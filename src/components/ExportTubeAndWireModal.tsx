@@ -18,16 +18,17 @@ import {
     breakdownPipeFrame,
 } from '../utils/tubeAndWireExporter';
 import { simulatePipeFrame } from '../utils/tubeSimulation';
-import { defaultMaxSpanMm, frameBodyInScene, type FramePlacement } from '../utils/pipeSkeleton';
+import { defaultMaxSpanMm, frameBodyInScene, WHOLE_SCENE, type FramePlacement, type FrameStyle } from '../utils/pipeSkeleton';
+import { loadManifold } from '../utils/sculptCut';
 
-function findBody(nodes: SceneNode[], id: string | null): SceneNode | null {
+/**
+ * The piece a selection belongs to: the top-level body it is part of, so a
+ * click on one leg frames the whole stand.
+ */
+function pieceOf(nodes: SceneNode[], id: string | null): SceneNode | null {
     if (!id) return null;
-    for (const n of nodes) {
-        if (n.id === id) return n;
-        const hit = findBody(n.children || [], id);
-        if (hit) return hit;
-    }
-    return null;
+    const holds = (n: SceneNode): boolean => n.id === id || (n.children ?? []).some(holds);
+    return nodes.find((n) => !n.simulation && holds(n)) ?? null;
 }
 
 export function ExportTubeAndWireModal({
@@ -65,7 +66,10 @@ export function ExportTubeAndWireModal({
 
     // --- Frame a shape: a lattice sketch or any solid, made into a supported frame ---
     const selectedNodeId = useStore(s => s.selectedNodeId);
-    const selectedBody = findBody(scene.nodes, selectedNodeId);
+    // The selected piece, or everything when nothing is selected.
+    const selectedBody = pieceOf(scene.nodes, selectedNodeId);
+    const hasShapes = scene.nodes.some((n) => !n.simulation);
+    const [frameStyle, setFrameStyle] = useState<FrameStyle>('auto');
     const pipeDefaultSpanMm = defaultMaxSpanMm(PIPE_STANDARDS[pipeStandardId]);
     const [frameSpanMm, setFrameSpanMm] = useState<number | null>(null);
     const [frameDiagonals, setFrameDiagonals] = useState(false);
@@ -81,16 +85,20 @@ export function ExportTubeAndWireModal({
         setStockLengthMm(PIPE_STANDARDS[id].stockLengthMm);
     };
 
-    const handleFrameShape = () => {
-        if (!selectedBody) return;
+    const handleFrameShape = async () => {
+        if (!hasShapes) return;
         const state = useStore.getState();
+        const name = selectedBody?.name ?? 'the scene';
         try {
-            const { nodes, skeleton } = frameBodyInScene(state.sceneGraph, selectedBody.id, {
+            const wasm = await loadManifold();
+            const { nodes, skeleton } = frameBodyInScene(state.sceneGraph, selectedBody?.id ?? WHOLE_SCENE, {
                 maxSpanMm: frameSpanMm ?? pipeDefaultSpanMm,
                 diagonals: frameDiagonals,
                 posts: framePosts,
                 placement: framePlacement,
+                style: frameStyle,
                 pipeStandardId,
+                wasm,
             });
             state.prepareForDiscreteChange();
             const nextScene: SceneGraph = { ...state.sceneGraph, nodes };
@@ -99,7 +107,7 @@ export function ExportTubeAndWireModal({
             // Too small for the pipe chosen: framed in tube that suits it, and the cut list follows.
             if (skeleton.resizedFrom) choosePipe(skeleton.pipeStandardId);
             setFrameMessage(
-                `Framed ${selectedBody.name}: ${skeleton.members.length} pipes, none over ${Math.round(skeleton.maxSpanMm)} mm between joints` +
+                `Framed ${name} ${skeleton.style === 'centrelines' ? 'down the middle of each part' : 'along its edges'}: ${skeleton.members.length} pipes, none over ${Math.round(skeleton.maxSpanMm)} mm between joints` +
                 (skeleton.resizedFrom
                     ? `. In ${PIPE_STANDARDS[skeleton.pipeStandardId].label}: ${PIPE_STANDARDS[skeleton.resizedFrom].label} is too big for it.`
                     : '')
@@ -145,15 +153,14 @@ export function ExportTubeAndWireModal({
                                         Frame a Shape
                                     </h3>
                                     <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                                        {selectedBody
-                                            ? <>Selected: <span className="font-semibold text-slate-700 dark:text-slate-200">{selectedBody.name}</span>{selectedBody.latticeCage ? ' (sketch)' : ''}</>
-                                            : 'Select a lattice sketch or any solid'}
+                                        Frames: <span className="font-semibold text-slate-700 dark:text-slate-200">{selectedBody ? selectedBody.name : 'the whole scene'}</span>
+                                        {selectedBody?.latticeCage ? ' (sketch)' : ''}
                                     </span>
                                 </div>
                                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                                    Lines drawn in a lattice become pipes; a solid is framed on its surface. Rails, posts and base rails are added so no pipe runs further than the span between joints that hold it.
+                                    Lines drawn in a lattice become pipes. A shape made of long parts (a table, a stand) gets a pipe down the middle of each; any other shape is framed along its edges. Rails, posts and base rails are added so no pipe runs further than the span between joints that hold it.
                                 </p>
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
                                     <label className="space-y-1 block">
                                         <span className="text-[11px] text-slate-500 dark:text-slate-400" title="How far this pipe may run between joints: where it sags L/140 full of water, as PVC makers' support tables">Max span (mm)</span>
                                         <input
@@ -174,6 +181,16 @@ export function ExportTubeAndWireModal({
                                         Diagonal bracing
                                     </label>
                                     <select
+                                        value={frameStyle}
+                                        onChange={e => setFrameStyle(e.target.value as FrameStyle)}
+                                        title="Down the middle: a pipe for each length of wood. Along the edges: a pipe for each edge of the shape."
+                                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
+                                    >
+                                        <option value="auto">Style: automatic</option>
+                                        <option value="centrelines">Down the middle of each part</option>
+                                        <option value="edges">Along the edges</option>
+                                    </select>
+                                    <select
                                         value={framePlacement}
                                         onChange={e => setFramePlacement(e.target.value as FramePlacement)}
                                         className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
@@ -183,8 +200,8 @@ export function ExportTubeAndWireModal({
                                     </select>
                                 </div>
                                 <button
-                                    onClick={handleFrameShape}
-                                    disabled={!selectedBody}
+                                    onClick={() => void handleFrameShape()}
+                                    disabled={!hasShapes}
                                     className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors"
                                 >
                                     <Box className="w-4 h-4" />

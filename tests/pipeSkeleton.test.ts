@@ -157,3 +157,32 @@ describe('thin rod', () => {
   });
 });
 
+
+describe('furniture of long parts', () => {
+  it('frames the flower stand down the middle of each part, with nothing selected', async () => {
+    const { PRESETS } = await import('../src/presets/presetScenes');
+    const { loadManifold } = await import('../src/utils/sculptCut');
+    const { WHOLE_SCENE } = await import('../src/utils/pipeSkeleton');
+    const scene = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).flower_stand.scene;
+    const wasm = await loadManifold();
+    // Auto: twelve of its fourteen parts are long, so a pipe down each.
+    const pvc = buildPipeSkeleton(scene, WHOLE_SCENE, { wasm });
+    expect(pvc.style).toBe('centrelines');
+    // Four legs, four aprons, four stretchers; the top, 43 mm up, is within
+    // three diameters of 3/4" PVC, so it rests on the aprons' joints.
+    expect(pvc.members.length).toBe(16);
+    expect(pvc.members.some((m) => m.kind === 'post')).toBe(false);
+    // In 8 mm dowel the legs run on up to rails under the top.
+    const dowel = buildPipeSkeleton(scene, WHOLE_SCENE, { wasm, pipeStandardId: 'dowel_8' });
+    expect(dowel.members.length).toBe(22);
+    // Every apron and stretcher meets its legs: one connected frame.
+    const seen = new Set([0]);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const m of dowel.members) if (seen.has(m.a) !== seen.has(m.b)) { seen.add(m.a); seen.add(m.b); grew = true; }
+    }
+    expect(seen.size).toBe(dowel.nodes.length);
+    // Along the edges, when asked, it is joined into one solid first.
+    expect(buildPipeSkeleton(scene, WHOLE_SCENE, { wasm, style: 'edges' }).style).toBe('edges');
+  });
+});

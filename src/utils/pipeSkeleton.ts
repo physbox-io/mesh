@@ -26,6 +26,8 @@
 // Millimetres, Z up, world, throughout.
 
 import * as THREE from 'three';
+import type { Manifold, ManifoldToplevel } from 'manifold-3d';
+import { manifoldToMeshMm, soupToManifoldMm } from './timberBreakdown';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
@@ -50,7 +52,19 @@ export interface Skeleton {
   members: { a: number; b: number; kind: MemberKind }[];
 }
 
+export type FrameStyle = 'auto' | 'edges' | 'centrelines';
+
+/** Frame everything in the scene rather than one body. */
+export const WHOLE_SCENE = '*';
+
 export interface SkeletonOptions {
+  /**
+   * 'edges': pipes along the shape's edges, its faces filled where wide.
+   * 'centrelines': one pipe down the middle of each long part, as a stick
+   * model of a table is a stick for each leg and rail. 'auto' (default):
+   * centre lines for a shape made mostly of long parts, edges otherwise.
+   */
+  style?: FrameStyle;
   /** Longest a pipe may run between joints that hold it, mm. Default: the pipe's own (`defaultMaxSpanMm`). */
   maxSpanMm?: number;
   /** A diagonal across every four-sided panel. Default false. */
@@ -60,6 +74,12 @@ export interface SkeletonOptions {
   /** Where the floor is, mm. Default 0. */
   floorMm?: number;
   pipeStandardId?: PipeStandardId;
+  /**
+   * Manifold, to join a shape made of several overlapping parts into one solid
+   * before its edges are framed. Without it each part is framed on its own,
+   * and parts that overlap (a tenon in its mortise) are cages that never meet.
+   */
+  wasm?: ManifoldToplevel;
 }
 
 /**
@@ -181,7 +201,7 @@ function newell(pts: V3[]): V3 {
 }
 
 /** A solid's surface as flat faces, simplified when it is curved finer than the span needs. */
-function fromSolid(g: Graph, path: SceneNode[], spanMm: number): Face[] {
+function fromSolid(g: Graph, path: SceneNode[], spanMm: number, wasm?: ManifoldToplevel): Face[] {
   // The body alone, under its parents' transforms, and without what is cut
   // out of it: a frame goes round a window, not along its edge. A body with a
   // cut also carries the finished mesh with the hole in it (`csgDerived`);
@@ -193,8 +213,29 @@ function fromSolid(g: Graph, path: SceneNode[], spanMm: number): Face[] {
   });
   let wrapped: SceneNode = solidOnly(path[path.length - 1]);
   for (let i = path.length - 2; i >= 0; i--) wrapped = { ...path[i], geoms: [], children: [wrapped] };
-  const tris = collectSceneTriangles({ nodes: [wrapped] } as SceneGraph).tris;
+  const collected = collectSceneTriangles({ nodes: [wrapped] } as SceneGraph);
+  let tris: ArrayLike<number> = collected.tris;
   if (tris.length < 9) return [];
+  // Several parts: one solid first, so their edges meet where the parts do.
+  const solids = new Set(collected.solidIds);
+  if (wasm && solids.size > 1) {
+    const pieces: Manifold[] = [];
+    for (const id of solids) {
+      const soup: number[] = [];
+      collected.solidIds.forEach((sid, t) => { if (sid === id) for (let k = 0; k < 9; k++) soup.push(collected.tris[t * 9 + k]); });
+      const m = soupToManifoldMm(wasm, soup);
+      if (m) pieces.push(m);
+    }
+    if (pieces.length) {
+      const joined = wasm.Manifold.union(pieces);
+      const mesh = manifoldToMeshMm(joined);
+      const soup = new Float64Array(mesh.faces.length * 3);
+      mesh.faces.forEach((v, k) => { for (let a = 0; a < 3; a++) soup[k * 3 + a] = mesh.positionsMm[v * 3 + a] / 1000; });
+      joined.delete();
+      for (const m of pieces) m.delete();
+      tris = soup;
+    }
+  }
 
   const weld = (soup: ArrayLike<number>) => {
     const map = new Map<string, number>();
@@ -452,6 +493,162 @@ function addDiagonals(g: Graph) {
   }
 }
 
+/** Eigenvectors of a symmetric 3 × 3 (row-major), by Jacobi: the principal axes. */
+function principalAxes(m: number[]): V3[] {
+  const a = [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]];
+  const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let sweep = 0; sweep < 50; sweep++) {
+    const off = a[0][1] ** 2 + a[0][2] ** 2 + a[1][2] ** 2;
+    if (off < 1e-18) break;
+    for (const [p, q] of [[0, 1], [0, 2], [1, 2]]) {
+      if (Math.abs(a[p][q]) < 1e-30) continue;
+      const th = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+      const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1));
+      const c = 1 / Math.sqrt(t * t + 1), sn = t * c;
+      for (let k = 0; k < 3; k++) { const x = a[k][p], y = a[k][q]; a[k][p] = c * x - sn * y; a[k][q] = sn * x + c * y; }
+      for (let k = 0; k < 3; k++) { const x = a[p][k], y = a[q][k]; a[p][k] = c * x - sn * y; a[q][k] = sn * x + c * y; }
+      for (let k = 0; k < 3; k++) { const x = v[k][p], y = v[k][q]; v[k][p] = c * x - sn * y; v[k][q] = sn * x + c * y; }
+    }
+  }
+  return [0, 1, 2].map((j) => norm([v[0][j], v[1][j], v[2][j]]));
+}
+
+interface Part {
+  kind: 'long' | 'panel' | 'block';
+  centre: V3;
+  axes: V3[];
+  /** Extents along `axes`, mm, longest first. */
+  size: number[];
+}
+
+/** Every solid part under the body, at any depth, as an oriented box. */
+function partsOf(path: SceneNode[]): Part[] {
+  const parts: Part[] = [];
+  const visit = (n: SceneNode, chain: SceneNode[]) => {
+    if (n.simulation) return;
+    const own = (n.geoms ?? []).filter((g) => g.csg !== 'difference' && !g.csgDerived && g.role !== 'collision');
+    if (own.length) {
+      let wrapped: SceneNode = { ...n, geoms: own, children: [] };
+      for (let i = chain.length - 1; i >= 0; i--) wrapped = { ...chain[i], geoms: [], children: [wrapped] };
+      const tris = collectSceneTriangles({ nodes: [wrapped] } as SceneGraph).tris;
+      if (tris.length >= 9) {
+        const pts: V3[] = [];
+        for (let i = 0; i + 2 < tris.length; i += 3) pts.push([tris[i] * 1000, tris[i + 1] * 1000, tris[i + 2] * 1000]);
+        const c = scale(pts.reduce((sum, p) => add(sum, p), [0, 0, 0] as V3), 1 / pts.length);
+        const cov = new Array(9).fill(0);
+        for (const p of pts) {
+          const d = sub(p, c);
+          for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) cov[i * 3 + j] += d[i] * d[j];
+        }
+        const axes = principalAxes(cov);
+        const lo = [0, 1, 2].map((k) => Math.min(...pts.map((p) => dot(sub(p, c), axes[k]))));
+        const hi = [0, 1, 2].map((k) => Math.max(...pts.map((p) => dot(sub(p, c), axes[k]))));
+        const order = [0, 1, 2].sort((x, y) => (hi[y] - lo[y]) - (hi[x] - lo[x]));
+        const mid = add(c, axes.reduce((sum, ax, k) => add(sum, scale(ax, (lo[k] + hi[k]) / 2)), [0, 0, 0] as V3));
+        const size = order.map((k) => hi[k] - lo[k]);
+        const kind = size[0] >= 2.5 * size[1] ? 'long' : size[1] >= 2.5 * size[2] ? 'panel' : 'block';
+        parts.push({ kind, centre: mid, axes: order.map((k) => axes[k]), size });
+      }
+    }
+    for (const ch of n.children ?? []) visit(ch, [...chain, n]);
+  };
+  visit(path[path.length - 1], path.slice(0, -1));
+  return parts;
+}
+
+/** The closest point to `p` on segment ab. */
+const nearestOn = (p: V3, a: V3, b: V3): V3 => {
+  const ab = sub(b, a);
+  const t = Math.max(0, Math.min(1, dot(sub(p, a), ab) / (dot(ab, ab) || 1)));
+  return add(a, scale(ab, t));
+};
+
+/**
+ * A stick model: each long part one pipe down its middle, its ends carried to
+ * the part they run into; a panel framed through the ends of the parts that
+ * hold it up (round its outline when none do); a block by its edges.
+ */
+function fromCentrelines(g: Graph, path: SceneNode[]) {
+  const parts = partsOf(path);
+  type Seg = { a: V3; b: V3; part: number };
+  const segs: Seg[] = [];
+  parts.forEach((p, i) => {
+    if (p.kind !== 'long') return;
+    const half = scale(p.axes[0], p.size[0] / 2);
+    segs.push({ a: sub(p.centre, half), b: add(p.centre, half), part: i });
+  });
+  // Ends carried onto the part they run into: an apron's tenon into its leg.
+  const width = (i: number) => parts[i].size[1];
+  for (const s of segs) {
+    for (const end of ['a', 'b'] as const) {
+      let best: { q: V3; d: number } | null = null;
+      for (const t of segs) {
+        if (t === s) continue;
+        const q = nearestOn(s[end], t.a, t.b);
+        const d = len(sub(q, s[end]));
+        if (d <= 0.75 * Math.max(width(s.part), width(t.part)) && (!best || d < best.d)) best = { q, d };
+      }
+      if (best) s[end] = best.q;
+    }
+  }
+  for (const s of segs) g.link(g.node(s.a), g.node(s.b), 'line');
+
+  // Panels: through what holds them up, or round their outline.
+  parts.forEach((p) => {
+    if (p.kind === 'long') return;
+    const [u, v, n] = p.axes;
+    const [lu, lv, lt] = p.size;
+    if (p.kind === 'block') {
+      const corner = (i: number, j: number, k: number) =>
+        add(p.centre, add(add(scale(u, (i - 0.5) * lu), scale(v, (j - 0.5) * lv)), scale(n, (k - 0.5) * lt)));
+      const c = [0, 1].flatMap((k) => [corner(0, 0, k), corner(1, 0, k), corner(1, 1, k), corner(0, 1, k)]).map((q) => g.node(q));
+      for (let k = 0; k < 4; k++) {
+        g.link(c[k], c[(k + 1) % 4], 'edge');
+        g.link(c[4 + k], c[4 + ((k + 1) % 4)], 'edge');
+        g.link(c[k], c[4 + k], 'edge');
+      }
+      return;
+    }
+    // Ends of long parts at the panel, inside its outline.
+    const reach = Math.max(lt, ...segs.map((s) => width(s.part))) * 1.5;
+    const under: V3[] = [];
+    for (const s of segs) {
+      for (const q of [s.a, s.b]) {
+        const d = sub(q, p.centre);
+        if (Math.abs(dot(d, n)) > reach) continue;
+        if (Math.abs(dot(d, u)) > lu / 2 + reach || Math.abs(dot(d, v)) > lv / 2 + reach) continue;
+        const onPlane = sub(q, scale(n, dot(d, n)));
+        under.push(onPlane);
+        g.link(g.node(q), g.node(onPlane), 'line');
+      }
+    }
+    let ring: V3[];
+    if (under.length >= 2) {
+      // Their outline in the panel's plane (gift wrapping; two points are a line).
+      const flat = under.map((q) => [dot(sub(q, p.centre), u), dot(sub(q, p.centre), v)] as [number, number]);
+      const hull: number[] = [];
+      let start = 0;
+      flat.forEach((f, i) => { if (f[0] < flat[start][0] || (f[0] === flat[start][0] && f[1] < flat[start][1])) start = i; });
+      let at = start;
+      do {
+        hull.push(at);
+        let next = (at + 1) % flat.length;
+        for (let i = 0; i < flat.length; i++) {
+          const cr = (flat[next][0] - flat[at][0]) * (flat[i][1] - flat[at][1]) - (flat[next][1] - flat[at][1]) * (flat[i][0] - flat[at][0]);
+          if (cr < 0) next = i;
+        }
+        at = next;
+      } while (at !== start && hull.length <= flat.length);
+      ring = hull.map((i) => under[i]);
+    } else {
+      ring = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([i, j]) => add(p.centre, add(scale(u, (i * lu) / 2), scale(v, (j * lv) / 2))));
+    }
+    const ids = ring.map((q) => g.node(q));
+    if (ids.length === 2) g.link(ids[0], ids[1], 'edge');
+    else ids.forEach((id, k) => g.link(id, ids[(k + 1) % ids.length], 'edge'));
+  });
+}
+
 export interface BuiltSkeleton extends Skeleton {
   maxSpanMm: number;
   source: 'sketch' | 'solid';
@@ -459,21 +656,32 @@ export interface BuiltSkeleton extends Skeleton {
   pipeStandardId: PipeStandardId;
   /** Set when the pipe asked for was too big and another was used: which. */
   resizedFrom?: PipeStandardId;
+  /** Which way it was framed: what 'auto' chose. */
+  style: 'edges' | 'centrelines';
 }
 
 /** The skeleton of a body in the scene, supported. */
 export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: SkeletonOptions = {}): BuiltSkeleton {
-  const path = pathTo(scene.nodes, bodyId);
+  const path = bodyId === WHOLE_SCENE
+    ? [{ id: WHOLE_SCENE, name: 'The scene', type: 'body', pos: [0, 0, 0], geoms: [], joints: [], children: scene.nodes.filter((n) => !n.simulation) } as SceneNode]
+    : pathTo(scene.nodes, bodyId);
   if (!path) throw new Error(`No body '${bodyId}'.`);
   const body = path[path.length - 1];
   const asked = PIPE_STANDARDS[opts.pipeStandardId ?? 'pvc_sch40_3_4'] ?? PIPE_STANDARDS.pvc_sch40_3_4;
   const sketch = !!body.latticeCage && (body.latticeCage.coords.length ?? 0) >= 3;
+  // Mostly long parts (legs, rails, battens): a stick each. Anything else, its edges.
+  const centrelines = !sketch && (opts.style === 'centrelines' || ((opts.style ?? 'auto') === 'auto' && (() => {
+    const parts = partsOf(path);
+    const long = parts.filter((p) => p.kind === 'long').length;
+    return long >= 3 && long >= parts.length / 2;
+  })()));
 
   // Sized before any joints are merged, from the shape itself.
   const sizeOf = (pts: V3[]) => [0, 1, 2].map((a) => Math.max(...pts.map((p) => p[a])) - Math.min(...pts.map((p) => p[a])));
   const loose = new Graph(0);
   if (sketch) fromLattice(loose, body, worldMatrix(path), 0);
-  else fromSolid(loose, path, opts.maxSpanMm && opts.maxSpanMm > 0 ? opts.maxSpanMm : defaultMaxSpanMm(asked));
+  else if (centrelines) fromCentrelines(loose, path);
+  else fromSolid(loose, path, opts.maxSpanMm && opts.maxSpanMm > 0 ? opts.maxSpanMm : defaultMaxSpanMm(asked), opts.wasm);
   if (!loose.members.length) throw new Error(`${body.name} has no lines or faces to frame.`);
   // A pipe between two fittings is about three diameters at the least, and a
   // frame needs two of them across, so a shape under six diameters across
@@ -494,7 +702,10 @@ export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: Skele
   const weld = Math.max(10, spec.odMm * 3);
   const g = new Graph(weld);
 
-  const faces = sketch ? fromLattice(g, body, worldMatrix(path), Math.max(5, spec.odMm / 2)) : fromSolid(g, path, span);
+  let faces: Face[] = [];
+  if (sketch) faces = fromLattice(g, body, worldMatrix(path), Math.max(5, spec.odMm / 2));
+  else if (centrelines) fromCentrelines(g, path);
+  else faces = fromSolid(g, path, span, opts.wasm);
 
   for (const f of faces) fillFace(g, f, span, floor);
   splitAtJoints(g, weld / 2);
@@ -505,6 +716,7 @@ export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: Skele
   return {
     nodes: g.nodes, members: g.members, maxSpanMm: span, source: sketch ? 'sketch' : 'solid',
     pipeStandardId: spec.id, ...(spec !== asked ? { resizedFrom: asked.id } : {}),
+    style: centrelines ? 'centrelines' : 'edges',
   };
 }
 
@@ -545,7 +757,7 @@ export function frameBodyInScene(
   const prefix = `frame_${Math.random().toString(36).slice(2, 7)}`;
   const frame = skeletonToNodes(sk, sk.pipeStandardId, prefix, shift);
   const without = (list: SceneNode[]): SceneNode[] =>
-    list.filter((n) => n.id !== bodyId).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
+    list.filter((n) => n.id !== bodyId && !(bodyId === WHOLE_SCENE && !n.simulation)).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
   const kept = opts.placement === 'beside' ? scene.nodes : without(scene.nodes);
   return { nodes: [...kept, ...frame], skeleton: sk, added: frame.length };
 }

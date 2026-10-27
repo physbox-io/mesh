@@ -126,7 +126,7 @@ import { contourSheetParts, laserSheetParts, laserStockTransform } from '../util
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from './useAddSimulation';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../utils/timberSimulation';
 import { pipeFrameSimulationRequest } from '../utils/tubeSimulation';
-import { frameBodyInScene } from '../utils/pipeSkeleton';
+import { frameBodyInScene, WHOLE_SCENE } from '../utils/pipeSkeleton';
 import { runMcpMoldSimulation } from '../utils/moldWorkerClient';
 import { runMcpRepairMesh } from '../utils/meshRepair';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
@@ -4528,9 +4528,9 @@ export function useMCPBridge() {
 
         case 'BUILD_PIPE_FRAME': {
           // A lattice sketch or any solid, framed in pipe and stood up.
-          const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : store.selectedNodeId;
-          if (!bodyId) return { ok: false, error: 'Give bodyId: a lattice sketch or any solid.' };
-          const body = findNodeInScene(store.sceneGraph.nodes, bodyId);
+          // A body, or the whole scene when none is given.
+          const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : WHOLE_SCENE;
+          const body = bodyId === WHOLE_SCENE ? { id: WHOLE_SCENE, name: 'the scene' } : findNodeInScene(store.sceneGraph.nodes, bodyId);
           if (!body) return { ok: false, error: `No body '${bodyId}'.` };
           const pipeStandardId = (typeof msg.pipeStandardId === 'string' && msg.pipeStandardId in PIPE_STANDARDS
             ? msg.pipeStandardId : 'pvc_sch40_3_4') as PipeStandardId;
@@ -4539,7 +4539,9 @@ export function useMCPBridge() {
             diagonals: msg.diagonals === true,
             posts: msg.posts !== false,
             placement: msg.placement === 'beside' ? 'beside' : 'replace',
+            style: msg.style === 'edges' || msg.style === 'centrelines' ? msg.style : 'auto',
             pipeStandardId,
+            wasm: await loadManifold(),
           });
           store.prepareForDiscreteChange();
           // Adds to the scene: its note card and settings stay.
@@ -4553,6 +4555,7 @@ export function useMCPBridge() {
           return {
             ok: true,
             source: skeleton.source,
+            style: skeleton.style,
             pipe: skeleton.pipeStandardId,
             ...(skeleton.resizedFrom ? { note: `${PIPE_STANDARDS[skeleton.resizedFrom].label} is too big for ${body.name}: framed in ${PIPE_STANDARDS[skeleton.pipeStandardId].label}.` } : {}),
             maxSpanMm: skeleton.maxSpanMm,

@@ -82,6 +82,12 @@ list, hubs and Add Simulation all work on it unchanged.
   with no printed fittings. Joints within three diameters merge, so no piece is shorter than
   anyone would cut; a ridge on shallow rafters is held by them (an apex), not given a post.
 
+- Two styles, chosen automatically: a shape made mostly of long parts (a table, a stand) gets a
+  pipe down the middle of each part, its ends carried onto the part they run into, panels
+  framed through what holds them up; anything else is framed along its edges, its parts first
+  joined into one solid (Manifold) so the edges meet where the parts do. Nothing selected
+  frames the whole scene; a click on one part frames the piece it belongs to.
+
 ## Next, if wanted
 
 A load test for the classroom noodle bridge: pin-jointed truss analysis under a load, each
