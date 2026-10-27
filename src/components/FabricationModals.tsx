@@ -15,8 +15,6 @@ import { ExportCastModal } from './ExportCastModal';
 import { SplitForPrintModal } from './SplitForPrintModal';
 import { TimberBreakdownModal } from './TimberBreakdownModal';
 import { ExportSheetUnfoldModal } from './ExportSheetUnfoldModal';
-import { ImportPcbModal } from './ImportPcbModal';
-import { MechanismBuilderModal } from './MechanismBuilderModal';
 import { ExportTubeAndWireModal } from './ExportTubeAndWireModal';
 import { BottomStatusBar } from './BottomStatusBar';
 import { MachineConfigModal } from './MachineConfigModal';
@@ -48,8 +46,6 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
   const [isSheetUnfoldModalOpen, setIsSheetUnfoldModalOpen] = useState(false);
-  const [isPcbModalOpen, setIsPcbModalOpen] = useState(false);
-  const [isMechanismModalOpen, setIsMechanismModalOpen] = useState(false);
   const [isTubeAndWireModalOpen, setIsTubeAndWireModalOpen] = useState(false);
 
   // Subscribe to sceneGraph only while a scene-consuming export modal is open,
@@ -166,20 +162,6 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         />
       )}
 
-      {isPcbModalOpen && (
-        <ImportPcbModal
-          isOpen={isPcbModalOpen}
-          onClose={() => setIsPcbModalOpen(false)}
-        />
-      )}
-
-      {isMechanismModalOpen && (
-        <MechanismBuilderModal
-          isOpen={isMechanismModalOpen}
-          onClose={() => setIsMechanismModalOpen(false)}
-        />
-      )}
-
       {isTubeAndWireModalOpen && sceneGraph && (
         <ExportTubeAndWireModal
           isOpen={isTubeAndWireModalOpen}
@@ -202,8 +184,6 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           split: () => setIsSplitModalOpen(true),
           joinery: () => setIsJoineryModalOpen(true),
           unfold: () => setIsSheetUnfoldModalOpen(true),
-          pcb: () => setIsPcbModalOpen(true),
-          mechanisms: () => setIsMechanismModalOpen(true),
           pipes: () => setIsTubeAndWireModalOpen(true),
         }}
       />

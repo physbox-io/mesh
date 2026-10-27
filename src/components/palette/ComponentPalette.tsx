@@ -17,6 +17,7 @@ import { InsertBossIcon, NutTrapIcon, NutSlotIcon, CounterboreIcon, BearingPocke
 import { Frame } from 'lucide-react';
 import { addReferencePicture } from '../../utils/addReferencePicture';
 import { useDialogs } from '../../store/dialogStore';
+import { usePanels } from '../../store/panelsStore';
 
 /** What the palette adds by click: every component but the lattice, which has its own handler. */
 export type PaletteComponentType = Exclude<Parameters<PhysicsState['addComponent']>[0], 'lattice'>;
@@ -203,6 +204,19 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
             spin="group-hover:-rotate-6"
             icon={<DShaftHubIcon />}
             onClick={() => onAddHardwareNode(createDShaftHubNode(5.0))}
+          />
+          <PaletteTile
+            button
+            label="Gears & Drives"
+            title="Printable involute gears, rack and pinion, GT2 belt drive, T8 leadscrew, cam and follower, or a 4-bar linkage, built to size and meshed"
+            color="blue"
+            spin="group-hover:rotate-45"
+            slow
+            icon={<GearIcon />}
+            onClick={() => {
+              usePanels.getState().setMechanismBuilderOpen(true);
+              onPlaced?.();
+            }}
           />
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 mt-3 mb-2">

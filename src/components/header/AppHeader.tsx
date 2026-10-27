@@ -1,4 +1,4 @@
-import { Play, Square, Settings, X, RotateCcw, Trash2, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces } from 'lucide-react';
+import { Play, Square, Settings, X, RotateCcw, Trash2, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -32,6 +32,7 @@ export function AppHeader({
   const openDocs = usePanels((s) => s.openDocs);
   const openStlImport = usePanels((s) => s.openStlImport);
   const openImageImport = usePanels((s) => s.openImageImport);
+  const setPcbImportOpen = usePanels((s) => s.setPcbImportOpen);
   const {
     isPlaying, togglePlay, isLoaded, resetSimulation,
     isSettingsOpen, setSettingsOpen,
@@ -174,6 +175,14 @@ export function AppHeader({
               title="Import STL (3D file)"
             >
               <Upload className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => setPcbImportOpen(true)}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-teal-600 dark:text-teal-400 transition-colors focus:outline-none cursor-pointer"
+              title="Import a PCB (from Volt, or a stock board) and build an enclosure with standoffs and front-panel cutouts around it"
+            >
+              <Cpu className="w-3.5 h-3.5" />
             </button>
 
             <button

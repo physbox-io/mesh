@@ -1,5 +1,5 @@
 // Which of the app's panels are open: the reference guide, the side drawers,
-// the copilot and the two importers.
+// the copilot, the importers and the gears builder.
 //
 // A store of its own rather than a slice of useStore: none of it is part of a
 // scene, useStore is big enough already, and editing useStore reloads the app
@@ -49,6 +49,12 @@ interface PanelsState {
   openImageImport: (file?: File) => void;
   closeStlImport: () => void;
   closeImageImport: () => void;
+  /** The gears-and-drives builder, opened from the palette's Hardware group. */
+  isMechanismBuilderOpen: boolean;
+  setMechanismBuilderOpen: (open: boolean) => void;
+  /** The PCB importer: a board from Volt or a stock one, and an enclosure around it. */
+  isPcbImportOpen: boolean;
+  setPcbImportOpen: (open: boolean) => void;
   /** The scene browser (open, examples, pattern boards), and the tab it is on. */
   sceneBrowser: SceneBrowserTab | null;
   openSceneBrowser: (tab?: SceneBrowserTab) => void;
@@ -77,6 +83,10 @@ export const usePanels = create<PanelsState>((set) => ({
   openImageImport: (file) => set({ imageImport: { file: file ?? null } }),
   closeStlImport: () => set({ stlImport: null }),
   closeImageImport: () => set({ imageImport: null }),
+  isMechanismBuilderOpen: false,
+  setMechanismBuilderOpen: (isMechanismBuilderOpen) => set({ isMechanismBuilderOpen }),
+  isPcbImportOpen: false,
+  setPcbImportOpen: (isPcbImportOpen) => set({ isPcbImportOpen }),
   sceneBrowser: null,
   openSceneBrowser: (tab) => set({ sceneBrowser: tab ?? 'examples' }),
   closeSceneBrowser: () => set({ sceneBrowser: null }),
