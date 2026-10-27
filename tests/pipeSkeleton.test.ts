@@ -182,7 +182,13 @@ describe('furniture of long parts', () => {
       for (const m of dowel.members) if (seen.has(m.a) !== seen.has(m.b)) { seen.add(m.a); seen.add(m.b); grew = true; }
     }
     expect(seen.size).toBe(dowel.nodes.length);
-    // Along the edges, when asked, it is joined into one solid first.
-    expect(buildPipeSkeleton(scene, WHOLE_SCENE, { wasm, style: 'edges' }).style).toBe('edges');
+    // Along the edges, when asked, it is joined into one solid first; the
+    // groove between the two top planks is a loose fragment, dropped, not
+    // stood on three posts of its own.
+    for (const pipeStandardId of ['pvc_sch40_3_4', 'dowel_8', 'dowel_5'] as const) {
+      const edges = buildPipeSkeleton(scene, WHOLE_SCENE, { wasm, style: 'edges', pipeStandardId });
+      expect(edges.style).toBe('edges');
+      expect(edges.members.some((m) => m.kind === 'post' || m.kind === 'base')).toBe(false);
+    }
   });
 });

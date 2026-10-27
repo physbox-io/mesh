@@ -360,6 +360,77 @@ function fillFace(g: Graph, face: Face, spanMm: number, floorMm: number) {
   }
 }
 
+/**
+ * Joints that land in the middle of a face moved onto its outline. Where one
+ * part meets another's flat side (a leg's top under the table top, inside its
+ * edge) there is no edge there to join, so the joint held nothing and was
+ * given a post to the floor. It is moved along the face to the nearest point
+ * of the outline, when that is near.
+ */
+function anchorOnFaces(g: Graph, faces: Face[], weldMm: number) {
+  for (const f of faces) {
+    const ring = f.loop.map((i) => g.nodes[i]);
+    if (ring.length < 3) continue;
+    const n = f.normal, o = ring[0];
+    const u = norm(sub(ring[1], o)), v = cross(n, u);
+    const flat = ring.map((q) => [dot(sub(q, o), u), dot(sub(q, o), v)]);
+    const inside = (x: number, y: number) => {
+      let hit = false;
+      for (let i = 0, j = flat.length - 1; i < flat.length; j = i++) {
+        const [xi, yi] = flat[i], [xj, yj] = flat[j];
+        if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) hit = !hit;
+      }
+      return hit;
+    };
+    const own = new Set(f.loop);
+    g.nodes.forEach((p, k) => {
+      if (own.has(k) || Math.abs(dot(sub(p, o), n)) > 1) return;
+      const d = sub(p, o);
+      if (!inside(dot(d, u), dot(d, v))) return;
+      let best: V3 | null = null;
+      ring.forEach((a, i) => {
+        const q = nearestOn(p, a, ring[(i + 1) % ring.length]);
+        if (!best || len(sub(q, p)) < len(sub(best, p))) best = q;
+      });
+      // Already on the outline, or far across a wide face (that is a fill's job).
+      const to = best as V3 | null;
+      if (to && len(sub(to, p)) > weldMm / 2 && len(sub(to, p)) <= weldMm * 4) g.nodes[k] = to;
+    });
+  }
+}
+
+/**
+ * Pieces of the frame joined to nothing else and small beside it dropped: a
+ * groove between two boards, a chamfer's facet. Left in, each was a joint
+ * holding nothing, and got a post to the floor. Nodes are renumbered.
+ */
+function dropFragments(g: Graph, weldMm: number) {
+  const parent = g.nodes.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (const m of g.members) parent[find(m.a)] = find(m.b);
+  const groups = new Map<number, number[]>();
+  for (const m of g.members) for (const i of [m.a, m.b]) {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    if (!groups.get(r)!.includes(i)) groups.get(r)!.push(i);
+  }
+  const span = (ids: number[]) => len(sub(
+    [0, 1, 2].map((a) => Math.max(...ids.map((i) => g.nodes[i][a]))) as V3,
+    [0, 1, 2].map((a) => Math.min(...ids.map((i) => g.nodes[i][a]))) as V3));
+  const sizes = [...groups.entries()].map(([r, ids]) => [r, span(ids)] as const);
+  const biggest = Math.max(...sizes.map(([, d]) => d));
+  const keep = new Set(sizes.filter(([, d]) => d >= Math.max(weldMm * 4, biggest * 0.1)).map(([r]) => r));
+  const old = g.reset();
+  const nodes = g.nodes;
+  g.nodes = [];
+  const remap = new Map<number, number>();
+  const at = (i: number) => {
+    if (!remap.has(i)) { remap.set(i, g.nodes.length); g.nodes.push(nodes[i]); }
+    return remap.get(i)!;
+  };
+  for (const m of old) if (keep.has(find(m.a))) g.link(at(m.a), at(m.b), m.kind);
+}
+
 /** Every member cut at the joints that lie along it. */
 function splitAtJoints(g: Graph, tolMm: number) {
   const old = g.reset();
@@ -447,8 +518,9 @@ function addPosts(g: Graph, spanMm: number, floorMm: number) {
   }
   const feet = new Map<number, number>();
   const count = g.nodes.length;
+  const used = new Set(g.members.flatMap((m) => [m.a, m.b]));
   for (let i = 0; i < count; i++) {
-    if (dist[i] <= reach) continue;
+    if (dist[i] <= reach || !used.has(i)) continue;
     const p = g.nodes[i];
     const foot = g.node([p[0], p[1], floorMm]);
     g.link(i, foot, 'post');
@@ -707,8 +779,10 @@ export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: Skele
   else if (centrelines) fromCentrelines(g, path);
   else faces = fromSolid(g, path, span, opts.wasm);
 
+  anchorOnFaces(g, faces, weld);
   for (const f of faces) fillFace(g, f, span, floor);
   splitAtJoints(g, weld / 2);
+  dropFragments(g, weld);
   if (opts.posts !== false) addPosts(g, span, floor);
   splitAtJoints(g, weld / 2);
   if (opts.diagonals) addDiagonals(g);
