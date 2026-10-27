@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
 import { buildPipeSkeleton, defaultMaxSpanMm, skeletonToNodes } from '../src/utils/pipeSkeleton';
 import { PIPE_STANDARDS, breakdownPipeFrame } from '../src/utils/tubeAndWireExporter';
-import { createLattice, vertexAt, addFace, addWire, serializeCage } from '../src/utils/latticeMesh';
+import { createLattice, vertexAt, addWire, serializeCage } from '../src/utils/latticeMesh';
 import { simulatePipeFrame } from '../src/utils/tubeSimulation';
 
 const box = (sx: number, sy: number, sz: number, z0 = 0): SceneGraph => ({
