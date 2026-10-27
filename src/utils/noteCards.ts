@@ -439,7 +439,7 @@ The crater is the shape of whatever made it — a flat-ended slug leaves a flat-
 The spike arrives at about **11 N·s** against a sheet that pierces at **7**, and the material under it is gone rather than pushed aside. Below that it only marks.
 
 ## The bracket — steel that takes a set
-Off on its own, a shelf arm rigid up to **6 N·m**. The slug dropped on it puts far more through the root, and the arm folds under its own weight and **stays** folded. A spring would come back.
+Off on its own, a shelf arm rigid up to **3 N·m**. The slug dropped on it puts far more through the root, and the arm folds under its own weight and **stays** folded. A spring would come back.
 
 ## What is cosmetic, and how to change that
 Breaking, shattering and crumpling are real: the solver knows about them. **Dents and holes are not, by default** — the plate looks cratered and the foil looks holed, but contact goes on using the whole original surface, so the spike rests on the hole it made.

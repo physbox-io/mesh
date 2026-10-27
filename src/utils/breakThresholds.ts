@@ -135,6 +135,20 @@ export function crumpleAsWeld(cfg: CrumpleConfig | undefined): WeldBreakConfig {
   return { weldBreakTorqueNm: cfg?.crumpleTorqueNm, weldBreakHoldSteps: DEFAULT_HOLD_STEPS };
 }
 
+/**
+ * The torque a weld carries, from its three angular constraint rows.
+ *
+ * Half their length, not all of it. MuJoCo measures a weld's angular error as
+ * the vector part of the relative quaternion, which is sin(theta/2) times the
+ * axis — half the angle for small turns — so the rows' force is twice the
+ * torque. Measured on a pasta cantilever with a 7 g tip, 100 mm out: the root
+ * rows read 14.1 where m g L is 6.9 (+ the strand's own 0.2), and mid-span 7.0
+ * where it is 3.5. Every torque limit in this file is in real N*m.
+ */
+export function weldTorque(tx: number, ty: number, tz: number): number {
+  return Math.sqrt(tx * tx + ty * ty + tz * tz) / 2;
+}
+
 function isFiniteThreshold(v: number | undefined): boolean {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0;
 }

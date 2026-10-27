@@ -638,11 +638,14 @@ export const shatterPreset: SceneGraph = {
             pos: [0, 0, 0],
             damping: 0.2,
             /*
-             * The arm carries about 2.5 N*m of its own weight all day, so six
-             * is enough headroom that it never sags on its own — and little
-             * enough that the slug landing on its end goes straight through it.
+             * Enough headroom over the arm's own weight that it never sags on
+             * its own, and little enough that the slug landing on its end goes
+             * straight through it. Three real N*m: this was tuned as six when
+             * the worker read a weld's torque at twice its value (see
+             * weldTorque in utils/breakThresholds.ts), so the scene behaves
+             * exactly as it did.
              */
-            crumpleTorqueNm: 6,
+            crumpleTorqueNm: 3,
             // Down and forward: the direction its own weight takes it once the
             // root lets go. Verified against the engine rather than derived —
             // the sign of a hinge's travel depends on the axis AND on which way

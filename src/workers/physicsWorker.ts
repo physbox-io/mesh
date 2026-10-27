@@ -52,7 +52,7 @@ import type {
 import { HistoryRing } from './historyRing';
 import { rebaseShard } from '../utils/runtimeShatter';
 import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptStateMap } from '../utils/scriptState';
-import { canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
+import { canCrumple, crumpleAsWeld, weldTorque, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -1073,7 +1073,7 @@ const checkConstraintBreaks = () => {
     const [fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0] = rows;
 
     const forceN = Math.sqrt(fx * fx + fy * fy + fz * fz);
-    const torqueNm = Math.sqrt(tx * tx + ty * ty + tz * tz);
+    const torqueNm = weldTorque(tx, ty, tz);
     const verdict = weldOverload(forceN, torqueNm, w.cfg, w.consecutive);
     w.consecutive = verdict.consecutive;
     if (!verdict.broken) continue;
