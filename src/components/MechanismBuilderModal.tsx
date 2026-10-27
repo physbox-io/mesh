@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { Cog, Plus, X, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore, cloneSceneGraph } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { useDialogs } from '../store/dialogStore';
 import { Field, Segmented, inputClass, sectionClass, sectionTitleClass } from './ExportFields';
 import {
   STANDARD_MODULES_MM,
@@ -109,8 +110,10 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
   const [rockerMm, setRockerMm] = useState<number>(56);
   const [crankAngleDeg, setCrankAngleDeg] = useState<number>(60);
 
-  // Live preview & engineering metrics
-  const preview = useMemo(() => {
+  // Live preview & engineering metrics. A part that cannot be built as asked
+  // (a bore too big for it) is refused by its builder; the reason is shown in
+  // place of the figures, and nothing can be inserted.
+  const buildPreview = useCallback(() => {
     if (family === 'gear_pair') {
       const dSpec = {
         moduleMm,
@@ -464,9 +467,28 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
     crankAngleDeg,
   ]);
 
+  const preview = useMemo(() => {
+    try {
+      return { ...buildPreview(), blocked: false };
+    } catch (err) {
+      return {
+        viewBox: '0 0 1 1', paths: [], pitchCircles: [], readouts: [],
+        statusOk: false, statusText: err instanceof Error ? err.message : String(err), blocked: true,
+      };
+    }
+  }, [buildPreview]);
+
   if (!isOpen) return null;
 
   const handleInsert = () => {
+    try {
+      insert();
+    } catch (err) {
+      useDialogs.getState().showNotice('Could not build the mechanism', err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const insert = () => {
     const newScene = cloneSceneGraph(sceneGraph);
     let addedNodes;
 
@@ -1092,7 +1114,9 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
           </button>
           <button
             onClick={handleInsert}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm"
+            disabled={preview.blocked}
+            title={preview.blocked ? preview.statusText : undefined}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-emerald-600"
           >
             <Plus className="w-4 h-4" />
             Insert Mechanism into Scene

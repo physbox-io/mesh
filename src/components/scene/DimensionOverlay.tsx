@@ -33,6 +33,7 @@ import { bestSectionAt, sectionOf, sectionPlane } from '../../utils/sectionSlice
 import { loadSectionMerge, sectionMerge } from '../../utils/sectionMerge';
 import { useSection, type DrawnCut } from '../../store/sectionStore';
 import type { SceneNode } from '../../types/scene';
+import { findNodeById } from '../../utils/sceneTree';
 import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer';
 
 const COLOUR = '#d97706';
@@ -182,8 +183,8 @@ function drawnPieces(root: THREE.Object3D, only: Set<string> | null): Map<string
   return out;
 }
 
-/** One body's triangles, world space, document frame (Z-up), with its frame and exact rounds. */
-function bodyMesh(id: string, pieces: DrawnPiece[]): BodyMesh {
+/** One body's triangles, world space, document frame (Z-up), with its frame, exact rounds and gear data. */
+function bodyMesh(id: string, pieces: DrawnPiece[], toothForm?: BodyMesh['toothForm']): BodyMesh {
   const positions: number[] = [];
   const faces: number[] = [];
   const p = new THREE.Vector3();
@@ -201,7 +202,37 @@ function bodyMesh(id: string, pieces: DrawnPiece[]): BodyMesh {
   }
   const spheres = pieces.map(sphereOf).filter((x): x is NonNullable<typeof x> => x !== null);
   const rods = pieces.map(rodOf).filter((x): x is NonNullable<typeof x> => x !== null);
-  return { id, positions, faces, spheres, rods, frame: frameOf(pieces) };
+  return { id, positions, faces, spheres, rods, frame: frameOf(pieces), ...(toothForm ? { toothForm } : {}) };
+}
+
+type Mirrors = { model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null };
+
+/**
+ * A body's pose in MuJoCo, where a simulated body actually is: its origin and
+ * its rotation (row-major), or null for a body MuJoCo does not know.
+ */
+function mjPose(node: SceneNode, { model, data, mujoco }: Mirrors): { at: Vec3; r: (i: number, j: number) => number } | null {
+  if (!model || !data || !mujoco) return null;
+  try {
+    const b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
+    if (b < 0) return null;
+    return {
+      at: [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]],
+      r: (i, j) => data.xmat[b * 9 + i * 3 + j],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** A toothed body's gear data and the frame it is stated in: the body's own, as it now stands. */
+function toothFormOf(id: string): BodyMesh['toothForm'] {
+  const node = findNodeById(useStore.getState().sceneGraph.nodes, id);
+  if (!node?.toothForm) return undefined;
+  const pose = mjPose(node, useStore.getState() as unknown as Mirrors);
+  if (!pose) return undefined;
+  const column = (j: number): Vec3 => [pose.r(0, j), pose.r(1, j), pose.r(2, j)];
+  return { form: node.toothForm, origin: pose.at, axes: [column(0), column(1), column(2)] };
 }
 
 /**
@@ -210,10 +241,8 @@ function bodyMesh(id: string, pieces: DrawnPiece[]): BodyMesh {
  * A part MuJoCo does not know is left out.
  */
 function locationLinks(ids: Iterable<string>, nodes: SceneNode[]): { id: string; parent: string | null; from: Vec3; to: Vec3 }[] {
-  const { model, data, mujoco } = useStore.getState() as unknown as {
-    model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null;
-  };
-  if (!model || !data || !mujoco) return [];
+  const mirrors = useStore.getState() as unknown as Mirrors;
+  if (!mirrors.model || !mirrors.data || !mirrors.mujoco) return [];
   const parentOf = new Map<string, SceneNode | null>();
   const byId = new Map<string, SceneNode>();
   const walk = (list: SceneNode[] | undefined, parent: SceneNode | null) => {
@@ -226,26 +255,20 @@ function locationLinks(ids: Iterable<string>, nodes: SceneNode[]): { id: string;
   };
   walk(nodes, null);
   const origin = (node: SceneNode): Vec3 | null => {
-    try {
-      const b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
-      if (b < 0) return null;
-      const at: Vec3 = [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]];
-      // A lattice body's own origin is the middle of its mesh, which moves with
-      // every edit and means nothing to the person drawing it. Where it sits is
-      // where its grid's origin is: the body's position less the offset baked
-      // into the mesh, turned by the body. Unmoved, that is the world origin,
-      // and there is nothing to dimension.
-      const offset = node.isLattice ? node.latticeOrigin : undefined;
-      if (offset) {
-        // xmat is the body's rotation, row-major.
-        const r = (i: number, j: number) => data.xmat[b * 9 + i * 3 + j];
-        const o = [offset[0] ?? 0, offset[1] ?? 0, offset[2] ?? 0];
-        return [0, 1, 2].map((i) => at[i] - (r(i, 0) * o[0] + r(i, 1) * o[1] + r(i, 2) * o[2])) as Vec3;
-      }
-      return at;
-    } catch {
-      return null;
+    const pose = mjPose(node, mirrors);
+    if (!pose) return null;
+    const { at, r } = pose;
+    // A lattice body's own origin is the middle of its mesh, which moves with
+    // every edit and means nothing to the person drawing it. Where it sits is
+    // where its grid's origin is: the body's position less the offset baked
+    // into the mesh, turned by the body. Unmoved, that is the world origin,
+    // and there is nothing to dimension.
+    const offset = node.isLattice ? node.latticeOrigin : undefined;
+    if (offset) {
+      const o = [offset[0] ?? 0, offset[1] ?? 0, offset[2] ?? 0];
+      return [0, 1, 2].map((i) => at[i] - (r(i, 0) * o[0] + r(i, 1) * o[1] + r(i, 2) * o[2])) as Vec3;
     }
+    return at;
   };
   const out: { id: string; parent: string | null; from: Vec3; to: Vec3 }[] = [];
   for (const id of ids) {
@@ -448,6 +471,36 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         line(out.lines, elbow, add(elbow, right, side * SHOULDER_PX * mpp));
         arrow(out.arrows, tip, [-k[0], -k[1], -k[2]]);
         label(key, add(elbow, right, side * (SHOULDER_PX + 3) * mpp), d.label, side > 0 ? 'left' : 'right');
+      } else if (d.kind === 'gear') {
+        // The pitch circle, or a rack's pitch line, chain-dotted as a gear
+        // drawing has it; the gear data on a leader out from it, a line each.
+        // In 4 px steps: six on, one off, one on, one off — a long dash and a dot.
+        const chain = (p: (t: number) => Vec3, lengthPx: number) => {
+          const steps = Math.max(9, Math.round(lengthPx / 4));
+          for (let s = 0; s < steps; s++) {
+            if (s % 9 !== 6 && s % 9 !== 8) line(out.lines, p(s / steps), p((s + 1) / steps));
+          }
+        };
+        if (d.pitchCircle) {
+          const { centre: [cu, cv], radius } = d.pitchCircle;
+          chain((t) => at(cu + radius * Math.cos(2 * Math.PI * t), cv + radius * Math.sin(2 * Math.PI * t)), (2 * Math.PI * radius) / mpp);
+        }
+        if (d.pitchLine) {
+          const [a, b] = [at(...d.pitchLine.a), at(...d.pitchLine.b)];
+          chain((t) => add(a, add(b, a, -1), t), Math.hypot(...add(b, a, -1)) / mpp);
+        }
+        const [ku, kv] = d.toward;
+        const tip = at(...d.anchor);
+        if (already(d.label, tip)) return;
+        const k = add(add([0, 0, 0], U, ku), V, kv);
+        const outward = onSheet(k);
+        const elbow = add(tip, outward, LEADER_PX * mpp);
+        const side = dot(outward, right) >= 0 ? 1 : -1;
+        line(out.lines, tip, elbow);
+        line(out.lines, elbow, add(elbow, right, side * SHOULDER_PX * mpp));
+        if (d.pitchCircle || d.pitchLine) arrow(out.arrows, tip, [-k[0], -k[1], -k[2]]);
+        const start = add(elbow, right, side * (SHOULDER_PX + 3) * mpp);
+        d.lines.forEach((text, n) => label(`${key}:${n}`, add(start, up, -n * 15 * mpp), text, side > 0 ? 'left' : 'right'));
       } else {
         // From the sheet's horizontal or vertical round to the part's long
         // axis, both drawn out from the middle of the part.
@@ -541,7 +594,9 @@ function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Ma
         });
       } else if (d.kind === 'diameter' || d.kind === 'radius') {
         keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`,
-          { body: b.id, kind: d.kind, count: d.count, label: d.label, valueMm: d.valueMm });
+          { body: b.id, kind: d.kind, count: d.count, ...(d.kind === 'diameter' && d.sides ? { sides: d.sides } : {}), label: d.label, valueMm: d.valueMm });
+      } else if (d.kind === 'gear') {
+        keep(`${d.kind}:${b.id}`, { body: b.id, kind: d.kind, label: d.label, lines: d.lines });
       } else {
         keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`,
           { body: b.id, kind: d.kind, ...(d.count ? { count: d.count } : {}), label: d.label, valueDeg: d.valueDeg });
@@ -636,7 +691,7 @@ export function DimensionOverlay() {
     for (const [id, entry] of pieces) {
       let hit = cache.current.get(id);
       if (!hit || hit.signature !== entry.signature) {
-        hit = { signature: entry.signature, dims: bodyViewDimensions(bodyMesh(id, entry.pieces), view) };
+        hit = { signature: entry.signature, dims: bodyViewDimensions(bodyMesh(id, entry.pieces, toothFormOf(id)), view) };
         cache.current.set(id, hit);
       }
       const d = hit.dims;

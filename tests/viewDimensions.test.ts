@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { bodyViewDimensions, formatDim, locationDimensions, omittedLink, sheetAxes, type AngleDim, type BodyMesh, type DiameterDim, type LinearDim } from '../src/utils/viewDimensions';
+import { bodyViewDimensions, formatDim, locationDimensions, omittedLink, sheetAxes, type AngleDim, type BodyMesh, type DiameterDim, type GearDim, type LinearDim } from '../src/utils/viewDimensions';
 import { orthoFraming } from '../src/utils/cameraViews';
+import { buildGt2PulleyNode, buildInvoluteGearNode, buildInvoluteRackNode } from '../src/utils/mechanismParts';
+import type { SceneNode } from '../src/types/scene';
 
 /** A three geometry as a body: positions taken as document frame (Z-up), metres. */
 function body(geometry: THREE.BufferGeometry, matrix?: THREE.Matrix4, id = 'part'): BodyMesh {
@@ -567,6 +569,87 @@ describe('radii', () => {
   it('top view: the arcs are edge on, so no radius', () => {
     const d = bodyViewDimensions(plate(), 'topDown');
     expect((d?.dims ?? []).filter((x) => x.kind === 'radius')).toEqual([]);
+  });
+
+  // A tooth flank is an involute: over its short run it fits a circle within
+  // the arc test's error, so a 16-tooth gear used to read "32× R4.8".
+  it('a gear\'s involute flanks are not radii', () => {
+    const gear = buildInvoluteGearNode({ teeth: 16, moduleMm: 1.5, boreKind: 'round', boreDiameterMm: 5 }).geoms[0];
+    const d = bodyViewDimensions({ id: 'gear', positions: gear.renderVertices!, faces: gear.faces! }, 'topDown');
+    expect((d?.dims ?? []).filter((x) => x.kind === 'radius')).toEqual([]);
+    expect(diameters(d).map((x) => x.label)).toEqual(['⌀5']);
+  });
+});
+
+describe('gear data', () => {
+  // A builder's gear standing at the origin, square to the world: its drawn
+  // mesh and its tooth form, as the overlay hands them over.
+  const toothed = (node: SceneNode): BodyMesh => {
+    const positions: number[] = [];
+    const faces: number[] = [];
+    for (const g of node.geoms) {
+      if (g.type !== 'mesh' || !g.renderVertices || !g.faces) continue;
+      const base = positions.length / 3;
+      positions.push(...g.renderVertices);
+      faces.push(...g.faces.map((i) => i + base));
+    }
+    return {
+      id: node.id, positions, faces,
+      toothForm: { form: node.toothForm!, origin: [0, 0, 0], axes: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] },
+    };
+  };
+  const gearOf = (d: { dims: unknown[] } | null) =>
+    (d?.dims ?? []).filter((x): x is GearDim => (x as GearDim).kind === 'gear');
+
+  it('a spur gear end on: teeth, module, pressure angle, shift, diameters, and the pitch circle', () => {
+    const node = buildInvoluteGearNode({ teeth: 16, moduleMm: 1.5, boreKind: 'round', boreDiameterMm: 5, backlashMm: 0.1 });
+    const [g] = gearOf(bodyViewDimensions(toothed(node), 'topDown'));
+    expect(g.lines).toEqual(['16T · m1.5 · PA 20°', 'x +0.06', 'd ⌀24 · da ⌀27.19 · df ⌀20.44', 'backlash 0.1']);
+    expect(g.pitchCircle?.radius).toBeCloseTo(mm(12), 9);
+    expect(diameters(bodyViewDimensions(toothed(node), 'topDown')).map((x) => x.label)).toEqual(['⌀5']);
+  });
+
+  // A D-shaft bore is an arc of more than half a circle, cut by a flat: a
+  // drawing gives it as a diameter. Its arc used to be lost altogether, the
+  // facet stepping onto the flat throwing the circle fit out.
+  it('a D-shaft bore is ⌀5, located by its centre', () => {
+    const node = buildInvoluteGearNode({ teeth: 16, moduleMm: 1.5, boreKind: 'd_shaft', boreDiameterMm: 5 });
+    const d = bodyViewDimensions(toothed(node), 'topDown');
+    expect(diameters(d).map((x) => x.label)).toEqual(['⌀5']);
+    expect((d?.dims ?? []).filter((x) => x.kind === 'radius')).toEqual([]);
+  });
+
+  // A hex bore is six equal sides round an empty middle: one figure across
+  // the flats, not six slanted edges and a chain of fragments.
+  it('a hex bore is "hex 5 A/F", with no slants or fragments', () => {
+    const node = buildInvoluteGearNode({ teeth: 16, moduleMm: 1.5, boreKind: 'hex', boreDiameterMm: 5 });
+    const d = bodyViewDimensions(toothed(node), 'topDown');
+    expect(diameters(d).map((x) => x.label)).toEqual(['hex 5 A/F']);
+    expect((d?.dims ?? []).filter((x) => x.kind === 'angle')).toEqual([]);
+    expect(linear(d, 'u', 1).map((x) => x.label)).toEqual(['13.6']);
+  });
+
+  it('side on: the same figures, no pitch circle', () => {
+    const node = buildInvoluteGearNode({ teeth: 32, moduleMm: 1.5 });
+    const [g] = gearOf(bodyViewDimensions(toothed(node), 'front'));
+    expect(g.lines[0]).toBe('32T · m1.5 · PA 20°');
+    expect(g.lines).not.toContain(expect.stringMatching(/^x /));
+    expect(g.pitchCircle).toBeUndefined();
+  });
+
+  it('a rack: its pitch line along its length, at the pitch height', () => {
+    const node = buildInvoluteRackNode({ teeth: 10, moduleMm: 2 });
+    const [g] = gearOf(bodyViewDimensions(toothed(node), 'topDown'));
+    expect(g.lines).toEqual(['Rack 10T · m2 · PA 20°', 'p 6.28 · backlash 0.1']);
+    expect(g.pitchLine!.b[0] - g.pitchLine!.a[0]).toBeCloseTo(mm(10 * Math.PI * 2), 9);
+    expect(g.pitchLine!.a[1]).toBeCloseTo(0, 9);
+  });
+
+  it('a GT2 pulley: teeth, belt pitch and the pitch diameter the belt runs on', () => {
+    const node = buildGt2PulleyNode({ teeth: 20 });
+    const [g] = gearOf(bodyViewDimensions(toothed(node), 'topDown'));
+    expect(g.lines[0]).toBe('GT2 20T · p 2');
+    expect(g.lines[1]).toMatch(/^PD ⌀12\.73 · OD ⌀12\.2/);
   });
 });
 

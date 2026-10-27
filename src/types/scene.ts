@@ -473,6 +473,28 @@ export interface SceneJoint {
   crumpleDampingAfter?: number;
 }
 
+/**
+ * A gear's data, in mm and degrees, in the body's own frame: a gear or pulley
+ * turns about the body's Z through its origin, a rack's pitch line runs along
+ * its X at y = 0 over its length.
+ */
+export type ToothForm =
+  | {
+      kind: 'involute';
+      teeth: number;
+      moduleMm: number;
+      pressureAngleDeg: number;
+      /** x, in modules: the tooth moved out from the standard pitch line. */
+      profileShift: number;
+      pitchDiameterMm: number;
+      tipDiameterMm: number;
+      rootDiameterMm: number;
+      /** Taken off each tooth's thickness at the pitch circle. */
+      backlashMm: number;
+    }
+  | { kind: 'rack'; teeth: number; moduleMm: number; pressureAngleDeg: number; pitchMm: number; lengthMm: number; backlashMm: number }
+  | { kind: 'gt2'; teeth: number; pitchMm: number; pitchDiameterMm: number; outsideDiameterMm: number };
+
 export interface SceneNode {
   id: string;
   name: string;
@@ -636,6 +658,13 @@ export interface SceneNode {
    * gear would put it out of step with whatever it runs against.
    */
   teeth?: number;
+  /**
+   * The tooth form a generated gear, rack or pulley was cut to, which its
+   * drawing has to state for it to be made again: a flank is not a size that
+   * can be read off the outline. Written by the builder that cut the teeth;
+   * the Dims overlay prints it as the gear data.
+   */
+  toothForm?: ToothForm;
   /**
    * The body's position before the current absolute-rotation gesture, so the
    * gesture composes from where it started instead of from its own last result.

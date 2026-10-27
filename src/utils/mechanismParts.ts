@@ -130,8 +130,10 @@ export function extrudedMeshGeom(
 }
 
 /**
- * Generates a clockwise inner bore polygon in mm, centered at (0, 0),
- * clamped so it stays safely inside `maxRadiusMm`.
+ * Generates a clockwise inner bore polygon in mm, centered at (0, 0). A bore
+ * that does not fit inside `maxRadiusMm` is refused, never shrunk to fit: a
+ * 608 seat cut at 16.8 mm takes no bearing, and a part that looks right but
+ * will not assemble is worse than no part.
  */
 export function buildBoreLoop(
   boreKind: GearBoreKind,
@@ -140,12 +142,19 @@ export function buildBoreLoop(
 ): [number, number][] | null {
   if (boreKind === 'none') return null;
   const rawDiameter = boreKind === 'bearing_608' ? 22.0 : Math.max(1.0, boreDiameterMm || 5.0);
-  const radius = Math.min(rawDiameter / 2, Math.max(0.5, maxRadiusMm));
-  if (radius <= 0.2) return null;
+  const radius = rawDiameter / 2;
+  // A hex bore's size is across its flats; its corners reach further out.
+  const reach = boreKind === 'hex' ? radius / Math.cos(Math.PI / 6) : radius;
+  if (reach > maxRadiusMm) {
+    const room = boreKind === 'hex' ? 2 * maxRadiusMm * Math.cos(Math.PI / 6) : 2 * maxRadiusMm;
+    const what = boreKind === 'bearing_608' ? 'A 608 bearing seat (⌀22 mm)'
+      : boreKind === 'hex' ? `A ${rawDiameter} mm hex bore` : `A ⌀${rawDiameter} mm bore`;
+    throw new Error(`${what} does not fit this part: it has room for ${boreKind === 'hex' ? `${room.toFixed(1)} mm across flats` : `⌀${room.toFixed(1)} mm`} at most. Use more teeth or a bigger size, or a smaller bore.`);
+  }
 
   if (boreKind === 'hex') {
-    // Hex bore where `radius * 2` is the across-flats distance (or corner radius if small).
-    const cornerR = Math.min(radius / Math.cos(Math.PI / 6), maxRadiusMm);
+    // Hex bore where `radius * 2` is the across-flats distance.
+    const cornerR = reach;
     const pts: [number, number][] = [];
     for (let i = 0; i < 6; i++) {
       // Clockwise order
@@ -514,6 +523,17 @@ export function buildInvoluteGearNode(
     pos: options.pos ? [...options.pos] : [0, 0, mm(metrics.addendumRadiusMm + 5)],
     ...(options.euler ? { euler: [...options.euler] } : {}),
     teeth: metrics.teeth,
+    toothForm: {
+      kind: 'involute',
+      teeth: metrics.teeth,
+      moduleMm: metrics.moduleMm,
+      pressureAngleDeg: metrics.pressureAngleDeg,
+      profileShift: metrics.profileShift,
+      pitchDiameterMm: metrics.pitchDiameterMm,
+      tipDiameterMm: 2 * metrics.addendumRadiusMm,
+      rootDiameterMm: 2 * metrics.rootRadiusMm,
+      backlashMm: metrics.backlashMm,
+    },
     geoms: [meshGeom, colliderGeom],
     joints: [joint],
     children: [],
@@ -822,6 +842,15 @@ export function buildInvoluteRackNode(
     name,
     type: 'body',
     pos: options.pos ? [...options.pos] : [0, 0, mm(metrics.thicknessMm / 2 + 5)],
+    toothForm: {
+      kind: 'rack',
+      teeth: metrics.teeth,
+      moduleMm: metrics.moduleMm,
+      pressureAngleDeg: metrics.pressureAngleDeg,
+      pitchMm: metrics.circularPitchMm,
+      lengthMm: metrics.totalLengthMm,
+      backlashMm: metrics.backlashMm,
+    },
     geoms: [meshGeom, colliderGeom],
     joints: [joint],
     children: [],
@@ -1103,6 +1132,13 @@ export function buildGt2PulleyNode(
     type: 'body',
     pos: options.pos ? [...options.pos] : [0, 0, mm(metrics.flangeRadiusMm + 5)],
     teeth: metrics.teeth,
+    toothForm: {
+      kind: 'gt2',
+      teeth: metrics.teeth,
+      pitchMm: metrics.pitchMm,
+      pitchDiameterMm: metrics.pitchDiameterMm,
+      outsideDiameterMm: metrics.outerDiameterMm,
+    },
     pulleyRadius: mm(metrics.pitchRadiusMm),
     geoms,
     joints: [joint],

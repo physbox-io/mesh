@@ -36,7 +36,7 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
             <DocsInfoButton tab="resize" />
           </h3>
 
-          {selectedNode.teeth === undefined && (
+          {selectedNode.teeth === undefined && !selectedNode.toothForm && (
             <div className="flex flex-col gap-2 pb-1 border-b border-slate-100">
               <label className="text-xs font-medium text-slate-500 flex justify-between">
                 Scale <span>applies to every sub-geom together</span>

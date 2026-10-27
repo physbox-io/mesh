@@ -38,9 +38,10 @@
  * fits circles exactly. Pure: no three.js, no store.
  */
 import { PairMemo } from './arrayMemo';
-import { findFeatureEdges } from './featureEdges';
+import { findFeatureEdges, type EdgeCandidate } from './featureEdges';
 import { fitCircle } from './measureSnap';
 import { VIEW_AXES, type DrawingView } from './cameraViews';
+import type { ToothForm } from '../types/scene';
 
 const featureEdgesMemo = new PairMemo<ReturnType<typeof findFeatureEdges>>();
 
@@ -67,6 +68,12 @@ export interface BodyMesh {
    * in, which its edges run along. Absent: the world's.
    */
   frame?: [Vec3, Vec3, Vec3];
+  /**
+   * The tooth form a gear, rack or pulley was cut to, and the body frame it is
+   * stated in (document frame, metres): its origin and its X, Y and Z axes.
+   * Known exactly by the builder, and not to be read off a tessellated flank.
+   */
+  toothForm?: { form: ToothForm; origin: Vec3; axes: [Vec3, Vec3, Vec3] };
 }
 
 /** A part's own axes as a view draws them: u across, v up, w into the sheet. */
@@ -107,7 +114,13 @@ export interface LinearDim {
 export interface DiameterDim {
   kind: 'diameter';
   centre: [number, number];
+  /** A polygonal hole's inradius: half its size across the flats. */
   radius: number;
+  /**
+   * A regular polygonal hole (a hex bore, a square drive) has this many sides,
+   * and valueMm is its size across the flats: "hex 5 A/F". Absent: round.
+   */
+  sides?: number;
   /** How many equal holes this label stands for. */
   count: number;
   valueMm: number;
@@ -146,7 +159,24 @@ export interface RadiusDim {
   label: string;
 }
 
-export type ViewDim = LinearDim | DiameterDim | RadiusDim | AngleDim;
+/**
+ * A toothed part's gear data, as a gear drawing gives it: a block of figures on
+ * a leader, and the pitch circle (or a rack's pitch line) chain-dotted when it
+ * is seen square on. Positions are on the part's sheet axes.
+ */
+export interface GearDim {
+  kind: 'gear';
+  pitchCircle?: { centre: [number, number]; radius: number };
+  pitchLine?: { a: [number, number]; b: [number, number] };
+  /** Where the leader starts, and the way it runs out: a unit vector. */
+  anchor: [number, number];
+  toward: [number, number];
+  /** The figures, a line each: "16T · m1.5 · PA 20°", the diameters, … */
+  lines: string[];
+  label: string;
+}
+
+export type ViewDim = LinearDim | DiameterDim | RadiusDim | AngleDim | GearDim;
 
 export interface BodyDimensions {
   id: string;
@@ -468,6 +498,12 @@ const ARC_TURN_MAX = (40 * Math.PI) / 180;
 const ARC_MIN_SWEEP = (20 * Math.PI) / 180;
 const ARC_MAX_ERROR = 0.005;
 /**
+ * How far the radii of an arc's two halves may differ, as a share. A round
+ * has one curvature all along; a gear tooth's involute flank fits a circle
+ * closely over its short run, but its curvature grows from root to tip.
+ */
+const ARC_HALVES_AGREE = 0.03;
+/**
  * An arc sweeping this far (a channel's round floor, a slot's end) is located
  * by its centre, as a hole is; a corner's quarter round is placed by the
  * edges it runs into.
@@ -529,15 +565,44 @@ export function arcsOf(points: Vec3[], closed: boolean): Arc[] {
     }
     k += run.length;
     if (run.length < 3 || sweep < ARC_MIN_SWEEP) continue;
-    const pts = [...run.map((i) => points[segs[i].from]), points[(segs[run[run.length - 1]].from + 1) % n]];
-    const fit = fitCircle(pts);
-    if (!fit || fit.error > ARC_MAX_ERROR) continue;
-    const off = Math.max(...pts.map((q) => Math.abs(dot(sub3(q, fit.centre), fit.normal))));
-    if (off > ARC_MAX_ERROR * fit.radius) continue;
-    const mid = pts[Math.floor(pts.length / 2)];
-    out.push({ centre: fit.centre, axis: fit.normal, radius: fit.radius, mid, samples: [pts[1], mid, pts[pts.length - 2]], sweep });
+    const all = [...run.map((i) => points[segs[i].from]), points[(segs[run[run.length - 1]].from + 1) % n]];
+    // The facet at either end can be the step into what comes next — a bore's
+    // flat, short and turned like a facet but with its far end off the round —
+    // so a run that does not fit is tried again without it.
+    for (const [a, b] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      const arc = fitArc(all.slice(a, all.length - b));
+      if (arc) {
+        out.push(arc);
+        break;
+      }
+    }
   }
   return out;
+}
+
+/** The arc through a run of facet corners, or null when they are not one round. */
+function fitArc(pts: Vec3[]): Arc | null {
+  if (pts.length < 4) return null;
+  const sub3 = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  let sweep = 0;
+  for (let i = 0; i + 2 < pts.length; i++) {
+    const d1 = sub3(pts[i + 1], pts[i]), d2 = sub3(pts[i + 2], pts[i + 1]);
+    const c: Vec3 = [d1[1] * d2[2] - d1[2] * d2[1], d1[2] * d2[0] - d1[0] * d2[2], d1[0] * d2[1] - d1[1] * d2[0]];
+    sweep += Math.atan2(Math.hypot(c[0], c[1], c[2]), dot(d1, d2));
+  }
+  if (sweep < ARC_MIN_SWEEP) return null;
+  const fit = fitCircle(pts);
+  if (!fit || fit.error > ARC_MAX_ERROR) return null;
+  const off = Math.max(...pts.map((q) => Math.abs(dot(sub3(q, fit.centre), fit.normal))));
+  if (off > ARC_MAX_ERROR * fit.radius) return null;
+  if (pts.length >= 7) {
+    const half = Math.floor(pts.length / 2);
+    const first = fitCircle(pts.slice(0, half + 1));
+    const second = fitCircle(pts.slice(half));
+    if (!first || !second || Math.abs(first.radius - second.radius) > ARC_HALVES_AGREE * fit.radius) return null;
+  }
+  const mid = pts[Math.floor(pts.length / 2)];
+  return { centre: fit.centre, axis: fit.normal, radius: fit.radius, mid, samples: [pts[1], mid, pts[pts.length - 2]], sweep };
 }
 
 /**
@@ -693,6 +758,129 @@ function occlusion(positions: ArrayLike<number>, faces: ArrayLike<number>, axes:
   };
 }
 
+/** What a drawing calls a regular polygonal hole of so many sides. */
+const POLYGON_NAMES: Record<number, string> = { 3: 'tri', 4: 'square', 5: 'pent', 6: 'hex', 8: 'oct' };
+
+/**
+ * Regular polygonal holes seen end on — a hex bore, a square drive: a closed
+ * ring of equal straight edges lying in the sheet round an empty middle. A
+ * drawing gives one figure across its flats and locates its centre, as it does
+ * a round hole; its sides are not outline edges to chain and slant. Returns the
+ * holes and the edges that make them.
+ */
+function polygonHoles(
+  edges: EdgeCandidate[], axes: SheetAxes, covered: (u: number, v: number) => boolean,
+): { holes: { centre: [number, number]; radius: number; sides: number }[]; edgeIds: Set<number> } {
+  const { u: U, v: V, w: W } = axes;
+  const key = (p: ArrayLike<number>) => [0, 1, 2].map((i) => Math.round(p[i] / MERGE_M * 4)).join(',');
+  type Line = { id: number; a: number[]; b: number[] };
+  const lines: Line[] = [];
+  for (const c of edges) {
+    if (c.edge.kind !== 'line') continue;
+    const { a, b } = c.edge;
+    const d = [0, 1, 2].map((i) => b[i] - a[i]);
+    const length = Math.hypot(d[0], d[1], d[2]);
+    if (length > SAME_M && Math.abs(dot(d, W)) / length < IN_SHEET) lines.push({ id: c.id, a, b });
+  }
+  const at = new Map<string, Line[]>();
+  for (const c of lines) {
+    for (const p of [c.a, c.b]) {
+      const k = key(p);
+      at.set(k, [...(at.get(k) ?? []), c]);
+    }
+  }
+  const holes: { centre: [number, number]; radius: number; sides: number }[] = [];
+  const edgeIds = new Set<number>();
+  const visited = new Set<number>();
+  for (const start of lines) {
+    if (visited.has(start.id)) continue;
+    // Walk the ring corner to corner, through corners shared by exactly two.
+    const ring: Line[] = [start];
+    const points: ArrayLike<number>[] = [start.a, start.b];
+    visited.add(start.id);
+    let corner = key(start.b);
+    let closed = false;
+    while (ring.length <= 12) {
+      const here = at.get(corner) ?? [];
+      if (here.length !== 2) break;
+      const next = here.find((c) => c !== ring[ring.length - 1])!;
+      if (next === start) { closed = true; break; }
+      if (visited.has(next.id)) break;
+      visited.add(next.id);
+      ring.push(next);
+      const far = key(next.a) === corner ? next.b : next.a;
+      points.push(far);
+      corner = key(far);
+    }
+    if (!closed || ring.length < 3 || ring.length > 12) continue;
+    const corners = points.slice(0, ring.length).map((q) => [dot(q, U), dot(q, V)]);
+    const centre: [number, number] = [
+      corners.reduce((t, q) => t + q[0], 0) / corners.length,
+      corners.reduce((t, q) => t + q[1], 0) / corners.length,
+    ];
+    const lengths = ring.map((c) => Math.hypot(...[0, 1, 2].map((i) => c.b[i] - c.a[i])));
+    const spokes = corners.map((q) => Math.hypot(q[0] - centre[0], q[1] - centre[1]));
+    const even = (xs: number[]) => Math.max(...xs) - Math.min(...xs) <= 0.02 * Math.max(...xs);
+    if (!even(lengths) || !even(spokes) || covered(centre[0], centre[1])) continue;
+    for (const c of ring) edgeIds.add(c.id);
+    const radius = (spokes.reduce((t, x) => t + x, 0) / spokes.length) * Math.cos(Math.PI / ring.length);
+    // Both rims of a through hole are one hole.
+    if (!holes.some((h) => h.sides === ring.length && Math.abs(h.radius - radius) < SAME_M &&
+      Math.hypot(h.centre[0] - centre[0], h.centre[1] - centre[1]) < SAME_M)) {
+      holes.push({ centre, radius, sides: ring.length });
+    }
+  }
+  return { holes, edgeIds };
+}
+
+/** A gear figure to the hundredth of a mm, or of a module: no trailing zeros. */
+const gearFigure = (v: number) => String(+v.toFixed(2));
+
+/**
+ * The gear data of a toothed part in one view. The pitch circle is drawn only
+ * when the gear's axis looks straight at the sheet, where it is a circle; the
+ * figures are given in every view, as a gear drawing's data table is.
+ */
+export function gearDim(tooth: NonNullable<BodyMesh['toothForm']>, axes: SheetAxes, forward: Vec3): GearDim {
+  const { form, origin, axes: [X, Y, Z] } = tooth;
+  const sheet = (x: number, y: number): [number, number] => {
+    const q = [0, 1, 2].map((i) => origin[i] + X[i] * x + Y[i] * y);
+    return [dot(q, axes.u), dot(q, axes.v)];
+  };
+  const endOn = Math.abs(dot(Z, forward)) > END_ON;
+  const centre = sheet(0, 0);
+  const toward: [number, number] = [Math.SQRT1_2, Math.SQRT1_2];
+  const lines: string[] = [];
+  let pitchCircle: GearDim['pitchCircle'];
+  let pitchLine: GearDim['pitchLine'];
+  let anchor = centre;
+  const onCircle = (diameterMm: number) => {
+    const radius = diameterMm / 2000;
+    pitchCircle = { centre, radius };
+    anchor = [centre[0] + toward[0] * radius, centre[1] + toward[1] * radius];
+  };
+  if (form.kind === 'involute') {
+    lines.push(`${form.teeth}T · m${gearFigure(form.moduleMm)} · PA ${formatAngle(form.pressureAngleDeg)}`);
+    if (Math.abs(form.profileShift) >= 0.005) lines.push(`x ${form.profileShift > 0 ? '+' : ''}${gearFigure(form.profileShift)}`);
+    lines.push(`d ⌀${gearFigure(form.pitchDiameterMm)} · da ⌀${gearFigure(form.tipDiameterMm)} · df ⌀${gearFigure(form.rootDiameterMm)}`);
+    if (form.backlashMm > 0) lines.push(`backlash ${gearFigure(form.backlashMm)}`);
+    if (endOn) onCircle(form.pitchDiameterMm);
+  } else if (form.kind === 'gt2') {
+    lines.push(`GT2 ${form.teeth}T · p ${gearFigure(form.pitchMm)}`);
+    lines.push(`PD ⌀${gearFigure(form.pitchDiameterMm)} · OD ⌀${gearFigure(form.outsideDiameterMm)}`);
+    if (endOn) onCircle(form.pitchDiameterMm);
+  } else {
+    lines.push(`Rack ${form.teeth}T · m${gearFigure(form.moduleMm)} · PA ${formatAngle(form.pressureAngleDeg)}`);
+    lines.push(`p ${gearFigure(form.pitchMm)}${form.backlashMm > 0 ? ` · backlash ${gearFigure(form.backlashMm)}` : ''}`);
+    if (endOn) {
+      const half = form.lengthMm / 2000;
+      pitchLine = { a: sheet(-half, 0), b: sheet(half, 0) };
+      anchor = pitchLine.b;
+    }
+  }
+  return { kind: 'gear', pitchCircle, pitchLine, anchor, toward, lines, label: lines.join(' · ') };
+}
+
 /** The dimensions for one part in one view. */
 export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimensions | null {
   const { forward, right, up } = VIEW_AXES[view];
@@ -731,6 +919,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   const uStops: Stop[] = [];
   const vStops: Stop[] = [];
   const circles: { centre: [number, number]; radius: number }[] = [];
+  let polygons: ReturnType<typeof polygonHoles>['holes'] = [];
   const balls: { centre: [number, number]; radius: number }[] = [];
   const hidden = occlusion(body.positions, body.faces, { u: right, v: up, w: forward });
   /**
@@ -841,7 +1030,10 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         if (drawn >= share && Math.abs(du) / length > 1 - SQUARE) straight.u = true;
       }
     };
+    const polygonal = polygonHoles(found.edges, axes, covered);
+    polygons = polygonal.holes;
     for (const candidate of found.edges) {
+      if (polygonal.edgeIds.has(candidate.id)) continue;
       const e = candidate.edge;
       if (e.kind === 'line') {
         // Only an edge where at least one of its two faces stands square to the
@@ -971,7 +1163,13 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
 
   // --- circles: one per hole, one label per size ---------------------------
   const holes: { centre: [number, number]; radius: number }[] = [];
-  for (const c of [...circles, ...balls]) {
+  // An arc of more than half a circle is given by its diameter, as a drawing
+  // gives it: a D-shaft bore is "⌀5" with its flat, not "R2.5".
+  const overHalf = arcs
+    .filter((arc) => arc.sweep > Math.PI && Math.abs(dot(arc.axis, W)) > END_ON &&
+      arc.samples.some((q) => !hidden(dot(q, right), dot(q, up), dot(q, forward))))
+    .map((arc) => ({ centre: [dot(arc.centre, U), dot(arc.centre, V)] as [number, number], radius: arc.radius }));
+  for (const c of [...circles, ...balls, ...overHalf]) {
     const same = holes.find((h) =>
       Math.abs(h.radius - c.radius) < SAME_M &&
       Math.abs(h.centre[0] - c.centre[0]) < SAME_M &&
@@ -985,6 +1183,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     Math.abs(h.centre[0] - (u0 + u1) / 2) < SAME_M && Math.abs(h.centre[1] - (v0 + v1) / 2) < SAME_M);
 
   const dims: ViewDim[] = [...slanted.dims];
+  if (body.toothForm) dims.push(gearDim(body.toothForm, axes, forward));
   const sizes: { radius: number; members: typeof holes }[] = [];
   for (const h of holes) {
     const size = sizes.find((s) => Math.abs(s.radius - h.radius) < SAME_M);
@@ -1004,6 +1203,27 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
       count,
       valueMm,
       label: `${count > 1 ? `${count}× ` : ''}⌀${formatDim(size.radius * 2)}`,
+    });
+  }
+  const polygonSizes: { sides: number; radius: number; members: typeof polygons }[] = [];
+  for (const h of polygons) {
+    const size = polygonSizes.find((x) => x.sides === h.sides && Math.abs(x.radius - h.radius) < SAME_M);
+    if (size) size.members.push(h);
+    else polygonSizes.push({ sides: h.sides, radius: h.radius, members: [h] });
+  }
+  for (const size of polygonSizes) {
+    const at = size.members.reduce((best, h) =>
+      h.centre[0] + h.centre[1] > best.centre[0] + best.centre[1] ? h : best);
+    const count = size.members.length;
+    const name = POLYGON_NAMES[size.sides] ?? `${size.sides}-gon`;
+    dims.push({
+      kind: 'diameter',
+      centre: at.centre,
+      radius: size.radius,
+      sides: size.sides,
+      count,
+      valueMm: Math.round(size.radius * 2 * 10000) / 10,
+      label: `${count > 1 ? `${count}× ` : ''}${name} ${formatDim(size.radius * 2)} A/F`,
     });
   }
   // --- radii: each arc that faces the sheet and shows, one label per size ---
@@ -1054,7 +1274,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
 
   // Holes seen end-on are located by their centres. A hole's extension line
   // starts at its centre: a centre line.
-  for (const h of holes) {
+  for (const h of [...holes, ...polygons]) {
     if (balls.includes(h)) continue;
     uStops.push({ at: h.centre[0], anchor: h.centre[1], weight: 2 * h.radius, centre: true });
     vStops.push({ at: h.centre[1], anchor: h.centre[0], weight: 2 * h.radius, centre: true });

@@ -128,8 +128,9 @@ export function scaleNodeTree(nodeId: string, sx: number, sy: number, sz: number
   const scaleNode = (n: SceneNode) => {
     // A gear is defined by its tooth count and pitch radius, and its geoms are
     // regenerated from those; scaling the shapes it happens to be drawn with
-    // would put the teeth out of step with the mesh it has to run against.
-    if ((n as { teeth?: number }).teeth !== undefined) return;
+    // would put the teeth out of step with the mesh it has to run against —
+    // and a rack's or pulley's out of step with the gear data it was cut to.
+    if (n.teeth !== undefined || n.toothForm) return;
 
     scaleMeshGeoms(n, sx, sy, sz);
     let cuts = false;

@@ -285,3 +285,22 @@ describe('mechanism meshes move with their bodies', () => {
     expect(meshes.filter((g) => !g.dynamic).map((g) => g.name)).toEqual([]);
   });
 });
+
+describe('a bore that does not fit is refused, not shrunk', () => {
+  // A 16-tooth module 1.5 gear has a ⌀20.4 root circle; its 608 seat used to
+  // be cut at ⌀16.8 without a word, and no bearing goes in that.
+  it('a 608 seat in a small gear throws, naming the room there is', () => {
+    expect(() => buildInvoluteGearNode({ teeth: 16, moduleMm: 1.5, boreKind: 'bearing_608' }))
+      .toThrow(/608 bearing seat \(⌀22 mm\) does not fit this part: it has room for ⌀16\.8 mm at most/);
+  });
+  it('the same seat in a gear big enough for it is cut at 22 mm', () => {
+    const node = buildInvoluteGearNode({ teeth: 40, moduleMm: 1.5, boreKind: 'bearing_608' });
+    const v = node.geoms[0].renderVertices!;
+    let inner = Infinity;
+    for (let i = 0; i < v.length; i += 3) inner = Math.min(inner, Math.hypot(v[i], v[i + 1]));
+    expect(inner * 2000).toBeCloseTo(22, 1);
+  });
+  it('a hex bore is judged by its corners', () => {
+    expect(() => buildInvoluteGearNode({ teeth: 8, moduleMm: 1, boreKind: 'hex', boreDiameterMm: 5 })).toThrow(/hex bore does not fit/);
+  });
+});

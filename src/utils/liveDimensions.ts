@@ -10,9 +10,10 @@ export interface LiveDimension {
   /**
    * 'linear', 'diameter' and 'radius' are the part's own sizes, along its own axes;
    * 'angle' is how far it is turned in the view; 'location' is where its
-   * origin sits from its parent's.
+   * origin sits from its parent's; 'gear' is the gear data a gear, rack or
+   * pulley was cut to.
    */
-  kind: 'linear' | 'diameter' | 'radius' | 'angle' | 'location';
+  kind: 'linear' | 'diameter' | 'radius' | 'angle' | 'location' | 'gear';
   /** Linear: 'width' runs across the part, 'height' up it. Location: across the sheet or up it. */
   direction?: 'width' | 'height';
   /** Linear only: 'chain' between face edges, or 'overall'. */
@@ -30,7 +31,11 @@ export interface LiveDimension {
   /** Location only: the body it is measured from, or 'origin'. */
   from?: string;
   label: string;
-  /** Every kind but angle. */
+  /** Diameter only: a regular polygonal hole's sides (6 for a hex); valueMm is across its flats. */
+  sides?: number;
+  /** Gear only: the figures, a line each, as the drawing prints them. */
+  lines?: string[];
+  /** Every kind but angle and gear. */
   valueMm?: number;
   /** Angle only. */
   valueDeg?: number;
