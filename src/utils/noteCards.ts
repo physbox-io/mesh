@@ -416,6 +416,31 @@ A **solver stress test** dressed as a sculpture studio: one dense mesh standing 
 - Raise the bob mass and drop it into the tower directly to skip the dominoes
 - Turn the friction on the dominoes down and watch the cascade slide out instead of toppling`,
 
+  spaghetti_towers: `# 🍝 Spaghetti Towers
+
+Two towers of dry spaghetti and putty, each with a 50 g weight on top, 20 mm off centre. Nothing is fixed down or glued in the editor: every strand is a separate part, and when you press **play** each one is stuck into the putty balls it reaches.
+
+## Why one stands and one doesn't
+Putty doesn't hold a strand rigidly. Lean on a joint and it gives, like a pin. So:
+- **Left:** every face is a triangle, and a triangle of pins can't change shape. It stands.
+- **Right:** square faces with nothing across them. A square of pins folds into a parallelogram.
+
+## Try it
+- Select a putty ball and set **Made of** in its **Joint** card to **Hot glue**. Glue holds rigid, so even the square tower stands.
+- Drop the **Putty** tile (left sidebar) where strands meet to make your own joints. Make a ball bigger and it holds more, because more of each strand is buried in it.
+- Make the weight heavier and see where it gives.`,
+
+  spaghetti_bridge: `# 🍝 Spaghetti Bridge
+
+A 300 mm span between two tables, made of dry spaghetti and putty, carrying a 100 g weight. It is two Pratt trusses, braced to each other across the deck, the top and the ends, and it just rests on the tables.
+
+Every strand is a separate part. When you press **play**, each one is stuck into the putty balls it reaches, and putty gives like a pin when it's leaned on. The bridge holds because every panel is a triangle.
+
+## Try it
+- Make the weight heavier and see where it gives.
+- Delete a diagonal: that panel becomes a square, and squares fold.
+- Set every joint to **Hot glue** in its **Joint** card and compare.`,
+
   shatter: `# 💥 Shatter
 
 Five ways for a thing to stop being rigid, all at once. Press **play** and leave it — nothing is scripted, the ball just swings.

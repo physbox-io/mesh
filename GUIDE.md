@@ -71,6 +71,41 @@ Technical decisions, conventions, and architecture notes for the **PhysBox: Mesh
   building of the same shape, and unlike an explicit `mass` it survives a rescale. Oak timber is 700,
   concrete 2400, and a crown of leaves, being mostly the air between them, is single digits.
 
+### 4c. Breaking under load, and joint blobs
+
+Two general mechanisms, both built in the compiled model only (the scene graph keeps whole
+parts, and Reset puts everything back). The spaghetti presets are their demo, not their scope.
+
+- **`loadStrength`** on a body: the material's flexural and tensile strength, its modulus and
+  whether it is ductile (`utils/deformMaterials.ts` gives every material one; Dry pasta is just
+  another material). Only a free, long, thin body uses it: one cylinder, capsule or box at least
+  8 times as long as it is thick (`utils/memberStrength.ts`). `utils/breakModel.ts` compiles it
+  as two halves joined at mid-span: a breakable weld for a brittle material, a ball joint with
+  friction equal to the yield moment (held by a lock that gives on overload) for a ductile one.
+  The limits are the cross-section's: bending `σ·S`, pull `σ·A`, buckling `π²EI/L²`. A bar is
+  judged by which way it is bent (on edge it is far stronger than flat). The second half exists
+  only in the model, as geom `<name>~2`; the viewport draws it as part of its member.
+- **`joinMaterial`** on a sphere/ellipsoid body makes it a joint blob (`utils/joinMaterials.ts`).
+  At compile time every rod whose end is inside it, and anything pressed a tenth of the way
+  in, is attached. Glue-like materials weld it, rigid until it lets go. Putty-like materials
+  hold it on a pin (a `<connect>`), and the blob gets slide joints instead of a free one so it
+  cannot spin. A free-spinning blob acted as a wheel and walked a standing tower apart. Rods held
+  on a pin get rolling friction for the same reason. Limits scale with how much of the part is
+  buried, and a rod's pull-out only counts pulling, not pushing it further in.
+
+Every limit is written into the model as a `<numeric>` named like its equality (`member:<id>`,
+`join:<blob>><id>`, `pin:<blob>><id>`, see `utils/breakKeys.ts`), and the physics worker reads
+them from there. Nothing breaks in the first 0.25 s (`BREAK_ARM_S`): a load set down at t = 0
+spikes every joint under it. A weld's angular rows read twice the true torque (quaternion
+half-angle), so torque is `weldTorque()` = half their length, everywhere.
+
+MuJoCo softens a constraint in proportion to the mass of what it joins, so light parts
+carrying heavy loads sag more than real ones (a 12 g plank holding 5.4 kg sags 9 mm where oak
+sags 4); the break loads are unaffected. Scenes with break limits get
+`<compiler boundinertia="1e-8">`: a strand's inertia about its own axis is almost nothing, and
+that alone made its welds' rotation soft. `tests/breakHarness.ts` runs the worker's break check
+headless; `tests/loadBreakGeneric.test.ts` checks each case against a hand calculation.
+
 ### 5. 3D multi-axis rotation (Euler representation)
 * Rotation is set as an explicit `[X, Y, Z]` Euler array.
 * Any stale `node.quat` is deleted on update so the MuJoCo compiler resolves rotation from the Euler array alone.

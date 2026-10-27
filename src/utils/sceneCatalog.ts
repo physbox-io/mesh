@@ -54,6 +54,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   bouncy_balls: 'Mechanisms',
   mesh_collision: 'Mechanisms',
   shatter: 'Mechanisms',
+  spaghetti_towers: 'Mechanisms',
 
   cartpole: 'Machines & robots',
   xy_plotter: 'Machines & robots',
@@ -70,6 +71,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   golden_gate: 'Bridges',
   golden_gate_mesh: 'Bridges',
   rope_bridge: 'Bridges',
+  spaghetti_bridge: 'Bridges',
 
   monkey_head: 'Sculpture',
   oak_tree: 'Sculpture',

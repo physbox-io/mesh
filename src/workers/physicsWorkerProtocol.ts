@@ -3,6 +3,7 @@
 // import from here so a message can't be posted in one shape and read in
 // another.
 
+import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
@@ -206,8 +207,14 @@ export interface ConstraintBrokenEvent {
   nodeId: string;
   /** The welded-to body for a weld; the joint's own name for a crumple. */
   targetId: string;
-  /** 'crumple' is a joint that has folded and stayed folded, not a part coming off. */
-  kind: 'weld' | 'crumple';
+  /**
+   * 'crumple' is a joint that has folded and stayed folded, not a part coming
+   * off. 'member' is a part that broke (or, ductile, bent) under load at
+   * mid-span; 'joint' is a part letting go of, or turning in, a join blob.
+   */
+  kind: 'weld' | 'crumple' | 'member' | 'joint';
+  /** Which limit it went over, for member and joint breaks. */
+  cause?: OverloadCause;
   /** Simulated seconds when it let go, for the "broken at 1.34 s" readout. */
   time: number;
   /** What it was carrying when it went, in N and N*m. */

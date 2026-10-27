@@ -1630,6 +1630,8 @@ interface ImplicitGeom {
   name: string;
   type: GeomType;
   rgba: number[];
+  /** The body it is part of, when the compiler made it from one: a member's far half. */
+  nodeId?: string;
 }
 
 /** What a geom is drawn in when it names no colour of its own. */
@@ -1643,10 +1645,10 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
   // it as unexplained would draw the solid ellipsoid right over the mesh whose
   // hole is the entire point.
   const knownGeomNames = useMemo(() => {
-    const names = new Set<string>();
+    const names = new Map<string, string>();
     const walk = (nodes: SceneNode[]) => {
       for (const node of nodes || []) {
-        for (const g of node.geoms || []) if (g.name) names.add(g.name);
+        for (const g of node.geoms || []) if (g.name) names.set(g.name, node.id);
         walk(node.children);
       }
     };
@@ -1746,16 +1748,23 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
           ? Array.from(model.geom_rgba.slice(offset, offset + 4)) 
           : [0.6, 0.4, 0.8, 1];
 
+        // A member that breaks under load is compiled as two halves, and the
+        // far one, `<geom>~2`, is in the model only (utils/breakModel.ts). It
+        // belongs to the member: picking it picks the member, and hiding the
+        // member hides it.
+        const nodeId = name.endsWith('~2') ? knownGeomNames.get(name.slice(0, -2)) : undefined;
+        if (nodeId && hiddenNodeIds.includes(nodeId)) continue;
         list.push({
           providedGeomId: i,
           name,
           type: typeStr,
           rgba: color,
+          nodeId,
         });
       }
     }
     return list;
-  }, [model, mujoco, knownGeomNames]);
+  }, [model, mujoco, knownGeomNames, hiddenNodeIds]);
 
   // Derived once per input rather than on every render: StaticBoxInstances
   // rewrites every instance matrix whenever its list is a new array, and a list
@@ -1815,13 +1824,15 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
           <DynamicGeom
             key={g.name}
             providedGeomId={g.providedGeomId}
+            nodeId={g.nodeId}
             name={g.name}
             type={g.type}
             color={g.rgba}
             mujoco={mujoco}
             model={model}
             data={data}
-            isSelected={false}
+            node={nodeOf(g.nodeId)}
+            isSelected={picked(g.nodeId)}
             setSelectedNodeId={setSelectedNodeId}
           />
         ))}

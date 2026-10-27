@@ -534,3 +534,25 @@ export const ScadIcon = () => (
     />
   </svg>
 );
+
+/** A lump of putty with two sticks pushed into it: a joint. */
+export const PuttyIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <defs>
+      <radialGradient id="tile-putty-grad" cx="35%" cy="30%" r="70%">
+        <stop offset="0%" stopColor="#e0f2fe" />
+        <stop offset="55%" stopColor="#7dd3fc" />
+        <stop offset="100%" stopColor="#0284c7" />
+      </radialGradient>
+    </defs>
+    <line x1="2.5" y1="20" x2="10" y2="13" className="stroke-amber-400" strokeWidth="1.6" strokeLinecap="round" />
+    <line x1="21.5" y1="20" x2="14" y2="13" className="stroke-amber-400" strokeWidth="1.6" strokeLinecap="round" />
+    <line x1="12" y1="2.5" x2="12" y2="10" className="stroke-amber-400" strokeWidth="1.6" strokeLinecap="round" />
+    <path
+      d="M7.5 12.5 C7 9.5, 9.5 8, 12 8.5 C14.8 8, 17 9.8, 16.5 12.6 C16.8 15.2, 14.2 16.6, 12 16.2 C9.4 16.6, 7.2 15.2, 7.5 12.5 Z"
+      fill="url(#tile-putty-grad)"
+      className="stroke-sky-600 dark:stroke-sky-400"
+      strokeWidth="1.3"
+    />
+  </svg>
+);

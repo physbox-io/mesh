@@ -59,6 +59,8 @@ import { addPourBoxToScene, pourBoxStl } from '../utils/pourBoxActions';
 import { holePinMesh, type PourBoxOptions } from '../utils/siliconeMold';
 import { CAST_METALS, SILICONES, isSiliconeId, resolveCastMaterial } from '../utils/castMaterials';
 import { mcpMoldSubject } from '../utils/moldSubject';
+import { resolveLoadStrength } from '../utils/deformMaterials';
+import { JOIN_MATERIALS, joinMaterial } from '../utils/joinMaterials';
 import { DEFAULT_TAB_DRAFT } from '../utils/moldTabs';
 import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { loadManifold } from '../utils/sculptCut';
@@ -1294,6 +1296,27 @@ const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoi
  * anything above it has a joint, which decides whether its meshes are drawn
  * from the body's transform.
  */
+/**
+ * The break-under-load and join-blob fields of a body as an agent wrote them,
+ * resolved in place: `loadStrength` from its shorthands (see
+ * resolveLoadStrength), `joinMaterial` checked against the list. An error
+ * message, or null when all is well.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const resolveBreakFields = (fields: Record<string, any>, materialId: string | undefined): string | null => {
+  if ('loadStrength' in fields) {
+    const r = resolveLoadStrength(fields.loadStrength, fields.deformMaterial ?? materialId);
+    if ('error' in r) return r.error;
+    fields.loadStrength = r.value;
+  }
+  if ('joinMaterial' in fields && fields.joinMaterial !== undefined && fields.joinMaterial !== null) {
+    if (!joinMaterial(fields.joinMaterial)) {
+      return `joinMaterial '${fields.joinMaterial}' is not one of ${JOIN_MATERIALS.map((m) => m.id).join(', ')}.`;
+    }
+  } else if ('joinMaterial' in fields) fields.joinMaterial = undefined;
+  return null;
+};
+
 export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): SceneNode => {
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
@@ -2593,6 +2616,8 @@ export function useMCPBridge() {
 
           // Extract declarative feature arrays if passed in updates
           const updates = { ...rawUpdates };
+          const breakError = resolveBreakFields(updates, target.deformMaterial);
+          if (breakError) return { ok: false, error: breakError };
           const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;
           const rawRoundEdges = updates.roundEdges !== undefined ? updates.roundEdges : updates.roundings;
           const normRoundEdges = Array.isArray(rawRoundEdges)
@@ -3675,7 +3700,11 @@ export function useMCPBridge() {
           return {
             ok: true,
             // Weld keys look like 'weld:<nodeId>-><targetId>'; a crumple zone
-            // that has given looks like 'crumple:<jointName>'.
+            // that has given looks like 'crumple:<jointName>'. A part broken
+            // (or bent) under load is 'member:<nodeId>'; one that came out of
+            // a join blob 'join:<blobId>><nodeId>' (glue) or
+            // 'pin:<blobId>><nodeId>' (putty). `last.cause` says how: pulled,
+            // sheared, bent or buckled.
             broken: state.brokenConstraints,
             last: state.lastBreak ?? null,
             shattered: Object.entries(state.shatteredBodies).map(([id, shards]) => ({ id, pieces: shards.length })),
@@ -3819,7 +3848,10 @@ export function useMCPBridge() {
             throw new Error('Missing body: pass one body descriptor, the same shape as an element of physics_build_scene\'s bodies array');
           }
           const parent = resolveParent(store.sceneGraph.nodes, msg.parent);
-          const node = fillBodyDefaults(raw, parent ? parent.moves : null);
+          const rawFields = { ...raw } as Record<string, unknown>;
+          const breakError = resolveBreakFields(rawFields, undefined);
+          if (breakError) return { ok: false, error: breakError };
+          const node = fillBodyDefaults(rawFields as RawNode, parent ? parent.moves : null);
           // A clashing id would make every later call ambiguous about which body
           // it meant, so it is corrected here rather than refused: the reply says
           // what the body ended up called.

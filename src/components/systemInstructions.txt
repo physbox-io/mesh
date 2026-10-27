@@ -76,6 +76,8 @@ Every node in the "nodes" array represents a physical body and is defined as:
   weldBreakTorqueNm: number (newton-metres of twist the weld survives; either limit alone is enough)
   weldBreakHoldSteps: number (consecutive overloaded steps before it counts, default 3; guards against the single-step spike a hard contact produces)
   shatterImpulseNs: number (newton-seconds of impulse that breaks this body into pieces; omit and it never shatters. The pieces are cut from the body's own outline and weigh what it weighed. TRANSIENT - reset makes it whole.)
+  loadStrength: material id ('pasta', 'hardwood', 'glass', 'steel', ...) or true or { flexuralMPa, tensileMPa, modulusGPa, ductile? } (breaks this body under steady LOAD: a free, long, thin body - one cylinder, capsule or box at least 8x as long as it is thick - snaps (brittle) or bends for good (ductile) at the bending, pull and buckling loads its own cross-section carries. TRANSIENT - reset puts it back.)
+  joinMaterial: 'putty' | 'marshmallow' | 'hotGlue' | 'pva' | 'epoxy' (makes a sphere/ellipsoid body a JOINT: every rod whose end is inside it, and anything pressed into it, is stuck to it when the scene runs. Putty and marshmallow hold on a pin (rods turn; triangulate frames or they fold), glue holds rigid; all let go when pulled out. A bigger blob holds more.)
   shatterPieces: number (how many pieces, 2..24, default 8)
   shatterPattern: 'uniform' | 'radial' (radial crowds the small pieces around the point of impact; default)
   shatterSpread: number (extra outward speed per piece, m/s)

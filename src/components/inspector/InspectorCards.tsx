@@ -13,6 +13,7 @@ import { CombineCard } from './CombineCard';
 import { ConstraintsCard } from './ConstraintsCard';
 import { CsgCard } from './CsgCard';
 import { DeformationCard } from './DeformationCard';
+import { JoinCard } from './JoinCard';
 import { ExportStlCard } from './ExportStlCard';
 import { GearCard } from './GearCard';
 import { HardwarePartCard } from './HardwarePartCard';
@@ -80,6 +81,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
       {tab === 'main' && (
         <>
           <BodyBasicsCard node={node} />
+          <JoinCard node={node} />
           <HardwarePartCard node={node} />
           <PositionCard node={node} />
           <SubGeomSelector node={node} />

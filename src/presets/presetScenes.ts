@@ -16,6 +16,7 @@ import { latticeBracketPreset } from './latticeBracket';
 import { oakTreePreset } from './oakTree';
 import { soapDishPreset } from './soapDish';
 import { shatterPreset } from './shatter';
+import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
   bearingCartPreset, chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
@@ -3518,6 +3519,18 @@ export const PRESETS = {
     name: 'Shatter',
     emoji: '💥',
     scene: shatterPreset,
+  },
+  spaghetti_towers: {
+    name: 'Spaghetti Towers (Putty)',
+    emoji: '🍝',
+    scene: spaghettiTowersPreset,
+    camera: { position: [0.55, -0.8, 0.5], target: [0, 0, 0.18] } satisfies PresetCamera,
+  },
+  spaghetti_bridge: {
+    name: 'Spaghetti Bridge (Putty)',
+    emoji: '🍝',
+    scene: spaghettiBridgePreset,
+    camera: { position: [0.3, -0.45, 0.3], target: [0, 0, 0.11] } satisfies PresetCamera,
   },
   flower_stand: {
     name: '3ft Flower Stand (Joinery)',

@@ -9,7 +9,7 @@ import { PaletteTile, type TileColor, type TileSpin } from './PaletteTile';
 import { ExtrusionTiles } from './ExtrusionTiles';
 import {
   CubeIcon, SphereIcon, CylinderIcon, PoleIcon, GearIcon, WedgeIcon, PyramidIcon, ConeIcon, TorusIcon,
-  TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon,
+  TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon, PuttyIcon,
 } from './shapeIcons';
 import { InsertBossIcon, NutTrapIcon, NutSlotIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon, ORingGrooveIcon, RimSealIcon,
   LinearRailIcon, RodBushingIcon, DrawerRunnerIcon, RailSeatIcon, RodSocketIcon, BushingHousingIcon,
@@ -69,6 +69,7 @@ const PART_TILES: PartTile[] = [
   { type: 'ring', label: 'Ring', title: 'Ring (an ellipsoid with a second ellipsoid subtracted; a boolean body you can reshape)', color: 'rose', spin: 'group-hover:-rotate-6', Icon: RingIcon },
   { type: 'pulley_wheel', label: 'Pulley', title: 'Pulley Stand system disk', color: 'cyan', spin: 'group-hover:rotate-45', slow: true, Icon: PulleyIcon },
   { type: 'pulley_rope', label: 'Rope', title: 'Coupler Rope', color: 'emerald', spin: 'group-hover:-rotate-6', Icon: RopeIcon },
+  { type: 'blob', label: 'Putty', title: 'Joint (putty, glue or marshmallow): anything that reaches into it is stuck to it, as strongly as its material and size allow', color: 'sky', spin: 'group-hover:rotate-6', Icon: PuttyIcon },
 ];
 
 /** The ways to make a shape of your own, rather than drop in a fixed one. */

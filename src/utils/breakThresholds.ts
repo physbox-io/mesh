@@ -25,6 +25,20 @@ export interface WeldBreakConfig {
   weldBreakTorqueNm?: number;
   /** Consecutive overloaded steps required. Defaults to DEFAULT_HOLD_STEPS. */
   weldBreakHoldSteps?: number;
+  /**
+   * Newtons of push ALONG a member it survives: the load at which a long, thin
+   * part buckles. Separate from the force limit because a column buckles at a
+   * small fraction of what pulling it apart takes, and only the caller knows
+   * which way along the member the force points. Undefined: never buckles.
+   */
+  weldBreakCompressionN?: number;
+  /**
+   * Set for a rod held in a joint: the force limit then means pulling the rod
+   * OUT, along its axis, and this is the sideways push it survives. Pushing a
+   * rod further in pulls nothing out; a post pressing into the putty under it
+   * is not coming loose. Needs the push along the rod (see axialPush).
+   */
+  weldBreakLateralN?: number;
 }
 
 /**
@@ -37,10 +51,23 @@ export interface WeldBreakConfig {
  */
 export const DEFAULT_HOLD_STEPS = 3;
 
+/**
+ * Simulated seconds before any constraint may break.
+ *
+ * A scene starts with every body where it was drawn, not where its load puts
+ * it, and the first few milliseconds are the solver pulling the two together.
+ * Measured on a spaghetti tower with a load welded to its top: the settling
+ * pulse snapped every joint 14 ms in, at a load the same tower held without
+ * complaint when it was set down gently. A quarter of a second is long past
+ * that and short enough that nobody waits for it.
+ */
+export const BREAK_ARM_S = 0.25;
+
 /** True when this body's weld is configured to be breakable at all. */
 export function isBreakable(cfg: WeldBreakConfig | undefined): boolean {
   if (!cfg) return false;
-  return isFiniteThreshold(cfg.weldBreakForceN) || isFiniteThreshold(cfg.weldBreakTorqueNm);
+  return isFiniteThreshold(cfg.weldBreakForceN) || isFiniteThreshold(cfg.weldBreakTorqueNm)
+    || isFiniteThreshold(cfg.weldBreakCompressionN);
 }
 
 /**
@@ -64,11 +91,112 @@ export function holdSteps(cfg: WeldBreakConfig | undefined): number {
  * for and is why this tests `>=` on a configured zero rather than treating it
  * as unset.
  */
-export function isOverloaded(forceN: number, torqueNm: number, cfg: WeldBreakConfig | undefined): boolean {
-  if (!cfg) return false;
-  if (isFiniteThreshold(cfg.weldBreakForceN) && forceN >= cfg.weldBreakForceN!) return true;
-  if (isFiniteThreshold(cfg.weldBreakTorqueNm) && torqueNm >= cfg.weldBreakTorqueNm!) return true;
-  return false;
+export function isOverloaded(forceN: number, torqueNm: number, cfg: WeldBreakConfig | undefined, compressionN = 0): boolean {
+  return overloadCause(forceN, torqueNm, cfg, compressionN) !== null;
+}
+
+/**
+ * The torque a weld carries, from its three angular constraint rows.
+ *
+ * Half their length, not all of it. MuJoCo measures a weld's angular error as
+ * the vector part of the relative quaternion, which is sin(theta/2) times the
+ * axis — half the angle for small turns — so the rows' force is twice the
+ * torque. Measured on a pasta cantilever with a 7 g tip, 100 mm out: the root
+ * rows read 14.1 where m g L is 6.9 (+ the strand's own 0.2), and mid-span 7.0
+ * where it is 3.5. Every torque limit in this file is in real N*m.
+ */
+export function weldTorque(tx: number, ty: number, tz: number): number {
+  return Math.sqrt(tx * tx + ty * ty + tz * tz) / 2;
+}
+
+/**
+ * How hard a bar is being bent, in weak-way newton-metres.
+ *
+ * `torque` is the weld's moment in body1's frame; `axis` and `wide` are the
+ * bar's length and its wide side, also in body1's frame. Bent about its wide
+ * side (the floppy way, a plank laid flat) it fails at `weakNm`; about its
+ * thin side (a plank on edge) at `strongNm`; twisted, taken at `weakNm`. The
+ * three shares combine as an ellipse, and the result is scaled back to weak
+ * newton-metres so it can be checked against the ordinary torque limit.
+ */
+export function barBending(
+  torque: readonly [number, number, number],
+  axis: readonly [number, number, number],
+  wide: readonly [number, number, number],
+  weakNm: number,
+  strongNm: number,
+): number {
+  const dot = (p: readonly number[], q: readonly number[]) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+  const tw = dot(torque, wide);
+  const ta = dot(torque, axis);
+  const tn2 = Math.max(0, dot(torque, torque) - tw * tw - ta * ta);
+  const share = (tw / weakNm) ** 2 + tn2 / (strongNm * strongNm) + (ta / weakNm) ** 2;
+  return weakNm * Math.sqrt(share);
+}
+
+/** A world-frame vector in body `body1`'s frame, from MuJoCo's row-major `xmat`. */
+export function toBodyFrame(v: readonly [number, number, number], xmat: ArrayLike<number>, body1: number): [number, number, number] {
+  const b = body1 * 9;
+  return [
+    xmat[b] * v[0] + xmat[b + 3] * v[1] + xmat[b + 6] * v[2],
+    xmat[b + 1] * v[0] + xmat[b + 4] * v[1] + xmat[b + 7] * v[2],
+    xmat[b + 2] * v[0] + xmat[b + 5] * v[1] + xmat[b + 8] * v[2],
+  ];
+}
+
+/**
+ * Which way a weld's force points along a member when its halves are pressed
+ * together. MuJoCo's convention, measured rather than derived: see
+ * tests/memberBreak.test.ts, which loads a column end-on.
+ */
+export const COMPRESSION_SIGN = 1;
+
+/**
+ * The push along a member, from its mid-span weld: positive when the halves
+ * are pressed together. A weld's force rows are in the world frame and the
+ * member's axis is in body1's, so the axis is turned by body1's orientation
+ * (`xmat`, row-major 3x3 per body, as MuJoCo keeps it).
+ */
+export function axialPush(
+  force: readonly [number, number, number],
+  xmat: ArrayLike<number>,
+  body1: number,
+  axis: readonly [number, number, number],
+): number {
+  const b = body1 * 9;
+  const [ax, ay, az] = axis;
+  const wx = xmat[b] * ax + xmat[b + 1] * ay + xmat[b + 2] * az;
+  const wy = xmat[b + 3] * ax + xmat[b + 4] * ay + xmat[b + 5] * az;
+  const wz = xmat[b + 6] * ax + xmat[b + 7] * ay + xmat[b + 8] * az;
+  return COMPRESSION_SIGN * (force[0] * wx + force[1] * wy + force[2] * wz);
+}
+
+/** What gave way: pulled out or apart, pushed sideways, bent or twisted past it, or buckled. */
+export type OverloadCause = 'pulled' | 'sheared' | 'bent' | 'buckled';
+
+/**
+ * Which limit this load is over, or null. `compressionN` is the push along a
+ * member (positive = compressing it); it only matters to a weld that has a
+ * buckling or a lateral limit, and is 0 for everything else.
+ */
+export function overloadCause(
+  forceN: number,
+  torqueNm: number,
+  cfg: WeldBreakConfig | undefined,
+  compressionN = 0,
+): OverloadCause | null {
+  if (!cfg) return null;
+  if (isFiniteThreshold(cfg.weldBreakCompressionN) && compressionN >= cfg.weldBreakCompressionN!) return 'buckled';
+  if (isFiniteThreshold(cfg.weldBreakTorqueNm) && torqueNm >= cfg.weldBreakTorqueNm!) return 'bent';
+  if (isFiniteThreshold(cfg.weldBreakLateralN)) {
+    // A rod in a joint: out along its axis, or sideways.
+    if (isFiniteThreshold(cfg.weldBreakForceN) && -compressionN >= cfg.weldBreakForceN!) return 'pulled';
+    const lateral = Math.sqrt(Math.max(0, forceN * forceN - compressionN * compressionN));
+    if (lateral >= cfg.weldBreakLateralN!) return 'sheared';
+    return null;
+  }
+  if (isFiniteThreshold(cfg.weldBreakForceN) && forceN >= cfg.weldBreakForceN!) return 'pulled';
+  return null;
 }
 
 /**
@@ -83,10 +211,12 @@ export function weldOverload(
   torqueNm: number,
   cfg: WeldBreakConfig | undefined,
   consecutive: number,
-): { broken: boolean; consecutive: number } {
-  if (!isOverloaded(forceN, torqueNm, cfg)) return { broken: false, consecutive: 0 };
+  compressionN = 0,
+): { broken: boolean; consecutive: number; cause: OverloadCause | null } {
+  const cause = overloadCause(forceN, torqueNm, cfg, compressionN);
+  if (!cause) return { broken: false, consecutive: 0, cause: null };
   const next = consecutive + 1;
-  return { broken: next >= holdSteps(cfg), consecutive: next };
+  return { broken: next >= holdSteps(cfg), consecutive: next, cause };
 }
 
 /**
@@ -133,20 +263,6 @@ export function canCrumple(cfg: CrumpleConfig | undefined): boolean {
  */
 export function crumpleAsWeld(cfg: CrumpleConfig | undefined): WeldBreakConfig {
   return { weldBreakTorqueNm: cfg?.crumpleTorqueNm, weldBreakHoldSteps: DEFAULT_HOLD_STEPS };
-}
-
-/**
- * The torque a weld carries, from its three angular constraint rows.
- *
- * Half their length, not all of it. MuJoCo measures a weld's angular error as
- * the vector part of the relative quaternion, which is sin(theta/2) times the
- * axis — half the angle for small turns — so the rows' force is twice the
- * torque. Measured on a pasta cantilever with a 7 g tip, 100 mm out: the root
- * rows read 14.1 where m g L is 6.9 (+ the strand's own 0.2), and mid-span 7.0
- * where it is 3.5. Every torque limit in this file is in real N*m.
- */
-export function weldTorque(tx: number, ty: number, tz: number): number {
-  return Math.sqrt(tx * tx + ty * ty + tz * tz) / 2;
 }
 
 function isFiniteThreshold(v: number | undefined): boolean {

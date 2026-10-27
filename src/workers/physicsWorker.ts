@@ -52,7 +52,8 @@ import type {
 import { HistoryRing } from './historyRing';
 import { rebaseShard } from '../utils/runtimeShatter';
 import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptStateMap } from '../utils/scriptState';
-import { canCrumple, crumpleAsWeld, weldTorque, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
+import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
+import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -915,6 +916,18 @@ interface BreakableWeld {
    * into its new shape so the part stays folded instead of flapping.
    */
   crumple?: { jointName: string; dampingAfter: number };
+  /**
+   * A member's axis, or a rod's way into itself at a joint, in body1's frame:
+   * so the push along it can be told from the rest of the force, for buckling
+   * and for pulling out. See BREAK_FIELDS in utils/breakKeys.ts.
+   */
+  axis?: [number, number, number];
+  /** A bar's wide side (body1's frame) and strong-way bending limit: see barBending. */
+  bar?: { wide: [number, number, number]; strongNm: number };
+  /** Another breakable that goes when this one does: a joint's pin, when the member snapped at the joint. */
+  also?: string;
+  /** What the main thread is told it was: see ConstraintBrokenEvent.kind. */
+  kind?: 'member' | 'joint';
 }
 
 let breakableWelds: BreakableWeld[] = [];
@@ -1002,6 +1015,43 @@ const rebuildBreakableWelds = () => {
     }
   };
   collect(sceneGraph.nodes);
+
+  // Members and joint blobs: the compiler wrote each one's limits into the
+  // model as a <numeric> named after its equality (utils/breakModel.ts), so
+  // nothing here works them out again.
+  const nnum = mdl.nnumeric ?? 0;
+  if (nnum > 0) {
+    const adrs = mdl.numeric_adr;
+    const vals = mdl.numeric_data;
+    const opt = (v: number) => (v >= 0 ? v : undefined);
+    for (let i = 0; i < nnum; i++) {
+      const name = mj.mj_id2name(mdl, mj.mjtObj.mjOBJ_NUMERIC.value, i);
+      const eqIndex = name ? eqIdByName[name] : undefined;
+      const parsed = name ? parseBreakKey(name) : null;
+      if (eqIndex === undefined || !parsed) continue;
+      const d = (k: number) => vals[adrs[i] + k];
+      breakableWelds.push({
+        eqIndex,
+        key: name,
+        nodeId: parsed.nodeId,
+        targetId: parsed.targetId,
+        cfg: {
+          weldBreakForceN: opt(d(BREAK_FIELDS.FORCE)),
+          weldBreakTorqueNm: opt(d(BREAK_FIELDS.TORQUE)),
+          weldBreakCompressionN: opt(d(BREAK_FIELDS.COMPRESSION)),
+          weldBreakLateralN: opt(d(BREAK_FIELDS.LATERAL)),
+          weldBreakHoldSteps: d(BREAK_FIELDS.HOLD) || undefined,
+        },
+        consecutive: 0,
+        axis: d(BREAK_FIELDS.AX) || d(BREAK_FIELDS.AY) || d(BREAK_FIELDS.AZ) ? [d(BREAK_FIELDS.AX), d(BREAK_FIELDS.AY), d(BREAK_FIELDS.AZ)] : undefined,
+        bar: d(BREAK_FIELDS.STRONG) > 0
+          ? { wide: [d(BREAK_FIELDS.WX), d(BREAK_FIELDS.WY), d(BREAK_FIELDS.WZ)], strongNm: d(BREAK_FIELDS.STRONG) }
+          : undefined,
+        also: d(BREAK_FIELDS.ALSO) ? `pin:${parsed.targetId}>${parsed.nodeId}` : undefined,
+        kind: parsed.kind === 'member' ? 'member' : 'joint',
+      });
+    }
+  }
 };
 
 /**
@@ -1041,6 +1091,12 @@ const checkConstraintBreaks = () => {
   const dat = data;
   const mj = mujoco;
   if (!dat || !mj) return;
+  // Nothing breaks while the scene is still settling onto its supports: see
+  // BREAK_ARM_S.
+  if (dat.time < BREAK_ARM_S) {
+    for (const w of breakableWelds) w.consecutive = 0;
+    return;
+  }
 
   const equalityType = mj.mjtConstraint.mjCNSTR_EQUALITY.value;
   const nefc = dat.nefc;
@@ -1066,18 +1122,8 @@ const checkConstraintBreaks = () => {
     if (rows && rows.length < 6) rows.push(efcForce[i]);
   }
 
-  for (const w of breakableWelds) {
-    if (brokenWeldKeys.has(w.key)) continue;
-    const rows = rowsOf.get(w.eqIndex);
-    if (!rows || rows.length === 0) continue;
-    const [fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0] = rows;
-
-    const forceN = Math.sqrt(fx * fx + fy * fy + fz * fz);
-    const torqueNm = weldTorque(tx, ty, tz);
-    const verdict = weldOverload(forceN, torqueNm, w.cfg, w.consecutive);
-    w.consecutive = verdict.consecutive;
-    if (!verdict.broken) continue;
-
+  let xmat: ArrayLike<number> | null = null;
+  const release = (w: BreakableWeld, forceN: number, torqueNm: number, cause: ReturnType<typeof weldOverload>['cause']) => {
     dat.eq_active[w.eqIndex] = 0;
     releaseCrumple(w);
     brokenWeldKeys.add(w.key);
@@ -1086,13 +1132,44 @@ const checkConstraintBreaks = () => {
       key: w.key,
       nodeId: w.nodeId,
       targetId: w.targetId,
-      kind: w.crumple ? 'crumple' : 'weld',
+      kind: w.kind ?? (w.crumple ? 'crumple' : 'weld'),
+      ...(cause ? { cause } : {}),
       time: dat.time,
       forceN,
       torqueNm,
     });
+  };
+  for (const w of breakableWelds) {
+    if (brokenWeldKeys.has(w.key)) continue;
+    const rows = rowsOf.get(w.eqIndex);
+    if (!rows || rows.length === 0) continue;
+    const [fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0] = rows;
+
+    const forceN = Math.sqrt(fx * fx + fy * fy + fz * fz);
+    let torqueNm = weldTorque(tx, ty, tz);
+    // The push along a member or a rod in a joint. See axialPush.
+    let compressionN = 0;
+    if (w.axis) {
+      const frames = (xmat ??= dat.xmat as ArrayLike<number>);
+      compressionN = axialPush([fx, fy, fz], frames, model!.eq_obj1id[w.eqIndex], w.axis);
+      // A bar is judged by which way it is bent.
+      if (w.bar && w.cfg.weldBreakTorqueNm !== undefined) {
+        const t = toBodyFrame([tx / 2, ty / 2, tz / 2], frames, model!.eq_obj1id[w.eqIndex]);
+        torqueNm = barBending(t, w.axis, w.bar.wide, w.cfg.weldBreakTorqueNm, w.bar.strongNm);
+      }
+    }
+    const verdict = weldOverload(forceN, torqueNm, w.cfg, w.consecutive, compressionN);
+    w.consecutive = verdict.consecutive;
+    if (!verdict.broken) continue;
+
+    release(w, forceN, torqueNm, verdict.cause);
+    if (w.also) {
+      const other = breakableWelds.find((x) => x.key === w.also);
+      if (other && !brokenWeldKeys.has(other.key)) release(other, forceN, torqueNm, verdict.cause);
+    }
   }
 };
+
 
 // ---- Impacts --------------------------------------------------------------
 //

@@ -149,8 +149,14 @@ describe('thin rod', () => {
     // its rafters, shallow as the roof is, so nothing needs a post.
     expect(pasta.skeleton.members.length).toBe(21);
     expect(pasta.skeleton.members.some((m) => m.kind === 'post')).toBe(false);
-    // Pipes only: no printed hub round a strand of spaghetti.
-    expect(pasta.added).toBe(21);
+    // No printed hub round a strand of spaghetti: putty at every joint instead,
+    // and every strand free to stand or fall on it.
+    const strands = pasta.nodes.filter((n) => n.id.startsWith('frame_') && !n.joinMaterial);
+    const putty = pasta.nodes.filter((n) => n.joinMaterial === 'putty');
+    expect(strands.length).toBe(21);
+    expect(putty.length).toBeGreaterThanOrEqual(8);
+    expect(pasta.added).toBe(strands.length + putty.length);
+    expect(strands.every((n) => n.joints[0]?.type === 'free' && n.loadStrength)).toBe(true);
     // A rod is drawn solid and still checks out hub to hub.
     const bd = breakdownPipeFrame({ nodes: pasta.nodes.filter((n) => n.id.startsWith('frame_')) } as unknown as SceneGraph, { pipeStandardId: 'spaghetti' });
     expect(simulatePipeFrame(bd).maxGapMm).toBeLessThan(0.05);

@@ -33,7 +33,8 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { clusterTrianglesToPolyFaces } from './sheetUnfoldExporter';
-import { PIPE_STANDARDS, makeStrutNode, pipeColour, pipeFittings, type PipeStandardId, type PipeStandardSpec } from './tubeAndWireExporter';
+import { GLUED_BELOW_OD_MM, PIPE_STANDARDS, makeStrutNode, pipeColour, pipeFittings, type PipeStandardId, type PipeStandardSpec } from './tubeAndWireExporter';
+import { gluedFrame } from './gluedFrame';
 
 type V3 = [number, number, number];
 
@@ -814,6 +815,12 @@ export function skeletonToNodes(sk: Skeleton, pipeStandardId: PipeStandardId, id
     return makeStrutNode(`${idPrefix}_pipe_${i + 1}`, `${KIND_NAMES[m.kind]} ${count[m.kind]}`,
       add(sk.nodes[m.a], shift), add(sk.nodes[m.b], shift), spec.odMm / 2, rgba);
   });
+  // Too thin for a fitting: glued or stuck at its joints, and built to stand
+  // or fall on them. See utils/gluedFrame.ts.
+  if (spec.odMm < GLUED_BELOW_OD_MM) {
+    const used = new Set(sk.members.flatMap((m) => [m.a, m.b]));
+    return gluedFrame(struts, spec, [...used].map((i) => add(sk.nodes[i], shift)), idPrefix);
+  }
   return [...struts, ...pipeFittings(struts, { pipeStandardId }, idPrefix)];
 }
 

@@ -6,6 +6,8 @@ import { isDentable, needsConversionForDenting } from '../../utils/dentMesh';
 import type { SceneGeom, SceneNode } from '../../types/scene';
 import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFields, estimateBodyMass, materialUpdates, shatterFields } from '../../utils/deformMaterials';
 import { SettledNumberInput } from '../SettledInputs';
+import { LoadBreakSection, LoadOnlyCard } from './LoadBreakSection';
+import { memberShape } from '../../utils/memberStrength';
 
 /*
  * Deformation — what this body does when it is hit hard: break
@@ -38,13 +40,15 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
   const candidates = (selectedNode.geoms || []).filter(
     (g) => isDentable(g) || needsConversionForDenting(g),
   );
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return memberShape(selectedNode) ? <LoadOnlyCard node={selectedNode} /> : null;
   const geom = candidates.find((g) => (g.dentYieldNs ?? 0) > 0) ?? candidates[0];
   const gi = (selectedNode.geoms || []).indexOf(geom);
   const willConvert = needsConversionForDenting(geom);
   const nodeId = selectedNode.id;
 
   const shatterOn = typeof selectedNode.shatterImpulseNs === 'number' && selectedNode.shatterImpulseNs > 0;
+  const loadOn = !!selectedNode.loadStrength;
+  const canBreakUnderLoad = !!memberShape(selectedNode) && (selectedNode.joints || []).some((j) => j.type === 'free');
   const dentOn = typeof geom.dentYieldNs === 'number' && geom.dentYieldNs > 0;
   const material = deformMaterial(selectedNode.deformMaterial);
   const movable = (selectedNode.joints || []).length > 0;
@@ -80,7 +84,7 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
   const pickMaterial = (id: string) => {
     const m = deformMaterial(id);
     if (!m) { updateNode(nodeId, { deformMaterial: id === 'custom' ? 'custom' : undefined }); return; }
-    const r = materialUpdates(selectedNode, m, { shatter: shatterOn, dent: dentOn });
+    const r = materialUpdates(selectedNode, m, { shatter: shatterOn, dent: dentOn, load: loadOn }, canBreakUnderLoad);
     for (const [i, u] of Object.entries(r.geoms)) updateNodeGeom(nodeId, u, Number(i));
     if (r.dent) makeDentable(nodeId, gi, dentFields(m.dent!));
     else {
@@ -88,6 +92,12 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
       if (r.shatter && willConvert) makeDentable(nodeId, gi, {});
     }
     updateNode(nodeId, r.node);
+  };
+
+  // The material's strength, or hardwood's when the material is Custom.
+  const setLoad = (on: boolean) => {
+    if (!on) { updateNode(nodeId, { loadStrength: undefined }); return; }
+    updateNode(nodeId, { loadStrength: { ...(material ?? deformMaterial('hardwood')!).strength } });
   };
 
   const breakSpeed = shatterOn && massKg > 0 ? selectedNode.shatterImpulseNs! / massKg : null;
@@ -125,10 +135,14 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
 
       {willConvert && !shatterOn && !dentOn && (
         <p className="text-[10px] text-slate-400 leading-snug">
-          A {geom.type} has no vertices to break or push in. Turning either on
-          below rebuilds it as the mesh it already looks like.
+          A {geom.type} has no vertices to break or push in. Turning on Shatters
+          or Dents rebuilds it as the mesh it already looks like
+          {canBreakUnderLoad ? ', and a mesh no longer breaks under load.' : '.'}
         </p>
       )}
+
+      {/* ---- Under load ---- */}
+      <LoadBreakSection node={selectedNode} onToggle={setLoad} />
 
       {/* ---- Shattering ---- */}
       <label

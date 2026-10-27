@@ -23,12 +23,12 @@
 // body has no momentum of its own; the blow is the striker's. So dent numbers
 // stay in N*s and describe the surface, not the thing that hits it.
 
-import type { SceneGeom, SceneNode } from '../types/scene';
+import type { LoadStrength, SceneGeom, SceneNode } from '../types/scene';
 import { meshVolumeAndCentroid } from './csg';
 
 export type DeformMaterialId =
   | 'glass' | 'ceramic' | 'stone' | 'plastic'
-  | 'softwood' | 'hardwood' | 'softMetal' | 'steel';
+  | 'softwood' | 'hardwood' | 'softMetal' | 'steel' | 'pasta';
 
 export interface ShatterProfile {
   /** Change of speed that breaks it, m/s. Times the body's mass gives N*s. */
@@ -63,8 +63,14 @@ export interface DeformMaterial {
   /** Null: it does not do this. Glass does not dent; steel does not shatter. */
   shatter: ShatterProfile | null;
   dent: DentProfile | null;
-  /** Which of the two picking this material turns on when neither is on yet. */
-  natural: { shatter: boolean; dent: boolean };
+  /**
+   * How it fails under steady load, for a long, thin part: see
+   * SceneNode.loadStrength. Every material has one, because everything breaks
+   * or bends if you lean on it hard enough.
+   */
+  strength: LoadStrength;
+  /** Which behaviours picking this material turns on when none is on yet. */
+  natural: { shatter: boolean; dent: boolean; load?: boolean };
   /** One line, for the dropdown's tooltip. */
   note: string;
 }
@@ -80,6 +86,7 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'glass', label: 'Glass', density: 2500,
     shatter: { breakSpeedMs: 3, pieces: 14, pattern: 'radial', depth: 1, spread: 0.4, thicknessRef: 0.006 },
     dent: null,
+    strength: { flexuralMPa: 50, tensileMPa: 40, modulusGPa: 70 },
     natural: { shatter: true, dent: false },
     note: 'A 6 mm wall breaks from a half-metre drop; thinner breaks sooner. Never dents.',
   },
@@ -87,6 +94,7 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'ceramic', label: 'Ceramic', density: 2400,
     shatter: { breakSpeedMs: 3.5, pieces: 8, pattern: 'radial', depth: 1, spread: 0.2, thicknessRef: 0.006 },
     dent: null,
+    strength: { flexuralMPa: 80, tensileMPa: 40, modulusGPa: 100 },
     natural: { shatter: true, dent: false },
     note: 'A little tougher than glass, and breaks into fewer, larger pieces.',
   },
@@ -94,6 +102,7 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'stone', label: 'Stone / concrete', density: 2400,
     shatter: { breakSpeedMs: 8, pieces: 5, pattern: 'uniform', depth: 0, spread: 0, thicknessRef: 0.03 },
     dent: null,
+    strength: { flexuralMPa: 5, tensileMPa: 3, modulusGPa: 30 },
     natural: { shatter: true, dent: false },
     note: 'Takes a real blow, then breaks into a few heavy chunks.',
   },
@@ -101,6 +110,7 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'plastic', label: 'Plastic', density: 1100,
     shatter: { breakSpeedMs: 15, pieces: 4, pattern: 'radial', depth: 0, spread: 0 },
     dent: { yieldNs: 2, depthPerNs: 0.004, maxDepth: 0.006, pierceNs: 20 },
+    strength: { flexuralMPa: 70, tensileMPa: 45, modulusGPa: 3, ductile: true },
     natural: { shatter: false, dent: true },
     note: 'Dents and scuffs. Cracks only when thrown very hard.',
   },
@@ -108,6 +118,7 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'softwood', label: 'Softwood', density: 450,
     shatter: { breakSpeedMs: 9, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
     dent: { yieldNs: 1, depthPerNs: 0.004, maxDepth: 0.008, pierceNs: 40 },
+    strength: { flexuralMPa: 65, tensileMPa: 40, modulusGPa: 9 },
     natural: { shatter: false, dent: true },
     note: 'Pine and the like: marks easily, splits into a few pieces.',
   },
@@ -115,6 +126,7 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'hardwood', label: 'Hardwood', density: 750,
     shatter: { breakSpeedMs: 12, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
     dent: { yieldNs: 3, depthPerNs: 0.0025, maxDepth: 0.005, pierceNs: 60 },
+    strength: { flexuralMPa: 100, tensileMPa: 60, modulusGPa: 12 },
     natural: { shatter: false, dent: true },
     note: 'Oak and the like: three times the blow to mark, and shallower when it does.',
   },
@@ -122,6 +134,7 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'softMetal', label: 'Soft metal', density: 2700,
     shatter: null,
     dent: { yieldNs: 1.5, depthPerNs: 0.008, maxDepth: 0.015, pierceNs: 25 },
+    strength: { flexuralMPa: 150, tensileMPa: 150, modulusGPa: 69, ductile: true },
     natural: { shatter: false, dent: true },
     note: 'Aluminium, copper: dents deep and easily, and can be holed.',
   },
@@ -129,8 +142,20 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     id: 'steel', label: 'Steel', density: 7850,
     shatter: null,
     dent: { yieldNs: 6, depthPerNs: 0.002, maxDepth: 0.006, pierceNs: 80 },
+    strength: { flexuralMPa: 250, tensileMPa: 250, modulusGPa: 200, ductile: true },
     natural: { shatter: false, dent: true },
     note: 'Unmarked by anything light. A dropped weight leaves a shallow crater.',
+  },
+  {
+    // Dry spaghetti: the classroom tower-and-bridge material. Strength and
+    // stiffness are for a 1.8 mm strand, which a 100 mm length buckles under
+    // about 2 N and a 6 g weight at the middle of a 200 mm span snaps.
+    id: 'pasta', label: 'Dry pasta', density: 1450,
+    shatter: { breakSpeedMs: 5, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
+    dent: null,
+    strength: { flexuralMPa: 20, tensileMPa: 15, modulusGPa: 4 },
+    natural: { shatter: false, dent: false, load: true },
+    note: 'Dry spaghetti: snaps when bent and buckles when pushed end-on, long before it pulls apart.',
   },
 ];
 
@@ -233,17 +258,26 @@ export const CUSTOM_DENT: DentProfile = { yieldNs: 4, depthPerNs: 0.012, maxDept
 export function materialUpdates(
   node: SceneNode,
   material: DeformMaterial,
-  now: { shatter: boolean; dent: boolean },
+  now: { shatter: boolean; dent: boolean; load?: boolean },
+  /**
+   * The body is a free, long, thin part (utils/memberStrength.ts). Its
+   * natural way to fail is under load, whatever it is made of, so that is what
+   * picking a material turns on; and denting or shattering would rebuild it
+   * as a mesh, which is no longer a rod and cannot break under load at all.
+   */
+  member = false,
 ): {
   node: Partial<SceneNode>;
   /** Per geom index. Only indices that change are present. */
   geoms: Record<number, Partial<SceneGeom>>;
   shatter: boolean;
   dent: boolean;
+  load: boolean;
 } {
-  const neither = !now.shatter && !now.dent;
-  const shatter = !!material.shatter && (neither ? material.natural.shatter : now.shatter);
-  const dent = !!material.dent && (neither ? material.natural.dent : now.dent);
+  const neither = !now.shatter && !now.dent && !now.load;
+  const shatter = !!material.shatter && (neither ? !member && material.natural.shatter : now.shatter);
+  const dent = !!material.dent && (neither ? !member && material.natural.dent : now.dent);
+  const load = neither ? member || !!material.natural.load : !!now.load;
 
   const geoms: Record<number, Partial<SceneGeom>> = {};
   (node.geoms || []).forEach((g, i) => {
@@ -257,6 +291,45 @@ export function materialUpdates(
   const nodeUpdates: Partial<SceneNode> = { deformMaterial: material.id };
   if (shatter) Object.assign(nodeUpdates, shatterFields(material.shatter!, estimateBodyMass(weighed)));
   else nodeUpdates.shatterImpulseNs = undefined;
+  nodeUpdates.loadStrength = load ? { ...material.strength } : undefined;
 
-  return { node: nodeUpdates, geoms, shatter, dent };
+  return { node: nodeUpdates, geoms, shatter, dent, load };
+}
+
+/**
+ * `loadStrength` as an agent may write it: the strength itself, a material id
+ * ('pasta', 'steel'), `true` for the body's own material (hardwood when it has
+ * none), or `false`/`null` to turn it off. `{ error }` when it is none of
+ * those; `undefined` result means "off".
+ */
+export function resolveLoadStrength(
+  v: unknown,
+  materialId: string | undefined,
+): { value: LoadStrength | undefined } | { error: string } {
+  if (v === false || v === null) return { value: undefined };
+  const ids = DEFORM_MATERIALS.map((m) => m.id).join(', ');
+  if (v === true) return { value: { ...(deformMaterial(materialId) ?? deformMaterial('hardwood')!).strength } };
+  if (typeof v === 'string') {
+    const m = deformMaterial(v);
+    return m ? { value: { ...m.strength } } : { error: `loadStrength '${v}' is not a material: use one of ${ids}, true, false, or { flexuralMPa, tensileMPa, modulusGPa, ductile? }.` };
+  }
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    const num = (k: string) => typeof o[k] === 'number' && Number.isFinite(o[k]) && (o[k] as number) > 0;
+    if (num('flexuralMPa') && num('tensileMPa') && num('modulusGPa')) {
+      return { value: { flexuralMPa: o.flexuralMPa as number, tensileMPa: o.tensileMPa as number, modulusGPa: o.modulusGPa as number, ...(o.ductile ? { ductile: true } : {}) } };
+    }
+  }
+  return { error: `loadStrength must be a material id (${ids}), true, false, or { flexuralMPa, tensileMPa, modulusGPa, ductile? } with positive numbers.` };
+}
+
+/**
+ * A body's loadStrength as the physics reads it: resolved from a shorthand
+ * (a material id, or true) when something wrote one straight into the scene,
+ * and undefined when it is off or unreadable.
+ */
+export function loadStrengthOf(node: SceneNode): LoadStrength | undefined {
+  if (node.loadStrength === undefined) return undefined;
+  const r = resolveLoadStrength(node.loadStrength, node.deformMaterial);
+  return 'error' in r ? undefined : r.value;
 }

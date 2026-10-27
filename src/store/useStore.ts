@@ -47,6 +47,7 @@ import { buildShatterGraph, MAX_LIVE_SHARDS } from '../utils/runtimeShatter';
 import { deformedGeometry, dentKey, useDentStore } from './dentStore';
 import { fromtoCenter, imprintOf, isDentable, meshForDenting, type Imprint } from '../utils/dentMesh';
 import { estimateBodyMass } from '../utils/deformMaterials';
+import { DEFAULT_JOIN_MATERIAL, joinMaterial } from '../utils/joinMaterials';
 import { wallThicknessAt } from '../utils/wallThickness';
 import type { DentConfig } from '../utils/breakThresholds';
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
@@ -1921,7 +1922,7 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    * rather than each under the last. Without one it goes at the top level and
    * is selected.
    */
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice' | 'blob', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
 
   // --- Sculpting ----------------------------------------------------------
   /** The body being sculpted, or null when the sculpt tools are closed. */
@@ -5866,6 +5867,13 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring' && type !== 'sculpt' && type !== 'lattice') {
         geoms = [{ name: `${id}_geom`, type: geomType, size, mass, rgba }];
       }
+      if (type === 'blob') {
+        // A joint: a 12 mm ball of putty, weighing what putty weighs. Whatever
+        // reaches into it is welded to it. See utils/joinMaterials.ts.
+        const putty = joinMaterial(DEFAULT_JOIN_MATERIAL)!;
+        geoms = [{ name: `${id}_geom`, type: 'ellipsoid', size: [0.006, 0.006, 0.006], rgba: [...putty.rgba], density: putty.density }];
+        joints = [{ name: `${id}_free`, type: 'free' }];
+      }
     }
 
     // MuJoCo allows a free joint only on a top-level body, and most branches
@@ -5882,6 +5890,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       joints,
       geoms,
       children: [],
+      ...(type === 'blob' ? { joinMaterial: DEFAULT_JOIN_MATERIAL } : {}),
       ...(type === 'wedge' ? {
         isWedge: true,
         width: 0.12,

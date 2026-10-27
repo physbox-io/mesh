@@ -66,7 +66,7 @@ describe('deformMaterials', () => {
   it('every material does at least one thing, and pierces well above where it dents', () => {
     for (const m of DEFORM_MATERIALS) {
       expect(m.shatter || m.dent).toBeTruthy();
-      expect((m.natural.shatter && m.shatter) || (m.natural.dent && m.dent)).toBeTruthy();
+      expect((m.natural.shatter && m.shatter) || (m.natural.dent && m.dent) || m.natural.load).toBeTruthy();
       if (m.dent?.pierceNs) expect(m.dent.pierceNs).toBeGreaterThan(m.dent.yieldNs * 1.5);
     }
   });

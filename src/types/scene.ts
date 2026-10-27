@@ -495,6 +495,18 @@ export type ToothForm =
   | { kind: 'rack'; teeth: number; moduleMm: number; pressureAngleDeg: number; pitchMm: number; lengthMm: number; backlashMm: number }
   | { kind: 'gt2'; teeth: number; pitchMm: number; pitchDiameterMm: number; outsideDiameterMm: number };
 
+/** A material's strength under steady load. See SceneNode.loadStrength. */
+export interface LoadStrength {
+  /** Bending stress at which it breaks (brittle) or yields (ductile), MPa. */
+  flexuralMPa: number;
+  /** Pulling stress it survives, MPa. */
+  tensileMPa: number;
+  /** Young's modulus, GPa: how stiff it is, and so how soon a long one buckles. */
+  modulusGPa: number;
+  /** True: bends and stays bent (metals, most plastics). False: snaps. */
+  ductile?: boolean;
+}
+
 export interface SceneNode {
   id: string;
   name: string;
@@ -623,6 +635,26 @@ export interface SceneNode {
     vel: [number, number, number];
     angvel: [number, number, number];
   };
+  /**
+   * What it takes to break this body by LOADING it rather than by hitting it:
+   * the material's strength, which the body's own cross-section turns into a
+   * bending moment, a pull and a buckling load. Undefined means it never
+   * breaks under load.
+   *
+   * Only a long, thin part — a rod, a strut, a plank — can use it (see
+   * utils/memberStrength.ts). The compiler builds such a part as two halves
+   * welded at the middle, and the weld gives way at the limits the section
+   * can carry. A brittle material snaps there; a ductile one bends and stays
+   * bent. Like shattering, breaking is a SIMULATION event: the saved scene
+   * keeps the whole part and Reset puts it back.
+   */
+  loadStrength?: LoadStrength;
+  /**
+   * This body is a joint: a blob of putty, glue or the like. At compile time
+   * every other part that reaches into it is welded to it, as strongly as this
+   * material and the blob's size allow. See utils/joinMaterials.ts.
+   */
+  joinMaterial?: string;
   isWedge?: boolean;
   width?: number;
   depth?: number;

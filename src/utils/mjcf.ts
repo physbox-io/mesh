@@ -6,6 +6,7 @@ import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
 import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
+import { buildBreakModel } from './breakModel';
 
 /**
  * A name as an attribute value. Names are whatever someone typed, and a body
@@ -216,6 +217,18 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
   if (geom.margin !== undefined) attrs += ` margin="${geom.margin}"`;
   if (geom.gap !== undefined) attrs += ` gap="${geom.gap}"`;
   return `<geom ${attrs} />`;
+};
+
+/** The contact exclusions and break limits that go with breakModel's equalities. */
+const breakExtrasXml = (b: ReturnType<typeof buildBreakModel>): string => {
+  let xml = '';
+  if (b.excludes.length) {
+    xml += `\n  <contact>${b.excludes.map(([p, q]) => `\n    <exclude body1="${xmlAttr(p)}" body2="${xmlAttr(q)}" />`).join('')}\n  </contact>`;
+  }
+  if (b.numerics.length) {
+    xml += `\n  <custom>${b.numerics.map((n) => `\n    <numeric name="${xmlAttr(n.name)}" data="${n.data.map((v) => +v.toPrecision(6)).join(' ')}" />`).join('')}\n  </custom>`;
+  }
+  return xml;
 };
 
 /**
@@ -492,6 +505,11 @@ export const compileToMJCF = (
   // utils/uniqueNames); this pass only finds anything new when a boolean's
   // generated geoms clash, since the graph pass ran on the scene handed in.
   uniquifyNamesInPlace(sceneCopy.nodes);
+
+  // Members that break under load become two welded halves, and join blobs
+  // weld whatever reaches into them. After the names are final, since the
+  // halves and the welds are named from them. See utils/breakModel.ts.
+  const breaks = buildBreakModel(sceneCopy.nodes);
 
   // Runs BEFORE mesh-asset collection: a wedge is rewritten into a mesh geom
   // here, and that mesh still needs to land in the <asset> block below.
@@ -893,6 +911,8 @@ export const compileToMJCF = (
     }
   }
 
+  for (const line of breaks.equality) equalityConstraints += `\n    ${line}`;
+
   if (equalityConstraints) {
     equalityXml = `\n  <equality>${equalityConstraints}\n  </equality>`;
   }
@@ -912,7 +932,13 @@ export const compileToMJCF = (
        0.0018 kg.m^2 hub) hit "Nan, Inf or huge value in QACC" within 15ms and
        simply never turned. This costs nothing and removes a whole class of
        "the preset does nothing" failure that depends on a body's scale. -->
-  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
+${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes with breakable members and
+       joint blobs. A 1.8 mm strand has almost none about its own axis, and
+       MuJoCo softens a weld by the inverse inertia of what it holds: a pasta
+       cantilever with a 7 g tip drooped 48 mm and swung, where 1e-8 holds it
+       to 0.35 mm. Far below anything a part bigger than a strand has. -->
+  <compiler boundinertia="1e-8" />
+` : ''}  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
     <geom solref="${contactTime} 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>
@@ -922,7 +948,7 @@ export const compileToMJCF = (
     
     ${sceneCopy.nodes.map(buildNode).join('\n')}
   </worldbody>
-${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${equalityXml}
+${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${equalityXml}${breakExtrasXml(breaks)}
 </mujoco>
   `.trim();
 };
