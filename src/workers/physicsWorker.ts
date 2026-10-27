@@ -694,6 +694,41 @@ const wakeBodies = () => {
   pendingWake.clear();
 };
 
+/** The least the pointer can pull with, N: about what fingers pull a strand out of putty with. */
+const DRAG_HAND_N = 5;
+
+/**
+ * The mass of everything joined to body `bId` by active welds and pins, its
+ * own included. Recomputed when what is broken changes, not every step.
+ */
+let joinedMassCache: { bId: number; broken: number; mass: number } | null = null;
+const joinedMass = (bId: number): number => {
+  const mdl = model!;
+  const dat = data!;
+  if (joinedMassCache?.bId === bId && joinedMassCache.broken === brokenWeldKeys.size) return joinedMassCache.mass;
+  const active = dat.eq_active;
+  const o1 = mdl.eq_obj1id, o2 = mdl.eq_obj2id, type = mdl.eq_type;
+  const weld = mujoco!.mjtEq.mjEQ_WELD.value, connect = mujoco!.mjtEq.mjEQ_CONNECT.value;
+  const links: number[][] = [];
+  for (let i = 0; i < mdl.neq; i++) {
+    if (!active[i] || (type[i] !== weld && type[i] !== connect)) continue;
+    // Body 0 is the world: something fixed to it is not mass to be moved.
+    if (o1[i] <= 0 || o2[i] <= 0) continue;
+    (links[o1[i]] ??= []).push(o2[i]);
+    (links[o2[i]] ??= []).push(o1[i]);
+  }
+  const seen = new Set([bId]);
+  const queue = [bId];
+  let mass = 0;
+  while (queue.length) {
+    const b = queue.pop()!;
+    mass += mdl.body_mass[b] || 0;
+    for (const n of links[b] ?? []) if (!seen.has(n)) { seen.add(n); queue.push(n); }
+  }
+  joinedMassCache = { bId, broken: brokenWeldKeys.size, mass };
+  return mass;
+};
+
 const applyDragForce = () => {
   const mdl = model!;
   const dat = data!;
@@ -717,7 +752,12 @@ const applyDragForce = () => {
 
   const bx = dat.xpos[bId * 3], by = dat.xpos[bId * 3 + 1], bz = dat.xpos[bId * 3 + 2];
   const vx = dat.cvel[bId * 6 + 3], vy = dat.cvel[bId * 6 + 4], vz = dat.cvel[bId * 6 + 5];
-  const mass = mdl.body_mass[bId] || 1.0;
+  const own = mdl.body_mass[bId] || 1.0;
+  // What the pull has to move: the body and everything welded or pinned to
+  // it. Sized by the grabbed body alone, a 0.4 g strand of spaghetti in a
+  // putty tower could be pulled with a hundredth of a newton, against putty
+  // that holds it to 1.4 N, and nothing anywhere could be pulled apart.
+  const mass = Math.max(own, joinedMass(bId));
   /*
    * Stiffness PER KILOGRAM, not an absolute one.
    *
@@ -733,14 +773,18 @@ const applyDragForce = () => {
    * time, so the gesture feels the same whatever is on the end of it. 200 per
    * kg is what a 1 kg body already had, so light bodies are unchanged.
    */
-  const K = 200.0 * mass;
-  const D = 2.0 * Math.sqrt(mass * K); // critical damping, so nothing oscillates
+  // A hand's worth at the least: enough, at the 0.15 m of pointer offset
+  // every body saturates at, to pull a part out of a joint or snap it.
+  const K = Math.max(200.0 * mass, DRAG_HAND_N / 0.15);
+  // Critical damping for the body actually being pulled: damping sized to the
+  // whole assembly but applied to one light part would be unstable at 1 ms.
+  const D = 2.0 * Math.sqrt(own * K);
 
   let fx = K * (dragTarget.x - bx) - D * vx;
   let fy = K * (dragTarget.y - by) - D * vy;
   let fz = K * (dragTarget.z - bz) - D * vz;
 
-  const maxForce = 3.0 * mass * 9.81;
+  const maxForce = Math.max(3.0 * mass * 9.81, DRAG_HAND_N);
   const netMag = Math.sqrt(fx * fx + fy * fy + fz * fz);
   if (netMag > maxForce) {
     const scale = maxForce / netMag;
@@ -952,6 +996,7 @@ let brokenWeldKeys: Set<string> = new Set();
  */
 const rebuildBreakableWelds = () => {
   breakableWelds = [];
+  joinedMassCache = null;
   const mdl = model;
   const mj = mujoco;
   if (!mdl || !mj) return;
