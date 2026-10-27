@@ -2791,7 +2791,7 @@ export function useMCPBridge() {
           // position, and `pos` here is relative to the parent, as everywhere
           // else in the scene graph.
           const parentWorld = parent ? getNodeWorldPos(store.sceneGraph.nodes, parent.id) ?? [0, 0, 0] : [0, 0, 0];
-          store.addComponent('sculpt', position.map((v: number, i: number) => v + parentWorld[i]), parent?.id ?? null);
+          store.addComponent('sculpt', position.map((v: number, i: number) => v + parentWorld[i]), parent?.id ?? null, { exact: true });
 
           const created = await waitForNewNode(before, 10000);
           if (!created) throw new Error('The sculpt body was not created (timed out waiting for the scene to settle)');

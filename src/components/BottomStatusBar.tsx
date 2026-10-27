@@ -498,7 +498,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                   viewport — which would otherwise both close the menu and
                   answer whatever gesture it had just started. */}
               <div className="fixed inset-0 z-40" onClick={() => setModeMenuOpen(false)} />
-              <div className="absolute bottom-full left-0 mb-1.5 z-50 w-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-lg p-1">
+              <div className="absolute bottom-full left-0 mb-1.5 z-50 w-64 max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-lg p-1">
                 {choices.map((choice) => (
                   <button
                     key={choice.label}

@@ -10,6 +10,8 @@ import { hardwareCutGeoms, hardwareCutProblem, hardwareSpecOf, nextHardwareGroup
 import { releaseFastenings, reseatHardware } from '../utils/hardwareParts';
 import { hardwarePartActions, type HardwarePartActions } from './hardwarePartActions';
 import { extrusionActions, type ExtrusionActions } from './extrusionActions';
+import { clipboardActions, type ClipboardActions } from './clipboardActions';
+import { belowOffset, besideOffset, restingPos } from '../utils/spawnPlacement';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { getGeomFrame } from '../utils/laserCutExporter';
@@ -1498,7 +1500,24 @@ export interface EdgeRoundSession {
   picked: RoundEdge[];
 }
 
-export interface PhysicsState extends HardwarePartActions, ExtrusionActions {
+/**
+ * How addComponent places a part. By default from its own size: at the top
+ * level it stands on the floor at the given x and y, clear of other bodies;
+ * under a parent it goes beside it (below it, for the things that hang).
+ * `exact` keeps the position as given, for a caller that chose one (MCP).
+ */
+export interface AddPlacement { exact?: boolean }
+
+/*
+ * A curve added from the palette: the shared default track a tenth the size,
+ * so it fits the 160 mm view the others do. The DEFAULT_CURVE_* constants stay
+ * as they are, because they are also the fallback for curves already saved.
+ */
+const PALETTE_CURVE_POINTS = DEFAULT_CURVE_POINTS.map((p) => p.map((v) => v * 0.1));
+const PALETTE_CURVE_WIDTH = DEFAULT_CURVE_WIDTH * 0.1;
+const PALETTE_CURVE_THICKNESS = DEFAULT_CURVE_THICKNESS * 0.1;
+
+export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions {
   mujoco: typeof MUJOCO_SHIM | null;
   model: ModelMirror | null;
   data: DataMirror | null;
@@ -1902,7 +1921,7 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions {
    * rather than each under the last. Without one it goes at the top level and
    * is selected.
    */
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice', position: number[], parentId?: string | null) => string;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
 
   // --- Sculpting ----------------------------------------------------------
   /** The body being sculpted, or null when the sculpt tools are closed. */
@@ -2425,6 +2444,7 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
 export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) => ({
   ...hardwarePartActions({ set, get, clone: cloneSceneGraph }),
   ...extrusionActions({ set, get, clone: cloneSceneGraph }),
+  ...clipboardActions({ set, get, clone: cloneSceneGraph }),
   mujoco: null,
   model: null,
   data: null,
@@ -5552,7 +5572,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     }
   },
 
-  addComponent: (type, position, parentId) => {
+  addComponent: (type, position, parentId, opts) => {
     get().prepareForDiscreteChange();
     const { sceneGraph } = get();
     const newScene = cloneSceneGraph(sceneGraph);
@@ -5587,14 +5607,14 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     const isChildJoint = isChild;
     
     if (type === 'gear') {
-      const radius = 0.1;
+      const radius = 0.05;
       const teeth = 12;
       const color = [0.5, 0.5, 0.5, 1];
       geoms = generateGearGeoms(id, radius, teeth, color, false);
       joints = [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 0, 1], damping: 0.5 }];
     } else if (type === 'pulley_wheel') {
-      const r = 0.08;
-      const thickness = 0.04;
+      const r = 0.05;
+      const thickness = 0.025;
       const spindle_r = r * 0.8;
       const spindle_h = thickness / 2 - 0.005;
       const flange_h = 0.005;
@@ -5611,7 +5631,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     } else if (type === 'curve') {
       // Rigid curved track: spline through control points, decomposed into
       // convex box segments so collision follows the real curve.
-      geoms = generateCurveGeoms(id, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS);
+      geoms = generateCurveGeoms(id, PALETTE_CURVE_POINTS, PALETTE_CURVE_WIDTH, PALETTE_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS);
       joints = []; // static — welded to world like the wedge
       localPos = [localPos[0], localPos[1], 0]; // tracks sit on the ground, not in the air
     } else {
@@ -5627,7 +5647,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'capsule') {
         geomType = 'capsule';
-        size = [0.02, 0.15];
+        size = [0.01, 0.05];
         rgba = [0.6, 0.6, 0.6, 1];
         // Standalone poles are free bodies and fall like any other shape; only
         // when nested under a parent does a hinge (pendulum rod) make sense.
@@ -5639,19 +5659,19 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'bob') {
         geomType = 'sphere';
-        size = [0.06];
+        size = [0.04];
         rgba = [0.2, 0.6, 1.0, 1];
         mass = 10.0;
         joints = [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.1 }];
       } else if (type === 'wedge') {
         geomType = 'box';
-        size = [0.2, 0.1, 0.08];
+        size = [0.06, 0.03, 0.015];
         rgba = [0.8, 0.5, 0.2, 1];
         // A wedge is a solid object, not a fixture: it falls and can be tipped
         // over like anything else. Set the joint to Fixed to weld it in place.
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'mesh') {
-        // Dynamic icosahedron: radius 0.3, centred at body origin.
+        // Dynamic icosahedron: radius 0.06, centred at body origin.
         // body pos = localPos handles spawn placement.
         // vertices: Y-up centred at (0,0,0) for the Three.js static render path fallback.
         // renderVertices: Z-up centred at (0,0,0) — icosahedron centroid is exactly (0,0,0).
@@ -5663,9 +5683,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           mass: 1,
           condim: 3,
           dynamic: true,
-          vertices: [-0.1577,0.2552,0,0.1577,0.2552,0,-0.1577,-0.2552,0,0.1577,-0.2552,0,0,-0.1577,0.2552,0,0.1577,0.2552,0,-0.1577,-0.2552,0,0.1577,-0.2552,0.2552,0,-0.1577,0.2552,0,0.1577,-0.2552,0,-0.1577,-0.2552,0,0.1577],
+          vertices: [-0.0315,0.051,0,0.0315,0.051,0,-0.0315,-0.051,0,0.0315,-0.051,0,0,-0.0315,0.051,0,0.0315,0.051,0,-0.0315,-0.051,0,0.0315,-0.051,0.051,0,-0.0315,0.051,0,0.0315,-0.051,0,-0.0315,-0.051,0,0.0315],
           // renderVertices: raw Z-up (Y↔Z swap only: Y-up (x,y,z)→(x,-z,y)), no centroid subtraction
-          renderVertices: [-0.1577,0,0.2552,0.1577,0,0.2552,-0.1577,0,-0.2552,0.1577,0,-0.2552,0,-0.2552,-0.1577,0,-0.2552,0.1577,0,0.2552,-0.1577,0,0.2552,0.1577,0.2552,0.1577,0,0.2552,-0.1577,0,-0.2552,0.1577,0,-0.2552,-0.1577,0],
+          renderVertices: [-0.0315,0,0.051,0.0315,0,0.051,-0.0315,0,-0.051,0.0315,0,-0.051,0,-0.051,-0.0315,0,-0.051,0.0315,0,0.051,-0.0315,0,0.051,0.0315,0.051,0.0315,0,0.051,-0.0315,0,-0.051,0.0315,0,-0.051,-0.0315,0],
           faces: [0,11,5,0,5,1,0,1,7,0,7,10,0,10,11,1,5,9,5,11,4,11,10,2,10,7,6,7,1,8,3,9,4,3,4,2,3,2,6,3,6,8,3,8,9,4,9,5,2,4,11,6,2,10,8,6,7,9,8,1],
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
@@ -5680,24 +5700,24 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           condim: 3,
           dynamic: true,
           vertices: [
-            -0.25, -0.25, -0.25,
-             0.25, -0.25, -0.25,
-             0.25,  0.25, -0.25,
-            -0.25,  0.25, -0.25,
-            -0.25, -0.25,  0.25,
-             0.25, -0.25,  0.25,
-             0.25,  0.25,  0.25,
-            -0.25,  0.25,  0.25
+            -0.05, -0.05, -0.05,
+             0.05, -0.05, -0.05,
+             0.05,  0.05, -0.05,
+            -0.05,  0.05, -0.05,
+            -0.05, -0.05,  0.05,
+             0.05, -0.05,  0.05,
+             0.05,  0.05,  0.05,
+            -0.05,  0.05,  0.05
           ],
           renderVertices: [
-            -0.25,  0.25, -0.25,
-             0.25,  0.25, -0.25,
-             0.25,  0.25,  0.25,
-            -0.25,  0.25,  0.25,
-            -0.25, -0.25, -0.25,
-             0.25, -0.25, -0.25,
-             0.25, -0.25,  0.25,
-            -0.25, -0.25,  0.25
+            -0.05,  0.05, -0.05,
+             0.05,  0.05, -0.05,
+             0.05,  0.05,  0.05,
+            -0.05,  0.05,  0.05,
+            -0.05, -0.05, -0.05,
+             0.05, -0.05, -0.05,
+             0.05, -0.05,  0.05,
+            -0.05, -0.05,  0.05
           ],
           faces: [
             0, 2, 1,  0, 3, 2,
@@ -5710,9 +5730,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'pyramid') {
-        const w = 0.2;
-        const d = 0.2;
-        const h = 0.2;
+        const w = 0.1;
+        const d = 0.1;
+        const h = 0.1;
         const { vertices, faces, renderVertices } = generatePyramidMeshData(w, d, h);
         geoms = [{
           name: `${id}_mesh`,
@@ -5728,8 +5748,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'cone') {
-        const r = 0.1;
-        const h = 0.2;
+        const r = 0.05;
+        const h = 0.1;
         const { vertices, faces, renderVertices } = generateConeMeshData(r, h, 16);
         geoms = [{
           name: `${id}_mesh`,
@@ -5745,8 +5765,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'torus') {
-        const R = 0.15;
-        const r = 0.04;
+        const R = 0.04;
+        const r = 0.012;
         const { vertices, faces, renderVertices } = generateTorusMeshData(R, r, 24, 16);
         geoms = [{
           name: `${id}_mesh`,
@@ -5762,9 +5782,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'tube') {
-        const r1 = 0.06;
-        const r2 = 0.1;
-        const h = 0.15;
+        const r1 = 0.03;
+        const r2 = 0.05;
+        const h = 0.08;
         const { vertices, faces, renderVertices } = generateTubeMeshData(r1, r2, h, 24);
         geoms = [{
           name: `${id}_mesh`,
@@ -5781,7 +5801,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'ellipsoid') {
         geomType = 'ellipsoid';
-        size = [0.12, 0.08, 0.06];
+        size = [0.06, 0.04, 0.03];
         rgba = [0.85, 0.55, 0.15, 1]; // yellow/orange
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'sculpt') {
@@ -5838,8 +5858,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         // it's just two ordinary primitives and a csg marker, so every slider in
         // the panel reshapes it and the mesh is regenerated from scratch.
         geoms = [
-          { name: `${id}_body`, type: 'ellipsoid', size: [0.12, 0.12, 0.04], mass: 1, rgba: [0.85, 0.65, 0.2, 1], condim: 3 },
-          { name: `${id}_hole`, type: 'ellipsoid', size: [0.06, 0.06, 0.07], csg: 'difference', pos: [0, 0, 0], rgba: [0.9, 0.25, 0.35, 1] },
+          { name: `${id}_body`, type: 'ellipsoid', size: [0.06, 0.06, 0.02], mass: 1, rgba: [0.85, 0.65, 0.2, 1], condim: 3 },
+          { name: `${id}_hole`, type: 'ellipsoid', size: [0.03, 0.03, 0.035], csg: 'difference', pos: [0, 0, 0], rgba: [0.9, 0.25, 0.35, 1] },
         ];
         joints = [{ name: `${id}_free`, type: 'free' }];
       }
@@ -5864,9 +5884,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       children: [],
       ...(type === 'wedge' ? {
         isWedge: true,
-        width: 2.0,
-        depth: 1.0,
-        height: 0.5,
+        width: 0.12,
+        depth: 0.06,
+        height: 0.03,
         wedgeAngle: 14.036
       } : {}),
       ...(type === 'pyramid' ? {
@@ -5876,32 +5896,32 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         // makes the shape jump the first time one is touched — and a shape that
         // grows while its body stays put ends up inside the floor, which MuJoCo
         // resolves by ejecting it through.
-        width: 0.2,
-        depth: 0.2,
-        height: 0.2
+        width: 0.1,
+        depth: 0.1,
+        height: 0.1
       } : {}),
       ...(type === 'cone' ? {
         isCone: true,
-        radius: 0.1,
-        height: 0.2
+        radius: 0.05,
+        height: 0.1
       } : {}),
       ...(type === 'torus' ? {
         isTorus: true,
-        majorRadius: 0.15,
-        tubeRadius: 0.04
+        majorRadius: 0.04,
+        tubeRadius: 0.012
       } : {}),
       ...(type === 'tube' ? {
         isTube: true,
-        innerRadius: 0.06,
-        outerRadius: 0.1,
-        height: 0.15
+        innerRadius: 0.03,
+        outerRadius: 0.05,
+        height: 0.08
       } : {}),
       ...(type === 'pulley_wheel' ? {
         isPulleyWheel: true,
-        // Must match the flange geoms above (r = 0.08). It was 0.4, so a
+        // Must match the flange geoms above (r = 0.05). It was 0.4, so a
         // dragged-in wheel drew its rope on a 0.4m rim around an 0.08m wheel
         // and coupled the rope kinematics to the wrong radius.
-        pulleyRadius: 0.08
+        pulleyRadius: 0.05
       } : {}),
       ...(type === 'pulley_rope' ? {
         isPulleyRope: true,
@@ -5910,7 +5930,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         rightTargetId: ''
       } : {}),
       ...(type === 'openscad' ? {
-        scad: `// Example OpenSCAD Code\ndifference() {\n  cube([0.5, 0.5, 0.5], center=true);\n  sphere(d=0.6, $fn=16);\n}`
+        scad: `// Example OpenSCAD Code\ndifference() {\n  cube([0.1, 0.1, 0.1], center=true);\n  sphere(d=0.12, $fn=16);\n}`
       } : {}),
       ...(type === 'ring' ? {
         csgEnabled: true,
@@ -5932,12 +5952,24 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       } : {}),
       ...(type === 'curve' ? {
         isCurve: true,
-        curvePoints: DEFAULT_CURVE_POINTS.map(p => [...p]),
-        curveWidth: DEFAULT_CURVE_WIDTH,
-        curveThickness: DEFAULT_CURVE_THICKNESS,
+        curvePoints: PALETTE_CURVE_POINTS.map(p => [...p]),
+        curveWidth: PALETTE_CURVE_WIDTH,
+        curveThickness: PALETTE_CURVE_THICKNESS,
         curveSegments: DEFAULT_CURVE_SEGMENTS
       } : {}),
     };
+
+    // Placed by its size, now that it has one: see utils/spawnPlacement.ts.
+    if (!opts?.exact) {
+      const parent = isChild ? findNodeById(newScene.nodes, parentId!) : null;
+      if (parent) {
+        newNode.pos = type === 'capsule' || type === 'bob'
+          ? [0, 0, belowOffset(parent, newNode)]
+          : [besideOffset(parent, newNode), 0, 0];
+      } else if (!isChild) {
+        newNode.pos = restingPos(newNode, newScene.nodes, position);
+      }
+    }
 
     if (isChild && parentId) {
       addChildNode(newScene.nodes, parentId, newNode);

@@ -98,7 +98,7 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
       x = Math.max(-0.45, Math.min(0.45, x));
       z = Math.max(-0.45, Math.min(0.45, z));
       
-      addComponent(type, [x, z, 0.2]);
+      addComponent(type, [x, z, 0]);
     };
     
     const dragOverHandler = (e: DragEvent) => e.preventDefault();

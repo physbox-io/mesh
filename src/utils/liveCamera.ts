@@ -35,3 +35,10 @@ export function getLiveCameraPose(): CameraPose | null {
     target: threeToMujoco(liveTarget.x, liveTarget.y, liveTarget.z),
   };
 }
+
+// The point on the floor under the middle of the view, in MuJoCo world space:
+// where a new or pasted body goes. The origin until the viewport has mounted.
+export function viewCentre(): [number, number, number] {
+  const pose = getLiveCameraPose();
+  return pose ? [pose.target[0], pose.target[1], 0] : [0, 0, 0];
+}

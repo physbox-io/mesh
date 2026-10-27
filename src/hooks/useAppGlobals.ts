@@ -2,7 +2,10 @@ import { useEffect } from 'react';
 import { useStore } from '../store/useStore';
 import { loadCompiler } from '../utils/openscad';
 
-/** Delete / Backspace deletes the selection; Ctrl-Z undoes, Ctrl-Y and Ctrl-Shift-Z redo. */
+/**
+ * Delete / Backspace deletes the selection; Ctrl-D duplicates it, Ctrl-C and
+ * Ctrl-V copy and paste it; Ctrl-Z undoes, Ctrl-Y and Ctrl-Shift-Z redo.
+ */
 export function useEditShortcuts() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -43,6 +46,31 @@ export function useEditShortcuts() {
       */
       if (!(e.metaKey || e.ctrlKey)) return;
       const key = e.key.toLowerCase();
+
+      // Duplicate, Copy and Paste act on bodies. Not while a tool has hold of
+      // one (the lattice and sculpt tools are editing its insides), not from a
+      // dialog, and Copy not while there is text selected on the page, which
+      // is what Ctrl-C is for there.
+      if ((key === 'd' || key === 'c' || key === 'v') && !e.shiftKey && !e.altKey) {
+        const s = useStore.getState();
+        if (s.sculptNodeId || s.latticeNodeId || s.gestureStatus || s.isPlaying) return;
+        if ((e.target as HTMLElement).closest?.('.fixed.inset-0')) return;
+        if (key === 'c') {
+          if (window.getSelection()?.toString()) return;
+          if (s.copySelection()) e.preventDefault();
+          return;
+        }
+        // Ctrl-D is the browser's bookmark key; with nothing selected it is left to it.
+        if (key === 'd') {
+          if (!s.selectedNodeId) return;
+          e.preventDefault();
+          s.duplicateSelection();
+          return;
+        }
+        if (s.pasteClipboard().length) e.preventDefault();
+        return;
+      }
+
       // Ctrl-Y as well as Ctrl-Shift-Z: the first is what Windows does, the
       // second is what everything else does, and both are cheap to answer.
       const redoing = key === 'y' || (key === 'z' && e.shiftKey);

@@ -6,6 +6,7 @@ import { useDialogs } from '../../store/dialogStore';
 import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
 import { useCoarsePointer } from '../../hooks/useCoarsePointer';
 import { findNodeById, getNodeWorldPos } from '../../utils/sceneTree';
+import { viewCentre } from '../../utils/liveCamera';
 import { sourcePositiveBounds } from '../../utils/csg';
 import { HierarchyTree } from '../HierarchyTree';
 import ColoringSection from '../ColoringSection';
@@ -34,15 +35,14 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
   const close = () => setOpen(false);
 
   // A clicked part goes under the selected body, beside it (or below it, for
-  // the things that hang); with nothing selected, just above the floor.
+  // the things that hang); with nothing selected, on the floor in the middle
+  // of the view. The store works out the distances from the part's size.
   const handleAddComponentClick = (type: PaletteComponentType) => {
     const { selectedNodeId, sceneGraph } = useStore.getState();
     if (selectedNodeId && findNodeById(sceneGraph.nodes, selectedNodeId)) {
-      const worldPos = getNodeWorldPos(sceneGraph.nodes, selectedNodeId) || [0, 0, 0];
-      const offset = (type === 'capsule' || type === 'bob') ? [0, 0, -0.6] : [0.5, 0, 0];
-      addComponent(type, [worldPos[0] + offset[0], worldPos[1] + offset[1], worldPos[2] + offset[2]], selectedNodeId);
+      addComponent(type, [0, 0, 0], selectedNodeId);
     } else {
-      addComponent(type, [0, 0, 0.15]); // Spawn slightly above floor
+      addComponent(type, viewCentre());
     }
     close();
   };
@@ -55,14 +55,14 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
    */
   const handleAddLatticeClick = () => {
     // At the origin, so the empty grid it opens on is centred there.
-    const id = addComponent('lattice', [0, 0, 0], useStore.getState().selectedNodeId);
+    const id = addComponent('lattice', [0, 0, 0], useStore.getState().selectedNodeId, { exact: true });
     close();
     useStore.getState().setLatticeNodeId(id);
   };
 
   /** Adds a ball of clay and opens the sculpt tools on it, for the same reason. */
   const handleAddSculptClick = () => {
-    const id = addComponent('sculpt', [0, 0, 0.2], useStore.getState().selectedNodeId);
+    const id = addComponent('sculpt', viewCentre(), useStore.getState().selectedNodeId);
     close();
     useStore.getState().setSculptNodeId(id);
   };
@@ -132,8 +132,9 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
               return;
             }
             const at = selectedNodeId ? getNodeWorldPos(sceneGraph.nodes, selectedNodeId) : null;
-            // Beside what is selected when it does not go into it, else just above the floor.
-            useStore.getState().addHardwarePart(kind, at ? [at[0] + 0.05, at[1], at[2]] : [0, 0, 0.03], selectedNodeId);
+            // Beside what is selected when it does not go into it, else just above the floor in the middle of the view.
+            const c = viewCentre();
+            useStore.getState().addHardwarePart(kind, at ? [at[0] + 0.05, at[1], at[2]] : [c[0], c[1], 0.03], selectedNodeId);
             close();
           }}
           onPlaced={close}

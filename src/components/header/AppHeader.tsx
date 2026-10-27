@@ -1,4 +1,4 @@
-import { Play, Square, Settings, X, RotateCcw, Trash2, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu } from 'lucide-react';
+import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -118,6 +118,15 @@ export function AppHeader({
               title="Save scene preset (Ctrl+S)"
             >
               <Save className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => useStore.getState().duplicateSelection()}
+              disabled={!selectedNodeId || isPlaying}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
+              title={selectedNodeId ? "Duplicate selected item into the middle of the view (Ctrl+D). Ctrl+C / Ctrl+V copy and paste, also between scenes" : "No item selected"}
+            >
+              <CopyPlus className="w-3.5 h-3.5" />
             </button>
 
             <button

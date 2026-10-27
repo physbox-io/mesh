@@ -65,7 +65,7 @@ const find = (id: string) => {
 };
 const sculptGeomOf = (node: any) => resolveCsgGeoms(node, 'render').find((x: any) => x.type === 'mesh');
 const newSculpt = (x: number) => {
-  useStore.getState().addComponent('sculpt', [x, 0, 0.2]);
+  useStore.getState().addComponent('sculpt', [x, 0, 0.2], null, { exact: true });
   return [...useStore.getState().sceneGraph.nodes].reverse().find((n: any) => n.isSculpt);
 };
 
