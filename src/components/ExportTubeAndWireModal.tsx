@@ -2,13 +2,9 @@ import { useState, useMemo } from 'react';
 import {
     X,
     Wrench,
-    Download,
     Plus,
-    ExternalLink,
     ShoppingCart,
-    Scissors,
     Box,
-    Compass,
     Layers,
     Check
 } from 'lucide-react';
@@ -23,20 +19,10 @@ import {
     breakdownPipeFrame,
     buildAllCustomHubNodes,
     withoutHubsAt,
-    type TubeCopeSpec,
-    computeTubeCopeJoint,
-    extractSceneTubeJoints,
-    exportTubeCopeSvg,
-    buildTubeCopeEtchUrl,
-    type WireBendOptions,
-    type WireBendJigOptions,
-    computeWireBendSchedule,
-    extractSceneWireCurves,
-    buildWireBendingJigNode
 } from '../utils/tubeAndWireExporter';
 import { AddSimulationButton } from './MachineJobControls';
 import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
-import { tubeSimulationRequest, type TubeSimulationJob } from '../utils/tubeSimulation';
+import { pipeFrameSimulationRequest } from '../utils/tubeSimulation';
 import { defaultMaxSpanMm, frameBodyInScene, type FramePlacement } from '../utils/pipeSkeleton';
 
 function findBody(nodes: SceneNode[], id: string | null): SceneNode | null {
@@ -61,7 +47,6 @@ export function ExportTubeAndWireModal({
     const storeScene = useStore(s => s.sceneGraph);
     const scene = propScene || storeScene;
 
-    const [activeTab, setActiveTab] = useState<'pipe' | 'cope' | 'wire'>('pipe');
     const simulation = useAddSimulation();
 
     // --- Tab 1: PVC / EMT Pipe Frame State ---
@@ -94,106 +79,11 @@ export function ExportTubeAndWireModal({
     const [framePlacement, setFramePlacement] = useState<FramePlacement>('replace');
     const [frameMessage, setFrameMessage] = useState<string | null>(null);
 
-    // --- Tab 2: Tube Coping State ---
-    const sceneMembers = useMemo(() => extractSceneTubeJoints(scene), [scene]);
-    const sceneJoints: TubeCopeSpec[] = useMemo(() => {
-        const list: TubeCopeSpec[] = [];
-        for (const m of sceneMembers) {
-            if (m.startCope) list.push(m.startCope.spec);
-            if (m.endCope) list.push(m.endCope.spec);
-            if (!m.startCope && !m.endCope) {
-                list.push({
-                    id: m.id,
-                    name: m.name,
-                    cutTubeOdMm: m.odMm,
-                    cutTubeWallMm: m.wallMm,
-                    targetKind: 'tube',
-                    targetTubeOdMm: m.odMm,
-                    angleDeg: 90,
-                });
-            }
-        }
-        return list;
-    }, [sceneMembers]);
-    const [selectedJointIndex, setSelectedJointIndex] = useState<number>(-1);
-    const [cutTubeOdMm, setCutTubeOdMm] = useState<number>(33.4);
-    const [cutTubeWallMm, setCutTubeWallMm] = useState<number>(3.38);
-    const [targetKind, setTargetKind] = useState<'tube' | 'plane'>('tube');
-    const [targetTubeOdMm, setTargetTubeOdMm] = useState<number>(42.2);
-    const [angleDeg, setAngleDeg] = useState<number>(45);
-    const [offsetMm, setOffsetMm] = useState<number>(0);
-    const [clockAngleDeg, setClockAngleDeg] = useState<number>(0);
-
-    const handleSelectSceneJoint = (idx: number) => {
-        setSelectedJointIndex(idx);
-        if (idx >= 0 && idx < sceneJoints.length) {
-            const j = sceneJoints[idx];
-            setCutTubeOdMm(j.cutTubeOdMm);
-            setCutTubeWallMm(j.cutTubeWallMm);
-            setTargetKind(j.targetKind);
-            setTargetTubeOdMm(j.targetTubeOdMm ?? j.cutTubeOdMm);
-            setAngleDeg(j.angleDeg);
-            setOffsetMm(j.offsetMm ?? 0);
-            setClockAngleDeg(j.clockAngleDeg ?? 0);
-        }
-    };
-
-    const copeSpec: TubeCopeSpec = useMemo(() => ({
-        id: selectedJointIndex >= 0 && sceneJoints[selectedJointIndex]?.id ? sceneJoints[selectedJointIndex].id : 'custom_cope',
-        name: selectedJointIndex >= 0 && sceneJoints[selectedJointIndex]?.name ? sceneJoints[selectedJointIndex].name : 'Custom Joint',
-        cutTubeOdMm,
-        cutTubeWallMm,
-        targetKind,
-        targetTubeOdMm,
-        angleDeg,
-        offsetMm,
-        clockAngleDeg
-    }), [selectedJointIndex, sceneJoints, cutTubeOdMm, cutTubeWallMm, targetKind, targetTubeOdMm, angleDeg, offsetMm, clockAngleDeg]);
-
-    const copeResult = useMemo(() => computeTubeCopeJoint(copeSpec), [copeSpec]);
-    const copeSvgResult = useMemo(() => exportTubeCopeSvg([copeSpec]), [copeSpec]);
-
-    // --- Tab 3: Wire Bending State ---
-    const sceneWires = useMemo(() => extractSceneWireCurves(scene), [scene]);
-    const [selectedWireIdx, setSelectedWireIdx] = useState<number>(0);
-    const [wireDiameterMm, setWireDiameterMm] = useState<number>(3.0);
-    const [bendRadiusMm, setBendRadiusMm] = useState<number>(6.0);
-    const [springbackFactor, setSpringbackFactor] = useState<number>(1.03);
-    const [jigBaseThicknessMm, setJigBaseThicknessMm] = useState<number>(6.0);
-    const [jigPostHeightMm, setJigPostHeightMm] = useState<number>(12.0);
-    const [jigAddedMessage, setJigAddedMessage] = useState<string | null>(null);
-
-    const SAMPLE_BRACKET_POINTS: [number, number, number][] = useMemo(() => [
-        [0, 0, 0],
-        [45, 0, 0],
-        [45, 35, 0],
-        [45, 35, 25],
-        [85, 35, 25]
-    ], []);
-
-    const activeWirePoints = useMemo(() => {
-        if (selectedWireIdx >= 0 && selectedWireIdx < sceneWires.length) {
-            return sceneWires[selectedWireIdx].pointsMm;
-        }
-        return SAMPLE_BRACKET_POINTS;
-    }, [selectedWireIdx, sceneWires, SAMPLE_BRACKET_POINTS]);
-
-    const wireOptions: Partial<WireBendOptions> = useMemo(() => ({
-        wireDiameterMm,
-        bendRadiusMm,
-        springbackFactor
-    }), [wireDiameterMm, bendRadiusMm, springbackFactor]);
-
-    const wireSchedule = useMemo(
-        () => computeWireBendSchedule(activeWirePoints, wireOptions),
-        [activeWirePoints, wireOptions]
-    );
-
     if (!isOpen) return null;
 
-    /** What this tab hands over, made and put in the scene to measure against the model. */
-    const handleSimulate = (job: TubeSimulationJob, placement: 'beside' | 'overlay') => {
-        void simulation.add({ ...tubeSimulationRequest(job, sceneStockTransform()).request, placement });
+    /** The frame made from its cut list, every tube seated hub to hub. */
+    const handleSimulate = (placement: 'beside' | 'overlay') => {
+        void simulation.add({ ...pipeFrameSimulationRequest(breakdown, sceneStockTransform()).request, placement });
     };
 
     /** A pipe, and the length it is sold in. */
@@ -246,40 +136,6 @@ export function ExportTubeAndWireModal({
         setTimeout(() => setHubAddedMessage(null), 3500);
     };
 
-    const handleDownloadCopeSvg = () => {
-        const blob = new Blob([copeSvgResult.svg], { type: 'image/svg+xml;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `tube-cope-${copeSpec.id}-${Math.round(cutTubeOdMm)}mm-${Math.round(angleDeg)}deg.svg`;
-        a.click();
-        URL.revokeObjectURL(url);
-    };
-
-    const handleOpenCopeInEtch = async () => {
-        const url = await buildTubeCopeEtchUrl(copeSvgResult);
-        window.open(url, '_blank', 'noopener,noreferrer');
-    };
-
-    const handleAddWireJigToScene = () => {
-        const jigOptions: Partial<WireBendJigOptions> = {
-            ...wireOptions,
-            baseThicknessMm: jigBaseThicknessMm,
-            pegHeightMm: jigPostHeightMm
-        };
-        const { jigNode } = buildWireBendingJigNode(activeWirePoints, jigOptions);
-        const state = useStore.getState();
-        const filteredNodes = (state.sceneGraph.nodes || []).filter(n => n.id !== jigNode.id);
-        const nextScene: SceneGraph = {
-            ...state.sceneGraph,
-            nodes: [...filteredNodes, jigNode]
-        };
-        state.updateScene(nextScene);
-        void state.recompile(nextScene);
-        setJigAddedMessage(`Added printable wire bending jig "${jigNode.name || jigNode.id}" to scene`);
-        setTimeout(() => setJigAddedMessage(null), 3500);
-    };
-
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
             <div className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden text-slate-800 dark:text-slate-100">
@@ -289,10 +145,10 @@ export function ExportTubeAndWireModal({
                         <Wrench className="w-5 h-5 text-cyan-600 dark:text-cyan-400" />
                         <div>
                             <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-                                PVC / EMT Pipe Frame, Tube Coping &amp; Wire Bending Studio
+                                Pipe Frame
                             </h2>
                             <p className="text-xs text-slate-500 dark:text-slate-400">
-                                10ft/3m conduit cut lists, 3D-printable multi-way hubs, 1:1 fish-mouth wrap templates &amp; CNC/3D wire bending jigs
+                                Frame a shape in PVC, EMT or aluminium tube: the stick cut list and the 3D-printable hubs
                             </p>
                         </div>
                     </div>
@@ -305,46 +161,8 @@ export function ExportTubeAndWireModal({
                     </button>
                 </div>
 
-                {/* Tabs */}
-                <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 px-5 gap-2 pt-2">
-                    <button
-                        onClick={() => setActiveTab('pipe')}
-                        className={`px-4 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors flex items-center gap-2 ${
-                            activeTab === 'pipe'
-                                ? 'border-cyan-500 dark:border-cyan-400 text-cyan-700 dark:text-cyan-300 bg-white dark:bg-slate-900'
-                                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-                        }`}
-                    >
-                        <Box className="w-3.5 h-3.5" />
-                        PVC / EMT Pipe Frame
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('cope')}
-                        className={`px-4 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors flex items-center gap-2 ${
-                            activeTab === 'cope'
-                                ? 'border-cyan-500 dark:border-cyan-400 text-cyan-700 dark:text-cyan-300 bg-white dark:bg-slate-900'
-                                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-                        }`}
-                    >
-                        <Scissors className="w-3.5 h-3.5" />
-                        Tube Coping (Fish-Mouth)
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('wire')}
-                        className={`px-4 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors flex items-center gap-2 ${
-                            activeTab === 'wire'
-                                ? 'border-cyan-500 dark:border-cyan-400 text-cyan-700 dark:text-cyan-300 bg-white dark:bg-slate-900'
-                                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-                        }`}
-                    >
-                        <Compass className="w-3.5 h-3.5" />
-                        Wire Bending &amp; 3D Jig
-                    </button>
-                </div>
-
                 {/* Content */}
                 <div className="flex-1 overflow-y-auto p-5 space-y-5">
-                    {activeTab === 'pipe' && (
                         <div className="space-y-5">
                             {/* Frame a shape */}
                             <div className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
@@ -544,7 +362,7 @@ export function ExportTubeAndWireModal({
                                     <AddSimulationButton
                                         disabled={breakdown.struts.length === 0}
                                         disabledReason="No pipes in the scene yet: build a frame above, or open a pipe frame from Examples."
-                                        onSimulate={(placement) => handleSimulate({ frame: breakdown }, placement)}
+                                        onSimulate={handleSimulate}
                                         progress={simulation.progress}
                                         error={simulation.error}
                                     />
@@ -609,342 +427,6 @@ export function ExportTubeAndWireModal({
                                 )}
                             </div>
                         </div>
-                    )}
-
-                    {activeTab === 'cope' && (
-                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                            {/* Left Controls */}
-                            <div className="lg:col-span-5 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3.5">
-                                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                                    Tube Miter &amp; Fish-Mouth Joint Parameters
-                                </h3>
-
-                                <div>
-                                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
-                                        Detected Scene Joint or Custom Spec
-                                    </label>
-                                    <select
-                                        value={selectedJointIndex}
-                                        onChange={e => handleSelectSceneJoint(Number(e.target.value))}
-                                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                    >
-                                        <option value={-1}>Custom Tube Joint Parameters</option>
-                                        {sceneJoints.map((j, idx) => (
-                                            <option key={j.id ?? idx} value={idx}>
-                                                {j.name ?? j.id ?? `Joint #${idx + 1}`} ({j.angleDeg}° • OD {j.cutTubeOdMm}mm → {j.targetTubeOdMm ?? j.cutTubeOdMm}mm)
-                                            </option>
-                                        ))}
-                                    </select>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Cut Tube OD (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="0.5"
-                                            min="6"
-                                            value={cutTubeOdMm}
-                                            onChange={e => setCutTubeOdMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Wall Thickness (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="0.2"
-                                            min="0.5"
-                                            value={cutTubeWallMm}
-                                            onChange={e => setCutTubeWallMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Target Surface</label>
-                                        <select
-                                            value={targetKind}
-                                            onChange={e => setTargetKind(e.target.value as 'tube' | 'plane')}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        >
-                                            <option value="tube">Round Collector Tube (Fish-Mouth)</option>
-                                            <option value="plane">Flat Plate / Miter Plane</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Target Tube OD (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="0.5"
-                                            min="6"
-                                            disabled={targetKind === 'plane'}
-                                            value={targetTubeOdMm}
-                                            onChange={e => setTargetTubeOdMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 disabled:opacity-50 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Joint Angle (°)</label>
-                                        <input
-                                            type="number"
-                                            step="1"
-                                            min="10"
-                                            max="170"
-                                            value={angleDeg}
-                                            onChange={e => setAngleDeg(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Centerline Offset (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="0.5"
-                                            value={offsetMm}
-                                            onChange={e => setOffsetMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div>
-                                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
-                                        Clocking Rotation Angle ({clockAngleDeg}°)
-                                    </label>
-                                    <input
-                                        type="range"
-                                        min="0"
-                                        max="360"
-                                        value={clockAngleDeg}
-                                        onChange={e => setClockAngleDeg(Number(e.target.value))}
-                                        className="w-full"
-                                    />
-                                </div>
-
-                                <div className="pt-2 flex flex-col gap-2">
-                                    <button
-                                        onClick={handleDownloadCopeSvg}
-                                        className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors"
-                                    >
-                                        <Download className="w-4 h-4" />
-                                        Download 1:1 Wrap-Around Template (.SVG)
-                                    </button>
-                                    <button
-                                        onClick={handleOpenCopeInEtch}
-                                        className="w-full py-2 px-3 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-2 transition-colors"
-                                    >
-                                        <ExternalLink className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                                        Open in Etch (2D Laser / Print Layout)
-                                    </button>
-                                    <AddSimulationButton
-                                        disabled={selectedJointIndex < 0}
-                                        disabledReason="Pick a joint from the scene: these figures describe no part of the model."
-                                        onSimulate={(placement) => handleSimulate({ cope: copeResult }, placement)}
-                                        progress={simulation.progress}
-                                        error={simulation.error}
-                                        besideOnly
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Right 1:1 SVG Preview */}
-                            <div className="lg:col-span-7 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 flex flex-col justify-between space-y-3">
-                                <div className="flex items-center justify-between">
-                                    <div>
-                                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300">
-                                            1:1 Unrolled Paper Wrap Template Preview
-                                        </h3>
-                                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                                            Circumference: {copeResult.circumferenceMm} mm • Saddle Depth: {copeResult.peakToValleyOuterMm} mm
-                                        </p>
-                                    </div>
-                                    <div className="flex items-center gap-3 text-[11px]">
-                                        <span className="flex items-center gap-1 text-red-600 dark:text-red-400">
-                                            <span className="w-3 h-0.5 bg-red-500 inline-block" /> Inner-Wall Fit Cut
-                                        </span>
-                                        <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
-                                            <span className="w-3 h-0.5 bg-blue-500 inline-block" /> Outer-Wall Bevel
-                                        </span>
-                                    </div>
-                                </div>
-
-                                <div className="bg-white rounded-lg p-3 overflow-auto flex items-center justify-center min-h-[260px]">
-                                    <div
-                                        className="w-full flex justify-center"
-                                        dangerouslySetInnerHTML={{ __html: copeSvgResult.svg }}
-                                    />
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {activeTab === 'wire' && (
-                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                            {/* Left Wire Settings */}
-                            <div className="lg:col-span-5 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3.5">
-                                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                                    Wire &amp; 3D Bending Jig Configuration
-                                </h3>
-
-                                <div>
-                                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Wire Path Source</label>
-                                    <select
-                                        value={selectedWireIdx}
-                                        onChange={e => setSelectedWireIdx(Number(e.target.value))}
-                                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
-                                    >
-                                        {sceneWires.map((w, idx) => (
-                                            <option key={w.id} value={idx}>
-                                                Scene Curve: {w.name} ({w.pointsMm.length} vertices)
-                                            </option>
-                                        ))}
-                                        <option value={-1}>Sample 3D Multi-Bend Bracket Wire Path</option>
-                                    </select>
-                                </div>
-
-                                <div className="grid grid-cols-3 gap-2.5">
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Wire Ø (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="0.5"
-                                            min="0.5"
-                                            value={wireDiameterMm}
-                                            onChange={e => setWireDiameterMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Bend R (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="0.5"
-                                            min="1"
-                                            value={bendRadiusMm}
-                                            onChange={e => setBendRadiusMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Springback</label>
-                                        <input
-                                            type="number"
-                                            step="0.01"
-                                            min="1.0"
-                                            max="1.25"
-                                            value={springbackFactor}
-                                            onChange={e => setSpringbackFactor(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-2.5">
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Jig Base Plate (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="1"
-                                            min="3"
-                                            value={jigBaseThicknessMm}
-                                            onChange={e => setJigBaseThicknessMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Fulcrum Pin Height (mm)</label>
-                                        <input
-                                            type="number"
-                                            step="1"
-                                            min="5"
-                                            value={jigPostHeightMm}
-                                            onChange={e => setJigPostHeightMm(Number(e.target.value))}
-                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 rounded-lg p-3 flex items-center justify-between">
-                                    <span className="text-xs text-slate-500 dark:text-slate-400">Total Wire Cut Length:</span>
-                                    <span className="text-sm font-bold text-cyan-700 dark:text-cyan-300">
-                                        {wireSchedule.totalCutLengthMm} mm
-                                    </span>
-                                </div>
-
-                                <button
-                                    onClick={handleAddWireJigToScene}
-                                    className="w-full py-2.5 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors shadow"
-                                >
-                                    <Plus className="w-4 h-4" />
-                                    Add Printable Wire Bending Jig to Scene
-                                </button>
-                                <AddSimulationButton
-                                    disabled={sceneWires.length === 0 || wireSchedule.pointsMm.length < 2}
-                                    disabledReason="No wire in the scene: the path shown is a sample."
-                                    onSimulate={(placement) => handleSimulate({ wire: wireSchedule }, placement)}
-                                    progress={simulation.progress}
-                                    error={simulation.error}
-                                />
-                                {jigAddedMessage && (
-                                    <div className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
-                                        <Check className="w-3.5 h-3.5" />
-                                        {jigAddedMessage}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Right LRA Table */}
-                            <div className="lg:col-span-7 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
-                                <div className="flex items-center justify-between">
-                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300">
-                                        LRA (Length • Rotate • Angle) Wire Bending Schedule
-                                    </h3>
-                                    <span className="text-xs text-slate-500 dark:text-slate-400">
-                                        Tail Straight Feed: {wireSchedule.finalStraightMm} mm
-                                    </span>
-                                </div>
-
-                                <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-lg">
-                                    <table className="w-full text-left text-xs">
-                                        <thead className="bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
-                                            <tr>
-                                                <th className="py-2 px-3">Step</th>
-                                                <th className="py-2 px-3">Straight Feed (mm)</th>
-                                                <th className="py-2 px-3">Rotate (°)</th>
-                                                <th className="py-2 px-3">Bend (°)</th>
-                                                <th className="py-2 px-3">Overbend (°)</th>
-                                                <th className="py-2 px-3">Arc (mm)</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-200 dark:divide-slate-800/70">
-                                            {wireSchedule.steps.map(step => (
-                                                <tr key={step.stepIndex} className="hover:bg-slate-100 dark:hover:bg-slate-900/50">
-                                                    <td className="py-2 px-3 font-semibold text-cyan-700 dark:text-cyan-300">
-                                                        #{step.stepIndex}
-                                                    </td>
-                                                    <td className="py-2 px-3 text-slate-900 dark:text-white font-mono">
-                                                        {step.straightFeedMm}
-                                                    </td>
-                                                    <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-mono">
-                                                        {step.rotateAngleDeg}°
-                                                    </td>
-                                                    <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-mono">
-                                                        {step.bendAngleDeg}°
-                                                    </td>
-                                                    <td className="py-2 px-3 text-amber-700 dark:text-amber-300 font-mono">
-                                                        {step.overbendAngleDeg}°
-                                                    </td>
-                                                    <td className="py-2 px-3 text-slate-500 dark:text-slate-400 font-mono">
-                                                        {step.arcLengthMm}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    )}
                 </div>
             </div>
         </div>

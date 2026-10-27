@@ -657,7 +657,7 @@ as the matching export.
 | Contour Slice | the layers, stacked at the sheet thickness |
 | Cast, Mold | **Add to Scene**: the pattern or mold halves, as exported, beside the model |
 | Sheet Unfold | the net folded back up along its own lines, fitted to the model and measured |
-| Tube & Wire | the tab's output made up: the frame's tubes seated hub to hub, the cope seated on its target, the wire bent from its schedule |
+| Pipes | the cut list made up: every tube cut to its length and seated hub to hub |
 | Timber Breakdown | each window's program milled in the frame the part sits in on the bed, each tenon pushed into what it leaves |
 
 * **One simulator for the feature and the tests.** `utils/cutSimulation.ts` sweeps each cutter
@@ -685,20 +685,20 @@ as the matching export.
   `collision: 'hull'` so it is never decomposed).
 * The work runs on its own export worker (job kinds `simulate`, `simulateSheets` and
   `simulateTimber`, with progress), started for the job and stopped after it. The sheet fold and
-  Tube & Wire are quick and run on the page.
-* **Built from the output, measured against the model.** Sheet, tube and timber are each made
-  from what the dialog hands over, never from the model, or they would prove nothing; the model
-  comes in only to fit the result to and measure it. Each has found a fault in its exporter:
-  sheet-metal flats that kept the full outside size (no setback), a cope that clipped the target
-  mid-wall, and timber window sheets that put the wrong face against the fence.
+  the pipe frame are quick and run on the page.
+* **Built from the output, measured against the model.** Sheet, pipe frame and timber are
+  each made from what the dialog hands over, never from the model, or they would prove nothing;
+  the model comes in only to fit the result to and measure it. Sheet and timber each found a
+  fault in their exporter: sheet-metal flats that kept the full outside size (no setback), and
+  timber window sheets that put the wrong face against the fence.
 * **Sheet fold** (`utils/sheetFoldSimulation.ts`): a bend's arc is the neutral length
   (R + K·T)·θ centred on the drawn bend line, about an axis R in from the inside of the bend; the
   rest of the drawn zone stays flat. The model is the part's outside. The fit is by face normals
   and edge directions (rotation), then face planes and cut-edge lines (position): none of those
   move with a setback, which corners do. Each unfolded face carries `model3DMm` for this.
-* **Tube & Wire** (`utils/tubeSimulation.ts`): the cope's target is ray-cast, not read from the
-  template; the wire is bent by `overbend / springback`, so the springback factor itself is
-  only proven by a test bend.
+* **Pipe frame** (`utils/tubeSimulation.ts`): each tube seated against its start hub's shoulder;
+  the gap to the far shoulder and tubes clashing inside a hub are what it reports. Frames are
+  built from a sketch or any solid by `utils/pipeSkeleton.ts` (plans/pipe-frame-from-shape.md).
 * **Timber** (`utils/timberSimulation.ts`): with the sheet's face up and the top end at the Y0
   stop the part lies only one way, so machine X = Y × Z fixes the face at the fence; a sheet
   naming another is a `setupFault`. Mortises on parts too big for the CNC have no program and

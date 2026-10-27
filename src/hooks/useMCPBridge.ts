@@ -113,19 +113,11 @@ import {
   PIPE_STANDARDS,
   breakdownPipeFrame,
   buildAllCustomHubNodes,
-  buildWireBendingJigNode,
-  computeTubeCopeJoint,
-  computeWireBendSchedule,
-  exportTubeCopeSvg,
-  extractSceneTubeJoints,
-  extractSceneWireCurves,
   withoutHubsAt,
   generatePipeStructurePreset,
   type PipeFrameOptions,
   type PipeStandardId,
   type PipeStructurePresetId,
-  type TubeCopeSpec,
-  type WireBendJigOptions,
 } from '../utils/tubeAndWireExporter';
 import { reliefSimulationTools } from '../utils/simulatedPart';
 import { simulationSetups } from '../utils/solidSetups';
@@ -133,7 +125,7 @@ import { BLOCK_FACES, FACE_NAME, type BlockFace } from '../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from './useAddSimulation';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../utils/timberSimulation';
-import { tubeSimulationRequest, type TubeSimulationJob } from '../utils/tubeSimulation';
+import { pipeFrameSimulationRequest } from '../utils/tubeSimulation';
 import { frameBodyInScene } from '../utils/pipeSkeleton';
 import { runMcpMoldSimulation } from '../utils/moldWorkerClient';
 import { runMcpRepairMesh } from '../utils/meshRepair';
@@ -4575,32 +4567,6 @@ export function useMCPBridge() {
           };
         }
 
-        case 'EXPORT_TUBE_COPE': {
-          const cope = computeTubeCopeJoint(msg as unknown as TubeCopeSpec);
-          const svgRes = exportTubeCopeSvg([msg as unknown as TubeCopeSpec]);
-          return {
-            ok: true,
-            circumferenceMm: cope.circumferenceMm,
-            peakToValleyOuterMm: cope.peakToValleyOuterMm,
-            peakToValleyInnerMm: cope.peakToValleyInnerMm,
-            peakToValleyCutMm: cope.peakToValleyCutMm,
-            svg: svgRes.svg,
-            warnings: cope.warnings,
-          };
-        }
-
-        case 'COMPUTE_WIRE_BEND': {
-          const pts: [number, number, number][] = Array.isArray(msg.pointsMm) ? (msg.pointsMm as [number, number, number][]) : [[0, 0, 0], [60, 0, 0], [60, 50, 0], [120, 50, 0]];
-          if (msg.addJig === true) {
-            const { jigNode, schedule, isPlanar } = buildWireBendingJigNode(pts, msg as Partial<WireBendJigOptions>);
-            const nextNodes = [...store.sceneGraph.nodes.filter((n) => n.id !== jigNode.id), jigNode];
-            await settleScene(nextNodes);
-            return { ok: true, jigId: jigNode.id, isPlanar, schedule };
-          }
-          const schedule = computeWireBendSchedule(pts, msg as Partial<WireBendJigOptions>);
-          return { ok: true, schedule };
-        }
-
         /*
          * Prepare for Casting, as the switch under Mold > Sand or Lost PLA > Advanced does it: edge
          * breaks on every part, and for sand, draft baked in. See
@@ -4960,59 +4926,16 @@ export function useMCPBridge() {
           }
 
           if (msg.kind === 'tube') {
-            // One tab of Tube & Wire, made from what it hands over: the cut
-            // list, the cope template, or the bend schedule.
-            const tubeJob = msg.tubeJob ?? 'frame';
-            let job: TubeSimulationJob;
-            let warnings: string[] = [];
-            if (tubeJob === 'frame') {
-              const bd = breakdownPipeFrame(scene, msg as Partial<PipeFrameOptions>);
-              if (!bd.struts.length) return { ok: false, error: 'The scene has no struts: cylinders or long boxes, end to end.', warnings: bd.warnings };
-              job = { frame: bd };
-              warnings = bd.warnings;
-            } else if (tubeJob === 'cope') {
-              // The joint as asked, or the scene's first.
-              const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
-              let spec: TubeCopeSpec | undefined = typeof msg.cutTubeOdMm === 'number'
-                ? {
-                    cutTubeOdMm: msg.cutTubeOdMm,
-                    cutTubeWallMm: n(msg.cutTubeWallMm, 2),
-                    targetKind: msg.targetKind === 'plane' ? 'plane' : 'tube',
-                    targetTubeOdMm: n(msg.targetTubeOdMm, msg.cutTubeOdMm),
-                    angleDeg: n(msg.angleDeg, 90),
-                    offsetMm: n(msg.offsetMm, 0),
-                    clockAngleDeg: n(msg.clockAngleDeg, 0),
-                  }
-                : undefined;
-              if (!spec) {
-                const members = extractSceneTubeJoints(scene);
-                const at = typeof msg.jointIndex === 'number' ? msg.jointIndex : 0;
-                spec = members.flatMap((m) => [m.startCope?.spec, m.endCope?.spec]).filter((x): x is TubeCopeSpec => !!x)[at];
-              }
-              if (!spec) return { ok: false, error: 'No coped joint in the scene: pass cut_tube_od_mm, angle_deg and the target to describe one.' };
-              const profile = computeTubeCopeJoint(spec);
-              job = { cope: profile };
-              warnings = profile.warnings;
-            } else if (tubeJob === 'wire') {
-              const wires = extractSceneWireCurves(scene);
-              const pts = Array.isArray(msg.pointsMm)
-                ? (msg.pointsMm as [number, number, number][])
-                : wires[typeof msg.wireIndex === 'number' ? msg.wireIndex : 0]?.pointsMm;
-              if (!pts || pts.length < 2) return { ok: false, error: 'No wire in the scene: pass points_mm, the path through its corners.' };
-              const schedule = computeWireBendSchedule(pts, msg as Partial<WireBendJigOptions>);
-              job = { wire: schedule };
-              warnings = schedule.warnings;
-            } else {
-              return { ok: false, error: "tube_job must be 'frame', 'cope' or 'wire'." };
-            }
-            const where = 'cope' in job ? 'beside' : placement;
-            const { figures, request } = tubeSimulationRequest(job, sceneStockTransform());
-            const added = await addSimulationToScene({ ...request, placement: where });
+            // The pipe frame made from its cut list, every tube seated hub to hub.
+            const bd = breakdownPipeFrame(scene, msg as Partial<PipeFrameOptions>);
+            if (!bd.struts.length) return { ok: false, error: 'The scene has no pipes: frame a shape in the Pipes dialog first, or load a pipe frame from Examples.', warnings: bd.warnings };
+            const { figures, request } = pipeFrameSimulationRequest(bd, sceneStockTransform());
+            const added = await addSimulationToScene({ ...request, placement });
             return {
-              ok: true, id: added.id, name: added.name, kind: 'tube', placement: where,
+              ok: true, id: added.id, name: added.name, kind: 'tube', placement,
               ...figures,
               volumeMm3: Math.round(added.volumeMm3),
-              warnings,
+              warnings: bd.warnings,
             };
           }
 

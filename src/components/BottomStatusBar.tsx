@@ -197,11 +197,7 @@ export interface ExportActions {
   joinery?: () => void;
   /** Unfold 3D meshes into flat 2D nets (papercraft glue tabs, sheet-metal K-factor bends, or leather stitch patterns). */
   unfold?: () => void;
-  /** Co-design a PCB enclosure & faceplate from Volt or standard board presets. */
-  pcb?: () => void;
-  /** Synthesize involute gears, racks, GT2 pulleys, leadscrews, cams, and 4-bar linkages. */
-  mechanisms?: () => void;
-  /** Build PVC/EMT conduit pipe frames (greenhouse, carport, yard pub), 3D-printable multi-way hubs, coping templates & wire jigs. */
+  /** Pipe frames: a sketch or any shape framed in tube, with the stick cut list and 3D-printable hubs. */
   pipes?: () => void;
 }
 
@@ -442,13 +438,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             : { label: 'Mold', title: 'Make a mold or a casting pattern of the selected part (or the whole scene): rigid, silicone, sand or lost PLA', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
           { label: 'Cast', title: 'Pour into a mold you have: select it (or a master in its pour box), then Cast', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
           ...(exports.pipes
-            ? [{ label: 'Pipes', title: 'PVC / EMT Conduit Pipe Frame (mini greenhouse, carport, yard pub), 3D-printable multi-way hub connectors, 10ft stick cut list, tube coping & wire jigs', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
-            : []),
-          ...(exports.mechanisms
-            ? [{ label: 'Gears', title: 'Synthesize manufacturable involute gears, racks, GT2 pulleys, T8 leadscrews, cams, and 4-bar linkages', tone: 'text-blue-600 dark:text-blue-400', icon: <Cuboid className="w-3.5 h-3.5" />, run: exports.mechanisms }]
-            : []),
-          ...(exports.pcb
-            ? [{ label: 'PCB', title: 'Volt ↔ Mesh PCB Enclosure, Standoff Boss & Front-Panel Cutout Co-Design', tone: 'text-teal-600 dark:text-teal-400', icon: <Cpu className="w-3.5 h-3.5" />, run: exports.pcb }]
+            ? [{ label: 'Pipes', title: 'Pipe Frame: frame a sketch or any shape in PVC, EMT or aluminium tube, with the stick cut list and 3D-printable hubs', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
             : []),
         ]
       : [
@@ -458,10 +448,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             : []),
           { label: 'Contour', title: 'Contour Slices (Stacked Relief Map, SVG)', tone: 'text-emerald-600 dark:text-emerald-400', icon: <Layers className="w-3.5 h-3.5" />, run: exports.contourSlices },
           ...(exports.pipes
-            ? [{ label: 'Pipes', title: 'PVC / EMT Pipe Frame, Tube Fish-Mouth Coping Templates & Wire Bending Jigs', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
-            : []),
-          ...(exports.pcb
-            ? [{ label: 'PCB', title: 'Export 1:1 PCB Front-Panel Faceplate SVG to Etch or build 3D enclosure', tone: 'text-teal-600 dark:text-teal-400', icon: <Cpu className="w-3.5 h-3.5" />, run: exports.pcb }]
+            ? [{ label: 'Pipes', title: 'Pipe Frame: frame a sketch or any shape in PVC, EMT or aluminium tube, with the stick cut list and 3D-printable hubs', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
             : []),
           ...(machineTarget === 'cnc'
             ? [

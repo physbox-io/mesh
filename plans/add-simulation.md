@@ -131,14 +131,15 @@ the machine.
 ## Sheet, tube and timber (added 2026-10-26, built the same day)
 
 Status: relief, solid machining (both sides and multi-face), laser, contour, rigid mold, every
-Mold tab's cast chain, and now Sheet Unfold, Tube & Wire and Timber Breakdown all simulate, in
-the dialogs and through `physics_add_simulation` (kinds `sheet`, `tube` with `tube_job`,
+Mold tab's cast chain, and now Sheet Unfold, the pipe frame and Timber Breakdown all simulate, in
+the dialogs and through `physics_add_simulation` (kinds `sheet`, `tube` (the pipe frame),
 `timber`; physbox-mcp v0.47.0). Each found a fault in its exporter, fixed in its own commit:
 sheet-metal flats with no setback (3.3 mm long per bend on a 50 mm box), a cope template that
 hit the target mid-wall (0.07 mm), and timber window sheets whose fence face the part could
 not be put against, which milled off-centre mortises mirrored. See GUIDE.md § Add Simulation.
 Left as notes on the body, not simulated: glue tabs, mitred tenon tips (sawn square), the
-pipe hubs (the dialog adds the printable ones), and hand-cut mortises. The original plan:
+pipe hubs (the dialog adds the printable ones), and hand-cut mortises. Tube coping and wire bending were removed from the Pipes dialog on 2026-10-26, at the user's
+call, with their simulations. The original plan:
 
 | Dialog | Output | Simulation |
 | --- | --- | --- |
