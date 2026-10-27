@@ -62,6 +62,18 @@ list, hubs and Add Simulation all work on it unchanged.
 - Diagonals add one member per quad panel, and only when asked.
 - Every frame passes through the cut list and Add Simulation with no gap.
 
+## Learned on the birdhouse (2026-10-26)
+
+- A model's parts are often children of one body: every pipe scan now walks the whole tree.
+- A shape too small for the pipe asked for (under six diameters across) is framed in the
+  largest tube that suits it (eight diameters, else six), down to 6 mm aluminium tube, and the
+  dialog's cut list switches to it. Refusing was wrong: a 120 mm birdhouse is a real size.
+- Curved or flat is told by the angle between neighbouring faces, not the face count, which
+  took a many-part flat model for a curve and simplified it to a tetrahedron.
+- Holes cut into a shape are not framed: a frame goes round a window, not along its edge.
+- A joint within a quarter span of support along members is held: an eave is a cantilever,
+  not a joint wanting a post.
+
 ## Not in v1
 
 Centre-line skeletons for branching shapes (a tree, a chair). Pipes are on the shape's surface

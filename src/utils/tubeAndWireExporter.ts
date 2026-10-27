@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { buildEtchHandoffUrl, etchBaseUrl } from './etchHandoff';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { boxGeom, cylinderGeom, mm } from './hardwareGeometry';
@@ -17,12 +18,16 @@ export type PipeStandardId =
   | 'emt_3_4'
   | 'emt_1'
   | 'pvc_metric_20'
-  | 'pvc_metric_25';
+  | 'pvc_metric_25'
+  | 'alu_6'
+  | 'alu_8'
+  | 'alu_10'
+  | 'alu_12';
 
 export interface PipeStandardSpec {
   id: PipeStandardId;
   label: string;
-  material: 'pvc' | 'emt';
+  material: 'pvc' | 'emt' | 'aluminium';
   nominalSize: string;
   odMm: number;
   idMm: number;
@@ -142,6 +147,12 @@ export const PIPE_STANDARDS: Record<PipeStandardId, PipeStandardSpec> = {
     socketDepthMm: 19.0,
     stockLengthMm: 3000,
   },
+  // Round tube in the sizes hobby and DIY shops sell by the metre: what a
+  // model the size of a birdhouse or a plant stand is framed in.
+  alu_6: { id: 'alu_6', label: '6 mm Aluminium Tube', material: 'aluminium', nominalSize: '6 × 1 mm', odMm: 6, idMm: 4, wallMm: 1, socketDepthMm: 9, stockLengthMm: 1000 },
+  alu_8: { id: 'alu_8', label: '8 mm Aluminium Tube', material: 'aluminium', nominalSize: '8 × 1 mm', odMm: 8, idMm: 6, wallMm: 1, socketDepthMm: 12, stockLengthMm: 1000 },
+  alu_10: { id: 'alu_10', label: '10 mm Aluminium Tube', material: 'aluminium', nominalSize: '10 × 1 mm', odMm: 10, idMm: 8, wallMm: 1, socketDepthMm: 15, stockLengthMm: 1000 },
+  alu_12: { id: 'alu_12', label: '12 mm Aluminium Tube', material: 'aluminium', nominalSize: '12 × 1 mm', odMm: 12, idMm: 10, wallMm: 1, socketDepthMm: 18, stockLengthMm: 1000 },
 };
 
 // ============================================================================
@@ -329,7 +340,7 @@ export function generatePipeStructurePreset(
   const spec = PIPE_STANDARDS[stdId] ?? PIPE_STANDARDS.pvc_sch40_3_4;
   const rMm = spec.odMm / 2;
   const rgba: [number, number, number, number] =
-    spec.material === 'emt' ? [0.7, 0.74, 0.78, 1] : [0.94, 0.95, 0.97, 1];
+    spec.material === 'pvc' ? [0.94, 0.95, 0.97, 1] : [0.7, 0.74, 0.78, 1];
 
   const nodes: SceneNode[] = [];
   let idx = 1;
@@ -508,6 +519,25 @@ interface RawStrutSegment {
   endMm: Vec3;
 }
 
+/**
+ * Every body at any depth as if it stood at the top of the scene, its world
+ * transform baked into its own pos and quat. A model built as one body with
+ * its parts as children (a birdhouse, a flower stand) used to show no struts
+ * at all: only the top level was read. Simulations are left out.
+ */
+function flattenNodes(nodes: SceneNode[], parent?: THREE.Matrix4): SceneNode[] {
+  const out: SceneNode[] = [];
+  for (const n of nodes || []) {
+    if (n.simulation) continue;
+    const world = getNodeWorldTransform(n, parent);
+    const p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+    world.decompose(p, q, sc);
+    out.push({ ...n, pos: [p.x, p.y, p.z], quat: [q.w, q.x, q.y, q.z], euler: undefined, children: [] });
+    out.push(...flattenNodes(n.children || [], world));
+  }
+  return out;
+}
+
 function nodeWorldFrame(node: SceneNode): { worldPos: Vec3; worldRotMat: number[]; scale: Vec3 } {
   const anyNode = node as SceneNode & {
     position?: [number, number, number];
@@ -557,7 +587,7 @@ function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
   const cylSegments: RawStrutSegment[] = [];
   const boxSegments: RawStrutSegment[] = [];
 
-  for (const node of scene.nodes) {
+  for (const node of flattenNodes(scene.nodes)) {
     // A hub's sleeves are cylinders too, but they are the fitting, not the frame.
     if (isPipeHubNode(node)) continue;
     if ((node as SceneNode & { visible?: boolean }).visible === false) continue;
@@ -1052,7 +1082,8 @@ export function buildPipeHubNode(
         rgba: negativeRgba,
       });
 
-      if (opts.crossBoltHoleMm > 0) {
+      // A bolt through a small tube's socket would cut half of it away: those are glued.
+      if (opts.crossBoltHoleMm > 0 && spec.odMm >= 16) {
         const boltCenterDist = port.shoulderOffsetMm + socketDepthMm * 0.5;
         const boltCenter = vScale(port.dir, boltCenterDist);
         const perp = perpUnitVector(port.dir);
@@ -1369,7 +1400,7 @@ export function extractSceneTubeJoints(
     axis: Vec3;
   }[] = [];
 
-  for (const node of scene.nodes) {
+  for (const node of flattenNodes(scene.nodes)) {
     // A hub's sleeves are cylinders too, but they are the fitting, not the frame.
     if (isPipeHubNode(node)) continue;
     if ((node as SceneNode & { visible?: boolean }).visible === false) continue;
@@ -1871,7 +1902,7 @@ export function extractSceneWireCurves(
 
   // Chain connected cylinder/capsule segments into polylines
   const segments: { name: string; p1: Vec3; p2: Vec3; used: boolean }[] = [];
-  for (const node of scene.nodes) {
+  for (const node of flattenNodes(scene.nodes)) {
     // A hub's sleeves are cylinders too, but they are the fitting, not the frame.
     if (isPipeHubNode(node)) continue;
     if ((node as SceneNode & { visible?: boolean }).visible === false) continue;

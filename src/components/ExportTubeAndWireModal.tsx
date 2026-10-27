@@ -196,6 +196,12 @@ export function ExportTubeAndWireModal({
         void simulation.add({ ...tubeSimulationRequest(job, sceneStockTransform()).request, placement });
     };
 
+    /** A pipe, and the length it is sold in. */
+    const choosePipe = (id: PipeStandardId) => {
+        setPipeStandardId(id);
+        setStockLengthMm(PIPE_STANDARDS[id].stockLengthMm);
+    };
+
     const handleFrameShape = () => {
         if (!selectedBody) return;
         const state = useStore.getState();
@@ -211,7 +217,14 @@ export function ExportTubeAndWireModal({
             const nextScene: SceneGraph = { ...state.sceneGraph, nodes };
             state.updateScene(nextScene);
             void state.recompile(nextScene);
-            setFrameMessage(`Framed ${selectedBody.name}: ${skeleton.members.length} pipes, none over ${Math.round(skeleton.maxSpanMm)} mm between joints`);
+            // Too small for the pipe chosen: framed in tube that suits it, and the cut list follows.
+            if (skeleton.resizedFrom) choosePipe(skeleton.pipeStandardId);
+            setFrameMessage(
+                `Framed ${selectedBody.name}: ${skeleton.members.length} pipes, none over ${Math.round(skeleton.maxSpanMm)} mm between joints` +
+                (skeleton.resizedFrom
+                    ? `. In ${PIPE_STANDARDS[skeleton.pipeStandardId].label}: ${PIPE_STANDARDS[skeleton.resizedFrom].label} is too big for it.`
+                    : '')
+            );
         } catch (e) {
             setFrameMessage((e as Error).message);
         }
@@ -401,7 +414,7 @@ export function ExportTubeAndWireModal({
                                         <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Pipe / Conduit Standard</label>
                                         <select
                                             value={pipeStandardId}
-                                            onChange={e => setPipeStandardId(e.target.value as PipeStandardId)}
+                                            onChange={e => choosePipe(e.target.value as PipeStandardId)}
                                             className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         >
                                             {Object.values(PIPE_STANDARDS).map(std => (
@@ -422,6 +435,7 @@ export function ExportTubeAndWireModal({
                                             <option value={3000}>3.0 m Metric Standard (3000 mm)</option>
                                             <option value={6096}>20 ft Commercial Stick (6096 mm)</option>
                                             <option value={1524}>5 ft Half Stick (1524 mm)</option>
+                                            <option value={1000}>1 m Length (1000 mm)</option>
                                         </select>
                                     </div>
                                 </div>
@@ -529,6 +543,7 @@ export function ExportTubeAndWireModal({
                                     </button>
                                     <AddSimulationButton
                                         disabled={breakdown.struts.length === 0}
+                                        disabledReason="No pipes in the scene yet: build a frame above, or open a pipe frame from Examples."
                                         onSimulate={(placement) => handleSimulate({ frame: breakdown }, placement)}
                                         progress={simulation.progress}
                                         error={simulation.error}
@@ -722,7 +737,8 @@ export function ExportTubeAndWireModal({
                                         Open in Etch (2D Laser / Print Layout)
                                     </button>
                                     <AddSimulationButton
-                                        disabled={false}
+                                        disabled={selectedJointIndex < 0}
+                                        disabledReason="Pick a joint from the scene: these figures describe no part of the model."
                                         onSimulate={(placement) => handleSimulate({ cope: copeResult }, placement)}
                                         progress={simulation.progress}
                                         error={simulation.error}
@@ -863,7 +879,8 @@ export function ExportTubeAndWireModal({
                                     Add Printable Wire Bending Jig to Scene
                                 </button>
                                 <AddSimulationButton
-                                    disabled={wireSchedule.pointsMm.length < 2}
+                                    disabled={sceneWires.length === 0 || wireSchedule.pointsMm.length < 2}
+                                    disabledReason="No wire in the scene: the path shown is a sample."
                                     onSimulate={(placement) => handleSimulate({ wire: wireSchedule }, placement)}
                                     progress={simulation.progress}
                                     error={simulation.error}

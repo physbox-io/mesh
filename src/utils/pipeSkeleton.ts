@@ -68,9 +68,7 @@ export interface SkeletonOptions {
  * (3/4" Schedule 40, 5 ft). From each pipe's own stiffness and weight.
  */
 export function defaultMaxSpanMm(spec: PipeStandardSpec): number {
-  const steel = spec.material === 'emt';
-  const E = steel ? 200_000 : 2_800; // N/mm²
-  const rho = steel ? 7.85e-6 : 1.4e-6; // kg/mm³
+  const [E, rho] = { emt: [200_000, 7.85e-6], aluminium: [69_000, 2.7e-6], pvc: [2_800, 1.4e-6] }[spec.material]; // N/mm², kg/mm³
   const ro = spec.odMm / 2, ri = spec.idMm / 2;
   const I = (Math.PI / 4) * (ro ** 4 - ri ** 4);
   const w = (Math.PI * (ro * ro - ri * ri) * rho + Math.PI * ri * ri * 1e-6) * 9.81; // N/mm
@@ -182,8 +180,14 @@ function newell(pts: V3[]): V3 {
 
 /** A solid's surface as flat faces, simplified when it is curved finer than the span needs. */
 function fromSolid(g: Graph, path: SceneNode[], spanMm: number): Face[] {
-  // The body alone, under its parents' transforms.
-  let wrapped: SceneNode = path[path.length - 1];
+  // The body alone, under its parents' transforms, and without what is cut
+  // out of it: a frame goes round a window, not along its edge.
+  const solidOnly = (n: SceneNode): SceneNode => ({
+    ...n,
+    geoms: (n.geoms ?? []).filter((g) => g.csg !== 'difference'),
+    children: (n.children ?? []).map(solidOnly),
+  });
+  let wrapped: SceneNode = solidOnly(path[path.length - 1]);
   for (let i = path.length - 2; i >= 0; i--) wrapped = { ...path[i], geoms: [], children: [wrapped] };
   const tris = collectSceneTriangles({ nodes: [wrapped] } as SceneGraph).tris;
   if (tris.length < 9) return [];
@@ -203,24 +207,45 @@ function fromSolid(g: Graph, path: SceneNode[], spanMm: number): Face[] {
   let { verts, idx } = weld(tris);
   let faces = clusterTrianglesToPolyFaces(verts, idx, 3);
 
-  // About one triangle per (edge² · √3/4) of surface, the edge under two
-  // thirds of the span so an uneven facet still needs nothing across it:
-  // more faces than twice that means a curved surface, brought down to facets.
-  const areaMm2 = faces.reduce((s, f) => s + f.areaM2 * 1e6, 0);
-  const edgeMm = spanMm * 0.65;
-  const wanted = Math.max(8, Math.ceil(areaMm2 / (0.433 * edgeMm * edgeMm)));
-  if (faces.length > wanted * 2 && verts.length > wanted) {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts.flatMap((v) => [v.x, v.y, v.z])), 3));
-    geo.setIndex(idx);
-    const keep = Math.max(6, Math.round(wanted / 2) + 2);
-    const out = new SimplifyModifier().modify(geo, Math.max(0, verts.length - keep));
-    const pos = out.attributes.position.array as ArrayLike<number>;
-    const index = out.index ? Array.from(out.index.array as ArrayLike<number>) : Array.from({ length: pos.length / 3 }, (_, i) => i);
-    const soup: number[] = [];
-    for (const i of index) soup.push(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
-    ({ verts, idx } = weld(soup));
-    faces = clusterTrianglesToPolyFaces(verts, idx, 3);
+  // Curved, or made of flat faces? A tessellated curve's neighbouring faces
+  // meet at a few degrees; a box's, a roof's, a birdhouse's at thirty or more.
+  // Counting faces instead took any model of many flat parts for a curve and
+  // simplified a birdhouse down to four corners.
+  const edgeFaces = new Map<string, number[]>();
+  faces.forEach((f, k) => f.verts.forEach((v, i) => {
+    const w = f.verts[(i + 1) % f.verts.length];
+    const key = v < w ? `${v}:${w}` : `${w}:${v}`;
+    edgeFaces.set(key, [...(edgeFaces.get(key) ?? []), k]);
+  }));
+  let shared = 0, gentle = 0;
+  for (const ks of edgeFaces.values()) {
+    if (ks.length !== 2) continue;
+    shared++;
+    if (faces[ks[0]].normal.angleTo(faces[ks[1]].normal) < (20 * Math.PI) / 180) gentle++;
+  }
+  if (shared > 0 && gentle / shared > 0.3) {
+    // About one triangle per (edge² · √3/4) of surface, the edge under two
+    // thirds of the span so an uneven facet needs nothing across it, and no
+    // more than a quarter of the shape so a small one keeps its form.
+    const box = new THREE.Box3().setFromPoints(verts);
+    const sizeMm = box.getSize(new THREE.Vector3()).multiplyScalar(1000);
+    const across = [sizeMm.x, sizeMm.y, sizeMm.z].sort((a, b) => b - a)[1];
+    const areaMm2 = faces.reduce((sum, f) => sum + f.areaM2 * 1e6, 0);
+    const edgeMm = Math.min(spanMm * 0.65, across / 4);
+    const wanted = Math.max(8, Math.ceil(areaMm2 / (0.433 * edgeMm * edgeMm)));
+    if (verts.length > wanted) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts.flatMap((v) => [v.x, v.y, v.z])), 3));
+      geo.setIndex(idx);
+      const keep = Math.max(6, Math.round(wanted / 2) + 2);
+      const simplified = new SimplifyModifier().modify(geo, Math.max(0, verts.length - keep));
+      const pos = simplified.attributes.position.array as ArrayLike<number>;
+      const index = simplified.index ? Array.from(simplified.index.array as ArrayLike<number>) : Array.from({ length: pos.length / 3 }, (_, i) => i);
+      const soup: number[] = [];
+      for (const i of index) soup.push(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+      ({ verts, idx } = weld(soup));
+      faces = clusterTrianglesToPolyFaces(verts, idx, 3);
+    }
   }
 
   const out: Face[] = [];
@@ -332,7 +357,8 @@ function addPosts(g: Graph, spanMm: number, floorMm: number) {
       prev = next;
     }
   }
-  const held = (i: number) => {
+  // Held outright: on the floor, or a steep member going down from it.
+  const outright = (i: number) => {
     const p = g.nodes[i];
     if (p[2] <= floorMm + 1) return true;
     return g.members.some((m) => {
@@ -340,10 +366,22 @@ function addPosts(g: Graph, spanMm: number, floorMm: number) {
       return other >= 0 && g.nodes[other][2] < p[2] - 1 && slopeOf(p, g.nodes[other]) >= steep;
     });
   };
+  // And within a short reach of that along members: an eave overhanging its
+  // wall is a cantilever a pipe carries, not a joint wanting a post.
+  const reach = spanMm / 4;
+  const dist = g.nodes.map((_, i) => (outright(i) ? 0 : Infinity));
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const m of g.members) {
+      const L = len(sub(g.nodes[m.a], g.nodes[m.b]));
+      if (dist[m.a] + L < dist[m.b]) { dist[m.b] = dist[m.a] + L; changed = true; }
+      if (dist[m.b] + L < dist[m.a]) { dist[m.a] = dist[m.b] + L; changed = true; }
+    }
+  }
   const feet = new Map<number, number>();
   const count = g.nodes.length;
   for (let i = 0; i < count; i++) {
-    if (held(i)) continue;
+    if (dist[i] <= reach) continue;
     const p = g.nodes[i];
     const foot = g.node([p[0], p[1], floorMm]);
     g.link(i, foot, 'post');
@@ -391,6 +429,10 @@ function addDiagonals(g: Graph) {
 export interface BuiltSkeleton extends Skeleton {
   maxSpanMm: number;
   source: 'sketch' | 'solid';
+  /** The pipe it was framed in: the one asked for, or a smaller one when that was too big for the shape. */
+  pipeStandardId: PipeStandardId;
+  /** Set when the pipe asked for was too big and another was used: which. */
+  resizedFrom?: PipeStandardId;
 }
 
 /** The skeleton of a body in the scene, supported. */
@@ -398,16 +440,34 @@ export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: Skele
   const path = pathTo(scene.nodes, bodyId);
   if (!path) throw new Error(`No body '${bodyId}'.`);
   const body = path[path.length - 1];
-  const spec = PIPE_STANDARDS[opts.pipeStandardId ?? 'pvc_sch40_3_4'] ?? PIPE_STANDARDS.pvc_sch40_3_4;
-  const span = opts.maxSpanMm && opts.maxSpanMm > 0 ? opts.maxSpanMm : defaultMaxSpanMm(spec);
+  const asked = PIPE_STANDARDS[opts.pipeStandardId ?? 'pvc_sch40_3_4'] ?? PIPE_STANDARDS.pvc_sch40_3_4;
+  const sketch = !!body.latticeCage && (body.latticeCage.coords.length ?? 0) >= 3;
+
+  // Sized before any joints are merged, from the shape itself.
+  const sizeOf = (pts: V3[]) => [0, 1, 2].map((a) => Math.max(...pts.map((p) => p[a])) - Math.min(...pts.map((p) => p[a])));
+  const loose = new Graph(0);
+  if (sketch) fromLattice(loose, body, worldMatrix(path), 0);
+  else fromSolid(loose, path, opts.maxSpanMm && opts.maxSpanMm > 0 ? opts.maxSpanMm : defaultMaxSpanMm(asked));
+  if (!loose.members.length) throw new Error(`${body.name} has no lines or faces to frame.`);
+  // A pipe between two fittings is about three diameters at the least, and a
+  // frame needs two of them across, so a shape under six diameters across
+  // collapses into its joints. Then the largest tube that suits it is used:
+  // eight diameters across where one does, six where not.
+  const across = sizeOf(loose.nodes).sort((a, b) => b - a)[1];
+  let spec = asked;
+  if (across < asked.odMm * 6) {
+    const smaller = Object.values(PIPE_STANDARDS).filter((s) => s.odMm < asked.odMm).sort((a, b) => b.odMm - a.odMm);
+    const pick = smaller.find((s) => s.odMm * 8 <= across) ?? smaller.find((s) => s.odMm * 6 <= across);
+    if (!pick) throw new Error(`${body.name} is ${Math.round(across)} mm across, smaller than any tube here frames.`);
+    spec = pick;
+  }
+  const span = opts.maxSpanMm && opts.maxSpanMm > 0 && spec === asked ? opts.maxSpanMm : defaultMaxSpanMm(spec);
   const floor = opts.floorMm ?? 0;
   // Joints closer than about a fitting's reach are one joint.
-  const weld = Math.max(10, spec.odMm * 1.5);
+  const weld = Math.max(spec.odMm, spec.odMm * 1.5);
   const g = new Graph(weld);
 
-  const sketch = !!body.latticeCage && (body.latticeCage.coords.length ?? 0) >= 3;
   const faces = sketch ? fromLattice(g, body, worldMatrix(path), Math.max(5, spec.odMm / 2)) : fromSolid(g, path, span);
-  if (!g.members.length) throw new Error(`${body.name} has no lines or faces to frame.`);
 
   for (const f of faces) fillFace(g, f, span, floor);
   splitAtJoints(g, weld / 2);
@@ -415,7 +475,10 @@ export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: Skele
   splitAtJoints(g, weld / 2);
   if (opts.diagonals) addDiagonals(g);
 
-  return { nodes: g.nodes, members: g.members, maxSpanMm: span, source: sketch ? 'sketch' : 'solid' };
+  return {
+    nodes: g.nodes, members: g.members, maxSpanMm: span, source: sketch ? 'sketch' : 'solid',
+    pipeStandardId: spec.id, ...(spec !== asked ? { resizedFrom: asked.id } : {}),
+  };
 }
 
 const KIND_NAMES: Record<MemberKind, string> = {
@@ -428,7 +491,7 @@ const KIND_NAMES: Record<MemberKind, string> = {
  */
 export function skeletonToNodes(sk: Skeleton, pipeStandardId: PipeStandardId, idPrefix: string, shift: V3 = [0, 0, 0]): SceneNode[] {
   const spec = PIPE_STANDARDS[pipeStandardId] ?? PIPE_STANDARDS.pvc_sch40_3_4;
-  const rgba: [number, number, number, number] = spec.material === 'emt' ? [0.7, 0.74, 0.78, 1] : [0.94, 0.95, 0.97, 1];
+  const rgba: [number, number, number, number] = spec.material === 'pvc' ? [0.94, 0.95, 0.97, 1] : [0.7, 0.74, 0.78, 1];
   const count: Partial<Record<MemberKind, number>> = {};
   const struts = sk.members.map((m, i) => {
     count[m.kind] = (count[m.kind] ?? 0) + 1;
@@ -453,7 +516,7 @@ export function frameBodyInScene(
   const xs = sk.nodes.map((p) => p[0]);
   const shift: V3 = opts.placement === 'beside' ? [Math.max(...xs) - Math.min(...xs) + 300, 0, 0] : [0, 0, 0];
   const prefix = `frame_${Math.random().toString(36).slice(2, 7)}`;
-  const frame = skeletonToNodes(sk, opts.pipeStandardId ?? 'pvc_sch40_3_4', prefix, shift);
+  const frame = skeletonToNodes(sk, sk.pipeStandardId, prefix, shift);
   const without = (list: SceneNode[]): SceneNode[] =>
     list.filter((n) => n.id !== bodyId).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
   const kept = opts.placement === 'beside' ? scene.nodes : without(scene.nodes);

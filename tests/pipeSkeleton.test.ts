@@ -100,3 +100,22 @@ describe('framing a body in the scene', () => {
     expect(replaced.nodes.length - 12).toBe(8);
   });
 });
+
+describe('shapes the pipes do not suit', () => {
+  it('reads a model whose parts are children, and frames a small one in tube that suits it', async () => {
+    const { PRESETS } = await import('../src/presets/presetScenes');
+    const scene = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).birdhouse.scene;
+    // Its walls and roof are children of one root body: they are read now.
+    expect(breakdownPipeFrame(scene).struts.length).toBeGreaterThan(0);
+    // 120 mm across, too small for 3/4" PVC: framed in tube that suits it.
+    const sk = buildPipeSkeleton(scene, 'birdhouse_root');
+    expect(sk.resizedFrom).toBe('pvc_sch40_3_4');
+    expect(PIPE_STANDARDS[sk.pipeStandardId].odMm * 8).toBeLessThanOrEqual(130);
+    // The house: four floor edges, four corners, two eaves, four gable
+    // rafters and the ridge. The round door is cut out, so it is not framed;
+    // the roof's overhang is carried, not stood on posts.
+    expect(sk.members.length).toBe(15);
+    expect(sk.nodes.length).toBe(10);
+    expect(sk.members.every((m) => m.kind === 'edge')).toBe(true);
+  });
+});

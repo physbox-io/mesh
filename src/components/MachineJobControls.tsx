@@ -419,7 +419,9 @@ export const AddSimulationButton: React.FC<{
    */
   label?: string;
   besideOnly?: boolean;
-}> = ({ disabled, onSimulate, progress, error, label = 'Add Simulation', besideOnly = false }) => {
+  /** Why it cannot be used yet, said beside it while it is disabled. */
+  disabledReason?: string;
+}> = ({ disabled, onSimulate, progress, error, label = 'Add Simulation', besideOnly = false, disabledReason }) => {
   const [placement, setPlacement] = useState<'beside' | 'overlay'>('beside');
   const busy = progress !== null;
   return (
@@ -454,6 +456,9 @@ export const AddSimulationButton: React.FC<{
       >
         {placement === 'beside' ? 'Beside' : 'Overlay'}
       </button>}
+      {disabled && disabledReason && (
+        <span className="ml-2 text-[11px] leading-snug text-slate-500 dark:text-slate-400 max-w-[16rem]">{disabledReason}</span>
+      )}
     </div>
   );
 };

@@ -4554,10 +4554,15 @@ export function useMCPBridge() {
           await settleScene(nodes, { replacesScene: false });
           const kinds: Record<string, number> = {};
           for (const m of skeleton.members) kinds[m.kind] = (kinds[m.kind] ?? 0) + 1;
-          const bd = breakdownPipeFrame(useStore.getState().sceneGraph, { pipeStandardId });
+          const bd = breakdownPipeFrame(useStore.getState().sceneGraph, {
+            pipeStandardId: skeleton.pipeStandardId,
+            stockLengthMm: PIPE_STANDARDS[skeleton.pipeStandardId].stockLengthMm,
+          });
           return {
             ok: true,
             source: skeleton.source,
+            pipe: skeleton.pipeStandardId,
+            ...(skeleton.resizedFrom ? { note: `${PIPE_STANDARDS[skeleton.resizedFrom].label} is too big for ${body.name}: framed in ${PIPE_STANDARDS[skeleton.pipeStandardId].label}.` } : {}),
             maxSpanMm: skeleton.maxSpanMm,
             pipes: skeleton.members.length,
             joints: skeleton.nodes.length,

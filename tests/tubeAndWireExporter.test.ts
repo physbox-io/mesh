@@ -18,9 +18,10 @@ import type { SceneGraph } from '../src/types/scene';
 
 describe('tubeAndWireExporter', () => {
   describe('1. Hardware-Store Pipe & Conduit Standards (PIPE_STANDARDS)', () => {
-    it('contains all 10 US Schedule 40 PVC, EMT conduit, and Metric PVC standards', () => {
+    it('contains the US Schedule 40 PVC, EMT conduit, Metric PVC and small aluminium tube standards', () => {
       const ids = Object.keys(PIPE_STANDARDS);
-      expect(ids).toHaveLength(10);
+      expect(ids).toHaveLength(14);
+      expect(PIPE_STANDARDS.alu_8.material).toBe('aluminium');
       expect(PIPE_STANDARDS.pvc_sch40_3_4.odMm).toBeCloseTo(26.67, 2);
       expect(PIPE_STANDARDS.pvc_sch40_3_4.stockLengthMm).toBe(3048);
       expect(PIPE_STANDARDS.emt_3_4.material).toBe('emt');
