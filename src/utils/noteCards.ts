@@ -475,6 +475,46 @@ A **3 ft (915 mm) tall** hardwood flower stand designed for **Bandsaw + Desktop 
 3. Inspect the **exploded 3D mortise-and-tenon preview**, **stopped edge roundovers**, **sliding CNC window setups** (for the 891 mm legs on a 300 mm CNC bed), and **Per-Part Fabrication Cards**
 4. Click **\`Apply Joinery to Scene\`** to replace the block model with the 14 tenoned, mortised, and profiled individual parts`,
 
+  pipe_greenhouse: `# 🌱 Mini Greenhouse
+
+A 1.2 × 1.8 m pitched-roof greenhouse frame, three bays, built from **3/4" Schedule 40 PVC** struts that meet end to end.
+
+## Make it
+1. Click **\`Pipes\`** on the bottom status bar
+2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
+3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
+4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
+
+  pipe_yard_pub: `# 🍺 Yard Pub Canopy
+
+A 1.8 × 1.2 m canopy over a bar counter, open at the back, built from **3/4" Schedule 40 PVC** struts that meet end to end.
+
+## Make it
+1. Click **\`Pipes\`** on the bottom status bar
+2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
+3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
+4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
+
+  pipe_carport: `# 🚗 Carport Frame
+
+A 2.8 × 3.9 m carport, four bays under a pitched roof, built from **3/4" Schedule 40 PVC** struts that meet end to end.
+
+## Make it
+1. Click **\`Pipes\`** on the bottom status bar
+2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
+3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
+4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
+
+  pipe_geodesic_dome: `# 🔺 Geodesic Dome
+
+A 2.4 m geodesic dome of 25 struts at angles no fitting is sold for, built from **3/4" Schedule 40 PVC** struts that meet end to end.
+
+## Make it
+1. Click **\`Pipes\`** on the bottom status bar
+2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
+3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
+4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
+
   chest_of_drawers: `# 🗄️ Chest of Drawers
 
 Four drawers on **400 mm full-extension ball-bearing runners**, eight runners in all, each opening in turn and closing again.

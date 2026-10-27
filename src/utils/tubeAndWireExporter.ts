@@ -463,6 +463,37 @@ export function generatePipeStructurePreset(
   return nodes;
 }
 
+const FITTING_NAMES: Record<PipeFittingClassification, string> = {
+  straight_coupler: 'Coupler',
+  '90_elbow': '90° Elbow',
+  '90_tee': '90° Tee',
+  '90_corner_3way': '3-Way Corner',
+  custom_printed_hub: 'Printed Hub',
+};
+
+/**
+ * A pipe structure as built: the struts, and a fitting at every joint, the
+ * ones a store sells and the printed ones alike, so nothing stands on a bare
+ * pipe end. The struts still run hub centre to hub centre, which is what the
+ * cut list is planned from; the fittings are left out of that.
+ */
+export function pipeStructureScene(
+  preset: PipeStructurePresetId,
+  options?: Parameters<typeof generatePipeStructurePreset>[1]
+): SceneNode[] {
+  const struts = generatePipeStructurePreset(preset, options);
+  const frameOptions: Partial<PipeFrameOptions> = { pipeStandardId: options?.pipeStandardId ?? 'pvc_sch40_3_4' };
+  const bd = breakdownPipeFrame({ nodes: struts } as SceneGraph, frameOptions);
+  const fittings = bd.hubs
+    .filter((h) => h.ports.length >= 2)
+    .map((h) => {
+      const node = buildPipeHubNode(h, frameOptions);
+      node.name = `${FITTING_NAMES[h.classification]}: ${h.name}`;
+      return node;
+    });
+  return [...struts, ...fittings];
+}
+
 interface RawStrutSegment {
   name: string;
   startMm: Vec3;
@@ -506,11 +537,18 @@ function transformPointMm(
   return [wx * 1000, wy * 1000, wz * 1000];
 }
 
+/** A hub or fitting `buildPipeHubNode` made: its core is named `hub_core`. */
+export function isPipeHubNode(node: SceneNode): boolean {
+  return (node.geoms ?? []).some((g) => g.name === 'hub_core');
+}
+
 function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
   const cylSegments: RawStrutSegment[] = [];
   const boxSegments: RawStrutSegment[] = [];
 
   for (const node of scene.nodes) {
+    // A hub's sleeves are cylinders too, but they are the fitting, not the frame.
+    if (isPipeHubNode(node)) continue;
     if ((node as SceneNode & { visible?: boolean }).visible === false) continue;
     const { worldPos, worldRotMat, scale } = nodeWorldFrame(node);
     const geoms = node.geoms ?? [];
@@ -1085,8 +1123,9 @@ export function buildAllCustomHubNodes(breakdown: PipeFrameBreakdownResult): Sce
 
   return targets.map((hub, idx) => {
     const node = buildPipeHubNode(hub, breakdown.options);
-    // Keep at hub's actual position or provide clean metadata
-    node.id = `custom_hub_print_${idx + 1}`;
+    // Its own id (`printed_<hub id>`), so adding the hubs again replaces them
+    // rather than stacking a second set, and an example's fittings are replaced too.
+    void idx;
     node.pos = [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])];
     void spacingMm;
     return node;
@@ -1310,6 +1349,8 @@ export function extractSceneTubeJoints(
   }[] = [];
 
   for (const node of scene.nodes) {
+    // A hub's sleeves are cylinders too, but they are the fitting, not the frame.
+    if (isPipeHubNode(node)) continue;
     if ((node as SceneNode & { visible?: boolean }).visible === false) continue;
     const { worldPos, worldRotMat, scale } = nodeWorldFrame(node);
     for (let gIdx = 0; gIdx < (node.geoms ?? []).length; gIdx++) {
@@ -1810,6 +1851,8 @@ export function extractSceneWireCurves(
   // Chain connected cylinder/capsule segments into polylines
   const segments: { name: string; p1: Vec3; p2: Vec3; used: boolean }[] = [];
   for (const node of scene.nodes) {
+    // A hub's sleeves are cylinders too, but they are the fitting, not the frame.
+    if (isPipeHubNode(node)) continue;
     if ((node as SceneNode & { visible?: boolean }).visible === false) continue;
     const { worldPos, worldRotMat, scale } = nodeWorldFrame(node);
     for (const g of node.geoms ?? []) {

@@ -15,6 +15,7 @@ import { latticeBracketPreset } from './latticeBracket';
 import { oakTreePreset } from './oakTree';
 import { soapDishPreset } from './soapDish';
 import { shatterPreset } from './shatter';
+import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
   bearingCartPreset, chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
 } from './hardwarePresets';
@@ -3628,6 +3629,33 @@ export const PRESETS = {
     emoji: '🏗️',
     scene: extrusionFramePreset,
     camera: { position: [0.62, -0.82, 0.55], target: [0, 0, 0.15] } satisfies PresetCamera,
+  },
+  // Conduit frames for the Pipes dialog: struts end to end, which it turns
+  // into a stick cut list and the hubs that join them.
+  pipe_greenhouse: {
+    name: 'Mini Greenhouse (PVC Pipe)',
+    emoji: '🌱',
+    scene: { nodes: pipeStructureScene('mini_greenhouse') },
+    camera: { position: [2.6, -3.2, 2.2], target: [0, 0, 0.75] } satisfies PresetCamera,
+  },
+  pipe_yard_pub: {
+    name: 'Yard Pub Canopy (PVC Pipe)',
+    emoji: '🍺',
+    scene: { nodes: pipeStructureScene('yard_pub') },
+    camera: { position: [2.8, -3.4, 2.5], target: [0, 0, 1.1] } satisfies PresetCamera,
+  },
+  pipe_carport: {
+    name: 'Carport Frame (PVC Pipe)',
+    emoji: '🚗',
+    // 3.9 m deep rather than the dialog's 4.5, to stay a size the scene handles well.
+    scene: { nodes: pipeStructureScene('carport', { depthMm: 3900 }) },
+    camera: { position: [4.2, -5.0, 3.4], target: [0, 0, 1.2] } satisfies PresetCamera,
+  },
+  pipe_geodesic_dome: {
+    name: 'Geodesic Dome (PVC Pipe)',
+    emoji: '🔺',
+    scene: { nodes: pipeStructureScene('geodesic_dome') },
+    camera: { position: [2.8, -3.4, 2.4], target: [0, 0, 0.6] } satisfies PresetCamera,
   },
 };
 

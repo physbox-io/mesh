@@ -31,6 +31,10 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   chest_of_drawers: 'Make it',
   sealed_jar: 'Make it',
   flower_stand: 'Make it',
+  pipe_greenhouse: 'Make it',
+  pipe_yard_pub: 'Make it',
+  pipe_carport: 'Make it',
+  pipe_geodesic_dome: 'Make it',
   boolean_shapes: 'Make it',
   openscad_demo: 'Make it',
 

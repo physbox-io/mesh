@@ -87,3 +87,18 @@ describe('tube and wire simulation', () => {
     expect(sim.deviation.maxMm).toBeGreaterThan(1);
   });
 });
+
+describe('pipe structure examples', () => {
+  it('stand on a fitting at every joint, and plan the same cut list as the bare struts', async () => {
+    const { pipeStructureScene, generatePipeStructurePreset: bare, isPipeHubNode } = await import('../src/utils/tubeAndWireExporter');
+    for (const preset of ['mini_greenhouse', 'yard_pub', 'carport', 'geodesic_dome'] as const) {
+      const nodes = pipeStructureScene(preset);
+      const withHubs = breakdownPipeFrame({ nodes } as unknown as SceneGraph);
+      const without = breakdownPipeFrame({ nodes: bare(preset) } as unknown as SceneGraph);
+      expect(withHubs.struts.length).toBe(without.struts.length);
+      expect(withHubs.totalPipeLengthMm).toBeCloseTo(without.totalPipeLengthMm, 6);
+      // Every joint of two or more pipes has its fitting.
+      expect(nodes.filter(isPipeHubNode).length).toBe(without.hubs.filter((h) => h.ports.length >= 2).length);
+    }
+  });
+});
