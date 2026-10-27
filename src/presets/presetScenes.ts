@@ -9,6 +9,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
  */
 export type PresetCamera = { position: [number, number, number]; target: [number, number, number] };
 import { generateCurveGeoms, generateWedgeMeshData, generateConeMeshData } from '../utils/geom';
+import { buildInvoluteGearNode, buildRackAndPinionPair, GEAR_AMBER, GEAR_BLUE } from '../utils/mechanismParts';
 import { californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS } from './californiaRelief';
 import { megaBustStudioPreset } from './megaBustStudio';
 import { latticeBracketPreset } from './latticeBracket';
@@ -162,223 +163,159 @@ export const generateGearGeoms = (
   return geoms;
 };
 
-const createGear = (id: string, name: string, pos: number[], radius: number, teeth: number, color: number[], isMotor: boolean, isSecondGear: boolean = false): SceneNode => {
-  return {
-    id,
-    name,
-    type: 'body',
-    pos,
-    joints: [
-      { 
-        name: `${id}_hinge`, 
-        type: 'hinge', 
-        axis: [0, 0, 1], // Z-axis hinge
-        damping: 0.5,
-        ...(isMotor && { actuator: { type: 'velocity', kv: 20, ctrlValue: 1.5 } })
-      }
-    ],
-    geoms: generateGearGeoms(id, radius, teeth, color, isSecondGear),
-    children: []
-  };
+// The gear presets are built from the same involute parts as Gears & Drives,
+// so what turns here is what prints. Module 1.5 mm, 8 mm thick, PLA.
+const GEAR_MODULE_MM = 1.5;
+const GEAR_THICK_MM = 8;
+/** Gear centres sit this high: their bottom faces just clear the floor. */
+const GEAR_Z = (GEAR_THICK_MM / 2 + 2) / 1000;
+
+/**
+ * Spur gears meshing in a line along +X, centred on the origin, the first one
+ * motor driven. Each is clocked so its teeth sit in the gaps of the one before
+ * and coupled to it at -(z_prev / z). Teeth stay at 17 or more, so no gear is
+ * profile shifted and the centre distance is m (z1 + z2) / 2.
+ */
+const gearTrain = (ids: string[], teeth: number[], colors: [number, number, number, number][]): SceneNode[] => {
+  const xs: number[] = [0];
+  const clocks: number[] = [0];
+  for (let i = 1; i < teeth.length; i++) {
+    xs.push(xs[i - 1] + (GEAR_MODULE_MM * (teeth[i - 1] + teeth[i])) / 2 / 1000);
+    // Mesh against the previous gear as it stands: a space faces its tooth,
+    // then roll back by however far that gear was itself turned.
+    clocks.push(Math.PI + Math.PI / teeth[i] - (teeth[i - 1] / teeth[i]) * clocks[i - 1]);
+  }
+  const mid = (xs[0] + xs[xs.length - 1]) / 2;
+  return teeth.map((z, i) => buildInvoluteGearNode(
+    { moduleMm: GEAR_MODULE_MM, teeth: z, thicknessMm: GEAR_THICK_MM, boreKind: 'round', boreDiameterMm: 5, rgba: colors[i] },
+    {
+      id: ids[i],
+      name: ids[i],
+      pos: [+(xs[i] - mid).toFixed(6), 0, GEAR_Z],
+      angleRad: clocks[i],
+      actuated: i === 0,
+      ...(i > 0 ? { coupleTargetId: ids[i - 1], coupleRatio: -(teeth[i - 1] / z) } : {}),
+    },
+  ));
 };
 
 export const gearsPreset: SceneGraph = {
-  nodes: [
-    // Two meshing gears at 0.1m radius
-    createGear('gear1', 'gear1', [-0.1, 0, 0.03], 0.1, 12, [0.8, 0.4, 0.2, 1], true, false),
-    createGear('gear2', 'gear2', [0.1, 0, 0.03], 0.1, 12, [0.2, 0.6, 0.8, 1], false, true)
-  ]
+  // 18T driving 30T: the driven gear turns at 3/5 the speed, the other way.
+  nodes: gearTrain(['gear1', 'gear2'], [18, 30], [GEAR_BLUE, GEAR_AMBER]),
 };
 
-const machineGear1 = createGear('gear1', 'gear1', [-0.2, -0.1, 0.03], 0.1, 12, [0.8, 0.4, 0.2, 1], true, false);
-machineGear1.geoms.push({
-  name: 'gear1_shaft',
-  type: 'cylinder',
-  size: [0.02, 0.04],
-  pos: [0, 0, 0.04],
-  rgba: [0.45, 0.45, 0.45, 1],
-  mass: 0.1,
-  contype: 0,
-  conaffinity: 0
-});
+const [machineGear1, machineGear2, machineGear3] = gearTrain(
+  ['gear1', 'gear2', 'gear3'],
+  [18, 30, 42],
+  [GEAR_BLUE, GEAR_AMBER, [0.3, 0.7, 0.45, 1]],
+);
 
-const machineGear2 = createGear('gear2', 'gear2', [0.0, -0.1, 0.03], 0.1, 12, [0.2, 0.6, 0.8, 1], false, true);
-
-const machineGear3 = createGear('gear3', 'gear3', [0.0, 0.1, 0.03], 0.1, 12, [0.2, 0.8, 0.4, 1], false, false);
+// The output gear carries a sweeper arm across its top face, reaching past its
+// teeth, which sweeps a block off a shelf beside it. The gears themselves do
+// not collide (they are coupled); the arm does.
+const gear3TipM = (GEAR_MODULE_MM * (42 + 2)) / 2 / 1000;
+const sweeperReachM = gear3TipM + 0.027;
 machineGear3.geoms.push({
-  name: 'gear3_pusher_peg',
-  type: 'cylinder',
-  size: [0.015, 0.04],
-  pos: [0.08, 0.0, 0.06],
+  name: 'gear3_sweeper',
+  type: 'box',
+  size: [sweeperReachM / 2, 0.003, 0.003],
+  pos: [sweeperReachM / 2, 0, GEAR_THICK_MM / 2 / 1000 + 0.003],
   rgba: [0.9, 0.2, 0.2, 1],
-  mass: 0.05,
-  condim: 3
+  mass: 0.005,
+  condim: 3,
 });
 
+// Beside the output gear on +Y, a quarter turn ahead of the arm, which turns
+// +Z. The shelf's top is below the arm and the block's side is in its path.
+const shelfRadialM = (gear3TipM + 0.003 + sweeperReachM) / 2;
 const machineShelf: SceneNode = {
   id: 'shelf',
   name: 'shelf',
   type: 'body',
-  pos: [0.2, 0.08, 0.03],
+  pos: [machineGear3.pos[0], shelfRadialM, 0.004],
   joints: [],
   geoms: [
     {
       name: 'shelf_geom',
       type: 'box',
-      size: [0.06, 0.06, 0.03],
+      size: [0.012, (sweeperReachM - gear3TipM - 0.003) / 2, 0.004],
       rgba: [0.7, 0.7, 0.7, 1],
-      mass: 10,
+      mass: 1,
       condim: 3,
-      friction: [0.1, 0.005, 0.0005]
-    }
+      friction: [0.3, 0.005, 0.0005],
+    },
   ],
-  children: []
+  children: [],
 };
 
 const machineBlock: SceneNode = {
   id: 'push_block',
   name: 'push_block',
   type: 'body',
-  pos: [0.17, 0.08, 0.09],
-  joints: [
-    { name: 'push_block_free', type: 'free' }
-  ],
+  pos: [machineGear3.pos[0], shelfRadialM, 0.008 + 0.0085],
+  joints: [{ name: 'push_block_free', type: 'free' }],
   geoms: [
     {
       name: 'push_block_geom',
       type: 'box',
-      size: [0.025, 0.025, 0.025],
+      size: [0.008, 0.008, 0.008],
       rgba: [0.95, 0.8, 0.25, 1],
-      mass: 0.1,
+      mass: 0.005,
       condim: 3,
-      friction: [0.1, 0.005, 0.0005]
-    }
+      friction: [0.3, 0.005, 0.0005],
+    },
   ],
-  children: []
+  children: [],
 };
 
 export const machinePreset: SceneGraph = {
-  nodes: [
-    machineGear1,
-    machineGear2,
-    machineGear3,
-    machineShelf,
-    machineBlock
-  ]
+  nodes: [machineGear1, machineGear2, machineGear3, machineShelf, machineBlock],
 };
 
-// Generate visual cogs matching pinion pitch spaced along X as child SceneNodes
-const pinionPitch = (Math.PI * 2 * 0.08) / 8;
-const rackTeethChildren: SceneNode[] = [];
-let toothIndex = 0;
-// Space teeth along a 0.35m long rack base (from -0.15 to 0.15)
-for (let x = -0.15; x <= 0.15; x += pinionPitch) {
-  rackTeethChildren.push({
-    id: `rack_tooth_${toothIndex}`,
-    name: `tooth_${toothIndex}`,
-    type: 'body',
-    pos: [x, 0.02, 0],
-    joints: [],
-    geoms: [
-      {
-        name: `rack_tooth_${toothIndex}_geom`,
-        type: 'box',
-        size: [0.005, 0.008, 0.01],
-        rgba: [0.7, 0.7, 0.7, 1],
-        mass: 0.01
-      }
-    ],
-    children: []
-  });
-  toothIndex++;
-}
-
-// Rack body node with X slide joint limited to [-0.3, 0.3] range
+// A 16T pinion on a 40-tooth rack, which pushes a block along the floor. The
+// rack's own collider is turned on for that (the builder leaves it off, since
+// it is coupled to the pinion, not driven by tooth contact).
+const rackPinion = buildRackAndPinionPair(
+  { teeth: 16 },
+  { teeth: 40 },
+  { pinionId: 'pinion', rackId: 'rack', pinionVelocityRadPerSec: 4, origin: [0, 0.03, GEAR_Z] },
+);
 const rackNode: SceneNode = {
-  id: 'rack',
+  ...rackPinion.rackNode,
   name: 'rack',
-  type: 'body',
-  pos: [0, -0.12, 0.03],
-  joints: [
-    { name: 'rack_slide', type: 'slide', axis: [1, 0, 0], damping: 0.5, limited: true, range: [-0.3, 0.3] }
-  ],
-  geoms: [
-    {
-      name: 'rack_base',
-      type: 'box',
-      size: [0.18, 0.02, 0.02],
-      rgba: [0.8, 0.8, 0.8, 1],
-      mass: 0.5
-    }
-  ],
-  children: rackTeethChildren
+  geoms: rackPinion.rackNode.geoms.map((g) => (g.role === 'collision' ? { ...g, contype: 1, conaffinity: 1, condim: 3 } : g)),
 };
-
-// Pinion gear with velocity motor
-const pinionNode = createGear('pinion', 'pinion', [0, 0, 0.03], 0.08, 8, [0.2, 0.6, 0.8, 1], true);
-
-// A block for the rack to push, and a fixed stop at the end of its travel.
-//
-// These were both in the wrong place. The rack spans x = -0.18..0.18 and the
-// shelf's left face was at x = 0.30, so the rack advanced exactly 0.12m, jammed
-// against the immovable shelf (mass 10, no joints = welded to the world) and
-// stalled the pinion — while the block sat at z = 0.065..0.115, ABOVE the rack's
-// z = 0.01..0.05, where the rack could never touch it. Nothing was pushed and
-// the mechanism just bound up.
-const rackShelf: SceneNode = {
-  id: 'rack_shelf',
-  name: 'rack_shelf',
-  type: 'body',
-  // Beyond the rack's full travel (0.18 + 0.3), so it acts as an end stop
-  // instead of an obstruction.
-  pos: [0.55, -0.12, 0.03],
-  joints: [],
-  geoms: [
-    {
-      name: 'rack_shelf_geom',
-      type: 'box',
-      size: [0.05, 0.05, 0.03],
-      rgba: [0.65, 0.65, 0.65, 1],
-      mass: 10,
-      condim: 3,
-      friction: [0.1, 0.005, 0.0005]
-    }
-  ],
-  children: []
-};
+const rackHalfLengthM = rackPinion.rackMetrics.totalLengthMm / 2 / 1000;
+const rackCollider = rackNode.geoms.find((g) => g.role === 'collision')!;
 
 const rackBlock: SceneNode = {
   id: 'rack_block',
   name: 'rack_block',
   type: 'body',
-  // In the rack's path and at its height: resting on the floor (half-extent
-  // 0.025) just past the rack's leading face, so the rack picks it up early in
-  // its travel and shoves it along.
-  pos: [0.25, -0.12, 0.025],
-  joints: [
-    { name: 'rack_block_free', type: 'free' }
-  ],
+  // On the floor in the rack's path, just past its leading end, so the rack
+  // picks it up early in its travel and shoves it along.
+  // Square on to the collider, which sits below the rack's origin (that is
+  // on its pitch line); off centre, the block slides off its end sideways.
+  pos: [rackHalfLengthM + 0.011, +(rackNode.pos[1] + rackCollider.pos![1]).toFixed(7), 0.008],
+  joints: [{ name: 'rack_block_free', type: 'free' }],
   geoms: [
     {
+      // Light, as the rack is: its coupling to the pinion is a soft
+      // constraint, and a load much heavier than the rack drags it behind.
       name: 'rack_block_geom',
       type: 'box',
-      size: [0.025, 0.025, 0.025],
+      size: [0.008, 0.008, 0.008],
       rgba: [0.95, 0.8, 0.25, 1],
-      mass: 0.1,
+      mass: 0.005,
       condim: 3,
-      friction: [0.1, 0.005, 0.0005]
-    }
+      friction: [0.1, 0.005, 0.0005],
+    },
   ],
-  children: []
+  children: [],
 };
 
 export const rackPinionPreset: SceneGraph = {
-  nodes: [
-    pinionNode,
-    rackNode,
-    rackShelf,
-    rackBlock
-  ]
+  nodes: [{ ...rackPinion.pinionNode, name: 'pinion' }, rackNode, rackBlock],
 };
 
 const inclinedPlaneWedgeMesh = generateWedgeMeshData(0.35, 0.2, 0.16);

@@ -59,7 +59,6 @@ const PART_TILES: PartTile[] = [
   { type: 'sphere', label: 'Sphere', title: 'Sphere (Ball geom)', color: 'emerald', spin: 'group-hover:rotate-6', Icon: SphereIcon },
   { type: 'cylinder', label: 'Cylinder', title: 'Cylinder block', color: 'amber', spin: 'group-hover:-rotate-3', Icon: CylinderIcon },
   { type: 'capsule', label: 'Pole', title: 'Capsule rod (Pole)', color: 'indigo', spin: 'group-hover:rotate-6', Icon: PoleIcon },
-  { type: 'gear', label: 'Gear', title: 'Gear cog', color: 'slate', spin: 'group-hover:rotate-45', slow: true, Icon: GearIcon },
   { type: 'wedge', label: 'Wedge', title: 'Wedge (Inclined plane)', color: 'amber', spin: 'group-hover:-rotate-3', Icon: WedgeIcon },
   { type: 'pyramid', label: 'Pyramid', title: 'Pyramid (Convex mesh)', color: 'rose', spin: 'group-hover:rotate-3', Icon: PyramidIcon },
   { type: 'cone', label: 'Cone', title: 'Cone (Convex mesh)', color: 'sky', spin: 'group-hover:-rotate-3', Icon: ConeIcon },
@@ -68,14 +67,15 @@ const PART_TILES: PartTile[] = [
   { type: 'ellipsoid', label: 'Ellipsoid', title: 'Ellipsoid primitive', color: 'amber', spin: 'group-hover:rotate-6', Icon: EllipsoidIcon },
   // A boolean body: an ellipsoid minus a piercing ellipsoid.
   { type: 'ring', label: 'Ring', title: 'Ring (an ellipsoid with a second ellipsoid subtracted; a boolean body you can reshape)', color: 'rose', spin: 'group-hover:-rotate-6', Icon: RingIcon },
-  { type: 'sculpt', label: 'Sculpt', title: 'Sculpt (a ball of clay you push into shape by hand; detail is added as you brush)', color: 'sky', spin: 'group-hover:rotate-3', Icon: SculptIcon },
-  { type: 'lattice', label: 'Lattice', title: 'Lattice (connect points on a 3D grid into faces, with exact dimensions and optional smoothing)', color: 'indigo', spin: 'group-hover:-rotate-3', Icon: LatticeIcon },
-  { type: 'curve', label: 'Curve', title: 'Curve (rigid spline track that balls roll along)', color: 'orange', spin: 'group-hover:rotate-3', Icon: CurveIcon },
   { type: 'pulley_wheel', label: 'Pulley', title: 'Pulley Stand system disk', color: 'cyan', spin: 'group-hover:rotate-45', slow: true, Icon: PulleyIcon },
   { type: 'pulley_rope', label: 'Rope', title: 'Coupler Rope', color: 'emerald', spin: 'group-hover:-rotate-6', Icon: RopeIcon },
 ];
 
-const OTHER_TILES: PartTile[] = [
+/** The ways to make a shape of your own, rather than drop in a fixed one. */
+const MODELLING_TILES: PartTile[] = [
+  { type: 'sculpt', label: 'Sculpt', title: 'Sculpt (a ball of clay you push into shape by hand; detail is added as you brush)', color: 'sky', spin: 'group-hover:rotate-3', Icon: SculptIcon },
+  { type: 'lattice', label: 'Lattice', title: 'Lattice (connect points on a 3D grid into faces, with exact dimensions and optional smoothing)', color: 'indigo', spin: 'group-hover:-rotate-3', Icon: LatticeIcon },
+  { type: 'curve', label: 'Curve', title: 'Curve (rigid spline track that balls roll along)', color: 'orange', spin: 'group-hover:rotate-3', Icon: CurveIcon },
   { type: 'mesh', label: 'Mesh', title: 'Custom static Mesh', color: 'violet', spin: 'group-hover:rotate-6', Icon: MeshIcon },
   { type: 'openscad', label: 'SCAD', title: 'Procedural OpenSCAD shape', color: 'blue', spin: 'group-hover:-rotate-3', Icon: ScadIcon },
 ];
@@ -169,8 +169,33 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
         </span>
       </div>
 
+      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+        <span>✏️ Modelling</span>
+      </h3>
       <div className="grid grid-cols-2 gap-2">
-        {PART_TILES.map(partTile)}
+        {MODELLING_TILES.map(partTile)}
+      </div>
+
+      <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
+        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <span>🧱 Parts</span>
+        </h3>
+        <div className="grid grid-cols-2 gap-2">
+          {PART_TILES.map(partTile)}
+          <PaletteTile
+            button
+            label="Gears & Drives"
+            title="Printable involute gears, rack and pinion, GT2 belt drive, T8 leadscrew, cam and follower, or a 4-bar linkage, built to size and meshed"
+            color="blue"
+            spin="group-hover:rotate-45"
+            slow
+            icon={<GearIcon />}
+            onClick={() => {
+              usePanels.getState().setMechanismBuilderOpen(true);
+              onPlaced?.();
+            }}
+          />
+        </div>
       </div>
 
       {/* 3D-Printed Mechanical Hardware Primitives */}
@@ -205,19 +230,6 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
             icon={<DShaftHubIcon />}
             onClick={() => onAddHardwareNode(createDShaftHubNode(5.0))}
           />
-          <PaletteTile
-            button
-            label="Gears & Drives"
-            title="Printable involute gears, rack and pinion, GT2 belt drive, T8 leadscrew, cam and follower, or a 4-bar linkage, built to size and meshed"
-            color="blue"
-            spin="group-hover:rotate-45"
-            slow
-            icon={<GearIcon />}
-            onClick={() => {
-              usePanels.getState().setMechanismBuilderOpen(true);
-              onPlaced?.();
-            }}
-          />
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 mt-3 mb-2">
           Bought parts. With a part selected, one goes into its cut for it; a shaft goes through a selected bearing; runners go on a selected drawer.
@@ -245,8 +257,6 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
           <span>🔧 Others</span>
         </h3>
         <div className="grid grid-cols-2 gap-2">
-          {OTHER_TILES.map(partTile)}
-
           {/* Note Card - spans 2 cols */}
           <div
             onClick={onAddNoteCard}

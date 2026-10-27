@@ -19,6 +19,7 @@ import { needsScadBuild } from '../src/hooks/useCsgCompile';
 import { makePresetNoteCard } from '../src/utils/noteCards';
 import type { SceneNode } from '../src/types/scene';
 import { simulate, type Sim } from './helpers/simulate';
+import { compileToMJCF } from '../src/utils/mjcf';
 import { crumpleAsWeld, weldOverload } from '../src/utils/breakThresholds';
 
 const preset = (key: string) => (PRESETS as Record<string, { scene: never }>)[key].scene;
@@ -51,66 +52,84 @@ describe('stacked cubes', () => {
 describe('gear system', () => {
   let sim: Sim;
   beforeAll(async () => { sim = await simulate(preset('gears')); sim.run(2); });
-
-  it('spins the driven gear up to its commanded speed', () => {
-    // ctrl 1.5 rad/s against kv=20 and damping 0.5 settles at 1.5*20/21.
-    expect(sim.jointVel('gear1_hinge')).toBeCloseTo(1.4286, 2);
-  });
   afterAll(() => sim.dispose());
 
-  it('drives the second gear in the opposite direction at a 1:1 ratio', () => {
-    expect(sim.jointVel('gear2_hinge')).toBeCloseTo(-sim.jointVel('gear1_hinge'), 2);
+  it('spins the driving gear up to its commanded speed', () => {
+    // A velocity motor at 3 rad/s, kv 2, against almost no damping.
+    expect(sim.jointVel('gear1_hinge')).toBeCloseTo(3, 1);
+  });
+
+  it('drives the 30T gear the other way at 18/30 of the speed', () => {
+    expect(sim.jointVel('gear2_hinge') / sim.jointVel('gear1_hinge')).toBeCloseTo(-18 / 30, 3);
   });
 
   it('stays numerically stable', () => {
     // The failure this guards: with the explicit Euler integrator a velocity
-    // actuator is only stable while kv < 2*I/timestep. The rescale cut the hub
-    // inertia to 0.0018, dropping that limit from ~89 to ~3.5 with kv still 20,
-    // so the model hit NaN in QACC at t=0.011 and both gears sat at zero.
+    // actuator is only stable while kv < 2*I/timestep, and a rescale once
+    // pushed the old cogs past it, to NaN in QACC at t=0.011.
     expect(Number.isFinite(sim.jointVel('gear1_hinge'))).toBe(true);
     expect(Math.abs(sim.jointPos('gear1_hinge'))).toBeGreaterThan(1);
+  });
+
+  it('couples only the gears that mesh, by their pitch radii', () => {
+    // Cut gears' first geom is a mesh of size [1]; reading their radius from it
+    // coupled every pair within 2.4 m at 1:1.
+    const xml = compileToMJCF(preset('gears'));
+    expect(xml.match(/<joint name="[^"]*coupling[^"]*"/g)).toHaveLength(1);
   });
 });
 
 describe('gear train machine', () => {
   let sim: Sim;
-  beforeAll(async () => { sim = await simulate(preset('machine')); sim.run(2); });
-
-  it('turns every gear in the train', () => {
-    for (const j of ['gear1_hinge', 'gear2_hinge', 'gear3_hinge']) {
-      expect(Math.abs(sim.jointPos(j))).toBeGreaterThan(1);
-    }
-  });
+  beforeAll(async () => { sim = await simulate(preset('machine')); });
   afterAll(() => sim.dispose());
 
-  it('alternates direction down the train', () => {
-    expect(Math.sign(sim.jointPos('gear1_hinge'))).toBe(-Math.sign(sim.jointPos('gear2_hinge')));
-    expect(Math.sign(sim.jointPos('gear2_hinge'))).toBe(-Math.sign(sim.jointPos('gear3_hinge')));
+  it('turns every gear in the train, alternating direction, at the tooth ratios', () => {
+    sim.run(0.5);
+    const w1 = sim.jointVel('gear1_hinge');
+    expect(Math.abs(w1)).toBeGreaterThan(1);
+    expect(sim.jointVel('gear2_hinge') / w1).toBeCloseTo(-18 / 30, 3);
+    expect(sim.jointVel('gear3_hinge') / w1).toBeCloseTo(18 / 42, 3);
+  });
+
+  it('has no coupling between gears that do not mesh', () => {
+    const xml = compileToMJCF(preset('machine'));
+    expect(xml).not.toMatch(/joint1="gear3_hinge" joint2="gear1_hinge"|joint1="gear1_hinge" joint2="gear3_hinge"/);
+    expect(xml.match(/<joint name="[^"]*coupling[^"]*"/g)).toHaveLength(2);
+  });
+
+  it('sweeps the block off its shelf with the output gear\'s arm', () => {
+    const start = sim.bodyPos('push_block');
+    sim.run(3);
+    const end = sim.bodyPos('push_block');
+    expect(Math.hypot(end[0] - start[0], end[1] - start[1])).toBeGreaterThan(0.015);
+    expect(end[2]).toBeLessThan(start[2] - 0.004); // off the shelf, onto the floor
   });
 });
 
 describe('rack and pinion', () => {
   let sim: Sim;
+  const r = 16 * 1.5 / 2 / 1000; // pitch radius of the 16T M1.5 pinion
   beforeAll(async () => { sim = await simulate(preset('rack_pinion')); });
+  afterAll(() => sim.dispose());
 
   it('converts pinion rotation into rack travel at the pinion\'s pitch radius', () => {
     sim.run(0.5);
     const theta = sim.jointPos('pinion_hinge');
     const x = sim.jointPos('rack_slide');
     expect(theta).toBeGreaterThan(0.1);
-    // x = r * theta, r = 0.08. The coupling used to emit polycoef r instead of
-    // 1/r — MuJoCo's joint equality is joint1 = poly(joint2), so that demanded
-    // 1/r^2 = 156x the travel and the mechanism bound against its own limit.
-    expect(x / theta).toBeCloseTo(0.08, 2);
+    // x = r * theta. The coupling once emitted polycoef r instead of 1/r —
+    // MuJoCo's joint equality is joint1 = poly(joint2) — and the mechanism
+    // bound against its own limit.
+    expect(x / theta).toBeCloseTo(r, 3);
   });
-  afterAll(() => sim.dispose());
 
   it('pushes the load block along instead of jamming', () => {
     const before = sim.bodyPos('rack_block')[0];
-    sim.run(1.5);
-    expect(sim.bodyPos('rack_block')[0]).toBeGreaterThan(before + 0.1);
+    sim.run(1);
+    expect(sim.bodyPos('rack_block')[0]).toBeGreaterThan(before + 0.03);
     // And the rack keeps tracking the pinion while it pushes.
-    expect(sim.jointPos('rack_slide') / sim.jointPos('pinion_hinge')).toBeCloseTo(0.08, 2);
+    expect(sim.jointPos('rack_slide') / sim.jointPos('pinion_hinge')).toBeCloseTo(r, 3);
   });
 });
 
