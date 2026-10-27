@@ -424,7 +424,7 @@ export function polygonsOverlap2D(polyA: Point2D[], polyB: Point2D[], epsMm: num
 // 3D Polygonal Mesh Representation & Coplanar Triangle Clustering
 // ---------------------------------------------------------------------------
 
-interface PolyFace3D {
+export interface PolyFace3D {
   index: number;
   /** Vertex indices into `PolySurface3D.vertices`, wound CCW around `normal`. */
   verts: number[];
@@ -527,7 +527,7 @@ function buildPolyFace3D(index: number, verts: number[], vertices: THREE.Vector3
 /**
  * Clusters coplanar adjacent triangles into polygonal faces within `coplanarToleranceDeg`.
  */
-function clusterTrianglesToPolyFaces(
+export function clusterTrianglesToPolyFaces(
   vertices: THREE.Vector3[],
   triIndices: number[],
   coplanarToleranceDeg: number

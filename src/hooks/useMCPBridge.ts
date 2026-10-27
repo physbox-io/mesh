@@ -119,6 +119,7 @@ import {
   exportTubeCopeSvg,
   extractSceneTubeJoints,
   extractSceneWireCurves,
+  withoutHubsAt,
   generatePipeStructurePreset,
   type PipeFrameOptions,
   type PipeStandardId,
@@ -133,6 +134,7 @@ import { contourSheetParts, laserSheetParts, laserStockTransform } from '../util
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from './useAddSimulation';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../utils/timberSimulation';
 import { tubeSimulationRequest, type TubeSimulationJob } from '../utils/tubeSimulation';
+import { frameBodyInScene } from '../utils/pipeSkeleton';
 import { runMcpMoldSimulation } from '../utils/moldWorkerClient';
 import { runMcpRepairMesh } from '../utils/meshRepair';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
@@ -4515,9 +4517,8 @@ export function useMCPBridge() {
           if (msg.addPrintableHubs === true) {
             const hubNodes = buildAllCustomHubNodes(bd);
             addedHubIds = hubNodes.map((h) => h.id);
-            const hubIdSet = new Set(addedHubIds);
-            const nextNodes = [...useStore.getState().sceneGraph.nodes.filter((n) => !hubIdSet.has(n.id)), ...hubNodes];
-            await settleScene(nextNodes);
+            const nextNodes = [...withoutHubsAt(useStore.getState().sceneGraph.nodes, hubNodes), ...hubNodes];
+            await settleScene(nextNodes, { replacesScene: false });
           }
           return {
             ok: true,
@@ -4529,6 +4530,42 @@ export function useMCPBridge() {
             shoppingList: bd.shoppingList,
             sticks: bd.sticks,
             addedHubIds,
+            warnings: bd.warnings,
+          };
+        }
+
+        case 'BUILD_PIPE_FRAME': {
+          // A lattice sketch or any solid, framed in pipe and stood up.
+          const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : store.selectedNodeId;
+          if (!bodyId) return { ok: false, error: 'Give bodyId: a lattice sketch or any solid.' };
+          const body = findNodeInScene(store.sceneGraph.nodes, bodyId);
+          if (!body) return { ok: false, error: `No body '${bodyId}'.` };
+          const pipeStandardId = (typeof msg.pipeStandardId === 'string' && msg.pipeStandardId in PIPE_STANDARDS
+            ? msg.pipeStandardId : 'pvc_sch40_3_4') as PipeStandardId;
+          const { nodes, skeleton, added } = frameBodyInScene(store.sceneGraph, body.id, {
+            maxSpanMm: typeof msg.maxSpanMm === 'number' ? msg.maxSpanMm : undefined,
+            diagonals: msg.diagonals === true,
+            posts: msg.posts !== false,
+            placement: msg.placement === 'beside' ? 'beside' : 'replace',
+            pipeStandardId,
+          });
+          store.prepareForDiscreteChange();
+          // Adds to the scene: its note card and settings stay.
+          await settleScene(nodes, { replacesScene: false });
+          const kinds: Record<string, number> = {};
+          for (const m of skeleton.members) kinds[m.kind] = (kinds[m.kind] ?? 0) + 1;
+          const bd = breakdownPipeFrame(useStore.getState().sceneGraph, { pipeStandardId });
+          return {
+            ok: true,
+            source: skeleton.source,
+            maxSpanMm: skeleton.maxSpanMm,
+            pipes: skeleton.members.length,
+            joints: skeleton.nodes.length,
+            byKind: kinds,
+            bodiesAdded: added,
+            sticksRequired: bd.sticksRequired,
+            totalPipeLengthMm: bd.totalPipeLengthMm,
+            shoppingList: bd.shoppingList,
             warnings: bd.warnings,
           };
         }

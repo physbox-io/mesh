@@ -281,7 +281,7 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-function makeStrutNode(
+export function makeStrutNode(
   id: string,
   name: string,
   p1Mm: Vec3,
@@ -482,16 +482,24 @@ export function pipeStructureScene(
   options?: Parameters<typeof generatePipeStructurePreset>[1]
 ): SceneNode[] {
   const struts = generatePipeStructurePreset(preset, options);
-  const frameOptions: Partial<PipeFrameOptions> = { pipeStandardId: options?.pipeStandardId ?? 'pvc_sch40_3_4' };
+  return [...struts, ...pipeFittings(struts, { pipeStandardId: options?.pipeStandardId ?? 'pvc_sch40_3_4' })];
+}
+
+/**
+ * The fitting at every joint of two or more of `struts`, store-bought or
+ * printed. `idPrefix` keeps their ids apart from another frame's in the
+ * same scene.
+ */
+export function pipeFittings(struts: SceneNode[], frameOptions: Partial<PipeFrameOptions>, idPrefix?: string): SceneNode[] {
   const bd = breakdownPipeFrame({ nodes: struts } as SceneGraph, frameOptions);
-  const fittings = bd.hubs
+  return bd.hubs
     .filter((h) => h.ports.length >= 2)
     .map((h) => {
       const node = buildPipeHubNode(h, frameOptions);
       node.name = `${FITTING_NAMES[h.classification]}: ${h.name}`;
+      if (idPrefix) node.id = `${idPrefix}_${h.id}`;
       return node;
     });
-  return [...struts, ...fittings];
 }
 
 interface RawStrutSegment {
@@ -1117,6 +1125,16 @@ export function buildPipeHubNode(
     children: [],
     geoms,
   };
+}
+
+/**
+ * `nodes` without any hub that `hubs` would stand on top of: the same id, or
+ * a hub at the same joint (an example's fitting, a framed shape's).
+ */
+export function withoutHubsAt(nodes: SceneNode[], hubs: SceneNode[]): SceneNode[] {
+  const ids = new Set(hubs.map((h) => h.id));
+  return nodes.filter((n) => !ids.has(n.id) && !(isPipeHubNode(n) && hubs.some((h) =>
+    Math.hypot(h.pos[0] - n.pos[0], h.pos[1] - n.pos[1], h.pos[2] - n.pos[2]) < 0.005)));
 }
 
 export function buildAllCustomHubNodes(breakdown: PipeFrameBreakdownResult): SceneNode[] {

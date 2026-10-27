@@ -12,7 +12,7 @@ import {
     Layers,
     Check
 } from 'lucide-react';
-import type { SceneGraph } from '../types/scene';
+import type { SceneGraph, SceneNode } from '../types/scene';
 import { useStore } from '../store/useStore';
 import {
     PIPE_STANDARDS,
@@ -22,6 +22,7 @@ import {
     type PipeFrameOptions,
     breakdownPipeFrame,
     buildAllCustomHubNodes,
+    withoutHubsAt,
     type TubeCopeSpec,
     computeTubeCopeJoint,
     extractSceneTubeJoints,
@@ -36,6 +37,17 @@ import {
 import { AddSimulationButton } from './MachineJobControls';
 import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
 import { tubeSimulationRequest, type TubeSimulationJob } from '../utils/tubeSimulation';
+import { defaultMaxSpanMm, frameBodyInScene, type FramePlacement } from '../utils/pipeSkeleton';
+
+function findBody(nodes: SceneNode[], id: string | null): SceneNode | null {
+    if (!id) return null;
+    for (const n of nodes) {
+        if (n.id === id) return n;
+        const hit = findBody(n.children || [], id);
+        if (hit) return hit;
+    }
+    return null;
+}
 
 export function ExportTubeAndWireModal({
     isOpen,
@@ -71,6 +83,16 @@ export function ExportTubeAndWireModal({
     }), [pipeStandardId, fitStyle, hubWallMm, fitClearanceMm, crossBoltHoleMm, stockLengthMm]);
 
     const breakdown = useMemo(() => breakdownPipeFrame(scene, pipeOptions), [scene, pipeOptions]);
+
+    // --- Frame a shape: a lattice sketch or any solid, made into a supported frame ---
+    const selectedNodeId = useStore(s => s.selectedNodeId);
+    const selectedBody = findBody(scene.nodes, selectedNodeId);
+    const pipeDefaultSpanMm = defaultMaxSpanMm(PIPE_STANDARDS[pipeStandardId]);
+    const [frameSpanMm, setFrameSpanMm] = useState<number | null>(null);
+    const [frameDiagonals, setFrameDiagonals] = useState(false);
+    const [framePosts, setFramePosts] = useState(true);
+    const [framePlacement, setFramePlacement] = useState<FramePlacement>('replace');
+    const [frameMessage, setFrameMessage] = useState<string | null>(null);
 
     // --- Tab 2: Tube Coping State ---
     const sceneMembers = useMemo(() => extractSceneTubeJoints(scene), [scene]);
@@ -174,12 +196,33 @@ export function ExportTubeAndWireModal({
         void simulation.add({ ...tubeSimulationRequest(job, sceneStockTransform()).request, placement });
     };
 
+    const handleFrameShape = () => {
+        if (!selectedBody) return;
+        const state = useStore.getState();
+        try {
+            const { nodes, skeleton } = frameBodyInScene(state.sceneGraph, selectedBody.id, {
+                maxSpanMm: frameSpanMm ?? pipeDefaultSpanMm,
+                diagonals: frameDiagonals,
+                posts: framePosts,
+                placement: framePlacement,
+                pipeStandardId,
+            });
+            state.prepareForDiscreteChange();
+            const nextScene: SceneGraph = { ...state.sceneGraph, nodes };
+            state.updateScene(nextScene);
+            void state.recompile(nextScene);
+            setFrameMessage(`Framed ${selectedBody.name}: ${skeleton.members.length} pipes, none over ${Math.round(skeleton.maxSpanMm)} mm between joints`);
+        } catch (e) {
+            setFrameMessage((e as Error).message);
+        }
+        setTimeout(() => setFrameMessage(null), 5000);
+    };
+
     const handleAddHubsToScene = () => {
         const hubNodes = buildAllCustomHubNodes(breakdown);
         if (hubNodes.length === 0) return;
         const state = useStore.getState();
-        const existingIds = new Set(hubNodes.map(n => n.id));
-        const filteredNodes = (state.sceneGraph.nodes || []).filter(n => !existingIds.has(n.id));
+        const filteredNodes = withoutHubsAt(state.sceneGraph.nodes || [], hubNodes);
         const nextScene: SceneGraph = {
             ...state.sceneGraph,
             nodes: [...filteredNodes, ...hubNodes]
@@ -290,6 +333,63 @@ export function ExportTubeAndWireModal({
                 <div className="flex-1 overflow-y-auto p-5 space-y-5">
                     {activeTab === 'pipe' && (
                         <div className="space-y-5">
+                            {/* Frame a shape */}
+                            <div className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
+                                <div className="flex items-center justify-between flex-wrap gap-2">
+                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                        Frame a Shape
+                                    </h3>
+                                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                        {selectedBody
+                                            ? <>Selected: <span className="font-semibold text-slate-700 dark:text-slate-200">{selectedBody.name}</span>{selectedBody.latticeCage ? ' (sketch)' : ''}</>
+                                            : 'Select a lattice sketch or any solid'}
+                                    </span>
+                                </div>
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                    Lines drawn in a lattice become pipes; a solid is framed on its surface. Rails, posts and base rails are added so no pipe runs further than the span between joints that hold it.
+                                </p>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
+                                    <label className="space-y-1 block">
+                                        <span className="text-[11px] text-slate-500 dark:text-slate-400" title="How far this pipe may run between joints: where it sags L/140 full of water, as PVC makers' support tables">Max span (mm)</span>
+                                        <input
+                                            type="number"
+                                            min={200}
+                                            step={50}
+                                            value={frameSpanMm ?? pipeDefaultSpanMm}
+                                            onChange={e => setFrameSpanMm(Number(e.target.value) > 0 ? Number(e.target.value) : null)}
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
+                                        />
+                                    </label>
+                                    <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                                        <input type="checkbox" checked={framePosts} onChange={e => setFramePosts(e.target.checked)} />
+                                        Posts to the floor
+                                    </label>
+                                    <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                                        <input type="checkbox" checked={frameDiagonals} onChange={e => setFrameDiagonals(e.target.checked)} />
+                                        Diagonal bracing
+                                    </label>
+                                    <select
+                                        value={framePlacement}
+                                        onChange={e => setFramePlacement(e.target.value as FramePlacement)}
+                                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
+                                    >
+                                        <option value="replace">Replace the shape</option>
+                                        <option value="beside">Beside the shape</option>
+                                    </select>
+                                </div>
+                                <button
+                                    onClick={handleFrameShape}
+                                    disabled={!selectedBody}
+                                    className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors"
+                                >
+                                    <Box className="w-4 h-4" />
+                                    Build Pipe Frame
+                                </button>
+                                {frameMessage && (
+                                    <div className="text-xs text-emerald-600 dark:text-emerald-400">{frameMessage}</div>
+                                )}
+                            </div>
+
                             {/* Configuration Grid */}
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 {/* Pipe Standard & Stock */}
