@@ -11,7 +11,9 @@ export function GearCard({ node }: { node: SceneNode }) {
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
   const updatePusherPeg = useStore((s) => s.updatePusherPeg);
 
-  if (!(node.id.includes('gear') && node.geoms)) return null;
+  // A cut gear (Gears & Drives) is resized by rebuilding it, not here: these
+  // sliders rewrite the geoms as box cogs and would throw its teeth away.
+  if (!(node.id.includes('gear') && node.geoms) || node.toothForm) return null;
   const pegGeom = node.geoms.find((g) => g.name.includes('peg'));
   const gearRadius = node.geoms[0].size[0];
   return (

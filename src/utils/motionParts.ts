@@ -35,6 +35,14 @@ export const STEPPERS: Record<string, [number, number, number, number, number, n
 
 /** The 1 ms step every model runs at (mjcf.ts). */
 const TIMESTEP = 0.001;
+/**
+ * The inertia a velocity-driven joint has to carry to stay steady with its
+ * torque limit reached. implicitfast steps the actuator's full gain, clamped
+ * or not, so a gain of more than about the joint's inertia per step overturns
+ * it each step and it runs away: a 5 g gear driven at kv 2 settled at
+ * -500 rad/s. Joints with a motor carry at least this as armature.
+ */
+export const motorArmature = (kv: number) => +(1.5 * kv * TIMESTEP).toFixed(7);
 /** How far below its set speed a stepper runs at its full holding torque, rad/s. */
 const SPEED_DROOP = 0.5;
 
@@ -112,7 +120,7 @@ function buildStepper(node: SceneNode, p: HardwarePart, id: string) {
       // reached if the rotor carries more inertia than a step can overturn —
       // so the joint carries that much as armature: inertia without mass,
       // which also limits how hard it can accelerate, as a real stepper's is.
-      armature: +(Math.max(rotorI, 1.5 * (torque / SPEED_DROOP) * TIMESTEP)).toFixed(7),
+      armature: Math.max(+rotorI.toFixed(7), motorArmature(torque / SPEED_DROOP)),
       actuator: { type: 'velocity', kv: +(torque / SPEED_DROOP).toFixed(4), ctrlValue: 0, forceLimit: torque },
     }],
     children: [],

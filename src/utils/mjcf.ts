@@ -218,6 +218,16 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
   return `<geom ${attrs} />`;
 };
 
+/**
+ * A cut gear's pitch radius in metres, from the tooth form it was cut to. Its
+ * first geom is a mesh, whose size is a placeholder [1], so reading the radius
+ * from that coupled every pair of generated gears within 2.4 m of each other.
+ */
+const pitchRadius = (node: SceneNode): number | undefined => {
+  const t = node.toothForm;
+  return t && t.kind !== 'rack' ? t.pitchDiameterMm / 2000 : undefined;
+};
+
 const buildJoint = (joint: SceneJoint) => {
   if (joint.type === 'free') {
     return `<freejoint name="${xmlAttr(joint.name)}" />`;
@@ -681,7 +691,7 @@ export const compileToMJCF = (
             jointName: j.name,
             nodeId: node.id,
             pos: wData ? wData.pos : [0, 0, 0],
-            radius: wData ? wData.size[0] : 0.25
+            radius: pitchRadius(node) ?? (wData ? wData.size[0] : 0.25)
           });
         }
         if (couplingAllowed && node.id.includes('pinion') && j.type === 'hinge') {
@@ -690,7 +700,7 @@ export const compileToMJCF = (
             jointName: j.name,
             nodeId: node.id,
             pos: wData ? wData.pos : [0, 0, 0],
-            radius: wData ? wData.size[0] : 0.08,
+            radius: pitchRadius(node) ?? (wData ? wData.size[0] : 0.08),
           });
         }
         if (couplingAllowed && node.id.includes('rack') && j.type === 'slide') {
@@ -735,7 +745,9 @@ export const compileToMJCF = (
       const ratio = node.coupleRatio !== undefined ? node.coupleRatio : -1.0;
       const pairKey = [joint1, joint2].sort().join('::');
       explicitlyCoupledJointPairs.add(pairKey);
-      equalityConstraints += `\n    <joint name="explicit_coupling_${couplingIndex++}" joint1="${xmlAttr(joint1)}" joint2="${xmlAttr(joint2)}" polycoef="0 ${ratio} 0 0 0" />`;
+      // Stiff, as teeth in mesh are: at the default 0.02 s a 20 g rack pushing
+      // a 5 g block fell 5% behind its pinion.
+      equalityConstraints += `\n    <joint name="explicit_coupling_${couplingIndex++}" joint1="${xmlAttr(joint1)}" joint2="${xmlAttr(joint2)}" polycoef="0 ${ratio} 0 0 0" solref="0.004 1" />`;
     }
   }
 
