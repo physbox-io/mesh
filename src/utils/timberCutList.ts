@@ -539,12 +539,30 @@ function buildCncSetupsForPart(
       }
     }
 
-    // Determine which numbered face sits UP and which adjacent face sits against the Y-axis fence
+    // Determine which numbered face sits UP and which adjacent face sits against the Y-axis fence.
+    // With that face up and the top end against the Y0 stop, the part can only
+    // lie one way, so the face at X0 is fixed: machine Y runs down the part
+    // from its top end and Z out of the face, so X is Y x Z. Naming a reference
+    // face instead put the other side against the fence on half the setups,
+    // and an off-centre mortise came out mirrored across the face.
     const faceUpNum = memberFaceNumber(part.member, group.faceNormal);
-    const alignWithFace1 = Math.abs(dot(group.faceNormal, part.member.face1.normal)) < 0.5;
-    const fenceFaceNum = alignWithFace1 ? 1 : 2;
+    const a0 = part.member.axes[0];
+    const yDir: Vec3 = [-a0[0], -a0[1], -a0[2]];
+    const zDir = group.faceNormal;
+    const xDir: Vec3 = [
+      yDir[1] * zDir[2] - yDir[2] * zDir[1],
+      yDir[2] * zDir[0] - yDir[0] * zDir[2],
+      yDir[0] * zDir[1] - yDir[1] * zDir[0],
+    ];
+    const fenceFaceNum = memberFaceNumber(part.member, [-xDir[0], -xDir[1], -xDir[2]]);
     const fenceFaceLabel = `Face F${fenceFaceNum}`;
     const faceUpLabel = `Face F${faceUpNum}`;
+    // Across the face from the fence, mm.
+    const acrossMm = part.member.axes.reduce((sum, a, i) => sum + Math.abs(dot(a, xDir)) * part.member.dimsMm[i], 0);
+    const fromFence = (p: Vec3, halfFeatureMm: number) => {
+      const x = dot([p[0] - part.member.centerMm[0], p[1] - part.member.centerMm[1], p[2] - part.member.centerMm[2]], xDir) + acrossMm / 2;
+      return +Math.max(halfFeatureMm, Math.min(acrossMm - halfFeatureMm, x)).toFixed(2);
+    };
 
     windows.forEach((win, wIdx) => {
       const winNum = wIdx + 1;
@@ -583,7 +601,7 @@ function buildCncSetupsForPart(
         stepdownMm,
         mortises: win.mortises.map((m) => ({
           id: m.id,
-          centerXMm: m.distFromRefEdgeMm,
+          centerXMm: fromFence(m.centerMm, m.thicknessMm * 0.5),
           centerYMm: Math.max(m.widthMm * 0.5, m.distFromTopEndMm - win.startOffsetMm),
           widthYMm: m.widthMm,
           thicknessXMm: m.thicknessMm,
@@ -592,7 +610,7 @@ function buildCncSetupsForPart(
         })),
         zClips: win.zClips.map((zc) => ({
           id: zc.id,
-          centerXMm: zc.distFromTopEdgeMm,
+          centerXMm: fromFence(zc.centerMm, zc.slotWidthMm * 0.5),
           centerYMm: partLenMm * 0.5 - win.startOffsetMm,
           lengthYMm: zc.slotLengthMm,
           widthXMm: zc.slotWidthMm,
