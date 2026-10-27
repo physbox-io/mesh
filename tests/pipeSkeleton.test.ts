@@ -107,6 +107,15 @@ describe('shapes the pipes do not suit', () => {
     const scene = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).birdhouse.scene;
     // Its walls and roof are children of one root body: they are read now.
     expect(breakdownPipeFrame(scene).struts.length).toBeGreaterThan(0);
+    // As the app holds it: a wall with a cut also carries the finished mesh,
+    // the door's 32 facets round its hole, which once made the house "curved".
+    const ring = Array.from({ length: 32 }, (_, i) => [Math.cos((i / 32) * 2 * Math.PI) * 0.018, Math.sin((i / 32) * 2 * Math.PI) * 0.018]);
+    const holeMesh = { name: 'Front Wall_csg', type: 'mesh', size: [1], csgDerived: 'visual', role: 'visual',
+      renderVertices: ring.flatMap(([x, z]) => [x, -0.0015, 0.075 + z]).concat(ring.flatMap(([x, z]) => [x, 0.0015, 0.075 + z])),
+      faces: ring.flatMap((_, i) => { const j = (i + 1) % 32; return [i, j, 32 + j, i, 32 + j, 32 + i]; }) };
+    const live = JSON.parse(JSON.stringify(scene)) as SceneGraph;
+    live.nodes[0].children!.find((n) => n.id === 'front_wall')!.geoms!.push(holeMesh as never);
+    expect(buildPipeSkeleton(live, 'birdhouse_root').members.length).toBe(15);
     // 120 mm across, too small for 3/4" PVC: framed in tube that suits it.
     const sk = buildPipeSkeleton(scene, 'birdhouse_root');
     expect(sk.resizedFrom).toBe('pvc_sch40_3_4');

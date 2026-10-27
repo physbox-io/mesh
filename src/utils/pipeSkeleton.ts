@@ -181,10 +181,12 @@ function newell(pts: V3[]): V3 {
 /** A solid's surface as flat faces, simplified when it is curved finer than the span needs. */
 function fromSolid(g: Graph, path: SceneNode[], spanMm: number): Face[] {
   // The body alone, under its parents' transforms, and without what is cut
-  // out of it: a frame goes round a window, not along its edge.
+  // out of it: a frame goes round a window, not along its edge. A body with a
+  // cut also carries the finished mesh with the hole in it (`csgDerived`);
+  // its parts, not that, are what is framed.
   const solidOnly = (n: SceneNode): SceneNode => ({
     ...n,
-    geoms: (n.geoms ?? []).filter((g) => g.csg !== 'difference'),
+    geoms: (n.geoms ?? []).filter((g) => g.csg !== 'difference' && !g.csgDerived && g.role !== 'collision'),
     children: (n.children ?? []).map(solidOnly),
   });
   let wrapped: SceneNode = solidOnly(path[path.length - 1]);
@@ -217,13 +219,15 @@ function fromSolid(g: Graph, path: SceneNode[], spanMm: number): Face[] {
     const key = v < w ? `${v}:${w}` : `${w}:${v}`;
     edgeFaces.set(key, [...(edgeFaces.get(key) ?? []), k]);
   }));
-  let shared = 0, gentle = 0;
+  // By area, so a small round hole's many facets cannot make a house curved.
+  const total = faces.reduce((sum, f) => sum + f.areaM2, 0);
+  const onCurve = new Set<number>();
   for (const ks of edgeFaces.values()) {
     if (ks.length !== 2) continue;
-    shared++;
-    if (faces[ks[0]].normal.angleTo(faces[ks[1]].normal) < (20 * Math.PI) / 180) gentle++;
+    if (faces[ks[0]].normal.angleTo(faces[ks[1]].normal) < (20 * Math.PI) / 180) ks.forEach((k) => onCurve.add(k));
   }
-  if (shared > 0 && gentle / shared > 0.3) {
+  const curvedArea = [...onCurve].reduce((sum, k) => sum + faces[k].areaM2, 0);
+  if (total > 0 && curvedArea / total > 0.3) {
     // About one triangle per (edge² · √3/4) of surface, the edge under two
     // thirds of the span so an uneven facet needs nothing across it, and no
     // more than a quarter of the shape so a small one keeps its form.
