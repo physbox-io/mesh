@@ -31,7 +31,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { clusterTrianglesToPolyFaces } from './sheetUnfoldExporter';
-import { PIPE_STANDARDS, makeStrutNode, pipeFittings, type PipeStandardId, type PipeStandardSpec } from './tubeAndWireExporter';
+import { PIPE_STANDARDS, makeStrutNode, pipeColour, pipeFittings, type PipeStandardId, type PipeStandardSpec } from './tubeAndWireExporter';
 
 type V3 = [number, number, number];
 
@@ -68,7 +68,9 @@ export interface SkeletonOptions {
  * (3/4" Schedule 40, 5 ft). From each pipe's own stiffness and weight.
  */
 export function defaultMaxSpanMm(spec: PipeStandardSpec): number {
-  const [E, rho] = { emt: [200_000, 7.85e-6], aluminium: [69_000, 2.7e-6], pvc: [2_800, 1.4e-6] }[spec.material]; // N/mm², kg/mm³
+  const [E, rho] = {
+    emt: [200_000, 7.85e-6], aluminium: [69_000, 2.7e-6], pvc: [2_800, 1.4e-6], wood: [10_000, 0.65e-6], pasta: [3_500, 1.5e-6],
+  }[spec.material]; // N/mm², kg/mm³
   const ro = spec.odMm / 2, ri = spec.idMm / 2;
   const I = (Math.PI / 4) * (ro ** 4 - ri ** 4);
   const w = (Math.PI * (ro * ro - ri * ri) * rho + Math.PI * ri * ri * 1e-6) * 9.81; // N/mm
@@ -372,8 +374,28 @@ function addPosts(g: Graph, spanMm: number, floorMm: number) {
   };
   // And within a short reach of that along members: an eave overhanging its
   // wall is a cantilever a pipe carries, not a joint wanting a post.
+  // Or an apex: members coming down to held joints from opposite sides, as
+  // a ridge stands on its two rafters, however shallow the roof.
+  const held = g.nodes.map((_, i) => outright(i));
+  for (let changed = true; changed;) {
+    changed = false;
+    g.nodes.forEach((p, i) => {
+      if (held[i]) return;
+      const down: V3[] = [];
+      for (const m of g.members) {
+        const other = m.a === i ? m.b : m.b === i ? m.a : -1;
+        if (other < 0 || !held[other] || g.nodes[other][2] >= p[2] - 1) continue;
+        const d = sub(g.nodes[other], p);
+        down.push(norm([d[0], d[1], 0]));
+      }
+      if (down.some((a, k) => down.slice(k + 1).some((b) => dot(a, b) < -0.5))) {
+        held[i] = true;
+        changed = true;
+      }
+    });
+  }
   const reach = spanMm / 4;
-  const dist = g.nodes.map((_, i) => (outright(i) ? 0 : Infinity));
+  const dist = g.nodes.map((_, i) => (held[i] ? 0 : Infinity));
   for (let changed = true; changed;) {
     changed = false;
     for (const m of g.members) {
@@ -467,8 +489,9 @@ export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: Skele
   }
   const span = opts.maxSpanMm && opts.maxSpanMm > 0 && spec === asked ? opts.maxSpanMm : defaultMaxSpanMm(spec);
   const floor = opts.floorMm ?? 0;
-  // Joints closer than about a fitting's reach are one joint.
-  const weld = Math.max(spec.odMm, spec.odMm * 1.5);
+  // Joints closer than three diameters are one joint: a shorter piece between
+  // two fittings (a roof's overhang, a board's thickness) is not one anyone cuts.
+  const weld = Math.max(10, spec.odMm * 3);
   const g = new Graph(weld);
 
   const faces = sketch ? fromLattice(g, body, worldMatrix(path), Math.max(5, spec.odMm / 2)) : fromSolid(g, path, span);
@@ -495,7 +518,7 @@ const KIND_NAMES: Record<MemberKind, string> = {
  */
 export function skeletonToNodes(sk: Skeleton, pipeStandardId: PipeStandardId, idPrefix: string, shift: V3 = [0, 0, 0]): SceneNode[] {
   const spec = PIPE_STANDARDS[pipeStandardId] ?? PIPE_STANDARDS.pvc_sch40_3_4;
-  const rgba: [number, number, number, number] = spec.material === 'pvc' ? [0.94, 0.95, 0.97, 1] : [0.7, 0.74, 0.78, 1];
+  const rgba = pipeColour(spec);
   const count: Partial<Record<MemberKind, number>> = {};
   const struts = sk.members.map((m, i) => {
     count[m.kind] = (count[m.kind] ?? 0) + 1;

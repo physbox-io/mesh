@@ -74,6 +74,20 @@ list, hubs and Add Simulation all work on it unchanged.
 - A joint within a quarter span of support along members is held: an eave is a cantilever,
   not a joint wanting a post.
 
+- Only pipes are pipes: plain boxes are no longer read as a frame (twelve edges each), which
+  made the birdhouse a flat-roofed cube with PVC hubs on its corners. Frame a Shape is the way
+  in, and the dialog has that one action; Add Simulation and Add Hubs are gone from it (the
+  frame carries its fittings; the cut list's fit check is a line under it).
+- Stock down to 3 mm dowel and dry spaghetti (1.8 mm, 250 mm strands); rod under 4 mm is glued,
+  with no printed fittings. Joints within three diameters merge, so no piece is shorter than
+  anyone would cut; a ridge on shallow rafters is held by them (an apex), not given a post.
+
+## Next, if wanted
+
+A load test for the classroom noodle bridge: pin-jointed truss analysis under a load, each
+member's force against its strength (Euler buckling in compression, breaking in tension), and
+the first to fail named, with the load it fails at.
+
 ## Not in v1
 
 Centre-line skeletons for branching shapes (a tree, a chair). Pipes are on the shape's surface

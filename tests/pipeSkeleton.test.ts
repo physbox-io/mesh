@@ -105,8 +105,14 @@ describe('shapes the pipes do not suit', () => {
   it('reads a model whose parts are children, and frames a small one in tube that suits it', async () => {
     const { PRESETS } = await import('../src/presets/presetScenes');
     const scene = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).birdhouse.scene;
-    // Its walls and roof are children of one root body: they are read now.
-    expect(breakdownPipeFrame(scene).struts.length).toBeGreaterThan(0);
+    // Its walls and roof are children of one root body, and boards, not
+    // pipes: there is no frame until it is framed.
+    expect(breakdownPipeFrame(scene).struts.length).toBe(0);
+    // A frame grouped under one body is read through the group.
+    const { frameBodyInScene } = await import('../src/utils/pipeSkeleton');
+    const frame = frameBodyInScene(scene, 'birdhouse_root').nodes;
+    const grouped = { nodes: [{ id: 'g', name: 'Group', pos: [0.1, 0, 0], geoms: [], joints: [], children: frame }] } as unknown as SceneGraph;
+    expect(breakdownPipeFrame(grouped).struts.length).toBe(15);
     // As the app holds it: a wall with a cut also carries the finished mesh,
     // the door's 32 facets round its hole, which once made the house "curved".
     const ring = Array.from({ length: 32 }, (_, i) => [Math.cos((i / 32) * 2 * Math.PI) * 0.018, Math.sin((i / 32) * 2 * Math.PI) * 0.018]);
@@ -128,3 +134,26 @@ describe('shapes the pipes do not suit', () => {
     expect(sk.members.every((m) => m.kind === 'edge')).toBe(true);
   });
 });
+
+describe('thin rod', () => {
+  it('frames the birdhouse in 5 mm dowel when asked, and spaghetti glued with no fittings', async () => {
+    const { PRESETS } = await import('../src/presets/presetScenes');
+    const scene = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).birdhouse.scene;
+    const dowel = buildPipeSkeleton(scene, 'birdhouse_root', { pipeStandardId: 'dowel_5' });
+    expect(dowel.pipeStandardId).toBe('dowel_5');
+    expect(dowel.resizedFrom).toBeUndefined();
+    expect(dowel.members.length).toBe(15);
+    const { frameBodyInScene } = await import('../src/utils/pipeSkeleton');
+    const pasta = frameBodyInScene(scene, 'birdhouse_root', { pipeStandardId: 'spaghetti' });
+    // Thin enough to follow the roof's overhang too; and the ridge stands on
+    // its rafters, shallow as the roof is, so nothing needs a post.
+    expect(pasta.skeleton.members.length).toBe(21);
+    expect(pasta.skeleton.members.some((m) => m.kind === 'post')).toBe(false);
+    // Pipes only: no printed hub round a strand of spaghetti.
+    expect(pasta.added).toBe(21);
+    // A rod is drawn solid and still checks out hub to hub.
+    const bd = breakdownPipeFrame({ nodes: pasta.nodes.filter((n) => n.id.startsWith('frame_')) } as unknown as SceneGraph, { pipeStandardId: 'spaghetti' });
+    expect(simulatePipeFrame(bd).maxGapMm).toBeLessThan(0.05);
+  });
+});
+

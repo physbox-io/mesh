@@ -21,12 +21,19 @@ export type PipeStandardId =
   | 'alu_6'
   | 'alu_8'
   | 'alu_10'
-  | 'alu_12';
+  | 'alu_12'
+  | 'dowel_3'
+  | 'dowel_5'
+  | 'dowel_6'
+  | 'dowel_8'
+  | 'dowel_10'
+  | 'dowel_12'
+  | 'spaghetti';
 
 export interface PipeStandardSpec {
   id: PipeStandardId;
   label: string;
-  material: 'pvc' | 'emt' | 'aluminium';
+  material: 'pvc' | 'emt' | 'aluminium' | 'wood' | 'pasta';
   nominalSize: string;
   odMm: number;
   idMm: number;
@@ -152,7 +159,33 @@ export const PIPE_STANDARDS: Record<PipeStandardId, PipeStandardSpec> = {
   alu_8: { id: 'alu_8', label: '8 mm Aluminium Tube', material: 'aluminium', nominalSize: '8 × 1 mm', odMm: 8, idMm: 6, wallMm: 1, socketDepthMm: 12, stockLengthMm: 1000 },
   alu_10: { id: 'alu_10', label: '10 mm Aluminium Tube', material: 'aluminium', nominalSize: '10 × 1 mm', odMm: 10, idMm: 8, wallMm: 1, socketDepthMm: 15, stockLengthMm: 1000 },
   alu_12: { id: 'alu_12', label: '12 mm Aluminium Tube', material: 'aluminium', nominalSize: '12 × 1 mm', odMm: 12, idMm: 10, wallMm: 1, socketDepthMm: 18, stockLengthMm: 1000 },
+  // Solid rod: hardwood dowel, sold by the metre, and dry spaghetti for the
+  // classroom bridge. A rod has no bore: idMm 0, its wall the whole radius.
+  dowel_3: { id: 'dowel_3', label: '3 mm Wooden Dowel', material: 'wood', nominalSize: '3 mm', odMm: 3, idMm: 0, wallMm: 1.5, socketDepthMm: 6, stockLengthMm: 1000 },
+  dowel_5: { id: 'dowel_5', label: '5 mm Wooden Dowel', material: 'wood', nominalSize: '5 mm', odMm: 5, idMm: 0, wallMm: 2.5, socketDepthMm: 8, stockLengthMm: 1000 },
+  dowel_6: { id: 'dowel_6', label: '6 mm Wooden Dowel', material: 'wood', nominalSize: '6 mm', odMm: 6, idMm: 0, wallMm: 3, socketDepthMm: 9, stockLengthMm: 1000 },
+  dowel_8: { id: 'dowel_8', label: '8 mm Wooden Dowel', material: 'wood', nominalSize: '8 mm', odMm: 8, idMm: 0, wallMm: 4, socketDepthMm: 12, stockLengthMm: 1000 },
+  dowel_10: { id: 'dowel_10', label: '10 mm Wooden Dowel', material: 'wood', nominalSize: '10 mm', odMm: 10, idMm: 0, wallMm: 5, socketDepthMm: 15, stockLengthMm: 1000 },
+  dowel_12: { id: 'dowel_12', label: '12 mm Wooden Dowel', material: 'wood', nominalSize: '12 mm', odMm: 12, idMm: 0, wallMm: 6, socketDepthMm: 18, stockLengthMm: 1000 },
+  spaghetti: { id: 'spaghetti', label: 'Dry Spaghetti', material: 'pasta', nominalSize: '1.8 mm', odMm: 1.8, idMm: 0, wallMm: 0.9, socketDepthMm: 3, stockLengthMm: 250 },
 };
+
+/** How a pipe of this stock is drawn. */
+export function pipeColour(spec: PipeStandardSpec): [number, number, number, number] {
+  return {
+    pvc: [0.94, 0.95, 0.97, 1],
+    emt: [0.7, 0.74, 0.78, 1],
+    aluminium: [0.7, 0.74, 0.78, 1],
+    wood: [0.82, 0.66, 0.45, 1],
+    pasta: [0.96, 0.86, 0.52, 1],
+  }[spec.material] as [number, number, number, number];
+}
+
+/**
+ * Rod this thin is glued at its joints (or stuck into a marshmallow), not
+ * pushed into a printed fitting: a socket round 1.8 mm spaghetti is no fitting.
+ */
+export const GLUED_BELOW_OD_MM = 4;
 
 // ============================================================================
 // 2. PVC / EMT Pipe Frame Breakdown, Presets & Printable 3D Hub Connectors
@@ -338,8 +371,7 @@ export function generatePipeStructurePreset(
   const stdId = options?.pipeStandardId ?? 'pvc_sch40_3_4';
   const spec = PIPE_STANDARDS[stdId] ?? PIPE_STANDARDS.pvc_sch40_3_4;
   const rMm = spec.odMm / 2;
-  const rgba: [number, number, number, number] =
-    spec.material === 'pvc' ? [0.94, 0.95, 0.97, 1] : [0.7, 0.74, 0.78, 1];
+  const rgba = pipeColour(spec);
 
   const nodes: SceneNode[] = [];
   let idx = 1;
@@ -501,6 +533,8 @@ export function pipeStructureScene(
  * same scene.
  */
 export function pipeFittings(struts: SceneNode[], frameOptions: Partial<PipeFrameOptions>, idPrefix?: string): SceneNode[] {
+  const spec = PIPE_STANDARDS[frameOptions.pipeStandardId ?? 'pvc_sch40_3_4'] ?? PIPE_STANDARDS.pvc_sch40_3_4;
+  if (spec.odMm < GLUED_BELOW_OD_MM) return [];
   const bd = breakdownPipeFrame({ nodes: struts } as SceneGraph, frameOptions);
   return bd.hubs
     .filter((h) => h.ports.length >= 2)
@@ -584,7 +618,6 @@ export function isPipeHubNode(node: SceneNode): boolean {
 
 function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
   const cylSegments: RawStrutSegment[] = [];
-  const boxSegments: RawStrutSegment[] = [];
 
   for (const node of flattenNodes(scene.nodes)) {
     // A hub's sleeves are cylinders too, but they are the fitting, not the frame.
@@ -633,69 +666,14 @@ function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
             });
           }
         }
-      } else if (g.type === 'box') {
-        const hx = g.size?.[0] ?? 0.25;
-        const hy = g.size?.[1] ?? 0.25;
-        const hz = g.size?.[2] ?? 0.25;
-        // Check if elongated strut-like box or full volumetric box
-        const dims = [hx * scale[0], hy * scale[1], hz * scale[2]];
-        const maxD = Math.max(...dims);
-        const midD = dims.slice().sort((a, b) => a - b)[1];
-        if (maxD > midD * 3 && midD < 0.08) {
-          // Slender bar box -> treat as single strut along longest axis
-          const axis = dims.indexOf(maxD);
-          const dVec: Vec3 = [0, 0, 0];
-          dVec[axis] = [hx, hy, hz][axis];
-          const p1Mm = transformPointMm(vSub(gPos, dVec), worldPos, worldRotMat, scale);
-          const p2Mm = transformPointMm(vAdd(gPos, dVec), worldPos, worldRotMat, scale);
-          if (vDist(p1Mm, p2Mm) > 20) {
-            cylSegments.push({
-              name: g.name ?? `${node.name || node.id}`,
-              startMm: p1Mm,
-              endMm: p2Mm,
-            });
-          }
-        } else {
-          // Volumetric box -> extract 12 wireframe edges as candidate frame struts
-          const corners: Vec3[] = [
-            [-hx, -hy, -hz],
-            [hx, -hy, -hz],
-            [hx, hy, -hz],
-            [-hx, hy, -hz],
-            [-hx, -hy, hz],
-            [hx, -hy, hz],
-            [hx, hy, hz],
-            [-hx, hy, hz],
-          ].map((c) => transformPointMm(vAdd(gPos, c as Vec3), worldPos, worldRotMat, scale));
-          const edges: [number, number, string][] = [
-            [0, 1, 'Bottom Front'],
-            [1, 2, 'Bottom Right'],
-            [2, 3, 'Bottom Back'],
-            [3, 0, 'Bottom Left'],
-            [4, 5, 'Top Front'],
-            [5, 6, 'Top Right'],
-            [6, 7, 'Top Back'],
-            [7, 4, 'Top Left'],
-            [0, 4, 'Front Left Post'],
-            [1, 5, 'Front Right Post'],
-            [2, 6, 'Back Right Post'],
-            [3, 7, 'Back Left Post'],
-          ];
-          for (const [i, j, edgeLabel] of edges) {
-            if (vDist(corners[i], corners[j]) > 20) {
-              boxSegments.push({
-                name: `${node.name || node.id} ${edgeLabel}`,
-                startMm: corners[i],
-                endMm: corners[j],
-              });
-            }
-          }
-        }
       }
     }
   }
 
-  return cylSegments.length > 0 ? cylSegments : boxSegments;
+  // Only pipes are pipes. Plain boxes used to stand in for a frame (twelve
+  // edges each) when there were none, which turned a birdhouse into a
+  // flat-roofed cube; Frame a Shape is how a shape becomes pipes now.
+  return cylSegments;
 }
 
 function classifyHubPorts(ports: PipeHubPort[]): {

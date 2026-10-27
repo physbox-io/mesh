@@ -2,7 +2,6 @@ import { useState, useMemo } from 'react';
 import {
     X,
     Wrench,
-    Plus,
     ShoppingCart,
     Box,
     Layers,
@@ -17,12 +16,8 @@ import {
     type PipeHubFitStyle,
     type PipeFrameOptions,
     breakdownPipeFrame,
-    buildAllCustomHubNodes,
-    withoutHubsAt,
 } from '../utils/tubeAndWireExporter';
-import { AddSimulationButton } from './MachineJobControls';
-import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
-import { pipeFrameSimulationRequest } from '../utils/tubeSimulation';
+import { simulatePipeFrame } from '../utils/tubeSimulation';
 import { defaultMaxSpanMm, frameBodyInScene, type FramePlacement } from '../utils/pipeSkeleton';
 
 function findBody(nodes: SceneNode[], id: string | null): SceneNode | null {
@@ -47,7 +42,6 @@ export function ExportTubeAndWireModal({
     const storeScene = useStore(s => s.sceneGraph);
     const scene = propScene || storeScene;
 
-    const simulation = useAddSimulation();
 
     // --- Tab 1: PVC / EMT Pipe Frame State ---
     const [pipeStandardId, setPipeStandardId] = useState<PipeStandardId>(DEFAULT_PIPE_FRAME_OPTIONS.pipeStandardId);
@@ -56,7 +50,6 @@ export function ExportTubeAndWireModal({
     const [fitClearanceMm, setFitClearanceMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.fitClearanceMm);
     const [crossBoltHoleMm, setCrossBoltHoleMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.crossBoltHoleMm);
     const [stockLengthMm, setStockLengthMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.stockLengthMm ?? 3048);
-    const [hubAddedMessage, setHubAddedMessage] = useState<string | null>(null);
 
     const pipeOptions: Partial<PipeFrameOptions> = useMemo(() => ({
         pipeStandardId,
@@ -68,6 +61,7 @@ export function ExportTubeAndWireModal({
     }), [pipeStandardId, fitStyle, hubWallMm, fitClearanceMm, crossBoltHoleMm, stockLengthMm]);
 
     const breakdown = useMemo(() => breakdownPipeFrame(scene, pipeOptions), [scene, pipeOptions]);
+    const fitCheck = useMemo(() => simulatePipeFrame(breakdown), [breakdown]);
 
     // --- Frame a shape: a lattice sketch or any solid, made into a supported frame ---
     const selectedNodeId = useStore(s => s.selectedNodeId);
@@ -80,11 +74,6 @@ export function ExportTubeAndWireModal({
     const [frameMessage, setFrameMessage] = useState<string | null>(null);
 
     if (!isOpen) return null;
-
-    /** The frame made from its cut list, every tube seated hub to hub. */
-    const handleSimulate = (placement: 'beside' | 'overlay') => {
-        void simulation.add({ ...pipeFrameSimulationRequest(breakdown, sceneStockTransform()).request, placement });
-    };
 
     /** A pipe, and the length it is sold in. */
     const choosePipe = (id: PipeStandardId) => {
@@ -119,21 +108,6 @@ export function ExportTubeAndWireModal({
             setFrameMessage((e as Error).message);
         }
         setTimeout(() => setFrameMessage(null), 5000);
-    };
-
-    const handleAddHubsToScene = () => {
-        const hubNodes = buildAllCustomHubNodes(breakdown);
-        if (hubNodes.length === 0) return;
-        const state = useStore.getState();
-        const filteredNodes = withoutHubsAt(state.sceneGraph.nodes || [], hubNodes);
-        const nextScene: SceneGraph = {
-            ...state.sceneGraph,
-            nodes: [...filteredNodes, ...hubNodes]
-        };
-        state.updateScene(nextScene);
-        void state.recompile(nextScene);
-        setHubAddedMessage(`Added ${hubNodes.length} 3D-printable hub connector(s) to scene`);
-        setTimeout(() => setHubAddedMessage(null), 3500);
     };
 
     return (
@@ -237,7 +211,7 @@ export function ExportTubeAndWireModal({
                                         >
                                             {Object.values(PIPE_STANDARDS).map(std => (
                                                 <option key={std.id} value={std.id}>
-                                                    {std.label} (OD {std.odMm}mm / ID {std.idMm}mm)
+                                                    {std.label} ({std.idMm > 0 ? `OD ${std.odMm} / ID ${std.idMm} mm` : `${std.odMm} mm rod`})
                                                 </option>
                                             ))}
                                         </select>
@@ -254,6 +228,7 @@ export function ExportTubeAndWireModal({
                                             <option value={6096}>20 ft Commercial Stick (6096 mm)</option>
                                             <option value={1524}>5 ft Half Stick (1524 mm)</option>
                                             <option value={1000}>1 m Length (1000 mm)</option>
+                                            <option value={250}>Spaghetti Strand (250 mm)</option>
                                         </select>
                                     </div>
                                 </div>
@@ -351,27 +326,19 @@ export function ExportTubeAndWireModal({
                                         </div>
                                     </div>
 
-                                    <button
-                                        onClick={handleAddHubsToScene}
-                                        disabled={breakdown.hubs.length === 0}
-                                        className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors shadow"
-                                    >
-                                        <Plus className="w-4 h-4" />
-                                        Add 3D-Printable Hub Connectors to Scene ({breakdown.hubs.length})
-                                    </button>
-                                    <AddSimulationButton
-                                        disabled={breakdown.struts.length === 0}
-                                        disabledReason="No pipes in the scene yet: build a frame above, or open a pipe frame from Examples."
-                                        onSimulate={handleSimulate}
-                                        progress={simulation.progress}
-                                        error={simulation.error}
-                                    />
-                                    {hubAddedMessage && (
-                                        <div className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
-                                            <Check className="w-3.5 h-3.5" />
-                                            {hubAddedMessage}
-                                        </div>
-                                    )}
+                                    {/* The cut list checked: every tube cut as listed and seated hub to hub. */}
+                                    <div className="text-xs leading-snug">
+                                        {breakdown.struts.length === 0 ? (
+                                            <span className="text-slate-500 dark:text-slate-400">No pipes in the scene yet: Build Pipe Frame above turns the selected shape into one.</span>
+                                        ) : fitCheck.maxGapMm < 0.05 && fitCheck.clashes.length === 0 ? (
+                                            <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400"><Check className="w-3.5 h-3.5" />Cut as listed, every pipe reaches its fittings.</span>
+                                        ) : (
+                                            <span className="text-amber-700 dark:text-amber-300">
+                                                {fitCheck.maxGapMm >= 0.05 && `A pipe ends ${fitCheck.maxGapMm.toFixed(1)} mm off its fitting. `}
+                                                {fitCheck.clashes.length > 0 && `${fitCheck.clashes.length} joint${fitCheck.clashes.length === 1 ? '' : 's'} where pipe ends run into each other.`}
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
 

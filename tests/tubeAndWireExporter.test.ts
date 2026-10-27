@@ -13,7 +13,8 @@ describe('tubeAndWireExporter', () => {
   describe('1. Hardware-Store Pipe & Conduit Standards (PIPE_STANDARDS)', () => {
     it('contains the US Schedule 40 PVC, EMT conduit, Metric PVC and small aluminium tube standards', () => {
       const ids = Object.keys(PIPE_STANDARDS);
-      expect(ids).toHaveLength(14);
+      expect(ids).toHaveLength(21);
+      expect(PIPE_STANDARDS.spaghetti.idMm).toBe(0);
       expect(PIPE_STANDARDS.alu_8.material).toBe('aluminium');
       expect(PIPE_STANDARDS.pvc_sch40_3_4.odMm).toBeCloseTo(26.67, 2);
       expect(PIPE_STANDARDS.pvc_sch40_3_4.stockLengthMm).toBe(3048);
@@ -81,7 +82,7 @@ describe('tubeAndWireExporter', () => {
       }
     });
 
-    it('converts a simple volumetric box scene into a 12-strut orthogonal PVC frame with 8 3-way 90° corners', () => {
+    it('reads a box only once Frame a Shape has made it pipes: 12 struts and 8 three-way corners', async () => {
       const boxScene: SceneGraph = {
         nodes: [
           {
@@ -96,7 +97,12 @@ describe('tubeAndWireExporter', () => {
         ],
       };
 
-      const bd = breakdownPipeFrame(boxScene, { pipeStandardId: 'pvc_sch40_1' });
+      // A plain box is not a frame: it used to be read as twelve pipes.
+      expect(breakdownPipeFrame(boxScene).struts).toHaveLength(0);
+      const { frameBodyInScene } = await import('../src/utils/pipeSkeleton');
+      const framed = { nodes: frameBodyInScene({ nodes: [{ ...boxScene.nodes[0], pos: [0, 0, 0.5], joints: [], children: [] }] } as unknown as SceneGraph,
+        'box_frame', { pipeStandardId: 'pvc_sch40_1' }).nodes } as SceneGraph;
+      const bd = breakdownPipeFrame(framed, { pipeStandardId: 'pvc_sch40_1' });
       expect(bd.struts).toHaveLength(12);
       expect(bd.hubs).toHaveLength(8);
       expect(bd.shoppingList.standardCorners3Way).toBe(8);
