@@ -92,7 +92,9 @@ describe('pipe structure examples', () => {
   it('stand on a fitting at every joint, and plan the same cut list as the bare struts', async () => {
     const { pipeStructureScene, generatePipeStructurePreset: bare, isPipeHubNode } = await import('../src/utils/tubeAndWireExporter');
     for (const preset of ['mini_greenhouse', 'yard_pub', 'carport', 'geodesic_dome'] as const) {
-      const nodes = pipeStructureScene(preset);
+      // Named as the store names them: every hub after the first gets `hub_core_2`…
+      const { withUniqueNames } = await import('../src/utils/uniqueNames');
+      const nodes = withUniqueNames({ nodes: pipeStructureScene(preset) } as unknown as SceneGraph).nodes;
       const withHubs = breakdownPipeFrame({ nodes } as unknown as SceneGraph);
       const without = breakdownPipeFrame({ nodes: bare(preset) } as unknown as SceneGraph);
       expect(withHubs.struts.length).toBe(without.struts.length);

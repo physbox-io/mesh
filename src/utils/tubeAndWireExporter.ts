@@ -537,9 +537,12 @@ function transformPointMm(
   return [wx * 1000, wy * 1000, wz * 1000];
 }
 
-/** A hub or fitting `buildPipeHubNode` made: its core is named `hub_core`. */
+/**
+ * A hub or fitting `buildPipeHubNode` made: its core is named `hub_core`, or
+ * `hub_core_2`… once the scene has made every hub's names unique.
+ */
 export function isPipeHubNode(node: SceneNode): boolean {
-  return (node.geoms ?? []).some((g) => g.name === 'hub_core');
+  return (node.geoms ?? []).some((g) => /^hub_core(_\d+)?$/.test(g.name ?? ''));
 }
 
 function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
