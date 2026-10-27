@@ -1213,29 +1213,30 @@ export function computeTubeCopeJoint(spec: TubeCopeSpec): TubeCopeProfile {
     const theta = (deg * Math.PI) / 180 + clockRad;
     const arcMm = (deg / 360) * circumferenceMm;
 
-    let zOuter: number;
-    let zInner: number;
-
-    if (spec.targetKind === 'plane') {
-      // Plane miter cut: z(theta) = r * cos(theta) / tan(alpha)
-      zOuter = (rOuter * Math.cos(theta)) / tanA;
-      zInner = (rInner * Math.cos(theta)) / tanA;
-    } else {
+    // Where the line along the tube at radius r meets the target.
+    const zAt = (r: number): number => {
+      if (spec.targetKind === 'plane') {
+        // Plane miter cut: z(theta) = r * cos(theta) / tan(alpha)
+        return (r * Math.cos(theta)) / tanA;
+      }
       // Cylindrical saddle ("fish-mouth") intersection:
       // Target tube along Z_t, cut tube in X_t - Z_t plane at angle alpha, offset along Y_t by offsetMm
       const actualTargetR = Math.max(1, (spec.targetTubeOdMm ?? spec.cutTubeOdMm) / 2);
-      const yOuter = rOuter * Math.sin(theta) + offsetMm;
-      const yInner = rInner * Math.sin(theta) + offsetMm;
+      const y = r * Math.sin(theta) + offsetMm;
+      const radSq = Math.max(0, actualTargetR * actualTargetR - y * y);
+      return (actualTargetR - Math.sqrt(radSq) + r * Math.cos(theta) * cosA) / sinA;
+    };
+    const zOuter = zAt(rOuter);
+    const zInner = zAt(rInner);
 
-      const radOuterSq = Math.max(0, actualTargetR * actualTargetR - yOuter * yOuter);
-      const radInnerSq = Math.max(0, actualTargetR * actualTargetR - yInner * yInner);
-
-      zOuter = (actualTargetR - Math.sqrt(radOuterSq) + rOuter * Math.cos(theta) * cosA) / sinA;
-      zInner = (actualTargetR - Math.sqrt(radInnerSq) + rInner * Math.cos(theta) * cosA) / sinA;
+    // A square cut through the wall must clear the target everywhere across
+    // it. On a saddle the target can come lower mid-wall than at either edge
+    // (0.07 mm on a 33 mm tube into a 42 mm one at 45°), so take the lowest
+    // across the wall, not just of the two edges.
+    let zCut = Math.min(zOuter, zInner);
+    if (spec.targetKind !== 'plane') {
+      for (let k = 1; k < 8; k++) zCut = Math.min(zCut, zAt(rOuter - ((rOuter - rInner) * k) / 8));
     }
-
-    // For a physical tube sitting against the target surface, both outer and inner edges cannot pass through the target:
-    const zCut = Math.min(zOuter, zInner);
     rawPoints.push({ angleDeg: round2(deg), arcMm: round2(arcMm), zOuter, zInner, zCut });
   }
 
