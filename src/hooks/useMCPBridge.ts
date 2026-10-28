@@ -277,7 +277,7 @@ const autoCompileScad = async (nodes: SceneNode[]) => {
 const settleScene = async (
   nodes: SceneNode[],
   { replacesScene = true, freshStart = false }: { replacesScene?: boolean; freshStart?: boolean } = {},
-): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
+): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number }> => {
   const store = useStore.getState();
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
   // load, so any note card left over from a previously-loaded preset (e.g.
@@ -308,8 +308,15 @@ const settleScene = async (
   // carrying the old scene's time into its telemetry.
   await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, freshStart, true);
   const error = useStore.getState().lastCompileError;
-  return { ok: !error, ...(error ? { error } : {}), nodeCount: nodes.length };
+  // nodeCount is every body, nested ones included: a ten-body ride built as
+  // one tower with everything hung off it used to report nodeCount 1.
+  return { ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length };
 };
+
+/** How many bodies a scene tree holds, at any depth. */
+function countBodies(nodes: SceneNode[] | undefined): number {
+  return (nodes || []).reduce((n, b) => n + 1 + countBodies(b.children), 0);
+}
 
 /** Every id in a scene tree, at any depth. */
 function collectNodeIds(nodes: SceneNode[], into: Set<string> = new Set()): Set<string> {
@@ -3729,7 +3736,8 @@ export function useMCPBridge() {
             id: node.id,
             name: landed?.name ?? node.name,
             ...(parent ? { parent: parent.id } : {}),
-            nodeCount: useStore.getState().sceneGraph.nodes.length,
+            nodeCount: countBodies(useStore.getState().sceneGraph.nodes),
+            topLevelCount: useStore.getState().sceneGraph.nodes.length,
           };
         }
 
@@ -5378,7 +5386,8 @@ export function useMCPBridge() {
           return {
             ok: !error,
             ...(error ? { error } : {}),
-            nodeCount: graph.nodes.length,
+            nodeCount: countBodies(graph.nodes),
+            topLevelCount: graph.nodes.length,
             noteCardCount: Array.isArray(noteCards) ? noteCards.length : 0,
           };
         }
