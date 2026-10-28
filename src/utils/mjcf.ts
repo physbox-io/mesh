@@ -916,7 +916,12 @@ export const compileToMJCF = (
   let connectIndex = 1;
   for (const c of connectConstraintsList) {
     const targetName = nodeNamesMap[c.targetId] || c.targetId;
-    const hasJoint = !!jointedNodes[c.targetId];
+    // Named whenever it is a body in the scene. Only targets with joints of
+    // their own used to be, so a pin on a crank's child (a crank pin with no
+    // joint, carried round by the crank's) was pinned to the world instead.
+    // A fixed body2 is the same as the world to MuJoCo, so naming it costs
+    // nothing.
+    const hasBody = c.targetId in nodeNamesMap;
     // MuJoCo's <connect> anchor is always specified in body1's local frame,
     // whether body2 is named or omitted (worldbody).
     const body1World = nodeWorldData[c.bodyId];
@@ -927,7 +932,7 @@ export const compileToMJCF = (
       c.anchor[1] - body1Pos[1],
       c.anchor[2] - body1Pos[2],
     ]);
-    if (hasJoint) {
+    if (hasBody) {
       equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" body2="${xmlAttr(targetName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
     } else {
       equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
