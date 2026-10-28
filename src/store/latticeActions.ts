@@ -18,6 +18,9 @@ import type { PhysicsState } from './useStore';
 import type { SliceDeps } from './sliceDeps';
 
 export interface LatticeActions {
+  // The state here is the state of the TOOL, not of the shape: the shape lives
+  // on the node as `latticeCage`, because it has to survive being saved and the
+  // tool does not. See utils/latticeMesh.ts.
   /** The body being modelled, or null when the lattice tools are closed. */
   latticeNodeId: string | null;
   latticeTool: LatticeTool;

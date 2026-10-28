@@ -372,11 +372,6 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    */
   setReferenceImages: (images: ReferenceImage[], recordUndo?: boolean) => void;
 
-  // --- Lattice modelling ---------------------------------------------------
-  //
-  // The state here is the state of the TOOL, not of the shape: the shape lives
-  // on the node as `latticeCage`, because it has to survive being saved and the
-  // tool does not. See utils/latticeMesh.ts.
   /**
    * What the app is in the middle of, in the words a person would use: "Scale
    * 1.25x", "Inset 3.0 mm", "Extrude". Null when nothing modal is running.
