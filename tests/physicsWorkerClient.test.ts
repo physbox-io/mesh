@@ -90,3 +90,64 @@ describe('PhysicsWorkerClient worker failure', () => {
   });
 });
 
+
+describe('PhysicsWorkerClient dead worker', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('settles everything owed and reports fatal when the engine aborts', async () => {
+    const { PhysicsWorkerClient } = await import('../src/store/physicsWorkerClient');
+    const client = new PhysicsWorkerClient();
+    const onError = vi.fn();
+    client.onError = onError;
+    const headless = client.runHeadless('<mujoco/>', { nodes: [] }, 10);
+    const telemetry = client.getTelemetry();
+
+    created[0].onmessage!({ data: { type: 'ERROR', message: 'The physics engine aborted (native code called abort()).', fatal: true } } as MessageEvent);
+
+    await expect(headless).rejects.toThrow(/aborted/);
+    await expect(telemetry).rejects.toThrow(/aborted/);
+    expect(client.hasPendingWork()).toBe(false);
+    expect(onError).toHaveBeenCalledWith(expect.stringMatching(/aborted/), true, undefined);
+    client.terminate();
+  });
+
+  it('takes a worker that owes work and stays silent for dead, and reports it fatal', async () => {
+    vi.useFakeTimers();
+    const { PhysicsWorkerClient, WORKER_SILENCE_MS } = await import('../src/store/physicsWorkerClient');
+    const client = new PhysicsWorkerClient();
+    const onError = vi.fn();
+    client.onError = onError;
+    const headless = client.runHeadless('<mujoco/>', { nodes: [] }, 10);
+    const settled = expect(headless).rejects.toThrow(/stopped answering/);
+
+    vi.advanceTimersByTime(WORKER_SILENCE_MS - 10_000);
+    expect(onError).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(20_000);
+
+    await settled;
+    expect(onError).toHaveBeenCalledWith(expect.stringMatching(/stopped answering/), true);
+    expect(client.hasPendingWork()).toBe(false);
+    client.terminate();
+  });
+
+  it('leaves an idle worker alone however long it is quiet, and counts silence from the request', async () => {
+    vi.useFakeTimers();
+    const { PhysicsWorkerClient, WORKER_SILENCE_MS } = await import('../src/store/physicsWorkerClient');
+    const client = new PhysicsWorkerClient();
+    const onError = vi.fn();
+    client.onError = onError;
+
+    vi.advanceTimersByTime(WORKER_SILENCE_MS * 3);
+    expect(onError).not.toHaveBeenCalled();
+
+    // Work handed over after a long idle spell gets the whole allowance.
+    const telemetry = client.getTelemetry();
+    vi.advanceTimersByTime(WORKER_SILENCE_MS - 10_000);
+    expect(onError).not.toHaveBeenCalled();
+    created[0].onmessage!({ data: { type: 'TELEMETRY_RESULT', id: (created[0].postMessage.mock.calls[0][0] as { id: string }).id, telemetry: null } } as MessageEvent);
+    await expect(telemetry).resolves.toBeNull();
+    vi.advanceTimersByTime(WORKER_SILENCE_MS * 2);
+    expect(onError).not.toHaveBeenCalled();
+    client.terminate();
+  });
+});

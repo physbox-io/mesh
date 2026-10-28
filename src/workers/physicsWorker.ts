@@ -109,6 +109,10 @@ const loadMujoco = (): Promise<Mujoco> => {
     const load = (threaded ? await import('@mujoco/mujoco/mt') : await import('@mujoco/mujoco')).default as typeof load_mujoco;
     return new Promise<Mujoco>((resolve, reject) => {
       load({
+        // After a native abort every later call into the module throws or
+        // blocks, so nothing this worker was asked will ever be answered. Say
+        // so at once: the page respawns the worker and rebuilds the scene.
+        onAbort: (what: unknown) => post({ type: 'ERROR', message: `The physics engine aborted (${String(what)}).`, fatal: true }),
         instantiateWasm: (
           imports: WebAssembly.Imports,
           done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,

@@ -196,8 +196,19 @@ const stripNodes = (nodes: SceneNode[]): SceneNode[] => (nodes || []).map((n) =>
 export const withoutMeshData = (sceneGraph: SceneGraph): SceneGraph =>
   sceneGraph ? { ...sceneGraph, nodes: stripNodes(sceneGraph.nodes) } : sceneGraph;
 
+/**
+ * How long the worker may owe an answer without sending anything at all
+ * before it is taken for dead. Longer than any legitimate build or headless
+ * run (the MCP bridge itself gives up on those after 60 s), because a false
+ * alarm costs a respawn and a rebuild.
+ */
+export const WORKER_SILENCE_MS = 120_000;
+
 export class PhysicsWorkerClient {
   private worker: Worker;
+  /** When the worker last said anything, or was handed work while idle. */
+  private lastHeardAt = Date.now();
+  private watchdog: ReturnType<typeof setInterval>;
   private pendingBuilds = new Map<string, Pending<BuiltResult>>();
   private pendingHeadless = new Map<string, Pending<HeadlessRunResult>>();
   private pendingHistory = new Map<string, Pending<HistoryResult>>();
@@ -222,6 +233,7 @@ export class PhysicsWorkerClient {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (evt: MessageEvent) => {
       const msg = evt.data;
+      this.lastHeardAt = Date.now();
       switch (msg.type) {
         case 'BUILT': {
           const pending = this.pendingBuilds.get(msg.id);
@@ -235,6 +247,9 @@ export class PhysicsWorkerClient {
           this.onFrame?.(msg);
           break;
         case 'ERROR':
+          // A fatal error means the engine is gone (a native abort, the heap
+          // exhausted): whatever was still asked will never be answered.
+          if (msg.fatal) this.rejectAll(new Error(msg.message));
           this.onError?.(msg.message, !!msg.fatal, msg.lastState);
           break;
         case 'CONSTRAINT_BROKEN':
@@ -302,6 +317,22 @@ export class PhysicsWorkerClient {
       fail(`The physics engine failed to load${evt.message ? `: ${evt.message}` : ''}. Reload the page to try again.`);
     };
     this.worker.onmessageerror = () => fail('The physics worker sent a message that could not be read.');
+    // A worker blocked for good (a native abort leaves later calls hanging)
+    // never answers and never errors, and hasPendingWork() then holds off the
+    // periodic recycle that would have replaced it: the tab's physics stayed
+    // dead until a reload. Owed work and long silence mean it is gone.
+    this.watchdog = setInterval(() => {
+      if (!this.hasPendingWork() || Date.now() - this.lastHeardAt < WORKER_SILENCE_MS) return;
+      clearInterval(this.watchdog);
+      const message = `The physics worker stopped answering for ${Math.round(WORKER_SILENCE_MS / 1000)} s.`;
+      this.rejectAll(new Error(message));
+      this.onError?.(message, true);
+    }, 5_000);
+  }
+
+  /** Start the silence clock on work handed to an idle worker. */
+  private noteRequest() {
+    if (!this.hasPendingWork()) this.lastHeardAt = Date.now();
   }
 
   /**
@@ -327,6 +358,7 @@ export class PhysicsWorkerClient {
     // hands back nothing to send.
     const { add, drop } = this.meshFiles.take();
     return new Promise((resolve, reject) => {
+      this.noteRequest();
       this.pendingBuilds.set(id, { resolve, reject });
       this.worker.postMessage(
         { type: 'BUILD', id, xml, sceneGraph: withoutMeshData(sceneGraph), preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall },
@@ -360,6 +392,7 @@ export class PhysicsWorkerClient {
     // and without these the worker fails with "Error opening file m_….msh".
     const { add, drop } = this.meshFiles.take();
     return new Promise((resolve, reject) => {
+      this.noteRequest();
       this.pendingHeadless.set(id, { resolve, reject });
       this.worker.postMessage(
         { type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride, meshFiles: add, dropMeshes: drop },
@@ -372,6 +405,7 @@ export class PhysicsWorkerClient {
   getHistory(query?: HistoryQuery): Promise<HistoryResult> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
+      this.noteRequest();
       this.pendingHistory.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'GET_HISTORY', id, query });
     });
@@ -380,6 +414,7 @@ export class PhysicsWorkerClient {
   getTelemetry(): Promise<HistoryEntry | null> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
+      this.noteRequest();
       this.pendingTelemetry.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'GET_TELEMETRY', id });
     });
@@ -389,6 +424,7 @@ export class PhysicsWorkerClient {
   stepFor(dtMs: number, inputs: Record<string, number>, outputs: string[]): Promise<StepForResult> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
+      this.noteRequest();
       this.pendingSteps.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'STEP_FOR', id, dtMs, inputs, outputs });
     });
@@ -398,6 +434,7 @@ export class PhysicsWorkerClient {
   getChannels(): Promise<{ channels: CoSimChannel[]; timestepMs: number }> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
+      this.noteRequest();
       this.pendingChannels.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'GET_CHANNELS', id });
     });
@@ -417,6 +454,7 @@ export class PhysicsWorkerClient {
   }
 
   terminate() {
+    clearInterval(this.watchdog);
     this.worker.terminate();
     // A terminated worker will never answer anything it was already asked, so
     // every in-flight request has to be settled here. Left pending they hang
