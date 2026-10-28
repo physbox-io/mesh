@@ -20,7 +20,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 /** Each field on a node that holds another node's id, and what goes with it. */
 export const REFERENCE_FIELDS = {
   weldTargetId: ['weldRigid'],
-  connectTargetId: ['connectAnchor'],
+  connectTargetId: ['connectAnchor', 'connectAnchorLocal'],
   coupleTargetId: ['coupleRatio'],
   leftTargetId: [],
   rightTargetId: [],

@@ -71,6 +71,7 @@ import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
 import { withoutDanglingReferences } from '../utils/danglingReferences';
+import { withConnectAnchorsFollowing } from '../utils/connectAnchors';
 import { useDialogs } from './dialogStore';
 import { downloadSceneRescue, allowUnload } from '../utils/rescueScene';
 import { envelope } from '../utils/coSimLink';
@@ -315,6 +316,12 @@ let userEditTimer: ReturnType<typeof setTimeout> | null = null;
 let castPrepBypass = 0;
 /** Graphs the guard refused, so an action's own recompile of one is not built. */
 const refusedGraphs = new WeakSet<SceneGraph>();
+/**
+ * The graph the store kept for each one it was handed. An action sets a graph
+ * and then rebuilds from its own copy of it, which never went through the
+ * rules in sharingUnchangedNodes; recompile builds what was kept instead.
+ */
+const keptGraphs = new WeakMap<SceneGraph, SceneGraph>();
 
 function markUserEdit() {
   userEditPending = true;
@@ -1021,7 +1028,7 @@ const detachReferencesTo = (nodes: SceneNode[], goneId: string): SceneNode[] =>
     if (!severed && children === n.children) return n;
     const next: SceneNode = { ...n, children };
     if (next.weldTargetId === goneId) { delete next.weldTargetId; delete next.weldRigid; }
-    if (next.connectTargetId === goneId) { delete next.connectTargetId; delete next.connectAnchor; }
+    if (next.connectTargetId === goneId) { delete next.connectTargetId; delete next.connectAnchor; delete next.connectAnchorLocal; }
     if (next.coupleTargetId === goneId) { delete next.coupleTargetId; delete next.coupleRatio; }
     return next;
   });
@@ -2452,9 +2459,13 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
       if (patch && 'sceneGraph' in patch && patch.sceneGraph) {
         // Clashing body and geom names renamed by the compiler's rule, so the
         // graph the viewport draws from names what the model holds; and what
-        // was fixed to a body no longer here let go (utils/danglingReferences).
+        // was fixed to a body no longer here let go (utils/danglingReferences),
+        // and connect pins kept on their bodies (utils/connectAnchors).
         const offered = patch.sceneGraph;
-        patch.sceneGraph = withUniqueNames(withoutDanglingReferences(patch.sceneGraph));
+        patch.sceneGraph = withConnectAnchorsFollowing(
+          get().sceneGraph,
+          withUniqueNames(withoutDanglingReferences(patch.sceneGraph)),
+        );
         const prev = get().sceneGraph;
         shareUnchanged(prev, patch.sceneGraph);
         if (userEditPending && castPrepBypass === 0 && castPrepArmed(prev) && bodiesChanged(prev, patch.sceneGraph)) {
@@ -2463,6 +2474,8 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
           refusedGraphs.add(patch.sceneGraph);
           const { sceneGraph: _refused, ...rest } = patch;
           patch = { ...rest, castPrepGuardOpen: true, castPrepBlocked: get().castPrepBlocked + 1 } as typeof patch;
+        } else {
+          keptGraphs.set(offered, patch.sceneGraph);
         }
       }
       (rawSet as (p: typeof patch, r?: boolean) => void)(patch, replace);
@@ -6042,6 +6055,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // An edit the Cast-prep guard turned away never reached the store; its
     // action's own rebuild must not build it either.
     if (overrideScene && refusedGraphs.has(overrideScene)) return;
+    if (overrideScene) overrideScene = keptGraphs.get(overrideScene) ?? overrideScene;
     /*
      * We only debounce if it's NOT a force reset (which is used by presets/loaders).
      *

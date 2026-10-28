@@ -533,7 +533,13 @@ export interface SceneNode {
    */
   weldRigid?: boolean;
   connectTargetId?: string;
+  /** Where the connect pins this body, in world space as the scene stands. */
   connectAnchor?: number[];
+  /**
+   * The same point in this body's own frame, kept by the store so the pin
+   * moves with the body (utils/connectAnchors). Derived; write connectAnchor.
+   */
+  connectAnchorLocal?: number[];
   /**
    * What it takes to shear this body's weld off, in newtons.
    *
