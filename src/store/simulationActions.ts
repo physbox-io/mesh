@@ -14,6 +14,7 @@ import { prewarmFractureWorker } from '../utils/fractureWorkerClient';
 import { useDialogs } from './dialogStore';
 import { downloadSceneRescue, allowUnload } from '../utils/rescueScene';
 import { refusedGraphs, keptGraphs } from './editGuard';
+import { noteModelBuilt } from './modelProvenance';
 import { clearBreakage, anyNode, applyShatterPieces } from './breakage';
 import {
   type PhysicsWindow, MUJOCO_SHIM, buildModelMirror, buildDataMirror, RECYCLE_HEAP_BYTES,
@@ -242,6 +243,9 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
             delete updates.sceneGraph;
           }
           set(updates);
+          // The document this model describes: for a build of the runtime
+          // overlay (shards, dents), the graph it was laid over.
+          noteModelBuilt(isRuntimeBuild ? graphAtBuildStart : sceneGraph);
           heldClient?.resume();
           heldClient = null;
           done();
@@ -412,6 +416,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       recycleWorker();
       set({ isPlaying: false });
       const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+      const docGraph = get().sceneGraph;
       const { graph: sceneGraph, sleep } = liveModelGraph(get());
       try {
         const client = getPhysicsWorkerClient();
@@ -423,6 +428,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
         set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
+        noteModelBuilt(docGraph);
         if (wasPlaying) { client.setPlaying(true); set({ isPlaying: true }); }
       } catch (e) {
         console.error('Recovery rebuild after fatal worker error failed:', e);
@@ -446,6 +452,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       // isPlaying is deliberately read later via get(), not destructured here: the
       // await below means the snapshot could be stale by the time it's used.
       const { data, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+      const docGraph = get().sceneGraph;
       const { graph: sceneGraph, sleep } = liveModelGraph(get());
       if (!data) return;
       if (lastHeapBytes <= RECYCLE_HEAP_BYTES) return;
@@ -476,6 +483,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);
         set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
+        noteModelBuilt(docGraph);
         if (get().isPlaying) client.setPlaying(true);
       } catch (e) {
         console.error('Seamless proactive worker recycle failed:', e);

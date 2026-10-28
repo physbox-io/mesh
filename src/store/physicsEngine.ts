@@ -15,6 +15,7 @@ import { envelope } from '../utils/coSimLink';
 import { applyShatterPieces } from './breakage';
 import type { PhysicsState } from './useStore';
 import { store } from './storeRef';
+import { noteWorkerFrame } from './modelProvenance';
 
 /** Name<->id lookup tables the worker builds; `${type}Rev` maps ids back to names. */
 export type IdMaps = Record<string, Record<string, number> | Record<number, string> | undefined>;
@@ -207,6 +208,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       // Kept beside the qpos mirror, from the same frame, so a recycle seeds
       // the new worker's scripts from the moment its bodies are seeded from.
       lastScriptState = snap.scriptState;
+      noteWorkerFrame(snap.time);
       const data = store().getState().data;
       if (data) {
         data.time = snap.time;
