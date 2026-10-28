@@ -9,7 +9,7 @@
 // decomposition still fills it, the body says so.
 
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
-import { decomposeNodeColliders, scaledBudget, SLENDER, RETRY_MAX_HULLS } from '../src/utils/convexDecomposition';
+import { collisionDetailLevels, decomposeNodeColliders, scaledBudget, SLENDER, RETRY_MAX_HULLS } from '../src/utils/convexDecomposition';
 import { findFilledCavities } from '../src/utils/filledCavities';
 import { decomposeMesh } from '../src/utils/vhacd';
 import type { Hull } from '../src/utils/csg';
@@ -177,4 +177,25 @@ describe('a car in the channel, in MuJoCo', () => {
     expect(highest).toBeLessThan(0.009);
     expect(widest).toBeLessThan(0.012);
   }, 120_000);
+});
+
+describe("the inspector's Detail levels", () => {
+  it('on the track, Fine and Finest are each finer than what Standard already gets', () => {
+    const scaled = scaledBudget(track.verts, track.faces);
+    const { standard, fine, finest } = collisionDetailLevels(trackNode().geoms);
+    expect(standard).toEqual({});
+    expect(fine.collisionHulls).toBeGreaterThanOrEqual(scaled.maxHulls);
+    expect(fine.collisionResolution).toBeGreaterThan(scaled.voxelResolution);
+    expect(finest.collisionResolution).toBeGreaterThan(fine.collisionResolution!);
+  });
+
+  it('on a compact cup they are the fixed figures they always were', () => {
+    const cup = cupMesh({ outerR: 0.10, innerR: 0.08, height: 0.12, baseThickness: 0.02 });
+    const geom = { name: 'cup', type: 'mesh', size: [1], renderVertices: cup.verts, vertices: zupToYupFlat(cup.verts), faces: cup.faces } as SceneGeom;
+    expect(collisionDetailLevels([geom])).toEqual({
+      standard: {},
+      fine: { collisionResolution: 100_000, collisionHulls: 32 },
+      finest: { collisionResolution: 300_000, collisionHulls: 48 },
+    });
+  });
 });

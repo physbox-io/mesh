@@ -137,6 +137,35 @@ export function scaledBudget(verts: number[], faces: number[]): { maxHulls: numb
   };
 }
 
+/** Detail settings, as voxel count and piece budget. Standard leaves both to the defaults. */
+export interface CollisionDetail { collisionResolution?: number; collisionHulls?: number }
+
+/**
+ * The inspector's Standard / Fine / Finest for a body. Fixed figures for a
+ * compact part; for a long thin one each step is finer than the budget its
+ * proportions already get by default. Fixed figures there gave Fine and Finest
+ * fewer pieces than Standard, and a filled channel back.
+ */
+export function collisionDetailLevels(meshes: SceneGeom[]): Record<'standard' | 'fine' | 'finest', CollisionDetail> {
+  const fixed = {
+    standard: {},
+    fine: { collisionResolution: 100_000, collisionHulls: 32 },
+    finest: { collisionResolution: 300_000, collisionHulls: 48 },
+  };
+  let budget: ReturnType<typeof scaledBudget> | null = null;
+  for (const g of meshes) {
+    const { verts, faces } = bodyFrameMesh(colliderSourceOf(g));
+    const b = scaledBudget(verts, faces);
+    if (!budget || b.slenderness > budget.slenderness) budget = b;
+  }
+  if (!budget || budget.slenderness < SLENDER) return fixed;
+  const step = (voxels: number, hulls: number): CollisionDetail => ({
+    collisionResolution: voxelResolutionOf(Math.max(voxels, budget.voxelResolution * (voxels / 100_000 + 0.5))),
+    collisionHulls: Math.min(MAX_REQUESTED_HULLS, Math.max(hulls, budget.maxHulls)),
+  });
+  return { standard: {}, fine: step(100_000, 32), finest: step(300_000, 48) };
+}
+
 export type DecompositionStrategy = 'hull' | 'sectors' | 'decompose' | 'primitives';
 
 export interface DecompositionVerdict {

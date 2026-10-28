@@ -1,20 +1,16 @@
+import { useMemo } from 'react';
 import { Donut } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { collisionModeOf } from '../../utils/csg';
-import { collidersAreStale, solidMeshGeoms } from '../../utils/convexDecomposition';
+import { collidersAreStale, collisionDetailLevels, solidMeshGeoms, type CollisionDetail } from '../../utils/convexDecomposition';
 import type { SceneNode } from '../../types/scene';
 
-/** Decomposition detail, as voxel count and piece budget. Standard leaves both to the defaults. */
-const DETAIL = {
-  standard: { collisionResolution: undefined, collisionHulls: undefined },
-  fine: { collisionResolution: 100_000, collisionHulls: 32 },
-  finest: { collisionResolution: 300_000, collisionHulls: 48 },
-} as const;
+type DetailName = 'standard' | 'fine' | 'finest';
 
-function detailOf(node: SceneNode): keyof typeof DETAIL | 'custom' {
-  for (const [name, d] of Object.entries(DETAIL)) {
+function detailOf(node: SceneNode, levels: Record<DetailName, CollisionDetail>): DetailName | 'custom' {
+  for (const [name, d] of Object.entries(levels)) {
     if (node.collisionResolution === d.collisionResolution && node.collisionHulls === d.collisionHulls) {
-      return name as keyof typeof DETAIL;
+      return name as DetailName;
     }
   }
   return 'custom';
@@ -28,9 +24,12 @@ function detailOf(node: SceneNode): keyof typeof DETAIL | 'custom' {
 export function CollisionCard({ node }: { node: SceneNode }) {
   const updateNode = useStore((s) => s.updateNode);
 
-  if (node.csgEnabled) return null;
   const meshes = solidMeshGeoms(node);
+  // Keyed on the geoms, so a body that is only moved does not re-measure.
+  const levels = useMemo(() => collisionDetailLevels(meshes), [node.geoms]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (node.csgEnabled) return null;
   if (meshes.length === 0) return null;
+  const detail = detailOf(node, levels);
 
   const mode = collisionModeOf(node);
   const colliders = (node.geoms || []).filter((g) => g.csgDerived === 'collider');
@@ -57,15 +56,18 @@ export function CollisionCard({ node }: { node: SceneNode }) {
         <label className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
           Detail
           <select
-            value={detailOf(node)}
-            onChange={(e) => updateNode(node.id, DETAIL[e.target.value as keyof typeof DETAIL])}
+            value={detail}
+            onChange={(e) => {
+              const d = levels[e.target.value as DetailName];
+              updateNode(node.id, { collisionResolution: d.collisionResolution, collisionHulls: d.collisionHulls });
+            }}
             className="px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
             title="How finely the shape is broken up. Finer sees narrower slots and grooves, and takes longer to work out. It costs nothing while the simulation runs."
           >
             <option value="standard">Standard</option>
             <option value="fine">Fine</option>
             <option value="finest">Finest</option>
-            {detailOf(node) === 'custom' && <option value="custom">Custom</option>}
+            {detail === 'custom' && <option value="custom">Custom</option>}
           </select>
         </label>
       )}
