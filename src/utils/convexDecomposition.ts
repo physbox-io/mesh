@@ -27,7 +27,7 @@
 // `await import(...)`, the same rule csg.ts follows for ./openscad.
 
 import {
-  collisionModeOf, colliderTemplateOf, convexHullOf, hullsToColliderGeoms,
+  collisionModeOf, colliderTemplateOf, convexHullOf, hullsToColliderGeoms, isCollidingMeshGeom,
   meshChecksum, meshVolumeAndCentroid, type Hull,
 } from './csg';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
@@ -102,13 +102,7 @@ export interface ColliderResult {
 
 /** The mesh geoms of a body that are solid enough to collide with. */
 export function solidMeshGeoms(node: SceneNode): SceneGeom[] {
-  return (node.geoms || []).filter(g =>
-    g.type === 'mesh' &&
-    g.csg !== 'difference' &&
-    !g.csgDerived &&
-    g.role !== 'visual' &&
-    !!g.faces?.length &&
-    !!(g.renderVertices?.length || g.vertices?.length));
+  return (node.geoms || []).filter(isCollidingMeshGeom);
 }
 
 /**
@@ -266,7 +260,7 @@ export function collisionHashOf(node: SceneNode): string {
     // while the part they collide for stays exactly the same shape.
     usesCollisionProxies(node.scad) ? node.scad : null,
     node.collisionMass ?? null,
-    meshes.map(g => [g.mass ?? null, g.density ?? null, g.condim ?? null, g.friction ?? null, g.solref ?? null, g.solimp ?? null]),
+    meshes.map(g => [g.mass ?? null, g.density ?? null, g.condim ?? null, g.friction ?? null, g.solref ?? null, g.solimp ?? null, g.contype ?? null, g.conaffinity ?? null]),
   ]);
   let h = 0x811c9dc5;
   for (let i = 0; i < key.length; i++) {

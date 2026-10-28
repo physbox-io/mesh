@@ -20,6 +20,7 @@ import {
 } from '../src/utils/convexDecomposition';
 import {
   collisionModeOf,
+  colliderTemplateOf,
   convexHullOf,
   hullsToColliderGeoms,
   meshVolumeAndCentroid,
@@ -235,6 +236,16 @@ describe('hullsToColliderGeoms', () => {
     expect(geoms[0].rgba).toEqual([1, 0, 0, 1]);
   });
 
+  it('carries contact filtering over, so a piece collides with what its source did', () => {
+    const geoms = hullsToColliderGeoms(slabHulls(), 'cup', colliderTemplateOf(
+      meshGeom(cupMesh(), { contype: 2, conaffinity: 4 }), [1, 1, 1, 1],
+    ), 1);
+    expect(geoms.every(g => g.contype === 2 && g.conaffinity === 4)).toBe(true);
+    // And says nothing when the source said nothing, so MuJoCo's defaults stand.
+    const plain = hullsToColliderGeoms(slabHulls(), 'cup', colliderTemplateOf(meshGeom(cupMesh()), [1, 1, 1, 1]), 1);
+    expect(plain.every(g => !('contype' in g) && !('conaffinity' in g))).toBe(true);
+  });
+
   it('emits nothing rather than something weightless', () => {
     expect(hullsToColliderGeoms([], 'cup', undefined, 1)).toEqual([]);
   });
@@ -386,5 +397,21 @@ describe('solidMeshGeoms', () => {
       { name: 'prim', type: 'box', size: [1, 1, 1] },
     ]);
     expect(solidMeshGeoms(node).map(g => g.name)).toEqual(['real']);
+  });
+
+  it('ignores a mesh that collides with nothing, rather than making its pieces collide', () => {
+    const node = body([
+      meshGeom(cupMesh(), { name: 'real' }),
+      meshGeom(cupMesh(), { name: 'sleeve', contype: 0, conaffinity: 0 }),
+      // Half off is still on: it is hit by whatever its conaffinity admits.
+      meshGeom(cupMesh(), { name: 'half', contype: 0, conaffinity: 1 }),
+    ]);
+    expect(solidMeshGeoms(node).map(g => g.name)).toEqual(['real', 'half']);
+    expect(collisionHashOf(body([meshGeom(cupMesh(), { contype: 0, conaffinity: 0 })]))).toBe('');
+  });
+
+  it('re-decomposes when a mesh changes what it collides with', () => {
+    const a = collisionHashOf(body([meshGeom(cupMesh())]));
+    expect(collisionHashOf(body([meshGeom(cupMesh(), { contype: 2 })]))).not.toBe(a);
   });
 });

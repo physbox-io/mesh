@@ -2204,6 +2204,9 @@ export function usableColliderHulls<T extends { verts: number[]; faces: number[]
 /** What a collider geom inherits from the geom it was decomposed from. */
 export interface ColliderTemplate {
   rgba?: number[];
+  /** Contact filtering: pieces of a geom kept off a mechanism's other parts stay off them. */
+  contype?: number;
+  conaffinity?: number;
   condim?: number;
   friction?: number[];
   solref?: number[];
@@ -2214,6 +2217,8 @@ export interface ColliderTemplate {
 export function colliderTemplateOf(g: SceneGeom | undefined, rgba: number[]): ColliderTemplate {
   return {
     rgba,
+    contype: g?.contype,
+    conaffinity: g?.conaffinity,
     condim: g?.condim,
     friction: g?.friction,
     solref: g?.solref,
@@ -2260,6 +2265,8 @@ export function hullsToColliderGeoms(
       rgba: [...rgba],
       mass: share,
       condim: template?.condim ?? 3,
+      ...(template?.contype !== undefined ? { contype: template.contype } : {}),
+      ...(template?.conaffinity !== undefined ? { conaffinity: template.conaffinity } : {}),
       ...(template?.friction ? { friction: [...template.friction] } : {}),
       ...(template?.solref ? { solref: [...template.solref] } : {}),
       ...(template?.solimp ? { solimp: [...template.solimp] } : {}),
@@ -2655,6 +2662,26 @@ function zupArrayToYup(zup: number[]): number[] {
  *
  * A non-CSG node is returned untouched, so every existing scene is unaffected.
  */
+/**
+ * A mesh geom that collides as a solid: what a body's decomposition is built
+ * from (solidMeshGeoms in convexDecomposition.ts), and so what its colliders
+ * stand in for. Lives here rather than there so resolveCsgGeoms can ask without
+ * the two modules importing each other.
+ *
+ * A geom with contype and conaffinity both 0 collides with nothing — a
+ * decorative sleeve, a rim kept off the frame it turns in. Decomposing one
+ * would turn it into pieces that collide with everything.
+ */
+export function isCollidingMeshGeom(g: SceneGeom): boolean {
+  return g.type === 'mesh' &&
+    g.csg !== 'difference' &&
+    !g.csgDerived &&
+    g.role !== 'visual' &&
+    !(g.contype === 0 && g.conaffinity === 0) &&
+    !!g.faces?.length &&
+    !!(g.renderVertices?.length || g.vertices?.length);
+}
+
 /**
  * What becomes of an authored geom once its body collides as convex pieces.
  *
