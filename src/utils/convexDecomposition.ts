@@ -28,8 +28,9 @@
 
 import {
   collisionModeOf, colliderTemplateOf, convexHullOf, hullsToColliderGeoms, isCollidingMeshGeom,
-  meshChecksum, meshVolumeAndCentroid, type Hull,
+  meshChecksum, meshVolumeAndCentroid, primitiveVolume, type Hull,
 } from './csg';
+import { authoredQuat } from './bodyOrientation';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import type { FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
@@ -165,11 +166,12 @@ export function hullBudget(solidity: number, requested?: number): number {
  */
 export function decompositionVerdict(
   node: SceneNode,
-  opts: { volume?: number; hullVolume?: number; hasHoleAxis?: boolean } = {},
+  opts: { volume?: number; hullVolume?: number; hasHoleAxis?: boolean; triangles?: number } = {},
 ): DecompositionVerdict {
   const mode: CollisionMode = collisionModeOf(node);
   const meshes = solidMeshGeoms(node);
-  const triangles = triangleCount(meshes);
+  // Measured figures are for one mesh, and so is its triangle count.
+  const triangles = opts.triangles ?? triangleCount(meshes);
 
   if (mode === 'primitives') {
     return { strategy: 'primitives', solidity: 1, triangles, maxHulls: 0, reason: 'forced' };
@@ -185,7 +187,9 @@ export function decompositionVerdict(
 
   const measured = opts.volume !== undefined && opts.hullVolume !== undefined
     ? { volume: opts.volume, hullVolume: opts.hullVolume, solidity: solidityOf(opts.volume, opts.hullVolume) }
-    : meshSolidity(colliderSourceOf(meshes[0]));
+    // Unmeasured, the body is as concave as its most concave mesh: each mesh
+    // collides as its own hull, so one cup among boxes is still a cup.
+    : meshes.map(g => meshSolidity(colliderSourceOf(g))).reduce((a, b) => (b.solidity < a.solidity ? b : a));
   const { solidity } = measured;
   const maxHulls = hullBudget(solidity, node.collisionHulls);
 
@@ -271,11 +275,73 @@ export function collisionHashOf(node: SceneNode): string {
 }
 
 /**
- * Decomposes a body's mesh into convex colliders, or decides not to.
+ * A mesh geom's collision source in the BODY frame, Z-up: its renderVertices
+ * (or its Y-up vertices, turned) moved by the geom's own pos and rotation.
  *
- * Returns a result with no geoms when the verdict is to collide as a hull —
- * which is still worth installing, because it stamps collisionHash and stops the
- * same mesh being reconsidered on every store update.
+ * The pieces are emitted with no rotation and their centroid as pos, so they
+ * land where their vertices say in the body frame. A mesh is placed by MuJoCo
+ * (and drawn by SceneLayer) at its geom's pose, so decomposing its raw vertices
+ * put every piece where the mesh would be with that pose taken away: two
+ * upright rims at y = ±30 mm became one flat ring at y = 0, and a sleeve
+ * standing on pos z = 85 mm collided 85 mm into the floor.
+ */
+export function bodyFrameMesh(g: SceneGeom): { verts: number[]; faces: number[] } {
+  const shape = colliderSourceOf(g);
+  const faces = shape.faces ?? [];
+  let local = shape.renderVertices;
+  if (!local) {
+    const yUp = shape.vertices ?? [];
+    local = new Array<number>(yUp.length);
+    for (let i = 0; i < yUp.length; i += 3) {
+      local[i] = yUp[i];
+      local[i + 1] = -yUp[i + 2];
+      local[i + 2] = yUp[i + 1];
+    }
+  }
+  const tx = g.pos?.[0] ?? 0, ty = g.pos?.[1] ?? 0, tz = g.pos?.[2] ?? 0;
+  let [w, x, y, z] = authoredQuat(g);
+  const n = Math.hypot(w, x, y, z) || 1;
+  w /= n; x /= n; y /= n; z /= n;
+  const turned = x !== 0 || y !== 0 || z !== 0;
+  if (!turned && !tx && !ty && !tz) return { verts: local, faces };
+  const verts = new Array<number>(local.length);
+  for (let i = 0; i < local.length; i += 3) {
+    let vx = local[i], vy = local[i + 1], vz = local[i + 2];
+    if (turned) {
+      // v + 2w(q x v) + 2 q x (q x v)
+      const cx = y * vz - z * vy, cy = z * vx - x * vz, cz = x * vy - y * vx;
+      const dx = y * cz - z * cy, dy = z * cx - x * cz, dz = x * cy - y * cx;
+      vx += 2 * (w * cx + dx); vy += 2 * (w * cy + dy); vz += 2 * (w * cz + dz);
+    }
+    verts[i] = vx + tx;
+    verts[i + 1] = vy + ty;
+    verts[i + 2] = vz + tz;
+  }
+  return { verts, faces };
+}
+
+/** One mesh's share of a body's decomposition. */
+interface MeshColliders {
+  source: SceneGeom;
+  verdict: DecompositionVerdict;
+  volume: number;
+  hullVolume: number;
+  hulls: Hull[];
+  cavities: FilledCavity[];
+  warning?: string;
+}
+
+/**
+ * Decomposes a body's meshes into convex colliders, or decides not to.
+ *
+ * Each colliding mesh is judged and broken up on its own, because MuJoCo hulls
+ * each on its own: a Ferris wheel's two rims are two rings, not one, and a box
+ * beside a cup is exact as it is. A mesh that is decomposed stops colliding as
+ * itself (resolveCsgGeoms reads `colliderOf`); the others go on as they were.
+ *
+ * Returns a result with no geoms when no mesh is decomposed — which is still
+ * worth installing, because it stamps collisionHash and stops the same mesh
+ * being reconsidered on every store update.
  *
  * The wasm is reached through `await import(...)`, never a static import, so
  * this module stays loadable in plain Node and in the test suite. Same rule
@@ -286,33 +352,20 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   if (!hash) return null;
 
   const meshes = solidMeshGeoms(node);
-  const source = meshes[0];
-  const shape = colliderSourceOf(source);
-  const verts = shape.renderVertices ?? shape.vertices ?? [];
-  const faces = shape.faces ?? [];
-
-  // The client runs the worker in a browser and falls back to the module under
-  // Node and vite-node, where there is no Worker to run. Measuring goes through
-  // it too: hulling every vertex of a dense sculpt hitched the viewport after
-  // each stroke when it ran here.
-  const { analyseMeshOffThread, decomposeWithCavitiesOffThread } = await import('./vhacdWorkerClient');
-  let analysis;
-  try {
-    analysis = await analyseMeshOffThread(verts, faces);
-  } catch {
-    const { analyseMesh } = await import('./meshAnalysis');
-    analysis = analyseMesh(verts, faces);
-  }
-  const { volume, hullVolume, integrity } = analysis;
-  const verdict = decompositionVerdict(node, { volume, hullVolume });
-  const mass = colliderMass(node, source, volume);
+  const baseName = node.name || node.id;
 
   // The script's own colliders, when it draws them (utils/scadColliders.ts).
+  // They stand for the whole body, so they carry no colliderOf.
   if (usesCollisionProxies(node.scad) && collisionModeOf(node) !== 'hull') {
+    const source = meshes[0];
+    const { verts, faces } = bodyFrameMesh(source);
+    const { volume, hullVolume } = await analyse(verts, faces);
+    const verdict = decompositionVerdict(node, { volume, hullVolume });
+    const mass = colliderMass(node, source, volume);
     try {
       const proxies = await scadProxyHulls(node.scad!);
       if (proxies.length > 0) {
-        const geoms = hullsToColliderGeoms(proxies, node.name || node.id, colliderTemplateOf(source, source.rgba ?? [0.3, 0.6, 0.9, 1]), mass);
+        const geoms = hullsToColliderGeoms(proxies, baseName, colliderTemplateOf(source, source.rgba ?? [0.3, 0.6, 0.9, 1]), mass);
         return {
           hash, geoms, volume, hullVolume, mass,
           verdict: { ...verdict, strategy: 'decompose', maxHulls: proxies.length, reason: 'scad-proxies' },
@@ -330,21 +383,86 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     }
   }
 
-  if (verdict.strategy !== 'decompose') {
-    return { hash, geoms: [], verdict, volume, hullVolume, mass, warning: verdict.warning };
+  const parts: MeshColliders[] = [];
+  for (const source of meshes) parts.push(await decomposeOneMesh(node, source));
+
+  const decomposed = parts.filter(p => p.hulls.length > 0);
+  const volume = parts.reduce((v, p) => v + p.volume, 0);
+  const hullVolume = parts.reduce((v, p) => v + p.hullVolume, 0);
+  // The body's verdict is its most concave mesh's, among those broken up if any were.
+  const lead = (decomposed.length ? decomposed : parts).reduce((a, b) => (b.verdict.solidity < a.verdict.solidity ? b : a));
+  const verdict: DecompositionVerdict = {
+    ...lead.verdict,
+    triangles: parts.reduce((t, p) => t + p.verdict.triangles, 0),
+    ...(decomposed.length ? { maxHulls: decomposed.reduce((t, p) => t + p.hulls.length, 0) } : {}),
+  };
+  const notes = parts.map(p => p.warning).filter((w): w is string => !!w);
+
+  if (decomposed.length === 0) {
+    const mass = parts.reduce((m, p) => m + colliderMass(node, p.source, p.volume), 0);
+    return { hash, geoms: [], verdict, volume, hullVolume, mass, ...(notes.length ? { warning: notes.join(' ') } : {}) };
   }
+
+  // A body-wide collisionMass is shared over what is decomposed, by volume;
+  // otherwise each mesh's pieces weigh what that mesh does.
+  const decomposedVolume = decomposed.reduce((v, p) => v + p.volume, 0);
+  const massOf = (p: MeshColliders) => (node.collisionMass !== undefined
+    ? node.collisionMass * (decomposedVolume > 0 ? p.volume / decomposedVolume : 1 / decomposed.length)
+    : colliderMass(node, p.source, p.volume));
+
+  const geoms: SceneGeom[] = [];
+  const named: NonNullable<ColliderResult['cavities']> = [];
+  for (const p of decomposed) {
+    const first = geoms.length;
+    const template = colliderTemplateOf(p.source, p.source.rgba ?? [0.3, 0.6, 0.9, 1]);
+    hullsToColliderGeoms(p.hulls, baseName, template, massOf(p)).forEach((g, i) => {
+      geoms.push({ ...g, name: `${baseName}_csg_col${first + i}`, colliderOf: p.source.name });
+    });
+    for (const c of p.cavities) named.push({ ...c, coveredBy: `${baseName}_csg_col${first + c.coveredBy}` });
+  }
+  const mass = decomposed.reduce((m, p) => m + massOf(p), 0);
+  const warning = [cavityWarning(named) ?? massWarning(node, decomposed), ...notes].filter(Boolean).join(' ');
+  return {
+    hash, geoms, verdict, volume, hullVolume, mass,
+    ...(warning ? { warning } : {}),
+    ...(named.length > 0 ? { cavities: named } : {}),
+  };
+}
+
+/** Volume, hull volume and soundness of a mesh, off the main thread where there is one. */
+async function analyse(verts: number[], faces: number[]) {
+  // The client runs the worker in a browser and falls back to the module under
+  // Node and vite-node, where there is no Worker to run. Measuring goes through
+  // it too: hulling every vertex of a dense sculpt hitched the viewport after
+  // each stroke when it ran here.
+  const { analyseMeshOffThread } = await import('./vhacdWorkerClient');
+  try {
+    return await analyseMeshOffThread(verts, faces);
+  } catch {
+    const { analyseMesh } = await import('./meshAnalysis');
+    return analyseMesh(verts, faces);
+  }
+}
+
+/** Judges one mesh of a body, and breaks it into convex pieces if it earns it. */
+async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<MeshColliders> {
+  const { verts, faces } = bodyFrameMesh(source);
+  const { volume, hullVolume, integrity } = await analyse(verts, faces);
+  const verdict = decompositionVerdict(node, { volume, hullVolume, triangles: faces.length / 3 });
+  const none = (warning?: string, strategy: DecompositionStrategy = verdict.strategy): MeshColliders => ({
+    source, verdict: { ...verdict, strategy }, volume, hullVolume, hulls: [], cavities: [], ...(warning ? { warning } : {}),
+  });
+
+  if (verdict.strategy !== 'decompose') return none(verdict.warning);
 
   // A mesh that is open or wound both ways cannot be flood-filled sensibly: the
   // fill leaks through the gaps and the "inside" it finds is not the inside.
   // Better a hull and a sentence than confident nonsense. See the winding trap
   // in CLAUDE.md, and meshIntegrity.ts for what is actually checked.
   if (integrity && !(integrity.closed && integrity.consistentlyWound && integrity.volume > 0)) {
-    return {
-      hash, geoms: [], verdict: { ...verdict, strategy: 'hull' }, volume, hullVolume, mass,
-      warning: !integrity.closed
-        ? 'This mesh has holes in it, so its inside cannot be told from its outside — it collides as its convex hull, and any hollow in it is solid. Close the mesh to decompose it.'
-        : 'This mesh has triangles facing both ways, so its inside cannot be told from its outside — it collides as its convex hull. Fix the winding to decompose it.',
-    };
+    return none(!integrity.closed
+      ? 'This mesh has holes in it, so its inside cannot be told from its outside — it collides as its convex hull, and any hollow in it is solid. Close the mesh to decompose it.'
+      : 'This mesh has triangles facing both ways, so its inside cannot be told from its outside — it collides as its convex hull. Fix the winding to decompose it.', 'hull');
   }
 
   // Asked for, or left to the defaults with one finer try in reserve.
@@ -353,6 +471,7 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     ? Math.max(10_000, Math.min(400_000, Math.round(node.collisionResolution)))
     : undefined;
 
+  const { decomposeWithCavitiesOffThread } = await import('./vhacdWorkerClient');
   let hulls: Hull[];
   let cavities: FilledCavity[];
   try {
@@ -381,29 +500,15 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     }
   } catch (err) {
     // Timed out, or the worker died. A body still has to collide as something.
-    return {
-      hash, geoms: [], verdict: { ...verdict, strategy: 'hull' }, volume, hullVolume, mass,
-      warning: `${err instanceof Error ? err.message : String(err)} It collides as its convex hull, so any hollow in it is solid.`,
-    };
+    return none(`${err instanceof Error ? err.message : String(err)} It collides as its convex hull, so any hollow in it is solid.`, 'hull');
   }
 
   if (hulls.length < MIN_SURVIVING_HULLS) {
-    // Emitting one piece, or none, is not a decomposition — and a body with no
-    // colliders at all would fall through the world.
-    return {
-      hash, geoms: [], verdict: { ...verdict, strategy: 'hull' }, volume, hullVolume, mass,
-      warning: 'This shape could not be broken into convex pieces, so it collides as its convex hull and any hollow in it is solid.',
-    };
+    // Emitting one piece, or none, is not a decomposition — and a mesh with no
+    // colliders at all would leave its body falling through the world.
+    return none('This shape could not be broken into convex pieces, so it collides as its convex hull and any hollow in it is solid.', 'hull');
   }
-
-  const baseName = node.name || node.id;
-  const geoms = hullsToColliderGeoms(hulls, baseName, colliderTemplateOf(source, source.rgba ?? [0.3, 0.6, 0.9, 1]), mass);
-  const named = cavities.map((c) => ({ ...c, coveredBy: `${baseName}_csg_col${c.coveredBy}` }));
-  return {
-    hash, geoms, verdict, volume, hullVolume, mass,
-    warning: cavityWarning(named) ?? massWarning(node, source, volume, hullVolume),
-    ...(named.length > 0 ? { cavities: named } : {}),
-  };
+  return { source, verdict, volume, hullVolume, hulls, cavities };
 }
 
 /** Said when a decomposition still fills something in, naming where and which piece. */
@@ -421,12 +526,25 @@ function cavityWarning(cavities: NonNullable<ColliderResult['cavities']>): strin
  * its convex hull now weighs what is actually there, which is lighter — often by
  * a factor of three. Correct, and the same defect inertia="exact" fixed for the
  * oak tree, but not something to change under someone without telling them.
+ *
+ * Both figures are the WHOLE body's: the geoms that were not decomposed weigh
+ * the same either way and are counted in each, so the sentence is about the
+ * body someone picks up rather than one of its meshes.
  */
-function massWarning(node: SceneNode, source: SceneGeom, volume: number, hullVolume: number): string | undefined {
-  if (node.collisionMass !== undefined || source.mass !== undefined) return undefined;
+function massWarning(node: SceneNode, decomposed: MeshColliders[]): string | undefined {
+  if (node.collisionMass !== undefined) return undefined;
+  const hollow = decomposed.filter(p => p.source.mass === undefined && p.volume > 0);
+  const volume = hollow.reduce((v, p) => v + p.volume, 0);
+  const hullVolume = hollow.reduce((v, p) => v + p.hullVolume, 0);
   if (!(volume > 0) || hullVolume / volume < 1.5) return undefined;
-  const density = source.density ?? 1000;
-  return `Now that its hollow is real, this body weighs ${(density * volume).toFixed(2)} kg rather than the ${(density * hullVolume).toFixed(2)} kg it was given as a solid lump. Set a mass if you wanted the heavier figure.`;
+  const before = hollow.reduce((m, p) => m + (p.source.density ?? 1000) * p.hullVolume, 0);
+  const after = hollow.reduce((m, p) => m + (p.source.density ?? 1000) * p.volume, 0);
+  const sources = new Set(decomposed.map(p => p.source));
+  const rest = (node.geoms || [])
+    .filter(g => !sources.has(g) && !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane')
+    .reduce((m, g) => m + (g.mass ?? (g.density ?? 1000) * primitiveVolume(g)), 0)
+    + decomposed.filter(p => !hollow.includes(p)).reduce((m, p) => m + (p.source.mass ?? 0), 0);
+  return `Now that its hollow is real, this body weighs ${(rest + after).toFixed(2)} kg rather than the ${(rest + before).toFixed(2)} kg it was given as a solid lump. Set a mass if you wanted the heavier figure.`;
 }
 
 /**

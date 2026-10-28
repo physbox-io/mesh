@@ -395,7 +395,9 @@ export const PRINT_CONTACT_TIME = 0.002;
 function applyContactClasses(nodes: SceneNode[], print: boolean) {
   for (const node of nodes) {
     if (node.geoms?.some((g) => g.contactClass || g.colliderFaces?.length)) {
-      const decomposed = node.geoms.some((g) => g.csgDerived === 'collider');
+      // A mesh a decomposition stands in for has already been demoted to
+      // visual (or dropped) by resolveCsgGeoms, so the role test below skips
+      // it; one the pieces do not cover still collides as its own section.
       const out: SceneGeom[] = [];
       for (const g of node.geoms) {
         if (g.contactClass) {
@@ -404,7 +406,7 @@ function applyContactClasses(nodes: SceneNode[], print: boolean) {
           const conaffinity = !print ? 0 : g.contactClass === 'pin' ? PIN_CONTACT : bit;
           out.push({ ...g, role: 'collision', mass: 0, density: undefined, contype, conaffinity });
         } else if (
-          !decomposed && g.type === 'mesh' && g.role !== 'visual'
+          g.type === 'mesh' && g.role !== 'visual'
           && g.colliderFaces?.length && g.colliderVertices?.length
         ) {
           const { colliderVertices, colliderFaces, ...rest } = g;

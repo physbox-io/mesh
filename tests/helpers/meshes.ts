@@ -220,3 +220,26 @@ export function toSoup(m: MeshData): Float64Array {
   }
   return out;
 }
+
+/**
+ * A torus about Z: major radius `R` to the middle of the tube, tube radius `r`.
+ * Solidity well under 1 — the hole in the middle is in its hull.
+ */
+export function torusMesh(R = 0.08, r = 0.006, segments = 32, sides = 12): MeshData {
+  const verts: number[] = [];
+  const faces: number[] = [];
+  for (let i = 0; i < segments; i++) {
+    const u = (i / segments) * Math.PI * 2;
+    for (let j = 0; j < sides; j++) {
+      const v = (j / sides) * Math.PI * 2;
+      const rr = R + r * Math.cos(v);
+      verts.push(rr * Math.cos(u), rr * Math.sin(u), r * Math.sin(v));
+    }
+  }
+  const at = (i: number, j: number) => (i % segments) * sides + (j % sides);
+  // d/du x d/dv points out of the tube, so u-then-v corners run CCW from outside.
+  for (let i = 0; i < segments; i++) {
+    for (let j = 0; j < sides; j++) quad(faces, at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+  }
+  return { verts, faces };
+}

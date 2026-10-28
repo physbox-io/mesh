@@ -105,6 +105,11 @@ export interface SceneGeom {
   // colliders — so a recompile can replace them wholesale and tell them from
   // authored ones.
   csgDerived?: 'visual' | 'collider';
+  // On a decomposition's collider: the name of the mesh geom it is a piece
+  // of. Only that mesh stops colliding as itself (resolveCsgGeoms); a body's
+  // other meshes go on as they were. Absent on older colliders, which stand in
+  // for every colliding mesh of the body.
+  colliderOf?: string;
   rgba?: number[];
   // Colour brushed onto part of this geom's surface (see utils/vertexPaint).
   // Purely decorative: nothing in the physics, the MJCF emitter or any exporter

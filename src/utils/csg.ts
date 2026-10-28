@@ -2720,8 +2720,19 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
     // only drawn. Colliders already carry role 'collision', so the render filter
     // below drops them without being told about decomposition at all.
     if (target === 'render') return solid.filter(g => g.role !== 'collision');
+    // Only a mesh the pieces stand in for is demoted. Every other geom of the
+    // body — a primitive, a mesh that was convex enough to keep, a decorative
+    // one that collides with nothing — still collides and weighs what it did:
+    // a carousel's canopy vanished from the physics, mass and all, because the
+    // platform under it had been decomposed.
+    const legacy = colliders.some(c => c.colliderOf === undefined);
+    const represented = new Set(colliders.map(c => c.colliderOf));
+    // A visual-only mesh is massless beside them and collides with nothing, so
+    // it goes the same way as before.
+    const demoted = (g: SceneGeom) => (g.type === 'mesh' && g.role === 'visual') ||
+      (isCollidingMeshGeom(g) && (legacy || represented.has(g.name)));
     const authored = solid.filter(g => g.csgDerived !== 'collider');
-    return [...authored.flatMap(demoteDecomposedGeom), ...colliders];
+    return [...authored.flatMap(g => (demoted(g) ? demoteDecomposedGeom(g) : [g])), ...colliders];
   }
 
   const derived = geoms.filter(g => !!g.csgDerived);
