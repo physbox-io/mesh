@@ -14,7 +14,7 @@ import { announcePresetSave } from '../utils/presetNotices';
 import { summarizeTrajectory } from '../utils/trajectorySummary';
 import { authoredQuat, orientationOf } from '../utils/bodyOrientation';
 import { pocketMesh, type PocketSpec } from '../utils/pocketCutter';
-import { useStore, getPhysicsWorkerClient } from '../store/useStore';
+import { useStore, getPhysicsWorkerClient, type PhysicsState } from '../store/useStore';
 import { useDentStore } from '../store/dentStore';
 import { isDentable, needsConversionForDenting } from '../utils/dentMesh';
 import type { DentConfig } from '../utils/breakThresholds';
@@ -164,9 +164,10 @@ import { walkBodiesWorld } from '../utils/bodyWorld';
 import { initialContacts } from './initialContacts';
 import { generatedMeshMass } from '../utils/generatedMeshMass';
 import { bboxOf, geomBboxOf, isFabricationScene, meshIntegrity, staleBodies, stockReport, summarizeNode } from '../utils/sceneSummary';
-import { modelBuiltFrom } from '../store/modelProvenance';
 import { recompilesInFlight } from '../store/simulationActions';
 import { framingPatch } from '../store/sceneFraming';
+import { lastWorkerFrame, modelBuiltFrom } from '../store/modelProvenance';
+import { describeWorker } from '../utils/workerStatus';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
@@ -313,6 +314,28 @@ const settleScene = async (
   // one tower with everything hung off it used to report nodeCount 1.
   return { ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length };
 };
+
+/**
+ * The worker's side of the story for physics_get_state and physics_play. Pass
+ * isPlaying false where a stall cannot have shown yet (just after starting).
+ */
+function workerStatusNow(
+  store: Pick<PhysicsState, 'sceneGraph' | 'model' | 'isPlaying'>,
+  isPlaying = store.isPlaying,
+) {
+  const built = modelBuiltFrom();
+  return describeWorker({
+    graph: store.sceneGraph,
+    hasModel: !!store.model,
+    builtFrom: built.graph,
+    builtAt: built.at,
+    frame: lastWorkerFrame(),
+    isPlaying,
+    compiling: recompilesInFlight > 0,
+    hidden: typeof document !== 'undefined' && document.hidden,
+    now: Date.now(),
+  });
+}
 
 /** How many bodies a scene tree holds, at any depth. */
 function countBodies(nodes: SceneNode[] | undefined): number {
@@ -2197,7 +2220,8 @@ export function useMCPBridge() {
       if (msg && Array.isArray(msg.withIds)) msg = { ...msg, withIds: msg.withIds.map(toId) };
 
       switch (cmd) {
-        case 'GET_STATE':
+        case 'GET_STATE': {
+          const worker = workerStatusNow(store);
           return {
             // Mesh arrays stripped as physics_get_objects strips them: one
             // carved tray made this reply 2.8 MB. include_meshes asks for them.
@@ -2205,7 +2229,11 @@ export function useMCPBridge() {
               ? store.sceneGraph
               : { ...store.sceneGraph, nodes: (store.sceneGraph.nodes || []).map(stripMeshArrays) },
             isPlaying:    store.isPlaying,
-            isLoaded:     store.isLoaded,
+            // Loaded means the worker holds a model of THIS scene. The store's
+            // flag goes true on the first build and stays true, so on its own
+            // it said yes for a scene the worker never built.
+            isLoaded:     store.isLoaded && worker.sceneBuilt,
+            worker,
             gravityZ:     store.gravityZ,
             windX:        store.windX,
             windY:        store.windY,
@@ -2214,6 +2242,7 @@ export function useMCPBridge() {
             floorBounce:   store.floorBounce,
             lastCompileError: store.lastCompileError,
           };
+        }
 
         case 'GET_CAMERA': {
           // Prefer the live pose (reflects manual orbiting/panning done in the
@@ -4999,9 +5028,18 @@ export function useMCPBridge() {
           // `store` is the snapshot from before the toggle.
           return { ok: true, isPlaying: useStore.getState().isPlaying };
 
-        case 'PLAY':
+        case 'PLAY': {
           if (!store.isPlaying) store.togglePlay();
-          return { ok: true };
+          // Whether there is anything to play: a scene the worker never built
+          // used to play nothing and report ok all the same.
+          const { sceneBuilt, compiling, note } = workerStatusNow(useStore.getState(), false);
+          return {
+            ok: true,
+            isPlaying: useStore.getState().isPlaying,
+            sceneBuilt,
+            ...(sceneBuilt ? {} : { compiling, warning: note }),
+          };
+        }
 
         case 'STOP':
           if (store.isPlaying) store.togglePlay();
