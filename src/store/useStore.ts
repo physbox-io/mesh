@@ -1026,6 +1026,32 @@ const detachReferencesTo = (nodes: SceneNode[], goneId: string): SceneNode[] =>
   });
 
 /**
+ * Move every weld and connect that named `fromId` onto `toId`.
+ *
+ * Combine folds a body into another and removes it, and what was fixed to it
+ * is fixed to the merged part now — the shape it was welded to is still there,
+ * it just belongs to a different body. Left alone the weld names a body that
+ * no longer exists and MuJoCo refuses the whole model. A weld that would now
+ * join `toId` to itself is cut, and a gear coupling is cut rather than moved,
+ * since it names the old body's joint, not its shape.
+ */
+const retargetReferences = (nodes: SceneNode[], fromId: string, toId: string): SceneNode[] => {
+  const move = (list: SceneNode[]): SceneNode[] => (list || []).map((n) => {
+    const children = move(n.children || []);
+    const moves = (n.weldTargetId === fromId || n.connectTargetId === fromId) && n.id !== toId;
+    if (!moves && children === n.children) return n;
+    const next: SceneNode = { ...n, children };
+    if (n.id !== toId) {
+      if (next.weldTargetId === fromId) next.weldTargetId = toId;
+      if (next.connectTargetId === fromId) next.connectTargetId = toId;
+    }
+    return next;
+  });
+  // Whatever still names it is the target's own weld to it, or a coupling.
+  return detachReferencesTo(move(nodes), fromId);
+};
+
+/**
  * How thick this body is where it was hit, in metres; null when it has no
  * closed mesh to measure. `localPoint` is in the body frame, which is the frame
  * renderVertices are in (Z-up, centroid at the origin).
@@ -3334,6 +3360,16 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       .filter(n => !sourceIds.includes(n.id) || n.id === targetId)
       .map(n => ({ ...n, children: prune(n.children || []) }));
     newScene.nodes = prune(newScene.nodes);
+    // Welds to a merged body hold the merged part now; anything that named a
+    // body pruned along with it lets go, as a delete would.
+    for (const source of sources) {
+      newScene.nodes = retargetReferences(newScene.nodes, source.id, targetId);
+      const under = (n: SceneNode) => (n.children || []).forEach((c) => {
+        newScene.nodes = detachReferencesTo(newScene.nodes, c.id);
+        under(c);
+      });
+      under(source);
+    }
 
     set({ sceneGraph: newScene, extraSelectedIds: [], selectedNodeId: targetId });
     if (mergedResult && mergedFaces > 0) {
