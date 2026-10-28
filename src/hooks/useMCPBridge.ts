@@ -272,7 +272,7 @@ const autoCompileScad = async (nodes: SceneNode[]) => {
 // and reports the real MJCF compile result instead.
 const settleScene = async (
   nodes: SceneNode[],
-  { replacesScene = true }: { replacesScene?: boolean } = {},
+  { replacesScene = true, freshStart = false }: { replacesScene?: boolean; freshStart?: boolean } = {},
 ): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
   const store = useStore.getState();
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
@@ -300,7 +300,9 @@ const settleScene = async (
   // left to race against. forceReset is false so recompile() preserves qpos/qvel
   // when the edit didn't change the DOF count (e.g. tweaking a color or adding a
   // fixed body) instead of always snapping the sim back to its initial state.
-  await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+  // A new scene altogether (freshStart) starts its clock at zero instead of
+  // carrying the old scene's time into its telemetry.
+  await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, freshStart, true);
   const error = useStore.getState().lastCompileError;
   return { ok: !error, ...(error ? { error } : {}), nodeCount: nodes.length };
 };
@@ -714,6 +716,18 @@ const bboxOf = (flatVerts: number[] | undefined) => {
 };
 
 /**
+ * A mesh geom's bounds in the MuJoCo (Z-up) frame every other figure is in.
+ * A collider carries only Y-up `vertices`, and measuring those reported its
+ * box with Y and Z swapped beside the visual mesh's.
+ */
+const geomBboxOf = (g: SceneGeom) => {
+  if (g.renderVertices?.length) return bboxOf(g.renderVertices);
+  const b = bboxOf(g.vertices);
+  // Y-up (x, y, z) is Z-up (x, -z, y).
+  return b && { min: [b.min[0], -b.max[2], b.min[1]], max: [b.max[0], -b.min[2], b.max[1]] };
+};
+
+/**
  * Whether a mesh geom actually encloses anything.
  *
  * physics_get_lattice and physics_get_sculpt have always reported `watertight`,
@@ -830,7 +844,7 @@ const summarizeGeom = (g: SceneGeom) => ({
     ? {
         vertCount: (g.renderVertices || g.vertices || []).length / 3,
         faceCount: (g.faces || []).length / 3,
-        bbox: bboxOf(g.renderVertices || g.vertices),
+        bbox: geomBboxOf(g),
         ...meshIntegrity(g),
       }
     : { size: g.size }),
@@ -2458,10 +2472,21 @@ export function useMCPBridge() {
               const list = hardwareList(store.sceneGraph);
               return list.rows.length ? { hardwareList: list } : {};
             })(),
-            ...(store.model?.body_mass ? {
-              // Body 0 is the world.
-              totalMassKg: +Array.from(store.model.body_mass).slice(1).reduce((a, b) => a + b, 0).toPrecision(6),
-            } : {}),
+            ...(store.model?.body_mass ? (() => {
+              const { body_mass: mass, body_dofnum: dofs, body_parentid: parent } = store.model!;
+              // What moves: a body with a degree of freedom of its own or under
+              // one that has. A fixed body (a wall, a bench) weighs nothing to
+              // the simulation, and counting it made the total meaningless.
+              const moves = (b: number): boolean => b > 0 && ((dofs?.[b] ?? 1) > 0 || (!!parent && moves(parent[b])));
+              let total = 0, fixed = 0;
+              for (let b = 1; b < mass!.length; b++) {
+                if (moves(b)) total += mass![b]; else fixed += mass![b];
+              }
+              return {
+                totalMassKg: +total.toPrecision(6),
+                ...(fixed > 0 ? { fixedMassKg: +fixed.toPrecision(6) } : {}),
+              };
+            })() : {}),
             stock: stockReport(store.sceneGraph, store.stock),
             ...(store.sceneGraph.simFidelity === 'print' ? {
               simFidelity: {
@@ -2591,7 +2616,7 @@ export function useMCPBridge() {
             ...n,
             ...(n.geoms ? {
               geoms: n.geoms.map((g) => (g.type === 'mesh'
-                ? { ...g, vertCount: (g.renderVertices || g.vertices || []).length / 3, faceCount: (g.faces || []).length / 3, bbox: bboxOf(g.renderVertices || g.vertices), ...meshIntegrity(g) }
+                ? { ...g, vertCount: (g.renderVertices || g.vertices || []).length / 3, faceCount: (g.faces || []).length / 3, bbox: geomBboxOf(g), ...meshIntegrity(g) }
                 : g)),
             } : {}),
             ...(n.children ? { children: n.children.map(withMeshChecks) } : {}),
@@ -3302,14 +3327,16 @@ export function useMCPBridge() {
           // have been applied, where a boolean has been evaluated, and where a
           // lattice cage has already become the mesh anybody would measure.
           const root = (window as unknown as { _physics_scene?: Object3D })._physics_scene ?? null;
+          const measured = measureInScene(root, point(from, 'from'), point(to, 'to'), {
+            corner: corner === undefined ? undefined : point(corner, 'corner'),
+            snap: snap !== false,
+            withinMm: typeof withinMm === 'number' ? withinMm : 3,
+          });
           return {
             ok: true,
-            ...measureInScene(root, point(from, 'from'), point(to, 'to'), {
-              corner: corner === undefined ? undefined : point(corner, 'corner'),
-              snap: snap !== false,
-              withinMm: typeof withinMm === 'number' ? withinMm : 3,
-            }),
-            snapped: snap !== false && root !== null,
+            ...measured,
+            // Whether any end really moved onto something, not whether snapping was asked for.
+            snapped: [measured.from, measured.to, measured.corner].some((end) => !!end && end.movedByMm > 0),
           };
         }
 
@@ -3522,7 +3549,9 @@ export function useMCPBridge() {
           const how = op === 'difference' || op === 'subtract' ? 'difference'
             : op === 'intersection' || op === 'intersect' ? 'intersection' : 'union';
 
-          const before = (target.geoms || []).length;
+          // Counted the same way as after, without the generated geoms a
+          // recompile replaces: counting those made a union report -8.
+          const before = (target.geoms || []).filter((g: SceneGeom) => !g.csgDerived).length;
           store.combineBodies(targetId, sources, how);
           await compileCsgNodes(true);
           await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
@@ -5765,7 +5794,7 @@ export function useMCPBridge() {
           }
 
           const nodes = bodies.map((b) => fillBodyDefaults(b));
-          const result = await settleScene(nodes);
+          const result = await settleScene(nodes, { freshStart: true });
           updateOrCreateNotecard({
             mode: 'mcp',
             nodes: useStore.getState().sceneGraph.nodes
