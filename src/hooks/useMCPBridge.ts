@@ -162,6 +162,9 @@ import {
 import type { SculptMesh, SculptUndoEntry } from '../utils/sculptMesh';
 import { CAMERA_VIEWS, type CameraView } from '../utils/cameraViews';
 import { getLiveDimensions } from '../utils/liveDimensions';
+import { belowFloor, boundsOverlaps, contactOverlaps, DEFAULT_OVERLAP_TOLERANCE } from '../utils/collisionCheck';
+import { walkBodiesWorld } from '../utils/bodyWorld';
+import { initialContacts } from './initialContacts';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
@@ -5297,53 +5300,19 @@ export function useMCPBridge() {
 
         case 'CHECK_COLLISIONS': {
           const nodes = store.sceneGraph.nodes || [];
-          const bodyBounds: Array<{ id: string; name: string; min: number[]; max: number[] }> = [];
-
-          const computeBounds = (nodeList: SceneNode[], parentPos: number[] = [0, 0, 0]) => {
-            for (const node of nodeList) {
-              const nodePos = [
-                (node.pos?.[0] || 0) + parentPos[0],
-                (node.pos?.[1] || 0) + parentPos[1],
-                (node.pos?.[2] || 0) + parentPos[2],
+          const tol = DEFAULT_OVERLAP_TOLERANCE;
+          // The contacts MuJoCo itself makes on the first step are the exact
+          // answer; the boxes are the fallback when the worker cannot run the
+          // scene, and are conservative (a box round a diagonal strut).
+          const exact = await initialContacts(store).catch(() => null);
+          const overlappingPairs = exact
+            ? contactOverlaps(exact, nodes, tol)
+            : [
+                ...boundsOverlaps(nodes, tol),
+                ...belowFloor(nodes, tol).map((f) => ({ bodyA: f.body, bodyB: 'floor', geomA: f.geom, geomB: 'floor', depthMm: f.depthMm })),
               ];
-              const min = [nodePos[0] - 0.1, nodePos[1] - 0.1, nodePos[2] - 0.1];
-              const max = [nodePos[0] + 0.1, nodePos[1] + 0.1, nodePos[2] + 0.1];
-
-              (node.geoms || []).forEach((g: SceneGeom) => {
-                const s = g.size || [0.1, 0.1, 0.1];
-                const halfX = s[0] || 0.1;
-                const halfY = s[1] || halfX;
-                const halfZ = s[2] || halfX;
-                min[0] = Math.min(min[0], nodePos[0] - halfX);
-                min[1] = Math.min(min[1], nodePos[1] - halfY);
-                min[2] = Math.min(min[2], nodePos[2] - halfZ);
-                max[0] = Math.max(max[0], nodePos[0] + halfX);
-                max[1] = Math.max(max[1], nodePos[1] + halfY);
-                max[2] = Math.max(max[2], nodePos[2] + halfZ);
-              });
-
-              bodyBounds.push({ id: node.id || node.name, name: node.name || node.id, min, max });
-              if (node.children) computeBounds(node.children, nodePos);
-            }
-          };
-
-          computeBounds(nodes);
-
-          const overlappingPairs: Array<{ bodyA: string; bodyB: string }> = [];
-          for (let i = 0; i < bodyBounds.length; i++) {
-            for (let j = i + 1; j < bodyBounds.length; j++) {
-              const a = bodyBounds[i];
-              const b = bodyBounds[j];
-              const overlap = (
-                a.min[0] <= b.max[0] && a.max[0] >= b.min[0] &&
-                a.min[1] <= b.max[1] && a.max[1] >= b.min[1] &&
-                a.min[2] <= b.max[2] && a.max[2] >= b.min[2]
-              );
-              if (overlap) {
-                overlappingPairs.push({ bodyA: a.name, bodyB: b.name });
-              }
-            }
-          }
+          let bodyCount = 0;
+          walkBodiesWorld(nodes, () => { bodyCount++; });
 
           // A body whose cavity is filled in is the other reason a scene does
           // not behave: nothing overlaps, and the ball still will not go in.
@@ -5364,7 +5333,9 @@ export function useMCPBridge() {
           return {
             ok: true,
             hasInterpenetrations: overlappingPairs.length > 0,
-            bodyCount: bodyBounds.length,
+            bodyCount,
+            method: exact ? 'contacts' : 'bounds',
+            toleranceMm: tol * 1000,
             overlappingPairs,
             ...(filledCavities.length ? {
               filledCavities,
