@@ -2684,7 +2684,21 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
 
   const out: SceneGeom[] = [];
   if (collidingWithPrimitives) {
-    const positives = source.filter(isPositive);
+    // Moved into the compiled frame with everything else. The boolean mesh is
+    // re-origined on its centroid (csgFrameOffset), and so are hull and
+    // decomposed colliders; primitives left where they were authored collided
+    // up to a centimetre from the body that was drawn, and from the hardware
+    // seated in it.
+    const [ox, oy] = hasMesh ? csgFrameOffset(node) : [0, 0];
+    const shifted = (g: SceneGeom): SceneGeom => (ox || oy
+      ? {
+        ...g,
+        ...(g.fromto
+          ? { fromto: [g.fromto[0] - ox, g.fromto[1] - oy, g.fromto[2], g.fromto[3] - ox, g.fromto[4] - oy, g.fromto[5]] }
+          : { pos: [(g.pos?.[0] ?? 0) - ox, (g.pos?.[1] ?? 0) - oy, g.pos?.[2] ?? 0] }),
+      }
+      : g);
+    const positives = source.filter(isPositive).map(shifted);
     // With an explicit total mass, split it across the primitive colliders by
     // volume — their union overlaps, so simply giving each the total (or keeping
     // whatever they were authored with) would make the body heavier than the

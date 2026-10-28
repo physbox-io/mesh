@@ -485,6 +485,27 @@ describe('resolveCsgGeoms', () => {
     expect(masses[0] + masses[1]).toBeCloseTo(9, 6);
     expect(masses[0] / masses[1]).toBeCloseTo(8, 6);   // radius ratio 2 -> volume ratio 8
   });
+
+  // The boolean mesh is re-origined on its centroid in X and Y. Primitive
+  // colliders left where they were authored collided up to a centimetre from
+  // the body that was drawn, on any part not symmetric about its origin.
+  it('collides primitives where the compiled mesh is drawn', () => {
+    const n = body([
+      { name: 'foot', type: 'box', size: [0.03, 0.02, 0.003] },
+      { name: 'upright', type: 'box', size: [0.03, 0.003, 0.025], pos: [0, 0.017, 0.028] },
+      { name: 'rod', type: 'capsule', size: [0.002], fromto: [0, 0, 0, 0.01, 0, 0.01] },
+      { name: 'hole', type: 'cylinder', size: [0.002, 0.01], csg: 'difference' },
+    ], { csgEnabled: true, csgCentroid: [0.001, 0.0098, 0.012] });
+    n.geoms.push(derivedMesh);
+    const byName = Object.fromEntries(resolveCsgGeoms(n, 'physics').map(g => [g.name, g]));
+    expect(byName.foot.pos).toEqual([-0.001, -0.0098, 0]);
+    expect(byName.upright.pos![1]).toBeCloseTo(0.0072, 9);
+    // Z is not re-origined.
+    expect(byName.upright.pos![2]).toBe(0.028);
+    [-0.001, -0.0098, 0, 0.009, -0.0098, 0.01].forEach((v, i) => expect(byName.rod.fromto![i]).toBeCloseTo(v, 9));
+    // Before the mesh exists the primitives are what is drawn, so they stay put.
+    expect(resolveCsgGeoms({ ...n, geoms: n.geoms.filter(g => g !== derivedMesh) }, 'physics')[0].pos).toBeUndefined();
+  });
 });
 // ---------------------------------------------------------------------------
 // Cuts

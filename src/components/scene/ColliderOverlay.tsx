@@ -77,7 +77,6 @@ const BodyColliders = ({ node, geoms, model, data, mujoco }: {
           geom={g}
           color={PALETTE[i % PALETTE.length]}
           bounds={null}
-          csgCentroid={node.csgEnabled ? node.csgCentroid : undefined}
         />
       ))}
     </group>
