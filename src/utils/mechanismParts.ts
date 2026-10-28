@@ -1905,7 +1905,8 @@ export interface FourBarResult {
   crankNode: SceneNode;
   couplerNode: SceneNode;
   rockerNode: SceneNode;
-  nodes: [SceneNode, SceneNode, SceneNode, SceneNode];
+  /** The top-level bodies: ground, crank (carrying the coupler) and rocker. */
+  nodes: [SceneNode, SceneNode, SceneNode];
   metrics: FourBarMetrics;
 }
 
@@ -2045,6 +2046,12 @@ export function buildFourBarLinkage(
     },
   );
   couplerNode.id = couplerId;
+  // Hung off the crank, so its hinge at B rides on the crank's end. Built as a
+  // top-level body it was hinged to the world at B, and the loop pulled apart
+  // as soon as the crank turned. Positions are in the parent's frame, and no
+  // link body is turned (the bars are turned in their geometry).
+  couplerNode.pos = couplerNode.pos.map((v, i) => +(v - crankNode.pos[i]).toFixed(7)) as [number, number, number];
+  crankNode.children = [couplerNode];
 
   const rockerId = makeId('fourbar_rocker');
   const rockerNode = makeLinkBody(
@@ -2078,7 +2085,7 @@ export function buildFourBarLinkage(
     crankNode,
     couplerNode,
     rockerNode,
-    nodes: [groundNode, crankNode, couplerNode, rockerNode],
+    nodes: [groundNode, crankNode, rockerNode],
     metrics,
   };
 }

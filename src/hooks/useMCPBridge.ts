@@ -4514,10 +4514,13 @@ export function useMCPBridge() {
           const createdIds = new Set(createdNodes.map((n) => n.id));
           const nextNodes = [...store.sceneGraph.nodes.filter((n) => !createdIds.has(n.id)), ...createdNodes];
           await settleScene(nextNodes);
+          const addedIds: string[] = [];
+          const collect = (list: SceneNode[]) => list.forEach((n) => { addedIds.push(n.id); collect(n.children || []); });
+          collect(createdNodes);
           return {
             ok: true,
             family,
-            addedIds: createdNodes.map((n) => n.id),
+            addedIds,
             metrics,
           };
         }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import load_mujoco from '@mujoco/mujoco';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { compileToMJCF } from '../src/utils/mjcf';
 import {
@@ -246,11 +247,12 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
         rockerMm: 55,
         crankAngleDeg: 60,
       });
-      expect(linkage.nodes).toHaveLength(4);
+      expect(linkage.nodes).toHaveLength(3);
+      expect(linkage.crankNode.children).toEqual([linkage.couplerNode]);
       expect(linkage.couplerNode.connectTargetId).toBe(linkage.rockerNode.id);
       expect(linkage.couplerNode.connectAnchor).toHaveLength(3);
 
-      for (const linkNode of linkage.nodes) {
+      for (const linkNode of [linkage.groundNode, linkage.crankNode, linkage.couplerNode, linkage.rockerNode]) {
         const mesh = linkNode.geoms.find((g) => g.type === 'mesh')!;
         assertWatertightGeom(mesh.renderVertices, mesh.faces);
       }
@@ -259,6 +261,43 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
       expect(xml).toContain('connect_constraint_1');
     });
   });
+});
+
+// The coupler used to be a top-level body, hinged to the world at B: the
+// crank turned away from it and pin B came 80 mm apart within two seconds.
+describe('a driven four-bar stays together', () => {
+  it('keeps both moving pins closed while the crank turns', async () => {
+    const lk = buildFourBarLinkage({ groundMm: 100, crankMm: 40, couplerMm: 90, rockerMm: 80 });
+    const { B, C, D, A } = lk.metrics.jointsXYMm;
+    const mujoco = await load_mujoco();
+    const model = mujoco.MjModel.from_xml_string(compileToMJCF({ nodes: lk.nodes }));
+    const data = new mujoco.MjData(model);
+    try {
+      const id = (n: { name: string }) => mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, n.name);
+      /** A point given in mm relative to `from`, on body `b`, in world metres. */
+      const at = (b: number, p: number[], from: number[]) => {
+        const l = [(p[0] - from[0]) / 1000, (p[1] - from[1]) / 1000, 0];
+        const m = data.xmat.slice(b * 9, b * 9 + 9);
+        return [0, 1, 2].map((r) => data.xpos[b * 3 + r] + m[r * 3] * l[0] + m[r * 3 + 1] * l[1] + m[r * 3 + 2] * l[2]);
+      };
+      const gap = (p: number[], q: number[]) => Math.hypot(p[0] - q[0], p[1] - q[1]) * 1000;
+      const crank = id(lk.crankNode), coupler = id(lk.couplerNode), rocker = id(lk.rockerNode);
+      data.ctrl[0] = 2.5;
+      let worstB = 0, worstC = 0;
+      for (let i = 0; i < 2 / model.opt.timestep; i++) {
+        mujoco.mj_step(model, data);
+        worstB = Math.max(worstB, gap(at(crank, B, A), at(coupler, B, B)));
+        worstC = Math.max(worstC, gap(at(coupler, C, B), at(rocker, C, D)));
+      }
+      // The crank really turned.
+      expect(Math.abs(data.qpos[0])).toBeGreaterThan(1);
+      expect(worstB).toBeLessThan(1);
+      expect(worstC).toBeLessThan(2);
+    } finally {
+      data.delete();
+      model.delete();
+    }
+  }, 60000);
 });
 
 describe('mechanism meshes move with their bodies', () => {
