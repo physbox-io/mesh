@@ -14,7 +14,7 @@ import {
   meshVolumeAndCentroid, convexHullOf, primitiveVolume,
   detectHoleAxis, decomposeAroundAxis,
   positiveBounds, sourcePositiveBounds, geomBounds, clipSegmentsToBox, geomMatrixOf,
-  resolveCsgGeoms, cutGeometry, cutDepthOf, reconcileCuts, surfaceUnder, pickCutSpot,
+  resolveCsgGeoms, csgMassOf, cutGeometry, cutDepthOf, reconcileCuts, surfaceUnder, pickCutSpot,
   threadProfile, threadSlices, THREAD_DEPTH_PER_PITCH, THREAD_EXTERNAL_DEPTH_PER_PITCH, THREAD_SLICES_PER_TURN, THREAD_MAX_SLICES, THREAD_MIN_SLICES_PER_TURN,
 } from '../src/utils/csg';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
@@ -484,6 +484,20 @@ describe('resolveCsgGeoms', () => {
     const masses = resolveCsgGeoms(n, 'physics').map(g => g.mass!);
     expect(masses[0] + masses[1]).toBeCloseTo(9, 6);
     expect(masses[0] / masses[1]).toBeCloseTo(8, 6);   // radius ratio 2 -> volume ratio 8
+  });
+
+  // A boolean body fell back to weighing 1 kg flat whatever it was made of.
+  it('weighs a boolean body by its true volume and what it is made of', () => {
+    const plate = (extra: Partial<SceneGeom>, node: Partial<SceneNode> = {}) => body([
+      { name: 'plate', type: 'box', size: [0.075, 0.05, 0.0025], ...extra },
+      { name: 'hole', type: 'cylinder', size: [0.012, 0.01], csg: 'difference' },
+    ], { csgEnabled: true, ...node });
+    const volume = 7.39e-5;
+    expect(csgMassOf(plate({ density: 700 }), volume)).toBeCloseTo(0.05173, 6);
+    expect(csgMassOf(plate({}), volume)).toBeCloseTo(0.0739, 6);              // MuJoCo's 1000 kg/m3
+    expect(csgMassOf(plate({ mass: 0.2 }), volume)).toBe(0.2);               // a stated mass wins
+    expect(csgMassOf(plate({ density: 700 }, { csgMass: 3 }), volume)).toBe(3);
+    expect(csgHashOf(plate({ density: 700 }))).not.toBe(csgHashOf(plate({ density: 2400 })));
   });
 
   // The boolean mesh is re-origined on its centroid in X and Y. Primitive

@@ -2329,6 +2329,23 @@ function computeMeshChecksum(v: number[], faceCount: number): string {
   return `${v.length}:${faceCount}:${h.toString(16)}`;
 }
 
+/**
+ * What a boolean body weighs, in kg, given its true volume in m³: a stated
+ * csgMass, else what its solid shapes were said to weigh, else that volume at
+ * what it is made of -- the rule every other geom follows, MuJoCo's 1000 kg/m³
+ * when nothing is said. It used to fall back to 1 kg flat, so a 5 mm pine
+ * plate weighed as much as a bag of sugar.
+ */
+export function csgMassOf(node: SceneNode, volume: number): number {
+  if (node.csgMass !== undefined) return node.csgMass;
+  const positives = csgSourceGeoms(node).filter(isPositive);
+  if (positives.length > 0 && positives.every((g) => g.mass !== undefined)) {
+    return positives.reduce((m, g) => m + (g.mass ?? 0), 0);
+  }
+  const density = positives.find((g) => g.density !== undefined)?.density ?? 1000;
+  return +(volume * density).toPrecision(8);
+}
+
 // Cheap, stable fingerprint of everything the derived geoms depend on. When
 // this matches node.csgHash the mesh on the node is already correct.
 export function csgHashOf(node: SceneNode): string {
@@ -2342,7 +2359,7 @@ export function csgHashOf(node: SceneNode): string {
     node.csgSectors ?? CSG_DEFAULT_SECTORS,
     node.csgHoleAxis ?? 'auto',
     node.csgMass ?? null,
-    src.filter(isPositive).map(g => [g.rgba, g.mass, g.friction, g.condim, g.solref, g.solimp]),
+    src.filter(isPositive).map(g => [g.rgba, g.mass, g.density, g.friction, g.condim, g.solref, g.solimp]),
     node.edgeRounds ?? null,
   ]);
   let h = 0x811c9dc5;
@@ -2431,7 +2448,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   let hullVolume: number | null = null;
 
   const requested = collisionModeOf(node);
-  const totalMass = node.csgMass ?? template?.mass ?? 1;
+  const totalMass = csgMassOf(node, volume);
 
   const centeredZup = translateFlat(zup, [-centroid[0], -centroid[1], 0]);
   const centeredYup = zupArrayToYup(centeredZup);

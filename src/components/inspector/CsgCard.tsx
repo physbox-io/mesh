@@ -1,7 +1,7 @@
 import { Donut, Trash2 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { CsgOp, SceneNode } from '../../types/scene';
-import { CSG_DEFAULT_SECTORS, csgHashOf, csgSourceGeoms } from '../../utils/csg';
+import { CSG_DEFAULT_SECTORS, csgHashOf, csgMassOf, csgSourceGeoms } from '../../utils/csg';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
 import { CutControls } from '../CutControls';
@@ -149,10 +149,10 @@ export function CsgCard({ node: selectedNode }: { node: SceneNode }) {
 
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500 flex justify-between">
-              Total mass <SliderValue value={selectedNode.csgMass ?? 1} onChange={(v) => updateNode(selectedNode.id, { csgMass: v })} decimals={3} unit="kg" min={0.01} max={20} />
+              Total mass <SliderValue value={csgMassOf(selectedNode, selectedNode.csgVolume ?? 0)} onChange={(v) => updateNode(selectedNode.id, { csgMass: v })} decimals={3} unit="kg" min={0.01} max={20} />
             </label>
             <RangeInput min="0.01" max="20" step="0.01"
-              value={selectedNode.csgMass ?? 1}
+              value={csgMassOf(selectedNode, selectedNode.csgVolume ?? 0)}
               onChange={(v) => updateNode(selectedNode.id, { csgMass: v })}
               className="w-full accent-blue-500 cursor-pointer"
             />
@@ -163,7 +163,7 @@ export function CsgCard({ node: selectedNode }: { node: SceneNode }) {
               <p className="text-[10px] text-slate-400 leading-snug">
                 True volume <span className="font-mono text-slate-500">{Math.round(selectedNode.csgVolume * 1e9).toLocaleString()} mm³</span>
                 {selectedNode.csgHullVolume ? <> · convex hull <span className="font-mono text-slate-500">{Math.round(selectedNode.csgHullVolume * 1e9).toLocaleString()} mm³</span></> : null}
-                {selectedNode.csgVolume > 0 && <> · density <span className="font-mono text-slate-500">{((selectedNode.csgMass ?? 1) / selectedNode.csgVolume).toFixed(0)} kg/m³</span></>}
+                {selectedNode.csgVolume > 0 && <> · density <span className="font-mono text-slate-500">{((csgMassOf(selectedNode, selectedNode.csgVolume ?? 0)) / selectedNode.csgVolume).toFixed(0)} kg/m³</span></>}
               </p>
             )}
           </div>
