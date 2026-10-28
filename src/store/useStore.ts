@@ -15,8 +15,8 @@ import { belowOffset, besideOffset, restingPos } from '../utils/spawnPlacement';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix, removeMergedBody } from '../utils/combineBodies';
 import { getGeomFrame } from '../utils/laserCutExporter';
-import { DEFAULT_BRUSH, fromSceneGeom, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
-import { buildSculptBaseSized, DEFAULT_SCULPT_BASE, DEFAULT_SCULPT_SIZE, longestSide, resizeSculptMesh, resizeSculptMeshAxes, type SculptBaseId } from '../utils/sculptBases';
+import { toSceneGeom } from '../utils/sculptMesh';
+import { buildSculptBaseSized, DEFAULT_SCULPT_BASE, DEFAULT_SCULPT_SIZE } from '../utils/sculptBases';
 import {
   createLattice, deserializeCage, faceCount, serializeCage, toSceneGeom as latticeToSceneGeom,
   DEFAULT_UNIT as LATTICE_UNIT,
@@ -28,7 +28,7 @@ import {
   hasBooleanOps, csgHashOf,
   colliderTemplateOf, hullsToColliderGeoms, meshVolumeAndCentroid, usableColliderHulls,
 } from '../utils/csg';
-import { collidersAreStale, collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
+import { collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
@@ -100,6 +100,11 @@ import {
 } from './physicsEngine';
 import { initialPreset, initialScene, framingPatch, initialFraming, snapForGridMm } from './sceneFraming';
 import { latticeActions, type LatticeActions } from './latticeActions';
+import {
+  dropStaleColliders, rebuildAfterGeomEdit, rebuildBooleansAfterRestore, writeEdgeRounds,
+  setNodeEdgeRounds, settleBooleanState,
+} from './geomEdits';
+import { sculptActions, type SculptActions } from './sculptActions';
 
 /**
  * What is on the bench.
@@ -261,20 +266,6 @@ function cutSpotFromCamera(node: SceneNode): CutSpot | null {
  * the panel shows the edit at once either way.
  */
 /**
- * Takes a body's convex pieces off it once its mesh has changed shape.
- *
- * A decomposed body collides ONLY as its pieces — the mesh they were cut from
- * is dropped from the model (resolveCsgGeoms) — so after a sculpt stroke it
- * went on colliding as the shape before the stroke until the decomposer
- * caught up, a few seconds later. Pressed Play in that window and a part you
- * had just pulled downward was drawn sunk into the floor; when the new pieces
- * landed mid-run they arrived already buried, and the solver threw the body
- * across the scene. Without pieces it collides as its convex hull, which
- * always contains the mesh: coarser for a moment, never inside anything.
- * The hash is left alone, so the edit still reads as stale and the
- * decomposer still runs. Returns whether there was anything to take off.
- */
-/**
  * Split for Print's section colours: far enough apart that every seam shows,
  * and none of them the selection or warning colours.
  */
@@ -283,41 +274,6 @@ const SECTION_COLOURS: [number, number, number][] = [
   [0.85, 0.78, 0.35], [0.35, 0.7, 0.75], [0.7, 0.55, 0.42], [0.55, 0.5, 0.85],
 ];
 
-function dropStaleColliders(node: SceneNode): boolean {
-  if (node.csgEnabled || !node.geoms?.some((g) => g.csgDerived === 'collider')) return false;
-  node.geoms = node.geoms.filter((g) => g.csgDerived !== 'collider');
-  delete node.collisionDecomposed;
-  return true;
-}
-
-function rebuildAfterGeomEdit(get: () => PhysicsState, newScene: SceneGraph, nodeId: string) {
-  const node = findNode(newScene.nodes, nodeId);
-  if (node?.csgEnabled && hasBooleanOps(node) && csgHashOf(node) !== node.csgHash) return;
-  // Same reasoning for a body about to be re-decomposed, but only once it has
-  // colliders to go stale: a body that has never been decomposed must still
-  // build, or a mesh edit would show nothing until the decomposer caught up —
-  // and a convex body, which never gains colliders, would never build at all.
-  if (node && !node.csgEnabled && node.collisionDecomposed && collidersAreStale(node)) return;
-  get().recompile(newScene, nodeId, false);
-}
-
-/**
- * After undo or redo: build any boolean body whose generated mesh no longer
- * matches what was restored.
- *
- * A snapshot carries a body's generated mesh as it was when the snapshot was
- * taken, which is not always the mesh of the shape it restores — undoing a
- * rounding puts the roundings back to none while the mesh saved with them is
- * still the rounded one. The removal button rebuilds straight away; undo has
- * to as well, rather than hope the auto-compiler gets round to it. Imported
- * lazily: the compiler's module imports this store.
- */
-function rebuildBooleansAfterRestore(): void {
-  void import('../hooks/useCsgCompile')
-    .then(({ compileCsgNodes }) => compileCsgNodes())
-    .catch((err) => console.error('Rebuilding booleans after undo failed:', err));
-}
-
 /** A session's roundings: the base, with its draft put in. */
 function draftRounds(session: EdgeRoundSession): EdgeRoundFeature[] {
   return withRoundFeature(
@@ -325,50 +281,6 @@ function draftRounds(session: EdgeRoundSession): EdgeRoundFeature[] {
     { mode: session.mode, size: session.size, edges: session.picked },
     session.editIndex,
   );
-}
-
-/**
- * Puts a body's roundings on it and rebuilds. Rounding makes a body a boolean
- * one; taking the last rounding off a body with no other boolean makes it an
- * ordinary one again, and its generated mesh has to go with it or the rounded
- * shape would keep drawing over the square one.
- */
-function writeEdgeRounds(
-  get: () => PhysicsState,
-  set: (partial: Partial<PhysicsState>) => void,
-  nodeId: string,
-  features: EdgeRoundFeature[],
-  rebuild = true,
-) {
-  const newScene = cloneSceneGraph(get().sceneGraph);
-  const node = findNode(newScene.nodes, nodeId);
-  if (!node) return;
-  setNodeEdgeRounds(node, features);
-  set({ sceneGraph: newScene });
-  if (rebuild) rebuildAfterGeomEdit(get, newScene, nodeId);
-}
-
-/** writeEdgeRounds' edit to the node itself, on a graph the caller has cloned. */
-function setNodeEdgeRounds(node: SceneNode, features: EdgeRoundFeature[]) {
-  if (features.length > 0) node.edgeRounds = features; else delete node.edgeRounds;
-  delete node.edgeRoundsLost;
-  settleBooleanState(node);
-}
-
-/**
- * Makes a body a boolean one when its shapes describe a boolean, and an
- * ordinary one again when they stop — taking the generated mesh with it, or the
- * old shape would keep drawing over the new one.
- */
-function settleBooleanState(node: SceneNode) {
-  if (hasBooleanOps(node)) {
-    node.csgEnabled = true;
-    if (node.csgCollision === undefined) node.csgCollision = 'auto';
-  } else if (node.csgEnabled) {
-    node.csgEnabled = false;
-    node.geoms = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
-    delete node.csgHash;
-  }
 }
 
 /**
@@ -519,7 +431,7 @@ const PALETTE_CURVE_POINTS = DEFAULT_CURVE_POINTS.map((p) => p.map((v) => v * 0.
 const PALETTE_CURVE_WIDTH = DEFAULT_CURVE_WIDTH * 0.1;
 const PALETTE_CURVE_THICKNESS = DEFAULT_CURVE_THICKNESS * 0.1;
 
-export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions {
+export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions, SculptActions {
   mujoco: typeof MUJOCO_SHIM | null;
   model: ModelMirror | null;
   data: DataMirror | null;
@@ -912,38 +824,6 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    */
   addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice' | 'blob', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
 
-  // --- Sculpting ----------------------------------------------------------
-  /** The body being sculpted, or null when the sculpt tools are closed. */
-  sculptNodeId: string | null;
-  /** The brush the sculpt tools are holding. */
-  sculptBrush: BrushSettings;
-  /** Live vertex/face counts and watertightness of the mesh being sculpted. */
-  sculptStats: { vertices: number; faces: number; watertight: boolean; atBudget: boolean; pieces?: number } | null;
-  setSculptNodeId: (id: string | null) => void;
-  setSculptBrush: (patch: Partial<BrushSettings>) => void;
-  setSculptStats: (stats: { vertices: number; faces: number; watertight: boolean; atBudget: boolean; pieces?: number } | null) => void;
-  /**
-   * What the scissors are doing, for the panel: a cut in progress, or why the
-   * last one was refused. The cut runs in a worker, so neither shows up in the
-   * viewport on its own.
-   */
-  sculptNotice: { text: string; tone: 'busy' | 'error' | 'info' } | null;
-  setSculptNotice: (notice: { text: string; tone: 'busy' | 'error' | 'info' } | null) => void;
-  /** Replaces a sculpt body's mesh with a different base shape, discarding the old one. */
-  setSculptBase: (nodeId: string, base: SculptBaseId) => void;
-  /**
-   * Scales a sculpt body's mesh about its origin: to `size` metres on its
-   * longest side, or with [x, y, z] (null keeps an axis) to that size on each.
-   */
-  resizeSculpt: (nodeId: string, size: number | (number | null)[]) => void;
-  /**
-   * Makes a sculpt that is in several pieces one body per piece, as one undo
-   * step. `pieces` is the mesh already split, largest first: the first stays
-   * on this body, in the geom named `geomName` (default: its sculpt mesh), and
-   * each of the rest becomes a new sculpt body beside it, at the same pose and
-   * in the same frame, so nothing moves. Returns every body's id, this one first.
-   */
-  separateSculpt: (nodeId: string, pieces: SculptMesh[], geomName?: string) => string[];
   /**
    * Replace a body with the sections Split for Print cut it into: the first
    * keeps the body's id, the rest are new siblings in the same place, each
@@ -1269,6 +1149,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   ...clipboardActions({ set, get, clone: cloneSceneGraph }),
   ...shapeParamActions({ set, get }),
   ...latticeActions({ set, get }),
+  ...sculptActions({ set, get }),
   mujoco: null,
   model: null,
   data: null,
@@ -2192,131 +2073,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       ? { extraSelectedIds: state.extraSelectedIds.filter(other => other !== id) }
       : { extraSelectedIds: [...state.extraSelectedIds, id] };
   }),
-
-  sculptNodeId: null,
-  sculptBrush: DEFAULT_BRUSH,
-  // Sculpting a body that is being simulated means chasing it around the scene,
-  // so entering the tools pauses the sim. Leaving them does not restart it —
-  // that is the user's call, and starting a sim behind someone's back is how a
-  // half-finished shape ends up on the floor.
-  sculptStats: null,
-  // The worker is told as well as the UI. With shared memory it runs its own
-  // step loop, and flipping only the store's flag showed "paused" while the
-  // body went on falling under the brush.
-  setSculptNodeId: (id) => {
-    if (id && typeof Worker !== 'undefined') getPhysicsWorkerClient().setPlaying(false);
-    set(id
-      ? { sculptNodeId: id, latticeNodeId: null, selectedNodeId: id, isPlaying: false, sculptNotice: null }
-      : { sculptNodeId: null, sculptStats: null, sculptNotice: null });
-  },
-  setSculptStats: (stats) => set({ sculptStats: stats }),
-  sculptNotice: null,
-  setSculptNotice: (notice) => set({ sculptNotice: notice }),
-
-  // Wholesale replacement, not an edit: the version bump is what tells the
-  // viewport to load the new mesh rather than carry on with the one it holds.
-  // At the size the body already is, so swapping a base never jumps in scale.
-  setSculptBase: (nodeId, base) => {
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    const geomIndex = Math.max(0, (node?.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
-    const old = node?.geoms?.[geomIndex];
-    const size = old?.renderVertices?.length && old.faces?.length
-      ? longestSide(fromSceneGeom(old.renderVertices, old.faces))
-      : DEFAULT_SCULPT_SIZE;
-    const mesh = buildSculptBaseSized(base, size || DEFAULT_SCULPT_SIZE);
-    const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-    get().updateNodeGeom(nodeId, { vertices, renderVertices, faces }, geomIndex);
-    get().updateNode(nodeId, {
-      sculptBase: base,
-      sculptVersion: (node?.sculptVersion ?? 1) + 1,
-      sculptEdited: false,
-    });
-  },
-  resizeSculpt: (nodeId, size) => {
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    const geomIndex = (node?.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
-    const geom = geomIndex >= 0 ? node!.geoms[geomIndex] : undefined;
-    if (!geom?.renderVertices?.length || !geom.faces?.length) return;
-    const source = fromSceneGeom(geom.renderVertices, geom.faces);
-    const mesh = Array.isArray(size) ? resizeSculptMeshAxes(source, size) : resizeSculptMesh(source, size);
-    get().updateNodeGeom(nodeId, toSceneGeom(mesh), geomIndex);
-    get().updateNode(nodeId, { sculptVersion: (node?.sculptVersion ?? 1) + 1 });
-  },
-  setSculptBrush: (patch) => set((state) => ({ sculptBrush: { ...state.sculptBrush, ...patch } })),
-
-  separateSculpt: (nodeId, pieces, geomName) => {
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    if (!node || pieces.length === 0) return [nodeId];
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const first = findNode(newScene.nodes, nodeId);
-    if (!first) return [nodeId];
-
-    const index = (() => {
-      const byName = geomName ? (first.geoms ?? []).findIndex((g: SceneGeom) => g.name === geomName) : -1;
-      return byName >= 0 ? byName : Math.max(0, (first.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived));
-    })();
-    const template = first.geoms[index];
-    Object.assign(template, toSceneGeom(pieces[0]));
-    dropStaleColliders(first);
-    first.sculptEdited = true;
-    first.sculptVersion = (first.sculptVersion ?? 1) + 1;
-
-    // The list the original hangs in, so the pieces hang from the same parent
-    // and the copied pose means the same thing.
-    const siblings = (() => {
-      const walk = (list: SceneNode[]): SceneNode[] | null => {
-        for (const n of list) {
-          if (n.id === nodeId) return list;
-          const found = walk(n.children || []);
-          if (found) return found;
-        }
-        return null;
-      };
-      return walk(newScene.nodes) ?? newScene.nodes;
-    })();
-    const at = siblings.indexOf(first);
-
-    const ids = [nodeId];
-    pieces.slice(1).forEach((piece, k) => {
-      const id = `sculpt_${Math.random().toString(36).substring(2, 10)}`;
-      ids.push(id);
-      /*
-        A copy of the body with nothing but the piece in it: same pose, same
-        joints (renamed, since MuJoCo names are global), same material, and
-        the mesh in the same frame, so the piece stays exactly where it was
-        cut. Its own children, colliders and cuts stay with the original.
-      */
-      const { children: _children, geoms: _geoms, ...rest } = first;
-      void _children; void _geoms;
-      const copy: SceneNode = JSON.parse(JSON.stringify(rest));
-      siblings.splice(at + 1 + k, 0, {
-        ...copy,
-        id,
-        // Named by its id, as separateLattice does: the viewport finds a
-        // body in the model by id, and the model names bodies by name.
-        name: id,
-        joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${id}_${String(j.name || 'joint').split('_').pop()}` })),
-        isSculpt: true,
-        sculptEdited: true,
-        sculptVersion: 1,
-        // Not the original's links to other bodies, or its script: a piece
-        // cut off a welded handle is not welded to anything.
-        weldTargetId: undefined,
-        coupleTargetId: undefined,
-        connectTargetId: undefined,
-        script: undefined,
-        collisionDecomposed: undefined,
-        collisionHash: undefined,
-        // Paint is per vertex, and these are different vertices.
-        geoms: [{ ...JSON.parse(JSON.stringify(template)), name: `${id}_mesh`, paint: undefined, ...toSceneGeom(piece) }],
-        children: [],
-      });
-    });
-    set({ sceneGraph: newScene, extraSelectedIds: [] });
-    get().recompile(newScene, undefined, true);
-    return ids;
-  },
 
   splitBodyForPrint: (nodeId, sections, absorbed = [], opts = {}) => {
     const node = findNode(get().sceneGraph.nodes, nodeId);
