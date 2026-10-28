@@ -165,6 +165,7 @@ import { getLiveDimensions } from '../utils/liveDimensions';
 import { belowFloor, boundsOverlaps, contactOverlaps, DEFAULT_OVERLAP_TOLERANCE } from '../utils/collisionCheck';
 import { walkBodiesWorld } from '../utils/bodyWorld';
 import { initialContacts } from './initialContacts';
+import { generatedMeshMass } from '../utils/generatedMeshMass';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
@@ -1410,7 +1411,7 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
       type: 'mesh',
       size: [1],
       rgba: b.rgba ?? [0.55, 0.68, 0.85, 1],
-      mass: typeof (b as RawGeom).mass === 'number' ? (b as RawGeom).mass : 1,
+      ...generatedMeshMass(b as { mass?: unknown; density?: unknown }),
       condim: 3,
       dynamic: true,
       latticeGeom: true,
@@ -1483,7 +1484,7 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
       type: 'mesh',
       size: [0.12, 0.12, 0.12],
       rgba: b.rgba ?? [0.82, 0.72, 0.62, 1],
-      mass: typeof (b as RawGeom).mass === 'number' ? (b as RawGeom).mass : 1,
+      ...generatedMeshMass(b as { mass?: unknown; density?: unknown }),
       condim: 3,
       dynamic: true,
       vertices,
@@ -3118,7 +3119,7 @@ export function useMCPBridge() {
               type: 'mesh',
               size: [1],
               rgba: [0.55, 0.68, 0.85, 1],
-              mass: 1,
+              // Weighed by its volume (see generatedMeshMass), not a flat kilogram.
               condim: 3,
               dynamic: true,
               latticeGeom: true,

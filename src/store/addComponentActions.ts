@@ -301,7 +301,7 @@ export function addComponentActions({ set, get }: SliceDeps): AddComponentAction
             type: 'mesh',
             size: [1],
             rgba: [0.82, 0.72, 0.62, 1], // unfired clay
-            mass: 1,
+            // No mass: weighed by its volume at 1000 kg/m³ (see generatedMeshMass).
             condim: 3,
             dynamic: true,
             vertices,
@@ -323,7 +323,7 @@ export function addComponentActions({ set, get }: SliceDeps): AddComponentAction
             type: 'mesh',
             size: [1],
             rgba: [0.55, 0.68, 0.85, 1], // drafting blue, to read as constructed
-            mass: 1,
+            // No mass: weighed by its volume at 1000 kg/m³ (see generatedMeshMass).
             condim: 3,
             dynamic: true,
             vertices,

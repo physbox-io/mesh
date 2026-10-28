@@ -16,6 +16,7 @@ import { getPhysicsWorkerClient } from './physicsEngine';
 import { initialFraming, snapForGridMm } from './sceneFraming';
 import type { PhysicsState } from './useStore';
 import type { SliceDeps } from './sliceDeps';
+import { generatedMeshMass } from '../utils/generatedMeshMass';
 
 export interface LatticeActions {
   // The state here is the state of the TOOL, not of the shape: the shape lives
@@ -412,7 +413,8 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
             type: 'mesh',
             size: [1],
             rgba: [...(cageGeom?.rgba ?? [0.55, 0.68, 0.85, 1])],
-            mass: cageGeom?.mass ?? 1,
+            // Each piece weighs its own volume unless the original was given a mass.
+            ...generatedMeshMass(cageGeom),
             condim: cageGeom?.condim ?? 3,
             dynamic: true,
             vertices: [],
