@@ -27,6 +27,9 @@
 import * as THREE from 'three';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { geomBounds, positiveBounds, resolveCsgGeoms } from './csg';
+import { transformBox, walkBodiesWorld } from './bodyWorld';
+
+const ORIGIN = [0, 0, 0];
 
 export interface SceneFraming {
   position: [number, number, number];
@@ -101,10 +104,11 @@ function meshVertexBounds(g: SceneGeom): { min: number[]; max: number[] } | null
 /**
  * The union of every body's bounds, in world space.
  *
- * A body's own rotation is not applied to its children's boxes: a geom's
- * rotation is already in `geomBounds`, and the remaining error is a body-level
- * spin, which can only shrink the box it is measured against — MARGIN covers
- * it. Planes are skipped (`geomBounds` returns null for them): the ground is
+ * Each body's box is taken in its own frame and carried out through the real
+ * pose of the body and every parent above it. Summing positions alone put a
+ * wheel's gondolas where they would hang if the wheel were not turned, and a
+ * ride built on a rotated hub framed its base and left the hub out of shot.
+ * Planes are skipped (`geomBounds` returns null for them): the ground is
  * unbounded, and framing it would mean framing nothing.
  */
 export function sceneContentBounds(nodes: SceneNode[]): SceneBounds | null {
@@ -123,27 +127,19 @@ export function sceneContentBounds(nodes: SceneNode[]): SceneBounds | null {
     }
   };
 
-  const walk = (node: SceneNode, parent: number[]) => {
-    const pos = [
-      parent[0] + (node.pos?.[0] || 0),
-      parent[1] + (node.pos?.[1] || 0),
-      parent[2] + (node.pos?.[2] || 0),
-    ];
+  walkBodiesWorld(nodes, (node, world) => {
     // A compiled body reports the bounds of its positive source geoms, already
     // moved into the frame the compiled mesh is drawn in.
     const csg = positiveBounds(node);
     if (csg) {
-      add(pos, csg);
+      add(ORIGIN, transformBox(csg, world));
     } else {
       for (const g of [...(node.geoms || []), ...resolveCsgGeoms(node, 'render')]) {
         const b = geomBounds(g) ?? meshVertexBounds(g);
-        if (b) add(pos, b);
+        if (b) add(ORIGIN, transformBox(b, world));
       }
     }
-    for (const child of node.children || []) walk(child, pos);
-  };
-
-  for (const node of nodes) walk(node, [0, 0, 0]);
+  });
   return any ? { min, max } : null;
 }
 

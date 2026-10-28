@@ -45,6 +45,17 @@ describe('sceneContentBounds', () => {
     expect(b.max[2]).toBeCloseTo(0.205, 6);
   });
 
+  it('carries a child through its parent\'s rotation', () => {
+    // A hub turned 90° about X: a gondola written 0.15 m along the hub's +Y
+    // hangs 0.15 m UP in the world, not out along world Y.
+    const hub = body([{ type: 'cylinder', size: [0.01, 0.01] }], [0, 0, 0.3]);
+    hub.euler = [90, 0, 0];
+    hub.children = [body([{ type: 'box', size: [0.01, 0.01, 0.01] }], [0, 0.15, 0])];
+    const b = sceneContentBounds([hub])!;
+    expect(b.max[2]).toBeCloseTo(0.46, 6);
+    expect(b.max[1]).toBeCloseTo(0.01, 6);
+  });
+
   it('ignores the ground plane, which has no bounds to frame', () => {
     expect(sceneContentBounds([body([{ type: 'plane', size: [0, 0, 1] }])])).toBeNull();
   });

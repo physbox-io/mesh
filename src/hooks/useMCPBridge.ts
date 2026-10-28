@@ -166,6 +166,7 @@ import { generatedMeshMass } from '../utils/generatedMeshMass';
 import { bboxOf, geomBboxOf, isFabricationScene, meshIntegrity, staleBodies, stockReport, summarizeNode } from '../utils/sceneSummary';
 import { modelBuiltFrom } from '../store/modelProvenance';
 import { recompilesInFlight } from '../store/simulationActions';
+import { framingPatch } from '../store/sceneFraming';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
@@ -5584,6 +5585,10 @@ export function useMCPBridge() {
 
           const nodes = bodies.map((b) => fillBodyDefaults(b));
           const result = await settleScene(nodes, { freshStart: true });
+          // A new scene is framed as a loaded preset is: the whole of it, every
+          // child and geom at its real pose. The camera used to stay wherever
+          // it was, which for a 300 mm ride was a close-up of its base.
+          useStore.setState(framingPatch(useStore.getState().sceneGraph, null));
           updateOrCreateNotecard({
             mode: 'mcp',
             nodes: useStore.getState().sceneGraph.nodes
