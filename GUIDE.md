@@ -259,7 +259,7 @@ hand-written SCAD, boolean. `node.collision` (`'auto' | 'hull' | 'decompose' | '
 overrides it; `csgCollision` is the old boolean-only field, still read so existing scenes behave as
 they did, never written. Read both through `collisionModeOf()`.
 
-Three things about it are load-bearing:
+These things about it are load-bearing:
 
 * **Derived colliders are ordinary geoms**, replaced wholesale by `applyNodeColliders` and
   fingerprinted by `collisionHash` so the decomposition runs once per real edit rather than per
@@ -270,6 +270,24 @@ Three things about it are load-bearing:
 * **A decomposed hollow body gets lighter**, because it is weighed by what is there rather than by
   its hull. Often by a factor of three. Correct, the same defect `inertia="exact"` fixed for the oak
   tree, and surfaced in the panel rather than applied silently.
+
+* **Each colliding mesh is decomposed on its own, where its geom puts it.** MuJoCo hulls each mesh
+  geom separately, so a body's verdict is per mesh: a wheel's two rims are two rings, a box beside a
+  cup stays a box. The source is taken into the body frame by the geom's `pos` and `quat`/`euler`
+  (`bodyFrameMesh`) — skip that and the pieces land where the mesh would be with its pose taken
+  away. Each piece names its mesh in `colliderOf`, and only the named meshes are demoted; older
+  colliders, which name none, stand for every colliding mesh. A mesh with `contype` and
+  `conaffinity` both 0 is not a source at all, and pieces inherit their mesh's filtering.
+* **Long thin parts get a budget scaled to them** (`scaledBudget`): pieces in proportion to length
+  over wall thickness (twice volume over area), voxels so a wall is two thick. V-HACD cuts along the
+  axes, so on a sloping U-channel every piece holding a wall and some floor fills the corner between
+  them: the 440 mm coaster track needs ~450 pieces before its channel is clear, and gets them on the
+  first run. A compact part keeps the old defaults and, when a cavity is found, one retry at up to
+  64 pieces.
+* **Filled cavities are found two ways** (`utils/filledCavities.ts`): a region of filled air that
+  fills most of the empty space in its bounding box (a slot, a cup), and a piece that is mostly air
+  reaching 1.5 wall thicknesses from any surface — which is how a channel filled along its length is
+  caught, when its bounding box is mostly sky.
 
 A boolean body with a hole that *pierces* it keeps the older, exact sector slicer (`utils/csg.ts`
 `decomposeAroundAxis`), whose error is known in closed form. Everything else goes to V-HACD.

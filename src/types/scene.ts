@@ -786,8 +786,10 @@ export interface SceneNode {
   collisionHulls?: number;
   /**
    * V-HACD voxel count for a decomposition: higher sees narrower slots.
-   * Absent = 25,000, with one automatic retry at 100,000 and 32 hulls when the
-   * first result is found to fill a cavity in (see utils/filledCavities.ts).
+   * Absent = 25,000, with one automatic retry at 100,000 and up to 64 hulls
+   * when the first result is found to fill a cavity in (see
+   * utils/filledCavities.ts), or a budget scaled to the part when it is long
+   * and thin (scaledBudget in utils/convexDecomposition.ts).
    */
   collisionResolution?: number;
   /** Total mass split across the derived colliders, as csgMass is for a boolean. */

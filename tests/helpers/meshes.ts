@@ -243,3 +243,63 @@ export function torusMesh(R = 0.08, r = 0.006, segments = 32, sides = 12): MeshD
   }
   return { verts, faces };
 }
+
+/** The coaster profile the U-channel fixture follows: (x, z) knots in metres, cosine-eased between. */
+export const COASTER_KNOTS: [number, number][] = [
+  [-0.22, 0.05], [-0.15, 0.11], [-0.13, 0.11], [-0.03, 0.012], [0.07, 0.045], [0.15, 0.012], [0.22, 0.06],
+];
+
+/** Height of the channel floor at x, along COASTER_KNOTS. */
+export function coasterFloorZ(x: number, knots = COASTER_KNOTS): number {
+  const cx = Math.max(knots[0][0], Math.min(knots[knots.length - 1][0], x));
+  for (let i = 0; i < knots.length - 1; i++) {
+    const [x0, z0] = knots[i], [x1, z1] = knots[i + 1];
+    if (cx >= x0 && cx <= x1) {
+      const u = (cx - x0) / (x1 - x0);
+      return z0 + (z1 - z0) * (1 - Math.cos(Math.PI * u)) / 2;
+    }
+  }
+  return knots[knots.length - 1][1];
+}
+
+/**
+ * A rolling-coaster track: a U-channel swept along COASTER_KNOTS, x from -220
+ * to +220 mm. The channel is `width` wide inside and `depth` deep, with `wall`
+ * thick sides and a `base` thick floor, its cross-section kept square to the
+ * slope. Solidity about 0.09 — almost all of its hull is air, most of it the
+ * channel a car runs in.
+ */
+export function uChannelTrack({
+  stations = 120, width = 0.032, wall = 0.003, depth = 0.012, base = 0.004, knots = COASTER_KNOTS,
+}: { stations?: number; width?: number; wall?: number; depth?: number; base?: number; knots?: [number, number][] } = {}): MeshData {
+  const x0 = knots[0][0], x1 = knots[knots.length - 1][0];
+  const a = width / 2 + wall;
+  // The section in (y, height above the floor), counter-clockwise seen from +x.
+  const poly: [number, number][] = [
+    [-a, -base], [a, -base], [a, depth], [width / 2, depth], [width / 2, 0], [-width / 2, 0], [-width / 2, depth], [-a, depth],
+  ];
+  const m = poly.length;
+  const verts: number[] = [];
+  for (let s = 0; s < stations; s++) {
+    const x = x0 + ((x1 - x0) * s) / (stations - 1);
+    const h = 1e-5;
+    const dz = (coasterFloorZ(x + h, knots) - coasterFloorZ(x - h, knots)) / (2 * h);
+    const n = Math.hypot(1, dz), tx = 1 / n, tz = dz / n;
+    for (const [y, up] of poly) verts.push(x - tz * up, y, coasterFloorZ(x, knots) + tx * up);
+  }
+  const faces: number[] = [];
+  // The section runs counter-clockwise seen from +x, so seen from outside a
+  // side face, round the section then +x is counter-clockwise: p, q, q+m, p+m.
+  for (let s = 0; s < stations - 1; s++) {
+    for (let k = 0; k < m; k++) {
+      const p = s * m + k, q = s * m + ((k + 1) % m);
+      quad(faces, p, q, q + m, p + m);
+    }
+  }
+  // The end caps, the section split into three convex pieces: floor and walls.
+  const cap: [number, number, number][] = [[0, 1, 4], [0, 4, 5], [1, 2, 3], [1, 3, 4], [0, 5, 6], [0, 6, 7]];
+  const last = (stations - 1) * m;
+  for (const [p, q, r] of cap) tri(faces, p, r, q);
+  for (const [p, q, r] of cap) tri(faces, last + p, last + q, last + r);
+  return { verts, faces };
+}

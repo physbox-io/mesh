@@ -32,7 +32,7 @@ import {
 } from './csg';
 import { authoredQuat } from './bodyOrientation';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
-import type { FilledCavity } from './filledCavities';
+import { wallThickness, type FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
 
 /**
@@ -71,6 +71,71 @@ export const MIN_SURVIVING_HULLS = 2;
  */
 export const MIN_HULLS = 8;
 export const MAX_HULLS = 16;
+
+/**
+ * What a body may ask for, or be given when the defaults scale up for a long
+ * thin part (scaledBudget). A U-channel coaster track 440 mm long, with 3 mm
+ * walls, needs about 450 pieces at 400k voxels before nothing but slivers of
+ * its channel are filled — V-HACD cuts along the axes, so every piece of a
+ * sloping channel that holds a wall and some floor fills the corner between
+ * them — and that is a second in the worker.
+ */
+export const MAX_REQUESTED_HULLS = 512;
+export const MIN_RESOLUTION = 10_000;
+export const MAX_RESOLUTION = 1_000_000;
+
+/**
+ * The most voxels the defaults spend unasked. Time is not the voxel count
+ * alone: the track takes 0.7 s at 400k, while a 100 mm cup with 2 mm walls
+ * takes 2.6 s at 25k and 37 s at 800k, past the worker's 20 s allowance.
+ */
+export const AUTO_MAX_RESOLUTION = 400_000;
+
+/**
+ * The retry for a part that is not long and thin: the voxels it always had,
+ * and pieces up to this many. On that thin cup 64 pieces at 100k voxels leave
+ * 2,400 mm³ filled where 16 at 25k left 54,000, in 8 s.
+ */
+export const RETRY_RESOLUTION = 100_000;
+export const RETRY_MAX_HULLS = 64;
+
+/**
+ * Length over wall thickness past which a part is long and thin enough that
+ * the default budget cannot work, so its first decomposition already uses the
+ * scaled one. The coaster track is 130; a 200 mm cup with 20 mm walls is 11,
+ * and a 100 mm one with 2 mm walls 50, which the default gets mostly right and
+ * the retry gets nearly all the way.
+ */
+export const SLENDER = 80;
+
+/** A requested voxel count, held to what V-HACD can do in the worker's time. */
+export function voxelResolutionOf(requested: number): number {
+  return Math.max(MIN_RESOLUTION, Math.min(MAX_RESOLUTION, Math.round(requested)));
+}
+
+/**
+ * The budget a part's own proportions call for: pieces in proportion to how
+ * many wall thicknesses long it is, and voxels small enough that a wall is two
+ * of them thick. A compact part gets about what it always did; a long thin one
+ * gets what it needs, within MAX_REQUESTED_HULLS and AUTO_MAX_RESOLUTION.
+ */
+export function scaledBudget(verts: number[], faces: number[]): { maxHulls: number; voxelResolution: number; slenderness: number } {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < verts.length; i += 3) {
+    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], verts[i + k]); hi[k] = Math.max(hi[k], verts[i + k]); }
+  }
+  const size = [0, 1, 2].map(k => Math.max(0, hi[k] - lo[k]));
+  const length = Math.max(...size);
+  const wall = wallThickness(verts, faces);
+  if (!(wall > 0) || !(length > 0)) return { maxHulls: 32, voxelResolution: RETRY_RESOLUTION, slenderness: 0 };
+  const slenderness = length / wall;
+  const boxVolume = size.reduce((v, s) => v * Math.max(s, wall), 1);
+  return {
+    maxHulls: Math.round(Math.max(32, Math.min(MAX_REQUESTED_HULLS, 4 * slenderness))),
+    voxelResolution: Math.round(Math.max(RETRY_RESOLUTION, Math.min(AUTO_MAX_RESOLUTION, boxVolume / (wall / 2) ** 3))),
+    slenderness,
+  };
+}
 
 export type DecompositionStrategy = 'hull' | 'sectors' | 'decompose' | 'primitives';
 
@@ -151,7 +216,7 @@ export function solidityOf(volume: number, hullVolume: number): number {
 
 /** How many pieces a shape of this solidity is worth breaking into. */
 export function hullBudget(solidity: number, requested?: number): number {
-  if (requested !== undefined) return Math.max(1, Math.min(64, Math.round(requested)));
+  if (requested !== undefined) return Math.max(1, Math.min(MAX_REQUESTED_HULLS, Math.round(requested)));
   const span = MAX_HULLS - MIN_HULLS;
   return Math.round(Math.max(MIN_HULLS, Math.min(MAX_HULLS, MIN_HULLS + span * (1 - solidity))));
 }
@@ -465,42 +530,47 @@ async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<Mes
       : 'This mesh has triangles facing both ways, so its inside cannot be told from its outside — it collides as its convex hull. Fix the winding to decompose it.', 'hull');
   }
 
-  // Asked for, or left to the defaults with one finer try in reserve.
+  // Asked for, or left to the defaults with one finer try in reserve. The
+  // defaults are for a compact part; a long thin one starts from the budget
+  // its proportions call for, since the default could only fill its channel.
   const tuned = node.collisionHulls !== undefined || node.collisionResolution !== undefined;
-  const resolution = node.collisionResolution !== undefined
-    ? Math.max(10_000, Math.min(400_000, Math.round(node.collisionResolution)))
-    : undefined;
+  const resolution = node.collisionResolution !== undefined ? voxelResolutionOf(node.collisionResolution) : undefined;
+  const scaled = scaledBudget(verts, faces);
+  const slender = !tuned && scaled.slenderness >= SLENDER;
 
   const { decomposeWithCavitiesOffThread } = await import('./vhacdWorkerClient');
-  let hulls: Hull[];
-  let cavities: FilledCavity[];
+  const run = (params: { maxHulls: number; voxelResolution?: number }) => decomposeWithCavitiesOffThread(verts, faces, params);
+  const standard = { maxHulls: verdict.maxHulls, ...(resolution ? { voxelResolution: resolution } : {}) };
+  // Timed out, or the worker died. A body still has to collide as something.
+  const failed = (err: unknown) => none(`${err instanceof Error ? err.message : String(err)} It collides as its convex hull, so any hollow in it is solid.`, 'hull');
+
+  let first: { hulls: Hull[]; cavities: FilledCavity[] };
   try {
-    const initial = await decomposeWithCavitiesOffThread(verts, faces, {
-      maxHulls: verdict.maxHulls,
-      ...(resolution ? { voxelResolution: resolution } : {}),
-    });
-    hulls = initial.hulls;
-    cavities = initial.cavities;
-    // A piece bridging a slot looks healthy from the outside — "9 convex
-    // pieces" — while the slot is solid. When that is found and nobody has
-    // tuned this body, try once finer: on the oak tray 100k voxels and 32
-    // hulls cleared a filled phone groove and two filled dishes in 2.3 s.
-    if (cavities.length > 0 && !tuned) {
-      const finerRun = await decomposeWithCavitiesOffThread(verts, faces, {
-        maxHulls: Math.max(32, verdict.maxHulls),
-        voxelResolution: 100_000,
-      });
-      const finer = finerRun.hulls;
-      const finerCavities = finerRun.cavities;
-      const filled = (list: FilledCavity[]) => list.reduce((sum, c) => sum + c.volumeMm3, 0);
-      if (finer.length >= MIN_SURVIVING_HULLS && filled(finerCavities) < filled(cavities)) {
-        hulls = finer;
-        cavities = finerCavities;
-      }
-    }
+    first = await run(slender ? { maxHulls: scaled.maxHulls, voxelResolution: scaled.voxelResolution } : standard);
   } catch (err) {
-    // Timed out, or the worker died. A body still has to collide as something.
-    return none(`${err instanceof Error ? err.message : String(err)} It collides as its convex hull, so any hollow in it is solid.`, 'hull');
+    if (!slender) return failed(err);
+    // Too slow at the scaled budget: something, at least, at the standard one.
+    try { first = await run(standard); } catch (again) { return failed(again); }
+  }
+  let { hulls, cavities } = first;
+  // A piece bridging a slot looks healthy from the outside — "9 convex
+  // pieces" — while the slot is solid. When that is found and nobody has
+  // tuned this body, try once finer: on the oak tray 100k voxels and 32
+  // hulls cleared a filled phone groove and two filled dishes in 2.3 s. A
+  // retry that fails keeps the first result rather than throwing it away.
+  if (cavities.length > 0 && !tuned && !slender) {
+    try {
+      const finer = await run({
+        maxHulls: Math.max(verdict.maxHulls, Math.min(RETRY_MAX_HULLS, scaled.maxHulls)),
+        voxelResolution: RETRY_RESOLUTION,
+      });
+      const filled = (list: FilledCavity[]) => list.reduce((sum, c) => sum + c.volumeMm3, 0);
+      if (finer.hulls.length >= MIN_SURVIVING_HULLS && filled(finer.cavities) < filled(cavities)) {
+        ({ hulls, cavities } = finer);
+      }
+    } catch {
+      // Keep the first.
+    }
   }
 
   if (hulls.length < MIN_SURVIVING_HULLS) {
