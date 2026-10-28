@@ -894,7 +894,7 @@ const summarizeNode = (node: SceneNode, model: ModelMirror | null = null): Recor
        * reported here for the same reason latticeOrigin is: it is the number you
        * need to convert, and nothing else will tell you it.
        */
-      ...(node.csgCentroid ? { originOffsetMm: csgFrameOffset(node).map(v => +(v * 1000).toFixed(3)) } : {}),
+      ...(csgFrameOffset(node).some((v) => v !== 0) ? { originOffsetMm: csgFrameOffset(node).map(v => +(v * 1000).toFixed(3)) } : {}),
       ...(node.csgWarning ? { warning: node.csgWarning } : {}),
       ...(node.csgError ? { error: node.csgError } : {}),
     },

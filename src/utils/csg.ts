@@ -2353,6 +2353,9 @@ export function csgHashOf(node: SceneNode): string {
   const src = csgSourceGeoms(node);
   if (!src.filter(isPositive).some(emitsSolid)) return '';
   const key = JSON.stringify([
+    // 2: the solid is no longer re-origined on its centroid, so a mesh
+    // compiled the old way has to be compiled again.
+    2,
     src.filter(emitsSolid).map(geomCsgKey),
     node.csgFn ?? CSG_DEFAULT_FN,
     collisionModeOf(node),
@@ -2434,11 +2437,14 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   // renderVertices is the Z-up copy — the space the sizes, positions and hole
   // axis all live in, so all measurement and slicing happens there.
   const zup = compiled.renderVertices;
-  // The volume centroid doubles as the body origin below, so that a CSG body's
-  // origin is its centre of mass — matching every other mesh shape in the app,
-  // and what the dynamic-mesh renderer assumes (it draws renderVertices
-  // straight at the body frame).
-  const { volume, centroid } = meshVolumeAndCentroid(zup, compiled.faces);
+  // The solid stays in the frame its shapes were authored in. It used to be
+  // re-origined on its centroid in X and Y while the body stayed put, so the
+  // part moved by that much the moment it had a hole in it: a bracket built
+  // flush against a wall was drawn and collided ten millimetres off it, and
+  // a hinged part turned about a different point. The offset is reported as
+  // zero (see csgFrameOffset), so everything that allowed for it agrees.
+  const { volume } = meshVolumeAndCentroid(zup, compiled.faces);
+  const centroid = [0, 0, 0];
   // The hull volume is a figure for the panel (and the 'hull' mode's mass).
   // Hulling every vertex of a dense mesh is the slowest thing in this
   // function, so when the mesh is decomposed below the hull is taken from the
@@ -2450,7 +2456,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   const requested = collisionModeOf(node);
   const totalMass = csgMassOf(node, volume);
 
-  const centeredZup = translateFlat(zup, [-centroid[0], -centroid[1], 0]);
+  const centeredZup = zup;
   const centeredYup = zupArrayToYup(centeredZup);
 
   const visual: SceneGeom = {
@@ -2501,8 +2507,8 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
         : undefined;
     } else {
       const sectors = node.csgSectors ?? CSG_DEFAULT_SECTORS;
-      // Slice in the SAME centred frame the visual mesh uses, so collider
-      // positions are body-frame directly.
+      // Slice in the SAME frame the visual mesh uses, so collider positions
+      // are body-frame directly.
       const shiftedOrigin = [
         holeAxis.origin[0] - centroid[0],
         holeAxis.origin[1] - centroid[1],
@@ -2804,8 +2810,10 @@ export function geomBounds(g: SceneGeom): { min: number[]; max: number[] } | nul
 /**
  * How far the compiled body frame is shifted from the source primitives' frame.
  *
- * evaluateNodeCsg re-origins a compiled solid on its centre of mass, but only in
- * X and Y — Z is left alone so a body keeps sitting where it was modelled.
+ * Zero for anything compiled now: evaluateNodeCsg used to re-origin a compiled
+ * solid on its centre of mass in X and Y, and no longer does. A scene saved
+ * that way keeps its stored offset until it recompiles (its hash is stale),
+ * which is why everything below still allows for one.
  * Anything drawn in the source frame (ghost outlines, bounds) has to apply the
  * same partial shift; subtracting the full centroid drops it by the solid's
  * height, which is invisible for a shape modelled about the origin and glaring
