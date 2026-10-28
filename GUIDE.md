@@ -149,7 +149,7 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 - **`api.applyForce(forceVec, bodyName)`**: applies a 3D force `[fx, fy, fz]` to the body.
 - **`api.applyTorque(torqueVec, bodyName)`**: applies a 3D torque `[tx, ty, tz]` to the body.
 - **`api.applyJointForce(jointName, forceVal)`**: applies a 1D force/torque along or around the joint axis.
-- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator. `mjcf.ts` names a joint's actuator `<jointName>_actuator`; an unknown name is ignored silently. For a velocity actuator `ctrlVal` is the target speed (rad/s hinge, m/s slide; the joint settles at `ctrlVal/gear`), for a motor the torque (N·m) or force (N). A velocity actuator on a light part runs away unless the joint carries `armature` ≥ 1.5·kv·dt (`motorArmature` in `utils/motionParts.ts`); only steppers and the mechanism builders add it.
+- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator. `mjcf.ts` names a joint's actuator `<jointName>_actuator`; an unknown name is ignored silently. For a velocity actuator `ctrlVal` is the target speed (rad/s hinge, m/s slide; the joint settles at `ctrlVal/gear`), for a motor the torque (N·m) or force (N). With a `forceLimit`, a velocity actuator on a light part cannot hold its speed unless the joint carries `armature` ≥ 1.5·kv·dt (`motorArmature` in `utils/motionParts.ts`); unclamped, implicitfast holds it. Steppers, the mechanism builders and MCP's `fillJointDefaults` (`withMotorArmature`) add it.
 - **`api.getTime()`**: the current simulation time.
 - **`api.getWind()`**: the current wind vector `[windX, windY]`.
 - **`api.log(msg)`**: logs a debug message to the console.

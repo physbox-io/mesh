@@ -168,6 +168,7 @@ import { recompilesInFlight } from '../store/simulationActions';
 import { framingPatch } from '../store/sceneFraming';
 import { lastWorkerFrame, modelBuiltFrom } from '../store/modelProvenance';
 import { describeWorker } from '../utils/workerStatus';
+import { withMotorArmature } from '../utils/motionParts';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
@@ -1113,7 +1114,7 @@ export function resolveUpdatedGeoms(
   return { ok: true, geoms: resolvedList };
 }
 
-const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
+const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => withMotorArmature({
   // As for geoms: springref and the crumple fields were dropped by a whitelist.
   ...(j as SceneJoint),
   name:    j.name    ?? `${bodyName}_joint_${idx}`,
@@ -2488,6 +2489,7 @@ export function useMCPBridge() {
 
           // Extract declarative feature arrays if passed in updates
           const updates = { ...rawUpdates };
+          if (Array.isArray(updates.joints)) updates.joints = updates.joints.map(withMotorArmature);
           const breakError = resolveBreakFields(updates, target.deformMaterial);
           if (breakError) return { ok: false, error: breakError };
           const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;

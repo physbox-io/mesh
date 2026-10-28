@@ -43,6 +43,18 @@ const TIMESTEP = 0.001;
  * -500 rad/s. Joints with a motor carry at least this as armature.
  */
 export const motorArmature = (kv: number) => +(1.5 * kv * TIMESTEP).toFixed(7);
+/**
+ * The joint, carrying at least motorArmature when a velocity motor on it has a
+ * torque limit. Unclamped, implicitfast integrates the gain and any inertia is
+ * stable; clamped, a light part runs away. For motors written by hand
+ * (build_scene), which the hardware and mechanism parts already cover. kv
+ * unset is MuJoCo's 1.
+ */
+export const withMotorArmature = <J extends { armature?: number; actuator?: { type: string; kv?: number; forceLimit?: number } }>(j: J): J => {
+  if (j.actuator?.type !== 'velocity' || j.actuator.forceLimit === undefined) return j;
+  const floor = motorArmature(j.actuator.kv ?? 1);
+  return (j.armature ?? 0) >= floor ? j : { ...j, armature: floor };
+};
 /** How far below its set speed a stepper runs at its full holding torque, rad/s. */
 const SPEED_DROOP = 0.5;
 
