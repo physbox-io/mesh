@@ -149,7 +149,7 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 - **`api.applyForce(forceVec, bodyName)`**: applies a 3D force `[fx, fy, fz]` to the body.
 - **`api.applyTorque(torqueVec, bodyName)`**: applies a 3D torque `[tx, ty, tz]` to the body.
 - **`api.applyJointForce(jointName, forceVal)`**: applies a 1D force/torque along or around the joint axis.
-- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator.
+- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator. `mjcf.ts` names a joint's actuator `<jointName>_actuator`; an unknown name is ignored silently. For a velocity actuator `ctrlVal` is the target speed (rad/s hinge, m/s slide; the joint settles at `ctrlVal/gear`), for a motor the torque (N·m) or force (N). A velocity actuator on a light part runs away unless the joint carries `armature` ≥ 1.5·kv·dt (`motorArmature` in `utils/motionParts.ts`); only steppers and the mechanism builders add it.
 - **`api.getTime()`**: the current simulation time.
 - **`api.getWind()`**: the current wind vector `[windX, windY]`.
 - **`api.log(msg)`**: logs a debug message to the console.
@@ -209,7 +209,7 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 
 ## Mesh Geoms Reference
 
-Mesh geoms (`type: 'mesh'`) come in two modes: **static** (visual only) and **dynamic** (full physics and collision).
+Mesh geoms (`type: 'mesh'`) come in two render modes: **static** (drawn once from world-space vertices) and **dynamic** (drawn from the body transform every frame). Both collide alike; `dynamic` decides only how the mesh is drawn.
 
 ---
 
@@ -222,11 +222,11 @@ Mesh geoms (`type: 'mesh'`) come in two modes: **static** (visual only) and **dy
 
 ---
 
-### Static mesh geoms (default)
+### Static mesh geoms (`dynamic` absent or false)
 
-`dynamic` field absent or `false`. Vertices are baked in Three.js Y-up world space. The mesh renders at a fixed position and never moves or collides. It is rendered **outside** the rotated group, with no `ref` and no `useFrame` tracking.
+`dynamic` field absent or `false`. Absent means static only in the type and in preset files: everything that makes a mesh geom over MCP (`fillGeomDefaults` / `normalizeMeshGeomData`) or in the store sets `dynamic: true`, and `promoteJointedMeshGeomsDeep` / `promoteMeshGeomsToDynamic` flip a jointed body's meshes when a preset loads or a joint is added. Vertices are baked in Three.js Y-up world space. The mesh renders at a fixed position and is never re-drawn (no `useFrame` tracking), but it **still collides**: `mjcf.ts` emits it like any mesh geom, so MuJoCo hulls it. If its body is decomposed, the pieces collide and the static mesh stays as a contactless visual (§ Concave collision).
 
-Good for: scenery, decorative structures, visual shells around primitive collision proxies.
+Good for: scenery and decorative structures. A visual shell around primitive collision proxies also needs `role: 'visual'`, or it collides too.
 
 ```ts
 { name: 'deck', type: 'mesh', size: [1], rgba: [...], vertices: [...], faces: [...] }
