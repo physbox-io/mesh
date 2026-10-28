@@ -663,7 +663,7 @@ export const compileToMJCF = (
   const jointedNodes: Record<string, string> = {};
   const explicitCouplingNodes: SceneNode[] = [];
   const pulleyRopesList: SceneNode[] = [];
-  const weldConstraintsList: { bodyName: string; targetId: string; rigid?: boolean }[] = [];
+  const weldConstraintsList: { bodyName: string; bodyId?: string; targetId: string; rigid?: boolean }[] = [];
   /*
    * Crumple zones, as locks.
    *
@@ -673,17 +673,17 @@ export const compileToMJCF = (
    * than as a stiff spring is what makes it PERMANENT: a spring pulls the part
    * back, and a crumpled one should stay crumpled.
    */
-  const crumpleLocks: { jointName: string; bodyName: string; parentName: string }[] = [];
+  const crumpleLocks: { jointName: string; bodyName: string; bodyId: string; parentName: string; parentId?: string }[] = [];
   const connectConstraintsList: { bodyId: string; bodyName: string; targetId: string; anchor: number[] }[] = [];
   const nodeNamesMap: Record<string, string> = {};
 
-  const traverse = (nodes: SceneNode[], parentName?: string) => {
+  const traverse = (nodes: SceneNode[], parentName?: string, parentId?: string) => {
     if (!nodes) return;
     for (const node of nodes) {
       nodeNamesMap[node.id] = node.name;
       (node.joints || []).forEach((j) => {
         if (j.crumpleTorqueNm === undefined || j.type === 'free') return;
-        crumpleLocks.push({ jointName: j.name, bodyName: node.name, parentName: parentName ?? '' });
+        crumpleLocks.push({ jointName: j.name, bodyName: node.name, bodyId: node.id, parentName: parentName ?? '', parentId });
       });
       if (node.joints && node.joints.length > 0) {
         jointedNodes[node.id] = node.joints[0].name;
@@ -695,7 +695,7 @@ export const compileToMJCF = (
         pulleyRopesList.push(node);
       }
       if (node.weldTargetId) {
-        weldConstraintsList.push({ bodyName: node.name, targetId: node.weldTargetId, ...(node.weldRigid ? { rigid: true } : {}) });
+        weldConstraintsList.push({ bodyName: node.name, bodyId: node.id, targetId: node.weldTargetId, ...(node.weldRigid ? { rigid: true } : {}) });
       }
       if (node.isComposite && node.weldLastToId) {
         weldConstraintsList.push({ bodyName: (node.compositePrefix || `${node.name}_`) + 'B_last', targetId: node.weldLastToId });
@@ -734,7 +734,7 @@ export const compileToMJCF = (
           });
         }
       });
-      traverse(node.children, node.name);
+      traverse(node.children, node.name, node.id);
     }
   };
   traverse(sceneCopy.nodes);
@@ -876,11 +876,25 @@ export const compileToMJCF = (
     ropeCouplingIndex++;
   }
 
+  /** A weld's anchor at body1's origin, in body2's frame (the world's when there is no body2). */
+  const weldAnchor = (bodyId: string, targetId?: string): string => {
+    const part = nodeWorldData[bodyId];
+    const target = targetId ? nodeWorldData[targetId] : { pos: [0, 0, 0], quat: [1, 0, 0, 0] as QuatWXYZ };
+    if (!part || !target) return '';
+    const local = quatRotateVecInv(target.quat, [
+      part.pos[0] - target.pos[0],
+      part.pos[1] - target.pos[1],
+      part.pos[2] - target.pos[2],
+    ]);
+    return ` anchor="${local.map(v => v.toFixed(6)).join(' ')}"`;
+  };
+
   // 3b. Crumple locks. Named after the joint rather than numbered, so the
   //     worker can map a released lock straight back to the joint it froze.
+  //     Held at the locked body, for the reason given at the welds below.
   for (const lock of crumpleLocks) {
     const target = lock.parentName ? ` body2="${xmlAttr(lock.parentName)}"` : '';
-    equalityConstraints += `\n    <weld name="crumple_lock_${xmlAttr(lock.jointName)}" body1="${xmlAttr(lock.bodyName)}"${target} />`;
+    equalityConstraints += `\n    <weld name="crumple_lock_${xmlAttr(lock.jointName)}" body1="${xmlAttr(lock.bodyName)}"${target}${weldAnchor(lock.bodyId, lock.parentId)} />`;
   }
 
   // 4. Closed-Loop Weld Constraints
@@ -890,7 +904,12 @@ export const compileToMJCF = (
     // A bolted joint: stiff, where the default weld lets a 3 kg drawer sag
     // millimetres onto what is under it. Only when asked for.
     const stiff = w.rigid ? ' solref="0.004 1" solimp="0.99 0.999 0.0002 0.5 2"' : '';
-    equalityConstraints += `\n    <weld name="weld_constraint_${weldIndex++}" body1="${xmlAttr(w.bodyName)}" body2="${xmlAttr(targetName)}"${stiff} />`;
+    // Held at the welded part, not at the target's origin. MuJoCo's default
+    // anchor is body2's origin, and a weld held there lets a small part far
+    // from it swing round it: a 20 g knob welded to a drawer fell 165 mm in
+    // two seconds. The anchor is in body2's frame.
+    const anchor = w.bodyId ? weldAnchor(w.bodyId, w.targetId) : '';
+    equalityConstraints += `\n    <weld name="weld_constraint_${weldIndex++}" body1="${xmlAttr(w.bodyName)}" body2="${xmlAttr(targetName)}"${anchor}${stiff} />`;
   }
 
   // 5. Closed-Loop Connect Joint Constraints
