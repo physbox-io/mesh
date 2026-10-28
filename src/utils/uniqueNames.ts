@@ -20,12 +20,18 @@ import type { SceneGraph, SceneNode } from '../types/scene';
  * names the compiler writes itself: the world body is `world` and the ground
  * plane is the geom `floor`, so a body or geom of the user's called that is
  * renamed as though something earlier had it.
+ *
+ * A composite (a rope, a cable) names the bodies it generates from its
+ * prefix, `<name>_` unless one is given. A copy of a rope with a prefix of its
+ * own kept it, so the two ropes' generated bodies clashed and the copy's end
+ * weld held the original's end. A later clashing prefix becomes the body's
+ * own (unique) name plus `_`, numbered further if even that is taken.
  */
 
 const RESERVED_BODIES = ['world'];
 const RESERVED_GEOMS = ['floor'];
 
-type Rename = { name?: string; geoms?: Map<number, string>; joints?: Map<number, string> };
+type Rename = { name?: string; geoms?: Map<number, string>; joints?: Map<number, string>; prefix?: string };
 type Renames = Map<SceneNode, Rename>;
 
 function allNames(nodes: SceneNode[], bodies: Set<string>, geoms: Set<string>, joints: Set<string>) {
@@ -47,6 +53,7 @@ function planRenames(nodes: SceneNode[]): Renames {
   const seenBodies = new Set<string>(RESERVED_BODIES);
   const seenGeoms = new Set<string>(RESERVED_GEOMS);
   const seenJoints = new Set<string>();
+  const seenPrefixes = new Set<string>();
   const free = (name: string, taken: Set<string>, seen: Set<string>) => {
     let k = 2;
     while (taken.has(`${name}_${k}`) || seen.has(`${name}_${k}`)) k++;
@@ -82,7 +89,17 @@ function planRenames(nodes: SceneNode[]): Renames {
           if (jName !== j.name) (entry.joints ??= new Map()).set(i, jName);
           seenJoints.add(jName);
         });
-        if (entry.name || entry.geoms || entry.joints) renames.set(node, entry);
+        if (node.isComposite) {
+          let prefix = node.compositePrefix || `${bodyName}_`;
+          if (seenPrefixes.has(prefix)) {
+            let k = 2;
+            prefix = `${bodyName}_`;
+            while (seenPrefixes.has(prefix)) prefix = `${bodyName}_${k++}_`;
+            entry.prefix = prefix;
+          }
+          seenPrefixes.add(prefix);
+        }
+        if (entry.name || entry.geoms || entry.joints || entry.prefix) renames.set(node, entry);
       }
       walk(node.children || []);
     }
@@ -93,8 +110,9 @@ function planRenames(nodes: SceneNode[]): Renames {
 
 /** Renames clashing bodies and geoms in place. For a copy that is the caller's to change. */
 export function uniquifyNamesInPlace(nodes: SceneNode[]): void {
-  for (const [node, { name, geoms, joints }] of planRenames(nodes)) {
+  for (const [node, { name, geoms, joints, prefix }] of planRenames(nodes)) {
     if (name) node.name = name;
+    if (prefix) node.compositePrefix = prefix;
     if (geoms) for (const [i, gName] of geoms) node.geoms[i].name = gName;
     if (joints) node.joints = node.joints!.map((j, i) => (joints.has(i) ? { ...j, name: joints.get(i)! } : j));
   }
@@ -118,6 +136,7 @@ export function withUniqueNames(scene: SceneGraph): SceneGraph {
       return {
         ...node,
         ...(r?.name ? { name: r.name } : {}),
+        ...(r?.prefix ? { compositePrefix: r.prefix } : {}),
         ...(r?.geoms ? { geoms: node.geoms.map((g, i) => (r.geoms!.has(i) ? { ...g, name: r.geoms!.get(i)! } : g)) } : {}),
         ...(r?.joints ? { joints: node.joints!.map((j, i) => (r.joints!.has(i) ? { ...j, name: r.joints!.get(i)! } : j)) } : {}),
         ...(node.children ? { children } : {}),

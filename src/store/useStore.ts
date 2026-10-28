@@ -70,6 +70,7 @@ import type { SplitSection } from '../utils/printSplit';
 import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
+import { withoutDanglingReferences } from '../utils/danglingReferences';
 import { useDialogs } from './dialogStore';
 import { downloadSceneRescue, allowUnload } from '../utils/rescueScene';
 import { envelope } from '../utils/coSimLink';
@@ -2450,9 +2451,10 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
       let patch = typeof partial === 'function' ? partial(get()) : partial;
       if (patch && 'sceneGraph' in patch && patch.sceneGraph) {
         // Clashing body and geom names renamed by the compiler's rule, so the
-        // graph the viewport draws from names what the model holds.
+        // graph the viewport draws from names what the model holds; and what
+        // was fixed to a body no longer here let go (utils/danglingReferences).
         const offered = patch.sceneGraph;
-        patch.sceneGraph = withUniqueNames(patch.sceneGraph);
+        patch.sceneGraph = withUniqueNames(withoutDanglingReferences(patch.sceneGraph));
         const prev = get().sceneGraph;
         shareUnchanged(prev, patch.sceneGraph);
         if (userEditPending && castPrepBypass === 0 && castPrepArmed(prev) && bodiesChanged(prev, patch.sceneGraph)) {

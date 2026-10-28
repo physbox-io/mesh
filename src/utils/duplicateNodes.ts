@@ -19,12 +19,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { nodeWorldMatrix } from './combineBodies';
 import { sceneContentBounds } from './frameScene';
 import { clearAlongX } from './spawnPlacement';
-
-/** Each field on a node that holds another node's id. */
-const REFERENCE_FIELDS = [
-  'coupleTargetId', 'weldTargetId', 'connectTargetId',
-  'leftTargetId', 'rightTargetId', 'pulleyWheelId', 'weldLastToId',
-] as const;
+import { REFERENCE_FIELDS } from './danglingReferences';
 
 /** Room left between a body and its copy, in metres. */
 const GAP = 0.01;
@@ -78,7 +73,7 @@ export function renumber(roots: SceneNode[]): void {
     walk(root, (n) => {
       n.id = ids.get(n.id)!;
       const fields = n as unknown as Record<string, unknown>;
-      for (const f of REFERENCE_FIELDS) {
+      for (const f of Object.keys(REFERENCE_FIELDS)) {
         const to = fields[f];
         if (typeof to === 'string' && ids.has(to)) fields[f] = ids.get(to);
       }

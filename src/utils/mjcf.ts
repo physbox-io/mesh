@@ -6,6 +6,7 @@ import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
 import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
+import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 
 /**
@@ -505,6 +506,9 @@ export const compileToMJCF = (
   // utils/uniqueNames); this pass only finds anything new when a boolean's
   // generated geoms clash, since the graph pass ran on the scene handed in.
   uniquifyNamesInPlace(sceneCopy.nodes);
+  // A scene handed straight to the compiler has not been through the store,
+  // and one constraint naming a missing body fails the whole model.
+  dropDanglingReferencesInPlace(sceneCopy.nodes);
 
   // Members that break under load become two welded halves, and join blobs
   // weld whatever reaches into them. After the names are final, since the
