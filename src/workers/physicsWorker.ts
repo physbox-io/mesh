@@ -2172,9 +2172,11 @@ const collectMujocoWarnings = (d: MjData): string[] => {
       }
       stat.delete?.();
     }
-    // The vector is a heap copy in its own right, like the contact vector in
-    // snapshot() — releasing only its members still leaks one per call.
-    stats.delete?.();
+    // Unlike the contact vector in snapshot(), this one is NOT a copy: it is a
+    // view onto the MjData's own warning array. Deleting it freed memory the
+    // MjData still owned, so the headless MjData's delete() freed it twice and
+    // the threaded build aborted the module, leaving every headless run and
+    // the tab's physics dead. Its members are copies and are released above.
   } catch { /* warning stats are diagnostics; never fail a run over them */ }
   return out;
 };
