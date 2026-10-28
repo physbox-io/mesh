@@ -45,9 +45,11 @@ describe('a connect pin stays on its body', () => {
 
   it('lands on a pasted copy, not on the original', () => {
     load();
-    useStore.setState({ selectedNodeId: 'arm', extraSelectedIds: [] });
-    const [copyId] = useStore.getState().duplicateSelection();
-    const copy = node(copyId);
+    // The pair together: a pin out of a copy is cut (utils/duplicateNodes).
+    useStore.setState({ selectedNodeId: 'arm', extraSelectedIds: ['rocker'] });
+    const copies = useStore.getState().duplicateSelection().map(node);
+    const copy = copies.find((n) => n.connectTargetId)!;
+    expect(copies.map((n) => n.id)).toContain(copy.connectTargetId);
     close(copy.connectAnchor, [copy.pos[0] + 0.005, copy.pos[1], copy.pos[2]]);
     close(node('arm').connectAnchor, [0.025, 0, 0.1]);
   });

@@ -7,8 +7,10 @@
 //
 // References between bodies inside the copy (a weld from one child to
 // another, a coupled gear pair, a pulley's wheels) are pointed at the new
-// bodies. References out of it are kept, so a copied bracket bolted to a frame
-// is bolted to that same frame. Names are left alone: the store's unique-name
+// bodies. A weld out of it is kept, so a copied bracket bolted to a frame is
+// bolted to that same frame. A pin or a gear coupling out of it is not: the
+// copy of a crank whose rod was pinned to a slider drove the ORIGINAL slider,
+// two cranks fighting over one. Names are left alone: the store's unique-name
 // rule (utils/uniqueNames.ts) renames the copy to `name_2` and so on.
 //
 // PURE: the caller clones the scene; these edit what they are given.
@@ -20,6 +22,9 @@ import { nodeWorldMatrix } from './combineBodies';
 import { sceneContentBounds } from './frameScene';
 import { clearAlongX } from './spawnPlacement';
 import { REFERENCE_FIELDS } from './danglingReferences';
+
+/** References that make the copy part of the original's mechanism, cut when they lead out of it. */
+const MECHANISM_LINKS = new Set<string>(['connectTargetId', 'coupleTargetId']);
 
 /** Room left between a body and its copy, in metres. */
 const GAP = 0.01;
@@ -73,9 +78,14 @@ export function renumber(roots: SceneNode[]): void {
     walk(root, (n) => {
       n.id = ids.get(n.id)!;
       const fields = n as unknown as Record<string, unknown>;
-      for (const f of Object.keys(REFERENCE_FIELDS)) {
+      for (const f of Object.keys(REFERENCE_FIELDS) as (keyof typeof REFERENCE_FIELDS)[]) {
         const to = fields[f];
-        if (typeof to === 'string' && ids.has(to)) fields[f] = ids.get(to);
+        if (typeof to !== 'string') continue;
+        if (ids.has(to)) fields[f] = ids.get(to);
+        else if (MECHANISM_LINKS.has(f)) {
+          delete fields[f];
+          for (const extra of REFERENCE_FIELDS[f]) delete fields[extra];
+        }
       }
     });
   }

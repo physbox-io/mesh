@@ -47,6 +47,24 @@ describe('duplicating bodies', () => {
     expect(copy.pos[1]).toBeCloseTo(-2 * board.step, 6);
   });
 
+  it('cuts a pin or a coupling out of the copy, so it does not drive the original', () => {
+    // A crank's rod pinned to a slider, and a gear coupled to another: copied,
+    // they drove the original slider and gear, two mechanisms fighting over one.
+    const rod = box('rod', [0.02, 0, 0], { connectTargetId: 'slider', connectAnchor: [0.04, 0, 0], connectAnchorLocal: [0.02, 0, 0] });
+    const gear = box('gear', [0, 0.05, 0], { coupleTargetId: 'other_gear', coupleRatio: -2 });
+    const scene: SceneGraph = { nodes: [rod, gear, box('slider', [0.2, 0, 0]), box('other_gear', [0, 0.1, 0])] } as SceneGraph;
+    const board = copyBodies(scene, ['rod', 'gear'], cloneNodes)!;
+    pasteBodies(scene, board, 1, cloneNodes);
+    const [rod2, gear2] = scene.nodes.slice(4);
+    expect(rod2.connectTargetId).toBeUndefined();
+    expect(rod2.connectAnchor).toBeUndefined();
+    expect(rod2.connectAnchorLocal).toBeUndefined();
+    expect(gear2.coupleTargetId).toBeUndefined();
+    expect(gear2.coupleRatio).toBeUndefined();
+    // The originals keep theirs.
+    expect(rod.connectTargetId).toBe('slider');
+  });
+
   it('pastes at the top level, at its world pose, when the parent has gone', () => {
     const frame = box('frame', [0.5, 0, 0], { children: [box('bracket', [0.02, 0, 0])] });
     const board = copyBodies({ nodes: [frame] } as SceneGraph, ['bracket'], cloneNodes)!;
