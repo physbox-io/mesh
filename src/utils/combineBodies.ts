@@ -269,3 +269,75 @@ export function cageInFrame(
   });
   return moved;
 }
+
+/** Give a node the transform `m`, which is in its (new) parent's frame. */
+function setNodeMatrix(node: SceneNode, m: THREE.Matrix4): void {
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  m.decompose(p, q, s);
+  node.pos = [p.x, p.y, p.z];
+  node.quat = [q.w, q.x, q.y, q.z];
+  delete node.euler;
+}
+
+const contains = (node: SceneNode, id: string): boolean =>
+  node.id === id || (node.children || []).some((c) => contains(c, id));
+
+/**
+ * Take a body that has been merged into `targetId` out of the tree, keeping
+ * the bodies hung off it. Mutates `nodes`.
+ *
+ * Only the body's own shape went into the target. Its children are parts of
+ * their own — a lid hinged to a box — so they move under the target and stay
+ * hinged to the merged shape, their world pose unchanged. A joint is written
+ * in the child's own frame and comes across as it is. The one child that
+ * cannot go under the target is the branch holding the target itself; that
+ * takes the merged body's place in its parent instead.
+ */
+export function removeMergedBody(nodes: SceneNode[], sourceId: string, targetId: string): void {
+  const find = (list: SceneNode[], parentWorld: THREE.Matrix4): { list: SceneNode[]; index: number; parentWorld: THREE.Matrix4 } | null => {
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].id === sourceId) return { list, index: i, parentWorld };
+      const found = find(list[i].children || [], parentWorld.clone().multiply(nodeMatrix(list[i])));
+      if (found) return found;
+    }
+    return null;
+  };
+  const at = find(nodes, new THREE.Matrix4());
+  if (!at || sourceId === targetId) return;
+  const source = at.list[at.index];
+  const sourceWorld = at.parentWorld.clone().multiply(nodeMatrix(source));
+  const intoParent = at.parentWorld.clone().invert();
+
+  const kept: SceneNode[] = [];
+  // Placed once the target's frame is known, below: it may be in `kept`.
+  const rehomed: { child: SceneNode; world: THREE.Matrix4 }[] = [];
+  for (const child of source.children || []) {
+    const world = sourceWorld.clone().multiply(nodeMatrix(child));
+    if (contains(child, targetId)) {
+      setNodeMatrix(child, intoParent.clone().multiply(world));
+      kept.push(child);
+    } else {
+      rehomed.push({ child, world });
+    }
+  }
+  at.list.splice(at.index, 1, ...kept);
+
+  if (rehomed.length === 0) return;
+  const targetWorld = nodeWorldMatrix(nodes, targetId);
+  const target = targetWorld && findIn(nodes, targetId);
+  if (!targetWorld || !target) return;
+  const intoTarget = targetWorld.clone().invert();
+  for (const { child, world } of rehomed) setNodeMatrix(child, intoTarget.clone().multiply(world));
+  target.children = [...(target.children || []), ...rehomed.map((r) => r.child)];
+}
+
+function findIn(nodes: SceneNode[], id: string): SceneNode | null {
+  for (const n of nodes || []) {
+    if (n.id === id) return n;
+    const found = findIn(n.children || [], id);
+    if (found) return found;
+  }
+  return null;
+}

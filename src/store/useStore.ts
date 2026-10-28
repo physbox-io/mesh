@@ -13,7 +13,7 @@ import { extrusionActions, type ExtrusionActions } from './extrusionActions';
 import { clipboardActions, type ClipboardActions } from './clipboardActions';
 import { belowOffset, besideOffset, restingPos } from '../utils/spawnPlacement';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
-import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
+import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix, removeMergedBody } from '../utils/combineBodies';
 import { getGeomFrame } from '../utils/laserCutExporter';
 import { DEFAULT_BRUSH, fromSceneGeom, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
 import { buildSculptBaseSized, DEFAULT_SCULPT_BASE, DEFAULT_SCULPT_SIZE, longestSide, resizeSculptMesh, resizeSculptMeshAxes, type SculptBaseId } from '../utils/sculptBases';
@@ -3356,19 +3356,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // The bodies that were merged in are gone: their shapes are on the target
     // now, and leaving the originals behind would draw every one of them twice
     // and simulate them as separate objects that happen to overlap.
-    const prune = (list: SceneNode[]): SceneNode[] => list
-      .filter(n => !sourceIds.includes(n.id) || n.id === targetId)
-      .map(n => ({ ...n, children: prune(n.children || []) }));
-    newScene.nodes = prune(newScene.nodes);
-    // Welds to a merged body hold the merged part now; anything that named a
-    // body pruned along with it lets go, as a delete would.
+    // The bodies hung off them are not merged, and move to the target.
+    // Welds to a merged body hold the merged part now.
     for (const source of sources) {
+      removeMergedBody(newScene.nodes, source.id, targetId);
       newScene.nodes = retargetReferences(newScene.nodes, source.id, targetId);
-      const under = (n: SceneNode) => (n.children || []).forEach((c) => {
-        newScene.nodes = detachReferencesTo(newScene.nodes, c.id);
-        under(c);
-      });
-      under(source);
     }
 
     set({ sceneGraph: newScene, extraSelectedIds: [], selectedNodeId: targetId });
