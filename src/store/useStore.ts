@@ -1,20 +1,12 @@
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
-import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, ReferenceImage } from '../types/scene';
-import { reconcileEdgeRounds } from '../utils/edgeRound';
-import { releaseFastenings } from '../utils/hardwareParts';
+import type { SceneGraph, SceneNode, ReferenceImage } from '../types/scene';
 import { hardwarePartActions, type HardwarePartActions } from './hardwarePartActions';
 import { extrusionActions, type ExtrusionActions } from './extrusionActions';
 import { clipboardActions, type ClipboardActions } from './clipboardActions';
-import type { DataMirror, ModelMirror } from '../types/sceneLayer';
-import { CSG_DEFAULT_SECTORS, sourcePositiveBounds, reconcileCuts, hasBooleanOps } from '../utils/csg';
-import { insetNegatives } from '../utils/scaleNode';
 import type { FacePatternTarget } from '../utils/facePatternPick';
 import type { CameraView } from '../utils/cameraViews';
-import { generateGearGeoms } from '../presets/presetScenes';
 import type { ConstraintBrokenEvent } from '../workers/physicsWorkerProtocol';
-import { getStickyRotation } from '../utils/geom';
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
 import { loadStock, saveStock, clampStock, type StockSize } from '../utils/stockSettings';
@@ -32,7 +24,7 @@ import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
 import { withoutDanglingReferences } from '../utils/danglingReferences';
 import { withConnectAnchorsFollowing } from '../utils/connectAnchors';
-import { cloneSceneGraph, findNode } from './sceneClone';
+import { cloneSceneGraph } from './sceneClone';
 import { bindStore } from './storeRef';
 
 // Moved out of this file into the modules above, and still imported from here.
@@ -44,17 +36,12 @@ export { endVoltLink, getPhysicsWorkerClient, setPhysicsFrameListener } from './
 export type { EdgeRoundSession } from './edgeRoundActions';
 export type { UndoRedoState } from './historyActions';
 export type { AddPlacement } from './addComponentActions';
-import {
-  isAllMeshNode, promoteMeshGeomsToDynamic, restoreCollisionWhenMadeMovable, mapVerts,
-  translateMeshGeoms, rotateMeshGeomsAbsolute,
-} from './meshGeomTransforms';
 import { userEditPending, castPrepBypass, refusedGraphs, keptGraphs, castPrepArmed, bodiesChanged } from './editGuard';
-import { type DeformedGeometry, detachReferencesTo } from './breakage';
+import type { DeformedGeometry } from './breakage';
 import { shapeParamActions, type ShapeParamActions } from './shapeParamActions';
-import { MUJOCO_SHIM, getPhysicsWorkerClient } from './physicsEngine';
+import { getPhysicsWorkerClient } from './physicsEngine';
 import { initialPreset, initialScene, initialFraming, snapForGridMm } from './sceneFraming';
 import { latticeActions, type LatticeActions } from './latticeActions';
-import { dropStaleColliders, rebuildAfterGeomEdit } from './geomEdits';
 import { sculptActions, type SculptActions } from './sculptActions';
 import { printSplitActions, type PrintSplitActions } from './printSplitActions';
 import { edgeRoundActions, type EdgeRoundActions } from './edgeRoundActions';
@@ -67,6 +54,8 @@ import { simulationActions, type SimulationActions } from './simulationActions';
 import { historyActions, type HistoryActions } from './historyActions';
 import { sceneSwapActions, type SceneSwapActions } from './sceneSwapActions';
 import { addComponentActions, type AddComponentActions } from './addComponentActions';
+import { geomActions, type GeomActions } from './geomActions';
+import { nodeActions, type NodeActions } from './nodeActions';
 
 /**
  * What is on the bench.
@@ -80,26 +69,7 @@ import { addComponentActions, type AddComponentActions } from './addComponentAct
 export type MachineTarget = 'fdm' | 'laser' | 'cnc';
 
 
-/** A node's own transform, as MJCF would apply it under its parent. */
-const localMatrixOf = (node: SceneNode): THREE.Matrix4 => {
-  const m = new THREE.Matrix4();
-  const q = node.quat
-    // MJCF quaternions are [w, x, y, z]; Three wants [x, y, z, w].
-    ? new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0])
-    : new THREE.Quaternion().setFromEuler(new THREE.Euler(
-        ((node.euler?.[0] ?? 0) * Math.PI) / 180,
-        ((node.euler?.[1] ?? 0) * Math.PI) / 180,
-        ((node.euler?.[2] ?? 0) * Math.PI) / 180,
-        'XYZ',
-      ));
-  return m.compose(
-    new THREE.Vector3(node.pos?.[0] ?? 0, node.pos?.[1] ?? 0, node.pos?.[2] ?? 0),
-    q,
-    new THREE.Vector3(1, 1, 1),
-  );
-};
-
-export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions, SculptActions, PrintSplitActions, EdgeRoundActions, CastPrepActions, CutActions, BreakageActions, PaintActions, BooleanActions, SimulationActions, HistoryActions, SceneSwapActions, AddComponentActions {
+export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions, SculptActions, PrintSplitActions, EdgeRoundActions, CastPrepActions, CutActions, BreakageActions, PaintActions, BooleanActions, SimulationActions, HistoryActions, SceneSwapActions, AddComponentActions, GeomActions, NodeActions {
   
   /**
    * Welds that have sheared off during this run, by weldKey().
@@ -386,28 +356,9 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    * them; `add` keeps what was selected already.
    */
   selectMany: (ids: string[], add: boolean) => void;
-  updateScene: (sceneGraph: SceneGraph, skipRecompile?: boolean) => void;
-  updateNodePos: (id: string, newPos: [number, number, number]) => void;
-  updateNodeGeom: (id: string, updates: Partial<SceneGeom>, geomIndex?: number) => void;
-  updateNodeJoint: (id: string, updates: Partial<SceneJoint>, jointIndex?: number) => void;
   rotateAroundCOM: boolean;
   setRotateAroundCOM: (val: boolean) => void;
-  updateNodeRotation: (id: string, axis: 0 | 1 | 2, deg: number, rotateAroundCOM?: boolean) => void;
-  updateNodeScript: (id: string, script: string) => void;
-  updateNode: (id: string, updates: Partial<SceneNode>) => void;
 
-  renameNode: (id: string, newName: string) => void;
-  updateNodeJointsList: (id: string, joints: SceneJoint[]) => void;
-  /**
-   * Lift a body out of its parent and onto the top level, keeping it where
-   * it looks like it is. MuJoCo allows a free joint only on a top-level
-   * body, so a nested body cannot be made 6-DOF without this first.
-   */
-  detachToTopLevel: (id: string) => boolean;
-  deleteNode: (id: string) => void;
-  /** Deletes several bodies as one undo step, and clears the selection they made up. */
-  deleteNodes: (ids: string[]) => void;
-  
   setDraggedNodeId: (id: string | null) => void;
   setDragTarget: (target: { x: number; y: number; z: number } | null) => void;
   setDragDistance: (distance: number) => void;
@@ -473,18 +424,6 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    */
   activeGeomIndex: number;
   setActiveGeomIndex: (index: number) => void;
-  updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
-  // --- CSG (boolean modifiers) ---
-  deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
-  /**
-   * Puts a scaled copy of a body's own shape inside it, marked as a hole.
-   *
-   * The shortest path from a solid to a hollow one. Factors are per-axis, and
-   * an axis above 1 is how the copy is made to pass right through — a cylinder
-   * with a [0.8, 0.8, 1.05] copy of itself subtracted is a pipe, where the same
-   * copy shrunk on all three would be a sealed cavity nobody can see.
-   */
-  insetNodeGeoms: (nodeId: string, factor: [number, number, number], pocket?: { axis: 0 | 1 | 2; side: 1 | -1 }) => void;
   incrementMcpActive: () => void;
   decrementMcpActive: () => void;
   resetMcpActive: () => void;
@@ -545,6 +484,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   ...historyActions({ set, get }),
   ...sceneSwapActions({ set, get }),
   ...addComponentActions({ set, get }),
+  ...geomActions({ set, get }),
+  ...nodeActions({ set, get }),
 
   voltLink: null,
   brokenConstraints: [],
@@ -721,542 +662,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     getPhysicsWorkerClient().setDrag(get().draggedNodeId, target);
   },
   setDragDistance: (distance) => set({ dragDistance: distance }),
-
-  updateScene: (newScene, skipRecompile) => {
-    get().prepareForDiscreteChange();
-    set({ sceneGraph: newScene });
-    if (!skipRecompile) {
-      get().recompile(newScene);
-    }
-  },
-  
-  renameNode: (id, newName) => {
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return false;
-      for (const node of nodes) {
-        if (node.id === id) {
-          node.name = newName;
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    traverse(newScene.nodes);
-    set({ sceneGraph: newScene });
-    get().recompile(newScene);
-  },
-  
-  updateNodePos: (id, newPos) => {
-    get().recordInteraction('node-pos');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return false; for (const node of nodes) {
-        if (node.id === id) {
-          if (isAllMeshNode(node)) {
-            // Mesh vertices are baked in world space — translate them directly
-            const [ox, oy, oz] = node.pos as number[];
-            const dx = newPos[0] - ox, dy = newPos[1] - oy, dz = newPos[2] - oz;
-            translateMeshGeoms(node, dx, dy, dz);
-            for (const g of node.geoms) {
-              if (g.baseVertices) {
-                g.baseVertices = mapVerts([...g.baseVertices], (x, y, z) => [x + dx, y + dy, z + dz]);
-              }
-            }
-          }
-          node.pos = newPos;
-          node.basePos = [...newPos];
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    traverse(newScene.nodes);
-    set({ sceneGraph: newScene });
-    get().recompile(newScene, undefined, false);
-  },
-
-  updateNodeRotation: (id, axis, deg, rotateAroundCOMOverride) => {
-    get().recordInteraction('node-rotation');
-    const rotateAroundCOM = rotateAroundCOMOverride ?? get().rotateAroundCOM ?? true;
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return false;
-      for (const node of nodes) {
-        if (node.id === id) {
-          const currentEuler = node.euler ? [...node.euler] : [0, 0, 0];
-          currentEuler[axis] = deg;
-          node.euler = currentEuler as [number, number, number];
-          delete node.quat;
-
-          const stickyEuler = currentEuler.map(a => getStickyRotation(a)) as [number, number, number];
-
-          if (isAllMeshNode(node)) {
-            rotateMeshGeomsAbsolute(node, stickyEuler, rotateAroundCOM);
-          } else {
-            if (!node.basePos && node.pos) {
-              node.basePos = [...node.pos];
-            }
-            if (!rotateAroundCOM && node.basePos) {
-              const radX = (stickyEuler[0] * Math.PI) / 180;
-              const radY = (stickyEuler[1] * Math.PI) / 180;
-              const radZ = (stickyEuler[2] * Math.PI) / 180;
-              const matX = new THREE.Matrix4().makeRotationX(radX);
-              const matY = new THREE.Matrix4().makeRotationY(radY);
-              const matZ = new THREE.Matrix4().makeRotationZ(radZ);
-              const rotMat = new THREE.Matrix4().multiplyMatrices(matZ, new THREE.Matrix4().multiplyMatrices(matY, matX));
-              const v = new THREE.Vector3(node.basePos[0], node.basePos[1], node.basePos[2]).applyMatrix4(rotMat);
-              node.pos = [v.x, v.y, v.z];
-            } else if (rotateAroundCOM && node.basePos) {
-              node.pos = [...node.basePos];
-            }
-          }
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    if (traverse(newScene.nodes)) {
-      set({ sceneGraph: newScene });
-      // Settled: a gizmo rotate commits all three axes in a row, and each one
-      // would otherwise be a rebuild of its own.
-      get().recompile(newScene, undefined, true, undefined, true);
-    }
-  },
-
-  updateNodeGeom: (id, updates, geomIndex) => {
-    get().recordInteraction('node-geom');
-    /*
-     * Whether this edit changes the shape, or only how it behaves on contact.
-     *
-     * `recompile`'s third argument does two things: it skips the 50ms debounce,
-     * and it rebuilds without carrying the simulation state over. Both are right
-     * for a change of geometry — the old state may not even be valid against the
-     * new model. Both are wrong for a material property: dragging the contact
-     * stiffness slider rebuilt MuJoCo on every pixel of travel and threw the
-     * world back to its start each time, which is what made those sliders feel
-     * like they were fighting the mouse.
-     */
-    const STRUCTURAL = ['size', 'vertices', 'faces', 'renderVertices', 'type', 'pos', 'euler', 'quat', 'csg'] as const;
-    const structural = STRUCTURAL.some(k => (updates as Record<string, unknown>)[k] !== undefined);
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return false; for (const node of nodes) {
-        if (node.id === id && node.geoms?.length > 0) {
-          if (id.includes('gear')) {
-            const centerGeom = node.geoms[0];
-            const currentRadius = centerGeom.size[0];
-            const currentTeeth = node.geoms.length - 1;
-            const currentColor = centerGeom.rgba || [0.5, 0.5, 0.5, 1];
-            const currentContype = centerGeom.contype !== undefined ? centerGeom.contype : 0;
-            const currentConaffinity = centerGeom.conaffinity !== undefined ? centerGeom.conaffinity : 0;
-            
-            let newRadius = currentRadius;
-            if (updates.size && Array.isArray(updates.size)) {
-              newRadius = updates.size[0];
-            }
-            
-            let newColor = currentColor;
-            if (updates.rgba) {
-              newColor = updates.rgba;
-            }
-
-            let newContype = currentContype;
-            if (updates.contype !== undefined) {
-              newContype = updates.contype;
-            }
-
-            let newConaffinity = currentConaffinity;
-            if (updates.conaffinity !== undefined) {
-              newConaffinity = updates.conaffinity;
-            }
-            
-            const gearNum = parseInt(id.replace(/\D/g, '')) || 1;
-            const isSecondGear = gearNum % 2 === 0;
-            
-            node.geoms = generateGearGeoms(id, newRadius, currentTeeth, newColor, isSecondGear, newContype, newConaffinity);
-          } else {
-            let targetGeom = node.geoms[0];
-            if (geomIndex !== undefined && geomIndex >= 0 && geomIndex < node.geoms.length) {
-              targetGeom = node.geoms[geomIndex];
-            } else {
-              const mainGeom = node.geoms.find((g: SceneGeom) => g.type === 'sphere' || g.type === 'box' || g.type === 'cylinder');
-              if (mainGeom) {
-                targetGeom = mainGeom;
-              }
-            }
-            if (updates.fromto && targetGeom.fromto) {
-              const oldFromto = targetGeom.fromto;
-              const newFromto = updates.fromto;
-              const oldLen = Math.sqrt((oldFromto[3]-oldFromto[0])**2 + (oldFromto[4]-oldFromto[1])**2 + (oldFromto[5]-oldFromto[2])**2) || 1.0;
-              const newLen = Math.sqrt((newFromto[3]-newFromto[0])**2 + (newFromto[4]-newFromto[1])**2 + (newFromto[5]-newFromto[2])**2) || 1.0;
-              const ratio = newLen / oldLen;
-              if (node.children) {
-                node.children.forEach((child: SceneNode) => {
-                  child.pos = [child.pos[0] * ratio, child.pos[1] * ratio, child.pos[2] * ratio];
-                });
-              }
-            }
-            const boundsBefore = structural && node.edgeRounds ? sourcePositiveBounds(node) : null;
-            Object.assign(targetGeom, updates);
-            if (updates.vertices || updates.faces || updates.renderVertices) dropStaleColliders(node);
-            // Rounded edges are stored as points, so they move with the shape.
-            if (boundsBefore) reconcileEdgeRounds(node, boundsBefore, sourcePositiveBounds(node));
-            /*
-              A cut is stated as a face and a depth, so resizing or moving the
-              shape it cuts into has to move the cut with it — a hole 10 mm into
-              the top of a block is still 10 mm into the top when the block gets
-              taller. Only geoms carrying that intent are touched; a negative
-              placed by hand keeps its own numbers. See reconcileCuts.
-            */
-            if (structural) reconcileCuts(node);
-          }
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    traverse(newScene.nodes);
-    set({ sceneGraph: newScene });
-    get().recompile(newScene, undefined, structural, undefined, structural);
-  },
-
-  // `jointIndex` defaults to 0, which is what every caller meant before it
-  // existed — the inspector only ever shows one joint. A body with several (a
-  // gimbal, say) needs to be able to say which.
-  updateNodeJoint: (id, updates, jointIndex = 0) => {
-    get().recordInteraction('node-joint');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return false; for (const node of nodes) {
-        if (node.id === id && node.joints?.length > 0) {
-          const target = node.joints[jointIndex] ?? node.joints[0];
-          Object.assign(target, updates);
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    traverse(newScene.nodes);
-    set({ sceneGraph: newScene });
-    get().recompile();
-  },
-
-  updateNodeScript: (id, script) => {
-    get().recordInteraction('node-script');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return false;
-      for (const node of nodes) {
-        if (node.id === id) {
-          node.script = script;
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    traverse(newScene.nodes);
-    set({ sceneGraph: newScene });
-    // Note: Live updates do not force model recompiles to support hot-editing of
-    // control gains! The worker keeps its own copy of the scene for script
-    // execution, so it needs telling directly rather than via a recompile.
-    getPhysicsWorkerClient().updateScript(id, script);
-  },
-
-  updateNodeScad: (id, scad, compiledData, skipRecompile) => {
-    get().recordInteraction('node-scad');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return false;
-      for (const node of nodes) {
-        if (node.id === id || node.name === id) {
-          node.scad = scad;
-          if (!node.geoms) {
-            node.geoms = [];
-          }
-          let meshGeom = node.geoms.find((g: SceneGeom) => g.type === 'mesh');
-          if (!meshGeom && node.geoms.length > 0) {
-            meshGeom = node.geoms[0];
-          }
-          const nodeRgba = (node as { rgba?: number[] }).rgba;
-          // number[], as SceneGeom.rgba is: a tuple here made the `as SceneGeom`
-          // below an assertion between unrelated types (TS2352).
-          const fallbackRgba: number[] =
-            Array.isArray(nodeRgba) && nodeRgba.length >= 3
-              ? [nodeRgba[0], nodeRgba[1], nodeRgba[2], nodeRgba[3] ?? 1]
-              : [0.3, 0.6, 0.9, 1];
-          if (!meshGeom) {
-            // No `size`: a mesh geom's is unused, the vertices are written a
-            // few lines below, and putting a number here would put one in the
-            // scene that has never been there.
-            meshGeom = {
-              id: `geom_${Math.random().toString(36).substring(2, 8)}`,
-              name: `${node.name || id}_mesh`,
-              type: 'mesh',
-              dynamic: true,
-              rgba: fallbackRgba,
-              mass: 1
-            } as SceneGeom;
-            node.geoms.push(meshGeom);
-          } else if (Array.isArray(nodeRgba) && nodeRgba.length >= 3 && !meshGeom.rgba) {
-            meshGeom.rgba = fallbackRgba;
-          }
-          meshGeom.type = 'mesh';
-          meshGeom.dynamic = true;
-          meshGeom.vertices = compiledData.vertices;
-          meshGeom.faces = compiledData.faces;
-          meshGeom.renderVertices = compiledData.renderVertices;
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    if (traverse(newScene.nodes)) {
-      set({ sceneGraph: newScene });
-      // Bulk callers (e.g. compiling several scad bodies in sequence) pass
-      // skipRecompile: firing a recompile per node here creates overlapping,
-      // unawaited MJCF/WASM builds that race - a stale one (compiled before a
-      // later node's mesh existed) can finish last and silently overwrite the
-      // correct final state. Bulk callers run a single recompile after all
-      // nodes are updated instead.
-      if (!skipRecompile) {
-        get().recompile(newScene, id, true);
-      }
-    }
-  },
-
-  // --- CSG (boolean modifiers) ---------------------------------------------
-  // A negative geom is an ordinary primitive with csg:'difference' — it's the
-  // node's csgEnabled flag plus that marker that turn the body into a boolean.
-  // Shapes get onto a body the ordinary ways (drag-in, presets, MCP); flipping
-  // one to 'difference' is what makes it a hole.
-  deleteNodeGeom: (nodeId, geomIndex) => {
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const node = findNode(newScene.nodes, nodeId);
-    if (!node || !node.geoms || geomIndex < 0 || geomIndex >= node.geoms.length) return;
-    // A piece of a hardware feature goes with the rest of it: half a nut trap
-    // is a hole nobody asked for.
-    const group = node.geoms[geomIndex].hardware?.group;
-    node.geoms = node.geoms.filter((g: SceneGeom, i: number) => i !== geomIndex && !(group && g.hardware?.group === group));
-    // Losing the last boolean operator leaves an ordinary compound body; drop
-    // the derived mesh with it so the primitives come back into view.
-    if (node.csgEnabled && !hasBooleanOps(node)) {
-      node.geoms = node.geoms.filter((g: SceneGeom) => !g.csgDerived);
-      node.csgEnabled = false;
-      delete node.csgHash;
-    }
-    set({ sceneGraph: newScene });
-    rebuildAfterGeomEdit(get, newScene, nodeId);
-  },
-
-  insetNodeGeoms: (nodeId, factor, pocket) => {
-    const target = findNode(get().sceneGraph.nodes, nodeId);
-    if (!target || insetNegatives(target, factor, pocket).length === 0) return;
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const node = findNode(newScene.nodes, nodeId);
-    if (!node) return;
-    const copies = insetNegatives(node, factor, pocket);
-    if (copies.length === 0) return;
-
-    node.geoms = [...node.geoms, ...copies];
-    node.csgEnabled = true;
-    if (node.csgCollision === undefined) node.csgCollision = 'auto';
-    if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
-
-    set({ sceneGraph: newScene });
-    rebuildAfterGeomEdit(get, newScene, nodeId);
-  },
-
-  updateNode: (id, updates) => {
-    get().recordInteraction('node');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]): boolean => {
-      for (const node of nodes) {
-        if (node.id === id) {
-          const wasJointless = !(node.joints?.length > 0);
-          Object.assign(node, updates);
-          // Body-level rgba is a shorthand for colouring the body's geoms:
-          // SceneNode has no colour of its own in MJCF or the renderer, so
-          // storing it on the node alone left SCAD and primitive bodies lilac.
-          const rawRgba = (updates as { rgba?: number[] }).rgba;
-          if (updates.geoms === undefined && Array.isArray(rawRgba) && rawRgba.length >= 3 && node.geoms?.length) {
-            for (const geom of node.geoms) {
-              if (geom.csg === 'difference') continue;
-              geom.rgba = [rawRgba[0] ?? 0.8, rawRgba[1] ?? 0.8, rawRgba[2] ?? 0.8, rawRgba[3] ?? geom.rgba?.[3] ?? 1];
-            }
-          }
-          // Same trap as updateNodeJointsList: an update that hands this node
-          // its first joint (e.g. an MCP physics_update_object call, not just
-          // the properties panel) needs its mesh geoms promoted too, or the
-          // body simulates and drags correctly while its render stays frozen.
-          if (updates.joints !== undefined && node.joints?.length > 0) {
-            promoteMeshGeomsToDynamic(node);
-            if (wasJointless) restoreCollisionWhenMadeMovable(node);
-          }
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    if (traverse(newScene.nodes)) {
-      set({ sceneGraph: newScene });
-      // Recompile so aerodynamics flag propagates to physics loop
-      get().recompile(newScene, undefined, false);
-    }
-  },
-
-  /*
-   * "free joint can only be used on top level" is MuJoCo refusing the whole
-   * model, not a warning — so before this existed, setting a nested body to
-   * 6-DOF left the last good model running while the document said something
-   * else, and the body simply stopped responding.
-   *
-   * The body keeps the pose it appears to have. Where the sim is live that is
-   * MuJoCo's own xpos/xmat, which is where the user can see it; otherwise the
-   * authored chain is composed down from the root, which is where the document
-   * says it is. Its own children come with it and need no adjustment, since
-   * they are positioned relative to this body either way.
-   */
-  detachToTopLevel: (id) => {
-    const scene = cloneSceneGraph(get().sceneGraph);
-
-    let parent: SceneNode | null = null;
-    let node: SceneNode | null = null;
-    const find = (nodes: SceneNode[], above: SceneNode | null): boolean => {
-      for (const n of nodes) {
-        if (n.id === id) { node = n; parent = above; return true; }
-        if (find(n.children || [], n)) return true;
-      }
-      return false;
-    };
-    find(scene.nodes, null);
-    if (!node || !parent) return false;   // missing, or already top level
-    const found: SceneNode = node;
-    const from: SceneNode = parent;
-
-    // Where it is now, in world terms.
-    const world = new THREE.Matrix4();
-    const model = get().model as ModelMirror | null;
-    const data = get().data as DataMirror | null;
-    const bodyId = MUJOCO_SHIM.mj_name2id(model, 'body', id);
-    if (model && data && bodyId >= 0) {
-      const o = bodyId * 3, m = bodyId * 9;
-      // xmat is row-major body-to-world.
-      world.set(
-        data.xmat[m], data.xmat[m + 1], data.xmat[m + 2], data.xpos[o],
-        data.xmat[m + 3], data.xmat[m + 4], data.xmat[m + 5], data.xpos[o + 1],
-        data.xmat[m + 6], data.xmat[m + 7], data.xmat[m + 8], data.xpos[o + 2],
-        0, 0, 0, 1,
-      );
-    } else {
-      // No live model: compose the authored chain instead.
-      const chain: SceneNode[] = [];
-      const walk = (nodes: SceneNode[], trail: SceneNode[]): boolean => {
-        for (const n of nodes) {
-          const next = [...trail, n];
-          if (n.id === id) { chain.push(...next); return true; }
-          if (walk(n.children || [], next)) return true;
-        }
-        return false;
-      };
-      walk(scene.nodes, []);
-      for (const link of chain) world.multiply(localMatrixOf(link));
-    }
-
-    const pos = new THREE.Vector3();
-    const quat = new THREE.Quaternion();
-    world.decompose(pos, quat, new THREE.Vector3());
-
-    from.children = (from.children || []).filter((c) => c.id !== id);
-    found.pos = [pos.x, pos.y, pos.z];
-    found.basePos = [pos.x, pos.y, pos.z];
-    // mjcf.ts writes no eulerseq, so MuJoCo reads euler as its default
-    // intrinsic xyz — Three's 'XYZ'. Degrees, as everything authored here is.
-    const e = new THREE.Euler().setFromQuaternion(quat, 'XYZ');
-    const deg = (r: number) => (r * 180) / Math.PI;
-    found.euler = [deg(e.x), deg(e.y), deg(e.z)];
-    delete found.quat;
-    scene.nodes = [...scene.nodes, found];
-
-    set({ sceneGraph: scene });
-    get().recompile(scene, id, false, true);
-    return true;
-  },
-
-  updateNodeJointsList: (id, joints) => {
-    get().recordInteraction('node-joints-list');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: SceneNode[]): boolean => {
-      if (!nodes) return false;
-      for (const node of nodes) {
-        if (node.id === id) {
-          const wasJointless = !(node.joints?.length > 0);
-          node.joints = joints;
-          if (joints.length > 0) {
-            promoteMeshGeomsToDynamic(node);
-            if (wasJointless) restoreCollisionWhenMadeMovable(node);
-          }
-          return true;
-        }
-        if (traverse(node.children)) return true;
-      }
-      return false;
-    };
-    if (traverse(newScene.nodes)) {
-      get().recompile(newScene, id);
-    }
-  },
-
-  deleteNode: (id) => get().deleteNodes([id]),
-
-  // Shift-click builds a selection of several bodies, and Delete used to take
-  // only the primary one, leaving the rest highlighted and still listed in the
-  // Combine card.
-  deleteNodes: (ids) => {
-    const doomed = new Set(ids);
-    if (doomed.size === 0) return;
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    // A screw taken out lets go of what it held.
-    releaseFastenings(newScene, doomed);
-    let removed = false;
-    const traverseAndRemove = (nodes: SceneNode[]) => {
-      if (!nodes) return;
-      for (let i = nodes.length - 1; i >= 0; i--) {
-        if (doomed.has(nodes[i].id)) {
-          nodes.splice(i, 1);
-          removed = true;
-        } else {
-          traverseAndRemove(nodes[i].children);
-        }
-      }
-    };
-    traverseAndRemove(newScene.nodes);
-    if (removed) {
-      // Nothing may go on naming what is gone — a bracket's weld to a deleted
-      // profile, a pen head welded to a deleted rail's carriage — or the
-      // whole scene stops compiling.
-      const gone: string[] = [];
-      const collect = (nodes: SceneNode[]) => {
-        for (const n of nodes) { if (doomed.has(n.id)) { const all = (m: SceneNode) => { gone.push(m.id); (m.children || []).forEach(all); }; all(n); } else collect(n.children || []); }
-      };
-      collect(get().sceneGraph.nodes);
-      for (const id of gone) newScene.nodes = detachReferencesTo(newScene.nodes, id);
-      set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [] });
-      get().recompile(newScene, null);
-    }
-  },
 
 })));
 bindStore(useStore);
