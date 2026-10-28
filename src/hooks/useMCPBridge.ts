@@ -3442,9 +3442,11 @@ export function useMCPBridge() {
         }
 
         case 'ADD_HARDWARE': {
-          const { kind, size, lengthMm, washer, into, group, at, fixTo, id: existing, between } = msg as Msg<{
+          // `partId`, not `id`: `id` is the request's own, so a part named that way
+          // was never seen, and every call read the request id as a part's.
+          const { kind, size, lengthMm, washer, into, group, at, fixTo, partId: existing, between } = msg as Msg<{
             kind: string; size?: string | number; lengthMm?: number; washer?: boolean; into?: string; group?: string; at?: number[];
-            fixTo?: string; id?: string; between?: string[];
+            fixTo?: string; partId?: string; between?: string[];
           }>;
           // A part already in the scene: only fix a body to its moving piece.
           if (existing) {
