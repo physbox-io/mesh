@@ -39,4 +39,13 @@ describe('a weld holds the part where it is', () => {
     expect(compileToMJCF(scene)).toMatch(/<weld [^>]*body1="knob" body2="drawer" anchor="0\.000000 -0\.165000 0\.000000"/);
     expect(await drop(scene, 'knob')).toBeLessThan(2);
   }, 60000);
+
+  it('holds a block welded to a fixed body', async () => {
+    // Drooped 10 mm and turned 20 degrees, held at the fixed body's origin.
+    const scene = { nodes: [
+      { ...body('anchor', [0, 0, 0.05], [0.005, 0.005, 0.005], 0.01), joints: [] },
+      body('hover', [0.03, 0, 0.05], [0.005, 0.005, 0.005], 0.00155, { weldTargetId: 'anchor' }),
+    ] } as SceneGraph;
+    expect(await drop(scene, 'hover')).toBeLessThan(1);
+  }, 60000);
 });
