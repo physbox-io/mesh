@@ -2,9 +2,8 @@ import type { ScriptStateMap } from '../utils/scriptState';
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep, HardwareCutKind, ReferenceImage } from '../types/scene';
-import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, type DraftParams } from '../utils/castPrep';
-import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, HardwareCutKind, ReferenceImage } from '../types/scene';
+import { hasEdgeRounds, reconcileEdgeRounds } from '../utils/edgeRound';
 import type { GeomThreadSpec } from '../utils/metricThreads';
 import { hardwareCutGeoms, hardwareCutProblem, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec } from '../utils/hardwareCuts';
 import { releaseFastenings, reseatHardware } from '../utils/hardwareParts';
@@ -75,6 +74,7 @@ export { restoreCollisionWhenMadeMovable, scaleMeshGeoms } from './meshGeomTrans
 export { castPrepArmed } from './editGuard';
 export { applyShatterPieces, effectiveSceneGraph, type DeformedGeometry } from './breakage';
 export { endVoltLink, getPhysicsWorkerClient, setPhysicsFrameListener } from './physicsEngine';
+export type { EdgeRoundSession } from './edgeRoundActions';
 import {
   isAllMeshNode, toRenderVertices, promoteMeshGeomsToDynamic, restoreCollisionWhenMadeMovable,
   promoteJointedMeshGeomsDeep, mapVerts, translateMeshGeoms, rotateMeshGeomsAbsolute,
@@ -96,12 +96,11 @@ import {
 } from './physicsEngine';
 import { initialPreset, initialScene, framingPatch, initialFraming, snapForGridMm } from './sceneFraming';
 import { latticeActions, type LatticeActions } from './latticeActions';
-import {
-  dropStaleColliders, rebuildAfterGeomEdit, rebuildBooleansAfterRestore, writeEdgeRounds,
-  setNodeEdgeRounds, settleBooleanState,
-} from './geomEdits';
+import { dropStaleColliders, rebuildAfterGeomEdit, rebuildBooleansAfterRestore, settleBooleanState } from './geomEdits';
 import { sculptActions, type SculptActions } from './sculptActions';
 import { printSplitActions, type PrintSplitActions } from './printSplitActions';
+import { edgeRoundActions, type EdgeRoundActions } from './edgeRoundActions';
+import { castPrepActions, type CastPrepActions } from './castPrepActions';
 
 /**
  * What is on the bench.
@@ -243,15 +242,6 @@ function cutSpotFromCamera(node: SceneNode): CutSpot | null {
   }
 }
 
-/** A session's roundings: the base, with its draft put in. */
-function draftRounds(session: EdgeRoundSession): EdgeRoundFeature[] {
-  return withRoundFeature(
-    session.base,
-    { mode: session.mode, size: session.size, edges: session.picked },
-    session.editIndex,
-  );
-}
-
 /**
  * Where a new cut goes, in order of how much the app actually knows: the spot
  * handed in; the last surface picked on this body — the face selected in the
@@ -379,18 +369,6 @@ function latticeAfterUndo(state: UndoRedoState) {
   return { latticeNodeId: null, latticeStats: null, latticeSelection: null, cutSpot: null };
 }
 
-export interface EdgeRoundSession {
-  nodeId: string;
-  /** The body's roundings when the session opened: what Cancel puts back. */
-  base: EdgeRoundFeature[];
-  /** The rounding being changed, or null for a new one. */
-  editIndex: number | null;
-  mode: 'fillet' | 'chamfer';
-  /** Metres. */
-  size: number;
-  picked: RoundEdge[];
-}
-
 /**
  * How addComponent places a part. By default from its own size: at the top
  * level it stands on the floor at the given x and y, clear of other bodies;
@@ -408,7 +386,7 @@ const PALETTE_CURVE_POINTS = DEFAULT_CURVE_POINTS.map((p) => p.map((v) => v * 0.
 const PALETTE_CURVE_WIDTH = DEFAULT_CURVE_WIDTH * 0.1;
 const PALETTE_CURVE_THICKNESS = DEFAULT_CURVE_THICKNESS * 0.1;
 
-export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions, SculptActions, PrintSplitActions {
+export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions, SculptActions, PrintSplitActions, EdgeRoundActions, CastPrepActions {
   mujoco: typeof MUJOCO_SHIM | null;
   model: ModelMirror | null;
   data: DataMirror | null;
@@ -810,52 +788,6 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    */
   setReferenceImages: (images: ReferenceImage[], recordUndo?: boolean) => void;
 
-  // --- Rounding edges ------------------------------------------------------
-  //
-  // A fillet or chamfer is a feature on the body (node.edgeRounds); this is
-  // the tool that makes one. While a session is open its draft is written
-  // straight onto the body, so the real boolean shows the result as the size
-  // is dragged, and only Apply leaves an undo step. See utils/edgeRound.ts.
-  edgeRoundSession: EdgeRoundSession | null;
-  /** Open the tool on a body — on one of its roundings, to change which edges it has. */
-  startEdgeRound: (nodeId: string, editIndex?: number) => void;
-  updateEdgeRoundDraft: (patch: Partial<Pick<EdgeRoundSession, 'mode' | 'size' | 'picked'>>) => void;
-  applyEdgeRound: () => void;
-  cancelEdgeRound: () => void;
-  /** Change a rounding's size or kind from the inspector. */
-  setEdgeRoundFeature: (nodeId: string, index: number, patch: Partial<Pick<EdgeRoundFeature, 'mode' | 'size'>>) => void;
-  removeEdgeRoundFeature: (nodeId: string, index: number) => void;
-  /** Round edges in one step, for agents: no session, one undo entry. */
-  roundEdges: (nodeId: string, feature: EdgeRoundFeature) => void;
-  /** Take the rounding off these edges, whichever feature has them. */
-  unroundEdges: (nodeId: string, edges: RoundEdge[]) => void;
-  /** The compiler found some rounded edges gone from the part: keep the rest, and say how many went. */
-  dropLostEdgeRounds: (nodeId: string, features: EdgeRoundFeature[], lost: number) => void;
-
-  // --- Prepare for casting (utils/castPrep.ts, driven by castPrepRunner) ---
-  /** What the running prep is doing, for the modal; null when none is running. */
-  castPrepBusy: string | null;
-  setCastPrepBusy: (busy: string | null) => void;
-  /** The guard modal: an edit was turned away because draft is baked in. */
-  castPrepGuardOpen: boolean;
-  /** Counts edits the guard turned away, so a caller can tell its own was one. */
-  castPrepBlocked: number;
-  closeCastPrepGuard: () => void;
-  /** Starts prep: one undo step for all of it, and the originals on the graph. */
-  beginCastPrep: (prep: CastPrep) => void;
-  /** Puts prep's roundings on, no undo step of its own. The caller compiles them. */
-  writeCastPrepEdges: (features: Record<string, EdgeRoundFeature[]>) => void;
-  /** Bodies whose roundings would not compile: back to how they were, still in prep for draft. */
-  revertCastPrepEdges: (failed: { id: string; reason: string }[]) => void;
-  /** Bakes draft into every prepped body. */
-  bakeCastPrepDraft: (params: DraftParams) => void;
-  /** Records what prep did, and fingerprints each body as prep left it. */
-  finishCastPrep: (patch: Partial<Pick<CastPrep, 'edges' | 'sharpEdges'>>) => void;
-  /** Switches prep off: each body nobody has changed since gets its originals back. */
-  clearCastPrep: () => { restored: string[]; kept: { id: string; name: string }[] };
-  /** Keeps the prepped shapes as the model, and forgets the originals. */
-  bakeCastPrep: () => void;
-
   // --- Lattice modelling ---------------------------------------------------
   //
   // The state here is the state of the TOOL, not of the shape: the shape lives
@@ -1104,6 +1036,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   ...latticeActions({ set, get }),
   ...sculptActions({ set, get }),
   ...printSplitActions({ set, get }),
+  ...edgeRoundActions({ set, get }),
+  ...castPrepActions({ set, get }),
   mujoco: null,
   model: null,
   data: null,
@@ -2046,177 +1980,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
   measureMode: null,
 
-  edgeRoundSession: null,
-  startEdgeRound: (nodeId, editIndex) => {
-    const open = get().edgeRoundSession;
-    if (open) get().cancelEdgeRound();
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    if (!node) return;
-    const base = node.edgeRounds ?? [];
-    const editing = editIndex !== undefined ? base[editIndex] : undefined;
-    set({
-      edgeRoundSession: {
-        nodeId,
-        base,
-        editIndex: editing ? editIndex! : null,
-        mode: editing?.mode ?? 'fillet',
-        size: editing?.size ?? 0,
-        picked: editing ? [...editing.edges] : [],
-      },
-      measureMode: null,
-    });
-  },
-  updateEdgeRoundDraft: (patch) => {
-    const session = get().edgeRoundSession;
-    if (!session) return;
-    const next = { ...session, ...patch };
-    set({ edgeRoundSession: next });
-    writeEdgeRounds(get, set, next.nodeId, draftRounds(next));
-  },
-  applyEdgeRound: () => {
-    const session = get().edgeRoundSession;
-    if (!session) return;
-    set({ edgeRoundSession: null });
-    // One undo step for the whole session: the snapshot is taken of the body as
-    // it was before the draft, then the result goes on top of it.
-    writeEdgeRounds(get, set, session.nodeId, session.base, false);
-    get().prepareForDiscreteChange();
-    writeEdgeRounds(get, set, session.nodeId, draftRounds(session));
-  },
-  cancelEdgeRound: () => {
-    const session = get().edgeRoundSession;
-    if (!session) return;
-    set({ edgeRoundSession: null });
-    writeEdgeRounds(get, set, session.nodeId, session.base);
-  },
-  setEdgeRoundFeature: (nodeId, index, patch) => {
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    const feature = node?.edgeRounds?.[index];
-    if (!feature) return;
-    get().recordInteraction('edge-round');
-    const features = [...node!.edgeRounds!];
-    features[index] = { ...feature, ...patch };
-    writeEdgeRounds(get, set, nodeId, features);
-  },
-  removeEdgeRoundFeature: (nodeId, index) => {
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    if (!node?.edgeRounds?.[index]) return;
-    get().prepareForDiscreteChange();
-    writeEdgeRounds(get, set, nodeId, node.edgeRounds.filter((_, i) => i !== index));
-  },
-  roundEdges: (nodeId, feature) => {
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    if (!node) return;
-    get().prepareForDiscreteChange();
-    writeEdgeRounds(get, set, nodeId, withRoundFeature(node.edgeRounds, feature, null));
-  },
-  dropLostEdgeRounds: (nodeId, features, lost) => {
-    // Not an undo step of its own: it is the consequence of the edit that
-    // changed the shape, and undoing that edit brings the edges back.
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const node = findNode(newScene.nodes, nodeId);
-    if (!node) return;
-    if (features.length > 0) node.edgeRounds = features; else delete node.edgeRounds;
-    node.edgeRoundsLost = (node.edgeRoundsLost ?? 0) + lost;
-    if (!hasBooleanOps(node) && node.csgEnabled) {
-      node.csgEnabled = false;
-      node.geoms = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
-      delete node.csgHash;
-    }
-    set({ sceneGraph: newScene });
-    if (!node.csgEnabled) get().recompile(newScene, nodeId, false);
-  },
-  unroundEdges: (nodeId, edges) => {
-    const node = findNode(get().sceneGraph.nodes, nodeId);
-    if (!node?.edgeRounds) return;
-    get().prepareForDiscreteChange();
-    writeEdgeRounds(get, set, nodeId, withoutEdges(node.edgeRounds, edges));
-  },
-
-  castPrepBusy: null,
-  setCastPrepBusy: (busy) => set({ castPrepBusy: busy }),
-  castPrepGuardOpen: false,
-  castPrepBlocked: 0,
-  closeCastPrepGuard: () => set({ castPrepGuardOpen: false }),
-  beginCastPrep: (prep) => {
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    newScene.castPrep = prep;
-    set({ sceneGraph: newScene });
-  },
-  writeCastPrepEdges: (features) => {
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    for (const [id, list] of Object.entries(features)) {
-      const node = findNode(newScene.nodes, id);
-      if (node) setNodeEdgeRounds(node, list);
-    }
-    set({ sceneGraph: newScene });
-  },
-  revertCastPrepEdges: (failed) => {
-    const sg = get().sceneGraph;
-    if (!sg.castPrep || failed.length === 0) return;
-    const newScene = cloneSceneGraph(sg);
-    const prep = copyPrep(sg.castPrep);
-    for (const { id, reason } of failed) {
-      const node = findNode(newScene.nodes, id);
-      const entry = prep.originals[id];
-      if (!node || !entry) continue;
-      restoreShape(node, entry.shape);
-      prep.skipped.push({ nodeId: id, name: node.name, reason });
-    }
-    newScene.castPrep = prep;
-    set({ sceneGraph: newScene });
-  },
-  bakeCastPrepDraft: (params) => {
-    const sg = get().sceneGraph;
-    if (!sg.castPrep) return;
-    const newScene = cloneSceneGraph(sg);
-    const prep = copyPrep(sg.castPrep);
-    bakeDraftInto(newScene, prep, params);
-    prep.draftDeg = params.deg;
-    prep.draftMode = params.mode;
-    prep.partingZ = params.partingZ;
-    newScene.castPrep = prep;
-    set({ sceneGraph: newScene });
-    get().recompile(newScene, undefined, true);
-  },
-  finishCastPrep: (patch) => {
-    const sg = get().sceneGraph;
-    if (!sg.castPrep) return;
-    const newScene = cloneSceneGraph(sg);
-    const prep = { ...copyPrep(sg.castPrep), ...patch };
-    for (const [id, entry] of Object.entries(prep.originals)) {
-      const node = findNode(newScene.nodes, id);
-      if (node) entry.signature = shapeSignature(node);
-    }
-    newScene.castPrep = prep;
-    set({ sceneGraph: newScene });
-  },
-  clearCastPrep: () => withCastPrepBypass(() => {
-    const sg = get().sceneGraph;
-    if (!sg.castPrep) return { restored: [], kept: [] };
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(sg);
-    const result = unprepScene(newScene);
-    set({ sceneGraph: newScene, castPrepGuardOpen: false });
-    get().recompile(newScene, undefined, true);
-    // A restored boolean comes back with the mesh it had; one whose mesh the
-    // compiler since replaced is rebuilt here rather than left to chance.
-    rebuildBooleansAfterRestore();
-    return result;
-  }),
-  bakeCastPrep: () => withCastPrepBypass(() => {
-    const sg = get().sceneGraph;
-    if (!sg.castPrep) return;
-    // Not an undo step of its own. Baking changes no shape, only forgets the
-    // originals, so a step for it undid to a scene that looked identical and
-    // took a second Ctrl+Z to see anything happen. One undo now goes straight
-    // back to before the prep, which is the step the person can see.
-    get().flushPendingUndo();
-    const newScene = cloneSceneGraph(sg);
-    delete newScene.castPrep;
-    set({ sceneGraph: newScene, castPrepGuardOpen: false });
-  }),
   setMeasureMode: (mode) => set((state) => (state.measureMode === mode ? {} : { measureMode: mode })),
   gizmoMode: 'translate',
   setGizmoMode: (mode) => set((state) => (state.gizmoMode === mode ? {} : { gizmoMode: mode })),
