@@ -72,6 +72,7 @@ import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
 import { withoutDanglingReferences } from '../utils/danglingReferences';
 import { withConnectAnchorsFollowing } from '../utils/connectAnchors';
+import { pieceHolding } from '../utils/splitPieces';
 import { useDialogs } from './dialogStore';
 import { downloadSceneRescue, allowUnload } from '../utils/rescueScene';
 import { envelope } from '../utils/coSimLink';
@@ -3761,10 +3762,13 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     installPieces(first, firstCentered.sec);
 
     const ids = [nodeId];
+    const pieceNodes: SceneNode[] = [first];
+    const offsets: [number, number, number][] = [firstCentered.offset];
     sections.slice(1).forEach((rawSec, k) => {
       const { sec, offset } = recenterSection(rawSec);
       const id = `split_${Math.random().toString(36).substring(2, 10)}`;
       ids.push(id);
+      offsets.push(offset);
       // Named for the part it came from; uniqueNames settles any clash.
       const name = opts.names?.[k + 1] || `${baseName}_part${k + 2}`;
       const { children: _children, geoms: _geoms, ...rest } = first;
@@ -3789,8 +3793,47 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         children: [],
       };
       installPieces(section, sec);
+      pieceNodes.push(section);
       siblings.splice(at + 1 + k, 0, section);
     });
+
+    /*
+      Everything that hung off the part, or was welded or pinned to it, used to
+      stay with the first piece, which keeps the part's id: a screw seated in
+      the other half rode along with the wrong one. Each goes to the piece it
+      is in (or nearest), placed where it was. Points are in the part's frame,
+      which is the frame the sections are in, except where a rotation was baked
+      into the mesh -- there the old behaviour stands.
+    */
+    if (!baked) {
+      const children = first.children || [];
+      first.children = [];
+      for (const child of children) {
+        const p = child.pos ?? [0, 0, 0];
+        const k = sections.length > 1 ? pieceHolding(sections, p) : 0;
+        child.pos = [p[0] - offsets[k][0], p[1] - offsets[k][1], p[2] - offsets[k][2]];
+        pieceNodes[k].children = [...(pieceNodes[k].children || []), child];
+      }
+      const partWorld = nodeWorldMatrix(get().sceneGraph.nodes, nodeId);
+      if (partWorld && sections.length > 1) {
+        const intoPart = partWorld.clone().invert();
+        const retarget = (list: SceneNode[]) => {
+          for (const n of list) {
+            if ((n.weldTargetId === nodeId || n.connectTargetId === nodeId) && !ids.includes(n.id)) {
+              const world = nodeWorldMatrix(get().sceneGraph.nodes, n.id);
+              if (world) {
+                const p = new THREE.Vector3().setFromMatrixPosition(world).applyMatrix4(intoPart);
+                const k = pieceHolding(sections, [p.x, p.y, p.z]);
+                if (n.weldTargetId === nodeId) n.weldTargetId = ids[k];
+                if (n.connectTargetId === nodeId) n.connectTargetId = ids[k];
+              }
+            }
+            retarget(n.children || []);
+          }
+        };
+        retarget(newScene.nodes);
+      }
+    }
     set({ sceneGraph: newScene, extraSelectedIds: [] });
     get().recompile(newScene, undefined, true);
     return ids;
