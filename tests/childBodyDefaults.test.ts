@@ -18,6 +18,12 @@ describe('fillBodyDefaults pos', () => {
     expect(node.children[0].pos).toEqual([0, 0, 0]);
   });
 
+  it('sits a fixed top-level body where it is drawn, not a metre up', () => {
+    const node = fillBodyDefaults({ name: 'wall', static: true, geoms: [{ type: 'box', size: [0.1, 0.01, 0.1] }] } as never);
+    expect(node.joints).toEqual([]);
+    expect(node.pos).toEqual([0, 0, 0]);
+  });
+
   it('sits a body added under a parent at the parent origin', () => {
     const node = fillBodyDefaults({ name: 'bolt', geoms: [{ type: 'cylinder', size: [0.002, 0.01] }] }, false);
     expect(node.pos).toEqual([0, 0, 0]);
