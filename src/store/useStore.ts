@@ -25,21 +25,15 @@ import {
 } from '../utils/csg';
 import { collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
-import type { PaintLayer } from '../utils/vertexPaint';
-import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { FacePatternTarget } from '../utils/facePatternPick';
 import type { CameraView } from '../utils/cameraViews';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult } from './physicsWorkerClient';
-import type { ConstraintBrokenEvent, ImpactEvent } from '../workers/physicsWorkerProtocol';
-import { canShatter, shatterVerdict } from '../utils/breakThresholds';
-import { DEFAULT_FRACTURE_PIECES } from '../utils/fracture';
-import { fractureMeshOffThread, prewarmFractureWorker } from '../utils/fractureWorkerClient';
-import { buildShatterGraph, MAX_LIVE_SHARDS } from '../utils/runtimeShatter';
-import { fromtoCenter, imprintOf, isDentable, meshForDenting } from '../utils/dentMesh';
+import type { ConstraintBrokenEvent } from '../workers/physicsWorkerProtocol';
+import { canShatter } from '../utils/breakThresholds';
+import { prewarmFractureWorker } from '../utils/fractureWorkerClient';
 import { DEFAULT_JOIN_MATERIAL, joinMaterial } from '../utils/joinMaterials';
-import type { DentConfig } from '../utils/breakThresholds';
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
 import { readUserPreset } from '../utils/userPresets';
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
@@ -73,7 +67,7 @@ export { applyShatterPieces, effectiveSceneGraph, type DeformedGeometry } from '
 export { endVoltLink, getPhysicsWorkerClient, setPhysicsFrameListener } from './physicsEngine';
 export type { EdgeRoundSession } from './edgeRoundActions';
 import {
-  isAllMeshNode, toRenderVertices, promoteMeshGeomsToDynamic, restoreCollisionWhenMadeMovable,
+  isAllMeshNode, promoteMeshGeomsToDynamic, restoreCollisionWhenMadeMovable,
   promoteJointedMeshGeomsDeep, mapVerts, translateMeshGeoms, rotateMeshGeomsAbsolute,
 } from './meshGeomTransforms';
 import {
@@ -81,9 +75,8 @@ import {
   castPrepArmed, bodiesChanged,
 } from './editGuard';
 import {
-  type DeformedGeometry, clearBreakage, fracturing, breakageEpoch, anyNode, scheduleShatterRebuild,
-  applyShatterPieces, effectiveSceneGraph, detachReferencesTo, retargetReferences, wallAtImpact,
-  bodyMassOf, dentBody,
+  type DeformedGeometry, clearBreakage, anyNode, applyShatterPieces,
+  detachReferencesTo, retargetReferences,
 } from './breakage';
 import { shapeParamActions, type ShapeParamActions } from './shapeParamActions';
 import {
@@ -99,6 +92,8 @@ import { printSplitActions, type PrintSplitActions } from './printSplitActions';
 import { edgeRoundActions, type EdgeRoundActions } from './edgeRoundActions';
 import { castPrepActions, type CastPrepActions } from './castPrepActions';
 import { cutActions, type CutActions } from './cutActions';
+import { breakageActions, type BreakageActions } from './breakageActions';
+import { paintActions, type PaintActions } from './paintActions';
 
 /**
  * What is on the bench.
@@ -254,7 +249,7 @@ const PALETTE_CURVE_POINTS = DEFAULT_CURVE_POINTS.map((p) => p.map((v) => v * 0.
 const PALETTE_CURVE_WIDTH = DEFAULT_CURVE_WIDTH * 0.1;
 const PALETTE_CURVE_THICKNESS = DEFAULT_CURVE_THICKNESS * 0.1;
 
-export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions, SculptActions, PrintSplitActions, EdgeRoundActions, CastPrepActions, CutActions {
+export interface PhysicsState extends HardwarePartActions, ExtrusionActions, ClipboardActions, ShapeParamActions, LatticeActions, SculptActions, PrintSplitActions, EdgeRoundActions, CastPrepActions, CutActions, BreakageActions, PaintActions {
   mujoco: typeof MUJOCO_SHIM | null;
   model: ModelMirror | null;
   data: DataMirror | null;
@@ -392,28 +387,6 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
   gridCellSizeMm: number;
   setGridCellSizeMm: (mm: number) => void;
 
-  // --- Coloring -----------------------------------------------------------
-  //
-  // Brushed onto part of a surface, not applied to a whole body — see
-  // utils/vertexPaint. Purely how the scene looks: a geom's colour has never
-  // fed the physics or any exporter.
-  /** Whether a drag in the viewport paints bodies instead of selecting them. */
-  paintMode: boolean;
-  /** The colour the brush is holding, as 0..1 rgb to match a geom's rgba. */
-  paintColor: [number, number, number];
-  /** Brush radius in metres. */
-  paintRadius: number;
-  /** Coverage one dab lays down at the centre of the brush, 0..1. */
-  paintFlow: number;
-  togglePaintMode: () => void;
-  setPaintColor: (rgb: [number, number, number]) => void;
-  setPaintBrush: (patch: { radius?: number; flow?: number }) => void;
-  /** Stores a finished stroke. Passing undefined strips a geom back to bare. */
-  setGeomPaint: (nodeId: string, geomName: string, layer: PaintLayer | undefined) => void;
-  /** Takes the paint off every geom of the scene. */
-  clearAllPaint: () => void;
-  /** Sets a body's base colour — one geom by name, or all of them. */
-  setGeomColor: (nodeId: string, geomName: string | undefined, rgba: number[]) => void;
   // When set, CameraController points the camera at this explicit pose instead
   // of the cameraView preset. Position/target are in MuJoCo world space (same
   // convention as every other pos field in the app) — CameraController converts
@@ -547,13 +520,6 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
   closePatternGenerator: () => void;
   openFacePattern: (target: FacePatternTarget) => void;
   closeFacePattern: () => void;
-  /**
-   * Replaces a geom's surface patterns (see utils/surfaceTexture), or clears
-   * them with undefined. No recompile: the MJCF never reads them.
-   */
-  setGeomTextures: (nodeId: string, geomName: string, textures: SurfaceTexture[] | undefined) => void;
-  /** Replace a geom's knife seams (SceneGeom.faceSplits). One undo step; no recompile. */
-  setGeomFaceSplits: (nodeId: string, geomName: string, splits: FaceSplit[] | undefined) => void;
   /**
    * Replace the scene with something a generator built, and hand the exporter
    * the settings it should be cut with.
@@ -728,20 +694,6 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
   recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean, settle?: boolean, immediate?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
   resetSimulation: () => void;
-  /** Put one broken weld back, without resetting the rest of the scene. */
-  restoreConstraint: (key: string) => void;
-  /** A body has been hit: break it, dent it, or ignore it. */
-  handleImpact: (event: ImpactEvent) => void;
-  /**
-   * Make a geom dentable, converting a primitive into the mesh it looked like.
-   *
-   * A dent moves vertices and a primitive has none, so this is what stands
-   * between "tick the box" and a surface that can actually take a mark.
-   * Returns false when the geom is something no mesh can be made of — a plane.
-   */
-  makeDentable: (nodeId: string, geomIndex: number, cfg: DentConfig) => boolean;
-  /** Replace a body with its pieces, in the runtime overlay only. */
-  shatterNode: (node: SceneNode, event: ImpactEvent, wallM?: number | null) => Promise<void>;
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number; scriptState?: ScriptStateMap }) => Promise<void>;
   recycleWorkerSeamlessly: () => Promise<void>;
   incrementMcpActive: () => void;
@@ -828,6 +780,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   ...edgeRoundActions({ set, get }),
   ...castPrepActions({ set, get }),
   ...cutActions({ set, get }),
+  ...breakageActions({ set, get }),
+  ...paintActions({ set, get }),
   mujoco: null,
   model: null,
   data: null,
@@ -1143,108 +1097,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   // lattice. Cells are millimetres; lattice steps are tenths, hence the ten.
   setGridCellSizeMm: (mm) => set({ gridCellSizeMm: mm, latticeSnap: snapForGridMm(mm) }),
 
-  paintMode: false,
-  paintColor: [0.91, 0.30, 0.24],
-  paintRadius: 0.008,
-  paintFlow: 0.35,
-  togglePaintMode: () => set((state) => ({ paintMode: !state.paintMode })),
-  setPaintColor: (paintColor) => set({ paintColor }),
-  setPaintBrush: (patch) => set((state) => ({
-    paintRadius: patch.radius ?? state.paintRadius,
-    paintFlow: patch.flow ?? state.paintFlow,
-  })),
-
-  setGeomPaint: (nodeId, geomName, layer) => {
-    const existing = findNode(get().sceneGraph.nodes, nodeId);
-    const index = existing?.geoms?.findIndex((geom: SceneGeom) => geom.name === geomName) ?? -1;
-    if (index === -1) return;
-
-    get().recordInteraction('paint');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const node = findNode(newScene.nodes, nodeId);
-    if (!node?.geoms?.[index]) return;
-    if (layer) node.geoms[index].paint = layer;
-    else delete node.geoms[index].paint;
-
-    // Deliberately no recompile.
-    //
-    // Every other geom edit has to rebuild the MJCF and swap the model in the
-    // physics worker, because every other geom edit changes something MuJoCo
-    // reads. Paint is not one: the emitter names the attributes it writes, no
-    // exporter reads vertex colour, and the viewport takes a geom's colour off
-    // the scene graph rather than out of the compiled model. Rebuilding here
-    // would drop the simulation back to its initial pose once per stroke to
-    // change nothing the simulation can see.
-    set({ sceneGraph: newScene });
-  },
-
-  setGeomTextures: (nodeId, geomName, textures) => {
-    const existing = findNode(get().sceneGraph.nodes, nodeId);
-    const index = existing?.geoms?.findIndex((geom: SceneGeom) => geom.name === geomName) ?? -1;
-    if (index === -1) return;
-
-    get().recordInteraction('pattern');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const node = findNode(newScene.nodes, nodeId);
-    if (!node?.geoms?.[index]) return;
-    if (textures?.length) node.geoms[index].textures = textures;
-    else delete node.geoms[index].textures;
-    // No recompile, for the reason setGeomPaint gives: the physics is the
-    // shape as authored, and the viewport and the exporters read the
-    // patterns off the scene graph (utils/geomSurface).
-    set({ sceneGraph: newScene });
-  },
-
-  setGeomFaceSplits: (nodeId, geomName, splits) => {
-    const existing = findNode(get().sceneGraph.nodes, nodeId);
-    if (!existing?.geoms?.some((geom: SceneGeom) => geom.name === geomName)) return;
-    get().prepareForDiscreteChange();
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const geom = findNode(newScene.nodes, nodeId)?.geoms?.find((g: SceneGeom) => g.name === geomName);
-    if (!geom) return;
-    if (splits?.length) geom.faceSplits = splits;
-    else delete geom.faceSplits;
-    // No recompile: a seam changes no shape (see setGeomTextures).
-    set({ sceneGraph: newScene });
-  },
-
-  setGeomColor: (nodeId, geomName, rgba) => {
-    get().recordInteraction('node-geom');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    const node = findNode(newScene.nodes, nodeId);
-    if (!node?.geoms?.length) return;
-
-    // No name means the whole body, which is what colouring an imported mesh or
-    // a boolean body usually means — those arrive as several geoms and leaving
-    // some of them the old colour is never what was asked for.
-    const targets = geomName ? node.geoms.filter((g: SceneGeom) => g.name === geomName) : node.geoms;
-    if (!targets.length) return;
-    for (const geom of targets) {
-      geom.rgba = [rgba[0] ?? 0.8, rgba[1] ?? 0.8, rgba[2] ?? 0.8, rgba[3] ?? geom.rgba?.[3] ?? 1];
-    }
-
-    // Base colour does go into the MJCF, unlike paint, so this one recompiles —
-    // once for the whole body rather than once per geom.
-    set({ sceneGraph: newScene });
-    get().recompile(newScene, undefined, true);
-  },
-
-  clearAllPaint: () => {
-    get().recordInteraction('paint');
-    const newScene = cloneSceneGraph(get().sceneGraph);
-    let found = false;
-    const walk = (nodes: SceneNode[]) => {
-      for (const node of nodes || []) {
-        for (const geom of node.geoms || []) {
-          if (geom.paint) { delete geom.paint; found = true; }
-        }
-        walk(node.children);
-      }
-    };
-    walk(newScene.nodes);
-    if (found) set({ sceneGraph: newScene });
-  },
-
   addHardwareComponentNode: (hardwareNode, opts) => {
     get().prepareForDiscreteChange();
     const sceneGraph = get().sceneGraph;
@@ -1273,175 +1125,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     get().recompile(undefined, undefined, true, true);
   },
 
-  /*
-   * A body has just been hit hard enough to matter.
-   *
-   * Shattering wins over denting when both apply: there is no point creasing
-   * the surface of something that is about to stop existing. Both are decided
-   * from the same measured impulse, which is what makes them read as one
-   * material rather than as two unrelated features.
-   */
-  handleImpact: (event) => {
-    const state = get();
-    // Look the body up in the graph that is actually running: a shard has no
-    // entry in the document, and a body that already broke has none either.
-    const live = effectiveSceneGraph(state.sceneGraph, state.shatteredBodies);
-    const node = findNodeById(live.nodes, event.nodeId);
-    if (!node) return;
-
-    // Already coming apart: the blow has nothing left to do to this body.
-    const cutting = fracturing.has(node.id);
-    if (!state.shatteredBodies[node.id] && !cutting) {
-      const wallM = node.shatterThicknessRef ? wallAtImpact(node, event.localPoint) : null;
-      if (shatterVerdict(event.impulseNs, node, wallM)) {
-        get().shatterNode(node, event, wallM);
-        return;
-      }
-    }
-
-    // Dent whatever was soft enough, on either end of the collision. The body
-    // that reported the blow is usually the striker, so the thing that takes
-    // the mark is usually the other one.
-    const other = event.otherNodeId ? findNodeById(live.nodes, event.otherNodeId) : null;
-    // Each end of the collision is marked by the shape of the other end.
-    if (!cutting) dentBody(node, event.localPoint, event.localNormal, event.impulseNs, imprintOf(other?.geoms?.[0]));
-    if (other && event.otherLocalPoint && event.otherLocalNormal) {
-      dentBody(other, event.otherLocalPoint, event.otherLocalNormal, event.impulseNs, imprintOf(node.geoms?.[0]));
-    }
-  },
-
-  /*
-   * Replace a body with its pieces, in the runtime overlay only.
-   *
-   * The rebuild is NOT a force reset: the rest of the scene is mid-flight and
-   * has to stay there. It changes the number of degrees of freedom, though, so
-   * the worker cannot carry the state over by copying arrays — it matches
-   * joints by name instead, which is what the by-joint branch of doBuild is for.
-   */
-  shatterNode: async (node, event, wallM) => {
-    const geom = (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
-    const source = geom && (geom.renderVertices ?? geom.vertices);
-    if (!geom || !source || !geom.faces) return;
-
-    // Stay inside the shard budget. Every entry in `shatteredBodies` lists the
-    // pieces of one break, and a piece that has broken again is no longer in
-    // the world, so the live ones are the pieces with no entry of their own.
-    // A shard breaking now gives its own slot back.
-    const broken = get().shatteredBodies;
-    const live = Object.values(broken).flat().filter((s) => !broken[s.id]);
-    let promised = 0;
-    for (const n of fracturing.values()) promised += n;
-    const room = MAX_LIVE_SHARDS - live.length - promised + (live.some((s) => s.id === node.id) ? 1 : 0);
-    const pieces = Math.min(node.shatterPieces ?? DEFAULT_FRACTURE_PIECES, room);
-    if (pieces < 2) return;
-
-    // Cut in the worker while the old model keeps stepping. The pieces are
-    // posed from the impact, and rebaseShard moves them onto wherever the body
-    // has got to by the time the rebuild lands, so the wait costs no accuracy.
-    fracturing.set(node.id, pieces);
-    const epoch = breakageEpoch;
-    let cells: Awaited<ReturnType<typeof fractureMeshOffThread>>;
-    try {
-      cells = await fractureMeshOffThread(source, geom.faces, {
-        pieces,
-        seed: node.shatterSeed ?? 1,
-        focus: node.shatterPattern === 'uniform'
-          ? undefined
-          : [event.localPoint[0], event.localPoint[1], event.localPoint[2]],
-      });
-    } catch (err) {
-      console.warn('[shatter]', err);
-      cells = [];
-    } finally {
-      if (epoch === breakageEpoch) fracturing.delete(node.id);
-    }
-    // Reset, or a new scene, while it was being cut: that break never happened.
-    if (epoch !== breakageEpoch) return;
-    const nowBroken = get().shatteredBodies;
-    if (nowBroken[node.id]) return;
-    if (!findNodeById(effectiveSceneGraph(get().sceneGraph, nowBroken).nodes, node.id)) return;
-    // Fewer than two pieces is not a shatter, and replacing a body with one
-    // shard would be a visible no-op that had thrown its collider away.
-    if (cells.length < 2) return;
-
-    const { shards } = buildShatterGraph(node, source, geom.faces, cells, {
-      pos: [event.pos[0], event.pos[1], event.pos[2]],
-      xmat: event.xmat,
-      vel: [event.vel[0], event.vel[1], event.vel[2]],
-      angvel: [event.angvel[0], event.angvel[1], event.angvel[2]],
-    }, {
-      spread: node.shatterSpread,
-      totalMass: bodyMassOf(node),
-      rgba: geom.rgba,
-      friction: geom.friction,
-      solref: geom.solref,
-      solimp: geom.solimp,
-      recursion: (node.shatterDepth ?? 0) > 0 ? {
-        generation: (node.shatterGeneration ?? 0) + 1,
-        depth: node.shatterDepth!,
-        impulseNs: node.shatterImpulseNs!,
-        thicknessRef: node.shatterThicknessRef,
-        pieces: node.shatterPieces ?? 8,
-        pattern: node.shatterPattern,
-        spread: node.shatterSpread,
-        seed: node.shatterSeed,
-      } : undefined,
-    });
-
-    set({
-      shatteredBodies: { ...nowBroken, [node.id]: shards },
-      lastShatter: { nodeId: node.id, name: node.name, pieces: shards.length, time: event.time, impulseNs: event.impulseNs, wallM: wallM ?? undefined },
-    });
-    scheduleShatterRebuild(() => get().recompile(undefined, undefined, false, true, false, true));
-  },
-
-  makeDentable: (nodeId, geomIndex, cfg) => {
-    const node = findNodeById(get().sceneGraph.nodes, nodeId);
-    const geom = node?.geoms?.[geomIndex];
-    if (!node || !geom) return false;
-
-    const updates: Partial<SceneGeom> = { ...cfg };
-    if (!isDentable(geom)) {
-      const mesh = meshForDenting(geom);
-      if (!mesh) return false;
-      updates.type = 'mesh';
-      updates.vertices = mesh.vertices;
-      updates.renderVertices = toRenderVertices(mesh.vertices);
-      updates.faces = mesh.faces;
-      // A fromto carried the shape's direction AND its offset. meshForDenting
-      // has turned the vertices to face the right way; the offset moves to the
-      // geom's pos, because these vertices are the collision geometry too and
-      // MuJoCo recentres a mesh asset on its centroid. Bake the offset in and
-      // the thing collides half its own length away from where it is drawn.
-      if (geom.fromto) {
-        updates.pos = fromtoCenter(geom.fromto);
-        updates.fromto = undefined;
-      }
-      // A mesh geom on a body that can move has to say so, or it is drawn from
-      // vertices baked once into world space and never tracks the body again:
-      // it simulates and drags correctly and looks frozen in place.
-      if ((node.joints || []).length > 0) updates.dynamic = true;
-      // The shape is its own hull, so there is nothing for the decomposer to
-      // find and every reason not to spend a rebuild looking.
-      if (!node.collision) get().updateNode(node.id, { collision: 'hull' });
-    }
-    get().updateNodeGeom(node.id, updates, geomIndex);
-    return true;
-  },
-
-  restoreConstraint: (key) => {
-    const prev = get().brokenConstraints;
-    if (!prev.includes(key)) return;
-    const next = prev.filter((k) => k !== key);
-    set({
-      brokenConstraints: next,
-      lastBreak: get().lastBreak?.key === key ? null : get().lastBreak,
-    });
-    // Undebounced and state-preserving: the weld comes back where the body is
-    // now, not where it was when it broke.
-    get().recompile(undefined, undefined, false, true);
-  },
-  
   loadPreset: (name) => {
     const prev = get().activePreset;
     get().prepareForDiscreteChange();
