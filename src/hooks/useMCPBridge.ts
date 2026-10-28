@@ -163,7 +163,7 @@ import { belowFloor, boundsOverlaps, contactOverlaps, DEFAULT_OVERLAP_TOLERANCE 
 import { walkBodiesWorld } from '../utils/bodyWorld';
 import { initialContacts } from './initialContacts';
 import { generatedMeshMass } from '../utils/generatedMeshMass';
-import { bboxOf, geomBboxOf, meshIntegrity, staleBodies, stockReport, summarizeNode } from '../utils/sceneSummary';
+import { bboxOf, geomBboxOf, isFabricationScene, meshIntegrity, staleBodies, stockReport, summarizeNode } from '../utils/sceneSummary';
 import { modelBuiltFrom } from '../store/modelProvenance';
 import { recompilesInFlight } from '../store/simulationActions';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
@@ -2293,7 +2293,10 @@ export function useMCPBridge() {
                 ...(fixed > 0 ? { fixedMassKg: +fixed.toPrecision(6) } : {}),
               };
             })() : {}),
-            stock: stockReport(store.sceneGraph, store.stock),
+            // Only for something being made: see isFabricationScene.
+            ...(isFabricationScene(store.sceneGraph, store.carveSettings)
+              ? { stock: stockReport(store.sceneGraph, store.stock) }
+              : {}),
             ...(store.sceneGraph.simFidelity === 'print' ? {
               simFidelity: {
                 mode: 'print',

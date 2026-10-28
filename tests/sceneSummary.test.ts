@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { staleBodies, summarizeNode } from '../src/utils/sceneSummary';
+import { isFabricationScene, staleBodies, summarizeGeom, summarizeNode } from '../src/utils/sceneSummary';
 import { collisionHashOf } from '../src/utils/convexDecomposition';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
 import type { ModelMirror } from '../src/types/sceneLayer';
@@ -35,7 +35,35 @@ const model = (ids: string[], masses: number[]): ModelMirror => ({
   _idMaps: { body: Object.fromEntries(ids.map((id, i) => [id, i + 1])) },
 } as unknown as ModelMirror);
 
+describe('summarizeGeom', () => {
+  it('carries fromto, so a capsule written end to end does not read as a stub pill', () => {
+    const s = summarizeGeom({ name: 'spoke', type: 'capsule', size: [0.0012], fromto: [0, 0, 0, 0.15, 0, 0] } as SceneGeom);
+    expect(s).toMatchObject({ type: 'capsule', size: [0.0012], fromto: [0, 0, 0, 0.15, 0, 0] });
+  });
+
+  it('rounds float noise to the micron', () => {
+    const s = summarizeGeom({ name: 'b', type: 'box', size: [0.1 + 0.2, 0.01, 0.01], pos: [1 / 3, 0, 0] } as SceneGeom);
+    expect(s.size).toEqual([0.3, 0.01, 0.01]);
+    expect(s.pos).toEqual([0.333333, 0, 0]);
+  });
+});
+
 describe('summarizeNode', () => {
+  it('summarises a curve track instead of listing every segment box', () => {
+    const segs = Array.from({ length: 64 }, (_, i) => ({ type: 'box' as const, size: [0.01, 0.25, 0.03], pos: [i * 0.05, 0, 0] }));
+    const s = summarizeNode(body('track', segs, { isCurve: true, curvePoints: [[0, 0, 0], [1, 0, 0]], curveWidth: 0.5 }), { model: null });
+    expect(s.geoms).toEqual([]);
+    expect(s.curve).toMatchObject({ segments: 64, controlPoints: 2, widthMm: 500 });
+    expect(summarizeNode(body('track', segs, { isCurve: true }), { model: null, full: true }).geoms).toHaveLength(64);
+  });
+
+  it('counts convex-piece colliders rather than listing them', () => {
+    const cols = Array.from({ length: 12 }, (_, i) => ({ ...octa(), name: `cup_mesh_csg_col${i}`, csgDerived: 'collider' as const, role: 'collision' as const }));
+    const s = summarizeNode(body('cup', [{ ...octa(), name: 'cup_mesh' }, ...cols]), { model: null });
+    expect((s.geoms as unknown[]).length).toBe(1);
+    expect(s.colliderGeoms).toBe(12);
+  });
+
   it('reports a decomposition still to run as pending, not as the convex hull', () => {
     const cup = body('cup', [octa()], { collision: 'decompose' });
     const pending = summarizeNode(cup, { model: null });
@@ -74,5 +102,22 @@ describe('staleBodies', () => {
 
   it('treats every body as stale when nothing has been built', () => {
     expect(staleBodies(graph([a, b]), null).size).toBe(2);
+  });
+});
+
+describe('isFabricationScene', () => {
+  const hinge = [{ name: 'h', type: 'hinge' as const, axis: [0, 0, 1] }];
+  const free = [{ name: 'f', type: 'free' as const }];
+
+  it('is a mechanism once anything is hinged, and leaves the stock out', () => {
+    const wheel = body('wheel', [{ type: 'cylinder', size: [0.1, 0.01] }], { joints: hinge });
+    expect(isFabricationScene(graph([body('tower', [], { children: [wheel] })]), null)).toBe(false);
+  });
+
+  it('is fabrication for loose parts, carve settings or print fidelity', () => {
+    expect(isFabricationScene(graph([body('part', [], { joints: free })]), null)).toBe(true);
+    const wheel = body('wheel', [], { joints: hinge });
+    expect(isFabricationScene(graph([wheel]), { depthMm: 3 })).toBe(true);
+    expect(isFabricationScene(graph([wheel], { simFidelity: 'print' }), null)).toBe(true);
   });
 });

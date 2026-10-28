@@ -116,6 +116,25 @@ export function stockReport(scene: SceneGraph, stock: { widthMm: number; depthMm
   };
 }
 
+/**
+ * Whether a scene is something being made, rather than a mechanism being
+ * simulated: the stock comparison, and `parts` and `partsNote` under it, only
+ * mean anything for the first. A Ferris wheel is not going to be cut from a
+ * 150 mm board, and telling every mechanism which of its parts would not fit
+ * the bench stock was most of the noise in its summary.
+ *
+ * A scene counts as fabrication when it has carve settings, is set to print
+ * fidelity, or has no articulated joint anywhere (hinge, slide, ball): loose
+ * parts on a bench, fixed or free. One hinge and it is a mechanism.
+ */
+export function isFabricationScene(scene: SceneGraph, carveSettings: unknown): boolean {
+  if (carveSettings) return true;
+  if (scene.simFidelity === 'print') return true;
+  const articulated = (nodes: SceneNode[] | undefined): boolean => (nodes || []).some((n) =>
+    (n.joints || []).some((j) => j.type !== 'free') || articulated(n.children));
+  return (scene.nodes?.length ?? 0) > 0 && !articulated(scene.nodes);
+}
+
 // ---------------------------------------------------------------------------
 // Has the model caught up with the graph?
 // ---------------------------------------------------------------------------
@@ -171,6 +190,9 @@ export function staleBodies(current: SceneGraph, built: SceneGraph | null): Set<
 // Bodies and geoms
 // ---------------------------------------------------------------------------
 
+/** To the micron: authored numbers come back as written, float noise does not. */
+const um = (v: number[] | undefined) => v?.map((x) => (typeof x === 'number' ? +x.toFixed(6) : x));
+
 /**
  * How a body actually reaches the contact solver.
  *
@@ -214,12 +236,19 @@ function collisionReport(node: SceneNode): Record<string, unknown> {
   };
 }
 
+/**
+ * One geom. A capsule or cylinder written with `fromto` carries it: its size
+ * is then only the radius, and `{type: 'capsule', size: [0.0012]}` alone reads
+ * as the stub pill the docs warn about.
+ */
 export const summarizeGeom = (g: SceneGeom) => ({
   name: g.name,
   type: g.type,
   ...(g.csg && g.csg !== 'union' ? { csg: g.csg } : {}),
   ...(g.csgDerived ? { generated: g.csgDerived } : {}),
-  ...(g.pos ? { pos: g.pos } : {}),
+  ...(g.role ? { role: g.role } : {}),
+  ...(g.pos ? { pos: um(g.pos) } : {}),
+  ...(g.quat ? { quat: um(g.quat) } : g.euler ? { euler: um(g.euler) } : {}),
   ...(g.type === 'mesh'
     ? {
         vertCount: (g.renderVertices || g.vertices || []).length / 3,
@@ -227,7 +256,7 @@ export const summarizeGeom = (g: SceneGeom) => ({
         bbox: geomBboxOf(g),
         ...meshIntegrity(g),
       }
-    : { size: g.size }),
+    : { size: um(g.size), ...(g.fromto ? { fromto: um(g.fromto) } : {}) }),
 });
 
 /*
@@ -248,11 +277,53 @@ const inertialOf = (model: ModelMirror | null, node: SceneNode): Record<string, 
   return out;
 };
 
+/**
+ * The geoms worth listing one by one, and a count of the rest.
+ *
+ * A curve track is dozens of generated segment boxes, and a decomposed body
+ * dozens of convex pieces (already counted in `collidesAs`); listing each at
+ * full precision was most of a 40 KB summary. `full` lists them anyway.
+ */
+function geomListing(node: SceneNode, full: boolean): Record<string, unknown> {
+  const geoms = node.geoms || [];
+  // A split section carries dozens of exact pin and socket colliders.
+  const exact = geoms.filter((g) => g.contactClass);
+  const listed = geoms.filter((g) => !g.contactClass);
+  const out: Record<string, unknown> = {};
+  if (exact.length) {
+    out.exactColliders = {
+      pins: exact.filter((g) => g.contactClass === 'pin').length,
+      sockets: exact.filter((g) => g.contactClass === 'socket').length,
+    };
+  }
+  if (full) {
+    out.geoms = listed.map(summarizeGeom);
+    return out;
+  }
+  if (node.isCurve) {
+    out.geoms = [];
+    out.curve = {
+      segments: listed.length,
+      ...(node.curvePoints ? { controlPoints: node.curvePoints.length } : {}),
+      ...(node.curveWidth !== undefined ? { widthMm: +(node.curveWidth * 1000).toFixed(2) } : {}),
+      ...(node.curveThickness !== undefined ? { thicknessMm: +(node.curveThickness * 1000).toFixed(2) } : {}),
+      ...(node.curveClosed ? { closed: true } : {}),
+    };
+    return out;
+  }
+  const colliders = listed.filter((g) => g.csgDerived === 'collider');
+  out.geoms = listed.filter((g) => g.csgDerived !== 'collider').map(summarizeGeom);
+  if (colliders.length) out.colliderGeoms = colliders.length;
+  return out;
+}
+
 export interface SummaryContext {
   /** The compiled model, if any. */
   model: ModelMirror | null;
   /** Bodies whose `inertial` is from an older build (see staleBodies). */
   stale?: Set<string>;
+  /** List generated geoms (curve segments, convex pieces) one by one. */
+  full?: boolean;
 }
 
 export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<string, unknown> => {
@@ -262,10 +333,10 @@ export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<stri
   return {
     id: node.id,
     name: node.name,
-    pos: node.pos,
+    pos: um(node.pos),
     ...(inertial ? { inertial: stale ? { ...inertial, stale: true } : inertial } : {}),
-    ...(node.quat ? { quat: node.quat } : {}),
-    ...(node.euler ? { euler: node.euler } : {}),
+    ...(node.quat ? { quat: um(node.quat) } : {}),
+    ...(node.euler ? { euler: um(node.euler) } : {}),
     ...(node.scad ? { hasScad: true } : {}),
     ...(node.csgEnabled ? {
       csg: {
@@ -294,15 +365,7 @@ export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<stri
     ...(node.csgEnabled ? {} : collisionReport(node)),
     ...(node.printPose ? { printPose: { up: node.printPose.up, spinDeg: +(node.printPose.spin * 180 / Math.PI).toFixed(2) } } : {}),
     joints: (node.joints || []).map((j) => ({ name: j.name, type: j.type })),
-    // A split section carries dozens of exact pin and socket colliders; listing
-    // each one would bury the geoms that matter, so they are counted instead.
-    geoms: (node.geoms || []).filter((g) => !g.contactClass).map(summarizeGeom),
-    ...((node.geoms || []).some((g) => g.contactClass) ? {
-      exactColliders: {
-        pins: (node.geoms || []).filter((g) => g.contactClass === 'pin').length,
-        sockets: (node.geoms || []).filter((g) => g.contactClass === 'socket').length,
-      },
-    } : {}),
+    ...geomListing(node, !!ctx.full),
     children: (node.children || []).map((c) => summarizeNode(c, ctx)),
   };
 };
