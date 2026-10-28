@@ -27,7 +27,7 @@ import { generateCurveGeoms, normalizeMeshGeomData, DEFAULT_CURVE_POINTS, DEFAUL
 import { compileCsgNodes } from './useCsgCompile';
 import { bodyEdges, bodyUp, whyNotRoundable } from '../utils/edgeRoundBase';
 import { maxSizeFor, sameEdge, selectEdges, type EdgeCandidate, type EdgeGroup } from '../utils/featureEdges';
-import { SOLIDITY_DECOMPOSE_BELOW } from '../utils/convexDecomposition';
+import { SOLIDITY_DECOMPOSE_BELOW, collidersAreStale } from '../utils/convexDecomposition';
 import { PRESETS } from '../presets/presetScenes';
 import { parseSTL } from '../utils/stlParser';
 import {
@@ -1113,6 +1113,12 @@ export function resolveUpdatedGeoms(
 
   return { ok: true, geoms: resolvedList };
 }
+
+/**
+ * How long physics_run_headless waits for convex pieces still being worked out.
+ * The bridge gives a whole command 60 s, and the run needs some of that.
+ */
+const HEADLESS_WAIT_FOR_COLLIDERS_MS = 30_000;
 
 const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => withMotorArmature({
   // As for geoms: springref and the crumple fields were dropped by a whitelist.
@@ -2410,7 +2416,21 @@ export function useMCPBridge() {
 
         case 'RUN_HEADLESS': {
           const ticks = Number(msg.ticks) || 300;
-          const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce } = store;
+          // A body still being broken into convex pieces collides as its hull
+          // until they land, so a run straight after a load could throw a car
+          // off a track that is solid across its channel and say nothing. Wait
+          // a while for them, then say which bodies ran as hulls.
+          const pendingBodies = () => {
+            const out: string[] = [];
+            const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => { if (collidersAreStale(n)) out.push(n.name); walk(n.children); });
+            walk(useStore.getState().sceneGraph.nodes);
+            return out;
+          };
+          for (const until = Date.now() + HEADLESS_WAIT_FOR_COLLIDERS_MS; pendingBodies().length > 0 && Date.now() < until;) {
+            await new Promise(r => setTimeout(r, 250));
+          }
+          const stillPending = pendingBodies();
+          const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce } = useStore.getState();
           // Runs inside the same physics worker that owns the live simulation
           // (see src/workers/physicsWorker.ts's runHeadless) — its own isolated
           // model/data built from the one already-loaded mujoco module, so a
@@ -2426,6 +2446,12 @@ export function useMCPBridge() {
           // early and told the caller to raise the stride it had already raised.
           const stride = Math.max(1, Math.floor(Number(msg.stride) || 1));
           const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride);
+          if (stillPending.length > 0) {
+            result.warnings = [
+              `Ran before the convex pieces of ${stillPending.join(', ')} were ready, so ${stillPending.length === 1 ? 'it' : 'they'} collided as a convex hull with any hollow filled in. Wait until physics_get_scene_summary no longer reports collisionPending, then run again.`,
+              ...(result.warnings ?? []),
+            ];
+          }
           const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies as string[]) : null;
           if (result.ok && result.trajectory && bodyFilter) {
             result.trajectory = result.trajectory.map((fr: HistoryEntry) => ({
