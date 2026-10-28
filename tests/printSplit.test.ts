@@ -340,6 +340,19 @@ describe('the knife cutting right through', () => {
     expect(r.sections).toHaveLength(3);
   });
 
+  it('keeps shapes that meet face to face together on each side', () => {
+    // A shelf against a block, a hair apart as built from floating-point
+    // positions: the union leaves them two solids, and each half of the cut
+    // used to come back as two loose bodies.
+    const soups = [box(40, 20, 10), box(40, 10, 10, [0, 20.001, 0])];
+    const r = cutAlongPlane(wasm, soups, [0.015, 0, 0], [1, 0, 0]);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.sections).toHaveLength(2);
+    const volumes = r.sections.map((s) => s.volumeMm3).sort((a, b) => a - b);
+    expect(volumes[0]).toBeCloseTo(15 * 30 * 10, 0);
+    expect(volumes[1]).toBeCloseTo(25 * 30 * 10, 0);
+  });
+
   it('refuses a plane that misses the part', () => {
     const r = cutAlongPlane(wasm, [box(40, 20, 10)], [0.1, 0, 0], [1, 0, 0]);
     expect(r.ok).toBe(false);

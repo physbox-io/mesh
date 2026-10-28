@@ -1298,11 +1298,11 @@ export function cutAlongPlane(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
   made.solid.delete();
   try {
     // A sliver under a thousandth of the part is the plane grazing it, not a piece.
-    const pieces = [pos, neg].flatMap((half) => half.decompose()).filter((p) => {
+    const pieces = [pos, neg].flatMap((half) => touchingGroups(wasm, half.decompose().filter((p) => {
       if (p.volume() > whole * 1e-3) return true;
       p.delete();
       return false;
-    });
+    })));
     if (pieces.length < 2) {
       for (const p of pieces) p.delete();
       return { ok: false, error: 'The line does not cut right through the part, so there is nothing to separate.' };
@@ -1332,6 +1332,36 @@ export function cutAlongPlane(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
     pos.delete();
     neg.delete();
   }
+}
+
+/**
+ * The pieces on one side of a cut, put back together where they touch.
+ *
+ * A body built from shapes that meet face to face (a shelf unioned onto a
+ * bracket) is one rigid part, but the union leaves them separate solids, so
+ * decompose() hands each half back as several, and the knife made loose
+ * bodies of them that fell away from each other. Pieces the cut really parted
+ * do not touch (the two legs of a U cut across), and stay apart. Takes
+ * ownership of `pieces`.
+ */
+function touchingGroups(wasm: ManifoldToplevel, pieces: Manifold[]): Manifold[] {
+  if (pieces.length < 2) return pieces;
+  const TOUCH_MM = 0.05;
+  const root = pieces.map((_, i) => i);
+  const find = (i: number): number => (root[i] === i ? i : (root[i] = find(root[i])));
+  for (let i = 0; i < pieces.length; i++) {
+    for (let j = i + 1; j < pieces.length; j++) {
+      if (find(i) !== find(j) && pieces[i].minGap(pieces[j], TOUCH_MM * 2) <= TOUCH_MM) root[find(j)] = find(i);
+    }
+  }
+  const groups = new Map<number, Manifold[]>();
+  pieces.forEach((p, i) => groups.set(find(i), [...(groups.get(find(i)) ?? []), p]));
+  return [...groups.values()].map((group) => {
+    if (group.length === 1) return group[0];
+    const joined = wasm.Manifold.compose(group);
+    for (const p of group) p.delete();
+    return joined;
+  });
 }
 
 /** The print rotation for a section, as the plate layout and the preview use it. */
