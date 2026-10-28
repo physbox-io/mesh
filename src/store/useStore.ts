@@ -307,6 +307,14 @@ function writeHardwareGroup(node: SceneNode, spec: HardwareCutSpec): boolean {
   return true;
 }
 
+/**
+ * Edits one cut and re-derives the primitive underneath it.
+ *
+ * Every cut edit is the same three steps — change the intent, work the geometry
+ * out again from the part's own surface, publish — and doing them in one place
+ * is what keeps `pos`, `quat` and `size` from ever disagreeing with the spot
+ * and depth they are supposed to express.
+ */
 function reshapeCut(
   get: () => PhysicsState,
   set: (partial: Partial<PhysicsState>) => void,

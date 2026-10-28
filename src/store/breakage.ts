@@ -295,12 +295,6 @@ const maxDentRadius = (verts: ArrayLike<number>): number => {
 };
 
 /**
- * Push a crater into every dentable surface of a body.
- *
- * A no-op on anything without a yield, which is every geom by default — so a
- * scene that never asked for this pays a property lookup per collision.
- */
-/**
  * Make the damage to one surface real to the solver, if it asked for that.
  *
  * Reads back whatever the surface has accumulated — one crater or a hundred
@@ -321,6 +315,12 @@ const commitDamage = (nodeId: string, geomName: string): void => {
   scheduleShatterRebuild(() => store().getState().recompile(undefined, undefined, false, true, false, true));
 };
 
+/**
+ * Push a crater into every dentable surface of a body.
+ *
+ * A no-op on anything without a yield, which is every geom by default — so a
+ * scene that never asked for this pays a property lookup per collision.
+ */
 export const dentBody = (
   node: SceneNode,
   point: number[],

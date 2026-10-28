@@ -30,6 +30,17 @@ export function dropStaleColliders(node: SceneNode): boolean {
   return true;
 }
 
+/**
+ * Rebuilds the physics model after an edit to a body's shapes — unless the
+ * edit left a boolean body's mesh stale, in which case the build is skipped.
+ *
+ * useCsgAutoCompile notices the stale hash, evaluates the boolean and runs
+ * its own build a moment later. Building here as well means every cut edit
+ * costs two model builds, and the first one installs colliders for a mesh
+ * that is about to be replaced: pure waste, and a visible stutter before the
+ * real result lands. The scene graph itself is already set by the caller, so
+ * the panel shows the edit at once either way.
+ */
 export function rebuildAfterGeomEdit(get: () => PhysicsState, newScene: SceneGraph, nodeId: string) {
   const node = findNode(newScene.nodes, nodeId);
   if (node?.csgEnabled && hasBooleanOps(node) && csgHashOf(node) !== node.csgHash) return;
