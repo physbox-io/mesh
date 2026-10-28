@@ -2545,17 +2545,20 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     }
   }
 
-  // A body with rounded edges and no hole to decompose around would otherwise
-  // collide as its source primitives — the square box, corners and all, which
-  // is the one thing rounding it was meant to change. When the rounded solid
-  // is near enough convex, let it collide as itself (MuJoCo hulls it anyway).
-  //
-  // And when it is not near enough convex — a plate with a hole in its OpenSCAD
-  // source, where no negative says where the hole is, so there is no axis to
-  // slice around — it is broken into convex pieces the way any other mesh body
-  // is (utils/convexDecomposition.ts), rather than hulled, which would fill the
-  // hole, or left to its square primitives.
-  if (mode === 'primitives' && requested === 'auto' && hasEdgeRounds(node)) {
+  // A body whose solid is not what its primitives are would otherwise collide
+  // as them: rounded edges as the square box, corners and all; a notch, a
+  // pocket or a cut with no long axis to slice round as solid material; a
+  // mesh unioned on as whatever its hull is. Only a plain union of primitives
+  // collides truly as them. So a solid near enough convex collides as itself
+  // (MuJoCo hulls it anyway), and anything else is broken into convex pieces
+  // the way any other mesh body is (utils/convexDecomposition.ts), rather than
+  // hulled, which would fill the hole. How it was made used to decide this: a
+  // part built with declarative cuts was decomposed, the same part cut step
+  // by step collided as its uncut primitives.
+  const solidIsNotItsPrimitives = hasEdgeRounds(node)
+    || src.some((g) => g.csg && g.csg !== 'union')
+    || positives.some((g) => g.type === 'mesh');
+  if (mode === 'primitives' && requested === 'auto' && solidIsNotItsPrimitives) {
     const hull = await computeHullVolume();
     hullVolume = hull;
     if (hull > 0 && volume / hull >= ROUNDED_HULL_SOLIDITY) {

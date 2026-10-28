@@ -40,3 +40,43 @@ describe('a compiled boolean', () => {
     expect(visual.renderVertices).toEqual(ZUP);
   });
 });
+
+/** A closed prism over a counter-clockwise outline (metres), z 0..h. */
+function prism(outline: number[][], h: number) {
+  const n = outline.length;
+  const zup = [...outline.flatMap(([x, y]) => [x, y, 0]), ...outline.flatMap(([x, y]) => [x, y, h])];
+  const faces: number[] = [];
+  // A fan from corner 0, which sees every other corner of this outline.
+  for (let i = 1; i + 1 < n; i++) faces.push(0, i + 1, i, n, n + i, n + i + 1);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    faces.push(i, j, n + j, i, n + j, n + i);
+  }
+  return { zup, faces };
+}
+
+// A part with a pocket collided as its uncut primitives: the pocket was
+// solid. Only a cut right through, with an axis to slice round, was handled.
+describe('a boolean with no hole axis', () => {
+  it('collides as its own solid, not as the primitives it was cut from', async () => {
+    const openscad = await import('../src/utils/openscad');
+    // A 30 x 20 x 10 mm block with a 10 mm square notch out of one corner.
+    const L = prism([[0, 0], [0.03, 0], [0.03, 0.01], [0.02, 0.01], [0.02, 0.02], [0, 0.02]], 0.01);
+    vi.mocked(openscad.compileSCAD).mockResolvedValueOnce({ vertices: yup(L.zup), renderVertices: L.zup, faces: L.faces });
+    const node: SceneNode = {
+      id: 'notched', name: 'notched', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+      csgEnabled: true,
+      geoms: [
+        { name: 'b', type: 'box', size: [0.015, 0.01, 0.005], pos: [0.015, 0.01, 0.005] },
+        // A blind pocket: it goes through nothing, so there is no axis to
+        // slice round, unlike a bore. (The mocked solid stands in for it.)
+        { name: 'pocket', type: 'box', size: [0.0055, 0.0055, 0.003], pos: [0.025, 0.015, 0.008], csg: 'difference' },
+      ],
+    };
+    const res = await evaluateNodeCsg(node);
+    expect(res!.mode).toBe('decompose');
+    const colliders = res!.geoms.filter((g) => g.csgDerived === 'collider');
+    expect(colliders.length).toBeGreaterThanOrEqual(2);
+  }, 60000);
+});
+
