@@ -225,10 +225,11 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
 };
 
 /** The contact exclusions and break limits that go with breakModel's equalities. */
-const breakExtrasXml = (b: ReturnType<typeof buildBreakModel>): string => {
+const breakExtrasXml = (b: ReturnType<typeof buildBreakModel>, linked: [string, string][] = []): string => {
   let xml = '';
-  if (b.excludes.length) {
-    xml += `\n  <contact>${b.excludes.map(([p, q]) => `\n    <exclude body1="${xmlAttr(p)}" body2="${xmlAttr(q)}" />`).join('')}\n  </contact>`;
+  const excludes = [...b.excludes, ...linked];
+  if (excludes.length) {
+    xml += `\n  <contact>${excludes.map(([p, q]) => `\n    <exclude body1="${xmlAttr(p)}" body2="${xmlAttr(q)}" />`).join('')}\n  </contact>`;
   }
   if (b.numerics.length) {
     xml += `\n  <custom>${b.numerics.map((n) => `\n    <numeric name="${xmlAttr(n.name)}" data="${n.data.map((v) => +v.toPrecision(6)).join(' ')}" />`).join('')}\n  </custom>`;
@@ -981,6 +982,22 @@ export const compileToMJCF = (
 
   for (const line of breaks.equality) equalityConstraints += `\n    ${line}`;
 
+  // Bodies already joined by a coupling or a pin do not also collide: a
+  // gear's collider and its mate's touch at the pitch circle, a nut's wraps
+  // its screw, a pinned link overlaps its neighbour at the pin. MuJoCo skips a
+  // parent and child by itself; these are the joins across the tree.
+  const linkedBodies: [string, string][] = [];
+  const linkedKeys = new Set<string>();
+  const link = (a?: string, b?: string) => {
+    if (!a || !b || a === b) return;
+    const key = [a, b].sort().join('\u0000');
+    if (linkedKeys.has(key)) return;
+    linkedKeys.add(key);
+    linkedBodies.push([a, b]);
+  };
+  for (const e of couplingEdges) link(jointsByName.get(e.joint1)?.node.name, jointsByName.get(e.joint2)?.node.name);
+  for (const c of connectConstraintsList) if (c.targetId in nodeNamesMap) link(c.bodyName, nodeNamesMap[c.targetId]);
+
   // Dry friction on a coupled joint goes where the chain feels it. The nodes
   // are this compile's copies, so their joint lists can be replaced.
   for (const [jointName, frictionloss] of relocateCoupledFriction(couplingEdges, jointsByName)) {
@@ -1024,7 +1041,7 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
     
     ${sceneCopy.nodes.map(buildNode).join('\n')}
   </worldbody>
-${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${tendonXml}${equalityXml}${breakExtrasXml(breaks)}
+${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${tendonXml}${equalityXml}${breakExtrasXml(breaks, linkedBodies)}
 </mujoco>
   `.trim();
 };

@@ -493,8 +493,6 @@ export function buildInvoluteGearNode(
     ...cylinderGeom(`${id}_col`, mm(metrics.pitchRadiusMm), mm(metrics.thicknessMm), 0, rgba, {
       role: 'collision',
       mass: massKg,
-      contype: 0,
-      conaffinity: 0,
     }),
   };
 
@@ -822,7 +820,7 @@ export function buildInvoluteRackNode(
       [0, mm(yMidMm), 0],
       rgba,
       density,
-      { role: 'collision', mass: massKg, contype: 0, conaffinity: 0 },
+      { role: 'collision', mass: massKg },
     ),
   };
 
@@ -1103,8 +1101,6 @@ export function buildGt2PulleyNode(
     cylinderGeom(`${id}_col`, mm(metrics.pitchRadiusMm), mm(metrics.totalHeightMm), 0, rgba, {
       role: 'collision',
       mass: massKg,
-      contype: 0,
-      conaffinity: 0,
     }),
   ];
 
@@ -1384,8 +1380,6 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
       cylinderGeom(`${nutId}_col`, mm(flangeR), mm(nutHeightMm), 0, BRASS_RGBA, {
         role: 'collision',
         mass: 0.022,
-        contype: 0,
-        conaffinity: 0,
       }),
     ],
     joints: [
@@ -1432,8 +1426,6 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
         ...cylinderGeom(`${screwId}_rod`, screwRadiusM, mm(lengthMm), 0, BRIGHT, {
           role: 'collision',
           mass: screwMass,
-          contype: 0,
-          conaffinity: 0,
         }),
         thread: { pitch: mm(pitchMm) },
       },
@@ -1476,7 +1468,6 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
       [0, 0, end * (halfLenM + supportHalf[2])],
       RACK_SLATE,
       ALUMINIUM,
-      { contype: 0, conaffinity: 0 },
     )),
     joints: [],
     children: [{ ...leadscrewNode, pos: [0, 0, 0] }, nutNode],
@@ -1637,8 +1628,6 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
       cylinderGeom(`${camId}_col`, mm(profile.baseRadiusMm + profile.liftMm / 2), mm(profile.thicknessMm), 0, CAM_EMERALD, {
         role: 'collision',
         mass: massKg,
-        contype: 0,
-        conaffinity: 0,
       }),
     ],
     joints: [
@@ -1706,7 +1695,7 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
         [0, mm(stemLengthMm / 2), 0],
         BLACK_OXIDE,
         STEEL,
-        { role: 'collision', contype: 0, conaffinity: 0 },
+        { role: 'collision' },
       ),
     ],
     joints: [
@@ -2003,8 +1992,6 @@ export function buildFourBarLinkage(
             role: 'collision',
             euler: [0, 0, +((angleRad * 180) / Math.PI).toFixed(4)],
             mass: massKg,
-            contype: 0,
-            conaffinity: 0,
           },
         ),
       ],
@@ -2081,7 +2068,9 @@ export function buildFourBarLinkage(
     `4-Bar Rocker (${metrics.rockerMm} mm)`,
     D,
     C,
-    1,
+    // Its own layer, above the coupler: on the crank's layer the two bars
+    // could sweep through each other now that links collide.
+    3,
     GEAR_AMBER,
     {
       name: `${rockerId}_hinge`,
