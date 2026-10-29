@@ -18,8 +18,11 @@ export interface Box3Like {
   max: number[];
 }
 
-/** A body's own transform in its parent's frame. */
-export function bodyLocalMatrix(node: Pick<SceneNode, 'pos' | 'quat' | 'euler'>): THREE.Matrix4 {
+/**
+ * A body's own transform in its parent's frame. Also takes a geom, or any
+ * partial pose: a missing pos is the origin, a missing rotation is none.
+ */
+export function bodyLocalMatrix(node: { pos?: number[]; quat?: number[]; euler?: number[] }): THREE.Matrix4 {
   const q = authoredQuat(node);
   const m = new THREE.Matrix4().makeRotationFromQuaternion(
     new THREE.Quaternion(q[1] || 0, q[2] || 0, q[3] || 0, q[0] ?? 1).normalize(),
