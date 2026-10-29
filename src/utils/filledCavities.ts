@@ -159,7 +159,7 @@ export function findFilledCavities(verts: number[], faces: number[], hulls: Hull
   const b = boundsOf(verts);
   const longest = Math.max(b.maxX - b.minX, b.maxY - b.minY, b.maxZ - b.minZ);
   if (!(longest > 0)) return [];
-  const bridged = bridgedCavities(verts, faces, hulls, sampleGrid(verts, faces, b, longest / GRID));
+  const bridged = bridgedCavities(hulls, sampleGrid(verts, faces, b, longest / GRID));
   const named = new Set(bridged.map((c) => c.coveredBy));
   const deep = filledHulls(verts, faces, hulls, b).filter((c) => !named.has(c.coveredBy));
   return [...bridged, ...deep].sort((p, q) => q.volumeMm3 - p.volumeMm3);
@@ -169,7 +169,7 @@ export function findFilledCavities(verts: number[], faces: number[], hulls: Hull
  * Air the hulls fill that fills most of the empty space around it: a slot, a
  * groove, the whole inside of a cup.
  */
-function bridgedCavities(verts: number[], faces: number[], hulls: Hull[], g: Grid): FilledCavity[] {
+function bridgedCavities(hulls: Hull[], g: Grid): FilledCavity[] {
   const { nx, ny, nz, sx, sy, sz, b, solid } = g;
   const px = (i: number) => b.minX + (i + 0.5) * sx;
   const py = (j: number) => b.minY + (j + 0.5) * sy;
