@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { makePresetNoteCard, type NoteCard } from '../utils/noteCards';
-import { syncedSetter } from '../utils/syncedSetter';
+import { syncedSetter, type Update } from '../utils/syncedSetter';
 import { physicsGlobals, type CopilotMessage } from '../physicsGlobals';
 import { cloudAutosave } from '../utils/cloudDocuments';
 import { unloadIsAllowed } from '../utils/rescueScene';
@@ -31,7 +31,11 @@ export function useSceneDocument() {
    * over the double pendulum wrote "Double Pendulum" straight back.
    */
   const noteCardsRef = useRef<NoteCard[]>(noteCards);
-  const [setNoteCards] = useState(() => syncedSetter(noteCardsRef, setNoteCardsState));
+  // The ref is read when the setter is called, never while rendering.
+  const setNoteCards = useCallback(
+    (next: Update<NoteCard[]>) => syncedSetter(noteCardsRef, setNoteCardsState)(next),
+    [],
+  );
   const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
 
