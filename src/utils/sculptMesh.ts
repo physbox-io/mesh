@@ -30,7 +30,7 @@
 // utils/stlParser.ts. `toSceneGeom` emits the Y-up copy the renderer wants
 // alongside it, so nothing downstream has to know a mesh was sculpted.
 // ---------------------------------------------------------------------------
-import { createInwardGuard, keepFromFolding, type InwardGuard } from './sculptThickness';
+import { buildVertexFaces, createInwardGuard, keepFromFolding, type InwardGuard, type VertexFaces } from './sculptThickness';
 
 export type BrushType =
   | 'draw'
@@ -459,19 +459,6 @@ function edgeKey(a: number, b: number): number {
 }
 
 /**
- * Splits every edge longer than `maxEdge` inside the brush, in one pass.
- *
- * Splitting edges one at a time means rebuilding the edge-to-face map after
- * each one, which is linear in the mesh for a change that touches three
- * triangles. Instead every edge to split is chosen first, its midpoint made,
- * and then the face list is rewritten once: each face emits 1, 2, 3 or 4
- * triangles depending on how many of its own edges were split. Because a split
- * edge is shared through the map, both faces on it agree about the midpoint and
- * the result stays conforming — no T-junctions, no cracks.
- *
- * Returns how many edges were split.
- */
-/**
  * The closest point on triangle (a, b, c) to p, written into `out` as
  * [x, y, z, u, v, w] (the barycentric weights of a, b, c). Ericson, Real-Time
  * Collision Detection, 5.1.5. Returns the squared distance.
@@ -518,6 +505,19 @@ export function closestPointOnTriangle(
   return dx * dx + dy * dy + dz * dz;
 }
 
+/**
+ * Splits every edge longer than `maxEdge` inside the brush, in one pass.
+ *
+ * Splitting edges one at a time means rebuilding the edge-to-face map after
+ * each one, which is linear in the mesh for a change that touches three
+ * triangles. Instead every edge to split is chosen first, its midpoint made,
+ * and then the face list is rewritten once: each face emits 1, 2, 3 or 4
+ * triangles depending on how many of its own edges were split. Because a split
+ * edge is shared through the map, both faces on it agree about the midpoint and
+ * the result stays conforming — no T-junctions, no cracks.
+ *
+ * Returns how many edges were split.
+ */
 /**
  * Whether any point of a triangle lies within `sqrt(reach2)` of a point.
  *
@@ -993,6 +993,8 @@ export interface SculptSession {
   inwardLimit: Map<number, number> | null;
   /** layerStart holds each vertex's own normal at first touch (inflate), not the stamp's. */
   holdsVertexNormal: boolean;
+  /** For an inward stroke's fold check: each vertex's faces, rebuilt when the topology changes. */
+  vertexFaces?: VertexFaces;
 }
 
 /** A third of the area of every triangle each vertex is a corner of. */
@@ -1489,7 +1491,10 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
   }
 
   if (dabStart) {
-    keepFromFolding(mesh.positions, mesh.faces, mesh.faceCount, mesh.vertexCount, indices, dabStart, [stamp.nx, stamp.ny, stamp.nz]);
+    if (!session.vertexFaces || session.vertexFaces.topologyRevision !== mesh.topologyRevision) {
+      session.vertexFaces = buildVertexFaces(mesh.faces, mesh.faceCount, mesh.vertexCount, mesh.topologyRevision);
+    }
+    keepFromFolding(mesh.positions, mesh.faces, session.vertexFaces, indices, dabStart, [stamp.nx, stamp.ny, stamp.nz]);
   }
 
   // A depth-limited dab stretches the edges that cross its wall, from the rim

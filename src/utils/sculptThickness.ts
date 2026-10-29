@@ -78,6 +78,34 @@ export function createInwardGuard(
   };
 }
 
+/** Each vertex's faces, compressed (offsets into one list), for one topology. */
+export interface VertexFaces {
+  offsets: Uint32Array;
+  faces: Uint32Array;
+  topologyRevision: number;
+}
+
+export function buildVertexFaces(faces: Uint32Array, faceCount: number, vertexCount: number, topologyRevision: number): VertexFaces {
+  const offsets = new Uint32Array(vertexCount + 1);
+  for (let i = 0; i < faceCount * 3; i++) offsets[faces[i] + 1]++;
+  for (let v = 0; v < vertexCount; v++) offsets[v + 1] += offsets[v];
+  const fill = offsets.slice(0, vertexCount);
+  const list = new Uint32Array(faceCount * 3);
+  for (let f = 0; f < faceCount; f++) {
+    for (let c = 0; c < 3; c++) list[fill[faces[f * 3 + c]]++] = f;
+  }
+  return { offsets, faces: list, topologyRevision };
+}
+
+/**
+ * How far past turning over a face may go in one dab before it counts as a
+ * fold: its normal reversed against its own from before the dab, or facing
+ * clearly away from the brush having faced it. Clearly, as a cosine: a crisp
+ * punch (hardness 0.8 with depthMm) is MEANT to stand its wall up sideways,
+ * and a wall face going perpendicular is not a fold.
+ */
+const FOLD_COSINE = -0.25;
+
 /**
  * Takes back as much of a dab as it takes to fold nothing over.
  *
@@ -88,25 +116,32 @@ export function createInwardGuard(
  * walls of the pit passing through one another (still closed, still wound
  * outward). A fold shows up as a face that turns over: one whose normal
  * reverses in a dab, or one that faced the way the brush was pushing from
- * and no longer does. The dab is halved until none does, and dropped if
- * halving five times does not get there.
+ * and now faces clearly away (FOLD_COSINE). The dab is halved until none does,
+ * and dropped if halving five times does not get there.
+ *
+ * Only the faces round the moved vertices are looked at, through `around`, so
+ * a dab costs what it touches rather than the whole mesh.
  *
  * `before` holds the positions of `indices` before the dab, three per vertex.
  */
 export function keepFromFolding(
-  positions: Float32Array, faces: Uint32Array, faceCount: number, vertexCount: number,
+  positions: Float32Array, faces: Uint32Array, around: VertexFaces,
   indices: number[], before: Float32Array, stampNormal: [number, number, number],
 ): void {
   if (indices.length === 0) return;
-  const slot = new Int32Array(vertexCount).fill(-1);
-  indices.forEach((v, k) => { slot[v] = k; });
+  const slot = new Map<number, number>();
+  indices.forEach((v, k) => { slot.set(v, k); });
+  const seen = new Set<number>();
   const touched: number[] = [];
-  for (let f = 0; f < faceCount; f++) {
-    if (slot[faces[f * 3]] >= 0 || slot[faces[f * 3 + 1]] >= 0 || slot[faces[f * 3 + 2]] >= 0) touched.push(f);
+  for (const v of indices) {
+    for (let i = around.offsets[v]; i < around.offsets[v + 1]; i++) {
+      const f = around.faces[i];
+      if (!seen.has(f)) { seen.add(f); touched.push(f); }
+    }
   }
   const at = (v: number, old: boolean, out: number[], o: number) => {
-    const k = slot[v];
-    if (old && k >= 0) { out[o] = before[k * 3]; out[o + 1] = before[k * 3 + 1]; out[o + 2] = before[k * 3 + 2]; }
+    const k = old ? slot.get(v) : undefined;
+    if (k !== undefined) { out[o] = before[k * 3]; out[o + 1] = before[k * 3 + 1]; out[o + 2] = before[k * 3 + 2]; }
     else { out[o] = positions[v * 3]; out[o + 1] = positions[v * 3 + 1]; out[o + 2] = positions[v * 3 + 2]; }
   };
   const tri = [0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -117,14 +152,17 @@ export function keepFromFolding(
     return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
   };
   const [sx, sy, sz] = stampNormal;
+  const sl = Math.hypot(sx, sy, sz) || 1;
   const was = touched.map((f) => normal(f, true));
   const folds = () => touched.some((f, k) => {
     const a = was[k];
     const b = normal(f, false);
-    if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] <= 0) return true;
     const la = Math.hypot(a[0], a[1], a[2]);
-    const facedBrush = (a[0] * sx + a[1] * sy + a[2] * sz) > 0.1 * la;
-    return facedBrush && (b[0] * sx + b[1] * sy + b[2] * sz) <= 0;
+    const lb = Math.hypot(b[0], b[1], b[2]);
+    if (!(la > 0) || !(lb > 0)) return false;
+    if ((a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb) < FOLD_COSINE) return true;
+    const facedBrush = (a[0] * sx + a[1] * sy + a[2] * sz) / (la * sl) > 0.1;
+    return facedBrush && (b[0] * sx + b[1] * sy + b[2] * sz) / (lb * sl) < FOLD_COSINE;
   });
   for (let attempt = 0; attempt <= 5 && folds(); attempt++) {
     const keep = attempt === 5 ? 0 : 0.5;
