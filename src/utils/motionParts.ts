@@ -33,38 +33,36 @@ export const STEPPERS: Record<string, [number, number, number, number, number, n
   'NEMA23 56': [56.4, 56, 6.35, 21, 1.26, 0.7, 300],
 };
 
-/** The 1 ms step every model runs at (mjcf.ts). */
-const TIMESTEP = 0.001;
-/**
- * The inertia a velocity-driven joint has to carry to stay steady with its
- * torque limit reached. implicitfast steps the actuator's full gain, clamped
- * or not, so a gain of more than about the joint's inertia per step overturns
- * it each step and it runs away: a 5 g gear driven at kv 2 settled at
- * -500 rad/s. Joints with a motor carry at least this as armature.
- */
-export const motorArmature = (kv: number) => +(1.5 * kv * TIMESTEP).toFixed(7);
-/**
- * The joint, carrying at least motorArmature when a velocity motor on it has a
- * torque limit. Unclamped, implicitfast integrates the gain and any inertia is
- * stable; clamped, a light part runs away. For motors written by hand
- * (build_scene), which the hardware and mechanism parts already cover. kv
- * unset is MuJoCo's 1.
- */
-export const withMotorArmature = <J extends { armature?: number; actuator?: { type: string; kv?: number; forceLimit?: number } }>(j: J): J => {
-  if (j.actuator?.type !== 'velocity' || j.actuator.forceLimit === undefined) return j;
-  const floor = motorArmature(j.actuator.kv ?? 1);
-  return (j.armature ?? 0) >= floor ? j : { ...j, armature: floor };
-};
 /** How far below its set speed a stepper runs at its full holding torque, rad/s. */
 const SPEED_DROOP = 0.5;
 
 const SPRING_STEEL: [number, number, number, number] = [0.55, 0.58, 0.62, 1];
 
+/**
+ * The least a spring's seat and top may weigh, kg, for its rate in N/m.
+ *
+ * A spring's rate is the joint's stiffness, which MuJoCo steps explicitly, and
+ * its seat and top are discs of wire weighing grams. A stiff spring between
+ * two such specks rings faster than the 1 ms step and the contact under it
+ * can follow: a Ø20×60 spring with a 1 kg box on it put its 5 g seat through
+ * a 10 mm plate in 3 s, and a Ø6×20 under 0.25 kg flew apart. Each end weighs
+ * at least enough to keep that ring below a quarter of the step's limit
+ * (the top 4·k·dt², the seat, which also has a contact to hold, twice that):
+ * 10 g and 21 g on the stiffest here, near a real spring's 15 g of wire, and
+ * a few grams on the smallest.
+ */
+const springEndMass = (rateNPerM: number, end: 'seat' | 'top') => +((end === 'seat' ? 8 : 4) * rateNPerM * 1e-6).toPrecision(4);
+
 function buildSpring(node: SceneNode, p: HardwarePart, id: string) {
   const [od, free, wire, rate, solid] = SPRINGS[p.size];
   const coils = Math.max(3, Math.round((solid / wire) - 1));
   const r = (od - wire) / 2;
-  node.geoms = [cylinderGeom(`${id}_seat`, mm(od / 2), mm(wire), mm(wire / 2), SPRING_STEEL)];
+  const seat = cylinderGeom(`${id}_seat`, mm(od / 2), mm(wire), mm(wire / 2), SPRING_STEEL);
+  seat.mass = Math.max(seat.mass ?? 0, springEndMass(rate * 1000, 'seat'));
+  // What it stands on holds it at the spring's own time scale, not the
+  // scene's 20 ms: a soft contact under a stiff spring is where it sank.
+  seat.solref = [0.004, 1];
+  node.geoms = [seat];
   // Each turn is a ring of wire on a slide of its own, coupled to the top in
   // proportion to how far up the spring it is: the turns close up together as
   // it compresses and open out as it extends, always reaching from the seat to
@@ -91,7 +89,9 @@ function buildSpring(node: SceneNode, p: HardwarePart, id: string) {
   });
   node.children = [...turns, {
     id: `${id}_carriage`, name: `${p.size} spring top`, type: 'body', pos: [0, 0, mm(free)],
-    geoms: [{ ...cylinderGeom(`${id}_top`, mm(od / 2), mm(wire), -mm(wire / 2), SPRING_STEEL), contype: 0, conaffinity: 0 }],
+    geoms: [((g) => ({ ...g, contype: 0, conaffinity: 0, mass: Math.max(g.mass ?? 0, springEndMass(rate * 1000, 'top')) }))(
+      cylinderGeom(`${id}_top`, mm(od / 2), mm(wire), -mm(wire / 2), SPRING_STEEL),
+    )],
     // The rate is the joint's stiffness; at rest at its free length, it stops solid.
     joints: [{
       name: `${id}_compress`, type: 'slide', axis: [0, 0, 1], pos: [0, 0, 0],
@@ -126,13 +126,12 @@ function buildStepper(node: SceneNode, p: HardwarePart, id: string) {
     ],
     joints: [{
       name: `${id}_spin`, type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0], damping: 0.0005,
-      // Driven at the speed asked for, with no more than its holding torque to do it.
-      // Stiff enough to hold its speed to within half a rad/s at full holding
-      // torque. A gain that stiff only stays steady once the torque limit is
-      // reached if the rotor carries more inertia than a step can overturn —
-      // so the joint carries that much as armature: inertia without mass,
-      // which also limits how hard it can accelerate, as a real stepper's is.
-      armature: Math.max(+rotorI.toFixed(7), motorArmature(torque / SPEED_DROOP)),
+      // Driven at the speed asked for, with no more than its holding torque to
+      // do it: stiff enough to hold its speed to within half a rad/s at full
+      // holding torque, and slipping past it, as a stalled stepper does. The
+      // rotor disc above is the inertia it has; the compiler drives the joint
+      // through a clutch (utils/motorClutch.ts), so no armature is needed to
+      // keep it steady.
       actuator: { type: 'velocity', kv: +(torque / SPEED_DROOP).toFixed(4), ctrlValue: 0, forceLimit: torque },
     }],
     children: [],

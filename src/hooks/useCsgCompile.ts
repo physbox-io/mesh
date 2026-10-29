@@ -77,24 +77,68 @@ function collectUnbuiltScad(nodes: SceneNode[], out: SceneNode[] = []): SceneNod
 }
 
 /**
+ * Decompositions running now, by body id, with the collisionHash each is for.
+ *
+ * A pass used to decompose every stale body whether or not another pass was
+ * already on it. The first body to land changed the scene, the effect
+ * scheduled a second pass, and every body still being decomposed was still
+ * stale, so it was decomposed again — and whichever run finished LAST was
+ * installed, because both carried the right hash. Four nesting bowls ran with
+ * pieces named bowl1_csg_col55 and then settled at 15 pieces with their
+ * cavities filled: the second run's finer retry had timed out in the queue.
+ */
+const collidersInFlight = new Map<string, { hash: string; done: Promise<void> }>();
+
+/** Ids of the bodies whose convex pieces are being worked out right now. */
+export function collidersBeingDecomposed(): string[] {
+  return [...collidersInFlight.keys()];
+}
+
+/** One decomposition per body and hash: a second ask joins the first. */
+function decomposeColliders(node: SceneNode): Promise<void> {
+  const hash = collisionHashOf(node);
+  const running = collidersInFlight.get(node.id);
+  if (running && running.hash === hash) return running.done;
+  const done: Promise<void> = (async () => {
+    try {
+      const result = await decomposeNodeColliders(node);
+      if (result) useStore.getState().applyNodeColliders(node.id, result, true);
+    } catch (err) {
+      const message = await describeLoadFailure(err instanceof Error ? err.message : String(err));
+      console.error(`Convex decomposition failed for ${node.id}:`, err);
+      useStore.getState().setNodeCollisionError(node.id, message, hash);
+    }
+  })().finally(() => {
+    if (collidersInFlight.get(node.id)?.done === done) collidersInFlight.delete(node.id);
+  });
+  collidersInFlight.set(node.id, { hash, done });
+  return done;
+}
+
+/**
  * Recompiles every boolean body whose mesh is out of date. Reads the scene from
  * the store at call time (not from a captured copy) so it can't install geoms
  * derived from primitives the user has since changed.
  *
  * Returns the number of bodies compiled. Errors are recorded on the node
  * (csgError) rather than thrown — one broken shape shouldn't stop the others.
+ *
+ * `colliderWaitMs` is for a caller with a deadline of its own: past it, the
+ * pass returns without the convex pieces still being worked out, and they
+ * install, and rebuild the model, when they land.
  */
 export async function compileCsgNodes(
   skipFinalRecompile = false,
   /**
-   * false: build booleans and SCAD, and leave convex decomposition to the
-   * background compiler (scheduleCsgCompile). V-HACD on a concave part takes
-   * seconds and its worker runs one job at a time, so a caller that only
+   * colliders false: build booleans and SCAD, and leave convex decomposition
+   * to the background compiler (scheduleCsgCompile). V-HACD on a concave part
+   * takes seconds and its worker runs one job at a time, so a caller that only
    * added a body waited on every stale body in the scene: the fourth
    * physics_create_lattice of a burst timed out at 60 s with its body made.
    */
-  { colliders = true }: { colliders?: boolean } = {},
+  opts: { colliders?: boolean; colliderWaitMs?: number } = {},
 ): Promise<number> {
+  const colliders = opts.colliders ?? true;
   const scene = useStore.getState().sceneGraph;
   const stale = collectStale(scene.nodes);
   const unbuilt = collectUnbuiltScad(scene.nodes);
@@ -150,18 +194,24 @@ export async function compileCsgNodes(
   // Re-read the scene rather than reuse the copy above: a boolean body's mesh
   // was just installed by applyNodeCsg, and a body whose mesh changed in this
   // same pass has to be decomposed from what it is NOW, not from what it was.
-  const staleColliders = colliders ? collectStaleColliders(useStore.getState().sceneGraph.nodes) : [];
-  if (!colliders && collectStaleColliders(useStore.getState().sceneGraph.nodes).length > 0) scheduleCsgCompile();
-  await Promise.all(staleColliders.map(async node => {
-    try {
-      const result = await decomposeNodeColliders(node);
-      if (result) useStore.getState().applyNodeColliders(node.id, result, true);
-    } catch (err) {
-      const message = await describeLoadFailure(err instanceof Error ? err.message : String(err));
-      console.error(`Convex decomposition failed for ${node.id}:`, err);
-      useStore.getState().setNodeCollisionError(node.id, message, collisionHashOf(node));
+  const allStaleColliders = collectStaleColliders(useStore.getState().sceneGraph.nodes);
+  const staleColliders = colliders ? allStaleColliders : [];
+  if (!colliders && allStaleColliders.length > 0) scheduleCsgCompile();
+  const decomposed = Promise.all(staleColliders.map(decomposeColliders));
+  if (opts.colliderWaitMs === undefined) {
+    await decomposed;
+  } else {
+    let late = true;
+    await Promise.race([
+      decomposed.then(() => { late = false; }),
+      new Promise((r) => setTimeout(r, opts.colliderWaitMs)),
+    ]);
+    if (late) {
+      decomposed
+        .then(() => useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false))
+        .catch((err) => console.error('Rebuilding after late convex pieces failed:', err));
     }
-  }));
+  }
 
   if (!skipFinalRecompile) {
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);

@@ -31,6 +31,7 @@ import {
   meshChecksum, meshVolumeAndCentroid, primitiveVolume, type Hull,
 } from './csg';
 import { authoredQuat } from './bodyOrientation';
+import { tidyMesh } from './meshTidy';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { wallThickness, type FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
@@ -540,7 +541,12 @@ async function analyse(verts: number[], faces: number[]) {
 
 /** Judges one mesh of a body, and breaks it into convex pieces if it earns it. */
 async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<MeshColliders> {
-  const { verts, faces } = bodyFrameMesh(source);
+  const framed = bodyFrameMesh(source);
+  const verts = framed.verts;
+  // Closed up first: a profile on the axis leaves zero-area triangles, and a
+  // polyhedron listed the wrong way round comes out inside out. Neither is
+  // ambiguous, and meshes saved before compiles were tidied still carry them.
+  const { faces } = tidyMesh(verts, framed.faces);
   const { volume, hullVolume, integrity } = await analyse(verts, faces);
   const verdict = decompositionVerdict(node, { volume, hullVolume, triangles: faces.length / 3 });
   const none = (warning?: string, strategy: DecompositionStrategy = verdict.strategy): MeshColliders => ({
@@ -552,11 +558,12 @@ async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<Mes
   // A mesh that is open or wound both ways cannot be flood-filled sensibly: the
   // fill leaks through the gaps and the "inside" it finds is not the inside.
   // Better a hull and a sentence than confident nonsense. See the winding trap
-  // in CLAUDE.md, and meshIntegrity.ts for what is actually checked.
+  // in CLAUDE.md, and meshIntegrity.ts for what is actually checked. A closed
+  // mesh wound inward throughout was turned the right way out just above.
   if (integrity && !(integrity.closed && integrity.consistentlyWound && integrity.volume > 0)) {
-    return none(!integrity.closed
-      ? 'This mesh has holes in it, so its inside cannot be told from its outside — it collides as its convex hull, and any hollow in it is solid. Close the mesh to decompose it.'
-      : 'This mesh has triangles facing both ways, so its inside cannot be told from its outside — it collides as its convex hull. Fix the winding to decompose it.', 'hull');
+    return none(integrity.closed && !integrity.consistentlyWound
+      ? 'This mesh has triangles facing both ways, so its inside cannot be told from its outside — it collides as its convex hull. Fix the winding to decompose it.'
+      : 'This mesh has holes in it, so its inside cannot be told from its outside — it collides as its convex hull, and any hollow in it is solid. Close the mesh to decompose it.', 'hull');
   }
 
   // Asked for, or left to the defaults with one finer try in reserve. The

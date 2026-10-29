@@ -6,9 +6,19 @@
 // `Worker` does not exist at all. That fallback is not a nicety — it is what
 // lets scripts/export-presets.ts and the test suite decompose.
 //
-// One worker, not a pool. Decompositions are queued behind a single debounce in
-// useCsgCompile and a scene rarely has more than a handful of concave bodies, so
-// the parallelism openscad.ts needs would buy a second wasm heap for nothing.
+// One worker, not a pool, and one job in it at a time. A pool was measured and
+// is not worth it: the wasm heap never shrinks, and is 60 MB after a cup at 25k
+// voxels and 230 MB after a 384-piece chute at 400k, so a second worker is a
+// second heap that size for work that is mostly one body at a time anyway.
+//
+// One job at a time is what makes a timeout mean something. Every request used
+// to be posted at once and timed from the post, so a scene of four concave
+// bodies built over MCP timed out all four: the fourth's 20 s ran out while the
+// first three were still in front of it. A job is now posted only when the
+// worker is idle, so its clock is its own; and a job that does time out is
+// stopped by terminating the worker, which used to grind on through it while
+// everything behind it waited and timed out in turn. The next job gets a new
+// worker.
 
 import type { Hull } from './csg';
 import type { DecomposeParams } from './vhacd';
@@ -19,59 +29,141 @@ import { noteWorkerStopped } from './staleBuild';
 /**
  * Long enough for any shape that passed the triangle cap, short enough that a
  * forced decomposition of something pathological gives up rather than wedging
- * the compile pass. The caller falls back to colliding as a hull.
+ * the compile pass. The caller falls back to colliding as a hull. Counted from
+ * when the worker is given the job, not from when it was asked for.
  */
-const DECOMPOSE_TIMEOUT_MS = 20_000;
+export const DECOMPOSE_TIMEOUT_MS = 20_000;
 
-/**
- * Measuring is a hull and an edge walk, well under a second — but it queues
- * behind whatever decomposition the one worker is already running, so it gets
- * that one's allowance on top.
- */
-const ANALYSE_TIMEOUT_MS = DECOMPOSE_TIMEOUT_MS + 10_000;
+/** Measuring is a hull and an edge walk, well under a second. */
+export const ANALYSE_TIMEOUT_MS = 10_000;
 
-type Settle = { resolve: (value: never) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
-
-let worker: Worker | null = null;
-let seq = 0;
-const pending = new Map<number, Settle>();
-const cavitiesByHulls = new WeakMap<Hull[], FilledCavity[]>();
-
-function failAll(message: string) {
-  for (const [, s] of pending) { clearTimeout(s.timer); s.reject(new Error(message)); }
-  pending.clear();
+/** What the client needs of a Worker; a test passes its own. */
+export interface WorkerLike {
+  postMessage(msg: VhacdRequest, transfer: Transferable[]): void;
+  terminate(): void;
+  onmessage: ((evt: MessageEvent<VhacdResponse>) => void) | null;
+  onerror: ((evt: unknown) => void) | null;
 }
 
-function ensureWorker(): Worker | null {
+type Job = {
+  build: (id: number) => VhacdRequest & { verts: Float64Array; faces: Uint32Array };
+  timeoutMs: number;
+  timeoutMessage: string;
+  resolve: (value: unknown) => void;
+  reject: (e: Error) => void;
+};
+
+const defaultSpawn = (): WorkerLike | null => {
   if (typeof Worker === 'undefined') return null;
-  if (worker) return worker;
   try {
-    worker = new Worker(new URL('../workers/vhacdWorker.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (evt: MessageEvent<VhacdResponse>) => {
-      const msg = evt.data;
-      const settle = pending.get(msg.id);
-      if (!settle) return;
-      pending.delete(msg.id);
-      clearTimeout(settle.timer);
-      if (msg.type === 'DECOMPOSE_ERROR') settle.reject(new Error(msg.message));
-      else if (msg.type === 'ANALYSED') (settle.resolve as (a: MeshAnalysis) => void)(msg.analysis);
+    return new Worker(new URL('../workers/vhacdWorker.ts', import.meta.url), { type: 'module' }) as unknown as WorkerLike;
+  } catch {
+    return null;
+  }
+};
+
+let spawn: () => WorkerLike | null = defaultSpawn;
+let worker: WorkerLike | null = null;
+let seq = 0;
+const queue: Job[] = [];
+let running: { id: number; job: Job; timer: ReturnType<typeof setTimeout> } | null = null;
+const cavitiesByHulls = new WeakMap<Hull[], FilledCavity[]>();
+
+/** For tests: the worker to use instead of the real one. Resets the queue. */
+export function setVhacdWorkerFactory(factory: (() => WorkerLike | null) | null): void {
+  worker?.terminate();
+  worker = null;
+  if (running) clearTimeout(running.timer);
+  running = null;
+  queue.length = 0;
+  spawn = factory ?? defaultSpawn;
+}
+
+/** Jobs waiting or running, for whoever wants to know whether the worker is busy. */
+export function vhacdJobsPending(): number {
+  return queue.length + (running ? 1 : 0);
+}
+
+function stopWorker() {
+  worker?.terminate();
+  worker = null;
+}
+
+function finish(id: number, settle: (job: Job) => void) {
+  if (!running || running.id !== id) return;
+  const { job, timer } = running;
+  clearTimeout(timer);
+  running = null;
+  settle(job);
+  pump();
+}
+
+function ensureWorker(): WorkerLike | null {
+  if (worker) return worker;
+  const w = spawn();
+  if (!w) return null;
+  w.onmessage = (evt: MessageEvent<VhacdResponse>) => {
+    const msg = evt.data;
+    finish(msg.id, (job) => {
+      if (msg.type === 'DECOMPOSE_ERROR') job.reject(new Error(msg.message));
+      else if (msg.type === 'ANALYSED') job.resolve(msg.analysis);
       else {
         const hulls = msg.hulls.map(fromPayload);
         if (msg.cavities) cavitiesByHulls.set(hulls, msg.cavities);
-        (settle.resolve as (h: Hull[]) => void)(hulls);
+        job.resolve(hulls);
       }
-    };
-    // A worker that dies leaves every caller awaiting forever otherwise.
-    worker.onerror = () => {
-      noteWorkerStopped();
-      failAll('The convex decomposition worker stopped.');
-      worker?.terminate();
-      worker = null;
-    };
-  } catch {
-    worker = null;
+    });
+  };
+  // A worker that dies fails the job it was running, and only that one: the
+  // jobs behind it get a new worker.
+  w.onerror = () => {
+    noteWorkerStopped();
+    if (worker === w) stopWorker();
+    if (running) finish(running.id, (job) => job.reject(new Error('The convex decomposition worker stopped.')));
+  };
+  worker = w;
+  return w;
+}
+
+function pump() {
+  if (running || queue.length === 0) return;
+  const w = ensureWorker();
+  if (!w) {
+    // The worker could not be started at all; nothing behind this will fare better.
+    for (const job of queue.splice(0)) job.reject(new Error('The convex decomposition worker could not be started.'));
+    return;
   }
-  return worker;
+  const job = queue.shift()!;
+  const id = ++seq;
+  const timer = setTimeout(() => {
+    // Stopped, not abandoned: left running it would hold every job behind it.
+    stopWorker();
+    finish(id, (j) => j.reject(new Error(j.timeoutMessage)));
+  }, job.timeoutMs);
+  running = { id, job, timer };
+  const req = job.build(id);
+  try {
+    w.postMessage(req, [req.verts.buffer, req.faces.buffer]);
+  } catch (err) {
+    stopWorker();
+    finish(id, (j) => j.reject(err instanceof Error ? err : new Error(String(err))));
+  }
+}
+
+function request<T>(
+  timeoutMessage: string,
+  timeoutMs: number,
+  build: Job['build'],
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    queue.push({ build, timeoutMs, timeoutMessage, resolve: resolve as (v: unknown) => void, reject });
+    pump();
+  });
+}
+
+/** Whether there is a worker to send jobs to, or this has to run inline. */
+function hasWorker(): boolean {
+  return ensureWorker() !== null;
 }
 
 const fromPayload = (h: HullPayload): Hull => ({
@@ -93,13 +185,11 @@ export async function decomposeMeshOffThread(
   faces: number[],
   params: Partial<DecomposeParams> = {},
 ): Promise<Hull[]> {
-  const w = ensureWorker();
-  if (!w) {
+  if (!hasWorker()) {
     const { decomposeMesh } = await import('./vhacd');
     return decomposeMesh(verts, faces, params);
   }
-
-  return request<Hull[]>(w, 'Convex decomposition timed out.', DECOMPOSE_TIMEOUT_MS, (id) => ({
+  return request<Hull[]>('Convex decomposition timed out.', DECOMPOSE_TIMEOUT_MS, (id) => ({
     type: 'DECOMPOSE', id, params,
     verts: Float64Array.from(verts),
     faces: Uint32Array.from(faces),
@@ -111,15 +201,13 @@ export async function decomposeWithCavitiesOffThread(
   faces: number[],
   params: Partial<DecomposeParams> = {},
 ): Promise<{ hulls: Hull[]; cavities: FilledCavity[] }> {
-  const w = ensureWorker();
-  if (!w) {
+  if (!hasWorker()) {
     const { decomposeMesh } = await import('./vhacd');
     const { findFilledCavities } = await import('./filledCavities');
     const hulls = await decomposeMesh(verts, faces, params);
     return { hulls, cavities: findFilledCavities(verts, faces, hulls) };
   }
-
-  const hulls = await request<Hull[]>(w, 'Convex decomposition timed out.', DECOMPOSE_TIMEOUT_MS, (id) => ({
+  const hulls = await request<Hull[]>('Convex decomposition timed out.', DECOMPOSE_TIMEOUT_MS, (id) => ({
     type: 'DECOMPOSE', id, params, findCavities: true,
     verts: Float64Array.from(verts),
     faces: Uint32Array.from(faces),
@@ -133,32 +221,13 @@ export async function decomposeWithCavitiesOffThread(
  * where it can be. See utils/meshAnalysis.ts.
  */
 export async function analyseMeshOffThread(verts: number[], faces: number[]): Promise<MeshAnalysis> {
-  const w = ensureWorker();
-  if (!w) {
+  if (!hasWorker()) {
     const { analyseMesh } = await import('./meshAnalysis');
     return analyseMesh(verts, faces);
   }
-  return request<MeshAnalysis>(w, 'Measuring the mesh timed out.', ANALYSE_TIMEOUT_MS, (id) => ({
+  return request<MeshAnalysis>('Measuring the mesh timed out.', ANALYSE_TIMEOUT_MS, (id) => ({
     type: 'ANALYSE', id,
     verts: Float64Array.from(verts),
     faces: Uint32Array.from(faces),
   }));
-}
-
-function request<T>(
-  w: Worker,
-  timeoutMessage: string,
-  timeoutMs: number,
-  build: (id: number) => VhacdRequest & { verts: Float64Array; faces: Uint32Array },
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const id = ++seq;
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(timeoutMessage));
-    }, timeoutMs);
-    pending.set(id, { resolve: resolve as (value: never) => void, reject, timer });
-    const req = build(id);
-    w.postMessage(req, [req.verts.buffer, req.faces.buffer]);
-  });
 }

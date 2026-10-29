@@ -13,12 +13,14 @@ import type {
   FrameSnapshot,
   ImpactEvent,
   HeadlessResult,
-  HistoryEntry,
   HistoryFrame,
   HistoryQuery,
   SeedState,
   StepForResult,
+  TelemetryReply,
 } from '../workers/physicsWorkerProtocol';
+import { noteScriptStatus } from './scriptStatus';
+import { noteWorkerFrame } from './modelProvenance';
 import type { CoSimChannel } from '../utils/coSimLink';
 import { noteWorkerStopped } from '../utils/staleBuild';
 
@@ -212,7 +214,7 @@ export class PhysicsWorkerClient {
   private pendingBuilds = new Map<string, Pending<BuiltResult>>();
   private pendingHeadless = new Map<string, Pending<HeadlessRunResult>>();
   private pendingHistory = new Map<string, Pending<HistoryResult>>();
-  private pendingTelemetry = new Map<string, Pending<HistoryEntry | null>>();
+  private pendingTelemetry = new Map<string, Pending<TelemetryReply | null>>();
   private pendingSteps = new Map<string, Pending<StepForResult>>();
   private pendingChannels = new Map<string, Pending<{ channels: CoSimChannel[]; timestepMs: number }>>();
   /**
@@ -236,6 +238,9 @@ export class PhysicsWorkerClient {
       this.lastHeardAt = Date.now();
       switch (msg.type) {
         case 'BUILT': {
+          // A build's reply carries the new model's state: from here on the
+          // sim time is the new model's, not the last frame of the old one.
+          if (msg.ok && typeof msg.time === 'number') noteWorkerFrame(msg.time);
           const pending = this.pendingBuilds.get(msg.id);
           if (pending) {
             this.pendingBuilds.delete(msg.id);
@@ -246,6 +251,11 @@ export class PhysicsWorkerClient {
         case 'FRAME':
           this.onFrame?.(msg);
           break;
+        case 'SCRIPT_STATUS': {
+          const { type: _t, ...status } = msg;
+          noteScriptStatus(status);
+          break;
+        }
         case 'ERROR':
           // A fatal error means the engine is gone (a native abort, the heap
           // exhausted): whatever was still asked will never be answered.
@@ -411,7 +421,7 @@ export class PhysicsWorkerClient {
     });
   }
 
-  getTelemetry(): Promise<HistoryEntry | null> {
+  getTelemetry(): Promise<TelemetryReply | null> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       this.noteRequest();

@@ -22,10 +22,11 @@ Technical decisions, conventions, and architecture notes for the **PhysBox: Mesh
 ## Architecture and Core Mechanics
 
 ### 1. Proximity-aware joint coupling (pinions and gears)
-* Gear and pinion-rack pairs are coupled with joint equality constraints (`<equality><joint ... /></equality>`) rather than tooth-on-tooth collision.
-* The compiler computes the world positions of gears and pinions relative to their parent bodies and couples them only when they are close enough:
+* Gear and pinion-rack pairs are coupled with equality constraints rather than tooth-on-tooth collision: a fixed tendon `joint1 - ratio*joint2` held at zero length (`utils/jointCoupling.ts`), which MuJoCo softens by the tendon's real inverse inertia. A joint equality's softness ignores the ratio and let loaded couplings slip.
+* The compiler computes the world positions and axes of gears and pinions and couples them only when they mesh (`utils/gearMeshing.ts`):
   * **Pinion-rack:** coupled when centre-to-centre distance $\le 0.5$ metres.
-  * **Gears:** coupled when centre-to-centre distance $\le (r_1 + r_2) \times 1.15$.
+  * **Gears:** hinge axes parallel, a round geom of each overlapping the other along the axis (the same plane), and the axes $0.5$ to $1.2 \times (r_1 + r_2)$ apart, $r$ being those geoms' radii (a cut gear's pitch radius). Ratio $-r_2/r_1$.
+  * Joints already joined by explicit `coupleTargetId` couplings, directly or along a chain, are never proximity-coupled to each other.
 * Each node has an `allowCoupling` property. Unchecking "Allow Mechanical Coupling" in the sidebar bypasses the proximity solver and leaves the parts to direct physical contact.
 
 ### 2. Gravity and DOF (degrees of freedom)
@@ -138,6 +139,7 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 ### API methods
 - **`api.isKeyPressed(keyName)`**: whether a key (e.g. `'space'`, `'w'`, `'arrowup'`, `'enter'`) is currently pressed. Case-insensitive. Matches both `e.key` and `e.code`.
 - **`api.getPosition(bodyName)`**: the 3D position `[x, y, z]` of the body (defaults to the current body).
+- **`api.getOrientation(bodyName)`**: the body's world rotation as a row-major 3x3 matrix, 9 numbers (`data.xmat`). Column 0 (`[R[0], R[3], R[6]]`) is the body's local X axis in world space.
 - **`api.getVelocity(bodyName)`**: the 3D linear velocity `[vx, vy, vz]`.
 - **`api.getAngularVelocity(bodyName)`**: the 3D angular velocity `[wx, wy, wz]`.
 - **`api.setPosition(pos, bodyName)`**: sets the 3D position `[x, y, z]` (or 1D position for hinge/slide joints).
@@ -149,11 +151,25 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 - **`api.applyForce(forceVec, bodyName)`**: applies a 3D force `[fx, fy, fz]` to the body.
 - **`api.applyTorque(torqueVec, bodyName)`**: applies a 3D torque `[tx, ty, tz]` to the body.
 - **`api.applyJointForce(jointName, forceVal)`**: applies a 1D force/torque along or around the joint axis.
-- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator. `mjcf.ts` names a joint's actuator `<jointName>_actuator`; an unknown name is ignored silently. For a velocity actuator `ctrlVal` is the target speed (rad/s hinge, m/s slide; the joint settles at `ctrlVal/gear`), for a motor the torque (N·m) or force (N). With a `forceLimit`, a velocity actuator on a light part cannot hold its speed unless the joint carries `armature` ≥ 1.5·kv·dt (`motorArmature` in `utils/motionParts.ts`); unclamped, implicitfast holds it. Steppers, the mechanism builders and MCP's `fillJointDefaults` (`withMotorArmature`) add it.
+- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator. `mjcf.ts` names a joint's actuator `<jointName>_actuator`; an unknown name does nothing and is reported (see *What a script got wrong*). For a velocity actuator `ctrlVal` is the target speed (rad/s hinge, m/s slide; the joint settles at `ctrlVal/gear`), for a motor the torque (N·m) or force (N). With a `forceLimit`, a velocity actuator on a light part cannot hold its speed unless the joint carries `armature` ≥ 1.5·kv·dt (`motorArmature` in `utils/motionParts.ts`); unclamped, implicitfast holds it. Steppers, the mechanism builders and MCP's `fillJointDefaults` (`withMotorArmature`) add it.
+- **`api.getActuatorControl(actuatorName)`**: the actuator's current control value (0, and a reported problem, for an unknown name).
 - **`api.getTime()`**: the current simulation time.
+- **`api.getTimestep()`**: the physics timestep in seconds (`model.opt.timestep`, normally 0.001): the `dt` of one script call.
 - **`api.getWind()`**: the current wind vector `[windX, windY]`.
-- **`api.log(msg)`**: logs a debug message to the console.
-- **`api.state`**: this body's own persistent object. The script body runs afresh every step, so its local variables do not survive; anything that has to last (an integral, a phase, a timer) goes on `api.state` — `api.state.integral = (api.state.integral || 0) + err * dt`. It survives edits made mid-play and worker recycles (it travels in the seed with qpos/qvel), and is cleared by Reset and by a preset load. The object is fixed: assigning `api.state = …` is ignored. Keep it to plain values, arrays and objects, or it cannot be carried across a worker restart. Implemented in `src/utils/scriptState.ts`; the native desktop app implements the same contract and also rewinds it with its run-ahead buffer.
+- **`api.raycast(origin, dir, maxDist = 10, excludeBody)`**: the first geom along `dir` from `origin` (world frame, m) within `maxDist`, as `{ dist, point, geom, body }`, or `null`. Skips the calling body unless `excludeBody` names another (`null` skips nothing); geoms with alpha 0 are not hit (`mj_ray`'s rule). A line follower looks down: `api.raycast(api.getPosition(), [0, 0, -1], 0.1)`.
+- **`api.getContacts(bodyName)`**: what the body touches now, `[{ otherBody, otherGeom, geom, dist, force }]`: body ids (`'world'` for the floor), signed distance (negative is penetration) and normal force in N. Reads `data.contact` once per call; it is a heap copy, so call it once a step at most.
+- **`api.log(...args)`**: logs a debug line to the console, and keeps it (last 200, with sim time and body) for MCP: `physics_run_headless` returns `logs`, `physics_get_telemetry` returns `scriptLogs`.
+- **`api.state`**: this body's own persistent object. The script body runs afresh every step, so its local variables do not survive; anything that has to last (an integral, a phase, a timer) goes on `api.state` — `api.state.integral = (api.state.integral || 0) + err * api.getTimestep()`. It survives edits made mid-play and worker recycles (it travels in the seed with qpos/qvel), and is cleared by Reset and by a preset load. The object is fixed: assigning `api.state = …` is ignored. Keep it to plain values, arrays and objects, or it cannot be carried across a worker restart. Implemented in `src/utils/scriptState.ts`; the native desktop app implements the same contract and also rewinds it with its run-ahead buffer. `physics_get_telemetry` returns it as `scriptState`, and `physics_run_headless` returns the run's final one.
+
+`bodyName` defaults to the script's own body throughout. To start a hinge or slide away from 0 there is no joint field: `if (api.getTime() === 0) api.setPosition([theta], '<bodyName>')`. A joint's `initialVelocity` sets its opening speed.
+
+### What a script got wrong, and what it costs
+A script never stops the simulation: a throw, a name the model does not have (body, joint, actuator) or a force that is not a finite number does nothing and is noted once per body and message in `src/workers/scriptDiagnostics.ts`'s `ScriptProblemLog`, with the sim time it first happened and how many times (steps, for a runtime error). Live, the worker pushes those to the main thread (`SCRIPT_STATUS`, at most twice a second, and after every build) and `physics_get_state.worker.scriptProblems` lists them; a headless run returns them as warnings ("… (first at t=0.301 s, failed on 700 steps)"). A body's problems are cleared when its script changes, all of them when a build starts over from t = 0. MCP writes that set a script (`update_object`, `add_object`, `build_scene`, `update_scene`) syntax-check it and return `scriptWarnings`, but save it anyway.
+
+The worker also times the scripts (`ScriptTiming`: per step and per body, in one-second windows) against how far sim time advanced: `worker.realtimeFactor`, `worker.scriptMsPerStep` and `worker.slowestScript` in `physics_get_state`, with a note below 0.8x saying whether scripts are the reason; a headless run reports `wallMs` and `scriptMsPerStep` and warns when scripts would hold live play below real time.
+
+### Telemetry
+History frames (every 10 steps; `physics_get_history`, `physics_get_telemetry`, and the `physics_run_headless` trajectory) carry each joint at its full width: hinge and slide as numbers, a free joint's `pos` as `[x, y, z, qw, qx, qy, qz]` and `vel` as 6 numbers, a ball's as a quaternion and 3 rates (see `readJoint` in `src/workers/scriptSensors.ts`). A joint with an actuator adds `ctrl` and `actuatorForce` (`qfrc_actuator`; `qfrc_applied` only shows `applyJointForce`). Joints carry their `body`, contacts their `body1`/`body2`, so a `bodies` filter keeps a body's joints and contacts too. The history is one continuous run: a build that starts over from t = 0 clears it and records the opening frame; a build that carries the running simulation across keeps it.
 
 ---
 
@@ -171,10 +187,12 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 ### 3. Non-minimum phase centring feedback
 * **Centring:** driving the cart straight to the centre ($x > 0 \implies F < 0$) fights the catching force. To return left to the centre, the cart first accelerates further right to tilt the pole left, then rides that tilt back.
 * **Gains:** positive position gains ($k_x > 0, k_v > 0$) with dominant vertical tracking gains ($k_\theta > 0, k_\omega > 0$) give stable, centring asymptotic decay:
-  * **$k_x = 22.0$** (centring stiffness)
-  * **$k_v = 15.0$** (cart velocity damping)
-  * **$k_\theta = 80.0$** (vertical catch)
-  * **$k_\omega = 20.0$** (angular rate damping)
+  * **$k_x = 8.0$** (centring stiffness)
+  * **$k_v = 8.0$** (cart velocity damping)
+  * **$k_\theta = 40.0$** (vertical catch: must exceed $(m_{cart} + m_{pole})\,g \approx 9.3$ N to hold the pole up)
+  * **$k_\omega = 4.0$** (angular rate damping)
+
+  These are the `cartpole` preset's (`src/presets/presetScenes.ts`).
 
 ---
 

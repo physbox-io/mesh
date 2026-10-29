@@ -12,6 +12,7 @@
 
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { SCAD_LIBRARY } from '../utils/scadLibrary';
+import { indexScadTriangles, type CompiledScad } from '../utils/scadMesh';
 // A static import on purpose: Vite follows it into the module graph, splits
 // the Emscripten glue into its own chunk and emits openscad.wasm as an asset
 // next to it, so nothing is fetched from a CDN and the cross-origin isolation
@@ -138,8 +139,6 @@ async function renderToStl(scadCode: string): Promise<Uint8Array> {
   return instance.FS.readFile('/output.stl', { encoding: 'binary' });
 }
 
-type CompiledScad = { vertices: number[]; faces: number[]; renderVertices: number[] };
-
 /**
  * Compiles a raw OpenSCAD source code string into 3D mesh vertex/face arrays.
  * A fresh WebAssembly instance each time — see renderToStl.
@@ -160,69 +159,7 @@ async function compileSCAD(scadCode: string): Promise<CompiledScad> {
     throw new Error('Parsed STL geometry does not contain position attributes.');
   }
 
-  const rawVerts = positionAttr.array;
-  const uniqueVerts: number[] = [];
-  const faces: number[] = [];
-
-  // Deduplicate vertices and index the face array.
-  // OpenSCAD's STL output is in its own Z-up convention (X=right, Y=depth, Z=up),
-  // but the `vertices` field is expected downstream in Three.js Y-up convention
-  // (X=right, Y=up, Z=toward camera) - the renderVertices conversion below assumes
-  // Y-up input and swaps it back to MuJoCo Z-up. Remap here (x,y,z)->(x,z,-y) so that
-  // round-tripping through that conversion reproduces OpenSCAD's original Z-up
-  // orientation instead of rotating every scad-compiled mesh 90° about X.
-  //
-  // Coincident vertices are found by a numeric hash of their coordinates
-  // quantised to 1e-5 (a hundredth of a millimetre), with an exact check on
-  // the bucket. This used to build a string key per corner, which on a
-  // threaded hole's million corners was the slowest step of the compile.
-  const Q = 1e5;
-  const buckets = new Map<number, number[]>();
-  const quantised = (v: number) => Math.round(v * Q);
-  for (let i = 0; i < rawVerts.length; i += 3) {
-    const yUpX = rawVerts[i];
-    const yUpY = rawVerts[i + 2];
-    const yUpZ = -rawVerts[i + 1];
-    const qx = quantised(yUpX), qy = quantised(yUpY), qz = quantised(yUpZ);
-    // Three large primes, xor-folded: cheap, and collisions only cost a
-    // comparison against the bucket's other members.
-    const hash = ((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) | 0;
-    let bucket = buckets.get(hash);
-    let idx = -1;
-    if (bucket) {
-      for (const candidate of bucket) {
-        const c = candidate * 3;
-        if (quantised(uniqueVerts[c]) === qx && quantised(uniqueVerts[c + 1]) === qy && quantised(uniqueVerts[c + 2]) === qz) {
-          idx = candidate;
-          break;
-        }
-      }
-    } else {
-      bucket = [];
-      buckets.set(hash, bucket);
-    }
-    if (idx === -1) {
-      idx = uniqueVerts.length / 3;
-      uniqueVerts.push(yUpX, yUpY, yUpZ);
-      bucket.push(idx);
-    }
-    faces.push(idx);
-  }
-
-  // Swap Y and Z for MuJoCo's Z-up space representation
-  const renderVertices: number[] = [];
-  for (let i = 0; i < uniqueVerts.length; i += 3) {
-    const x = uniqueVerts[i];
-    const y = uniqueVerts[i + 1];
-    const z = uniqueVerts[i + 2];
-    renderVertices.push(
-      Number(x.toFixed(5)),
-      Number((-z).toFixed(5)),
-      Number(y.toFixed(5))
-    );
-  }
-
-  return { vertices: uniqueVerts, faces, renderVertices };
+  return indexScadTriangles(positionAttr.array);
 }
 
 // onmessage handlers run to their first await and then interleave, so two

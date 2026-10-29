@@ -9,6 +9,9 @@ import type { SceneNode } from '../../types/scene';
 import { type PhysicsWindow, countBodies } from './bridgeUtils';
 import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from './bodyFeatures';
 
+/** How long a scene build waits for its convex pieces before answering. */
+const SETTLE_WAIT_FOR_COLLIDERS_MS = 25_000;
+
 export const autoCompileScad = async (nodes: SceneNode[]) => {
   const scadNodes: SceneNode[] = [];
   const collect = (nodesList: SceneNode[]) => {
@@ -99,8 +102,14 @@ export const settleScene = async (
   // Boolean bodies compile through the same OpenSCAD pool, and just as
   // asynchronously — a caller that got ok:true before they finished would be
   // told a scene built when its geometry didn't exist yet. skipFinalRecompile:
-  // the single build below covers it.
-  await compileCsgNodes(true, { colliders: waitForColliders });
+  // the single build below covers it. Convex pieces get a share of the
+  // command's 60 s, not all of it: a marble run's four bodies are a good half
+  // minute one after another, and the hub dropped the command at 60 s. Late
+  // ones land on their own; the summary says collisionPending until they do.
+  // A caller that only added a body does not wait for them at all.
+  await compileCsgNodes(true, waitForColliders
+    ? { colliderWaitMs: SETTLE_WAIT_FOR_COLLIDERS_MS }
+    : { colliders: false });
   await applyDeclarativePostCsgFeatures(nodes);
   // This is now the ONLY recompile triggered by this load, so there's nothing
   // left to race against. forceReset is false so recompile() preserves qpos/qvel

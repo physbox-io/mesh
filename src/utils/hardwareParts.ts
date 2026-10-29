@@ -270,6 +270,11 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
   // Matched by id, which every builder derives from the part's own: a spring
   // has many coils, all one kind of piece.
   const old = new Map(partBodies(node).slice(1).map((b) => [b.id, b]));
+  // Where the old spec's builder put each piece, so a piece is judged moved
+  // by how far it is from THAT, not from where the new size puts it: a spring
+  // re-sized from 30 to 60 mm long kept its top at 30 mm, its range moved up
+  // 30 mm to match, and rested 30 mm short of its free length.
+  const built = new Map(was ? partBodies(hardwarePartNode(was, node.id)).slice(1).map((b) => [b.id, b.pos]) : []);
   for (const body of partBodies(fresh).slice(1)) {
     const was = old.get(body.id);
     if (!was) continue;
@@ -286,9 +291,10 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
     const wasJoint = was.joints?.[0];
     if (joint?.type === 'slide' && joint.axis && joint.range && wasJoint?.type === 'slide') {
       // Started off its middle: kept there, its range moved to match.
-      const shift = [0, 1, 2].reduce((acc, k) => acc + ((was.pos[k] ?? 0) - (body.pos[k] ?? 0)) * (joint.axis![k] ?? 0), 0);
+      const home = built.get(body.id) ?? body.pos;
+      const shift = [0, 1, 2].reduce((acc, k) => acc + ((was.pos[k] ?? 0) - (home[k] ?? 0)) * (joint.axis![k] ?? 0), 0);
       if (Math.abs(shift) > 1e-9) {
-        body.pos = [...was.pos];
+        body.pos = body.pos.map((v, k) => +(v + shift * (joint.axis![k] ?? 0)).toFixed(9));
         joint.range = [+(joint.range[0] - shift).toFixed(6), +(joint.range[1] - shift).toFixed(6)];
       }
     }

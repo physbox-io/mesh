@@ -11,7 +11,6 @@
 
 import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
 import { prismMesh } from './csg';
-import { motorArmature } from './motionParts';
 import {
   ALUMINIUM,
 } from './extrusionParts';
@@ -494,8 +493,6 @@ export function buildInvoluteGearNode(
     ...cylinderGeom(`${id}_col`, mm(metrics.pitchRadiusMm), mm(metrics.thicknessMm), 0, rgba, {
       role: 'collision',
       mass: massKg,
-      contype: 0,
-      conaffinity: 0,
     }),
   };
 
@@ -507,7 +504,6 @@ export function buildInvoluteGearNode(
     damping: 0.002,
     ...(options.actuated
       ? {
-          armature: motorArmature(2.0),
           actuator: {
             type: 'velocity',
             kv: 2.0,
@@ -824,7 +820,7 @@ export function buildInvoluteRackNode(
       [0, mm(yMidMm), 0],
       rgba,
       density,
-      { role: 'collision', mass: massKg, contype: 0, conaffinity: 0 },
+      { role: 'collision', mass: massKg },
     ),
   };
 
@@ -1105,8 +1101,6 @@ export function buildGt2PulleyNode(
     cylinderGeom(`${id}_col`, mm(metrics.pitchRadiusMm), mm(metrics.totalHeightMm), 0, rgba, {
       role: 'collision',
       mass: massKg,
-      contype: 0,
-      conaffinity: 0,
     }),
   ];
 
@@ -1118,7 +1112,6 @@ export function buildGt2PulleyNode(
     damping: 0.001,
     ...(options.actuated
       ? {
-          armature: motorArmature(1.5),
           actuator: {
             type: 'velocity',
             kv: 1.5,
@@ -1312,8 +1305,12 @@ export interface LeadscrewDriveSpec {
 }
 
 export interface LeadscrewDriveResult {
+  /** The screw, on its hinge: a child of the mount. */
   leadscrewNode: SceneNode;
+  /** The nut, on its slide: a child of the mount beside the screw, so it does not turn with it. */
   nutNode: SceneNode;
+  /** The mount, holding both: what goes into the scene. */
+  mountNode: SceneNode;
   nodes: [SceneNode];
   lengthMm: number;
   leadMm: number;
@@ -1325,9 +1322,10 @@ export interface LeadscrewDriveResult {
 }
 
 /**
- * Synthesizes a T8 trapezoidal leadscrew on a hinge joint with a child brass
- * flanged nut carriage on a slide joint coupled by
- * `coupleRatio = (leadMm / 1000) / (2 * Math.PI)`.
+ * Synthesizes a T8 trapezoidal leadscrew on a hinge joint and a brass flanged
+ * nut on a slide joint, side by side in a fixed mount, the nut coupled to the
+ * screw by `coupleRatio = (leadMm / 1000) / (2 * Math.PI)`. Anything fixed to
+ * the nut travels without turning.
  */
 export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDriveResult {
   const lengthMm = Math.max(40, spec.lengthMm ?? 200);
@@ -1382,8 +1380,6 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
       cylinderGeom(`${nutId}_col`, mm(flangeR), mm(nutHeightMm), 0, BRASS_RGBA, {
         role: 'collision',
         mass: 0.022,
-        contype: 0,
-        conaffinity: 0,
       }),
     ],
     joints: [
@@ -1430,8 +1426,6 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
         ...cylinderGeom(`${screwId}_rod`, screwRadiusM, mm(lengthMm), 0, BRIGHT, {
           role: 'collision',
           mass: screwMass,
-          contype: 0,
-          conaffinity: 0,
         }),
         thread: { pitch: mm(pitchMm) },
       },
@@ -1445,7 +1439,6 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
         damping: 0.001,
         ...(spec.actuateScrew ?? true
           ? {
-              armature: motorArmature(1.5),
               actuator: {
                 type: 'velocity',
                 kv: 1.5,
@@ -1456,14 +1449,36 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
           : {}),
       },
     ],
-    children: [nutNode],
+    children: [],
     allowCoupling: true,
   };
 
+  // The screw and the nut both hang off a fixed mount, so the nut slides in a
+  // frame that does not turn. As the screw's child it inherited the screw's
+  // rotation: a carriage on the nut spun at the screw's speed.
+  const supportHalf = [mm(11), mm(11), mm(4)];
+  const mountNode: SceneNode = {
+    id: `${screwId}_mount`,
+    name: `T${diameterMm}×${leadMm} Leadscrew mount`,
+    type: 'body',
+    pos: origin,
+    geoms: [-1, 1].map((end) => boxGeom(
+      `${screwId}_support_${end < 0 ? 'lo' : 'hi'}`,
+      supportHalf,
+      [0, 0, end * (halfLenM + supportHalf[2])],
+      RACK_SLATE,
+      ALUMINIUM,
+    )),
+    joints: [],
+    children: [{ ...leadscrewNode, pos: [0, 0, 0] }, nutNode],
+  };
+  const screwInMount = mountNode.children[0];
+
   return {
-    leadscrewNode,
+    leadscrewNode: screwInMount,
     nutNode,
-    nodes: [leadscrewNode],
+    mountNode,
+    nodes: [mountNode],
     lengthMm,
     leadMm,
     pitchMm,
@@ -1613,8 +1628,6 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
       cylinderGeom(`${camId}_col`, mm(profile.baseRadiusMm + profile.liftMm / 2), mm(profile.thicknessMm), 0, CAM_EMERALD, {
         role: 'collision',
         mass: massKg,
-        contype: 0,
-        conaffinity: 0,
       }),
     ],
     joints: [
@@ -1626,7 +1639,6 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
         damping: 0.002,
         ...(spec.actuateCam ?? true
           ? {
-              armature: motorArmature(2.0),
               actuator: {
                 type: 'velocity',
                 kv: 2.0,
@@ -1683,7 +1695,7 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
         [0, mm(stemLengthMm / 2), 0],
         BLACK_OXIDE,
         STEEL,
-        { role: 'collision', contype: 0, conaffinity: 0 },
+        { role: 'collision' },
       ),
     ],
     joints: [
@@ -1980,8 +1992,6 @@ export function buildFourBarLinkage(
             role: 'collision',
             euler: [0, 0, +((angleRad * 180) / Math.PI).toFixed(4)],
             mass: massKg,
-            contype: 0,
-            conaffinity: 0,
           },
         ),
       ],
@@ -2016,7 +2026,6 @@ export function buildFourBarLinkage(
       damping: 0.002,
       ...(options.actuateCrank ?? true
         ? {
-            armature: motorArmature(2.5),
             actuator: {
               type: 'velocity',
               kv: 2.5,
@@ -2059,7 +2068,9 @@ export function buildFourBarLinkage(
     `4-Bar Rocker (${metrics.rockerMm} mm)`,
     D,
     C,
-    1,
+    // Its own layer, above the coupler: on the crank's layer the two bars
+    // could sweep through each other now that links collide.
+    3,
     GEAR_AMBER,
     {
       name: `${rockerId}_hinge`,

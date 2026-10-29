@@ -303,3 +303,5 @@ export function uChannelTrack({
   for (const [p, q, r] of cap) tri(faces, last + p, last + q, last + r);
   return { verts, faces };
 }
+
+export * from './sweptMeshes';

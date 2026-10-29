@@ -6,12 +6,12 @@
 import { captureViewportThumb } from '../../utils/viewportCapture';
 import { savePreset } from '../../utils/presetStorage';
 import { announcePresetSave } from '../../utils/presetNotices';
-import { summarizeTrajectory } from '../../utils/trajectorySummary';
+import { emptySceneRefusal, reportHeadless } from '../../utils/headlessReport';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../../utils/noteCards';
-import { compileCsgNodes } from '../useCsgCompile';
+import { collidersBeingDecomposed, compileCsgNodes } from '../useCsgCompile';
 import { collidersAreStale } from '../../utils/convexDecomposition';
 import { headlessImpactWarning } from '../../utils/headlessLimits';
 import { PRESETS } from '../../presets/presetScenes';
@@ -24,14 +24,21 @@ import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../../types/s
 import type { RawNode } from '../../utils/sceneNodes';
 import { bboxOf, stockReport } from '../../utils/sceneSummary';
 import { framingPatch } from '../../store/sceneFraming';
-import type { HeadlessResult, HistoryEntry } from '../../workers/physicsWorkerProtocol';
+import type { HeadlessResult } from '../../workers/physicsWorkerProtocol';
 import {
   type PhysicsWindow, workerStatusNow, countBodies, type Msg, HEADLESS_WAIT_FOR_COLLIDERS_MS,
   SUSPICIOUSLY_LARGE_DIAGONAL_M,
 } from './bridgeUtils';
 import { fillBodyDefaults } from './bodyDefaults';
 import { settleScene } from './settleScene';
+import { scriptWarnings } from '../../utils/scriptCheck';
 import type { McpCommands } from './types';
+
+/** A scene reply, plus a warning for each script that does not compile (applied all the same). */
+const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R & { scriptWarnings?: string[] } => {
+  const warnings = scriptWarnings(nodes);
+  return warnings.length ? { ...result, scriptWarnings: warnings } : result;
+};
 
 export const sceneCommands: McpCommands = {
   RUN_HEADLESS: async (msg) => {
@@ -42,7 +49,10 @@ export const sceneCommands: McpCommands = {
     // a while for them, then say which bodies ran as hulls.
     const pendingBodies = () => {
       const out: string[] = [];
-      const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => { if (collidersAreStale(n)) out.push(n.name); walk(n.children); });
+      // In flight as well as stale: a body whose pieces are being
+      // worked out again (a second ask for the same shape joins the first).
+      const running = new Set(collidersBeingDecomposed());
+      const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => { if (collidersAreStale(n) || running.has(n.id)) out.push(n.name); walk(n.children); });
       walk(useStore.getState().sceneGraph.nodes);
       return out;
     };
@@ -50,6 +60,9 @@ export const sceneCommands: McpCommands = {
       await new Promise(r => setTimeout(r, 250));
     }
     const stillPending = pendingBodies();
+    // Nothing to run: an empty scene used to come back ok and settled.
+    const empty = emptySceneRefusal(useStore.getState().sceneGraph);
+    if (empty) return empty;
     const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce } = useStore.getState();
     // Runs inside the same physics worker that owns the live simulation
     // (see src/workers/physicsWorker.ts's runHeadless) — its own isolated
@@ -77,18 +90,8 @@ export const sceneCommands: McpCommands = {
     // trajectory stand for what the live run would do.
     const impactWarning = headlessImpactWarning(sceneGraph.nodes);
     if (impactWarning) result.warnings = [...(result.warnings ?? []), impactWarning];
-    const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies as string[]) : null;
-    if (result.ok && result.trajectory && bodyFilter) {
-      result.trajectory = result.trajectory.map((fr: HistoryEntry) => ({
-        ...fr,
-        bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => bodyFilter.has(k))),
-      }));
-    }
-    // How it ended, so the trajectory need not be read to find out.
-    if (result.ok && result.trajectory) {
-      return { ...result, final: summarizeTrajectory(result.trajectory) };
-    }
-    return result;
+    // Names or ids; `final` judged on the whole scene before the filter.
+    return reportHeadless(result, sceneGraph, msg.bodies);
   },
   TOGGLE_PLAY: async (_msg, { store }) => {
     store.togglePlay();
@@ -112,8 +115,10 @@ export const sceneCommands: McpCommands = {
     return { ok: true };
   },
   RESET: async (_msg, { store }) => {
+    // The worker clears the history itself on a build that starts over from
+    // t = 0. Clearing it here too, after the build was posted, wiped the
+    // opening frame that build had just recorded.
     store.resetSimulation();
-    getPhysicsWorkerClient().clearHistory();
     return { ok: true };
   },
   LOAD_PRESET: async (msg, { store }) => {
@@ -129,8 +134,8 @@ export const sceneCommands: McpCommands = {
     if (name.startsWith('user:') && !(await ensureUserPreset(name))) {
       return { ok: false, error: `Preset "${name}" is in the account but could not be fetched from it. Try again.` };
     }
+    // History: cleared by the worker on the fresh build, as for RESET.
     store.loadPreset(name);
-    getPhysicsWorkerClient().clearHistory();
     // The preset's boolean bodies build asynchronously, and this used to
     // answer before they had: a contour slice sent straight after
     // loading the casting flask cut solid blocks, its holes not yet made.
@@ -370,8 +375,10 @@ export const sceneCommands: McpCommands = {
     store.setActivePreset(undefined);
     store.updateScene(graph, true);
     // Awaited, unlike Import JSON's: the reply has to say whether it built.
-    await useStore.getState().recompile(useStore.getState().sceneGraph);
-    getPhysicsWorkerClient().clearHistory();
+    // From rest: a new scene with as many degrees of freedom as the old one
+    // used to inherit its poses and clock. That fresh build also clears the
+    // history, so the old scene's frames cannot mix with this one's.
+    await useStore.getState().recompile(useStore.getState().sceneGraph, null, true, true);
     const win = window as unknown as PhysicsWindow;
     win._physics_setNoteCards?.(Array.isArray(noteCards) ? noteCards as NoteCard[] : []);
     win._physics_setCopilotMessages?.(Array.isArray(copilotMessages) ? copilotMessages as SavedCopilotMessage[] : []);
@@ -403,7 +410,7 @@ export const sceneCommands: McpCommands = {
       mode: 'mcp',
       nodes: useStore.getState().sceneGraph.nodes
     });
-    return result;
+    return withScriptWarnings(result, nodes);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
     const { gravityZ, windX, windY, density, floorFriction, floorBounce, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
@@ -440,12 +447,16 @@ export const sceneCommands: McpCommands = {
     // of plain objects — missing fields are filled with safe defaults so agents don't need to
     // supply every field.
     const bodies = msg.bodies as RawNode[];
-    if (!Array.isArray(bodies) || bodies.length === 0) {
-      return { ok: false, error: 'bodies must be a non-empty array' };
+    if (!Array.isArray(bodies)) {
+      return { ok: false, error: 'bodies must be an array of body descriptors ([] clears the scene)' };
     }
 
     const nodes = bodies.map((b) => fillBodyDefaults(b));
-    const result = await settleScene(nodes, { freshStart: true });
+    const result = withScriptWarnings(await settleScene(nodes, { freshStart: true }), nodes);
+    // An empty list clears the scene. It used to be refused, which left
+    // physics_update_scene([]) as the only way to start from nothing; there
+    // is no scene to frame or describe on a card.
+    if (nodes.length === 0) return result;
     // A new scene is framed as a loaded preset is: the whole of it, every
     // child and geom at its real pose. The camera used to stay wherever
     // it was, which for a 300 mm ride was a close-up of its base.

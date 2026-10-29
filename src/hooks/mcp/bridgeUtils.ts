@@ -9,6 +9,7 @@ import type { SavedCopilotMessage } from '../../utils/userPresets';
 import type { SceneNode } from '../../types/scene';
 import { recompilesInFlight } from '../../store/simulationActions';
 import { lastWorkerFrame, modelBuiltFrom } from '../../store/modelProvenance';
+import { lastScriptStatus } from '../../store/scriptStatus';
 import { describeWorker } from '../../utils/workerStatus';
 
 export interface PhysicsWindow extends Window {
@@ -41,6 +42,7 @@ export function workerStatusNow(
     compiling: recompilesInFlight > 0,
     hidden: typeof document !== 'undefined' && document.hidden,
     now: Date.now(),
+    scripts: lastScriptStatus(),
   });
 }
 
