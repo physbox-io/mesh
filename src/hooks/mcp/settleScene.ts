@@ -4,7 +4,7 @@
 
 import { useStore } from '../../store/useStore';
 import { compileSCAD } from '../../utils/openscad';
-import { compileCsgNodes, needsScadBuild } from '../useCsgCompile';
+import { compileCsgNodes } from '../useCsgCompile';
 import type { SceneNode } from '../../types/scene';
 import { type PhysicsWindow, countBodies } from './bridgeUtils';
 import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from './bodyFeatures';
@@ -12,12 +12,12 @@ import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from 
 /** How long a scene build waits for its convex pieces before answering. */
 const SETTLE_WAIT_FOR_COLLIDERS_MS = 25_000;
 
-export const autoCompileScad = async (nodes: SceneNode[], { onlyUnbuilt = false }: { onlyUnbuilt?: boolean } = {}) => {
+export const autoCompileScad = async (nodes: SceneNode[]) => {
   const scadNodes: SceneNode[] = [];
   const collect = (nodesList: SceneNode[]) => {
     if (!nodesList) return;
     for (const node of nodesList) {
-      if (node.scad && (!onlyUnbuilt || needsScadBuild(node))) scadNodes.push(node);
+      if (node.scad) scadNodes.push(node);
       collect(node.children || []);
     }
   };
@@ -75,9 +75,7 @@ export const autoCompileScad = async (nodes: SceneNode[], { onlyUnbuilt = false 
 // and reports the real MJCF compile result instead.
 export const settleScene = async (
   nodes: SceneNode[],
-  {
-    replacesScene = true, freshStart = false, colliderWaitMs = SETTLE_WAIT_FOR_COLLIDERS_MS,
-  }: { replacesScene?: boolean; freshStart?: boolean; colliderWaitMs?: number } = {},
+  { replacesScene = true, freshStart = false }: { replacesScene?: boolean; freshStart?: boolean } = {},
 ): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number }> => {
   const store = useStore.getState();
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
@@ -93,10 +91,7 @@ export const settleScene = async (
   // A caller that only adds a body keeps what the scene says about itself:
   // print fidelity, cast prep, reference pictures, its name.
   store.updateScene(replacesScene ? { nodes } : { ...store.sceneGraph, nodes }, true);
-  // A caller that only adds a body builds that body's source, not every
-  // OpenSCAD body already standing in the scene: it used to recompile them all,
-  // one cold worker pool's worth of time per call, for nothing.
-  await autoCompileScad(nodes, { onlyUnbuilt: !replacesScene });
+  await autoCompileScad(nodes);
   await applyDeclarativePreCsgFeatures(nodes);
   // Boolean bodies compile through the same OpenSCAD pool, and just as
   // asynchronously — a caller that got ok:true before they finished would be
@@ -105,9 +100,7 @@ export const settleScene = async (
   // command's 60 s, not all of it: a marble run's four bodies are a good half
   // minute one after another, and the hub dropped the command at 60 s. Late
   // ones land on their own; the summary says collisionPending until they do.
-  // A caller that adds one body can pass 0: its reply then comes back once the
-  // body exists, and the pieces install, and rebuild the model, when they land.
-  await compileCsgNodes(true, { colliderWaitMs });
+  await compileCsgNodes(true, { colliderWaitMs: SETTLE_WAIT_FOR_COLLIDERS_MS });
   await applyDeclarativePostCsgFeatures(nodes);
   // This is now the ONLY recompile triggered by this load, so there's nothing
   // left to race against. forceReset is false so recompile() preserves qpos/qvel
