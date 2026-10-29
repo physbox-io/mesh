@@ -10,8 +10,9 @@ import {
 } from '../../utils/latticeCommands';
 import type { SceneNode } from '../../types/scene';
 import {
-  deserializeCage, orientFaces, serializeCage, type Axis as LatticeAxis, type Lattice,
+  deserializeCage, orientFaces, restoreLattice, serializeCage, type Axis as LatticeAxis, type Lattice,
 } from '../../utils/latticeMesh';
+import { fuseFlushFaces, unionOverlappingPieces } from '../../utils/latticeSketch';
 import { findNodeInScene } from './bridgeUtils';
 
 /**
@@ -67,6 +68,7 @@ export function pushLatticeHistory(targetId: string, snapshot: Lattice) {
  * setSculptBase sends when it swaps a mesh out.
  */
 export function commitLattice(node: SceneNode, lattice: Lattice) {
+  fuseTouchingParts(lattice);
   const store = useStore.getState();
   store.updateNode(node.id, { latticeVersion: (node.latticeVersion ?? 1) + 1 });
   store.applyLattice(node.id, serializeCage(lattice), node.latticeSubdiv ?? 0);
@@ -79,11 +81,30 @@ export interface LatticeOpSpec extends Record<string, any> {
   kind?: string;
 }
 
+/**
+ * What the editor does on every commit, for the agent's edits too: faces lying
+ * flat against each other facing opposite ways are fused, and closed pieces
+ * whose volumes overlap are united (utils/latticeSketch.ts). Without it six
+ * boxes drawn flush over MCP stayed six touching boxes: not watertight, and
+ * weighed by their hull, 28.5 kg for a 9.7 kg chair. Returns whether it changed
+ * anything.
+ */
+export function fuseTouchingParts(lattice: Lattice): boolean {
+  let changed = fuseFlushFaces(lattice) > 0;
+  const united = unionOverlappingPieces(lattice);
+  if (united) {
+    restoreLattice(lattice, united);
+    changed = true;
+  }
+  return changed;
+}
+
 export function runLatticeOps(
   lattice: Lattice,
   ops: LatticeOpSpec[],
   initialSubdiv = 0,
   initialThicknessMm = 0,
+  { fuse = true }: { fuse?: boolean } = {},
 ): { subdiv: number; thicknessMm: number; results: Record<string, unknown>[] } {
   let subdiv = Math.max(0, Math.min(2, Math.round(Number(initialSubdiv) || 0)));
   let thicknessMm = Math.max(0, Number(initialThicknessMm) || 0);
@@ -192,5 +213,6 @@ export function runLatticeOps(
         );
     }
   }
+  if (fuse && results.length > 0) fuseTouchingParts(lattice);
   return { subdiv, thicknessMm, results };
 }

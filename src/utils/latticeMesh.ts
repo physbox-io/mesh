@@ -1954,13 +1954,23 @@ export function signedVolume(lattice: Lattice): number {
  *
  * Consistency comes first, by walking each piece and flipping any face that
  * runs a shared edge in the same direction as its neighbour (agreeing faces
- * traverse a shared edge in OPPOSITE directions). Then the piece as a whole is
+ * traverse a shared edge in OPPOSITE directions). A piece here is connected
+ * through edges two faces share: parts that merely touch along an edge are
+ * oriented each on its own. Then the piece as a whole is
  * turned outwards, judged by whether its faces lean away from its own centre —
  * which works for an open shell, where there is no volume to take the sign of.
  *
  * Returns how many faces were turned round.
  */
-export function orientFaces(lattice: Lattice): number {
+export function orientFaces(
+  lattice: Lattice,
+  /**
+   * 'soup' walks across any shared edge, as it always did: the boolean's raw
+   * output is a soup of fragments meeting at T-junctions, held together only
+   * by edges three or more fragments use, and it is tidied afterwards.
+   */
+  { across = 'manifold' }: { across?: 'manifold' | 'soup' } = {},
+): number {
   const alive: number[] = [];
   lattice.faces.forEach((verts, f) => { if (verts) alive.push(f); });
   if (alive.length === 0) return 0;
@@ -1997,7 +2007,14 @@ export function orientFaces(lattice: Lattice): number {
       const verts = lattice.faces[f]!;
       for (let i = 0; i < verts.length; i++) {
         const key = edgeKey(verts[i], verts[(i + 1) % verts.length]);
-        for (const use of along.get(key) ?? []) {
+        const uses = along.get(key) ?? [];
+        // Only across an edge exactly two faces meet at. Where parts touch
+        // (a back standing on a seat, a leg under it) three or four faces share
+        // an edge, "the neighbour" is not one face, and walking across it
+        // judged the back by the seat's top and turned five of its six faces
+        // inward. Each part is then turned outward by its own volume below.
+        if (across === 'manifold' && uses.length !== 2) continue;
+        for (const use of uses) {
           if (use.face === f || seen.has(use.face)) continue;
           seen.add(use.face);
           // Both running the edge the same way means one of them is the wrong

@@ -670,7 +670,7 @@ export function latticeBoolean(a: Lattice, b: Lattice, op: BooleanOp, keepSeams:
   // follows the arithmetic rather than the shape. Let the piece decide — and
   // again after the seam is tidied, because splicing two faces into one and
   // dropping corners out of the middle of edges both rewrite face rings.
-  orientFaces(result);
+  orientFaces(result, { across: 'soup' });
   // The sharp edges are carried through the tidy-up as GEOMETRY rather than as
   // creases on the cage. They cannot be creases yet: joining two faces removes
   // the edge between them for a moment, and `removeFace` prunes any crease on
@@ -680,7 +680,7 @@ export function latticeBoolean(a: Lattice, b: Lattice, op: BooleanOp, keepSeams:
   const protectedSeams: [Vec, Vec][] = [...sharp, ...keepSeams];
   mergeCoplanarFaces(result, protectedSeams);
   dissolveCollinearCorners(result, protectedSeams);
-  orientFaces(result);
+  orientFaces(result, { across: 'soup' });
   applyCreases(result, sharp);
   return result;
 }
