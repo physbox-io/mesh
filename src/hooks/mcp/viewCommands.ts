@@ -1,0 +1,576 @@
+// ---------------------------------------------------------------------------
+// MCP commands that look at the scene: its state, summary, objects, edges and
+// collisions, telemetry and history, measurements, the camera and a
+// screenshot, reference images, note cards, and the schema
+// ---------------------------------------------------------------------------
+
+import { useViewQuality } from '../../store/viewQualityStore';
+import { renderViewportNow } from '../../utils/viewportCapture';
+import { authoredQuat, orientationOf } from '../../utils/bodyOrientation';
+import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
+import { PRINT_CONTACT_TIME } from '../../utils/mjcf';
+import { getLiveCameraPose } from '../../utils/liveCamera';
+import { bodyEdges, bodyUp, whyNotRoundable } from '../../utils/edgeRoundBase';
+import { maxSizeFor, sameEdge, type EdgeCandidate } from '../../utils/featureEdges';
+import { SOLIDITY_DECOMPOSE_BELOW } from '../../utils/convexDecomposition';
+import {
+  describeReferenceImage, normalizeReferencePicture, readReferencePatch, upsertReferenceImage,
+} from '../../utils/referenceImages';
+import { sceneContentBounds } from '../../utils/frameScene';
+import { measureInScene } from '../../utils/measureScene';
+import type { Object3D } from 'three';
+import type { SceneNode, SceneGeom } from '../../types/scene';
+import { hardwareList } from '../../utils/hardwareList';
+import { CAMERA_VIEWS, type CameraView } from '../../utils/cameraViews';
+import { getLiveDimensions } from '../../utils/liveDimensions';
+import { belowFloor, boundsOverlaps, contactOverlaps, DEFAULT_OVERLAP_TOLERANCE } from '../../utils/collisionCheck';
+import { walkBodiesWorld } from '../../utils/bodyWorld';
+import { initialContacts } from '../initialContacts';
+import {
+  geomBboxOf, isFabricationScene, meshIntegrity, staleBodies, stockReport, summarizeNode,
+} from '../../utils/sceneSummary';
+import { recompilesInFlight } from '../../store/simulationActions';
+import { modelBuiltFrom } from '../../store/modelProvenance';
+import type { HistoryQuery } from '../../workers/physicsWorkerProtocol';
+import { type PhysicsWindow, workerStatusNow, type Msg, findNodeInScene, stripMeshArrays } from './bridgeUtils';
+import { sealCheckFor } from './bodyFeatures';
+import type { McpCommands } from './types';
+
+export const viewCommands: McpCommands = {
+  GET_STATE: async (msg, { store }) => {
+    const worker = workerStatusNow(store);
+    return {
+      // Mesh arrays stripped as physics_get_objects strips them: one
+      // carved tray made this reply 2.8 MB. include_meshes asks for them.
+      sceneGraph: msg.includeMeshes === true
+        ? store.sceneGraph
+        : { ...store.sceneGraph, nodes: (store.sceneGraph.nodes || []).map(stripMeshArrays) },
+      isPlaying:    store.isPlaying,
+      // Loaded means the worker holds a model of THIS scene. The store's
+      // flag goes true on the first build and stays true, so on its own
+      // it said yes for a scene the worker never built.
+      isLoaded:     store.isLoaded && worker.sceneBuilt,
+      worker,
+      gravityZ:     store.gravityZ,
+      windX:        store.windX,
+      windY:        store.windY,
+      density:      store.density,
+      floorFriction: store.floorFriction,
+      floorBounce:   store.floorBounce,
+      lastCompileError: store.lastCompileError,
+    };
+  },
+  GET_CAMERA: async (_msg, { store }) => {
+    // Prefer the live pose (reflects manual orbiting/panning done in the
+    // browser since the last SET_CAMERA/preset change); fall back to the
+    // last-known override/preset if the viewport hasn't mounted yet.
+    const live = getLiveCameraPose();
+    return {
+      ...(live ?? {}),
+      preset: store.cameraOverride ? null : store.cameraView,
+      isOverride: store.cameraOverride !== null,
+      dims: store.dimsEnabled,
+      // What the Dims overlay is drawing right now, in mm; empty when it
+      // is off, in Perspective, or orbited off the view's axis.
+      dimensions: getLiveDimensions(),
+    };
+  },
+  SET_CAMERA: async (msg, { store }) => {
+    // Two mutually exclusive forms: { preset } to reset to a built-in
+    // view, or { position:[x,y,z], target?:[x,y,z] } for an explicit
+    // (perspective) pose. Both position and target are in MuJoCo world
+    // space, same convention as every other pos field in this API.
+    // `dims` switches the Dims overlay with either form, or alone.
+    if (msg.dims !== undefined) {
+      if (typeof msg.dims !== 'boolean') return { ok: false, error: 'dims must be true or false' };
+      store.setDimsEnabled(msg.dims);
+    }
+    if (msg.preset !== undefined) {
+      if (!CAMERA_VIEWS.includes(msg.preset as CameraView)) {
+        return { ok: false, error: `preset must be one of ${CAMERA_VIEWS.map((v) => `'${v}'`).join(', ')}` };
+      }
+      store.setCameraView(msg.preset as CameraView);
+      return { ok: true };
+    }
+    if (msg.dims !== undefined && msg.position === undefined) return { ok: true };
+    if (!Array.isArray(msg.position) || msg.position.length !== 3) {
+      return { ok: false, error: 'position must be a [x,y,z] array in MuJoCo world space (or pass preset instead)' };
+    }
+    if (msg.target !== undefined && (!Array.isArray(msg.target) || msg.target.length !== 3)) {
+      return { ok: false, error: 'target must be a [x,y,z] array in MuJoCo world space' };
+    }
+    store.setCameraOverride({
+      position: msg.position as [number, number, number],
+      target: (msg.target ?? [0, 0, 0]) as [number, number, number],
+    });
+    return { ok: true };
+  },
+  GET_SCENE: async (_msg, { store }) => {
+    return store.sceneGraph;
+  },
+  GET_SCENE_SUMMARY: async (_msg, { store }) => {
+    // Bodies the installed model was not built from, as they now stand:
+    // their `inertial` is the previous build's.
+    const stale = staleBodies(store.sceneGraph, store.model ? modelBuiltFrom().graph : null);
+    const compiling = recompilesInFlight > 0;
+    return {
+      ...(stale.size || compiling ? {
+        modelStale: {
+          bodies: stale.size,
+          compiling,
+          note: compiling
+            ? 'A compile is in flight: inertial figures and masses marked stale are from the previous build. Ask again in a moment.'
+            : 'The scene has changed since the model was last compiled (or its compile failed: see physics_get_state.lastCompileError). Inertial figures and masses marked stale are from the previous build.',
+        },
+      } : {}),
+      nodes: (store.sceneGraph.nodes || []).map((n) => summarizeNode(n, { model: store.model, stale })),
+      // What to buy: every bought part counted, bar stock packed.
+      ...(() => {
+        const list = hardwareList(store.sceneGraph);
+        return list.rows.length ? { hardwareList: list } : {};
+      })(),
+      ...(store.model?.body_mass ? (() => {
+        const { body_mass: mass, body_dofnum: dofs, body_parentid: parent } = store.model!;
+        // What moves: a body with a degree of freedom of its own or under
+        // one that has. A fixed body (a wall, a bench) weighs nothing to
+        // the simulation, and counting it made the total meaningless.
+        const moves = (b: number): boolean => b > 0 && ((dofs?.[b] ?? 1) > 0 || (!!parent && moves(parent[b])));
+        let total = 0, fixed = 0;
+        for (let b = 1; b < mass!.length; b++) {
+          if (moves(b)) total += mass![b]; else fixed += mass![b];
+        }
+        return {
+          totalMassKg: +total.toPrecision(6),
+          ...(fixed > 0 ? { fixedMassKg: +fixed.toPrecision(6) } : {}),
+        };
+      })() : {}),
+      // Only for something being made: see isFabricationScene.
+      ...(isFabricationScene(store.sceneGraph, store.carveSettings)
+        ? { stock: stockReport(store.sceneGraph, store.stock) }
+        : {}),
+      ...(store.sceneGraph.simFidelity === 'print' ? {
+        simFidelity: {
+          mode: 'print',
+          // g * t^2 at the stiffest contact the timestep allows.
+          restingPenetrationMm: +(9.81 * PRINT_CONTACT_TIME * PRINT_CONTACT_TIME * 1000).toFixed(3),
+          note: 'Pins and sockets collide exactly; everything else collides as its hull or convex pieces. A clearance under about 0.1 mm is below what the contact can resolve.',
+        },
+      } : {}),
+      ...(store.sceneGraph.referenceImages?.length
+        ? { referenceImages: store.sceneGraph.referenceImages.map(describeReferenceImage) }
+        : {}),
+    };
+  },
+    /*
+      A picture pinned in the viewport to model from. Without `imageId` it
+      adds one (`image` required: a data URL or bare base64, which the
+      server reads off disk for `path`); with `imageId` it changes that one.
+      `remove` takes one off, `clear` takes them all. One undo step either
+      way. Not `id`: that is the request's own id on the wire.
+    */
+  SET_REFERENCE_IMAGE: async (msg, { store }) => {
+    const { imageId: id, image, remove, clear } = msg as Msg<{ imageId?: string; image?: string; remove?: boolean; clear?: boolean }>;
+    const current = store.sceneGraph.referenceImages ?? [];
+    const listed = (list: typeof current) => list.map(describeReferenceImage);
+    if (clear) {
+      store.setReferenceImages([]);
+      return { ok: true, removed: current.length, referenceImages: [] };
+    }
+    if (remove) {
+      if (!id) throw new Error('remove needs the imageId of the picture to take off');
+      if (!current.some((r) => r.id === id)) throw new Error(`No reference image with id '${id}'`);
+      const rest = current.filter((r) => r.id !== id);
+      store.setReferenceImages(rest);
+      return { ok: true, removed: id, referenceImages: listed(rest) };
+    }
+    const patch: Parameters<typeof upsertReferenceImage>[2] = readReferencePatch(msg);
+    if (msg.height !== undefined && msg.width === undefined) {
+      const h = Number(msg.height);
+      if (!Number.isFinite(h) || h <= 0 || h > 20) throw new Error('height must be more than 0 and at most 20 m');
+      patch.height = h;
+    }
+    if (typeof image === 'string' && image) {
+      Object.assign(patch, await normalizeReferencePicture(image.startsWith('data:') ? image : `data:image/png;base64,${image}`));
+    } else if (!id) {
+      throw new Error('Give path (or image) to add a reference image, or imageId to change one');
+    }
+    const { images, image: placed } = upsertReferenceImage(
+      useStore.getState().sceneGraph.referenceImages, id, patch, sceneContentBounds(store.sceneGraph.nodes),
+    );
+    store.setReferenceImages(images);
+    return { ok: true, ...describeReferenceImage(placed), referenceImages: listed(images) };
+  },
+  GET_TELEMETRY: async () => {
+    return getPhysicsWorkerClient().getTelemetry().then(t => t || { error: 'No simulation telemetry available' });
+  },
+  GET_HISTORY: async (msg) => {
+    // The worker holds up to 5000 frames, ~14 MB of JSON when full. No
+    // agent can read that, so unless maxFrames is given (0 = no cap) the
+    // stride is raised to fit 200 frames across whatever window was asked for.
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    const { frames, total, stride } = await getPhysicsWorkerClient().getHistory({
+      sinceTime: num(msg.sinceTime),
+      last: num(msg.last),
+      stride: num(msg.stride),
+      maxFrames: num(msg.maxFrames) ?? 200,
+      bodies: Array.isArray(msg.bodies) ? (msg.bodies as string[]) : undefined,
+      include: Array.isArray(msg.include) ? (msg.include as HistoryQuery['include']) : undefined,
+    });
+    return { total, returned: frames.length, stride, frames };
+  },
+  GET_OBJECTS: async (_msg, { store }) => {
+    return (store.sceneGraph.nodes || []).map(stripMeshArrays);
+  },
+  GET_OBJECT: async (msg, { store }) => {
+    const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
+    if (!targetId) throw new Error('Missing object id');
+    const findNode = (nodesList: SceneNode[] | undefined): SceneNode | null => {
+      if (!nodesList) return null;
+      for (const node of nodesList) {
+        if (node.id === targetId) return node;
+        const child = findNode(node.children);
+        if (child) return child;
+      }
+      return null;
+    };
+    const found = findNode(store.sceneGraph.nodes);
+    if (!found) throw new Error(`Object not found: ${targetId}`);
+    // The docs promise every mesh geom its size and integrity checks, as
+    // physics_get_scene_summary gives them; this used to strip the arrays
+    // and return nothing in their place.
+    const withMeshChecks = (n: SceneNode): SceneNode => ({
+      ...n,
+      ...(n.geoms ? {
+        geoms: n.geoms.map((g) => (g.type === 'mesh'
+          ? { ...g, vertCount: (g.renderVertices || g.vertices || []).length / 3, faceCount: (g.faces || []).length / 3, bbox: geomBboxOf(g), ...meshIntegrity(g) }
+          : g)),
+      } : {}),
+      ...(n.children ? { children: n.children.map(withMeshChecks) } : {}),
+    });
+    // Every O-ring groove on it, checked against what is round it now.
+    const grooves = [...new Set((found.geoms || []).filter((g) => g.hardware?.part === 'groove').map((g) => g.hardware!.group))];
+    const sealChecks = grooves.map((group) => ({ group, ...sealCheckFor(store.sceneGraph, found.id, group) }));
+    return { ...stripMeshArrays(withMeshChecks(found)), ...(sealChecks.length ? { sealChecks } : {}) };
+  },
+  MEASURE: async (msg, { store }) => {
+    const { from, to, corner, snap, withinMm } = msg;
+    // Which way a body points, rather than a distance: `body` with an
+    // optional local `axis`. Read from the simulation's latest frame when
+    // it has one, else from the body as authored.
+    if (typeof msg.body === 'string') {
+      const wanted = msg.body;
+      const byName = (list: SceneNode[]): SceneNode | null => {
+        for (const n of list) {
+          if (n.name === wanted) return n;
+          const hit = byName(n.children || []);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      const node = findNodeInScene(store.sceneGraph.nodes, wanted) ?? byName(store.sceneGraph.nodes);
+      if (!node) return { ok: false, error: `No body with id or name "${wanted}"` };
+      const axis = msg.axis === 'x' || msg.axis === 'y' ? msg.axis : 'z';
+      const { frames } = await getPhysicsWorkerClient().getHistory({ last: 1, bodies: [node.id], maxFrames: 1 });
+      const live = frames[frames.length - 1]?.bodies?.[node.id]?.quat;
+      const quat = live ?? authoredQuat(node);
+      return {
+        ok: true,
+        body: node.id,
+        axis,
+        source: live ? 'simulation' : 'authored',
+        ...(live ? { atTime: frames[frames.length - 1].time } : {}),
+        quat,
+        ...orientationOf(quat, axis),
+      };
+    }
+    const point = (value: unknown, name: string): [number, number, number] => {
+      if (!Array.isArray(value) || value.length < 3 || !value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+        throw new Error(`${name} must be a point [x, y, z] in metres, in the world frame`);
+      }
+      return [value[0], value[1], value[2]];
+    };
+    // The DRAWN scene, not the document: that is where the transforms
+    // have been applied, where a boolean has been evaluated, and where a
+    // lattice cage has already become the mesh anybody would measure.
+    const root = (window as unknown as { _physics_scene?: Object3D })._physics_scene ?? null;
+    const measured = measureInScene(root, point(from, 'from'), point(to, 'to'), {
+      corner: corner === undefined ? undefined : point(corner, 'corner'),
+      snap: snap !== false,
+      withinMm: typeof withinMm === 'number' ? withinMm : 3,
+    });
+    return {
+      ok: true,
+      ...measured,
+      // Whether any end really moved onto something, not whether snapping was asked for.
+      snapped: [measured.from, measured.to, measured.corner].some((end) => !!end && end.movedByMm > 0),
+    };
+  },
+    /*
+     * Rounded and bevelled edges. GET_EDGES lists what can be rounded, with
+     * ids; ROUND_EDGES rounds some of them — by id, or by a group a person
+     * would name (all, top, bottom, vertical). The edges are found on the
+     * body as modelled, before any rounding, so ids stay put while its
+     * roundings change. See utils/edgeRound.ts.
+     */
+  GET_EDGES: async (msg, { store }) => {
+    const { targetId } = msg as Msg<{ targetId: string }>;
+    const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+    const why = whyNotRoundable(node);
+    if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
+    const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
+    const mm = (p: number[]) => p.map((v) => Math.round(v * 1e6) / 1e3);
+    const roundedBy = (e: EdgeCandidate) => (node!.edgeRounds ?? []).findIndex((f) => f.edges.some((x) => sameEdge(x, e.edge)));
+    return {
+      ok: true,
+      id: targetId,
+      edges: found.edges.map((e) => ({
+        id: e.id,
+        kind: e.edge.kind,
+        ...(e.edge.kind === 'line'
+          ? { fromMm: mm(e.edge.a), toMm: mm(e.edge.b) }
+          : { centreMm: mm(e.edge.centre), diameterMm: Math.round(e.edge.radius * 2e6) / 1e3, axis: e.edge.axis.map((v) => Math.round(v * 1000) / 1000) }),
+        convex: e.edge.convex,
+        angleDeg: Math.round(e.angleDeg * 10) / 10,
+        groups: e.edge.convex ? (['top', 'bottom', 'vertical'] as const).filter((g) => e[g]) : ['inside'],
+        maxRoundMm: Math.round(maxSizeFor([e], 'fillet') * 1e5) / 100,
+        maxBevelMm: Math.round(maxSizeFor([e], 'chamfer') * 1e5) / 100,
+        ...(roundedBy(e) >= 0 ? { roundedBy: roundedBy(e) } : {}),
+      })),
+      // Edges that were found but are neither straight nor a full circle.
+      unroundable: found.other.length,
+      roundings: (node!.edgeRounds ?? []).map((f, i) => ({
+        index: i, mode: f.mode === 'fillet' ? 'round' : 'bevel', sizeMm: Math.round(f.size * 1e5) / 100, edges: f.edges.length,
+      })),
+    };
+  },
+  CHECK_COLLISIONS: async (_msg, { store }) => {
+    const nodes = store.sceneGraph.nodes || [];
+    const tol = DEFAULT_OVERLAP_TOLERANCE;
+    // The contacts MuJoCo itself makes on the first step are the exact
+    // answer; the boxes are the fallback when the worker cannot run the
+    // scene, and are conservative (a box round a diagonal strut).
+    const exact = await initialContacts(store).catch(() => null);
+    const overlappingPairs = exact
+      ? contactOverlaps(exact, nodes, tol)
+      : [
+          ...boundsOverlaps(nodes, tol),
+          ...belowFloor(nodes, tol).map((f) => ({ bodyA: f.body, bodyB: 'floor', geomA: f.geom, geomB: 'floor', depthMm: f.depthMm })),
+        ];
+    let bodyCount = 0;
+    walkBodiesWorld(nodes, () => { bodyCount++; });
+
+    // A body whose cavity is filled in is the other reason a scene does
+    // not behave: nothing overlaps, and the ball still will not go in.
+    // This is the command someone runs when that happens, so say it here
+    // rather than make them go looking in the scene summary.
+    const filledCavities: Array<{ body: string; solidity: number }> = [];
+    const collectFilled = (ns: SceneNode[]) => {
+      for (const n of ns || []) {
+        const hasColliders = (n.geoms || []).some((g: SceneGeom) => g.csgDerived === 'collider');
+        if (!hasColliders && n.collisionSolidity !== undefined && n.collisionSolidity < SOLIDITY_DECOMPOSE_BELOW) {
+          filledCavities.push({ body: n.name || n.id, solidity: n.collisionSolidity });
+        }
+        collectFilled(n.children || []);
+      }
+    };
+    collectFilled(nodes);
+
+    return {
+      ok: true,
+      hasInterpenetrations: overlappingPairs.length > 0,
+      bodyCount,
+      method: exact ? 'contacts' : 'bounds',
+      toleranceMm: tol * 1000,
+      overlappingPairs,
+      ...(filledCavities.length ? {
+        filledCavities,
+        note: 'These bodies are hollow but collide as their convex hull, so their cavities are solid to contact — anything dropped in rests on the rim. Set collision:\'decompose\' on them, or simplify the mesh if it was declined for being too dense.',
+      } : {}),
+    };
+  },
+  SCREENSHOT: async (msg) => {
+    const win = window as unknown as PhysicsWindow;
+    const gl = win._physics_gl;
+    if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
+
+    /*
+     * Draw a frame before reading one.
+     *
+     * This used to rely on r3f redrawing every animation frame and on
+     * preserveDrawingBuffer keeping the last one about. That holds while
+     * something is moving; it does not when the viewport goes idle — a
+     * paused simulation, a backgrounded tab — and then toDataURL returns
+     * whatever was last painted, which can be minutes old and framed by a
+     * camera that has since moved. The caller cannot tell: they get a
+     * perfectly good PNG of a scene that is not there any more. That is
+     * worse than an error, and it is exactly what happened while building
+     * a model through this bridge — five camera moves, five identical
+     * frames of empty floor, with the model sitting in the scene the whole
+     * time.
+     */
+    // The collider overlay, for this frame only: switched, given two
+    // frames to mount and track its bodies, and put back afterwards.
+    const viewQuality = useViewQuality.getState();
+    const restoreColliders = viewQuality.showColliders;
+    if (typeof msg.showColliders === 'boolean' && msg.showColliders !== restoreColliders) {
+      viewQuality.setShowColliders(msg.showColliders);
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    }
+
+    // Through the composer when there is one; see renderViewportNow.
+    renderViewportNow();
+
+    const dataUrl = gl.domElement.toDataURL('image/png');
+    if (useViewQuality.getState().showColliders !== restoreColliders) {
+      useViewQuality.getState().setShowColliders(restoreColliders);
+    }
+    return {
+      ok: true,
+      dataUrl,
+      width: gl.domElement.width,
+      height: gl.domElement.height,
+      // Says whether the frame was drawn to order or is whatever the
+      // canvas happened to be holding.
+      rendered: Boolean(win._physics_scene && win._physics_camera),
+    };
+  },
+  GET_NOTE_CARDS: async () => {
+    const getter = (window as unknown as PhysicsWindow)._physics_getNoteCards;
+    return { ok: true, noteCards: getter ? getter() : [] };
+  },
+  SET_NOTE_CARDS: async (msg) => {
+    const setter = (window as unknown as PhysicsWindow)._physics_setNoteCards;
+    if (!setter) return { ok: false, error: 'Note card state not available' };
+    if (!Array.isArray(msg.noteCards)) return { ok: false, error: 'noteCards must be an array' };
+    setter(msg.noteCards);
+    return { ok: true };
+  },
+  GET_SCHEMA: async () => {
+    return {
+      choosingTheRightTool: {
+        ruleOfThumb: 'Build detailed scenes in ONE call to physics_build_scene (or add parts with physics_add_object) using declarative body features instead of making 20 sequential tool calls or hand-writing raw triangle arrays.',
+        mechanicalPartsWithHolesThreadsRounding: 'Use primitive geoms + declarative `cuts: [...]`, `roundEdges: [...]`, `patterns: [...]`, and `paint: [...]` directly on the body descriptor in physics_build_scene / physics_add_object / physics_update_object, OR boolean geoms (`csg: "difference" | "intersection"`).',
+        extruded2DProfilesWithHoles: 'Use `type: "extrude"` (or `"prism"`) with `polygon: [[x,y], ...]` (metres), optional `holes: [[[x,y], ...]]`, and `height` (metres) on a geom or body.',
+        turnedOrAxisymmetricParts: 'Use `type: "lathe"` (or `"revolve"`) with `profile: [[r,z], ...]` (metres) on a geom or body, OR a declarative lattice `{ lattice: { empty: true, subdiv: 1, ops: [{ op: "revolve", profile: [[xMm,0,zMm], ...] }] } }`.',
+        conesWedgesToriTubes: 'Use parametric geom types directly: `cone` (`size: [r, hh]`), `pyramid` (`size: [hx, hy, hh]`), `wedge` (`size: [hx, hy, hz]`), `torus` (`size: [R, r]`), `tube` / `pipe` (`size: [outerR, innerR, hh]`).',
+        subdivisionAndGridPolyhedra: 'Use declarative `lattice: { sizeMm: 40, subdiv: 1, thicknessMm: 0, ops: [{ op: "extrude" | "inset" | "bevel" | "bevel_edges" | "circle" | "revolve" | "bridge" | "faces" | "delete_faces" | "sharpen" | "dimension" | "orient" | "smooth" | "wall", ... }] }` on the body, or pass `ops: [...]` to `physics_create_lattice`.',
+        organicClayShapes: 'Use declarative `sculpt: { base: "sphere" | "Bust" | ..., strokes: [...], cuts: [...] }` on the body, or pass batch `strokes: [...]` to `physics_sculpt`.',
+        curvedTracksAndRamps: 'Set `isCurve: true` and `curvePoints: [[x,y,z], ...]` (Z-up metres) on the body.',
+        ropesCablesChains: 'Set `isComposite: true`, `compositeType: "cable"`, `compositeCount`, `compositeSize` on the body.',
+        customPolyhedra: 'If you must supply raw triangles (`type: "mesh"`), pass `verticesZUp: [x0,y0,z0, ...]` in standard MuJoCo Z-up metres (auto-converted to Y-up `vertices` and `renderVertices`, with inside-out closed meshes auto-flipped). Avoid hand-typing hundreds of coordinates when `extrude`, `lathe`, `lattice`, or `scad` can express the shape in 5 lines.',
+      },
+      geomTypes: ['box', 'sphere', 'capsule', 'cylinder', 'ellipsoid', 'plane', 'cone', 'pyramid', 'wedge', 'torus', 'tube', 'extrude', 'lathe', 'mesh'],
+      geomSizes: {
+        box:       'half-extents [hx, hy, hz]',
+        sphere:    'radius [r]',
+        capsule:   'radius and half-height [r, hh] — cylinder between the two end-caps. ALWAYS give both elements (or use fromto): a 1-element [r] does not error, it silently falls back to hh=r and collapses the geom into a tiny stub pill at pos.',
+        cylinder:  'radius and half-height [r, hh]',
+        ellipsoid: 'semi-axes [rx, ry, rz]',
+        plane:     'ignored by MuJoCo (infinite plane) — set to [0, 0, 1] or any non-zero',
+        cone:      '[radius, halfHeight] (or `radius` and `height` fields in metres) — auto-generates a closed outward-wound cone mesh',
+        pyramid:   '[hx, hy, halfHeight] (or `width`, `depth`, `height` in metres) — 4-sided pyramid mesh',
+        wedge:     '[hx, hy, hz] (or `width`, `depth`, `height` in metres) — right-triangular prism / ramp mesh',
+        torus:     '[majorRadius, tubeRadius] (or `majorRadius`, `tubeRadius` in metres) — watertight torus ring in XY plane around Z axis',
+        tube:      '[outerRadius, innerRadius, halfHeight] (or `outerRadius`, `innerRadius`, `height` in metres; alias `pipe` / `hollow_cylinder`) — hollow cylinder / pipe mesh',
+        extrude:   '2D polygon prism (alias `prism`): provide `polygon: [[x,y], ...]` in metres, optional `holes: [[[x,y], ...]]`, and `height` in metres (or `size: [halfHeight]`). Centered on Z by default (`centered: false` spans z=0..height).',
+        lathe:     'revolved 2D profile around Z axis (alias `revolve`): provide `profile: [[r,z], ...]` in metres and optional `segments` (default 24).',
+        mesh:      'arbitrary triangle mesh via `verticesZUp` (preferred, Z-up metres) or `vertices` (Three.js Y-up metres) + `faces`. Defaults to `dynamic: true` so body `pos`/`euler`/`quat` and geom `pos`/`euler`/`quat` always position the mesh in Z-up space.',
+      },
+      jointTypes: ['hinge', 'slide', 'ball', 'free'],
+      geomFields: {
+        name:        'string — unique identifier',
+        type:        'GeomType (see geomTypes — includes parametric mesh shorthands cone, pyramid, wedge, torus, tube, extrude, lathe)',
+        size:        'number[] — interpretation depends on type (see geomSizes)',
+        rgba:        'number[4] — [r, g, b, a] each 0-1, default white opaque',
+        pos:         'number[3] — local offset from body origin in Z-up metres, NOT world-space (works on all geoms including dynamic meshes)',
+        quat:        'number[4] — [w, x, y, z] rotation quaternion',
+        euler:       'number[3] — [roll, pitch, yaw] in degrees, alternative to quat',
+        fromto:      'number[6] — [x1,y1,z1, x2,y2,z2] for capsule/cylinder endpoints (overrides size/pos/quat)',
+        mass:        'number — if set, overrides density-based mass for this geom',
+        friction:    'number[3] — [slide, spin, roll]. slide: tangential friction (0=icy, 1=normal, 2=rubbery). spin: torsional (typical 0.005). roll: rolling resistance (typical 0.0001).',
+        contype:     'number — bitmask for collision group membership',
+        conaffinity: 'number — bitmask for which groups this geom collides with',
+        condim:      'number — contact dimensionality (1, 3, 4, or 6)',
+        solref:      'number[2] — [timeconst_s, dampingRatio]. timeconst_s: contact spring time constant in seconds (min 0.005s = 5x timestep, 0.04 is a safe default). dampingRatio: 1.0=no bounce (critically damped), 0.0=max bounce, ~0.2=lively. Contact blends both geoms by averaging — floor has dampingRatio=0.0 so it does not kill ball bounce.',
+        solimp:      'number[5] — [d0, d1, width, midpoint, power]. d0/d1: min/max impedance (0.99/0.9999 for hard contact). Typical bouncy: [0.99, 0.9999, 0.0001, 0.5, 2].',
+        verticesZUp: 'number[] — PREFERRED for custom meshes: flat [x0,y0,z0, x1,y1,z1, ...] in standard MuJoCo Z-up metres. Automatically populates Three.js Y-up `vertices` and `renderVertices`, and auto-flips closed meshes if wound inside-out.',
+        vertices:    'number[] — flat array of vertex positions for mesh type: [x0,y0,z0, x1,y1,z1, ...] in Three.js Y-up space (optional if `verticesZUp` or `renderVertices` is provided)',
+        faces:       'number[] — flat array of triangle indices for mesh type: [i0,j0,k0, i1,j1,k1, ...]. Closed meshes with uniformly inverted winding are automatically flipped outward.',
+        polygon:     'number[][] — for `type: "extrude"`: 2D `[x, y]` vertices in metres',
+        holes:       'number[][][] — for `type: "extrude"`: optional array of 2D `[x, y]` hole loops in metres',
+        profile:     'number[][] — for `type: "lathe"`: 2D `[r, z]` profile points in metres revolved around Z',
+        dynamic:     'boolean — defaults to `true` for all mesh geoms so body `pos`/`euler` work in Z-up space',
+        csg:         `'union'|'difference'|'intersection' — boolean modifier (default 'union'). A geom marked 'difference' is CUT OUT of the union of the body's other geoms instead of being added to it: one ellipsoid plus a slimmer ellipsoid marked 'difference' is a ring. The body is compiled to a single mesh; set collision on the body to choose how it collides.`,
+        thread:      `{ pitch: number, left?: boolean, fit?: number } — on any cylinder. On one marked 'difference' the hole is tapped; on any other the cylinder becomes a threaded rod (external ISO thread), which makes the body a boolean one. pitch and fit are in METRES (M6 coarse is 0.001). The cylinder's radius is the thread's MAJOR radius, so an M8 rod (radius 0.004, pitch 0.00125) screws into an M8 tapped hole as drawn. For holes, declarative cuts or physics_cut's threadPitchMm is easier.`,
+        role:        `'visual'|'collision' — 'visual' draws but never collides (contype/conaffinity forced to 0), 'collision' simulates but is never drawn. Default (omitted) is both.`,
+        renderVertices: 'number[] — flat [x0,y0,z0,...] in raw MuJoCo Z-up space. Auto-derived from `verticesZUp` or `vertices` if omitted.',
+      },
+      nodeFields: {
+        id:            'string — unique body identifier (used in coupling/weld/connect refs)',
+        name:          'string — display name, also used in MuJoCo XML',
+        pos:           'number[3] — position relative to parent (world for root nodes)',
+        quat:          'number[4] — body orientation quaternion [w,x,y,z]',
+        euler:         'number[3] — body orientation in degrees, alternative to quat',
+        static:        'boolean — if true (or `fixed: true` / `dynamic: false`), omits the default free joint so a top-level body is fixed in world space',
+        geoms:         'SceneGeom[] — one or more geoms composing the body shape (optional if body-level `type`/`size` shorthand, `lattice`, `sculpt`, `isCurve`, or `scad` is used)',
+        cuts:          'DeclarativeCut[] — array of hole/slot/dish/hardware cut specs `{ shape?: "cylinder"|"slot"|"dish"|"counterbore"|"countersink"|"hex_socket"|"nut_trap"|"heat_set_insert"|"bearing_seat"|"o_ring_groove"|"t_slot", at?: [xMm,yMm,zMm], normal?: [nx,ny,nz], diameterMm?, widthMm?, lengthMm?, depthMm?, threadPitchMm?, size?: "M3"|"M4"|..., bore?, fitMm? }` applied automatically when the body is built or updated',
+        roundEdges:    'DeclarativeRound[] | DeclarativeRound — `{ edges?: "all"|"top"|"bottom"|"vertical"|"inside"|number[], sizeMm: number, mode?: "round"|"bevel" }` (or array of them; alias `roundings`) applied automatically after cuts',
+        patterns:      'DeclarativePattern[] — array of surface textures `{ at: [xMm,yMm,zMm], normal?: [nx,ny,nz], pattern: "knurl"|"hex"|"ribs"|"grid"|"wave"|"dimples"|"voronoi"|"flutes"|"threads"|"text", depthMm?: number, emboss?: boolean, options?: {...} }` applied automatically to the body faces',
+        paint:         'DeclarativePaint[] — array of paint strokes `{ at: [x,y,z] | [[x,y,z],...], rgba: [r,g,b,a?], radius?: number, flow?: number, geomName?: string }` (in metres) applied automatically after CSG',
+        lattice:       '`{ sizeMm?: number, empty?: boolean, subdiv?: 0|1|2, thicknessMm?: number, ops?: LatticeOp[] }` — builds a lattice body inline in a single pass. Each op in `ops` is `{ op: "extrude"|"inset"|"bevel"|"bevel_edges"|"circle"|"revolve"|"bridge"|"faces"|"delete_faces"|"sharpen"|"dimension"|"orient"|"smooth"|"wall", ... }` in mm.',
+        sculpt:        '`{ base?: "sphere"|"cube"|"cylinder"|"torus"|"capsule"|"cone"|"Bust"|"Head"|"Hand", strokes?: SculptStroke[], cuts?: SculptCut[] }` — builds a sculpted clay body inline in a single pass.',
+        joints:        'SceneJoint[] — joints attaching this body to its parent',
+        children:      'SceneNode[] — child bodies (rigidly offset unless they have joints)',
+        coupleTargetId:'string — id of another body; couples their first joints with coupleRatio',
+        coupleRatio:   'number — gear ratio for explicit joint coupling (default -1)',
+        weldTargetId:  'string — id of body to weld to (closed-loop rigid constraint)',
+        weldBreakForceN:    'number — newtons of pull this weld survives before it shears off. Omit and it never breaks. A 1 kg body hanging off a weld pulls about 10 N. Breaking is transient: the scene graph still says the part is welded on, and reset puts it back.',
+        weldBreakTorqueNm:  'number — newton-metres of twist this weld survives. Same rules as weldBreakForceN; either limit alone is enough.',
+        weldBreakHoldSteps: 'number — consecutive overloaded steps required before it counts (default 3). Guards against the single-step force spike a hard contact produces.',
+        connectTargetId:'string — id of body to connect to via a ball-and-socket point constraint',
+        connectAnchor: 'number[3] — world-space anchor point for the connect constraint',
+        script:        'string — JavaScript control script running at 1000 Hz',
+        scad:          'string — raw OpenSCAD code to compile into a dynamic mesh geometry',
+        isComposite:   'boolean — emit this body as a MuJoCo <composite> (auto-jointed chain forming a smooth curve) instead of using its own geoms/joints/children directly. See compositeType/compositeCount/compositeSize/compositeCurve. Prefer this over manually chaining capsule fromto segments for rope/cable/mustache/tentacle curves.',
+        compositeType: `'cable'|'grid'|'rope'|'cloth' — default 'cable'. 'rope' is remapped to MuJoCo's 'cable' type.`,
+        compositeCount:'string (not array) — space-separated segment counts, e.g. "25 1 1". Default "15 1 1".',
+        compositeSize: 'string (not number) — total extent before curving, e.g. "1.5". Default "1.5".',
+        compositeCurve:'string — MuJoCo composite curve-shape spec, e.g. "s 0 0" for straight. Passed verbatim to MuJoCo, not validated here.',
+        compositePrefix:'string — name prefix for auto-generated segment bodies (default `${name}_`). Last segment auto-name is `${compositePrefix}B_last`.',
+        weldLastToId:  'string — id of another body to weld the composite\'s LAST segment to (e.g. anchoring a rope/cable end). Only used when isComposite is true.',
+        isCurve:       'boolean — RIGID curved track: a Catmull-Rom spline through curvePoints is decomposed into many small convex box geoms, so collision follows the real (even concave) curve — balls roll along it. Omit geoms and joints: geoms are auto-generated and the body defaults to static (welded to world). Contrast with isComposite (a floppy rope/cable).',
+        curvePoints:   'number[][] — body-local Z-up control points, e.g. [[-1.6,0,1.4],[-0.55,0,0.45],[0.45,0,0.12],[1.6,0,0.7]]. The spline IS the rolling surface (boxes sit half a thickness below it). Default is a ramp-with-valley demo curve.',
+        curveWidth:    'number — track width in meters (default 0.5)',
+        curveThickness:'number — slab thickness in meters (default 0.06)',
+        curveSegments: 'number — how many box segments approximate the spline (default 28; more = smoother)',
+        curveClosed:   'boolean — wrap the spline into a seamless closed loop (oval/circuit tracks). Default false.',
+        curveBank:     'number — bank (roll) angle in degrees about the travel direction; positive raises the left-of-travel edge. For a counter-clockwise loop use a NEGATIVE bank to raise the outside edge (see the oval_track preset, which uses -18).',
+        csgEnabled:    'boolean — evaluate this body\'s geoms as a boolean program (see the geom `csg` field). Inferred automatically when any geom is marked difference/intersection, so you rarely need to set it. The primitives remain the source of truth; the mesh is regenerated whenever they change.',
+        edgeRounds:    'array — rounded (fillet) and bevelled (chamfer) edges, each { mode: "fillet"|"chamfer", size (m), edges }. Use declarative `roundEdges` on the body or `physics_round_edges` rather than authoring raw edge geometry by hand.',
+        collision:     `'auto'|'hull'|'decompose'|'primitives' — how THIS BODY collides, mesh or boolean. MuJoCo collides a mesh as its CONVEX HULL, which fills in any cavity, so a cup, bowl, open-top box, funnel or housing would be solid to contact. 'auto' (the default) measures SOLIDITY — true volume over hull volume — and breaks the shape into convex pieces when it is below ~0.92. A box or sphere is 1.0 and keeps its hull, which is exact and cheap; a cup is around 0.3 and gets decomposed, so a ball dropped in lands INSIDE it. 'hull' forces the old filled-in behaviour. 'decompose' forces the split even for a mesh auto declined (under ~24 triangles, or over ~150k). 'primitives' is boolean-only: the authored positives collide and the mesh is visual. Runs in the background and is cached against the mesh, so it costs nothing until the shape changes. NOTE a decomposed hollow body weighs its true volume rather than its hull's — often a third as much; set mass or collisionMass if you wanted the heavier figure.`,
+        collisionResolution: `number — V-HACD voxel count for this body's decomposition, 10,000 to 1,000,000. Default 25,000, with one automatic retry at 100,000 and up to 64 pieces when the first result fills a cavity in; a long thin part (length over wall thickness 80 or more, e.g. a U-channel track) starts at up to 400,000 and 512 pieces instead (physics_get_scene_summary reports any left as cavitiesFilled). Raise it for a narrow slot or groove that still comes out solid; it costs decomposition time, not simulation time.`,
+        collisionHulls: `number — how many convex pieces to break each of this body's meshes into, up to 512. Default: 8 to 16, scaled by how concave it is, or more for a long thin part. Contact cost between two decomposed bodies is quadratic in this, and accuracy is flat past about 16, so raise it only for a shape whose cavity is genuinely being missed.`,
+        collisionMass: `number (kg) — total mass shared across the convex pieces by volume, as csgMass is for a boolean body.`,
+        csgCollision:  `DEPRECATED, use 'collision'. Still read, so older scenes behave as they always did. 'auto'|'decompose'|'primitives'|'hull' — how the boolean result collides.`,
+        csgSectors:    'number — sector count for decomposition (default 16). Higher = tighter fit to the hole, more geoms.',
+        csgHoleAxis:   `'auto'|'x'|'y'|'z' — axis the hole runs along, for decomposition. 'auto' takes the longest axis of the largest negative geom.`,
+        csgMass:       'number — total mass of the boolean solid, split across its colliders by volume. Without this, MuJoCo would derive mass from the hull volume, which for a ring is far more material than there actually is.',
+        csgFn:         'number — OpenSCAD $fn (facet count) for the generated primitives (default 32).',
+      },
+      tips: [
+        'ONE-CALL SCENE BUILDING — You can include `cuts`, `roundEdges`, `patterns`, `paint`, `lattice`, and `sculpt` directly on any body inside `physics_build_scene` or `physics_add_object`. Everything compiles in a single pass without needing 20 follow-up tool calls.',
+        'BATCH TOOL CALLS — Existing modification tools also accept batch arrays: `physics_cut(targetId, cuts=[...])`, `physics_round_edges(targetId, roundings=[...])`, `physics_sculpt(targetId, strokes=[...])`, `physics_paint(targetId, strokes=[...])`, `physics_apply_pattern(targetId, patterns=[...])`, and `physics_create_lattice(..., ops=[...])`.',
+        'PARAMETRIC MESH SHORTHANDS — Use `type: "cone" | "pyramid" | "wedge" | "torus" | "tube" | "extrude" | "lathe"` on any geom or body instead of hand-building raw vertex/face arrays.',
+        'Z-UP CUSTOM MESHES — When building custom polyhedra with `type: "mesh"`, supply `verticesZUp: [x0,y0,z0, ...]` in standard MuJoCo Z-up metres. You do NOT need to convert to Three.js Y-up `vertices` or supply `renderVertices`, and closed meshes with negative signed volume are automatically flipped right-side out.',
+        'GOTCHA — geom pos is body-local, not world-space: for a body at pos [0,0,0.4] with a box half-extent of 0.4, local z=0 is the box center (world z=0.4) and local z=+0.4 is the top face (world z=0.8). Do not pick pos values as if they were world heights.',
+        'PREFER over manual capsule-chain curves: for rope/cable/mustache/tentacle/vine shapes, set isComposite:true + compositeType:\'cable\' + compositeCount/compositeSize/compositeCurve on one body instead of hand-placing many capsule fromto segments.',
+        'Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets (works for both primitives and parametric/custom meshes).',
+        'Rings/tubes/holes — use `type: "tube"` / `"torus"`, declarative `cuts: [...]`, or boolean modifiers (`csg: "difference"`).',
+        'HOLLOW AND CONCAVE SHAPES JUST WORK — do not build proxy walls. `collision: "auto"` (the default) measures solidity and decomposes any concave mesh body into convex pieces automatically so balls land inside cups, bowls, funnels, and housings.',
+        'GOTCHA — rgba alpha is NOT rendered as transparency in this app: the renderer\'s material always uses full opacity regardless of the 4th rgba value, so rgba:[r,g,b,0] does NOT make a geom invisible — use `role: "collision"` for invisible colliders or `role: "visual"` for non-colliding visuals.',
+        'OpenSCAD shapes: set scad="cube([0.5,0.5,0.5]);" on a body node. If geoms is omitted, it automatically creates a dynamic mesh geom and compiles the SCAD code to vertices/faces.',
+        'Bouncy objects: set solref=[0.04, 0.2] and solimp=[0.99, 0.9999, 0.0001, 0.5, 2]. dampingRatio 0.2 = lively bounce. The floor has dampingRatio=0.0 so ball+floor averages to 0.1 (still bouncy).',
+      ],
+    };
+  },
+};
