@@ -427,12 +427,16 @@ export const sceneCommands: McpCommands = {
     // of plain objects — missing fields are filled with safe defaults so agents don't need to
     // supply every field.
     const bodies = msg.bodies as RawNode[];
-    if (!Array.isArray(bodies) || bodies.length === 0) {
-      return { ok: false, error: 'bodies must be a non-empty array' };
+    if (!Array.isArray(bodies)) {
+      return { ok: false, error: 'bodies must be an array of body descriptors ([] clears the scene)' };
     }
 
     const nodes = bodies.map((b) => fillBodyDefaults(b));
     const result = await settleScene(nodes, { freshStart: true });
+    // An empty list clears the scene. It used to be refused, which left
+    // physics_update_scene([]) as the only way to start from nothing; there
+    // is no scene to frame or describe on a card.
+    if (nodes.length === 0) return result;
     // A new scene is framed as a loaded preset is: the whole of it, every
     // child and geom at its real pose. The camera used to stay wherever
     // it was, which for a 300 mm ride was a close-up of its base.
