@@ -152,11 +152,19 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           clearTimeout(win._recompileTimeoutId);
           win._recompileWake?.();
         }
+        let wake: (() => void) | null = null;
         await new Promise<void>(resolve => {
+          wake = resolve;
           win._recompileWake = resolve;
           win._recompileTimeoutId = setTimeout(resolve, settle ? 180 : 50);
         });
-        win._recompileWake = null;
+        // Only our own handle. A call that was woken by a newer one wakes up
+        // after that one has set its handle, and clearing it unconditionally
+        // left the newer call with no way to be woken: the next edit cleared
+        // its timer, found no handle, and it hung for good - never building,
+        // never returning, and never giving back its count, so every scene
+        // summary after a burst of edits said a compile was in flight.
+        if (win._recompileWake === wake) win._recompileWake = null;
         if (token !== recompileToken) {
           // Handed on rather than dropped: the call that overtook this one builds
           // the newer scene, and it must still start that scene from rest if this
