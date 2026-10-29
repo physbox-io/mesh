@@ -6,6 +6,7 @@ import { RangeInput } from '../RangeInput';
 import { DocsInfoButton } from '../docs/DocsInfoButton';
 import { MaterialCard } from './MaterialCard';
 import { CouplingCard } from './CouplingCard';
+import { displayedGeomMass, primitiveVolume } from '../../utils/geomMassDisplay';
 
 /**
  * The active sub-geom's properties, split by inspector tab: its colour on
@@ -17,11 +18,16 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
   const density = useStore((s) => s.density);
   const gravityZ = useStore((s) => s.gravityZ);
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
+  const model = useStore((s) => s.model);
 
   if (!selectedNode.geoms || selectedNode.geoms.length === 0) return null;
   const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
   const geom = selectedNode.geoms[activeIndex];
   if (!geom) return null;
+  const bodyId = model?._idMaps?.body?.[selectedNode.id];
+  const bodyMass = bodyId !== undefined && bodyId >= 0 ? model?.body_mass?.[bodyId] : undefined;
+  const mass = displayedGeomMass(selectedNode, activeIndex, bodyMass);
+  const shownMass = mass?.kg ?? 0;
   return (
     <div className="flex flex-col gap-4">
       {part !== 'main' && <SubGeomSelector node={selectedNode} />}
@@ -96,34 +102,29 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
           <span>Mass</span>
           <DocsInfoButton tab="gravity" />
         </h3>
-        <label className="text-xs font-medium text-slate-500 flex justify-between">Value <SliderValue value={geom.mass ?? 0} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} decimals={2} unit="kg" min={0} max={50} /></label>
-        <RangeInput min="0" max="50" step="0.01" value={geom.mass ?? 0} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
+        <label className="text-xs font-medium text-slate-500 flex justify-between">Value <SliderValue value={shownMass} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} decimals={shownMass > 0 && shownMass < 0.1 ? 3 : 2} unit="kg" min={0} max={50} /></label>
+        <RangeInput min="0" max="50" step="0.001" value={shownMass} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
+        {mass?.computed && (
+          <p className="text-[10px] text-slate-500">
+            {mass.scope === 'body' ? 'Whole body, computed' : 'Computed'} from volume × density
+            {typeof geom.density === 'number' ? ` (${Math.round(geom.density)} kg/m³)` : ' (1000 kg/m³)'}. Setting a value fixes it.
+          </p>
+        )}
+        {mass && !mass.computed && geom.type === 'mesh' && (
+          <button
+            type="button"
+            className="self-start text-[10px] text-blue-600 hover:underline"
+            onClick={() => updateNodeGeom(selectedNode.id, { mass: undefined }, activeIndex)}
+          >
+            Weigh by volume instead
+          </button>
+        )}
 
         {(() => {
-          let volM3 = 0;
-          const sz = geom.size || [0.1, 0.1, 0.1];
-          // A capsule or cylinder written as a fromto states its
-          // length as two end points and carries no size[1], so
-          // reading the half-length straight out of size gave
-          // undefined -> NaN, and NaN <= 0 is false, so the card
-          // printed "NaN L" rather than declining to answer.
-          const ft = geom.fromto;
-          const halfLen = sz[1] ?? (ft
-            ? Math.hypot(ft[3] - ft[0], ft[4] - ft[1], ft[5] - ft[2]) / 2
-            : undefined);
-          if (geom.type === 'sphere') {
-            volM3 = (4 / 3) * Math.PI * Math.pow(sz[0], 3);
-          } else if (geom.type === 'cylinder') {
-            volM3 = Math.PI * Math.pow(sz[0], 2) * ((halfLen ?? 0) * 2);
-          } else if (geom.type === 'capsule') {
-            volM3 = (4 / 3) * Math.PI * Math.pow(sz[0], 3) + Math.PI * Math.pow(sz[0], 2) * ((halfLen ?? 0) * 2);
-          } else if (geom.type === 'box') {
-            volM3 = 8 * sz[0] * (sz[1] ?? sz[0]) * (sz[2] ?? sz[0]);
-          } else if (geom.type === 'ellipsoid') {
-            volM3 = (4 / 3) * Math.PI * sz[0] * (sz[1] ?? sz[0]) * (sz[2] ?? sz[0]);
-          }
+          // fromto capsules included: see primitiveVolume.
+          const volM3 = primitiveVolume(geom);
           if (!(volM3 > 0) || !Number.isFinite(volM3)) return null;
-          const m = geom.mass ?? 0;
+          const m = shownMass;
           const objDensity = m / volM3;
           const gAbs = Math.abs(gravityZ);
           // Against the ambient medium set in Environment.
