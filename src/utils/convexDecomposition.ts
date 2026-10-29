@@ -643,7 +643,9 @@ function massWarning(node: SceneNode, decomposed: MeshColliders[]): string | und
     .filter(g => !sources.has(g) && !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane')
     .reduce((m, g) => m + (g.mass ?? (g.density ?? 1000) * primitiveVolume(g)), 0)
     + decomposed.filter(p => !hollow.includes(p)).reduce((m, p) => m + (p.source.mass ?? 0), 0);
-  return `Now that its hollow is real, this body weighs ${(rest + after).toFixed(2)} kg rather than the ${(rest + before).toFixed(2)} kg it was given as a solid lump. Set a mass if you wanted the heavier figure.`;
+  // Not "its hollow": a quadruped or a chair is concave and solid, and the
+  // difference is the air between its legs, which its hull counted.
+  return `Weighed by its real volume now that it collides as convex pieces, this body weighs ${(rest + after).toFixed(2)} kg rather than the ${(rest + before).toFixed(2)} kg of its convex hull, which counted the space between and inside its parts as solid. Set a mass if you wanted the heavier figure.`;
 }
 
 /**
