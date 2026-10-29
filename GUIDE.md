@@ -22,10 +22,11 @@ Technical decisions, conventions, and architecture notes for the **PhysBox: Mesh
 ## Architecture and Core Mechanics
 
 ### 1. Proximity-aware joint coupling (pinions and gears)
-* Gear and pinion-rack pairs are coupled with joint equality constraints (`<equality><joint ... /></equality>`) rather than tooth-on-tooth collision.
-* The compiler computes the world positions of gears and pinions relative to their parent bodies and couples them only when they are close enough:
+* Gear and pinion-rack pairs are coupled with equality constraints rather than tooth-on-tooth collision: a fixed tendon `joint1 - ratio*joint2` held at zero length (`utils/jointCoupling.ts`), which MuJoCo softens by the tendon's real inverse inertia. A joint equality's softness ignores the ratio and let loaded couplings slip.
+* The compiler computes the world positions and axes of gears and pinions and couples them only when they mesh (`utils/gearMeshing.ts`):
   * **Pinion-rack:** coupled when centre-to-centre distance $\le 0.5$ metres.
-  * **Gears:** coupled when centre-to-centre distance $\le (r_1 + r_2) \times 1.15$.
+  * **Gears:** hinge axes parallel, a round geom of each overlapping the other along the axis (the same plane), and the axes $0.5$ to $1.2 \times (r_1 + r_2)$ apart, $r$ being those geoms' radii (a cut gear's pitch radius). Ratio $-r_2/r_1$.
+  * Joints already joined by explicit `coupleTargetId` couplings, directly or along a chain, are never proximity-coupled to each other.
 * Each node has an `allowCoupling` property. Unchecking "Allow Mechanical Coupling" in the sidebar bypasses the proximity solver and leaves the parts to direct physical contact.
 
 ### 2. Gravity and DOF (degrees of freedom)

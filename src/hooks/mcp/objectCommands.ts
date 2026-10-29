@@ -16,7 +16,6 @@ import { Vector3 } from 'three';
 import type { SceneNode, SceneGeom, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
-import { withMotorArmature } from '../../utils/motionParts';
 import {
   countBodies, collectNodeIds, type Msg, pointList, resolveParent, withChild, findNodeInScene,
 } from './bridgeUtils';
@@ -109,7 +108,6 @@ export const objectCommands: McpCommands = {
 
     // Extract declarative feature arrays if passed in updates
     const updates = { ...rawUpdates };
-    if (Array.isArray(updates.joints)) updates.joints = updates.joints.map(withMotorArmature);
     const breakError = resolveBreakFields(updates, target.deformMaterial);
     if (breakError) return { ok: false, error: breakError };
     const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;
@@ -462,22 +460,27 @@ export const objectCommands: McpCommands = {
       id = store.seatHardwarePart(into, group, partKind);
       if (!id) return { ok: false, error: `'${into}' has no hardware cut '${group}' that takes a ${info.label.toLowerCase()}` };
     } else {
-      const pos = Array.isArray(at) && at.length >= 3 ? at.map((v) => v / 1000) : [0, 0, 0.03];
-      id = store.addHardwarePart(partKind, pos, into ?? null);
+      const placed = Array.isArray(at) && at.length >= 3;
+      const pos = placed ? at.map((v) => v / 1000) : [0, 0, 0.03];
+      // `at` is where it goes, exactly; `into` a body with no cut for it
+      // fixes it there (a stepper bolted to its frame).
+      id = store.addHardwarePart(partKind, pos, into ?? null, { exact: placed, mount: !!into });
     }
     if (!id) return { ok: false, error: 'The part could not be added' };
-    if (fixTo) {
-      const added = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
-      const piece = added && movingPieceOf(added);
-      const why = piece ? useStore.getState().fixToPiece(piece.id, fixTo) : `A ${info.label.toLowerCase()} has no moving piece to fix a body to`;
-      if (why) return { ok: false, error: why, id };
-    }
+    // Sized before anything is fixed to it: fixed first, a body rode the
+    // default size's moving piece where the new size's no longer was.
     if (!joinKind && kind !== 'vslot_carriage' && (size !== undefined || lengthMm !== undefined || washer !== undefined)) {
       useStore.getState().setHardwarePart(id, {
         ...(size !== undefined ? { size: String(size) } : {}),
         ...(typeof lengthMm === 'number' ? { lengthMm } : {}),
         ...(typeof washer === 'boolean' ? { washer } : {}),
       });
+    }
+    if (fixTo) {
+      const added = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
+      const piece = added && movingPieceOf(added);
+      const why = piece ? useStore.getState().fixToPiece(piece.id, fixTo) : `A ${info.label.toLowerCase()} has no moving piece to fix a body to`;
+      if (why) return { ok: false, error: why, id };
     }
     await compileCsgNodes(true);
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
@@ -492,7 +495,9 @@ export const objectCommands: McpCommands = {
       ...(spec.fastens ? { fastens: spec.fastens } : {}),
       ...(part.weldTargetId ? { weldedTo: part.weldTargetId } : {}),
       ...(part.children.some((c) => c.hardwarePart?.piece === 'inner')
-        ? { innerRaceId: part.children.find((c) => c.hardwarePart?.piece === 'inner')!.id } : {}),
+        ? { [spec.kind === 'stepper' ? 'shaftId' : 'innerRaceId']: part.children.find((c) => c.hardwarePart?.piece === 'inner')!.id } : {}),
+      ...(part.children.some((c) => c.hardwarePart?.piece === 'carriage')
+        ? { carriageId: part.children.find((c) => c.hardwarePart?.piece === 'carriage')!.id } : {}),
       posMm: part.pos.map((v) => Math.round(v * 1e6) / 1000),
       ...(spec.kind === 'oring' && into && spec.seat ? { sealCheck: sealCheckFor(useStore.getState().sceneGraph, into, spec.seat) } : {}),
     };

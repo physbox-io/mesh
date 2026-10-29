@@ -75,7 +75,7 @@ describe('gear system', () => {
     // Cut gears' first geom is a mesh of size [1]; reading their radius from it
     // coupled every pair within 2.4 m at 1:1.
     const xml = compileToMJCF(preset('gears'));
-    expect(xml.match(/<joint name="[^"]*coupling[^"]*"/g)).toHaveLength(1);
+    expect(xml.match(/<tendon name="[^"]*coupling[^"]*"/g)).toHaveLength(1);
   });
 });
 
@@ -94,8 +94,8 @@ describe('gear train machine', () => {
 
   it('has no coupling between gears that do not mesh', () => {
     const xml = compileToMJCF(preset('machine'));
-    expect(xml).not.toMatch(/joint1="gear3_hinge" joint2="gear1_hinge"|joint1="gear1_hinge" joint2="gear3_hinge"/);
-    expect(xml.match(/<joint name="[^"]*coupling[^"]*"/g)).toHaveLength(2);
+    expect(xml).not.toMatch(/joint="gear3_hinge" coef="1" \/><joint joint="gear1_hinge"|joint="gear1_hinge" coef="1" \/><joint joint="gear3_hinge"/);
+    expect(xml.match(/<tendon name="[^"]*coupling[^"]*"/g)).toHaveLength(2);
   });
 
   it('sweeps the block off its shelf with the output gear\'s arm', () => {

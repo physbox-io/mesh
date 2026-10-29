@@ -99,7 +99,8 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
 
       const xml = compileToMJCF({ nodes: pair.nodes });
       expect(xml).toContain('explicit_coupling_1');
-      expect(xml).toContain('polycoef="0 -0.5 0 0 0"');
+      // Held as a tendon at zero length: driven − ratio·driver.
+      expect(xml).toContain('coef="0.5" /></fixed>');
     });
 
     it('prevents undercutting on low tooth count gears (z = 10) via profile shift without self-intersecting outlines', () => {
@@ -147,7 +148,7 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
 
       const xml = compileToMJCF({ nodes: rp.nodes });
       expect(xml).toContain('explicit_coupling_1');
-      expect(xml).toContain('polycoef="0 0.015 0 0 0"');
+      expect(xml).toContain('coef="-0.015" /></fixed>');
     });
   });
 
@@ -181,14 +182,15 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
       assertWatertightGeom(beltMesh.renderVertices, beltMesh.faces);
     });
 
-    it('builds a T8 leadscrew and child nut carriage with exact (leadMm / 1000) / (2π) coupling ratio', () => {
+    it('builds a T8 leadscrew and a nut beside it with exact (leadMm / 1000) / (2π) coupling ratio', () => {
       for (const leadMm of [2, 4, 8] as const) {
         const ls = buildLeadscrewDrive({ lengthMm: 200, leadMm, pitchMm: 2, diameterMm: 8 });
         const expectedRatio = (leadMm / 1000) / (2 * Math.PI);
         expect(ls.coupleRatio).toBeCloseTo(expectedRatio, 7);
         expect(ls.nutNode.coupleTargetId).toBe(ls.leadscrewNode.id);
         expect(ls.nutNode.coupleRatio).toBeCloseTo(expectedRatio, 7);
-        expect(ls.leadscrewNode.children).toContain(ls.nutNode);
+        // Side by side in a fixed mount: the nut must not turn with the screw.
+        expect(ls.mountNode.children).toEqual([ls.leadscrewNode, ls.nutNode]);
 
         const screwMesh = ls.leadscrewNode.geoms.find((g) => g.type === 'mesh')!;
         assertWatertightGeom(screwMesh.renderVertices, screwMesh.faces);

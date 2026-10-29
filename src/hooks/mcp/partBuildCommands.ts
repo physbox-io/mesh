@@ -17,18 +17,13 @@ import {
   PCB_PRESETS, buildPcbNode, decodePcbHandoff, exportPcbFaceplateSvg, generatePcbEnclosure,
   type PcbEnclosureFace, type PcbEnclosureOptions, type PcbMechanicalSpec,
 } from '../../utils/pcbEnclosureSync';
-import {
-  buildCamMechanism, buildFourBarLinkage, buildGt2BeltDrive, buildInvoluteGearNode,
-  buildLeadscrewDrive, buildMeshingGearPair, buildRackAndPinionPair, type CamSpec, type FourBarSpec,
-  type Gt2BeltDriveSpec, type InvoluteGearSpec, type InvoluteRackSpec, type LeadscrewDriveSpec,
-} from '../../utils/mechanismParts';
+import { buildMechanism, type MechanismRequest } from '../../utils/buildMechanism';
 import {
   PIPE_STANDARDS, breakdownPipeFrame, buildAllCustomHubNodes, withoutHubsAt,
   generatePipeStructurePreset, type PipeFrameOptions, type PipeStandardId,
   type PipeStructurePresetId,
 } from '../../utils/tubeAndWireExporter';
 import { frameBodyInScene, WHOLE_SCENE } from '../../utils/pipeSkeleton';
-import type { SceneNode } from '../../types/scene';
 import { findNodeInScene } from './bridgeUtils';
 import { settleScene } from './settleScene';
 import type { McpCommands, McpHandler } from './types';
@@ -394,66 +389,16 @@ const syncPcbEnclosureCommand: McpHandler = async (msg, { store }) => {
 };
 
 const buildMechanismCommand: McpHandler = async (msg, { store }) => {
-  const family = typeof msg.family === 'string' ? msg.family : 'gear_pair';
-  let createdNodes: SceneNode[];
-  let metrics: Record<string, unknown> = {};
-  if (family === 'gear') {
-    const node = buildInvoluteGearNode(msg as unknown as InvoluteGearSpec);
-    createdNodes = [node];
-  } else if (family === 'gear_pair') {
-    const driverSpec: InvoluteGearSpec = (msg.driver as InvoluteGearSpec) ?? {
-      moduleMm: typeof msg.moduleMm === 'number' ? msg.moduleMm : 1.5,
-      teeth: typeof msg.driverTeeth === 'number' ? msg.driverTeeth : 16,
-    };
-    const drivenSpec: InvoluteGearSpec = (msg.driven as InvoluteGearSpec) ?? {
-      moduleMm: driverSpec.moduleMm,
-      teeth: typeof msg.drivenTeeth === 'number' ? msg.drivenTeeth : 32,
-    };
-    const pair = buildMeshingGearPair(driverSpec, drivenSpec);
-    createdNodes = [pair.driverNode, pair.drivenNode];
-    metrics = { centerDistanceMm: pair.centerDistanceMm, ratio: pair.gearRatio, contactRatio: pair.contactRatio };
-  } else if (family === 'rack_pinion') {
-    const pinionSpec: InvoluteGearSpec = (msg.pinion as InvoluteGearSpec) ?? {
-      moduleMm: typeof msg.moduleMm === 'number' ? msg.moduleMm : 1.5,
-      teeth: typeof msg.pinionTeeth === 'number' ? msg.pinionTeeth : 16,
-    };
-    const rackSpec: InvoluteRackSpec = (msg.rack as InvoluteRackSpec) ?? {
-      moduleMm: pinionSpec.moduleMm,
-      teeth: typeof msg.rackTeeth === 'number' ? msg.rackTeeth : 20,
-    };
-    const rp = buildRackAndPinionPair(pinionSpec, rackSpec);
-    createdNodes = [rp.pinionNode, rp.rackNode];
-    metrics = { coupleRatio: rp.coupleRatio, pitchRadiusMm: rp.pitchRadiusMm };
-  } else if (family === 'gt2_belt') {
-    const belt = buildGt2BeltDrive((msg as unknown as Gt2BeltDriveSpec) ?? { driverTeeth: 20, drivenTeeth: 40, centerDistanceMm: 80 });
-    createdNodes = [belt.driverNode, belt.drivenNode, belt.beltNode];
-    metrics = { beltLengthMm: belt.beltLengthMm, beltTeeth: belt.beltTeethRounded, coupleRatio: belt.coupleRatio };
-  } else if (family === 'leadscrew') {
-    const ls = buildLeadscrewDrive((msg as unknown as LeadscrewDriveSpec) ?? { lengthMm: 200, leadMm: 8 });
-    createdNodes = [ls.leadscrewNode];
-    metrics = { coupleRatio: ls.coupleRatio, travelRangeMm: ls.travelRangeMm };
-  } else if (family === 'cam_follower') {
-    const cam = buildCamMechanism((msg as unknown as CamSpec) ?? { kind: 'eccentric', baseRadiusMm: 20, liftMm: 8 });
-    createdNodes = [cam.camNode, cam.followerNode];
-    metrics = { maxRadiusMm: cam.profile.maxRadiusMm, minRadiusMm: cam.profile.minRadiusMm, coupleRatio: cam.coupleRatio };
-  } else if (family === 'four_bar') {
-    const fb = buildFourBarLinkage((msg as unknown as FourBarSpec) ?? { groundMm: 100, crankMm: 40, couplerMm: 90, rockerMm: 80 });
-    createdNodes = fb.nodes;
-    metrics = { ...fb.metrics };
-  } else {
-    return { ok: false, error: `Unknown mechanism family '${family}'.` };
-  }
-  const createdIds = new Set(createdNodes.map((n) => n.id));
-  const nextNodes = [...store.sceneGraph.nodes.filter((n) => !createdIds.has(n.id)), ...createdNodes];
-  await settleScene(nextNodes);
-  const addedIds: string[] = [];
-  const collect = (list: SceneNode[]) => list.forEach((n) => { addedIds.push(n.id); collect(n.children || []); });
-  collect(createdNodes);
+  // Added to the scene as it is; see utils/buildMechanism.ts.
+  const built = buildMechanism(msg as MechanismRequest, store.sceneGraph.nodes);
+  if ('error' in built) return { ok: false, error: built.error };
+  await settleScene(built.nodes);
   return {
     ok: true,
-    family,
-    addedIds,
-    metrics,
+    family: built.family,
+    addedIds: built.addedIds,
+    ...(built.arborId ? { arborId: built.arborId } : {}),
+    metrics: built.metrics,
   };
 };
 

@@ -331,10 +331,10 @@ describe('equality constraints and wedge mesh caching', () => {
       },
     ];
     const xml = compile([...makePair(1, 0), ...makePair(2, 5)]);
-    expect(xml).toContain('joint1="pinion_1_hinge" joint2="rack_1_slide"');
-    expect(xml).toContain('joint1="pinion_2_hinge" joint2="rack_2_slide"');
-    expect(xml).not.toContain('joint1="pinion_1_hinge" joint2="rack_2_slide"');
-    expect(xml).not.toContain('joint1="pinion_2_hinge" joint2="rack_1_slide"');
+    expect(xml).toContain('<joint joint="pinion_1_hinge" coef="1" /><joint joint="rack_1_slide"');
+    expect(xml).toContain('<joint joint="pinion_2_hinge" coef="1" /><joint joint="rack_2_slide"');
+    expect(xml).not.toContain('<joint joint="pinion_1_hinge" coef="1" /><joint joint="rack_2_slide"');
+    expect(xml).not.toContain('<joint joint="pinion_2_hinge" coef="1" /><joint joint="rack_1_slide"');
   });
 
   it('caches wedge mesh arrays across compileToMJCF calls', () => {

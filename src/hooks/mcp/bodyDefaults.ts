@@ -22,7 +22,6 @@ import {
   DEFAULT_UNIT as LATTICE_UNIT,
 } from '../../utils/latticeMesh';
 import { generatedMeshMass } from '../../utils/generatedMeshMass';
-import { withMotorArmature } from '../../utils/motionParts';
 import { pointList, toRenderVertices } from './bridgeUtils';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 
@@ -226,7 +225,7 @@ export function resolveUpdatedGeoms(
   return { ok: true, geoms: resolvedList };
 }
 
-export const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => withMotorArmature({
+export const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
   // As for geoms: springref and the crumple fields were dropped by a whitelist.
   ...(j as SceneJoint),
   name:    j.name    ?? `${bodyName}_joint_${idx}`,

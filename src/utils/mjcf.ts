@@ -8,6 +8,10 @@ import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRo
 import { uniquifyNamesInPlace } from './uniqueNames';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
+import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
+import { gearBody, meshingGears, type GearBody } from './gearMeshing';
+import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
+import { UNSLIPPING_CLUTCH, clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
 /**
  * A name as an attribute value. Names are whatever someone typed, and a body
@@ -221,10 +225,11 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
 };
 
 /** The contact exclusions and break limits that go with breakModel's equalities. */
-const breakExtrasXml = (b: ReturnType<typeof buildBreakModel>): string => {
+const breakExtrasXml = (b: ReturnType<typeof buildBreakModel>, linked: [string, string][] = []): string => {
   let xml = '';
-  if (b.excludes.length) {
-    xml += `\n  <contact>${b.excludes.map(([p, q]) => `\n    <exclude body1="${xmlAttr(p)}" body2="${xmlAttr(q)}" />`).join('')}\n  </contact>`;
+  const excludes = [...b.excludes, ...linked];
+  if (excludes.length) {
+    xml += `\n  <contact>${excludes.map(([p, q]) => `\n    <exclude body1="${xmlAttr(p)}" body2="${xmlAttr(q)}" />`).join('')}\n  </contact>`;
   }
   if (b.numerics.length) {
     xml += `\n  <custom>${b.numerics.map((n) => `\n    <numeric name="${xmlAttr(n.name)}" data="${n.data.map((v) => +v.toPrecision(6)).join(' ')}" />`).join('')}\n  </custom>`;
@@ -322,16 +327,20 @@ const buildNode = (node: SceneNode): string => {
   (node.geoms || []).forEach(g => innerXml += buildGeom(g, hasSolid && g.role === 'visual'));
   (node.children || []).forEach(c => innerXml += buildNode(c));
   
-  let attrs = `name="${xmlAttr(nameStr)}" pos="${posStr}"`;
+  let frame = ` pos="${posStr}"`;
   if (rotationIsBaked(node)) {
     // Nothing: the vertices already carry it. See `rotationIsBaked`.
   } else if (node.quat) {
-    attrs += ` quat="${node.quat.join(' ')}"`;
+    frame += ` quat="${node.quat.join(' ')}"`;
   } else if (node.euler) {
-    attrs += ` euler="${node.euler.join(' ')}"`;
+    frame += ` euler="${node.euler.join(' ')}"`;
   }
-  
-  return `<body ${attrs}>${innerXml}</body>`;
+  // A torque-limited velocity motor drives its joint through a slip clutch
+  // from a driver dof beside it, in the same frame. See utils/motorClutch.ts.
+  const drivers = (node.joints || []).filter(isClutchedMotor)
+    .map((j) => clutchDriverBodyXml(nameStr, frame, j, xmlAttr)).join('');
+
+  return `<body name="${xmlAttr(nameStr)}"${frame}>${innerXml}</body>${drivers}`;
 };
 
 /**
@@ -661,7 +670,7 @@ export const compileToMJCF = (
   getAbsolutePositions(sceneCopy.nodes);
 
   // Keep track of gear joints along with their absolute position and size
-  const gearJointNodes: { jointName: string; nodeId: string; pos: [number, number, number]; radius: number }[] = [];
+  const gearJointNodes: GearBody[] = [];
   const jointedNodes: Record<string, string> = {};
   const explicitCouplingNodes: SceneNode[] = [];
   const pulleyRopesList: SceneNode[] = [];
@@ -679,10 +688,12 @@ export const compileToMJCF = (
   const connectConstraintsList: { bodyId: string; bodyName: string; targetId: string; anchor: number[] }[] = [];
   const nodeNamesMap: Record<string, string> = {};
 
+  const jointsByName = new Map<string, { node: SceneNode; joint: SceneJoint }>();
   const traverse = (nodes: SceneNode[], parentName?: string, parentId?: string) => {
     if (!nodes) return;
     for (const node of nodes) {
       nodeNamesMap[node.id] = node.name;
+      for (const j of node.joints || []) jointsByName.set(j.name, { node, joint: j });
       (node.joints || []).forEach((j) => {
         if (j.crumpleTorqueNm === undefined || j.type === 'free') return;
         crumpleLocks.push({ jointName: j.name, bodyName: node.name, bodyId: node.id, parentName: parentName ?? '', parentId });
@@ -710,13 +721,8 @@ export const compileToMJCF = (
       (node.joints || []).forEach(j => {
         if (j.actuator) actuators.push(j); 
         if (couplingAllowed && node.id.includes('gear') && j.type === 'hinge') {
-          const wData = nodeWorldData[node.id];
-          gearJointNodes.push({
-            jointName: j.name,
-            nodeId: node.id,
-            pos: wData ? wData.pos : [0, 0, 0],
-            radius: pitchRadius(node) ?? (wData ? wData.size[0] : 0.25)
-          });
+          const wData = nodeWorldData[node.id] ?? { pos: [0, 0, 0], quat: [1, 0, 0, 0] as QuatWXYZ, size: [] };
+          gearJointNodes.push(gearBody(node, j, wData, pitchRadius(node)));
         }
         if (couplingAllowed && node.id.includes('pinion') && j.type === 'hinge') {
           const wData = nodeWorldData[node.id];
@@ -741,9 +747,30 @@ export const compileToMJCF = (
   };
   traverse(sceneCopy.nodes);
 
+  // A velocity servo far stiffer than the joint it drives (kv*dt over the
+  // joint's inertia), on a body held in a closed loop by a pin or a weld, is
+  // driven through a clutch that never slips. The implicit integrator treats
+  // that gain as inertia the constraint solver does not know about, and the
+  // loop's pins tore open: a 50 g scissor-lift slider held by a kv 20000
+  // servo folded the lift flat. Through the clutch the solver sees it.
+  const looped = new Set<string>();
+  for (const c of connectConstraintsList) { looped.add(c.bodyId); looped.add(c.targetId); }
+  for (const w of weldConstraintsList) { if (w.bodyId) looped.add(w.bodyId); looped.add(w.targetId); }
+  for (let i = 0; i < actuators.length; i++) {
+    const j = actuators[i];
+    const owner = jointsByName.get(j.name)?.node;
+    if (!owner || !looped.has(owner.id) || j.actuator?.type !== 'velocity' || j.actuator.forceLimit !== undefined) continue;
+    if (j.type !== 'hinge' && j.type !== 'slide') continue;
+    if ((j.actuator.kv ?? 1) * 0.001 <= estimateJointInertia(owner, j)) continue;
+    const held: SceneJoint = { ...j, actuator: { ...j.actuator, forceLimit: UNSLIPPING_CLUTCH } };
+    actuators[i] = held;
+    owner.joints = owner.joints.map((x) => (x.name === j.name ? held : x));
+  }
+
   const actuatorsXml = actuators.map((j) => {
     const act = j.actuator!;
-    let attrs = `name="${xmlAttr(j.name)}_actuator" joint="${xmlAttr(j.name)}"`;
+    const clutched = isClutchedMotor(j);
+    let attrs = `name="${xmlAttr(j.name)}_actuator" joint="${xmlAttr(clutched ? clutchDriverJointName(j.name) : j.name)}"`;
     if (act.kv !== undefined && act.type === 'velocity') attrs += ` kv="${act.kv}"`;
     if (act.gear !== undefined) attrs += ` gear="${act.gear}"`;
     // A motor's ctrl is its torque. Unlimited, so a linked Volt's stall
@@ -751,12 +778,22 @@ export const compileToMJCF = (
     if (act.type === 'motor') attrs += ` ctrllimited="false"`;
     // What the motor can actually put out: a stepper's holding torque. Only
     // when set, so every actuator that had none compiles as it did.
-    if (act.forceLimit !== undefined) attrs += ` forcelimited="true" forcerange="${-act.forceLimit} ${act.forceLimit}"`;
+    // A clutched motor's limit is its clutch's friction, not a clamp.
+    if (act.forceLimit !== undefined && !clutched) attrs += ` forcelimited="true" forcerange="${-act.forceLimit} ${act.forceLimit}"`;
     return `    <${act.type} ${attrs} />`;
   }).join('\n');
-
   let equalityXml = '';
   let equalityConstraints = '';
+  // Fixed tendons: motor clutches, and the couplings below.
+  const tendonLines: string[] = actuators.filter(isClutchedMotor).map((j) => clutchTendonXml(j, xmlAttr));
+  const couplingEdges: CouplingEdge[] = [];
+  const couple = (name: string, joint1: string, joint2: string, ratio: number | string) => {
+    const c = jointCouplingXml(name, joint1, joint2, ratio, xmlAttr);
+    couplingEdges.push({ joint1, joint2, ratio: Number(ratio) });
+    tendonLines.push(c.tendon);
+    equalityConstraints += `\n${c.equality}`;
+  };
+
 
   // 0. Explicit joint couplings
   let couplingIndex = 1;
@@ -770,32 +807,30 @@ export const compileToMJCF = (
       const pairKey = [joint1, joint2].sort().join('::');
       explicitlyCoupledJointPairs.add(pairKey);
       // Stiff, as teeth in mesh are: at the default 0.02 s a 20 g rack pushing
-      // a 5 g block fell 5% behind its pinion.
-      equalityConstraints += `\n    <joint name="explicit_coupling_${couplingIndex++}" joint1="${xmlAttr(joint1)}" joint2="${xmlAttr(joint2)}" polycoef="0 ${ratio} 0 0 0" solref="0.004 1" />`;
+      // a 5 g block fell 5% behind its pinion. See utils/jointCoupling.ts.
+      couple(`explicit_coupling_${couplingIndex++}`, joint1, joint2, ratio);
     }
   }
 
-  // 1. Gears fallback dynamic proximity coupling
+  // Joints already tied together by explicit couplings, directly or along a
+  // chain: the proximity rules below leave those alone.
+  const chainOf = new Map<string, string>();
+  const root = (j: string): string => {
+    let r = j;
+    while (chainOf.has(r) && chainOf.get(r) !== r) r = chainOf.get(r)!;
+    return r;
+  };
+  for (const e of couplingEdges) chainOf.set(root(e.joint1), root(e.joint2));
+  const sameChain = (a: string, b: string) => root(a) === root(b);
+
+  // 1. Gears fallback dynamic proximity coupling: parallel axes, wheels in
+  //    the same plane, centres a pitch-circle sum apart. See utils/gearMeshing.ts.
   const coupledPairs = new Set<string>();
-  for (let i = 0; i < gearJointNodes.length; i++) {
-    for (let j = i + 1; j < gearJointNodes.length; j++) {
-      const g1 = gearJointNodes[i];
-      const g2 = gearJointNodes[j];
-      const dx = g1.pos[0] - g2.pos[0];
-      const dy = g1.pos[1] - g2.pos[1];
-      const dz = g1.pos[2] - g2.pos[2];
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      // Touch/meshing criteria: centers within sum of radii + 20% margin
-      const maxMeshingDist = (g1.radius + g2.radius) * 1.2;
-      if (dist <= maxMeshingDist) {
-        const pairKey = [g1.jointName, g2.jointName].sort().join('::');
-        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
-          coupledPairs.add(pairKey);
-          const ratio = -(g1.radius / (g2.radius || 0.1));
-          equalityConstraints += `\n    <joint name="gear_coupling_${coupledPairs.size}" joint1="${xmlAttr(g1.jointName)}" joint2="${xmlAttr(g2.jointName)}" polycoef="0 ${ratio.toFixed(6)} 0 0 0" />`;
-        }
-      }
-    }
+  for (const { a, b, ratio } of meshingGears(gearJointNodes, sameChain)) {
+    const pairKey = [a.jointName, b.jointName].sort().join('::');
+    if (coupledPairs.has(pairKey) || explicitlyCoupledJointPairs.has(pairKey)) continue;
+    coupledPairs.add(pairKey);
+    couple(`gear_coupling_${coupledPairs.size}`, a.jointName, b.jointName, ratio.toFixed(6));
   }
 
   // 2. Pinion and Rack fallback proximity coupling
@@ -809,7 +844,7 @@ export const compileToMJCF = (
       // Only couple if their centers are within 0.5 meters of each other
       if (dist <= 0.5) {
         const pairKey = [p.jointName, r.jointName].sort().join('::');
-        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
+        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey) && !sameChain(p.jointName, r.jointName)) {
           coupledPairs.add(pairKey);
           pinionRackCouplingCount++;
           const pinionRadius = p.radius;
@@ -823,7 +858,7 @@ export const compileToMJCF = (
           const couplingName = pinionRackCouplingCount === 1
             ? 'pinion_rack_coupling'
             : `pinion_rack_coupling_${pinionRackCouplingCount}`;
-          equalityConstraints += `\n    <joint name="${xmlAttr(couplingName)}" joint1="${xmlAttr(p.jointName)}" joint2="${xmlAttr(r.jointName)}" polycoef="0 ${turnsPerMetre} 0 0 0" />`;
+          couple(couplingName, p.jointName, r.jointName, turnsPerMetre);
         }
       }
     }
@@ -924,6 +959,10 @@ export const compileToMJCF = (
     // A fixed body2 is the same as the world to MuJoCo, so naming it costs
     // nothing.
     const hasBody = c.targetId in nodeNamesMap;
+    // Held rigid, as a pin is: at MuJoCo's default impedance a pin was only as
+    // stiff as the lighter body it held, so a scissor lift's pins opened 7 mm
+    // under its 2 kg platform with a 1 kg slider, and it folded flat with a
+    // 50 g one. tests/rigidPins.test.ts.
     // MuJoCo's <connect> anchor is always specified in body1's local frame,
     // whether body2 is named or omitted (worldbody).
     const body1World = nodeWorldData[c.bodyId];
@@ -935,17 +974,41 @@ export const compileToMJCF = (
       c.anchor[2] - body1Pos[2],
     ]);
     if (hasBody) {
-      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" body2="${xmlAttr(targetName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
+      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" body2="${xmlAttr(targetName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" ${RIGID_COUPLING} />`;
     } else {
-      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
+      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" ${RIGID_COUPLING} />`;
     }
   }
 
   for (const line of breaks.equality) equalityConstraints += `\n    ${line}`;
 
+  // Bodies already joined by a coupling or a pin do not also collide: a
+  // gear's collider and its mate's touch at the pitch circle, a nut's wraps
+  // its screw, a pinned link overlaps its neighbour at the pin. MuJoCo skips a
+  // parent and child by itself; these are the joins across the tree.
+  const linkedBodies: [string, string][] = [];
+  const linkedKeys = new Set<string>();
+  const link = (a?: string, b?: string) => {
+    if (!a || !b || a === b) return;
+    const key = [a, b].sort().join('\u0000');
+    if (linkedKeys.has(key)) return;
+    linkedKeys.add(key);
+    linkedBodies.push([a, b]);
+  };
+  for (const e of couplingEdges) link(jointsByName.get(e.joint1)?.node.name, jointsByName.get(e.joint2)?.node.name);
+  for (const c of connectConstraintsList) if (c.targetId in nodeNamesMap) link(c.bodyName, nodeNamesMap[c.targetId]);
+
+  // Dry friction on a coupled joint goes where the chain feels it. The nodes
+  // are this compile's copies, so their joint lists can be replaced.
+  for (const [jointName, frictionloss] of relocateCoupledFriction(couplingEdges, jointsByName)) {
+    const owner = jointsByName.get(jointName)!.node;
+    owner.joints = owner.joints.map((j) => (j.name === jointName ? { ...j, frictionloss } : j));
+  }
+
   if (equalityConstraints) {
     equalityXml = `\n  <equality>${equalityConstraints}\n  </equality>`;
   }
+  const tendonXml = tendonLines.length ? `\n  <tendon>\n${tendonLines.join('\n')}\n  </tendon>` : '';
 
   // Contact time constant. MuJoCo will not go below twice the timestep, and at
   // 0.002 s a part resting under gravity sinks about g*t^2 = 0.04 mm into what
@@ -978,7 +1041,7 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
     
     ${sceneCopy.nodes.map(buildNode).join('\n')}
   </worldbody>
-${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${equalityXml}${breakExtrasXml(breaks)}
+${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${tendonXml}${equalityXml}${breakExtrasXml(breaks, linkedBodies)}
 </mujoco>
   `.trim();
 };
