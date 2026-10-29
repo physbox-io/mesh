@@ -301,7 +301,12 @@ export const sceneCommands: McpCommands = {
 
     const currentNodes = store.sceneGraph.nodes || [];
     const updatedNodes = [...currentNodes, newNode];
-    const res = await settleScene(updatedNodes, { replacesScene: false });
+    // Answers once the body exists, not after its convex pieces: those are
+    // V-HACD work, one job at a time behind every other body's, and the first
+    // create of five went past the hub's 60 s and was retried into a duplicate.
+    // The pieces install, and rebuild the model, when they land; the summary
+    // says collisionPending until then.
+    const res = await settleScene(updatedNodes, { replacesScene: false, colliderWaitMs: 0 });
 
     return {
       ok: res.ok,

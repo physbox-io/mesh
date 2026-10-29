@@ -85,7 +85,12 @@ export const latticeCommands: McpCommands = {
 
     const currentNodes = useStore.getState().sceneGraph.nodes || [];
     const updatedNodes = parent ? withChild(currentNodes, parent.id, newNode) : [...currentNodes, newNode];
-    const settleRes = await settleScene(updatedNodes, { replacesScene: false });
+    // Answers once the body exists, not after its convex pieces: those are
+    // V-HACD work, one job at a time behind every other body's, and the first
+    // create of five went past the hub's 60 s and was retried into a duplicate.
+    // The pieces install, and rebuild the model, when they land; the summary
+    // says collisionPending until then.
+    const settleRes = await settleScene(updatedNodes, { replacesScene: false, colliderWaitMs: 0 });
     if (!settleRes.ok) {
       throw new Error(`The lattice body failed to compile: ${settleRes.error}`);
     }
