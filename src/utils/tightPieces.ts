@@ -39,14 +39,9 @@ export interface TightenOptions {
   timeBudgetMs?: number;
   /**
    * No cut may leave a piece thinner than this (twice its volume over its
-   * area), metres: a backstop to cutting only across the surface (cutPlanes).
-   * A ball dropped into a cup whose floor had been cut into 0.5 mm slabs went
-   * straight through it: it sank further in one step than a slab was thick,
-   * and MuJoCo pushed it out of the far side.
+   * area), metres: a sliver is no use to contact, and costs a piece.
    */
   minThickness?: number;
-  /** How far each half of a cut reaches past the cut into the other, metres. */
-  overlap?: number;
 }
 
 export interface TightenResult {
@@ -346,13 +341,7 @@ function cutPlanes(piece: Piece): { n: number[]; e: number }[] {
     return [{ n, e: dot(n, p) }];
   }
   const out: { n: number[]; e: number }[] = [];
-  const meanLen = Math.hypot(mean[0], mean[1], mean[2]) || 1;
   for (const axis of second ? [n, second] : [n]) {
-    // Never along the way the surface faces: that slices material off in
-    // slabs (a cup's floor came out as 0.5 mm sheets a falling ball went
-    // straight through), where every useful cut — halving an arc, splitting
-    // an inside corner along its edge — runs across it.
-    if (Math.abs(dot(axis, mean)) / meanLen > 0.5) continue;
     out.push({ n: axis, e: dot(axis, p) });
     // Where the turn is: between the scraps turned one way and those turned
     // the other, whichever side of each other they lie.
@@ -431,12 +420,11 @@ export function tightenPieces(verts: number[], faces: number[], hulls: Hull[], o
     let best: Piece[] | null = null;
     let bestScore = Infinity;
     for (const plane of cutPlanes(piece)) {
-      // The halves overlap across the cut rather than meet on it. Meeting
-      // exactly, they left a seam a ball sank into: an 8 mm ball dropped
-      // 100 mm into a cup went through its 4 mm floor where two floor pieces
-      // met, each pushing it sideways off its own edge.
-      const lap = opts.overlap ?? 0;
-      const halves = [cutRegion(piece.hull, plane.n, plane.e + lap), cutRegion(piece.hull, plane.n.map(c => -c), -plane.e + lap)];
+      // Meeting exactly on the cut, not overlapping across it: an overlap
+      // keeps a strip of the parent's chord on each side, and on the coaster
+      // track those strips stood up as ridges that bounced a rolling ball 8 mm
+      // into the air and stopped it.
+      const halves = [cutRegion(piece.hull, plane.n, plane.e), cutRegion(piece.hull, plane.n.map(c => -c), -plane.e)];
       if (!halves[0] || !halves[1]) continue;
       const made = halves.map(h => makePiece(q, h!, cap, quick));
       if (!made[0] || !made[1]) continue;
