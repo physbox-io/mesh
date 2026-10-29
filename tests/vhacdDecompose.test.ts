@@ -155,7 +155,7 @@ describe('decomposeNodeColliders', () => {
     const result = (await decomposeNodeColliders(meshNode(cupMesh())))!;
     // Water density over the TRUE volume, not the hull's — a real change to how
     // the body behaves, so it is not made silently.
-    expect(result.warning).toMatch(/weighs .* kg by its own volume; as its convex hull it would have weighed .* kg/);
+    expect(result.warning).toMatch(/weighs .* rather than/);
     expect(result.mass).toBeLessThan(1000 * result.hullVolume);
     expect(result.mass).toBeCloseTo(1000 * result.volume, 5);
   });

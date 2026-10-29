@@ -628,9 +628,8 @@ function cavityWarning(cavities: NonNullable<ColliderResult['cavities']>): strin
 }
 
 /**
- * Said once, when it first becomes true: a concave body (hollow, or just
- * shaped: legs, arms) that was being weighed by its convex hull now weighs
- * what is actually there, which is lighter — often by
+ * Said once, when it first becomes true: a hollow body that was being weighed by
+ * its convex hull now weighs what is actually there, which is lighter — often by
  * a factor of three. Correct, and the same defect inertia="exact" fixed for the
  * oak tree, but not something to change under someone without telling them.
  *
@@ -651,9 +650,7 @@ function massWarning(node: SceneNode, decomposed: MeshColliders[]): string | und
     .filter(g => !sources.has(g) && !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane')
     .reduce((m, g) => m + (g.mass ?? (g.density ?? 1000) * primitiveVolume(g)), 0)
     + decomposed.filter(p => !hollow.includes(p)).reduce((m, p) => m + (p.source.mass ?? 0), 0);
-  // Not "hollow": a solid quadruped or a chair of boxes is concave without a
-  // cavity anywhere, and the old figure is simply its convex hull's.
-  return `This body weighs ${(rest + after).toFixed(2)} kg by its own volume; as its convex hull it would have weighed ${(rest + before).toFixed(2)} kg. Set a mass if you wanted the heavier figure.`;
+  return `Now that its hollow is real, this body weighs ${(rest + after).toFixed(2)} kg rather than the ${(rest + before).toFixed(2)} kg it was given as a solid lump. Set a mass if you wanted the heavier figure.`;
 }
 
 /**
