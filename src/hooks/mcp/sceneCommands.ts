@@ -11,7 +11,7 @@ import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../../utils/noteCards';
-import { compileCsgNodes } from '../useCsgCompile';
+import { collidersBeingDecomposed, compileCsgNodes } from '../useCsgCompile';
 import { collidersAreStale } from '../../utils/convexDecomposition';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
@@ -41,7 +41,10 @@ export const sceneCommands: McpCommands = {
     // a while for them, then say which bodies ran as hulls.
     const pendingBodies = () => {
       const out: string[] = [];
-      const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => { if (collidersAreStale(n)) out.push(n.name); walk(n.children); });
+      // In flight as well as stale: a body whose pieces are being
+      // worked out again (a second ask for the same shape joins the first).
+      const running = new Set(collidersBeingDecomposed());
+      const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => { if (collidersAreStale(n) || running.has(n.id)) out.push(n.name); walk(n.children); });
       walk(useStore.getState().sceneGraph.nodes);
       return out;
     };
