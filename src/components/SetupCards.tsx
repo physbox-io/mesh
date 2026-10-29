@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Eye, Lightbulb, Play, RotateCw, CheckCircle2 } from 'lucide-react';
+import { Box, Download, Eye, Lightbulb, Play, RotateCw, CheckCircle2 } from 'lucide-react';
 import type { SolidSetupResult, SetupPlanSummary } from '../utils/solidSetups';
 import { setupDiagramSvg } from '../utils/setupDiagram';
 import { faceUpLabel, type StockSize } from '../utils/orient';
@@ -23,6 +23,9 @@ export function SetupCards({
   onDownload,
   onRun,
   canRun,
+  simulatedThrough,
+  onSimulateTo,
+  simulating,
 }: {
   setups: SolidSetupResult[];
   firstStock: StockSize;
@@ -34,6 +37,11 @@ export function SetupCards({
   onDownload: (index: number) => void;
   onRun: (index: number) => void;
   canRun: boolean;
+  /** The last setup whose step is in the scene, 1-based; 0 or less for none. */
+  simulatedThrough?: number;
+  /** Adds the steps up to and including this setup's (0-based) to the scene. */
+  onSimulateTo?: (index: number) => void;
+  simulating?: boolean;
 }) {
   const total = setups.reduce((t, s) => t + s.estimatedTimeSeconds, 0);
   return (
@@ -107,6 +115,23 @@ export function SetupCards({
                   {s.allowanceMm > 0 && <li>Leaves {s.allowanceMm.toFixed(1)} mm to sand off where it finishes</li>}
                   <li>{s.locate === 'pins' ? 'Located on the pins' : s.index === 1 ? 'Zero on the near-left corner' : 'Located by touching off the block'}</li>
                 </ul>
+                {onSimulateTo && (
+                  (simulatedThrough ?? 0) >= s.index ? (
+                    <p className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> In the scene as it comes off this setup
+                    </p>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onSimulateTo(i)}
+                      disabled={simulating}
+                      title="Add the block as it comes off this setup to the scene, and any step before it"
+                      className="flex items-center gap-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400 hover:underline disabled:opacity-40 cursor-pointer"
+                    >
+                      <Box className="w-3.5 h-3.5" /> Show the block after this setup
+                    </button>
+                  )
+                )}
                 <div className="flex items-center gap-1.5 pt-0.5">
                   <button
                     type="button"
