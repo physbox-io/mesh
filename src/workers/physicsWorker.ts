@@ -54,6 +54,7 @@ import { rebaseShard } from '../utils/runtimeShatter';
 import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptStateMap } from '../utils/scriptState';
 import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
+import { createConstraintMonitor } from '../utils/constraintResiduals';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -2254,6 +2255,9 @@ const runHeadless = (
     // The per-tick aero diagnostics of the most recently stepped tick, so the
     // (possibly deferred) sample() below reports the tick it belongs to.
     let lastAero: Record<string, AeroDiagnostic> = {};
+    // Every tick, not every frame: a pin that opens for a few ticks and
+    // closes again between two sampled frames has still let go.
+    const constraints = createConstraintMonitor(mujoco, model);
 
     const outcome = runHeadlessLoop<HistoryEntry>({ ticks, stride }, {
       step: () => {
@@ -2265,6 +2269,7 @@ const runHeadless = (
         wakeBodies();
         mujoco!.mj_step(model!, data!);
         checkConstraintBreaks();
+        constraints.sample(data!);
       },
       time: () => data!.time,
       isBad: () => {
@@ -2277,8 +2282,10 @@ const runHeadless = (
       sample: () => buildHistoryEntry(lastAero),
     });
 
+    const constraintReport = constraints.report(data);
     warnings.push(...collectMujocoWarnings(data));
     warnings.push(...scriptProblems.values());
+    warnings.push(...constraintReport.warnings);
     if (outcome.truncationDetail) warnings.push(outcome.truncationDetail);
 
     return {
@@ -2291,6 +2298,7 @@ const runHeadless = (
         : {}),
       trajectory: outcome.frames,
       warnings,
+      constraintReport,
     };
   } catch (e) {
     return { ok: false, error: String((e as Error)?.message || e), warnings: [...warnings, ...scriptProblems.values()] };

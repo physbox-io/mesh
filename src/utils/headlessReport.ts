@@ -11,7 +11,11 @@
  */
 import type { SceneGraph, SceneNode } from '../types/scene';
 import type { HistoryEntry } from '../workers/physicsWorkerProtocol';
+import type { ConstraintReport } from './constraintResiduals';
 import { summarizeTrajectory, type TrajectorySummary } from './trajectorySummary';
+
+/** How many constraints `final.constraints` lists; the rest are counted. */
+const MAX_LISTED_CONSTRAINTS = 20;
 
 export interface BodyFilter {
   /** Body ids to keep, or null to keep them all. */
@@ -68,26 +72,41 @@ export function emptySceneRefusal(graph: SceneGraph) {
   };
 }
 
+export type HeadlessFinal = TrajectorySummary & {
+  /** Every pin, weld and coupling held, and no joint ran well past its stop. */
+  constraintsHeld?: boolean;
+  /** Each equality's worst residual over the run, worst first. */
+  constraints?: ConstraintReport['constraints'];
+  /** How many constraints were measured beyond those listed. */
+  moreConstraints?: number;
+  /** Joints that ran well past a stop. */
+  limits?: ConstraintReport['limits'];
+};
+
 interface RawResult {
   ok: boolean;
   trajectory?: HistoryEntry[];
   warnings?: string[];
+  constraintReport?: ConstraintReport;
   [k: string]: unknown;
 }
 
-export type HeadlessReply<R> = R & {
+export interface HeadlessReply {
+  ok: boolean;
   warnings: string[];
   trajectory?: HistoryEntry[];
-  final?: TrajectorySummary | null;
-};
+  final?: HeadlessFinal | null;
+  [k: string]: unknown;
+}
 
 /**
  * The reply: `final` from the whole run, then the trajectory and `final.bodies`
  * cut down to the bodies asked for, with a warning for any that matched nothing.
  */
-export function reportHeadless<R extends RawResult>(result: R, graph: SceneGraph, requestedBodies: unknown): HeadlessReply<R> {
+export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBodies: unknown): HeadlessReply {
   const filter = resolveBodyFilter(graph, requestedBodies);
-  const rest = result;
+  // The worker's constraint report is folded into `final`, not passed on raw.
+  const { constraintReport, ...rest } = result;
   const warnings = [...(rest.warnings ?? [])];
   if (filter.unknown.length) {
     const names: string[] = [];
@@ -99,7 +118,7 @@ export function reportHeadless<R extends RawResult>(result: R, graph: SceneGraph
   if (!rest.ok || !rest.trajectory) return { ...rest, warnings };
 
   const summary = summarizeTrajectory(rest.trajectory, { jointTypes: jointTypes(graph) });
-  const final = summary;
+  let final: HeadlessFinal | null = summary;
   if (summary) {
     // A body's id says nothing to whoever named it; give the name alongside.
     const nameOf = new Map<string, string>();
@@ -110,6 +129,18 @@ export function reportHeadless<R extends RawResult>(result: R, graph: SceneGraph
     }
     if (filter.ids) {
       summary.bodies = Object.fromEntries(Object.entries(summary.bodies).filter(([id]) => filter.ids!.has(id)));
+    }
+    if (constraintReport) {
+      const listed = constraintReport.constraints.slice(0, MAX_LISTED_CONSTRAINTS);
+      final = {
+        ...summary,
+        constraintsHeld: constraintReport.warnings.length === 0,
+        ...(listed.length ? { constraints: listed } : {}),
+        ...(constraintReport.constraints.length > listed.length
+          ? { moreConstraints: constraintReport.constraints.length - listed.length }
+          : {}),
+        ...(constraintReport.limits.length ? { limits: constraintReport.limits } : {}),
+      };
     }
   }
   const trajectory = filter.ids

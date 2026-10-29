@@ -7,6 +7,7 @@ import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
+import type { ConstraintReport } from '../utils/constraintResiduals';
 
 /** Explicit state to seed a freshly built model with (a live mirror's copy). */
 export interface SeedState {
@@ -147,7 +148,11 @@ export interface HistoryQuery {
 }
 
 export type HeadlessResult =
-  | { ok: true; ticksSimulated: number; trajectory: HistoryEntry[]; warnings: string[] }
+  | {
+      ok: true; ticksSimulated: number; trajectory: HistoryEntry[]; warnings: string[];
+      /** How far each pin, weld and coupling opened, and the stops run through. */
+      constraintReport?: ConstraintReport;
+    }
   | { ok: false; error: string; warnings: string[] };
 
 // ---- Main thread -> worker -----------------------------------------------

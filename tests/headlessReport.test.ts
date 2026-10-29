@@ -80,3 +80,35 @@ describe('an empty scene', () => {
     expect(emptySceneRefusal(graph)).toBeNull();
   });
 });
+
+describe('constraints in final', () => {
+  it('folds the worker\'s constraint report into final and says whether they held', () => {
+    const pin = { name: 'connect_constraint_1', kind: 'connect' as const, bodies: ['input', 'output'], worstMm: 23, finalMm: 21, worstAtS: 1.2 };
+    const stop = { joint: 'out_hinge', body: 'output', range: [-90, 90] as [number, number], unit: 'deg' as const, worstPast: 12, worstAtS: 1, final: 100, finalPast: 10 };
+    const warning = 'Pin connect_constraint_1 between input and output was pulled 23 mm apart';
+    const r = reportHeadless({
+      ...run(0),
+      warnings: [warning],
+      constraintReport: { constraints: [pin], limits: [stop], warnings: [warning] },
+    }, graph, undefined);
+    expect(r.constraintReport).toBeUndefined();
+    // At rest, and broken: the two are reported apart.
+    expect(r.final!.settled).toBe(true);
+    expect(r.final!.constraintsHeld).toBe(false);
+    expect(r.final!.constraints).toEqual([pin]);
+    expect(r.final!.limits).toEqual([stop]);
+    expect(r.warnings).toEqual([warning]);
+  });
+
+  it('lists at most twenty and counts the rest', () => {
+    const many = Array.from({ length: 25 }, (_, i) => ({
+      name: `weld_constraint_${i}`, kind: 'weld' as const, bodies: ['a', 'b'],
+      worstMm: 0.1, finalMm: 0.1, worstDeg: 0.1, finalDeg: 0.1, worstAtS: 0,
+    }));
+    const r = reportHeadless({ ...run(0), constraintReport: { constraints: many, limits: [], warnings: [] } }, graph, undefined);
+    expect(r.final!.constraintsHeld).toBe(true);
+    expect(r.final!.constraints).toHaveLength(20);
+    expect(r.final!.moreConstraints).toBe(5);
+    expect(r.final!.limits).toBeUndefined();
+  });
+});
