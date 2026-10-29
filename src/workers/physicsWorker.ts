@@ -843,7 +843,10 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
       node.joints?.forEach((j) => {
         if (!dat || !mdl) return;
         const jId = jointIdCache[j.name];
-        if (jId !== undefined) {
+        // One scalar each is a hinge or a slide. A free or ball joint's state
+        // is a 7/4-vector, and its first number alone (a free joint's x) read
+        // as the whole of it; the body's pos, quat, vel and angvel carry it.
+        if (jId !== undefined && mdl.jnt_type[jId] !== 0 && mdl.jnt_type[jId] !== 1) {
           joints[j.name] = { pos: dat.qpos[mdl.jnt_qposadr[jId]], vel: dat.qvel[mdl.jnt_dofadr[jId]], qfrc_applied: dat.qfrc_applied[mdl.jnt_dofadr[jId]] };
         }
       });
