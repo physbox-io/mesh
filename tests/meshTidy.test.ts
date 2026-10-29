@@ -1,19 +1,21 @@
-// A SCAD bowl whose profile touches the axis is a closed mesh, and was not
-// treated as one.
+// A SCAD bowl whose profile touches the axis, and a polyhedron listed the
+// wrong way round, are both closed meshes. Neither was treated as one.
 //
 // `rotate_extrude() polygon([[0,0], ..., [0,t]])` — the usual way to write a
 // cup — compiled to a mesh with 256 zero-area triangles on 64 segments, was
 // reported `watertight: false`, refused for decomposition as having holes,
-// and collided and was weighed as its hull.
+// and collided and was weighed as its hull. A CCW `polyhedron` was reported
+// inside out and refused with the message for a mesh wound both ways.
 //
 // OpenSCAD itself is a browser worker, so this builds what it writes to STL:
 // one vertex per segment at each point on the axis.
 
 import { describe, expect, it } from 'vitest';
 import { indexScadTriangles } from '../src/utils/scadMesh';
+import { tidyMesh } from '../src/utils/meshTidy';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { decomposeNodeColliders } from '../src/utils/convexDecomposition';
-import { latheSoup, zupToYupFlat, type MeshData } from './helpers/meshes';
+import { boredCup, latheSoup, flipMesh, zupToYupFlat, type MeshData } from './helpers/meshes';
 import type { SceneNode } from '../src/types/scene';
 
 // A cup 60 mm across and 40 mm tall with 3 mm walls, profile reaching the axis
@@ -72,5 +74,35 @@ describe('a lathed profile that touches the axis', () => {
     expect(r.geoms.length).toBeGreaterThan(1);
     // 1000 kg/m³ of the true volume: about 0.03 kg, not the 0.11 kg of its hull.
     expect(r.mass).toBeCloseTo(1000 * TRUE_VOLUME, 2);
+  }, 60_000);
+});
+
+describe('a closed mesh wound inward throughout', () => {
+  const cup = boredCup();
+
+  it('is turned the right way out by the compile', () => {
+    const inverted = flipMesh(cup);
+    const soup: number[] = [];
+    for (const f of inverted.faces) soup.push(inverted.verts[f * 3], inverted.verts[f * 3 + 1], inverted.verts[f * 3 + 2]);
+    const m = compiled(soup);
+    expect(analyzeMesh(m.verts, m.faces)!.volume).toBeGreaterThan(0);
+  });
+
+  it('is decomposed rather than refused as wound both ways', async () => {
+    const r = (await decomposeNodeColliders(node(flipMesh(cup))))!;
+    expect(r.warning ?? '').not.toMatch(/both ways/);
+    expect(r.verdict.strategy).toBe('decompose');
+    expect(r.geoms.length).toBeGreaterThan(1);
+  }, 60_000);
+
+  it('a mesh really wound both ways still gets the both-ways sentence', async () => {
+    const mixed = { verts: cup.verts, faces: cup.faces.slice() };
+    // Turn over one half of the triangles.
+    for (let i = 0; i < mixed.faces.length / 2; i += 3) [mixed.faces[i + 1], mixed.faces[i + 2]] = [mixed.faces[i + 2], mixed.faces[i + 1]];
+    const t = tidyMesh(mixed.verts, mixed.faces);
+    expect(t.flipped).toBe(false);
+    const r = (await decomposeNodeColliders({ ...node(mixed), collision: 'decompose' }))!;
+    expect(r.warning).toMatch(/both ways/);
+    expect(r.geoms).toEqual([]);
   }, 60_000);
 });

@@ -86,6 +86,13 @@ export interface TidyResult {
 export function tidyMesh(verts: ArrayLike<number>, faces: number[], quantum: number | null = 1e-9): TidyResult {
   const welded = dropCollapsedTriangles(quantum === null ? faces : weldFaces(verts, faces, quantum));
   const dropped = (faces.length - welded.length) / 3;
-  const integrity = analyzeMesh(verts, welded);
-  return { faces: welded, dropped, flipped: false, integrity };
+  let integrity = analyzeMesh(verts, welded);
+  let out = welded;
+  let flipped = false;
+  if (integrity && integrity.closed && integrity.consistentlyWound && integrity.volume < 0) {
+    out = flipFaces(welded);
+    flipped = true;
+    integrity = { ...integrity, volume: -integrity.volume };
+  }
+  return { faces: out, dropped, flipped, integrity };
 }
