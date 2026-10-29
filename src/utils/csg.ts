@@ -37,6 +37,7 @@ import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { PairMemo } from './arrayMemo';
 import { edgeRoundSolids, hasEdgeRounds } from './edgeRound';
 import { analyzeMesh } from './meshIntegrity';
+import { dropCollapsedTriangles } from './meshTidy';
 // NOTE: ./openscad is imported lazily inside evaluateNodeCsg, not here. It
 // reaches the Zustand store (for the compile counter), which reaches the physics
 // worker client and the MuJoCo wasm glue — so a static import would drag the
@@ -2605,20 +2606,8 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   };
 }
 
-/** The triangles that still have three different corners. */
-export function dropCollapsedTriangles(faces: number[]): number[] {
-  let collapsed = false;
-  for (let i = 0; i < faces.length && !collapsed; i += 3) {
-    collapsed = faces[i] === faces[i + 1] || faces[i + 1] === faces[i + 2] || faces[i] === faces[i + 2];
-  }
-  if (!collapsed) return faces;
-  const out: number[] = [];
-  for (let i = 0; i < faces.length; i += 3) {
-    const a = faces[i], b = faces[i + 1], c = faces[i + 2];
-    if (a !== b && b !== c && a !== c) out.push(a, b, c);
-  }
-  return out;
-}
+// Lives in meshTidy.ts with the rest of the clean-up a compiled mesh gets.
+export { dropCollapsedTriangles };
 
 function chunk3(flat: number[]): number[][] {
   const out: number[][] = [];

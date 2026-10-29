@@ -31,6 +31,7 @@ import {
   meshChecksum, meshVolumeAndCentroid, primitiveVolume, type Hull,
 } from './csg';
 import { authoredQuat } from './bodyOrientation';
+import { tidyMesh } from './meshTidy';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { wallThickness, type FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
@@ -540,7 +541,11 @@ async function analyse(verts: number[], faces: number[]) {
 
 /** Judges one mesh of a body, and breaks it into convex pieces if it earns it. */
 async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<MeshColliders> {
-  const { verts, faces } = bodyFrameMesh(source);
+  const framed = bodyFrameMesh(source);
+  const verts = framed.verts;
+  // Closed up first: a profile on the axis leaves zero-area triangles, which
+  // are not holes, and meshes saved before compiles were tidied carry them.
+  const { faces } = tidyMesh(verts, framed.faces);
   const { volume, hullVolume, integrity } = await analyse(verts, faces);
   const verdict = decompositionVerdict(node, { volume, hullVolume, triangles: faces.length / 3 });
   const none = (warning?: string, strategy: DecompositionStrategy = verdict.strategy): MeshColliders => ({
