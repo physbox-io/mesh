@@ -124,6 +124,7 @@ import { simulationSetups } from '../utils/solidSetups';
 import { BLOCK_FACES, FACE_NAME, type BlockFace } from '../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from './useAddSimulation';
+import { addMcpSimulationSteps } from './useSimulationSteps';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../utils/timberSimulation';
 import { pipeFrameSimulationRequest } from '../utils/tubeSimulation';
 import { frameBodyInScene, WHOLE_SCENE } from '../utils/pipeSkeleton';
@@ -4738,6 +4739,7 @@ export function useMCPBridge() {
             if (!result.success || !result.stockTransform) {
               return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
             }
+            if (msg.stage !== undefined) return addMcpSimulationSteps(result, options, msg.stage);
             const added = await addSimulationToScene({
               job: {
                 gcode: result.sides[0].gcode,
