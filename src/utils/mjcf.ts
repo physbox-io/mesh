@@ -8,10 +8,10 @@ import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRo
 import { uniquifyNamesInPlace } from './uniqueNames';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
-import { jointCouplingXml } from './jointCoupling';
+import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
-import { relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
-import { clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
+import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
+import { UNSLIPPING_CLUTCH, clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
 /**
  * A name as an attribute value. Names are whatever someone typed, and a body
@@ -746,6 +746,26 @@ export const compileToMJCF = (
   };
   traverse(sceneCopy.nodes);
 
+  // A velocity servo far stiffer than the joint it drives (kv*dt over the
+  // joint's inertia), on a body held in a closed loop by a pin or a weld, is
+  // driven through a clutch that never slips. The implicit integrator treats
+  // that gain as inertia the constraint solver does not know about, and the
+  // loop's pins tore open: a 50 g scissor-lift slider held by a kv 20000
+  // servo folded the lift flat. Through the clutch the solver sees it.
+  const looped = new Set<string>();
+  for (const c of connectConstraintsList) { looped.add(c.bodyId); looped.add(c.targetId); }
+  for (const w of weldConstraintsList) { if (w.bodyId) looped.add(w.bodyId); looped.add(w.targetId); }
+  for (let i = 0; i < actuators.length; i++) {
+    const j = actuators[i];
+    const owner = jointsByName.get(j.name)?.node;
+    if (!owner || !looped.has(owner.id) || j.actuator?.type !== 'velocity' || j.actuator.forceLimit !== undefined) continue;
+    if (j.type !== 'hinge' && j.type !== 'slide') continue;
+    if ((j.actuator.kv ?? 1) * 0.001 <= estimateJointInertia(owner, j)) continue;
+    const held: SceneJoint = { ...j, actuator: { ...j.actuator, forceLimit: UNSLIPPING_CLUTCH } };
+    actuators[i] = held;
+    owner.joints = owner.joints.map((x) => (x.name === j.name ? held : x));
+  }
+
   const actuatorsXml = actuators.map((j) => {
     const act = j.actuator!;
     const clutched = isClutchedMotor(j);
@@ -938,6 +958,10 @@ export const compileToMJCF = (
     // A fixed body2 is the same as the world to MuJoCo, so naming it costs
     // nothing.
     const hasBody = c.targetId in nodeNamesMap;
+    // Held rigid, as a pin is: at MuJoCo's default impedance a pin was only as
+    // stiff as the lighter body it held, so a scissor lift's pins opened 7 mm
+    // under its 2 kg platform with a 1 kg slider, and it folded flat with a
+    // 50 g one. tests/rigidPins.test.ts.
     // MuJoCo's <connect> anchor is always specified in body1's local frame,
     // whether body2 is named or omitted (worldbody).
     const body1World = nodeWorldData[c.bodyId];
@@ -949,9 +973,9 @@ export const compileToMJCF = (
       c.anchor[2] - body1Pos[2],
     ]);
     if (hasBody) {
-      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" body2="${xmlAttr(targetName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
+      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" body2="${xmlAttr(targetName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" ${RIGID_COUPLING} />`;
     } else {
-      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
+      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" ${RIGID_COUPLING} />`;
     }
   }
 

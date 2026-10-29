@@ -21,14 +21,19 @@
 //
 // The driver is a sibling body in the same frame, and its joint carries the
 // actuator under the joint's own actuator name, so ctrl, the Volt link and
-// every lookup by name are as they were. Its inertia, 1.5·kv·dt, is the
-// floor that keeps the clutch's friction row well conditioned; it is behind
-// the clutch, so the real joint never carries it.
+// every lookup by name are as they were. Its inertia, 1.5·kv·dt, keeps the
+// clutch's friction row well conditioned. While the clutch holds, the joint
+// feels it only as the servo's 1.5 ms lag (inertia/kv); once it slips, the
+// joint feels nothing of it but the limit torque, so a stop never has to
+// absorb it.
 // ---------------------------------------------------------------------------
 
 import type { SceneJoint } from '../types/scene';
 
 const TIMESTEP = 0.001;
+
+/** A clutch limit no joint reaches: a servo driven through it never slips. */
+export const UNSLIPPING_CLUTCH = 1e6;
 
 /** Whether this joint's motor is emitted as a clutch: a velocity motor with a force limit on a hinge or slide. */
 export function isClutchedMotor(j: SceneJoint): boolean {
