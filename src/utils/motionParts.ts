@@ -38,11 +38,31 @@ const SPEED_DROOP = 0.5;
 
 const SPRING_STEEL: [number, number, number, number] = [0.55, 0.58, 0.62, 1];
 
+/**
+ * The least a spring's seat and top may weigh, kg, for its rate in N/m.
+ *
+ * A spring's rate is the joint's stiffness, which MuJoCo steps explicitly, and
+ * its seat and top are discs of wire weighing grams. A stiff spring between
+ * two such specks rings faster than the 1 ms step and the contact under it
+ * can follow: a Ø20×60 spring with a 1 kg box on it put its 5 g seat through
+ * a 10 mm plate in 3 s, and a Ø6×20 under 0.25 kg flew apart. Each end weighs
+ * at least enough to keep that ring below a quarter of the step's limit
+ * (the top 4·k·dt², the seat, which also has a contact to hold, twice that):
+ * 10 g and 21 g on the stiffest here, near a real spring's 15 g of wire, and
+ * a few grams on the smallest.
+ */
+const springEndMass = (rateNPerM: number, end: 'seat' | 'top') => +((end === 'seat' ? 8 : 4) * rateNPerM * 1e-6).toPrecision(4);
+
 function buildSpring(node: SceneNode, p: HardwarePart, id: string) {
   const [od, free, wire, rate, solid] = SPRINGS[p.size];
   const coils = Math.max(3, Math.round((solid / wire) - 1));
   const r = (od - wire) / 2;
-  node.geoms = [cylinderGeom(`${id}_seat`, mm(od / 2), mm(wire), mm(wire / 2), SPRING_STEEL)];
+  const seat = cylinderGeom(`${id}_seat`, mm(od / 2), mm(wire), mm(wire / 2), SPRING_STEEL);
+  seat.mass = Math.max(seat.mass ?? 0, springEndMass(rate * 1000, 'seat'));
+  // What it stands on holds it at the spring's own time scale, not the
+  // scene's 20 ms: a soft contact under a stiff spring is where it sank.
+  seat.solref = [0.004, 1];
+  node.geoms = [seat];
   // Each turn is a ring of wire on a slide of its own, coupled to the top in
   // proportion to how far up the spring it is: the turns close up together as
   // it compresses and open out as it extends, always reaching from the seat to
@@ -69,7 +89,9 @@ function buildSpring(node: SceneNode, p: HardwarePart, id: string) {
   });
   node.children = [...turns, {
     id: `${id}_carriage`, name: `${p.size} spring top`, type: 'body', pos: [0, 0, mm(free)],
-    geoms: [{ ...cylinderGeom(`${id}_top`, mm(od / 2), mm(wire), -mm(wire / 2), SPRING_STEEL), contype: 0, conaffinity: 0 }],
+    geoms: [((g) => ({ ...g, contype: 0, conaffinity: 0, mass: Math.max(g.mass ?? 0, springEndMass(rate * 1000, 'top')) }))(
+      cylinderGeom(`${id}_top`, mm(od / 2), mm(wire), -mm(wire / 2), SPRING_STEEL),
+    )],
     // The rate is the joint's stiffness; at rest at its free length, it stops solid.
     joints: [{
       name: `${id}_compress`, type: 'slide', axis: [0, 0, 1], pos: [0, 0, 0],

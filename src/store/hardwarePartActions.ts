@@ -23,7 +23,7 @@ export interface HardwarePartActions {
    * that takes it and has nothing in it yet, or — for a shaft — through a
    * picked bearing's bore. Otherwise it stands on its own at `position`.
    */
-  addHardwarePart: (kind: HardwarePartKind, position: number[], targetId?: string | null) => string | null;
+  addHardwarePart: (kind: HardwarePartKind, position: number[], targetId?: string | null, opts?: AddPartOptions) => string | null;
   /** Seats a new part in one of a body's hardware cuts. Returns its id, or null when the cut cannot take one. */
   seatHardwarePart: (hostId: string, group: string, kind?: HardwarePartKind) => string | null;
   /**
@@ -42,6 +42,17 @@ export interface HardwarePartActions {
   rideOnRod: (hostId: string, group: string) => string | null;
   /** A pair of runners for a drawer standing in its cabinet. Returns their ids, or why not. */
   addDrawerRunners: (drawerId: string) => string[] | string;
+}
+
+export interface AddPartOptions {
+  /** Put it exactly at `position`, not lifted to clear the floor (a part placed on something). */
+  exact?: boolean;
+  /**
+   * With a target that has no cut for it: fix the part rigidly to the target
+   * where it stands (a motor bolted to a frame, a spring standing on a plate)
+   * rather than leaving it free beside it.
+   */
+  mount?: boolean;
 }
 
 interface Deps {
@@ -154,7 +165,7 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
       return r.ok ? r.ids ?? [] : r.problem;
     },
 
-    addHardwarePart: (kind, position, targetId) => {
+    addHardwarePart: (kind, position, targetId, opts = {}) => {
       const target = targetId ? findNodeById(get().sceneGraph.nodes, targetId) : null;
       if (target && !target.hardwarePart) {
         const active = target.geoms[get().activeGeomIndex ?? -1]?.hardware?.group;
@@ -179,7 +190,11 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
       }
       const part = hardwarePartNode({ kind, size: HARDWARE_PARTS[kind].defaultSize }, id);
       // Just above the floor, or wherever it was dropped: it falls from there.
-      part.pos = [position[0] ?? 0, position[1] ?? 0, Math.max(position[2] ?? 0, 0.02)];
+      part.pos = [position[0] ?? 0, position[1] ?? 0, opts.exact ? (position[2] ?? 0) : Math.max(position[2] ?? 0, 0.02)];
+      if (opts.mount && target && !target.hardwarePart) {
+        part.weldTargetId = target.id;
+        part.weldRigid = true;
+      }
       scene.nodes = [...scene.nodes, part];
       commit(scene, id, id);
       return id;
