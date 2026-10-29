@@ -3,7 +3,8 @@
 // constraints, cuts, rounded edges, hardware, patterns, the knife
 // ---------------------------------------------------------------------------
 
-import { useStore } from '../../store/useStore';
+import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
+import { freeJointPose, touchesPose } from '../../utils/livePose';
 import { compileSCAD } from '../../utils/openscad';
 import { updateOrCreateNotecard } from '../../utils/noteCards';
 import { compileCsgNodes } from '../useCsgCompile';
@@ -32,6 +33,19 @@ import {
 } from './bodyFeatures';
 import { autoCompileScad } from './settleScene';
 import type { McpCommands } from './types';
+
+/**
+ * Puts a free body where its document now says, in the running simulation too,
+ * as the editor's own position fields and gizmos do (utils/livePose.ts). The
+ * rebuild that follows carries qpos across, so without this the body stayed
+ * at its old pose until Reset, paused or not.
+ */
+function syncFreeJointToDocument(id: string) {
+  const nodes = useStore.getState().sceneGraph.nodes;
+  const node = findNodeInScene(nodes, id);
+  const pose = freeJointPose(node, nodes.some((n) => n.id === id));
+  if (pose) getPhysicsWorkerClient().setQpos(pose.joint, 0, pose.qpos);
+}
 
 export const objectCommands: McpCommands = {
     /*
@@ -200,6 +214,7 @@ export const objectCommands: McpCommands = {
         rest.geoms = [{ ...fillGeomDefaults({ type: 'mesh', ...(meshRgba ? { rgba: meshRgba } : {}) }, name, 0, moves), name: `${name}_mesh` }, ...rest.geoms];
       }
       if (Object.keys(rest).length > 0) store.updateNode(targetId, rest);
+      if (touchesPose(rest)) syncFreeJointToDocument(targetId);
       store.updateNodeScad(targetId, scad, compiled, false);
       await applyDeclarativePreCsgFeatures([target]);
       if (findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.csgEnabled) {
@@ -210,6 +225,7 @@ export const objectCommands: McpCommands = {
     } else {
       if (Object.keys(updates).length > 0) {
         store.updateNode(targetId, updates);
+        if (touchesPose(updates)) syncFreeJointToDocument(targetId);
       }
       await applyDeclarativePreCsgFeatures([target]);
       // An update that touches a boolean body (its geoms, its collision
