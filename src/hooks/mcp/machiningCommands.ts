@@ -21,6 +21,7 @@ import { simulationSetups } from '../../utils/solidSetups';
 import { FACE_NAME } from '../../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../../utils/sheetSimulation';
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from '../useAddSimulation';
+import { addMcpSimulationSteps } from '../useSimulationSteps';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../../utils/timberSimulation';
 import { pipeFrameSimulationRequest } from '../../utils/tubeSimulation';
 import { runMcpMoldSimulation } from '../../utils/moldWorkerClient';
@@ -225,6 +226,7 @@ export const machiningCommands: McpCommands = {
       if (!result.success || !result.stockTransform) {
         return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
       }
+      if (msg.stage !== undefined) return addMcpSimulationSteps(result, options, msg.stage);
       const added = await addSimulationToScene({
         job: {
           gcode: result.sides[0].gcode,

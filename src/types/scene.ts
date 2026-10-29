@@ -924,6 +924,11 @@ export interface SceneNode {
     /** How far the drawn surface may stray from the grid, mm. */
     toleranceMm: number;
     placement: 'beside' | 'overlay';
+    /** A step of a machining job: 0 the stock as it goes on, k after setup k, of `stages`. */
+    stage?: number;
+    stages?: number;
+    /** The plan the step was simulated from, so a re-plan starts the steps over. */
+    planKey?: string;
   };
 }
 

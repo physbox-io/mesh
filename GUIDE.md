@@ -760,6 +760,15 @@ as the matching export.
   and the part is where `f(p) = min(box, min_k H_k(R_k p + t_k) - z'_k) >= 0`, meshed with surface
   nets. Only plans that stand the block on a side go this way; one setup and the top/flip pair
   keep the height-map pair above, unchanged.
+* **Step by step** (`utils/solidSimulationSteps.ts`, `hooks/useSimulationSteps.ts`): the Solid
+  dialog's "Watch it being made" strip and each setup card add the job one body at a time. Step 0
+  is the stock with only setup 1's `OP 0` registration pins bored (`registrationPrelude`); step k
+  is the same simulation over setups 1..k (`SimulationJobOptions.stage`), stood as the block
+  stands for setup k (`simulatedBody`'s `machineFrame`, setup k's rotation). A datum notch is part
+  of setup 1's surface, so it first shows at step 1. Each body carries `simulation.stage`,
+  `stages` and `planKey` (a hash of the programs); the next step is read from the scene, so a
+  re-plan starts over and a deleted step is added again. MCP: `stage` on `physics_add_simulation`
+  (a number, or `'all'`).
 
 ---
 

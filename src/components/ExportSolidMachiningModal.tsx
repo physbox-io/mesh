@@ -26,6 +26,8 @@ import {
 import { toolingOnly, useAutoTooling, useBedProbe, useCarveTooling, useSettled, type SetTooling } from './carveTooling';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useAddSimulation } from '../hooks/useAddSimulation';
+import { useSimulationSteps } from '../hooks/useSimulationSteps';
+import { SimulateStepsBar } from './SimulateStepsBar';
 import { reliefSimulationTools } from '../utils/simulatedPart';
 import { simulationSetups } from '../utils/solidSetups';
 import { SetupCards } from './SetupCards';
@@ -161,6 +163,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       }),
     [scene, settled, settledPlacement, probedGrid, machineState.motion, autoOrient]
   );
+  // Watch it being made: the stock, then the block after each setup.
+  const steps = useSimulationSteps(result, settled);
 
   const recommendTooling = () => {
     if (!result?.success) return null;
@@ -648,6 +652,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
           {/* Toolpath preview, one side at a time */}
           {result?.success && current && (
             <div className="space-y-3">
+              <SimulateStepsBar steps={steps} disabled={busy || pending || !placementSettled} />
               <SetupCards
                 setups={setups}
                 firstStock={result.stock}
@@ -658,6 +663,9 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 onDownload={(i) => downloadText(setups[i].gcode, `${baseName}_setup_${setups[i].index}_${setups[i].upFace.replace('+', 'p').replace('-', 'm')}.gcode`)}
                 onRun={handleStart}
                 canRun={canCut}
+                simulatedThrough={steps.next - 1}
+                onSimulateTo={(i) => void steps.addUpTo(i + 1)}
+                simulating={steps.adding !== null}
               />
 
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-600 dark:text-slate-400">
