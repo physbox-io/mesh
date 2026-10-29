@@ -13,6 +13,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import type { HistoryEntry } from '../workers/physicsWorkerProtocol';
 import type { ConstraintReport } from './constraintResiduals';
 import { summarizeTrajectory, type TrajectorySummary } from './trajectorySummary';
+import { contactsOfBodies, jointsOfBodies } from '../workers/historyRing';
 
 /** How many constraints `final.constraints` lists; the rest are counted. */
 const MAX_LISTED_CONSTRAINTS = 20;
@@ -143,10 +144,13 @@ export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBo
       };
     }
   }
+  // The bodies asked for, their joints, and the contacts they are in.
   const trajectory = filter.ids
     ? rest.trajectory.map((fr) => ({
         ...fr,
         bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => filter.ids!.has(k))),
+        joints: jointsOfBodies(fr.joints || {}, filter.ids!),
+        contacts: contactsOfBodies(fr.contacts || [], filter.ids!),
       }))
     : rest.trajectory;
   return { ...rest, trajectory, warnings, final };

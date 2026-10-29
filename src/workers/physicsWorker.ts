@@ -55,6 +55,8 @@ import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptSt
 import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
 import { createConstraintMonitor } from '../utils/constraintResiduals';
+import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
+import { actuatorsByJoint, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -198,17 +200,22 @@ interface CachedScript {
 let scriptCache: Record<string, CachedScript> = {};
 /*
  * What scripts got wrong, keyed by body + message so a mistake made every step
- * is logged once. A headless run clears it first and returns it as warnings;
- * otherwise it only reaches the console.
+ * is logged once, with when it started and how often. A headless run swaps in
+ * its own and returns it as warnings; live, it is pushed to the main thread
+ * (SCRIPT_STATUS) for physics_get_state. See scriptDiagnostics.ts.
  */
-let scriptProblems = new Map<string, string>();
+let scriptProblems = new ScriptProblemLog();
 const noteScriptProblem = (bodyName: string, message: string) => {
-  const key = `${bodyName}\u0000${message}`;
-  if (scriptProblems.has(key)) return;
-  const text = `Script on '${bodyName}': ${message}`;
-  scriptProblems.set(key, text);
-  console.warn(`[Script:${bodyName}]`, message);
+  if (scriptProblems.note(bodyName, message, data ? data.time : 0)) {
+    console.warn(`[Script:${bodyName}]`, message);
+  }
 };
+/** api.log lines, and what the scripts cost: swapped out by a headless run like the problems. */
+let scriptLogs = new ScriptLogRing(200);
+let scriptTiming = new ScriptTiming();
+/** A short list of names for a "no such X; this model has: ..." message. */
+const nameList = (names: string[], max = 12): string =>
+  names.length === 0 ? '(none)' : names.length <= max ? names.join(', ') : `${names.slice(0, max).join(', ')} and ${names.length - max} more`;
 // Each scripted body's api.state; see utils/scriptState.ts. A `let` so a
 // headless run can work on its own without touching the live scene's.
 let scriptState = new ScriptStateStore();
@@ -267,6 +274,34 @@ const rebuildIdCaches = () => {
   geomIdCache = giCache;
   geomNameCache = gnCache;
   actuatorIdCache = aCache;
+
+  // The joints telemetry reports, with their body and actuators, once per build.
+  const nodeOfBody: Record<number, string> = { 0: 'world' };
+  const infos: JointInfo[] = [];
+  const byJoint = actuatorsByJoint(mj, mdl);
+  const walk = (nodes: SceneNode[]) => {
+    for (const node of nodes || []) {
+      const bId = bCache[node.id];
+      if (bId !== undefined && nodeOfBody[bId] === undefined) nodeOfBody[bId] = node.id;
+      for (const j of node.joints || []) {
+        const id = jCache[j.name];
+        if (id === undefined) continue;
+        infos.push({ name: j.name, id, type: mdl.jnt_type[id], qposadr: mdl.jnt_qposadr[id], dofadr: mdl.jnt_dofadr[id], body: node.id, actuators: byJoint.get(id) ?? [] });
+      }
+      walk(node.children || []);
+    }
+  };
+  walk(sceneGraph.nodes);
+  bodyNodeById = nodeOfBody;
+  jointInfos = infos;
+};
+
+/** Scene node id of each MuJoCo body ('world' for 0), for naming contacts and ray hits. */
+let bodyNodeById: Record<number, string> = {};
+let jointInfos: JointInfo[] = [];
+const sensorNames: SensorNames = {
+  geomName: (g) => geomNameCache[g] ?? `geom_${g}`,
+  bodyNode: (b) => bodyNodeById[b] ?? (mujoco && model ? mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, b) || `body_${b}` : `body_${b}`),
 };
 
 const createScriptApi = (node: SceneNode): Record<string, unknown> => {
@@ -274,6 +309,29 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
     bodyIdCache[name] ?? (mujoco && model ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, name) : -1);
   const _resolveJoint = (name: string) =>
     jointIdCache[name] ?? (mujoco && model ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, name) : -1);
+  const me = node.name || node.id;
+  // Lookups that used to miss in silence (a getter returning zeros, a force
+  // or a control going nowhere) now say so once in the problems, naming what
+  // the model does have. Still no throw: see _guard below. A body left out
+  // defaults to the script's own, and is not reported if that one has no
+  // MuJoCo body of its own.
+  const _body = (fnName: string, bodyName: string | undefined): number => {
+    const id = _resolveBody(bodyName ?? node.id);
+    if (id === -1 && bodyName !== undefined) {
+      noteScriptProblem(me, `${fnName}: no body named '${bodyName}'; this model has: ${nameList([...new Set(Object.keys(bodyIdCache))])}`);
+    }
+    return id;
+  };
+  const _joint = (fnName: string, jointName: string): number => {
+    const id = typeof jointName === 'string' ? _resolveJoint(jointName) : -1;
+    if (id === -1) noteScriptProblem(me, `${fnName}: no joint named '${String(jointName)}'; this model has: ${nameList(Object.keys(jointIdCache))}`);
+    return id;
+  };
+  const _actuator = (fnName: string, actuatorName: string): number => {
+    const id = actuatorIdCache[actuatorName] ?? -1;
+    if (id === -1) noteScriptProblem(me, `${fnName}: no actuator named '${String(actuatorName)}'; this model has: ${nameList(Object.keys(actuatorIdCache))}`);
+    return id;
+  };
 
   // The setters used to return quietly on every miss (no such body, no joint,
   // a joint MuJoCo does not know) and to read only [0] of a vector given to a
@@ -307,7 +365,8 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
       const along = (v[0] * a[0] + v[1] * a[1] + v[2] * a[2]) / len;
       const off = Math.sqrt(Math.max(0, v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - along * along));
       if (off > 1e-6 * Math.max(1, Math.abs(along))) {
-        noteScriptProblem(node.name || node.id, `${fnName}: [${v.slice(0, 3).join(', ')}] is not along ${joint.type} '${joint.name}' axis [${a.join(', ')}]; only its component along the axis (${along.toPrecision(4)}) was applied`);
+        // No values in the message: it is the dedupe key, and they change every step.
+        noteScriptProblem(me, `${fnName}: a vector that is not along ${joint.type} '${joint.name}' axis [${a.join(', ')}] was given; only its component along the axis was applied`);
       }
       return along;
     }
@@ -370,81 +429,115 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
         throw new Error(`setAngularVelocity: joint '${joint.name}' is a slide, which cannot rotate; use setVelocity`);
       }
     }),
-    getPosition: (bodyName = node.id) => {
+    getPosition: (bodyName?: string) => {
       const dat = data!;
-      const bId = _resolveBody(bodyName);
+      const bId = _body('getPosition', bodyName);
       return bId !== -1 ? [dat.xpos[bId * 3], dat.xpos[bId * 3 + 1], dat.xpos[bId * 3 + 2]] : [0, 0, 0];
     },
-    getVelocity: (bodyName = node.id) => {
+    getVelocity: (bodyName?: string) => {
       const dat = data!;
-      const bId = _resolveBody(bodyName);
+      const bId = _body('getVelocity', bodyName);
       return bId !== -1 ? [dat.cvel[bId * 6 + 3], dat.cvel[bId * 6 + 4], dat.cvel[bId * 6 + 5]] : [0, 0, 0];
     },
-    getAngularVelocity: (bodyName = node.id) => {
+    getAngularVelocity: (bodyName?: string) => {
       const dat = data!;
-      const bId = _resolveBody(bodyName);
+      const bId = _body('getAngularVelocity', bodyName);
       return bId !== -1 ? [dat.cvel[bId * 6 + 0], dat.cvel[bId * 6 + 1], dat.cvel[bId * 6 + 2]] : [0, 0, 0];
     },
-    getMass: (bodyName = node.id) => {
+    getMass: (bodyName?: string) => {
       const mdl = model!;
-      const bId = _resolveBody(bodyName);
+      const bId = _body('getMass', bodyName);
       return bId !== -1 ? mdl.body_mass[bId] : 0;
     },
     getJointPosition: (jointName: string) => {
       const mdl = model!, dat = data!;
-      const jId = _resolveJoint(jointName);
+      const jId = _joint('getJointPosition', jointName);
       return jId !== -1 ? dat.qpos[mdl.jnt_qposadr[jId]] : 0;
     },
     getJointVelocity: (jointName: string) => {
       const mdl = model!, dat = data!;
-      const jId = _resolveJoint(jointName);
+      const jId = _joint('getJointVelocity', jointName);
       return jId !== -1 ? dat.qvel[mdl.jnt_dofadr[jId]] : 0;
     },
-    applyForce: (forceVec: number[], bodyName = node.id) => {
-      if (!Array.isArray(forceVec)) return;
+    applyForce: (forceVec: number[], bodyName?: string) => {
+      if (!Array.isArray(forceVec)) { noteScriptProblem(me, `applyForce: pass [fx, fy, fz], not ${typeof forceVec}`); return; }
       const dat = data!;
-      const bId = _resolveBody(bodyName);
+      const bId = _body('applyForce', bodyName);
       if (bId === -1) return;
       pendingWake.add(bId);
       dat.xfrc_applied[bId * 6 + 0] += forceVec[0] || 0;
       dat.xfrc_applied[bId * 6 + 1] += forceVec[1] || 0;
       dat.xfrc_applied[bId * 6 + 2] += forceVec[2] || 0;
     },
-    applyTorque: (torqueVec: number[], bodyName = node.id) => {
-      if (!Array.isArray(torqueVec)) return;
+    applyTorque: (torqueVec: number[], bodyName?: string) => {
+      if (!Array.isArray(torqueVec)) { noteScriptProblem(me, `applyTorque: pass [tx, ty, tz], not ${typeof torqueVec}`); return; }
       const dat = data!;
-      const bId = _resolveBody(bodyName);
+      const bId = _body('applyTorque', bodyName);
       if (bId === -1) return;
       pendingWake.add(bId);
       dat.xfrc_applied[bId * 6 + 3] += torqueVec[0] || 0;
       dat.xfrc_applied[bId * 6 + 4] += torqueVec[1] || 0;
       dat.xfrc_applied[bId * 6 + 5] += torqueVec[2] || 0;
     },
-    getOrientation: (bodyName = node.id) => {
+    getOrientation: (bodyName?: string) => {
       const dat = data!;
-      const bId = _resolveBody(bodyName);
+      const bId = _body('getOrientation', bodyName);
       if (bId === -1) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
       const o = bId * 9;
       return [dat.xmat[o], dat.xmat[o+1], dat.xmat[o+2], dat.xmat[o+3], dat.xmat[o+4], dat.xmat[o+5], dat.xmat[o+6], dat.xmat[o+7], dat.xmat[o+8]];
     },
     applyJointForce: (jointName: string, forceVal: number) => {
-      if (typeof forceVal !== 'number') return;
+      if (typeof forceVal !== 'number' || !Number.isFinite(forceVal)) {
+        noteScriptProblem(me, `applyJointForce('${jointName}', ${String(forceVal)}): the force must be a finite number; nothing was applied`);
+        return;
+      }
       const mdl = model!, dat = data!;
-      const jId = _resolveJoint(jointName);
+      const jId = _joint('applyJointForce', jointName);
       if (jId !== -1) {
         pendingWake.add(mdl.jnt_bodyid[jId]);
         dat.qfrc_applied[mdl.jnt_dofadr[jId]] += forceVal;
       }
     },
     setActuatorControl: (actuatorName: string, ctrlVal: number) => {
-      if (typeof ctrlVal !== 'number') return;
-      const dat = data!;
-      const actId = actuatorIdCache[actuatorName] ?? -1;
-      if (actId !== -1) dat.ctrl[actId] = ctrlVal;
+      if (typeof ctrlVal !== 'number' || !Number.isFinite(ctrlVal)) {
+        noteScriptProblem(me, `setActuatorControl('${actuatorName}', ${String(ctrlVal)}): the control must be a finite number; nothing was set`);
+        return;
+      }
+      const actId = _actuator('setActuatorControl', actuatorName);
+      if (actId !== -1) data!.ctrl[actId] = ctrlVal;
+    },
+    getActuatorControl: (actuatorName: string) => {
+      const actId = _actuator('getActuatorControl', actuatorName);
+      return actId !== -1 ? data!.ctrl[actId] : 0;
     },
     getTime: () => (data ? data.time : 0),
+    getTimestep: () => (model ? modelOpt(model).timestep : 0),
     getWind: () => [envWindX || 0, envWindY || 0],
-    log: (msg: unknown) => console.log(`[Script:${node.name}]`, msg),
+    // First hit within maxDist (default 10 m) along dir, or null. Skips the
+    // calling body unless excludeBody says otherwise (null: skip nothing).
+    raycast: (origin: number[], dir: number[], maxDist = 10, excludeBody?: string | null) => {
+      if (!Array.isArray(origin) || origin.length < 3 || !Array.isArray(dir) || dir.length < 3) {
+        noteScriptProblem(me, 'raycast: pass origin and dir as [x, y, z] arrays');
+        return null;
+      }
+      const exclude = excludeBody === null ? -1 : _body('raycast', excludeBody ?? undefined);
+      try {
+        return raycast(mujoco!, model!, data!, origin, dir, maxDist, exclude, sensorNames);
+      } catch (e) {
+        noteScriptProblem(me, (e as Error).message);
+        return null;
+      }
+    },
+    // What this body (or the named one) is touching right now.
+    getContacts: (bodyName?: string) => {
+      const bId = _body('getContacts', bodyName);
+      if (bId === -1) return [];
+      return contactsOfBody(mujoco!, model!, data!, bId, sensorNames);
+    },
+    log: (...args: unknown[]) => {
+      console.log(`[Script:${node.name}]`, ...args);
+      scriptLogs.push(data ? data.time : 0, me, args);
+    },
   };
   attachScriptState(api, scriptState, node.id);
   return api;
@@ -616,7 +709,10 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
         scriptCache[node.id] = cached;
       }
 
+      // Timed per body, so a slow scene can name the script that makes it slow.
+      const t0 = performance.now();
       try { cached.fn(cached.api); } catch (e) { noteScriptProblem(node.name || node.id, `runtime error: ${(e as Error)?.message ?? e}`); }
+      scriptTiming.addBody(node.name || node.id, performance.now() - t0);
     }
 
     if (node.children) executeScripts(node.children, aeroDiagnostics);
@@ -840,17 +936,16 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
           ],
         };
       }
-      node.joints?.forEach((j) => {
-        if (!dat || !mdl) return;
-        const jId = jointIdCache[j.name];
-        if (jId !== undefined) {
-          joints[j.name] = { pos: dat.qpos[mdl.jnt_qposadr[jId]], vel: dat.qvel[mdl.jnt_dofadr[jId]], qfrc_applied: dat.qfrc_applied[mdl.jnt_dofadr[jId]] };
-        }
-      });
       if (node.children) collectNodeData(node.children);
     }
   };
   collectNodeData(sceneGraph.nodes);
+  // Every joint at its full width (a free joint's 7/6, a ball's 4/3), with
+  // its actuator's control and force: see readJoint.
+  if (jointInfos.length) {
+    const views = jointViews(dat);
+    for (const j of jointInfos) joints[j.name] = readJoint(j, views);
+  }
 
   const contacts: ContactHistory[] = [];
   // `dat.contact` is not a view. Every read of the property has the bindings
@@ -864,10 +959,15 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
   const contactVec = dat.contact;
   try {
     const ncon = contactVec.size();
+    const geomBody = ncon > 0 ? mdl.geom_bodyid : null;
     for (let c = 0; c < ncon; c++) {
       const contact = contactVec.get(c);
       if (contact) {
-        contacts.push({ geom1: geomNameCache[contact.geom1] ?? `geom_${contact.geom1}`, geom2: geomNameCache[contact.geom2] ?? `geom_${contact.geom2}`, dist: contact.dist });
+        contacts.push({
+          geom1: geomNameCache[contact.geom1] ?? `geom_${contact.geom1}`, geom2: geomNameCache[contact.geom2] ?? `geom_${contact.geom2}`, dist: contact.dist,
+          // Whose geoms they are, so a `bodies` filter can keep a body's contacts.
+          body1: sensorNames.bodyNode(geomBody![contact.geom1]), body2: sensorNames.bodyNode(geomBody![contact.geom2]),
+        });
         contact.delete();
       }
     }
@@ -1545,6 +1645,7 @@ let tickFloor = 0; // Date.now(): TICKs posted before this are a stale backlog
 
 const endHold = () => {
   holdUntil = 0;
+  scriptTiming.restart();
   tickFloor = Date.now();
   accumulator = 0;
   lastTickTime = performance.now();
@@ -1571,7 +1672,9 @@ const stepOnce = (stepSize: number): boolean => {
     applyJointForces(data, linkForces);
 
     const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
+    const scriptStart = performance.now();
     executeScripts(sceneGraph.nodes, aeroDiagnostics);
+    scriptTiming.addStep(performance.now() - scriptStart);
     applyFreeJointDamping(sceneGraph.nodes);
     wakeBodies();
 
@@ -1678,6 +1781,8 @@ const stepTick = (delta: number) => {
   for (let i = 0; i < stepsNeeded; i++) {
     if (!stepOnce(stepSize)) return;
   }
+  // How fast the sim is keeping up, and what the scripts cost: see ScriptTiming.
+  if (scriptTiming.tick(performance.now(), data.time)) scriptStatusDue = true;
 
   if (stepsNeeded > 0) framePending = true;
   if (framePending && (!isSharedSupported || performance.now() - lastFramePost >= FRAME_INTERVAL_MS - 2)) {
@@ -1700,9 +1805,38 @@ const FRAME_INTERVAL_MS = 16;
 let lastFramePost = 0;
 let framePending = false;
 
+/** When SCRIPT_STATUS was last posted, and whether something new is waiting to be. */
+let lastScriptStatusPost = 0;
+let scriptStatusDue = true;
+let lastStatusVersion = -1;
+const SCRIPT_STATUS_INTERVAL_MS = 500;
+
+/**
+ * Tells the main thread what the live scripts got wrong and cost, for
+ * physics_get_state. Throttled to SCRIPT_STATUS_INTERVAL_MS unless `force`.
+ */
+const postScriptStatus = (force = false) => {
+  const now = performance.now();
+  if (scriptProblems.version !== lastStatusVersion) scriptStatusDue = true;
+  // Counts change every step a script fails; those ride along on the timed post.
+  if (!force && (now - lastScriptStatusPost < SCRIPT_STATUS_INTERVAL_MS || (!scriptStatusDue && !(isPlaying && scriptProblems.size)))) return;
+  lastScriptStatusPost = now;
+  scriptStatusDue = false;
+  lastStatusVersion = scriptProblems.version;
+  const problems = scriptProblems.list();
+  post({
+    type: 'SCRIPT_STATUS',
+    problems: problems.slice(0, 20),
+    moreProblems: Math.max(0, problems.length - 20) + scriptProblems.overflow,
+    timing: scriptTiming.last,
+    timestepMs: model ? modelOpt(model).timestep * 1000 : 0,
+  });
+};
+
 const postFrame = () => {
   framePending = false;
   lastFramePost = performance.now();
+  postScriptStatus();
   const snap = snapshot();
   if (isSharedSupported) {
     post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
@@ -1881,6 +2015,15 @@ const applyMeshFiles = (add?: { name: string; bytes: Uint8Array }[], drop?: stri
   for (const f of add ?? []) meshVfs.addBuffer(f.name, f.bytes);
 };
 
+/** Each scripted body's script, by the name its problems are filed under. */
+const scriptsByBody = (nodes: SceneNode[], into = new Map<string, string>()): Map<string, string> => {
+  for (const n of nodes || []) {
+    if (n.script && n.script.trim() !== '') into.set(n.name || n.id, n.script);
+    scriptsByBody(n.children || [], into);
+  }
+  return into;
+};
+
 const doBuild = (
   xml: string,
   newSceneGraph: SceneGraph,
@@ -1889,9 +2032,11 @@ const doBuild = (
   brokenConstraints?: string[],
 ) => {
   if (brokenConstraints) brokenWeldKeys = new Set(brokenConstraints);
-  // A rebuild is usually an edit: let a mistake that is still there be logged again.
-  scriptProblems = new Map();
+  // Which scripts this build changes: their old mistakes no longer apply.
+  const scriptsBefore = scriptsByBody(sceneGraph.nodes);
   scriptStateForBuild(scriptState, preserveState, seedState);
+  /** Set when this build starts the simulation over from t = 0 (see below). */
+  let freshRun = false;
   const oldModel = model;
   const oldData = data;
 
@@ -2067,6 +2212,7 @@ const doBuild = (
     seedNew(sceneGraph.nodes);
     if (seededNew) mujoco.mj_forward(newModel, newData);
   } else {
+    freshRun = true;
     seedActuatorCtrl(sceneGraph.nodes, newData);
 
     mujoco.mj_forward(newModel, newData);
@@ -2117,13 +2263,29 @@ const doBuild = (
     sharedBuffers = {};
   }
 
-  // Note: history is NOT cleared here. Every rebuild goes through doBuild —
-  // ordinary scene edits, the every-4-builds proactive recycle, and the
-  // every-20s seamless mid-play recycle all call this. Wiping history
-  // unconditionally would silently truncate physics_get_history/telemetry
-  // on every one of those, defeating the "seamless" point of the proactive
-  // recycles. Only an explicit RESET/LOAD_PRESET should clear history — see
-  // the CLEAR_HISTORY message handler, which those already call.
+  /*
+   * History belongs to one continuous run. A build that carries the running
+   * simulation across (an edit mid-play, a shatter, a recycle's seed) keeps
+   * it: time goes on from where it was. A build that starts over from t = 0 —
+   * a new scene, a preset, Reset, an undo, a structural edit — clears it, and
+   * records the new opening state as its first frame. Kept, scene B's frames
+   * were appended after scene A's (time running 29 s back to 0, which
+   * since_time cannot separate) and get_telemetry went on answering with
+   * scene A's last frame.
+   */
+  if (freshRun) {
+    history.clear();
+    history.push(buildHistoryEntry({}));
+    scriptProblems.clear();
+    scriptLogs.clear();
+  } else {
+    const after = scriptsByBody(sceneGraph.nodes);
+    const changed = new Set<string>();
+    for (const [body, src] of after) if (scriptsBefore.get(body) !== src) changed.add(body);
+    for (const body of scriptsBefore.keys()) if (!after.has(body)) changed.add(body);
+    if (changed.size) scriptProblems.clearBodies(changed);
+  }
+  scriptTiming.restart();
   accumulator = 0;
 
   return {
@@ -2205,14 +2367,19 @@ const runHeadless = (
   pendingWake.clear();
   const savedBodyIdCache = bodyIdCache, savedJointIdCache = jointIdCache;
   const savedGeomIdCache = geomIdCache, savedGeomNameCache = geomNameCache, savedActuatorIdCache = actuatorIdCache;
+  const savedBodyNodeById = bodyNodeById, savedJointInfos = jointInfos;
   // breakableWelds holds indices into the LIVE model's equality list, so it has
   // to be swapped out with everything else or the headless run would break
   // welds by the interactive model's numbering.
   const savedBreakableWelds = breakableWelds, savedBrokenWeldKeys = brokenWeldKeys;
 
   const warnings: string[] = [];
-  const savedScriptProblems = scriptProblems;
-  scriptProblems = new Map();
+  const savedScriptProblems = scriptProblems, savedScriptLogs = scriptLogs, savedScriptTiming = scriptTiming;
+  scriptProblems = new ScriptProblemLog();
+  scriptLogs = new ScriptLogRing(200);
+  scriptTiming = new ScriptTiming();
+  let scriptMs = 0;
+  const wallStart = performance.now();
 
   let headlessModel: MjModel | null = null;
   let headlessData: MjData | null = null;
@@ -2264,7 +2431,11 @@ const runHeadless = (
         data!.xfrc_applied.fill(0);
         data!.qfrc_applied.fill(0);
         lastAero = {};
+        const t0 = performance.now();
         executeScripts(sceneGraph.nodes, lastAero);
+        const dt = performance.now() - t0;
+        scriptMs += dt;
+        scriptTiming.addStep(dt);
         applyFreeJointDamping(sceneGraph.nodes);
         wakeBodies();
         mujoco!.mj_step(model!, data!);
@@ -2282,11 +2453,17 @@ const runHeadless = (
       sample: () => buildHistoryEntry(lastAero),
     });
 
+    const wallMs = performance.now() - wallStart;
     const constraintReport = constraints.report(data);
     warnings.push(...collectMujocoWarnings(data));
-    warnings.push(...scriptProblems.values());
+    warnings.push(...scriptProblems.warnings());
+    const ticksRun = Math.max(1, outcome.ticksSimulated);
+    const cost = scriptTiming.current(wallMs, null);
+    const costWarning = headlessCostWarning(ticksRun, wallMs, scriptMs, modelOpt(model).timestep, cost?.slowest);
+    if (costWarning) warnings.push(costWarning);
     warnings.push(...constraintReport.warnings);
     if (outcome.truncationDetail) warnings.push(outcome.truncationDetail);
+    const scriptReport = headlessScriptReport(wallMs, scriptMs, ticksRun);
 
     return {
       ok: true,
@@ -2299,9 +2476,10 @@ const runHeadless = (
       trajectory: outcome.frames,
       warnings,
       constraintReport,
+      ...scriptReport,
     };
   } catch (e) {
-    return { ok: false, error: String((e as Error)?.message || e), warnings: [...warnings, ...scriptProblems.values()] };
+    return { ok: false, error: String((e as Error)?.message || e), warnings: [...warnings, ...scriptProblems.warnings()] };
   } finally {
     if (headlessData) { try { headlessData.delete(); } catch { /* ignore */ } }
     if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
@@ -2314,8 +2492,21 @@ const runHeadless = (
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
-    scriptProblems = savedScriptProblems;
+    bodyNodeById = savedBodyNodeById; jointInfos = savedJointInfos;
+    scriptProblems = savedScriptProblems; scriptLogs = savedScriptLogs; scriptTiming = savedScriptTiming;
   }
+};
+
+/** What a headless run's scripts logged, held and cost, for its reply. Reads the swapped-in stores. */
+const headlessScriptReport = (wallMs: number, scriptMs: number, ticks: number) => {
+  const hasScripts = scriptsByBody(sceneGraph.nodes).size > 0;
+  const finalState = scriptState.snapshot();
+  return {
+    wallMs: Math.round(wallMs),
+    ...(hasScripts ? { scriptMsPerStep: +(scriptMs / ticks).toPrecision(3) } : {}),
+    ...(scriptLogs.total ? { logs: scriptLogs.entries(), ...(scriptLogs.dropped ? { logsDropped: scriptLogs.dropped } : {}) } : {}),
+    ...(finalState ? { scriptState: finalState } : {}),
+  };
 };
 
 self.onmessage = async (evt: MessageEvent) => {
@@ -2329,6 +2520,8 @@ self.onmessage = async (evt: MessageEvent) => {
           const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState, msg.brokenConstraints);
           if (msg.holdForInstall) holdUntil = performance.now() + HOLD_FOR_INSTALL_MS;
           post({ type: 'BUILT', id: msg.id, ok: true, ...result });
+          // A build may have cleared problems (a fresh run, a changed script).
+          postScriptStatus(true);
           if (isPlaying && isSharedSupported) {
             startWorkerLoop();
           }
@@ -2346,6 +2539,8 @@ self.onmessage = async (evt: MessageEvent) => {
       }
       case 'SET_PLAYING': {
         isPlaying = !!msg.isPlaying;
+        // A pause is not slow play: measure from here.
+        scriptTiming.restart();
         if (isPlaying) {
           accumulator = 0;
           if (isSharedSupported) {
@@ -2358,6 +2553,7 @@ self.onmessage = async (evt: MessageEvent) => {
           // The steps since the last frame, so what stops on screen is where
           // the simulation stopped. See FRAME_INTERVAL_MS.
           if (framePending && model && data) postFrame();
+          postScriptStatus(true);
         }
         break;
       }
@@ -2413,6 +2609,8 @@ self.onmessage = async (evt: MessageEvent) => {
         if (node) {
           node.script = msg.script;
           delete scriptCache[msg.nodeId];
+          // The old script's mistakes are not the new one's.
+          scriptProblems.clearBodies(new Set([node.name || node.id]));
         }
         break;
       }
@@ -2434,7 +2632,19 @@ self.onmessage = async (evt: MessageEvent) => {
         break;
       }
       case 'GET_TELEMETRY': {
-        post({ type: 'TELEMETRY_RESULT', id: msg.id, telemetry: history.latest() });
+        // The latest frame, with what the scripts hold now and their last words.
+        const latest = history.latest();
+        const scriptStateNow = scriptState.snapshot();
+        const lines = scriptLogs.entries(50);
+        post({
+          type: 'TELEMETRY_RESULT', id: msg.id,
+          telemetry: latest || scriptStateNow || lines.length ? {
+            ...(latest ?? {}),
+            ...(scriptStateNow ? { scriptState: scriptStateNow } : {}),
+            ...(lines.length ? { scriptLogs: lines } : {}),
+            ...(scriptLogs.total > lines.length ? { scriptLogsDropped: scriptLogs.total - lines.length } : {}),
+          } : null,
+        });
         break;
       }
       case 'CLEAR_HISTORY': {

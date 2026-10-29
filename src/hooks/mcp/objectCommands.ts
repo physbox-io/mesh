@@ -3,6 +3,7 @@
 // constraints, cuts, rounded edges, hardware, patterns, the knife
 // ---------------------------------------------------------------------------
 
+import { scriptSyntaxError, scriptWarnings } from '../../utils/scriptCheck';
 import { useStore } from '../../store/useStore';
 import { compileSCAD } from '../../utils/openscad';
 import { updateOrCreateNotecard } from '../../utils/noteCards';
@@ -84,9 +85,12 @@ export const objectCommands: McpCommands = {
     if (landed?.csgError) {
       return { ok: false, error: `Boolean failed: ${landed.csgError}`, id: node.id };
     }
+    // Applied either way; a script that does not compile is said so here.
+    const added = scriptWarnings(landed ? [landed] : [node]);
     return {
       ok: !addError && !!landed,
       ...(addError ? { error: addError } : {}),
+      ...(added.length ? { scriptWarnings: added } : {}),
       id: node.id,
       name: landed?.name ?? node.name,
       ...(parent ? { parent: parent.id } : {}),
@@ -227,8 +231,13 @@ export const objectCommands: McpCommands = {
       nodes: useStore.getState().sceneGraph.nodes
     });
     const error = useStore.getState().lastCompileError;
+    // A script is applied even when it does not compile; the reply says so.
+    const scriptError = typeof rawUpdates.script === 'string' ? scriptSyntaxError(rawUpdates.script) : null;
     // Says what was taken, so a caller can see its whole update landed.
-    return { ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}) };
+    return {
+      ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}),
+      ...(scriptError ? { scriptWarnings: [`Script on '${target.name || targetId}' does not compile: ${scriptError}. It was saved as written and will do nothing until fixed.`] } : {}),
+    };
   },
   DELETE_OBJECT: async (msg, { store }) => {
     const { targetId } = msg as Msg<{ targetId: string }>;

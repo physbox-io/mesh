@@ -30,7 +30,14 @@ import {
 } from './bridgeUtils';
 import { fillBodyDefaults } from './bodyDefaults';
 import { settleScene } from './settleScene';
+import { scriptWarnings } from '../../utils/scriptCheck';
 import type { McpCommands } from './types';
+
+/** A scene reply, plus a warning for each script that does not compile (applied all the same). */
+const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R & { scriptWarnings?: string[] } => {
+  const warnings = scriptWarnings(nodes);
+  return warnings.length ? { ...result, scriptWarnings: warnings } : result;
+};
 
 export const sceneCommands: McpCommands = {
   RUN_HEADLESS: async (msg) => {
@@ -102,8 +109,10 @@ export const sceneCommands: McpCommands = {
     return { ok: true };
   },
   RESET: async (_msg, { store }) => {
+    // The worker clears the history itself on a build that starts over from
+    // t = 0. Clearing it here too, after the build was posted, wiped the
+    // opening frame that build had just recorded.
     store.resetSimulation();
-    getPhysicsWorkerClient().clearHistory();
     return { ok: true };
   },
   LOAD_PRESET: async (msg, { store }) => {
@@ -119,8 +128,8 @@ export const sceneCommands: McpCommands = {
     if (name.startsWith('user:') && !(await ensureUserPreset(name))) {
       return { ok: false, error: `Preset "${name}" is in the account but could not be fetched from it. Try again.` };
     }
+    // History: cleared by the worker on the fresh build, as for RESET.
     store.loadPreset(name);
-    getPhysicsWorkerClient().clearHistory();
     // The preset's boolean bodies build asynchronously, and this used to
     // answer before they had: a contour slice sent straight after
     // loading the casting flask cut solid blocks, its holes not yet made.
@@ -360,8 +369,10 @@ export const sceneCommands: McpCommands = {
     store.setActivePreset(undefined);
     store.updateScene(graph, true);
     // Awaited, unlike Import JSON's: the reply has to say whether it built.
-    await useStore.getState().recompile(useStore.getState().sceneGraph);
-    getPhysicsWorkerClient().clearHistory();
+    // From rest: a new scene with as many degrees of freedom as the old one
+    // used to inherit its poses and clock. That fresh build also clears the
+    // history, so the old scene's frames cannot mix with this one's.
+    await useStore.getState().recompile(useStore.getState().sceneGraph, null, true, true);
     const win = window as unknown as PhysicsWindow;
     win._physics_setNoteCards?.(Array.isArray(noteCards) ? noteCards as NoteCard[] : []);
     win._physics_setCopilotMessages?.(Array.isArray(copilotMessages) ? copilotMessages as SavedCopilotMessage[] : []);
@@ -393,7 +404,7 @@ export const sceneCommands: McpCommands = {
       mode: 'mcp',
       nodes: useStore.getState().sceneGraph.nodes
     });
-    return result;
+    return withScriptWarnings(result, nodes);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
     const { gravityZ, windX, windY, density, floorFriction, floorBounce, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
@@ -435,7 +446,7 @@ export const sceneCommands: McpCommands = {
     }
 
     const nodes = bodies.map((b) => fillBodyDefaults(b));
-    const result = await settleScene(nodes, { freshStart: true });
+    const result = withScriptWarnings(await settleScene(nodes, { freshStart: true }), nodes);
     // An empty list clears the scene. It used to be refused, which left
     // physics_update_scene([]) as the only way to start from nothing; there
     // is no scene to frame or describe on a card.

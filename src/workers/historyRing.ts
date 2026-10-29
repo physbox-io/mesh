@@ -9,7 +9,18 @@
 // can read 14 MB anyway. Cutting the slice down *before* it is posted removes
 // the clone cost and the payload together.
 
-import type { HistoryEntry, HistoryFrame, HistoryQuery } from './physicsWorkerProtocol';
+import type { ContactHistory, HistoryEntry, HistoryFrame, HistoryQuery, JointHistory } from './physicsWorkerProtocol';
+
+/**
+ * A `bodies` filter applied to everything a frame carries: the bodies by id,
+ * the joints of those bodies, and the contacts that involve one of them. The
+ * filter used to cut `bodies` alone, so asking for one payload still returned
+ * every joint and every contact in the scene — most of the reply.
+ */
+export const jointsOfBodies = (joints: Record<string, JointHistory>, ids: Set<string>): Record<string, JointHistory> =>
+  Object.fromEntries(Object.entries(joints).filter(([, j]) => j.body !== undefined && ids.has(j.body)));
+export const contactsOfBodies = (contacts: ContactHistory[], ids: Set<string>): ContactHistory[] =>
+  contacts.filter((c) => (c.body1 !== undefined && ids.has(c.body1)) || (c.body2 !== undefined && ids.has(c.body2)));
 
 export class HistoryRing {
   private buf: (HistoryEntry | undefined)[];
@@ -55,7 +66,8 @@ export class HistoryRing {
    *   2. `last` keeps only the newest N of what is left;
    *   3. `stride` keeps every kth frame, raised as far as `maxFrames` needs,
    *      counted back from the newest so the newest is always included;
-   *   4. `bodies` / `include` trim what each frame carries.
+   *   4. `bodies` / `include` trim what each frame carries (`bodies` keeps
+ *      those bodies, their joints and the contacts they are in).
    * Frames are shallow copies: entries in the ring are never mutated.
    */
   query(q: HistoryQuery = {}): { frames: HistoryFrame[]; total: number; stride: number } {
@@ -86,8 +98,8 @@ export class HistoryRing {
           ? Object.fromEntries(Object.entries(e.bodies).filter(([k]) => bodyFilter.has(k)))
           : e.bodies;
       }
-      if (!include || include.has('joints')) f.joints = e.joints;
-      if (!include || include.has('contacts')) f.contacts = e.contacts;
+      if (!include || include.has('joints')) f.joints = bodyFilter ? jointsOfBodies(e.joints, bodyFilter) : e.joints;
+      if (!include || include.has('contacts')) f.contacts = bodyFilter ? contactsOfBodies(e.contacts, bodyFilter) : e.contacts;
       if (!include || include.has('aero')) f.aeroDiagnostics = e.aeroDiagnostics;
       return f;
     };

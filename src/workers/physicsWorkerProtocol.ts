@@ -8,6 +8,7 @@ import type { SceneGraph } from '../types/scene';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
+import type { ScriptLogLine, ScriptProblem, ScriptTimingReport } from './scriptDiagnostics';
 
 /** Explicit state to seed a freshly built model with (a live mirror's copy). */
 export interface SeedState {
@@ -114,16 +115,30 @@ export interface BodyHistory {
   quat?: number[];
 }
 
+/**
+ * A joint's state. Hinge and slide: numbers. Free: pos [x,y,z,qw,qx,qy,qz],
+ * vel [vx,vy,vz,wx,wy,wz]; ball: pos [qw,qx,qy,qz], vel [wx,wy,wz] (angular
+ * rates in the body frame). See readJoint in scriptSensors.ts.
+ */
 export interface JointHistory {
-  pos: number;
-  vel: number;
-  qfrc_applied: number;
+  /** The scene node (body) the joint belongs to. */
+  body?: string;
+  pos: number | number[];
+  vel: number | number[];
+  qfrc_applied: number | number[];
+  /** Hinge/slide with an actuator: its control value. */
+  ctrl?: number;
+  /** Hinge/slide with an actuator: the actuators' force on the joint (qfrc_actuator), N or N*m. */
+  actuatorForce?: number;
 }
 
 export interface ContactHistory {
   geom1: string;
   geom2: string;
   dist: number;
+  /** The scene nodes (bodies) owning geom1 and geom2; 'world' for the floor and other world geoms. */
+  body1?: string;
+  body2?: string;
 }
 
 export interface HistoryEntry {
@@ -147,12 +162,27 @@ export interface HistoryQuery {
   include?: ('bodies' | 'joints' | 'contacts' | 'aero')[];
 }
 
+/** What the scripts did in a headless run, returned with it. */
+// A type, not an interface: HeadlessResult is passed where an index signature is wanted.
+export type HeadlessScriptReport = {
+  /** api.log lines, oldest first (the last MAX kept). */
+  logs?: ScriptLogLine[];
+  /** Lines logged beyond those returned. */
+  logsDropped?: number;
+  /** Every scripted body's api.state at the end of the run, by node id. */
+  scriptState?: ScriptStateMap;
+  /** Wall time the run took, ms. */
+  wallMs?: number;
+  /** Mean wall time all scripts took per step, ms. */
+  scriptMsPerStep?: number;
+};
+
 export type HeadlessResult =
-  | {
+  | ({
       ok: true; ticksSimulated: number; trajectory: HistoryEntry[]; warnings: string[];
       /** How far each pin, weld and coupling opened, and the stops run through. */
       constraintReport?: ConstraintReport;
-    }
+    } & HeadlessScriptReport)
   | { ok: false; error: string; warnings: string[] };
 
 // ---- Main thread -> worker -----------------------------------------------
@@ -279,9 +309,35 @@ export type WorkerToMainMessage =
   | ({ type: 'IMPACT' } & ImpactEvent)
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   | { type: 'HISTORY_RESULT'; id: string; history: HistoryFrame[]; total: number; stride: number }
-  | { type: 'TELEMETRY_RESULT'; id: string; telemetry: HistoryEntry | null }
+  | { type: 'TELEMETRY_RESULT'; id: string; telemetry: TelemetryReply | null }
+  | ({ type: 'SCRIPT_STATUS' } & ScriptStatus)
   | ({ type: 'STEPPED'; id: string } & StepForResult)
   | { type: 'CHANNELS'; id: string; channels: CoSimChannel[]; timestepMs: number };
+
+/** The latest history frame, with what the scripts hold and said. */
+export type TelemetryReply = Partial<HistoryEntry> & {
+  /** Every scripted body's api.state now, by node id. */
+  scriptState?: ScriptStateMap;
+  /** The most recent api.log lines, oldest first. */
+  scriptLogs?: ScriptLogLine[];
+  /** Lines logged since the build that are no longer held. */
+  scriptLogsDropped?: number;
+};
+
+/**
+ * What the live scripts are getting wrong and costing, pushed by the worker
+ * (at most twice a second while playing, and after every build) so
+ * physics_get_state can say so without a round trip to a worker that may be
+ * busy or dead.
+ */
+export interface ScriptStatus {
+  problems: ScriptProblem[];
+  /** Problems beyond those listed. */
+  moreProblems: number;
+  /** The last second-long measurement of play, or null before one. */
+  timing: ScriptTimingReport | null;
+  timestepMs: number;
+}
 
 /** What a STEP_FOR did. `unknown` lists the input and output names the model has no channel for. */
 export type StepForResult =

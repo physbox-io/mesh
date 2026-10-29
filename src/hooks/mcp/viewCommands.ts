@@ -34,6 +34,7 @@ import { modelBuiltFrom } from '../../store/modelProvenance';
 import type { HistoryQuery } from '../../workers/physicsWorkerProtocol';
 import { type PhysicsWindow, workerStatusNow, type Msg, findNodeInScene, stripMeshArrays } from './bridgeUtils';
 import { sealCheckFor } from './bodyFeatures';
+import { resolveBodyFilter } from '../../utils/headlessReport';
 import type { McpCommands } from './types';
 
 export const viewCommands: McpCommands = {
@@ -203,20 +204,26 @@ export const viewCommands: McpCommands = {
   GET_TELEMETRY: async () => {
     return getPhysicsWorkerClient().getTelemetry().then(t => t || { error: 'No simulation telemetry available' });
   },
-  GET_HISTORY: async (msg) => {
+  GET_HISTORY: async (msg, { store }) => {
     // The worker holds up to 5000 frames, ~14 MB of JSON when full. No
     // agent can read that, so unless maxFrames is given (0 = no cap) the
     // stride is raised to fit 200 frames across whatever window was asked for.
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    // Names or ids, as physics_run_headless takes them; frames are keyed by id.
+    const filter = resolveBodyFilter(store.sceneGraph, msg.bodies);
     const { frames, total, stride } = await getPhysicsWorkerClient().getHistory({
       sinceTime: num(msg.sinceTime),
       last: num(msg.last),
       stride: num(msg.stride),
       maxFrames: num(msg.maxFrames) ?? 200,
-      bodies: Array.isArray(msg.bodies) ? (msg.bodies as string[]) : undefined,
+      // Nothing matched keeps nothing, not everything.
+      bodies: filter.ids ? (filter.ids.size ? [...filter.ids] : ['\u0000none']) : undefined,
       include: Array.isArray(msg.include) ? (msg.include as HistoryQuery['include']) : undefined,
     });
-    return { total, returned: frames.length, stride, frames };
+    return {
+      total, returned: frames.length, stride, frames,
+      ...(filter.unknown.length ? { warning: `bodies: no body has the name or id ${filter.unknown.map((u) => `"${u}"`).join(', ')}.` } : {}),
+    };
   },
   GET_OBJECTS: async (_msg, { store }) => {
     return (store.sceneGraph.nodes || []).map(stripMeshArrays);

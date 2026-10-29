@@ -150,6 +150,8 @@ export function summarizeTrajectory(trajectory: HistoryEntry[], options: Summary
     for (const frame of trajectory) {
       if (frame.time < settleFrom) continue;
       for (const [name, j] of Object.entries(frame.joints || {})) {
+        // Free and ball joints carry vectors; their bodies are judged instead.
+        if (typeof j.vel !== 'number') continue;
         const v = Math.abs(j.vel);
         if (!(v <= (fastest[name] ?? 0))) fastest[name] = v;
       }
