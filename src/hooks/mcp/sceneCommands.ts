@@ -6,7 +6,7 @@
 import { captureViewportThumb } from '../../utils/viewportCapture';
 import { savePreset } from '../../utils/presetStorage';
 import { announcePresetSave } from '../../utils/presetNotices';
-import { summarizeTrajectory } from '../../utils/trajectorySummary';
+import { emptySceneRefusal, reportHeadless } from '../../utils/headlessReport';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
@@ -23,7 +23,7 @@ import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../../types/s
 import type { RawNode } from '../../utils/sceneNodes';
 import { bboxOf, stockReport } from '../../utils/sceneSummary';
 import { framingPatch } from '../../store/sceneFraming';
-import type { HeadlessResult, HistoryEntry } from '../../workers/physicsWorkerProtocol';
+import type { HeadlessResult } from '../../workers/physicsWorkerProtocol';
 import {
   type PhysicsWindow, workerStatusNow, countBodies, type Msg, HEADLESS_WAIT_FOR_COLLIDERS_MS,
   SUSPICIOUSLY_LARGE_DIAGONAL_M,
@@ -49,6 +49,9 @@ export const sceneCommands: McpCommands = {
       await new Promise(r => setTimeout(r, 250));
     }
     const stillPending = pendingBodies();
+    // Nothing to run: an empty scene used to come back ok and settled.
+    const empty = emptySceneRefusal(useStore.getState().sceneGraph);
+    if (empty) return empty;
     const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce } = useStore.getState();
     // Runs inside the same physics worker that owns the live simulation
     // (see src/workers/physicsWorker.ts's runHeadless) — its own isolated
@@ -71,18 +74,8 @@ export const sceneCommands: McpCommands = {
         ...(result.warnings ?? []),
       ];
     }
-    const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies as string[]) : null;
-    if (result.ok && result.trajectory && bodyFilter) {
-      result.trajectory = result.trajectory.map((fr: HistoryEntry) => ({
-        ...fr,
-        bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => bodyFilter.has(k))),
-      }));
-    }
-    // How it ended, so the trajectory need not be read to find out.
-    if (result.ok && result.trajectory) {
-      return { ...result, final: summarizeTrajectory(result.trajectory) };
-    }
-    return result;
+    // Names or ids; `final` judged on the whole scene before the filter.
+    return reportHeadless(result, sceneGraph, msg.bodies);
   },
   TOGGLE_PLAY: async (_msg, { store }) => {
     store.togglePlay();
