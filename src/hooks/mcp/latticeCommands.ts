@@ -18,6 +18,7 @@ import {
   latticeHistory, latticeOf, latticeTarget, pushLatticeHistory, commitLattice, runLatticeOps,
 } from './latticeState';
 import { settleScene } from './settleScene';
+import { collidersAreStale } from '../../utils/convexDecomposition';
 import { cageOriginInBodyMm, latticeBodyPos } from '../../utils/latticeFrame';
 import type { McpCommands } from './types';
 
@@ -90,7 +91,12 @@ export const latticeCommands: McpCommands = {
 
     const currentNodes = useStore.getState().sceneGraph.nodes || [];
     const updatedNodes = parent ? withChild(currentNodes, parent.id, newNode) : [...currentNodes, newNode];
-    const settleRes = await settleScene(updatedNodes, { replacesScene: false });
+    // Not waiting for its convex pieces: those are V-HACD, one job at a time
+    // across the whole scene, and a burst of creates queued behind each
+    // other's until one timed out with its body already made (a retry then
+    // made it twice). The summary reports collisionPending meanwhile, and
+    // physics_run_headless waits for them.
+    const settleRes = await settleScene(updatedNodes, { replacesScene: false, waitForColliders: false });
     if (!settleRes.ok) {
       throw new Error(`The lattice body failed to compile: ${settleRes.error}`);
     }
@@ -108,6 +114,7 @@ export const latticeCommands: McpCommands = {
       // Joint anchors and child bodies are in the body frame, whose origin is
       // the centre of mass: cage point c (mm) is at body-frame c + this.
       cageOriginMm: cageOriginInBodyMm(newNode),
+      ...(collidersAreStale(findNodeInScene(useStore.getState().sceneGraph.nodes, id) ?? newNode) ? { collisionPending: true } : {}),
     };
   },
   LATTICE_FACES: async (msg, { store }) => {

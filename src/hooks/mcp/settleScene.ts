@@ -72,7 +72,13 @@ export const autoCompileScad = async (nodes: SceneNode[]) => {
 // and reports the real MJCF compile result instead.
 export const settleScene = async (
   nodes: SceneNode[],
-  { replacesScene = true, freshStart = false }: { replacesScene?: boolean; freshStart?: boolean } = {},
+  {
+    replacesScene = true, freshStart = false, waitForColliders = true,
+  }: {
+    replacesScene?: boolean; freshStart?: boolean;
+    /** false: reply once the body is built; its convex pieces follow in the background. */
+    waitForColliders?: boolean;
+  } = {},
 ): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number }> => {
   const store = useStore.getState();
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
@@ -94,7 +100,7 @@ export const settleScene = async (
   // asynchronously — a caller that got ok:true before they finished would be
   // told a scene built when its geometry didn't exist yet. skipFinalRecompile:
   // the single build below covers it.
-  await compileCsgNodes(true);
+  await compileCsgNodes(true, { colliders: waitForColliders });
   await applyDeclarativePostCsgFeatures(nodes);
   // This is now the ONLY recompile triggered by this load, so there's nothing
   // left to race against. forceReset is false so recompile() preserves qpos/qvel

@@ -84,11 +84,24 @@ function collectUnbuiltScad(nodes: SceneNode[], out: SceneNode[] = []): SceneNod
  * Returns the number of bodies compiled. Errors are recorded on the node
  * (csgError) rather than thrown — one broken shape shouldn't stop the others.
  */
-export async function compileCsgNodes(skipFinalRecompile = false): Promise<number> {
+export async function compileCsgNodes(
+  skipFinalRecompile = false,
+  /**
+   * false: build booleans and SCAD, and leave convex decomposition to the
+   * background compiler (scheduleCsgCompile). V-HACD on a concave part takes
+   * seconds and its worker runs one job at a time, so a caller that only
+   * added a body waited on every stale body in the scene: the fourth
+   * physics_create_lattice of a burst timed out at 60 s with its body made.
+   */
+  { colliders = true }: { colliders?: boolean } = {},
+): Promise<number> {
   const scene = useStore.getState().sceneGraph;
   const stale = collectStale(scene.nodes);
   const unbuilt = collectUnbuiltScad(scene.nodes);
-  if (stale.length === 0 && unbuilt.length === 0 && collectStaleColliders(scene.nodes).length === 0) return 0;
+  if (stale.length === 0 && unbuilt.length === 0 && (!colliders || collectStaleColliders(scene.nodes).length === 0)) {
+    if (!colliders && collectStaleColliders(scene.nodes).length > 0) scheduleCsgCompile();
+    return 0;
+  }
 
   if (unbuilt.length > 0) {
     const { compileSCAD } = await import('../utils/openscad');
@@ -137,7 +150,8 @@ export async function compileCsgNodes(skipFinalRecompile = false): Promise<numbe
   // Re-read the scene rather than reuse the copy above: a boolean body's mesh
   // was just installed by applyNodeCsg, and a body whose mesh changed in this
   // same pass has to be decomposed from what it is NOW, not from what it was.
-  const staleColliders = collectStaleColliders(useStore.getState().sceneGraph.nodes);
+  const staleColliders = colliders ? collectStaleColliders(useStore.getState().sceneGraph.nodes) : [];
+  if (!colliders && collectStaleColliders(useStore.getState().sceneGraph.nodes).length > 0) scheduleCsgCompile();
   await Promise.all(staleColliders.map(async node => {
     try {
       const result = await decomposeNodeColliders(node);
