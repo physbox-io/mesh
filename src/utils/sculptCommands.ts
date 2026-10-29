@@ -20,6 +20,7 @@
 
 import {
   applyBrush,
+  closestPointOnTriangle,
   applyUndo,
   beginStroke,
   buildSpatialHash,
@@ -161,22 +162,29 @@ export function resolveStamp(
  *
  * Separate from resolveStamp's bounded lookup because a miss needs this too:
  * the answer to "that was nowhere near the model" is the point that is.
+ *
+ * On the TRIANGLES, not the nearest vertex. A face Scissors leaves is a fan of
+ * long triangles with no vertex inside, so a point on it was answered with a
+ * rim corner 38 mm away, and a brush there "missed". The nearest vertex bounds
+ * the search: no triangle whose box is further than it can hold anything
+ * closer, which rejects nearly every face in a few comparisons. The normal is
+ * the corners' normals blended where the point lands, or the face's own when a
+ * corner sits on a crease (where blending the cap's corners with the side's
+ * tilts it).
  */
 export function nearestSurfacePoint(
   mesh: SculptMesh,
   point: number[],
 ): { stamp: ResolvedStamp; distance: number } | null {
   const [px, py, pz] = point;
+  const p = mesh.positions;
   let bestIndex = -1;
   let bestDistanceSq = Infinity;
 
-  // Straight scan. The hash is built for radius queries around a known surface
-  // point; here the point may be anywhere, including far outside the mesh, and
-  // widening the query until it finds something costs more than one pass.
   for (let i = 0; i < mesh.vertexCount; i++) {
-    const dx = mesh.positions[i * 3] - px;
-    const dy = mesh.positions[i * 3 + 1] - py;
-    const dz = mesh.positions[i * 3 + 2] - pz;
+    const dx = p[i * 3] - px;
+    const dy = p[i * 3 + 1] - py;
+    const dz = p[i * 3 + 2] - pz;
     const distanceSq = dx * dx + dy * dy + dz * dz;
     if (distanceSq < bestDistanceSq) {
       bestDistanceSq = distanceSq;
@@ -185,17 +193,58 @@ export function nearestSurfacePoint(
   }
   if (bestIndex < 0) return null;
 
-  return {
-    stamp: {
-      x: mesh.positions[bestIndex * 3],
-      y: mesh.positions[bestIndex * 3 + 1],
-      z: mesh.positions[bestIndex * 3 + 2],
-      nx: mesh.normals[bestIndex * 3],
-      ny: mesh.normals[bestIndex * 3 + 1],
-      nz: mesh.normals[bestIndex * 3 + 2],
-    },
-    distance: Math.sqrt(bestDistanceSq),
+  const n = mesh.normals;
+  let stamp: ResolvedStamp = {
+    x: p[bestIndex * 3], y: p[bestIndex * 3 + 1], z: p[bestIndex * 3 + 2],
+    nx: n[bestIndex * 3], ny: n[bestIndex * 3 + 1], nz: n[bestIndex * 3 + 2],
   };
+
+  const out = [0, 0, 0, 0, 0, 0];
+  let bestFace = -1;
+  let bestOut: number[] | null = null;
+  const f = mesh.faces;
+  for (let t = 0; t < mesh.faceCount; t++) {
+    const a = f[t * 3], b = f[t * 3 + 1], c = f[t * 3 + 2];
+    // Distance from the point to the triangle's box, axis by axis.
+    const lo0 = Math.min(p[a * 3], p[b * 3], p[c * 3]), hi0 = Math.max(p[a * 3], p[b * 3], p[c * 3]);
+    const e0 = px < lo0 ? lo0 - px : px > hi0 ? px - hi0 : 0;
+    if (e0 * e0 >= bestDistanceSq) continue;
+    const lo1 = Math.min(p[a * 3 + 1], p[b * 3 + 1], p[c * 3 + 1]), hi1 = Math.max(p[a * 3 + 1], p[b * 3 + 1], p[c * 3 + 1]);
+    const e1 = py < lo1 ? lo1 - py : py > hi1 ? py - hi1 : 0;
+    if (e0 * e0 + e1 * e1 >= bestDistanceSq) continue;
+    const lo2 = Math.min(p[a * 3 + 2], p[b * 3 + 2], p[c * 3 + 2]), hi2 = Math.max(p[a * 3 + 2], p[b * 3 + 2], p[c * 3 + 2]);
+    const e2 = pz < lo2 ? lo2 - pz : pz > hi2 ? pz - hi2 : 0;
+    if (e0 * e0 + e1 * e1 + e2 * e2 >= bestDistanceSq) continue;
+    const d2 = closestPointOnTriangle(p, a, b, c, px, py, pz, out);
+    if (d2 < bestDistanceSq) {
+      bestDistanceSq = d2;
+      bestFace = t;
+      bestOut = out.slice();
+    }
+  }
+
+  if (bestFace >= 0 && bestOut) {
+    const a = f[bestFace * 3], b = f[bestFace * 3 + 1], c = f[bestFace * 3 + 2];
+    const [, , , u, v, w] = bestOut;
+    // The face's own normal, from its winding.
+    const ux = p[b * 3] - p[a * 3], uy = p[b * 3 + 1] - p[a * 3 + 1], uz = p[b * 3 + 2] - p[a * 3 + 2];
+    const vx = p[c * 3] - p[a * 3], vy = p[c * 3 + 1] - p[a * 3 + 1], vz = p[c * 3 + 2] - p[a * 3 + 2];
+    let fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx;
+    const fl = Math.hypot(fx, fy, fz) || 1;
+    fx /= fl; fy /= fl; fz /= fl;
+    let nx = n[a * 3] * u + n[b * 3] * v + n[c * 3] * w;
+    let ny = n[a * 3 + 1] * u + n[b * 3 + 1] * v + n[c * 3 + 1] * w;
+    let nz = n[a * 3 + 2] * u + n[b * 3 + 2] * v + n[c * 3 + 2] * w;
+    const nl = Math.hypot(nx, ny, nz);
+    // A corner more than ~30 degrees off the face is on a crease, and its
+    // normal belongs as much to the face beyond it.
+    const creased = [a, b, c].some((k) => n[k * 3] * fx + n[k * 3 + 1] * fy + n[k * 3 + 2] * fz < 0.87);
+    if (nl < 1e-9 || creased) { nx = fx; ny = fy; nz = fz; }
+    else { nx /= nl; ny /= nl; nz /= nl; }
+    stamp = { x: bestOut[0], y: bestOut[1], z: bestOut[2], nx, ny, nz };
+  }
+
+  return { stamp, distance: Math.sqrt(bestDistanceSq) };
 }
 
 /** Consecutive points of a stroke closer than this many radii are joined into a line of dabs. */

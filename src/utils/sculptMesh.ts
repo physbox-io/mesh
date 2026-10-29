@@ -471,6 +471,53 @@ function edgeKey(a: number, b: number): number {
  * Returns how many edges were split.
  */
 /**
+ * The closest point on triangle (a, b, c) to p, written into `out` as
+ * [x, y, z, u, v, w] (the barycentric weights of a, b, c). Ericson, Real-Time
+ * Collision Detection, 5.1.5. Returns the squared distance.
+ */
+export function closestPointOnTriangle(
+  p: ArrayLike<number>, a: number, b: number, c: number,
+  px: number, py: number, pz: number, out: number[],
+): number {
+  const ax = p[a * 3], ay = p[a * 3 + 1], az = p[a * 3 + 2];
+  const bx = p[b * 3], by = p[b * 3 + 1], bz = p[b * 3 + 2];
+  const cx = p[c * 3], cy = p[c * 3 + 1], cz = p[c * 3 + 2];
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const acx = cx - ax, acy = cy - ay, acz = cz - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  let u = 1, v = 0, w = 0;
+  if (!(d1 <= 0 && d2 <= 0)) {
+    const bpx = px - bx, bpy = py - by, bpz = pz - bz;
+    const d3 = abx * bpx + aby * bpy + abz * bpz;
+    const d4 = acx * bpx + acy * bpy + acz * bpz;
+    const cpx = px - cx, cpy = py - cy, cpz = pz - cz;
+    const d5 = abx * cpx + aby * cpy + abz * cpz;
+    const d6 = acx * cpx + acy * cpy + acz * cpz;
+    const vc = d1 * d4 - d3 * d2;
+    const vb = d5 * d2 - d1 * d6;
+    const va = d3 * d6 - d5 * d4;
+    if (d3 >= 0 && d4 <= d3) { u = 0; v = 1; w = 0; }
+    else if (d6 >= 0 && d5 <= d6) { u = 0; v = 0; w = 1; }
+    else if (vc <= 0 && d1 >= 0 && d3 <= 0) { const t = d1 / (d1 - d3); u = 1 - t; v = t; w = 0; }
+    else if (vb <= 0 && d2 >= 0 && d6 <= 0) { const t = d2 / (d2 - d6); u = 1 - t; v = 0; w = t; }
+    else if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+      const t = (d4 - d3) / ((d4 - d3) + (d5 - d6)); u = 0; v = 1 - t; w = t;
+    } else {
+      const denom = 1 / (va + vb + vc);
+      v = vb * denom; w = vc * denom; u = 1 - v - w;
+    }
+  }
+  const qx = ax * u + bx * v + cx * w;
+  const qy = ay * u + by * v + cy * w;
+  const qz = az * u + bz * v + cz * w;
+  out[0] = qx; out[1] = qy; out[2] = qz; out[3] = u; out[4] = v; out[5] = w;
+  const dx = qx - px, dy = qy - py, dz = qz - pz;
+  return dx * dx + dy * dy + dz * dz;
+}
+
+/**
  * Whether any point of a triangle lies within `sqrt(reach2)` of a point.
  *
  * A bounding-box reject first, since nearly every face in the mesh fails it;
@@ -960,6 +1007,8 @@ const TAUBIN_MU_RATIO = 0.8;
 const DECIMATE_EVERY = 4;
 /** Halvings one dab may make: 2^6 takes a 30 mm base edge under 0.5 mm. */
 const MAX_REFINE_PASSES = 6;
+/** Fewer vertices than this under a grab's first dab, and the surface is refined first. */
+const GRAB_MIN_CAUGHT = 4;
 
 export function beginStroke(mesh: SculptMesh, settings: BrushSettings): SculptSession {
   /*
@@ -1091,7 +1140,17 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
   // under it turned a rim pass on a carved pumpkin from 23 k vertices into
   // 57 k and held the page for 48 s. It still collapses what it bunches up.
   const refines = settings.type !== 'smooth';
-  if (settings.dynamicTopology && settings.type !== 'grab') {
+  /*
+   * Grab refines along its drag (refineAlongDrag), not under the brush — except
+   * when it starts somewhere with next to nothing to hold. A face left by
+   * Scissors is one fan of long triangles with no vertex inside it, so a grab
+   * on it caught nothing and reported the point as missed. Refining first gives
+   * it surface to pull; the vertices it then catches survive later refinement,
+   * which only ever appends.
+   */
+  const grabStartsBare = settings.type === 'grab' && !session.grabbed[channel]
+    && queryRadius(mesh, session.hash, stamp.x, stamp.y, stamp.z, radius).length < GRAB_MIN_CAUGHT;
+  if (settings.dynamicTopology && (settings.type !== 'grab' || grabStartsBare)) {
     // Down to the target before anything moves, not one halving a dab. A pass
     // halves only the edges in reach, so a 3 mm brush landing on new clay's
     // 6 mm edges found a few corners in its radius and drove them in alone:
