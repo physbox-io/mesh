@@ -105,4 +105,28 @@ describe('a surface folded through itself', () => {
     expect(b).toBeCloseTo(3, 6);
     expect(c).toBeCloseTo(3, 6);
   });
+
+  it('is flagged in the scene summary for any mesh, not only a sculpt', async () => {
+    const { meshIntegrity } = await import('../src/utils/sceneSummary');
+    const { renderVertices, faces } = toSceneGeom(folded());
+    const report = meshIntegrity({ name: 'm', type: 'mesh', size: [1], renderVertices, faces });
+    expect(report.watertight).toBe(true);
+    expect(report.weighedByHull).toBe(true);
+    const ball = toSceneGeom(buildSculptBaseSized('sphere', 0.08));
+    expect(meshIntegrity({ name: 'b', type: 'mesh', size: [1], ...ball }).weighedByHull).toBeUndefined();
+  });
+});
+
+describe('a slender but sound mesh', () => {
+  it('keeps its exact inertia: a 1 mm wire 1.5 m long', () => {
+    const w = 0.0005, l = 0.75;
+    const positions = [
+      -w, -w, -l, w, -w, -l, w, w, -l, -w, w, -l,
+      -w, -w, l, w, -w, l, w, w, l, -w, w, l,
+    ];
+    const faces = [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5, 3, 0, 4, 3, 4, 7];
+    const check = checkMeshInertia(positions, faces);
+    expect(check.principal[0] / check.principal[2]).toBeLessThan(2e-6);
+    expect(check.ok).toBe(true);
+  });
 });

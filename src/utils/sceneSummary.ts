@@ -10,6 +10,7 @@
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
 import { analyzeMesh } from './meshIntegrity';
+import { checkMeshInertia } from './meshInertiaCheck';
 import { cageOriginInBodyMm } from './latticeFrame';
 import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum } from './csg';
 import { collidersAreStale, solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
@@ -71,6 +72,11 @@ export function meshIntegrity(g: SceneGeom): Record<string, unknown> {
     ...(m.closed && m.volume < 0 ? { windingInverted: true } : {}),
     // The case signed volume cannot see: some faces one way, some the other.
     ...(m.closed && !m.consistentlyWound ? { windingMixed: true } : {}),
+    // Closed and wound outward, but folded through itself: its exact inertia
+    // would not be positive, so mjcf.ts weighs it by its convex hull instead.
+    ...(m.closed && m.consistentlyWound && !checkMeshInertia(pos, faces).ok
+      ? { weighedByHull: true, note: 'The surface passes through itself, so this mesh is weighed by its convex hull, not its shape.' }
+      : {}),
   };
 }
 

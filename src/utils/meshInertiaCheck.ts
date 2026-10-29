@@ -20,8 +20,12 @@ export interface InertiaCheck {
   ok: boolean;
 }
 
-/** Below this share of the largest principal moment, a moment counts as not positive. */
-const MIN_MOMENT_RATIO = 1e-6;
+/**
+ * Below this share of the largest principal moment, a moment is numerically
+ * zero. Far under any real part's proportions: a 1 mm wire 1.5 m long is
+ * about 1.5e-6, and must pass.
+ */
+const ZERO_MOMENT_RATIO = 1e-12;
 
 export function checkMeshInertia(positions: ArrayLike<number>, faces: ArrayLike<number>, faceCount = Math.floor(faces.length / 3)): InertiaCheck {
   let vol6 = 0;
@@ -59,9 +63,15 @@ export function checkMeshInertia(positions: ArrayLike<number>, faces: ArrayLike<
   const tr = Cxx + Cyy + Czz;
   // Inertia = trace(C) I - C.
   const principal = symmetricEigenvalues(tr - Cxx, tr - Cyy, tr - Czz, -Cxy, -Cxz, -Cyz);
-  const largest = Math.max(Math.abs(principal[2]), 1e-300);
-  const ok = principal[0] > largest * MIN_MOMENT_RATIO && Number.isFinite(principal[0]);
-  return { volume, principal, ok };
+  // What MuJoCo checks: every principal moment positive, and the three able
+  // to belong to a real body (each no more than the sum of the other two).
+  // About bad geometry, not aspect ratio.
+  const [p0, p1, p2] = principal;
+  const finite = principal.every(Number.isFinite);
+  const largest = Math.max(Math.abs(p2), 1e-300);
+  const positive = p0 > largest * ZERO_MOMENT_RATIO;
+  const triangle = p0 + p1 >= p2 * (1 - 1e-9);
+  return { volume, principal, ok: finite && positive && triangle };
 }
 
 /** Eigenvalues of the symmetric matrix [[a, d, e], [d, b, f], [e, f, c]], ascending. */
