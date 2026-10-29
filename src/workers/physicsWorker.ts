@@ -44,6 +44,7 @@ import { runHeadlessLoop, type HeadlessRunResult } from '../store/physicsWorkerC
 import type {
   AeroDiagnostic,
   BodyHistory,
+  ConstraintBrokenEvent,
   ContactHistory,
   HistoryEntry,
   JointHistory,
@@ -1236,6 +1237,9 @@ const applyBrokenWelds = () => {
  * Costs nothing when the scene has no breakable welds in it, which is every
  * scene that existed before this feature — the early return is the first line.
  */
+/** Set for the length of a headless run, which collects its breaks here instead of posting them. */
+let headlessBreaks: ConstraintBrokenEvent[] | null = null;
+
 const checkConstraintBreaks = () => {
   if (breakableWelds.length === 0) return;
   const dat = data;
@@ -1277,8 +1281,7 @@ const checkConstraintBreaks = () => {
     dat.eq_active[w.eqIndex] = 0;
     releaseCrumple(w);
     brokenWeldKeys.add(w.key);
-    post({
-      type: 'CONSTRAINT_BROKEN',
+    const event: ConstraintBrokenEvent = {
       key: w.key,
       nodeId: w.nodeId,
       targetId: w.targetId,
@@ -1287,7 +1290,11 @@ const checkConstraintBreaks = () => {
       time: dat.time,
       forceN,
       torqueNm,
-    });
+    };
+    // A headless run's breaks are its own: posted, the store took them as the
+    // live scene's, and the next live build started with those welds broken.
+    if (headlessBreaks) headlessBreaks.push(event);
+    else post({ type: 'CONSTRAINT_BROKEN', ...event });
   };
   for (const w of breakableWelds) {
     if (brokenWeldKeys.has(w.key)) continue;
@@ -2372,6 +2379,8 @@ const runHeadless = (
   // to be swapped out with everything else or the headless run would break
   // welds by the interactive model's numbering.
   const savedBreakableWelds = breakableWelds, savedBrokenWeldKeys = brokenWeldKeys;
+  const breaks: ConstraintBrokenEvent[] = [];
+  headlessBreaks = breaks;
 
   const warnings: string[] = [];
   const savedScriptProblems = scriptProblems, savedScriptLogs = scriptLogs, savedScriptTiming = scriptTiming;
@@ -2476,6 +2485,7 @@ const runHeadless = (
       trajectory: outcome.frames,
       warnings,
       constraintReport,
+      ...(breaks.length ? { breaks } : {}),
       ...scriptReport,
     };
   } catch (e) {
@@ -2492,6 +2502,7 @@ const runHeadless = (
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
+    headlessBreaks = null;
     bodyNodeById = savedBodyNodeById; jointInfos = savedJointInfos;
     scriptProblems = savedScriptProblems; scriptLogs = savedScriptLogs; scriptTiming = savedScriptTiming;
   }

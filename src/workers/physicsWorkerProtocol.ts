@@ -182,6 +182,8 @@ export type HeadlessResult =
       ok: true; ticksSimulated: number; trajectory: HistoryEntry[]; warnings: string[];
       /** How far each pin, weld and coupling opened, and the stops run through. */
       constraintReport?: ConstraintReport;
+      /** Welds, members, blobs and crumple zones that gave way in this run, in order. */
+      breaks?: ConstraintBrokenEvent[];
     } & HeadlessScriptReport)
   | { ok: false; error: string; warnings: string[] };
 
