@@ -120,4 +120,27 @@ describe('isFabricationScene', () => {
     expect(isFabricationScene(graph([wheel]), { depthMm: 3 })).toBe(true);
     expect(isFabricationScene(graph([wheel], { simFidelity: 'print' }), null)).toBe(true);
   });
+
+  it('is an experiment, not fabrication, for a free part launched, shattering or otherwise set up to simulate', () => {
+    const block = [{ type: 'box' as const, size: [0.02, 0.02, 0.02] }];
+    expect(isFabricationScene(graph([body('part', block, { joints: free })]), null)).toBe(true);
+    const launched = body('ball', block, { joints: [{ ...free[0], initialVelocity: [0, 0, 0, 0, 0, 0] }] });
+    expect(isFabricationScene(graph([launched]), null)).toBe(true);
+    const thrown = body('ball', block, { joints: [{ ...free[0], initialVelocity: [2, 0, 0, 0, 0, 0] }] });
+    expect(isFabricationScene(graph([thrown]), null)).toBe(false);
+    const vase = body('vase', block, { joints: free, shatterImpulseNs: 8 });
+    expect(isFabricationScene(graph([vase]), null)).toBe(false);
+    const plate = body('plate', [{ ...block[0], dentYieldNs: 6 }], { joints: free });
+    expect(isFabricationScene(graph([plate]), null)).toBe(false);
+    const scripted = body('bot', block, { joints: free, script: 'ctrl[0] = 1' });
+    expect(isFabricationScene(graph([body('bench', block), scripted]), null)).toBe(false);
+    const nested = body('blob', block, { joinMaterial: 'putty' });
+    expect(isFabricationScene(graph([body('bench', block, { children: [nested] })]), null)).toBe(false);
+  });
+
+  it('is fabrication again for an experiment with carve settings or print fidelity', () => {
+    const vase = body('vase', [], { joints: [{ ...free[0], initialVelocity: [2, 0, 0, 0, 0, 0] }], shatterImpulseNs: 8 });
+    expect(isFabricationScene(graph([vase]), { depthMm: 3 })).toBe(true);
+    expect(isFabricationScene(graph([vase], { simFidelity: 'print' }), null)).toBe(true);
+  });
 });

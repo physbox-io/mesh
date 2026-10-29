@@ -132,14 +132,27 @@ export function stockReport(scene: SceneGraph, stock: { widthMm: number; depthMm
  *
  * A scene counts as fabrication when it has carve settings, is set to print
  * fidelity, or has no articulated joint anywhere (hinge, slide, ball): loose
- * parts on a bench, fixed or free. One hinge and it is a mechanism.
+ * parts on a bench, fixed or free. One hinge and it is a mechanism. Loose
+ * parts set up as an experiment are not on a bench either: a body that
+ * shatters, dents, crumples, breaks under load, is a join blob, is launched
+ * with an initial velocity, runs a control script or carries an actuator says
+ * the scene is there to be simulated. Carve settings and print fidelity still
+ * win over all of that.
  */
 export function isFabricationScene(scene: SceneGraph, carveSettings: unknown): boolean {
   if (carveSettings) return true;
   if (scene.simFidelity === 'print') return true;
-  const articulated = (nodes: SceneNode[] | undefined): boolean => (nodes || []).some((n) =>
-    (n.joints || []).some((j) => j.type !== 'free') || articulated(n.children));
-  return (scene.nodes?.length ?? 0) > 0 && !articulated(scene.nodes);
+  const mechanismOrExperiment = (nodes: SceneNode[] | undefined): boolean => (nodes || []).some((n) =>
+    (n.joints || []).some((j) => j.type !== 'free') || isExperimentBody(n) || mechanismOrExperiment(n.children));
+  return (scene.nodes?.length ?? 0) > 0 && !mechanismOrExperiment(scene.nodes);
+}
+
+/** A body (not its children) set up for a physics experiment rather than to be made. */
+function isExperimentBody(n: SceneNode): boolean {
+  if (n.shatterImpulseNs != null || n.loadStrength || n.joinMaterial || n.script?.trim()) return true;
+  if ((n.geoms || []).some((g) => g.dentYieldNs != null)) return true;
+  return (n.joints || []).some((j) => j.crumpleTorqueNm != null || !!j.actuator
+    || (j.initialVelocity || []).some((v) => v !== 0));
 }
 
 // ---------------------------------------------------------------------------
