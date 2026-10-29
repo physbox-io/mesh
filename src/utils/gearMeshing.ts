@@ -72,25 +72,30 @@ export function gearBody(node: SceneNode, j: SceneJoint, world: { pos: number[];
     }
     return null;
   };
-  const solid = (node.geoms || []).filter((g) => g.csg !== 'difference');
-  let wheels: Wheel[] = [];
-  if (pitchRadius !== undefined) {
+  const solid = (node.geoms || []).filter((g) => g.csg !== 'difference' && g.role !== 'visual');
+  const cylinders: Wheel[] = [];
+  const meshes: Wheel[] = [];
+  for (const g of solid) {
+    const e = extent(g);
+    if (!e || !(e.r > 0)) continue;
+    (g.type === 'mesh' ? meshes : cylinders).push({ radius: e.r, lo: e.lo, hi: e.hi });
+  }
+  let wheels: Wheel[];
+  if (cylinders.length) {
+    // Round colliders are the pitch circles: a mechanism-builder gear's, or
+    // each gear of a compound arbor built onto one hinge.
+    wheels = cylinders;
+  } else if (pitchRadius !== undefined) {
     // A cut gear is one wheel at its pitch circle, as thick as all of it.
-    const spans = solid.map(extent).filter((e): e is NonNullable<typeof e> => !!e);
+    const spans = (node.geoms || []).filter((g) => g.csg !== 'difference').map(extent).filter((e): e is NonNullable<typeof e> => !!e);
     const lo = spans.length ? Math.min(...spans.map((e) => e.lo)) : -Infinity;
     const hi = spans.length ? Math.max(...spans.map((e) => e.hi)) : Infinity;
     wheels = [{ radius: pitchRadius, lo, hi }];
+  } else if (meshes.length) {
+    wheels = meshes;
   } else {
-    for (const g of solid) {
-      if (g.role === 'visual') continue;
-      const e = extent(g);
-      if (e && e.r > 0) wheels.push({ radius: e.r, lo: e.lo, hi: e.hi });
-    }
-    if (!wheels.length) {
-      // Nothing round to go by: the first geom's size, in every plane.
-      const r = node.geoms?.[0]?.size?.[0] ?? 0.25;
-      wheels = [{ radius: r, lo: -Infinity, hi: Infinity }];
-    }
+    // Nothing round to go by: the first geom's size, in every plane.
+    wheels = [{ radius: node.geoms?.[0]?.size?.[0] ?? 0.25, lo: -Infinity, hi: Infinity }];
   }
   return { jointName: j.name, nodeId: node.id, origin, axis, wheels };
 }
