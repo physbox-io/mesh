@@ -202,10 +202,12 @@ export const toRenderVertices = (vertices: number[]): number[] => {
 };
 
 /**
- * How long physics_run_headless waits for convex pieces still being worked out.
- * The bridge gives a whole command 60 s, and the run needs some of that.
+ * How long physics_run_headless waits for convex pieces still being worked
+ * out, queued or running. The bridge gives a whole command 60 s and the run
+ * needs some of that; 45 s covers a four-body marble run (~40 s of pieces one
+ * body after another), and a scene with more says so and can be run again.
  */
-export const HEADLESS_WAIT_FOR_COLLIDERS_MS = 30_000;
+export const HEADLESS_WAIT_FOR_COLLIDERS_MS = 45_000;
 
 // Bounding-box diagonal above this (in MuJoCo meters) on a freshly-compiled
 // SCAD mesh almost always means the source forgot the required

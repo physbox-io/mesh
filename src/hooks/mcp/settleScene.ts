@@ -4,13 +4,20 @@
 
 import { useStore } from '../../store/useStore';
 import { compileSCAD } from '../../utils/openscad';
-import { compileCsgNodes } from '../useCsgCompile';
+import { compileCsgNodes, pendingColliderBodies } from '../useCsgCompile';
 import type { SceneNode } from '../../types/scene';
 import { type PhysicsWindow, countBodies } from './bridgeUtils';
 import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from './bodyFeatures';
 
-/** How long a scene build waits for its convex pieces before answering. */
-const SETTLE_WAIT_FOR_COLLIDERS_MS = 25_000;
+/**
+ * How long a scene build waits for its convex pieces before answering: long
+ * enough for a cup, not for a chute. Pieces run one body at a time, a
+ * two-turn chute is ~20 s on its own and a four-body marble run ~40 s, and
+ * the hub drops a command at 60 s — reporting an error for a scene that was
+ * built, which an agent then builds again. So the build answers and says
+ * which bodies are still pending.
+ */
+const SETTLE_WAIT_FOR_COLLIDERS_MS = 3_000;
 
 export const autoCompileScad = async (nodes: SceneNode[]) => {
   const scadNodes: SceneNode[] = [];
@@ -82,7 +89,7 @@ export const settleScene = async (
     /** false: reply once the body is built; its convex pieces follow in the background. */
     waitForColliders?: boolean;
   } = {},
-): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number }> => {
+): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string }> => {
   const store = useStore.getState();
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
   // load, so any note card left over from a previously-loaded preset (e.g.
@@ -102,11 +109,11 @@ export const settleScene = async (
   // Boolean bodies compile through the same OpenSCAD pool, and just as
   // asynchronously — a caller that got ok:true before they finished would be
   // told a scene built when its geometry didn't exist yet. skipFinalRecompile:
-  // the single build below covers it. Convex pieces get a share of the
-  // command's 60 s, not all of it: a marble run's four bodies are a good half
-  // minute one after another, and the hub dropped the command at 60 s. Late
-  // ones land on their own; the summary says collisionPending until they do.
-  // A caller that only added a body does not wait for them at all.
+  // the single build below covers it. Convex pieces get a few seconds of
+  // the command's 60 s, not all of it (see SETTLE_WAIT_FOR_COLLIDERS_MS).
+  // Late ones land on their own; the reply and the summary say
+  // collisionPending until they do. A caller that only added a body does not
+  // wait for them at all.
   await compileCsgNodes(true, waitForColliders
     ? { colliderWaitMs: SETTLE_WAIT_FOR_COLLIDERS_MS }
     : { colliders: false });
@@ -121,5 +128,12 @@ export const settleScene = async (
   const error = useStore.getState().lastCompileError;
   // nodeCount is every body, nested ones included: a ten-body ride built as
   // one tower with everything hung off it used to report nodeCount 1.
-  return { ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length };
+  const pending = pendingColliderBodies();
+  return {
+    ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length,
+    ...(pending.length ? {
+      collisionPending: pending,
+      note: `Convex pieces for ${pending.join(', ')} are still being worked out, one body at a time — a few seconds each, up to ~20 s for a long coiled part. They collide as their convex hull until then. The scene is built: do not build it again. physics_run_headless waits for them; physics_get_scene_summary shows collisionPending until they land.`,
+    } : {}),
+  };
 };
