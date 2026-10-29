@@ -78,8 +78,8 @@ export async function fractureMeshOffThread(
 ): Promise<FractureCell[]> {
   const w = ensureWorker();
   if (!w) {
-    const { fractureMesh } = await import('./fracture');
-    return fractureMesh(verts, faces, opts);
+    const [{ fractureSolid }, { loadManifold }] = await Promise.all([import('./fractureClip'), import('./sculptCut')]);
+    return fractureSolid(await loadManifold(), verts, faces, opts);
   }
   return new Promise<FractureCell[]>((resolve, reject) => {
     const id = ++seq;

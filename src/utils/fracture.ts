@@ -18,11 +18,11 @@
 // within rounding, and every shard is already convex, which is exactly what
 // MuJoCo wants a collision mesh to be.
 //
-// What it costs is hollowness: the shards of a cup are cut from the cup's hull,
-// so they look like the pieces of a solid lump rather than of a vessel. Cutting
-// each cell against the source mesh instead is a boolean per shard, which is the
-// OpenSCAD worker and seconds of wall clock; it is a worthwhile upgrade later and
-// it drops in behind the same interface, because only `cellsFor` would change.
+// On its own that costs hollowness: the shards of a cup cut from the cup's hull
+// are the pieces of a solid lump, and a chair's tile the box it fits in. So a
+// concave body's cells are then intersected with the real solid, one boolean
+// per cell in manifold-3d, in utils/fractureClip.ts; this file's cells are what
+// a convex body (and a mesh Manifold will not take) still gets as they are.
 //
 // Pure, and deliberately worker-free: a hull plus a few hundred plane solves is
 // well under a frame, so there is nothing here worth the cost of a worker. Same

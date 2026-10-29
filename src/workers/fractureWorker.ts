@@ -11,17 +11,21 @@
 // utils/fracture.ts stays Worker-free, so the tests call it directly and only
 // the browser pays for this. Same split as vhacdWorker over utils/vhacd.
 
-import { fractureMesh } from '../utils/fracture';
+import { fractureSolid } from '../utils/fractureClip';
+import { loadManifold } from '../utils/sculptCut';
 import type { FractureRequest, FractureResponse } from './fractureProtocol';
 
 const post = (msg: FractureResponse, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
 
-self.onmessage = (evt: MessageEvent<FractureRequest>) => {
+self.onmessage = async (evt: MessageEvent<FractureRequest>) => {
   const msg = evt.data;
-  if (msg.type !== 'FRACTURE') return; // WARM only has to load this module
+  // WARM loads this module, and the boolean that cuts concave bodies.
+  if (msg.type !== 'FRACTURE') { void loadManifold().catch(() => {}); return; }
   try {
-    const cells = fractureMesh(Array.from(msg.verts), Array.from(msg.faces), msg.opts);
+    // Cells of the real solid, not of its hull: see utils/fractureClip.ts.
+    const wasm = await loadManifold();
+    const cells = fractureSolid(wasm, Array.from(msg.verts), Array.from(msg.faces), msg.opts);
     const payload = cells.map(c => ({
       verts: Float64Array.from(c.verts),
       faces: Uint32Array.from(c.faces),

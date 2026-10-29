@@ -421,8 +421,11 @@ export function buildShatterGraph(
         initialVelocity: [vx, vy, vz, wx, wy, wz],
       }],
       children: [],
-      // A shard is convex by construction, so hulling it is exact and
-      // decomposing it would only buy contact pairs.
+      // A shard of a convex body is convex by construction, so hulling it is
+      // exact. One of a concave body is a cell of the real solid (see
+      // utils/fractureClip.ts) and may not be; its hull is a small error next
+      // to the whole body's, and decomposing it mid-break would hold the
+      // pieces up while V-HACD ran.
       collision: 'hull',
     };
   });
