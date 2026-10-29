@@ -110,8 +110,15 @@ describe('a ball in a close-fitting blind bore', () => {
     expect(r.intrusion?.atMm?.[2] ?? 0).toBeLessThan(5);
   }, 60_000);
 
-  it('a square pocket, which is not, says how far its pieces still narrow the opening', async () => {
-    const block = boxUnion([{ min: [-0.03, -0.03, 0], max: [0.03, 0.03, 0.035] }], [{ min: [-0.0105, -0.0105, 0.005], max: [0.0105, 0.0105, 0.04] }]);
+  it('a round bore that is not lathed says how far its pieces still narrow the opening', async () => {
+    // A square pocket is cut exactly at its corners now (reflexCuts.test.ts);
+    // a bore in a block is curved, and its pieces are V-HACD's.
+    const { loadManifold } = await import('../src/utils/sculptCut');
+    const { fromManifold } = await import('../src/utils/chunkedDecomposition');
+    const M = (await loadManifold()).Manifold;
+    const part = M.cube([60, 60, 35]).translate([-30, -30, 0]).subtract(M.cylinder(40, 10.5, 10.5, 64).translate([5, 0, 5]));
+    const block = fromManifold(part);
+    part.delete();
     const r = (await decomposeNodeColliders(meshNode('block', block)))!;
     expect(r.intrusion!.mm).toBeGreaterThan(0);
     expect(intrusionSentence(r.intrusion!)).toMatch(/^Openings narrowed by up to [\d.]+ mm, most near \(/);

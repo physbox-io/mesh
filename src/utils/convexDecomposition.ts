@@ -289,8 +289,9 @@ export function colliderMass(node: SceneNode, template: SceneGeom | undefined, t
  * when the method changes enough that colliders saved by the old one should
  * be made again. 2: cut into chunks and pulled in to the surface
  * (solidDecomposition.ts), where 1 was one V-HACD call over the whole part.
+ * 3: cut exactly along sharp inside corners first (reflexCuts.ts).
  */
-export const COLLIDER_RECIPE = 2;
+export const COLLIDER_RECIPE = 3;
 
 /**
  * Fingerprints everything the colliders on a NON-boolean body were built from.
@@ -482,7 +483,9 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   }
   const mass = decomposed.reduce((m, p) => m + massOf(p), 0);
   const proudest = decomposed.reduce<MeshColliders | null>((a, p) => ((p.intrusion ?? 0) > (a?.intrusion ?? 0) ? p : a), null);
-  const intrusion = proudest?.intrusion !== undefined && proudest.intrusion > 0
+  // Under a hundredth of a millimetre is rounding, not a narrowed opening: cut
+  // at its corners, a square pocket's exact pieces measure 5e-15 mm.
+  const intrusion = proudest?.intrusion !== undefined && +(proudest.intrusion * 1000).toFixed(2) > 0
     ? { mm: +(proudest.intrusion * 1000).toFixed(2), ...(proudest.intrusionAt ? { atMm: proudest.intrusionAt.map(v => +(v * 1000).toFixed(1)) as [number, number, number] } : {}) }
     : undefined;
   const warning = [cavityWarning(named) ?? massWarning(node, decomposed), ...notes].filter(Boolean).join(' ');

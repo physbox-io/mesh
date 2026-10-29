@@ -296,6 +296,16 @@ These things about it are load-bearing:
   away. Each piece names its mesh in `colliderOf`, and only the named meshes are demoted; older
   colliders, which name none, stand for every colliding mesh. A mesh with `contype` and
   `conaffinity` both 0 is not a source at all, and pieces inherit their mesh's filtering.
+* **Sharp inside corners are cut exactly first** (`utils/reflexCuts.ts`): the solid is split by
+  Manifold's `splitByPlane` along the plane of a face at each reflex edge turning more than 15°,
+  the plane through the most such edge first (a pocket's floor takes all four floor edges), until no
+  sharp reflex edge is left. A plane cut adds no reflex edge, so every cell left with none is convex
+  and exactly part of the solid. A 21 mm square pocket in a 60 mm block, which V-HACD and
+  tightPieces left as 66 pieces 4.8 mm proud (a 0.5 mm-clearance peg stopped 16 mm up), is 5 boxes
+  in ~50 ms and the peg reaches the floor. Cells still curved (a bore's 5.6° facets) go on to V-HACD
+  below, each with at least a chunk's 16 pieces of budget; past 128 cells, or with too little budget
+  for the curved ones, the whole part goes the V-HACD way. A sealed hollow is a separate inward shell
+  to Manifold's `decompose` and is put back with the solid round it, or the box reads as convex.
 * **A mesh is cut into chunks before V-HACD sees it** (`utils/chunkedDecomposition.ts`, Manifold's
   `splitByPlane`, always at the middle of the longest side): while a chunk is 40 wall thicknesses
   long or more, and again while its pieces still fill a cavity, down to 8 walls and 32 chunks. One
@@ -324,7 +334,8 @@ These things about it are load-bearing:
   caught, when its bounding box is mostly sky.
 
 A boolean body with a hole that *pierces* it keeps the older, exact sector slicer (`utils/csg.ts`
-`decomposeAroundAxis`), whose error is known in closed form. Everything else goes to V-HACD.
+`decomposeAroundAxis`), whose error is known in closed form, and so does any lathed mesh
+(`utils/revolution.ts`). A flat-walled concavity is cut exactly (above). Everything else goes to V-HACD.
 
 ---
 
