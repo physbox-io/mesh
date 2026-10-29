@@ -1312,8 +1312,12 @@ export interface LeadscrewDriveSpec {
 }
 
 export interface LeadscrewDriveResult {
+  /** The screw, on its hinge: a child of the mount. */
   leadscrewNode: SceneNode;
+  /** The nut, on its slide: a child of the mount beside the screw, so it does not turn with it. */
   nutNode: SceneNode;
+  /** The mount, holding both: what goes into the scene. */
+  mountNode: SceneNode;
   nodes: [SceneNode];
   lengthMm: number;
   leadMm: number;
@@ -1325,9 +1329,10 @@ export interface LeadscrewDriveResult {
 }
 
 /**
- * Synthesizes a T8 trapezoidal leadscrew on a hinge joint with a child brass
- * flanged nut carriage on a slide joint coupled by
- * `coupleRatio = (leadMm / 1000) / (2 * Math.PI)`.
+ * Synthesizes a T8 trapezoidal leadscrew on a hinge joint and a brass flanged
+ * nut on a slide joint, side by side in a fixed mount, the nut coupled to the
+ * screw by `coupleRatio = (leadMm / 1000) / (2 * Math.PI)`. Anything fixed to
+ * the nut travels without turning.
  */
 export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDriveResult {
   const lengthMm = Math.max(40, spec.lengthMm ?? 200);
@@ -1456,14 +1461,37 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
           : {}),
       },
     ],
-    children: [nutNode],
+    children: [],
     allowCoupling: true,
   };
 
+  // The screw and the nut both hang off a fixed mount, so the nut slides in a
+  // frame that does not turn. As the screw's child it inherited the screw's
+  // rotation: a carriage on the nut spun at the screw's speed.
+  const supportHalf = [mm(11), mm(11), mm(4)];
+  const mountNode: SceneNode = {
+    id: `${screwId}_mount`,
+    name: `T${diameterMm}×${leadMm} Leadscrew mount`,
+    type: 'body',
+    pos: origin,
+    geoms: [-1, 1].map((end) => boxGeom(
+      `${screwId}_support_${end < 0 ? 'lo' : 'hi'}`,
+      supportHalf,
+      [0, 0, end * (halfLenM + supportHalf[2])],
+      RACK_SLATE,
+      ALUMINIUM,
+      { contype: 0, conaffinity: 0 },
+    )),
+    joints: [],
+    children: [{ ...leadscrewNode, pos: [0, 0, 0] }, nutNode],
+  };
+  const screwInMount = mountNode.children[0];
+
   return {
-    leadscrewNode,
+    leadscrewNode: screwInMount,
     nutNode,
-    nodes: [leadscrewNode],
+    mountNode,
+    nodes: [mountNode],
     lengthMm,
     leadMm,
     pitchMm,

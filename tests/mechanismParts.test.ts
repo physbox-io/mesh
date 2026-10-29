@@ -181,14 +181,15 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
       assertWatertightGeom(beltMesh.renderVertices, beltMesh.faces);
     });
 
-    it('builds a T8 leadscrew and child nut carriage with exact (leadMm / 1000) / (2π) coupling ratio', () => {
+    it('builds a T8 leadscrew and a nut beside it with exact (leadMm / 1000) / (2π) coupling ratio', () => {
       for (const leadMm of [2, 4, 8] as const) {
         const ls = buildLeadscrewDrive({ lengthMm: 200, leadMm, pitchMm: 2, diameterMm: 8 });
         const expectedRatio = (leadMm / 1000) / (2 * Math.PI);
         expect(ls.coupleRatio).toBeCloseTo(expectedRatio, 7);
         expect(ls.nutNode.coupleTargetId).toBe(ls.leadscrewNode.id);
         expect(ls.nutNode.coupleRatio).toBeCloseTo(expectedRatio, 7);
-        expect(ls.leadscrewNode.children).toContain(ls.nutNode);
+        // Side by side in a fixed mount: the nut must not turn with the screw.
+        expect(ls.mountNode.children).toEqual([ls.leadscrewNode, ls.nutNode]);
 
         const screwMesh = ls.leadscrewNode.geoms.find((g) => g.type === 'mesh')!;
         assertWatertightGeom(screwMesh.renderVertices, screwMesh.faces);

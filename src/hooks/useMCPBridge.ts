@@ -4405,7 +4405,7 @@ export function useMCPBridge() {
             metrics = { beltLengthMm: belt.beltLengthMm, beltTeeth: belt.beltTeethRounded, coupleRatio: belt.coupleRatio };
           } else if (family === 'leadscrew') {
             const ls = buildLeadscrewDrive((msg as unknown as LeadscrewDriveSpec) ?? { lengthMm: 200, leadMm: 8 });
-            createdNodes = [ls.leadscrewNode];
+            createdNodes = ls.nodes;
             metrics = { coupleRatio: ls.coupleRatio, travelRangeMm: ls.travelRangeMm };
           } else if (family === 'cam_follower') {
             const cam = buildCamMechanism((msg as unknown as CamSpec) ?? { kind: 'eccentric', baseRadiusMm: 20, liftMm: 8 });
