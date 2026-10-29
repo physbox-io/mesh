@@ -202,11 +202,18 @@ function massive(g: SceneGeom): boolean {
  */
 export function estimateBodyMass(node: SceneNode): number {
   let total = 0;
+  // A decomposed body's convex pieces carry its meshes' weight between them
+  // (convexDecomposition's colliderMass): counting them as well as the mesh
+  // they were cut from weighed it twice, and its shards came out twice as
+  // heavy as the body that broke.
+  const decomposed = (node.geoms || []).some((g) => g.csgDerived === 'collider');
+  const pieceMass = decomposed && node.collisionMass !== undefined ? node.collisionMass : null;
   for (const g of node.geoms || []) {
-    if (!massive(g)) continue;
+    if (!massive(g) || g.csgDerived === 'collider') continue;
+    if (pieceMass !== null && g.type === 'mesh' && !g.csgDerived) continue;
     total += typeof g.mass === 'number' ? g.mass : (g.density ?? 1000) * geomVolume(g);
   }
-  return total;
+  return total + (pieceMass ?? 0);
 }
 
 /** A shatter profile as the node fields it becomes, for a body of this mass. */

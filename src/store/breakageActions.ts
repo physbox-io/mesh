@@ -84,7 +84,9 @@ export function breakageActions({ set, get }: SliceDeps): BreakageActions {
      * joints by name instead, which is what the by-joint branch of doBuild is for.
      */
     shatterNode: async (node, event, wallM) => {
-      const geom = (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
+      // The body's own mesh, never one of the convex pieces it collides as.
+      const geom = (node.geoms || []).find((g) => !g.csgDerived && (g.renderVertices ?? g.vertices) && g.faces)
+        ?? (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
       const source = geom && (geom.renderVertices ?? geom.vertices);
       if (!geom || !source || !geom.faces) return;
 
