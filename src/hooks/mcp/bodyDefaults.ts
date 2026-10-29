@@ -25,6 +25,7 @@ import { generatedMeshMass } from '../../utils/generatedMeshMass';
 import { withMotorArmature } from '../../utils/motionParts';
 import { pointList, toRenderVertices } from './bridgeUtils';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
+import { latticeBodyPos } from '../../utils/latticeFrame';
 
 export interface PendingDeclarativeOps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -569,7 +570,11 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
     // default (a metre up, to drop onto the floor) would float it off the part.
     // A body that falls is dropped from a metre up; one that cannot move (a
     // frame, a wall) stays where it is drawn, rather than floating a metre up.
-    pos:      b.pos     ?? (nested || !moves ? [0, 0, 0] : [0, 0, 1]),
+    pos:      latticeFields
+      // A declarative lattice's `pos` names its cage origin, as
+      // physics_create_lattice's does (utils/latticeFrame.ts).
+      ? latticeBodyPos(b.pos ?? (nested || !moves ? [0, 0, 0] : [0, 0, 1]), latticeFields.latticeOrigin, b)
+      : b.pos ?? (nested || !moves ? [0, 0, 0] : [0, 0, 1]),
     ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
     ...(b.euler !== undefined ? { euler: b.euler } : {}),
     geoms:    resolvedGeoms,

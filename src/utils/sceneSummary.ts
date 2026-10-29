@@ -10,6 +10,7 @@
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
 import { analyzeMesh } from './meshIntegrity';
+import { cageOriginInBodyMm } from './latticeFrame';
 import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum } from './csg';
 import { collidersAreStale, solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
 import { measurePart } from './solidMachiningExporter';
@@ -338,6 +339,10 @@ export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<stri
     ...(node.quat ? { quat: um(node.quat) } : {}),
     ...(node.euler ? { euler: um(node.euler) } : {}),
     ...(node.scad ? { hasScad: true } : {}),
+    // Joint anchors and child bodies are in the body frame, whose origin is
+    // the shape's centre of mass; this is where the cage's own origin is in
+    // it, in mm (utils/latticeFrame.ts).
+    ...(node.isLattice && (node.latticeOrigin ?? []).some((v) => v !== 0) ? { cageOriginMm: cageOriginInBodyMm(node) } : {}),
     ...(node.csgEnabled ? {
       csg: {
         collision: collisionModeOf(node),

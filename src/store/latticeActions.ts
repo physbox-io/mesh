@@ -11,6 +11,7 @@ import {
   type Axis as LatticeAxis, type LatticeCage, type SnapMultiple, type LatticeTool,
 } from '../utils/latticeMesh';
 import { reconcileCuts } from '../utils/csg';
+import { keepJointsAndChildrenOnShape } from '../utils/latticeFrame';
 import { cloneSceneGraph, findNode } from './sceneClone';
 import { getPhysicsWorkerClient } from './physicsEngine';
 import { initialFraming, snapForGridMm } from './sceneFraming';
@@ -311,6 +312,10 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
                 const at = other.pos ?? [0, 0, 0];
                 other.pos = [at[0] - local[0], at[1] - local[1], at[2] - local[2]];
               }
+              // Hinges and the bodies hung off this one are on the shape too:
+              // left alone, extruding an arm slid its pivot along with the
+              // centre of mass, away from the root it was put at.
+              keepJointsAndChildrenOnShape(node, local);
               if (node.quat) {
                 delta.applyQuaternion(new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0]));
               } else if (node.euler) {

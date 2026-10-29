@@ -18,6 +18,7 @@ import {
   latticeHistory, latticeOf, latticeTarget, pushLatticeHistory, commitLattice, runLatticeOps,
 } from './latticeState';
 import { settleScene } from './settleScene';
+import { cageOriginInBodyMm, latticeBodyPos } from '../../utils/latticeFrame';
 import type { McpCommands } from './types';
 
 export const latticeCommands: McpCommands = {
@@ -57,7 +58,11 @@ export const latticeCommands: McpCommands = {
       id,
       name: (typeof name === 'string' && name.trim()) ? name.trim() : 'Lattice',
       type: 'body',
-      pos: position,
+      // The caller's `pos` is where the CAGE origin goes, since every
+      // coordinate in `ops` and in the later lattice tools is in the cage's
+      // frame; the body itself sits on the shape's centre of mass, which the
+      // mesh is centred on (utils/latticeFrame.ts).
+      pos: latticeBodyPos(position, origin),
       // Nested, it is fixed rigidly to its parent: a free joint is only
       // allowed at the top level.
       joints: parent ? [] : [{ name: `${id}_free`, type: 'free' }],
@@ -100,6 +105,9 @@ export const latticeCommands: McpCommands = {
       ...(parent ? { parent: parent.id } : {}),
       ...(Array.isArray(ops) && ops.length > 0 ? { opsApplied: ops.length } : {}),
       ...latticeSummary(deserializeCage(cage)),
+      // Joint anchors and child bodies are in the body frame, whose origin is
+      // the centre of mass: cage point c (mm) is at body-frame c + this.
+      cageOriginMm: cageOriginInBodyMm(newNode),
     };
   },
   LATTICE_FACES: async (msg, { store }) => {
@@ -301,7 +309,7 @@ export const latticeCommands: McpCommands = {
   },
   GET_LATTICE: async (msg, { store }) => {
     const { targetId } = msg as Msg<{ targetId: string }>;
-    const { lattice } = latticeTarget(store, targetId);
-    return { ok: true, id: targetId, ...describeLattice(lattice) };
+    const { node, lattice } = latticeTarget(store, targetId);
+    return { ok: true, id: targetId, ...describeLattice(lattice), cageOriginMm: cageOriginInBodyMm(node) };
   },
 };
