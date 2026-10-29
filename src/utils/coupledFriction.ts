@@ -50,7 +50,7 @@ function geomMoment(g: SceneGeom, offset: number[], p: number[], a: number[]): n
     ? [(g.fromto[0] + g.fromto[3]) / 2, (g.fromto[1] + g.fromto[4]) / 2, (g.fromto[2] + g.fromto[5]) / 2]
     : (g.pos ?? [0, 0, 0]);
   const d2 = norm2(cross(sub([c[0] + offset[0], c[1] + offset[1], c[2] + offset[2]], p), a));
-  let own = 0;
+  let own: number;
   switch (g.type) {
     case 'sphere': own = 0.4 * (s[0] ?? 0) ** 2; break;
     case 'cylinder': case 'capsule': own = 0.5 * (s[0] ?? 0) ** 2; break;

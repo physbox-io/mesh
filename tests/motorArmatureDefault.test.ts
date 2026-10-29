@@ -36,7 +36,6 @@ const motoredBar = (forceLimit?: number): SceneNode => fillBodyDefaults({
   }],
 } as never);
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 const open = (nodes: SceneNode[]) => {
   const m = mj.MjModel.from_xml_string(compileToMJCF({ nodes }, -9.81, 1, 0, 0, 0));
   const d = new mj.MjData(m);
