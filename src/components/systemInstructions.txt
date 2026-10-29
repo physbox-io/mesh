@@ -135,6 +135,7 @@ Every joint constrains motion of the body relative to its parent:
   axis: [number, number, number] <- Direction axis of rotation/translation (e.g., [0, 1, 0] for Y-rotation)
   pos: [number, number, number] <- Joint anchor position
   damping: number <- Resistance force (default 0 or 1-5 for smooth decay)
+  initialVelocity: number[] <- Optional. Starting velocity, applied on load/reset. Free: [vx, vy, vz, wx, wy, wz]; ball: [wx, wy, wz]; hinge/slide: one number. Linear m/s in WORLD axes, angular rad/s in the BODY'S OWN frame, so a top spinning about its own axis is [0,0,0, 0,0,50] however it is tilted. The way to spin a top or launch a body.
   crumpleTorqueNm: number <- Optional. N*m past which this joint stops being rigid and FOLDS, permanently. Hinges and sliders only. TRANSIENT - reset straightens it. NOTE a joint only folds if something still loads it after it gives: an upright post gives gravity no lever and goes on standing, while a cantilever folds under its own weight.
   crumpleRangeDeg: [number, number] <- Optional. How far it may fold once it has given, in degrees.
   crumpleDampingAfter: number <- Optional. Damping written in at the moment it gives, so it settles into its new shape instead of swinging into it.
