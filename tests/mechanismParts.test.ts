@@ -99,7 +99,8 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
 
       const xml = compileToMJCF({ nodes: pair.nodes });
       expect(xml).toContain('explicit_coupling_1');
-      expect(xml).toContain('polycoef="0 -0.5 0 0 0"');
+      // Held as a tendon at zero length: driven − ratio·driver.
+      expect(xml).toContain('coef="0.5" /></fixed>');
     });
 
     it('prevents undercutting on low tooth count gears (z = 10) via profile shift without self-intersecting outlines', () => {
@@ -147,7 +148,7 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
 
       const xml = compileToMJCF({ nodes: rp.nodes });
       expect(xml).toContain('explicit_coupling_1');
-      expect(xml).toContain('polycoef="0 0.015 0 0 0"');
+      expect(xml).toContain('coef="-0.015" /></fixed>');
     });
   });
 

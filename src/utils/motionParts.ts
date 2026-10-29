@@ -33,28 +33,6 @@ export const STEPPERS: Record<string, [number, number, number, number, number, n
   'NEMA23 56': [56.4, 56, 6.35, 21, 1.26, 0.7, 300],
 };
 
-/** The 1 ms step every model runs at (mjcf.ts). */
-const TIMESTEP = 0.001;
-/**
- * The inertia a velocity-driven joint has to carry to stay steady with its
- * torque limit reached. implicitfast steps the actuator's full gain, clamped
- * or not, so a gain of more than about the joint's inertia per step overturns
- * it each step and it runs away: a 5 g gear driven at kv 2 settled at
- * -500 rad/s. Joints with a motor carry at least this as armature.
- */
-export const motorArmature = (kv: number) => +(1.5 * kv * TIMESTEP).toFixed(7);
-/**
- * The joint, carrying at least motorArmature when a velocity motor on it has a
- * torque limit. Unclamped, implicitfast integrates the gain and any inertia is
- * stable; clamped, a light part runs away. For motors written by hand
- * (build_scene), which the hardware and mechanism parts already cover. kv
- * unset is MuJoCo's 1.
- */
-export const withMotorArmature = <J extends { armature?: number; actuator?: { type: string; kv?: number; forceLimit?: number } }>(j: J): J => {
-  if (j.actuator?.type !== 'velocity' || j.actuator.forceLimit === undefined) return j;
-  const floor = motorArmature(j.actuator.kv ?? 1);
-  return (j.armature ?? 0) >= floor ? j : { ...j, armature: floor };
-};
 /** How far below its set speed a stepper runs at its full holding torque, rad/s. */
 const SPEED_DROOP = 0.5;
 
@@ -126,13 +104,12 @@ function buildStepper(node: SceneNode, p: HardwarePart, id: string) {
     ],
     joints: [{
       name: `${id}_spin`, type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0], damping: 0.0005,
-      // Driven at the speed asked for, with no more than its holding torque to do it.
-      // Stiff enough to hold its speed to within half a rad/s at full holding
-      // torque. A gain that stiff only stays steady once the torque limit is
-      // reached if the rotor carries more inertia than a step can overturn —
-      // so the joint carries that much as armature: inertia without mass,
-      // which also limits how hard it can accelerate, as a real stepper's is.
-      armature: Math.max(+rotorI.toFixed(7), motorArmature(torque / SPEED_DROOP)),
+      // Driven at the speed asked for, with no more than its holding torque to
+      // do it: stiff enough to hold its speed to within half a rad/s at full
+      // holding torque, and slipping past it, as a stalled stepper does. The
+      // rotor disc above is the inertia it has; the compiler drives the joint
+      // through a clutch (utils/motorClutch.ts), so no armature is needed to
+      // keep it steady.
       actuator: { type: 'velocity', kv: +(torque / SPEED_DROOP).toFixed(4), ctrlValue: 0, forceLimit: torque },
     }],
     children: [],

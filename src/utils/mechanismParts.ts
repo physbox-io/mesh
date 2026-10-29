@@ -11,7 +11,6 @@
 
 import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
 import { prismMesh } from './csg';
-import { motorArmature } from './motionParts';
 import {
   ALUMINIUM,
 } from './extrusionParts';
@@ -507,7 +506,6 @@ export function buildInvoluteGearNode(
     damping: 0.002,
     ...(options.actuated
       ? {
-          armature: motorArmature(2.0),
           actuator: {
             type: 'velocity',
             kv: 2.0,
@@ -1118,7 +1116,6 @@ export function buildGt2PulleyNode(
     damping: 0.001,
     ...(options.actuated
       ? {
-          armature: motorArmature(1.5),
           actuator: {
             type: 'velocity',
             kv: 1.5,
@@ -1450,7 +1447,6 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
         damping: 0.001,
         ...(spec.actuateScrew ?? true
           ? {
-              armature: motorArmature(1.5),
               actuator: {
                 type: 'velocity',
                 kv: 1.5,
@@ -1654,7 +1650,6 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
         damping: 0.002,
         ...(spec.actuateCam ?? true
           ? {
-              armature: motorArmature(2.0),
               actuator: {
                 type: 'velocity',
                 kv: 2.0,
@@ -2044,7 +2039,6 @@ export function buildFourBarLinkage(
       damping: 0.002,
       ...(options.actuateCrank ?? true
         ? {
-            armature: motorArmature(2.5),
             actuator: {
               type: 'velocity',
               kv: 2.5,

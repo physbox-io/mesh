@@ -8,6 +8,8 @@ import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRo
 import { uniquifyNamesInPlace } from './uniqueNames';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
+import { jointCouplingXml } from './jointCoupling';
+import { clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
 /**
  * A name as an attribute value. Names are whatever someone typed, and a body
@@ -322,16 +324,20 @@ const buildNode = (node: SceneNode): string => {
   (node.geoms || []).forEach(g => innerXml += buildGeom(g, hasSolid && g.role === 'visual'));
   (node.children || []).forEach(c => innerXml += buildNode(c));
   
-  let attrs = `name="${xmlAttr(nameStr)}" pos="${posStr}"`;
+  let frame = ` pos="${posStr}"`;
   if (rotationIsBaked(node)) {
     // Nothing: the vertices already carry it. See `rotationIsBaked`.
   } else if (node.quat) {
-    attrs += ` quat="${node.quat.join(' ')}"`;
+    frame += ` quat="${node.quat.join(' ')}"`;
   } else if (node.euler) {
-    attrs += ` euler="${node.euler.join(' ')}"`;
+    frame += ` euler="${node.euler.join(' ')}"`;
   }
-  
-  return `<body ${attrs}>${innerXml}</body>`;
+  // A torque-limited velocity motor drives its joint through a slip clutch
+  // from a driver dof beside it, in the same frame. See utils/motorClutch.ts.
+  const drivers = (node.joints || []).filter(isClutchedMotor)
+    .map((j) => clutchDriverBodyXml(nameStr, frame, j, xmlAttr)).join('');
+
+  return `<body name="${xmlAttr(nameStr)}"${frame}>${innerXml}</body>${drivers}`;
 };
 
 /**
@@ -743,7 +749,8 @@ export const compileToMJCF = (
 
   const actuatorsXml = actuators.map((j) => {
     const act = j.actuator!;
-    let attrs = `name="${xmlAttr(j.name)}_actuator" joint="${xmlAttr(j.name)}"`;
+    const clutched = isClutchedMotor(j);
+    let attrs = `name="${xmlAttr(j.name)}_actuator" joint="${xmlAttr(clutched ? clutchDriverJointName(j.name) : j.name)}"`;
     if (act.kv !== undefined && act.type === 'velocity') attrs += ` kv="${act.kv}"`;
     if (act.gear !== undefined) attrs += ` gear="${act.gear}"`;
     // A motor's ctrl is its torque. Unlimited, so a linked Volt's stall
@@ -751,12 +758,20 @@ export const compileToMJCF = (
     if (act.type === 'motor') attrs += ` ctrllimited="false"`;
     // What the motor can actually put out: a stepper's holding torque. Only
     // when set, so every actuator that had none compiles as it did.
-    if (act.forceLimit !== undefined) attrs += ` forcelimited="true" forcerange="${-act.forceLimit} ${act.forceLimit}"`;
+    // A clutched motor's limit is its clutch's friction, not a clamp.
+    if (act.forceLimit !== undefined && !clutched) attrs += ` forcelimited="true" forcerange="${-act.forceLimit} ${act.forceLimit}"`;
     return `    <${act.type} ${attrs} />`;
   }).join('\n');
-
   let equalityXml = '';
   let equalityConstraints = '';
+  // Fixed tendons: motor clutches, and the couplings below.
+  const tendonLines: string[] = actuators.filter(isClutchedMotor).map((j) => clutchTendonXml(j, xmlAttr));
+  const couple = (name: string, joint1: string, joint2: string, ratio: number | string) => {
+    const c = jointCouplingXml(name, joint1, joint2, ratio, xmlAttr);
+    tendonLines.push(c.tendon);
+    equalityConstraints += `\n${c.equality}`;
+  };
+
 
   // 0. Explicit joint couplings
   let couplingIndex = 1;
@@ -770,8 +785,8 @@ export const compileToMJCF = (
       const pairKey = [joint1, joint2].sort().join('::');
       explicitlyCoupledJointPairs.add(pairKey);
       // Stiff, as teeth in mesh are: at the default 0.02 s a 20 g rack pushing
-      // a 5 g block fell 5% behind its pinion.
-      equalityConstraints += `\n    <joint name="explicit_coupling_${couplingIndex++}" joint1="${xmlAttr(joint1)}" joint2="${xmlAttr(joint2)}" polycoef="0 ${ratio} 0 0 0" solref="0.004 1" />`;
+      // a 5 g block fell 5% behind its pinion. See utils/jointCoupling.ts.
+      couple(`explicit_coupling_${couplingIndex++}`, joint1, joint2, ratio);
     }
   }
 
@@ -792,7 +807,7 @@ export const compileToMJCF = (
         if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
           coupledPairs.add(pairKey);
           const ratio = -(g1.radius / (g2.radius || 0.1));
-          equalityConstraints += `\n    <joint name="gear_coupling_${coupledPairs.size}" joint1="${xmlAttr(g1.jointName)}" joint2="${xmlAttr(g2.jointName)}" polycoef="0 ${ratio.toFixed(6)} 0 0 0" />`;
+          couple(`gear_coupling_${coupledPairs.size}`, g1.jointName, g2.jointName, ratio.toFixed(6));
         }
       }
     }
@@ -823,7 +838,7 @@ export const compileToMJCF = (
           const couplingName = pinionRackCouplingCount === 1
             ? 'pinion_rack_coupling'
             : `pinion_rack_coupling_${pinionRackCouplingCount}`;
-          equalityConstraints += `\n    <joint name="${xmlAttr(couplingName)}" joint1="${xmlAttr(p.jointName)}" joint2="${xmlAttr(r.jointName)}" polycoef="0 ${turnsPerMetre} 0 0 0" />`;
+          couple(couplingName, p.jointName, r.jointName, turnsPerMetre);
         }
       }
     }
@@ -946,6 +961,7 @@ export const compileToMJCF = (
   if (equalityConstraints) {
     equalityXml = `\n  <equality>${equalityConstraints}\n  </equality>`;
   }
+  const tendonXml = tendonLines.length ? `\n  <tendon>\n${tendonLines.join('\n')}\n  </tendon>` : '';
 
   // Contact time constant. MuJoCo will not go below twice the timestep, and at
   // 0.002 s a part resting under gravity sinks about g*t^2 = 0.04 mm into what
@@ -978,7 +994,7 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
     
     ${sceneCopy.nodes.map(buildNode).join('\n')}
   </worldbody>
-${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${equalityXml}${breakExtrasXml(breaks)}
+${actuators.length > 0 ? `  <actuator>\n${actuatorsXml}\n  </actuator>` : ''}${tendonXml}${equalityXml}${breakExtrasXml(breaks)}
 </mujoco>
   `.trim();
 };
