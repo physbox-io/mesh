@@ -9,6 +9,7 @@ import { uniquifyNamesInPlace } from './uniqueNames';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { jointCouplingXml } from './jointCoupling';
+import { relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
 /**
@@ -685,10 +686,12 @@ export const compileToMJCF = (
   const connectConstraintsList: { bodyId: string; bodyName: string; targetId: string; anchor: number[] }[] = [];
   const nodeNamesMap: Record<string, string> = {};
 
+  const jointsByName = new Map<string, { node: SceneNode; joint: SceneJoint }>();
   const traverse = (nodes: SceneNode[], parentName?: string, parentId?: string) => {
     if (!nodes) return;
     for (const node of nodes) {
       nodeNamesMap[node.id] = node.name;
+      for (const j of node.joints || []) jointsByName.set(j.name, { node, joint: j });
       (node.joints || []).forEach((j) => {
         if (j.crumpleTorqueNm === undefined || j.type === 'free') return;
         crumpleLocks.push({ jointName: j.name, bodyName: node.name, bodyId: node.id, parentName: parentName ?? '', parentId });
@@ -766,8 +769,10 @@ export const compileToMJCF = (
   let equalityConstraints = '';
   // Fixed tendons: motor clutches, and the couplings below.
   const tendonLines: string[] = actuators.filter(isClutchedMotor).map((j) => clutchTendonXml(j, xmlAttr));
+  const couplingEdges: CouplingEdge[] = [];
   const couple = (name: string, joint1: string, joint2: string, ratio: number | string) => {
     const c = jointCouplingXml(name, joint1, joint2, ratio, xmlAttr);
+    couplingEdges.push({ joint1, joint2, ratio: Number(ratio) });
     tendonLines.push(c.tendon);
     equalityConstraints += `\n${c.equality}`;
   };
@@ -957,6 +962,13 @@ export const compileToMJCF = (
   }
 
   for (const line of breaks.equality) equalityConstraints += `\n    ${line}`;
+
+  // Dry friction on a coupled joint goes where the chain feels it. The nodes
+  // are this compile's copies, so their joint lists can be replaced.
+  for (const [jointName, frictionloss] of relocateCoupledFriction(couplingEdges, jointsByName)) {
+    const owner = jointsByName.get(jointName)!.node;
+    owner.joints = owner.joints.map((j) => (j.name === jointName ? { ...j, frictionloss } : j));
+  }
 
   if (equalityConstraints) {
     equalityXml = `\n  <equality>${equalityConstraints}\n  </equality>`;
