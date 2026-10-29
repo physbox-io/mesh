@@ -7,6 +7,7 @@
 import type { DecomposeParams } from '../utils/vhacd';
 import type { FilledCavity } from '../utils/filledCavities';
 import type { MeshIntegrity } from '../utils/meshIntegrity';
+import type { SolidOptions } from '../utils/solidDecomposition';
 
 /** What deciding whether to decompose a mesh needs to know about it. */
 export interface MeshAnalysis {
@@ -32,9 +33,14 @@ export type VhacdRequest =
       params: Partial<DecomposeParams>;
       findCavities?: boolean;
     }
-  | { type: 'ANALYSE'; id: number; verts: Float64Array; faces: Uint32Array };
+  | { type: 'ANALYSE'; id: number; verts: Float64Array; faces: Uint32Array }
+  | { type: 'DECOMPOSE_SOLID'; id: number; verts: Float64Array; faces: Uint32Array; options: SolidOptions };
 
 export type VhacdResponse =
   | { type: 'DECOMPOSED'; id: number; hulls: HullPayload[]; cavities?: FilledCavity[] }
   | { type: 'ANALYSED'; id: number; analysis: MeshAnalysis }
+  | {
+      type: 'DECOMPOSED_SOLID'; id: number; hulls: HullPayload[]; cavities: FilledCavity[];
+      intrusion: number; intrusionAt?: [number, number, number]; chunks: number;
+    }
   | { type: 'DECOMPOSE_ERROR'; id: number; message: string };

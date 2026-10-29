@@ -33,7 +33,7 @@ import {
 import { authoredQuat } from './bodyOrientation';
 import { tidyMesh } from './meshTidy';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
-import { wallThickness, type FilledCavity } from './filledCavities';
+import type { FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
 
 /**
@@ -74,97 +74,48 @@ export const MIN_HULLS = 8;
 export const MAX_HULLS = 16;
 
 /**
- * What a body may ask for, or be given when the defaults scale up for a long
- * thin part (scaledBudget). A U-channel coaster track 440 mm long, with 3 mm
- * walls, needs about 450 pieces at 400k voxels before nothing but slivers of
- * its channel are filled — V-HACD cuts along the axes, so every piece of a
- * sloping channel that holds a wall and some floor fills the corner between
- * them — and that is a second in the worker.
+ * The most pieces a body may ask for, and the most a mesh comes out as when
+ * it asks for nothing: a chute cut into chunks and pulled in to its surface
+ * (solidDecomposition.ts) uses about 420.
  */
 export const MAX_REQUESTED_HULLS = 512;
+/**
+ * The default for a body on a free joint, which can land in another
+ * decomposed body: contact between two is pieces times pieces, and four
+ * nesting bowls of 200 to 300 pieces each ran MuJoCo out of its contact
+ * memory (mj_stackAlloc) at the first touch. 64 each is what they had, and
+ * worked with.
+ */
+export const MAX_LOOSE_PIECES = 64;
 export const MIN_RESOLUTION = 10_000;
 export const MAX_RESOLUTION = 1_000_000;
-
-/**
- * The most voxels the defaults spend unasked. Time is not the voxel count
- * alone: the track takes 0.7 s at 400k, while a 100 mm cup with 2 mm walls
- * takes 2.6 s at 25k and 37 s at 800k, past the worker's 20 s allowance.
- */
-export const AUTO_MAX_RESOLUTION = 400_000;
-
-/**
- * The retry for a part that is not long and thin: the voxels it always had,
- * and pieces up to this many. On that thin cup 64 pieces at 100k voxels leave
- * 2,400 mm³ filled where 16 at 25k left 54,000, in 8 s.
- */
-export const RETRY_RESOLUTION = 100_000;
-export const RETRY_MAX_HULLS = 64;
-
-/**
- * Length over wall thickness past which a part is long and thin enough that
- * the default budget cannot work, so its first decomposition already uses the
- * scaled one. The coaster track is 130; a 200 mm cup with 20 mm walls is 11,
- * and a 100 mm one with 2 mm walls 50, which the default gets mostly right and
- * the retry gets nearly all the way.
- */
-export const SLENDER = 80;
 
 /** A requested voxel count, held to what V-HACD can do in the worker's time. */
 export function voxelResolutionOf(requested: number): number {
   return Math.max(MIN_RESOLUTION, Math.min(MAX_RESOLUTION, Math.round(requested)));
 }
 
-/**
- * The budget a part's own proportions call for: pieces in proportion to how
- * many wall thicknesses long it is, and voxels small enough that a wall is two
- * of them thick. A compact part gets about what it always did; a long thin one
- * gets what it needs, within MAX_REQUESTED_HULLS and AUTO_MAX_RESOLUTION.
- */
-export function scaledBudget(verts: number[], faces: number[]): { maxHulls: number; voxelResolution: number; slenderness: number } {
-  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < verts.length; i += 3) {
-    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], verts[i + k]); hi[k] = Math.max(hi[k], verts[i + k]); }
-  }
-  const size = [0, 1, 2].map(k => Math.max(0, hi[k] - lo[k]));
-  const length = Math.max(...size);
-  const wall = wallThickness(verts, faces);
-  if (!(wall > 0) || !(length > 0)) return { maxHulls: 32, voxelResolution: RETRY_RESOLUTION, slenderness: 0 };
-  const slenderness = length / wall;
-  const boxVolume = size.reduce((v, s) => v * Math.max(s, wall), 1);
-  return {
-    maxHulls: Math.round(Math.max(32, Math.min(MAX_REQUESTED_HULLS, 4 * slenderness))),
-    voxelResolution: Math.round(Math.max(RETRY_RESOLUTION, Math.min(AUTO_MAX_RESOLUTION, boxVolume / (wall / 2) ** 3))),
-    slenderness,
-  };
-}
-
 /** Detail settings, as voxel count and piece budget. Standard leaves both to the defaults. */
 export interface CollisionDetail { collisionResolution?: number; collisionHulls?: number }
 
 /**
- * The inspector's Standard / Fine / Finest for a body. Fixed figures for a
- * compact part; for a long thin one each step is finer than the budget its
- * proportions already get by default. Fixed figures there gave Fine and Finest
- * fewer pieces than Standard, and a filled channel back.
+ * The inspector's Standard / Fine / Finest. Each is voxels per chunk, finer
+ * than the 25k a chunk gets by default; none sets a piece count, which would
+ * cap the whole part.
+ *
+ * These used to depend on the part — fixed figures for a compact one, a step
+ * above its scaled budget for a long thin one, read off its bounding box — and
+ * a two-turn chute's box hid its 750 mm of channel, so it got the compact
+ * figures and Fine and Finest filled its channel as Standard did. A part is
+ * now cut into chunks until none is long and thin (chunkedDecomposition.ts),
+ * each chunk measured afresh, so the same figures suit every part.
  */
-export function collisionDetailLevels(meshes: SceneGeom[]): Record<'standard' | 'fine' | 'finest', CollisionDetail> {
-  const fixed = {
+export function collisionDetailLevels(): Record<'standard' | 'fine' | 'finest', CollisionDetail> {
+  return {
     standard: {},
-    fine: { collisionResolution: 100_000, collisionHulls: 32 },
-    finest: { collisionResolution: 300_000, collisionHulls: 48 },
+    fine: { collisionResolution: 50_000 },
+    finest: { collisionResolution: 100_000 },
   };
-  let budget: ReturnType<typeof scaledBudget> | null = null;
-  for (const g of meshes) {
-    const { verts, faces } = bodyFrameMesh(colliderSourceOf(g));
-    const b = scaledBudget(verts, faces);
-    if (!budget || b.slenderness > budget.slenderness) budget = b;
-  }
-  if (!budget || budget.slenderness < SLENDER) return fixed;
-  const step = (voxels: number, hulls: number): CollisionDetail => ({
-    collisionResolution: voxelResolutionOf(Math.max(voxels, budget.voxelResolution * (voxels / 100_000 + 0.5))),
-    collisionHulls: Math.min(MAX_REQUESTED_HULLS, Math.max(hulls, budget.maxHulls)),
-  });
-  return { standard: {}, fine: step(100_000, 32), finest: step(300_000, 48) };
 }
 
 export type DecompositionStrategy = 'hull' | 'sectors' | 'decompose' | 'primitives';
@@ -194,6 +145,8 @@ export interface ColliderResult {
   warning?: string;
   /** Cavities the colliders still fill in, named by the collider covering each. */
   cavities?: NonNullable<SceneNode['collisionCavities']>;
+  /** How far the colliders stand proud of the surface into the air, at most. */
+  intrusion?: NonNullable<SceneNode['collisionIntrusion']>;
 }
 
 /** The mesh geoms of a body that are solid enough to collide with. */
@@ -332,6 +285,14 @@ export function colliderMass(node: SceneNode, template: SceneGeom | undefined, t
 }
 
 /**
+ * Which way colliders are made, fingerprinted with everything else: bumped
+ * when the method changes enough that colliders saved by the old one should
+ * be made again. 2: cut into chunks and pulled in to the surface
+ * (solidDecomposition.ts), where 1 was one V-HACD call over the whole part.
+ */
+export const COLLIDER_RECIPE = 2;
+
+/**
  * Fingerprints everything the colliders on a NON-boolean body were built from.
  *
  * The boolean counterpart is csgHashOf, and the two are deliberately separate:
@@ -351,6 +312,7 @@ export function collisionHashOf(node: SceneNode): string {
   const meshes = solidMeshGeoms(node);
   if (meshes.length === 0) return '';
   const key = JSON.stringify([
+    COLLIDER_RECIPE,
     meshes.map(g => [meshChecksum(colliderSourceOf(g)), g.pos ?? null, g.quat ?? null, g.euler ?? null]),
     collisionModeOf(node),
     node.collisionHulls ?? null,
@@ -423,6 +385,9 @@ interface MeshColliders {
   hullVolume: number;
   hulls: Hull[];
   cavities: FilledCavity[];
+  /** How far the pieces stand proud of the surface into the air, at most, metres. */
+  intrusion?: number;
+  intrusionAt?: [number, number, number];
   warning?: string;
 }
 
@@ -516,12 +481,29 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     for (const c of p.cavities) named.push({ ...c, coveredBy: `${baseName}_csg_col${first + c.coveredBy}` });
   }
   const mass = decomposed.reduce((m, p) => m + massOf(p), 0);
+  const proudest = decomposed.reduce<MeshColliders | null>((a, p) => ((p.intrusion ?? 0) > (a?.intrusion ?? 0) ? p : a), null);
+  const intrusion = proudest?.intrusion !== undefined && proudest.intrusion > 0
+    ? { mm: +(proudest.intrusion * 1000).toFixed(2), ...(proudest.intrusionAt ? { atMm: proudest.intrusionAt.map(v => +(v * 1000).toFixed(1)) as [number, number, number] } : {}) }
+    : undefined;
   const warning = [cavityWarning(named) ?? massWarning(node, decomposed), ...notes].filter(Boolean).join(' ');
   return {
     hash, geoms, verdict, volume, hullVolume, mass,
     ...(warning ? { warning } : {}),
     ...(named.length > 0 ? { cavities: named } : {}),
+    ...(intrusion ? { intrusion } : {}),
   };
+}
+
+/**
+ * How a body's narrowed openings are put, for the scene summary and the
+ * inspector. Not a warning: every inside corner leaves a fillet of a
+ * millimetre or so, which matters only to a part fitted that closely — a
+ * 0.5 mm-clearance peg stopped at the rim of a bore whose pieces stood
+ * 1.65 mm proud, and nothing said why.
+ */
+export function intrusionSentence(intrusion: NonNullable<SceneNode['collisionIntrusion']>): string {
+  const at = intrusion.atMm ? `, most near (${intrusion.atMm.map(v => Math.round(v)).join(', ')}) mm` : '';
+  return `Openings narrowed by up to ${intrusion.mm} mm${at}: the convex pieces stand that far proud of the surface, mostly in inside corners, so a part fitted closer than that jams. Collision Detail Fine or Finest tightens them.`;
 }
 
 /** Volume, hull volume and soundness of a mesh, off the main thread where there is one. */
@@ -566,55 +548,33 @@ async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<Mes
       : 'This mesh has holes in it, so its inside cannot be told from its outside — it collides as its convex hull, and any hollow in it is solid. Close the mesh to decompose it.', 'hull');
   }
 
-  // Asked for, or left to the defaults with one finer try in reserve. The
-  // defaults are for a compact part; a long thin one starts from the budget
-  // its proportions call for, since the default could only fill its channel.
-  const tuned = node.collisionHulls !== undefined || node.collisionResolution !== undefined;
+  // Cut into chunks, each decomposed, every piece pulled in to the surface
+  // (utils/solidDecomposition.ts). A piece count asked for is the most the
+  // whole mesh may come out as; a voxel count asked for is per chunk.
+  const loose = (node.joints ?? []).some(j => j.type === 'free');
+  const maxPieces = node.collisionHulls !== undefined
+    ? hullBudget(verdict.solidity, node.collisionHulls)
+    : loose ? MAX_LOOSE_PIECES : MAX_REQUESTED_HULLS;
   const resolution = node.collisionResolution !== undefined ? voxelResolutionOf(node.collisionResolution) : undefined;
-  const scaled = scaledBudget(verts, faces);
-  const slender = !tuned && scaled.slenderness >= SLENDER;
-
-  const { decomposeWithCavitiesOffThread } = await import('./vhacdWorkerClient');
-  const run = (params: { maxHulls: number; voxelResolution?: number }) => decomposeWithCavitiesOffThread(verts, faces, params);
-  const standard = { maxHulls: verdict.maxHulls, ...(resolution ? { voxelResolution: resolution } : {}) };
-  // Timed out, or the worker died. A body still has to collide as something.
-  const failed = (err: unknown) => none(`${err instanceof Error ? err.message : String(err)} It collides as its convex hull, so any hollow in it is solid.`, 'hull');
-
-  let first: { hulls: Hull[]; cavities: FilledCavity[] };
+  const { decomposeSolidOffThread } = await import('./vhacdWorkerClient');
+  let solid: Awaited<ReturnType<typeof decomposeSolidOffThread>>;
   try {
-    first = await run(slender ? { maxHulls: scaled.maxHulls, voxelResolution: scaled.voxelResolution } : standard);
+    solid = await decomposeSolidOffThread(verts, faces, { maxPieces, ...(resolution ? { voxelResolution: resolution } : {}) });
   } catch (err) {
-    if (!slender) return failed(err);
-    // Too slow at the scaled budget: something, at least, at the standard one.
-    try { first = await run(standard); } catch (again) { return failed(again); }
+    // Timed out, or the worker died. A body still has to collide as something.
+    return none(`${err instanceof Error ? err.message : String(err)} It collides as its convex hull, so any hollow in it is solid.`, 'hull');
   }
-  let { hulls, cavities } = first;
-  // A piece bridging a slot looks healthy from the outside — "9 convex
-  // pieces" — while the slot is solid. When that is found and nobody has
-  // tuned this body, try once finer: on the oak tray 100k voxels and 32
-  // hulls cleared a filled phone groove and two filled dishes in 2.3 s. A
-  // retry that fails keeps the first result rather than throwing it away.
-  if (cavities.length > 0 && !tuned && !slender) {
-    try {
-      const finer = await run({
-        maxHulls: Math.max(verdict.maxHulls, Math.min(RETRY_MAX_HULLS, scaled.maxHulls)),
-        voxelResolution: RETRY_RESOLUTION,
-      });
-      const filled = (list: FilledCavity[]) => list.reduce((sum, c) => sum + c.volumeMm3, 0);
-      if (finer.hulls.length >= MIN_SURVIVING_HULLS && filled(finer.cavities) < filled(cavities)) {
-        ({ hulls, cavities } = finer);
-      }
-    } catch {
-      // Keep the first.
-    }
-  }
+  const { hulls, cavities } = solid;
 
   if (hulls.length < MIN_SURVIVING_HULLS) {
     // Emitting one piece, or none, is not a decomposition — and a mesh with no
     // colliders at all would leave its body falling through the world.
     return none('This shape could not be broken into convex pieces, so it collides as its convex hull and any hollow in it is solid.', 'hull');
   }
-  return { source, verdict, volume, hullVolume, hulls, cavities };
+  return {
+    source, verdict, volume, hullVolume, hulls, cavities,
+    intrusion: solid.intrusion, ...(solid.intrusionAt ? { intrusionAt: solid.intrusionAt } : {}),
+  };
 }
 
 /** Said when a decomposition still fills something in, naming where and which piece. */

@@ -1,4 +1,3 @@
-import { useMemo } from 'react';
 import { Donut } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { collisionModeOf } from '../../utils/csg';
@@ -25,8 +24,7 @@ export function CollisionCard({ node }: { node: SceneNode }) {
   const updateNode = useStore((s) => s.updateNode);
 
   const meshes = solidMeshGeoms(node);
-  // Keyed on the geoms, so a body that is only moved does not re-measure.
-  const levels = useMemo(() => collisionDetailLevels(meshes), [node.geoms]); // eslint-disable-line react-hooks/exhaustive-deps
+  const levels = collisionDetailLevels();
   if (node.csgEnabled) return null;
   if (meshes.length === 0) return null;
   const detail = detailOf(node, levels);

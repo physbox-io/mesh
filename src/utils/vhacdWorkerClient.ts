@@ -23,6 +23,7 @@
 import type { Hull } from './csg';
 import type { DecomposeParams } from './vhacd';
 import type { FilledCavity } from './filledCavities';
+import type { SolidOptions, SolidResult } from './solidDecomposition';
 import type { HullPayload, MeshAnalysis, VhacdRequest, VhacdResponse } from '../workers/vhacdProtocol';
 import { noteWorkerStopped } from './staleBuild';
 
@@ -33,6 +34,12 @@ import { noteWorkerStopped } from './staleBuild';
  * when the worker is given the job, not from when it was asked for.
  */
 export const DECOMPOSE_TIMEOUT_MS = 20_000;
+
+/**
+ * A whole part, chunked, decomposed and pulled in (solidDecomposition.ts): a
+ * two-turn chute is about 21 s of it in Node, most parts a few.
+ */
+export const SOLID_TIMEOUT_MS = 60_000;
 
 /** Measuring is a hull and an edge walk, well under a second. */
 export const ANALYSE_TIMEOUT_MS = 10_000;
@@ -107,6 +114,13 @@ function ensureWorker(): WorkerLike | null {
     finish(msg.id, (job) => {
       if (msg.type === 'DECOMPOSE_ERROR') job.reject(new Error(msg.message));
       else if (msg.type === 'ANALYSED') job.resolve(msg.analysis);
+      else if (msg.type === 'DECOMPOSED_SOLID') {
+        const result: SolidResult = {
+          hulls: msg.hulls.map(fromPayload), cavities: msg.cavities, intrusion: msg.intrusion, chunks: msg.chunks,
+          ...(msg.intrusionAt ? { intrusionAt: msg.intrusionAt } : {}),
+        };
+        job.resolve(result);
+      }
       else {
         const hulls = msg.hulls.map(fromPayload);
         if (msg.cavities) cavitiesByHulls.set(hulls, msg.cavities);
@@ -227,6 +241,19 @@ export async function analyseMeshOffThread(verts: number[], faces: number[]): Pr
   }
   return request<MeshAnalysis>('Measuring the mesh timed out.', ANALYSE_TIMEOUT_MS, (id) => ({
     type: 'ANALYSE', id,
+    verts: Float64Array.from(verts),
+    faces: Uint32Array.from(faces),
+  }));
+}
+
+/** A whole closed mesh to tightened convex pieces; see utils/solidDecomposition.ts. */
+export async function decomposeSolidOffThread(verts: number[], faces: number[], options: SolidOptions): Promise<SolidResult> {
+  if (!hasWorker()) {
+    const { decomposeSolid } = await import('./solidDecomposition');
+    return decomposeSolid(verts, faces, options);
+  }
+  return request<SolidResult>('Convex decomposition timed out.', SOLID_TIMEOUT_MS, (id) => ({
+    type: 'DECOMPOSE_SOLID', id, options,
     verts: Float64Array.from(verts),
     faces: Uint32Array.from(faces),
   }));
