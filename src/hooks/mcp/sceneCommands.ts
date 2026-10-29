@@ -11,8 +11,7 @@ import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../../utils/noteCards';
-import { collidersBeingDecomposed, compileCsgNodes } from '../useCsgCompile';
-import { collidersAreStale } from '../../utils/convexDecomposition';
+import { compileCsgNodes, pendingColliderBodies } from '../useCsgCompile';
 import { headlessImpactWarning } from '../../utils/headlessLimits';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
@@ -47,15 +46,7 @@ export const sceneCommands: McpCommands = {
     // until they land, so a run straight after a load could throw a car
     // off a track that is solid across its channel and say nothing. Wait
     // a while for them, then say which bodies ran as hulls.
-    const pendingBodies = () => {
-      const out: string[] = [];
-      // In flight as well as stale: a body whose pieces are being
-      // worked out again (a second ask for the same shape joins the first).
-      const running = new Set(collidersBeingDecomposed());
-      const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => { if (collidersAreStale(n) || running.has(n.id)) out.push(n.name); walk(n.children); });
-      walk(useStore.getState().sceneGraph.nodes);
-      return out;
-    };
+    const pendingBodies = pendingColliderBodies;
     for (const until = Date.now() + HEADLESS_WAIT_FOR_COLLIDERS_MS; pendingBodies().length > 0 && Date.now() < until;) {
       await new Promise(r => setTimeout(r, 250));
     }
@@ -81,7 +72,7 @@ export const sceneCommands: McpCommands = {
     const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride);
     if (stillPending.length > 0) {
       result.warnings = [
-        `Ran before the convex pieces of ${stillPending.join(', ')} were ready, so ${stillPending.length === 1 ? 'it' : 'they'} collided as a convex hull with any hollow filled in. Wait until physics_get_scene_summary no longer reports collisionPending, then run again.`,
+        `Gave up waiting after ${HEADLESS_WAIT_FOR_COLLIDERS_MS / 1000} s: the convex pieces of ${stillPending.join(', ')} were still being worked out, so ${stillPending.length === 1 ? 'it' : 'they'} collided as a convex hull with any hollow filled in, and this run does not show their real contact. Wait until physics_get_scene_summary no longer reports collisionPending, then run again.`,
         ...(result.warnings ?? []),
       ];
     }

@@ -782,14 +782,13 @@ export interface SceneNode {
    * Absent means 'auto'. See utils/convexDecomposition.ts.
    */
   collision?: CollisionMode;
-  /** Hull budget for a decomposition. Absent = derived from how concave it is. */
+  /** The most convex pieces a decomposition may come out as. Absent = up to 512, as the shape needs. */
   collisionHulls?: number;
   /**
-   * V-HACD voxel count for a decomposition: higher sees narrower slots.
-   * Absent = 25,000, with one automatic retry at 100,000 and up to 64 hulls
-   * when the first result is found to fill a cavity in (see
-   * utils/filledCavities.ts), or a budget scaled to the part when it is long
-   * and thin (scaledBudget in utils/convexDecomposition.ts).
+   * V-HACD voxel count per chunk of a decomposition: higher sees narrower
+   * slots. Absent = enough for a wall two voxels thick, up to 25,000. The
+   * mesh is cut into chunks first, until none is long and thin or fills a
+   * cavity (utils/chunkedDecomposition.ts).
    */
   collisionResolution?: number;
   /** Total mass split across the derived colliders, as csgMass is for a boolean. */
@@ -815,6 +814,12 @@ export interface SceneNode {
   collisionSolidity?: number;
   /** Cavities the last decomposition still fills in, and the collider covering each. */
   collisionCavities?: Array<{ centerMm: number[]; extentMm: number[]; volumeMm3: number; coveredBy: string }>;
+  /**
+   * How far the last decomposition's pieces stand proud of the surface into
+   * the air, at most, and near where: how much an opening is narrowed, which
+   * is what jams a close fit.
+   */
+  collisionIntrusion?: { mm: number; atMm?: [number, number, number] };
   collisionWarning?: string;
   collisionError?: string;
   /**

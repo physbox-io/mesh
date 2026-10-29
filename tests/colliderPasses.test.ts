@@ -39,7 +39,7 @@ vi.mock('../src/utils/convexDecomposition', async (importOriginal) => {
 });
 
 const { useStore } = await import('../src/store/useStore');
-const { compileCsgNodes, collidersBeingDecomposed } = await import('../src/hooks/useCsgCompile');
+const { compileCsgNodes, collidersBeingDecomposed, pendingColliderBodies } = await import('../src/hooks/useCsgCompile');
 
 const bowl = (id: string): SceneNode => {
   const m = cupMesh({ outerR: 0.05, innerR: 0.045, height: 0.04, baseThickness: 0.004 });
@@ -66,12 +66,15 @@ describe('two compile passes over the same stale bodies', () => {
     await new Promise(r => setTimeout(r, 60));
     expect(pieces('bowl1')).toBe(55);
     expect(collidersBeingDecomposed()).toEqual(['bowl2']);
+    // What physics_run_headless and a scene build wait on.
+    expect(pendingColliderBodies()).toEqual(['bowl2']);
     const second = compileCsgNodes(true);
     await Promise.all([first, second]);
 
     expect(calls.get('bowl2')).toBe(1);
     expect(pieces('bowl2')).toBe(55);
     expect(collidersBeingDecomposed()).toEqual([]);
+    expect(pendingColliderBodies()).toEqual([]);
   });
 
   it('a pass with a deadline answers without pieces still being worked out, and they land after', async () => {

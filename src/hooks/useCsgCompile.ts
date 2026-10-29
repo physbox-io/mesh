@@ -94,6 +94,22 @@ export function collidersBeingDecomposed(): string[] {
   return [...collidersInFlight.keys()];
 }
 
+/**
+ * Names of the bodies whose convex pieces are not in yet: stale (queued) or
+ * in flight. In flight as well, because a body whose pieces are being worked
+ * out again joins the run already going and is not stale twice.
+ */
+export function pendingColliderBodies(): string[] {
+  const out: string[] = [];
+  const running = new Set(collidersInFlight.keys());
+  const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => {
+    if ((!n.csgEnabled && collidersAreStale(n)) || running.has(n.id)) out.push(n.name);
+    walk(n.children);
+  });
+  walk(useStore.getState().sceneGraph.nodes);
+  return out;
+}
+
 /** One decomposition per body and hash: a second ask joins the first. */
 function decomposeColliders(node: SceneNode): Promise<void> {
   const hash = collisionHashOf(node);

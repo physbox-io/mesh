@@ -13,7 +13,7 @@ import { analyzeMesh } from './meshIntegrity';
 import { checkMeshInertia } from './meshInertiaCheck';
 import { cageOriginInBodyMm } from './latticeFrame';
 import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum } from './csg';
-import { collidersAreStale, solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
+import { collidersAreStale, intrusionSentence, solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
 import { measurePart } from './solidMachiningExporter';
 
 export const bboxOf = (flatVerts: number[] | undefined) => {
@@ -229,6 +229,11 @@ function collisionReport(node: SceneNode): Record<string, unknown> {
       ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),
       // Slots and recesses a piece fills in, which the piece count hides.
       ...(node.collisionCavities?.length ? { cavitiesFilled: node.collisionCavities } : {}),
+      // How much an opening is narrowed: what makes a close fit jam.
+      ...(node.collisionIntrusion ? {
+        openingsNarrowedMm: node.collisionIntrusion.mm,
+        openingsNarrowed: intrusionSentence(node.collisionIntrusion),
+      } : {}),
       ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
     };
   }

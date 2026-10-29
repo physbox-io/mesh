@@ -22,6 +22,13 @@ export interface DecomposeParams {
   voxelResolution: number;
   minVolumePercentError: number;
   fillMode: 'flood' | 'surface' | 'raycast';
+  /**
+   * How many times V-HACD may halve before it merges back down to maxHulls.
+   * Its own default is 10 — up to 1024 candidates merged pairwise — and on a
+   * cup that merge is two thirds of the time: 2.5 s at 10, 0.9 s at 5, for
+   * the same 16 pieces. A chunk (chunkedDecomposition.ts) is small enough for 6.
+   */
+  maxRecursionDepth?: number;
 }
 
 /**
@@ -34,8 +41,11 @@ export interface DecomposeParams {
  * `fillMode: 'flood'` is the one with meaning rather than a number. Flood fill
  * marks everything reachable from outside the bounding box as empty, so an open
  * cup's cavity stays a cavity — which is the entire feature. A SEALED void is
- * not reachable, so it fills in solid, and that is the right physics answer too:
- * nothing can get into it.
+ * not reachable, so it fills in solid. That is wrong whenever something starts
+ * inside it — a tumbler's stones, a rattle, a ball in a cage: a closed drum came
+ * back as one hull and threw its dice out. Raycast and surface fill do the
+ * same. So the hollow is opened by cutting the mesh in two before this sees it
+ * (chunkedDecomposition.ts): each half is a cup, which flood fill gets right.
  *
  * The rest are a speed/accuracy trade measured on the 100 mm cup fixture, which
  * is about as hard as an authored container gets (2 mm walls). Wall-clock, and
@@ -111,6 +121,7 @@ export async function decomposeMesh(
     voxelResolution: p.voxelResolution,
     minVolumePercentError: p.minVolumePercentError,
     fillMode: p.fillMode,
+    ...(p.maxRecursionDepth !== undefined ? { maxRecursionDepth: p.maxRecursionDepth } : {}),
     messages: 'none',
   };
 

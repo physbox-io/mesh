@@ -14,6 +14,7 @@
 import { decomposeMesh } from '../utils/vhacd';
 import { findFilledCavities } from '../utils/filledCavities';
 import { analyseMesh } from '../utils/meshAnalysis';
+import { decomposeSolid } from '../utils/solidDecomposition';
 import type { VhacdRequest, VhacdResponse } from './vhacdProtocol';
 
 const post = (msg: VhacdResponse, transfer: Transferable[] = []) =>
@@ -24,6 +25,21 @@ self.onmessage = async (evt: MessageEvent<VhacdRequest>) => {
   if (msg.type === 'ANALYSE') {
     try {
       post({ type: 'ANALYSED', id: msg.id, analysis: analyseMesh(Array.from(msg.verts), Array.from(msg.faces)) });
+    } catch (err) {
+      post({ type: 'DECOMPOSE_ERROR', id: msg.id, message: err instanceof Error ? err.message : String(err) });
+    }
+    return;
+  }
+  if (msg.type === 'DECOMPOSE_SOLID') {
+    try {
+      const r = await decomposeSolid(Array.from(msg.verts), Array.from(msg.faces), msg.options);
+      const payload = r.hulls.map(h => ({
+        verts: Float64Array.from(h.verts), faces: Uint32Array.from(h.faces), volume: h.volume, centroid: h.centroid,
+      }));
+      post(
+        { type: 'DECOMPOSED_SOLID', id: msg.id, hulls: payload, cavities: r.cavities, intrusion: r.intrusion, ...(r.intrusionAt ? { intrusionAt: r.intrusionAt } : {}), chunks: r.chunks },
+        payload.flatMap(h => [h.verts.buffer, h.faces.buffer]),
+      );
     } catch (err) {
       post({ type: 'DECOMPOSE_ERROR', id: msg.id, message: err instanceof Error ? err.message : String(err) });
     }

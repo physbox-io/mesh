@@ -296,12 +296,28 @@ These things about it are load-bearing:
   away. Each piece names its mesh in `colliderOf`, and only the named meshes are demoted; older
   colliders, which name none, stand for every colliding mesh. A mesh with `contype` and
   `conaffinity` both 0 is not a source at all, and pieces inherit their mesh's filtering.
-* **Long thin parts get a budget scaled to them** (`scaledBudget`): pieces in proportion to length
-  over wall thickness (twice volume over area), voxels so a wall is two thick. V-HACD cuts along the
-  axes, so on a sloping U-channel every piece holding a wall and some floor fills the corner between
-  them: the 440 mm coaster track needs ~450 pieces before its channel is clear, and gets them on the
-  first run. A compact part keeps the old defaults and, when a cavity is found, one retry at up to
-  64 pieces.
+* **A mesh is cut into chunks before V-HACD sees it** (`utils/chunkedDecomposition.ts`, Manifold's
+  `splitByPlane`, always at the middle of the longest side): while a chunk is 40 wall thicknesses
+  long or more, and again while its pieces still fill a cavity, down to 8 walls and 32 chunks. One
+  call over the whole part failed three ways — a coil's bounding box hid its length (a two-turn chute
+  got the compact budget and 29 to 42 filled cavities), its voxels were sized by that box (a stepped
+  floor that stopped 6 mm marbles on an 11° slope), and a flood from outside cannot reach a sealed
+  hollow (a closed drum came back as one hull). Each chunk is measured afresh and gets its own voxel
+  grid, no piece spans a cut, and a cut through a sealed hollow opens it. A mesh Manifold will not
+  take is decomposed whole.
+* **Every piece is then pulled in to the surface** (`utils/tightPieces.ts`): rebuilt as the hull of
+  the solid inside it (the mesh's triangles clipped to it, its corners in the material, its edges'
+  crossings), which drops V-HACD's voxel overshoot without losing material, and the piece standing
+  proudest is cut in two until none stands more than 0.1 mm proud or 512 pieces or 5 s are spent. No
+  cut leaves a piece thinner than half the wall (1 to 2 mm): a ball falls straight through slabs.
+  What is left — inside corners, curved bores — is reported as `collisionIntrusion`
+  (`openingsNarrowedMm` in the scene summary): an opening is narrowed by that much, and a fit closer
+  than that jams. A 10 mm bore that cleared 8.35 mm now clears ~9.65 mm above its floor corner.
+* **It is slower.** A cup is a few seconds, a two-turn chute ~20 s. The V-HACD worker runs one job at
+  a time, each timed from when it starts (60 s for a whole mesh), and a late job terminates the worker.
+  A scene build over MCP answers before slow pieces land (`collisionPending`); `physics_run_headless`
+  waits up to 45 s for them. `COLLIDER_RECIPE` is in `collisionHashOf`, so bumping it makes saved
+  scenes decompose again.
 * **Filled cavities are found two ways** (`utils/filledCavities.ts`): a region of filled air that
   fills most of the empty space in its bounding box (a slot, a cup), and a piece that is mostly air
   reaching 1.5 wall thicknesses from any surface — which is how a channel filled along its length is

@@ -9,7 +9,10 @@
 // decomposition still fills it, the body says so.
 
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
-import { collisionDetailLevels, decomposeNodeColliders, scaledBudget, SLENDER, RETRY_MAX_HULLS } from '../src/utils/convexDecomposition';
+import { collisionDetailLevels, decomposeNodeColliders } from '../src/utils/convexDecomposition';
+import { chunkSlenderness } from '../src/utils/chunkedDecomposition';
+import { CHUNK_VOXELS, SOLID_CHUNK_PLAN } from '../src/utils/solidDecomposition';
+import { wallThickness } from '../src/utils/filledCavities';
 import { findFilledCavities } from '../src/utils/filledCavities';
 import { decomposeMesh } from '../src/utils/vhacd';
 import type { Hull } from '../src/utils/csg';
@@ -75,17 +78,13 @@ const trackNode = (extra: Partial<SceneNode> = {}): SceneNode => ({
 });
 
 describe('the U-channel fixture', () => {
-  it('is mostly air inside its hull, and long for its walls', () => {
-    const { slenderness, maxHulls } = scaledBudget(track.verts, track.faces);
-    expect(slenderness).toBeGreaterThan(SLENDER);
-    expect(maxHulls).toBeGreaterThanOrEqual(256);
+  it('is long for its walls, so it is cut into chunks before it is decomposed', () => {
+    expect(chunkSlenderness(track, wallThickness(track.verts, track.faces))).toBeGreaterThan(SOLID_CHUNK_PLAN.slender);
   });
 
-  it('gives a compact cup about the budget it always had', () => {
+  it('a compact cup is not', () => {
     const cup = cupMesh({ outerR: 0.10, innerR: 0.08, height: 0.12, baseThickness: 0.02 });
-    const { slenderness, maxHulls } = scaledBudget(cup.verts, cup.faces);
-    expect(slenderness).toBeLessThan(SLENDER);
-    expect(Math.min(RETRY_MAX_HULLS, maxHulls)).toBeLessThanOrEqual(64);
+    expect(chunkSlenderness(cup, wallThickness(cup.verts, cup.faces))).toBeLessThan(SOLID_CHUNK_PLAN.slender);
   });
 });
 
@@ -161,41 +160,38 @@ describe('a car in the channel, in MuJoCo', () => {
       geoms: [{ name: 'car_ball', type: 'sphere', size: [0.005], density: 7800, solref: stiff }],
     };
     sim = await simulate({ nodes: [rail, ball] } as never);
-    let furthest = -Infinity, highest = 0, widest = 0;
+    let furthest = -Infinity, highest = 0, widest = 0, last = Infinity;
     for (let i = 0; i < 150; i++) {
       sim.run(0.01);
       const [x, y, cz] = sim.bodyPos('car');
       if (x < -0.21 || x > 0.21) break;
       furthest = Math.max(furthest, x);
       const f = floorFrame(x);
-      highest = Math.max(highest, (cz - f.z) * f.up[1]);
+      last = (cz - f.z) * f.up[1];
+      // Up to the crest. Past it the ball is airborne, as it should be: it
+      // reaches the 61 mm-radius crest at about 0.95 m/s, and anything over
+      // sqrt(g r) = 0.77 m/s leaves the track. On the old stepped pieces it
+      // arrived too slowly to.
+      if (x < 0.07) highest = Math.max(highest, last);
       widest = Math.max(widest, Math.abs(y));
     }
     // Past the bottom of the drop and over the 45 mm hump at x = 70 mm.
     expect(furthest).toBeGreaterThan(0.08);
     // Riding on the floor: a channel filled to its 12 mm rim would carry it at 17 mm.
     expect(highest).toBeLessThan(0.009);
+    // And back on it, in the channel, once it has landed.
+    expect(last).toBeLessThan(0.009);
     expect(widest).toBeLessThan(0.012);
   }, 120_000);
 });
 
 describe("the inspector's Detail levels", () => {
-  it('on the track, Fine and Finest are each finer than what Standard already gets', () => {
-    const scaled = scaledBudget(track.verts, track.faces);
-    const { standard, fine, finest } = collisionDetailLevels(trackNode().geoms);
+  it('are each finer than what a chunk gets by default, and cap no part', () => {
+    const { standard, fine, finest } = collisionDetailLevels();
     expect(standard).toEqual({});
-    expect(fine.collisionHulls).toBeGreaterThanOrEqual(scaled.maxHulls);
-    expect(fine.collisionResolution).toBeGreaterThan(scaled.voxelResolution);
+    expect(fine.collisionResolution).toBeGreaterThan(CHUNK_VOXELS);
     expect(finest.collisionResolution).toBeGreaterThan(fine.collisionResolution!);
-  });
-
-  it('on a compact cup they are the fixed figures they always were', () => {
-    const cup = cupMesh({ outerR: 0.10, innerR: 0.08, height: 0.12, baseThickness: 0.02 });
-    const geom = { name: 'cup', type: 'mesh', size: [1], renderVertices: cup.verts, vertices: zupToYupFlat(cup.verts), faces: cup.faces } as SceneGeom;
-    expect(collisionDetailLevels([geom])).toEqual({
-      standard: {},
-      fine: { collisionResolution: 100_000, collisionHulls: 32 },
-      finest: { collisionResolution: 300_000, collisionHulls: 48 },
-    });
+    expect(fine.collisionHulls).toBeUndefined();
+    expect(finest.collisionHulls).toBeUndefined();
   });
 });
