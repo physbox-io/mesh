@@ -1,6 +1,7 @@
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import { generateWedgeMeshData } from './geom';
 import { analyzeMesh } from './meshIntegrity';
+import { checkMeshInertia } from './meshInertiaCheck';
 import { resolveCsgGeoms } from './csg';
 import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
@@ -601,7 +602,11 @@ export const compileToMJCF = (
     const verts = g.renderVertices || g.vertices!;
     return meshInertiaAttrs.get(verts, g.faces!, () => {
       const integrity = analyzeMesh(verts, g.faces!);
+      // Closed and wound outward is not enough: a surface folded through
+      // itself is both, and its exact inertia can come out non-positive,
+      // which MuJoCo refuses for the whole scene. Such a mesh keeps the hull.
       return integrity && integrity.closed && integrity.consistentlyWound && integrity.volume > 0
+        && checkMeshInertia(verts, g.faces!).ok
         ? ' inertia="exact"'
         : '';
     });

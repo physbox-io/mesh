@@ -30,6 +30,7 @@
 // utils/stlParser.ts. `toSceneGeom` emits the Y-up copy the renderer wants
 // alongside it, so nothing downstream has to know a mesh was sculpted.
 // ---------------------------------------------------------------------------
+import { createInwardGuard, keepFromFolding, type InwardGuard } from './sculptThickness';
 
 export type BrushType =
   | 'draw'
@@ -983,6 +984,15 @@ export interface SculptSession {
    * measured in. Null otherwise.
    */
   layerStart: Map<number, number[]> | null;
+  /**
+   * For an inward stroke (draw or inflate, inverted): how far each vertex may
+   * travel in along its held direction (layerStart), measured once against the
+   * surface the stroke started from. See utils/sculptThickness.ts.
+   */
+  inwardGuard: InwardGuard | null;
+  inwardLimit: Map<number, number> | null;
+  /** layerStart holds each vertex's own normal at first touch (inflate), not the stamp's. */
+  holdsVertexNormal: boolean;
 }
 
 /** A third of the area of every triangle each vertex is a corner of. */
@@ -1042,8 +1052,52 @@ export function beginStroke(mesh: SculptMesh, settings: BrushSettings): SculptSe
     grabOrigin: [null, null],
     stampCount: 0,
     hitVertexBudget: false,
-    layerStart: isLayered(settings) ? new Map() : null,
+    layerStart: isLayered(settings) || isInward(settings) ? new Map() : null,
+    inwardGuard: isInward(settings)
+      ? createInwardGuard(mesh.positions, mesh.vertexCount, mesh.faces, mesh.faceCount, settings.radius * INWARD_MIN_GAP_RADII)
+      : null,
+    inwardLimit: isInward(settings) ? new Map() : null,
+    holdsVertexNormal: isInward(settings) && settings.type === 'inflate',
   };
+}
+
+/** Of the brush radius, the clay an inward stroke always leaves behind a vertex. */
+const INWARD_MIN_GAP_RADII = 0.1;
+
+/** A stroke that pushes the surface in, and so could push it through the other side. */
+function isInward(settings: BrushSettings): boolean {
+  return settings.invert && (settings.type === 'draw' || settings.type === 'inflate');
+}
+
+/** How far vertex `i` may go in this stroke, measured the first time it is asked. */
+function inwardLimitOf(session: SculptSession, i: number, start: number[]): number {
+  const limits = session.inwardLimit!;
+  let limit = limits.get(i);
+  if (limit === undefined) {
+    limit = session.inwardGuard!.limitFrom(start, [start[3], start[4], start[5]]);
+    limits.set(i, limit);
+  }
+  return limit;
+}
+
+/**
+ * Takes back whatever part of this dab carried a vertex further in than its
+ * limit, along the direction the limit is measured in. Mutates positions.
+ */
+function holdInwardLimit(session: SculptSession, indices: number[], stamp: BrushStamp): void {
+  const q = session.mesh.positions;
+  for (const i of indices) {
+    const p0 = layerStartOf(session, i, stamp);
+    const limit = inwardLimitOf(session, i, p0);
+    if (limit === Infinity) continue;
+    // How far in (against the held normal) it has gone since the stroke reached it.
+    const gone = -((q[i * 3] - p0[0]) * p0[3] + (q[i * 3 + 1] - p0[1]) * p0[4] + (q[i * 3 + 2] - p0[2]) * p0[5]);
+    if (gone <= limit) continue;
+    const back = gone - limit;
+    q[i * 3] += p0[3] * back;
+    q[i * 3 + 1] += p0[4] * back;
+    q[i * 3 + 2] += p0[5] * back;
+  }
 }
 
 function isLayered(settings: BrushSettings): boolean {
@@ -1065,7 +1119,14 @@ function layerStartOf(session: SculptSession, i: number, stamp: BrushStamp): num
   let p = start.get(i);
   if (!p) {
     const q = session.mesh.positions;
-    p = [q[i * 3], q[i * 3 + 1], q[i * 3 + 2], stamp.nx, stamp.ny, stamp.nz];
+    // Inflate pushes each vertex along its OWN normal, so that is the direction
+    // it is held to; draw pushes the whole dab along the stamp's.
+    if (session.holdsVertexNormal) {
+      const n = session.mesh.normals;
+      p = [q[i * 3], q[i * 3 + 1], q[i * 3 + 2], n[i * 3], n[i * 3 + 1], n[i * 3 + 2]];
+    } else {
+      p = [q[i * 3], q[i * 3 + 1], q[i * 3 + 2], stamp.nx, stamp.ny, stamp.nz];
+    }
     start.set(i, p);
   }
   return p;
@@ -1133,6 +1194,11 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       session.layerStart!.set(mid, [
         (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, (pa[2] + pb[2]) / 2, nx / nl, ny / nl, nz / nl,
       ]);
+      // Between two vertices that may each go so far in, the surface may too.
+      if (session.inwardLimit) {
+        const la = inwardLimitOf(session, a, pa), lb = inwardLimitOf(session, b, pb);
+        session.inwardLimit.set(mid, Math.min(la, lb));
+      }
     }
     : undefined;
 
@@ -1216,6 +1282,16 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
 
   if (indices.length === 0) return;
   recordUndo(session, indices);
+  // Where this dab found them, for an inward stroke to take back a fold.
+  let dabStart: Float32Array | null = null;
+  if (session.inwardGuard) {
+    dabStart = new Float32Array(indices.length * 3);
+    indices.forEach((v, k) => {
+      dabStart![k * 3] = mesh.positions[v * 3];
+      dabStart![k * 3 + 1] = mesh.positions[v * 3 + 1];
+      dabStart![k * 3 + 2] = mesh.positions[v * 3 + 2];
+    });
+  }
 
   const sign = settings.invert ? -1 : 1;
   const strength = Math.max(0, Math.min(1, settings.strength));
@@ -1257,6 +1333,7 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
         positions[i * 3 + 1] += stamp.ny * w;
         positions[i * 3 + 2] += stamp.nz * w;
       }
+      if (session.inwardGuard) holdInwardLimit(session, indices, stamp);
       break;
     }
 
@@ -1264,10 +1341,16 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       for (let k = 0; k < indices.length; k++) {
         const i = indices[k];
         const w = weights[k] * amplitude;
-        positions[i * 3] += normals[i * 3] * w;
-        positions[i * 3 + 1] += normals[i * 3 + 1] * w;
-        positions[i * 3 + 2] += normals[i * 3 + 2] * w;
+        // Inward, along the normal the vertex had when the stroke reached it:
+        // its current normal, inside the pit the stroke is digging, turns to
+        // face the opposite wall and then under the rim, and the walls folded
+        // through each other.
+        const n = session.inwardGuard ? layerStartOf(session, i, stamp).slice(3) : null;
+        positions[i * 3] += (n ? n[0] : normals[i * 3]) * w;
+        positions[i * 3 + 1] += (n ? n[1] : normals[i * 3 + 1]) * w;
+        positions[i * 3 + 2] += (n ? n[2] : normals[i * 3 + 2]) * w;
       }
+      if (session.inwardGuard) holdInwardLimit(session, indices, stamp);
       break;
     }
 
@@ -1403,6 +1486,10 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       }
       break;
     }
+  }
+
+  if (dabStart) {
+    keepFromFolding(mesh.positions, mesh.faces, mesh.faceCount, mesh.vertexCount, indices, dabStart, [stamp.nx, stamp.ny, stamp.nz]);
   }
 
   // A depth-limited dab stretches the edges that cross its wall, from the rim

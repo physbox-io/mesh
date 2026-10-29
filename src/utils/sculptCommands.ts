@@ -35,6 +35,7 @@ import {
   type SculptMesh,
   type SculptUndoEntry,
 } from './sculptMesh';
+import { checkMeshInertia } from './meshInertiaCheck';
 
 export const BRUSH_TYPES: BrushType[] = ['draw', 'inflate', 'smooth', 'flatten', 'pinch', 'grab'];
 
@@ -127,6 +128,23 @@ export interface SculptStrokeResult {
   maxDisplacement: number | null;
   /** Whether the brush added or removed vertices rather than only moving them. */
   topologyChanged: boolean;
+  /** Present when the surface now passes through itself; see solidityWarning. */
+  warning?: string;
+}
+
+/**
+ * What to tell a caller about a closed surface that folds through itself.
+ *
+ * It stays closed and consistently wound, so `watertight` says yes, and MuJoCo
+ * refused the scene the moment it tried to integrate its inertia. The compiler
+ * now weighs such a mesh by its hull instead (mjcf.ts), so the scene runs, but
+ * the shape is still wrong, and saying so beats a silent mass change.
+ */
+export function solidityWarning(mesh: SculptMesh): string | undefined {
+  if (!isWatertight(mesh)) return undefined;
+  const check = checkMeshInertia(mesh.positions, mesh.faces, mesh.faceCount);
+  if (check.ok) return undefined;
+  return 'The surface now passes through itself (its volume or inertia comes out non-positive), so it is weighed by its convex hull, not its shape. Take the stroke back with physics_undo_sculpt, or smooth the folded region out.';
 }
 
 /** A dab in mesh space, with the surface normal that the raycast would have given. */
@@ -380,6 +398,7 @@ export function applySculptStroke(
 
   recomputeNormals(mesh);
 
+  const warning = solidityWarning(mesh);
   return {
     vertices: mesh.vertexCount,
     faces: mesh.faceCount,
@@ -389,6 +408,7 @@ export function applySculptStroke(
     moved,
     maxDisplacement,
     topologyChanged,
+    ...(warning ? { warning } : {}),
   };
 }
 
@@ -400,12 +420,14 @@ export function sculptSummary(mesh: SculptMesh) {
     bounds.max[1] - bounds.min[1],
     bounds.max[2] - bounds.min[2],
   ];
+  const warning = solidityWarning(mesh);
   return {
     vertices: mesh.vertexCount,
     faces: mesh.faceCount,
     watertight: isWatertight(mesh),
     bounds: { min: bounds.min, max: bounds.max },
     size,
+    ...(warning ? { warning } : {}),
   };
 }
 
