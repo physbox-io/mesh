@@ -13,6 +13,7 @@ import { compileSCAD } from '../../utils/openscad';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../../utils/noteCards';
 import { compileCsgNodes } from '../useCsgCompile';
 import { collidersAreStale } from '../../utils/convexDecomposition';
+import { headlessImpactWarning } from '../../utils/headlessLimits';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
 import {
@@ -71,6 +72,11 @@ export const sceneCommands: McpCommands = {
         ...(result.warnings ?? []),
       ];
     }
+    // Shatter and dent are decided on the main thread and never happen here
+    // (utils/headlessLimits.ts): say so, rather than let a whole body in the
+    // trajectory stand for what the live run would do.
+    const impactWarning = headlessImpactWarning(sceneGraph.nodes);
+    if (impactWarning) result.warnings = [...(result.warnings ?? []), impactWarning];
     const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies as string[]) : null;
     if (result.ok && result.trajectory && bodyFilter) {
       result.trajectory = result.trajectory.map((fr: HistoryEntry) => ({
