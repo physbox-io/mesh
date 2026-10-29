@@ -9,6 +9,7 @@ import { uniquifyNamesInPlace } from './uniqueNames';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { jointCouplingXml } from './jointCoupling';
+import { gearBody, meshingGears, type GearBody } from './gearMeshing';
 import { relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
@@ -668,7 +669,7 @@ export const compileToMJCF = (
   getAbsolutePositions(sceneCopy.nodes);
 
   // Keep track of gear joints along with their absolute position and size
-  const gearJointNodes: { jointName: string; nodeId: string; pos: [number, number, number]; radius: number }[] = [];
+  const gearJointNodes: GearBody[] = [];
   const jointedNodes: Record<string, string> = {};
   const explicitCouplingNodes: SceneNode[] = [];
   const pulleyRopesList: SceneNode[] = [];
@@ -719,13 +720,8 @@ export const compileToMJCF = (
       (node.joints || []).forEach(j => {
         if (j.actuator) actuators.push(j); 
         if (couplingAllowed && node.id.includes('gear') && j.type === 'hinge') {
-          const wData = nodeWorldData[node.id];
-          gearJointNodes.push({
-            jointName: j.name,
-            nodeId: node.id,
-            pos: wData ? wData.pos : [0, 0, 0],
-            radius: pitchRadius(node) ?? (wData ? wData.size[0] : 0.25)
-          });
+          const wData = nodeWorldData[node.id] ?? { pos: [0, 0, 0], quat: [1, 0, 0, 0] as QuatWXYZ, size: [] };
+          gearJointNodes.push(gearBody(node, j, wData, pitchRadius(node)));
         }
         if (couplingAllowed && node.id.includes('pinion') && j.type === 'hinge') {
           const wData = nodeWorldData[node.id];
@@ -795,27 +791,25 @@ export const compileToMJCF = (
     }
   }
 
-  // 1. Gears fallback dynamic proximity coupling
+  // Joints already tied together by explicit couplings, directly or along a
+  // chain: the proximity rules below leave those alone.
+  const chainOf = new Map<string, string>();
+  const root = (j: string): string => {
+    let r = j;
+    while (chainOf.has(r) && chainOf.get(r) !== r) r = chainOf.get(r)!;
+    return r;
+  };
+  for (const e of couplingEdges) chainOf.set(root(e.joint1), root(e.joint2));
+  const sameChain = (a: string, b: string) => root(a) === root(b);
+
+  // 1. Gears fallback dynamic proximity coupling: parallel axes, wheels in
+  //    the same plane, centres a pitch-circle sum apart. See utils/gearMeshing.ts.
   const coupledPairs = new Set<string>();
-  for (let i = 0; i < gearJointNodes.length; i++) {
-    for (let j = i + 1; j < gearJointNodes.length; j++) {
-      const g1 = gearJointNodes[i];
-      const g2 = gearJointNodes[j];
-      const dx = g1.pos[0] - g2.pos[0];
-      const dy = g1.pos[1] - g2.pos[1];
-      const dz = g1.pos[2] - g2.pos[2];
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      // Touch/meshing criteria: centers within sum of radii + 20% margin
-      const maxMeshingDist = (g1.radius + g2.radius) * 1.2;
-      if (dist <= maxMeshingDist) {
-        const pairKey = [g1.jointName, g2.jointName].sort().join('::');
-        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
-          coupledPairs.add(pairKey);
-          const ratio = -(g1.radius / (g2.radius || 0.1));
-          couple(`gear_coupling_${coupledPairs.size}`, g1.jointName, g2.jointName, ratio.toFixed(6));
-        }
-      }
-    }
+  for (const { a, b, ratio } of meshingGears(gearJointNodes, sameChain)) {
+    const pairKey = [a.jointName, b.jointName].sort().join('::');
+    if (coupledPairs.has(pairKey) || explicitlyCoupledJointPairs.has(pairKey)) continue;
+    coupledPairs.add(pairKey);
+    couple(`gear_coupling_${coupledPairs.size}`, a.jointName, b.jointName, ratio.toFixed(6));
   }
 
   // 2. Pinion and Rack fallback proximity coupling
@@ -829,7 +823,7 @@ export const compileToMJCF = (
       // Only couple if their centers are within 0.5 meters of each other
       if (dist <= 0.5) {
         const pairKey = [p.jointName, r.jointName].sort().join('::');
-        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
+        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey) && !sameChain(p.jointName, r.jointName)) {
           coupledPairs.add(pairKey);
           pinionRackCouplingCount++;
           const pinionRadius = p.radius;

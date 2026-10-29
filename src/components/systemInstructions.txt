@@ -68,7 +68,7 @@ Every node in the "nodes" array represents a physical body and is defined as:
   children: nested array of child SceneNodes (tree structure)
   
   // Optional Special Fields:
-  allowCoupling: boolean (if true, mechanical coupling enabled)
+  allowCoupling: boolean (default true; false keeps the body out of the automatic proximity coupling: hinge bodies with 'gear' in the id couple when their axes are parallel, a round geom of each lies in the same plane, and the axes are 0.5-1.2x the sum of those radii apart; bodies already chained by coupleTargetId are left alone)
   coupleTargetId: string (id of target body to couple with: this body's first joint = coupleRatio x the target's first joint, held rigid like gear teeth)
   coupleRatio: number (gear/coupling ratio)
   weldTargetId: string (id of target body to weld to)
