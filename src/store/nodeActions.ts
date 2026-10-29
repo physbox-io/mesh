@@ -345,6 +345,12 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
         return false;
       };
       if (traverse(newScene.nodes)) {
+        // Into the store now, not when the build lands: the build installs its
+        // scene only if nothing has changed meanwhile, so any edit straight
+        // after this one (a resize, a rename) dropped the new joints. That is
+        // how physics_create_sculpt with a parent kept the hinge addComponent
+        // gives a child, after taking it off.
+        set({ sceneGraph: newScene });
         get().recompile(newScene, id);
       }
     },
