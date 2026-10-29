@@ -85,7 +85,7 @@ Every node in the "nodes" array represents a physical body and is defined as:
   connectTargetId: string (id of target body to connect with point-to-point: a loop-closing pin, held rigid however light the links)
   connectAnchor: [number, number, number] (anchor point for connect constraint)
   isAerodynamic: boolean (enables aerodynamic lift/drag model)
-  script: string (custom JavaScript controller script running at 1000Hz)
+  script: string (custom JavaScript controller script running at 1000Hz, once per physics step; see CONTROL SCRIPT API below)
   scad: string (OpenSCAD script to compile custom mesh geometry)
 
 ═══════════════════════════════════════════
@@ -143,6 +143,7 @@ Every joint constrains motion of the body relative to its parent:
   frictionloss: number <- Optional. Dry friction, N*m (hinge) or N (slide): the joint holds still until loaded past this, so a lid, lamp arm or stiff printed hinge stays where it is left. Damping cannot do this (it fades as the joint slows). To hold against gravity it must exceed mass*9.81*lever arm. On a coupled joint (geared, coupleTargetId) it loads the whole chain through the ratio, as real friction does.
   range: [number, number] <- Rotation/translation limits (e.g. [-90, 90] in degrees)
   limited: boolean <- Enable range limits
+  initialVelocity: number[] <- Optional. The joint's speed at t = 0: [w] hinge (rad/s), [v] slide (m/s), [vx,vy,vz,wx,wy,wz] free, [wx,wy,wz] ball. There is no initial-position field: to start a hinge or slide away from 0, script `if (api.getTime() === 0) api.setPosition([theta], '<bodyName>')`.
   actuator: {
     type: "motor" | "velocity",
     kv: number, (for velocity control: force = kv * (ctrlValue - speed))
@@ -150,8 +151,25 @@ Every joint constrains motion of the body relative to its parent:
     ctrlValue: number (starting control: for "velocity" the target speed, rad/s on a hinge, m/s on a slide (the joint settles at ctrlValue/gear when gear is set); for "motor" the torque, N*m, or force, N)
     forceLimit: number (optional: the most it puts out, N*m or N, so it stalls past it)
   }
-  The actuator is named `<jointName>_actuator`; a script drives it with `api.setActuatorControl('<jointName>_actuator', value)` (any other name is silently ignored).
+  The actuator is named `<jointName>_actuator`; a script drives it with `api.setActuatorControl('<jointName>_actuator', value)` and reads it back with `api.getActuatorControl(name)` (any other name does nothing and is reported as a script problem, listing the actuators the model has).
   A TORQUE-LIMITED (forceLimit) VELOCITY ACTUATOR IS A SLIP CLUTCH: the joint is dragged at the set speed through dry friction equal to forceLimit, so it holds its speed below the limit and slips at the limit above it (a stalled motor), stable at any inertia. No armature is added: it accelerates at forceLimit / its real inertia.
+
+═══════════════════════════════════════════
+CONTROL SCRIPT API
+═══════════════════════════════════════════
+A body's `script` runs as a function of `api` every physics step. Always write `api.` (a bare getTime() throws). bodyName defaults to the script's own body.
+  api.getPosition(bodyName), api.getVelocity(bodyName), api.getAngularVelocity(bodyName) -> [x, y, z]
+  api.getOrientation(bodyName) -> row-major 3x3 world rotation, 9 numbers (column 0 = the body's X axis in world space)
+  api.setPosition(pos, bodyName), api.setVelocity(vel, bodyName), api.setAngularVelocity(w, bodyName) (a number for a hinge/slide body)
+  api.getMass(bodyName), api.getJointPosition(jointName), api.getJointVelocity(jointName)
+  api.applyForce([fx,fy,fz], bodyName), api.applyTorque([tx,ty,tz], bodyName), api.applyJointForce(jointName, f)
+  api.setActuatorControl(actuatorName, value), api.getActuatorControl(actuatorName)
+  api.getTime(), api.getTimestep() (the step, s: the dt of one call), api.getWind(), api.isKeyPressed(key)
+  api.raycast(origin, dir, maxDist = 10, excludeBody) -> { dist, point, geom, body } | null: the first geom along dir (skips the script's own body; null skips nothing). A line follower: api.raycast(api.getPosition(), [0, 0, -1], 0.1).
+  api.getContacts(bodyName) -> [{ otherBody, otherGeom, geom, dist, force }]: what the body touches now ('world' is the floor).
+  api.log(...args): debug output, kept with the sim time for the run.
+  api.state: this body's persistent object. Local variables reset every step, so anything that must last (an integral, a timer, a phase) lives here: `api.state.integral = (api.state.integral || 0) + err * api.getTimestep()`. Mutate it, never assign it; plain values only. Reset clears it.
+A script that throws, or names a body/joint/actuator the model lacks, does not stop the simulation: it does nothing and is reported as a script problem with when it started and how often. A script that does not compile is saved but does nothing.
 
 ═══════════════════════════════════════════
 COORDINATE SYSTEM, WORLD MODEL & CRITICAL GOTCHAS
