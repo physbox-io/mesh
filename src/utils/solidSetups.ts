@@ -780,7 +780,7 @@ export function simulationSetups(
  * A one- or two-sided job's sides as setups, so a caller can treat every
  * solid job alike. The programs are the sides' own, unchanged.
  */
-export function sidesAsSetups(result: SolidMachiningResult, opts: SolidMachiningOptions): SolidMachiningResult {
+export function sidesAsSetups(result: SolidMachiningResult, opts: Pick<SolidMachiningOptions, 'finishingToolDiaMm'>): SolidMachiningResult {
   if (!result.success) return result;
   const built = result.sides.map((side) => asSetup(side, result, null, opts.finishingToolDiaMm));
   const of = built.length;

@@ -45,6 +45,11 @@ export interface AddSimulationRequest {
   select?: boolean;
   /** What a cast was poured in, kept on the body (`simulation.material`). */
   material?: string;
+  /**
+   * One step of a machining job (`job.stage`): stood as the block stands for
+   * that step's setup (`machineFrame`), and named and described as a step.
+   */
+  step?: { index: number; of: number; planKey: string; machineFrame: number[]; title: string };
 }
 
 export interface AddedSimulation {
@@ -95,11 +100,13 @@ export async function addSimulationToScene(
     req.transform,
     {
       id,
-      name: `Simulated: ${req.label} ${stamp(now)}`,
+      name: req.step ? `Simulated step ${req.step.index}: ${req.step.title}` : `Simulated: ${req.label} ${stamp(now)}`,
       kind: req.kind,
-      placement: req.placement,
+      placement: req.step ? 'beside' : req.placement,
       existing: store.sceneGraph.nodes.filter((n) => n.simulation),
       createdAt: now.toISOString(),
+      machineFrame: req.step?.machineFrame,
+      stage: req.step,
     }
   );
   // Named here as the store would rename it on the way in, so the card and
@@ -111,7 +118,25 @@ export async function addSimulationToScene(
 
   const where = req.placement === 'overlay' ? ', laid over the model.' : ', at full size beside the model.';
   const lines = [`## ${name}`, ''];
-  if (milled && req.job) {
+  if (milled && req.job && req.step) {
+    const s = req.step;
+    lines.push(
+      s.index === 0
+        ? `Step 0 of ${s.of - 1}: the ${+req.job.widthMm.toFixed(1)} × ${+req.job.depthMm.toFixed(1)} × ` +
+            `${+req.job.thicknessMm.toFixed(1)} mm block as it goes on the machine, standing as it does for setup 1.`
+        : `Step ${s.index} of ${s.of - 1}: ${s.title}, standing as the block does on the machine for it.`,
+      '',
+      ...(req.details ?? []).map((d) => `- ${d}`),
+      s.index === 0
+        ? milled.stockVolumeMm3 - milled.volumeMm3 > 1
+          ? `- The registration pin holes are bored first: ${mm3(milled.stockVolumeMm3 - milled.volumeMm3)}`
+          : '- Nothing is cut before setup 1'
+        : `- ${mm3(milled.stockVolumeMm3 - milled.volumeMm3)} removed so far, ${mm3(milled.volumeMm3)} left`,
+      ...(milled.rapidCuts > 0
+        ? [`- **${milled.rapidCuts} rapid move${milled.rapidCuts === 1 ? '' : 's'} cut material**, up to ${milled.deepestRapidMm.toFixed(2)} mm deep`]
+        : []),
+    );
+  } else if (milled && req.job) {
     lines.push(
       `What the ${req.label.toLowerCase()} program leaves, cut back out of a ` +
         `${+req.job.widthMm.toFixed(1)} × ${+req.job.depthMm.toFixed(1)} × ${+req.job.thicknessMm.toFixed(1)} mm block${where}`,

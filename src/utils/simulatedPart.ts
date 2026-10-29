@@ -50,6 +50,12 @@ export interface SimulationJobOptions {
    * The top and the flip alone go the way they always have.
    */
   setups?: SimulationSetup[];
+  /**
+   * One step of the job rather than all of it: 0 is the block as it goes on
+   * the machine, with only setup 1's registration pins bored (its OP 0); k is
+   * the block after setups 1 to k. Read with `setups`.
+   */
+  stage?: number;
 }
 
 export interface SimulationJobResult {
@@ -153,7 +159,33 @@ function runFieldJob(o: SimulationJobOptions, setups: SimulationSetup[], onProgr
   };
 }
 
+/**
+ * The registration pins at the head of a program (its OP 0 block), as a
+ * program of their own; '' when it bores none.
+ */
+export function registrationPrelude(gcode: string): string {
+  const lines = gcode.split('\n');
+  const start = lines.findIndex((l) => l.includes('OP 0: registration pins'));
+  if (start < 0) return '';
+  const end = lines.findIndex((l, i) => i > start && /^G0 X0 Y0\b/.test(l.trim()));
+  if (end < 0) return '';
+  // The header before it sets units and the cutter; keep it.
+  return lines.slice(0, end + 1).join('\n');
+}
+
+/** The job cut down to one step of it (`stage`). */
+function stageJob(o: SimulationJobOptions): SimulationJobOptions {
+  if (o.stage === undefined || !o.setups?.length) return o;
+  const k = Math.max(0, Math.min(o.setups.length, Math.floor(o.stage)));
+  if (k > 0) return { ...o, stage: undefined, setups: o.setups.slice(0, k) };
+  // Only a top setup bores pins, so the block in its first frame, as one
+  // height map, is exact either way; a setup on an end turns it at placing.
+  const pins = o.setups[0].rotation[8] > 0 ? registrationPrelude(o.setups[0].gcode) : '';
+  return { ...o, stage: undefined, setups: undefined, gcode: pins, gcodeB: undefined };
+}
+
 export function runSimulationJob(o: SimulationJobOptions, onProgress?: (fraction: number) => void): SimulationJobResult {
+  o = stageJob(o);
   if (o.setups && o.setups.some(onASide)) return runFieldJob(o, o.setups, onProgress);
   if (o.setups && o.setups.length > 0) {
     // Only the top and the flip: the height-map pair has always described those exactly.
@@ -253,6 +285,14 @@ export function simulatedBody(
     /** Simulations already in the scene, so a new one goes past them. */
     existing?: SceneNode[];
     createdAt?: string;
+    /**
+     * Stand it as the block stands on the machine for a setup instead of the
+     * way the model stands: that setup's rotation from setup 1's frame
+     * (`SimulationSetup.rotation`), 'beside' only.
+     */
+    machineFrame?: number[];
+    /** Which step of a job this is, and the plan it belongs to. */
+    stage?: { index: number; of: number; planKey: string };
   }
 ): SceneNode {
   const p = sim.positions;
@@ -272,12 +312,16 @@ export function simulatedBody(
       world[v * 3 + 2] = (r ? r[2] * a + r[5] * b + r[8] * c : c) + m[2];
     }
   } else {
-    // Turned back the way the model stands, at the size it is cut.
+    // Turned back the way the model stands, at the size it is cut; or, for a
+    // step of the job, turned as the block stands for its setup.
     const r = transform.rotation;
+    const m = opts.machineFrame;
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     for (let v = 0; v < count; v++) {
       const a = p[v * 3], b = p[v * 3 + 1], c = p[v * 3 + 2];
-      const q = r
+      const q = m
+        ? [m[0] * a + m[1] * b + m[2] * c, m[3] * a + m[4] * b + m[5] * c, m[6] * a + m[7] * b + m[8] * c]
+        : r
         ? [r[0] * a + r[3] * b + r[6] * c, r[1] * a + r[4] * b + r[7] * c, r[2] * a + r[5] * b + r[8] * c]
         : [a, b, c];
       for (let k = 0; k < 3; k++) {
@@ -354,6 +398,7 @@ export function simulatedBody(
       cellMm: sim.cellMm,
       toleranceMm: sim.toleranceMm,
       placement: opts.placement,
+      ...(opts.stage ? { stage: opts.stage.index, stages: opts.stage.of, planKey: opts.stage.planKey } : {}),
     },
   };
 }
