@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { makePresetNoteCard, type NoteCard } from '../utils/noteCards';
+import { syncedSetter } from '../utils/syncedSetter';
 import { physicsGlobals, type CopilotMessage } from '../physicsGlobals';
 import { cloudAutosave } from '../utils/cloudDocuments';
 import { unloadIsAllowed } from '../utils/rescueScene';
@@ -14,7 +15,7 @@ const PENDING_CLEAN = Symbol('pending');
  * the scene has changed since it was last loaded, saved or imported.
  */
 export function useSceneDocument() {
-  const [noteCards, setNoteCards] = useState<NoteCard[]>(() => {
+  const [noteCards, setNoteCardsState] = useState<NoteCard[]>(() => {
     const initialPreset = useStore.getState().activePreset;
     if (initialPreset && !initialPreset.startsWith('user:')) {
       const card = makePresetNoteCard(initialPreset);
@@ -22,17 +23,26 @@ export function useSceneDocument() {
     }
     return [];
   });
+  /*
+   * The cards as last SET, not as last rendered. The MCP bridge sets the cards
+   * and reads them back in the same tick (LOAD_PRESET installs the preset's
+   * card, then refreshes its bounding boxes), and a getter closed over the
+   * rendered state handed back the card from before the set: loading 'empty'
+   * over the double pendulum wrote "Double Pendulum" straight back.
+   */
+  const noteCardsRef = useRef<NoteCard[]>(noteCards);
+  const [setNoteCards] = useState(() => syncedSetter(noteCardsRef, setNoteCardsState));
   const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
 
   // Expose noteCards and copilotMessages state to MCP bridge and noteCard manager
   useEffect(() => {
-    physicsGlobals._physics_getNoteCards = () => noteCards;
+    physicsGlobals._physics_getNoteCards = () => noteCardsRef.current;
     physicsGlobals._physics_setNoteCards = (cards: typeof noteCards) => setNoteCards(cards);
     physicsGlobals._physics_getCopilotMessages = () => copilotMessages;
     physicsGlobals._physics_setCopilotMessages = (msgs: typeof copilotMessages) => setCopilotMessages(msgs);
     physicsGlobals._physics_store = useStore;
-  }, [noteCards, copilotMessages]);
+  }, [noteCards, copilotMessages, setNoteCards]);
 
   /*
    * What the scene looked like when it was last loaded, saved or imported, so
@@ -106,7 +116,7 @@ export function useSceneDocument() {
     setCopilotMessages(chat);
     setEditingCardId(null);
     markClean(notes, chat);
-  }, [markClean]);
+  }, [markClean, setNoteCards]);
 
   return {
     noteCards, setNoteCards,

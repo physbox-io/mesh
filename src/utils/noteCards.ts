@@ -2,6 +2,8 @@
 // handler) so both paths produce the same note card for a given built-in preset
 // instead of App.tsx's copy silently diverging from — or simply not being reachable
 // from — the MCP bridge.
+import { bodyLocalMatrix, transformBox, type Box3Like } from './bodyWorld';
+
 export interface NoteCard { id: string; markdown: string; minimized: boolean; x: number; y: number }
 
 /** The geom fields the bounding-box estimate reads; any SceneGeom qualifies. */
@@ -9,6 +11,9 @@ export interface BoundsGeom {
   type?: string;
   size?: number[];
   pos?: number[];
+  quat?: number[];
+  euler?: number[];
+  csg?: string;
   fromto?: number[];
   vertices?: number[];
   renderVertices?: number[];
@@ -27,6 +32,8 @@ export interface BoundsNode {
   geoms?: BoundsGeom[];
   /** Body-local offset of a child, and the children measured relative to it. */
   pos?: number[];
+  quat?: number[];
+  euler?: number[];
   children?: BoundsNode[];
 }
 
@@ -640,105 +647,108 @@ export function makePresetNoteCard(presetKey: string): NoteCard | null {
   return { id: `preset_note_${presetKey}`, markdown: md, minimized: false, x: 16, y: 16 };
 }
 
-export function computeNodeBoundingBox(node: BoundsNode): { x: number; y: number; z: number } {
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  let minZ = Infinity, maxZ = -Infinity;
-
-  const includeBounds = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number) => {
-    if (x0 < minX) minX = x0;
-    if (x1 > maxX) maxX = x1;
-    if (y0 < minY) minY = y0;
-    if (y1 > maxY) maxY = y1;
-    if (z0 < minZ) minZ = z0;
-    if (z1 > maxZ) maxZ = z1;
+/**
+ * The box round a body and everything hung off it, in the body's own frame.
+ *
+ * Children are placed by their whole pose, not centred on their `pos`: a
+ * child's shape is rarely centred on its origin (a lattice part sits on its
+ * centre of mass, a leg hangs below its hinge), and centring it there was what
+ * reported a chair 686 mm deep that is 360. A negative (`csg: 'difference'`)
+ * takes material away and adds nothing to the size.
+ */
+function nodeLocalBox(node: BoundsNode): Box3Like | null {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  const include = (box: Box3Like) => {
+    for (let a = 0; a < 3; a++) {
+      if (box.min[a] < min[a]) min[a] = box.min[a];
+      if (box.max[a] > max[a]) max[a] = box.max[a];
+    }
   };
 
   if (node.width !== undefined || node.depth !== undefined || node.height !== undefined) {
     const w = node.width ?? 0.1;
     const d = node.depth ?? 0.1;
     const h = node.height ?? 0.1;
-    includeBounds(-w / 2, w / 2, -d / 2, d / 2, -h / 2, h / 2);
+    include({ min: [-w / 2, -d / 2, -h / 2], max: [w / 2, d / 2, h / 2] });
   }
-
   if (node.radius !== undefined && node.height !== undefined) {
     const r = node.radius;
     const h = node.height;
-    includeBounds(-r, r, -r, r, -h / 2, h / 2);
+    include({ min: [-r, -r, -h / 2], max: [r, r, h / 2] });
   }
-
   if (node.majorRadius !== undefined && node.tubeRadius !== undefined) {
-    const R = node.majorRadius;
+    const R = node.majorRadius + node.tubeRadius;
     const r = node.tubeRadius;
-    includeBounds(-(R + r), R + r, -(R + r), R + r, -r, r);
+    include({ min: [-R, -R, -r], max: [R, R, r] });
   }
 
-  if (Array.isArray(node.geoms)) {
-    for (const g of node.geoms) {
-      const gx = g.pos ? g.pos[0] : 0;
-      const gy = g.pos ? g.pos[1] : 0;
-      const gz = g.pos ? g.pos[2] : 0;
-
-      const verts = g.renderVertices || g.vertices;
-      if (Array.isArray(verts) && verts.length >= 3) {
-        for (let i = 0; i < verts.length; i += 3) {
-          const vx = verts[i] + gx;
-          const vy = verts[i + 1] + gy;
-          const vz = verts[i + 2] + gz;
-          includeBounds(vx, vx, vy, vy, vz, vz);
+  for (const g of node.geoms ?? []) {
+    if (g.csg === 'difference') continue;
+    const frame = bodyLocalMatrix(g);
+    const verts = g.renderVertices || g.vertices;
+    if (Array.isArray(verts) && verts.length >= 3) {
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i + 2 < verts.length; i += 3) {
+        for (let a = 0; a < 3; a++) {
+          const v = verts[i + a];
+          if (v < lo[a]) lo[a] = v;
+          if (v > hi[a]) hi[a] = v;
         }
-      } else if (g.fromto && g.fromto.length >= 6) {
-        const [x1, y1, z1, x2, y2, z2] = g.fromto;
-        const r = (g.size && g.size[0]) ? g.size[0] : 0.05;
-        includeBounds(
-          Math.min(x1, x2) - r + gx, Math.max(x1, x2) + r + gx,
-          Math.min(y1, y2) - r + gy, Math.max(y1, y2) + r + gy,
-          Math.min(z1, z2) - r + gz, Math.max(z1, z2) + r + gz
-        );
-      } else if (g.size && Array.isArray(g.size)) {
-        let sx: number, sy: number, sz: number;
-        if (g.type === 'box') {
-          sx = g.size[0] ?? 0.05;
-          sy = g.size[1] ?? sx;
-          sz = g.size[2] ?? sx;
-        } else if (g.type === 'sphere') {
-          sx = sy = sz = g.size[0] ?? 0.05;
-        } else if (g.type === 'cylinder' || g.type === 'capsule') {
-          sx = sy = g.size[0] ?? 0.05;
-          sz = g.size[1] ?? sx;
-        } else if (g.type === 'ellipsoid') {
-          sx = g.size[0] ?? 0.05;
-          sy = g.size[1] ?? sx;
-          sz = g.size[2] ?? sx;
-        } else {
-          sx = g.size[0] ?? 0.05;
-          sy = g.size[1] ?? sx;
-          sz = g.size[2] ?? sx;
-        }
-        includeBounds(gx - sx, gx + sx, gy - sy, gy + sy, gz - sz, gz + sz);
       }
+      include(transformBox({ min: lo, max: hi }, frame));
+    } else if (g.fromto && g.fromto.length >= 6) {
+      const [x1, y1, z1, x2, y2, z2] = g.fromto;
+      const r = (g.size && g.size[0]) ? g.size[0] : 0.05;
+      include({
+        min: [Math.min(x1, x2) - r, Math.min(y1, y2) - r, Math.min(z1, z2) - r],
+        max: [Math.max(x1, x2) + r, Math.max(y1, y2) + r, Math.max(z1, z2) + r],
+      });
+    } else if (g.size && Array.isArray(g.size)) {
+      if (g.type === 'plane' || g.type === 'mesh') continue;
+      let sx: number, sy: number, sz: number;
+      if (g.type === 'sphere') {
+        sx = sy = sz = g.size[0] ?? 0.05;
+      } else if (g.type === 'cylinder' || g.type === 'capsule') {
+        sx = sy = g.size[0] ?? 0.05;
+        sz = (g.size[1] ?? sx) + (g.type === 'capsule' ? sx : 0);
+      } else {
+        sx = g.size[0] ?? 0.05;
+        sy = g.size[1] ?? sx;
+        sz = g.size[2] ?? sx;
+      }
+      include(transformBox({ min: [-sx, -sy, -sz], max: [sx, sy, sz] }, frame));
     }
   }
 
-  if (Array.isArray(node.children)) {
-    for (const child of node.children) {
-      const cb = computeNodeBoundingBox(child);
-      const cx = child.pos ? child.pos[0] : 0;
-      const cy = child.pos ? child.pos[1] : 0;
-      const cz = child.pos ? child.pos[2] : 0;
-      includeBounds(cx - cb.x / 2, cx + cb.x / 2, cy - cb.y / 2, cy + cb.y / 2, cz - cb.z / 2, cz + cb.z / 2);
+  for (const child of node.children ?? []) {
+    const box = nodeLocalBox(child);
+    if (box) include(transformBox(box, bodyLocalMatrix(child)));
+  }
+
+  return min[0] === Infinity ? null : { min, max };
+}
+
+export function computeNodeBoundingBox(node: BoundsNode): { x: number; y: number; z: number } {
+  const box = nodeLocalBox(node);
+  if (!box) return { x: 0.1, y: 0.1, z: 0.1 };
+  return {
+    x: Math.max(0.001, box.max[0] - box.min[0]),
+    y: Math.max(0.001, box.max[1] - box.min[1]),
+    z: Math.max(0.001, box.max[2] - box.min[2]),
+  };
+}
+
+/** The bodies worth listing: everything but a ground plane. */
+function majorComponents(nodes: BoundsNode[]): BoundsNode[] {
+  return nodes.filter(n => {
+    const name = (n.name || n.id || '').toLowerCase();
+    if (name === 'floor' || name === 'ground' || name === 'world') {
+      if (n.geoms && n.geoms.some(g => g.type === 'plane')) return false;
     }
-  }
-
-  if (minX === Infinity) {
-    return { x: 0.1, y: 0.1, z: 0.1 };
-  }
-
-  const dx = Math.max(0.001, maxX - minX);
-  const dy = Math.max(0.001, maxY - minY);
-  const dz = Math.max(0.001, maxZ - minZ);
-
-  return { x: dx, y: dy, z: dz };
+    return true;
+  });
 }
 
 export function formatComponentBoundingBoxes(nodes: BoundsNode[]): string {
@@ -746,13 +756,7 @@ export function formatComponentBoundingBoxes(nodes: BoundsNode[]): string {
     return 'No major components in scene.';
   }
 
-  const majorNodes = nodes.filter(n => {
-    const name = (n.name || n.id || '').toLowerCase();
-    if (name === 'floor' || name === 'ground' || name === 'world') {
-      if (n.geoms && n.geoms.some(g => g.type === 'plane')) return false;
-    }
-    return true;
-  });
+  const majorNodes = majorComponents(nodes);
 
   const targets = majorNodes.length > 0 ? majorNodes : nodes;
 
@@ -930,6 +934,11 @@ export function updateOrCreateNotecard(options: {
     // edits now take the preserving path below, which keeps existing prose and
     // refreshes only the derived Component Bounding Boxes; a caller that really
     // does want to rewrite the card has SET_NOTE_CARDS for that.
+    // The Blank Scene card is right about an empty scene: rewriting it then
+    // (as the refresh after loading 'empty' did) swapped it for a generic
+    // "Physics Scene" card describing nothing.
+    if (isBlankCard && options.mode !== 'generate' && majorComponents(nodeArray).length === 0) return;
+
     if (options.mode === 'generate' || isBlankCard) {
       // Completely replace stale preset / Blank Scene card with the new scene title & summary!
       const contentMiddle = customSections ? `${summaryText}\n\n${customSections}` : summaryText;
