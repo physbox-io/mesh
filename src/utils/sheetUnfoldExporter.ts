@@ -2089,7 +2089,7 @@ function renderSheetUnfoldSvg(
     for (let s = 0; s < numSheets; s++) {
       const y0 = sheetYOffset(s);
       sheetOutlineParts.push(
-        `    <rect x="0" y="${fmt(y0)}" width="${fmt(sheetW)}" height="${fmt(sheetH)}" fill="none" stroke="#94a3b8" stroke-width="0.35" stroke-dasharray="6,4" />`
+        `    <rect x="0" y="${fmt(y0)}" width="${fmt(sheetW)}" height="${fmt(sheetH)}" data-operation="ghost" fill="none" stroke="#94a3b8" stroke-width="0.35" stroke-dasharray="6,4" />`
       );
       if (options.includeLabels) {
         labelParts.push(
@@ -2145,8 +2145,8 @@ function renderSheetUnfoldSvg(
       if (fe.bendZonePolygon2D && fe.bendZonePolygon2D.length === 4) {
         const bz = fe.bendZonePolygon2D;
         seamTabParts.push(
-          `    <line x1="${fmt(bz[0].x)}" y1="${fmt(bz[0].y + yOff)}" x2="${fmt(bz[1].x)}" y2="${fmt(bz[1].y + yOff)}" stroke-dasharray="1.5,1.5" />`,
-          `    <line x1="${fmt(bz[3].x)}" y1="${fmt(bz[3].y + yOff)}" x2="${fmt(bz[2].x)}" y2="${fmt(bz[2].y + yOff)}" stroke-dasharray="1.5,1.5" />`
+          `    <line x1="${fmt(bz[0].x)}" y1="${fmt(bz[0].y + yOff)}" x2="${fmt(bz[1].x)}" y2="${fmt(bz[1].y + yOff)}" stroke-dasharray="1.5,1.5" data-operation="ghost" />`,
+          `    <line x1="${fmt(bz[3].x)}" y1="${fmt(bz[3].y + yOff)}" x2="${fmt(bz[2].x)}" y2="${fmt(bz[2].y + yOff)}" stroke-dasharray="1.5,1.5" data-operation="ghost" />`
         );
         // Side bridges connecting bend zone to outer cut contour
         cutParts.push(
@@ -2203,23 +2203,23 @@ function renderSheetUnfoldSvg(
 
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(sheetW)}mm" height="${fmt(totalHeight)}mm" viewBox="0 0 ${fmt(sheetW)} ${fmt(totalHeight)}">`,
-    sheetOutlineParts.length > 0 ? `  <g id="layer-sheet-bounds">\n${sheetOutlineParts.join('\n')}\n  </g>` : '',
+    sheetOutlineParts.length > 0 ? `  <g id="layer-sheet-bounds" data-operation="ghost">\n${sheetOutlineParts.join('\n')}\n  </g>` : '',
     seamTabParts.length > 0
-      ? `  <g id="layer-seams-tabs" fill="none" stroke="#9333ea" stroke-width="0.25">\n${seamTabParts.join('\n')}\n  </g>`
+      ? `  <g id="layer-seams-tabs" data-operation="etch" fill="none" stroke="#9333ea" stroke-width="0.25">\n${seamTabParts.join('\n')}\n  </g>`
       : '',
     mountainParts.length > 0
-      ? `  <g id="layer-mountain-folds" fill="none" stroke="#2563eb" stroke-width="0.3" stroke-dasharray="4,2">\n${mountainParts.join('\n')}\n  </g>`
+      ? `  <g id="layer-mountain-folds" data-operation="etch" fill="none" stroke="#2563eb" stroke-width="0.3" stroke-dasharray="4,2">\n${mountainParts.join('\n')}\n  </g>`
       : '',
     valleyParts.length > 0
-      ? `  <g id="layer-valley-folds" fill="none" stroke="#16a34a" stroke-width="0.3" stroke-dasharray="5,2,1.2,2">\n${valleyParts.join('\n')}\n  </g>`
+      ? `  <g id="layer-valley-folds" data-operation="etch" fill="none" stroke="#16a34a" stroke-width="0.3" stroke-dasharray="5,2,1.2,2">\n${valleyParts.join('\n')}\n  </g>`
       : '',
     stitchHoleParts.length > 0
-      ? `  <g id="layer-stitch-holes" fill="none" stroke="#9333ea" stroke-width="0.25">\n${stitchHoleParts.join('\n')}\n  </g>`
+      ? `  <g id="layer-stitch-holes" data-operation="cut" fill="none" stroke="#9333ea" stroke-width="0.25">\n${stitchHoleParts.join('\n')}\n  </g>`
       : '',
     cutParts.length > 0
-      ? `  <g id="layer-cut" fill="none" stroke="#e11d48" stroke-width="0.35">\n${cutParts.join('\n')}\n  </g>`
+      ? `  <g id="layer-cut" data-operation="cut" fill="none" stroke="#e11d48" stroke-width="0.35">\n${cutParts.join('\n')}\n  </g>`
       : '',
-    labelParts.length > 0 ? `  <g id="layer-labels">\n${labelParts.join('\n')}\n  </g>` : '',
+    labelParts.length > 0 ? `  <g id="layer-labels" data-operation="etch">\n${labelParts.join('\n')}\n  </g>` : '',
     `</svg>`,
   ]
     .filter(Boolean)
