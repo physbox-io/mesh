@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PRESETS, birdhouseScadPreset } from '../src/presets/presetScenes';
 import { needsScadBuild } from '../src/hooks/useCsgCompile';
+import { collidersAreStale } from '../src/utils/convexDecomposition';
 import { makePresetNoteCard } from '../src/utils/noteCards';
 import type { SceneNode } from '../src/types/scene';
 import { simulate, type Sim } from './helpers/simulate';
@@ -281,6 +282,64 @@ describe('pulley system (Atwood machine)', () => {
     expect(Math.abs(right.pos[0])).toBeCloseTo(wheel.pulleyRadius!, 6);
     // ...and on the same axis as the support that holds it up.
     for (const n of [wheel, left, right]) expect(n.pos[1]).toBe(0);
+    // While the vertical column stands behind the wheel in -Y rather than
+    // passing straight through the wheel rim at y = 0.
+    const column = scene.nodes.find(n => n.id === 'pulley_support')!.geoms.find(g => g.name === 'support_column')!;
+    expect(column.fromto![1]).toBeLessThan(-0.03);
+    expect(column.fromto![4]).toBeLessThan(-0.03);
+  });
+});
+
+describe('golden gate bridge', () => {
+  it('anchors the cables and hangers to the static towers and keeps the deck clear of the legs', async () => {
+    const scene = preset('golden_gate') as unknown as { nodes: SceneNode[] };
+    const towers = scene.nodes.find(n => n.id === 'gg_towers')!;
+    const deck = scene.nodes.find(n => n.id === 'gg_deck')!;
+    expect(towers.geoms.some(g => g.name?.startsWith('cf_'))).toBe(true);
+    expect(towers.geoms.some(g => g.name?.startsWith('hf_'))).toBe(true);
+    expect(deck.geoms.some(g => g.name?.startsWith('cf_'))).toBe(false);
+
+    const sim = await simulate(preset('golden_gate'));
+    try {
+      // With the deck sized to clear the tower legs, nothing interpenetrates at t=0.
+      sim.step(1);
+      expect(sim.data.ncon).toBe(0);
+    } finally {
+      sim.dispose();
+    }
+  });
+});
+
+describe('openscad showcase', () => {
+  it('catches the falling spheres inside the decomposed hollow tray and invalidates colliders on mesh edit', async () => {
+    const scene = preset('openscad_demo') as unknown as { nodes: SceneNode[] };
+    const container = scene.nodes.find(n => n.id === 'scad_container')!;
+    expect(container.geoms.filter(g => !g.csgDerived)).toHaveLength(1);
+    expect(container.geoms.filter(g => g.csgDerived === 'collider')).toHaveLength(5);
+    expect(collidersAreStale(container)).toBe(false);
+
+    // Editing the compiled mesh marks the colliders stale so V-HACD rebuilds them.
+    const edited: SceneNode = {
+      ...container,
+      geoms: container.geoms.map(g => g.name === 'scad_container_geom'
+        ? { ...g, renderVertices: g.renderVertices!.map(v => v * 1.2) }
+        : g),
+    };
+    expect(collidersAreStale(edited)).toBe(true);
+
+    const sim = await simulate(preset('openscad_demo'));
+    try {
+      sim.run(2);
+      const rimZ = sim.bodyPos('scad_container')[2] + 0.10;
+      const floorZ = sim.bodyPos('scad_container')[2] - 0.07;
+      for (const ball of ['ball_red', 'ball_green', 'ball_yellow']) {
+        const [, , bz] = sim.bodyPos(ball);
+        expect(bz).toBeGreaterThan(floorZ);
+        expect(bz).toBeLessThan(rimZ);
+      }
+    } finally {
+      sim.dispose();
+    }
   });
 });
 

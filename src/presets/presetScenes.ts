@@ -9,6 +9,8 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
  */
 export type PresetCamera = { position: [number, number, number]; target: [number, number, number] };
 import { generateCurveGeoms, generateWedgeMeshData, generateConeMeshData } from '../utils/geom';
+import { colliderTemplateOf, convexHullOf, hullsToColliderGeoms, type Hull } from '../utils/csg';
+import { collisionHashOf } from '../utils/convexDecomposition';
 import { buildInvoluteGearNode, buildRackAndPinionPair, GEAR_AMBER, GEAR_BLUE } from '../utils/mechanismParts';
 import { californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS } from './californiaRelief';
 import { megaBustStudioPreset } from './megaBustStudio';
@@ -411,20 +413,22 @@ export const pulleySystemPreset: SceneGraph = {
       pos: [0, 0, 0],
       geoms: [
         // Starts at z = 0.02, not 0: a capsule's cap is a hemisphere of its
-        // radius, so from 0 the base would sink through the floor.
+        // radius, so from 0 the base would sink through the floor. Offset in -Y
+        // behind the wheel so the column does not pass through the pulley rim.
         {
           name: 'support_column',
           type: 'capsule',
-          fromto: [0, 0, 0.02, 0, 0, PULLEY_WHEEL_Z + 0.07],
+          fromto: [0, -0.045, 0.02, 0, -0.045, PULLEY_WHEEL_Z + 0.04],
           size: [0.02],
           rgba: [0.4, 0.4, 0.4, 1]
         },
-        // The axle. Non-colliding: it passes through the hub by design and is
-        // joined to it by the hinge, not by contact.
+        // Cantilevered axle extending forward from the column through the wheel
+        // hub at y = 0. Non-colliding: it passes through the hub by design and
+        // is joined to it by the hinge, not by contact.
         {
           name: 'support_axle',
           type: 'cylinder',
-          fromto: [0, -0.035, PULLEY_WHEEL_Z, 0, 0.035, PULLEY_WHEEL_Z],
+          fromto: [0, -0.045, PULLEY_WHEEL_Z, 0, 0.025, PULLEY_WHEEL_Z],
           size: [0.008],
           rgba: [0.3, 0.3, 0.3, 1],
           contype: 0,
@@ -914,7 +918,7 @@ export const goldenGateBridgePreset: SceneGraph = (() => {
   const makeTowerGeoms = (x: number, prefix: string): SceneGeom[] => [
     { name: `${prefix}_leg_f`, type: 'box',     size: [0.02, 0.02, 0.2], pos: [x, -0.08, 0.2], rgba: ORANGE },
     { name: `${prefix}_leg_b`, type: 'box',     size: [0.02, 0.02, 0.2], pos: [x,  0.08, 0.2], rgba: ORANGE },
-    { name: `${prefix}_xb_lo`, type: 'box',     size: [0.02, 0.10, 0.015], pos: [x, 0, 0.1],   rgba: ORANGE },
+    { name: `${prefix}_xb_lo`, type: 'box',     size: [0.02, 0.10, 0.015], pos: [x, 0, 0.045], rgba: ORANGE },
     { name: `${prefix}_xb_hi`, type: 'box',     size: [0.02, 0.10, 0.015], pos: [x, 0, 0.35],  rgba: ORANGE },
   ];
 
@@ -945,16 +949,20 @@ export const goldenGateBridgePreset: SceneGraph = (() => {
     nodes: [
       {
         id: 'gg_towers', name: 'gg_towers', type: 'body' as const, pos: [0, 0, 0], joints: [],
-        geoms: [...makeTowerGeoms(-0.35, 'tl'), ...makeTowerGeoms(0.35, 'tr')],
+        geoms: [
+          ...makeTowerGeoms(-0.35, 'tl'), ...makeTowerGeoms(0.35, 'tr'),
+          ...makeCableGeoms(-0.08, 'cf'), ...makeCableGeoms(0.08, 'cb'),
+          ...makeHangerGeoms(-0.08, 'hf'), ...makeHangerGeoms(0.08, 'hb'),
+        ],
         children: [],
       },
       {
-        id: 'gg_deck', name: 'gg_deck', type: 'body' as const, pos: [0, 0, 0],
-        joints: [{ name: 'gg_sway', type: 'ball', pos: [0, 0, 0], damping: 30, stiffness: 120 }],
+        id: 'gg_deck', name: 'gg_deck', type: 'body' as const, pos: [0, 0, 0.08],
+        // Suspended from the overhead cable line (z = 0.32 in world space) and
+        // sized to clear the tower legs at x = ±0.35, y = ±0.08.
+        joints: [{ name: 'gg_sway', type: 'ball', pos: [0, 0, 0.24], damping: 15, stiffness: 120 }],
         geoms: [
-          { name: 'gg_deck_box', type: 'box', size: [0.35, 0.08, 0.01], pos: [0, 0, 0.08], rgba: GREY, mass: 60 },
-          ...makeCableGeoms(-0.08, 'cf'), ...makeCableGeoms(0.08, 'cb'),
-          ...makeHangerGeoms(-0.08, 'hf'), ...makeHangerGeoms(0.08, 'hb'),
+          { name: 'gg_deck_box', type: 'box', size: [0.325, 0.058, 0.01], pos: [0, 0, 0], rgba: GREY, mass: 6 },
         ],
         children: [],
       },
@@ -2090,7 +2098,7 @@ const yawScript = `
 const [windX, windY] = api.getWind();
 const targetYaw = Math.atan2(windY, windX);
 const currentYaw = api.getJointPosition('yaw_hinge');
-const yawError = targetYaw - currentYaw;
+const yawError = Math.atan2(Math.sin(targetYaw - currentYaw), Math.cos(targetYaw - currentYaw));
 const yawVel = api.getJointVelocity('yaw_hinge');
 api.applyJointForce('yaw_hinge', 8 * yawError - 3 * yawVel);
 `.trim();
@@ -2216,120 +2224,135 @@ export const bouncyBallsPreset: SceneGraph = (() => {
   return { nodes };
 })();
 
-export const openscadDemoPreset: SceneGraph = {
-  nodes: [
-    {
-      id: 'scad_container',
-      name: 'scad_container',
-      type: 'body',
-      pos: [0, 0, 0.15],
-      joints: [{ name: 'scad_container_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
-      geoms: [
-        { name: 'scad_container_floor', type: 'box', size: [0.15, 0.15, 0.015], pos: [0, 0, -0.085], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
-        { name: 'scad_container_wall_px', type: 'box', size: [0.015, 0.15, 0.085], pos: [0.135, 0, 0.015], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
-        { name: 'scad_container_wall_nx', type: 'box', size: [0.015, 0.15, 0.085], pos: [-0.135, 0, 0.015], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
-        { name: 'scad_container_wall_py', type: 'box', size: [0.15, 0.015, 0.085], pos: [0, 0.135, 0.015], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
-        { name: 'scad_container_wall_ny', type: 'box', size: [0.15, 0.015, 0.085], pos: [0, -0.135, 0.015], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
-        {
-          name: 'scad_container_geom',
-          type: 'mesh',
-          size: [1],
-          rgba: [0.2, 0.5, 0.8, 1],
-          mass: 0.001,
-          contype: 0,
-          conaffinity: 0,
-          dynamic: true,
-          vertices: [
-            -0.15, -0.1, -0.15,
-             0.15, -0.1, -0.15,
-             0.15, -0.1,  0.15,
-            -0.15, -0.1,  0.15,
-            -0.15,  0.1, -0.15,
-             0.15,  0.1, -0.15,
-             0.15,  0.1,  0.15,
-            -0.15,  0.1,  0.15,
-            -0.12, -0.07, -0.12,
-             0.12, -0.07, -0.12,
-             0.12, -0.07,  0.12,
-            -0.12, -0.07,  0.12,
-            -0.12,  0.1, -0.12,
-             0.12,  0.1, -0.12,
-             0.12,  0.1,  0.12,
-            -0.12,  0.1,  0.12
-          ],
-          renderVertices: [
-            -0.15,  0.15, -0.1,
-             0.15,  0.15, -0.1,
-             0.15, -0.15, -0.1,
-            -0.15, -0.15, -0.1,
-            -0.15,  0.15,  0.1,
-             0.15,  0.15,  0.1,
-             0.15, -0.15,  0.1,
-            -0.15, -0.15,  0.1,
-            -0.12,  0.12, -0.07,
-             0.12,  0.12, -0.07,
-             0.12, -0.12, -0.07,
-            -0.12, -0.12, -0.07,
-            -0.12,  0.12,  0.1,
-             0.12,  0.12,  0.1,
-             0.12, -0.12,  0.1,
-            -0.12, -0.12,  0.1
-          ],
-          // The shell of the difference() below: outer walls facing out, cavity
-          // walls facing into the cavity, rim on top. 26 of these 28 triangles
-          // used to face the other way — the two that did not are what made it
-          // a MIXED winding, which a signed-volume check cannot see (CLAUDE.md
-          // § Traps) and which MuJoCo will not integrate an inertia over.
-          faces: [
-            0, 1, 2,  0, 2, 3,
-            0, 5, 1,  0, 4, 5,
-            1, 6, 2,  1, 5, 6,
-            2, 7, 3,  2, 6, 7,
-            3, 4, 0,  3, 7, 4,
-            4, 13, 5,  4, 12, 13,
-            5, 14, 6,  5, 13, 14,
-            6, 15, 7,  6, 14, 15,
-            7, 12, 4,  7, 15, 12,
-            8, 10, 9,  8, 11, 10,
-            8, 13, 12,  8, 9, 13,
-            9, 14, 13,  9, 10, 14,
-            10, 15, 14,  10, 11, 15,
-            11, 12, 15,  11, 8, 12
-          ]
-        }
-      ],
-      scad: `// OpenSCAD Showcase Scene\n// A hollow box that catches falling spheres!\nbox_size = 0.3; // [0.15:0.02:0.5]\nbox_height = 0.2; // [0.1:0.02:0.4]\ninner_size = 0.24; // [0.1:0.02:0.4]\ndifference() {\n  cube([box_size, box_size, box_height], center=true);\n  translate([0, 0, 0.03]) cube([inner_size, inner_size, box_height], center=true);\n}`,
-      children: []
-    },
-    {
-      id: 'ball_red',
-      name: 'ball_red',
-      type: 'body',
-      pos: [-0.04, 0, 0.4],
-      joints: [{ name: 'ball_red_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
-      geoms: [{ name: 'ball_red_geom', type: 'sphere', size: [0.04], rgba: [0.8, 0.2, 0.2, 1], mass: 0.2 }],
-      children: []
-    },
-    {
-      id: 'ball_green',
-      name: 'ball_green',
-      type: 'body',
-      pos: [0.05, 0, 0.5],
-      joints: [{ name: 'ball_green_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
-      geoms: [{ name: 'ball_green_geom', type: 'sphere', size: [0.03], rgba: [0.2, 0.8, 0.2, 1], mass: 0.15 }],
-      children: []
-    },
-    {
-      id: 'ball_yellow',
-      name: 'ball_yellow',
-      type: 'body',
-      pos: [0, 0, 0.6],
-      joints: [{ name: 'ball_yellow_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
-      geoms: [{ name: 'ball_yellow_geom', type: 'sphere', size: [0.045], rgba: [0.8, 0.8, 0.2, 1], mass: 0.3 }],
-      children: []
-    }
-  ]
-};
+export const openscadDemoPreset: SceneGraph = (() => {
+  const boxHull = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): Hull => convexHullOf([
+    [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+    [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+  ])!;
+  const meshGeom: SceneGeom = {
+    name: 'scad_container_geom',
+    type: 'mesh',
+    size: [1],
+    rgba: [0.2, 0.5, 0.8, 1],
+    mass: 2.0,
+    dynamic: true,
+    vertices: [
+      -0.15, -0.1, -0.15,
+       0.15, -0.1, -0.15,
+       0.15, -0.1,  0.15,
+      -0.15, -0.1,  0.15,
+      -0.15,  0.1, -0.15,
+       0.15,  0.1, -0.15,
+       0.15,  0.1,  0.15,
+      -0.15,  0.1,  0.15,
+      -0.12, -0.07, -0.12,
+       0.12, -0.07, -0.12,
+       0.12, -0.07,  0.12,
+      -0.12, -0.07,  0.12,
+      -0.12,  0.1, -0.12,
+       0.12,  0.1, -0.12,
+       0.12,  0.1,  0.12,
+      -0.12,  0.1,  0.12
+    ],
+    renderVertices: [
+      -0.15,  0.15, -0.1,
+       0.15,  0.15, -0.1,
+       0.15, -0.15, -0.1,
+      -0.15, -0.15, -0.1,
+      -0.15,  0.15,  0.1,
+       0.15,  0.15,  0.1,
+       0.15, -0.15,  0.1,
+      -0.15, -0.15,  0.1,
+      -0.12,  0.12, -0.07,
+       0.12,  0.12, -0.07,
+       0.12, -0.12, -0.07,
+      -0.12, -0.12, -0.07,
+      -0.12,  0.12,  0.1,
+       0.12,  0.12,  0.1,
+       0.12, -0.12,  0.1,
+      -0.12, -0.12,  0.1
+    ],
+    // The shell of the difference() below: outer walls facing out, cavity
+    // walls facing into the cavity, rim on top. 26 of these 28 triangles
+    // used to face the other way — the two that did not are what made it
+    // a MIXED winding, which a signed-volume check cannot see (CLAUDE.md
+    // § Traps) and which MuJoCo will not integrate an inertia over.
+    faces: [
+      0, 1, 2,  0, 2, 3,
+      0, 5, 1,  0, 4, 5,
+      1, 6, 2,  1, 5, 6,
+      2, 7, 3,  2, 6, 7,
+      3, 4, 0,  3, 7, 4,
+      4, 13, 5,  4, 12, 13,
+      5, 14, 6,  5, 13, 14,
+      6, 15, 7,  6, 14, 15,
+      7, 12, 4,  7, 15, 12,
+      8, 10, 9,  8, 11, 10,
+      8, 13, 12,  8, 9, 13,
+      9, 14, 13,  9, 10, 14,
+      10, 15, 14,  10, 11, 15,
+      11, 12, 15,  11, 8, 12
+    ]
+  };
+  const hulls = [
+    boxHull(-0.15,  0.15, -0.15,  0.15, -0.10, -0.07),
+    boxHull( 0.12,  0.15, -0.15,  0.15, -0.07,  0.10),
+    boxHull(-0.15, -0.12, -0.15,  0.15, -0.07,  0.10),
+    boxHull(-0.12,  0.12,  0.12,  0.15, -0.07,  0.10),
+    boxHull(-0.12,  0.12, -0.15, -0.12, -0.07,  0.10),
+  ];
+  const colliders = hullsToColliderGeoms(
+    hulls,
+    'scad_container',
+    colliderTemplateOf(meshGeom, meshGeom.rgba!),
+    meshGeom.mass!,
+  ).map(g => ({ ...g, colliderOf: meshGeom.name }));
+  const container: SceneNode = {
+    id: 'scad_container',
+    name: 'scad_container',
+    type: 'body',
+    pos: [0, 0, 0.15],
+    joints: [{ name: 'scad_container_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
+    geoms: [meshGeom, ...colliders],
+    collisionDecomposed: true,
+    collisionSolidity: 0.448,
+    scad: `// OpenSCAD Showcase Scene\n// A hollow box that catches falling spheres!\nbox_size = 0.3; // [0.15:0.02:0.5]\nbox_height = 0.2; // [0.1:0.02:0.4]\ninner_size = 0.24; // [0.1:0.02:0.4]\ndifference() {\n  cube([box_size, box_size, box_height], center=true);\n  translate([0, 0, 0.03]) cube([inner_size, inner_size, box_height], center=true);\n}`,
+    children: []
+  };
+  container.collisionHash = collisionHashOf(container);
+  return {
+    nodes: [
+      container,
+      {
+        id: 'ball_red',
+        name: 'ball_red',
+        type: 'body',
+        pos: [-0.04, 0, 0.4],
+        joints: [{ name: 'ball_red_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
+        geoms: [{ name: 'ball_red_geom', type: 'sphere', size: [0.04], rgba: [0.8, 0.2, 0.2, 1], mass: 0.2 }],
+        children: []
+      },
+      {
+        id: 'ball_green',
+        name: 'ball_green',
+        type: 'body',
+        pos: [0.05, 0, 0.5],
+        joints: [{ name: 'ball_green_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
+        geoms: [{ name: 'ball_green_geom', type: 'sphere', size: [0.03], rgba: [0.2, 0.8, 0.2, 1], mass: 0.15 }],
+        children: []
+      },
+      {
+        id: 'ball_yellow',
+        name: 'ball_yellow',
+        type: 'body',
+        pos: [0, 0, 0.6],
+        joints: [{ name: 'ball_yellow_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
+        geoms: [{ name: 'ball_yellow_geom', type: 'sphere', size: [0.045], rgba: [0.8, 0.8, 0.2, 1], mass: 0.3 }],
+        children: []
+      }
+    ]
+  };
+})();
 
 export const ropeBridgePreset: SceneGraph = {
   nodes: [

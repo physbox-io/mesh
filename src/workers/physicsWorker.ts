@@ -665,12 +665,6 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
             const ty_aero = pitchMoment * spanY;
             const tz_aero = pitchMoment * spanZ;
 
-            const bankAngle = Math.atan2(upX * spanY - upY * spanX, upZ);
-            const rollRestoring = -0.1 * bankAngle * q * wingArea * chord;
-            const tx_roll = rollRestoring * noseX;
-            const ty_roll = rollRestoring * noseY;
-            const tz_roll = rollRestoring * noseZ;
-
             const tx_lever = ry * fz - rz * fy;
             const ty_lever = rz * fx - rx * fz;
             const tz_lever = rx * fy - ry * fx;
@@ -679,14 +673,14 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
             xfrc[pId * 6 + 1] += fy;
             xfrc[pId * 6 + 2] += fz;
 
-            xfrc[pId * 6 + 3] += tx_aero + tx_roll + tx_lever;
-            xfrc[pId * 6 + 4] += ty_aero + ty_roll + ty_lever;
-            xfrc[pId * 6 + 5] += tz_aero + tz_roll + tz_lever;
+            xfrc[pId * 6 + 3] += tx_aero + tx_lever;
+            xfrc[pId * 6 + 4] += ty_aero + ty_lever;
+            xfrc[pId * 6 + 5] += tz_aero + tz_lever;
 
             aeroDiagnostics[node.name || node.id] = {
               relSpeed, alpha: alpha * 180 / Math.PI, CL, CD,
               force: [fx, fy, fz],
-              torque: [tx_aero + tx_roll + tx_lever, ty_aero + ty_roll + ty_lever, tz_aero + tz_roll + tz_lever],
+              torque: [tx_aero + tx_lever, ty_aero + ty_lever, tz_aero + tz_lever],
             };
           } else {
             aeroDiagnostics[node.name || node.id] = { relSpeed, alpha: 0, CL: 0, CD: 0, force: [0, 0, 0], torque: [0, 0, 0] };
