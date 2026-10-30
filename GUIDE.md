@@ -282,9 +282,16 @@ These things about it are load-bearing:
 * **Derived colliders are ordinary geoms**, replaced wholesale by `applyNodeColliders` and
   fingerprinted by `collisionHash` so the decomposition runs once per real edit rather than per
   keystroke. Same pattern as `csgHash`, and deliberately a separate field.
-* **Demoting the source mesh is not symmetric.** A *dynamic* mesh is drawn from the body transform,
-  so it is dropped from the model entirely. A *static* mesh is drawn from `data.geom_xpos` via its
-  geom id, so dropping it makes the body jump to the origin — it stays, with contact and mass zeroed.
+* **The source mesh stays, out of contact, and carries the mass.** The pieces overlap and stand
+  proud of the surface or short of it, so a body weighed by them leaned with them (a symmetric
+  cup's centre of mass 0.9 mm off its axis, a bowl's moments unequal across it). So the mesh they
+  stand in for stays in the model with `role: 'visual'` (no contact), weighed exactly by MuJoCo
+  (`inertia="exact"`) with the mass its pieces were given, and the pieces are emitted massless
+  (`demoteDecomposedGeom` in `csg.ts`). A mesh MuJoCo cannot weigh exactly (`meshWeighsExactly`:
+  not closed, inside out, or a non-positive inertia) keeps the old asymmetry: the pieces carry the
+  mass, and the mesh is dropped if *dynamic* (drawn from the body transform) or kept massless if
+  *static* — a static mesh is drawn from `data.geom_xpos` via its geom id, and dropping it makes the
+  body jump to the origin.
 * **A decomposed hollow body gets lighter**, because it is weighed by what is there rather than by
   its hull. Often by a factor of three. Correct, the same defect `inertia="exact"` fixed for the oak
   tree, and surfaced in the panel rather than applied silently.

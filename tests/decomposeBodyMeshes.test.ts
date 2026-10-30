@@ -11,7 +11,7 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { bodyFrameMesh, decomposeNodeColliders } from '../src/utils/convexDecomposition';
 import { meshVolumeAndCentroid, resolveCsgGeoms } from '../src/utils/csg';
-import { boxMesh, cupMesh, torusMesh, zupToYupFlat } from './helpers/meshes';
+import { boxMesh, cupMesh, flipMesh, torusMesh, zupToYupFlat } from './helpers/meshes';
 import { simulate, type Sim } from './helpers/simulate';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 
@@ -118,7 +118,7 @@ describe('decomposing every mesh of a body', () => {
 describe('what a decomposed body keeps', () => {
   const physics = (node: SceneNode) => resolveCsgGeoms(node, 'physics');
 
-  it('drops only the meshes its pieces stand in for', async () => {
+  it('demotes only the meshes its pieces stand in for', async () => {
     const node = await decomposed(body([
       meshGeom('platform', cupMesh({ outerR: 0.1, innerR: 0.09, height: 0.03, baseThickness: 0.01 })),
       // Convex: collides exactly as its own hull, so it is never decomposed.
@@ -127,8 +127,10 @@ describe('what a decomposed body keeps', () => {
       { name: 'deck', type: 'cylinder', size: [0.1, 0.005] },
     ]));
     const names = physics(node).map(g => g.name);
-    expect(names).not.toContain('platform');
+    // Kept out of contact, as what the body is weighed by (see below).
+    expect(physics(node).find(g => g.name === 'platform')!.role).toBe('visual');
     expect(names).toEqual(expect.arrayContaining(['canopy', 'sleeve', 'deck']));
+    expect(physics(node).find(g => g.name === 'canopy')!.role).toBeUndefined();
     expect(physics(node).find(g => g.name === 'sleeve')!.mass).toBe(0.3);
     expect(names.filter(n => n.startsWith('b_csg_col')).length).toBeGreaterThan(1);
   }, 60_000);
@@ -143,11 +145,29 @@ describe('what a decomposed body keeps', () => {
     expect(physics(node).map(g => g.name)).toEqual(['decor', 'old_csg_col0']);
   });
 
-  it('keeps a static mesh it stands in for, drawn but massless and out of contact', async () => {
+  // The pieces overlap and stand proud or short of the surface, so a body
+  // weighed by them leaned wherever they did: a symmetric cup's centre of mass
+  // came out 0.9 mm off its axis. The mesh, integrated exactly, is the solid.
+  it('weighs the body by the mesh its pieces stand in for, out of contact, and the pieces by nothing', async () => {
+    for (const dynamic of [true, false]) {
+      const node = await decomposed(body([meshGeom('platform', cupMesh(), { dynamic })]));
+      const geoms = physics(node);
+      const kept = geoms.find(g => g.name === 'platform')!;
+      const pieces = node.geoms!.filter(g => g.csgDerived === 'collider');
+      expect(kept.role).toBe('visual');
+      expect(kept.mass).toBeCloseTo(pieces.reduce((m, g) => m + (g.mass ?? 0), 0), 8);
+      expect(geoms.filter(g => g.csgDerived === 'collider').every(g => g.mass === 0)).toBe(true);
+    }
+  }, 60_000);
+
+  it('keeps the old way round for a mesh MuJoCo cannot weigh exactly', async () => {
     const node = await decomposed(body([meshGeom('platform', cupMesh(), { dynamic: false })]));
-    const kept = physics(node).find(g => g.name === 'platform')!;
-    expect(kept.role).toBe('visual');
+    // Turned inside out after it was decomposed: its exact inertia would be negative.
+    const inverted = flipMesh({ verts: [], faces: node.geoms![0].faces! }).faces;
+    const broken = { ...node, geoms: [{ ...node.geoms![0], faces: inverted }, ...node.geoms!.slice(1)] };
+    const kept = physics(broken).find(g => g.name === 'platform')!;
     expect(kept.mass).toBe(0);
+    expect(physics(broken).filter(g => g.csgDerived === 'collider').every(g => (g.mass ?? 0) > 0)).toBe(true);
   }, 60_000);
 
   it('weighs the whole body in the mass warning, not just the mesh that got lighter', async () => {

@@ -37,6 +37,7 @@ import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { PairMemo } from './arrayMemo';
 import { edgeRoundSolids, hasEdgeRounds } from './edgeRound';
 import { analyzeMesh } from './meshIntegrity';
+import { checkMeshInertia } from './meshInertiaCheck';
 import { dropCollapsedTriangles } from './meshTidy';
 // NOTE: ./openscad is imported lazily inside evaluateNodeCsg, not here. It
 // reaches the Zustand store (for the compile counter), which reaches the physics
@@ -2752,19 +2753,46 @@ export function isCollidingMeshGeom(g: SceneGeom): boolean {
  * What becomes of an authored geom once its body collides as convex pieces.
  *
  * A primitive is already convex and goes on colliding as itself — only the mesh
- * is replaced. And whether that mesh can be dropped from the model entirely
- * depends on how the renderer finds it, which is NOT symmetric:
+ * is replaced, and it stays in the model, out of contact, as what the body is
+ * WEIGHED by. The pieces overlap, and stand proud of the surface or short of
+ * it, so a body weighed by them puts its centre of mass wherever they happen
+ * to lean: a symmetric cup's came out 0.9 mm off its axis, a paraboloid bowl's
+ * 0.25 mm. The mesh itself, integrated exactly (inertia="exact" in mjcf.ts),
+ * is the true solid. So it carries the mass its pieces were given, and they
+ * carry none.
  *
- *   - a DYNAMIC mesh is drawn from the body transform (data.xpos/xmat — see the
- *     isDynamic branch in SceneLayer), so it needs no geom in the model at all.
- *     Dropping it saves MuJoCo parsing the asset and hulling it for nothing.
- *   - a STATIC mesh is drawn from data.geom_xpos via its geom id. Drop it and
- *     that lookup returns -1, the transform falls back to identity, and the body
- *     visibly jumps to the origin. So it stays, with contact zeroed and no mass.
+ * Only a mesh MuJoCo can integrate exactly earns that (meshWeighsExactly);
+ * any other keeps the old way round, its pieces carrying the mass and the mesh
+ * dropped (dynamic) or kept massless (static) — a STATIC mesh is drawn from
+ * data.geom_xpos via its geom id, and dropped it would jump to the origin.
  */
-function demoteDecomposedGeom(g: SceneGeom): SceneGeom[] {
+function demoteDecomposedGeom(g: SceneGeom, pieces: SceneGeom[]): SceneGeom[] {
   if (g.type !== 'mesh') return [g];
+  if (pieces.length > 0 && meshWeighsExactly(g)) {
+    const mass = +pieces.reduce((m, c) => m + (c.mass ?? 0), 0).toFixed(8);
+    if (mass > 0) return [{ ...g, role: 'visual' as const, mass, density: undefined }];
+  }
   return g.dynamic ? [] : [{ ...g, role: 'visual' as const, mass: 0 }];
+}
+
+const exactlyWeighable = new WeakMap<object, boolean>();
+
+/**
+ * Whether MuJoCo can weigh a mesh by its own volume: closed, wound outward
+ * and with a positive-definite inertia — the test mjcf.ts applies before it
+ * asks for inertia="exact", so the two agree. Remembered per face array.
+ */
+export function meshWeighsExactly(g: SceneGeom): boolean {
+  const verts = g.renderVertices || g.vertices;
+  const faces = g.faces;
+  if (!verts?.length || !faces?.length) return false;
+  const known = exactlyWeighable.get(faces);
+  if (known !== undefined) return known;
+  const integrity = analyzeMesh(verts, faces);
+  const ok = !!integrity && integrity.closed && integrity.consistentlyWound && integrity.volume > 0
+    && checkMeshInertia(verts, faces).ok;
+  exactlyWeighable.set(faces, ok);
+  return ok;
 }
 
 export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): SceneGeom[] {
@@ -2798,7 +2826,17 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
     const demoted = (g: SceneGeom) => (g.type === 'mesh' && g.role === 'visual') ||
       (isCollidingMeshGeom(g) && (legacy || represented.has(g.name)));
     const authored = solid.filter(g => g.csgDerived !== 'collider');
-    return [...authored.flatMap(g => (demoted(g) ? demoteDecomposedGeom(g) : [g])), ...colliders];
+    // Pieces named for their mesh hand it their mass; older pieces, which
+    // stand for every colliding mesh at once, keep theirs.
+    const weighed = new Set<string>();
+    const kept = authored.flatMap(g => {
+      if (!demoted(g)) return [g];
+      const pieces = legacy ? [] : colliders.filter(c => c.colliderOf === g.name);
+      const out = demoteDecomposedGeom(g, pieces);
+      if (out.some(o => (o.mass ?? 0) > 0)) weighed.add(g.name);
+      return out;
+    });
+    return [...kept, ...colliders.map(c => (c.colliderOf !== undefined && weighed.has(c.colliderOf) ? { ...c, mass: 0 } : c))];
   }
 
   const derived = geoms.filter(g => !!g.csgDerived);

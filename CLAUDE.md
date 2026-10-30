@@ -69,10 +69,11 @@ running −Z — so a quad's winding cannot be copied from one to the other unch
 **Concave shapes collide as convex pieces now, and the source mesh is demoted asymmetrically.**
 MuJoCo hulls every mesh geom, so a cup used to be a solid billet. `utils/convexDecomposition.ts`
 measures solidity (true volume / hull volume) and sends anything below ~0.92 through V-HACD. The
-trap is in `resolveCsgGeoms`: once a body has colliders, a **dynamic** source mesh is dropped from
-the model entirely (it draws from the body transform), while a **static** one must stay emitted with
-contact zeroed — drop it and `geomId` is -1, the renderer falls back to identity, and the body jumps
-to the origin. See GUIDE.md § Concave collision.
+trap is in `resolveCsgGeoms`: once a body has colliders, the source mesh stays emitted with contact
+zeroed and carries the body's mass (exact inertia; the pieces are massless), unless MuJoCo cannot
+weigh it exactly — then a **dynamic** one is dropped (it draws from the body transform) while a
+**static** one must still stay, massless — drop it and `geomId` is -1, the renderer falls back to
+identity, and the body jumps to the origin. See GUIDE.md § Concave collision.
 
 **A safe toolpath can still waste the afternoon.** The carve tests mostly check safety: no rapid
 through stock, no gouge, no dive. Twice a roughing pass passed all of them and went to the machine
