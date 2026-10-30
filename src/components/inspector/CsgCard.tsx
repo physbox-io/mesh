@@ -149,11 +149,11 @@ export function CsgCard({ node: selectedNode }: { node: SceneNode }) {
 
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-slate-500 flex justify-between">
-              Total mass <SliderValue value={csgMassOf(selectedNode, selectedNode.csgVolume ?? 0)} onChange={(v) => updateNode(selectedNode.id, { csgMass: v })} decimals={3} unit="kg" min={0.01} max={20} />
+              Total mass <SliderValue value={csgMassOf(selectedNode, selectedNode.csgVolume ?? 0)} onChange={(v) => updateNode(selectedNode.id, { collisionMass: v, csgMass: undefined })} decimals={3} unit="kg" min={0.01} max={20} />
             </label>
             <RangeInput min="0.01" max="20" step="0.01"
               value={csgMassOf(selectedNode, selectedNode.csgVolume ?? 0)}
-              onChange={(v) => updateNode(selectedNode.id, { csgMass: v })}
+              onChange={(v) => updateNode(selectedNode.id, { collisionMass: v, csgMass: undefined })}
               className="w-full accent-blue-500 cursor-pointer"
             />
             {/* MuJoCo would derive mass from the hull's volume, which

@@ -125,6 +125,15 @@ describe('a sliding-lid box made as a boolean', () => {
     }
   }, 120_000);
 
+  it('shares a stated mass across its pieces: collisionMass, mass or csgMass', async () => {
+    for (const stated of [{ collisionMass: 0.25 }, { mass: 0.25 }, { csgMass: 0.25 }]) {
+      const { res } = await compile(boxNode(stated as Partial<SceneNode>));
+      const pieces = res.geoms.filter((g) => g.csgDerived === 'collider');
+      expect(pieces.length).toBeGreaterThanOrEqual(2);
+      expect(pieces.reduce((m, g) => m + (g.mass ?? 0), 0)).toBeCloseTo(0.25, 6);
+    }
+  }, 120_000);
+
   it('rebuilds when the collision detail changes', () => {
     const h = csgHashOf(boxNode());
     expect(csgHashOf(boxNode({ collisionResolution: 400_000 }))).not.toBe(h);

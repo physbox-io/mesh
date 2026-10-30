@@ -308,7 +308,9 @@
       "shatterPattern": "'uniform' | 'radial' — radial crowds the small pieces around the point of impact (default).",
       "shatterSpread": "number — extra outward speed per piece, m/s.",
       "shatterSeed": "number — fixes which pieces, so a scene breaks the same way twice.",
-      "shatterDepth": "number — how many times the PIECES may break again when they land (0 default, 2 max). Later generations split into at most four chips that do not collide with each other, and the world holds at most 60 shards."
+      "shatterDepth": "number — how many times the PIECES may break again when they land (0 default, 2 max). Later generations split into at most four chips that do not collide with each other, and the world holds at most 60 shards.",
+      "collisionMass": "number, kg: the body's total mass, shared by volume across what it collides as: a mesh body's decomposed convex pieces, and a boolean body's colliders (or its positive primitives in 'primitives' mode, or its mesh as a hull). On a boolean body a body-level `mass` does the same; collisionMass wins when both are set.",
+      "csgMass": "number, kg: DEPRECATED alias of collisionMass on a boolean body, still read so older scenes keep their weight. collisionMass, or a body-level mass, wins when set."
     },
     "jointFields": {
       "name": "string: unique joint name",

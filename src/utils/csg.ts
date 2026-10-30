@@ -2338,14 +2338,26 @@ function computeMeshChecksum(v: number[], faceCount: number): string {
 }
 
 /**
+ * The total mass stated for a boolean body, if one was: `collisionMass`, the
+ * field every decomposed body is weighed by; else a body-level `mass`; else
+ * `csgMass`, the older boolean-only name, still read so saved scenes keep
+ * their weight. Only csgMass used to count, and the docs named the other two.
+ */
+export function statedBooleanMass(node: SceneNode): number | undefined {
+  const finite = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  return finite(node.collisionMass) ?? finite((node as { mass?: unknown }).mass) ?? finite(node.csgMass);
+}
+
+/**
  * What a boolean body weighs, in kg, given its true volume in m³: a stated
- * csgMass, else what its solid shapes were said to weigh, else that volume at
+ * mass (statedBooleanMass), else what its solid shapes were said to weigh, else that volume at
  * what it is made of -- the rule every other geom follows, MuJoCo's 1000 kg/m³
  * when nothing is said. It used to fall back to 1 kg flat, so a 5 mm pine
  * plate weighed as much as a bag of sugar.
  */
 export function csgMassOf(node: SceneNode, volume: number): number {
-  if (node.csgMass !== undefined) return node.csgMass;
+  const stated = statedBooleanMass(node);
+  if (stated !== undefined) return stated;
   const positives = csgSourceGeoms(node).filter(isPositive);
   if (positives.length > 0 && positives.every((g) => g.mass !== undefined)) {
     return positives.reduce((m, g) => m + (g.mass ?? 0), 0);
@@ -2371,7 +2383,7 @@ export function csgHashOf(node: SceneNode): string {
     collisionModeOf(node),
     node.csgSectors ?? CSG_DEFAULT_SECTORS,
     node.csgHoleAxis ?? 'auto',
-    node.csgMass ?? null,
+    statedBooleanMass(node) ?? null,
     src.filter(isPositive).map(g => [g.rgba, g.mass, g.density, g.friction, g.condim, g.solref, g.solimp]),
     node.edgeRounds ?? null,
     // Collision Detail: without these a change to it rebuilt nothing.
@@ -2788,11 +2800,12 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
     // solid it represents.
     const vols = positives.map(primitiveVolume);
     const totalVol = vols.reduce((s, v) => s + v, 0);
+    const stated = statedBooleanMass(node);
     out.push(...positives.map((g, i) => ({
       ...g,
       role: 'collision' as const,
-      ...(node.csgMass !== undefined && totalVol > 0
-        ? { mass: +(node.csgMass * (vols[i] / totalVol)).toFixed(8) }
+      ...(stated !== undefined && totalVol > 0
+        ? { mass: +(stated * (vols[i] / totalVol)).toFixed(8) }
         : {}),
     })));
   }

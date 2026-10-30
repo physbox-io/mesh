@@ -500,6 +500,35 @@ describe('resolveCsgGeoms', () => {
     expect(csgHashOf(plate({ density: 700 }))).not.toBe(csgHashOf(plate({ density: 2400 })));
   });
 
+  // The docs say to set `mass` or `collisionMass` for a body's total, as for
+  // any decomposed body; on a boolean body only the undocumented csgMass did
+  // anything.
+  it('weighs a boolean body by its documented mass fields, csgMass still read', () => {
+    const plate = (node: Partial<SceneNode> & { mass?: number }) => body([
+      { name: 'plate', type: 'box', size: [0.075, 0.05, 0.0025], density: 700 },
+      { name: 'hole', type: 'cylinder', size: [0.012, 0.01], csg: 'difference' },
+    ], { csgEnabled: true, ...node } as Partial<SceneNode>);
+    const volume = 7.39e-5;
+    expect(csgMassOf(plate({ collisionMass: 3 }), volume)).toBe(3);
+    expect(csgMassOf(plate({ mass: 2 }), volume)).toBe(2);
+    expect(csgMassOf(plate({ csgMass: 4 }), volume)).toBe(4);
+    expect(csgMassOf(plate({ collisionMass: 3, csgMass: 4 }), volume)).toBe(3);
+    // Each rebuilds the boolean, which is what carries the mass to the colliders.
+    const h = csgHashOf(plate({}));
+    expect(csgHashOf(plate({ collisionMass: 3 }))).not.toBe(h);
+    expect(csgHashOf(plate({ mass: 2 }))).not.toBe(h);
+    // Primitive colliders share it out too.
+    const prims = (extra: Partial<SceneNode> & { mass?: number }) => body([
+      { name: 'big', type: 'sphere', size: [0.1] },
+      { name: 'small', type: 'sphere', size: [0.05] },
+      { name: 'hole', type: 'cylinder', size: [0.02, 0.4], csg: 'difference' },
+    ], { csgEnabled: true, ...extra } as Partial<SceneNode>);
+    for (const extra of [{ collisionMass: 9 }, { mass: 9 }, { csgMass: 9 }]) {
+      const masses = resolveCsgGeoms(prims(extra), 'physics').map(g => g.mass!);
+      expect(masses[0] + masses[1]).toBeCloseTo(9, 6);
+    }
+  });
+
   // The boolean mesh is re-origined on its centroid in X and Y. Primitive
   // colliders left where they were authored collided up to a centimetre from
   // the body that was drawn, on any part not symmetric about its origin.
