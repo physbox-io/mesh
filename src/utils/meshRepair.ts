@@ -25,6 +25,12 @@ export interface MeshRepairResult {
   removedNonManifold: number;
   filledLoops: number;
   flippedShells: number;
+  /**
+   * Share of the input's surface area on triangles the weld squashed to
+   * nothing (two corners merged). Seam slivers carry next to none; a weld that
+   * is eating real faces shows up here first.
+   */
+  collapsedAreaFraction: number;
 }
 
 function emptyIntegrity(): MeshIntegrity {
@@ -277,6 +283,7 @@ export function repairMesh(
       removedNonManifold: 0,
       filledLoops: 0,
       flippedShells: 0,
+      collapsedAreaFraction: 0,
     };
   }
 
@@ -400,13 +407,19 @@ export function repairMesh(
   }
 
   const nonDegenerateTris: RawTri[] = [];
+  let inputArea = 0;
+  let collapsedArea = 0;
   for (let i = 0; i < remappedFaces.length; i += 3) {
     const a = remappedFaces[i];
     const b = remappedFaces[i + 1];
     const c = remappedFaces[i + 2];
+    const fa = faceArr[i], fb = faceArr[i + 1], fc = faceArr[i + 2];
+    const inArea = fa < vCount && fb < vCount && fc < vCount ? triArea3D(posArr, fa, fb, fc) : 0;
+    inputArea += inArea;
 
     if (a === b || b === c || a === c) {
       removedDegenerate++;
+      if (fa !== fb && fb !== fc && fa !== fc) collapsedArea += inArea;
       continue;
     }
 
@@ -880,7 +893,109 @@ export function repairMesh(
     removedNonManifold,
     filledLoops,
     flippedShells,
+    collapsedAreaFraction: inputArea > 0 ? collapsedArea / inputArea : 0,
   };
+}
+
+/** The weld tolerance physics_repair_mesh uses when none is given (metres): 0.01 mm. */
+export const DEFAULT_REPAIR_WELD_TOLERANCE = 1e-5;
+
+export interface WeldToleranceLimit {
+  /** The largest weld tolerance this mesh takes without merging its own features. */
+  maxTolerance: number;
+  /** Bounding-box diagonal. */
+  diagonal: number;
+  /** Shortest edge longer than the seam-noise floor, or null when there is none. */
+  shortestEdge: number | null;
+}
+
+/**
+ * How far this mesh can be welded before the weld starts merging real corners.
+ *
+ * Welding joins every pair of vertices closer than the tolerance, so an edge
+ * shorter than it loses an end: a 20 mm cube welded at 25 mm is one vertex.
+ * The limit is half the shortest real edge (edges under 1e-4 of the part's
+ * size are seam slivers, which welding exists to remove), and never more than
+ * 1% of the part's size, since seam cracks are never that wide.
+ */
+export function weldToleranceLimit(positions: ArrayLike<number>, faces: ArrayLike<number>): WeldToleranceLimit {
+  const n = Math.floor(positions.length / 3);
+  const box = bboxOf(positions);
+  const diagonal = box ? Math.hypot(box[3] - box[0], box[4] - box[1], box[5] - box[2]) : 0;
+  const floor = diagonal * 1e-4;
+  let shortest = Infinity;
+  const edge = (u: number, v: number) => {
+    if (u >= n || v >= n) return;
+    const d = Math.hypot(
+      positions[u * 3] - positions[v * 3],
+      positions[u * 3 + 1] - positions[v * 3 + 1],
+      positions[u * 3 + 2] - positions[v * 3 + 2],
+    );
+    if (d > floor && d < shortest) shortest = d;
+  };
+  for (let i = 0; i + 2 < faces.length; i += 3) {
+    edge(faces[i], faces[i + 1]);
+    edge(faces[i + 1], faces[i + 2]);
+    edge(faces[i + 2], faces[i]);
+  }
+  const shortestEdge = Number.isFinite(shortest) ? shortest : null;
+  const maxTolerance = Math.min(diagonal * 0.01, shortestEdge !== null ? shortestEdge * 0.5 : Infinity);
+  return { maxTolerance, diagonal, shortestEdge };
+}
+
+function bboxOf(p: ArrayLike<number>): number[] | null {
+  const n = Math.floor(p.length / 3);
+  if (n === 0) return null;
+  const b = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < n; i++) {
+    for (let k = 0; k < 3; k++) {
+      const v = p[i * 3 + k];
+      if (v < b[k]) b[k] = v;
+      if (v > b[k + 3]) b[k + 3] = v;
+    }
+  }
+  return b;
+}
+
+const fmtMm = (m: number) => `${+(m * 1000).toPrecision(3)} mm`;
+
+/**
+ * Whether a repair kept the part it was given. Returns why not, or null.
+ *
+ * A repair closes cracks, drops slivers and fills holes: it never moves the
+ * outline of the part, changes the volume of a part that was already a closed
+ * solid, or squashes real faces. A result that did any of those was made by a
+ * weld wide enough to merge the part's own corners (a cube welded down to a
+ * tetrahedron, or to nothing), and must not replace the part.
+ */
+export function checkRepairOutcome(inputPositions: ArrayLike<number>, report: MeshRepairResult): string | null {
+  const triangles = report.faces.length / 3;
+  if (triangles < 4) {
+    return triangles === 0
+      ? 'the repair left no triangles at all'
+      : `the repair left only ${triangles} triangle${triangles === 1 ? '' : 's'}, which cannot enclose anything`;
+  }
+  if (report.collapsedAreaFraction > 0.05) {
+    return `the weld squashed ${Math.round(report.collapsedAreaFraction * 100)}% of the surface to nothing by merging the corners of real faces`;
+  }
+  const before = bboxOf(inputPositions);
+  const after = bboxOf(report.positions);
+  if (before && after) {
+    const diag = Math.hypot(before[3] - before[0], before[4] - before[1], before[5] - before[2]);
+    let moved = 0;
+    for (let k = 0; k < 6; k++) moved = Math.max(moved, Math.abs(after[k] - before[k]));
+    if (diag > 0 && moved > diag * 0.1) {
+      return `the part's bounding box moved by ${fmtMm(moved)} (the part is ${fmtMm(diag)} across)`;
+    }
+  }
+  const b = report.before;
+  if (b.closed && b.consistentlyWound && Math.abs(b.volume) > 0) {
+    const change = Math.abs(Math.abs(report.after.volume) - Math.abs(b.volume)) / Math.abs(b.volume);
+    if (change > 0.1) {
+      return `the volume of an already closed part changed by ${Math.round(change * 100)}%`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -917,7 +1032,7 @@ export function zupToYup(zup: ArrayLike<number>): number[] {
 export function repairSceneGeom(
   geom: SceneGeom,
   options?: MeshRepairOptions
-): { geom: SceneGeom; report: MeshRepairResult } | null {
+): { geom: SceneGeom; report: MeshRepairResult; input: number[] } | null {
   if (geom.type !== 'mesh') return null;
 
   let zupPositions: number[] | null = null;
@@ -944,7 +1059,7 @@ export function repairSceneGeom(
     faces: report.faces,
   };
 
-  return { geom: updatedGeom, report };
+  return { geom: updatedGeom, report, input: zupPositions };
 }
 
 export async function runMcpRepairMesh(params: {
@@ -967,7 +1082,7 @@ export async function runMcpRepairMesh(params: {
     ? msg.weldToleranceMm / 1000
     : typeof msg.weldTolerance === 'number' && msg.weldTolerance >= 0
       ? msg.weldTolerance
-      : 1e-5;
+      : DEFAULT_REPAIR_WELD_TOLERANCE;
   const fillHoles = msg.fillHoles !== false;
   const fixWinding = msg.fixWinding !== false;
   const removeDuplicates = msg.removeDuplicates !== false;
@@ -995,7 +1110,10 @@ export async function runMcpRepairMesh(params: {
   }
 
   const reports: Array<Record<string, unknown>> = [];
-  let touchedCsgNode = false;
+  // Every mesh is repaired and checked before any is written back: one that
+  // the weld would destroy fails the whole call and leaves every part as it was.
+  const failures: string[] = [];
+  const updates: Array<{ node: SceneNode; geoms: SceneGeom[] }> = [];
 
   for (const node of targets) {
     const geoms = node.geoms || [];
@@ -1011,8 +1129,28 @@ export async function runMcpRepairMesh(params: {
         removeDegenerates,
       });
       if (!repaired) return g;
+      const { report, input } = repaired;
+      const label = `${node.name || node.id}/${g.name || `mesh_${idx}`}`;
+      // The default is what every repair has always used; only a tolerance
+      // asked for is held to the part's own scale.
+      if (weldTolM > DEFAULT_REPAIR_WELD_TOLERANCE) {
+        const limit = weldToleranceLimit(input, g.faces ?? []);
+        if (weldTolM > limit.maxTolerance) {
+          failures.push(
+            `${label}: weld tolerance ${fmtMm(weldTolM)} is too large for this part. ` +
+            `It is ${fmtMm(limit.diagonal)} across` +
+            (limit.shortestEdge !== null ? ` and its shortest edge is ${fmtMm(limit.shortestEdge)}` : '') +
+            `, so welding that far would merge its own corners. The most it takes is ${fmtMm(limit.maxTolerance)}.`,
+          );
+          return g;
+        }
+      }
+      const broken = checkRepairOutcome(input, report);
+      if (broken) {
+        failures.push(`${label}: ${broken}, so the repair was not applied. Try a smaller weld tolerance.`);
+        return g;
+      }
       modified = true;
-      const { report } = repaired;
       const fmtStats = (s: MeshIntegrity) => ({
         watertight: s.closed && s.consistentlyWound,
         consistentlyWound: s.consistentlyWound,
@@ -1037,13 +1175,24 @@ export async function runMcpRepairMesh(params: {
       return repaired.geom;
     });
 
-    if (modified) {
-      if (node.csgEnabled) touchedCsgNode = true;
-      updateNode(node.id, {
-        geoms: nextGeoms,
-        ...(node.csgEnabled ? { csgHash: undefined, csgError: undefined } : {}),
-      });
-    }
+    if (modified) updates.push({ node, geoms: nextGeoms });
+  }
+
+  if (failures.length) {
+    return {
+      ok: false,
+      error: `Nothing was changed. ${failures.join(' ')}`,
+      failures,
+    };
+  }
+
+  let touchedCsgNode = false;
+  for (const { node, geoms } of updates) {
+    if (node.csgEnabled) touchedCsgNode = true;
+    updateNode(node.id, {
+      geoms,
+      ...(node.csgEnabled ? { csgHash: undefined, csgError: undefined } : {}),
+    });
   }
 
   if (reports.length === 0) {
