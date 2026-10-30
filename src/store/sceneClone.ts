@@ -13,7 +13,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
  * from the same base rather than accumulating drift. Not part of the saved
  * document, but cloneGeom carries them across an edit.
  */
-export type WorkingGeom = SceneGeom & { baseVertices?: number[]; baseRenderVertices?: number[] };
+export type WorkingGeom = SceneGeom & { baseVertices?: number[]; baseRenderVertices?: number[]; baseColliderVertices?: number[] };
 
 export type WorkingNode = SceneNode & { basePos?: number[] };
 
@@ -60,6 +60,7 @@ export const SHARED_GEOM_KEYS = new Set([
   'renderVertices',
   'baseVertices',
   'baseRenderVertices',
+  'baseColliderVertices',
   'colliderVertices',
   'colliderFaces',
   'paint',

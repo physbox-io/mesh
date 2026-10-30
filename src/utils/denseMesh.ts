@@ -168,13 +168,15 @@ export function colliderCopySync(
 }
 
 /**
- * The mesh a dense geom's collider is made from, and fingerprinted on: its
- * Z-up renderVertices, or its Y-up vertices turned Z-up when it has none.
- * `key` is the array the fingerprint is remembered against.
+ * The mesh a dense geom's collider is made from, and fingerprinted on: the one
+ * it is drawn and simulated as. That is a moving mesh's Z-up renderVertices,
+ * and a static mesh's Y-up vertices, turned Z-up (a static mesh's
+ * renderVertices are not kept up to date). `key` is the array the fingerprint
+ * is remembered against.
  */
 function colliderSource(g: SceneGeom): { key: number[]; zUp: () => number[] } | null {
   if (!g.faces?.length) return null;
-  if (g.renderVertices?.length) return { key: g.renderVertices, zUp: () => g.renderVertices! };
+  if (g.renderVertices?.length && (g.dynamic || !g.vertices?.length)) return { key: g.renderVertices, zUp: () => g.renderVertices! };
   const v = g.vertices;
   if (!v?.length) return null;
   return {
@@ -185,6 +187,17 @@ function colliderSource(g: SceneGeom): { key: number[]; zUp: () => number[] } | 
       return out;
     },
   };
+}
+
+/**
+ * The fingerprint denseColliderOf holds for this geom's mesh as it is now, or
+ * null when it has no mesh. A transform that moves the mesh and its collider
+ * together (meshGeomTransforms.ts) marks the collider with it, so it is not
+ * rebuilt for nothing.
+ */
+export function denseFingerprintOf(g: SceneGeom): string | null {
+  const source = colliderSource(g);
+  return source ? meshFingerprint(source.key, g.faces!) : null;
 }
 
 /**
@@ -202,12 +215,14 @@ export function refreshDenseCollider(g: SceneGeom): SceneGeom | null {
   if (meshFingerprint(source.key, g.faces!) === g.denseColliderOf) return g;
   if (!simplifierReady()) return null;
   const copy = colliderCopySync(source.zUp(), g.faces!);
+  // The turned-from copy is of the old mesh, with the old copy's vertices.
+  const { baseColliderVertices: _base, ...unturned } = g;
   if (!copy) {
-    const { colliderVertices: _v, colliderFaces: _f, denseColliderOf: _d, ...rest } = g;
+    const { colliderVertices: _v, colliderFaces: _f, denseColliderOf: _d, ...rest } = unturned;
     return rest;
   }
   return {
-    ...g,
+    ...unturned,
     colliderVertices: copy.colliderVertices,
     colliderFaces: copy.colliderFaces,
     denseColliderOf: meshFingerprint(source.key, g.faces!),

@@ -31,7 +31,7 @@ export interface PackedArray {
   b64: string;
 }
 
-const FLOAT_KEYS = new Set(['vertices', 'renderVertices', 'baseVertices', 'baseRenderVertices', 'colliderVertices']);
+const FLOAT_KEYS = new Set(['vertices', 'renderVertices', 'baseVertices', 'baseRenderVertices', 'colliderVertices', 'baseColliderVertices']);
 const INDEX_KEYS = new Set(['faces', 'colliderFaces']);
 
 /** Below this a mesh array is a box or a collider piece, and the text is small enough. */

@@ -89,7 +89,7 @@ describe('a dense collider kept in step with its mesh', () => {
       });
     });
 
-    it('rebuilds the copy when the part is rescaled, to the new size', () => {
+    it('keeps the copy at the new size when the part is rescaled', () => {
       scaleNodeTree('ring', 2, 1, 3);
       const g = ring();
       const drawn = bounds(g.renderVertices!);

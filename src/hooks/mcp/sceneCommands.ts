@@ -16,7 +16,7 @@ import { headlessImpactWarning } from '../../utils/headlessLimits';
 import { headlessImpacts } from './headlessImpacts';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
-import { colliderCopyOf, denseImportNote, headlessMeshBudgetError } from '../../utils/denseMesh';
+import { colliderCopyOf, denseFingerprintOf, denseImportNote, headlessMeshBudgetError } from '../../utils/denseMesh';
 import { denseCollidersSettled } from '../../store/denseColliders';
 import {
   deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage,
@@ -333,7 +333,7 @@ export const sceneCommands: McpCommands = {
           vertices: parsed.vertices,
           faces: parsed.faces,
           renderVertices: parsed.renderVertices,
-          ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces, denseColliderOf: collider.source } : {}),
+          ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces } : {}),
           dynamic: dynamic !== false,
         } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],
@@ -354,6 +354,9 @@ export const sceneCommands: McpCommands = {
       };
     }
 
+    // Marked with what its copy was made from, in the terms the store checks
+    // it by (store/denseColliders): renderVertices if it moves, else vertices.
+    if (collider) newNode.geoms[0].denseColliderOf = denseFingerprintOf(newNode.geoms[0]) ?? collider.source;
     const currentNodes = store.sceneGraph.nodes || [];
     const updatedNodes = [...currentNodes, newNode];
     const res = await settleScene(updatedNodes, { replacesScene: false });

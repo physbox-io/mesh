@@ -368,6 +368,8 @@ export interface SceneGeom {
   baseVertices?: number[];
   /** The same, for the Z-up renderVertices of a dynamic mesh. */
   baseRenderVertices?: number[];
+  /** The same, for colliderVertices, so the collider turns with the mesh it stands in for. */
+  baseColliderVertices?: number[];
   /**
    * A collider whose shape is known exactly, as opposed to one approximated
    * from a mesh. Split for Print puts these on the sections it makes, in two

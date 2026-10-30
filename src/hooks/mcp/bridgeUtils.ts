@@ -157,6 +157,7 @@ export const stripMeshArrays = (node: SceneNode): SceneNode => {
       delete rest.renderVertices;
       delete rest.colliderVertices;
       delete rest.colliderFaces;
+      delete rest.baseColliderVertices;
       // A text pattern's saved letter outlines are kilobytes of coordinates.
       if (rest.textures?.some((t) => t.options?.outline)) {
         rest.textures = rest.textures.map((t) => {
