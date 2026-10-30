@@ -8,8 +8,8 @@
 // rope equalities.
 // ---------------------------------------------------------------------------
 
-import type { SceneNode } from '../types/scene';
-import type { QuatWXYZ } from './sceneTree';
+import type { SceneJoint, SceneNode } from '../types/scene';
+import { nodeLocalQuat, quatMultiply, quatRotateVec, type QuatWXYZ } from './sceneTree';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
 
 /** A body's rest pose, world frame, and its first geom's size. */
@@ -22,7 +22,40 @@ export interface CouplingPlan {
   couplings: PlannedCoupling[];
   /** `<equality>` lines that are not couplings of two joints by a tendon. */
   equalities: string[];
+  /** A coupling asked for and left out, by name and why. */
+  warnings: string[];
 }
+
+/** Every body's rest pose, world frame, by id. */
+export function restPoses(nodes: SceneNode[]): Record<string, WorldPose> {
+  const out: Record<string, WorldPose> = {};
+  const walk = (list: SceneNode[], parentPos: [number, number, number], parentQuat: QuatWXYZ) => {
+    for (const node of list || []) {
+      const r = quatRotateVec(parentQuat, node.pos);
+      const pos: [number, number, number] = [parentPos[0] + r[0], parentPos[1] + r[1], parentPos[2] + r[2]];
+      const quat = quatMultiply(parentQuat, nodeLocalQuat(node));
+      const mainGeom = (node.geoms || [])[0];
+      out[node.id] = { pos, quat, size: mainGeom ? mainGeom.size : [0.1, 0.1, 0.1] };
+      walk(node.children, pos, quat);
+    }
+  };
+  walk(nodes, [0, 0, 0], [1, 0, 0, 0]);
+  return out;
+}
+
+/**
+ * The joint a coupling drives: the body's first hinge or slide. A free joint
+ * is six numbers, and a coupling to it drove only the first, its X: a body
+ * built with no joint (so given a free one) was flung sideways at 4.9 m/s by
+ * the slide coupled to it.
+ */
+const couplable = (j: SceneJoint) => j.type === 'hinge' || j.type === 'slide';
+export const couplingJoint = (node: SceneNode): SceneJoint | undefined => (node.joints || []).find(couplable);
+
+const jointsSaid = (node: SceneNode) => {
+  const types = [...new Set((node.joints || []).map((j) => j.type ?? 'hinge'))];
+  return types.length ? `only a ${types.join(' and a ')} joint` : 'no joint';
+};
 
 /**
  * A cut gear's pitch radius in metres, from the tooth form it was cut to. Its
@@ -34,9 +67,13 @@ const pitchRadius = (node: SceneNode): number | undefined => {
   return t && t.kind !== 'rack' ? t.pitchDiameterMm / 2000 : undefined;
 };
 
+/** What a scene's couplings leave out, by body: for an MCP reply. */
+export const couplingWarnings = (nodes: SceneNode[]): string[] => planCouplings(nodes, restPoses(nodes), (s) => s).warnings;
+
 export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPose>, xmlAttr: (s: string) => string): CouplingPlan {
   const couplings: PlannedCoupling[] = [];
   const equalities: string[] = [];
+  const warnings: string[] = [];
   const pinionNodes: { jointName: string; nodeId: string; pos: [number, number, number]; radius: number }[] = [];
   const rackNodes: { jointName: string; nodeId: string; pos: [number, number, number] }[] = [];
   const gearJointNodes: GearBody[] = [];
@@ -48,7 +85,8 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
   const traverse = (list: SceneNode[]) => {
     for (const node of list || []) {
       byId.set(node.id, node);
-      if (node.joints && node.joints.length > 0) jointedNodes[node.id] = node.joints[0].name;
+      const cj = couplingJoint(node);
+      if (cj) jointedNodes[node.id] = cj.name;
       if (node.coupleTargetId) explicitCouplingNodes.push(node);
       if (node.isPulleyRope) pulleyRopesList.push(node);
       const couplingAllowed = node.allowCoupling !== false;
@@ -82,6 +120,11 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
   for (const node of explicitCouplingNodes) {
     const joint1 = jointedNodes[node.id];
     const joint2 = jointedNodes[node.coupleTargetId!];
+    const target = byId.get(node.coupleTargetId!);
+    if (target && (!joint1 || !joint2)) {
+      const lacking = joint1 ? target : node;
+      warnings.push(`Body '${node.id}' is coupled to '${target.id}' (coupleTargetId), but '${lacking.id}' has ${jointsSaid(lacking)}, and a coupling ties one hinge or slide to another: it was left out. Give '${lacking.id}' a hinge or slide joint (a body built with no joints gets a free one).`);
+    }
     if (joint1 && joint2) {
       const ratio = node.coupleRatio !== undefined ? node.coupleRatio : -1.0;
       explicitlyCoupledJointPairs.add([joint1, joint2].sort().join('::'));
@@ -164,5 +207,5 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
     ropeCouplingIndex++;
   }
 
-  return { couplings, equalities };
+  return { couplings, equalities, warnings };
 }

@@ -5,12 +5,12 @@ import { checkMeshInertia } from './meshInertiaCheck';
 import { resolveCsgGeoms } from './csg';
 import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
-import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
+import { isNodeRotationBaked, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
-import { planCouplings } from './sceneCouplings';
+import { planCouplings, restPoses } from './sceneCouplings';
 import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { contactArenaXml } from './contactArena';
 import { SMALL_BODY_INERTIA_FLOOR, hasSubMillimetreMovingBody } from './incomingBodyCheck';
@@ -653,30 +653,8 @@ export const compileToMJCF = (
 
   const actuators: SceneJoint[] = [];
 
-  // First, traverse and compute absolute world positions, orientations, and sizes for all bodies
-  const nodeWorldData: { [id: string]: { pos: [number, number, number]; quat: QuatWXYZ; size: number[] } } = {};
-
-  const getAbsolutePositions = (
-    nodes: SceneNode[],
-    parentPos: [number, number, number] = [0, 0, 0],
-    parentQuat: QuatWXYZ = [1, 0, 0, 0],
-  ) => {
-    if (!nodes) return;
-    for (const node of nodes) {
-      const rotatedOffset = quatRotateVec(parentQuat, node.pos);
-      const worldPos: [number, number, number] = [
-        parentPos[0] + rotatedOffset[0],
-        parentPos[1] + rotatedOffset[1],
-        parentPos[2] + rotatedOffset[2],
-      ];
-      const worldQuat = quatMultiply(parentQuat, nodeLocalQuat(node));
-      const mainGeom = (node.geoms || [])[0];
-      const size = mainGeom ? mainGeom.size : [0.1, 0.1, 0.1];
-      nodeWorldData[node.id] = { pos: worldPos, quat: worldQuat, size };
-      getAbsolutePositions(node.children, worldPos, worldQuat);
-    }
-  };
-  getAbsolutePositions(sceneCopy.nodes);
+  // Every body's rest pose, world frame.
+  const nodeWorldData = restPoses(sceneCopy.nodes);
 
   const weldConstraintsList: { bodyName: string; bodyId?: string; targetId: string; rigid?: boolean }[] = [];
   /*
