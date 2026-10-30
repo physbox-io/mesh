@@ -26,8 +26,43 @@ const add = (a: number[], b: number[]): V3 => [a[0] + b[0], a[1] + b[1], a[2] + 
 const scale = (a: number[], k: number): V3 => [a[0] * k, a[1] * k, a[2] * k];
 const unit = (a: number[]): V3 => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
-/** One toothed wheel of a gear body: its radius and where it lies along the axis (world, m). */
-export interface Wheel { radius: number; lo: number; hi: number }
+/**
+ * One toothed wheel of a gear body: its radius and where it lies along the
+ * axis (world, m), and its tooth count when its outline shows one.
+ */
+export interface Wheel { radius: number; lo: number; hi: number; teeth?: number }
+
+/**
+ * Teeth counted on a mesh's outline: the angular bins (about the axis) whose
+ * outermost point is nearer the tip than the root, counted as runs. Only an
+ * outline whose depth is a gear's for that many teeth counts: a standard
+ * tooth is 2.25 modules deep on a tip radius of (N + 2)/2 modules, so
+ * depth/tip·N = 4.5·N/(N + 2), 3.2 to 4.5. A hexagon (0.8) is not a gear.
+ */
+export function countTeeth(points: { angle: number; r: number }[]): number | undefined {
+  let rMax = 0;
+  for (const p of points) rMax = Math.max(rMax, p.r);
+  if (!(rMax > 0)) return undefined;
+  const BINS = 720;
+  const bins = new Float64Array(BINS).fill(-1);
+  for (const p of points) {
+    // Bores and hubs are well inside any root circle.
+    if (p.r < 0.5 * rMax) continue;
+    const b = Math.floor(((p.angle / (2 * Math.PI)) % 1 + 1) % 1 * BINS) % BINS;
+    if (p.r > bins[b]) bins[b] = p.r;
+  }
+  const filled = [...bins].filter((r) => r >= 0);
+  if (filled.length < 10) return undefined;
+  const rLow = Math.min(...filled);
+  const depth = rMax - rLow;
+  if (depth < 0.04 * rMax) return undefined;
+  const mid = (rMax + rLow) / 2;
+  const high = filled.map((r) => r > mid);
+  let teeth = 0;
+  for (let i = 0; i < high.length; i++) if (high[i] && !high[(i + high.length - 1) % high.length]) teeth++;
+  const q = (depth / rMax) * teeth;
+  return teeth >= 5 && q >= 1.5 && q <= 9 ? teeth : undefined;
+}
 
 export interface GearBody {
   jointName: string;
@@ -36,6 +71,45 @@ export interface GearBody {
   origin: V3;
   axis: V3;
   wheels: Wheel[];
+  /** Nothing round to go by: its wheel is the first geom's size. */
+  guessed?: boolean;
+}
+
+interface MeshExtent { lo: number; hi: number; r: number; teeth?: number }
+
+/**
+ * A mesh's span along a hinge and its widest radius from it, with its teeth:
+ * in the body frame, so the same whatever the pose, and kept per vertex array.
+ * Every hinged body is weighed as a possible pinion on every compile.
+ */
+const meshExtents = new WeakMap<number[], Map<string, MeshExtent>>();
+function meshExtent(v: number[], gp: number[], j: SceneJoint): MeshExtent {
+  const axis = unit(j.axis ?? [0, 0, 1]);
+  const jp = j.pos ?? [0, 0, 0];
+  const key = [...gp, ...jp, ...axis].join(',');
+  let byKey = meshExtents.get(v);
+  const hit = byKey?.get(key);
+  if (hit) return hit;
+  // A basis square to the axis, for angles about it.
+  const e1 = unit(Math.abs(axis[0]) < 0.9 ? [0, -axis[2], axis[1]] : [-axis[2], 0, axis[0]]);
+  const e2: V3 = [axis[1] * e1[2] - axis[2] * e1[1], axis[2] * e1[0] - axis[0] * e1[2], axis[0] * e1[1] - axis[1] * e1[0]];
+  let lo = Infinity, hi = -Infinity, r = 0;
+  const outline: { angle: number; r: number }[] = [];
+  for (let i = 0; i < v.length; i += 3) {
+    const d = [v[i] + gp[0] - jp[0], v[i + 1] + gp[1] - jp[1], v[i + 2] + gp[2] - jp[2]];
+    const a = dot(d, axis);
+    if (a < lo) lo = a;
+    if (a > hi) hi = a;
+    const x = dot(d, e1), y = dot(d, e2);
+    const rad = Math.hypot(x, y);
+    if (rad > r) r = rad;
+    outline.push({ angle: Math.atan2(y, x), r: rad });
+  }
+  const teeth = countTeeth(outline);
+  const out: MeshExtent = { lo, hi, r, ...(teeth ? { teeth } : {}) };
+  if (!byKey) meshExtents.set(v, (byKey = new Map()));
+  byKey.set(key, out);
+  return out;
 }
 
 /**
@@ -46,26 +120,9 @@ export function gearBody(node: SceneNode, j: SceneJoint, world: { pos: number[];
   const axis = unit(quatRotateVec(world.quat, j.axis ?? [0, 0, 1]));
   const origin = add(world.pos, quatRotateVec(world.quat, j.pos ?? [0, 0, 0]));
   const along = (p: number[]) => dot(sub(add(world.pos, quatRotateVec(world.quat, p)), origin), axis);
-  const radial = (p: number[]) => {
-    const d = sub(add(world.pos, quatRotateVec(world.quat, p)), origin);
-    const a = dot(d, axis);
-    return Math.hypot(...sub(d, scale(axis, a)));
-  };
-  const extent = (g: SceneGeom): { lo: number; hi: number; r: number } | null => {
+  const extent = (g: SceneGeom): MeshExtent | null => {
     const gp = g.pos ?? [0, 0, 0];
-    if (g.type === 'mesh') {
-      const v = g.renderVertices;
-      if (!v?.length) return null;
-      let lo = Infinity, hi = -Infinity, r = 0;
-      for (let i = 0; i < v.length; i += 3) {
-        const p = [v[i] + gp[0], v[i + 1] + gp[1], v[i + 2] + gp[2]];
-        const a = along(p);
-        if (a < lo) lo = a;
-        if (a > hi) hi = a;
-        r = Math.max(r, radial(p));
-      }
-      return { lo, hi, r };
-    }
+    if (g.type === 'mesh') return g.renderVertices?.length ? meshExtent(g.renderVertices, gp, j) : null;
     if (g.type === 'cylinder' || g.type === 'capsule') {
       const c = along(gp), h = g.size?.[1] ?? g.size?.[0] ?? 0;
       return { lo: c - h, hi: c + h, r: g.size?.[0] ?? 0 };
@@ -78,9 +135,13 @@ export function gearBody(node: SceneNode, j: SceneJoint, world: { pos: number[];
   for (const g of solid) {
     const e = extent(g);
     if (!e || !(e.r > 0)) continue;
-    (g.type === 'mesh' ? meshes : cylinders).push({ radius: e.r, lo: e.lo, hi: e.hi });
+    // A toothed outline's radius is its pitch circle, (N + 2)/2 modules
+    // inside a tip of N/2: what two such wheels' centres are apart.
+    if (e.teeth) meshes.push({ radius: (e.r * e.teeth) / (e.teeth + 2), lo: e.lo, hi: e.hi, teeth: e.teeth });
+    else (g.type === 'mesh' ? meshes : cylinders).push({ radius: e.r, lo: e.lo, hi: e.hi });
   }
   let wheels: Wheel[];
+  let guessed = false;
   if (cylinders.length) {
     // Round colliders are the pitch circles: a mechanism-builder gear's, or
     // each gear of a compound arbor built onto one hinge.
@@ -90,14 +151,16 @@ export function gearBody(node: SceneNode, j: SceneJoint, world: { pos: number[];
     const spans = (node.geoms || []).filter((g) => g.csg !== 'difference').map(extent).filter((e): e is NonNullable<typeof e> => !!e);
     const lo = spans.length ? Math.min(...spans.map((e) => e.lo)) : -Infinity;
     const hi = spans.length ? Math.max(...spans.map((e) => e.hi)) : Infinity;
-    wheels = [{ radius: pitchRadius, lo, hi }];
+    const teeth = node.toothForm?.kind === 'involute' ? node.toothForm.teeth : undefined;
+    wheels = [{ radius: pitchRadius, lo, hi, ...(teeth ? { teeth } : {}) }];
   } else if (meshes.length) {
     wheels = meshes;
   } else {
     // Nothing round to go by: the first geom's size, in every plane.
     wheels = [{ radius: node.geoms?.[0]?.size?.[0] ?? 0.25, lo: -Infinity, hi: Infinity }];
+    guessed = true;
   }
-  return { jointName: j.name, nodeId: node.id, origin, axis, wheels };
+  return { jointName: j.name, nodeId: node.id, origin, axis, wheels, ...(guessed ? { guessed } : {}) };
 }
 
 export interface GearMesh { a: GearBody; b: GearBody; ratio: number }
@@ -128,8 +191,9 @@ export function meshingGears(gears: GearBody[], sameChain: (a: string, b: string
           const sum = wa.radius + wb.radius;
           if (!(sum > 0) || centre > 1.2 * sum || centre < 0.5 * sum) continue;
           const miss = Math.abs(centre - sum);
-          // Opposite axes turn the other way round in a's frame.
-          const ratio = -(wb.radius / wa.radius) * Math.sign(cos);
+          // Opposite axes turn the other way round in a's frame. Teeth, when
+          // both outlines show them, are the exact ratio.
+          const ratio = -(wa.teeth && wb.teeth ? wb.teeth / wa.teeth : wb.radius / wa.radius) * Math.sign(cos);
           if (!best || miss < best.miss) best = { ratio, miss };
         }
       }

@@ -13,6 +13,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import type { HistoryEntry } from '../workers/physicsWorkerProtocol';
 import type { ConstraintReport } from './constraintResiduals';
 import { summarizeTrajectory, type TrajectorySummary } from './trajectorySummary';
+import { couplingWarnings } from './sceneCouplings';
 import { contactsOfBodies, jointsOfBodies } from '../workers/historyRing';
 
 /** How many constraints `final.constraints` lists; the rest are counted. */
@@ -109,6 +110,9 @@ export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBo
   // The worker's constraint report is folded into `final`, not passed on raw.
   const { constraintReport, ...rest } = result;
   const warnings = [...(rest.warnings ?? [])];
+  // Couplings asked for that the model could not have: not held, and said so.
+  const unbuilt = couplingWarnings(graph.nodes);
+  warnings.push(...unbuilt);
   if (filter.unknown.length) {
     const names: string[] = [];
     walk(graph.nodes, (n) => names.push(n.name === n.id ? n.id : `${n.name} (${n.id})`));
@@ -135,7 +139,7 @@ export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBo
       const listed = constraintReport.constraints.slice(0, MAX_LISTED_CONSTRAINTS);
       final = {
         ...summary,
-        constraintsHeld: constraintReport.warnings.length === 0,
+        constraintsHeld: constraintReport.warnings.length === 0 && unbuilt.length === 0,
         ...(listed.length ? { constraints: listed } : {}),
         ...(constraintReport.constraints.length > listed.length
           ? { moreConstraints: constraintReport.constraints.length - listed.length }

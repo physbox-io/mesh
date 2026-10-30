@@ -5,14 +5,14 @@ import { checkMeshInertia } from './meshInertiaCheck';
 import { resolveCsgGeoms } from './csg';
 import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
-import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
+import { isNodeRotationBaked, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
 import { geomSizeProblem } from './geomSize';
 import { applyBodyMass } from './bodyMass';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
-import { gearBody, meshingGears, type GearBody } from './gearMeshing';
+import { planCouplings, restPoses } from './sceneCouplings';
 import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { contactArenaXml } from './contactArena';
 import { withoutNulls } from './withoutNulls';
@@ -256,16 +256,6 @@ const breakExtrasXml = (b: ReturnType<typeof buildBreakModel>, linked: [string, 
     xml += `\n  <custom>${b.numerics.map((n) => `\n    <numeric name="${xmlAttr(n.name)}" data="${n.data.map((v) => +v.toPrecision(6)).join(' ')}" />`).join('')}\n  </custom>`;
   }
   return xml;
-};
-
-/**
- * A cut gear's pitch radius in metres, from the tooth form it was cut to. Its
- * first geom is a mesh, whose size is a placeholder [1], so reading the radius
- * from that coupled every pair of generated gears within 2.4 m of each other.
- */
-const pitchRadius = (node: SceneNode): number | undefined => {
-  const t = node.toothForm;
-  return t && t.kind !== 'rack' ? t.pitchDiameterMm / 2000 : undefined;
 };
 
 const buildJoint = (joint: SceneJoint) => {
@@ -696,39 +686,10 @@ export const compileToMJCF = (
     : '';
 
   const actuators: SceneJoint[] = [];
-  const pinionNodes: { jointName: string; nodeId: string; pos: [number, number, number]; radius: number }[] = [];
-  const rackNodes: { jointName: string; nodeId: string; pos: [number, number, number] }[] = [];
 
-  // First, traverse and compute absolute world positions, orientations, and sizes for all bodies
-  const nodeWorldData: { [id: string]: { pos: [number, number, number]; quat: QuatWXYZ; size: number[] } } = {};
+  // Every body's rest pose, world frame.
+  const nodeWorldData = restPoses(sceneCopy.nodes);
 
-  const getAbsolutePositions = (
-    nodes: SceneNode[],
-    parentPos: [number, number, number] = [0, 0, 0],
-    parentQuat: QuatWXYZ = [1, 0, 0, 0],
-  ) => {
-    if (!nodes) return;
-    for (const node of nodes) {
-      const rotatedOffset = quatRotateVec(parentQuat, Array.isArray(node.pos) ? node.pos : [0, 0, 0]);
-      const worldPos: [number, number, number] = [
-        parentPos[0] + rotatedOffset[0],
-        parentPos[1] + rotatedOffset[1],
-        parentPos[2] + rotatedOffset[2],
-      ];
-      const worldQuat = quatMultiply(parentQuat, nodeLocalQuat(node));
-      const mainGeom = (node.geoms || [])[0];
-      const size = mainGeom ? mainGeom.size : [0.1, 0.1, 0.1];
-      nodeWorldData[node.id] = { pos: worldPos, quat: worldQuat, size };
-      getAbsolutePositions(node.children, worldPos, worldQuat);
-    }
-  };
-  getAbsolutePositions(sceneCopy.nodes);
-
-  // Keep track of gear joints along with their absolute position and size
-  const gearJointNodes: GearBody[] = [];
-  const jointedNodes: Record<string, string> = {};
-  const explicitCouplingNodes: SceneNode[] = [];
-  const pulleyRopesList: SceneNode[] = [];
   const weldConstraintsList: { bodyName: string; bodyId?: string; targetId: string; rigid?: boolean }[] = [];
   /*
    * Crumple zones, as locks.
@@ -753,15 +714,6 @@ export const compileToMJCF = (
         if (j.crumpleTorqueNm === undefined || j.type === 'free') return;
         crumpleLocks.push({ jointName: j.name, bodyName: node.name, bodyId: node.id, parentName: parentName ?? '', parentId });
       });
-      if (node.joints && node.joints.length > 0) {
-        jointedNodes[node.id] = node.joints[0].name;
-      }
-      if (node.coupleTargetId) {
-        explicitCouplingNodes.push(node);
-      }
-      if (node.isPulleyRope) {
-        pulleyRopesList.push(node);
-      }
       if (node.weldTargetId) {
         weldConstraintsList.push({ bodyName: node.name, bodyId: node.id, targetId: node.weldTargetId, ...(node.weldRigid ? { rigid: true } : {}) });
       }
@@ -772,49 +724,30 @@ export const compileToMJCF = (
         connectConstraintsList.push({ bodyId: node.id, bodyName: node.name, targetId: node.connectTargetId, anchor: node.connectAnchor });
       }
 
-      const couplingAllowed = node.allowCoupling !== false;
-      (node.joints || []).forEach(j => {
-        if (j.actuator) actuators.push(j); 
-        if (couplingAllowed && node.id.includes('gear') && j.type === 'hinge') {
-          const wData = nodeWorldData[node.id] ?? { pos: [0, 0, 0], quat: [1, 0, 0, 0] as QuatWXYZ, size: [] };
-          gearJointNodes.push(gearBody(node, j, wData, pitchRadius(node)));
-        }
-        if (couplingAllowed && node.id.includes('pinion') && j.type === 'hinge') {
-          const wData = nodeWorldData[node.id];
-          pinionNodes.push({
-            jointName: j.name,
-            nodeId: node.id,
-            pos: wData ? wData.pos : [0, 0, 0],
-            radius: pitchRadius(node) ?? (wData ? wData.size[0] : 0.08),
-          });
-        }
-        if (couplingAllowed && node.id.includes('rack') && j.type === 'slide') {
-          const wData = nodeWorldData[node.id];
-          rackNodes.push({
-            jointName: j.name,
-            nodeId: node.id,
-            pos: wData ? wData.pos : [0, 0, 0],
-          });
-        }
-      });
+      for (const j of node.joints || []) if (j.actuator) actuators.push(j);
       traverse(node.children, node.name, node.id);
     }
   };
   traverse(sceneCopy.nodes);
+  // What is coupled to what: explicit couplings, meshing gears, racks, ropes.
+  const plan = planCouplings(sceneCopy.nodes, nodeWorldData);
 
   // A velocity servo far stiffer than the joint it drives (kv*dt over the
-  // joint's inertia), on a body held in a closed loop by a pin or a weld, is
-  // driven through a clutch that never slips. The implicit integrator treats
-  // that gain as inertia the constraint solver does not know about, and the
-  // loop's pins tore open: a 50 g scissor-lift slider held by a kv 20000
-  // servo folded the lift flat. Through the clutch the solver sees it.
+  // joint's inertia), on a body held in a closed loop by a pin or a weld, or
+  // on a coupled joint, is driven through a clutch that never slips. The
+  // implicit integrator treats that gain as inertia the constraint solver
+  // does not know about, and the constraint tore open: a 50 g scissor-lift
+  // slider held by a kv 20000 servo folded the lift flat, and a 10 g pinion
+  // at kv 1 (kv*dt/I = 2000) swung the 50 g gear it drives between -773 and
+  // +741 rad/s in its first 12 ms. Through the clutch the solver sees it.
   const looped = new Set<string>();
   for (const c of connectConstraintsList) { looped.add(c.bodyId); looped.add(c.targetId); }
   for (const w of weldConstraintsList) { if (w.bodyId) looped.add(w.bodyId); looped.add(w.targetId); }
+  const coupledJoints = new Set(plan.couplings.flatMap((c) => [c.joint1, c.joint2]));
   for (let i = 0; i < actuators.length; i++) {
     const j = actuators[i];
     const owner = jointsByName.get(j.name)?.node;
-    if (!owner || !looped.has(owner.id) || j.actuator?.type !== 'velocity' || j.actuator.forceLimit !== undefined) continue;
+    if (!owner || !(looped.has(owner.id) || coupledJoints.has(j.name)) || j.actuator?.type !== 'velocity' || j.actuator.forceLimit !== undefined) continue;
     if (j.type !== 'hinge' && j.type !== 'slide') continue;
     if ((j.actuator.kv ?? 1) * 0.001 <= estimateJointInertia(owner, j)) continue;
     const held: SceneJoint = { ...j, actuator: { ...j.actuator, forceLimit: UNSLIPPING_CLUTCH } };
@@ -850,123 +783,7 @@ export const compileToMJCF = (
   };
 
 
-  // 0. Explicit joint couplings
-  let couplingIndex = 1;
-  const explicitlyCoupledJointPairs = new Set<string>();
-
-  for (const node of explicitCouplingNodes) {
-    const joint1 = jointedNodes[node.id];
-    const joint2 = jointedNodes[node.coupleTargetId!];
-    if (joint1 && joint2) {
-      const ratio = node.coupleRatio !== undefined ? node.coupleRatio : -1.0;
-      const pairKey = [joint1, joint2].sort().join('::');
-      explicitlyCoupledJointPairs.add(pairKey);
-      // Stiff, as teeth in mesh are: at the default 0.02 s a 20 g rack pushing
-      // a 5 g block fell 5% behind its pinion. See utils/jointCoupling.ts.
-      couple(`explicit_coupling_${couplingIndex++}`, joint1, joint2, ratio);
-    }
-  }
-
-  // Joints already tied together by explicit couplings, directly or along a
-  // chain: the proximity rules below leave those alone.
-  const chainOf = new Map<string, string>();
-  const root = (j: string): string => {
-    let r = j;
-    while (chainOf.has(r) && chainOf.get(r) !== r) r = chainOf.get(r)!;
-    return r;
-  };
-  for (const e of couplingEdges) chainOf.set(root(e.joint1), root(e.joint2));
-  const sameChain = (a: string, b: string) => root(a) === root(b);
-
-  // 1. Gears fallback dynamic proximity coupling: parallel axes, wheels in
-  //    the same plane, centres a pitch-circle sum apart. See utils/gearMeshing.ts.
-  const coupledPairs = new Set<string>();
-  for (const { a, b, ratio } of meshingGears(gearJointNodes, sameChain)) {
-    const pairKey = [a.jointName, b.jointName].sort().join('::');
-    if (coupledPairs.has(pairKey) || explicitlyCoupledJointPairs.has(pairKey)) continue;
-    coupledPairs.add(pairKey);
-    couple(`gear_coupling_${coupledPairs.size}`, a.jointName, b.jointName, ratio.toFixed(6));
-  }
-
-  // 2. Pinion and Rack fallback proximity coupling
-  let pinionRackCouplingCount = 0;
-  for (const p of pinionNodes) {
-    for (const r of rackNodes) {
-      const dx = p.pos[0] - r.pos[0];
-      const dy = p.pos[1] - r.pos[1];
-      const dz = p.pos[2] - r.pos[2];
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      // Only couple if their centers are within 0.5 meters of each other
-      if (dist <= 0.5) {
-        const pairKey = [p.jointName, r.jointName].sort().join('::');
-        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey) && !sameChain(p.jointName, r.jointName)) {
-          coupledPairs.add(pairKey);
-          pinionRackCouplingCount++;
-          const pinionRadius = p.radius;
-          // MuJoCo's joint equality constrains joint1 = poly(joint2), so this
-          // polynomial has to give the PINION ANGLE as a function of the rack's
-          // displacement: theta = x / r. It used to emit r itself, which is the
-          // relationship the other way round — with r = 0.08 that asked the rack
-          // to travel 1/r^2 = 156x too far, so it slammed into its own limit and
-          // the whole mechanism bound up instead of driving.
-          const turnsPerMetre = pinionRadius > 1e-6 ? 1 / pinionRadius : 12.5;
-          const couplingName = pinionRackCouplingCount === 1
-            ? 'pinion_rack_coupling'
-            : `pinion_rack_coupling_${pinionRackCouplingCount}`;
-          couple(couplingName, p.jointName, r.jointName, turnsPerMetre);
-        }
-      }
-    }
-  }
-
-  // 3. Pulley Rope Joint Couplings
-  let ropeCouplingIndex = 1;
-  for (const rope of pulleyRopesList) {
-    const { pulleyWheelId, leftTargetId, rightTargetId } = rope;
-    if (leftTargetId && rightTargetId) {
-      const leftJoint = jointedNodes[leftTargetId];
-      const rightJoint = jointedNodes[rightTargetId];
-      
-      if (leftJoint && rightJoint) {
-        // Linear coupling between weights: ratio is -1.0 (as one goes down, other goes up)
-        equalityConstraints += `\n    <joint name="rope_coupling_linear_${ropeCouplingIndex}" joint1="${xmlAttr(leftJoint)}" joint2="${xmlAttr(rightJoint)}" polycoef="0 -1 0 0 0" />`;
-        
-        // Couple pulley wheel Hinge rotation with the Left weight slide joint
-        if (pulleyWheelId) {
-          const wheelJoint = jointedNodes[pulleyWheelId];
-          if (wheelJoint) {
-            // Find the pulley wheel node to get its radius
-            const findWheel = (nodes: SceneNode[]): SceneNode | null => {
-              if (!nodes) return null;
-              for (const n of nodes) {
-                if (n.id === pulleyWheelId) return n;
-                const found = findWheel(n.children);
-                if (found) return found;
-              }
-              return null;
-            };
-            const wheelNode = findWheel(sceneCopy.nodes);
-            const radius = wheelNode?.pulleyRadius || 0.08;
-            
-            // Rope kinematics: the weight travels the arc the rim turns through,
-            // x = r * theta.
-            //
-            // MuJoCo's joint equality is joint1 = poly(joint2), and joint1 here is
-            // the WEIGHT's slide while joint2 is the wheel's hinge — so the
-            // coefficient is the radius, not its reciprocal. It used to emit 1/r,
-            // which asked for 12.5m of weight travel per radian of wheel: off by
-            // 1/r^2 = 156x, impossible to satisfy alongside the left/right rope
-            // coupling and gravity, so the solver fought itself and the whole
-            // mechanism thrashed. (Same mistake as the rack-and-pinion coupling
-            // above; both directions of that relationship look plausible in
-            // isolation, which is exactly why they need a test asserting x/theta.)
-            equalityConstraints += `\n    <joint name="rope_coupling_angular_${ropeCouplingIndex}" joint1="${xmlAttr(leftJoint)}" joint2="${xmlAttr(wheelJoint)}" polycoef="0 ${radius} 0 0 0" />`;
-          }
-        }
-      }
-    }
-    ropeCouplingIndex++;
-  }
+  for (const c of plan.couplings) couple(c.name, c.joint1, c.joint2, c.ratio);
 
   /** A weld's anchor at body1's origin, in body2's frame (the world's when there is no body2). */
   const weldAnchor = (bodyId: string, targetId?: string): string => {
@@ -1050,7 +867,7 @@ export const compileToMJCF = (
     linkedKeys.add(key);
     linkedBodies.push([a, b]);
   };
-  for (const e of couplingEdges) link(jointsByName.get(e.joint1)?.node.name, jointsByName.get(e.joint2)?.node.name);
+  for (const c of plan.couplings) if (!c.keepContact) link(jointsByName.get(c.joint1)?.node.name, jointsByName.get(c.joint2)?.node.name);
   for (const c of connectConstraintsList) if (c.targetId in nodeNamesMap) link(c.bodyName, nodeNamesMap[c.targetId]);
 
   // Dry friction on a coupled joint goes where the chain feels it. The nodes

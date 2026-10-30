@@ -9,6 +9,7 @@ import type { SceneGraph, SceneNode } from '../../types/scene';
 import { type PhysicsWindow, countBodies } from './bridgeUtils';
 import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from './bodyFeatures';
 import { unresolvedReferences, unresolvedReferenceWarnings } from '../../utils/unresolvedReferences';
+import { couplingWarnings } from '../../utils/sceneCouplings';
 
 /**
  * How long a scene build waits for its convex pieces before answering: long
@@ -92,7 +93,7 @@ export const settleScene = async (
     /** false: reply once the body is built; its convex pieces follow in the background. */
     waitForColliders?: boolean;
   } = {},
-): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[] }> => {
+): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[]; couplingWarnings?: string[] }> => {
   const store = useStore.getState();
   // Read before the store drops them: a typo in a target id did nothing, ok:true.
   const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes));
@@ -134,9 +135,13 @@ export const settleScene = async (
   // nodeCount is every body, nested ones included: a ten-body ride built as
   // one tower with everything hung off it used to report nodeCount 1.
   const pending = pendingColliderBodies();
+  // A coupling the compiler had to leave out, said by name: it used to go
+  // quietly, and the run reported every constraint held.
+  const coupling = couplingWarnings(useStore.getState().sceneGraph.nodes);
   return {
     ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length,
     ...(referenceWarnings.length ? { referenceWarnings } : {}),
+    ...(coupling.length ? { couplingWarnings: coupling } : {}),
     ...(pending.length ? {
       collisionPending: pending,
       note: `Convex pieces for ${pending.join(', ')} are still being worked out, one body at a time — a few seconds each, up to ~20 s for a long coiled part. They collide as their convex hull until then. The scene is built: do not build it again. physics_run_headless waits for them; physics_get_scene_summary shows collisionPending until they land.`,

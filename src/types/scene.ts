@@ -547,6 +547,11 @@ export interface SceneNode {
   joints: SceneJoint[];
   children: SceneNode[];
   allowCoupling?: boolean;
+  /**
+   * A slide body with teeth: coupled to a hinged wheel that meshes with it
+   * (utils/rackMeshing.ts). A cut rack (toothForm kind 'rack') is one already.
+   */
+  isRack?: boolean;
   coupleTargetId?: string;
   coupleRatio?: number;
   weldTargetId?: string;
@@ -711,6 +716,12 @@ export interface SceneNode {
   pulleyRadius?: number;
   isPulleyRope?: boolean;
   pulleyWheelId?: string;
+  /**
+   * A rope's strands holding each end (default 1): 2 for a load hung in a
+   * movable pulley, 4 for a four-fall block and tackle. utils/pulleyRope.ts.
+   */
+  leftStrands?: number;
+  rightStrands?: number;
   isAerodynamic?: boolean;
   rot?: number[];
   /**

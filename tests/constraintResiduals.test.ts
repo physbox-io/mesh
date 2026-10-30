@@ -79,7 +79,7 @@ describe('constraint residuals in a headless run', () => {
     expect(r.limits[0]).toMatchObject({ joint: 'slide', body: 'slider', unit: 'mm', range: [-120, 100] });
     expect(r.limits[0].worstPast).toBeGreaterThan(2);
     expect(r.warnings.some((w) => /Pin connect_constraint_1 between arm and world/.test(w))).toBe(true);
-    expect(r.warnings.some((w) => /Coupling gear_coupling_1 \(joint ga on gear_a -> joint gb on gear_b\) slipped/.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /Coupling gear_coupling_1 \(ga -> gb/.test(w))).toBe(true);
     expect(r.warnings.some((w) => /Joint slide \(slider\) ran .* past its range \[-120, 100\] mm/.test(w))).toBe(true);
   });
 

@@ -1,9 +1,11 @@
 /**
  * Pulley rope rendering.
  *
- * Extracted from App.tsx, unchanged. A rope is a joint-equality abstraction
- * rather than a simulated cable, so it has no geometry of its own and is drawn
- * from the positions of the bodies it constrains.
+ * A rope is a coupling of the joints at its ends and its wheel rather than a
+ * simulated cable, so it has no geometry of its own and is drawn from the
+ * bodies it ties: from the face of each end toward the wheel, up to the
+ * wheel's tangent point on that end's side, and over the rim, with any
+ * further strands an end hangs from. utils/pulleyRope.ts lays it out.
  */
 import { useRef, useMemo, useEffect, useCallback } from 'react';
 import { useFrame, type ThreeEvent } from '@react-three/fiber';
@@ -12,6 +14,8 @@ import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim } from '../../types/sceneLayer';
+import { restPoses } from '../../utils/sceneCouplings';
+import { ropeLayout, ropePolylines, type RopeLayout, type V3 } from '../../utils/pulleyRope';
 
 interface PulleyRopesRendererProps {
   model: ModelMirror | null;
@@ -27,9 +31,12 @@ interface PulleyRopeMarkersProps {
   setSelectedNodeId: (id: string | null) => void;
 }
 
+/** A rope to draw: its layout, or just the two bodies it joins when it has none. */
+interface DrawnRope { id: string; leftId: string; rightId: string; layout?: RopeLayout }
+
 // Dynamic glowing pulley cable/rope renderer
 export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyRopesRendererProps) => {
-  const lineRefs = useRef<{ [ropeId: string]: THREE.Line | null }>({});
+  const lineRefs = useRef<{ [ropeId: string]: THREE.LineSegments | null }>({});
   const bodyIdCache = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!model || !mujoco) return;
@@ -50,42 +57,31 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
     mapNodeIds(sceneGraph?.nodes);
     bodyIdCache.current = c;
   }, [model, mujoco, sceneGraph]);
-  
+
   // A rope switched off with the hierarchy's eye is not drawn, like any body.
   const hiddenNodeIds = useStore((state) => state.hiddenNodeIds);
 
-  // Find all pulley rope nodes in the scene
+  // Every rope with both ends, laid out at the rest pose.
   const pulleyRopes = useMemo(() => {
     const hidden = new Set(hiddenNodeIds);
-    // Both ends are what the filter below is: a rope without them is not one.
-    const ropes: (SceneNode & { leftTargetId: string; rightTargetId: string })[] = [];
-    const traverse = (nodes: SceneNode[], ancestorHidden: boolean) => {
-      if (!nodes) return;
-      for (const n of nodes) {
+    const nodes = sceneGraph?.nodes ?? [];
+    const byId = new Map<string, SceneNode>();
+    const found: SceneNode[] = [];
+    const traverse = (list: SceneNode[], ancestorHidden: boolean) => {
+      for (const n of list || []) {
+        byId.set(n.id, n);
         const isHidden = ancestorHidden || hidden.has(n.id);
-        if (n.isPulleyRope && n.leftTargetId && n.rightTargetId && !isHidden) {
-          ropes.push(n as SceneNode & { leftTargetId: string; rightTargetId: string });
-        }
+        if (n.isPulleyRope && n.leftTargetId && n.rightTargetId && !isHidden) found.push(n);
         traverse(n.children, isHidden);
       }
     };
-    traverse(sceneGraph?.nodes ?? [], false);
-    return ropes;
+    traverse(nodes, false);
+    if (!found.length) return [];
+    const poses = restPoses(nodes);
+    return found.map((n): DrawnRope => ({
+      id: n.id, leftId: n.leftTargetId!, rightId: n.rightTargetId!, layout: ropeLayout(n, byId, poses).layout,
+    }));
   }, [sceneGraph, hiddenNodeIds]);
-
-  // Helper to find wheel node radius reactively
-  const findWheelNode = useCallback((wheelId: string) => {
-    const traverse = (nodes: SceneNode[]): SceneNode | null => {
-      if (!nodes) return null;
-      for (const n of nodes) {
-        if (n.id === wheelId) return n;
-        const c = traverse(n.children);
-        if (c) return c;
-      }
-      return null;
-    };
-    return traverse(sceneGraph?.nodes ?? []);
-  }, [sceneGraph]);
 
   useFrame(() => {
     const activeModel = useStore.getState().model;
@@ -94,70 +90,46 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
     if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
     if (!model || !data || !mujoco) return;
 
+    const body = (id: string) => bodyIdCache.current[id] ?? -1;
+    const pos = (b: number): V3 => [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]];
+    // A body-frame vector in the world: xmat is row-major.
+    const rot = (b: number, v: V3): V3 => {
+      const m = data.xmat, o = b * 9;
+      return [
+        m[o] * v[0] + m[o + 1] * v[1] + m[o + 2] * v[2],
+        m[o + 3] * v[0] + m[o + 4] * v[1] + m[o + 5] * v[2],
+        m[o + 6] * v[0] + m[o + 7] * v[1] + m[o + 8] * v[2],
+      ];
+    };
+    const at = (b: number, local: V3): V3 => {
+      const p = pos(b), r = rot(b, local);
+      return [p[0] + r[0], p[1] + r[1], p[2] + r[2]];
+    };
+
     for (const rope of pulleyRopes) {
-      try {
-        const leftId = bodyIdCache.current[rope.leftTargetId] ?? -1;
-        const rightId = bodyIdCache.current[rope.rightTargetId] ?? -1;
-
-        if (leftId === -1 || rightId === -1) continue;
-
-        const lx = data.xpos[leftId * 3];
-        const ly = data.xpos[leftId * 3 + 1];
-        const lz = data.xpos[leftId * 3 + 2];
-
-        const rx = data.xpos[rightId * 3];
-        const ry = data.xpos[rightId * 3 + 1];
-        const rz = data.xpos[rightId * 3 + 2];
-
-        const points: THREE.Vector3[] = [];
-
-        if (rope.pulleyWheelId) {
-          // Pulley wheel present: arc-over-wheel geometry
-          const wheelId = bodyIdCache.current[rope.pulleyWheelId] ?? -1;
-          if (wheelId === -1) {
-            // Wheel not yet spawned — fall back to straight line
-            points.push(new THREE.Vector3(lx, ly, lz));
-            points.push(new THREE.Vector3(rx, ry, rz));
-          } else {
-            const wx = data.xpos[wheelId * 3];
-            const wy = data.xpos[wheelId * 3 + 1];
-            const wz = data.xpos[wheelId * 3 + 2];
-            const wheelNode = findWheelNode(rope.pulleyWheelId);
-            // 0.4 was a pre-rescale default: it drew a rope arcing over a
-            // 0.4m rim around a wheel whose geoms are 0.08.
-            const rad = wheelNode?.pulleyRadius || 0.08;
-            // Attach near the top of each weight rather than a fixed 0.15 above
-            // it — another pre-rescale constant, which left the rope ending in
-            // mid-air well clear of the weight it is supposed to hold.
-            const attach = rad * 0.5;
-
-            points.push(new THREE.Vector3(lx, ly, lz + attach));
-            points.push(new THREE.Vector3(wx - rad, wy, wz));
-            const segments = 12;
-            for (let i = 1; i < segments; i++) {
-              const phi = Math.PI - (Math.PI * i) / segments;
-              points.push(new THREE.Vector3(
-                wx + rad * Math.cos(phi),
-                wy,
-                wz + rad * Math.sin(phi)
-              ));
-            }
-            points.push(new THREE.Vector3(wx + rad, wy, wz));
-            points.push(new THREE.Vector3(rx, ry, rz + attach));
-          }
-        } else {
-          // No wheel — straight rope between the two bodies
-          points.push(new THREE.Vector3(lx, ly, lz));
-          points.push(new THREE.Vector3(rx, ry, rz));
-        }
-
-        const line = lineRefs.current[rope.id];
-        if (line) {
-          line.geometry.setFromPoints(points);
-        }
-      } catch {
-        // Safe check
+      const line = lineRefs.current[rope.id];
+      if (!line) continue;
+      const leftB = body(rope.leftId), rightB = body(rope.rightId);
+      if (leftB === -1 || rightB === -1) continue;
+      let lines: V3[][];
+      const lay = rope.layout;
+      if (!lay) {
+        // Not a rope the model couples (an end that cannot slide): drawn
+        // straight between the bodies, so it can be seen and fixed.
+        lines = [[pos(leftB), pos(rightB)]];
+      } else {
+        const end = (b: number, e: RopeLayout['left']) => ({ attach: at(b, e.attachLocal), axis: rot(b, e.axisLocal), sign: e.sign, strands: e.strands });
+        const wheelB = lay.wheel ? body(lay.wheel.nodeId) : -1;
+        const wheel = lay.wheel && wheelB !== -1
+          ? { centre: pos(wheelB), axis: rot(wheelB, lay.wheel.axisLocal), radius: lay.wheel.radius }
+          : null;
+        lines = ropePolylines(end(leftB, lay.left), end(rightB, lay.right), wheel);
       }
+      const points: THREE.Vector3[] = [];
+      for (const l of lines) {
+        for (let i = 0; i + 1 < l.length; i++) points.push(new THREE.Vector3(...l[i]), new THREE.Vector3(...l[i + 1]));
+      }
+      line.geometry.setFromPoints(points);
     }
   });
 
@@ -166,14 +138,10 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
   return (
     <>
       {pulleyRopes.map((rope) => (
-        /* `line` in JSX resolves to @types/react's SVG element, not to
-           @react-three/fiber's THREE.Line: both augment the same JSX namespace
-           and the DOM one wins. R3F's reconciler renders a THREE.Line here, so
-           only the ref's declared type needs correcting. */
-        <line key={rope.id} ref={(el) => { lineRefs.current[rope.id] = el as unknown as THREE.Line | null; }}>
+        <lineSegments key={rope.id} ref={(el: THREE.LineSegments | null) => { lineRefs.current[rope.id] = el; }}>
           <bufferGeometry />
           <lineBasicMaterial color="#3b82f6" linewidth={3.5} transparent opacity={0.9} />
-        </line>
+        </lineSegments>
       ))}
     </>
   );
