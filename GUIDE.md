@@ -107,6 +107,19 @@ sags 4); the break loads are unaffected. Scenes with break limits get
 that alone made its welds' rotation soft. `tests/breakHarness.ts` runs the worker's break check
 headless; `tests/loadBreakGeneric.test.ts` checks each case against a hand calculation.
 
+### 4d. Low friction, and runs that blow up while staying finite
+
+MuJoCo's default pyramidal friction cone degenerates as sliding friction goes to 0: a box on
+an icy ramp was thrown 1.8 m up, and a lever with mu 0.01 on its plank and stop launched its
+load hundreds of metres. `utils/contactFriction.ts` compiles any slide below 0.001 as 0.001
+(exactly 0 is unstable in the exact cone and in condim 1 as well), and switches a scene with any
+contact below 0.1, the floor included, to `cone="elliptic"`. Scenes without one keep the pyramid.
+
+A headless run that blows up without going non-finite is caught by `utils/solverWorkMonitor.ts`:
+contact and constraint forces cannot add energy, so when `qfrc_constraint . qvel` integrated over
+the run passes a quarter of what lifting every moving body the scene's size would take, the reply
+carries `unstable` and a warning. Every preset stays under 4% of that. `tests/lowFriction.test.ts`.
+
 ### 5. 3D multi-axis rotation (Euler representation)
 * Rotation is set as an explicit `[X, Y, Z]` Euler array.
 * Any stale `node.quat` is deleted on update so the MuJoCo compiler resolves rotation from the Euler array alone.

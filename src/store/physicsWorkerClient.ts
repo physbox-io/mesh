@@ -26,6 +26,7 @@ import { noteWorkerFrame } from './modelProvenance';
 import type { CoSimChannel } from '../utils/coSimLink';
 import { noteWorkerStopped } from '../utils/staleBuild';
 import { wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
+import type { SolverEnergyGain } from '../utils/solverWorkMonitor';
 
 export type { BuiltResult, FrameSnapshot } from '../workers/physicsWorkerProtocol';
 
@@ -225,6 +226,8 @@ export type HeadlessRunResult = HeadlessResult & {
   truncationReason?: HeadlessTruncationReason;
   truncationDetail?: string;
   ticksRequested?: number;
+  /** The contacts put energy in: the run blew up while staying finite (utils/solverWorkMonitor). */
+  unstable?: SolverEnergyGain;
 };
 
 /*
