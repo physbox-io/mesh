@@ -69,7 +69,7 @@ Every node in the "nodes" array represents a physical body and is defined as:
   
   // Optional Special Fields:
   allowCoupling: boolean (default true; false keeps the body out of the automatic proximity coupling: hinge bodies with 'gear' in the id couple when their axes are parallel, a round geom of each lies in the same plane, and the axes are 0.5-1.2x the sum of those radii apart; bodies already chained by coupleTargetId are left alone)
-  coupleTargetId: string (id of target body to couple with: this body's first joint = coupleRatio x the target's first joint, held rigid like gear teeth)
+  coupleTargetId: string (id of target body to couple with: this body's first joint = coupleRatio x the target's first joint, held rigid like gear teeth; both bodies need a joint, and the target is named by its id. A target id that names nothing does nothing, and the reply's referenceWarnings says so)
   coupleRatio: number (gear/coupling ratio)
   weldTargetId: string (id of target body to weld to)
   weldBreakForceN: number (newtons of pull the weld survives before it shears off; omit and it never breaks. A 1 kg body hanging off a weld pulls about 10 N, so a few hundred is a sturdy joint and a few tens is decorative. Breaking is TRANSIENT - the scene still says the part is welded on, and reset puts it back.)

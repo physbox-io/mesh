@@ -8,6 +8,7 @@ import type { ScriptStateMap } from '../utils/scriptState';
 import type { SceneGraph } from '../types/scene';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { compileToMJCF } from '../utils/mjcf';
+import { explainCompileError } from '../utils/compileErrorContext';
 import { PhysicsWorkerClient, type BuiltResult } from './physicsWorkerClient';
 import { canShatter } from '../utils/breakThresholds';
 import { prewarmFractureWorker } from '../utils/fractureWorkerClient';
@@ -361,7 +362,8 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         const built = await client.build(xml, sceneGraph, !forceReset, seedState, get().brokenConstraints, hold);
         if (hold && built.ok) heldClient = client;
         if (!built.ok) {
-          throw new Error(built.error || 'Unknown physics worker build error');
+          // Said in the scene's names, not the line numbers of XML nobody sees.
+          throw new Error(explainCompileError(built.error || 'Unknown physics worker build error', xml));
         }
         applyBuilt(built);
         // A fresh worker starts paused. The other two recycles tell it to play;
@@ -403,7 +405,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
             const hold = !!immediate && isRuntimeBuild && !forceReset;
             const built = await freshClient.build(xml, sceneGraph, !forceReset, recoverySeedState, get().brokenConstraints, hold);
             if (hold && built.ok) heldClient = freshClient;
-            if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error', { cause: e });
+            if (!built.ok) throw new Error(explainCompileError(built.error || 'Unknown physics worker build error', xml), { cause: e });
             applyBuilt(built);
             if (get().isPlaying) freshClient.setPlaying(true);
             return;

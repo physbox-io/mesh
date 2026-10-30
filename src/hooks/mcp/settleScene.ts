@@ -8,6 +8,7 @@ import { compileCsgNodes, pendingColliderBodies } from '../useCsgCompile';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import { type PhysicsWindow, countBodies } from './bridgeUtils';
 import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from './bodyFeatures';
+import { unresolvedReferences, unresolvedReferenceWarnings } from '../../utils/unresolvedReferences';
 
 /**
  * How long a scene build waits for its convex pieces before answering: long
@@ -91,8 +92,10 @@ export const settleScene = async (
     /** false: reply once the body is built; its convex pieces follow in the background. */
     waitForColliders?: boolean;
   } = {},
-): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string }> => {
+): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[] }> => {
   const store = useStore.getState();
+  // Read before the store drops them: a typo in a target id did nothing, ok:true.
+  const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes));
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
   // load, so any note card left over from a previously-loaded preset (e.g.
   // "Double Pendulum") is now describing a scene that no longer exists. Clear
@@ -133,6 +136,7 @@ export const settleScene = async (
   const pending = pendingColliderBodies();
   return {
     ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length,
+    ...(referenceWarnings.length ? { referenceWarnings } : {}),
     ...(pending.length ? {
       collisionPending: pending,
       note: `Convex pieces for ${pending.join(', ')} are still being worked out, one body at a time — a few seconds each, up to ~20 s for a long coiled part. They collide as their convex hull until then. The scene is built: do not build it again. physics_run_headless waits for them; physics_get_scene_summary shows collisionPending until they land.`,
