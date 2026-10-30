@@ -38,6 +38,7 @@ import {
 import { exportThreeMfAssemblies, type ThreeMfAssembly, type ThreeMfPart } from './threeMfExporter';
 import type { CsgContext, HalfFeatures, MoldExportResult, MoldMeshHalf } from './moldExporter';
 import { castMaterial, castMaterialWarnings, type CastMaterialId } from './castMaterials';
+import { applyDraft, erodeDepth, type DraftMode } from './moldDraft';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
 export const WATER_BASED_REFUSAL = 'Water-based casts dissolve PVA while they cure; use the rigid mold or a silicone one.';
@@ -173,6 +174,45 @@ export function envelopeSolid(wasm: ManifoldToplevel, grid: Grid, depth: Float64
     tri.push(b(c, r), b(c, r + 1), t(c, r + 1), b(c, r), t(c, r + 1), t(c, r));
   }
   return new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: vert, triVerts: Uint32Array.from(tri) }));
+}
+
+/**
+ * The part as a drafted cavity casts it, for the molds that cut the exact part
+ * rather than a depth field: the liner and the undercut-keeping mold. `part` is
+ * in the half's own frame (cavity below z = 0), and `rawDepth` is its depth
+ * field on that half's grid. Returns `part` itself when there is no draft.
+ *
+ * The drafted field's envelope is the taper. 'remove' keeps only what lies
+ * inside it. 'add' grows the part by everything the envelope has beyond the
+ * undrafted one; that one is pulled in by a cell first, because its walls are
+ * the grid's and lie a fraction of a cell off the part's, and growing from them
+ * would leave a fin of mold between the two. 'centre' does both.
+ */
+export function draftPart(
+  wasm: ManifoldToplevel,
+  part: Manifold,
+  grid: Grid,
+  rawDepth: Float64Array,
+  draftDeg: number,
+  mode: DraftMode = 'remove',
+): Manifold {
+  if (!(draftDeg > 0)) return part;
+  const drafted = envelopeSolid(wasm, grid, applyDraft(rawDepth, grid, draftDeg, mode));
+  let out = part;
+  if (mode !== 'remove') {
+    const inner = envelopeSolid(wasm, grid, erodeDepth(rawDepth, grid));
+    const grown = drafted.subtract(inner);
+    inner.delete();
+    out = part.add(grown);
+    grown.delete();
+  }
+  if (mode !== 'add') {
+    const kept = out.intersect(drafted);
+    if (out !== part) out.delete();
+    out = kept;
+  }
+  drafted.delete();
+  return out;
 }
 
 /**
@@ -335,6 +375,12 @@ function buildHalfPair(
 ): HalfPair {
   const { wasm, grid, moldWidthMm, moldDepthMm, partingZ } = ctx;
   let part = flipped ? rawPart.transform(flipAbout(partingZ)) : rawPart.translate([0, 0, -partingZ]);
+  // The casting as the draft leaves it; the shell's envelope then has to hold
+  // both it and the undrafted part, whichever reaches further.
+  const { draftAngleDeg, draftMode } = ctx.opts;
+  const drafted = draftPart(wasm, part, grid, rawDepth, draftAngleDeg, draftMode);
+  if (drafted !== part) part = replace(part, drafted);
+  const reach = draftAngleDeg > 0 ? applyDraft(rawDepth, grid, draftAngleDeg, draftMode).map((d, i) => Math.max(d, rawDepth[i])) : rawDepth;
   if (ctx.opts.moldType === 'open' || ctx.lidIsBackingPlate) {
     // Here the part ends exactly on the block's face, and a solid cut by
     // another that shares its face is left with a sheet of nothing there. So
@@ -350,7 +396,7 @@ function buildHalfPair(
     slice.delete();
   }
 
-  const envelope = envelopeDepth(rawDepth, grid, ctx.skinMm, blockHeight - MIN_FLOOR_MM);
+  const envelope = envelopeDepth(reach, grid, ctx.skinMm, blockHeight - MIN_FLOOR_MM);
   const env = envelopeSolid(wasm, grid, envelope);
   const cube = wasm.Manifold.cube([moldWidthMm, moldDepthMm, blockHeight], false);
   const block = cube.translate([-moldWidthMm / 2, -moldDepthMm / 2, -blockHeight]);
@@ -405,11 +451,7 @@ function buildHalfPair(
 
 /** Everything the exact-CSG mold build has, plus what the liner needs from the column field. */
 export interface LinerContext extends CsgContext {
-  grid: Grid;
   field: ColumnField;
-  /** Undrafted cavity depth per column, each half in its own build frame. */
-  rawBaseDepth: Float64Array;
-  rawLidDepth: Float64Array;
   skinMm: number;
   castMaterial: CastMaterialId;
 }

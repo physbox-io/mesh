@@ -21,8 +21,9 @@ import { collectSceneTriangles } from './contourSliceExporter';
 import type { ManifoldToplevel, Manifold } from 'manifold-3d';
 import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, type Mat4Tuple, type Triangle3D } from './moldManifold';
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
+import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
 import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
-import { buildLinerMold, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
+import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
 import type { CastMaterialId } from './castMaterials';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
@@ -66,6 +67,12 @@ export interface MoldOptions {
    * lets a rigid mold let go.
    */
   draftAngleDeg: number;
+  /**
+   * Which way the walls lean (utils/moldDraft.ts): 'remove' (default) keeps the
+   * opening's size and takes the taper off the casting, 'add' keeps the bottom's
+   * and puts it on, 'centre' pivots each wall about its mid-height.
+   */
+  draftMode?: DraftMode;
   /**
    * Keep 3D overhangs and undercuts inside the mold cavity (for flexible
    * silicone/TPU molds or sacrificial shells) instead of filling them in solid
@@ -216,66 +223,6 @@ function addQuad(
   if (!sameVertex(v0, v2) && !sameVertex(v2, v3) && !sameVertex(v0, v3)) {
     triangles.push({ a: v0, b: v2, c: v3, normal: computeNormal(v0, v2, v3) });
   }
-}
-
-/**
- * Tapers the cavity walls so a rigid mold can let go.
- *
- * A cavity is a depth field, and a wall's steepness is that field's gradient, so
- * draft is a slope limit: no column may be deeper than its neighbour by more
- * than one step's worth of the taper. Sweeping the limit forwards and then
- * backwards propagates it across the whole field in two passes, and it only ever
- * makes the cavity shallower -- the taper is cut back into the deep side, which
- * is what leaves the opening the widest part of the pocket.
- *
- * The cost is real and worth stating: a wall loses depth x tan(angle) of lateral
- * detail, so 2 degrees over an 18 mm cavity rounds the top millimetre of every
- * cliff. Set the angle to zero to reproduce the part exactly and demold by hand.
- */
-function applyDraft(depth: Float64Array, grid: Grid, draftDeg: number): Float64Array {
-  if (!(draftDeg > 0)) return depth;
-
-  const cot = 1 / Math.tan((draftDeg * Math.PI) / 180);
-  const wx = grid.stepX * cot;
-  const wy = grid.stepY * cot;
-  const wd = Math.hypot(grid.stepX, grid.stepY) * cot;
-  const d = Float64Array.from(depth);
-  const { cols, rows } = grid;
-
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const i = r * cols + c;
-      if (c > 0) d[i] = Math.min(d[i], d[i - 1] + wx);
-      if (r > 0) d[i] = Math.min(d[i], d[i - cols] + wy);
-      if (r > 0 && c > 0) d[i] = Math.min(d[i], d[i - cols - 1] + wd);
-      if (r > 0 && c < cols - 1) d[i] = Math.min(d[i], d[i - cols + 1] + wd);
-    }
-  }
-  for (let r = rows - 1; r >= 0; r--) {
-    for (let c = cols - 1; c >= 0; c--) {
-      const i = r * cols + c;
-      if (c < cols - 1) d[i] = Math.min(d[i], d[i + 1] + wx);
-      if (r < rows - 1) d[i] = Math.min(d[i], d[i + cols] + wy);
-      if (r < rows - 1 && c < cols - 1) d[i] = Math.min(d[i], d[i + cols + 1] + wd);
-      if (r < rows - 1 && c > 0) d[i] = Math.min(d[i], d[i + cols - 1] + wd);
-    }
-  }
-  return d;
-}
-
-/** The shallowest taper on any cavity wall, in degrees off the pull direction. */
-function shallowestDraft(depth: Float64Array, grid: Grid): number {
-  let steepest = 0;
-  const { cols, rows } = grid;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const i = r * cols + c;
-      if (c + 1 < cols) steepest = Math.max(steepest, Math.abs(depth[i + 1] - depth[i]) / grid.stepX);
-      if (r + 1 < rows) steepest = Math.max(steepest, Math.abs(depth[i + cols] - depth[i]) / grid.stepY);
-    }
-  }
-  if (steepest <= 1e-9) return 90;
-  return (Math.atan(1 / steepest) * 180) / Math.PI;
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +696,10 @@ export interface CsgContext {
   lidIsBackingPlate: boolean;
   undercutColumns: number;
   warnings: string[];
+  grid: Grid;
+  /** Undrafted cavity depth per column, each half in its own build frame; draftPart tapers from these. */
+  rawBaseDepth: Float64Array;
+  rawLidDepth: Float64Array;
 }
 
 function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
@@ -783,6 +734,11 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
     } else {
       partManifold = rawPartManifold.translate([0, 0, -partingZ]);
       rawPartManifold.delete();
+    }
+    const draftedPart = draftPart(wasm, partManifold, ctx.grid, ctx.rawBaseDepth, opts.draftAngleDeg, opts.draftMode);
+    if (draftedPart !== partManifold) {
+      partManifold.delete();
+      partManifold = draftedPart;
     }
 
     const blockHeight = partHeightMm + opts.baseThicknessMm;
@@ -909,6 +865,15 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
     lidPart = rawPartManifold.transform(mat);
     rawPartManifold.delete();
   }
+
+  // The exact part, tapered as the depth-field mold would be.
+  const taper = (m: Manifold, raw: Float64Array) => {
+    const t = draftPart(wasm, m, ctx.grid, raw, opts.draftAngleDeg, opts.draftMode);
+    if (t !== m) m.delete();
+    return t;
+  };
+  basePart = taper(basePart, ctx.rawBaseDepth);
+  lidPart = taper(lidPart, ctx.rawLidDepth);
 
   const baseBlock = wasm.Manifold.cube([moldWidthMm, moldDepthMm, baseBlockHeight], false)
     .translate([-mw2, -md2, -baseBlockHeight]);
@@ -1308,8 +1273,14 @@ export function generateMoldMeshes(
 
   // The lid is flipped over to mate, so it is built mirrored in Y relative to
   // the base half and its own features are mirrored with it.
-  const baseDepth = applyDraft(rawBaseDepth, grid, opts.draftAngleDeg);
-  const lidDepth = applyDraft(rawLidDepth, grid, opts.draftAngleDeg);
+  const baseDepth = applyDraft(rawBaseDepth, grid, opts.draftAngleDeg, opts.draftMode);
+  const lidDepth = applyDraft(rawLidDepth, grid, opts.draftAngleDeg, opts.draftMode);
+  if (draftBreaksSide(baseDepth, grid) || (opts.moldType === 'clamshell' && draftBreaksSide(lidDepth, grid))) {
+    warnings.push(
+      `The ${opts.draftAngleDeg}\u00b0 draft widens the cavity out through the mold's side wall; ` +
+      'raise the wall margin or lower the draft.'
+    );
+  }
 
   let cavityDepthMm = 0;
   for (let i = 0; i < n; i++) {
@@ -1489,6 +1460,9 @@ export function generateMoldMeshes(
     minDraftDeg,
     lidIsBackingPlate,
     undercutColumns,
+    grid,
+    rawBaseDepth,
+    rawLidDepth,
   };
 
   if (opts.dissolvableLiner) {
@@ -1498,10 +1472,7 @@ export function generateMoldMeshes(
       wasm: activeWasm,
       flexibleMoldAdvised: false,
       warnings: [...warnings],
-      grid,
       field,
-      rawBaseDepth,
-      rawLidDepth,
       skinMm: opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM,
       castMaterial: opts.castMaterial ?? 'epoxy',
     });

@@ -84,13 +84,15 @@ function Segmented<T extends string>({
   value,
   onChange,
   options,
+  disabled = false,
 }: {
   value: T;
   onChange: (val: T) => void;
   options: readonly (readonly [T, string])[];
+  disabled?: boolean;
 }) {
   return (
-    <div className="flex bg-slate-200 dark:bg-slate-700/60 p-0.5 rounded-lg text-xs font-medium min-w-0">
+    <div className={`flex bg-slate-200 dark:bg-slate-700/60 p-0.5 rounded-lg text-xs font-medium min-w-0${disabled ? ' opacity-50 pointer-events-none' : ''}`}>
       {options.map(([optVal, label]) => (
         <button
           key={optVal}
@@ -517,6 +519,17 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                 <option value="-y">Back to front (−Y)</option>
                 <option value="-x">Other side (−X)</option>
               </select>
+            </Field>
+            <Field
+              label="Draft Direction"
+              hint="Which way the draft leans the walls. Remove keeps the opening's size and takes the taper off the casting, so a thin wall gets thinner at the bottom. Add keeps the bottom's size and puts it on, widening the opening. Centre pivots each wall at mid-height."
+            >
+              <Segmented
+                value={options.draftMode ?? 'remove'}
+                onChange={(v) => set('draftMode', v)}
+                options={[['remove', 'Remove'], ['add', 'Add'], ['centre', 'Centre']] as const}
+                disabled={draftLocked || options.draftAngleDeg === 0}
+              />
             </Field>
 
             <div className="grid grid-cols-2 gap-3 min-w-0">

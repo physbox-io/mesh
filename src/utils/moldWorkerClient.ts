@@ -259,7 +259,10 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.wallMarginMm === 'number' ? { wallMarginMm: msg.wallMarginMm } : {}),
       ...(typeof msg.baseThicknessMm === 'number' ? { baseThicknessMm: msg.baseThicknessMm } : {}),
       ...(typeof msg.cavityDepthMm === 'number' ? { cavityDepthMm: msg.cavityDepthMm } : {}),
-      ...(typeof msg.draftAngleDeg === 'number' ? { draftAngleDeg: msg.draftAngleDeg } : {}),
+      // draft_deg is the tool's name for it, as on the metal chains.
+      ...(typeof msg.draftAngleDeg === 'number' ? { draftAngleDeg: msg.draftAngleDeg }
+        : typeof msg.draftDeg === 'number' ? { draftAngleDeg: msg.draftDeg } : {}),
+      ...(msg.draftMode === 'remove' || msg.draftMode === 'add' || msg.draftMode === 'centre' ? { draftMode: msg.draftMode } : {}),
       ...(typeof msg.allowUndercuts === 'boolean' ? { allowUndercuts: msg.allowUndercuts } : {}),
       ...(typeof msg.includeSprue === 'boolean' ? { includeSprue: msg.includeSprue } : {}),
       ...(typeof msg.includeVents === 'boolean' ? { includeVents: msg.includeVents } : {}),
