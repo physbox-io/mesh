@@ -36,6 +36,8 @@ export interface GearBody {
   origin: V3;
   axis: V3;
   wheels: Wheel[];
+  /** Nothing round to go by: its wheel is the first geom's size. */
+  guessed?: boolean;
 }
 
 /**
@@ -81,6 +83,7 @@ export function gearBody(node: SceneNode, j: SceneJoint, world: { pos: number[];
     (g.type === 'mesh' ? meshes : cylinders).push({ radius: e.r, lo: e.lo, hi: e.hi });
   }
   let wheels: Wheel[];
+  let guessed = false;
   if (cylinders.length) {
     // Round colliders are the pitch circles: a mechanism-builder gear's, or
     // each gear of a compound arbor built onto one hinge.
@@ -96,8 +99,9 @@ export function gearBody(node: SceneNode, j: SceneJoint, world: { pos: number[];
   } else {
     // Nothing round to go by: the first geom's size, in every plane.
     wheels = [{ radius: node.geoms?.[0]?.size?.[0] ?? 0.25, lo: -Infinity, hi: Infinity }];
+    guessed = true;
   }
-  return { jointName: j.name, nodeId: node.id, origin, axis, wheels };
+  return { jointName: j.name, nodeId: node.id, origin, axis, wheels, ...(guessed ? { guessed } : {}) };
 }
 
 export interface GearMesh { a: GearBody; b: GearBody; ratio: number }

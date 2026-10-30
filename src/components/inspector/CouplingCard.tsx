@@ -2,6 +2,8 @@ import { useStore, cloneSceneGraph } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { SettledNumberInput } from '../SettledInputs';
 import { DocsInfoButton } from '../docs/DocsInfoButton';
+import { isRackBody } from '../../utils/rackMeshing';
+import { findNodeById } from '../../utils/sceneTree';
 
 /** Joint Mechanical Coupling Configuration */
 export function CouplingCard({ node: selectedNode }: { node: SceneNode }) {
@@ -42,6 +44,26 @@ export function CouplingCard({ node: selectedNode }: { node: SceneNode }) {
         Enable Coupling
       </label>
 
+      {selectedNode.joints.some((j) => j.type === 'slide') && (
+        <label className="text-xs font-semibold text-slate-500 flex items-center gap-2 cursor-pointer py-1" title="A rack is coupled to a hinged wheel that meshes with it">
+          <input
+            type="checkbox"
+            checked={isRackBody(selectedNode)}
+            disabled={selectedNode.toothForm?.kind === 'rack'}
+            onChange={(e) => {
+              const newScene = cloneSceneGraph(sceneGraph);
+              const node = findNodeById(newScene.nodes, selectedNode.id);
+              if (!node) return;
+              if (e.target.checked) node.isRack = true;
+              else delete node.isRack;
+              updateScene(newScene);
+            }}
+            className="w-4 h-4 rounded text-blue-500 focus:ring-blue-400 accent-blue-500 cursor-pointer"
+          />
+          Rack (teeth on this slide)
+        </label>
+      )}
+
       {selectedNode.allowCoupling !== false && (() => {
         // Gather list of other jointed nodes in the scene
         const list: SceneNode[] = [];
@@ -73,7 +95,8 @@ export function CouplingCard({ node: selectedNode }: { node: SceneNode }) {
                         node.coupleTargetId = val;
                         // Default ratio depending on type if target selected and no custom ratio set
                         if (val && node.coupleRatio === undefined) {
-                          node.coupleRatio = val.includes('rack') || selectedNode.id.includes('rack') ? 0.2 : -1.0;
+                          const target = findNodeById(newScene.nodes, val);
+                          node.coupleRatio = isRackBody(node) || (target && isRackBody(target)) ? 0.2 : -1.0;
                         }
                         return true;
                       }

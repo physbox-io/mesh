@@ -11,6 +11,7 @@
 import type { SceneJoint, SceneNode } from '../types/scene';
 import { nodeLocalQuat, quatMultiply, quatRotateVec, type QuatWXYZ } from './sceneTree';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
+import { isRackBody, meshingRacks, rackBody, type RackBody } from './rackMeshing';
 
 /** A body's rest pose, world frame, and its first geom's size. */
 export interface WorldPose { pos: [number, number, number]; quat: QuatWXYZ; size: number[] }
@@ -74,8 +75,8 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
   const couplings: PlannedCoupling[] = [];
   const equalities: string[] = [];
   const warnings: string[] = [];
-  const pinionNodes: { jointName: string; nodeId: string; pos: [number, number, number]; radius: number }[] = [];
-  const rackNodes: { jointName: string; nodeId: string; pos: [number, number, number] }[] = [];
+  const pinions: GearBody[] = [];
+  const racks: RackBody[] = [];
   const gearJointNodes: GearBody[] = [];
   const jointedNodes: Record<string, string> = {};
   const explicitCouplingNodes: SceneNode[] = [];
@@ -90,24 +91,15 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
       if (node.coupleTargetId) explicitCouplingNodes.push(node);
       if (node.isPulleyRope) pulleyRopesList.push(node);
       const couplingAllowed = node.allowCoupling !== false;
+      const pose = world[node.id] ?? { pos: [0, 0, 0], quat: [1, 0, 0, 0] as QuatWXYZ, size: [] };
       for (const j of node.joints || []) {
-        if (couplingAllowed && node.id.includes('gear') && j.type === 'hinge') {
-          const wData = world[node.id] ?? { pos: [0, 0, 0], quat: [1, 0, 0, 0] as QuatWXYZ, size: [] };
-          gearJointNodes.push(gearBody(node, j, wData, pitchRadius(node)));
+        if (couplingAllowed && j.type === 'hinge') {
+          const g = gearBody(node, j, pose, pitchRadius(node));
+          if (node.id.includes('gear')) gearJointNodes.push(g);
+          // Any hinged wheel can drive a rack; a rack has to say it is one.
+          if (!g.guessed) pinions.push(g);
         }
-        if (couplingAllowed && node.id.includes('pinion') && j.type === 'hinge') {
-          const wData = world[node.id];
-          pinionNodes.push({
-            jointName: j.name,
-            nodeId: node.id,
-            pos: wData ? wData.pos : [0, 0, 0],
-            radius: pitchRadius(node) ?? (wData ? wData.size[0] : 0.08),
-          });
-        }
-        if (couplingAllowed && node.id.includes('rack') && j.type === 'slide') {
-          const wData = world[node.id];
-          rackNodes.push({ jointName: j.name, nodeId: node.id, pos: wData ? wData.pos : [0, 0, 0] });
-        }
+        if (couplingAllowed && j.type === 'slide' && isRackBody(node) && j === couplingJoint(node)) racks.push(rackBody(node, j, pose));
       }
       traverse(node.children);
     }
@@ -155,32 +147,26 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
     couplings.push({ name: `gear_coupling_${coupledPairs.size}`, joint1: a.jointName, joint2: b.jointName, ratio: ratio.toFixed(6) });
   }
 
-  // 2. Pinion and Rack fallback proximity coupling
+  // 2. A rack on its pinion, by where they are: see utils/rackMeshing.ts.
   let pinionRackCouplingCount = 0;
-  for (const p of pinionNodes) {
-    for (const r of rackNodes) {
-      const dx = p.pos[0] - r.pos[0];
-      const dy = p.pos[1] - r.pos[1];
-      const dz = p.pos[2] - r.pos[2];
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      // Only couple if their centers are within 0.5 meters of each other
-      if (dist <= 0.5) {
-        const pairKey = [p.jointName, r.jointName].sort().join('::');
-        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey) && !sameChain(p.jointName, r.jointName)) {
-          coupledPairs.add(pairKey);
-          pinionRackCouplingCount++;
-          const pinionRadius = p.radius;
-          // The coupling gives the PINION ANGLE as a function of the rack's
-          // displacement: theta = x / r. It used to emit r itself, which is the
-          // relationship the other way round — with r = 0.08 that asked the rack
-          // to travel 1/r^2 = 156x too far, so it slammed into its own limit and
-          // the whole mechanism bound up instead of driving.
-          const turnsPerMetre = pinionRadius > 1e-6 ? 1 / pinionRadius : 12.5;
-          const name = pinionRackCouplingCount === 1 ? 'pinion_rack_coupling' : `pinion_rack_coupling_${pinionRackCouplingCount}`;
-          couplings.push({ name, joint1: p.jointName, joint2: r.jointName, ratio: turnsPerMetre });
-        }
-      }
-    }
+  const racked = new Set<string>();
+  for (const { pinion, rack, turnsPerMetre } of meshingRacks(pinions, racks, sameChain)) {
+    const pairKey = [pinion.jointName, rack.jointName].sort().join('::');
+    racked.add(rack.nodeId);
+    if (coupledPairs.has(pairKey) || explicitlyCoupledJointPairs.has(pairKey)) continue;
+    coupledPairs.add(pairKey);
+    pinionRackCouplingCount++;
+    // θ = x / (r·k): the pinion's angle per metre of rack, signed by the side
+    // the rack is on. It once emitted r itself, the relationship the other
+    // way round, which asked a rack to travel 1/r^2 = 156x too far.
+    const name = pinionRackCouplingCount === 1 ? 'pinion_rack_coupling' : `pinion_rack_coupling_${pinionRackCouplingCount}`;
+    couplings.push({ name, joint1: pinion.jointName, joint2: rack.jointName, ratio: +turnsPerMetre.toPrecision(9) });
+  }
+  // A rack nothing drives is said by name, unless a coupling already ties it.
+  const tied = new Set(couplings.flatMap((c) => [c.joint1, c.joint2]));
+  for (const rack of racks) {
+    if (racked.has(rack.nodeId) || tied.has(rack.jointName)) continue;
+    warnings.push(`Body '${rack.nodeId}' is a rack, but no hinged wheel meshes with it, so nothing turns it: a wheel meshes when its hinge axis is square to the slide, it lies in the rack's plane over the rack's length, and the rack's face toward it is about one pitch radius (the wheel's radius) from its axis. Couple it explicitly with coupleTargetId to drive it from elsewhere.`);
   }
 
   // 3. Pulley Rope Joint Couplings

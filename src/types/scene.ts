@@ -539,6 +539,11 @@ export interface SceneNode {
   joints: SceneJoint[];
   children: SceneNode[];
   allowCoupling?: boolean;
+  /**
+   * A slide body with teeth: coupled to a hinged wheel that meshes with it
+   * (utils/rackMeshing.ts). A cut rack (toothForm kind 'rack') is one already.
+   */
+  isRack?: boolean;
   coupleTargetId?: string;
   coupleRatio?: number;
   weldTargetId?: string;

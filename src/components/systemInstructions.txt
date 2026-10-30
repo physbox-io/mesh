@@ -69,6 +69,7 @@ Every node in the "nodes" array represents a physical body and is defined as:
   
   // Optional Special Fields:
   allowCoupling: boolean (default true; false keeps the body out of the automatic proximity coupling: hinge bodies with 'gear' in the id couple when their axes are parallel, a round geom of each lies in the same plane, and the axes are 0.5-1.2x the sum of those radii apart; bodies already chained by coupleTargetId are left alone)
+  isRack: boolean (a slide body with teeth: coupled to a hinged wheel whose axis is square to the slide, in the rack's plane, with the rack's face about one wheel radius from the axis; theta = x/r, signed by which side of the wheel the rack is on. Only marked bodies are racks, whatever the id)
   coupleTargetId: string (id of target body to couple with: this body's first hinge or slide = coupleRatio x the target's first hinge or slide, held rigid like gear teeth; a body with neither, e.g. one given the default free joint, is not coupled and the reply's couplingWarnings say so)
   coupleRatio: number (gear/coupling ratio)
   weldTargetId: string (id of target body to weld to)
