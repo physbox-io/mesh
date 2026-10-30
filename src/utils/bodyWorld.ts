@@ -64,3 +64,41 @@ export function transformBox(box: Box3Like, m: THREE.Matrix4): Box3Like {
   }
   return { min, max };
 }
+
+/** Where a body is in the world, and whether that is the simulation's word or the scene's. */
+export interface BodyWorldPos {
+  pos: [number, number, number];
+  source: 'simulation' | 'authored';
+}
+
+/**
+ * Every body's world position, by id. From the simulation's latest frame when
+ * there is a model and it was built from the body as it now stands (a body in
+ * `stale` has changed since); otherwise composed from the authored chain of
+ * parents, so a body nested under a turned wheel is still put in the right place.
+ */
+export function bodyWorldPositions(
+  nodes: SceneNode[] | undefined,
+  live?: {
+    model: { _idMaps?: { body?: Record<string, number> } } | null;
+    data: { xpos: ArrayLike<number> } | null;
+    stale?: Set<string>;
+  },
+): Map<string, BodyWorldPos> {
+  const out = new Map<string, BodyWorldPos>();
+  const ids = live?.model?._idMaps?.body;
+  const xpos = live?.data?.xpos;
+  walkBodiesWorld(nodes, (node, world) => {
+    const b = ids?.[node.id];
+    if (xpos && b !== undefined && b > 0 && b * 3 + 2 < xpos.length && !live?.stale?.has(node.id)) {
+      const p: [number, number, number] = [xpos[b * 3], xpos[b * 3 + 1], xpos[b * 3 + 2]];
+      if (p.every(Number.isFinite)) {
+        out.set(node.id, { pos: p, source: 'simulation' });
+        return;
+      }
+    }
+    const e = world.elements;
+    out.set(node.id, { pos: [e[12], e[13], e[14]], source: 'authored' });
+  });
+  return out;
+}

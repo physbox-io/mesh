@@ -16,6 +16,7 @@ import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum
 import { collidersAreStale, intrusionSentence, solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
 import { measurePart } from './solidMachiningExporter';
 import { collidingGeomBoxes } from './collisionCheck';
+import type { BodyWorldPos } from './bodyWorld';
 
 export const bboxOf = (flatVerts: number[] | undefined) => {
   if (!flatVerts || flatVerts.length === 0) return undefined;
@@ -256,7 +257,7 @@ const um = (v: number[] | undefined) => v?.map((x) => (typeof x === 'number' ? +
  * only until it lands, a few seconds to minutes later. Reporting "convex hull"
  * then read as the verdict; it is reported as pending instead.
  */
-function collisionReport(node: SceneNode): Record<string, unknown> {
+export function collisionReport(node: SceneNode): Record<string, unknown> {
   const colliders = (node.geoms || []).filter(g => g.csgDerived === 'collider');
   if (collidersAreStale(node)) {
     return {
@@ -379,6 +380,20 @@ export interface SummaryContext {
   stale?: Set<string>;
   /** List generated geoms (curve segments, convex pieces) one by one. */
   full?: boolean;
+  /** World positions by body id (bodyWorldPositions), given where they differ from `pos`. */
+  world?: Map<string, BodyWorldPos>;
+}
+
+/**
+ * A body's world position, where it is not just its `pos`: a nested body's
+ * pos is in its parent's frame, and a simulated one has moved.
+ */
+function worldPosOf(node: SceneNode, world: Map<string, BodyWorldPos> | undefined): Record<string, unknown> {
+  const w = world?.get(node.id);
+  if (!w) return {};
+  const p = node.pos || [0, 0, 0];
+  if (w.pos.every((v, i) => Math.abs(v - (p[i] ?? 0)) < 1e-6)) return {};
+  return { worldPos: um(w.pos), worldPosSource: w.source };
 }
 
 export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<string, unknown> => {
@@ -389,6 +404,7 @@ export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<stri
     id: node.id,
     name: node.name,
     pos: um(node.pos),
+    ...worldPosOf(node, ctx.world),
     ...(inertial ? { inertial: stale ? { ...inertial, stale: true } : inertial } : {}),
     ...(node.quat ? { quat: um(node.quat) } : {}),
     ...(node.euler ? { euler: um(node.euler) } : {}),

@@ -147,32 +147,8 @@ export const findNodeInScene = (nodes: SceneNode[], id: string): SceneNode | nul
   return null;
 };
 
-export const stripMeshArrays = (node: SceneNode): SceneNode => {
-  const cloned = { ...node };
-  if (cloned.geoms) {
-    cloned.geoms = cloned.geoms.map((g) => {
-      const rest = { ...g };
-      delete rest.vertices;
-      delete rest.faces;
-      delete rest.renderVertices;
-      delete rest.colliderVertices;
-      delete rest.colliderFaces;
-      // A text pattern's saved letter outlines are kilobytes of coordinates.
-      if (rest.textures?.some((t) => t.options?.outline)) {
-        rest.textures = rest.textures.map((t) => {
-          if (!t.options?.outline) return t;
-          const { outline: _outline, outlineSig: _sig, imageGrid: _grid, ...options } = t.options;
-          return { ...t, options };
-        });
-      }
-      return rest;
-    });
-  }
-  if (cloned.children) {
-    cloned.children = cloned.children.map(stripMeshArrays);
-  }
-  return cloned;
-};
+// Lives with the other pure reply shapers, so it can be tested without the store.
+export { stripMeshArrays } from '../../utils/objectReply';
 
 // Shared by BUILD_SCENE and UPDATE_SCENE: fills in the fields compileToMJCF's
 // buildNode() unconditionally calls .forEach on (joints, geoms, children).

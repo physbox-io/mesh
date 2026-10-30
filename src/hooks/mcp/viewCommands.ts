@@ -24,10 +24,11 @@ import { hardwareList } from '../../utils/hardwareList';
 import { CAMERA_VIEWS, type CameraView } from '../../utils/cameraViews';
 import { getLiveDimensions } from '../../utils/liveDimensions';
 import { belowFloor, boundsOverlaps, contactOverlaps, DEFAULT_OVERLAP_TOLERANCE } from '../../utils/collisionCheck';
-import { walkBodiesWorld } from '../../utils/bodyWorld';
+import { bodyWorldPositions, walkBodiesWorld } from '../../utils/bodyWorld';
+import { objectReply } from '../../utils/objectReply';
 import { initialContacts } from '../initialContacts';
 import {
-  geomBboxOf, isFabricationScene, meshIntegrity, staleBodies, stockReport, summarizeNode,
+  isFabricationScene, staleBodies, stockReport, summarizeNode,
 } from '../../utils/sceneSummary';
 import { recompilesInFlight } from '../../store/simulationActions';
 import { modelBuiltFrom } from '../../store/modelProvenance';
@@ -128,7 +129,10 @@ export const viewCommands: McpCommands = {
             : 'The scene has changed since the model was last compiled (or its compile failed: see physics_get_state.lastCompileError). Inertial figures and masses marked stale are from the previous build.',
         },
       } : {}),
-      nodes: (store.sceneGraph.nodes || []).map((n) => summarizeNode(n, { model: store.model, stale })),
+      nodes: (() => {
+        const world = bodyWorldPositions(store.sceneGraph.nodes, { model: store.model, data: store.data, stale });
+        return (store.sceneGraph.nodes || []).map((n) => summarizeNode(n, { model: store.model, stale, world }));
+      })(),
       // What to buy: every bought part counted, bar stock packed.
       ...(() => {
         const list = hardwareList(store.sceneGraph);
@@ -246,22 +250,15 @@ export const viewCommands: McpCommands = {
     };
     const found = findNode(store.sceneGraph.nodes);
     if (!found) throw new Error(`Object not found: ${targetId}`);
-    // The docs promise every mesh geom its size and integrity checks, as
-    // physics_get_scene_summary gives them; this used to strip the arrays
-    // and return nothing in their place.
-    const withMeshChecks = (n: SceneNode): SceneNode => ({
-      ...n,
-      ...(n.geoms ? {
-        geoms: n.geoms.map((g) => (g.type === 'mesh'
-          ? { ...g, vertCount: (g.renderVertices || g.vertices || []).length / 3, faceCount: (g.faces || []).length / 3, bbox: geomBboxOf(g), ...meshIntegrity(g) }
-          : g)),
-      } : {}),
-      ...(n.children ? { children: n.children.map(withMeshChecks) } : {}),
-    });
+    // Every mesh geom gets its size and integrity checks, as
+    // physics_get_scene_summary gives them; convex pieces are counted, not
+    // listed, unless `full` (utils/objectReply.ts).
+    const stale = staleBodies(store.sceneGraph, store.model ? modelBuiltFrom().graph : null);
+    const world = bodyWorldPositions(store.sceneGraph.nodes, { model: store.model, data: store.data, stale });
     // Every O-ring groove on it, checked against what is round it now.
     const grooves = [...new Set((found.geoms || []).filter((g) => g.hardware?.part === 'groove').map((g) => g.hardware!.group))];
     const sealChecks = grooves.map((group) => ({ group, ...sealCheckFor(store.sceneGraph, found.id, group) }));
-    return { ...stripMeshArrays(withMeshChecks(found)), ...(sealChecks.length ? { sealChecks } : {}) };
+    return { ...objectReply(found, { full: msg.full === true, world }), ...(sealChecks.length ? { sealChecks } : {}) };
   },
   MEASURE: async (msg, { store }) => {
     const { from, to, corner, snap, withinMm } = msg;
