@@ -247,8 +247,15 @@ describe('print fidelity in the MJCF', () => {
       }],
     };
     const xml = compileToMJCF(meshScene);
-    expect(xml).toMatch(/name="m_mesh"[^>]*contype="0" conaffinity="0"/);
+    // Moving, it is drawn from the body transform, so the drawn mesh is not in
+    // the model at all: a dense import's would take most of the engine's heap.
+    expect(xml).not.toMatch(/name="m_mesh"/);
     expect(xml).toMatch(/name="m_mesh_collider"[^>]*mass="1"/);
     expect(xml).toMatch(/<mesh name="m_mesh_collider"[^>]*vertex="-0.01 /);
+    // Static, the renderer finds it by geom id, so it stays, touching nothing.
+    const g = meshScene.nodes[0].geoms[0];
+    const staticXml = compileToMJCF({ nodes: [{ ...meshScene.nodes[0], geoms: [{ ...g, dynamic: false }] }] });
+    expect(staticXml).toMatch(/name="m_mesh"[^>]*contype="0" conaffinity="0"/);
+    expect(staticXml).toMatch(/name="m_mesh_collider"[^>]*mass="1"/);
   });
 });

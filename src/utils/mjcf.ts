@@ -397,10 +397,14 @@ export const PRINT_CONTACT_TIME = 0.002;
  * - A pin or a socket lives only in print fidelity; otherwise it is inert.
  *   It never weighs anything — the section's own mesh carries the mass.
  * - A mesh with a separate collider source (`colliderVertices`) is drawn from
- *   its own vertices but collides as the source: the visible mesh is emitted
- *   visual-only and a plain mesh geom beside it takes the contact and the
- *   mass. Not when the body has convex pieces already, which were made from
- *   that same source and replace it (see convexDecomposition.ts).
+ *   its own vertices but collides as the source: a plain mesh geom takes the
+ *   contact and the mass. The visible mesh stays in the model visual-only when
+ *   it is static, which the renderer finds by geom id; a dynamic one is drawn
+ *   from the body transform and left out, as demoteDecomposedGeom (csg.ts)
+ *   leaves it out. That matters for a dense import (utils/denseMesh.ts), whose
+ *   drawn mesh alone would take most of the engine's heap. Not when the body
+ *   has convex pieces already, which were made from that same source and
+ *   replace it (see convexDecomposition.ts).
  *
  * A scene with neither kind of geom comes out byte for byte as it did before
  * this existed, which the native app's golden XML depends on.
@@ -423,7 +427,7 @@ function applyContactClasses(nodes: SceneNode[], print: boolean) {
           && g.colliderFaces?.length && g.colliderVertices?.length
         ) {
           const { colliderVertices, colliderFaces, ...rest } = g;
-          out.push({ ...rest, role: 'visual', mass: undefined, density: undefined });
+          if (!g.dynamic) out.push({ ...rest, role: 'visual', mass: undefined, density: undefined });
           // Y-up, as every geom's `vertices` are; renderVertices is Z-up.
           const yUp: number[] = new Array(colliderVertices.length);
           for (let i = 0; i < colliderVertices.length; i += 3) {
@@ -467,6 +471,11 @@ export interface MjcfOptions {
    * presets and the native app's golden XML rely on.
    */
   meshFiles?: MeshFileSink;
+  /**
+   * Filled in by the compile: the triangles of every mesh the model holds,
+   * which is most of what it costs the engine's heap (utils/denseMesh.ts).
+   */
+  stats?: { meshTriangles: number };
 }
 
 export const compileToMJCF = (
@@ -574,6 +583,7 @@ export const compileToMJCF = (
     }
   };
   collectMeshAssets(sceneCopy.nodes);
+  if (opts.stats) opts.stats.meshTriangles = meshAssets.reduce((n, g) => n + g.faces!.length / 3, 0);
 
   // Vertices stored in Three.js Y-up space (X=right, Y=up, Z=depth).
   // MuJoCo is Z-up: rotate (x,y,z) -> (x,-z,y), which keeps the winding (a

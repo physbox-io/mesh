@@ -1,4 +1,5 @@
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { DENSE_MESH_TRIANGLES } from './denseMesh';
 
 // ---------------------------------------------------------------------------
 // Coordinate spaces
@@ -76,9 +77,23 @@ export interface ParsedSTLResult {
   };
   /** One-line, human-readable description of what the inference recognised. */
   shapeSummary: string;
+  /**
+   * Empty when the mesh is dense (see `dense`): a polyhedron of that many
+   * triangles is tens of megabytes of OpenSCAD source that the OpenSCAD worker
+   * runs out of memory compiling.
+   */
   scadRaw: string;
+  /** Empty when the mesh is dense, as scadRaw. */
   scadParametric: string;
+  /** Empty when the mesh is dense and some island would need a polyhedron. */
   scadCsg: string;
+  /** Triangles in the mesh. */
+  triangleCount: number;
+  /**
+   * Over DENSE_MESH_TRIANGLES (utils/denseMesh): imported as a mesh, never as
+   * an OpenSCAD polyhedron, and collides as a simplified copy.
+   */
+  dense: boolean;
   primitiveGeom: {
     type: 'box' | 'cylinder' | 'sphere';
     size: number[];
@@ -679,6 +694,8 @@ export function parseSTL(
 
   const boundingBox = computeBoundingBox(zUpVerts);
   const partName = options.name || 'imported_stl';
+  const triangleCount = faces.length / 3;
+  const dense = triangleCount > DENSE_MESH_TRIANGLES;
 
   // --- Inference -----------------------------------------------------------
 
@@ -702,7 +719,7 @@ export function parseSTL(
 
   // --- Generated OpenSCAD --------------------------------------------------
 
-  const scadRaw = `// Auto-generated OpenSCAD polyhedron for ${partName} (Z-up, metres)
+  const scadRaw = dense ? '' : `// Auto-generated OpenSCAD polyhedron for ${partName} (Z-up, metres)
 ${emitPolyhedron(zUpVerts, faces, '')}`;
 
   // Parametric mesh: the real geometry, scaled by sliders. When the model is a
@@ -720,7 +737,9 @@ size_z = ${fmt(sizeZ)}; ${slider(sizeZ)}
 
 `;
 
-  if (inferredSpacing) {
+  if (dense) {
+    scadParametric = '';
+  } else if (inferredSpacing) {
     const element = subComponents[0];
     const axisIndex = AXIS_NAME.indexOf(inferredSpacing.axis);
     const offset = ['0', '0', '0'];
@@ -749,7 +768,9 @@ ${emitPolyhedron(zUpVerts, faces, '  ')}
   let scadCsg: string;
   const summaries = subComponents.map(c => describeFit(c.fit, c.holes));
 
-  if (subComponents.length === 1) {
+  if (dense && subComponents.some(c => !c.fit.exact)) {
+    scadCsg = '';
+  } else if (subComponents.length === 1) {
     const c = subComponents[0];
     const vars = emitFitVars(c.fit, c.holes, '');
     scadCsg = `// Parametric CSG for ${partName} (Z-up, metres)
@@ -823,6 +844,8 @@ ${blocks.map(b => b.body).join('\n')}
     scadRaw,
     scadParametric,
     scadCsg,
+    triangleCount,
+    dense,
     primitiveGeom,
     appliedScale: [scaleX, scaleY, scaleZ],
   };
