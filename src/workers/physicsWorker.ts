@@ -251,7 +251,8 @@ const rebuildIdCaches = () => {
         if (node.name) bCache[node.name] = bId;
       }
       node.joints?.forEach((j) => {
-        if (!mj || !mdl) return;
+        // mj_name2id throws on undefined, which failed the whole build.
+        if (!mj || !mdl || !j.name) return;
         const jId = mj.mj_name2id(mdl, mj.mjtObj.mjOBJ_JOINT.value, j.name);
         if (jId !== -1) jCache[j.name] = jId;
       });

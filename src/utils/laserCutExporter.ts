@@ -3134,7 +3134,7 @@ export function exportLaserCutSvg(
       const sheet = sheets[s];
       const sheetY = sheetTop[s];
       svg += `  <!-- Sheet ${s + 1} Frame -->\n`;
-      svg += `  <rect x="0" y="${sheetY}" width="${sheet.widthMm}" height="${sheet.heightMm}" fill="none" stroke="#94A3B8" stroke-width="0.5" stroke-dasharray="4 4" />\n`;
+      svg += `  <rect x="0" y="${sheetY}" width="${sheet.widthMm}" height="${sheet.heightMm}" data-operation="ghost" fill="none" stroke="#94A3B8" stroke-width="0.5" stroke-dasharray="4 4" />\n`;
       if (options.includeLabels) {
         // The thickness joins the caption only when the rack holds more than
         // one, because then it is what decides which pile of material this
@@ -3147,7 +3147,7 @@ export function exportLaserCutSvg(
     }
   }
 
-  svg += `  <g id="cut-paths" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
+  svg += `  <g id="cut-paths" data-operation="cut" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
 
   // Panels are packed in the coordinates of their own sheet. The drawing stacks
   // the sheets one below the next, so that is where the offset goes back in.
@@ -3184,7 +3184,7 @@ export function exportLaserCutSvg(
   // use for "mark, do not cut", in a group of their own so a laser's software
   // can give them their own power and speed.
   if (panels.some((p) => p.engrave2D?.length)) {
-    svg += `  <g id="engrave-patterns" stroke="#0000FF" stroke-width="0.1" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
+    svg += `  <g id="engrave-patterns" data-operation="etch" stroke="#0000FF" stroke-width="0.1" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
     for (const panel of panels) {
       const pos = drawPos(panel);
       for (const line of panel.engrave2D ?? []) {
@@ -3198,7 +3198,7 @@ export function exportLaserCutSvg(
   }
 
   if (options.includeLabels) {
-    svg += `  <g id="engrave-labels" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
+    svg += `  <g id="engrave-labels" data-operation="etch" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
     for (const panel of panels) {
       const pos = drawPos(panel);
       const cx = pos.x + (panel.width2D || 50) / 2;

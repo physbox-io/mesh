@@ -201,7 +201,7 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
   });
 
   describe('4. Cam & Follower + Planar Grashof 4-Bar Linkage', () => {
-    it('generates watertight cams for all 4 profile types (eccentric, snail, heart, harmonic) with follower coupling', () => {
+    it('generates watertight cams for all 4 profile types (eccentric, snail, heart, harmonic) with a sprung follower', () => {
       const kinds: CamProfileKind[] = ['eccentric', 'snail', 'heart', 'harmonic'];
       for (const kind of kinds) {
         const profile = buildCamProfile({ kind, baseRadiusMm: 18, liftMm: 10 });
@@ -210,7 +210,7 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
         expect(hasSelfIntersection(profile.outline)).toBe(false);
 
         const mech = buildCamMechanism({ kind, baseRadiusMm: 18, liftMm: 10 });
-        expect(mech.followerNode.coupleTargetId).toBe(mech.camNode.id);
+        expect(mech.followerNode.coupleTargetId).toBeUndefined();
         expect(mech.followerNode.joints[0]?.type).toBe('slide');
 
         const camMesh = mech.camNode.geoms.find((g) => g.type === 'mesh')!;

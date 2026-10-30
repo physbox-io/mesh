@@ -2012,7 +2012,7 @@ export function exportPcbFaceplateSvg(
 
   // 1. Outer faceplate cut boundary (red cut layer)
   const cornerR = Math.max(0, valid.cornerRadiusMm ?? 1.5);
-  lines.push('  <g id="layer-cut" stroke="#ff0000" fill="none" stroke-width="0.2">');
+  lines.push('  <g id="layer-cut" data-operation="cut" stroke="#ff0000" fill="none" stroke-width="0.2">');
   lines.push(
     `    <rect x="0" y="0" width="${widthMm}" height="${heightMm}" rx="${cornerR.toFixed(2)}" ry="${cornerR.toFixed(2)}" data-feature="panel-outline" />`,
   );
@@ -2036,7 +2036,7 @@ export function exportPcbFaceplateSvg(
   const engraveLines: string[] = [];
   if (includeBoardOutline && marginMm > 0 && face === 'top') {
     engraveLines.push(
-      `    <rect x="${marginMm.toFixed(3)}" y="${marginMm.toFixed(3)}" width="${valid.widthMm.toFixed(3)}" height="${valid.depthMm.toFixed(3)}" stroke="#64748b" stroke-dasharray="1.5,1" stroke-width="0.15" fill="none" data-layer="reference" data-feature="board-outline" />`,
+      `    <rect x="${marginMm.toFixed(3)}" y="${marginMm.toFixed(3)}" width="${valid.widthMm.toFixed(3)}" height="${valid.depthMm.toFixed(3)}" stroke="#64748b" stroke-dasharray="1.5,1" stroke-width="0.15" fill="none" data-layer="reference" data-operation="ghost" data-feature="board-outline" />`,
     );
   }
 
@@ -2103,7 +2103,7 @@ export function exportPcbFaceplateSvg(
   lines.push('  </g>');
 
   if (engraveLines.length > 0) {
-    lines.push('  <g id="layer-engrave">');
+    lines.push('  <g id="layer-engrave" data-operation="etch">');
     lines.push(...engraveLines);
     lines.push('  </g>');
   }

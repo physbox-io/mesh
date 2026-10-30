@@ -17,6 +17,18 @@ import { mcpBridgePlugin } from './vite-plugin-mcp-bridge'
  * Vite's `server.headers` applies to every response, so the exception has to be
  * a middleware that runs after them and strips them back off.
  */
+/**
+ * The page Volt opens to link a scene (`?link=volt`) is the other exception:
+ * isolated, it is put in a browsing context group of its own, `window.opener`
+ * is null, and Volt's handle to it reads as closed. It runs MuJoCo
+ * single-threaded instead; Volt sets the pace of a linked run anyway.
+ */
+const withoutIsolation = (url: string): boolean => {
+  const [path, query = ''] = url.split('?');
+  if (path === '/signin.html') return true;
+  return (path === '/' || path === '/index.html') && new URLSearchParams(query).get('link') === 'volt';
+};
+
 function signInWithoutIsolation(): Plugin {
   const strip = (server: { middlewares: Connect.Server }) => {
     /*
@@ -33,7 +45,7 @@ function signInWithoutIsolation(): Plugin {
      * the call is simply dropped.
      */
     server.middlewares.use((req, res, next) => {
-      if (req.url && req.url.split('?')[0] === '/signin.html') {
+      if (req.url && withoutIsolation(req.url)) {
         const original = res.setHeader.bind(res);
         res.setHeader = ((name: string, value: never) => {
           if (/^cross-origin-(opener|embedder)-policy$/i.test(name)) return res;

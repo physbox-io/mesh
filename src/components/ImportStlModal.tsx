@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { X, Upload, Sliders, Box, Layers, Check, AlertCircle, Code } from 'lucide-react';
 import { parseSTL, type ParsedSTLResult } from '../utils/stlParser';
-import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
+import type { SceneGeom, SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface ImportStlModalProps {
@@ -129,7 +129,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
         pos: [0, 0, 0.2],
         scad: scadCode,
         geoms: [{ type: 'mesh', size: [1], dynamic: true } as SceneGeom],
-        joints: [{ type: 'free' } as SceneJoint],
+        joints: [{ name: `${id}_free`, type: 'free' as const }],
         children: [],
       };
       onImportNode(node);
