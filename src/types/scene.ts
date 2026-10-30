@@ -820,6 +820,12 @@ export interface SceneNode {
    * is what jams a close fit.
    */
   collisionIntrusion?: { mm: number; atMm?: [number, number, number] };
+  /**
+   * How far the surface lies outside every piece of the last decomposition,
+   * at most, and near where: material no piece covers, which contact sinks
+   * into (utils/pieceCoverage.ts).
+   */
+  collisionUncovered?: { mm: number; atMm?: [number, number, number] };
   collisionWarning?: string;
   collisionError?: string;
   /**

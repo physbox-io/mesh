@@ -151,6 +151,8 @@ export interface ColliderResult {
   cavities?: NonNullable<SceneNode['collisionCavities']>;
   /** How far the colliders stand proud of the surface into the air, at most. */
   intrusion?: NonNullable<SceneNode['collisionIntrusion']>;
+  /** How far the surface lies outside every collider, at most: material contact sinks into. */
+  uncovered?: NonNullable<SceneNode['collisionUncovered']>;
 }
 
 /** The mesh geoms of a body that are solid enough to collide with. */
@@ -293,9 +295,10 @@ export function colliderMass(node: SceneNode, template: SceneGeom | undefined, t
  * when the method changes enough that colliders saved by the old one should
  * be made again. 2: cut into chunks and pulled in to the surface
  * (solidDecomposition.ts), where 1 was one V-HACD call over the whole part.
- * 3: cut exactly along sharp inside corners first (reflexCuts.ts).
+ * 3: cut exactly along sharp inside corners first (reflexCuts.ts). 4: the axis
+ * put back into lathed sectors, and pieces on the mesh's own faces kept.
  */
-export const COLLIDER_RECIPE = 3;
+export const COLLIDER_RECIPE = 4;
 
 /**
  * Fingerprints everything the colliders on a NON-boolean body were built from.
@@ -393,6 +396,9 @@ interface MeshColliders {
   /** How far the pieces stand proud of the surface into the air, at most, metres. */
   intrusion?: number;
   intrusionAt?: [number, number, number];
+  /** How far the surface lies outside every piece, at most, metres. */
+  uncovered?: number;
+  uncoveredAt?: [number, number, number];
   warning?: string;
 }
 
@@ -492,12 +498,21 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   const intrusion = proudest?.intrusion !== undefined && +(proudest.intrusion * 1000).toFixed(2) > 0
     ? { mm: +(proudest.intrusion * 1000).toFixed(2), ...(proudest.intrusionAt ? { atMm: proudest.intrusionAt.map(v => +(v * 1000).toFixed(1)) as [number, number, number] } : {}) }
     : undefined;
-  const warning = [cavityWarning(named) ?? massWarning(node, decomposed), ...notes].filter(Boolean).join(' ');
+  const bare = decomposed.reduce<MeshColliders | null>((a, p) => ((p.uncovered ?? 0) > (a?.uncovered ?? 0) ? p : a), null);
+  // Under a tenth of a millimetre is within MuJoCo's own contact softness.
+  const uncovered = bare?.uncovered !== undefined && +(bare.uncovered * 1000).toFixed(1) >= 0.1
+    ? { mm: +(bare.uncovered * 1000).toFixed(1), ...(bare.uncoveredAt ? { atMm: bare.uncoveredAt.map(v => +(v * 1000).toFixed(1)) as [number, number, number] } : {}) }
+    : undefined;
+  // Reported from a tenth of a millimetre, warned of from UNCOVERED_WARN_MM:
+  // V-HACD's voxels leave a millimetre or two of a curved wall bare between
+  // pieces, which is worth knowing about but not worth a warning on every bowl.
+  const warning = [cavityWarning(named) ?? massWarning(node, decomposed), uncovered && uncovered.mm >= UNCOVERED_WARN_MM ? uncoveredSentence(uncovered) : undefined, ...notes].filter(Boolean).join(' ');
   return {
     hash, geoms, verdict, volume, hullVolume, mass,
     ...(warning ? { warning } : {}),
     ...(named.length > 0 ? { cavities: named } : {}),
     ...(intrusion ? { intrusion } : {}),
+    ...(uncovered ? { uncovered } : {}),
   };
 }
 
@@ -511,6 +526,20 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
 export function intrusionSentence(intrusion: NonNullable<SceneNode['collisionIntrusion']>): string {
   const at = intrusion.atMm ? `, most near (${intrusion.atMm.map(v => Math.round(v)).join(', ')}) mm` : '';
   return `Openings narrowed by up to ${intrusion.mm} mm${at}: the convex pieces stand that far proud of the surface, mostly in inside corners, so a part fitted closer than that jams. Collision Detail Fine or Finest tightens them.`;
+}
+
+/** Bare surface deeper than this, in millimetres, is a warning as well as a figure in the summary. */
+export const UNCOVERED_WARN_MM = 3;
+
+/**
+ * Material no convex piece covers, for the scene summary and the inspector.
+ * The opposite fault to a narrowed opening, and the worse one: contact goes
+ * into the body there, so a part sinks into the floor or a ball drops into
+ * a solid; nothing about the part's look gives it away.
+ */
+export function uncoveredSentence(uncovered: NonNullable<SceneNode['collisionUncovered']>): string {
+  const at = uncovered.atMm ? ` near (${uncovered.atMm.map(v => Math.round(v)).join(', ')}) mm` : '';
+  return `Part of the surface${at} has no convex piece under it, so contact sinks up to ${uncovered.mm} mm into the body there. Set Collision Detail finer, or report the shape.`;
 }
 
 /** Volume, hull volume and soundness of a mesh, off the main thread where there is one. */
@@ -581,6 +610,7 @@ async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<Mes
   return {
     source, verdict, volume, hullVolume, hulls, cavities,
     intrusion: solid.intrusion, ...(solid.intrusionAt ? { intrusionAt: solid.intrusionAt } : {}),
+    uncovered: solid.uncovered, ...(solid.uncoveredAt ? { uncoveredAt: solid.uncoveredAt } : {}),
   };
 }
 

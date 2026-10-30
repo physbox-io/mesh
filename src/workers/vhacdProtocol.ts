@@ -41,6 +41,7 @@ export type VhacdResponse =
   | { type: 'ANALYSED'; id: number; analysis: MeshAnalysis }
   | {
       type: 'DECOMPOSED_SOLID'; id: number; hulls: HullPayload[]; cavities: FilledCavity[];
-      intrusion: number; intrusionAt?: [number, number, number]; chunks: number;
+      intrusion: number; intrusionAt?: [number, number, number];
+      uncovered: number; uncoveredAt?: [number, number, number]; chunks: number;
     }
   | { type: 'DECOMPOSE_ERROR'; id: number; message: string };

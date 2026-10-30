@@ -64,6 +64,16 @@ describe('summarizeNode', () => {
     expect(s.colliderGeoms).toBe(12);
   });
 
+  it('reports surface no piece covers, which narrowing never showed', () => {
+    const mesh = { ...octa(), name: 'blob_mesh' };
+    const cols = [0, 1].map(i => ({ ...octa(), name: `blob_csg_col${i}`, csgDerived: 'collider' as const, role: 'collision' as const }));
+    const node = body('blob', [mesh, ...cols], { collisionUncovered: { mm: 26.8, atMm: [0, 0, -25] } });
+    const s = summarizeNode({ ...node, collisionHash: collisionHashOf(node), collisionDecomposed: true }, { model: null });
+    expect(s.surfaceUncoveredMm).toBe(26.8);
+    expect(s.surfaceUncovered).toMatch(/no convex piece under it, so contact sinks up to 26.8 mm/);
+    expect(s.openingsNarrowedMm).toBeUndefined();
+  });
+
   it('reports a decomposition still to run as pending, not as the convex hull', () => {
     const cup = body('cup', [octa()], { collision: 'decompose' });
     const pending = summarizeNode(cup, { model: null });

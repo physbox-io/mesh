@@ -2019,7 +2019,34 @@ export function decomposeAroundAxis(
   const EPS = 1e-9;
   const out: Hull[] = [];
 
-  const sliceSlab = (slabP: THREE.Vector3[], slabFaces: number[]) => {
+  // Where the axis runs through material. Every sector shares the axis as its
+  // inner edge, but a sector's cloud holds only the mesh's vertices and its
+  // edges' crossings of the sector's sides — the axis is in none of them
+  // unless a vertex sits on it. A cap fanned from a rim vertex (Manifold's and
+  // OpenSCAD's cylinders) has none, and a tier cut at a step loses the pole of
+  // a cap lying in the cut plane: a lathed funnel's solid spout came out as a
+  // ring of wedges round a cone-shaped hole a ball jammed in, and a cup's
+  // floor as a cone 0.4 mm thick at the middle. So the axis is put back where
+  // it is inside the part: where it pierces the surface, and at each tier's
+  // bounds when the material carries on across them.
+  let tMin = Infinity, tMax = -Infinity;
+  for (let i = 0; i < t.length; i++) { if (t[i] < tMin) tMin = t[i]; if (t[i] > tMax) tMax = t[i]; }
+  const nudge = Math.max(1e-9, (tMax - tMin) * 1e-6);
+  const piercings = axisPiercings(P, faces, t, u, v);
+  const onAxis = (tt: number) => a.clone().multiplyScalar(tt);
+  const axisPointsFor = (tLo: number, tHi: number): THREE.Vector3[] => {
+    const pts: THREE.Vector3[] = [];
+    // Inside the tier: the surface's own points, which bound the material.
+    for (const tt of piercings) if (tt > tLo + nudge && tt < tHi - nudge) pts.push(onAxis(tt));
+    // At a bound, only when the material on this side of it reaches the
+    // axis: a cup's floor top belongs to the floor's tier, never the bore's.
+    const step = Math.min(nudge, Number.isFinite(tLo) && Number.isFinite(tHi) ? (tHi - tLo) / 4 : nudge);
+    if (Number.isFinite(tLo) && windingAt(P, faces, onAxis(tLo + step)) > 0.5) pts.push(onAxis(tLo));
+    if (Number.isFinite(tHi) && windingAt(P, faces, onAxis(tHi - step)) > 0.5) pts.push(onAxis(tHi));
+    return pts;
+  };
+
+  const sliceSlab = (slabP: THREE.Vector3[], slabFaces: number[], axisPts: THREE.Vector3[] = []) => {
     if (slabP.length < 4 || slabFaces.length < 3) return;
     // Signed distance of every vertex to every boundary plane, computed once.
     const dist: Float64Array[] = normals.map(nn => {
@@ -2066,6 +2093,9 @@ export function decomposeAroundAxis(
       }
     }
 
+    // The axis is on both sides of every sector.
+    for (const p of axisPts) for (const cloud of clouds) if (cloud.length) cloud.push([p.x, p.y, p.z]);
+
     for (const cloud of clouds) {
       const hull = convexHullOf(cloud);
       if (!hull) continue;
@@ -2081,15 +2111,62 @@ export function decomposeAroundAxis(
   };
 
   if (steps.length === 0) {
-    sliceSlab(P, faces);
+    sliceSlab(P, faces, axisPointsFor(-Infinity, Infinity));
   } else {
     const bounds = [-Infinity, ...steps, Infinity];
     for (let k = 0; k + 1 < bounds.length; k++) {
       const { slabP, slabFaces } = clipMeshToAxialSlab(P, faces, t, bounds[k], bounds[k + 1]);
-      sliceSlab(slabP, slabFaces);
+      sliceSlab(slabP, slabFaces, axisPointsFor(bounds[k], bounds[k + 1]));
     }
   }
   return out;
+}
+
+/**
+ * Where the axis (through the origin along `a`, with `u` and `v` across it)
+ * meets the surface, as positions along it. A triangle the axis only grazes
+ * at an edge or a corner counts too, more than once perhaps: these are points
+ * on the surface, not a parity.
+ */
+function axisPiercings(P: THREE.Vector3[], faces: number[], t: Float64Array, u: THREE.Vector3, v: THREE.Vector3): number[] {
+  const pu = new Float64Array(P.length), pv = new Float64Array(P.length);
+  for (let i = 0; i < P.length; i++) { pu[i] = P[i].dot(u); pv[i] = P[i].dot(v); }
+  const hits: number[] = [];
+  for (let f = 0; f < faces.length; f += 3) {
+    const i0 = faces[f], i1 = faces[f + 1], i2 = faces[f + 2];
+    const x0 = pu[i0], y0 = pv[i0], x1 = pu[i1], y1 = pv[i1], x2 = pu[i2], y2 = pv[i2];
+    const den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+    const scale = Math.max(Math.abs(x0), Math.abs(y0), Math.abs(x1), Math.abs(y1), Math.abs(x2), Math.abs(y2));
+    if (!(Math.abs(den) > 1e-12 * scale * scale)) continue; // edge-on to the axis
+    const w0 = ((y1 - y2) * (0 - x2) + (x2 - x1) * (0 - y2)) / den;
+    const w1 = ((y2 - y0) * (0 - x2) + (x0 - x2) * (0 - y2)) / den;
+    const w2 = 1 - w0 - w1;
+    const e = -1e-9;
+    if (w0 < e || w1 < e || w2 < e) continue;
+    hits.push(w0 * t[i0] + w1 * t[i1] + w2 * t[i2]);
+  }
+  return hits.sort((p, q) => p - q);
+}
+
+/**
+ * The winding number of a closed mesh about a point: 1 inside an outward
+ * mesh, 0 outside, by solid angle (Van Oosterom and Strackee), so a point
+ * lined up with edges and corners is no harder than any other. Read as a
+ * magnitude, so a mesh wound inward answers the same.
+ */
+function windingAt(P: THREE.Vector3[], faces: number[], q: THREE.Vector3): number {
+  let total = 0;
+  for (let f = 0; f < faces.length; f += 3) {
+    const a = P[faces[f]], b = P[faces[f + 1]], c = P[faces[f + 2]];
+    const ax = a.x - q.x, ay = a.y - q.y, az = a.z - q.z;
+    const bx = b.x - q.x, by = b.y - q.y, bz = b.z - q.z;
+    const cx = c.x - q.x, cy = c.y - q.y, cz = c.z - q.z;
+    const la = Math.hypot(ax, ay, az), lb = Math.hypot(bx, by, bz), lc = Math.hypot(cx, cy, cz);
+    const det = ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+    const div = la * lb * lc + (ax * bx + ay * by + az * bz) * lc + (ax * cx + ay * cy + az * cz) * lb + (bx * cx + by * cy + bz * cz) * la;
+    total += 2 * Math.atan2(det, div);
+  }
+  return Math.abs(total / (4 * Math.PI));
 }
 
 // ---------------------------------------------------------------------------

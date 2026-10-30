@@ -118,6 +118,7 @@ function ensureWorker(): WorkerLike | null {
         const result: SolidResult = {
           hulls: msg.hulls.map(fromPayload), cavities: msg.cavities, intrusion: msg.intrusion, chunks: msg.chunks,
           ...(msg.intrusionAt ? { intrusionAt: msg.intrusionAt } : {}),
+          uncovered: msg.uncovered ?? 0, ...(msg.uncoveredAt ? { uncoveredAt: msg.uncoveredAt } : {}),
         };
         job.resolve(result);
       }

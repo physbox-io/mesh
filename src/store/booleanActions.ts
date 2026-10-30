@@ -192,6 +192,7 @@ export function booleanActions({ set, get }: SliceDeps): BooleanActions {
       node.collisionSolidity = +result.verdict.solidity.toFixed(4);
       if (result.cavities?.length) node.collisionCavities = result.cavities; else delete node.collisionCavities;
       if (result.intrusion) node.collisionIntrusion = result.intrusion; else delete node.collisionIntrusion;
+      if (result.uncovered) node.collisionUncovered = result.uncovered; else delete node.collisionUncovered;
       if (result.warning) node.collisionWarning = result.warning; else delete node.collisionWarning;
       delete node.collisionError;
       set({ sceneGraph: newScene });

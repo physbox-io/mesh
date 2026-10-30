@@ -323,6 +323,20 @@ These things about it are load-bearing:
   What is left — inside corners, curved bores — is reported as `collisionIntrusion`
   (`openingsNarrowedMm` in the scene summary): an opening is narrowed by that much, and a fit closer
   than that jams. A 10 mm bore that cleared 8.35 mm now clears ~9.65 mm above its floor corner.
+  A mesh's faces are clipped to a piece at a millionth of the part, not exactly: a sculpt is stored
+  in single precision, and a V-HACD box whose faces lay 0.4 nm inside its cube's was found to hold
+  nothing and dropped, leaving a carved cube nothing under its lower half (it sank 27 mm).
+* **Bare surface is measured too** (`utils/pieceCoverage.ts`, `collisionUncovered`,
+  `surfaceUncoveredMm` in the summary): every vertex and face centroid outside all pieces, measured
+  to the nearest. It is the opposite fault to narrowing — contact sinks into the body there — and
+  nothing standing proud ever showed it. V-HACD's voxels leave 1-2 mm of a curved wall bare; past
+  3 mm it is a warning as well.
+* **Lathed sectors carry the axis.** Every sector's inner edge is the axis, but its cloud only had the
+  axis where a vertex sat on it. A cap fanned from its rim (Manifold's and OpenSCAD's cylinders)
+  has none, and a tier cut at a step drops the pole of a cap in the cut plane, so a cup's floor came
+  out a cone 0.4 mm thick at the middle and a funnel's solid spout a ring round a conical hole a
+  ball jammed in. The axis is put back where it pierces the surface, and at a tier's bound when the
+  material on that side reaches it (by winding number, so a cup's floor top is the floor's).
 * **Bodies on a free joint get 64 pieces** (`MAX_LOOSE_PIECES`) unless `collisionHulls` says
   otherwise: two decomposed bodies in contact are pieces times pieces. Four nesting paraboloid bowls
   stepped at 2-3 ms per 1 ms step at 64 pieces and 18-36 ms at 513, and 512 V-HACD pieces each

@@ -37,6 +37,7 @@
 import type { Hull } from './csg';
 import { findFilledCavities, wallThickness, type FilledCavity } from './filledCavities';
 import { tightenPieces } from './tightPieces';
+import { uncoveredSurface } from './pieceCoverage';
 import type { Chunk, ChunkPlan } from './chunkedDecomposition';
 import type { ReflexCutResult } from './reflexCuts';
 
@@ -55,6 +56,12 @@ export interface SolidResult {
   /** How far the pieces stand proud of the surface into the air, at most, metres. */
   intrusion: number;
   intrusionAt?: [number, number, number];
+  /**
+   * How far the surface lies outside every piece, at most, metres: material
+   * no piece covers, which contact sinks into (pieceCoverage.ts).
+   */
+  uncovered: number;
+  uncoveredAt?: [number, number, number];
   chunks: number;
 }
 
@@ -143,6 +150,7 @@ async function sectorPieces(verts: number[], faces: number[], opts: SolidOptions
   return {
     hulls: tight.hulls, cavities, intrusion: tight.intrusion,
     ...(tight.intrusionAt ? { intrusionAt: tight.intrusionAt } : {}),
+    ...coverageOf(verts, faces, tight.hulls),
     chunks: 1,
   };
 }
@@ -193,11 +201,12 @@ function mergeConvexTiers(hulls: Hull[], rev: { origin: number[]; axis: number[]
 export async function decomposeSolid(verts: number[], faces: number[], opts: SolidOptions): Promise<SolidResult> {
   const tolerance = opts.tolerance ?? toleranceFor(verts);
   const sectors = opts.voxelResolution === undefined ? await sectorPieces(verts, faces, opts, tolerance) : null;
-  if (sectors && sectors.intrusion <= SECTORS_GOOD_ENOUGH) return sectors;
+  if (sectors && sectors.intrusion <= SECTORS_GOOD_ENOUGH && sectors.uncovered <= SECTORS_GOOD_ENOUGH) return sectors;
   const exact = await reflexPieces(verts, faces, opts, tolerance);
   if (exact) return exact;
   const chunked = await chunkedPieces(verts, faces, opts, tolerance);
-  return sectors && sectors.intrusion < chunked.intrusion ? sectors : chunked;
+  const worst = (r: SolidResult) => Math.max(r.intrusion, r.uncovered);
+  return sectors && worst(sectors) < worst(chunked) ? sectors : chunked;
 }
 
 /**
@@ -287,6 +296,13 @@ function tightened(verts: number[], faces: number[], hulls: Hull[], opts: SolidO
   return {
     hulls: tight.hulls, cavities, intrusion: tight.intrusion,
     ...(tight.intrusionAt ? { intrusionAt: tight.intrusionAt } : {}),
+    ...coverageOf(verts, faces, tight.hulls),
     chunks,
   };
+}
+
+/** How far the surface lies outside every piece, as SolidResult carries it. */
+function coverageOf(verts: number[], faces: number[], hulls: Hull[]): Pick<SolidResult, 'uncovered' | 'uncoveredAt'> {
+  const c = uncoveredSurface(verts, faces, hulls);
+  return { uncovered: c.depth, ...(c.at ? { uncoveredAt: c.at } : {}) };
 }
