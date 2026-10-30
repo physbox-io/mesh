@@ -170,13 +170,26 @@ function uniqueEdges(faces: number[]): [number, number][] {
 }
 
 /**
+ * How far outside a region's face a triangle may lie and still count as on
+ * it: a millionth of the part. A face of the mesh that a piece's face lies
+ * on is the piece's own side, and float noise must not put it outside. A
+ * sculpt is stored in single precision, so its 50 mm cube's flat bottom sat at
+ * z = -25.00000037 mm while V-HACD's box over the lower half stopped at -25:
+ * clipped to 0.1 nm, every face of that box was cut away, the box was found to
+ * hold nothing and was dropped, and the body sank 27 mm into the floor.
+ */
+export function onFaceTolerance(size: number): number {
+  return Math.max(1e-10, size * 1e-6);
+}
+
+/**
  * The hull of the solid inside a convex region, or null when the region holds
  * none. Also returns the clipped surface, for choosing where to cut.
  */
-function solidInside(q: MeshQuery, region: Hull): { hull: Hull; scraps: Piece['scraps']; planes: Plane[] } | null {
+function solidInside(q: MeshQuery, region: Hull, onFace: number): { hull: Hull; scraps: Piece['scraps']; planes: Plane[] } | null {
   const planes = planesOf(region);
   const { lo, hi } = boundsOf(region.verts);
-  const pad = 1e-7;
+  const pad = Math.max(1e-7, onFace);
   const tris = q.near(lo.map(v => v - pad), hi.map(v => v + pad));
   const points: number[][] = [];
   const scraps: Piece['scraps'] = [];
@@ -184,7 +197,7 @@ function solidInside(q: MeshQuery, region: Hull): { hull: Hull; scraps: Piece['s
     const o = t * 9;
     let poly = Array.from(q.tri.subarray(o, o + 9));
     for (const p of planes) {
-      poly = clipPolygon(poly, p, 1e-10);
+      poly = clipPolygon(poly, p, onFace);
       if (poly.length < 9) break;
     }
     if (poly.length < 9) continue;
@@ -376,12 +389,31 @@ function thicknessOf(h: Hull): number {
   return area > 0 ? (2 * h.volume) / area : 0;
 }
 
-function makePiece(q: MeshQuery, region: Hull, cap: number, quick: number): Piece | null {
-  const solid = solidInside(q, region);
+function makePiece(q: MeshQuery, region: Hull, cap: number, quick: number, onFace: number): Piece | null {
+  const solid = solidInside(q, region, onFace);
   if (!solid) return null;
   if (usableColliderHulls([solid.hull]).length === 0) return null;
   const { depth, at } = standsProud(q, solid.hull, cap, quick);
   return { hull: solid.hull, planes: solid.planes, scraps: solid.scraps, depth, deepest: at };
+}
+
+/**
+ * Whether a region holds material: its centroid, or a point halfway from it
+ * to any corner, inside the mesh. A piece V-HACD made that does, and that
+ * could not be rebuilt, is kept as it came rather than dropped — a missing
+ * piece is a hole in the body, where a proud one is only a fillet.
+ */
+function holdsMaterial(q: MeshQuery, h: Hull): boolean {
+  const v = h.verts;
+  const n = v.length / 3;
+  if (n === 0) return false;
+  const c = [0, 0, 0];
+  for (let i = 0; i < v.length; i += 3) for (let k = 0; k < 3; k++) c[k] += v[i + k] / n;
+  if (q.inside(c[0], c[1], c[2])) return true;
+  for (let i = 0; i < v.length; i += 3) {
+    if (q.inside((c[0] + v[i]) / 2, (c[1] + v[i + 1]) / 2, (c[2] + v[i + 2]) / 2)) return true;
+  }
+  return false;
 }
 
 /**
@@ -395,14 +427,19 @@ export function tightenPieces(verts: number[], faces: number[], hulls: Hull[], o
   // Anything deeper than this is a filled cavity, which filledCavities.ts names.
   const cap = Math.max(size / 4, opts.tolerance * 4);
   const quick = opts.tolerance / 4;
+  const onFace = onFaceTolerance(size);
 
   let intrusionBefore = 0;
   for (const h of hulls) intrusionBefore = Math.max(intrusionBefore, standsProud(q, h, cap, quick).depth);
 
   const pieces: Piece[] = [];
   for (const h of hulls) {
-    const p = makePiece(q, h, cap, quick);
+    const p = makePiece(q, h, cap, quick, onFace);
     if (p) pieces.push(p);
+    else if (usableColliderHulls([h]).length > 0 && holdsMaterial(q, h)) {
+      const { depth, at } = standsProud(q, h, cap, quick);
+      pieces.push({ hull: h, planes: planesOf(h), scraps: [], depth, deepest: at, stuck: true });
+    }
   }
   // Rebuilding can only drop a piece that held no material at all.
   if (pieces.length === 0) return { hulls, intrusion: intrusionBefore, intrusionBefore, cuts: 0 };
@@ -426,7 +463,7 @@ export function tightenPieces(verts: number[], faces: number[], hulls: Hull[], o
       // into the air and stopped it.
       const halves = [cutRegion(piece.hull, plane.n, plane.e), cutRegion(piece.hull, plane.n.map(c => -c), -plane.e)];
       if (!halves[0] || !halves[1]) continue;
-      const made = halves.map(h => makePiece(q, h!, cap, quick));
+      const made = halves.map(h => makePiece(q, h!, cap, quick, onFace));
       if (!made[0] || !made[1]) continue;
       if (opts.minThickness && made.some(m => thicknessOf(m!.hull) < opts.minThickness!)) continue;
       const deeper = Math.max(made[0].depth, made[1].depth);

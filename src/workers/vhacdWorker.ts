@@ -37,7 +37,7 @@ self.onmessage = async (evt: MessageEvent<VhacdRequest>) => {
         verts: Float64Array.from(h.verts), faces: Uint32Array.from(h.faces), volume: h.volume, centroid: h.centroid,
       }));
       post(
-        { type: 'DECOMPOSED_SOLID', id: msg.id, hulls: payload, cavities: r.cavities, intrusion: r.intrusion, ...(r.intrusionAt ? { intrusionAt: r.intrusionAt } : {}), chunks: r.chunks },
+        { type: 'DECOMPOSED_SOLID', id: msg.id, hulls: payload, cavities: r.cavities, intrusion: r.intrusion, ...(r.intrusionAt ? { intrusionAt: r.intrusionAt } : {}), uncovered: r.uncovered, ...(r.uncoveredAt ? { uncoveredAt: r.uncoveredAt } : {}), chunks: r.chunks },
         payload.flatMap(h => [h.verts.buffer, h.faces.buffer]),
       );
     } catch (err) {

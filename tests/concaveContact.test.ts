@@ -15,6 +15,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { decomposeNodeColliders, intrusionSentence, type ColliderResult } from '../src/utils/convexDecomposition';
 import { decomposeSolid } from '../src/utils/solidDecomposition';
 import { decomposeMesh } from '../src/utils/vhacd';
+import { generateLatheMeshData } from '../src/utils/geom';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 import {
   boredCup, boxUnion, helicalHalfPipe, lathe, straightHalfPipe, translateMesh, zToX, zupToYupFlat, type MeshData,
@@ -182,4 +183,64 @@ describe('dice inside a closed drum', () => {
     // Inside the 45 mm inner radius throughout; thrown out, they were 70 mm off.
     expect(Math.max(...farthest)).toBeLessThan(0.045);
   }, 120_000);
+});
+
+// The axis is in no sector's cloud unless a vertex sits on it, so a tier
+// whose cap pole was left in the cut plane, or a cap fanned from its rim (as
+// Manifold and OpenSCAD make one), lost the material round the axis: the
+// pieces left a cone-shaped hole there, and nothing stood proud to say so.
+describe('material on a lathed part\'s axis', () => {
+  /** The highest point over (x, y) inside any piece, below `top`. */
+  const surfaceAt = (hulls: { verts: number[]; faces: number[] }[], x: number, y: number, top: number) => {
+    const planes = hulls.map(h => {
+      const out: number[][] = [];
+      for (let i = 0; i < h.faces.length; i += 3) {
+        const [a, b, c] = [h.faces[i] * 3, h.faces[i + 1] * 3, h.faces[i + 2] * 3];
+        const u = [0, 1, 2].map(k => h.verts[b + k] - h.verts[a + k]), w = [0, 1, 2].map(k => h.verts[c + k] - h.verts[a + k]);
+        const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+        const l = Math.hypot(n[0], n[1], n[2]);
+        if (l > 1e-18) out.push([...n.map(v => v / l), (n[0] * h.verts[a] + n[1] * h.verts[a + 1] + n[2] * h.verts[a + 2]) / l]);
+      }
+      return out;
+    });
+    let best = -Infinity;
+    for (let z = 0; z <= top; z += 0.0001) {
+      if (planes.some(pl => pl.every(q => q[0] * x + q[1] * y + q[2] * z - q[3] <= 1e-9))) best = z;
+    }
+    return best;
+  };
+
+  it('keeps a lathed funnel\'s solid spout solid, and a ball rests on it', async () => {
+    // physics_build_scene's funnel: a `lathe` profile that does not come back
+    // to its start, so the lathe caps both ends to the axis and the spout is a
+    // solid plug 30 mm tall. Its pieces were a ring of wedges round a cone
+    // 0.4 mm across at the bottom and 13 mm at the top; a 6 mm ball dropped
+    // in jammed 14 mm up, and openingsNarrowedMm said 0.
+    const lathed = generateLatheMeshData([[0.011, 0], [0.014, 0], [0.014, 0.03], [0.063, 0.09], [0.06, 0.09], [0.011, 0.03]], 48);
+    const funnel = meshNode('funnel', { verts: lathed.renderVertices, faces: lathed.faces });
+    const r = (await decomposeNodeColliders(funnel))!;
+    expect(r.uncovered).toBeUndefined();
+    const hulls = r.geoms.map(g => {
+      const v: number[] = [];
+      for (let i = 0; i < g.vertices!.length; i += 3) v.push(g.vertices![i] + g.pos![0], -g.vertices![i + 2] + g.pos![1], g.vertices![i + 1] + g.pos![2]);
+      return { verts: v, faces: g.faces! };
+    });
+    for (const [x, y] of [[0, 0], [0.003, 0.002], [-0.008, 0.004]]) expect(surfaceAt(hulls, x, y, 0.035)).toBeCloseTo(0.03, 3);
+    const z = await run([withPieces({ ...funnel, pos: [0, 0, 0.1] }, r), ball('b', [0, 0, 0.2], 0.006, 0.01)], 1.5, sim => sim.bodyPos('b')[2]);
+    expect(z[z.length - 1]).toBeCloseTo(0.1 + 0.03 + 0.006, 3);
+  }, 120_000);
+
+  it('gives a cup with fanned caps a flat floor, its full thickness at the middle', async () => {
+    // r 50/46 mm, 4 mm floor, as Manifold makes it: no vertex on the axis.
+    const { loadManifold } = await import('../src/utils/sculptCut');
+    const { fromManifold } = await import('../src/utils/chunkedDecomposition');
+    const M = (await loadManifold()).Manifold;
+    const part = M.cylinder(60, 50, 50, 64).subtract(M.cylinder(60, 46, 46, 64).translate([0, 0, 4]));
+    const cup = fromManifold(part);
+    part.delete();
+    const solid = await decomposeSolid(cup.verts, cup.faces, { maxPieces: 512 });
+    expect(solid.uncovered).toBe(0);
+    // The floor was a cone, 0 mm thick at the axis and 3.6 mm at the wall.
+    for (const r of [0, 0.01, 0.03, 0.045]) expect(surfaceAt(solid.hulls, r * 0.6, r * 0.8, 0.02)).toBeCloseTo(0.004, 4);
+  }, 60_000);
 });

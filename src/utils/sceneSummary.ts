@@ -13,7 +13,7 @@ import { analyzeMesh } from './meshIntegrity';
 import { checkMeshInertia } from './meshInertiaCheck';
 import { cageOriginInBodyMm } from './latticeFrame';
 import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum } from './csg';
-import { collidersAreStale, intrusionSentence, solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
+import { collidersAreStale, intrusionSentence, solidMeshGeoms, uncoveredSentence, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
 import { measurePart } from './solidMachiningExporter';
 import { collidingGeomBoxes } from './collisionCheck';
 import type { BodyWorldPos } from './bodyWorld';
@@ -277,6 +277,11 @@ export function collisionReport(node: SceneNode): Record<string, unknown> {
       ...(node.collisionIntrusion ? {
         openingsNarrowedMm: node.collisionIntrusion.mm,
         openingsNarrowed: intrusionSentence(node.collisionIntrusion),
+      } : {}),
+      // Material no piece covers: what a part sinks into, which narrowing never shows.
+      ...(node.collisionUncovered ? {
+        surfaceUncoveredMm: node.collisionUncovered.mm,
+        surfaceUncovered: uncoveredSentence(node.collisionUncovered),
       } : {}),
       ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
     };
