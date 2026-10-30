@@ -214,7 +214,7 @@ export const MAX_REFLEX_CELLS = 128;
  * cells or leave too little budget for the curved ones.
  */
 async function reflexPieces(verts: number[], faces: number[], opts: SolidOptions, tolerance: number): Promise<SolidResult | null> {
-  let cut: ReflexCutResult | null = null;
+  let cut: ReflexCutResult | null;
   try {
     const [{ loadManifold }, { cutAtReflexEdges }] = await Promise.all([import('./sculptCut'), import('./reflexCuts')]);
     cut = cutAtReflexEdges(await loadManifold(), verts, faces, Math.min(MAX_REFLEX_CELLS, opts.maxPieces));
