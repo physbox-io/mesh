@@ -9,6 +9,7 @@ import { cutAlongPlane, type PlaneCutResult } from '../src/utils/printSplit';
 import { partSoups } from '../src/utils/printSplitClient';
 import { carryAcrossCut, knifeSoups, seamsAcross } from '../src/utils/knife';
 import { applySurfaceTextures, type SurfaceTexture } from '../src/utils/surfaceTexture';
+import { decomposeNodeColliders } from '../src/utils/convexDecomposition';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 
 let wasm: ManifoldToplevel;
@@ -103,6 +104,73 @@ describe('a seam over MCP, with no line drawn', () => {
     const box = body({ type: 'box', size: [0.02, 0.01, 0.005] });
     expect(seamsAcross(box, new THREE.Vector3(0.05, 0, 0), new THREE.Vector3(1, 0, 0))).toEqual([]);
   });
+});
+
+/*
+  A knife piece used to collide as one convex shape filling its holes: the
+  section's plane-cut "exact" pieces were installed as its colliders even when
+  one was left concave (a curved bore cannot be cut exactly by planes), and
+  being stamped as the decomposition they kept the general one from running.
+*/
+describe('a knife piece collides as what it is, holes and all', () => {
+  /** A 40 x 40 x 20 mm block with a 16 mm bore along z, as a soup in metres. */
+  function boredBlock(): Float64Array {
+    const block = wasm.Manifold.cube([40, 40, 20], true);
+    const bore = wasm.Manifold.cylinder(30, 8, 8, 48, true);
+    const part = block.subtract(bore);
+    const mesh = part.getMesh();
+    const out: number[] = [];
+    for (let t = 0; t < mesh.numTri * 3; t++) {
+      const i = mesh.triVerts[t] * mesh.numProp;
+      out.push(mesh.vertProperties[i] / 1000, mesh.vertProperties[i + 1] / 1000, mesh.vertProperties[i + 2] / 1000);
+    }
+    for (const m of [block, bore, part]) m.delete();
+    return Float64Array.from(out);
+  }
+  /** Whether a point (metres) lies inside the hull of these points (metres). */
+  function inHull(points: number[][], p: number[]): boolean {
+    const mm = (q: number[]) => q.map((v) => v * 1000) as [number, number, number];
+    const a = wasm.Manifold.hull(points.map(mm));
+    const b = wasm.Manifold.hull([...points.map(mm), mm(p)]);
+    try { return b.volume() - a.volume() < 1e-3; } finally { a.delete(); b.delete(); }
+  }
+  const pointsOf = (positions: ArrayLike<number>) => {
+    const out: number[][] = [];
+    for (let i = 0; i < positions.length; i += 3) out.push([positions[i], positions[i + 1], positions[i + 2]]);
+    return out;
+  };
+  // Air: in the half bore of the +x piece, 4 mm off the axis.
+  const inGroove = [0.004, 0, 0];
+
+  it('installs no plane-cut pieces that fill the bore, and leaves the piece to be decomposed', async () => {
+    // Cut along the bore's axis: each piece is a block with a half-round groove.
+    const r = cutAlongPlane(wasm, [boredBlock()], [0, 0, 0], [1, 0, 0]);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.sections).toHaveLength(2);
+    const k = r.sections.findIndex((s) => s.positions[0] > -1e-9 && Array.from(s.positions).every((v, i) => i % 3 !== 0 || v > -1e-9));
+    const section = r.sections[k];
+    for (const piece of section.convexPieces) expect(inHull(pointsOf(piece.positions), inGroove)).toBe(false);
+
+    // The piece as splitBodyForPrint makes it, through the general decomposition.
+    const node: SceneNode = {
+      id: 'piece', name: 'piece', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+      geoms: [{
+        name: 'piece_mesh', type: 'mesh', size: [1], dynamic: true,
+        renderVertices: Array.from(section.positions), faces: Array.from(section.faces),
+        colliderVertices: Array.from(section.plainPositions), colliderFaces: Array.from(section.plainFaces),
+      } as SceneGeom],
+    } as unknown as SceneNode;
+    const result = (await decomposeNodeColliders(node))!;
+    expect(result.verdict.strategy).toBe('decompose');
+    expect(result.geoms.length).toBeGreaterThan(1);
+    for (const g of result.geoms) {
+      // Collider vertices are Y-up about the piece's pos; back to the body's Z-up frame.
+      const v = g.vertices!;
+      const pts: number[][] = [];
+      for (let i = 0; i < v.length; i += 3) pts.push([v[i] + g.pos![0], -v[i + 2] + g.pos![1], v[i + 1] + g.pos![2]]);
+      expect(inHull(pts, inGroove)).toBe(false);
+    }
+  }, 60_000);
 });
 
 function surfaceOf(node: SceneNode): [number[], number[]] {
