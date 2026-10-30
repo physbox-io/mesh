@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
+import { useCallback, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Environment, Lightformer } from '@react-three/drei';
 import { EffectComposer, N8AO } from '@react-three/postprocessing';
@@ -18,6 +18,7 @@ import { RenderOnChange } from './RenderOnChange';
 import { GridFadeFollowsCamera } from './GridFadeFollowsCamera';
 import { GroundGrid } from './GroundGrid';
 import { OriginGlow } from './OriginGlow';
+import { KeyLight } from './KeyLight';
 import { BodyToneMapping } from './BodyToneMapping';
 import { StudioBackdrop } from './StudioBackdrop';
 import { SelectionOutline } from './SelectionOutline';
@@ -63,16 +64,6 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
 }) {
   const hiRes = useViewQuality(s => s.hiRes);
   const pathTrace = useViewQuality(s => s.pathTrace);
-  const keyLightRef = useRef<THREE.DirectionalLight>(null);
-  // three allocates a shadow map once and never resizes it, so a new mapSize
-  // only takes once the old map is gone. Layout effect: the frame the switch
-  // asked for must find the map already dropped.
-  useLayoutEffect(() => {
-    const shadow = keyLightRef.current?.shadow;
-    if (!shadow?.map) return;
-    shadow.map.dispose();
-    shadow.map = null;
-  }, [hiRes]);
   // The EffectComposer instance, so a screenshot can render through the same
   // post-processing pipeline the viewport uses (AO included) instead of a raw
   // gl.render() that would silently skip every effect — see SCREENSHOT in
@@ -191,48 +182,14 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
         <Lightformer form="rect" intensity={0.6} position={[0, 1, -5]} scale={[8, 2, 1]} />
       </Environment>
       <ambientLight intensity={0.08} />
-      {/* The shadow camera is an orthographic box, and its default is +/-5m
-          with a 512px map. This scene lives at part scale — the camera
-          sits about 300mm out and shows 250mm of world — so the default
-          spends its whole depth texture on empty space and resolves a
-          part's shadow at roughly 20mm per texel, which is mush. Bounded
-          to +/-0.8m at 2048px it lands near 0.8mm per texel instead,
-          which is what a 250mm part needs to cast a shadow with an edge
-          on it rather than a grey cloud.
-          normalBias offsets the lookup along the surface normal, which is
-          what keeps a body resting flat on the ground from shadow-acneing
-          itself into stripes. 0.01 was tuned against that case — coarse,
-          low-poly primitives. A lathed mesh with 96-120 radial wedges
-          around a ~5cm cap works out to roughly 2-3mm of arc per wedge,
-          right at this map's own ~2mm/texel resolution, so the acne
-          shows up radiating with the wedges instead of as stripes. 0.03
-          clears that without visible peter-panning at bench scale. */}
-      {/* Hi-Res doubles the map (about 0.4mm per texel) and widens the
-          PCF filter to soften the shadow's edge. Only so far: three r184
-          filters with five taps rotated per pixel, so a wider radius goes
-          grainy rather than softer. */}
-      <directionalLight
-        ref={keyLightRef}
-        position={[1.5, 3, 1.5]}
-        intensity={darkMode ? 1.4 : 1.2}
-        castShadow
-        shadow-mapSize={hiRes ? [4096, 4096] : [2048, 2048]}
-        shadow-radius={hiRes ? 4 : 1}
-        shadow-camera-left={-0.8}
-        shadow-camera-right={0.8}
-        shadow-camera-top={0.8}
-        shadow-camera-bottom={-0.8}
-        shadow-camera-near={0.1}
-        shadow-camera-far={6}
-        shadow-normalBias={0.03}
-      />
+      <KeyLight darkMode={darkMode} hiRes={hiRes} nodes={sceneGraph.nodes} />
       {/* Double-sided: drei's Grid defaults to BackSide, so the graph
           paper vanished the moment the camera dropped below the floor —
           which it does whenever you orbit under a part to look at its
           underside, and losing the ground is losing the only reference
           for where the part is. */}
       {/* Fades at 1.6 m, which is where the rest of this scene already
-          stops: the shadow camera is +/-0.8 m and the shadow catcher is a
+          stops at bench scale: the shadow camera is +/-0.8 m and the catcher a
           1.6 m plane, so past that there is ground drawn but nothing
           grounded on it. The floor is also the main thing the eye judges
           a part's size against — a horizon six windows away is what made
@@ -261,29 +218,6 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       <GridFadeFollowsCamera />
       <OriginGlow darkMode={darkMode} cellSizeMm={gridCellSizeMm} />
 
-      {/* Every geom already casts and receives, but until now nothing on
-          the ground caught any of it: drei's Grid is a custom shader that
-          doesn't receive shadows, so bodies only shadowed each other and
-          the floor stayed clean. That's the one place the eye reads
-          contact and height from, so a part hovering 20mm up looked
-          identical to one sitting down.
-          ShadowMaterial draws nothing but the shadow itself, so the grid
-          still shows through underneath. Sized to match the shadow
-          camera's 1.6m footprint exactly — a larger plane would sample
-          outside the depth texture and smear its edge texels outward.
-          raycast is stubbed off deliberately: a plane across the
-          viewport floor would otherwise swallow every background click,
-          and onPointerMissed — the only thing that clears the selection —
-          would never fire again. */}
-      <mesh
-        rotation={[-Math.PI / 2, 0, 0]}
-        position={[0, 0, 0]}
-        receiveShadow
-        raycast={() => null}
-      >
-        <planeGeometry args={[1.6, 1.6]} />
-        <shadowMaterial transparent opacity={darkMode ? 0.5 : 0.32} depthWrite={false} />
-      </mesh>
   
       {model && data && mujoco && (
         <PhysicsLoop 
