@@ -27,7 +27,7 @@ describe('bodies from an agent are checked before MuJoCo sees them', () => {
     expect(fill({ name: 'a', pos: [0, 0], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }))
       .toThrow(/pos has 2 numbers, not 3/);
     expect(fill({ name: 'a', geoms: [{ type: 'box', size: [0.01, NaN, 0.01] }] }))
-      .toThrow(/geom 'a_geom_0': size\[1\] is NaN/);
+      .toThrow(/Geom "a_geom_0" on body "a": size\[1\] is NaN/);
     expect(fill({ name: 'a', geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }], joints: [{ type: 'hinge', axis: [0, 'y', 0] }] }))
       .toThrow(/joint 'a_joint_0': axis\[1\]/);
   });

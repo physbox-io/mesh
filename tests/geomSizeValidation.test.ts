@@ -43,7 +43,7 @@ describe('geomSizeProblem', () => {
     ['negative', [-0.05, 0.05, 0.05], /size\[0\] is -0\.05/],
     ['zero', [0.05, 0, 0.05], /size\[1\] is 0/],
     ['text', [0.05, 0.05, 'big'], /size\[2\] is "big"/],
-    ['NaN', [NaN], /size\[0\] is null/],
+    ['NaN', [NaN], /size\[0\] is NaN/],
     ['not a list', 'large', /must be a list of numbers/],
     ['empty', [], /size is empty/],
   ])('refuses a %s box size', (_l, size, msg) => {

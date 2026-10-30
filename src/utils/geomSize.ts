@@ -47,7 +47,7 @@ export function geomSizeProblem(geom: SizedGeom, bodyName?: string): string | nu
     // JSON makes of NaN.
     if (v === undefined && i > 0) continue;
     if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
-      return `${where}: size[${i}] is ${JSON.stringify(v)}; a ${type}'s size is ${MEANING[type] ?? 'its extent'} in metres and every entry must be a positive number.`;
+      return `${where}: size[${i}] is ${typeof v === 'number' ? String(v) : JSON.stringify(v)}; a ${type}'s size is ${MEANING[type] ?? 'its extent'} in metres and every entry must be a positive number.`;
     }
   }
   return null;
