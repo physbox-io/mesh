@@ -13,6 +13,7 @@ import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
 import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { contactArenaXml } from './contactArena';
+import { withoutNulls } from './withoutNulls';
 import { compiledSlide, geomFriction, needsEllipticCone } from './contactFriction';
 import { SMALL_BODY_INERTIA_FLOOR, hasSubMillimetreMovingBody } from './incomingBodyCheck';
 import { UNSLIPPING_CLUTCH, clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
@@ -504,9 +505,12 @@ export const compileToMJCF = (
   // hands back the original geom objects, and a rename would leak into the
   // store. Vertex and face arrays are shared — nothing here writes into them,
   // and deep-copying a shattered scene's worth of them cost every rebuild.
+  // A null field is read as unset (utils/withoutNulls.ts): `friction: null`
+  // reached `.join` and the scene never compiled again.
   const cloneNodes = (nodes: SceneNode[]): SceneNode[] => nodes.map(n => ({
-    ...n,
-    ...(n.geoms ? { geoms: n.geoms.map(g => ({ ...g })) } : {}),
+    ...withoutNulls(n),
+    ...(n.geoms ? { geoms: n.geoms.map(g => ({ ...withoutNulls(g) })) } : {}),
+    ...(n.joints ? { joints: n.joints.map(withoutNulls) } : {}),
     ...(n.children ? { children: cloneNodes(n.children) } : {}),
   }));
   const sceneCopy: SceneGraph = { ...scene, nodes: cloneNodes(scene.nodes) };
@@ -679,7 +683,7 @@ export const compileToMJCF = (
   ) => {
     if (!nodes) return;
     for (const node of nodes) {
-      const rotatedOffset = quatRotateVec(parentQuat, node.pos);
+      const rotatedOffset = quatRotateVec(parentQuat, Array.isArray(node.pos) ? node.pos : [0, 0, 0]);
       const worldPos: [number, number, number] = [
         parentPos[0] + rotatedOffset[0],
         parentPos[1] + rotatedOffset[1],
