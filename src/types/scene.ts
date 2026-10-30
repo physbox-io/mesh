@@ -969,6 +969,23 @@ export interface SceneGraph {
    * any export, the DFM checks or picking. See utils/referenceImages.ts.
    */
   referenceImages?: ReferenceImage[];
+  /**
+   * Gravity, wind, air and floor, as the scene was saved with them. Written
+   * into a saved preset, a file, a share link and get_scene's answer, and read
+   * back on load (store/sceneEnvironment.ts). Never on the live store graph:
+   * the store's own fields hold the environment there, and are what compiles.
+   */
+  environment?: Partial<SceneEnvironment>;
+}
+
+/** The world a scene runs in. Metres, seconds, kg/m³. */
+export interface SceneEnvironment {
+  gravityZ: number;
+  windX: number;
+  windY: number;
+  density: number;
+  floorFriction: number;
+  floorBounce: number;
 }
 
 /** Which drawing view a reference image faces, and so which plane it lies in. */

@@ -5,7 +5,7 @@
 import { useStore } from '../../store/useStore';
 import { compileSCAD } from '../../utils/openscad';
 import { compileCsgNodes, pendingColliderBodies } from '../useCsgCompile';
-import type { SceneNode } from '../../types/scene';
+import type { SceneGraph, SceneNode } from '../../types/scene';
 import { type PhysicsWindow, countBodies } from './bridgeUtils';
 import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from './bodyFeatures';
 
@@ -83,9 +83,11 @@ export const autoCompileScad = async (nodes: SceneNode[]) => {
 export const settleScene = async (
   nodes: SceneNode[],
   {
-    replacesScene = true, freshStart = false, waitForColliders = true,
+    replacesScene = true, freshStart = false, waitForColliders = true, sceneFields = {},
   }: {
     replacesScene?: boolean; freshStart?: boolean;
+    /** What a replacing scene says about itself (fidelity, pictures, environment...). */
+    sceneFields?: Omit<SceneGraph, 'nodes'>;
     /** false: reply once the body is built; its convex pieces follow in the background. */
     waitForColliders?: boolean;
   } = {},
@@ -103,7 +105,7 @@ export const settleScene = async (
   // build racing against the final one below.
   // A caller that only adds a body keeps what the scene says about itself:
   // print fidelity, cast prep, reference pictures, its name.
-  store.updateScene(replacesScene ? { nodes } : { ...store.sceneGraph, nodes }, true);
+  store.updateScene(replacesScene ? { ...sceneFields, nodes } : { ...store.sceneGraph, nodes }, true);
   await autoCompileScad(nodes);
   await applyDeclarativePreCsgFeatures(nodes);
   // Boolean bodies compile through the same OpenSCAD pool, and just as

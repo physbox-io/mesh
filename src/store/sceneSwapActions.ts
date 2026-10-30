@@ -5,7 +5,7 @@
 // and only then frames the new one (finishSceneSwap).
 // ---------------------------------------------------------------------------
 
-import type { SceneGraph } from '../types/scene';
+import type { SceneEnvironment, SceneGraph } from '../types/scene';
 import { PRESETS } from '../presets/presetScenes';
 import { readUserPreset } from '../utils/userPresets';
 import { saveStock, clampStock, type StockSize } from '../utils/stockSettings';
@@ -15,6 +15,7 @@ import { promoteJointedMeshGeomsDeep } from './meshGeomTransforms';
 import { clearBreakage } from './breakage';
 import { onNextPaint, getPhysicsWorkerClient } from './physicsEngine';
 import { framingPatch } from './sceneFraming';
+import { DEFAULT_ENVIRONMENT, environmentOf, takeEnvironment } from './sceneEnvironment';
 import type { PhysicsState } from './useStore';
 import type { SliceDeps } from './sliceDeps';
 
@@ -24,7 +25,7 @@ interface Preset {
   emoji?: string;
   scene?: SceneGraph;
   camera?: { position: [number, number, number]; target: [number, number, number] };
-  environment?: Partial<{ gravityZ: number; windX: number; windY: number; density: number; floorFriction: number; floorBounce: number }>;
+  environment?: Partial<SceneEnvironment>;
   /**
    * How this scene is meant to be carved, for the relief export to open with.
    *
@@ -136,15 +137,32 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
           // The picture and the date belong to the preset, not the scene: left
           // on, they would ride along in the graph into every export, share
           // link and later save.
-          const { thumbnail: _thumbnail, savedAt: _savedAt, ...savedGraph } = saved ?? {};
-          const savedScene: SceneGraph | null =
+          // So do the notes and the chat, which the document holds, and the
+          // environment, which the store's own fields do.
+          const {
+            thumbnail: _thumbnail, savedAt: _savedAt, noteCards: _notes, copilotMessages: _chat,
+            ...savedGraph
+          } = saved ?? {};
+          const found: SceneGraph | null =
             saved && Array.isArray(saved.nodes) ? (savedGraph as unknown as SceneGraph)
             : nested && Array.isArray(nested.nodes) ? nested
             : null;
           // A preset with no nodes is a corrupt or half-written entry rather than
           // an empty scene; recompiling it would throw inside the MJCF builder.
-          if (savedScene) {
+          if (found) {
+            const { graph: savedScene, environment } = takeEnvironment(found);
             promoteJointedMeshGeomsDeep(savedScene.nodes);
+            // In the store now, as a built-in preset's is, not when the worker
+            // has built it: everything that reads the graph straight after the
+            // load (the boolean compile, the MCP reply, the note card) read the
+            // scene being left.
+            set((state) => ({
+              sceneGraph: savedScene,
+              outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
+              // A preset saved before the environment was saved gets the default
+              // world, not whatever the last scene was set to.
+              ...(environment ?? DEFAULT_ENVIRONMENT),
+            }));
             // A saved scene never carries a camera, so it is framed entirely
             // from its own bounds — the same as a preset that does not state
             // one. After the rebuild, for the same reason the presets are.
@@ -208,11 +226,9 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
       }
-      if (preset.environment) {
-        set({ windX: 0, windY: 0, floorBounce: 0, ...preset.environment });
-      } else {
-        set({ windX: 0, windY: 0, floorBounce: 0 });
-      }
+      // The preset's world, and the default for anything it does not mention.
+      // Gravity, air and floor friction used to carry over from the last scene.
+      set(environmentOf(preset.environment));
       finishSceneSwap(swap, get().recompile(scene, null, true, true), set,
         () => framingPatch(scene, framing));
     },
@@ -252,9 +268,7 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
         sculptNodeId: null,
         sculptStats: null,
         gestureStatus: null,
-        windX: 0,
-        windY: 0,
-        floorBounce: 0,
+        ...DEFAULT_ENVIRONMENT,
       }));
       // A generated board is sized from the stock it will be cut from, which
       // is usually a good deal smaller than the default view assumes.

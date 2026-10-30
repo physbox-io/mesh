@@ -31,6 +31,7 @@ import {
 } from '../../utils/sceneSummary';
 import { recompilesInFlight } from '../../store/simulationActions';
 import { modelBuiltFrom } from '../../store/modelProvenance';
+import { withEnvironment } from '../../store/sceneEnvironment';
 import type { HistoryQuery } from '../../workers/physicsWorkerProtocol';
 import { type PhysicsWindow, workerStatusNow, type Msg, findNodeInScene, stripMeshArrays } from './bridgeUtils';
 import { sealCheckFor } from './bodyFeatures';
@@ -106,9 +107,12 @@ export const viewCommands: McpCommands = {
     });
     return { ok: true };
   },
-  GET_SCENE: async (_msg, { store }) => {
-    return store.sceneGraph;
-  },
+  // Everything UPDATE_SCENE needs to put the scene back as it was: the
+  // environment and the note cards live outside the graph, so they are added.
+  GET_SCENE: async (_msg, { store }) => ({
+    ...withEnvironment(store.sceneGraph, store),
+    noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() ?? [],
+  }),
   GET_SCENE_SUMMARY: async (_msg, { store }) => {
     // Bodies the installed model was not built from, as they now stand:
     // their `inertial` is the previous build's.

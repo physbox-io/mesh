@@ -24,6 +24,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { bboxOf, stockReport } from '../../utils/sceneSummary';
 import { framingPatch } from '../../store/sceneFraming';
+import { withEnvironment } from '../../store/sceneEnvironment';
 import type { HeadlessResult } from '../../workers/physicsWorkerProtocol';
 import {
   type PhysicsWindow, workerStatusNow, countBodies, type Msg, HEADLESS_WAIT_FOR_COLLIDERS_MS,
@@ -172,10 +173,9 @@ export const sceneCommands: McpCommands = {
         msgSetter([]);
       }
     }
-    updateOrCreateNotecard({
-      mode: 'mcp',
-      nodes: useStore.getState().sceneGraph.nodes
-    });
+    // No card refresh here: loading is not an edit, and the preset's card is
+    // what it says. The refresh used to merge bounding boxes into it, and for
+    // a saved preset it read them off the scene being left.
     return { ok: true, preset: name };
   },
   SAVE_PRESET: async (msg, { store }) => {
@@ -197,7 +197,7 @@ export const sceneCommands: McpCommands = {
     // same way; savePreset dates it.
     const thumbnail = captureViewportThumb();
     const preset = {
-      ...store.sceneGraph,
+      ...withEnvironment(store.sceneGraph, store),
       noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() || [],
       copilotMessages: (window as unknown as PhysicsWindow)._physics_getCopilotMessages?.() || [],
       ...(thumbnail ? { thumbnail } : {}),
@@ -402,8 +402,9 @@ export const sceneCommands: McpCommands = {
   UPDATE_SCENE: async (msg) => {
     if (!msg.sceneGraph) return { ok: false, error: 'Missing sceneGraph' };
     // The MCP tool schema passes sceneGraph as a bare array of nodes (matching
-    // BUILD_SCENE's convention); also accept the internal { nodes: [...] } shape.
-    const rawScene = msg.sceneGraph as RawNode[] | { nodes?: RawNode[] };
+    // BUILD_SCENE's convention); also accept the internal { nodes: [...] } shape,
+    // which is what GET_SCENE answers with.
+    const rawScene = msg.sceneGraph as RawNode[] | (Omit<SceneGraph, 'nodes'> & { nodes?: RawNode[]; noteCards?: unknown });
     const rawNodes = Array.isArray(rawScene) ? rawScene : rawScene.nodes;
     if (!Array.isArray(rawNodes)) {
       return { ok: false, error: 'sceneGraph must be an array of nodes, or an object of the form { nodes: SceneNode[] }' };
@@ -413,11 +414,34 @@ export const sceneCommands: McpCommands = {
     // editing the output of GET_SCENE_SUMMARY, which strips these arrays)
     // doesn't crash compileToMJCF's unconditional .forEach on those fields.
     const nodes = rawNodes.map((b) => fillBodyDefaults(b));
-    const result = await settleScene(nodes);
-    updateOrCreateNotecard({
-      mode: 'mcp',
-      nodes: useStore.getState().sceneGraph.nodes
-    });
+    // What the scene says about itself. The object form is GET_SCENE's answer
+    // coming back, and carries all of it: fidelity, pictures, environment,
+    // cast prep, name and note cards. A bare array is new bodies for the scene
+    // on screen: it keeps the pictures being modelled from and the fidelity
+    // the work is being done at (dropping that changed the physics), but not
+    // cast prep or a name, which describe the bodies that were replaced.
+    const current = useStore.getState().sceneGraph;
+    let sceneFields: Omit<SceneGraph, 'nodes'>;
+    let noteCards: NoteCard[] | null = null;
+    if (Array.isArray(rawScene)) {
+      sceneFields = {
+        ...(current.simFidelity ? { simFidelity: current.simFidelity } : {}),
+        ...(current.referenceImages?.length ? { referenceImages: current.referenceImages } : {}),
+      };
+    } else {
+      const { nodes: _nodes, noteCards: cards, ...fields } = rawScene;
+      sceneFields = fields;
+      if (Array.isArray(cards)) noteCards = cards as NoteCard[];
+    }
+    const result = await settleScene(nodes, { sceneFields });
+    if (noteCards) {
+      (window as unknown as PhysicsWindow)._physics_setNoteCards?.(noteCards);
+    } else {
+      updateOrCreateNotecard({
+        mode: 'mcp',
+        nodes: useStore.getState().sceneGraph.nodes
+      });
+    }
     return withScriptWarnings(result, nodes);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {

@@ -16,6 +16,7 @@ import {
 import { detachReferencesTo } from './breakage';
 import { MUJOCO_SHIM, getPhysicsWorkerClient } from './physicsEngine';
 import type { SliceDeps } from './sliceDeps';
+import { takeEnvironment } from './sceneEnvironment';
 
 /** A node's own transform, as MJCF would apply it under its parent. */
 const localMatrixOf = (node: SceneNode): THREE.Matrix4 => {
@@ -58,9 +59,12 @@ export interface NodeActions {
 
 export function nodeActions({ set, get }: SliceDeps): NodeActions {
   return {
-    updateScene: (newScene, skipRecompile) => {
+    updateScene: (loaded, skipRecompile) => {
       get().prepareForDiscreteChange();
-      set({ sceneGraph: newScene });
+      // A file or an agent's get_scene round trip carries its environment;
+      // an edit (`{ ...sceneGraph, nodes }`) never does, and leaves it be.
+      const { graph: newScene, environment } = takeEnvironment(loaded);
+      set(environment ? { sceneGraph: newScene, ...environment } : { sceneGraph: newScene });
       if (!skipRecompile) {
         get().recompile(newScene);
       }

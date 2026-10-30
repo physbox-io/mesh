@@ -19,6 +19,7 @@ import { revokeShare, isProRequired } from '../utils/apiClient';
 import { listUserPresetNames, saveUserPreset } from '../utils/userPresets';
 import { SIGNED_IN_EVENT } from '../components/UserProfileButton';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
+import { readEnvironment } from '../store/sceneEnvironment';
 
 /*
  * Sharing the scene as a link.
@@ -73,7 +74,13 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
     const name = activePreset?.startsWith('user:')
       ? activePreset.slice('user:'.length)
       : synced.name || 'Shared scene';
-    return { name, nodes: synced.nodes, noteCards };
+    const { simFidelity, referenceImages } = synced;
+    return {
+      name, nodes: synced.nodes, noteCards,
+      environment: readEnvironment(useStore.getState()),
+      ...(simFidelity ? { simFidelity } : {}),
+      ...(referenceImages?.length ? { referenceImages } : {}),
+    };
   }, [sceneGraph, model, data, mujoco, noteCards, activePreset]);
 
   const handleShare = useCallback(async () => {
@@ -199,7 +206,8 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
 
         clearShareFragment();
         clearShareToken();
-        if (!saveUserPreset(name, { nodes: shared.nodes, noteCards: shared.noteCards ?? [] })) {
+        const { name: _name, noteCards: notes, ...scene } = shared;
+        if (!saveUserPreset(name, { ...scene, noteCards: notes ?? [] })) {
           setShareError(
             `"${name}" opened but could not be saved — browser storage is full. ` +
               'Export the JSON now if you want to keep it.'

@@ -23,7 +23,7 @@
 // puts that in a URL. So the refusal names what is big rather than saying no.
 // ---------------------------------------------------------------------------
 
-import type { SceneNode } from '../types/scene';
+import type { SceneGraph, SceneNode } from '../types/scene';
 import type { UserPreset } from './userPresets';
 import { packMeshArrays, unpackMeshArrays } from './meshPacking';
 import { externalizeMeshes, resolveMeshBlobs } from './meshBlobs';
@@ -52,11 +52,32 @@ export const SHARE_SOFT_LIMIT = 16 * 1024;
  */
 export const SHARE_HARD_LIMIT = 64 * 1024;
 
-/** What travels: the scene and the notes written on it. */
-export interface SharedScene {
+/**
+ * What travels: the scene, what it says about itself (print fidelity, the
+ * pictures it is modelled from, its gravity and floor), and the notes written
+ * on it. Cast prep is left at home: it holds a second copy of every part.
+ */
+export interface SharedScene extends Pick<SceneGraph, 'simFidelity' | 'referenceImages' | 'environment'> {
   name: string;
   nodes: SceneNode[];
   noteCards?: UserPreset['noteCards'];
+}
+
+/**
+ * The scene without the convex pieces its concave bodies collide as.
+ *
+ * They are worked out again on the other end (a body marked decomposed with no
+ * pieces reads as stale, see collidersAreStale), and they are most of the
+ * link: one 40 mm cup came to 68 KB with them and 5 KB without. A boolean's
+ * pieces are left alone: those come from its compile, which only re-runs
+ * when its source changes.
+ */
+export function withoutConvexPieces(nodes: SceneNode[]): SceneNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    geoms: node.csgEnabled || !node.geoms ? node.geoms : node.geoms.filter((g) => g.csgDerived !== 'collider'),
+    children: node.children ? withoutConvexPieces(node.children) : node.children,
+  }));
 }
 
 export interface ShareLink {
@@ -93,8 +114,7 @@ export class ShareTooLargeError extends Error {
       `This scene needs ${Math.round(length / 1024)}KB of link and browsers stop reading at about ` +
         `${SHARE_HARD_LIMIT / 1024}KB. ` +
         (heaviest.length
-          ? `${heaviest.join(', ')} ${heaviest.length === 1 ? 'carries' : 'carry'} the vertices and ` +
-            `faces of a mesh, which is what makes a scene too big for a URL. `
+          ? `${heaviest.join(', ')} ${heaviest.length === 1 ? 'is' : 'are'} what makes it too big for a URL. `
           : '') +
         `Save the scene, or export STL, and send that instead.`
     );
@@ -204,7 +224,7 @@ async function gunzip(bytes: Uint8Array): Promise<string> {
 
 /** The fragment a scene travels in, without the URL around it. */
 export async function encodeShareFragment(scene: SharedScene): Promise<string> {
-  const json = JSON.stringify(packMeshArrays(scene));
+  const json = JSON.stringify(packMeshArrays({ ...scene, nodes: withoutConvexPieces(scene.nodes) }));
   const packed = await gzip(json);
   return new URLSearchParams({
     v: SHARE_VERSION,
@@ -262,7 +282,10 @@ export async function buildShareLink(
 
   const full = `${url.toString()}#${await encodeShareFragment(scene)}`;
   if (full.length > SHARE_HARD_LIMIT) {
-    throw new ShareTooLargeError(full.length, meshHeavyNodes(scene.nodes));
+    const heaviest = meshHeavyNodes(withoutConvexPieces(scene.nodes));
+    // A photo is easily the whole budget on its own.
+    const pictures = JSON.stringify(scene.referenceImages ?? []).length;
+    throw new ShareTooLargeError(full.length, pictures > SHARE_HARD_LIMIT / 2 ? ['the reference pictures', ...heaviest] : heaviest);
   }
 
   const notes: string[] = [];

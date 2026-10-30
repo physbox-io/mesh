@@ -56,6 +56,7 @@ import { sceneSwapActions, type SceneSwapActions } from './sceneSwapActions';
 import { addComponentActions, type AddComponentActions } from './addComponentActions';
 import { geomActions, type GeomActions } from './geomActions';
 import { nodeActions, type NodeActions } from './nodeActions';
+import { DEFAULT_ENVIRONMENT } from './sceneEnvironment';
 
 /**
  * What is on the bench.
@@ -512,12 +513,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   mcpActiveCount: 0,
   scadCompileCount: 0,
   
-  gravityZ: -9.81,
-  windX: 0,
-  windY: 0,
-  density: 0,
-  floorFriction: 1.0,
-  floorBounce: 0.0,
+  ...DEFAULT_ENVIRONMENT,
   
   rotateAroundCOM: true,
   setRotateAroundCOM: (val) => set({ rotateAroundCOM: val }),

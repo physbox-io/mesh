@@ -10,6 +10,7 @@ import { savePreset } from '../utils/presetStorage';
 import { announcePresetSave } from '../utils/presetNotices';
 import { cloudAutosave } from '../utils/cloudDocuments';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
+import { readEnvironment, withEnvironment } from '../store/sceneEnvironment';
 import { packMeshArrays } from '../utils/meshPacking';
 import type { SceneDocument } from './useSceneDocument';
 import { recordRecent } from '../utils/sceneMeta';
@@ -29,6 +30,8 @@ export function usePresetActions(doc: SceneDocument) {
     mujoco: s.mujoco, activePreset: s.activePreset,
     sceneGraph: s.sceneGraph, loadPreset: s.loadPreset,
   })));
+  // Only so a change to gravity, wind or the floor is auto-saved too.
+  const environment = useStore(useShallow(readEnvironment));
   const showNotice = useDialogs((s) => s.showNotice);
 
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
@@ -95,7 +98,7 @@ export function usePresetActions(doc: SceneDocument) {
     if (!trimmed) return;
     try {
       const { model, data } = useStore.getState();
-      const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
+      const syncedScene = withEnvironment(getSyncedSceneGraph(sceneGraph, model, data, mujoco), useStore.getState());
       // The picture for the scene browser, of the scene being saved.
       const thumbnail = captureViewportThumb();
       const preset = { ...syncedScene, noteCards, copilotMessages, ...(thumbnail ? { thumbnail } : {}) };
@@ -154,7 +157,7 @@ export function usePresetActions(doc: SceneDocument) {
       cloudAutosave.schedule(name, () => {
         const { model, data } = useStore.getState();
         return packMeshArrays({
-          ...getSyncedSceneGraph(sceneGraph, model, data, mujoco),
+          ...withEnvironment(getSyncedSceneGraph(sceneGraph, model, data, mujoco), useStore.getState()),
           noteCards,
           copilotMessages,
         });
@@ -163,7 +166,7 @@ export function usePresetActions(doc: SceneDocument) {
       // A scene that cannot be synced cannot be saved to anything; the local paths
       // have the same problem and there is nothing useful to add here.
     }
-  }, [sceneGraph, noteCards, copilotMessages, mujoco, activePreset]);
+  }, [sceneGraph, environment, noteCards, copilotMessages, mujoco, activePreset]);
 
   const handleSavePresetClick = useCallback(() => {
     const defaultName = activePreset && activePreset.startsWith('user:')

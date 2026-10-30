@@ -6,6 +6,7 @@ import type { SceneGraph } from '../types/scene';
 import type { NoteCard } from '../utils/noteCards';
 import type { CopilotMessage } from '../physicsGlobals';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
+import { withEnvironment } from '../store/sceneEnvironment';
 import { packMeshArrays, unpackMeshArrays } from '../utils/meshPacking';
 import { exportBaseName } from '../utils/exportBaseName';
 import type { SceneDocument } from './useSceneDocument';
@@ -23,7 +24,7 @@ export function useSceneIo(doc: SceneDocument) {
 
   const exportJson = useCallback(() => {
     try {
-      const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
+      const syncedScene = withEnvironment(getSyncedSceneGraph(sceneGraph, model, data, mujoco), useStore.getState());
       const dataStr = JSON.stringify(packMeshArrays({ ...syncedScene, noteCards, copilotMessages }), null, 2);
       const blob = new Blob([dataStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -66,9 +67,11 @@ export function useSceneIo(doc: SceneDocument) {
       s.setSculptNodeId(null);
       s.setLatticeNodeId(null);
       s.setActivePreset(undefined);
-      updateScene(parsed as SceneGraph);
-      const notes = Array.isArray(parsed.noteCards) ? parsed.noteCards as NoteCard[] : [];
-      const chat = Array.isArray(parsed.copilotMessages) ? parsed.copilotMessages as CopilotMessage[] : [];
+      // The notes and chat are the document's, not the graph's.
+      const { noteCards, copilotMessages, ...graph } = parsed;
+      updateScene(graph as SceneGraph);
+      const notes = Array.isArray(noteCards) ? noteCards as NoteCard[] : [];
+      const chat = Array.isArray(copilotMessages) ? copilotMessages as CopilotMessage[] : [];
       replaceDocument(notes, chat);
     };
     if (dropped) {
