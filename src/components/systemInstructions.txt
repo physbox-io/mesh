@@ -137,7 +137,7 @@ SCENEJOINT SCHEMA
 Every joint constrains motion of the body relative to its parent:
   name: unique name of the joint
   type: one of: "hinge" (1-DOF rotation), "slide" (1-DOF translation), "ball" (3-DOF rotation), "free" (6-DOF free movement)
-  axis: [number, number, number] <- Direction axis of rotation/translation (e.g., [0, 1, 0] for Y-rotation)
+  axis: [number, number, number] <- Direction axis of rotation/translation (e.g., [0, 1, 0] for Y-rotation). Left out on a hinge or slide, it is the body's own Z (MuJoCo's default) and the reply warns.
   pos: [number, number, number] <- Joint anchor position
   damping: number <- Resistance force (default 0 or 1-5 for smooth decay)
   initialVelocity: number[] <- Optional. Starting velocity, applied on load/reset. Free: [vx, vy, vz, wx, wy, wz]; ball: [wx, wy, wz]; hinge/slide: one number. Linear m/s in WORLD axes, angular rad/s in the BODY'S OWN frame, so a top spinning about its own axis is [0,0,0, 0,0,50] however it is tilted. The way to spin a top or launch a body.

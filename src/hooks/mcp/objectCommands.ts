@@ -20,6 +20,7 @@ import type { SceneNode, SceneGeom, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { withoutNulls } from '../../utils/withoutNulls';
+import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import {
   countBodies, collectNodeIds, type Msg, pointList, resolveParent, withChild, findNodeInScene,
 } from './bridgeUtils';
@@ -103,10 +104,12 @@ export const objectCommands: McpCommands = {
     }
     // Applied either way; a script that does not compile is said so here.
     const added = scriptWarnings(landed ? [landed] : [node]);
+    const axes = jointAxisWarnings(landed ? [landed] : [node]);
     return {
       ok: !addError && !!landed,
       ...(addError ? { error: addError } : {}),
       ...(added.length ? { scriptWarnings: added } : {}),
+      ...(axes.length ? { warnings: axes } : {}),
       id: node.id,
       name: landed?.name ?? node.name,
       ...(parent ? { parent: parent.id } : {}),
@@ -268,9 +271,13 @@ export const objectCommands: McpCommands = {
     const error = useStore.getState().lastCompileError;
     // A script is applied even when it does not compile; the reply says so.
     const scriptError = typeof rawUpdates.script === 'string' ? scriptSyntaxError(rawUpdates.script) : null;
+    // Only when the joints were sent: a body already warned about is not warned again on every edit.
+    const updated = Array.isArray(rawUpdates.joints) ? findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) : null;
+    const axes = updated ? jointAxisWarnings([{ ...updated, children: [] }]) : [];
     // Says what was taken, so a caller can see its whole update landed.
     return {
       ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}),
+      ...(axes.length ? { warnings: axes } : {}),
       ...(scriptError ? { scriptWarnings: [`Script on '${target.name || targetId}' does not compile: ${scriptError}. It was saved as written and will do nothing until fixed.`] } : {}),
     };
   },

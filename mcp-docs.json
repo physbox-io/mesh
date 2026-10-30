@@ -448,8 +448,8 @@
     },
     "jointTypes": {
       "free": "6-DOF unconstrained; body falls freely under gravity. Use for dropped objects.",
-      "hinge": "1-DOF rotation around axis. Specify axis:[x,y,z]. Use for wheels, doors, pendulums. For a bearing, lid or arm that should hold its angle, set frictionloss (dry friction, N*m); damping alone only slows it.",
-      "slide": "1-DOF translation along axis. Specify axis:[x,y,z]. Use for pistons, rails. For a slide that should hold its place, set frictionloss (dry friction, N).",
+      "hinge": "1-DOF rotation around axis. Specify axis:[x,y,z]; left out, it is the body's own Z (MuJoCo's default), and the build or update reply carries a warning naming the joint. Use for wheels, doors, pendulums. For a bearing, lid or arm that should hold its angle, set frictionloss (dry friction, N*m); damping alone only slows it.",
+      "slide": "1-DOF translation along axis. Specify axis:[x,y,z]; left out, it is the body's own Z, with a warning as for a hinge. Use for pistons, rails. For a slide that should hold its place, set frictionloss (dry friction, N).",
       "ball": "3-DOF rotation (ball-and-socket). Use with stiffness+damping for springs, sway, or frictionloss for a joint that holds its pose."
     },
     "geomFields": {

@@ -35,12 +35,22 @@ import {
 import { fillBodyDefaults } from './bodyDefaults';
 import { settleScene } from './settleScene';
 import { scriptWarnings } from '../../utils/scriptCheck';
+import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import type { McpCommands } from './types';
 
-/** A scene reply, plus a warning for each script that does not compile (applied all the same). */
-const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R & { scriptWarnings?: string[] } => {
+/**
+ * A scene reply, plus a warning for each script that does not compile (applied
+ * all the same) and each hinge or slide left on MuJoCo's default axis.
+ */
+const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R & { scriptWarnings?: string[]; warnings?: string[] } => {
   const warnings = scriptWarnings(nodes);
-  return warnings.length ? { ...result, scriptWarnings: warnings } : result;
+  const axes = jointAxisWarnings(nodes);
+  const prior = (result as { warnings?: unknown }).warnings;
+  return {
+    ...result,
+    ...(warnings.length ? { scriptWarnings: warnings } : {}),
+    ...(axes.length ? { warnings: [...(Array.isArray(prior) ? prior : []), ...axes] } : {}),
+  };
 };
 
 export const sceneCommands: McpCommands = {
