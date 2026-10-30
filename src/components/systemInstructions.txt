@@ -121,7 +121,7 @@ Every geom represents a collision and visual shape attached to a body:
       * "wedge": size [half_x, half_y, half_z] (right-triangular prism / ramp)
       * "torus": size [major_radius, tube_radius] (or `majorRadius`, `tubeRadius`). A ring wraps round its hole, so at ordinary proportions it collides as automatic convex pieces (see 9a), weighed by its true volume
       * "tube" (alias "pipe"): size [outer_radius, inner_radius, half_height]
-      * "extrude" (alias "prism"): `polygon: [[x, y], ...]` (2D outline in metres), optional `holes: [[[x, y], ...]]`, `height` (metres)
+      * "extrude" (alias "prism"): `polygon: [[x, y], ...]` (2D outline in metres), optional `holes: [[[x, y], ...]]`, `height` (metres) or `size: [half_height]` (with neither it is 0.1 m tall)
       * "lathe" (alias "revolve"): `profile: [[r, z], ...]` (2D profile in metres revolved around Z), optional `segments`
     - Custom mesh: "mesh" with `verticesZUp: [x0, y0, z0, ...]` (Z-up metres, preferred) + `faces: [i0, j0, k0, ...]`
   size: array of numbers defining dimensions:

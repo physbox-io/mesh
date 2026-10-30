@@ -657,6 +657,28 @@ export function generateLatheMeshData(
   return { vertices, faces, renderVertices };
 }
 
+/** Half-extents of a flat vertex array, each floored at 5 mm; null when empty. */
+function boundingHalfExtents(rv: number[]): [number, number, number] | null {
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i + 2 < rv.length; i += 3) {
+    const x = rv[i], y = rv[i + 1], z = rv[i + 2];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  if (!isFinite(minX)) return null;
+  return [
+    Math.max(0.005, (maxX - minX) / 2),
+    Math.max(0.005, (maxY - minY) / 2),
+    Math.max(0.005, (maxZ - minZ) / 2),
+  ];
+}
+
 export const PARAMETRIC_MESH_TYPES = new Set([
   'cone',
   'pyramid',
@@ -734,9 +756,20 @@ export function normalizeMeshGeomData<T extends Record<string, any>>(geom: T): T
     const segs = Number(g.segments ?? 24) || 24;
     generated = generateTubeMeshData(Math.min(innerRadius, outerRadius * 0.98), outerRadius, height, segs);
   } else if (rawType === 'extrude' || rawType === 'prism' || ((rawType === 'mesh' || !rawType) && hasPolygon)) {
-    const h = Number(g.height ?? (g.size?.[2] != null ? g.size[2] * 2 : 0.1)) || 0.1;
+    // `height`, or `size: [halfHeight]` as the schema documents it, or the
+    // half-extents a normalised extrude carries ([hx, hy, hz]) when it comes
+    // round again. Reading only size[2] made a one-number size a silent 100 mm.
+    const s = Array.isArray(g.size) ? g.size : [];
+    const halfHeight = s.length === 1 ? s[0] : s[2];
+    const h = Number(g.height ?? (halfHeight != null ? halfHeight * 2 : 0.1)) || 0.1;
     const centered = g.centered !== false;
     generated = generateExtrudedPolygonMeshData(g.polygon || [[-0.1, -0.1], [0.1, -0.1], [0, 0.1]], h, centered, g.holes);
+    // The geom keeps its polygon, so an update normalises it again and builds
+    // it again from size[2]. The bounding size below floors each half-extent
+    // at 5 mm, which turned an 8 mm gear into a 10 mm one on its next update,
+    // so the height it was built at goes into size exactly.
+    const extents = s.length !== 3 ? boundingHalfExtents(generated.renderVertices) : null;
+    if (extents) g.size = [extents[0], extents[1], h / 2];
   } else if (rawType === 'lathe' || rawType === 'revolve' || ((rawType === 'mesh' || !rawType) && hasProfile)) {
     const segs = Number(g.segments ?? 24) || 24;
     generated = generateLatheMeshData(g.profile || [[0.1, 0], [0.1, 0.2]], segs);
@@ -808,25 +841,8 @@ export function normalizeMeshGeomData<T extends Record<string, any>>(geom: T): T
     // Populate bounding half-extents in g.size when not explicitly provided
     if (!Array.isArray(g.size) || g.size.length < 3) {
       const rv = Array.isArray(g.renderVertices) && g.renderVertices.length >= 9 ? g.renderVertices : g.vertices;
-      let minX = Infinity, maxX = -Infinity;
-      let minY = Infinity, maxY = -Infinity;
-      let minZ = Infinity, maxZ = -Infinity;
-      for (let i = 0; i + 2 < rv.length; i += 3) {
-        const x = rv[i], y = rv[i + 1], z = rv[i + 2];
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        if (z < minZ) minZ = z;
-        if (z > maxZ) maxZ = z;
-      }
-      if (isFinite(minX)) {
-        g.size = [
-          Math.max(0.005, (maxX - minX) / 2),
-          Math.max(0.005, (maxY - minY) / 2),
-          Math.max(0.005, (maxZ - minZ) / 2),
-        ];
-      }
+      const half = boundingHalfExtents(rv);
+      if (half) g.size = half;
     }
   }
   return geom;

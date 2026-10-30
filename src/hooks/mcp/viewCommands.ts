@@ -554,7 +554,7 @@ export const viewCommands: McpCommands = {
         wedge:     '[hx, hy, hz] (or `width`, `depth`, `height` in metres) — right-triangular prism / ramp mesh',
         torus:     '[majorRadius, tubeRadius] (or `majorRadius`, `tubeRadius` in metres) — watertight torus ring in XY plane around Z axis',
         tube:      '[outerRadius, innerRadius, halfHeight] (or `outerRadius`, `innerRadius`, `height` in metres; alias `pipe` / `hollow_cylinder`) — hollow cylinder / pipe mesh',
-        extrude:   '2D polygon prism (alias `prism`): provide `polygon: [[x,y], ...]` in metres, optional `holes: [[[x,y], ...]]`, and `height` in metres (or `size: [halfHeight]`). Centered on Z by default (`centered: false` spans z=0..height).',
+        extrude:   '2D polygon prism (alias `prism`): provide `polygon: [[x,y], ...]` in metres, optional `holes: [[[x,y], ...]]`, and `height` in metres (or `size: [halfHeight]`; with neither it is 0.1 m tall). Centered on Z by default (`centered: false` spans z=0..height).',
         lathe:     'revolved 2D profile around Z axis (alias `revolve`): provide `profile: [[r,z], ...]` in metres and optional `segments` (default 24).',
         mesh:      'arbitrary triangle mesh via `verticesZUp` (preferred, Z-up metres) or `vertices` (Three.js Y-up metres) + `faces`. Defaults to `dynamic: true` so body `pos`/`euler`/`quat` and geom `pos`/`euler`/`quat` always position the mesh in Z-up space.',
       },
