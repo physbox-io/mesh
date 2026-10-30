@@ -7,6 +7,7 @@ import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
 import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
+import { geomSizeProblem } from './geomSize';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
@@ -47,7 +48,16 @@ const getCachedWedgeMeshData = (w: number, d: number, h: number) => {
   return cached;
 };
 
-const formatGeomSize = (type: string, rawSize: unknown): string => {
+const formatGeomSize = (type: string, rawSize: unknown, geom?: SceneGeom): string => {
+  // A size given but unusable (negative, zero, text) is an error, named, not a
+  // silent 0.1 m: a negative box used to come out 200 mm and 0.32 kg. The MCP
+  // and the store refuse one on the way in (utils/geomSize); this catches a
+  // document that already held one. Only a size left out, or a data-less mesh
+  // standing in as a box, takes the default below.
+  if (geom) {
+    const problem = geomSizeProblem({ ...geom, type });
+    if (problem) throw new Error(problem);
+  }
   const arr = Array.isArray(rawSize)
     ? rawSize.map((v: unknown) => (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1)
     : [0.1, 0.1, 0.1];
@@ -193,7 +203,7 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
 
   let attrs = `name="${xmlAttr(geom.name)}" type="${geomType}"`;
   if (!isMesh) {
-    attrs += ` size="${formatGeomSize(geomType, geom.size)}"`;
+    attrs += ` size="${formatGeomSize(geomType, geom.size, geom.type === 'mesh' ? undefined : geom)}"`;
   } else {
     attrs += ` mesh="${xmlAttr(geom.name)}"`;
   }

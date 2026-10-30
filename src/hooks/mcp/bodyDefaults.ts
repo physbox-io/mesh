@@ -25,6 +25,7 @@ import { generatedMeshMass } from '../../utils/generatedMeshMass';
 import { pointList, toRenderVertices } from './bridgeUtils';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 import { latticeBodyPos } from '../../utils/latticeFrame';
+import { geomSizeProblem } from '../../utils/geomSize';
 
 export interface PendingDeclarativeOps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -56,6 +57,9 @@ export const normalizeRgba = (
 
 export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
   const g: RawGeom = { ...rawG };
+  // Refused, not repaired: a negative or text size used to compile as 0.1 m.
+  const sizeProblem = geomSizeProblem({ ...g, name: g.name ?? `${bodyName}_geom_${idx}` }, bodyName);
+  if (sizeProblem) throw new Error(sizeProblem);
   normalizeMeshGeomData(g);
   const isMesh = (g.type ?? 'box') === 'mesh';
   const dynamic = g.dynamic !== undefined ? g.dynamic : (isMesh ? true : (bodyIsJointed ? undefined : undefined));

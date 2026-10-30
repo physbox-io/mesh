@@ -198,6 +198,7 @@
       "mesh"
     ],
     "geomSizes": {
+      "rule": "Every size entry a shape reads must be a positive number in metres (a plane's may be 0, meaning infinite). A negative, zero, NaN or text entry is refused with an error naming the geom and the entry, and nothing is changed; it is never replaced with a default. A size left out entirely takes the default.",
       "box": "half-extents [hx, hy, hz]. Full dimensions are 2*hx × 2*hy × 2*hz",
       "sphere": "radius [r]",
       "capsule": "[radius, half-height]: a cylinder of half-height hh capped with hemispheres of radius r. Or use fromto to specify endpoints directly. ALWAYS supply both elements (or fromto): a 1-element [radius] does not error, it silently falls back to half-height = radius and collapses the geom into a tiny stub pill at its pos.",

@@ -11,6 +11,7 @@ import { generateGearGeoms } from '../presets/presetScenes';
 import { cloneSceneGraph, findNode } from './sceneClone';
 import { dropStaleColliders, rebuildAfterGeomEdit } from './geomEdits';
 import type { SliceDeps } from './sliceDeps';
+import { assertGeomSizes } from '../utils/geomSize';
 
 export interface GeomActions {
   updateNodeGeom: (id: string, updates: Partial<SceneGeom>, geomIndex?: number) => void;
@@ -51,6 +52,7 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
           if (node.id === id && node.geoms?.length > 0) {
             if (id.includes('gear')) {
               const centerGeom = node.geoms[0];
+              assertGeomSizes([{ ...centerGeom, ...updates }], node.name);
               const currentRadius = centerGeom.size[0];
               const currentTeeth = node.geoms.length - 1;
               const currentColor = centerGeom.rgba || [0.5, 0.5, 0.5, 1];
@@ -104,6 +106,9 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
                 }
               }
               const boundsBefore = structural && node.edgeRounds ? sourcePositiveBounds(node) : null;
+              // Refused before anything is written: a bad size is an error
+              // to the caller, never a 0.1 m default (utils/geomSize).
+              assertGeomSizes([{ ...targetGeom, ...updates }], node.name);
               Object.assign(targetGeom, updates);
               if (updates.vertices || updates.faces || updates.renderVertices) dropStaleColliders(node);
               // Rounded edges are stored as points, so they move with the shape.
