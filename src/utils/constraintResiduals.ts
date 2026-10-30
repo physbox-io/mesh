@@ -13,6 +13,13 @@
  * three position rows for a connect, three more for a weld's rotation, one for
  * a joint or tendon coupling. Only typed-array views are read per tick; no
  * embind vector is copied onto the heap. Worker-safe: no store, no DOM.
+ *
+ * The same rows' `efc_force` says what each constraint carries: a pin's or
+ * weld's force at its anchor in N, a coupling's in its first joint's units
+ * (N on a slide, N·m on a hinge) - a rope or pulley coupling's tension. Read
+ * in the same pass, so it costs nothing extra. A weld's moment is not given:
+ * its rotation rows are a quaternion error's, scaled by torquescale and by
+ * the error's own Jacobian, and are no torque in N·m without that Jacobian.
  */
 
 // MuJoCo enum values (mjtEq, mjtConstraint, mjtJoint, mjtObj).
@@ -51,6 +58,14 @@ export interface ConstraintResidual {
   finalDeg?: number;
   /** Simulated time of the worst error. */
   worstAtS: number;
+  /**
+   * What it carried: the largest over the run and at the end. A pin's or
+   * weld's force is in N; a coupling's is in its first joint's units,
+   * `forceUnit` (N for a slide, N*m for a hinge).
+   */
+  peakForce?: number;
+  finalForce?: number;
+  forceUnit?: 'N' | 'N*m';
   /** Switched off by the end of the run: it broke, which is reported as a break. */
   broke?: boolean;
 }
@@ -84,6 +99,8 @@ type Data = any;
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 const round = (v: number, places = 1) => Math.round(v * 10 ** places) / 10 ** places;
+/** Four significant figures. */
+const sig = (v: number) => (v === 0 ? 0 : +v.toPrecision(4));
 
 interface EqTrack {
   name: string;
@@ -98,6 +115,8 @@ interface EqTrack {
   worstAt: number;
   finalPos: number;
   finalRot: number;
+  peakForce: number;
+  finalForce: number;
   seen: boolean;
   index: number;
 }
@@ -139,7 +158,8 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
     const track: EqTrack = {
       name: name(OBJ_EQUALITY, i, `equality ${i}`),
       kind, bodies: [], linear: true, torquescale: 1,
-      worstPos: 0, worstRot: 0, worstAt: 0, finalPos: 0, finalRot: 0, seen: false, index: i,
+      worstPos: 0, worstRot: 0, worstAt: 0, finalPos: 0, finalRot: 0,
+      peakForce: 0, finalForce: 0, seen: false, index: i,
     };
     if (kind === 'connect' || kind === 'weld') {
       track.bodies = [bodyName(obj1[i]), bodyName(obj2[i])];
@@ -149,6 +169,12 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
       track.joints = [name(OBJ_JOINT, j1, `joint ${j1}`), ...(j2 >= 0 ? [name(OBJ_JOINT, j2, `joint ${j2}`)] : [])];
       track.bodies = [bodyName(jntBody[j1]), ...(j2 >= 0 ? [bodyName(jntBody[j2])] : [])];
       track.linear = jntType[j1] === JNT_SLIDE;
+    } else if (kind === 'tendon') {
+      // A fixed tendon's first joint sets the units its force is in.
+      try {
+        const j1 = model.wrap_objid[model.tendon_adr[obj1[i]]];
+        if (j1 >= 0 && jntType) track.linear = jntType[j1] === JNT_SLIDE;
+      } catch { /* units stay N */ }
     }
     eqs.push(track);
   }
@@ -173,6 +199,7 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
   // Squared sums per equality for the tick being read; reused, never reallocated.
   const posSq = new Float64Array(neq);
   const rotSq = new Float64Array(neq);
+  const forceSq = new Float64Array(neq);
   const rows = new Int32Array(neq);
 
   /** Read one tick's residuals and positions. Call after mj_step. */
@@ -181,18 +208,19 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
     if (neq) {
       const ne: number = data.ne ?? 0;
       if (ne > 0) {
-        posSq.fill(0); rotSq.fill(0); rows.fill(0);
-        const pos = data.efc_pos, type = data.efc_type, id = data.efc_id;
+        posSq.fill(0); rotSq.fill(0); forceSq.fill(0); rows.fill(0);
+        const pos = data.efc_pos, type = data.efc_type, id = data.efc_id, force = data.efc_force;
         for (let r = 0; r < ne; r++) {
           if (type[r] !== CNSTR_EQUALITY) continue;
           const e = id[r];
           if (e < 0 || e >= neq) continue;
           const k = rows[e]++;
           const v = pos[r];
+          const f = force[r];
           // A weld's rows 3..5 are its rotation, the rest are positions (or a
           // coupling's single row, in the units of its first joint).
           if (eqs[e].kind === 'weld' && k >= 3) rotSq[e] += v * v;
-          else posSq[e] += v * v;
+          else { posSq[e] += v * v; forceSq[e] += f * f; }
         }
         for (let e = 0; e < neq; e++) {
           if (rows[e] === 0) continue;
@@ -207,6 +235,8 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
           t.seen = true;
           t.finalPos = posErr;
           t.finalRot = rotErr;
+          t.finalForce = Math.sqrt(forceSq[e]);
+          if (t.finalForce > t.peakForce) t.peakForce = t.finalForce;
           // Judged against the warning thresholds, so a weld's millimetre and
           // its degree are weighed alike when picking the worst moment.
           const now = Math.max(posErr / RESIDUAL_WARN_MM, rotErr / RESIDUAL_WARN_DEG);
@@ -243,6 +273,8 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
           ...(usesMm ? { worstMm: round(t.worstPos, 2), finalMm: round(t.finalPos, 2) } : {}),
           ...(usesDeg ? { worstDeg: round(t.worstRot, 2), finalDeg: round(t.finalRot, 2) } : {}),
           worstAtS: round(t.worstAt, 3),
+          peakForce: sig(t.peakForce), finalForce: sig(t.finalForce),
+          forceUnit: (t.kind === 'joint' || t.kind === 'tendon') && !t.linear ? 'N*m' as const : 'N' as const,
           ...(broke ? { broke: true } : {}),
         };
       })
@@ -312,6 +344,8 @@ export function mergeConstraintReports(reports: ConstraintReport[]): ConstraintR
         ...(worse.worstMm !== undefined ? { worstMm: worse.worstMm } : {}),
         ...(worse.worstDeg !== undefined ? { worstDeg: worse.worstDeg } : {}),
         worstAtS: worse.worstAtS,
+        ...(was.peakForce !== undefined || c.peakForce !== undefined
+          ? { peakForce: Math.max(was.peakForce ?? 0, c.peakForce ?? 0) } : {}),
         ...(was.broke || c.broke ? { broke: true } : {}),
       });
     }
