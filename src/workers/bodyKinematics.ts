@@ -55,3 +55,24 @@ export function worldToBodyFrame(xmat: ArrayLike<number>, b: number, w: ArrayLik
     xmat[m + 2] * w[0] + xmat[m + 5] * w[1] + xmat[m + 8] * w[2],
   ];
 }
+
+/**
+ * Bring a just-stepped MjData's derived quantities up to its state.
+ *
+ * mj_step computes xpos, xquat, cvel and the rest from the state at the START
+ * of the step, then integrates qpos/qvel past them, so after it the bodies
+ * lagged the joints by a step within one frame (vz by g·dt, pos by v·dt).
+ * Running the position and velocity kinematics again makes a frame one
+ * instant. The next mj_step recomputes all of it from qpos/qvel, so the
+ * physics is unchanged; contacts and constraint forces stay those the step
+ * was solved with.
+ */
+export function syncKinematics<M, D>(
+  mj: { mj_kinematics(m: M, d: D): void; mj_comPos(m: M, d: D): void; mj_comVel(m: M, d: D): void },
+  model: M,
+  data: D,
+): void {
+  mj.mj_kinematics(model, data);
+  mj.mj_comPos(model, data);
+  mj.mj_comVel(model, data);
+}

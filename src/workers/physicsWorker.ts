@@ -61,7 +61,7 @@ import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
 import { createConstraintMonitor, mergeConstraintReports, type ConstraintReport } from '../utils/constraintResiduals';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
-import { bodyAngularVelocity, bodyPointVelocity, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
+import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -1427,6 +1427,8 @@ const stepOnce = (stepSize: number): boolean => {
       isPlaying = false;
       return false;
     }
+    // Bodies to the instant the joints are at, for everything read from here on.
+    syncKinematics(mujoco, model, data);
     checkConstraintBreaks();
     checkImpacts(stepSize);
     stepCount++;
@@ -2160,6 +2162,7 @@ const runHeadless = async (
         applyFreeJointDamping(sceneGraph.nodes);
         wakeBodies();
         mujoco!.mj_step(model!, data!);
+        syncKinematics(mujoco!, model!, data!);
         checkConstraintBreaks();
         checkImpacts(timestep);
         constraints.sample(data!);
