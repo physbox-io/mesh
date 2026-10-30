@@ -26,6 +26,7 @@ import { getLiveDimensions } from '../../utils/liveDimensions';
 import { belowFloor, boundsOverlaps, contactOverlaps, DEFAULT_OVERLAP_TOLERANCE } from '../../utils/collisionCheck';
 import { bodyWorldPositions, walkBodiesWorld } from '../../utils/bodyWorld';
 import { objectReply } from '../../utils/objectReply';
+import { meshPage } from '../../utils/meshPage';
 import { initialContacts } from '../initialContacts';
 import {
   isFabricationScene, staleBodies, stockReport, summarizeNode,
@@ -258,7 +259,21 @@ export const viewCommands: McpCommands = {
     // Every O-ring groove on it, checked against what is round it now.
     const grooves = [...new Set((found.geoms || []).filter((g) => g.hardware?.part === 'groove').map((g) => g.hardware!.group))];
     const sealChecks = grooves.map((group) => ({ group, ...sealCheckFor(store.sceneGraph, found.id, group) }));
-    return { ...objectReply(found, { full: msg.full === true, world }), ...(sealChecks.length ? { sealChecks } : {}) };
+    // One geom's triangles, a page at a time, when asked for (utils/meshPage.ts).
+    const wantsMesh = typeof msg.geom === 'string' || typeof msg.offset === 'number' || typeof msg.limit === 'number';
+    const page = wantsMesh
+      ? meshPage(store.sceneGraph.nodes, found.id, {
+          geom: typeof msg.geom === 'string' ? msg.geom : undefined,
+          offset: typeof msg.offset === 'number' ? msg.offset : undefined,
+          limit: typeof msg.limit === 'number' ? msg.limit : undefined,
+        })
+      : null;
+    if (page && 'error' in page) throw new Error(page.error);
+    return {
+      ...objectReply(found, { full: msg.full === true, world }),
+      ...(sealChecks.length ? { sealChecks } : {}),
+      ...(page ? { meshPage: page } : {}),
+    };
   },
   MEASURE: async (msg, { store }) => {
     const { from, to, corner, snap, withinMm } = msg;

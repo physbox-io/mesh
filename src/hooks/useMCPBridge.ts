@@ -10,6 +10,7 @@ import { useStore } from '../store/useStore';
 import { createMeshMachineHandlers, setCurrentScene } from '../utils/machineMcp';
 import type { SceneNode } from '../types/scene';
 import { findNodeInScene } from './mcp/bridgeUtils';
+import { encodeReply } from './mcp/replySize';
 import type { McpCommands } from './mcp/types';
 import { sculptCommands } from './mcp/sculptCommands';
 import { latticeCommands } from './mcp/latticeCommands';
@@ -130,7 +131,7 @@ export function useMCPBridge() {
           return;
         }
         Promise.resolve(result)
-          .then(data => ws?.send(JSON.stringify({ event: 'RESULT', cmd, id, data })))
+          .then(data => ws?.send(encodeReply(cmd, id, data)))
           .catch(e  => ws?.send(JSON.stringify({ event: 'ERROR', cmd, id, error: String(e) })))
           .finally(done);
       };
