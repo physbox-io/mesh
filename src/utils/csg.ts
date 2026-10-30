@@ -2510,9 +2510,12 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   if (requested === 'auto' || requested === 'decompose') {
     const holeAxis = detectHoleAxis(node);
     if (!holeAxis) {
-      warning = requested === 'decompose'
-        ? 'No hole axis found (the negative shape is not elongated in any direction) — colliding as the source primitives instead.'
-        : undefined;
+      // Said as it is: a body with no negative shape at all (a threaded rod)
+      // was told its negative shape was not elongated.
+      warning = requested !== 'decompose' ? undefined
+        : csgSourceGeoms(node).some(isNegative)
+          ? 'No hole axis found (the negative shape is not elongated in any direction) — colliding as the source primitives instead.'
+          : "'decompose' slices a body around a hole, and this body has no negative shape (no csg 'difference' geom) — colliding as the source primitives instead. Use collision 'auto' or 'hull' for a solid part.";
     } else {
       const sectors = node.csgSectors ?? CSG_DEFAULT_SECTORS;
       // Slice in the SAME frame the visual mesh uses, so collider positions
