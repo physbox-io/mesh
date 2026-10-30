@@ -17,7 +17,15 @@ import { ropeLayout } from './pulleyRope';
 export interface WorldPose { pos: [number, number, number]; quat: QuatWXYZ; size: number[] }
 
 /** q(joint1) = ratio · q(joint2). */
-export interface PlannedCoupling { name: string; joint1: string; joint2: string; ratio: number | string }
+export interface PlannedCoupling {
+  name: string; joint1: string; joint2: string; ratio: number | string;
+  /**
+   * The two bodies still collide. Meshing gears and a nut on its screw
+   * overlap where they couple, so they do not; a rope's ends hang apart, and
+   * two weights that swing into each other should hit.
+   */
+  keepContact?: boolean;
+}
 
 export interface CouplingPlan {
   couplings: PlannedCoupling[];
@@ -172,11 +180,11 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
     const { layout, problems } = ropeLayout(rope, byId, world);
     warnings.push(...problems);
     if (layout) {
-      couplings.push({ name: `rope_coupling_linear_${ropeCouplingIndex}`, joint1: layout.left.jointName, joint2: layout.right.jointName, ratio: +layout.linearRatio.toPrecision(9) });
+      couplings.push({ name: `rope_coupling_linear_${ropeCouplingIndex}`, joint1: layout.left.jointName, joint2: layout.right.jointName, ratio: +layout.linearRatio.toPrecision(9), keepContact: true });
       // Rope taken up on the left per metre of the left end's travel.
       const takenUp = layout.left.strands * layout.left.sign;
       if (layout.wheel) {
-        couplings.push({ name: `rope_coupling_angular_${ropeCouplingIndex}`, joint1: layout.wheel.jointName, joint2: layout.left.jointName, ratio: +(layout.wheel.turnsPerMetre * takenUp).toPrecision(9) });
+        couplings.push({ name: `rope_coupling_angular_${ropeCouplingIndex}`, joint1: layout.wheel.jointName, joint2: layout.left.jointName, ratio: +(layout.wheel.turnsPerMetre * takenUp).toPrecision(9), keepContact: true });
       }
     }
     ropeCouplingIndex++;

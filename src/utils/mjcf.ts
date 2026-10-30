@@ -830,7 +830,7 @@ export const compileToMJCF = (
     linkedKeys.add(key);
     linkedBodies.push([a, b]);
   };
-  for (const e of couplingEdges) link(jointsByName.get(e.joint1)?.node.name, jointsByName.get(e.joint2)?.node.name);
+  for (const c of plan.couplings) if (!c.keepContact) link(jointsByName.get(c.joint1)?.node.name, jointsByName.get(c.joint2)?.node.name);
   for (const c of connectConstraintsList) if (c.targetId in nodeNamesMap) link(c.bodyName, nodeNamesMap[c.targetId]);
 
   // Dry friction on a coupled joint goes where the chain feels it. The nodes
