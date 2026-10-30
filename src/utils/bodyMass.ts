@@ -14,12 +14,13 @@
 //   so the centre of mass, is what their own weights say it is.
 //
 // A concave mesh body that collides as convex pieces (convexDecomposition.ts)
-// is weighed through its pieces. Each piece already carries a mass worked out
-// from its mesh's TRUE volume (shared over the pieces by hull volume) at the
-// mesh's density, 1000 unless it said otherwise. So a body density rescales
-// the pieces of a mesh that stated neither, and a body mass scales every piece
-// with everything else: the pieces' share follows the solid's true volume and
-// the centre of mass stays the solid's.
+// carries a mass worked out from its mesh's TRUE volume at the mesh's density,
+// 1000 unless it said otherwise. Where MuJoCo can weigh the mesh exactly,
+// resolveCsgGeoms keeps it in the model out of contact (role 'visual') holding
+// all of that mass and the pieces weigh nothing; otherwise the pieces hold it,
+// shared by hull volume. Either way a body density rescales whatever holds the
+// mass of a mesh that stated neither, and a body mass scales it with
+// everything else, so the centre of mass stays the solid's.
 //
 // A boolean body (csgEnabled, csgMass) is left to its own mass path in csg.ts,
 // and a stated collisionMass to convexDecomposition.ts.
@@ -30,8 +31,17 @@ import { primitiveVolume } from './geomMassDisplay';
 
 const positive = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
 
-/** Geoms MuJoCo weighs: not cutters, not decoration, not a pin's zero-mass socket. */
-const weighs = (g: SceneGeom) => g.csg !== 'difference' && g.csg !== 'intersection' && g.role !== 'visual';
+/**
+ * Geoms MuJoCo weighs: not cutters, not a pin's zero-mass socket, and not
+ * decoration, unless it was given a mass to carry (mjcf.ts emits a stated
+ * mass on a visual geom; a decomposed mesh's mass carrier is one).
+ */
+const weighs = (g: SceneGeom) => g.csg !== 'difference' && g.csg !== 'intersection'
+  && (g.role !== 'visual' || positive(g.mass));
+
+/** A decomposed mesh kept out of contact to carry its pieces' mass (resolveCsgGeoms). */
+const carriesPieceMass = (g: SceneGeom, authored: SceneGeom[]) => g.type === 'mesh' && g.role === 'visual'
+  && positive(g.mass) && authored.some((a) => a.name === g.name && a.type === 'mesh' && a.role !== 'visual' && !a.csgDerived);
 
 /** Whether the body's own mass or density belongs to another path. */
 function handledElsewhere(node: SceneNode): boolean {
@@ -64,10 +74,10 @@ export function applyBodyMass(
 
   let out = geoms.map((g) => {
     if (!weighs(g) || !positive(density)) return g;
-    if (g.csgDerived === 'collider') {
+    if (g.csgDerived === 'collider' || carriesPieceMass(g, authored)) {
       // Weighed at its mesh's density when it was cut; at the body's now,
       // unless the mesh said otherwise.
-      const src = sourceOf(g, authored);
+      const src = g.csgDerived === 'collider' ? sourceOf(g, authored) : authored.find((a) => a.name === g.name);
       if (typeof g.mass !== 'number' || src?.mass !== undefined || src?.density !== undefined) return g;
       return { ...g, mass: +(g.mass * (density / 1000)).toPrecision(10) };
     }
