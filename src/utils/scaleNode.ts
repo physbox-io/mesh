@@ -23,6 +23,11 @@ import { geomBounds, reconcileCuts } from './csg';
  * along its own Z, and a sphere has neither.
  */
 export function scaledSize(type: string | undefined, size: number[], sx: number, sy: number, sz: number): number[] {
+  // A primitive is symmetric about its own axes, so a mirror leaves its size
+  // as it was (its position is mirrored on its own). Negative half-extents
+  // reached the model as MuJoCo's 0.1 m fallback, and a sphere mirrored in
+  // one axis shrank to a third.
+  [sx, sy, sz] = [Math.abs(sx), Math.abs(sy), Math.abs(sz)];
   const mean = (sx + sy + sz) / 3;
   // A radius lies in the XY plane whatever else is happening, so the two
   // lateral factors are the ones that can change it.

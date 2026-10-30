@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import type { SceneNode, SceneGeom } from '../types/scene';
 import type { WorkingNode } from './sceneClone';
+import { denseFingerprintOf } from '../utils/denseMesh';
 
 // Returns true if every geom on a node is a mesh (so pos/euler are meaningless for rendering)
 export const isAllMeshNode = (node: SceneNode) =>
@@ -106,11 +107,59 @@ export const mapVerts = (v: number[], fn: (x: number, y: number, z: number) => [
   return v;
 };
 
+// ---------------------------------------------------------------------------
+// The collider a mesh collides as (colliderVertices: a Split for Print
+// section's plain copy, a dense import's simplified one) is in the Z-up space
+// of renderVertices, and has to go wherever the drawn mesh goes. Every
+// transform below is linear, so the same map is right for any collider; a map
+// that mirrors (negative determinant) turns triangles inside out, so the
+// collider's winding is reversed to keep it facing outward.
+//
+// A dense collider is marked with the fingerprint of the mesh it was made from
+// (denseColliderOf), and the store rebuilds it when the mesh no longer matches
+// (store/denseColliders). One that matched before the transform matches after
+// it, so it is re-marked rather than rebuilt; one that was already stale stays
+// stale and is rebuilt.
+// ---------------------------------------------------------------------------
+
+/** Whether a geom's dense collider (if it has one) was made from its mesh as it is now. */
+const denseFresh = (g: SceneGeom) => !g.denseColliderOf || g.denseColliderOf === denseFingerprintOf(g);
+
+/** Re-marks a dense collider as made from the mesh as it now is, when it moved with it. */
+const remarkDense = (g: SceneGeom, wasFresh: boolean) => {
+  if (g.denseColliderOf && wasFresh) g.denseColliderOf = denseFingerprintOf(g) ?? g.denseColliderOf;
+};
+
+/** A collider's vertices carried through a Z-up map, wound outward again after a mirror. */
+const carryCollider = (g: SceneGeom, fn: (x: number, y: number, z: number) => [number, number, number], det = 1) => {
+  if (!g.colliderVertices?.length) return;
+  g.colliderVertices = mapVerts([...g.colliderVertices], fn);
+  if (det < 0 && g.colliderFaces) g.colliderFaces = flipWinding(g.colliderFaces);
+};
+
+/** The same triangles wound the other way: two corners of each swapped. */
+function flipWinding(faces: number[]): number[] {
+  const f = [...faces];
+  for (let i = 0; i < f.length; i += 3) [f[i + 1], f[i + 2]] = [f[i + 2], f[i + 1]];
+  return f;
+}
+
+/** Y-up mean of a vertex array, as a Z-up point. */
+const zUpCentroid = (v: number[]): [number, number, number] => {
+  let cx = 0, cy = 0, cz = 0;
+  const n = v.length / 3;
+  for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i + 1]; cz += v[i + 2]; }
+  return [cx / n, -cz / n, cy / n];
+};
+
 // Translate static mesh geom vertices (Y-up world space)
 export const translateMeshGeoms = (node: SceneNode, dx: number, dy: number, dz: number) => {
   for (const g of node.geoms) {
     if (isStaticMesh(g)) {
+      const fresh = denseFresh(g);
       g.vertices = mapVerts([...g.vertices], (x,y,z) => [x+dx, y+dy, z+dz]);
+      carryCollider(g, (x, y, z) => [x + dx, y - dz, z + dy]);
+      remarkDense(g, fresh);
     }
     // Dynamic meshes are positioned via body pos — no vertex transform needed
   }
@@ -140,6 +189,14 @@ export const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, numbe
   const v = new THREE.Vector3();
 
   for (const g of node.geoms) {
+    const fresh = denseFresh(g);
+    // The collider turns from its own base, as the mesh does from its. One met
+    // first after the mesh already has a base (a collider made since the mesh
+    // was last turned) has no unturned copy to start from, so it is left: a
+    // dense one is rebuilt from the turned mesh, being stale.
+    const turnsCollider = !!g.colliderVertices?.length
+      && (!!g.baseColliderVertices || !(g.dynamic ? g.baseRenderVertices : g.baseVertices));
+    if (turnsCollider && !g.baseColliderVertices) g.baseColliderVertices = [...g.colliderVertices!];
     if (g.type === 'mesh' && Array.isArray(g.vertices) && g.vertices.length > 0) {
       if (!g.baseVertices) {
         g.baseVertices = [...g.vertices];
@@ -173,6 +230,14 @@ export const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, numbe
         }
       }
       g.vertices = newVerts;
+      if (turnsCollider && !g.dynamic) {
+        // The Z-up form of the same turn, about the same centre.
+        const [ox, oy, oz] = rotateAroundCOM ? zUpCentroid(baseVerts) : [0, 0, 0];
+        g.colliderVertices = mapVerts([...g.baseColliderVertices!], (x, y, z) => {
+          v.set(x - ox, y - oy, z - oz).applyMatrix4(rotMatZup);
+          return [v.x + ox, v.y + oy, v.z + oz];
+        });
+      }
     }
 
     if (isDynamicMesh(g)) {
@@ -190,7 +255,14 @@ export const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, numbe
         newRender[i + 2] = v.z;
       }
       g.renderVertices = newRender;
+      if (turnsCollider) {
+        g.colliderVertices = mapVerts([...g.baseColliderVertices!], (x, y, z) => {
+          v.set(x, y, z).applyMatrix4(rotMatZup);
+          return [v.x, v.y, v.z];
+        });
+      }
     }
+    if (turnsCollider) remarkDense(g, fresh);
   }
 
   if (node.geoms.some(isDynamicMesh) && node.pos) {
@@ -222,15 +294,27 @@ export const scaleMeshGeoms = (node: Pick<SceneNode, 'geoms'>, sx: number, sy: n
     cx /= n; cy /= n; cz /= n;
     return mapVerts(v, (x,y,z) => [cx+(x-cx)*fx, cy+(y-cy)*fy, cz+(z-cz)*fz]);
   };
+  const det = sx * sy * sz;
   for (const g of node.geoms) {
+    const fresh = denseFresh(g);
     if (isStaticMesh(g)) {
+      // The collider about the same centre, in Z-up.
+      const [ox, oy, oz] = zUpCentroid(g.vertices);
+      carryCollider(g, (x, y, z) => [ox + (x - ox) * sx, oy + (y - oy) * sy, oz + (z - oz) * sz], det);
       g.vertices = scaleAboutCentroid(g.vertices as number[], sx, sz, sy);
     }
     if (isDynamicMesh(g)) {
-      // renderVertices are raw Z-up — scale about origin
+      // renderVertices are raw Z-up — scale about origin, and the collider with them
       g.renderVertices = mapVerts([...g.renderVertices], (x,y,z) => [x*sx, y*sy, z*sz]);
+      carryCollider(g, (x, y, z) => [x * sx, y * sy, z * sz], det);
       // Also scale the MuJoCo collision vertices (Y-up world space) about their centroid
       if (g.vertices) g.vertices = scaleAboutCentroid(g.vertices as number[], sx, sz, sy);
     }
+    // A mirror turns every triangle inside out, and a mesh is drawn one-sided
+    // from its winding, so it showed as a half-transparent body (CLAUDE.md §
+    // Traps). Swapping two corners of each triangle keeps the triangles in
+    // their order and on their vertices, so nothing indexed by either moves.
+    if (det < 0 && g.type === 'mesh' && g.faces?.length) g.faces = flipWinding(g.faces);
+    remarkDense(g, fresh);
   }
 };

@@ -23,6 +23,7 @@ export const stripMeshArrays = (node: SceneNode): SceneNode => {
       delete rest.renderVertices;
       delete rest.colliderVertices;
       delete rest.colliderFaces;
+      delete rest.baseColliderVertices;
       // The undeformed copy a dented or reshaped mesh keeps: as big as the mesh.
       delete rest.baseVertices;
       delete rest.baseRenderVertices;

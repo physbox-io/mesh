@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { X, Upload, Sliders, Box, Layers, Check, AlertCircle, Code } from 'lucide-react';
 import { parseSTL, type ParsedSTLResult } from '../utils/stlParser';
+import { colliderCopyOf, denseImportNote, type ColliderCopy } from '../utils/denseMesh';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
@@ -22,6 +23,8 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
   const [fileName, setFileName] = useState<string>('');
   const [scadCode, setScadCode] = useState<string | null>(null);
   const [parsed, setParsed] = useState<ParsedSTLResult | null>(null);
+  // A dense part's simplified copy to collide as (utils/denseMesh.ts).
+  const [collider, setCollider] = useState<ColliderCopy | null>(null);
   const [importMode, setImportMode] = useState<'scad_csg' | 'scad_parametric' | 'scad_raw' | 'mesh' | 'primitive'>('scad_csg');
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -59,10 +62,15 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
     try {
       const buffer = await file.arrayBuffer();
       const result = parseSTL(buffer, { name: file.name.replace(/\.stl$/i, ''), recentre: true });
+      // A dense part goes in as a mesh: its OpenSCAD modes have no code (the
+      // compile runs out of memory), and the mesh collides as a lighter copy.
+      setCollider(result.dense ? await colliderCopyOf(result.renderVertices, result.faces) : null);
+      if (result.dense) setImportMode('mesh');
       setParsed(result);
     } catch (err) {
       setError(`Failed to parse STL file: ${String(err)}`);
       setParsed(null);
+      setCollider(null);
     } finally {
       setIsProcessing(false);
     }
@@ -214,6 +222,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
           vertices: parsed.vertices,
           faces: parsed.faces,
           renderVertices: parsed.renderVertices,
+          ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces, denseColliderOf: collider.source } : {}),
           dynamic: true,
         } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],
@@ -344,6 +353,13 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
                 <span>Inferred shape: <strong>{parsed.shapeSummary}</strong></span>
               </div>
 
+              {collider && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg text-xs text-amber-700 dark:text-amber-300 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-px" />
+                  <span>{denseImportNote(collider)} The OpenSCAD modes are off: a polyhedron this size runs out of memory compiling.</span>
+                </div>
+              )}
+
               {parsed.inferredSpacing && (
                 <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 rounded-lg text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
                   <Check className="w-4 h-4 flex-shrink-0" />
@@ -358,8 +374,8 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
               <div className="space-y-2">
                 <label className="block font-semibold text-xs text-slate-700 dark:text-slate-300">Choose Import Mode:</label>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
-                  <label className={`p-3 border rounded-xl cursor-pointer transition-colors flex items-start gap-2.5 ${importMode === 'scad_csg' ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
-                    <input type="radio" name="importMode" value="scad_csg" checked={importMode === 'scad_csg'} onChange={() => setImportMode('scad_csg')} className="mt-0.5" />
+                  <label className={`p-3 border rounded-xl cursor-pointer transition-colors flex items-start gap-2.5 ${parsed.dense ? 'opacity-50 pointer-events-none' : ''} ${importMode === 'scad_csg' ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
+                    <input type="radio" name="importMode" value="scad_csg" checked={importMode === 'scad_csg'} disabled={parsed.dense} onChange={() => setImportMode('scad_csg')} className="mt-0.5" />
                     <div>
                       <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1">
                         <Sliders className="w-3.5 h-3.5 text-indigo-500" /> Parametric CSG Primitives
@@ -368,8 +384,8 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
                     </div>
                   </label>
 
-                  <label className={`p-3 border rounded-xl cursor-pointer transition-colors flex items-start gap-2.5 ${importMode === 'scad_parametric' ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
-                    <input type="radio" name="importMode" value="scad_parametric" checked={importMode === 'scad_parametric'} onChange={() => setImportMode('scad_parametric')} className="mt-0.5" />
+                  <label className={`p-3 border rounded-xl cursor-pointer transition-colors flex items-start gap-2.5 ${parsed.dense ? 'opacity-50 pointer-events-none' : ''} ${importMode === 'scad_parametric' ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
+                    <input type="radio" name="importMode" value="scad_parametric" checked={importMode === 'scad_parametric'} disabled={parsed.dense} onChange={() => setImportMode('scad_parametric')} className="mt-0.5" />
                     <div>
                       <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1">
                         <Layers className="w-3.5 h-3.5 text-indigo-500" /> Scaled Mesh Polyhedron
@@ -378,8 +394,8 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
                     </div>
                   </label>
 
-                  <label className={`p-3 border rounded-xl cursor-pointer transition-colors flex items-start gap-2.5 ${importMode === 'scad_raw' ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
-                    <input type="radio" name="importMode" value="scad_raw" checked={importMode === 'scad_raw'} onChange={() => setImportMode('scad_raw')} className="mt-0.5" />
+                  <label className={`p-3 border rounded-xl cursor-pointer transition-colors flex items-start gap-2.5 ${parsed.dense ? 'opacity-50 pointer-events-none' : ''} ${importMode === 'scad_raw' ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
+                    <input type="radio" name="importMode" value="scad_raw" checked={importMode === 'scad_raw'} disabled={parsed.dense} onChange={() => setImportMode('scad_raw')} className="mt-0.5" />
                     <div>
                       <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1">
                         <Layers className="w-3.5 h-3.5 text-indigo-500" /> OpenSCAD Polyhedron
