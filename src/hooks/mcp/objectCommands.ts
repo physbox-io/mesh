@@ -142,7 +142,7 @@ export const objectCommands: McpCommands = {
       if (k === 'id' || k === 'name' || k === 'pos') delete updates[k];
       else updates[k] = undefined;
     }
-    if (Array.isArray(updates.joints)) updates.joints = updates.joints.map((j: object) => withoutNulls(j));
+    if (Array.isArray(updates.joints)) updates.joints = updates.joints.map((j) => withoutNulls(j));
     const breakError = resolveBreakFields(updates, target.deformMaterial);
     if (breakError) return { ok: false, error: breakError };
     const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;
