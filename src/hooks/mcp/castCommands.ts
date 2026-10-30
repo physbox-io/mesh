@@ -13,6 +13,7 @@ import { mcpMoldSubject } from '../../utils/moldSubject';
 import { DEFAULT_TAB_DRAFT } from '../../utils/moldTabs';
 import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../../utils/printSplitClient';
 import { filamentSpec } from '../../utils/filaments';
+import { exportPrintFiles } from '../../utils/printExport';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import type { McpCommands } from './types';
 
@@ -244,6 +245,41 @@ export const castCommands: McpCommands = {
       checks,
       ...(assembly ? { assembly } : {}),
       warnings: result.warnings,
+    };
+  },
+    /*
+     * The toolbar's Export STL / Export 3MF, for an agent: the chosen bodies
+     * (default every body) at true size in millimetres, Z-up, sitting on
+     * z = 0. Built from the graph, not the canvas (utils/printExport.ts), so
+     * there is no size prompt and no waiting on a frame. Files come back as
+     * for EXPORT_CAST.
+     */
+  EXPORT_PRINT: async (msg, { store }) => {
+    if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to print.' };
+    const format = msg.format === undefined ? 'stl' : msg.format;
+    if (format !== 'stl' && format !== '3mf') return { ok: false, error: "format is 'stl' or '3mf'." };
+    const asked = (Array.isArray(msg.ids) ? msg.ids : typeof msg.ids === 'string' ? [msg.ids] : [])
+      .filter((v): v is string => typeof v === 'string');
+    const unknown = asked.filter((id) => !findNodeInScene(store.sceneGraph.nodes, id));
+    if (unknown.length) return { ok: false, error: `No body called ${unknown.join(', ')}.` };
+    const ids = asked.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!.id);
+    const result = exportPrintFiles(store.sceneGraph, {
+      format,
+      ids,
+      separate: msg.separate === true,
+      ...(typeof msg.plate === 'boolean' ? { plate: msg.plate } : {}),
+      bed: store.printBed,
+      baseName: store.sceneGraph.name || store.activePreset || 'model',
+    });
+    if (!result.files.length) {
+      return { ok: false, error: 'Nothing printable in what was asked for: no body with solid geometry (bought-in hardware and simulated cuts are left out).', warnings: result.warnings };
+    }
+    return {
+      ok: true,
+      // Under `summary`: the MCP server passes on summary, warnings and files only.
+      summary: { format, units: 'mm', plated: result.plated, parts: result.parts },
+      warnings: result.warnings,
+      files: describeFiles(result.files, msg.includeFiles !== false),
     };
   },
 };
