@@ -156,6 +156,9 @@ export interface PcbClearanceCheck {
 }
 
 export interface FaceplateSvgOptions {
+  /** The enclosure the panel belongs to; its size and screw holes follow it. */
+  enclosure?: Partial<PcbEnclosureOptions>;
+  /** Overrides the panel's plan size: board plus this all round. */
   marginMm?: number;
   includeLabels?: boolean;
   includeDialTicks?: boolean;
@@ -205,16 +208,20 @@ export const PCB_BOARD_COLORS: Record<PcbBoardColor, [number, number, number, nu
 export const PCB_PRESETS: Record<string, PcbMechanicalSpec> = {
   arduino_uno: {
     name: 'Arduino Uno R3',
-    widthMm: 68.6,
-    depthMm: 53.3,
+    // 2700 x 2100 mil. Holes from Arduino's drawing (UNO R3 datasheet A000066,
+    // 5.4 Board Outline & Mounting Holes), in mil from the bottom-left corner
+    // with the USB and power jacks on the left: (600, 2000), (2600, 1400),
+    // (2600, 300), (550, 100); Ø3.2 mm. Centred here on the board.
+    widthMm: 68.58,
+    depthMm: 53.34,
     thicknessMm: 1.6,
     cornerRadiusMm: 1.5,
     color: 'blue',
     mountingHoles: [
-      { id: 'mh_tl', xMm: -20.3, yMm: 24.1, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
-      { id: 'mh_tr', xMm: 31.7, yMm: 15.2, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
-      { id: 'mh_br', xMm: 31.7, yMm: -12.7, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
-      { id: 'mh_bl', xMm: -19.0, yMm: -24.1, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
+      { id: 'mh_tl', xMm: -19.05, yMm: 24.13, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
+      { id: 'mh_tr', xMm: 31.75, yMm: 8.89, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
+      { id: 'mh_br', xMm: 31.75, yMm: -19.05, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
+      { id: 'mh_bl', xMm: -20.32, yMm: -24.13, drillMm: 3.2, padDiameterMm: 6.0, fastener: 'M3' },
     ],
     components: [
       {
@@ -1372,6 +1379,43 @@ function buildPanelCutoutGeom(
 }
 
 /**
+ * Where the lid's screws go. Each is a boss hanging from the top of the base's
+ * walls in an inside corner, fused into both walls, with an insert sunk into its
+ * top; the lid's clearance holes sit over them. A boss standing on the floor
+ * would go through the board, which is only `boardClearanceMm` from the walls,
+ * so the boss stops short of it instead. Centred mm, base frame.
+ */
+interface LidScrewLayout {
+  fastener: PcbFastenerSize;
+  /** Boss centres, [tag, x, y], mm. */
+  corners: [string, number, number][];
+  bossRadiusMm: number;
+  /** How far the boss hangs below the top of the walls. */
+  bossLengthMm: number;
+  insertDepthMm: number;
+}
+
+function lidScrewLayout(innerWidthMm: number, innerDepthMm: number, opts: PcbEnclosureOptions): LidScrewLayout {
+  const fastener = opts.lidFastenerSize;
+  const [, insertDepthMm, bossOuterMm] = INSERTS[fastener] ?? INSERTS.M3;
+  const bossRadiusMm = bossOuterMm / 2;
+  // Far enough in that the boss stays 0.3 mm inside the outer faces.
+  const inset = Math.max(bossRadiusMm - opts.wallThicknessMm + 0.3, 0.5);
+  const cx = innerWidthMm / 2 - inset;
+  const cy = innerDepthMm / 2 - inset;
+  return {
+    fastener,
+    corners: [['tl', -cx, cy], ['tr', cx, cy], ['bl', -cx, -cy], ['br', cx, -cy]],
+    bossRadiusMm,
+    bossLengthMm: insertDepthMm + 1.5,
+    insertDepthMm,
+  };
+}
+
+/** Room a lid boss needs between its foot and anything below it. */
+const LID_BOSS_GAP_MM = 0.5;
+
+/**
  * Computes electro-mechanical clearance checks between the PCB components,
  * mounting bosses, and enclosure walls/lid/floor.
  */
@@ -1388,11 +1432,17 @@ export function evaluatePcbClearance(
   const maxTopCompMm = topComps.length ? Math.max(...topComps.map((c) => c.heightMm)) : 4.0;
   const maxBottomCompMm = bottomComps.length ? Math.max(...bottomComps.map((c) => c.heightMm)) : 0;
 
+  // The lid's screw bosses hang over the board's corners, so the board needs
+  // their length (and a gap) above it as well as room for its components.
+  const lidScrews = opts.includeLid ? lidScrewLayout(innerWidthMm, innerDepthMm, opts) : null;
+  const roomAboveBoardMm = Math.max(
+    maxTopCompMm + opts.topClearanceMm,
+    lidScrews ? lidScrews.bossLengthMm + LID_BOSS_GAP_MM : 0,
+  );
   const innerHeightMm = +(
     opts.standoffHeightMm +
     spec.thicknessMm +
-    maxTopCompMm +
-    opts.topClearanceMm
+    roomAboveBoardMm
   ).toFixed(4);
 
   const outerWidthMm = +(innerWidthMm + 2 * opts.wallThicknessMm).toFixed(4);
@@ -1506,6 +1556,24 @@ export function evaluatePcbClearance(
         });
       }
     }
+
+    // A top-side component under one of the lid's hanging screw bosses
+    if (lidScrews && side === 'top') {
+      const underBossMm = roomAboveBoardMm - lidScrews.bossLengthMm - comp.heightMm;
+      for (const [tag, bx, by] of lidScrews.corners) {
+        const dx = Math.max(0, Math.abs(bx - comp.xMm) - wMm / 2);
+        const dy = Math.max(0, Math.abs(by - comp.yMm) - dMm / 2);
+        if (Math.hypot(dx, dy) >= lidScrews.bossRadiusMm || underBossMm >= 0) continue;
+        minTopClearanceMm = Math.min(minTopClearanceMm, underBossMm);
+        issues.push({
+          severity: 'error',
+          code: 'lid_collision',
+          componentId: comp.id,
+          message: `Component ${comp.ref} is under the lid screw boss in the ${tag} corner and ${Math.abs(underBossMm).toFixed(2)} mm too tall for it; raise topClearanceMm or move the part.`,
+          clearanceMm: +underBossMm.toFixed(3),
+        });
+      }
+    }
   }
 
   if (!Number.isFinite(minBossClearanceMm)) minBossClearanceMm = 10.0;
@@ -1567,29 +1635,46 @@ export function generatePcbEnclosure(
   const lidRgba = opts.lidColor ?? [0.28, 0.32, 0.38, 1];
   const ABS_DENSITY = 1050;
 
-  // 1. Outer box + subtracted inner cavity box
-  const outerBox = boxGeom(
-    `${baseId}_outer_shell`,
-    [mm(outerWidthMm / 2), mm(outerDepthMm / 2), mm(baseHeightMm / 2)],
-    [0, 0, 0],
-    baseRgba,
-    ABS_DENSITY,
-  );
+  // 1. The shell: a floor and four walls. It is built up rather than hollowed
+  // out of a block, because every `difference` comes off after every `union`,
+  // so a cavity cutter would take the standoffs and screw bosses with it.
+  const wallHalfMm = opts.wallThicknessMm / 2;
+  // Walls start halfway into the floor, so the pieces overlap rather than touch.
+  const wallHeightMm = innerHeightMm + wallHalfMm;
+  const wallCenterZMm = baseHeightMm / 2 - wallHeightMm / 2;
+  const shellBox = (part: string, halfMm: number[], posMm: number[]) =>
+    boxGeom(`${baseId}_${part}`, halfMm.map(mm), posMm.map(mm), baseRgba, ABS_DENSITY);
+  const shellGeoms: SceneGeom[] = [
+    shellBox('floor', [outerWidthMm / 2, outerDepthMm / 2, wallHalfMm], [0, 0, -baseHeightMm / 2 + wallHalfMm]),
+    shellBox('wall_left', [wallHalfMm, outerDepthMm / 2, wallHeightMm / 2], [-outerWidthMm / 2 + wallHalfMm, 0, wallCenterZMm]),
+    shellBox('wall_right', [wallHalfMm, outerDepthMm / 2, wallHeightMm / 2], [outerWidthMm / 2 - wallHalfMm, 0, wallCenterZMm]),
+    shellBox('wall_front', [outerWidthMm / 2, wallHalfMm, wallHeightMm / 2], [0, -outerDepthMm / 2 + wallHalfMm, wallCenterZMm]),
+    shellBox('wall_back', [outerWidthMm / 2, wallHalfMm, wallHeightMm / 2], [0, outerDepthMm / 2 - wallHalfMm, wallCenterZMm]),
+  ];
 
-  const cavityOvershootMm = 2.0;
-  const cavityHeightMm = innerHeightMm + cavityOvershootMm;
-  const cavityCenterZMm = floorTopZMm + cavityHeightMm / 2;
-  const innerCavity: SceneGeom = {
-    name: `${baseId}_inner_cavity`,
-    type: 'box',
-    size: [mm(innerWidthMm / 2), mm(innerDepthMm / 2), mm(cavityHeightMm / 2)],
-    pos: [0, 0, mm(cavityCenterZMm)],
-    csg: 'difference',
-    cutAt: [0, 0, mm(baseHeightMm / 2)],
-    cutNormal: [0, 0, 1],
-    cutDepth: mm(innerHeightMm),
-    rgba: [0.9, 0.25, 0.35, 1],
-  };
+  // Screw bosses for the lid, hanging in the inside corners from the top of
+  // the walls, each with an insert sunk into its top.
+  const lidScrews = opts.includeLid ? lidScrewLayout(innerWidthMm, innerDepthMm, opts) : null;
+  const lidBossGeoms: SceneGeom[] = [];
+  if (lidScrews) {
+    const lengthMm = lidScrews.bossLengthMm;
+    for (const [tag, x, y] of lidScrews.corners) {
+      lidBossGeoms.push({
+        name: `${baseId}_lid_boss_${tag}`,
+        type: 'cylinder',
+        size: [mm(lidScrews.bossRadiusMm), mm(lengthMm / 2)],
+        pos: [mm(x), mm(y), mm(baseHeightMm / 2 - lengthMm / 2)],
+        rgba: [...baseRgba],
+        density: ABS_DENSITY,
+      });
+      lidBossGeoms.push(
+        ...hardwareCutGeoms(
+          { group: `lid_screw_${tag}`, kind: 'insert', size: lidScrews.fastener, at: [mm(x), mm(y), mm(baseHeightMm / 2)], normal: [0, 0, 1] },
+          baseId,
+        ),
+      );
+    }
+  }
 
   // 2. Mounting standoff bosses (`insert_boss`) at every `spec.mountingHoles` position
   const standoffGeoms: SceneGeom[] = [];
@@ -1735,13 +1820,13 @@ export function generatePcbEnclosure(
     csgCollision: 'auto',
     csgSectors: CSG_DEFAULT_SECTORS,
     joints: [{ name: `${baseId}_free`, type: 'free' }],
-    geoms: [outerBox, innerCavity, ...standoffGeoms, ...baseCutoutGeoms],
+    geoms: [...shellGeoms, ...lidBossGeoms, ...standoffGeoms, ...baseCutoutGeoms],
     children: [],
   };
 
   // 4. Optional removable lid node with 4 corner screw clearance holes + top panel cutouts
   let lidNode: SceneNode | undefined;
-  if (opts.includeLid) {
+  if (lidScrews) {
     const lidPlate = boxGeom(
       `${lidId}_plate`,
       [mm(outerWidthMm / 2), mm(outerDepthMm / 2), mm(opts.wallThicknessMm / 2)],
@@ -1750,18 +1835,9 @@ export function generatePcbEnclosure(
       ABS_DENSITY,
     );
 
-    const lidFastener = opts.lidFastenerSize;
-    const cornerHoleRadiusM = mm((CLEARANCE_HOLES[lidFastener] ?? 3.4) / 2);
-    const cornerInsetMm = Math.max(opts.wallThicknessMm / 2, 2.0);
-    const cxMm = outerWidthMm / 2 - cornerInsetMm;
-    const cyMm = outerDepthMm / 2 - cornerInsetMm;
-    const corners: [string, number, number][] = [
-      ['tl', -cxMm, cyMm],
-      ['tr', cxMm, cyMm],
-      ['bl', -cxMm, -cyMm],
-      ['br', cxMm, -cyMm],
-    ];
-    const lidCornerHoles: SceneGeom[] = corners.map(([tag, x, y]) => ({
+    // Over the bosses in the base.
+    const cornerHoleRadiusM = mm((CLEARANCE_HOLES[lidScrews.fastener] ?? 3.4) / 2);
+    const lidCornerHoles: SceneGeom[] = lidScrews.corners.map(([tag, x, y]) => ({
       name: `${lidId}_corner_${tag}`,
       type: 'cylinder',
       size: [cornerHoleRadiusM, mm((opts.wallThicknessMm + 2.0) / 2)],
@@ -1984,23 +2060,23 @@ export function exportPcbFaceplateSvg(
   options?: FaceplateSvgOptions,
 ): FaceplateSvgResult {
   const valid = validatePcbSpec(spec);
-  const marginMm = options?.marginMm ?? 2.5;
+  const enc: PcbEnclosureOptions = { ...DEFAULT_PCB_ENCLOSURE_OPTIONS, ...options?.enclosure };
+  // The panel is the enclosure's own face: the lid seen from above, or a wall
+  // seen from outside. A marginMm given explicitly overrides the plan size.
+  const marginMm = options?.marginMm ?? enc.boardClearanceMm + enc.wallThicknessMm;
   const includeLabels = options?.includeLabels ?? true;
   const includeDialTicks = options?.includeDialTicks ?? true;
   const includeBoardOutline = options?.includeBoardOutline ?? true;
   const thicknessMm = options?.thicknessMm ?? 2.0;
 
-  const topComps = valid.components.filter((c) => (c.side ?? 'top') === 'top');
-  const maxCompHeightMm = topComps.length ? Math.max(...topComps.map((c) => c.heightMm)) : 8.0;
-  const sidePanelHeightMm = 5.0 + valid.thicknessMm + maxCompHeightMm + 3.0;
+  const { innerDimensionsMm: [innerWidthMm, innerDepthMm, innerHeightMm] } = evaluatePcbClearance(valid, enc);
+  const baseHeightMm = enc.wallThicknessMm + innerHeightMm;
+  const pcbBottomZMm = -baseHeightMm / 2 + enc.wallThicknessMm + enc.standoffHeightMm;
 
   const boardSpanXMm =
     face === 'left' || face === 'right' ? valid.depthMm : valid.widthMm;
-  const boardSpanYMm =
-    face === 'top' ? valid.depthMm : sidePanelHeightMm;
-
   const widthMm = +(boardSpanXMm + 2 * marginMm).toFixed(3);
-  const heightMm = +(boardSpanYMm + 2 * marginMm).toFixed(3);
+  const heightMm = +(face === 'top' ? valid.depthMm + 2 * marginMm : baseHeightMm).toFixed(3);
   const centerX = widthMm / 2;
   const centerY = heightMm / 2;
 
@@ -2019,14 +2095,20 @@ export function exportPcbFaceplateSvg(
 
   let cutoutCount = 0;
 
-  // 2. Mounting holes on top faceplate
+  // 2. Screw holes on the top panel: the lid's, over the bosses in the base,
+  // or with no lid, the board's own, for a plate on its standoffs.
   if (face === 'top') {
-    for (const hole of valid.mountingHoles) {
-      const cx = +(centerX + hole.xMm).toFixed(3);
-      const cy = +(centerY - hole.yMm).toFixed(3);
-      const r = +(hole.drillMm / 2).toFixed(3);
+    const lidScrews = enc.includeLid ? lidScrewLayout(innerWidthMm, innerDepthMm, enc) : null;
+    const holes: { id: string; x: number; y: number; r: number; attr: string }[] = lidScrews
+      ? lidScrews.corners.map(([tag, x, y]) => ({
+          id: tag, x, y, r: (CLEARANCE_HOLES[lidScrews.fastener] ?? 3.4) / 2, attr: 'data-lid-screw',
+        }))
+      : valid.mountingHoles.map((h) => ({ id: h.id, x: h.xMm, y: h.yMm, r: h.drillMm / 2, attr: 'data-mounting-hole' }));
+    for (const hole of holes) {
+      const cx = +(centerX + hole.x).toFixed(3);
+      const cy = +(centerY - hole.y).toFixed(3);
       lines.push(
-        `    <circle cx="${cx}" cy="${cy}" r="${r}" data-cutout-shape="circle" data-mounting-hole="${escapeXml(hole.id)}" />`,
+        `    <circle cx="${cx}" cy="${cy}" r="${+hole.r.toFixed(3)}" data-cutout-shape="circle" ${hole.attr}="${escapeXml(hole.id)}" />`,
       );
       cutoutCount++;
     }
@@ -2044,11 +2126,16 @@ export function exportPcbFaceplateSvg(
   for (const comp of faceComponents) {
     const pm = comp.panelMount!;
     const dims = cutoutDimensionsMm(comp, pm);
-    const localX = face === 'left' || face === 'right' ? comp.yMm : comp.xMm;
-    const localY =
-      face === 'top'
-        ? comp.yMm
-        : (pm.zOffsetMm ?? comp.heightMm / 2) - maxCompHeightMm / 2;
+    // Seen from outside: on the back and left walls +X and +Y run leftwards.
+    const localX =
+      face === 'left' ? -comp.yMm
+        : face === 'right' ? comp.yMm
+          : face === 'back' ? -comp.xMm
+            : comp.xMm;
+    // On a wall, the height the base model cuts it at, from the base's middle.
+    const sign = comp.side === 'bottom' ? -1 : 1;
+    const boardSurfZMm = comp.side === 'bottom' ? pcbBottomZMm : pcbBottomZMm + valid.thicknessMm;
+    const localY = face === 'top' ? comp.yMm : boardSurfZMm + sign * (pm.zOffsetMm ?? comp.heightMm / 2);
 
     const cx = +(centerX + localX).toFixed(3);
     const cy = +(centerY - localY).toFixed(3);

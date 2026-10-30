@@ -11,6 +11,11 @@ import {
   type PcbMechanicalSpec,
 } from '../src/utils/pcbEnclosureSync';
 import { boxGeom } from '../src/utils/hardwareGeometry';
+import type { SceneGeom } from '../src/types/scene';
+
+/** Whether a body-frame point (m) lies inside an axis-aligned box geom. */
+const insideBox = (g: SceneGeom, p: number[]) =>
+  g.type === 'box' && !g.quat && p.every((v, i) => Math.abs(v - (g.pos?.[i] ?? 0)) < g.size[i]);
 
 describe('Volt <-> Mesh PCB & Enclosure Co-Design Sync', () => {
   describe('1. PCB_PRESETS & buildPcbNode', () => {
@@ -116,12 +121,12 @@ describe('Volt <-> Mesh PCB & Enclosure Co-Design Sync', () => {
         expect(result.lidNode!.csgEnabled).toBe(true);
         expect(result.pcbNode.geoms.length).toBeGreaterThan(spec.components.length);
 
-        // Verify outer shell + subtracted inner cavity
-        const outerShell = result.baseNode.geoms.find((g) => g.name.endsWith('_outer_shell'));
-        const innerCavity = result.baseNode.geoms.find((g) => g.name.endsWith('_inner_cavity'));
-        expect(outerShell).toBeDefined();
-        expect(innerCavity).toBeDefined();
-        expect(innerCavity!.csg).toBe('difference');
+        // The shell is a floor and four walls, all material
+        for (const part of ['floor', 'wall_left', 'wall_right', 'wall_front', 'wall_back']) {
+          const g = result.baseNode.geoms.find((x) => x.name.endsWith(`_${part}`));
+          expect(g, part).toBeDefined();
+          expect(g!.csg).toBeUndefined();
+        }
 
         // Verify mounting standoff bosses and bores match every mounting hole
         const bosses = result.baseNode.geoms.filter(
@@ -225,9 +230,9 @@ describe('Volt <-> Mesh PCB & Enclosure Co-Design Sync', () => {
 
       expect(topPanel.widthMm).toBeCloseTo(eurorack.widthMm + 4.0, 3);
       expect(topPanel.heightMm).toBeCloseTo(eurorack.depthMm + 4.0, 3);
+      // The lid's four screw holes, and the top-mounted parts
       expect(topPanel.cutoutCount).toBe(
-        eurorack.mountingHoles.length +
-          eurorack.components.filter((c) => c.panelMount?.face === 'top').length,
+        4 + eurorack.components.filter((c) => c.panelMount?.face === 'top').length,
       );
 
       expect(topPanel.svg).toContain('<svg xmlns="http://www.w3.org/2000/svg"');
@@ -263,6 +268,107 @@ describe('Volt <-> Mesh PCB & Enclosure Co-Design Sync', () => {
       expect(asyncEtchUrl).toContain('#v=1&');
       expect(asyncEtchUrl).toContain('data=');
       expect(asyncEtchUrl).toContain('thickness=2');
+    });
+  });
+
+  describe('5. The enclosure holds together', () => {
+    it('places the Uno holes where Arduino\'s drawing does', () => {
+      // mil from the bottom-left corner, UNO R3 datasheet 5.4
+      const drawing = [[600, 2000], [2600, 1400], [2600, 300], [550, 100]];
+      const uno = PCB_PRESETS.arduino_uno;
+      expect(uno.widthMm).toBeCloseTo(2700 * 0.0254, 2);
+      expect(uno.depthMm).toBeCloseTo(2100 * 0.0254, 2);
+      const fromCorner = uno.mountingHoles
+        .map((h) => [h.xMm + uno.widthMm / 2, h.yMm + uno.depthMm / 2].map((v) => Math.round(v / 0.0254)))
+        .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      expect(fromCorner).toEqual([...drawing].sort((a, b) => a[0] - b[0] || a[1] - b[1]));
+    });
+
+    it('keeps the standoffs and lid bosses: nothing cuts them away wholesale', () => {
+      for (const spec of Object.values(PCB_PRESETS)) {
+        const { baseNode } = generatePcbEnclosure(spec);
+        const cutters = baseNode.geoms.filter((g) => g.csg === 'difference');
+        const material = baseNode.geoms.filter(
+          (g) => g.name.includes('_lid_boss_') || (g.hardware?.kind === 'insert_boss' && g.hardware.part === 'boss'),
+        );
+        expect(material.length).toBe(spec.mountingHoles.length + 4);
+        for (const m of material) {
+          expect(cutters.some((c) => insideBox(c, m.pos!)), `${spec.name}: ${m.name}`).toBe(false);
+        }
+      }
+    });
+
+    it('puts every lid screw over a boss with an insert in it, inside the walls', () => {
+      for (const spec of Object.values(PCB_PRESETS)) {
+        const { baseNode, lidNode, clearanceReport, pcbNode } = generatePcbEnclosure(spec);
+        const [outerW, outerD] = clearanceReport.outerDimensionsMm.map((v) => v / 1000);
+        const holes = lidNode!.geoms.filter((g) => g.name.includes('_corner_'));
+        expect(holes).toHaveLength(4);
+        const top = baseNode.geoms.find((g) => g.name.endsWith('_wall_left'))!;
+        const wallTop = top.pos![2] + top.size[2];
+        for (const hole of holes) {
+          const [x, y] = hole.pos!;
+          const boss = baseNode.geoms.find(
+            (g) => g.name.includes('_lid_boss_') && Math.hypot(g.pos![0] - x, g.pos![1] - y) < 1e-6,
+          );
+          expect(boss, `${spec.name}: boss under ${hole.name}`).toBeDefined();
+          // Flush with the top of the walls, inside the outer faces
+          expect(boss!.pos![2] + boss!.size[1]).toBeCloseTo(wallTop, 6);
+          expect(Math.abs(x) + boss!.size[0]).toBeLessThan(outerW / 2);
+          expect(Math.abs(y) + boss!.size[0]).toBeLessThan(outerD / 2);
+          const insert = baseNode.geoms.find(
+            (g) => g.hardware?.kind === 'insert' && Math.hypot(g.cutAt![0] - x, g.cutAt![1] - y) < 1e-6,
+          );
+          expect(insert, `${spec.name}: insert in ${boss!.name}`).toBeDefined();
+          expect(insert!.cutAt![2]).toBeCloseTo(wallTop, 6);
+          expect(insert!.cutDepth!).toBeLessThan(boss!.size[1] * 2);
+          // The boss's foot is above the board
+          const boardTop = pcbNode.pos[2] - baseNode.pos[2] + pcbNode.height! / 2;
+          expect(boss!.pos![2] - boss!.size[1]).toBeGreaterThan(boardTop);
+        }
+      }
+    });
+
+    it('flags a tall part under a lid boss', () => {
+      const spec: PcbMechanicalSpec = {
+        ...PCB_PRESETS.proto_50x50,
+        components: [
+          { id: 'corner_cap', ref: 'C1', kind: 'capacitor', xMm: 22, yMm: 22, widthMm: 4, depthMm: 4, heightMm: 6 },
+        ],
+      };
+      const { clearanceReport } = generatePcbEnclosure(spec, { topClearanceMm: 1 });
+      expect(clearanceReport.issues.some((i) => i.code === 'lid_collision' && i.componentId === 'corner_cap')).toBe(true);
+    });
+
+    it('sizes the faceplate to the enclosure it belongs to, with the lid\'s screw holes', () => {
+      const opts = { boardClearanceMm: 3, wallThicknessMm: 2 };
+      for (const spec of Object.values(PCB_PRESETS)) {
+        const { clearanceReport, lidNode } = generatePcbEnclosure(spec, opts);
+        const [outerW, outerD] = clearanceReport.outerDimensionsMm;
+        const top = exportPcbFaceplateSvg(spec, 'top', { enclosure: opts });
+        expect(top.widthMm).toBeCloseTo(outerW, 3);
+        expect(top.heightMm).toBeCloseTo(outerD, 3);
+        for (const hole of lidNode!.geoms.filter((g) => g.name.includes('_corner_'))) {
+          const cx = +(outerW / 2 + hole.pos![0] * 1000).toFixed(3);
+          const cy = +(outerD / 2 - hole.pos![1] * 1000).toFixed(3);
+          expect(top.svg).toContain(`cx="${cx}" cy="${cy}"`);
+        }
+        const front = exportPcbFaceplateSvg(spec, 'front', { enclosure: opts });
+        expect(front.widthMm).toBeCloseTo(outerW, 3);
+        const side = exportPcbFaceplateSvg(spec, 'left', { enclosure: opts });
+        expect(side.widthMm).toBeCloseTo(outerD, 3);
+      }
+    });
+
+    it('draws side panels as seen from outside', () => {
+      // The Uno's USB jack is towards the back (+Y) on the left wall; looking
+      // at the left wall from outside, the back is on the left.
+      const uno = PCB_PRESETS.arduino_uno;
+      const usb = uno.components.find((c) => c.id === 'usb_port')!;
+      const panel = exportPcbFaceplateSvg(uno, 'left');
+      const x = Number(/x="([\d.]+)"[^>]*data-component="usb_port"/.exec(panel.svg)![1]);
+      expect(x + 5).toBeLessThan(panel.widthMm / 2);
+      expect(usb.yMm).toBeGreaterThan(0);
     });
   });
 });

@@ -166,16 +166,25 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
     boreType,
   ]);
 
+  // The faceplate is the enclosure's own face, so it takes the same options.
+  const faceplateOptions = useMemo(() => ({
+    enclosure: {
+      standoffHeightMm,
+      wallThicknessMm,
+      boardClearanceMm,
+      topClearanceMm,
+      includeLid: buildMode !== 'enclosure_open',
+    },
+    includeLabels,
+    includeDialTicks,
+    includeBoardOutline: true,
+    thicknessMm: wallThicknessMm,
+  }), [standoffHeightMm, wallThicknessMm, boardClearanceMm, topClearanceMm, buildMode, includeLabels, includeDialTicks]);
+
   const faceplate = useMemo(() => {
     if (!activeSpec) return null;
-    return exportPcbFaceplateSvg(activeSpec, previewFace, {
-      marginMm: boardClearanceMm + wallThicknessMm,
-      includeLabels,
-      includeDialTicks,
-      includeBoardOutline: true,
-      thicknessMm: wallThicknessMm,
-    });
-  }, [activeSpec, previewFace, boardClearanceMm, wallThicknessMm, includeLabels, includeDialTicks]);
+    return exportPcbFaceplateSvg(activeSpec, previewFace, faceplateOptions);
+  }, [activeSpec, previewFace, faceplateOptions]);
 
   const svgDataUri = useMemo(() => {
     if (!faceplate?.svg) return '';
@@ -201,13 +210,7 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
     if (!activeSpec) return;
     setEtchError(null);
     try {
-      const url = await buildPcbFaceplateEtchUrl(activeSpec, previewFace, {
-        marginMm: boardClearanceMm + wallThicknessMm,
-        includeLabels,
-        includeDialTicks,
-        includeBoardOutline: true,
-        thicknessMm: wallThicknessMm,
-      });
+      const url = await buildPcbFaceplateEtchUrl(activeSpec, previewFace, faceplateOptions);
       window.open(url, '_blank', 'noopener,noreferrer');
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'Failed to open faceplate in Etch.');

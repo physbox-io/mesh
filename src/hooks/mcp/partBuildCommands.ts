@@ -353,7 +353,8 @@ const syncPcbEnclosureCommand: McpHandler = async (msg, { store }) => {
     msg.face === 'front' || msg.face === 'back' || msg.face === 'left' || msg.face === 'right'
       ? msg.face
       : 'top';
-  const faceplate = exportPcbFaceplateSvg(spec, face);
+  // Sized to the enclosure built from the same options, lid screws and all.
+  const faceplate = exportPcbFaceplateSvg(spec, face, { enclosure: msg as Partial<PcbEnclosureOptions> });
 
   if (msg.pcbOnly === true) {
     const pcbNode = buildPcbNode(spec);
