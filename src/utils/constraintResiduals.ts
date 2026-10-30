@@ -287,3 +287,47 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
 
   return { sample, report };
 }
+
+/** How far a residual is over its warning, the measure the report sorts by. */
+const severity = (c: ConstraintResidual) =>
+  Math.max((c.worstMm ?? 0) / RESIDUAL_WARN_MM, (c.worstDeg ?? 0) / RESIDUAL_WARN_DEG);
+
+/**
+ * One report for a run whose model was rebuilt partway (a headless run in
+ * which something shattered): each constraint and stop by name, the worst
+ * moment from whichever model saw it, the end from the last. Equalities are
+ * named by index, so one detached by the rebuild can lend its name to the
+ * next; that is rare, and costs only which row a figure is filed under.
+ */
+export function mergeConstraintReports(reports: ConstraintReport[]): ConstraintReport {
+  if (reports.length === 1) return reports[0];
+  const byName = new Map<string, ConstraintResidual>();
+  for (const r of reports) {
+    for (const c of r.constraints) {
+      const was = byName.get(c.name);
+      if (!was) { byName.set(c.name, c); continue; }
+      const worse = severity(was) > severity(c) ? was : c;
+      byName.set(c.name, {
+        ...c,
+        ...(worse.worstMm !== undefined ? { worstMm: worse.worstMm } : {}),
+        ...(worse.worstDeg !== undefined ? { worstDeg: worse.worstDeg } : {}),
+        worstAtS: worse.worstAtS,
+        ...(was.broke || c.broke ? { broke: true } : {}),
+      });
+    }
+  }
+  const byJoint = new Map<string, LimitOvershoot>();
+  for (const r of reports) {
+    for (const l of r.limits) {
+      const was = byJoint.get(l.joint);
+      byJoint.set(l.joint, was && was.worstPast > l.worstPast
+        ? { ...l, worstPast: was.worstPast, worstAtS: was.worstAtS }
+        : l);
+    }
+  }
+  return {
+    constraints: [...byName.values()].sort((a, b) => severity(b) - severity(a)),
+    limits: [...byJoint.values()],
+    warnings: [...new Set(reports.flatMap((r) => r.warnings))],
+  };
+}

@@ -10,13 +10,12 @@ import type { SceneNode, SceneGeom } from '../types/scene';
 import type { ImpactEvent } from '../workers/physicsWorkerProtocol';
 import { shatterVerdict } from '../utils/breakThresholds';
 import { DEFAULT_FRACTURE_PIECES } from '../utils/fracture';
-import { fractureMeshOffThread } from '../utils/fractureWorkerClient';
-import { buildShatterGraph, MAX_LIVE_SHARDS } from '../utils/runtimeShatter';
+import { cutShards, shardRoom, shatterSourceOf } from './shatterCut';
 import { fromtoCenter, imprintOf, isDentable, meshForDenting } from '../utils/dentMesh';
 import type { DentConfig } from '../utils/breakThresholds';
 import { findNodeById } from './sceneClone';
 import { toRenderVertices } from './meshGeomTransforms';
-import { fracturing, breakageEpoch, scheduleShatterRebuild, effectiveSceneGraph, wallAtImpact, bodyMassOf, dentBody } from './breakage';
+import { fracturing, breakageEpoch, scheduleShatterRebuild, effectiveSceneGraph, wallAtImpact, dentBody } from './breakage';
 import type { SliceDeps } from './sliceDeps';
 
 export interface BreakageActions {
@@ -84,22 +83,14 @@ export function breakageActions({ set, get }: SliceDeps): BreakageActions {
      * joints by name instead, which is what the by-joint branch of doBuild is for.
      */
     shatterNode: async (node, event, wallM) => {
-      // The body's own mesh, never one of the convex pieces it collides as.
-      const geom = (node.geoms || []).find((g) => !g.csgDerived && (g.renderVertices ?? g.vertices) && g.faces)
-        ?? (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
-      const source = geom && (geom.renderVertices ?? geom.vertices);
-      if (!geom || !source || !geom.faces) return;
+      if (!shatterSourceOf(node)) return;
 
-      // Stay inside the shard budget. Every entry in `shatteredBodies` lists the
-      // pieces of one break, and a piece that has broken again is no longer in
-      // the world, so the live ones are the pieces with no entry of their own.
-      // A shard breaking now gives its own slot back.
+      // Stay inside the shard budget, counting pieces already promised to
+      // bodies still being cut.
       const broken = get().shatteredBodies;
-      const live = Object.values(broken).flat().filter((s) => !broken[s.id]);
       let promised = 0;
       for (const n of fracturing.values()) promised += n;
-      const room = MAX_LIVE_SHARDS - live.length - promised + (live.some((s) => s.id === node.id) ? 1 : 0);
-      const pieces = Math.min(node.shatterPieces ?? DEFAULT_FRACTURE_PIECES, room);
+      const pieces = Math.min(node.shatterPieces ?? DEFAULT_FRACTURE_PIECES, shardRoom(broken, node.id) - promised);
       if (pieces < 2) return;
 
       // Cut in the worker while the old model keeps stepping. The pieces are
@@ -107,18 +98,12 @@ export function breakageActions({ set, get }: SliceDeps): BreakageActions {
       // has got to by the time the rebuild lands, so the wait costs no accuracy.
       fracturing.set(node.id, pieces);
       const epoch = breakageEpoch;
-      let cells: Awaited<ReturnType<typeof fractureMeshOffThread>>;
+      let shards: SceneNode[] | null;
       try {
-        cells = await fractureMeshOffThread(source, geom.faces, {
-          pieces,
-          seed: node.shatterSeed ?? 1,
-          focus: node.shatterPattern === 'uniform'
-            ? undefined
-            : [event.localPoint[0], event.localPoint[1], event.localPoint[2]],
-        });
+        shards = await cutShards(node, event, pieces);
       } catch (err) {
         console.warn('[shatter]', err);
-        cells = [];
+        shards = null;
       } finally {
         if (epoch === breakageEpoch) fracturing.delete(node.id);
       }
@@ -127,33 +112,8 @@ export function breakageActions({ set, get }: SliceDeps): BreakageActions {
       const nowBroken = get().shatteredBodies;
       if (nowBroken[node.id]) return;
       if (!findNodeById(effectiveSceneGraph(get().sceneGraph, nowBroken).nodes, node.id)) return;
-      // Fewer than two pieces is not a shatter, and replacing a body with one
-      // shard would be a visible no-op that had thrown its collider away.
-      if (cells.length < 2) return;
-
-      const { shards } = buildShatterGraph(node, source, geom.faces, cells, {
-        pos: [event.pos[0], event.pos[1], event.pos[2]],
-        xmat: event.xmat,
-        vel: [event.vel[0], event.vel[1], event.vel[2]],
-        angvel: [event.angvel[0], event.angvel[1], event.angvel[2]],
-      }, {
-        spread: node.shatterSpread,
-        totalMass: bodyMassOf(node),
-        rgba: geom.rgba,
-        friction: geom.friction,
-        solref: geom.solref,
-        solimp: geom.solimp,
-        recursion: (node.shatterDepth ?? 0) > 0 ? {
-          generation: (node.shatterGeneration ?? 0) + 1,
-          depth: node.shatterDepth!,
-          impulseNs: node.shatterImpulseNs!,
-          thicknessRef: node.shatterThicknessRef,
-          pieces: node.shatterPieces ?? 8,
-          pattern: node.shatterPattern,
-          spread: node.shatterSpread,
-          seed: node.shatterSeed,
-        } : undefined,
-      });
+      // Fewer than two pieces is not a shatter.
+      if (!shards) return;
 
       set({
         shatteredBodies: { ...nowBroken, [node.id]: shards },

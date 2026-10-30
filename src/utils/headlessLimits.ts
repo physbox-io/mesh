@@ -1,41 +1,35 @@
 /**
  * What a headless run does not simulate, named body by body.
  *
- * Welds, members, joint blobs and crumple zones break inside the physics
- * worker's own step, so physics_run_headless breaks them as the live run does.
- * Shattering and denting do not: the worker only REPORTS an impact, and the
- * store on the main thread decides, cuts the shards (in the fracture worker)
- * and rebuilds the model around them while the old one keeps stepping. A
- * headless run steps a model of its own, start to finish, inside one worker
- * call, with nobody to hand an impact to, so a drop that shatters live
- * finished whole headless and get_breaks had nothing to say. Until the cut and
- * the rebuild can run inside the worker, the run says which bodies it is
- * leaving whole and unmarked rather than letting the trajectory stand for
- * what would happen.
+ * A headless run stops at every blow and asks what it did, as the live run
+ * asks the store (hooks/mcp/headlessImpacts.ts), so bodies shatter and
+ * surfaces dent there as they do live. One thing is left out: a surface set to
+ * `deformCollision` has its damage made real to the solver live, by rebuilding
+ * the model around the deformed mesh after every blow. Headless, its dents are
+ * recorded and the solver goes on with the undented surface, so the run says
+ * so rather than letting the trajectory stand for a part that has been holed.
  */
 import type { SceneNode } from '../types/scene';
-import { canDent, canShatter } from './breakThresholds';
+import { canDent } from './breakThresholds';
 
-export function unsimulatedImpacts(nodes: SceneNode[] | undefined): { shatter: string[]; dent: string[] } {
-  const shatter: string[] = [];
-  const dent: string[] = [];
+/** Bodies with a surface whose damage the live solver feels and a headless run does not. */
+export function unsimulatedImpacts(nodes: SceneNode[] | undefined): string[] {
+  const out: string[] = [];
   const walk = (list: SceneNode[] | undefined) => {
     for (const node of list ?? []) {
-      if (canShatter(node)) shatter.push(node.name || node.id);
-      else if ((node.geoms ?? []).some((g) => canDent(g))) dent.push(node.name || node.id);
+      const real = (node.geoms ?? []).some((g) => g.deformCollision
+        && (canDent(g) || (typeof g.pierceImpulseNs === 'number' && g.pierceImpulseNs > 0)));
+      if (real) out.push(node.name || node.id);
       walk(node.children);
     }
   };
   walk(nodes);
-  return { shatter, dent };
+  return out;
 }
 
-/** The warning for a headless reply, or null when nothing in the scene can shatter or dent. */
+/** The warning for a headless reply, or null when nothing in the scene deforms its collision shape. */
 export function headlessImpactWarning(nodes: SceneNode[] | undefined): string | null {
-  const { shatter, dent } = unsimulatedImpacts(nodes);
-  const parts: string[] = [];
-  if (shatter.length) parts.push(`${shatter.join(', ')} ${shatter.length === 1 ? 'is' : 'are'} set to shatter`);
-  if (dent.length) parts.push(`${dent.join(', ')} ${dent.length === 1 ? 'is' : 'are'} set to dent`);
-  if (!parts.length) return null;
-  return `${parts.join(', and ')}, which a headless run does not simulate: they stay whole and unmarked however hard they are hit, and physics_get_breaks will not list them. Welds, members, blobs and crumple zones do break here. Play the scene live (physics_play, then physics_get_breaks) to see the impacts.`;
+  const bodies = unsimulatedImpacts(nodes);
+  if (!bodies.length) return null;
+  return `${bodies.join(', ')} ${bodies.length === 1 ? 'has' : 'have'} deformCollision set, which a headless run does not model: its dents and holes are listed in \`dented\`, but the solver goes on colliding with the undamaged surface, so nothing falls through a hole here. Play the scene live (physics_play, then physics_get_breaks) to see the damage felt.`;
 }

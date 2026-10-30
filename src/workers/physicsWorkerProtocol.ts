@@ -187,6 +187,18 @@ export type HeadlessResult =
     } & HeadlessScriptReport)
   | { ok: false; error: string; warnings: string[] };
 
+/**
+ * The scene a headless run goes on with after a blow broke something: the
+ * graph with the body swapped for its pieces, compiled. The run carries every
+ * joint across by name and places the shards where the body was.
+ */
+export interface HeadlessRebuild {
+  xml: string;
+  sceneGraph: SceneGraph;
+  meshFiles?: { name: string; bytes: Uint8Array }[];
+  dropMeshes?: string[];
+}
+
 // ---- Main thread -> worker -----------------------------------------------
 
 export type MainToWorkerMessage =
@@ -220,7 +232,14 @@ export type MainToWorkerMessage =
       /** As BUILD's: the headless XML is compiled against the same ledger. */
       meshFiles?: { name: string; bytes: Uint8Array }[];
       dropMeshes?: string[];
+      /**
+       * Stop at every blow and ask (HEADLESS_IMPACT) what it did, as the live
+       * run asks the store. Without it a headless run never shatters.
+       */
+      judgeImpacts?: boolean;
     }
+  /** The answer to a HEADLESS_IMPACT: the model to go on with, or nothing to change. */
+  | { type: 'HEADLESS_IMPACT_REPLY'; id: string; rebuild?: HeadlessRebuild }
   | { type: 'GET_HISTORY'; id: string; query?: HistoryQuery }
   | { type: 'GET_TELEMETRY'; id: string }
   | { type: 'CLEAR_HISTORY' }
@@ -310,6 +329,8 @@ export type WorkerToMainMessage =
   | ({ type: 'CONSTRAINT_BROKEN' } & ConstraintBrokenEvent)
   | ({ type: 'IMPACT' } & ImpactEvent)
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
+  /** A headless run (`judgeImpacts`) has stopped at a blow and waits for HEADLESS_IMPACT_REPLY. */
+  | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }
   | { type: 'HISTORY_RESULT'; id: string; history: HistoryFrame[]; total: number; stride: number }
   | { type: 'TELEMETRY_RESULT'; id: string; telemetry: TelemetryReply | null }
   | ({ type: 'SCRIPT_STATUS' } & ScriptStatus)

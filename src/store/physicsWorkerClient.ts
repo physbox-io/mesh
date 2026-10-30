@@ -12,8 +12,10 @@ import type {
   ConstraintBrokenEvent,
   FrameSnapshot,
   ImpactEvent,
+  HeadlessRebuild,
   HeadlessResult,
   HistoryFrame,
+  MainToWorkerMessage,
   HistoryQuery,
   SeedState,
   StepForResult,
@@ -27,6 +29,13 @@ import { noteWorkerStopped } from '../utils/staleBuild';
 export type { BuiltResult, FrameSnapshot } from '../workers/physicsWorkerProtocol';
 
 type Pending<T> = { resolve: (r: T) => void; reject: (e: Error) => void };
+
+/**
+ * What a headless run does about a blow: the scene to go on with, compiled
+ * against this client's `meshFiles`, or null when nothing broke. See
+ * `runHeadless`'s `judge`.
+ */
+export type HeadlessImpactJudge = (event: ImpactEvent) => Promise<{ xml: string; sceneGraph: SceneGraph } | null>;
 
 /** What GET_HISTORY returned, and how much of the history it was cut from. */
 export type HistoryResult = { frames: HistoryFrame[]; total: number; stride: number };
@@ -55,6 +64,12 @@ export interface HeadlessLoopHooks<F> {
   isBad(): boolean;
   /** Build a trajectory frame from the current state. */
   sample(): F;
+  /**
+   * True when something happened this tick that the caller must deal with
+   * before the next one: a blow that may shatter a body. `headlessLoop` then
+   * yields, and the caller resumes it once the model is rebuilt.
+   */
+  interrupted?(): boolean;
 }
 
 export interface HeadlessLoopOptions {
@@ -101,6 +116,22 @@ export const runHeadlessLoop = <F>(
   opts: HeadlessLoopOptions,
   hooks: HeadlessLoopHooks<F>,
 ): HeadlessLoopOutcome<F> => {
+  const loop = headlessLoop(opts, hooks);
+  let r = loop.next();
+  while (!r.done) r = loop.next();
+  return r.value;
+};
+
+/**
+ * The same loop, as a generator that yields after any tick `interrupted`
+ * flags, with that tick's frame already kept. The caller rebuilds the model
+ * (with simulated time carried over, so it still strictly increases) and
+ * resumes; the frames, the stride and the tick count run on across it.
+ */
+export function* headlessLoop<F>(
+  opts: HeadlessLoopOptions,
+  hooks: HeadlessLoopHooks<F>,
+): Generator<void, HeadlessLoopOutcome<F>, void> {
   const ticks = Math.max(0, Math.floor(opts.ticks) || 0);
   const stride = Math.max(1, Math.floor(opts.stride ?? 1) || 1);
   const maxFrames = Math.max(1, Math.floor(opts.maxFrames ?? MAX_HEADLESS_FRAMES));
@@ -148,6 +179,7 @@ export const runHeadlessLoop = <F>(
       frames.push(hooks.sample());
       lastKeptTick = i;
     }
+    if (hooks.interrupted?.()) yield;
   }
 
   // The final tick always gets a frame on a run that finished cleanly, even
@@ -157,7 +189,7 @@ export const runHeadlessLoop = <F>(
   }
 
   return { frames, ticksSimulated, truncated, ...(truncationReason ? { truncationReason, truncationDetail } : {}) };
-};
+}
 
 /**
  * The reply the worker sends back for RUN_HEADLESS. `HeadlessResult` (in
@@ -213,6 +245,7 @@ export class PhysicsWorkerClient {
   private watchdog: ReturnType<typeof setInterval>;
   private pendingBuilds = new Map<string, Pending<BuiltResult>>();
   private pendingHeadless = new Map<string, Pending<HeadlessRunResult>>();
+  private headlessJudges = new Map<string, HeadlessImpactJudge>();
   private pendingHistory = new Map<string, Pending<HistoryResult>>();
   private pendingTelemetry = new Map<string, Pending<TelemetryReply | null>>();
   private pendingSteps = new Map<string, Pending<StepForResult>>();
@@ -269,6 +302,7 @@ export class PhysicsWorkerClient {
           this.onImpact?.(msg);
           break;
         case 'HEADLESS_RESULT': {
+          this.headlessJudges.delete(msg.id);
           const pending = this.pendingHeadless.get(msg.id);
           if (pending) {
             this.pendingHeadless.delete(msg.id);
@@ -276,6 +310,9 @@ export class PhysicsWorkerClient {
           }
           break;
         }
+        case 'HEADLESS_IMPACT':
+          void this.answerImpact(msg.id, msg.event);
+          break;
         case 'HISTORY_RESULT': {
           const pending = this.pendingHistory.get(msg.id);
           if (pending) {
@@ -395,8 +432,13 @@ export class PhysicsWorkerClient {
   // across the thread boundary. It defaults to 1 (every tick) because the MCP
   // bridge does its own striding on the full trajectory; passing it here as
   // well would decimate twice.
-  runHeadless(xml: string, sceneGraph: SceneGraph, ticks: number, stride = 1): Promise<HeadlessRunResult> {
+  //
+  // With a `judge`, the run stops at every blow and asks it what happened, as
+  // the live run asks the store: a body that shatters is rebuilt as its pieces
+  // at that tick and the run goes on. Without one it never shatters.
+  runHeadless(xml: string, sceneGraph: SceneGraph, ticks: number, stride = 1, judge?: HeadlessImpactJudge): Promise<HeadlessRunResult> {
     const id = Math.random().toString(36).slice(2);
+    if (judge) this.headlessJudges.set(id, judge);
     // The same ledger as `build`: an XML compiled against it can name a mesh
     // file the last live build only sent as text (a SCAD body just updated),
     // and without these the worker fails with "Error opening file m_….msh".
@@ -405,10 +447,29 @@ export class PhysicsWorkerClient {
       this.noteRequest();
       this.pendingHeadless.set(id, { resolve, reject });
       this.worker.postMessage(
-        { type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride, meshFiles: add, dropMeshes: drop },
+        { type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride, meshFiles: add, dropMeshes: drop, judgeImpacts: !!judge },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
     });
+  }
+
+  /** Answer a paused headless run. Always answers: the run waits for it. */
+  private async answerImpact(id: string, event: ImpactEvent) {
+    let rebuild: HeadlessRebuild | undefined;
+    try {
+      const next = await this.headlessJudges.get(id)?.(event);
+      if (next) {
+        // Taken after the judge compiled: the files its XML names.
+        const { add, drop } = this.meshFiles.take();
+        rebuild = { xml: next.xml, sceneGraph: withoutMeshData(next.sceneGraph), meshFiles: add, dropMeshes: drop };
+      }
+    } catch (err) {
+      console.warn('[headless impact]', err);
+    }
+    this.worker.postMessage(
+      { type: 'HEADLESS_IMPACT_REPLY', id, rebuild } satisfies MainToWorkerMessage,
+      rebuild?.meshFiles?.map((f) => f.bytes.buffer as ArrayBuffer) ?? [],
+    );
   }
 
   /** No query returns everything held; see HistoryRing.query for the filters. */
@@ -477,6 +538,7 @@ export class PhysicsWorkerClient {
   }
 
   private rejectAll(err: Error) {
+    this.headlessJudges.clear();
     const settle = (map: Map<string, { reject: (e: Error) => void }>) => {
       for (const pending of map.values()) pending.reject(err);
       map.clear();

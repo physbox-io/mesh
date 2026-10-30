@@ -13,6 +13,7 @@ import { compileSCAD } from '../../utils/openscad';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../../utils/noteCards';
 import { compileCsgNodes, pendingColliderBodies } from '../useCsgCompile';
 import { headlessImpactWarning } from '../../utils/headlessLimits';
+import { headlessImpacts } from './headlessImpacts';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
 import {
@@ -69,20 +70,36 @@ export const sceneCommands: McpCommands = {
     // left the worker's 20,000-frame cap in force, so a long run stopped
     // early and told the caller to raise the stride it had already raised.
     const stride = Math.max(1, Math.floor(Number(msg.stride) || 1));
-    const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride);
+    // Every blow is judged as the live run's are: a body that shatters is
+    // rebuilt as its pieces at that tick (with sleeping on, as live), and
+    // dents are recorded. See headlessImpacts.ts.
+    const impacts = headlessImpacts(sceneGraph, (graph) => compileToMJCF(
+      graph, gravityZ, floorFriction, windX, windY, density, floorBounce, { sleep: true, meshFiles: client.meshFiles },
+    ));
+    const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride, impacts.judge);
     if (stillPending.length > 0) {
       result.warnings = [
         `Gave up waiting after ${HEADLESS_WAIT_FOR_COLLIDERS_MS / 1000} s: the convex pieces of ${stillPending.join(', ')} were still being worked out, so ${stillPending.length === 1 ? 'it' : 'they'} collided as a convex hull with any hollow filled in, and this run does not show their real contact. Wait until physics_get_scene_summary no longer reports collisionPending, then run again.`,
         ...(result.warnings ?? []),
       ];
     }
-    // Shatter and dent are decided on the main thread and never happen here
-    // (utils/headlessLimits.ts): say so, rather than let a whole body in the
-    // trajectory stand for what the live run would do.
+    // Damage the live solver feels and this run does not (utils/headlessLimits.ts).
     const impactWarning = headlessImpactWarning(sceneGraph.nodes);
     if (impactWarning) result.warnings = [...(result.warnings ?? []), impactWarning];
+    // The shards are bodies of the trajectory too: known by id, and kept
+    // whenever the body they came from is asked for.
+    const shards = impacts.shards();
+    const reportGraph = shards.length ? { ...sceneGraph, nodes: [...sceneGraph.nodes, ...shards] } : sceneGraph;
+    const asked: string[] = Array.isArray(msg.bodies) ? msg.bodies.map(String) : [];
+    const requested = asked.length
+      ? [...asked, ...impacts.shattered.filter((b) => asked.includes(b.id) || asked.includes(b.name)).flatMap((b) => b.shards)]
+      : msg.bodies;
     // Names or ids; `final` judged on the whole scene before the filter.
-    return reportHeadless(result, sceneGraph, msg.bodies);
+    return {
+      ...reportHeadless(result, reportGraph, requested),
+      ...(impacts.shattered.length ? { shattered: impacts.shattered } : {}),
+      ...(impacts.dented.length ? { dented: impacts.dented } : {}),
+    };
   },
   TOGGLE_PLAY: async (_msg, { store }) => {
     store.togglePlay();

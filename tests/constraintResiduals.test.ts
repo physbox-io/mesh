@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import load_mujoco from '@mujoco/mujoco';
-import { createConstraintMonitor } from '../src/utils/constraintResiduals';
+import { createConstraintMonitor, mergeConstraintReports, type ConstraintReport } from '../src/utils/constraintResiduals';
 import { compileToMJCF } from '../src/utils/mjcf';
 import type { SceneGraph } from '../src/types/scene';
 
@@ -131,5 +131,29 @@ describe('constraint residuals in a headless run', () => {
     expect(pin.name).toMatch(/^connect_constraint_/);
     expect(pin.bodies).toEqual(['bob', 'post']);
     expect(r.warnings.some((w) => /between bob and post/.test(w))).toBe(true);
+  });
+});
+
+describe('a run rebuilt partway', () => {
+  it('keeps the worst moment from whichever model saw it, and the end from the last', () => {
+    const before: ConstraintReport = {
+      constraints: [{ name: 'weld_constraint_0', kind: 'weld', bodies: ['a', 'b'], worstMm: 3, finalMm: 1, worstDeg: 0.1, finalDeg: 0, worstAtS: 0.2 }],
+      limits: [{ joint: 'j', body: 'a', range: [0, 90], unit: 'deg', worstPast: 5, worstAtS: 0.1, final: 90, finalPast: 0 }],
+      warnings: ['w1'],
+    };
+    const after: ConstraintReport = {
+      constraints: [
+        { name: 'weld_constraint_0', kind: 'weld', bodies: ['a', 'b'], worstMm: 0.5, finalMm: 0.2, worstDeg: 0.1, finalDeg: 0, worstAtS: 0.9, broke: true },
+        { name: 'connect_constraint_1', kind: 'connect', bodies: ['c', 'world'], worstMm: 0.1, finalMm: 0.1, worstAtS: 0.7 },
+      ],
+      limits: [{ joint: 'j', body: 'a', range: [0, 90], unit: 'deg', worstPast: 2, worstAtS: 0.8, final: 88, finalPast: 0 }],
+      warnings: ['w1', 'w2'],
+    };
+    const merged = mergeConstraintReports([before, after]);
+    expect(merged.constraints.map((c) => c.name)).toEqual(['weld_constraint_0', 'connect_constraint_1']);
+    expect(merged.constraints[0]).toMatchObject({ worstMm: 3, worstAtS: 0.2, finalMm: 0.2, broke: true });
+    expect(merged.limits).toEqual([{ ...after.limits[0], worstPast: 5, worstAtS: 0.1 }]);
+    expect(merged.warnings).toEqual(['w1', 'w2']);
+    expect(mergeConstraintReports([after])).toBe(after);
   });
 });
