@@ -307,8 +307,12 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
     flags.static === true ||
     flags.fixed === true ||
     (Array.isArray(b.geoms) && b.geoms.length > 0 && b.geoms.every(g => g.dynamic === false));
+  // A rope is a logical node, not a body: the compiler emits nothing for it,
+  // so a default free joint and 0.25 m box were ghosts that only the scene
+  // summary showed.
+  const logical = b.isPulleyRope === true;
   // A nested body with no joints given is fixed rigidly to its parent.
-  const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested) ? [] : [{ type: 'free' }];
+  const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested || logical) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)
     .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
   const moves = resolvedJoints.length > 0 || parentMoves === true;
@@ -557,7 +561,7 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
   delete rest.radialSegments;
   delete rest.tubularSegments;
 
-  const chosenGeoms = curveGeoms ?? latticeGeoms ?? sculptGeoms ?? b.geoms ?? synthesizedSingleGeom;
+  const chosenGeoms = curveGeoms ?? latticeGeoms ?? sculptGeoms ?? b.geoms ?? (logical ? [] : synthesizedSingleGeom);
   const resolvedGeoms = chosenGeoms.map((g: RawGeom, i: number) =>
     fillGeomDefaults(
       g.rgba === undefined && bodyRgba !== undefined && g.csg !== 'difference'
