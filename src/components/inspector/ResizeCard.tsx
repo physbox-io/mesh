@@ -1,5 +1,6 @@
 import { useStore } from '../../store/useStore';
 import { lengthSpan } from '../../utils/sliderSpan';
+import { guardedEdit, resizedGeomSize } from '../../utils/sizeEdit';
 import type { SceneNode } from '../../types/scene';
 import { ThreadField } from '../ThreadField';
 import { SliderValue } from '../SliderValue';
@@ -27,6 +28,12 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
   const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
   const geom = selectedNode.geoms[activeIndex];
   if (!geom) return null;
+  // A size that is not a positive number is refused here and the control
+  // keeps the size in force; a short size is filled out (utils/sizeEdit).
+  const setSize = (index: number, value: number, entries: number) => {
+    const size = resizedGeomSize(geom.size, index, value, entries);
+    if (size) guardedEdit(() => updateNodeGeom(selectedNode.id, { size }, activeIndex));
+  };
   return (
     <>
       {!selectedNode.id.includes('gear') && (
@@ -49,14 +56,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
             <div className="flex flex-col gap-2">
               <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={geom.size[0]} onChange={(v) => {
                   const r = v;
-                  updateNodeGeom(selectedNode.id, { size: [r] }, activeIndex);
+                  setSize(0, r, 1);
                 }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
               <RangeInput 
                 {...lengthSpan(geom.size[0])}
                 value={geom.size[0]}
                 onChange={(v) => {
                   const r = v;
-                  updateNodeGeom(selectedNode.id, { size: [r] }, activeIndex);
+                  setSize(0, r, 1);
                 }}
                 className="w-full accent-blue-500 cursor-pointer" 
               />
@@ -72,14 +79,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Radius X <SliderValue value={geom.size[0]} onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
+                    setSize(0, val, 3);
                   }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
                 <RangeInput 
                   {...lengthSpan(geom.size[0])}
                   value={geom.size[0]}
                   onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
+                    setSize(0, val, 3);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
@@ -87,14 +94,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Y <SliderValue value={geom.size[1]} onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
+                    setSize(1, val, 3);
                   }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
                 <RangeInput 
                   {...lengthSpan(geom.size[1])}
                   value={geom.size[1]}
                   onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
+                    setSize(1, val, 3);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
@@ -102,14 +109,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Z <SliderValue value={geom.size[2]} onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
+                    setSize(2, val, 3);
                   }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
                 <RangeInput 
                   {...lengthSpan(geom.size[2])}
                   value={geom.size[2]}
                   onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
+                    setSize(2, val, 3);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
@@ -122,14 +129,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Width (X) <SliderValue value={geom.size[0]} onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
+                    setSize(0, val, 3);
                   }} decimals={1} unit="mm" scale={2000} min={0.01} /></label>
                 <RangeInput 
                   {...lengthSpan(geom.size[0])}
                   value={geom.size[0]}
                   onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
+                    setSize(0, val, 3);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
@@ -137,14 +144,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <SliderValue value={geom.size[1]} onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
+                    setSize(1, val, 3);
                   }} decimals={1} unit="mm" scale={2000} min={0.01} /></label>
                 <RangeInput 
                   {...lengthSpan(geom.size[1])}
                   value={geom.size[1]}
                   onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
+                    setSize(1, val, 3);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
@@ -152,14 +159,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={geom.size[2]} onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
+                    setSize(2, val, 3);
                   }} decimals={1} unit="mm" scale={2000} min={0.01} /></label>
                 <RangeInput 
                   {...lengthSpan(geom.size[2])}
                   value={geom.size[2]}
                   onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
+                    setSize(2, val, 3);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
@@ -172,18 +179,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={geom.size[0]} onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { 
-                      size: geom.size[1] !== undefined ? [val, geom.size[1]] : [val] 
-                    }, activeIndex);
+                    setSize(0, val, geom.size[1] !== undefined ? 2 : 1);
                   }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
                 <RangeInput 
                   {...lengthSpan(geom.size[0])}
                   value={geom.size[0]}
                   onChange={(v) => {
                     const val = v;
-                    updateNodeGeom(selectedNode.id, { 
-                      size: geom.size[1] !== undefined ? [val, geom.size[1]] : [val] 
-                    }, activeIndex);
+                    setSize(0, val, geom.size[1] !== undefined ? 2 : 1);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
@@ -192,14 +195,14 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-medium text-slate-500 flex justify-between">{geom.type === 'capsule' ? 'Length (straight part)' : 'Length'} <SliderValue value={geom.size[1]} onChange={(v) => {
                       const val = v;
-                      updateNodeGeom(selectedNode.id, { size: [geom.size[0], val] }, activeIndex);
+                      setSize(1, val, 2);
                     }} decimals={1} unit="mm" scale={2000} min={0.01} /></label>
                   <RangeInput 
                     {...lengthSpan(geom.size[1])}
                     value={geom.size[1]}
                     onChange={(v) => {
                       const val = v;
-                      updateNodeGeom(selectedNode.id, { size: [geom.size[0], val] }, activeIndex);
+                      setSize(1, val, 2);
                     }}
                     className="w-full accent-blue-500 cursor-pointer" 
                   />
@@ -232,7 +235,7 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
                           fromto[1] + dirY * scale,
                           fromto[2] + dirZ * scale
                         ];
-                        updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex);
+                        guardedEdit(() => updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex));
                       }} decimals={1} unit="mm" scale={1000} min={0.01} />
                     </label>
                     <RangeInput 
@@ -249,7 +252,7 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
                           fromto[1] + dirY * scale,
                           fromto[2] + dirZ * scale
                         ];
-                        updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex);
+                        guardedEdit(() => updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex));
                       }}
                       className="w-full accent-blue-500 cursor-pointer" 
                     />

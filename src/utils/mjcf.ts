@@ -7,6 +7,8 @@ import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
 import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
+import { geomSizeProblem } from './geomSize';
+import { applyBodyMass } from './bodyMass';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
@@ -48,9 +50,20 @@ const getCachedWedgeMeshData = (w: number, d: number, h: number) => {
   return cached;
 };
 
-const formatGeomSize = (type: string, rawSize: unknown): string => {
+const formatGeomSize = (type: string, rawSize: unknown, geom?: SceneGeom): string => {
+  // A size given but unusable (negative, zero, text) is an error, named, not a
+  // silent 0.1 m: a negative box used to come out 200 mm and 0.32 kg. The MCP
+  // and the store refuse one on the way in (utils/geomSize); this catches a
+  // document that already held one. Only a size left out, or a data-less mesh
+  // standing in as a box, takes the default below.
+  if (geom) {
+    const problem = geomSizeProblem({ ...geom, type });
+    if (problem) throw new Error(problem);
+  }
+  // A hole in the list is an entry left out, read from the first as a short
+  // size is; only a data-less mesh standing in as a box still gets 0.1.
   const arr = Array.isArray(rawSize)
-    ? rawSize.map((v: unknown) => (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1)
+    ? rawSize.map((v: unknown) => (v === undefined ? undefined : (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1))
     : [0.1, 0.1, 0.1];
 
   if (type === 'sphere') {
@@ -194,7 +207,7 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
 
   let attrs = `name="${xmlAttr(geom.name)}" type="${geomType}"`;
   if (!isMesh) {
-    attrs += ` size="${formatGeomSize(geomType, geom.size)}"`;
+    attrs += ` size="${formatGeomSize(geomType, geom.size, geom.type === 'mesh' ? undefined : geom)}"`;
   } else {
     attrs += ` mesh="${xmlAttr(geom.name)}"`;
   }
@@ -515,9 +528,13 @@ export const compileToMJCF = (
   // mesh has been decomposed — its convex pieces. Runs before everything else so
   // name-uniqueness and mesh-asset collection only ever see geoms that will
   // really be emitted. A body with nothing derived is returned untouched.
+  // Each body's own geom list, before it is resolved: a convex piece's source
+  // mesh is dropped from what is emitted, and bodyMass needs to find it.
+  const authoredGeoms = new Map<SceneNode, SceneGeom[]>();
   const resolveCsg = (nodes: SceneNode[]) => {
     if (!nodes) return;
     for (const node of nodes) {
+      authoredGeoms.set(node, node.geoms || []);
       node.geoms = resolveCsgGeoms(node, 'physics');
       resolveCsg(node.children || []);
     }
@@ -526,6 +543,15 @@ export const compileToMJCF = (
 
   const printFidelity = scene.simFidelity === 'print';
   applyContactClasses(sceneCopy.nodes, printFidelity);
+  // A body's own mass or density, handed to the geoms that are emitted (see
+  // utils/bodyMass): MJCF has nowhere to put it on the body itself.
+  const applyBodyMasses = (nodes: SceneNode[]) => {
+    for (const node of nodes) {
+      node.geoms = applyBodyMass(node, node.geoms || [], authoredGeoms.get(node) ?? node.geoms ?? []);
+      applyBodyMasses(node.children || []);
+    }
+  };
+  applyBodyMasses(sceneCopy.nodes);
 
   // The viewport finds each body and geom by its name, so a clash would bind
   // the lookups for both to whichever MuJoCo registered first. Renamed by the

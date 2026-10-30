@@ -157,3 +157,69 @@ export function seedNewBodies(
   seedNew(nodes);
   return seededNew;
 }
+
+/** Every actuator's control value carried across, by name. Returns the names placed. */
+export function copyCarriedActuators(
+  carried: CarriedState,
+  newModel: MjModel,
+  newData: MjData,
+  actuatorIdOf: Record<string, number>,
+): Set<string> {
+  const placed = new Set<string>();
+  for (const name in actuatorIdOf) {
+    if (!Object.prototype.hasOwnProperty.call(carried.actuators, name)) continue;
+    const id = actuatorIdOf[name];
+    if (id >= 0 && id < newModel.nu) {
+      newData.ctrl[id] = carried.actuators[name];
+      placed.add(name);
+    }
+  }
+  return placed;
+}
+
+/** The document's control value for every actuator that has one, by actuator name. */
+export function documentCtrlValues(nodes: SceneNode[] | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  const walk = (list: SceneNode[] | undefined) => {
+    if (!list) return;
+    for (const node of list) {
+      for (const j of node.joints ?? []) {
+        if (j.actuator?.ctrlValue !== undefined) out[`${j.name}_actuator`] = j.actuator.ctrlValue;
+      }
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+/**
+ * A control value the document has just changed wins over the one carried.
+ *
+ * A rebuild mid-play carries every actuator's live ctrl across, so that what a
+ * script or the Volt link set survives an unrelated edit. But an edit of the
+ * motor's own set speed is a rebuild too, and the carried value used to
+ * overwrite it: the new gain (in the model) took, the new speed (in ctrl) was
+ * thrown away. So any actuator whose document ctrlValue differs from the one
+ * the replaced model was built with is set from the document. Returns the
+ * names written.
+ */
+export function applyEditedCtrl(
+  before: Record<string, number> | null | undefined,
+  nodes: SceneNode[],
+  newModel: MjModel,
+  newData: MjData,
+  actuatorIdOf: Record<string, number>,
+): string[] {
+  if (!before) return [];
+  const now = documentCtrlValues(nodes);
+  const written: string[] = [];
+  for (const name in now) {
+    if (before[name] === now[name]) continue;
+    const id = actuatorIdOf[name];
+    if (id === undefined || id < 0 || id >= newModel.nu) continue;
+    newData.ctrl[id] = now[name];
+    written.push(name);
+  }
+  return written;
+}

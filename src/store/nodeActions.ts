@@ -17,6 +17,7 @@ import { detachReferencesTo } from './breakage';
 import { MUJOCO_SHIM, getPhysicsWorkerClient } from './physicsEngine';
 import type { SliceDeps } from './sliceDeps';
 import { takeEnvironment } from './sceneEnvironment';
+import { assertGeomSizes } from '../utils/geomSize';
 
 /** A node's own transform, as MJCF would apply it under its parent. */
 const localMatrixOf = (node: SceneNode): THREE.Matrix4 => {
@@ -217,6 +218,8 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
     },
 
     updateNode: (id, updates) => {
+      // A bad geom size is refused, not written for the compiler to guess at.
+      if (updates.geoms) assertGeomSizes(updates.geoms, updates.name ?? id);
       get().recordInteraction('node');
       const newScene = cloneSceneGraph(get().sceneGraph);
       const traverse = (nodes: SceneNode[]): boolean => {

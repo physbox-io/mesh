@@ -431,6 +431,7 @@
       "mesh"
     ],
     "geomSizes": {
+      "rule": "Every size entry a shape reads must be a positive number in metres (a plane's may be 0, meaning infinite). A negative, zero, NaN or text entry is refused with an error naming the geom and the entry, and nothing is changed; it is never replaced with a default. A size left out entirely takes the default.",
       "box": "half-extents [hx, hy, hz]. Full dimensions are 2*hx × 2*hy × 2*hz",
       "sphere": "radius [r]",
       "capsule": "[radius, half-height]: a cylinder of half-height hh capped with hemispheres of radius r. Or use fromto to specify endpoints directly. ALWAYS supply both elements (or fromto): a 1-element [radius] does not error, it silently falls back to half-height = radius and collapses the geom into a tiny stub pill at its pos.",
@@ -497,7 +498,9 @@
     },
     "nodeFields": {
       "core": {
-        "id": "string: unique body identifier",
+        "id": "string: unique body identifier (defaults to the name). A body that reuses an id already taken earlier in the scene (depth first) is renamed id_2, id_3 ..., as clashing names are; physics_build_scene and physics_update_scene list any such renames in `renamedIds` and address that body by its new id from then on.",
+        "mass": "number kg: the body's total mass. Shared over its solid geoms in proportion to what each would weigh on its own (stated mass, else volume x density), so the centre of mass stays where the shape puts it; a decomposed mesh body's convex pieces are scaled the same way. Visual geoms stay weightless. On a boolean body it is shared across its colliders, like collisionMass.",
+        "density": "number kg/m3: density for every solid geom on the body that states neither mass nor density of its own. A body `mass` set as well wins over it for the total.",
         "name": "string: display name and MuJoCo XML name",
         "type": "always 'body' (or shorthand geom type when `geoms` is omitted)",
         "pos": "[x,y,z]: position relative to parent (or world for root)",

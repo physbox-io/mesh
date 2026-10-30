@@ -14,7 +14,8 @@ import { prewarmFractureWorker } from '../utils/fractureWorkerClient';
 import { useDialogs } from './dialogStore';
 import { downloadSceneRescue, allowUnload } from '../utils/rescueScene';
 import { refusedGraphs, keptGraphs } from './editGuard';
-import { noteModelBuilt } from './modelProvenance';
+import { modelBuiltFrom, noteModelBuilt } from './modelProvenance';
+import { documentCtrlValues } from '../workers/carryState';
 import { clearBreakage, anyNode, applyShatterPieces } from './breakage';
 import {
   type PhysicsWindow, MUJOCO_SHIM, buildModelMirror, buildDataMirror, RECYCLE_HEAP_BYTES,
@@ -348,6 +349,8 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
               ctrl: Array.from(live.ctrl as Float64Array),
               time: live.time as number,
               scriptState: lastScriptState,
+              // The set speeds that ctrl was running under; see applyEditedCtrl.
+              docCtrl: documentCtrlValues(modelBuiltFrom().graph?.nodes),
             }
           : undefined;
 
@@ -385,6 +388,8 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
                   ctrl: Array.from(live.ctrl as Float64Array),
                   time: live.time as number,
                   scriptState: lastScriptState,
+                  // The set speeds that ctrl was running under; see applyEditedCtrl.
+                  docCtrl: documentCtrlValues(modelBuiltFrom().graph?.nodes),
                 }
               : undefined;
             recycleWorker();
@@ -510,6 +515,8 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         // A fresh worker is a fresh realm: without this every script's api.state
         // (and, as ever, its globals) would be wiped mid-play.
         scriptState: lastScriptState,
+        // The set speeds that ctrl was running under; see applyEditedCtrl.
+        docCtrl: documentCtrlValues(modelBuiltFrom().graph?.nodes),
       };
       recycleWorker();
       try {
