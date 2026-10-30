@@ -34,6 +34,7 @@ import {
 } from './bodyFeatures';
 import { autoCompileScad } from './settleScene';
 import type { McpCommands } from './types';
+import { unresolvedReferences, unresolvedReferenceWarnings } from '../../utils/unresolvedReferences';
 
 /**
  * Puts a free body where its document now says, in the running simulation too,
@@ -89,6 +90,8 @@ export const objectCommands: McpCommands = {
     const nodes = parent
       ? withChild(store.sceneGraph.nodes, parent.id, node)
       : [...store.sceneGraph.nodes, node];
+    // Read before the store drops them: a typo in a target id did nothing, ok:true.
+    const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes, new Set([node.id])));
     store.updateScene({ ...store.sceneGraph, nodes }, true);
     await autoCompileScad([node]);
     await applyDeclarativePreCsgFeatures([node]);
@@ -106,6 +109,7 @@ export const objectCommands: McpCommands = {
       ok: !addError && !!landed,
       ...(addError ? { error: addError } : {}),
       ...(added.length ? { scriptWarnings: added } : {}),
+      ...(referenceWarnings.length ? { referenceWarnings } : {}),
       id: node.id,
       name: landed?.name ?? node.name,
       ...(parent ? { parent: parent.id } : {}),
@@ -170,12 +174,16 @@ export const objectCommands: McpCommands = {
 
     // A geom type, coordinate or size MuJoCo would refuse with an XML line
     // number is refused here, by name, before the body is touched.
+    const next = { ...target, ...updates } as SceneNode;
     try {
-      const next = { ...target, ...updates } as SceneNode;
       checkIncomingBody(next, (next.joints || []).length > 0);
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+    // Read before the store drops them: a typo in a target id did nothing, ok:true.
+    const replaced = (list: SceneNode[]): SceneNode[] =>
+      list.map((n) => (n.id === targetId ? next : { ...n, children: replaced(n.children || []) }));
+    const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(replaced(store.sceneGraph.nodes), new Set([targetId])));
 
     if (rawCuts || normRoundEdges || rawPatterns || rawPaint) {
       pendingDeclarativeOps.set(targetId, {
@@ -262,6 +270,7 @@ export const objectCommands: McpCommands = {
     // Says what was taken, so a caller can see its whole update landed.
     return {
       ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}),
+      ...(referenceWarnings.length ? { referenceWarnings } : {}),
       ...(scriptError ? { scriptWarnings: [`Script on '${target.name || targetId}' does not compile: ${scriptError}. It was saved as written and will do nothing until fixed.`] } : {}),
     };
   },
