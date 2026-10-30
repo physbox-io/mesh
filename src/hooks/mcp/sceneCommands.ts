@@ -6,7 +6,7 @@
 import { captureViewportThumb } from '../../utils/viewportCapture';
 import { savePreset } from '../../utils/presetStorage';
 import { announcePresetSave } from '../../utils/presetNotices';
-import { emptySceneRefusal, reportHeadless } from '../../utils/headlessReport';
+import { emptySceneRefusal, frameSections, reportHeadless } from '../../utils/headlessReport';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
@@ -110,7 +110,12 @@ export const sceneCommands: McpCommands = {
     const impacts = headlessImpacts(sceneGraph, (graph) => compileToMJCF(
       graph, gravityZ, floorFriction, windX, windY, density, floorBounce, { sleep: true, meshFiles: client.meshFiles },
     ));
-    const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride, impacts.judge);
+    // include: ['bodies','joints','contacts','aero'] as physics_get_history's; contacts left out
+    // are never gathered, which is most of a frame on a scene of a few bodies.
+    const sections = frameSections(msg.include);
+    const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride, impacts.judge, {
+      contacts: !sections || sections.has('contacts'),
+    });
     if (stillPending.length > 0) {
       result.warnings = [
         `Gave up waiting after ${HEADLESS_WAIT_FOR_COLLIDERS_MS / 1000} s: the convex pieces of ${stillPending.join(', ')} were still being worked out, so ${stillPending.length === 1 ? 'it' : 'they'} collided as a convex hull with any hollow filled in, and this run does not show their real contact. Wait until physics_get_scene_summary no longer reports collisionPending, then run again.`,
@@ -130,7 +135,7 @@ export const sceneCommands: McpCommands = {
       : msg.bodies;
     // Names or ids; `final` judged on the whole scene before the filter.
     return {
-      ...reportHeadless(result, reportGraph, requested),
+      ...reportHeadless(result, reportGraph, requested, msg.include),
       ...(impacts.shattered.length ? { shattered: impacts.shattered } : {}),
       ...(impacts.dented.length ? { dented: impacts.dented } : {}),
     };

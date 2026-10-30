@@ -26,6 +26,7 @@ import type load_mujoco from '@mujoco/mujoco';
 import type { SceneNode } from '../types/scene';
 import type { ImpactEvent } from './physicsWorkerProtocol';
 import { shatterFloor } from '../utils/breakThresholds';
+import { bodyAngularVelocity, bodyPointVelocity } from './bodyKinematics';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -292,6 +293,7 @@ export function checkImpacts(w: ImpactWatches, mdl: MjModel | null, dat: MjData 
       const otherNodeId = otherBodyId >= 0 ? w.bodyIdToNodeId[otherBodyId] : undefined;
       const otherSite = otherBodyId >= 0 ? impactSiteOf(mdl, dat, otherBodyId, watch.bodyId) : null;
       const b = watch.bodyId;
+      const views = { cvel: dat.cvel, xpos: dat.xpos, subtreeCom: dat.subtree_com, rootId: mdl.body_rootid };
 
       events.push({
         nodeId: watch.nodeId,
@@ -304,8 +306,9 @@ export function checkImpacts(w: ImpactWatches, mdl: MjModel | null, dat: MjData 
         localNormal: normal,
         pos: [dat.xpos[b * 3], dat.xpos[b * 3 + 1], dat.xpos[b * 3 + 2]],
         xmat: Array.from({ length: 9 }, (_, i) => dat.xmat[b * 9 + i]),
-        vel: [dat.cvel[b * 6 + 3], dat.cvel[b * 6 + 4], dat.cvel[b * 6 + 5]],
-        angvel: [dat.cvel[b * 6], dat.cvel[b * 6 + 1], dat.cvel[b * 6 + 2]],
+        // The origin's velocity (runtimeShatter adds ω × r from `pos`), not cvel's tree-COM point.
+        vel: bodyPointVelocity(views, b),
+        angvel: bodyAngularVelocity(views, b),
       });
       continue;
     }

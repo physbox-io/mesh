@@ -11,6 +11,12 @@ import type { HistoryEntry } from '../workers/physicsWorkerProtocol';
  * judged here: a body has settled when it moved less than 1 mm/s and turned
  * less than 0.5 °/s throughout it, and is rocking when its tilt turned round
  * at least twice in the last second by more than a fifth of a degree.
+ *
+ * It is judged as the run goes, frame by frame (TrajectoryAccumulator), so a
+ * headless run feeds it every tick and `final` does not depend on the stride
+ * the trajectory was kept at: at stride 500 a ramp roll's turn used to alias
+ * from 439° down to 79°, and `settled` was judged on the one kept frame that
+ * fell in the last half second.
  */
 
 /** Window over which a body must stay still to count as settled, in seconds. */
@@ -19,6 +25,14 @@ const SETTLED_SPEED_MS = 0.001;
 const SETTLED_TURN_RADS = (0.5 * Math.PI) / 180;
 const ROCK_WINDOW_S = 1;
 const ROCK_MIN_DEG = 0.2;
+/**
+ * Steady drift under the settled speed that still counts as moving, m/s.
+ * Soft contacts let a block below its friction angle slide at a constant
+ * 0.2-0.8 mm/s (8 mm in 10 s) and a self-locked wedge back out at 0.25-0.5
+ * mm/s for ever, both under the 1 mm/s that `settled` allows. A body at rest
+ * on the level drifts by nothing at all, so the floor can sit far below that.
+ */
+const CREEP_SPEED_MS = 0.00005;
 
 export interface BodyFinal {
   /** The body's name, where it differs from the id it is keyed by. */
@@ -36,8 +50,17 @@ export interface BodyFinal {
   netTurnedDeg: number;
   speedMmS: number;
   angSpeedDegS: number;
+  /** The fastest the body went over the run, mm/s and °/s. */
+  peakSpeedMmS: number;
+  peakAngSpeedDegS: number;
   settled: boolean;
   rocking: boolean;
+  /**
+   * Under the settled speeds, but drifting steadily all through the last
+   * half second (contact creep): not settled. `creepMmS` is the rate.
+   */
+  creeping?: boolean;
+  creepMmS?: number;
 }
 
 export interface TrajectorySummary {
@@ -48,6 +71,8 @@ export interface TrajectorySummary {
   settled: boolean;
   /** Body ids and joint names still moving at the end, when not settled. */
   moving?: string[];
+  /** Of `moving`, the bodies only creeping: see BodyFinal.creeping. */
+  creeping?: string[];
   /** Seconds of simulated time the run covered. */
   durationS: number;
   bodies: Record<string, BodyFinal>;
@@ -119,74 +144,166 @@ export interface SummaryOptions {
   jointTypes?: Record<string, string>;
 }
 
-export function summarizeTrajectory(trajectory: HistoryEntry[], options: SummaryOptions = {}): TrajectorySummary | null {
-  if (trajectory.length === 0) return null;
-  const first = trajectory[0];
-  const last = trajectory[trajectory.length - 1];
-  const durationS = last.time - first.time;
-  const settleFrom = last.time - SETTLE_WINDOW_S;
-  const rockFrom = last.time - ROCK_WINDOW_S;
-  const judged = durationS >= SETTLE_WINDOW_S;
+/** Tilts are kept for the rock test no closer together than this, s: bounds memory at one frame a tick. */
+const TILT_SAMPLE_S = 0.002;
 
-  const bodies: Record<string, BodyFinal> = {};
-  const moving: string[] = [];
-  let allSettled = judged;
-  for (const [id, end] of Object.entries(last.bodies || {})) {
-    let still = judged;
-    const tilts: number[] = [];
-    let turned = 0;
-    let prev: { quat: number[]; angvel: number[]; time: number } | null = null;
-    for (const frame of trajectory) {
-      const b = frame.bodies?.[id];
-      if (!b) continue;
-      if (b.quat) {
-        if (prev) turned += stepTurnDeg(prev.quat, b.quat, prev.angvel, b.angvel, frame.time - prev.time);
-        prev = { quat: b.quat, angvel: b.angvel, time: frame.time };
-      }
-      if (frame.time >= settleFrom) {
-        if (len(b.vel) > SETTLED_SPEED_MS || len(b.angvel) > SETTLED_TURN_RADS) still = false;
-      }
-      if (frame.time >= rockFrom && b.quat) tilts.push(tiltOf(b.quat));
-    }
-    const rocking = tilts.length > 2 && reversals(tilts, ROCK_MIN_DEG) >= 2;
-    const settled = still && !rocking;
-    if (!settled) { allSettled = false; if (judged) moving.push(id); }
-    const startQuat = first.bodies?.[id]?.quat;
-    bodies[id] = {
-      posMm: [end.pos[0] * 1000, end.pos[1] * 1000, end.pos[2] * 1000].map((v) => Math.round(v * 10) / 10) as [
-        number,
-        number,
-        number,
-      ],
-      tiltDeg: end.quat ? Math.round(tiltOf(end.quat) * 10) / 10 : 0,
-      turnedDeg: Math.round(turned * 10) / 10,
-      netTurnedDeg: end.quat && startQuat ? Math.round(angleBetween(startQuat, end.quat) * 10) / 10 : 0,
-      speedMmS: Math.round(len(end.vel) * 10000) / 10,
-      angSpeedDegS: Math.round(((len(end.angvel) * 180) / Math.PI) * 10) / 10,
-      settled,
-      rocking,
-    };
+interface BodyTrack {
+  firstQuat?: number[];
+  prev: { quat: number[]; angvel: number[]; time: number } | null;
+  turned: number;
+  /** Last frame time the body was over the settled speeds (or NaN). */
+  lastMoving: number;
+  /** (time, tilt, position) over the last ROCK_WINDOW_S, oldest first; tilt NaN without a quat. */
+  tiltT: number[];
+  tilt: number[];
+  pos: number[][];
+  end: BodyHistoryLike;
+  seen: number;
+  peakSpeed: number;
+  peakAng: number;
+}
+
+type BodyHistoryLike = { pos: number[]; vel: number[]; angvel: number[]; quat?: number[] };
+
+/**
+ * `final`, built a frame at a time. Feed it every tick (or every kept frame)
+ * in time order; `result()` judges the run up to the last frame fed.
+ */
+export class TrajectoryAccumulator {
+  private bodies = new Map<string, BodyTrack>();
+  /** Joint name -> last frame time it was over its settled speed. */
+  private joints = new Map<string, number>();
+  private firstTime = NaN;
+  private lastTime = NaN;
+  private readonly types: Record<string, string>;
+
+  constructor(options: SummaryOptions = {}) {
+    this.types = options.jointTypes ?? {};
   }
-  // The joints as well: a joint whose body the frames do not carry would
-  // otherwise turn unseen, and a NaN speed is never still.
-  if (judged) {
-    const types = options.jointTypes ?? {};
-    const fastest: Record<string, number> = {};
-    for (const frame of trajectory) {
-      if (frame.time < settleFrom) continue;
-      for (const [name, j] of Object.entries(frame.joints || {})) {
-        // Free and ball joints carry vectors; their bodies are judged instead.
-        if (typeof j.vel !== 'number') continue;
-        const v = Math.abs(j.vel);
-        if (!(v <= (fastest[name] ?? 0))) fastest[name] = v;
+
+  add(frame: { time: number; bodies?: Record<string, BodyHistoryLike>; joints?: Record<string, { vel: number | number[] }> }): void {
+    const t = frame.time;
+    if (Number.isNaN(this.firstTime)) this.firstTime = t;
+    this.lastTime = t;
+    for (const [id, b] of Object.entries(frame.bodies || {})) {
+      let k = this.bodies.get(id);
+      if (!k) {
+        k = { prev: null, turned: 0, lastMoving: -Infinity, tiltT: [], tilt: [], pos: [], end: b, seen: t, peakSpeed: 0, peakAng: 0 };
+        this.bodies.set(id, k);
       }
+      k.end = b;
+      k.seen = t;
+      if (b.quat) {
+        if (!k.firstQuat) k.firstQuat = b.quat;
+        if (k.prev) k.turned += stepTurnDeg(k.prev.quat, b.quat, k.prev.angvel, b.angvel, t - k.prev.time);
+        k.prev = { quat: b.quat, angvel: b.angvel, time: t };
+      }
+      const n = k.tiltT.length;
+      if (n === 0 || t - k.tiltT[n - 1] >= TILT_SAMPLE_S) {
+        k.tiltT.push(t); k.tilt.push(b.quat ? tiltOf(b.quat) : NaN); k.pos.push(b.pos);
+        // Nothing older than a window before now can be in the last window.
+        let drop = 0;
+        while (drop < k.tiltT.length && k.tiltT[drop] < t - ROCK_WINDOW_S) drop++;
+        if (drop > 64) { k.tiltT.splice(0, drop); k.tilt.splice(0, drop); k.pos.splice(0, drop); }
+      }
+      const v = len(b.vel), w = len(b.angvel);
+      if (!(v <= SETTLED_SPEED_MS) || !(w <= SETTLED_TURN_RADS)) k.lastMoving = t;
+      if (v > k.peakSpeed) k.peakSpeed = v;
+      if (w > k.peakAng) k.peakAng = w;
     }
-    for (const [name, v] of Object.entries(fastest)) {
-      const type = types[name];
+    // The joints as well: a joint whose body the frames do not carry would
+    // otherwise turn unseen, and a NaN speed is never still.
+    for (const [name, j] of Object.entries(frame.joints || {})) {
+      // Free and ball joints carry vectors; their bodies are judged instead.
+      if (typeof j.vel !== 'number') continue;
+      const type = this.types[name];
       if (type === 'free' || type === 'ball') continue;
       const limit = type === 'hinge' ? SETTLED_TURN_RADS : SETTLED_SPEED_MS;
-      if (!(v <= limit)) { allSettled = false; moving.push(name); }
+      if (!this.joints.has(name)) this.joints.set(name, -Infinity);
+      if (!(Math.abs(j.vel) <= limit)) this.joints.set(name, t);
     }
   }
-  return { settled: allSettled, ...(moving.length ? { moving } : {}), durationS, bodies };
+
+  result(): TrajectorySummary | null {
+    if (Number.isNaN(this.lastTime)) return null;
+    const durationS = this.lastTime - this.firstTime;
+    const settleFrom = this.lastTime - SETTLE_WINDOW_S;
+    const rockFrom = this.lastTime - ROCK_WINDOW_S;
+    const judged = durationS >= SETTLE_WINDOW_S;
+
+    const bodies: Record<string, BodyFinal> = {};
+    const moving: string[] = [];
+    const creepers: string[] = [];
+    let allSettled = judged;
+    for (const [id, k] of this.bodies) {
+      // Bodies of the last frame only: a body gone by then (shattered) has no end state.
+      if (k.seen !== this.lastTime) continue;
+      const end = k.end;
+      const still = judged && k.lastMoving < settleFrom;
+      const tilts = k.tilt.filter((v, i) => k.tiltT[i] >= rockFrom && !Number.isNaN(v));
+      const rocking = tilts.length > 2 && reversals(tilts, ROCK_MIN_DEG) >= 2;
+      const creep = still && !rocking ? creepRate(k, settleFrom, this.lastTime) : 0;
+      const creeping = creep >= CREEP_SPEED_MS;
+      const settled = still && !rocking && !creeping;
+      if (!settled) { allSettled = false; if (judged) moving.push(id); }
+      if (creeping) creepers.push(id);
+      bodies[id] = {
+        posMm: [end.pos[0] * 1000, end.pos[1] * 1000, end.pos[2] * 1000].map((v) => Math.round(v * 10) / 10) as [
+          number,
+          number,
+          number,
+        ],
+        tiltDeg: end.quat ? Math.round(tiltOf(end.quat) * 10) / 10 : 0,
+        turnedDeg: Math.round(k.turned * 10) / 10,
+        netTurnedDeg: end.quat && k.firstQuat ? Math.round(angleBetween(k.firstQuat, end.quat) * 10) / 10 : 0,
+        speedMmS: Math.round(len(end.vel) * 10000) / 10,
+        angSpeedDegS: Math.round(((len(end.angvel) * 180) / Math.PI) * 10) / 10,
+        peakSpeedMmS: Math.round(k.peakSpeed * 10000) / 10,
+        peakAngSpeedDegS: Math.round(((k.peakAng * 180) / Math.PI) * 10) / 10,
+        settled,
+        rocking,
+        ...(creeping ? { creeping, creepMmS: Math.round(creep * 1e5) / 100 } : {}),
+      };
+    }
+    if (judged) {
+      for (const [name, last] of this.joints) {
+        if (last >= settleFrom) { allSettled = false; moving.push(name); }
+      }
+    }
+    return {
+      settled: allSettled, ...(moving.length ? { moving } : {}), ...(creepers.length ? { creeping: creepers } : {}),
+      durationS, bodies,
+    };
+  }
+}
+
+/**
+ * A body's steady drift over the settle window, m/s, or 0 when it is not
+ * steady: the second half must keep up at least half the first half's rate,
+ * so a body still easing into its contacts (fast, then nothing) is not
+ * creeping and one sliding at a constant crawl is.
+ */
+function creepRate(k: BodyTrack, from: number, to: number): number {
+  const i0 = k.tiltT.findIndex((t) => t >= from);
+  if (i0 < 0) return 0;
+  const t0 = k.tiltT[i0];
+  if (!(to - t0 >= SETTLE_WINDOW_S * 0.8)) return 0;
+  const mid = (t0 + to) / 2;
+  let im = i0;
+  while (im + 1 < k.tiltT.length && k.tiltT[im + 1] <= mid) im++;
+  const p0 = k.pos[i0], pm = k.pos[im], p1 = k.end.pos;
+  const d = (a: number[], b: number[]) => Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+  const tm = k.tiltT[im];
+  if (!(tm > t0) || !(to > tm)) return 0;
+  const r1 = d(p0, pm) / (tm - t0);
+  const r2 = d(pm, p1) / (to - tm);
+  if (r2 < 0.5 * r1) return 0;
+  return d(p0, p1) / (to - t0);
+}
+
+/** `final` from a list of frames (a kept trajectory). A run fed every tick is judged more exactly. */
+export function summarizeTrajectory(trajectory: HistoryEntry[], options: SummaryOptions = {}): TrajectorySummary | null {
+  const acc = new TrajectoryAccumulator(options);
+  for (const frame of trajectory) acc.add(frame);
+  return acc.result();
 }

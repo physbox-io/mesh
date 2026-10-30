@@ -859,8 +859,8 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                     title: '📖 Reading body state',
                     rows: [
                       ['api.getPosition(bodyName?)', 'World position as [x, y, z], in metres (×1000 for mm).'],
-                      ['api.getVelocity(bodyName?)', 'Linear velocity as [vx, vy, vz], in m/s.'],
-                      ['api.getAngularVelocity(bodyName?)', 'Angular velocity as [wx, wy, wz], in rad/s.'],
+                      ['api.getVelocity(bodyName?)', 'Linear velocity of the body origin as [vx, vy, vz], world frame, in m/s.'],
+                      ['api.getAngularVelocity(bodyName?)', 'Angular velocity as [wx, wy, wz], world frame, in rad/s.'],
                       ['api.getOrientation(bodyName?)', 'Orientation as a flat 9-element row-major rotation matrix.'],
                       ['api.getMass(bodyName?)', 'Body mass in kg, as computed from its geoms.'],
                     ],
