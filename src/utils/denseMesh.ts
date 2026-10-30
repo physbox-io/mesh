@@ -23,6 +23,24 @@
 // ---------------------------------------------------------------------------
 
 import { PairMemo } from './arrayMemo';
+import type { SceneGeom } from '../types/scene';
+
+type Simplifier = typeof import('meshoptimizer/simplifier')['MeshoptSimplifier'];
+let simplifier: Simplifier | null = null;
+let loading: Promise<Simplifier> | null = null;
+
+/** Loads the simplifier's wasm once; later calls return the same promise. */
+export function loadSimplifier(): Promise<Simplifier> {
+  loading ??= import('meshoptimizer/simplifier').then(async ({ MeshoptSimplifier }) => {
+    await MeshoptSimplifier.ready;
+    simplifier = MeshoptSimplifier;
+    return MeshoptSimplifier;
+  });
+  return loading;
+}
+
+/** Whether colliderCopySync can run now. */
+export const simplifierReady = () => simplifier !== null;
 
 /** Above this many triangles a mesh gets a simplified copy to collide as. */
 export const DENSE_MESH_TRIANGLES = 200_000;
@@ -107,12 +125,23 @@ export interface ColliderCopy {
 export async function colliderCopyOf(
   vertices: ArrayLike<number>,
   faces: ArrayLike<number>,
-  { threshold = DENSE_MESH_TRIANGLES, budget = COLLIDER_TRIANGLE_BUDGET }: { threshold?: number; budget?: number } = {},
+  opts: { threshold?: number; budget?: number } = {},
 ): Promise<ColliderCopy | null> {
+  if (Math.floor(faces.length / 3) <= (opts.threshold ?? DENSE_MESH_TRIANGLES)) return null;
+  await loadSimplifier();
+  return colliderCopySync(vertices, faces, opts);
+}
+
+/** colliderCopyOf once the simplifier has loaded (simplifierReady); throws before. */
+export function colliderCopySync(
+  vertices: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  { threshold = DENSE_MESH_TRIANGLES, budget = COLLIDER_TRIANGLE_BUDGET }: { threshold?: number; budget?: number } = {},
+): ColliderCopy | null {
   const triangles = Math.floor(faces.length / 3);
   if (triangles <= threshold) return null;
-  const { MeshoptSimplifier } = await import('meshoptimizer/simplifier');
-  await MeshoptSimplifier.ready;
+  const MeshoptSimplifier = simplifier;
+  if (!MeshoptSimplifier) throw new Error('The mesh simplifier has not loaded yet (await loadSimplifier()).');
   const positions = Float32Array.from(vertices);
   const indices = Uint32Array.from(faces);
   const target = Math.max(3, Math.min(budget, triangles) * 3);
@@ -135,6 +164,53 @@ export async function colliderCopyOf(
   return {
     colliderVertices, colliderFaces, source: meshFingerprint(vertices, faces),
     triangles, colliderTriangles: colliderFaces.length / 3,
+  };
+}
+
+/**
+ * The mesh a dense geom's collider is made from, and fingerprinted on: its
+ * Z-up renderVertices, or its Y-up vertices turned Z-up when it has none.
+ * `key` is the array the fingerprint is remembered against.
+ */
+function colliderSource(g: SceneGeom): { key: number[]; zUp: () => number[] } | null {
+  if (!g.faces?.length) return null;
+  if (g.renderVertices?.length) return { key: g.renderVertices, zUp: () => g.renderVertices! };
+  const v = g.vertices;
+  if (!v?.length) return null;
+  return {
+    key: v,
+    zUp: () => {
+      const out = new Array<number>(v.length);
+      for (let i = 0; i < v.length; i += 3) { out[i] = v[i]; out[i + 1] = -v[i + 2]; out[i + 2] = v[i + 1]; }
+      return out;
+    },
+  };
+}
+
+/**
+ * A dense geom whose mesh still is what its collider was made from comes back
+ * as it is. One whose mesh has changed since (rescaled, simplified, repaired,
+ * sculpted: any write of new arrays) comes back with a collider made from the
+ * new mesh, or, if the mesh is no longer dense, with no collider and no mark,
+ * so it collides as itself. Null when it needs rebuilding and the simplifier
+ * has not loaded yet: the caller loads it and asks again.
+ */
+export function refreshDenseCollider(g: SceneGeom): SceneGeom | null {
+  if (!g.denseColliderOf) return g;
+  const source = colliderSource(g);
+  if (!source) return g;
+  if (meshFingerprint(source.key, g.faces!) === g.denseColliderOf) return g;
+  if (!simplifierReady()) return null;
+  const copy = colliderCopySync(source.zUp(), g.faces!);
+  if (!copy) {
+    const { colliderVertices: _v, colliderFaces: _f, denseColliderOf: _d, ...rest } = g;
+    return rest;
+  }
+  return {
+    ...g,
+    colliderVertices: copy.colliderVertices,
+    colliderFaces: copy.colliderFaces,
+    denseColliderOf: meshFingerprint(source.key, g.faces!),
   };
 }
 

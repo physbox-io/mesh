@@ -22,6 +22,7 @@ import {
 } from '../utils/printBedSettings';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
+import { withFreshDenseColliders } from './denseColliders';
 import { withoutDanglingReferences } from '../utils/danglingReferences';
 import { withConnectAnchorsFollowing } from '../utils/connectAnchors';
 import { cloneSceneGraph } from './sceneClone';
@@ -438,12 +439,14 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
         // Clashing body and geom names renamed by the compiler's rule, so the
         // graph the viewport draws from names what the model holds; and what
         // was fixed to a body no longer here let go (utils/danglingReferences),
-        // and connect pins kept on their bodies (utils/connectAnchors).
+        // and connect pins kept on their bodies (utils/connectAnchors). A
+        // dense part's collision copy is rebuilt when its mesh has changed
+        // (store/denseColliders).
         const offered = patch.sceneGraph;
-        patch.sceneGraph = withConnectAnchorsFollowing(
+        patch.sceneGraph = withFreshDenseColliders(withConnectAnchorsFollowing(
           get().sceneGraph,
           withUniqueNames(withoutDanglingReferences(patch.sceneGraph)),
-        );
+        ), () => useStore.getState().updateScene(useStore.getState().sceneGraph));
         const prev = get().sceneGraph;
         shareUnchanged(prev, patch.sceneGraph);
         if (userEditPending && castPrepBypass === 0 && castPrepArmed(prev) && bodiesChanged(prev, patch.sceneGraph)) {

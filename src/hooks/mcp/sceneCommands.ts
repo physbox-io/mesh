@@ -17,6 +17,7 @@ import { headlessImpacts } from './headlessImpacts';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
 import { colliderCopyOf, denseImportNote, headlessMeshBudgetError } from '../../utils/denseMesh';
+import { denseCollidersSettled } from '../../store/denseColliders';
 import {
   deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage,
 } from '../../utils/userPresets';
@@ -53,6 +54,8 @@ export const sceneCommands: McpCommands = {
       await new Promise(r => setTimeout(r, 250));
     }
     const stillPending = pendingBodies();
+    // A dense part edited before the simplifier loaded is rebuilt once it has.
+    await denseCollidersSettled();
     // Nothing to run: an empty scene used to come back ok and settled.
     const empty = emptySceneRefusal(useStore.getState().sceneGraph);
     if (empty) return empty;
