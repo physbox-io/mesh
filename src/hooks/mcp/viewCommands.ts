@@ -575,7 +575,7 @@ export const viewCommands: McpCommands = {
         'Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets (works for both primitives and parametric/custom meshes).',
         'Rings/tubes/holes — use `type: "tube"` / `"torus"`, declarative `cuts: [...]`, or boolean modifiers (`csg: "difference"`).',
         'HOLLOW AND CONCAVE SHAPES JUST WORK — do not build proxy walls. `collision: "auto"` (the default) measures solidity and decomposes any concave mesh body into convex pieces automatically so balls land inside cups, bowls, funnels, and housings.',
-        'GOTCHA — rgba alpha is NOT rendered as transparency in this app: the renderer\'s material always uses full opacity regardless of the 4th rgba value, so rgba:[r,g,b,0] does NOT make a geom invisible — use `role: "collision"` for invisible colliders or `role: "visual"` for non-colliding visuals.',
+        'GOTCHA — rgba alpha below 1 draws a geom translucent and 0 draws nothing, but it still collides and has mass: alpha hides nothing from the physics. Use `role: "collision"` for invisible colliders, `role: "visual"` for non-colliding visuals, and delete what should not be there.',
         'OpenSCAD shapes: set scad="cube([0.5,0.5,0.5]);" on a body node. If geoms is omitted, it automatically creates a dynamic mesh geom and compiles the SCAD code to vertices/faces.',
         'Bouncy objects: set solref=[0.04, 0.2] and solimp=[0.99, 0.9999, 0.0001, 0.5, 2]. dampingRatio 0.2 = lively bounce. The floor has dampingRatio=0.0 so ball+floor averages to 0.1 (still bouncy).',
       ],
