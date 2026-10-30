@@ -41,6 +41,7 @@ import type { SceneGraph, SceneJoint, SceneNode } from '../types/scene';
 // imported outside a Worker realm so it is testable (this file cannot be:
 // it assigns self.onmessage at module scope). See tests/headlessRun.test.ts.
 import { headlessLoop, type HeadlessRunResult } from '../store/physicsWorkerClient';
+import { autoResetCount, wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
 import type {
   AeroDiagnostic,
   BodyHistory,
@@ -1390,6 +1391,19 @@ const endHold = () => {
  */
 let linkForces: ResolvedInput[] = [];
 
+/** Names of the joints the scene gives an initial velocity. */
+const initialVelocityJointNames = (nodes: SceneNode[]): string[] => {
+  const out: string[] = [];
+  const walk = (list: SceneNode[]) => {
+    for (const node of list || []) {
+      node.joints?.forEach((j) => { if (j.initialVelocity?.some((v) => v !== 0)) out.push(j.name); });
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return out;
+};
+
 /**
  * One model step, with everything a step does besides `mj_step`: forces,
  * scripts, damping, breaks, impacts, history. False when the step failed or
@@ -1412,9 +1426,16 @@ const stepOnce = (stepSize: number): boolean => {
     wakeBodies();
 
     const prevTime = data.time;
+    // The clock alone misses a reset on the first step (it also ends at one
+    // timestep), so the reset warning is watched as well. See mujocoAutoReset.
+    const prevResets = autoResetCount(data);
     mujoco.mj_step(model, data);
-    if (data.time <= prevTime) {
-      post({ type: 'ERROR', message: 'Simulation diverged (solver auto-reset detected) — simulation stopped.', fatal: false });
+    if (data.time <= prevTime || autoResetCount(data) !== prevResets) {
+      const message = prevTime === 0
+        ? 'Simulation diverged on its first step: MuJoCo reset it to the starting pose at rest — simulation stopped.' +
+          wipedInitialVelocityNote(initialVelocityJointNames(sceneGraph.nodes))
+        : 'Simulation diverged (solver auto-reset detected) — simulation stopped.';
+      post({ type: 'ERROR', message, fatal: false });
       isPlaying = false;
       return false;
     }
@@ -2077,12 +2098,14 @@ const runHeadless = async (
     };
     traverseVel(sceneGraph.nodes);
     let needForward = false;
+    const initialVelocityJoints: string[] = [];
     for (const j of initVelJoints) {
       const jntId = jointIdCache[j.name];
       if (jntId !== undefined) {
         const dofAdr = model.jnt_dofadr[jntId];
         for (let i = 0; i < j.vel.length; i++) data.qvel[dofAdr + i] = j.vel[i];
         needForward = true;
+        if (j.vel.some((v) => v !== 0)) initialVelocityJoints.push(j.name);
       }
     }
     if (needForward) mujoco.mj_forward(model, data);
@@ -2136,7 +2159,7 @@ const runHeadless = async (
       timestep = modelOpt(nextModel).timestep;
     };
 
-    const loop = headlessLoop<HistoryEntry>({ ticks, stride }, {
+    const loop = headlessLoop<HistoryEntry>({ ticks, stride, initialVelocityJoints }, {
       step: () => {
         data!.xfrc_applied.fill(0);
         data!.qfrc_applied.fill(0);
@@ -2163,6 +2186,10 @@ const runHeadless = async (
       },
       sample: () => buildHistoryEntry(lastAero),
       interrupted: () => impacts.length > 0,
+      // A mid-run rebuild hands over a fresh MjData whose counters start at 0;
+      // the loop has stopped on any earlier change, so the count it compares
+      // against is 0 as well.
+      resets: () => autoResetCount(data!),
     });
     // Each pause is a tick on which something was hit: ask what it did, in
     // the order the blows landed, and rebuild when it broke.

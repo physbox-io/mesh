@@ -25,6 +25,7 @@ import { noteScriptStatus } from './scriptStatus';
 import { noteWorkerFrame } from './modelProvenance';
 import type { CoSimChannel } from '../utils/coSimLink';
 import { noteWorkerStopped } from '../utils/staleBuild';
+import { wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
 
 export type { BuiltResult, FrameSnapshot } from '../workers/physicsWorkerProtocol';
 
@@ -70,6 +71,13 @@ export interface HeadlessLoopHooks<F> {
    * yields, and the caller resumes it once the model is rebuilt.
    */
   interrupted?(): boolean;
+  /**
+   * MuJoCo's auto-reset counter (`autoResetCount` in utils/mujocoAutoReset).
+   * A change across a step means the state was reset during it. Without it
+   * a reset on the very first step is invisible: it also ends at one
+   * timestep, exactly like a good step from t = 0.
+   */
+  resets?(): number;
 }
 
 export interface HeadlessLoopOptions {
@@ -78,6 +86,11 @@ export interface HeadlessLoopOptions {
   stride?: number;
   /** Hard ceiling on kept frames, so a huge run cannot blow the reply. */
   maxFrames?: number;
+  /**
+   * Joints the scene gave an initial velocity, named in the reason when the
+   * run blows up on its first tick - the reset that ends it zeroes them.
+   */
+  initialVelocityJoints?: readonly string[];
 }
 
 export interface HeadlessLoopOutcome<F> {
@@ -143,18 +156,28 @@ export function* headlessLoop<F>(
   let truncationDetail: string | undefined;
   let lastKeptTick = -1;
   let prevTime = hooks.time();
+  let prevResets = hooks.resets?.();
 
   for (let i = 0; i < ticks; i++) {
     hooks.step();
 
     const t = hooks.time();
-    if (!Number.isFinite(t) || t <= prevTime) {
+    const resets = hooks.resets?.();
+    const resetSeen = resets !== undefined && resets !== prevResets;
+    prevResets = resets;
+    if (!Number.isFinite(t) || t <= prevTime || resetSeen) {
       truncated = true;
       truncationReason = 'diverged';
-      truncationDetail =
-        `The model went unstable at tick ${i + 1}: MuJoCo reset the simulation state ` +
-        `(simulated time went from ${prevTime} back to ${t}). Frames after this point ` +
-        'would have belonged to a restarted run, so the run stopped here.';
+      truncationDetail = i === 0
+        ? 'The model went unstable on its very first tick: MuJoCo found a huge or non-finite ' +
+          'position, velocity or acceleration and reset the simulation to its starting pose at rest. ' +
+          'Nothing was simulated from the state the scene sets up, so the run stopped there.' +
+          wipedInitialVelocityNote(opts.initialVelocityJoints ?? []) +
+          ' Look for an initial velocity, force or script value that is far too large, or bodies ' +
+          'that start deeply overlapping.'
+        : `The model went unstable at tick ${i + 1}: MuJoCo reset the simulation state ` +
+          `(simulated time went from ${prevTime} back to ${t}). Frames after this point ` +
+          'would have belonged to a restarted run, so the run stopped here.';
       break;
     }
     if (hooks.isBad()) {
