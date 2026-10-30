@@ -360,7 +360,8 @@ const syncPcbEnclosureCommand: McpHandler = async (msg, { store }) => {
   if (msg.pcbOnly === true) {
     const pcbNode = buildPcbNode(spec);
     const nextNodes = [...store.sceneGraph.nodes.filter((n) => n.id !== pcbNode.id), pcbNode];
-    await settleScene(nextNodes);
+    // Added to the scene: its notes, fidelity and pictures stay.
+    await settleScene(nextNodes, { replacesScene: false });
     return {
       ok: true,
       pcbId: pcbNode.id,
@@ -377,7 +378,7 @@ const syncPcbEnclosureCommand: McpHandler = async (msg, { store }) => {
     enc.pcbNode,
     ...(enc.lidNode ? [enc.lidNode] : []),
   ];
-  await settleScene(nextNodes);
+  await settleScene(nextNodes, { replacesScene: false });
   return {
     ok: true,
     baseId: enc.baseNode.id,
@@ -394,7 +395,12 @@ const buildMechanismCommand: McpHandler = async (msg, { store }) => {
   // Added to the scene as it is; see utils/buildMechanism.ts.
   const built = buildMechanism(msg as MechanismRequest, store.sceneGraph.nodes);
   if ('error' in built) return { ok: false, error: built.error };
-  const settled = await settleScene(built.nodes);
+  // Added to the scene: its notes, fidelity and pictures stay, as for any body
+  // added (replacing the scene dropped them). And the reply comes once the
+  // parts are built, not after their convex pieces: those follow in the
+  // background (collisionPending), and waiting on them pushed a build past
+  // send_command's ten seconds although it had worked.
+  const settled = await settleScene(built.nodes, { replacesScene: false, waitForColliders: false });
   // Said, not done quietly: a 0.5 mm lead built as 1 mm runs twice as far.
   const warnings = adjustmentWarnings(built.family, built.adjusted);
   return {
