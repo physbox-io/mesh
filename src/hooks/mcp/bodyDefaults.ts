@@ -27,6 +27,7 @@ import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 import { latticeBodyPos } from '../../utils/latticeFrame';
 import { checkIncomingBody } from '../../utils/incomingBodyCheck';
 import { geomSizeProblem } from '../../utils/geomSize';
+import { withoutNulls } from '../../utils/withoutNulls';
 
 export interface PendingDeclarativeOps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,7 +58,8 @@ export const normalizeRgba = (
 };
 
 export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
-  const g: RawGeom = { ...rawG };
+  // A null field is an unset one (utils/withoutNulls.ts).
+  const g: RawGeom = withoutNulls({ ...rawG });
   // Refused, not repaired: a negative or text size used to compile as 0.1 m.
   const sizeProblem = geomSizeProblem({ ...g, name: g.name ?? `${bodyName}_geom_${idx}` }, bodyName);
   if (sizeProblem) throw new Error(sizeProblem);
@@ -134,11 +136,14 @@ export function resolveUpdatedGeoms(
   let anyStructuralChange = false;
 
   for (let i = 0; i < rawGeoms.length; i++) {
-    const g = rawGeoms[i] ?? {};
+    // A null in the patch removes that field from the geom it merges into.
+    const patch = (rawGeoms[i] ?? {}) as RawGeom;
+    const cleared = Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] === null);
+    const g = withoutNulls(patch);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const gAny = g as Record<string, any>;
     const hasOwnShape = GEOM_SHAPE_KEYS.some((k) => gAny[k] !== undefined);
-    const hasStructural = GEOM_STRUCTURAL_KEYS.some((k) => gAny[k] !== undefined);
+    const hasStructural = GEOM_STRUCTURAL_KEYS.some((k) => gAny[k] !== undefined || cleared.includes(k));
     if (hasStructural) anyStructuralChange = true;
 
     let existing: SceneGeom | undefined;
@@ -183,9 +188,11 @@ export function resolveUpdatedGeoms(
           ...(g as Partial<SceneGeom>),
           ...(nextRgba ? { rgba: nextRgba } : {}),
         };
+        for (const k of cleared) delete (resolved as unknown as Record<string, unknown>)[k];
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const base: RawGeom & Record<string, any> = { ...existing, ...g };
+        for (const k of cleared) delete base[k];
         if (gAny.verticesZUp !== undefined) {
           delete base.vertices;
           delete base.renderVertices;
@@ -231,7 +238,9 @@ export function resolveUpdatedGeoms(
   return { ok: true, geoms: resolvedList };
 }
 
-export const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
+export const fillJointDefaults = (rawJ: RawJoint, bodyName: string, idx: number): SceneJoint => fillJoint(withoutNulls(rawJ), bodyName, idx);
+
+const fillJoint = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
   // As for geoms: springref and the crumple fields were dropped by a whitelist.
   ...(j as SceneJoint),
   name:    j.name    ?? `${bodyName}_joint_${idx}`,
@@ -271,7 +280,8 @@ export const resolveBreakFields = (fields: Record<string, any>, materialId: stri
   return null;
 };
 
-export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): SceneNode => {
+export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = null): SceneNode => {
+  const b = withoutNulls(rawB);
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
   const nested = parentMoves !== null;
@@ -301,8 +311,12 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
     flags.static === true ||
     flags.fixed === true ||
     (Array.isArray(b.geoms) && b.geoms.length > 0 && b.geoms.every(g => g.dynamic === false));
+  // A rope is a logical node, not a body: the compiler emits nothing for it,
+  // so a default free joint and 0.25 m box were ghosts that only the scene
+  // summary showed.
+  const logical = b.isPulleyRope === true;
   // A nested body with no joints given is fixed rigidly to its parent.
-  const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested) ? [] : [{ type: 'free' }];
+  const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested || logical) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)
     .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
   const moves = resolvedJoints.length > 0 || parentMoves === true;
@@ -551,7 +565,7 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
   delete rest.radialSegments;
   delete rest.tubularSegments;
 
-  const chosenGeoms = curveGeoms ?? latticeGeoms ?? sculptGeoms ?? b.geoms ?? synthesizedSingleGeom;
+  const chosenGeoms = curveGeoms ?? latticeGeoms ?? sculptGeoms ?? b.geoms ?? (logical ? [] : synthesizedSingleGeom);
   const resolvedGeoms = chosenGeoms.map((g: RawGeom, i: number) =>
     fillGeomDefaults(
       g.rgba === undefined && bodyRgba !== undefined && g.csg !== 'difference'

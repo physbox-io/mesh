@@ -41,6 +41,7 @@ import type { SceneGraph, SceneJoint, SceneNode } from '../types/scene';
 // imported outside a Worker realm so it is testable (this file cannot be:
 // it assigns self.onmessage at module scope). See tests/headlessRun.test.ts.
 import { headlessLoop, type HeadlessRunResult } from '../store/physicsWorkerClient';
+import { createSolverWorkMonitor, solverEnergyWarning, type SolverEnergyGain } from '../utils/solverWorkMonitor';
 import { autoResetCount, wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
 import type {
   AeroDiagnostic,
@@ -2106,6 +2107,9 @@ const runHeadless = async (
     // Every tick, not every frame: a pin that opens for a few ticks and
     // closes again between two sampled frames has still let go.
     let constraints = createConstraintMonitor(mujoco, model);
+    // Energy the contacts put in: an explosion that never goes non-finite.
+    let solverWork = createSolverWorkMonitor(mujoco, model);
+    let energyGain: SolverEnergyGain | null = null;
     // What the models before a mid-run rebuild did to their constraints.
     const earlierReports: ConstraintReport[] = [];
     let timestep = modelOpt(model).timestep;
@@ -2146,6 +2150,8 @@ const runHeadless = async (
       else mj.mj_forward(nextModel, nextData);
       applyBrokenWelds();
       constraints = createConstraintMonitor(mj, nextModel);
+      energyGain ??= solverWork.result();
+      solverWork = createSolverWorkMonitor(mj, nextModel);
       timestep = modelOpt(nextModel).timestep;
     };
 
@@ -2161,7 +2167,9 @@ const runHeadless = async (
         scriptTiming.addStep(dt);
         applyFreeJointDamping(sceneGraph.nodes);
         wakeBodies();
+        solverWork.before(data!);
         mujoco!.mj_step(model!, data!);
+        solverWork.after(data!, timestep);
         checkConstraintBreaks();
         checkImpacts(timestep);
         constraints.sample(data!);
@@ -2203,6 +2211,8 @@ const runHeadless = async (
     if (costWarning) warnings.push(costWarning);
     warnings.push(...constraintReport.warnings);
     if (outcome.truncationDetail) warnings.push(outcome.truncationDetail);
+    energyGain ??= solverWork.result();
+    if (energyGain) warnings.push(solverEnergyWarning(energyGain));
     const scriptReport = headlessScriptReport(wallMs, scriptMs, ticksRun);
 
     return {
@@ -2217,6 +2227,7 @@ const runHeadless = async (
       warnings,
       constraintReport,
       ...(breaks.length ? { breaks } : {}),
+      ...(energyGain ? { unstable: energyGain } : {}),
       ...scriptReport,
     };
   } catch (e) {

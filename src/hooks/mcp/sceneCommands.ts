@@ -36,9 +36,9 @@ import { fillBodyDefaults } from './bodyDefaults';
 import { settleScene } from './settleScene';
 import { withUniqueRawIds } from '../../utils/uniqueNames';
 import { scriptWarnings } from '../../utils/scriptCheck';
+import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import type { McpCommands } from './types';
 
-/** A scene reply, plus a warning for each script that does not compile (applied all the same). */
 /** The reply says which ids were taken and what the later body is called now. */
 const withRenamedIds = <R extends object>(result: R, renamed: { from: string; to: string }[]): R & { renamedIds?: { from: string; to: string }[]; note?: string } => {
   if (renamed.length === 0) return result;
@@ -51,9 +51,19 @@ const withRenamedIds = <R extends object>(result: R, renamed: { from: string; to
   };
 };
 
-const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R & { scriptWarnings?: string[] } => {
+/**
+ * A scene reply, plus a warning for each script that does not compile (applied
+ * all the same) and each hinge or slide left on MuJoCo's default axis.
+ */
+const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R & { scriptWarnings?: string[]; warnings?: string[] } => {
   const warnings = scriptWarnings(nodes);
-  return warnings.length ? { ...result, scriptWarnings: warnings } : result;
+  const axes = jointAxisWarnings(nodes);
+  const prior = (result as { warnings?: unknown }).warnings;
+  return {
+    ...result,
+    ...(warnings.length ? { scriptWarnings: warnings } : {}),
+    ...(axes.length ? { warnings: [...(Array.isArray(prior) ? prior : []), ...axes] } : {}),
+  };
 };
 
 export const sceneCommands: McpCommands = {

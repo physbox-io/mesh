@@ -19,6 +19,8 @@ import { checkIncomingBody } from '../../utils/incomingBodyCheck';
 import type { SceneNode, SceneGeom, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
+import { withoutNulls } from '../../utils/withoutNulls';
+import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import {
   countBodies, collectNodeIds, type Msg, pointList, resolveParent, withChild, findNodeInScene,
 } from './bridgeUtils';
@@ -105,11 +107,13 @@ export const objectCommands: McpCommands = {
     }
     // Applied either way; a script that does not compile is said so here.
     const added = scriptWarnings(landed ? [landed] : [node]);
+    const axes = jointAxisWarnings(landed ? [landed] : [node]);
     return {
       ok: !addError && !!landed,
       ...(addError ? { error: addError } : {}),
       ...(added.length ? { scriptWarnings: added } : {}),
       ...(referenceWarnings.length ? { referenceWarnings } : {}),
+      ...(axes.length ? { warnings: axes } : {}),
       id: node.id,
       name: landed?.name ?? node.name,
       ...(parent ? { parent: parent.id } : {}),
@@ -129,8 +133,16 @@ export const objectCommands: McpCommands = {
     if (!target) return { ok: false, error: `No object with id "${requestedId}"` };
     const targetId = target.id;
 
-    // Extract declarative feature arrays if passed in updates
+    // Extract declarative feature arrays if passed in updates. A null field
+    // removes it from the body (and, in a geom or joint, from that).
     const updates = { ...rawUpdates };
+    // A body cannot be without an id, a name or a place, so a null there is ignored.
+    for (const k of Object.keys(updates)) {
+      if (updates[k] !== null) continue;
+      if (k === 'id' || k === 'name' || k === 'pos') delete updates[k];
+      else updates[k] = undefined;
+    }
+    if (Array.isArray(updates.joints)) updates.joints = updates.joints.map((j: object) => withoutNulls(j));
     const breakError = resolveBreakFields(updates, target.deformMaterial);
     if (breakError) return { ok: false, error: breakError };
     const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;
@@ -267,10 +279,14 @@ export const objectCommands: McpCommands = {
     const error = useStore.getState().lastCompileError;
     // A script is applied even when it does not compile; the reply says so.
     const scriptError = typeof rawUpdates.script === 'string' ? scriptSyntaxError(rawUpdates.script) : null;
+    // Only when the joints were sent: a body already warned about is not warned again on every edit.
+    const updated = Array.isArray(rawUpdates.joints) ? findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) : null;
+    const axes = updated ? jointAxisWarnings([{ ...updated, children: [] }]) : [];
     // Says what was taken, so a caller can see its whole update landed.
     return {
       ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}),
       ...(referenceWarnings.length ? { referenceWarnings } : {}),
+      ...(axes.length ? { warnings: axes } : {}),
       ...(scriptError ? { scriptWarnings: [`Script on '${target.name || targetId}' does not compile: ${scriptError}. It was saved as written and will do nothing until fixed.`] } : {}),
     };
   },

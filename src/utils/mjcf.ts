@@ -15,6 +15,8 @@ import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
 import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { contactArenaXml } from './contactArena';
+import { withoutNulls } from './withoutNulls';
+import { compiledSlide, geomFriction, needsEllipticCone } from './contactFriction';
 import { SMALL_BODY_INERTIA_FLOOR, hasSubMillimetreMovingBody } from './incomingBodyCheck';
 import { UNSLIPPING_CLUTCH, clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
@@ -192,7 +194,8 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
       if (geom.conaffinity !== undefined) slab += ` conaffinity="${geom.conaffinity}"`;
     }
     if (geom.condim !== undefined) slab += ` condim="${geom.condim}"`;
-    if (geom.friction !== undefined) slab += ` friction="${geom.friction.join(' ')}"`;
+    const slabFriction = geomFriction(geom);
+    if (slabFriction) slab += ` friction="${slabFriction.join(' ')}"`;
     return `<geom ${slab} />`;
   }
   const emptyMesh = geom.type === 'mesh' && (flat === 'speck' || (flat !== null && rotated) || (!hasMeshData && Array.isArray(geom.vertices) && geom.vertices.length === 0));
@@ -232,7 +235,9 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
     if (geom.conaffinity !== undefined) attrs += ` conaffinity="${geom.conaffinity}"`;
   }
   if (geom.condim !== undefined) attrs += ` condim="${geom.condim}"`;
-  if (geom.friction !== undefined) attrs += ` friction="${geom.friction.join(' ')}"`;
+  // Never below 0.001: no friction at all is unstable in MuJoCo (contactFriction.ts).
+  const friction = geomFriction(geom);
+  if (friction) attrs += ` friction="${friction.join(' ')}"`;
   if (geom.solref) attrs += ` solref="${geom.solref.join(' ')}"`;
   if (geom.solimp) attrs += ` solimp="${geom.solimp.join(' ')}"`;
   if (geom.margin !== undefined) attrs += ` margin="${geom.margin}"`;
@@ -513,9 +518,12 @@ export const compileToMJCF = (
   // hands back the original geom objects, and a rename would leak into the
   // store. Vertex and face arrays are shared — nothing here writes into them,
   // and deep-copying a shattered scene's worth of them cost every rebuild.
+  // A null field is read as unset (utils/withoutNulls.ts): `friction: null`
+  // reached `.join` and the scene never compiled again.
   const cloneNodes = (nodes: SceneNode[]): SceneNode[] => nodes.map(n => ({
-    ...n,
-    ...(n.geoms ? { geoms: n.geoms.map(g => ({ ...g })) } : {}),
+    ...withoutNulls(n),
+    ...(n.geoms ? { geoms: n.geoms.map(g => ({ ...withoutNulls(g) })) } : {}),
+    ...(n.joints ? { joints: n.joints.map(withoutNulls) } : {}),
     ...(n.children ? { children: cloneNodes(n.children) } : {}),
   }));
   const sceneCopy: SceneGraph = { ...scene, nodes: cloneNodes(scene.nodes) };
@@ -701,7 +709,7 @@ export const compileToMJCF = (
   ) => {
     if (!nodes) return;
     for (const node of nodes) {
-      const rotatedOffset = quatRotateVec(parentQuat, node.pos);
+      const rotatedOffset = quatRotateVec(parentQuat, Array.isArray(node.pos) ? node.pos : [0, 0, 0]);
       const worldPos: [number, number, number] = [
         parentPos[0] + rotatedOffset[0],
         parentPos[1] + rotatedOffset[1],
@@ -1081,13 +1089,13 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
 ` : hasSubMillimetreMovingBody(sceneCopy.nodes) ? `  <!-- A floor on rotational inertia for a moving part under 1 mm: MuJoCo
        refuses one below 1e-15 kg.m^2, and a 0.2 mm cube has 1e-17. -->
   <compiler boundinertia="${SMALL_BODY_INERTIA_FLOOR}" />
-` : ''}${contactArenaXml(sceneCopy.nodes)}  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
+` : ''}${contactArenaXml(sceneCopy.nodes)}  <option integrator="implicitfast"${needsEllipticCone(sceneCopy.nodes, floorFriction) ? ' cone="elliptic"' : ''} timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
     <geom solref="${contactTime} 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>
   <worldbody>
     <light directional="true" pos="-0.3 0.3 1.5" dir="0.3 -0.3 -1.5" diffuse="0.8 0.8 0.8" />
-    <geom name="floor" type="plane" size="0.5 0.5 0.1" pos="0 0 0" rgba="0.9 0.9 0.9 1" friction="${floorFriction} 0.005 0.0001" solref="${contactTime} ${Math.max(0, 1 - floorBounce).toFixed(3)}" solimp="0.99 0.9999 0.0001 0.5 2"${printFidelity ? ` contype="${FLOOR_CONTACT}" conaffinity="${FLOOR_CONTACT}"` : ''} />
+    <geom name="floor" type="plane" size="0.5 0.5 0.1" pos="0 0 0" rgba="0.9 0.9 0.9 1" friction="${compiledSlide(floorFriction)} 0.005 0.0001" solref="${contactTime} ${Math.max(0, 1 - floorBounce).toFixed(3)}" solimp="0.99 0.9999 0.0001 0.5 2"${printFidelity ? ` contype="${FLOOR_CONTACT}" conaffinity="${FLOOR_CONTACT}"` : ''} />
     
     ${sceneCopy.nodes.map(buildNode).join('\n')}
   </worldbody>

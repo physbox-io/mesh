@@ -107,6 +107,19 @@ sags 4); the break loads are unaffected. Scenes with break limits get
 that alone made its welds' rotation soft. `tests/breakHarness.ts` runs the worker's break check
 headless; `tests/loadBreakGeneric.test.ts` checks each case against a hand calculation.
 
+### 4d. Low friction, and runs that blow up while staying finite
+
+MuJoCo's default pyramidal friction cone degenerates as sliding friction goes to 0: a box on
+an icy ramp was thrown 1.8 m up, and a lever with mu 0.01 on its plank and stop launched its
+load hundreds of metres. `utils/contactFriction.ts` compiles any slide below 0.001 as 0.001
+(exactly 0 is unstable in the exact cone and in condim 1 as well), and switches a scene with any
+contact below 0.1, the floor included, to `cone="elliptic"`. Scenes without one keep the pyramid.
+
+A headless run that blows up without going non-finite is caught by `utils/solverWorkMonitor.ts`:
+contact and constraint forces cannot add energy, so when `qfrc_constraint . qvel` integrated over
+the run passes a quarter of what lifting every moving body the scene's size would take, the reply
+carries `unstable` and a warning. Every preset stays under 4% of that. `tests/lowFriction.test.ts`.
+
 ### 5. 3D multi-axis rotation (Euler representation)
 * Rotation is set as an explicit `[X, Y, Z]` Euler array.
 * Any stale `node.quat` is deleted on update so the MuJoCo compiler resolves rotation from the Euler array alone.
@@ -151,7 +164,7 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 - **`api.applyForce(forceVec, bodyName)`**: applies a 3D force `[fx, fy, fz]` to the body.
 - **`api.applyTorque(torqueVec, bodyName)`**: applies a 3D torque `[tx, ty, tz]` to the body.
 - **`api.applyJointForce(jointName, forceVal)`**: applies a 1D force/torque along or around the joint axis.
-- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator. `mjcf.ts` names a joint's actuator `<jointName>_actuator`; an unknown name does nothing and is reported (see *What a script got wrong*). For a velocity actuator `ctrlVal` is the target speed (rad/s hinge, m/s slide; the joint settles at `ctrlVal/gear`), for a motor the torque (N·m) or force (N). With a `forceLimit`, a velocity actuator on a light part cannot hold its speed unless the joint carries `armature` ≥ 1.5·kv·dt (`motorArmature` in `utils/motionParts.ts`); unclamped, implicitfast holds it. Steppers, the mechanism builders and MCP's `fillJointDefaults` (`withMotorArmature`) add it.
+- **`api.setActuatorControl(actuatorName, ctrlVal)`**: sets the control value for the named actuator. `mjcf.ts` names a joint's actuator `<jointName>_actuator`; an unknown name does nothing and is reported (see *What a script got wrong*). For a velocity actuator `ctrlVal` is the target speed (rad/s hinge, m/s slide; the joint settles at `ctrlVal/gear`), for a motor the torque (N·m) or force (N). With a `forceLimit` on a hinge or slide, a velocity actuator is emitted as a slip clutch (`utils/motorClutch.ts`): a hidden driver body `<bodyName>__drive` turns at the set speed under an unclamped servo and drags the joint through a fixed tendon `<jointName>__clutch` whose frictionloss is the limit, so the joint holds its speed below the limit and slips at exactly the limit above it (a stalled motor), stable at any inertia. No armature is added to the joint; the actuator keeps the joint's actuator name, so `setActuatorControl` is unchanged.
 - **`api.getActuatorControl(actuatorName)`**: the actuator's current control value (0, and a reported problem, for an unknown name).
 - **`api.getTime()`**: the current simulation time.
 - **`api.getTimestep()`**: the physics timestep in seconds (`model.opt.timestep`, normally 0.001): the `dt` of one script call.
