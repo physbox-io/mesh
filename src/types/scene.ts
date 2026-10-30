@@ -414,6 +414,14 @@ export interface SceneGeom {
    */
   colliderVertices?: number[];
   colliderFaces?: number[];
+  /**
+   * Set when colliderVertices is the simplified copy a dense import collides
+   * as (utils/denseMesh.ts), rather than a Split for Print section: the
+   * meshFingerprint of the mesh it was made from. Only such a geom, when it
+   * moves, is left out of the physics model as itself (mjcf.ts); a store
+   * write that changes the mesh rebuilds the copy (store/denseColliders.ts).
+   */
+  denseColliderOf?: string;
 }
 
 export interface SceneJoint {

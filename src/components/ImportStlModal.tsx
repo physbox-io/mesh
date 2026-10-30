@@ -222,7 +222,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
           vertices: parsed.vertices,
           faces: parsed.faces,
           renderVertices: parsed.renderVertices,
-          ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces } : {}),
+          ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces, denseColliderOf: collider.source } : {}),
           dynamic: true,
         } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],

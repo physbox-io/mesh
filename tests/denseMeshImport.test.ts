@@ -101,6 +101,7 @@ describe('dense mesh import', () => {
           name: 'ring_geom', type: 'mesh', size: [1], dynamic: true,
           renderVertices: dense.vertices, vertices: toYUp(dense.vertices), faces: dense.faces,
           colliderVertices: copy.colliderVertices, colliderFaces: copy.colliderFaces,
+          denseColliderOf: copy.source,
         }],
       }],
     };
@@ -109,7 +110,11 @@ describe('dense mesh import', () => {
     expect(stats.meshTriangles).toBe(copy.colliderTriangles);
     expect(xml).not.toMatch(/name="ring_geom"/);
     expect(headlessMeshBudgetError(stats.meshTriangles)).toBeNull();
-    const m = new mj.MjModel.from_xml_string(xml);
+    // Without the mark (a Split for Print section has a collider source too)
+    // the drawn mesh stays in the model as it always did.
+    const unmarked = { nodes: [{ ...scene.nodes[0], geoms: [{ ...scene.nodes[0].geoms[0], denseColliderOf: undefined }] }] };
+    expect(compileToMJCF(unmarked, -9.81, 0.5, 0, 0, 0, 0)).toMatch(/name="ring_geom"[^>]*contype="0" conaffinity="0"/);
+    const m = mj.MjModel.from_xml_string(xml);
     const d = new mj.MjData(m);
     try {
       expect(m.nmeshface).toBe(copy.colliderTriangles);

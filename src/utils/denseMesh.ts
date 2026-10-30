@@ -22,6 +22,8 @@
 // read the thresholds here without pulling its wasm into their bundles.
 // ---------------------------------------------------------------------------
 
+import { PairMemo } from './arrayMemo';
+
 /** Above this many triangles a mesh gets a simplified copy to collide as. */
 export const DENSE_MESH_TRIANGLES = 200_000;
 
@@ -58,10 +60,35 @@ export function headlessMeshBudgetError(triangles: number): string | null {
   return `The physics model holds ${Math.round(triangles).toLocaleString()} mesh triangles — about ${gb(engineBytesFor(triangles))} of the physics engine's ${gb(ENGINE_HEAP_BYTES)} memory — and a headless run builds a second copy beside the live one, which does not fit. Re-import the part (physics_import_stl gives a dense mesh a simplified collision copy) or simplify its mesh, then run again.`;
 }
 
+const fingerprints = new PairMemo<string>();
+const f32 = new Float32Array(1);
+const u32 = new Uint32Array(f32.buffer);
+
+/**
+ * A fingerprint of a mesh's vertices and faces: what a dense geom's collider
+ * was made from (SceneGeom.denseColliderOf). Each coordinate is hashed as the
+ * float32 it rounds to, so a scene saved (meshPacking stores float32) and
+ * loaded again has the same fingerprint, and its collider is not rebuilt for
+ * nothing. Remembered against the arrays, which are never edited in place.
+ */
+export function meshFingerprint(vertices: ArrayLike<number>, faces: ArrayLike<number>): string {
+  return fingerprints.get(vertices, faces, () => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < vertices.length; i++) {
+      f32[0] = vertices[i];
+      h = Math.imul(h ^ u32[0], 0x01000193) >>> 0;
+    }
+    for (let i = 0; i < faces.length; i++) h = Math.imul(h ^ faces[i], 0x01000193) >>> 0;
+    return `${vertices.length}:${faces.length}:${h.toString(16)}`;
+  });
+}
+
 export interface ColliderCopy {
   /** Z-up, body frame, metres: the space of renderVertices (SceneGeom.colliderVertices). */
   colliderVertices: number[];
   colliderFaces: number[];
+  /** meshFingerprint of the mesh it was made from, for SceneGeom.denseColliderOf. */
+  source: string;
   /** Triangles in the mesh as given. */
   triangles: number;
   /** Triangles in the copy. */
@@ -105,7 +132,10 @@ export async function colliderCopyOf(
     }
     colliderFaces[i] = remap[v];
   }
-  return { colliderVertices, colliderFaces, triangles, colliderTriangles: colliderFaces.length / 3 };
+  return {
+    colliderVertices, colliderFaces, source: meshFingerprint(vertices, faces),
+    triangles, colliderTriangles: colliderFaces.length / 3,
+  };
 }
 
 /**

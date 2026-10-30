@@ -397,14 +397,15 @@ export const PRINT_CONTACT_TIME = 0.002;
  * - A pin or a socket lives only in print fidelity; otherwise it is inert.
  *   It never weighs anything — the section's own mesh carries the mass.
  * - A mesh with a separate collider source (`colliderVertices`) is drawn from
- *   its own vertices but collides as the source: a plain mesh geom takes the
- *   contact and the mass. The visible mesh stays in the model visual-only when
- *   it is static, which the renderer finds by geom id; a dynamic one is drawn
- *   from the body transform and left out, as demoteDecomposedGeom (csg.ts)
- *   leaves it out. That matters for a dense import (utils/denseMesh.ts), whose
- *   drawn mesh alone would take most of the engine's heap. Not when the body
- *   has convex pieces already, which were made from that same source and
- *   replace it (see convexDecomposition.ts).
+ *   its own vertices but collides as the source: the visible mesh is emitted
+ *   visual-only and a plain mesh geom beside it takes the contact and the
+ *   mass. Not when the body has convex pieces already, which were made from
+ *   that same source and replace it (see convexDecomposition.ts).
+ * - Except a moving dense import (`denseColliderOf`, utils/denseMesh.ts): its
+ *   visible mesh alone would take most of the engine's heap, so it is left
+ *   out, as demoteDecomposedGeom (csg.ts) leaves a decomposed one out. The
+ *   renderer draws a moving mesh from the body transform. A static one stays,
+ *   because the renderer finds it by geom id.
  *
  * A scene with neither kind of geom comes out byte for byte as it did before
  * this existed, which the native app's golden XML depends on.
@@ -426,8 +427,8 @@ function applyContactClasses(nodes: SceneNode[], print: boolean) {
           g.type === 'mesh' && g.role !== 'visual'
           && g.colliderFaces?.length && g.colliderVertices?.length
         ) {
-          const { colliderVertices, colliderFaces, ...rest } = g;
-          if (!g.dynamic) out.push({ ...rest, role: 'visual', mass: undefined, density: undefined });
+          const { colliderVertices, colliderFaces, denseColliderOf, ...rest } = g;
+          if (!(g.dynamic && denseColliderOf)) out.push({ ...rest, role: 'visual', mass: undefined, density: undefined });
           // Y-up, as every geom's `vertices` are; renderVertices is Z-up.
           const yUp: number[] = new Array(colliderVertices.length);
           for (let i = 0; i < colliderVertices.length; i += 3) {
