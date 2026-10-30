@@ -323,6 +323,16 @@ These things about it are load-bearing:
   What is left — inside corners, curved bores — is reported as `collisionIntrusion`
   (`openingsNarrowedMm` in the scene summary): an opening is narrowed by that much, and a fit closer
   than that jams. A 10 mm bore that cleared 8.35 mm now clears ~9.65 mm above its floor corner.
+* **Bodies on a free joint get 64 pieces** (`MAX_LOOSE_PIECES`) unless `collisionHulls` says
+  otherwise: two decomposed bodies in contact are pieces times pieces. Four nesting paraboloid bowls
+  stepped at 2-3 ms per 1 ms step at 64 pieces and 18-36 ms at 513, and 512 V-HACD pieces each
+  overflowed MuJoCo's default 15 MiB contact arena (`mj_stackAlloc`); `utils/contactArena.ts` now
+  emits `<size memory>` at 128 KiB per moving piece past the default, so many pieces are slow
+  rather than fatal. At 64 those bowls' pieces stand up to 2.3 mm proud.
+* **Thin walls landing on thin walls need stiff contact.** At the scene default (solref 0.02 s) a
+  part landing at ~1 m/s sinks about v·τ = 20 mm into what it lands on — through a 4 mm wall. Four
+  bowls with exact pieces, dropped coaxially, came out stacked upside down; with `solref: [0.005, 1]`
+  on their meshes (pieces inherit it) they settled 4 mm apart, level (`tests/nestingBowls.test.ts`).
 * **It is slower.** A cup is a few seconds, a two-turn chute ~20 s. The V-HACD worker runs one job at
   a time, each timed from when it starts (60 s for a whole mesh), and a late job terminates the worker.
   A scene build over MCP answers before slow pieces land (`collisionPending`); `physics_run_headless`

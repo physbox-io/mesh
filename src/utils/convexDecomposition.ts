@@ -84,7 +84,11 @@ export const MAX_REQUESTED_HULLS = 512;
  * decomposed body: contact between two is pieces times pieces, and four
  * nesting bowls of 200 to 300 pieces each ran MuJoCo out of its contact
  * memory (mj_stackAlloc) at the first touch. 64 each is what they had, and
- * worked with.
+ * worked with. The arena is sized to the pieces now (contactArena.ts), but
+ * time is the real limit: those bowls stepped at 2 to 3 ms a millisecond step
+ * at 64 pieces and 18 to 36 ms at 513. The price is accuracy: at 64 a 74 mm
+ * paraboloid bowl's pieces stand 2.3 mm proud, and nested bowls sit ~2.4 mm
+ * high a level (tests/nestingBowls.test.ts).
  */
 export const MAX_LOOSE_PIECES = 64;
 export const MIN_RESOLUTION = 10_000;

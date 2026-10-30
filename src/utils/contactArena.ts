@@ -8,17 +8,18 @@
 // arena fills to its last byte and MuJoCo drops contacts without a word, so
 // the bowls sink into each other instead.
 //
-// Measured on those bowls cut into exact sector-and-band pieces, dropped
-// 4.5 mm apart and settling nested: peak arena use against pieces per bowl —
+// Measured on those bowls cut into exact sector-and-band pieces, peak arena
+// use against pieces per bowl:
 //
-//   pieces/bowl   65     129    257    513
-//   peak arena    6.6    8.1    15.1   31.5 MiB    (~3.4 KiB a contact)
+//   pieces/bowl                         65     257    513
+//   dropped, stiff contact, settling    6.6    15.1   31.5 MiB
+//   dropped at the default, sinking     -      61     118  MiB
 //
-// — about 15 KiB a piece, every bowl moving. Set down already nested, every
-// piece touching, 513 a bowl peaked at 73 MiB: 37 KiB a piece. So a moving
-// body's pieces are budgeted 48 KiB each, and MuJoCo's default is left alone
-// until that comes to more: four free bodies at the 64-piece default are
-// 12 MiB by this rule (6.6 measured) and compile as they did.
+// (~3.4 KiB a contact). Soft contact lets a landing bowl sink into the one
+// below, and then every piece touches several: 60 KiB a piece. So a moving
+// body's pieces are budgeted 128 KiB each, and MuJoCo's default is left alone
+// until that comes to more — past about 120 pieces. Four free bodies at the
+// 64-piece default ask for 32 MiB.
 //
 // More memory does not make it fast: those bowls stepped at 18 to 36 ms a
 // millisecond step at 513 pieces, against 2 to 3 ms at 64. It turns a crash
@@ -29,7 +30,7 @@ import type { SceneNode } from '../types/scene';
 const MIB = 1024 * 1024;
 /** MuJoCo's own arena when <size memory> is not given. */
 export const DEFAULT_ARENA = 15 * MIB;
-const PER_PIECE = 48 * 1024;
+const PER_PIECE = 128 * 1024;
 /** Held under the wasm heap's 2 GB with room for the model and everything else. */
 const MOST = 512 * MIB;
 
