@@ -1595,12 +1595,48 @@ export interface CamMechanismResult {
   followerNode: SceneNode;
   nodes: [SceneNode, SceneNode];
   profile: CamProfileResult;
-  coupleRatio: number;
+  /** The spring's push on the follower at the base circle and at full lift, N. */
+  followerPreloadN: [number, number];
 }
 
 /**
- * Builds a cam body on a hinge joint and a linear follower stem on a slide
- * joint positioned along +Y, coupled via `coupleTargetId` and `coupleRatio`.
+ * Splits a cam outline, anticlockwise and star-shaped about the origin, into
+ * convex pieces that each include the origin: consecutive sectors merged for
+ * as long as the piece stays convex. MuJoCo hulls every mesh, so one mesh of
+ * the whole profile would bridge a heart cam's notch and a snail's drop.
+ */
+export function camConvexPieces(outline: [number, number][]): [number, number][][] {
+  const n = outline.length;
+  const convex = (poly: [number, number][]) => {
+    for (let i = 0; i < poly.length; i++) {
+      const [ax, ay] = poly[i];
+      const [bx, by] = poly[(i + 1) % poly.length];
+      const [cx, cy] = poly[(i + 2) % poly.length];
+      if ((bx - ax) * (cy - by) - (by - ay) * (cx - bx) < -1e-9) return false;
+    }
+    return true;
+  };
+  const pieces: [number, number][][] = [];
+  let start = 0;
+  while (start < n) {
+    let end = start + 1;
+    const pts = (a: number, b: number) => {
+      const out: [number, number][] = [[0, 0]];
+      for (let k = a; k <= b; k++) out.push(outline[k % n]);
+      return out;
+    };
+    while (end < n && convex(pts(start, end + 1))) end++;
+    pieces.push(pts(start, end));
+    start = end;
+  }
+  return pieces;
+}
+
+/**
+ * Builds a cam body on a hinge joint and a follower on a slide along +Y. The
+ * cam drives the follower through contact, not a coupling: its convex pieces
+ * push a roller that a spring on the slide holds against the profile, so the
+ * follower rises and falls with the profile rather than with the cam's angle.
  */
 export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
   const profile = buildCamProfile(spec);
@@ -1615,6 +1651,10 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
   const areaMm2 = Math.abs(signedPolygonArea2(profile.outline)) / 2;
   const massKg = +(Math.max(0.005, areaMm2 * profile.thicknessMm * 1e-9 * PLA_DENSITY)).toFixed(6);
 
+  // Collision is the bare profile in convex pieces; the bore is only drawn.
+  const camPieces = camConvexPieces(profile.outline);
+  const pieceAreaMm2 = camPieces.reduce((a, p) => a + Math.abs(signedPolygonArea2(p)) / 2, 0);
+
   const defaultZ = mm(profile.maxRadiusMm + 10);
   const origin: [number, number, number] = spec.origin ? [...spec.origin] : [0, 0, defaultZ];
 
@@ -1625,9 +1665,14 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
     pos: origin,
     geoms: [
       visual(extrudedMeshGeom(`${camId}_mesh`, prism.positions, prism.faces, CAM_EMERALD)),
-      cylinderGeom(`${camId}_col`, mm(profile.baseRadiusMm + profile.liftMm / 2), mm(profile.thicknessMm), 0, CAM_EMERALD, {
-        role: 'collision',
-        mass: massKg,
+      ...camPieces.map((piece, i) => {
+        const m = prismMesh(piece.map(([x, y]) => [mm(x), mm(y)]), -halfThickM, halfThickM);
+        const share = Math.abs(signedPolygonArea2(piece)) / 2 / pieceAreaMm2;
+        return extrudedMeshGeom(`${camId}_col${i}`, m.positions, m.faces, CAM_EMERALD, {
+          role: 'collision',
+          mass: +(massKg * share).toFixed(7),
+          friction: [0.1, 0.005, 0.0001],
+        });
       }),
     ],
     joints: [
@@ -1658,7 +1703,14 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
   const rollerRadiusMm = 4;
   const stemHalfWidthMm = 2.5;
   const followerStartYMm = profile.baseRadiusMm + rollerRadiusMm;
-  const coupleRatio = +((profile.liftMm / 1000) / Math.PI).toFixed(7);
+  // The return spring: its rest point sits a full lift below the base circle,
+  // so it pushes the roller onto the cam over the whole stroke.
+  const springNPerM = 60;
+  const springRefM = -mm(profile.liftMm);
+  const followerPreloadN: [number, number] = [
+    +(springNPerM * -springRefM).toFixed(3),
+    +(springNPerM * (mm(profile.liftMm) - springRefM)).toFixed(3),
+  ];
 
   // Build anticlockwise 2D follower silhouette in XY (roller arc at bottom + stem up +Y)
   const followerOutline: [number, number][] = [];
@@ -1689,10 +1741,15 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
     pos: [origin[0], +(origin[1] + mm(followerStartYMm)).toFixed(7), origin[2]],
     geoms: [
       visual(extrudedMeshGeom(`${followerId}_mesh`, followerPrism.positions, followerPrism.faces, BRIGHT)),
+      // The roller tip rides the cam; the stem above it stays clear of it.
+      cylinderGeom(`${followerId}_roller`, mm(rollerRadiusMm), mm(profile.thicknessMm * 0.8), 0, BLACK_OXIDE, {
+        role: 'collision',
+        friction: [0.1, 0.005, 0.0001],
+      }),
       boxGeom(
         `${followerId}_stem`,
-        [mm(rollerRadiusMm), mm((stemLengthMm + rollerRadiusMm) / 2), mm(profile.thicknessMm * 0.4)],
-        [0, mm(stemLengthMm / 2), 0],
+        [mm(stemHalfWidthMm), mm(stemLengthMm / 2), mm(profile.thicknessMm * 0.4)],
+        [0, mm(rollerRadiusMm + stemLengthMm / 2), 0],
         BLACK_OXIDE,
         STEEL,
         { role: 'collision' },
@@ -1705,12 +1762,13 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
         axis: [0, 1, 0],
         pos: [0, 0, 0],
         damping: 0.05,
+        stiffness: springNPerM,
+        springref: springRefM,
+        // Stops a little past the stroke both ways: the cam sets the travel.
         limited: true,
-        range: [0, mm(profile.liftMm * 1.5)],
+        range: [-mm(2), mm(profile.liftMm * 1.5)],
       },
     ],
-    coupleTargetId: camId,
-    coupleRatio,
     children: [],
   };
 
@@ -1719,7 +1777,7 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
     followerNode,
     nodes: [camNode, followerNode],
     profile,
-    coupleRatio,
+    followerPreloadN,
   };
 }
 

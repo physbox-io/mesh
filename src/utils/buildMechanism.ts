@@ -236,7 +236,7 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
     case 'cam_follower': {
       const cam = buildCamMechanism({ ...(req as CamSpec), ...(origin ? { origin } : {}), actuateCam: actuate });
       created = cam.nodes;
-      metrics = { maxRadiusMm: cam.profile.maxRadiusMm, minRadiusMm: cam.profile.minRadiusMm, coupleRatio: cam.coupleRatio };
+      metrics = { maxRadiusMm: cam.profile.maxRadiusMm, minRadiusMm: cam.profile.minRadiusMm, followerPreloadN: cam.followerPreloadN };
       break;
     }
     case 'four_bar': {
