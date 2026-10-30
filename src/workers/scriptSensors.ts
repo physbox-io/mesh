@@ -13,6 +13,7 @@
 
 import type load_mujoco from '@mujoco/mujoco';
 import type { JointHistory } from './physicsWorkerProtocol';
+import { clutchDriverJointName } from '../utils/motorClutch';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -33,7 +34,25 @@ export interface JointInfo {
   body: string;
   /** Actuators driving this joint (transmission = joint). */
   actuators: number[];
+  /**
+   * A torque-limited velocity motor's hidden driver (utils/motorClutch.ts):
+   * the actuator sits on the driver's joint, and the user's joint feels it
+   * only through the slip clutch.
+   */
+  drive?: { dofadr: number; actuators: number[] };
 }
+
+/**
+ * The clutch driver of a joint, when the compiler made one: its joint is
+ * named by clutchDriverJointName and carries the actuator.
+ */
+export const clutchDrive = (
+  mj: Mujoco, model: MjModel, jointName: string, byJoint: Map<number, number[]>,
+): JointInfo['drive'] => {
+  const id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT.value, clutchDriverJointName(jointName));
+  if (id < 0) return undefined;
+  return { dofadr: model.jnt_dofadr[id], actuators: byJoint.get(id) ?? [] };
+};
 
 /** Actuator ids by the joint they drive, for actuators whose transmission is a joint. */
 export const actuatorsByJoint = (mj: Mujoco, model: MjModel): Map<number, number[]> => {
@@ -57,6 +76,7 @@ export interface JointViews {
   qvel: ArrayLike<number>;
   qfrcApplied: ArrayLike<number>;
   qfrcActuator: ArrayLike<number>;
+  qfrcConstraint: ArrayLike<number>;
   ctrl: ArrayLike<number>;
 }
 
@@ -65,6 +85,7 @@ export const jointViews = (data: MjData): JointViews => ({
   qvel: data.qvel,
   qfrcApplied: data.qfrc_applied,
   qfrcActuator: data.qfrc_actuator,
+  qfrcConstraint: data.qfrc_constraint,
   ctrl: data.ctrl,
 });
 
@@ -85,6 +106,13 @@ const slice = (a: ArrayLike<number>, from: number, n: number): number[] => {
  * first actuator's control) and `actuatorForce` (the actuators' generalised
  * force on the joint, qfrc_actuator — the effort a setActuatorControl puts in,
  * which qfrc_applied never shows).
+ *
+ * A torque-limited velocity motor is a slip clutch to a hidden driver, which
+ * carries the actuator. Its joint reports the driver's `ctrl` and
+ * `actuatorForce` (the motor's effort), and `clutchTorque`, what the clutch
+ * puts on the joint: the motor's effort while it holds, the limit while it
+ * slips. Read off the driver's dof, which nothing else acts on, as the
+ * negated constraint force there (the clutch tendon is joint − driver).
  */
 export const readJoint = (j: JointInfo, v: JointViews): JointHistory => {
   let out: JointHistory;
@@ -94,7 +122,11 @@ export const readJoint = (j: JointInfo, v: JointViews): JointHistory => {
     out = { body: j.body, pos: slice(v.qpos, j.qposadr, 4), vel: slice(v.qvel, j.dofadr, 3), qfrc_applied: slice(v.qfrcApplied, j.dofadr, 3) };
   } else {
     out = { body: j.body, pos: v.qpos[j.qposadr], vel: v.qvel[j.dofadr], qfrc_applied: v.qfrcApplied[j.dofadr] };
-    if (j.actuators.length) {
+    if (j.drive) {
+      if (j.drive.actuators.length) out.ctrl = v.ctrl[j.drive.actuators[0]];
+      out.actuatorForce = v.qfrcActuator[j.drive.dofadr];
+      out.clutchTorque = -v.qfrcConstraint[j.drive.dofadr];
+    } else if (j.actuators.length) {
       out.ctrl = v.ctrl[j.actuators[0]];
       out.actuatorForce = v.qfrcActuator[j.dofadr];
     }

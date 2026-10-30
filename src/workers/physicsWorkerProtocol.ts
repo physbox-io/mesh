@@ -131,6 +131,11 @@ export interface JointHistory {
   ctrl?: number;
   /** Hinge/slide with an actuator: the actuators' force on the joint (qfrc_actuator), N or N*m. */
   actuatorForce?: number;
+  /**
+   * A torque-limited velocity motor (a slip clutch): the torque or force the
+   * clutch puts on the joint, N*m or N. `actuatorForce` is then the motor's effort on its driver.
+   */
+  clutchTorque?: number;
 }
 
 export interface ContactHistory {

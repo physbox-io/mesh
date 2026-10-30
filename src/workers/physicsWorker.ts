@@ -64,7 +64,7 @@ import { TrajectoryAccumulator } from '../utils/trajectorySummary';
 import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
-import { actuatorsByJoint, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
+import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -295,7 +295,11 @@ const rebuildIdCaches = () => {
       for (const j of node.joints || []) {
         const id = jCache[j.name];
         if (id === undefined) continue;
-        infos.push({ name: j.name, id, type: mdl.jnt_type[id], qposadr: mdl.jnt_qposadr[id], dofadr: mdl.jnt_dofadr[id], body: node.id, actuators: byJoint.get(id) ?? [] });
+        const drive = clutchDrive(mj, mdl, j.name, byJoint);
+        infos.push({
+          name: j.name, id, type: mdl.jnt_type[id], qposadr: mdl.jnt_qposadr[id], dofadr: mdl.jnt_dofadr[id], body: node.id,
+          actuators: byJoint.get(id) ?? [], ...(drive ? { drive } : {}),
+        });
       }
       walk(node.children || []);
     }
