@@ -26,12 +26,18 @@ import type { SceneGraph, SceneNode } from '../types/scene';
  * own kept it, so the two ropes' generated bodies clashed and the copy's end
  * weld held the original's end. A later clashing prefix becomes the body's
  * own (unique) name plus `_`, numbered further if even that is taken.
+ *
+ * Body ids follow the same rule too. The store, the MCP (get_object, the
+ * scene summary, a headless run's report) and every constraint target find a
+ * body by id, so two bodies with one id were one body to all of them: the
+ * summary and get_object answered for whichever came first, and a headless
+ * trajectory mixed the two. Every body has an id, pulley ropes included.
  */
 
 const RESERVED_BODIES = ['world'];
 const RESERVED_GEOMS = ['floor'];
 
-type Rename = { name?: string; geoms?: Map<number, string>; joints?: Map<number, string>; prefix?: string };
+type Rename = { id?: string; name?: string; geoms?: Map<number, string>; joints?: Map<number, string>; prefix?: string };
 type Renames = Map<SceneNode, Rename>;
 
 function allNames(nodes: SceneNode[], bodies: Set<string>, geoms: Set<string>, joints: Set<string>) {
@@ -43,6 +49,46 @@ function allNames(nodes: SceneNode[], bodies: Set<string>, geoms: Set<string>, j
     }
     allNames(node.children || [], bodies, geoms, joints);
   }
+}
+
+/** Anything shaped like a body tree: a SceneNode, or a raw MCP body descriptor. */
+type IdTree = { children?: IdTree[] };
+
+/**
+ * New ids for the later of any clash, by the name rule: the first body (depth
+ * first) keeps an id, each later one becomes `id_2`, `id_3` … whichever is
+ * free first. `idOf` says what a body's id is (for a raw descriptor, its id or
+ * else its name, as fillBodyDefaults decides); a body with none is left be.
+ */
+export function planIdRenames<T extends IdTree>(nodes: T[], idOf: (n: T) => string | undefined): Map<T, string> {
+  const all = new Set<string>();
+  const collect = (list: T[] | undefined) => {
+    for (const n of list ?? []) {
+      const id = idOf(n);
+      if (id) all.add(id);
+      collect(n.children as T[] | undefined);
+    }
+  };
+  collect(nodes);
+  const seen = new Set<string>();
+  const out = new Map<T, string>();
+  const walk = (list: T[] | undefined) => {
+    for (const n of list ?? []) {
+      let id = idOf(n);
+      if (id) {
+        if (seen.has(id)) {
+          let k = 2;
+          while (all.has(`${id}_${k}`) || seen.has(`${id}_${k}`)) k++;
+          id = `${id}_${k}`;
+          out.set(n, id);
+        }
+        seen.add(id);
+      }
+      walk(n.children as T[] | undefined);
+    }
+  };
+  walk(nodes);
+  return out;
 }
 
 function planRenames(nodes: SceneNode[]): Renames {
@@ -105,12 +151,18 @@ function planRenames(nodes: SceneNode[]): Renames {
     }
   };
   walk(nodes);
+  for (const [node, id] of planIdRenames(nodes, (n) => n.id)) {
+    const entry = renames.get(node) ?? {};
+    entry.id = id;
+    renames.set(node, entry);
+  }
   return renames;
 }
 
 /** Renames clashing bodies and geoms in place. For a copy that is the caller's to change. */
 export function uniquifyNamesInPlace(nodes: SceneNode[]): void {
-  for (const [node, { name, geoms, joints, prefix }] of planRenames(nodes)) {
+  for (const [node, { id, name, geoms, joints, prefix }] of planRenames(nodes)) {
+    if (id) node.id = id;
     if (name) node.name = name;
     if (prefix) node.compositePrefix = prefix;
     if (geoms) for (const [i, gName] of geoms) node.geoms[i].name = gName;
@@ -135,6 +187,7 @@ export function withUniqueNames(scene: SceneGraph): SceneGraph {
       changed = true;
       return {
         ...node,
+        ...(r?.id ? { id: r.id } : {}),
         ...(r?.name ? { name: r.name } : {}),
         ...(r?.prefix ? { compositePrefix: r.prefix } : {}),
         ...(r?.geoms ? { geoms: node.geoms.map((g, i) => (r.geoms!.has(i) ? { ...g, name: r.geoms!.get(i)! } : g)) } : {}),
@@ -145,4 +198,34 @@ export function withUniqueNames(scene: SceneGraph): SceneGraph {
     return changed ? out : list;
   };
   return { ...scene, nodes: rebuild(scene.nodes) };
+}
+
+/** A raw body descriptor's id, as fillBodyDefaults will decide it. */
+type RawBody = { id?: string; name?: string; children?: RawBody[] };
+
+/**
+ * Raw MCP bodies with every clashing id made unique, before they become
+ * nodes. Done here rather than left to the store, because the bodies' cuts,
+ * patterns and SCAD are queued by id while they are filled in, and two
+ * bodies queued under one id get each other's. Returns the bodies (the same
+ * array when nothing clashes) and what was renamed, for the reply.
+ */
+export function withUniqueRawIds<T extends RawBody>(bodies: T[]): { bodies: T[]; renamed: { from: string; to: string }[] } {
+  const plan = planIdRenames(bodies as RawBody[], (b) => b.id ?? b.name);
+  const renamed: { from: string; to: string }[] = [];
+  if (plan.size === 0) return { bodies, renamed };
+  const rebuild = (list: RawBody[]): RawBody[] => {
+    let changed = false;
+    const out = list.map((b) => {
+      const id = plan.get(b);
+      if (id) renamed.push({ from: (b.id ?? b.name)!, to: id });
+      const children = Array.isArray(b.children) ? rebuild(b.children) : b.children;
+      if (!id && children === b.children) return b;
+      changed = true;
+      return { ...b, ...(id ? { id } : {}), ...(b.children ? { children } : {}) };
+    });
+    return changed ? out : list;
+  };
+  const out = rebuild(bodies) as T[];
+  return { bodies: out, renamed };
 }

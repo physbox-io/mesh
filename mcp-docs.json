@@ -257,7 +257,7 @@
       "deformCollision": "boolean — make damage to this surface real to the contact solver rather than only visible. Costs a model rebuild AND a convex decomposition per blow; off by default."
     },
     "nodeFields": {
-      "id": "string: unique body identifier",
+      "id": "string: unique body identifier (defaults to the name). A body that reuses an id already taken earlier in the scene (depth first) is renamed id_2, id_3 ..., as clashing names are; physics_build_scene and physics_update_scene list any such renames in `renamedIds` and address that body by its new id from then on.",
       "name": "string: display name and MuJoCo XML name",
       "type": "always 'body' (or shorthand geom type when `geoms` is omitted)",
       "pos": "[x,y,z]: position relative to parent (or world for root)",

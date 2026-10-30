@@ -32,10 +32,23 @@ import {
 } from './bridgeUtils';
 import { fillBodyDefaults } from './bodyDefaults';
 import { settleScene } from './settleScene';
+import { withUniqueRawIds } from '../../utils/uniqueNames';
 import { scriptWarnings } from '../../utils/scriptCheck';
 import type { McpCommands } from './types';
 
 /** A scene reply, plus a warning for each script that does not compile (applied all the same). */
+/** The reply says which ids were taken and what the later body is called now. */
+const withRenamedIds = <R extends object>(result: R, renamed: { from: string; to: string }[]): R & { renamedIds?: { from: string; to: string }[]; note?: string } => {
+  if (renamed.length === 0) return result;
+  const said = renamed.map((r) => `"${r.from}" -> "${r.to}"`).join(', ');
+  const prior = (result as { note?: string }).note;
+  return {
+    ...result,
+    renamedIds: renamed,
+    note: `${prior ? `${prior} ` : ''}Body ids must be unique; a later body reusing an id was renamed: ${said}. Use the new id to address it.`,
+  };
+};
+
 const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R & { scriptWarnings?: string[] } => {
   const warnings = scriptWarnings(nodes);
   return warnings.length ? { ...result, scriptWarnings: warnings } : result;
@@ -413,7 +426,9 @@ export const sceneCommands: McpCommands = {
     // joints/geoms/children (very easy to hand-author without, e.g. by
     // editing the output of GET_SCENE_SUMMARY, which strips these arrays)
     // doesn't crash compileToMJCF's unconditional .forEach on those fields.
-    const nodes = rawNodes.map((b) => fillBodyDefaults(b));
+    // Two bodies with one id were one body to every lookup; the later is renamed.
+    const { bodies: uniqueNodes, renamed } = withUniqueRawIds(rawNodes);
+    const nodes = uniqueNodes.map((b) => fillBodyDefaults(b));
     // What the scene says about itself. The object form is GET_SCENE's answer
     // coming back, and carries all of it: fidelity, pictures, environment,
     // cast prep, name and note cards. A bare array is new bodies for the scene
@@ -442,7 +457,7 @@ export const sceneCommands: McpCommands = {
         nodes: useStore.getState().sceneGraph.nodes
       });
     }
-    return withScriptWarnings(result, nodes);
+    return withRenamedIds(withScriptWarnings(result, nodes), renamed);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
     const { gravityZ, windX, windY, density, floorFriction, floorBounce, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
@@ -483,8 +498,10 @@ export const sceneCommands: McpCommands = {
       return { ok: false, error: 'bodies must be an array of body descriptors ([] clears the scene)' };
     }
 
-    const nodes = bodies.map((b) => fillBodyDefaults(b));
-    const result = withScriptWarnings(await settleScene(nodes, { freshStart: true }), nodes);
+    // Two bodies with one id were one body to every lookup; the later is renamed.
+    const { bodies: uniqueBodies, renamed } = withUniqueRawIds(bodies);
+    const nodes = uniqueBodies.map((b) => fillBodyDefaults(b));
+    const result = withRenamedIds(withScriptWarnings(await settleScene(nodes, { freshStart: true }), nodes), renamed);
     // An empty list clears the scene. It used to be refused, which left
     // physics_update_scene([]) as the only way to start from nothing; there
     // is no scene to frame or describe on a card.
