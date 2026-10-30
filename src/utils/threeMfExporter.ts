@@ -68,7 +68,10 @@ export interface ThreeMfOptions {
   /**
    * How many filaments the target machine has.
    *
-   * Four is an AMS; the encoding goes to 32 (see encodeTriangleState).
+   * Five by default: an AMS and the external spool. Two AMS and the spool is
+   * nine; the encoding goes to 32 (see encodeTriangleState). The cap is what
+   * keeps the blends along a brushed mark's soft edge from each taking a
+   * filament, so more is not free.
    */
   maxExtruders?: number;
   application?: string;
@@ -225,7 +228,7 @@ function packModel(model: string, extra: ZipEntry[] = []): Uint8Array {
  * the caller wants them.
  */
 export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {}): ThreeMfResult {
-  const maxExtruders = options.maxExtruders ?? 4;
+  const maxExtruders = Math.min(32, Math.max(1, Math.round(options.maxExtruders ?? 5)));
 
   // Pass one: every triangle's colour, so the palette can be decided across the
   // whole export rather than per object — the same red has to be the same
@@ -261,14 +264,16 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
       const b = colorAt(indices[t + 1]);
       const c = colorAt(indices[t + 2]);
       cornerColors.push(a, b, c);
-      // A slicer prints a whole triangle in one filament, so the face's colour
-      // is the average of its corners — which is also what decides which side of
-      // a mark's soft edge the triangle falls on.
-      triangleColors.push({
-        r: (a[0] + b[0] + c[0]) / 3,
-        g: (a[1] + b[1] + c[1]) / 3,
-        b: (a[2] + b[2] + c[2]) / 3,
-      });
+      // A slicer prints a whole triangle in one filament. Two corners alike
+      // decide it, so a triangle across a hard-edged mark's boundary is one
+      // colour or the other rather than a blend that snaps to some third
+      // filament; otherwise the face's colour is the average of its corners,
+      // which decides which side of a soft edge it falls on.
+      const same = (p: number[], q: number[]) => p[0] === q[0] && p[1] === q[1] && p[2] === q[2];
+      const two = same(a, b) || same(a, c) ? a : same(b, c) ? b : null;
+      triangleColors.push(two
+        ? { r: two[0], g: two[1], b: two[2] }
+        : { r: (a[0] + b[0] + c[0]) / 3, g: (a[1] + b[1] + c[1]) / 3, b: (a[2] + b[2] + c[2]) / 3 });
     }
 
     prepared.push({ mesh, indices, cornerColors, triangleColors });

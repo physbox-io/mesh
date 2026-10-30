@@ -65,6 +65,8 @@ export interface PrintExportOptions {
   bed?: { widthMm: number; depthMm: number };
   /** File name without extension. */
   baseName?: string;
+  /** Filaments the printer has, for a 3MF's colours: default 5 (an AMS and the external spool). */
+  filaments?: number;
 }
 
 export interface PrintExportResult {
@@ -210,7 +212,7 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
   if (options.format === '3mf' && options.plate !== false && options.bed) {
     const plated = platedMeshes(scene, parts, options.bed);
     if (plated) {
-      const result = exportThreeMf(plated);
+      const result = exportThreeMf(plated, { maxExtruders: options.filaments });
       return { files: [{ name: `${base}_plate.3mf`, bytes: result.data }], parts: summary, plated: true, warnings, missing };
     }
   }
@@ -242,7 +244,7 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
       // A body is one object; its colours are its volumes.
       object: p.id,
     })));
-    const result = exportThreeMf(meshes);
+    const result = exportThreeMf(meshes, { maxExtruders: options.filaments });
     return { name: `${name}.3mf`, bytes: result.data };
   });
   return { files, parts: summary, plated: false, warnings, missing };

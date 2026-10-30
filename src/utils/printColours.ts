@@ -6,7 +6,8 @@
 // and a stroke is stored against that copy's vertices. So a painted geom is
 // exported as that copy, coloured exactly as the screen mixes it, rather than
 // as its plain triangles — a box is twelve of those, and the pips on a die
-// would have nowhere to land. A geom with a pattern on its face keeps the
+// would have nowhere to land. Coloured as it will print, not quite as the
+// screen mixes it: each vertex is the brush's colour or the body's. A geom with a pattern on its face keeps the
 // pattern's triangles and takes each corner's colour from the nearest painted
 // vertex.
 // ---------------------------------------------------------------------------
@@ -57,8 +58,14 @@ function paintedSurface(geom: SceneGeom, halfLen: number | undefined) {
     positions = yupVertsToZup(positions);
   }
 
+  // A printer lays down one filament or another, so a brush's soft edge is
+  // decided at half coverage: the file then shows what will print, and the
+  // blend along a mark's edge cannot snap to some other part's filament.
+  const canvas = canvasFromLayer(geom.paint, count, geom.paint.res);
+  const hard = { ...canvas, data: canvas.data.slice() };
+  for (let i = 3; i < hard.data.length; i += 4) hard.data[i] = hard.data[i] >= 0.5 ? 1 : 0;
   const colors = new Float32Array(count * 3);
-  writeVertexColors(colors, geom.rgba ?? [0.8, 0.8, 0.8, 1], canvasFromLayer(geom.paint, count, geom.paint.res));
+  writeVertexColors(colors, geom.rgba ?? [0.8, 0.8, 0.8, 1], hard);
   return { positions, faces, colors };
 }
 

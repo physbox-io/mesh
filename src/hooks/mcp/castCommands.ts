@@ -268,6 +268,7 @@ export const castCommands: McpCommands = {
       ids,
       separate: msg.separate === true,
       ...(typeof msg.plate === 'boolean' ? { plate: msg.plate } : {}),
+      ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
       bed: store.printBed,
       baseName: store.sceneGraph.name || store.activePreset || 'model',
     });

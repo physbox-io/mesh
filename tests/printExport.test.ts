@@ -164,5 +164,12 @@ describe('colour and material in the 3MF', () => {
     expect(model).not.toMatch(/paint_color="4"/);
     // Finer than the plain box's 12 triangles, so the spot has somewhere to land
     expect(model.match(/<triangle /g)!.length).toBeGreaterThan(100);
+
+    // Beside an orange part, the pink along the spot's soft edge must not
+    // snap to orange: the spot prints red or the die white, nothing else.
+    const withOrange: SceneGraph = { nodes: [...die.nodes, body('orange', [0.05, 0, 0.1], [0.005, 0.005, 0.005])] };
+    withOrange.nodes[1].geoms[0].rgba = [1, 0.5, 0, 1];
+    const mixed = model3mf(exportPrintFiles(withOrange, { format: '3mf' }).files[0].bytes).model;
+    expect(new Set([...mixed.matchAll(/paint_color="(\w+)"/g)].map((m) => m[1])).size).toBe(1);
   });
 });
