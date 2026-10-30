@@ -234,7 +234,7 @@ export type HeadlessRunResult = HeadlessResult & {
  * plain number[] vertex arrays cost time on both threads for data the worker
  * never reads.
  */
-const MESH_FIELDS = ['vertices', 'renderVertices', 'faces', 'baseVertices', 'baseRenderVertices', 'colliderVertices', 'colliderFaces', 'paint'] as const;
+const MESH_FIELDS = ['vertices', 'renderVertices', 'faces', 'baseVertices', 'baseRenderVertices', 'colliderVertices', 'baseColliderVertices', 'colliderFaces', 'paint'] as const;
 const stripGeom = (g: SceneGeom): SceneGeom => {
   if (!MESH_FIELDS.some((k) => g[k] !== undefined)) return g;
   const copy = { ...g };

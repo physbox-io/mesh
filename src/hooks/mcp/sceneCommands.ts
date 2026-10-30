@@ -16,6 +16,8 @@ import { headlessImpactWarning } from '../../utils/headlessLimits';
 import { headlessImpacts } from './headlessImpacts';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
+import { colliderCopyOf, denseFingerprintOf, denseImportNote, headlessMeshBudgetError } from '../../utils/denseMesh';
+import { denseCollidersSettled } from '../../store/denseColliders';
 import {
   deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage,
 } from '../../utils/userPresets';
@@ -53,6 +55,8 @@ export const sceneCommands: McpCommands = {
       await new Promise(r => setTimeout(r, 250));
     }
     const stillPending = pendingBodies();
+    // A dense part edited before the simplifier loaded is rebuilt once it has.
+    await denseCollidersSettled();
     // Nothing to run: an empty scene used to come back ok and settled.
     const empty = emptySceneRefusal(useStore.getState().sceneGraph);
     if (empty) return empty;
@@ -63,9 +67,15 @@ export const sceneCommands: McpCommands = {
     // headless "what-if" run can never diverge from what's actually
     // rendered live, and never costs a second loaded WASM module.
     const client = getPhysicsWorkerClient();
+    const stats = { meshTriangles: 0 };
     const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
-      meshFiles: client.meshFiles,
+      meshFiles: client.meshFiles, stats,
     });
+    // Said before the build rather than found by it: a model too dense to sit
+    // beside the live one aborts the engine part way through, and the run came
+    // back as a crash with nothing to say why.
+    const tooDense = headlessMeshBudgetError(stats.meshTriangles);
+    if (tooDense) return { ok: false, error: tooDense };
     // Decimated in the worker, not here: a full per-tick, per-body
     // trajectory is ~500KB per 900 ticks, and striding only after the run
     // left the worker's 20,000-frame cap in force, so a long run stopped
@@ -262,11 +272,32 @@ export const sceneCommands: McpCommands = {
     }
 
     const baseName = name || 'imported_stl';
-    const parsed = parseSTL(data, { name: baseName, scale });
+    let parsed: ReturnType<typeof parseSTL>;
+    try {
+      parsed = parseSTL(data, { name: baseName, scale });
+    } catch (e) {
+      return { ok: false, error: `Could not read the STL: ${(e as Error)?.message || String(e)}` };
+    }
 
+    // A dense part is never an OpenSCAD polyhedron (the compile runs out of
+    // memory, and the body was left a placeholder box under a reply of ok),
+    // and collides as a simplified copy of itself (utils/denseMesh.ts).
+    const warnings: string[] = [];
+    const requested = importMode || 'scad_parametric';
+    const scadMode = requested === 'scad_parametric' || requested === 'scad_raw';
+    if (parsed.dense && scadMode) {
+      warnings.push(`importMode '${requested}' was not used: ${parsed.triangleCount.toLocaleString()} triangles is too many for an OpenSCAD polyhedron, which runs out of memory compiling, so the part was imported as a mesh.`);
+    }
     // The free joint is named: a nameless one failed every build (the worker
     // looked it up by name), so an imported body never simulated.
-    const mode = importMode || 'scad_parametric';
+    const mode = parsed.dense && scadMode ? 'mesh' : requested;
+    const collider = mode === 'mesh' ? await colliderCopyOf(parsed.renderVertices, parsed.faces) : null;
+    if (collider) {
+      warnings.push(denseImportNote(collider));
+      if (dynamic === false) {
+        warnings.push('It was imported static (dynamic: false), and a static mesh is found by the renderer in the physics model, so its full mesh stays in the model. Import it dynamic unless it has to be fixed in place.');
+      }
+    }
     const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 1];
     const id = `stl_${Math.random().toString(36).slice(2, 7)}`;
     let newNode: SceneNode;
@@ -297,10 +328,12 @@ export const sceneCommands: McpCommands = {
         name: baseName,
         pos: nodePos,
         geoms: [{
+          name: `${id}_geom`,
           type: 'mesh',
           vertices: parsed.vertices,
           faces: parsed.faces,
           renderVertices: parsed.renderVertices,
+          ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces } : {}),
           dynamic: dynamic !== false,
         } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],
@@ -321,6 +354,9 @@ export const sceneCommands: McpCommands = {
       };
     }
 
+    // Marked with what its copy was made from, in the terms the store checks
+    // it by (store/denseColliders): renderVertices if it moves, else vertices.
+    if (collider) newNode.geoms[0].denseColliderOf = denseFingerprintOf(newNode.geoms[0]) ?? collider.source;
     const currentNodes = store.sceneGraph.nodes || [];
     const updatedNodes = [...currentNodes, newNode];
     const res = await settleScene(updatedNodes, { replacesScene: false });
@@ -330,8 +366,11 @@ export const sceneCommands: McpCommands = {
       ...(res.error ? { error: res.error } : {}),
       nodeId: id,
       name: baseName,
+      importMode: mode,
       vertCount: parsed.vertices.length / 3,
       faceCount: parsed.faces.length / 3,
+      ...(collider ? { colliderFaceCount: collider.colliderTriangles } : {}),
+      ...(warnings.length ? { warnings } : {}),
       subComponentCount: parsed.subComponents.length,
       inferredSpacing: parsed.inferredSpacing,
       boundingBox: parsed.boundingBox,

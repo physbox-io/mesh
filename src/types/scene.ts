@@ -368,6 +368,8 @@ export interface SceneGeom {
   baseVertices?: number[];
   /** The same, for the Z-up renderVertices of a dynamic mesh. */
   baseRenderVertices?: number[];
+  /** The same, for colliderVertices, so the collider turns with the mesh it stands in for. */
+  baseColliderVertices?: number[];
   /**
    * A collider whose shape is known exactly, as opposed to one approximated
    * from a mesh. Split for Print puts these on the sections it makes, in two
@@ -414,6 +416,14 @@ export interface SceneGeom {
    */
   colliderVertices?: number[];
   colliderFaces?: number[];
+  /**
+   * Set when colliderVertices is the simplified copy a dense import collides
+   * as (utils/denseMesh.ts), rather than a Split for Print section: the
+   * meshFingerprint of the mesh it was made from. Only such a geom, when it
+   * moves, is left out of the physics model as itself (mjcf.ts); a store
+   * write that changes the mesh rebuilds the copy (store/denseColliders.ts).
+   */
+  denseColliderOf?: string;
 }
 
 export interface SceneJoint {

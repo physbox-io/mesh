@@ -104,6 +104,10 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
                 if (g.baseVertices) {
                   g.baseVertices = mapVerts([...g.baseVertices], (x, y, z) => [x + dx, y + dy, z + dz]);
                 }
+                // Z-up, as the collider it is the unturned copy of.
+                if (g.baseColliderVertices && !g.dynamic) {
+                  g.baseColliderVertices = mapVerts([...g.baseColliderVertices], (x, y, z) => [x + dx, y - dz, z + dy]);
+                }
               }
             }
             node.pos = newPos;

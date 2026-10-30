@@ -10,6 +10,11 @@
 // Measured cavities are channels too, but of the scene graph rather than the
 // model: they are answered here and never reach the physics worker, and a new
 // measurement while linked re-sends the catalogue so Volt can bind it.
+//
+// When this page goes (closed, reloaded, navigated) it tells Volt UNLINK, so
+// Volt stops showing "Mesh linked" at once instead of finding out on its next
+// step. Volt also watches for the window closing; this covers a reload, which
+// leaves the window open.
 // ---------------------------------------------------------------------------
 
 import { useEffect } from 'react';
@@ -80,9 +85,17 @@ export function useVoltLink() {
       }).catch(() => {});
     });
 
+    const onPageHide = () => {
+      const link = useStore.getState().voltLink;
+      if (!link) return;
+      try { window.opener?.postMessage(envelope({ type: 'UNLINK' }), link.origin); } catch { /* Volt gone too */ }
+    };
+
     window.addEventListener('message', onMessage);
+    window.addEventListener('pagehide', onPageHide);
     return () => {
       window.removeEventListener('message', onMessage);
+      window.removeEventListener('pagehide', onPageHide);
       unsubscribe();
     };
   }, []);
