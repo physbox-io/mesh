@@ -61,6 +61,7 @@ import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
 import { createConstraintMonitor, mergeConstraintReports, type ConstraintReport } from '../utils/constraintResiduals';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
+import { bodyAngularVelocity, bodyPointVelocity, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -310,6 +311,11 @@ const sensorNames: SensorNames = {
   bodyNode: (b) => bodyNodeById[b] ?? (mujoco && model ? mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, b) || `body_${b}` : `body_${b}`),
 };
 
+/** The views body velocities are read from; take once per use, as each getter allocates. */
+const velocityViews = (mdl: MjModel, dat: MjData): VelocityViews => ({
+  cvel: dat.cvel, xpos: dat.xpos, subtreeCom: dat.subtree_com, rootId: mdl.body_rootid,
+});
+
 const createScriptApi = (node: SceneNode): Record<string, unknown> => {
   const _resolveBody = (name: string) =>
     bodyIdCache[name] ?? (mujoco && model ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, name) : -1);
@@ -424,7 +430,8 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
       const dofadr = mdl.jnt_dofadr[jId];
       pendingWake.add(mdl.jnt_bodyid[jId]);
       if (joint.type === 'free') {
-        const w = _vector('setAngularVelocity', angvel, 3, joint);
+        // World frame, as getAngularVelocity reads it: a free joint's qvel holds ω in the body's frame.
+        const w = worldToBodyFrame(dat.xmat, mdl.jnt_bodyid[jId], _vector('setAngularVelocity', angvel, 3, joint));
         dat.qvel[dofadr + 3] = w[0]; dat.qvel[dofadr + 4] = w[1]; dat.qvel[dofadr + 5] = w[2];
       } else if (joint.type === 'ball') {
         const w = _vector('setAngularVelocity', angvel, 3, joint);
@@ -443,12 +450,13 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
     getVelocity: (bodyName?: string) => {
       const dat = data!;
       const bId = _body('getVelocity', bodyName);
-      return bId !== -1 ? [dat.cvel[bId * 6 + 3], dat.cvel[bId * 6 + 4], dat.cvel[bId * 6 + 5]] : [0, 0, 0];
+      // The body origin's (the point getPosition gives), not cvel's tree-COM point.
+      return bId !== -1 ? bodyPointVelocity(velocityViews(model!, dat), bId) : [0, 0, 0];
     },
     getAngularVelocity: (bodyName?: string) => {
       const dat = data!;
       const bId = _body('getAngularVelocity', bodyName);
-      return bId !== -1 ? [dat.cvel[bId * 6 + 0], dat.cvel[bId * 6 + 1], dat.cvel[bId * 6 + 2]] : [0, 0, 0];
+      return bId !== -1 ? bodyAngularVelocity(velocityViews(model!, dat), bId) : [0, 0, 0];
     },
     getMass: (bodyName?: string) => {
       const mdl = model!;
@@ -565,7 +573,6 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
         if (bId !== -1) {
           // Views taken once for this body: each `dat.x` / `mdl.x` read is an embind
           // getter that allocates a new typed array over the heap.
-          const cvel = dat.cvel;
           const geomXpos = dat.geom_xpos;
           const xfrc = dat.xfrc_applied;
           const xmat = dat.xmat;
@@ -587,20 +594,16 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
             geomWorldZ = geomXpos[gId * 3 + 2];
           }
 
-          const rx = geomWorldX - xpos[pId * 3 + 0];
-          const ry = geomWorldY - xpos[pId * 3 + 1];
-          const rz = geomWorldZ - xpos[pId * 3 + 2];
+          // The force goes on the moving body, whose xfrc_applied acts at its COM.
+          const xipos = dat.xipos;
+          const rx = geomWorldX - xipos[pId * 3 + 0];
+          const ry = geomWorldY - xipos[pId * 3 + 1];
+          const rz = geomWorldZ - xipos[pId * 3 + 2];
 
-          const wx = cvel[bId * 6 + 0];
-          const wy = cvel[bId * 6 + 1];
-          const wz = cvel[bId * 6 + 2];
-          const vO_x = cvel[bId * 6 + 3];
-          const vO_y = cvel[bId * 6 + 4];
-          const vO_z = cvel[bId * 6 + 5];
-
-          const vx = vO_x + (wy * rz - wz * ry);
-          const vy = vO_y + (wz * rx - wx * rz);
-          const vz = vO_z + (wx * ry - wy * rx);
+          // The air meets the geom where it is, at that point's velocity.
+          const views = velocityViews(mdl, dat);
+          const [wx, wy, wz] = bodyAngularVelocity(views, bId);
+          const [vx, vy, vz] = bodyPointVelocity(views, bId, [geomWorldX, geomWorldY, geomWorldZ]);
 
           const o = bId * 9;
           const noseX = xmat[o + 0], noseY = xmat[o + 3], noseZ = xmat[o + 6];
@@ -730,12 +733,14 @@ const applyFreeJointDamping = (nodes: SceneNode[]) => {
           const bId = bodyIdCache[node.id] ?? bodyIdCache[node.name] ?? -1;
           if (bId !== -1) {
             // Views taken once for this body, as in executeScripts.
-            const cvel = dat.cvel;
             const xfrc = dat.xfrc_applied;
             const bodyInertia = mdl.body_inertia;
             const bodyMass = mdl.body_mass;
-            const wx = cvel[bId * 6 + 0], wy = cvel[bId * 6 + 1], wz = cvel[bId * 6 + 2];
-            const vx = cvel[bId * 6 + 3], vy = cvel[bId * 6 + 4], vz = cvel[bId * 6 + 5];
+            // xfrc_applied acts at the body's COM, so the damping reads that point's velocity.
+            const views = velocityViews(mdl, dat);
+            const xipos = dat.xipos;
+            const [wx, wy, wz] = bodyAngularVelocity(views, bId);
+            const [vx, vy, vz] = bodyPointVelocity(views, bId, [xipos[bId * 3], xipos[bId * 3 + 1], xipos[bId * 3 + 2]]);
             const c = joint.damping;
             const mass = bodyMass[bId] || 1.0;
             const ix = bodyInertia[bId * 3 + 0] || 1.0;
@@ -852,7 +857,8 @@ const applyDragForce = () => {
   pendingWake.add(bId);
 
   const bx = dat.xpos[bId * 3], by = dat.xpos[bId * 3 + 1], bz = dat.xpos[bId * 3 + 2];
-  const vx = dat.cvel[bId * 6 + 3], vy = dat.cvel[bId * 6 + 4], vz = dat.cvel[bId * 6 + 5];
+  // The spring pulls the origin (bx, by, bz), so it is damped on that point's velocity.
+  const [vx, vy, vz] = bodyPointVelocity(velocityViews(mdl, dat), bId);
   const own = mdl.body_mass[bId] || 1.0;
   // What the pull has to move: the body and everything welded or pinned to
   // it. Sized by the grabbed body alone, a 0.4 g strand of spaghetti in a
@@ -902,33 +908,21 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
   const dat = data!;
   const bodies: Record<string, BodyHistory> = {};
   const joints: Record<string, JointHistory> = {};
+  const views = velocityViews(mdl, dat);
   const collectNodeData = (nodesList: SceneNode[]) => {
     if (!nodesList || !dat || !mdl) return;
     for (const node of nodesList) {
       const bId = bodyIdCache[node.id];
       if (bId !== undefined) {
         // Views taken once for this body, as in executeScripts.
-        const cvel = dat.cvel;
         const xfrc = dat.xfrc_applied;
         const xpos = dat.xpos;
         const xquat = dat.xquat;
-        const bodyDofnum = mdl.body_dofnum;
-        const bodyParentid = mdl.body_parentid;
-        let pId = bId;
-        while (pId > 0 && bodyDofnum[pId] === 0) {
-          pId = bodyParentid[pId];
-        }
-        const wx = cvel[bId * 6 + 0], wy = cvel[bId * 6 + 1], wz = cvel[bId * 6 + 2];
-        const vO_x = cvel[bId * 6 + 3], vO_y = cvel[bId * 6 + 4], vO_z = cvel[bId * 6 + 5];
-        const x_pos = xpos[bId * 3 + 0], y_pos = xpos[bId * 3 + 1], z_pos = xpos[bId * 3 + 2];
-        const rx = x_pos - xpos[pId * 3 + 0];
-        const ry = y_pos - xpos[pId * 3 + 1];
-        const rz = z_pos - xpos[pId * 3 + 2];
-        const vx = vO_x + (wy * rz - wz * ry);
-        const vy = vO_y + (wz * rx - wx * rz);
-        const vz = vO_z + (wx * ry - wy * rx);
+        // vel: world-frame velocity of the point `pos` is (the body origin);
+        // angvel: world-frame ω. See bodyKinematics.ts.
         bodies[node.id] = {
-          pos: [x_pos, y_pos, z_pos], vel: [vx, vy, vz], angvel: [wx, wy, wz],
+          pos: [xpos[bId * 3], xpos[bId * 3 + 1], xpos[bId * 3 + 2]],
+          vel: bodyPointVelocity(views, bId), angvel: bodyAngularVelocity(views, bId),
           quat: [xquat[bId * 4], xquat[bId * 4 + 1], xquat[bId * 4 + 2], xquat[bId * 4 + 3]],
           xfrc_applied: [
             xfrc[bId * 6 + 0], xfrc[bId * 6 + 1], xfrc[bId * 6 + 2],

@@ -166,8 +166,9 @@ CONTROL SCRIPT API
 ═══════════════════════════════════════════
 A body's `script` runs as a function of `api` every physics step. Always write `api.` (a bare getTime() throws). bodyName defaults to the script's own body.
   api.getPosition(bodyName), api.getVelocity(bodyName), api.getAngularVelocity(bodyName) -> [x, y, z]
+    (position of the body origin; velocity of that same point, world frame; angular velocity in the world frame. Telemetry and physics_run_headless frames use the same conventions for pos/vel/angvel.)
   api.getOrientation(bodyName) -> row-major 3x3 world rotation, 9 numbers (column 0 = the body's X axis in world space)
-  api.setPosition(pos, bodyName), api.setVelocity(vel, bodyName), api.setAngularVelocity(w, bodyName) (a number for a hinge/slide body)
+  api.setPosition(pos, bodyName), api.setVelocity(vel, bodyName), api.setAngularVelocity(w, bodyName) (world frame on a free body; a number for a hinge/slide body)
   api.getMass(bodyName), api.getJointPosition(jointName), api.getJointVelocity(jointName)
   api.applyForce([fx,fy,fz], bodyName), api.applyTorque([tx,ty,tz], bodyName), api.applyJointForce(jointName, f)
   api.setActuatorControl(actuatorName, value), api.getActuatorControl(actuatorName)

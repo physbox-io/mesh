@@ -140,11 +140,11 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 - **`api.isKeyPressed(keyName)`**: whether a key (e.g. `'space'`, `'w'`, `'arrowup'`, `'enter'`) is currently pressed. Case-insensitive. Matches both `e.key` and `e.code`.
 - **`api.getPosition(bodyName)`**: the 3D position `[x, y, z]` of the body (defaults to the current body).
 - **`api.getOrientation(bodyName)`**: the body's world rotation as a row-major 3x3 matrix, 9 numbers (`data.xmat`). Column 0 (`[R[0], R[3], R[6]]`) is the body's local X axis in world space.
-- **`api.getVelocity(bodyName)`**: the 3D linear velocity `[vx, vy, vz]`.
-- **`api.getAngularVelocity(bodyName)`**: the 3D angular velocity `[wx, wy, wz]`.
+- **`api.getVelocity(bodyName)`**: the 3D linear velocity `[vx, vy, vz]` of the point `getPosition` gives (the body origin), in the world frame. Not MuJoCo's raw `cvel`, whose linear part is the velocity of the whole tree's centre of mass (see `src/workers/bodyKinematics.ts`).
+- **`api.getAngularVelocity(bodyName)`**: the 3D angular velocity `[wx, wy, wz]`, world frame. Telemetry's `vel`/`angvel` follow the same conventions.
 - **`api.setPosition(pos, bodyName)`**: sets the 3D position `[x, y, z]` (or 1D position for hinge/slide joints).
 - **`api.setVelocity(vel, bodyName)`**: sets the 3D linear velocity `[vx, vy, vz]` (or 1D velocity).
-- **`api.setAngularVelocity(angvel, bodyName)`**: sets the 3D angular velocity `[wx, wy, wz]` (or 1D angular velocity).
+- **`api.setAngularVelocity(angvel, bodyName)`**: sets the 3D angular velocity `[wx, wy, wz]` (world frame on a free body, turned into the body frame its qvel holds; a ball joint's own frame), or a 1D angular velocity.
 - **`api.getMass(bodyName)`**: the mass of the body.
 - **`api.getJointPosition(jointName)`**: the 1D position of a hinge or slide joint.
 - **`api.getJointVelocity(jointName)`**: the 1D velocity of a hinge or slide joint.
