@@ -54,7 +54,7 @@ import type {
 } from './physicsWorkerProtocol';
 import { HistoryRing } from './historyRing';
 import { buildImpactWatches, checkImpacts as detectImpacts, type ImpactWatches } from './impactWatch';
-import { JOINT_NV, captureState, copyJointsByName, seedNewBodies, type CarriedState } from './carryState';
+import { JOINT_NV, applyEditedCtrl, captureState, copyCarriedActuators as copyCarriedActuatorsByName, copyJointsByName, documentCtrlValues, seedNewBodies, type CarriedState } from './carryState';
 import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptStateMap } from '../utils/scriptState';
 import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
@@ -1675,19 +1675,8 @@ const seedActuatorCtrl = (nodes: SceneNode[], targetData: MjData, skipActuators?
   });
 };
 
-const copyCarriedActuators = (carried: CarriedState, newModel: MjModel, newData: MjData): Set<string> => {
-  const placed = new Set<string>();
-  for (const name in actuatorIdCache) {
-    if (Object.prototype.hasOwnProperty.call(carried.actuators, name)) {
-      const id = actuatorIdCache[name];
-      if (id >= 0 && id < newModel.nu) {
-        newData.ctrl[id] = carried.actuators[name];
-        placed.add(name);
-      }
-    }
-  }
-  return placed;
-};
+const copyCarriedActuators = (carried: CarriedState, newModel: MjModel, newData: MjData): Set<string> =>
+  copyCarriedActuatorsByName(carried, newModel, newData, actuatorIdCache);
 
 /**
  * Carry a running simulation into a model whose degrees of freedom changed.
@@ -1738,9 +1727,13 @@ const doBuild = (
   xml: string,
   newSceneGraph: SceneGraph,
   preserveState: boolean,
-  seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number; scriptState?: ScriptStateMap },
+  seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number; scriptState?: ScriptStateMap; docCtrl?: Record<string, number> },
   brokenConstraints?: string[],
 ) => {
+  // The set speeds the running model was built with, so an edit of one can
+  // win over the live ctrl carried across (see applyEditedCtrl). A fresh
+  // worker has no previous scene of its own; the main thread sends it.
+  const ctrlBefore = seedState ? (seedState.docCtrl ?? null) : documentCtrlValues(sceneGraph?.nodes);
   if (brokenConstraints) brokenWeldKeys = new Set(brokenConstraints);
   // Which scripts this build changes: their old mistakes no longer apply.
   const scriptsBefore = scriptsByBody(sceneGraph.nodes);
@@ -1827,6 +1820,7 @@ const doBuild = (
     for (let i = 0; i < seedState.qpos.length; i++) newData.qpos[i] = seedState.qpos[i];
     for (let i = 0; i < seedState.qvel.length; i++) newData.qvel[i] = seedState.qvel[i];
     if (seedState.ctrl) for (let i = 0; i < Math.min(seedState.ctrl.length, newModel.nu); i++) newData.ctrl[i] = seedState.ctrl[i];
+    applyEditedCtrl(ctrlBefore, sceneGraph.nodes, newModel, newData, actuatorIdCache);
     newData.time = seedState.time;
     mujoco.mj_forward(newModel, newData);
   } else if (preserveState && carried && carried.nq === newModel.nq && carried.nv === newModel.nv) {
@@ -1836,6 +1830,7 @@ const doBuild = (
     for (let i = 0; i < nv; i++) newData.qvel[i] = carried.qvel[i];
     const placedActuators = copyCarriedActuators(carried, newModel, newData);
     seedActuatorCtrl(sceneGraph.nodes, newData, placedActuators);
+    applyEditedCtrl(ctrlBefore, sceneGraph.nodes, newModel, newData, actuatorIdCache);
     newData.time = carried.time;
     mujoco.mj_forward(newModel, newData);
   } else if (carried && preserveState) {
@@ -1853,6 +1848,7 @@ const doBuild = (
      * pose: everything else in mid-air snaps back to where it started.
      */
     carryByJointName(carried, newModel, newData);
+    applyEditedCtrl(ctrlBefore, sceneGraph.nodes, newModel, newData, actuatorIdCache);
   } else {
     freshRun = true;
     seedActuatorCtrl(sceneGraph.nodes, newData);

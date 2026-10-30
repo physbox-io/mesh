@@ -18,6 +18,11 @@ export interface SeedState {
   time: number;
   /** Every scripted body's api.state, so a recycled worker's scripts carry on. */
   scriptState?: ScriptStateMap;
+  /**
+   * The document set speeds (ctrlValue by actuator name) of the model `ctrl`
+   * came from, so a set speed edited since wins over it. See applyEditedCtrl.
+   */
+  docCtrl?: Record<string, number>;
 }
 
 export interface DragTarget {
