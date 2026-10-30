@@ -530,6 +530,8 @@ export const viewCommands: McpCommands = {
         joints:        'SceneJoint[] — joints attaching this body to its parent',
         children:      'SceneNode[] — child bodies (rigidly offset unless they have joints)',
         coupleTargetId:'string — id of another body; couples their first hinge or slide joints with coupleRatio',
+        isPulleyRope:  'boolean — a rope (no geoms, no joints) tying leftTargetId and rightTargetId, bodies with a slide along the rope, optionally over pulleyWheelId (a hinged isPulleyWheel body with pulleyRadius); taut and rigid',
+        leftStrands:   'number — default 1; strands holding the rope\'s left end (rightStrands for the right): 2 = movable pulley, 4 = four-fall block and tackle',
         isRack:        'boolean — this slide body is a rack: coupled to a hinged wheel that meshes with it (axis square to the slide, face about one wheel radius from the axis)',
         coupleRatio:   'number — gear ratio for explicit joint coupling (default -1)',
         weldTargetId:  'string — id of body to weld to (closed-loop rigid constraint)',

@@ -89,10 +89,25 @@ export function RopeCard({ node }: { node: SceneNode }) {
           <option value="">-- None (direct coupling) --</option>
           {allPulleyWheels.map(wheel => (
             <option key={wheel.id} value={wheel.id}>
-              {wheel.id} (r={((wheel.pulleyRadius || 0.4) * 1000).toFixed(0)} mm)
+              {wheel.id} (r={((wheel.pulleyRadius || 0.08) * 1000).toFixed(0)} mm)
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="flex gap-2" title="Strands holding each end: 2 for a load in a movable pulley, 4 for a four-fall block and tackle">
+        {(['leftStrands', 'rightStrands'] as const).map((field, i) => (
+          <label key={field} className="flex-1 flex flex-col gap-1 text-xs font-semibold text-slate-500">
+            Strands on {i === 0 ? 'A' : 'B'}
+            <select
+              value={node[field] ?? 1}
+              onChange={(e) => updateRopeParams(node.id, { [field]: Number(e.target.value) })}
+              className="w-full text-xs border border-slate-200 rounded p-1.5 bg-slate-50 font-medium text-slate-700 focus:border-blue-500 outline-none"
+            >
+              {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+        ))}
       </div>
     </div>
   );

@@ -69,6 +69,11 @@ Every node in the "nodes" array represents a physical body and is defined as:
   
   // Optional Special Fields:
   allowCoupling: boolean (default true; false keeps the body out of the automatic proximity coupling: hinge bodies with 'gear' in the id couple when their axes are parallel, a round geom of each lies in the same plane, and the axes are 0.5-1.2x the sum of those radii apart; bodies already chained by coupleTargetId are left alone)
+  isPulleyRope: boolean (a rope, not a part: no geoms or joints; ties leftTargetId and rightTargetId, bodies with a slide joint along the rope, optionally over pulleyWheelId. Always taut and rigid: leftStrands*dLeft + rightStrands*dRight = 0 toward the wheel, and the wheel turns with the rope. Directions come from where the bodies are, so either end may be on either side)
+  leftTargetId, rightTargetId: string (a rope's two end bodies, each with a slide)
+  leftStrands, rightStrands: number (default 1: strands holding that end of a rope. rightStrands 2 = a load in a movable pulley, MA 2; 4 = a four-fall block and tackle, MA 4)
+  pulleyWheelId: string (a rope's wheel: a body with isPulleyWheel and a hinge)
+  isPulleyWheel: boolean, pulleyRadius: number (m) (a hinged wheel a rope runs over, and its radius at the rope)
   isRack: boolean (a slide body with teeth: coupled to a hinged wheel whose axis is square to the slide, in the rack's plane, with the rack's face about one wheel radius from the axis; theta = x/r, signed by which side of the wheel the rack is on. Only marked bodies are racks, whatever the id)
   coupleTargetId: string (id of target body to couple with: this body's first hinge or slide = coupleRatio x the target's first hinge or slide, held rigid like gear teeth; a body with neither, e.g. one given the default free joint, is not coupled and the reply's couplingWarnings say so)
   coupleRatio: number (gear/coupling ratio)

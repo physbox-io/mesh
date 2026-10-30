@@ -4,14 +4,14 @@
 // Explicit couplings (coupleTargetId), meshing gears found by proximity
 // (utils/gearMeshing.ts), a pinion on its rack, and pulley ropes. mjcf.ts
 // emits each as a rigid fixed tendon (utils/jointCoupling.ts); this only
-// decides what is coupled to what. Pure: no store, no XML beyond the legacy
-// rope equalities.
+// decides what is coupled to what. Pure: no store, no XML.
 // ---------------------------------------------------------------------------
 
 import type { SceneJoint, SceneNode } from '../types/scene';
 import { nodeLocalQuat, quatMultiply, quatRotateVec, type QuatWXYZ } from './sceneTree';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
 import { isRackBody, meshingRacks, rackBody, type RackBody } from './rackMeshing';
+import { ropeLayout } from './pulleyRope';
 
 /** A body's rest pose, world frame, and its first geom's size. */
 export interface WorldPose { pos: [number, number, number]; quat: QuatWXYZ; size: number[] }
@@ -21,8 +21,6 @@ export interface PlannedCoupling { name: string; joint1: string; joint2: string;
 
 export interface CouplingPlan {
   couplings: PlannedCoupling[];
-  /** `<equality>` lines that are not couplings of two joints by a tendon. */
-  equalities: string[];
   /** A coupling asked for and left out, by name and why. */
   warnings: string[];
 }
@@ -69,11 +67,10 @@ const pitchRadius = (node: SceneNode): number | undefined => {
 };
 
 /** What a scene's couplings leave out, by body: for an MCP reply. */
-export const couplingWarnings = (nodes: SceneNode[]): string[] => planCouplings(nodes, restPoses(nodes), (s) => s).warnings;
+export const couplingWarnings = (nodes: SceneNode[]): string[] => planCouplings(nodes, restPoses(nodes)).warnings;
 
-export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPose>, xmlAttr: (s: string) => string): CouplingPlan {
+export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPose>): CouplingPlan {
   const couplings: PlannedCoupling[] = [];
-  const equalities: string[] = [];
   const warnings: string[] = [];
   const pinions: GearBody[] = [];
   const racks: RackBody[] = [];
@@ -169,29 +166,21 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
     warnings.push(`Body '${rack.nodeId}' is a rack, but no hinged wheel meshes with it, so nothing turns it: a wheel meshes when its hinge axis is square to the slide, it lies in the rack's plane over the rack's length, and the rack's face toward it is about one pitch radius (the wheel's radius) from its axis. Couple it explicitly with coupleTargetId to drive it from elsewhere.`);
   }
 
-  // 3. Pulley Rope Joint Couplings
+  // 3. Pulley ropes: always taut, rigid as gears are. See utils/pulleyRope.ts.
   let ropeCouplingIndex = 1;
   for (const rope of pulleyRopesList) {
-    const { pulleyWheelId, leftTargetId, rightTargetId } = rope;
-    if (leftTargetId && rightTargetId) {
-      const leftJoint = jointedNodes[leftTargetId];
-      const rightJoint = jointedNodes[rightTargetId];
-      if (leftJoint && rightJoint) {
-        // Linear coupling between weights: ratio is -1.0 (as one goes down, other goes up)
-        equalities.push(`    <joint name="rope_coupling_linear_${ropeCouplingIndex}" joint1="${xmlAttr(leftJoint)}" joint2="${xmlAttr(rightJoint)}" polycoef="0 -1 0 0 0" />`);
-        // Couple pulley wheel Hinge rotation with the Left weight slide joint
-        const wheelJoint = pulleyWheelId ? jointedNodes[pulleyWheelId] : undefined;
-        if (wheelJoint) {
-          const radius = byId.get(pulleyWheelId!)?.pulleyRadius || 0.08;
-          // Rope kinematics: the weight travels the arc the rim turns through,
-          // x = r * theta. joint1 is the WEIGHT's slide and joint2 the wheel's
-          // hinge, so the coefficient is the radius, not its reciprocal.
-          equalities.push(`    <joint name="rope_coupling_angular_${ropeCouplingIndex}" joint1="${xmlAttr(leftJoint)}" joint2="${xmlAttr(wheelJoint)}" polycoef="0 ${radius} 0 0 0" />`);
-        }
+    const { layout, problems } = ropeLayout(rope, byId, world);
+    warnings.push(...problems);
+    if (layout) {
+      couplings.push({ name: `rope_coupling_linear_${ropeCouplingIndex}`, joint1: layout.left.jointName, joint2: layout.right.jointName, ratio: +layout.linearRatio.toPrecision(9) });
+      // Rope taken up on the left per metre of the left end's travel.
+      const takenUp = layout.left.strands * layout.left.sign;
+      if (layout.wheel) {
+        couplings.push({ name: `rope_coupling_angular_${ropeCouplingIndex}`, joint1: layout.wheel.jointName, joint2: layout.left.jointName, ratio: +(layout.wheel.turnsPerMetre * takenUp).toPrecision(9) });
       }
     }
     ropeCouplingIndex++;
   }
 
-  return { couplings, equalities, warnings };
+  return { couplings, warnings };
 }

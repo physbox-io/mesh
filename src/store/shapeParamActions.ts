@@ -23,7 +23,7 @@ export interface ShapeParamActions {
   updateTubeParams: (id: string, params: { innerRadius?: number; outerRadius?: number; height?: number }) => void;
   updateCurveParams: (id: string, params: { points?: number[][]; width?: number; thickness?: number; segments?: number; closed?: boolean; bank?: number }) => void;
   updatePulleyParams: (id: string, params: { leftTargetId?: string; rightTargetId?: string; pulleyRadius?: number }) => void;
-  updateRopeParams: (id: string, params: { pulleyWheelId?: string; leftTargetId?: string; rightTargetId?: string }) => void;
+  updateRopeParams: (id: string, params: { pulleyWheelId?: string; leftTargetId?: string; rightTargetId?: string; leftStrands?: number; rightStrands?: number }) => void;
   updateNodeComposite: (id: string, params: Partial<SceneNode>) => void;
   updateGearTeeth: (id: string, teeth: number) => void;
   addPusherPeg: (gearId: string) => void;
@@ -270,6 +270,8 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
             if (params.pulleyWheelId !== undefined) node.pulleyWheelId = params.pulleyWheelId;
             if (params.leftTargetId !== undefined) node.leftTargetId = params.leftTargetId;
             if (params.rightTargetId !== undefined) node.rightTargetId = params.rightTargetId;
+            if (params.leftStrands !== undefined) node.leftStrands = params.leftStrands;
+            if (params.rightStrands !== undefined) node.rightStrands = params.rightStrands;
             return true;
           }
           if (traverse(node.children)) return true;

@@ -708,6 +708,12 @@ export interface SceneNode {
   pulleyRadius?: number;
   isPulleyRope?: boolean;
   pulleyWheelId?: string;
+  /**
+   * A rope's strands holding each end (default 1): 2 for a load hung in a
+   * movable pulley, 4 for a four-fall block and tackle. utils/pulleyRope.ts.
+   */
+  leftStrands?: number;
+  rightStrands?: number;
   isAerodynamic?: boolean;
   rot?: number[];
   /**

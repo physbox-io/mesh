@@ -696,7 +696,7 @@ export const compileToMJCF = (
   };
   traverse(sceneCopy.nodes);
   // What is coupled to what: explicit couplings, meshing gears, racks, ropes.
-  const plan = planCouplings(sceneCopy.nodes, nodeWorldData, xmlAttr);
+  const plan = planCouplings(sceneCopy.nodes, nodeWorldData);
 
   // A velocity servo far stiffer than the joint it drives (kv*dt over the
   // joint's inertia), on a body held in a closed loop by a pin or a weld, is
@@ -747,7 +747,6 @@ export const compileToMJCF = (
 
 
   for (const c of plan.couplings) couple(c.name, c.joint1, c.joint2, c.ratio);
-  for (const line of plan.equalities) equalityConstraints += `\n${line}`;
 
   /** A weld's anchor at body1's origin, in body2's frame (the world's when there is no body2). */
   const weldAnchor = (bodyId: string, targetId?: string): string => {
