@@ -12,6 +12,7 @@ import { buildBreakModel } from './breakModel';
 import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
 import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
+import { contactArenaXml } from './contactArena';
 import { UNSLIPPING_CLUTCH, clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
 /**
@@ -1039,7 +1040,7 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
        cantilever with a 7 g tip drooped 48 mm and swung, where 1e-8 holds it
        to 0.35 mm. Far below anything a part bigger than a strand has. -->
   <compiler boundinertia="1e-8" />
-` : ''}  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
+` : ''}${contactArenaXml(sceneCopy.nodes)}  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
     <geom solref="${contactTime} 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>

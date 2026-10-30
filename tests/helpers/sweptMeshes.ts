@@ -174,3 +174,21 @@ export function flipMesh(m: MeshData): MeshData {
   for (let i = 0; i < faces.length; i += 3) [faces[i + 1], faces[i + 2]] = [faces[i + 2], faces[i + 1]];
   return { verts: m.verts, faces };
 }
+
+/**
+ * A paraboloid bowl, outside z = a r² and inside the same shifted up by `t`,
+ * rim `h` high (outer rim radius sqrt(h / a)), lathed in `seg` segments from
+ * `n` profile steps that start 0.5 mm off the axis — SCAD's
+ * rotate_extrude($fn=64) polygon(concat(outer, inner)). Four of them, rims
+ * 55/45/35/25 mm, are the nesting-bowls scene.
+ */
+export function paraboloidBowl(h: number, { a = 10, t = 0.004, seg = 64, n = 32 } = {}): MeshData {
+  const R = Math.sqrt(h / a), r0 = 0.0005;
+  const outer: [number, number][] = [], inner: [number, number][] = [];
+  for (let k = 0; k <= n; k++) {
+    const r = r0 + ((R - r0) * k) / n;
+    outer.push([r, a * r * r]);
+    inner.push([r, a * r * r + t]);
+  }
+  return lathe([...outer, ...inner.reverse()], seg);
+}
