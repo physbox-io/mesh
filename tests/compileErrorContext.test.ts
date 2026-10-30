@@ -39,14 +39,19 @@ describe('a compile error, in the scene\'s names', () => {
     expect(r.explained).toBe("MuJoCo could not build the scene: invalid keyword: 'hinged', in joint 'lever_j' on body 'lever' (its type is 'hinged').");
   });
 
+  // A rope with a free end is left out with a warning now (utils/pulleyRope.ts),
+  // so MuJoCo never sees a bad rope coupling; its message is fed in by hand.
   it('says what a generated rope coupling is and which joints it ties', () => {
-    const r = compile({ nodes: [
-      box('wheel', 0, 'hinge'), box('left', 0.1, 'free'), box('right', -0.1, 'free'),
+    const graph = { nodes: [
+      box('wheel', 0, 'hinge'), box('left', 0.1, 'slide'), box('right', -0.1, 'slide'),
       { ...box('rope', 0, 'hinge'), joints: [], isPulleyRope: true, pulleyWheelId: 'wheel', leftTargetId: 'left', rightTargetId: 'right' },
-    ] })!;
-    expect(r.raw).toMatch(/rope_coupling_linear_1/);
-    expect(r.explained).toMatch(/only HINGE and SLIDE joint allowed in constraint, in a pulley rope's coupling .*between free joint 'left_j' on body 'left' and free joint 'right_j' on body 'right'\.$/);
-    expect(r.explained).not.toMatch(/line \d+/);
+    ] } as SceneGraph;
+    const xml = compileToMJCF(graph, -9.81, 1, 0, 0, 1.2, 0);
+    const line = xml.split('\n').findIndex((l) => l.includes("'rope_coupling_linear_1'") || l.includes('"rope_coupling_linear_1"')) + 1;
+    expect(line).toBeGreaterThan(0);
+    const explained = explainCompileError(`Error: only HINGE and SLIDE joint allowed in constraint\nElement name 'rope_coupling_linear_1', id 0, line ${line}`, xml);
+    expect(explained).toMatch(/only HINGE and SLIDE joint allowed in constraint, in a pulley rope's coupling .*between slide joint 'left_j' on body 'left' and slide joint 'right_j' on body 'right'\.$/);
+    expect(explained).not.toMatch(/line \d+/);
   });
 
   it('leaves a message with no location, or no XML, as it was', () => {

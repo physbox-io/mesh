@@ -38,7 +38,7 @@ export function restPoses(nodes: SceneNode[]): Record<string, WorldPose> {
   const out: Record<string, WorldPose> = {};
   const walk = (list: SceneNode[], parentPos: [number, number, number], parentQuat: QuatWXYZ) => {
     for (const node of list || []) {
-      const r = quatRotateVec(parentQuat, node.pos);
+      const r = quatRotateVec(parentQuat, node.pos ?? [0, 0, 0]);
       const pos: [number, number, number] = [parentPos[0] + r[0], parentPos[1] + r[1], parentPos[2] + r[2]];
       const quat = quatMultiply(parentQuat, nodeLocalQuat(node));
       const mainGeom = (node.geoms || [])[0];
