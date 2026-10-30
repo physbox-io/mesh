@@ -43,6 +43,23 @@ let recompileToken = 0;
  */
 export let recompilesInFlight = 0;
 
+/** Callers waiting for every recompile in flight to land; see `whenBuildsLand`. */
+let idleWaiters: (() => void)[] = [];
+
+/**
+ * Resolves once no recompile is in flight.
+ *
+ * A recompile that a newer one supersedes does not build; the newer one builds
+ * the newer scene. Its caller used to get control back at once, and an MCP
+ * command that read `lastCompileError` then read whatever the PREVIOUS build
+ * had left there — so a scene that was about to build was reported with the
+ * last one's error. A superseded call waits here instead, and returns only once
+ * the build that covers its request has landed.
+ */
+const whenBuildsLand = (): Promise<void> => recompilesInFlight === 0
+  ? Promise.resolve()
+  : new Promise((resolve) => { idleWaiters.push(resolve); });
+
 /** A reset that a superseded recompile was asked for; see recompile. */
 let pendingForceReset = false;
 
@@ -128,7 +145,16 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       // it belongs to has even started compiling.
       recompilesInFlight++;
       let counted = true;
-      const done = () => { if (counted) { counted = false; recompilesInFlight = Math.max(0, recompilesInFlight - 1); } };
+      const done = () => {
+        if (!counted) return;
+        counted = false;
+        recompilesInFlight = Math.max(0, recompilesInFlight - 1);
+        if (recompilesInFlight === 0 && idleWaiters.length) {
+          const waiters = idleWaiters;
+          idleWaiters = [];
+          waiters.forEach((w) => w());
+        }
+      };
       /*
        * A force reset normally skips the wait, because it is what a preset load,
        * an undo and a reset all use and none of those may lag. But an edit from a
@@ -171,6 +197,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           // one was asked to.
           if (forceReset) pendingForceReset = true;
           done();
+          await whenBuildsLand();
           return;
         }
       }
@@ -235,6 +262,11 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           console.info(`[PhysicsWorker] Shared memory (COOP/COEP) active: ${!!built.isShared}`);
         }
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);
+        // The error clears NOW, not with the rest on the next paint. The await
+        // on recompile() resolves before that paint, and every MCP command
+        // reads lastCompileError straight after it: deferred, a build that
+        // worked was reported with the previous build's error.
+        set({ lastCompileError: null });
         const updates: Partial<PhysicsState> = {
           mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built),
           sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,
@@ -395,7 +427,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         }
         // A build that a newer call has already superseded is not news: that
         // call is building the newer scene, and its outcome is the one to report.
-        if (token !== recompileToken) { done(); return; }
+        if (token !== recompileToken) { done(); await whenBuildsLand(); return; }
         // Still update the sceneGraph so the UI reflects the change even if MuJoCo
         // rejects it — but only if nothing has been written since this build
         // began, the same guard the success path uses. Unguarded, a failed build
