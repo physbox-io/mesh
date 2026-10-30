@@ -85,18 +85,18 @@ describe('colour conversion', () => {
 });
 
 describe('the painted-triangle encoding', () => {
-  it('leaves the default filament unstamped', () => {
+  it('leaves an unpainted triangle unstamped', () => {
     expect(encodeTriangleState(0)).toBeNull();
   });
 
-  it('stamps the painted filaments', () => {
-    expect(encodeTriangleState(1)).toBe('4');
-    expect(encodeTriangleState(2)).toBe('8');
-    expect(encodeTriangleState(3)).toBe('C');
+  it('numbers filaments as Bambu Studio and OrcaSlicer do (CONST_FILAMENTS)', () => {
+    const bambu = ['4', '8', '0C', '1C', '2C', '3C', '4C', '5C', '6C', '7C', '8C', '9C', 'AC', 'BC', 'CC', 'DC',
+      'EC', '0FC', '1FC', '2FC', '3FC', '4FC', '5FC', '6FC', '7FC', '8FC', '9FC', 'AFC', 'BFC', 'CFC', 'DFC', 'EFC'];
+    bambu.forEach((code, i) => expect(encodeTriangleState(i + 1)).toBe(code));
   });
 
   it('declines a filament it cannot encode rather than writing a wrong one', () => {
-    expect(encodeTriangleState(4)).toBeNull();
+    expect(encodeTriangleState(33)).toBeNull();
   });
 });
 
@@ -108,14 +108,16 @@ describe('exportThreeMf', () => {
     const files = unzipSync(exportThreeMf([triangle(null)]).data) as Record<string, Uint8Array>;
     const model = new TextDecoder().decode(files['3D/3dmodel.model']);
 
-    expect(Object.keys(files).sort()).toEqual(['3D/3dmodel.model', '[Content_Types].xml', '_rels/.rels']);
+    expect(Object.keys(files).sort()).toEqual([
+      '3D/3dmodel.model', 'Metadata/Slic3r_PE_model.config', 'Metadata/model_settings.config', '[Content_Types].xml', '_rels/.rels',
+    ]);
     expect(model).toContain('<model unit="millimeter"');
   });
 
   it('produces a package with the three parts a reader looks for', () => {
     const files = unzip(exportThreeMf([triangle(null)]).data);
 
-    expect([...files.keys()]).toEqual(['[Content_Types].xml', '_rels/.rels', '3D/3dmodel.model']);
+    expect([...files.keys()].slice(0, 3)).toEqual(['[Content_Types].xml', '_rels/.rels', '3D/3dmodel.model']);
     expect(files.get('[Content_Types].xml')).toContain('3dmanufacturing-3dmodel+xml');
     expect(files.get('_rels/.rels')).toContain('/3D/3dmodel.model');
   });
@@ -125,7 +127,8 @@ describe('exportThreeMf', () => {
 
     expect(model).toContain('unit="millimeter"');
     expect(model).toContain('<vertex x="10" y="0" z="0"/>');
-    expect(model).toMatch(/<object id="(\d+)"[^>]*>[\s\S]*<build><item objectid="\1"\/><\/build>/);
+    // The mesh is a volume of the object the build places
+    expect(model).toMatch(/<object id="(\d+)"[^>]*>[\s\S]*<component objectid="\1"\/>[\s\S]*<build><item objectid="\d+"\/><\/build>/);
   });
 
   it('gives each corner its own colour index', () => {
@@ -169,9 +172,9 @@ describe('exportThreeMf', () => {
     expect(result.palette[0].hex).toBe(linearToSrgbHex([0.5, 0.5, 0.5]));
     expect(result.palette[0].triangles).toBe(3);
     expect(result.palette[1].hex).toBe('#ff0000');
-    // Exactly one triangle carries a stamp, and it carries both vendors' spelling.
-    expect(model.match(/paint_color="4"/g)).toHaveLength(1);
-    expect(model.match(/slic3rpe:mmu_segmentation="4"/g)).toHaveLength(1);
+    // Exactly one triangle carries a stamp, filament 2, in both vendors' spelling.
+    expect(model.match(/paint_color="8"/g)).toHaveLength(1);
+    expect(model.match(/slic3rpe:mmu_segmentation="8"/g)).toHaveLength(1);
   });
 
   it('snaps colours past the machine\'s filament count onto the ones that fit', () => {

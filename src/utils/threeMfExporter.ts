@@ -26,8 +26,13 @@
 //
 // Honest limits, both worth knowing before trusting a print:
 //  - `paint_color`'s encoding is a vendor format, not a spec. What is written
-//    here is the whole-triangle case (see encodeTriangleState) and it has not
-//    been checked against a real slicer from this codebase.
+//    here is the whole-triangle case (see encodeTriangleState), checked
+//    against Bambu/Orca's source, not yet against a file opened in a slicer.
+//
+// Each mesh is also a volume with its own filament, named in Bambu's and
+// PrusaSlicer's config files, so a part made of several materials (a mesh's
+// `object` key) prints each in its own; paint is stamped only where it
+// differs from the volume's filament.
 //  - A slicer's painting has at most a handful of filaments; anything past
 //    `maxExtruders` is snapped to the nearest colour that fits.
 // ---------------------------------------------------------------------------
@@ -51,14 +56,19 @@ export interface ThreeMfMesh {
   colors: ArrayLike<number> | null;
   /** Linear rgb of the body itself, used where there are no vertex colours. */
   baseColor: number[];
+  /**
+   * Meshes with the same key are one printed object, each mesh a volume of
+   * it printed in the filament its baseColor falls in: a part whose inside is
+   * a different material from its outside. Absent: an object of its own.
+   */
+  object?: string;
 }
 
 export interface ThreeMfOptions {
   /**
    * How many filaments the target machine has.
    *
-   * Four is an AMS. The encoding below is only defined for the first few slots
-   * anyway — see encodeTriangleState.
+   * Four is an AMS; the encoding goes to 32 (see encodeTriangleState).
    */
   maxExtruders?: number;
   application?: string;
@@ -92,25 +102,31 @@ export function linearToSrgbHex(rgb: number[]): string {
 }
 
 /**
- * The `paint_color` value for a triangle painted entirely in one filament.
+ * The `paint_color` value for a triangle painted entirely in one filament,
+ * given that filament's 1-based number.
  *
  * The slicers encode a triangle's painting as a subdivision tree serialised
- * into hex nibbles: the low bits say whether the triangle is split, the rest
- * carry the state, and a split triangle recurses. A triangle that is not split
- * is therefore a single nibble of `state << 2`, which is where "4" for the
- * second filament and "8" for the third come from.
+ * into hex nibbles, written last nibble first: the low bits say whether the
+ * triangle is split, the rest carry the state, and a split triangle recurses.
+ * The state of an unsplit triangle IS the filament number (Bambu Studio's and
+ * OrcaSlicer's EnforcerBlockerType: Extruder1 = 1). Filaments 1 and 2 fit in
+ * one nibble, `state << 2`; from 3 the nibble is 0b1100 and the next holds
+ * state - 3, and from 18 that one is 0b1111 and a third holds state - 18. This
+ * reproduces Bambu's own table (CONST_FILAMENTS in Model.cpp): "4", "8", "0C",
+ * "1C" ... "EC", "0FC" ...
  *
- * Only the unsplit case is written here, and only for the states that fit in
- * one nibble. That is exactly right for what this app produces: the painted
- * surface is tessellated finely enough that a mark's boundary falls between
- * triangles rather than across one, so no triangle needs splitting. Returns
- * null when there is nothing to stamp — state 0 is the default filament, and
- * writing it on every triangle would be noise in the file.
+ * Only the unsplit case is written, which is right for what this app
+ * produces: the painted surface is tessellated finely enough that a mark's
+ * boundary falls between triangles rather than across one. Returns null for 0,
+ * "not painted", which prints in the volume's own filament.
  */
-export function encodeTriangleState(state: number): string | null {
-  if (state <= 0) return null;
-  if (state > 3) return null;
-  return ((state << 2) >>> 0).toString(16).toUpperCase();
+export function encodeTriangleState(extruder: number): string | null {
+  if (!Number.isInteger(extruder) || extruder <= 0) return null;
+  if (extruder <= 2) return ((extruder << 2) >>> 0).toString(16).toUpperCase();
+  const hex = (n: number) => n.toString(16).toUpperCase();
+  if (extruder <= 17) return `${hex(extruder - 3)}C`;
+  if (extruder <= 32) return `${hex(extruder - 18)}FC`;
+  return null;
 }
 
 const xmlEscape = (text: string) =>
@@ -139,7 +155,7 @@ interface TriangleColor { r: number; g: number; b: number; }
  * actually laid down; the triangle is then given whichever slot is nearest its
  * average.
  */
-function buildPalette(cornerColors: number[][], maxExtruders: number) {
+function buildPalette(cornerColors: number[][], maxExtruders: number, required: number[][] = []) {
   const buckets = new Map<string, { color: TriangleColor; count: number }>();
   for (const [r, g, b] of cornerColors) {
     const c = { r, g, b };
@@ -152,7 +168,15 @@ function buildPalette(cornerColors: number[][], maxExtruders: number) {
   }
 
   const ranked = [...buckets.values()].sort((a, b) => b.count - a.count);
-  const slots = ranked.slice(0, Math.max(1, maxExtruders)).map((b) => b.color);
+  // A volume's own colour is a material chosen on purpose, so it keeps a slot
+  // ahead of a paint colour however few corners it has.
+  const keyOf = (c: number[]) => `${Math.round(c[0] * 15)},${Math.round(c[1] * 15)},${Math.round(c[2] * 15)}`;
+  const must = new Set(required.map(keyOf));
+  const kept = ranked.filter((b) => must.has(keyOf([b.color.r, b.color.g, b.color.b])));
+  const rest = ranked.filter((b) => !must.has(keyOf([b.color.r, b.color.g, b.color.b])));
+  const room = Math.max(1, maxExtruders);
+  const chosen = [...kept.slice(0, room), ...rest.slice(0, Math.max(0, room - kept.length))];
+  const slots = chosen.sort((a, b) => b.count - a.count).map((b) => b.color);
 
   const assign = (c: TriangleColor) => {
     let best = 0;
@@ -251,8 +275,13 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     for (const c of cornerColors) allCornerColors.push(c);
   }
 
-  const { slots, assign } = buildPalette(allCornerColors, maxExtruders);
+  const { slots, assign } = buildPalette(
+    allCornerColors,
+    maxExtruders,
+    meshes.map((m) => m.baseColor),
+  );
   const slotCounts = new Array(slots.length).fill(0);
+  const filamentOf = (rgb: number[]) => assign({ r: rgb[0] ?? 0.8, g: rgb[1] ?? 0.8, b: rgb[2] ?? 0.8 }) + 1;
 
   // Pass two: the XML. Colours are pooled across the export so one <m:color>
   // serves every triangle corner that is that colour — a painted die has a few
@@ -273,11 +302,18 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
   const COLORGROUP_ID = 1;
   let nextObjectId = 2;
   const objects: string[] = [];
-  const items: string[] = [];
   let triangleTotal = 0;
 
-  for (const { mesh, indices, cornerColors, triangleColors } of prepared) {
+  // Every mesh is written as a volume of an object, the way the mold liner's
+  // assemblies are (see exportThreeMfAssemblies below), so that each volume can
+  // name its filament in the slicers' config files. Only a triangle in some
+  // other filament is stamped.
+  interface Volume { id: number; name: string; extruder: number; triangles: number }
+  const printed = new Map<string, { name: string; volumes: Volume[] }>();
+
+  prepared.forEach(({ mesh, indices, cornerColors, triangleColors }, meshIndex) => {
     const objectId = nextObjectId++;
+    const extruder = filamentOf(mesh.baseColor);
     const vertexCount = Math.floor(mesh.positions.length / 3);
 
     const vertexLines: string[] = [];
@@ -288,14 +324,15 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     }
 
     const triangleLines: string[] = [];
-    for (let t = 0, face = 0; t + 2 < indices.length; t += 3, face++) {
+    let face = 0;
+    for (let t = 0; t + 2 < indices.length; t += 3, face++) {
       const p1 = colorId(cornerColors[face * 3]);
       const p2 = colorId(cornerColors[face * 3 + 1]);
       const p3 = colorId(cornerColors[face * 3 + 2]);
 
       const slot = assign(triangleColors[face]);
       slotCounts[slot]++;
-      const painted = encodeTriangleState(slot);
+      const painted = slot + 1 === extruder ? null : encodeTriangleState(slot + 1);
       const paint = painted ? ` paint_color="${painted}" slic3rpe:mmu_segmentation="${painted}"` : '';
 
       triangleLines.push(
@@ -309,7 +346,48 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
       `<mesh><vertices>${vertexLines.join('')}</vertices>` +
       `<triangles>${triangleLines.join('')}</triangles></mesh></object>`
     );
-    items.push(`<item objectid="${objectId}"/>`);
+    const key = mesh.object ?? `\u0000${meshIndex}`;
+    const entry = printed.get(key) ?? { name: mesh.object ?? mesh.name, volumes: [] };
+    entry.volumes.push({ id: objectId, name: mesh.name, extruder, triangles: face });
+    printed.set(key, entry);
+  });
+
+  const items: string[] = [];
+  const bambuObjects: string[] = [];
+  const prusaObjects: string[] = [];
+  for (const { name, volumes } of printed.values()) {
+    const assemblyId = nextObjectId++;
+    objects.push(
+      `<object id="${assemblyId}" type="model" name="${xmlEscape(name)}"><components>` +
+      volumes.map((v) => `<component objectid="${v.id}"/>`).join('') +
+      '</components></object>'
+    );
+    items.push(`<item objectid="${assemblyId}"/>`);
+    bambuObjects.push(
+      `  <object id="${assemblyId}">\n` +
+      `    <metadata key="name" value="${xmlEscape(name)}"/>\n` +
+      `    <metadata key="extruder" value="${volumes[0].extruder}"/>\n` +
+      volumes.map((v) =>
+        `    <part id="${v.id}" subtype="normal_part">\n` +
+        `      <metadata key="name" value="${xmlEscape(v.name)}"/>\n` +
+        `      <metadata key="extruder" value="${v.extruder}"/>\n` +
+        '    </part>\n'
+      ).join('') +
+      '  </object>\n'
+    );
+    for (const v of volumes) {
+      prusaObjects.push(
+        ` <object id="${v.id}" instances_count="1">\n` +
+        `  <metadata type="object" key="name" value="${xmlEscape(v.name)}"/>\n` +
+        `  <metadata type="object" key="extruder" value="${v.extruder}"/>\n` +
+        `  <volume firstid="0" lastid="${Math.max(0, v.triangles - 1)}">\n` +
+        `   <metadata type="volume" key="name" value="${xmlEscape(v.name)}"/>\n` +
+        '   <metadata type="volume" key="volume_type" value="ModelPart"/>\n' +
+        `   <metadata type="volume" key="extruder" value="${v.extruder}"/>\n` +
+        '  </volume>\n' +
+        ' </object>\n'
+      );
+    }
   }
 
   const colorNodes = colorList.map((hex) => `<m:color color="${hex}"/>`).join('');
@@ -324,8 +402,13 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     `<resources><m:colorgroup id="${COLORGROUP_ID}">${colorNodes}</m:colorgroup>${objects.join('')}</resources>` +
     `<build>${items.join('')}</build></model>`;
 
+  const config = (body: string[]) => '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n' + body.join('') + '</config>\n';
+
   return {
-    data: packModel(model),
+    data: packModel(model, [
+      { path: 'Metadata/model_settings.config', data: utf8(config(bambuObjects)) },
+      { path: 'Metadata/Slic3r_PE_model.config', data: utf8(config(prusaObjects)) },
+    ]),
     triangles: triangleTotal,
     palette: slots.map((color, i) => ({
       hex: linearToSrgbHex([color.r, color.g, color.b]),

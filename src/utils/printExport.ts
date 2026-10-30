@@ -18,21 +18,36 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { resolveCsgGeoms } from './csg';
 import { getNodeWorldTransform } from './laserCutExporter';
-import { appendSolidTriangles, uncompiledCsgWarning } from './contourSliceExporter';
+import { uncompiledCsgWarning } from './contourSliceExporter';
+import { getGeomFrame } from './laserCutExporter';
+import { colouredGeomTriangles } from './printColours';
 import { isBoughtIn } from './boughtIn';
 import { exportBinarySTL, type Triangle3D } from './moldManifold';
-import { exportThreeMf, type ThreeMfMesh } from './threeMfExporter';
+import { exportThreeMf, linearToSrgbHex, type ThreeMfMesh } from './threeMfExporter';
 import { layoutOnBed, type PosedPart } from './printPlate';
 
 export type PrintFormat = 'stl' | '3mf';
 
+/** The part of a body in one colour: in a 3MF, one volume on one filament. */
+export interface PrintVolume {
+  /** World triangles, metres, Z-up: nine numbers a triangle. */
+  tris: number[];
+  /** Linear rgb per corner where paint varies it, else null. */
+  colors: number[] | null;
+  /** Linear rgb, as the 3MF writer wants it. */
+  colour: [number, number, number];
+}
+
 export interface PrintPart {
   id: string;
   name: string;
-  /** World triangles, metres, Z-up: nine numbers a triangle. */
+  /** Every volume's triangles together, for an STL and for measuring. */
   tris: number[];
-  /** Linear rgb, as the 3MF writer wants it. */
-  colour: [number, number, number];
+  /**
+   * One per geom colour. A body whose geoms differ in colour, such as a shell
+   * round a core in another material, prints each in its own filament.
+   */
+  volumes: PrintVolume[];
 }
 
 export interface PrintExportOptions {
@@ -66,6 +81,10 @@ const linear = (rgba: number[] | undefined): [number, number, number] => {
   return [c.r, c.g, c.b];
 };
 
+/** One colour at every corner of `length / 3` corners. */
+const solid = (length: number, colour: number[]): number[] =>
+  Array.from({ length }, (_, i) => colour[i % 3]);
+
 /** Every body's printable triangles, one part a body, world-placed. */
 export function printableParts(scene: SceneGraph, ids?: string[]): { parts: PrintPart[]; warnings: string[]; missing: string[] } {
   const want = ids?.length ? new Set(ids) : null;
@@ -84,14 +103,25 @@ export function printableParts(scene: SceneGraph, ids?: string[]): { parts: Prin
     if (inside && !isBoughtIn(node)) {
       const uncompiled = uncompiledCsgWarning(node);
       if (uncompiled) warnings.push(uncompiled);
-      const tris: number[] = [];
-      let colour: [number, number, number] | null = null;
+      const byColour = new Map<string, PrintVolume>();
       for (const geom of resolveCsgGeoms(node, 'render')) {
         if (geom.role === 'collision') continue;
-        if (!appendSolidTriangles(geom, bodyMatrix, tris)) continue;
-        colour ??= linear(geom.rgba);
+        const frame = getGeomFrame(geom);
+        const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix));
+        if (!piece) continue;
+        const colour = linear(geom.rgba);
+        const key = colour.map((c) => c.toFixed(4)).join(',');
+        const volume = byColour.get(key) ?? { tris: [], colors: null, colour };
+        // Corner colours for the whole volume once any piece of it is painted.
+        if (piece.colors && !volume.colors) volume.colors = solid(volume.tris.length, colour);
+        if (volume.colors) for (const c of piece.colors ?? solid(piece.tris.length, colour)) volume.colors.push(c);
+        for (const t of piece.tris) volume.tris.push(t);
+        byColour.set(key, volume);
       }
-      if (tris.length) parts.push({ id: node.id, name: node.name || node.id, tris, colour: colour ?? linear(undefined) });
+      const volumes = [...byColour.values()];
+      if (volumes.length) {
+        parts.push({ id: node.id, name: node.name || node.id, tris: volumes.flatMap((v) => v.tris), volumes });
+      }
     }
     for (const child of node.children || []) traverse(child, bodyMatrix, inside);
   };
@@ -188,7 +218,7 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
   const groups = options.separate ? parts.map((p) => [p]) : [parts];
   const used = new Map<string, number>();
   const files = groups.map((group) => {
-    const mm = toBedMm(group.map((p) => p.tris));
+    const mm = toBedMm(group.flatMap((p) => p.volumes.map((v) => v.tris)));
     // Names are unique per body but not once lowercased and stripped.
     let name = options.separate ? safeName(group[0].name) : base;
     const seen = used.get(name) ?? 0;
@@ -196,12 +226,23 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
     if (seen) name = `${name}_${seen + 1}`;
     if (options.format === 'stl') {
       // One shell list per file; STL has no objects, so a whole group is one soup.
+      // (Every volume, every part: colour is the one thing an STL cannot say.)
       const joined = new Float32Array(mm.reduce((n, a) => n + a.length, 0));
       let at = 0;
       for (const a of mm) { joined.set(a, at); at += a.length; }
       return { name: `${name}.stl`, bytes: stlBytes(joined, name) };
     }
-    const result = exportThreeMf(group.map((p, i) => ({ name: p.name, positions: mm[i], indices: null, colors: null, baseColor: p.colour })));
+    let at = 0;
+    const meshes: ThreeMfMesh[] = group.flatMap((p) => p.volumes.map((v) => ({
+      name: p.volumes.length > 1 ? `${p.name} ${linearToSrgbHex(v.colour)}` : p.name,
+      positions: mm[at++],
+      indices: null,
+      colors: v.colors,
+      baseColor: v.colour,
+      // A body is one object; its colours are its volumes.
+      object: p.id,
+    })));
+    const result = exportThreeMf(meshes);
     return { name: `${name}.3mf`, bytes: result.data };
   });
   return { files, parts: summary, plated: false, warnings, missing };

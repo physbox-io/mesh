@@ -76,7 +76,7 @@ describe('exportPrintFiles', () => {
     expect(result.files[0].name).toBe('two_parts.3mf');
     const files = unzipSync(result.files[0].bytes);
     const model = new TextDecoder().decode(files['3D/3dmodel.model']);
-    expect(model.match(/<object /g)?.length).toBe(2);
+    expect(model.match(/<item /g)?.length).toBe(2);
   });
 
   it('names ids it does not have', () => {
@@ -104,5 +104,65 @@ describe('EXPORT_PRINT', () => {
     expect(await castCommands.EXPORT_PRINT({ ids: ['ghost'] }, ctx)).toMatchObject({ ok: false, error: 'No body called ghost.' });
     const reply = await castCommands.EXPORT_PRINT({ includeFiles: false }, ctx) as { files: { base64?: string }[] };
     expect(reply.files[0].base64).toBeUndefined();
+  });
+});
+
+describe('colour and material in the 3MF', () => {
+  const model3mf = (bytes: Uint8Array) => {
+    const files = unzipSync(bytes) as Record<string, Uint8Array>;
+    const text = (p: string) => new TextDecoder().decode(files[p]);
+    return { model: text('3D/3dmodel.model'), bambu: text('Metadata/model_settings.config'), prusa: text('Metadata/Slic3r_PE_model.config') };
+  };
+
+  it('prints a core in another colour as its own volume on its own filament', () => {
+    // A 30 mm grey shell round a 10 mm red core: one object, two materials.
+    const lined: SceneGraph = {
+      nodes: [{
+        id: 'part', name: 'part', type: 'body', pos: [0, 0, 0.1], joints: [], children: [],
+        geoms: [
+          { name: 'shell', type: 'box', size: [0.015, 0.015, 0.015], rgba: [0.5, 0.5, 0.5, 1] },
+          { name: 'core', type: 'box', size: [0.005, 0.005, 0.005], rgba: [1, 0, 0, 1] },
+        ],
+      }],
+    };
+    const result = exportPrintFiles(lined, { format: '3mf' });
+    const { model, bambu, prusa } = model3mf(result.files[0].bytes);
+    // One thing on the plate, made of two volumes
+    expect(model.match(/<item /g)).toHaveLength(1);
+    expect(model.match(/<component /g)).toHaveLength(2);
+    const extruders = [...bambu.matchAll(/<part id="\d+"[\s\S]*?key="extruder" value="(\d+)"/g)].map((m) => m[1]);
+    expect(extruders.sort()).toEqual(['1', '2']);
+    expect(prusa.match(/key="extruder" value="2"/g)!.length).toBeGreaterThan(0);
+    // A volume in its own filament needs no painting
+    expect(model).not.toContain('paint_color');
+  });
+
+  it('carries paint, stamped with the filament Bambu numbers it by', async () => {
+    const { buildPaintGeometry, paintArgsFromSize, paintResolution, emptyCanvas, applyDab, layerFromCanvas } =
+      await import('../src/utils/vertexPaint');
+    const size = [0.01, 0.01, 0.01];
+    const args = paintArgsFromSize('box', size);
+    const res = paintResolution('box', args);
+    const surface = buildPaintGeometry('box', args, res)!;
+    const positions = surface.getAttribute('position').array;
+    const canvas = emptyCanvas(surface.getAttribute('position').count, res);
+    // A red spot in the middle of the top face
+    applyDab(canvas, positions, { x: 0, y: 0.01, z: 0, radius: 0.004, color: [1, 0, 0], flow: 1, erase: false }, surface.getIndex()?.array);
+    const paint = layerFromCanvas(canvas)!;
+    const die: SceneGraph = {
+      nodes: [{
+        id: 'die', name: 'die', type: 'body', pos: [0, 0, 0.1], joints: [], children: [],
+        geoms: [{ name: 'die_g', type: 'box', size, rgba: [1, 1, 1, 1], paint }],
+      }],
+    };
+    const { model, bambu } = model3mf(exportPrintFiles(die, { format: '3mf' }).files[0].bytes);
+    // Red at the spot's centre, as the brush's soft edge leaves it
+    expect(model).toMatch(/<m:color color="#ff0[0-9a-f]0[0-9a-f]"\/>/);
+    // White body on filament 1, the spot on filament 2: "8", not "4"
+    expect(bambu).toMatch(/<part id="\d+"[\s\S]*?key="extruder" value="1"/);
+    expect(model).toMatch(/paint_color="8"/);
+    expect(model).not.toMatch(/paint_color="4"/);
+    // Finer than the plain box's 12 triangles, so the spot has somewhere to land
+    expect(model.match(/<triangle /g)!.length).toBeGreaterThan(100);
   });
 });
