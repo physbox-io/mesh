@@ -42,6 +42,10 @@ export function geomSizeProblem(geom: SizedGeom, bodyName?: string): string | nu
   const used = Math.min(size.length, (type === 'capsule' || type === 'cylinder') && geom.fromto ? 1 : (USED[type] ?? size.length));
   for (let i = 0; i < used; i++) {
     const v = size[i];
+    // A hole past the first entry is an entry left out, as a short size is
+    // ([0.1, undefined, undefined] is the cube [0.1]). null is not: it is what
+    // JSON makes of NaN.
+    if (v === undefined && i > 0) continue;
     if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
       return `${where}: size[${i}] is ${JSON.stringify(v)}; a ${type}'s size is ${MEANING[type] ?? 'its extent'} in metres and every entry must be a positive number.`;
     }

@@ -20,4 +20,12 @@ export function sliderSpan(value: number, lo: number, hi: number, step = 0.01): 
 export const offsetSpan = (value: number) => sliderSpan(value, -4, 4);
 
 /** A dimension: 10 mm to 4 m in 10 mm steps. */
-export const lengthSpan = (value: number) => sliderSpan(value, 0.01, 4);
+export const lengthSpan = (value: number) => {
+  // Never down to 0: a dimension under 10 mm floored its minimum to 0, and a
+  // slider at its left end then asked for a zero size, which is refused. Such
+  // a part's slider starts at 1 mm (or at the value, if smaller still).
+  const span = sliderSpan(value, 0.01, 4);
+  if (span.min > 0) return span;
+  const v = Number.isFinite(value) && value > 0 ? value : 0.01;
+  return { ...span, min: Math.min(0.001, v) };
+};

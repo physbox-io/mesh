@@ -2,6 +2,7 @@ import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
+import { guardedEdit } from '../../utils/sizeEdit';
 
 /** Gear Config */
 export function GearCard({ node }: { node: SceneNode }) {
@@ -37,7 +38,7 @@ export function GearCard({ node }: { node: SceneNode }) {
         <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
           Gear Radius <SliderValue value={gearRadius} onChange={(v) => {
             const r = v;
-            updateNodeGeom(node.id, { size: [r, node.geoms[0].size[1]] });
+            guardedEdit(() => updateNodeGeom(node.id, { size: [r, node.geoms[0].size[1]] }));
           }} decimals={1} unit="mm" scale={1000} min={0.05} max={5.0} />
         </label>
         <RangeInput 
@@ -47,7 +48,7 @@ export function GearCard({ node }: { node: SceneNode }) {
           value={gearRadius} 
           onChange={(v) => {
             const r = v;
-            updateNodeGeom(node.id, { size: [r, node.geoms[0].size[1]] });
+            guardedEdit(() => updateNodeGeom(node.id, { size: [r, node.geoms[0].size[1]] }));
           }} 
           className="w-full accent-blue-500 cursor-pointer" 
         />

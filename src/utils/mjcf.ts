@@ -59,8 +59,10 @@ const formatGeomSize = (type: string, rawSize: unknown, geom?: SceneGeom): strin
     const problem = geomSizeProblem({ ...geom, type });
     if (problem) throw new Error(problem);
   }
+  // A hole in the list is an entry left out, read from the first as a short
+  // size is; only a data-less mesh standing in as a box still gets 0.1.
   const arr = Array.isArray(rawSize)
-    ? rawSize.map((v: unknown) => (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1)
+    ? rawSize.map((v: unknown) => (v === undefined ? undefined : (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1))
     : [0.1, 0.1, 0.1];
 
   if (type === 'sphere') {
