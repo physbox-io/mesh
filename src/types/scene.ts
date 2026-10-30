@@ -516,6 +516,14 @@ export interface SceneNode {
   id: string;
   name: string;
   /**
+   * The body's total mass in kg, shared over its solid geoms in proportion to
+   * what each would weigh on its own (utils/bodyMass). A boolean body's is
+   * csgMass instead.
+   */
+  mass?: number;
+  /** Density in kg/m³ for every solid geom that states neither mass nor density. */
+  density?: number;
+  /**
    * Optional because the scene has always contained bodies without it: the STL
    * import and the MCP bridge build nodes straight, and nothing downstream —
    * the MJCF emitter included — reads it. It marks a body where something hands

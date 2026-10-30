@@ -8,6 +8,7 @@ import { PairMemo } from './arrayMemo';
 import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
 import { geomSizeProblem } from './geomSize';
+import { applyBodyMass } from './bodyMass';
 import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
@@ -525,6 +526,15 @@ export const compileToMJCF = (
 
   const printFidelity = scene.simFidelity === 'print';
   applyContactClasses(sceneCopy.nodes, printFidelity);
+  // A body's own mass or density, handed to the geoms that are emitted (see
+  // utils/bodyMass): MJCF has nowhere to put it on the body itself.
+  const applyBodyMasses = (nodes: SceneNode[]) => {
+    for (const node of nodes) {
+      node.geoms = applyBodyMass(node);
+      applyBodyMasses(node.children || []);
+    }
+  };
+  applyBodyMasses(sceneCopy.nodes);
 
   // The viewport finds each body and geom by its name, so a clash would bind
   // the lookups for both to whichever MuJoCo registered first. Renamed by the

@@ -265,6 +265,8 @@
       "euler": "[roll,pitch,yaw] degrees: body orientation, alternative to quat",
       "static": "boolean: if true (or `fixed: true` / `dynamic: false`), omits the default free joint so a top-level body is fixed in world space",
       "geoms": "SceneGeom[]: one or more geoms defining shape (optional if body-level `type`/`size` shorthand, `lattice`, `sculpt`, `isCurve`, or `scad` is used)",
+      "mass": "number kg: the body's total mass. Shared over its solid geoms in proportion to what each would weigh on its own (stated mass, else volume x density), so the centre of mass stays where the shape puts it. Visual geoms stay weightless. A boolean body takes its mass from csgMass instead.",
+      "density": "number kg/m3: density for every solid geom on the body that states neither mass nor density of its own. A body `mass` set as well wins over it for the total.",
       "cuts": "DeclarativeCut[]: array of hole/slot/dish/hardware cut specs `{ shape?: 'cylinder'|'slot'|'dish'|'counterbore'|'nut_trap'|'nut_slot'|'insert'|'insert_boss'|'bearing', at?: [xMm,yMm,zMm], normal?: [nx,ny,nz], diameterMm?, widthMm?, lengthMm?, depthMm?, threadPitchMm?, size?: 'M3'|'M4'|..., bore?, fitMm? }` applied automatically when the body is built or updated",
       "roundEdges": "DeclarativeRound[] | DeclarativeRound: `{ edges?: 'all'|'top'|'bottom'|'vertical'|'inside'|number[], sizeMm: number, mode?: 'round'|'bevel' }` (or array of them; alias `roundings`) applied automatically after cuts",
       "patterns": "DeclarativePattern[]: array of surface textures `{ at: [xMm,yMm,zMm], normal?: [nx,ny,nz], pattern: string, depthMm?: number, emboss?: boolean, options?: {...} }` applied automatically to the body faces",
