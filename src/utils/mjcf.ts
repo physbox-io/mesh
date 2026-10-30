@@ -515,9 +515,13 @@ export const compileToMJCF = (
   // mesh has been decomposed — its convex pieces. Runs before everything else so
   // name-uniqueness and mesh-asset collection only ever see geoms that will
   // really be emitted. A body with nothing derived is returned untouched.
+  // Each body's own geom list, before it is resolved: a convex piece's source
+  // mesh is dropped from what is emitted, and bodyMass needs to find it.
+  const authoredGeoms = new Map<SceneNode, SceneGeom[]>();
   const resolveCsg = (nodes: SceneNode[]) => {
     if (!nodes) return;
     for (const node of nodes) {
+      authoredGeoms.set(node, node.geoms || []);
       node.geoms = resolveCsgGeoms(node, 'physics');
       resolveCsg(node.children || []);
     }
@@ -530,7 +534,7 @@ export const compileToMJCF = (
   // utils/bodyMass): MJCF has nowhere to put it on the body itself.
   const applyBodyMasses = (nodes: SceneNode[]) => {
     for (const node of nodes) {
-      node.geoms = applyBodyMass(node);
+      node.geoms = applyBodyMass(node, node.geoms || [], authoredGeoms.get(node) ?? node.geoms ?? []);
       applyBodyMasses(node.children || []);
     }
   };
