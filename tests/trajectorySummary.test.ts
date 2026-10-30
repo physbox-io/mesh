@@ -48,6 +48,19 @@ describe('summarizing a headless run', () => {
     expect(s.bodies.phone.settled).toBe(false);
   });
 
+  it('adds up the whole turn, not just where it ended', () => {
+    // Rocks 30 degrees out and back three times: ends where it started.
+    const s = summarizeTrajectory(run(3, (t) => ({ deg: 30 * Math.sin(Math.PI * t) ** 2 })))!;
+    expect(s.bodies.phone.netTurnedDeg).toBeCloseTo(0, 0);
+    expect(s.bodies.phone.turnedDeg).toBeCloseTo(180, -1);
+  });
+
+  it('counts a fast spin past what the frames alone could show', () => {
+    // Two full turns a second, sampled every 10 ms: 720 degrees a second.
+    const s = summarizeTrajectory(run(1, (t) => ({ deg: (720 * t) % 360, w: 4 * Math.PI })))!;
+    expect(s.bodies.phone.turnedDeg).toBeCloseTo(720, -1);
+  });
+
   it('will not judge a run too short to tell', () => {
     const s = summarizeTrajectory(run(0.2, () => ({ deg: 0 })))!;
     expect(s.settled).toBe(false);

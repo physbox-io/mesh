@@ -26,8 +26,14 @@ export interface BodyFinal {
   posMm: [number, number, number];
   /** Angle between the body's own +Z and world up, in degrees. */
   tiltDeg: number;
-  /** How far the body has turned since the first frame, in degrees. */
+  /**
+   * How far the body turned over the whole run, in degrees: every step's turn
+   * added up, so a wheel that went round twice says 720 and one that rocked
+   * back and forth says how much it rocked.
+   */
   turnedDeg: number;
+  /** The angle between where the body started and where it ended, in degrees. */
+  netTurnedDeg: number;
   speedMmS: number;
   angSpeedDegS: number;
   settled: boolean;
@@ -61,6 +67,18 @@ function angleBetween(a: number[], b: number[]): number {
 }
 
 const len = (v: number[]) => Math.hypot(v[0], v[1], v[2]);
+
+/**
+ * The angle a body turned through between two kept frames. The shortest turn
+ * between the two orientations is right while it is well under half a turn;
+ * past a quarter turn per frame (a fast spinner with a coarse stride) it may
+ * have aliased, and the body's own angular speed over the gap says more.
+ */
+function stepTurnDeg(q0: number[], q1: number[], w0: number[] | undefined, w1: number[] | undefined, dt: number): number {
+  const shortest = angleBetween(q0, q1);
+  if (shortest < 90 || !w0 || !w1 || !(dt > 0)) return shortest;
+  return Math.max(shortest, (((len(w0) + len(w1)) / 2) * dt * 180) / Math.PI);
+}
 
 /**
  * Direction reversals of a series, counting only swings bigger than `min`.
@@ -116,9 +134,15 @@ export function summarizeTrajectory(trajectory: HistoryEntry[], options: Summary
   for (const [id, end] of Object.entries(last.bodies || {})) {
     let still = judged;
     const tilts: number[] = [];
+    let turned = 0;
+    let prev: { quat: number[]; angvel: number[]; time: number } | null = null;
     for (const frame of trajectory) {
       const b = frame.bodies?.[id];
       if (!b) continue;
+      if (b.quat) {
+        if (prev) turned += stepTurnDeg(prev.quat, b.quat, prev.angvel, b.angvel, frame.time - prev.time);
+        prev = { quat: b.quat, angvel: b.angvel, time: frame.time };
+      }
       if (frame.time >= settleFrom) {
         if (len(b.vel) > SETTLED_SPEED_MS || len(b.angvel) > SETTLED_TURN_RADS) still = false;
       }
@@ -135,7 +159,8 @@ export function summarizeTrajectory(trajectory: HistoryEntry[], options: Summary
         number,
       ],
       tiltDeg: end.quat ? Math.round(tiltOf(end.quat) * 10) / 10 : 0,
-      turnedDeg: end.quat && startQuat ? Math.round(angleBetween(startQuat, end.quat) * 10) / 10 : 0,
+      turnedDeg: Math.round(turned * 10) / 10,
+      netTurnedDeg: end.quat && startQuat ? Math.round(angleBetween(startQuat, end.quat) * 10) / 10 : 0,
       speedMmS: Math.round(len(end.vel) * 10000) / 10,
       angSpeedDegS: Math.round(((len(end.angvel) * 180) / Math.PI) * 10) / 10,
       settled,
