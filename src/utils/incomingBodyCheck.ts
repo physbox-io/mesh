@@ -6,7 +6,8 @@
  * not one ("XML Error: invalid keyword: 'cube'"), a coordinate that is not a
  * number ("bad format in attribute 'pos'", "does not have enough data"), and a
  * moving body too small to weigh ("mass and inertia of moving bodies must be
- * larger than mjMINVAL", which a 0.2 mm sphere trips). Each is caught here and
+ * larger than mjMINVAL", which anything under 0.2 mm trips even with the
+ * inertia floor below). Each is caught here and
  * named, with what would do instead, and the scene is left as it was.
  */
 import type { SceneGeom, SceneNode } from '../types/scene';
@@ -18,8 +19,43 @@ export const GEOM_TYPES = ['box', 'sphere', 'capsule', 'cylinder', 'ellipsoid', 
 /** Shapes that are built into a mesh before compile (utils/geom.ts, PARAMETRIC_MESH_TYPES). */
 const MESH_SHAPES = 'cone, pyramid, wedge, torus, tube, extrude (polygon), lathe (profile)';
 
-/** The smallest a moving body may be across, metres. MuJoCo refuses a sphere of 0.2 mm. */
-export const SMALLEST_MOVING_BODY_M = 0.001;
+/**
+ * The smallest a moving body may be across, metres: a fine FDM print's detail.
+ * MuJoCo refuses anything whose inertia is under 1e-15 kg*m^2 (a 0.2 mm cube
+ * has 1e-17), so a scene with a moving body under 1 mm is compiled with a
+ * floor on inertia, SMALL_BODY_INERTIA_FLOOR, by utils/mjcf.ts.
+ */
+export const SMALLEST_MOVING_BODY_M = 0.0002;
+
+/**
+ * kg*m^2. Above MuJoCo's 1e-15 and below a 1 mm cube's own 1.7e-13, so it
+ * lets a sub-mm part load and leaves every bigger one exactly as it was.
+ */
+export const SMALL_BODY_INERTIA_FLOOR = 1e-14;
+
+/** Across, metres, of a node's solid geoms at their widest; null if one cannot be measured. */
+function solidAcross(node: SceneNode): number | null {
+  const solid = (node.geoms || []).filter((g) => g.role !== 'visual' && g.csg !== 'difference' && g.type !== 'plane');
+  if (solid.length === 0) return null;
+  let across = 0;
+  for (const g of solid) {
+    const b = geomBounds(g);
+    if (!b) return null;
+    across = Math.max(across, ...[0, 1, 2].map((a) => b.max[a] - b.min[a]));
+  }
+  return across;
+}
+
+/** Whether any body with a joint of its own is under 1 mm across, so needs the inertia floor. */
+export function hasSubMillimetreMovingBody(nodes: SceneNode[]): boolean {
+  return nodes.some((n) => {
+    if ((n.joints?.length ?? 0) > 0 && !n.isComposite) {
+      const across = solidAcross(n);
+      if (across !== null && across < 0.001) return true;
+    }
+    return hasSubMillimetreMovingBody(n.children || []);
+  });
+}
 
 /** Where a number is wrong, or null. `length` is how many it must have, when that is fixed. */
 function badNumbers(value: unknown, length?: number): string | null {
@@ -65,15 +101,8 @@ export function checkIncomingBody(node: SceneNode, moves: boolean): void {
   // can all be measured (a SCAD body's mesh is not built yet), and not a
   // composite, whose segments are generated, nor a shard of something broken.
   if (!moves || node.isComposite || node.scad || node.shatterFrom !== undefined) return;
-  const solid = geoms.filter((g) => g.role !== 'visual' && g.csg !== 'difference' && g.type !== 'plane');
-  if (solid.length === 0) return;
-  let across = 0;
-  for (const g of solid) {
-    const b = geomBounds(g);
-    if (!b) return;
-    across = Math.max(across, ...[0, 1, 2].map((a) => b.max[a] - b.min[a]));
-  }
-  if (across < SMALLEST_MOVING_BODY_M) {
+  const across = solidAcross(node);
+  if (across !== null && across < SMALLEST_MOVING_BODY_M) {
     throw new Error(`Body '${body}' is ${+(across * 1000).toFixed(3)} mm across at most, too small for MuJoCo to weigh as a moving body (it needs to be at least ${SMALLEST_MOVING_BODY_M * 1000} mm). Sizes are metres and half-sizes: a 5 mm cube is size [0.0025, 0.0025, 0.0025]. Make it bigger, or fix it in place (static: true).`);
   }
 }

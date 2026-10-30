@@ -13,6 +13,7 @@ import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
 import { gearBody, meshingGears, type GearBody } from './gearMeshing';
 import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { contactArenaXml } from './contactArena';
+import { SMALL_BODY_INERTIA_FLOOR, hasSubMillimetreMovingBody } from './incomingBodyCheck';
 import { UNSLIPPING_CLUTCH, clutchDriverBodyXml, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 
 /**
@@ -1040,6 +1041,9 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
        cantilever with a 7 g tip drooped 48 mm and swung, where 1e-8 holds it
        to 0.35 mm. Far below anything a part bigger than a strand has. -->
   <compiler boundinertia="1e-8" />
+` : hasSubMillimetreMovingBody(sceneCopy.nodes) ? `  <!-- A floor on rotational inertia for a moving part under 1 mm: MuJoCo
+       refuses one below 1e-15 kg.m^2, and a 0.2 mm cube has 1e-17. -->
+  <compiler boundinertia="${SMALL_BODY_INERTIA_FLOOR}" />
 ` : ''}${contactArenaXml(sceneCopy.nodes)}  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
     <geom solref="${contactTime} 1" solimp="0.99 0.9999 0.0001 0.5 2" />
