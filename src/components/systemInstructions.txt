@@ -165,7 +165,7 @@ Every joint constrains motion of the body relative to its parent:
     forceLimit: number (optional: the most it puts out, N*m or N, so it stalls past it)
   }
   The actuator is named `<jointName>_actuator`; a script drives it with `api.setActuatorControl('<jointName>_actuator', value)` and reads it back with `api.getActuatorControl(name)` (any other name does nothing and is reported as a script problem, listing the actuators the model has).
-  A TORQUE-LIMITED (forceLimit) VELOCITY ACTUATOR IS A SLIP CLUTCH: the joint is dragged at the set speed through dry friction equal to forceLimit, so it holds its speed below the limit and slips at the limit above it (a stalled motor), stable at any inertia. No armature is added: it accelerates at forceLimit / its real inertia.
+  A TORQUE-LIMITED (forceLimit) VELOCITY ACTUATOR IS A SLIP CLUTCH: the joint is dragged at the set speed through dry friction equal to forceLimit, so it holds its speed below the limit and slips at the limit above it (a stalled motor), stable at any inertia. No armature is added: it accelerates at forceLimit / its real inertia. A velocity servo with no forceLimit that is far stiffer than its joint (kv*0.001 above the joint's inertia) on a coupled joint (gears, a rack, a rope) or a pinned/welded body is driven through a clutch that never slips, so the parts coupled to it are not whipped.
 
 ═══════════════════════════════════════════
 CONTROL SCRIPT API

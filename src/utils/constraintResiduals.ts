@@ -11,8 +11,12 @@
  * Residuals come straight from the solver: the first `ne` rows of `efc_pos`
  * are the equality rows, each tagged with its equality's id in `efc_id` -
  * three position rows for a connect, three more for a weld's rotation, one for
- * a joint or tendon coupling. Only typed-array views are read per tick; no
- * embind vector is copied onto the heap. Worker-safe: no store, no DOM.
+ * a joint or tendon coupling. A coupling held by a fixed tendon (as every
+ * coupling the compiler writes is) is read through its tendon's joints, so a
+ * hinge's error is in degrees: it used to be printed as metres, and a gear
+ * pair 0.2° out at start-up read "3.46 mm apart, not holding". Only
+ * typed-array views are read per tick; no embind vector is copied onto the
+ * heap. Worker-safe: no store, no DOM.
  */
 
 // MuJoCo enum values (mjtEq, mjtConstraint, mjtJoint, mjtObj).
@@ -23,6 +27,8 @@ const EQ_TENDON = 3;
 const CNSTR_EQUALITY = 0;
 const JNT_SLIDE = 2;
 const JNT_HINGE = 3;
+const WRAP_JOINT = 1;
+const TRN_JOINT = 0;
 
 /** Above these a residual is a warning: a pin or weld this far open is not holding. */
 export const RESIDUAL_WARN_MM = 1;
@@ -90,7 +96,9 @@ interface EqTrack {
   kind: ConstraintResidual['kind'];
   bodies: string[];
   joints?: string[];
-  /** For a joint coupling: is joint1 a slide (metres) or rotary (radians)? */
+  /** A coupling of two joints, by joint equality or by fixed tendon. */
+  coupling: boolean;
+  /** For a coupling: is joint1 a slide (metres) or rotary (radians)? */
   linear: boolean;
   torquescale: number;
   worstPos: number;
@@ -117,6 +125,7 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
   const OBJ_BODY: number = mj.mjtObj?.mjOBJ_BODY?.value ?? 1;
   const OBJ_JOINT: number = mj.mjtObj?.mjOBJ_JOINT?.value ?? 3;
   const OBJ_EQUALITY: number = mj.mjtObj?.mjOBJ_EQUALITY?.value ?? 17;
+  const OBJ_ACTUATOR: number = mj.mjtObj?.mjOBJ_ACTUATOR?.value ?? 19;
   const name = (type: number, id: number, fallback: string) => {
     try { return mj.mj_id2name(model, type, id) || fallback; } catch { return fallback; }
   };
@@ -138,7 +147,7 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
       t === EQ_CONNECT ? 'connect' : t === EQ_WELD ? 'weld' : t === EQ_JOINT ? 'joint' : t === EQ_TENDON ? 'tendon' : 'other';
     const track: EqTrack = {
       name: name(OBJ_EQUALITY, i, `equality ${i}`),
-      kind, bodies: [], linear: true, torquescale: 1,
+      kind, bodies: [], coupling: false, linear: true, torquescale: 1,
       worstPos: 0, worstRot: 0, worstAt: 0, finalPos: 0, finalRot: 0, seen: false, index: i,
     };
     if (kind === 'connect' || kind === 'weld') {
@@ -149,6 +158,20 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
       track.joints = [name(OBJ_JOINT, j1, `joint ${j1}`), ...(j2 >= 0 ? [name(OBJ_JOINT, j2, `joint ${j2}`)] : [])];
       track.bodies = [bodyName(jntBody[j1]), ...(j2 >= 0 ? [bodyName(jntBody[j2])] : [])];
       track.linear = jntType[j1] === JNT_SLIDE;
+      track.coupling = true;
+    } else if (kind === 'tendon' && obj2[i] < 0 && model.ntendon) {
+      // A fixed tendon of joints held at zero length: joint1 has coef 1, so
+      // the residual is in joint1's units.
+      const t = obj1[i];
+      const adr = model.tendon_adr[t], num = model.tendon_num[t];
+      const joints: number[] = [];
+      for (let w = adr; w < adr + num; w++) if (model.wrap_type[w] === WRAP_JOINT) joints.push(model.wrap_objid[w]);
+      if (joints.length === num && num >= 2) {
+        track.joints = joints.map((jt) => name(OBJ_JOINT, jt, `joint ${jt}`));
+        track.bodies = joints.map((jt) => bodyName(jntBody[jt]));
+        track.linear = jntType[joints[0]] === JNT_SLIDE;
+        track.coupling = true;
+      }
     }
     eqs.push(track);
   }
@@ -198,7 +221,7 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
           if (rows[e] === 0) continue;
           const t = eqs[e];
           let posErr = 0, rotErr = 0;
-          if (t.kind === 'joint' && !t.linear) rotErr = Math.sqrt(posSq[e]) * RAD2DEG;
+          if (t.coupling && !t.linear) rotErr = Math.sqrt(posSq[e]) * RAD2DEG;
           else posErr = Math.sqrt(posSq[e]) * 1000;
           if (t.kind === 'weld' && t.torquescale > 0) {
             const s = Math.min(1, Math.sqrt(rotSq[e]) / t.torquescale);
@@ -227,6 +250,31 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
     }
   };
 
+  /**
+   * A velocity servo on one of these joints stiffer than the joint can follow
+   * (kv*dt over its inertia well above 1), which the implicit integrator
+   * damps where the constraint solver cannot see it.
+   */
+  const stiffServo = (joints: string[]) => {
+    // The compiler's step (utils/mjcf.ts). model.opt is a struct copied
+    // onto the heap on every read, not a view.
+    const dt = 0.001;
+    for (let a = 0; a < (model.nu ?? 0); a++) {
+      if (model.actuator_trntype[a] !== TRN_JOINT) continue;
+      const jt = model.actuator_trnid[2 * a];
+      const jn = name(OBJ_JOINT, jt, '');
+      if (!joints.includes(jn) || (jntType[jt] !== JNT_SLIDE && jntType[jt] !== JNT_HINGE)) continue;
+      const kv = -model.actuator_biasprm[10 * a + 2];
+      const inertia = model.dof_M0[model.jnt_dofadr[jt]];
+      if (!(kv > 0) || !(inertia > 0)) continue;
+      const ratio = (kv * dt) / inertia;
+      if (ratio > 10) {
+        return { actuator: name(OBJ_ACTUATOR, a, `actuator ${a}`), joint: jn, ratio: +ratio.toPrecision(3), kvMax: +(inertia / dt).toPrecision(2) };
+      }
+    }
+    return null;
+  };
+
   /** What the run did to its constraints. `data` gives the final positions. */
   const report = (data: Data): ConstraintReport => {
     const warnings: string[] = [];
@@ -235,8 +283,8 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
       .filter((t) => t.seen)
       .map((t) => {
         const broke = !!active && !active[t.index];
-        const usesMm = t.kind !== 'joint' || t.linear;
-        const usesDeg = t.kind === 'weld' || (t.kind === 'joint' && !t.linear);
+        const usesMm = !t.coupling || t.linear;
+        const usesDeg = t.kind === 'weld' || (t.coupling && !t.linear);
         return {
           name: t.name, kind: t.kind, bodies: t.bodies,
           ...(t.joints ? { joints: t.joints } : {}),
@@ -256,10 +304,13 @@ export function createConstraintMonitor(mj: Mj, model: Model) {
       if ((c.worstMm ?? 0) > RESIDUAL_WARN_MM) parts.push(`${c.worstMm} mm apart (${c.finalMm} mm at the end)`);
       if ((c.worstDeg ?? 0) > RESIDUAL_WARN_DEG) parts.push(`${c.worstDeg}° out (${c.finalDeg}° at the end)`);
       if (!parts.length) continue;
-      const what = c.kind === 'joint'
-        ? `Coupling ${c.name} (${(c.joints ?? []).join(' -> ')}, on ${c.bodies.join(' and ')})`
+      const what = c.joints
+        ? `Coupling ${c.name} (${c.joints.join(' -> ')}, on ${c.bodies.join(' and ')})`
         : `${c.kind === 'connect' ? 'Pin' : c.kind === 'weld' ? 'Weld' : 'Constraint'} ${c.name} between ${c.bodies.join(' and ')}`;
-      warnings.push(`${what} was pulled ${parts.join(', ')}, worst at t=${c.worstAtS} s: it is not holding, so the motion is not what the mechanism allows. Look for a part driven against it, an over-constrained loop, or too little mass for the load.`);
+      const servo = c.joints && stiffServo(c.joints);
+      warnings.push(servo
+        ? `${what} was pulled ${parts.join(', ')}, worst at t=${c.worstAtS} s: it is not holding. ${servo.actuator} drives ${servo.joint} with a servo far stiffer than the joint can follow in a step (kv*timestep/inertia = ${servo.ratio}), and the coupled parts are whipped around it before they settle. Lower its kv below ${servo.kvMax} or give it a forceLimit: the servo is the cause, not the load or the masses.`
+        : `${what} was pulled ${parts.join(', ')}, worst at t=${c.worstAtS} s: it is not holding, so the motion is not what the mechanism allows. Look for a part driven against it, an over-constrained loop, or too little mass for the load.`);
     }
 
     const over: LimitOvershoot[] = [];

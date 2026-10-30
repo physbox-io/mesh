@@ -699,18 +699,21 @@ export const compileToMJCF = (
   const plan = planCouplings(sceneCopy.nodes, nodeWorldData);
 
   // A velocity servo far stiffer than the joint it drives (kv*dt over the
-  // joint's inertia), on a body held in a closed loop by a pin or a weld, is
-  // driven through a clutch that never slips. The implicit integrator treats
-  // that gain as inertia the constraint solver does not know about, and the
-  // loop's pins tore open: a 50 g scissor-lift slider held by a kv 20000
-  // servo folded the lift flat. Through the clutch the solver sees it.
+  // joint's inertia), on a body held in a closed loop by a pin or a weld, or
+  // on a coupled joint, is driven through a clutch that never slips. The
+  // implicit integrator treats that gain as inertia the constraint solver
+  // does not know about, and the constraint tore open: a 50 g scissor-lift
+  // slider held by a kv 20000 servo folded the lift flat, and a 10 g pinion
+  // at kv 1 (kv*dt/I = 2000) swung the 50 g gear it drives between -773 and
+  // +741 rad/s in its first 12 ms. Through the clutch the solver sees it.
   const looped = new Set<string>();
   for (const c of connectConstraintsList) { looped.add(c.bodyId); looped.add(c.targetId); }
   for (const w of weldConstraintsList) { if (w.bodyId) looped.add(w.bodyId); looped.add(w.targetId); }
+  const coupledJoints = new Set(plan.couplings.flatMap((c) => [c.joint1, c.joint2]));
   for (let i = 0; i < actuators.length; i++) {
     const j = actuators[i];
     const owner = jointsByName.get(j.name)?.node;
-    if (!owner || !looped.has(owner.id) || j.actuator?.type !== 'velocity' || j.actuator.forceLimit !== undefined) continue;
+    if (!owner || !(looped.has(owner.id) || coupledJoints.has(j.name)) || j.actuator?.type !== 'velocity' || j.actuator.forceLimit !== undefined) continue;
     if (j.type !== 'hinge' && j.type !== 'slide') continue;
     if ((j.actuator.kv ?? 1) * 0.001 <= estimateJointInertia(owner, j)) continue;
     const held: SceneJoint = { ...j, actuator: { ...j.actuator, forceLimit: UNSLIPPING_CLUTCH } };
