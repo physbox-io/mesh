@@ -16,7 +16,7 @@ import { carryAcrossCut, knifeSoups, seamsAcross } from '../../utils/knife';
 import { splitSeams } from '../../utils/surfaceTexture';
 import { Vector3 } from 'three';
 import { checkIncomingBody } from '../../utils/incomingBodyCheck';
-import type { SceneNode, SceneGeom, HardwarePartKind } from '../../types/scene';
+import type { SceneNode, SceneGeom, SceneJoint, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { withoutNulls } from '../../utils/withoutNulls';
@@ -142,7 +142,7 @@ export const objectCommands: McpCommands = {
       if (k === 'id' || k === 'name' || k === 'pos') delete updates[k];
       else updates[k] = undefined;
     }
-    if (Array.isArray(updates.joints)) updates.joints = updates.joints.map((j) => withoutNulls(j));
+    if (Array.isArray(updates.joints)) updates.joints = updates.joints.map((j: SceneJoint) => withoutNulls(j));
     const breakError = resolveBreakFields(updates, target.deformMaterial);
     if (breakError) return { ok: false, error: breakError };
     const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;
