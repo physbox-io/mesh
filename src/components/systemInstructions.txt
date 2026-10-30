@@ -68,7 +68,7 @@ Every node in the "nodes" array represents a physical body and is defined as:
   children: nested array of child SceneNodes (tree structure)
   
   // Optional Special Fields:
-  allowCoupling: boolean (default true; false keeps the body out of the automatic proximity coupling: hinge bodies with 'gear' in the id couple when their axes are parallel, a round geom of each lies in the same plane, and the axes are 0.5-1.2x the sum of those radii apart; bodies already chained by coupleTargetId are left alone)
+  allowCoupling: boolean (default true; false keeps the body out of the automatic proximity coupling: hinge bodies with 'gear' in the id couple when their axes are parallel, a round geom of each lies in the same plane, and the axes are 0.5-1.2x the sum of those radii apart; a round geom is a cylinder/capsule, a cut gear's pitch circle, or a mesh (an extruded tooth outline too: its teeth are counted, and two toothed wheels couple at their teeth ratio); bodies already chained by coupleTargetId are left alone)
   isPulleyRope: boolean (a rope, not a part: no geoms or joints; ties leftTargetId and rightTargetId, bodies with a slide joint along the rope, optionally over pulleyWheelId. Always taut and rigid: leftStrands*dLeft + rightStrands*dRight = 0 toward the wheel, and the wheel turns with the rope. Directions come from where the bodies are, so either end may be on either side)
   leftTargetId, rightTargetId: string (a rope's two end bodies, each with a slide)
   leftStrands, rightStrands: number (default 1: strands holding that end of a rope. rightStrands 2 = a load in a movable pulley, MA 2; 4 = a four-fall block and tackle, MA 4)
