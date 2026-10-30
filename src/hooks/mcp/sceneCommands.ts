@@ -19,7 +19,7 @@ import {
   deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage,
 } from '../../utils/userPresets';
 import { unpackMeshArrays } from '../../utils/meshPacking';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { bboxOf, stockReport } from '../../utils/sceneSummary';
 import { framingPatch } from '../../store/sceneFraming';
@@ -247,9 +247,8 @@ export const sceneCommands: McpCommands = {
     const baseName = name || 'imported_stl';
     const parsed = parseSTL(data, { name: baseName, scale });
 
-    // The nodes below are written without geom or joint names, as this
-    // import always has — MuJoCo names them itself. Said out loud rather
-    // than filled in: naming them would change what lands in the scene.
+    // The free joint is named: a nameless one failed every build (the worker
+    // looked it up by name), so an imported body never simulated.
     const mode = importMode || 'scad_parametric';
     const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 1];
     const id = `stl_${Math.random().toString(36).slice(2, 7)}`;
@@ -262,7 +261,7 @@ export const sceneCommands: McpCommands = {
         pos: nodePos,
         scad: parsed.scadParametric,
         geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false } as SceneGeom],
-        joints: [{ type: 'free' } as SceneJoint],
+        joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],
       };
     } else if (mode === 'scad_raw') {
@@ -272,7 +271,7 @@ export const sceneCommands: McpCommands = {
         pos: nodePos,
         scad: parsed.scadRaw,
         geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false } as SceneGeom],
-        joints: [{ type: 'free' } as SceneJoint],
+        joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],
       };
     } else if (mode === 'mesh') {
@@ -287,7 +286,7 @@ export const sceneCommands: McpCommands = {
           renderVertices: parsed.renderVertices,
           dynamic: dynamic !== false,
         } as SceneGeom],
-        joints: [{ type: 'free' } as SceneJoint],
+        joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],
       };
     } else {
@@ -300,7 +299,7 @@ export const sceneCommands: McpCommands = {
           size: parsed.primitiveGeom.size,
           rgba: [0.3, 0.7, 0.9, 1],
         } as SceneGeom],
-        joints: [{ type: 'free' } as SceneJoint],
+        joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],
       };
     }
@@ -311,6 +310,7 @@ export const sceneCommands: McpCommands = {
 
     return {
       ok: res.ok,
+      ...(res.error ? { error: res.error } : {}),
       nodeId: id,
       name: baseName,
       vertCount: parsed.vertices.length / 3,

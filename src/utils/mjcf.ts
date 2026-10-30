@@ -249,10 +249,13 @@ const pitchRadius = (node: SceneNode): number | undefined => {
 };
 
 const buildJoint = (joint: SceneJoint) => {
+  // A joint written without a name stays nameless: name="undefined" on two of
+  // them is a repeated name, and MuJoCo refuses the model.
+  const name = joint.name ? `name="${xmlAttr(joint.name)}" ` : '';
   if (joint.type === 'free') {
-    return `<freejoint name="${xmlAttr(joint.name)}" />`;
+    return `<freejoint ${name}/>`;
   }
-  let attrs = `name="${xmlAttr(joint.name)}" type="${joint.type}"`;
+  let attrs = `${name}type="${joint.type}"`;
   if (joint.pos) attrs += ` pos="${joint.pos.join(' ')}"`;
   if (joint.axis) attrs += ` axis="${joint.axis.join(' ')}"`;
   if (joint.damping !== undefined) attrs += ` damping="${joint.damping}"`;
