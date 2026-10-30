@@ -129,7 +129,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
         pos: [0, 0, 0.2],
         scad: scadCode,
         geoms: [{ type: 'mesh', size: [1], dynamic: true } as SceneGeom],
-        joints: [{ name: `${id}_free`, type: 'free' }],
+        joints: [{ name: `${id}_free`, type: 'free' as const }],
         children: [],
       };
       onImportNode(node);
