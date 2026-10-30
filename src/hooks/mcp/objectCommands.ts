@@ -15,6 +15,7 @@ import { patternSurfaces } from '../../utils/facePatternPick';
 import { carryAcrossCut, knifeSoups, seamsAcross } from '../../utils/knife';
 import { splitSeams } from '../../utils/surfaceTexture';
 import { Vector3 } from 'three';
+import { checkIncomingBody } from '../../utils/incomingBodyCheck';
 import type { SceneNode, SceneGeom, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
@@ -165,6 +166,15 @@ export const objectCommands: McpCommands = {
       if (updates.geoms.some((g: SceneGeom) => g.csg === 'difference' || g.csg === 'intersection' || (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0))) {
         updates.csgEnabled = true;
       }
+    }
+
+    // A geom type, coordinate or size MuJoCo would refuse with an XML line
+    // number is refused here, by name, before the body is touched.
+    try {
+      const next = { ...target, ...updates } as SceneNode;
+      checkIncomingBody(next, (next.joints || []).length > 0);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
 
     if (rawCuts || normRoundEdges || rawPatterns || rawPaint) {

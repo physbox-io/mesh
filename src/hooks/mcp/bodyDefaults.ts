@@ -25,6 +25,7 @@ import { generatedMeshMass } from '../../utils/generatedMeshMass';
 import { pointList, toRenderVertices } from './bridgeUtils';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 import { latticeBodyPos } from '../../utils/latticeFrame';
+import { checkIncomingBody } from '../../utils/incomingBodyCheck';
 
 export interface PendingDeclarativeOps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -558,7 +559,7 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
     ),
   );
 
-  return {
+  const node: SceneNode = {
     ...(rest as SceneNode),
     ...(latticeFields ?? {}),
     ...(sculptFields ?? {}),
@@ -628,4 +629,6 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
       curveBank:      b.curveBank      ?? 0,
     } : {}),
   };
+  checkIncomingBody(node, resolvedJoints.length > 0);
+  return node;
 };
