@@ -165,6 +165,10 @@ export function booleanActions({ set, get }: SliceDeps): BooleanActions {
       if (oldCentroid.some((v, a) => Math.abs(v - (newCentroid[a] ?? 0)) > 1e-9)) reseatHardware(node);
       node.csgCollision = node.csgCollision ?? 'auto';
       if (result.warning) node.csgWarning = result.warning; else delete node.csgWarning;
+      // What its convex pieces still fill in or narrow, reported as for any
+      // other decomposed body (scene summary, inspector).
+      if (result.cavities?.length) node.collisionCavities = result.cavities; else delete node.collisionCavities;
+      if (result.intrusion) node.collisionIntrusion = result.intrusion; else delete node.collisionIntrusion;
       delete node.csgError;
       set({ sceneGraph: newScene });
       // Bulk callers recompile once at the end — see the same note on updateNodeScad.

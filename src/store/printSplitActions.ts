@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import { nodeWorldMatrix } from '../utils/combineBodies';
-import { colliderTemplateOf, hullsToColliderGeoms, meshVolumeAndCentroid, usableColliderHulls } from '../utils/csg';
+import { colliderTemplateOf, hullsToColliderGeoms, meshVolumeAndCentroid, statedBooleanMass, usableColliderHulls } from '../utils/csg';
 import { collisionHashOf } from '../utils/convexDecomposition';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { SplitSection } from '../utils/printSplit';
@@ -66,7 +66,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       const template: SceneGeom | undefined = solid[0] ?? first.geoms?.[0];
       // What it weighs is shared out by volume when it was stated; otherwise
       // each section is weighed from its own volume at the body's density.
-      const totalMass = first.csgMass ?? (solid.length && solid.every((g: SceneGeom) => g.mass !== undefined)
+      const totalMass = (first.csgEnabled ? statedBooleanMass(first) : first.csgMass) ?? (solid.length && solid.every((g: SceneGeom) => g.mass !== undefined)
         ? solid.reduce((m: number, g: SceneGeom) => m + (g.mass ?? 0), 0)
         : undefined);
       const density = solid.find((g: SceneGeom) => g.density !== undefined)?.density;

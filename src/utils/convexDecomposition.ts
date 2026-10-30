@@ -44,8 +44,9 @@ import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColl
 export const SOLIDITY_DECOMPOSE_BELOW = 0.92;
 
 /**
- * Below this there is no concavity to find. A tetrahedron IS its own hull, and
- * so is anything else drawn with a handful of triangles.
+ * Below this a mesh convex enough by its solidity is reported as too coarse to
+ * have a concavity worth finding. Not a veto on its own: an L-shaped prism is
+ * 20 triangles and plainly concave.
  */
 export const MIN_DECOMPOSE_TRIANGLES = 24;
 
@@ -255,7 +256,9 @@ export function decompositionVerdict(
     };
   }
 
-  if (triangles < MIN_DECOMPOSE_TRIANGLES) {
+  // Only where the solidity agrees: an L-shaped prism is 20 triangles and
+  // two-thirds of its hull, and as a boolean's solid it collided as that hull.
+  if (triangles < MIN_DECOMPOSE_TRIANGLES && solidity >= SOLIDITY_DECOMPOSE_BELOW) {
     return { strategy: 'hull', solidity, triangles, maxHulls: 0, reason: 'too-coarse' };
   }
   if (solidity >= SOLIDITY_DECOMPOSE_BELOW) {

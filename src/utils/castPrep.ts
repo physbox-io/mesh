@@ -22,7 +22,7 @@
  */
 import * as THREE from 'three';
 import type { CastPrep, EdgeRoundFeature, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
-import { resolveCsgGeoms } from './csg';
+import { resolveCsgGeoms, statedBooleanMass } from './csg';
 import { appendBaseGeomTriangles } from './geomSurface';
 import { getGeomFrame, getNodeWorldTransform } from './laserCutExporter';
 import { maxSizeFor, sameEdge, suggestedSize, type EdgeCandidate } from './featureEdges';
@@ -547,7 +547,7 @@ export function draftBodyGeoms(node: SceneNode, world: THREE.Matrix4, p: DraftPa
       // are about to go. The baked mesh is the body now, so it takes both back:
       // the boolean's stated mass, or the source primitives', or its volume's.
       delete baked.role;
-      const mass = node.csgMass ?? sourceMass(node);
+      const mass = statedBooleanMass(node) ?? sourceMass(node);
       if (mass !== undefined) baked.mass = mass; else delete baked.mass;
     }
     baked.type = 'mesh';

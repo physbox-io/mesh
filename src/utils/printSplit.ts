@@ -826,9 +826,16 @@ const MAX_PLANES = 32;
  *
  * Each step takes the plane that most reduces the pieces' combined hull volume
  * — for an L, the plane of the inside face of one leg, which leaves two boxes.
- * A part built of flat faces comes out exact. A curved one stops when no plane
- * helps any more, or at MAX_PIECES, and what is left collides as its hull.
- * Returns nothing when the solid is convex already. Does not take ownership of `m`.
+ * A part built of flat faces comes out exact.
+ *
+ * Returns nothing when the solid is convex already, AND when it cannot be cut
+ * exactly: a curved one stops when no plane helps any more, or at MAX_PIECES,
+ * and a piece left concave would collide as its hull. Installed as the body's
+ * colliders, that hull filled whatever it spanned (a knife cut along a bore
+ * left one 0.83-solid piece filling the half-bore groove) and, being stamped
+ * as the decomposition, kept the general one (convexDecomposition.ts: reflex
+ * cuts, then V-HACD) from ever running. Nothing returned leaves the section
+ * to that. Does not take ownership of `m`.
  */
 function convexPieces(m: Manifold): Manifold[] {
   const solidity = (p: Manifold) => {
@@ -881,6 +888,10 @@ function convexPieces(m: Manifold): Manifold[] {
     if (!best) { done.push(p); continue; }
     p.delete();
     todo.push(best[0], best[1]);
+  }
+  if (done.some((p) => solidity(p) < CONVEX_ENOUGH)) {
+    for (const p of done) p.delete();
+    return [];
   }
   return done;
 }

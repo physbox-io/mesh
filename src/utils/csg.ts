@@ -2416,14 +2416,26 @@ function computeMeshChecksum(v: number[], faceCount: number): string {
 }
 
 /**
+ * The total mass stated for a boolean body, if one was: `collisionMass`, the
+ * field every decomposed body is weighed by; else a body-level `mass`; else
+ * `csgMass`, the older boolean-only name, still read so saved scenes keep
+ * their weight. Only csgMass used to count, and the docs named the other two.
+ */
+export function statedBooleanMass(node: SceneNode): number | undefined {
+  const finite = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  return finite(node.collisionMass) ?? finite((node as { mass?: unknown }).mass) ?? finite(node.csgMass);
+}
+
+/**
  * What a boolean body weighs, in kg, given its true volume in m³: a stated
- * csgMass, else what its solid shapes were said to weigh, else that volume at
+ * mass (statedBooleanMass), else what its solid shapes were said to weigh, else that volume at
  * what it is made of -- the rule every other geom follows, MuJoCo's 1000 kg/m³
  * when nothing is said. It used to fall back to 1 kg flat, so a 5 mm pine
  * plate weighed as much as a bag of sugar.
  */
 export function csgMassOf(node: SceneNode, volume: number): number {
-  if (node.csgMass !== undefined) return node.csgMass;
+  const stated = statedBooleanMass(node);
+  if (stated !== undefined) return stated;
   const positives = csgSourceGeoms(node).filter(isPositive);
   if (positives.length > 0 && positives.every((g) => g.mass !== undefined)) {
     return positives.reduce((m, g) => m + (g.mass ?? 0), 0);
@@ -2440,16 +2452,21 @@ export function csgHashOf(node: SceneNode): string {
   if (!src.filter(isPositive).some(emitsSolid)) return '';
   const key = JSON.stringify([
     // 2: the solid is no longer re-origined on its centroid, so a mesh
-    // compiled the old way has to be compiled again.
-    2,
+    // compiled the old way has to be compiled again. 3: a concave boolean is
+    // decomposed the way every other mesh body is (decomposeNodeColliders),
+    // where it had one V-HACD call of its own.
+    3,
     src.filter(emitsSolid).map(geomCsgKey),
     node.csgFn ?? CSG_DEFAULT_FN,
     collisionModeOf(node),
     node.csgSectors ?? CSG_DEFAULT_SECTORS,
     node.csgHoleAxis ?? 'auto',
-    node.csgMass ?? null,
+    statedBooleanMass(node) ?? null,
     src.filter(isPositive).map(g => [g.rgba, g.mass, g.density, g.friction, g.condim, g.solref, g.solimp]),
     node.edgeRounds ?? null,
+    // Collision Detail: without these a change to it rebuilt nothing.
+    node.collisionHulls ?? null,
+    node.collisionResolution ?? null,
   ]);
   let h = 0x811c9dc5;
   for (let i = 0; i < key.length; i++) {
@@ -2468,6 +2485,10 @@ export interface CsgResult {
   centroid: number[];
   mode: 'decompose' | 'primitives' | 'hull';
   warning?: string;
+  /** Cavities the pieces still fill in, as SceneNode.collisionCavities. */
+  cavities?: SceneNode['collisionCavities'];
+  /** How far the pieces stand proud of the surface, as SceneNode.collisionIntrusion. */
+  intrusion?: SceneNode['collisionIntrusion'];
 }
 
 const MAX_COMPILE_ATTEMPTS = 3;
@@ -2587,11 +2608,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
 
   if (requested === 'auto' || requested === 'decompose') {
     const holeAxis = detectHoleAxis(node);
-    if (!holeAxis) {
-      warning = requested === 'decompose'
-        ? 'No hole axis found (the negative shape is not elongated in any direction) — colliding as the source primitives instead.'
-        : undefined;
-    } else {
+    if (holeAxis) {
       const sectors = node.csgSectors ?? CSG_DEFAULT_SECTORS;
       // Slice in the SAME frame the visual mesh uses, so collider positions
       // are body-frame directly.
@@ -2644,30 +2661,33 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   const solidIsNotItsPrimitives = hasEdgeRounds(node)
     || src.some((g) => g.csg && g.csg !== 'union')
     || positives.some((g) => g.type === 'mesh');
-  if (mode === 'primitives' && requested === 'auto' && solidIsNotItsPrimitives) {
+  const forced = requested === 'decompose';
+  if (mode === 'primitives' && (forced || (requested === 'auto' && solidIsNotItsPrimitives))) {
     const hull = await computeHullVolume();
     hullVolume = hull;
-    if (hull > 0 && volume / hull >= ROUNDED_HULL_SOLIDITY) {
+    if (!forced && hull > 0 && volume / hull >= ROUNDED_HULL_SOLIDITY) {
       return { hash, scad, volume, hullVolume: hull, centroid, mode: 'hull', geoms: [{ ...visual, mass: totalMass }] };
     }
+    // The same decomposition as any other mesh body: exact cuts along flat
+    // inside corners, chunked V-HACD, pieces pulled in to the surface, the
+    // body's Collision Detail. One V-HACD call of its own here used to leave
+    // pieces standing millimetres proud into a sliding lid's groove.
     try {
-      const { hullBudget, solidityOf, voxelResolutionOf } = await import('./convexDecomposition');
-      const { decomposeMeshOffThread } = await import('./vhacdWorkerClient');
-      // The body's own overrides, which this path used to ignore.
-      const pieces = await decomposeMeshOffThread(centeredZup, compiled.faces, {
-        maxHulls: hullBudget(solidityOf(volume, hull), node.collisionHulls),
-        ...(node.collisionResolution !== undefined
-          ? { voxelResolution: voxelResolutionOf(node.collisionResolution) }
-          : {}),
-      });
-      const usable = usableColliderHulls(pieces);
-      if (usable.length >= 2) {
-        colliders = hullsToColliderGeoms(usable, baseName, colliderTemplateOf(template, rgba), totalMass);
-        return { hash, scad, volume, hullVolume: hull, centroid, mode: 'decompose', geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
+      const pieces = await decomposeCompiledSolid(node, visual, totalMass);
+      if (pieces && pieces.geoms.length >= 2) {
+        return {
+          hash, scad, volume, hullVolume: hull, centroid, mode: 'decompose',
+          geoms: [{ ...visual, role: 'visual', mass: 0 }, ...pieces.geoms],
+          ...(pieces.warning ? { warning: pieces.warning } : {}),
+          ...(pieces.cavities?.length ? { cavities: pieces.cavities } : {}),
+          ...(pieces.intrusion ? { intrusion: pieces.intrusion } : {}),
+        };
       }
+      if (pieces?.warning) warning = pieces.warning;
     } catch {
       // Timed out or no worker: fall through and collide as the primitives.
     }
+    if (forced && !warning) warning = 'This shape could not be broken into convex pieces — colliding as the source primitives instead.';
   }
 
   if (mode === 'decompose') {
@@ -2681,6 +2701,28 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   return {
     hash, scad, volume, hullVolume, centroid, mode: 'primitives', warning,
     geoms: [{ ...visual, role: 'visual', mass: 0 }],
+  };
+}
+
+/**
+ * A compiled boolean's convex pieces, from the decomposition every other mesh
+ * body gets (convexDecomposition.ts decomposeNodeColliders), run on a stand-in
+ * body whose one mesh is the compiled solid. Pieces carry `mass` between them.
+ */
+async function decomposeCompiledSolid(node: SceneNode, visual: SceneGeom, mass: number) {
+  const { decomposeNodeColliders } = await import('./convexDecomposition');
+  const { csgDerived: _derived, ...mesh } = visual;
+  void _derived;
+  const standIn: SceneNode = {
+    ...node, csgEnabled: false, scad: undefined, collisionMass: mass, geoms: [mesh],
+  };
+  const result = await decomposeNodeColliders(standIn);
+  if (!result) return null;
+  return {
+    ...result,
+    // Named as before, with nothing to say which mesh they stand for: a
+    // boolean body's colliders stand for its compiled solid (resolveCsgGeoms).
+    geoms: result.geoms.map(({ colliderOf: _of, ...g }) => { void _of; return { ...g, csgDerived: 'collider' as const }; }),
   };
 }
 
@@ -2873,11 +2915,12 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
     // solid it represents.
     const vols = positives.map(primitiveVolume);
     const totalVol = vols.reduce((s, v) => s + v, 0);
+    const stated = statedBooleanMass(node);
     out.push(...positives.map((g, i) => ({
       ...g,
       role: 'collision' as const,
-      ...(node.csgMass !== undefined && totalVol > 0
-        ? { mass: +(node.csgMass * (vols[i] / totalVol)).toFixed(8) }
+      ...(stated !== undefined && totalVol > 0
+        ? { mass: +(stated * (vols[i] / totalVol)).toFixed(8) }
         : {}),
     })));
   }
