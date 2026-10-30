@@ -278,7 +278,10 @@ export const castCommands: McpCommands = {
     return {
       ok: true,
       // Under `summary`: the MCP server passes on summary, warnings and files only.
-      summary: { format, units: 'mm', plated: result.plated, parts: result.parts },
+      summary: {
+        format, units: 'mm', plated: result.plated, parts: result.parts,
+        ...(result.filaments ? { filaments: result.filaments } : {}),
+      },
       warnings: result.warnings,
       files: describeFiles(result.files, msg.includeFiles !== false),
     };

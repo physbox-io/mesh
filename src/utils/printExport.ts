@@ -76,6 +76,11 @@ export interface PrintExportResult {
   warnings: string[];
   /** Ids asked for that the scene does not have. */
   missing: string[];
+  /**
+   * A 3MF's filaments: number, sRGB colour and how many triangles print in
+   * it, file by file in order. What to load in which slot.
+   */
+  filaments?: { extruder: number; hex: string; triangles: number }[][];
 }
 
 const linear = (rgba: number[] | undefined): [number, number, number] => {
@@ -213,11 +218,12 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
     const plated = platedMeshes(scene, parts, options.bed);
     if (plated) {
       const result = exportThreeMf(plated, { maxExtruders: options.filaments });
-      return { files: [{ name: `${base}_plate.3mf`, bytes: result.data }], parts: summary, plated: true, warnings, missing };
+      return { files: [{ name: `${base}_plate.3mf`, bytes: result.data }], parts: summary, plated: true, warnings, missing, filaments: [result.palette] };
     }
   }
 
   const groups = options.separate ? parts.map((p) => [p]) : [parts];
+  const filaments: NonNullable<PrintExportResult['filaments']> = [];
   const used = new Map<string, number>();
   const files = groups.map((group) => {
     const mm = toBedMm(group.flatMap((p) => p.volumes.map((v) => v.tris)));
@@ -245,7 +251,8 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
       object: p.id,
     })));
     const result = exportThreeMf(meshes, { maxExtruders: options.filaments });
+    filaments.push(result.palette);
     return { name: `${name}.3mf`, bytes: result.data };
   });
-  return { files, parts: summary, plated: false, warnings, missing };
+  return { files, parts: summary, plated: false, warnings, missing, ...(filaments.length ? { filaments } : {}) };
 }
