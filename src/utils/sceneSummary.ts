@@ -15,6 +15,7 @@ import { cageOriginInBodyMm } from './latticeFrame';
 import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum } from './csg';
 import { collidersAreStale, intrusionSentence, solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from './convexDecomposition';
 import { measurePart } from './solidMachiningExporter';
+import { collidingGeomBoxes } from './collisionCheck';
 
 export const bboxOf = (flatVerts: number[] | undefined) => {
   if (!flatVerts || flatVerts.length === 0) return undefined;
@@ -136,15 +137,44 @@ export function stockReport(scene: SceneGraph, stock: { widthMm: number; depthMm
  * parts set up as an experiment are not on a bench either: a body that
  * shatters, dents, crumples, breaks under load, is a join blob, is launched
  * with an initial velocity, runs a control script or carries an actuator says
- * the scene is there to be simulated. Carve settings and print fidelity still
- * win over all of that.
+ * the scene is there to be simulated. So is a loose body held up in the air,
+ * resting on nothing: cubes about to tumble, a coin about to be flipped. Carve
+ * settings and print fidelity still win over all of that.
  */
 export function isFabricationScene(scene: SceneGraph, carveSettings: unknown): boolean {
   if (carveSettings) return true;
   if (scene.simFidelity === 'print') return true;
   const mechanismOrExperiment = (nodes: SceneNode[] | undefined): boolean => (nodes || []).some((n) =>
     (n.joints || []).some((j) => j.type !== 'free') || isExperimentBody(n) || mechanismOrExperiment(n.children));
-  return (scene.nodes?.length ?? 0) > 0 && !mechanismOrExperiment(scene.nodes);
+  return (scene.nodes?.length ?? 0) > 0 && !mechanismOrExperiment(scene.nodes) && !dropsAnything(scene.nodes);
+}
+
+/** How far above whatever is under it a loose body may start and still count as resting there, metres. */
+const RESTING_GAP_M = 0.002;
+
+/**
+ * Whether any free body starts in the air: its lowest point clear of the floor
+ * and of the top of every other body under it. Parts laid out on a bench, or
+ * stacked on one another, rest; a drop test does not.
+ */
+function dropsAnything(nodes: SceneNode[]): boolean {
+  const boxes = collidingGeomBoxes(nodes);
+  return nodes.some((n) => {
+    if (!(n.joints || []).some((j) => j.type === 'free')) return false;
+    const ids = new Set<string>();
+    const collect = (b: SceneNode) => { ids.add(b.id); (b.children || []).forEach(collect); };
+    collect(n);
+    const own = boxes.filter((b) => ids.has(b.body));
+    if (!own.length) return false;
+    const minZ = Math.min(...own.map((b) => b.box.min[2]));
+    if (minZ <= RESTING_GAP_M) return false;
+    const lo = [Math.min(...own.map((b) => b.box.min[0])), Math.min(...own.map((b) => b.box.min[1]))];
+    const hi = [Math.max(...own.map((b) => b.box.max[0])), Math.max(...own.map((b) => b.box.max[1]))];
+    const restsOnSomething = boxes.some((b) => !ids.has(b.body)
+      && b.box.max[2] >= minZ - RESTING_GAP_M && b.box.min[2] < minZ
+      && b.box.min[0] < hi[0] && b.box.max[0] > lo[0] && b.box.min[1] < hi[1] && b.box.max[1] > lo[1]);
+    return !restsOnSomething;
+  });
 }
 
 /** A body (not its children) set up for a physics experiment rather than to be made. */

@@ -144,3 +144,24 @@ describe('isFabricationScene', () => {
     expect(isFabricationScene(graph([vase], { simFidelity: 'print' }), null)).toBe(true);
   });
 });
+
+describe('isFabricationScene: loose bodies in the air', () => {
+  const free = [{ name: 'f', type: 'free' as const }];
+  const cube = [{ type: 'box' as const, size: [0.02, 0.02, 0.02] }];
+
+  it('is an experiment, not fabrication, when a free body starts in the air on nothing', () => {
+    const dropped = body('cube', cube, { joints: free, pos: [0, 0, 0.5] });
+    expect(isFabricationScene(graph([dropped]), null)).toBe(false);
+  });
+
+  it('is fabrication for a part on the floor or stacked on another', () => {
+    const base = body('base', cube, { joints: free, pos: [0, 0, 0.02] });
+    const lid = body('lid', cube, { joints: free, pos: [0, 0, 0.06] });
+    expect(isFabricationScene(graph([base, lid]), null)).toBe(true);
+  });
+
+  it('carve settings still win', () => {
+    const dropped = body('cube', cube, { joints: free, pos: [0, 0, 0.5] });
+    expect(isFabricationScene(graph([dropped]), { depthMm: 3 })).toBe(true);
+  });
+});
