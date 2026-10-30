@@ -8,6 +8,10 @@
  * gear train still spinning at 25 rad/s came back `settled: true`. Here the
  * filter takes names or ids, says which entries matched nothing, and `final`
  * is judged on every body and joint before anything is filtered out.
+ *
+ * `final` comes from the worker's per-tick summary when it sent one, so the
+ * stride frames were kept at changes nothing in it; from the kept frames only
+ * when it did not.
  */
 import type { SceneGraph, SceneNode } from '../types/scene';
 import type { HistoryEntry } from '../workers/physicsWorkerProtocol';
@@ -87,6 +91,7 @@ export type HeadlessFinal = TrajectorySummary & {
 interface RawResult {
   ok: boolean;
   trajectory?: HistoryEntry[];
+  summary?: TrajectorySummary | null;
   warnings?: string[];
   constraintReport?: ConstraintReport;
   [k: string]: unknown;
@@ -104,10 +109,17 @@ export interface HeadlessReply {
  * The reply: `final` from the whole run, then the trajectory and `final.bodies`
  * cut down to the bodies asked for, with a warning for any that matched nothing.
  */
-export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBodies: unknown): HeadlessReply {
+/** The frame sections `include` asked for ('bodies', 'joints', 'contacts', 'aero'), or null for all. */
+export function frameSections(include: unknown): Set<string> | null {
+  if (!Array.isArray(include)) return null;
+  return new Set(include.map(String));
+}
+
+export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBodies: unknown, include?: unknown): HeadlessReply {
   const filter = resolveBodyFilter(graph, requestedBodies);
-  // The worker's constraint report is folded into `final`, not passed on raw.
-  const { constraintReport, ...rest } = result;
+  const sections = frameSections(include);
+  // The worker's constraint report and summary are folded into `final`, not passed on raw.
+  const { constraintReport, summary: tickSummary, ...rest } = result;
   const warnings = [...(rest.warnings ?? [])];
   if (filter.unknown.length) {
     const names: string[] = [];
@@ -118,7 +130,7 @@ export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBo
   }
   if (!rest.ok || !rest.trajectory) return { ...rest, warnings };
 
-  const summary = summarizeTrajectory(rest.trajectory, { jointTypes: jointTypes(graph) });
+  const summary = tickSummary !== undefined ? tickSummary : summarizeTrajectory(rest.trajectory, { jointTypes: jointTypes(graph) });
   let final: HeadlessFinal | null = summary;
   if (summary) {
     // A body's id says nothing to whoever named it; give the name alongside.
@@ -144,14 +156,21 @@ export function reportHeadless(result: RawResult, graph: SceneGraph, requestedBo
       };
     }
   }
-  // The bodies asked for, their joints, and the contacts they are in.
-  const trajectory = filter.ids
-    ? rest.trajectory.map((fr) => ({
-        ...fr,
-        bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => filter.ids!.has(k))),
-        joints: jointsOfBodies(fr.joints || {}, filter.ids!),
-        contacts: contactsOfBodies(fr.contacts || [], filter.ids!),
-      }))
+  // The bodies asked for, their joints, and the contacts they are in; only the sections included.
+  const trajectory = filter.ids || sections
+    ? rest.trajectory.map((fr) => {
+        const out: Partial<HistoryEntry> & { time: number } = { time: fr.time };
+        const keep = (s: string) => !sections || sections.has(s);
+        if (keep('bodies')) {
+          out.bodies = filter.ids
+            ? Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => filter.ids!.has(k)))
+            : fr.bodies;
+        }
+        if (keep('joints')) out.joints = filter.ids ? jointsOfBodies(fr.joints || {}, filter.ids) : fr.joints;
+        if (keep('contacts')) out.contacts = filter.ids ? contactsOfBodies(fr.contacts || [], filter.ids) : fr.contacts;
+        if (keep('aero')) out.aeroDiagnostics = fr.aeroDiagnostics;
+        return out as HistoryEntry;
+      })
     : rest.trajectory;
   return { ...rest, trajectory, warnings, final };
 }

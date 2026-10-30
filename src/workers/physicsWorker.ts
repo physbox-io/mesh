@@ -60,6 +60,8 @@ import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptSt
 import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
 import { createConstraintMonitor, mergeConstraintReports, type ConstraintReport } from '../utils/constraintResiduals';
+import { TrajectoryAccumulator } from '../utils/trajectorySummary';
+import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
@@ -903,7 +905,11 @@ const applyDragForce = () => {
   dat.xfrc_applied[bId * 6 + 2] = fz;
 };
 
-const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): HistoryEntry => {
+/**
+ * A telemetry frame of the current state. `contacts: false` leaves out the
+ * contact list (an empty array), which is most of the cost and the size.
+ */
+const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>, opts: { contacts?: boolean } = {}): HistoryEntry => {
   const mdl = model!;
   const dat = data!;
   const bodies: Record<string, BodyHistory> = {};
@@ -942,6 +948,7 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
   }
 
   const contacts: ContactHistory[] = [];
+  if (opts.contacts === false) return { time: dat.time, bodies, joints, contacts, aeroDiagnostics };
   // `dat.contact` is not a view. Every read of the property has the bindings
   // copy the whole contact array into a fresh std::vector on the wasm heap and
   // hand back a handle that has to be delete()d — exactly like the per-contact
@@ -2019,6 +2026,7 @@ const runHeadless = async (
   ticks: number,
   stride = 1,
   askImpact?: AskImpact,
+  frameContacts = true,
 ): Promise<HeadlessRunResult> => {
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
   const mj = mujoco;
@@ -2149,6 +2157,8 @@ const runHeadless = async (
       timestep = modelOpt(nextModel).timestep;
     };
 
+    // `final` is judged on every tick, whatever the stride: see TrajectoryAccumulator.
+    const accumulator = new TrajectoryAccumulator({ jointTypes: jointTypes(headlessSceneGraph) });
     const loop = headlessLoop<HistoryEntry>({ ticks, stride, initialVelocityJoints }, {
       step: () => {
         data!.xfrc_applied.fill(0);
@@ -2175,7 +2185,8 @@ const runHeadless = async (
         for (let i = 0; i < model!.nv; i++) if (!Number.isFinite(qvel[i])) return true;
         return false;
       },
-      sample: () => buildHistoryEntry(lastAero),
+      observe: () => accumulator.add(buildHistoryEntry(lastAero, { contacts: false })),
+      sample: () => buildHistoryEntry(lastAero, { contacts: frameContacts }),
       interrupted: () => impacts.length > 0,
       // A mid-run rebuild hands over a fresh MjData whose counters start at 0;
       // the loop has stopped on any earlier change, so the count it compares
@@ -2215,6 +2226,7 @@ const runHeadless = async (
         ? { truncationReason: outcome.truncationReason, truncationDetail: outcome.truncationDetail }
         : {}),
       trajectory: outcome.frames,
+      summary: accumulator.result(),
       warnings,
       constraintReport,
       ...(breaks.length ? { breaks } : {}),
@@ -2405,6 +2417,7 @@ const handleMessage = async (evt: MessageEvent) => {
           const result = await runHeadless(
             msg.xml, msg.sceneGraph, msg.ticks, msg.stride,
             judged ? (event) => askMainAboutImpact(id, event) : undefined,
+            msg.contacts !== false,
           );
           post({ type: 'HEADLESS_RESULT', id, ...result });
         } finally {

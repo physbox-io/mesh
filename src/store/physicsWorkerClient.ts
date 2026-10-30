@@ -66,6 +66,11 @@ export interface HeadlessLoopHooks<F> {
   /** Build a trajectory frame from the current state. */
   sample(): F;
   /**
+   * Called after every good tick, kept or not: what is judged over the whole
+   * run (`final`) must not depend on the stride the frames are kept at.
+   */
+  observe?(): void;
+  /**
    * True when something happened this tick that the caller must deal with
    * before the next one: a blow that may shatter a body. `headlessLoop` then
    * yields, and the caller resumes it once the model is rebuilt.
@@ -189,6 +194,7 @@ export function* headlessLoop<F>(
 
     prevTime = t;
     ticksSimulated = i + 1;
+    hooks.observe?.();
 
     if (i % stride === 0) {
       if (frames.length >= maxFrames) {
@@ -459,7 +465,13 @@ export class PhysicsWorkerClient {
   // With a `judge`, the run stops at every blow and asks it what happened, as
   // the live run asks the store: a body that shatters is rebuilt as its pieces
   // at that tick and the run goes on. Without one it never shatters.
-  runHeadless(xml: string, sceneGraph: SceneGraph, ticks: number, stride = 1, judge?: HeadlessImpactJudge): Promise<HeadlessRunResult> {
+  //
+  // `frames.contacts: false` leaves the contact list out of every kept frame:
+  // on a scene with a few bodies it is most of each frame.
+  runHeadless(
+    xml: string, sceneGraph: SceneGraph, ticks: number, stride = 1, judge?: HeadlessImpactJudge,
+    frames: { contacts?: boolean } = {},
+  ): Promise<HeadlessRunResult> {
     const id = Math.random().toString(36).slice(2);
     if (judge) this.headlessJudges.set(id, judge);
     // The same ledger as `build`: an XML compiled against it can name a mesh
@@ -470,7 +482,7 @@ export class PhysicsWorkerClient {
       this.noteRequest();
       this.pendingHeadless.set(id, { resolve, reject });
       this.worker.postMessage(
-        { type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride, meshFiles: add, dropMeshes: drop, judgeImpacts: !!judge },
+        { type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride, contacts: frames.contacts !== false, meshFiles: add, dropMeshes: drop, judgeImpacts: !!judge },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
     });

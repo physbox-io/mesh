@@ -8,6 +8,7 @@ import type { SceneGraph } from '../types/scene';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
+import type { TrajectorySummary } from '../utils/trajectorySummary';
 import type { ScriptLogLine, ScriptProblem, ScriptTimingReport } from './scriptDiagnostics';
 
 /** Explicit state to seed a freshly built model with (a live mirror's copy). */
@@ -184,6 +185,8 @@ export type HeadlessResult =
       constraintReport?: ConstraintReport;
       /** Welds, members, blobs and crumple zones that gave way in this run, in order. */
       breaks?: ConstraintBrokenEvent[];
+      /** `final`, judged on every tick (not only the kept frames), before any `bodies` filter. */
+      summary?: TrajectorySummary | null;
     } & HeadlessScriptReport)
   | { ok: false; error: string; warnings: string[] };
 
@@ -229,6 +232,8 @@ export type MainToWorkerMessage =
   | { type: 'UPDATE_SCRIPT'; nodeId: string; script: string }
   | {
       type: 'RUN_HEADLESS'; id: string; xml: string; sceneGraph: SceneGraph; ticks: number; stride?: number;
+      /** Whether kept frames carry their contacts (default true). */
+      contacts?: boolean;
       /** As BUILD's: the headless XML is compiled against the same ledger. */
       meshFiles?: { name: string; bytes: Uint8Array }[];
       dropMeshes?: string[];

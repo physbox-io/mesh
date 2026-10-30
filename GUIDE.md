@@ -171,6 +171,8 @@ The worker also times the scripts (`ScriptTiming`: per step and per body, in one
 ### Telemetry
 History frames (every 10 steps; `physics_get_history`, `physics_get_telemetry`, and the `physics_run_headless` trajectory) carry each joint at its full width: hinge and slide as numbers, a free joint's `pos` as `[x, y, z, qw, qx, qy, qz]` and `vel` as 6 numbers, a ball's as a quaternion and 3 rates (see `readJoint` in `src/workers/scriptSensors.ts`). A joint with an actuator adds `ctrl` and `actuatorForce` (`qfrc_actuator`; `qfrc_applied` only shows `applyJointForce`). Joints carry their `body`, contacts their `body1`/`body2`, so a `bodies` filter keeps a body's joints and contacts too. The history is one continuous run: a build that starts over from t = 0 clears it and records the opening frame; a build that carries the running simulation across keeps it.
 
+A frame's bodies carry `pos` (the body origin, world), `vel` (the world velocity of that same point — not MuJoCo's raw `cvel`, whose linear part belongs to the tree's centre of mass) and `angvel` (world frame), read at the same instant as the joints: `syncKinematics` (`src/workers/bodyKinematics.ts`) re-derives them after every step, since `mj_step` leaves them one step behind `qpos`/`qvel`. A free joint's own `vel[3..5]` stays in the body frame, as MuJoCo stores it. `physics_run_headless`'s `final` is judged on every tick (`TrajectoryAccumulator` in `src/utils/trajectorySummary.ts`, fed by `headlessLoop`'s `observe`), so it does not depend on `stride`; `include` drops frame sections (contacts are never gathered when left out).
+
 ---
 
 ## LQR Control Law and Non-Minimum Phase Dynamics (Cartpole)
