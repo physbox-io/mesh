@@ -117,6 +117,19 @@ describe('decompositionVerdict', () => {
     expect(v.reason).toBe('too-coarse');
   });
 
+  it('decomposes a concave mesh however few triangles it has', () => {
+    // An L-shaped prism, 30 x 20 x 10 mm with a 10 mm notch: 20 triangles.
+    const outline = [[0, 0], [0.03, 0], [0.03, 0.01], [0.02, 0.01], [0.02, 0.02], [0, 0.02]];
+    const n = outline.length;
+    const verts = [...outline.flatMap(([x, y]) => [x, y, 0]), ...outline.flatMap(([x, y]) => [x, y, 0.01])];
+    const faces: number[] = [];
+    for (let i = 1; i + 1 < n; i++) faces.push(0, i + 1, i, n, n + i, n + i + 1);
+    for (let i = 0; i < n; i++) { const j = (i + 1) % n; faces.push(i, j, n + j, i, n + j, n + i); }
+    const v = decompositionVerdict(body([meshGeom({ verts, faces })]));
+    expect(v.triangles).toBe(20);
+    expect(v.strategy).toBe('decompose');
+  });
+
   it('collides a sphere as its hull on the solidity test', () => {
     const v = decompositionVerdict(body([meshGeom(sphereMesh())]));
     expect(v.strategy).toBe('hull');
