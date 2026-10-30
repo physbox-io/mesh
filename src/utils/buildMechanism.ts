@@ -38,6 +38,7 @@ import {
   type LeadscrewDriveSpec,
 } from './mechanismParts';
 import { nodeLocalQuat, quatMultiply, quatRotateVec, type QuatWXYZ } from './sceneTree';
+import { adjustedFields, type MechanismAdjustment } from './mechanismAdjustments';
 
 export const MECHANISM_FAMILIES = ['gear', 'gear_pair', 'rack_pinion', 'gt2_belt', 'leadscrew', 'cam_follower', 'four_bar'] as const;
 export type MechanismFamilyName = (typeof MECHANISM_FAMILIES)[number];
@@ -63,7 +64,20 @@ export interface MechanismBuild {
   /** A body the build put a gear onto, if any. */
   arborId?: string;
   metrics: Record<string, unknown>;
+  /** Every requested figure the builder changed; see utils/mechanismAdjustments.ts. */
+  adjusted: MechanismAdjustment[];
 }
+
+/** The figures of a gear a request can name, as the builder made it. */
+const gearUsed = (m: { teeth: number; moduleMm: number; pressureAngleDeg: number; backlashMm: number; thicknessMm?: number }) => ({
+  teeth: m.teeth, moduleMm: m.moduleMm, pressureAngleDeg: m.pressureAngleDeg, backlashMm: m.backlashMm, thicknessMm: m.thicknessMm,
+});
+
+/** A gear given as its own spec object, or as the request's flat fields. */
+const gearAdjusted = (req: MechanismRequest, key: string, flatTeeth: string, m: Parameters<typeof gearUsed>[0]) =>
+  req[key] && typeof req[key] === 'object'
+    ? adjustedFields(req[key], gearUsed(m), `${key}.`)
+    : adjustedFields(req, { [flatTeeth]: m.teeth, moduleMm: m.moduleMm });
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 const vec3 = (v: unknown): [number, number, number] | undefined =>
@@ -175,6 +189,7 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
   let created: SceneNode[] = [];
   let metrics: Record<string, unknown> = {};
   let onArbor: SceneNode | null = null;
+  let adjusted: MechanismAdjustment[] = [];
 
   const gearSpec = (v: unknown, fallback: InvoluteGearSpec): InvoluteGearSpec => (v && typeof v === 'object' ? v as InvoluteGearSpec : fallback);
 
@@ -187,6 +202,7 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
       if (arborId) onArbor = node;
       else created = [node];
       metrics = { pitchDiameterMm: node.toothForm && 'pitchDiameterMm' in node.toothForm ? node.toothForm.pitchDiameterMm : undefined };
+      if (node.toothForm?.kind === 'involute') adjusted = adjustedFields(req, gearUsed(node.toothForm));
       break;
     }
     case 'gear_pair': {
@@ -198,6 +214,7 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
         actuateDriver: actuate && !arborId,
       });
       metrics = { centerDistanceMm: pair.centerDistanceMm, ratio: pair.gearRatio, coupleRatio: pair.coupleRatio, contactRatio: pair.contactRatio };
+      adjusted = [...gearAdjusted(req, 'driver', 'driverTeeth', pair.driverMetrics), ...gearAdjusted(req, 'driven', 'drivenTeeth', pair.drivenMetrics)];
       if (arborId && arbor) {
         // The driven gear beside the arbor, in the arbor's frame and plane.
         const rel = [0, 1, 2].map((k) => pair.drivenNode.pos[k] - pair.driverNode.pos[k]);
@@ -219,18 +236,21 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
       const rp = buildRackAndPinionPair(pinion, rack, { ...(origin ? { origin } : {}), actuatePinion: actuate });
       created = rp.nodes;
       metrics = { coupleRatio: rp.coupleRatio, pitchRadiusMm: rp.pitchRadiusMm };
+      adjusted = gearAdjusted(req, 'pinion', 'pinionTeeth', rp.pinionMetrics);
       break;
     }
     case 'gt2_belt': {
       const belt = buildGt2BeltDrive({ ...(req as Gt2BeltDriveSpec), ...(origin ? { origin } : {}), actuateDriver: actuate });
       created = belt.nodes;
       metrics = { beltLengthMm: belt.beltLengthMm, beltTeeth: belt.beltTeethRounded, coupleRatio: belt.coupleRatio };
+      adjusted = adjustedFields(req, { driverTeeth: belt.driverMetrics.teeth, drivenTeeth: belt.drivenMetrics.teeth, beltWidthMm: belt.driverMetrics.beltWidthMm });
       break;
     }
     case 'leadscrew': {
       const ls = buildLeadscrewDrive({ ...(req as LeadscrewDriveSpec), ...(origin ? { origin } : {}), actuateScrew: actuate });
       created = ls.nodes;
       metrics = { coupleRatio: ls.coupleRatio, travelRangeMm: ls.travelRangeMm, screwId: ls.leadscrewNode.id, nutId: ls.nutNode.id };
+      adjusted = adjustedFields(req, { lengthMm: ls.lengthMm, leadMm: ls.leadMm, pitchMm: ls.pitchMm, diameterMm: ls.diameterMm });
       break;
     }
     case 'cam_follower': {
@@ -272,5 +292,5 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
   const addedIds: string[] = [];
   walk(created, (n) => addedIds.push(n.id));
   if (arborId && !contains(nodes, arborId)) return { error: `No body '${arborId}' to build onto.` };
-  return { family, nodes, addedIds, ...(arborId ? { arborId } : {}), metrics };
+  return { family, nodes, addedIds, ...(arborId ? { arborId } : {}), metrics, adjusted };
 }

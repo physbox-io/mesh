@@ -18,6 +18,7 @@ import {
   type PcbEnclosureFace, type PcbEnclosureOptions, type PcbMechanicalSpec,
 } from '../../utils/pcbEnclosureSync';
 import { buildMechanism, type MechanismRequest } from '../../utils/buildMechanism';
+import { adjustmentWarnings } from '../../utils/mechanismAdjustments';
 import {
   PIPE_STANDARDS, breakdownPipeFrame, buildAllCustomHubNodes, withoutHubsAt,
   generatePipeStructurePreset, type PipeFrameOptions, type PipeStandardId,
@@ -393,13 +394,18 @@ const buildMechanismCommand: McpHandler = async (msg, { store }) => {
   // Added to the scene as it is; see utils/buildMechanism.ts.
   const built = buildMechanism(msg as MechanismRequest, store.sceneGraph.nodes);
   if ('error' in built) return { ok: false, error: built.error };
-  await settleScene(built.nodes);
+  const settled = await settleScene(built.nodes);
+  // Said, not done quietly: a 0.5 mm lead built as 1 mm runs twice as far.
+  const warnings = adjustmentWarnings(built.family, built.adjusted);
   return {
-    ok: true,
+    ok: settled.ok,
+    ...(settled.error ? { error: settled.error } : {}),
     family: built.family,
     addedIds: built.addedIds,
     ...(built.arborId ? { arborId: built.arborId } : {}),
     metrics: built.metrics,
+    ...(built.adjusted.length ? { adjusted: built.adjusted, warnings } : {}),
+    ...(settled.collisionPending ? { collisionPending: settled.collisionPending, note: settled.note } : {}),
   };
 };
 
