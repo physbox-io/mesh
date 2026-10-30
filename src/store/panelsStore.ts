@@ -55,6 +55,9 @@ interface PanelsState {
   /** The PCB importer: a board from Volt or a stock one, and an enclosure around it. */
   isPcbImportOpen: boolean;
   setPcbImportOpen: (open: boolean) => void;
+  /** A board that arrived from Volt in the address bar, for the importer to start on. */
+  pcbHandoff: string | null;
+  openPcbHandoff: (handoff: string) => void;
   /** The scene browser (open, examples, pattern boards), and the tab it is on. */
   sceneBrowser: SceneBrowserTab | null;
   openSceneBrowser: (tab?: SceneBrowserTab) => void;
@@ -86,7 +89,9 @@ export const usePanels = create<PanelsState>((set) => ({
   isMechanismBuilderOpen: false,
   setMechanismBuilderOpen: (isMechanismBuilderOpen) => set({ isMechanismBuilderOpen }),
   isPcbImportOpen: false,
-  setPcbImportOpen: (isPcbImportOpen) => set({ isPcbImportOpen }),
+  setPcbImportOpen: (isPcbImportOpen) => set({ isPcbImportOpen, pcbHandoff: null }),
+  pcbHandoff: null,
+  openPcbHandoff: (pcbHandoff) => set({ isPcbImportOpen: true, pcbHandoff }),
   sceneBrowser: null,
   openSceneBrowser: (tab) => set({ sceneBrowser: tab ?? 'examples' }),
   closeSceneBrowser: () => set({ sceneBrowser: null }),

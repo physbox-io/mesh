@@ -5,6 +5,7 @@ import { ImportImageModal } from './ImportImageModal';
 import { GeneratePatternModal } from './GeneratePatternModal';
 import { MechanismBuilderModal } from './MechanismBuilderModal';
 import { ImportPcbModal } from './ImportPcbModal';
+import { usePcbHandoffLink } from '../hooks/usePcbHandoffLink';
 
 /** The STL, image and PCB importers, the pattern generators, and the gears builder. */
 export function ImportModals() {
@@ -16,6 +17,8 @@ export function ImportModals() {
   const setMechanismBuilderOpen = usePanels((s) => s.setMechanismBuilderOpen);
   const isPcbImportOpen = usePanels((s) => s.isPcbImportOpen);
   const setPcbImportOpen = usePanels((s) => s.setPcbImportOpen);
+  const pcbHandoff = usePanels((s) => s.pcbHandoff);
+  usePcbHandoffLink();
   return (
     <>
       {/* Import STL Modal — mounted only while open so each import starts clean */}
@@ -53,7 +56,10 @@ export function ImportModals() {
       )}
 
       {isPcbImportOpen && (
-        <ImportPcbModal onClose={() => setPcbImportOpen(false)} />
+        <ImportPcbModal
+          onClose={() => setPcbImportOpen(false)}
+          {...(pcbHandoff ? { initialSpec: pcbHandoff } : {})}
+        />
       )}
     </>
   );
