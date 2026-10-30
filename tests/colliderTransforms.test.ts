@@ -7,7 +7,7 @@ import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
 import { splitForPrint, type SplitResult } from '../src/utils/printSplit';
 import { useStore } from '../src/store/useStore';
-import { scaleNodeTree } from '../src/utils/scaleNode';
+import { scaleNodeTree, scaledSize } from '../src/utils/scaleNode';
 import { scaleMeshGeoms } from '../src/store/meshGeomTransforms';
 import { compileToMJCF } from '../src/utils/mjcf';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
@@ -102,12 +102,30 @@ describe('a Split for Print section rescaled', () => {
     expect(xml).not.toMatch(new RegExp(`<geom name="${name}_collider"[^>]*contype="0"`));
   });
 
-  it('keeps the collider wound outward through a mirror', () => {
+  it('keeps the collider and the drawn mesh wound outward through a mirror', () => {
     const g = structuredClone(mesh(ids[0]));
     scaleMeshGeoms({ geoms: [g] }, -1, 1, 1);
     const plain = analyzeMesh(g.colliderVertices!, g.colliderFaces!)!;
     expect(plain.consistentlyWound).toBe(true);
     expect(plain.volume).toBeGreaterThan(0);
+    // What the scene summary reports as windingInverted (negative volume) and
+    // windingMixed (not consistently wound): drawn one-sided, an inside-out
+    // mesh looks half transparent.
+    const drawn = analyzeMesh(g.renderVertices!, g.faces!)!;
+    expect(drawn.consistentlyWound).toBe(true);
+    expect(drawn.volume).toBeGreaterThan(0);
+  });
+
+  it('mirrors a static mesh wound outward too, and leaves a primitive its size', () => {
+    const g = structuredClone(mesh(ids[0]));
+    const yUp = g.vertices!;
+    const flat = { ...g, dynamic: false, renderVertices: undefined, vertices: yUp } as SceneGeom;
+    scaleMeshGeoms({ geoms: [flat] }, 1, -1, 1);
+    const drawn = analyzeMesh(flat.vertices!, flat.faces!)!;
+    expect(drawn.consistentlyWound).toBe(true);
+    expect(drawn.volume).toBeGreaterThan(0);
+    expect(scaledSize('sphere', [0.1], -1, 1, 1)).toEqual([0.1]);
+    expect(scaledSize('box', [0.1, 0.2, 0.3], -2, 1, 1)).toEqual([0.2, 0.2, 0.3]);
   });
 });
 

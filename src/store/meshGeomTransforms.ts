@@ -134,12 +134,15 @@ const remarkDense = (g: SceneGeom, wasFresh: boolean) => {
 const carryCollider = (g: SceneGeom, fn: (x: number, y: number, z: number) => [number, number, number], det = 1) => {
   if (!g.colliderVertices?.length) return;
   g.colliderVertices = mapVerts([...g.colliderVertices], fn);
-  if (det < 0 && g.colliderFaces) {
-    const f = [...g.colliderFaces];
-    for (let i = 0; i < f.length; i += 3) [f[i + 1], f[i + 2]] = [f[i + 2], f[i + 1]];
-    g.colliderFaces = f;
-  }
+  if (det < 0 && g.colliderFaces) g.colliderFaces = flipWinding(g.colliderFaces);
 };
+
+/** The same triangles wound the other way: two corners of each swapped. */
+function flipWinding(faces: number[]): number[] {
+  const f = [...faces];
+  for (let i = 0; i < f.length; i += 3) [f[i + 1], f[i + 2]] = [f[i + 2], f[i + 1]];
+  return f;
+}
 
 /** Y-up mean of a vertex array, as a Z-up point. */
 const zUpCentroid = (v: number[]): [number, number, number] => {
@@ -307,6 +310,11 @@ export const scaleMeshGeoms = (node: Pick<SceneNode, 'geoms'>, sx: number, sy: n
       // Also scale the MuJoCo collision vertices (Y-up world space) about their centroid
       if (g.vertices) g.vertices = scaleAboutCentroid(g.vertices as number[], sx, sz, sy);
     }
+    // A mirror turns every triangle inside out, and a mesh is drawn one-sided
+    // from its winding, so it showed as a half-transparent body (CLAUDE.md §
+    // Traps). Swapping two corners of each triangle keeps the triangles in
+    // their order and on their vertices, so nothing indexed by either moves.
+    if (det < 0 && g.type === 'mesh' && g.faces?.length) g.faces = flipWinding(g.faces);
     remarkDense(g, fresh);
   }
 };
