@@ -109,9 +109,23 @@ export function parseSetups(v: unknown): SolidMachiningOptions['setups'] | undef
   return faces.length > 0 ? faces : undefined;
 }
 
+/**
+ * What a solid-machining job over MCP is planned with when the command does
+ * not say: physics_export_machining's own defaults. The server sends those on
+ * every export but none of them with physics_add_simulation, which left a
+ * simulation of "the export" planning two sides in hardwood while the export
+ * cut one in aluminium. Defaulting here, for both, keeps them one job.
+ */
+export const MCP_MACHINING_DEFAULTS = {
+  sides: 1,
+  material: 'aluminium',
+  toolDiaMm: 3,
+  finishingToolType: 'flat',
+} as const;
+
 /** The solid-machining job an MCP command plans. Shared by EXPORT_MACHINING and ADD_SIMULATION. */
 export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGraph) {
-  const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : 3;
+  const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : MCP_MACHINING_DEFAULTS.toolDiaMm;
   // Feeds, speeds and stepdowns worked out for the material and the
   // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
   // a wood recipe whatever material is named.
@@ -131,14 +145,15 @@ export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGr
     stockWidthMm: 0,
     stockDepthMm: 0,
     stockThicknessMm: 0,
-    ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
+    sides: typeof msg.sides === 'number' ? msg.sides : MCP_MACHINING_DEFAULTS.sides,
     ...(setups !== undefined ? { setups } : {}),
     ...(typeof msg.clearanceMm === 'number' ? { clearanceMm: msg.clearanceMm } : {}),
     ...(typeof msg.toolStickoutMm === 'number' ? { toolStickoutMm: msg.toolStickoutMm } : {}),
-    ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
-    ...(msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
-      ? { finishingToolType: msg.finishingToolType }
-      : {}),
+    material: typeof msg.material === 'string' ? msg.material : MCP_MACHINING_DEFAULTS.material,
+    finishingToolType:
+      msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
+        ? msg.finishingToolType
+        : MCP_MACHINING_DEFAULTS.finishingToolType,
     roughingToolDiaMm: dia,
     finishingToolDiaMm: dia,
   } as Parameters<typeof deriveSolidOptions>[1], motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y));
