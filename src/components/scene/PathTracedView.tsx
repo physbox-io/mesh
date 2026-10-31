@@ -475,7 +475,15 @@ function buildTracedScene(
   };
 
   for (const mesh of bodies) {
-    const material = mesh.material as THREE.MeshStandardMaterial;
+    let material = mesh.material as THREE.MeshStandardMaterial;
+    // Nothing in a scene is a lamp. Emissive is the raster view's selection
+    // tint (and a rope's glow); traced, it would be light, and the selected
+    // body would come out blue and cast blue on everything near it.
+    if (material.emissiveIntensity > 0 && material.emissive.getHex() !== 0) {
+      material = material.clone();
+      material.emissiveIntensity = 0;
+      instanceMaterials.push(material);
+    }
     const instanced = mesh as THREE.InstancedMesh;
     if (!instanced.isInstancedMesh) {
       place(withRgbaColors(mesh.geometry), material, mesh.matrixWorld);
