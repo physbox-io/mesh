@@ -556,3 +556,24 @@ describe('the sand rig on the print bed', () => {
   });
 });
 
+
+describe('a parting height on a model drafted by Prepare for Casting', () => {
+  const prepped = {
+    ...latticeBracketPreset,
+    castPrep: { draftDeg: 2, draftMode: 'add', partingZ: 0, edges: null, method: 'sand', originals: {}, skipped: [] },
+  } as unknown as SceneGraph;
+  const auto = generateCastPattern(prepped, { metalId: 'aluminium' });
+
+  it('parts where the draft was tapered from, and says so, rather than where it was asked', () => {
+    expect(auto.success, auto.error).toBe(true);
+    const asked = auto.summary.partingFromBaseMm + 20;
+    const r = generateCastPattern(prepped, { metalId: 'aluminium', partingFromBaseMm: asked });
+    expect(r.summary.partingFromBaseMm).toBeCloseTo(auto.summary.partingFromBaseMm, 6);
+    expect(r.warnings.some((w) => /Prepare for Casting drafted the walls/.test(w))).toBe(true);
+  });
+
+  it('says nothing when the height asked is the prepared one', () => {
+    const r = generateCastPattern(prepped, { metalId: 'aluminium', partingFromBaseMm: auto.summary.partingFromBaseMm });
+    expect(r.warnings.some((w) => /Prepare for Casting drafted the walls/.test(w))).toBe(false);
+  });
+});

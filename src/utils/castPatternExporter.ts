@@ -568,10 +568,16 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // scan costs one pass over an already-sampled grid.
   let parting: number;
   const preppedDraft = scene.castPrep && scene.castPrep.draftDeg > 0 ? scene.castPrep : null;
-  if (opts.partingFromBaseMm === 'auto' && preppedDraft) {
+  if (preppedDraft) {
     // The walls were tapered away from one plane; parting anywhere else puts
     // the drafted walls the wrong way round on one side of it.
     parting = Math.min(partH, Math.max(0, preppedDraft.partingZ * 1000 - mnZ));
+    if (opts.partingFromBaseMm !== 'auto' && !lostPla && Math.abs(opts.partingFromBaseMm - parting) > 0.05) {
+      warnings.push(
+        `Parted at ${parting.toFixed(1)} mm above the base, not ${opts.partingFromBaseMm} mm: Prepare for Casting ` +
+          `drafted the walls from there, so prepare again at the height you want.`,
+      );
+    }
   } else if (opts.partingFromBaseMm === 'auto') {
     parting = 0;
     let bestTrapped = trappedAt(0);
