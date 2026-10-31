@@ -434,12 +434,32 @@ export const viewCommands: McpCommands = {
      * frames of empty floor, with the model sitting in the scene the whole
      * time.
      */
-    // The collider overlay, for this frame only: switched, given two
-    // frames to mount and track its bodies, and put back afterwards.
+    // The view modes, for this frame only: each override is switched, given
+    // two frames to mount (the collider overlay has bodies to track), and put
+    // back afterwards. Edges is on by default, and an agent that is not told
+    // so reads its ink lines — specks on fine detail — as holes or stray
+    // geometry, so the reply always says which modes drew the frame.
     const viewQuality = useViewQuality.getState();
-    const restoreColliders = viewQuality.showColliders;
-    if (typeof msg.showColliders === 'boolean' && msg.showColliders !== restoreColliders) {
-      viewQuality.setShowColliders(msg.showColliders);
+    const before = {
+      colliders: viewQuality.showColliders,
+      edges: useStore.getState().showEdges,
+      wireframe: useStore.getState().wireframe,
+    };
+    const wanted = {
+      colliders: typeof msg.showColliders === 'boolean' ? msg.showColliders : before.colliders,
+      edges: typeof msg.showEdges === 'boolean' ? msg.showEdges : before.edges,
+      wireframe: typeof msg.wireframe === 'boolean' ? msg.wireframe : before.wireframe,
+    };
+    const apply = (v: typeof before) => {
+      if (useViewQuality.getState().showColliders !== v.colliders) useViewQuality.getState().setShowColliders(v.colliders);
+      const s = useStore.getState();
+      if (s.showEdges !== v.edges) s.toggleShowEdges();
+      if (s.wireframe !== v.wireframe) s.toggleWireframe();
+    };
+    const overridden = wanted.colliders !== before.colliders
+      || wanted.edges !== before.edges || wanted.wireframe !== before.wireframe;
+    if (overridden) {
+      apply(wanted);
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     }
 
@@ -447,8 +467,18 @@ export const viewCommands: McpCommands = {
     renderViewportNow();
 
     const dataUrl = gl.domElement.toDataURL('image/png');
-    if (useViewQuality.getState().showColliders !== restoreColliders) {
-      useViewQuality.getState().setShowColliders(restoreColliders);
+    if (overridden) apply(before);
+
+    const ink = document.documentElement.classList.contains('dark') ? 'white' : 'black';
+    const notes: string[] = [];
+    if (wanted.edges) {
+      notes.push(`Edges view is on: the thin ${ink} lines along corners, and ${ink} specks on fine detail (text, patterns, sculpted creases, small holes), are ink lines drawn on edges sharper than 20-30 degrees, not geometry or defects. Pass show_edges: false for a frame without them.`);
+    }
+    if (wanted.wireframe) {
+      notes.push('Wireframe view is on: bodies are drawn as their triangle edges, see-through, not as shaded solids. Pass wireframe: false for a shaded frame.');
+    }
+    if (wanted.colliders) {
+      notes.push('Collider overlay is on: coloured outlines are what the physics collides, drawn over the bodies.');
     }
     return {
       ok: true,
@@ -458,6 +488,8 @@ export const viewCommands: McpCommands = {
       // Says whether the frame was drawn to order or is whatever the
       // canvas happened to be holding.
       rendered: Boolean(win._physics_scene && win._physics_camera),
+      view: wanted,
+      ...(notes.length ? { note: notes.join(' ') } : {}),
     };
   },
   GET_NOTE_CARDS: async () => {
