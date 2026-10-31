@@ -13,17 +13,19 @@
 //   voids into disconnected components, and selecting the primary casting cavity
 //   (discarding alignment pin-socket clearance gaps and outer pry notches).
 //
+// A mold whose surface will not close even after welding seams is refused:
+// repairing it here changes the mold, and the casting with it.
+//
 // Fallback Path:
 //   Exact ray column spans (castColumnSpans) + dual contouring / surface nets
-//   (meshField) if non-manifold or open geometry cannot be converted to Manifold.
+//   (meshField) if the Manifold CSG itself fails.
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
 import type { Manifold as ManifoldT, ManifoldToplevel } from 'manifold-3d';
 import type { SceneNode } from '../types/scene';
 import type { SurfaceTexture } from './surfaceTexture';
-import { loadManifold, toManifold } from './sculptCut';
-import { createSculptMesh } from './sculptMesh';
+import { loadManifold } from './sculptCut';
 import { manifoldToMeshMm } from './timberBreakdown';
 import { castColumnSpans, type ColumnGrid } from './columnSolid';
 import { meshField } from './multiSetupMesh';
@@ -31,7 +33,7 @@ import type { IndexedMesh } from './stlMesh';
 import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform, getGeomFrame } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
-import { repairMesh } from './meshRepair';
+import { analyzeMesh } from './meshIntegrity';
 import type { MoldExportResult, MoldSummary } from './moldExporter';
 import { unrotateFromPull } from './moldPullDirection';
 import { pourIntoCavity, probeFacesTouched, type PourInfo, type PourOptions } from './pourCast';
@@ -84,6 +86,8 @@ export type InternalCastOptions = MoldCastSimulationOptions & {
   halves?: (Float64Array | number[])[];
   negativeHalves?: (Float64Array | number[])[];
   rawTextures?: RawMoldTexture[];
+  /** The mold body's name, for a refusal. */
+  moldName?: string;
 };
 
 /**
@@ -308,6 +312,7 @@ export async function simulateCastFromMoldNode(
     halves: geomShellsMm.length > 0 ? geomShellsMm : undefined,
     negativeHalves: negativeShellsMm.length > 0 ? negativeShellsMm : undefined,
     rawTextures: rawTextures.length > 0 ? rawTextures : undefined,
+    moldName: node.name,
   });
   if (warnings.length > 0) {
     res.warnings.push(...warnings);
@@ -630,57 +635,43 @@ export async function simulateCastFromMoldTriangles(
     const wasm = await loadManifold();
     const probeBox = wasm.Manifold.cube([boxW, boxD, boxH], false).translate([boxMinX, boxMinY, boxMinZ]);
 
-    // Convert mold shells to Manifold (trying exact vertex welding first so fine
-    // boolean meshes never have sub-millimetre intersection edges collapsed, then
-    // falling back to 0.01 mm seam welding and full meshRepair if needed)
-    const convertSoupToManifold = (soup: ArrayLike<number>): ManifoldT | null => {
-      // Pass 1: exact coordinate welding (quantum = 0) for clean indexed meshes
-      const exact = weldTriangles(soup, 0);
-      if (exact.faces.length >= 12) {
-        try {
-          const direct = new wasm.Manifold(
-            new wasm.Mesh({
-              numProp: 3,
-              vertProperties: exact.positions,
-              triVerts: exact.faces,
-            }),
-          );
-          if (direct.status() === 'NoError' && !direct.isEmpty()) {
-            return direct;
-          }
-          direct.delete();
-        } catch {
-          // Fall through to tolerance welding / repair
-        }
-      }
-
-      // Pass 2: 0.01 mm tolerance welding (heals float32 STL seam cracks)
-      const { positions, faces } = weldTriangles(soup, 0.01);
+    // Convert mold shells to Manifold: exact vertex welding first, so fine
+    // boolean meshes never have sub-millimetre intersection edges collapsed,
+    // then 0.01 mm seam welding. Neither fills a hole.
+    const closedSolid = (positions: Float32Array, faces: Uint32Array): ManifoldT | null => {
       if (faces.length < 12) return null;
-      const sMesh = createSculptMesh(positions, faces);
-      const mRes = toManifold(wasm, sMesh);
-      if (mRes.ok) return mRes.manifold;
+      try {
+        const m = new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: positions, triVerts: faces }));
+        if (m.status() === 'NoError' && !m.isEmpty()) return m;
+        m.delete();
+      } catch {
+        // Not a closed solid.
+      }
+      return null;
+    };
+    // Why the last shell that would not close did not, for the refusal.
+    let unsolidShell: string | undefined;
+    const convertSoupToManifold = (soup: ArrayLike<number>): ManifoldT | null => {
+      const exact = weldTriangles(soup, 0);
+      const direct = closedSolid(exact.positions, exact.faces);
+      if (direct) return direct;
+      // Heals float32 STL seam cracks.
+      const { positions, faces } = weldTriangles(soup, 0.01);
+      const welded = closedSolid(positions, faces);
+      if (welded) return welded;
+      if (faces.length < 12) return null;
 
-      // Pass 3: full meshRepair (spatial-hash welding, non-manifold ear removal, hole filling)
-      const repaired = repairMesh(Array.from(positions), Array.from(faces), {
-        weldTolerance: 0.02,
-        fillHoles: true,
-        fixWinding: true,
-      });
-      if (repaired.faces.length < 12) {
-        warnings.push(`Mold shell manifold warning: ${mRes.error}`);
-        return null;
-      }
-      const rMesh = createSculptMesh(
-        new Float32Array(repaired.positions),
-        new Uint32Array(repaired.faces),
-      );
-      const rRes = toManifold(wasm, rMesh);
-      if (rRes.ok) {
-        warnings.push('Auto-repaired non-manifold mold shell before 3D CSG.');
-        return rRes.manifold;
-      }
-      warnings.push(`Mold shell manifold warning: ${rRes.error}`);
+      // A shell that closes only by cutting out what will not weld and capping
+      // the holes flat is a different mold: a cap across a core let the pour
+      // into it and the casting came back with a floor. So it is refused, with
+      // what is wrong, rather than cast.
+      const integrity = analyzeMesh(positions, faces);
+      const open = (integrity?.boundaryEdges ?? 0) + (integrity?.nonManifoldEdges ?? 0);
+      unsolidShell ??= open > 0
+        ? `${open.toLocaleString()} of its edges are open or shared by more than two faces`
+        : integrity && !integrity.consistentlyWound
+        ? 'its faces are not all wound the same way'
+        : 'its surface cannot be read as a solid';
       return null;
     };
 
@@ -694,11 +685,14 @@ export async function simulateCastFromMoldTriangles(
     }
 
     if (shells.length === 0) {
+      // None closed apart; the whole may, or its two sides cut at the parting plane.
+      unsolidShell = undefined;
       const m = convertSoupToManifold(trisMm);
       if (m) {
         shells.push(m);
       } else if (options?.isClamshell && options?.partingZ !== undefined) {
         // Try splitting by parting plane
+        unsolidShell = undefined;
         const pZ = options.partingZ;
         const bot: number[] = [];
         const top: number[] = [];
@@ -713,6 +707,21 @@ export async function simulateCastFromMoldTriangles(
           if (pm) shells.push(pm);
         }
       }
+    }
+
+    if (unsolidShell) {
+      for (const shell of shells) shell.delete();
+      probeBox.delete();
+      return {
+        success: false,
+        error: `${options?.moldName ?? 'The mold'} is not a closed solid: ${unsolidShell}, so what it would cast cannot be worked out. ` +
+          'Repair it (Repair Mesh) and check the result, or make the mold again.',
+        warnings,
+        mesh: { positions: new Float32Array(0), faces: new Uint32Array(0) },
+        castVolumeMm3: 0,
+        sizeMm: { width: 0, depth: 0, height: 0 },
+        cavityComponents: 0,
+      };
     }
 
     if (shells.length > 0) {
