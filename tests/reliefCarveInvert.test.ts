@@ -78,3 +78,51 @@ describe('Relief Inversion (Cameo -> Intaglio)', () => {
     }
   });
 });
+
+// A low box, smaller than the stock, cut as modelled: the case where a cameo
+// is told to set Background to Carve to cut the board round it down.
+const smallBox = bodyWith({ type: 'box', size: [0.02, 0.02, 0.003] }, [0, 0, 0.003]);
+
+describe('Intaglio ignores the cameo-only options, and says so honestly', () => {
+  it('does not advise Background: Carve, which an intaglio never reads', () => {
+    const result = generateReliefCarveGcode(smallBox, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      verticalScaleMode: 'model',
+      backgroundMode: 'skip',
+      stockWidthMm: 80,
+      stockDepthMm: 80,
+      roughingEnabled: false,
+      invertRelief: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.warnings.join(' ')).not.toMatch(/Set Background to Carve/);
+    // Background is the stock face around the impression, whatever was asked.
+    const carved = generateReliefCarveGcode(smallBox, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      verticalScaleMode: 'model',
+      backgroundMode: 'carve',
+      stockWidthMm: 80,
+      stockDepthMm: 80,
+      roughingEnabled: false,
+      invertRelief: true,
+    });
+    expect(carved.gcode).toBe(result.gcode);
+  });
+
+  it('does not cut an intaglio through the board, and says Cut Through was not used', () => {
+    const result = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      carveDepthMm: 10,
+      stockWidthMm: 120,
+      stockDepthMm: 120,
+      roughingEnabled: false,
+      invertRelief: true,
+      cutThroughMm: 0.3,
+    });
+    expect(result.success).toBe(true);
+    const text = result.warnings.join(' ');
+    expect(text).not.toMatch(/Cuts through the/);
+    expect(text).toMatch(/Cut Through/);
+    expect(Math.min(...zCutValues(result.gcode))).toBeGreaterThanOrEqual(-(18 - 1) - 0.01);
+  });
+});

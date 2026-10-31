@@ -156,7 +156,8 @@ export interface ReliefCarveOptions {
    * background down to the floor so the model stands proud of it; 'skip' leaves
    * it at full stock height and only cuts where the model actually dips.
    * 'auto' is 'skip' for a model cut at its own size (the stock round it is
-   * the stock, not part of the design) and 'carve' otherwise.
+   * the stock, not part of the design) and 'carve' otherwise. Cameo only: an
+   * intaglio leaves the stock round its impression at full height.
    */
   backgroundMode: 'carve' | 'skip' | 'auto';
   /**
@@ -166,7 +167,8 @@ export interface ReliefCarveOptions {
    * With it set, the relief goes the stock's full thickness plus this, and
    * the holes in the model -- the places inside its footprint with no surface
    * at all -- are cut to that floor whatever `backgroundMode` says, since a
-   * hole is the point of a through-cut and not background.
+   * hole is the point of a through-cut and not background. Cameo only: an
+   * intaglio ignores it, with a warning.
    */
   cutThroughMm?: number;
   /**
@@ -4427,7 +4429,13 @@ export function generateReliefCarveGcode(
   // millimetre of slack absorbs a generated board's sub-cell rounding.
   const OVERHANG_SLACK_MM = 0.5;
   const footprintFits = modelW <= stockW + OVERHANG_SLACK_MM && modelD <= stockD + OVERHANG_SLACK_MM;
-  const cutThrough = Math.max(0, opts.cutThroughMm ?? 0);
+  // An intaglio's holes are where the model has nothing, so its cast has
+  // nothing there either and the mold stays solid; through-cutting it would
+  // only punch the model's peaks out of the back. Cut Through is a cameo's.
+  const cutThrough = opts.invertRelief ? 0 : Math.max(0, opts.cutThroughMm ?? 0);
+  if (opts.invertRelief && (opts.cutThroughMm ?? 0) > 0) {
+    warnings.push('Cut Through applies only to a raised (cameo) relief, so this intaglio keeps 1 mm under its deepest cut.');
+  }
   const maxDepthForStock = Math.max(0.1, opts.stockThicknessMm - 1);
 
   // Model centre lands on the stock centre; the model's highest point lands on
@@ -4647,7 +4655,9 @@ export function generateReliefCarveGcode(
 
   const backgroundMode =
     opts.backgroundMode === 'auto' ? (asModelled ? 'skip' : 'carve') : opts.backgroundMode;
-  if (asModelled && backgroundMode === 'skip' && (modelW < stockW - 1 || modelD < stockD - 1)) {
+  // An intaglio has no background to carve: round the impression is the
+  // stock face, the model's lowest level, whatever Background says.
+  if (!opts.invertRelief && asModelled && backgroundMode === 'skip' && (modelW < stockW - 1 || modelD < stockD - 1)) {
     warnings.push(
       `The model (${modelW.toFixed(1)} x ${modelD.toFixed(1)} mm) is smaller than the stock, and the board ` +
         `round it is left uncut. Set Background to Carve to cut it down to the floor.`

@@ -76,7 +76,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
       stockThicknessMm: stock.thicknessMm,
     },
     (o) =>
-      (o.cutThroughMm ?? 0) > 0
+      (o.cutThroughMm ?? 0) > 0 && !o.invertRelief
         ? o.stockThicknessMm + (o.cutThroughMm ?? 0)
         : Math.min(o.carveDepthMm, Math.max(0.1, o.stockThicknessMm - 1))
   );
@@ -388,6 +388,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 )}
               </Field>
 
+              {/* Background and Cut Through are a raised relief's: an intaglio
+                  leaves the stock round its impression whole and is never cut
+                  through, so they are not offered with it. */}
+              {!options.invertRelief && (<>
               <Field
                 className="lg:col-span-2"
                 hintAlign="end"
@@ -453,6 +457,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   </Field>
                 </>
               )}
+              </>)}
 
               <Field
                 className="lg:col-span-2"
