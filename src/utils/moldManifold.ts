@@ -65,13 +65,23 @@ export function manifoldToTriangles(m: Manifold): Triangle3D[] {
   return tris;
 }
 
+/**
+ * The part as one Manifold solid, or the solids (by id) that no repair could
+ * close. All or nothing: a mold cut from the bodies that did close would be
+ * missing the others, and a lined mold would fill their space with PVA.
+ */
+export interface PartManifold {
+  part: Manifold | null;
+  unsolid: number[];
+}
+
 export function buildPartManifold(
   wasm: ManifoldToplevel,
   tris: Float64Array,
   solidIds?: number[]
-): Manifold | null {
+): PartManifold {
   const triCount = tris.length / 9;
-  if (triCount === 0) return null;
+  if (triCount === 0) return { part: null, unsolid: [] };
 
   const groups = new Map<number, number[]>();
   for (let t = 0; t < triCount; t++) {
@@ -86,7 +96,8 @@ export function buildPartManifold(
 
   let combined: Manifold | null = null;
 
-  for (const triIndices of groups.values()) {
+  const unsolid: number[] = [];
+  for (const [sid, triIndices] of groups) {
     const vMap = new Map<string, number>();
     const positions: number[] = [];
     const faces: number[] = [];
@@ -170,7 +181,10 @@ export function buildPartManifold(
       }
     }
 
-    if (!solidManifold) continue;
+    if (!solidManifold) {
+      unsolid.push(sid);
+      continue;
+    }
 
     if (!combined) {
       combined = solidManifold;
@@ -182,11 +196,25 @@ export function buildPartManifold(
     }
   }
 
-  if (combined && combined.status() === 'NoError' && !combined.isEmpty()) {
-    return combined;
+  if (unsolid.length === 0 && combined && combined.status() === 'NoError' && !combined.isEmpty()) {
+    return { part: combined, unsolid };
   }
   combined?.delete();
-  return null;
+  return { part: null, unsolid };
+}
+
+/**
+ * Why the part could not be made solid, naming the bodies that would not close
+ * when there are any; `what` is the mold that needed it.
+ */
+export function unsolidPartRefusal(unsolid: number[], solidNames: string[] | undefined, what: string): string {
+  const names = [...new Set(unsolid.map((sid) => solidNames?.[sid]).filter((n): n is string => Boolean(n)))];
+  if (names.length === 0) return `The part could not be made into a solid for ${what}; repair the mesh and try again.`;
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  return (
+    `${list} ${names.length === 1 ? 'is' : 'are'} not a closed solid even after repair, so ${what} cannot hold ` +
+    `${names.length === 1 ? 'it' : 'them'}; repair the mesh or delete ${names.length === 1 ? 'it' : 'them'} and try again.`
+  );
 }
 
 /**

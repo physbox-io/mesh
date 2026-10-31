@@ -31,6 +31,7 @@ import type { Grid, ColumnField } from './moldColumns';
 import {
   boundsOf,
   buildPartManifold,
+  unsolidPartRefusal,
   exportBinarySTL,
   manifoldToTriangles,
   type Mat4Tuple,
@@ -477,8 +478,8 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const { wasm, opts, warnings } = ctx;
   const fail = (error: string) => ({ error });
 
-  const rawPart = buildPartManifold(wasm, ctx.tris, ctx.solidIds);
-  if (!rawPart) return fail('The part could not be made into a solid for the liner; repair the mesh and try again.');
+  const { part: rawPart, unsolid } = buildPartManifold(wasm, ctx.tris, ctx.solidIds);
+  if (!rawPart) return fail(unsolidPartRefusal(unsolid, ctx.solidNames, 'the liner'));
   const castVolumeMl = rawPart.volume() / 1000;
 
   const material = castMaterialCheck(ctx.castMaterial, castVolumeMl);

@@ -19,7 +19,7 @@
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import type { ManifoldToplevel, Manifold } from 'manifold-3d';
-import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, type Mat4Tuple, type Triangle3D } from './moldManifold';
+import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, unsolidPartRefusal, type Mat4Tuple, type Triangle3D } from './moldManifold';
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
 import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
@@ -672,6 +672,8 @@ export interface CsgContext {
   wasm: ManifoldToplevel;
   tris: Float64Array;
   solidIds: number[];
+  /** The body each solid id belongs to, for naming one that will not close. */
+  solidNames: string[];
   partingZ: number;
   detailIsAbove: boolean;
   moldWidthMm: number;
@@ -702,9 +704,9 @@ export interface CsgContext {
   rawLidDepth: Float64Array;
 }
 
-function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
+function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
   const {
-    wasm, tris, solidIds, partingZ, detailIsAbove,
+    wasm, tris, solidIds, solidNames, partingZ, detailIsAbove,
     moldWidthMm, moldDepthMm, partHeightMm, rawCavityDepthMm,
     opts, baseFeatures, lidFeatures,
     baseBlockHeight, lidBlockHeight,
@@ -714,8 +716,8 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
     warnings,
   } = ctx;
 
-  const rawPartManifold = buildPartManifold(wasm, tris, solidIds);
-  if (!rawPartManifold) return null;
+  const { part: rawPartManifold, unsolid } = buildPartManifold(wasm, tris, solidIds);
+  if (!rawPartManifold) return { error: unsolidPartRefusal(unsolid, solidNames, 'the undercut-keeping mold') };
 
   const mw2 = moldWidthMm / 2;
   const md2 = moldDepthMm / 2;
@@ -1095,7 +1097,7 @@ export function generateMoldMeshes(
   const activeWasm = wasm ?? null;
 
   // Extract all world triangles in scene space (metres)
-  const { tris: sceneTris, solidIds: sceneSolidIds, warnings: sceneWarnings } = collectSceneTriangles(scene);
+  const { tris: sceneTris, solidIds: sceneSolidIds, solidNames: sceneSolidNames, warnings: sceneWarnings } = collectSceneTriangles(scene);
   if (sceneWarnings?.length) warnings.push(...sceneWarnings);
 
   if (!sceneTris || sceneTris.length === 0) {
@@ -1410,8 +1412,11 @@ export function generateMoldMeshes(
   const lidBlockHeight = lidTrueDepth + opts.baseThicknessMm;
 
   const lidIsBackingPlate = Math.min(volBelow, volAbove) < 1e-6;
-  const useExactCsg = Boolean(!opts.dissolvableLiner && activeWasm && opts.allowUndercuts && undercutColumns > 0);
+  const useExactCsg = Boolean(!opts.dissolvableLiner && opts.allowUndercuts && undercutColumns > 0);
   const effectiveFlexibleAdvised = flexibleMoldAdvised || useExactCsg;
+  // Undercuts are kept only by cutting the exact part out of the block; the
+  // depth-field mold below would fill them in, so without the engine say so.
+  if (useExactCsg && !activeWasm) return { ...emptyMoldResult(NO_MANIFOLD_REFUSAL), ...setupFields };
 
   // What a rigid mold fills in is shown, not warned about: the pull direction
   // is already the one that loses least, and Simulate Cast lets the user judge
@@ -1438,6 +1443,7 @@ export function generateMoldMeshes(
     setup: setupFields,
     tris,
     solidIds: sceneSolidIds ?? [],
+    solidNames: sceneSolidNames ?? [],
     partingZ,
     detailIsAbove,
     moldWidthMm,
@@ -1486,7 +1492,8 @@ export function generateMoldMeshes(
       flexibleMoldAdvised: effectiveFlexibleAdvised,
       warnings: [...warnings],
     });
-    if (csgRes) return csgRes;
+    // Not the depth-field mold instead: it fills in the undercuts that were asked to be kept.
+    return 'error' in csgRes ? { ...emptyMoldResult(csgRes.error), ...setupFields } : csgRes;
   }
 
   const base = buildHalf(grid, baseDepth, opts.baseThicknessMm, baseFeatures, baseTrueDepth);

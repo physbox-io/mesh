@@ -186,7 +186,7 @@ function flipWinding(tris: number[], from: number, to: number): void {
 
 const sceneTrianglesCache = new WeakMap<
   SceneGraph,
-  { tris: number[]; solidIds: number[]; skipped: string[]; warnings: string[] }
+  { tris: number[]; solidIds: number[]; solidNames: string[]; skipped: string[]; warnings: string[] }
 >();
 
 /** Said when a body's holes have never been evaluated: its cutters are dropped, so the solid is cut whole. */
@@ -202,6 +202,8 @@ export function collectSceneTriangles(scene: SceneGraph): {
   tris: number[];
   /** Which solid each triangle came from, one entry per triangle. */
   solidIds: number[];
+  /** The body each solid belongs to, indexed by solid id. */
+  solidNames: string[];
   skipped: string[];
   warnings: string[];
 } {
@@ -210,12 +212,14 @@ export function collectSceneTriangles(scene: SceneGraph): {
     return {
       tris: cached.tris,
       solidIds: cached.solidIds,
+      solidNames: cached.solidNames,
       skipped: [...cached.skipped],
       warnings: [...cached.warnings],
     };
   }
   const tris: number[] = [];
   const solidIds: number[] = [];
+  const solidNames: string[] = [];
   const skipped: string[] = [];
   const warnings: string[] = [];
   let solid = 0;
@@ -249,6 +253,7 @@ export function collectSceneTriangles(scene: SceneGraph): {
       }
       const added = (tris.length - before) / 9;
       for (let i = 0; i < added; i++) solidIds.push(solid);
+      solidNames.push(node.name);
       solid++;
     }
 
@@ -256,11 +261,12 @@ export function collectSceneTriangles(scene: SceneGraph): {
   };
 
   for (const root of scene.nodes) traverse(root);
-  const result = { tris, solidIds, skipped, warnings };
+  const result = { tris, solidIds, solidNames, skipped, warnings };
   sceneTrianglesCache.set(scene, result);
   return {
     tris,
     solidIds,
+    solidNames,
     skipped: [...skipped],
     warnings: [...warnings],
   };
