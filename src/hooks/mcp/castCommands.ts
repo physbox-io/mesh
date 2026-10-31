@@ -194,11 +194,15 @@ export const castCommands: McpCommands = {
       minWallMm: num(msg.minWallMm),
     }).filter(([, v]) => v !== undefined));
     const marginMm = num(msg.marginMm) ?? 5;
+    const placement = msg.placement === 'beside' ? 'beside' : msg.placement === undefined || msg.placement === 'replace' ? 'replace' : null;
+    if (!placement) return { ok: false, error: "placement is 'replace' or 'beside'." };
+    const maxSections = num(msg.maxSections);
     const { result, checks } = await splitOffThread(soups, {
       bed,
       marginMm,
       overhangDeg: filamentSpec(store.filament).maxOverhangDeg,
       joinery,
+      ...(maxSections !== undefined ? { maxSections } : {}),
     });
     if (!result.ok) return { ok: false, error: result.error };
 
@@ -221,7 +225,11 @@ export const castCommands: McpCommands = {
       }
     }
 
-    const ids = msg.apply === true ? store.splitBodyForPrint(node.id, result.sections, absorbed, { cutFor: { bed, marginMm } }) : null;
+    const ids = msg.apply === true
+      ? store.splitBodyForPrint(node.id, result.sections, absorbed, {
+        cutFor: { bed, marginMm }, placement, ...(msg.centerOrigin === true ? { centerOrigin: true } : {}),
+      })
+      : null;
     const round = (v: number, d = 1) => +v.toFixed(d);
     return {
       ok: true,

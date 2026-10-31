@@ -545,22 +545,32 @@ joinery on the cut faces. The bed is a workshop setting beside the stock (`store
   metres; `bodySoups` in `printSplitClient.ts` collects them) and works in millimetres in Manifold.
   `workers/printSplitWorker.ts` runs it, and `tests/printSplit.test.ts` runs it directly.
 * **Which way up.** `bestPose` tries the six axes, the piece's cut faces and its 24 largest hull
-  faces. It finds the footprint by rotating calipers and costs a pose by `supportArea`, which lives in
+  faces. It finds the footprint by rotating calipers, and when no edge-square turn fits it tries every
+  half degree, so a long bar can lie corner to corner. It costs a pose by `supportArea`, which lives in
   `utils/printSupport.ts` so the DFM lens measures support the same way.
 * **Where to cut.** A piece with no pose that fits is cut in two. Planes square to the world axes and
-  to its principal axes are tried at the first of n even slabs, ±15%. A sliver (under 2% of the
-  piece) is refused, and a face too thin to glue is heavily penalised. The fewest predicted sections
-  wins, then the least support and the smallest seam, then the cut nearest the even split.
+  to its principal axes are tried at the first of n even slabs, ±15%, with n taken from each of the
+  bed's side lengths in turn. A sliver (under 2% of the piece) is refused, and a face too thin to glue
+  is heavily penalised. The fewest predicted sections wins, then the least support and the smallest
+  seam, then the cut nearest the even split. The prediction takes the piece's box square to the world
+  or to its principal axes, whichever is tighter, matched to the bed's sides whichever way needs fewest.
 * **Joinery goes on per joint.** A joint is the patch of a cut plane two final sections actually
   share; an early cut is later cut again. Pins go as deep in the patch as they fit, two when it is
-  wider than four diameters. Pegs go on whichever side's pose minds them least, measured on the real
-  geometry, which is what keeps a section from being printed standing on its pegs.
+  wider than four diameters, and only where both sections are solid behind the face to a hole's
+  bottom and a wall past it (`backedRegion`). Pegs go on whichever side's pose minds them least,
+  measured on the real geometry, which is what keeps a section from being printed standing on its
+  pegs. A joint where pegs would stand either side off the bed gets holes both sides, for a dowel.
 * **What the scene gets.** `splitBodyForPrint` keeps the body's id for section 1 and adds siblings
   `<name>_part2`… Each section has one mesh geom with `colliderVertices`/`colliderFaces`, which hold the
   section before its holes and pegs, plus `contactClass` pin and socket geoms, and `printPose` on the
-  node. Recipe fields (wedge, lattice, sculpt, CSG, roundings) are dropped, because the sections are
-  the geometry now. The 3MF export offers to stand posed sections the way they print and pack them
-  on the bed (`layoutOnBed` in `utils/printPlate.ts`), with no size prompt.
+  node, with the bed and margin it was cut for. Recipe fields (wedge, lattice, sculpt, CSG, roundings)
+  are dropped, because the sections are the geometry now. A body that fits whole is not rebuilt: it
+  only gets its `printPose`. Sections are in the part's colour, with its paint and its other geoms'
+  colours laid on as paint (`utils/sectionPaint.ts`). Jointed or bought-in bodies hung off an
+  absorbed body are re-hung from the section they sit in, and welds to them retargeted. The 3MF
+  export offers to stand posed sections the way they print and pack them on the bed
+  (`layoutOnBed` in `utils/printPlate.ts`) inside the margin they were split with, with no size
+  prompt; Export STL offers a file each, stood the same way.
 
 **Print fidelity** (`sceneGraph.simFidelity: 'print'`, the Environment panel's switch, or
 `physics_set_environment(fidelity)`) is generic, not specific to the split:
