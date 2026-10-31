@@ -206,6 +206,19 @@ describe('splitForPrint — joinery', () => {
     expect(r.warnings.join(' ')).toMatch(/holes on both sides for a loose/);
   });
 
+  it('drills no hole where the section behind the face is too thin to hold it', () => {
+    // A 40 mm square face, but 3 mm behind it the pos side steps down to an
+    // 8 mm strip: a 10.5 mm hole there would come out through the step.
+    const step = [box(150, 40, 40), box(3, 40, 40, [150, 0, 0]), box(147, 40, 8, [153, 0, 16])];
+    const r = ok(splitForPrint(wasm, step, { bed: bed200, joinery: { kind: 'dowel' } }));
+    const at150 = r.joints.filter((j) => Math.abs(r.cuts[j.cut].offset * 1000 - 150) < 1e-6);
+    expect(at150).toHaveLength(1);
+    expect(at150[0].pins).toHaveLength(0);
+    // The same part without the step is pinned there.
+    const solid = ok(splitForPrint(wasm, [box(300, 40, 40)], { bed: bed200, joinery: { kind: 'dowel' } }));
+    expect(solid.joints[0].pins.length).toBeGreaterThan(0);
+  });
+
   it('warns instead of placing a pin where the face is too thin for one', () => {
     const r = ok(splitForPrint(wasm, [box(300, 8, 100)], { bed: bed200, joinery: { kind: 'dowel' } }));
     expect(r.sections.length).toBeGreaterThanOrEqual(2);

@@ -813,6 +813,29 @@ function clearOfHoles(
   return all;
 }
 
+/**
+ * Where on a joint's face (plane coordinates) both sections are solid all the
+ * way to a hole's bottom and a wall past it: the face says nothing about what
+ * is behind it, and a hole drilled into a shell, a taper or the step behind a
+ * flange came out through the far wall. Read as slices a millimetre or so
+ * apart, intersected; placePins then keeps the hole a wall's width inside it.
+ */
+function backedRegion(n: Vec3, offset: number, neg: Manifold, pos: Manifold, j: Joinery): CrossSection {
+  const reach = j.lengthMm / 2 + HOLE_EXTRA_MM + j.minWallMm;
+  const K = Math.max(2, Math.ceil(reach));
+  let region: CrossSection | null = null;
+  for (const [m, sign] of [[neg, -1], [pos, 1]] as const) {
+    for (let k = 1; k <= K; k++) {
+      const cs = sliceAt(m, n, offset + sign * (reach * k) / K);
+      if (!region) { region = cs; continue; }
+      const next: CrossSection = region.intersect(cs);
+      region.delete(); cs.delete();
+      region = next;
+    }
+  }
+  return region!;
+}
+
 /** A cylinder along `axis` from `start` for `length`, radius r1 at the start and r2 at the end. */
 function cylinderAlong(wasm: ManifoldToplevel, start: Vec3, axis: Vec3, length: number, r1: number, r2 = r1): Manifold {
   const c = wasm.Manifold.cylinder(length, r1, r2, PIN_SEGMENTS);
@@ -1192,15 +1215,19 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
         { section: joint.neg, inward: neg3(n) },
         { section: joint.pos, inward: n },
       ], drilled, joinery);
+      const backed = backedRegion(n, o, plain[joint.neg], plain[joint.pos], joinery);
       for (const whole of parts) {
         if (whole.area() >= MIN_JOINT_AREA_MM2) {
-          const part = clear ? whole.subtract(clear) : whole;
+          const solid = whole.intersect(backed);
+          const part = clear ? solid.subtract(clear) : solid;
           centres.push(...placePins(part, joinery));
-          if (part !== whole) part.delete();
+          if (part !== solid) part.delete();
+          solid.delete();
         }
         whole.delete();
       }
       clear?.delete();
+      backed.delete();
       if (!centres.length) return;
       const at = centres.map(([x, y]) => fromPlane(n, o, x, y));
       joint.pins = at.map((p) => scale3(p, 1 / MM));
