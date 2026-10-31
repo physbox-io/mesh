@@ -23,6 +23,7 @@ import type { SceneNode } from '../types/scene';
 import { useStore } from '../store/useStore';
 import { physicsGlobals } from '../physicsGlobals';
 import { withUniqueNames } from '../utils/uniqueNames';
+import { castMaterial, resolveCastMaterial } from '../utils/castMaterials';
 
 export interface AddSimulationRequest {
   /**
@@ -112,6 +113,9 @@ export async function addSimulationToScene(
   // Named here as the store would rename it on the way in, so the card and
   // the caller have the name it ends up with.
   if (req.material && node.simulation) node.simulation = { ...node.simulation, material: req.material };
+  // Drawn in what it was poured in: a clear epoxy see-through, bronze bronze.
+  const poured = resolveCastMaterial(req.material);
+  if (poured) node.geoms = node.geoms?.map((g) => ({ ...g, rgba: [...castMaterial(poured).rgba] }));
   const named = withUniqueNames({ ...store.sceneGraph, nodes: [...store.sceneGraph.nodes, node] });
   const name = named.nodes[named.nodes.length - 1].name;
   store.addHardwareComponentNode({ ...node, name }, { select: req.select !== false });

@@ -19,6 +19,19 @@ describe('the material list', () => {
     }
   });
 
+  it('gives every entry a colour, see-through only for what is clear', () => {
+    for (const m of CAST_MATERIALS) {
+      expect(m.rgba, m.id).toHaveLength(4);
+      for (const c of m.rgba) expect(c >= 0 && c <= 1, m.id).toBe(true);
+      // Alpha 0 draws nothing at all.
+      expect(m.rgba[3], m.id).toBeGreaterThan(0.2);
+    }
+    const alpha = (id: string) => CAST_MATERIALS.find((m) => m.id === id)!.rgba[3];
+    expect(alpha('epoxy')).toBeLessThan(0.5);
+    expect(alpha('water')).toBeLessThan(0.5);
+    for (const opaque of ['plaster', 'concrete', 'bronze', 'chocolate']) expect(alpha(opaque), opaque).toBe(1);
+  });
+
   it('gives every metal what a pattern needs', () => {
     expect(CAST_METALS.map((m) => m.id)).toEqual(['aluminium', 'brass', 'bronze', 'silver']);
     for (const m of CAST_METALS) {

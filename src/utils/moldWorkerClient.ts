@@ -618,6 +618,7 @@ export async function runMcpMoldSimulation(params: {
       kind: 'cast',
       label: 'Mold cast',
       placement,
+      ...(msg.castMaterial !== undefined && moldOpts.castMaterial ? { material: moldOpts.castMaterial } : {}),
       details: [
         `Cast dimensions: ${castRes.sizeMm.width} × ${castRes.sizeMm.depth} × ${castRes.sizeMm.height} mm`,
         `Mold type: ${moldRes.moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
