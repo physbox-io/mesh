@@ -5,7 +5,8 @@
 
 import * as THREE from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
-import { nodeWorldMatrix } from '../utils/combineBodies';
+import { getNodeWorldTransform } from '../utils/laserCutExporter';
+import { isNodeRotationBaked } from '../utils/sceneTree';
 import { colliderTemplateOf, hullsToColliderGeoms, meshVolumeAndCentroid, statedBooleanMass, usableColliderHulls } from '../utils/csg';
 import { collisionHashOf } from '../utils/convexDecomposition';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
@@ -61,14 +62,41 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       const first = findNode(newScene.nodes, nodeId);
       if (!first) return [nodeId];
 
-      const solid = (first.geoms || []).filter((g: SceneGeom) =>
+      // Every body's world frame before the change, by the rule the soups were
+      // taken with (a baked rotation is in the vertices, not the frame).
+      const worlds = new Map<string, THREE.Matrix4>();
+      const walkWorlds = (list: SceneNode[], parent?: THREE.Matrix4) => {
+        for (const n of list) {
+          const world = getNodeWorldTransform(n, parent);
+          worlds.set(n.id, world);
+          walkWorlds(n.children || [], world);
+        }
+      };
+      walkWorlds(get().sceneGraph.nodes);
+      const intoPart = (worlds.get(nodeId) ?? new THREE.Matrix4()).clone().invert();
+
+      // The part is this body and the ones absorbed into it: a bare root holding
+      // its panels (the birdhouse) has no geoms of its own, and its sections take
+      // what they are made of, and what they weigh, from the panels.
+      const gone = new Set(absorbed.filter((id) => id !== nodeId));
+      const madeOf = [first, ...[...gone].map((id) => findNode(newScene.nodes, id)).filter((n): n is SceneNode => !!n)];
+      const solidOf = (n: SceneNode) => (n.geoms || []).filter((g: SceneGeom) =>
         g.csg !== 'difference' && !g.csgDerived && g.role !== 'collision' && g.role !== 'visual');
+      const solid = madeOf.flatMap(solidOf);
       const template: SceneGeom | undefined = solid[0] ?? first.geoms?.[0];
       // What it weighs is shared out by volume when it was stated; otherwise
       // each section is weighed from its own volume at the body's density.
-      const totalMass = (first.csgEnabled ? statedBooleanMass(first) : first.csgMass) ?? (solid.length && solid.every((g: SceneGeom) => g.mass !== undefined)
-        ? solid.reduce((m: number, g: SceneGeom) => m + (g.mass ?? 0), 0)
-        : undefined);
+      const massOf = (n: SceneNode): number | undefined => {
+        const own = solidOf(n);
+        return (n.csgEnabled ? statedBooleanMass(n) : n.csgMass) ?? (own.length && own.every((g: SceneGeom) => g.mass !== undefined)
+          ? own.reduce((m: number, g: SceneGeom) => m + (g.mass ?? 0), 0)
+          : undefined);
+      };
+      const weighed = madeOf.filter((n) => solidOf(n).length || n.csgEnabled);
+      const masses = weighed.map(massOf);
+      const totalMass = weighed.length && masses.every((m) => m !== undefined)
+        ? masses.reduce((a: number, m) => a + (m ?? 0), 0)
+        : undefined;
       const density = solid.find((g: SceneGeom) => g.density !== undefined)?.density;
       const totalVolume = sections.reduce((v, sec) => v + sec.volumeMm3, 0) || 1;
       // The sections are cut from the triangles as drawn, which already carry a
@@ -156,8 +184,27 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
 
       // The other bodies the sections were cut from — children of this one, or
       // others selected with it — are in the sections now, wherever they hung.
-      if (opts.placement !== 'beside' && absorbed.length) {
-        const gone = new Set(absorbed.filter((id) => id !== nodeId));
+      // What hung off them and was not taken in (a hinged lid, a seated screw)
+      // is not part of the cut: it stays, re-hung from the piece it is in, where
+      // it was. Its pose is put in the part's frame here, with the old graph's
+      // frames; a baked body's rotation lives in its vertices, so only its
+      // position moves.
+      const rescued: SceneNode[] = [];
+      if (opts.placement !== 'beside' && gone.size) {
+        for (const id of gone) {
+          for (const child of findNode(newScene.nodes, id)?.children || []) {
+            if (gone.has(child.id)) continue;
+            const world = worlds.get(child.id);
+            if (world) {
+              const rel = intoPart.clone().multiply(world);
+              const p = new THREE.Vector3(), q = new THREE.Quaternion();
+              rel.decompose(p, q, new THREE.Vector3());
+              child.pos = [p.x, p.y, p.z];
+              if (!isNodeRotationBaked(child)) { child.quat = [q.w, q.x, q.y, q.z]; delete child.euler; }
+            }
+            rescued.push(child);
+          }
+        }
         const prune = (list: SceneNode[]): SceneNode[] => list
           .filter((c) => !gone.has(c.id))
           .map((c) => { c.children = prune(c.children || []); return c; });
@@ -321,8 +368,10 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
         which is the frame the sections are in, except where a rotation was baked
         into the mesh -- there the old behaviour stands.
       */
-      if (!baked) {
-        const children = first.children || [];
+      if (baked) {
+        first.children = [...(first.children || []), ...rescued];
+      } else {
+        const children = [...(first.children || []), ...rescued];
         first.children = [];
         for (const child of children) {
           const p = child.pos ?? [0, 0, 0];
@@ -330,26 +379,27 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
           child.pos = [p[0] - offsets[k][0], p[1] - offsets[k][1], p[2] - offsets[k][2]];
           pieceNodes[k].children = [...(pieceNodes[k].children || []), child];
         }
-        const partWorld = nodeWorldMatrix(get().sceneGraph.nodes, nodeId);
-        if (partWorld && sections.length > 1) {
-          const intoPart = partWorld.clone().invert();
-          const retarget = (list: SceneNode[]) => {
-            for (const n of list) {
-              if ((n.weldTargetId === nodeId || n.connectTargetId === nodeId) && !ids.includes(n.id)) {
-                const world = nodeWorldMatrix(get().sceneGraph.nodes, n.id);
-                if (world) {
-                  const p = new THREE.Vector3().setFromMatrixPosition(world).applyMatrix4(intoPart);
-                  const k = pieceHolding(sections, [p.x, p.y, p.z]);
-                  if (n.weldTargetId === nodeId) n.weldTargetId = ids[k];
-                  if (n.connectTargetId === nodeId) n.connectTargetId = ids[k];
-                }
-              }
-              retarget(n.children || []);
-            }
-          };
-          retarget(newScene.nodes);
-        }
       }
+      // A body welded or connected to the part, or to a body absorbed into it,
+      // goes to the piece it is in or nearest. A baked part keeps the old rule
+      // for its children (all on the first piece), and so for these.
+      const intoIt = (id: string | undefined) => !!id && (id === nodeId || gone.has(id));
+      const retarget = (list: SceneNode[]) => {
+        for (const n of list) {
+          if ((intoIt(n.weldTargetId) || intoIt(n.connectTargetId)) && !ids.includes(n.id)) {
+            const world = worlds.get(n.id);
+            let k = 0;
+            if (world && !baked && sections.length > 1) {
+              const p = new THREE.Vector3().setFromMatrixPosition(world).applyMatrix4(intoPart);
+              k = pieceHolding(sections, [p.x, p.y, p.z]);
+            }
+            if (intoIt(n.weldTargetId)) n.weldTargetId = ids[k];
+            if (intoIt(n.connectTargetId)) n.connectTargetId = ids[k];
+          }
+          retarget(n.children || []);
+        }
+      };
+      retarget(newScene.nodes);
       set({ sceneGraph: newScene, extraSelectedIds: [] });
       get().recompile(newScene, undefined, true);
       return ids;
