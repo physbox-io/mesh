@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
-import type { Manifold as ManifoldT } from 'manifold-3d';
+import type { Manifold as ManifoldT, ManifoldToplevel } from 'manifold-3d';
 import type { SceneNode } from '../types/scene';
 import type { SurfaceTexture } from './surfaceTexture';
 import { loadManifold, toManifold } from './sculptCut';
@@ -770,10 +770,12 @@ export async function simulateCastFromMoldTriangles(
             cavityComponents: 0,
           };
         }
-        const raw = manifoldToMeshMm(poured.casting);
-        poured.casting.delete();
-        // Turned out of the mold onto the face the pour left.
-        const res = finalizeCastMesh(raw.positionsMm, raw.faces, poured.pieces, { ...options, flipUpright: true }, warnings);
+        // The casting comes turned with the side poured from up, where a sprue stands.
+        const casting = options.trimChannels ? trimRunnerChannels(wasm, poured.casting) : poured.casting;
+        const raw = manifoldToMeshMm(casting);
+        casting.delete();
+        // Turned out of the mold onto the face the pour left, unless kept as poured.
+        const res = finalizeCastMesh(raw.positionsMm, raw.faces, poured.pieces, { ...options, flipUpright: options.orientUpright !== false }, warnings);
         return { ...res, pour: poured.info };
       }
 
@@ -798,46 +800,7 @@ export async function simulateCastFromMoldTriangles(
           for (const p of parts) {
             if (p !== best) p.delete();
           }
-          // Optional trim runner channels
-          if (options?.trimChannels) {
-            // Sprue and vent channels stick up near the top face of the mold
-            const bbox = best.boundingBox();
-            const zTop = bbox.max[2];
-            const zBot = bbox.min[2];
-            const spanH = zTop - zBot;
-            if (spanH > 2) {
-              // Check slices from top down to find where narrow channel widens to part body
-              let cutZ = zTop;
-              for (let z = zTop - 0.5; z >= zTop - spanH * 0.4; z -= 0.5) {
-                const sliceBox = wasm.Manifold.cube([boxW * 2, boxD * 2, 0.5], false).translate([
-                  boxMinX - boxW / 2,
-                  boxMinY - boxD / 2,
-                  z - 0.25,
-                ]);
-                const slice = best.intersect(sliceBox);
-                const sliceVol = slice.volume();
-                sliceBox.delete();
-                slice.delete();
-                const sliceArea = sliceVol / 0.5;
-                // A sprue + vent channel total area is <= 65 mm²
-                if (sliceArea > 75) {
-                  cutZ = z + 0.5;
-                  break;
-                }
-              }
-              if (cutZ < zTop - 0.5) {
-                const cutter = wasm.Manifold.cube([boxW * 2, boxD * 2, zTop - cutZ + 1], false).translate([
-                  boxMinX - boxW / 2,
-                  boxMinY - boxD / 2,
-                  cutZ,
-                ]);
-                const trimmed = best.subtract(cutter);
-                cutter.delete();
-                best.delete();
-                best = trimmed;
-              }
-            }
-          }
+          if (options?.trimChannels) best = trimRunnerChannels(wasm, best);
 
           const raw = manifoldToMeshMm(best);
           best.delete();
@@ -871,6 +834,40 @@ export async function simulateCastFromMoldTriangles(
   // 4. Fallback Path: Exact Column Spans + meshField
   warnings.push('Falling back to column spans and surface nets for mold cavity simulation.');
   return fallbackColumnSpansCast(trisMm, boxMinX, boxMaxX, boxMinY, boxMaxY, minZ, maxZ, options, warnings);
+}
+
+/**
+ * Cuts the narrow sprue and vent channels off the top of a casting: slices
+ * down from the top until one is wider than a sprue and vent together, and
+ * takes everything above it. Consumes `casting`.
+ */
+function trimRunnerChannels(wasm: ManifoldToplevel, casting: ManifoldT): ManifoldT {
+  const { min, max } = casting.boundingBox();
+  const zTop = max[2];
+  const spanH = zTop - min[2];
+  if (spanH <= 2) return casting;
+  const w = max[0] - min[0];
+  const d = max[1] - min[1];
+  // Check slices from top down to find where narrow channel widens to part body
+  let cutZ = zTop;
+  for (let z = zTop - 0.5; z >= zTop - spanH * 0.4; z -= 0.5) {
+    const sliceBox = wasm.Manifold.cube([w * 2, d * 2, 0.5], false).translate([min[0] - w / 2, min[1] - d / 2, z - 0.25]);
+    const slice = casting.intersect(sliceBox);
+    const sliceArea = slice.volume() / 0.5;
+    sliceBox.delete();
+    slice.delete();
+    // A sprue + vent channel total area is <= 65 mm²
+    if (sliceArea > 75) {
+      cutZ = z + 0.5;
+      break;
+    }
+  }
+  if (!(cutZ < zTop - 0.5)) return casting;
+  const cutter = wasm.Manifold.cube([w * 2, d * 2, zTop - cutZ + 1], false).translate([min[0] - w / 2, min[1] - d / 2, cutZ]);
+  const trimmed = casting.subtract(cutter);
+  cutter.delete();
+  casting.delete();
+  return trimmed;
 }
 
 /**
