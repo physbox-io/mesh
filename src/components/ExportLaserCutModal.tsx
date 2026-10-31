@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { derivedFingerWidthMm, type LaserCutOptions, type LaserCutResult, type StockItem } from '../utils/laserCutExporter';
+import { defaultCornerRelief, layoutKerf } from '../utils/sheetCutRecipe';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { buildEtchHandoffUrl } from '../utils/etchHandoff';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
@@ -227,7 +228,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    */
   const machineTarget = useStore((s) => s.machineTarget);
   const machineMode: 'laser' | 'cnc' = machineTarget === 'laser' ? 'laser' : 'cnc';
-  const cornerRelief = cornerReliefChoice ?? (machineMode === 'cnc' ? 'dogbone' : 'none');
+  const cornerRelief = cornerReliefChoice ?? defaultCornerRelief(machineMode);
   const material = useStore((s) => s.material);
   const materialLabel = MATERIALS.find((m) => m.id === material)?.label ?? material;
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
@@ -308,9 +309,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    * still until the typing stops; `layoutPending` is what the preview says
    * meanwhile, so a stale drawing never reads as a finished one.
    */
-  // Only a laser is sent a kerf. A router's G-code stands the bit off by its
-  // own radius, and a kerf on top would loosen every joint a second time.
-  const layoutKerfMm = machineMode === 'laser' ? kerfMm : 0;
+  // Only a laser is sent a kerf (sheetCutRecipe), as the MCP simulation is.
+  const layoutKerfMm = layoutKerf(machineMode, kerfMm);
   const liveLayoutFields = useMemo(() => ({
     jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm: layoutKerfMm, cornerRelief,
     bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,

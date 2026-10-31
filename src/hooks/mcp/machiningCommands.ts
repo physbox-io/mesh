@@ -20,6 +20,7 @@ import { reliefSimulationTools } from '../../utils/simulatedPart';
 import { simulationSetups } from '../../utils/solidSetups';
 import { FACE_NAME } from '../../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../../utils/sheetSimulation';
+import { defaultCornerRelief, layoutKerf } from '../../utils/sheetCutRecipe';
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from '../useAddSimulation';
 import { addMcpSimulationSteps } from '../useSimulationSteps';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../../utils/timberSimulation';
@@ -267,13 +268,23 @@ export const machiningCommands: McpCommands = {
 
     if (msg.kind === 'laser' || msg.kind === 'contour') {
       const router = msg.machine === 'router';
-      const routerRadiusMm = router ? (num(msg.bitDiaMm) ?? 3.175) / 2 : 0;
+      // Laid out as the dialog lays it out for that machine (sheetCutRecipe):
+      // a router gets no kerf, and dogbones in the corners its bit leaves round.
+      const machine = router ? 'cnc' : 'laser';
+      const bitDiaMm = num(msg.bitDiaMm) ?? 3.175;
+      const routerRadiusMm = router ? bitDiaMm / 2 : 0;
       // A contour layer is one sheet of the bench's stock, as in its dialog.
       const thicknessMm = num(msg.materialThicknessMm)
         ?? (msg.kind === 'contour' ? useStore.getState().stock.thicknessMm : 3);
       if (msg.kind === 'laser') {
         const result: LaserCutResult = await runJob((c) =>
-          c.run('laser', scene, { ...DEFAULT_LASER_OPTIONS, materialThickness: thicknessMm / 1000 }));
+          c.run('laser', scene, {
+          ...DEFAULT_LASER_OPTIONS,
+          materialThickness: thicknessMm / 1000,
+          kerf: layoutKerf(machine, DEFAULT_LASER_OPTIONS.kerf),
+          cornerRelief: defaultCornerRelief(machine),
+          bitDiameter: bitDiaMm / 1000,
+        }));
         if (!result.success || !result.panels?.length) {
           return { ok: false, error: result.error || 'The panels could not be laid out.', warnings: result.warnings ?? [] };
         }
@@ -293,7 +304,11 @@ export const machiningCommands: McpCommands = {
         };
       }
       const result: ContourSliceResult = await runJob((c) =>
-        c.run('contour', scene, { ...DEFAULT_CONTOUR_OPTIONS, materialThickness: thicknessMm / 1000 }));
+        c.run('contour', scene, {
+          ...DEFAULT_CONTOUR_OPTIONS,
+          materialThickness: thicknessMm / 1000,
+          kerf: layoutKerf(machine, DEFAULT_CONTOUR_OPTIONS.kerf),
+        }));
       if (!result.success || !result.layers?.length || !result.stockTransform) {
         return { ok: false, error: result.error || 'The model could not be sliced.', warnings: result.warnings ?? [] };
       }

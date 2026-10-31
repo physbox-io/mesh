@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { type ContourSliceOptions, type ContourSliceResult } from '../utils/contourSliceExporter';
+import { layoutKerf } from '../utils/sheetCutRecipe';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
@@ -270,9 +271,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
    * still until the typing stops; `slicePending` is what the preview says while
    * the wait is on, so an out-of-date drawing never reads as a finished one.
    */
-  // Only a laser is sent a kerf. A router's G-code stands the bit off by its
-  // own radius, and a kerf on top would shrink every dowel hole twice.
-  const slicedKerfMm = machineMode === 'laser' ? kerfMm : 0;
+  // Only a laser is sent a kerf (sheetCutRecipe), as the MCP simulation is.
+  const slicedKerfMm = layoutKerf(machineMode, kerfMm);
   const liveSliceFields = useMemo(() => ({
     materialThicknessMm, layerOverride, slicePosition, kerfMm: slicedKerfMm, pinCount, pinDiameterMm,
     sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations,
