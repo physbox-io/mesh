@@ -6,7 +6,9 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // .claude/worktrees holds other agents' checkouts, each with its own
+  // tsconfig: typed linting refuses to pick a root among them and fails every file.
+  globalIgnores(['dist', '.claude/**']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
