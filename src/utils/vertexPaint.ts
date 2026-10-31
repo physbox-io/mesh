@@ -356,6 +356,8 @@ export function buildMeshPaintGeometry(
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(sub.positions, 3));
   geo.setIndex(new THREE.BufferAttribute(sub.faces, 1));
+  // Read only where the material is smooth-shaded (a painted sculpt).
+  geo.computeVertexNormals();
   geo.computeBoundingBox();
   geo.computeBoundingSphere();
   return geo;
@@ -491,6 +493,13 @@ export function colorsForCopy(
   return out;
 }
 
+/**
+ * The brush's hardness when nothing says otherwise, for the editor and MCP
+ * alike: half the radius at full strength. The fully soft brush (0) took two
+ * coats to cover a belly.
+ */
+export const DEFAULT_PAINT_HARDNESS = 0.5;
+
 export interface DabOptions {
   /** Centre of the dab, in the surface's own space. */
   x: number; y: number; z: number;
@@ -501,6 +510,11 @@ export interface DabOptions {
   flow: number;
   /** Take paint off instead of putting it on. */
   erase?: boolean;
+  /**
+   * 0..1: the share of the radius laid down at full strength before the edge
+   * starts to fall off. 0 (the default) is the soft round brush.
+   */
+  hardness?: number;
 }
 
 /**
@@ -580,7 +594,7 @@ export function closestPointOnTriangleBary(
 export function applyDab(
   canvas: PaintCanvas,
   positions: ArrayLike<number>,
-  { x, y, z, radius, color, flow, erase }: DabOptions,
+  { x, y, z, radius, color, flow, erase, hardness = 0 }: DabOptions,
   faces?: ArrayLike<number> | null,
 ): { lo: number; hi: number } | null {
   const r2 = radius * radius;
@@ -626,7 +640,11 @@ export function applyDab(
     // Squared-cosine-ish falloff: full strength under the middle of the brush
     // and zero *slope* at the edge, so overlapping dabs down a stroke add up to
     // an even band instead of a row of visible rims.
-    const t = 1 - d2 / r2;
+    // Hardness holds the middle at full strength and fits the same falloff
+    // into what is left of the radius.
+    const core = Math.min(0.95, Math.max(0, hardness));
+    const u = core > 0 ? Math.max(0, (Math.sqrt(d2) / radius - core) / (1 - core)) : 0;
+    const t = core > 0 ? 1 - u * u : 1 - d2 / r2;
     const amount = Math.min(1, Math.max(0, t * t * flow));
     paintVertex(v, amount);
   }

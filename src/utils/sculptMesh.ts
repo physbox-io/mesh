@@ -873,6 +873,12 @@ export interface BrushSettings {
   /** For 'carve': add clay along the stroke (a tube, which may leave the surface) instead of cutting it away. */
   carveAdd?: boolean;
   /**
+   * For an Add stroke: its thickness as a share of its width, across the
+   * plane it is drawn in. 1 (the default) is a round tube; less is a blade,
+   * for a fin, a fluke or an ear.
+   */
+  carveThickness?: number;
+  /**
    * A ceiling on how many vertices dynamic topology may create.
    *
    * Refinement is exponential in the detail setting and quadratic in the brush
@@ -1204,10 +1210,14 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
     }
     : undefined;
 
-  // Not for Smooth, which takes detail away and has none to add: refining
-  // under it turned a rim pass on a carved pumpkin from 23 k vertices into
-  // 57 k and held the page for 48 s. It still collapses what it bunches up.
-  const refines = settings.type !== 'smooth';
+  // Smooth takes detail away and has none to add: refining under it to the
+  // usual target turned a rim pass on a carved pumpkin from 23 k vertices
+  // into 57 k and held the page for 48 s. It still collapses what it bunches
+  // up. But a face left by a cut has no vertex inside it, and with nothing
+  // there to bend the rim stayed a hard edge however often it was smoothed;
+  // so Smooth splits only edges longer than a quarter of the brush, which
+  // the long fan of a cut has and clay at any working density does not.
+  const refineEdge = settings.type === 'smooth' ? Math.max(target * 1.5, radius * 0.25) : target * 1.5;
   /*
    * Grab refines along its drag (refineAlongDrag), not under the brush — except
    * when it starts somewhere with next to nothing to hold. A face left by
@@ -1225,8 +1235,8 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
     // the ragged, crumpled patch small features came out as. Passes stop as
     // soon as one splits nothing, so clay that is already fine pays one scan.
     let split = 0;
-    for (let pass = 0; refines && pass < MAX_REFINE_PASSES && mesh.vertexCount < budget; pass++) {
-      const n = refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, target * 1.5, onMidpoint);
+    for (let pass = 0; pass < MAX_REFINE_PASSES && mesh.vertexCount < budget; pass++) {
+      const n = refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, refineEdge, onMidpoint);
       split += n;
       if (n === 0) break;
     }

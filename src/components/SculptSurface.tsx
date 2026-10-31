@@ -529,7 +529,7 @@ export function SculptSurface({
   }, [syncGeometry, commit, nodeId, geomName]);
 
   /** A Carve drag: the cutter swept along the path drawn, in the worker. */
-  const carve = useCallback(async (path: number[][]) => {
+  const carve = useCallback(async (path: number[][], plane: THREE.Plane | null) => {
     const target = mesh;
     const revision = target.revision;
     const b = brushRef.current;
@@ -546,6 +546,9 @@ export function SculptSurface({
       ...(b.carveTaper ? { taper: b.carveTaper } : {}),
       ...(b.carveAngle ? { tilt: (b.carveAngle * Math.PI) / 180 } : {}),
       add: b.carveAdd === true,
+      ...(b.carveAdd && plane && (b.carveThickness ?? 1) < 1
+        ? { flatten: { normal: [plane.normal.x, plane.normal.y, plane.normal.z], ratio: b.carveThickness! } }
+        : {}),
     }, { mode: b.carveAdd ? 'add' : 'remove' });
     cutting.current = false;
     return applyCutResult(target, revision, result);
@@ -553,13 +556,15 @@ export function SculptSurface({
 
   const finishStroke = useCallback(() => {
     grabPlane.current = null;
+    // An Add stroke is drawn on this plane, and a thin one lies in it.
+    const plane = carvePlane.current;
     carvePlane.current = null;
     const path = carvePath.current;
     if (path) {
       carvePath.current = null;
       setOrbitEnabled(true);
       useStore.getState().setDraggedNodeId(null);
-      void carve(path).finally(() => drawCarveLine(null));
+      void carve(path, plane).finally(() => drawCarveLine(null));
       return;
     }
     const session = sessionRef.current;

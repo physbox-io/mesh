@@ -331,16 +331,25 @@ export const objectCommands: McpCommands = {
     const { targetId, strokes } = msg as Msg<{ targetId: string; strokes?: Record<string, any>[] }>;
     if (!targetId) throw new Error('Missing targetId');
     if (Array.isArray(strokes) && strokes.length > 0) {
-      const results = [];
-      let totalLanded = 0;
-      let totalRequested = 0;
-      for (const s of strokes) {
-        const res = applyPaintStrokeToBody(targetId, s);
-        results.push(res);
-        totalLanded += Number(res.dabsLanded || 0);
-        totalRequested += Number(res.dabsRequested || 0);
-      }
-      return { ok: true, id: targetId, strokesApplied: results.length, dabsLanded: totalLanded, dabsRequested: totalRequested, results };
+      // A stroke that misses is reported in its place in `results` and the
+      // rest still land: one miss used to fail the call after the strokes
+      // before it had been applied.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const results: Record<string, any>[] = strokes.map((s) => {
+        try {
+          return applyPaintStrokeToBody(targetId, s);
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      });
+      const landed = results.filter((r) => r.ok);
+      return {
+        ok: landed.length > 0, id: targetId,
+        strokesRequested: strokes.length, strokesApplied: landed.length,
+        dabsLanded: results.reduce((n, r) => n + Number(r.dabsLanded || 0), 0),
+        dabsRequested: results.reduce((n, r) => n + Number(r.dabsRequested || 0), 0),
+        results,
+      };
     }
     return applyPaintStrokeToBody(targetId, msg);
   },

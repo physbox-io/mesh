@@ -39,6 +39,17 @@ describe('applyDab', () => {
     expect(canvas.data[3 * 4 + 3]).toBe(0);
   });
 
+  it('a hard brush covers fully across its core, and still stops at its edge', () => {
+    const soft = emptyCanvas(4, []);
+    const hard = emptyCanvas(4, []);
+    // Vertex 1 is 1 mm out on a 2.5 mm brush: 40% of the radius.
+    applyDab(soft, ROW, { x: 0, y: 0, z: 0, radius: 0.0025, color: RED, flow: 1 });
+    applyDab(hard, ROW, { x: 0, y: 0, z: 0, radius: 0.0025, color: RED, flow: 1, hardness: 0.5 });
+    expect(soft.data[1 * 4 + 3]).toBeLessThan(0.75);
+    expect(hard.data[1 * 4 + 3]).toBeCloseTo(1, 6);
+    expect(hard.data[3 * 4 + 3]).toBe(0);
+  });
+
   it('builds up when the same place is painted again', () => {
     const canvas = emptyCanvas(4, []);
     const dab = () => applyDab(canvas, ROW, { x: 0, y: 0, z: 0, radius: 0.0025, color: RED, flow: 0.3 });

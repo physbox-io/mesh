@@ -76,6 +76,7 @@ export async function applySculptCutResult(
   geomBefore: SceneGeom | undefined,
   mesh: SculptMesh,
   result: Awaited<ReturnType<typeof cutSculptOffThread>>,
+  opts: { add?: boolean } = {},
 ) {
   if (!result.ok) return { ok: false, id: targetId, error: result.error };
 
@@ -96,6 +97,16 @@ export async function applySculptCutResult(
   // Scissors do in the viewport. That is a change to the document, so
   // it is the editor's undo that reverses it, not this history.
   const pieces = splitComponents(result.mesh);
+  // Clay added is added to this body. If it came out as a piece apart from
+  // it, it never touched it; making a new body of it, and dropping this
+  // one's undo history on the way, was not what was asked.
+  if (opts.add && pieces.length > splitComponents(mesh).length) {
+    return {
+      ok: false, id: targetId,
+      error: 'The added clay does not touch the body, so nothing was applied. Start the path on or inside the surface (physics_probe_sculpt finds it).',
+      undoDepth: (sculptHistory.get(targetId) ?? []).length,
+    };
+  }
   if (pieces.length > 1) {
     const bodies = useStore.getState().separateSculpt(targetId, pieces, geomBefore?.name);
     sculptHistory.delete(targetId);

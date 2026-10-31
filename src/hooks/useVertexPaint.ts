@@ -136,12 +136,13 @@ export function useVertexPaint({
     const canvas = canvasRef.current;
     const positions = geometry?.getAttribute('position')?.array;
     if (!canvas || !positions) return;
-    const { paintColor, paintRadius, paintFlow } = useStore.getState();
+    const { paintColor, paintRadius, paintFlow, paintHardness } = useStore.getState();
     upload(applyDab(canvas, positions, {
       x: point.x, y: point.y, z: point.z,
       radius: Math.max(1e-5, paintRadius / scale),
       color: paintColor,
       flow: paintFlow,
+      hardness: paintHardness,
       erase,
     }, geometry?.getIndex()?.array));
   }, [geometry, upload]);

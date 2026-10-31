@@ -12,6 +12,7 @@ import { maxSizeFor, selectEdges, type EdgeGroup } from '../../utils/featureEdge
 import {
   applyDab, buildMeshPaintGeometry, buildPaintGeometry, canvasFromLayer, isPaintable,
   layerFromCanvas, paintArgsFromSize, paintMeshResolution, paintResolution, toGeometrySpace,
+  DEFAULT_PAINT_HARDNESS,
 } from '../../utils/vertexPaint';
 import { toSceneGeom } from '../../utils/sculptMesh';
 import { cutSculptOffThread } from '../../utils/sculptCutClient';
@@ -388,7 +389,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>): Record<string, any> {
   const store = useStore.getState();
-  const { geomName, at, radius, rgba, flow, erase } = m;
+  const { geomName, at, radius, rgba, flow, erase, line, hardness } = m;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) throw new Error(`No object with id '${targetId}'`);
 
@@ -434,24 +435,53 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   if (!positions?.length) throw new Error('That geom has no surface to paint');
 
   const canvas = canvasFromLayer(geom.paint, positions.length / 3, res);
+  const local = points.map((p) => toGeometrySpace(geom.type, p, isDynamicMesh));
+  // A line is its points joined: dabs a third of a radius apart along each
+  // step, each pulled onto the surface so a long step across a curved body
+  // does not sink under it. Without it each point is a dab of its own (the
+  // pips of a die), and a stripe drawn as points came out dotted.
+  const dabs = line === true ? alongSurface(local, positions, brush / 3) : local;
   let landed = 0;
-  for (const point of points) {
-    const [x, y, z] = toGeometrySpace(geom.type, point, isDynamicMesh);
+  for (const [x, y, z] of dabs) {
     if (applyDab(canvas, positions, {
       x, y, z,
       radius: brush,
       color: rgba,
       flow: typeof flow === 'number' ? flow : 1,
       erase: !!erase,
+      hardness: typeof hardness === 'number' ? hardness : DEFAULT_PAINT_HARDNESS,
     }, faces)) landed++;
   }
   built?.dispose();
 
   if (!landed) {
-    throw new Error(`No vertices within ${brush} m of any of those points — the point has to be on the surface, in the geom's own frame`);
+    return {
+      ok: false, geomName: geom.name, dabsLanded: 0, dabsRequested: dabs.length,
+      error: `No vertices within ${brush} m of any of those points — the point has to be on the surface, in the geom's own frame`,
+    };
   }
   useStore.getState().setGeomPaint(targetId, geom.name, layerFromCanvas(canvas));
-  return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: points.length };
+  return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: dabs.length };
+}
+
+/** Points `step` apart along a polyline, each moved to the nearest surface vertex. */
+function alongSurface(points: number[][], positions: ArrayLike<number>, step: number): number[][] {
+  const nearest = (p: number[]) => {
+    let best = Infinity, at = p;
+    for (let v = 0; v < positions.length; v += 3) {
+      const d = (positions[v] - p[0]) ** 2 + (positions[v + 1] - p[1]) ** 2 + (positions[v + 2] - p[2]) ** 2;
+      if (d < best) { best = d; at = [positions[v], positions[v + 1], positions[v + 2]]; }
+    }
+    return at;
+  };
+  const out: number[][] = points.length ? [points[0]] : [];
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1], b = points[i];
+    const n = Math.min(400, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / step));
+    for (let k = 1; k < n; k++) out.push(nearest([0, 1, 2].map((j) => a[j] + (b[j] - a[j]) * (k / n))));
+    out.push(b);
+  }
+  return out;
 }
 
 export async function applyDeclarativePreCsgFeatures(nodes: SceneNode[]): Promise<void> {
@@ -510,7 +540,8 @@ export async function applyDeclarativePostCsgFeatures(nodes: SceneNode[]): Promi
         pendingDeclarativeOps.delete(n.id);
         if (pending.paint && pending.paint.length > 0) {
           for (const paintSpec of pending.paint) {
-            applyPaintStrokeToBody(n.id, paintSpec);
+            const res = applyPaintStrokeToBody(n.id, paintSpec);
+            if (!res.ok) throw new Error(`Paint on '${n.name}' failed: ${res.error}`);
           }
         }
       }

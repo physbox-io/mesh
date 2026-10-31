@@ -52,6 +52,12 @@ export interface GrooveSpec {
   /** Radians the cutter leans sideways, about the path: a slanted cut, an undercut lid. */
   tilt?: number;
   /**
+   * Added clay only: the ball swept along the path squashed along `normal`
+   * (in the sculpt's frame) to `ratio` of its width, so a fluke, a flipper or
+   * an ear comes out as a blade rather than a round tube.
+   */
+  flatten?: { normal: number[]; ratio: number };
+  /**
    * Join the swept tool onto the clay instead of cutting it away: a ball of
    * `width` swept along the path, which here may leave the surface. A
    * tapered, curving tube: a stem, a horn, a handle.
@@ -214,9 +220,21 @@ export function buildGroove(wasm: ManifoldToplevel, spec: GrooveSpec): ManifoldT
   try {
     for (const run of runs) {
       const size = scales(run.path, run.tapered);
-      const tools = run.path.map((p, i) => cutterPoints(
-        cutterRings(run.profile), p, run.normals[i], size[i], run.tapered ? spec.tilt ?? 0 : 0, tangentAt(run.path, i),
-      ));
+      const flat = spec.add && spec.flatten && spec.flatten.ratio > 0 && spec.flatten.ratio < 1 ? spec.flatten : null;
+      const nl = flat ? Math.hypot(flat.normal[0], flat.normal[1], flat.normal[2]) || 1 : 1;
+      const fn = flat ? flat.normal.map((c) => c / nl) : [0, 0, 1];
+      const tools = run.path.map((p, i) => {
+        const points = cutterPoints(
+          cutterRings(run.profile), p, run.normals[i], size[i], run.tapered ? spec.tilt ?? 0 : 0, tangentAt(run.path, i),
+        );
+        if (flat) {
+          for (const q of points) {
+            const along = ((q[0] - p[0]) * fn[0] + (q[1] - p[1]) * fn[1] + (q[2] - p[2]) * fn[2]) * (1 - flat.ratio);
+            for (let k = 0; k < 3; k++) q[k] -= fn[k] * along;
+          }
+        }
+        return points;
+      });
       if (tools.length === 1) {
         pieces.push(wasm.Manifold.hull(tools[0] as [number, number, number][]));
         continue;
@@ -329,16 +347,31 @@ export function grooveAlongSurface(
   path: number[][],
   options: {
     width: number; depth: number; profile: CarveProfile; mirror?: 'x' | 'y' | 'z'; reach?: number; fill?: boolean;
-    taper?: number; tilt?: number; add?: boolean;
+    taper?: number; tilt?: number; add?: boolean; flatten?: GrooveSpec['flatten'];
   },
 ): { spec: GrooveSpec; missed: number[][] } {
   // Added clay goes where it is drawn, on the surface or off it: a stem
   // leaves the clay at its first point and runs on into the air.
   if (options.add) {
+    // Rooted, though. A first point a few millimetres off the surface made a
+    // tail that never touched the cat, and it came back as a body of its
+    // own; so a start outside the clay is joined to it from below the skin.
+    if (path.length > 0) {
+      recomputeNormals(mesh);
+      const hit = closestOnSurface(mesh, path[0], longestEdgeOf(mesh));
+      if (hit) {
+        const off = [0, 1, 2].map((i) => path[0][i] - hit.point[i]);
+        const outside = off[0] * hit.normal[0] + off[1] * hit.normal[1] + off[2] * hit.normal[2] > 0;
+        if (outside && hit.distance > options.width / 4) {
+          path = [[0, 1, 2].map((i) => hit.point[i] - hit.normal[i] * options.width / 2), ...path];
+        }
+      }
+    }
     return {
       spec: {
         kind: 'groove', path, normals: path.map(() => [0, 0, 1]), width: options.width, depth: options.depth,
         profile: 'round', add: true, ...(options.taper ? { taper: options.taper } : {}),
+        ...(options.flatten ? { flatten: options.flatten } : {}),
         ...(options.mirror ? { mirror: options.mirror } : {}),
       },
       missed: [],

@@ -491,7 +491,7 @@ export type PrismSpec =
   | {
     kind: 'carvePath'; path: number[][]; width: number; depth: number;
     profile: CarveProfile; mirror?: 'x' | 'y' | 'z'; fill?: boolean;
-    taper?: number; tilt?: number; add?: boolean;
+    taper?: number; tilt?: number; add?: boolean; flatten?: GrooveSpec['flatten'];
   };
 
 /** Build the prism a spec describes and cut the mesh with it. */

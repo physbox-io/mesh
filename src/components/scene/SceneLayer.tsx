@@ -577,8 +577,10 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // drilled plates. The creased copy splits vertices, though, and paint is keyed
   // to the welded vertex indices, so while paint is showing the welded mesh is
   // drawn with flatShading instead (normals from screen-space derivatives;
-  // facets show, but nothing smears).
-  const flatShading = type === 'mesh' && showPaint;
+  // facets show, but nothing smears). Not on a sculpt: its triangles are kept
+  // even by its own remeshing, there are no slivers to smear a normal across,
+  // and a painted cat drawn faceted looked like a different model.
+  const flatShading = type === 'mesh' && showPaint && !node?.isSculpt;
   const materialProps = useMemo(() => {
     const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
@@ -939,6 +941,9 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   const paintGeometry = useMemo(() => {
     if (!showPaint) return null;
     if (type === 'mesh') {
+      // A smooth-shaded paint surface (a sculpt's, see flatShading) needs
+      // normals, and the welded copy is otherwise drawn without any.
+      if (meshBufferGeometry && !meshBufferGeometry.getAttribute('normal')) meshBufferGeometry.computeVertexNormals();
       if (!meshBufferGeometry || !paintRes.length) return meshBufferGeometry;
       const pos = meshBufferGeometry.getAttribute('position')?.array as Float32Array | undefined;
       const idx = meshBufferGeometry.getIndex()?.array as Uint32Array | undefined;

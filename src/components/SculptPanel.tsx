@@ -370,7 +370,7 @@ export function SculptPanel() {
             active={brush.carveAdd === true}
             onClick={() => setBrush({ carveAdd: !brush.carveAdd })}
             icon={Expand}
-            hint="Add clay along the stroke instead of cutting: a round tube as wide as the brush. Start on the clay and drag off it: a stem, a horn, a handle."
+            hint="Add clay along the stroke instead of cutting: a tube as wide as the brush, flattened by Thickness. Start on the clay and drag off it: a stem, a horn, a handle, a fin."
           />
           <Toggle
             label="Fill outline"
@@ -390,6 +390,18 @@ export function SculptPanel() {
           format={(v) => (v === 0 ? 'none' : `${Math.round(v * 100)}% each end`)}
           hint="Narrow and shallow the cut to a point towards both ends of the stroke: a rib that fades into the stem, a stem that thins to its tip."
         />
+        {brush.carveAdd && (
+          <Slider
+            label="Thickness"
+            value={brush.carveThickness ?? 1}
+            min={0.1}
+            max={1}
+            step={0.05}
+            onChange={(carveThickness) => setBrush({ carveThickness })}
+            format={(v) => (v >= 1 ? 'round' : `${Math.round(v * 100)}% of width`)}
+            hint="How thick the added clay is, across the view you draw it in. Round makes a tube; thinner makes a blade lying flat to the screen: a fin, a fluke, an ear."
+          />
+        )}
         {!brush.carveAdd && (
           <Slider
             label="Angle"

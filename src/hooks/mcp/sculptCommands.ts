@@ -12,6 +12,8 @@ import {
 import { cutSculptOffThread } from '../../utils/sculptCutClient';
 import type { CarveProfile } from '../../utils/sculptCarve';
 import { getNodeWorldPos } from '../../utils/sceneTree';
+import { restingPos } from '../../utils/spawnPlacement';
+import { viewCentre } from '../../utils/liveCamera';
 import type { SculptUndoEntry } from '../../utils/sculptMesh';
 import { collectNodeIds, waitForNewNode, type Msg, pointList, resolveParent, findNodeInScene } from './bridgeUtils';
 import { sculptHistory, SCULPT_HISTORY_DEPTH, sculptMeshOf, applySculptCutResult, sculptTarget } from './sculptState';
@@ -33,7 +35,11 @@ export const sculptCommands: McpCommands = {
     const { name, base, pos, sizeMm } = msg as Msg<{ name?: string; base?: SculptBaseId; sizeMm?: number }>;
     if (sizeMm !== undefined && !(typeof sizeMm === 'number' && sizeMm > 0)) throw new Error('sizeMm must be a positive number of millimetres');
     const parent = resolveParent(store.sceneGraph.nodes, msg.parent);
-    const position = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0.3];
+    const given = Array.isArray(pos) && pos.length === 3;
+    // With no pos, it stands on the floor at the middle of the view, as the
+    // palette places one. The old default, 0.3 m up, was above the default
+    // view: all a caller saw of the new body was its shadow.
+    const position = given ? pos : [0, 0, 0];
     if (base !== undefined && !SCULPT_BASES.some(b => b.id === base)) {
       throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
     }
@@ -65,12 +71,22 @@ export const sculptCommands: McpCommands = {
     if (base && base !== created.sculptBase) store.setSculptBase(created.id, base);
     if (sizeMm !== undefined) useStore.getState().resizeSculpt(created.id, sizeMm / 1000);
     if (typeof name === 'string' && name.trim()) store.renameNode(created.id, name.trim());
+    // Placed once base and size are known, since both change its bounds.
+    if (!given && !parent) {
+      const nodes = useStore.getState().sceneGraph.nodes;
+      const self = findNodeInScene(nodes, created.id);
+      if (self) {
+        const at = restingPos(self, nodes.filter((n) => n.id !== created.id), viewCentre());
+        useStore.getState().updateNodePos(created.id, at as [number, number, number]);
+      }
+    }
 
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, created.id);
     return {
       ok: true,
       id: created.id,
       name: after?.name,
+      pos: after?.pos,
       ...(parent ? { parent: parent.id } : {}),
       base: after?.sculptBase,
       ...sculptSummary(sculptMeshOf(after)),
@@ -138,7 +154,7 @@ export const sculptCommands: McpCommands = {
 
     const mesh = sculptMeshOf(node, geomIndex);
     let lastResult: ReturnType<typeof applySculptStroke> | null = null;
-    let totalVerticesChanged = 0;
+    const perStroke: { brush?: string; applied: number; missed: number; moved: number; topologyChanged?: boolean }[] = [];
 
     for (const s of strokeList) {
       if (s.brush !== undefined && !BRUSH_TYPES.includes(s.brush)) {
@@ -163,7 +179,13 @@ export const sculptCommands: McpCommands = {
         depthMm: s.depthMm,
         hardness: s.hardness,
       }, sink);
-      totalVerticesChanged += lastResult.moved ?? 0;
+      perStroke.push({
+        brush: s.brush ?? 'draw',
+        applied: Number(lastResult.applied ?? 0),
+        missed: Array.isArray(lastResult.missed) ? lastResult.missed.length : 0,
+        moved: lastResult.moved ?? 0,
+        ...(lastResult.topologyChanged ? { topologyChanged: true } : {}),
+      });
 
       if (sink.undo) {
         const stack = sculptHistory.get(targetId) ?? [];
@@ -187,10 +209,20 @@ export const sculptCommands: McpCommands = {
     store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
     const error = useStore.getState().lastCompileError;
+    // A batch reports each stroke and their totals. It used to spread the
+    // LAST stroke's applied/missed/moved over the whole reply beside a
+    // total of its own, and the two never agreed.
+    const batch = strokeList.length > 1;
+    const { applied: _a, missed: _m, moved: _v, maxDisplacement: _d, topologyChanged: _t, ...meshFields } = lastResult ?? ({} as Partial<ReturnType<typeof applySculptStroke>>);
     return {
       ok: !error, ...(error ? { error } : {}), id: targetId,
-      ...(lastResult ?? {}),
-      ...(strokeList.length > 1 ? { strokesApplied: strokeList.length, verticesChanged: totalVerticesChanged } : {}),
+      ...(batch ? meshFields : lastResult ?? {}),
+      ...(batch ? {
+        strokesApplied: strokeList.length,
+        dabsApplied: perStroke.reduce((n, r) => n + r.applied, 0),
+        pointsMissed: perStroke.reduce((n, r) => n + r.missed, 0),
+        strokes: perStroke,
+      } : {}),
       undoDepth: (sculptHistory.get(targetId) ?? []).length,
     };
   },
@@ -242,10 +274,11 @@ export const sculptCommands: McpCommands = {
     return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
   },
   SCULPT_CARVE: async (msg, { store }) => {
-    const { targetId, path, widthMm, depthMm, profile = 'round', symmetry, fill, taper, angleDeg, mode = 'cut' } = msg as Msg<{
+    const { targetId, path, widthMm, depthMm, profile = 'round', symmetry, fill, taper, angleDeg, mode = 'cut', thicknessMm, flatAxis = 'z' } = msg as Msg<{
       targetId: string; path: number[][]; widthMm: number; depthMm?: number;
       profile?: CarveProfile; symmetry?: 'x' | 'y' | 'z'; fill?: boolean;
       taper?: number; angleDeg?: number; mode?: 'cut' | 'add';
+      thicknessMm?: number; flatAxis?: 'x' | 'y' | 'z';
     }>;
     const { node, geomIndex } = sculptTarget(store, targetId);
     const points = pointList(path);
@@ -258,6 +291,10 @@ export const sculptCommands: McpCommands = {
     if (!['round', 'v', 'flat'].includes(profile)) throw new Error("profile must be 'round', 'v' or 'flat'");
     if (symmetry !== undefined && !['x', 'y', 'z'].includes(symmetry)) throw new Error("symmetry must be 'x', 'y' or 'z'");
     if (taper !== undefined && !(taper >= 0 && taper <= 0.5)) throw new Error('taper is the share of the length at each end, 0 to 0.5');
+    if (thicknessMm !== undefined && (!add || !(thicknessMm > 0 && thicknessMm <= widthMm))) {
+      throw new Error("thicknessMm is for mode 'add': the tube's thickness across flatAxis, more than 0 and at most widthMm");
+    }
+    if (!['x', 'y', 'z'].includes(flatAxis)) throw new Error("flatAxis must be 'x', 'y' or 'z'");
 
     // Snapped, filled and cut in the worker, which already holds the
     // mesh: done here, the closest-point searches on 80 k vertices held
@@ -270,9 +307,12 @@ export const sculptCommands: McpCommands = {
       fill: fill === true && !add,
       ...(taper ? { taper } : {}),
       ...(angleDeg ? { tilt: (angleDeg * Math.PI) / 180 } : {}),
+      ...(thicknessMm !== undefined && thicknessMm < widthMm
+        ? { flatten: { normal: [flatAxis === 'x' ? 1 : 0, flatAxis === 'y' ? 1 : 0, flatAxis === 'z' ? 1 : 0], ratio: thicknessMm / widthMm } }
+        : {}),
       add,
     }, { mode: add ? 'add' : 'remove', cap: true });
-    return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
+    return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result, { add });
   },
   PROBE_SCULPT: async (msg, { store }) => {
     const { targetId, at } = msg as Msg<{ targetId: string }>;

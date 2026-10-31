@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SceneNode, SceneGeom } from '../types/scene';
-import type { PaintLayer } from '../utils/vertexPaint';
+import { DEFAULT_PAINT_HARDNESS, type PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import { cloneSceneGraph, findNode } from './sceneClone';
 import type { SliceDeps } from './sliceDeps';
@@ -22,9 +22,11 @@ export interface PaintActions {
   paintRadius: number;
   /** Coverage one dab lays down at the centre of the brush, 0..1. */
   paintFlow: number;
+  /** Share of the radius laid down at full strength before the edge falls off, 0..1. */
+  paintHardness: number;
   togglePaintMode: () => void;
   setPaintColor: (rgb: [number, number, number]) => void;
-  setPaintBrush: (patch: { radius?: number; flow?: number }) => void;
+  setPaintBrush: (patch: { radius?: number; flow?: number; hardness?: number }) => void;
   /** Stores a finished stroke. Passing undefined strips a geom back to bare. */
   setGeomPaint: (nodeId: string, geomName: string, layer: PaintLayer | undefined) => void;
   /**
@@ -50,6 +52,8 @@ export function paintActions({ set, get }: SliceDeps): PaintActions {
 
     paintFlow: 0.35,
 
+    paintHardness: DEFAULT_PAINT_HARDNESS,
+
     togglePaintMode: () => set((state) => ({ paintMode: !state.paintMode })),
 
     setPaintColor: (paintColor) => set({ paintColor }),
@@ -57,6 +61,7 @@ export function paintActions({ set, get }: SliceDeps): PaintActions {
     setPaintBrush: (patch) => set((state) => ({
       paintRadius: patch.radius ?? state.paintRadius,
       paintFlow: patch.flow ?? state.paintFlow,
+      paintHardness: patch.hardness ?? state.paintHardness,
     })),
 
     setGeomPaint: (nodeId, geomName, layer) => {

@@ -3,7 +3,7 @@ import type { ManifoldToplevel } from 'manifold-3d';
 import { applyBrush, beginStroke, DEFAULT_BRUSH, endStroke, icosphere, isWatertight, recomputeNormals, type SculptMesh } from '../src/utils/sculptMesh';
 import { cutSculpt, cutSculptWith, loadManifold } from '../src/utils/sculptCut';
 import { closestOnSurface, grooveAlongSurface, type CarveProfile, type GrooveSpec } from '../src/utils/sculptCarve';
-import { createSculptMesh } from '../src/utils/sculptMesh';
+import { createSculptMesh, splitComponents } from '../src/utils/sculptMesh';
 
 const R = 0.035; // pumpkin-sized clay
 
@@ -182,6 +182,38 @@ describe('carving a groove', () => {
     for (let i = 0; i < result.mesh.vertexCount; i++) top = Math.max(top, result.mesh.positions[i * 3 + 2]);
     expect(top * 1000).toBeGreaterThan(R * 1000 + 10);
     expect(result.pieces).toBe(1);
+    expect(isWatertight(result.mesh)).toBe(true);
+  });
+
+  it('Add roots a tube whose first point is off the surface (was a body of its own)', () => {
+    const clay = icosphere(R, 4);
+    // A tail starting 5 mm off the side and running away from it: drawn
+    // as given it never touched the clay.
+    const path = [5, 10, 15, 20].map((h) => [R + h / 1000, 0, 0]);
+    const { spec } = grooveAlongSurface(clay, path, { width: 0.006, depth: 0, profile: 'round', add: true, taper: 0.3 });
+    const result = cutSculptWith(wasm, clay, spec);
+    if (!result.ok) throw new Error(result.error);
+    expect(splitComponents(result.mesh).length).toBe(1);
+    expect(isWatertight(result.mesh)).toBe(true);
+  });
+
+  it('Add with flatten makes a blade, thin across the direction given', () => {
+    const clay = icosphere(R, 4);
+    const path = [-2, 5, 10, 15].map((h) => [R + h / 1000, 0, 0]);
+    const { spec } = grooveAlongSurface(clay, path, {
+      width: 0.006, depth: 0, profile: 'round', add: true, flatten: { normal: [0, 0, 1], ratio: 0.3 },
+    });
+    const result = cutSculptWith(wasm, clay, spec);
+    if (!result.ok) throw new Error(result.error);
+    let y = 0, z = 0;
+    for (let i = 0; i < result.mesh.vertexCount; i++) {
+      if (result.mesh.positions[i * 3] < R + 0.004) continue;
+      y = Math.max(y, Math.abs(result.mesh.positions[i * 3 + 1]));
+      z = Math.max(z, Math.abs(result.mesh.positions[i * 3 + 2]));
+    }
+    expect(y * 1000).toBeGreaterThan(2.7);
+    expect(z * 1000).toBeLessThan(1.1);
+    expect(splitComponents(result.mesh).length).toBe(1);
     expect(isWatertight(result.mesh)).toBe(true);
   });
 

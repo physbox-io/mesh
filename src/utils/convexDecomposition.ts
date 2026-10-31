@@ -652,7 +652,9 @@ function massWarning(node: SceneNode, decomposed: MeshColliders[]): string | und
     + decomposed.filter(p => !hollow.includes(p)).reduce((m, p) => m + (p.source.mass ?? 0), 0);
   // Not "its hollow": a quadruped or a chair is concave and solid, and the
   // difference is the air between its legs, which its hull counted.
-  return `Weighed by its real volume now that it collides as convex pieces, this body weighs ${(rest + after).toFixed(2)} kg rather than the ${(rest + before).toFixed(2)} kg of its convex hull, which counted the space between and inside its parts as solid. Set a mass if you wanted the heavier figure.`;
+  // Grams under a kilogram: a 1.4 g tail read "0.00 kg rather than 0.00 kg".
+  const weight = (kg: number) => (kg >= 1 ? `${kg.toFixed(2)} kg` : `${+(kg * 1000).toPrecision(3)} g`);
+  return `Weighed by its real volume now that it collides as convex pieces, this body weighs ${weight(rest + after)} rather than the ${weight(rest + before)} of its convex hull, which counted the space between and inside its parts as solid. Set a mass if you wanted the heavier figure.`;
 }
 
 /**

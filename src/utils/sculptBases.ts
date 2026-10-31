@@ -366,8 +366,10 @@ export function birdSkeleton(): Bone[] {
 /** A fish, facing +X: a streamlined body, fins, and a forked tail. */
 export function fishSkeleton(): Bone[] {
   return [
-    { a: [-0.030, 0, 0], b: [0.050, 0, 0.004], ra: 0.030, rb: 0.020 },
-    { a: [0.050, 0, 0.004], b: [0.078, 0, 0.002], ra: 0.020, rb: 0.010 },
+    // Deepest a third of the way back from the snout, narrowing both ways.
+    // It used to be deepest just ahead of the tail, with the head the slim end.
+    { a: [-0.030, 0, 0], b: [0.022, 0, 0.003], ra: 0.020, rb: 0.030 },
+    { a: [0.022, 0, 0.003], b: [0.078, 0, 0.002], ra: 0.030, rb: 0.011 },
     // Tail stock and the two lobes of the fin.
     { a: [-0.030, 0, 0], b: [-0.062, 0, 0.002], ra: 0.020, rb: 0.008 },
     { a: [-0.062, 0, 0.002], b: [-0.092, 0, 0.030], ra: 0.008, rb: 0.004 },

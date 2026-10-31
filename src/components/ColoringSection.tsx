@@ -62,6 +62,7 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
   const paintColor = useStore((s) => s.paintColor);
   const paintRadius = useStore((s) => s.paintRadius);
   const paintFlow = useStore((s) => s.paintFlow);
+  const paintHardness = useStore((s) => s.paintHardness);
   const togglePaintMode = useStore((s) => s.togglePaintMode);
   const setPaintColor = useStore((s) => s.setPaintColor);
   const setPaintBrush = useStore((s) => s.setPaintBrush);
@@ -175,6 +176,22 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
             step={0.05}
             value={paintFlow}
             onChange={(e) => setPaintBrush({ flow: parseFloat(e.target.value) })}
+            className="w-full accent-fuchsia-500 cursor-pointer"
+          />
+        </label>
+
+        <label className="block" title="How crisp the edge of a mark is. Soft blends into what is around it; hard gives a clean edge, for stripes and patches.">
+          <div className="flex items-baseline justify-between mb-0.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Hardness</span>
+            <span className="text-[10px] font-mono text-slate-600 dark:text-slate-300">{Math.round(paintHardness * 100)}%</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={0.95}
+            step={0.05}
+            value={paintHardness}
+            onChange={(e) => setPaintBrush({ hardness: parseFloat(e.target.value) })}
             className="w-full accent-fuchsia-500 cursor-pointer"
           />
         </label>
