@@ -77,7 +77,7 @@ export const CAST_MATERIALS: CastMaterial[] = [
     warnings: [{
       aboveMl: 200,
       inPla: true,
-      text: "A {ml} ml epoxy pour can heat past PLA's ~60 °C softening point as it cures; pour it in layers or use a slow-curing casting epoxy.",
+      text: 'A {ml} ml epoxy pour may exceed PLA\'s ~60 °C softening point during cure; pour in layers or use deep-pour epoxy.',
     }],
   },
   { id: 'polyurethane', label: 'Polyurethane resin', densityGcm3: 1.05, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.9, 0.82, 1], warnings: [] },
@@ -92,11 +92,11 @@ export const CAST_MATERIALS: CastMaterial[] = [
   { id: 'wax', label: 'Wax', densityGcm3: 0.9, pourC: 70, waterBased: false, metal: false, silicone: false, rgba: [0.98, 0.94, 0.82, 0.9], warnings: [] },
   {
     id: 'chocolate', label: 'Chocolate', densityGcm3: 1.3, pourC: 31, waterBased: false, metal: false, silicone: false, rgba: [0.36, 0.2, 0.1, 1],
-    warnings: [{ text: 'Food goes in a food-grade silicone mold, or a print in a food-safe filament: layer lines hold bacteria.' }],
+    warnings: [],
   },
   {
     id: 'water', label: 'Water (ice)', densityGcm3: 0.92, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
-    warnings: [{ text: 'Water grows about 9% as it freezes: fill a little below the rim.' }],
+    warnings: [],
   },
   { id: 'plaster', label: 'Plaster', densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
   { id: 'concrete', label: 'Concrete', densityGcm3: 2.4, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
@@ -169,7 +169,7 @@ export function castMaterialWarnings(id: CastMaterialId, volumeMl: number, mold:
   const m = castMaterial(id);
   const out: string[] = [];
   if (mold.pla && m.pourC !== undefined && m.pourC > PLA_SOFTEN_C) {
-    out.push(`${m.label} poured hotter than about ${PLA_SOFTEN_C} °C softens a PLA mold; pour it as cool as it will run.`);
+    out.push(`Pour ${m.label} below ~${PLA_SOFTEN_C} °C to avoid softening a PLA mold.`);
   }
   for (const w of m.warnings) {
     if (w.inPla && !mold.pla) continue;

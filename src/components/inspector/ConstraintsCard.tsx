@@ -116,11 +116,7 @@ export function ConstraintsCard({ node }: { node: SceneNode }) {
                 <span className="text-[10px] text-slate-400 w-8 shrink-0">N·m</span>
               </div>
               <p className="text-[10px] text-slate-400 leading-snug">
-                A 1 kg body hanging off this weld pulls about 10 N, so a few
-                hundred is a sturdy joint and a few tens is a decorative one.
-                Leave a limit at zero to ignore it. Breaking is part of the
-                run, not an edit — the part is still welded on in the saved
-                scene, and Reset puts it back.
+                Connects two bodies by distance or rigid weld to close kinematic loops.
               </p>
             </>
           )}

@@ -60,14 +60,14 @@ export function CastPrepSection({ method, partingFromBaseMm }: {
     setReport(null);
     const { kept } = clearCastPrep();
     setNote(kept.length > 0
-      ? `Back to the original shapes — except ${kept.map((k) => k.name).join(', ')}, changed since prep, which ${kept.length === 1 ? 'was' : 'were'} left as ${kept.length === 1 ? 'it is' : 'they are'}.`
-      : 'Back to the original shapes.');
+      ? `Original shapes restored except ${kept.map((k) => k.name).join(', ')}.`
+      : 'Original shapes restored.');
   };
   const bakeIn = () => {
     setAppliedKey(null);
     setReport(null);
     bakeCastPrep();
-    setNote('Kept as the model. The originals are gone, so edit the prepared shapes from here — or undo.');
+    setNote('Baked into model.');
   };
 
   const on = !!prep;
@@ -169,9 +169,7 @@ export function CastPrepSection({ method, partingFromBaseMm }: {
       </div>
 
       <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">
-        {sand
-          ? 'Acts on every part in the scene, not only what this tab molds, and in the model itself, so the viewport and the plain STL export see it too. Draft is baked into the shapes, so editing is locked while it is on — switch it off to get the originals back.'
-          : 'Acts on every part in the scene, not only what this tab molds, as ordinary roundings you can still edit. A burnt-out pattern never draws, so it needs no draft.'}
+        Applies to all parts in the scene. Turn off to edit original geometry.
       </p>
 
       {busy && (
@@ -184,20 +182,19 @@ export function CastPrepSection({ method, partingFromBaseMm }: {
       )}
       {!busy && on && report?.ok && (
         <p className="text-[11px] leading-snug text-slate-600 dark:text-slate-300">
-          {report.treated} part{report.treated === 1 ? '' : 's'} prepared
-          {report.draftDeg > 0 ? ` · ${report.draftDeg}° draft` : ''}
-          {report.edges ? ` · edges up to ${report.edges.chamferMm} mm chamfer, ${report.edges.filletMm} mm fillet` : ''}
-          {report.sharpEdges > 0 ? ` · ${report.sharpEdges} edge${report.sharpEdges === 1 ? '' : 's'} too short to break, left sharp` : ''}.
+          {report.edges
+            ? `Applies ${report.draftDeg}° draft from the parting plane and ${report.edges.filletMm} mm edge fillets.`
+            : `${report.treated} part${report.treated === 1 ? '' : 's'} prepared${report.draftDeg > 0 ? ` · ${report.draftDeg}° draft` : ''}.`}
         </p>
       )}
       {!busy && on && (prep?.skipped.length ?? 0) > 0 && (
-        <ul className="text-[11px] leading-snug text-amber-700 dark:text-amber-400 list-disc pl-4">
-          {prep!.skipped.map((s, i) => <li key={i}><span className="font-semibold">{s.name}</span>: {s.reason}</li>)}
-        </ul>
+        <p className="text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+          Skipped non-manifold parts: {prep!.skipped.map((s) => `${s.name} (${s.reason})`).join(', ')}
+        </p>
       )}
       {!busy && on && !sand && prep!.draftDeg > 0 && (
         <p className="text-[11px] text-amber-700 dark:text-amber-400">
-          Draft from the sand setup is still baked in. A burnt-out pattern does not need it; switch prep off and on to drop it.
+          Sand draft is still active; toggle prep off and on to clear it.
         </p>
       )}
       {!busy && !on && note && (

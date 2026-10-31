@@ -127,11 +127,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                       <span className="text-[10px] text-slate-400 w-8 shrink-0">N·m·s</span>
                     </div>
                     <p className="text-[10px] text-slate-400 leading-snug">
-                      Held rigid until the torque on it passes the limit, then it folds
-                      within the range above and <strong className="text-slate-500">stays
-                      folded</strong> — a spring comes back, a crumpled bracket does not.
-                      Give it enough stiffness after that it settles into its new shape
-                      instead of swinging into it. Reset straightens it.
+                      Root body: joint moves relative to world. Use Join below to attach to another part.
                     </p>
                     {info && (
                       <div className="flex items-center gap-2 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">

@@ -582,14 +582,7 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
         <div className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-2 py-1.5">
           <div className="text-[11px] font-bold text-amber-700 dark:text-amber-300 tabular-nums">{gestureStatus}</div>
           <div className="text-[10px] leading-snug text-amber-700/70 dark:text-amber-400/70">
-            {/^(Move|Scale|Inset)/.test(gestureStatus) ? (
-              <>
-                Move the pointer to size it · <kbd className="font-mono">X/Y/Z</kbd> holds one axis ·
-                click or <kbd className="font-mono">Enter</kbd> keeps · <kbd className="font-mono">Esc</kbd> puts it back
-              </>
-            ) : (
-              <><kbd className="font-mono">Esc</kbd> abandons it</>
-            )}
+            Drag faces in the viewport or type dimensions on their labels.
           </div>
         </div>
       )}
@@ -708,13 +701,7 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
           ))}
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
-          The lit slice follows your pointer. Hold <kbd className="font-mono">Ctrl</kbd> to
-          stay on the one you are pointing at: it stops moving, reaches out past the shape,
-          and only points on it can be clicked. The lock button or <kbd className="font-mono">Caps Lock</kbd> holds
-          it without a key down; picking a drawing tool switches it on. Points snap to the
-          grid chosen in the viewport's grid menu, bottom right.
-          <kbd className="font-mono"> X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> turns it,
-          <kbd className="font-mono"> [</kbd> / <kbd className="font-mono">]</kbd> moves it a step, Shift for five.
+          Hold Ctrl or Caps Lock to lock plane. X/Y/Z turns, [/] steps.
         </p>
       </div>
 
@@ -772,8 +759,7 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
         </div>
         {subdiv > 0 && (
           <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
-            Four corners smooth to a rounded square and never to a circle. Cut the corners
-            off first with <kbd className="font-mono">B</kbd>; eight corners read as round.
+            Subdivides quads into a smooth surface. Press H on an edge to keep it sharp.
           </p>
         )}
       </div>

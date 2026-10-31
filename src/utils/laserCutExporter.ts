@@ -1439,16 +1439,12 @@ export function assignPanelThickness(
     `${items.slice(0, 4).join(', ')}${items.length > 4 ? `, +${items.length - 4} more` : ''}`;
   if (thinner.length) {
     warnings.push(
-      `Cut thinner than drawn, because the rack holds nothing thicker: ${list(thinner)}. ` +
-        `The joints still fit each other, so this will go together and look right — but the ` +
-        `parts are weaker than the model called for. Add thicker stock if they carry anything.`
+      `Cut from thinner stock than modelled (${list(thinner)}); joints are adjusted to match stock thickness.`
     );
   }
   if (thicker.length) {
     warnings.push(
-      `Cut thicker than drawn, because the rack holds nothing thinner: ${list(thicker)}. ` +
-        `Their joints fit the stock they are cut from, but panels will not seat where they meet ` +
-        `face to face — the model spaced them for thinner material.`
+      `Cut from thicker stock than modelled (${list(thicker)}); joints fit the stock, but face-to-face panel spacing follows the model.`
     );
   }
 
@@ -2651,23 +2647,12 @@ function applyJointsToPanels(
   if (modelled.length > 0 && singleThicknessMm !== null) {
     const typical = modelled[Math.floor(modelled.length / 2)];
     if (stockMm > 1.5 * typical) {
-      // Past this point the stock is thicker than the gap the model leaves for
-      // it, so neighbouring panels overlap in space. Every joint then wants the
-      // material at the corner it shares with the next one, and both keep it —
-      // the small proud blocks that have to be snapped off after cutting. It is
-      // the model that has to change, so name the thickness that would suit it.
       warnings.push(
-        `The model is drawn with ${typical.toFixed(1)} mm panels but joints are cut for ` +
-        `${stockMm.toFixed(1)} mm stock — too thick for the spacing the model leaves. ` +
-        `Panels will overlap where they meet, and corners come out with small proud ` +
-        `blocks that have to be broken off. Cut this from about ${typical.toFixed(1)} mm ` +
-        `stock, or scale the model up until it suits ${stockMm.toFixed(1)} mm.`
+        `Model panels are ${typical.toFixed(1)} mm thick but joints are sized for ${stockMm.toFixed(1)} mm stock; adjacent panels will overlap at corners. Use ~${typical.toFixed(1)} mm stock or scale the model up.`
       );
     } else if (Math.abs(typical - stockMm) > 0.25 * stockMm) {
       warnings.push(
-        `The model is drawn with ${typical.toFixed(1)} mm panels but joints are cut for ` +
-        `${stockMm.toFixed(1)} mm stock. The joints themselves will fit, but panel spacing ` +
-        `still follows the model, so parts may not seat where they meet face-to-face.`
+        `Model panels are ${typical.toFixed(1)} mm thick while stock is ${stockMm.toFixed(1)} mm; joints fit the stock, but face-to-face spacing follows the model.`
       );
     }
   }
@@ -2957,14 +2942,10 @@ export function exportLaserCutSvg(
    * so the only moment it can be caught is before the cut.
    */
   if (assignment.tooThin.length && !options.allowThinnerStock) {
+    const list = assignment.tooThin.join(', ');
     return {
       success: false,
-      error:
-        `The rack has nothing thick enough for ${assignment.tooThin.join(', ')}. ` +
-        `Cutting these from thinner stock would give parts that go together exactly as drawn ` +
-        `and are markedly weaker than designed — an 8 mm plate in 6 mm keeps about half its ` +
-        `stiffness in bending — and they may not fit what they slot into. Add thicker stock, ` +
-        `thin the model, or turn on "cut from thinner stock" if you have already decided.`,
+      error: `Stock is thinner than modelled (${list}). Add matching stock to the rack or pass allowThinnerStock: true.`,
       warnings: assignment.warnings,
     };
   }

@@ -65,9 +65,9 @@ function slowNote(i: WorkerStatusInput): string | undefined {
   const rtf = `${t.realtimeFactor.toFixed(2)}x real time`;
   if (t.scriptShare >= SCRIPT_DOMINANT_SHARE) {
     const who = t.slowest ? ` (slowest: '${t.slowest.body}' at ${t.slowest.msPerStep.toFixed(2)} ms)` : '';
-    return `Playing at ${rtf} because of the control scripts: they take ${t.scriptMsPerStep.toFixed(2)} ms per step${who} against a ${i.scripts!.timestepMs.toFixed(2)} ms timestep. Do less work per step, or only every Nth step (keep a counter on api.state).`;
+    return `Running at ${rtf}: control scripts take ${t.scriptMsPerStep.toFixed(2)} ms/step${who} vs ${i.scripts!.timestepMs.toFixed(2)} ms budget. Reduce per-step work or run every Nth step.`;
   }
-  return `Playing at ${rtf}: the model itself is slower to step than real time (scripts take only ${Math.round(t.scriptShare * 100)}% of the time). Fewer contacts, simpler colliders or a larger timestep would help.`;
+  return `Running at ${rtf}: physics step exceeds real-time budget (scripts use ${Math.round(t.scriptShare * 100)}%). Simplify colliders, reduce contacts, or increase timestep.`;
 }
 
 export function describeWorker(i: WorkerStatusInput): WorkerStatus {

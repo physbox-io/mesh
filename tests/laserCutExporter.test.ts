@@ -533,7 +533,7 @@ describe('Laser cut corner quality', () => {
       ...DEFAULT_LASER_OPTIONS,
       sheetWidth: 0.15, sheetHeight: 0.15, maxSheets: 1, autoScale: true,
     });
-    expect(shrunk.warnings!.some(w => /proud\s+blocks/.test(w))).toBe(true);
+    expect(shrunk.warnings!.some(w => /overlap at corners/.test(w))).toBe(true);
 
     // Matching the stock to the shrunken model is the way out, and it cuts clean.
     const matched = exportLaserCutSvg(birdhousePreset, {
@@ -541,7 +541,7 @@ describe('Laser cut corner quality', () => {
       sheetWidth: 0.15, sheetHeight: 0.15, maxSheets: 1, autoScale: true,
       materialThickness: 0.0009,
     });
-    expect(matched.warnings!.some(w => /proud\s+blocks/.test(w))).toBe(false);
+    expect(matched.warnings!.some(w => /overlap at corners/.test(w))).toBe(false);
   });
 
   it('cuts joints right up to a square corner but stops short of an obtuse one', () => {
@@ -659,13 +659,13 @@ describe('Laser cut material thickness and tab length', () => {
 
   it('says so when the stock does not match what the model was drawn for', () => {
     const matched = exportLaserCutSvg(birdhousePreset, DEFAULT_LASER_OPTIONS);
-    expect(matched.warnings!.some(w => w.includes('drawn with'))).toBe(false);
+    expect(matched.warnings!.some(w => w.includes('Model panels are'))).toBe(false);
 
     const mismatched = exportLaserCutSvg(birdhousePreset, {
       ...DEFAULT_LASER_OPTIONS,
       materialThickness: 0.006,
     });
-    expect(mismatched.warnings!.some(w => w.includes('3.0 mm panels'))).toBe(true);
+    expect(mismatched.warnings!.some(w => w.includes('Model panels are 3.0 mm'))).toBe(true);
   });
 });
 

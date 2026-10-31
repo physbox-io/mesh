@@ -80,7 +80,7 @@ describe('a generated board goes straight through the relief exporter', () => {
     // cutter's centre is kept inside rather than against the stock.
     // Waves run off all four edges, so the cut is carried past them (12a6abb)
     // and the exporter says so: those two are about the clamps, not a mismatch.
-    const runOff = /runs off its edge below the top face|past the board edge/;
+    const runOff = /runs off its edge below the top face|past stock edge/;
     expect((result.warnings ?? []).filter((w) => !runOff.test(w))).toEqual([]);
   });
 

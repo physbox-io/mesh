@@ -520,9 +520,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                   </button>
                 ))}
                 <p className="px-2 py-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-slate-800 mt-1">
-                  Pick one, move the pointer to size it, then click to keep it, or Esc to put it back.
-                  Measuring takes clicks instead: Esc puts the tape away.
-                  Hold Alt while dragging to turn snapping off.
+                  Click to confirm, Esc to cancel, hold Alt to disable snapping.
                 </p>
               </div>
             </>
@@ -701,9 +699,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 role="status"
                 className="absolute bottom-full right-0 mb-2 w-64 rounded-lg bg-slate-900 dark:bg-slate-800 text-white text-[11px] leading-relaxed px-3 py-2 shadow-xl border border-slate-700 z-50"
               >
-                <span className="font-bold">Exports are here, on this bar.</span>{' '}
-                They change with the machine and material you pick to the left, so
-                they live beside those rather than behind the printer button.
+                <span className="font-bold">Export tools for the selected machine and material.</span>
                 <span className="absolute top-full right-4 -mt-px border-[6px] border-transparent border-t-slate-900 dark:border-t-slate-800" />
               </div>
             )}

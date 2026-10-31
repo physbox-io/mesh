@@ -44,13 +44,7 @@ export const ControllerSilenceBanner: React.FC<{ machineState: MachineState }> =
     <div className="flex items-start gap-2 rounded-lg bg-red-500/10 border border-red-500/50 px-3 py-2 text-[11px] leading-relaxed text-red-700 dark:text-red-300">
       <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
       <span>
-        <strong className="font-bold">The controller is not answering.</strong> Commands are going
-        out (the machine may well still move) but nothing has come back for several seconds, and a
-        job cannot stream without the replies: it will stop on its first line and sit there. Seen in
-        the wild from a second controller sharing a USB hub, a lead with no receive line in it, the
-        wrong baud rate (GRBL is 115200), and a controller that needed power-cycling. The hub is
-        worth ruling out first, by going straight into the machine. The console below shows what, if
-        anything, is arriving.
+        No response from controller. Check baud rate (115200 for GRBL), USB cable/hub, or power-cycle the controller.
       </span>
     </div>
   );

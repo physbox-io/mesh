@@ -289,7 +289,7 @@ describe('Contour Slice Exporter', () => {
 
     expect(result.layers![0].loops).toHaveLength(2);
     expect(result.layers![0].pieceCount).toBe(2);
-    expect(result.warnings!.some(w => w.includes('separate pieces'))).toBe(true);
+    expect(result.warnings!.some(w => w.includes('multiple islands'))).toBe(true);
   });
 
   it('slices a real preset scene into stackable layers', () => {
@@ -385,7 +385,7 @@ describe('Contour Slice Exporter', () => {
     const result = exportContourSliceSvg(post, DEFAULT_CONTOUR_OPTIONS);
 
     expect(result.success).toBe(true);
-    expect(result.warnings!.some(w => /copies of the same cross-section/.test(w))).toBe(true);
+    expect(result.warnings!.some(w => /identical cross-section/.test(w))).toBe(true);
   });
 
   it('cuts without dowels when asked, and says why when they will not fit', () => {

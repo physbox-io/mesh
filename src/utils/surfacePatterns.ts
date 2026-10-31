@@ -401,7 +401,7 @@ const sliced: PatternSpec = {
   label: 'Sliced',
   blurb: 'A board cut right through into wavy strips that stay joined at both ends, like a sliced and fanned steak.',
   caveat:
-    'The slots go through the board, so set the stock on a spoilboard you do not mind marking; the cut goes 0.3 mm into it. The strips hang from the solid ends, so keep the end margin generous. The slot can be no narrower than the cutter, and the cutter needs flute enough to reach through the full thickness.',
+    'Through-cut pattern (0.3 mm into spoilboard); requires a spoilboard, adequate end margin, and a cutter diameter ≤ slot width with flute length ≥ stock thickness.',
   defaults: {
     slices: 7, slotMm: 6.35, amplitudeMm: 12, wavelengthMm: 250, phaseDeg: 0, endMarginMm: 30,
     envelope: 'taper', axis: 'x',
@@ -1162,7 +1162,7 @@ const studs: PatternSpec = {
   label: 'Stud Plate',
   blurb: 'A flat plate with rows of round studs standing proud of it.',
   caveat:
-    'This is the look, not a working brick. A carved surface has no undercuts, so there are no tubes underneath and nothing to clutch with -- a brick that actually grips needs a solid model and a fit measured in hundredths of a millimetre. A flat mill also leaves a fillet of its own radius around each stud root; a ball nose is the better finishing tool here.',
+    'Decorative stud pattern only (no underside clutch tubes); finish with a ball-nose cutter to avoid flat-mill root fillets.',
   defaults: { pitchMm: 8, diameterMm: 4.8, marginMm: 4, shoulder: 0.25 },
   fields: [
     { kind: 'number', key: 'pitchMm', label: 'Stud pitch', min: 1, max: 100, step: 0.1, unit: 'mm',

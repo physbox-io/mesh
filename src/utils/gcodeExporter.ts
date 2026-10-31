@@ -674,9 +674,7 @@ export function generateLaserCutGcode(
         // clamps usually are.
         if (faced.marginShort) {
           warnings.push(
-            `${panel.name}: the margin around it is narrower than the ${f(facingBit)}mm facing bit's ` +
-              `radius, so facing runs right to the edge of the sheet there. Keep clamps clear of that ` +
-              `edge, or leave a wider margin.`
+            `${panel.name}: sheet margin is narrower than the ${f(facingBit)} mm facing bit radius; facing extends to the sheet edge.`
           );
         }
         operations.push({

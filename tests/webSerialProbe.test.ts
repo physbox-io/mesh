@@ -174,15 +174,15 @@ describe('no probe runs on a circuit nobody has proved', () => {
     const result = await webSerialManager.zeroZ(12);
 
     expect(result.success).toBe(false);
-    expect(result.message).toMatch(/has not been proved/);
-    expect(fake.lastError()).toMatch(/has not been proved/);
+    expect(result.message).toMatch(/not verified this session/);
+    expect(fake.lastError()).toMatch(/not verified this session/);
     expect(fake.sent.some(l => l.includes('G38.2'))).toBe(false);
   });
 
   it('refuses the bed probe and a bare probe on the same grounds', async () => {
     fake = attachFakeGrbl(() => -5, { prove: false });
-    await expect(webSerialManager.probeGrid(bounds, 2, 2)).rejects.toThrow(/has not been proved/);
-    await expect(webSerialManager.probePoint()).rejects.toThrow(/has not been proved/);
+    await expect(webSerialManager.probeGrid(bounds, 2, 2)).rejects.toThrow(/not verified this session/);
+    await expect(webSerialManager.probePoint()).rejects.toThrow(/not verified this session/);
     expect(fake.sent.some(l => l.includes('G38.2'))).toBe(false);
   });
 
@@ -219,7 +219,7 @@ describe('no probe runs on a circuit nobody has proved', () => {
     fake = attachFakeGrbl(() => -5, { prove: false });
     const result = await webSerialManager.zeroZ(12);
     expect(result.success).toBe(false);
-    expect(result.message).toMatch(/has not been proved/);
+    expect(result.message).toMatch(/not verified this session/);
   });
 });
 

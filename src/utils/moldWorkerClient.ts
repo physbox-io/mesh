@@ -291,8 +291,7 @@ export function pourSideLabel(dir: PourDirection): string {
 /** The undercut warning, or null when a rigid mold lets go. */
 export function pourUndercutWarning(pour: PourInfo): string | null {
   return pour.undercutMm2 > 0
-    ? `Undercut (${pour.undercutMm2.toLocaleString()} mm² held in): fine when the mold or the casting is flexible, ` +
-      'like silicone; a rigid mold and a rigid casting will not come apart.'
+    ? `Undercut (${pour.undercutMm2.toLocaleString()} mm² trapped): requires a flexible mold or flexible casting material to demold.`
     : null;
 }
 

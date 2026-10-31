@@ -294,9 +294,9 @@ function analyzeMeshOverhangClusters(
         geomName: geom.name,
         category: 'manufacturing',
         severity: 'critical',
-        title: `Unsupported Mesh Overhang >45° (${b.count} Faces)`,
-        description: `Detected cluster of ${b.count} downward-facing mesh faces exceeding the 45° overhang threshold without support structures.`,
-        recommendation: 'Re-orient part on print bed, add chamfers/fillets, or enable slicer print supports.',
+        title: `Overhang >45° (${b.count} faces)`,
+        description: `${b.count} downward-facing mesh faces exceed 45°.`,
+        recommendation: 'Reorient part, chamfer overhangs, or enable supports.',
         position: surfacePos,
         surfacePoint: surfacePos,
         meshFaceCount: b.count,
@@ -315,9 +315,9 @@ function analyzeMeshOverhangClusters(
       geomName: geom.name,
       category: 'manufacturing',
       severity: 'warning',
-      title: `Sub-Optimal Print Orientation (${overhangRatio}% Support Area)`,
-      description: `Current orientation creates ${overhangRatio}% downward overhang face area. Will require extensive print support structures and long print times.`,
-      recommendation: 'Rotate component 90° or lay wide flat face directly on the print bed to eliminate support material.',
+      title: `High overhang area (${overhangRatio}%)`,
+      description: `${overhangRatio}% of face area overhangs >45°.`,
+      recommendation: 'Lay widest flat face on the print bed.',
       position: bounds.center,
       surfacePoint: bounds.center,
     });
@@ -357,7 +357,7 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
   for (const { node, parentPos } of allNodes) {
     // A bought bearing or screw is not made here, so has nothing to weaken.
     if (isBoughtIn(node)) continue;
-    const { worldPos, min, max, dimensions, center } = getNodeRealWorldBounds(node, parentPos);
+    const { min, max, dimensions, center } = getNodeRealWorldBounds(node, parentPos);
     const [dx, dy, dz] = dimensions;
     const isStatic = !node.joints || node.joints.length === 0;
 
@@ -377,9 +377,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
             geomName: g.name,
             category: 'structural',
             severity: 'critical',
-            title: `Ultra-Thin Wall Section (${wallThicknessMm.toFixed(1)}mm)`,
-            description: `Wall thickness is below 1.0mm. Vulnerable to structural collapse under normal force.`,
-            recommendation: 'Thicken wall section to at least 1.2mm–2.0mm for load-bearing stability.',
+            title: `Thin wall (${wallThicknessMm.toFixed(1)} mm)`,
+            description: 'Wall thickness is below 1.0 mm.',
+            recommendation: 'Thicken to ≥ 1.2 mm.',
             position: gTransform.pos,
             surfacePoint: gTransform.pos,
           });
@@ -399,9 +399,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
             geomName: g.name,
             category: 'manufacturing',
             severity: 'critical',
-            title: `Fragile Vertical Pin (${diameterMm.toFixed(1)}mm Diameter)`,
-            description: `Small pin printed vertically along Z. Bending loads will easily split Z-axis layer boundaries.`,
-            recommendation: 'Increase pin diameter to >=4mm or reorient print axis horizontally.',
+            title: `Slender vertical pin (⌀${diameterMm.toFixed(1)} mm)`,
+            description: 'Small vertical cylinder is weak across Z layer lines.',
+            recommendation: 'Increase diameter to ≥ 4 mm or print horizontally.',
             position: gTransform.pos,
             surfacePoint: gTransform.pos,
           });
@@ -426,9 +426,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
             geomName: g.name,
             category: 'manufacturing',
             severity: 'critical',
-            title: `Thin Hole-to-Edge Wall Proximity (${minMarginMm.toFixed(1)}mm)`,
-            description: `Wall thickness between drill hole and outer enclosure perimeter is under 1.5mm. High risk of perimeter wall blowout or cracking under fastener torque.`,
-            recommendation: `Increase wall margin between hole and outer boundary to at least 2.5mm.`,
+            title: `Hole near edge (${minMarginMm.toFixed(1)} mm wall)`,
+            description: 'Wall between hole and outer edge is under 1.5 mm.',
+            recommendation: 'Increase edge margin to ≥ 2.5 mm.',
             position: gPos,
             surfacePoint: gPos,
           });
@@ -448,38 +448,6 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
       }
     }
 
-    // --- PASS 3: UNFILLETED 90° NOTCH STEPS ---
-    if (primGeoms.length >= 2) {
-      for (let i = 0; i < primGeoms.length - 1; i++) {
-        const g1 = primGeoms[i], g2 = primGeoms[i + 1];
-        if (g1.type === 'box' && g2.type === 'box' && g1.pos && g2.pos) {
-          const dxStep = Math.abs(g1.pos[0] - g2.pos[0]);
-          const dyStep = Math.abs(g1.pos[1] - g2.pos[1]);
-          const dzStep = Math.abs(g1.pos[2] - g2.pos[2]);
-          if ((dxStep > 0.02 || dyStep > 0.02) && dzStep < 0.01) {
-            const stepMjPos: [number, number, number] = [
-              worldPos[0] + (g1.pos[0] + g2.pos[0]) / 2,
-              worldPos[1] + (g1.pos[1] + g2.pos[1]) / 2,
-              worldPos[2] + (g1.pos[2] + g2.pos[2]) / 2,
-            ];
-            weakSpots.push({
-              id: `notch_${node.id}_${i}`,
-              nodeId: node.id,
-              nodeName: node.name,
-              category: 'structural',
-              severity: 'info',
-              title: 'Unfilleted 90° Notch Stress Riser',
-              description: 'Abrupt 90° corner joint between sub-geometries creates high stress concentration under load.',
-              recommendation: 'Add a 2mm–4mm fillet radius or angled corner chamfer.',
-              position: stepMjPos,
-              surfacePoint: stepMjPos,
-            });
-            break;
-          }
-        }
-      }
-    }
-
     // --- PASS 4: BOUNDING BOX & SCALE EVALUATION ---
     const maxExtent = Math.max(dx, dy, dz);
     if (maxExtent > 20.0) {
@@ -489,9 +457,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
         nodeName: node.name,
         category: 'manufacturing',
         severity: 'critical',
-        title: 'Model Exceeds Build Envelope (>20,000 mm)',
-        description: `Model extents are ${Math.round(maxExtent * 1000).toLocaleString()} mm wide, about 1000 times too big: it was most likely drawn in millimetres and read in as metres.`,
-        recommendation: 'Check the units it was imported with, or scale it by 0.001.',
+        title: 'Exceeds build envelope (>20 m)',
+        description: `Part span is ${Math.round(maxExtent * 1000).toLocaleString()} mm (likely mm imported as m).`,
+        recommendation: 'Scale by 0.001 or check import units.',
         position: center,
         surfacePoint: center,
       });
@@ -520,9 +488,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
         nodeName: node.name,
         category: 'structural',
         severity: 'warning',
-        title: `High Aspect Ratio Feature (${(longSide / midSide).toFixed(1)}:1 Ratio)`,
-        description: `Slender feature (${(longSide * 1000).toFixed(0)}mm long vs ${(midSide * 1000).toFixed(0)}mm across). Prone to bending or print wobble.`,
-        recommendation: 'Consider thicker walls or reinforcing ribs to prevent bending during printing or under load.',
+        title: `Slender feature (${(longSide / midSide).toFixed(1)}:1)`,
+        description: `${(longSide * 1000).toFixed(0)} mm × ${(midSide * 1000).toFixed(0)} mm span may flex during printing.`,
+        recommendation: 'Thicken section or add ribs/supports.',
         position: [center[0], center[1], max[2]],
         surfacePoint: [center[0], center[1], max[2]],
       });
@@ -561,9 +529,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
           nodeName: node.name,
           category: 'manufacturing',
           severity: 'warning',
-          title: 'Weak Print Bed Contact Footprint',
-          description: `Minimal ground contact area relative to part height (${(height * 1000).toFixed(0)}mm tall). High risk of print detachment.`,
-          recommendation: 'Add a sacrificial print brim/raft or broaden base contact area.',
+          title: 'Small bed contact area',
+          description: `Small base footprint relative to ${(height * 1000).toFixed(0)} mm height.`,
+          recommendation: 'Use a brim/raft or reorient.',
           position: [center[0], center[1], min[2]],
           surfacePoint: [center[0], center[1], min[2]],
         });
@@ -584,49 +552,13 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
             nodeName: node.name,
             category: 'hardware',
             severity: 'critical',
-            title: `Thin Insert Boss Wall (${bossWallMm.toFixed(1)}mm)`,
-            description: `Outer wall surrounding ${spec.size} insert hole is under 1.8mm recommendation. Thermal insertion will burst boss wall.`,
-            recommendation: `Enlarge boss outer diameter to at least ${(innerH + 3.6).toFixed(1)}mm.`,
+            title: `Thin insert boss wall (${bossWallMm.toFixed(1)} mm)`,
+            description: `Wall around ${spec.size} insert is under 1.8 mm.`,
+            recommendation: `Increase boss OD to ≥ ${(innerH + 3.6).toFixed(1)} mm.`,
             position: center,
             surfacePoint: center,
           });
         }
-      }
-    }
-  }
-
-  // --- PASS 5: DYNAMIC CLEARANCE & GEAR INTERLOCKING ---
-  // Only gear pairs can raise this, so only gears are paired, each centred
-  // once: bounding every node twice per pair made this pass O(N²) bounds
-  // computations, each resolving the node's booleans.
-  const isGear = (n: SceneNode) => n.name?.toLowerCase().includes('gear') || n.name?.toLowerCase().includes('pinion');
-  const gears = allNodes
-    .filter(entry => isGear(entry.node))
-    .map(entry => ({ node: entry.node, center: getNodeRealWorldBounds(entry.node, entry.parentPos).center }));
-  for (let i = 0; i < gears.length; i++) {
-    for (let j = i + 1; j < gears.length; j++) {
-      const a = gears[i];
-      const b = gears[j];
-      if (a.node.id === b.node.id) continue;
-
-      const posA = a.center;
-      const posB = b.center;
-      const dist = Math.hypot(posA[0] - posB[0], posA[1] - posB[1], posA[2] - posB[2]);
-
-      if (dist < 0.03 && dist > 0.001) {
-        const midPoint: [number, number, number] = [(posA[0] + posB[0]) / 2, (posA[1] + posB[1]) / 2, (posA[2] + posB[2]) / 2];
-        weakSpots.push({
-          id: `clearance_${a.node.id}_${b.node.id}`,
-          nodeId: a.node.id,
-          nodeName: `${a.node.name} / ${b.node.name}`,
-          category: 'hardware',
-          severity: 'warning',
-          title: 'Tight Gear Tooth Clearance / Binding Risk',
-          description: 'Meshing gear centers positioned with minimal clearance gap. Risks physical tooth binding or interlock jams.',
-          recommendation: 'Increase backlash clearance (+0.15mm pitch offset) or verify mechanical equality coupling.',
-          position: midPoint,
-          surfacePoint: midPoint,
-        });
       }
     }
   }

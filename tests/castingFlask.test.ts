@@ -72,7 +72,7 @@ describe('the casting flask preset', () => {
       splitOversized: true,
     }));
     expect(result.success).toBe(false);
-    expect(result.error).toContain('nothing thick enough');
+    expect(result.error).toContain('Stock is thinner than modelled');
   });
 });
 

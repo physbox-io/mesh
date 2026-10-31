@@ -105,12 +105,12 @@ describe('facing', () => {
     expect(xs.length).toBeGreaterThan(0);
     expect(Math.min(...xs)).toBeGreaterThanOrEqual(12.5 - 1e-9);
     expect(Math.max(...xs)).toBeLessThanOrEqual(116 - 12.5 + 1e-9);
-    expect(r.warnings?.some((w) => /narrower than the 25.000mm facing bit's radius/.test(w))).toBe(true);
+    expect(r.warnings?.some((w) => /narrower than the 25.000 mm facing bit radius/.test(w))).toBe(true);
   });
 
   it('says nothing about margins when there is room for the bit', () => {
     const r = run({ facingBitDiameterMm: 20, sheetSizeMm: [{ widthMm: 300, heightMm: 300 }] });
-    expect(r.warnings?.some((w) => /facing bit's radius/.test(w)) ?? false).toBe(false);
+    expect(r.warnings?.some((w) => /facing bit radius/.test(w)) ?? false).toBe(false);
   });
 
   it('names the operation with both thicknesses, so the pause list reads plainly', () => {

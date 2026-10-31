@@ -67,14 +67,14 @@ describe('warnings come from the data', () => {
   });
 
   it('warns about anything poured hotter than PLA takes', () => {
-    expect(castMaterialWarnings('wax', 10, { pla: true })[0]).toMatch(/softens a PLA mold/);
+    expect(castMaterialWarnings('wax', 10, { pla: true })[0]).toMatch(/avoid softening a PLA mold/);
     expect(castMaterialWarnings('wax', 10, { pla: false })).toEqual([]);
-    expect(castMaterialWarnings('chocolate', 10, { pla: true }).join(' ')).not.toMatch(/softens/);
+    expect(castMaterialWarnings('chocolate', 10, { pla: true }).join(' ')).not.toMatch(/soften/);
   });
 
   it('carries the notes that apply in any mold', () => {
-    expect(castMaterialWarnings('water', 10, { pla: false })[0]).toMatch(/9%/);
-    expect(castMaterialWarnings('chocolate', 10, { pla: false })[0]).toMatch(/food/i);
+    expect(castMaterialWarnings('water', 10, { pla: false })).toEqual([]);
+    expect(castMaterialWarnings('chocolate', 10, { pla: false })).toEqual([]);
   });
 
   it('leaves no material name in a branch in the casting code', () => {

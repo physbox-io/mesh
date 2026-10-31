@@ -1998,10 +1998,7 @@ export function machineSurface(
     const flutes = fluteLen > 0 ? fluteLen : autoFluteLength(dia, tip);
     if (!opts.toolBodyClearance && shank > dia + 1e-6 && depthMm > flutes) {
       warnings.push(
-        `The ${dia} mm ${which} bit has about ${flutes.toFixed(1)} mm of flute on a ` +
-          `${shank.toFixed(3)} mm shank, and the ${noun} is ${depthMm.toFixed(1)} mm deep, so the shank will be ` +
-          `in the cut. Shank clearance is off, so nothing in this path allows for that. A long-reach ` +
-          `or necked bit — one whose shank is no wider than its cutting diameter — has no step to foul.`
+        `${dia} mm ${which} bit has ~${flutes.toFixed(1)} mm flute length on a ${shank.toFixed(3)} mm shank; ${depthMm.toFixed(1)} mm ${noun} depth exceeds flute length with shank clearance disabled.`
       );
     }
 
@@ -2014,11 +2011,7 @@ export function machineSurface(
       const cone = vBitConeHeight(dia, tip.vBitAngleDeg ?? 60);
       if (depthMm > cone + 1e-6) {
         warnings.push(
-          `The ${dia} mm ${tip.vBitAngleDeg ?? 60}\u00b0 V-bit only cuts for the ` +
-            `${cone.toFixed(1)} mm it takes the cone to reach full diameter, and the ${noun} is ` +
-            `${depthMm.toFixed(1)} mm deep. Below that it is the shank in the cut. Use a wider ` +
-            `bit, a narrower point angle, or rough the depth out first and leave the V-bit the ` +
-            `detail near the surface.`
+          `${dia} mm ${tip.vBitAngleDeg ?? 60}° V-bit cone height is ${cone.toFixed(1)} mm (${noun} depth is ${depthMm.toFixed(1)} mm); use a wider V-bit, a narrower angle, or rough first.`
         );
       }
       return;
@@ -2030,10 +2023,7 @@ export function machineSurface(
     const ratio = depthMm / Math.max(0.05, dia);
     if (ratio > MAX_REACH_DIAMETERS) {
       warnings.push(
-        `A ${depthMm.toFixed(1)} mm ${noun} is ${ratio.toFixed(1)} diameters of stickout for the ` +
-          `${dia} mm ${which} bit. Stiffness falls with the cube of that, so expect chatter and ` +
-          `wander. A bit of ${(depthMm / MAX_REACH_DIAMETERS).toFixed(1)} mm or more, or a ` +
-          `shallower ${noun}, is what makes it rigid.`
+        `${depthMm.toFixed(1)} mm ${noun} requires ${ratio.toFixed(1)}×D stickout on the ${dia} mm ${which} bit; use a ≥ ${(depthMm / MAX_REACH_DIAMETERS).toFixed(1)} mm cutter or reduce depth to avoid deflection.`
       );
     }
   };
@@ -2085,19 +2075,11 @@ export function machineSurface(
     const ceiling = ideal * 2;
     if (chip < floor) {
       warnings.push(
-        `${feed} mm/min at ${opts.spindleRpm} RPM on ${Math.max(1, Math.round(flutes))} flutes is ` +
-          `${chip.toFixed(4)} mm of chip per tooth on the ${which} tool, against the ` +
-          `${ideal.toFixed(3)} mm a ${dia} mm cutter wants in ${material.label.toLowerCase()}. ` +
-          `Below about ${floor.toFixed(3)} mm the edge rubs instead of cutting, which is what ` +
-          `dulls a bit and burns the work. Feed faster, drop the spindle speed, or use a cutter ` +
-          `with fewer flutes.`
+        `${which} chipload is ${chip.toFixed(4)} mm/tooth (${feed} mm/min, ${opts.spindleRpm} RPM, ${Math.max(1, Math.round(flutes))} flutes), below the ${floor.toFixed(3)} mm minimum for a ${dia} mm cutter in ${material.label.toLowerCase()} (target ~${ideal.toFixed(3)} mm). Increase feedrate, lower RPM, or use fewer flutes to prevent rubbing.`
       );
     } else if (chip > ceiling) {
       warnings.push(
-        `${feed} mm/min at ${opts.spindleRpm} RPM on ${Math.max(1, Math.round(flutes))} flutes is ` +
-          `${chip.toFixed(3)} mm of chip per tooth on the ${which} tool, past the ` +
-          `${ceiling.toFixed(3)} mm a ${dia} mm cutter will take in ${material.label.toLowerCase()}. ` +
-          `Expect deflection, a poor finish and a broken bit. Slow the feed or raise the spindle.`
+        `${which} chipload is ${chip.toFixed(3)} mm/tooth (${feed} mm/min, ${opts.spindleRpm} RPM, ${Math.max(1, Math.round(flutes))} flutes), above the ${ceiling.toFixed(3)} mm maximum for a ${dia} mm cutter in ${material.label.toLowerCase()}. Lower feedrate or increase RPM.`
       );
     }
   };
@@ -2111,19 +2093,14 @@ export function machineSurface(
     const capped = material.maxRpm !== undefined ? Math.min(ideal, material.maxRpm) : ideal;
     if (opts.spindleRpm > capped * 1.6) {
       warnings.push(
-        `${opts.spindleRpm.toLocaleString()} RPM is well above the ` +
-          `${Math.round(capped / 500) * 500} RPM a ${opts.finishingToolDiaMm} mm cutter wants in ` +
-          `${material.label.toLowerCase()}` +
+        `${opts.spindleRpm.toLocaleString()} RPM exceeds the recommended ~${Math.round(capped / 500) * 500} RPM for a ${opts.finishingToolDiaMm} mm cutter in ${material.label.toLowerCase()}` +
           (material.maxRpm !== undefined
-            ? ` — this material melts rather than wears, so the excess goes into the cut as heat.`
-            : ` — the edge is travelling faster than it can clear a chip, which burns the work and blunts the bit.`)
+            ? ` (risk of melting).`
+            : ` (risk of rubbing and excess heat).`)
       );
     } else if (opts.spindleRpm < capped * 0.45) {
       warnings.push(
-        `${opts.spindleRpm.toLocaleString()} RPM is well below the ` +
-          `${Math.round(capped / 500) * 500} RPM a ${opts.finishingToolDiaMm} mm cutter wants in ` +
-          `${material.label.toLowerCase()}. A cutter turning too slowly takes too big a bite per ` +
-          `tooth and deflects, which shows up as chatter marks across the finish.`
+        `${opts.spindleRpm.toLocaleString()} RPM is below the recommended ~${Math.round(capped / 500) * 500} RPM for a ${opts.finishingToolDiaMm} mm cutter in ${material.label.toLowerCase()}, increasing chipload and tool deflection.`
       );
     }
   }
@@ -2139,25 +2116,17 @@ export function machineSurface(
   const geometryWarn = (geometry: CutterGeometry, dia: number, which: string) => {
     if (geometry === 'downcut' && depthMm > dia * 2) {
       warnings.push(
-        `A downcut ${which} bit presses its chips into the bottom of the cut, and this ${noun} is ` +
-          `${(depthMm / dia).toFixed(1)} diameters deep. The chips have nowhere to go, so the ` +
-          `cut packs, heats and burns. Downcut is the right choice for a clean top edge on thin ` +
-          `stock, not for clearing depth — use an upcut to rough and keep the downcut for the ` +
-          `finishing sweep if the top face is what matters.`
+        `Downcut ${which} bit in a ${(depthMm / dia).toFixed(1)}×D deep ${noun} can pack chips; use an upcut bit for roughing deep pockets.`
       );
     }
     if (geometry === 'compression' && depthMm < 6) {
       warnings.push(
-        `A compression ${which} bit is upcut for its first few millimetres and downcut above. ` +
-          `This ${noun} never leaves that lower section, so it will behave exactly as an upcut — ` +
-          `the tool is doing nothing a plain upcut would not, at several times the price.`
+        `Compression ${which} bit in a ${depthMm.toFixed(1)} mm ${noun} cuts only within its lower upcut section.`
       );
     }
     if (geometry === 'straight' && depthMm > dia * 3) {
       warnings.push(
-        `A straight-flute ${which} bit has no helix to move chips either way, so a cut ` +
-          `${(depthMm / dia).toFixed(1)} diameters deep relies entirely on dust extraction to ` +
-          `clear itself. Take shallower passes, or fit a helical cutter.`
+        `Straight-flute ${which} bit in a ${(depthMm / dia).toFixed(1)}×D deep ${noun} has no axial chip evacuation; use dust extraction or shallower passes.`
       );
     }
   };
@@ -2173,9 +2142,7 @@ export function machineSurface(
   // throws waste is the direction it is trying to travel.
   if (opts.finishingEnabled && opts.finishingGeometry === 'downcut' && opts.leadInAngleDeg <= 0) {
     warnings.push(
-      `The finishing bit is a downcut and the lead-in angle is 0, so every pass starts with a ` +
-        `vertical plunge. That is the one move a downcut cutter cannot make — it packs its own ` +
-        `chips under the tip. Set a lead-in of 10-20 degrees.`
+      `Downcut finishing bit with 0° lead-in plunges vertically and can pack chips under the tip; set a 10–20° lead-in angle.`
     );
   }
 
@@ -2194,12 +2161,10 @@ export function machineSurface(
           : finishRad - Math.sqrt(finishRad * finishRad - half * half);
   if (ridgeMm > 0.2) {
     warnings.push(
-      `A ${stepover.toFixed(2)} mm stepover with this cutter leaves ${ridgeMm.toFixed(2)} mm ridges ` +
-        `between passes on a flat area — that is sanding, not a finish. ` +
+      `${stepover.toFixed(2)} mm stepover leaves ${ridgeMm.toFixed(2)} mm cusps between passes; ` +
         (opts.finishingToolType === 'v_bit'
-          ? `A V-bit's ridge is set by its point angle: a wider angle, or a smaller stepover, ` +
-            `brings it down.`
-          : `Drop the stepover, or fit a larger-diameter ball nose.`)
+          ? `reduce stepover or use a wider V-bit angle.`
+          : `reduce stepover or use a larger ball-nose cutter.`)
     );
   }
 
@@ -2316,11 +2281,7 @@ export function machineSurface(
     }
     if (carved > 0 && blocked / carved > 0.02) {
       warnings.push(
-        `The ${opts.finishingToolDiaMm} mm bit's shank or holder cannot reach into ` +
-          `${((100 * blocked) / carved).toFixed(0)}% of the ${noun}, up to ${worst.toFixed(1)} mm ` +
-          `short of the surface, so the path is lifted clear and that material is left standing. ` +
-          `A longer-reach bit, a shallower ${noun}, or turning off shank clearance under Advanced ` +
-          `are the ways out — the last one will cut it, by dragging the shank through the wall.`
+        `Shank/holder clearance lifted the ${opts.finishingToolDiaMm} mm toolpath over ${((100 * blocked) / carved).toFixed(0)}% of the ${noun} (up to ${worst.toFixed(1)} mm above the surface). Use a longer-reach bit, reduce depth, or disable shank clearance in Advanced.`
       );
     }
   }
@@ -2706,10 +2667,7 @@ export function machineSurface(
   // Written out as its own line because on a router with a dial rather than a
   // controlled spindle the `S` word below does nothing at all, and this comment
   // is the only place the number appears in a form anybody reads.
-  gcode.push(
-    `; SET THE SPINDLE TO ${Math.round(opts.spindleRpm).toLocaleString('en-GB')} RPM ` +
-      `before starting — the S word is ignored by a hand-dialled router`
-  );
+  gcode.push(`; Spindle: ${Math.round(opts.spindleRpm)} RPM`);
   gcode.push(`M3 S${Math.round(opts.spindleRpm)} ; spindle on`);
   gcode.push('G4 P2 ; let the spindle come up to speed');
   // Whatever the caller wants done first — registration holes, say.
@@ -2836,9 +2794,7 @@ export function machineSurface(
       );
       gcode.push(
         adaptive
-          ? `;     adaptive clear, ${round2(roughStepover)} mm bite ` +
-            `(${Math.round(engagement * 100)}% of the cutter) — held in corners too, which is ` +
-            `what the ${round2(layerStep)} mm depth is bought with`
+          ? `;     adaptive clear, ${round2(roughStepover)} mm radial engagement (${Math.round(engagement * 100)}%)`
           : `;     raster, ${round2(roughStepover)} mm stepover`
       );
     }
@@ -3434,9 +3390,7 @@ export function machineSurface(
     // Asked for explicitly, so it is emitted — but a single sweep with nothing
     // ahead of it means the first move into the stock goes to the floor.
     warnings.push(
-      `One depth-first sweep with no roughing ahead of it takes the ${opts.finishingToolDiaMm} mm bit ` +
-        `to the full ${depthMm.toFixed(1)} mm on its first entry. Layer the finishing pass, or rough first, ` +
-        `unless you know this cutter can take it.`
+      `Single-pass finishing without roughing engages the ${opts.finishingToolDiaMm} mm bit to the full ${depthMm.toFixed(1)} mm depth on entry; enable roughing or layered finishing.`
     );
   }
 
@@ -4598,8 +4552,7 @@ export function generateReliefCarveGcode(
     // second-guess: the stock and a skim of spoilboard, and no less.
     reliefDepth = opts.stockThicknessMm + cutThrough;
     warnings.push(
-      `Cuts through the ${opts.stockThicknessMm} mm stock and ${cutThrough} mm into the spoilboard. ` +
-        `Check the board is down flat on it before you start.`
+      `Cuts through ${opts.stockThicknessMm} mm stock and ${cutThrough} mm into the spoilboard.`
     );
   } else if (asModelled && reliefDepth > maxDepthForStock) {
     warnings.push(
@@ -4645,11 +4598,7 @@ export function generateReliefCarveGcode(
   if (undercut && asModelled) {
     const b = undercut.bounds;
     warnings.push(
-      `Part of the model is undercut: about ${Math.round(undercut.areaMm2)} mm² of it, near X ` +
-        `${b.minX.toFixed(0)}–${b.maxX.toFixed(0)} Y ${b.minY.toFixed(0)}–${b.maxY.toFixed(0)} mm, ` +
-        `is hidden under an overhang (up to ${undercut.maxMm.toFixed(1)} mm deep) where a cutter coming ` +
-        `straight down cannot reach. It is left solid — about ${Math.round(undercut.volumeMm3)} mm³ the ` +
-        `model has as empty space. A leaning slot comes out with a vertical wall on its overhanging side.`
+      `Undercut region (~${Math.round(undercut.areaMm2)} mm², ~${Math.round(undercut.volumeMm3)} mm³, up to ${undercut.maxMm.toFixed(1)} mm deep near X ${b.minX.toFixed(0)}–${b.maxX.toFixed(0)} Y ${b.minY.toFixed(0)}–${b.maxY.toFixed(0)} mm) is occluded from +Z and left solid.`
     );
   }
 
@@ -4732,8 +4681,7 @@ export function generateReliefCarveGcode(
       runOff.maxY ? `Y${f(stockD)}` : null,
     ].filter(Boolean);
     warnings.push(
-      `The cut runs ${overrunMm.toFixed(1)} mm past the board edge at ${named.join(', ')}, where the ` +
-        `model runs off it. Keep clamps clear of ${named.length === 1 ? 'that edge' : 'those edges'}.`
+      `Toolpath extends ${overrunMm.toFixed(1)} mm past stock edge at ${named.join(', ')}; keep clamps clear.`
     );
   }
   const frameBounds = runOff
@@ -4758,17 +4706,13 @@ export function generateReliefCarveGcode(
       loose = placed.loose;
       if (placed.tabs > 0) {
         warnings.push(
-          `${placed.tabs} holding tab${placed.tabs === 1 ? '' : 's'}, ${height} mm thick, keep ` +
-            `${freed} loose piece${freed === 1 ? '' : 's'} attached. Saw or chisel ` +
-            `${placed.tabs === 1 ? 'it' : 'them'} off once the board is off the machine.`
+          `Placed ${placed.tabs} holding tab${placed.tabs === 1 ? '' : 's'} (${height} mm thick) across ${freed} cut-free piece${freed === 1 ? '' : 's'}.`
         );
       }
     }
     if (loose > 0) {
       warnings.push(
-        `${loose} piece${loose === 1 ? ' is' : 's are'} cut free of the rest of the board. Hold ` +
-          `${loose === 1 ? 'it' : 'them'} down -- tabs, tape or screws -- or the cutter will throw ` +
-          `${loose === 1 ? 'it' : 'them'} once the last of the slot is cut.`
+        `${loose} cut-free piece${loose === 1 ? ' has' : 's have'} no holding tabs; secure separately before cutting through.`
       );
     }
   }

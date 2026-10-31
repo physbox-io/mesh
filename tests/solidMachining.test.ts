@@ -106,7 +106,7 @@ describe('solid machining of the wall bracket', () => {
     const oneSided = generateSolidMachining(latticeBracketPreset, { ...quick, sides: 1, up: '-z' });
     expect(oneSided.success, oneSided.error).toBe(true);
     expect(oneSided.unreachablePercent).toBeGreaterThan(50);
-    expect(oneSided.warnings.join('\n')).toMatch(/cannot see past/);
+    expect(oneSided.warnings.join('\n')).toMatch(/beneath overhangs/);
   });
 
   it('refuses stock thinner than the part', () => {
@@ -119,7 +119,7 @@ describe('solid machining of the wall bracket', () => {
     const loose = generateSolidMachining(latticeBracketPreset, { ...quick, tabCount: 0 });
     expect(loose.success, loose.error).toBe(true);
     expect(loose.tabsPlaced).toBe(0);
-    expect(loose.warnings.join('\n')).toMatch(/come loose/);
+    expect(loose.warnings.join('\n')).toMatch(/no holding tabs/);
   });
 });
 

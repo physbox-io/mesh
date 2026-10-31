@@ -8,7 +8,7 @@ import { machineArming, subscribeToArming } from '../utils/machineMcp';
  * and so an agent's refusal message can quote the same words.
  */
 const ARM_TOOLTIP =
-  'Armed means an AI can control connected machines; otherwise only humans may.';
+  'Allow AI control of connected machines.';
 
 /**
  * The one place a person says whether an AI may move the machine.
@@ -112,7 +112,7 @@ export function AgentMachineBanner() {
   return (
     <div
       className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg border border-red-500/60 bg-red-500/10 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300"
-      title={`${ARM_TOOLTIP} Armed for another ${minutesLeft} minutes; disarming is immediate and cancels anything running.`}
+      title={`${ARM_TOOLTIP} Active for ${minutesLeft}m; click Disarm to stop.`}
     >
       <Bot size={14} className="shrink-0 animate-pulse" />
       <span className="shrink-0 font-semibold tracking-wide">ARMED</span>

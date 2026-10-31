@@ -575,11 +575,10 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     thickestPvaMm: Math.round(thickest * 10) / 10,
     dissolveHours,
     steps: [
-      'Print with PLA on filament 1 and PVA on filament 2; the 3MF sets both.',
-      `Cast ${castMaterial(ctx.castMaterial).label.toLowerCase()} as usual and let it cure.`,
-      'Lift the PLA shell straight off along the pull; if the PVA holds it, soak the mold until it lets go.',
-      `Soak the casting in warm (30–40 °C) water, stirred and changed when it clouds, until the PVA is gone: ` +
-      `about ${dissolveHours} h for its thickest ${Math.round(thickest * 10) / 10} mm, at a rough 1 mm an hour.`,
+      'Print with PLA on extruder 1 and PVA on extruder 2 (pre-assigned in 3MF).',
+      `Cast ${castMaterial(ctx.castMaterial).label.toLowerCase()} and allow to cure.`,
+      'Remove the PLA outer shell along the pull direction.',
+      `Dissolve the PVA liner in warm (30–40 °C) water (~${dissolveHours} h for ${Math.round(thickest * 10) / 10} mm max thickness).`,
     ],
   };
 

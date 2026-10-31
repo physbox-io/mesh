@@ -27,10 +27,6 @@ export const EdgesCard: React.FC<{ node: SceneNode }> = ({ node }) => {
       <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
         <SquareRoundCorner className="w-3.5 h-3.5 text-amber-500" /> Edges
       </h3>
-      <p className="text-[10px] text-slate-400 -mt-1 leading-snug">
-        Round or bevel the part’s edges so it looks finished and is kinder to hands. The rounded
-        shape is what collides, prints and machines.
-      </p>
 
       {node.edgeRoundsLost ? (
         <p className="text-[10px] leading-snug text-amber-700 bg-amber-50 rounded-md px-2 py-1">

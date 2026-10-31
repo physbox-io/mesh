@@ -76,9 +76,7 @@ export function ShareReportPortal({ share: state }: { share: ShareState }) {
           ) : (
             <>
               <p className="text-[11px] text-slate-600 dark:text-slate-300">
-                Sign in and your account can hold the scene instead — the link becomes a short
-                one, anyone can open it without an account, and you can turn it off later.
-                It is free; there is nothing to buy.
+                Sign in for free to create a short shareable link hosted on your account.
               </p>
               <button
                 onClick={() =>

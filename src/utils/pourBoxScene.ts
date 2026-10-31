@@ -160,9 +160,9 @@ export function sceneWithPourBox(
 
 /** What each hole is for, in the note card's words. */
 const HOLE_USE: Record<HolePurpose, string> = {
-  wick: 'hole through the silicone for a wick; plug it with the wick when you pour.',
-  pour: 'hole through the silicone to pour through, the mold standing as it was made, on the base.',
-  fixing: 'hole through the silicone for a fixing; plug it when you pour.',
+  wick: 'wick hole (plug during pour).',
+  pour: 'pour hole.',
+  fixing: 'fixing hole (plug during pour).',
 };
 
 /** Lines for the scene's note card; the hole only when its pin went in. */
@@ -171,9 +171,9 @@ export function pourBoxNotes(name: string, box: PourBox, pinAdded = Boolean(box.
   return [
     `## Silicone pour box for ${name}`,
     '',
-    `- Print the base (${r.baseFootprintMm[0]} × ${r.baseFootprintMm[1]} mm) and the sleeve (${r.sleeveFootprintMm[0]} × ${r.sleeveFootprintMm[1]} × ${r.sleeveHeightMm} mm). Stand the master on the base, inside the groove, and drop the sleeve into the groove.`,
-    `- Fill to ${r.fillHeightMm} mm above the base: ${r.siliconeMm3.toLocaleString()} mm³, ${r.siliconeG} g of ${r.siliconeName.toLowerCase()} (${r.partAG} g A + ${r.partBG} g B). Mix 10% extra for what stays in the cup.`,
-    ...(box.hole && pinAdded ? [`- Print the ${box.hole.purpose} pin (${box.hole.diaMm} mm across, ${box.hole.lengthMm.toFixed(1)} mm long) and stand it on the master: it rises ${(r.fillZMm + 1 - (box.hole.footMm[2] + 0.5)).toFixed(1)} mm above the master, 1 mm past the fill line, and leaves a ${box.hole.diaMm} mm ${HOLE_USE[box.hole.purpose]}`] : []),
+    `- Base: ${r.baseFootprintMm[0]} × ${r.baseFootprintMm[1]} mm; sleeve: ${r.sleeveFootprintMm[0]} × ${r.sleeveFootprintMm[1]} × ${r.sleeveHeightMm} mm.`,
+    `- Fill to ${r.fillHeightMm} mm: ${r.siliconeMm3.toLocaleString()} mm³, ${r.siliconeG} g ${r.siliconeName.toLowerCase()} (${r.partAG} g A + ${r.partBG} g B; mix +10% margin).`,
+    ...(box.hole && pinAdded ? [`- ${box.hole.purpose} pin: ⌀${box.hole.diaMm} × ${box.hole.lengthMm.toFixed(1)} mm (${HOLE_USE[box.hole.purpose]})`] : []),
     ...r.warnings.map((w) => `- ${w}`),
   ];
 }

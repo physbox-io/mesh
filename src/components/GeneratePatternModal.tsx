@@ -333,17 +333,8 @@ export const GeneratePatternModal: React.FC = () => {
             )}
 
             <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-              The pattern runs to the edge of the stock, so the export will say it overhangs: the
-              cutter cannot reach the outer half-diameter without leaving the material, and that
-              band stays at full height. Trim or edge the panel afterwards, or drop the plan scale
-              a couple of percent to pull the pattern inside it.
+              Creates a relief board sized to your stock, ready for Export Relief Carve.
             </p>
-            {!through && <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-              One object, not a pattern laid over a block: the panel is the footprint of the stock
-              and the pattern is its top face, so the relief export cuts only the valleys and leaves
-              the high points as untouched surface. It is {PANEL_BASE_MM} mm thick under the deepest
-              cut — what it is cut <em>from</em> is the {stock.thicknessMm} mm stock on the bench.
-            </p>}
           </div>
         </div>
 

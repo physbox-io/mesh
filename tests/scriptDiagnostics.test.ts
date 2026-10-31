@@ -105,7 +105,7 @@ describe('headlessCostWarning', () => {
     // 1000 steps, 5 s of wall, 4.5 s of it scripts, 1 ms timestep: 0.2x live.
     const w = headlessCostWarning(1000, 5000, 4500, 0.001, { body: 'cart', msPerStep: 4.4 });
     expect(w).toMatch(/90%/);
-    expect(w).toMatch(/4\.50 ms per step/);
+    expect(w).toMatch(/4\.50 ms\/step/);
     expect(w).toMatch(/'cart'/);
     expect(w).toMatch(/0\.20x real time/);
   });
@@ -132,8 +132,8 @@ describe('script syntax check on write', () => {
     ] as unknown as SceneNode[];
     const w = scriptWarnings(nodes);
     expect(w).toHaveLength(2);
-    expect(w[0]).toMatch(/^Script on 'cart' does not compile: /);
-    expect(w[1]).toMatch(/^Script on 'pole' does not compile: /);
+    expect(w[0]).toMatch(/^Script syntax error on 'cart': /);
+    expect(w[1]).toMatch(/^Script syntax error on 'pole': /);
   });
 });
 
@@ -159,13 +159,13 @@ describe('physics_get_state worker script fields', () => {
     expect(s.realtimeFactor).toBe(0.1);
     expect(s.scriptMsPerStep).toBe(4);
     expect(s.slowestScript).toEqual({ body: 'cart', msPerStep: 3.9 });
-    expect(s.note).toMatch(/0\.10x real time because of the control scripts/);
+    expect(s.note).toMatch(/0\.10x real time: control scripts/);
     expect(s.note).toMatch(/'cart'/);
   });
 
   it('blames the model when scripts are cheap, and says nothing at real time or in a hidden tab', () => {
     expect(describeWorker(base({ scripts: { problems: [], moreProblems: 0, timing: timing(0.5, 0.05), timestepMs: 1 } })).note)
-      .toMatch(/model itself/);
+      .toMatch(/physics step exceeds real-time budget/);
     expect(describeWorker(base({ scripts: { problems: [], moreProblems: 0, timing: timing(0.98, 0.5), timestepMs: 1 } })).note).toBeUndefined();
     expect(describeWorker(base({ hidden: true, frame: { at: 9990, simTime: 3 }, scripts: { problems: [], moreProblems: 0, timing: timing(0.1, 0.9), timestepMs: 1 } })).note)
       .toBeUndefined();

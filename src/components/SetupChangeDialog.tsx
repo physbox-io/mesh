@@ -160,9 +160,8 @@ export function SetupChangeDialog({
             <div className="space-y-2">
               <p>
                 {onNotch
-                  ? <>Lower the bit into the notch cut in the near-left corner. Jog its side up to each of the notch's two inner walls with a slip of paper between, until the paper just drags, then press the button. They were cut by this machine in the first setup, so the zero matches it whatever shape the sawn block is.</>
-                  : <>Jog the side of the bit up to each face with a slip of paper between, until the paper just drags, then press the button.</>}
-                {' '}The bit is {toolDiaMm} mm, so its centre is {r.toFixed(2)} mm off what it touches.
+                  ? <>Touch off X and Y on the inner walls of the near-left corner notch ({toolDiaMm} mm bit, {r.toFixed(2)} mm radius offset).</>
+                  : <>Without dowel pins, re-zero X and Y on the flipped stock corner ({toolDiaMm} mm bit, {r.toFixed(2)} mm radius offset).</>}
               </p>
               <JogPad disabled={!connected} />
               <div className="flex flex-wrap items-center gap-2">

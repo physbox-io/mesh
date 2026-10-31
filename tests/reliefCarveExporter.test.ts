@@ -310,8 +310,8 @@ describe('Relief carve exporter', () => {
 
     expect(result.success).toBe(true);
     const warned = result.warnings.join(' ');
-    expect(warned).toMatch(/12\.5 diameters of stickout/);
-    expect(warned).toMatch(/5\.0 mm or more/);
+    expect(warned).toMatch(/12\.5×D stickout/);
+    expect(warned).toMatch(/5\.0 mm/);
   });
 
   it('separates the shank fouling the cut from the bit being whippy', () => {
@@ -326,8 +326,8 @@ describe('Relief carve exporter', () => {
     // Stock 1.6 mm bit: 3.175 mm shank, so the shank is in the cut, and nothing
     // is holding the path out of the wall.
     const stock = generateReliefCarveGcode(dome, base).warnings.join(' ');
-    expect(stock).toMatch(/shank will be\s+in the cut|shank will be in the cut/);
-    expect(stock).toMatch(/diameters of stickout/);
+    expect(stock).toMatch(/exceeds flute length with shank clearance disabled/);
+    expect(stock).toMatch(/×D stickout/);
 
     // A necked long-reach bit — shank no wider than the cutter, 25 mm of it —
     // has no step to foul, so only the stiffness caution is left.
@@ -336,8 +336,8 @@ describe('Relief carve exporter', () => {
       finishingShankDiaMm: 1.6,
       finishingFluteLengthMm: 25,
     }).warnings.join(' ');
-    expect(necked).not.toMatch(/shank will be/);
-    expect(necked).toMatch(/diameters of stickout/);
+    expect(necked).not.toMatch(/exceeds flute length/);
+    expect(necked).toMatch(/×D stickout/);
   });
 
   it('layers the finishing raster when it has to clear the relief alone', () => {
@@ -377,7 +377,7 @@ describe('Relief carve exporter', () => {
     expect(single.finishingRasterLines).toBeLessThan(auto.finishingRasterLines);
     expect(single.estimatedTimeSeconds).toBeLessThan(auto.estimatedTimeSeconds);
     // Quicker, but it does not get to be quiet about what it is doing.
-    expect(single.warnings.join(' ')).toMatch(/first entry/);
+    expect(single.warnings.join(' ')).toMatch(/full 20\.0 mm depth on entry/);
 
     // And 'layered' forces layers even when roughing would have covered it.
     const forced = generateReliefCarveGcode(dome, {
@@ -517,8 +517,8 @@ describe('Relief carve exporter', () => {
     const guarded = generateReliefCarveGcode(dome, opts);
     const bare = generateReliefCarveGcode(dome, { ...opts, toolBodyClearance: false });
 
-    expect(guarded.warnings.join(' ')).toMatch(/cannot reach into/);
-    expect(bare.warnings.join(' ')).not.toMatch(/cannot reach into/);
+    expect(guarded.warnings.join(' ')).toMatch(/Shank\/holder clearance lifted/);
+    expect(bare.warnings.join(' ')).not.toMatch(/Shank\/holder clearance lifted/);
 
     // Both still reach the floor out in the open background — the shank only
     // binds where something tall is standing next to the cut — so the jobs
@@ -635,7 +635,7 @@ describe('Relief carve exporter', () => {
     });
 
     expect(advised.success).toBe(true);
-    expect(advised.warnings.every((w) => /diameters of stickout/.test(w))).toBe(true);
+    expect(advised.warnings.every((w) => /×D stickout/.test(w))).toBe(true);
     // Feeds are derated for how far the bit is hanging out, not left at default.
     expect(advised.finishingRasterLines).toBeGreaterThan(0);
   });
@@ -726,19 +726,19 @@ describe('Adaptive roughing', () => {
     const res = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
     expect(res.roughingBitePercent).toBeGreaterThanOrEqual(20);
     expect(res.roughingBitePercent).toBeLessThanOrEqual(45);
-    expect(res.gcode).toContain(`(${res.roughingBitePercent}% of the cutter)`);
+    expect(res.gcode).toContain(`(${res.roughingBitePercent}%)`);
   });
 
   it('says what bite it is taking and what that buys', () => {
     const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
-    expect(adaptive.gcode).toMatch(/adaptive clear, [\d.]+ mm bite \(\d+% of the cutter\)/);
+    expect(adaptive.gcode).toMatch(/adaptive clear, [\d.]+ mm radial engagement \(\d+%\)/);
   });
 
   it('honours an explicit stepover', () => {
     const res = generateReliefCarveGcode(dome, {
       ...deep, roughingStrategy: 'adaptive', roughingToolDiaMm: 6, roughingStepoverMm: 1.5,
     });
-    expect(res.gcode).toMatch(/1\.5 mm bite \(25% of the cutter\)/);
+    expect(res.gcode).toMatch(/1\.5 mm radial engagement \(25%\)/);
   });
 
   it('still roughs a shallow relief, where the deep stepdown does not fit', () => {

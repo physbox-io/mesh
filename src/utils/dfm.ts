@@ -371,8 +371,8 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
       process: 'print',
       severity: share > T.overhangShareCritical ? 'critical' : 'warning',
       title: `${(share * 100).toFixed(0)}% of the surface needs support`,
-      detail: `${(share * 100).toFixed(0)}% of this part leans more than ${limits.overhangDeg}° from vertical, reaching ${worstDeg.toFixed(0)}°. That is a lot of support to print, and a lot of scarred surface where it breaks off.`,
-      fix: 'Turn the part on the build plate — the orientation with the least downward area usually costs the least support and the least time.',
+      detail: `${(share * 100).toFixed(0)}% of the surface overhangs past ${limits.overhangDeg}° (max ${worstDeg.toFixed(0)}°).`,
+      fix: 'Reorient on the build plate to reduce downward-facing area.',
       position: at,
       metric: share,
     });
@@ -385,9 +385,9 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
       id: 'print_no_bridge',
       process: 'print',
       severity: 'critical',
-      title: 'This filament will not bridge',
-      detail: `There are faces here running flat over open air, and the loaded filament will not span a gap — it droops into it instead of setting across it.`,
-      fix: 'Turn the part so those faces are supported, chamfer them so they climb instead of spanning, or print it in something stiffer.',
+      title: 'Unsupported horizontal span',
+      detail: 'Horizontal faces span open air; selected filament requires support across gaps.',
+      fix: 'Reorient the part or enable supports.',
       position: hotSpot(tris, heat, 0.8) ?? [0, 0, b.maxZ],
       metric: unbridgeable / totalArea,
     });
@@ -401,9 +401,9 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
       id: 'print_warp',
       process: 'print',
       severity: 'warning',
-      title: `${spanMm.toFixed(0)} mm across, in a filament that shrinks`,
-      detail: `This part is ${spanMm.toFixed(0)} mm across its widest flat direction. The loaded filament shrinks as it cools, and over that span the shrinkage lifts the corners off the bed.`,
-      fix: 'Print it in an enclosure, add a brim, or use a filament that does not shrink if the part does not need the heat resistance.',
+      title: `Large footprint (${spanMm.toFixed(0)} mm) in high-shrinkage filament`,
+      detail: `${spanMm.toFixed(0)} mm span may warp or lift at the corners during cooling.`,
+      fix: 'Use an enclosure and brim, or switch to PLA/PETG.',
       position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.minZ],
       metric: spanMm,
     });
@@ -416,8 +416,8 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
       process: 'print',
       severity: thin.mm < limits.minWallMm / 2 ? 'critical' : 'warning',
       title: `Wall down to ${thin.mm.toFixed(2)} mm`,
-      detail: `The thinnest material here measures ${thin.mm.toFixed(2)} mm, against ${limits.minWallMm} mm for the loaded filament. Below that the slicer has nowhere to put two perimeters and will thin it further or drop it entirely.`,
-      fix: `Take it to at least ${limits.minWallMm} mm.`,
+      detail: `Minimum wall is ${thin.mm.toFixed(2)} mm (min ${limits.minWallMm} mm for this filament).`,
+      fix: `Thicken walls to at least ${limits.minWallMm} mm.`,
       position: thin.at,
       metric: thin.mm,
     });
@@ -453,13 +453,14 @@ function bedFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFindin
   if (fitsBedSquareOn(size, bed)) return [];
   const worst = Math.max(...size) / Math.max(bed.widthMm, bed.depthMm, bed.heightMm);
   if (worst > BED_BALLPARK) return [];
+  const over = Math.max(size[0] - bed.widthMm, size[1] - bed.depthMm, size[2] - bed.heightMm, 0);
   return [{
     id: 'print_exceeds_bed',
     process: 'print',
     severity: 'critical',
-    title: 'It does not fit the printer',
-    detail: `This part is ${size.map((v) => v.toFixed(0)).join(' x ')} mm, and the bed is ${bed.widthMm} x ${bed.depthMm} x ${bed.heightMm} mm whichever way up it goes.`,
-    fix: 'Split it for print: it is cut into sections that each fit, with dowel holes or pegs on the cut faces to line them up.',
+    title: 'Exceeds print bed',
+    detail: `Part is ${size.map((v) => v.toFixed(0)).join(' × ')} mm; bed is ${bed.widthMm} × ${bed.depthMm} × ${bed.heightMm} mm (${over.toFixed(0)} mm over limit).`,
+    fix: 'Scale down or use Split for Print.',
     position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ],
     metric: worst,
   }];
@@ -501,15 +502,19 @@ function stockFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFind
   const planRatio = Math.max(w / stock.widthMm, d / stock.depthMm);
   if (planRatio > STOCK_BALLPARK || h / stock.thicknessMm > STOCK_BALLPARK) return [];
 
+  const size = [w, d, h];
+  const stockDims = [stock.widthMm, stock.depthMm, stock.thicknessMm];
+  const over = Math.max(
+    fitsPlan ? 0 : Math.min(Math.max(w - stock.widthMm, d - stock.depthMm), Math.max(d - stock.widthMm, w - stock.depthMm)),
+    Math.max(0, h - stock.thicknessMm),
+  );
   return [{
     id: 'stock_fit',
     process: 'cnc',
     severity: 'critical',
-    title: 'It does not fit the stock',
-    detail: !fitsPlan
-      ? `This part is ${w.toFixed(0)} x ${d.toFixed(0)} mm, on a ${stock.widthMm} x ${stock.depthMm} mm board.`
-      : `This part is ${h.toFixed(0)} mm tall, out of ${stock.thicknessMm} mm stock.`,
-    fix: 'Scale it down, clamp bigger stock, or split it into pieces.',
+    title: 'Exceeds stock dimensions',
+    detail: `Part is ${size.map((v) => v.toFixed(0)).join(' × ')} mm; bench stock is ${stockDims.map((v) => v.toFixed(0)).join(' × ')} mm (${over.toFixed(1)} mm over).`,
+    fix: 'Increase stock dimensions or scale the part down.',
     position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ],
   }];
 }
@@ -729,24 +734,22 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
     const sideList = [...sideFacesUsed];
     const reachNote =
       trappedAllFacesTris > 0
-        ? ` Some of that volume is enclosed from all six faces and cannot be reached by turning the block.`
+        ? ` Some volume is enclosed from all six faces.`
         : sideReachableTris > 0
-          ? ` Turning the block onto its ${sideList.join(', ')} face${sideList.length > 1 ? 's' : ''} reaches the side undercuts.`
-          : ` All of it opens to the underside when the block is flipped.`;
+          ? ` Side undercuts are reachable from ${sideList.join(', ')}.`
+          : ` Accessible from the underside when flipped.`;
     const fixText =
       trappedAllFacesTris > 0
-        ? 'Flip the part or use Solid Machining (Setups: Auto) for outer overhangs, and split the part to open internal cavities.'
+        ? 'Flip the part or use Solid Machining (Setups: Auto) for outer overhangs, and split internal cavities.'
         : sideReachableTris > 0
-          ? `Flip the part and cut the second side, or use Solid Machining (Setups: Auto) to turn the block onto its ${sideList.join(', ')} face${sideList.length > 1 ? 's' : ''}.`
-          : 'Flip the part and cut the second side, or split it into two pieces that each open to a cutter.';
+          ? `Flip the part or use Solid Machining (Setups: Auto) on ${sideList.join(', ')}.`
+          : 'Flip the part for a two-sided setup, or split the body.';
     findings.push({
       id: 'cnc_undercut',
       process: 'cnc',
       severity: trappedShare > T.undercutShareCritical ? 'critical' : 'warning',
       title: `${(trappedShare * 100).toFixed(0)}% is under an overhang`,
-      detail:
-        `${(trappedShare * 100).toFixed(0)}% of this part sits beneath something else, where a cutter coming straight down cannot reach it. ` +
-        `The machine will leave that material behind.${reachNote}`,
+      detail: `${(trappedShare * 100).toFixed(0)}% of part volume is occluded from +Z.${reachNote}`,
       fix: fixText,
       position: hotSpot(tris, heat, 0.5) ?? [0, 0, b.maxZ],
       metric: trappedShare,
@@ -789,9 +792,9 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
           id: 'cnc_corner_radius',
           process: 'cnc',
           severity: 'warning',
-          title: `A \u00d8${limits.toolDiaMm} mm bit cannot get into ${(strandedShare * 100).toFixed(0)}% of the pockets`,
-          detail: `${(strandedShare * 100).toFixed(0)}% of the enclosed pocket area here is narrower than the cutter, so those features do not get cut at all.`,
-          fix: `Use a smaller bit, or open the slots past ${limits.toolDiaMm} mm.`,
+          title: `Inside corner radius < ${(limits.toolDiaMm / 2).toFixed(1)} mm`,
+          detail: `${(strandedShare * 100).toFixed(0)}% of enclosed pocket area is narrower than a ⌀${limits.toolDiaMm} mm end mill.`,
+          fix: `Fillet to ≥ R${(limits.toolDiaMm / 2).toFixed(1)} mm, widen slots past ${limits.toolDiaMm} mm, or use a smaller bit.`,
           position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ],
           metric: strandedShare,
         });
@@ -812,9 +815,9 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
       id: 'cnc_reach',
       process: 'cnc',
       severity: flips ? 'info' : 'warning',
-      title: flips ? `${depthMm.toFixed(0)} mm deep — cut it from both sides` : `${depthMm.toFixed(0)} mm deep — deeper than a bit reaches`,
-      detail: `This part stands ${depthMm.toFixed(0)} mm tall, and the longest standard bit reaches about ${limits.maxToolReachMm.toFixed(0)} mm before its shank is in the cut.`,
-      fix: flips ? 'Machine one side, turn it over, machine the other.' : 'Split it into pieces shallow enough to reach from two sides.',
+      title: flips ? `${depthMm.toFixed(0)} mm deep — cut from both sides` : `${depthMm.toFixed(0)} mm deep — exceeds max tool reach`,
+      detail: `Part height is ${depthMm.toFixed(0)} mm (max standard tool reach ~${limits.maxToolReachMm.toFixed(0)} mm).`,
+      fix: flips ? 'Machine from both sides.' : 'Reduce depth or split the part into layers.',
       position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.minZ],
       metric: depthMm,
     });
@@ -829,8 +832,8 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
       process: 'cnc',
       severity: thin.mm < limits.cncMinWallMm / 2 ? 'critical' : 'warning',
       title: `Wall down to ${thin.mm.toFixed(2)} mm`,
-      detail: `The thinnest material here is ${thin.mm.toFixed(2)} mm, against about ${limits.cncMinWallMm} mm for the stock on the bench. Thinner than that and it chatters, tears out or simply breaks off while being cut.`,
-      fix: `Thicken it to ${limits.cncMinWallMm} mm, or cut it from something that holds a thin section.`,
+      detail: `Minimum wall is ${thin.mm.toFixed(2)} mm (min ${limits.cncMinWallMm} mm for this material).`,
+      fix: `Thicken walls to ≥ ${limits.cncMinWallMm} mm.`,
       position: thin.at,
       metric: thin.mm,
     });
@@ -915,9 +918,9 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       id: 'cast_undercut',
       process: 'cast',
       severity: 'critical',
-      title: `${(undercutShare * 100).toFixed(0)}% undercut — the pattern will not pull`,
-      detail: `${(undercutShare * 100).toFixed(0)}% of the surface leans back over the mould, by up to ${worstDeg.toFixed(0)}°, wherever the parting line goes. Those faces lock the pattern in: the sand has to be broken to get it out.`,
-      fix: 'Move the parting line so the undercut falls the other side of it, split the pattern, or add a loose piece for the feature.',
+      title: 'Undercut locks pattern in mould',
+      detail: `${(undercutShare * 100).toFixed(0)}% of the surface leans back up to ${worstDeg.toFixed(0)}° along the draw.`,
+      fix: 'Use Prepare for Casting → Remove Undercuts, split the pattern, or use Lost PLA.',
       position: hotSpot(tris, heat, 0.9) ?? [0, 0, partingZ],
       metric: undercutShare,
     });
@@ -931,9 +934,9 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       id: 'cast_draft',
       process: 'cast',
       severity: 'warning',
-      title: `${(dragShare * 100).toFixed(0)}% of walls have no draft`,
-      detail: `${(dragShare * 100).toFixed(0)}% of the surface stands within ${limits.draftDeg}° of parallel to the pull, over ${heightMm.toFixed(0)} mm of height. Walls that upright drag the whole way out, scuffing the mould and taking sand with them.`,
-      fix: `Taper them by ${limits.draftDeg}° away from the parting line — well under a millimetre of extra material on a part this size.`,
+      title: `Walls have < ${limits.draftDeg}° draft`,
+      detail: `${(dragShare * 100).toFixed(0)}% of the surface has less than ${limits.draftDeg}° draft over ${heightMm.toFixed(0)} mm height.`,
+      fix: `Taper walls by ${limits.draftDeg}° (e.g., via Prepare for Casting).`,
       position: hotSpot(tris, heat, 0.05) ?? [0, 0, partingZ],
       metric: dragShare,
     });

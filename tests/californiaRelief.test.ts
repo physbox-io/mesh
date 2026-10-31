@@ -150,7 +150,7 @@ describe('California relief preset', () => {
 
     expect(advised.success).toBe(true);
     expect(advised.warnings).toHaveLength(1);
-    expect(advised.warnings[0]).toMatch(/diameters of stickout/);
+    expect(advised.warnings[0]).toMatch(/×D stickout/);
     expect(advised.toolChange).toBe(true);
     // Sweeps the long way: the map is taller than it is wide. 90 degrees from
     // +X is the Y sweep, which is how the header names it now that a raster can

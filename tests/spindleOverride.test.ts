@@ -104,7 +104,7 @@ describe('a program asking for more spindle than the controller has', () => {
   });
 
   it('is refused with a reason that says to re-export', () => {
-    expect(spindleCeilingRefusal(job, pwm)).toMatch(/S24000.*10000 RPM.*2\.4×.*Re-export for this machine/s);
+    expect(spindleCeilingRefusal(job, pwm)).toMatch(/S24000.*10000 RPM.*2\.4×.*Re-export for 10000 RPM/s);
   });
 
   it('is not refused at or under $30', () => {

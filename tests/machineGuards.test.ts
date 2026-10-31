@@ -147,7 +147,7 @@ describe('a program planned for a faster spindle than this one', () => {
     mgr.state.grblSettings = { 30: 10000 };
 
     await webSerialManager.startJob(JOB);
-    expect(webSerialManager.getState().lastError).toMatch(/S24000.*\$30.*Re-export for this machine/s);
+    expect(webSerialManager.getState().lastError).toMatch(/S24000.*\$30.*Re-export for 10000 RPM/s);
     expect(webSerialManager.isRunning()).toBe(false);
     expect(motionLines()).toEqual([]);
   });
@@ -159,7 +159,7 @@ describe('a program planned for a faster spindle than this one', () => {
 
     const run = await webSerialManager.runJob(JOB);
     expect(handed).not.toHaveBeenCalled();
-    expect(run?.message).toMatch(/Re-export for this machine/);
+    expect(run?.message).toMatch(/Re-export for 10000 RPM/);
   });
 
   it('runs on the machine whose override says its S drives nothing, and only that one', async () => {
@@ -172,7 +172,7 @@ describe('a program planned for a faster spindle than this one', () => {
     mgr.state.grblSettings = { 30: 10000 };
     expect(webSerialManager.getState().motion.spindle?.max).not.toBe(24000);
     await webSerialManager.startJob(JOB);
-    expect(webSerialManager.getState().lastError).toMatch(/Re-export for this machine/);
+    expect(webSerialManager.getState().lastError).toMatch(/Re-export for 10000 RPM/);
 
     // The router: planned to its real top speed, and its job is not refused.
     mgr.parseLine('[VER:1.1h.20190825:Router]');

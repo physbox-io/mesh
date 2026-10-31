@@ -160,10 +160,10 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
 
     // Verify beginner-proof buildGuideMarkdown contains all required shop sections
     expect(cutPlan.buildGuideMarkdown).toContain('Bill of Materials');
-    expect(cutPlan.buildGuideMarkdown).toContain("Bird's-Eye Corner Orientation Map");
+    expect(cutPlan.buildGuideMarkdown).toContain('Corner Leg Orientation Map');
     expect(cutPlan.buildGuideMarkdown).toContain('Leg_FL');
     expect(cutPlan.buildGuideMarkdown).toContain('Reference Datum Faces');
-    expect(cutPlan.buildGuideMarkdown).toContain('Two-Stage Glue-Up & Squaring Checklist');
+    expect(cutPlan.buildGuideMarkdown).toContain('Assembly & Squaring Checklist');
     expect(cutPlan.buildGuideMarkdown).toContain('Z-Clip');
   });
 

@@ -51,8 +51,8 @@ export async function addMetalChain(r: { piece: ChainPiece; warnings: string[] }
   const flask = r.flask.shape === 'box' ? `${w} × ${d} × ${h} mm` : `⌀${w} × ${h} mm`;
   const piece = await addPiece(r.piece, `${castMaterial(r.piece.material).label} casting`, [
     method === 'sand'
-      ? `Sand flask about ${flask}, ${(r.fillG / 1000).toFixed(1)} kg of sand (a real flask is often bigger; only the sand changes)`
-      : `Flask about ${flask}, ${r.fillG} g of investment powder (a real flask is often bigger; only the investment changes)`,
+      ? `Sand flask ~${flask}, ${(r.fillG / 1000).toFixed(1)} kg sand`
+      : `Flask ~${flask}, ${r.fillG} g investment powder`,
     ...r.warnings,
   ], true);
   return { piece };

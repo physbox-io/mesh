@@ -34,9 +34,7 @@ export function CsgCard({ node: selectedNode }: { node: SceneNode }) {
         {stale && <span className="ml-auto text-[10px] font-semibold text-amber-600 animate-pulse">recompiling…</span>}
       </h3>
       <p className="text-[10px] text-slate-400 -mt-1 leading-snug">
-        <strong>Cut</strong> takes a shape out of this body: click the part where you want it, then pick
-        a shape. Subtracted shapes are drawn as red outlines. The list below is every shape this body is
-        made of; switching one to <strong>subtract</strong> turns it into a hole.
+        Combines geoms in order using Union, Difference, or Intersection.
       </p>
 
       {/* Cut. The only way to put a shape ON a body: dragging one

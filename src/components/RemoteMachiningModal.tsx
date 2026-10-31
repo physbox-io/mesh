@@ -91,9 +91,7 @@ export const RemoteMachiningModal: React.FC<RemoteMachiningModalProps> = ({ isOp
               <Star className="w-10 h-10 text-cyan-500 mx-auto mb-3" />
               <p className="text-slate-700 dark:text-slate-300 font-medium">Remote monitoring is part of PhysBox Pro</p>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 max-w-md mx-auto leading-relaxed">
-                Driving your machine from this browser works exactly as it does now. Pro adds
-                watching it from somewhere else &mdash; progress, position, feed and faults on your
-                phone while a four-hour job runs &mdash; and keeps every finished run afterwards.
+                PhysBox Pro adds live remote telemetry and cloud job history.
               </p>
               <a
                 href="https://physbox.io/pro.html"

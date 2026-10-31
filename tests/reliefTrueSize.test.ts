@@ -139,7 +139,7 @@ describe('a relief cut as modelled', () => {
     expect(r.undercut!.areaMm2).toBeGreaterThan(50 * 80 * 0.9);
     expect(r.undercut!.areaMm2).toBeLessThan(50 * 80 * 1.1);
     expect(r.undercut!.maxMm).toBeCloseTo(10, 0);
-    expect(r.warnings.some((w) => /undercut/.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /undercut/i.test(w))).toBe(true);
   });
 
   it('leaves the board round a smaller true-size model alone, and says so', () => {

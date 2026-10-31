@@ -203,7 +203,7 @@ describe('splitForPrint — joinery', () => {
       expect(s.features.every((f) => f.kind === 'bore')).toBe(true);
       expect(s.features).toHaveLength(joint.pins.length);
     }
-    expect(r.warnings.join(' ')).toMatch(/holes on both sides for a loose/);
+    expect(r.warnings.join(' ')).toMatch(/replaced printed pegs with .* dowel bores/);
   });
 
   it('drills no hole where the section behind the face is too thin to hold it', () => {
@@ -223,7 +223,7 @@ describe('splitForPrint — joinery', () => {
     const r = ok(splitForPrint(wasm, [box(300, 8, 100)], { bed: bed200, joinery: { kind: 'dowel' } }));
     expect(r.sections.length).toBeGreaterThanOrEqual(2);
     expect(r.joints.every((j) => j.pins.length === 0)).toBe(true);
-    expect(r.warnings.join(' ')).toMatch(/held to the rest by glue alone/);
+    expect(r.warnings.join(' ')).toMatch(/aligned manually during glue-up/);
   });
 });
 

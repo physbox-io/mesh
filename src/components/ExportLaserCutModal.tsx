@@ -1069,31 +1069,29 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     >
                       + Add stock size
                     </button>
-                    <label className="flex items-start gap-2 pt-1 text-[11px] text-slate-500 dark:text-slate-400 cursor-pointer">
+                    <label
+                      className="flex items-start gap-2 pt-1 text-[11px] text-slate-500 dark:text-slate-400 cursor-pointer"
+                      title="Cut from thinner stock than drawn. Off, the export stops instead: a part cut thinner goes together exactly as drawn and is markedly weaker."
+                    >
                       <input
                         type="checkbox"
                         checked={allowThinnerStock}
                         onChange={(e) => setAllowThinnerStock(e.target.checked)}
                         className="w-3.5 h-3.5 mt-px cursor-pointer"
                       />
-                      <span>
-                        Cut from thinner stock than drawn. Off, the export stops instead: a part
-                        cut thinner goes together exactly as drawn and is markedly weaker, so
-                        nothing about the result would tell you.
-                      </span>
+                      <span>Cut from thinner stock than drawn</span>
                     </label>
-                    <label className="flex items-start gap-2 text-[11px] text-slate-500 dark:text-slate-400 cursor-pointer">
+                    <label
+                      className="flex items-start gap-2 text-[11px] text-slate-500 dark:text-slate-400 cursor-pointer"
+                      title="Cut parts too big for the rack as joined pieces. A flat frame becomes four mitred lengths glued at the corners."
+                    >
                       <input
                         type="checkbox"
                         checked={splitOversized}
                         onChange={(e) => setSplitOversized(e.target.checked)}
                         className="w-3.5 h-3.5 mt-px cursor-pointer"
                       />
-                      <span>
-                        Cut parts too big for the rack as joined pieces. A flat frame becomes four
-                        mitred lengths glued at the corners — the same part, from stock no wider
-                        than its own border. Parts that already fit are untouched.
-                      </span>
+                      <span>Split oversized parts into joined pieces</span>
                     </label>
                   </div>
                 </Field>
@@ -1159,7 +1157,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 className="lg:col-span-3"
                 hintAlign="end"
                 label="Annotations"
-                hint="What the SVG carries besides cut lines. Labels and sheet outlines help you sort parts, but they are engraved/drawn. Strip them to Cut paths only before sending real material."
+                hint="Label panels and matching finger joints"
               >
                 <Segmented
                   value={annotations}

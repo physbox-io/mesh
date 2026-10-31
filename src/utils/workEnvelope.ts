@@ -171,8 +171,7 @@ export function checkJobEnvelope(
       sizeChecked: true,
       placementChecked: false,
       placementSkippedBecause:
-        'Homing is off on this controller ($22=0), so machine coordinates mean nothing until it is ' +
-        'homed and where the job lands on the bed cannot be checked. Its size has been.',
+        'Homing is disabled ($22=0); bed placement cannot be verified without machine home.',
     };
   }
   if (!homed) {
@@ -182,8 +181,7 @@ export function checkJobEnvelope(
       sizeChecked: true,
       placementChecked: false,
       placementSkippedBecause:
-        'The machine has not been homed since it connected, so its coordinates are wherever it ' +
-        'powered on and where the job lands on the bed cannot be checked. Home it first. Its size has been checked.',
+        'Machine has not been homed this session; home first to verify bed placement.',
     };
   }
   if (!origin || !machinePos) {
@@ -193,7 +191,7 @@ export function checkJobEnvelope(
       sizeChecked: true,
       placementChecked: false,
       placementSkippedBecause:
-        'Nothing is connected, so where the job would land on the bed cannot be checked. Its size has been.',
+        'No machine connected; bed placement not checked.',
     };
   }
 
@@ -229,9 +227,7 @@ export function checkJobEnvelope(
         kind: 'runs-off',
         overrunMm: overrun,
         message:
-          `From this work origin the job reaches ${mm(overrun)} ${direction} of ${a.axis} travel. ` +
-          `It spans ${mm(jobLo)} to ${mm(jobHi)} in machine coordinates, and the machine can reach ` +
-          `${mm(range.lo)} to ${mm(range.hi)}. Move the origin or reclamp the stock.`,
+          `Job extends ${mm(overrun)} ${direction} of ${a.axis} travel (${mm(jobLo)}..${mm(jobHi)} vs ${mm(range.lo)}..${mm(range.hi)}). Shift work origin or reclamp stock.`,
       });
     }
   }

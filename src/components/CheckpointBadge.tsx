@@ -38,11 +38,7 @@ export const CheckpointBadge: React.FC<{
       <p className={`text-[11px] leading-relaxed flex items-start gap-1.5 ${className}`}>
         <ChevronsDown className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
         <span>
-          <strong>Stopping for more than a moment? Park instead.</strong> A pause leaves the spindle
-          running with the tool still down in the cut, which scorches wood and welds itself into
-          acrylic. Park retracts, stops the spindle and hands the machine back — and it records the
-          line actually reached, so the job can be picked up later
-          {status.local || status.cloud ? ' even after a power cut' : ''}.
+          Pause keeps the spindle running in the cut. Use Park to retract and stop.
         </span>
       </p>
     );
@@ -53,10 +49,7 @@ export const CheckpointBadge: React.FC<{
       <p className={`text-[11px] leading-relaxed flex items-start gap-1.5 ${className}`}>
         <CloudOff className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
         <span>
-          This job is <strong>not saved</strong> — it is too big for this browser's storage
-          {status.bytes > 0 && <> ({(status.bytes / 1024 / 1024).toFixed(1)} MB of G-code)</>}. If the
-          tab closes or the laptop sleeps, it cannot be picked up again. PhysBox Pro keeps the program
-          in your account, where size is not the limit.
+          Job too large for local recovery ({(status.bytes / (1024 * 1024)).toFixed(1)} MB). Use PhysBox Pro for cloud checkpoints.
         </span>
       </p>
     );
@@ -70,9 +63,7 @@ export const CheckpointBadge: React.FC<{
         <HardDrive className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-slate-400" />
       )}
       <span>
-        Saved {status.cloud ? 'to your account and to this browser' : 'in this browser'}: if the tab
-        closes or the machine loses power, you will be offered this job again from the line it
-        reached. Leave the work clamped where it is.
+        Checkpoint saved ({status.cloud ? 'cloud + local' : 'local'}).
       </span>
     </p>
   );

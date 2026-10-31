@@ -281,19 +281,19 @@ function summarise(plan: SetupPlan): SetupPlanSummary {
   const names = plan.order.map((f) => FACE_NAME[f]);
   const text =
     names.length === 1
-      ? 'One setup, from the top.'
-      : `${names.length} setups: ${names.join(', then ')}. The block is turned between them.`;
+      ? '1 setup (top).'
+      : `${names.length} setups: ${names.join(', then ')}.`;
   // Only ever what a router always leaves: a plan that left more than that fails instead.
   const mm3 = Math.round(plan.unreachedMm3);
   const remaining = {
     mm3,
     bounds: plan.unreachedBounds,
-    text: mm3 < 1 ? 'Every surface of the part is cut.' : 'Inside corners come out rounded, the size of the bit.',
+    text: mm3 < 1 ? 'All surfaces reached.' : 'Inside corners filleted to cutter radius.',
   };
   const sides = plan.order.filter((f) => f !== '+z' && f !== '-z');
   const redesignHint =
     sides.length > 0
-      ? `Make the faces that lean over the part upright and it needs ${plan.order.includes('-z') ? 'only the top and the flip' : 'only one setup'}.`
+      ? `Removing side undercuts reduces this to ${plan.order.includes('-z') ? '2 setups (top and flip)' : '1 setup'}.`
       : undefined;
   return { text, remaining, redesignHint, dropped: plan.dropped };
 }
@@ -312,20 +312,16 @@ function planFailure(plan: SetupPlan, partMm3: number): string | null {
   if (leftOver <= Math.max(20, 0.0002 * partMm3)) return null;
   if (plan.longerBit) {
     return (
-      `This part can't be cut with this bit: some of it is deeper than the bit can reach from any ` +
-      `side. Use a bit that reaches at least ${plan.longerBit.reachMm} mm from its tip to the holder, ` +
-      `or make the part smaller.`
+      `Some features exceed tool reach from any side. Use a bit with at least ${plan.longerBit.reachMm} mm stickout, or scale the part down.`
     );
   }
   if (plan.dropped.some((d) => /under the spindle/.test(d.reason))) {
     return (
-      `This part can't be cut on this machine: the block would have to stand on end, and it is too ` +
-      `tall to fit under the spindle. Make the part smaller, or check Room Under Spindle.`
+      `Standing the block on end exceeds spindle Z clearance. Scale the part down or increase Room Under Spindle.`
     );
   }
   return (
-    `This part can't be cut on a 3-axis router: some of it can't be reached from the top, the ` +
-    `bottom or any side. Change the model so every surface can be seen from one of them.`
+    `Internal or undercut features cannot be reached from any of the six block faces.`
   );
 }
 
@@ -547,8 +543,7 @@ function sideSetup(
     datum: notchMm
       ? {
           description:
-            `X on the datum notch's wall facing your left, Y on its wall facing you (the notch is the cut-out ` +
-            `in the near-left corner), Z on the ${FACE_NAME[face]} (now on top).`,
+            `X on the left datum notch wall, Y on the near datum notch wall, Z on the ${FACE_NAME[face]} (top).`,
           touches: [
             { axis: 'x', face: 'datum notch, wall facing left', valueMm: notchMm - r, wallMm: notchMm },
             { axis: 'y', face: 'datum notch, wall facing you', valueMm: notchMm - r, wallMm: notchMm },
@@ -557,8 +552,7 @@ function sideSetup(
         }
       : {
           description:
-            `X on the ${FACE_NAME[left]} (now on your left), Y on the ${FACE_NAME[near]} (now towards you), ` +
-            `Z on the ${FACE_NAME[face]} (now on top).`,
+            `X on the ${FACE_NAME[left]} (left), Y on the ${FACE_NAME[near]} (near), Z on the ${FACE_NAME[face]} (top).`,
           touches: [
             { axis: 'x', face: FACE_NAME[left], valueMm: -r, wallMm: 0 },
             { axis: 'y', face: FACE_NAME[near], valueMm: -r, wallMm: 0 },

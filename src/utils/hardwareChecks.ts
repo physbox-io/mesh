@@ -219,7 +219,7 @@ export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: Sc
     out.push({
       id: `runner_${runner.id}`, process, severity: 'critical',
       title: `${runner.name}: ${space.toFixed(1)} mm side space`,
-      detail: `Ball-bearing runners take ${RUNNER_SIDE_SPACE_MM} mm each side of the drawer, ±${SIDE_SPACE_SLACK_MM}; this one has ${space.toFixed(1)} mm, so the drawer ${off < 0 ? 'binds' : 'will not reach both runners'}.`,
+      detail: `Drawer side gap is ${space.toFixed(1)} mm per side; runners require ${RUNNER_SIDE_SPACE_MM} mm (${(Math.abs(off) * 2).toFixed(1)} mm ${off > 0 ? 'over' : 'under'} total).`,
       fix: off < 0 ? `Make the drawer ${by} narrower, or the cabinet that much wider inside.` : `Make the drawer ${by} wider, or the cabinet that much narrower inside.`,
       position: middle.toArray() as [number, number, number],
       metric: space,
@@ -249,8 +249,8 @@ export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: Sce
         out.push({
           id: `screw_${child.id}`, process, severity: 'warning',
           title: `${p.size} screw: ${mmText(grip)} under its head`,
-          detail: `The head of ${child.name} bears on ${mmText(grip)} of ${host.name}; under ${mmText(UNDER_HEAD_DIAMETERS * d)} it pulls through when it is done up tight.`,
-          fix: `Sink the counterbore ${mmText(UNDER_HEAD_DIAMETERS * d - grip)} less, or make the part that much thicker under it.`,
+          detail: `${child.name} has ${mmText(grip)} under its head in ${host.name} (recommended ≥ ${mmText(UNDER_HEAD_DIAMETERS * d)} / ${UNDER_HEAD_DIAMETERS}D).`,
+          fix: `Sink the counterbore ${mmText(UNDER_HEAD_DIAMETERS * d - grip)} less, or thicken the wall under it.`,
           position: (world ? new THREE.Vector3().setFromMatrixPosition(world).toArray() : [0, 0, 0]) as [number, number, number],
           metric: grip * 1000,
         });
@@ -301,14 +301,14 @@ export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: Scen
     if (gaps.length === 0) {
       // An open seal is not a sealed one, however good the groove.
       out.push(finding('warning', `${label}: nothing presses on it`,
-        `No part sits within ${mmText(REACH)} of the groove in ${host.name}, so the seal cannot be checked.`,
-        geo.radial ? 'Put the part it seals against in place: the bore over the boss, or the shaft through the bore.' : 'Put the lid in place over the groove.'));
+        `No mating part within ${mmText(REACH)} of the groove in ${host.name}.`,
+        geo.radial ? 'Position the mating bore or shaft over the groove.' : 'Position the lid over the groove.'));
       continue;
     }
     if (gaps.length < geo.rays.length) {
       out.push(finding('critical', `${label}: the mating part misses part of the ring`,
-        `Only ${gaps.length} of ${geo.rays.length} points round the groove in ${host.name} have anything over them; the rest of the ring presses on nothing and leaks there.`,
-        'Line the mating part up over the whole groove, or move the groove inside its edge.'));
+        `Only ${gaps.length} of ${geo.rays.length} points around the groove in ${host.name} contact a mating surface.`,
+        'Align the mating part over the full groove perimeter.'));
       continue;
     }
     // Room for the cord: the groove's depth plus the gap to the lid (axial),
@@ -336,7 +336,7 @@ export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: Scen
     if (squeezeLow < SEAL_LIMITS.squeezeMin) {
       const move = loose - targetRoom;
       out.push(finding('critical', `${label}: squeezed only ${pct(Math.max(0, squeezeLow))}`,
-        `The ring has ${mmText(loose)} of room for a ${mmText(cord)} cord; under ${pct(SEAL_LIMITS.squeezeMin)} squeeze it leaks.`,
+        `Gland clearance is ${mmText(loose)} for a ${mmText(cord)} cord (min squeeze ${pct(SEAL_LIMITS.squeezeMin)}).`,
         geo.radial
           ? `Make ${where} ${mmText(move * 2)} smaller across, or use a thicker cord.`
           : `Bring ${where} ${mmText(move)} closer, or use a thicker cord.`,
@@ -346,7 +346,7 @@ export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: Scen
     if (squeezeHigh > SEAL_LIMITS.squeezeMax) {
       const move = targetRoom - tight;
       out.push(finding('critical', `${label}: crushed, ${pct(squeezeHigh)} squeeze`,
-        `The ring has only ${mmText(tight)} of room for a ${mmText(cord)} cord; past ${pct(SEAL_LIMITS.squeezeMax)} it takes a set, splits, or stops ${where} going home.`,
+        `Gland clearance is ${mmText(tight)} for a ${mmText(cord)} cord (max squeeze ${pct(SEAL_LIMITS.squeezeMax)}).`,
         geo.radial ? `Make ${where} ${mmText(move * 2)} bigger across.` : `Give the ring ${mmText(move)} more room: deepen the groove or stand ${where} off.`,
         squeezeHigh));
       continue;
@@ -354,20 +354,20 @@ export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: Scen
     if (fill > SEAL_LIMITS.fillMax) {
       const wide = (Math.PI * cord * cord / 4) / (0.72 * tight);
       out.push(finding('critical', `${label}: groove ${pct(fill)} full`,
-        `Squeezed, the rubber has to go somewhere, and past ${pct(SEAL_LIMITS.fillMax)} full it is forced out of the groove and cut.`,
+        `Cross-section fill exceeds ${pct(SEAL_LIMITS.fillMax)} max gland fill.`,
         `Widen the groove to ${mmText(wide)}.`, fill));
       continue;
     }
     if (stretch > SEAL_LIMITS.stretchMax) {
       out.push(finding('critical', `${label}: stretched ${pct(stretch)}`,
-        `Past ${pct(SEAL_LIMITS.stretchMax)} the cord thins and the ring loses its grip.`,
+        `Installed stretch exceeds ${pct(SEAL_LIMITS.stretchMax)} max.`,
         'Use a ring with a larger inside diameter.', stretch));
       continue;
     }
     const even = Math.abs(squeezeHigh - squeezeLow) < 0.05 ? '' : `, ${pct(squeezeLow)} to ${pct(squeezeHigh)} round the ring`;
     out.push({ ...finding('info', `${label}: seals`,
       `${pct((squeezeLow + squeezeHigh) / 2)} squeeze${even}, groove ${pct(fill)} full${stretch > 0.001 ? `, ${pct(stretch)} stretch` : ''}.`,
-      'Print the walls it seals with 3 or more perimeters: thinner FDM walls weep however good the seal.'), passed: true });
+      ''), passed: true });
   }
   return out;
 }

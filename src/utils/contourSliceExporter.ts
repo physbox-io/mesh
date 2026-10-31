@@ -1130,9 +1130,7 @@ export function exportContourSliceSvg(
       const first = layers[longest.start].index + 1;
       const last = layers[longest.start + longest.length - 1].index + 1;
       warnings.push(
-        `Layers ${first}–${last} are ${longest.length} copies of the same cross-section — something in ` +
-        `the model has a constant profile over ${(longest.length * step * 1000).toFixed(0)} mm. Cut one and ` +
-        `repeat it rather than nesting every copy, or leave that part out of the slice.`
+        `Layers ${first}–${last} (${longest.length} layers, ${(longest.length * step * 1000).toFixed(0)} mm) have an identical cross-section.`
       );
     }
   }
@@ -1140,9 +1138,7 @@ export function exportContourSliceSvg(
   const multiPiece = layers.filter(l => l.pieceCount > 1);
   if (multiPiece.length > 0) {
     warnings.push(
-      `${multiPiece.length} layer${multiPiece.length === 1 ? '' : 's'} fall into separate pieces ` +
-      `(e.g. layer ${multiPiece[0].index + 1}, ${multiPiece[0].pieceCount} pieces). Each piece is cut, but only ` +
-      `pieces the dowels pass through are located by them.`
+      `${multiPiece.length} layer${multiPiece.length === 1 ? ' splits' : 's split'} into multiple islands (e.g. layer ${multiPiece[0].index + 1}: ${multiPiece[0].pieceCount} pieces); only islands intersected by dowels are registered.`
     );
   }
 

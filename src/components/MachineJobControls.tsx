@@ -105,11 +105,7 @@ export const JobPauseBanner: React.FC<{
 
       {toolChange && showZTools && (
         <p className="text-[11px] leading-relaxed">
-          The new bit is a different length from the one that came out, so the machine's Z zero no
-          longer describes where the tip is. Touch off again before resuming: jog the tip down onto
-          the work and take zero from there, or probe it on the plate. The machine is free to move
-          while it waits: jog it where you like, and resuming lifts back to the job's own clear
-          height before it carries on.
+          Zero Z on the new tool before resuming.
         </p>
       )}
       {toolChange && showZTools && (
@@ -120,8 +116,7 @@ export const JobPauseBanner: React.FC<{
           being swapped is the one the tool is parked over. */}
       {machineState.status === 'PAUSED_MATERIAL' && (
         <p className="text-[11px] leading-relaxed">
-          The machine is stopped and free to move. Jog it where you like. Resuming lifts back to the
-          job's own clear height before it carries on.
+          Swap the stock, then resume.
         </p>
       )}
 
@@ -190,10 +185,10 @@ export const JobPauseBanner: React.FC<{
           <button
             onClick={allowResume}
             disabled={probingZ}
-            title="Only if the Z datum is already right for the tool now in the spindle"
+            title="Resume using current Z zero"
             className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold cursor-pointer"
           >
-            Z is already set, let me resume
+            Skip Z zero
           </button>
         )}
 
@@ -293,9 +288,9 @@ export const JobResumeBanner: React.FC<{
         <div>
           <h4 className="font-bold text-sm">Job stopped {done}% of the way through</h4>
           <p className="text-xs leading-relaxed font-semibold">
-            {stop.why} It stopped at line {stop.stoppedAtLine.toLocaleString()} of{' '}
-            {resume.totalLines.toLocaleString()}, and can be picked up from there instead of
-            starting again.
+            Stopped at line {stop.stoppedAtLine.toLocaleString()} of{' '}
+            {resume.totalLines.toLocaleString()} ({done}%) — {stop.why}
+            {stop.windBack > 0 ? ' Step back ~15 lines to cover buffered moves.' : ''}
           </p>
         </div>
       </div>
@@ -304,20 +299,9 @@ export const JobResumeBanner: React.FC<{
         <p className="text-[11px] leading-relaxed font-semibold text-red-700 dark:text-red-300">{stop.detail}</p>
       )}
 
-      <p className="text-[11px] leading-relaxed">
-        Suggested restart: line <span className="font-mono font-semibold">{stop.suggestedLine.toLocaleString()}</span>
-        {stop.windBack > 0
-          ? ' — a little before the stop, because the controller had taken lines it had not yet cut, so nothing is left uncut.'
-          : ' — the line it had reached.'}
-      </p>
-
       {resume.restored && (
         <p className="text-[11px] leading-relaxed font-semibold">
-          The machine has been through a power cycle since, so nothing on it is still true: home it,
-          confirm the work origin, and zero Z for whatever tool is actually in the spindle.
-          {resume.approximate && (
-            <> The line below was recorded once a minute, so wind it back rather than forward.</>
-          )}
+          Controller reconnected or reset since stop; verify work origin and Z zero.
         </p>
       )}
 
@@ -327,9 +311,7 @@ export const JobResumeBanner: React.FC<{
 
       {showZTools && atToolChange && (
         <p className="text-[11px] leading-relaxed">
-          Unlock the machine and jog Z down off the switch, fit the new bit, and zero Z on the same
-          surface as before. X and Y did not move, so they need nothing. Resuming carries on with the
-          new tool from the tool change; it does not stop for it a second time.
+          Line {target.toLocaleString()} uses a new tool: fit that bit and zero Z before resuming.
           {depth !== null && depth !== undefined ? (
             <> Resuming will move over the stopping point and descend to <strong>Z{depth.toFixed(2)} mm</strong>.</>
           ) : (
@@ -340,13 +322,10 @@ export const JobResumeBanner: React.FC<{
 
       {showZTools && !atToolChange && (
         <p className="text-[11px] leading-relaxed">
-          Before resuming: clear the tool from the work by hand, and re-home the machine if it
-          alarmed. If the bit was changed, its length is different and the Z zero is now wrong.
-          Touch off again first.
           {depth !== null && depth !== undefined ? (
-            <> Resuming will move over the stopping point and descend to <strong>Z{depth.toFixed(2)} mm</strong>.</>
+            <>Resuming will move over the stopping point and descend to <strong>Z{depth.toFixed(2)} mm</strong>.</>
           ) : (
-            <> Resuming will move over the stopping point without going back down into the cut.</>
+            <>Resuming will move over the stopping point without going back down into the cut.</>
           )}
         </p>
       )}
@@ -780,12 +759,6 @@ export const JobPreflight: React.FC<{
           {envelope.problems.map((p, i) => (
             <p key={i} className="text-[11px] leading-relaxed text-red-300">{p.message}</p>
           ))}
-          {machineState.motion.softLimits && (
-            <p className="text-[11px] leading-relaxed text-red-400/80">
-              Soft limits are on, so the controller will alarm and stop rather than drive into the
-              stop, but it will do so partway through, with the work already cut into.
-            </p>
-          )}
         </div>
       )}
 
@@ -979,11 +952,6 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
           ))}
         </div>
       </div>
-      <p className="text-[10px] leading-relaxed text-slate-500">
-        Applied to the motion already in the buffer, so a cut that is chattering or burning can be
-        backed off without stopping the job. Chatter or burn marks mean the feed and the speed are
-        wrong for each other. Trim here to find the pair that works, then set them for next time.
-      </p>
     </div>
   );
 };

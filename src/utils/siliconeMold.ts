@@ -231,7 +231,7 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
   const groove = Math.max(0.5, Math.min(o.grooveMm, o.baseMm - 1));
   if (Math.abs(groove - o.grooveMm) > 1e-9) {
     warnings.push(
-      `The groove is ${+groove.toFixed(2)} mm deep, not ${o.grooveMm} mm: it must leave 1 mm of the ${o.baseMm} mm base under it, so thicken the base for a deeper one.`,
+      `Groove depth clamped to ${+groove.toFixed(2)} mm (from ${o.grooveMm} mm) to leave 1 mm floor in the ${o.baseMm} mm base.`,
     );
   }
 
@@ -313,10 +313,10 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
       purpose: o.hole,
     };
     if (o.hole === 'pour' && diaMm < MIN_POUR_HOLE_MM) {
-      warnings.push(`A pour hole ${diaMm} mm across is too narrow to pour through; make it at least ${MIN_POUR_HOLE_MM} mm.`);
+      warnings.push(`Pour hole diameter (${diaMm} mm) is below the ${MIN_POUR_HOLE_MM} mm minimum.`);
     }
     if (o.hole !== 'pour' && Math.PI * (diaMm / 2) ** 2 > MAX_PLUGGED_MM2) {
-      warnings.push(`A ${o.hole} hole ${diaMm} mm across is too big to plug while pouring through the master's foot; keep it under ${MAX_PLUGGED_DIA_MM} mm, or make it a pour hole.`);
+      warnings.push(`${o.hole} hole diameter (${diaMm} mm) exceeds ${MAX_PLUGGED_DIA_MM} mm max for a plugged hole; reduce diameter or switch to a pour hole.`);
     }
   }
 

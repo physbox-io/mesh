@@ -61,11 +61,11 @@ describe('printAnalysis & hardwareComponents', () => {
 
     const thinWallSpot = result.weakSpots.find(w => w.id.startsWith('thin_wall_'));
     expect(thinWallSpot).toBeDefined();
-    expect(thinWallSpot?.title).toContain('Ultra-Thin Wall Section');
+    expect(thinWallSpot?.title).toContain('Thin wall');
 
     const thinPinSpot = result.weakSpots.find(w => w.id.startsWith('thin_pin_'));
     expect(thinPinSpot).toBeDefined();
-    expect(thinPinSpot?.title).toContain('Fragile Vertical Pin');
+    expect(thinPinSpot?.title).toContain('Slender vertical pin');
 
     const scaleSpot = result.weakSpots.find(w => w.id.startsWith('scale_large_'));
     expect(scaleSpot).toBeDefined();
@@ -95,7 +95,7 @@ describe('printAnalysis & hardwareComponents', () => {
     const result = analyzeSceneMechanicalWeaknesses(meshScene);
     const overhangSpot = result.weakSpots.find(w => w.id.startsWith('mesh_overhang_'));
     expect(overhangSpot).toBeDefined();
-    expect(overhangSpot?.title).toContain('Unsupported Mesh Overhang');
+    expect(overhangSpot?.title).toContain('Overhang >45°');
   });
 
   it('accurately positions weak spots for nodes at non-zero world pos without double offset', () => {

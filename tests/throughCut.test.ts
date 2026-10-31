@@ -183,9 +183,9 @@ describe('through-cut relief export', () => {
     };
     const tabbed = generateReliefCarveGcode({ nodes: [node] }, base).warnings.join(' ');
     expect(tabbed).toMatch(/holding tab/);
-    expect(tabbed).not.toMatch(/cut free/);
+    expect(tabbed).not.toMatch(/no holding tabs/);
     const bare = generateReliefCarveGcode({ nodes: [node] }, { ...base, holdingTabs: false }).warnings.join(' ');
-    expect(bare).toMatch(/cut free/);
+    expect(bare).toMatch(/no holding tabs/);
   }, 60_000);
 
   it('never goes below the stock without being asked to', () => {

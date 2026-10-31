@@ -1281,7 +1281,7 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
         onNeg.withPeg.delete(); onPos.withPeg.delete();
         bore(joint.neg, neg3(n));
         bore(joint.pos, n);
-        ctx.warnings.push(`Sections ${joint.neg + 1} and ${joint.pos + 1}: a peg would stand either of them off the bed, so their joint has holes on both sides for a loose Ø${joinery.diameterMm} × ${joinery.lengthMm} mm dowel (print one, or cut one).`);
+        ctx.warnings.push(`Sections ${joint.neg + 1} and ${joint.pos + 1}: replaced printed pegs with Ø${joinery.diameterMm} × ${joinery.lengthMm} mm dowel bores so both sections fit the print bed.`);
         return;
       }
       const pegNeg = onNeg.cost <= onPos.cost;
@@ -1325,7 +1325,7 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
       for (const g of groups.values()) {
         if (g === largest) continue;
         const names = g.map((i) => i + 1).join(', ');
-        ctx.warnings.push(`Section${g.length > 1 ? 's' : ''} ${names} ${g.length > 1 ? 'are' : 'is'} held to the rest by glue alone: no face ${g.length > 1 ? 'they share' : 'it shares'} with the rest has room for a Ø${joinery.diameterMm} mm ${joinery.kind === 'dowel' ? 'dowel' : 'peg'} with ${joinery.minWallMm} mm of wall round it. Line ${g.length > 1 ? 'them' : 'it'} up by hand when gluing.`);
+        ctx.warnings.push(`Section${g.length > 1 ? 's' : ''} ${names} ${g.length > 1 ? 'have' : 'has'} insufficient wall margin (${joinery.minWallMm} mm) for a Ø${joinery.diameterMm} mm ${joinery.kind === 'dowel' ? 'dowel' : 'peg'} and must be aligned manually during glue-up.`);
       }
     }
   }

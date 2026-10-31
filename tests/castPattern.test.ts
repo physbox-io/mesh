@@ -143,7 +143,7 @@ describe('casting a small part', () => {
     // A band of this modulus freezes in a second or so and feeds back through
     // its own gate; the old rule stuck a 10 mm riser on it regardless.
     expect(r.summary.riserDiaMm).toBe(0);
-    expect(r.warnings.join(' ')).toMatch(/no riser/i);
+    expect(r.warnings.join(' ')).toMatch(/riser omitted/i);
   });
 
   it('parts at mid-height rather than at the base', () => {
@@ -248,7 +248,7 @@ describe('a scene of separate bodies', () => {
     // Bodies floating in mid-air are genuinely re-entrant, whatever the plane.
     const r = generateCastPattern(scene, { metalId: 'aluminium' });
     expect(r.summary.undrawablePercent).toBeGreaterThan(1);
-    expect(r.warnings.join(' ')).toMatch(/will not draw cleanly/);
+    expect(r.warnings.join(' ')).toMatch(/overhangs the pull direction/);
   });
 
   it("picks a parting plane no worse than the base", () => {
@@ -328,9 +328,9 @@ describe('the rig on a tall scene', () => {
   });
 
   it('says the rig is too big for a home foundry', () => {
-    expect(r.warnings.join(' ')).toMatch(/bigger than most home foundries/);
+    expect(r.warnings.join(' ')).toMatch(/Rig envelope is/);
     const burn = generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium' });
-    expect(burn.warnings.join(' ')).toMatch(/kg of investment/);
+    expect(burn.warnings.join(' ')).toMatch(/kg investment/);
   });
 
   it('still gives a squat part a real feeder', () => {
@@ -369,9 +369,9 @@ describe('lost-PLA cast pattern', () => {
     // draw check is fine here, and the figure is reported without the warning.
     const atBase = generateCastPattern(ring, { method: 'sand', metalId: 'silver', partingFromBaseMm: 0 });
     const burnt = generateCastPattern(ring, { method: 'lost-pla', metalId: 'silver', partingFromBaseMm: 0 });
-    expect(atBase.warnings.join(' ')).toMatch(/overhangs the upward pull/);
+    expect(atBase.warnings.join(' ')).toMatch(/overhangs the pull direction/);
     expect(burnt.summary.undrawablePercent).toBeCloseTo(atBase.summary.undrawablePercent, 6);
-    expect(burnt.warnings.join(' ')).not.toMatch(/overhangs the upward pull/);
+    expect(burnt.warnings.join(' ')).not.toMatch(/overhangs the pull direction/);
     expect(burnt.summary.partingFromBaseMm).toBe(0);
   });
 
@@ -569,11 +569,11 @@ describe('a parting height on a model drafted by Prepare for Casting', () => {
     const asked = auto.summary.partingFromBaseMm + 20;
     const r = generateCastPattern(prepped, { metalId: 'aluminium', partingFromBaseMm: asked });
     expect(r.summary.partingFromBaseMm).toBeCloseTo(auto.summary.partingFromBaseMm, 6);
-    expect(r.warnings.some((w) => /Prepare for Casting drafted the walls/.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /draft was prepared there/.test(w))).toBe(true);
   });
 
   it('says nothing when the height asked is the prepared one', () => {
     const r = generateCastPattern(prepped, { metalId: 'aluminium', partingFromBaseMm: auto.summary.partingFromBaseMm });
-    expect(r.warnings.some((w) => /Prepare for Casting drafted the walls/.test(w))).toBe(false);
+    expect(r.warnings.some((w) => /draft was prepared there/.test(w))).toBe(false);
   });
 });

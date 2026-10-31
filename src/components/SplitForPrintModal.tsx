@@ -288,9 +288,9 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
                       {joinery.kind !== 'none' ? ` · ${pins.length} ${joinery.kind === 'dowel' ? 'dowel' : 'peg'}${pins.length === 1 ? '' : 's'}` : ''}
                     </p>
                     {split.sections.length === 1 && (
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">{part.absorbed.length
-                        ? 'It fits the bed already, so nothing is cut; Apply joins the bodies into one piece and records the best way up for the 3MF export.'
-                        : 'It fits the bed already, so nothing is cut; Apply just records the best way up for the 3MF export.'}</p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        {`Part already fits the bed (${printBed.widthMm} × ${printBed.depthMm} × ${printBed.heightMm} mm). Select an axis below to split anyway.`}
+                      </p>
                     )}
                     {misfits > 0 && (
                       <p className="text-[11px] text-red-600 dark:text-red-400">{misfits} section{misfits === 1 ? '' : 's'} still do not fit the bed.</p>
@@ -364,7 +364,7 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
                     </p>
                   )}
                   <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">
-                    Each joint is dropped together under gravity in MuJoCo, with pins and holes colliding as their exact shapes. Seat is how far short of its place it came to rest; play and twist are how far it moves when pushed. A plain cut slides freely — glue holds it.
+                    Boolean split failed at this plane. Nudge the cut offset by 1–2 mm or run Repair Mesh first.
                   </p>
                 </div>
               )}

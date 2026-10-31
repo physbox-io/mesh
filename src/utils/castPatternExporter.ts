@@ -587,8 +587,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     parting = Math.min(partH, Math.max(0, preppedDraft.partingZ * 1000 - mnZ));
     if (opts.partingFromBaseMm !== 'auto' && !lostPla && Math.abs(opts.partingFromBaseMm - parting) > 0.05) {
       warnings.push(
-        `Parted at ${parting.toFixed(1)} mm above the base, not ${opts.partingFromBaseMm} mm: Prepare for Casting ` +
-          `drafted the walls from there, so prepare again at the height you want.`,
+        `Parting plane kept at ${parting.toFixed(1)} mm (draft was prepared there, not ${opts.partingFromBaseMm} mm).`,
       );
     }
   } else if (opts.partingFromBaseMm === 'auto') {
@@ -617,15 +616,12 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     drawBasisMm3 > 0 ? Math.min(100, Math.max(0, (100 * trapped) / drawBasisMm3)) : 0;
   if (undrawablePercent > 1 && !lostPla) {
     warnings.push(
-      `About ${undrawablePercent.toFixed(0)}% of the part overhangs the upward pull, so the pattern ` +
+      `~${undrawablePercent.toFixed(0)}% of the part overhangs the pull direction` +
         (preppedDraft
-          ? `will not draw cleanly from the sand there. The walls already carry ${preppedDraft.draftDeg}° of draft, ` +
-            `so what is left is an undercut that draft cannot fix: change the shape, or switch to Lost PLA.`
+          ? ` despite ${preppedDraft.draftDeg}° draft. Remove undercuts or switch to Lost PLA.`
           : patternDraft > 0
-            ? `will not draw cleanly from the sand there, even with ${patternDraft}° of draft: an undercut that draft cannot fix. ` +
-              `Move the parting plane, change the shape, or switch to Lost PLA and burn the pattern out instead of pulling it.`
-            : `will not draw cleanly from the sand there. Add draft, move the parting plane, or switch to Lost PLA ` +
-              `and burn the pattern out instead of pulling it.`)
+            ? ` despite ${patternDraft}° draft. Move the parting plane, remove undercuts, or switch to Lost PLA.`
+            : `. Add draft, move the parting plane, or switch to Lost PLA.`)
     );
   }
 
@@ -731,8 +727,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   const riserDia = opts.riserDiaMm > 0 ? opts.riserDiaMm : autoRiserDia;
   if (opts.addRiser && !riserWanted && !lostPla) {
     warnings.push(
-      `No riser: at a modulus of ${castModulusMm.toFixed(2)} mm this casting freezes fast enough to feed ` +
-        `back through its own gate, and a feeder small enough to suit it would freeze first.`
+      `Riser omitted (casting modulus ${castModulusMm.toFixed(2)} mm is thin enough to feed through the gate).`
     );
   }
 
@@ -1049,8 +1044,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     }
     if (vents.length === 0) {
       warnings.push(
-        'No room for a vent clear of the sprue on a pattern this small, so the sprue and cup have to ' +
-          'let the air out on their own. Pour slowly and keep the cup full.'
+        'Pattern is too small for a separate vent clear of the sprue; pour slowly to vent through the sprue.'
       );
     }
   }
@@ -1075,10 +1069,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   const gatingMetalG = (gatingVolumeMm3 / 1000) * metal.densityGcm3;
   if (opts.addGating && gatingMetalG > castingMetalG) {
     warnings.push(
-      `The gating holds more metal than the casting does — ${Math.round(gatingMetalG)} g of channel to ` +
-        `${Math.round(castingMetalG)} g of part. The rig has to span the whole ${Math.round(gPartH)} mm ` +
-        'height of the pattern, so a tall, mostly-empty scene pays for it in sprue. Cast it in pieces, ' +
-        'or lay it down so it is wide rather than tall.'
+      `Gating mass (${Math.round(gatingMetalG)} g) exceeds part mass (${Math.round(castingMetalG)} g) across the ${Math.round(gPartH)} mm pattern height. Consider orienting the part flat or casting in sections.`
     );
   }
 
@@ -1110,34 +1101,23 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     patternPlasticG = (patternVolMm3 / 1000) * 1.24 * 0.33;
     if (patternVolMm3 > 120_000) {
       warnings.push(
-        `That is a lot of plastic to burn out (${Math.round(patternVolMm3).toLocaleString()} mm³ of pattern). Print it ` +
-          'hollow — two or three walls and about 10% infill — with a drain hole into the sprue, or the PLA ' +
-          'expands as it softens and splits the investment before it ever gets a chance to burn.'
+        `Large burnout volume (${Math.round(patternVolMm3).toLocaleString()} mm³): print with 2–3 walls, ~10% infill, and a drain hole into the sprue so thermal expansion does not crack the investment.`
       );
     }
     if (Math.min(partW, partD, partH) < 2) {
       warnings.push(
-        `The thinnest section here is about ${Math.min(partW, partD, partH).toFixed(1)} mm. Investment holds ` +
-          'fine detail well, but a section under ~2 mm freezes before it fills unless the flask is poured hot ' +
-          'and the metal is helped in with vacuum or a centrifuge.'
+        `Minimum section is ~${Math.min(partW, partD, partH).toFixed(1)} mm; sections under 2 mm may require a hot flask or vacuum/centrifugal assist to fill completely.`
       );
     }
   }
 
-  // And the rig has to fit in something real. A home foundry's flask is a
-  // biscuit tin and a kiln is a bucket; both run out well before a 600 mm
-  // pattern does, and the investment for a flask that size is weighed in tens
-  // of kilos, so the size is stated with what it would actually take.
   if (lostPla && (flaskDiaMm > 200 || flaskHeightMm > 300)) {
     warnings.push(
-      `That flask is ⌀${Math.round(flaskDiaMm)} × ${Math.round(flaskHeightMm)} mm and would take about ` +
-        `${(investmentPowderG / 1000).toFixed(1)} kg of investment. Hobby flasks are rarely over 150 mm, and ` +
-        'a kiln that will burn one out is rarer still. Cast it in pieces and join them.'
+      `Flask size is ⌀${Math.round(flaskDiaMm)} × ${Math.round(flaskHeightMm)} mm (~${(investmentPowderG / 1000).toFixed(1)} kg investment); consider casting in sections.`
     );
   } else if (!lostPla && Math.max(gPartW, gPartD, rigTopZ) > 300) {
     warnings.push(
-      `The rig is ${Math.round(gPartW)} × ${Math.round(gPartD)} × ${Math.round(rigTopZ)} mm, which needs a ` +
-        'flask bigger than most home foundries have and a crucible to match. Cast it in pieces and join them.'
+      `Rig envelope is ${Math.round(gPartW)} × ${Math.round(gPartD)} × ${Math.round(rigTopZ)} mm; consider casting in sections.`
     );
   }
 

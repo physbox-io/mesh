@@ -300,13 +300,9 @@ export function splitPanelsToFit(
       });
     });
     notes.push(
-      `${panel.name} does not fit the rack whole, so it is cut as 4 mitred lengths ` +
-        `glued at the corners. The assembled part is the same size as the model.` +
-        (panel.engrave2D?.length ? ` Its surface pattern is not engraved on the lengths.` : '') +
-        (spliced
-          ? ` The lengths are longer than the stock too, so they are spliced from ` +
-            `${spliced} pieces joined by interlocking fingers.`
-          : '')
+      `${panel.name} exceeds sheet dimensions and is split into 4 mitred frame lengths` +
+        (spliced ? ` (${spliced} finger-spliced pieces each)` : '') +
+        (panel.engrave2D?.length ? '; surface pattern omitted on split lengths.' : '.')
     );
   }
 

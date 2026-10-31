@@ -27,7 +27,7 @@ export function scriptWarnings(nodes: SceneNode[] | undefined): string[] {
   const walk = (list: SceneNode[] | undefined) => {
     for (const n of list || []) {
       const err = scriptSyntaxError(n.script);
-      if (err) out.push(`Script on '${n.name || n.id}' does not compile: ${err}. It was saved as written and will do nothing until fixed.`);
+      if (err) out.push(`Script syntax error on '${n.name || n.id}': ${err}.`);
       walk(n.children);
     }
   };

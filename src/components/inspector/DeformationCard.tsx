@@ -133,14 +133,6 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
         <p className="text-[10px] text-slate-400 leading-snug">{material.note}</p>
       )}
 
-      {willConvert && !shatterOn && !dentOn && (
-        <p className="text-[10px] text-slate-400 leading-snug">
-          A {geom.type} has no vertices to break or push in. Turning on Shatters
-          or Dents rebuilds it as the mesh it already looks like
-          {canBreakUnderLoad ? ', and a mesh no longer breaks under load.' : '.'}
-        </p>
-      )}
-
       {/* ---- Under load ---- */}
       <LoadBreakSection node={selectedNode} onToggle={setLoad} />
 
@@ -161,8 +153,7 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
 
       {shatterOn && !movable && (
         <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
-          This body is fixed in place, so nothing can hit it hard enough to
-          matter. Give it a joint under Body &amp; Joints to let it be struck.
+          Pre-fractures the mesh into welded Voronoi pieces that separate on impact.
         </p>
       )}
 
@@ -181,12 +172,7 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
           </div>
           {breakSpeed !== null && (
             <p className="text-[10px] text-slate-400 leading-snug -mt-1">
-              A {(massKg * 1000 < 1000 ? `${Math.round(massKg * 1000)} g` : `${massKg.toFixed(1)} kg`)} body
-              stopped from {breakSpeed.toFixed(1)} m/s — a drop of
-              about {(breakSpeed * breakSpeed / 19.62 * 1000).toFixed(0)} mm onto something hard
-              {selectedNode.shatterThicknessRef
-                ? `, where the wall is ${+(selectedNode.shatterThicknessRef * 1000).toFixed(1)} mm. Thinner breaks sooner: half that wall, half the blow.`
-                : '.'}
+              Single-geom body: only unpins fixed bodies on impact. Use Shatter or Join for multi-piece breaks.
             </p>
           )}
           <div className="flex items-center gap-2">
@@ -306,12 +292,6 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
             />
             <span className="text-[10px] text-slate-400 w-8 shrink-0">N·s</span>
           </div>
-          {(geom.pierceImpulseNs ?? 0) > 0 && (geom.pierceImpulseNs ?? 0) <= (geom.dentYieldNs ?? 0) * 1.5 && (
-            <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
-              Piercing this close to the yield leaves almost no range in which this
-              behaves like a sheet — nearly everything that marks it will go through.
-            </p>
-          )}
           <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer mt-1">
             <input
               type="checkbox"
@@ -320,37 +300,14 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
                 { deformCollision: e.target.checked || undefined }, gi)}
               className="accent-amber-500 cursor-pointer"
             />
-            Damage is real, not just seen
+            Update collision mesh on dent (slow)
           </label>
-          {geom.deformCollision ? (
-            <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
-              Every mark now changes what this body collides as: things fall
-              through the holes, and an edge worn away stops holding what it used
-              to. <strong>It is slow on purpose.</strong> Damage reaches the
-              solver by rebuilding the model, and the surface has to be broken
-              into convex pieces each time — a hull would fill every crater and
-              every hole straight back in. Expect a hitch per blow.
-            </p>
-          ) : (
-            <p className="text-[10px] text-slate-400 leading-snug">
-              <strong className="text-slate-500">Damage is cosmetic.</strong> The
-              surface shows the crater, but contact keeps using the undamaged
-              shape — so something can rest on the hole it just made. Tick the box
-              above to make it real, and read what that costs.
-              {marks && ` Deepest so far ${(marks.deepest * 1000).toFixed(1)} mm`}
-              {marks?.holes ? `, and holed through ${marks.holes} time${marks.holes === 1 ? '' : 's'}` : ''}
-              {marks && '.'}
-            </p>
-          )}
+          <p className="text-[10px] text-slate-400 leading-snug">
+            {geom.deformCollision
+              ? 'Rebuilds convex collision hulls after each dent (may pause briefly).'
+              : 'Dents are visual only unless checked.'}
+          </p>
         </div>
-      )}
-
-      {(shatterOn || dentOn) && (
-        <p className="text-[10px] text-slate-400 leading-snug">
-          Blows are measured as impulse, not force, so the number means the same
-          thing whatever the solver is doing: a 200 g body arriving at 5 m/s and
-          stopping dead is about 1 N·s.{shatterOn && dentOn && ' A blow hard enough to shatter does not also dent.'}
-        </p>
       )}
     </div>
   );

@@ -36,9 +36,7 @@ export const ProbeCircuitStatus: React.FC<ProbeCircuitStatusProps> = ({ active, 
     <div className="flex items-start gap-1.5 text-[10px] text-amber-700 dark:text-amber-300 leading-snug">
       <Zap className="w-3.5 h-3.5 shrink-0 mt-px" />
       <span>
-        Probe circuit not yet proved. Clip the continuity lead on and touch the bit to the plate
-        by hand until this turns green — probing is refused until then, because a probe only
-        stops when that circuit closes.
+        Touch the plate to the bit to verify continuity before probing.
       </span>
     </div>
   );

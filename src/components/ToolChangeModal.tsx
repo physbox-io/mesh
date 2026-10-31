@@ -90,10 +90,10 @@ export const ToolChangeModal: React.FC = () => {
           <button
             type="button"
             onClick={() => setOverrideFor(key)}
-            title="Only if the Z datum is already right for the tool now in the spindle"
+            title="Resume using current Z zero"
             className="px-2 py-2 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
           >
-            Z is already set, let me resume
+            Skip Z zero
           </button>
         ) : undefined
       }

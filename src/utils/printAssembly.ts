@@ -576,19 +576,19 @@ export function runStage(mj: MujocoLike, xml: string, stage: StageSpec, opts: { 
     const rotates = stage.kind === 'join' && stage.joinery.kind !== 'none' && stage.pins >= 1
       && (stage.pins === 1 || (seated && twistDeg === null));
     if (stage.kind === 'join' && stage.joinery.kind !== 'none' && stage.pins === 0) {
-      notes.push('No pins on this joint: the face was too narrow for one. It is held by glue alone.');
+      notes.push('No alignment pins fit on this face (held by adhesive only).');
     }
-    if (rotates) notes.push('It can turn about its pin. Glue it with the faces clamped square, or use a wider face for a second pin.');
+    if (rotates) notes.push('Single-pin joint can rotate; clamp square during glue-up or widen face for a second pin.');
     if (!seated && !diverged && gapMm < 0) {
-      notes.push(`It ended up ${(-gapMm).toFixed(2)} mm past its seat: it went into the part it joins, which means the contact there is not being seen.`);
+      notes.push(`Over-travelled seat by ${(-gapMm).toFixed(2)} mm (interpenetrating mating part).`);
     } else if (!seated && !diverged) {
       notes.push(gapMm > 0.5
-        ? `It came to rest ${gapMm.toFixed(1)} mm short of its seat: a pin is not finding its hole.`
-        : `It came to rest ${gapMm.toFixed(2)} mm short of its seat.`);
+        ? `Stopped ${gapMm.toFixed(1)} mm short of seat (pin interference).`
+        : `Stopped ${gapMm.toFixed(2)} mm short of seat.`);
     }
-    if (diverged) notes.push('The simulation became unstable during this stage, so its numbers mean nothing.');
+    if (diverged) notes.push('Simulation diverged during this stage.');
     const approximate = stage.approximate.length > 0;
-    if (approximate) notes.push(`Section${stage.approximate.length > 1 ? 's' : ''} ${stage.approximate.map((s) => s + 1).join(', ')} collide${stage.approximate.length > 1 ? '' : 's'} as a convex hull here, so contact away from the pins is approximate.`);
+    if (approximate) notes.push(`Section${stage.approximate.length > 1 ? 's' : ''} ${stage.approximate.map((s) => s + 1).join(', ')} use${stage.approximate.length > 1 ? '' : 's'} convex-hull collision away from pins.`);
 
     // Fails when it does not go together, or when two or more pins still let it
     // slide about — pins that are not bearing. A single pin, or none, is a

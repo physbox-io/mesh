@@ -301,9 +301,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
           dropped.push({
             face: f,
             reason:
-              `stood on end the block is ${standing.toFixed(0)} mm tall, and with the bit's ` +
-              `${(input.stickoutMm ?? 0).toFixed(0)} mm that needs ${need.toFixed(0)} mm under the spindle, ` +
-              `against ${input.clearanceMm.toFixed(0)} mm`,
+              `${standing.toFixed(0)} mm standing height + ${(input.stickoutMm ?? 0).toFixed(0)} mm bit (${need.toFixed(0)} mm) exceeds ${input.clearanceMm.toFixed(0)} mm under the spindle`,
           });
           continue;
         }
@@ -448,8 +446,8 @@ export function planSetups(input: PlannerInput): SetupPlan {
       face: f,
       reason:
         pick.chosen.length >= maxSetups
-          ? `it would clear ${Math.round(gain)} mm³ more, but the plan is at its ${maxSetups}-setup limit`
-          : `it would clear ${Math.round(gain)} mm³ more, not enough to be worth turning the block for`,
+          ? `clears ${Math.round(gain)} mm³ more (skipped due to ${maxSetups}-setup limit)`
+          : `clears only ${Math.round(gain)} mm³ more`,
     });
   }
 

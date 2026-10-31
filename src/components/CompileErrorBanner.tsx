@@ -32,10 +32,7 @@ export function CompileErrorBanner() {
     <div className="pointer-events-auto max-w-lg flex items-start gap-2 rounded-lg bg-red-50/95 dark:bg-red-950/90 border border-red-400 dark:border-red-700 px-3 py-2 text-[11px] leading-relaxed text-red-800 dark:text-red-200 shadow-lg backdrop-blur-md">
       <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
       <span>
-        <strong className="font-bold">This scene would not load.</strong> The change is still in the
-        document, but the simulation is running the last version that loaded — so what you see and
-        what you edit no longer agree, and bodies will not respond until it builds. Undo, or put
-        right what is named below.
+        <strong className="font-bold">Scene failed to compile (running last valid state):</strong>
         <span className="block mt-1 font-mono text-[10px] opacity-90 break-words">{error}</span>
       </span>
     </div>

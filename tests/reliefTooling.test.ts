@@ -173,7 +173,7 @@ describe('what the exported program says about its tooling', () => {
       finishingFeedrate: 60,
       finishingFlutes: 4,
     });
-    expect(result.warnings.join(' ')).toMatch(/chip per tooth/i);
+    expect(result.warnings.join(' ')).toMatch(/mm\/tooth/i);
   });
 
   it('warns that a downcut bit packs its chips into a deep relief', () => {

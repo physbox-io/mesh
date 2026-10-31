@@ -167,9 +167,6 @@ export function spindleCeilingRefusal(
   if (asked === null || asked <= ceiling + 0.5) return null;
   const ratio = asked / ceiling;
   return (
-    `This program runs the spindle at S${Math.round(asked)}, but this controller tops out at ` +
-    `${Math.round(ceiling)} RPM ($30), so it would clamp the speed and every feed would cut at ` +
-    `${ratio.toFixed(1)}× the chip load it was planned for. Re-export for this machine. ` +
-    "If the spindle's speed is set by hand rather than by S, enter its real top speed in Machine Setup."
+    `Program spindle speed S${Math.round(asked)} exceeds controller max ${Math.round(ceiling)} RPM ($30), which would increase chipload by ${ratio.toFixed(1)}×. Re-export for ${Math.round(ceiling)} RPM, or set the manual spindle speed override in Machine Setup.`
   );
 }

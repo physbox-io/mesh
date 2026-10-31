@@ -1077,9 +1077,9 @@ function resolveMoldSetup(
     note =
       moldType === 'open'
         ? turned
-          ? `One-part open mold, with the part turned to open ${AXIS_WORDS[direction]}: that way keeps the most of its shape.`
-          : 'One-part open mold: this part comes out of one cleanly.'
-        : `Two-part mold opening ${AXIS_WORDS[direction]}${turned ? ', the way that keeps the most of the shape' : ''}.`;
+          ? `One-part open mold oriented ${AXIS_WORDS[direction]} to minimize undercuts.`
+          : 'One-part open mold.'
+        : `Two-part mold opening ${AXIS_WORDS[direction]}.`;
   }
   return { moldType, direction, note };
 }
@@ -1426,16 +1426,13 @@ export function generateMoldMeshes(
     const pct = (100 * undercutColumns) / field.hitColumns;
     const pctText = pct < 1 ? 'Under 1' : pct.toFixed(0);
     warnings.push(
-      `${pctText}% of the part sits behind an overhang or undercut. Because undercuts are kept in the cavity, ` +
-      'a rigid mold will mechanically lock onto the casting — print in flexible TPU, cast a silicone negative, or use a sacrificial shell.'
+      `${pctText}% of the part has undercuts preserved in the cavity. Print in flexible TPU, cast a silicone negative, or use a sacrificial shell so the casting can release.`
     );
   }
 
   if (opts.moldType === 'clamshell' && lidIsBackingPlate) {
     warnings.push(
-      'The whole part lies on one side of the parting plane, so the lid holds none of its shape and ' +
-      'comes out as a flat backing plate. Print it only if you want a flat, glossy back on the casting; ' +
-      'otherwise switch to the one-part open mold and pour into the cavity half alone.'
+      'Part lies on one side of the parting plane; the lid is a flat backing plate. Switch to a one-part open mold unless a closed top face is needed.'
     );
   }
 

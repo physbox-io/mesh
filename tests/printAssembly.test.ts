@@ -90,7 +90,7 @@ describe('assembly in MuJoCo', () => {
     // It rides on the dowel: well clear of 0.1 mm, and no more than the 9.5 mm the dowel stands proud.
     expect(result.gapMm).toBeGreaterThan(3);
     expect(result.gapMm).toBeLessThan(10);
-    expect(result.notes.join(' ')).toMatch(/short of its seat/);
+    expect(result.notes.join(' ')).toMatch(/short of seat/);
   }, 60_000);
 
   it('flags a joint held by a single pin as free to turn', () => {
@@ -101,7 +101,7 @@ describe('assembly in MuJoCo', () => {
     const join = report.stages.find((s) => s.kind === 'join')!;
     expect(join.seated).toBe(true);
     expect(join.rotates).toBe(true);
-    expect(join.notes.join(' ')).toMatch(/turn about its pin/);
+    expect(join.notes.join(' ')).toMatch(/Single-pin joint can rotate/);
   }, 60_000);
 
   it('seats a plain cut, with no limit on how far it slides', () => {

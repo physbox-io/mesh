@@ -66,9 +66,9 @@ describe('solid machining from any face', () => {
       expect(s.instructions.length).toBeGreaterThan(0);
     });
     expect(r.plan!.text).toMatch(/3 setups/);
-    expect(r.plan!.redesignHint).toMatch(/upright/);
+    expect(r.plan!.redesignHint).toMatch(/Removing side undercuts/);
     // What a plan that succeeds says it leaves: only what every router leaves.
-    expect(r.plan!.remaining.text).toMatch(/Inside corners come out rounded|Every surface/);
+    expect(r.plan!.remaining.text).toMatch(/Inside corners filleted|All surfaces/);
   });
 
   it('says the turned setups are cut without the bed levelling probed on the top', () => {
@@ -118,9 +118,9 @@ describe('solid machining from any face', () => {
     // A 6 mm bit reaching 48 mm cannot get half way along the groove from either end.
     const res = generateSolidMachining(scene, { ...opts, toolStickoutMm: 0, setups: 'auto' });
     expect(res.success).toBe(false);
-    expect(res.error).toMatch(/^This part can't be cut with this bit/);
-    expect(res.error).toMatch(/at least \d+ mm from its tip to the holder/);
-    expect(res.error).not.toMatch(/mm³|stickout|collet/);
+    expect(res.error).toMatch(/^Some features exceed tool reach/);
+    expect(res.error).toMatch(/at least \d+ mm/);
+    expect(res.error).not.toMatch(/mm³|collet/);
   });
 
   it('leaves an upright tray to one setup, as it always was', () => {

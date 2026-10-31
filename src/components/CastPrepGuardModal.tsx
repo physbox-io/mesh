@@ -44,7 +44,7 @@ export function CastPrepGuardModal() {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="The scene is prepared for casting"
+        aria-label="Casting draft is active"
         className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-md w-full p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
@@ -53,11 +53,11 @@ export function CastPrepGuardModal() {
             <Flame className="w-5 h-5" />
           </div>
           <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">
-            {done ? 'Now make your change again' : 'The scene is prepared for casting'}
+            Casting draft is active
           </h2>
         </div>
         <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed whitespace-normal">
-          {done ?? `${deg}° of draft is baked into every part for sand casting. Editing now would edit the drafted shapes, and switching prep off would have nothing to put back — so that edit was not made.`}
+          {done ?? `${deg}° casting draft is applied. Turn off prep to edit original shapes, or bake the draft permanently.`}
         </div>
         <div className="flex flex-wrap justify-end gap-2 text-xs">
           {done ? (
@@ -72,10 +72,13 @@ export function CastPrepGuardModal() {
               <button
                 onClick={() => {
                   const { kept } = clearCastPrep();
-                  setDone(kept.length > 0
-                    ? `The original shapes are back, except ${kept.map((k) => k.name).join(', ')}. Make your change again.`
-                    : 'The original shapes are back, and editable. Make your change again, then turn prep on in Cast.');
+                  if (kept.length > 0) {
+                    setDone(`Original shapes restored except ${kept.map((k) => k.name).join(', ')}.`);
+                  } else {
+                    dismiss();
+                  }
                 }}
+                title="Restore original shapes for editing."
                 className="px-4 py-2 font-semibold text-orange-700 dark:text-orange-300 hover:bg-orange-500/10 rounded-lg transition-colors cursor-pointer"
               >
                 Leave Casting Prep
@@ -83,8 +86,9 @@ export function CastPrepGuardModal() {
               <button
                 onClick={() => {
                   bakeCastPrep();
-                  setDone('The drafted shapes are the model now. Make your change again — to them.');
+                  dismiss();
                 }}
+                title="Bake drafted geometry permanently."
                 className="px-4 py-2 font-semibold text-white bg-orange-500 hover:bg-orange-600 rounded-lg transition-colors cursor-pointer"
               >
                 Bake It In

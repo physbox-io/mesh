@@ -24,11 +24,9 @@ export function LoadBreakSection({ node, onToggle }: { node: SceneNode; onToggle
   const info = lastBreak?.key === memberKey(node.id) ? lastBreak : null;
   const material = deformMaterial(node.deformMaterial);
 
-  const why = !shape
-    ? 'Only a long, thin part (a rod, strut or plank, at least 8 times as long as it is thick) breaks under load. Chunky parts break by being hit: see Shatters.'
-    : !free
-      ? 'This part is fixed in place or hangs on a joint. Only a free part can break under load.'
-      : undefined;
+  const why = !usable
+    ? 'Triggers when sustained force (N) exceeds the threshold over multiple steps.'
+    : undefined;
 
   return (
     <>

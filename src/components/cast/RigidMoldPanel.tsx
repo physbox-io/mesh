@@ -447,9 +447,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             {locksOn && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-900 text-purple-800 dark:text-purple-200">
                 <span className="basis-full">
-                  {castMaterial(material).waterBased
-                    ? `A rigid mold would lock on here, and ${castMaterial(material).label.toLowerCase()} dissolves a PVA liner: use Silicone.`
-                    : 'A rigid mold would lock on here: tick the PVA liner, or use Silicone.'}
+                  Undercut area detected. Rigid molds may lock; consider a Silicone Pour Box{castMaterial(material).waterBased ? '.' : ' or PVA liner.'}
                 </span>
                 {!castMaterial(material).waterBased && (
                   <button type="button" onClick={() => set('dissolvableLiner', true)}

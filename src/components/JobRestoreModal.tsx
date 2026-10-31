@@ -77,7 +77,7 @@ export const JobRestoreModal: React.FC = () => {
         <div className="flex items-center justify-between p-5 border-b border-slate-200 dark:border-slate-700">
           <h3 className="font-bold text-slate-800 dark:text-slate-100 text-base flex items-center gap-2">
             <RotateCcw className="w-5 h-5 text-sky-500" />
-            A job was still running when this was last open
+            Interrupted Job
           </h3>
           <button
             onClick={later}
@@ -92,12 +92,9 @@ export const JobRestoreModal: React.FC = () => {
           <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed flex flex-col gap-2">
             <p>
               <strong className="text-slate-800 dark:text-slate-100">
-                {from.jobName || 'A job'}
+                {from.jobName || 'Job'}
               </strong>{' '}
-              was streaming to the machine and stopped without finishing. It started{' '}
-              {started.toLocaleString()} and last reported {stopped.toLocaleString()}.{' '}
-              The program itself was saved, so it can be picked up from where it got to rather than
-              run again from the top.
+              stopped at {stopped.toLocaleString()} (started {started.toLocaleString()}).
             </p>
 
             <p className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
@@ -107,8 +104,7 @@ export const JobRestoreModal: React.FC = () => {
                   Recovered from your PhysBox Pro account.
                   {resume.approximate && (
                       <>
-                        {' '}The line is recorded once a minute there, so the real stopping point may
-                        be a little further on — wind it back rather than forward.
+                        {' '}Cloud progress saves every minute; step back a few lines if needed.
                       </>
                     )}
                 </>
@@ -119,37 +115,6 @@ export const JobRestoreModal: React.FC = () => {
                 </>
               )}
             </p>
-          </div>
-
-          {/*
-            The hard part, and the reason this is not a one-click "carry on".
-            Nothing in this app stopped that job, so the controller went round a
-            power cycle with it: it is not homed, and the tool in the spindle is
-            whatever is in the spindle. Everything the ordinary resume banner
-            warns about is true here and one step worse.
-          */}
-          <div className="bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/40 rounded-xl p-4 flex flex-col gap-2">
-            <strong className="text-amber-800 dark:text-amber-300 font-semibold text-xs">
-              Before you resume, the machine does not know any of this
-            </strong>
-            <ul className="text-amber-700/90 dark:text-amber-200/80 text-[11px] leading-relaxed list-disc pl-4 flex flex-col gap-1">
-              <li>
-                The work must still be clamped exactly where it was. If it has been unbolted or
-                nudged, there is nothing to resume onto — start again.
-              </li>
-              <li>
-                <strong>Home the machine first.</strong> It has been off since; its position is
-                whatever it powered up in.
-              </li>
-              <li>
-                <strong>Check the work origin.</strong> G54 lives in the controller's EEPROM and
-                usually survives a power cut, but confirm it with Go To Zero before trusting it.
-              </li>
-              <li>
-                <strong>Zero Z again.</strong> The tool may have been taken out, and a different
-                stickout makes the old datum wrong in the direction of driving the bit into the work.
-              </li>
-            </ul>
           </div>
 
           <JobResumeBanner machineState={machineState} onOpenSetup={later} />

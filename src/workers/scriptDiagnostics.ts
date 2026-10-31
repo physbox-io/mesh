@@ -259,5 +259,5 @@ export const headlessCostWarning = (
   const liveRtf = (timestepS * 1000) / msPerStep;
   if (share < 0.5 || liveRtf >= SLOW_RTF) return null;
   const who = slowest ? ` (slowest: '${slowest.body}' at ${slowest.msPerStep.toFixed(2)} ms)` : '';
-  return `Scripts took ${Math.round(share * 100)}% of this run's ${Math.round(wallMs)} ms: ${(scriptMs / ticks).toFixed(2)} ms per step${who} against a ${(timestepS * 1000).toFixed(2)} ms timestep, so live play would run at about ${liveRtf.toFixed(2)}x real time. Do less work per step, or only every Nth step (keep a counter on api.state).`;
+  return `Scripts used ${Math.round(share * 100)}% of step time (${(scriptMs / ticks).toFixed(2)} ms/step${who} vs ${(timestepS * 1000).toFixed(2)} ms budget; ~${liveRtf.toFixed(2)}x real time). Reduce per-step work or run every Nth step.`;
 };

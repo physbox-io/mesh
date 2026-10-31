@@ -168,7 +168,7 @@ describe('workEnvelope', () => {
     it('skips the placement check when nothing is connected', () => {
       const v = checkJobEnvelope(job(0, 0, 200, 150), machine);
       expect(v.placementChecked).toBe(false);
-      expect(v.placementSkippedBecause).toMatch(/Nothing is connected/);
+      expect(v.placementSkippedBecause).toMatch(/No machine connected/);
     });
   });
 

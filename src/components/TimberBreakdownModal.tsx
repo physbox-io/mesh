@@ -1168,29 +1168,6 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
 
                       {activeTab === 'cards' && (
                         <div ref={cardsListRef} className="flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1">
-                          <div className="rounded-lg bg-slate-100 dark:bg-slate-800/60 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
-                            <strong>How to read this list:</strong> Part numbers (<span className="font-mono font-semibold">1, 2…</span>) and face numbers (<span className="font-mono font-semibold">F1–F4</span>) are shown directly on the 3D preview faces.{' '}
-                            {!showCnc || cncPartCount === 0 ? (
-                              <>
-                                Cut each part to its listed <span className="font-mono font-semibold">L × W × T mm</span> size on a saw
-                                {isGlueFrame
-                                  ? ' and glue the joints flush (no CNC required).'
-                                  : isDowelFrame
-                                    ? ' and drill the listed dowel holes (no CNC required).'
-                                    : ' and cut the listed pockets/slots with shop tools (or switch CNC to On).'}
-                              </>
-                            ) : (
-                              <>
-                                Cut each part to its listed <span className="font-mono font-semibold">L × W × T mm</span> size first; CNC bed dimensions (
-                                <span className="font-mono">{cncBed.widthMm} × {cncBed.depthMm} × {cncBed.heightMm} mm</span>) govern how parts with{' '}
-                                <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
-                                  CNC Needed
-                                </span>{' '}
-                                clamp on the bed.
-                              </>
-                            )}
-                          </div>
-
                           {cutPlan.partCards.map((card) => {
                             const hasCnc = showCnc && card.cncSetups.length > 0;
                             const exceedsCnc = showCnc && card.cncAttachment === 'exceeds_cnc';
@@ -1413,46 +1390,37 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
 
                       {activeTab === 'glue' && (
                         <div className="flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1 text-xs">
-                          <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-900 dark:text-amber-200">
-                            <strong>Tip:</strong> Wood glue gives you 5–10 minutes of open working time. Never glue all legs and rails at once — glue the two flat side frames first, let them cure, then join them together.
-                          </div>
-
                           {[
                             {
                               step: '1. Complete Full Dry-Fit First (No Glue)',
                               details: [
-                                'Assemble the entire frame dry without glue and pull the joint shoulders tight with clamps.',
                                 isGlueFrame
-                                  ? 'Confirm every rail end sits square and flush against its mating leg face with no gaps.'
+                                  ? 'Dry-fit all frame members and clamp to verify flush, square joints.'
                                   : isDowelFrame
-                                    ? 'Confirm every dowel pin seats cleanly in its mating leg and rail holes with no gaps or twisted rails.'
+                                    ? 'Dry-fit all frame members and dowels to verify square seating without gaps.'
                                     : isDadoFrame
-                                      ? 'Confirm every rail tongue seats cleanly in its dado slot with no gaps or twisted rails.'
-                                      : 'Confirm every tenon seats cleanly in its mortise with no gaps or twisted rails.',
+                                      ? 'Dry-fit all tongues and dado slots to verify square seating without gaps.'
+                                      : 'Dry-fit all tenons and mortises to verify square seating without gaps.',
                               ],
                             },
                             {
                               step: '2. Stage 1 — Glue the Two Flat Side Sub-Assemblies',
                               details: [
-                                'Glue and clamp the Left Frame (Leg_FL + Leg_BL + Left rails/stretchers) flat on your bench.',
-                                'Glue and clamp the Right Frame (Leg_FR + Leg_BR + Right rails/stretchers) flat on your bench.',
-                                'Wipe squeezed-out glue with a damp cloth and let cure for 30–45 minutes.',
+                                'Glue and clamp the Left and Right side frames flat on the bench, wipe squeeze-out, and cure for 30–45 minutes.',
                               ],
                             },
                             {
                               step: '3. Stage 2 — Join Side Frames with Front & Back Rails',
                               details: [
-                                'Stand both cured side frames upright on a flat surface and glue the Front and Back rails between them.',
-                                'Measure corner-to-corner diagonals (Leg_FL to Leg_BR vs. Leg_FR to Leg_BL) and adjust clamp pressure until both diagonals match within 1 mm.',
+                                'Stand both side frames upright, glue the Front and Back rails between them, and clamp until corner-to-corner diagonals match within 1 mm.',
                               ],
                             },
                             {
                               step: '4. Stage 3 — Attach Tabletop / Panel',
                               details: [
-                                'If the top was split into planks, edge-glue the planks together first.',
                                 !breakdown?.parts.some((p) => p.zClipSlots.length > 0)
-                                  ? 'Place the finished top face-down, center the frame on it, and secure with figure-8 expansion washers (do not glue a solid wood top directly to the aprons).'
-                                  : 'Place the finished top face-down, center the frame on it, and secure with Z-Clip expansion fasteners in the apron slots (do not glue a solid wood top directly to the aprons).',
+                                  ? 'Edge-glue any split top planks first, then attach the top using figure-8 expansion washers.'
+                                  : 'Edge-glue any split top planks first, then attach the top using Z-Clip expansion fasteners in the apron slots.',
                               ],
                             },
                           ].map((stage) => (

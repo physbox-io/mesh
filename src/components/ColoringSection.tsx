@@ -202,7 +202,7 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
         <span>
           {paintMode
             ? 'Drag on a body to paint · go over it again to build up · Ctrl erases · Alt picks a colour up · Ctrl+Z undoes a stroke'
-            : 'Colour is looks only. It changes nothing about the physics or what gets exported.'}
+            : 'Visual and 3MF color only (does not affect physics).'}
         </span>
       </p>
 

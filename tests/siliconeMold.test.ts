@@ -150,8 +150,8 @@ describe('a hole through the mold', () => {
   });
 
   it('warns about a hole that cannot work', () => {
-    expect(buildPourBox(wasm, brick, { hole: 'pour', holeDiaMm: 4 }).report.warnings.join(' ')).toMatch(/too narrow to pour/);
-    expect(buildPourBox(wasm, brick, { hole: 'wick', holeDiaMm: 7 }).report.warnings.join(' ')).toMatch(/too big to plug/);
+    expect(buildPourBox(wasm, brick, { hole: 'pour', holeDiaMm: 4 }).report.warnings.join(' ')).toMatch(/below the 6 mm minimum/);
+    expect(buildPourBox(wasm, brick, { hole: 'wick', holeDiaMm: 7 }).report.warnings.join(' ')).toMatch(/exceeds 5 mm max for a plugged hole/);
     expect(buildPourBox(wasm, brick, { hole: 'wick' }).report.warnings).toEqual([]);
   });
 
@@ -315,9 +315,9 @@ describe('a groove deeper than the base allows', () => {
   it('says how deep it was made, and why', () => {
     const shallow = buildPourBox(wasm, cylinderSoup(10, 20), { baseMm: 4, grooveMm: 5 });
     expect(shallow.report.grooveMm).toBe(3);
-    expect(shallow.report.warnings.some((w) => /groove is 3 mm deep, not 5 mm/.test(w))).toBe(true);
+    expect(shallow.report.warnings.some((w) => /Groove depth clamped to 3 mm \(from 5 mm\)/.test(w))).toBe(true);
     const asked = buildPourBox(wasm, cylinderSoup(10, 20), { baseMm: 6, grooveMm: 4 });
     expect(asked.report.grooveMm).toBe(4);
-    expect(asked.report.warnings.some((w) => /groove/.test(w))).toBe(false);
+    expect(asked.report.warnings.some((w) => /groove/i.test(w))).toBe(false);
   });
 });

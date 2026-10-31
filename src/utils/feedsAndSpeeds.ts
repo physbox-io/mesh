@@ -109,7 +109,7 @@ export const MATERIALS: MaterialSpec[] = [
     label: 'MDF',
     surfaceSpeedMMin: 300,
     chiploadPerDia: 0.03,
-    note: 'Machines beautifully and destroys cutters — the binder is abrasive. Dust extraction is not optional here.',
+    note: 'Cuts evenly at high feedrates; abrasive on tool edges.',
   },
   {
     id: 'acrylic',
@@ -118,7 +118,7 @@ export const MATERIALS: MaterialSpec[] = [
     surfaceSpeedMMin: 200,
     chiploadPerDia: 0.035,
     maxRpm: 16000,
-    note: 'Melts rather than wears. Big chips carry the heat out; small ones at high RPM weld the swarf back into the cut.',
+    note: 'Keep chipload up and RPM moderate to evacuate heat in the chip rather than melting the cut.',
   },
   {
     id: 'aluminium',

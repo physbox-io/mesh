@@ -147,13 +147,7 @@ export const MachineWorkOriginPanel: React.FC<{
       {staleZ && showZProbe && (
         <div className="flex items-start space-x-2 rounded-lg bg-amber-500/10 border border-amber-500/50 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-          <span>
-            <strong className="font-bold">Z zero is not confirmed for this session.</strong> The
-            controller may still be holding a datum from a previous session, tool, or piece of stock.
-            Connecting, and a tool change mid-job, both leave it untrusted until you touch off
-            again. Any Z move (including Go To Zero, and starting a job) is blocked until you set Z
-            zero below, by hand or on the plate.
-          </span>
+          <span>Set Z zero before starting a job or moving to zero.</span>
         </div>
       )}
 
@@ -180,7 +174,7 @@ export const MachineWorkOriginPanel: React.FC<{
               disabled={busy || (showZProbe && staleZ)}
               title={
                 showZProbe && staleZ
-                  ? 'Set Z zero below first. The retract this uses never moves down, but it will not lift until Z is trusted'
+                  ? 'Set Z zero first'
                   : 'Retract and drive to the work origin to check where it landed'
               }
               className={actionBtn}
@@ -269,11 +263,7 @@ export const MachineWorkOriginPanel: React.FC<{
               </label>
 
               <p className="text-[10px] text-slate-500 leading-snug">
-                Wear your glasses, put scrap under the head, and jog the <em>dot</em> onto the corner
-                of the stock before zeroing, not the head. Raise the percentage until you can see
-                it. Laser mode (<code>$32</code>) is switched off while the spot is lit and back on
-                the moment it goes out, because GRBL will not fire a stationary head with it on. The
-                spot times out after two minutes on its own.
+                Jog the laser dot onto the stock corner before zeroing (auto-off after 2m).
               </p>
             </div>
           )}

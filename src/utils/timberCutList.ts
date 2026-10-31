@@ -655,10 +655,10 @@ function buildBirdsEyeMapMarkdown(parts: MemberJoineryPart[]): string {
   if (legs.length === 0) return '';
 
   return [
-    `## Bird's-Eye Corner Orientation Map (Preventing the "Four Identical Legs" Trap)`,
+    `## Corner Leg Orientation Map`,
     ``,
     `> [!IMPORTANT]`,
-    `> Each corner leg has mortises on its two **interior** faces ($90^\\circ$ apart) and its stopped roundover/show faces on the **exterior** corner. Mark \`Leg_FL\`, \`Leg_FR\`, \`Leg_BL\`, and \`Leg_BR\` on the top end-grain in pencil before cutting!`,
+    `> Each corner leg has mortises on its two **interior** faces ($90^\\circ$ apart) and show faces on the **exterior** corner. Label \`Leg_FL\`, \`Leg_FR\`, \`Leg_BL\`, and \`Leg_BR\` on the top end-grain before cutting.`,
     ``,
     '```text',
     '                    BACK (+Y Show Face)',
@@ -712,7 +712,7 @@ export function buildTimberCutPlan(
         ? 'Apply an even coat to mating ends and edges and clamp square.'
         : isDowelMode
           ? 'Apply a thin even coat to dowel holes, fluted pins, and mating joint faces.'
-          : 'Apply a thin even coat to tenon cheeks and mortise walls; never glue the solid tabletop directly to aprons.',
+          : 'Apply a thin coat to tenon cheeks and mortise walls (attach tabletop with expansion clips, not glue).',
     },
   ];
   const totalZClips = breakdown.parts.reduce((acc, p) => acc + p.zClipSlots.length, 0);
@@ -936,22 +936,12 @@ export function buildTimberCutPlan(
   const birdsEyeMapMarkdown = buildBirdsEyeMapMarkdown(breakdown.parts);
 
   const glueUpGuideMarkdown = [
-    `## Two-Stage Glue-Up & Squaring Checklist`,
+    `## Assembly & Squaring Checklist`,
     ``,
-    `> [!TIP]`,
-    `> PVA wood glue has a 5–10 minute open working time. **Never try to glue all legs, rails, and stretchers in one panicked step.** Build two flat side frames first, let them cure, then join them together.`,
-    ``,
-    `1. **Complete Full Dry-Fit First (No Glue):** Assemble the entire frame dry, pull the shoulders tight with clamps, and confirm there are no gaps or twisted rails.`,
-    `2. **Stage 1 — Glue the Two Flat Side Sub-Assemblies:**`,
-    `   - Glue and clamp the **Left Frame** (\`Leg_FL\` + \`Leg_BL\` + Left Apron/Stretchers) flat on your bench.`,
-    `   - Glue and clamp the **Right Frame** (\`Leg_FR\` + \`Leg_BR\` + Right Apron/Stretchers) flat on your bench.`,
-    `   - Wipe squeezed-out glue with a damp cloth and let cure for 30–45 minutes.`,
-    `3. **Stage 2 — Join Left & Right Frames with Front & Back Rails:**`,
-    `   - Stand both cured side frames upright on a flat surface and glue the **Front** and **Back** rails/stretchers between them.`,
-    `   - **Diagonal Squaring Check:** Measure corner-to-corner diagonals ($D_1$ from \`Leg_FL\` to \`Leg_BR\` vs. $D_2$ from \`Leg_FR\` to \`Leg_BL\`). Adjust clamp pressure until $D_1 = D_2$ within $1\\text{ mm}$.`,
-    `4. **Stage 3 — Attach Tabletop / Seat with Expansion Clips (No Glue on Aprons!):**`,
-    `   - If the tabletop was split into planks, edge-glue the planks together first using the alignment dowels.`,
-    `   - Place the finished tabletop face-down, center the base frame on it, and hook the **Z-Clip expansion fasteners** into the $4\\text{ mm}$ apron slots and screw into the underside of the top. **Do not glue the solid wood top to the aprons.**`,
+    `1. **Dry-fit:** Assemble the frame without glue and verify joint seating and squareness.`,
+    `2. **Side sub-assemblies:** Glue and clamp the **Left Frame** (\`Leg_FL\` + \`Leg_BL\` + left rails) and **Right Frame** (\`Leg_FR\` + \`Leg_BR\` + right rails) flat; allow to cure.`,
+    `3. **Cross rails & squaring:** Join the cured side frames with the **Front** and **Back** rails; verify corner-to-corner diagonals ($D_1 = D_2$ within $1\\text{ mm}$).`,
+    `4. **Tabletop / seat:** Edge-glue planks if split, then secure the top to the aprons using **Z-Clip / Figure-8 expansion fasteners** (do not glue solid wood tops directly to aprons).`,
   ].join('\n');
 
   const bomLines: string[] = [

@@ -60,39 +60,24 @@ export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshel
         <li className="flex items-start gap-2">
           <Layers className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Print cavity-up.</strong>{' '}
-            {isOpen
-              ? 'The mold is laid flat outer face down, so nothing needs support.'
-              : 'Both halves are laid flat outer face down, so nothing needs support.'}{' '}
-            Fine layers on the cavity: every layer line prints itself into the casting.
-            Four walls or more, or resin wicks into the infill.
+            <strong>Print cavity-up:</strong> Print flat with fine layers and 4+ perimeters so resin cannot wick into the infill.
           </span>
         </li>
         <li className="flex items-start gap-2">
           <Droplets className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Seal, then release.</strong> Printed FDM layer lines can mechanically bond with
-            casting resin. Apply an epoxy sealer or primer coat to the cavity, then apply mold
-            release wax or spray before pouring.
+            <strong>Seal &amp; release:</strong> Seal FDM layer lines with primer or epoxy sealer, then apply mold release before pouring.
           </span>
         </li>
         <li className="flex items-start gap-2">
           <Droplets className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
             <strong>
-              Pour in {lifts} {lifts === 1 ? 'lift' : 'lifts'}.
+              Pour in {lifts} {lifts === 1 ? 'lift' : 'lifts'}:
             </strong>{' '}
-            {result.cavityDepthMm > SAFE_LIFT_MM ? (
-              <>
-                Cavity depth is {result.cavityDepthMm} mm. Most standard casting epoxies recommend
-                pouring in layers up to ~{SAFE_LIFT_MM} mm, or using a deep-pour epoxy system.
-              </>
-            ) : (
-              <>
-                {result.cavityDepthMm} mm is within standard single-pour depths for most casting resins.
-              </>
-            )}{' '}
-            Brush a thin coat into the details first to release bubbles, then fill.
+            {result.cavityDepthMm > SAFE_LIFT_MM
+              ? `Pour ${result.cavityDepthMm} mm depth in ~${SAFE_LIFT_MM} mm layers (or use deep-pour epoxy) after brushing details to release bubbles.`
+              : `Brush a thin coat into details to release bubbles, then fill the ${result.cavityDepthMm} mm cavity.`}
           </span>
         </li>
         <li className="flex items-start gap-2">
@@ -100,17 +85,14 @@ export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshel
           <span>
             {isOpen ? (
               <>
-                <strong>Pour and level.</strong> Pour into the deepest point of the cavity so the rising
-                level pushes air out ahead of it, then screed flush or let the open back self-level.
-                Full cure, then demold.
+                <strong>Pour &amp; level:</strong> Pour into the deepest point, screed or let self-level, and demold after full cure.
               </>
             ) : (
               <>
-                <strong>Close it, or don't.</strong>{' '}
+                <strong>Close &amp; cure:</strong>{' '}
                 {result.lidIsBackingPlate
-                  ? 'The lid holds none of the shape here. Screed the back flush and leave it off, or set it on afterwards as a press for a flat, glossy back. The vents let the excess out.'
-                  : 'Seat the lid on the pins, band it lightly closed (there is no injection pressure to fight) and let the excess escape through the vents. Pour through the sprue.'}{' '}
-                Full cure, then pry at the side notches.
+                  ? 'Leave the flat backing lid off or press it on after pouring, then pry at the side notches once cured.'
+                  : 'Seat the lid on the registration pins, pour through the sprue until vents fill, and pry open once cured.'}
               </>
             )}
           </span>
@@ -119,8 +101,7 @@ export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshel
           <li className="flex items-start gap-2">
             <Hand className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
             <span>
-              <strong>If it sticks.</strong> The walls run nearly straight down, so wax them well. If
-              a casting still will not come out, raise <strong>Draft</strong> to 3°.
+              <strong>Demold:</strong> Wax steep walls thoroughly, or increase <strong>Draft</strong> to 3° if parts stick.
             </span>
           </li>
         )}

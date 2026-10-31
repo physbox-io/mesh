@@ -1317,11 +1317,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
       );
     }
     if (!this.state.probeCircuitSeen) {
-      return (
-        'The probe circuit has not been proved on this connection. Clip the lead on, touch ' +
-        'the tool to the plate by hand until the probe light comes on, then try again. A ' +
-        'probe stops only when that circuit closes; without it the tool is driven into the work.'
-      );
+      return 'Probe circuit not verified this session. Touch the plate to the tool to confirm continuity before probing.';
     }
     return null;
   }
@@ -1421,8 +1417,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
     // whose height this session has not actually confirmed.
     if (this.state.needsZZero && !this.laserModeEnabled()) {
       const message =
-        'Z zero has not been set this session. Set it in Machine Setup before running a job — ' +
-        'a Z move against an unconfirmed datum can drive the tool into the stock.';
+        'Z zero has not been set this session. Set Z zero in Machine Setup before running a job.';
       this.updateState({ lastError: message });
       return null;
     }
@@ -2687,7 +2682,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
       success: true,
       message:
         offsetMm === 0
-          ? 'Work Z 0 set at the tool tip. Nothing moved — the machine has only been told where it is.'
+          ? 'Work Z0 set at current tool position.'
           : `Work Z 0 set ${offsetMm.toFixed(2)} mm below the tool tip, allowing for the gauge under it.`,
     };
   }
@@ -3059,9 +3054,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
       return {
         success: true,
         machineZ: contactZ,
-        message:
-          `Z zeroed on the touch plate (contact at machine Z ${contactZ.toFixed(3)}). ` +
-          `Work Z 0 is ${touchPlateThicknessMm.toFixed(2)} mm below the plate top — remove the plate before cutting.`,
+        message: `Z zeroed on touch plate (machine Z ${contactZ.toFixed(3)}, plate ${touchPlateThicknessMm.toFixed(2)} mm). Remove plate before cutting.`,
       };
     } finally {
       if (this.state.status === 'PROBING') {

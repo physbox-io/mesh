@@ -837,9 +837,7 @@ export function stockFor(partW: number, partD: number, partH: number, opts: Soli
     return {
       ...want, prep: null,
       tooSmall:
-        `Your ${f(board.widthMm)} x ${f(board.depthMm)} x ${f(board.thicknessMm)} mm board is too small: ` +
-        `this part needs at least ${minW} x ${minD} x ${up(partH, 1)} mm, and ${up(want.stockW, 1)} x ` +
-        `${up(want.stockD, 1)} x ${up(want.stockT, 1)} mm with a full frame to clamp. Set the board in the status bar.`,
+        `Bench stock (${f(board.widthMm)} × ${f(board.depthMm)} × ${f(board.thicknessMm)} mm) is smaller than the minimum required (${minW} × ${minD} × ${up(partH, 1)} mm; ${up(want.stockW, 1)} × ${up(want.stockD, 1)} × ${up(want.stockT, 1)} mm with full clamping frame).`,
     };
   }
 
@@ -857,9 +855,9 @@ export function stockFor(partW: number, partD: number, partH: number, opts: Soli
     thick ? `${stockT} mm thick` : null,
   ].filter(Boolean).join(', ');
   const why = flush.size > 0 && cutPlan
-    ? 'the side setups stand it on faces flush with the part'
-    : 'the rest would only be faced and cut away';
-  const prep = sizes ? `Cut the board down to ${sizes} first: ${why}.` : null;
+    ? 'side setups reference flush faces'
+    : 'to avoid excess facing';
+  const prep = sizes ? `Trim stock to ${sizes} before machining (${why}).` : null;
   if (!cutPlan) {
     // The board as it is, the part centred in it.
     return { stockW: board.widthMm, stockD: board.depthMm, stockT, partCx: board.widthMm / 2, partCy: board.depthMm / 2, prep, tooSmall: null };
@@ -999,15 +997,12 @@ function generateSolidSides(
   }
   if (flush.size === 0 && (stockW < partW + 2 * moat || stockD < partD + 2 * moat)) {
     warnings.push(
-      `The ${stockW} x ${stockD} mm stock is too small for the ${partW.toFixed(1)} x ` +
-        `${partD.toFixed(1)} mm part with a ${moat.toFixed(1)} mm channel round it; the channel ` +
-        `is cropped at the edge of the stock and the frame there is gone.`
+      `Stock (${stockW} × ${stockD} mm) is narrower than the part (${partW.toFixed(1)} × ${partD.toFixed(1)} mm) plus ${moat.toFixed(1)} mm perimeter channel; channel is cropped at the stock edge.`
     );
   }
   if (stockT < partH - 1e-6) {
     return fail(
-      `The stock is ${stockT} mm thick and the part is ${partH.toFixed(1)} mm tall this way up. ` +
-        `Use thicker stock, or turn the part so a shorter axis points up.`
+      `Stock thickness (${stockT} mm) is less than part height (${partH.toFixed(1)} mm). Use thicker stock or reorient the part.`
     );
   }
 
@@ -1047,9 +1042,7 @@ function generateSolidSides(
     cols = Math.ceil(stockW / res) + 1;
     rows = Math.ceil(stockD / res) + 1;
     warnings.push(
-      `Surface sampled every ${res.toFixed(2)} mm — the stock is too large to sample at the ` +
-        `${stepover.toFixed(2)} mm stepover. Detail finer than that is smoothed out, and so is ` +
-        `the part's size, by up to that much.`
+      `Heightmap resolution capped at ${res.toFixed(2)} mm (requested stepover ${stepover.toFixed(2)} mm).`
     );
   }
   const stepX = cols > 1 ? stockW / (cols - 1) : res;
@@ -1078,14 +1071,12 @@ function generateSolidSides(
   const tabsPlaced = tabs.anchors.length;
   if (tabsPlaced < Math.round(opts.tabCount)) {
     warnings.push(
-      `Only ${tabsPlaced} of ${Math.round(opts.tabCount)} tabs could be placed: the part's ` +
-        `outline has no frame within reach at the other positions. Widen the frame, or ask for fewer.`
+      `Placed ${tabsPlaced} of ${Math.round(opts.tabCount)} tabs (insufficient surrounding frame at remaining positions).`
     );
   }
   if (tabsPlaced === 0) {
     warnings.push(
-      `Nothing holds the part once the channel is through. It will come loose under the cutter ` +
-        `on the last pass — add tabs, or fix the part down some other way.`
+      'Through-cut has no holding tabs; ensure the part is secured separately.'
     );
   }
   /*
@@ -1171,9 +1162,7 @@ function generateSolidSides(
     const ratio = depthMm / Math.max(0.05, dia);
     if (ratio > MAX_REACH_DIAMETERS) {
       warnings.push(
-        `${label}: a ${depthMm.toFixed(1)} mm bore is ${ratio.toFixed(1)} diameters of stickout for the ` +
-          `${dia} mm bit (past ${MAX_REACH_DIAMETERS}\u00d7D); ensure the cutter's flute and stickout reach ` +
-          `${depthMm.toFixed(1)} mm without the collet hitting the top of the stock.`
+        `${label}: ${depthMm.toFixed(1)} mm bore is ${ratio.toFixed(1)}×D for the ${dia} mm bit (>${MAX_REACH_DIAMETERS}×D); verify flute length and collet clearance.`
       );
     }
   };
@@ -1201,9 +1190,7 @@ function generateSolidSides(
       reachWarn(boreDepth, pinToolDia, 'Pin bore');
       if (opts.pinDiaMm - pinToolDia < 2 * PECK_BELOW_MM) {
         warnings.push(
-          `The ${opts.pinDiaMm} mm pin holes are barely wider than the ${pinToolDia} mm cutter, so they ` +
-            `are drilled in pecks rather than bored on a helix, and come out the cutter's size. ` +
-            `Use a wider pin for a hole that is cut to size.`
+          `${opts.pinDiaMm} mm pin holes are peck-drilled at the ${pinToolDia} mm cutter diameter (insufficient radial clearance for helical boring).`
         );
       }
     }
@@ -1227,12 +1214,8 @@ function generateSolidSides(
   if (unreachablePercent > 1) {
     warnings.push(
       twoSided
-        ? `About ${unreachablePercent.toFixed(0)}% of the part's volume is material neither side ` +
-          `can see — the inside of a sideways hole, the roof of a slot. It is left in. A hole ` +
-          `like that is drilled afterwards, or the part is turned so the hole points up.`
-        : `About ${unreachablePercent.toFixed(0)}% of the part's volume is under a surface the ` +
-          `one side cannot see past, so it stays solid below it. Cut both sides, or turn the part ` +
-          `so its flat face is down.`
+        ? `~${unreachablePercent.toFixed(0)}% of part volume is occluded from both +Z and -Z (side features or undercuts) and will remain uncut.`
+        : `~${unreachablePercent.toFixed(0)}% of part volume lies beneath overhangs and remains solid in a single-sided job; use two-sided machining or reorient.`
     );
   }
 
@@ -1447,8 +1430,7 @@ function generateSolidSides(
 
   if (!twoSided && opts.throughCutMm > 0) {
     warnings.push(
-      `The channel goes ${opts.throughCutMm} mm below the bottom of the stock, into whatever is ` +
-        `under it. Cut on a spoilboard, not on the bed.`
+      `Through-cut extends ${opts.throughCutMm} mm below the stock bottom; use a spoilboard.`
     );
   }
 

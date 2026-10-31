@@ -116,10 +116,7 @@ export function ScaleControls({ nodeId }: { nodeId: string }) {
       </div>
 
       <p className="text-[10px] text-slate-400 leading-snug">
-        Relative: each Apply multiplies the current size, and the factor returns to 1×.
-        Axes are the body's own. A cylinder or a capsule takes <strong>X</strong> and <strong>Y</strong> as
-        its radius and <strong>Z</strong> as its length; a sphere, having no axis at all, takes the average.
-        Or press <kbd className="font-mono">S</kbd> in the viewport and size it by pointer.
+        Multiplies current size along body axes (press S in viewport to scale by pointer).
       </p>
     </div>
   );

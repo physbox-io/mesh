@@ -181,7 +181,7 @@ describe('PVA-lined mold', () => {
     expect(info.thickestPvaMm).toBeGreaterThan(10);
     expect(info.thickestPvaMm).toBeLessThan(20);
     expect(info.dissolveHours).toBeGreaterThanOrEqual(Math.ceil(info.thickestPvaMm));
-    expect(info.steps.join(' ')).toMatch(/filament 2/);
+    expect(info.steps.join(' ')).toMatch(/extruder 2/);
   });
 
   it('writes a 3MF with the shell on extruder 1 and the liner on extruder 2', () => {

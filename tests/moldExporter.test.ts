@@ -706,7 +706,7 @@ describe('One-part open mold and parting overhang checks', () => {
     expect(res.topHalf).toBeUndefined();
     expect(res.bottomHalf).toBeDefined();
     expect(res.flexibleMoldAdvised).toBe(true);
-    expect(res.warnings.some((w) => /lock onto the casting/i.test(w))).toBe(true);
+    expect(res.warnings.some((w) => /undercuts preserved in the cavity/i.test(w))).toBe(true);
 
     // 1. Watertightness: binary STL has 0 boundary edges and is closed
     const mesh = stlToMesh(res.binarySTL);

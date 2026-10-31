@@ -426,7 +426,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               </Field>
               <Field
                 label="Top Skin (mm)"
-                hint="Stock above the part's top face, faced off at the start of each side. A sawn surface is neither flat nor at a known height, so the part is put a little below it and everything above is skimmed away."
+                hint="Sets default feeds, speeds, and step-down for the selected stock material."
               >
                 <NumberInput
                   step={0.5} min={0} max={20}
@@ -502,7 +502,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
               <Field
                 label="Tabs"
-                hint="Bridges left across the channel, spread round the part, that hold it to the frame once the channel is through. Sawn or snapped off afterwards and the stubs filed. 0 leaves the part loose under a spinning cutter on its last pass, which is how parts and cutters get thrown."
+                hint="Holds the part in the stock frame until cut free after machining."
               >
                 <NumberInput
                   step={1} min={0} max={16} integer

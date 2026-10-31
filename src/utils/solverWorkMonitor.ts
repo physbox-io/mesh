@@ -97,9 +97,5 @@ export function createSolverWorkMonitor(mj: Mj, model: Model) {
 
 /** The warning a run with an energy gain carries. */
 export function solverEnergyWarning(gain: SolverEnergyGain): string {
-  return `The simulation blew up without going non-finite: by tick ${gain.tick} (t=${gain.timeS} s) the contacts and ` +
-    `constraints had put ${gain.gainedJ} J into the scene, more than lifting every moving body through a quarter of its size ` +
-    `(${gain.limitJ} J), and "${gain.body}" was moving at ${gain.speedMS} m/s. Contacts cannot add energy, so the ` +
-    'trajectory from there on is the solver failing, not physics. Usual causes: a friction coefficient at or near 0 ' +
-    'with condim 3, bodies that start deeply overlapping, or a part far lighter than what it is pressed against.';
+  return `Solver instability detected at tick ${gain.tick} (t=${gain.timeS} s): contacts injected ${gain.gainedJ} J (threshold ${gain.limitJ} J; "${gain.body}" reached ${gain.speedMS} m/s). Check for overlapping initial geometry, near-zero friction with condim 3, or large mass ratios.`;
 }

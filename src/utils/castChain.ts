@@ -634,8 +634,8 @@ export function pieceLines(p: ChainPiece): string[] {
   return [
     `${p.volumeMm3.toLocaleString()} mm³, ${p.weightG} g of ${label}` +
       (p.mix ? ` (${Math.round(p.mix.a)} g ${p.mix.aLabel} + ${Math.round(p.mix.b)} g ${p.mix.bLabel})` : ''),
-    ...(p.gating ? [`Gating and pour margin: ${p.gating.weightG} g more, cut off and remelted (${Math.round(p.weightG + p.gating.weightG)} g to melt)`] : []),
-    ...(p.deviation ? [`From the master: ${p.deviation.maxMm} mm at most, ${p.deviation.meanMm} mm on average`] : []),
+    ...(p.gating ? [`Gating + margin: +${p.gating.weightG} g (${Math.round(p.weightG + p.gating.weightG)} g total melt)`] : []),
+    ...(p.deviation ? [`Deviation from master: ${p.deviation.maxMm} mm max, ${p.deviation.meanMm} mm mean`] : []),
     ...p.notes,
   ];
 }

@@ -78,8 +78,8 @@ describe('which thickness each panel is cut from', () => {
     // Nothing at 10; the nearest above is 12, so it is cut thicker.
     const rack = [stock(300, 200, 12), stock(300, 200, 18)];
     const { warnings } = assignPanelThickness(panels, rack, opts());
-    expect(warnings.join(' ')).toContain('Cut thicker than drawn');
-    expect(warnings.join(' ')).toContain('will not seat');
+    expect(warnings.join(' ')).toContain('Cut from thicker stock than modelled');
+    expect(warnings.join(' ')).toContain('panel spacing follows the model');
   });
 
   it('flags a part the rack can only cut thinner than it was drawn', () => {
@@ -123,7 +123,7 @@ describe('stock too thin for the model', () => {
       stock: [stock(300, 200, 6)],
     }));
     expect(result.success).toBe(false);
-    expect(result.error).toContain('nothing thick enough');
+    expect(result.error).toContain('Stock is thinner than modelled');
     expect(result.svg).toBeUndefined();
   });
 
@@ -305,7 +305,7 @@ describe('splitting a part the rack cannot hold whole', () => {
     expect(sizes[3][0]).toBeCloseTo(240, 0);
     for (const [, short] of sizes) expect(short).toBeCloseTo(30, 0);
 
-    expect(result.warnings!.some((w) => w.includes('4 mitred lengths'))).toBe(true);
+    expect(result.warnings!.some((w) => w.includes('4 mitred frame lengths'))).toBe(true);
     expect(result.warnings!.some((w) => w.includes('Too big for'))).toBeFalsy();
   });
 

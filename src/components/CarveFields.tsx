@@ -677,7 +677,7 @@ export function RoughingPassFields({
         </Field>
         <Field
           label="Stepdown (mm)"
-          hint="How much depth each roughing layer takes. Deeper is quicker but loads the cutter harder; 1–2 mm suits most wood on a hobby router."
+          hint="Maximum Z depth per pass."
         >
           <NumberInput
             step={0.5} min={0.1} max={20}

@@ -299,12 +299,6 @@ export const PatternPanel: React.FC<{
               </li>
             ))}
           </ol>
-          <p className="flex items-start gap-2 text-[11px] leading-snug text-slate-500 dark:text-slate-400 border-t border-slate-200 dark:border-slate-800 pt-2.5">
-            <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
-            {lostPla
-              ? 'Molten metal is dangerous, and this route adds two of its own. Burnout fumes are not something to breathe — kiln outdoors or properly extracted. And a flask that is not fully burnt out still holds water and plastic: that flashes to steam and throws metal straight back up the cup. Face shield, gloves, and clear the area of anyone who does not need to be there.'
-              : 'Molten metal is dangerous. Dry sand and dry tools only — trapped moisture flashes to steam and throws metal. Face shield, gloves, and clear the area of anyone who does not need to be there.'}
-          </p>
         </div>
       </PanelBody>
 
