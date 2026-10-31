@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { csgSourceGeoms, fromtoFrame } from './csg';
 import { isBoughtIn } from './boughtIn';
+import { isNodeRotationBaked } from './sceneTree';
 import { buildEtchHandoffUrl, etchBaseUrl } from './etchHandoff';
 import { toBase64Url } from './shareLink';
 
@@ -230,7 +231,12 @@ function eulerToMatrix4(e: number[]): THREE.Matrix4 {
 }
 
 function getNodeWorldTransform(node: SceneNode, parentMatrix?: THREE.Matrix4): THREE.Matrix4 {
-  const m = node.quat
+  // A mesh body whose rotation was baked into its vertices keeps its euler for
+  // the inspector, but its frame has no rotation (mjcf.ts emits none), so
+  // applying it here would turn the vertices a second time.
+  const m = isNodeRotationBaked(node)
+    ? new THREE.Matrix4()
+    : node.quat
     ? quatToMatrix4(node.quat)
     : node.euler
       ? eulerToMatrix4(node.euler)
