@@ -714,7 +714,7 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
     sides: twoSided ? 2 : 1,
     // Pins go in the frame at the ends; with an end flush there is none, and
     // the flip is found by touching off, which the turn dialog walks through.
-    ...((opts.flushFaces ?? []).some((f) => f === '+x' || f === '-x') ? { registrationPins: false } : {}),
+    // generateSides leaves them out then, and says so.
   };
   const result = steps.generateSides(scene, sidesOpts);
   if (!result.success) return result;
@@ -730,10 +730,18 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
 
   // The two-sided job's own "neither side can see" figure is the old question;
   // what the plan leaves is said in its summary instead.
+  // The probed grid describes the top. A turned setup cuts another face and
+  // is levelled by nothing (see asSetup), so it is said for all of them at
+  // once, in place of the flip's own side-B sentence.
+  const turned = plan.order.some((f) => f !== '+z' && f !== '-z');
+  const levelledTopOnly = turned && !!opts.applyMeshLeveling && !!opts.meshLevelGrid;
   const warnings = [
     ...result.warnings.filter((w) => !/material neither side can see|under a surface the one side cannot see/.test(w)),
     ...notchWarnings,
-  ];
+    ...(levelledTopOnly
+      ? ['Bed levelling is applied to the top-up setup only. The other setups cut faces the probed grid does not describe, so they are cut without levelling.']
+      : []),
+  ].filter((w) => !(levelledTopOnly && /^Bed levelling is applied to side A only/.test(w)));
   const built: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>[] = [];
   for (const face of plan.order) {
     if (face === '+z') { built.push(asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm, notchFor.get('+z'))); continue; }

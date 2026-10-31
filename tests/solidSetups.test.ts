@@ -71,6 +71,17 @@ describe('solid machining from any face', () => {
     expect(r.plan!.remaining.text).toMatch(/Inside corners come out rounded|Every surface/);
   });
 
+  it('says the turned setups are cut without the bed levelling probed on the top', () => {
+    const grid = { minX: 0, minY: 0, maxX: 200, maxY: 200, gridX: 2, gridY: 2,
+      points: [[{ x: 0, y: 0, z: 0 }, { x: 200, y: 0, z: 1.5 }], [{ x: 0, y: 200, z: 0 }, { x: 200, y: 200, z: 1.5 }]] };
+    const lev = generateSolidMachining(scene, { ...opts, setups: 'auto', applyMeshLeveling: true, meshLevelGrid: grid as never });
+    expect(lev.success, lev.error).toBe(true);
+    const turned = lev.setups!.filter((s) => s.upFace !== '+z' && s.upFace !== '-z');
+    expect(turned.length).toBeGreaterThan(0);
+    for (const s of turned) expect(s.gcode).toBe(r.setups!.find((t) => t.upFace === s.upFace)!.gcode);
+    expect(lev.warnings.some((w) => /other setups .* cut without levelling/.test(w))).toBe(true);
+  }, 60_000);
+
   it('tells the operator how to stand the block, naming two faces', () => {
     const end = r.setups!.find((s) => s.upFace === '+x')!;
     expect(end.gcode).toMatch(/Stand the block: Stand the block on its left end, right end up, with the front towards you/);
@@ -192,5 +203,18 @@ describe('a round body with a box tail, flipped and opened from the end', () => 
     expect(r2.success).toBe(true);
     expect(r2.setups!.map((s) => s.upFace)).toEqual(['+z', '-x', '-z']);
     expect(r2.partVolumeMm3).toBeCloseTo(r.partVolumeMm3, 5);
+  }, 60_000);
+
+  it('says so when an end run flush leaves no frame for the pins that were asked for', () => {
+    const o = deriveSolidOptions(replica, {
+      scalePercent: 50, setups: 'auto', material: 'hardwood', toolStickoutMm: 30,
+      roughingToolDiaMm: 3.175, finishingToolDiaMm: 3.175,
+    });
+    expect(o.registrationPins).toBe(true);
+    const r = generateSolidMachining(replica, o);
+    expect(r.success, r.error).toBe(true);
+    expect(r.setups!.map((s) => s.upFace)).toContain('-z');
+    expect(r.pins).toHaveLength(0);
+    expect(r.warnings.join(' ')).toMatch(/registration pins/i);
   }, 60_000);
 });

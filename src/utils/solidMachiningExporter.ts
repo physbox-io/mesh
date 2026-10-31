@@ -1116,7 +1116,14 @@ function generateSolidSides(
   // --- Registration pins ----------------------------------------------------
   const pins: { x: number; y: number }[] = [];
   // Pins go in the frame at the ends, so not with an end flush.
-  if (twoSided && opts.registrationPins && !flush.has('-x') && !flush.has('+x')) {
+  const endFlush = flush.has('-x') || flush.has('+x');
+  if (twoSided && opts.registrationPins && endFlush) {
+    warnings.push(
+      'No registration pins: the part runs right up to an end of the block, leaving no frame there ' +
+        'to bore them in, so the flip is zeroed on the block itself instead.'
+    );
+  }
+  if (twoSided && opts.registrationPins && !endFlush) {
     const px = [frame / 2, stockW - frame / 2];
     for (const x of px) {
       const c = Math.round(x / stepX);
@@ -1407,11 +1414,12 @@ function generateSolidSides(
   }
 
   // The grid is measured on whatever face was up when it was probed. After the
-  // flip that face is underneath, so side B wants a grid of its own.
+  // flip that face is underneath, so side B is cut without it: the program is
+  // levelled when it is made, and nothing re-levels it after a fresh probe.
   if (twoSided && opts.applyMeshLeveling && opts.meshLevelGrid) {
     warnings.push(
-      `Bed levelling follows the surface probed before side A. Probe again after flipping the ` +
-        `block, before cutting side B: its top is the other face, and the old grid does not describe it.`
+      `Bed levelling is applied to side A only. Side B's top is the other face, which the probed ` +
+        `grid does not describe, so side B is cut without levelling.`
     );
   }
 
