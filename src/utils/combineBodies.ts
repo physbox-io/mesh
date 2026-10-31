@@ -25,13 +25,18 @@
 import * as THREE from 'three';
 import { createLattice, mergeLattice, type Lattice } from './latticeMesh';
 import type { SceneGeom, SceneNode } from '../types/scene';
+import { isNodeRotationBaked } from './sceneTree';
 
 /** How a combined shape takes part in the boolean it lands in. */
 export type CombineOp = 'union' | 'difference' | 'intersection';
 
 /** A node's own transform, in its parent's frame. */
 export function nodeMatrix(node: SceneNode): THREE.Matrix4 {
-  const m = node.quat
+  // A rotation baked into a mesh body's vertices is not its frame's (mjcf.ts
+  // emits none); turning by it again moved a combined body's mesh.
+  const m = isNodeRotationBaked(node)
+    ? new THREE.Matrix4()
+    : node.quat
     ? new THREE.Matrix4().makeRotationFromQuaternion(
       new THREE.Quaternion(node.quat[1] || 0, node.quat[2] || 0, node.quat[3] || 0, node.quat[0] ?? 1).normalize(),
     )

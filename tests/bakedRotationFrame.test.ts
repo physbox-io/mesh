@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// The bridge module sizes its OpenSCAD pool from navigator at import.
+vi.hoisted(() => { (globalThis as { navigator?: unknown }).navigator ??= { hardwareConcurrency: 2 }; });
+
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 import { getNodeWorldTransform } from '../src/utils/laserCutExporter';
 import { printableParts } from '../src/utils/printExport';
 import { partSoups } from '../src/utils/partSoups';
 import * as THREE from 'three';
+import { useStore } from '../src/store/useStore';
 
 // A mesh body turned in the inspector has the turn baked into its vertices and
 // keeps its euler only for show; its frame has no rotation (mjcf.ts emits none).
@@ -60,5 +65,16 @@ describe('a baked rotation is not applied twice', () => {
     const root: SceneNode = { id: 'root', name: 'root', type: 'body', pos: [0, 0, 0], joints: [], geoms: [], children: [bakedBar('child')] } as SceneNode;
     const { soups } = partSoups(root);
     expect(extent(soups[0])).toEqual([20, 100, 10]);
+  });
+
+  it('combining a baked body into another keeps its mesh where it was drawn', () => {
+    useStore.setState({ recompile: async () => {} } as never);
+    const base = { id: 'base', name: 'base', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+      geoms: [{ name: 'base_g', type: 'box', size: [0.01, 0.01, 0.01] }] } as SceneNode;
+    useStore.getState().updateScene({ nodes: [base, bakedBar('bar')] } as never);
+    useStore.getState().combineBodies('base', ['bar'], 'union');
+    const node = useStore.getState().sceneGraph.nodes.find((n) => n.id === 'base')!;
+    const mesh = node.geoms.find((g) => g.type === 'mesh')!;
+    expect(extent(mesh.renderVertices!)).toEqual([20, 100, 10]);
   });
 });
