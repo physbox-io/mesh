@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { useStore } from '../../store/useStore';
-import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../../utils/castPatternExporter';
+import { generateCastPattern, DEFAULT_CAST_OPTIONS, rememberCastOptions, type CastMethod } from '../../utils/castPatternExporter';
 import { runCastPrep } from '../../utils/castPrepRunner';
 import { planPourBox } from '../../utils/pourBoxScene';
 import { addPourBoxToScene, pourBoxStl } from '../../utils/pourBoxActions';
@@ -123,6 +123,8 @@ export const castCommands: McpCommands = {
     };
     const result = generateCastPattern(scene, options);
     if (!result.success) return { ok: false, error: result.error || 'The cast pattern could not be generated.', warnings: result.warnings ?? [] };
+    // physics_add_simulation's sand and lost-PLA chains simulate this pattern next.
+    rememberCastOptions(options);
     return {
       ok: true,
       molded: { label: subject.label, ids: subject.ids },

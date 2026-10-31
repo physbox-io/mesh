@@ -22,7 +22,7 @@ export interface AddedPourBox {
 export async function addPourBoxToScene(ids: string[], options: Partial<PourBoxOptions>, planned?: PourBox): Promise<AddedPourBox> {
   const store = useStore.getState();
   const box = planned ?? await planPourBox(store.sceneGraph, ids, options);
-  const out = sceneWithPourBox(useStore.getState().sceneGraph, ids, box);
+  const out = sceneWithPourBox(useStore.getState().sceneGraph, ids, box, options);
   useStore.getState().updateScene(out.scene);
 
   const name = findNodeById(out.scene.nodes, ids[0])?.name ?? 'the master';

@@ -110,6 +110,19 @@ export const DEFAULT_CAST_OPTIONS: CastOptions = {
   draftDeg: 0,
 };
 
+const lastPlanned: Partial<Record<CastMethod, CastOptions>> = {};
+
+/** Saves the pattern options last planned with (the Sand or Lost PLA tab, or physics_export_cast), per method. */
+export function rememberCastOptions(options: CastOptions): void {
+  lastPlanned[options.method] = { ...options };
+}
+
+/** Returns the pattern options last planned with for this method, or null when none has been this session. */
+export function lastCastOptions(method: CastMethod): CastOptions | null {
+  const o = lastPlanned[method];
+  return o ? { ...o } : null;
+}
+
 export interface CastSummary {
   method: CastMethod;
   methodLabel: string;

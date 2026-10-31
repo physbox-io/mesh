@@ -47,12 +47,13 @@ import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimula
 import { useStore } from '../store/useStore';
 import { workerStoppedError } from './staleBuild';
 import { isSiliconeMold, pourBoxIn, pourSelection } from './pourTarget';
+import { pourBoxOptionsFor } from './pourBoxScene';
 import { mcpMoldSubject } from './moldSubject';
 import { metalChain, siliconeChain, type ChainPiece, type ChainResult, type MetalChain, type SiliconeChain } from './castChain';
 import { addMetalChain, addSiliconeChain } from './castChainActions';
 import { DEFAULT_TAB_DRAFT, DEFAULT_TAB_MATERIAL, materialFitsTab, tabMaterials } from './moldTabs';
 import type { PourBoxOptions } from './siliconeMold';
-import type { CastOptions } from './castPatternExporter';
+import { lastCastOptions, type CastOptions } from './castPatternExporter';
 import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
 export interface MoldPreview {
@@ -404,15 +405,18 @@ async function runMcpChain(
   if (msg.castMaterial !== undefined && (!named || !materialFitsTab(tab, named))) {
     return { ok: false, error: `For method '${method}', cast_material is one of ${tabMaterials(tab).map((m) => m.id).join(', ')}.` };
   }
-  const material = named ?? DEFAULT_TAB_MATERIAL[tab];
+  const remembered = method === 'silicone' ? null : lastCastOptions(method);
+  const material = named ?? (remembered?.metalId as CastMaterialId | undefined) ?? DEFAULT_TAB_MATERIAL[tab];
   const client = new MoldWorkerClient();
   try {
     if (method === 'silicone') {
-      // The box at its default sizes (physics_make_pour_box sets those), with
-      // any hole through the silicone asked for.
-      const boxOptions: Partial<PourBoxOptions> = {};
+      // The box already round the master as physics_make_pour_box made it,
+      // else one at its default sizes, with any hole through the silicone asked for.
+      const madeBox = pourBoxOptionsFor(scene, subject.ids);
+      const boxOptions: Partial<PourBoxOptions> = { ...madeBox };
       if (msg.hole === 'wick' || msg.hole === 'pour' || msg.hole === 'fixing') boxOptions.hole = msg.hole;
-      else if (msg.hole !== undefined && msg.hole !== null && msg.hole !== 'none') {
+      else if (msg.hole === 'none') boxOptions.hole = null;
+      else if (msg.hole !== undefined && msg.hole !== null) {
         return { ok: false, error: "hole is 'wick', 'pour', 'fixing' or 'none'." };
       }
       if (typeof msg.holeDiaMm === 'number' && msg.holeDiaMm > 0) boxOptions.holeDiaMm = msg.holeDiaMm;
@@ -430,14 +434,18 @@ async function runMcpChain(
         id: added.piece.id, name: added.piece.name,
         siliconeMold: { id: added.siliconeMold!.id, name: added.siliconeMold!.name, selected: true, vents: r.vents, silicone: r.silicone },
         pouredThrough: r.pouredThrough,
+        pourBoxFrom: madeBox ? 'the pour box in the scene' : 'the defaults',
         ...pieceReply(r.piece),
         warnings: r.warnings,
       };
     }
+    // The parting, riser, sprue and gating last planned for this method, as
+    // the rigid mold takes the Rigid tab's.
     const options: Partial<CastOptions> = {
+      ...remembered,
       method,
       metalId: material,
-      draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : DEFAULT_TAB_DRAFT[tab],
+      draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : remembered?.draftDeg ?? DEFAULT_TAB_DRAFT[tab],
       ...(typeof msg.shrinkPercent === 'number' && msg.shrinkPercent >= 0 ? { shrinkPercent: msg.shrinkPercent } : {}),
       ...(typeof msg.addGating === 'boolean' ? { addGating: msg.addGating } : {}),
     };
@@ -449,6 +457,7 @@ async function runMcpChain(
       molded: { label: subject.label, ids: subject.ids },
       id: added.piece.id, name: added.piece.name,
       flask: r.flask,
+      optionsFrom: remembered ? 'the pattern last planned (Mold dialog or physics_export_cast)' : 'the defaults',
       ...(method === 'sand' ? { sandG: r.fillG } : { investmentPowderG: r.fillG }),
       filledShare: r.filledShare,
       ...pieceReply(r.piece),

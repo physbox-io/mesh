@@ -2,13 +2,13 @@
 // Sand and Lost PLA: the printed pattern for a metal casting
 // ---------------------------------------------------------------------------
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Download, CheckCircle2 } from 'lucide-react';
 import type { SceneGraph } from '../../types/scene';
 import type { CastMaterialId } from '../../utils/castMaterials';
 import { DEFAULT_TAB_DRAFT } from '../../utils/moldTabs';
 import { AdvancedBlock, CastTopFields } from './CastTopFields';
-import { DEFAULT_CAST_OPTIONS, type CastMethod, type CastOptions } from '../../utils/castPatternExporter';
+import { DEFAULT_CAST_OPTIONS, rememberCastOptions, type CastMethod, type CastOptions } from '../../utils/castPatternExporter';
 import { NumberInput } from '@physbox-io/ui';
 import { inputClass, sectionClass, sectionTitleClass, Field, Segmented } from '../CarveFields';
 import { useSettled } from '../carveTooling';
@@ -73,6 +73,10 @@ export const PatternPanel: React.FC<{
   };
 
   const settled = useSettled(options, 250);
+  // What an agent's chain for this method plans with, as the Rigid tab's are.
+  useEffect(() => {
+    if (active) rememberCastOptions(settled);
+  }, [active, settled]);
   // Prep rewrites the scene several times on its way through; build the
   // preview once, from where it lands.
   const prepBusy = useStore((s) => s.castPrepBusy);

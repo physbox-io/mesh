@@ -1,6 +1,7 @@
 import type { PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { PocketSpec } from '../utils/pocketCutter';
+import type { PourBoxOptions } from '../utils/siliconeMold';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
@@ -945,6 +946,9 @@ export interface SceneNode {
     pourDepthMm: number;
     /** The silicone it was planned for: what a pour into the box pours. */
     silicone?: 'platinum' | 'tin';
+    /** What it was planned with, and round which bodies, so the Silicone chain plans this box again. */
+    options?: Partial<PourBoxOptions>;
+    masterIds?: string[];
   };
   /**
    * Set on a body Add Simulation made: the part a machining program will leave,

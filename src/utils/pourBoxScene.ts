@@ -89,7 +89,12 @@ function worldOf(nodes: SceneNode[], id: string, parent?: THREE.Matrix4): THREE.
  * level; a hole's pin goes under the first master, in its frame, with no joint, so
  * it moves with it and prints as part of it.
  */
-export function sceneWithPourBox(scene: SceneGraph, ids: string[], box: PourBox): { scene: SceneGraph; baseId: string; sleeveId: string; holePinId?: string } {
+export function sceneWithPourBox(
+  scene: SceneGraph,
+  ids: string[],
+  box: PourBox,
+  options?: Partial<PourBoxOptions>,
+): { scene: SceneGraph; baseId: string; sleeveId: string; holePinId?: string } {
   const tag = Math.random().toString(36).slice(2, 7);
   const masterName = (() => {
     const find = (nodes: SceneNode[]): SceneNode | null => {
@@ -102,7 +107,11 @@ export function sceneWithPourBox(scene: SceneGraph, ids: string[], box: PourBox)
     };
     return find(scene.nodes)?.name ?? 'master';
   })();
-  const pourBox = { pourDepthMm: box.report.pourDepthMm, silicone: box.report.silicone };
+  const pourBox = {
+    pourDepthMm: box.report.pourDepthMm,
+    silicone: box.report.silicone,
+    ...(options ? { options: { ...options }, masterIds: [...ids] } : {}),
+  };
   const base: SceneNode = { ...meshBody(`pourbase_${tag}`, `${masterName}_pour_base`, box.base, [0.62, 0.64, 0.68, 1]), pourBox };
   // Translucent so the master shows through it; it still collides.
   const sleeve: SceneNode = {
@@ -167,4 +176,22 @@ export function pourBoxNotes(name: string, box: PourBox, pinAdded = Boolean(box.
     ...(box.hole && pinAdded ? [`- Print the ${box.hole.purpose} pin (${box.hole.diaMm} mm across, ${box.hole.lengthMm.toFixed(1)} mm long) and stand it on the master: it rises ${(r.fillZMm + 1 - (box.hole.footMm[2] + 0.5)).toFixed(1)} mm above the master, 1 mm past the fill line, and leaves a ${box.hole.diaMm} mm ${HOLE_USE[box.hole.purpose]}`] : []),
     ...r.warnings.map((w) => `- ${w}`),
   ];
+}
+
+/**
+ * What the pour box already in the scene round exactly these masters was
+ * planned with (as physics_make_pour_box or the Silicone tab made it), or null.
+ */
+export function pourBoxOptionsFor(scene: SceneGraph, ids: string[]): Partial<PourBoxOptions> | null {
+  const want = [...ids].sort().join('\n');
+  let found: Partial<PourBoxOptions> | null = null;
+  const walk = (nodes: SceneNode[]) => {
+    for (const n of nodes) {
+      const b = n.pourBox;
+      if (b?.options && b.masterIds && [...b.masterIds].sort().join('\n') === want) found = b.options;
+      walk(n.children || []);
+    }
+  };
+  walk(scene.nodes);
+  return found ? { ...(found as Partial<PourBoxOptions>) } : null;
 }
