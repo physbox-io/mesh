@@ -166,7 +166,8 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
 
   const handleApply = () => {
     if (!split || !node) return;
-    splitBodyForPrint(node.id, split.sections, part.absorbed);
+    const made = landed!.request.settled;
+    splitBodyForPrint(node.id, split.sections, part.absorbed, { cutFor: { bed: made.printBed, marginMm: made.marginMm } });
     onClose();
   };
 

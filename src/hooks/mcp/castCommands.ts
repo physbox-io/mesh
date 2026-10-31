@@ -193,9 +193,10 @@ export const castCommands: McpCommands = {
       clearanceMm: num(msg.clearanceMm),
       minWallMm: num(msg.minWallMm),
     }).filter(([, v]) => v !== undefined));
+    const marginMm = num(msg.marginMm) ?? 5;
     const { result, checks } = await splitOffThread(soups, {
       bed,
-      marginMm: num(msg.marginMm) ?? 5,
+      marginMm,
       overhangDeg: filamentSpec(store.filament).maxOverhangDeg,
       joinery,
     });
@@ -220,7 +221,7 @@ export const castCommands: McpCommands = {
       }
     }
 
-    const ids = msg.apply === true ? store.splitBodyForPrint(node.id, result.sections, absorbed) : null;
+    const ids = msg.apply === true ? store.splitBodyForPrint(node.id, result.sections, absorbed, { cutFor: { bed, marginMm } }) : null;
     const round = (v: number, d = 1) => +v.toFixed(d);
     return {
       ok: true,
@@ -265,13 +266,18 @@ export const castCommands: McpCommands = {
     const unknown = asked.filter((id) => !findNodeInScene(store.sceneGraph.nodes, id));
     if (unknown.length) return { ok: false, error: `No body called ${unknown.join(', ')}.` };
     const ids = asked.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!.id);
+    const bedArr = Array.isArray(msg.bedMm) ? (msg.bedMm as number[]) : null;
+    const exportBed = bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
+      ? { widthMm: bedArr[0], depthMm: bedArr[1], heightMm: bedArr[2] }
+      : store.printBed;
     const result = exportPrintFiles(store.sceneGraph, {
       format,
       ids,
       separate: msg.separate === true,
       ...(typeof msg.plate === 'boolean' ? { plate: msg.plate } : {}),
       ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
-      bed: store.printBed,
+      bed: exportBed,
+      ...(typeof msg.marginMm === 'number' && Number.isFinite(msg.marginMm) && msg.marginMm >= 0 ? { marginMm: msg.marginMm } : {}),
       baseName: store.sceneGraph.name || store.activePreset || 'model',
     });
     if (!result.files.length) {

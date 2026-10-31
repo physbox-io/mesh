@@ -53,6 +53,8 @@ export interface PrintPart {
    * it prints. Absent, a part prints the way it stands.
    */
   turn?: Mat3;
+  /** For a section: the bed and margin it was split for. */
+  cutFor?: { bedMm: [number, number, number]; marginMm: number };
 }
 
 export interface PrintExportOptions {
@@ -68,7 +70,12 @@ export interface PrintExportOptions {
    * print pose. With `separate`, each body's file is a plate of its own.
    */
   plate?: boolean;
-  bed?: { widthMm: number; depthMm: number };
+  bed?: { widthMm: number; depthMm: number; heightMm?: number };
+  /**
+   * Kept clear round the plate's edge, mm. Default: the margin the sections
+   * were split with (the least, if they differ), else 5.
+   */
+  marginMm?: number;
   /** File name without extension. */
   baseName?: string;
   /** Filaments the printer has, for a 3MF's colours: default 5 (an AMS and the external spool). */
@@ -139,6 +146,7 @@ export function printableParts(scene: SceneGraph, ids?: string[]): { parts: Prin
           // Row-major transpose of the rotation is three's column-major read as rows.
           const e = new THREE.Matrix4().extractRotation(bodyMatrix).elements;
           part.turn = mulMat3(poseMatrix(node.printPose), [e[0], e[1], e[2], e[4], e[5], e[6], e[8], e[9], e[10]]);
+          if (node.printPose.cutFor) part.cutFor = node.printPose.cutFor;
         }
         parts.push(part);
       }
@@ -214,12 +222,26 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
   const plated = options.format === '3mf' && !!bed && options.plate !== false
     && (options.plate === true || parts.some((p) => p.turn));
 
+  // A section was cut to fit inside the margin it was split with; plated with
+  // a wider one it can spill onto a plate of its own.
+  const cutFor = parts.flatMap((p) => (p.cutFor ? [p.cutFor] : []));
+  const margin = options.marginMm ?? (cutFor.length ? Math.min(...cutFor.map((c) => c.marginMm)) : 5);
+  if (plated) {
+    const differs = (b: number[]) => Math.abs(b[0] - bed!.widthMm) > 1e-6 || Math.abs(b[1] - bed!.depthMm) > 1e-6
+      || (bed!.heightMm !== undefined && Math.abs(b[2] - bed!.heightMm) > 1e-6);
+    const other = [...new Set(cutFor.filter((c) => differs(c.bedMm)).map((c) => c.bedMm.join(' × ')))];
+    if (other.length) {
+      const here = [bed!.widthMm, bed!.depthMm, ...(bed!.heightMm !== undefined ? [bed!.heightMm] : [])].join(' × ');
+      warnings.push(`Sections were split for a ${other.join(' mm or a ')} mm bed and are plated on a ${here} mm one: split them again for this printer if any does not fit.`);
+    }
+  }
+
   const groups = options.separate ? parts.map((p) => [p]) : [parts];
   const filaments: NonNullable<PrintExportResult['filaments']> = [];
   const used = new Map<string, number>();
   const files = groups.map((group) => {
     const mm = plated
-      ? layoutSetsOnBed(group.map((p) => p.volumes.map((v) => (p.turn ? rotatePoints(p.turn, v.tris) : v.tris))), bed!).flatMap((p) => p.sets)
+      ? layoutSetsOnBed(group.map((p) => p.volumes.map((v) => (p.turn ? rotatePoints(p.turn, v.tris) : v.tris))), bed!, margin).flatMap((p) => p.sets)
       : toBedMm(group.flatMap((p) => p.volumes.map((v) => v.tris)));
     // Names are unique per body but not once lowercased and stripped.
     let name = options.separate ? safeName(group[0].name) : plated ? `${base}_plate` : base;

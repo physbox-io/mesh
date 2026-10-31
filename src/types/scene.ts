@@ -934,8 +934,10 @@ export interface SceneNode {
    * body-local direction that points up off the bed, and `spin` the turn about
    * the vertical after that, in radians. The 3MF export stands the body that
    * way and lays it on the plate. The physics and the viewport ignore it.
+   * `cutFor` is the bed and margin the split was made for, which the plate
+   * keeps to.
    */
-  printPose?: { up: [number, number, number]; spin: number };
+  printPose?: { up: [number, number, number]; spin: number; cutFor?: { bedMm: [number, number, number]; marginMm: number } };
   /**
    * Set on a silicone pour box's base and sleeve: printed tooling, never
    * molded itself, and where the silicone fills to, so a pour into the master

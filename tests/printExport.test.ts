@@ -218,6 +218,19 @@ describe('the plate', () => {
     expect(Math.max(...zs)).toBeCloseTo(20, 3);
   });
 
+  it('plates sections inside the margin they were split with, and says when the bed has changed', () => {
+    const scene = plateScene();
+    scene.nodes[0].printPose = { up: [1, 0, 0], spin: 0, cutFor: { bedMm: [256, 256, 256], marginMm: 1 } };
+    const xs = (r: ReturnType<typeof exportPrintFiles>) =>
+      [...items(r.files[0].bytes).model.matchAll(/<vertex x="([^"]+)"/g)].map((m) => +m[1]);
+    const kept = exportPrintFiles(scene, { format: '3mf', bed: { ...bed, heightMm: 256 } });
+    expect(Math.min(...xs(kept))).toBeCloseTo(1, 3);
+    expect(kept.warnings.join(' ')).not.toMatch(/split for a/);
+    const moved = exportPrintFiles(scene, { format: '3mf', bed: { widthMm: 180, depthMm: 180, heightMm: 180 } });
+    expect(moved.warnings.join(' ')).toMatch(/split for a 256 × 256 × 256 mm bed and are plated on a 180 × 180 × 180 mm one/);
+    expect(Math.min(...xs(exportPrintFiles(scene, { format: '3mf', bed, marginMm: 7 })))).toBeCloseTo(7, 3);
+  });
+
   it('with separate, one plate file a body, each stood the way it prints', () => {
     const result = exportPrintFiles(plateScene(), { format: '3mf', bed, separate: true });
     expect(result.plated).toBe(true);

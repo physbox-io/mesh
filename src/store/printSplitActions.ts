@@ -18,6 +18,7 @@ import type { SplitSection } from '../utils/printSplit';
 import { featureGeoms } from '../utils/printAssembly';
 import { pieceHolding } from '../utils/splitPieces';
 import { cloneSceneGraph, findNode } from './sceneClone';
+import type { PrintBed } from '../utils/printBedSettings';
 import type { SliceDeps } from './sliceDeps';
 
 export interface PrintSplitActions {
@@ -43,6 +44,8 @@ export interface PrintSplitActions {
       names?: string[];
       centerOrigin?: boolean;
       placement?: 'replace' | 'beside';
+      /** The bed and margin the split was made for, recorded on each print pose for the plate. */
+      cutFor?: { bed: PrintBed; marginMm: number };
     },
   ) => string[];
 }
@@ -62,8 +65,11 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       // other bodies taken in it is still made one mesh, which is what makes
       // them print as one piece.
       const taken = absorbed.filter((id) => id !== nodeId);
+      const cutFor = opts.cutFor
+        ? { bedMm: [opts.cutFor.bed.widthMm, opts.cutFor.bed.depthMm, opts.cutFor.bed.heightMm] as [number, number, number], marginMm: opts.cutFor.marginMm }
+        : undefined;
       if (sections.length === 1 && !opts.plain && !taken.length && opts.placement !== 'beside') {
-        first.printPose = { up: [...sections[0].up] as [number, number, number], spin: sections[0].spin };
+        first.printPose = { up: [...sections[0].up] as [number, number, number], spin: sections[0].spin, ...(cutFor ? { cutFor } : {}) };
         set({ sceneGraph: newScene });
         return [nodeId];
       }
@@ -189,7 +195,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
         n.collisionDecomposed = true;
         n.collisionHash = collisionHashOf(n);
       };
-      const poseOf = (sec: (typeof sections)[number]) => ({ up: [...sec.up] as [number, number, number], spin: sec.spin });
+      const poseOf = (sec: (typeof sections)[number]) => ({ up: [...sec.up] as [number, number, number], spin: sec.spin, ...(cutFor ? { cutFor } : {}) });
 
       // Everything that would regenerate the body's geometry from a recipe has
       // to go: the sections ARE the geometry now, and a wedge's or a lattice's
