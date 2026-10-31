@@ -24,7 +24,7 @@ import { colouredGeomTriangles } from './printColours';
 import { isBoughtIn } from './boughtIn';
 import { exportBinarySTL, type Triangle3D } from './moldManifold';
 import { exportThreeMf, linearToSrgbHex, type ThreeMfMesh } from './threeMfExporter';
-import { layoutOnBed, type PosedPart } from './printPlate';
+import { layoutSetsOnBed, mulMat3, poseMatrix, rotatePoints, type Mat3 } from './printPlate';
 
 export type PrintFormat = 'stl' | '3mf';
 
@@ -48,6 +48,11 @@ export interface PrintPart {
    * round a core in another material, prints each in its own filament.
    */
   volumes: PrintVolume[];
+  /**
+   * For a section made by Split for Print: the turn from the world to the way
+   * it prints. Absent, a part prints the way it stands.
+   */
+  turn?: Mat3;
 }
 
 export interface PrintExportOptions {
@@ -57,9 +62,10 @@ export interface PrintExportOptions {
   /** One file per body rather than one file holding them all. */
   separate?: boolean;
   /**
-   * Lay sections made by Split for Print out on the bed, each stood the way it
-   * prints, as the 3MF button offers to. Default: when any chosen body has a
-   * print pose. Only those bodies go on the plate.
+   * Lay the parts out on the bed (3MF only, with `bed`): sections made by Split
+   * for Print each stood the way they print, as the 3MF button offers to, and
+   * every other chosen body as it stands. Default: when any chosen body has a
+   * print pose. With `separate`, each body's file is a plate of its own.
    */
   plate?: boolean;
   bed?: { widthMm: number; depthMm: number };
@@ -127,7 +133,14 @@ export function printableParts(scene: SceneGraph, ids?: string[]): { parts: Prin
       }
       const volumes = [...byColour.values()];
       if (volumes.length) {
-        parts.push({ id: node.id, name: node.name || node.id, tris: volumes.flatMap((v) => v.tris), volumes });
+        const part: PrintPart = { id: node.id, name: node.name || node.id, tris: volumes.flatMap((v) => v.tris), volumes };
+        if (node.printPose) {
+          // The pose is in the body's frame: undo the body's world turn first.
+          // Row-major transpose of the rotation is three's column-major read as rows.
+          const e = new THREE.Matrix4().extractRotation(bodyMatrix).elements;
+          part.turn = mulMat3(poseMatrix(node.printPose), [e[0], e[1], e[2], e[4], e[5], e[6], e[8], e[9], e[10]]);
+        }
+        parts.push(part);
       }
     }
     for (const child of node.children || []) traverse(child, bodyMatrix, inside);
@@ -177,26 +190,6 @@ function stlBytes(mm: Float32Array, name: string): Uint8Array {
 
 const safeName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'part';
 
-/** Posed sections on the bed, for a 3MF; null when none of the parts has a pose. */
-function platedMeshes(scene: SceneGraph, parts: PrintPart[], bed: { widthMm: number; depthMm: number }): ThreeMfMesh[] | null {
-  const chosen = new Set(parts.map((p) => p.id));
-  const posed: PosedPart[] = [];
-  const walk = (nodes: SceneNode[]) => {
-    for (const n of nodes) {
-      const mesh = chosen.has(n.id) && n.printPose
-        ? (n.geoms || []).find((g) => g.type === 'mesh' && g.role !== 'collision' && g.renderVertices?.length && g.faces?.length)
-        : undefined;
-      if (mesh) {
-        posed.push({ name: n.name || n.id, positions: mesh.renderVertices!, faces: mesh.faces!, pose: n.printPose!, colour: linear(mesh.rgba) });
-      }
-      walk(n.children || []);
-    }
-  };
-  walk(scene.nodes);
-  if (!posed.length) return null;
-  return layoutOnBed(posed, bed).map((p) => ({ name: p.name, positions: p.positions, indices: p.indices, colors: null, baseColor: p.colour }));
-}
-
 export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions): PrintExportResult {
   const { parts, warnings, missing } = printableParts(scene, options.ids);
   const base = safeName(options.baseName ?? 'model');
@@ -213,22 +206,23 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
 
   // The plate is a 3MF thing: an STL has no way to say "these are separate
   // objects on one bed" beyond being one file of shells, which a slicer
-  // would happily lay out itself.
-  if (options.format === '3mf' && options.plate !== false && options.bed) {
-    const plated = platedMeshes(scene, parts, options.bed);
-    if (plated) {
-      const result = exportThreeMf(plated, { maxExtruders: options.filaments });
-      return { files: [{ name: `${base}_plate.3mf`, bytes: result.data }], parts: summary, plated: true, warnings, missing, filaments: [result.palette] };
-    }
-  }
+  // would happily lay out itself. Plating only places parts — sections turned
+  // the way they print, the rest as they stand — so each part keeps its
+  // volumes and paint, and the file holds exactly the parts in `summary`.
+  // `separate` still means one file a body: each is then a plate of one.
+  const bed = options.bed;
+  const plated = options.format === '3mf' && !!bed && options.plate !== false
+    && (options.plate === true || parts.some((p) => p.turn));
 
   const groups = options.separate ? parts.map((p) => [p]) : [parts];
   const filaments: NonNullable<PrintExportResult['filaments']> = [];
   const used = new Map<string, number>();
   const files = groups.map((group) => {
-    const mm = toBedMm(group.flatMap((p) => p.volumes.map((v) => v.tris)));
+    const mm = plated
+      ? layoutSetsOnBed(group.map((p) => p.volumes.map((v) => (p.turn ? rotatePoints(p.turn, v.tris) : v.tris))), bed!).flatMap((p) => p.sets)
+      : toBedMm(group.flatMap((p) => p.volumes.map((v) => v.tris)));
     // Names are unique per body but not once lowercased and stripped.
-    let name = options.separate ? safeName(group[0].name) : base;
+    let name = options.separate ? safeName(group[0].name) : plated ? `${base}_plate` : base;
     const seen = used.get(name) ?? 0;
     used.set(name, seen + 1);
     if (seen) name = `${name}_${seen + 1}`;
@@ -254,5 +248,5 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
     filaments.push(result.palette);
     return { name: `${name}.3mf`, bytes: result.data };
   });
-  return { files, parts: summary, plated: false, warnings, missing, ...(filaments.length ? { filaments } : {}) };
+  return { files, parts: summary, plated, warnings, missing, ...(filaments.length ? { filaments } : {}) };
 }

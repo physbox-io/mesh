@@ -173,3 +173,55 @@ describe('colour and material in the 3MF', () => {
     expect(new Set([...mixed.matchAll(/paint_color="(\w+)"/g)].map((m) => m[1])).size).toBe(1);
   });
 });
+
+describe('the plate', () => {
+  const bed = { widthMm: 256, depthMm: 256 };
+  const items = (bytes: Uint8Array) => {
+    const model = new TextDecoder().decode((unzipSync(bytes) as Record<string, Uint8Array>)['3D/3dmodel.model']);
+    return { model, items: model.match(/<item /g)?.length ?? 0, components: model.match(/<component /g)?.length ?? 0 };
+  };
+  /** A box as a mesh geom, Z-up, wound outward: what Split for Print leaves. */
+  const meshBox = (name: string, [x, y, z]: number[], rgba: number[]) => ({
+    name, type: 'mesh' as const, rgba,
+    renderVertices: [-x, -y, -z, x, -y, -z, x, y, -z, -x, y, -z, -x, -y, z, x, -y, z, x, y, z, -x, y, z],
+    faces: [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7],
+  });
+  // A 20 x 40 x 10 mm section made of a grey shell and a red core, stood on
+  // its side to print, and a 10 mm cube that was never split.
+  const plateScene = (): SceneGraph => ({
+    nodes: [
+      {
+        id: 'section', name: 'section', type: 'body', pos: [0, 0, 0.3], joints: [], children: [],
+        printPose: { up: [1, 0, 0], spin: 0 },
+        geoms: [
+          meshBox('shell', [0.01, 0.02, 0.005], [0.5, 0.5, 0.5, 1]),
+          { name: 'core', type: 'box', size: [0.002, 0.002, 0.002], rgba: [1, 0, 0, 1] },
+        ],
+      },
+      body('cube', [0.1, 0, 0.3], [0.005, 0.005, 0.005]),
+    ],
+  });
+
+  it('puts every chosen part on the plate, posed or not, with its colours, and the summary matches', () => {
+    const result = exportPrintFiles(plateScene(), { format: '3mf', bed });
+    expect(result.plated).toBe(true);
+    expect(result.files.map((f) => f.name)).toEqual(['model_plate.3mf']);
+    const { model, items: n, components } = items(result.files[0].bytes);
+    expect(n).toBe(result.parts.length);
+    expect(n).toBe(2);
+    // The section's core is its own volume, as off the plate: two for it, one for the cube
+    expect(components).toBe(3);
+    expect(result.filaments?.[0].length).toBe(2);
+    // The section stands on its side: 10 mm (its X) is now its height
+    const zs = [...model.matchAll(/<vertex x="[^"]+" y="[^"]+" z="([^"]+)"/g)].map((m) => +m[1]);
+    expect(Math.min(...zs)).toBeCloseTo(0, 4);
+    expect(Math.max(...zs)).toBeCloseTo(20, 3);
+  });
+
+  it('with separate, one plate file a body, each stood the way it prints', () => {
+    const result = exportPrintFiles(plateScene(), { format: '3mf', bed, separate: true });
+    expect(result.plated).toBe(true);
+    expect(result.files.map((f) => f.name)).toEqual(['section.3mf', 'cube.3mf']);
+    expect(result.files.map((f) => items(f.bytes).items)).toEqual([1, 1]);
+  });
+});

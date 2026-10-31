@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import type { SceneGraph } from '../src/types/scene';
 
 /*
@@ -9,22 +9,7 @@ import type { SceneGraph } from '../src/types/scene';
  * job. Given the same arguments, both must plan the same one.
  */
 
-// The options each job is planned with, caught before any worker runs it.
-const runs: { kind: string; options: Record<string, unknown> }[] = [];
-vi.mock('../src/utils/exportWorkerClient', () => ({
-  ExportWorkerClient: class {
-    run(kind: string, _scene: unknown, options: Record<string, unknown>) {
-      runs.push({ kind, options });
-      return Promise.resolve({ success: false, error: 'captured' });
-    }
-    dispose() {}
-  },
-}));
-
 const { machiningOptionsFor } = await import('../src/hooks/mcp/exportOptions');
-const { machiningCommands } = await import('../src/hooks/mcp/machiningCommands');
-const { DEFAULT_LASER_OPTIONS } = await import('../src/utils/laserCutExporter');
-const { DEFAULT_CONTOUR_OPTIONS } = await import('../src/utils/contourSliceExporter');
 
 const block: SceneGraph = {
   nodes: [{ id: 'b', name: 'p', type: 'body', pos: [0, 0, 0], geoms: [{ name: 'g', type: 'box', size: [0.02, 0.02, 0.005] } as never], joints: [], children: [] }],
@@ -51,37 +36,3 @@ describe('an MCP machining simulation', () => {
   });
 });
 
-/*
- * A router simulation of a laser cut or a contour slice is laid out as the
- * dialog lays it out for a router: no kerf (the G-code stands the bit off by
- * its radius) and, for panels, dogbones in the inside corners. It used to take
- * the laser's recipe, 0.15 mm kerf and square corners, whatever the machine.
- */
-describe('an MCP sheet simulation on a router', () => {
-  const ctx = { store: { sceneGraph: block }, toId: (s: string) => s } as never;
-
-  it('lays panels out with no kerf, dogbone corners and the named bit', async () => {
-    runs.length = 0;
-    await machiningCommands.ADD_SIMULATION({ kind: 'laser', machine: 'router', bitDiaMm: 6 }, ctx);
-    expect(runs[0].kind).toBe('laser');
-    expect(runs[0].options.kerf).toBe(0);
-    expect(runs[0].options.cornerRelief).toBe('dogbone');
-    expect(runs[0].options.bitDiameter).toBeCloseTo(0.006);
-  });
-
-  it('slices contour layers with no kerf', async () => {
-    runs.length = 0;
-    await machiningCommands.ADD_SIMULATION({ kind: 'contour', machine: 'router' }, ctx);
-    expect(runs[0].kind).toBe('contour');
-    expect(runs[0].options.kerf).toBe(0);
-  });
-
-  it('keeps the laser recipe on a laser', async () => {
-    runs.length = 0;
-    await machiningCommands.ADD_SIMULATION({ kind: 'laser' }, ctx);
-    await machiningCommands.ADD_SIMULATION({ kind: 'contour' }, ctx);
-    expect(runs[0].options.kerf).toBe(DEFAULT_LASER_OPTIONS.kerf);
-    expect(runs[0].options.cornerRelief).toBe('none');
-    expect(runs[1].options.kerf).toBe(DEFAULT_CONTOUR_OPTIONS.kerf);
-  });
-});

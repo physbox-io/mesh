@@ -7,7 +7,7 @@ import { useDialogs } from '../store/dialogStore';
 import type { SceneNode } from '../types/scene';
 import type { NoteCard } from '../utils/noteCards';
 import { exportThreeMf, type ThreeMfMesh } from '../utils/threeMfExporter';
-import { layoutOnBed, type PosedPart } from '../utils/printPlate';
+import { exportPrintFiles } from '../utils/printExport';
 import { downloadBlob } from '../utils/downloadBlob';
 import { exportBaseName } from '../utils/exportBaseName';
 
@@ -80,45 +80,44 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
 
   const export3mf = useCallback(() => {
     // Sections made by Split for Print know which way up they print. When
-    // there are some, offer the print job — each section stood that way and
-    // laid out on the bed — rather than the scene as it stands. No size prompt
-    // for those: they were cut to fit this bed, and rescaling would undo that.
+    // there are some, offer the print job — each section stood that way, the
+    // rest of the scene as it stands, all laid out on the bed — rather than the
+    // scene as it is placed. No size prompt for those: they were cut to fit
+    // this bed, and rescaling would undo that. The plate is built from the
+    // graph (utils/printExport), the same file physics_export_print writes, so
+    // paint and every part's volumes go with it.
     const { sceneGraph: graph, printBed } = useStore.getState();
-    const posed: PosedPart[] = [];
+    let posed = 0;
     const walk = (nodes: SceneNode[]) => {
       for (const n of nodes) {
-        const mesh = n.printPose && (n.geoms || []).find((g) => g.type === 'mesh' && g.role !== 'collision' && g.renderVertices?.length && g.faces?.length);
-        if (n.printPose && mesh) {
-          const c = new THREE.Color().setRGB(mesh.rgba?.[0] ?? 0.8, mesh.rgba?.[1] ?? 0.8, mesh.rgba?.[2] ?? 0.8, THREE.SRGBColorSpace);
-          posed.push({ name: n.name || n.id, positions: mesh.renderVertices!, faces: mesh.faces!, pose: n.printPose, colour: [c.r, c.g, c.b] });
-        }
+        if (n.printPose) posed++;
         walk(n.children || []);
       }
     };
     walk(graph.nodes);
-    if (posed.length) {
+    if (posed) {
       openDialog({
-        title: `Lay out ${posed.length} split section${posed.length === 1 ? '' : 's'} on the print bed?`,
+        title: `Lay out ${posed} split section${posed === 1 ? '' : 's'} on the print bed?`,
         confirmLabel: 'Lay out on bed',
         cancelLabel: 'Export scene as-is',
         body: (
           <>
             <p>
-              Each split section will be stood the way it prints and arranged across the{' '}
-              <strong>{printBed.widthMm} × {printBed.depthMm} mm</strong> bed.
+              Each split section will be stood the way it prints and, with the scene's other parts,
+              arranged across the <strong>{printBed.widthMm} × {printBed.depthMm} mm</strong> bed.
             </p>
             <p>Choose “Export scene as-is” to export the whole scene in its current pose instead.</p>
           </>
         ),
         onConfirm: () => {
           closeDialog();
-          const plated = layoutOnBed(posed, printBed);
-          const result = exportThreeMf(plated.map((p) => ({
-            name: p.name, positions: p.positions, indices: p.indices, colors: null, baseColor: p.colour,
-          })));
-          downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${baseName()}_plate.3mf`);
-          const plates = Math.max(...plated.map((p) => p.plate)) + 1;
-          if (plates > 1) console.info(`[Export] ${plates} plates' worth of sections; the extra plates sit beside the bed.`);
+          const result = exportPrintFiles(graph, { format: '3mf', plate: true, bed: printBed });
+          const file = result.files[0];
+          if (!file) {
+            showNotice('Nothing to export', 'There are no printable parts in the scene to export.');
+            return;
+          }
+          downloadBlob(new Blob([file.bytes.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${baseName()}_plate.3mf`);
         },
         onCancel: () => {
           closeDialog();
@@ -129,7 +128,7 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
     }
 
     exportWholeScene3mf();
-  }, [exportWholeScene3mf, baseName, openDialog, closeDialog]);
+  }, [exportWholeScene3mf, baseName, openDialog, closeDialog, showNotice]);
 
   return { exportStl, export3mf };
 }

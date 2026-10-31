@@ -216,31 +216,55 @@ export function layoutOnBed(
   bed: { widthMm: number; depthMm: number },
   marginMm = 5,
 ): PlatedPart[] {
-  const posed = parts.map((p) => {
-    const turned = rotatePoints(poseMatrix(p.pose), p.positions);
+  const placed = layoutSetsOnBed(parts.map((p) => [rotatePoints(poseMatrix(p.pose), p.positions)]), bed, marginMm);
+  return parts.map((p, i) => ({
+    name: p.name, positions: placed[i].sets[0], indices: Uint32Array.from(p.faces), colour: p.colour, plate: placed[i].plate,
+  }));
+}
+
+/**
+ * The packing under `layoutOnBed`, for parts already turned the way they
+ * print. A part is a list of point sets (metres, Z-up) — its volumes, say —
+ * that move together: sized in millimetres, dropped onto Z = 0 and packed as
+ * one footprint. Points come back in the same order, so triangle soups and
+ * per-corner colours stay lined up with them.
+ */
+export function layoutSetsOnBed(
+  parts: ArrayLike<number>[][],
+  bed: { widthMm: number; depthMm: number },
+  marginMm = 5,
+): { sets: Float32Array[]; plate: number }[] {
+  const sized = parts.map((sets) => {
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < turned.length; i += 3) {
-      for (let k = 0; k < 3; k++) {
-        turned[i + k] *= 1000;
-        lo[k] = Math.min(lo[k], turned[i + k]);
-        hi[k] = Math.max(hi[k], turned[i + k]);
+    for (const set of sets) {
+      for (let i = 0; i + 2 < set.length; i += 3) {
+        for (let k = 0; k < 3; k++) {
+          const v = set[i + k] * 1000;
+          lo[k] = Math.min(lo[k], v);
+          hi[k] = Math.max(hi[k], v);
+        }
       }
     }
-    return { p, turned, lo, size: [hi[0] - lo[0], hi[1] - lo[1]] };
+    return { sets, lo, size: [hi[0] - lo[0], hi[1] - lo[1]] };
   });
-  const places = packOnBed(posed.map(({ size }) => ({ w: size[0], d: size[1] })), bed, marginMm);
-  return posed.map(({ p, turned, lo, size }, i) => {
+  const places = packOnBed(sized.map(({ size }) => ({ w: size[0], d: size[1] })), bed, marginMm);
+  return sized.map(({ sets, lo, size }, i) => {
     const place = places[i];
-    const out = new Float32Array(turned.length);
     const plateX = place.plate * (bed.widthMm + PLATE_GAP_MM);
-    for (let v = 0; v < turned.length; v += 3) {
-      let x = turned[v] - lo[0], y = turned[v + 1] - lo[1];
-      // A quarter turn about the vertical, keeping the footprint's corner at the origin.
-      if (place.turned) [x, y] = [size[1] - y, x];
-      out[v] = plateX + place.x + x;
-      out[v + 1] = place.y + y;
-      out[v + 2] = turned[v + 2] - lo[2];
-    }
-    return { name: p.name, positions: out, indices: Uint32Array.from(p.faces), colour: p.colour, plate: place.plate };
+    return {
+      plate: place.plate,
+      sets: sets.map((set) => {
+        const out = new Float32Array(set.length);
+        for (let v = 0; v + 2 < set.length; v += 3) {
+          let x = set[v] * 1000 - lo[0], y = set[v + 1] * 1000 - lo[1];
+          // A quarter turn about the vertical, keeping the footprint's corner at the origin.
+          if (place.turned) [x, y] = [size[1] - y, x];
+          out[v] = plateX + place.x + x;
+          out[v + 1] = place.y + y;
+          out[v + 2] = set[v + 2] * 1000 - lo[2];
+        }
+        return out;
+      }),
+    };
   });
 }
