@@ -73,7 +73,7 @@ export const PLA_SOFTEN_C = 60;
 
 export const CAST_MATERIALS: CastMaterial[] = [
   {
-    id: 'epoxy', label: 'Epoxy resin', densityGcm3: 1.15, waterBased: false, metal: false, silicone: false, rgba: [0.82, 0.92, 1, 0.35],
+    id: 'epoxy', label: 'Epoxy resin', densityGcm3: 1.15, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.94, 0.88, 0.6],
     warnings: [{
       aboveMl: 200,
       inPla: true,
@@ -95,7 +95,7 @@ export const CAST_MATERIALS: CastMaterial[] = [
     warnings: [{ text: 'Food goes in a food-grade silicone mold, or a print in a food-safe filament: layer lines hold bacteria.' }],
   },
   {
-    id: 'water', label: 'Water (ice)', densityGcm3: 0.92, waterBased: true, metal: false, silicone: false, rgba: [0.8, 0.92, 1, 0.45],
+    id: 'water', label: 'Water (ice)', densityGcm3: 0.92, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
     warnings: [{ text: 'Water grows about 9% as it freezes: fill a little below the rim.' }],
   },
   { id: 'plaster', label: 'Plaster', densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },

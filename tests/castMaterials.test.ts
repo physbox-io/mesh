@@ -27,8 +27,11 @@ describe('the material list', () => {
       expect(m.rgba[3], m.id).toBeGreaterThan(0.2);
     }
     const alpha = (id: string) => CAST_MATERIALS.find((m) => m.id === id)!.rgba[3];
-    expect(alpha('epoxy')).toBeLessThan(0.5);
-    expect(alpha('water')).toBeLessThan(0.5);
+    // Cured epoxy and ice are hazy, not glass: see-through, but plainly there.
+    for (const hazy of ['epoxy', 'water']) {
+      expect(alpha(hazy), hazy).toBeGreaterThan(0.45);
+      expect(alpha(hazy), hazy).toBeLessThan(0.75);
+    }
     for (const opaque of ['plaster', 'concrete', 'bronze', 'chocolate']) expect(alpha(opaque), opaque).toBe(1);
   });
 
