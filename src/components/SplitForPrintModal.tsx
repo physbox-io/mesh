@@ -5,7 +5,7 @@ import { useStore } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useSettled } from '../hooks/useSettled';
 import { filamentSpec } from '../utils/filaments';
-import { MIN_PRINT_BED_MM, MAX_PRINT_BED_MM, DEFAULT_PRINT_BED } from '../utils/printBedSettings';
+import { MIN_PRINT_BED_MM, MAX_PRINT_BED_MM, DEFAULT_PRINT_BED, type PrintBed } from '../utils/printBedSettings';
 import { DEFAULT_JOINERY, type Joinery, type JoineryKind } from '../utils/printSplit';
 import {
   selectionSoups, prewarmPrintSplit, splitOffThread, testAssemblyOffThread, type SplitOk, type SplitOutcome,
@@ -61,7 +61,7 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
   const [explodeMm, setExplodeMm] = useState(20);
   // What came back, and for which request: a request with no answer yet is
   // the search still running, and the last answer stays up meanwhile.
-  const [landed, setLanded] = useState<{ request: object; outcome: SplitOutcome } | null>(null);
+  const [landed, setLanded] = useState<{ request: { settled: { printBed: PrintBed; marginMm: number } }; outcome: SplitOutcome } | null>(null);
   // An assembly test belongs to the split it tested; a new split retires it.
   const [assemblyState, setAssembly] = useState<{ forSplit: SplitOk; plan: AssemblyPlan; results: StageResult[]; running: boolean; error?: string } | null>(null);
   const [replayRange, setReplayRange] = useState<{ from: number; to: number } | null>(null);

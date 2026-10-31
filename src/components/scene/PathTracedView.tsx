@@ -309,7 +309,8 @@ export function PathTracedView({ background }: { background: string }) {
 
     // The shader compiles on the GPU driver's own threads; the tracer draws
     // nothing until it has, so say so rather than look stuck.
-    if (pathTracer.isCompiling) {
+    // isCompiling is the tracer's own getter, left out of its type declarations.
+    if ((pathTracer as WebGLPathTracer & { isCompiling: boolean }).isCompiling) {
       if (!s.compileStarted) s.compileStarted = now;
       report('compiling', 0);
       pathTracer.renderSample();
