@@ -417,6 +417,22 @@ function footprint(pts: [number, number][], W: number, D: number): { fits: boole
     const a = ring[i], b = ring[(i + 1) % ring.length];
     consider(Math.atan2(b[1] - a[1], b[0] - a[0]));
   }
+  // Square to an edge is where the smallest box is, not the only way in: a
+  // 300 × 20 mm bar fits a 246 mm bed corner to corner. When no edge-square
+  // turn fits, every half degree is tried, then the nearest miss refined.
+  if (!(best as { fits: boolean } | null)?.fits) {
+    const STEPS = 180;
+    let at = 0, least = Infinity;
+    for (let k = 0; k < STEPS; k++) {
+      const theta = (k * Math.PI) / 2 / STEPS;
+      consider(theta);
+      const now = best as { fits: boolean; overflow: number } | null;
+      if (now?.fits) break;
+      if (now && now.overflow < least) { least = now.overflow; at = theta; }
+    }
+    const step = Math.PI / 2 / STEPS;
+    for (let k = -10; k <= 10 && !(best as { fits: boolean } | null)?.fits; k++) consider(at + (k * step) / 10);
+  }
   const b = best ?? { fits: false, spin: 0, w: 0, d: 0, overflow: Infinity, area: 0 };
   return { fits: b.fits, spin: b.spin, w: b.w, d: b.d, overflow: b.overflow };
 }

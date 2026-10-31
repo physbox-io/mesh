@@ -90,10 +90,22 @@ describe('splitForPrint — cutting', () => {
     expect(r.sections.every((s) => s.fits)).toBe(true);
   });
 
+  it('lays a bar too long for the bed corner to corner rather than cutting it', () => {
+    // 300 mm on a 246 mm square, 20 mm tall: it fits only on the diagonal.
+    const r = ok(splitForPrint(wasm, [box(300, 20, 10)], { bed: { widthMm: 256, depthMm: 256, heightMm: 20 }, joinery: { kind: 'none' } }));
+    expect(r.sections).toHaveLength(1);
+    expect(r.sections[0].fits).toBe(true);
+    const [w, d, h] = r.sections[0].sizeMm;
+    expect(w).toBeLessThanOrEqual(246 + 1e-6);
+    expect(d).toBeLessThanOrEqual(246 + 1e-6);
+    expect(h).toBeLessThanOrEqual(20 + 1e-6);
+  });
+
   it('cuts a plate in thirds that stand on edge, not halves that need cutting again', () => {
     // Halves are 250 mm square, which no side of a 246 × 246 × 256 bed takes
-    // twice over; thirds are 167 × 250, and stand 250 mm tall.
-    const r = ok(splitForPrint(wasm, [box(500, 250, 10)], { bed: { widthMm: 256, depthMm: 256, heightMm: 256 }, joinery: { kind: 'none' } }));
+    // twice over, and 100 mm thick, too thick to stand corner to corner;
+    // thirds are 167 × 250, and stand 250 mm tall.
+    const r = ok(splitForPrint(wasm, [box(500, 250, 100)], { bed: { widthMm: 256, depthMm: 256, heightMm: 256 }, joinery: { kind: 'none' } }));
     expect(r.sections).toHaveLength(3);
     expect(r.sections.every((s) => s.fits)).toBe(true);
   });
