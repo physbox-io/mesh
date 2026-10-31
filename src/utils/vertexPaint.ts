@@ -507,7 +507,7 @@ export interface DabOptions {
  * Closest point on triangle (A, B, C) to P, returning squared distance and
  * barycentric weights [wa, wb, wc].
  */
-function closestPointOnTriangleBary(
+export function closestPointOnTriangleBary(
   px: number, py: number, pz: number,
   ax: number, ay: number, az: number,
   bx: number, by: number, bz: number,

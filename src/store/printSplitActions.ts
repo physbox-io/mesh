@@ -5,7 +5,11 @@
 
 import * as THREE from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
-import { getNodeWorldTransform } from '../utils/laserCutExporter';
+import { getGeomFrame, getNodeWorldTransform } from '../utils/laserCutExporter';
+import { resolveCsgGeoms } from '../utils/csg';
+import { isBoughtIn } from '../utils/boughtIn';
+import { colouredGeomTriangles } from '../utils/printColours';
+import { needsColourCarry, sectionPaint, type ColourSource } from '../utils/sectionPaint';
 import { isNodeRotationBaked } from '../utils/sceneTree';
 import { colliderTemplateOf, hullsToColliderGeoms, meshVolumeAndCentroid, statedBooleanMass, usableColliderHulls } from '../utils/csg';
 import { collisionHashOf } from '../utils/convexDecomposition';
@@ -15,15 +19,6 @@ import { featureGeoms } from '../utils/printAssembly';
 import { pieceHolding } from '../utils/splitPieces';
 import { cloneSceneGraph, findNode } from './sceneClone';
 import type { SliceDeps } from './sliceDeps';
-
-/**
- * Split for Print's section colours: far enough apart that every seam shows,
- * and none of them the selection or warning colours.
- */
-const SECTION_COLOURS: [number, number, number][] = [
-  [0.36, 0.55, 0.85], [0.92, 0.6, 0.25], [0.4, 0.72, 0.5], [0.78, 0.45, 0.72],
-  [0.85, 0.78, 0.35], [0.35, 0.7, 0.75], [0.7, 0.55, 0.42], [0.55, 0.5, 0.85],
-];
 
 export interface PrintSplitActions {
   /**
@@ -38,8 +33,8 @@ export interface PrintSplitActions {
     /** Other bodies whose geometry went into the sections — attached children, or bodies selected with it — to remove. */
     absorbed?: string[],
     /**
-     * A plain cut (the knife's) rather than a split for print: the pieces keep
-     * the part's colour and are given no print pose. `carry`, a section
+     * A plain cut (the knife's) rather than a split for print: the pieces are
+     * given no print pose. `carry`, a section
      * each: the patterns and seams it keeps (utils/knife carryAcrossCut).
      */
     opts?: {
@@ -98,6 +93,26 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
         ? masses.reduce((a: number, m) => a + (m ?? 0), 0)
         : undefined;
       const density = solid.find((g: SceneGeom) => g.density !== undefined)?.density;
+
+      // Every piece is in the part's colour, with the part's paint and the
+      // colours of its other geoms laid on as paint (utils/sectionPaint): the
+      // 3MF prints each piece as the part was drawn. They used to be given a
+      // colour each, so the seams showed, and printed in it.
+      const rgba = template?.rgba ? [...template.rgba] : [0.8, 0.8, 0.8, 1];
+      const colourSources: ColourSource[] = [];
+      for (const n of madeOf) {
+        if (isBoughtIn(n)) continue;
+        const toPart = intoPart.clone().multiply(worlds.get(n.id) ?? new THREE.Matrix4());
+        for (const geom of resolveCsgGeoms(n, 'render')) {
+          if (geom.role === 'collision') continue;
+          const frame = getGeomFrame(geom);
+          // A plain geom in the part's own colour leaves its stretch bare.
+          if (!geom.paint && !needsColourCarry([{ tris: [], colors: null, rgba: geom.rgba ?? [0.8, 0.8, 0.8, 1] }], rgba)) continue;
+          const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(toPart, frame.matrix));
+          if (piece) colourSources.push({ ...piece, rgba: geom.rgba ?? [0.8, 0.8, 0.8, 1] });
+        }
+      }
+      const carryColour = needsColourCarry(colourSources, rgba);
       const totalVolume = sections.reduce((v, sec) => v + sec.volumeMm3, 0) || 1;
       // The sections are cut from the triangles as drawn, which already carry a
       // rotation that was baked into the vertices (see rotationIsBaked in
@@ -108,10 +123,8 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
           (Array.isArray(g.baseVertices) && g.baseVertices.length > 0) ||
           (Array.isArray(g.baseRenderVertices) && g.baseRenderVertices.length > 0));
 
-      const geomsFor = (id: string, sec: (typeof sections)[number], k: number): SceneGeom[] => {
-        const rgba = opts.plain && template?.rgba
-          ? [...template.rgba]
-          : [...SECTION_COLOURS[k % SECTION_COLOURS.length], template?.rgba?.[3] ?? 1];
+      const geomsFor = (id: string, sec: (typeof sections)[number], k: number, offset: number[] = [0, 0, 0]): SceneGeom[] => {
+        const paint = carryColour ? sectionPaint(colourSources, sec.positions, sec.faces, rgba, offset) : undefined;
         const renderVertices = Array.from(sec.positions);
         const vertices: number[] = new Array(renderVertices.length);
         for (let i = 0; i < renderVertices.length; i += 3) {
@@ -124,8 +137,9 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
             name: `${id}_mesh`,
             type: 'mesh',
             size: [1],
-            rgba,
+            rgba: [...rgba],
             dynamic: true,
+            ...(paint ? { paint } : {}),
             ...(template?.friction ? { friction: [...template.friction] } : {}),
             ...(template?.condim !== undefined ? { condim: template.condim } : {}),
             ...(totalMass !== undefined
@@ -301,7 +315,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
             coupleTargetId: undefined,
             connectTargetId: undefined,
             script: undefined,
-            geoms: geomsFor(name, sec, k),
+            geoms: geomsFor(name, sec, k, offset),
             printPose: opts.plain ? undefined : poseOf(sec),
             children: [],
           };
@@ -319,7 +333,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
         first.pos = [basePos[0] + firstCentered.offset[0], basePos[1] + firstCentered.offset[1], basePos[2] + firstCentered.offset[2]];
       }
       if (opts.names?.[0]) first.name = opts.names[0];
-      first.geoms = geomsFor(first.name || first.id, firstCentered.sec, 0);
+      first.geoms = geomsFor(first.name || first.id, firstCentered.sec, 0, firstCentered.offset);
       if (opts.plain) delete first.printPose;
       else first.printPose = poseOf(firstCentered.sec);
       installPieces(first, firstCentered.sec);
@@ -351,7 +365,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
           coupleTargetId: undefined,
           connectTargetId: undefined,
           script: undefined,
-          geoms: geomsFor(name, sec, k + 1),
+          geoms: geomsFor(name, sec, k + 1, offset),
           printPose: opts.plain ? undefined : poseOf(sec),
           children: [],
         };
