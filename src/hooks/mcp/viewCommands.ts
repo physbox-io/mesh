@@ -125,9 +125,12 @@ export const viewCommands: McpCommands = {
         modelStale: {
           bodies: stale.size,
           compiling,
+          // The reason, here: it used to be only in physics_get_state, a
+          // reply big enough to overflow before anyone found it.
+          ...(!compiling && store.lastCompileError ? { lastCompileError: store.lastCompileError } : {}),
           note: compiling
             ? 'A compile is in flight: inertial figures and masses marked stale are from the previous build. Ask again in a moment.'
-            : 'The scene has changed since the model was last compiled (or its compile failed: see physics_get_state.lastCompileError). Inertial figures and masses marked stale are from the previous build.',
+            : 'The scene has changed since the model was last compiled (or its compile failed: see lastCompileError). Inertial figures and masses marked stale are from the previous build.',
         },
       } : {}),
       nodes: (() => {

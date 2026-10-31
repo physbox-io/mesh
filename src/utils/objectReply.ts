@@ -11,7 +11,20 @@
  */
 import type { SceneGeom, SceneNode } from '../types/scene';
 import type { BodyWorldPos } from './bodyWorld';
+import type { PaintLayer } from './vertexPaint';
 import { collisionReport, geomBboxOf, meshIntegrity } from './sceneSummary';
+
+/** A paint layer as its colours, each with the vertices it covers, most first. */
+function paintSummary(paint: PaintLayer): PaintLayer {
+  const counts = new Map<string, number>();
+  for (let i = 0; i < paint.idx.length; i++) {
+    const [r, g, b] = [0, 1, 2].map((k) => paint.rgba[i * 4 + k]);
+    const hex = `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+    counts.set(hex, (counts.get(hex) ?? 0) + 1);
+  }
+  const colors = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([hex, vertices]) => ({ hex, vertices }));
+  return { res: paint.res, idx: [], rgba: [], paintedVertices: paint.idx.length, colors } as PaintLayer;
+}
 
 export const stripMeshArrays = (node: SceneNode): SceneNode => {
   const cloned = { ...node };
@@ -27,6 +40,11 @@ export const stripMeshArrays = (node: SceneNode): SceneNode => {
       // The undeformed copy a dented or reshaped mesh keeps: as big as the mesh.
       delete rest.baseVertices;
       delete rest.baseRenderVertices;
+      // Brushed colour is an entry per painted vertex: a striped cat's ran to
+      // 61 KB and overflowed physics_get_state on its own. Its colours are
+      // listed instead; the arrays come with include_meshes / get_scene,
+      // beside the vertices they index.
+      if (rest.paint) rest.paint = paintSummary(rest.paint);
       // A text pattern's saved letter outlines are kilobytes of coordinates.
       if (rest.textures?.some((t) => t.options?.outline)) {
         rest.textures = rest.textures.map((t) => {
