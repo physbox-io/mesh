@@ -116,3 +116,29 @@ describe('a split keeps what hung off the bodies it absorbed', () => {
     expect(node(left)!.geoms[0].friction).toEqual([0.7, 0.005, 0.0001]);
   });
 });
+
+// "It fits the bed already, so nothing is cut; Apply just records the best way
+// up" -- and Apply used to rebuild the body as a plain mesh in a new colour,
+// losing its recipe.
+describe('Apply on a part that fits the bed whole', () => {
+  it('records the print pose and changes nothing else', async () => {
+    const { splitForPrint } = await import('../src/utils/printSplit');
+    useStore.setState({ recompile: async () => {} } as never);
+    useStore.getState().updateScene({ nodes: [{
+      id: 'cup', name: 'cup', pos: [0, 0, 0.05], quat: [1, 0, 0, 0], joints: [], children: [],
+      geoms: [{ name: 'cup_g', type: 'box', size: [0.02, 0.01, 0.005], rgba: [0.2, 0.7, 0.3, 1] }],
+    }] } as never);
+    const before = JSON.parse(JSON.stringify(node('cup')));
+    const { soups, absorbed } = partSoups(node('cup')!);
+    const split = splitForPrint(wasm, soups, { bed: { widthMm: 256, depthMm: 256, heightMm: 256 } });
+    if (!split.ok) throw new Error(split.error);
+    expect(split.sections).toHaveLength(1);
+    const ids = useStore.getState().splitBodyForPrint('cup', split.sections, absorbed);
+    expect(ids).toEqual(['cup']);
+    const after = node('cup')!;
+    expect(after.printPose).toEqual({ up: split.sections[0].up, spin: split.sections[0].spin });
+    const { printPose: _p, ...rest } = after;
+    void _p;
+    expect(JSON.parse(JSON.stringify(rest))).toEqual(before);
+  });
+});

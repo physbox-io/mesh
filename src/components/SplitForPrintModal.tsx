@@ -287,7 +287,9 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
                       {joinery.kind !== 'none' ? ` · ${pins.length} ${joinery.kind === 'dowel' ? 'dowel' : 'peg'}${pins.length === 1 ? '' : 's'}` : ''}
                     </p>
                     {split.sections.length === 1 && (
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">It fits the bed already, so nothing is cut; Apply just records the best way up for the 3MF export.</p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">{part.absorbed.length
+                        ? 'It fits the bed already, so nothing is cut; Apply joins the bodies into one piece and records the best way up for the 3MF export.'
+                        : 'It fits the bed already, so nothing is cut; Apply just records the best way up for the 3MF export.'}</p>
                     )}
                     {misfits > 0 && (
                       <p className="text-[11px] text-red-600 dark:text-red-400">{misfits} section{misfits === 1 ? '' : 's'} still do not fit the bed.</p>

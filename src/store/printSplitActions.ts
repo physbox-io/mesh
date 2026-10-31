@@ -57,6 +57,17 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       const first = findNode(newScene.nodes, nodeId);
       if (!first) return [nodeId];
 
+      // A body that fits the bed whole is not cut, so nothing about it changes
+      // but which way up it prints: its recipe, colour and paint all stay. With
+      // other bodies taken in it is still made one mesh, which is what makes
+      // them print as one piece.
+      const taken = absorbed.filter((id) => id !== nodeId);
+      if (sections.length === 1 && !opts.plain && !taken.length && opts.placement !== 'beside') {
+        first.printPose = { up: [...sections[0].up] as [number, number, number], spin: sections[0].spin };
+        set({ sceneGraph: newScene });
+        return [nodeId];
+      }
+
       // Every body's world frame before the change, by the rule the soups were
       // taken with (a baked rotation is in the vertices, not the frame).
       const worlds = new Map<string, THREE.Matrix4>();
