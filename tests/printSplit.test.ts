@@ -90,6 +90,14 @@ describe('splitForPrint — cutting', () => {
     expect(r.sections.every((s) => s.fits)).toBe(true);
   });
 
+  it('cuts a plate in thirds that stand on edge, not halves that need cutting again', () => {
+    // Halves are 250 mm square, which no side of a 246 × 246 × 256 bed takes
+    // twice over; thirds are 167 × 250, and stand 250 mm tall.
+    const r = ok(splitForPrint(wasm, [box(500, 250, 10)], { bed: { widthMm: 256, depthMm: 256, heightMm: 256 }, joinery: { kind: 'none' } }));
+    expect(r.sections).toHaveLength(3);
+    expect(r.sections.every((s) => s.fits)).toBe(true);
+  });
+
   it('leaves an L-bracket that already fits alone, and stands it the cheapest way up', () => {
     const soups = [box(120, 40, 10), box(10, 40, 80, [0, 0, 10])];
     const r = ok(splitForPrint(wasm, soups, { bed: bed200, joinery: { kind: 'none' } }));

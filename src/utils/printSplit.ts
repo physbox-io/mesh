@@ -568,19 +568,35 @@ function makePiece(m: Manifold, cutDowns: Vec3[], explode: Vec3, ctx: Ctx): Piec
   return { m, geo, pose: bestPose(geo, cutDowns, ctx), cutDowns, explode };
 }
 
-/** Sections a piece will probably come to, from its bounding box against the bed. */
+const PERMS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+
+/**
+ * Sections a piece will probably come to: its box, square to the world or to
+ * its own principal axes (whichever is tighter, so a piece lying at an angle
+ * is not counted by the box round it), cut into slabs against the bed, with
+ * its sides matched to the bed's whichever way needs the fewest. Matching the
+ * longest side to the longest axis is not always that: a 333 × 250 mm plate
+ * on a 246 × 246 × 256 mm bed is two slabs, standing, not four.
+ */
 function predictedSections(p: Piece, ctx: Ctx): number {
   if (p.pose.fits) return 1;
-  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < p.geo.hull.length; i += 3) {
-    for (let k = 0; k < 3; k++) {
-      lo[k] = Math.min(lo[k], p.geo.hull[i + k]);
-      hi[k] = Math.max(hi[k], p.geo.hull[i + k]);
+  const bed = [ctx.W, ctx.D, ctx.H];
+  let best = Infinity;
+  for (const axes of [AXES.filter((_, i) => i % 2 === 0), principalAxes(p.geo.hull)]) {
+    if (axes.length !== 3) continue;
+    const ext = axes.map((a) => {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i < p.geo.hull.length; i += 3) {
+        const s = a[0] * p.geo.hull[i] + a[1] * p.geo.hull[i + 1] + a[2] * p.geo.hull[i + 2];
+        if (s < lo) lo = s; if (s > hi) hi = s;
+      }
+      return hi - lo;
+    });
+    for (const perm of PERMS) {
+      best = Math.min(best, ext.reduce((n, e, k) => n * Math.max(1, Math.ceil(e / bed[perm[k]] - 1e-9)), 1));
     }
   }
-  const ext = [0, 1, 2].map((k) => hi[k] - lo[k]).sort((a, b) => b - a);
-  const bed = [ctx.W, ctx.D, ctx.H].sort((a, b) => b - a);
-  return Math.max(2, ext.reduce((n, e, k) => n * Math.max(1, Math.ceil(e / bed[k] - 1e-9)), 1));
+  return Math.max(2, best);
 }
 
 /** The pin hole's radius and the inset a pin needs from the edge of a face. */
@@ -618,7 +634,11 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
     if (normals.some((e) => Math.abs(dot(e, u)) > Math.cos(5 * Math.PI / 180))) continue;
     normals.push(u);
   }
-  const usable = Math.max(ctx.W, ctx.D, ctx.H);
+  // A slab as long as each of the bed's sides: the longest is not always the
+  // one to use, since a piece cut to it may then fit no other way (the halves
+  // of a 500 × 250 mm plate on a 246 × 246 × 256 mm bed are 250 mm square and
+  // need cutting again, where thirds stand on edge).
+  const usables = [...new Set([ctx.W, ctx.D, ctx.H])];
   let best: CutChoice | null = null;
 
   for (const n of normals) {
@@ -629,34 +649,36 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
     }
     const extent = hi - lo;
     if (!(extent > 1)) continue;
-    const slabs = Math.max(2, Math.ceil(extent / usable - 1e-9));
-    const slab = extent / slabs;
-    for (let step = -3; step <= 3; step++) {
-      const offset = lo + slab + step * 0.05 * slab;
-      if (offset <= lo + 0.5 || offset >= hi - 0.5) continue;
-      const [posM, negM] = piece.m.splitByPlane(n, offset);
-      const vp = posM.volume(), vn = negM.volume();
-      if (posM.isEmpty() || negM.isEmpty() || vp < SLIVER_SHARE * piece.geo.volume || vn < SLIVER_SHARE * piece.geo.volume) {
-        posM.delete(); negM.delete();
-        continue;
-      }
-      const cs = sliceAt(piece.m, n, offset);
-      const face = judgeFace(cs, ctx);
-      cs.delete();
-      // The pos half's cut face looks back down the normal, and the neg half's along it.
-      const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], add3(piece.explode, n), ctx);
-      const neg = makePiece(negM, [...piece.cutDowns, n], add3(piece.explode, neg3(n)), ctx);
-      const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
-      const support = (pos.pose.fits ? pos.pose.supportMm2 : 0) + (neg.pose.fits ? neg.pose.supportMm2 : 0);
-      // Off the even split only for a reason: a tie goes to the even cut, so
-      // the sections come out the same size rather than one barely fitting.
-      const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area
-        + Math.abs(step) * 0.01 * slab;
-      if (!best || score < best.score) {
-        if (best) { best.pos.m.delete(); best.neg.m.delete(); }
-        best = { n, offset, pos, neg, score };
-      } else {
-        posM.delete(); negM.delete();
+    const slabCounts = [...new Set(usables.map((u) => Math.max(2, Math.ceil(extent / u - 1e-9))))];
+    for (const slabs of slabCounts) {
+      const slab = extent / slabs;
+      for (let step = -3; step <= 3; step++) {
+        const offset = lo + slab + step * 0.05 * slab;
+        if (offset <= lo + 0.5 || offset >= hi - 0.5) continue;
+        const [posM, negM] = piece.m.splitByPlane(n, offset);
+        const vp = posM.volume(), vn = negM.volume();
+        if (posM.isEmpty() || negM.isEmpty() || vp < SLIVER_SHARE * piece.geo.volume || vn < SLIVER_SHARE * piece.geo.volume) {
+          posM.delete(); negM.delete();
+          continue;
+        }
+        const cs = sliceAt(piece.m, n, offset);
+        const face = judgeFace(cs, ctx);
+        cs.delete();
+        // The pos half's cut face looks back down the normal, and the neg half's along it.
+        const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], add3(piece.explode, n), ctx);
+        const neg = makePiece(negM, [...piece.cutDowns, n], add3(piece.explode, neg3(n)), ctx);
+        const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
+        const support = (pos.pose.fits ? pos.pose.supportMm2 : 0) + (neg.pose.fits ? neg.pose.supportMm2 : 0);
+        // Off the even split only for a reason: a tie goes to the even cut, so
+        // the sections come out the same size rather than one barely fitting.
+        const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area
+          + Math.abs(step) * 0.01 * slab;
+        if (!best || score < best.score) {
+          if (best) { best.pos.m.delete(); best.neg.m.delete(); }
+          best = { n, offset, pos, neg, score };
+        } else {
+          posM.delete(); negM.delete();
+        }
       }
     }
   }
