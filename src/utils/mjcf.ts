@@ -663,22 +663,34 @@ export const compileToMJCF = (
 
   const sink = opts.meshFiles;
   sink?.begin();
+  /*
+   * A convex piece goes to MuJoCo as its points alone, and MuJoCo hulls them.
+   * Its faces are V-HACD's (or our hull's after rounding), and one piece in
+   * a painted cat came back with two faces wound against each other: MuJoCo
+   * refused the mesh for "inconsistent orientation", and with it every build
+   * of the scene until the body was decomposed again. A hull MuJoCo makes
+   * for itself cannot be wound wrong, and it hulls every mesh for contact
+   * anyway.
+   */
+  const NO_FACES: number[] = [];
   const meshAsset = (g: SceneGeom): string => {
     const hull = g.maxHullVert !== undefined ? ` maxhullvert="${g.maxHullVert}"` : '';
+    const faces = g.csgDerived === 'collider' ? NO_FACES : g.faces!;
     if (sink) {
       const encoded: { bytes?: Uint8Array } = {};
-      const file = meshFileNames.get(g.vertices!, g.faces!, () => {
-        encoded.bytes = encodeMsh(toMjcfVerts(g.vertices!), g.faces!);
+      const file = meshFileNames.get(g.vertices!, faces, () => {
+        encoded.bytes = encodeMsh(toMjcfVerts(g.vertices!), faces);
         return mshFileName(encoded.bytes);
       });
       if (sink.useFile(file, !!g.stableMesh)) {
         // Encoded only if the worker does not have it already.
-        if (!sink.holds?.(file)) sink.files.set(file, encoded.bytes ?? encodeMsh(toMjcfVerts(g.vertices!), g.faces!));
+        if (!sink.holds?.(file)) sink.files.set(file, encoded.bytes ?? encodeMsh(toMjcfVerts(g.vertices!), faces));
         return `    <mesh name="${xmlAttr(g.name)}"${meshInertia(g)}${hull} file="${file}" />`;
       }
     }
     const verts = toMjcfVerts(g.vertices!);
-    return `    <mesh name="${xmlAttr(g.name)}"${meshInertia(g)}${hull} vertex="${verts.join(' ')}" face="${g.faces!.join(' ')}" />`;
+    const face = faces.length ? ` face="${faces.join(' ')}"` : '';
+    return `    <mesh name="${xmlAttr(g.name)}"${meshInertia(g)}${hull} vertex="${verts.join(' ')}"${face} />`;
   };
 
   const assetXml = meshAssets.length > 0
