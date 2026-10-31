@@ -519,7 +519,12 @@ export function AssemblyPreview({
       const startPos = new THREE.Vector3(), startQ = new THREE.Quaternion();
       start.decompose(startPos, startQ, new THREE.Vector3());
       const firstSection = stage.moving[body].sections[0];
-      const printed = new THREE.Quaternion().setFromRotationMatrix(matrixOf(poseMatrix(sections[firstSection].pose)));
+      // A body of several sections was glued up in an earlier stage and ended
+      // it the way the part goes: it only slides in. One section comes off the
+      // bed, turned the way it printed.
+      const printed = stage.moving[body].sections.length > 1
+        ? startQ.clone()
+        : new THREE.Quaternion().setFromRotationMatrix(matrixOf(poseMatrix(sections[firstSection].pose)));
       const f = local / seg.prelude;
       const ease = f * f * (3 - 2 * f);
       const q = printed.clone().slerp(startQ, ease);
