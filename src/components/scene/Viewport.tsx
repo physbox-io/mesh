@@ -120,6 +120,7 @@ export function Viewport({ threeSceneRef, darkMode, doc, onImportSceneJson }: {
           {isPlaying ? 'Render paused while playing'
             : pathTracePhase === 'waiting' ? 'Render: waiting for the view to settle'
             : pathTracePhase === 'building' ? 'Render: preparing scene'
+            : pathTracePhase === 'compiling' ? 'Render: compiling the tracer'
             : pathTracePhase === 'rendering' ? `Render: ${pathTraceSamples} samples`
             : `Render: done, ${pathTraceSamples} samples`}
         </div>

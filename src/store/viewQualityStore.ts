@@ -56,8 +56,10 @@ export const useViewQuality = create<ViewQualityState>((set) => ({
  * What the path tracer is doing, for the viewport's status pill. Its own store
  * because RenderOnChange redraws on every useViewQuality change, and a sample
  * count written as the image converges would keep the frame loop running.
+ * 'compiling' is the tracer's shader, built once each time Render mode is
+ * turned on; on some GPUs it is the longest wait of all.
  */
-export type PathTracePhase = 'waiting' | 'building' | 'rendering' | 'done';
+export type PathTracePhase = 'waiting' | 'building' | 'compiling' | 'rendering' | 'done';
 
 interface PathTraceStatus {
   phase: PathTracePhase;

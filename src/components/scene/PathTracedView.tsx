@@ -7,6 +7,7 @@ import { useStore } from '../../store/useStore';
 import { useViewQuality, usePathTraceStatus, type PathTracePhase } from '../../store/viewQualityStore';
 import { preToneMappedColor } from '../../utils/neutralToneMapping';
 import { MeshBvhWorkerClient } from '../../utils/meshBvhWorkerClient';
+import { withRgbaColors } from '../../utils/tracerGeometry';
 
 /** How long the view has to hold still before tracing starts. */
 const SETTLE_MS = 350;
@@ -159,6 +160,8 @@ export function PathTracedView({ background }: { background: string }) {
     /** When the last sample was drawn, if it was drawn in the frame before this one. */
     lastSampleAt: 0,
     slowFrames: 0,
+    /** When the tracer's shader was first seen compiling, for the console. */
+    compileStarted: 0,
   });
 
   // The tracer, its denoiser and the floor are made in an effect and held in a
@@ -304,6 +307,20 @@ export function PathTracedView({ background }: { background: string }) {
     }
     s.showing = true;
 
+    // The shader compiles on the GPU driver's own threads; the tracer draws
+    // nothing until it has, so say so rather than look stuck.
+    if (pathTracer.isCompiling) {
+      if (!s.compileStarted) s.compileStarted = now;
+      report('compiling', 0);
+      pathTracer.renderSample();
+      invalidate();
+      return;
+    }
+    if (s.compileStarted) {
+      console.info(`[PathTracedView] tracer compiled in ${Math.round(now - s.compileStarted)} ms`);
+      s.compileStarted = 0;
+    }
+
     const converged = pathTracer.samples >= MAX_SAMPLES;
     // Once converged, a frame drawn for some other reason (the pointer crossing
     // the viewport) only puts the finished image back over the raster one.
@@ -391,7 +408,8 @@ function sceneSignature(bodies: THREE.Mesh[]): number[] {
   for (const mesh of bodies) {
     sig.push(...mesh.matrixWorld.elements);
     const position = mesh.geometry.getAttribute('position');
-    sig.push(mesh.geometry.id, position ? (position as THREE.BufferAttribute).version : -1);
+    const color = mesh.geometry.getAttribute('color') as THREE.BufferAttribute | undefined;
+    sig.push(mesh.geometry.id, position ? (position as THREE.BufferAttribute).version : -1, color ? color.version : -1);
     const material = mesh.material as THREE.MeshStandardMaterial;
     sig.push(materialKey(material), material.version, material.color.r, material.color.g, material.color.b, material.opacity);
     const instanced = mesh as THREE.InstancedMesh;
@@ -459,7 +477,7 @@ function buildTracedScene(
     const material = mesh.material as THREE.MeshStandardMaterial;
     const instanced = mesh as THREE.InstancedMesh;
     if (!instanced.isInstancedMesh) {
-      place(mesh.geometry, material, mesh.matrixWorld);
+      place(withRgbaColors(mesh.geometry), material, mesh.matrixWorld);
       continue;
     }
     // The tracer reads plain meshes only, so each instance becomes one, with
@@ -475,7 +493,7 @@ function buildTracedScene(
         instanceMaterials.push(own);
         instanceMaterial = own;
       }
-      place(mesh.geometry, instanceMaterial, _instanceMatrix);
+      place(withRgbaColors(mesh.geometry), instanceMaterial, _instanceMatrix);
     }
   }
 
