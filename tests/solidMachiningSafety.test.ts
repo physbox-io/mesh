@@ -56,6 +56,25 @@ function pinMoves(gcode: string) {
   return out;
 }
 
+/**
+ * Two pins that mirror onto each other when the block turns over left to
+ * right, each hole wholly in the stock and clear of the channel round a
+ * centred partW x partD rectangle.
+ */
+function expectPinsClear(pins: { x: number; y: number }[], stockW: number, stockD: number, partW: number, partD: number) {
+  const moat = Math.max(3, quick.roughingToolDiaMm * 1.5);
+  const r = 4;
+  expect(pins).toHaveLength(2);
+  expect(pins[0].x + pins[1].x).toBeCloseTo(stockW, 6);
+  expect(pins[0].y).toBeCloseTo(pins[1].y, 6);
+  for (const p of pins) {
+    expect(Math.min(p.x, stockW - p.x, p.y, stockD - p.y)).toBeGreaterThan(r);
+    const dx = Math.max(0, Math.abs(p.x - stockW / 2) - partW / 2);
+    const dy = Math.max(0, Math.abs(p.y - stockD / 2) - partD / 2);
+    expect(Math.hypot(dx, dy) - r).toBeGreaterThanOrEqual(moat);
+  }
+}
+
 describe('Registration pins', () => {
   it('pecks a pin hole the cutter only just fits, at the plunge rate', () => {
     // With the pin as wide as the cutter the helix has no radius, and it was
@@ -82,12 +101,38 @@ describe('Registration pins', () => {
     // An explicit stock 2 x 10 mm wider than part and channel leaves a 10 mm
     // frame; the pin was centred in the 15 mm frame asked for, and an 8 mm
     // hole there runs into the channel.
-    const res = generateSolidMachining(block, {
-      ...quick, sides: 2, stockWidthMm: 30 + 2 * (9.525 + 10), stockDepthMm: 80,
+    // There is room further out, in the corners, and the pins go there.
+    const stockW = 30 + 2 * (9.525 + 10);
+    const res = generateSolidMachining(block, { ...quick, sides: 2, stockWidthMm: stockW, stockDepthMm: 80 });
+    expect(res.success, res.error).toBe(true);
+    expectPinsClear(res.pins, stockW, 80, 30, 30);
+  });
+
+  /*
+   * An 81 mm fish on a 100 mm board: its nose and tail fill the ends of the
+   * frame at mid-depth, where the pins used to be the only place tried, so a
+   * two-sided job warned and dropped them unless the fish shrank to 58 mm.
+   */
+  it('finds room for the pins beside a long part', () => {
+    const long = body([{ type: 'box', size: [0.0405, 0.015, 0.008], pos: [0, 0, 0.008] } as never]);
+    const res = generateSolidMachining(long, {
+      ...quick, sides: 2, stockWidthMm: 100, stockDepthMm: 100, stockThicknessMm: 20,
+    });
+    expect(res.success, res.error).toBe(true);
+    expect(res.warnings.join('\n')).not.toMatch(/registration pin/);
+    expectPinsClear(res.pins, 100, 100, 81, 30);
+    // Far enough apart to hold the block square.
+    expect(Math.abs(res.pins[1].x - res.pins[0].x)).toBeGreaterThan(50);
+  });
+
+  it('says so when there is nowhere for the pins', () => {
+    const long = body([{ type: 'box', size: [0.0405, 0.04, 0.008], pos: [0, 0, 0.008] } as never]);
+    const res = generateSolidMachining(long, {
+      ...quick, sides: 2, stockWidthMm: 100, stockDepthMm: 100, stockThicknessMm: 20,
     });
     expect(res.success, res.error).toBe(true);
     expect(res.pins).toHaveLength(0);
-    expect(res.warnings.join('\n')).toMatch(/registration pin/);
+    expect(res.warnings.join('\n')).toMatch(/registration pins/);
   });
 
   it('shows the pin bores in the preview and counts them in the cut distance', () => {

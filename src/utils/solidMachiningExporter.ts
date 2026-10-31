@@ -1124,24 +1124,46 @@ function generateSolidSides(
     );
   }
   if (twoSided && opts.registrationPins && !endFlush) {
-    const px = [frame / 2, stockW - frame / 2];
-    for (const x of px) {
-      const c = Math.round(x / stepX);
-      const r = Math.round(stockCy / stepY);
-      const k = Math.min(rows - 1, Math.max(0, r)) * cols + Math.min(cols - 1, Math.max(0, c));
-      // The whole hole in the frame with a millimetre to spare, not only its
-      // centre: a stock given narrower than part, channel and frame leaves
-      // less frame than was asked for, and the hole ran into the channel.
-      const clear = dist[k] * res - opts.pinDiaMm / 2;
-      if (frame < opts.pinDiaMm + 2 || !frameMask[k] || clear < moat + 1) {
-        warnings.push(
-          `No room in the frame for a ${opts.pinDiaMm} mm registration pin at X${f(x)}: the frame ` +
-            `needs to be wider than the pin with stock either side of it. Widen the frame or turn pins off.`
-        );
-        pins.length = 0;
-        break;
+    const pinR = opts.pinDiaMm / 2;
+    // Never nearer an edge than the pin in the middle of the end frame.
+    const edgeWall = Math.max(1, frame / 2 - pinR);
+    // The whole hole in the frame with a millimetre to spare, not only its
+    // centre: a stock given narrower than part, channel and frame leaves
+    // less frame than was asked for, and the hole ran into the channel.
+    const fits = (c: number, r: number) => {
+      const x = c * stepX, y = r * stepY;
+      const k = r * cols + c;
+      return frameMask[k] === 1 && dist[k] * res - pinR >= moat + 1 &&
+        Math.min(x, stockW - x, y, stockD - y) - pinR >= edgeWall - 1e-6;
+    };
+    // The block turns over left to right, so a pin at (x, y) lands where its
+    // partner at (W - x, y) was: any such pair registers. The ends of the
+    // frame at mid-depth come first; a long part reaches them (a fish's nose
+    // and tail), so then search the frame for the pair farthest apart, which
+    // is usually in the corners.
+    const mid = Math.min(rows - 1, Math.max(0, Math.round(stockCy / stepY)));
+    const end = Math.min(cols - 1, Math.max(0, Math.round(frame / 2 / stepX)));
+    let best: { c: number; r: number } | null =
+      frame >= opts.pinDiaMm + 2 && fits(end, mid) && fits(cols - 1 - end, mid) ? { c: end, r: mid } : null;
+    // A pair closer than half the block barely holds it square.
+    const maxC = Math.floor((cols - 1) / 4);
+    for (let c = 0; !best && c <= maxC; c++) {
+      let bestR = -1;
+      for (let r = 0; r < rows; r++) {
+        if (!fits(c, r) || !fits(cols - 1 - c, r)) continue;
+        if (bestR < 0 || Math.abs(r - mid) < Math.abs(bestR - mid)) bestR = r;
       }
-      pins.push({ x, y: stockCy });
+      if (bestR >= 0) best = { c, r: bestR };
+    }
+    if (best) {
+      const x = best.c === end ? frame / 2 : best.c * stepX;
+      const y = best.r === mid ? stockCy : best.r * stepY;
+      pins.push({ x, y }, { x: stockW - x, y });
+    } else {
+      warnings.push(
+        `No room in the frame for a pair of ${opts.pinDiaMm} mm registration pins: each needs ` +
+          `${f(moat + 1)} mm of stock between it and the part. Use a longer board or a smaller pin, or turn pins off.`
+      );
     }
   }
 
