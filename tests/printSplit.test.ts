@@ -170,6 +170,22 @@ describe('splitForPrint — joinery', () => {
     }
   });
 
+  it('gives a joint holes both sides when a peg would stand either section off the bed', () => {
+    // Two 100 mm halves on a 100 mm bed: neither has 10 mm to spare for a peg.
+    const bed = { widthMm: 100, depthMm: 30, heightMm: 30 };
+    const r = ok(splitForPrint(wasm, [box(200, 20, 20)], { bed, marginMm: 0, joinery: { kind: 'peg', diameterMm: d, lengthMm: L, clearanceMm: c } }));
+    expect(r.sections).toHaveLength(2);
+    expect(r.sections.every((s) => s.fits)).toBe(true);
+    const joint = r.joints[0];
+    expect(joint.pins.length).toBeGreaterThan(0);
+    expect(joint.pegSide).toBeUndefined();
+    for (const s of r.sections) {
+      expect(s.features.every((f) => f.kind === 'bore')).toBe(true);
+      expect(s.features).toHaveLength(joint.pins.length);
+    }
+    expect(r.warnings.join(' ')).toMatch(/holes on both sides for a loose/);
+  });
+
   it('warns instead of placing a pin where the face is too thin for one', () => {
     const r = ok(splitForPrint(wasm, [box(300, 8, 100)], { bed: bed200, joinery: { kind: 'dowel' } }));
     expect(r.sections.length).toBeGreaterThanOrEqual(2);

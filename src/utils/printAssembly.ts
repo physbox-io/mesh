@@ -265,10 +265,13 @@ export function buildAssemblyPlan(split: SplitOk): AssemblyPlan {
     const label = `Cut ${t.cut + 1}: section${movingSections.length > 1 ? 's' : ''} ${movingSections.map((s) => s + 1).join(', ')} onto ${fixedSections.map((s) => s + 1).join(', ')}`;
 
     // Dowels into their holes on the seated side, first.
-    const dowelHosts = j.kind === 'dowel' ? joints.flatMap((jt) => jt.pins.map(() => jt.neg)) : [];
-    const dowelJoints = j.kind === 'dowel' ? joints.flatMap((jt) => jt.pins.map(() => split.joints.indexOf(jt))) : [];
-    const dowels = j.kind === 'dowel'
-      ? joints.flatMap((jt) => jt.pins.map((p) => {
+    // A peg split's joint with no peg side has holes both sides (printSplit),
+    // so it is doweled like a dowel split's.
+    const doweled = joints.filter((jt) => j.kind === 'dowel' || (j.kind === 'peg' && !jt.pegSide));
+    const dowelHosts = doweled.flatMap((jt) => jt.pins.map(() => jt.neg));
+    const dowelJoints = doweled.flatMap((jt) => jt.pins.map(() => split.joints.indexOf(jt)));
+    const dowels = doweled.length
+      ? doweled.flatMap((jt) => jt.pins.map((p) => {
         const inward = cut.normal.map((v) => -v) as Vec3;
         // Bottomed in a hole half a dowel and a little deep: its centre sits
         // that little way in from the face.

@@ -161,7 +161,10 @@ export interface SplitJoint {
   areaMm2: number;
   /** Pin centres on the cut plane, body frame, metres. */
   pins: Vec3[];
-  /** For a peg joint, which side carries the pegs. */
+  /**
+   * For a peg joint, which side carries the pegs. Absent on a pinned joint of
+   * a peg split means neither could: it has holes both sides, for a dowel.
+   */
   pegSide?: 'neg' | 'pos';
 }
 
@@ -1202,16 +1205,29 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
         const before = bestPose(geoOf(final[s]), leafInfo[s].cutDowns, ctx);
         const after = bestPose(geoOf(withPeg), leafInfo[s].cutDowns, ctx);
         const cost = !after.fits ? Infinity : after.cost - (before.fits ? before.cost : 0);
-        return { withPeg, cost };
+        return { withPeg, cost, fitted: before.fits };
       };
       const onNeg = extraCost(joint.neg, n);
       const onPos = extraCost(joint.pos, neg3(n));
+      // A section with half a peg's length to spare on neither side: standing
+      // pegs on either would push it off the bed. That joint gets a hole each
+      // side instead, for a loose dowel the peg's size, and says so.
+      if (onNeg.cost === Infinity && onPos.cost === Infinity && (onNeg.fitted || onPos.fitted)) {
+        onNeg.withPeg.delete(); onPos.withPeg.delete();
+        bore(joint.neg, neg3(n));
+        bore(joint.pos, n);
+        ctx.warnings.push(`Sections ${joint.neg + 1} and ${joint.pos + 1}: a peg would stand either of them off the bed, so their joint has holes on both sides for a loose Ø${joinery.diameterMm} × ${joinery.lengthMm} mm dowel (print one, or cut one).`);
+        return;
+      }
       const pegNeg = onNeg.cost <= onPos.cost;
       const [pegS, holeS, out] = pegNeg ? [joint.neg, joint.pos, n] : [joint.pos, joint.neg, neg3(n)];
       replace(final, pegS, pegNeg ? onNeg.withPeg : onPos.withPeg);
       (pegNeg ? onPos : onNeg).withPeg.delete();
       const { u: pu } = planeAxes(out);
       for (const p of at) {
+        // The peg's root is sunk into its own face: a hole drilled later into
+        // that section, from another face, keeps clear of it.
+        drilled.push({ section: pegS, at: p, axis: neg3(out), depth: PEG_SINK_MM, radius: joinery.diameterMm / 2 });
         features[pegS].push({ kind: 'peg', at: scale3(p, 1 / MM), axis: out, radius: joinery.diameterMm / 2 / MM, depth: joinery.lengthMm / 2 / MM, joint: ji });
         colliders[pegS].push({
           role: 'pin',

@@ -67,6 +67,16 @@ describe('assembly in MuJoCo', () => {
     expect(report.ok).toBe(true);
   }, 60_000);
 
+  it('dowels a peg split\'s joint that had no room for a peg', () => {
+    const r = splitForPrint(wasm, [box(200, 20, 20)], { bed: { widthMm: 100, depthMm: 30, heightMm: 30 }, marginMm: 0, joinery: { kind: 'peg' } });
+    if (!r.ok) throw new Error(r.error);
+    expect(r.joints[0].pegSide).toBeUndefined();
+    const plan = buildAssemblyPlan(r as Extract<SplitResult, { ok: true }>);
+    expect(plan.stages.map((s) => s.kind)).toEqual(['dowels', 'join']);
+    const report = runAssembly(mj, plan, compile);
+    expect(report.ok).toBe(true);
+  }, 60_000);
+
   it('stands a part off its seat by about a pin length when a hole is 2 mm out', () => {
     const r = split(box(300, 100, 100), 'dowel');
     const join = buildAssemblyPlan(r).stages[1];
