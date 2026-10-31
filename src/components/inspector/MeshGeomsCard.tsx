@@ -16,10 +16,10 @@ export function MeshGeomsCard({ node: selectedNode }: { node: SceneNode }) {
   const [simplifyRatio, setSimplifyRatio] = useState(0.5);
   const [meshSimplifierError, setMeshSimplifierError] = useState<string | null>(null);
 
-  const handleSimplifyMesh = useCallback((g: SceneGeom, ownerId: string) => {
+  const handleSimplifyMesh = useCallback(async (g: SceneGeom, ownerId: string) => {
     try {
       setMeshSimplifierError(null);
-      const { vertices: uniqueVerts, faces, renderVertices: newRenderVerts } = simplifyGeomMesh(g, simplifyRatio);
+      const { vertices: uniqueVerts, faces, renderVertices: newRenderVerts } = await simplifyGeomMesh(g, simplifyRatio);
 
       const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
       patchGeom(newScene.nodes, ownerId, g.name, {
