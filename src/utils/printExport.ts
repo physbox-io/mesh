@@ -61,7 +61,7 @@ export interface PrintExportOptions {
   format: PrintFormat;
   /** Bodies to export, with everything below them. Absent or empty: every body. */
   ids?: string[];
-  /** One file per body rather than one file holding them all. */
+  /** One file per body rather than one file holding them all; a section's stands the way it prints. */
   separate?: boolean;
   /**
    * Lay the parts out on the bed (3MF only, with `bed`): sections made by Split
@@ -242,7 +242,9 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
   const files = groups.map((group) => {
     const mm = plated
       ? layoutSetsOnBed(group.map((p) => p.volumes.map((v) => (p.turn ? rotatePoints(p.turn, v.tris) : v.tris))), bed!, margin).flatMap((p) => p.sets)
-      : toBedMm(group.flatMap((p) => p.volumes.map((v) => v.tris)));
+      // A file of its own stands a section the way it prints; together, the
+      // parts keep their places relative to each other.
+      : toBedMm(group.flatMap((p) => p.volumes.map((v) => (options.separate && p.turn ? Array.from(rotatePoints(p.turn, v.tris)) : v.tris))));
     // Names are unique per body but not once lowercased and stripped.
     let name = options.separate ? safeName(group[0].name) : plated ? `${base}_plate` : base;
     const seen = used.get(name) ?? 0;

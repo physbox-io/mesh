@@ -8,6 +8,7 @@ import type { SceneNode } from '../types/scene';
 import type { NoteCard } from '../utils/noteCards';
 import { exportThreeMf, type ThreeMfMesh } from '../utils/threeMfExporter';
 import { exportPrintFiles } from '../utils/printExport';
+import { zipStore } from '../utils/zipStore';
 import { downloadBlob } from '../utils/downloadBlob';
 import { exportBaseName } from '../utils/exportBaseName';
 
@@ -24,13 +25,54 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
 
   const baseName = useCallback(() => exportBaseName(noteCards, activePreset), [noteCards, activePreset]);
 
-  const exportStl = useCallback(() => {
+  const exportWholeSceneStl = useCallback(() => {
     withExportGroup('Export STL', (exportGroup) => {
       const exporter = new STLExporter();
       const result = exporter.parse(exportGroup, { binary: true }) as DataView;
       downloadBlob(new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' }), `${baseName()}.stl`);
     });
   }, [withExportGroup, baseName]);
+
+  // An STL is one soup: the split sections in it stand assembled, as big as the
+  // part that did not fit, and the size prompt scales them all by one section.
+  // So sections go out as a file each, stood the way they print, at true size.
+  const exportStl = useCallback(() => {
+    const { sceneGraph: graph } = useStore.getState();
+    let posed = 0;
+    const walk = (nodes: SceneNode[]) => {
+      for (const n of nodes) {
+        if (n.printPose) posed++;
+        walk(n.children || []);
+      }
+    };
+    walk(graph.nodes);
+    if (!posed) { exportWholeSceneStl(); return; }
+    openDialog({
+      title: `Export ${posed} split section${posed === 1 ? '' : 's'} as STLs to print?`,
+      confirmLabel: 'One STL each',
+      cancelLabel: 'Export scene as-is',
+      body: (
+        <>
+          <p>Each part goes in a file of its own, at true size, and each split section is stood the way it prints. They come in one zip.</p>
+          <p>Choose “Export scene as-is” for the whole scene in one STL, in its current pose.</p>
+        </>
+      ),
+      onConfirm: () => {
+        closeDialog();
+        const result = exportPrintFiles(graph, { format: 'stl', separate: true });
+        if (!result.files.length) {
+          showNotice('Nothing to export', 'There are no printable parts in the scene to export.');
+          return;
+        }
+        const zip = zipStore(result.files.map((f) => ({ path: f.name, data: f.bytes })));
+        downloadBlob(new Blob([zip.buffer as ArrayBuffer], { type: 'application/zip' }), `${baseName()}_stl.zip`);
+      },
+      onCancel: () => {
+        closeDialog();
+        exportWholeSceneStl();
+      },
+    });
+  }, [exportWholeSceneStl, baseName, openDialog, closeDialog, showNotice]);
 
   /**
    * The same model, in the format that can carry what it looks like.

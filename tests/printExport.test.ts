@@ -231,6 +231,18 @@ describe('the plate', () => {
     expect(Math.min(...xs(exportPrintFiles(scene, { format: '3mf', bed, marginMm: 7 })))).toBeCloseTo(7, 3);
   });
 
+  it('with separate, an STL a body, a section stood the way it prints', () => {
+    const result = exportPrintFiles(plateScene(), { format: 'stl', separate: true });
+    expect(result.files.map((f) => f.name)).toEqual(['section.stl', 'cube.stl']);
+    // Binary STL: 80-byte header, count, then 50 bytes a triangle (normal, three corners).
+    const bytes = result.files[0].bytes;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const zs: number[] = [];
+    for (let t = 0; t < view.getUint32(80, true); t++) for (let c = 0; c < 3; c++) zs.push(view.getFloat32(84 + t * 50 + 12 + c * 12 + 8, true));
+    // Stood on its side: the 20 mm X is its height, as on the plate.
+    expect(Math.max(...zs) - Math.min(...zs)).toBeCloseTo(20, 3);
+  });
+
   it('with separate, one plate file a body, each stood the way it prints', () => {
     const result = exportPrintFiles(plateScene(), { format: '3mf', bed, separate: true });
     expect(result.plated).toBe(true);
