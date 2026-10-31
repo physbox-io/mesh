@@ -310,3 +310,14 @@ function wedgeSoup(): number[] {
   for (const [w, x, y, z] of quads) out.push(...p[w], ...p[x], ...p[y], ...p[w], ...p[y], ...p[z]);
   return out;
 }
+
+describe('a groove deeper than the base allows', () => {
+  it('says how deep it was made, and why', () => {
+    const shallow = buildPourBox(wasm, cylinderSoup(10, 20), { baseMm: 4, grooveMm: 5 });
+    expect(shallow.report.grooveMm).toBe(3);
+    expect(shallow.report.warnings.some((w) => /groove is 3 mm deep, not 5 mm/.test(w))).toBe(true);
+    const asked = buildPourBox(wasm, cylinderSoup(10, 20), { baseMm: 6, grooveMm: 4 });
+    expect(asked.report.grooveMm).toBe(4);
+    expect(asked.report.warnings.some((w) => /groove/.test(w))).toBe(false);
+  });
+});

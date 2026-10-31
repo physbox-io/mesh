@@ -99,6 +99,8 @@ export interface PourBoxReport {
    */
   pourDepthMm: number;
   sleeveHeightMm: number;
+  /** The groove's depth as built: grooveMm, less if the base is too thin for it. */
+  grooveMm: number;
   sleeveFootprintMm: [number, number];
   baseFootprintMm: [number, number];
   siliconeMm3: number;
@@ -227,6 +229,11 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
   const wall = Math.max(0.8, o.wallMm);
   const clear = Math.max(0, o.clearanceMm);
   const groove = Math.max(0.5, Math.min(o.grooveMm, o.baseMm - 1));
+  if (Math.abs(groove - o.grooveMm) > 1e-9) {
+    warnings.push(
+      `The groove is ${+groove.toFixed(2)} mm deep, not ${o.grooveMm} mm: it must leave 1 mm of the ${o.baseMm} mm base under it, so thicken the base for a deeper one.`,
+    );
+  }
 
   let zMin = Infinity, zTop = -Infinity, topAt: [number, number] = [0, 0];
   let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
@@ -336,6 +343,7 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
       fillZMm: +fillZ.toFixed(3),
       pourDepthMm: +(fillZ - (clear > 0 ? sleeveBottom : zMin)).toFixed(2),
       sleeveHeightMm: +(sleeveTop - sleeveBottom).toFixed(2),
+      grooveMm: +groove.toFixed(2),
       sleeveFootprintMm: extent(outer),
       baseFootprintMm: extent(baseOutline),
       siliconeMm3: Math.round(siliconeMm3),
