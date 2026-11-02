@@ -165,3 +165,16 @@ export function useDfmReport(scene: SceneGraph | null, process: DfmProcess | nul
 export function useStructuralWeakSpots(scene: SceneGraph | null, enabled: boolean): WeakSpot[] | null {
   return useAnalysis<WeakSpot[]>(scene, enabled ? WEAK_SPOTS_KEY : null, { type: 'WEAK_SPOTS' });
 }
+
+/**
+ * The DFM report as a promise, for what is not a component (the MCP bridge).
+ * The queue drops a job for one scene when another scene's arrives, so the
+ * open DFM panel's next edit can drop this one: asked again then, twice at most.
+ */
+export async function dfmReportFor(scene: SceneGraph, process: DfmProcess, bench: DfmBenchArgs): Promise<DfmReport | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const report = await request(scene, dfmKey(process, bench), { type: 'DFM', process, bench });
+    if (report) return report as DfmReport;
+  }
+  return null;
+}

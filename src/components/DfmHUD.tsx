@@ -8,6 +8,7 @@ import { type WeakSpot } from '../utils/printAnalysis';
 import { useDfmReport, useStructuralWeakSpots } from '../utils/dfmWorkerClient';
 import { materialSpec } from '../utils/feedsAndSpeeds';
 import { filamentSpec } from '../utils/filaments';
+import { useCastDialog } from '../store/castDialogStore';
 
 /**
  * What the DFM overlay says, in words, beside the heat map that says it in
@@ -131,9 +132,12 @@ export function DfmHUD() {
 
   // The machine lens is not a setting: it follows the bench.
   const lens = dfmEnabled ? dfmLensFor(machineTarget) : null;
+  // What the Mold dialog's Rigid tab last poured: the casting lens's thinnest
+  // section is the material's (epoxy fills a millimetre, plaster three).
+  const castMaterial = useCastDialog((s) => s.materialByTab.rigid);
   const bench = useMemo(
-    () => ({ material, filament, stock, printBed, nodeId: selectedNodeId }),
-    [material, filament, stock, printBed, selectedNodeId],
+    () => ({ material, filament, stock, printBed, nodeId: selectedNodeId, ...(castMaterial ? { castMaterial } : {}) }),
+    [material, filament, stock, printBed, selectedNodeId, castMaterial],
   );
 
   const open = dfmEnabled && !panel.minimized;

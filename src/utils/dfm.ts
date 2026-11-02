@@ -37,6 +37,7 @@ import { MAX_AVAILABLE_REACH_DIAMETERS, STANDARD_BIT_DIAS } from './reliefCarveE
 import { sampleColumns } from './partColumns';
 import { squaredDistanceTransform } from './heightmapMesh';
 import { overhangDeg, supportArea } from './printSupport';
+import { castMaterial, type CastMaterialId } from './castMaterials';
 import type { SceneGraph, SceneNode } from '../types/scene';
 
 export type DfmProcess = 'print' | 'cnc' | 'cast';
@@ -75,7 +76,19 @@ export interface DfmLimits {
    * nozzle, this one is whether the remaining material holds together.
    */
   cncMinWallMm: number;
+  /**
+   * Thinnest section a casting keeps, mm: the larger of what the poured
+   * material fills (castMaterials' minSectionMm) and what a printed mold or
+   * pattern reproduces (PRINTED_DETAIL_MM).
+   */
+  castMinSectionMm: number;
 }
+
+/**
+ * The finest detail a printed mold or pattern holds, mm: two 0.4 mm beads.
+ * A 0.6 mm spoke in the master is a slot the nozzle cannot draw in the mold.
+ */
+export const PRINTED_DETAIL_MM = 0.8;
 
 /**
  * HOW LOUD ANY OF THIS IS ALLOWED TO BE.
@@ -150,6 +163,8 @@ export interface DfmBench {
    * the question is per part.
    */
   nodeId?: string | null;
+  /** What is poured, for the casting lens's thinnest section (default epoxy). */
+  castMaterial?: CastMaterialId;
 }
 
 /**
@@ -175,6 +190,7 @@ export function dfmLimitsFor(bench: DfmBench): DfmLimits {
     stockMm: bench.stock ?? null,
     bedMm: bench.printBed ?? null,
     cncMinWallMm: mat.minWallMm,
+    castMinSectionMm: Math.max(PRINTED_DETAIL_MM, castMaterial(bench.castMaterial ?? 'epoxy').minSectionMm),
   };
 }
 
@@ -942,6 +958,22 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
     });
   }
 
+  // Too thin to cast: below what the material fills, or what a printed mold
+  // can draw. Spokes and fins a hair wide came out of a mold as nothing.
+  const thin = thinnestWall(tris, limits.castMinSectionMm);
+  if (thin && thin.mm < limits.castMinSectionMm && thin.share > T.thinCellShare) {
+    findings.push({
+      id: 'cast_thin_section',
+      process: 'cast',
+      severity: thin.mm < limits.castMinSectionMm / 2 ? 'critical' : 'warning',
+      title: `Sections down to ${thin.mm.toFixed(1)} mm`,
+      detail: `The thinnest part is ${thin.mm.toFixed(2)} mm; a cast keeps about ${limits.castMinSectionMm} mm here (the material, or a printed mold's ${PRINTED_DETAIL_MM} mm detail).`,
+      fix: `Thicken it to ${limits.castMinSectionMm} mm, or cast in a finer material.`,
+      position: thin.at,
+      metric: thin.mm,
+    });
+  }
+
   return {
     findings,
     heat,
@@ -1110,6 +1142,7 @@ export function analyseDfm(
       filament: bench.filament ?? DEFAULT_FILAMENT,
       stock: bench.stock ?? null,
       printBed: bench.printBed ?? null,
+      castMaterial: bench.castMaterial,
     }),
     ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
   };
@@ -1217,6 +1250,7 @@ function analyseDfmAsPlaced(
       filament: bench.filament ?? DEFAULT_FILAMENT,
       stock: bench.stock ?? null,
       printBed: bench.printBed ?? null,
+      castMaterial: bench.castMaterial,
     }),
     ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
   };

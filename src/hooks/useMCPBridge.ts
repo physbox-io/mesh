@@ -19,6 +19,7 @@ import { castCommands } from './mcp/castCommands';
 import { partBuildCommands } from './mcp/partBuildCommands';
 import { machiningCommands } from './mcp/machiningCommands';
 import { cutCommands } from './mcp/cutCommands';
+import { dfmCommands } from './mcp/dfmCommands';
 import { viewCommands } from './mcp/viewCommands';
 import { objectCommands } from './mcp/objectCommands';
 import { sceneCommands } from './mcp/sceneCommands';
@@ -56,6 +57,7 @@ const COMMANDS: McpCommands = {
   ...viewCommands,
   ...machiningCommands,
   ...cutCommands,
+  ...dfmCommands,
   ...partBuildCommands,
   ...castCommands,
   ...breakageCommands,

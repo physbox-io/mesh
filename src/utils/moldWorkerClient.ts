@@ -41,6 +41,7 @@ import {
   type CastMaterialId,
 } from './castMaterials';
 import { stlToMesh } from './stlMesh';
+import { dfmReportFor } from './dfmWorkerClient';
 import type { SimulationPart } from './simulatedPart';
 import { appendSolidTriangles, collectSceneTriangles } from './contourSliceExporter';
 import { soupVolume, type PourBoxOptions } from './siliconeMold';
@@ -235,6 +236,18 @@ export class MoldWorkerClient {
     this.sceneSent = null;
     this.stopped = null;
   }
+}
+
+/**
+ * The master's sections a cast will not keep, as warnings: below what the
+ * poured material fills, or what a printed mold draws (dfm.ts,
+ * cast_thin_section). A mold of a gear with 0.4 mm tooth tips said nothing.
+ */
+async function thinSectionWarnings(scene: SceneGraph, material: CastMaterialId | undefined): Promise<string[]> {
+  const report = await dfmReportFor(scene, 'cast', { castMaterial: material ?? 'epoxy' }).catch(() => null);
+  return (report?.findings ?? [])
+    .filter((f) => f.id === 'cast_thin_section' && !f.passed)
+    .map((f) => `${f.title}: ${f.detail} ${f.fix}`);
 }
 
 /** What a mold body records about its master (see SceneNode.simulation.mold). */
@@ -711,7 +724,7 @@ export async function runMcpMoldSimulation(params: {
       ...(castRes.deviation ? { deviationMm: castRes.deviation } : {}),
       ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
       cavityComponents: castRes.cavityComponents,
-      warnings: [...moldRes.warnings, ...castRes.warnings],
+      warnings: [...moldRes.warnings, ...castRes.warnings, ...(await thinSectionWarnings(scene, moldOpts.castMaterial))],
     };
   }
 
@@ -762,7 +775,7 @@ export async function runMcpMoldSimulation(params: {
     pieces: moldRes.parts.map((p) => ({ name: p.name, material: p.material })),
     volumeMm3: Math.round(added.volumeMm3),
     ...(moldRes.liner ? { liner: moldRes.liner } : {}),
-    warnings: moldRes.warnings,
+    warnings: [...moldRes.warnings, ...(await thinSectionWarnings(scene, moldOpts.castMaterial))],
     // The two-material print file; its bytes only when the caller keeps them.
     ...(threeMf && describeFiles
       ? {
