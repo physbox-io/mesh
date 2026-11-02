@@ -131,12 +131,12 @@ export function applyCloth(rt: ClothRuntime, model: Model, data: Data, wind: [nu
   }
   const windy = wind[0] !== 0 || wind[1] !== 0 || wind[2] !== 0;
   const pos: Float64Array = data.flexvert_xpos;
-  if (!windy) { rt.prev = null; return; }
   // Vertex velocity from the last step's positions: the slide joints a flex
   // vertex moves on are in its parent's frame, and this is simpler and exact
   // enough for a pressure.
   const dt = rt.prev && t > rt.prevTime ? t - rt.prevTime : 0;
   const prev = rt.prev;
+  if (!windy) { rt.prev = null; return; }
   for (const f of rt.flexes) {
     const E = f.elems;
     for (let e = 0; e < E.length; e += 3) {

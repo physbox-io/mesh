@@ -9,6 +9,7 @@ import { meshCloth } from '../src/utils/cloth/clothMesh';
 import { contactBody } from '../src/utils/contactBodies';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
 import type { ClothSpec } from '../src/types/cloth';
+import { shadeSailPreset } from '../src/presets/clothPresets';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let mj: any;
@@ -147,4 +148,19 @@ describe('cloth', () => {
       vec.delete();
     }
   });
+
+  // Twenty seconds, calm and in a breeze: at a 4 ms step and lighter damping
+  // the preset sail was steady for ten and then tore itself apart.
+  it.each([[0, 0], [6, 2]])('keeps the shade sail steady for 20 s in wind %d,%d', (wx, wy) => {
+    const { model, data, rt } = run(shadeSailPreset, 19.5, [wx, wy, 0]);
+    const before = Float64Array.from(data.flexvert_xpos);
+    while (data.time < 20) { data.xfrc_applied.fill(0); applyCloth(rt, model, data, [wx, wy, 0], 1.225); mj.mj_step(model, data); }
+    let moved = 0;
+    for (let i = 0; i < before.length; i += 3) moved += Math.hypot(data.flexvert_xpos[i] - before[i], data.flexvert_xpos[i + 1] - before[i + 1], data.flexvert_xpos[i + 2] - before[i + 2]);
+    const speed = moved / (before.length / 3) / 0.5;
+    const loads = clothTieLoads(rt, data).map((l) => l.newtons);
+    console.log('sail 20 s wind', wx, wy, 'speed', (speed * 1000).toFixed(1), 'mm/s loads', loads.map((n) => n.toFixed(0)));
+    expect(speed).toBeLessThan(0.01);
+    for (const n of loads) { expect(n).toBeGreaterThan(30); expect(n).toBeLessThan(1000); }
+  }, 300_000);
 });

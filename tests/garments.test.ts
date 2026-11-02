@@ -40,12 +40,19 @@ describe.each<GarmentKind>(['tshirt', 'dress', 'skirt'])('%s', (garment) => {
     mj.mj_forward(model, data);
     const rt = initClothRuntime(mj, model)!;
     const t0 = performance.now();
-    while (data.time < 3) {
+    // Long enough to see it come to rest, not just to see the seams close:
+    // at a 4 ms step both passed at 3 s while the shirt never stopped moving.
+    let before: Float64Array | null = null;
+    while (data.time < 6) {
+      if (!before && data.time >= 5.5) before = Float64Array.from(data.flexvert_xpos);
       data.xfrc_applied.fill(0);
       applyCloth(rt, model, data, [0, 0, 0], 1.225);
       mj.mj_step(model, data);
     }
-    const ms = (performance.now() - t0) / (3 / model.opt.timestep);
+    const ms = (performance.now() - t0) / (6 / model.opt.timestep);
+    let moved = 0;
+    for (let v = 0; v < model.nflexvert; v++) moved += Math.hypot(...[0, 1, 2].map((k) => data.flexvert_xpos[3 * v + k] - before![3 * v + k]));
+    const speed = moved / model.nflexvert / 0.5;
     const mesh = meshCloth(g.cloth!);
     const bySeam: Record<string, number> = {};
     for (const s of mesh.stitches) {
@@ -56,10 +63,13 @@ describe.each<GarmentKind>(['tshirt', 'dress', 'skirt'])('%s', (garment) => {
     }
     const z: number[] = [];
     for (let v = 0; v < model.nflexvert; v++) z.push(data.flexvert_xpos[3 * v + 2]);
-    console.log(garment, `${model.nflexvert} verts, ${ms.toFixed(1)} ms/step`, 'z', Math.min(...z).toFixed(2), Math.max(...z).toFixed(2),
+    console.log(garment, `${model.nflexvert} verts, ${ms.toFixed(1)} ms/step, ${(speed * 1000).toFixed(1)} mm/s`, 'z', Math.min(...z).toFixed(2), Math.max(...z).toFixed(2),
       Object.fromEntries(Object.entries(bySeam).map(([k, v]) => [k, Math.round(v * 1000)])));
     expect(z.every(Number.isFinite)).toBe(true);
-    for (const [name, gap] of Object.entries(bySeam)) expect(gap, name).toBeLessThan(0.025);
+    // Sewn: every seam within a few mm (the eased neckline is the loosest).
+    for (const [name, gap] of Object.entries(bySeam)) expect(gap, name).toBeLessThan(name === 'neckline' ? 0.008 : 0.005);
+    // At rest: under 5 mm/s on average.
+    expect(speed).toBeLessThan(0.005);
     // Still on the form: the top of it is up near the shoulders or waist, not on the floor.
     const L = bodyLandmarks(form.bodyForm!);
     expect(Math.max(...z)).toBeGreaterThan((garment === 'skirt' ? L.hipZ : L.bustZ));

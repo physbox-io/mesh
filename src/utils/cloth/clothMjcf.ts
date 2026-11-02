@@ -23,9 +23,13 @@ export const CLOTH_FLEX_PREFIX = 'clothflex_';
 export const CLOTH_OPTION = {
   // MuJoCo will not integrate flex elasticity under implicit or implicitfast.
   integrator: 'discrete',
-  // Cloth is the costliest thing in the scene by far, and a 4 ms step drapes
-  // as well as 1 ms at a quarter of the cost (spike/cloth bench).
-  timestep: 0.004,
+  // 2 ms, not the 4 ms the spike used. At 4 ms the integrator fed energy into
+  // a sewn garment faster than anything took it out: a t-shirt on its form
+  // still moved at ~80 mm/s after 8 s and a sail tore itself apart in ~15 s.
+  // At 2 ms, with stitches at twice the stiffness (they cannot go below two
+  // steps), the shirt comes to rest (~1 mm/s) and its seams close to ~1 mm.
+  // Half the speed; tests/garments.test.ts holds both.
+  timestep: 0.002,
   extra: 'solver="CG" iterations="20" tolerance="1e-5"',
 };
 
@@ -38,6 +42,8 @@ export const CLOTH_OPTION = {
  */
 const STIFF_TIE = 'solimp="0.99 0.9999 0.001 0.5 2"';
 const STITCH = 'solimp="0.95 0.99 0.001 0.5 2"';
+/** Two steps: as stiff as MuJoCo lets a constraint be. */
+const SEAM_SOLREF = `${2 * 0.002} 1`;
 
 export const flexName = (body: string, piece: string) => `${body}__${piece}`;
 export const flexVertexBody = (body: string, piece: string, i: number) => `${flexName(body, piece)}_${i}`;
@@ -77,7 +83,7 @@ export function clothXml(node: SceneNode, bodyName: string, xmlAttr: (s: string)
       element="${m.tris.join(' ')}">
       <edge damping="0.002"/>
       <elasticity young="${+stableYoung(mat, mesh.spacing * (p.spacingScale ?? 1), p.stiffnessScale ?? 1).toPrecision(4)}" poisson="${mat.poisson}" thickness="${mat.thickness}" damping="${mat.damping}" elastic2d="${mat.bending ? 'both' : 'stretch'}"/>
-      <contact contype="2" conaffinity="1" condim="3" friction="${mat.friction}" solref="0.008 1" selfcollide="${spec.selfCollide ? 'auto' : 'none'}" margin="${f(radius)}"/>
+      <contact contype="2" conaffinity="1" condim="3" friction="${mat.friction}" solref="0.02 2" selfcollide="${spec.selfCollide ? 'auto' : 'none'}" margin="${f(radius)}"/>
     </flexcomp>`;
   }).join('');
 
@@ -87,7 +93,7 @@ export function clothXml(node: SceneNode, bodyName: string, xmlAttr: (s: string)
     const eq = `cloth_${bodyName}_stitch${i}`;
     const a = flexVertexBody(bodyName, s.a[0], s.a[1]);
     const b = flexVertexBody(bodyName, s.b[0], s.b[1]);
-    equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}" body2="${xmlAttr(b)}" anchor="0 0 0" solref="0.008 1" ${STITCH}/>`);
+    equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}" body2="${xmlAttr(b)}" anchor="0 0 0" solref="${SEAM_SOLREF}" ${STITCH}/>`);
     numerics.push({ name: CLOTH_SEW_PREFIX + eq, data: [0, 0, 0, sewTime] });
   });
   for (const t of mesh.ties) {
@@ -96,7 +102,7 @@ export function clothXml(node: SceneNode, bodyName: string, xmlAttr: (s: string)
       const eq = clothTieName(bodyName, t.tie, k);
       const a = flexVertexBody(bodyName, t.piece, v);
       const to = tie.to ? ` body2="${xmlAttr(tie.to)}"` : '';
-      equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}"${to} anchor="0 0 0" solref="0.008 1" ${STIFF_TIE}/>`);
+      equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}"${to} anchor="0 0 0" solref="${SEAM_SOLREF}" ${STIFF_TIE}/>`);
       if (tie.to) excludes.push([a, tie.to]);
       if (tie.anchor && t.verts.length === 1) numerics.push({ name: CLOTH_SEW_PREFIX + eq, data: [...tie.anchor.slice(0, 3), sewTime] });
     });

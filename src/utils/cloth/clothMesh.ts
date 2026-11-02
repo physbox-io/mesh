@@ -12,21 +12,22 @@ import type {
 } from '../../types/cloth';
 
 /*
- * Damping 0.05 throughout: at MuJoCo's lighter defaults a tensioned sheet on a
- * fine mesh rang itself apart, the corner tie of a 3 m sail swinging 40 cm
- * round its post, where 0.05 settled every fabric here. Cloth is heavily
- * damped in life too: it does not ring.
+ * Damping 0.2 throughout. At MuJoCo's lighter defaults a tensioned sheet on a
+ * fine mesh rang itself apart, and at 0.05 a shade sail still grew a flutter
+ * that tore it loose after ~15 s, calm or windy. Damping does not change where
+ * cloth comes to rest (the sail's corner loads were the same), only whether
+ * it gets there. Cloth is heavily damped in life too: it does not ring.
  */
 export const CLOTH_MATERIALS: Record<ClothMaterialName, ClothMaterial> = {
   // 160 g/m2 cotton jersey, a t-shirt.
-  jersey: { arealDensity: 0.16, young: 1e6, poisson: 0.2, thickness: 0.002, bending: true, damping: 0.05, friction: 0.6, windCd: 1.2 },
+  jersey: { arealDensity: 0.16, young: 1e6, poisson: 0.2, thickness: 0.002, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2 },
   // Shirting or poplin: about twice as heavy for its stretch, and stiffer.
-  woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.05, friction: 0.5, windCd: 1.2 },
+  woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.2, friction: 0.5, windCd: 1.2 },
   // Heavy cotton duck.
-  canvas: { arealDensity: 0.4, young: 1e7, poisson: 0.25, thickness: 0.001, bending: true, damping: 0.05, friction: 0.7, windCd: 1.2 },
+  canvas: { arealDensity: 0.4, young: 1e7, poisson: 0.25, thickness: 0.001, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2 },
   // Knitted HDPE shade cloth. Open, so it takes less of the wind; a membrane
   // with no bending stiffness worth paying for.
-  shadeCloth: { arealDensity: 0.185, young: 1e7, poisson: 0.3, thickness: 0.0008, bending: false, damping: 0.05, friction: 0.6, windCd: 0.8 },
+  shadeCloth: { arealDensity: 0.185, young: 1e7, poisson: 0.3, thickness: 0.0008, bending: false, damping: 0.2, friction: 0.6, windCd: 0.8 },
 };
 
 /**
@@ -226,16 +227,27 @@ export function meshCloth(spec: ClothSpec): ClothMesh {
   (spec.seams ?? []).forEach((s, seam) => {
     const a = chain(s.a, pieces), b = chain(s.b, pieces);
     const [long, short, swap] = a.length >= b.length ? [a, b, false] : [b, a, true];
-    // Every point of the longer side to the nearest fraction on the shorter,
-    // so the longer is gathered (eased) onto it.
-    let j = 0;
-    for (const q of long) {
-      while (j < short.length - 1 && Math.abs(short[j + 1].t - q.t) <= Math.abs(short[j].t - q.t)) j++;
-      const r = short[j];
+    // One stitch per point of the shorter side, to the point at the nearest
+    // fraction of the longer, each used once: the longer side's spare points
+    // gather between stitches, which is what easing is. Stitching every point
+    // of the longer side instead put two neighbours onto one point, asking the
+    // cloth between them to shrink to nothing; it never could, and the seam
+    // fought it forever, jittering and holding the seam open.
+    let from = 0;
+    short.forEach((r, k) => {
+      // Leave enough of the longer side for the points still to come.
+      const last = long.length - (short.length - k);
+      let best = from;
+      for (let i = from; i <= last; i++) {
+        if (Math.abs(long[i].t - r.t) < Math.abs(long[best].t - r.t)) best = i;
+        else if (long[i].t > r.t) break;
+      }
+      from = best + 1;
+      const q = long[best];
       const [x, y] = swap ? [r, q] : [q, r];
-      if (x.piece === y.piece && x.id === y.id) continue;
+      if (x.piece === y.piece && x.id === y.id) return;
       stitches.push({ a: [x.piece, x.id], b: [y.piece, y.id], seam });
-    }
+    });
   });
   const ties: ClothMesh['ties'] = [];
   (spec.ties ?? []).forEach((t, tie) => {
