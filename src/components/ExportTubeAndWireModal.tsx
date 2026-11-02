@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import {
     X,
     Wrench,
@@ -18,8 +18,8 @@ import {
     breakdownPipeFrame,
 } from '../utils/tubeAndWireExporter';
 import { simulatePipeFrame } from '../utils/tubeSimulation';
-import { defaultMaxSpanMm, frameBodyInScene, WHOLE_SCENE, type FramePlacement, type FrameStyle } from '../utils/pipeSkeleton';
-import { loadManifold } from '../utils/sculptCut';
+import { defaultMaxSpanMm, WHOLE_SCENE, type FramePlacement, type FrameStyle } from '../utils/pipeSkeleton';
+import { frameBodyOffThread, prewarmPipeFrame } from '../utils/pipeFrameClient';
 import { ExportSubjectLine } from './ExportSubjectLine';
 
 /**
@@ -80,6 +80,9 @@ export function ExportTubeAndWireModal({
     const [framePosts, setFramePosts] = useState(true);
     const [framePlacement, setFramePlacement] = useState<FramePlacement>('replace');
     const [frameMessage, setFrameMessage] = useState<string | null>(null);
+    const [framing, setFraming] = useState(false);
+    // Manifold loads in the worker while the dialog is read.
+    useEffect(() => { if (isOpen) prewarmPipeFrame(); }, [isOpen]);
 
     if (!isOpen) return null;
 
@@ -90,20 +93,20 @@ export function ExportTubeAndWireModal({
     };
 
     const handleFrameShape = async () => {
-        if (!hasShapes) return;
-        const state = useStore.getState();
+        if (!hasShapes || framing) return;
         const name = selectedBody?.name ?? 'the scene';
+        setFraming(true);
         try {
-            const wasm = await loadManifold();
-            const { nodes, skeleton } = frameBodyInScene(state.sceneGraph, selectedBody?.id ?? WHOLE_SCENE, {
+            const { nodes, skeleton } = await frameBodyOffThread(useStore.getState().sceneGraph, selectedBody?.id ?? WHOLE_SCENE, {
                 maxSpanMm: frameSpanMm ?? pipeDefaultSpanMm,
                 diagonals: frameDiagonals,
                 posts: framePosts,
                 placement: framePlacement,
                 style: frameStyle,
                 pipeStandardId,
-                wasm,
             });
+            // Read again: the scene may have moved on while the worker ran.
+            const state = useStore.getState();
             state.prepareForDiscreteChange();
             const nextScene: SceneGraph = { ...state.sceneGraph, nodes };
             state.updateScene(nextScene);
@@ -119,6 +122,7 @@ export function ExportTubeAndWireModal({
         } catch (e) {
             setFrameMessage((e as Error).message);
         }
+        setFraming(false);
         setTimeout(() => setFrameMessage(null), 5000);
     };
 
@@ -206,11 +210,11 @@ export function ExportTubeAndWireModal({
                                 </div>
                                 <button
                                     onClick={() => void handleFrameShape()}
-                                    disabled={!hasShapes}
+                                    disabled={!hasShapes || framing}
                                     className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors"
                                 >
-                                    <Box className="w-4 h-4" />
-                                    Build Pipe Frame
+                                    <Box className={`w-4 h-4 ${framing ? 'animate-pulse' : ''}`} />
+                                    {framing ? 'Framing…' : 'Build Pipe Frame'}
                                 </button>
                                 {frameMessage && (
                                     <div className="text-xs text-emerald-600 dark:text-emerald-400">{frameMessage}</div>

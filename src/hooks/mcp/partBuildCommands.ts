@@ -20,11 +20,12 @@ import {
 import { buildMechanism, type MechanismRequest } from '../../utils/buildMechanism';
 import { adjustmentWarnings } from '../../utils/mechanismAdjustments';
 import {
-  PIPE_STANDARDS, breakdownPipeFrame, buildAllCustomHubNodes, withoutHubsAt,
+  PIPE_STANDARDS, breakdownPipeFrame, withoutHubsAt,
   generatePipeStructurePreset, type PipeFrameOptions, type PipeStandardId,
   type PipeStructurePresetId,
 } from '../../utils/tubeAndWireExporter';
-import { frameBodyInScene, WHOLE_SCENE } from '../../utils/pipeSkeleton';
+import { WHOLE_SCENE } from '../../utils/pipeSkeleton';
+import { buildHubsOffThread, frameBodyOffThread } from '../../utils/pipeFrameClient';
 import { findNodeInScene } from './bridgeUtils';
 import { settleScene } from './settleScene';
 import type { McpCommands, McpHandler } from './types';
@@ -431,7 +432,7 @@ const breakdownPipeFrameCommand: McpHandler = async (msg) => {
   const bd = breakdownPipeFrame(useStore.getState().sceneGraph, msg as Partial<PipeFrameOptions>);
   let addedHubIds: string[] = [];
   if (msg.addPrintableHubs === true) {
-    const hubNodes = buildAllCustomHubNodes(bd);
+    const hubNodes = await buildHubsOffThread(bd);
     addedHubIds = hubNodes.map((h) => h.id);
     const nextNodes = [...withoutHubsAt(useStore.getState().sceneGraph.nodes, hubNodes), ...hubNodes];
     await settleScene(nextNodes, { replacesScene: false });
@@ -470,14 +471,13 @@ export const partBuildCommands: McpCommands = {
     if (!body) return { ok: false, error: `No body '${bodyId}'.` };
     const pipeStandardId = (typeof msg.pipeStandardId === 'string' && msg.pipeStandardId in PIPE_STANDARDS
       ? msg.pipeStandardId : 'pvc_sch40_3_4') as PipeStandardId;
-    const { nodes, skeleton, added } = frameBodyInScene(store.sceneGraph, body.id, {
+    const { nodes, skeleton, added } = await frameBodyOffThread(store.sceneGraph, body.id, {
       maxSpanMm: typeof msg.maxSpanMm === 'number' ? msg.maxSpanMm : undefined,
       diagonals: msg.diagonals === true,
       posts: msg.posts !== false,
       placement: msg.placement === 'beside' ? 'beside' : 'replace',
       style: msg.style === 'edges' || msg.style === 'centrelines' ? msg.style : 'auto',
       pipeStandardId,
-      wasm: await loadManifold(),
     });
     store.prepareForDiscreteChange();
     // Adds to the scene: its note card and settings stay.
