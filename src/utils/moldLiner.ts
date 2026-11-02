@@ -41,6 +41,7 @@ import type { CsgContext, HalfFeatures, MoldExportResult, MoldMeshHalf } from '.
 import { castMaterial, castMaterialWarnings, type CastMaterialId } from './castMaterials';
 import { applyDraft, erodeDepth, type DraftMode } from './moldDraft';
 import { linerPair, pairSoftenC, type LinerPair, type LinerPairId } from './linerMaterials';
+import { fittedBlock, type Outline } from './moldOutline';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
 /** Said of a water-soluble liner; an ABS + HIPS mold takes water-based casts. */
@@ -81,7 +82,7 @@ export function castMaterialCheck(material: CastMaterialId, castVolumeMl: number
   if (m.metal) return { error: METAL_REFUSAL, warnings: [] };
   // Hours in a bath melt ice and chocolate before any liner is gone, and
   // chocolate does not belong in IPA or limonene either.
-  if (material === 'water' || material === 'chocolate') return { error: MELTS_REFUSAL(m.label), warnings: [] };
+  if (m.meltsInBath) return { error: MELTS_REFUSAL(m.label), warnings: [] };
   if (m.waterBased && pair.waterSoluble) return { error: WATER_BASED_REFUSAL, warnings: [] };
   return { warnings: castMaterialWarnings(material, castVolumeMl, { pla: true, softenC: pairSoftenC(pair), name: pair.label }) };
 }
@@ -378,6 +379,7 @@ function buildHalfPair(
   rawDepth: Float64Array,
   blockHeight: number,
   features: HalfFeatures,
+  outline?: Outline | null,
 ): HalfPair {
   const { wasm, grid, moldWidthMm, moldDepthMm, partingZ } = ctx;
   let part = flipped ? rawPart.transform(flipAbout(partingZ)) : rawPart.translate([0, 0, -partingZ]);
@@ -405,7 +407,7 @@ function buildHalfPair(
   const envelope = envelopeDepth(reach, grid, ctx.skinMm, blockHeight - MIN_FLOOR_MM);
   const env = envelopeSolid(wasm, grid, envelope);
   const cube = wasm.Manifold.cube([moldWidthMm, moldDepthMm, blockHeight], false);
-  const block = cube.translate([-moldWidthMm / 2, -moldDepthMm / 2, -blockHeight]);
+  const block = fittedBlock(wasm, cube.translate([-moldWidthMm / 2, -moldDepthMm / 2, -blockHeight]), outline, -blockHeight, 0);
   cube.delete();
 
   // Inside the block only: the face-cutting stub above it is no part of the casting.
@@ -504,9 +506,9 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   }
 
   const clamshell = opts.moldType === 'clamshell';
-  const base = buildHalfPair(ctx, rawPart, ctx.detailIsAbove, ctx.rawBaseDepth, ctx.baseBlockHeight, ctx.baseFeatures);
+  const base = buildHalfPair(ctx, rawPart, ctx.detailIsAbove, ctx.rawBaseDepth, ctx.baseBlockHeight, ctx.baseFeatures, ctx.outlines?.base);
   const lid = clamshell
-    ? buildHalfPair(ctx, rawPart, !ctx.detailIsAbove, ctx.rawLidDepth, ctx.lidBlockHeight, ctx.lidFeatures)
+    ? buildHalfPair(ctx, rawPart, !ctx.detailIsAbove, ctx.rawLidDepth, ctx.lidBlockHeight, ctx.lidFeatures, ctx.outlines?.lid)
     : null;
   rawPart.delete();
 

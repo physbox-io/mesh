@@ -63,6 +63,11 @@ export interface CastMaterial {
   mix?: CastMix;
   /** It cures in water, so it dissolves a PVA liner. */
   waterBased: boolean;
+  /**
+   * It melts at room temperature, or is food: hours in a liner's solvent
+   * bath ruin it, so no dissolvable liner takes it.
+   */
+  meltsInBath?: true;
   /** Poured into a sand or investment mold, from a printed pattern. */
   metal: boolean;
   /** It can make a silicone mold itself, and it sticks to one. */
@@ -98,11 +103,11 @@ export const CAST_MATERIALS: CastMaterial[] = [
   },
   { id: 'wax', label: 'Wax', minSectionMm: 1.5, densityGcm3: 0.9, pourC: 70, waterBased: false, metal: false, silicone: false, rgba: [0.98, 0.94, 0.82, 0.9], warnings: [] },
   {
-    id: 'chocolate', label: 'Chocolate', minSectionMm: 2.0, densityGcm3: 1.3, pourC: 31, waterBased: false, metal: false, silicone: false, rgba: [0.36, 0.2, 0.1, 1],
+    id: 'chocolate', label: 'Chocolate', minSectionMm: 2.0, densityGcm3: 1.3, pourC: 31, meltsInBath: true, waterBased: false, metal: false, silicone: false, rgba: [0.36, 0.2, 0.1, 1],
     warnings: [],
   },
   {
-    id: 'water', label: 'Water (ice)', minSectionMm: 2.0, densityGcm3: 0.92, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
+    id: 'water', label: 'Water (ice)', minSectionMm: 2.0, densityGcm3: 0.92, meltsInBath: true, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
     warnings: [],
   },
   { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
