@@ -19,8 +19,10 @@ import type {
  * it gets there. Cloth is heavily damped in life too: it does not ring.
  */
 export const CLOTH_MATERIALS: Record<ClothMaterialName, ClothMaterial> = {
-  // 160 g/m2 cotton jersey, a t-shirt.
-  jersey: { arealDensity: 0.16, young: 1e6, poisson: 0.2, thickness: 0.002, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2 },
+  // 160 g/m2 cotton jersey, a t-shirt: 0.8 mm, as jersey is. Modelled 2 mm
+  // thick (the same stretch at 2.5x less modulus), it was 15x stiffer to
+  // bend, could not follow the form into the armpit, and chattered there.
+  jersey: { arealDensity: 0.16, young: 2.5e6, poisson: 0.2, thickness: 0.0008, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2 },
   // Shirting or poplin: about twice as heavy for its stretch, and stiffer.
   woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.2, friction: 0.5, windCd: 1.2 },
   // Heavy cotton duck.

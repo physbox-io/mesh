@@ -40,6 +40,15 @@ export const CLOTH_OPTION = {
  * and as rigid as a tie, hundreds of them closing at once flung the whole
  * garment off the form (tests/garments.test.ts).
  */
+/**
+ * Cloth against solids: impedance from 0.9 to 0.999 over the first 4 mm, so
+ * contact firms up quickly and fabric does not sink into what it lies on. At
+ * MuJoCo's defaults a fitted dress sank up to 13 mm into its form and showed
+ * the form through it in patches; a near-rigid wall (0.1 mm ramp) stopped
+ * that but set the cloth chattering. Measured, tests/garments.test.ts.
+ */
+const CLOTH_CONTACT_IMP = 'solimp="0.9 0.999 0.004 0.5 2"';
+
 const STIFF_TIE = 'solimp="0.99 0.9999 0.001 0.5 2"';
 const STITCH = 'solimp="0.95 0.99 0.001 0.5 2"';
 /** Two steps: as stiff as MuJoCo lets a constraint be. */
@@ -83,7 +92,7 @@ export function clothXml(node: SceneNode, bodyName: string, xmlAttr: (s: string)
       element="${m.tris.join(' ')}">
       <edge damping="0.002"/>
       <elasticity young="${+stableYoung(mat, mesh.spacing * (p.spacingScale ?? 1), p.stiffnessScale ?? 1).toPrecision(4)}" poisson="${mat.poisson}" thickness="${mat.thickness}" damping="${mat.damping}" elastic2d="${mat.bending ? 'both' : 'stretch'}"/>
-      <contact contype="2" conaffinity="1" condim="3" friction="${mat.friction}" solref="0.02 2" selfcollide="${spec.selfCollide ? 'auto' : 'none'}" margin="${f(radius)}"/>
+      <contact contype="2" conaffinity="1" condim="3" friction="${mat.friction}" solref="0.02 2" ${CLOTH_CONTACT_IMP} selfcollide="${spec.selfCollide ? 'auto' : 'none'}" margin="${f(radius)}"/>
     </flexcomp>`;
   }).join('');
 

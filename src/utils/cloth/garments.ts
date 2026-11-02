@@ -26,7 +26,10 @@ const edgePts = (edges: ClothEdge[], id: string) => edges.find((e) => e.id === i
 
 export const GARMENT_DEFAULTS: Record<GarmentKind, Required<Omit<GarmentDraft, 'garment' | 'fitTo'>>> = {
   tshirt: { ease: 0.1, length: 0, flare: 1, sleeve: 0.2, material: 'jersey', rgba: [0.23, 0.48, 0.83, 1] },
-  dress: { ease: 0.06, length: 0.55, flare: 1.5, sleeve: 0, material: 'woven', rgba: [0.75, 0.22, 0.3, 1] },
+  // A knit dress with 14 cm of ease. These patterns have no darts, so a
+  // fitted woven bodice cannot wrap a bust: at 6 cm of ease it pulled its own
+  // side seams 11-15 mm open, and held shut it was dragged into the form.
+  dress: { ease: 0.14, length: 0.55, flare: 1.5, sleeve: 0, material: 'jersey', rgba: [0.75, 0.22, 0.3, 1] },
   skirt: { ease: 0.04, length: 0.5, flare: 1.6, sleeve: 0, material: 'woven', rgba: [0.2, 0.25, 0.35, 1] },
 };
 
@@ -163,26 +166,11 @@ export function draftGarment(draft: GarmentDraft, form: BodyFormMeasurements): C
     }
   }
 
-  if (kind === 'tshirt') {
-    // A rib neckband cut short of the neckline, so it pulls the neck in flat.
-    const neckline = 2 * (polyLen(edgePts(front, 'neckR')) + polyLen(edgePts(back, 'neckR')));
-    const Lb = neckline * 0.85, Wb = 0.03 * s;
-    pieces.push({
-      name: 'band', rgba: [0.92, 0.92, 0.94, 1], spacingScale: 0.5, stiffnessScale: 0.1,
-      edges: [
-        { id: 'bottom', pts: [[0, 0], [Lb, 0]] },
-        { id: 'endR', pts: [[Lb, 0], [Lb, Wb]] },
-        { id: 'top', pts: [[Lb, Wb], [0, Wb]] },
-        { id: 'endL', pts: [[0, Wb], [0, 0]] },
-      ],
-      // u = 0 at the centre back, running first toward -x.
-      placement: { kind: 'wrap', origin: [0, 0, L.hpsZ], axis: [0, 0, 1], ref: [0, 1, 0], radius: Lb / (2 * Math.PI) },
-    });
-    sew('neckline',
-      [{ piece: 'back', edge: 'neckL' }, { piece: 'front', edge: 'neckL', reversed: true }, { piece: 'front', edge: 'neckR', reversed: true }, { piece: 'back', edge: 'neckR' }],
-      [{ piece: 'band', edge: 'bottom' }]);
-    sew('bandEnds', [{ piece: 'band', edge: 'endR' }], [{ piece: 'band', edge: 'endL', reversed: true }]);
-  }
+  // No neckband yet: the neckline is left as a raw edge. A band starts as a
+  // flat ring at shoulder height while the neckline dips 9 cm at the front,
+  // so sewing had to drag and twist it into place, and whether the shirt
+  // then settled or chattered flipped with a 3% change in its length. It
+  // comes back when it can be placed along the neckline's own curve.
   return { pieces, seams, material: d.material, spacing: 0.04, draft: { ...draft } };
 }
 

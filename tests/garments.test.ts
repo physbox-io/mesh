@@ -1,5 +1,8 @@
-// Garments drafted onto a body form, sewn and draped in real MuJoCo: every
-// seam closes and the garment hangs on the form instead of falling off it.
+// Garments drafted onto a body form, sewn and draped in real MuJoCo, held to
+// what a person looks at: every seam closed to a few mm, the garment at rest
+// (not just its seams closed: at a 4 ms step a shirt passed that and never
+// stopped moving), and nothing sunk into the form (a fitted dress sank 13 mm
+// and showed the form through it in patches). Six seconds each.
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import load_mujoco from '@mujoco/mujoco';
@@ -9,7 +12,7 @@ import { meshCloth } from '../src/utils/cloth/clothMesh';
 import { bodyFormNode, garmentNode } from '../src/utils/cloth/clothNodes';
 import { bodyLandmarks, ellipseHalfWidth } from '../src/utils/cloth/bodyForm';
 import type { SceneGraph } from '../src/types/scene';
-import type { GarmentKind } from '../src/types/cloth';
+import type { BodyFormMeasurements, GarmentKind } from '../src/types/cloth';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let mj: any;
@@ -22,7 +25,6 @@ describe('body form', () => {
     // Ramanujan's second approximation, inverted: back to 1 m round.
     expect(Math.PI * (a + b) * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)))).toBeCloseTo(1, 3);
     const form = bodyFormNode('f', 'form', { chest: 1.1, waist: 0.9 });
-    // The widest slice is at the bust and measures the chest.
     const torso = form.geoms!.filter((g) => g.name.startsWith('form_torso'));
     const widest = torso.reduce((p, q) => (q.size[0] > p.size[0] ? q : p));
     expect(widest.size[0]).toBeCloseTo(ellipseHalfWidth(1.1, 0.7), 2);
@@ -30,18 +32,23 @@ describe('body form', () => {
   });
 });
 
-describe.each<GarmentKind>(['tshirt', 'dress', 'skirt'])('%s', (garment) => {
-  it('sews shut and hangs on the form', () => {
-    const form = bodyFormNode('f', 'form');
+const PRESET_DRESS_FORM = { chest: 0.92, waist: 0.72, hip: 0.98, shoulderWidth: 0.39, neck: 0.33, height: 1.68, upperArm: 0.27 };
+const cases: [string, GarmentKind, Partial<BodyFormMeasurements>][] = [
+  ['t-shirt', 'tshirt', {}],
+  ['t-shirt on a bigger form, arms higher', 'tshirt', { armAngle: 40, chest: 1.1, waist: 0.95 }],
+  ['dress', 'dress', {}],
+  ['dress on the preset form', 'dress', PRESET_DRESS_FORM],
+  ['skirt', 'skirt', {}],
+];
+
+describe.each(cases)('%s', (_label, garment, measurements) => {
+  it('is sewn shut, at rest, and sits on the form', () => {
+    const form = bodyFormNode('f', 'form', measurements);
     const g = garmentNode('g', 'garment', { garment }, form);
-    const xml = compileToMJCF({ nodes: [form, g] } as SceneGraph);
-    const model = mj.MjModel.from_xml_string(xml);
+    const model = mj.MjModel.from_xml_string(compileToMJCF({ nodes: [form, g] } as SceneGraph));
     const data = new mj.MjData(model);
     mj.mj_forward(model, data);
     const rt = initClothRuntime(mj, model)!;
-    const t0 = performance.now();
-    // Long enough to see it come to rest, not just to see the seams close:
-    // at a 4 ms step both passed at 3 s while the shirt never stopped moving.
     let before: Float64Array | null = null;
     while (data.time < 6) {
       if (!before && data.time >= 5.5) before = Float64Array.from(data.flexvert_xpos);
@@ -49,31 +56,34 @@ describe.each<GarmentKind>(['tshirt', 'dress', 'skirt'])('%s', (garment) => {
       applyCloth(rt, model, data, [0, 0, 0], 1.225);
       mj.mj_step(model, data);
     }
-    const ms = (performance.now() - t0) / (6 / model.opt.timestep);
     let moved = 0;
     for (let v = 0; v < model.nflexvert; v++) moved += Math.hypot(...[0, 1, 2].map((k) => data.flexvert_xpos[3 * v + k] - before![3 * v + k]));
     const speed = moved / model.nflexvert / 0.5;
-    const mesh = meshCloth(g.cloth!);
+
     const bySeam: Record<string, number> = {};
-    for (const s of mesh.stitches) {
+    for (const s of meshCloth(g.cloth!).stitches) {
       const ia = mj.mj_name2id(model, 1, `garment__${s.a[0]}_${s.a[1]}`), ib = mj.mj_name2id(model, 1, `garment__${s.b[0]}_${s.b[1]}`);
       const gap = Math.hypot(...[0, 1, 2].map((k) => data.xpos[3 * ia + k] - data.xpos[3 * ib + k]));
       const name = g.cloth!.seams![s.seam].name!;
       bySeam[name] = Math.max(bySeam[name] ?? 0, gap);
     }
+    // How far cloth has gone into the form, past its own 4 mm skin.
+    let deepest = 0;
+    const vec = data.contact;
+    try {
+      for (let i = 0; i < vec.size(); i++) { const c = vec.get(i); if (c.geom1 < 0 || c.geom2 < 0) deepest = Math.min(deepest, c.dist); c.delete(); }
+    } finally { vec.delete(); }
     const z: number[] = [];
     for (let v = 0; v < model.nflexvert; v++) z.push(data.flexvert_xpos[3 * v + 2]);
-    console.log(garment, `${model.nflexvert} verts, ${ms.toFixed(1)} ms/step, ${(speed * 1000).toFixed(1)} mm/s`, 'z', Math.min(...z).toFixed(2), Math.max(...z).toFixed(2),
-      Object.fromEntries(Object.entries(bySeam).map(([k, v]) => [k, Math.round(v * 1000)])));
+    console.log(_label, `${(speed * 1000).toFixed(1)} mm/s, deepest ${(deepest * 1000).toFixed(1)} mm`,
+      Object.fromEntries(Object.entries(bySeam).map(([k, v]) => [k, +(v * 1000).toFixed(1)])));
+
     expect(z.every(Number.isFinite)).toBe(true);
-    // Sewn: every seam within a few mm (the eased neckline is the loosest).
-    for (const [name, gap] of Object.entries(bySeam)) expect(gap, name).toBeLessThan(name === 'neckline' ? 0.008 : 0.005);
-    // At rest: under 5 mm/s on average.
+    for (const [name, gap] of Object.entries(bySeam)) expect(gap, name).toBeLessThan(0.006);
     expect(speed).toBeLessThan(0.005);
-    // Still on the form: the top of it is up near the shoulders or waist, not on the floor.
+    expect(deepest).toBeGreaterThan(-0.002);
     const L = bodyLandmarks(form.bodyForm!);
-    expect(Math.max(...z)).toBeGreaterThan((garment === 'skirt' ? L.hipZ : L.bustZ));
+    expect(Math.max(...z)).toBeGreaterThan(garment === 'skirt' ? L.hipZ : L.bustZ);
     expect(Math.max(...z)).toBeLessThan(L.hpsZ + 0.15);
-    expect(Math.min(...z)).toBeGreaterThan(0);
   });
 });

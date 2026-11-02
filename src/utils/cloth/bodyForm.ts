@@ -137,8 +137,14 @@ export function bodyFormGeoms(m: BodyFormMeasurements, prefix: string): SceneGeo
     const z = top - i * step;
     const [c, k] = at(z);
     const a = ellipseHalfWidth(c, k);
-    // The end slices taller, to round off the top of the chest and the seat.
-    const half = i === 0 || i === N - 1 ? step * 1.3 : step * 0.9;
+    // Each slice 2.5 steps tall, so they overlap deeply. At 0.9 each pair met
+    // in a groove ~17% of the radius deep (3 cm at the waist), and cloth lying
+    // across a groove is pinched between two solids: it sank into the form and
+    // chattered there. At 2.5 the grooves are ~2%, and the waist still narrows
+    // (a slice two steps off reaches only 60% of its width there). The end
+    // slices are kept short so they do not stand out above the shoulders or
+    // below the seat.
+    const half = i === 0 || i === N - 1 ? step * 1.2 : step * 2.5;
     add(`torso${i}`, { type: 'ellipsoid', size: [r4(a), r4(a * k), r4(half)], pos: [0, 0, r4(z)] });
   }
 
