@@ -44,7 +44,9 @@ import { linerPair, pairSoftenC, type LinerPair, type LinerPairId } from './line
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
 /** Said of a water-soluble liner; an ABS + HIPS mold takes water-based casts. */
-export const WATER_BASED_REFUSAL = 'Water-based casts dissolve a water-soluble liner while they cure; use an ABS + HIPS liner, the rigid mold or a silicone one.';
+export const WATER_BASED_REFUSAL = 'Water-based casts dissolve a water-soluble liner while they cure; use an ABS + HIPS or PLA + PVB liner, the rigid mold or a silicone one.';
+export const MELTS_REFUSAL = (label: string) =>
+  `${label} melts before a liner dissolves, and a solvent bath is no place for food; use a silicone mold.`;
 export const METAL_REFUSAL = 'Metal is poured into sand or investment, not a printed mold; make a Sand or Lost PLA pattern instead.';
 export const NO_MANIFOLD_REFUSAL = "Couldn't load the geometry engine; reload the page and try again.";
 
@@ -77,6 +79,9 @@ export function castMaterialCheck(material: CastMaterialId, castVolumeMl: number
   const m = castMaterial(material);
   const pair = linerPair(pairId);
   if (m.metal) return { error: METAL_REFUSAL, warnings: [] };
+  // Hours in a bath melt ice and chocolate before any liner is gone, and
+  // chocolate does not belong in IPA or limonene either.
+  if (material === 'water' || material === 'chocolate') return { error: MELTS_REFUSAL(m.label), warnings: [] };
   if (m.waterBased && pair.waterSoluble) return { error: WATER_BASED_REFUSAL, warnings: [] };
   return { warnings: castMaterialWarnings(material, castVolumeMl, { pla: true, softenC: pairSoftenC(pair), name: pair.label }) };
 }

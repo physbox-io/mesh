@@ -492,7 +492,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                   className="text-xs px-2 py-1 rounded-md bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700"
                 >
                   {LINER_PAIRS.map((p) => (
-                    <option key={p.id} value={p.id}>{p.label} ({p.waterSoluble ? 'water' : 'limonene'})</option>
+                    <option key={p.id} value={p.id}>{p.label} ({p.waterSoluble ? 'water' : p.liner.name === 'PVB' ? 'IPA' : 'limonene'})</option>
                   ))}
                 </select>
               )}

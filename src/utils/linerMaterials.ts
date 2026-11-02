@@ -7,10 +7,10 @@
 // estimate said "warm water, 8 h", and a water-based cast was refused because
 // it would dissolve the PVA. A printer loaded with ABS and HIPS dissolves its
 // liner in d-limonene instead, which plaster and concrete do not touch, and
-// PETG's shell takes a hotter pour than PLA's. So the pair is chosen, and
-// every figure follows from it.
+// PETG's shell takes a hotter pour than PLA's, and PVB goes in IPA. So the
+// pair is chosen, and every figure follows from it.
 
-export type LinerPairId = 'pla_pva' | 'pla_bvoh' | 'petg_pva' | 'abs_hips';
+export type LinerPairId = 'pla_pva' | 'pla_bvoh' | 'petg_pva' | 'abs_hips' | 'pla_pvb';
 
 export interface LinerFilament {
   /** As a slicer names it: 'PLA', 'PVA'. */
@@ -68,6 +68,15 @@ export const LINER_PAIRS: LinerPair[] = [
     shell: { name: 'ABS', densityGcm3: 1.04, softenC: 95 },
     liner: { name: 'HIPS', densityGcm3: 1.04, softenC: 95 },
     solvent: 'd-limonene', waterSoluble: false, dissolveMmPerHour: 0.5,
+  },
+  {
+    // PVB (PolySmooth and the like) dissolves in isopropyl alcohol, which PLA
+    // shrugs off and plaster or concrete do not mind either. Work it in a
+    // ventilated place, away from flame.
+    id: 'pla_pvb', label: 'PLA + PVB',
+    shell: { name: 'PLA', densityGcm3: 1.24, softenC: 60 },
+    liner: { name: 'PVB', densityGcm3: 1.08, softenC: 65 },
+    solvent: 'isopropyl alcohol (IPA, 99%), ventilated and away from flame', waterSoluble: false, dissolveMmPerHour: 0.5,
   },
 ];
 

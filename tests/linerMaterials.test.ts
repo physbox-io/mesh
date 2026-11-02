@@ -52,6 +52,15 @@ describe('liner pairs', () => {
     expect(res.success).toBe(true);
   });
 
+  it('takes PVB, dissolved in IPA, and keeps ice and chocolate out of every liner', () => {
+    expect(linerPair('pla_pvb').solvent).toMatch(/isopropyl/);
+    expect(castMaterialCheck('concrete', 50, 'pla_pvb').error).toBeUndefined();
+    for (const pair of ['pla_pva', 'abs_hips', 'pla_pvb'] as const) {
+      expect(castMaterialCheck('chocolate', 50, pair).error).toMatch(/melts/);
+      expect(castMaterialCheck('water', 50, pair).error).toMatch(/melts/);
+    }
+  });
+
   it('warns of a hot pour against the pair, not always against PLA', () => {
     expect(castMaterialCheck('wax', 50, 'pla_pva').warnings.join(' ')).toMatch(/60 °C/);
     expect(castMaterialCheck('wax', 50, 'abs_hips').warnings.join(' ')).not.toMatch(/softening/);
