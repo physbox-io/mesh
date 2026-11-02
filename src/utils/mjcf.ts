@@ -7,7 +7,10 @@ import { FLOOR_CONTACT, PRINT_CONTACT_TIME } from './contactClasses';
 import { prepareScene } from './mjcfPrepare';
 import { collectMeshAssets, meshAssetsXml } from './mjcfMeshAssets';
 import { constraintsXml } from './mjcfConstraints';
-import { buildNode } from './mjcfBody';
+import { buildNode, setClothXml } from './mjcfBody';
+import { xmlAttr } from './xmlAttr';
+import { CLOTH_OPTION, clothXml, hasCloth, type ClothXml } from './cloth/clothMjcf';
+import type { SceneNode } from '../types/scene';
 
 /*
  * The scene graph compiled to MuJoCo's MJCF. The graph, not the XML, is the
@@ -66,6 +69,28 @@ export const compileToMJCF = (
   // Before the bodies: it writes into their joints.
   const extras = constraintsXml(nodes, breaks);
 
+  // Cloth (utils/cloth): worked out now, with every name final. Its stitches
+  // and ties go in their own <equality>, <contact> and <custom> sections,
+  // which MuJoCo reads as if they were one with the rest.
+  const clothByNode = new Map<SceneNode, ClothXml>();
+  const withCloth = hasCloth(nodes);
+  const collectCloth = (list: SceneNode[]) => {
+    for (const n of list) {
+      if (n.cloth) clothByNode.set(n, clothXml(n, n.name || n.id || 'body', xmlAttr));
+      collectCloth(n.children || []);
+    }
+  };
+  if (withCloth) collectCloth(nodes);
+  setClothXml(clothByNode);
+  const clothParts = [...clothByNode.values()];
+  const clothEquality = clothParts.flatMap((c) => c.equality);
+  const clothExcludes = clothParts.flatMap((c) => c.excludes);
+  const clothNumerics = clothParts.flatMap((c) => c.numerics);
+  const clothXmlSections =
+    (clothEquality.length ? `\n  <equality>${clothEquality.map((l) => `\n    ${l}`).join('')}\n  </equality>` : '') +
+    (clothExcludes.length ? `\n  <contact>${clothExcludes.map(([p, q]) => `\n    <exclude body1="${xmlAttr(p)}" body2="${xmlAttr(q)}" />`).join('')}\n  </contact>` : '') +
+    (clothNumerics.length ? `\n  <custom>${clothNumerics.map((n) => `\n    <numeric name="${xmlAttr(n.name)}" data="${n.data.map((v) => +v.toPrecision(6)).join(' ')}" />`).join('')}\n  </custom>` : '');
+
   // Contact time constant. MuJoCo will not go below twice the timestep, and at
   // 0.002 s a part resting under gravity sinks about g*t^2 = 0.04 mm into what
   // it rests on — against 4 mm at the standard 0.02. That is the difference
@@ -90,7 +115,10 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
 ` : hasSubMillimetreMovingBody(nodes) ? `  <!-- A floor on rotational inertia for a moving part under 1 mm: MuJoCo
        refuses one below 1e-15 kg.m^2, and a 0.2 mm cube has 1e-17. -->
   <compiler boundinertia="${SMALL_BODY_INERTIA_FLOOR}" />
-` : ''}${contactArenaXml(nodes)}  <option integrator="implicitfast"${needsEllipticCone(nodes, floorFriction) ? ' cone="elliptic"' : ''} timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
+` : ''}${contactArenaXml(nodes)}  ${withCloth ? `<!-- Cloth: flex elasticity integrates only under the discrete integrator,
+       with a looser solve, because cloth is the costliest thing here by far
+       (utils/cloth/clothMjcf.ts). -->
+  ` : ''}<option integrator="${withCloth ? CLOTH_OPTION.integrator : 'implicitfast'}"${needsEllipticCone(nodes, floorFriction) ? ' cone="elliptic"' : ''} timestep="${withCloth ? CLOTH_OPTION.timestep : 0.001}" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" ${withCloth ? CLOTH_OPTION.extra : 'iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"'}${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
     <geom solref="${contactTime} 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>
@@ -100,7 +128,7 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
     
     ${nodes.map(buildNode).join('\n')}
   </worldbody>
-${extras.actuator}${extras.tendon}${extras.equality}${extras.contact}
+${extras.actuator}${extras.tendon}${extras.equality}${extras.contact}${clothXmlSections}
 </mujoco>
   `.trim();
 };

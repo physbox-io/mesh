@@ -3,6 +3,7 @@ import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { PocketSpec } from '../utils/pocketCutter';
 import type { PourBoxOptions } from '../utils/siliconeMold';
 import type { BrickworkOptions } from '../utils/brickwork';
+import type { ClothSpec, BodyFormMeasurements } from './cloth';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
@@ -900,6 +901,18 @@ export interface SceneNode {
   rightTargetId?: string;
   pulleyRadius?: number;
   isPulleyRope?: boolean;
+  /**
+   * Fabric: this body is cloth cut from these pieces (see types/cloth.ts),
+   * not its geoms. It has no joints of its own and does not move; its
+   * vertices do. utils/cloth/.
+   */
+  cloth?: ClothSpec;
+  /**
+   * A dress form: this body's geoms are generated from these measurements
+   * (utils/cloth/bodyForm.ts) and regenerated when they change, along with
+   * any garment drafted for it.
+   */
+  bodyForm?: BodyFormMeasurements;
   pulleyWheelId?: string;
   /**
    * A rope's strands holding each end (default 1): 2 for a load hung in a
