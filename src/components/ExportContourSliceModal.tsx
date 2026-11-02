@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
-  X, Download, AlertCircle, Layers, Mountain, Cpu, RefreshCw, Info, ChevronRight,
+  X, Download, ExternalLink, AlertCircle, Layers, Mountain, Cpu, RefreshCw, Info, ChevronRight,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { type ContourSliceOptions, type ContourSliceResult } from '../utils/contourSliceExporter';
@@ -29,6 +29,7 @@ import { RackToolPicker } from './RackToolPicker';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { contourSheetParts } from '../utils/sheetSimulation';
 import { ExportSubjectLine } from './ExportSubjectLine';
+import { buildEtchHandoffUrl } from '../utils/etchHandoff';
 
 interface ExportContourSliceModalProps {
   /** What it works on: the selection, or the whole scene (shown under the title). */
@@ -363,6 +364,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       .replace(/stroke-width="0.2"/, 'stroke-width="0.9"');
   }, [exportResult, preview]);
 
+  // Why the last hand-over to Etch did not happen (handleOpenInEtch), before the early return.
+  const [etchError, setEtchError] = useState<string | null>(null);
   if (!isOpen) return null;
 
   /** The layers as cut, stacked back up into the model they were sliced from. */
@@ -381,6 +384,25 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
         machineMode === 'cnc' ? `${bitDiameterMm} mm bit` : null,
       ].filter((d): d is string => !!d),
     });
+  };
+
+  // Opens the slices in Etch, the 2D end of the same bench, at the stock
+  // thickness: the SVG and Unfold dialogs had this, Contour did not.
+  const handleOpenInEtch = async () => {
+    if (!exportResult?.success || !exportResult.svg) return;
+    setEtchError(null);
+    try {
+      const url = await buildEtchHandoffUrl({
+        svg: exportResult.svg,
+        name: `${subjectLabel ?? 'Contour'} slices`,
+        thicknessMm: materialThicknessMm,
+      });
+      const tab = window.open(url, '_blank');
+      if (!tab) throw new Error('The browser blocked the new tab: allow pop-ups for this site, then try again.');
+      tab.opener = null;
+    } catch (err) {
+      setEtchError(err instanceof Error ? err.message : 'The slices could not be sent to Etch.');
+    }
   };
 
   const handleDownloadSvg = () => {
@@ -1057,6 +1079,18 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               progress={simulation.progress}
               error={simulation.error}
             />
+            {etchError && (
+              <span className="text-[11px] text-red-600 dark:text-red-400 max-w-xs leading-snug">{etchError}</span>
+            )}
+            <button
+              onClick={handleOpenInEtch}
+              disabled={!exportResult?.success}
+              title="Open these slices in Etch with the stock thickness set"
+              className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 disabled:opacity-40 text-slate-800 dark:text-slate-100 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
+            >
+              <ExternalLink className="w-4 h-4" />
+              <span>Open in Etch</span>
+            </button>
             <button
               onClick={handleDownloadSvg}
               disabled={!exportResult?.success}

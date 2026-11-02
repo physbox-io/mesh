@@ -19,9 +19,8 @@ app lacks.
    it takes. Etch's bridge is a `switch`, so its commands cannot be listed
    without keeping a list beside it; worth a table of handlers, as Mesh's
    `COMMANDS` map is.
-4. **Contour has no "Open in Etch" in Mesh**, while SVG/Laser Cut and Unfold
-   do. The Etch button and physics_export_cut cover it, but the Contour
-   dialog should have the button too.
+4. ~~Contour has no "Open in Etch" in Mesh~~ — done in Mesh (2026-11-01):
+   the Contour dialog sends its slices at the stock thickness.
 5. **Check for stock edited inside export dialogs.** Mesh removed the stock
    fields from Relief Carve and Contour: the stock is set once, in the
    status bar. If Etch has per-dialog stock or thickness fields that write
