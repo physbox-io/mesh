@@ -41,6 +41,7 @@ import {
   type CastMaterialId,
 } from './castMaterials';
 import { stlToMesh } from './stlMesh';
+import { LINER_PAIRS, resolveLinerPair } from './linerMaterials';
 import { dfmReportFor } from './dfmWorkerClient';
 import type { SimulationPart } from './simulatedPart';
 import { appendSolidTriangles, collectSceneTriangles } from './contourSliceExporter';
@@ -282,15 +283,15 @@ export function pourShortfallWarning(node: SceneNode, castVolumeMm3: number, rea
     : null;
 }
 
-/** PVA's natural, a pale cream, beside the simulation's wood for the PLA. */
-const PVA_RGBA = [0.95, 0.93, 0.82, 1];
+/** A soluble liner's natural, a pale cream, beside the simulation's wood for the shell. */
+const LINER_RGBA = [0.95, 0.93, 0.82, 1];
 
 /** A mold's printed pieces as the scene body's geoms (see simulatedBody's `parts`). */
 export function moldSceneParts(summary: Pick<MoldSummary, 'parts'>): SimulationPart[] {
   return (summary.parts ?? []).map((p) => ({
     name: p.name,
     triangles: p.triangles,
-    ...(p.material === 'PVA' ? { rgba: PVA_RGBA } : {}),
+    ...(p.role === 'liner' ? { rgba: LINER_RGBA } : {}),
   }));
 }
 
@@ -306,7 +307,11 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
   const pos = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
   const castMaterial = resolveCastMaterial(msg.castMaterial);
   const badMaterial = msg.castMaterial !== undefined && (!castMaterial || castMaterialSpec(castMaterial).metal);
+  const asked = msg.linerMaterial ?? msg.linerPair;
+  const linerPairId = resolveLinerPair(asked);
+  const badLiner = asked !== undefined && !linerPairId;
   return {
+    ...(badLiner ? { error: `liner_material is one of ${LINER_PAIRS.map((p) => p.id).join(', ')}.` } : {}),
     ...(badMaterial
       ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast).` }
       : {}),
@@ -342,6 +347,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.dissolvableLiner === 'boolean' ? { dissolvableLiner: msg.dissolvableLiner } : {}),
       ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
       ...(castMaterial ? { castMaterial } : {}),
+      ...(linerPairId ? { linerPair: linerPairId } : {}),
     },
   };
 }
@@ -780,7 +786,7 @@ export async function runMcpMoldSimulation(params: {
     ...(threeMf && describeFiles
       ? {
           files: describeFiles(
-            [{ name: moldRes.moldType === 'open' ? 'casting_mold_open_pva.3mf' : 'casting_mold_plate_pva.3mf', bytes: threeMf }],
+            [{ name: `casting_mold_${moldRes.moldType === 'open' ? 'open' : 'plate'}_${moldRes.liner?.pair ?? 'pla_pva'}.3mf`, bytes: threeMf }],
             msg.includeFiles === true,
           ),
         }

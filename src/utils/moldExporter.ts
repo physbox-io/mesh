@@ -25,6 +25,7 @@ import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './
 import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
 import type { CastMaterialId } from './castMaterials';
+import { linerPair, type LinerPairId } from './linerMaterials';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
 export type { Triangle3D } from './moldManifold';
@@ -80,15 +81,18 @@ export interface MoldOptions {
    */
   allowUndercuts?: boolean;
   /**
-   * Print the mold as a PLA shell with a dissolvable PVA liner (moldLiner.ts):
+   * Print the mold as a rigid shell with a dissolvable liner (moldLiner.ts;
+   * PLA + PVA unless `linerPair` says otherwise):
    * every undercut kept, and the shell still lifts off once the PVA has gone.
    * Exported as a two-material 3MF.
    */
   dissolvableLiner?: boolean;
   /** PVA skin between the PLA shell and the casting, mm (default 1.2, three beads). */
   linerSkinMm?: number;
-  /** What is poured, which decides whether a PVA liner can hold it (default epoxy). */
+  /** What is poured, which decides whether a liner can hold it (default epoxy). */
   castMaterial?: CastMaterialId;
+  /** The liner's shell and soluble filament (linerMaterials.ts, default PLA + PVA). */
+  linerPair?: LinerPairId;
   /** Base diameter of alignment pins in mm. */
   pinDiameterMm: number;
   /** Height of alignment pins in mm. */
@@ -187,7 +191,7 @@ export interface MoldExportResult {
   combinedTriangles: Triangle3D[];
   warnings: string[];
   error?: string;
-  /** The PVA liner's figures, when the mold has one. */
+  /** The liner's figures, when the mold has one. */
   liner?: MoldLinerInfo;
   /** The two-material 3MF, when the mold has a liner. Encoded on first read. */
   threeMf?: Uint8Array;
@@ -1560,6 +1564,7 @@ export function generateMoldMeshes(
       field,
       skinMm: opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM,
       castMaterial: opts.castMaterial ?? 'epoxy',
+      linerPair: opts.linerPair,
     });
     return 'error' in lined ? { ...emptyMoldResult(lined.error), ...setupFields } : lined;
   }
@@ -1682,7 +1687,10 @@ export type MoldSummary = Omit<
 export interface MoldStlPart {
   name: string;
   triangles: number;
-  material: 'PLA' | 'PVA';
+  /** The rigid shell (or an unlined half), or the soluble liner. */
+  role: 'shell' | 'liner';
+  /** What it prints in: 'PLA', 'HIPS'. */
+  material: string;
 }
 
 /**
@@ -1691,14 +1699,15 @@ export interface MoldStlPart {
  * share every face where they meet, so one mesh of both reads as thousands of
  * non-manifold edges though each piece is closed.
  */
-export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf'>): MoldStlPart[] {
+export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf' | 'liner'>): MoldStlPart[] {
+  const pair = linerPair(r.liner?.pair);
   const of = (h: MoldMeshHalf): MoldStlPart[] =>
     h.liner
       ? [
-          { name: `${h.name} shell`, triangles: h.liner.shell.length, material: 'PLA' },
-          { name: `${h.name} liner`, triangles: h.liner.liner.length, material: 'PVA' },
+          { name: `${h.name} shell`, triangles: h.liner.shell.length, role: 'shell', material: pair.shell.name },
+          { name: `${h.name} liner`, triangles: h.liner.liner.length, role: 'liner', material: pair.liner.name },
         ]
-      : [{ name: h.name, triangles: h.triangles.length, material: 'PLA' }];
+      : [{ name: h.name, triangles: h.triangles.length, role: 'shell', material: 'PLA' }];
   return [...of(r.bottomHalf), ...(r.topHalf ? of(r.topHalf) : [])].filter((p) => p.triangles > 0);
 }
 

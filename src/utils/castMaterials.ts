@@ -172,11 +172,17 @@ export function mixGrams(id: CastMaterialId, grams: number): { a: number; b: num
 }
 
 /** The notes that apply to this pour, in this kind of mold. */
-export function castMaterialWarnings(id: CastMaterialId, volumeMl: number, mold: { pla: boolean }): string[] {
+export function castMaterialWarnings(
+  id: CastMaterialId,
+  volumeMl: number,
+  /** `pla`: a printed mold. `softenC` and `name` say what it is printed in (default PLA, 60 °C). */
+  mold: { pla: boolean; softenC?: number; name?: string },
+): string[] {
   const m = castMaterial(id);
   const out: string[] = [];
-  if (mold.pla && m.pourC !== undefined && m.pourC > PLA_SOFTEN_C) {
-    out.push(`Pour ${m.label} below ~${PLA_SOFTEN_C} °C to avoid softening a PLA mold.`);
+  const soften = mold.softenC ?? PLA_SOFTEN_C;
+  if (mold.pla && m.pourC !== undefined && m.pourC > soften) {
+    out.push(`Pour ${m.label} below ~${soften} °C to avoid softening a ${mold.name ?? 'PLA'} mold.`);
   }
   for (const w of m.warnings) {
     if (w.inPla && !mold.pla) continue;

@@ -104,8 +104,8 @@ describe('PVA-lined mold', () => {
     const linerV = volumeOf(half.liner);
     const exactV = volumeOf(exact.bottomHalf.triangles);
     expect(Math.abs(shellV + linerV - exactV) / exactV).toBeLessThan(0.01);
-    expect(lined.liner!.pvaVolumeMm3).toBeCloseTo(linerV, -1);
-    expect(lined.liner!.pvaGrams).toBeCloseTo((linerV / 1000) * 1.23, 0);
+    expect(lined.liner!.linerVolumeMm3).toBeCloseTo(linerV, -1);
+    expect(lined.liner!.linerGrams).toBeCloseTo((linerV / 1000) * 1.23, 0);
     // The undercut under the head is held by PVA, not filled in by PLA.
     expect(linerV).toBeGreaterThan(0.25 * (40 * 40 - 14 * 14) * 17);
   });
@@ -178,9 +178,9 @@ describe('PVA-lined mold', () => {
     const info = moldSummary(res).liner!;
     expect(info.castVolumeMl).toBeCloseTo((40 * 40 * 15 + 14 * 14 * 17 + 40 * 40 * 10) / 1000, 0);
     // The PVA under the head reaches 13 mm in from its rim to the waist.
-    expect(info.thickestPvaMm).toBeGreaterThan(10);
-    expect(info.thickestPvaMm).toBeLessThan(20);
-    expect(info.dissolveHours).toBeGreaterThanOrEqual(Math.ceil(info.thickestPvaMm));
+    expect(info.thickestLinerMm).toBeGreaterThan(10);
+    expect(info.thickestLinerMm).toBeLessThan(20);
+    expect(info.dissolveHours).toBeGreaterThanOrEqual(Math.ceil(info.thickestLinerMm));
     expect(info.steps.join(' ')).toMatch(/extruder 2/);
   });
 

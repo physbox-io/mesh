@@ -15,6 +15,7 @@ import {
 } from '../../utils/moldExporter';
 import { MoldWorkerClient, moldMasterRecord, moldSceneParts, type MoldPreview } from '../../utils/moldWorkerClient';
 import { DEFAULT_LINER_SKIN_MM } from '../../utils/moldLiner';
+import { LINER_PAIRS, linerPair, pairSoftenC, type LinerPairId } from '../../utils/linerMaterials';
 import { moldFeatureLines } from '../../utils/moldExporter';
 import { castMaterial, castMaterialWarnings, castWeightG, mixGrams, type CastMaterialId } from '../../utils/castMaterials';
 import { ChainResult } from './ChainRun';
@@ -146,6 +147,8 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
     () => ({ ...chosen, castMaterial: material, ...(draftLocked ? { draftAngleDeg: 0 } : {}) }),
     [chosen, material, draftLocked],
   );
+  /** What a lined mold is printed in, and what dissolves its liner. */
+  const pair = linerPair(options.linerPair);
 
   const [viewMode, setViewMode] = useState<PreviewViewMode>('clamshell_exploded');
   const [trimCastChannels, setTrimCastChannels] = useState(false);
@@ -445,19 +448,22 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
               'Set 0 to reproduce the part exactly and demold by hand.'
               }
             />
-            <MaterialNotes notes={castMaterialWarnings(material, (castPreview?.castVolumeMm3 ?? partVolumeMm3) / 1000, { pla: true })} />
+            <MaterialNotes notes={castMaterialWarnings(material, (castPreview?.castVolumeMm3 ?? partVolumeMm3) / 1000,
+              options.dissolvableLiner ? { pla: true, softenC: pairSoftenC(pair), name: pair.label } : { pla: true })} />
 
             {locksOn && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-900 text-purple-800 dark:text-purple-200">
                 <span className="basis-full">
-                  Undercut area detected. Rigid molds may lock; consider a Silicone Pour Box{castMaterial(material).waterBased ? '.' : ' or PVA liner.'}
+                  Undercut area detected. Rigid molds may lock; consider a Silicone Pour Box or a dissolvable liner.
                 </span>
-                {!castMaterial(material).waterBased && (
-                  <button type="button" onClick={() => set('dissolvableLiner', true)}
-                    className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
-                    PVA liner
-                  </button>
-                )}
+                {/* A water-based cast dissolves a water-soluble liner, so it is offered HIPS, which limonene takes. */}
+                <button type="button" onClick={() => {
+                    if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
+                    set('dissolvableLiner', true);
+                  }}
+                  className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
+                  {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
+                </button>
                 <button type="button" onClick={onSilicone}
                   className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
                   Silicone
@@ -465,22 +471,37 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
               </div>
             )}
 
-            <HintAnchor hint="PLA mold, PVA where the casting touches it. Every undercut is kept; the PVA dissolves and the PLA lifts off. Needs a two-filament printer.">
-              <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={Boolean(options.dissolvableLiner)}
-                  onChange={(e) => set('dissolvableLiner', e.target.checked)}
-                  className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
-                />
-                Dissolvable PVA Liner (PLA + PVA 3MF)
-              </label>
-            </HintAnchor>
+            <div className="flex flex-wrap items-center gap-2">
+              <HintAnchor hint="A rigid shell, with a soluble liner where the casting touches it. Every undercut is kept; the liner dissolves and the shell lifts off. Needs a two-filament printer.">
+                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(options.dissolvableLiner)}
+                    onChange={(e) => set('dissolvableLiner', e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                  />
+                  Dissolvable Liner
+                </label>
+              </HintAnchor>
+              {options.dissolvableLiner && (
+                <select
+                  value={pair.id}
+                  onChange={(e) => set('linerPair', e.target.value as LinerPairId)}
+                  aria-label="Liner filaments"
+                  title={`Liner dissolves in ${pair.solvent}`}
+                  className="text-xs px-2 py-1 rounded-md bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700"
+                >
+                  {LINER_PAIRS.map((p) => (
+                    <option key={p.id} value={p.id}>{p.label} ({p.waterSoluble ? 'water' : 'limonene'})</option>
+                  ))}
+                </select>
+              )}
+            </div>
             {result.liner && (
               <div className="pl-6 text-[11px] leading-snug text-slate-600 dark:text-slate-300 space-y-1">
                 <div>
-                  PVA <strong>{result.liner.pvaGrams} g</strong> · PLA <strong>{result.liner.plaGrams} g</strong> ·
-                  thickest PVA {result.liner.thickestPvaMm} mm, about {result.liner.dissolveHours} h to dissolve
+                  {result.liner.linerMaterial} <strong>{result.liner.linerGrams} g</strong> · {result.liner.shellMaterial} <strong>{result.liner.shellGrams} g</strong> ·
+                  thickest liner {result.liner.thickestLinerMm} mm, about {result.liner.dissolveHours} h in {result.liner.solvent}
                 </div>
                 <ol className="list-decimal pl-4 space-y-0.5 text-slate-500 dark:text-slate-400">
                   {result.liner.steps.map((step, i) => <li key={i}>{step}</li>)}
@@ -589,7 +610,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
 
             {options.dissolvableLiner && (
               <div className="grid grid-cols-2 gap-3 min-w-0">
-                <Field label="PVA Skin (mm)" hint="PVA between the casting and the PLA. 1.2 mm is three beads." hintAlign="end">
+                <Field label="Liner Skin (mm)" hint="Liner between the casting and the shell. 1.2 mm is three beads." hintAlign="end">
                   <NumberInput
                     min={0.8}
                     max={4}
@@ -771,7 +792,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             onClick={() =>
               void handleDownload(
                 result.liner
-                  ? moldType === 'open' ? 'casting_mold_open_pva.3mf' : 'casting_mold_plate_pva.3mf'
+                  ? `casting_mold_${moldType === 'open' ? 'open' : 'plate'}_${pair.id}.3mf`
                   : moldType === 'open' ? 'casting_mold_open.stl' : 'casting_mold_plate.stl'
               )
             }

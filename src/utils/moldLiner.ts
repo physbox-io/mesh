@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// A PLA mold with a dissolvable PVA liner
+// A printed mold with a dissolvable liner (PLA + PVA by default; linerMaterials.ts)
 // ---------------------------------------------------------------------------
 //
 // A rigid printed mold has to choose. Fill its undercuts in, and it lets go of
@@ -40,45 +40,45 @@ import { exportThreeMfAssemblies, type ThreeMfAssembly, type ThreeMfPart } from 
 import type { CsgContext, HalfFeatures, MoldExportResult, MoldMeshHalf } from './moldExporter';
 import { castMaterial, castMaterialWarnings, type CastMaterialId } from './castMaterials';
 import { applyDraft, erodeDepth, type DraftMode } from './moldDraft';
+import { linerPair, pairSoftenC, type LinerPair, type LinerPairId } from './linerMaterials';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
-export const WATER_BASED_REFUSAL = 'Water-based casts dissolve PVA while they cure; use the rigid mold or a silicone one.';
+/** Said of a water-soluble liner; an ABS + HIPS mold takes water-based casts. */
+export const WATER_BASED_REFUSAL = 'Water-based casts dissolve a water-soluble liner while they cure; use an ABS + HIPS liner, the rigid mold or a silicone one.';
 export const METAL_REFUSAL = 'Metal is poured into sand or investment, not a printed mold; make a Sand or Lost PLA pattern instead.';
 export const NO_MANIFOLD_REFUSAL = "Couldn't load the geometry engine; reload the page and try again.";
 
-/** g/cm³, as the filament makers give them. */
-const PVA_DENSITY = 1.23;
-const PLA_DENSITY = 1.24;
-/**
- * Solid PVA in warm (30–40 °C), stirred water, mm an hour. A rough figure:
- * makers quote whole prints ("a few hours") rather than a rate, so this is
- * stated as one in the estimate and nothing is promised by it.
- */
-const PVA_DISSOLVE_MM_PER_HOUR = 1;
-/** What is left of the PLA floor under the deepest skin, at least. */
+/** What is left of the shell's floor under the deepest skin, at least. */
 const MIN_FLOOR_MM = 1;
 
 export interface MoldLinerInfo {
+  /** What it is printed in (linerMaterials.ts). */
+  pair: LinerPairId;
+  shellMaterial: string;
+  linerMaterial: string;
+  /** What dissolves the liner. */
+  solvent: string;
   skinMm: number;
   castMaterial: CastMaterialId;
-  pvaVolumeMm3: number;
-  pvaGrams: number;
-  plaVolumeMm3: number;
-  plaGrams: number;
+  linerVolumeMm3: number;
+  linerGrams: number;
+  shellVolumeMm3: number;
+  shellGrams: number;
   castVolumeMl: number;
-  /** The deepest PVA anywhere from a face water reaches once the shell is off, mm. */
-  thickestPvaMm: number;
+  /** The deepest liner anywhere from a face the solvent reaches once the shell is off, mm. */
+  thickestLinerMm: number;
   dissolveHours: number;
   /** What to do with it, in order. */
   steps: string[];
 }
 
-/** Whether this cast can go in a PVA-lined mold, and anything worth saying about it. */
-export function castMaterialCheck(material: CastMaterialId, castVolumeMl: number): { error?: string; warnings: string[] } {
+/** Whether this cast can go in a mold lined with this pair, and anything worth saying about it. */
+export function castMaterialCheck(material: CastMaterialId, castVolumeMl: number, pairId?: LinerPairId): { error?: string; warnings: string[] } {
   const m = castMaterial(material);
+  const pair = linerPair(pairId);
   if (m.metal) return { error: METAL_REFUSAL, warnings: [] };
-  if (m.waterBased) return { error: WATER_BASED_REFUSAL, warnings: [] };
-  return { warnings: castMaterialWarnings(material, castVolumeMl, { pla: true }) };
+  if (m.waterBased && pair.waterSoluble) return { error: WATER_BASED_REFUSAL, warnings: [] };
+  return { warnings: castMaterialWarnings(material, castVolumeMl, { pla: true, softenC: pairSoftenC(pair), name: pair.label }) };
 }
 
 /**
@@ -455,6 +455,8 @@ export interface LinerContext extends CsgContext {
   field: ColumnField;
   skinMm: number;
   castMaterial: CastMaterialId;
+  /** What it is printed in (default PLA + PVA). */
+  linerPair?: LinerPairId;
 }
 
 function meshPart(m: Manifold, name: string, extruder: number): ThreeMfPart {
@@ -471,7 +473,7 @@ function meshPart(m: Manifold, name: string, extruder: number): ThreeMfPart {
 }
 
 /**
- * The PVA-lined mold, or the one sentence that says why not. Shares its layout
+ * The lined mold (a rigid shell, a soluble liner), or the one sentence that says why not. Shares its layout
  * with the exact-CSG mold: halves side by side on the plate, cavity up.
  */
 export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: string } {
@@ -482,7 +484,8 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   if (!rawPart) return fail(unsolidPartRefusal(unsolid, ctx.solidNames, 'the liner'));
   const castVolumeMl = rawPart.volume() / 1000;
 
-  const material = castMaterialCheck(ctx.castMaterial, castVolumeMl);
+  const pair: LinerPair = linerPair(ctx.linerPair);
+  const material = castMaterialCheck(ctx.castMaterial, castVolumeMl, pair.id);
   if (material.error) {
     rawPart.delete();
     return fail(material.error);
@@ -490,7 +493,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const notes = [...warnings, ...material.warnings];
   if (opts.baseThicknessMm < ctx.skinMm + MIN_FLOOR_MM) {
     notes.push(
-      `The ${opts.baseThicknessMm} mm floor leaves under ${MIN_FLOOR_MM} mm of PLA below a ${ctx.skinMm} mm liner; ` +
+      `The ${opts.baseThicknessMm} mm floor leaves under ${MIN_FLOOR_MM} mm of ${pair.shell.name} below a ${ctx.skinMm} mm liner; ` +
       `a floor of ${Math.ceil((ctx.skinMm + MIN_FLOOR_MM + 1) * 10) / 10} mm or more keeps the shell stiff.`
     );
   }
@@ -506,7 +509,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const escaped = halves.reduce((sum, h) => sum + h.escapedMm3, 0);
   if (escaped > castVolumeMl * 1000 * 0.002) {
     notes.push(
-      `${Math.round(escaped)} mm³ of the part reaches past the liner onto the PLA, where a feature is finer than ` +
+      `${Math.round(escaped)} mm³ of the part reaches past the liner onto the ${pair.shell.name}, where a feature is finer than ` +
       'the mold grid; the shell may grip the casting there.'
     );
   }
@@ -527,12 +530,12 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const pvaVolumeMm3 = all.reduce((s, h) => s + h.liner.volume(), 0);
   const plaVolumeMm3 = all.reduce((s, h) => s + h.shell.volume(), 0);
   const thickest = Math.max(...halves.map((h) => thickestPvaMm(h.envelope, h.spans, ctx.grid)));
-  const dissolveHours = Math.max(1, Math.ceil(thickest / PVA_DISSOLVE_MM_PER_HOUR));
+  const dissolveHours = Math.max(1, Math.ceil(thickest / pair.dissolveMmPerHour));
 
   const names = lid ? ['Cavity half', 'Lid half'] : ['Open mold'];
   const assemblies: ThreeMfAssembly[] = all.map((h, i) => ({
     name: names[i],
-    parts: [meshPart(h.shell, `${names[i]} shell (PLA)`, 1), meshPart(h.liner, `${names[i]} liner (PVA)`, 2)],
+    parts: [meshPart(h.shell, `${names[i]} shell (${pair.shell.name})`, 1), meshPart(h.liner, `${names[i]} liner (${pair.liner.name})`, 2)],
   }));
 
   const halfOf = (h: { shell: Manifold; liner: Manifold }, name: string, blockHeight: number, pinRise: number): MoldMeshHalf => {
@@ -564,21 +567,26 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const totalWidth = lid ? ctx.moldWidthMm * 2 + plateGapMm : ctx.moldWidthMm;
   const totalHeight = Math.max(ctx.baseBlockHeight, lid ? ctx.lidBlockHeight + opts.pinHeightMm : 0);
 
+  const thickR = Math.round(thickest * 10) / 10;
   const liner: MoldLinerInfo = {
+    pair: pair.id,
+    shellMaterial: pair.shell.name,
+    linerMaterial: pair.liner.name,
+    solvent: pair.solvent,
     skinMm: ctx.skinMm,
     castMaterial: ctx.castMaterial,
-    pvaVolumeMm3: Math.round(pvaVolumeMm3),
-    pvaGrams: Math.round((pvaVolumeMm3 / 1000) * PVA_DENSITY * 10) / 10,
-    plaVolumeMm3: Math.round(plaVolumeMm3),
-    plaGrams: Math.round((plaVolumeMm3 / 1000) * PLA_DENSITY * 10) / 10,
+    linerVolumeMm3: Math.round(pvaVolumeMm3),
+    linerGrams: Math.round((pvaVolumeMm3 / 1000) * pair.liner.densityGcm3 * 10) / 10,
+    shellVolumeMm3: Math.round(plaVolumeMm3),
+    shellGrams: Math.round((plaVolumeMm3 / 1000) * pair.shell.densityGcm3 * 10) / 10,
     castVolumeMl: Math.round(castVolumeMl * 10) / 10,
-    thickestPvaMm: Math.round(thickest * 10) / 10,
+    thickestLinerMm: thickR,
     dissolveHours,
     steps: [
-      'Print with PLA on extruder 1 and PVA on extruder 2 (pre-assigned in 3MF).',
+      `Print with ${pair.shell.name} on extruder 1 and ${pair.liner.name} on extruder 2 (pre-assigned in 3MF).`,
       `Cast ${castMaterial(ctx.castMaterial).label.toLowerCase()} and allow to cure.`,
-      'Remove the PLA outer shell along the pull direction.',
-      `Dissolve the PVA liner in warm (30–40 °C) water (~${dissolveHours} h for ${Math.round(thickest * 10) / 10} mm max thickness).`,
+      `Remove the ${pair.shell.name} outer shell along the pull direction.`,
+      `Dissolve the ${pair.liner.name} liner in ${pair.solvent} (~${dissolveHours} h for ${thickR} mm max thickness).`,
     ],
   };
 
@@ -586,7 +594,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     success: true,
     ...ctx.setup,
     get binarySTL() {
-      if (!stlBytes) stlBytes = exportBinarySTL(combinedTriangles, 'PhysBox 3D Mold Plate (PLA + PVA)');
+      if (!stlBytes) stlBytes = exportBinarySTL(combinedTriangles, `PhysBox 3D Mold Plate (${pair.label})`);
       return stlBytes;
     },
     get threeMf() {
