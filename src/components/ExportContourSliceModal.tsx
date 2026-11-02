@@ -12,7 +12,6 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM } from '../utils/stockSettings';
 import { useSettled } from '../hooks/useSettled';
 import { AddSimulationButton, JobOverrides, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { InlineJobPause } from './JobPauseModal';
@@ -159,10 +158,9 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
    * The sheet is the bench's stock: its thickness is the slice pitch and its
    * width and depth are one sheet's cutting area. These used to be local (3 mm,
    * 600 x 400), so stock set in the status bar never reached this dialog.
-   * Editing them here edits the bench, as the relief dialog does.
+   * Set in the status bar, not here.
    */
   const stock = useStore((s) => s.stock);
-  const setStock = useStore((s) => s.setStock);
   const materialThicknessMm = stock.thicknessMm;
   const sheetWidthMm = stock.widthMm;
   const sheetHeightMm = stock.depthMm;
@@ -490,29 +488,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 </div>
               </Field>
 
-              <Field
-                className="lg:col-span-2"
-                label="Thickness (mm)"
-                hint="The stock thickness from the status bar, which this edits. Each layer is one sheet thick, so this also sets how far apart the model is sliced."
-              >
-                <NumberInput
-                  /*
-                   * 200 mm, not 50. Contour stacking *is* the thick-foam
-                   * workflow — EPS ships in 25, 50, 75 and 100 — and this one
-                   * number sets the slice pitch, the cut depth and the
-                   * stepdown at once. A ceiling of 50 meant typing 75 silently
-                   * gave 50, and the whole stack was then sliced at the wrong
-                   * pitch: wrong layer count, wrong finished height, and a cut
-                   * 25 mm short of through. Nothing in `contourSliceExporter`
-                   * has ever had a 50 mm limit. The bounds are now the
-                   * bench stock's, which this field edits.
-                   */
-                  step={0.5} min={MIN_STOCK_MM} max={MAX_STOCK_THICKNESS_MM}
-                  value={materialThicknessMm}
-                  onChange={(v) => { if (v !== undefined) setStock({ thicknessMm: v }); }}
-                  className={inputClass}
-                />
-              </Field>
+              {/* Thickness and sheet size are the bench stock, set in the status
+                  bar: each layer is one sheet of it. */}
 
               <Field
                 className="lg:col-span-3"
@@ -786,29 +763,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
           <div className={sectionClass}>
             <h3 className={sectionTitleClass}>Sheet &amp; Nesting</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
-              <Field
-                className="lg:col-span-2"
-                label="Sheet Size (mm)"
-                hint="Usable cutting area of one sheet: the stock width and depth from the status bar, which this edits. Layers are nested left to right; when a row no longer fits, nesting starts a new sheet below."
-              >
-                <div className="flex items-center space-x-1.5">
-                  <NumberInput
-                    step={10} min={50} max={MAX_STOCK_PLAN_MM}
-                    value={sheetWidthMm}
-                    onChange={(v) => { if (v !== undefined) setStock({ widthMm: v }); }}
-                    className={`${inputClass} px-2`}
-                    aria-label="Sheet width in mm"
-                  />
-                  <span className="text-xs font-medium text-slate-400">&times;</span>
-                  <NumberInput
-                    step={10} min={50} max={MAX_STOCK_PLAN_MM}
-                    value={sheetHeightMm}
-                    onChange={(v) => { if (v !== undefined) setStock({ depthMm: v }); }}
-                    className={`${inputClass} px-2`}
-                    aria-label="Sheet height in mm"
-                  />
-                </div>
-              </Field>
+              {/* Sheet size: the bench stock, set in the status bar. */}
 
               <Field
                 className="lg:col-span-2"
