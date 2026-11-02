@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import type load_mujoco from '@mujoco/mujoco';
+import { contactBody } from './contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -365,8 +366,8 @@ export function readOutputs(mj: Mujoco, model: MjModel, data: MjData, names: str
       for (let c = 0; c < n; c++) {
         const contact = vec.get(c);
         if (!contact) continue;
-        for (const g of [contact.geom1, contact.geom2]) {
-          const body = model.geom_bodyid[g];
+        for (const side of [0, 1] as const) {
+          const body = contactBody(model, contact, side);
           contactsByBody.set(body, (contactsByBody.get(body) ?? 0) + 1);
         }
         contact.delete();

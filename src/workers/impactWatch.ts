@@ -27,6 +27,7 @@ import type { SceneNode } from '../types/scene';
 import type { ImpactEvent } from './physicsWorkerProtocol';
 import { shatterFloor } from '../utils/breakThresholds';
 import { bodyAngularVelocity, bodyPointVelocity } from './bodyKinematics';
+import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -206,8 +207,8 @@ function impactSiteOf(
       const contact = contactVec.get(c);
       if (!contact) continue;
       try {
-        const b1 = mdl.geom_bodyid[contact.geom1];
-        const b2 = mdl.geom_bodyid[contact.geom2];
+        const b1 = contactBody(mdl, contact, 0);
+        const b2 = contactBody(mdl, contact, 1);
         if (b1 !== bodyId && b2 !== bodyId) continue;
         // When we already know who hit whom, take THAT contact. A plate lying
         // on the ground is in contact with the ground at every step, and the

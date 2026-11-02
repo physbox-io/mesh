@@ -14,6 +14,7 @@
 import type load_mujoco from '@mujoco/mujoco';
 import type { JointHistory } from './physicsWorkerProtocol';
 import { clutchDriverJointName } from '../utils/motorClutch';
+import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -211,22 +212,21 @@ export const contactsOfBody = (mj: Mujoco, model: MjModel, data: MjData, bodyId:
   const wrench = new mj.DoubleBuffer(6);
   try {
     const n = vec.size();
-    const geomBody = model.geom_bodyid;
     for (let i = 0; i < n; i++) {
       const c = vec.get(i);
       if (!c) continue;
       try {
-        const b1 = geomBody[c.geom1], b2 = geomBody[c.geom2];
-        let mine: number, other: number;
-        if (bodyId < 0 || b1 === bodyId) { mine = c.geom1; other = c.geom2; }
-        else if (b2 === bodyId) { mine = c.geom2; other = c.geom1; }
+        const b1 = contactBody(model, c, 0), b2 = contactBody(model, c, 1);
+        let mine: number, other: number, otherBody: number;
+        if (bodyId < 0 || b1 === bodyId) { mine = c.geom1; other = c.geom2; otherBody = b2; }
+        else if (b2 === bodyId) { mine = c.geom2; other = c.geom1; otherBody = b1; }
         else continue;
         let force = 0;
         if (c.efc_address >= 0) {
           mj.mj_contactForce(model, data, i, wrench);
           force = wrench.GetView()[0];
         }
-        out.push({ otherBody: names.bodyNode(geomBody[other]), otherGeom: names.geomName(other), geom: names.geomName(mine), dist: c.dist, force });
+        out.push({ otherBody: names.bodyNode(otherBody), otherGeom: other >= 0 ? names.geomName(other) : 'cloth', geom: mine >= 0 ? names.geomName(mine) : 'cloth', dist: c.dist, force });
       } finally {
         c.delete();
       }

@@ -91,6 +91,7 @@ import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
+import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -1045,14 +1046,15 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>, opts
   const contactVec = dat.contact;
   try {
     const ncon = contactVec.size();
-    const geomBody = ncon > 0 ? mdl.geom_bodyid : null;
     for (let c = 0; c < ncon; c++) {
       const contact = contactVec.get(c);
       if (contact) {
+        // A cloth side has no geom (-1); it is named for the cloth's vertex body.
+        const geomOf = (g: number, side: 0 | 1) => (g >= 0 ? geomNameCache[g] ?? `geom_${g}` : sensorNames.bodyNode(contactBody(mdl, contact, side)));
         contacts.push({
-          geom1: geomNameCache[contact.geom1] ?? `geom_${contact.geom1}`, geom2: geomNameCache[contact.geom2] ?? `geom_${contact.geom2}`, dist: contact.dist,
+          geom1: geomOf(contact.geom1, 0), geom2: geomOf(contact.geom2, 1), dist: contact.dist,
           // Whose geoms they are, so a `bodies` filter can keep a body's contacts.
-          body1: sensorNames.bodyNode(geomBody![contact.geom1]), body2: sensorNames.bodyNode(geomBody![contact.geom2]),
+          body1: sensorNames.bodyNode(contactBody(mdl, contact, 0)), body2: sensorNames.bodyNode(contactBody(mdl, contact, 1)),
         });
         contact.delete();
       }
