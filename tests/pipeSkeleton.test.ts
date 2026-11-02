@@ -198,3 +198,22 @@ describe('furniture of long parts', () => {
     }
   });
 });
+
+describe('a scene of many primitives on one body', () => {
+  it('frames the Golden Gate down the middle of its sticks, without overflowing the stack', async () => {
+    const { PRESETS } = await import('../src/presets/presetScenes');
+    const scene = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).golden_gate.scene;
+    const { frameBodyInScene, WHOLE_SCENE } = await import('../src/utils/pipeSkeleton');
+    // Towers, cables and hangers are all geoms of one body: each is a part of
+    // its own, so the bridge is a stick model, not one block framed by its
+    // edges (which took minutes, and spread a mesh's worth of points into
+    // Math.min until the stack ran out).
+    const sk = frameBodyInScene(scene, WHOLE_SCENE).skeleton;
+    expect(sk.style).toBe('centrelines');
+    expect(sk.members.length).toBeGreaterThan(30);
+    const ends = new Map<number, number>();
+    for (const m of sk.members) for (const i of [m.a, m.b]) ends.set(i, (ends.get(i) ?? 0) + 1);
+    // Nothing left hanging: every joint holds two pipes or more.
+    expect([...ends.values()].filter((d) => d === 1)).toHaveLength(0);
+  }, 60000);
+});

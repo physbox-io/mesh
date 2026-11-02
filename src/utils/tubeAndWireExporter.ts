@@ -283,6 +283,14 @@ export interface PipeFrameBreakdownResult {
 // --- Vector math helpers ---
 type Vec3 = [number, number, number];
 
+/**
+ * Smallest and largest of a list, by loop. `Math.min(...xs)` passes every
+ * element as an argument, and a mesh's worth of points (the Golden Gate's
+ * cables) is more arguments than the stack holds.
+ */
+const minOf = (xs: number[]) => { let m = Infinity; for (const x of xs) if (x < m) m = x; return m; };
+const maxOf = (xs: number[]) => { let m = -Infinity; for (const x of xs) if (x > m) m = x; return m; };
+
 function vSub(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
@@ -1023,8 +1031,8 @@ export function solidCentroidXY(geoms: SceneGeom[], cells = 40): [number, number
   }
   const solid = shapes.filter((x) => !x.cut);
   if (!solid.length) return [0, 0];
-  const lo = [0, 1, 2].map((k) => Math.min(...solid.map((x) => x.lo[k])));
-  const hi = [0, 1, 2].map((k) => Math.max(...solid.map((x) => x.hi[k])));
+  const lo = [0, 1, 2].map((k) => minOf(solid.map((x) => x.lo[k])));
+  const hi = [0, 1, 2].map((k) => maxOf(solid.map((x) => x.hi[k])));
   let n = 0, sx = 0, sy = 0;
   for (let i = 0; i < cells; i++) for (let j = 0; j < cells; j++) for (let k = 0; k < cells; k++) {
     const p: Vec3 = [0, 1, 2].map((a, q) => lo[a] + ((([i, j, k][q]) + 0.5) / cells) * (hi[a] - lo[a])) as Vec3;

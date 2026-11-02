@@ -45,6 +45,13 @@ const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const len = (a: V3) => Math.hypot(a[0], a[1], a[2]);
 const norm = (a: V3): V3 => scale(a, 1 / (len(a) || 1));
+/**
+ * Smallest and largest of a list, by loop. `Math.min(...xs)` passes every
+ * element as an argument, and a mesh's worth of points (the Golden Gate's
+ * cables) is more arguments than the stack holds.
+ */
+const minOf = (xs: number[]) => { let m = Infinity; for (const x of xs) if (x < m) m = x; return m; };
+const maxOf = (xs: number[]) => { let m = -Infinity; for (const x of xs) if (x > m) m = x; return m; };
 
 export type MemberKind = 'edge' | 'line' | 'rail' | 'post' | 'base' | 'brace';
 
@@ -348,8 +355,8 @@ function fillFace(g: Graph, face: Face, spanMm: number, floorMm: number) {
     for (let k = 0; k + 1 < hits.length; k += 2) out.push([hits[k], hits[k + 1]]);
     return out;
   };
-  const [s0, s1] = [Math.min(...st.map((p) => p[0])), Math.max(...st.map((p) => p[0]))];
-  const [t0, t1] = [Math.min(...st.map((p) => p[1])), Math.max(...st.map((p) => p[1]))];
+  const [s0, s1] = [minOf(st.map((p) => p[0])), maxOf(st.map((p) => p[0]))];
+  const [t0, t1] = [minOf(st.map((p) => p[1])), maxOf(st.map((p) => p[1]))];
   const levels = (lo: number, hi: number) => {
     const k = Math.ceil((hi - lo) / spanMm - 1e-6);
     return Array.from({ length: Math.max(0, k - 1) }, (_, i) => lo + ((hi - lo) * (i + 1)) / k);
@@ -419,10 +426,10 @@ function dropFragments(g: Graph, weldMm: number) {
     if (!groups.get(r)!.includes(i)) groups.get(r)!.push(i);
   }
   const span = (ids: number[]) => len(sub(
-    [0, 1, 2].map((a) => Math.max(...ids.map((i) => g.nodes[i][a]))) as V3,
-    [0, 1, 2].map((a) => Math.min(...ids.map((i) => g.nodes[i][a]))) as V3));
+    [0, 1, 2].map((a) => maxOf(ids.map((i) => g.nodes[i][a]))) as V3,
+    [0, 1, 2].map((a) => minOf(ids.map((i) => g.nodes[i][a]))) as V3));
   const sizes = [...groups.entries()].map(([r, ids]) => [r, span(ids)] as const);
-  const biggest = Math.max(...sizes.map(([, d]) => d));
+  const biggest = maxOf(sizes.map(([, d]) => d));
   const keep = new Set(sizes.filter(([, d]) => d >= Math.max(weldMm * 4, biggest * 0.1)).map(([r]) => r));
   const old = g.reset();
   const nodes = g.nodes;
@@ -603,8 +610,13 @@ function partsOf(path: SceneNode[]): Part[] {
   const visit = (n: SceneNode, chain: SceneNode[]) => {
     if (n.simulation) return;
     const own = (n.geoms ?? []).filter((g) => g.csg !== 'difference' && !g.csgDerived && g.role !== 'collision');
-    if (own.length) {
-      let wrapped: SceneNode = { ...n, geoms: own, children: [] };
+    // A primitive is a part of its own: a body built of boxes and capsules (a
+    // bridge's legs, cables and hangers on one body) is an assembly of sticks,
+    // not one block. A body's mesh geoms together are its one shape.
+    const meshes = own.filter((g) => g.type === 'mesh');
+    const groups = [...own.filter((g) => g.type !== 'mesh').map((g) => [g]), ...(meshes.length ? [meshes] : [])];
+    for (const geoms of groups) {
+      let wrapped: SceneNode = { ...n, geoms, children: [] };
       for (let i = chain.length - 1; i >= 0; i--) wrapped = { ...chain[i], geoms: [], children: [wrapped] };
       const tris = collectSceneTriangles({ nodes: [wrapped] } as SceneGraph).tris;
       if (tris.length >= 9) {
@@ -617,8 +629,8 @@ function partsOf(path: SceneNode[]): Part[] {
           for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) cov[i * 3 + j] += d[i] * d[j];
         }
         const axes = principalAxes(cov);
-        const lo = [0, 1, 2].map((k) => Math.min(...pts.map((p) => dot(sub(p, c), axes[k]))));
-        const hi = [0, 1, 2].map((k) => Math.max(...pts.map((p) => dot(sub(p, c), axes[k]))));
+        const lo = [0, 1, 2].map((k) => minOf(pts.map((p) => dot(sub(p, c), axes[k]))));
+        const hi = [0, 1, 2].map((k) => maxOf(pts.map((p) => dot(sub(p, c), axes[k]))));
         const order = [0, 1, 2].sort((x, y) => (hi[y] - lo[y]) - (hi[x] - lo[x]));
         const mid = add(c, axes.reduce((sum, ax, k) => add(sum, scale(ax, (lo[k] + hi[k]) / 2)), [0, 0, 0] as V3));
         const size = order.map((k) => hi[k] - lo[k]);
@@ -753,7 +765,7 @@ export function buildPipeSkeleton(scene: SceneGraph, bodyId: string, opts: Skele
   })()));
 
   // Sized before any joints are merged, from the shape itself.
-  const sizeOf = (pts: V3[]) => [0, 1, 2].map((a) => Math.max(...pts.map((p) => p[a])) - Math.min(...pts.map((p) => p[a])));
+  const sizeOf = (pts: V3[]) => [0, 1, 2].map((a) => maxOf(pts.map((p) => p[a])) - minOf(pts.map((p) => p[a])));
   const loose = new Graph(0);
   if (sketch) fromLattice(loose, body, worldMatrix(path), 0);
   else if (centrelines) fromCentrelines(loose, path);
@@ -837,7 +849,7 @@ export function frameBodyInScene(
 ): { nodes: SceneNode[]; skeleton: BuiltSkeleton; added: number } {
   const sk = buildPipeSkeleton(scene, bodyId, opts);
   const xs = sk.nodes.map((p) => p[0]);
-  const shift: V3 = opts.placement === 'beside' ? [Math.max(...xs) - Math.min(...xs) + 300, 0, 0] : [0, 0, 0];
+  const shift: V3 = opts.placement === 'beside' ? [maxOf(xs) - minOf(xs) + 300, 0, 0] : [0, 0, 0];
   const prefix = `frame_${Math.random().toString(36).slice(2, 7)}`;
   const frame = skeletonToNodes(sk, sk.pipeStandardId, prefix, shift);
   const without = (list: SceneNode[]): SceneNode[] =>
