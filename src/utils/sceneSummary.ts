@@ -9,7 +9,7 @@
  */
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
-import { analyzeMesh } from './meshIntegrity';
+import { analyzeMesh, meshShells } from './meshIntegrity';
 import { checkMeshInertia } from './meshInertiaCheck';
 import { cageOriginInBodyMm } from './latticeFrame';
 import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum } from './csg';
@@ -66,8 +66,17 @@ export function meshIntegrity(g: SceneGeom): Record<string, unknown> {
   if (!triangles || !pos.length) return {};
   const m = analyzeMesh(pos, faces);
   if (!m) return { watertight: 'not checked — too many triangles' };
+  const counted = meshShells(pos, faces);
+  // An inside-out mesh (windingInverted) has its pieces and hollows the other way round.
+  const shells = counted && m.volume < 0 ? { ...counted, pieces: counted.voids, voids: counted.pieces } : counted;
   return {
     watertight: m.closed,
+    // More than one piece is what a casting or a print needs to hear about:
+    // a closed mesh can still be a part with its bolt heads floating loose.
+    ...(shells && shells.pieces > 1
+      ? { pieces: shells.pieces, piecesNote: `${shells.pieces} separate pieces in this mesh: anything not joined to the main body falls out of a casting or prints loose.` }
+      : {}),
+    ...(shells && shells.voids ? { hollows: shells.voids } : {}),
     ...(m.boundaryEdges ? { boundaryEdges: m.boundaryEdges } : {}),
     ...(m.nonManifoldEdges ? { nonManifoldEdges: m.nonManifoldEdges } : {}),
     ...(m.degenerateTriangles ? { degenerateTriangles: m.degenerateTriangles } : {}),

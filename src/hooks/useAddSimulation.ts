@@ -12,6 +12,7 @@ import {
   type SimulationJobOptions,
   type SimulationJobResult,
   type SimulationPlacement,
+  type SimulationPart,
 } from '../utils/simulatedPart';
 import type { SheetJobOptions, SheetJobResult } from '../utils/sheetSimulation';
 import type { TimberSimJobOptions, TimberSimJobResult } from '../utils/timberSimulation';
@@ -33,6 +34,8 @@ export interface AddSimulationRequest {
   job?: SimulationJobOptions;
   sheets?: SheetJobOptions;
   mesh?: IndexedMesh;
+  /** `mesh`'s faces in runs that are pieces of their own, one geom each (see simulatedBody). */
+  parts?: SimulationPart[];
   transform: StockTransform;
   kind: NonNullable<SceneNode['simulation']>['kind'];
   /** What the program is, for the body's name: "Relief carve". */
@@ -46,6 +49,8 @@ export interface AddSimulationRequest {
   select?: boolean;
   /** What a cast was poured in, kept on the body (`simulation.material`). */
   material?: string;
+  /** A generated mold's master, kept on the body (`simulation.mold`). */
+  mold?: NonNullable<SceneNode['simulation']>['mold'];
   /**
    * One step of a machining job (`job.stage`): stood as the block stands for
    * that step's setup (`machineFrame`), and named and described as a step.
@@ -108,11 +113,13 @@ export async function addSimulationToScene(
       createdAt: now.toISOString(),
       machineFrame: req.step?.machineFrame,
       stage: req.step,
+      ...(req.mesh && req.parts ? { parts: req.parts } : {}),
     }
   );
   // Named here as the store would rename it on the way in, so the card and
   // the caller have the name it ends up with.
   if (req.material && node.simulation) node.simulation = { ...node.simulation, material: req.material };
+  if (req.mold && node.simulation) node.simulation = { ...node.simulation, mold: req.mold };
   // Drawn in what it was poured in: a clear epoxy see-through, bronze bronze.
   const poured = resolveCastMaterial(req.material);
   if (poured) node.geoms = node.geoms?.map((g) => ({ ...g, rgba: [...castMaterial(poured).rgba] }));

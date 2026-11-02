@@ -18,6 +18,7 @@ import {
   lastMoldOptions,
   moldSummary,
   moldPreviewBuffers,
+  moldFeatureLines,
   type MoldHalfBuffers,
   type MoldOptions,
   type MoldSummary,
@@ -40,7 +41,9 @@ import {
   type CastMaterialId,
 } from './castMaterials';
 import { stlToMesh } from './stlMesh';
-import { appendSolidTriangles } from './contourSliceExporter';
+import type { SimulationPart } from './simulatedPart';
+import { appendSolidTriangles, collectSceneTriangles } from './contourSliceExporter';
+import { soupVolume, type PourBoxOptions } from './siliconeMold';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimulation';
@@ -52,7 +55,6 @@ import { mcpMoldSubject } from './moldSubject';
 import { metalChain, siliconeChain, type ChainPiece, type ChainResult, type MetalChain, type SiliconeChain } from './castChain';
 import { addMetalChain, addSiliconeChain } from './castChainActions';
 import { DEFAULT_TAB_DRAFT, DEFAULT_TAB_MATERIAL, materialFitsTab, tabMaterials } from './moldTabs';
-import type { PourBoxOptions } from './siliconeMold';
 import { lastCastOptions, type CastOptions } from './castPatternExporter';
 import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
@@ -217,9 +219,13 @@ export class MoldWorkerClient {
   async castNode(node: SceneNode, options?: MoldCastSimulationOptions): Promise<MoldCastSimulationResult> {
     this.revive();
     if (!this.worker) {
-      return simulateCastFromMoldNode(node, options);
+      const res = await simulateCastFromMoldNode(node, options);
+      const short = res.success ? pourShortfallWarning(node, res.castVolumeMm3, 'agent') : null;
+      return short ? { ...res, warnings: [short, ...(res.warnings ?? [])] } : res;
     }
-    return this.send<MoldCastSimulationResult>({ type: 'CAST_NODE', node, options });
+    const res = await this.send<MoldCastSimulationResult>({ type: 'CAST_NODE', node, options });
+    const short = res.success ? pourShortfallWarning(node, res.castVolumeMm3, 'agent') : null;
+    return short ? { ...res, warnings: [short, ...(res.warnings ?? [])] } : res;
   }
 
   dispose() {
@@ -231,6 +237,50 @@ export class MoldWorkerClient {
   }
 }
 
+/** What a mold body records about its master (see SceneNode.simulation.mold). */
+export function moldMasterRecord(scene: SceneGraph, summary: Pick<MoldSummary, 'moldType'>): { masterVolumeMm3: number; laidOpen: boolean } {
+  // Scene triangles are in metres.
+  const volumeMm3 = Math.abs(soupVolume(collectSceneTriangles(scene).tris)) * 1e9;
+  return { masterVolumeMm3: Math.round(volumeMm3), laidOpen: summary.moldType === 'clamshell' };
+}
+
+/** A pour this far under the master's volume is not the casting. */
+const SHORT_POUR_SHARE = 0.9;
+
+/**
+ * Whether a pour into a generated mold came up short of its master, in words.
+ * A clamshell added to the scene lies as it prints, halves side by side and
+ * open, so pouring into it fills each half on its own: once that came back at
+ * 56% of the master, silently.
+ */
+export function pourShortfallWarning(node: SceneNode, castVolumeMm3: number, reader: 'user' | 'agent' = 'user'): string | null {
+  const mold = node.simulation?.mold;
+  if (!mold || !(mold.masterVolumeMm3 > 0)) return null;
+  const share = castVolumeMm3 / mold.masterVolumeMm3;
+  const pct = Math.round(share * 100);
+  if (mold.laidOpen) {
+    return `This two-part mold lies open, its halves side by side as they print, so each half filled on its own (${pct}% of the master's volume). ` +
+      (reader === 'agent'
+        ? "That is not what the closed mold casts: physics_add_simulation kind 'mold_cast' with master_id and no body_id pours into it closed."
+        : 'That is not what the closed mold casts: Simulate Cast in the Mold dialog pours into it closed.');
+  }
+  return share < SHORT_POUR_SHARE
+    ? `The pour came to ${pct}% of the master's volume: it stopped short of filling the cavity (a fill depth below the rim, the side poured from, or trapped air). Check the pour direction and fill.`
+    : null;
+}
+
+/** PVA's natural, a pale cream, beside the simulation's wood for the PLA. */
+const PVA_RGBA = [0.95, 0.93, 0.82, 1];
+
+/** A mold's printed pieces as the scene body's geoms (see simulatedBody's `parts`). */
+export function moldSceneParts(summary: Pick<MoldSummary, 'parts'>): SimulationPart[] {
+  return (summary.parts ?? []).map((p) => ({
+    name: p.name,
+    triangles: p.triangles,
+    ...(p.material === 'PVA' ? { rgba: PVA_RGBA } : {}),
+  }));
+}
+
 const PULL_DIRECTIONS: readonly string[] = ['auto', '+z', '-z', '+y', '-y', '+x', '-x'];
 
 export function moldOptionsFor(msg: Record<string, unknown>): {
@@ -240,6 +290,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
   error?: string;
 } {
   const fromDialog = lastMoldOptions();
+  const pos = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
   const castMaterial = resolveCastMaterial(msg.castMaterial);
   const badMaterial = msg.castMaterial !== undefined && (!castMaterial || castMaterialSpec(castMaterial).metal);
   return {
@@ -257,8 +308,14 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.pullDirection === 'string' && PULL_DIRECTIONS.includes(msg.pullDirection)
         ? { pullDirection: msg.pullDirection as MoldOptions['pullDirection'] }
         : {}),
-      ...(typeof msg.wallMarginMm === 'number' ? { wallMarginMm: msg.wallMarginMm } : {}),
-      ...(typeof msg.baseThicknessMm === 'number' ? { baseThicknessMm: msg.baseThicknessMm } : {}),
+      // wall_mm and floor_mm are the tool's names; the dialog's are Wall Margin and Base Floor.
+      ...(pos(msg.wallMm ?? msg.wallMarginMm) !== undefined ? { wallMarginMm: pos(msg.wallMm ?? msg.wallMarginMm) } : {}),
+      ...(pos(msg.floorMm ?? msg.baseThicknessMm) !== undefined ? { baseThicknessMm: pos(msg.floorMm ?? msg.baseThicknessMm) } : {}),
+      ...(pos(msg.pinDiaMm ?? msg.pinDiameterMm) !== undefined ? { pinDiameterMm: pos(msg.pinDiaMm ?? msg.pinDiameterMm) } : {}),
+      ...(pos(msg.pinHeightMm) !== undefined ? { pinHeightMm: pos(msg.pinHeightMm) } : {}),
+      ...(typeof msg.pinToleranceMm === 'number' && msg.pinToleranceMm >= 0 ? { pinToleranceMm: msg.pinToleranceMm } : {}),
+      ...(pos(msg.sprueTopDiaMm) !== undefined ? { sprueTopDiaMm: pos(msg.sprueTopDiaMm) } : {}),
+      ...(pos(msg.sprueBottomDiaMm) !== undefined ? { sprueBottomDiaMm: pos(msg.sprueBottomDiaMm) } : {}),
       ...(typeof msg.cavityDepthMm === 'number' ? { cavityDepthMm: msg.cavityDepthMm } : {}),
       // draft_deg is the tool's name for it, as on the metal chains.
       ...(typeof msg.draftAngleDeg === 'number' ? { draftAngleDeg: msg.draftAngleDeg }
@@ -267,7 +324,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.allowUndercuts === 'boolean' ? { allowUndercuts: msg.allowUndercuts } : {}),
       ...(typeof msg.includeSprue === 'boolean' ? { includeSprue: msg.includeSprue } : {}),
       ...(typeof msg.includeVents === 'boolean' ? { includeVents: msg.includeVents } : {}),
-      ...(typeof msg.ventDiaMm === 'number' ? { ventDiaMm: msg.ventDiaMm } : {}),
+      ...(pos(msg.ventDiaMm) !== undefined ? { ventDiaMm: pos(msg.ventDiaMm) } : {}),
       ...(typeof msg.includePryNotches === 'boolean' ? { includePryNotches: msg.includePryNotches } : {}),
       ...(typeof msg.dissolvableLiner === 'boolean' ? { dissolvableLiner: msg.dissolvableLiner } : {}),
       ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
@@ -580,6 +637,13 @@ export async function runMcpMoldSimulation(params: {
         fillFrom: typeof msg.fillMm === 'number' && msg.fillMm > 0 ? 'fill_mm' : box ? 'pour box' : 'rim',
         sizeMm: castRes.sizeMm,
         volumeMm3: Math.round(castRes.castVolumeMm3),
+        // Against the master the mold was made from, when it was made here.
+        ...(moldNode.simulation?.mold?.masterVolumeMm3
+          ? {
+              masterVolumeMm3: moldNode.simulation.mold.masterVolumeMm3,
+              ofMasterPercent: Math.round((castRes.castVolumeMm3 / moldNode.simulation.mold.masterVolumeMm3) * 100),
+            }
+          : {}),
         ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
         cavityComponents: castRes.cavityComponents,
         warnings: castRes.warnings,
@@ -667,6 +731,8 @@ export async function runMcpMoldSimulation(params: {
   }
   const added = await addSimulationToScene({
     mesh: stlToMesh(stl),
+    parts: moldSceneParts(moldRes),
+    mold: moldMasterRecord(scene, moldRes),
     transform: sceneStockTransform(),
     kind: 'mold',
     label: 'Mold',
@@ -674,6 +740,7 @@ export async function runMcpMoldSimulation(params: {
     details: [
       `Mold block: ${moldRes.moldWidthMm} × ${moldRes.moldDepthMm} × ${moldRes.moldHeightMm} mm`,
       `Cavity depth: ${moldRes.cavityDepthMm} mm (${moldRes.minDraftDeg}° min draft)`,
+      ...moldFeatureLines(moldRes.features),
     ],
   });
   return {
@@ -690,6 +757,9 @@ export async function runMcpMoldSimulation(params: {
     moldSizeMm: [moldRes.moldWidthMm, moldRes.moldDepthMm, moldRes.moldHeightMm],
     cavityDepthMm: moldRes.cavityDepthMm,
     minDraftDeg: moldRes.minDraftDeg,
+    ...(moldRes.features ? { features: moldRes.features } : {}),
+    // One geom per piece that prints apart: a half, or a lined half's shell and liner.
+    pieces: moldRes.parts.map((p) => ({ name: p.name, material: p.material })),
     volumeMm3: Math.round(added.volumeMm3),
     ...(moldRes.liner ? { liner: moldRes.liner } : {}),
     warnings: moldRes.warnings,

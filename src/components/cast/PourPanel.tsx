@@ -3,7 +3,7 @@ import { AlertTriangle } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useSettled } from '../../hooks/useSettled';
 import { AddSimulationButton } from '../MachineJobControls';
-import { MoldWorkerClient, addPourToScene, pourPlugNote, pourSideLabel, pourUndercutWarning } from '../../utils/moldWorkerClient';
+import { MoldWorkerClient, addPourToScene, pourPlugNote, pourShortfallWarning, pourSideLabel, pourUndercutWarning } from '../../utils/moldWorkerClient';
 import { POUR_DIRECTIONS, type PourDirection } from '../../utils/pourCast';
 import { isSiliconeMold, pourBoxIn } from '../../utils/pourTarget';
 import type { MoldCastSimulationResult } from '../../utils/moldCastSimulation';
@@ -114,6 +114,7 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
   const notes = cast ? castMaterialWarnings(material, cast.castVolumeMm3 / 1000, { pla: false }) : [];
   const undercut = pour ? pourUndercutWarning(pour) : null;
   const plug = pour ? pourPlugNote(pour) : null;
+  const short = cast ? pourShortfallWarning(moldNode, cast.castVolumeMm3) : null;
   return (
     <>
       <PanelBody>
@@ -195,6 +196,12 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
               <dt className="text-slate-500 dark:text-slate-400">Size</dt>
               <dd className="font-mono">{cast.sizeMm.width} × {cast.sizeMm.depth} × {cast.sizeMm.height} mm</dd>
             </dl>
+            {short && (
+              <p className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{short}</span>
+              </p>
+            )}
             {notes.map((n) => (
               <p key={n} className="text-xs text-amber-700 dark:text-amber-400">{n}</p>
             ))}

@@ -975,6 +975,12 @@ export interface SceneNode {
     stages?: number;
     /** The plan the step was simulated from, so a re-plan starts the steps over. */
     planKey?: string;
+    /**
+     * A generated mold's master, so a pour into it can say when it came up
+     * short: the master's volume, and whether the mold lies open as it prints
+     * (a clamshell's halves side by side, each filling on its own).
+     */
+    mold?: { masterVolumeMm3: number; laidOpen: boolean };
   };
 }
 

@@ -95,3 +95,53 @@ export function analyzeMesh(positions: ArrayLike<number>, faces: ArrayLike<numbe
     degenerateTriangles,
   };
 }
+
+export interface MeshShells {
+  /** Connected runs of triangles (sharing a vertex), whichever way they face. */
+  shells: number;
+  /** Shells that enclose outward: pieces of material, a loose bolt head among them. */
+  pieces: number;
+  /** Shells wound inward: the inside wall of a hollow, not a piece of its own. */
+  voids: number;
+}
+
+/**
+ * How many separate pieces a mesh is. "Watertight" is a fact about edges, so
+ * eleven closed shells pass it as well as one does, and a casting with ten
+ * bolt heads floating loose of it looked sound. A shell that winds inward is
+ * a hollow's inner wall and is counted apart, so a hollow ball is one piece.
+ * Connectivity is by vertex index, as `analyzeMesh` judges closedness.
+ */
+export function meshShells(positions: ArrayLike<number>, faces: ArrayLike<number>): MeshShells | null {
+  const triangles = faces.length / 3;
+  if (!triangles || !positions.length || triangles > MAX_CHECKED_TRIANGLES) return null;
+  const parent = new Int32Array(positions.length / 3);
+  for (let i = 0; i < parent.length; i++) parent[i] = i;
+  const find = (x: number) => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  const join = (a: number, b: number) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+  for (let i = 0; i < faces.length; i += 3) {
+    join(faces[i], faces[i + 1]);
+    join(faces[i], faces[i + 2]);
+  }
+  const volumes = new Map<number, number>();
+  for (let i = 0; i < faces.length; i += 3) {
+    const a = faces[i] * 3, b = faces[i + 1] * 3, c = faces[i + 2] * 3;
+    const v = (positions[a] * (positions[b + 1] * positions[c + 2] - positions[b + 2] * positions[c + 1])
+      - positions[a + 1] * (positions[b] * positions[c + 2] - positions[b + 2] * positions[c])
+      + positions[a + 2] * (positions[b] * positions[c + 1] - positions[b + 1] * positions[c])) / 6;
+    const root = find(faces[i]);
+    volumes.set(root, (volumes.get(root) ?? 0) + v);
+  }
+  let voids = 0;
+  for (const v of volumes.values()) if (v < 0) voids++;
+  return { shells: volumes.size, pieces: volumes.size - voids, voids };
+}

@@ -13,8 +13,9 @@ import {
   type MoldOptions,
   type MoldSummary,
 } from '../../utils/moldExporter';
-import { MoldWorkerClient, type MoldPreview } from '../../utils/moldWorkerClient';
+import { MoldWorkerClient, moldMasterRecord, moldSceneParts, type MoldPreview } from '../../utils/moldWorkerClient';
 import { DEFAULT_LINER_SKIN_MM } from '../../utils/moldLiner';
+import { moldFeatureLines } from '../../utils/moldExporter';
 import { castMaterial, castMaterialWarnings, castWeightG, mixGrams, type CastMaterialId } from '../../utils/castMaterials';
 import { ChainResult } from './ChainRun';
 import { OPEN_MOLD_ALLOWANCE } from '../../utils/moldExporter';
@@ -259,10 +260,12 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
     }
     const added = await addToScene.add({
       mesh: stlToMesh(bytes),
+      ...(preview ? { parts: moldSceneParts(preview.summary), mold: moldMasterRecord(scene, preview.summary) } : {}),
       transform: sceneStockTransform(),
       kind: 'mold',
       label: 'Mold',
       placement: 'beside',
+      details: moldFeatureLines(preview?.summary.features),
       select: false,
     });
     // Halves laid flat to print are not something to pour into or mold again.

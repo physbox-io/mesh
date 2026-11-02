@@ -21,7 +21,9 @@ export function exportBaseName(noteCards: NoteCard[], activePreset: string | und
     }
   }
 
-  if (!baseName && activePreset) {
+  // 'empty' is the blank scene a new design starts from, not a name for it:
+  // exports of whatever was built there all came out as empty.stl.
+  if (!baseName && activePreset && activePreset !== 'empty') {
     if (activePreset.startsWith('user:')) {
       baseName = activePreset.replace('user:', '').trim();
     } else {

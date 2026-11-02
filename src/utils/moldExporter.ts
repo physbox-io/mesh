@@ -158,6 +158,8 @@ export interface MoldExportResult {
   cavityHoldsTop: boolean;
   /** One plain sentence on how the mold was set up, when it was turned or chosen for the user. */
   setupNote?: string;
+  /** Sprue, vents, pins, sockets and pry notches: what and where each is. */
+  features?: MoldFeatureReport;
   binarySTL: Uint8Array;
   partBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
   moldBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
@@ -991,14 +993,92 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
   };
 }
 
+/**
+ * The features of a mold in words and numbers. The notches are the last
+ * sockets on the cavity half (they are cut the same way, only shallower).
+ */
+function describeMoldFeatures(
+  opts: MoldOptions,
+  base: HalfFeatures,
+  lid: HalfFeatures,
+  notchCount: number,
+): MoldFeatureReport {
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const at = (x: number, y: number): [number, number] => [r1(x), r1(y)];
+  const open = opts.moldType === 'open';
+  const baseHalf = open ? 'open mold' as const : 'cavity half' as const;
+  const sockets = base.sockets.slice(0, base.sockets.length - notchCount);
+  const notches = base.sockets.slice(base.sockets.length - notchCount);
+  const channels = open ? [] : lid.channels;
+  const sprue = opts.includeSprue && channels.length ? channels[0] : null;
+  const vents = sprue ? channels.slice(1) : channels;
+  return {
+    frame: 'mm from the centre of each half, as it prints (parting face up); the lid is mirrored in Y against the cavity half, as it closes over it',
+    sprue: sprue
+      ? { half: 'lid half', atMm: at(sprue.x, sprue.y), diaMm: r1(sprue.outerR * 2), narrowDiaMm: r1(sprue.innerR * 2) }
+      : null,
+    vents: vents.map((v) => ({ half: 'lid half' as const, atMm: at(v.x, v.y), diaMm: r1(v.innerR * 2) })),
+    blindVents: (base.topVents ?? []).map((v) => ({ half: baseHalf, atMm: at(v.x, v.y), diaMm: r1(v.r * 2), depthMm: r1(Math.abs(v.zRoof)) })),
+    pins: lid.pins.map((p) => ({ half: 'lid half' as const, atMm: at(p.x, p.y), diaMm: r1(p.baseR * 2), narrowDiaMm: r1(p.topR * 2), heightMm: r1(p.height) })),
+    sockets: sockets.map((k) => ({ half: baseHalf, atMm: at(k.x, k.y), diaMm: r1(k.rimR * 2), narrowDiaMm: r1(k.botR * 2), depthMm: r1(k.depth) })),
+    pryNotches: notches.map((k) => ({ half: baseHalf, atMm: at(k.x, k.y), diaMm: r1(k.rimR * 2), depthMm: r1(k.depth) })),
+  };
+}
+
+/** The feature report as short lines, for a note card. */
+export function moldFeatureLines(f: MoldFeatureReport | undefined): string[] {
+  if (!f) return [];
+  const xy = (m: MoldFeature) => `(${m.atMm[0]}, ${m.atMm[1]})`;
+  const list = (ms: MoldFeature[]) => ms.map(xy).join(', ');
+  return [
+    ...(f.sprue ? [`Sprue (pour hole): ⌀${f.sprue.diaMm} → ⌀${f.sprue.narrowDiaMm} mm through the lid at ${xy(f.sprue)}`] : []),
+    ...(f.vents.length ? [`Vents: ${f.vents.length}× ⌀${f.vents[0].diaMm} mm through the lid at ${list(f.vents)}`] : []),
+    ...(f.blindVents.length ? [`Blind vents: ${f.blindVents.length}× ⌀${f.blindVents[0].diaMm} mm down from the top at ${list(f.blindVents)}`] : []),
+    ...(f.pins.length ? [`Registration pins: ${f.pins.length}× ⌀${f.pins[0].diaMm} mm on the lid, sockets in the cavity half`] : []),
+    ...(f.pryNotches.length ? [`Pry notches: ${f.pryNotches.length} on the seam at ${list(f.pryNotches)}, to lever the halves apart`] : []),
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Mold setup: which mold, opening which way
 // ---------------------------------------------------------------------------
 
 export type MoldSetupFields = Pick<
   MoldExportResult,
-  'moldType' | 'pullDirection' | 'lostFraction' | 'cavityHoldsTop' | 'setupNote'
+  'moldType' | 'pullDirection' | 'lostFraction' | 'cavityHoldsTop' | 'setupNote' | 'features'
 >;
+
+/** One hole or peg of a mold, where it is on its half. */
+export interface MoldFeature {
+  half: 'cavity half' | 'lid half' | 'open mold';
+  /** From the centre of that half, mm, as it prints: parting face (or open top) up. */
+  atMm: [number, number];
+  diaMm: number;
+  /** For a tapered one, the diameter at its narrow end. */
+  narrowDiaMm?: number;
+  depthMm?: number;
+  heightMm?: number;
+}
+
+/**
+ * What every hole and peg on a mold is for, so nobody has to guess from the
+ * shape: an agent once called the pry notches channels.
+ */
+export interface MoldFeatureReport {
+  frame: string;
+  /** Poured into: through the lid from its outer face to the cavity, wide end out. */
+  sprue: MoldFeature | null;
+  /** Air out: through the lid, at the far ends of the cavity from the sprue. */
+  vents: MoldFeature[];
+  /** Blind vents bored down from an open mold's top over a trapped pocket of air. */
+  blindVents: MoldFeature[];
+  /** Registration pins standing on the lid's parting face, one keyed off its corner. */
+  pins: MoldFeature[];
+  /** Their sockets in the cavity half's parting face. */
+  sockets: MoldFeature[];
+  /** Shallow cones on the seam at the two side edges: lever the halves apart there. */
+  pryNotches: MoldFeature[];
+}
 
 /**
  * An open mold is one print with nothing to line up, so 'auto' takes it unless
@@ -1406,6 +1486,8 @@ export function generateMoldMeshes(
     ],
   };
 
+  setupFields.features = describeMoldFeatures(opts, baseFeatures, lidFeatures, notchPositions.length);
+
   const baseTrueDepth = opts.moldType === 'open' ? partHeightMm : (detailIsAbove ? zMax - partingZ : partingZ - zMin);
   const lidTrueDepth = detailIsAbove ? partingZ - zMin : zMax - partingZ;
   const baseBlockHeight = baseTrueDepth + opts.baseThicknessMm;
@@ -1592,7 +1674,33 @@ export type MoldSummary = Omit<
 > & {
   bottomHalf: MoldHalfSummary;
   topHalf?: MoldHalfSummary;
+  /** What prints as a separate piece, in the STL's triangle order. */
+  parts: MoldStlPart[];
 };
+
+/** One printed piece of a mold, as a run of the STL's triangles. */
+export interface MoldStlPart {
+  name: string;
+  triangles: number;
+  material: 'PLA' | 'PVA';
+}
+
+/**
+ * The STL's triangles cut into the pieces that print: a half, or a lined
+ * half's shell and liner. The STL holds them all, and a shell and its liner
+ * share every face where they meet, so one mesh of both reads as thousands of
+ * non-manifold edges though each piece is closed.
+ */
+export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf'>): MoldStlPart[] {
+  const of = (h: MoldMeshHalf): MoldStlPart[] =>
+    h.liner
+      ? [
+          { name: `${h.name} shell`, triangles: h.liner.shell.length, material: 'PLA' },
+          { name: `${h.name} liner`, triangles: h.liner.liner.length, material: 'PVA' },
+        ]
+      : [{ name: h.name, triangles: h.triangles.length, material: 'PLA' }];
+  return [...of(r.bottomHalf), ...(r.topHalf ? of(r.topHalf) : [])].filter((p) => p.triangles > 0);
+}
 
 /** Positions and per-vertex normals, ready for a BufferGeometry. */
 export interface MoldHalfBuffers {
@@ -1663,6 +1771,7 @@ export function moldSummary(r: MoldExportResult): MoldSummary {
     lostFraction: r.lostFraction,
     cavityHoldsTop: r.cavityHoldsTop,
     setupNote: r.setupNote,
+    ...(r.features ? { features: r.features } : {}),
     error: r.error,
     warnings: r.warnings,
     partBounds: r.partBounds,
@@ -1680,6 +1789,7 @@ export function moldSummary(r: MoldExportResult): MoldSummary {
     lidIsBackingPlate: r.lidIsBackingPlate,
     bottomHalf: half(r.bottomHalf),
     topHalf: r.topHalf ? half(r.topHalf) : undefined,
+    parts: r.success ? moldStlParts(r) : [],
     ...(r.liner ? { liner: r.liner } : {}),
   };
 }

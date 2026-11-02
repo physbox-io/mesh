@@ -17,6 +17,18 @@ import { exportPrintFiles } from '../../utils/printExport';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import type { McpCommands } from './types';
 
+/**
+ * What an export is called: the scene's name, else the one body exported,
+ * else the preset it came from. Never 'empty', the blank scene's preset id,
+ * which named every file built from scratch empty.stl.
+ */
+function exportFileBase(store: { sceneGraph: { name?: string; nodes: { id: string; name: string; simulation?: unknown }[] }; activePreset?: string }, ids: string[]): string {
+  const bodies = ids.length ? ids : store.sceneGraph.nodes.filter((n) => !n.simulation).map((n) => n.id);
+  const only = bodies.length === 1 ? store.sceneGraph.nodes.find((n) => n.id === bodies[0])?.name : undefined;
+  const preset = store.activePreset && store.activePreset !== 'empty' ? store.activePreset.replace(/^user:/, '') : undefined;
+  return store.sceneGraph.name || only || preset || 'model';
+}
+
 export const castCommands: McpCommands = {
     /*
      * A printed pour box for a silicone mold of the given bodies (default:
@@ -286,7 +298,7 @@ export const castCommands: McpCommands = {
       ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
       bed: exportBed,
       ...(typeof msg.marginMm === 'number' && Number.isFinite(msg.marginMm) && msg.marginMm >= 0 ? { marginMm: msg.marginMm } : {}),
-      baseName: store.sceneGraph.name || store.activePreset || 'model',
+      baseName: exportFileBase(store, ids),
     });
     if (!result.files.length) {
       return { ok: false, error: 'Nothing printable in what was asked for: no body with solid geometry (bought-in hardware and simulated cuts are left out).', warnings: result.warnings };

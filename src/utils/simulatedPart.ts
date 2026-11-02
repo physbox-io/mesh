@@ -262,6 +262,31 @@ export function reliefSimulationTools(
 
 export type SimulationPlacement = 'beside' | 'overlay';
 
+/** A run of a simulated mesh's triangles that is a piece of its own. */
+export interface SimulationPart {
+  name: string;
+  triangles: number;
+  rgba?: number[];
+}
+
+/** One geom's vertices and faces: the faces given, renumbered over just the vertices they use. */
+function compactRun(vertices: number[], renderVertices: number[], faces: ArrayLike<number>, from: number, to: number) {
+  const remap = new Map<number, number>();
+  const v: number[] = [], rv: number[] = [], f: number[] = [];
+  for (let i = from; i < to; i++) {
+    const old = faces[i];
+    let k = remap.get(old);
+    if (k === undefined) {
+      k = remap.size;
+      remap.set(old, k);
+      v.push(vertices[old * 3], vertices[old * 3 + 1], vertices[old * 3 + 2]);
+      rv.push(renderVertices[old * 3], renderVertices[old * 3 + 1], renderVertices[old * 3 + 2]);
+    }
+    f.push(k);
+  }
+  return { vertices: v, renderVertices: rv, faces: f };
+}
+
 /** Light wood, a shade off any model colour so the two are told apart. */
 export const SIMULATION_RGBA = [0.86, 0.7, 0.48, 1];
 
@@ -293,6 +318,12 @@ export function simulatedBody(
     machineFrame?: number[];
     /** Which step of a job this is, and the plan it belongs to. */
     stage?: { index: number; of: number; planKey: string };
+    /**
+     * The mesh's faces in runs, one geom each (a mold's halves, a lined
+     * half's shell and liner): pieces that print apart stay apart, rather
+     * than one mesh where two pieces' shared faces read as non-manifold.
+     */
+    parts?: SimulationPart[];
   }
 ): SceneNode {
   const p = sim.positions;
@@ -332,10 +363,14 @@ export function simulatedBody(
     }
     let startX = transform.modelMaxMm[0];
     for (const n of opts.existing ?? []) {
-      const mesh = n.geoms?.find((g) => g.renderVertices?.length);
-      if (!mesh?.renderVertices) continue;
+      // Every geom: a mold is one per printed piece.
       let far = -Infinity;
-      for (let i = 0; i < mesh.renderVertices.length; i += 3) far = Math.max(far, mesh.renderVertices[i]);
+      for (const g of n.geoms ?? []) {
+        const rv = g.renderVertices;
+        if (!rv?.length) continue;
+        for (let i = 0; i < rv.length; i += 3) far = Math.max(far, rv[i]);
+      }
+      if (far === -Infinity) continue;
       startX = Math.max(startX, (n.pos[0] + far) * 1000);
     }
     const gap = 20;
@@ -366,26 +401,35 @@ export function simulatedBody(
     vertices[i] = x; vertices[i + 1] = z; vertices[i + 2] = -y;
   }
 
-  const geom: SceneGeom = {
-    name: `${opts.id}_mesh`,
+  const geomOf = (name: string, mesh: Pick<SceneGeom, 'vertices' | 'renderVertices' | 'faces'>, rgba?: number[]): SceneGeom => ({
+    name,
     type: 'mesh',
     size: [1],
-    rgba: [...SIMULATION_RGBA],
+    rgba: [...(rgba ?? SIMULATION_RGBA)],
     // Drawn from the body's transform rather than baked into world space.
     dynamic: true,
     // Nothing to collide with: it is there to be looked at and measured.
     contype: 0,
     conaffinity: 0,
-    vertices,
-    renderVertices,
-    faces: Array.from(sim.faces),
-  };
+    ...mesh,
+  });
+  const runs = opts.parts?.filter((p) => p.triangles > 0) ?? [];
+  const split = runs.length > 1 && runs.reduce((n, p) => n + p.triangles, 0) * 3 === sim.faces.length;
+  let at = 0;
+  const geoms = split
+    ? runs.map((p, i) => {
+        const from = at;
+        at += p.triangles * 3;
+        return geomOf(`${opts.id}_${i}_${p.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')}`,
+          compactRun(vertices, renderVertices, sim.faces, from, at), p.rgba);
+      })
+    : [geomOf(`${opts.id}_mesh`, { vertices, renderVertices, faces: Array.from(sim.faces) })];
   return {
     id: opts.id,
     name: opts.name,
     type: 'body',
     pos: origin.map((v) => v / 1000),
-    geoms: [geom],
+    geoms,
     // No joint: it stays where it is put.
     joints: [],
     children: [],

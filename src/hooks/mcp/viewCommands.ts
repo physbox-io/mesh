@@ -155,6 +155,9 @@ export const viewCommands: McpCommands = {
         return {
           totalMassKg: +total.toPrecision(6),
           ...(fixed > 0 ? { fixedMassKg: +fixed.toPrecision(6) } : {}),
+          // Summed from the installed model, so it is the previous build's
+          // until the recompile lands (see modelStale).
+          ...(stale.size || compiling ? { massStale: true } : {}),
         };
       })() : {}),
       // Only for something being made: see isFabricationScene.
