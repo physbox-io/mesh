@@ -47,6 +47,16 @@ export interface MjcfOptions {
   stats?: { meshTriangles: number };
 }
 
+/**
+ * Air density for MuJoCo's fluid model. Left at the scene's default of 0,
+ * the model is off and its wind moves nothing: only bodies marked
+ * aerodynamic, which the worker pushes itself (assuming 1.225 then too),
+ * felt the wind slider. So wind without a stated density blows through
+ * sea-level air; with no wind, 0 still means no air drag at all, as before.
+ */
+export const airDensity = (density: number, windX: number, windY: number) =>
+  density > 0 ? density : (windX || windY ? 1.225 : 0);
+
 export const compileToMJCF = (
   scene: SceneGraph,
   gravityZ: number = -9.81,
@@ -118,7 +128,7 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
 ` : ''}${contactArenaXml(nodes)}  ${withCloth ? `<!-- Cloth: flex elasticity integrates only under the discrete integrator,
        with a looser solve, because cloth is the costliest thing here by far
        (utils/cloth/clothMjcf.ts). -->
-  ` : ''}<option integrator="${withCloth ? CLOTH_OPTION.integrator : 'implicitfast'}"${needsEllipticCone(nodes, floorFriction) ? ' cone="elliptic"' : ''} timestep="${withCloth ? CLOTH_OPTION.timestep : 0.001}" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" ${withCloth ? CLOTH_OPTION.extra : 'iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"'}${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
+  ` : ''}<option integrator="${withCloth ? CLOTH_OPTION.integrator : 'implicitfast'}"${needsEllipticCone(nodes, floorFriction) ? ' cone="elliptic"' : ''} timestep="${withCloth ? CLOTH_OPTION.timestep : 0.001}" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${airDensity(density, windX, windY)}" ${withCloth ? CLOTH_OPTION.extra : 'iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"'}${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
     <geom solref="${contactTime} 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>
