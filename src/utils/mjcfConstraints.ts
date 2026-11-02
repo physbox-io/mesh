@@ -2,7 +2,7 @@ import type { SceneNode, SceneJoint } from '../types/scene';
 import { quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import type { buildBreakModel } from './breakModel';
 import { RIGID_COUPLING, jointCouplingXml } from './jointCoupling';
-import { planCouplings, restPoses } from './sceneCouplings';
+import { modelJoints, planCouplings, restPoses } from './sceneCouplings';
 import { estimateJointInertia, relocateCoupledFriction, type CouplingEdge } from './coupledFriction';
 import { UNSLIPPING_CLUTCH, clutchDriverJointName, clutchTendonXml, isClutchedMotor } from './motorClutch';
 import { xmlAttr } from './xmlAttr';
@@ -34,7 +34,7 @@ function gather(nodes: SceneNode[]) {
     for (const node of list) {
       byId.set(node.id, node);
       byName.set(node.name, node);
-      for (const j of node.joints || []) {
+      for (const j of modelJoints(node)) {
         jointsByName.set(j.name, { node, joint: j });
         if (j.crumpleTorqueNm !== undefined && j.type !== 'free') {
           crumpleLocks.push({ jointName: j.name, bodyName: node.name, bodyId: node.id, parentName: parentName ?? '', parentId });
@@ -49,7 +49,7 @@ function gather(nodes: SceneNode[]) {
       if (node.connectTargetId && node.connectAnchor) {
         connects.push({ bodyId: node.id, bodyName: node.name, targetId: node.connectTargetId, anchor: node.connectAnchor });
       }
-      for (const j of node.joints || []) if (j.actuator) actuators.push(j);
+      for (const j of modelJoints(node)) if (j.actuator) actuators.push(j);
       walk(node.children, node.name, node.id);
     }
   };

@@ -42,6 +42,10 @@ function present(nodes: SceneNode[]): Present {
   const out: Present = { names: new Set(), prefixes: [] };
   const walk = (list: SceneNode[]) => {
     for (const n of list || []) {
+      // A pulley rope is no body in the model, so nothing can be welded or
+      // pinned to it: MuJoCo refused the whole scene ("unknown element").
+      // What hangs under one still is.
+      if (n.isPulleyRope) { walk(n.children || []); continue; }
       if (n.id) out.names.add(n.id);
       if (n.name) out.names.add(n.name);
       // MuJoCo names a cable's bodies <prefix>B_first, B_1 … B_last.

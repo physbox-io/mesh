@@ -154,12 +154,20 @@ const buildJoint = (joint: SceneJoint) => {
 
 export const buildNode = (node: SceneNode): string => {
   if (!node) return '';
+  const posStr = Array.isArray(node.pos) ? node.pos.join(' ') : '0 0 0';
   // Logical-only nodes (e.g. pulley ropes) have no geoms or joints and must not
   // emit a <body> into MJCF — a bodyless body causes implicit inertia artefacts.
-  if (node.isPulleyRope) return '';
+  // But a part added with the rope selected lands under it, and was dropped
+  // from the model with it. Its position is in the rope's frame, as the rest
+  // of the tree reads it (getNodeWorldPos, restPoses), so it goes in a
+  // <frame>, which places bodies without being one.
+  if (node.isPulleyRope) {
+    if (!node.children?.length) return '';
+    const turn = node.quat ? ` quat="${node.quat.join(' ')}"` : node.euler ? ` euler="${node.euler.join(' ')}"` : '';
+    return `<frame pos="${posStr}"${turn}>${node.children.map(buildNode).join('')}</frame>`;
+  }
 
   const nameStr = node.name || node.id || 'body';
-  const posStr = Array.isArray(node.pos) ? node.pos.join(' ') : '0 0 0';
 
   if (node.isComposite) {
     const type = node.compositeType === 'rope' ? 'cable' : (node.compositeType || 'cable');

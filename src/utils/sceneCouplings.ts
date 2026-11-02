@@ -51,15 +51,24 @@ export function restPoses(nodes: SceneNode[]): Record<string, WorldPose> {
 }
 
 /**
+ * The joints a body has in the model. A composite's (a cable's) are settings
+ * for the joints MuJoCo generates along it, under other names: one coupled,
+ * driven or meshed as a gear named a joint the model does not have, and
+ * MuJoCo refused the whole scene.
+ */
+export const modelJoints = (node: SceneNode): SceneJoint[] => (node.isComposite ? [] : node.joints || []);
+
+/**
  * The joint a coupling drives: the body's first hinge or slide. A free joint
  * is six numbers, and a coupling to it drove only the first, its X: a body
  * built with no joint (so given a free one) was flung sideways at 4.9 m/s by
  * the slide coupled to it.
  */
 const couplable = (j: SceneJoint) => j.type === 'hinge' || j.type === 'slide';
-export const couplingJoint = (node: SceneNode): SceneJoint | undefined => (node.joints || []).find(couplable);
+export const couplingJoint = (node: SceneNode): SceneJoint | undefined => modelJoints(node).find(couplable);
 
 const jointsSaid = (node: SceneNode) => {
+  if (node.isComposite) return 'only the joints of a cable, which MuJoCo makes along it';
   const types = [...new Set((node.joints || []).map((j) => j.type ?? 'hinge'))];
   return types.length ? `only a ${types.join(' and a ')} joint` : 'no joint';
 };
@@ -97,7 +106,7 @@ export function planCouplings(nodes: SceneNode[], world: Record<string, WorldPos
       if (node.isPulleyRope) pulleyRopesList.push(node);
       const couplingAllowed = node.allowCoupling !== false;
       const pose = world[node.id] ?? { pos: [0, 0, 0], quat: [1, 0, 0, 0] as QuatWXYZ, size: [] };
-      for (const j of node.joints || []) {
+      for (const j of modelJoints(node)) {
         if (couplingAllowed && j.type === 'hinge') {
           const g = gearBody(node, j, pose, pitchRadius(node));
           if (node.id.includes('gear')) gearJointNodes.push(g);

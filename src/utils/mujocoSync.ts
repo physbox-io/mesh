@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { cloneSceneGraph } from '../store/useStore';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import type { ModelMirror, MujocoShim } from '../types/sceneLayer';
+import { nodeLocalQuat } from './sceneTree';
 
 // The slice of the MuJoCo model/data mirror that scene syncing reads. Only
 // these members are touched here, but they are the store's own mirror types so
@@ -28,9 +29,17 @@ export const getSyncedSceneGraph = (
     parentWorldQuat: THREE.Quaternion
   ) => {
     if (node.isPulleyRope) {
-      if (node.children) {
+      // No body of its own, but its children sit in its frame: mjcf.ts puts
+      // them in a <frame> at the rope's pose, and the tree reads them so.
+      // Handing them the parent's frame wrote each child back off by the
+      // rope's offset, and it jumped there on the next build.
+      if (node.children?.length) {
+        const [w, x, y, z] = nodeLocalQuat(node);
+        const ropeQuat = parentWorldQuat.clone().multiply(new THREE.Quaternion(x, y, z, w));
+        const p = node.pos ?? [0, 0, 0];
+        const ropePos = new THREE.Vector3(p[0], p[1], p[2]).applyQuaternion(parentWorldQuat).add(parentWorldPos);
         for (const child of node.children) {
-          syncNode(child, parentWorldPos, parentWorldQuat);
+          syncNode(child, ropePos, ropeQuat);
         }
       }
       return;
