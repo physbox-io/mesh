@@ -74,8 +74,69 @@ describe('Laser Cut Exporter Engine', () => {
 
     const result = exportLaserCutSvg(sphereScene, DEFAULT_LASER_OPTIONS);
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Laser cut export failed');
-    expect(result.error).toContain('unsupported curved geometries');
+    expect(result.error).toContain('Nothing here cuts from sheet');
+    expect(result.error).toContain('curved sides');
+    expect(result.error).toMatch(/Contour|Unfold/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Any part that is a sheet cuts as its outline, whatever the outline
+// ---------------------------------------------------------------------------
+
+describe('sheets of any outline', () => {
+  const one = (g: SceneGeom): SceneGraph => ({ nodes: [{ id: 'b', name: 'part', type: 'body', pos: [0, 0, 0.1], joints: [], children: [], geoms: [g] }] });
+  const cut = (g: SceneGeom, thicknessMm: number) =>
+    exportLaserCutSvg(one(g), { ...DEFAULT_LASER_OPTIONS, materialThickness: thicknessMm / 1000 });
+  // From the outline's own centre: panel coordinates sit wherever the layout put them.
+  const radiusOf = (pts: { x: number; y: number }[]) => {
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    return pts.map((p) => Math.hypot(p.x - cx, p.y - cy));
+  };
+
+  it('cuts a disc (a cylinder primitive) as a true circle', () => {
+    const r = cut({ name: 'disc', type: 'cylinder', size: [0.04, 0.0015] } as SceneGeom, 3);
+    expect(r.success).toBe(true);
+    const outline = r.panels![0].outerPolygon2D;
+    expect(outline.length).toBeGreaterThan(48);
+    for (const d of radiusOf(outline)) expect(Math.abs(d - 40)).toBeLessThan(0.06);
+  });
+
+  it('cuts a thick puck through thick stock as one profile', () => {
+    const r = cut({ name: 'puck', type: 'cylinder', size: [0.03, 0.03] } as SceneGeom, 80);
+    expect(r.success).toBe(true);
+    expect(r.panels).toHaveLength(1);
+    expect(r.panels![0].thickness).toBeCloseTo(0.06);
+  });
+
+  it('refuses a solid with curved sides on thin stock instead of cutting its two ends loose', () => {
+    for (const g of [
+      { name: 'post', type: 'cylinder', size: [0.03, 0.03] },
+      { name: 'ball', type: 'sphere', size: [0.03] },
+      { name: 'lens', type: 'ellipsoid', size: [0.04, 0.03, 0.0015] },
+      { name: 'pill', type: 'capsule', size: [0.01, 0.03] },
+    ] as SceneGeom[]) {
+      const r = cut(g, 3);
+      expect(r.success, g.name).toBe(false);
+      expect(r.error).toContain('curved sides');
+    }
+  });
+
+  it('cuts a mesh plate with an arc in its outline, keeping the arc', () => {
+    const n = 40, rad = 0.03, h = 0.003, v: number[] = [], f: number[] = [];
+    for (let k = 0; k < n; k++) {
+      const a = (Math.PI * k) / (n - 1);
+      v.push(rad * Math.cos(a), rad * Math.sin(a), 0, rad * Math.cos(a), rad * Math.sin(a), h);
+    }
+    const m = v.length / 3;
+    v.push(0, 0, 0, 0, 0, h);
+    for (let k = 0; k < n; k++) { const a = 2 * k, b = 2 * ((k + 1) % n); f.push(a, b, b + 1, a, b + 1, a + 1); }
+    for (let k = 0; k < n - 1; k++) f.push(m, 2 * (k + 1), 2 * k, m + 1, 2 * k + 1, 2 * (k + 1) + 1);
+    f.push(m, 0, 2 * (n - 1), m + 1, 2 * (n - 1) + 1, 1);
+    const r = cut({ name: 'half', type: 'mesh', size: [1], renderVertices: v, faces: f } as SceneGeom, 3);
+    expect(r.success).toBe(true);
+    expect(r.panels![0].outerPolygon2D.length).toBeGreaterThan(30);
   });
 });
 

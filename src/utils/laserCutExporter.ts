@@ -6,7 +6,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { csgSourceGeoms, fromtoFrame } from './csg';
 import * as THREE from 'three';
 import { splitPanelsToFit } from './panelSplitter';
-import { texturedSurfaceOf } from './geomSurface';
+import { appendBaseGeomTriangles, texturedSurfaceOf } from './geomSurface';
 import { reliefContours } from './patternEngrave';
 import { isBoughtIn } from './boughtIn';
 import { isNodeRotationBaked } from './sceneTree';
@@ -734,6 +734,33 @@ function mirrorPanelFrame(panel: LaserPanel): void {
   if (panel.engrave2D) panel.engrave2D = panel.engrave2D.map((l) => l.map((p) => ({ x: -p.x, y: p.y })));
 }
 
+/**
+ * A primitive as a welded, world-space mesh geom, for the mesh panel path.
+ * Curves get chords within 0.01 mm of true, since this is the outline that
+ * is cut; null for what has no solid (a plane).
+ */
+function primitiveAsMesh(geom: SceneGeom, geomMatrix: THREE.Matrix4): SceneGeom | null {
+  const rMm = Math.max(...(geom.size ?? [0.01]).slice(0, geom.type === 'ellipsoid' ? 3 : 1)) * 1000;
+  const radial = Math.max(48, Math.min(256, Math.ceil(Math.PI / Math.acos(Math.max(-1, 1 - 0.01 / Math.max(rMm, 0.01))))));
+  const soup: number[] = [];
+  if (!appendBaseGeomTriangles(geom, getGeomFrame(geom).halfLen, geomMatrix, soup, radial)) return null;
+  // Welded, so the mesh path sees one surface rather than loose triangles.
+  const index = new Map<string, number>();
+  const verts: number[] = [];
+  const faces: number[] = [];
+  for (let i = 0; i < soup.length; i += 3) {
+    const key = `${soup[i].toFixed(9)},${soup[i + 1].toFixed(9)},${soup[i + 2].toFixed(9)}`;
+    let k = index.get(key);
+    if (k === undefined) {
+      k = verts.length / 3;
+      index.set(key, k);
+      verts.push(soup[i], soup[i + 1], soup[i + 2]);
+    }
+    faces.push(k);
+  }
+  return { name: geom.name, type: 'mesh', size: [1], renderVertices: verts, faces } as SceneGeom;
+}
+
 export function extractPanelsFromScene(
   scene: SceneGraph,
   options: LaserCutOptions
@@ -761,8 +788,26 @@ export function extractPanelsFromScene(
     for (const geom of positiveGeoms) {
       const geomMatrix = getGeomTransform(geom, bodyMatrix);
 
-      if (geom.type === 'sphere' || geom.type === 'ellipsoid' || geom.type === 'capsule') {
-        invalidGeoms.push(`${node.name} (${geom.name || geom.type})`);
+      if (geom.type !== 'box' && geom.type !== 'mesh') {
+        // Every other primitive (cylinder, sphere, capsule, ellipsoid) as the
+        // mesh it is, through the mesh path below: whatever has two flat
+        // skins cuts as its outline (a disc, a round lid), and whatever has
+        // none is said to be curved. Primitives other than boxes used to be
+        // skipped or refused by type, so a disc came back as "nothing to cut".
+        const asMesh = primitiveAsMesh(geom, geomMatrix);
+        const meshPanels = asMesh
+          ? extractPanelsFromMeshGeom(asMesh, new THREE.Matrix4(), node.name, options, panelIdCounter, diffGeoms, bodyMatrix)
+          : [];
+        if (meshPanels.length === 0) {
+          invalidGeoms.push(`${node.name} (${geom.name || geom.type}: curved sides a flat sheet cannot make)`);
+        } else {
+          for (const panel of meshPanels) {
+            panel.name = meshPanels.length === 1 ? (geom.name || node.name) : panel.name;
+            attachPatternEngraving(panel, geom, geomMatrix);
+          }
+          panels.push(...meshPanels);
+          panelIdCounter += meshPanels.length;
+        }
         continue;
       }
 
@@ -927,7 +972,7 @@ export function extractPanelsFromScene(
         );
 
         if (meshPanels.length === 0) {
-          invalidGeoms.push(`${node.name} (curved non-planar mesh)`);
+          invalidGeoms.push(`${node.name} (${geom.name || 'mesh'}: curved sides a flat sheet cannot make)`);
         } else {
           for (const panel of meshPanels) attachPatternEngraving(panel, geom, geomMatrix);
           panels.push(...meshPanels);
@@ -1054,7 +1099,7 @@ function extractPanelsFromMeshGeom(
   // engine works from mid-planes, so getting this right is what lets meshed
   // geometry interlock with the same accuracy as box primitives.
   const consumed = new Set<number>();
-  const slabs: { info: GroupInfo; thickness: number; offset: number }[] = [];
+  const slabs: { info: GroupInfo; thickness: number; offset: number; paired: boolean }[] = [];
 
   for (let i = 0; i < infos.length; i++) {
     if (consumed.has(i)) continue;
@@ -1073,7 +1118,9 @@ function extractPanelsFromMeshGeom(
       // Signed distance from plane i to plane j along plane i's normal.
       const sep = -(gi.group.planeDist + gj.group.planeDist);
       const th = Math.abs(sep);
-      if (th < 0.0002 || th > 0.03) continue;
+      // Up to half again the stock: thick foam and slab stock are sheets too,
+      // and a fixed 30 mm left an 80 mm board's parts unpaired.
+      if (th < 0.0002 || th > Math.max(0.03, 1.5 * options.materialThickness)) continue;
       if (gj.area < gi.area * 0.25 || gj.area > gi.area * 4) continue;
 
       // The two skins must sit on top of each other, not merely be parallel.
@@ -1092,13 +1139,20 @@ function extractPanelsFromMeshGeom(
     consumed.add(i);
     if (bestJ >= 0) {
       consumed.add(bestJ);
-      slabs.push({ info: gi, thickness: Math.abs(bestSep), offset: bestSep / 2 });
+      slabs.push({ info: gi, thickness: Math.abs(bestSep), offset: bestSep / 2, paired: true });
     } else {
-      slabs.push({ info: gi, thickness: options.materialThickness, offset: 0 });
+      slabs.push({ info: gi, thickness: options.materialThickness, offset: 0, paired: false });
     }
   }
 
+  const totalArea = tris.reduce((sum, t) => sum + new THREE.Vector3().subVectors(t.b, t.a).cross(new THREE.Vector3().subVectors(t.c, t.a)).length() * 0.5, 0);
+  const totalAreaMm2 = totalArea * 1e6;
   let idCounter = startId;
+  // A solid shelled into panels (each face cut from stock, as a box is)
+  // must be flat-faced all over: where its sides curve, the panels leave
+  // them open, and a cylinder came out as two loose discs.
+  let shelledArea = 0;
+  const pairedPanels = new Set<number>();
   for (const slab of slabs) {
     const group = slab.info.group;
 
@@ -1170,7 +1224,8 @@ function extractPanelsFromMeshGeom(
     // Triangulated boundaries arrive as long runs of nearly-colinear points and,
     // where a CSG result was quantised, as sub-millimetre staircases. Both are
     // below any cutter's resolution, so flatten them before joints are cut.
-    const clean = (l: Point2D[]) => simplifyPolyline2D(simplifyPolygon2D(l), 0.25);
+    // 0.05 mm: under any kerf, and an arc stays an arc rather than facets.
+    const clean = (l: Point2D[]) => simplifyPolyline2D(simplifyPolygon2D(l), 0.05);
     const outerPolygon2D = clean(loops[0]);
     const innerCutouts2D = loops.slice(1).map(clean).filter(l => l.length >= 3);
 
@@ -1203,15 +1258,23 @@ function extractPanelsFromMeshGeom(
     const perimeterMm = loopPerimeter(outerPolygon2D) +
       innerCutouts2D.reduce((acc, l) => acc + loopPerimeter(l), 0);
     const areaMm2 = slab.info.area * 1e6;
-    if (areaMm2 < 1.5 * perimeterMm * slab.thickness * 1000) continue;
-
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const pt of outerPolygon2D) {
-      minX = Math.min(minX, pt.x); maxX = Math.max(maxX, pt.x);
-      minY = Math.min(minY, pt.y); maxY = Math.max(maxY, pt.y);
+    // A paired slab that is the whole part, its outline straight through
+    // (two skins and the walls between, nothing else), is a profile cut
+    // however thick: a puck cut through 80 mm stock is not a rim band.
+    const wholePrism = slab.paired &&
+      Math.abs(totalAreaMm2 - (2 * areaMm2 + perimeterMm * slab.thickness * 1000)) <= 0.03 * totalAreaMm2;
+    if (!wholePrism) {
+      if (areaMm2 < 1.5 * perimeterMm * slab.thickness * 1000) continue;
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const pt of outerPolygon2D) {
+        minX = Math.min(minX, pt.x); maxX = Math.max(maxX, pt.x);
+        minY = Math.min(minY, pt.y); maxY = Math.max(maxY, pt.y);
+      }
+      if (Math.min(maxX - minX, maxY - minY) < 2 * slab.thickness * 1000) continue;
     }
-    if (Math.min(maxX - minX, maxY - minY) < 2 * slab.thickness * 1000) continue;
 
+    if (!slab.paired) shelledArea += slab.info.area;
+    else pairedPanels.add(idCounter);
     meshPanels.push({
       id: `panel_${idCounter++}`,
       name: `${geom.name || nodeName}_poly_${meshPanels.length + 1}`,
@@ -1226,7 +1289,9 @@ function extractPanelsFromMeshGeom(
     });
   }
 
-  return meshPanels;
+  if (shelledArea > 0 && shelledArea < 0.95 * totalArea) {
+    return meshPanels.filter((p) => pairedPanels.has(Number(p.id.replace('panel_', ''))));
+  }
   return meshPanels;
 }
 
@@ -2632,7 +2697,8 @@ function applyJointsToPanels(
   // and mortise already cut, because those are what create the inside corners.
   warnings.push(...reliefWarnings(panels, options));
 
-  if (unjointed.length > 0) {
+  // A lone part (a disc, a sign, a bracket) joins nothing by design.
+  if (unjointed.length > 0 && panels.length > 1) {
     warnings.push(
       `No joints were cut for ${unjointed.join(', ')} — nothing in the model butts against ` +
       `${unjointed.length === 1 ? 'this panel' : 'these panels'} edge-to-edge, so ` +
@@ -2913,9 +2979,9 @@ export function exportLaserCutSvg(
     if (invalidGeoms.length > 0) {
       return {
         success: false,
-        error: `Laser cut export failed: Scene contains unsupported curved geometries [${invalidGeoms.join(
+        error: `Nothing here cuts from sheet: ${invalidGeoms.join(
           ', '
-        )}]. Laser cutting requires flat planar panels or box primitives.`,
+        )}. Flat cutting takes parts that are a sheet (any outline, about the stock's thickness) or solids with flat faces all over; a curved solid slices with Contour or unfolds with Unfold.`,
       };
     }
     return {

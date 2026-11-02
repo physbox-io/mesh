@@ -32,7 +32,9 @@ export function appendBaseGeomTriangles(
   geom: SceneGeom,
   halfLen: number | undefined,
   matrix: THREE.Matrix4,
-  out: number[]
+  out: number[],
+  /** Segments round a curved primitive; a cut outline wants more than a slice does. */
+  radial = 48,
 ): boolean {
   const s = geom.size || [];
   const r = s[0] || 0.01;
@@ -43,17 +45,17 @@ export function appendBaseGeomTriangles(
       geometry = new THREE.BoxGeometry(2 * (s[0] || 0.01), 2 * (s[1] || 0.01), 2 * (s[2] || 0.01));
       break;
     case 'sphere':
-      geometry = new THREE.SphereGeometry(r, 48, 24);
+      geometry = new THREE.SphereGeometry(r, radial, Math.max(12, radial >> 1));
       break;
     case 'ellipsoid':
-      geometry = new THREE.SphereGeometry(1, 48, 24).scale(s[0] || 0.01, s[1] || 0.01, s[2] || 0.01);
+      geometry = new THREE.SphereGeometry(1, radial, Math.max(12, radial >> 1)).scale(s[0] || 0.01, s[1] || 0.01, s[2] || 0.01);
       break;
     case 'cylinder':
       // three builds these around +Y; the scene's primitives run along local +Z.
-      geometry = new THREE.CylinderGeometry(r, r, 2 * (halfLen ?? s[1] ?? r), 48).rotateX(Math.PI / 2);
+      geometry = new THREE.CylinderGeometry(r, r, 2 * (halfLen ?? s[1] ?? r), radial).rotateX(Math.PI / 2);
       break;
     case 'capsule':
-      geometry = new THREE.CapsuleGeometry(r, 2 * (halfLen ?? s[1] ?? r), 12, 32).rotateX(Math.PI / 2);
+      geometry = new THREE.CapsuleGeometry(r, 2 * (halfLen ?? s[1] ?? r), 12, Math.max(32, radial)).rotateX(Math.PI / 2);
       break;
     case 'mesh': {
       // vertices is the Y-up (three.js) copy; renderVertices shares its space
