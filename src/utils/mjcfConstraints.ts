@@ -26,12 +26,14 @@ function gather(nodes: SceneNode[]) {
   const welds: Weld[] = [];
   const crumpleLocks: CrumpleLock[] = [];
   const connects: Connect[] = [];
-  const nodeNames: Record<string, string> = {};
+  const byId = new Map<string, SceneNode>();
+  const byName = new Map<string, SceneNode>();
   const jointsByName = new Map<string, { node: SceneNode; joint: SceneJoint }>();
   const walk = (list: SceneNode[], parentName?: string, parentId?: string) => {
     if (!list) return;
     for (const node of list) {
-      nodeNames[node.id] = node.name;
+      byId.set(node.id, node);
+      byName.set(node.name, node);
       for (const j of node.joints || []) {
         jointsByName.set(j.name, { node, joint: j });
         if (j.crumpleTorqueNm !== undefined && j.type !== 'free') {
@@ -52,7 +54,14 @@ function gather(nodes: SceneNode[]) {
     }
   };
   walk(nodes);
-  return { actuators, welds, crumpleLocks, connects, nodeNames, jointsByName };
+  /**
+   * The body a weld or a pin names at its other end: by id, or failing that by
+   * name, which danglingReferences accepts as present too. A Map, not an
+   * object: `'constructor' in {}` is true, and a body of that name came out
+   * as body2="function Object() { [native code] }".
+   */
+  const bodyOf = (target: string): SceneNode | undefined => byId.get(target) ?? byName.get(target);
+  return { actuators, welds, crumpleLocks, connects, bodyOf, jointsByName };
 }
 
 /**
@@ -109,15 +118,15 @@ const actuatorXml = (j: SceneJoint): string => {
  * run on the compile's own copy, and before the bodies are emitted.
  */
 export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof buildBreakModel>) {
-  const { actuators, welds, crumpleLocks, connects, nodeNames, jointsByName } = gather(nodes);
+  const { actuators, welds, crumpleLocks, connects, bodyOf, jointsByName } = gather(nodes);
   // Every body's rest pose, world frame.
   const poses = restPoses(nodes);
   // What is coupled to what: explicit couplings, meshing gears, racks, ropes.
   const plan = planCouplings(nodes, poses);
 
   const looped = new Set<string>();
-  for (const c of connects) { looped.add(c.bodyId); looped.add(c.targetId); }
-  for (const w of welds) { if (w.bodyId) looped.add(w.bodyId); looped.add(w.targetId); }
+  for (const c of connects) { looped.add(c.bodyId); looped.add(bodyOf(c.targetId)?.id ?? c.targetId); }
+  for (const w of welds) { if (w.bodyId) looped.add(w.bodyId); looped.add(bodyOf(w.targetId)?.id ?? w.targetId); }
   clutchStiffServos(actuators, looped, new Set(plan.couplings.flatMap((c) => [c.joint1, c.joint2])), jointsByName);
 
   let equalities = '';
@@ -154,7 +163,8 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
 
   // Closed-loop welds.
   welds.forEach((w, i) => {
-    const targetName = nodeNames[w.targetId] || w.targetId;
+    // Not a body in the scene: a body a rope generates (`<prefix>B_last`).
+    const target = bodyOf(w.targetId);
     // A bolted joint: stiff, where the default weld lets a 3 kg drawer sag
     // millimetres onto what is under it. Only when asked for.
     const stiff = w.rigid ? ' solref="0.004 1" solimp="0.99 0.999 0.0002 0.5 2"' : '';
@@ -162,8 +172,8 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
     // anchor is body2's origin, and a weld held there lets a small part far
     // from it swing round it: a 20 g knob welded to a drawer fell 165 mm in
     // two seconds. The anchor is in body2's frame.
-    const anchor = w.bodyId ? weldAnchor(w.bodyId, w.targetId) : '';
-    equalities += `\n    <weld name="weld_constraint_${i + 1}" body1="${xmlAttr(w.bodyName)}" body2="${xmlAttr(targetName)}"${anchor}${stiff} />`;
+    const anchor = w.bodyId && target ? weldAnchor(w.bodyId, target.id) : '';
+    equalities += `\n    <weld name="weld_constraint_${i + 1}" body1="${xmlAttr(w.bodyName)}" body2="${xmlAttr(target?.name || w.targetId)}"${anchor}${stiff} />`;
   });
 
   // Closed-loop pins.
@@ -173,7 +183,8 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
     // joint, carried round by the crank's) was pinned to the world instead.
     // A fixed body2 is the same as the world to MuJoCo, so naming it costs
     // nothing.
-    const body2 = c.targetId in nodeNames ? ` body2="${xmlAttr(nodeNames[c.targetId] || c.targetId)}"` : '';
+    const target = bodyOf(c.targetId);
+    const body2 = target ? ` body2="${xmlAttr(target.name || c.targetId)}"` : '';
     // Held rigid, as a pin is: at MuJoCo's default impedance a pin was only as
     // stiff as the lighter body it held, so a scissor lift's pins opened 7 mm
     // under its 2 kg platform with a 1 kg slider, and it folded flat with a
@@ -207,7 +218,7 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
     excludes.push([a, b]);
   };
   for (const c of plan.couplings) if (!c.keepContact) link(jointsByName.get(c.joint1)?.node.name, jointsByName.get(c.joint2)?.node.name);
-  for (const c of connects) if (c.targetId in nodeNames) link(c.bodyName, nodeNames[c.targetId]);
+  for (const c of connects) link(c.bodyName, bodyOf(c.targetId)?.name);
 
   // Dry friction on a coupled joint goes where the chain feels it. The nodes
   // are this compile's copies, so their joint lists can be replaced.
