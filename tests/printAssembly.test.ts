@@ -11,7 +11,8 @@ import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
 import { checkSplit, splitForPrint, type SplitResult } from '../src/utils/printSplit';
 import { buildAssemblyPlan, runAssembly, runStage, type MujocoLike } from '../src/utils/printAssembly';
-import { compileToMJCF, PRINT_CONTACT_TIME } from '../src/utils/mjcf';
+import { compileToMJCF } from '../src/utils/mjcf';
+import { PRINT_CONTACT_TIME } from '../src/utils/contactClasses';
 import type { SceneGraph } from '../src/types/scene';
 
 let wasm: ManifoldToplevel;
