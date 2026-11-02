@@ -131,7 +131,10 @@ carries `unstable` and a warning. Every preset stays under 4% of that. `tests/lo
 
 * `src/App.tsx`: main user interface, sidebar, environment configuration, and documentation modal.
 * `src/store/useStore.ts`: state management and scene node mutation actions.
-* `src/utils/mjcf.ts`: compiles the Zustand scene node graph into MJCF XML.
+* `src/utils/mjcf.ts`: compiles the Zustand scene node graph into MJCF XML. The passes live beside it:
+  `mjcfPrepare.ts` (the scene resolved to what simulates, names final), `mjcfMeshAssets.ts` (the
+  `<asset>` block and exact inertia), `mjcfConstraints.ts` (actuators, tendons, equalities, contact
+  exclusions), `mjcfBody.ts` (bodies, joints, geoms), with `mjcfFlatMesh.ts` and `contactClasses.ts`.
 * `src/presets/presetScenes.ts`: initial scene definitions and configurations.
 * `src/utils/webSerialManager.ts`: the GRBL link and the job streamer. Holds the program and the
   line it has reached; `resumeFromLine` replays the program without sending it to rebuild the modal

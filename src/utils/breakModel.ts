@@ -30,6 +30,7 @@ import { nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type Quat
 import { DEFAULT_HOLD_STEPS } from './breakThresholds';
 import { BREAK_FIELDS, BREAK_KIND, memberKey, joinKey, pinKey } from './breakKeys';
 import { loadStrengthOf } from './deformMaterials';
+import { xmlAttr } from './xmlAttr';
 
 type V3 = [number, number, number];
 
@@ -54,10 +55,6 @@ const dot = (p: V3, q: V3) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
 const unit = (p: V3): V3 => { const l = Math.hypot(...p); return l > 0 ? scale(p, 1 / l) : [0, 0, 0]; };
 const fmt = (v: readonly number[]) => v.map((x) => +x.toFixed(7)).join(' ');
 const lim = (v: number | undefined) => (v === undefined || !Number.isFinite(v) ? -1 : v);
-
-function xmlAttr(name: string): string {
-  return String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
 
 interface Pose { pos: V3; quat: QuatWXYZ }
 const toWorld = (pose: Pose, p: readonly number[]): V3 => add(pose.pos, quatRotateVec(pose.quat, p) as V3);

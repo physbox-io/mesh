@@ -132,8 +132,8 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       const carryColour = needsColourCarry(colourSources, rgba);
       const totalVolume = sections.reduce((v, sec) => v + sec.volumeMm3, 0) || 1;
       // The sections are cut from the triangles as drawn, which already carry a
-      // rotation that was baked into the vertices (see rotationIsBaked in
-      // mjcf.ts) — so that rotation must not be applied to them a second time.
+      // rotation that was baked into the vertices (see isNodeRotationBaked in
+      // sceneTree.ts) — so that rotation must not be applied to them a second time.
       const baked = (first.geoms || []).length > 0
         && first.geoms.every((g: SceneGeom) => g.type === 'mesh')
         && first.geoms.some((g: SceneGeom) =>

@@ -37,6 +37,7 @@ page at runtime.
 
 - `src/store/useStore.ts` — Zustand scene graph; every mutation goes through here.
 - `src/utils/mjcf.ts` — compiles the scene graph to MJCF XML. The graph, not the XML, is the source of truth.
+  Its passes are the `mjcf*.ts` modules beside it (prepare, mesh assets, constraints, body) and `contactClasses.ts`.
 - `src/components/scene/SceneLayer.tsx` — renders one geom. Materials and culling live here.
 - `src/hooks/useMCPBridge.ts` — every MCP command, mapped to store mutations/selectors.
 - `src/workers/` — physics, OpenSCAD, mold, export, fracture, sculpt-cut and V-HACD workers. Anything

@@ -8,7 +8,7 @@ import { useViewQuality } from '../../store/viewQualityStore';
 import { renderViewportNow } from '../../utils/viewportCapture';
 import { authoredQuat, orientationOf } from '../../utils/bodyOrientation';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
-import { PRINT_CONTACT_TIME } from '../../utils/mjcf';
+import { PRINT_CONTACT_TIME } from '../../utils/contactClasses';
 import { getLiveCameraPose } from '../../utils/liveCamera';
 import { bodyEdges, bodyUp, whyNotRoundable } from '../../utils/edgeRoundBase';
 import { maxSizeFor, sameEdge, type EdgeCandidate } from '../../utils/featureEdges';

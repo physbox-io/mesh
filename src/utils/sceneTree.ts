@@ -21,7 +21,22 @@ export type QuatWXYZ = [number, number, number, number];
 
 const IDENTITY_QUAT: QuatWXYZ = [1, 0, 0, 0];
 
-/** Whether a mesh body's rotation is already baked into its vertices (so MJCF emits no body rotation). */
+/**
+ * Whether a mesh body's rotation is already baked into its vertices (so MJCF emits no body rotation).
+ *
+ * `updateNodeRotation` turns an all-mesh body by rewriting every vertex from an
+ * unrotated copy it keeps as `baseVertices` — and it also records the angles in
+ * `node.euler`, because that is what the sidebar's rotation sliders read back.
+ * Emitting that euler as well asked MuJoCo to turn the body a second time, on
+ * top of vertices already turned, so one rotation arrived as two and a body
+ * turned about one axis came out tumbled about three.
+ *
+ * `baseVertices` is the marker, not the geom type: a mesh body that has never
+ * been through that path — one authored in a preset, or imported — has its
+ * vertices as they were written and needs the euler to do the turning. The
+ * presence of even one non-mesh geom means the same, since the bake only ever
+ * runs when every geom is a mesh.
+ */
 export function isNodeRotationBaked(node: SceneNode): boolean {
   const geoms = node.geoms || [];
   if (geoms.length === 0) return false;
