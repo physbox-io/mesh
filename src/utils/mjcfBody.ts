@@ -43,6 +43,36 @@ const formatGeomSize = (type: string, rawSize: unknown, geom?: SceneGeom): strin
   return `${x} ${y} ${z}`;
 };
 
+/**
+ * What a geom weighs and how it touches, the same whatever shape it is emitted
+ * as. The thin box a flat mesh becomes kept its own copy of these, and lost
+ * the geom's solref, solimp, margin and gap.
+ */
+const physicalAttrs = (geom: SceneGeom, massless: boolean): string => {
+  let attrs = '';
+  if (geom.mass !== undefined) attrs += ` mass="${geom.mass}"`;
+  else if (massless) attrs += ` mass="0"`;
+  else if (geom.density !== undefined) attrs += ` density="${geom.density}"`;
+  if (geom.role === 'visual') {
+    // A visual-only geom is drawn but must not take part in contact — the body's
+    // real colliders are elsewhere (see resolveCsgGeoms). Overrides any authored
+    // contype/conaffinity rather than merging with it: "visual" is unambiguous.
+    attrs += ` contype="0" conaffinity="0"`;
+  } else {
+    if (geom.contype !== undefined) attrs += ` contype="${geom.contype}"`;
+    if (geom.conaffinity !== undefined) attrs += ` conaffinity="${geom.conaffinity}"`;
+  }
+  if (geom.condim !== undefined) attrs += ` condim="${geom.condim}"`;
+  // Never below 0.001: no friction at all is unstable in MuJoCo (contactFriction.ts).
+  const friction = geomFriction(geom);
+  if (friction) attrs += ` friction="${friction.join(' ')}"`;
+  if (geom.solref) attrs += ` solref="${geom.solref.join(' ')}"`;
+  if (geom.solimp) attrs += ` solimp="${geom.solimp.join(' ')}"`;
+  if (geom.margin !== undefined) attrs += ` margin="${geom.margin}"`;
+  if (geom.gap !== undefined) attrs += ` gap="${geom.gap}"`;
+  return attrs;
+};
+
 const buildGeom = (geom: SceneGeom, massless = false) => {
   // A mesh geom is only valid in MJCF if vertex/face array data exists to populate the <asset> block
   const hasMeshData = Array.isArray(geom.vertices) && geom.vertices.length > 0 && Array.isArray(geom.faces) && geom.faces.length > 0;
@@ -60,18 +90,7 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
     const at = flat.pos.map((c, k) => c + (geom.pos?.[k] ?? 0));
     let slab = `name="${xmlAttr(geom.name)}" type="box" size="${flat.size.join(' ')}" pos="${at.join(' ')}" quat="${flat.quat.join(' ')}"`;
     if (geom.rgba) slab += ` rgba="${geom.rgba.join(' ')}"`;
-    if (geom.mass !== undefined) slab += ` mass="${geom.mass}"`;
-    else if (massless) slab += ` mass="0"`;
-    else if (geom.density !== undefined) slab += ` density="${geom.density}"`;
-    if (geom.role === 'visual') slab += ` contype="0" conaffinity="0"`;
-    else {
-      if (geom.contype !== undefined) slab += ` contype="${geom.contype}"`;
-      if (geom.conaffinity !== undefined) slab += ` conaffinity="${geom.conaffinity}"`;
-    }
-    if (geom.condim !== undefined) slab += ` condim="${geom.condim}"`;
-    const slabFriction = geomFriction(geom);
-    if (slabFriction) slab += ` friction="${slabFriction.join(' ')}"`;
-    return `<geom ${slab} />`;
+    return `<geom ${slab}${physicalAttrs(geom, massless)} />`;
   }
   const emptyMesh = geom.type === 'mesh' && (flat === 'speck' || (flat !== null && rotated) || (!hasMeshData && Array.isArray(geom.vertices) && geom.vertices.length === 0));
   if (emptyMesh) {
@@ -97,27 +116,7 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
   } else if (geom.euler) {
     attrs += ` euler="${geom.euler.join(' ')}"`;
   }
-  if (geom.mass !== undefined) attrs += ` mass="${geom.mass}"`;
-  else if (massless) attrs += ` mass="0"`;
-  else if (geom.density !== undefined) attrs += ` density="${geom.density}"`;
-  if (geom.role === 'visual') {
-    // A visual-only geom is drawn but must not take part in contact — the body's
-    // real colliders are elsewhere (see resolveCsgGeoms). Overrides any authored
-    // contype/conaffinity rather than merging with it: "visual" is unambiguous.
-    attrs += ` contype="0" conaffinity="0"`;
-  } else {
-    if (geom.contype !== undefined) attrs += ` contype="${geom.contype}"`;
-    if (geom.conaffinity !== undefined) attrs += ` conaffinity="${geom.conaffinity}"`;
-  }
-  if (geom.condim !== undefined) attrs += ` condim="${geom.condim}"`;
-  // Never below 0.001: no friction at all is unstable in MuJoCo (contactFriction.ts).
-  const friction = geomFriction(geom);
-  if (friction) attrs += ` friction="${friction.join(' ')}"`;
-  if (geom.solref) attrs += ` solref="${geom.solref.join(' ')}"`;
-  if (geom.solimp) attrs += ` solimp="${geom.solimp.join(' ')}"`;
-  if (geom.margin !== undefined) attrs += ` margin="${geom.margin}"`;
-  if (geom.gap !== undefined) attrs += ` gap="${geom.gap}"`;
-  return `<geom ${attrs} />`;
+  return `<geom ${attrs}${physicalAttrs(geom, massless)} />`;
 };
 
 const buildJoint = (joint: SceneJoint) => {

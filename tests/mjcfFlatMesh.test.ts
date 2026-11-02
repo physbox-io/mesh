@@ -38,6 +38,18 @@ describe('meshes MuJoCo cannot hull', () => {
     for (const c of box![2].split(' ').map(Number)) expect(Math.abs(c)).toBeLessThan(1e-9);
   });
 
+  it('the thin box keeps the contact settings the mesh was given', () => {
+    const l = createLattice(0.0001);
+    addFace(l, [vertexAt(l, 0, 0, 0), vertexAt(l, 400, 0, 0), vertexAt(l, 400, 200, 0), vertexAt(l, 0, 200, 0)]);
+    const scene = sceneOf(l);
+    Object.assign(scene.nodes[0].geoms[0], { solref: [0.01, 1], solimp: [0.9, 0.95, 0.001, 0.5, 2], margin: 0.002, gap: 0.001 });
+    const slab = compileToMJCF(scene).match(/<geom name="a_mesh" type="box"[^>]*>/)?.[0] ?? '';
+    expect(slab).toContain('solref="0.01 1"');
+    expect(slab).toContain('solimp="0.9 0.95 0.001 0.5 2"');
+    expect(slab).toContain('margin="0.002"');
+    expect(slab).toContain('gap="0.001"');
+  });
+
   it('a mesh with volume is left alone', () => {
     const xml = compileToMJCF(sceneOf(boxLattice(0.0001, 200)));
     expect(xml).toContain('<mesh name="a_mesh"');
