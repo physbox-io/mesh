@@ -6,7 +6,7 @@
  * src/store/useStore.ts). These interfaces name the fields the renderers read.
  */
 import type { SceneGeom } from './scene';
-import type { IdMaps } from '../workers/physicsWorkerProtocol';
+import type { FlexInfo, IdMaps } from '../workers/physicsWorkerProtocol';
 
 export interface MujocoObjType { value: string }
 
@@ -41,6 +41,8 @@ export interface ModelMirror {
   jnt_dofadr?: ArrayLike<number>;
   /** Name<->id lookup tables the worker builds; read only through the shim. */
   _idMaps?: IdMaps;
+  /** Cloth pieces, for ClothLayer (utils/cloth). */
+  flexes?: FlexInfo[];
 }
 
 /** The per-frame state, mutated in place by the worker's FRAME messages. */
@@ -50,6 +52,10 @@ export interface DataMirror {
   xfrc_applied: Float64Array; qfrc_applied: Float64Array;
   xpos: Float64Array; xmat: Float64Array; cvel: Float64Array;
   geom_xpos: Float64Array; geom_xmat: Float64Array;
+  /** Cloth vertices, world frame; empty without cloth. */
+  flexvert_xpos?: Float64Array;
+  /** The pull on each cloth tie as of the latest frame. */
+  clothTies?: { name: string; newtons: number }[];
 }
 
 /** The test hook that freezes per-frame updates. */

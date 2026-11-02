@@ -314,8 +314,9 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
     (Array.isArray(b.geoms) && b.geoms.length > 0 && b.geoms.every(g => g.dynamic === false));
   // A rope is a logical node, not a body: the compiler emits nothing for it,
   // so a default free joint and 0.25 m box were ghosts that only the scene
-  // summary showed.
-  const logical = b.isPulleyRope === true;
+  // summary showed. Cloth likewise: its pieces are its substance, and its
+  // vertices move, not the body.
+  const logical = b.isPulleyRope === true || (b.cloth != null && typeof b.cloth === 'object');
   // A nested body with no joints given is fixed rigidly to its parent.
   const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested || logical) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)

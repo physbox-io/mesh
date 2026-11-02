@@ -29,6 +29,16 @@ export const CLOTH_OPTION = {
   extra: 'solver="CG" iterations="20" tolerance="1e-5"',
 };
 
+/**
+ * Constraint impedance. A tie holds near-rigidly (0.99-0.9999): at MuJoCo's
+ * default (0.9-0.95) a tensioned sail's corner stopped short of its post.
+ * Stitches sit between: at the default a garment's seams stayed ~3 cm open,
+ * and as rigid as a tie, hundreds of them closing at once flung the whole
+ * garment off the form (tests/garments.test.ts).
+ */
+const STIFF_TIE = 'solimp="0.99 0.9999 0.001 0.5 2"';
+const STITCH = 'solimp="0.95 0.99 0.001 0.5 2"';
+
 export const flexName = (body: string, piece: string) => `${body}__${piece}`;
 export const flexVertexBody = (body: string, piece: string, i: number) => `${flexName(body, piece)}_${i}`;
 export const clothTieName = (body: string, tie: number, k: number) => `cloth_${body}_tie${tie}_${k}`;
@@ -77,7 +87,7 @@ export function clothXml(node: SceneNode, bodyName: string, xmlAttr: (s: string)
     const eq = `cloth_${bodyName}_stitch${i}`;
     const a = flexVertexBody(bodyName, s.a[0], s.a[1]);
     const b = flexVertexBody(bodyName, s.b[0], s.b[1]);
-    equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}" body2="${xmlAttr(b)}" anchor="0 0 0" solref="0.008 1"/>`);
+    equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}" body2="${xmlAttr(b)}" anchor="0 0 0" solref="0.008 1" ${STITCH}/>`);
     numerics.push({ name: CLOTH_SEW_PREFIX + eq, data: [0, 0, 0, sewTime] });
   });
   for (const t of mesh.ties) {
@@ -86,9 +96,7 @@ export function clothXml(node: SceneNode, bodyName: string, xmlAttr: (s: string)
       const eq = clothTieName(bodyName, t.tie, k);
       const a = flexVertexBody(bodyName, t.piece, v);
       const to = tie.to ? ` body2="${xmlAttr(tie.to)}"` : '';
-      // Impedance near 1: at MuJoCo's default (0.9-0.95) a tie gives under a
-      // tensioned sail, and its corner stopped 65 mm short of the post.
-      equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}"${to} anchor="0 0 0" solref="0.008 1" solimp="0.99 0.9999 0.001 0.5 2"/>`);
+      equality.push(`<connect name="${xmlAttr(eq)}" body1="${xmlAttr(a)}"${to} anchor="0 0 0" solref="0.008 1" ${STIFF_TIE}/>`);
       if (tie.to) excludes.push([a, tie.to]);
       if (tie.anchor && t.verts.length === 1) numerics.push({ name: CLOTH_SEW_PREFIX + eq, data: [...tie.anchor.slice(0, 3), sewTime] });
     });

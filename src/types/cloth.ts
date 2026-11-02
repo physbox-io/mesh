@@ -24,11 +24,12 @@ export interface ClothEdge {
  *  - wrap: rolled round an axis, v running along `axis`, u round it starting
  *    at `ref` and turning right-handed about `axis`. `radius` is the radius at
  *    v = 0; `taper` adds that much radius per metre of v, making a cone (a
- *    flared skirt, a sleeve that narrows).
+ *    flared skirt, a sleeve that narrows). `clockwise` turns it the other way,
+ *    which is how the right sleeve is the mirror of the left.
  */
 export type ClothPlacement =
   | { kind: 'plane'; origin?: number[]; uAxis?: number[]; vAxis?: number[] }
-  | { kind: 'wrap'; origin: number[]; axis: number[]; ref: number[]; radius: number; taper?: number; startU?: number };
+  | { kind: 'wrap'; origin: number[]; axis: number[]; ref: number[]; radius: number; taper?: number; startU?: number; clockwise?: boolean };
 
 export interface ClothPiece {
   name: string;

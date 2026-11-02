@@ -183,6 +183,7 @@ export const buildModelMirror = (built: BuiltResult): ModelMirror => ({
   jnt_qposadr: built.jnt_qposadr,
   jnt_dofadr: built.jnt_dofadr,
   _idMaps: built.idMaps,
+  flexes: built.flexes,
 });
 
 // A stable object whose typed-array contents get mutated in place on every
@@ -197,6 +198,7 @@ export const buildDataMirror = (built: BuiltResult | FrameSnapshot): DataMirror 
   xfrc_applied: built.xfrc_applied!, qfrc_applied: built.qfrc_applied!,
   xpos: built.xpos!, xmat: built.xmat!, cvel: built.cvel!,
   geom_xpos: built.geom_xpos!, geom_xmat: built.geom_xmat!,
+  flexvert_xpos: built.flexvert_xpos,
 });
 
 /*
@@ -466,7 +468,9 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           data.xfrc_applied.set(snap.xfrc_applied); data.qfrc_applied.set(snap.qfrc_applied);
           data.xpos.set(snap.xpos); data.xmat.set(snap.xmat); data.cvel.set(snap.cvel);
           data.geom_xpos.set(snap.geom_xpos); data.geom_xmat.set(snap.geom_xmat);
+          if (snap.flexvert_xpos && data.flexvert_xpos?.length === snap.flexvert_xpos.length) data.flexvert_xpos.set(snap.flexvert_xpos);
         }
+        data.clothTies = snap.clothTies;
       }
       physicsFrameListener?.();
       syncLiveWindAudio();

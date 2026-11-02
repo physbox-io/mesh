@@ -6,6 +6,7 @@ import load_mujoco from '@mujoco/mujoco';
 import { compileToMJCF } from '../src/utils/mjcf';
 import { applyCloth, clothTieLoads, initClothRuntime } from '../src/utils/cloth/clothStep';
 import { meshCloth } from '../src/utils/cloth/clothMesh';
+import { contactBody } from '../src/utils/contactBodies';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
 import type { ClothSpec } from '../src/types/cloth';
 
@@ -128,5 +129,22 @@ describe('cloth', () => {
     // Weightless while sewing: it has not fallen.
     const z = Array.from({ length: model.nflexvert }, (_, v) => data.flexvert_xpos[3 * v + 2]);
     expect(Math.min(...z)).toBeGreaterThan(0.75);
+  });
+
+  it('names the body on the cloth side of a contact, which has no geom', () => {
+    const nodes = [{ id: 'mat', name: 'mat', pos: [0, 0, 0.02], cloth: { pieces: [{ name: 'p', edges: square(0.3) }], spacing: 0.1, sewTime: 0 } } as SceneNode];
+    const { model, data } = run({ nodes } as SceneGraph, 0.5);
+    const vec = data.contact;
+    try {
+      expect(vec.size()).toBeGreaterThan(0);
+      const c = vec.get(0);
+      const sides = [contactBody(model, c, 0), contactBody(model, c, 1)];
+      c.delete();
+      const names = sides.map((b) => mj.mj_id2name(model, 1, b));
+      expect(names).toContain('world'); // the floor
+      expect(names.some((n: string) => /^mat__p_\d+$/.test(n))).toBe(true);
+    } finally {
+      vec.delete();
+    }
   });
 });

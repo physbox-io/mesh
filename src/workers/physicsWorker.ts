@@ -91,6 +91,7 @@ import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
+import { applyCloth, clothTieLoads, initClothRuntime, type ClothRuntime } from '../utils/cloth/clothStep';
 import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -188,6 +189,13 @@ const history = new HistoryRing(5000);
 
 const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
 
+/**
+ * The current model's cloth: seams to close, flexes to float and blow about
+ * (utils/cloth/clothStep). Rebuilt with the id caches, so the live run, a
+ * headless run and a mid-run rebuild each get their own model's.
+ */
+let clothRt: ClothRuntime | null = null;
+
 let sharedBuffers: {
   qpos?: Float64Array;
   qvel?: Float64Array;
@@ -199,6 +207,8 @@ let sharedBuffers: {
   cvel?: Float64Array;
   geom_xpos?: Float64Array;
   geom_xmat?: Float64Array;
+  /** Cloth vertices, world frame; separate from the guards below, being often empty. */
+  flexvert_xpos?: Float64Array;
 } = {};
 
 const updateSharedBuffers = () => {
@@ -215,6 +225,7 @@ const updateSharedBuffers = () => {
   cvel.set(data.cvel);
   geom_xpos.set(data.geom_xpos);
   geom_xmat.set(data.geom_xmat);
+  if (sharedBuffers.flexvert_xpos?.length) sharedBuffers.flexvert_xpos.set(data.flexvert_xpos);
 };
 
 
@@ -268,6 +279,7 @@ const findNodeById = (nodes: SceneNode[], targetId: string): SceneNode | null =>
 const rebuildIdCaches = () => {
   const mj = mujoco!;
   const mdl = model!;
+  clothRt = initClothRuntime(mj, mdl);
   const bCache: Record<string, number> = {};
   const jCache: Record<string, number> = {};
   const collectIds = (nodes: SceneNode[]) => {
@@ -3316,6 +3328,11 @@ const flushAeroAudio = () => {
   }
 };
 
+/** Sews, floats and blows the cloth for the coming step; xfrc_applied is already cleared. */
+const stepCloth = () => {
+  if (clothRt && model && data) applyCloth(clothRt, model, data, [envWindX || 0, envWindY || 0, 0], envDensity > 0 ? envDensity : 1.225);
+};
+
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
 const snapshot = () => {
   const dat = data!;
@@ -3335,6 +3352,7 @@ const snapshot = () => {
       cvel,
       geom_xpos,
       geom_xmat,
+      flexvert_xpos: sharedBuffers.flexvert_xpos,
     };
   }
   return {
@@ -3350,6 +3368,7 @@ const snapshot = () => {
     cvel: Float64Array.from(dat.cvel),
     geom_xpos: Float64Array.from(dat.geom_xpos),
     geom_xmat: Float64Array.from(dat.geom_xmat),
+    flexvert_xpos: model?.nflexvert ? Float64Array.from(dat.flexvert_xpos) : undefined,
   };
 };
 
@@ -3754,6 +3773,7 @@ const stepOnce = (stepSize: number): boolean => {
     applyCompositeAeroForces();
     applyFreeJointDamping(sceneGraph.nodes);
     wakeBodies();
+    stepCloth();
 
     const prevTime = data.time;
     // The clock alone misses a reset on the first step (it also ends at one
@@ -3853,6 +3873,25 @@ const stepFor = (dtMs: number, inputs: Record<string, number>, outputNames: stri
   return { ok: true as const, t: data.time, steps, outputs, unknown: [...unknownInputs, ...unknownOutputs] };
 };
 
+const CLOTH_FRAME_BUDGET_MS = 24;
+
+/** Each flex's vertices and triangles, for the viewport to draw. */
+const flexInfo = (m: MjModel) => {
+  const out: { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[] }[] = [];
+  for (let f = 0; f < (m.nflex ?? 0); f++) {
+    if (m.flex_dim[f] !== 2) continue;
+    const ea = m.flex_elemdataadr[f], en = m.flex_elemnum[f];
+    out.push({
+      name: mujoco!.mj_id2name(m, mujoco!.mjtObj.mjOBJ_FLEX.value, f) ?? '',
+      vertadr: m.flex_vertadr[f],
+      vertnum: m.flex_vertnum[f],
+      elems: Array.from((m.flex_elem as ArrayLike<number> & { slice(a: number, b: number): ArrayLike<number> }).slice(ea, ea + 3 * en)),
+      rgba: Array.from((m.flex_rgba as ArrayLike<number> & { slice(a: number, b: number): ArrayLike<number> }).slice(4 * f, 4 * f + 4)),
+    });
+  }
+  return out;
+};
+
 const stepTick = (delta: number) => {
   if (!isPlaying || !model || !data || !mujoco) return;
   if (holdUntil) {
@@ -3866,8 +3905,13 @@ const stepTick = (delta: number) => {
   const stepsNeeded = Math.floor(accumulator / stepSize);
   accumulator -= stepsNeeded * stepSize;
 
+  // Cloth can cost more per step than a step is long. Rather than run every
+  // step owed and post a frame a few times a second, stop at a frame's worth
+  // of work and let the rest go: the cloth plays in slow motion, smoothly.
+  const budgetEnd = clothRt ? performance.now() + CLOTH_FRAME_BUDGET_MS : Infinity;
   for (let i = 0; i < stepsNeeded; i++) {
     if (!stepOnce(stepSize)) return;
+    if (performance.now() > budgetEnd) { accumulator = 0; break; }
   }
   // How fast the sim is keeping up, and what the scripts cost: see ScriptTiming.
   if (scriptTiming.tick(performance.now(), data.time)) scriptStatusDue = true;
@@ -3921,6 +3965,9 @@ const postScriptStatus = (force = false) => {
   });
 };
 
+/** The loads on the cloth's ties, for the inspector. Absent without any. */
+const clothFrame = () => (clothRt?.ties.length && data ? { clothTies: clothTieLoads(clothRt, data) } : {});
+
 const postFrame = () => {
   framePending = false;
   lastFramePost = performance.now();
@@ -3930,13 +3977,14 @@ const postFrame = () => {
   flushAeroAudio();
   const snap = snapshot();
   if (isSharedSupported) {
-    post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
+    post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot(), ...clothFrame() });
   } else {
-    post({ type: 'FRAME', ...snap, isShared: false, scriptState: scriptState.snapshot() }, [
+    post({ type: 'FRAME', ...snap, isShared: false, scriptState: scriptState.snapshot(), ...clothFrame() }, [
       snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
       snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
       snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
-      snap.geom_xpos.buffer, snap.geom_xmat.buffer
+      snap.geom_xpos.buffer, snap.geom_xmat.buffer,
+      ...(snap.flexvert_xpos ? [snap.flexvert_xpos.buffer] : []),
     ]);
   }
 };
@@ -4262,6 +4310,7 @@ const doBuild = (
       cvel: createSharedArray(newModel.nbody * 6),
       geom_xpos: createSharedArray(newModel.ngeom * 3),
       geom_xmat: createSharedArray(newModel.ngeom * 9),
+      flexvert_xpos: createSharedArray(newModel.nflexvert * 3),
     };
   } else {
     sharedBuffers = {};
@@ -4309,6 +4358,7 @@ const doBuild = (
     jnt_qposadr: Array.from(newModel.jnt_qposadr as ArrayLike<number>),
     jnt_dofadr: Array.from(newModel.jnt_dofadr as ArrayLike<number>),
     idMaps: buildIdMaps(),
+    flexes: flexInfo(newModel),
     isShared: isSharedSupported,
     ...snapshot(),
   };
@@ -4404,6 +4454,7 @@ const runHeadless = async (
   );
   const savedPluckTouchSite = new Map(recentPluckTouchSite);
   const savedContinuousPairStart = new Map(continuousPairStartSimTime);
+  const savedClothRt = clothRt;
   // A headless run starts its scripts from nothing and must not leave its
   // state or compiled closures in the live scene's.
   const savedScriptState = scriptState;
@@ -4552,6 +4603,7 @@ const runHeadless = async (
         applyCompositeAeroForces();
         applyFreeJointDamping(sceneGraph.nodes);
         wakeBodies();
+        stepCloth();
         solverWork.before(data!);
         mujoco!.mj_step(model!, data!);
         syncKinematics(mujoco!, model!, data!);
@@ -4625,6 +4677,7 @@ const runHeadless = async (
     if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
     if (threaded && savedData && mujoco) { try { mujoco.mju_threadpool(savedData, STEP_THREADS); } catch { /* ignore */ } }
     model = savedModel; data = savedData; sceneGraph = savedSceneGraph;
+    clothRt = savedClothRt;
     scriptState = savedScriptState;
     scriptCache = savedScriptCache;
     pendingWake.clear();

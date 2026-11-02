@@ -27,6 +27,7 @@ import { dentKey, useDentStore } from '../../store/dentStore';
 import { useViewQuality } from '../../store/viewQualityStore';
 import { PulleyRopesRenderer } from './PulleyRopes';
 import { FlexureLeaves } from './FlexureLeaves';
+import { ClothLayer } from './ClothLayer';
 import SculptSurface from '../SculptSurface';
 import LatticeSurface from '../LatticeSurface';
 import { PrintAnalysisOverlay } from '../PrintAnalysisOverlay';
@@ -1903,6 +1904,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             not drawn twice while it is being edited. */}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <FlexureLeaves model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
+        <ClothLayer model={model} data={data} sceneGraph={sceneGraph} />
         <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
         {showColliders && <ColliderOverlay model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />}
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />

@@ -166,7 +166,8 @@ export function placer(p: ClothPlacement | undefined): (q: UV) => number[] {
   // Make `ref` square to the axis, so a careless one still rolls a true tube.
   const d = p.ref[0] * axis[0] + p.ref[1] * axis[1] + p.ref[2] * axis[2];
   const ref = norm([p.ref[0] - d * axis[0], p.ref[1] - d * axis[1], p.ref[2] - d * axis[2]]);
-  const side = cross3(axis, ref);
+  const turn = cross3(axis, ref);
+  const side = p.clockwise ? turn.map((x) => -x) : turn;
   const r0 = p.radius, taper = p.taper ?? 0, u0 = p.startU ?? 0;
   return ([u, v]) => {
     const th = (u - u0) / r0, r = Math.max(1e-3, r0 + taper * v), c = Math.cos(th), s = Math.sin(th);

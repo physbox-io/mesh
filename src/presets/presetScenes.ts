@@ -29,6 +29,7 @@ import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
 import { hydrostaticFlotationPreset } from './hydrostaticFlotation';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
+import { dressOnFormPreset, shadeSailPreset, tshirtOnFormPreset } from './clothPresets';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
   bearingCartPreset, chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
@@ -3476,6 +3477,24 @@ export const PRESETS = {
     name: 'Coin Flip',
     emoji: '🪙',
     scene: coinFlipPreset
+  },
+  tshirt_on_form: {
+    name: 'T-shirt on a Dress Form',
+    emoji: '👕',
+    scene: tshirtOnFormPreset,
+    camera: { position: [1.3, -2.6, 1.55], target: [0, 0, 1.15] } satisfies PresetCamera,
+  },
+  dress_on_form: {
+    name: 'Dress on a Dress Form',
+    emoji: '👗',
+    scene: dressOnFormPreset,
+    camera: { position: [1.4, -2.8, 1.4], target: [0, 0, 0.95] } satisfies PresetCamera,
+  },
+  shade_sail: {
+    name: 'Shade Sail',
+    emoji: '⛱️',
+    scene: shadeSailPreset,
+    camera: { position: [5.5, -7, 4.5], target: [0, 0, 2.2] } satisfies PresetCamera,
   },
   windmill: {
     name: 'Wind Turbine',

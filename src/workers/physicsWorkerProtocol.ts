@@ -61,6 +61,18 @@ export interface SimBuffers {
   cvel: Float64Array;
   geom_xpos: Float64Array;
   geom_xmat: Float64Array;
+  /** Cloth vertices, world frame, 3 each (utils/cloth). Absent or empty without cloth. */
+  flexvert_xpos?: Float64Array;
+}
+
+/** One cloth piece as MuJoCo built it: where its vertices are in flexvert_xpos, and its triangles. */
+export interface FlexInfo {
+  name: string;
+  vertadr: number;
+  vertnum: number;
+  /** Triangles as indices local to this flex, three each. */
+  elems: number[];
+  rgba: number[];
 }
 
 export interface FrameSnapshot extends Partial<SimBuffers> {
@@ -81,6 +93,8 @@ export interface FrameSnapshot extends Partial<SimBuffers> {
    * worker recycle seeds the new worker with both from the same moment.
    */
   scriptState?: ScriptStateMap;
+  /** The pull on each cloth tie this frame, newtons (absent without any). */
+  clothTies?: { name: string; newtons: number }[];
 }
 
 export interface BuiltResult extends Partial<SimBuffers> {
@@ -96,6 +110,7 @@ export interface BuiltResult extends Partial<SimBuffers> {
   geom_type?: number[]; geom_rgba?: number[];
   jnt_qposadr?: number[]; jnt_dofadr?: number[];
   idMaps?: IdMaps;
+  flexes?: FlexInfo[];
   time?: number;
   isShared?: boolean;
   /** As on FrameSnapshot — a build spreads one in, so it carries the figure too. */
