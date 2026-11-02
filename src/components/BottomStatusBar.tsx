@@ -200,6 +200,8 @@ export interface ExportActions {
   unfold?: () => void;
   /** Pipe frames: a sketch or any shape framed in tube, with the stick cut list and 3D-printable hubs. */
   pipes?: () => void;
+  /** Lay a shape in brick: the bricks to buy, the cuts, the mortar and the lintels. */
+  brick?: () => void;
   /** The part laid flat and opened in Etch, cut for the bench's machine. */
   etch?: { run: () => void; busy: boolean; error: string | null };
 }
@@ -466,7 +468,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             : []),
         ];
   // Built by hand from bought stock, whatever is on the bench.
-  const build = buildItems({ pipes: exports.pipes, joinery: exports.joinery, partsList: () => openHardwareList(), hasHardware });
+  const build = buildItems({ pipes: exports.pipes, joinery: exports.joinery, brick: exports.brick, partsList: () => openHardwareList(), hasHardware });
 
   return (
     /*

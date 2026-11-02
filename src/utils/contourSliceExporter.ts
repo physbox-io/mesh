@@ -749,7 +749,7 @@ function dropCollinear(pts: Point2D[], tolMm: number): Point2D[] {
 }
 
 /** All closed contours of the scene at one height, cleaned up (mm, model frame). */
-function contoursAtZ(tris: number[], z: number, solidIds: number[]): Point2D[][] {
+export function contoursAtZ(tris: number[], z: number, solidIds: number[]): Point2D[][] {
   const loops = chainSegments(unionSegments(sliceTrianglesAtZ(tris, z, solidIds)));
   const out: Point2D[][] = [];
   for (const loop of loops) {

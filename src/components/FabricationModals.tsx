@@ -16,6 +16,7 @@ import { SplitForPrintModal } from './SplitForPrintModal';
 import { TimberBreakdownModal } from './TimberBreakdownModal';
 import { ExportSheetUnfoldModal } from './ExportSheetUnfoldModal';
 import { ExportTubeAndWireModal } from './ExportTubeAndWireModal';
+import { BrickworkModal } from './BrickworkModal';
 import { BottomStatusBar } from './BottomStatusBar';
 import { MachineConfigModal } from './MachineConfigModal';
 import { moldSubject, selectedIds } from '../utils/moldSubject';
@@ -49,6 +50,7 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
   const [isSheetUnfoldModalOpen, setIsSheetUnfoldModalOpen] = useState(false);
   const [isTubeAndWireModalOpen, setIsTubeAndWireModalOpen] = useState(false);
+  const [isBrickModalOpen, setIsBrickModalOpen] = useState(false);
 
   // Subscribe to sceneGraph only while a scene-consuming export modal is open,
   // so editing the scene does not re-render the bottom bar or closed modals.
@@ -216,6 +218,10 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         />
       )}
 
+      {isBrickModalOpen && (
+        <BrickworkModal isOpen={isBrickModalOpen} onClose={() => setIsBrickModalOpen(false)} />
+      )}
+
       <BottomStatusBar
         onOpenMachineConfig={() => setMachineConfigOpen(true)}
         exports={{
@@ -231,6 +237,7 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           joinery: () => setIsJoineryModalOpen(true),
           unfold: opening(setIsSheetUnfoldModalOpen),
           pipes: opening(setIsTubeAndWireModalOpen),
+          brick: () => setIsBrickModalOpen(true),
           etch: { run: sendToEtch, busy: etchBusy, error: etchError },
         }}
       />

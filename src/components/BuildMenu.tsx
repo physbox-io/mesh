@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronUp, Hammer, ListChecks, Puzzle, Wrench } from 'lucide-react';
+import { BrickWall, ChevronUp, Hammer, ListChecks, Puzzle, Wrench } from 'lucide-react';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 export interface BuildItem {
@@ -32,7 +32,7 @@ export const BuildMenu: React.FC<{ items: BuildItem[] }> = ({ items }) => {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        title="Build it by hand from bought stock — pipe and timber frames, and the hardware to buy. The same whatever machine is on the bench."
+        title="Build it by hand from bought stock — pipe and timber frames, brickwork, and the hardware to buy. The same whatever machine is on the bench."
         className="flex items-center justify-center gap-1 p-1 px-1.5 rounded-md font-semibold hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors focus:outline-none cursor-pointer text-teal-600 dark:text-teal-400"
       >
         <Hammer className="w-3.5 h-3.5" />
@@ -78,6 +78,7 @@ export const BuildMenu: React.FC<{ items: BuildItem[] }> = ({ items }) => {
 export function buildItems(actions: {
   pipes?: () => void;
   joinery?: () => void;
+  brick?: () => void;
   partsList: () => void;
   hasHardware: boolean;
 }): BuildItem[] {
@@ -88,6 +89,9 @@ export function buildItems(actions: {
       : []),
     ...(actions.joinery
       ? [{ label: 'Timber frame', hint: 'Break a frame into mortise-and-tenon parts with a cut list, cut by bandsaw or router. Best for: tables, chairs, benches and stands.', icon: <Puzzle className={icon} />, run: actions.joinery }]
+      : []),
+    ...(actions.brick
+      ? [{ label: 'Brick', hint: 'Lay a shape in brick, course by course, with the bricks to buy, the cuts, the mortar and the lintels. Best for: walls, piers, planters and barbecues.', icon: <BrickWall className={icon} />, run: actions.brick }]
       : []),
     {
       label: 'Parts list',

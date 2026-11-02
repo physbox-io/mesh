@@ -17,6 +17,7 @@ import { latticeCommands } from './mcp/latticeCommands';
 import { breakageCommands } from './mcp/breakageCommands';
 import { castCommands } from './mcp/castCommands';
 import { partBuildCommands } from './mcp/partBuildCommands';
+import { brickCommands } from './mcp/brickCommands';
 import { machiningCommands } from './mcp/machiningCommands';
 import { cutCommands } from './mcp/cutCommands';
 import { dfmCommands } from './mcp/dfmCommands';
@@ -59,6 +60,7 @@ const COMMANDS: McpCommands = {
   ...cutCommands,
   ...dfmCommands,
   ...partBuildCommands,
+  ...brickCommands,
   ...castCommands,
   ...breakageCommands,
   ...latticeCommands,
