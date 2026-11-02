@@ -556,6 +556,12 @@ export const sceneCommands: McpCommands = {
     const { bodies: uniqueBodies, renamed } = withUniqueRawIds(bodies);
     const nodes = uniqueBodies.map((b) => fillBodyDefaults(b));
     const result = withRenamedIds(withScriptWarnings(await settleScene(nodes, { freshStart: true }), nodes), renamed);
+    // What the scene is called: the scene button shows it in place of
+    // "Modified scene", the save dialog starts from it and exports are named
+    // for it. A fresh start drops any earlier name.
+    const name = typeof msg.name === 'string' ? msg.name.trim().slice(0, 120) : '';
+    const settled = useStore.getState().sceneGraph;
+    if (name || settled.name) useStore.getState().updateScene({ ...settled, name: name || undefined }, true);
     // An empty list clears the scene. It used to be refused, which left
     // physics_update_scene([]) as the only way to start from nothing; there
     // is no scene to frame or describe on a card.

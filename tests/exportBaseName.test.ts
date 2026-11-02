@@ -28,4 +28,7 @@ describe('exportBaseName', () => {
     expect(exportBaseName([], undefined)).toBe('physics_scene');
     expect(exportBaseName([card('# ***')], '')).toBe('physics_scene');
   });
+  it('takes the scene\'s own name before a note card heading', () => {
+    expect(exportBaseName([card('# Bracket')], 'empty', 'Gear housing')).toBe('gear_housing');
+  });
 });

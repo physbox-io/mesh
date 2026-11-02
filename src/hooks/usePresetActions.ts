@@ -46,13 +46,17 @@ export function usePresetActions(doc: SceneDocument) {
   }, []);
 
   // The open scene's name, on the button that opens the scene browser.
+  // A scene given a name (an agent's physics_build_scene name) goes by it
+  // rather than by "Modified scene" once it is no longer the preset it was.
+  const sceneName = sceneGraph.name?.trim();
   const activePresetLabel = useMemo(() => {
-    if (!activePreset) return '✏️ Modified scene';
+    const modified = sceneName ? `✏️ ${sceneName}` : '✏️ Modified scene';
+    if (!activePreset) return modified;
     if (activePreset.startsWith('user:')) return `💾 ${activePreset.replace('user:', '')}`;
     const preset = PRESETS[activePreset as keyof typeof PRESETS] as PresetEntry | undefined;
-    if (!preset) return '✏️ Modified scene';
+    if (!preset) return modified;
     return `${preset.emoji ? `${preset.emoji} ` : ''}${preset.name}`;
-  }, [activePreset]);
+  }, [activePreset, sceneName]);
 
   // Load a preset and replace the note card with the preset's built-in card (if any)
   const loadPresetWithCard = useCallback((name: string) => {
@@ -171,10 +175,10 @@ export function usePresetActions(doc: SceneDocument) {
   const handleSavePresetClick = useCallback(() => {
     const defaultName = activePreset && activePreset.startsWith('user:')
       ? activePreset.replace('user:', '')
-      : '';
+      : sceneGraph.name?.trim() ?? '';
     setPresetNameInput(defaultName);
     setIsSaveModalOpen(true);
-  }, [activePreset]);
+  }, [activePreset, sceneGraph.name]);
 
   // Ctrl+S opens the save dialog, named for the preset that is open, rather
   // than the browser's "Save page as", which saves the app's HTML and none of

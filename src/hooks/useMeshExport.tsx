@@ -23,7 +23,7 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
   const closeDialog = useDialogs((s) => s.closeDialog);
   const withExportGroup = useExportGroup(threeSceneRef);
 
-  const baseName = useCallback(() => exportBaseName(noteCards, activePreset), [noteCards, activePreset]);
+  const baseName = useCallback(() => exportBaseName(noteCards, activePreset, useStore.getState().sceneGraph.name), [noteCards, activePreset]);
 
   const exportWholeSceneStl = useCallback(() => {
     withExportGroup('Export STL', (exportGroup) => {

@@ -51,6 +51,15 @@ describe('physics_build_scene', () => {
     expect(useStore.getState().lastCompileError).toBeNull();
   });
 
+  it('names the scene, and a later build without a name drops it', async () => {
+    const box = { id: 'box', name: 'box', pos: [0, 0, 0.1], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] };
+    await sceneCommands.BUILD_SCENE({ bodies: [box], name: ' Gear housing ' }, ctx());
+    expect(useStore.getState().sceneGraph.name).toBe('Gear housing');
+    expect(useStore.getState().sceneGraph.nodes).toHaveLength(1);
+    await sceneCommands.BUILD_SCENE({ bodies: [box] }, ctx());
+    expect(useStore.getState().sceneGraph.name).toBeUndefined();
+  });
+
   it('still refuses something that is not a list', async () => {
     expect(await sceneCommands.BUILD_SCENE({ bodies: 'box' }, ctx())).toMatchObject({ ok: false, error: expect.stringMatching(/array/) });
     expect(await sceneCommands.BUILD_SCENE({}, ctx())).toMatchObject({ ok: false });

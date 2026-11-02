@@ -30,7 +30,7 @@ export function useSceneIo(doc: SceneDocument) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${exportBaseName(noteCards, activePreset)}.json`;
+      a.download = `${exportBaseName(noteCards, activePreset, useStore.getState().sceneGraph.name)}.json`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
