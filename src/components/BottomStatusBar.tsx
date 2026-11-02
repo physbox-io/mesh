@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, ListChecks, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Send, Square, Wrench,
+  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Send, Square, Wrench,
 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
@@ -22,6 +22,7 @@ import { useCastDialog } from '../store/castDialogStore';
 import { useJobPause } from '../store/jobPauseStore';
 import { RemoteJobChip } from './RemoteJobChip';
 import { openHardwareList } from './HardwareListDialog';
+import { BuildMenu, buildItems } from './BuildMenu';
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -439,9 +440,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               }
             : { label: 'Mold', title: 'A mold or casting pattern of the selected part (or the whole scene). Best for: copies in resin, wax, plaster, chocolate or metal.', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
           { label: 'Cast', title: 'Pour into a mold in the scene: select it, then Cast. Best for: checking a pour fills, and what it weighs.', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
-          ...(exports.pipes
-            ? [{ label: 'Pipes', title: 'Frame a shape in PVC, EMT or aluminium tube, with the cut list and printable hubs. Best for: shelters, carts, racks and greenhouses.', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
-            : []),
         ]
       : [
           { label: 'SVG', title: 'Flat panels cut from sheet, with finger joints or tabs. Best for: boxes, enclosures and flat-pack furniture.', tone: 'text-amber-600 dark:text-amber-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unwrap },
@@ -460,26 +458,15 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             ? [{ label: 'Unfold', title: 'Unfold a shape into a flat net to fold or sew. Best for: papercraft and packaging, bent sheet metal, leather goods.', tone: 'text-rose-600 dark:text-rose-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unfold }]
             : []),
           { label: 'Contour', title: 'Slice the model into layers of sheet to stack and glue. Best for: topographic maps and big sculptural shapes.', tone: 'text-emerald-600 dark:text-emerald-400', icon: <Layers className="w-3.5 h-3.5" />, run: exports.contourSlices },
-          ...(exports.pipes
-            ? [{ label: 'Pipes', title: 'Frame a shape in PVC, EMT or aluminium tube, with the cut list and printable hubs. Best for: shelters, carts, racks and greenhouses.', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
-            : []),
           ...(machineTarget === 'cnc'
             ? [
                 { label: 'Relief', title: 'Carve the model into the face of the board. Best for: signs, plaques, terrain and carved panels.', tone: 'text-blue-600 dark:text-blue-400', icon: <Mountain className="w-3.5 h-3.5" />, run: exports.reliefCarve },
                 { label: 'Solid', title: 'Machine the part itself from a block, turning it for the far side. Best for: real 3D parts in wood, plastic or aluminium.', tone: 'text-indigo-600 dark:text-indigo-400', icon: <Cuboid className="w-3.5 h-3.5" />, run: exports.solid },
-                ...(exports.joinery
-                  ? [{ label: 'Joinery', title: 'Break a frame into mortise-and-tenon parts with a cut list. Best for: tables, chairs, benches and stands in timber.', tone: 'text-amber-600 dark:text-amber-400', icon: <Puzzle className="w-3.5 h-3.5" />, run: exports.joinery }]
-                  : []),
               ]
             : []),
         ];
-  // Whatever makes the part, the hardware that goes in it has to be bought.
-  if (hasHardware) {
-    exportButtons.push({
-      label: 'Parts', title: 'The hardware to buy, counted, with bar stock cut to length. Best for: the shopping list before a build.', tone: 'text-slate-600 dark:text-slate-300',
-      icon: <ListChecks className="w-3.5 h-3.5" />, run: () => openHardwareList(),
-    });
-  }
+  // Built by hand from bought stock, whatever is on the bench.
+  const build = buildItems({ pipes: exports.pipes, joinery: exports.joinery, partsList: () => openHardwareList(), hasHardware });
 
   return (
     /*
@@ -729,6 +716,8 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 {b.label}
               </button>
             ))}
+            <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
+            <BuildMenu items={build} />
             {exports.etch?.error && machineTarget !== 'fdm' && (
               <span role="alert" className="text-[11px] text-red-600 dark:text-red-400 max-w-[18rem] truncate" title={exports.etch.error}>
                 {exports.etch.error}

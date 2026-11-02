@@ -502,17 +502,16 @@ A **3 ft (915 mm) tall** hardwood flower stand designed for **Bandsaw + Desktop 
 | **Plant Platform Top** (\`Stand_Top\`) | 1 (splits to 2 planks) | 380 × 380 × 24 mm | Edge-glued top with alignment dowels and seasonal expansion Z-clip slots |
 
 ## How to Break Down into Stock & Cuts
-1. In the bottom status bar, set **Machine** to **\`CNC Router\`**
-2. Click the amber **\`Joinery\`** button on the bottom status bar
-3. Inspect the **exploded 3D mortise-and-tenon preview**, **stopped edge roundovers**, **sliding CNC window setups** (for the 891 mm legs on a 300 mm CNC bed), and **Per-Part Fabrication Cards**
-4. Click **\`Apply Joinery to Scene\`** to replace the block model with the 14 tenoned, mortised, and profiled individual parts`,
+1. Open **\`Build\`** on the bottom status bar and pick **\`Timber frame\`**
+2. Inspect the **exploded 3D mortise-and-tenon preview**, **stopped edge roundovers**, **sliding CNC window setups** (for the 891 mm legs on a 300 mm CNC bed), and **Per-Part Fabrication Cards**
+3. Click **\`Apply Joinery to Scene\`** to replace the block model with the 14 tenoned, mortised, and profiled individual parts`,
 
   pipe_greenhouse: `# 🌱 Mini Greenhouse
 
 A 1.2 × 1.8 m pitched-roof greenhouse frame, three bays, built from **3/4" Schedule 40 PVC** struts that meet end to end.
 
 ## Make it
-1. Click **\`Pipes\`** on the bottom status bar
+1. Open **\`Build\`** on the bottom status bar and pick **\`Pipe frame\`**
 2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
 3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
 4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
@@ -522,7 +521,7 @@ A 1.2 × 1.8 m pitched-roof greenhouse frame, three bays, built from **3/4" Sche
 A 1.8 × 1.2 m canopy over a bar counter, open at the back, built from **3/4" Schedule 40 PVC** struts that meet end to end.
 
 ## Make it
-1. Click **\`Pipes\`** on the bottom status bar
+1. Open **\`Build\`** on the bottom status bar and pick **\`Pipe frame\`**
 2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
 3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
 4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
@@ -532,7 +531,7 @@ A 1.8 × 1.2 m canopy over a bar counter, open at the back, built from **3/4" Sc
 A 2.8 × 3.9 m carport, four bays under a pitched roof, built from **3/4" Schedule 40 PVC** struts that meet end to end.
 
 ## Make it
-1. Click **\`Pipes\`** on the bottom status bar
+1. Open **\`Build\`** on the bottom status bar and pick **\`Pipe frame\`**
 2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
 3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
 4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
@@ -542,7 +541,7 @@ A 2.8 × 3.9 m carport, four bays under a pitched roof, built from **3/4" Schedu
 A 2.4 m geodesic dome of 25 struts at angles no fitting is sold for, built from **3/4" Schedule 40 PVC** struts that meet end to end.
 
 ## Make it
-1. Click **\`Pipes\`** on the bottom status bar
+1. Open **\`Build\`** on the bottom status bar and pick **\`Pipe frame\`**
 2. Pick the pipe and the stick length: the cut list packs every strut onto the sticks to buy, kerf included
 3. **Add 3D-Printable Hub Connectors to Scene** puts a hub at every joint the hardware store does not sell
 4. **Add Simulation** cuts every tube to its listed length and seats it hub to hub, to check the list before you saw`,
@@ -559,7 +558,7 @@ Four drawers on **400 mm full-extension ball-bearing runners**, eight runners in
 ## Try it
 - Press **Play**: the bottom drawer opens first, and each one above it two seconds later
 - Select a drawer and change the cabinet's width: the **DFM** check says how far off the side space is, and by how much to change the drawer
-- **Parts** in the bottom bar lists the runners to buy`,
+- **Build → Parts list** in the bottom bar lists the runners to buy`,
 
   xy_plotter: `# ✏️ XY Plotter on Linear Rails
 
@@ -636,7 +635,7 @@ A 300 mm cube of **20 × 20 T-slot extrusion**, held together by **16 corner bra
 
 ## Try it
 - Press **Play**: the carriage rides up and down its post
-- **Parts** in the bottom bar packs the twelve profiles onto the bar lengths extrusion is sold in`,
+- **Build → Parts list** in the bottom bar packs the twelve profiles onto the bar lengths extrusion is sold in`,
 };
 
 
