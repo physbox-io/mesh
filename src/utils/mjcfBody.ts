@@ -170,7 +170,10 @@ export const buildNode = (node: SceneNode): string => {
   const nameStr = node.name || node.id || 'body';
 
   if (node.isComposite) {
-    const type = node.compositeType === 'rope' ? 'cable' : (node.compositeType || 'cable');
+    // Only 'cable' survives in MuJoCo 3.17 ('rope' is our alias for it). A
+    // saved 'cloth' or 'grid' composite would fail the whole compile, so it
+    // loads as a cable instead.
+    const type = 'cable';
     const count = node.compositeCount || '15 1 1';
     const size = node.compositeSize !== undefined ? node.compositeSize : '1.5';
     const prefix = node.compositePrefix || `${nameStr}_`;

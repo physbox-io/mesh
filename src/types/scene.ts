@@ -1140,7 +1140,13 @@ export interface SceneNode {
   /** Set once a face has been drawn, so a reset can warn before discarding it. */
   latticeEdited?: boolean;
   isComposite?: boolean;
-  compositeType?: 'cable' | 'grid' | 'rope' | 'cloth';
+  /**
+   * 'cable' and 'rope' (the same thing) are all MuJoCo 3.17 still accepts:
+   * its 'cloth' and 'grid' composites are gone, replaced by flex. Old scenes
+   * may still carry those two values; the compiler emits them as a cable so
+   * they load. Cloth is the `cloth` field on a body now.
+   */
+  compositeType?: 'cable' | 'rope';
   compositeCount?: string;
   compositeSize?: string;
   compositePrefix?: string;

@@ -613,7 +613,7 @@ export const viewCommands: McpCommands = {
         script:        'string — JavaScript control script running at 1000 Hz',
         scad:          'string — raw OpenSCAD code to compile into a dynamic mesh geometry',
         isComposite:   'boolean — emit this body as a MuJoCo <composite> (auto-jointed chain forming a smooth curve) instead of using its own geoms/joints/children directly. See compositeType/compositeCount/compositeSize/compositeCurve. Prefer this over manually chaining capsule fromto segments for rope/cable/mustache/tentacle curves.',
-        compositeType: `'cable'|'grid'|'rope'|'cloth' — default 'cable'. 'rope' is remapped to MuJoCo's 'cable' type.`,
+        compositeType: `'cable'|'rope' — default 'cable'; the two are the same. MuJoCo no longer has grid or cloth composites.`,
         compositeCount:'string (not array) — space-separated segment counts, e.g. "25 1 1". Default "15 1 1".',
         compositeSize: 'string (not number) — total extent before curving, e.g. "1.5". Default "1.5".',
         compositeCurve:'string — MuJoCo composite curve-shape spec, e.g. "s 0 0" for straight. Passed verbatim to MuJoCo, not validated here.',
