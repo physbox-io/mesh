@@ -32,8 +32,11 @@ import { reliefSimulationTools } from '../utils/simulatedPart';
 import { simulationSetups } from '../utils/solidSetups';
 import { SetupCards } from './SetupCards';
 import { SetupChangeDialog } from './SetupChangeDialog';
+import { ExportSubjectLine } from './ExportSubjectLine';
 
 interface Props {
+  /** What it works on: the selection, or the whole scene (shown under the title). */
+  subjectLabel?: string;
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
@@ -87,7 +90,7 @@ function downloadText(text: string, filename: string) {
  * stock, and what holds one to the other — and down the bottom, where there
  * are two programs to run instead of one.
  */
-export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, scene, seed }) => {
+export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, scene, subjectLabel, seed }) => {
   useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   // Which setup the preview shows and the footer's button cuts.
@@ -344,6 +347,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
                 Machine Solid Part on CNC
               </h2>
+              <ExportSubjectLine verb="Machining" label={subjectLabel} />
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
                 Cut the model itself out of a block at true size, from as many sides as it needs
               </p>

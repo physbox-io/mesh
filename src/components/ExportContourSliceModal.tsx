@@ -29,8 +29,11 @@ import { HintAnchor } from './ExportFields';
 import { RackToolPicker } from './RackToolPicker';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { contourSheetParts } from '../utils/sheetSimulation';
+import { ExportSubjectLine } from './ExportSubjectLine';
 
 interface ExportContourSliceModalProps {
+  /** What it works on: the selection, or the whole scene (shown under the title). */
+  subjectLabel?: string;
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
@@ -149,6 +152,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   isOpen,
   onClose,
   scene,
+  subjectLabel,
   }) => {
   useEscapeToClose(isOpen, onClose);
   /*
@@ -447,6 +451,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
                 Export Contour Slices
               </h2>
+              <ExportSubjectLine verb="Slicing" label={subjectLabel} />
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
                 Cut the model into stacked layers. Download the SVG, or cut straight from here over WebSerial USB
               </p>

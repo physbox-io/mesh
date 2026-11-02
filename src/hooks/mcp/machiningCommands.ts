@@ -26,10 +26,21 @@ import { addMcpSimulationSteps } from '../useSimulationSteps';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../../utils/timberSimulation';
 import { pipeFrameSimulationRequest } from '../../utils/tubeSimulation';
 import { runMcpMoldSimulation } from '../../utils/moldWorkerClient';
+import { mcpMoldSubject } from '../../utils/moldSubject';
 import { ExportWorkerClient } from '../../utils/exportWorkerClient';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import { reliefOptionsFor, machiningOptionsFor } from './exportOptions';
 import type { McpCommands } from './types';
+import type { SceneGraph } from '../../types/scene';
+
+/**
+ * What an export works on, as the dialogs take the selection: master_id
+ * (comma-separated for several bodies), else every body that is not a
+ * simulation.
+ */
+function exportSubject(msg: Record<string, unknown>, scene: SceneGraph, verb: string, toId: (s: string) => string = (s) => s) {
+  return mcpMoldSubject(scene, msg.masterId, (id) => findNodeInScene(scene.nodes, toId(id)), verb);
+}
 
 export const machiningCommands: McpCommands = {
     /*
@@ -42,8 +53,10 @@ export const machiningCommands: McpCommands = {
      * settings and the bench's stock and material, as the dialog would.
      */
   EXPORT_RELIEF: async (msg, { store }) => {
-    const scene = store.sceneGraph;
-    if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to carve.' };
+    if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to carve.' };
+    const subject = exportSubject(msg, store.sceneGraph, 'carve');
+    if ('error' in subject) return { ok: false, error: subject.error };
+    const scene = subject.scene;
     const { options, fromDialog } = reliefOptionsFor(msg);
     const client = new ExportWorkerClient();
     let result: ReliefCarveResult;
@@ -104,8 +117,10 @@ export const machiningCommands: McpCommands = {
     };
   },
   EXPORT_MACHINING: async (msg, { store }) => {
-    const scene = store.sceneGraph;
-    if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to machine.' };
+    if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to machine.' };
+    const subject = exportSubject(msg, store.sceneGraph, 'machine');
+    if ('error' in subject) return { ok: false, error: subject.error };
+    const scene = subject.scene;
     const options = machiningOptionsFor(msg, scene);
     // On a worker, as the dialog plans it: on the page, a big part froze
     // the tab for the half minute its plan takes.
@@ -179,6 +194,14 @@ export const machiningCommands: McpCommands = {
     if (!scene.nodes?.some((n) => !n.simulation)) {
       return { ok: false, error: 'The scene has nothing to cut but earlier simulations.' };
     }
+    // Relief, machining, laser, contour and tube cut master_id, else every
+    // body; sheet and timber name their parts with body_id.
+    let subjectScene = scene;
+    if (msg.kind === 'relief' || msg.kind === 'machining' || msg.kind === 'laser' || msg.kind === 'contour' || msg.kind === 'tube') {
+      const subject = exportSubject(msg, scene, 'cut', (s) => toId(s) as string);
+      if ('error' in subject) return { ok: false, error: subject.error };
+      subjectScene = subject.scene;
+    }
 
     const runJob = async <T,>(go: (client: ExportWorkerClient) => Promise<T>) => {
       const client = new ExportWorkerClient();
@@ -187,7 +210,7 @@ export const machiningCommands: McpCommands = {
 
     if (msg.kind === 'relief') {
       const { options, fromDialog } = reliefOptionsFor(msg);
-      const result: ReliefCarveResult = await runJob((c) => c.run('relief', scene, options));
+      const result: ReliefCarveResult = await runJob((c) => c.run('relief', subjectScene, options));
       if (!result.success || !result.stockTransform) {
         return { ok: false, error: result.error || 'The relief carve could not be planned.', warnings: result.warnings ?? [] };
       }
@@ -220,10 +243,10 @@ export const machiningCommands: McpCommands = {
     }
 
     if (msg.kind === 'machining') {
-      const options = machiningOptionsFor(msg, scene);
+      const options = machiningOptionsFor(msg, subjectScene);
       // On the worker: a big part's plan takes half a minute, and on the
       // page it froze the tab for all of it.
-      const result: SolidMachiningResult = await runJob((c) => c.run('solid', scene, options));
+      const result: SolidMachiningResult = await runJob((c) => c.run('solid', subjectScene, options));
       if (!result.success || !result.stockTransform) {
         return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
       }
@@ -278,7 +301,7 @@ export const machiningCommands: McpCommands = {
         ?? (msg.kind === 'contour' ? useStore.getState().stock.thicknessMm : 3);
       if (msg.kind === 'laser') {
         const result: LaserCutResult = await runJob((c) =>
-          c.run('laser', scene, {
+          c.run('laser', subjectScene, {
           ...DEFAULT_LASER_OPTIONS,
           materialThickness: thicknessMm / 1000,
           kerf: layoutKerf(machine, DEFAULT_LASER_OPTIONS.kerf),
@@ -304,7 +327,7 @@ export const machiningCommands: McpCommands = {
         };
       }
       const result: ContourSliceResult = await runJob((c) =>
-        c.run('contour', scene, {
+        c.run('contour', subjectScene, {
           ...DEFAULT_CONTOUR_OPTIONS,
           materialThickness: thicknessMm / 1000,
           kerf: layoutKerf(machine, DEFAULT_CONTOUR_OPTIONS.kerf),
@@ -321,7 +344,7 @@ export const machiningCommands: McpCommands = {
         details: [`${result.layers.length} layers of ${thicknessMm} mm stock`],
       });
       // The model, stretched the way the stack is.
-      const tris = collectSceneTriangles(scene).tris;
+      const tris = collectSceneTriangles(subjectScene).tris;
       let six = 0;
       for (let t = 0; t + 8 < tris.length; t += 9) {
         six += tris[t] * (tris[t + 4] * tris[t + 8] - tris[t + 5] * tris[t + 7])
@@ -376,7 +399,7 @@ export const machiningCommands: McpCommands = {
 
     if (msg.kind === 'tube') {
       // The pipe frame made from its cut list, every tube seated hub to hub.
-      const bd = breakdownPipeFrame(scene, msg as Partial<PipeFrameOptions>);
+      const bd = breakdownPipeFrame(subjectScene, msg as Partial<PipeFrameOptions>);
       if (!bd.struts.length) return { ok: false, error: 'The scene has no pipes: frame a shape in the Pipes dialog first, or load a pipe frame from Examples.', warnings: bd.warnings };
       const { figures, request } = pipeFrameSimulationRequest(bd, sceneStockTransform());
       const added = await addSimulationToScene({ ...request, placement });

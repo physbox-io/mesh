@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, ListChecks, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Square, Wrench,
+  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, ListChecks, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Send, Square, Wrench,
 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
@@ -199,6 +199,8 @@ export interface ExportActions {
   unfold?: () => void;
   /** Pipe frames: a sketch or any shape framed in tube, with the stick cut list and 3D-printable hubs. */
   pipes?: () => void;
+  /** The part laid flat and opened in Etch, cut for the bench's machine. */
+  etch?: { run: () => void; busy: boolean; error: string | null };
 }
 
 /** Fired by anything that wants the export buttons pointed out — the navbar's print button, for one. */
@@ -408,12 +410,12 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const exportButtons: { label: string; title: string; tone: string; icon: React.ReactNode; run: () => void; ring?: boolean; disabled?: boolean }[] =
     machineTarget === 'fdm'
       ? [
-          { label: 'STL', title: '3D Print (STL), geometry only. STL cannot carry colour; use 3MF if the model is painted.', tone: 'text-slate-600 dark:text-slate-300', icon: <Printer className="w-3.5 h-3.5" />, run: exports.stl },
-          { label: '3MF', title: '3D Print in colour (3MF). Carries painted colour two ways: per-vertex for viewers, and a filament slot per triangle for a multi-material slicer.', tone: 'text-fuchsia-600 dark:text-fuchsia-400', icon: <Package className="w-3.5 h-3.5" />, run: exports.threeMf },
+          { label: 'STL', title: 'A 3D print in one colour. Best for: single-material prints, in any slicer.', tone: 'text-slate-600 dark:text-slate-300', icon: <Printer className="w-3.5 h-3.5" />, run: exports.stl },
+          { label: '3MF', title: 'A 3D print with its colours and parts kept. Best for: painted models and multi-material printers.', tone: 'text-fuchsia-600 dark:text-fuchsia-400', icon: <Package className="w-3.5 h-3.5" />, run: exports.threeMf },
           {
             label: 'Split',
             title: selectedNodeId
-              ? `Split for print: cut the selected ${extraSelectedCount ? `${extraSelectedCount + 1} bodies, as one part,` : 'body'} into sections that fit the bed, with dowel holes or pegs to line them up`
+              ? `Cut the selected ${extraSelectedCount ? `${extraSelectedCount + 1} bodies, as one part,` : 'body'} into sections that fit the bed, with dowels or pegs to line them up. Best for: parts bigger than the printer.`
               : 'Split for print — select a body first',
             tone: 'text-emerald-600 dark:text-emerald-400',
             icon: <Puzzle className="w-3.5 h-3.5" />,
@@ -435,27 +437,38 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 },
                 ring: true,
               }
-            : { label: 'Mold', title: 'Make a mold or a casting pattern of the selected part (or the whole scene): rigid, silicone, sand or lost PLA', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
-          { label: 'Cast', title: 'Pour into a mold you have: select it (or a master in its pour box), then Cast', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
+            : { label: 'Mold', title: 'A mold or casting pattern of the selected part (or the whole scene). Best for: copies in resin, wax, plaster, chocolate or metal.', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
+          { label: 'Cast', title: 'Pour into a mold in the scene: select it, then Cast. Best for: checking a pour fills, and what it weighs.', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
           ...(exports.pipes
-            ? [{ label: 'Pipes', title: 'Pipe Frame: frame a sketch or any shape in PVC, EMT or aluminium tube, with the stick cut list and 3D-printable hubs', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
+            ? [{ label: 'Pipes', title: 'Frame a shape in PVC, EMT or aluminium tube, with the cut list and printable hubs. Best for: shelters, carts, racks and greenhouses.', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
             : []),
         ]
       : [
-          { label: 'SVG', title: 'Unwrap panel faces into 2D cut patterns (SVG), or cut them straight from here', tone: 'text-amber-600 dark:text-amber-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unwrap },
-          ...(exports.unfold
-            ? [{ label: 'Unfold', title: 'Unfold 3D meshes into flat 2D nets: Papercraft (glue tabs), Sheet Metal (K-factor bends), or Leather/Soft Goods (seam allowance & stitch holes)', tone: 'text-rose-600 dark:text-rose-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unfold }]
+          { label: 'SVG', title: 'Flat panels cut from sheet, with finger joints or tabs. Best for: boxes, enclosures and flat-pack furniture.', tone: 'text-amber-600 dark:text-amber-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unwrap },
+          ...(exports.etch
+            ? [{
+                label: exports.etch.busy ? 'Etch…' : 'Etch',
+                title: exports.etch.error
+                  ?? `Lay the selected part (or the whole scene) out flat and open it in Etch, cut for the ${machineTarget === 'laser' ? 'laser' : 'CNC router'} from the bench stock. Best for: going straight to cutting.`,
+                tone: 'text-sky-600 dark:text-sky-400',
+                icon: <Send className="w-3.5 h-3.5" />,
+                run: exports.etch.run,
+                disabled: exports.etch.busy,
+              }]
             : []),
-          { label: 'Contour', title: 'Contour Slices (Stacked Relief Map, SVG)', tone: 'text-emerald-600 dark:text-emerald-400', icon: <Layers className="w-3.5 h-3.5" />, run: exports.contourSlices },
+          ...(exports.unfold
+            ? [{ label: 'Unfold', title: 'Unfold a shape into a flat net to fold or sew. Best for: papercraft and packaging, bent sheet metal, leather goods.', tone: 'text-rose-600 dark:text-rose-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unfold }]
+            : []),
+          { label: 'Contour', title: 'Slice the model into layers of sheet to stack and glue. Best for: topographic maps and big sculptural shapes.', tone: 'text-emerald-600 dark:text-emerald-400', icon: <Layers className="w-3.5 h-3.5" />, run: exports.contourSlices },
           ...(exports.pipes
-            ? [{ label: 'Pipes', title: 'Pipe Frame: frame a sketch or any shape in PVC, EMT or aluminium tube, with the stick cut list and 3D-printable hubs', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
+            ? [{ label: 'Pipes', title: 'Frame a shape in PVC, EMT or aluminium tube, with the cut list and printable hubs. Best for: shelters, carts, racks and greenhouses.', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
             : []),
           ...(machineTarget === 'cnc'
             ? [
-                { label: 'Relief', title: '3D Relief Carve (CNC Router)', tone: 'text-blue-600 dark:text-blue-400', icon: <Mountain className="w-3.5 h-3.5" />, run: exports.reliefCarve },
-                { label: 'Solid', title: 'Machine the part itself out of a block at true size: one side, flip, the other side', tone: 'text-indigo-600 dark:text-indigo-400', icon: <Cuboid className="w-3.5 h-3.5" />, run: exports.solid },
+                { label: 'Relief', title: 'Carve the model into the face of the board. Best for: signs, plaques, terrain and carved panels.', tone: 'text-blue-600 dark:text-blue-400', icon: <Mountain className="w-3.5 h-3.5" />, run: exports.reliefCarve },
+                { label: 'Solid', title: 'Machine the part itself from a block, turning it for the far side. Best for: real 3D parts in wood, plastic or aluminium.', tone: 'text-indigo-600 dark:text-indigo-400', icon: <Cuboid className="w-3.5 h-3.5" />, run: exports.solid },
                 ...(exports.joinery
-                  ? [{ label: 'Joinery', title: 'Break down a table, chair, or stand into mortise-and-tenon parts, stock bars, and a Bandsaw + CNC build guide', tone: 'text-amber-600 dark:text-amber-400', icon: <Puzzle className="w-3.5 h-3.5" />, run: exports.joinery }]
+                  ? [{ label: 'Joinery', title: 'Break a frame into mortise-and-tenon parts with a cut list. Best for: tables, chairs, benches and stands in timber.', tone: 'text-amber-600 dark:text-amber-400', icon: <Puzzle className="w-3.5 h-3.5" />, run: exports.joinery }]
                   : []),
               ]
             : []),
@@ -463,7 +476,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // Whatever makes the part, the hardware that goes in it has to be bought.
   if (hasHardware) {
     exportButtons.push({
-      label: 'Parts', title: 'The hardware to buy: every bearing, screw, ring and rail in the scene, counted, with bar stock cut to length', tone: 'text-slate-600 dark:text-slate-300',
+      label: 'Parts', title: 'The hardware to buy, counted, with bar stock cut to length. Best for: the shopping list before a build.', tone: 'text-slate-600 dark:text-slate-300',
       icon: <ListChecks className="w-3.5 h-3.5" />, run: () => openHardwareList(),
     });
   }
@@ -716,6 +729,11 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 {b.label}
               </button>
             ))}
+            {exports.etch?.error && machineTarget !== 'fdm' && (
+              <span role="alert" className="text-[11px] text-red-600 dark:text-red-400 max-w-[18rem] truncate" title={exports.etch.error}>
+                {exports.etch.error}
+              </span>
+            )}
           </div>
 
           {/* Said here as well as in the export dialogs, because this is where

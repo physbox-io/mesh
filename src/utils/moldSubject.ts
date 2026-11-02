@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// What a mold is made of: the selection, or the whole scene
+// What a mold, or any export, is made of: the selection, or the whole scene
 // ---------------------------------------------------------------------------
 //
-// Every kind of mold follows one rule. With parts selected it molds those
+// Every kind of mold, and every export in the bottom bar, follows one rule. With parts selected it molds those
 // parts, children and all, where they stand; with nothing selected it molds
 // every body in the scene. Simulated bodies (earlier molds and casts) are never
 // part of it.
@@ -90,15 +90,17 @@ export function mcpMoldSubject(
   scene: SceneGraph,
   masterId: unknown,
   resolve: (id: string) => SceneNode | null,
+  /** What is being made, for the errors: 'mold', 'carve', 'machine', 'cut'. */
+  verb = 'mold',
 ): MoldSubject | { error: string } {
   const named = typeof masterId === 'string' ? masterId.split(',').map((x) => x.trim()).filter(Boolean) : [];
   const missing = named.filter((id) => !resolve(id));
   if (missing.length) return { error: `No body called ${missing.join(', ')}.` };
   const ids = named.map((id) => resolve(id)!.id);
   if (ids.length && ids.every((id) => isSimulation(scene.nodes, id))) {
-    return { error: `${named.join(', ')} ${named.length === 1 ? 'is a simulation or a pour box' : 'are simulations or pour boxes'}, not part of the design: pass master_id for the part to mold.` };
+    return { error: `${named.join(', ')} ${named.length === 1 ? 'is a simulation or a pour box' : 'are simulations or pour boxes'}, not part of the design: pass master_id for the part to ${verb}.` };
   }
   const subject = moldSubject(scene, ids);
-  if (!subject.ids.length) return { error: 'There is nothing to mold: the scene holds only earlier simulations. Add the part first.' };
+  if (!subject.ids.length) return { error: `There is nothing to ${verb}: the scene holds only earlier simulations. Add the part first.` };
   return subject;
 }

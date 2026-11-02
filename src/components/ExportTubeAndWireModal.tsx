@@ -20,6 +20,7 @@ import {
 import { simulatePipeFrame } from '../utils/tubeSimulation';
 import { defaultMaxSpanMm, frameBodyInScene, WHOLE_SCENE, type FramePlacement, type FrameStyle } from '../utils/pipeSkeleton';
 import { loadManifold } from '../utils/sculptCut';
+import { ExportSubjectLine } from './ExportSubjectLine';
 
 /**
  * The piece a selection belongs to: the top-level body it is part of, so a
@@ -34,11 +35,14 @@ function pieceOf(nodes: SceneNode[], id: string | null): SceneNode | null {
 export function ExportTubeAndWireModal({
     isOpen,
     onClose,
-    scene: propScene
+    scene: propScene,
+    subjectLabel,
 }: {
     isOpen: boolean;
     onClose: () => void;
     scene?: SceneGraph;
+    /** What it works on: the selection, or the whole scene (shown under the title). */
+    subjectLabel?: string;
 }) {
     const storeScene = useStore(s => s.sceneGraph);
     const scene = propScene || storeScene;
@@ -129,6 +133,7 @@ export function ExportTubeAndWireModal({
                             <h2 className="text-base font-semibold text-slate-900 dark:text-white">
                                 Pipe Frame
                             </h2>
+                            <ExportSubjectLine verb="Framing" label={subjectLabel} />
                             <p className="text-xs text-slate-500 dark:text-slate-400">
                                 Frame a shape in PVC, EMT or aluminium tube: the stick cut list and the 3D-printable hubs
                             </p>

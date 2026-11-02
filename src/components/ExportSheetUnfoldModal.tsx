@@ -24,8 +24,11 @@ import { HintAnchor } from './ExportFields';
 import { AddSimulationButton } from './MachineJobControls';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { sheetFoldSimulationRequest } from '../utils/sheetFoldSimulation';
+import { ExportSubjectLine } from './ExportSubjectLine';
 
 export interface ExportSheetUnfoldModalProps {
+  /** What it works on: the selection, or the whole scene (shown under the title). */
+  subjectLabel?: string;
   isOpen: boolean;
   onClose: () => void;
   scene?: SceneGraph;
@@ -132,6 +135,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
   isOpen,
   onClose,
   scene: sceneProp,
+  subjectLabel,
 }) => {
   useEscapeToClose(isOpen, onClose);
   const storeScene = useStore((s) => s.sceneGraph);
@@ -274,6 +278,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
                 Unfold 3D to 2D Flat Pattern (Sheet Goods &amp; Etch)
               </h2>
+              <ExportSubjectLine verb="Unfolding" label={subjectLabel} />
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
                 Unwrap 3D meshes and lattice cages into flat 2D nets for papercraft/packaging, brake-bent sheet metal, or stitched leather &amp; soft goods.
               </p>

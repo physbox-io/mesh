@@ -25,6 +25,10 @@ export function refuseRetired(msg: Record<string, unknown>, retired: Record<stri
   }
 }
 
+/** The stock is set once, for every export, as the status bar sets it. */
+export const BOARD_INSTEAD =
+  'The stock is the bench board, as in the dialogs: set it with physics_set_environment.';
+
 export const RESIZE_INSTEAD =
   'Parts are cut at their modelled size, as in the dialog: resize the part in the scene (physics_update_object).';
 
@@ -35,12 +39,19 @@ export const RESIZE_INSTEAD =
  * program the export would hand over.
  */
 export function reliefOptionsFor(msg: Record<string, unknown>): { options: ReliefCarveOptions; fromDialog: boolean } {
-  refuseRetired(msg, { scalePercent: [RESIZE_INSTEAD, 100] });
+  refuseRetired(msg, {
+    scalePercent: [RESIZE_INSTEAD, 100],
+    stockWidthMm: [BOARD_INSTEAD, 0],
+    stockDepthMm: [BOARD_INSTEAD, 0],
+    stockThicknessMm: [BOARD_INSTEAD, 0],
+  });
   const store = useStore.getState();
   const motion = webSerialManager.getState().motion;
   const dialog = lastReliefOptions();
+  // The stock is the bench's, whatever the dialog last planned on.
+  const bench = { stockWidthMm: store.stock.widthMm, stockDepthMm: store.stock.depthMm, stockThicknessMm: store.stock.thicknessMm };
   const base: ReliefCarveOptions = dialog
-    ? { ...DEFAULT_RELIEF_OPTIONS, ...dialog }
+    ? { ...DEFAULT_RELIEF_OPTIONS, ...dialog, ...bench }
     : {
         ...DEFAULT_RELIEF_OPTIONS,
         ...APP_RELIEF_DEFAULTS,
@@ -62,9 +73,6 @@ export function reliefOptionsFor(msg: Record<string, unknown>): { options: Relie
     ...(typeof msg.material === 'string' ? { material: msg.material as ReliefCarveOptions['material'] } : {}),
     ...(msg.roughingStrategy === 'adaptive' || msg.roughingStrategy === 'raster' ? { roughingStrategy: msg.roughingStrategy } : {}),
     ...(typeof msg.roughingEnabled === 'boolean' ? { roughingEnabled: msg.roughingEnabled } : {}),
-    ...(num(msg.stockWidthMm) ? { stockWidthMm: num(msg.stockWidthMm) } : {}),
-    ...(num(msg.stockDepthMm) ? { stockDepthMm: num(msg.stockDepthMm) } : {}),
-    ...(num(msg.stockThicknessMm) ? { stockThicknessMm: num(msg.stockThicknessMm) } : {}),
     ...(['auto', 'model', 'fill', 'proportional'].includes(msg.verticalScaleMode as string)
       ? { verticalScaleMode: msg.verticalScaleMode as ReliefCarveOptions['verticalScaleMode'] }
       : {}),
@@ -130,8 +138,7 @@ export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGr
   // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
   // a wood recipe whatever material is named.
   const motion = webSerialManager.getState().motion;
-  const boardInstead =
-    'The stock is the bench board, as in the dialog: set it with physics_set_environment.';
+  const boardInstead = BOARD_INSTEAD;
   refuseRetired(msg, {
     scalePercent: [RESIZE_INSTEAD, 100],
     stockWidthMm: [boardInstead, 0],

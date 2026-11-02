@@ -29,8 +29,11 @@ import { HintAnchor } from './ExportFields';
 import { RackToolPicker } from './RackToolPicker';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
+import { ExportSubjectLine } from './ExportSubjectLine';
 
 interface ExportLaserCutModalProps {
+  /** What it works on: the selection, or the whole scene (shown under the title). */
+  subjectLabel?: string;
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
@@ -149,6 +152,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   isOpen,
   onClose,
   scene,
+  subjectLabel,
   }) => {
   useEscapeToClose(isOpen, onClose);
   const [jointMode, setJointMode] = useState<'finger' | 'slot' | 'glue'>('finger');
@@ -544,6 +548,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
                 Export to Laser / CNC
               </h2>
+              <ExportSubjectLine verb="Cutting" label={subjectLabel} />
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
                 Unwrap 3D panel faces into 2D cut patterns. Download the SVG, or cut straight from here over WebSerial USB (GRBL / Marlin)
               </p>

@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from 'react';
+import { useEffect, useMemo, useState, type RefObject } from 'react';
 import type * as THREE from 'three';
 import { useStore } from '../store/useStore';
 import { usePanels } from '../store/panelsStore';
@@ -18,6 +18,8 @@ import { ExportSheetUnfoldModal } from './ExportSheetUnfoldModal';
 import { ExportTubeAndWireModal } from './ExportTubeAndWireModal';
 import { BottomStatusBar } from './BottomStatusBar';
 import { MachineConfigModal } from './MachineConfigModal';
+import { moldSubject, selectedIds } from '../utils/moldSubject';
+import { openSceneInEtch } from '../utils/etchSceneHandoff';
 
 /**
  * The bottom bar and everything it opens: the fabrication exports, Split for
@@ -60,6 +62,16 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
     isSheetUnfoldModalOpen ||
     isTubeAndWireModalOpen;
   const sceneGraph = useStore((s) => (anySceneModalOpen ? s.sceneGraph : null));
+  // What every export works on, as the Mold dialog molds: the selection when
+  // the dialog opened, else every body. Read once on opening, since adding a
+  // simulation selects it.
+  const [subjectIds, setSubjectIds] = useState<string[]>([]);
+  const opening = (open: (v: boolean) => void) => () => {
+    setSubjectIds(selectedIds(useStore.getState()));
+    open(true);
+  };
+  const subject = useMemo(() => (sceneGraph ? moldSubject(sceneGraph, subjectIds) : null), [sceneGraph, subjectIds]);
+  const subjectScene = subject?.scene ?? null;
 
   // Resume a previously connected USB or cloud machine once on app startup
   // even while MachineConfigModal is not mounted.
@@ -76,31 +88,62 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   }, []);
 
   const { exportStl, export3mf } = useMeshExport(threeSceneRef, noteCards);
+
+  // Etch, in one click: the selection (or every body) laid flat for the
+  // bench's machine, out of the bench's stock (utils/etchSceneHandoff.ts).
+  const [etchBusy, setEtchBusy] = useState(false);
+  const [etchError, setEtchError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!etchError) return;
+    const t = setTimeout(() => setEtchError(null), 10000);
+    return () => clearTimeout(t);
+  }, [etchError]);
+  const sendToEtch = () => {
+    const state = useStore.getState();
+    const subject = moldSubject(state.sceneGraph, selectedIds(state));
+    if (!subject.ids.length) {
+      setEtchError('Nothing to send: the scene has no parts.');
+      return;
+    }
+    setEtchBusy(true);
+    setEtchError(null);
+    openSceneInEtch({
+      scene: subject.scene,
+      name: subject.label,
+      machine: state.machineTarget === 'laser' ? 'laser' : 'cnc',
+      stock: state.stock,
+    })
+      .catch((e: Error) => setEtchError(e.message))
+      .finally(() => setEtchBusy(false));
+  };
   return (
     <>
       {/* Mounted only while open so closed modals do not run hooks, worker
           settle timers, or scene tree walks on every edit. */}
-      {isLaserCutModalOpen && sceneGraph && (
+      {isLaserCutModalOpen && subjectScene && (
         <ExportLaserCutModal
           isOpen={isLaserCutModalOpen}
           onClose={() => setIsLaserCutModalOpen(false)}
-          scene={sceneGraph}
+          scene={subjectScene!}
+          subjectLabel={subject!.label}
         />
       )}
 
-      {isContourSliceModalOpen && sceneGraph && (
+      {isContourSliceModalOpen && subjectScene && (
         <ExportContourSliceModal
           isOpen={isContourSliceModalOpen}
           onClose={() => setIsContourSliceModalOpen(false)}
-          scene={sceneGraph}
+          scene={subjectScene!}
+          subjectLabel={subject!.label}
         />
       )}
 
-      {isReliefCarveModalOpen && sceneGraph && (
+      {isReliefCarveModalOpen && subjectScene && (
         <ExportReliefCarveModal
           isOpen={isReliefCarveModalOpen}
           onClose={() => setIsReliefCarveModalOpen(false)}
-          scene={sceneGraph}
+          scene={subjectScene!}
+          subjectLabel={subject!.label}
           onMachineAsPart={(seed) => {
             setIsReliefCarveModalOpen(false);
             setSolidSeed(seed);
@@ -117,14 +160,15 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         />
       )}
 
-      {isSolidModalOpen && sceneGraph && (
+      {isSolidModalOpen && subjectScene && (
         <ExportSolidMachiningModal
           isOpen={isSolidModalOpen}
           onClose={() => {
             setIsSolidModalOpen(false);
             setSolidSeed(null);
           }}
-          scene={sceneGraph}
+          scene={subjectScene!}
+          subjectLabel={subject!.label}
           seed={solidSeed}
         />
       )}
@@ -154,19 +198,21 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         />
       )}
 
-      {isSheetUnfoldModalOpen && sceneGraph && (
+      {isSheetUnfoldModalOpen && subjectScene && (
         <ExportSheetUnfoldModal
           isOpen={isSheetUnfoldModalOpen}
           onClose={() => setIsSheetUnfoldModalOpen(false)}
-          scene={sceneGraph}
+          scene={subjectScene!}
+          subjectLabel={subject!.label}
         />
       )}
 
-      {isTubeAndWireModalOpen && sceneGraph && (
+      {isTubeAndWireModalOpen && subjectScene && (
         <ExportTubeAndWireModal
           isOpen={isTubeAndWireModalOpen}
           onClose={() => setIsTubeAndWireModalOpen(false)}
-          scene={sceneGraph}
+          scene={subjectScene!}
+          subjectLabel={subject!.label}
         />
       )}
 
@@ -176,15 +222,16 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           stl: exportStl,
           threeMf: export3mf,
           mold: () => setIsMoldModalOpen(true),
-          unwrap: () => setIsLaserCutModalOpen(true),
-          contourSlices: () => setIsContourSliceModalOpen(true),
-          reliefCarve: () => setIsReliefCarveModalOpen(true),
-          solid: () => setIsSolidModalOpen(true),
+          unwrap: opening(setIsLaserCutModalOpen),
+          contourSlices: opening(setIsContourSliceModalOpen),
+          reliefCarve: opening(setIsReliefCarveModalOpen),
+          solid: opening(setIsSolidModalOpen),
           cast: () => setIsCastModalOpen(true),
           split: () => setIsSplitModalOpen(true),
           joinery: () => setIsJoineryModalOpen(true),
-          unfold: () => setIsSheetUnfoldModalOpen(true),
-          pipes: () => setIsTubeAndWireModalOpen(true),
+          unfold: opening(setIsSheetUnfoldModalOpen),
+          pipes: opening(setIsTubeAndWireModalOpen),
+          etch: { run: sendToEtch, busy: etchBusy, error: etchError },
         }}
       />
 

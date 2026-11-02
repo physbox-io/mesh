@@ -27,8 +27,11 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { reliefSimulationTools } from '../utils/simulatedPart';
 import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
+import { ExportSubjectLine } from './ExportSubjectLine';
 
 interface Props {
+  /** What it works on: the selection, or the whole scene (shown under the title). */
+  subjectLabel?: string;
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
@@ -42,7 +45,7 @@ interface Props {
 /** Where a relief starts: the model at its own size if it fits the stock. */
 const RELIEF_START = { ...DEFAULT_RELIEF_OPTIONS, ...APP_RELIEF_DEFAULTS };
 
-export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene, onMachineAsPart }) => {
+export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene, subjectLabel, onMachineAsPart }) => {
   useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
 
@@ -58,7 +61,6 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
    * stock it named into the bench.
    */
   const stock = useStore((s) => s.stock);
-  const setStock = useStore((s) => s.setStock);
   const carveSettings = useStore((s) => s.carveSettings);
 
   // The feeds are derated for the depth of the carve, which here is one of the
@@ -285,6 +287,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
                 Carve 3D Relief on CNC
               </h2>
+              <ExportSubjectLine verb="Carving" label={subjectLabel} />
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
                 Squash the model's height into the face of a block and cut it over WebSerial USB (GRBL / Marlin)
               </p>
@@ -301,42 +304,12 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
         {/* Body */}
         <div className="flex-1 overflow-y-auto overflow-x-clip p-4 sm:p-6 space-y-5">
 
-          {/* Stock & relief */}
+          {/* Relief */}
           <div className={sectionClass}>
-            <h3 className={sectionTitleClass}>Stock &amp; Relief</h3>
+            <h3 className={sectionTitleClass}>Relief</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
-              <Field
-                className="lg:col-span-3"
-                label="Stock Block (mm)"
-                hint="Width, depth and thickness of the block clamped on the bed — the same board the status bar shows, so it is set once for every export. The job's origin is the near-left corner of its top face, so zero the machine there before you start. The whole carve runs +X and +Y from zero."
-              >
-                <div className="flex items-center space-x-1.5">
-                  <NumberInput
-                    step={10} min={10} max={2000}
-                    value={options.stockWidthMm}
-                    onChange={(v) => { if (v !== undefined) setStock({ widthMm: v }); }}
-                    className={`${inputClass} px-2`}
-                    aria-label="Stock width in mm"
-                  />
-                  <span className="text-xs font-medium text-slate-400">&times;</span>
-                  <NumberInput
-                    step={10} min={10} max={2000}
-                    value={options.stockDepthMm}
-                    onChange={(v) => { if (v !== undefined) setStock({ depthMm: v }); }}
-                    className={`${inputClass} px-2`}
-                    aria-label="Stock depth in mm"
-                  />
-                  <span className="text-xs font-medium text-slate-400">&times;</span>
-                  <NumberInput
-                    step={1} min={1} max={300}
-                    value={options.stockThicknessMm}
-                    onChange={(v) => { if (v !== undefined) setStock({ thicknessMm: v }); }}
-                    className={`${inputClass} px-2`}
-                    aria-label="Stock thickness in mm"
-                  />
-                </div>
-              </Field>
-
+              {/* The stock is not shown here: it is the bench's, set once in the
+                  status bar for every export. */}
               {/* Material is set once, in the status bar, and every export reads
                   it from there — it describes what is clamped on the bed rather
                   than anything about this carve. Named here anyway, because
