@@ -41,13 +41,24 @@ export function etchLayoutOptions(req: Pick<EtchSceneRequest, 'machine' | 'stock
   };
 }
 
+/**
+ * Why there is nothing to send, and what to do instead. The panel layout only
+ * takes flat panels; a solid goes to Etch as Contour's slices or Unfold's net.
+ */
+function panelRefusal(error: string | undefined): string {
+  const why = error || 'Nothing here lays flat into panels to cut.';
+  return /planar panels|box objects|lays flat/i.test(why)
+    ? 'Nothing here is flat panels to cut. For a solid shape, use Contour (stacked slices) or Unfold (a net), and open the result in Etch from there.'
+    : why;
+}
+
 /** Lays the scene out and returns the URL that opens it in Etch. Throws with a sentence when it cannot. */
 export async function etchUrlForScene(req: EtchSceneRequest): Promise<string> {
   const client = new ExportWorkerClient();
   try {
     const result = await client.run('laser', req.scene, etchLayoutOptions(req));
     if (!result.success || !result.svg || !result.panels?.length) {
-      throw new Error(result.error || 'Nothing here lays flat into panels to cut.');
+      throw new Error(panelRefusal(result.error));
     }
     const handoff = { svg: result.svg, name: req.name, thicknessMm: req.stock.thicknessMm };
     return await (req.baseUrl ? buildEtchHandoffUrl(handoff, req.baseUrl) : buildEtchHandoffUrl(handoff));
@@ -57,22 +68,16 @@ export async function etchUrlForScene(req: EtchSceneRequest): Promise<string> {
 }
 
 /**
- * Opens the scene in Etch in a new tab. The tab is opened before the layout
- * runs, while the click still counts as one, since a popup blocker refuses a
- * window opened after an await; it is closed again if the layout fails.
+ * Opens the scene in Etch in a new tab, once the layout is done. A blank tab
+ * opened first and closed on failure was a flash of nothing; the click's
+ * permission to open a tab outlasts a layout (a few seconds in Chrome), and
+ * a blocked one is said rather than lost.
  */
 export async function openSceneInEtch(req: EtchSceneRequest): Promise<void> {
-  const tab = window.open('about:blank', '_blank');
-  try {
-    const url = await etchUrlForScene(req);
-    if (tab) {
-      tab.opener = null;
-      tab.location.href = url;
-    } else {
-      window.open(url, '_blank', 'noopener');
-    }
-  } catch (e) {
-    tab?.close();
-    throw e;
-  }
+  const url = await etchUrlForScene(req);
+  // Not 'noopener': with it window.open returns null whether or not the tab
+  // opened, and a blocked one could not be told apart. Cut loose by hand.
+  const tab = window.open(url, '_blank');
+  if (!tab) throw new Error('The browser blocked the new tab: allow pop-ups for this site, then press Etch again.');
+  tab.opener = null;
 }

@@ -222,7 +222,11 @@ export function useMCPBridge() {
       if (msg && Array.isArray(msg.withIds)) msg = { ...msg, withIds: msg.withIds.map(toId) };
 
       if (Object.hasOwn(COMMANDS, cmd)) return COMMANDS[cmd](msg, { store, toId });
-      return { error: `Unknown command: ${cmd}` };
+      // What send_command can say here: every command, the machine ones too.
+      if (cmd === 'LIST_COMMANDS') {
+        return { ok: true, commands: [...new Set([...Object.keys(COMMANDS), ...Object.keys(machineHandlers), 'LIST_COMMANDS'])].sort() };
+      }
+      return { error: `Unknown command: ${cmd}. LIST_COMMANDS names every command this app takes.` };
     };
 
     connect();
