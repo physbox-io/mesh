@@ -1,5 +1,7 @@
 # Etch and Volt: changes that follow from Mesh's 2026-11-01 work
 
+**Status 2026-11-02:** Etch d5b0b74 and Volt 497f172 deployed (tab identity, LIST_COMMANDS, audits); physbox-mcp v0.60.1. Open: Etch's G-code dialog has its own laser/CNC selector (same store field as the bottom bar); Etch keeps "Untitled" when an SVG is imported into a blank document.
+
 Written while fixing an agent's mold-making notes in Mesh and adding
 physics_export_cut. Each item says what Mesh now does, and what the sibling
 app lacks.
