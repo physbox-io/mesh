@@ -26,6 +26,7 @@ import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type Pull
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
 import type { CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
+import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
 export type { Triangle3D } from './moldManifold';
@@ -57,6 +58,12 @@ export interface MoldOptions {
   pullDirection?: 'auto' | PullDirection;
   /** Wall thickness around the part in mm. */
   wallMarginMm: number;
+  /**
+   * The block's plan: 'box' (default) the part's bounding box plus the wall,
+   * 'fit' the part's own outline plus the wall, pins and notches moved onto
+   * it (moldOutline.ts): round a round part, about half the print.
+   */
+  blockShape?: 'box' | 'fit';
   /** Floor/roof slab thickness behind the cavity in mm. */
   baseThicknessMm: number;
   /** Custom override for total cavity depth in mm (0 uses actual scene height). */
@@ -675,6 +682,8 @@ export function emptyMoldResult(message?: string): MoldExportResult {
 
 export interface CsgContext {
   setup: MoldSetupFields;
+  /** The block plans when it follows the part (blockShape 'fit'), else null: a box. */
+  outlines: MoldOutlines | null;
   wasm: ManifoldToplevel;
   tris: Float64Array;
   solidIds: number[];
@@ -750,8 +759,8 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
     }
 
     const blockHeight = partHeightMm + opts.baseThicknessMm;
-    const moldBlock = wasm.Manifold.cube([moldWidthMm, moldDepthMm, blockHeight], false)
-      .translate([-mw2, -md2, -blockHeight]);
+    const moldBlock = fittedBlock(wasm, wasm.Manifold.cube([moldWidthMm, moldDepthMm, blockHeight], false)
+      .translate([-mw2, -md2, -blockHeight]), ctx.outlines?.base, -blockHeight, 0);
 
     // pour_ext: cross section at open face Z = -0.01 extruded Z in [-0.5, +2.0]
     let pour_ext: Manifold | null = null;
@@ -883,8 +892,8 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
   basePart = taper(basePart, ctx.rawBaseDepth);
   lidPart = taper(lidPart, ctx.rawLidDepth);
 
-  const baseBlock = wasm.Manifold.cube([moldWidthMm, moldDepthMm, baseBlockHeight], false)
-    .translate([-mw2, -md2, -baseBlockHeight]);
+  const baseBlock = fittedBlock(wasm, wasm.Manifold.cube([moldWidthMm, moldDepthMm, baseBlockHeight], false)
+    .translate([-mw2, -md2, -baseBlockHeight]), ctx.outlines?.base, -baseBlockHeight, 0);
 
   let carvedBase = baseBlock.subtract(basePart);
   baseBlock.delete();
@@ -899,8 +908,8 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
     carvedBase = next;
   }
 
-  const lidBlock = wasm.Manifold.cube([moldWidthMm, moldDepthMm, lidBlockHeight], false)
-    .translate([-mw2, -md2, -lidBlockHeight]);
+  const lidBlock = fittedBlock(wasm, wasm.Manifold.cube([moldWidthMm, moldDepthMm, lidBlockHeight], false)
+    .translate([-mw2, -md2, -lidBlockHeight]), ctx.outlines?.lid, -lidBlockHeight, 0);
 
   let carvedLid = lidBlock.subtract(lidPart);
   lidBlock.delete();
@@ -1404,12 +1413,29 @@ export function generateMoldMeshes(
   const maxKeyOffsetX = Math.max(0, pinInsetX - socketRimR - 1.5);
   const keyOffsetX = Math.min(maxKeyOffsetX, Math.min(4, Math.max(2, partHalfW * 0.4)));
 
-  const pinPositions: Array<[number, number]> = [
-    [-mw2 + pinInsetX + keyOffsetX, -md2 + pinInsetY],
-    [mw2 - pinInsetX, -md2 + pinInsetY],
-    [mw2 - pinInsetX, md2 - pinInsetY],
-    [-mw2 + pinInsetX, md2 - pinInsetY],
-  ];
+  // A block that follows the part: its plan, with the pins on a ring halfway
+  // out into the wall (or clear of the cavity by a socket and a millimetre).
+  const outlines: MoldOutlines | null = opts.blockShape === 'fit' && activeWasm
+    ? moldOutlines(activeWasm, tris, sceneSolidIds, {
+        wallMm: opts.wallMarginMm,
+        pinRingMm: Math.max(opts.wallMarginMm / 2, socketRimR + 1),
+        baseMirrored: detailIsAbove,
+        // Draft added at the cavity's foot widens it by depth x tan(angle).
+        extraMm: opts.draftMode === 'add' ? rawCavityDepthMm * Math.tan((opts.draftAngleDeg * Math.PI) / 180) : 0,
+      })
+    : null;
+  if (opts.blockShape === 'fit' && !outlines) {
+    warnings.push("The part's outline could not be traced (it is not one closed solid), so the block is a box.");
+  }
+
+  const pinPositions: Array<[number, number]> = outlines
+    ? pinsOnRing(outlines.pinRing, Math.max(5, 2 * socketRimR + 1))
+    : [
+        [-mw2 + pinInsetX + keyOffsetX, -md2 + pinInsetY],
+        [mw2 - pinInsetX, -md2 + pinInsetY],
+        [mw2 - pinInsetX, md2 - pinInsetY],
+        [-mw2 + pinInsetX, md2 - pinInsetY],
+      ];
 
   const minWallMarginForPins = Math.ceil((opts.pinDiameterMm + 2 * opts.pinToleranceMm + 2) * 10) / 10;
   if (opts.moldType === 'clamshell' && opts.wallMarginMm < minWallMarginForPins) {
@@ -1424,7 +1450,7 @@ export function generateMoldMeshes(
   const notchRimR = Math.min(3, Math.max(1.5, opts.wallMarginMm * 0.35));
   const notchPositions: Array<[number, number]> =
     opts.moldType === 'clamshell' && opts.includePryNotches
-      ? [[mw2 - 1, 0], [-mw2 + 1, 0]]
+      ? outlines ? notchesOnOutline(outlines.base) : [[mw2 - 1, 0], [-mw2 + 1, 0]]
       : [];
 
   const baseFeatures: HalfFeatures = {
@@ -1524,6 +1550,7 @@ export function generateMoldMeshes(
 
   const csgFields = {
     setup: setupFields,
+    outlines,
     tris,
     solidIds: sceneSolidIds ?? [],
     solidNames: sceneSolidNames ?? [],
@@ -1580,11 +1607,14 @@ export function generateMoldMeshes(
     return 'error' in csgRes ? { ...emptyMoldResult(csgRes.error), ...setupFields } : csgRes;
   }
 
-  const base = buildHalf(grid, baseDepth, opts.baseThicknessMm, baseFeatures, baseTrueDepth);
-  const lid =
+  const builtBase = buildHalf(grid, baseDepth, opts.baseThicknessMm, baseFeatures, baseTrueDepth);
+  const builtLid =
     opts.moldType === 'clamshell'
       ? buildHalf(grid, lidDepth, opts.baseThicknessMm, lidFeatures, lidTrueDepth)
       : null;
+  // Cut to the part's outline when the block follows it.
+  const base = outlines && activeWasm ? { ...builtBase, triangles: trimTriangles(activeWasm, builtBase.triangles, outlines.base) } : builtBase;
+  const lid = builtLid && outlines && activeWasm ? { ...builtLid, triangles: trimTriangles(activeWasm, builtLid.triangles, outlines.lid) } : builtLid;
 
   // Both halves print cavity up: flat outer face on the bed, no support needed
   // under the pins, and the detail surface facing the nozzle. A single open mold

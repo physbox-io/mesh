@@ -311,6 +311,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
   const linerPairId = resolveLinerPair(asked);
   const badLiner = asked !== undefined && !linerPairId;
   return {
+    ...(msg.blockShape !== undefined && msg.blockShape !== 'box' && msg.blockShape !== 'fit' ? { error: "block_shape is 'box' or 'fit'." } : {}),
     ...(badLiner ? { error: `liner_material is one of ${LINER_PAIRS.map((p) => p.id).join(', ')}.` } : {}),
     ...(badMaterial
       ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast).` }
@@ -340,6 +341,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
         : typeof msg.draftDeg === 'number' ? { draftAngleDeg: msg.draftDeg } : {}),
       ...(msg.draftMode === 'remove' || msg.draftMode === 'add' || msg.draftMode === 'centre' ? { draftMode: msg.draftMode } : {}),
       ...(typeof msg.allowUndercuts === 'boolean' ? { allowUndercuts: msg.allowUndercuts } : {}),
+      ...(msg.blockShape === 'box' || msg.blockShape === 'fit' ? { blockShape: msg.blockShape } : {}),
       ...(typeof msg.includeSprue === 'boolean' ? { includeSprue: msg.includeSprue } : {}),
       ...(typeof msg.includeVents === 'boolean' ? { includeVents: msg.includeVents } : {}),
       ...(pos(msg.ventDiaMm) !== undefined ? { ventDiaMm: pos(msg.ventDiaMm) } : {}),

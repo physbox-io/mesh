@@ -554,6 +554,14 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
               />
             </Field>
 
+            <Field label="Block Shape" hint="Box is the part's bounding box plus the wall. Follow part traces the part's outline plus the wall, with the pins moved onto it: much less filament round a round part.">
+              <Segmented
+                value={options.blockShape ?? 'box'}
+                onChange={(v) => set('blockShape', v)}
+                options={[['box', 'Box'], ['fit', 'Follow part']] as const}
+              />
+            </Field>
+
             <div className="grid grid-cols-2 gap-3 min-w-0">
               <Field label="Wall Margin (mm)" hint="Perimeter flange width around the cast part." hintAlign="start">
                 <NumberInput
