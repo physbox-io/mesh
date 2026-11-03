@@ -626,15 +626,19 @@ export const JobTransport: React.FC<{
       )}
       {/* The gap between "pause" and "abandon". A feed hold leaves the tool
           sitting in the cut and GRBL refuses to jog in Hold, so pausing to
-          actually look at the work used to mean scrapping the job. */}
-      <button
-        onClick={() => webSerialManager.parkJob({ isLaser })}
-        title="Stop the cut, retract, and hand the machine back so you can jog it about. The line actually reached is kept, so it can carry on from there."
-        className={`${base} bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200`}
-      >
-        <ChevronsDown className={icon} />
-        <span>Park</span>
-      </button>
+          actually look at the work used to mean scrapping the job. Not at a
+          tool change or sheet swap: the machine is already stopped there and
+          free to jog. */}
+      {machineState.status !== 'PAUSED_TOOL' && machineState.status !== 'PAUSED_MATERIAL' && (
+        <button
+          onClick={() => webSerialManager.parkJob({ isLaser })}
+          title="Stop the cut, retract, and hand the machine back so you can jog it about. The line actually reached is kept, so it can carry on from there."
+          className={`${base} bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200`}
+        >
+          <ChevronsDown className={icon} />
+          <span>Park</span>
+        </button>
+      )}
       <button
         onClick={() => webSerialManager.cancelJob()}
         title="Soft reset: stops the machine now and loses the position. The line it reached is kept, to resume after re-homing and re-zeroing."

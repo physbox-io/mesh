@@ -2267,6 +2267,12 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   public async parkJob({ isLaser: laser }: { isLaser?: boolean } = {}): Promise<boolean> {
     if (!this.isJobRunning || this.state.status === 'PAUSED_PARKED') return false;
+    // A tool change or a sheet swap has already drained, stopped and parked
+    // the machine, which is free to be jogged. It never reports the feed hold
+    // waited for below, so parking it turned the pause into an operator hold
+    // five seconds later: the prompt was lost, and with it the re-zero gate
+    // that `assertReadyToResume` keys on PAUSED_TOOL.
+    if (this.state.status === 'PAUSED_TOOL' || this.state.status === 'PAUSED_MATERIAL') return false;
 
     // 1. Hold, and let the deceleration finish.
     if (!this.isPaused) {

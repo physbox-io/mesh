@@ -1097,3 +1097,45 @@ describe('a start that never streams', () => {
   });
 });
 
+/*
+ * Park at a tool change or a sheet swap. The machine had already drained and
+ * stopped, so it never reported the feed hold `parkJob` waits for: five seconds
+ * later the pause became an operator hold that "did not confirm the axes had
+ * stopped", the prompt saying which tool to fit was gone, and the re-zero gate
+ * on resume, which is keyed on PAUSED_TOOL, no longer applied.
+ */
+describe('parking at a programmed pause', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+  });
+  afterEach(async () => {
+    webSerialManager.discardPark();
+    await webSerialManager.cancelJob();
+    webSerialManager.clearResumePoint();
+    fake.detach();
+  });
+
+  it('leaves a tool change as it was, re-zero gate and all', async () => {
+    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nT2 M6 ; fit the 3 mm ball nose\nG1 X20\n');
+    await advance(6);
+    const before = webSerialManager.getState();
+    expect(before.status).toBe('PAUSED_TOOL');
+
+    expect(await webSerialManager.parkJob()).toBe(false);
+    const after = webSerialManager.getState();
+    expect(after.status).toBe('PAUSED_TOOL');
+    expect(after.pauseMessage).toBe(before.pauseMessage);
+    await expect(webSerialManager.resumeJob()).rejects.toThrow(/Z zero/);
+  });
+
+  it('leaves a sheet swap as it was', async () => {
+    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nM0 (PAUSE: Insert Material Sheet 2 of 3)\nG1 X20\n');
+    await advance(6);
+    expect(webSerialManager.getState().status).toBe('PAUSED_MATERIAL');
+    expect(await webSerialManager.parkJob()).toBe(false);
+    expect(webSerialManager.getState().status).toBe('PAUSED_MATERIAL');
+  });
+});
+
