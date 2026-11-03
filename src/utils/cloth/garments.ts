@@ -273,14 +273,17 @@ export function draftGarment(draft: GarmentDraft, form: BodyFormMeasurements): C
     const armhole = (armFront + armBack) / 2;
     const half = Math.max(0.15 * s, (form.upperArm + 0.12) / 2);
     const sl = sleeve(half, d.sleeve, armhole, armFront / (armFront + armBack));
-    const R = half / Math.PI;
+    // Rolled into a tube round the arm's own axis, clear of the arm and the
+    // deltoid; a tube rounder than the sleeve is wide starts with its
+    // underarm seam a little open.
+    const R = Math.max(half / Math.PI, L.deltoidRadius + START_GAP);
     for (const sideSign of [1, -1]) {
       const name = sideSign > 0 ? 'sleeveR' : 'sleeveL';
       const dir = [sideSign * L.armDir[0], 0, L.armDir[2]];
       // Square to the arm and upward: the top of the cap (u = 0) sits on top of the arm.
       const up = [sideSign * -L.armDir[2], 0, L.armDir[0]];
       // Rolled round the arm with the top of the cap at the shoulder point.
-      const o = [sideSign * L.shoulderPoint[0] + sl.capHeight * dir[0], 0, L.shoulderPoint[2] + sl.capHeight * dir[2]];
+      const o = [sideSign * L.armOrigin[0] + sl.capHeight * dir[0], 0, L.armOrigin[2] + sl.capHeight * dir[2]];
       // Front of the sleeve (u > 0) toward -y on both arms, so it meets the front armhole.
       pieces.push({
         name, edges: sl.edges, rgba,

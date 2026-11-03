@@ -172,59 +172,73 @@ function rowHalfWidth(outline: UV[], v: number): number {
   return h;
 }
 
-/** Arc length round an ellipse (half-axes a, b) from its front point, tabulated against angle. */
-function ellipseArc(a: number, b: number, n = 96) {
-  const phi: number[] = [0], len: number[] = [0];
-  for (let i = 1; i <= n; i++) {
-    const t = (Math.PI * i) / n, t0 = (Math.PI * (i - 1)) / n;
-    phi.push(t);
-    len.push(len[i - 1] + Math.hypot(a * (Math.sin(t) - Math.sin(t0)), b * (Math.cos(t) - Math.cos(t0))));
-  }
-  const quarter = len[n >> 1];
-  /** The angle at which arc length `s` is reached (clamped to the back point). */
-  const angle = (s: number) => {
-    if (s >= len[n]) return Math.PI;
-    let i = 1;
-    while (len[i] < s) i++;
-    const f = (s - len[i - 1]) / (len[i] - len[i - 1] || 1);
-    return phi[i - 1] + f * (phi[i] - phi[i - 1]);
-  };
-  return { quarter, angle };
-}
-
 function girthPlacer(p: GirthPlacement, outline: UV[]): (q: UV) => number[] {
   const prof = p.profile.slice().sort((x, y) => x.v - y.v);
   if (!prof.length) throw new Error('a girth placement needs a profile');
+  const n = prof[0].radii.length;
+  if (n < 8 || n % 4) throw new Error('a girth profile needs radii at a multiple of four even angles');
   const at = (v: number) => {
     if (v <= prof[0].v) return prof[0];
     for (let i = 1; i < prof.length; i++) {
       if (v <= prof[i].v) {
         const a = prof[i - 1], b = prof[i], t = (v - a.v) / (b.v - a.v || 1);
-        return { v, halfWidth: a.halfWidth + (b.halfWidth - a.halfWidth) * t, halfDepth: a.halfDepth + (b.halfDepth - a.halfDepth) * t, centreY: a.centreY + (b.centreY - a.centreY) * t };
+        return { v, centreY: a.centreY + (b.centreY - a.centreY) * t, radii: a.radii.map((r, k) => r + (b.radii[k] - r) * t) };
       }
     }
     return prof[prof.length - 1];
   };
-  const rows = new Map<number, { A: number; B: number; cy: number; angle: (s: number) => number }>();
+  // Indices round the section: the side at 0 (+x), the back at n/4, the
+  // other side at n/2, the front at 3n/4. Each half of a piece runs from its
+  // centre to one side.
+  const centre = p.facing === 'front' ? (3 * n) / 4 : n / 4;
+  const pathTo = (sideIdx: number) => {
+    const out: number[] = [];
+    const step = ((sideIdx - centre + n) % n) <= n / 2 ? 1 : -1;
+    for (let i = centre; ; i = (i + step + n) % n) { out.push(i); if (i === sideIdx % n) break; }
+    return out;
+  };
+  const toPlus = pathTo(0), toMinus = pathTo(n / 2);
+  const rows = new Map<number, (u: number) => [number, number]>();
   const row = (v: number) => {
     const key = Math.round(v * 1e4);
-    let r = rows.get(key);
-    if (!r) {
-      const c = at(v), a0 = c.halfWidth + p.gap, b0 = Math.max(1e-3, c.halfDepth + p.gap);
-      // Enlarged until the row reaches the side: then front and back, each
-      // wrapped the same way, start with their side seams together. A row a
-      // little shorter than the body (a close fit) may tuck in slightly.
-      const k = Math.max(0.9, rowHalfWidth(outline, v) / ellipseArc(a0, b0).quarter);
-      const A = a0 * k, B = b0 * k;
-      r = { A, B, cy: c.centreY, angle: ellipseArc(A, B).angle };
-      rows.set(key, r);
-    }
-    return r;
+    let f = rows.get(key);
+    if (f) return f;
+    const sec = at(v), h = Math.max(1e-4, rowHalfWidth(outline, v));
+    const pt = (i: number, off: number): [number, number] => {
+      const th = (2 * Math.PI * i) / n, r = sec.radii[i] + off;
+      return [r * Math.cos(th), sec.centreY + r * Math.sin(th)];
+    };
+    const arc = (path: number[], off: number) => {
+      const pts = path.map((i) => pt(i, off)), cum = [0];
+      for (let k = 1; k < pts.length; k++) cum.push(cum[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
+      return { pts, cum, len: cum[cum.length - 1] };
+    };
+    // Stood off by the gap, and further where the row is longer than the body
+    // is round to the side: a quarter turn adds about pi/2 per metre off.
+    const side = (path: number[]) => {
+      let off = p.gap, a = arc(path, off);
+      for (let it = 0; it < 4 && a.len < h; it++) { off += (h - a.len) / (Math.PI / 2); a = arc(path, off); }
+      return a;
+    };
+    const plus = side(toPlus), minus = side(toMinus);
+    f = (u: number) => {
+      const a = u >= 0 ? plus : minus;
+      // At its true length round the body; a row as long as the body is round
+      // ends exactly at the side seam. One shorter (above the underarm, where
+      // the armhole is cut away) stops short, leaving the armhole open where
+      // the arm comes through: stretched round to the side it lay inside the arm.
+      const sArc = h >= a.len - 1e-9 ? (Math.abs(u) / h) * a.len : Math.abs(u);
+      let k = 1;
+      while (k < a.cum.length - 1 && a.cum[k] < sArc) k++;
+      const t = Math.min(1, (sArc - a.cum[k - 1]) / (a.cum[k] - a.cum[k - 1] || 1));
+      return [a.pts[k - 1][0] + (a.pts[k][0] - a.pts[k - 1][0]) * t, a.pts[k - 1][1] + (a.pts[k][1] - a.pts[k - 1][1]) * t];
+    };
+    rows.set(key, f);
+    return f;
   };
-  const sy = p.facing === 'front' ? -1 : 1;
   return ([u, v]) => {
-    const r = row(v), phi = r.angle(Math.abs(u));
-    return [p.origin[0] + Math.sign(u) * r.A * Math.sin(phi), p.origin[1] + r.cy + sy * r.B * Math.cos(phi), p.origin[2] + v];
+    const [x, y] = row(v)(u);
+    return [p.origin[0] + x, p.origin[1] + y, p.origin[2] + v];
   };
 }
 

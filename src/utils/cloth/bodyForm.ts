@@ -89,6 +89,10 @@ export interface BodyLandmarks {
   shoulderPoint: number[];
   /** Unit direction down the +x arm. */
   armDir: number[];
+  /** Where the +x arm's axis starts, at the shoulder. */
+  armOrigin: number[];
+  /** Radius of the deltoid that rounds the shoulder over the arm. */
+  deltoidRadius: number;
   armRadius: number;
   armLength: number;
   /** Bust point, +x side (a male figure's is where a dart would point, were there one). */
@@ -176,6 +180,8 @@ export function bodyLandmarks(m: BodyFormMeasurements): BodyLandmarks {
     neckRadius: m.neck / (2 * Math.PI),
     shoulderPoint: [m.shoulderWidth / 2, 0, P.shoulderZ - P.shoulderDrop],
     armDir: [Math.cos(th), 0, -Math.sin(th)],
+    armOrigin: [m.shoulderWidth / 2 - P.shoulderR * 0.6, 0, P.shoulderZ - P.shoulderDrop - 0.01 * P.s],
+    deltoidRadius: (m.upperArm / (2 * Math.PI)) * 1.3,
     armRadius: m.upperArm / (2 * Math.PI),
     armLength: m.armLength,
     bustPoint: [P.bustSpan / 2, bust ? bust.centreY - bust.radii.y : -0.7 * chestHalf, P.bustZ],
@@ -187,6 +193,21 @@ const r4 = (x: number) => +x.toFixed(4);
 
 /** The form's geoms, named `<prefix>_<part>`. */
 export function bodyFormGeoms(m: BodyFormMeasurements, prefix: string): SceneGeom[] {
+  const P = proportions(m);
+  const geoms = bodyFormGeomsRaw(m, prefix);
+  // The torso is one smooth surface, lofted through the hull of these parts'
+  // sections: it is what is drawn, and it is what collides, as a stack of
+  // convex slabs cut from it. Drawn as slices the torso read as a pile of
+  // rings; colliding as slices it had grooves between them that cloth sank
+  // into, below the surface you could see.
+  const isTorsoPart = (g: SceneGeom) => /_(torso\d+|bust\w*|shoulder\w*|deltoid\w*)$/.test(g.name);
+  const rows = prefix === 'form' ? formRows(m) : torsoRows(geoms.filter(isTorsoPart), P.crotchZ + 0.02 * P.s, P.shoulderZ + P.shoulderR);
+  const rgba = geoms[0]?.rgba ?? [0.93, 0.89, 0.82, 1];
+  return [...geoms.filter((g) => !isTorsoPart(g)), torsoSkin(rows, `${prefix}_skin`, rgba), ...torsoSlabs(rows, `${prefix}_torso`)];
+}
+
+/** Every primitive the form is built from, the torso's construction parts included. */
+function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string): SceneGeom[] {
   const P = proportions(m);
   const L = bodyLandmarks(m);
   const female = m.figure === 'female';
@@ -290,23 +311,23 @@ export function bodyFormGeoms(m: BodyFormMeasurements, prefix: string): SceneGeo
     add('pole', { type: 'cylinder', size: [0.015, r4((P.crotchZ + 0.03 * s) / 2)], pos: [0, 0, r4((P.crotchZ + 0.03 * s) / 2)] });
     add('base', { type: 'cylinder', size: [0.22, 0.015], pos: [0, 0, 0.015] });
   }
-  // The torso is drawn as one smooth skin over its slices, which still do
-  // the colliding but are not drawn: stacked, they read as a pile of rings.
-  for (const g of geoms) if (/_(torso\d+|bust\w*|shoulder\w*|deltoid\w*)$/.test(g.name)) g.role = 'collision';
-  geoms.push(torsoSkin(geoms, P.crotchZ + 0.02 * s, P.shoulderZ + P.shoulderR, `${prefix}_skin`, rgba));
   return geoms;
 }
 
+/** Points round the torso at each row: this many, at even angles round its own centre. */
+export const TORSO_ANGLES = 72;
+/** One row of the torso's surface: radius at each even angle round (0, centreY), at height z. */
+export interface TorsoRow { z: number; centreY: number; radii: number[] }
+
 /**
- * A smooth mesh over the torso's colliding geoms: at each height the convex
- * hull of their cross-sections (what a tape round the body traces), sampled
- * by angle and lofted. Drawn only (role 'visual'). Vertices Three.js Y-up, as
- * mesh geoms are; triangles wound outward (CLAUDE.md, face winding).
+ * The torso's surface as rows: at each height the convex hull of the parts'
+ * cross-sections (what a tape round the body traces), as radii at even angles
+ * round its centre, then evened out up each column (the hull of each section
+ * is smooth round the body but not up it, and followed every slice's bulge).
  */
-function torsoSkin(geoms: SceneGeom[], z0: number, z1: number, name: string, rgba: number[]): SceneGeom {
-  const parts = geoms.filter((g) => g.role === 'collision');
-  const ANG = 72, ROWS = Math.max(8, Math.round((z1 - z0) / 0.012));
-  const rows: number[][][] = [];
+function torsoRows(parts: SceneGeom[], z0: number, z1: number): TorsoRow[] {
+  const ANG = TORSO_ANGLES, ROWS = Math.max(8, Math.round((z1 - z0) / 0.012));
+  const rows: TorsoRow[] = [];
   for (let r = 0; r <= ROWS; r++) {
     const z = z0 + ((z1 - z0) * r) / ROWS;
     const pts: [number, number][] = [];
@@ -332,57 +353,92 @@ function torsoSkin(geoms: SceneGeom[], z0: number, z1: number, name: string, rgb
     let cy = 0;
     for (const p of hull) cy += p[1];
     cy /= hull.length;
-    // Round the hull by angle from its centre, so every row has the same points.
-    const row: number[][] = [];
+    const radii: number[] = [];
     for (let i = 0; i < ANG; i++) {
       const th = (2 * Math.PI * i) / ANG, dx = Math.cos(th), dy = Math.sin(th);
       let best = 0;
       for (let k = 0; k < hull.length; k++) {
         const [x1, y1] = hull[k], [x2, y2] = hull[(k + 1) % hull.length];
-        // Ray (0, cy) + t (dx, dy) against segment.
+        // The ray (0, cy) + t (dx, dy) against this edge.
         const ex = x2 - x1, ey = y2 - y1, den = dx * ey - dy * ex;
         if (Math.abs(den) < 1e-12) continue;
-        const t = ((x1) * ey - (y1 - cy) * ex) / den, u = ((x1) * dy - (y1 - cy) * dx) / den;
+        const t = (x1 * ey - (y1 - cy) * ex) / den, u = (x1 * dy - (y1 - cy) * dx) / den;
         if (t > 0 && u >= -1e-9 && u <= 1 + 1e-9) best = Math.max(best, t);
       }
-      row.push([best * dx, cy + best * dy, z]);
+      radii.push(best);
     }
-    rows.push(row);
+    rows.push({ z, centreY: cy, radii });
   }
-  // Each section's hull is smooth round the body but not up it: it still
-  // follows every slice's bulge. A running mean up each column, twice, over
-  // about +-4 cm, evens them out and keeps the waist.
+  // A running mean up each column, twice, over about +-4 cm.
   const W = 3;
   for (let pass = 0; pass < 2; pass++) {
-    const copy = rows.map((row) => row.map((p) => p.slice()));
+    const copy = rows.map((r) => ({ ...r, radii: r.radii.slice() }));
     for (let r = 1; r + 1 < rows.length; r++) {
-      for (let i = 0; i < ANG; i++) {
-        let sx = 0, sy = 0, n = 0;
-        for (let q = Math.max(0, r - W); q <= Math.min(rows.length - 1, r + W); q++) { sx += copy[q][i][0]; sy += copy[q][i][1]; n++; }
-        rows[r][i][0] = sx / n; rows[r][i][1] = sy / n;
+      let cy = 0, n = 0;
+      const sum = new Array(ANG).fill(0);
+      for (let q = Math.max(0, r - W); q <= Math.min(rows.length - 1, r + W); q++) {
+        cy += copy[q].centreY; n++;
+        for (let i = 0; i < ANG; i++) sum[i] += copy[q].radii[i];
       }
+      rows[r].centreY = cy / n;
+      rows[r].radii = sum.map((x) => x / n);
     }
   }
-  // MuJoCo Z-up (x, y, z) is Three.js (x, z, -y).
+  return rows;
+}
+
+/** A row's points, MuJoCo Z-up. */
+const rowPoints = (row: TorsoRow) => row.radii.map((r, i) => {
+  const th = (2 * Math.PI * i) / row.radii.length;
+  return [r * Math.cos(th), row.centreY + r * Math.sin(th), row.z];
+});
+
+/**
+ * Rows lofted into a closed mesh, MuJoCo Z-up points converted to Three.js
+ * Y-up (x, z, -y) as mesh geoms take them; wound outward (CLAUDE.md, face
+ * winding): counter-clockwise round z then up, and the caps facing down and up.
+ */
+function loft(rows: TorsoRow[]): { vertices: number[]; faces: number[] } {
+  const ANG = rows[0].radii.length;
   const vertices: number[] = [];
   const push = (p: number[]) => { vertices.push(p[0], p[2], -p[1]); return vertices.length / 3 - 1; };
-  const idx = rows.map((row) => row.map(push));
+  const idx = rows.map((row) => rowPoints(row).map(push));
   const faces: number[] = [];
   for (let r = 0; r + 1 < idx.length; r++) {
     for (let i = 0; i < ANG; i++) {
       const a = idx[r][i], b = idx[r][(i + 1) % ANG], c = idx[r + 1][(i + 1) % ANG], d = idx[r + 1][i];
-      // Counter-clockwise round z, then up: outward.
       faces.push(a, b, c, a, c, d);
     }
   }
-  // Caps: fans to the centre of the bottom and top rows, facing down and up.
-  const centre = (row: number[][]) => push([0, row.reduce((sum, p) => sum + p[1], 0) / row.length, row[0][2]]);
-  const bottom = centre(rows[0]), topC = centre(rows[rows.length - 1]);
+  const capAt = (row: TorsoRow) => push([0, row.centreY, row.z]);
+  const bottom = capAt(rows[0]), top = capAt(rows[rows.length - 1]);
   for (let i = 0; i < ANG; i++) {
     faces.push(bottom, idx[0][(i + 1) % ANG], idx[0][i]);
-    faces.push(topC, idx[idx.length - 1][i], idx[idx.length - 1][(i + 1) % ANG]);
+    faces.push(top, idx[idx.length - 1][i], idx[idx.length - 1][(i + 1) % ANG]);
   }
-  return { name, type: 'mesh', size: [1, 1, 1], role: 'visual', rgba, vertices, faces } as SceneGeom;
+  return { vertices, faces };
+}
+
+/** The torso's surface, drawn only. */
+function torsoSkin(rows: TorsoRow[], name: string, rgba: number[]): SceneGeom {
+  return { name, type: 'mesh', size: [1, 1, 1], role: 'visual', rgba, ...loft(rows) } as SceneGeom;
+}
+
+/**
+ * The same surface as convex slabs about 4 cm tall, collision only. Each is
+ * the loft between two rows, both convex, so MuJoCo's hull of it is the slab
+ * itself, and the slabs together are the surface that is drawn.
+ */
+function torsoSlabs(rows: TorsoRow[], prefix: string): SceneGeom[] {
+  const every = Math.max(1, Math.round(0.04 / Math.max(1e-3, rows[1].z - rows[0].z)));
+  const picks: number[] = [];
+  for (let r = 0; r < rows.length; r += every) picks.push(r);
+  if (picks[picks.length - 1] !== rows.length - 1) picks.push(rows.length - 1);
+  const out: SceneGeom[] = [];
+  for (let k = 0; k + 1 < picks.length; k++) {
+    out.push({ name: `${prefix}${k}`, type: 'mesh', size: [1, 1, 1], role: 'collision', ...loft([rows[picks[k]], rows[picks[k + 1]]]) } as SceneGeom);
+  }
+  return out;
 }
 
 function convexHull(pts: [number, number][]): [number, number][] {
@@ -394,46 +450,42 @@ function convexHull(pts: [number, number][]): [number, number][] {
   return [...lower.slice(0, -1), ...upper.slice(0, -1)];
 }
 
+const rowsCache = new Map<string, TorsoRow[]>();
+/** The torso's rows for these measurements (cached: garments ask for them often). */
+function formRows(m: BodyFormMeasurements): TorsoRow[] {
+  const key = JSON.stringify(m);
+  let rows = rowsCache.get(key);
+  if (!rows) {
+    const P = proportions(m);
+    const parts = bodyFormGeomsRaw(m, 'form').filter((g) => /_(torso\d+|bust\w*|shoulder\w*|deltoid\w*)$/.test(g.name));
+    rows = torsoRows(parts, P.crotchZ + 0.02 * P.s, P.shoulderZ + P.shoulderR);
+    if (rowsCache.size > 16) rowsCache.clear();
+    rowsCache.set(key, rows);
+  }
+  return rows;
+}
+
 /**
- * The torso's cross-section at height z: half-width, half-depth, and how far
- * its centre sits toward +y. From the torso slices and the shoulders (not the
- * arms, neck or legs), as garments are wrapped round it to start. Below the
- * hips it stays the hips' (a skirt hangs from them); above the shoulders it
- * closes to nothing.
+ * The torso's surface at height z, as a girth placement takes it (radii at
+ * even angles round a centre). Below the hips it stays the hips' (a skirt
+ * hangs from them); above the top of the shoulders, the top row.
  */
-export function bodyFormSection(m: BodyFormMeasurements, z: number, prefix = 'form') {
-  const L = bodyLandmarks(m);
-  const geoms = bodyFormGeoms(m, prefix).filter((g) => /_(torso\d+|shoulder\w*|bust\w*|deltoid\w*)$/.test(g.name));
+export function bodyFormSection(m: BodyFormMeasurements, z: number): { centreY: number; radii: number[] } {
+  const rows = formRows(m), L = bodyLandmarks(m);
   const zz = Math.max(z, L.hipZ);
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (const g of geoms) {
-    if (g.type === 'ellipsoid' || g.type === 'sphere') {
-      const [a, b, c] = g.type === 'sphere' ? [g.size[0], g.size[0], g.size[0]] : g.size;
-      const p = g.pos ?? [0, 0, 0], t = (zz - p[2]) / c;
-      if (Math.abs(t) >= 1) continue;
-      const s = Math.sqrt(1 - t * t);
-      x0 = Math.min(x0, p[0] - a * s); x1 = Math.max(x1, p[0] + a * s);
-      y0 = Math.min(y0, p[1] - b * s); y1 = Math.max(y1, p[1] + b * s);
-    } else if (g.type === 'capsule' && g.fromto) {
-      const [ax, ay, az, bx, by, bz] = g.fromto, r = g.size[0];
-      // Sampled along the axis: each point's sphere cut at height zz.
-      for (let i = 0; i <= 16; i++) {
-        const f = i / 16, px = ax + (bx - ax) * f, py = ay + (by - ay) * f, pz = az + (bz - az) * f;
-        const dz = zz - pz;
-        if (Math.abs(dz) >= r) continue;
-        const h = Math.sqrt(r * r - dz * dz);
-        x0 = Math.min(x0, px - h); x1 = Math.max(x1, px + h);
-        y0 = Math.min(y0, py - h); y1 = Math.max(y1, py + h);
-      }
+  if (zz <= rows[0].z) return rows[0];
+  for (let i = 1; i < rows.length; i++) {
+    if (zz <= rows[i].z) {
+      const a = rows[i - 1], b = rows[i], t = (zz - a.z) / (b.z - a.z || 1);
+      return { centreY: a.centreY + (b.centreY - a.centreY) * t, radii: a.radii.map((r, k) => r + (b.radii[k] - r) * t) };
     }
   }
-  if (!Number.isFinite(x0)) return { halfWidth: 0.01, halfDepth: 0.005, centreY: 0 };
-  return { halfWidth: Math.max(Math.abs(x0), Math.abs(x1)), halfDepth: (y1 - y0) / 2, centreY: (y1 + y0) / 2 };
+  return rows[rows.length - 1];
 }
 
 /** The section every `step` metres from `z0` up to `z1`, as a girth placement's profile (v measured from `zRef`). */
 export function bodyFormProfile(m: BodyFormMeasurements, z0: number, z1: number, zRef: number, step = 0.02) {
-  const out: { v: number; halfWidth: number; halfDepth: number; centreY: number }[] = [];
+  const out: { v: number; centreY: number; radii: number[] }[] = [];
   for (let z = z0; z <= z1 + 1e-9; z += step) out.push({ v: z - zRef, ...bodyFormSection(m, z) });
   return out;
 }

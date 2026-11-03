@@ -34,19 +34,20 @@ export type ClothPlacement =
   | AlongPlacement;
 
 /**
- * Round a body: each row of the piece (each v) wrapped round an ellipse
- * centred on the body's axis, by arc length from the centre of the piece, so
- * the row keeps its length. `profile` gives the body's cross-section by
- * height (v = 0 at `origin`, up the z axis): half-width, half-depth, and how
- * far its centre is from the axis toward +y. Each row's ellipse is that
- * cross-section stood off by `gap`, and enlarged until the row reaches round
- * to its side (+-x), so a front and a back placed this way meet at their
- * side seams. `facing` -y puts the piece's centre at the front.
+ * Round a body: each row of the piece (each v) wrapped round the body's
+ * cross-section at that height, by arc length from the centre of the piece
+ * out to its side seam, stood `gap` clear of it. `profile` gives the
+ * cross-section by height (v = 0 at `origin`, up the z axis) as its radius at
+ * even angles round a centre `centreY` toward +y from the axis, angle 0 at +x
+ * turning toward +y. Each row reaches round exactly to the side (+-x), so a
+ * front and a back placed this way meet at their side seams; a row longer
+ * than that is stood further off, so the cloth never starts inside the body.
+ * `facing` -y puts the piece's centre at the front.
  */
 export interface GirthPlacement {
   kind: 'girth';
   origin: number[];
-  profile: { v: number; halfWidth: number; halfDepth: number; centreY: number }[];
+  profile: { v: number; centreY: number; radii: number[] }[];
   facing: 'front' | 'back';
   gap: number;
 }
