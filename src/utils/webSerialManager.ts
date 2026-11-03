@@ -756,6 +756,8 @@ class WebSerialManager extends GrblMachine<MachineState> {
   private zIsSetForResume = false;
   /** A start is waiting on the guide spot or stale replies. See `startJob`. */
   private starting = false;
+  /** Whether the stream `beginStreaming` is waiting on ever began. */
+  private streamBegan = false;
   /** Pauses pressed during `starting`, waiting for the stream to begin. See `pauseJob`. */
   private awaitingStream: Array<() => void> = [];
 
@@ -1499,10 +1501,13 @@ class WebSerialManager extends GrblMachine<MachineState> {
     if (this.isJobRunning || this.isPaused || this.starting) return; // see runJob
 
     const prepared = prepareJobLines(gcode);
-    // Before anything is set up for it: the package refuses it too, but by
-    // then this job would already read as running.
+    // Before anything is set up for it: the package refuses these too, but by
+    // then this job would already read as running, with its clock going, and
+    // the last job's resume offer and checkpoint gone. `resumeFromLine` had
+    // the same fault, and checks the position up front for the same reason.
     const codes = prepared.map((l) => l.code);
-    const refusal = this.travelBlockedReason(codes) ?? this.spindleBlockedReason(codes);
+    const refusal =
+      this.positionBlockedReason() ?? this.travelBlockedReason(codes) ?? this.spindleBlockedReason(codes);
     if (refusal) {
       this.updateState({ lastError: refusal });
       return;
@@ -1570,6 +1575,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   private async beginStreaming(lines: string[]): Promise<void> {
     this.starting = true;
+    this.streamBegan = false;
     const epoch = this.jobEpoch;
     try {
       if (this.state.guideSpot) await this.guideSpotOff();
@@ -1582,11 +1588,19 @@ class WebSerialManager extends GrblMachine<MachineState> {
       this.updateState({ lastError: err instanceof Error ? err.message : String(err) });
     } finally {
       this.starting = false;
+      // Refused, or stopped (an E-Stop while the guide spot went out) before
+      // the first line: nothing ran, so nothing is running. Left alone, the
+      // job read as RUNNING with its clock counting up from nothing.
+      if (!this.streamBegan) {
+        this.stopElapsedTicker();
+        if (this.state.status === 'RUNNING') this.updateState({ status: 'IDLE' });
+      }
       this.releaseStreamWaiters();
     }
   }
 
   protected onJobStarted(): void {
+    this.streamBegan = true;
     this.releaseStreamWaiters();
   }
 

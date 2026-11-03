@@ -32,7 +32,11 @@ function attachFakeGrbl() {
    * is once the buffer has drained, and a board that never answered would make
    * every one of those wait out its timeout.
    */
-  const board = { report: '<Idle|MPos:0.000,0.000,0.000|FS:0,0>' as string | null };
+  const board = {
+    report: '<Idle|MPos:0.000,0.000,0.000|FS:0,0>' as string | null,
+    /** Lines this board takes and never answers, as a controller that has gone deaf. */
+    ignore: null as RegExp | null,
+  };
   /** Bytes written that the fake has not yet acknowledged. */
   let outstanding = 0;
   /** The high-water mark of that, which is what must never exceed the buffer. */
@@ -79,6 +83,7 @@ function attachFakeGrbl() {
       const trimmed = line.trim();
       if (!trimmed) return;
       sent.push(trimmed);
+      if (board.ignore?.test(trimmed)) return;
       // The controller holds the whole line plus its terminator until it has
       // parsed it, which is what the streamer's byte budget is counting.
       outstanding += trimmed.length + 1;
@@ -1034,3 +1039,61 @@ describe('resuming after a reset, an alarm or a new tool', () => {
     expect(webSerialManager.getState().lastError).toMatch(/Z zero/);
   });
 });
+
+/*
+ * A start the package then refuses. The package checks for a lost position in
+ * `streamProgram`, after `startJob` had already marked the job RUNNING, set
+ * its clock going, dropped the resume offer and checkpointed the new program:
+ * the same fault `resumeFromLine` was fixed for. And an E-Stop pressed while a
+ * start was still putting out the guide spot left the clock running.
+ */
+describe('a start that never streams', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+  const mgr = () => webSerialManager as unknown as {
+    parseLine: (l: string) => void;
+    state: Record<string, unknown>;
+    elapsedTimer: unknown;
+  };
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+  });
+  afterEach(async () => {
+    await webSerialManager.cancelJob();
+    webSerialManager.clearResumePoint();
+    fake.detach();
+  });
+
+  it('refuses a lost position before marking anything as running', async () => {
+    webSerialManager.startJob(JOB);
+    await advance(20);
+    mgr().parseLine('ALARM:1');
+    await settle();
+    await webSerialManager.unlockAlarm();
+    const offer = webSerialManager.getState().resume;
+    expect(offer).not.toBeNull();
+    const sentBefore = fake.lines().length;
+
+    await webSerialManager.startJob('G21\nG90\nG1 X10 F600\n');
+    await advance(4);
+    const state = webSerialManager.getState();
+    expect(state.lastError).toMatch(/lost its position/);
+    expect(state.status).not.toBe('RUNNING');
+    expect(state.resume).toEqual(offer);
+    expect(mgr().elapsedTimer).toBeNull();
+    expect(fake.lines().length).toBe(sentBefore);
+  });
+
+  it('stops the clock when an E-Stop lands while the start is still getting ready', async () => {
+    // A lit guide spot is put out before the first line, which is the window.
+    mgr().state.guideSpot = true;
+    const started = webSerialManager.startJob(JOB);
+    await webSerialManager.eStop();
+    await started;
+    await advance(4);
+    expect(webSerialManager.getState().status).not.toBe('RUNNING');
+    expect(mgr().elapsedTimer).toBeNull();
+    expect(fake.lines().some((l) => l.startsWith('G1 X'))).toBe(false);
+  });
+});
+
