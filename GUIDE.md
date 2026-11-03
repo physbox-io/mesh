@@ -136,9 +136,14 @@ carries `unstable` and a warning. Every preset stays under 4% of that. `tests/lo
   `<asset>` block and exact inertia), `mjcfConstraints.ts` (actuators, tendons, equalities, contact
   exclusions), `mjcfBody.ts` (bodies, joints, geoms), with `mjcfFlatMesh.ts` and `contactClasses.ts`.
 * `src/presets/presetScenes.ts`: initial scene definitions and configurations.
-* `src/utils/webSerialManager.ts`: the GRBL link and the job streamer. Holds the program and the
-  line it has reached; `resumeFromLine` replays the program without sending it to rebuild the modal
-  state, then streams a preamble plus the tail.
+* `src/utils/webSerialManager.ts`: the GRBL link and the job streamer, built as a chain of layers
+  over the package's `GrblMachine`: `machineCore.ts` (every field, progress, settings) →
+  `machineGuideSpot.ts` → `machineSetup.ts` (zeroing by hand, jog, frame) → `machineProbing.ts` →
+  `machineJob.ts` (start, stream, programmed pauses) → `machineRecovery.ts` (resume, park, abandon) →
+  `webSerialManager.ts` (link events, status reports, telemetry, E-Stop). Fields live in the core
+  so they initialise in one place; a layer calls only itself and the layers below it. Holds the
+  program and the line it has reached; `resumeFromLine` replays the program without sending it to
+  rebuild the modal state, then streams a preamble plus the tail.
 * `src/utils/jobCheckpoint.ts`: what makes that survive the tab. The program is written to
   localStorage when a job starts and the reached line every two seconds after, so an interrupted job
   can be offered back on the next load. On PhysBox Pro the same two records go to the account under
