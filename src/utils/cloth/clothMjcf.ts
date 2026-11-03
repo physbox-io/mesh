@@ -23,13 +23,14 @@ export const CLOTH_FLEX_PREFIX = 'clothflex_';
 export const CLOTH_OPTION = {
   // MuJoCo will not integrate flex elasticity under implicit or implicitfast.
   integrator: 'discrete',
-  // 2 ms, not the 4 ms the spike used. At 4 ms the integrator fed energy into
-  // a sewn garment faster than anything took it out: a t-shirt on its form
-  // still moved at ~80 mm/s after 8 s and a sail tore itself apart in ~15 s.
-  // At 2 ms, with stitches at twice the stiffness (they cannot go below two
-  // steps), the shirt comes to rest (~1 mm/s) and its seams close to ~1 mm.
-  // Half the speed; tests/garments.test.ts holds both.
-  timestep: 0.002,
+  // 1 ms, the step every other scene in Mesh takes. Coarser steps were tried
+  // for speed and each failed somewhere: at 4 ms the integrator fed energy
+  // into a sewn garment faster than anything took it out (a t-shirt never
+  // stopped moving; a sail tore itself apart after ~15 s); at 2 ms a shirt
+  // with a neckband, or a dress with sleeves, still chattered and sank into
+  // the form. At 1 ms, with stitches at the two-step floor, every garment in
+  // tests/garments.test.ts comes to rest with its seams closed.
+  timestep: 0.001,
   extra: 'solver="CG" iterations="20" tolerance="1e-5"',
 };
 
@@ -52,7 +53,7 @@ const CLOTH_CONTACT_IMP = 'solimp="0.9 0.999 0.004 0.5 2"';
 const STIFF_TIE = 'solimp="0.99 0.9999 0.001 0.5 2"';
 const STITCH = 'solimp="0.95 0.99 0.001 0.5 2"';
 /** Two steps: as stiff as MuJoCo lets a constraint be. */
-const SEAM_SOLREF = `${2 * 0.002} 1`;
+const SEAM_SOLREF = `${2 * CLOTH_OPTION.timestep} 1`;
 
 export const flexName = (body: string, piece: string) => `${body}__${piece}`;
 export const flexVertexBody = (body: string, piece: string, i: number) => `${flexName(body, piece)}_${i}`;

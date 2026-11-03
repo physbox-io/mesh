@@ -209,6 +209,34 @@ function chain(side: SeamSide, pieces: Record<string, PieceMesh>) {
   return out;
 }
 
+type ChainPoint = { piece: string; id: number; t: number };
+
+/**
+ * One stitch per point of the shorter side, to the point at the nearest
+ * fraction of the longer, each used once: the longer side's spare points
+ * gather between stitches, which is what easing is. Stitching every point of
+ * the longer side instead put two neighbours onto one point, asking the cloth
+ * between them to shrink to nothing; it never could, and the seam fought it
+ * forever, jittering and holding the seam open. Pairs come back as [a, b].
+ */
+function pairChains(a: ChainPoint[], b: ChainPoint[]): [ChainPoint, ChainPoint][] {
+  const [long, short, swap] = a.length >= b.length ? [a, b, false] : [b, a, true];
+  const out: [ChainPoint, ChainPoint][] = [];
+  let from = 0;
+  short.forEach((r, k) => {
+    // Leave enough of the longer side for the points still to come.
+    const last = long.length - (short.length - k);
+    let best = from;
+    for (let i = from; i <= last; i++) {
+      if (Math.abs(long[i].t - r.t) < Math.abs(long[best].t - r.t)) best = i;
+      else if (long[i].t > r.t) break;
+    }
+    from = best + 1;
+    out.push(swap ? [r, long[best]] : [long[best], r]);
+  });
+  return out;
+}
+
 const cache = new Map<string, ClothMesh>();
 const CACHE_MAX = 32;
 
@@ -227,29 +255,24 @@ export function meshCloth(spec: ClothSpec): ClothMesh {
   }
   const stitches: ClothMesh['stitches'] = [];
   (spec.seams ?? []).forEach((s, seam) => {
-    const a = chain(s.a, pieces), b = chain(s.b, pieces);
-    const [long, short, swap] = a.length >= b.length ? [a, b, false] : [b, a, true];
-    // One stitch per point of the shorter side, to the point at the nearest
-    // fraction of the longer, each used once: the longer side's spare points
-    // gather between stitches, which is what easing is. Stitching every point
-    // of the longer side instead put two neighbours onto one point, asking the
-    // cloth between them to shrink to nothing; it never could, and the seam
-    // fought it forever, jittering and holding the seam open.
-    let from = 0;
-    short.forEach((r, k) => {
-      // Leave enough of the longer side for the points still to come.
-      const last = long.length - (short.length - k);
-      let best = from;
-      for (let i = from; i <= last; i++) {
-        if (Math.abs(long[i].t - r.t) < Math.abs(long[best].t - r.t)) best = i;
-        else if (long[i].t > r.t) break;
+    // Notches. When both sides are walked over the same number of edges, each
+    // edge is sewn to its counterpart, so every place one edge gives way to
+    // the next is a mark the two sides must meet at: a sleeve's crown at the
+    // shoulder seam, say. Sewn by fraction of the whole length instead, the
+    // shoulder point slid past the crown wherever the front and back armholes
+    // differed, and left a hole at the top of the sleeve.
+    const parts: [SeamSide, SeamSide][] = s.a.length === s.b.length && s.a.length > 1
+      ? s.a.map((e, k) => [[e], [s.b[k]]])
+      : [[s.a, s.b]];
+    const seen = new Set<string>();
+    for (const [sa, sb] of parts) {
+      for (const [x, y] of pairChains(chain(sa, pieces), chain(sb, pieces))) {
+        const key = `${x.piece}:${x.id}|${y.piece}:${y.id}`;
+        if (seen.has(key) || (x.piece === y.piece && x.id === y.id)) continue;
+        seen.add(key);
+        stitches.push({ a: [x.piece, x.id], b: [y.piece, y.id], seam });
       }
-      from = best + 1;
-      const q = long[best];
-      const [x, y] = swap ? [r, q] : [q, r];
-      if (x.piece === y.piece && x.id === y.id) return;
-      stitches.push({ a: [x.piece, x.id], b: [y.piece, y.id], seam });
-    });
+    }
   });
   const ties: ClothMesh['ties'] = [];
   (spec.ties ?? []).forEach((t, tie) => {
