@@ -2,8 +2,14 @@
 // the finishing tool clears on its own, cut nearest first and linked along the
 // surface where that is safe.
 
-import { describeFinishingStrategy, finishingPassGroups, waterlineLevel, type FinishingStrategy } from './finishingPaths';
-import { sampleHeightmap, type Heightmap } from './reliefHeightmap';
+import {
+  WALL_SLOPE,
+  describeFinishingStrategy,
+  finishingPassGroups,
+  waterlineLevel,
+  type FinishingStrategy,
+} from './finishingPaths';
+import { dilateForTool, sampleHeightmap, toolTipHeightAt } from './reliefHeightmap';
 import { DEFAULT_RELIEF_OPTIONS, vBitHalfAngleRad, type ReliefCarveOptions } from './reliefOptions';
 import {
   PATH_SIMPLIFY_MM,
@@ -15,22 +21,9 @@ import {
 } from './reliefPaths';
 import { MAX_REACH_DIAMETERS, describeCutter } from './reliefTooling';
 import { FLAT_PROFILE, ballProfile, vProfile } from './stockModel';
+import { bodyFor, centreWindow, type SurfaceJob } from './surfaceJob';
+import { finishingCutter } from './surfaceToolingWarnings';
 import type { ToolpathWriter } from './toolpathWriter';
-
-/** The finishing tool's view of the surface, as `machineSurface` prepares it. */
-export interface FinishingSurface {
-  /** The surface dilated by the finishing cutter. */
-  finishMap: Heightmap;
-  /** The window the finishing tool's centre may enter. */
-  passRect: { minX: number; minY: number; maxX: number; maxY: number };
-  /** Where a waterline point can stand at its level (see `machineSurface`). */
-  holdOffWall: (p: { x: number; y: number }, level: number) => PathPoint;
-  finishRad: number;
-  stepover: number;
-  floorZ: number;
-  depthMm: number;
-  res: number;
-}
 
 /**
  * Writes the finishing pass onto `w`. `materialLevelAt` is what roughing left
@@ -38,12 +31,92 @@ export interface FinishingSurface {
  */
 export function finishSurface(
   w: ToolpathWriter,
+  job: SurfaceJob,
   opts: ReliefCarveOptions,
-  fin: FinishingSurface,
   materialLevelAt: (x: number, y: number) => number,
   warnings: string[]
 ): { finishingRasterLines: number; error?: undefined } | { error: string } {
-  const { finishMap, passRect, holdOffWall, finishRad, stepover, floorZ, depthMm, res } = fin;
+  const { surface, depthMm, resolution: res } = job;
+  const floorZ = -depthMm;
+  const noun = job.noun ?? 'relief';
+  const { finishTip, finishRad, stepover } = finishingCutter(opts);
+
+  const finishBody = bodyFor(
+    opts,
+    opts.finishingToolDiaMm,
+    opts.finishingShankDiaMm,
+    opts.finishingFluteLengthMm,
+    finishTip
+  );
+  const finishMap = dilateForTool(surface, finishRad, finishTip, finishBody);
+  // For points between the samples (a waterline's), read under the cutter
+  // itself rather than off the dilated grid.
+  const finishTipAt = toolTipHeightAt(surface, finishRad, finishTip, finishBody);
+  /*
+   * Where a waterline point can stand at its level. The line is traced on the
+   * dilated grid and the cutter is checked under itself, and the two can put
+   * a wall a fraction of a cell apart. Where the check finds the cutter in the
+   * wall, the point steps downhill, off the wall, until it is clear: a
+   * waterline keeps its height and gives up a little of its line. Climbing the
+   * wall instead, at every such point, was 287 m of vertical travel on one
+   * side of a 100 mm cylinder. Only a point with no clear spot within a cell
+   * is lifted.
+   */
+  const wallRise = WALL_SLOPE * Math.min(finishMap.stepX || Infinity, finishMap.stepY || Infinity);
+  /**
+   * Whether the dilated grid has a wall across the cell a point is in: the
+   * only cells where the line was placed by the half-way rule rather than by
+   * the grid's own reading, so the only ones the cutter has to be checked in.
+   */
+  const inWallCell = (x: number, y: number) => {
+    const fx = (x - finishMap.minX) / (finishMap.stepX || 1), fy = (y - finishMap.minY) / (finishMap.stepY || 1);
+    const c = Math.min(finishMap.cols - 2, Math.max(0, Math.floor(fx)));
+    const r = Math.min(finishMap.rows - 2, Math.max(0, Math.floor(fy)));
+    const k = r * finishMap.cols + c, z = finishMap.z;
+    const a = z[k], b = z[k + 1], cc = z[k + finishMap.cols], d = z[k + finishMap.cols + 1];
+    return Math.max(a, b, cc, d) - Math.min(a, b, cc, d) > wallRise;
+  };
+  const passRect = centreWindow(job, finishRad);
+
+  const holdOffWall = (p: { x: number; y: number }, level: number) => {
+    if (!inWallCell(p.x, p.y) || finishTipAt(p.x, p.y) <= level + 1e-3) return { x: p.x, y: p.y, z: level };
+    const gx = sampleHeightmap(finishMap, p.x + res / 2, p.y) - sampleHeightmap(finishMap, p.x - res / 2, p.y);
+    const gy = sampleHeightmap(finishMap, p.x, p.y + res / 2) - sampleHeightmap(finishMap, p.x, p.y - res / 2);
+    const g = Math.hypot(gx, gy);
+    if (g > 1e-9) {
+      for (let k = 1; k <= 8; k++) {
+        const d = (res * k) / 8;
+        const x = p.x - (gx / g) * d, y = p.y - (gy / g) * d;
+        // Never off the edge of the stock the tool centre is kept inside.
+        if (x < passRect.minX || x > passRect.maxX || y < passRect.minY || y > passRect.maxY) break;
+        if (finishTipAt(x, y) <= level + 1e-3) return { x, y, z: level };
+      }
+    }
+    return { x: p.x, y: p.y, z: Math.max(level, finishTipAt(p.x, p.y)) };
+  };
+
+  // How much of the ${noun} the tool's own body puts out of reach. Left silent
+  // this reads as a carve that simply came out shallow, so it is measured
+  // against the same pass with the body ignored and reported.
+  if (finishBody.length > 0) {
+    const bare = dilateForTool(surface, finishRad, finishTip);
+    let blocked = 0;
+    let carved = 0;
+    let worst = 0;
+    for (let i = 0; i < finishMap.z.length; i++) {
+      if (bare.z[i] >= -1e-6) continue;
+      carved++;
+      const lost = finishMap.z[i] - bare.z[i];
+      if (lost > 0.1) blocked++;
+      if (lost > worst) worst = lost;
+    }
+    if (carved > 0 && blocked / carved > 0.02) {
+      warnings.push(
+        `Shank/holder clearance lifted the ${opts.finishingToolDiaMm} mm toolpath over ${((100 * blocked) / carved).toFixed(0)}% of the ${noun} (up to ${worst.toFixed(1)} mm above the surface). Use a longer-reach bit, reduce depth, or disable shank clearance in Advanced.`
+      );
+    }
+  }
+
   let finishingRasterLines = 0;
   // How much depth one sweep of the raster is allowed to take. With roughing on
   // there is only the allowance left to remove, so the whole surface comes off

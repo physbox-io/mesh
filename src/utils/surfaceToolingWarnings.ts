@@ -144,19 +144,23 @@ export function warnAboutTooling(
   // prompted to turn. Checked against surface speed rather than left implicit
   // in the chipload, because "your feed is wrong" and "your dial is wrong" want
   // different actions from the operator.
+  //
+  // Against the cutter doing the cutting: the finishing bit, or with no
+  // finishing pass the roughing one, which is then the only bit fitted.
   {
-    const ideal = (material.surfaceSpeedMMin * 1000) / (Math.PI * Math.max(0.1, opts.finishingToolDiaMm));
+    const dia = opts.finishingEnabled ? opts.finishingToolDiaMm : opts.roughingToolDiaMm;
+    const ideal = (material.surfaceSpeedMMin * 1000) / (Math.PI * Math.max(0.1, dia));
     const capped = material.maxRpm !== undefined ? Math.min(ideal, material.maxRpm) : ideal;
     if (opts.spindleRpm > capped * 1.6) {
       warnings.push(
-        `${opts.spindleRpm.toLocaleString()} RPM exceeds the recommended ~${Math.round(capped / 500) * 500} RPM for a ${opts.finishingToolDiaMm} mm cutter in ${material.label.toLowerCase()}` +
+        `${opts.spindleRpm.toLocaleString()} RPM exceeds the recommended ~${Math.round(capped / 500) * 500} RPM for a ${dia} mm cutter in ${material.label.toLowerCase()}` +
           (material.maxRpm !== undefined
             ? ` (risk of melting).`
             : ` (risk of rubbing and excess heat).`)
       );
     } else if (opts.spindleRpm < capped * 0.45) {
       warnings.push(
-        `${opts.spindleRpm.toLocaleString()} RPM is below the recommended ~${Math.round(capped / 500) * 500} RPM for a ${opts.finishingToolDiaMm} mm cutter in ${material.label.toLowerCase()}, increasing chipload and tool deflection.`
+        `${opts.spindleRpm.toLocaleString()} RPM is below the recommended ~${Math.round(capped / 500) * 500} RPM for a ${dia} mm cutter in ${material.label.toLowerCase()}, increasing chipload and tool deflection.`
       );
     }
   }
@@ -214,7 +218,7 @@ export function warnAboutTooling(
         : half >= finishRad
           ? finishRad
           : finishRad - Math.sqrt(finishRad * finishRad - half * half);
-  if (ridgeMm > 0.2) {
+  if (opts.finishingEnabled && ridgeMm > 0.2) {
     warnings.push(
       `${stepover.toFixed(2)} mm stepover leaves ${ridgeMm.toFixed(2)} mm cusps between passes; ` +
         (opts.finishingToolType === 'v_bit'
