@@ -1161,6 +1161,10 @@ export interface BrickworkSource {
   jointMm?: number;
   /** Toy bricks: the sizes to build with ('2x4', ...). */
   toySizes?: string[];
+  /** Toy bricks: size → how many the builder has (null: any number). Wins over toySizes. */
+  toyInventory?: Record<string, number | null>;
+  /** Toy bricks: hollow, walls this many studs thick. */
+  hollowStuds?: number;
   /** 'clay' (default for bricks), 'toy' (default for toy bricks) or 'stone'. */
   colour?: 'clay' | 'toy' | 'stone';
 }

@@ -21,7 +21,9 @@ import type { BrickworkSource, SceneGeom, SceneGraph, SceneNode } from '../types
 import type { Point2D } from './laserCutExporter';
 import { collectSceneTriangles, contoursAtZ } from './contourSliceExporter';
 import { nestingDepths, offsetNestedLoops, pointInPolygon, signedArea2 } from './polygonOffset';
-import { DEFAULT_TOY_SIZES, layToyBricks, TOY_HEIGHT_MM, TOY_PITCH_MM, type ToySize } from './toyBricks';
+import { DEFAULT_TOY_SIZES, layToyBricks, TOY_HEIGHT_MM, TOY_PITCH_MM, type ToyInventory, type ToySize } from './toyBricks';
+import { bondReport, type BondReport } from './brickBond';
+import { layWalls } from './brickSetOut';
 
 export type BrickStandardId = 'uk' | 'us_modular' | 'eu_nf' | 'au' | 'mini_6' | 'mini_12' | 'toy';
 
@@ -71,8 +73,12 @@ export interface BrickworkOptions {
   jointMm?: number;
   /** Extra bricks bought against breakage, percent. */
   wastagePct: number;
-  /** Toy bricks: the sizes to build with. Default: all of them. */
+  /** Toy bricks: the sizes to build with, as many as it takes. Default: every size. */
   toySizes?: ToySize[];
+  /** Toy bricks: size → how many the builder has (null: any number). Wins over toySizes. */
+  toyInventory?: ToyInventory;
+  /** Toy bricks: hollow, walls this many studs thick and capped top and bottom. 0 or absent: solid. */
+  hollowStuds?: number;
 }
 
 export const DEFAULT_BRICKWORK_OPTIONS: BrickworkOptions = { standardId: 'uk', bond: 'stretcher', wastagePct: 5 };
@@ -122,6 +128,10 @@ export interface BrickworkResult {
   lintels: { lengthMm: number; count: number }[];
   /** Toy bricks: how many of each size. */
   parts?: { size: ToySize; count: number }[];
+  /** Toy bricks: what the build needs more of than the builder has. */
+  short?: { size: ToySize; count: number }[];
+  /** How well it holds together: see utils/brickBond.ts. */
+  bond: BondReport;
   warnings: string[];
 }
 
@@ -139,7 +149,15 @@ interface Run {
 }
 
 function runAt(run: Run, s: number): V2 {
-  const t = Math.max(0, Math.min(run.total, s));
+  // Past an end, straight on along the end's own line: a run carried through
+  // an inside corner (toothing) goes on into the other wall.
+  if (s < 0 || s > run.total) {
+    const [a, b] = s < 0 ? [run.pts[0], run.pts[1]] : [run.pts[run.pts.length - 2], run.pts[run.pts.length - 1]];
+    const d = sub(b, a), l = len(d) || 1;
+    const from = s < 0 ? a : b, by = s < 0 ? s : s - run.total;
+    return { x: from.x + (d.x / l) * by, y: from.y + (d.y / l) * by };
+  }
+  const t = s;
   let i = 1;
   while (i < run.s.length - 1 && run.s[i] < t) i++;
   const a = run.pts[i - 1], b = run.pts[i];
@@ -149,12 +167,15 @@ function runAt(run: Run, s: number): V2 {
 }
 
 /** A closed loop (material on its left) split into runs at its corners. */
-function runsOf(loop: V2[], cornerDeg = 30): Run[] {
+function runsOf(loop: V2[], cornerDeg = 30, minEdge = 0): Run[] {
   const n = loop.length;
   const corners: number[] = [];
   for (let i = 0; i < n; i++) {
     const a = loop[(i - 1 + n) % n], b = loop[i], c = loop[(i + 1) % n];
     const d1 = sub(b, a), d2 = sub(c, b);
+    // A notch (where two overlapping parts' corners poke through) is not a
+    // corner to set out from: a corner has a real edge either side.
+    if (len(d1) < minEdge || len(d2) < minEdge) continue;
     const turn = Math.abs(Math.atan2(d1.x * d2.y - d1.y * d2.x, d1.x * d2.x + d1.y * d2.y));
     if (turn > (cornerDeg * Math.PI) / 180) corners.push(i);
   }
@@ -236,8 +257,14 @@ function unitsFor(bond: BrickBond, course: number): ('S' | 'H')[] {
 }
 
 /** The subject: the whole scene, or one body under its ancestors' frames. */
+/**
+ * Whether the whole scene's brickwork takes this body. Not a simulated cut,
+ * and not anything that moves: a hinged door or a drawbridge is not brick.
+ */
+const laidWithScene = (n: SceneNode) => !n.simulation && !(n.joints?.length);
+
 export function subjectScene(scene: SceneGraph, bodyId: string | null): SceneGraph {
-  if (!bodyId) return { ...scene, nodes: scene.nodes.filter((n) => !n.simulation) };
+  if (!bodyId) return { ...scene, nodes: scene.nodes.filter(laidWithScene) };
   const path = (nodes: SceneNode[]): SceneNode[] | null => {
     for (const n of nodes) {
       if (n.id === bodyId) return [n];
@@ -264,29 +291,37 @@ export function brickFits(s: BrickStandard, spanMm: number, heightMm: number): b
 
 /** The shape in toy bricks: every course on the stud grid, counted by size. */
 function toyResult(
-  std: BrickStandard, tris: number[], solidIds: number[], lo: number[], hi: number[], sizes: ToySize[], warnings: string[],
+  std: BrickStandard, tris: number[], solidIds: number[], lo: number[], hi: number[], o: BrickworkOptions, warnings: string[],
 ): BrickworkResult {
+  const inventory: ToyInventory = o.toyInventory
+    ?? Object.fromEntries((o.toySizes ?? DEFAULT_TOY_SIZES).map((s) => [s, null]));
   const modelH = hi[2] - lo[2];
   const span = Math.max(hi[0] - lo[0], hi[1] - lo[1]);
   if (span < 2 * TOY_PITCH_MM || modelH < TOY_HEIGHT_MM / 2) {
     throw new Error(`The shape is ${Math.round(span)} mm across and ${Math.round(modelH)} mm tall, too small for toy bricks. Scale it up.`);
   }
   const courses = Math.max(1, Math.round(modelH / TOY_HEIGHT_MM));
-  const { bricks, parts } = layToyBricks({
-    lo: [lo[0], lo[1]], hi: [hi[0], hi[1]], courses, zBase: lo[2], sizes, maxBricks: MAX_BRICKS,
+  const { bricks, parts, short } = layToyBricks({
+    lo: [lo[0], lo[1]], hi: [hi[0], hi[1]], courses, zBase: lo[2], inventory, hollowStuds: o.hollowStuds, maxBricks: MAX_BRICKS,
     solidAt: (c) => {
       const loops = contoursAtZ(tris, (lo[2] + ((c + 0.5) / courses) * modelH) / 1000, solidIds);
       return loops.length ? regionOf(loops).inside : null;
     },
   });
   if (!bricks.length) throw new Error('No toy brick fits in this shape.');
+  if (short.length) {
+    warnings.push(`Short of ${short.map((s) => `${s.count} × ${s.size.replace('x', '×')}`).join(', ')}: more than you have.`);
+  }
+  const bond = bondReport(bricks, 0.2, { sides: true });
+  bondWarnings(bond, warnings, true);
   return {
     standard: std, bond: 'stretcher', jointMm: 0, courses,
     modelHeightMm: modelH, builtHeightMm: courses * TOY_HEIGHT_MM,
     bricks, whole: bricks.length, cutPieces: 0, closers: 0, toBuy: bricks.length,
-    cuts: [], mortarLitres: 0, mortarBags: 0, lintels: [], parts, warnings,
+    cuts: [], mortarLitres: 0, mortarBags: 0, lintels: [], parts, short, bond, warnings,
   };
 }
+
 
 /** Lays the scene's solids in brick. Throws, with what to change, when it cannot. */
 export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {}): BrickworkResult {
@@ -306,7 +341,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   const modelH = hi[2] - lo[2];
   const span = Math.max(hi[0] - lo[0], hi[1] - lo[1]);
   const std = asked;
-  if (std.toy) return toyResult(std, tris, solidIds, lo, hi, o.toySizes ?? DEFAULT_TOY_SIZES, warnings);
+  if (std.toy) return toyResult(std, tris, solidIds, lo, hi, o, warnings);
   if (!brickFits(std, span, modelH)) {
     const smaller = Object.values(BRICK_STANDARDS).filter((s) => s.lengthMm < std.lengthMm && brickFits(s, span, modelH)).map((s) => s.label);
     throw new Error(`The shape is ${Math.round(span)} mm across and ${Math.round(modelH)} mm tall, too small for ${std.label} bricks. ` +
@@ -316,6 +351,19 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   const L = std.lengthMm, W = std.widthMm, H = std.heightMm;
   const gauge = H + j;
   const courses = Math.max(1, Math.round((modelH + j) / gauge));
+  // Too many to lay is said before laying them: the courses' area over a
+  // brick's bed, give or take the joints.
+  {
+    let area = 0;
+    for (let c = 0; c < courses; c++) {
+      const loops = contoursAtZ(tris, (lo[2] + ((c + 0.5) / courses) * modelH) / 1000, solidIds);
+      area += Math.abs(loops.reduce((t, l) => t + signedArea2(l) / 2, 0));
+    }
+    const estimate = area / ((L + j) * (W + j));
+    if (estimate > MAX_BRICKS * 1.1) {
+      throw new Error(`That is about ${Math.round(estimate / 1000) * 1000} bricks, more than ${MAX_BRICKS.toLocaleString()}. Lay one wall at a time (select it first), or scale the shape down.`);
+    }
+  }
 
   // A grid fine enough to keep a joint between bricks, coarse enough to fit.
   const pad = L * 2;
@@ -326,6 +374,12 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
 
   const bricks: PlacedBrick[] = [];
   let headerFallbacks = 0;
+  // The widest face joint a curve opened to (0: none).
+  let widestWedge = 0;
+  // Who ran through each corner last course (utils/brickSetOut.ts).
+  const cornerOwners = new Map<string, string>();
+  // Wall-courses too thin for headers (a half-brick chimney in English bond).
+  let thinForHeaders = 0;
   let headersTried = 0;
   // What the shape is at each course: an opening is where it has nothing below.
   const solidAt = new Map<number, (p: V2) => boolean>();
@@ -341,8 +395,46 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     const here = grid();
     const z = lo[2] + c * gauge;
     const units = unitsFor(o.bond, c);
+    const prevCourse = bricks.filter((b) => b.course === c - 1);
     let unitIx = 0;
     let thin = false;
+
+    // Straight walls first, set out as a bricklayer would (utils/brickSetOut.ts);
+    // the face-by-face laying below only fills what they leave: curves, lumps.
+    {
+      const { headerless } = layWalls({
+        loops: region.loops,
+        outerFlags: region.loops.map((l) => signedArea2(l) > 0),
+        inside: region.inside,
+        dims: { L, W, H, j },
+        bond: o.bond,
+        course: c,
+        below: prevCourse,
+        step: cell,
+        owners: cornerOwners,
+        layer: {
+          // A safety net against another wall's bricks, tested a joint in
+          // from each end: the set-out's own joints close by a few millimetres
+          // to take up slack, nearer than the grid's margin round a brick.
+          free: (at, u, n, along, depth) => {
+            const inset = Math.min(along / 2 - cell / 2, j);
+            for (let t = inset + cell / 2; t < along - inset; t += cell) for (let q = cell / 2; q < depth; q += cell) if (here.at({ x: at.x + u.x * t + n.x * q, y: at.y + u.y * t + n.y * q })) return false;
+            return true;
+          },
+          lay: (at, u, n, along, depth, flags) => {
+            here.mark(at, u, n, along, depth, j - cell / 2);
+            bricks.push({
+              course: c, x: at.x + u.x * along / 2 + n.x * depth / 2, y: at.y + u.y * along / 2 + n.y * depth / 2, z,
+              angle: Math.atan2(u.y, u.x), lengthMm: along, depthMm: depth, ...flags,
+            });
+            if (bricks.length > MAX_BRICKS) {
+              throw new Error(`That is more than ${MAX_BRICKS.toLocaleString()} bricks. Lay one wall at a time (select it first), or scale the shape down.`);
+            }
+          },
+        },
+      });
+      thinForHeaders += headerless;
+    }
 
     for (let ring = 0; ring < 200; ring++) {
       const ringLoops = ring === 0
@@ -350,24 +442,28 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
         // A ring further in lies in the material; an offset that has come out
         // the far side of a wall thinner than the rings (a flue grown past
         // the chimney's outside) is not one.
-        : regionOf(offsetNestedLoops(region.loops, -ring * (W + j), { joinStyle: 'miter' }).paths).loops
+        // A leaf further in, and a grid step more: on a curve each brick of
+        // the leaf outside is a chord that sags into this one.
+        : regionOf(offsetNestedLoops(region.loops, -(ring * (W + j) + cell), { joinStyle: 'miter' }).paths).loops
           .filter((l) => l.filter((p) => region.inside(p)).length * 2 > l.length);
       if (!ringLoops.length) break;
       // Which runs face out: the shape's outline, not the inside of a hole.
-      const runs = ringLoops.flatMap((l) => runsOf(l).map((r) => ({ ...r, outer: signedArea2(l) > 0 })));
-      // Alternate courses take the runs the other way round, so the walls
-      // meeting at a corner take turns to run through it.
-      const flip = o.bond === 'stack' ? 0 : c;
-      const order = [...runs.keys()].sort((a, b) => ((a + flip) % 2) - ((b + flip) % 2) || a - b);
+      // (Ignoring notch corners, runsOf's minEdge, joined the tower's runs
+      // across them and its chord bricks then overlapped at their inner
+      // corners: left at 0 until curves are set out properly.)
+      const perLoop = ringLoops.map((l) => runsOf(l).map((r) => ({ ...r, outer: signedArea2(l) > 0 })));
+      const runs = perLoop.flat();
+      const order = [...runs.keys()];
       let laidThisRing = 0;
 
       for (const r of order) {
         // A ring with no corner to lap at starts half a brick round on alternate courses.
         const run = runs[r].closed && o.bond !== 'stack' && c % 2 === 1 ? { ...rotateRun(runs[r], (L + j) / 2), outer: runs[r].outer } : runs[r];
+        const endAt = run.total;
         const step = cell;
         // What is free along the run: each point's band across the leaf.
         const free = (s: number, depth: number, along: number): boolean => {
-          const a = runAt(run, s), b = runAt(run, Math.min(run.total, s + along));
+          const a = runAt(run, s), b = runAt(run, Math.min(endAt, s + along));
           const u0 = sub(b, a), ul = len(u0) || 1;
           const u = { x: u0.x / ul, y: u0.y / ul }, n = { x: -u.y, y: u.x };
           for (let t = step / 2; t < along; t += step) {
@@ -377,6 +473,10 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
           }
           return true;
         };
+        // The back of a brick is checked short of a joint: on a curve the
+        // collar joint between two leaves narrows where a straight brick sags
+        // into it, as it does in a real curved wall.
+        const backClear = (depth: number) => (run.closed ? Math.max(step, depth - j) : depth);
         let s = 0;
         // A fresh stretch (the run's start, or past a brick already laid)
         // starts the bond again: in a course with headers, a queen closer
@@ -385,7 +485,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
         let fresh = true;
         let laidInRun = 0;
         let pending: ('S' | 'H' | 'Q')[] = [];
-        while (s < run.total - step) {
+        while (s < endAt - step) {
           // Skip what is taken.
           // Only the run's own start (past a corner already laid) restarts the
           // bond; a gap between headers further along does not.
@@ -393,16 +493,20 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
           if (fresh) {
             fresh = false;
             unitIx = 0;
-            pending = ring === 0 && run.outer && units.includes('H') ? ['Q'] : [];
+            // Only in a course that starts with a header: the closer sets its
+            // headers a quarter brick off, centred on the stretchers below.
+            pending = ring === 0 && run.outer && units[0] === 'H' ? ['Q'] : [];
           }
-          const kind = pending.length ? pending.shift()! : units[unitIx++ % units.length];
+          // Headers are laid from the face; a ring further in is stretchers
+          // behind them (a header there would reach out past the wall).
+          const kind = pending.length ? pending.shift()! : ring > 0 ? 'S' : units[unitIx++ % units.length];
           const closer = kind === 'Q';
           let along = kind === 'H' ? W : closer ? (W - j) / 2 : L;
           let depth = kind === 'S' ? W : L;
           // How far the band is free from here, up to one unit.
           let room = 0;
-          while (room < along && s + room < run.total && free(s + room, depth, step)) room += step;
-          room = Math.min(room, run.total - s);
+          while (room < along && s + room < endAt && free(s + room, backClear(depth), step)) room += step;
+          room = Math.min(room, endAt - s);
           if (kind === 'H') headersTried++;
           if (kind === 'H' || closer) {
             // A header needs the wall a brick thick behind it.
@@ -414,8 +518,8 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
               if (!region.inside(back)) headerFallbacks++;
               along = L; depth = W;
               room = 0;
-              while (room < along && s + room < run.total && free(s + room, depth, step)) room += step;
-              room = Math.min(room, run.total - s);
+              while (room < along && s + room < endAt && free(s + room, backClear(depth), step)) room += step;
+              room = Math.min(room, endAt - s);
             }
           }
           const piece = Math.min(along, room);
@@ -426,21 +530,32 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
           const centre = { x: a.x + u.x * (ul / 2) + n.x * (depth / 2), y: a.y + u.y * (ul / 2) + n.y * (depth / 2) };
           // Past the first leaf, bricks stay inside the shape.
           if (ring > 0 && !region.inside(centre)) { s += step; continue; }
-          if (ring === 0 && !region.inside({ x: a.x + u.x * (ul / 2) + n.x * Math.min(depth - step, W) , y: a.y + u.y * (ul / 2) + n.y * Math.min(depth - step, W) })) thin = true;
+          // Thinner than a brick: the shape ends well short of the brick's back
+          // (not the few millimetres a chord on a curve sags past it).
+          const back = Math.min(depth, W) * 0.8;
+          if (ring === 0 && !region.inside({ x: a.x + u.x * (ul / 2) + n.x * back, y: a.y + u.y * (ul / 2) + n.y * back })) thin = true;
           here.mark(a, u, n, ul, depth, j - cell / 2);
           bricks.push({
             course: c, x: centre.x, y: centre.y, z, angle: Math.atan2(u.y, u.x),
             lengthMm: ul, depthMm: depth, header: depth > W + 1e-6, closer,
             // Within a couple of joints of whole: the perpends are closed up a
             // little instead, as a bricklayer would, rather than a brick cut.
-            cut: !closer && piece < along - 2.5 * j,
+            cut: !closer && piece < (depth > W + 1e-6 ? W : L) - 2.5 * j,
           });
           laidThisRing++;
           laidInRun++;
           if (bricks.length > MAX_BRICKS) {
             throw new Error(`That is more than ${MAX_BRICKS.toLocaleString()} bricks. Lay one wall at a time (select it first), or scale the shape down.`);
           }
-          s += piece + j;
+          // On a curve turning into the wall, the next brick's back corner
+          // would meet this one's: the joint opens on the face instead, as a
+          // curved wall's joints are wedges.
+          const ahead = runAt(run, Math.min(endAt, s + piece + j + 1)), after = runAt(run, Math.min(endAt, s + piece + j + 1 + L / 2));
+          const t0 = sub(after, ahead), tl = len(t0) || 1;
+          const turn = Math.atan2(u.x * t0.y / tl - u.y * t0.x / tl, u.x * t0.x / tl + u.y * t0.y / tl);
+          const wedge = turn > 0.01 ? depth * Math.tan(turn) : 0;
+          if (wedge > 0) widestWedge = Math.max(widestWedge, j + wedge);
+          s += piece + j + wedge;
         }
       }
       if (!laidThisRing && ring > 0) break;
@@ -453,6 +568,12 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   // only a wall too thin for headers is worth saying.
   if (headerFallbacks > 0.25 * headersTried && (o.bond === 'english' || o.bond === 'flemish')) {
     warnings.push(`${headerFallbacks} headers would stick out of a wall thinner than a brick's length (${L} mm), so stretchers were laid there instead.`);
+  }
+  if (widestWedge > 2 * j) {
+    warnings.push(`On the curve the joints open to ${Math.round(widestWedge)} mm on the face, as a curve this tight in whole bricks must: a builder would lay it in headers or radial bricks, or with wider-than-usual joints.`);
+  }
+  if (thinForHeaders) {
+    warnings.push(`${thinForHeaders} course${thinForHeaders === 1 ? '' : 's'} of half-brick wall (a chimney, a pier) laid in stretchers: ${o.bond === 'english' ? 'English' : 'Flemish'} bond needs walls a brick thick.`);
   }
   if (thinCourses) warnings.push(`In ${thinCourses} course${thinCourses === 1 ? '' : 's'} the wall is thinner than a brick (${W} mm): laid one brick wide.`);
 
@@ -471,6 +592,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     const key = Math.round(l / bucket) * bucket;
     byLen.set(key, (byLen.get(key) ?? 0) + 1);
   }
+
   // A brick split lengthways makes two queen closers.
   const closers = bricks.filter((b) => b.closer).length;
   const whole = bricks.length - cutLens.length - closers;
@@ -484,10 +606,24 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   const bearing = 150 * (L / 215);
   const stock = 150 * (L / 215);
   const lintelMap = new Map<number, number>();
-  for (const spanMm of openingSpans(bricks, solidAt, j)) {
-    const l = Math.round(Math.ceil((spanMm + 2 * bearing) / stock) * stock);
+  const openings = openingSpans(bricks, solidAt, j);
+  for (const { span: spanMm, slot } of openings) {
+    const l = slot ? Math.round(spanMm) : Math.round(Math.ceil((spanMm + 2 * bearing) / stock) * stock);
     lintelMap.set(l, (lintelMap.get(l) ?? 0) + 1);
   }
+
+  // How it holds together, with each lintel in as what it is: a beam in the
+  // course under the bricks it carries, bearing on the brickwork either side,
+  // so those bricks are tied back in. A quarter brick is the least lap a bond
+  // should have.
+  const lintels: PlacedBrick[] = openings.map((op) => ({
+    course: op.course - 1, x: op.centre.x, y: op.centre.y, z: 0, angle: op.angle,
+    lengthMm: op.slot ? op.span + 2 * j : op.span + 2 * bearing, depthMm: op.depth, header: false, closer: false, cut: false,
+  }));
+  // A quarter brick (with its joint) is the least lap a bond should have,
+  // give or take half a joint as the perpends are opened or closed.
+  const bond = bondReport([...bricks, ...lintels], j, { lap: (L + j) / 4 - j / 2 });
+  bondWarnings(bond, warnings, false);
 
   return {
     standard: std, bond: o.bond, jointMm: j, courses,
@@ -496,8 +632,21 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     cuts: [...byLen.entries()].sort((a, b) => b[0] - a[0]).map(([lengthMm, count]) => ({ lengthMm, count })),
     mortarLitres, mortarBags: Math.ceil(mortarLitres / 12.5),
     lintels: [...lintelMap.entries()].sort((a, b) => a[0] - b[0]).map(([lengthMm, count]) => ({ lengthMm, count })),
-    warnings,
+    bond, warnings,
   };
+}
+
+/** What the bond report means for the builder, said once. */
+function bondWarnings(bond: BondReport, warnings: string[], toy: boolean) {
+  if (toy && bond.pieces > 1) warnings.push(`It comes apart into ${bond.pieces} pieces: nothing grips them together.`);
+  // A part standing on something else (a chimney on its slab) is a piece of
+  // its own and fine; pieces side by side with nothing crossing them are not.
+  if (!toy && bond.sideBySide > 0) {
+    warnings.push(`${bond.sideBySide + 1} pieces of brickwork stand side by side with no brick crossing between them: tie the leaves with wall ties, or lay English or Flemish bond.`);
+  }
+  // In brickwork a brick over an opening sits on its lintel (listed with
+  // the count); only a toy brick can hang on nothing.
+  if (toy && bond.unsupported) warnings.push(`${bond.unsupported} brick${bond.unsupported === 1 ? ' has' : 's have'} nothing under ${bond.unsupported === 1 ? 'it' : 'them'}.`);
 }
 
 /**
@@ -505,7 +654,12 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
  * into one span where they sit end to end. Only the first course over an
  * opening counts; the ones above stand on it.
  */
-function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boolean>, j: number): number[] {
+interface Opening {
+  span: number; course: number; centre: V2; angle: number; depth: number;
+  /** The gap is a slot left for a lintel over a narrower opening below: the lintel is the slot. */
+  slot: boolean;
+}
+function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boolean>, j: number): Opening[] {
   const byCourse = new Map<number, PlacedBrick[]>();
   for (const b of bricks) {
     const list = byCourse.get(b.course);
@@ -516,7 +670,7 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
     const u = { x: Math.cos(b.angle), y: Math.sin(b.angle) }, n = { x: -u.y, y: u.x };
     return { u, n, o: { x: b.x - u.x * b.lengthMm / 2 - n.x * b.depthMm / 2, y: b.y - u.y * b.lengthMm / 2 - n.y * b.depthMm / 2 } };
   };
-  const spans: number[] = [];
+  const spans: Opening[] = [];
   const courses = [...byCourse.keys()].sort((a, b) => a - b);
   for (let k = 1; k < courses.length; k++) {
     // Nothing of the shape below at all: it stands on something else (a slab,
@@ -575,9 +729,28 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
         // end is an overhang.
         if (!open && from !== null) { if (from > lo) gaps.push([from, t]); from = null; }
       }
-      const middle = gaps.find(([a, b]) => a <= 0 && b >= 0);
-      const best = middle ? middle[1] - middle[0] : Math.max(0, ...gaps.map(([a, b]) => b - a));
-      if (best > 0) spans.push(best);
+      const found = gaps.find(([a, b]) => a <= 0 && b >= 0) ?? gaps.sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))[0];
+      // Each end to a tenth of a millimetre: a lintel is bought to length.
+      const edge = (inSide: number, outSide: number) => {
+        let a = inSide, b = outSide;
+        for (let i = 0; i < 20 && Math.abs(b - a) > 0.1; i++) { const m = (a + b) / 2; if (supportedAt(m)) b = m; else a = m; }
+        return (a + b) / 2;
+      };
+      const middle = found && [edge(found[0] + step, found[0] - step), edge(found[1] - step, found[1] + step)] as [number, number];
+      if (middle && middle[1] > middle[0]) {
+        const at = (middle[0] + middle[1]) / 2;
+        // A slot: the course under the gap has brickwork at both ends of it
+        // and the opening narrower, so the gap is where the lintel is meant
+        // to sit, bearing on that brickwork, and it is the lintel's length.
+        const twoBelow = solidAt.get(courses[k] - 2);
+        const solidTwoBelow = (t: number) => !!twoBelow && [-across, 0, across].some((w) => twoBelow({ x: c0.x + u.x * t + n.x * w, y: c0.y + u.y * t + n.y * w }));
+        const slot = solidTwoBelow(middle[0] + 2 * step) && solidTwoBelow(middle[1] - 2 * step) && !solidTwoBelow(at);
+        spans.push({
+          span: middle[1] - middle[0], course: courses[k], slot,
+          centre: { x: c0.x + u.x * at, y: c0.y + u.y * at },
+          angle: Math.atan2(u.y, u.x), depth: Math.max(...group.map((x) => x.depthMm)),
+        });
+      }
     }
   }
   return spans;
@@ -627,6 +800,8 @@ export function brickworkSourceGeoms(source: BrickworkSource, prefix = 'brick'):
       ...(source.bond ? { bond: source.bond as BrickBond } : {}),
       ...(source.jointMm ? { jointMm: source.jointMm } : {}),
       ...(source.toySizes ? { toySizes: source.toySizes as ToySize[] } : {}),
+      ...(source.toyInventory ? { toyInventory: source.toyInventory } : {}),
+      ...(source.hollowStuds ? { hollowStuds: source.hollowStuds } : {}),
     },
   );
   const colour = BRICK_COLOURS[source.colour ?? (result.standard.toy ? 'toy' : 'clay')];
@@ -674,6 +849,29 @@ export function brickworkNodes(
 
 export type BrickPlacement = 'replace' | 'beside';
 
+/** The colour most of a shape is, as toy bricks a shade either side of it; toy red if it has none. */
+function colourOf(scene: SceneGraph): BrickColour | undefined {
+  const tally = new Map<string, { rgba: number[]; n: number }>();
+  const walk = (nodes: SceneNode[]) => nodes.forEach((n) => {
+    for (const g of n.geoms ?? []) {
+      if (!g.rgba || g.csg === 'difference') continue;
+      const key = g.rgba.slice(0, 3).map((v) => v.toFixed(2)).join(',');
+      const t = tally.get(key) ?? { rgba: g.rgba, n: 0 };
+      t.n++;
+      tally.set(key, t);
+    }
+    walk(n.children ?? []);
+  });
+  walk(scene.nodes);
+  const top = [...tally.values()].sort((a, b) => b.n - a.n)[0];
+  if (!top) return undefined;
+  const [r, g, b] = top.rgba;
+  return (_brick, i) => {
+    const v = jitter(i, 0.04);
+    return [Math.min(1, Math.max(0, r + v)), Math.min(1, Math.max(0, g + v)), Math.min(1, Math.max(0, b + v)), 1];
+  };
+}
+
 /**
  * The scene with a body (or everything, for null) laid in brick: the
  * brickwork in its place, or beside it along +X.
@@ -683,7 +881,8 @@ export function brickworkInScene(
   bodyId: string | null,
   opts: Partial<BrickworkOptions> & { placement?: BrickPlacement } = {},
 ): { nodes: SceneNode[]; result: BrickworkResult } {
-  const result = layBricks(subjectScene(scene, bodyId), opts);
+  const subject = subjectScene(scene, bodyId);
+  const result = layBricks(subject, opts);
   let shift: [number, number, number] = [0, 0, 0];
   if (opts.placement === 'beside') {
     let minX = Infinity, maxX = -Infinity;
@@ -695,9 +894,11 @@ export function brickworkInScene(
     shift = [maxX - minX + 300, 0, 0];
   }
   const prefix = `brick_${Math.random().toString(36).slice(2, 7)}`;
-  const laid = brickworkNodes(result, prefix, shift);
+  // Toy bricks come in every colour: they take the model's, so a grey castle
+  // builds grey. Real bricks are the colour bricks are.
+  const laid = brickworkNodes(result, prefix, shift, result.standard.toy ? colourOf(subject) : undefined);
   const without = (list: SceneNode[]): SceneNode[] =>
-    list.filter((n) => (bodyId ? n.id !== bodyId : !!n.simulation)).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
+    list.filter((n) => (bodyId ? n.id !== bodyId : !laidWithScene(n))).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
   const kept = opts.placement === 'beside' ? scene.nodes : without(scene.nodes);
   return { nodes: [...kept, ...laid], result };
 }
