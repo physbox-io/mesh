@@ -68,6 +68,25 @@ function collectStaleColliders(nodes: SceneNode[], out: SceneNode[] = []): Scene
   return out;
 }
 
+/**
+ * Brickwork bodies with no bricks yet: a preset or an MCP-built body arrives
+ * as its source (SceneNode.brickwork) and is laid here, in the brickwork
+ * worker. Keyed by the source, as SCAD is: a failure is not retried until the
+ * source changes.
+ */
+const failedBrickwork = new Set<string>();
+const brickworkKey = (node: SceneNode) => JSON.stringify(node.brickwork);
+export function needsBrickworkBuild(node: SceneNode): boolean {
+  return !!node.brickwork && !(node.geoms?.length) && !failedBrickwork.has(brickworkKey(node));
+}
+function collectUnbuiltBrickwork(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
+  for (const node of nodes || []) {
+    if (needsBrickworkBuild(node)) out.push(node);
+    collectUnbuiltBrickwork(node.children || [], out);
+  }
+  return out;
+}
+
 function collectUnbuiltScad(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
   for (const node of nodes || []) {
     if (needsScadBuild(node) && !failedScad.has(node.scad!)) out.push(node);
@@ -158,9 +177,24 @@ export async function compileCsgNodes(
   const scene = useStore.getState().sceneGraph;
   const stale = collectStale(scene.nodes);
   const unbuilt = collectUnbuiltScad(scene.nodes);
+  const unlaid = collectUnbuiltBrickwork(scene.nodes);
+  if (unlaid.length > 0) {
+    const { layBrickworkSourceOffThread } = await import('../utils/brickworkClient');
+    await Promise.all(unlaid.map(async (node) => {
+      try {
+        const geoms = await layBrickworkSourceOffThread(node.brickwork!, node.id);
+        // Laid from the source it still has: if that changed meanwhile, the next pass lays the new one.
+        const now = findNodeById(useStore.getState().sceneGraph.nodes, node.id);
+        if (now && brickworkKey(now) === brickworkKey(node) && !now.geoms?.length) useStore.getState().updateNode(node.id, { geoms });
+      } catch (err) {
+        failedBrickwork.add(brickworkKey(node));
+        console.error(`Laying the bricks failed for ${node.id}:`, err);
+      }
+    }));
+  }
   if (stale.length === 0 && unbuilt.length === 0 && (!colliders || collectStaleColliders(scene.nodes).length === 0)) {
     if (!colliders && collectStaleColliders(scene.nodes).length > 0) scheduleCsgCompile();
-    return 0;
+    return unlaid.length;
   }
 
   if (unbuilt.length > 0) {
@@ -232,7 +266,7 @@ export async function compileCsgNodes(
   if (!skipFinalRecompile) {
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);
   }
-  return stale.length + unbuilt.length + staleColliders.length;
+  return stale.length + unbuilt.length + unlaid.length + staleColliders.length;
 }
 
 /**
@@ -262,6 +296,7 @@ export function useCsgAutoCompile() {
   useEffect(() => {
     if (collectStale(sceneGraph.nodes).length === 0 &&
         collectUnbuiltScad(sceneGraph.nodes).length === 0 &&
+        collectUnbuiltBrickwork(sceneGraph.nodes).length === 0 &&
         collectStaleColliders(sceneGraph.nodes).length === 0) return;
     scheduleCsgCompile();
   }, [sceneGraph]);

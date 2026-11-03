@@ -17,7 +17,7 @@
 //
 // Millimetres throughout; the scene is metres, Z up.
 
-import type { SceneGraph, SceneNode } from '../types/scene';
+import type { BrickworkSource, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import type { Point2D } from './laserCutExporter';
 import { collectSceneTriangles, contoursAtZ } from './contourSliceExporter';
 import { nestingDepths, offsetNestedLoops, pointInPolygon, signedArea2 } from './polygonOffset';
@@ -603,6 +603,35 @@ export const toyColour: BrickColour = (_b, i) => {
   const v = jitter(i, 0.03);
   return [0.78 + v, 0.09 + v, 0.08 + v, 1];
 };
+
+/** Grey stone, the tops a shade lighter as weathered battlements are. */
+export const stoneColour: BrickColour = (b, i) => {
+  const v = jitter(i, 0.04);
+  const top = b.z > 150 ? 0.04 : 0;
+  return [0.6 + v + top, 0.6 + v + top, 0.58 + v + top, 1];
+};
+
+export const BRICK_COLOURS: Record<NonNullable<BrickworkSource['colour']>, BrickColour> = {
+  clay: clayColour, toy: toyColour, stone: stoneColour,
+};
+
+/**
+ * A brickwork body's bricks, laid from its source: box geoms in the body's
+ * frame. Slow for a big shape; the compile pass runs it in the worker.
+ */
+export function brickworkSourceGeoms(source: BrickworkSource, prefix = 'brick'): { geoms: SceneGeom[]; result: BrickworkResult } {
+  const result = layBricks(
+    { nodes: [{ id: 'shape', name: 'Shape', type: 'body', pos: [0, 0, 0], joints: [], children: [], geoms: source.shape }] } as SceneGraph,
+    {
+      standardId: source.standardId as BrickStandardId,
+      ...(source.bond ? { bond: source.bond as BrickBond } : {}),
+      ...(source.jointMm ? { jointMm: source.jointMm } : {}),
+      ...(source.toySizes ? { toySizes: source.toySizes as ToySize[] } : {}),
+    },
+  );
+  const colour = BRICK_COLOURS[source.colour ?? (result.standard.toy ? 'toy' : 'clay')];
+  return { geoms: brickworkNodes(result, prefix, [0, 0, 0], colour).flatMap((n) => n.geoms), result };
+}
 
 /**
  * Bricks as scene bodies, one per course, every brick a box. `shift` moves

@@ -750,6 +750,14 @@ export interface SceneNode {
   hardwarePart?: HardwarePart;
   script?: string;
   scad?: string;
+  /**
+   * A body laid in brick from a shape: the shape and how to lay it. Like
+   * `scad`, the source; the bricks are its geoms, laid off the main thread by
+   * the compile pass (hooks/useCsgCompile.ts) when the body has none, so a
+   * preset or an MCP-built body arrives as source and is built on load.
+   * Box geoms in the body's frame; see utils/brickwork.ts.
+   */
+  brickwork?: BrickworkSource;
   // --- CSG (boolean modifiers) ---------------------------------------------
   // When true, the body's geoms are treated as a CSG program rather than as a
   // set of independent solids: positives are unioned, geoms marked
@@ -1140,4 +1148,19 @@ export interface EdgeRoundFeature {
   /** Metres. A fillet's radius; a chamfer's leg — how far back along each face it starts. */
   size: number;
   edges: RoundEdge[];
+}
+
+/** What a brickwork body is laid from: see SceneNode.brickwork. */
+export interface BrickworkSource {
+  /** The shape, as geoms in the body's frame (metres). Never drawn or simulated itself. */
+  shape: SceneGeom[];
+  /** A BrickStandardId: 'uk', 'toy', ... */
+  standardId: string;
+  /** A BrickBond, for bricks that take one. */
+  bond?: string;
+  jointMm?: number;
+  /** Toy bricks: the sizes to build with ('2x4', ...). */
+  toySizes?: string[];
+  /** 'clay' (default for bricks), 'toy' (default for toy bricks) or 'stone'. */
+  colour?: 'clay' | 'toy' | 'stone';
 }
