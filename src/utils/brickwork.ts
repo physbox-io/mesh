@@ -21,8 +21,9 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import type { Point2D } from './laserCutExporter';
 import { collectSceneTriangles, contoursAtZ } from './contourSliceExporter';
 import { nestingDepths, offsetNestedLoops, pointInPolygon, signedArea2 } from './polygonOffset';
+import { DEFAULT_TOY_SIZES, layToyBricks, TOY_HEIGHT_MM, TOY_PITCH_MM, type ToySize } from './toyBricks';
 
-export type BrickStandardId = 'uk' | 'us_modular' | 'eu_nf' | 'au' | 'mini_12';
+export type BrickStandardId = 'uk' | 'us_modular' | 'eu_nf' | 'au' | 'mini_6' | 'mini_12' | 'toy';
 
 export interface BrickStandard {
   id: BrickStandardId;
@@ -32,6 +33,10 @@ export interface BrickStandard {
   heightMm: number;
   /** The usual joint, mm. */
   jointMm: number;
+  /** A scale-model brick, for a shape too small for real ones. */
+  miniature?: boolean;
+  /** Interlocking studded bricks on an 8 mm grid, in several sizes: see utils/toyBricks.ts. */
+  toy?: boolean;
 }
 
 export const BRICK_STANDARDS: Record<BrickStandardId, BrickStandard> = {
@@ -39,7 +44,9 @@ export const BRICK_STANDARDS: Record<BrickStandardId, BrickStandard> = {
   us_modular: { id: 'us_modular', label: 'US modular 7⅝ × 3⅝ × 2¼"', lengthMm: 194, widthMm: 92, heightMm: 57, jointMm: 10 },
   eu_nf: { id: 'eu_nf', label: 'European NF 240 × 115 × 71', lengthMm: 240, widthMm: 115, heightMm: 71, jointMm: 10 },
   au: { id: 'au', label: 'Australian 230 × 110 × 76', lengthMm: 230, widthMm: 110, heightMm: 76, jointMm: 10 },
-  mini_12: { id: 'mini_12', label: 'Miniature 1:12 (18 × 9 × 6)', lengthMm: 18, widthMm: 8.5, heightMm: 5.5, jointMm: 0.8 },
+  mini_6: { id: 'mini_6', label: 'Miniature 1:6 (36 × 17 × 11)', lengthMm: 36, widthMm: 17, heightMm: 11, jointMm: 1.6, miniature: true },
+  mini_12: { id: 'mini_12', label: 'Miniature 1:12 (18 × 9 × 6)', lengthMm: 18, widthMm: 8.5, heightMm: 5.5, jointMm: 0.8, miniature: true },
+  toy: { id: 'toy', label: 'Toy bricks (8 mm studs)', lengthMm: 2 * TOY_PITCH_MM, widthMm: TOY_PITCH_MM, heightMm: TOY_HEIGHT_MM, jointMm: 0, toy: true },
 };
 
 /**
@@ -64,6 +71,8 @@ export interface BrickworkOptions {
   jointMm?: number;
   /** Extra bricks bought against breakage, percent. */
   wastagePct: number;
+  /** Toy bricks: the sizes to build with. Default: all of them. */
+  toySizes?: ToySize[];
 }
 
 export const DEFAULT_BRICKWORK_OPTIONS: BrickworkOptions = { standardId: 'uk', bond: 'stretcher', wastagePct: 5 };
@@ -111,6 +120,8 @@ export interface BrickworkResult {
   mortarBags: number;
   /** Lintels over openings, by length (with bearing both ends). */
   lintels: { lengthMm: number; count: number }[];
+  /** Toy bricks: how many of each size. */
+  parts?: { size: ToySize; count: number }[];
   warnings: string[];
 }
 
@@ -119,7 +130,13 @@ const sub = (a: V2, b: V2): V2 => ({ x: a.x - b.x, y: a.y - b.y });
 const len = (a: V2) => Math.hypot(a.x, a.y);
 
 /** A stretch of outline with material on its left, by arc length. */
-interface Run { pts: V2[]; s: number[]; total: number; /** A loop with no corner: it can start anywhere. */ closed?: boolean }
+interface Run {
+  pts: V2[]; s: number[]; total: number;
+  /** A loop with no corner: it can start anywhere. */
+  closed?: boolean;
+  /** On the shape's outline rather than round a hole in it: the face seen. */
+  outer?: boolean;
+}
 
 function runAt(run: Run, s: number): V2 {
   const t = Math.max(0, Math.min(run.total, s));
@@ -236,12 +253,45 @@ export function subjectScene(scene: SceneGraph, bodyId: string | null): SceneGra
   return { ...scene, nodes: [wrapped] };
 }
 
+/**
+ * Whether a shape this size is brickwork in this brick: at least a brick long
+ * across and four courses tall (a one-brick pier is real brickwork however
+ * small). Below that it refuses, naming the bricks that would do.
+ */
+export function brickFits(s: BrickStandard, spanMm: number, heightMm: number): boolean {
+  return spanMm >= s.lengthMm && heightMm >= 4 * (s.heightMm + s.jointMm) - s.jointMm;
+}
+
+/** The shape in toy bricks: every course on the stud grid, counted by size. */
+function toyResult(
+  std: BrickStandard, tris: number[], solidIds: number[], lo: number[], hi: number[], sizes: ToySize[], warnings: string[],
+): BrickworkResult {
+  const modelH = hi[2] - lo[2];
+  const span = Math.max(hi[0] - lo[0], hi[1] - lo[1]);
+  if (span < 2 * TOY_PITCH_MM || modelH < TOY_HEIGHT_MM / 2) {
+    throw new Error(`The shape is ${Math.round(span)} mm across and ${Math.round(modelH)} mm tall, too small for toy bricks. Scale it up.`);
+  }
+  const courses = Math.max(1, Math.round(modelH / TOY_HEIGHT_MM));
+  const { bricks, parts } = layToyBricks({
+    lo: [lo[0], lo[1]], hi: [hi[0], hi[1]], courses, zBase: lo[2], sizes, maxBricks: MAX_BRICKS,
+    solidAt: (c) => {
+      const loops = contoursAtZ(tris, (lo[2] + ((c + 0.5) / courses) * modelH) / 1000, solidIds);
+      return loops.length ? regionOf(loops).inside : null;
+    },
+  });
+  if (!bricks.length) throw new Error('No toy brick fits in this shape.');
+  return {
+    standard: std, bond: 'stretcher', jointMm: 0, courses,
+    modelHeightMm: modelH, builtHeightMm: courses * TOY_HEIGHT_MM,
+    bricks, whole: bricks.length, cutPieces: 0, closers: 0, toBuy: bricks.length,
+    cuts: [], mortarLitres: 0, mortarBags: 0, lintels: [], parts, warnings,
+  };
+}
+
 /** Lays the scene's solids in brick. Throws, with what to change, when it cannot. */
 export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {}): BrickworkResult {
   const o = { ...DEFAULT_BRICKWORK_OPTIONS, ...opts };
-  const std = BRICK_STANDARDS[o.standardId] ?? BRICK_STANDARDS.uk;
-  const j = o.jointMm && o.jointMm > 0 ? o.jointMm : std.jointMm;
-  const L = std.lengthMm, W = std.widthMm, H = std.heightMm;
+  const asked = BRICK_STANDARDS[o.standardId] ?? BRICK_STANDARDS.uk;
   const warnings: string[] = [];
 
   const { tris, solidIds, skipped } = collectSceneTriangles(scene);
@@ -255,9 +305,15 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   }
   const modelH = hi[2] - lo[2];
   const span = Math.max(hi[0] - lo[0], hi[1] - lo[1]);
-  if (span < W || modelH < H) {
-    throw new Error(`The shape is ${Math.round(span)} × ${Math.round(modelH)} mm, smaller than a ${std.label} brick. Pick smaller bricks or scale the shape up.`);
+  const std = asked;
+  if (std.toy) return toyResult(std, tris, solidIds, lo, hi, o.toySizes ?? DEFAULT_TOY_SIZES, warnings);
+  if (!brickFits(std, span, modelH)) {
+    const smaller = Object.values(BRICK_STANDARDS).filter((s) => s.lengthMm < std.lengthMm && brickFits(s, span, modelH)).map((s) => s.label);
+    throw new Error(`The shape is ${Math.round(span)} mm across and ${Math.round(modelH)} mm tall, too small for ${std.label} bricks. ` +
+      (smaller.length ? `Choose ${smaller.join(' or ')}, or scale it up.` : 'Scale it up.'));
   }
+  const j = o.jointMm && o.jointMm > 0 ? o.jointMm : std.jointMm;
+  const L = std.lengthMm, W = std.widthMm, H = std.heightMm;
   const gauge = H + j;
   const courses = Math.max(1, Math.round((modelH + j) / gauge));
 
@@ -291,9 +347,14 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     for (let ring = 0; ring < 200; ring++) {
       const ringLoops = ring === 0
         ? region.loops
-        : regionOf(offsetNestedLoops(region.loops, -ring * (W + j), { joinStyle: 'miter' }).paths).loops;
+        // A ring further in lies in the material; an offset that has come out
+        // the far side of a wall thinner than the rings (a flue grown past
+        // the chimney's outside) is not one.
+        : regionOf(offsetNestedLoops(region.loops, -ring * (W + j), { joinStyle: 'miter' }).paths).loops
+          .filter((l) => l.filter((p) => region.inside(p)).length * 2 > l.length);
       if (!ringLoops.length) break;
-      const runs = ringLoops.flatMap((l) => runsOf(l));
+      // Which runs face out: the shape's outline, not the inside of a hole.
+      const runs = ringLoops.flatMap((l) => runsOf(l).map((r) => ({ ...r, outer: signedArea2(l) > 0 })));
       // Alternate courses take the runs the other way round, so the walls
       // meeting at a corner take turns to run through it.
       const flip = o.bond === 'stack' ? 0 : c;
@@ -302,7 +363,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
 
       for (const r of order) {
         // A ring with no corner to lap at starts half a brick round on alternate courses.
-        const run = runs[r].closed && o.bond !== 'stack' && c % 2 === 1 ? rotateRun(runs[r], (L + j) / 2) : runs[r];
+        const run = runs[r].closed && o.bond !== 'stack' && c % 2 === 1 ? { ...rotateRun(runs[r], (L + j) / 2), outer: runs[r].outer } : runs[r];
         const step = cell;
         // What is free along the run: each point's band across the leaf.
         const free = (s: number, depth: number, along: number): boolean => {
@@ -322,14 +383,17 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
         // beside the first header puts its joints a quarter brick off the
         // ones below.
         let fresh = true;
+        let laidInRun = 0;
         let pending: ('S' | 'H' | 'Q')[] = [];
         while (s < run.total - step) {
           // Skip what is taken.
-          if (!free(s, W, step)) { s += step; fresh = true; continue; }
+          // Only the run's own start (past a corner already laid) restarts the
+          // bond; a gap between headers further along does not.
+          if (!free(s, W, step)) { s += step; if (!laidInRun) fresh = true; continue; }
           if (fresh) {
             fresh = false;
             unitIx = 0;
-            pending = ring === 0 && units.includes('H') ? ['Q'] : [];
+            pending = ring === 0 && run.outer && units.includes('H') ? ['Q'] : [];
           }
           const kind = pending.length ? pending.shift()! : units[unitIx++ % units.length];
           const closer = kind === 'Q';
@@ -372,6 +436,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
             cut: !closer && piece < along - 2.5 * j,
           });
           laidThisRing++;
+          laidInRun++;
           if (bricks.length > MAX_BRICKS) {
             throw new Error(`That is more than ${MAX_BRICKS.toLocaleString()} bricks. Lay one wall at a time (select it first), or scale the shape down.`);
           }
@@ -454,7 +519,10 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
   const spans: number[] = [];
   const courses = [...byCourse.keys()].sort((a, b) => a - b);
   for (let k = 1; k < courses.length; k++) {
-    const solidBelow = solidAt.get(courses[k] - 1) ?? (() => false);
+    // Nothing of the shape below at all: it stands on something else (a slab,
+    // the ground at another level), not over an opening.
+    const solidBelow = solidAt.get(courses[k] - 1);
+    if (!solidBelow) continue;
     const loose: PlacedBrick[] = [];
     for (const b of byCourse.get(courses[k])!) {
       const f = footprint(b);
@@ -485,16 +553,15 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
           }
         }
       }
-      // Along the wall: a stretcher's length, or across a header.
-      const ref = group.find((x) => !x.header) ?? group[0];
-      const ang = ref.header ? ref.angle + Math.PI / 2 : ref.angle;
-      const u = { x: Math.cos(ang), y: Math.sin(ang) }, n = { x: -u.y, y: u.x };
+      // Every brick's angle runs along the face it was laid on, header or not.
+      const ref = group[0];
+      const u = { x: Math.cos(ref.angle), y: Math.sin(ref.angle) }, n = { x: -u.y, y: u.x };
       const c0 = { x: group.reduce((t, x) => t + x.x, 0) / group.length, y: group.reduce((t, x) => t + x.y, 0) / group.length };
       const ext = group.map((x) => (x.x - c0.x) * u.x + (x.y - c0.y) * u.y);
       const reachMm = Math.max(...group.map((x) => Math.max(x.lengthMm, x.depthMm)));
       const lo = Math.min(...ext) - reachMm, hi = Math.max(...ext) + reachMm;
       // The course below along the wall's middle (and either side of a collar joint).
-      const across = ref.header ? ref.lengthMm / 4 : ref.depthMm / 4;
+      const across = ref.depthMm / 4;
       const supportedAt = (t: number) => [-across, 0, across].some((w) =>
         solidBelow({ x: c0.x + u.x * t + n.x * w, y: c0.y + u.y * t + n.y * w }));
       // The unsupported stretch nearest the middle of the group is the opening.
@@ -504,7 +571,9 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
       for (let t = lo; t <= hi + step; t += step) {
         const open = t <= hi && !supportedAt(t);
         if (open && from === null) from = t;
-        if (!open && from !== null) { gaps.push([from, t]); from = null; }
+        // Only a gap with brickwork both sides is an opening; one open at an
+        // end is an overhang.
+        if (!open && from !== null) { if (from > lo) gaps.push([from, t]); from = null; }
       }
       const middle = gaps.find(([a, b]) => a <= 0 && b >= 0);
       const best = middle ? middle[1] - middle[0] : Math.max(0, ...gaps.map(([a, b]) => b - a));
@@ -514,8 +583,35 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
   return spans;
 }
 
-/** Bricks as scene bodies, one per course, every brick a box. `shift` moves them, mm. */
-export function brickworkNodes(result: BrickworkResult, idPrefix: string, shift: [number, number, number] = [0, 0, 0]): SceneNode[] {
+export type BrickColour = (brick: PlacedBrick, index: number) => [number, number, number, number];
+
+/** A little variation either way, the same for the same brick every time. */
+const jitter = (i: number, amount: number) => {
+  const h = Math.sin(i * 12.9898) * 43758.5453;
+  return (h - Math.floor(h)) * 2 * amount - amount;
+};
+
+/** Brick reds with a little variation, the headers darker as burnt ends are. */
+export const clayColour: BrickColour = (b, i) => {
+  const v = jitter(i, 0.06);
+  const base: [number, number, number] = b.header ? [0.52, 0.22, 0.15] : [0.68, 0.30, 0.20];
+  return [base[0] + v, base[1] + v * 0.6, base[2] + v * 0.4, 1];
+};
+
+/** Toy red, each brick a shade off its neighbours so the seams read. */
+export const toyColour: BrickColour = (_b, i) => {
+  const v = jitter(i, 0.03);
+  return [0.78 + v, 0.09 + v, 0.08 + v, 1];
+};
+
+/**
+ * Bricks as scene bodies, one per course, every brick a box. `shift` moves
+ * them, mm; `colour` paints each (default: clay, or toy red for toy bricks).
+ */
+export function brickworkNodes(
+  result: Pick<BrickworkResult, 'bricks' | 'standard'>, idPrefix: string, shift: [number, number, number] = [0, 0, 0], colour?: BrickColour,
+): SceneNode[] {
+  const paint = colour ?? (result.standard.toy ? toyColour : clayColour);
   const H = result.standard.heightMm;
   const byCourse = new Map<number, PlacedBrick[]>();
   for (const b of result.bricks) {
@@ -523,13 +619,6 @@ export function brickworkNodes(result: BrickworkResult, idPrefix: string, shift:
     if (list) list.push(b);
     else byCourse.set(b.course, [b]);
   }
-  // Brick reds with a little variation, the headers darker as burnt ends are.
-  const shade = (i: number, header: boolean): [number, number, number, number] => {
-    const h = Math.sin(i * 12.9898) * 43758.5453;
-    const v = (h - Math.floor(h)) * 0.12 - 0.06;
-    const base: [number, number, number] = header ? [0.52, 0.22, 0.15] : [0.68, 0.30, 0.20];
-    return [base[0] + v, base[1] + v * 0.6, base[2] + v * 0.4, 1];
-  };
   let i = 0;
   return [...byCourse.entries()].sort((a, b) => a[0] - b[0]).map(([course, list]) => ({
     id: `${idPrefix}_course_${course + 1}`,
@@ -546,8 +635,9 @@ export function brickworkNodes(result: BrickworkResult, idPrefix: string, shift:
         size: [b.lengthMm / 2000, b.depthMm / 2000, H / 2000],
         pos: [(b.x + shift[0]) / 1000, (b.y + shift[1]) / 1000, (b.z + H / 2 + shift[2]) / 1000],
         quat: [Math.cos(b.angle / 2), 0, 0, Math.sin(b.angle / 2)],
-        rgba: shade(i, b.header),
-        density: 1900,
+        rgba: paint(b, i),
+        // Fired clay; ABS for toy bricks, which are hollow underneath.
+        density: result.standard.toy ? 550 : 1900,
       };
     }),
   }));

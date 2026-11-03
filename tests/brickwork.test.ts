@@ -108,11 +108,16 @@ describe('laying a shape in brick', () => {
     expect(Math.abs(firstAngles(0) - firstAngles(1))).toBeGreaterThan(0.03);
   });
 
-  it('says what to change when it cannot', () => {
-    const tiny = scene([box('t', 0, 0, 0.02, 0.03, 0.03, 0.02)]);
-    expect(() => layBricks(tiny)).toThrow(/smaller than a UK standard/);
-    // In miniature bricks it lays.
-    expect(layBricks(tiny, { standardId: 'mini_12' }).bricks.length).toBeGreaterThan(10);
+  it('refuses a shape too small for the brick, naming the bricks that would do', async () => {
+    const { PRESETS } = await import('../src/presets/presetScenes');
+    const birdhouse = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).birdhouse.scene;
+    // 143 mm across: two courses of house brick is no birdhouse.
+    expect(() => layBricks(birdhouse)).toThrow(/too small for UK standard .* bricks\. Choose .*Miniature 1:12.*Toy bricks/);
+    const bird = layBricks(birdhouse, { standardId: 'mini_12' });
+    expect(bird.courses).toBeGreaterThan(20);
+    expect(overlaps(bird.bricks)).toBe(0);
+    // A one-brick pier 600 mm tall is real brickwork, small as it is.
+    expect(layBricks(scene([box('p', 0, 0, 0.3, 0.1075, 0.1075, 0.3)])).standard.id).toBe('uk');
     // A 40 m wall 10 m high is far more bricks than can be drawn.
     const huge = scene([box('h', 0, 0, 5, 20, 0.1075, 5)]);
     expect(() => layBricks(huge)).toThrow(new RegExp(`more than ${MAX_BRICKS.toLocaleString()}`));
@@ -127,5 +132,26 @@ describe('laying a shape in brick', () => {
     expect(beside.nodes[0].id).toBe('b');
     // Past the wall along +X.
     expect(Math.min(...beside.nodes.slice(1).flatMap((n) => n.geoms.map((g) => g.pos![0])))).toBeGreaterThan(1.5);
+  });
+});
+
+describe('toy bricks', () => {
+  it('builds a wall from interlocking sizes, no seam on the one below', () => {
+    // 160 mm long, 2 studs thick, ten bricks tall.
+    const r = layBricks(scene([box('w', 0, 0, 0.048, 0.08, 0.008, 0.048)]), { standardId: 'toy' });
+    expect(r.courses).toBe(10);
+    expect(overlaps(r.bricks)).toBe(0);
+    const seams = (c: number) => r.bricks.filter((b) => b.course === c).map((b) => Math.round(b.x - b.lengthMm / 2)).sort((a, b) => a - b).slice(1);
+    for (let c = 1; c < r.courses; c++) expect(seams(c).filter((x) => seams(c - 1).includes(x))).toEqual([]);
+    // Counted by size, every brick in one.
+    expect(r.parts!.reduce((n, p) => n + p.count, 0)).toBe(r.bricks.length);
+    expect(r.mortarLitres).toBe(0);
+  });
+
+  it('builds with only the sizes allowed, 1×1 to finish', () => {
+    const r = layBricks(scene([box('b', 0, 0, 0.048, 0.04, 0.04, 0.048)]), { standardId: 'toy', toySizes: ['2x2'] });
+    expect(new Set(r.parts!.map((p) => p.size))).toEqual(new Set(['2x2']));
+    // A thin board still gets a row of bricks.
+    expect(layBricks(scene([box('t', 0, 0, 0.05, 0.06, 0.0015, 0.05)]), { standardId: 'toy' }).bricks.length).toBeGreaterThan(5);
   });
 });

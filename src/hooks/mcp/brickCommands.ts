@@ -3,6 +3,7 @@
 import type { McpCommands } from './types';
 import { BRICK_STANDARDS, DEFAULT_BRICKWORK_OPTIONS, type BrickBond, type BrickStandardId } from '../../utils/brickwork';
 import { layBricksOffThread } from '../../utils/brickworkClient';
+import { TOY_SIZES, type ToySize } from '../../utils/toyBricks';
 import { findNodeInScene } from './bridgeUtils';
 import { settleScene } from './settleScene';
 
@@ -16,6 +17,10 @@ export const brickCommands: McpCommands = {
       return { ok: false, error: `standardId is one of ${Object.keys(BRICK_STANDARDS).join(', ')}.` };
     }
     if (msg.bond !== undefined && !BONDS.includes(msg.bond as BrickBond)) return { ok: false, error: `bond is one of ${BONDS.join(', ')}.` };
+    const toySizes = msg.toySizes;
+    if (toySizes !== undefined && (!Array.isArray(toySizes) || toySizes.some((t) => !TOY_SIZES.includes(t as ToySize)))) {
+      return { ok: false, error: `toySizes is a list of ${TOY_SIZES.join(', ')}.` };
+    }
     const placement = msg.placement === 'replace' ? 'replace' : msg.placement === 'none' ? 'none' : 'beside';
     let outcome;
     try {
@@ -25,6 +30,7 @@ export const brickCommands: McpCommands = {
         jointMm: typeof msg.jointMm === 'number' ? msg.jointMm : undefined,
         wastagePct: typeof msg.wastagePct === 'number' ? msg.wastagePct : DEFAULT_BRICKWORK_OPTIONS.wastagePct,
         placement: placement === 'none' ? 'beside' : placement,
+        ...(toySizes ? { toySizes: toySizes as ToySize[] } : {}),
       });
     } catch (e) {
       return { ok: false, error: (e as Error).message };
@@ -51,6 +57,7 @@ export const brickCommands: McpCommands = {
       mortarLitres: Math.round(r.mortarLitres),
       mortarBags25kg: r.mortarBags,
       lintels: r.lintels,
+      ...(r.parts ? { parts: r.parts } : {}),
       warnings: r.warnings,
     };
   },

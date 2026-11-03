@@ -9,6 +9,7 @@ import {
   type BrickBond, type BrickPlacement, type BrickStandardId,
 } from '../utils/brickwork';
 import { layBricksOffThread, type BrickworkOutcome } from '../utils/brickworkClient';
+import { DEFAULT_TOY_SIZES, TOY_SIZES, type ToySize } from '../utils/toyBricks';
 
 /** The top-level piece a selection belongs to, as Pipes takes it. */
 function pieceOf(nodes: SceneNode[], id: string | null): SceneNode | null {
@@ -39,8 +40,12 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [toySizes, setToySizes] = useState<ToySize[]>(DEFAULT_TOY_SIZES);
 
-  const options = useMemo(() => ({ standardId, bond, jointMm, wastagePct, placement }), [standardId, bond, jointMm, wastagePct, placement]);
+  const options = useMemo(
+    () => ({ standardId, bond, jointMm, wastagePct, placement, toySizes }),
+    [standardId, bond, jointMm, wastagePct, placement, toySizes],
+  );
 
   // Counted as the settings change, in the worker.
   useEffect(() => {
@@ -78,6 +83,9 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
 
   const r = outcome?.result;
   const std = BRICK_STANDARDS[standardId];
+  const toy = !!std.toy;
+  const toggleSize = (size: ToySize) =>
+    setToySizes((now) => (now.includes(size) ? now.filter((x) => x !== size) : [...now, size]));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
@@ -88,7 +96,7 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
             <div>
               <h2 className="text-base font-semibold text-slate-900 dark:text-white">Brickwork</h2>
               <p className="text-xs font-medium text-slate-600 dark:text-slate-300">Laying: {piece ? piece.name : 'the whole scene'}</p>
-              <p className="text-xs text-slate-500 dark:text-slate-400">The shape in brick, course by course: the bricks to buy, the cuts, the mortar and the lintels.</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">The shape in brick, course by course: the bricks to buy, the cuts, the mortar and the lintels — or in toy bricks, by size.</p>
             </div>
           </div>
           <button onClick={onClose} title="Close" className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
@@ -101,25 +109,46 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
             <label className="space-y-1 block col-span-2 md:col-span-1">
               <span className="text-[11px] text-slate-500 dark:text-slate-400">Brick</span>
               <select value={standardId} onChange={(e) => chooseStandard(e.target.value as BrickStandardId)} className={field}>
-                {Object.values(BRICK_STANDARDS).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                <optgroup label="Building bricks">
+                  {Object.values(BRICK_STANDARDS).filter((s) => !s.miniature && !s.toy).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                </optgroup>
+                <optgroup label="Models">
+                  {Object.values(BRICK_STANDARDS).filter((s) => s.miniature).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                </optgroup>
+                <optgroup label="Toy Bricks">
+                  {Object.values(BRICK_STANDARDS).filter((s) => s.toy).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                </optgroup>
               </select>
             </label>
-            <label className="space-y-1 block">
+            {!toy && <label className="space-y-1 block">
               <span className="text-[11px] text-slate-500 dark:text-slate-400" title="Stretcher: every brick along the wall, half lapped. English and Flemish lay headers across a wall a brick thick. Stack lines the joints up, for show.">Bond</span>
               <select value={bond} onChange={(e) => setBond(e.target.value as BrickBond)} className={field}>
                 {BRICK_BONDS.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
               </select>
-            </label>
-            <label className="space-y-1 block">
+            </label>}
+            {!toy && <label className="space-y-1 block">
               <span className="text-[11px] text-slate-500 dark:text-slate-400">Joint (mm)</span>
               <NumberInput min={0.5} max={30} step={0.5} value={jointMm} fallbackOnBlur={std.jointMm}
                 onChange={(v) => { if (v !== undefined && Number.isFinite(v) && v > 0) setJointMm(v); }} className={field} />
-            </label>
-            <label className="space-y-1 block">
+            </label>}
+            {!toy && <label className="space-y-1 block">
               <span className="text-[11px] text-slate-500 dark:text-slate-400" title="Extra bricks against breakage and rejects">Spare (%)</span>
               <NumberInput min={0} max={50} step={1} value={wastagePct} fallbackOnBlur={DEFAULT_BRICKWORK_OPTIONS.wastagePct}
                 onChange={(v) => { if (v !== undefined && Number.isFinite(v) && v >= 0) setWastagePct(v); }} className={field} />
-            </label>
+            </label>}
+            {toy && (
+              <fieldset className="col-span-2 space-y-1">
+                <legend className="text-[11px] text-slate-500 dark:text-slate-400" title="The sizes to build with. 1×1 is always there to finish a gap.">Sizes (studs)</legend>
+                <div className="flex flex-wrap gap-x-3 gap-y-1">
+                  {TOY_SIZES.map((size) => (
+                    <label key={size} className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-300">
+                      <input type="checkbox" checked={size === '1x1' || toySizes.includes(size)} disabled={size === '1x1'} onChange={() => toggleSize(size)} />
+                      {size.replace('x', '×')}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            )}
             <label className="space-y-1 block">
               <span className="text-[11px] text-slate-500 dark:text-slate-400">Put the bricks</span>
               <select value={placement} onChange={(e) => setPlacement(e.target.value as BrickPlacement)} className={field}>
@@ -142,12 +171,15 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
           {r && (
             <>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {[
+                {(r.parts ? [
+                  ['Bricks', r.toBuy.toLocaleString(), `${r.parts.length} sizes`],
+                  ['Courses', String(r.courses), `${Math.round(r.builtHeightMm)} mm built, model ${Math.round(r.modelHeightMm)} mm`],
+                ] : [
                   ['Bricks to buy', r.toBuy.toLocaleString(), `${r.whole.toLocaleString()} whole, ${r.cutPieces} cut, ${wastagePct}% spare`],
                   ['Courses', String(r.courses), `${Math.round(r.builtHeightMm)} mm built, model ${Math.round(r.modelHeightMm)} mm`],
                   ['Mortar', `${Math.round(r.mortarLitres)} L`, `${r.mortarBags} × 25 kg bags of premix`],
                   ['Lintels', String(r.lintels.reduce((n, l) => n + l.count, 0)), r.lintels.length ? r.lintels.map((l) => `${l.count}× ${l.lengthMm} mm`).join(', ') : 'No openings to span'],
-                ].map(([label, value, note]) => (
+                ]).map(([label, value, note]) => (
                   <div key={label} className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
                     <div className="text-[11px] text-slate-500 dark:text-slate-400">{label}</div>
                     <div className="text-lg font-semibold text-slate-900 dark:text-white">{value}</div>
@@ -155,6 +187,14 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
                   </div>
                 ))}
               </div>
+              {r.parts && (
+                <div className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2">Parts</h3>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                    {r.parts.map((p) => <span key={p.size}><span className="font-semibold">{p.count}×</span> {p.size.replace('x', '×')}</span>)}
+                  </div>
+                </div>
+              )}
               {r.cuts.length > 0 && (
                 <div className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2">Cuts</h3>
