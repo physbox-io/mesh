@@ -40,6 +40,11 @@ export interface ClothRuntime {
   eqStride: number;
   prev: Float64Array | null;
   prevTime: number;
+  /**
+   * When the seams were last aimed from where their points were, and so
+   * when their closing started; null until the cloth is first stepped.
+   */
+  aimedAt: number | null;
   /** Equality ids of the ties, by name, for reading their loads. */
   ties: { name: string; eq: number }[];
 }
@@ -94,7 +99,7 @@ export function initClothRuntime(mujoco: Mj, model: Model): ClothRuntime | null 
     const name: string = mujoco.mj_id2name(model, EQUALITY, e) ?? '';
     if (name.startsWith('cloth_') && name.includes('_tie')) ties.push({ name, eq: e });
   }
-  return { sews, flexes, eqStride, prev: null, prevTime: -1, ties };
+  return { sews, flexes, eqStride, prev: null, prevTime: -1, ties, aimedAt: null };
 }
 
 const SKIN_FRICTION = 0.02;
@@ -124,9 +129,13 @@ export function clothNormalCoefficient(alpha: number, cd: number): number {
  */
 export function applyCloth(rt: ClothRuntime, model: Model, data: Data, wind: [number, number, number], airDensity: number) {
   const t = data.time;
+  if (rt.aimedAt === null) aimSews(rt, data, model);
+  const t0 = rt.aimedAt!;
   const eqData = model.eq_data;
   for (const s of rt.sews) {
-    const k = Math.min(1, t / s.seconds), o = rt.eqStride * s.eq + 3;
+    // From where it was aimed to closed, over the rest of its sew time (at
+    // once if that has passed: a seam re-aimed mid-run is already nearly shut).
+    const k = t >= s.seconds ? 1 : Math.min(1, (t - t0) / Math.max(1e-6, s.seconds - t0)), o = rt.eqStride * s.eq + 3;
     eqData[o] = s.from[0] + (s.to[0] - s.from[0]) * k;
     eqData[o + 1] = s.from[1] + (s.to[1] - s.from[1]) * k;
     eqData[o + 2] = s.from[2] + (s.to[2] - s.from[2]) * k;
@@ -190,21 +199,27 @@ export function applyCloth(rt: ClothRuntime, model: Model, data: Data, wind: [nu
 
 /**
  * Puts each cloth vertex where its piece starts (on the form, say) rather
- * than where it was cut, and aims every seam and tie from there. Call once on
- * a fresh start, after mj_forward; it forwards again.
+ * than where it was cut, if it is still where it was cut. Call after any
+ * build, once its state is in place: a fresh start, a rebuild that carried
+ * the rest of the scene over (flex vertices' joints have no names, so they
+ * come back at their cutting place), a respawned worker seeded with the old
+ * state (already placed: left alone). Forwards when it moves anything.
  *
  * A flex vertex rests at its body's position (the flat pattern) and moves on
- * three slide joints, so starting it elsewhere is only qpos. A connect is
- * compiled as satisfied at the rest places, so each seam's starting anchor is
- * taken again from where its two points now are: the seam then closes from
- * the small gap it starts with, not from the width of the cutting table.
+ * slide joints, so starting it elsewhere is only qpos.
  */
-export function applyClothStart(rt: ClothRuntime, mujoco: Mj, model: Model, data: Data): void {
+export function placeCloth(rt: ClothRuntime, mujoco: Mj, model: Model, data: Data): boolean {
   let moved = false;
   const qpos = data.qpos, bpos = model.body_pos, jadr = model.body_jntadr, jnum = model.body_jntnum;
   const qadr = model.jnt_qposadr, axis = model.jnt_axis;
   for (const f of rt.flexes) {
     if (!f.start) continue;
+    let placed = false;
+    for (let v = 0; v < f.vnum && !placed; v++) {
+      const b = f.bodies[v];
+      for (let j = jadr[b]; j < jadr[b] + jnum[b]; j++) if (Math.abs(qpos[qadr[j]]) > 1e-9) { placed = true; break; }
+    }
+    if (placed) continue;
     moved = true;
     for (let v = 0; v < f.vnum; v++) {
       const b = f.bodies[v];
@@ -212,19 +227,31 @@ export function applyClothStart(rt: ClothRuntime, mujoco: Mj, model: Model, data
       for (let j = jadr[b]; j < jadr[b] + jnum[b]; j++) qpos[qadr[j]] = dx * axis[3 * j] + dy * axis[3 * j + 1] + dz * axis[3 * j + 2];
     }
   }
-  if (!moved) return;
-  mujoco.mj_forward(model, data);
-  const xpos = data.xpos, xmat = data.xmat, o1 = model.eq_obj1id, o2 = model.eq_obj2id, eqData = model.eq_data;
+  if (moved) mujoco.mj_forward(model, data);
+  rt.aimedAt = null;
+  return moved;
+}
+
+/** Kept for callers that start a run: place the cloth, then aim its seams from there. */
+export function applyClothStart(rt: ClothRuntime, mujoco: Mj, model: Model, data: Data): void {
+  placeCloth(rt, mujoco, model, data);
+}
+
+/**
+ * Aims every seam and tie from where its two points are now: a connect is
+ * compiled as satisfied at the cutting places, so aimed from there a seam
+ * would pull its pieces back toward the cutting table. It then closes from
+ * the gap it really has, over what is left of the sew time.
+ */
+function aimSews(rt: ClothRuntime, data: Data, model: Model) {
+  const xpos = data.xpos, xmat = data.xmat, o1 = model.eq_obj1id, o2 = model.eq_obj2id;
   for (const s of rt.sews) {
     const b1 = o1[s.eq], b2 = o2[s.eq];
     const d = [0, 1, 2].map((k) => xpos[3 * b1 + k] - xpos[3 * b2 + k]);
     // Into body2's frame: R^T d, xmat row-major.
-    const from: [number, number, number] = [0, 1, 2].map((c) => d[0] * xmat[9 * b2 + c] + d[1] * xmat[9 * b2 + 3 + c] + d[2] * xmat[9 * b2 + 6 + c]) as [number, number, number];
-    s.from = from;
-    const o = rt.eqStride * s.eq + 3;
-    eqData[o] = from[0]; eqData[o + 1] = from[1]; eqData[o + 2] = from[2];
+    s.from = [0, 1, 2].map((c) => d[0] * xmat[9 * b2 + c] + d[1] * xmat[9 * b2 + 3 + c] + d[2] * xmat[9 * b2 + 6 + c]) as [number, number, number];
   }
-  mujoco.mj_forward(model, data);
+  rt.aimedAt = data.time;
 }
 
 /**

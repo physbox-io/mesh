@@ -91,7 +91,7 @@ import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
-import { applyCloth, applyClothStart, clothTieLoads, initClothRuntime, type ClothRuntime } from '../utils/cloth/clothStep';
+import { applyCloth, clothTieLoads, initClothRuntime, placeCloth, type ClothRuntime } from '../utils/cloth/clothStep';
 import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -4288,8 +4288,6 @@ const doBuild = (
     seedActuatorCtrl(sceneGraph.nodes, newData);
 
     mujoco.mj_forward(newModel, newData);
-    // Cloth starts where its pieces start (on the form), not where they were cut.
-    if (clothRt) applyClothStart(clothRt, mujoco, newModel, newData);
 
     const initVelJoints: { name: string; vel: number[] }[] = [];
     const traverseVel = (nodes: SceneNode[]) => {
@@ -4312,6 +4310,12 @@ const doBuild = (
     }
     if (needForward) mujoco.mj_forward(newModel, newData);
   }
+
+  // Cloth still at its cutting place (a fresh start, or a rebuild whose
+  // unnamed flex joints could not be carried) goes to where it starts, however
+  // the state above was arrived at; its seams are aimed from there when it is
+  // first stepped (utils/cloth/clothStep).
+  if (clothRt) placeCloth(clothRt, mujoco, newModel, newData);
 
   // Last, so nothing above can put a broken weld back together. A rebuild is
   // the one moment a break can be silently undone — the model is new, every
@@ -4532,7 +4536,7 @@ const runHeadless = async (
 
     seedActuatorCtrl(sceneGraph.nodes, data);
     mujoco.mj_forward(model, data);
-    if (clothRt) applyClothStart(clothRt, mujoco, model, data);
+    if (clothRt) placeCloth(clothRt, mujoco, model, data);
 
     const initVelJoints: { name: string; vel: number[] }[] = [];
     const traverseVel = (nodes: SceneNode[]) => {
