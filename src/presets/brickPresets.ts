@@ -1,16 +1,15 @@
 // ---------------------------------------------------------------------------
-// Brickwork presets: a smoker laid in UK brick, and a castle in toy bricks
+// Brickwork presets: a garden smoker to build in UK brick, and a castle to
+// build in toy bricks
 // ---------------------------------------------------------------------------
 //
-// Each is a brickwork body (SceneNode.brickwork): a plain shape — boxes for
-// the walls, the openings left out — and how to lay it, with no bricks. The
-// compile pass lays them in the brickwork worker when the preset loads, as
-// it builds an OpenSCAD preset, so they are exactly what Build → Brick makes
-// of the shape. The shapes keep to the brick's own measure (whole bricks
-// along, whole courses up), as a builder would draw them.
+// Each starts as a model: the walls as one solid body, drawn the way a
+// builder draws a job to the brick's own measure (whole and half bricks
+// along, whole courses up), with what is not brick beside it. Select the
+// walls and Build → Brick lays them in brick (or toy bricks), in their place.
 // ---------------------------------------------------------------------------
 
-import type { BrickworkSource, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
+import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import type { BrickworkOptions } from '../utils/brickwork';
 
 /** A box from its two corners, metres. */
@@ -26,24 +25,28 @@ const shape = (geoms: SceneGeom[]): SceneGraph =>
 // --- Smoker ----------------------------------------------------------------
 //
 // UK brick: 215 × 102.5 × 65, 10 mm joints, so 225 mm a brick along and 75 mm
-// a course. Outside 5 × 3½ bricks (1115 × 777.5), walls a brick thick, in
-// stretcher bond, as a garden smoker is laid. Firebox below (courses 1-8), cooking chamber above (9-16),
-// a concrete roof slab (17), and a chimney a brick and a half square (18-25).
+// a course. A single leaf, half a brick thick, in stretcher bond, as a garden
+// smoker is built: outside 5 × 4 bricks (1115 × 890), so the corners turn on
+// whole bricks. Firebox below (courses 1-8), cooking chamber above (9-16), a
+// concrete roof slab (17), and a chimney a brick and a half square (18-25).
 
 const C = 0.075;
-const SX = 0.5575, SY = 0.38875, T = 0.215;
+const SX = 0.5575, SY = 0.445, T = 0.1025;
+/**
+ * Half-widths: the firebox mouth (piers a brick and a half), its lintel
+ * (bearing half a brick), the door (piers a brick) and its lintel.
+ */
+const FB = 0.23, FBL = 0.3425, DR = 0.3425, DRL = 0.455;
 
 export const SMOKER_OPTIONS: Partial<BrickworkOptions> = { standardId: 'uk', bond: 'stretcher' };
 
 export const smokerShape = (): SceneGraph => {
   const front: SceneGeom[] = [
-    // Firebox mouth 450 wide, four courses high, under a concrete lintel.
-    span('fb_l', -SX, -0.225, -SY, -SY + T, 0, 4 * C), span('fb_r', 0.225, SX, -SY, -SY + T, 0, 4 * C),
-    span('fb_lintel_l', -SX, -0.375, -SY, -SY + T, 4 * C, 5 * C), span('fb_lintel_r', 0.375, SX, -SY, -SY + T, 4 * C, 5 * C),
+    span('fb_l', -SX, -FB, -SY, -SY + T, 0, 4 * C), span('fb_r', FB, SX, -SY, -SY + T, 0, 4 * C),
+    span('fb_lintel_l', -SX, -FBL, -SY, -SY + T, 4 * C, 5 * C), span('fb_lintel_r', FBL, SX, -SY, -SY + T, 4 * C, 5 * C),
     span('mid', -SX, SX, -SY, -SY + T, 5 * C, 8 * C),
-    // Door 600 wide, six courses, and its lintel.
-    span('dr_l', -SX, -0.3, -SY, -SY + T, 8 * C, 14 * C), span('dr_r', 0.3, SX, -SY, -SY + T, 8 * C, 14 * C),
-    span('dr_lintel_l', -SX, -0.45, -SY, -SY + T, 14 * C, 15 * C), span('dr_lintel_r', 0.45, SX, -SY, -SY + T, 14 * C, 15 * C),
+    span('dr_l', -SX, -DR, -SY, -SY + T, 8 * C, 14 * C), span('dr_r', DR, SX, -SY, -SY + T, 8 * C, 14 * C),
+    span('dr_lintel_l', -SX, -DRL, -SY, -SY + T, 14 * C, 15 * C), span('dr_lintel_r', DRL, SX, -SY, -SY + T, 14 * C, 15 * C),
     span('top', -SX, SX, -SY, -SY + T, 15 * C, 16 * C),
   ];
   const walls: SceneGeom[] = [
@@ -51,8 +54,8 @@ export const smokerShape = (): SceneGraph => {
     span('back', -SX, SX, SY - T, SY, 0, 16 * C),
     span('left', -SX, -SX + T, -SY + T, SY - T, 0, 16 * C),
     span('right', SX - T, SX, -SY + T, SY - T, 0, 16 * C),
-    // Chimney on the slab at the back, flue 122.5 square.
-    span('ch_f', -0.16375, 0.16375, 0.0 - 0.06, 0.0425, 17 * C, 25 * C),
+    // Chimney on the slab at the back, half a brick thick round a flue 122.5 square.
+    span('ch_f', -0.16375, 0.16375, -0.06, 0.0425, 17 * C, 25 * C),
     span('ch_b', -0.16375, 0.16375, 0.165, 0.2675, 17 * C, 25 * C),
     span('ch_l', -0.16375, -0.06125, 0.0425, 0.165, 17 * C, 25 * C),
     span('ch_r', 0.06125, 0.16375, 0.0425, 0.165, 17 * C, 25 * C),
@@ -67,8 +70,8 @@ export const smokerExtras = (): SceneNode[] => {
   const fixed = (id: string, name: string, geoms: SceneGeom[]): SceneNode => ({ id, name, type: 'body', pos: [0, 0, 0], joints: [], children: [], geoms });
   const extras: SceneNode[] = [
     fixed('smoker_lintels', 'Lintels', [
-      { ...span('firebox_lintel', -0.375, 0.375, -SY, -SY + T, 4 * C, 5 * C - 0.01), rgba: concrete, density: 2400 },
-      { ...span('door_lintel', -0.45, 0.45, -SY, -SY + T, 14 * C, 15 * C - 0.01), rgba: concrete, density: 2400 },
+      { ...span('firebox_lintel', -FBL + 0.005, FBL - 0.005, -SY, -SY + T, 4 * C, 5 * C - 0.01), rgba: concrete, density: 2400 },
+      { ...span('door_lintel', -DRL + 0.005, DRL - 0.005, -SY, -SY + T, 14 * C, 15 * C - 0.01), rgba: concrete, density: 2400 },
     ]),
     fixed('smoker_slab', 'Roof slab', [
       { ...span('slab', -SX - 0.03, SX + 0.03, -SY - 0.03, SY + 0.03, 16 * C - 0.01, 17 * C - 0.01), rgba: concrete, density: 2400 },
@@ -81,12 +84,12 @@ export const smokerExtras = (): SceneNode[] => {
     ]),
     {
       // A steel door on a hinge down its left edge; push it and it swings.
-      id: 'smoker_door', name: 'Door', type: 'body', pos: [-0.31, -SY - 0.012, 8 * C],
+      id: 'smoker_door', name: 'Door', type: 'body', pos: [-DR - 0.01, -SY - 0.012, 8 * C],
       joints: [{ name: 'door_hinge', type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0], damping: 2, limited: true, range: [-110, 0] }],
       children: [],
       geoms: [
-        { ...span('door_plate', 0, 0.62, -0.006, 0.006, 0.0, 6 * C - 0.01), rgba: steel, density: 7850 },
-        { name: 'door_handle', type: 'capsule', size: [0.008], fromto: [0.56, -0.03, 0.12, 0.56, -0.03, 0.32], rgba: [0.1, 0.1, 0.1, 1], density: 7850 },
+        { ...span('door_plate', 0, 2 * DR + 0.02, -0.006, 0.006, 0.0, 6 * C - 0.01), rgba: steel, density: 7850 },
+        { name: 'door_handle', type: 'capsule', size: [0.008], fromto: [2 * DR - 0.04, -0.03, 0.12, 2 * DR - 0.04, -0.03, 0.32], rgba: [0.1, 0.1, 0.1, 1], density: 7850 },
       ],
     },
   ];
@@ -153,17 +156,12 @@ export const castleExtras = (): SceneNode[] => {
   return [drawbridge];
 };
 
-/** A body laid in brick from a shape when the scene loads. */
-const brickworkBody = (id: string, shapeScene: SceneGraph, options: Partial<BrickworkOptions>, colour?: BrickworkSource['colour']): SceneNode => ({
-  id, name: 'Brickwork', type: 'body', pos: [0, 0, 0], joints: [], children: [], geoms: [],
-  brickwork: {
-    shape: shapeScene.nodes[0].geoms,
-    standardId: options.standardId ?? 'uk',
-    ...(options.bond ? { bond: options.bond } : {}),
-    ...(colour ? { colour } : {}),
-  },
+/** The model of the brickwork: one solid body, to be laid in brick. */
+const model = (id: string, name: string, shapeScene: SceneGraph, rgba: number[]): SceneNode => ({
+  id, name, type: 'body', pos: [0, 0, 0], joints: [], children: [],
+  geoms: shapeScene.nodes[0].geoms.map((g) => ({ ...g, rgba })),
 });
 
-export const smokerPreset: SceneGraph = { nodes: [brickworkBody('smoker_brickwork', smokerShape(), SMOKER_OPTIONS), ...smokerExtras()] };
+export const smokerPreset: SceneGraph = { nodes: [model('smoker_walls', 'Smoker walls', smokerShape(), [0.66, 0.31, 0.22, 1]), ...smokerExtras()] };
 
-export const toyCastlePreset: SceneGraph = { nodes: [brickworkBody('castle_brickwork', castleShape(), CASTLE_OPTIONS, 'stone'), ...castleExtras()] };
+export const toyCastlePreset: SceneGraph = { nodes: [model('castle', 'Castle', castleShape(), [0.62, 0.62, 0.6, 1]), ...castleExtras()] };

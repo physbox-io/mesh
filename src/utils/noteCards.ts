@@ -548,30 +548,29 @@ A 2.4 m geodesic dome of 25 struts at angles no fitting is sold for, built from 
 
   brick_smoker: `# 🔥 Brick Smoker
 
-A garden smoker in **UK brick** (215 × 102.5 × 65, 10 mm joints), walls a brick thick in **stretcher bond**: a firebox below, a cooking chamber above, a concrete roof slab and a chimney.
+A garden smoker drawn to **UK brick** (215 × 102.5 × 65, 10 mm joints): walls half a brick thick, five bricks by four, with a firebox below, a cooking chamber above, a concrete roof slab and a chimney. The openings are sized to the bricks, so it builds from whole bricks.
 
-## What is real here
-- Every brick was laid by **Build → Brick** from a plain shape of the walls, so this is what it makes
-- **415 bricks** laid, **397 to buy**: the half bats at corners and openings are paired out of whole bricks, plus 5% spare
-- Concrete **lintels** over the firebox mouth and the door; the count asks for **1050 mm** and **1200 mm**, 150 mm bearing each end
+## Build it in brick
+1. Select **Smoker walls**
+2. Open **\`Build\`** → **\`Brick\`**: UK standard, stretcher bond
+3. Pick **In place of the shape** and **Lay in scene**
+
+It lays **261 bricks**, all whole but **12 half bricks** at the sides of the openings, and asks for a lintel over each opening. The door, slab, lintels and steel stay as they are: only the walls are brick.
+
+## What else is real here
 - A steel **baffle** spreads the fire's heat, open at the back for the smoke to rise; the **grate** sits above it
-- The steel **door** is on a hinge: select it and push it open
-
-## Try it
-- Open **\`Build\`** → **\`Brick\`** on a wall of your own: pick the bond, see the bricks, cuts, mortar and lintels, and **Lay in scene**`,
+- The steel **door** is on a hinge: select it and push it open`,
 
   toy_castle: `# 🏰 Toy Brick Castle
 
-A castle 320 mm square in **toy bricks** on the 8 mm stud grid: four towers, curtain walls two studs thick with battlements, and a gateway with the drawbridge down.
+A castle 320 mm square, drawn on the 8 mm stud grid of **toy bricks**: four towers, curtain walls two studs thick with battlements, and a gateway with the drawbridge down.
 
-## What is real here
-- Built by **Build → Brick** with **Toy bricks** from a plain shape of the walls
-- **855 bricks**: 676 × 2×8, 31 × 2×6, 19 × 2×4 and 129 × 2×2 (the battlements)
-- Alternate courses run the other way, and no brick ends on a seam in the course below, so the walls lock together
-- The drawbridge is on a hinge at the gate's sill
+## Build it in toy bricks
+1. Select the **Castle**
+2. Open **\`Build\`** → **\`Brick\`** and pick **Toy bricks**; untick sizes you have none of, or say how many you have
+3. Pick **In place of the shape** and **Lay in scene**
 
-## Try it
-- Open **\`Build\`** → **\`Brick\`**, pick **Toy bricks**, and untick sizes to build with fewer kinds`,
+It builds in **538 bricks**, biggest first (173 × 4×10, 121 × 2×10, 117 × 2×2 for the battlements and smaller), in one piece: every brick grips the course below, and the gateway is spanned by bricks reaching the studs either side.`,
 
   chest_of_drawers: `# 🗄️ Chest of Drawers
 

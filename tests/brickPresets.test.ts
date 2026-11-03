@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { brickworkSourceGeoms } from '../src/utils/brickwork';
+import { brickworkInScene } from '../src/utils/brickwork';
 import { layBrickworkSourceOffThread } from '../src/utils/brickworkClient';
 import { needsBrickworkBuild } from '../src/hooks/useCsgCompile';
 import { smokerPreset, toyCastlePreset } from '../src/presets/brickPresets';
@@ -7,39 +7,74 @@ import { smokerPreset, toyCastlePreset } from '../src/presets/brickPresets';
 const body = (scene: typeof smokerPreset, id: string) => scene.nodes.find((n) => n.id === id)!;
 
 describe('brickwork presets', () => {
-  it('arrive as a shape to lay, and are laid on load', () => {
-    for (const [scene, id] of [[smokerPreset, 'smoker_brickwork'], [toyCastlePreset, 'castle_brickwork']] as const) {
-      const b = body(scene, id);
-      expect(b.geoms).toEqual([]);
-      expect(needsBrickworkBuild(b)).toBe(true);
-      // Once laid it is left alone.
-      expect(needsBrickworkBuild({ ...b, geoms: brickworkSourceGeoms(b.brickwork!).geoms })).toBe(false);
-    }
+  it('start as models, for Build → Brick to lay', () => {
+    expect(body(smokerPreset, 'smoker_walls').geoms.length).toBeGreaterThan(5);
+    expect(body(toyCastlePreset, 'castle').geoms.length).toBeGreaterThan(5);
+    expect(smokerPreset.nodes.some((n) => n.brickwork)).toBe(false);
   });
 
-  it('lays the smoker in UK brick with a lintel over each opening', () => {
-    const { result: r } = brickworkSourceGeoms(body(smokerPreset, 'smoker_brickwork').brickwork!);
-    // Firebox mouth and door: the concrete lintels' gaps, 150 mm bearing each end.
-    expect(r.lintels).toEqual([{ lengthMm: 1050, count: 1 }, { lengthMm: 1200, count: 1 }]);
-    expect(r.warnings).toEqual([]);
+  it('lays the smoker walls in whole bricks but for half bricks at the openings', () => {
+    const { nodes, result: r } = brickworkInScene(smokerPreset, 'smoker_walls', { standardId: 'uk', bond: 'stretcher', placement: 'replace' });
     // As its note card says.
-    expect([r.bricks.length, r.toBuy]).toEqual([415, 397]);
-    expect(body(smokerPreset, 'smoker_door').joints[0].type).toBe('hinge');
+    expect(r.bricks.length).toBe(261);
+    expect(r.cuts).toEqual([{ lengthMm: 105, count: 12 }]);
+    // The model's own lintels, in the slots left for them.
+    expect(r.lintels).toEqual([{ lengthMm: 685, count: 1 }, { lengthMm: 910, count: 1 }]);
+    // The walls, and the chimney standing on its slab: nothing to warn of.
+    expect(r.bond).toMatchObject({ pieces: 2, sideBySide: 0 });
+    expect(r.warnings).toEqual([]);
+    expect(r.bond.straightJoints).toBeLessThanOrEqual(1);
+    // In place of the walls; the door, slab and steel stay.
+    expect(nodes.some((n) => n.id === 'smoker_walls')).toBe(false);
+    expect(nodes.find((n) => n.id === 'smoker_door')!.joints[0].type).toBe('hinge');
   });
 
-  it('builds the castle in toy bricks, counted by size', () => {
-    const { result: r } = brickworkSourceGeoms(body(toyCastlePreset, 'castle_brickwork').brickwork!);
+  it('never lays a moving part, even with the whole scene', () => {
+    const { nodes } = brickworkInScene(smokerPreset, null, { standardId: 'uk', placement: 'replace' });
+    expect(nodes.some((n) => n.id === 'smoker_door')).toBe(true);
+  });
+
+  it('builds the castle in toy bricks, in one piece, the colour of the model', () => {
+    const { nodes, result: r } = brickworkInScene(toyCastlePreset, 'castle', { standardId: 'toy', placement: 'replace' });
+    // A grey castle builds grey, each brick a shade either side.
+    const rgba = nodes.filter((n) => n.name.startsWith('Course')).flatMap((n) => n.geoms.map((g) => g.rgba!));
+    expect(rgba.every((c) => Math.abs(c[0] - 0.62) < 0.05 && Math.abs(c[0] - c[1]) < 0.01)).toBe(true);
     expect(Math.round(r.builtHeightMm)).toBe(240);
     // As its note card says.
-    expect(r.parts).toEqual([{ size: '2x8', count: 676 }, { size: '2x6', count: 31 }, { size: '2x4', count: 19 }, { size: '2x2', count: 129 }]);
-    expect(body(toyCastlePreset, 'castle_drawbridge').joints[0].type).toBe('hinge');
+    expect(r.bricks.length).toBe(538);
+    expect(r.bond).toMatchObject({ pieces: 1, unsupported: 0 });
   });
 
-  it('lays a source through the client, its bricks named for their body', async () => {
+  it('builds the castle from what the builder has, short of nothing', () => {
+    // Four 2×10s, six 2×12s, and 2-wide bricks up to 2×8: no 1×1s at all.
+    const toyInventory = { '2x2': null, '2x3': null, '2x4': null, '2x6': null, '2x8': null, '2x10': 4, '2x12': 6 };
+    const { result: r } = brickworkInScene(toyCastlePreset, 'castle', { standardId: 'toy', hollowStuds: 2, toyInventory });
+    expect(r.short).toEqual([]);
+    const count = (size: string) => r.parts!.find((p) => p.size === size)?.count ?? 0;
+    expect(count('2x10')).toBeLessThanOrEqual(4);
+    expect(count('2x12')).toBeLessThanOrEqual(6);
+    expect(count('1x1')).toBe(0);
+    expect(r.bond).toMatchObject({ pieces: 1, unsupported: 0 });
+  });
+
+  it('saves the few long bricks there are for the gateway they must span', () => {
+    // Only four 2×10s: spent low down, the 8-stud gateway is left with nothing
+    // that grips either side of it.
+    const toyInventory = { '2x2': null, '2x4': null, '2x8': null, '2x10': 4 };
+    const { result: r } = brickworkInScene(toyCastlePreset, 'castle', { standardId: 'toy', hollowStuds: 2, toyInventory });
+    expect(r.short).toEqual([]);
+    expect(r.bond).toMatchObject({ pieces: 1, unsupported: 0 });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('lays a brickwork body from its source on load, named for it', async () => {
+    const source = { shape: body(toyCastlePreset, 'castle').geoms, standardId: 'toy' };
+    const laid = { id: 'castle_bricks', name: 'Castle', type: 'body' as const, pos: [0, 0, 0], joints: [], children: [], geoms: [], brickwork: source };
+    expect(needsBrickworkBuild(laid)).toBe(true);
     // No Worker under Node: the client lays it inline, as the page's worker would.
-    const geoms = await layBrickworkSourceOffThread(body(toyCastlePreset, 'castle_brickwork').brickwork!, 'castle_brickwork');
-    expect(geoms.length).toBe(855);
-    expect(geoms.every((g) => g.type === 'box' && g.name!.startsWith('castle_brickwork_'))).toBe(true);
-    expect(new Set(geoms.map((g) => g.name)).size).toBe(geoms.length);
+    const geoms = await layBrickworkSourceOffThread(source, 'castle_bricks');
+    expect(geoms.length).toBe(538);
+    expect(geoms.every((g) => g.type === 'box' && g.name!.startsWith('castle_bricks_'))).toBe(true);
+    expect(needsBrickworkBuild({ ...laid, geoms })).toBe(false);
   });
 });
