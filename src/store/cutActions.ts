@@ -16,6 +16,7 @@ import {
   sourcePositiveBounds, pickCutSpot,
 } from '../utils/csg';
 import { cloneSceneGraph, findNode } from './sceneClone';
+import { isNodeRotationBaked } from '../utils/sceneTree';
 import type { PhysicsWindow } from './physicsEngine';
 import { rebuildAfterGeomEdit, settleBooleanState } from './geomEdits';
 import type { PhysicsState } from './useStore';
@@ -44,14 +45,16 @@ function cutSpotFromCamera(node: SceneNode): CutSpot | null {
     // way round.
     const eye = new THREE.Vector3(camera.position.x, -camera.position.z, camera.position.y);
     eye.sub(new THREE.Vector3(node.pos?.[0] ?? 0, node.pos?.[1] ?? 0, node.pos?.[2] ?? 0));
-    if (node.quat) {
-      eye.applyQuaternion(
-        new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0]).invert(),
-      );
-    } else if (node.euler) {
-      const rad = (d: number) => (d * Math.PI) / 180;
-      const euler = new THREE.Euler(rad(node.euler[0]), rad(node.euler[1]), rad(node.euler[2]), 'XYZ');
-      eye.applyQuaternion(new THREE.Quaternion().setFromEuler(euler).invert());
+    if (!isNodeRotationBaked(node)) {
+      if (node.quat) {
+        eye.applyQuaternion(
+          new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0]).invert(),
+        );
+      } else if (node.euler) {
+        const rad = (d: number) => (d * Math.PI) / 180;
+        const euler = new THREE.Euler(rad(node.euler[0]), rad(node.euler[1]), rad(node.euler[2]), 'XYZ');
+        eye.applyQuaternion(new THREE.Quaternion().setFromEuler(euler).invert());
+      }
     }
     const middle = [0, 1, 2].map(a => (bounds.min[a] + bounds.max[a]) / 2);
     const dir = new THREE.Vector3(middle[0], middle[1], middle[2]).sub(eye);

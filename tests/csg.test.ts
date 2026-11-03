@@ -475,6 +475,18 @@ describe('resolveCsgGeoms', () => {
     expect(resolveCsgGeoms(n, 'render').map(g => g.name)).toContain('b_csg');
   });
 
+  it('collides only the hull mesh in hull mode, without duplicating source primitives', () => {
+    const n = washer();
+    const hullMesh: SceneGeom = {
+      name: 'b_csg', type: 'mesh', size: [1], csgDerived: 'visual', mass: 0.5,
+    };
+    n.geoms.push(hullMesh);
+    const phys = resolveCsgGeoms(n, 'physics');
+    expect(phys.map(g => g.name)).toEqual(['b_csg']);
+    expect(phys[0].mass).toBe(0.5);
+    expect(resolveCsgGeoms(n, 'render').map(g => g.name)).toEqual(['b_csg']);
+  });
+
   it('splits an explicit total mass across primitive colliders by volume', () => {
     const n = body([
       { name: 'big', type: 'sphere', size: [0.1] },

@@ -2884,7 +2884,7 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
   const derived = geoms.filter(g => !!g.csgDerived);
   const source = geoms.filter(g => !g.csgDerived);
   const hasMesh = derived.some(g => g.csgDerived === 'visual');
-  const collidingWithPrimitives = !hasMesh || derived.every(g => g.csgDerived !== 'collider');
+  const collidingWithPrimitives = !hasMesh || derived.every(g => g.csgDerived === 'visual' && g.role === 'visual');
 
   const visualSource = source.filter(g => g.role === 'visual');
   if (target === 'render') {

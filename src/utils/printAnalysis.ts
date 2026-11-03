@@ -11,6 +11,7 @@
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { resolveCsgGeoms, positiveBounds } from './csg';
 import { isBoughtIn } from './boughtIn';
+import { isNodeRotationBaked } from './sceneTree';
 import * as THREE from 'three';
 
 export type WeakSpotCategory = 'structural' | 'dynamic' | 'hardware' | 'manufacturing';
@@ -75,31 +76,43 @@ function getGeomWorldTransform(
   let rotMat = identityMat;
   let hasRotation = false;
 
-  if (node.rot && (node.rot[0] !== 0 || node.rot[1] !== 0 || node.rot[2] !== 0)) {
-    hasRotation = true;
-    const euler = new THREE.Euler(node.rot[0] || 0, node.rot[1] || 0, node.rot[2] || 0, 'XYZ');
-    const q = new THREE.Quaternion().setFromEuler(euler);
-    const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
-    const me = m4.elements;
-    rotMat = [
-      me[0], me[4], me[8],
-      me[1], me[5], me[9],
-      me[2], me[6], me[10],
-    ];
-  } else if (node.euler && (node.euler[0] !== 0 || node.euler[1] !== 0 || node.euler[2] !== 0)) {
-    hasRotation = true;
-    const rx = (node.euler[0] * Math.PI) / 180;
-    const ry = (node.euler[1] * Math.PI) / 180;
-    const rz = (node.euler[2] * Math.PI) / 180;
-    const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
-    const q = new THREE.Quaternion().setFromEuler(euler);
-    const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
-    const me = m4.elements;
-    rotMat = [
-      me[0], me[4], me[8],
-      me[1], me[5], me[9],
-      me[2], me[6], me[10],
-    ];
+  if (!isNodeRotationBaked(node)) {
+    if (node.quat && node.quat.length === 4 && (node.quat[0] !== 1 || node.quat[1] !== 0 || node.quat[2] !== 0 || node.quat[3] !== 0)) {
+      hasRotation = true;
+      const q = new THREE.Quaternion(node.quat[1] || 0, node.quat[2] || 0, node.quat[3] || 0, node.quat[0] ?? 1).normalize();
+      const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
+      const me = m4.elements;
+      rotMat = [
+        me[0], me[4], me[8],
+        me[1], me[5], me[9],
+        me[2], me[6], me[10],
+      ];
+    } else if (node.rot && (node.rot[0] !== 0 || node.rot[1] !== 0 || node.rot[2] !== 0)) {
+      hasRotation = true;
+      const euler = new THREE.Euler(node.rot[0] || 0, node.rot[1] || 0, node.rot[2] || 0, 'XYZ');
+      const q = new THREE.Quaternion().setFromEuler(euler);
+      const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
+      const me = m4.elements;
+      rotMat = [
+        me[0], me[4], me[8],
+        me[1], me[5], me[9],
+        me[2], me[6], me[10],
+      ];
+    } else if (node.euler && (node.euler[0] !== 0 || node.euler[1] !== 0 || node.euler[2] !== 0)) {
+      hasRotation = true;
+      const rx = (node.euler[0] * Math.PI) / 180;
+      const ry = (node.euler[1] * Math.PI) / 180;
+      const rz = (node.euler[2] * Math.PI) / 180;
+      const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
+      const q = new THREE.Quaternion().setFromEuler(euler);
+      const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
+      const me = m4.elements;
+      rotMat = [
+        me[0], me[4], me[8],
+        me[1], me[5], me[9],
+        me[2], me[6], me[10],
+      ];
+    }
   }
 
   const gx = geom?.pos?.[0] || 0;
@@ -128,7 +141,7 @@ function getNodeRealWorldBounds(node: SceneNode, parentPos: [number, number, num
     min = [nodeWorldPos[0] + csgB.min[0], nodeWorldPos[1] + csgB.min[1], nodeWorldPos[2] + csgB.min[2]];
     max = [nodeWorldPos[0] + csgB.max[0], nodeWorldPos[1] + csgB.max[1], nodeWorldPos[2] + csgB.max[2]];
   } else {
-    const allGeoms = [...(node.geoms || []), ...resolveCsgGeoms(node, 'render')];
+    const allGeoms = resolveCsgGeoms(node, 'render');
     for (const g of allGeoms) {
       const gTransform = getGeomWorldTransform(node, g, parentPos);
       const gPos = gTransform.pos;
@@ -437,7 +450,7 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
     }
 
     // --- PASS 2: MESH OVERHANG ANALYSIS ---
-    const allGeomsForMesh = [...(node.geoms || []), ...resolveCsgGeoms(node, 'render')];
+    const allGeomsForMesh = resolveCsgGeoms(node, 'render');
     const visitedMeshGeoms = new Set<string>();
 
     for (const g of allGeomsForMesh) {
