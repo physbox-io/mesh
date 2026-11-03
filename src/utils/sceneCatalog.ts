@@ -32,6 +32,8 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   sealed_jar: 'Make it',
   flower_stand: 'Make it',
   pipe_greenhouse: 'Make it',
+  brick_smoker: 'Make it',
+  toy_castle: 'Make it',
   pipe_yard_pub: 'Make it',
   pipe_carport: 'Make it',
   pipe_geodesic_dome: 'Make it',

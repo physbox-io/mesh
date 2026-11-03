@@ -17,6 +17,7 @@ import { megaBustStudioPreset } from './megaBustStudio';
 import { latticeBracketPreset } from './latticeBracket';
 import { oakTreePreset } from './oakTree';
 import { soapDishPreset } from './soapDish';
+import { smokerPreset, toyCastlePreset } from './brickPresets';
 import { shatterPreset } from './shatter';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
@@ -3602,6 +3603,19 @@ export const PRESETS = {
     emoji: '🏗️',
     scene: extrusionFramePreset,
     camera: { position: [0.62, -0.82, 0.55], target: [0, 0, 0.15] } satisfies PresetCamera,
+  },
+  // Laid by Build → Brick from plain shapes (presets/brickPresetShapes.ts).
+  brick_smoker: {
+    name: 'Brick Smoker',
+    emoji: '🔥',
+    scene: smokerPreset,
+    camera: { position: [2.0, -2.6, 1.9], target: [0, 0, 0.8] } satisfies PresetCamera,
+  },
+  toy_castle: {
+    name: 'Toy Brick Castle',
+    emoji: '🏰',
+    scene: toyCastlePreset,
+    camera: { position: [0.62, -0.42, 0.42], target: [0.16, 0.16, 0.1] } satisfies PresetCamera,
   },
   // Conduit frames for the Pipes dialog: struts end to end, which it turns
   // into a stick cut list and the hubs that join them.
