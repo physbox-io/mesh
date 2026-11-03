@@ -46,7 +46,7 @@ export function redraftGarmentsFor(nodes: SceneNode[], form: SceneNode): void {
       const d = n.cloth?.draft;
       if (d && d.fitTo === formName) {
         const keep = n.cloth!;
-        n.cloth = { ...draftGarment(d, form.bodyForm!), sewTime: keep.sewTime, selfCollide: keep.selfCollide, ...(keep.spacing ? { spacing: keep.spacing } : {}) };
+        n.cloth = { ...draftGarment(d, form.bodyForm!), ...(keep.selfCollide !== undefined ? { selfCollide: keep.selfCollide } : {}), ...(keep.spacing ? { spacing: keep.spacing } : {}) };
         n.pos = [...(form.pos ?? [0, 0, 0])];
       }
       if (n.children) visit(n.children);

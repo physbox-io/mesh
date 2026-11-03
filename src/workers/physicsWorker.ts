@@ -91,7 +91,7 @@ import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
-import { applyCloth, clothTieLoads, initClothRuntime, type ClothRuntime } from '../utils/cloth/clothStep';
+import { applyCloth, applyClothStart, clothTieLoads, initClothRuntime, type ClothRuntime } from '../utils/cloth/clothStep';
 import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -4288,6 +4288,8 @@ const doBuild = (
     seedActuatorCtrl(sceneGraph.nodes, newData);
 
     mujoco.mj_forward(newModel, newData);
+    // Cloth starts where its pieces start (on the form), not where they were cut.
+    if (clothRt) applyClothStart(clothRt, mujoco, newModel, newData);
 
     const initVelJoints: { name: string; vel: number[] }[] = [];
     const traverseVel = (nodes: SceneNode[]) => {
@@ -4530,6 +4532,7 @@ const runHeadless = async (
 
     seedActuatorCtrl(sceneGraph.nodes, data);
     mujoco.mj_forward(model, data);
+    if (clothRt) applyClothStart(clothRt, mujoco, model, data);
 
     const initVelJoints: { name: string; vel: number[] }[] = [];
     const traverseVel = (nodes: SceneNode[]) => {

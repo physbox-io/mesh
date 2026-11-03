@@ -18,6 +18,9 @@ import { clothMaterial, DEFAULT_SEW_TIME, meshCloth, pieceArea, stableYoung } fr
 
 export const CLOTH_SEW_PREFIX = 'clothsew_';
 export const CLOTH_FLEX_PREFIX = 'clothflex_';
+/** `clothstart_<flex>`: where each vertex starts, x y z per vertex in the cloth body's frame. */
+export const CLOTH_START_PREFIX = 'clothstart_';
+const START_CHUNK = 300;
 
 /** What the scene's <option> must be once it holds cloth. */
 export const CLOTH_OPTION = {
@@ -86,6 +89,14 @@ export function clothXml(node: SceneNode, bodyName: string, xmlAttr: (s: string)
     const mass = Math.max(1e-3, mat.arealDensity * pieceArea(m));
     const rgba = (p.rgba ?? [0.25, 0.5, 0.85, 1]).join(' ');
     numerics.push({ name: CLOTH_FLEX_PREFIX + name, data: [sewTime, mat.windCd] });
+    if (m.start !== m.pts) {
+      // In chunks, `clothstart_<flex>__<k>`: MuJoCo refuses an attribute with
+      // more than a few hundred numbers in it.
+      const all = m.start.flat();
+      for (let k = 0; k * START_CHUNK < all.length; k++) {
+        numerics.push({ name: `${CLOTH_START_PREFIX}${name}__${k}`, data: all.slice(k * START_CHUNK, (k + 1) * START_CHUNK) });
+      }
+    }
     const radius = Math.min(0.004, mesh.spacing * 0.15);
     return `
     <flexcomp name="${xmlAttr(name)}" type="direct" dim="2" radius="${f(radius)}" mass="${f(mass)}" rgba="${rgba}"

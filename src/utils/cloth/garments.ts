@@ -9,8 +9,8 @@
  * is world +x, the wearer's left (patterns are drawn facing you).
  */
 
-import type { BodyFormMeasurements, ClothEdge, ClothPiece, ClothSeam, ClothSpec, GarmentDraft, GarmentKind, UV } from '../../types/cloth';
-import { bodyLandmarks } from './bodyForm';
+import type { BodyFormMeasurements, ClothEdge, ClothPiece, ClothSeam, ClothSpec, GarmentDraft, GarmentKind, SeamSide, UV } from '../../types/cloth';
+import { bodyFormProfile, bodyLandmarks } from './bodyForm';
 import { polyLen } from './clothMesh';
 
 const bez = (p0: UV, p1: UV, p2: UV, p3: UV, n = 24): UV[] => {
@@ -21,6 +21,47 @@ const bez = (p0: UV, p1: UV, p2: UV, p3: UV, n = 24): UV[] => {
   }
   return out;
 };
+/** A smooth curve through `pts` (Catmull-Rom), `n` points per span: a side seam, not a polyline with corners. */
+function spline(pts: UV[], n = 10): UV[] {
+  if (pts.length < 3) return pts.slice();
+  const P = [pts[0], ...pts, pts[pts.length - 1]];
+  const out: UV[] = [];
+  for (let i = 1; i < P.length - 2; i++) {
+    const [p0, p1, p2, p3] = [P[i - 1], P[i], P[i + 1], P[i + 2]];
+    for (let j = 0; j < n; j++) {
+      const t = j / n, t2 = t * t, t3 = t2 * t;
+      out.push([0, 1].map((k) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3)) as UV);
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+/** The point at height v on a polyline running upward (v increasing). */
+function atHeight(curve: UV[], v: number): UV {
+  for (let i = 1; i < curve.length; i++) {
+    const a = curve[i - 1], b = curve[i];
+    if ((v >= a[1] && v <= b[1]) || (v <= a[1] && v >= b[1])) {
+      const t = (v - a[1]) / (b[1] - a[1] || 1);
+      return [a[0] + (b[0] - a[0]) * t, v];
+    }
+  }
+  return v < curve[0][1] ? curve[0] : curve[curve.length - 1];
+}
+
+/**
+ * A flared hem, curved up toward the side so it meets the side seam square,
+ * as a flared skirt is cut (straight across, its corners would hang as points).
+ * Returns the hem from the centre out, and where the side seam now starts.
+ */
+function curvedHem(hemHalf: number, hemV: number, above: UV): { hem: UV[]; corner: UV } {
+  const tanPhi = Math.max(0, (hemHalf - above[0]) / (above[1] - hemV || 1));
+  const rise = (tanPhi * hemHalf) / 2;
+  const hem: UV[] = [];
+  for (let i = 0; i <= 8; i++) { const u = (hemHalf * i) / 8; hem.push([u, hemV + rise * (u / hemHalf) ** 2]); }
+  return { hem, corner: hem[hem.length - 1] };
+}
+
 const mirror = (pts: UV[]): UV[] => pts.map(([u, v]) => [-u, v] as UV).reverse();
 const edgePts = (edges: ClothEdge[], id: string) => edges.find((e) => e.id === id)!.pts;
 
@@ -38,37 +79,50 @@ interface Side { hemHalf: number; points: UV[] }
  */
 /**
  * A side bust dart: a wedge cut into the side seam at height `v`, `intake`
- * wide, its point at `tip`. Sewing its two legs together shapes the flat piece
+ * wide, pointing to `short` before the bust point `apex`, its point on the
+ * line that halves its mouth so its two legs are the same length. Sewing its two legs together shapes the flat piece
  * over the bust, as a woven bodice needs: without one, a close-fitting dress
  * stood under tension and pulled its side seams 7-11 mm open. A piece with a
  * dart has extra edges, dartLow/dartUp; one with only `notchV` (the back) has
  * its side seam split there too, so the two side seams are sewn notch to notch.
  */
-interface SideDart { v: number; intake: number; tip: UV }
+interface SideDart { v: number; intake: number; apex: UV; short: number }
 
 function bodice(o: { W: number; AH: number; neckHalf: number; neckDepth: number; shoulderX: number; shoulderDrop: number; scoop: number; side: Side; dart?: SideDart; notchV?: number }): ClothEdge[] {
   const { W, AH, side } = o;
   const sp: UV = [o.shoulderX, -o.shoulderDrop], ua: UV = [W, -AH], hps: UV = [o.neckHalf, 0];
-  const hem = side.points[0];
-  const sideR: UV[] = [...side.points, ua];
-  // The point at height v on the side seam's last stretch (waist to underarm).
-  const last = side.points[side.points.length - 1];
-  const onSide = (v: number): UV => { const t = (v - last[1]) / (ua[1] - last[1]); return [last[0] + (ua[0] - last[0]) * t, v]; };
+  // A flared hem curves up to the side; the side seam is a smooth curve from
+  // there through the hip and waist to the underarm.
+  const flared = side.points.length > 1 && side.points[0][0] > side.points[1][0] + 1e-6;
+  const { hem: hemCurve, corner } = flared
+    ? curvedHem(side.points[0][0], side.points[0][1], side.points[1])
+    : { hem: [[0, side.points[0][1]], side.points[0]] as UV[], corner: side.points[0] };
+  const sideR: UV[] = spline([corner, ...side.points.slice(1), ua]);
+  const onSide = (v: number): UV => atHeight(sideR, v);
+  const below = (p: UV) => [...sideR.filter((q) => q[1] < p[1] - 1e-6), p];
+  const aboveP = (p: UV) => [p, ...sideR.filter((q) => q[1] > p[1] + 1e-6)];
   const armR = bez(ua, [W - o.scoop, -AH + 0.02], [sp[0] - 0.012, sp[1] - 0.09], sp);
   const neckR = bez(hps, [o.neckHalf, -o.neckDepth * 0.6], [o.neckHalf * 0.45, -o.neckDepth], [0, -o.neckDepth]);
-  const hemR: UV[] = [[0, hem[1]], hem];
+  const hemR: UV[] = hemCurve;
   let sideEdgesR: ClothEdge[] = [{ id: 'sideR', pts: sideR }];
   if (o.dart) {
     const l1 = onSide(o.dart.v - o.dart.intake / 2), l2 = onSide(o.dart.v + o.dart.intake / 2);
+    // The point on the line square to the mouth through its middle, `short`
+    // before the bust point: both legs the same length.
+    const mid: UV = [(l1[0] + l2[0]) / 2, (l1[1] + l2[1]) / 2];
+    const cu = l2[0] - l1[0], cv = l2[1] - l1[1], cl = Math.hypot(cu, cv) || 1;
+    const inward: UV = [-cv / cl, cu / cl];
+    const len = Math.max(0.03, Math.hypot(o.dart.apex[0] - mid[0], o.dart.apex[1] - mid[1]) - o.dart.short);
+    const tip: UV = [mid[0] + inward[0] * len, mid[1] + inward[1] * len];
     sideEdgesR = [
-      { id: 'sideR', pts: [...side.points, l1] },
-      { id: 'dartLowR', pts: [l1, o.dart.tip] },
-      { id: 'dartUpR', pts: [o.dart.tip, l2] },
-      { id: 'sideUpR', pts: [l2, ua] },
+      { id: 'sideR', pts: below(l1) },
+      { id: 'dartLowR', pts: [l1, tip] },
+      { id: 'dartUpR', pts: [tip, l2] },
+      { id: 'sideUpR', pts: aboveP(l2) },
     ];
   } else if (o.notchV !== undefined) {
     const n = onSide(o.notchV);
-    sideEdgesR = [{ id: 'sideR', pts: [...side.points, n] }, { id: 'sideUpR', pts: [n, ua] }];
+    sideEdgesR = [{ id: 'sideR', pts: below(n) }, { id: 'sideUpR', pts: aboveP(n) }];
   }
   const sideEdgesL = sideEdgesR.slice().reverse().map((e) => ({ id: e.id.replace(/R$/, 'L'), pts: mirror(e.pts) }));
   return [
@@ -137,24 +191,32 @@ export function draftGarment(draft: GarmentDraft, form: BodyFormMeasurements): C
   const sew = (name: string, a: ClothSeam['a'], b: ClothSeam['b']) => seams.push({ name, a, b });
   const rgba = d.rgba;
   const gap = Math.max(L.chestDepth, L.hipDepth) + 0.06;
+  // Each piece is cut flat (its rest shape) and starts wrapped round the
+  // form, row by row at its true width, its side seams already together.
   const flat = (y: number, z: number) => ({ kind: 'plane' as const, origin: [0, y, z], uAxis: [1, 0, 0], vAxis: [0, 0, 1] });
+  const START_GAP = 0.012 * s;
+  const round = (facing: 'front' | 'back', zTop: number, zBottom: number) => ({
+    kind: 'girth' as const, origin: [0, 0, zTop], facing, gap: START_GAP,
+    profile: bodyFormProfile(form, zBottom - 0.04, zTop + 0.04, zTop),
+  });
 
   if (kind === 'skirt') {
     const Ww = (form.waist + ease) / 4, Wh = (form.hip + ease) / 4;
     const toHip = L.waistZ - L.hipZ, len = Math.max(toHip + 0.05, d.length);
     const hemHalf = Wh * d.flare;
-    const sideR: UV[] = [[hemHalf, -len], [Wh, -toHip], [Ww, 0]];
+    const { hem: hemR, corner } = curvedHem(hemHalf, -len, [Wh, -toHip]);
+    const sideR: UV[] = spline([corner, [Wh, -toHip], [Ww, 0]]);
     const edges: ClothEdge[] = [
-      { id: 'hem', pts: [[-hemHalf, -len], [hemHalf, -len]] },
+      { id: 'hem', pts: [...mirror(hemR), ...hemR.slice(1)] },
       { id: 'sideR', pts: sideR },
       { id: 'waist', pts: [[Ww, 0], [-Ww, 0]] },
       { id: 'sideL', pts: mirror(sideR) },
     ];
-    pieces.push({ name: 'front', edges, placement: flat(-gap, L.waistZ), rgba });
-    pieces.push({ name: 'back', edges, placement: flat(gap, L.waistZ), rgba: shade(rgba) });
+    pieces.push({ name: 'front', edges, placement: flat(-gap, L.waistZ), start: round('front', L.waistZ, L.waistZ - len), rgba });
+    pieces.push({ name: 'back', edges, placement: flat(gap, L.waistZ), start: round('back', L.waistZ, L.waistZ - len), rgba: shade(rgba) });
     sew('sideR', [{ piece: 'front', edge: 'sideR' }], [{ piece: 'back', edge: 'sideR' }]);
     sew('sideL', [{ piece: 'front', edge: 'sideL' }], [{ piece: 'back', edge: 'sideL' }]);
-    return { pieces, seams, material: d.material, spacing: 0.04, draft: { ...draft } };
+    return { pieces, seams, material: d.material, spacing: 0.04, sewTime: GARMENT_SEW_TIME, draft: { ...draft } };
   }
 
   // Bodice: a t-shirt is boxy, a dress fitted at the waist and flared below the hip.
@@ -175,21 +237,24 @@ export function draftGarment(draft: GarmentDraft, form: BodyFormMeasurements): C
     W, AH, side,
     neckHalf: L.neckRadius + 0.012 * s,
     shoulderX: form.shoulderWidth / 2 + 0.01 * s,
-    shoulderDrop: 0.035 * s,
+    // The form's own slope, so the shoulder seam lies along its shoulder.
+    shoulderDrop: L.shoulderDrop,
   };
-  // A dress is woven and close fitting, so its front has side bust darts,
-  // 5 cm below the underarm and pointing to 3 cm short of the bust point.
-  // A t-shirt is knit and loose, and has none.
+  // A dress is woven and close fitting, so over a bust its front has side
+  // bust darts, 5 cm below the underarm and pointing to 3 cm short of the bust
+  // point, taking in about as much as the bust stands out. A t-shirt is knit
+  // and loose, and has none.
   let dart: SideDart | undefined;
-  if (kind === 'dress') {
-    const v = -AH - 0.05 * s, apex: UV = [0.09 * s, at(L.bustZ)];
-    const dx = W - apex[0], dy = v - apex[1], dl = Math.hypot(dx, dy);
-    dart = { v, intake: 0.025 * s, tip: [apex[0] + (dx / dl) * 0.03 * s, apex[1] + (dy / dl) * 0.03 * s] };
+  if (kind === 'dress' && L.bustProminence > 0.01) {
+    const v = -AH - 0.05 * s, apex: UV = [L.bustPoint[0], at(L.bustZ)];
+    const intake = Math.min(0.05, Math.max(0.012, 0.7 * L.bustProminence));
+    dart = { v, intake, apex, short: 0.03 * s };
   }
   const front = bodice({ ...common, neckDepth: (kind === 'dress' ? 0.13 : 0.09) * s, scoop: 0.03 * s, dart });
   const back = bodice({ ...common, neckDepth: 0.02 * s, scoop: 0.018 * s, notchV: dart ? dart.v - dart.intake / 2 : undefined });
-  pieces.push({ name: 'front', edges: front, placement: flat(-gap, L.hpsZ), rgba });
-  pieces.push({ name: 'back', edges: back, placement: flat(gap, L.hpsZ), rgba: shade(rgba) });
+  const hemZ = L.hpsZ + side.points[0][1];
+  pieces.push({ name: 'front', edges: front, placement: flat(-gap, L.hpsZ), start: round('front', L.hpsZ, hemZ), rgba });
+  pieces.push({ name: 'back', edges: back, placement: flat(gap, L.hpsZ), start: round('back', L.hpsZ, hemZ), rgba: shade(rgba) });
   sew('shoulderR', [{ piece: 'front', edge: 'shR' }], [{ piece: 'back', edge: 'shR' }]);
   sew('shoulderL', [{ piece: 'front', edge: 'shL' }], [{ piece: 'back', edge: 'shL' }]);
   if (dart) {
@@ -214,10 +279,14 @@ export function draftGarment(draft: GarmentDraft, form: BodyFormMeasurements): C
       const dir = [sideSign * L.armDir[0], 0, L.armDir[2]];
       // Square to the arm and upward: the top of the cap (u = 0) sits on top of the arm.
       const up = [sideSign * -L.armDir[2], 0, L.armDir[0]];
-      const start = 0.15 * s;
-      const o = [sideSign * L.shoulderPoint[0] + start * dir[0], 0, L.shoulderPoint[2] + start * dir[2]];
+      // Rolled round the arm with the top of the cap at the shoulder point.
+      const o = [sideSign * L.shoulderPoint[0] + sl.capHeight * dir[0], 0, L.shoulderPoint[2] + sl.capHeight * dir[2]];
       // Front of the sleeve (u > 0) toward -y on both arms, so it meets the front armhole.
-      pieces.push({ name, edges: sl.edges, rgba, placement: { kind: 'wrap', origin: o, axis: dir.map((x) => -x), ref: up, radius: R, clockwise: sideSign > 0 } });
+      pieces.push({
+        name, edges: sl.edges, rgba,
+        placement: { kind: 'plane', origin: [sideSign * 0.8 * s, 0, L.hpsZ], uAxis: [0, 1, 0], vAxis: [0, 0, 1] },
+        start: { kind: 'wrap', origin: o, axis: dir.map((x) => -x), ref: up, radius: R, clockwise: sideSign > 0 },
+      });
       const tag = sideSign > 0 ? 'R' : 'L';
       // The armhole runs front underarm -> shoulder point -> back underarm, as the cap does.
       sew(`armhole${tag}`,
@@ -233,6 +302,7 @@ export function draftGarment(draft: GarmentDraft, form: BodyFormMeasurements): C
     // A neckband cut short of the neckline, so it pulls the neck in flat,
     // notched where the neckline's four edges meet (the shoulder seams and the
     // centre front) so those land where they should round the band.
+    const neckPath: SeamSide = [{ piece: 'back', edge: 'neckL' }, { piece: 'front', edge: 'neckL', reversed: true }, { piece: 'front', edge: 'neckR', reversed: true }, { piece: 'back', edge: 'neckR' }];
     const neckEdges = [polyLen(edgePts(back, 'neckL')), polyLen(edgePts(front, 'neckL')), polyLen(edgePts(front, 'neckR')), polyLen(edgePts(back, 'neckR'))];
     const neckline = neckEdges.reduce((x, y) => x + y, 0);
     const Lb = neckline * 0.9, Wb = 0.03 * s;
@@ -254,16 +324,22 @@ export function draftGarment(draft: GarmentDraft, form: BodyFormMeasurements): C
         { id: 'top', pts: [[Lb, Wb], [0, Wb]] },
         { id: 'endL', pts: [[0, Wb], [0, 0]] },
       ],
-      // u = 0 at the centre back, running first toward -x.
-      placement: { kind: 'wrap', origin: [0, 0, L.hpsZ], axis: [0, 0, 1], ref: [0, 1, 0], radius: Lb / (2 * Math.PI) },
+      placement: { kind: 'plane', origin: [-Lb / 2, 0.6 * s, L.hpsZ + 0.1], uAxis: [1, 0, 0], vAxis: [0, 0, 1] },
+      // Starts on the neckline it is sewn to, from the centre back round.
+      start: { kind: 'along', path: neckPath, up: [0, 0, 1] },
     });
-    sew('neckline',
-      [{ piece: 'back', edge: 'neckL' }, { piece: 'front', edge: 'neckL', reversed: true }, { piece: 'front', edge: 'neckR', reversed: true }, { piece: 'back', edge: 'neckR' }],
+    sew('neckline', neckPath,
       ids.map((edge) => ({ piece: 'band', edge })));
     sew('bandEnds', [{ piece: 'band', edge: 'endR' }], [{ piece: 'band', edge: 'endL', reversed: true }]);
   }
-  return { pieces, seams, material: d.material, spacing: 0.04, draft: { ...draft } };
+  return { pieces, seams, material: d.material, spacing: 0.04, sewTime: GARMENT_SEW_TIME, draft: { ...draft } };
 }
+
+/**
+ * Seconds to sew a garment that starts on the form: its seams start a
+ * centimetre or two apart, not the width of the room.
+ */
+const GARMENT_SEW_TIME = 0.4;
 
 /** The back a shade darker than the front, so the two read apart. */
 function shade(rgba: number[]): number[] {

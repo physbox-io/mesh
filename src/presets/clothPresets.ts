@@ -10,9 +10,8 @@ import type { ClothEdge, UV } from '../types/cloth';
 import { bodyFormNode, garmentNode } from '../utils/cloth/clothNodes';
 
 function formWearing(garment: 'tshirt' | 'dress'): SceneGraph {
-  const form = bodyFormNode('form', 'form', garment === 'dress'
-    ? { chest: 0.92, waist: 0.72, hip: 0.98, shoulderWidth: 0.39, neck: 0.33, height: 1.68, upperArm: 0.27 }
-    : {});
+  // A man's t-shirt on a male form, a dress on a female one.
+  const form = bodyFormNode('form', 'form', { figure: garment === 'dress' ? 'female' : 'male' });
   const worn = garmentNode(garment, garment, { garment }, form);
   return {
     nodes: [form, worn],

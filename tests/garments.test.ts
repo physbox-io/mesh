@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import load_mujoco from '@mujoco/mujoco';
 import { compileToMJCF } from '../src/utils/mjcf';
-import { applyCloth, initClothRuntime } from '../src/utils/cloth/clothStep';
+import { applyCloth, applyClothStart, initClothRuntime } from '../src/utils/cloth/clothStep';
 import { meshCloth } from '../src/utils/cloth/clothMesh';
 import { bodyFormNode, garmentNode } from '../src/utils/cloth/clothNodes';
 import { bodyLandmarks, ellipseHalfWidth } from '../src/utils/cloth/bodyForm';
@@ -30,17 +30,42 @@ describe('body form', () => {
     expect(widest.size[0]).toBeCloseTo(ellipseHalfWidth(1.1, 0.7), 2);
     expect(Math.abs(widest.pos![2] - bodyLandmarks(form.bodyForm!).bustZ)).toBeLessThan(0.05);
   });
+
+  it("measures a female form's bust round the bust, as a tape would", () => {
+    const form = bodyFormNode('f', 'form', { figure: 'female', chest: 0.94, underbust: 0.78 });
+    const z = bodyLandmarks(form.bodyForm!).bustZ;
+    // Every geom cut at the bust line, sampled, then the convex hull's perimeter.
+    const pts: [number, number][] = [];
+    for (const g of form.geoms!) {
+      if (g.type !== 'ellipsoid' || !/torso|bust/.test(g.name)) continue;
+      const [a, b, c] = g.size, p = g.pos!, t = (z - p[2]) / c;
+      if (Math.abs(t) >= 1) continue;
+      const k = Math.sqrt(1 - t * t);
+      for (let i = 0; i < 90; i++) { const th = (2 * Math.PI * i) / 90; pts.push([p[0] + a * k * Math.cos(th), p[1] + b * k * Math.sin(th)]); }
+    }
+    pts.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+    const cross = (o: number[], a: number[], b: number[]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo: number[][] = [], hi: number[][] = [];
+    for (const p of pts) { while (lo.length > 1 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+    for (const p of pts.slice().reverse()) { while (hi.length > 1 && cross(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); }
+    const hull = [...lo.slice(0, -1), ...hi.slice(0, -1)];
+    let girth = 0;
+    for (let i = 0; i < hull.length; i++) girth += Math.hypot(hull[i][0] - hull[(i + 1) % hull.length][0], hull[i][1] - hull[(i + 1) % hull.length][1]);
+    expect(girth).toBeCloseTo(0.94, 2);
+    expect(bodyLandmarks(form.bodyForm!).bustProminence).toBeGreaterThan(0.02);
+  });
 });
 
-const PRESET_DRESS_FORM = { chest: 0.92, waist: 0.72, hip: 0.98, shoulderWidth: 0.39, neck: 0.33, height: 1.68, upperArm: 0.27 };
+const FEMALE = { figure: 'female' as const };
 const cases: [string, GarmentKind, Partial<BodyFormMeasurements>, Partial<GarmentDraft>?][] = [
-  ['t-shirt', 'tshirt', {}],
-  ['t-shirt on a bigger form, arms higher', 'tshirt', { armAngle: 40, chest: 1.1, waist: 0.95 }],
-  ['dress', 'dress', {}],
-  ['dress on the preset form', 'dress', PRESET_DRESS_FORM],
-  ['skirt', 'skirt', {}],
-  ['dress with sleeves', 'dress', {}, { sleeve: 0.2 }],
-  ['knit dress', 'dress', {}, { material: 'jersey' }],
+  ['t-shirt on a male form', 'tshirt', {}],
+  ['t-shirt on a bigger male form, arms higher', 'tshirt', { armAngle: 40, chest: 1.1, waist: 0.95 }],
+  ['t-shirt on a female form', 'tshirt', FEMALE],
+  ['dress on a female form', 'dress', FEMALE],
+  ['dress on a fuller female form', 'dress', { ...FEMALE, chest: 1.02, underbust: 0.84, waist: 0.82, hip: 1.08 }],
+  ['dress with sleeves', 'dress', FEMALE, { sleeve: 0.2 }],
+  ['knit dress', 'dress', FEMALE, { material: 'jersey' }],
+  ['skirt', 'skirt', FEMALE],
 ];
 
 describe.each(cases)('%s', (_label, garment, measurements, options = {}) => {
@@ -51,6 +76,7 @@ describe.each(cases)('%s', (_label, garment, measurements, options = {}) => {
     const data = new mj.MjData(model);
     mj.mj_forward(model, data);
     const rt = initClothRuntime(mj, model)!;
+    applyClothStart(rt, mj, model, data);
     let before: Float64Array | null = null;
     while (data.time < 6) {
       if (!before && data.time >= 5.5) before = Float64Array.from(data.flexvert_xpos);

@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import load_mujoco from '@mujoco/mujoco';
 import { compileToMJCF } from '../src/utils/mjcf';
-import { applyCloth, clothTieLoads, initClothRuntime } from '../src/utils/cloth/clothStep';
+import { applyCloth, applyClothStart, clothTieLoads, initClothRuntime } from '../src/utils/cloth/clothStep';
 import { meshCloth } from '../src/utils/cloth/clothMesh';
 import { contactBody } from '../src/utils/contactBodies';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
@@ -29,6 +29,7 @@ function run(scene: SceneGraph, seconds: number, wind: [number, number, number] 
   mj.mj_forward(model, data);
   const rt = initClothRuntime(mj, model)!;
   expect(rt).not.toBeNull();
+  applyClothStart(rt, mj, model, data);
   const t0 = performance.now();
   while (data.time < seconds) {
     data.xfrc_applied.fill(0);

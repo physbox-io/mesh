@@ -29,12 +29,53 @@ export interface ClothEdge {
  */
 export type ClothPlacement =
   | { kind: 'plane'; origin?: number[]; uAxis?: number[]; vAxis?: number[] }
-  | { kind: 'wrap'; origin: number[]; axis: number[]; ref: number[]; radius: number; taper?: number; startU?: number; clockwise?: boolean };
+  | { kind: 'wrap'; origin: number[]; axis: number[]; ref: number[]; radius: number; taper?: number; startU?: number; clockwise?: boolean }
+  | GirthPlacement
+  | AlongPlacement;
+
+/**
+ * Round a body: each row of the piece (each v) wrapped round an ellipse
+ * centred on the body's axis, by arc length from the centre of the piece, so
+ * the row keeps its length. `profile` gives the body's cross-section by
+ * height (v = 0 at `origin`, up the z axis): half-width, half-depth, and how
+ * far its centre is from the axis toward +y. Each row's ellipse is that
+ * cross-section stood off by `gap`, and enlarged until the row reaches round
+ * to its side (+-x), so a front and a back placed this way meet at their
+ * side seams. `facing` -y puts the piece's centre at the front.
+ */
+export interface GirthPlacement {
+  kind: 'girth';
+  origin: number[];
+  profile: { v: number; halfWidth: number; halfDepth: number; centreY: number }[];
+  facing: 'front' | 'back';
+  gap: number;
+}
+
+/**
+ * Along edges of pieces already placed: u runs along their 3D path (by
+ * fraction of its length, from the first edge's start), v along `up`. How a
+ * neckband starts on the neckline it will be sewn to.
+ */
+export interface AlongPlacement {
+  kind: 'along';
+  path: SeamSide;
+  up: number[];
+}
 
 export interface ClothPiece {
   name: string;
   edges: ClothEdge[];
+  /**
+   * Where the piece is cut: its rest shape, flat as the pattern was, which
+   * is what its stretch and bend are measured against.
+   */
   placement?: ClothPlacement;
+  /**
+   * Where it starts, if not there: wrapped round the form, say, with its
+   * seams almost met, so it is sewn in a moment instead of pulled across the
+   * room. Rest shape and lengths still come from `placement`.
+   */
+  start?: ClothPlacement;
   rgba?: number[];
   /** Mesh finer or coarser than the cloth's spacing, e.g. 0.5 for a narrow band. */
   spacingScale?: number;
@@ -138,9 +179,16 @@ export interface GarmentDraft {
  * A dress form's measurements, metres. Circumferences are round the body,
  * as a tape measures them; heights are from the floor.
  */
+export type BodyFigure = 'male' | 'female';
+
 export interface BodyFormMeasurements {
+  /** The figure's build: where the waist and hips sit, the bust, the set of the shoulders. */
+  figure: BodyFigure;
   height: number;
+  /** Round the fullest part of the chest (the bust, on a female figure). */
   chest: number;
+  /** Round the ribcage just under the bust; equal to the chest for no bust. */
+  underbust: number;
   waist: number;
   hip: number;
   neck: number;

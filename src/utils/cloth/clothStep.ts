@@ -13,7 +13,7 @@
  * Pure: no worker globals, so tests step a model the same way.
  */
 
-import { CLOTH_FLEX_PREFIX, CLOTH_SEW_PREFIX } from './clothMjcf';
+import { CLOTH_FLEX_PREFIX, CLOTH_SEW_PREFIX, CLOTH_START_PREFIX } from './clothMjcf';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- the MuJoCo wasm bindings are untyped here */
 type Mj = any;
@@ -30,6 +30,8 @@ interface FlexRt {
   elems: Int32Array;
   floatSeconds: number;
   cd: number;
+  /** Where each vertex starts, cloth body frame, when that is not its rest place. */
+  start?: Float64Array;
 }
 
 export interface ClothRuntime {
@@ -52,6 +54,7 @@ export function initClothRuntime(mujoco: Mj, model: Model): ClothRuntime | null 
   const nAdr = model.numeric_adr, nData = model.numeric_data;
   const sews: Sew[] = [];
   const flexByName = new Map<string, { seconds: number; cd: number }>();
+  const startChunks = new Map<string, number[][]>();
   for (let i = 0; i < model.nnumeric; i++) {
     const name: string = mujoco.mj_id2name(model, NUMERIC, i) ?? '';
     const a = nAdr[i];
@@ -60,21 +63,30 @@ export function initClothRuntime(mujoco: Mj, model: Model): ClothRuntime | null 
       if (eq < 0) continue;
       const o = eqStride * eq + 3;
       sews.push({ eq, from: [eqData[o], eqData[o + 1], eqData[o + 2]], to: [nData[a], nData[a + 1], nData[a + 2]], seconds: Math.max(1e-6, nData[a + 3]) });
+    } else if (name.startsWith(CLOTH_START_PREFIX)) {
+      // Chunked: clothstart_<flex>__<k>.
+      const rest = name.slice(CLOTH_START_PREFIX.length), cut = rest.lastIndexOf('__');
+      const flex = rest.slice(0, cut), k = Number(rest.slice(cut + 2));
+      (startChunks.get(flex) ?? startChunks.set(flex, []).get(flex)!)[k] = Array.from(nData.slice(a, a + model.numeric_size[i]) as ArrayLike<number>);
     } else if (name.startsWith(CLOTH_FLEX_PREFIX)) {
       flexByName.set(name.slice(CLOTH_FLEX_PREFIX.length), { seconds: nData[a], cd: nData[a + 1] });
     }
   }
+  const startByName = new Map<string, Float64Array>();
+  for (const [flex, chunks] of startChunks) startByName.set(flex, Float64Array.from(chunks.flat()));
   const flexes: FlexRt[] = [];
   const vadr = model.flex_vertadr, vnum = model.flex_vertnum, vbody = model.flex_vertbodyid;
   const eadr = model.flex_elemdataadr, enumA = model.flex_elemnum, elem = model.flex_elem, dim = model.flex_dim;
   const bmass = model.body_mass;
   for (let fi = 0; fi < model.nflex; fi++) {
-    const info = flexByName.get(mujoco.mj_id2name(model, FLEX, fi) ?? '');
+    const flexName = mujoco.mj_id2name(model, FLEX, fi) ?? '';
+    const info = flexByName.get(flexName);
     if (!info || dim[fi] !== 2) continue;
     const n = vnum[fi], bodies = new Int32Array(n), mass = new Float64Array(n);
     for (let v = 0; v < n; v++) { bodies[v] = vbody[vadr[fi] + v]; mass[v] = bmass[bodies[v]]; }
     const elems = Int32Array.from(elem.slice(eadr[fi], eadr[fi] + 3 * enumA[fi]));
-    flexes.push({ vadr: vadr[fi], vnum: n, bodies, mass, elems, floatSeconds: info.seconds, cd: info.cd });
+    const start = startByName.get(flexName);
+    flexes.push({ vadr: vadr[fi], vnum: n, bodies, mass, elems, floatSeconds: info.seconds, cd: info.cd, ...(start && start.length === 3 * n ? { start } : {}) });
   }
   if (!sews.length && !flexes.length) return null;
   const ties: ClothRuntime['ties'] = [];
@@ -174,6 +186,45 @@ export function applyCloth(rt: ClothRuntime, model: Model, data: Data, wind: [nu
   if (!rt.prev || rt.prev.length !== pos.length) rt.prev = new Float64Array(pos.length);
   rt.prev.set(pos);
   rt.prevTime = t;
+}
+
+/**
+ * Puts each cloth vertex where its piece starts (on the form, say) rather
+ * than where it was cut, and aims every seam and tie from there. Call once on
+ * a fresh start, after mj_forward; it forwards again.
+ *
+ * A flex vertex rests at its body's position (the flat pattern) and moves on
+ * three slide joints, so starting it elsewhere is only qpos. A connect is
+ * compiled as satisfied at the rest places, so each seam's starting anchor is
+ * taken again from where its two points now are: the seam then closes from
+ * the small gap it starts with, not from the width of the cutting table.
+ */
+export function applyClothStart(rt: ClothRuntime, mujoco: Mj, model: Model, data: Data): void {
+  let moved = false;
+  const qpos = data.qpos, bpos = model.body_pos, jadr = model.body_jntadr, jnum = model.body_jntnum;
+  const qadr = model.jnt_qposadr, axis = model.jnt_axis;
+  for (const f of rt.flexes) {
+    if (!f.start) continue;
+    moved = true;
+    for (let v = 0; v < f.vnum; v++) {
+      const b = f.bodies[v];
+      const dx = f.start[3 * v] - bpos[3 * b], dy = f.start[3 * v + 1] - bpos[3 * b + 1], dz = f.start[3 * v + 2] - bpos[3 * b + 2];
+      for (let j = jadr[b]; j < jadr[b] + jnum[b]; j++) qpos[qadr[j]] = dx * axis[3 * j] + dy * axis[3 * j + 1] + dz * axis[3 * j + 2];
+    }
+  }
+  if (!moved) return;
+  mujoco.mj_forward(model, data);
+  const xpos = data.xpos, xmat = data.xmat, o1 = model.eq_obj1id, o2 = model.eq_obj2id, eqData = model.eq_data;
+  for (const s of rt.sews) {
+    const b1 = o1[s.eq], b2 = o2[s.eq];
+    const d = [0, 1, 2].map((k) => xpos[3 * b1 + k] - xpos[3 * b2 + k]);
+    // Into body2's frame: R^T d, xmat row-major.
+    const from: [number, number, number] = [0, 1, 2].map((c) => d[0] * xmat[9 * b2 + c] + d[1] * xmat[9 * b2 + 3 + c] + d[2] * xmat[9 * b2 + 6 + c]) as [number, number, number];
+    s.from = from;
+    const o = rt.eqStride * s.eq + 3;
+    eqData[o] = from[0]; eqData[o + 1] = from[1]; eqData[o + 2] = from[2];
+  }
+  mujoco.mj_forward(model, data);
 }
 
 /**

@@ -8,7 +8,7 @@
 
 import { delaunay } from './delaunay';
 import type {
-  ClothEdge, ClothMaterial, ClothMaterialName, ClothPiece, ClothPlacement, ClothSpec, SeamSide, UV,
+  AlongPlacement, ClothEdge, ClothMaterial, ClothMaterialName, ClothPiece, ClothPlacement, ClothSpec, GirthPlacement, SeamSide, UV,
 } from '../../types/cloth';
 
 /*
@@ -105,8 +105,10 @@ const distToPoly = (poly: UV[], [x, y]: UV) => {
 export interface PieceMesh {
   /** Pattern-space points; the outline's come first, in order. */
   uv: UV[];
-  /** Placed points, body frame. */
+  /** Placed points, body frame: the rest shape. */
   pts: number[][];
+  /** Where each point starts, body frame (the piece's `start`, else `pts`). */
+  start: number[][];
   /** Triangles, wound counter-clockwise in pattern space. */
   tris: number[];
   /** Point indices along each edge, first to last; the last is the next edge's first. */
@@ -160,7 +162,75 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
 const norm = (v: number[]) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
 const cross3 = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 
-export function placer(p: ClothPlacement | undefined): (q: UV) => number[] {
+/** Half the u-extent of an outline's row at height v (its widest point either side of u = 0). */
+function rowHalfWidth(outline: UV[], v: number): number {
+  let h = 0;
+  for (let i = 0, j = outline.length - 1; i < outline.length; j = i++) {
+    const [ui, vi] = outline[i], [uj, vj] = outline[j];
+    if ((vi > v) !== (vj > v)) h = Math.max(h, Math.abs(ui + ((v - vi) * (uj - ui)) / (vj - vi)));
+  }
+  return h;
+}
+
+/** Arc length round an ellipse (half-axes a, b) from its front point, tabulated against angle. */
+function ellipseArc(a: number, b: number, n = 96) {
+  const phi: number[] = [0], len: number[] = [0];
+  for (let i = 1; i <= n; i++) {
+    const t = (Math.PI * i) / n, t0 = (Math.PI * (i - 1)) / n;
+    phi.push(t);
+    len.push(len[i - 1] + Math.hypot(a * (Math.sin(t) - Math.sin(t0)), b * (Math.cos(t) - Math.cos(t0))));
+  }
+  const quarter = len[n >> 1];
+  /** The angle at which arc length `s` is reached (clamped to the back point). */
+  const angle = (s: number) => {
+    if (s >= len[n]) return Math.PI;
+    let i = 1;
+    while (len[i] < s) i++;
+    const f = (s - len[i - 1]) / (len[i] - len[i - 1] || 1);
+    return phi[i - 1] + f * (phi[i] - phi[i - 1]);
+  };
+  return { quarter, angle };
+}
+
+function girthPlacer(p: GirthPlacement, outline: UV[]): (q: UV) => number[] {
+  const prof = p.profile.slice().sort((x, y) => x.v - y.v);
+  if (!prof.length) throw new Error('a girth placement needs a profile');
+  const at = (v: number) => {
+    if (v <= prof[0].v) return prof[0];
+    for (let i = 1; i < prof.length; i++) {
+      if (v <= prof[i].v) {
+        const a = prof[i - 1], b = prof[i], t = (v - a.v) / (b.v - a.v || 1);
+        return { v, halfWidth: a.halfWidth + (b.halfWidth - a.halfWidth) * t, halfDepth: a.halfDepth + (b.halfDepth - a.halfDepth) * t, centreY: a.centreY + (b.centreY - a.centreY) * t };
+      }
+    }
+    return prof[prof.length - 1];
+  };
+  const rows = new Map<number, { A: number; B: number; cy: number; angle: (s: number) => number }>();
+  const row = (v: number) => {
+    const key = Math.round(v * 1e4);
+    let r = rows.get(key);
+    if (!r) {
+      const c = at(v), a0 = c.halfWidth + p.gap, b0 = Math.max(1e-3, c.halfDepth + p.gap);
+      // Enlarged until the row reaches the side: then front and back, each
+      // wrapped the same way, start with their side seams together. A row a
+      // little shorter than the body (a close fit) may tuck in slightly.
+      const k = Math.max(0.9, rowHalfWidth(outline, v) / ellipseArc(a0, b0).quarter);
+      const A = a0 * k, B = b0 * k;
+      r = { A, B, cy: c.centreY, angle: ellipseArc(A, B).angle };
+      rows.set(key, r);
+    }
+    return r;
+  };
+  const sy = p.facing === 'front' ? -1 : 1;
+  return ([u, v]) => {
+    const r = row(v), phi = r.angle(Math.abs(u));
+    return [p.origin[0] + Math.sign(u) * r.A * Math.sin(phi), p.origin[1] + r.cy + sy * r.B * Math.cos(phi), p.origin[2] + v];
+  };
+}
+
+export function placer(p: ClothPlacement | undefined, outline: UV[] = []): (q: UV) => number[] {
+  if (p?.kind === 'girth') return girthPlacer(p, outline);
+  if (p?.kind === 'along') throw new Error('an along placement is placed after the pieces it follows');
   if (!p || p.kind === 'plane') {
     const o = p?.origin ?? [0, 0, 0], U = p?.uAxis ?? [1, 0, 0], V = p?.vAxis ?? [0, 1, 0];
     return ([u, v]) => [0, 1, 2].map((k) => o[k] + u * U[k] + v * V[k]);
@@ -281,8 +351,14 @@ export function meshCloth(spec: ClothSpec): ClothMesh {
   for (const p of spec.pieces) {
     if (pieces[p.name]) throw new Error(`two cloth pieces are called "${p.name}"`);
     const m = meshOutline(p.edges, spacing * (p.spacingScale ?? 1), counts[p.name]);
-    const place = placer(p.placement);
-    pieces[p.name] = { ...m, pts: m.uv.map(place) };
+    const outline = p.edges.flatMap((e) => e.pts.slice(0, -1));
+    const pts = m.uv.map(placer(p.placement, outline));
+    const start = p.start && p.start.kind !== 'along' ? m.uv.map(placer(p.start, outline)) : pts;
+    pieces[p.name] = { ...m, pts, start };
+  }
+  // Then whatever starts along the others, now they are placed.
+  for (const p of spec.pieces) {
+    if (p.start?.kind === 'along') pieces[p.name].start = placeAlong(p.start, pieces[p.name], pieces);
   }
   const stitches: ClothMesh['stitches'] = [];
   (spec.seams ?? []).forEach((s, seam) => {
@@ -326,6 +402,30 @@ export function meshCloth(spec: ClothSpec): ClothMesh {
   if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value as string);
   cache.set(key, out);
   return out;
+}
+
+/** A piece's start along the 3D path of others' edges: u by fraction of its extent, v along `up`. */
+function placeAlong(p: AlongPlacement, m: PieceMesh, pieces: Record<string, PieceMesh>): number[][] {
+  const path: number[][] = [];
+  for (const { piece, edge, reversed } of p.path) {
+    const pm = pieces[piece];
+    const ev = pm?.edgeVerts[edge];
+    if (!ev) throw new Error(`along names edge "${edge}" of "${piece}", which is not there`);
+    for (const i of reversed ? ev.slice().reverse() : ev) path.push(pm.start[i]);
+  }
+  const cum = [0];
+  for (let i = 1; i < path.length; i++) cum.push(cum[i - 1] + Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1], path[i][2] - path[i - 1][2]));
+  const total = cum[cum.length - 1] || 1;
+  let uMin = Infinity, uMax = -Infinity, vMin = Infinity;
+  for (const [u, v] of m.uv) { uMin = Math.min(uMin, u); uMax = Math.max(uMax, u); vMin = Math.min(vMin, v); }
+  const up = norm(p.up);
+  return m.uv.map(([u, v]) => {
+    const s = ((u - uMin) / (uMax - uMin || 1)) * total;
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < s) i++;
+    const f = (s - cum[i - 1]) / (cum[i] - cum[i - 1] || 1);
+    return [0, 1, 2].map((k) => path[i - 1][k] + (path[i][k] - path[i - 1][k]) * f + (v - vMin) * up[k]);
+  });
 }
 
 /** Fabric area of one piece, m^2, measured flat. */
