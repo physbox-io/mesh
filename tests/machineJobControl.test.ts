@@ -1139,3 +1139,43 @@ describe('parking at a programmed pause', () => {
   });
 });
 
+/*
+ * The moment between Start and the first line. `starting` covers it in
+ * `startJob` and `resumeFromLine` but not in `runJob`, so a second run - a
+ * double click, or an agent's run beside the operator's - overwrote the
+ * archive name and the setup of the job that was starting; and the guide spot
+ * could be lit into it, after the start had already put it out.
+ */
+describe('the moment a job is starting', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+  const mgr = () => webSerialManager as unknown as {
+    state: Record<string, unknown>;
+    jobContext: { name?: string };
+  };
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+  });
+  afterEach(async () => {
+    await webSerialManager.cancelJob();
+    webSerialManager.clearResumePoint();
+    fake.detach();
+  });
+
+  it('refuses a second run without touching the first', async () => {
+    mgr().state.guideSpot = true; // holds the start open while the beam goes out
+    await webSerialManager.runJob(JOB, { name: 'first' });
+    await webSerialManager.runJob('G21\nG90\nG1 X5 F600\n', { name: 'second' });
+    expect(webSerialManager.getState().lastError).toMatch(/already running/);
+    expect(mgr().jobContext.name).toBe('first');
+  });
+
+  it('will not light the guide spot into it', async () => {
+    mgr().state.guideSpot = true;
+    await webSerialManager.runJob(JOB, { name: 'first' });
+    await webSerialManager.guideSpotOn(10);
+    expect(webSerialManager.getState().guideSpot).toBe(false);
+    expect(fake.lines().some((l) => /^M3 S/.test(l))).toBe(false);
+  });
+});
+

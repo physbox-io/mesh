@@ -1403,8 +1403,10 @@ class WebSerialManager extends GrblMachine<MachineState> {
     // Not over the top of one already in flight: a new stream resets the byte
     // count while the old program's lines are still in GRBL's buffer, which
     // over MCP put 222 bytes into its 128-byte receive buffer. Checked before
-    // the context below, which belongs to the job still running.
-    if (this.isJobRunning || this.isPaused) {
+    // the context below, which belongs to the job still running. Nor while one
+    // is starting: the package marks it running only once it streams, and a
+    // second run in that second overwrote the first's name and setup.
+    if (this.isJobRunning || this.isPaused || this.starting) {
       this.updateState({ lastError: 'A job is already running or paused. Cancel it before starting another.' });
       return null;
     }
@@ -2760,7 +2762,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
     }
     // Firing into a running job would fight the program's own S words, and the
     // spot would be indistinguishable from the cut anyway.
-    if (this.isJobRunning) {
+    // Starting counts: the start has already put the spot out, so one lit now
+    // would stay lit, with `$32` off, for the whole job.
+    if (this.isJobRunning || this.starting) {
       this.updateState({ lastError: 'Cannot light the guide spot while a job is running.' });
       return;
     }
