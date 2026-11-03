@@ -3892,6 +3892,26 @@ const flexInfo = (m: MjModel) => {
   return out;
 };
 
+/**
+ * Each cloth stitch as the pair of flex vertices it joins (indices into
+ * flexvert_xpos), for the viewport to draw them as one point. Physically a
+ * stitch joins them; what is left between them is the solver's tolerance,
+ * and drawn apart it showed as a slit along every seam.
+ */
+const clothStitchPairs = (m: MjModel): number[] => {
+  const vertOfBody = new Map<number, number>();
+  const vb = m.flex_vertbodyid as ArrayLike<number>;
+  for (let v = 0; v < (m.nflexvert ?? 0); v++) vertOfBody.set(vb[v], v);
+  const out: number[] = [];
+  for (let e = 0; e < m.neq; e++) {
+    const name = mujoco!.mj_id2name(m, mujoco!.mjtObj.mjOBJ_EQUALITY.value, e) ?? '';
+    if (!name.startsWith('cloth_') || !name.includes('_stitch')) continue;
+    const a = vertOfBody.get(m.eq_obj1id[e]), b = vertOfBody.get(m.eq_obj2id[e]);
+    if (a !== undefined && b !== undefined) out.push(a, b);
+  }
+  return out;
+};
+
 const stepTick = (delta: number) => {
   if (!isPlaying || !model || !data || !mujoco) return;
   if (holdUntil) {
@@ -4359,6 +4379,7 @@ const doBuild = (
     jnt_dofadr: Array.from(newModel.jnt_dofadr as ArrayLike<number>),
     idMaps: buildIdMaps(),
     flexes: flexInfo(newModel),
+    clothStitches: clothStitchPairs(newModel),
     isShared: isSharedSupported,
     ...snapshot(),
   };

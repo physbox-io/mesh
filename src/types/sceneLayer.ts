@@ -43,6 +43,8 @@ export interface ModelMirror {
   _idMaps?: IdMaps;
   /** Cloth pieces, for ClothLayer (utils/cloth). */
   flexes?: FlexInfo[];
+  /** Cloth stitches as pairs of flexvert_xpos indices. */
+  clothStitches?: number[];
 }
 
 /** The per-frame state, mutated in place by the worker's FRAME messages. */

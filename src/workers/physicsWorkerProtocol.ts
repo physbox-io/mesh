@@ -111,6 +111,8 @@ export interface BuiltResult extends Partial<SimBuffers> {
   jnt_qposadr?: number[]; jnt_dofadr?: number[];
   idMaps?: IdMaps;
   flexes?: FlexInfo[];
+  /** Cloth stitches as pairs of flexvert_xpos indices, drawn as one point. */
+  clothStitches?: number[];
   time?: number;
   isShared?: boolean;
   /** As on FrameSnapshot — a build spreads one in, so it carries the figure too. */

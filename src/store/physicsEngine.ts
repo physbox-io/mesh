@@ -184,6 +184,7 @@ export const buildModelMirror = (built: BuiltResult): ModelMirror => ({
   jnt_dofadr: built.jnt_dofadr,
   _idMaps: built.idMaps,
   flexes: built.flexes,
+  clothStitches: built.clothStitches,
 });
 
 // A stable object whose typed-array contents get mutated in place on every

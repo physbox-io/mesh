@@ -30,7 +30,16 @@ function clothNodes(nodes: SceneNode[] | undefined, out = new Map<string, SceneN
   return out;
 }
 
-function ClothPiece({ flex, node, selected, data }: { flex: FlexInfo; node: SceneNode | undefined; selected: boolean; data: DataMirror }) {
+function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; node: SceneNode | undefined; selected: boolean; data: DataMirror; partners: Map<number, number[]> }) {
+  // This piece's stitched vertices: local index, and every vertex it is sewn to.
+  const sewn = useMemo(() => {
+    const out: [number, number[]][] = [];
+    for (let v = 0; v < flex.vertnum; v++) {
+      const p = partners.get(flex.vertadr + v);
+      if (p) out.push([v, p]);
+    }
+    return out;
+  }, [flex, partners]);
   const geometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * flex.vertnum), 3));
@@ -56,6 +65,14 @@ function ClothPiece({ flex, node, selected, data }: { flex: FlexInfo; node: Scen
     const arr = pos.array as Float32Array;
     const o = 3 * flex.vertadr;
     for (let i = 0; i < 3 * flex.vertnum; i++) arr[i] = src[o + i];
+    // A stitched vertex is drawn where it and its partners meet.
+    for (const [v, ps] of sewn) {
+      for (let k = 0; k < 3; k++) {
+        let sum = src[o + 3 * v + k];
+        for (const q of ps) sum += src[3 * q + k];
+        arr[3 * v + k] = sum / (ps.length + 1);
+      }
+    }
     pos.needsUpdate = true;
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
@@ -83,6 +100,13 @@ export function ClothLayer({ model, data, sceneGraph }: Props) {
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   const hiddenNodeIds = useStore((s) => s.hiddenNodeIds);
   const byName = useMemo(() => clothNodes(sceneGraph?.nodes), [sceneGraph]);
+  const stitches = model?.clothStitches;
+  const partners = useMemo(() => {
+    const m = new Map<number, number[]>();
+    const add = (a: number, b: number) => { const l = m.get(a); if (l) l.push(b); else m.set(a, [b]); };
+    for (let i = 0; i + 1 < (stitches?.length ?? 0); i += 2) { add(stitches![i], stitches![i + 1]); add(stitches![i + 1], stitches![i]); }
+    return m;
+  }, [stitches]);
   const flexes = model?.flexes;
   if (!flexes?.length || !data) return null;
   const hidden = new Set(hiddenNodeIds);
@@ -91,7 +115,7 @@ export function ClothLayer({ model, data, sceneGraph }: Props) {
       {flexes.map((flex) => {
         const node = byName.get(flex.name.slice(0, flex.name.lastIndexOf('__')));
         if (node && hidden.has(node.id)) return null;
-        return <ClothPiece key={flex.name} flex={flex} node={node} selected={!!node && node.id === selectedNodeId} data={data} />;
+        return <ClothPiece key={flex.name} flex={flex} node={node} selected={!!node && node.id === selectedNodeId} data={data} partners={partners} />;
       })}
     </>
   );

@@ -61,9 +61,9 @@ export const polyLen = (pts: UV[]) =>
   pts.reduce((s, p, i) => (i ? s + Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) : 0), 0);
 
 /** `n` equal steps along a polyline, both ends included. */
-function resample(pts: UV[], step: number): UV[] {
+function resample(pts: UV[], step: number, count?: number): UV[] {
   const L = polyLen(pts);
-  const n = Math.max(1, Math.round(L / step));
+  const n = count ?? Math.max(1, Math.round(L / step));
   const out: UV[] = [];
   let seg = 0, acc = 0;
   for (let i = 0; i <= n; i++) {
@@ -114,13 +114,13 @@ export interface PieceMesh {
 }
 
 /** Boundary sampled at `step`, interior a triangular lattice, Delaunay, clipped to the outline. */
-export function meshOutline(edges: ClothEdge[], step: number): Omit<PieceMesh, 'pts'> {
+export function meshOutline(edges: ClothEdge[], step: number, counts: Record<string, number> = {}): Omit<PieceMesh, 'pts'> {
   if (edges.length === 0) throw new Error('a cloth piece needs at least one edge');
   const uv: UV[] = [];
   const ids: number[][] = [];
   for (const e of edges) {
     if (e.pts.length < 2) throw new Error(`cloth edge "${e.id}" needs at least two points`);
-    const r = resample(e.pts, step);
+    const r = resample(e.pts, step, counts[e.id]);
     const list: number[] = [];
     for (let i = 0; i < r.length - 1; i++) { list.push(uv.length); uv.push(r[i]); }
     list.push(-1); // the next edge's first point
@@ -237,6 +237,36 @@ function pairChains(a: ChainPoint[], b: ChainPoint[]): [ChainPoint, ChainPoint][
   return out;
 }
 
+/**
+ * Segment counts for edges sewn edge to edge at nearly the same length (within
+ * 10%): both sides of such a pair get the same number, so every point has a
+ * partner. Resampled independently, a dart's two legs came out at 5 and 4
+ * points, and the one left over puckered open. Edges sewn at different
+ * lengths on purpose (a sleeve cap eased into its armhole) keep theirs.
+ */
+function matchedCounts(spec: ClothSpec, spacing: number): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  const piece = (name: string) => spec.pieces.find((p) => p.name === name);
+  const len = (side: SeamSide[number]) => {
+    const e = piece(side.piece)?.edges.find((x) => x.id === side.edge);
+    return e ? polyLen(e.pts) : 0;
+  };
+  const step = (side: SeamSide[number]) => spacing * (piece(side.piece)?.spacingScale ?? 1);
+  for (const s of spec.seams ?? []) {
+    const parts: [SeamSide[number], SeamSide[number]][] = s.a.length === s.b.length ? s.a.map((e, k) => [e, s.b[k]]) : [];
+    for (const [a, b] of parts) {
+      const la = len(a), lb = len(b);
+      if (!la || !lb || Math.abs(la - lb) > 0.1 * Math.max(la, lb)) continue;
+      const n = Math.max(1, Math.round(la / step(a)), Math.round(lb / step(b)));
+      for (const side of [a, b]) {
+        const prev = out[side.piece]?.[side.edge];
+        (out[side.piece] ??= {})[side.edge] = Math.max(prev ?? 0, n);
+      }
+    }
+  }
+  return out;
+}
+
 const cache = new Map<string, ClothMesh>();
 const CACHE_MAX = 32;
 
@@ -247,9 +277,10 @@ export function meshCloth(spec: ClothSpec): ClothMesh {
   if (hit) return hit;
   if (!(spacing > 0.002)) throw new Error('cloth spacing must be over 2 mm');
   const pieces: Record<string, PieceMesh> = {};
+  const counts = matchedCounts(spec, spacing);
   for (const p of spec.pieces) {
     if (pieces[p.name]) throw new Error(`two cloth pieces are called "${p.name}"`);
-    const m = meshOutline(p.edges, spacing * (p.spacingScale ?? 1));
+    const m = meshOutline(p.edges, spacing * (p.spacingScale ?? 1), counts[p.name]);
     const place = placer(p.placement);
     pieces[p.name] = { ...m, pts: m.uv.map(place) };
   }
