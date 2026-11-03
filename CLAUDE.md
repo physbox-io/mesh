@@ -44,7 +44,8 @@ page at runtime.
   slow belongs in one.
 - `src/utils/*Exporter.ts` — one per fabrication output (G-code, 3MF, laser cut, contour slice, relief
   carve, solid machining, mold, cast pattern); STL and 3MF go through `hooks/useMeshExport.tsx`.
-  Solid machining reuses `machineSurface()` from `reliefCarveExporter.ts`.
+  Relief carving and solid machining share `machineSurface()` (`machineSurface.ts`), which runs
+  `surfaceRoughing.ts` (+ `adaptiveRoughingLayer.ts`) and `surfaceFinishing.ts` through a `ToolpathWriter`.
 - `src/presets/` — scene definitions. `presetScenes.ts` holds the `PRESETS` map; large presets get
   their own module.
 - `tests/` — Vitest, no browser. Exporters and geometry are tested by asserting on their output.
@@ -83,8 +84,8 @@ pockets. `tests/reliefPathEfficiency.test.ts` measures what roughing leaves, wha
 material it removes, and how far it flies between cuts, against figures taken on the old and new
 paths. Finishing had the same fault (runs cut in scan order, a lift and a flight between every
 two), and the same file now measures its lifts and air travel. Any change to roughing or
-finishing order in `reliefCarveExporter.ts` (which also drives solid machining through
-`machineSurface()`) has to keep it green. Don't loosen a bound without
+finishing order in `surfaceRoughing.ts`, `adaptiveRoughingLayer.ts` or `surfaceFinishing.ts`
+(which also drive solid machining through `machineSurface()`) has to keep it green. Don't loosen a bound without
 a measurement.
 
 **`rgba`'s alpha hides nothing from the physics.** Alpha below 1 draws a geom translucent
