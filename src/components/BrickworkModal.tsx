@@ -9,7 +9,8 @@ import {
   type BrickBond, type BrickPlacement, type BrickStandardId,
 } from '../utils/brickwork';
 import { layBricksOffThread, type BrickworkOutcome } from '../utils/brickworkClient';
-import { DEFAULT_TOY_SIZES, TOY_SIZES, type ToySize } from '../utils/toyBricks';
+import { TOY_SIZES, type ToyInventory } from '../utils/toyBricks';
+import { ToyInventoryEditor } from './ToyInventoryEditor';
 
 /** The top-level piece a selection belongs to, as Pipes takes it. */
 function pieceOf(nodes: SceneNode[], id: string | null): SceneNode | null {
@@ -40,11 +41,12 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [toySizes, setToySizes] = useState<ToySize[]>(DEFAULT_TOY_SIZES);
+  const [toyInventory, setToyInventory] = useState<ToyInventory>(() => Object.fromEntries(TOY_SIZES.map((s) => [s, null])));
+  const [hollowStuds, setHollowStuds] = useState<number>(0);
 
   const options = useMemo(
-    () => ({ standardId, bond, jointMm, wastagePct, placement, toySizes }),
-    [standardId, bond, jointMm, wastagePct, placement, toySizes],
+    () => ({ standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds }),
+    [standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds],
   );
 
   // Counted as the settings change, in the worker.
@@ -84,8 +86,6 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const r = outcome?.result;
   const std = BRICK_STANDARDS[standardId];
   const toy = !!std.toy;
-  const toggleSize = (size: ToySize) =>
-    setToySizes((now) => (now.includes(size) ? now.filter((x) => x !== size) : [...now, size]));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
@@ -137,18 +137,13 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
                 onChange={(v) => { if (v !== undefined && Number.isFinite(v) && v >= 0) setWastagePct(v); }} className={field} />
             </label>}
             {toy && (
-              <fieldset className="col-span-2 space-y-1">
-                <legend className="text-[11px] text-slate-500 dark:text-slate-400" title="The sizes to build with. 1×1 is always there to finish a gap.">Sizes (studs)</legend>
-                <div className="flex flex-wrap gap-x-3 gap-y-1">
-                  {TOY_SIZES.map((size) => (
-                    <label key={size} className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-300">
-                      <input type="checkbox" checked={size === '1x1' || toySizes.includes(size)} disabled={size === '1x1'} onChange={() => toggleSize(size)} />
-                      {size.replace('x', '×')}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
+              <label className="space-y-1 block">
+                <span className="text-[11px] text-slate-500 dark:text-slate-400" title="Build hollow, the walls this many studs thick and the roof stepped in; 0 for solid. Fewer bricks for a big model.">Hollow, walls (studs)</span>
+                <NumberInput min={0} max={20} step={1} value={hollowStuds} fallbackOnBlur={0}
+                  onChange={(v) => { if (v !== undefined && Number.isFinite(v) && v >= 0) setHollowStuds(Math.round(v)); }} className={field} />
+              </label>
             )}
+            {toy && <ToyInventoryEditor inventory={toyInventory} onChange={setToyInventory} />}
             <label className="space-y-1 block">
               <span className="text-[11px] text-slate-500 dark:text-slate-400">Put the bricks</span>
               <select value={placement} onChange={(e) => setPlacement(e.target.value as BrickPlacement)} className={field}>
@@ -170,15 +165,17 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
 
           {r && (
             <>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 {(r.parts ? [
                   ['Bricks', r.toBuy.toLocaleString(), `${r.parts.length} sizes`],
                   ['Courses', String(r.courses), `${Math.round(r.builtHeightMm)} mm built, model ${Math.round(r.modelHeightMm)} mm`],
+                  ['Holds together', r.bond.pieces === 1 ? 'One piece' : `${r.bond.pieces} pieces`, `${r.bond.straightJoints} seam${r.bond.straightJoints === 1 ? '' : 's'} on a seam below`],
                 ] : [
                   ['Bricks to buy', r.toBuy.toLocaleString(), `${r.whole.toLocaleString()} whole, ${r.cutPieces} cut, ${wastagePct}% spare`],
                   ['Courses', String(r.courses), `${Math.round(r.builtHeightMm)} mm built, model ${Math.round(r.modelHeightMm)} mm`],
                   ['Mortar', `${Math.round(r.mortarLitres)} L`, `${r.mortarBags} × 25 kg bags of premix`],
                   ['Lintels', String(r.lintels.reduce((n, l) => n + l.count, 0)), r.lintels.length ? r.lintels.map((l) => `${l.count}× ${l.lengthMm} mm`).join(', ') : 'No openings to span'],
+                  ['Bond', r.bond.straightJoints === 0 ? 'Every joint lapped' : `${r.bond.straightJoints} short laps`, r.bond.straightJoints === 0 ? 'A quarter brick or more over the joint below' : 'Joints lapped under a quarter brick over the one below'],
                 ]).map(([label, value, note]) => (
                   <div key={label} className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
                     <div className="text-[11px] text-slate-500 dark:text-slate-400">{label}</div>

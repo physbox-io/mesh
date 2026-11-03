@@ -3,7 +3,7 @@
 import type { McpCommands } from './types';
 import { BRICK_STANDARDS, DEFAULT_BRICKWORK_OPTIONS, type BrickBond, type BrickStandardId } from '../../utils/brickwork';
 import { layBricksOffThread } from '../../utils/brickworkClient';
-import { TOY_SIZES, type ToySize } from '../../utils/toyBricks';
+import { normalToySize, TOY_SIZES, type ToyInventory, type ToySize } from '../../utils/toyBricks';
 import { findNodeInScene } from './bridgeUtils';
 import { settleScene } from './settleScene';
 
@@ -21,6 +21,22 @@ export const brickCommands: McpCommands = {
     if (toySizes !== undefined && (!Array.isArray(toySizes) || toySizes.some((t) => !TOY_SIZES.includes(t as ToySize)))) {
       return { ok: false, error: `toySizes is a list of ${TOY_SIZES.join(', ')}.` };
     }
+    // How many of each toy brick the builder has: { '2x4': 40, '2x2': null }.
+    let toyInventory: ToyInventory | undefined;
+    if (msg.toyInventory !== undefined) {
+      if (typeof msg.toyInventory !== 'object' || msg.toyInventory === null || Array.isArray(msg.toyInventory)) {
+        return { ok: false, error: "toyInventory is a map of size to how many you have, e.g. { '2x4': 40, '2x2': null } (null: any number)." };
+      }
+      toyInventory = {};
+      for (const [k, v] of Object.entries(msg.toyInventory as Record<string, unknown>)) {
+        const size = normalToySize(k);
+        if (!size || (v !== null && (typeof v !== 'number' || v < 0))) return { ok: false, error: `toyInventory: '${k}' is not a size (AxB) with a count or null.` };
+        toyInventory[size] = v as number | null;
+      }
+    }
+    if (msg.hollowStuds !== undefined && (typeof msg.hollowStuds !== 'number' || msg.hollowStuds < 0)) {
+      return { ok: false, error: 'hollowStuds is the wall thickness in studs for a hollow toy-brick build; 0 for solid.' };
+    }
     const placement = msg.placement === 'replace' ? 'replace' : msg.placement === 'none' ? 'none' : 'beside';
     let outcome;
     try {
@@ -31,6 +47,8 @@ export const brickCommands: McpCommands = {
         wastagePct: typeof msg.wastagePct === 'number' ? msg.wastagePct : DEFAULT_BRICKWORK_OPTIONS.wastagePct,
         placement: placement === 'none' ? 'beside' : placement,
         ...(toySizes ? { toySizes: toySizes as ToySize[] } : {}),
+        ...(toyInventory ? { toyInventory } : {}),
+        ...(typeof msg.hollowStuds === 'number' ? { hollowStuds: Math.round(msg.hollowStuds) } : {}),
       });
     } catch (e) {
       return { ok: false, error: (e as Error).message };
@@ -58,6 +76,8 @@ export const brickCommands: McpCommands = {
       mortarBags25kg: r.mortarBags,
       lintels: r.lintels,
       ...(r.parts ? { parts: r.parts } : {}),
+      ...(r.short?.length ? { short: r.short } : {}),
+      bond: r.bond,
       warnings: r.warnings,
     };
   },
