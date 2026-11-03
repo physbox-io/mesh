@@ -1179,3 +1179,31 @@ describe('the moment a job is starting', () => {
   });
 });
 
+/*
+ * A zero the controller never acknowledged. `sendAndWait` gives up on a
+ * timeout without throwing, so a G10 lost on a deaf link was reported as a
+ * zero set, and the Z gate on starts and resumes was lifted on it.
+ */
+describe('a zero the controller never answers', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+    (webSerialManager as unknown as { state: Record<string, unknown> }).state.needsZZero = true;
+  });
+  afterEach(() => fake.detach());
+
+  it('is not reported as set, and leaves the gate shut', async () => {
+    fake.board.ignore = /^G10/;
+    const result = await webSerialManager.zeroZHere();
+    expect(result.success).toBe(false);
+    expect(webSerialManager.getState().needsZZero).toBe(true);
+  });
+
+  it('is not reported as set by Set Work Position either', async () => {
+    fake.board.ignore = /^G10/;
+    const result = await webSerialManager.setWorkPosition({ z: 0 });
+    expect(result.success).toBe(false);
+    expect(webSerialManager.getState().needsZZero).toBe(true);
+  });
+});

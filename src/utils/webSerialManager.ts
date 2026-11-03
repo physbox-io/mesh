@@ -517,6 +517,9 @@ const RETRACT_BELOW_PULLOFF_MM = 1;
  */
 const QUICK_REPLY_TIMEOUT_MS = 3000;
 
+const DATUM_NOT_CONFIRMED =
+  'The controller did not confirm the new zero, so it has not been recorded. Check the connection and zero again.';
+
 /** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
 
 export type MachineStateListener = (state: MachineState) => void;
@@ -1281,6 +1284,26 @@ class WebSerialManager extends GrblMachine<MachineState> {
       await this.sendLine(command, { timeoutMs });
     } catch (err) {
       if (!(err instanceof AckTimeoutError)) throw err;
+    }
+  }
+
+  /**
+   * Writes a work offset and says whether the controller took it.
+   *
+   * Not `sendAndWait`, which gives up on a timeout without saying so: a `G10`
+   * lost on a link that had gone deaf was reported as a zero set, and the Z
+   * gate on starts and resumes was lifted on it. An idle controller answers a
+   * `G10` at once, so one that has not within a few seconds is not trusted
+   * with the datum.
+   */
+  private async writeDatum(line: string): Promise<boolean> {
+    try {
+      await this.sendLine(line, { timeoutMs: QUICK_REPLY_TIMEOUT_MS });
+      return true;
+    } catch (err) {
+      if (!(err instanceof AckTimeoutError)) throw err;
+      this.updateState({ lastError: DATUM_NOT_CONFIRMED });
+      return false;
     }
   }
 
@@ -2063,7 +2086,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
     if (at.z !== undefined) words.push(`Z${(at.z + paperMm).toFixed(3)}`);
     if (words.length === 0) return { success: false, message: 'No axis given.' };
     await this.sendAndWait('G21 G90');
-    await this.sendAndWait(`G10 L20 P1 ${words.join(' ')}`);
+    if (!(await this.writeDatum(`G10 L20 P1 ${words.join(' ')}`))) {
+      return { success: false, message: DATUM_NOT_CONFIRMED };
+    }
     if (at.z !== undefined) {
       this.recordZDatum();
       this.jobPeakWorkZ = null;
@@ -2696,7 +2721,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
       return { success: false, message: 'Not connected to a machine.' };
     }
     await this.sendAndWait('G21 G90');
-    await this.sendAndWait(`G10 L20 P1 Z${offsetMm.toFixed(3)}`);
+    if (!(await this.writeDatum(`G10 L20 P1 Z${offsetMm.toFixed(3)}`))) {
+      return { success: false, message: DATUM_NOT_CONFIRMED };
+    }
     // The datum is now real, whichever bit is in the collet.
     this.recordZDatum();
     this.jobPeakWorkZ = null;
@@ -3066,7 +3093,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
         return { success: false, message };
       }
 
-      await this.sendAndWait(`G10 L20 P1 Z${touchPlateThicknessMm.toFixed(3)}`);
+      if (!(await this.writeDatum(`G10 L20 P1 Z${touchPlateThicknessMm.toFixed(3)}`))) {
+        return { success: false, message: DATUM_NOT_CONFIRMED };
+      }
       this.recordZDatum();
       // Heights seen on the old datum say nothing about this one.
       this.jobPeakWorkZ = null;
