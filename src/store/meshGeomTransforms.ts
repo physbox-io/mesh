@@ -54,6 +54,19 @@ export const promoteMeshGeomsToDynamic = (node: SceneNode) => {
   }
 };
 
+// The same trap from the other side: a static mesh is drawn from its vertices
+// as they are, so a pos, euler or quat on the geom moves it in the physics and
+// not on screen. A mesh geom given a pose of its own goes over to the dynamic
+// path, which draws it where MuJoCo puts it; the model is built from
+// `vertices` either way, so nothing about the physics changes.
+const posed = (g: SceneGeom) =>
+  (Array.isArray(g.pos) && g.pos.some((c) => c !== 0))
+  || (Array.isArray(g.euler) && g.euler.some((c) => c !== 0))
+  || (Array.isArray(g.quat) && g.quat.length === 4);
+export const promotePosedStaticMeshes = (node: SceneNode) => {
+  if (node.geoms?.some((g: SceneGeom) => isStaticMesh(g) && posed(g))) promoteMeshGeomsToDynamic(node);
+};
+
 // The other half of the same moment: a body that has just been made movable
 // has to be able to touch the world.
 //

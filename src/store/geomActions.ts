@@ -12,6 +12,7 @@ import { cloneSceneGraph, findNode } from './sceneClone';
 import { dropStaleColliders, rebuildAfterGeomEdit } from './geomEdits';
 import type { SliceDeps } from './sliceDeps';
 import { assertGeomSizes } from '../utils/geomSize';
+import { promotePosedStaticMeshes } from './meshGeomTransforms';
 
 export interface GeomActions {
   updateNodeGeom: (id: string, updates: Partial<SceneGeom>, geomIndex?: number) => void;
@@ -121,6 +122,7 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
                 placed by hand keeps its own numbers. See reconcileCuts.
               */
               if (structural) reconcileCuts(node);
+              if (updates.pos || updates.euler || updates.quat) promotePosedStaticMeshes(node);
             }
             return true;
           }

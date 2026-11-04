@@ -10,7 +10,7 @@ import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { getStickyRotation } from '../utils/geom';
 import { cloneSceneGraph } from './sceneClone';
 import {
-  isAllMeshNode, promoteMeshGeomsToDynamic, restoreCollisionWhenMadeMovable, mapVerts,
+  isAllMeshNode, promoteMeshGeomsToDynamic, promotePosedStaticMeshes, restoreCollisionWhenMadeMovable, mapVerts,
   translateMeshGeoms, rotateMeshGeomsAbsolute,
 } from './meshGeomTransforms';
 import { detachReferencesTo } from './breakage';
@@ -227,6 +227,7 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
           if (node.id === id) {
             const wasJointless = !(node.joints?.length > 0);
             Object.assign(node, updates);
+            if (updates.geoms) promotePosedStaticMeshes(node);
             // Body-level rgba is a shorthand for colouring the body's geoms:
             // SceneNode has no colour of its own in MJCF or the renderer, so
             // storing it on the node alone left SCAD and primitive bodies lilac.
