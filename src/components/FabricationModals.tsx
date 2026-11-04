@@ -20,6 +20,7 @@ import { BrickworkModal } from './BrickworkModal';
 import { BottomStatusBar } from './BottomStatusBar';
 import { MachineConfigModal } from './MachineConfigModal';
 import { moldSubject, selectedIds } from '../utils/moldSubject';
+import { useCastDialog } from '../store/castDialogStore';
 import { openSceneInEtch } from '../utils/etchSceneHandoff';
 
 /**
@@ -45,7 +46,9 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isSolidModalOpen, setIsSolidModalOpen] = useState(false);
   // What the relief dialog hands solid machining when a model has an undercut.
   const [solidSeed, setSolidSeed] = useState<Partial<SolidMachiningOptions> | null>(null);
-  const [isCastModalOpen, setIsCastModalOpen] = useState(false);
+  // In a store, not here: a mold's inspector card opens it as well.
+  const isCastModalOpen = useCastDialog((s) => s.pourOpen);
+  const setIsCastModalOpen = useCastDialog((s) => s.setPourOpen);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
   const [isSheetUnfoldModalOpen, setIsSheetUnfoldModalOpen] = useState(false);

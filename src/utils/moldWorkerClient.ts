@@ -267,6 +267,7 @@ export function moldMasterRecord(
     ...(summary.pullDirection ? { pullDirection: summary.pullDirection } : {}),
     cavityHoldsTop: Boolean(summary.cavityHoldsTop),
     ...(feedRouteOf(summary.features) ? { feed: feedRouteOf(summary.features) } : {}),
+    ...(summary.features ? { featureLines: moldFeatureLines(summary.features) } : {}),
   };
 }
 

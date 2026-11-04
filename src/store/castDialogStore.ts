@@ -18,6 +18,9 @@ interface Remembered {
 }
 
 interface CastDialogState extends Remembered {
+  /** Whether the Cast (pour) panel is open: the bottom bar and a mold's inspector card both open it. Not remembered. */
+  pourOpen: boolean;
+  setPourOpen: (open: boolean) => void;
   /** The tab the next opening should land on, and whether Advanced starts open; taken once. */
   request: { tab: MoldTab; advanced: boolean } | null;
   requestTab: (request: { tab: MoldTab; advanced: boolean }) => void;
@@ -51,6 +54,8 @@ function save(state: Remembered) {
 
 export const useCastDialog = create<CastDialogState>((set, get) => ({
   ...load(),
+  pourOpen: false,
+  setPourOpen: (pourOpen) => set({ pourOpen }),
   request: null,
   requestTab: (request) => set({ request }),
   takeRequest: () => {

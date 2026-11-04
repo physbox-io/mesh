@@ -8,6 +8,7 @@ import { EdgesCard } from '../EdgesCard';
 import { FacePatternEditor } from '../FacePatternEditor';
 import { SurfacePatternsCard } from '../SurfacePatternsCard';
 import { AerodynamicsCard, BodyBasicsCard } from './BodyBasicsCard';
+import { MoldCard } from './MoldCard';
 import { CollisionCard } from './CollisionCard';
 import { CombineCard } from './CombineCard';
 import { ConstraintsCard } from './ConstraintsCard';
@@ -81,6 +82,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
       {tab === 'main' && (
         <>
           <BodyBasicsCard node={node} />
+          <MoldCard node={node} />
           <JoinCard node={node} />
           <HardwarePartCard node={node} />
           <PositionCard node={node} />

@@ -1001,6 +1001,8 @@ export interface SceneNode {
       cavityHoldsTop?: boolean;
       /** A bottom-filled mold's route, mm in the cavity half's frame (parting face at 0), so trimming takes it off the casting. */
       feed?: FeedRoute;
+      /** What every hole and peg is, in words (moldFeatureLines), for the mold's inspector card. */
+      featureLines?: string[];
     };
   };
 }
