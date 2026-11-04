@@ -663,6 +663,7 @@ export async function runMcpMoldSimulation(params: {
         name: added.name,
         kind: 'mold_cast',
         sourceMoldId: moldNode.id,
+        ...(moldNode.simulation?.mold?.featureLines ? { featureNotes: moldNode.simulation.mold.featureLines } : {}),
         ...(castRes.pour ? { pour: castRes.pour } : {}),
         placement,
         fillFrom: typeof msg.fillMm === 'number' && msg.fillMm > 0 ? 'fill_mm' : box ? 'pour box' : 'rim',
@@ -740,6 +741,8 @@ export async function runMcpMoldSimulation(params: {
       moldType: moldRes.moldType,
       pullDirection: moldRes.pullDirection,
       ...(moldRes.setupNote ? { setupNote: moldRes.setupNote } : {}),
+      // What the mold it was poured in had, in words: an agent once took the pry notches for channels.
+      ...(moldRes.features ? { featureNotes: moldFeatureLines(moldRes.features) } : {}),
       sizeMm: castRes.sizeMm,
       volumeMm3: Math.round(castRes.castVolumeMm3),
       ...(castRes.fill ? { fill: castRes.fill } : {}),
@@ -792,7 +795,7 @@ export async function runMcpMoldSimulation(params: {
     moldSizeMm: [moldRes.moldWidthMm, moldRes.moldDepthMm, moldRes.moldHeightMm],
     cavityDepthMm: moldRes.cavityDepthMm,
     minDraftDeg: moldRes.minDraftDeg,
-    ...(moldRes.features ? { features: moldRes.features } : {}),
+    ...(moldRes.features ? { features: moldRes.features, featureNotes: moldFeatureLines(moldRes.features) } : {}),
     // One geom per piece that prints apart: a half, or a lined half's shell and liner.
     pieces: moldRes.parts.map((p) => ({ name: p.name, material: p.material })),
     volumeMm3: Math.round(added.volumeMm3),
