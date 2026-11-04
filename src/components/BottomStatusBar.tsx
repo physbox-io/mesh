@@ -544,6 +544,12 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
 
       {/* What it is cut on, and what out of */}
       <div className="flex items-center gap-2 max-lg:shrink-0">
+        {/* Its own pill, outside the machine's: built by hand from bought
+            stock, it does not change with the machine, the stock or the
+            material, and inside that group it read as one of its exports. */}
+        <div className="flex items-center px-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+          <BuildMenu items={build} />
+        </div>
         <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
           <Cpu className="w-3.5 h-3.5 text-amber-500" />
           <select
@@ -719,8 +725,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 {b.label}
               </button>
             ))}
-            <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
-            <BuildMenu items={build} />
             {exports.etch?.error && machineTarget !== 'fdm' && (
               <span role="alert" className="text-[11px] text-red-600 dark:text-red-400 max-w-[18rem] truncate" title={exports.etch.error}>
                 {exports.etch.error}
