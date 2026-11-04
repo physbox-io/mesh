@@ -54,6 +54,21 @@ export interface CastMaterial {
    * aluminium three, investment silver one.
    */
   minSectionMm: number;
+  /**
+   * The narrowest a mold's sprue may be where it enters the cavity, mm. Below
+   * about 3.5 mm a bubble of air in an upright tube of resin cannot rise past
+   * the liquid (surface tension holds it: Bretherton), so a pour into a 4 mm
+   * sprue sat in the funnel and never went in; thicker pours want more for
+   * the flow. Printed holes also come out a few tenths small.
+   */
+  sprueNeckMm: number;
+  /**
+   * The narrowest upright passage a bubble of air can rise through this
+   * liquid, mm: about 3.4 x its capillary length (Bretherton). Narrower, and
+   * liquid poured in from above seals the passage, so the air under it stays
+   * and the liquid stays out (pourFill.ts).
+   */
+  bubbleRiseMm: number;
   /** Of the cured or frozen piece, g/cm³. */
   densityGcm3: number;
   /** Linear contraction a pattern is grown by, %. Given where it is designed for (metals). */
@@ -85,38 +100,38 @@ export const PLA_SOFTEN_C = 60;
 
 export const CAST_MATERIALS: CastMaterial[] = [
   {
-    id: 'epoxy', label: 'Epoxy resin', minSectionMm: 1.0, densityGcm3: 1.15, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.94, 0.88, 0.6],
+    id: 'epoxy', label: 'Epoxy resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.15, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.94, 0.88, 0.6],
     warnings: [{
       aboveMl: 200,
       inPla: true,
       text: 'A {ml} ml epoxy pour may exceed PLA\'s ~60 °C softening point during cure; pour in layers or use deep-pour epoxy.',
     }],
   },
-  { id: 'polyurethane', label: 'Polyurethane resin', minSectionMm: 1.0, densityGcm3: 1.05, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.9, 0.82, 1], warnings: [] },
+  { id: 'polyurethane', label: 'Polyurethane resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.05, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.9, 0.82, 1], warnings: [] },
   {
-    id: 'platinum', label: 'Platinum-cure silicone', minSectionMm: 1.5, densityGcm3: 1.08, mix: { kind: 'ab', a: 1, b: 1 },
+    id: 'platinum', label: 'Platinum-cure silicone', minSectionMm: 1.5, sprueNeckMm: 8, bubbleRiseMm: 3.2, densityGcm3: 1.08, mix: { kind: 'ab', a: 1, b: 1 },
     waterBased: false, metal: false, silicone: true, rgba: [0.9, 0.94, 0.92, 0.6], warnings: [],
   },
   {
-    id: 'tin', label: 'Tin-cure silicone', minSectionMm: 1.5, densityGcm3: 1.15, mix: { kind: 'ab', a: 10, b: 1 },
+    id: 'tin', label: 'Tin-cure silicone', minSectionMm: 1.5, sprueNeckMm: 8, bubbleRiseMm: 3.2, densityGcm3: 1.15, mix: { kind: 'ab', a: 10, b: 1 },
     waterBased: false, metal: false, silicone: true, rgba: [0.95, 0.76, 0.78, 1], warnings: [],
   },
-  { id: 'wax', label: 'Wax', minSectionMm: 1.5, densityGcm3: 0.9, pourC: 70, waterBased: false, metal: false, silicone: false, rgba: [0.98, 0.94, 0.82, 0.9], warnings: [] },
+  { id: 'wax', label: 'Wax', minSectionMm: 1.5, sprueNeckMm: 5, bubbleRiseMm: 3.2, densityGcm3: 0.9, pourC: 70, waterBased: false, metal: false, silicone: false, rgba: [0.98, 0.94, 0.82, 0.9], warnings: [] },
   {
-    id: 'chocolate', label: 'Chocolate', minSectionMm: 2.0, densityGcm3: 1.3, pourC: 31, meltsInBath: true, waterBased: false, metal: false, silicone: false, rgba: [0.36, 0.2, 0.1, 1],
+    id: 'chocolate', label: 'Chocolate', minSectionMm: 2.0, sprueNeckMm: 8, bubbleRiseMm: 4, densityGcm3: 1.3, pourC: 31, meltsInBath: true, waterBased: false, metal: false, silicone: false, rgba: [0.36, 0.2, 0.1, 1],
     warnings: [],
   },
   {
-    id: 'water', label: 'Water (ice)', minSectionMm: 2.0, densityGcm3: 0.92, meltsInBath: true, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
+    id: 'water', label: 'Water (ice)', minSectionMm: 2.0, sprueNeckMm: 5, bubbleRiseMm: 5.3, densityGcm3: 0.92, meltsInBath: true, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
     warnings: [],
   },
-  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
-  { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, densityGcm3: 2.4, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
-  { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
-  { id: 'aluminium', label: 'Aluminium', minSectionMm: 3.0, densityGcm3: 2.7, shrinkPercent: 1.3, pourC: 720, waterBased: false, metal: true, silicone: false, rgba: [0.78, 0.8, 0.83, 1], warnings: [] },
-  { id: 'brass', label: 'Brass', minSectionMm: 2.5, densityGcm3: 8.5, shrinkPercent: 1.5, pourC: 1000, waterBased: false, metal: true, silicone: false, rgba: [0.8, 0.66, 0.3, 1], warnings: [] },
-  { id: 'bronze', label: 'Bronze', minSectionMm: 2.5, densityGcm3: 8.8, shrinkPercent: 1.5, pourC: 1150, waterBased: false, metal: true, silicone: false, rgba: [0.72, 0.48, 0.25, 1], warnings: [] },
-  { id: 'silver', label: 'Silver', minSectionMm: 1.0, densityGcm3: 10.5, shrinkPercent: 1.6, pourC: 1000, waterBased: false, metal: true, silicone: false, rgba: [0.86, 0.87, 0.89, 1], warnings: [] },
+  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
+  { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, sprueNeckMm: 15, bubbleRiseMm: 10, densityGcm3: 2.4, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
+  { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
+  { id: 'aluminium', label: 'Aluminium', minSectionMm: 3.0, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 2.7, shrinkPercent: 1.3, pourC: 720, waterBased: false, metal: true, silicone: false, rgba: [0.78, 0.8, 0.83, 1], warnings: [] },
+  { id: 'brass', label: 'Brass', minSectionMm: 2.5, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 8.5, shrinkPercent: 1.5, pourC: 1000, waterBased: false, metal: true, silicone: false, rgba: [0.8, 0.66, 0.3, 1], warnings: [] },
+  { id: 'bronze', label: 'Bronze', minSectionMm: 2.5, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 8.8, shrinkPercent: 1.5, pourC: 1150, waterBased: false, metal: true, silicone: false, rgba: [0.72, 0.48, 0.25, 1], warnings: [] },
+  { id: 'silver', label: 'Silver', minSectionMm: 1.0, sprueNeckMm: 8, bubbleRiseMm: 7, densityGcm3: 10.5, shrinkPercent: 1.6, pourC: 1000, waterBased: false, metal: true, silicone: false, rgba: [0.86, 0.87, 0.89, 1], warnings: [] },
 ];
 
 /** Names an older version accepted, and what they mean now. */

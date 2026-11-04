@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
-  generateMoldMeshes,
+  generateMoldMeshes as generateWithEngine,
   exportBinarySTL,
   computeNormal,
   DEFAULT_MOLD_OPTIONS,
@@ -13,6 +13,14 @@ import type { SceneGraph, SceneGeom } from '../src/types/scene';
 import { stlToMesh } from '../src/utils/stlMesh';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { loadManifold } from '../src/utils/sculptCut';
+
+// The app's worker always hands the generator the geometry engine, and bottom
+// fill (the default) needs it for the runner under the cavity.
+let engine: Awaited<ReturnType<typeof loadManifold>> | null = null;
+beforeAll(async () => {
+  engine = await loadManifold();
+});
+const generateMoldMeshes: typeof generateWithEngine = (scene, options, wasm) => generateWithEngine(scene, options, wasm ?? engine);
 
 function bodyWith(geom: Partial<SceneGeom> & { type: SceneGeom['type']; size: number[] }, pos = [0, 0, 0]): SceneGraph {
   return {
@@ -185,8 +193,9 @@ describe('Parting plane', () => {
 
     expect(res.success).toBe(true);
 
-    // The whole 14 mm of part goes into one half: 14 mm of cavity over a 5 mm floor.
-    expect(res.bottomHalf.heightMm).toBeCloseTo(19, 1);
+    // The whole 14 mm of part goes into one half: 14 mm of cavity over the
+    // 8.5 mm floor a bottom-fill runner needs under it (the 5 mm asked, deepened).
+    expect(res.bottomHalf.heightMm).toBeCloseTo(22.5, 1);
     // The other half has nothing to hold, so it is a 5 mm plate with 4 mm pins.
     expect(res.topHalf!.heightMm).toBeCloseTo(9, 1);
 
@@ -196,17 +205,18 @@ describe('Parting plane', () => {
     const cavityZ = res.bottomHalf.triangles
       .map((t) => (t.a[2] + t.b[2] + t.c[2]) / 3)
       .filter((z) => z > 1);
-    expect(cavityZ.some((z) => Math.abs(z - 15) < 0.6)).toBe(true); // plate top
-    expect(cavityZ.some((z) => Math.abs(z - 5) < 0.6)).toBe(true); // boss top
-    expect(zRange(res.bottomHalf.triangles).max).toBeCloseTo(19, 1);
+    expect(cavityZ.some((z) => Math.abs(z - 18.5) < 0.6)).toBe(true); // plate top
+    expect(cavityZ.some((z) => Math.abs(z - 8.5) < 0.6)).toBe(true); // boss top
+    expect(zRange(res.bottomHalf.triangles).max).toBeCloseTo(22.5, 1);
 
     expect(res.warnings.join(' ')).toContain('backing plate');
   });
 
   it('parts a sphere at its equator, where the silhouette is widest', () => {
     const res = generateMoldMeshes(dome, { ...DEFAULT_MOLD_OPTIONS, baseThicknessMm: 5 });
-    // 30 mm of hemisphere in each half, over a 5 mm floor.
-    expect(res.bottomHalf.heightMm).toBeCloseTo(35, 0);
+    // 30 mm of hemisphere in each half, over a 5 mm floor (8.5 under the
+    // cavity, for the bottom-fill runner).
+    expect(res.bottomHalf.heightMm).toBeCloseTo(38.5, 0);
     expect(res.topHalf!.heightMm).toBeCloseTo(39, 0); // + 4 mm pins
   });
 
@@ -221,13 +231,20 @@ describe('Parting plane', () => {
 describe('Printability', () => {
   it('gives each half a closed surface', () => {
     const res = generateMoldMeshes(plaque, DEFAULT_MOLD_OPTIONS);
-    expect(unpairedEdges(res.bottomHalf.triangles)).toBe(0);
+    // The cavity half's bores come out of the geometry engine, whose vertices
+    // can sit closer than the micron unpairedEdges rounds to; read it welded.
+    for (const h of [res.bottomHalf, res.topHalf!]) {
+      const m = stlToMesh(exportBinarySTL(h.triangles));
+      expect(analyzeMesh(m.positions, m.faces)!.closed).toBe(true);
+    }
     expect(unpairedEdges(res.topHalf!.triangles)).toBe(0);
   });
 
   it('bores the sprue and vents right through the lid instead of sealing them in', () => {
     const res = generateMoldMeshes(plaque, {
       ...DEFAULT_MOLD_OPTIONS,
+      // Down through the lid over the cavity, where this looks for it.
+      sprueFeed: 'top',
       includeSprue: true,
       sprueTopDiaMm: 8,
       sprueBottomDiaMm: 4,
@@ -284,7 +301,7 @@ describe('Draft', () => {
     // The deepest point of the cavity is still the full height of the part: the
     // taper is cut back into the wall, not off the bottom of the pocket.
     expect(res.cavityDepthMm).toBeCloseTo(14, 1);
-    expect(res.bottomHalf.heightMm).toBeCloseTo(19, 1);
+    expect(res.bottomHalf.heightMm).toBeCloseTo(22.5, 1);
     // Drafted walls are what let a rigid print release, so the advice changes.
     expect(res.flexibleMoldAdvised).toBe(false);
     expect(res.warnings.join(' ')).not.toContain('TPU');
@@ -423,12 +440,19 @@ describe('Pour channels', () => {
   it('pours and vents into a ring-shaped cavity, not into the hole in its middle', () => {
     const res = generateMoldMeshes(frame(40, 10), {
       ...DEFAULT_MOLD_OPTIONS,
+      sprueFeed: 'top',
       includeSprue: true,
       includeVents: true,
     });
-    const holes = lidHoles(res);
-    expect(holes.length).toBe(3);
-    for (const hole of holes) {
+    const holes = lidHoles(res).sort((a, b) => b.length - a.length);
+    // The sprue, and a vent from each high point of the frame.
+    expect(holes.length).toBe(1 + res.features!.vents.length);
+    // The sprue's funnel mouth is wider than the 10 mm wall and may overhang
+    // the solid mold over the hole, but it is centred on the frame, and so is its neck.
+    const [sprue, ...vents] = holes;
+    const mid = sprue.reduce((m, p) => ({ x: m.x + p.x / sprue.length, y: m.y + p.y / sprue.length }), { x: 0, y: 0 });
+    expect(onFrame(mid, 40, 10)).toBe(true);
+    for (const hole of vents) {
       for (const cell of hole) expect(onFrame(cell, 40, 10)).toBe(true);
     }
   });
@@ -442,7 +466,8 @@ describe('Pour channels', () => {
       ventDiaMm: 1.5,
     });
     const holes = lidHoles(res);
-    expect(holes.length).toBe(2);
+    expect(holes.length).toBe(res.features!.vents.length);
+    expect(holes.length).toBeGreaterThan(0);
     for (const hole of holes) {
       for (const cell of hole) expect(onFrame(cell, 240, 40)).toBe(true);
     }
@@ -474,6 +499,7 @@ describe('Pour channels', () => {
     };
     const res = generateMoldMeshes(asymmetricY, {
       ...DEFAULT_MOLD_OPTIONS,
+      sprueFeed: 'top',
       includeSprue: true,
       includeVents: true,
     });
@@ -482,11 +508,12 @@ describe('Pour channels', () => {
     // `lidHoles` returns `(x_lid, -y_lid)`, which is the exact `(x_base, y_base)`
     // coordinate where each hole lands when the lid is flipped around X (`y -> -y`)
     // to close onto the base. In `base` (`mirrorY(above)`), the `main` bar cavity
-    // sits at `y_base < -2`, so every flipped hole cell must land inside `main`
-    // (`cell.y < -2`), never on the uncarved mold wall at `y_base > 0`.
+    // sits at `y_base < -2`, and the thin `ref` bar at y_base = +15, which has
+    // a high point of its own and so a vent of its own. Every flipped hole cell
+    // must land on one of them, never on the uncarved mold wall between.
     for (const hole of holes) {
       for (const cell of hole) {
-        expect(cell.y).toBeLessThan(-2);
+        expect(cell.y < -2 || Math.abs(cell.y - 15) < 2).toBe(true);
       }
     }
   });
@@ -617,6 +644,8 @@ describe('One-part open mold and parting overhang checks', () => {
       ...DEFAULT_MOLD_OPTIONS,
       wallMarginMm: 4,
       baseThicknessMm: 3,
+      // A 4 mm wall has no room for a bottom fill's down-sprue (moldGating.test.ts).
+      sprueFeed: 'top',
     });
     expect(plaqueRes.success).toBe(true);
     const plaqueMesh = stlToMesh(plaqueRes.binarySTL);
@@ -634,6 +663,7 @@ describe('One-part open mold and parting overhang checks', () => {
       ...DEFAULT_MOLD_OPTIONS,
       wallMarginMm: 4,
       baseThicknessMm: 3,
+      sprueFeed: 'top',
     });
     expect(tallRes.success).toBe(true);
     expect(tallRes.moldWidthMm).toBe(152.5);

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   simulateCastFromMoldResult,
   simulateCastFromMoldNode,
@@ -6,10 +6,18 @@ import {
   weldTriangles,
   computeMeshVolume,
 } from '../src/utils/moldCastSimulation';
-import { generateMoldMeshes, DEFAULT_MOLD_OPTIONS } from '../src/utils/moldExporter';
+import { generateMoldMeshes as generateWithEngine, DEFAULT_MOLD_OPTIONS } from '../src/utils/moldExporter';
 import type { SceneGraph, SceneGeom, SceneNode } from '../src/types/scene';
 import { loadManifold } from '../src/utils/sculptCut';
 import { manifoldToMeshMm } from '../src/utils/timberBreakdown';
+
+// The app's worker always hands the generator the geometry engine, and bottom
+// fill (the default) needs it for the runner under the cavity.
+let engine: Awaited<ReturnType<typeof loadManifold>> | null = null;
+beforeAll(async () => {
+  engine = await loadManifold();
+});
+const generateMoldMeshes: typeof generateWithEngine = (scene, options, wasm) => generateWithEngine(scene, options, wasm ?? engine);
 
 describe('Mold Cast Simulation', () => {
   // Test 1: Casting from a 1-part open mold of a stepped plaque
@@ -101,7 +109,8 @@ describe('Mold Cast Simulation', () => {
     expect(mold.success).toBe(true);
     expect(mold.topHalf).toBeDefined();
 
-    const sim = await simulateCastFromMoldResult(mold);
+    // Trimmed: filled from the bottom, the casting comes out with a runner on it.
+    const sim = await simulateCastFromMoldResult(mold, { trimChannels: true });
 
     expect(sim.success).toBe(true);
     expect(sim.error).toBeUndefined();
@@ -272,7 +281,8 @@ describe('Mold Cast Simulation', () => {
     };
 
     for (const moldType of ['clamshell', 'open'] as const) {
-      const mold = generateMoldMeshes(frame, { ...DEFAULT_MOLD_OPTIONS, moldType, includeVents: false });
+      // Ventless, so poured from the top: from the bottom its air would have nowhere to go.
+      const mold = generateMoldMeshes(frame, { ...DEFAULT_MOLD_OPTIONS, moldType, includeVents: false, sprueFeed: 'top' });
       expect(mold.pullDirection === '+y' || mold.pullDirection === '-y').toBe(true);
       const cast = await simulateCastFromMoldResult(mold, { trimChannels: true });
       expect(cast.success).toBe(true);

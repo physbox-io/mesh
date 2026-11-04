@@ -26,6 +26,8 @@ import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type Pull
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
 import type { CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
+import { channelSolid, planSprue, sprueNeckDiaMm } from './moldSprue';
+import { boreTriangles, bottomFillFloorMm, cutBores, exactPourSpans, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
 import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
@@ -106,12 +108,19 @@ export interface MoldOptions {
   pinHeightMm: number;
   /** Clearance tolerance between pin and socket in mm (e.g. 0.25 mm for FDM). */
   pinToleranceMm: number;
-  /** Whether to include a tapered pour sprue funnel. */
+  /** Whether to include a pour sprue: a funnel in the lid's outer face and a neck to the cavity. */
   includeSprue: boolean;
-  /** Pour sprue inlet diameter at the top outer face in mm. */
+  /** The funnel's mouth at the lid's outer face, mm (45°, as deep as the lid allows; moldSprue.ts). */
   sprueTopDiaMm: number;
-  /** Pour sprue outlet diameter entering the cavity in mm. */
+  /** The neck into the cavity, mm; never under the cast material's least (castMaterials.ts sprueNeckMm). */
   sprueBottomDiaMm: number;
+  /**
+   * Where a clamshell is filled from (moldGating.ts). 'bottom' (default): a
+   * down-sprue in the wall and a runner to the cavity's lowest point, so the
+   * liquid rises and pushes the air out ahead of it. 'top': straight down
+   * through the lid into the cavity.
+   */
+  sprueFeed?: 'bottom' | 'top';
   /** Whether to include air riser vent channels. */
   includeVents: boolean;
   /** Air vent diameter in mm. */
@@ -132,8 +141,9 @@ export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
   pinHeightMm: 4,
   pinToleranceMm: 0.25,
   includeSprue: true,
-  sprueTopDiaMm: 8,
-  sprueBottomDiaMm: 4,
+  sprueTopDiaMm: 16,
+  sprueBottomDiaMm: 6,
+  sprueFeed: 'bottom',
   includeVents: true,
   ventDiaMm: 1.5,
   includePryNotches: true,
@@ -247,8 +257,10 @@ export interface HalfFeatures {
   sockets: Array<{ x: number; y: number; rimR: number; botR: number; depth: number }>;
   /** Tapered pins standing proud of the parting face. */
   pins: Array<{ x: number; y: number; baseR: number; topR: number; height: number }>;
+  /** Round bores (down-sprue, runner, a vent's way up from a pocket), cut with the geometry engine. */
+  bores?: BoreCut[];
   /** Channels bored from the outer face through to the cavity. */
-  channels: Array<{ x: number; y: number; outerR: number; innerR: number }>;
+  channels: Array<{ x: number; y: number; outerR: number; innerR: number; funnelDepth?: number }>;
   /** Vents bored from the open top face down to overhanging cavity roof (for open molds). */
   topVents?: Array<{ x: number; y: number; r: number; zRoof: number }>;
 }
@@ -541,6 +553,12 @@ function buildHalf(
         // The funnel is wide at the outer face and narrows to innerR where it
         // breaks into the cavity, so the column is void from the outer face up
         // to wherever the cone wall passes it.
+        if (ch.funnelDepth !== undefined) {
+          // The sprue: a 45° funnel this deep, then the neck straight on.
+          const h = d <= ch.innerR ? top - floorZ : ch.funnelDepth * (ch.outerR - d) / (ch.outerR - ch.innerR);
+          bot = Math.max(bot, floorZ + Math.min(h, top - floorZ));
+          continue;
+        }
         const t = d <= ch.innerR ? 1 : (ch.outerR - d) / (ch.outerR - ch.innerR);
         bot = Math.max(bot, floorZ + (top - floorZ) * t);
       }
@@ -907,6 +925,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
     sock.delete();
     carvedBase = next;
   }
+  if (baseFeatures.bores?.length) carvedBase = cutBores(wasm, carvedBase, baseFeatures.bores);
 
   const lidBlock = fittedBlock(wasm, wasm.Manifold.cube([moldWidthMm, moldDepthMm, lidBlockHeight], false)
     .translate([-mw2, -md2, -lidBlockHeight]), ctx.outlines?.lid, -lidBlockHeight, 0);
@@ -925,9 +944,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
   }
 
   for (const ch of lidFeatures.channels) {
-    const chH = lidBlockHeight + 2;
-    const chan = wasm.Manifold.cylinder(chH, ch.outerR, ch.innerR, 24, false)
-      .translate([ch.x, ch.y, -lidBlockHeight - 1]);
+    const chan = channelSolid(wasm, ch, lidBlockHeight);
     const next = carvedLid.subtract(chan);
     carvedLid.delete();
     chan.delete();
@@ -1015,6 +1032,7 @@ function describeMoldFeatures(
   base: HalfFeatures,
   lid: HalfFeatures,
   notchCount: number,
+  bottomFill: BottomFill | null = null,
 ): MoldFeatureReport {
   const r1 = (v: number) => Math.round(v * 10) / 10;
   const at = (x: number, y: number): [number, number] => [r1(x), r1(y)];
@@ -1028,8 +1046,15 @@ function describeMoldFeatures(
   return {
     frame: 'mm from the centre of each half, as it prints (parting face up); the lid is mirrored in Y against the cavity half, as it closes over it',
     sprue: sprue
-      ? { half: 'lid half', atMm: at(sprue.x, sprue.y), diaMm: r1(sprue.outerR * 2), narrowDiaMm: r1(sprue.innerR * 2) }
+      ? { half: 'lid half', atMm: at(sprue.x, sprue.y), diaMm: r1(sprue.outerR * 2), narrowDiaMm: r1(sprue.innerR * 2), depthMm: r1(sprue.funnelDepth ?? 0) }
       : null,
+    feed: bottomFill ? 'bottom' : 'top',
+    ...(bottomFill
+      ? {
+          downSprue: { half: 'cavity half' as const, atMm: at(bottomFill.down.x, bottomFill.down.y), diaMm: r1(bottomFill.r * 2), depthMm: r1(bottomFill.r - bottomFill.runnerZ) },
+          gate: { half: 'cavity half' as const, atMm: at(bottomFill.gate.x, bottomFill.gate.y), diaMm: r1(bottomFill.gateR * 2), depthMm: r1(-bottomFill.gate.z) },
+        }
+      : {}),
     vents: vents.map((v) => ({ half: 'lid half' as const, atMm: at(v.x, v.y), diaMm: r1(v.innerR * 2) })),
     blindVents: (base.topVents ?? []).map((v) => ({ half: baseHalf, atMm: at(v.x, v.y), diaMm: r1(v.r * 2), depthMm: r1(Math.abs(v.zRoof)) })),
     pins: lid.pins.map((p) => ({ half: 'lid half' as const, atMm: at(p.x, p.y), diaMm: r1(p.baseR * 2), narrowDiaMm: r1(p.topR * 2), heightMm: r1(p.height) })),
@@ -1044,7 +1069,10 @@ export function moldFeatureLines(f: MoldFeatureReport | undefined): string[] {
   const xy = (m: MoldFeature) => `(${m.atMm[0]}, ${m.atMm[1]})`;
   const list = (ms: MoldFeature[]) => ms.map(xy).join(', ');
   return [
-    ...(f.sprue ? [`Sprue (pour hole): ⌀${f.sprue.diaMm} → ⌀${f.sprue.narrowDiaMm} mm through the lid at ${xy(f.sprue)}`] : []),
+    ...(f.sprue ? [`Sprue (pour hole): ⌀${f.sprue.diaMm} mm funnel ${f.sprue.depthMm ?? 0} mm deep, then a ⌀${f.sprue.narrowDiaMm} mm neck through the lid at ${xy(f.sprue)}`] : []),
+    ...(f.feed === 'bottom' && f.downSprue && f.gate
+      ? [`Bottom fill: on down the cavity half's wall at ${xy(f.downSprue)}, ${f.downSprue.depthMm} mm, along under the cavity, and up through a ⌀${f.gate.diaMm} mm gate into its lowest point at ${xy(f.gate)}`]
+      : []),
     ...(f.vents.length ? [`Vents: ${f.vents.length}× ⌀${f.vents[0].diaMm} mm through the lid at ${list(f.vents)}`] : []),
     ...(f.blindVents.length ? [`Blind vents: ${f.blindVents.length}× ⌀${f.blindVents[0].diaMm} mm down from the top at ${list(f.blindVents)}`] : []),
     ...(f.pins.length ? [`Registration pins: ${f.pins.length}× ⌀${f.pins[0].diaMm} mm on the lid, sockets in the cavity half`] : []),
@@ -1079,9 +1107,13 @@ export interface MoldFeature {
  */
 export interface MoldFeatureReport {
   frame: string;
-  /** Poured into: through the lid from its outer face to the cavity, wide end out. */
+  /** Poured into: a funnel in the lid's outer face (diaMm wide, depthMm deep), then a neck (narrowDiaMm) to the cavity. */
   sprue: MoldFeature | null;
-  /** Air out: through the lid, at the far ends of the cavity from the sprue. */
+  /** 'bottom': the sprue goes on down the cavity half's wall (downSprue) and along its floor into the lowest point (gate). */
+  feed: 'bottom' | 'top';
+  downSprue?: MoldFeature;
+  gate?: MoldFeature;
+  /** Air out: through the lid from every high point of the cavity as poured (up through the cavity half too, for a pocket in it). */
   vents: MoldFeature[];
   /** Blind vents bored down from an open mold's top over a trapped pocket of air. */
   blindVents: MoldFeature[];
@@ -1464,13 +1496,7 @@ export function generateMoldMeshes(
     channels: [],
   };
 
-  const pour = placePourChannels(
-    field,
-    grid,
-    opts.ventDiaMm / 2,
-    opts.includeVents ? 2 : 0,
-    detailIsAbove ? below : above,
-  );
+  const pour = placePourChannels(field, grid, opts.ventDiaMm / 2, 0, detailIsAbove ? below : above);
 
   if (opts.moldType === 'open' && opts.includeVents && undercutColumns > 0) {
     const blindVents = placeOpenMoldBlindVents(
@@ -1494,37 +1520,94 @@ export function generateMoldMeshes(
   // was NOT mirrored in Y, so on the lid's build grid the part sits at `+y`;
   // when `detailIsAbove` is false, `lidDepth` (`mirrorY(above)`) is at `-y`.
   const lidChannelY = (y: number) => (detailIsAbove ? y : -y);
+  const baseTrueDepth = opts.moldType === 'open' ? partHeightMm : (detailIsAbove ? zMax - partingZ : partingZ - zMin);
+  const lidTrueDepth = detailIsAbove ? partingZ - zMin : zMax - partingZ;
+  // Filled from the bottom, the cavity half's floor holds the runner under the cavity.
+  const feed = opts.moldType === 'clamshell' && opts.includeSprue ? (opts.sprueFeed ?? 'bottom') : 'top';
+  const neckR = sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial) / 2;
+  const baseFloorMm = feed === 'bottom' ? Math.max(opts.baseThicknessMm, bottomFillFloorMm(neckR)) : opts.baseThicknessMm;
+  const baseBlockHeight = baseTrueDepth + baseFloorMm;
+  const lidBlockHeight = lidTrueDepth + opts.baseThicknessMm;
+  // Whatever cuts the lid deepest in each column, drafted or not: the funnel stays clear of all of it.
+  const lidCavityDepth = lidDepth.map((d, i) => Math.max(d, rawLidDepth[i]));
+
+  // The closed mold as it is poured, lid up, in the cavity half's frame: the
+  // exact part where undercuts are kept, the depth fields where they are filled.
+  const clamshell = opts.moldType === 'clamshell';
+  const exactCavity = Boolean(opts.dissolvableLiner) || Boolean(opts.allowUndercuts && undercutColumns > 0);
+  const pourSpans = !clamshell ? null : exactCavity
+    ? exactPourSpans(field, grid, partingZ, detailIsAbove)
+    : rigidPourSpans(baseDepth, lidDepth, grid);
+
+  // A vent at every high point: up from the top of each pocket the rising
+  // level would close over, through the cavity half if it is in it, and
+  // through the lid (whose y is the cavity half's negated).
+  const ventR = opts.ventDiaMm / 2;
+  const ventChannels: HalfFeatures['channels'] = [];
+  const baseBores: BoreCut[] = [];
+  if (pourSpans && opts.includeVents) {
+    const peaks = planPeakVents(pourSpans, grid);
+    for (const v of peaks) {
+      ventChannels.push({ x: v.x, y: -v.y, outerR: opts.ventDiaMm * 0.8, innerR: ventR });
+      // Started a little inside the pocket, so its rim is not left as a skin.
+      if (exactCavity && v.z < -Math.min(grid.stepX, grid.stepY)) {
+        baseBores.push({ a: [v.x, v.y, v.z - 0.3], b: [v.x, v.y, 1], r: ventR });
+      }
+    }
+  }
+
+  // The sprue: down through the lid into the cavity, or from the bottom.
+  let sprueChannel: HalfFeatures['channels'][number] | null = null;
+  let bottomFill: ReturnType<typeof planBottomFill> = null;
+  if (opts.includeSprue && feed === 'bottom' && pourSpans && !opts.includeVents) {
+    return {
+      ...emptyMoldResult('Filled from the bottom, the mold needs its vents: the air rises to the top and has no other way out. Turn vents on, or fill from the top.'),
+      ...setupFields,
+    };
+  }
+  if (opts.includeSprue && feed === 'bottom' && pourSpans) {
+    const avoid = baseFeatures.sockets.map((s) => ({ x: s.x, y: s.y, r: s.rimR }));
+    bottomFill = planBottomFill(pourSpans, grid, neckR, avoid, opts.blockShape === 'fit' ? opts.wallMarginMm : Infinity);
+    if (!bottomFill) {
+      const need = Math.ceil((2 * (neckR + FEED_WALL_MM)) * 10) / 10;
+      return {
+        ...emptyMoldResult(
+          `Bottom fill needs ${need} mm of wall beside the cavity for its down-sprue, clear of the pins; widen the wall margin, or fill from the top.`,
+        ),
+        ...setupFields,
+      };
+    }
+    const { down, gate, runnerZ, r, gateR } = bottomFill;
+    sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, bottomFill.roomR);
+    baseBores.push(
+      // Down the wall from the parting face...
+      { a: [down.x, down.y, 1], b: [down.x, down.y, runnerZ], r },
+      // ...along under the cavity...
+      { a: [down.x, down.y, runnerZ], b: [gate.x, gate.y, runnerZ], r, ends: true },
+      // ...and up into its lowest point, a little way in.
+      { a: [gate.x, gate.y, runnerZ], b: [gate.x, gate.y, gate.z + 0.3], r: gateR },
+    );
+  } else if (opts.includeSprue && clamshell) {
+    sprueChannel = planSprue(pour.sprue.x, lidChannelY(pour.sprue.y), opts, grid, lidCavityDepth, lidBlockHeight);
+  }
+  if (baseBores.length) baseFeatures.bores = baseBores;
+  // A vent under the sprue's own mouth is the sprue: that air goes out up it.
+  const clearOfSprue = (v: HalfFeatures['channels'][number]) =>
+    !(sprueChannel && feed === 'top' && Math.hypot(v.x - sprueChannel.x, v.y - sprueChannel.y) < sprueChannel.outerR + v.outerR + 1);
+
   const lidFeatures: HalfFeatures = {
     sockets: [],
     // `pinPositions` are in `base`'s frame, so the lid always mirrors them in Y.
     pins: pinPositions.map(([x, y]) => ({ x, y: -y, baseR: pinBaseR, topR: pinTopR, height: opts.pinHeightMm })),
-    channels: [
-      ...(opts.includeSprue
-        ? [{
-            x: pour.sprue.x,
-            y: lidChannelY(pour.sprue.y),
-            outerR: opts.sprueTopDiaMm / 2,
-            innerR: Math.min(opts.sprueBottomDiaMm / 2, opts.sprueTopDiaMm / 2 - 0.4),
-          }]
-        : []),
-      ...pour.vents.map((v) => ({
-        x: v.x,
-        y: lidChannelY(v.y),
-        outerR: opts.ventDiaMm * 0.8,
-        innerR: opts.ventDiaMm / 2,
-      })),
-    ],
+    channels: [...(sprueChannel ? [sprueChannel] : []), ...ventChannels.filter(clearOfSprue)],
   };
 
-  setupFields.features = describeMoldFeatures(opts, baseFeatures, lidFeatures, notchPositions.length);
-
-  const baseTrueDepth = opts.moldType === 'open' ? partHeightMm : (detailIsAbove ? zMax - partingZ : partingZ - zMin);
-  const lidTrueDepth = detailIsAbove ? partingZ - zMin : zMax - partingZ;
-  const baseBlockHeight = baseTrueDepth + opts.baseThicknessMm;
-  const lidBlockHeight = lidTrueDepth + opts.baseThicknessMm;
+  setupFields.features = describeMoldFeatures(opts, baseFeatures, lidFeatures, notchPositions.length, bottomFill);
 
   const lidIsBackingPlate = Math.min(volBelow, volAbove) < 1e-6;
   const useExactCsg = Boolean(!opts.dissolvableLiner && opts.allowUndercuts && undercutColumns > 0);
+  // A runner along the floor is a tunnel, which a depth field cannot hold.
+  if (baseFeatures.bores?.length && !activeWasm) return { ...emptyMoldResult(NO_MANIFOLD_REFUSAL), ...setupFields };
   const effectiveFlexibleAdvised = flexibleMoldAdvised || useExactCsg;
   // Undercuts are kept only by cutting the exact part out of the block; the
   // depth-field mold below would fill them in, so without the engine say so.
@@ -1607,7 +1690,11 @@ export function generateMoldMeshes(
     return 'error' in csgRes ? { ...emptyMoldResult(csgRes.error), ...setupFields } : csgRes;
   }
 
-  const builtBase = buildHalf(grid, baseDepth, opts.baseThicknessMm, baseFeatures, baseTrueDepth);
+  const heightfieldBase = buildHalf(grid, baseDepth, baseFloorMm, baseFeatures, baseTrueDepth);
+  // The down-sprue, runner and vents' bores are tunnels a depth field cannot hold.
+  const builtBase = baseFeatures.bores?.length && activeWasm
+    ? { ...heightfieldBase, triangles: boreTriangles(activeWasm, heightfieldBase.triangles, baseFeatures.bores) }
+    : heightfieldBase;
   const builtLid =
     opts.moldType === 'clamshell'
       ? buildHalf(grid, lidDepth, opts.baseThicknessMm, lidFeatures, lidTrueDepth)

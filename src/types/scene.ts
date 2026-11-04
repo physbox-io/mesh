@@ -986,10 +986,35 @@ export interface SceneNode {
     /**
      * A generated mold's master, so a pour into it can say when it came up
      * short: the master's volume, and whether the mold lies open as it prints
-     * (a clamshell's halves side by side, each filling on its own).
+     * (a clamshell's halves side by side). A pour into one that lies open
+     * closes it first (moldCastSimulation.ts): the lid, every geom named
+     * "lid half", turned over onto the cavity half, parting face to parting
+     * face. `partingZMm` says where those faces are on the plate, and
+     * `pullDirection` / `cavityHoldsTop` stand the casting back the way the
+     * part stood.
      */
-    mold?: { masterVolumeMm3: number; laidOpen: boolean };
+    mold?: {
+      masterVolumeMm3: number;
+      laidOpen: boolean;
+      partingZMm?: { cavity: number; lid: number };
+      pullDirection?: '+z' | '-z' | '+y' | '-y' | '+x' | '-x';
+      cavityHoldsTop?: boolean;
+      /** A bottom-filled mold's route, mm in the cavity half's frame (parting face at 0), so trimming takes it off the casting. */
+      feed?: FeedRoute;
+    };
   };
+}
+
+/** A bottom-fill route: down-sprue at `down`, runner at height `runnerZ`, gate up into the lowest point at `gate` (z its top). */
+export interface FeedRoute {
+  down: [number, number];
+  gate: [number, number, number];
+  runnerZ: number;
+  r: number;
+  gateR: number;
+  /** The funnel over the down-sprue, in the lid's outer face: mouth radius and depth, mm. */
+  funnelR?: number;
+  funnelDepth?: number;
 }
 
 export interface SceneGraph {

@@ -73,7 +73,7 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
     let live = true;
     setBusy(true);
     client
-      .castNode(moldNode, { pour: { direction: settled.direction, ...(settled.fill ? { fillMm: settled.fill } : {}) } })
+      .castNode(moldNode, { castMaterial: material, pour: { direction: settled.direction, ...(settled.fill ? { fillMm: settled.fill } : {}) } })
       .then((res) => {
         if (!live) return;
         if (res.success) {
@@ -93,7 +93,7 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
     return () => {
       live = false;
     };
-  }, [moldNode, settled]);
+  }, [moldNode, settled, material]);
 
   const handleAdd = async () => {
     if (!cast) return;

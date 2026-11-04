@@ -10,7 +10,8 @@ import { loadManifold } from '../src/utils/sculptCut';
 import { stlToMesh } from '../src/utils/stlMesh';
 import { analyzeMesh, meshShells } from '../src/utils/meshIntegrity';
 import { simulatedBody } from '../src/utils/simulatedPart';
-import { moldOptionsFor, moldSceneParts, pourShortfallWarning } from '../src/utils/moldWorkerClient';
+import { moldMasterRecord, moldOptionsFor, moldSceneParts, pourShortfallWarning } from '../src/utils/moldWorkerClient';
+import { simulateCastFromMoldNode } from '../src/utils/moldCastSimulation';
 import { meshIntegrity } from '../src/utils/sceneSummary';
 import { exportBaseName } from '../src/utils/exportBaseName';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
@@ -51,9 +52,15 @@ describe('mold features in the reply', () => {
     expect(s.success).toBe(true);
     const f = s.features!;
     expect(f.sprue?.half).toBe('lid half');
-    expect(f.sprue?.diaMm).toBe(8);
-    expect(f.sprue?.narrowDiaMm).toBe(4);
-    expect(f.vents).toHaveLength(2);
+    // A funnel in the lid's face, then epoxy's 6 mm neck.
+    expect(f.sprue?.narrowDiaMm).toBe(6);
+    expect(f.sprue!.diaMm).toBeGreaterThan(f.sprue!.narrowDiaMm!);
+    expect(f.sprue!.depthMm).toBeGreaterThan(0);
+    // Filled from the bottom, and a vent from the ball's one high point.
+    expect(f.feed).toBe('bottom');
+    expect(f.downSprue?.half).toBe('cavity half');
+    expect(f.gate?.diaMm).toBeGreaterThan(0);
+    expect(f.vents).toHaveLength(1);
     expect(f.vents.every((v) => v.half === 'lid half' && v.diaMm === 1.5)).toBe(true);
     expect(f.pins).toHaveLength(4);
     expect(f.sockets).toHaveLength(4);
@@ -116,13 +123,6 @@ describe('a pour short of the master', () => {
     simulation: { kind: 'mold', createdAt: '', cellMm: 0, toleranceMm: 0, placement: 'beside', mold },
   });
 
-  it('says a clamshell lying open filled each half on its own', () => {
-    const w = pourShortfallWarning(moldNode({ masterVolumeMm3: 1000, laidOpen: true }), 560, 'agent');
-    expect(w).toMatch(/56%/);
-    expect(w).toMatch(/master_id/);
-    expect(pourShortfallWarning(moldNode({ masterVolumeMm3: 1000, laidOpen: true }), 560)).not.toMatch(/physics_/);
-  });
-
   it('flags an open mold that fell short, and keeps quiet when it is full', () => {
     expect(pourShortfallWarning(moldNode({ masterVolumeMm3: 1000, laidOpen: false }), 700)).toMatch(/70%/);
     expect(pourShortfallWarning(moldNode({ masterVolumeMm3: 1000, laidOpen: false }), 990)).toBeNull();
@@ -133,6 +133,34 @@ describe('a pour short of the master', () => {
     delete n.simulation!.mold;
     expect(pourShortfallWarning(n, 10)).toBeNull();
   });
+});
+
+describe('a pour into a clamshell lying open', () => {
+  // It filled each half on its own: a lined gear sculpture came back at 56%
+  // of the master, its gears half as thick, with a warning instead of a casting.
+  for (const lined of [false, true]) {
+    it(`closes the ${lined ? 'lined ' : ''}mold first and casts the whole part`, async () => {
+      const res = generateMoldMeshes(ball, { ...CLAMSHELL, dissolvableLiner: lined, castMaterial: 'epoxy' }, wasm);
+      const s = moldSummary(res);
+      const mesh = stlToMesh(res.binarySTL);
+      const node = simulatedBody({ ...mesh, cellMm: 0, toleranceMm: 0 }, {
+        modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [1, 1, 1], modelMinMm: [-20, -20, 0], modelMaxMm: [20, 20, 40],
+      }, { id: 'sim_x', name: 'Mold', kind: 'mold', placement: 'beside', parts: moldSceneParts(s) });
+      const record = moldMasterRecord(ball, s);
+      node.simulation = { ...node.simulation!, mold: record };
+      const ballMm3 = record.masterVolumeMm3;
+      // Wherever it has been dragged to.
+      node.pos = [0.31, -0.047, 0.002];
+      // Trimmed: the bottom fill's runner comes off along its own bore.
+      const cast = await simulateCastFromMoldNode(node, { trimChannels: true });
+      expect(cast.success, cast.error).toBe(true);
+      // The ball, and a little of the sprue and vents.
+      expect(cast.castVolumeMm3).toBeGreaterThan(ballMm3 * 0.97);
+      expect(cast.castVolumeMm3).toBeLessThan(ballMm3 * 1.08);
+      expect(cast.sizeMm.width).toBeCloseTo(40, 0);
+      expect(pourShortfallWarning(node, cast.castVolumeMm3)).toBeNull();
+    });
+  }
 });
 
 describe('separate pieces', () => {

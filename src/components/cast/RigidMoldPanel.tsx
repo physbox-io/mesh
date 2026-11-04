@@ -223,7 +223,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
     let live = true;
     setCastPreviewBusy(true);
     client
-      .cast({ trimChannels: trimCastChannels })
+      .cast({ trimChannels: trimCastChannels, castMaterial: material })
       .then((res) => {
         if (live) setCastPreview(res);
       })
@@ -236,7 +236,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
     return () => {
       live = false;
     };
-  }, [active, preview, result.success, effectiveViewMode, trimCastChannels]);
+  }, [active, preview, result.success, effectiveViewMode, trimCastChannels, material]);
 
   const [saving, setSaving] = useState(false);
   const [castBusy, setCastBusy] = useState(false);
@@ -282,7 +282,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
     setCastBusy(true);
     setCastError(null);
     try {
-      const castRes = await client.cast({ trimChannels: trimCastChannels }, true);
+      const castRes = await client.cast({ trimChannels: trimCastChannels, castMaterial: material }, true);
       if (!castRes.success) {
         setCastError(castRes.error || 'Could not simulate cast from mold.');
         return;
@@ -687,12 +687,27 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                       onChange={(e) => set('includeSprue', e.target.checked)}
                       className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
                     />
-                    Include Tapered Pour Sprue Funnel
+                    Include Pour Sprue
                   </label>
 
                   {options.includeSprue && (
                     <div className="grid grid-cols-2 gap-3 pl-6 min-w-0">
-                      <Field label="Inlet Dia (mm)" hintAlign="start">
+                      <Field
+                        label="Fill From"
+                        hint="Bottom: down the wall and into the lowest point, so the resin rises and pushes the air out. Top: straight down through the lid."
+                        hintAlign="start"
+                        className="col-span-2"
+                      >
+                        <select
+                          value={options.sprueFeed ?? 'bottom'}
+                          onChange={(e) => set('sprueFeed', e.target.value as 'bottom' | 'top')}
+                          className={inputClass}
+                        >
+                          <option value="bottom">Bottom (recommended)</option>
+                          <option value="top">Top</option>
+                        </select>
+                      </Field>
+                      <Field label="Funnel Dia (mm)" hint="The funnel's mouth on the lid's outside. It goes as deep as the lid allows." hintAlign="start">
                         <NumberInput
                           min={4}
                           max={30}
@@ -702,12 +717,12 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                           className={inputClass}
                         />
                       </Field>
-                      <Field label="Outlet Dia (mm)" hintAlign="end">
+                      <Field label="Neck Dia (mm)" hint={`Into the cavity. ${castMaterial(material).label} needs at least ${castMaterial(material).sprueNeckMm} mm, or air can't get out past it.`} hintAlign="end">
                         <NumberInput
-                          min={2}
-                          max={15}
+                          min={castMaterial(material).sprueNeckMm}
+                          max={20}
                           step={0.5}
-                          value={options.sprueBottomDiaMm}
+                          value={Math.max(options.sprueBottomDiaMm, castMaterial(material).sprueNeckMm)}
                           onChange={(v) => set('sprueBottomDiaMm', v)}
                           className={inputClass}
                         />

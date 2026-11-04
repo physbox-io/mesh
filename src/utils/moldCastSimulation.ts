@@ -23,7 +23,7 @@
 
 import * as THREE from 'three';
 import type { Manifold as ManifoldT, ManifoldToplevel } from 'manifold-3d';
-import type { SceneNode } from '../types/scene';
+import type { FeedRoute, SceneNode } from '../types/scene';
 import type { SurfaceTexture } from './surfaceTexture';
 import { loadManifold } from './sculptCut';
 import { manifoldToMeshMm } from './timberBreakdown';
@@ -37,6 +37,9 @@ import { analyzeMesh } from './meshIntegrity';
 import type { MoldExportResult, MoldSummary } from './moldExporter';
 import { unrotateFromPull } from './moldPullDirection';
 import { pourIntoCavity, probeFacesTouched, type PourInfo, type PourOptions } from './pourCast';
+import { castMaterial, type CastMaterialId } from './castMaterials';
+import { fillCellMm, simulateFill, voxelizeCavity, type FillDomain, type FillResult } from './pourFill';
+import { cutBores, feedRouteOf, FEED_WALL_MM, type BoreCut } from './moldGating';
 
 export interface MoldCastSimulationOptions {
   /** Whether to trim narrow sprue/vent runner stubs sticking up to the outer mold face (default: false — keeps what the mold actually casts, or true when comparing part volume). */
@@ -50,6 +53,19 @@ export interface MoldCastSimulationOptions {
    * a pour (or the one given), to a fill height, failing when nothing does.
    */
   pour?: PourOptions;
+  /** What is poured into a closed mold, for how narrow a passage its air can rise through (default epoxy). */
+  castMaterial?: CastMaterialId;
+  /** Pour a closed mold with the air in it (pourFill.ts), so what cannot fill is left out (default true). */
+  airAware?: boolean;
+}
+
+/** What a closed mold's pour left unfilled, air it could not let out. */
+export interface CastFillReport {
+  /** Share of the cavity, sprue and vents included, that filled. */
+  filledShare: number;
+  trappedMm3: number;
+  pockets: number;
+  largestPocketMm3: number;
 }
 
 export interface MoldCastSimulationResult {
@@ -70,6 +86,8 @@ export interface MoldCastSimulationResult {
   pour?: PourInfo;
   /** How far the cast strays from the part it was molded from, mm, when asked for. */
   deviation?: { maxMm: number; meanMm: number };
+  /** For a closed mold poured with its air in: what did not fill. */
+  fill?: CastFillReport;
 }
 
 export interface RawMoldTexture {
@@ -81,6 +99,8 @@ export interface RawMoldTexture {
 
 export type InternalCastOptions = MoldCastSimulationOptions & {
   isClamshell?: boolean;
+  /** A bottom-filled clamshell's route in the closed mold's frame, for trimming. */
+  feedTrim?: BoreCut[];
   flipUpright?: boolean;
   partingZ?: number;
   halves?: (Float64Array | number[])[];
@@ -206,6 +226,8 @@ export async function simulateCastFromMoldNode(
   options?: MoldCastSimulationOptions,
 ): Promise<MoldCastSimulationResult> {
   const geomShellsMm: Float64Array[] = [];
+  /** The name of the geom each of `geomShellsMm` came from. */
+  const geomNames: string[] = [];
   const negativeShellsMm: Float64Array[] = [];
   const allTrisMetres: number[] = [];
   const rawTextures: RawMoldTexture[] = [];
@@ -260,6 +282,7 @@ export async function simulateCastFromMoldNode(
           allTrisMetres.push(valMm / 1000);
         }
         geomShellsMm.push(geomTrisMm);
+        geomNames.push(geom.name ?? '');
       }
     }
 
@@ -301,6 +324,9 @@ export async function simulateCastFromMoldNode(
       cavityComponents: 0,
     };
   }
+
+  const closed = await castLaidOpenClamshell(node, geomShellsMm, geomNames, options);
+  if (closed) return closed;
 
   const allTrisMm = new Float64Array(allTrisMetres.length);
   for (let i = 0; i < allTrisMetres.length; i++) {
@@ -364,35 +390,16 @@ export async function simulateCastFromMoldResult(
     const topCenterX = (mold.topHalf.bounds.minX + mold.topHalf.bounds.maxX) / 2;
     const lidPartingZ = mold.topHalf.partingZMm || findPartingZ(mold.topHalf.triangles) || mold.topHalf.bounds.maxZ;
 
-    // Flip lid around X by 180°: (x - topCenterX, -y, botPartingZ + lidPartingZ - z)
     const topTrisMm = new Float64Array(mold.topHalf.triangles.length * 9);
     let ti = 0;
     for (const t of mold.topHalf.triangles) {
-      topTrisMm[ti++] = t.a[0] - topCenterX;
-      topTrisMm[ti++] = -t.a[1];
-      topTrisMm[ti++] = botPartingZ + lidPartingZ - t.a[2];
-      topTrisMm[ti++] = t.b[0] - topCenterX;
-      topTrisMm[ti++] = -t.b[1];
-      topTrisMm[ti++] = botPartingZ + lidPartingZ - t.b[2];
-      topTrisMm[ti++] = t.c[0] - topCenterX;
-      topTrisMm[ti++] = -t.c[1];
-      topTrisMm[ti++] = botPartingZ + lidPartingZ - t.c[2];
+      for (const v of [t.a, t.b, t.c]) {
+        topTrisMm[ti++] = v[0] - topCenterX;
+        topTrisMm[ti++] = v[1];
+        topTrisMm[ti++] = v[2];
+      }
     }
-
-    const assembledTris = new Float64Array(botTrisMm.length + topTrisMm.length);
-    assembledTris.set(botTrisMm, 0);
-    assembledTris.set(topTrisMm, botTrisMm.length);
-
-    return restorePartFrame(
-      await simulateCastFromMoldTriangles(assembledTris, {
-        ...options,
-        isClamshell: true,
-        partingZ: botPartingZ,
-        halves: [botTrisMm, topTrisMm],
-      }),
-      mold,
-      options,
-    );
+    return restorePartFrame(await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(mold.features)), mold, options);
   } else {
     // 1-part open mold
     return restorePartFrame(
@@ -406,6 +413,219 @@ export async function simulateCastFromMoldResult(
       options,
     );
   }
+}
+
+/**
+ * Pours the closed mold's cavity with the air in it and takes out of the
+ * casting what the air keeps: each trapped pocket as voxels, turned into a
+ * solid by a level set and subtracted, so the walls stay the mold's own.
+ */
+function pourWithAir(
+  wasm: ManifoldToplevel,
+  cavity: ManifoldT,
+  material: CastMaterialId,
+): { casting: ManifoldT; report: CastFillReport; warning?: string } | null {
+  const raw = manifoldToMeshMm(cavity);
+  const flat = new Float64Array(raw.faces.length * 3);
+  for (let i = 0; i < raw.faces.length; i++) {
+    const v = raw.faces[i] * 3;
+    flat[i * 3] = raw.positionsMm[v];
+    flat[i * 3 + 1] = raw.positionsMm[v + 1];
+    flat[i * 3 + 2] = raw.positionsMm[v + 2];
+  }
+  const b = cavity.boundingBox();
+  const size: [number, number, number] = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
+  if (!(size[0] > 0 && size[1] > 0 && size[2] > 0)) return null;
+  const dom = voxelizeCavity(flat, fillCellMm(size));
+  const res = simulateFill(dom, castMaterial(material).bubbleRiseMm);
+  const report: CastFillReport = {
+    filledShare: Math.round(res.filledShare * 1000) / 1000,
+    trappedMm3: Math.round(res.trappedMm3),
+    pockets: res.pockets.length,
+    largestPocketMm3: Math.round(res.pockets[0]?.volumeMm3 ?? 0),
+  };
+  const volume = cavity.volume();
+  // A cell's worth here and there is the voxels, not air.
+  if (res.trappedMm3 < Math.max(2, volume * 0.003)) return { casting: cavity, report };
+  const air = airSolid(wasm, dom, res);
+  if (!air) return { casting: cavity, report };
+  const casting = cavity.subtract(air);
+  air.delete();
+  const share = 1 - casting.volume() / volume;
+  // A bubble a few millimetres across here and there is reported, not warned about.
+  const matters = share >= 0.01 || report.largestPocketMm3 >= 30;
+  const warning = matters
+    ? `Air stays in ${res.pockets.length === 1 ? 'one pocket' : `${res.pockets.length} pockets`} (${report.trappedMm3} mm³, ${Math.round(share * 1000) / 10}% of the casting, ` +
+      `the largest ${report.largestPocketMm3} mm³): the ${castMaterial(material).label.toLowerCase()} cannot get in where its air cannot get out. ` +
+      'Each needs a vent from its top, or the mold filled from the bottom.'
+    : undefined;
+  return { casting, report, warning };
+}
+
+/** The trapped air as a solid: its cells and the mold cells round them, so the cut follows the mold's walls. */
+function airSolid(wasm: ManifoldToplevel, d: FillDomain, res: FillResult): ManifoldT | null {
+  const { cols, rows, layers, cell, inside } = d;
+  const plane = cols * rows;
+  const n = plane * layers;
+  const air = new Uint8Array(n);
+  let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < n; i++) {
+    if (!inside[i] || res.wet[i]) continue;
+    const k = Math.floor(i / plane), rem = i - k * plane, r = Math.floor(rem / cols), c = rem - r * cols;
+    for (let dk = -1; dk <= 1; dk++) for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      const kk = k + dk, rr = r + dr, cc = c + dc;
+      if (kk < 0 || rr < 0 || cc < 0 || kk >= layers || rr >= rows || cc >= cols) continue;
+      const j = (kk * rows + rr) * cols + cc;
+      // Into the mold, never into liquid.
+      if (j === i || !inside[j]) air[j] = 1;
+    }
+    lo = [Math.min(lo[0], c), Math.min(lo[1], r), Math.min(lo[2], k)];
+    hi = [Math.max(hi[0], c), Math.max(hi[1], r), Math.max(hi[2], k)];
+  }
+  if (lo[0] === Infinity) return null;
+  const at = (c: number, r: number, k: number) =>
+    c < 0 || r < 0 || k < 0 || c >= cols || r >= rows || k >= layers ? 0 : air[(k * rows + r) * cols + c];
+  // Trilinear between cell centres, 0.5 on the boundary.
+  const sdf = (p: [number, number, number]) => {
+    const fx = (p[0] - d.x0) / cell, fy = (p[1] - d.y0) / cell, fz = (p[2] - d.z0) / cell;
+    const c = Math.floor(fx), r = Math.floor(fy), k = Math.floor(fz);
+    const tx = fx - c, ty = fy - r, tz = fz - k;
+    let v = 0;
+    for (let a = 0; a < 2; a++) for (let b2 = 0; b2 < 2; b2++) for (let e = 0; e < 2; e++) {
+      const w = (a ? tx : 1 - tx) * (b2 ? ty : 1 - ty) * (e ? tz : 1 - tz);
+      if (w > 0) v += w * at(c + a, r + b2, k + e);
+    }
+    return v - 0.5;
+  };
+  const bounds = {
+    min: [d.x0 + (lo[0] - 2) * cell, d.y0 + (lo[1] - 2) * cell, d.z0 + (lo[2] - 2) * cell] as [number, number, number],
+    max: [d.x0 + (hi[0] + 2) * cell, d.y0 + (hi[1] + 2) * cell, d.z0 + (hi[2] + 2) * cell] as [number, number, number],
+  };
+  const m = wasm.Manifold.levelSet(sdf as (p: [number, number, number]) => number, bounds, cell);
+  if (m.isEmpty()) {
+    m.delete();
+    return null;
+  }
+  return m;
+}
+
+/**
+ * A clamshell's halves closed and poured: `bot` and `top` as they print, each
+ * centred on x = 0, the lid turned over about X onto the cavity half, parting
+ * face to parting face: (x, -y, botPartingZ + lidPartingZ - z).
+ */
+async function castClosedClamshell(
+  bot: Float64Array,
+  top: Float64Array,
+  botPartingZ: number,
+  lidPartingZ: number,
+  options?: MoldCastSimulationOptions,
+  feed?: FeedRoute,
+): Promise<MoldCastSimulationResult> {
+  const turned = new Float64Array(top.length);
+  for (let i = 0; i < top.length; i += 3) {
+    turned[i] = top[i];
+    turned[i + 1] = -top[i + 1];
+    turned[i + 2] = botPartingZ + lidPartingZ - top[i + 2];
+  }
+  const assembled = new Float64Array(bot.length + turned.length);
+  assembled.set(bot, 0);
+  assembled.set(turned, bot.length);
+  // The route a little fatter than it was cut, so no skin of it is left on the
+  // casting; the down-sprue and funnel much fatter, since a depth-field lid
+  // draws them a grid cell ragged, and the down-sprue is a wall clear of the part.
+  const z = (v: number) => botPartingZ + v;
+  const ragged = FEED_WALL_MM - 0.1;
+  const face = botPartingZ + lidPartingZ;
+  const feedTrim: BoreCut[] | undefined = feed && [
+    // The funnel, 45° from a millimetre above the lid's face...
+    ...(feed.funnelR && feed.funnelDepth
+      ? [{ a: [feed.down[0], feed.down[1], face + 1], b: [feed.down[0], feed.down[1], face - feed.funnelDepth - ragged], r: feed.funnelR + 1 + ragged, rB: feed.r + ragged } as BoreCut]
+      : []),
+    { a: [feed.down[0], feed.down[1], face + 1], b: [feed.down[0], feed.down[1], z(feed.runnerZ)], r: feed.r + ragged },
+    { a: [feed.down[0], feed.down[1], z(feed.runnerZ)], b: [feed.gate[0], feed.gate[1], z(feed.runnerZ)], r: feed.r + 0.05, ends: true },
+    { a: [feed.gate[0], feed.gate[1], z(feed.runnerZ)], b: [feed.gate[0], feed.gate[1], z(feed.gate[2])], r: feed.gateR + 0.05 },
+  ];
+  return simulateCastFromMoldTriangles(assembled, { ...options, isClamshell: true, partingZ: botPartingZ, halves: [bot, turned], ...(feedTrim ? { feedTrim } : {}) });
+}
+
+/**
+ * A generated clamshell in the scene lies as it prints, halves side by side,
+ * and a pour into it filled each half on its own: a lined gear sculpture's
+ * cast came back at 56% of the master, its gears half as thick, because the
+ * lid's share of them was never in the mold. So a body that knows it lies
+ * open (simulation.mold.laidOpen) is closed first, the lid being every geom
+ * named "lid half", and poured through its sprue the way the Mold dialog's
+ * cast is. Null when the body is not one of those.
+ */
+async function castLaidOpenClamshell(
+  node: SceneNode,
+  shells: Float64Array[],
+  names: string[],
+  options?: MoldCastSimulationOptions,
+): Promise<MoldCastSimulationResult | null> {
+  const rec = node.simulation?.mold;
+  if (!rec?.laidOpen) return null;
+  const isLid = names.map((n) => /lid[ _]half/i.test(n));
+  if (!isLid.some(Boolean) || isLid.every(Boolean)) return null;
+
+  const join = (lid: boolean) => {
+    const parts = shells.filter((_, i) => isLid[i] === lid);
+    const out = new Float64Array(parts.reduce((s, p) => s + p.length, 0));
+    let o = 0;
+    for (const p of parts) {
+      out.set(p, o);
+      o += p.length;
+    }
+    return out;
+  };
+  const bot = join(false);
+  const top = join(true);
+  // Back into the body's own frame, wherever it has been moved to: there the
+  // plate's centreline is y = 0, the footprint of a half and its mirror.
+  const toBody = getNodeWorldTransform(node).invert();
+  const v = new THREE.Vector3();
+  for (const a of [bot, top]) {
+    for (let i = 0; i < a.length; i += 3) {
+      v.set(a[i] / 1000, a[i + 1] / 1000, a[i + 2] / 1000).applyMatrix4(toBody);
+      a[i] = v.x * 1000;
+      a[i + 1] = v.y * 1000;
+      a[i + 2] = v.z * 1000;
+    }
+  }
+  // The plate's bed is the lowest point of either half; centre each half on x = 0.
+  let bed = Infinity;
+  for (const a of [bot, top]) for (let i = 2; i < a.length; i += 3) bed = Math.min(bed, a[i]);
+  const settle = (a: Float64Array) => {
+    let mn = Infinity, mx = -Infinity, zTop = -Infinity;
+    for (let i = 0; i < a.length; i += 3) {
+      mn = Math.min(mn, a[i]);
+      mx = Math.max(mx, a[i]);
+      zTop = Math.max(zTop, a[i + 2] - bed);
+    }
+    const cx = (mn + mx) / 2;
+    for (let i = 0; i < a.length; i += 3) {
+      a[i] -= cx;
+      a[i + 2] -= bed;
+    }
+    return zTop;
+  };
+  const botTop = settle(bot);
+  settle(top);
+  // The cavity half has nothing above its parting face; the lid has its pins.
+  const botPartingZ = rec.partingZMm?.cavity ?? botTop;
+  const lidPartingZ = rec.partingZMm?.lid ?? findPartingZFromPositions(top);
+  if (!(lidPartingZ > 0)) return null;
+
+  // A closed mold is poured through its sprue: the side and level of an open pour do not apply.
+  const rest: MoldCastSimulationOptions = { ...options };
+  delete rest.pour;
+  const res = await castClosedClamshell(bot, top, botPartingZ, lidPartingZ, rest, rec.feed);
+  return restorePartFrame(
+    res,
+    { moldType: 'clamshell', pullDirection: rec.pullDirection ?? '+z', cavityHoldsTop: Boolean(rec.cavityHoldsTop), topHalf: {} as MoldSummary['topHalf'] },
+    rest,
+  );
 }
 
 /**
@@ -521,21 +741,11 @@ export async function simulateCastFromMoldBuffers(
     const topTrisMm = new Float64Array(topPositions.length);
     for (let i = 0; i < topPositions.length; i += 3) {
       topTrisMm[i] = topPositions[i] - topCenterX;
-      topTrisMm[i + 1] = -topPositions[i + 1];
-      topTrisMm[i + 2] = botPartingZ + lidPartingZ - topPositions[i + 2];
+      topTrisMm[i + 1] = topPositions[i + 1];
+      topTrisMm[i + 2] = topPositions[i + 2];
     }
-
-    const assembledTris = new Float64Array(botTrisMm.length + topTrisMm.length);
-    assembledTris.set(botTrisMm, 0);
-    assembledTris.set(topTrisMm, botTrisMm.length);
-
     return restorePartFrame(
-      await simulateCastFromMoldTriangles(assembledTris, {
-        ...options,
-        isClamshell: true,
-        partingZ: botPartingZ,
-        halves: [botTrisMm, topTrisMm],
-      }),
+      await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(summary.features)),
       summary,
       options,
     );
@@ -809,12 +1019,31 @@ export async function simulateCastFromMoldTriangles(
           for (const p of parts) {
             if (p !== best) p.delete();
           }
+          let fill: CastFillReport | undefined;
+          if (options?.isClamshell && options.airAware !== false) {
+            const poured = pourWithAir(wasm, best, options.castMaterial ?? 'epoxy');
+            if (poured) {
+              fill = poured.report;
+              if (poured.casting !== best) {
+                best.delete();
+                best = poured.casting;
+              }
+              if (poured.warning) warnings.push(poured.warning);
+            }
+          }
+          // Trimmed, the bottom fill's down-sprue, runner and gate come off along
+          // their own bores, and then the sprue and vents off the top.
+          if (options?.trimChannels && options.feedTrim?.length) best = cutBores(wasm, best, options.feedTrim);
           if (options?.trimChannels) best = trimRunnerChannels(wasm, best);
+          // Trimming along a depth-field lid's ragged holes leaves slivers of
+          // nothing floating where they were; they are not casting.
+          if (options?.trimChannels) best = dropSlivers(wasm, best);
 
           const raw = manifoldToMeshMm(best);
           best.delete();
 
-          return finalizeCastMesh(raw.positionsMm, raw.faces, cavityComponents, options, warnings);
+          const res = finalizeCastMesh(raw.positionsMm, raw.faces, cavityComponents, options, warnings);
+          return fill ? { ...res, fill } : res;
         }
       } else {
         cavity.delete();
@@ -843,6 +1072,23 @@ export async function simulateCastFromMoldTriangles(
   // 4. Fallback Path: Exact Column Spans + meshField
   warnings.push('Falling back to column spans and surface nets for mold cavity simulation.');
   return fallbackColumnSpansCast(trisMm, boxMinX, boxMaxX, boxMinY, boxMaxY, minZ, maxZ, options, warnings);
+}
+
+/** The casting less any piece under a cubic millimetre, or a thousandth of it. Consumes `casting`. */
+function dropSlivers(wasm: ManifoldToplevel, casting: ManifoldT): ManifoldT {
+  const parts = casting.decompose();
+  if (parts.length <= 1) {
+    for (const p of parts) p.delete();
+    return casting;
+  }
+  const floor = Math.max(1, casting.volume() * 1e-3);
+  const kept = parts.filter((p) => p.volume() >= floor);
+  for (const p of parts) if (!kept.includes(p)) p.delete();
+  if (kept.length === 0) return casting;
+  casting.delete();
+  const out = wasm.Manifold.compose(kept);
+  for (const p of kept) p.delete();
+  return out;
 }
 
 /**

@@ -42,6 +42,8 @@ import { castMaterial, castMaterialWarnings, type CastMaterialId } from './castM
 import { applyDraft, erodeDepth, type DraftMode } from './moldDraft';
 import { linerPair, pairSoftenC, type LinerPair, type LinerPairId } from './linerMaterials';
 import { fittedBlock, type Outline } from './moldOutline';
+import { channelSolid } from './moldSprue';
+import { boreSolids } from './moldGating';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
 /** Said of a water-soluble liner; an ABS + HIPS mold takes water-based casts. */
@@ -449,9 +451,10 @@ function buildHalfPair(
     pin.delete();
   }
   for (const ch of features.channels) {
-    cutBoth(
-      wasm.Manifold.cylinder(blockHeight + 2, ch.outerR, ch.innerR, 24, false).translate([ch.x, ch.y, -blockHeight - 1])
-    );
+    cutBoth(channelSolid(wasm, ch, blockHeight));
+  }
+  for (const cut of features.bores ?? []) {
+    for (const tool of boreSolids(wasm, cut)) cutBoth(tool);
   }
 
   return { shell, liner, envelope, spans: halfSpans(ctx.field, grid, partingZ, flipped), escapedMm3 };

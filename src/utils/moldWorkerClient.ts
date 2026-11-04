@@ -30,6 +30,7 @@ import {
   type MoldCastSimulationResult,
 } from './moldCastSimulation';
 import type { SceneGraph, SceneNode } from '../types/scene';
+import { feedRouteOf } from './moldGating';
 import { loadManifold } from './sculptCut';
 import {
   CAST_MATERIALS,
@@ -222,11 +223,11 @@ export class MoldWorkerClient {
     this.revive();
     if (!this.worker) {
       const res = await simulateCastFromMoldNode(node, options);
-      const short = res.success ? pourShortfallWarning(node, res.castVolumeMm3, 'agent') : null;
+      const short = res.success ? pourShortfallWarning(node, res.castVolumeMm3) : null;
       return short ? { ...res, warnings: [short, ...(res.warnings ?? [])] } : res;
     }
     const res = await this.send<MoldCastSimulationResult>({ type: 'CAST_NODE', node, options });
-    const short = res.success ? pourShortfallWarning(node, res.castVolumeMm3, 'agent') : null;
+    const short = res.success ? pourShortfallWarning(node, res.castVolumeMm3) : null;
     return short ? { ...res, warnings: [short, ...(res.warnings ?? [])] } : res;
   }
 
@@ -252,10 +253,21 @@ async function thinSectionWarnings(scene: SceneGraph, material: CastMaterialId |
 }
 
 /** What a mold body records about its master (see SceneNode.simulation.mold). */
-export function moldMasterRecord(scene: SceneGraph, summary: Pick<MoldSummary, 'moldType'>): { masterVolumeMm3: number; laidOpen: boolean } {
+export function moldMasterRecord(
+  scene: SceneGraph,
+  summary: Pick<MoldSummary, 'moldType' | 'pullDirection' | 'cavityHoldsTop' | 'bottomHalf' | 'topHalf' | 'features'>,
+): NonNullable<NonNullable<SceneNode['simulation']>['mold']> {
   // Scene triangles are in metres.
   const volumeMm3 = Math.abs(soupVolume(collectSceneTriangles(scene).tris)) * 1e9;
-  return { masterVolumeMm3: Math.round(volumeMm3), laidOpen: summary.moldType === 'clamshell' };
+  const laidOpen = summary.moldType === 'clamshell' && Boolean(summary.topHalf);
+  return {
+    masterVolumeMm3: Math.round(volumeMm3),
+    laidOpen,
+    ...(laidOpen ? { partingZMm: { cavity: summary.bottomHalf.partingZMm, lid: summary.topHalf!.partingZMm } } : {}),
+    ...(summary.pullDirection ? { pullDirection: summary.pullDirection } : {}),
+    cavityHoldsTop: Boolean(summary.cavityHoldsTop),
+    ...(feedRouteOf(summary.features) ? { feed: feedRouteOf(summary.features) } : {}),
+  };
 }
 
 /** A pour this far under the master's volume is not the casting. */
@@ -263,21 +275,15 @@ const SHORT_POUR_SHARE = 0.9;
 
 /**
  * Whether a pour into a generated mold came up short of its master, in words.
- * A clamshell added to the scene lies as it prints, halves side by side and
- * open, so pouring into it fills each half on its own: once that came back at
- * 56% of the master, silently.
+ * A clamshell lying open as it prints is closed before the pour
+ * (moldCastSimulation.ts); it used to fill each half on its own and come back
+ * at 56% of the master, with a warning that said so rather than a casting.
  */
-export function pourShortfallWarning(node: SceneNode, castVolumeMm3: number, reader: 'user' | 'agent' = 'user'): string | null {
+export function pourShortfallWarning(node: SceneNode, castVolumeMm3: number): string | null {
   const mold = node.simulation?.mold;
   if (!mold || !(mold.masterVolumeMm3 > 0)) return null;
   const share = castVolumeMm3 / mold.masterVolumeMm3;
   const pct = Math.round(share * 100);
-  if (mold.laidOpen) {
-    return `This two-part mold lies open, its halves side by side as they print, so each half filled on its own (${pct}% of the master's volume). ` +
-      (reader === 'agent'
-        ? "That is not what the closed mold casts: physics_add_simulation kind 'mold_cast' with master_id and no body_id pours into it closed."
-        : 'That is not what the closed mold casts: Simulate Cast in the Mold dialog pours into it closed.');
-  }
   return share < SHORT_POUR_SHARE
     ? `The pour came to ${pct}% of the master's volume: it stopped short of filling the cavity (a fill depth below the rim, the side poured from, or trapped air). Check the pour direction and fill.`
     : null;
@@ -313,6 +319,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
   return {
     ...(msg.blockShape !== undefined && msg.blockShape !== 'box' && msg.blockShape !== 'fit' ? { error: "block_shape is 'box' or 'fit'." } : {}),
     ...(badLiner ? { error: `liner_material is one of ${LINER_PAIRS.map((p) => p.id).join(', ')}.` } : {}),
+    ...(msg.sprueFeed !== undefined && msg.sprueFeed !== 'bottom' && msg.sprueFeed !== 'top' ? { error: "sprue_feed is 'bottom' or 'top'." } : {}),
     ...(badMaterial
       ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast).` }
       : {}),
@@ -335,6 +342,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.pinToleranceMm === 'number' && msg.pinToleranceMm >= 0 ? { pinToleranceMm: msg.pinToleranceMm } : {}),
       ...(pos(msg.sprueTopDiaMm) !== undefined ? { sprueTopDiaMm: pos(msg.sprueTopDiaMm) } : {}),
       ...(pos(msg.sprueBottomDiaMm) !== undefined ? { sprueBottomDiaMm: pos(msg.sprueBottomDiaMm) } : {}),
+      ...(msg.sprueFeed === 'bottom' || msg.sprueFeed === 'top' ? { sprueFeed: msg.sprueFeed } : {}),
       ...(typeof msg.cavityDepthMm === 'number' ? { cavityDepthMm: msg.cavityDepthMm } : {}),
       // draft_deg is the tool's name for it, as on the metal chains.
       ...(typeof msg.draftAngleDeg === 'number' ? { draftAngleDeg: msg.draftAngleDeg }
@@ -633,6 +641,7 @@ export async function runMcpMoldSimulation(params: {
         c.castNode(moldNode, {
           trimChannels: msg.trimChannels === true,
           orientUpright: msg.orientUpright !== false,
+          ...(moldOpts.castMaterial ? { castMaterial: moldOpts.castMaterial } : {}),
           pour: {
             direction: POUR_DIRECTIONS.includes(msg.pourDirection as PourDirection) ? (msg.pourDirection as PourDirection) : box ? '+z' : 'auto',
             ...(fillMm ? { fillMm } : {}),
@@ -658,6 +667,8 @@ export async function runMcpMoldSimulation(params: {
         fillFrom: typeof msg.fillMm === 'number' && msg.fillMm > 0 ? 'fill_mm' : box ? 'pour box' : 'rim',
         sizeMm: castRes.sizeMm,
         volumeMm3: Math.round(castRes.castVolumeMm3),
+        // What a pour with the air in it left unfilled.
+        ...(castRes.fill ? { fill: castRes.fill } : {}),
         // Against the master the mold was made from, when it was made here.
         ...(moldNode.simulation?.mold?.masterVolumeMm3
           ? {
@@ -682,6 +693,7 @@ export async function runMcpMoldSimulation(params: {
       const cr = await c.cast({
         trimChannels: msg.trimChannels === true,
         orientUpright: msg.orientUpright !== false,
+        ...(moldOpts.castMaterial ? { castMaterial: moldOpts.castMaterial } : {}),
       }, true);
       return { preview: p, castRes: cr };
     });
@@ -729,6 +741,7 @@ export async function runMcpMoldSimulation(params: {
       ...(moldRes.setupNote ? { setupNote: moldRes.setupNote } : {}),
       sizeMm: castRes.sizeMm,
       volumeMm3: Math.round(castRes.castVolumeMm3),
+      ...(castRes.fill ? { fill: castRes.fill } : {}),
       ...(castRes.deviation ? { deviationMm: castRes.deviation } : {}),
       ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
       cavityComponents: castRes.cavityComponents,
