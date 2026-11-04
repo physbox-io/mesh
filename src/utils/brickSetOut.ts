@@ -49,26 +49,34 @@ export interface BrickDims { L: number; W: number; H: number; j: number }
 
 /** Straight faces of the loops, split at corners; curves are left out. */
 function facesOf(loops: V2[][], outerFlags: boolean[]): Face[] {
-  const out: Face[] = [];
+  // Join collinear neighbours within each closed loop (including across its start/end seam).
+  const sameLine = (p: Face, q: Face) =>
+    dot(p.u, q.u) > 0.9999 && len(sub(p.b, q.a)) < 0.5 && Math.abs(dot(sub(q.b, p.a), p.n)) < 0.5;
+  const merged: Face[] = [];
   loops.forEach((loop, li) => {
+    const ring: Face[] = [];
     const n = loop.length;
     for (let i = 0; i < n; i++) {
       const a = loop[i], b = loop[(i + 1) % n];
       const d = sub(b, a), l = len(d);
       if (l < 1) continue;
       const u = mul(d, 1 / l);
-      out.push({ a, b, u, n: { x: -u.y, y: u.x }, length: l, outer: outerFlags[li] });
+      const f: Face = { a, b, u, n: { x: -u.y, y: u.x }, length: l, outer: outerFlags[li] };
+      const last = ring[ring.length - 1];
+      if (last && sameLine(last, f)) {
+        last.b = f.b;
+        last.length = len(sub(last.b, last.a));
+      } else {
+        ring.push(f);
+      }
     }
+    if (ring.length > 1 && sameLine(ring[ring.length - 1], ring[0])) {
+      const tail = ring.pop()!;
+      ring[0].a = tail.a;
+      ring[0].length = len(sub(ring[0].b, ring[0].a));
+    }
+    merged.push(...ring);
   });
-  // Join collinear neighbours (a slice's straight face can come in pieces).
-  const merged: Face[] = [];
-  for (const f of out) {
-    const last = merged[merged.length - 1];
-    if (last && dot(last.u, f.u) > 0.9999 && len(sub(last.b, f.a)) < 0.5 && Math.abs(dot(sub(f.b, last.a), last.n)) < 0.5) {
-      last.b = f.b;
-      last.length = len(sub(last.b, last.a));
-    } else merged.push({ ...f });
-  }
   // A facet of a curve is not a wall: a face that turns gently into the next
   // at both ends (a polygon round a tower) is left to the face-by-face laying.
   const turn = (f: Face, g: Face) => Math.acos(Math.max(-1, Math.min(1, dot(f.u, g.u))));

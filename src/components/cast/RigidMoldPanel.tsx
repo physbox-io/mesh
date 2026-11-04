@@ -261,7 +261,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
       setFailure((e as Error).message);
       return;
     }
-    const added = await addToScene.add({
+    await addToScene.add({
       mesh: stlToMesh(bytes),
       ...(preview ? { parts: moldSceneParts(preview.summary), mold: moldMasterRecord(scene, preview.summary) } : {}),
       transform: sceneStockTransform(),
@@ -269,10 +269,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
       label: 'Mold',
       placement: 'beside',
       details: moldFeatureLines(preview?.summary.features),
-      select: false,
     });
-    // Halves laid flat to print are not something to pour into or mold again.
-    if (added) useStore.getState().selectMany([], false);
   };
 
   /** Simulates pouring into the closed mold and adds the resulting cast solid to the scene. */
@@ -709,10 +706,10 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                       </Field>
                       <Field label="Funnel Dia (mm)" hint="The funnel's mouth on the lid's outside. It goes as deep as the lid allows." hintAlign="start">
                         <NumberInput
-                          min={4}
-                          max={30}
+                          min={Math.max(4, Math.max(options.sprueBottomDiaMm, castMaterial(material).sprueNeckMm) * 2)}
+                          max={40}
                           step={1}
-                          value={options.sprueTopDiaMm}
+                          value={Math.max(options.sprueTopDiaMm, Math.max(options.sprueBottomDiaMm, castMaterial(material).sprueNeckMm) * 2)}
                           onChange={(v) => set('sprueTopDiaMm', v)}
                           className={inputClass}
                         />

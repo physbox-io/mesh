@@ -46,8 +46,8 @@ describe('pouring with air in the mold', () => {
     expect(r.pockets[0].volumeMm3).toBeGreaterThan(20 * 20 * 10 * 0.9);
   });
 
-  it('fills the same block once a vent lets its air out', () => {
-    const r = pour(union(box(-10, -10, 0, 20, 20, 10), tube(0, 0, 9, 30, 2.4), tube(8, 8, 9, 30, 1.6)));
+  it('fills the same block once a vent lets its air out, even if the vent stops a couple of cells short of topK', () => {
+    const r = pour(union(box(-10, -10, 0, 20, 20, 10), tube(0, 0, 9, 30, 2.4), tube(8, 8, 9, 29.2, 1.6)));
     expect(r.filledShare).toBeGreaterThan(0.98);
   });
 

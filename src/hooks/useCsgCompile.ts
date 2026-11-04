@@ -178,6 +178,10 @@ export async function compileCsgNodes(
   const stale = collectStale(scene.nodes);
   const unbuilt = collectUnbuiltScad(scene.nodes);
   const unlaid = collectUnbuiltBrickwork(scene.nodes);
+  if (stale.length === 0 && unbuilt.length === 0 && unlaid.length === 0 && (!colliders || collectStaleColliders(scene.nodes).length === 0)) {
+    if (!colliders && collectStaleColliders(scene.nodes).length > 0) scheduleCsgCompile();
+    return 0;
+  }
   if (unlaid.length > 0) {
     const { layBrickworkSourceOffThread } = await import('../utils/brickworkClient');
     await Promise.all(unlaid.map(async (node) => {
@@ -185,16 +189,14 @@ export async function compileCsgNodes(
         const geoms = await layBrickworkSourceOffThread(node.brickwork!, node.id);
         // Laid from the source it still has: if that changed meanwhile, the next pass lays the new one.
         const now = findNodeById(useStore.getState().sceneGraph.nodes, node.id);
-        if (now && brickworkKey(now) === brickworkKey(node) && !now.geoms?.length) useStore.getState().updateNode(node.id, { geoms });
+        if (now && brickworkKey(now) === brickworkKey(node) && !now.geoms?.length) {
+          useStore.getState().updateNode(node.id, { geoms }, true);
+        }
       } catch (err) {
         failedBrickwork.add(brickworkKey(node));
         console.error(`Laying the bricks failed for ${node.id}:`, err);
       }
     }));
-  }
-  if (stale.length === 0 && unbuilt.length === 0 && (!colliders || collectStaleColliders(scene.nodes).length === 0)) {
-    if (!colliders && collectStaleColliders(scene.nodes).length > 0) scheduleCsgCompile();
-    return unlaid.length;
   }
 
   if (unbuilt.length > 0) {

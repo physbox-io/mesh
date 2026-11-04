@@ -22,18 +22,18 @@ export function MoldCard({ node }: { node: SceneNode }) {
   ].filter(Boolean).join(', ');
 
   return (
-    <div className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-200/60 rounded-lg">
+    <div className="flex flex-col gap-2 p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800 rounded-lg">
       <div className="flex justify-between items-center">
-        <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Mold</label>
+        <label className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Mold</label>
         {mold.masterVolumeMm3 > 0 && (
-          <span className="text-[10px] text-slate-500" title="The part it was made from, and so what a pour takes.">
+          <span className="text-[10px] text-slate-500 dark:text-slate-400" title="The part it was made from, and so what a pour takes.">
             casts {Math.round(mold.masterVolumeMm3 / 100) / 10} ml
           </span>
         )}
       </div>
-      <div className="text-xs text-slate-700">{summary}.</div>
+      <div className="text-xs text-slate-700 dark:text-slate-200">{summary}.</div>
       {lines.length > 0 && (
-        <ul className="flex flex-col gap-1 text-[10px] leading-snug text-slate-500 list-disc pl-3.5">
+        <ul className="flex flex-col gap-1 text-[10px] leading-snug text-slate-500 dark:text-slate-400 list-disc pl-3.5">
           {lines.map((l) => (
             <li key={l}>{l}</li>
           ))}
@@ -43,7 +43,7 @@ export function MoldCard({ node }: { node: SceneNode }) {
         type="button"
         onClick={() => openPour(true)}
         title="Pour into this mold: closed, poured through its sprue, with the air in it. The same as Cast on the bottom bar."
-        className="flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded border border-orange-200 bg-white text-xs font-semibold text-orange-600 hover:bg-orange-50 shadow-sm"
+        className="flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded border border-orange-200 dark:border-orange-900/60 bg-white dark:bg-slate-800 text-xs font-semibold text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950/40 shadow-sm cursor-pointer"
       >
         <Flame className="w-3.5 h-3.5" />
         Pour…

@@ -140,11 +140,15 @@ export function simulateFill(d: FillDomain, bubbleRiseMm: number): FillResult {
   const empty: FillResult = { wet: new Uint8Array(n), filledShare: 0, pockets: [], trappedMm3: 0 };
   if (total === 0) return empty;
 
-  // Openings: cavity reaching the top layer, which is the mold's top face.
+  // Openings: cavity reaching the top face of the mold. On a heightfield lid
+  // a narrow vent's sloped wall can stop a voxel or two below the wide sprue
+  // mouth's top layer, while any internal cavity ceiling sits at least the lid
+  // floor thickness (≥ 2 mm) below.
   let topK = -1;
   for (let i = n - 1; i >= 0 && topK < 0; i--) if (inside[i]) topK = Math.floor(i / plane);
   const opening = new Uint8Array(n);
-  for (let k = Math.max(0, topK - 1); k <= topK; k++) {
+  const openMargin = Math.max(1, Math.round(1.0 / cell));
+  for (let k = Math.max(0, topK - openMargin); k <= topK; k++) {
     for (let j = 0; j < plane; j++) {
       const i = k * plane + j;
       if (inside[i] && (k === layers - 1 || !inside[i + plane])) opening[i] = 1;

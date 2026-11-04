@@ -5,7 +5,7 @@ import type { SceneNode } from '../types/scene';
 import { useStore } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import {
-  BRICK_BONDS, BRICK_STANDARDS, DEFAULT_BRICKWORK_OPTIONS,
+  BRICK_BONDS, BRICK_STANDARDS, DEFAULT_BRICKWORK_OPTIONS, defaultBrickStandardFor,
   type BrickBond, type BrickPlacement, type BrickStandardId,
 } from '../utils/brickwork';
 import { layBricksOffThread, type BrickworkOutcome } from '../utils/brickworkClient';
@@ -21,6 +21,26 @@ function pieceOf(nodes: SceneNode[], id: string | null): SceneNode | null {
 
 const field = 'w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white';
 
+interface RememberedBrickworkState {
+  standardId: BrickStandardId;
+  bond: BrickBond;
+  jointMm: number;
+  wastagePct: number;
+  placement: BrickPlacement;
+  toyInventory: ToyInventory;
+  hollowStuds: number;
+}
+
+let rememberedBrickwork: RememberedBrickworkState = {
+  standardId: DEFAULT_BRICKWORK_OPTIONS.standardId,
+  bond: DEFAULT_BRICKWORK_OPTIONS.bond,
+  jointMm: BRICK_STANDARDS[DEFAULT_BRICKWORK_OPTIONS.standardId].jointMm,
+  wastagePct: DEFAULT_BRICKWORK_OPTIONS.wastagePct,
+  placement: 'beside',
+  toyInventory: Object.fromEntries(TOY_SIZES.map((s) => [s, null])),
+  hollowStuds: 0,
+};
+
 /**
  * Lay the selected piece (or the whole scene) in brick: the count to buy, the
  * cuts, the mortar and the lintels, worked out as the settings change, and the
@@ -32,17 +52,26 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   const piece = pieceOf(scene.nodes, selectedNodeId);
 
-  const [standardId, setStandardId] = useState<BrickStandardId>(DEFAULT_BRICKWORK_OPTIONS.standardId);
-  const [bond, setBond] = useState<BrickBond>(DEFAULT_BRICKWORK_OPTIONS.bond);
-  const [jointMm, setJointMm] = useState<number>(BRICK_STANDARDS[DEFAULT_BRICKWORK_OPTIONS.standardId].jointMm);
-  const [wastagePct, setWastagePct] = useState<number>(DEFAULT_BRICKWORK_OPTIONS.wastagePct);
-  const [placement, setPlacement] = useState<BrickPlacement>('beside');
+  const [standardId, setStandardId] = useState<BrickStandardId>(() =>
+    defaultBrickStandardFor(scene, piece?.id ?? null, rememberedBrickwork.standardId),
+  );
+  const [bond, setBond] = useState<BrickBond>(() => rememberedBrickwork.bond);
+  const [jointMm, setJointMm] = useState<number>(() => {
+    const initial = defaultBrickStandardFor(scene, piece?.id ?? null, rememberedBrickwork.standardId);
+    return initial === rememberedBrickwork.standardId ? rememberedBrickwork.jointMm : BRICK_STANDARDS[initial].jointMm;
+  });
+  const [wastagePct, setWastagePct] = useState<number>(() => rememberedBrickwork.wastagePct);
+  const [placement, setPlacement] = useState<BrickPlacement>(() => rememberedBrickwork.placement);
   const [outcome, setOutcome] = useState<BrickworkOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [toyInventory, setToyInventory] = useState<ToyInventory>(() => Object.fromEntries(TOY_SIZES.map((s) => [s, null])));
-  const [hollowStuds, setHollowStuds] = useState<number>(0);
+  const [toyInventory, setToyInventory] = useState<ToyInventory>(() => ({ ...rememberedBrickwork.toyInventory }));
+  const [hollowStuds, setHollowStuds] = useState<number>(() => rememberedBrickwork.hollowStuds);
+
+  useEffect(() => {
+    rememberedBrickwork = { standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds };
+  }, [standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds]);
 
   const options = useMemo(
     () => ({ standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds }),
@@ -78,9 +107,11 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
     state.prepareForDiscreteChange();
     const next = { ...state.sceneGraph, nodes: outcome.nodes };
     state.updateScene(next);
+    if (placement === 'replace' && piece && !next.nodes.some((n) => n.id === piece.id)) {
+      state.setSelectedNodeId(null);
+    }
     void state.recompile(next);
-    setMessage(`Laid ${outcome.result.bricks.length.toLocaleString()} bricks in ${outcome.result.courses} courses.`);
-    setTimeout(() => setMessage(null), 5000);
+    onClose();
   };
 
   const r = outcome?.result;

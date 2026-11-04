@@ -25,11 +25,27 @@ export function ToyInventoryEditor({ inventory, onChange }: { inventory: ToyInve
     set(size, inventory[size] ?? null);
     setAdding('');
   };
+  const selectAll = () => {
+    const next: ToyInventory = {};
+    for (const s of sizes) next[s] = inventory[s] ?? null;
+    onChange(next);
+  };
+  const selectNone = () => onChange({});
   return (
     <fieldset className="col-span-2 md:col-span-3 space-y-1">
-      <legend className="text-[11px] text-slate-500 dark:text-slate-400" title="Tick the sizes to build with, and say how many you have of any you are short of. Blank: as many as it takes.">
-        Bricks to build with (studs, and how many you have)
-      </legend>
+      <div className="flex items-center justify-between gap-2">
+        <legend className="text-[11px] text-slate-500 dark:text-slate-400" title="Tick the sizes to build with, and say how many you have of any you are short of. Blank: as many as it takes.">
+          Bricks to build with (studs, and how many you have)
+        </legend>
+        <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+          <button type="button" onClick={selectAll} className="underline hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer">
+            All
+          </button>
+          <button type="button" onClick={selectNone} className="underline hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer">
+            None
+          </button>
+        </div>
+      </div>
       <div className="grid grid-cols-3 md:grid-cols-6 gap-x-3 gap-y-1">
         {sizes.map((size) => {
           const used = size in inventory;

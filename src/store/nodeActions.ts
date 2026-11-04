@@ -45,7 +45,7 @@ export interface NodeActions {
   updateNodeRotation: (id: string, axis: 0 | 1 | 2, deg: number, rotateAroundCOM?: boolean) => void;
   updateNodeJoint: (id: string, updates: Partial<SceneJoint>, jointIndex?: number) => void;
   updateNodeScript: (id: string, script: string) => void;
-  updateNode: (id: string, updates: Partial<SceneNode>) => void;
+  updateNode: (id: string, updates: Partial<SceneNode>, skipRecompile?: boolean) => void;
   /**
    * Lift a body out of its parent and onto the top level, keeping it where
    * it looks like it is. MuJoCo allows a free joint only on a top-level
@@ -217,10 +217,10 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
       getPhysicsWorkerClient().updateScript(id, script);
     },
 
-    updateNode: (id, updates) => {
+    updateNode: (id, updates, skipRecompile) => {
       // A bad geom size is refused, not written for the compiler to guess at.
       if (updates.geoms) assertGeomSizes(updates.geoms, updates.name ?? id);
-      get().recordInteraction('node');
+      if (!skipRecompile) get().recordInteraction('node');
       const newScene = cloneSceneGraph(get().sceneGraph);
       const traverse = (nodes: SceneNode[]): boolean => {
         for (const node of nodes) {
@@ -254,7 +254,7 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
       if (traverse(newScene.nodes)) {
         set({ sceneGraph: newScene });
         // Recompile so aerodynamics flag propagates to physics loop
-        get().recompile(newScene, undefined, false);
+        if (!skipRecompile) get().recompile(newScene, undefined, false);
       }
     },
 

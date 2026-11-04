@@ -203,6 +203,12 @@ describe('toy bricks', () => {
     const tight = layBricks(scene([box('t', 0, 0, 0.0048, 0.012, 0.004, 0.0048)]), { standardId: 'toy', toyInventory: { '1x2': null } });
     expect(tight.short).toEqual([{ size: '1x1', count: 1 }]);
     expect(tight.warnings.join()).toMatch(/Short of 1 × 1×1/);
+    // Only 2×4 ticked with too few in hand: uses more 2×4s and reports short of 2×4, not 1×1.
+    const twoByFourBlock = scene([box('b', 0, 0, 0.0096, 0.016, 0.016, 0.0096)]);
+    const scarce2x4 = layBricks(twoByFourBlock, { standardId: 'toy', toyInventory: { '2x4': 2 } });
+    expect(scarce2x4.parts).toEqual([{ size: '2x4', count: 4 }]);
+    expect(scarce2x4.short).toEqual([{ size: '2x4', count: 2 }]);
+    expect(scarce2x4.warnings.join()).toMatch(/Short of 2 × 2×4/);
   });
 
   it('tiles a block exactly from two-wide bricks, needing no 1×1', () => {

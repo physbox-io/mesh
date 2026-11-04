@@ -109,6 +109,7 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
   };
 
   const pour = cast?.pour;
+  const closedMold = Boolean(moldNode.simulation?.mold?.laidOpen);
   const grams = cast ? castWeightG(material, cast.castVolumeMm3) : 0;
   const mix = cast ? mixGrams(material, grams) : null;
   const notes = cast ? castMaterialWarnings(material, cast.castVolumeMm3 / 1000, { pla: false }) : [];
@@ -135,44 +136,48 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
               ))}
             </select>
           </label>
-          <label className="space-y-1 text-xs">
-            <span className="font-semibold text-slate-600 dark:text-slate-300">Pour from</span>
-            <select
-              value={direction}
-              onChange={(e) => setDirection(e.target.value as PourDirection | 'auto')}
-              className={inputClass}
-            >
-              <option value="auto">Best side</option>
-              {POUR_DIRECTIONS.map((d) => (
-                <option key={d} value={d}>{SIDE_NAMES[d]}</option>
-              ))}
-            </select>
-          </label>
-          <label className="space-y-1 text-xs">
-            <span className="font-semibold text-slate-600 dark:text-slate-300">
-              Fill depth (mm){' '}
-              {fill !== null && (
-                <button type="button" onClick={() => setFill(null)} className="font-normal underline cursor-pointer">
-                  to rim
-                </button>
-              )}
-              {box && fill !== box.pourDepthMm && (
-                <button type="button" onClick={() => setFill(box.pourDepthMm)} className="font-normal underline cursor-pointer ml-1">
-                  to fill line
-                </button>
-              )}
-            </span>
-            <NumberInput
-              min={0.5}
-              max={pour?.depthMm}
-              step={1}
-              value={fill ?? pour?.depthMm ?? 0}
-              onChange={(v) => {
-                if (v !== undefined) setFill(pour && v >= pour.depthMm ? null : v);
-              }}
-              className={inputClass}
-            />
-          </label>
+          {!closedMold && (
+            <>
+              <label className="space-y-1 text-xs">
+                <span className="font-semibold text-slate-600 dark:text-slate-300">Pour from</span>
+                <select
+                  value={direction}
+                  onChange={(e) => setDirection(e.target.value as PourDirection | 'auto')}
+                  className={inputClass}
+                >
+                  <option value="auto">Best side</option>
+                  {POUR_DIRECTIONS.map((d) => (
+                    <option key={d} value={d}>{SIDE_NAMES[d]}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1 text-xs">
+                <span className="font-semibold text-slate-600 dark:text-slate-300">
+                  Fill depth (mm){' '}
+                  {fill !== null && (
+                    <button type="button" onClick={() => setFill(null)} className="font-normal underline cursor-pointer">
+                      to rim
+                    </button>
+                  )}
+                  {box && fill !== box.pourDepthMm && (
+                    <button type="button" onClick={() => setFill(box.pourDepthMm)} className="font-normal underline cursor-pointer ml-1">
+                      to fill line
+                    </button>
+                  )}
+                </span>
+                <NumberInput
+                  min={0.5}
+                  max={pour?.depthMm}
+                  step={1}
+                  value={fill ?? pour?.depthMm ?? 0}
+                  onChange={(v) => {
+                    if (v !== undefined) setFill(pour && v >= pour.depthMm ? null : v);
+                  }}
+                  className={inputClass}
+                />
+              </label>
+            </>
+          )}
         </div>
         {failure ? (
           <p className="text-red-600 dark:text-red-400">{failure}</p>
@@ -181,9 +186,15 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
         ) : (
           <>
             <p className={`text-slate-600 dark:text-slate-300 ${busy ? 'opacity-50' : ''}`}>
-              {box && fill === box.pourDepthMm ? 'To the pour box\'s fill line: ' : ''}
-              Poured {pour ? pourSideLabel(pour.direction) : ''}
-              {pour && pour.filledMm < pour.depthMm ? `, ${pour.filledMm} of ${pour.depthMm} mm deep` : ', to the rim'}.
+              {pour ? (
+                <>
+                  {box && fill === box.pourDepthMm ? "To the pour box's fill line: " : ''}
+                  Poured {pourSideLabel(pour.direction)}
+                  {pour.filledMm < pour.depthMm ? `, ${pour.filledMm} of ${pour.depthMm} mm deep` : ', to the rim'}.
+                </>
+              ) : (
+                <>Closed and poured through its sprue{moldNode.simulation?.mold?.feed ? ', from the bottom' : ''}.</>
+              )}
             </p>
             <dl className={`grid grid-cols-2 gap-y-1 text-xs ${busy ? 'opacity-50' : ''}`}>
               <dt className="text-slate-500 dark:text-slate-400">Volume</dt>
@@ -196,6 +207,12 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
               <dt className="text-slate-500 dark:text-slate-400">Size</dt>
               <dd className="font-mono">{cast.sizeMm.width} × {cast.sizeMm.depth} × {cast.sizeMm.height} mm</dd>
             </dl>
+            {cast.warnings.map((w) => (
+              <p key={w} className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{w}</span>
+              </p>
+            ))}
             {short && (
               <p className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
                 <AlertTriangle className="w-4 h-4 shrink-0" />

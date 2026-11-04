@@ -196,9 +196,11 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
     allowed.push({ size, w: a, h: b });
     if (a !== b) allowed.push({ size, w: b, h: a });
   }
+  if (allowed.length === 0) {
+    throw new Error('Tick at least one brick size to build with.');
+  }
   const scarceSizes = new Set([...left.entries()].filter(([, n]) => Number.isFinite(n)).map(([sz]) => sz));
-  // A gap has to be filled with something: 1×1 is always there to finish,
-  // and counted short if the builder has fewer.
+  // A gap no ticked brick fits into has to be filled with a 1×1, counted short.
   if (!left.has('1x1')) left.set('1x1', 0);
   const fits = new Map<string, ToySize>(allowed.map((a) => [`${a.w}x${a.h}`, a.size]));
   const sizeOf = (w: number, h: number): ToySize | null => (w === 1 && h === 1 ? '1x1' : fits.get(`${w}x${h}`) ?? null);
@@ -279,15 +281,13 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
       for (const k of cells) {
         if (!want[k] || taken[k]) continue;
         const ai = k % nx, aj = (k - ai) / nx;
-        let pick: { b: Brick; size: ToySize; score: number } | null = null;
-        for (const { size, w, h } of [...allowed, { size: '1x1', w: 1, h: 1 }]) {
-          if (size !== '1x1' && room(size) < 1) continue;
+        const evaluateCandidate = (size: ToySize, w: number, h: number): { b: Brick; size: ToySize; score: number } | null => {
           // Grows away from where the scan came from.
           const b: Brick = { i: flipI ? ai - w + 1 : ai, j: flipJ ? aj - h + 1 : aj, w, h };
-          if (b.i < 0 || b.j < 0 || b.i + w > nx || b.j + h > ny) continue;
+          if (b.i < 0 || b.j < 0 || b.i + w > nx || b.j + h > ny) return null;
           let ok = true;
           for (let j = b.j; ok && j < b.j + h; j++) for (let i = b.i; ok && i < b.i + w; i++) if (!want[j * nx + i] || taken[j * nx + i]) ok = false;
-          if (!ok) continue;
+          if (!ok) return null;
           // Cells covered now are bricks not needed later: the count; less
           // what it costs the bond, in cells at a 2×4's worth a brick, so that
           // a bigger brick cannot simply buy its way onto a seam.
@@ -302,9 +302,9 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
               if (o.size === '1x1' || room(o.size) < 1) return false;
               for (let ox = x - o.w + 1; ox <= x; ox++) {
                 for (let oy = y - o.h + 1; oy <= y; oy++) {
-                  let fits = true;
-                  for (let p = ox; fits && p < ox + o.w; p++) for (let q = oy; fits && q < oy + o.h; q++) if (!freeCell(p, q)) fits = false;
-                  if (fits) return true;
+                  let fitsHere = true;
+                  for (let p = ox; fitsHere && p < ox + o.w; p++) for (let q = oy; fitsHere && q < oy + o.h; q++) if (!freeCell(p, q)) fitsHere = false;
+                  if (fitsHere) return true;
                 }
               }
               return false;
@@ -319,7 +319,26 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
           // Holding back sizes the builder has few of, for where only they will do.
           const hold = hoard && scarceSizes.has(size) ? 1 : 0;
           const score = w * h - CELLS_PER_BRICK * (brickCost(b) - 1 + stranded + hold) + random() * 0.01;
-          if (!pick || score > pick.score) pick = { b, size, score };
+          return { b, size, score };
+        };
+
+        let pick: { b: Brick; size: ToySize; score: number } | null = null;
+        // 1. Prefer bricks still in hand.
+        for (const { size, w, h } of allowed) {
+          if (room(size) < 1) continue;
+          const cand = evaluateCandidate(size, w, h);
+          if (cand && (!pick || cand.score > pick.score)) pick = cand;
+        }
+        // 2. When no brick in hand fits here, use a ticked size (and count it short) before falling back to 1×1.
+        if (!pick) {
+          for (const { size, w, h } of allowed) {
+            if (room(size) >= 1) continue;
+            const cand = evaluateCandidate(size, w, h);
+            if (cand && (!pick || cand.score > pick.score)) pick = cand;
+          }
+        }
+        if (!pick) {
+          pick = evaluateCandidate('1x1', 1, 1);
         }
         if (!pick) continue;
         // Only a 1×1 fits here and the builder has none: inside the model a
