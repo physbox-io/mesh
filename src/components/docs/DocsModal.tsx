@@ -492,10 +492,10 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
 
             {tab === 'offset' && (
               <div className="flex flex-col gap-4">
-                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">📍 Geom Position Offset</h3>
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">📍 Geom Offset &amp; Rotation</h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  This moves a single <strong>geom</strong> within its body, rather than moving the body itself. It is the tool for
-                  building compound shapes out of primitives.
+                  This moves and turns a single <strong>geom</strong> within its body, rather than moving the body itself. It is the tool for
+                  building compound shapes out of primitives. The rotation is about the geom's own centre, in degrees, in the body's frame.
                 </p>
                 <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                   <div className="text-xs">

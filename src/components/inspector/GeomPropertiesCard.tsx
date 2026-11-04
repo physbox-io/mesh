@@ -1,12 +1,26 @@
 import { useStore } from '../../store/useStore';
 import { sliderSpan } from '../../utils/sliderSpan';
-import type { SceneNode } from '../../types/scene';
+import type { SceneGeom, SceneNode } from '../../types/scene';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
 import { DocsInfoButton } from '../docs/DocsInfoButton';
 import { MaterialCard } from './MaterialCard';
 import { CouplingCard } from './CouplingCard';
 import { displayedGeomMass, primitiveVolume } from '../../utils/geomMassDisplay';
+import { getStickyRotation } from '../../utils/geom';
+import * as THREE from 'three';
+
+/** A geom's rotation in degrees, read from euler or, failing that, its quat (w, x, y, z). */
+function geomEuler(geom: SceneGeom): [number, number, number] {
+  if (geom.quat && geom.quat.length === 4) {
+    const [w, x, y, z] = geom.quat;
+    const e = new THREE.Euler().setFromQuaternion(new THREE.Quaternion(x, y, z, w).normalize(), 'XYZ');
+    const deg = (r: number) => Math.round((r * 180) / Math.PI * 100) / 100;
+    return [deg(e.x), deg(e.y), deg(e.z)];
+  }
+  const e = geom.euler ?? [0, 0, 0];
+  return [e[0] ?? 0, e[1] ?? 0, e[2] ?? 0];
+}
 
 /**
  * The active sub-geom's properties, split by inspector tab: its colour on
@@ -41,7 +55,7 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
           // the collapse effect), and React leaves it alone while the prop is unchanged.
           <div className="is-collapsed p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
             <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center gap-1.5">
-              <span className="flex items-center gap-1">📍 Geom Position Offset</span>
+              <span className="flex items-center gap-1">📍 Geom Offset &amp; Rotation</span>
               <DocsInfoButton tab="offset" />
             </h3>
             <div className="flex flex-col gap-3">
@@ -90,6 +104,25 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
               </div>
+              {/* Turns this geom inside its body; the body's own rotation is on Main.
+                  A geom set with a quat is shown as its euler, and editing writes
+                  euler and drops the quat, which would otherwise win in MJCF. */}
+              {(() => {
+                const euler = geomEuler(geom);
+                return (['X', 'Y', 'Z'] as const).map((axis, i) => {
+                  const setAngle = (v: number) => {
+                    const next: [number, number, number] = [euler[0], euler[1], euler[2]];
+                    next[i] = getStickyRotation(v);
+                    updateNodeGeom(selectedNode.id, { euler: next, quat: undefined }, activeIndex);
+                  };
+                  return (
+                    <div key={axis} className={`flex flex-col gap-1 ${i === 0 ? 'pt-2 border-t border-slate-100' : ''}`}>
+                      <label className="text-xs font-medium text-slate-500 flex justify-between">{axis} Rotation <SliderValue value={euler[i]} onChange={setAngle} decimals={0} unit="°" min={-360} max={360} /></label>
+                      <RangeInput min="-180" max="180" step="1" value={euler[i]} onChange={setAngle} className="w-full accent-blue-500 cursor-pointer" />
+                    </div>
+                  );
+                });
+              })()}
             </div>
           </div>
         );
