@@ -265,11 +265,12 @@ function unitsFor(bond: BrickBond, course: number): ('S' | 'H')[] {
 /** The subject: the whole scene, or one body under its ancestors' frames. */
 /**
  * Whether a body is already a laid course of bricks, so laying beside the
- * shape does not re-brick the courses just added.
+ * shape does not re-brick the courses just added. Tested on the course id and
+ * brick geom names, which survive uniqueNames and renaming.
  */
 const isLaidCourse = (n: SceneNode) =>
   Boolean(n.brickwork) ||
-  (/^Course \d+$/.test(n.name ?? '') && Boolean(n.geoms?.length) && n.geoms.every((g) => /^brick_/.test(g.name ?? '')));
+  (/_course_\d+$/.test(n.id) && Boolean(n.geoms?.length) && n.geoms.every((g) => /^brick_/.test(g.name ?? '')));
 
 /**
  * Whether the whole scene's brickwork takes this body. Not a simulated cut,
@@ -302,44 +303,6 @@ export function subjectScene(scene: SceneGraph, bodyId: string | null): SceneGra
  */
 export function brickFits(s: BrickStandard, spanMm: number, heightMm: number): boolean {
   return spanMm >= s.lengthMm && heightMm >= 4 * (s.heightMm + s.jointMm) - s.jointMm;
-}
-
-/**
- * Picks a brick standard that fits the subject when the dialog opens: keeps
- * `preferred` when it fits, or switches to a fitting standard (or `'toy'` for
- * the toy castle / small shapes) so opening the dialog does not start on a
- * refusal when another standard fits.
- */
-export function defaultBrickStandardFor(
-  scene: SceneGraph,
-  bodyId: string | null,
-  preferred: BrickStandardId = DEFAULT_BRICKWORK_OPTIONS.standardId,
-): BrickStandardId {
-  try {
-    const subject = subjectScene(scene, bodyId);
-    if (bodyId === 'castle' || subject.nodes.some((n) => n.id === 'castle')) return 'toy';
-    const { tris } = collectSceneTriangles(subject);
-    if (tris.length < 9) return preferred;
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < tris.length; i++) {
-      const v = tris[i] * 1000;
-      if (v < lo[i % 3]) lo[i % 3] = v;
-      if (v > hi[i % 3]) hi[i % 3] = v;
-    }
-    const modelH = hi[2] - lo[2];
-    const span = Math.max(hi[0] - lo[0], hi[1] - lo[1]);
-    const pref = BRICK_STANDARDS[preferred] ?? BRICK_STANDARDS.uk;
-    if (pref.toy) {
-      const estStuds = ((hi[0] - lo[0]) / TOY_PITCH_MM) * ((hi[1] - lo[1]) / TOY_PITCH_MM) * (modelH / TOY_HEIGHT_MM) / 8;
-      if (estStuds <= MAX_BRICKS || !brickFits(BRICK_STANDARDS.uk, span, modelH)) return preferred;
-      return 'uk';
-    }
-    if (brickFits(pref, span, modelH)) return preferred;
-    const fit = Object.values(BRICK_STANDARDS).find((s) => !s.toy && brickFits(s, span, modelH));
-    return fit ? fit.id : 'toy';
-  } catch {
-    return preferred;
-  }
 }
 
 /** The shape in toy bricks: every course on the stud grid, counted by size. */
@@ -378,8 +341,8 @@ function toyResult(
 
 /** Lays the scene's solids in brick. Throws, with what to change, when it cannot. */
 export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {}): BrickworkResult {
-  const o = { ...DEFAULT_BRICKWORK_OPTIONS, ...opts };
-  const asked = BRICK_STANDARDS[o.standardId] ?? BRICK_STANDARDS.uk;
+  const o = { ...DEFAULT_BRICKWORK_OPTIONS, ...scene.brickwork, ...opts };
+  const std = BRICK_STANDARDS[o.standardId] ?? BRICK_STANDARDS.uk;
   const warnings: string[] = [];
 
   const { tris, solidIds, skipped } = collectSceneTriangles(scene);
@@ -393,7 +356,6 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   }
   const modelH = hi[2] - lo[2];
   const span = Math.max(hi[0] - lo[0], hi[1] - lo[1]);
-  const std = asked;
   if (std.toy) return toyResult(std, tris, solidIds, lo, hi, o, warnings);
   if (!brickFits(std, span, modelH)) {
     const smaller = Object.values(BRICK_STANDARDS).filter((s) => s.lengthMm < std.lengthMm && brickFits(s, span, modelH)).map((s) => s.label);

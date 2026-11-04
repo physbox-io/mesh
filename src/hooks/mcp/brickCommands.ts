@@ -38,17 +38,21 @@ export const brickCommands: McpCommands = {
       return { ok: false, error: 'hollowStuds is the wall thickness in studs for a hollow toy-brick build; 0 for solid.' };
     }
     const placement = msg.placement === 'replace' ? 'replace' : msg.placement === 'none' ? 'none' : 'beside';
+    const saved = store.sceneGraph.brickwork;
+    const brickwork = {
+      standardId: (msg.standardId as BrickStandardId | undefined) ?? saved?.standardId ?? DEFAULT_BRICKWORK_OPTIONS.standardId,
+      bond: (msg.bond as BrickBond | undefined) ?? saved?.bond ?? DEFAULT_BRICKWORK_OPTIONS.bond,
+      ...(typeof msg.jointMm === 'number' ? { jointMm: msg.jointMm } : saved?.jointMm !== undefined ? { jointMm: saved.jointMm } : {}),
+      wastagePct: typeof msg.wastagePct === 'number' ? msg.wastagePct : (saved?.wastagePct ?? DEFAULT_BRICKWORK_OPTIONS.wastagePct),
+      ...(toySizes ? { toySizes: toySizes as ToySize[] } : saved?.toySizes ? { toySizes: saved.toySizes } : {}),
+      ...(toyInventory ? { toyInventory } : saved?.toyInventory ? { toyInventory: saved.toyInventory } : {}),
+      ...(typeof msg.hollowStuds === 'number' ? { hollowStuds: Math.round(msg.hollowStuds) } : saved?.hollowStuds !== undefined ? { hollowStuds: saved.hollowStuds } : {}),
+    };
     let outcome;
     try {
       outcome = await layBricksOffThread(store.sceneGraph, bodyId, {
-        standardId: (msg.standardId as BrickStandardId | undefined) ?? DEFAULT_BRICKWORK_OPTIONS.standardId,
-        bond: (msg.bond as BrickBond | undefined) ?? DEFAULT_BRICKWORK_OPTIONS.bond,
-        jointMm: typeof msg.jointMm === 'number' ? msg.jointMm : undefined,
-        wastagePct: typeof msg.wastagePct === 'number' ? msg.wastagePct : DEFAULT_BRICKWORK_OPTIONS.wastagePct,
+        ...brickwork,
         placement: placement === 'none' ? 'beside' : placement,
-        ...(toySizes ? { toySizes: toySizes as ToySize[] } : {}),
-        ...(toyInventory ? { toyInventory } : {}),
-        ...(typeof msg.hollowStuds === 'number' ? { hollowStuds: Math.round(msg.hollowStuds) } : {}),
       });
     } catch (e) {
       return { ok: false, error: (e as Error).message };
@@ -56,6 +60,7 @@ export const brickCommands: McpCommands = {
     const r = outcome.result;
     if (placement !== 'none') {
       store.prepareForDiscreteChange();
+      store.updateScene({ ...store.sceneGraph, brickwork }, true);
       await settleScene(outcome.nodes, { replacesScene: false });
     }
     return {

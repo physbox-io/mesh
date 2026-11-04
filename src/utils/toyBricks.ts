@@ -323,22 +323,12 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
         };
 
         let pick: { b: Brick; size: ToySize; score: number } | null = null;
-        // 1. Prefer bricks still in hand.
-        for (const { size, w, h } of allowed) {
-          if (room(size) < 1) continue;
+        const allOut = allowed.every(({ size }) => room(size) < 1);
+        for (const { size, w, h } of [...allowed, { size: '1x1', w: 1, h: 1 }]) {
+          if (size !== '1x1' && !allOut && room(size) < 1) continue;
+          if (size === '1x1' && allOut && pick) continue;
           const cand = evaluateCandidate(size, w, h);
           if (cand && (!pick || cand.score > pick.score)) pick = cand;
-        }
-        // 2. When no brick in hand fits here, use a ticked size (and count it short) before falling back to 1×1.
-        if (!pick) {
-          for (const { size, w, h } of allowed) {
-            if (room(size) >= 1) continue;
-            const cand = evaluateCandidate(size, w, h);
-            if (cand && (!pick || cand.score > pick.score)) pick = cand;
-          }
-        }
-        if (!pick) {
-          pick = evaluateCandidate('1x1', 1, 1);
         }
         if (!pick) continue;
         // Only a 1×1 fits here and the builder has none: inside the model a

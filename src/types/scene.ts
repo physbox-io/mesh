@@ -2,6 +2,7 @@ import type { PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { PocketSpec } from '../utils/pocketCutter';
 import type { PourBoxOptions } from '../utils/siliconeMold';
+import type { BrickworkOptions } from '../utils/brickwork';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
@@ -1058,6 +1059,11 @@ export interface SceneGraph {
    * the store's own fields hold the environment there, and are what compiles.
    */
   environment?: Partial<SceneEnvironment>;
+  /**
+   * How Build → Brick lays this scene (which brick, bond, joint, or toy-brick
+   * inventory and wall thickness), saved with the scene and presets.
+   */
+  brickwork?: Partial<BrickworkOptions>;
 }
 
 /** The world a scene runs in. Metres, seconds, kg/m³. */

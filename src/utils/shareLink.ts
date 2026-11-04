@@ -57,7 +57,7 @@ export const SHARE_HARD_LIMIT = 64 * 1024;
  * pictures it is modelled from, its gravity and floor), and the notes written
  * on it. Cast prep is left at home: it holds a second copy of every part.
  */
-export interface SharedScene extends Pick<SceneGraph, 'simFidelity' | 'referenceImages' | 'environment'> {
+export interface SharedScene extends Pick<SceneGraph, 'simFidelity' | 'referenceImages' | 'environment' | 'brickwork'> {
   name: string;
   nodes: SceneNode[];
   noteCards?: UserPreset['noteCards'];

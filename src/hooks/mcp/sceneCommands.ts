@@ -496,6 +496,7 @@ export const sceneCommands: McpCommands = {
       sceneFields = {
         ...(current.simFidelity ? { simFidelity: current.simFidelity } : {}),
         ...(current.referenceImages?.length ? { referenceImages: current.referenceImages } : {}),
+        ...(current.brickwork ? { brickwork: current.brickwork } : {}),
       };
     } else {
       const { nodes: _nodes, noteCards: cards, ...fields } = rawScene;

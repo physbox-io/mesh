@@ -546,20 +546,26 @@ function buildHalf(
         }
       }
 
+      // A channel at a cell centre (planPeakVents) is up to half a grid diagonal
+      // from its nearest vertex; innerR must reach that vertex or solid[i] stays 1
+      // at all four corners and the heightfield lid closes the vent over with a skin.
+      const minChannelR = 0.55 * Math.hypot(grid.stepX, grid.stepY);
       let bot = floorZ;
       for (const ch of feats.channels) {
+        const innerR = Math.max(ch.innerR, minChannelR);
+        const outerR = Math.max(ch.outerR, innerR + 0.2);
         const d = Math.hypot(x - ch.x, y - ch.y);
-        if (d >= ch.outerR) continue;
+        if (d >= outerR) continue;
         // The funnel is wide at the outer face and narrows to innerR where it
         // breaks into the cavity, so the column is void from the outer face up
         // to wherever the cone wall passes it.
         if (ch.funnelDepth !== undefined) {
           // The sprue: a 45° funnel this deep, then the neck straight on.
-          const h = d <= ch.innerR ? top - floorZ : ch.funnelDepth * (ch.outerR - d) / (ch.outerR - ch.innerR);
+          const h = d <= innerR ? top - floorZ : ch.funnelDepth * (outerR - d) / (outerR - innerR);
           bot = Math.max(bot, floorZ + Math.min(h, top - floorZ));
           continue;
         }
-        const t = d <= ch.innerR ? 1 : (ch.outerR - d) / (ch.outerR - ch.innerR);
+        const t = d <= innerR ? 1 : (outerR - d) / (outerR - innerR);
         bot = Math.max(bot, floorZ + (top - floorZ) * t);
       }
 

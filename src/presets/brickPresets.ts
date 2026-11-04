@@ -162,6 +162,12 @@ const model = (id: string, name: string, shapeScene: SceneGraph, rgba: number[])
   geoms: shapeScene.nodes[0].geoms.map((g) => ({ ...g, rgba })),
 });
 
-export const smokerPreset: SceneGraph = { nodes: [model('smoker_walls', 'Smoker walls', smokerShape(), [0.66, 0.31, 0.22, 1]), ...smokerExtras()] };
+export const smokerPreset: SceneGraph = {
+  nodes: [model('smoker_walls', 'Smoker walls', smokerShape(), [0.66, 0.31, 0.22, 1]), ...smokerExtras()],
+  brickwork: SMOKER_OPTIONS,
+};
 
-export const toyCastlePreset: SceneGraph = { nodes: [model('castle', 'Castle', castleShape(), [0.62, 0.62, 0.6, 1]), ...castleExtras()] };
+export const toyCastlePreset: SceneGraph = {
+  nodes: [model('castle', 'Castle', castleShape(), [0.62, 0.62, 0.6, 1]), ...castleExtras()],
+  brickwork: CASTLE_OPTIONS,
+};

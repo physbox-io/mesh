@@ -7,10 +7,12 @@ import { smokerPreset, toyCastlePreset } from '../src/presets/brickPresets';
 const body = (scene: typeof smokerPreset, id: string) => scene.nodes.find((n) => n.id === id)!;
 
 describe('brickwork presets', () => {
-  it('start as models, for Build → Brick to lay', () => {
+  it('start as models, for Build → Brick to lay, with their brick settings on the scene', () => {
     expect(body(smokerPreset, 'smoker_walls').geoms.length).toBeGreaterThan(5);
     expect(body(toyCastlePreset, 'castle').geoms.length).toBeGreaterThan(5);
     expect(smokerPreset.nodes.some((n) => n.brickwork)).toBe(false);
+    expect(smokerPreset.brickwork).toEqual({ standardId: 'uk', bond: 'stretcher' });
+    expect(toyCastlePreset.brickwork).toEqual({ standardId: 'toy' });
   });
 
   it('lays the smoker walls in whole bricks but for half bricks at the openings', () => {

@@ -74,12 +74,13 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
     const name = activePreset?.startsWith('user:')
       ? activePreset.slice('user:'.length)
       : synced.name || 'Shared scene';
-    const { simFidelity, referenceImages } = synced;
+    const { simFidelity, referenceImages, brickwork } = synced;
     return {
       name, nodes: synced.nodes, noteCards,
       environment: readEnvironment(useStore.getState()),
       ...(simFidelity ? { simFidelity } : {}),
       ...(referenceImages?.length ? { referenceImages } : {}),
+      ...(brickwork ? { brickwork } : {}),
     };
   }, [sceneGraph, model, data, mujoco, noteCards, activePreset]);
 

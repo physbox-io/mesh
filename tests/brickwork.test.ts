@@ -163,7 +163,8 @@ describe('laying a shape in brick', () => {
     expect(() => layBricks(huge)).toThrow(new RegExp(`more than ${MAX_BRICKS.toLocaleString()}`));
   }, 60000);
 
-  it('puts the bricks in the scene in place of the shape, or beside it', () => {
+  it('puts the bricks in the scene in place of the shape, or beside it', async () => {
+    const { withUniqueNames } = await import('../src/utils/uniqueNames');
     const replaced = brickworkInScene(gateway, 'b', { placement: 'replace' });
     expect(replaced.nodes.some((n) => n.id === 'b')).toBe(false);
     expect(replaced.nodes.length).toBe(replaced.result.courses);
@@ -172,6 +173,10 @@ describe('laying a shape in brick', () => {
     expect(beside.nodes[0].id).toBe('b');
     // Past the wall along +X.
     expect(Math.min(...beside.nodes.slice(1).flatMap((n) => n.geoms.map((g) => g.pos![0])))).toBeGreaterThan(1.5);
+    // Laying beside a second and third time (after uniqueNames renames courses to Course 1_2) never re-bricks laid courses.
+    const second = withUniqueNames({ nodes: brickworkInScene({ nodes: beside.nodes }, null, { placement: 'beside' }).nodes });
+    const third = brickworkInScene(second, null, { placement: 'beside' });
+    expect(third.result.bricks.length).toBe(beside.result.bricks.length);
   });
 });
 
@@ -238,7 +243,9 @@ describe('toy bricks', () => {
 
   it('spans a gateway with bricks gripping studs beside it', async () => {
     const { toyCastlePreset } = await import('../src/presets/brickPresets');
-    const { result: r } = brickworkInScene(toyCastlePreset, 'castle', { standardId: 'toy' });
+    // toyCastlePreset carries brickwork: { standardId: 'toy' } on the scene.
+    const { result: r } = brickworkInScene(toyCastlePreset, 'castle');
+    expect(r.standard.id).toBe('toy');
     expect(r.bond).toMatchObject({ pieces: 1, unsupported: 0 });
     // Measured 3.
     expect(r.bond.straightJoints).toBeLessThanOrEqual(3);

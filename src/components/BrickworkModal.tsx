@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { BrickWall, X } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
-import type { SceneNode } from '../types/scene';
+import type { SceneGraph, SceneNode } from '../types/scene';
 import { useStore } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import {
-  BRICK_BONDS, BRICK_STANDARDS, DEFAULT_BRICKWORK_OPTIONS, defaultBrickStandardFor,
+  BRICK_BONDS, BRICK_STANDARDS, DEFAULT_BRICKWORK_OPTIONS,
   type BrickBond, type BrickPlacement, type BrickStandardId,
 } from '../utils/brickwork';
 import { layBricksOffThread, type BrickworkOutcome } from '../utils/brickworkClient';
@@ -21,25 +21,7 @@ function pieceOf(nodes: SceneNode[], id: string | null): SceneNode | null {
 
 const field = 'w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white';
 
-interface RememberedBrickworkState {
-  standardId: BrickStandardId;
-  bond: BrickBond;
-  jointMm: number;
-  wastagePct: number;
-  placement: BrickPlacement;
-  toyInventory: ToyInventory;
-  hollowStuds: number;
-}
-
-let rememberedBrickwork: RememberedBrickworkState = {
-  standardId: DEFAULT_BRICKWORK_OPTIONS.standardId,
-  bond: DEFAULT_BRICKWORK_OPTIONS.bond,
-  jointMm: BRICK_STANDARDS[DEFAULT_BRICKWORK_OPTIONS.standardId].jointMm,
-  wastagePct: DEFAULT_BRICKWORK_OPTIONS.wastagePct,
-  placement: 'beside',
-  toyInventory: Object.fromEntries(TOY_SIZES.map((s) => [s, null])),
-  hollowStuds: 0,
-};
+let rememberedPlacement: BrickPlacement = 'beside';
 
 /**
  * Lay the selected piece (or the whole scene) in brick: the count to buy, the
@@ -52,26 +34,33 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   const piece = pieceOf(scene.nodes, selectedNodeId);
 
-  const [standardId, setStandardId] = useState<BrickStandardId>(() =>
-    defaultBrickStandardFor(scene, piece?.id ?? null, rememberedBrickwork.standardId),
-  );
-  const [bond, setBond] = useState<BrickBond>(() => rememberedBrickwork.bond);
-  const [jointMm, setJointMm] = useState<number>(() => {
-    const initial = defaultBrickStandardFor(scene, piece?.id ?? null, rememberedBrickwork.standardId);
-    return initial === rememberedBrickwork.standardId ? rememberedBrickwork.jointMm : BRICK_STANDARDS[initial].jointMm;
-  });
-  const [wastagePct, setWastagePct] = useState<number>(() => rememberedBrickwork.wastagePct);
-  const [placement, setPlacement] = useState<BrickPlacement>(() => rememberedBrickwork.placement);
+  const saved = scene.brickwork;
+  const initialStandard = saved?.standardId ?? DEFAULT_BRICKWORK_OPTIONS.standardId;
+  const [standardId, setStandardId] = useState<BrickStandardId>(initialStandard);
+  const [bond, setBond] = useState<BrickBond>(saved?.bond ?? DEFAULT_BRICKWORK_OPTIONS.bond);
+  const [jointMm, setJointMm] = useState<number>(saved?.jointMm ?? BRICK_STANDARDS[initialStandard].jointMm);
+  const [wastagePct, setWastagePct] = useState<number>(saved?.wastagePct ?? DEFAULT_BRICKWORK_OPTIONS.wastagePct);
+  const [placement, setPlacement] = useState<BrickPlacement>(() => rememberedPlacement);
   const [outcome, setOutcome] = useState<BrickworkOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [toyInventory, setToyInventory] = useState<ToyInventory>(() => ({ ...rememberedBrickwork.toyInventory }));
-  const [hollowStuds, setHollowStuds] = useState<number>(() => rememberedBrickwork.hollowStuds);
+  const [toyInventory, setToyInventory] = useState<ToyInventory>(() =>
+    saved?.toyInventory ? { ...saved.toyInventory } : Object.fromEntries(TOY_SIZES.map((s) => [s, null])),
+  );
+  const [hollowStuds, setHollowStuds] = useState<number>(saved?.hollowStuds ?? 0);
+  const laidNodesRef = useRef<SceneNode[] | null>(null);
+  const laidOptionsRef = useRef<unknown>(null);
+  const sourceSceneRef = useRef<{ scene: SceneGraph; pieceId: string | null }>({ scene, pieceId: piece?.id ?? null });
 
   useEffect(() => {
-    rememberedBrickwork = { standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds };
-  }, [standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds]);
+    rememberedPlacement = placement;
+  }, [placement]);
+
+  useEffect(() => {
+    const brickwork = { standardId, bond, jointMm, wastagePct, toyInventory, hollowStuds };
+    useStore.setState((s) => ({ sceneGraph: { ...s.sceneGraph, brickwork } }));
+  }, [standardId, bond, jointMm, wastagePct, toyInventory, hollowStuds]);
 
   const options = useMemo(
     () => ({ standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds }),
@@ -81,16 +70,22 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   // Counted as the settings change, in the worker.
   useEffect(() => {
     if (!isOpen) return;
+    if (scene.nodes !== laidNodesRef.current) {
+      sourceSceneRef.current = { scene: { nodes: scene.nodes }, pieceId: piece?.id ?? null };
+    } else if (options === laidOptionsRef.current) {
+      return;
+    }
+    const { scene: targetScene, pieceId: targetPieceId } = sourceSceneRef.current;
     let live = true;
     const t = setTimeout(() => {
       setBusy(true);
-      layBricksOffThread(scene, piece?.id ?? null, options)
+      layBricksOffThread(targetScene, targetPieceId, options)
         .then((o) => { if (live) { setOutcome(o); setError(null); } })
         .catch((e: Error) => { if (live) { setOutcome(null); setError(e.message); } })
         .finally(() => { if (live) setBusy(false); });
     }, 250);
     return () => { live = false; clearTimeout(t); };
-  }, [isOpen, scene, piece?.id, options]);
+  }, [isOpen, scene.nodes, piece?.id, options]);
 
   if (!isOpen) return null;
 
@@ -103,15 +98,18 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
     if (!outcome) return;
     const state = useStore.getState();
     // Laid from the scene as it was counted; if it has moved on, it is being counted again.
-    if (state.sceneGraph !== scene) { setMessage('The scene changed: counting again.'); return; }
+    if (state.sceneGraph.nodes !== scene.nodes) { setMessage('The scene changed: counting again.'); return; }
     state.prepareForDiscreteChange();
     const next = { ...state.sceneGraph, nodes: outcome.nodes };
+    laidNodesRef.current = outcome.nodes;
+    laidOptionsRef.current = options;
     state.updateScene(next);
     if (placement === 'replace' && piece && !next.nodes.some((n) => n.id === piece.id)) {
       state.setSelectedNodeId(null);
     }
     void state.recompile(next);
-    onClose();
+    setMessage(`Laid ${outcome.result.bricks.length.toLocaleString()} bricks in ${outcome.result.courses} courses.`);
+    setTimeout(() => setMessage(null), 5000);
   };
 
   const r = outcome?.result;
