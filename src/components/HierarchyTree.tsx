@@ -52,7 +52,9 @@ function useSelectRow() {
   const setLeftSidebarOpen = usePanels((s) => s.setLeftSidebarOpen);
   return useCallback((id: string | null, geomIndex?: number) => {
     setSelectedNodeId(id);
-    if (geomIndex !== undefined) setActiveGeomIndex(geomIndex);
+    // A body row picks the body (its first shape in the inspector, the whole
+    // body outlined); a geom row picks that geom, and only it is outlined.
+    if (id) setActiveGeomIndex(geomIndex ?? 0, geomIndex !== undefined);
     setLeftSidebarOpen(false);
   }, [setSelectedNodeId, setActiveGeomIndex, setLeftSidebarOpen]);
 }
@@ -73,7 +75,8 @@ interface HierarchyRowProps {
  */
 function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleCollapsed }: HierarchyRowProps) {
   const isSelected = useStore((s) => s.selectedNodeId === node.id);
-  const activeGeomIndex = useStore((s) => (s.selectedNodeId === node.id ? s.activeGeomIndex : -1));
+  // -1 unless one of this body's geoms was picked on its own.
+  const activeGeomIndex = useStore((s) => (s.selectedNodeId === node.id && s.geomFocused ? s.activeGeomIndex : -1));
   const isHidden = useStore((s) => s.hiddenNodeIds.includes(node.id));
   const toggleNodeHidden = useStore((s) => s.toggleNodeHidden);
   const select = useSelectRow();
@@ -88,10 +91,10 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
   return (
     <div className="flex flex-col">
       <div
-        onClick={() => select(node.id, 0)}
+        onClick={() => select(node.id)}
         style={{ paddingLeft: `${depth === 0 ? 8 : 4}px` }}
         className={`flex items-center px-2 py-1.5 rounded-md border cursor-pointer transition-colors shadow-sm mb-1 ${
-          isSelected && activeGeomIndex === 0
+          isSelected && activeGeomIndex === -1
             ? 'bg-blue-50 border-blue-200 text-blue-600 dark:bg-blue-950/40 dark:border-blue-800 dark:text-blue-400 font-semibold'
             : isSelected
               ? 'bg-blue-50/40 border-blue-100/50 text-blue-500 dark:bg-blue-950/20 dark:border-blue-900/50 dark:text-blue-400 font-semibold'

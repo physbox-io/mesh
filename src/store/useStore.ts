@@ -420,7 +420,14 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    * picked.
    */
   activeGeomIndex: number;
-  setActiveGeomIndex: (index: number) => void;
+  /**
+   * `focus` (the default) says the geom itself was picked — a hierarchy row or
+   * the inspector's geom list — so the viewport outlines that geom rather than
+   * the whole body. Picking a body clears it.
+   */
+  setActiveGeomIndex: (index: number, focus?: boolean) => void;
+  /** The active geom was picked on its own; see setActiveGeomIndex. */
+  geomFocused: boolean;
   incrementMcpActive: () => void;
   decrementMcpActive: () => void;
   resetMcpActive: () => void;
@@ -590,6 +597,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setSelectedNodeId: (id) => set((state) => ({
     selectedNodeId: id,
     extraSelectedIds: [],
+    geomFocused: false,
     // A different body starts on the move handles again. Re-selecting the same
     // one leaves them alone, so the viewport's click-to-swap is not undone by
     // the selection it travels with.
@@ -642,7 +650,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   cycleGizmoMode: () => set((state) => ({ gizmoMode: state.gizmoMode === 'translate' ? 'rotate' : 'translate' })),
 
   activeGeomIndex: 0,
-  setActiveGeomIndex: (index) => set({ activeGeomIndex: index }),
+  setActiveGeomIndex: (index, focus = true) => set({ activeGeomIndex: index, geomFocused: focus }),
+  geomFocused: false,
 
   setDraggedNodeId: (id) => {
     if (id !== null && get().draggedNodeId === null) {

@@ -477,6 +477,10 @@ function zupToYup(v: number[]): number[] {
  */
 export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type, color, mujoco, model, data, node = null, isSelected, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: DynamicGeomProps) {
   const meshRef = useRef<THREE.Group>(null);
+  // Which geom of its body this group draws: SelectionOutline outlines just
+  // the picked one when a geom, not the body, was chosen in the hierarchy.
+  // A member's far half after a break (`<geom>~2`) counts as the member.
+  const geomTag = useMemo(() => ({ geomName: name.replace(/~2$/, '') }), [name]);
   const isPlaying = useStore(state => state.isPlaying);
   
   const geomId = useMemo(() => {
@@ -1066,7 +1070,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
         }
       }
       return (
-        <group name={nodeId} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
+        <group name={nodeId} userData={geomTag} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
           <group position={localPos} quaternion={localQuat}>
             <mesh castShadow receiveShadow geometry={(showPaint && paintGeometry ? paintGeometry : shadedGeometry)!} {...dragHandlers} {...paintHandlers}>
               {renderedMaterial}
@@ -1080,7 +1084,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     }
     // Static mesh: vertices baked in Three.js world space — no position/rotation applied.
     return (
-      <group name={nodeId}>
+      <group name={nodeId} userData={geomTag}>
         <mesh castShadow receiveShadow geometry={(showPaint && paintGeometry ? paintGeometry : shadedGeometry)!} {...dragHandlers} {...paintHandlers}>
           {renderedMaterial}
           {brushCursor}
@@ -1101,7 +1105,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
 
   if (patternedGeometry) {
     return (
-      <group name={nodeId} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
+      <group name={nodeId} userData={geomTag} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
         {/* Already in the geom's own frame, cylinders along +Z included, so
             none of the rotation the JSX primitives below are given. */}
         <mesh castShadow receiveShadow geometry={patternedGeometry} {...dragHandlers}>
@@ -1116,6 +1120,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     return (
       <group
         name={nodeId}
+        userData={geomTag}
         ref={meshRef}
         position={initialPos}
         quaternion={initialQuaternion}
@@ -1142,6 +1147,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   return (
     <group
       name={nodeId}
+      userData={geomTag}
       ref={meshRef}
       position={initialPos}
       quaternion={initialQuaternion}
@@ -1699,7 +1705,18 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
     return set;
   }, [extraSelectedIds, selectedNodeId]);
   const nodeOf = (id?: string) => (id ? nodeById.get(id) ?? null : null);
-  const picked = (id?: string) => !!id && selectedIds.has(id);
+  // A geom picked on its own in the hierarchy is tinted alone, when it is drawn
+  // as a mesh of its own. A boolean body draws one generated mesh and a cut is
+  // a ghost, so picking one of those still tints the body.
+  const focusedGeomName = useStore((state) => {
+    if (!state.geomFocused || !state.selectedNodeId) return null;
+    return nodeById.get(state.selectedNodeId)?.geoms?.[state.activeGeomIndex]?.name ?? null;
+  });
+  const picked = (id?: string, geomName?: string) => {
+    if (!id || !selectedIds.has(id)) return false;
+    if (!focusedGeomName || id !== selectedNodeId || !geomName) return true;
+    return !focusedDrawn || geomName === focusedGeomName;
+  };
 
   // Bodies switched off with the hierarchy's eye. Only their drawing goes: they
   // stay in the model, and in knownGeomNames above, so the implicit pass does
@@ -1731,6 +1748,8 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
     traverse(sceneGraph.nodes, false, false);
     return list;
   }, [sceneGraph, hiddenNodeIds]);
+  const focusedDrawn = !!focusedGeomName
+    && geoms.some((g) => g.nodeId === selectedNodeId && g.name === focusedGeomName);
 
   const implicitGeoms = useMemo(() => {
     if (!model || !mujoco || !model.geom_type) return [];
@@ -1819,7 +1838,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             model={model}
             data={data}
             node={nodeOf(g.nodeId)}
-            isSelected={picked(g.nodeId)}
+            isSelected={picked(g.nodeId, g.name)}
             setSelectedNodeId={setSelectedNodeId}
             staticBody={g.staticBody}
           />
@@ -1837,7 +1856,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             model={model}
             data={data}
             node={nodeOf(g.nodeId)}
-            isSelected={picked(g.nodeId)}
+            isSelected={picked(g.nodeId, g.name.replace(/~2$/, ''))}
             setSelectedNodeId={setSelectedNodeId}
           />
         ))}
@@ -1852,7 +1871,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             model={model}
             data={data}
             node={nodeOf(g.nodeId)}
-            isSelected={picked(g.nodeId)}
+            isSelected={picked(g.nodeId, g.name)}
             setSelectedNodeId={setSelectedNodeId}
             vertices={g.renderVertices}
             faces={g.faces}
@@ -1896,7 +1915,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
           model={model}
           data={data}
           node={nodeOf(g.nodeId)}
-          isSelected={picked(g.nodeId)}
+          isSelected={picked(g.nodeId, g.name)}
           setSelectedNodeId={setSelectedNodeId}
           vertices={g.vertices}
           faces={g.faces}

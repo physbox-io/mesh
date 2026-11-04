@@ -4,6 +4,7 @@ import { Outline } from '@react-three/postprocessing';
 import { BlendFunction, type OutlineEffect } from 'postprocessing';
 import type * as THREE from 'three';
 import { useStore } from '../../store/useStore';
+import { findNode } from '../../store/sceneClone';
 
 /**
  * An outline around the selected bodies, in place of the blue tint they used to
@@ -28,8 +29,11 @@ export function SelectionOutline() {
   useFrame(() => {
     const outline = effect.current;
     if (!outline) return;
-    const { selectedNodeId, extraSelectedIds, recompileId } = useStore.getState();
-    const key = `${recompileId}|${selectedNodeId ?? ''}|${extraSelectedIds.join(',')}`;
+    const { selectedNodeId, extraSelectedIds, recompileId, geomFocused, activeGeomIndex, sceneGraph } = useStore.getState();
+    const focusedGeomName = geomFocused && selectedNodeId
+      ? findNode(sceneGraph?.nodes, selectedNodeId)?.geoms?.[activeGeomIndex]?.name ?? null
+      : null;
+    const key = `${recompileId}|${selectedNodeId ?? ''}|${extraSelectedIds.join(',')}|${focusedGeomName ?? ''}`;
     const current = outline.selection;
     if (key === lastKeyRef.current) {
       let allMounted = true;
@@ -51,6 +55,19 @@ export function SelectionOutline() {
     // A Set: a body's group can hold another of the same name (a geom's own
     // group inside its node's), and a duplicate would never match below.
     const meshes = new Set<THREE.Object3D>();
+    // A geom picked on its own in the hierarchy is outlined alone, by the tag
+    // DynamicGeom puts on its group. One with no group of its own (a boolean
+    // body's member, a cut) finds nothing and the whole body is outlined.
+    if (focusedGeomName) {
+      scene.traverse((o) => {
+        if (o.name !== selectedNodeId || o.userData.geomName !== focusedGeomName) return;
+        o.traverse((c) => {
+          if ((c as THREE.Mesh).isMesh) meshes.add(c);
+        });
+      });
+    }
+    // The rest of the selection, still whole bodies.
+    if (meshes.size > 0 && selectedNodeId) ids.delete(selectedNodeId);
     if (ids.size > 0) {
       scene.traverse((o) => {
         if (!o.name || !ids.has(o.name)) return;

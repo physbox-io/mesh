@@ -79,7 +79,7 @@ export function CsgCard({ node: selectedNode }: { node: SceneNode }) {
                 );
               })()}
               <button
-                onClick={() => { deleteNodeGeom(selectedNode.id, idx); setActiveGeomIndex(0); }}
+                onClick={() => { deleteNodeGeom(selectedNode.id, idx); setActiveGeomIndex(0, false); }}
                 disabled={solids.length <= 1}
                 className="p-1 rounded border border-slate-200 text-slate-400 hover:text-rose-600 hover:border-rose-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
                 title={solids.length <= 1 ? 'A body needs at least one shape' : 'Delete this shape'}
