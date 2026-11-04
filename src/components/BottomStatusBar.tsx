@@ -22,7 +22,8 @@ import { useCastDialog } from '../store/castDialogStore';
 import { useJobPause } from '../store/jobPauseStore';
 import { RemoteJobChip } from './RemoteJobChip';
 import { openHardwareList } from './HardwareListDialog';
-import { BuildMenu, buildItems } from './BuildMenu';
+import { BuildMenu } from './BuildMenu';
+import { buildItems } from './buildItems';
 
 /**
  * What the app is in the middle of, said in one phrase.

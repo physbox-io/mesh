@@ -53,8 +53,8 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   useEffect(() => {
     if (!isOpen) return;
     let live = true;
-    setBusy(true);
     const t = setTimeout(() => {
+      setBusy(true);
       layBricksOffThread(scene, piece?.id ?? null, options)
         .then((o) => { if (live) { setOutcome(o); setError(null); } })
         .catch((e: Error) => { if (live) { setOutcome(null); setError(e.message); } })

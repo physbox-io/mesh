@@ -213,8 +213,8 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
 
   for (let c = 0; c < args.courses; c++) {
     const want = masks[c];
-    const original = solid[c] ?? want;
     if (!want) { below = null; continue; }
+    const original = solid[c] ?? want;
     const under = below;
     const anyBelow = !!under && under.some((v, k) => v > 0 && want[k] === 1);
 

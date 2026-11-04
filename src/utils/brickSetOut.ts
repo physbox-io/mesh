@@ -339,55 +339,6 @@ function fillJoints<T extends { len: number }>(out: T[], length: number, j: numb
   return out.map((p, i) => ({ ...p, gapAfter: i < gaps.length ? gaps[i] : 0 }));
 }
 
-/**
- * An English header course along a one-brick wall, as set out on site. At a
- * corner the return wall's stretcher runs through and its end is the quoin
- * header, so the course starts with a queen closer; at a stopped end it is a
- * header and then the closer. Headers between, and if the wall is not a whole
- * number of them, one cut header in the middle; the rest is taken up in the
- * joints.
- */
-function englishHeaderCourse(
-  length: number, ends: { start: number; end: number }, dims: BrickDims, below: number[] = [], lap = dims.L / 4,
-): { kind: Kind; len: number; gapAfter: number }[] {
-  const { W, j } = dims;
-  const Q = (W - j) / 2;
-  const head = (cornered: boolean): { kind: Kind; len: number }[] =>
-    (cornered ? [{ kind: 'Q', len: Q }] : [{ kind: 'H', len: W }, { kind: 'Q', len: Q }]);
-  const start = head(ends.start < 0), end = head(ends.end < 0).reverse();
-  const used = (list: { len: number }[]) => list.reduce((t, p) => t + p.len + j, 0);
-  const middle = length - used(start) - used(end) + j;
-  if (middle < -j) return fillJoints(start.slice(0, 1), length, j);
-  const n = Math.max(0, Math.floor((middle + j) / (W + j)));
-  const rest = middle - n * (W + j) + j;
-  const mid: { kind: Kind; len: number }[] = Array.from({ length: n }, () => ({ kind: 'H' as Kind, len: W }));
-  // What is left over goes in the middle, cut: one cut header if it is half
-  // a header or more; less, and one whole header comes out and two equal cut
-  // headers go in its place. Not spread through the joints, where it would
-  // drift the bond along the wall.
-  // Where in the course the cut goes: near the middle, at the slot whose
-  // joints sit clear of the course below's (the stretcher course under it
-  // will have stepped its bond about the middle too).
-  const at = (k: number) => {
-    const m = mid.slice();
-    if (rest - j >= W / 2) m.splice(k, 0, { kind: 'H', len: rest - j });
-    else if (rest > 2 && n > 0) m.splice(Math.min(k, n - 1), 1, { kind: 'H', len: (W + rest - j) / 2 }, { kind: 'H', len: (W + rest - j) / 2 });
-    return [...start, ...m, ...end];
-  };
-  // Judged on the joints as they will be laid, slack taken up and all.
-  const clash = (plan: { len: number; gapAfter: number }[]) => {
-    let s = 0, hits = 0;
-    for (let i = 0; i < plan.length - 1; i++) { s += plan[i].len + j + plan[i].gapAfter; if (below.some((b) => Math.abs(b - (s - j / 2)) < lap)) hits++; }
-    return hits;
-  };
-  let bestK = Math.floor(n / 2), bestScore = Infinity;
-  for (let k = 0; k <= n; k++) {
-    const score = clash(fillJoints(at(k), length, j)) * 10 + Math.abs(k - n / 2) / Math.max(1, n);
-    if (score < bestScore) { bestScore = score; bestK = k; }
-  }
-  return fillJoints(at(bestK), length, j);
-}
-
 export interface StripLayer {
   /** Whether a brick there would touch nothing already laid. */
   free(o: V2, u: V2, n: V2, along: number, depth: number): boolean;

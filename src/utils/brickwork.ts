@@ -107,7 +107,7 @@ export interface PlacedBrick {
 
 export interface BrickworkResult {
   standard: BrickStandard;
-  bond: BrickBond;
+  bondType: BrickBond;
   jointMm: number;
   courses: number;
   modelHeightMm: number;
@@ -210,7 +210,13 @@ function rotateRun(run: Run, by: number): Run {
 /** Which cells of the course are taken. */
 class Occupancy {
   readonly cells: Uint8Array;
-  constructor(readonly x0: number, readonly y0: number, readonly nx: number, readonly ny: number, readonly cell: number) {
+  readonly x0: number;
+  readonly y0: number;
+  readonly nx: number;
+  readonly ny: number;
+  readonly cell: number;
+  constructor(x0: number, y0: number, nx: number, ny: number, cell: number) {
+    this.x0 = x0; this.y0 = y0; this.nx = nx; this.ny = ny; this.cell = cell;
     this.cells = new Uint8Array(nx * ny);
   }
   at(p: V2): boolean {
@@ -315,7 +321,7 @@ function toyResult(
   const bond = bondReport(bricks, 0.2, { sides: true });
   bondWarnings(bond, warnings, true);
   return {
-    standard: std, bond: 'stretcher', jointMm: 0, courses,
+    standard: std, bondType: 'stretcher', jointMm: 0, courses,
     modelHeightMm: modelH, builtHeightMm: courses * TOY_HEIGHT_MM,
     bricks, whole: bricks.length, cutPieces: 0, closers: 0, toBuy: bricks.length,
     cuts: [], mortarLitres: 0, mortarBags: 0, lintels: [], parts, short, bond, warnings,
@@ -626,7 +632,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   bondWarnings(bond, warnings, false);
 
   return {
-    standard: std, bond: o.bond, jointMm: j, courses,
+    standard: std, bondType: o.bond, jointMm: j, courses,
     modelHeightMm: modelH, builtHeightMm: courses * gauge - j,
     bricks, whole, cutPieces: cutLens.length, closers, toBuy,
     cuts: [...byLen.entries()].sort((a, b) => b[0] - a[0]).map(([lengthMm, count]) => ({ lengthMm, count })),

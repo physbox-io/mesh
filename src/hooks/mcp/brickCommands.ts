@@ -18,7 +18,7 @@ export const brickCommands: McpCommands = {
     }
     if (msg.bond !== undefined && !BONDS.includes(msg.bond as BrickBond)) return { ok: false, error: `bond is one of ${BONDS.join(', ')}.` };
     const toySizes = msg.toySizes;
-    if (toySizes !== undefined && (!Array.isArray(toySizes) || toySizes.some((t) => !TOY_SIZES.includes(t as ToySize)))) {
+    if (toySizes !== undefined && (!Array.isArray(toySizes) || toySizes.some((t) => !(TOY_SIZES as readonly string[]).includes(t as string)))) {
       return { ok: false, error: `toySizes is a list of ${TOY_SIZES.join(', ')}.` };
     }
     // How many of each toy brick the builder has: { '2x4': 40, '2x2': null }.
@@ -62,7 +62,7 @@ export const brickCommands: McpCommands = {
       ok: true,
       laid: placement !== 'none',
       brick: r.standard.label,
-      bond: r.bond,
+      bondType: r.bondType,
       jointMm: r.jointMm,
       courses: r.courses,
       builtHeightMm: Math.round(r.builtHeightMm),
