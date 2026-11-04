@@ -3,6 +3,7 @@ import { stlToMesh } from '../src/utils/stlMesh';
 import { exportBinarySTL, generateMoldMeshes } from '../src/utils/moldExporter';
 import { generateCastPattern } from '../src/utils/castPatternExporter';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
+import { loadManifold } from '../src/utils/sculptCut';
 import { latticeBracketPreset } from '../src/presets/latticeBracket';
 import type { SceneGraph } from '../src/types/scene';
 
@@ -44,14 +45,16 @@ describe('stlToMesh', () => {
     expect(integrityOf(gated.patternStl).volume).toBeGreaterThan(integrity.volume);
   });
 
-  it('brings mold halves in the right way out', () => {
+  it('brings mold halves in the right way out', async () => {
     const dome: SceneGraph = {
       nodes: [{
         id: 'd', name: 'dome', type: 'body', pos: [0, 0, 0],
         geoms: [{ name: 'g', type: 'sphere', size: [0.02] } as never], joints: [], children: [],
       }],
     };
-    const res = generateMoldMeshes(dome);
+    // With the geometry engine, as the app's worker always has it: a bottom
+    // fill's runner under the cavity needs it.
+    const res = generateMoldMeshes(dome, {}, await loadManifold());
     expect(res.success).toBe(true);
     const integrity = integrityOf(res.binarySTL);
     expect(integrity.consistentlyWound).toBe(true);
