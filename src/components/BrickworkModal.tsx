@@ -46,9 +46,12 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [toyInventory, setToyInventory] = useState<ToyInventory>(() =>
-    saved?.toyInventory ? { ...saved.toyInventory } : Object.fromEntries(TOY_SIZES.map((s) => [s, null])),
+    saved?.toyInventory
+      ? { ...saved.toyInventory }
+      : Object.fromEntries((saved?.toySizes ?? TOY_SIZES).map((s) => [s, null])),
   );
   const [hollowStuds, setHollowStuds] = useState<number>(saved?.hollowStuds ?? 0);
+  const [subjectName, setSubjectName] = useState<string | null>(() => piece?.name ?? null);
   const laidNodesRef = useRef<SceneNode[] | null>(null);
   const laidOptionsRef = useRef<unknown>(null);
   const sourceSceneRef = useRef<{ scene: SceneGraph; pieceId: string | null }>({ scene, pieceId: piece?.id ?? null });
@@ -76,9 +79,11 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
       return;
     }
     const { scene: targetScene, pieceId: targetPieceId } = sourceSceneRef.current;
+    const targetName = pieceOf(targetScene.nodes, targetPieceId)?.name ?? null;
     let live = true;
     const t = setTimeout(() => {
       setBusy(true);
+      setSubjectName(targetName);
       layBricksOffThread(targetScene, targetPieceId, options)
         .then((o) => { if (live) { setOutcome(o); setError(null); } })
         .catch((e: Error) => { if (live) { setOutcome(null); setError(e.message); } })
@@ -99,15 +104,14 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
     const state = useStore.getState();
     // Laid from the scene as it was counted; if it has moved on, it is being counted again.
     if (state.sceneGraph.nodes !== scene.nodes) { setMessage('The scene changed: counting again.'); return; }
-    state.prepareForDiscreteChange();
     const next = { ...state.sceneGraph, nodes: outcome.nodes };
-    laidNodesRef.current = outcome.nodes;
     laidOptionsRef.current = options;
     state.updateScene(next);
-    if (placement === 'replace' && piece && !next.nodes.some((n) => n.id === piece.id)) {
+    laidNodesRef.current = useStore.getState().sceneGraph.nodes;
+    const targetPieceId = sourceSceneRef.current.pieceId;
+    if (placement === 'replace' && targetPieceId && !next.nodes.some((n) => n.id === targetPieceId)) {
       state.setSelectedNodeId(null);
     }
-    void state.recompile(next);
     setMessage(`Laid ${outcome.result.bricks.length.toLocaleString()} bricks in ${outcome.result.courses} courses.`);
     setTimeout(() => setMessage(null), 5000);
   };
@@ -124,7 +128,7 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
             <BrickWall className="w-5 h-5 text-red-700 dark:text-red-400" />
             <div>
               <h2 className="text-base font-semibold text-slate-900 dark:text-white">Brickwork</h2>
-              <p className="text-xs font-medium text-slate-600 dark:text-slate-300">Laying: {piece ? piece.name : 'the whole scene'}</p>
+              <p className="text-xs font-medium text-slate-600 dark:text-slate-300">Laying: {subjectName ?? 'the whole scene'}</p>
               <p className="text-xs text-slate-500 dark:text-slate-400">The shape in brick, course by course: the bricks to buy, the cuts, the mortar and the lintels — or in toy bricks, by size.</p>
             </div>
           </div>

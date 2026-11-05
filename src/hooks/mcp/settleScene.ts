@@ -109,7 +109,7 @@ export const settleScene = async (
   // build racing against the final one below.
   // A caller that only adds a body keeps what the scene says about itself:
   // print fidelity, cast prep, reference pictures, its name.
-  store.updateScene(replacesScene ? { ...sceneFields, nodes } : { ...store.sceneGraph, nodes }, true);
+  store.updateScene(replacesScene ? { ...sceneFields, nodes } : { ...store.sceneGraph, ...sceneFields, nodes }, true);
   await autoCompileScad(nodes);
   await applyDeclarativePreCsgFeatures(nodes);
   // Boolean bodies compile through the same OpenSCAD pool, and just as

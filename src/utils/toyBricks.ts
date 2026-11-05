@@ -323,12 +323,19 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
         };
 
         let pick: { b: Brick; size: ToySize; score: number } | null = null;
-        const allOut = allowed.every(({ size }) => room(size) < 1);
+        let anyInHandFit = false;
         for (const { size, w, h } of [...allowed, { size: '1x1', w: 1, h: 1 }]) {
-          if (size !== '1x1' && !allOut && room(size) < 1) continue;
-          if (size === '1x1' && allOut && pick) continue;
+          if (size !== '1x1' && room(size) < 1) continue;
           const cand = evaluateCandidate(size, w, h);
+          if (cand && size !== '1x1') anyInHandFit = true;
           if (cand && (!pick || cand.score > pick.score)) pick = cand;
+        }
+        if (!anyInHandFit) {
+          for (const { size, w, h } of allowed) {
+            if (room(size) >= 1) continue;
+            const cand = evaluateCandidate(size, w, h);
+            if (cand && (!pick || cand.score > pick.score)) pick = cand;
+          }
         }
         if (!pick) continue;
         // Only a 1×1 fits here and the builder has none: inside the model a

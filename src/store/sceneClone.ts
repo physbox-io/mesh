@@ -153,6 +153,7 @@ export const replaceNodeWith = (nodes: SceneNode[], id: string, replacements: Sc
 
 export const cloneSceneGraph = (sg: SceneGraph): SceneGraph => ({
   ...sg,
+  ...(sg.brickwork ? { brickwork: clonePlain(sg.brickwork) } : {}),
   nodes: (sg.nodes || []).map(cloneNode),
 });
 

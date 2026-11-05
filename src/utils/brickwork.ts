@@ -270,7 +270,7 @@ function unitsFor(bond: BrickBond, course: number): ('S' | 'H')[] {
  */
 const isLaidCourse = (n: SceneNode) =>
   Boolean(n.brickwork) ||
-  (/_course_\d+$/.test(n.id) && Boolean(n.geoms?.length) && n.geoms.every((g) => /^brick_/.test(g.name ?? '')));
+  (/_course_\d+(?:_\d+)?$/.test(n.id) && Boolean(n.geoms?.length) && n.geoms.every((g) => /^brick_/.test(g.name ?? '')));
 
 /**
  * Whether the whole scene's brickwork takes this body. Not a simulated cut,
@@ -341,7 +341,16 @@ function toyResult(
 
 /** Lays the scene's solids in brick. Throws, with what to change, when it cannot. */
 export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {}): BrickworkResult {
-  const o = { ...DEFAULT_BRICKWORK_OPTIONS, ...scene.brickwork, ...opts };
+  const saved = scene.brickwork;
+  const sameStd = !opts.standardId || !saved?.standardId || opts.standardId === saved.standardId;
+  const o: BrickworkOptions = {
+    ...DEFAULT_BRICKWORK_OPTIONS,
+    ...saved,
+    ...(sameStd ? {} : { jointMm: undefined }),
+    ...(opts.toySizes && !opts.toyInventory ? { toyInventory: undefined } : {}),
+    ...(opts.toyInventory && !opts.toySizes ? { toySizes: undefined } : {}),
+    ...opts,
+  };
   const std = BRICK_STANDARDS[o.standardId] ?? BRICK_STANDARDS.uk;
   const warnings: string[] = [];
 

@@ -23,9 +23,8 @@ describe('brickwork presets', () => {
     // The model's own lintels, in the slots left for them.
     expect(r.lintels).toEqual([{ lengthMm: 685, count: 1 }, { lengthMm: 910, count: 1 }]);
     // The walls, and the chimney standing on its slab: nothing to warn of.
-    expect(r.bond).toMatchObject({ pieces: 2, sideBySide: 0 });
+    expect(r.bond).toMatchObject({ pieces: 2, sideBySide: 0, straightJoints: 0 });
     expect(r.warnings).toEqual([]);
-    expect(r.bond.straightJoints).toBeLessThanOrEqual(1);
     // In place of the walls; the door, slab and steel stay.
     expect(nodes.some((n) => n.id === 'smoker_walls')).toBe(false);
     expect(nodes.find((n) => n.id === 'smoker_door')!.joints[0].type).toBe('hinge');

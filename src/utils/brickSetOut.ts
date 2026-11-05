@@ -241,22 +241,32 @@ function setOutStrip(
     startWith?: Kind; endWith?: Kind;
     /** What a closer costs away from the start (broken bond). Default: 5. */
     closerMidCost?: number;
+    /** Middle of the wall along this strip, mm (default: length / 2). */
+    mid?: number;
   } = {},
 ): ({ kind: Kind; len: number; gapAfter: number }[] & { cost: number }) | null {
   const q = Math.round(length / step);
+  const midQ = opts.mid !== undefined ? opts.mid / step : q / 2;
   const jq = Math.max(1, Math.round(dims.j / step));
   const all: Piece[] = pieces.map((p) => ({ ...p, len: Math.round(p.len / step) }));
   if (opts.anyCut) {
     // A cut of any length on the set-out grid: an English bond laps the
     // headers below within a few millimetres, and a cut in 10 mm steps
-    // could not get back into step after one.
-    const every = 1;
+    // could not get back into step after one. A stretcher cut shorter than a
+    // header (2 * lap - j) puts two perpends closer than 2 * lap, which the
+    // next course cannot lap without a straight joint, so it costs more.
+    const every = Math.max(1, Math.round(dims.j / (4 * step)));
     for (let c = Math.ceil(opts.anyCut.min / step); c <= Math.floor(opts.anyCut.max / step); c += every) {
-      if (!all.some((p) => p.kind === opts.anyCut!.kind && p.len === c)) all.push({ kind: opts.anyCut.kind, len: c, cost: 2.5 });
+      if (!all.some((p) => p.kind === opts.anyCut!.kind && p.len === c)) {
+        const short = (opts.anyCut.kind === 'S' || opts.anyCut.kind === 'P') && c * step < dims.W - dims.j / 2 ? 1.5 : 0;
+        all.push({ kind: opts.anyCut.kind, len: c, cost: 2.5 + short });
+      }
     }
   }
   // Whether a joint at each grid position would sit on one below, worked out
-  // once rather than at every step of the search.
+  // once rather than at every step of the search. The nearer the seam below,
+  // the heavier the penalty, so when a full lap cannot be had it still picks
+  // the widest lap there is rather than a dead-on straight joint.
   const nearAt = new Uint8Array(q + jq + 2);
   const lapQ = lap / step;
   for (const b of below) {
@@ -286,6 +296,8 @@ function setOutStrip(
       all.forEach((pc, i) => {
         const end = p + pc.len;
         if (end > q + 1) return;
+        const lastKind = last ? kinds[last - 1] : null;
+        if (pc.kind === 'Q' && lastKind === 'Q') return;
         // A queen closer goes beside the corner, first in the strip, and nowhere else.
         let c = here + pc.cost + (pc.kind === 'Q' && p !== 0 ? (opts.closerMidCost ?? 5) : 0);
         // A cut (not a standard bat or closer) at either end of the strip,
@@ -295,10 +307,9 @@ function setOutStrip(
         if (odd && (p === 0 || Math.abs(q - end) <= slack)) c += 1.5;
         // And the further from the middle, the more: the broken bond goes in
         // the middle of the wall, not a brick in from the corner.
-        if (odd) c += Math.abs((p + end) / 2 - q / 2) / Math.max(1, q);
+        if (odd) c += Math.abs((p + end) / 2 - midQ) / Math.max(1, q);
         if (p === 0 && opts.startWith && pc.kind !== opts.startWith) c += 20;
         if (opts.alternate && pc.kind !== 'Q') {
-          const lastKind = last ? kinds[last - 1] : null;
           if (lastKind && lastKind !== 'Q' && lastKind === pc.kind) c += 3;
           if (!lastKind || lastKind === 'Q') { if (opts.first && pc.kind !== opts.first) c += 1; }
         }
@@ -442,10 +453,10 @@ export function layWalls(args: {
     }
   }
   const lap = L / 4;
-  // Set out on a quarter-joint grid: a UK header (102.5), closer (46.25) and
-  // joint (10) all fall on it, so a course of headers does not drift off its
-  // lap the way it did on the occupancy grid's 5 mm.
-  const setOutStep = Math.max(0.1, j / 4);
+  // Set out on an eighth-joint grid (1.25 mm for a 10 mm joint): a UK header
+  // (102.5), three-quarter bat (158.75), closer (46.25) and joint (10) all
+  // fall on it exactly, so a course of headers does not drift off its lap.
+  const setOutStep = Math.max(0.1, j / 8);
   let headerless = 0;
   walls.forEach((w, wi) => {
     const leaves = Math.max(1, Math.round((w.thickness + j) / (W + j)));
@@ -454,8 +465,41 @@ export function layWalls(args: {
     if (length < L / 4) return;
     // Joints of the course below along this wall, per leaf (a header's on every leaf).
     const belowSeams: number[][] = Array.from({ length: leaves }, () => []);
+    if (args.below.length === 0 && bond !== 'stack') {
+      // On the first course there is no course below yet, but a corner this
+      // wall runs through now will be owned by the return wall on the next
+      // course, putting a corner joint at ext + j / 2 (and, if two leaves
+      // deep, a collar joint between the return's leaves at W + j / 2).
+      if (ext[wi].start > 0) {
+        if (innerStop[wi].start > 0) belowSeams[0].push(W + j / 2);
+        else {
+          belowSeams.forEach((list) => list.push(ext[wi].start + j / 2));
+          if (ext[wi].start > W + j) belowSeams.forEach((list) => list.push(W + j / 2));
+        }
+      }
+      if (ext[wi].end > 0) {
+        if (innerStop[wi].end > 0) belowSeams[0].push(length - W - j / 2);
+        else {
+          belowSeams.forEach((list) => list.push(length - ext[wi].end - j / 2));
+          if (ext[wi].end > W + j) belowSeams.forEach((list) => list.push(length - W - j / 2));
+        }
+      }
+    }
     for (const b of args.below) {
       const bu = { x: Math.cos(b.angle), y: Math.sin(b.angle) };
+      if (Math.abs(dot(bu, w.u)) < 0.01) {
+        // A brick of the return wall running through this corner in the course
+        // below: its inner side (and the collar joint between its leaves) is a
+        // seam this wall must lap across so the corner ties both leaves.
+        const bn = { x: -bu.y, y: bu.x };
+        for (const e of [1, -1]) {
+          const p = add({ x: b.x, y: b.y }, mul(bn, e * (b.depthMm / 2 + j / 2)));
+          const s = dot(sub(p, o), w.u), qn = dot(sub(p, o), w.n);
+          if (s < lap || s > length - lap || qn < -1 || qn > w.thickness + 1) continue;
+          belowSeams.forEach((list) => list.push(s));
+        }
+        continue;
+      }
       if (Math.abs(dot(bu, w.u)) < 0.99) continue;
       for (const e of [1, -1]) {
         const p = add({ x: b.x, y: b.y }, mul(bu, e * (b.lengthMm / 2 + j / 2)));
@@ -506,7 +550,7 @@ export function layWalls(args: {
           { kind: 'H', len: W, cost: 0 },
           { kind: 'Q', len: (W - j) / 2, cost: 0.6 },
         ], belowSeams.flat(), dims, setOutStep, lap, {
-          anyCut: { kind: 'H', min: W / 2, max: W - 2.5 * j }, closerMidCost: 0.9,
+          anyCut: { kind: 'H', min: W / 2, max: W - j }, closerMidCost: 0.9,
           ...(cornered[wi].start ? { startWith: 'Q' as Kind } : {}), ...(cornered[wi].end ? { endWith: 'Q' as Kind } : {}),
         }), 0);
         return;
@@ -518,20 +562,20 @@ export function layWalls(args: {
           { kind: 'Q', len: (W - j) / 2, cost: 0.3 },
           { kind: 'P', len: (3 * L - j) / 4, cost: 0.6 },
           { kind: 'P', len: (L - j) / 2, cost: 0.6 },
-        ], merged, dims, setOutStep, lap, { alternate: true, first: c % 2 === 0 ? 'H' : 'P', anyCut: { kind: 'P', min: L / 4, max: L - 2.5 * j } });
+        ], merged, dims, setOutStep, lap, { alternate: true, first: c % 2 === 0 ? 'H' : 'P', anyCut: { kind: 'P', min: L / 4, max: L - j } });
         placeAll(plan, 0);
         return;
       }
     }
     // Stretchers, leaf by leaf; stack bond keeps its joints in line. An
-    // inner leaf of a wall running through an English corner stops a joint
-    // short of it.
+    // inner leaf of a wall running through an English or stretcher corner
+    // stops a joint short of it.
     for (let k = 0; k < leaves; k++) {
       const s0 = k > 0 ? innerStop[wi].start : 0, s1 = k > 0 ? innerStop[wi].end : 0;
       const leafLength = length - s0 - s1;
       if (leafLength < L / 4) continue;
       const plan = setOutStrip(leafLength, stretchers, bond === 'stack' ? [] : belowSeams[k].map((x) => x - s0), dims, setOutStep, lap,
-        { anyCut: { kind: 'S', min: L / 4, max: L - 2.5 * j } });
+        { anyCut: { kind: 'S', min: L / 4, max: L - j }, mid: length / 2 - s0 });
       if (!plan) continue;
       cost += plan.cost ?? 0;
       let s = s0;

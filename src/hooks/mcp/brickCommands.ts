@@ -39,13 +39,15 @@ export const brickCommands: McpCommands = {
     }
     const placement = msg.placement === 'replace' ? 'replace' : msg.placement === 'none' ? 'none' : 'beside';
     const saved = store.sceneGraph.brickwork;
+    const standardId = (msg.standardId as BrickStandardId | undefined) ?? saved?.standardId ?? DEFAULT_BRICKWORK_OPTIONS.standardId;
+    const sameStd = !saved?.standardId || standardId === saved.standardId;
     const brickwork = {
-      standardId: (msg.standardId as BrickStandardId | undefined) ?? saved?.standardId ?? DEFAULT_BRICKWORK_OPTIONS.standardId,
+      standardId,
       bond: (msg.bond as BrickBond | undefined) ?? saved?.bond ?? DEFAULT_BRICKWORK_OPTIONS.bond,
-      ...(typeof msg.jointMm === 'number' ? { jointMm: msg.jointMm } : saved?.jointMm !== undefined ? { jointMm: saved.jointMm } : {}),
+      ...(typeof msg.jointMm === 'number' ? { jointMm: msg.jointMm } : sameStd && saved?.jointMm !== undefined ? { jointMm: saved.jointMm } : {}),
       wastagePct: typeof msg.wastagePct === 'number' ? msg.wastagePct : (saved?.wastagePct ?? DEFAULT_BRICKWORK_OPTIONS.wastagePct),
-      ...(toySizes ? { toySizes: toySizes as ToySize[] } : saved?.toySizes ? { toySizes: saved.toySizes } : {}),
-      ...(toyInventory ? { toyInventory } : saved?.toyInventory ? { toyInventory: saved.toyInventory } : {}),
+      ...(toySizes ? { toySizes: toySizes as ToySize[] } : !toyInventory && saved?.toySizes ? { toySizes: saved.toySizes } : {}),
+      ...(toyInventory ? { toyInventory } : !toySizes && saved?.toyInventory ? { toyInventory: saved.toyInventory } : {}),
       ...(typeof msg.hollowStuds === 'number' ? { hollowStuds: Math.round(msg.hollowStuds) } : saved?.hollowStuds !== undefined ? { hollowStuds: saved.hollowStuds } : {}),
     };
     let outcome;
@@ -59,9 +61,10 @@ export const brickCommands: McpCommands = {
     }
     const r = outcome.result;
     if (placement !== 'none') {
-      store.prepareForDiscreteChange();
-      store.updateScene({ ...store.sceneGraph, brickwork }, true);
-      await settleScene(outcome.nodes, { replacesScene: false });
+      await settleScene(outcome.nodes, { replacesScene: false, sceneFields: { brickwork } });
+      if (placement === 'replace' && store.selectedNodeId && !findNodeInScene(outcome.nodes, store.selectedNodeId)) {
+        store.setSelectedNodeId(null);
+      }
     }
     return {
       ok: true,

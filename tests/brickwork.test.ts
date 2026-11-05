@@ -78,16 +78,11 @@ describe('laying a shape in brick', () => {
     expect(r.warnings).toEqual([]);
   });
 
-  // The gateway's walls are not a whole number of bricks long (the return is
-  // a metre), so a header bond carries a broken bond up the return, one short
-  // lap a course, as it does on site; walls drawn to the brick have none (the
-  // box below). Ceilings at what was measured, 2026-11-02.
-  for (const [bond, ceiling] of [['stretcher', 2], ['english', 24], ['flemish', 30]] as [BrickBond, number][]) {
+  for (const bond of ['stretcher', 'english', 'flemish'] as BrickBond[]) {
     it(`sets out a one-brick gateway wall with a return in ${bond} bond, in one piece`, () => {
       const r = layBricks(gateway, { bond });
       expect(overlaps(r.bricks)).toBe(0);
-      expect(r.bond.pieces).toBe(1);
-      expect(r.bond.straightJoints).toBeLessThanOrEqual(ceiling);
+      expect(r.bond).toMatchObject({ pieces: 1, straightJoints: 0 });
       // 600 mm opening, 150 mm bearing each end.
       expect(r.lintels).toEqual([{ lengthMm: 900, count: 1 }]);
       if (bond !== 'stretcher') {
@@ -102,9 +97,7 @@ describe('laying a shape in brick', () => {
       const r = layBricks(room, { bond });
       expect(overlaps(r.bricks)).toBe(0);
       expect(r.lintels).toEqual([]);
-      expect(r.bond.pieces).toBe(1);
-      // A few in the first course over the base, where the bond starts.
-      expect(r.bond.straightJoints).toBeLessThanOrEqual(4);
+      expect(r.bond).toMatchObject({ pieces: 1, straightJoints: 0 });
       // 10 m of one-brick wall a metre high: about 120 bricks a square metre.
       expect(r.toBuy).toBeGreaterThan(1100);
       expect(r.toBuy).toBeLessThan(1350);
@@ -208,12 +201,16 @@ describe('toy bricks', () => {
     const tight = layBricks(scene([box('t', 0, 0, 0.0048, 0.012, 0.004, 0.0048)]), { standardId: 'toy', toyInventory: { '1x2': null } });
     expect(tight.short).toEqual([{ size: '1x1', count: 1 }]);
     expect(tight.warnings.join()).toMatch(/Short of 1 × 1×1/);
-    // Only 2×4 ticked with too few in hand: uses more 2×4s and reports short of 2×4, not 1×1.
+    // Only 2×4 ticked with too few in hand (even when a bigger ticked brick is still in stock): uses more 2×4s and reports short of 2×4, not 1×1.
     const twoByFourBlock = scene([box('b', 0, 0, 0.0096, 0.016, 0.016, 0.0096)]);
-    const scarce2x4 = layBricks(twoByFourBlock, { standardId: 'toy', toyInventory: { '2x4': 2 } });
+    const scarce2x4 = layBricks(twoByFourBlock, { standardId: 'toy', toyInventory: { '2x4': 2, '2x8': 2 } });
     expect(scarce2x4.parts).toEqual([{ size: '2x4', count: 4 }]);
     expect(scarce2x4.short).toEqual([{ size: '2x4', count: 2 }]);
     expect(scarce2x4.warnings.join()).toMatch(/Short of 2 × 2×4/);
+    // Explicit toySizes or a different standardId overrides what was saved on scene.brickwork.
+    const withSaved: SceneGraph = { ...wall, brickwork: { standardId: 'uk', jointMm: 10, toyInventory: { '2x4': 2 } } };
+    expect(layBricks(withSaved, { standardId: 'mini_12' }).jointMm).toBe(0.8);
+    expect(layBricks(withSaved, { standardId: 'toy', toySizes: ['2x4', '2x2'] }).short).toEqual([]);
   });
 
   it('tiles a block exactly from two-wide bricks, needing no 1×1', () => {
