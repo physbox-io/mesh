@@ -11,6 +11,7 @@ import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, OrthographicCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { bodyColor } from '../../utils/bodyColor';
+import { glowIntensity } from '../../utils/geomGlow';
 import { registerLiveCamera } from '../../utils/liveCamera';
 import { DEFAULT_EYE, DEFAULT_TARGET_Y, drawnContentBounds, sceneContentBounds } from '../../utils/frameScene';
 import { isDrawingView, orthoFraming, ORTHO_STANDOFF, SQUARE_TO_VIEW, VIEW_AXES } from '../../utils/cameraViews';
@@ -585,14 +586,18 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // even by its own remeshing, there are no slivers to smear a normal across,
   // and a painted cat drawn faceted looked like a different model.
   const flatShading = type === 'mesh' && showPaint && !node?.isSculpt;
+  const glow = geomEntry?.glow ?? 0;
   const materialProps = useMemo(() => {
     const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
       color: bodyColor([r, g, b]),
       // The tint marks the selection only with Hi-Res off; with it on, the
       // composer outlines the selection instead (SelectionOutline).
-      emissive: isSelected && !hiRes ? '#3b82f6' : '#000',
-      emissiveIntensity: isSelected && !hiRes ? 0.2 : 0,
+      ...(isSelected && !hiRes
+        ? { emissive: '#3b82f6', emissiveIntensity: 0.2 }
+        : { emissive: glow > 0 ? bodyColor([r, g, b]) : '#000', emissiveIntensity: glowIntensity(glow, [r, g, b]) }),
+      // The tracer turns emissive off, but for this: see PathTracedView.
+      userData: { glow },
       // Satin, like a printed or moulded part. At 0.85 the studio lights in
       // App.tsx spread into a wash and a curved surface shaded about as flat
       // as a box face; at 0.5 they land as soft highlights that show the
@@ -620,7 +625,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       ...(vertexColored ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
       ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
     };
-  }, [color, isSelected, hiRes, alpha, wireframe, showEdges, vertexColored, flatShading]);
+  }, [color, isSelected, hiRes, alpha, wireframe, showEdges, vertexColored, flatShading, glow]);
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
@@ -1797,10 +1802,12 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
     primitiveGeoms, instancedBoxGeoms, sculptGeom, staticMeshGeoms, dynamicMeshGeoms,
   } = useMemo(() => {
     const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
-    // Static boxes not on the selected body render as one InstancedMesh.
+    // Static boxes not on the selected body render as one InstancedMesh, which
+    // has one material and so no per-box alpha or glow: a pane of glass among
+    // them drew as a solid slab, hiding what was behind it.
     const instancedBoxGeoms = paintMode
       ? []
-      : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint && !g.textures?.length);
+      : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint && !g.textures?.length && (g.rgba?.[3] ?? 1) >= 1 && !g.glow);
     const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
     const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
     // The body under the sculpt tools is drawn by SculptSurface, which owns the

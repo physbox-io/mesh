@@ -370,6 +370,43 @@ function stepTilesIfSlow(
   pathTracer.tiles.set(n, n);
 }
 
+/** Refraction of what a translucent geom is drawn as: low, so its two faces mirror the studio by 1% and not the 8% of real acrylic. */
+const CLEAR_IOR = 1.2;
+
+/** Most light a glowing geom gives off traced, where the raster view's bloom wants far more. */
+const TRACED_GLOW = 3;
+
+/**
+ * What a live material becomes in the traced scene, cloned into `owned` if it
+ * has to change.
+ *
+ * Nothing in a scene is a lamp, unless it asks to be. Emissive is the raster
+ * view's selection tint (and a rope's glow); traced, it would be light, and the
+ * selected body would come out blue and cast blue on everything near it. A geom
+ * with `glow` is meant as light, so it keeps it, and lights what is near it.
+ *
+ * Alpha is not how light goes through a thing. The tracer reads opacity as the
+ * chance a ray passes, so each face of a pane at 6% still shades 6% of its rays
+ * and mirrors the white studio at full strength: a haze over all that is behind
+ * it. So a translucent geom is drawn as what it stands for, a clear material
+ * that lets through 1 - alpha, and its tint fades with it.
+ */
+function tracedMaterial(live: THREE.MeshStandardMaterial, owned: THREE.Material[]): THREE.MeshStandardMaterial {
+  const glowing = (live.userData.glow ?? 0) > 0;
+  const lit = live.emissiveIntensity > 0 && live.emissive.getHex() !== 0;
+  const clear = live.transparent && live.opacity < 1;
+  if (!clear && (!lit || (glowing && live.emissiveIntensity <= TRACED_GLOW))) return live;
+  const material = live.clone();
+  owned.push(material);
+  if (lit) material.emissiveIntensity = glowing ? TRACED_GLOW : 0;
+  if (clear) {
+    const alpha = live.opacity;
+    material.color.lerp(_white, 1 - alpha);
+    Object.assign(material, { transmission: 1 - alpha, ior: CLEAR_IOR, opacity: 1, transparent: false, roughness: Math.min(live.roughness, 0.05), depthWrite: true });
+  }
+  return material;
+}
+
 /** The bodies: visible meshes that cast shadows and draw with a standard material. */
 function collectBodies(scene: THREE.Scene): THREE.Mesh[] {
   const bodies: THREE.Mesh[] = [];
@@ -412,7 +449,7 @@ function sceneSignature(bodies: THREE.Mesh[]): number[] {
     const color = mesh.geometry.getAttribute('color') as THREE.BufferAttribute | undefined;
     sig.push(mesh.geometry.id, position ? (position as THREE.BufferAttribute).version : -1, color ? color.version : -1);
     const material = mesh.material as THREE.MeshStandardMaterial;
-    sig.push(materialKey(material), material.version, material.color.r, material.color.g, material.color.b, material.opacity);
+    sig.push(materialKey(material), material.version, material.color.r, material.color.g, material.color.b, material.opacity, material.emissiveIntensity);
     const instanced = mesh as THREE.InstancedMesh;
     if (instanced.isInstancedMesh) {
       sig.push(instanced.count, instanced.instanceMatrix.version, instanced.instanceColor?.version ?? -1);
@@ -447,6 +484,7 @@ function sameSignature(a: number[], b: number[], tolerance: number): boolean {
   return true;
 }
 
+const _white = new THREE.Color(1, 1, 1);
 const _instanceMatrix = new THREE.Matrix4();
 const _instanceColor = new THREE.Color();
 const _keyPosition = new THREE.Vector3();
@@ -475,15 +513,7 @@ function buildTracedScene(
   };
 
   for (const mesh of bodies) {
-    let material = mesh.material as THREE.MeshStandardMaterial;
-    // Nothing in a scene is a lamp. Emissive is the raster view's selection
-    // tint (and a rope's glow); traced, it would be light, and the selected
-    // body would come out blue and cast blue on everything near it.
-    if (material.emissiveIntensity > 0 && material.emissive.getHex() !== 0) {
-      material = material.clone();
-      material.emissiveIntensity = 0;
-      instanceMaterials.push(material);
-    }
+    const material = tracedMaterial(mesh.material as THREE.MeshStandardMaterial, instanceMaterials);
     const instanced = mesh as THREE.InstancedMesh;
     if (!instanced.isInstancedMesh) {
       place(withRgbaColors(mesh.geometry), material, mesh.matrixWorld);

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Environment, Lightformer } from '@react-three/drei';
-import { EffectComposer, N8AO } from '@react-three/postprocessing';
+import { Bloom, EffectComposer, N8AO } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore, applyShatterPieces } from '../../store/useStore';
@@ -11,6 +11,7 @@ import { useViewQuality } from '../../store/viewQualityStore';
 import { physicsGlobals } from '../../physicsGlobals';
 import type { WeakSpot } from '../../utils/printAnalysis';
 import { DEFAULT_EYE } from '../../utils/frameScene';
+import { GLOW_THRESHOLD, sceneGlows } from '../../utils/geomGlow';
 import { DropHandler } from '../DropHandler';
 import { AxisLegendDrawer } from '../AxisLegendDrawer';
 import { PhysicsLoop } from './PhysicsLoop';
@@ -93,6 +94,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
     () => applyShatterPieces(outgoingGraph ?? sceneGraph, shatteredBodies),
     [outgoingGraph, sceneGraph, shatteredBodies],
   );
+  const glows = useMemo(() => sceneGlows(effectiveGraph?.nodes), [effectiveGraph]);
   const [activeWeakSpot, setActiveWeakSpot] = useState<WeakSpot | null>(null);
 
   /*
@@ -302,6 +304,9 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
           distanceFalloff={1}
           color="black"
         />
+        {/* The halo round a geom with `glow`, in linear light, before the
+            tone mapping squeezes it. Only in a scene that has one. */}
+        {glows && <Bloom mipmapBlur intensity={0.9} radius={0.72} luminanceThreshold={GLOW_THRESHOLD} luminanceSmoothing={0.12} />}
         {/* Tone maps the bodies only, not the backdrop, grid or floor
             shadow — see BodyToneMapping. Last in the chain so it sees
             AO's output in linear light. Hi-Res only. */}

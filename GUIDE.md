@@ -283,6 +283,10 @@ box(cx, 1.5, 0, 0.08, 1.5, 0.08) // tall post: large hy
 
 ---
 
+### Glow
+
+`glow` on a geom (0 to 1; the inspector's Glow slider) makes it shine in its own `rgba` colour. Like `rgba` it is looks only. `utils/geomGlow.ts` sets the emissive by the colour's luminance, so blue glows as hard as yellow, and above the composer's Bloom threshold, which nothing lit reaches, so a halo means a glowing geom. Bloom is mounted only in a scene that has one. A static box with `glow` or an alpha below 1 is left out of `StaticBoxInstances`, whose one material has neither. Path traced (`PathTracedView.tsx`), glow is real light and casts on what is near it, and a geom with alpha below 1 becomes a clear material passing 1 - alpha, because the tracer reads opacity as a chance of passing and a 6% pane came out hazy.
+
 ### Concave collision
 
 MuJoCo collides every mesh geom as its **convex hull**. For a bracket or a boulder that is the same

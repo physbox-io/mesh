@@ -153,6 +153,11 @@ export interface SceneGeom {
   condim?: number;
   friction?: number[];
   /**
+   * Neon: 0 to 1, how strongly the geom shines in its own colour, with a halo
+   * of light round it. Decorative, like rgba: it never reaches the physics.
+   */
+  glow?: number;
+  /**
    * Contact time constant a convex piece of a thin wall takes when it has no
    * solref of its own and the scene is not in print fidelity (see
    * wallContactTime in convexDecomposition.ts).

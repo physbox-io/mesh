@@ -256,6 +256,13 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
               )}
               className="w-full accent-blue-500 cursor-pointer"
             />
+            <label className="text-xs font-medium text-slate-500 flex justify-between mt-1" title="Shines in its own colour, with a neon halo. Looks only: no effect on the physics.">
+              Glow <span>{Math.round((geom.glow ?? 0) * 100)}%</span>
+            </label>
+            <RangeInput min="0" max="1" step="0.01" value={geom.glow ?? 0}
+              onChange={(v) => updateNodeGeom(selectedNode.id, {glow: v}, activeIndex)}
+              className="w-full accent-blue-500 cursor-pointer"
+            />
           </div>
         );
       })()}
