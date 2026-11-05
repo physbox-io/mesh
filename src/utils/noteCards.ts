@@ -612,6 +612,23 @@ A **NEMA17** stepper turns a 220 mm platter carried on a **6001 bearing**. Three
 - Press **Play**: it spins up over nine seconds, then slows
 - Swap the motor for a **NEMA23** in its card, and the spin-up keeps pace with the speed asked for`,
 
+  pachinko: `# 🎰 Pachinko
+
+A **360 × 500 mm** tabletop machine, leaning back 8°, that plays itself for as long as you let it.
+
+## What is real here
+- A **sprung hammer** comes up between two rails and throws the ball seated on them up the lane. Each shot pulls it back a different distance, so each lands somewhere new
+- The ball runs round the **arc** and drops into **212 pins**, two free-spinning **windmills** and three **tulips**
+- Everything lands on a **sloping floor** that rolls it back to the hammer. Nothing resets the balls
+- The arc and tulips are hollow on the ball's side. They collide as their real curved shape, cut into exact convex pieces
+- The front is a real pane: it is nearly invisible, and it is what keeps the balls in
+
+## Try it
+- Hold **Space** to pull the hammer yourself, and let go to fire
+- Turn on **Render** mode: the neon is real light there, and it falls on the board and the balls
+- Select a part and change its **Glow** in the Main tab
+`,
+
   spring_launcher: `# 🎯 Spring Launcher
 
 A ball in a cup on a **Ø16 × 50 mm compression spring**, rate **2 N/mm**.

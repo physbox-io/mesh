@@ -1,3 +1,4 @@
+import { pachinkoPreset } from './pachinko';
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 
 /**
@@ -3579,6 +3580,10 @@ export const PRESETS = {
     emoji: '💿',
     scene: stepperTurntablePreset,
     camera: { position: [0.3, -0.38, 0.3], target: [0, 0, 0.06] } satisfies PresetCamera,
+  },
+  pachinko: {
+    name: 'Pachinko',
+    scene: pachinkoPreset,
   },
   spring_launcher: {
     name: 'Spring Launcher',
