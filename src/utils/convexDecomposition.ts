@@ -33,7 +33,7 @@ import {
 import { authoredQuat } from './bodyOrientation';
 import { tidyMesh } from './meshTidy';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
-import type { FilledCavity } from './filledCavities';
+import { wallThickness, type FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
 
 /**
@@ -42,6 +42,39 @@ import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColl
  * slightly dished plate all land here.
  */
 export const SOLIDITY_DECOMPOSE_BELOW = 0.92;
+
+/**
+ * A surface this far inside its hull is a hole or a pocket, however little of
+ * the part it takes: 1 mm, or a hundredth of the part's largest side. Solidity
+ * alone left any hole under 8% of its block solid to contact. A pin stood on
+ * top of a 3 mm plate's bolt hole, a peg on a 60 mm block's 20 mm bore.
+ */
+export const CONCAVE_DEPTH = 0.001;
+export const CONCAVE_DEPTH_OF_SIZE = 0.01;
+
+/** Whether a surface `depth` inside the hull of a part `size` across is a real concavity. */
+export function concaveByDepth(depth: number, size: number): boolean {
+  return depth >= Math.max(CONCAVE_DEPTH, size * CONCAVE_DEPTH_OF_SIZE);
+}
+
+/** The scene's default contact time constant, seconds (compileToMJCF), and twice the timestep, MuJoCo's least. */
+const DEFAULT_CONTACT_TIME = 0.02;
+const LEAST_CONTACT_TIME = 0.002;
+
+/** How fast a part is taken to land, m/s: dropped from about 5 cm. */
+const LANDING_SPEED = 1;
+
+/**
+ * The contact time constant a wall this thick needs, or nothing if the scene's
+ * default will do. A part landing at v sinks about v·τ into what it lands on:
+ * 20 mm at the default, through a 4 mm wall, and four nesting bowls came out
+ * stacked upside down. So τ is what stops a landing inside the wall.
+ */
+export function wallContactTime(wall: number): number | undefined {
+  if (!(wall > 0)) return undefined;
+  const t = Math.max(LEAST_CONTACT_TIME, wall / LANDING_SPEED);
+  return t < DEFAULT_CONTACT_TIME ? t : undefined;
+}
 
 /**
  * Below this a mesh convex enough by its solidity is reported as too coarse to
@@ -221,7 +254,7 @@ export function hullBudget(solidity: number, requested?: number): number {
  */
 export function decompositionVerdict(
   node: SceneNode,
-  opts: { volume?: number; hullVolume?: number; hasHoleAxis?: boolean; triangles?: number } = {},
+  opts: { volume?: number; hullVolume?: number; hasHoleAxis?: boolean; triangles?: number; concavityDepth?: number; size?: number } = {},
 ): DecompositionVerdict {
   const mode: CollisionMode = collisionModeOf(node);
   const meshes = solidMeshGeoms(node);
@@ -258,10 +291,15 @@ export function decompositionVerdict(
 
   // Only where the solidity agrees: an L-shaped prism is 20 triangles and
   // two-thirds of its hull, and as a boolean's solid it collided as that hull.
-  if (triangles < MIN_DECOMPOSE_TRIANGLES && solidity >= SOLIDITY_DECOMPOSE_BELOW) {
+  const convexEnough = solidity >= SOLIDITY_DECOMPOSE_BELOW
+    // Worth more than its hull is overlapping shells, an oak's foliage: what
+    // lies inside the hull there is one shell inside another, not a hole.
+    && !(opts.concavityDepth !== undefined && opts.size !== undefined && !(measured.volume > measured.hullVolume * 1.001)
+      && concaveByDepth(opts.concavityDepth, opts.size));
+  if (triangles < MIN_DECOMPOSE_TRIANGLES && convexEnough) {
     return { strategy: 'hull', solidity, triangles, maxHulls: 0, reason: 'too-coarse' };
   }
-  if (solidity >= SOLIDITY_DECOMPOSE_BELOW) {
+  if (convexEnough) {
     return { strategy: 'hull', solidity, triangles, maxHulls: 0, reason: 'convex-enough' };
   }
   if (triangles > MAX_DECOMPOSE_TRIANGLES) {
@@ -300,8 +338,10 @@ export function colliderMass(node: SceneNode, template: SceneGeom | undefined, t
  * (solidDecomposition.ts), where 1 was one V-HACD call over the whole part.
  * 3: cut exactly along sharp inside corners first (reflexCuts.ts). 4: the axis
  * put back into lathed sectors, and pieces on the mesh's own faces kept.
+ * 5: curved walls cut exactly (cutCurved), holes found by depth as well as by
+ * solidity, and thin walls' pieces given contact to match.
  */
-export const COLLIDER_RECIPE = 4;
+export const COLLIDER_RECIPE = 5;
 
 /**
  * Fingerprints everything the colliders on a NON-boolean body were built from.
@@ -396,6 +436,7 @@ interface MeshColliders {
   hullVolume: number;
   hulls: Hull[];
   cavities: FilledCavity[];
+  wallContactTime?: number;
   /** How far the pieces stand proud of the surface into the air, at most, metres. */
   intrusion?: number;
   intrusionAt?: [number, number, number];
@@ -489,8 +530,9 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   for (const p of decomposed) {
     const first = geoms.length;
     const template = colliderTemplateOf(p.source, p.source.rgba ?? [0.3, 0.6, 0.9, 1]);
+    const contact = p.source.solref ? undefined : p.wallContactTime;
     hullsToColliderGeoms(p.hulls, baseName, template, massOf(p)).forEach((g, i) => {
-      geoms.push({ ...g, name: `${baseName}_csg_col${first + i}`, colliderOf: p.source.name });
+      geoms.push({ ...g, name: `${baseName}_csg_col${first + i}`, colliderOf: p.source.name, ...(contact ? { wallContactTime: contact } : {}) });
     });
     for (const c of p.cavities) named.push({ ...c, coveredBy: `${baseName}_csg_col${first + c.coveredBy}` });
   }
@@ -560,6 +602,14 @@ async function analyse(verts: number[], faces: number[]) {
   }
 }
 
+function largestSide(verts: number[]): number {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < verts.length; i += 3) {
+    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], verts[i + k]); hi[k] = Math.max(hi[k], verts[i + k]); }
+  }
+  return Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+}
+
 /** Judges one mesh of a body, and breaks it into convex pieces if it earns it. */
 async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<MeshColliders> {
   const framed = bodyFrameMesh(source);
@@ -568,8 +618,8 @@ async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<Mes
   // polyhedron listed the wrong way round comes out inside out. Neither is
   // ambiguous, and meshes saved before compiles were tidied still carry them.
   const { faces } = tidyMesh(verts, framed.faces);
-  const { volume, hullVolume, integrity } = await analyse(verts, faces);
-  const verdict = decompositionVerdict(node, { volume, hullVolume, triangles: faces.length / 3 });
+  const { volume, hullVolume, integrity, concavityDepth } = await analyse(verts, faces);
+  const verdict = decompositionVerdict(node, { volume, hullVolume, triangles: faces.length / 3, concavityDepth, size: largestSide(verts) });
   const none = (warning?: string, strategy: DecompositionStrategy = verdict.strategy): MeshColliders => ({
     source, verdict: { ...verdict, strategy }, volume, hullVolume, hulls: [], cavities: [], ...(warning ? { warning } : {}),
   });
@@ -612,6 +662,7 @@ async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<Mes
   }
   return {
     source, verdict, volume, hullVolume, hulls, cavities,
+    wallContactTime: wallContactTime(wallThickness(verts, faces)),
     intrusion: solid.intrusion, ...(solid.intrusionAt ? { intrusionAt: solid.intrusionAt } : {}),
     uncovered: solid.uncovered, ...(solid.uncoveredAt ? { uncoveredAt: solid.uncoveredAt } : {}),
   };

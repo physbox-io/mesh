@@ -49,6 +49,11 @@ export const PRINT_CONTACT_TIME = 0.002;
  */
 export function applyContactClasses(nodes: SceneNode[], print: boolean) {
   for (const node of nodes) {
+    // A thin wall's pieces take contact to match it, unless print fidelity's
+    // is stiffer already.
+    if (!print && node.geoms?.some((g) => g.wallContactTime && !g.solref)) {
+      node.geoms = node.geoms.map((g) => (g.wallContactTime && !g.solref ? { ...g, solref: [g.wallContactTime, 1] } : g));
+    }
     if (node.geoms?.some((g) => g.contactClass || g.colliderFaces?.length)) {
       // A mesh a decomposition stands in for has already been demoted to
       // visual (or dropped) by resolveCsgGeoms, so the role test below skips

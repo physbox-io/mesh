@@ -6,6 +6,7 @@
 // stays plain so the inline fallback (Node, tests) can run it too.
 
 import { convexHullOf, meshVolumeAndCentroid } from './csg';
+import { concavityDepth } from './hullDepth';
 import { analyzeMesh } from './meshIntegrity';
 import type { MeshAnalysis } from '../workers/vhacdProtocol';
 
@@ -13,6 +14,9 @@ export function analyseMesh(verts: number[], faces: number[]): MeshAnalysis {
   const { volume } = meshVolumeAndCentroid(verts, faces);
   const points: number[][] = [];
   for (let i = 0; i < verts.length; i += 3) points.push([verts[i], verts[i + 1], verts[i + 2]]);
-  const hullVolume = convexHullOf(points)?.volume ?? 0;
-  return { volume, hullVolume, integrity: analyzeMesh(verts, faces) };
+  const hull = convexHullOf(points);
+  return {
+    volume, hullVolume: hull?.volume ?? 0, integrity: analyzeMesh(verts, faces),
+    concavityDepth: hull ? concavityDepth(verts, faces, hull) : 0,
+  };
 }

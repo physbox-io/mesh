@@ -13,6 +13,8 @@ import type { SolidOptions } from '../utils/solidDecomposition';
 export interface MeshAnalysis {
   volume: number;
   hullVolume: number;
+  /** How far the surface lies inside the hull at its deepest, metres. */
+  concavityDepth?: number;
   integrity: MeshIntegrity | null;
 }
 

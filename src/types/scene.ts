@@ -152,6 +152,12 @@ export interface SceneGeom {
   conaffinity?: number;
   condim?: number;
   friction?: number[];
+  /**
+   * Contact time constant a convex piece of a thin wall takes when it has no
+   * solref of its own and the scene is not in print fidelity (see
+   * wallContactTime in convexDecomposition.ts).
+   */
+  wallContactTime?: number;
   solref?: number[];
   solimp?: number[];
   margin?: number;

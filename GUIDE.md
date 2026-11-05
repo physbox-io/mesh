@@ -292,9 +292,13 @@ the rim — and nothing about the scene says why.
 
 `utils/convexDecomposition.ts` decides what to do about it, per body, from **solidity**: true volume
 over convex-hull volume. A box and a sphere are 1.0. A cup is nearer 0.3, and that gap is the size of
-the lie. Below ~0.92 the mesh is broken into convex pieces by V-HACD (`utils/vhacd.ts`, vendored —
-see `src/vendor/vhacd/PROVENANCE.md`), each emitted as its own mesh geom tagged
-`csgDerived: 'collider'`. Above it, the hull is kept, because it is exact and cheaper.
+the lie. Below ~0.92 the mesh is broken into convex pieces, each emitted as its own mesh geom tagged
+`csgDerived: 'collider'`. Above it, the hull is kept, because it is exact and cheaper — unless the
+surface goes **deep** inside the hull (`utils/hullDepth.ts`): 1 mm, or a hundredth of the part's
+largest side. Solidity says how much of a part is air, not whether anything could go into it, and
+left every hole under 8% of its block solid to contact: a peg stood on a 20 mm bore in a 60 mm block,
+a pin on a plate's bolt hole. Overlapping shells (volume above the hull's, an oak's foliage) are not
+judged by depth, because what lies inside their hull is another shell.
 
 This applies to **any** body with a mesh geom — imported STL, sculpt, lattice part, relief,
 hand-written SCAD, boolean. `node.collision` (`'auto' | 'hull' | 'decompose' | 'primitives'`)
@@ -337,6 +341,14 @@ These things about it are load-bearing:
   below, each with at least a chunk's 16 pieces of budget; past 128 cells, or with too little budget
   for the curved ones, the whole part goes the V-HACD way. A sealed hollow is a separate inward shell
   to Manifold's `decompose` and is put back with the solid round it, or the box reads as convex.
+* **Curved walls are cut exactly too** (`cutCurved` in `utils/reflexCuts.ts`). A curved wall is a run
+  of shallow reflex edges, so the same cut works: along the plane bisecting the deepest one, proudest
+  cell first, until no cell's hull stands more than the tolerance proud or the piece budget is spent.
+  Round a bore those planes are radial. Each halves an arc and quarters its sag, and the cells are
+  the solid itself. A 22 mm bore in a block, 5.9 mm narrower in 68 V-HACD pieces (a 1 mm-clearance
+  peg stopped at the rim), is under 0.1 mm in 33. Doubly curved or long swept surfaces use the budget
+  up less well, so unless this comes within 0.5 mm the V-HACD way below runs too, and the better of
+  the two is kept. On a two-turn chute that is V-HACD.
 * **A mesh is cut into chunks before V-HACD sees it** (`utils/chunkedDecomposition.ts`, Manifold's
   `splitByPlane`, always at the middle of the longest side): while a chunk is 40 wall thicknesses
   long or more, and again while its pieces still fill a cavity, down to 8 walls and 32 chunks. One
@@ -374,10 +386,13 @@ These things about it are load-bearing:
   overflowed MuJoCo's default 15 MiB contact arena (`mj_stackAlloc`); `utils/contactArena.ts` now
   emits `<size memory>` at 128 KiB per moving piece past the default, so many pieces are slow
   rather than fatal. At 64 those bowls' pieces stand up to 2.3 mm proud.
-* **Thin walls landing on thin walls need stiff contact.** At the scene default (solref 0.02 s) a
-  part landing at ~1 m/s sinks about v·τ = 20 mm into what it lands on — through a 4 mm wall. Four
-  bowls with exact pieces, dropped coaxially, came out stacked upside down; with `solref: [0.005, 1]`
-  on their meshes (pieces inherit it) they settled 4 mm apart, level (`tests/nestingBowls.test.ts`).
+* **Thin walls get stiffer contact by themselves.** At the scene default (solref 0.02 s) a part
+  landing at ~1 m/s sinks about v·τ = 20 mm into what it lands on — through a 4 mm wall. Four bowls
+  with exact pieces, dropped coaxially, came out stacked upside down (`tests/nestingBowls.test.ts`).
+  So pieces of a wall thinner than 20 mm carry `wallContactTime`, the wall over 1 m/s and at least
+  2 ms, which the compile turns into their `solref`, unless the mesh has a `solref` of its own or the
+  scene is in print fidelity, which is stiffer already. At 64 pieces those bowls now stack in order,
+  each about 2.4 mm high on the one below, because of the pieces' standing proud.
 * **It is slower.** A cup is a few seconds, a two-turn chute ~20 s. The V-HACD worker runs one job at
   a time, each timed from when it starts (60 s for a whole mesh), and a late job terminates the worker.
   A scene build over MCP answers before slow pieces land (`collisionPending`); `physics_run_headless`
