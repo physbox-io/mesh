@@ -7,6 +7,7 @@ import { useStore } from '../../store/useStore';
 import { useViewQuality, usePathTraceStatus, type PathTracePhase } from '../../store/viewQualityStore';
 import { preToneMappedColor } from '../../utils/neutralToneMapping';
 import { MeshBvhWorkerClient } from '../../utils/meshBvhWorkerClient';
+import { TracedGlow } from '../../utils/tracedGlow';
 import { withRgbaColors } from '../../utils/tracerGeometry';
 
 /** How long the view has to hold still before tracing starts. */
@@ -55,6 +56,7 @@ interface Engine {
   pathTracer: WebGLPathTracer;
   denoise: DenoiseMaterial;
   denoiseQuad: FullScreenQuad;
+  glow: TracedGlow;
   floor: THREE.Mesh;
   bvhWorker: MeshBvhWorkerClient;
 }
@@ -85,6 +87,7 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
     // fade-in, so its opacity and blending are copied across each frame.
     const denoise = new DenoiseMaterial({ sigma: DENOISE_SIGMA, kSigma: 1, threshold: DENOISE_THRESHOLD });
     const denoiseQuad = new FullScreenQuad(denoise);
+    const glow = new TracedGlow();
     pt.renderToCanvasCallback = (target, renderer, quad) => {
       const fade = quad.material as THREE.ShaderMaterial & { opacity: number };
       denoise.map = target.texture;
@@ -94,6 +97,7 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
       const autoClear = renderer.autoClear;
       renderer.autoClear = false;
       denoiseQuad.render(renderer);
+      glow.render(renderer, target.texture, target.width, target.height, fade.opacity);
       renderer.autoClear = autoClear;
     };
 
@@ -105,7 +109,7 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
     floor.updateMatrix();
     floor.matrixAutoUpdate = false;
 
-    return { pathTracer: pt, denoise, denoiseQuad, floor, bvhWorker };
+    return { pathTracer: pt, denoise, denoiseQuad, glow, floor, bvhWorker };
   } catch (e) {
     console.error('[PathTracedView] could not start the path tracer', e);
     return null;
@@ -182,6 +186,7 @@ export function PathTracedView({ background }: { background: string }) {
       engine.pathTracer.dispose();
       engine.denoiseQuad.dispose();
       engine.denoise.dispose();
+      engine.glow.dispose();
       engine.floor.geometry.dispose();
       (engine.floor.material as THREE.Material).dispose();
       for (const m of s.instanceMaterials) m.dispose();
@@ -373,8 +378,8 @@ function stepTilesIfSlow(
 /** Refraction of what a translucent geom is drawn as: low, so its two faces mirror the studio by 1% and not the 8% of real acrylic. */
 const CLEAR_IOR = 1.2;
 
-/** Most light a glowing geom gives off traced, where the raster view's bloom wants far more. */
-const TRACED_GLOW = 3;
+/** Light a geom at full glow gives off traced: enough at any glow worth seeing to clear TracedGlow's threshold. */
+const TRACED_GLOW = 4;
 
 /**
  * What a live material becomes in the traced scene, cloned into `owned` if it
@@ -392,13 +397,13 @@ const TRACED_GLOW = 3;
  * that lets through 1 - alpha, and its tint fades with it.
  */
 function tracedMaterial(live: THREE.MeshStandardMaterial, owned: THREE.Material[]): THREE.MeshStandardMaterial {
-  const glowing = (live.userData.glow ?? 0) > 0;
+  const glow: number = live.userData.glow ?? 0;
   const lit = live.emissiveIntensity > 0 && live.emissive.getHex() !== 0;
   const clear = live.transparent && live.opacity < 1;
-  if (!clear && (!lit || (glowing && live.emissiveIntensity <= TRACED_GLOW))) return live;
+  if (!clear && !lit) return live;
   const material = live.clone();
   owned.push(material);
-  if (lit) material.emissiveIntensity = glowing ? TRACED_GLOW : 0;
+  if (lit) material.emissiveIntensity = glow * TRACED_GLOW;
   if (clear) {
     const alpha = live.opacity;
     material.color.lerp(_white, 1 - alpha);
