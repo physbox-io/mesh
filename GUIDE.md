@@ -557,11 +557,16 @@ joinery on the cut faces. The bed is a workshop setting beside the stock (`store
   half degree, so a long bar can lie corner to corner. It costs a pose by `supportArea`, which lives in
   `utils/printSupport.ts` so the DFM lens measures support the same way.
 * **Where to cut.** A piece with no pose that fits is cut in two. Planes square to the world axes and
-  to its principal axes are tried at the first of n even slabs, ±15%, with n taken from each of the
-  bed's side lengths in turn. A sliver (under 2% of the piece) is refused, and a face too thin to glue
+  to its principal axes are tried at the first and last of n even slabs, ±15%, with n taken from each
+  of the bed's side lengths in turn. A sliver (under 2% of the piece) is refused, and a face too thin to glue
   is heavily penalised. The fewest predicted sections wins, then the least support and the smallest
   seam, then the cut nearest the even split. The prediction takes the piece's box square to the world
   or to its principal axes, whichever is tighter, matched to the bed's sides whichever way needs fewest.
+  A piece that does not fit still counts its support, at its nearest-miss pose, so a cut gets no credit
+  for leaving the overhang in the remainder.
+* **Pull Apart comes from the finished tree.** A cut pushes each side by the depth of the stack on the
+  other side (`explodeVectors`), so every joint opens by at least two units and a stack stands evenly.
+  One unit per cut on the way down cancels: the inner two of four slabs both come to -n + n.
 * **Joinery goes on per joint.** A joint is the patch of a cut plane two final sections actually
   share; an early cut is later cut again. Pins go as deep in the patch as they fit, two when it is
   wider than four diameters, and only where both sections are solid behind the face to a hole's

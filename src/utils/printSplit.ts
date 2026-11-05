@@ -15,8 +15,8 @@
 //      six axes, the piece's own cut faces, and the biggest faces of its convex
 //      hull — a part resting on a hull face is resting on something.
 //   2. Otherwise it is cut in two. The planes tried are square to the world
-//      axes and to the piece's principal axes, at the first of n even slabs
-//      and a little either side of it. A cut that leaves a sliver, or a face
+//      axes and to the piece's principal axes, at the first and last of n even
+//      slabs and a little either side of each. A cut that leaves a sliver, or a face
 //      too thin to glue, loses; of the rest, the one predicted to need the
 //      fewest sections wins, then the least support, then the smallest seam.
 //   3. Both halves go back to 1.
@@ -437,6 +437,10 @@ function footprint(pts: [number, number][], W: number, D: number): { fits: boole
   return { fits: b.fits, spin: b.spin, w: b.w, d: b.d, overflow: b.overflow };
 }
 
+function poseSupport(geo: PieceGeo, down: Vec3, ctx: Ctx): number {
+  return supportArea(rotatePoints(rotationBetween(down, [0, 0, -1]), geo.soup), ctx.overhangDeg, 0.5).area;
+}
+
 function evaluatePose(geo: PieceGeo, down: Vec3, ctx: Ctx): PoseEval {
   const R = rotationBetween(down, [0, 0, -1]);
   const hp = rotatePoints(R, geo.hull);
@@ -451,10 +455,9 @@ function evaluatePose(geo: PieceGeo, down: Vec3, ctx: Ctx): PoseEval {
   const fp = footprint(pts, ctx.W, ctx.D);
   const overflow = Math.max(fp.overflow, height / ctx.H);
   const fits = overflow <= 1 + 1e-9;
-  let support = 0;
-  if (fits) {
-    support = supportArea(rotatePoints(R, geo.soup), ctx.overhangDeg, 0.5).area;
-  }
+  // Only a pose that fits can be chosen on cost, so a miss is not measured
+  // here: bestPose measures the one miss it ends up with.
+  const support = fits ? poseSupport(geo, down, ctx) : 0;
   return {
     down, spin: fp.spin, fits, supportMm2: support, heightMm: height,
     sizeMm: [fp.w, fp.d, height], overflow,
@@ -484,7 +487,7 @@ function bestPose(geo: PieceGeo, extraDowns: Vec3[], ctx: Ctx): PoseEval {
       best = e;
     }
   }
-  return best!;
+  return best!.fits ? best! : { ...best!, supportMm2: poseSupport(geo, best!.down, ctx) };
 }
 
 // ---------------------------------------------------------------------------
@@ -576,12 +579,11 @@ interface Piece {
   pose: PoseEval;
   /** Outward normals of its cut faces, for the pose search. */
   cutDowns: Vec3[];
-  explode: Vec3;
 }
 
-function makePiece(m: Manifold, cutDowns: Vec3[], explode: Vec3, ctx: Ctx): Piece {
+function makePiece(m: Manifold, cutDowns: Vec3[], ctx: Ctx): Piece {
   const geo = geoOf(m);
-  return { m, geo, pose: bestPose(geo, cutDowns, ctx), cutDowns, explode };
+  return { m, geo, pose: bestPose(geo, cutDowns, ctx), cutDowns };
 }
 
 const PERMS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
@@ -668,8 +670,12 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
     const slabCounts = [...new Set(usables.map((u) => Math.max(2, Math.ceil(extent / u - 1e-9))))];
     for (const slabs of slabCounts) {
       const slab = extent / slabs;
-      for (let step = -3; step <= 3; step++) {
-        const offset = lo + slab + step * 0.05 * slab;
+      // From both ends, or a part cuts worse for facing the other way: what is
+      // left after the first cut decides where the next one can reach, so
+      // lo + slab and hi - slab do not come to the same planes. Two slabs share
+      // the one plane.
+      for (const start of slabs > 2 ? [lo + slab, hi - slab] : [lo + slab]) for (let step = -3; step <= 3; step++) {
+        const offset = start + step * 0.05 * slab;
         if (offset <= lo + 0.5 || offset >= hi - 0.5) continue;
         const [posM, negM] = piece.m.splitByPlane(n, offset);
         const vp = posM.volume(), vn = negM.volume();
@@ -681,10 +687,10 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
         const face = judgeFace(cs, ctx);
         cs.delete();
         // The pos half's cut face looks back down the normal, and the neg half's along it.
-        const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], add3(piece.explode, n), ctx);
-        const neg = makePiece(negM, [...piece.cutDowns, n], add3(piece.explode, neg3(n)), ctx);
+        const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], ctx);
+        const neg = makePiece(negM, [...piece.cutDowns, n], ctx);
         const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
-        const support = (pos.pose.fits ? pos.pose.supportMm2 : 0) + (neg.pose.fits ? neg.pose.supportMm2 : 0);
+        const support = pos.pose.supportMm2 + neg.pose.supportMm2;
         // Off the even split only for a reason: a tie goes to the even cut, so
         // the sections come out the same size rather than one barely fitting.
         const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area
@@ -702,6 +708,34 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
     ctx.warnings.push('One cut runs through material thinner than the minimum wall, because no cut avoided it. Check that seam before gluing.');
   }
   return best;
+}
+
+/**
+ * How far each section moves when the part is pulled apart, in units of the
+ * Pull Apart slider. Every joint opens by at least two units, the gap between
+ * two sections of a single cut, and sections stacked along a cut stand evenly.
+ *
+ * It takes the whole tree. Adding one unit per cut on the way down cancels: the
+ * inner two of four slabs both come to -n + n, and sit together however far the
+ * slider goes. So a cut pushes its two sides by the depth of the other side's
+ * stack, which leaves room for everything still to open up inside them.
+ */
+function explodeVectors(tree: SplitTree, cuts: SplitCut[], count: number): Vec3[] {
+  const out: Vec3[] = Array.from({ length: count }, () => [0, 0, 0]);
+  /** Sections stacked along n: cuts across n add up, cuts along it are side by side. */
+  const stack = (t: SplitTree, n: Vec3): number => {
+    if ('section' in t) return 1;
+    const [a, b] = [stack(t.neg, n), stack(t.pos, n)];
+    return Math.abs(dot(cuts[t.cut].normal, n)) > Math.SQRT1_2 ? a + b : Math.max(a, b);
+  };
+  const push = (t: SplitTree, at: Vec3) => {
+    if ('section' in t) { out[t.section] = at; return; }
+    const n = cuts[t.cut].normal;
+    push(t.neg, add3(at, scale3(n, -stack(t.pos, n))));
+    push(t.pos, add3(at, scale3(n, stack(t.neg, n))));
+  };
+  push(tree, [0, 0, 0]);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,7 +1178,7 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
 
   const cuts: SplitCut[] = [];
   const plain: Manifold[] = [];
-  const leafInfo: { cutDowns: Vec3[]; explode: Vec3 }[] = [];
+  const leafInfo: { cutDowns: Vec3[] }[] = [];
   let open = 1;
   let capped = false;
 
@@ -1165,12 +1199,14 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
     }
     open--;
     plain.push(piece.m);
-    leafInfo.push({ cutDowns: piece.cutDowns, explode: piece.explode });
+    leafInfo.push({ cutDowns: piece.cutDowns });
     return { section: plain.length - 1 };
   };
 
-  const tree = build(makePiece(made.solid, [], [0, 0, 0], ctx));
+  const tree = build(makePiece(made.solid, [], ctx));
   if (capped) ctx.warnings.push(`Stopped at ${maxSections} sections, and some of them still do not fit the bed.`);
+
+  const explode = explodeVectors(tree, cuts, plain.length);
 
   // --- Joints: the face each pair of neighbouring sections actually shares.
   const joints: SplitJoint[] = [];
@@ -1357,7 +1393,7 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
       colliders: colliders[s].map(colliderToMetres),
       solidity,
       convexPieces: convex,
-      explode: leafInfo[s].explode,
+      explode: explode[s],
     };
   });
   for (const m of final) m.delete();

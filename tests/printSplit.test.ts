@@ -407,3 +407,48 @@ describe('the knife cutting right through', () => {
     expect(r.ok).toBe(false);
   });
 });
+
+describe('Split for Print: what the search leaves out', () => {
+  /** A long bar with shelves off one side, bunched towards its far end. */
+  const shelves = (mirrored: boolean) => {
+    const at = (x: number, w: number) => (mirrored ? 520 - x - w : x);
+    return [
+      box(520, 30, 30),
+      ...[60, 300, 400, 460].map((x) => box(30, 90, 30, [at(x, 30), 30, 0])),
+    ];
+  };
+
+  it('pulls every joint open, however the cuts nest', () => {
+    const r = ok(splitForPrint(wasm, [box(800, 800, 20)], { bed: { widthMm: 210, depthMm: 110, heightMm: 60 } }));
+    expect(r.sections.length).toBeGreaterThan(8);
+    const seen = new Set(r.sections.map((s) => s.explode.map((v) => v.toFixed(3)).join()));
+    expect(seen.size).toBe(r.sections.length);
+    for (const j of r.joints) {
+      const n = r.cuts[j.cut].normal;
+      const [a, b] = [r.sections[j.neg].explode, r.sections[j.pos].explode];
+      expect(n[0] * (b[0] - a[0]) + n[1] * (b[1] - a[1]) + n[2] * (b[2] - a[2])).toBeGreaterThanOrEqual(2 - 1e-9);
+    }
+  });
+
+  it('spaces a stack of sections evenly when pulled apart', () => {
+    const r = ok(splitForPrint(wasm, [box(1000, 40, 40)], { bed: bed200 }));
+    const along = r.sections.map((s) => s.explode[0]).sort((a, b) => a - b);
+    expect(along.length).toBe(r.sections.length);
+    expect(along[0]).toBe(-along[along.length - 1]);
+    along.slice(1).forEach((v, i) => expect(v - along[i]).toBeCloseTo(2, 9));
+  });
+
+  it('cuts from either end, so a part does no worse for facing the other way', () => {
+    const bed = { widthMm: 256, depthMm: 256, heightMm: 256 };
+    const one = ok(splitForPrint(wasm, shelves(false), { bed }));
+    const other = ok(splitForPrint(wasm, shelves(true), { bed }));
+    expect(other.sections.length).toBe(one.sections.length);
+  });
+
+  it('reports the support of a section that does not fit', () => {
+    const r = ok(splitForPrint(wasm, shelves(false), { bed: bed200, maxSections: 1 }));
+    expect(r.sections.length).toBe(1);
+    expect(r.sections[0].fits).toBe(false);
+    expect(r.sections[0].supportMm2).toBeGreaterThan(0);
+  });
+});
