@@ -33,6 +33,8 @@
 // Pure, store-free and Worker-safe.
 
 import type { ManifoldToplevel, Manifold } from 'manifold-3d';
+import { convexHullOf } from './csg';
+import { depthInside, hullPlanes } from './hullDepth';
 import type { Chunk } from './chunkedDecomposition';
 import { fromManifold, toManifoldSolid } from './chunkedDecomposition';
 
@@ -52,6 +54,9 @@ const NOISE_RISE = 1e-7;
 
 /** A vertex within this of a plane lies in it, metres. */
 const ON_PLANE = 1e-7;
+
+/** How far into the air a cut goes to take a skin off a wall, metres. */
+const SKIN = 1e-6;
 
 /** A component smaller than this is a crumb of the cut, mm³. */
 const CRUMB_MM3 = 1e-3;
@@ -117,12 +122,18 @@ function canonical(p: Plane): Plane & { key: string } {
 }
 
 /** The plane through the most sharp reflex edge, as described at the top. */
-function bestPlane(c: Chunk, sharp: Edge[], all: Edge[]): Plane | null {
+function bestPlane(c: Chunk, sharp: Edge[], all: Edge[]): (Plane & { air: number }) | null {
   const v = c.verts;
   const off = (p: Plane, i: number) => p.n[0] * v[i * 3] + p.n[1] * v[i * 3 + 1] + p.n[2] * v[i * 3 + 2] - p.d;
-  const seen = new Map<string, Plane & { key: string }>();
-  for (const e of sharp) for (const p of e.planes) { const q = canonical(p); if (!seen.has(q.key)) seen.set(q.key, q); }
-  let best: { p: Plane; on: number; crossed: number; key: string } | null = null;
+  const seen = new Map<string, Plane & { key: string; air: number }>();
+  for (const e of sharp) {
+    for (const p of e.planes) {
+      const q = canonical(p);
+      // The face's normal points into the air in front of it.
+      if (!seen.has(q.key)) seen.set(q.key, { ...q, air: q.n[0] * p.n[0] + q.n[1] * p.n[1] + q.n[2] * p.n[2] });
+    }
+  }
+  let best: { p: Plane & { air: number }; on: number; crossed: number; key: string } | null = null;
   for (const p of seen.values()) {
     let on = 0, crossed = 0;
     for (const e of all) {
@@ -138,58 +149,62 @@ function bestPlane(c: Chunk, sharp: Edge[], all: Edge[]): Plane | null {
 }
 
 /**
+ * The separate solids of a cut side, each with any sealed hollow it holds.
+ * Takes ownership of `m`.
+ *
+ * A sealed hollow is a shell of its own, wound inward, with a negative volume.
+ * It goes back with the solid round it — the smallest whose box holds it — or
+ * that solid would read as convex and fill the hollow: a closed 60 mm box came
+ * out as one cube.
+ */
+function solidComponents(wasm: ManifoldToplevel, m: Manifold): Manifold[] {
+  const parts = m.decompose();
+  m.delete();
+  const solids: Manifold[] = [], voids: Manifold[] = [];
+  for (const p of parts) {
+    const vol = p.volume();
+    if (vol > CRUMB_MM3) solids.push(p);
+    else if (vol < -CRUMB_MM3) voids.push(p);
+    else p.delete();
+  }
+  const holds = (o: Manifold, i: Manifold) => {
+    const a = o.boundingBox(), b = i.boundingBox();
+    return [0, 1, 2].every(k => a.min[k] <= b.min[k] && b.max[k] <= a.max[k]);
+  };
+  const inner = new Map<Manifold, Manifold[]>();
+  for (const h of voids) {
+    const round = solids.filter(o => holds(o, h)).sort((x, y) => x.volume() - y.volume())[0];
+    if (round) inner.set(round, [...(inner.get(round) ?? []), h]);
+    else h.delete();
+  }
+  return solids.map(o => {
+    const hs = inner.get(o);
+    if (!hs) return o;
+    const whole = wasm.Manifold.compose([o, ...hs]);
+    o.delete();
+    for (const h of hs) h.delete();
+    return whole;
+  });
+}
+
+/**
  * Cuts a closed mesh along its sharp inside corners. Null when Manifold will
- * not take the mesh, when its only reflex edges are shallow (a curved part,
- * nothing to gain), or when it would come to more than `maxCells` cells.
+ * not take the mesh, or when it would come to more than `maxCells` cells. A
+ * part curved throughout comes back whole, as one `rest` cell.
  */
 export function cutAtReflexEdges(wasm: ManifoldToplevel, verts: number[], faces: number[], maxCells: number): ReflexCutResult | null {
   // Curved throughout, nothing to cut. With no reflex edge at all, every
   // shell is convex — boxes listed together in one mesh — and is a piece as
   // it stands: V-HACD made 236 pieces of an open-top box's five slabs, still
   // filling 59 places.
-  const first = reflexEdges({ verts, faces });
-  if (first.length > 0 && !first.some(e => e.deg > SHARP_REFLEX_DEG)) return null;
   const root = toManifoldSolid(wasm, verts, faces);
   if (!root) return null;
 
   const convex: Chunk[] = [], rest: Chunk[] = [];
   let queue: Manifold[] = [];
   let cuts = 0;
-  const components = (m: Manifold) => {
-    const parts = m.decompose();
-    m.delete();
-    // A sealed hollow is a shell of its own, wound inward, with a negative
-    // volume. It goes back with the solid round it — the smallest whose box
-    // holds it — or that solid would read as convex and fill the hollow: a
-    // closed 60 mm box came out as one cube.
-    const solids: Manifold[] = [], voids: Manifold[] = [];
-    for (const p of parts) {
-      const vol = p.volume();
-      if (vol > CRUMB_MM3) solids.push(p);
-      else if (vol < -CRUMB_MM3) voids.push(p);
-      else p.delete();
-    }
-    const holds = (o: Manifold, i: Manifold) => {
-      const a = o.boundingBox(), b = i.boundingBox();
-      return [0, 1, 2].every(k => a.min[k] <= b.min[k] && b.max[k] <= a.max[k]);
-    };
-    const inner = new Map<Manifold, Manifold[]>();
-    for (const h of voids) {
-      const round = solids.filter(o => holds(o, h)).sort((x, y) => x.volume() - y.volume())[0];
-      if (round) inner.set(round, [...(inner.get(round) ?? []), h]);
-      else h.delete();
-    }
-    return solids.map(o => {
-      const hs = inner.get(o);
-      if (!hs) return o;
-      const whole = wasm.Manifold.compose([o, ...hs]);
-      o.delete();
-      for (const h of hs) h.delete();
-      return whole;
-    });
-  };
   try {
-    queue = components(root);
+    queue = solidComponents(wasm, root);
     while (queue.length) {
       if (convex.length + rest.length + queue.length > maxCells) return null;
       const m = queue.shift()!;
@@ -202,16 +217,120 @@ export function cutAtReflexEdges(wasm: ManifoldToplevel, verts: number[], faces:
         (edges.length ? rest : convex).push(cell);
         continue;
       }
-      const [pos, neg] = m.splitByPlane(plane.n, plane.d * MM);
+      let sides = m.splitByPlane(plane.n, plane.d * MM);
+      // An empty side: the wall the plane came from is still here. Float
+      // noise landed the cut before this one inside the material, leaving a
+      // skin a micron thick over the opening and the pocket whole behind it.
+      // A 21.16 mm hex pocket did that, threw its part back to V-HACD, and
+      // stopped a peg at its rim. Take the cut a hair into the air, and the
+      // skin off.
+      if (sides.some(side => side.isEmpty())) {
+        for (const side of sides) side.delete();
+        sides = m.splitByPlane(plane.n, (plane.d + plane.air * SKIN) * MM);
+      }
       m.delete();
-      // Both sides hold material round a reflex edge in the plane; an empty
-      // side means the plane missed it, and cutting again would not end.
-      if (pos.isEmpty() || neg.isEmpty()) { pos.delete(); neg.delete(); return null; }
+      // Still empty, and cutting again would not end. The cell goes on as it is.
+      if (sides.some(side => side.isEmpty())) {
+        for (const side of sides) side.delete();
+        rest.push(cell);
+        continue;
+      }
+      const kept = sides.filter(side => {
+        const whole = (2 * side.volume()) / side.surfaceArea() >= 2 * SKIN * MM;
+        if (!whole) side.delete();
+        return whole;
+      });
       cuts++;
-      queue.push(...components(pos), ...components(neg));
+      for (const side of kept) queue.push(...solidComponents(wasm, side));
     }
   } finally {
     for (const m of queue) m.delete();
   }
   return { convex, rest, cuts };
+}
+
+/** Reflex points of a cell measured per cell at most, so a dense mesh costs the same to judge. */
+const MAX_DEPTH_SAMPLES = 2000;
+
+interface CurvedCell { m: Manifold; cell: Chunk; depth: number; edge: Edge | null }
+
+/**
+ * How far a cell's reflex edges lie inside its own hull, and which is deepest:
+ * how far that hull would stand proud of the cell, were it kept as a piece.
+ */
+function concavityOf(c: Chunk): { depth: number; edge: Edge | null } {
+  const edges = reflexEdges(c);
+  if (edges.length === 0) return { depth: 0, edge: null };
+  const v = c.verts;
+  const points: number[][] = [];
+  for (let i = 0; i < v.length; i += 3) points.push([v[i], v[i + 1], v[i + 2]]);
+  const hull = convexHullOf(points);
+  if (!hull) return { depth: 0, edge: null };
+  const planes = hullPlanes(hull);
+  const inside = (x: number, y: number, z: number) => depthInside(planes, x, y, z);
+  const stride = Math.max(1, Math.ceil(edges.length / MAX_DEPTH_SAMPLES));
+  let depth = 0, edge: Edge | null = null;
+  for (let i = 0; i < edges.length; i += stride) {
+    const e = edges[i];
+    const ax = v[e.a * 3], ay = v[e.a * 3 + 1], az = v[e.a * 3 + 2];
+    const bx = v[e.b * 3], by = v[e.b * 3 + 1], bz = v[e.b * 3 + 2];
+    // The middle as well as the ends: a through bore's edges end on the
+    // block's faces, and only their middles are inside its hull.
+    const d = Math.max(inside(ax, ay, az), inside(bx, by, bz), inside((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2));
+    if (d > depth) { depth = d; edge = e; }
+  }
+  return { depth, edge };
+}
+
+/**
+ * Cuts cells with curved walls until each one's hull stands no more than
+ * `tolerance` proud of it, the proudest first, or `maxCells` are made.
+ *
+ * The same cut as a corner's, taken along the plane that bisects a shallow
+ * reflex edge, which leaves both sides of that edge under 180°. Round a bore
+ * those planes are radial; along a filleted corner they fan through it. Each
+ * cut halves the arc it lands in and so quarters its sag, and the cells are
+ * pieces of the solid itself, with no voxels in them, so nothing stands proud
+ * but the chord. V-HACD then tightPieces left a 22 mm bore in a block 5.9 mm
+ * narrower in 68 pieces.
+ */
+export function cutCurved(wasm: ManifoldToplevel, cells: Chunk[], maxCells: number, tolerance: number): { cells: Chunk[]; cuts: number } {
+  const open: CurvedCell[] = [];
+  const done: Chunk[] = [];
+  let cuts = 0;
+  const judge = (m: Manifold): void => {
+    const cell = fromManifold(m);
+    const { depth, edge } = concavityOf(cell);
+    if (edge && depth > tolerance) open.push({ m, cell, depth, edge });
+    else { m.delete(); done.push(cell); }
+  };
+  for (const c of cells) {
+    const m = toManifoldSolid(wasm, c.verts, c.faces);
+    if (m) judge(m);
+    else done.push(c);
+  }
+  try {
+    while (open.length > 0 && open.length + done.length < maxCells) {
+      let worst = 0;
+      for (let i = 1; i < open.length; i++) if (open[i].depth > open[worst].depth) worst = i;
+      const { m, cell, edge } = open.splice(worst, 1)[0];
+      const [p1, p2] = edge!.planes;
+      const n: [number, number, number] = [p1.n[0] - p2.n[0], p1.n[1] - p2.n[1], p1.n[2] - p2.n[2]];
+      const len = Math.hypot(n[0], n[1], n[2]);
+      const a = edge!.a * 3;
+      const offset = len > 0 ? (n[0] * cell.verts[a] + n[1] * cell.verts[a + 1] + n[2] * cell.verts[a + 2]) / len : 0;
+      const [pos, neg] = len > 0 ? m.splitByPlane([n[0] / len, n[1] / len, n[2] / len], offset * MM) : [null, null];
+      if (!pos || !neg || pos.isEmpty() || neg.isEmpty()) {
+        pos?.delete(); neg?.delete(); m.delete();
+        done.push(cell);
+        continue;
+      }
+      m.delete();
+      cuts++;
+      for (const side of [pos, neg]) for (const part of solidComponents(wasm, side)) judge(part);
+    }
+  } finally {
+    for (const o of open) { o.m.delete(); done.push(o.cell); }
+  }
+  return { cells: done, cuts };
 }

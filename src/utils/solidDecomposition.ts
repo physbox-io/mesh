@@ -9,10 +9,12 @@
 // axis (revolution.ts), and chunks are tried only if the sectors fill a
 // cavity (a bowl's curved inside) or stand prouder than half a millimetre.
 //
-// Any other part with sharp inside corners is cut along them first
-// (reflexCuts.ts): the cells that come out convex are exact pieces, and only
-// cells still curved go on to the chunks. A part whose corners would take
-// more than MAX_REFLEX_CELLS cells goes the chunked way whole.
+// Any other part is cut along its inside corners first (reflexCuts.ts), and
+// along the plane through each shallow reflex edge of a curved wall, proudest
+// first, within the budget. Those cells are the solid itself. Unless they come
+// within half a millimetre the chunks run as well and the better of the two is
+// kept, which on a long swept shape is the chunks. A part whose corners would
+// take more than MAX_REFLEX_CELLS cells goes the chunked way alone.
 //
 // Measured on the concave-contact scenes (Node, one core), against one
 // V-HACD call over the whole part at the old defaults:
@@ -31,6 +33,14 @@
 //   open-top box      99 pieces, 7.3 mm proud, 2.7 s  5 boxes, exact, 0.05 s
 //   sealed box        chunked                         6 boxes, exact, 0.09 s
 //   U-channel track   490 pieces, 4.2 mm proud, 9.2 s 3 curved cells (floor, walls), 348 pieces, 1.3 mm, 2.3 s
+//
+// And cutting curved walls, against V-HACD on the curved cells:
+//
+//                     V-HACD                          cut
+//   22 mm block bore  68 pieces, 5.9 mm proud         33 pieces, 0.05 mm; a 1 mm-clearance peg reaches the floor (was at the rim)
+//   r3 filleted pocket 72 pieces, 5.0 mm proud        18 pieces, 0.09 mm
+//   half-pipe ramp    205 pieces, 0.31 mm, 4.4 s      16 pieces, none, 0.14 s
+//   U-channel track   348 pieces, 1.3 mm, 2.3 s       209 pieces, 0.2 mm, 0.5 s
 //
 // Pure, store-free and Worker-safe.
 
@@ -202,11 +212,11 @@ export async function decomposeSolid(verts: number[], faces: number[], opts: Sol
   const tolerance = opts.tolerance ?? toleranceFor(verts);
   const sectors = opts.voxelResolution === undefined ? await sectorPieces(verts, faces, opts, tolerance) : null;
   if (sectors && sectors.intrusion <= SECTORS_GOOD_ENOUGH && sectors.uncovered <= SECTORS_GOOD_ENOUGH) return sectors;
-  const exact = await reflexPieces(verts, faces, opts, tolerance);
-  if (exact) return exact;
+  const exact = opts.voxelResolution === undefined ? await reflexPieces(verts, faces, opts, tolerance) : null;
+  const worst = (r: SolidResult) => (r.cavities.length > 0 ? Infinity : Math.max(r.intrusion, r.uncovered));
+  if (exact && worst(exact) <= SECTORS_GOOD_ENOUGH) return exact;
   const chunked = await chunkedPieces(verts, faces, opts, tolerance);
-  const worst = (r: SolidResult) => Math.max(r.intrusion, r.uncovered);
-  return sectors && worst(sectors) < worst(chunked) ? sectors : chunked;
+  return [sectors, exact].reduce<SolidResult>((best, r) => (r && worst(r) < worst(best) ? r : best), chunked);
 }
 
 /**
@@ -216,43 +226,45 @@ export async function decomposeSolid(verts: number[], faces: number[], opts: Sol
 export const MAX_REFLEX_CELLS = 128;
 
 /**
- * A part cut along its sharp inside corners (reflexCuts.ts): the convex cells
- * are exact pieces, and only cells still curved somewhere are decomposed by
- * V-HACD, each with its share of what the budget has left. Null when the part
- * has no sharp inside corner, or cutting along them would take too many
- * cells or leave too little budget for the curved ones.
+ * A part cut along its inside corners (reflexCuts.ts): the convex cells are
+ * exact pieces, and the cells still curved somewhere are cut along their walls
+ * with what the budget has left. Null when Manifold will not take the part, or
+ * cutting along its corners would take too many cells.
  */
 async function reflexPieces(verts: number[], faces: number[], opts: SolidOptions, tolerance: number): Promise<SolidResult | null> {
   let cut: ReflexCutResult | null;
+  let wasm: Awaited<ReturnType<typeof import('./sculptCut').loadManifold>>;
+  let cutCurved: typeof import('./reflexCuts').cutCurved;
   try {
-    const [{ loadManifold }, { cutAtReflexEdges }] = await Promise.all([import('./sculptCut'), import('./reflexCuts')]);
-    cut = cutAtReflexEdges(await loadManifold(), verts, faces, Math.min(MAX_REFLEX_CELLS, opts.maxPieces));
+    const [{ loadManifold }, reflex] = await Promise.all([import('./sculptCut'), import('./reflexCuts')]);
+    wasm = await loadManifold();
+    cutCurved = reflex.cutCurved;
+    cut = reflex.cutAtReflexEdges(wasm, verts, faces, Math.min(MAX_REFLEX_CELLS, opts.maxPieces));
   } catch {
     return null;
   }
   if (!cut) return null;
   const { convexHullOf } = await import('./csg');
-  const hulls: Hull[] = [];
-  for (const c of cut.convex) {
+  const hullOfCell = (c: Chunk): Hull | null => {
     const pts: number[][] = [];
     for (let i = 0; i < c.verts.length; i += 3) pts.push([c.verts[i], c.verts[i + 1], c.verts[i + 2]]);
     const h = convexHullOf(pts);
-    if (h) hulls.push({ ...h, volume: Math.abs(h.volume) });
+    return h ? { ...h, volume: Math.abs(h.volume) } : null;
+  };
+  const hulls: Hull[] = [];
+  for (const c of cut.convex) {
+    const h = hullOfCell(c);
+    if (h) hulls.push(h);
   }
-  // A curved cell gets at least a chunk's worth of pieces, or the part goes
-  // the old way whole: a U-channel asked for 16 pieces split them 4, 4 and 4
-  // over its floor and two walls, and the floor's 4 still spanned the
-  // channel's dips.
   const left = opts.maxPieces - hulls.length;
-  if (cut.rest.length > 0 && left < cut.rest.length * CHUNK_HULLS) return null;
-  let chunks = cut.convex.length;
-  for (const c of cut.rest) {
-    const share = { ...opts, maxPieces: Math.floor(left / cut.rest.length) };
-    const r = await chunkHulls(c.verts, c.faces, share);
-    hulls.push(...r.hulls);
-    chunks += r.chunks;
+  if (cut.rest.length > 0 && left < cut.rest.length) return null;
+  if (cut.rest.length > 0) {
+    for (const c of cutCurved(wasm, cut.rest, left, tolerance).cells) {
+      const h = hullOfCell(c);
+      if (h) hulls.push(h);
+    }
   }
-  return tightened(verts, faces, hulls, opts, tolerance, chunks);
+  return tightened(verts, faces, hulls, opts, tolerance, cut.convex.length + cut.rest.length);
 }
 
 async function chunkedPieces(verts: number[], faces: number[], opts: SolidOptions, tolerance: number): Promise<SolidResult> {
