@@ -379,7 +379,7 @@ function stepTilesIfSlow(
 const CLEAR_IOR = 1.2;
 
 /** Light a geom at full glow gives off traced: enough at any glow worth seeing to clear TracedGlow's threshold. */
-const TRACED_GLOW = 4;
+const TRACED_GLOW = 2.2;
 
 /**
  * What a live material becomes in the traced scene, cloned into `owned` if it

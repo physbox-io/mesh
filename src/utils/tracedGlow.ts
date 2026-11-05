@@ -13,11 +13,14 @@
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
-const LEVELS = 6;
-const BRIGHT = 1.2;
-const STRENGTH = 0.5;
+// Five levels keep the halo on the tube. Each adds to the one above on the way
+// back up, so the light comes out about five times over: hence the low strength.
+// At six levels and 0.5, a neon arc blew out half the frame to white.
+const LEVELS = 5;
+const BRIGHT = 1.0;
+const STRENGTH = 0.1;
 /** A traced firefly is one pixel at any brightness; held here, it cannot flare. */
-const MOST = 8;
+const MOST = 3;
 
 const vertexShader = /* glsl */ `
 varying vec2 vUv;
