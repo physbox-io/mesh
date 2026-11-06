@@ -584,7 +584,7 @@ Four drawers on **400 mm full-extension ball-bearing runners**, eight runners in
 ## Try it
 - Press **Play**: the bottom drawer opens first, and each one above it two seconds later
 - Select a drawer and change the cabinet's width: the **DFM** check says how far off the side space is, and by how much to change the drawer
-- **Build → Parts list** in the bottom bar lists the runners to buy`,
+- **Make → Parts list** in the bottom bar lists the runners to buy`,
 
   xy_plotter: `# ✏️ XY Plotter on Linear Rails
 
@@ -678,7 +678,7 @@ A 300 mm cube of **20 × 20 T-slot extrusion**, held together by **16 corner bra
 
 ## Try it
 - Press **Play**: the carriage rides up and down its post
-- **Build → Parts list** in the bottom bar packs the twelve profiles onto the bar lengths extrusion is sold in`,
+- **Make → Parts list** in the bottom bar packs the twelve profiles onto the bar lengths extrusion is sold in`,
 };
 
 

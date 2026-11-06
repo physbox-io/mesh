@@ -6,7 +6,7 @@
 // Each starts as a model: the walls as one solid body, drawn the way a
 // builder draws a job to the brick's own measure (whole and half bricks
 // along, whole courses up), with what is not brick beside it. Select the
-// walls and Build → Brick lays them in brick (or toy bricks), in their place.
+// walls and Make → Brick lays them in brick (or toy bricks), in their place.
 // ---------------------------------------------------------------------------
 
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';

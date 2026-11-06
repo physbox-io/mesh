@@ -1071,7 +1071,7 @@ export interface SceneGraph {
    */
   environment?: Partial<SceneEnvironment>;
   /**
-   * How Build → Brick lays this scene (which brick, bond, joint, or toy-brick
+   * How Make → Brick lays this scene (which brick, bond, joint, or toy-brick
    * inventory and wall thickness), saved with the scene and presets.
    */
   brickwork?: Partial<BrickworkOptions>;

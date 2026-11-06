@@ -7,7 +7,7 @@ import { smokerPreset, toyCastlePreset } from '../src/presets/brickPresets';
 const body = (scene: typeof smokerPreset, id: string) => scene.nodes.find((n) => n.id === id)!;
 
 describe('brickwork presets', () => {
-  it('start as models, for Build → Brick to lay, with their brick settings on the scene', () => {
+  it('start as models, for Make → Brick to lay, with their brick settings on the scene', () => {
     expect(body(smokerPreset, 'smoker_walls').geoms.length).toBeGreaterThan(5);
     expect(body(toyCastlePreset, 'castle').geoms.length).toBeGreaterThan(5);
     expect(smokerPreset.nodes.some((n) => n.brickwork)).toBe(false);

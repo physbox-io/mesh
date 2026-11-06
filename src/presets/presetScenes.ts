@@ -3609,7 +3609,7 @@ export const PRESETS = {
     scene: extrusionFramePreset,
     camera: { position: [0.62, -0.82, 0.55], target: [0, 0, 0.15] } satisfies PresetCamera,
   },
-  // Laid by Build → Brick from plain shapes (presets/brickPresetShapes.ts).
+  // Laid by Make → Brick from plain shapes (presets/brickPresetShapes.ts).
   brick_smoker: {
     name: 'Brick Smoker',
     emoji: '🔥',

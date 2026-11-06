@@ -32,11 +32,11 @@ export const BuildMenu: React.FC<{ items: BuildItem[] }> = ({ items }) => {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        title="Build it by hand from bought stock — pipe and timber frames, brickwork, and the hardware to buy. The same whatever machine is on the bench."
+        title="Make it by hand from bought stock — pipe and timber frames, brickwork, and the hardware to buy. The same whatever machine is on the bench."
         className="flex items-center justify-center gap-1 p-1 px-1.5 rounded-md font-semibold hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors focus:outline-none cursor-pointer text-teal-600 dark:text-teal-400"
       >
         <Hammer className="w-3.5 h-3.5" />
-        Build
+        Make
         <ChevronUp className={`w-3 h-3 opacity-50 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
