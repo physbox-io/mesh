@@ -141,6 +141,40 @@ describe('laying a shape in brick', () => {
     expect(overlaps(layBricks(tower).bricks)).toBe(0);
   });
 
+  it('buys mortar at the rate premix makers give, more for a wall of two leaves', () => {
+    const wall = (t: number) => scene([box('w', 0, 0, 0.5, 2.25, t, 0.5)]);
+    const half = layBricks(wall(0.05125));
+    const perBag = (r: typeof half) => (r.bricks.length * 12.5) / r.mortarLitres;
+    // Datasheets: 20 to 25 standard bricks to the 25 kg bag.
+    expect(perBag(half)).toBeGreaterThan(20);
+    expect(perBag(half)).toBeLessThan(28);
+    // The collar joint between the leaves: half that joint again for each brick.
+    const two = layBricks(wall(0.1075));
+    expect(two.mortarLitres / two.bricks.length).toBeGreaterThan(half.mortarLitres / half.bricks.length * 1.1);
+    // A scale-model brick is solid: joints and nothing else.
+    const mini = layBricks(scene([box('w', 0, 0, 0.1, 0.4, 0.0085, 0.1)]), { standardId: 'mini_6' });
+    const std = mini.standard;
+    const joints = mini.bricks.reduce((t, b) => t + (b.lengthMm * mini.jointMm + std.heightMm * mini.jointMm + mini.jointMm ** 2) * b.depthMm, 0) * 1.1 / 1e6;
+    expect(mini.mortarLitres).toBeCloseTo(joints, 6);
+  });
+
+  it('lists every brick shorter than whole as a cut, and buys a brick for each cut header', () => {
+    // Off the brick's measure, so strips close with cuts.
+    const offGauge = scene([
+      box('f', 0, -1.291, 0.5, 2.2445, 0.1075, 0.5), box('b', 0, 1.291, 0.5, 2.2445, 0.1075, 0.5),
+      box('l', -2.137, 0, 0.5, 0.1075, 1.1835, 0.5), box('r', 2.137, 0, 0.5, 0.1075, 1.1835, 0.5),
+    ]);
+    for (const bond of ['stretcher', 'english'] as BrickBond[]) {
+      const r = layBricks(offGauge, { bond });
+      const short = r.bricks.filter((b) => !b.closer && b.lengthMm < (b.header ? 102.5 : 215) - 5);
+      expect(short.every((b) => b.cut)).toBe(true);
+      // Every brick laid comes out of a brick, or shares one only as two stretcher cuts can.
+      const headers = r.bricks.filter((b) => b.cut && b.header).length;
+      const stretcherCuts = r.bricks.filter((b) => b.cut && !b.header).length;
+      expect(r.toBuy).toBeGreaterThanOrEqual(r.whole + headers + Math.ceil(stretcherCuts / 2) + Math.ceil(r.closers / 2));
+    }
+  });
+
   it('refuses a shape too small for the brick, naming the bricks that would do', async () => {
     const { PRESETS } = await import('../src/presets/presetScenes');
     const birdhouse = (PRESETS as unknown as Record<string, { scene: SceneGraph }>).birdhouse.scene;

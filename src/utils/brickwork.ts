@@ -24,6 +24,7 @@ import { nestingDepths, offsetNestedLoops, pointInPolygon, signedArea2 } from '.
 import { DEFAULT_TOY_SIZES, layToyBricks, TOY_HEIGHT_MM, TOY_PITCH_MM, type ToyInventory, type ToySize } from './toyBricks';
 import { bondReport, type BondReport } from './brickBond';
 import { layWalls } from './brickSetOut';
+import { MORTAR_BAG_LITRES, mortarLitresFor } from './brickMortar';
 
 export type BrickStandardId = 'uk' | 'us_modular' | 'eu_nf' | 'au' | 'mini_6' | 'mini_12' | 'toy';
 
@@ -35,17 +36,22 @@ export interface BrickStandard {
   heightMm: number;
   /** The usual joint, mm. */
   jointMm: number;
+  /** Share of a brick's volume its frog or cores take in mortar. Absent: solid. */
+  frogFill?: number;
   /** A scale-model brick, for a shape too small for real ones. */
   miniature?: boolean;
   /** Interlocking studded bricks on an 8 mm grid, in several sizes: see utils/toyBricks.ts. */
   toy?: boolean;
 }
 
+/** Sets the UK brick at the 25 bricks a 25 kg bag that premix datasheets give. */
+const FROG_FILL = 0.11;
+
 export const BRICK_STANDARDS: Record<BrickStandardId, BrickStandard> = {
-  uk: { id: 'uk', label: 'UK standard 215 × 102.5 × 65', lengthMm: 215, widthMm: 102.5, heightMm: 65, jointMm: 10 },
-  us_modular: { id: 'us_modular', label: 'US modular 7⅝ × 3⅝ × 2¼"', lengthMm: 194, widthMm: 92, heightMm: 57, jointMm: 10 },
-  eu_nf: { id: 'eu_nf', label: 'European NF 240 × 115 × 71', lengthMm: 240, widthMm: 115, heightMm: 71, jointMm: 10 },
-  au: { id: 'au', label: 'Australian 230 × 110 × 76', lengthMm: 230, widthMm: 110, heightMm: 76, jointMm: 10 },
+  uk: { id: 'uk', label: 'UK standard 215 × 102.5 × 65', lengthMm: 215, widthMm: 102.5, heightMm: 65, jointMm: 10, frogFill: FROG_FILL },
+  us_modular: { id: 'us_modular', label: 'US modular 7⅝ × 3⅝ × 2¼"', lengthMm: 194, widthMm: 92, heightMm: 57, jointMm: 10, frogFill: FROG_FILL },
+  eu_nf: { id: 'eu_nf', label: 'European NF 240 × 115 × 71', lengthMm: 240, widthMm: 115, heightMm: 71, jointMm: 10, frogFill: FROG_FILL },
+  au: { id: 'au', label: 'Australian 230 × 110 × 76', lengthMm: 230, widthMm: 110, heightMm: 76, jointMm: 10, frogFill: FROG_FILL },
   mini_6: { id: 'mini_6', label: 'Miniature 1:6 (36 × 17 × 11)', lengthMm: 36, widthMm: 17, heightMm: 11, jointMm: 1.6, miniature: true },
   mini_12: { id: 'mini_12', label: 'Miniature 1:12 (18 × 9 × 6)', lengthMm: 18, widthMm: 8.5, heightMm: 5.5, jointMm: 0.8, miniature: true },
   toy: { id: 'toy', label: 'Toy bricks (8 mm studs)', lengthMm: 2 * TOY_PITCH_MM, widthMm: TOY_PITCH_MM, heightMm: TOY_HEIGHT_MM, jointMm: 0, toy: true },
@@ -562,9 +568,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
           bricks.push({
             course: c, x: centre.x, y: centre.y, z, angle: Math.atan2(u.y, u.x),
             lengthMm: ul, depthMm: depth, header: depth > W + 1e-6, closer,
-            // Within a couple of joints of whole: the perpends are closed up a
-            // little instead, as a bricklayer would, rather than a brick cut.
-            cut: !closer && piece < (depth > W + 1e-6 ? W : L) - 2.5 * j,
+            cut: !closer && piece < (depth > W + 1e-6 ? W : L) - j / 2,
           });
           laidThisRing++;
           laidInRun++;
@@ -602,10 +606,13 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   if (thinCourses) warnings.push(`In ${thinCourses} course${thinCourses === 1 ? '' : 's'} the wall is thinner than a brick (${W} mm): laid one brick wide.`);
 
   // Cut pieces: paired out of whole bricks where two fit in one, longest first.
+  // Only stretchers: a cut header is trimmed across the brick's width, and what
+  // comes off is no brick.
   const cutLens = bricks.filter((b) => b.cut).map((b) => Math.round(b.lengthMm)).sort((x, y) => y - x);
+  const cutHeaders = bricks.filter((b) => b.cut && b.header).length;
   const bins: number[] = [];
   const kerf = Math.max(1, j / 3);
-  for (const l of cutLens) {
+  for (const l of bricks.filter((b) => b.cut && !b.header).map((b) => Math.round(b.lengthMm)).sort((x, y) => y - x)) {
     const k = bins.findIndex((used) => used + kerf + l <= L);
     if (k >= 0) bins[k] += kerf + l;
     else bins.push(l);
@@ -620,11 +627,9 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   // A brick split lengthways makes two queen closers.
   const closers = bricks.filter((b) => b.closer).length;
   const whole = bricks.length - cutLens.length - closers;
-  const toBuy = Math.ceil((whole + bins.length + Math.ceil(closers / 2)) * (1 + o.wastagePct / 100));
+  const toBuy = Math.ceil((whole + bins.length + cutHeaders + Math.ceil(closers / 2)) * (1 + o.wastagePct / 100));
 
-  // Mortar: a bed and a perpend for each brick, and a tenth for waste.
-  const mortarMm3 = bricks.reduce((sum, b) => sum + (b.lengthMm * j + H * j + j * j) * b.depthMm, 0) * 1.1;
-  const mortarLitres = mortarMm3 / 1e6;
+  const mortarLitres = mortarLitresFor(bricks, std, j);
 
   // Lintels: an opening's span, with the bearing either end, in stock steps.
   const bearing = 150 * (L / 215);
@@ -654,7 +659,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     modelHeightMm: modelH, builtHeightMm: courses * gauge - j,
     bricks, whole, cutPieces: cutLens.length, closers, toBuy,
     cuts: [...byLen.entries()].sort((a, b) => b[0] - a[0]).map(([lengthMm, count]) => ({ lengthMm, count })),
-    mortarLitres, mortarBags: Math.ceil(mortarLitres / 12.5),
+    mortarLitres, mortarBags: Math.ceil(mortarLitres / MORTAR_BAG_LITRES),
     lintels: [...lintelMap.entries()].sort((a, b) => a[0] - b[0]).map(([lengthMm, count]) => ({ lengthMm, count })),
     bond, warnings,
   };

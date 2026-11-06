@@ -515,13 +515,13 @@ export function layWalls(args: {
       const depth = kind === 'S' ? W : kind === 'P' ? w.thickness : w.thickness;
       actions.push(() => {
       if (!args.layer.free(at, w.u, w.n, along, depth)) return;
-      if (kind === 'S') args.layer.lay(at, w.u, w.n, along, W, { header: false, closer: false, cut: along < L - 2.5 * j });
-      else if (kind === 'H') args.layer.lay(at, w.u, w.n, along, w.thickness, { header: true, closer: false, cut: along < W - 2.5 * j });
+      if (kind === 'S') args.layer.lay(at, w.u, w.n, along, W, { header: false, closer: false, cut: along < L - j / 2 });
+      else if (kind === 'H') args.layer.lay(at, w.u, w.n, along, w.thickness, { header: true, closer: false, cut: along < W - j / 2 });
       else if (kind === 'Q') args.layer.lay(at, w.u, w.n, along, w.thickness, { header: true, closer: true, cut: false });
       else { // a stretcher on each leaf
         for (let k = 0; k < leaves; k++) {
           const p = add(add(o, mul(w.u, s)), mul(w.n, k * (W + j)));
-          args.layer.lay(p, w.u, w.n, along, W, { header: false, closer: false, cut: along < L - 2.5 * j });
+          args.layer.lay(p, w.u, w.n, along, W, { header: false, closer: false, cut: along < L - j / 2 });
         }
       }
       });
