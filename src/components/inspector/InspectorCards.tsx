@@ -13,6 +13,7 @@ import { BalanceCard } from './BalanceCard';
 import { ContainerWaterCard } from './ContainerWaterCard';
 import { FlexureCard } from './FlexureCard';
 import { MoldCard } from './MoldCard';
+import { GarmentCard } from './GarmentCard';
 import { CollisionCard } from './CollisionCard';
 import { CombineCard } from './CombineCard';
 import { ConstraintsCard } from './ConstraintsCard';
@@ -88,6 +89,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
           <BodyBasicsCard node={node} />
           <PartActions node={node} threeSceneRef={threeSceneRef} />
           <MoldCard node={node} />
+          <GarmentCard node={node} />
           <JoinCard node={node} />
           <HardwarePartCard node={node} />
           <PositionCard node={node} />

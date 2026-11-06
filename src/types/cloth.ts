@@ -31,7 +31,19 @@ export type ClothPlacement =
   | { kind: 'plane'; origin?: number[]; uAxis?: number[]; vAxis?: number[] }
   | { kind: 'wrap'; origin: number[]; axis: number[]; ref: number[]; radius: number; taper?: number; startU?: number; clockwise?: boolean }
   | GirthPlacement
-  | AlongPlacement;
+  | AlongPlacement
+  | PathPlacement;
+
+/**
+ * Ruled-surface placement along a smooth 3D curve through `stations`: `u` runs
+ * by arc length along the spline through `p`, and `v` (from the pattern's
+ * centreline) runs along the unit transverse ruling `across` (projected
+ * orthogonal to the curve tangent).
+ */
+export interface PathPlacement {
+  kind: 'path';
+  stations: { p: number[]; across: number[] }[];
+}
 
 /**
  * Round a body: each row of the piece (each v) wrapped round the body's
@@ -112,9 +124,15 @@ export interface ClothTie {
   at?: number;
   to?: string;
   anchor?: number[];
+  /**
+   * Another cloth (its node's name) to sew the point to instead of a body:
+   * the nearest point of it where the two start, drawn together over the sew
+   * time. How an ornament goes on a garment.
+   */
+  toCloth?: string;
 }
 
-export type ClothMaterialName = 'jersey' | 'woven' | 'canvas' | 'shadeCloth';
+export type ClothMaterialName = 'jersey' | 'woven' | 'canvas' | 'shadeCloth' | 'denim' | 'leather' | 'taffeta' | 'velvet';
 
 export interface ClothMaterial {
   /** kg/m^2. */
@@ -133,10 +151,22 @@ export interface ClothMaterial {
    * sheet; less for an open weave, which lets air through.
    */
   windCd: number;
+  /**
+   * How far it stretches to take a shape it was not cut to, as a fraction.
+   * A knit gives, and goes over a bust as it is; a woven barely does, and a
+   * garment of it is shaped there with darts.
+   */
+  give: number;
 }
 
 export interface ClothSpec {
-  pieces: ClothPiece[];
+  /**
+   * A garment modelled in 3D round a body form (utils/cloth/garmentShell):
+   * the cloth is its shell, cut into panels at its seams and flattened into
+   * pieces. Otherwise the cloth is `pieces`, placed and sewn.
+   */
+  garment?: GarmentDraft;
+  pieces?: ClothPiece[];
   seams?: ClothSeam[];
   ties?: ClothTie[];
   material?: ClothMaterialName;
@@ -152,26 +182,99 @@ export interface ClothSpec {
   sewTime?: number;
   selfCollide?: boolean;
   /**
+   * Which layer it is worn as: cloth lies outside every cloth of a lower
+   * layer (a jacket, 2, over a shirt, 1, over jeans, 0). Same layers pass
+   * through each other.
+   */
+  layer?: number;
+  /**
    * Set when the cloth was drafted for a body form: regenerate from these
    * whenever the form's measurements change. See utils/cloth/garments.ts.
    */
   draft?: GarmentDraft;
+  /**
+   * How a garment starts: worn, sewn on the form (the default); or as its
+   * pieces, each laid out flat a little off where it goes, sewn up over the
+   * sew time when the scene plays.
+   */
+  layout?: 'worn' | 'pieces';
 }
 
-export type GarmentKind = 'tshirt' | 'dress' | 'skirt';
+/**
+ * An edge of a garment as it is cut (`neckline`, `hem`, `waist`, `cuff`,
+ * `armhole`, `opening`, a tube's `top` and `end`) or one of its seams by
+ * name (`side`, `centre`, `armholeL`, `underarmL`, `elbowL`, `dartL`, ...).
+ */
+export type GarmentLine = string;
+
+/**
+ * Something fixed along a line of a garment: studs, buttons or beads at a
+ * spacing (`size` across them); a zipper, whose teeth run the whole line.
+ * They ride on the cloth and are marked on the pattern; they do not weigh
+ * or stiffen it.
+ */
+export interface GarmentTrim {
+  kind: 'stud' | 'button' | 'bead' | 'zipper';
+  along: GarmentLine;
+  /** Between one and the next, metres; a zipper's teeth set their own. */
+  spacing?: number;
+  /** Across one, metres. */
+  size?: number;
+  rgba?: number[];
+}
+
+export type GarmentKind = 'tshirt' | 'dress' | 'skirt' | 'gown' | 'jacket' | 'trousers' | 'tube' | 'sock' | 'hat';
+
+/** A limb of a body form, as a tube garment goes over it. */
+export type FormLimbName = 'armL' | 'armR' | 'legL' | 'legR' | 'head';
 
 export interface GarmentDraft {
   garment: GarmentKind;
   /** Name of the body form it is fitted to. */
   fitTo: string;
+  /** Where it starts on the body: at the neck, with a neckline (a bodice), or at a waistband. Not for a tube (`over`). */
+  top?: 'neck' | 'waist';
+  /** Follows each leg down (trousers) instead of hanging past them (a skirt, a dress). */
+  legs?: boolean;
   /** Ease over the body, metres of circumference at chest, waist and hip. */
   ease?: number;
-  /** Hem below the waist for a dress or skirt, metres. */
+  /** For a garment from a waistband (`top: 'waist'`): ease round the waist itself, metres of circumference, snug so it holds. */
+  waistEase?: number;
+  /** Hem below the waist, metres (trousers: waistband to hem). Past the floor, it lies on it. */
   length?: number;
-  /** Skirt flare: hem circumference over hip circumference. */
+  /** Skirt flare: hem circumference over hip circumference. Trousers: hem over thigh. */
   flare?: number;
+  /** Extra length at the centre back, metres, tapering off to the sides: a train. */
+  train?: number;
   /** Sleeve length from the shoulder point, metres; 0 for sleeveless. */
   sleeve?: number;
+  /** Round the sleeve at its cuff, metres; 0 for as wide as the sleeve. */
+  cuff?: number;
+  /** Armhole cut this much deeper than a set-in sleeve's, metres: deep, a batwing. */
+  armhole?: number;
+  /** Front neckline below the neck point, metres. */
+  neckline?: number;
+  /** Open down the centre front, its edges left unsewn: a jacket, a coat. */
+  opening?: boolean;
+  /** Studs, buttons, a zipper, beads: along the garment's edges and seams. */
+  trims?: GarmentTrim[];
+  /**
+   * A tube garment (sock, glove, hood, cuff): the limb it goes round, from
+   * and to where along it (0 the root, 1 the end: a leg's toe, an arm's
+   * fingertips, the crown), and whether it closes over the `to` end.
+   */
+  over?: FormLimbName;
+  from?: number;
+  to?: number;
+  cap?: boolean;
+  /** How many panels round a tube garment, cut along it; a dome wants more (a hat's crown six), a sock two. */
+  gores?: number;
+  /**
+   * Shaped to the body under the bust, with darts (a fitted dress); or not,
+   * hanging straight from its widest above (a t-shirt). A front with neither
+   * cannot be cut flat.
+   */
+  fitted?: boolean;
   material?: ClothMaterialName;
   rgba?: number[];
 }
@@ -201,6 +304,8 @@ export interface BodyFormMeasurements {
   upperArm: number;
   /** Arms down from horizontal, degrees: 90 hangs straight, 45 is an A-pose. */
   armAngle: number;
+  /** How far the forearm turns forward from the upper arm at the elbow, degrees: 0 is straight. */
+  elbowBend: number;
   /** Whether the form has legs below the hip, or stands on a pole. */
   legs: boolean;
 }

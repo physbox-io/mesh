@@ -5,7 +5,6 @@ import { geomFriction } from './contactFriction';
 import { clutchDriverBodyXml, isClutchedMotor } from './motorClutch';
 import { flatMesh } from './mjcfFlatMesh';
 import { xmlAttr } from './xmlAttr';
-import type { ClothXml } from './cloth/clothMjcf';
 
 /*
  * One body of the scene as MJCF: its joints, its geoms and its children. A
@@ -153,14 +152,6 @@ const buildJoint = (joint: SceneJoint) => {
   return `<joint ${attrs} />`;
 };
 
-/**
- * Each cloth body's MJCF, worked out once per compile before the bodies are
- * written (its equalities and numerics go elsewhere in the file). Keyed by the
- * compile's own copy of the node; set by compileToMJCF.
- */
-let clothXmlByNode = new Map<SceneNode, ClothXml>();
-export const setClothXml = (m: Map<SceneNode, ClothXml>) => { clothXmlByNode = m; };
-
 export const buildNode = (node: SceneNode): string => {
   if (!node) return '';
   const posStr = Array.isArray(node.pos) ? node.pos.join(' ') : '0 0 0';
@@ -178,14 +169,14 @@ export const buildNode = (node: SceneNode): string => {
 
   const nameStr = node.name || node.id || 'body';
 
-  const cloth = clothXmlByNode.get(node);
-  if (cloth) {
-    // The cloth's own body is a fixed frame for its pieces: no joints, no
-    // geoms. Its vertices are bodies of their own, each free to slide.
-    let attrs = `name="${xmlAttr(nameStr)}" pos="${posStr}"`;
-    if (node.quat) attrs += ` quat="${node.quat.join(' ')}"`;
-    else if (node.euler) attrs += ` euler="${node.euler.join(' ')}"`;
-    return `<body ${attrs}>${cloth.body}${(node.children || []).map(buildNode).join('')}</body>`;
+  // Cloth is not MuJoCo's: the cloth solver in the worker owns it
+  // (utils/cloth/xpbd.ts), reading where every body is each step. Anything
+  // parented to a cloth body is placed in its frame, which places bodies
+  // without being one.
+  if (node.cloth) {
+    if (!node.children?.length) return '';
+    const turn = node.quat ? ` quat="${node.quat.join(' ')}"` : node.euler ? ` euler="${node.euler.join(' ')}"` : '';
+    return `<frame pos="${posStr}"${turn}>${node.children.map(buildNode).join('')}</frame>`;
   }
 
   if (node.isComposite) {

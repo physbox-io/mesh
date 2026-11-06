@@ -29,7 +29,7 @@ import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
 import { hydrostaticFlotationPreset } from './hydrostaticFlotation';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
-import { dressOnFormPreset, shadeSailPreset, tshirtOnFormPreset } from './clothPresets';
+import { ballgownPreset, dressOnFormPreset, knitwearPreset, menswearPreset, shadeSailPreset, skirtPreset, tshirtOnFormPreset } from './clothPresets';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
   bearingCartPreset, chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
@@ -3489,6 +3489,30 @@ export const PRESETS = {
     emoji: '👗',
     scene: dressOnFormPreset,
     camera: { position: [1.4, -2.8, 1.4], target: [0, 0, 0.95] } satisfies PresetCamera,
+  },
+  menswear_on_form: {
+    name: 'Jeans, T-shirt and Leather Jacket',
+    emoji: '🧥',
+    scene: menswearPreset,
+    camera: { position: [1.4, -2.9, 1.4], target: [0, 0, 0.95] } satisfies PresetCamera,
+  },
+  knitwear_on_form: {
+    name: 'Knit Hat, Socks and Leg Warmers',
+    emoji: '🧦',
+    scene: knitwearPreset,
+    camera: { position: [1.3, -2.6, 1.0], target: [0, 0, 0.75] } satisfies PresetCamera,
+  },
+  skirt_on_form: {
+    name: 'Skirt on a Dress Form',
+    emoji: '🩱',
+    scene: skirtPreset,
+    camera: { position: [1.3, -2.6, 1.1], target: [0, 0, 0.8] } satisfies PresetCamera,
+  },
+  ballgown_on_form: {
+    name: 'Ballgown with a Train and Bow',
+    emoji: '👑',
+    scene: ballgownPreset,
+    camera: { position: [2.6, 1.9, 1.5], target: [0, 0.25, 0.75] } satisfies PresetCamera,
   },
   shade_sail: {
     name: 'Shade Sail',

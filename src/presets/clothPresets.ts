@@ -6,8 +6,11 @@
  */
 
 import type { SceneGraph, SceneNode } from '../types/scene';
-import type { ClothEdge, UV } from '../types/cloth';
+import type { ClothEdge, ClothPiece, ClothSeam, ClothTie, PathPlacement, UV } from '../types/cloth';
 import { bodyFormNode, garmentNode } from '../utils/cloth/clothNodes';
+import { bodyFormSection, bodyLandmarks } from '../utils/cloth/bodyForm';
+import { GARMENT_DEFAULTS } from '../utils/cloth/garments';
+import { samplePathStations } from '../utils/cloth/clothMesh';
 
 function formWearing(garment: 'tshirt' | 'dress'): SceneGraph {
   // A man's t-shirt on a male form, a dress on a female one.
@@ -20,6 +23,161 @@ function formWearing(garment: 'tshirt' | 'dress'): SceneGraph {
 
 export const tshirtOnFormPreset = formWearing('tshirt');
 export const dressOnFormPreset = formWearing('dress');
+
+/** A garment worn as `layer` (0 next to the body). */
+function wearing(id: string, draft: Parameters<typeof garmentNode>[2], form: SceneNode, layer: number): SceneNode {
+  const node = garmentNode(id, id, draft, form);
+  node.cloth!.layer = layer;
+  return node;
+}
+
+/** A man in jeans, a t-shirt over them and a leather jacket over that: three layers. */
+function menswear(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'male' });
+  return {
+    nodes: [
+      form,
+      wearing('jeans', { garment: 'trousers' }, form, 0),
+      wearing('tshirt', { garment: 'tshirt', rgba: [0.92, 0.92, 0.9, 1] }, form, 1),
+      wearing('jacket', { garment: 'jacket' }, form, 2),
+    ],
+  } as SceneGraph;
+}
+
+/**
+ * A large bow folded from one continuous velvet ribbon and sewn onto the back
+ * of `onto` at height z: from the right tail up into the right loop, across
+ * the front of the knot into the left loop, and down into the left tail.
+ */
+function bow(id: string, onto: string, backY: number, z: number, layer: number, rgba: number[]): SceneNode {
+  // Placed as a vertical generalized cylinder (across = [0, 0, 1] everywhere)
+  // over a smooth horizontal curve in (x, y), so every triangle of the loops,
+  // center knot, and hanging tails starts isometric to its flat 2D pattern.
+  const vMin = -0.40, vMax = 0.055, vMid = (vMin + vMax) / 2, z0 = z + vMid;
+  const ac = [0, 0, 1];
+  const stations: { p: number[]; across: number[] }[] = [
+    // Right back pinch (0..1), tied to the gown.
+    { p: [-0.006, backY + 0.005, z0], across: ac },
+    { p: [-0.024, backY + 0.006, z0], across: ac },
+    // Right tail & back of right loop (1..5).
+    { p: [-0.058, backY + 0.008, z0], across: ac },
+    { p: [-0.068, backY + 0.009, z0], across: ac },
+    { p: [-0.135, backY + 0.014, z0], across: ac },
+    // Right loop outer tip (5) and front sheet (6..7).
+    { p: [-0.155, backY + 0.025, z0], across: ac },
+    { p: [-0.092, backY + 0.038, z0], across: ac },
+    // Front center knot (7..9), wrapping in front (+y) of the back pinch.
+    { p: [-0.026, backY + 0.022, z0], across: ac },
+    { p: [0, backY + 0.027, z0], across: ac },
+    { p: [0.026, backY + 0.022, z0], across: ac },
+    // Left loop front sheet (9..10) and outer tip (11).
+    { p: [0.092, backY + 0.038, z0], across: ac },
+    { p: [0.155, backY + 0.025, z0], across: ac },
+    // Left tail & back of left loop (11..15).
+    { p: [0.135, backY + 0.014, z0], across: ac },
+    { p: [0.068, backY + 0.009, z0], across: ac },
+    { p: [0.058, backY + 0.008, z0], across: ac },
+    // Left back pinch (15..16), tied to the gown.
+    { p: [0.024, backY + 0.006, z0], across: ac },
+    { p: [0.006, backY + 0.005, z0], across: ac },
+  ];
+  const { stationS: s } = samplePathStations(stations);
+  const vTop = [
+    0.028, 0.028, 0.040, 0.044, 0.053, 0.055, 0.048,
+    0.028, 0.028, 0.028,
+    0.048, 0.055, 0.053, 0.044, 0.040, 0.028, 0.028,
+  ];
+  const topPt = (i: number): UV => [s[i], vTop[i]];
+  const spanTop = (i0: number, i1: number): UV[] => {
+    const out: UV[] = [], step = i1 >= i0 ? 1 : -1;
+    for (let i = i0; ; i += step) { out.push(topPt(i)); if (i === i1) break; }
+    return out;
+  };
+  const edges: ClothEdge[] = [
+    // Lower boundary: right back pinch -> right tail -> right loop bottom -> front knot bottom -> left loop bottom -> left tail -> left back pinch.
+    { id: 'bot_pinchR', pts: [[s[0], -0.028], [s[1], -0.028]] },
+    { id: 'tailR_in', pts: [[s[1], -0.028], [s[2], vMin]] },
+    { id: 'tailR_hem', pts: [[s[2], vMin], [s[4], vMin]] },
+    { id: 'tailR_out', pts: [[s[4], vMin], [s[3], -0.036]] },
+    { id: 'bot_loopR', pts: [[s[3], -0.036], [s[4], -0.050], [s[5], -0.055], [s[6], -0.048], [s[7], -0.028]] },
+    { id: 'bot_knotR', pts: [[s[7], -0.028], [s[8], -0.028]] },
+    { id: 'bot_knotL', pts: [[s[8], -0.028], [s[9], -0.028]] },
+    { id: 'bot_loopL', pts: [[s[9], -0.028], [s[10], -0.048], [s[11], -0.055], [s[12], -0.050], [s[13], -0.036]] },
+    { id: 'tailL_out', pts: [[s[13], -0.036], [s[12], vMin]] },
+    { id: 'tailL_hem', pts: [[s[12], vMin], [s[14], vMin]] },
+    { id: 'tailL_in', pts: [[s[14], vMin], [s[15], -0.028]] },
+    { id: 'bot_pinchL', pts: [[s[15], -0.028], [s[16], -0.028]] },
+    // Left pinch vertical end.
+    { id: 'endL', pts: [[s[16], -0.028], topPt(16)] },
+    // Upper boundary (reversed from 16 back to 0).
+    { id: 'top_pinchL', pts: spanTop(16, 15) },
+    { id: 'top_loopL', pts: spanTop(15, 9) },
+    { id: 'top_knotL', pts: spanTop(9, 8) },
+    { id: 'top_knotR', pts: spanTop(8, 7) },
+    { id: 'top_loopR', pts: spanTop(7, 1) },
+    { id: 'top_pinchR', pts: spanTop(1, 0) },
+    // Right pinch vertical end.
+    { id: 'endR', pts: [topPt(0), [s[0], -0.028]] },
+  ];
+  const pieces: ClothPiece[] = [{ name: 'ribbon', rgba, edges, placement: { kind: 'path', stations } }];
+  // Close the back pinch at the center and wrap the front knot band over it.
+  const seams: ClothSeam[] = [
+    { name: 'pinchClosed', a: [{ piece: 'ribbon', edge: 'endR' }], b: [{ piece: 'ribbon', edge: 'endL', reversed: true }] },
+    { name: 'knotBotR', a: [{ piece: 'ribbon', edge: 'bot_knotR' }], b: [{ piece: 'ribbon', edge: 'bot_pinchR', reversed: true }] },
+    { name: 'knotBotL', a: [{ piece: 'ribbon', edge: 'bot_knotL' }], b: [{ piece: 'ribbon', edge: 'bot_pinchL', reversed: true }] },
+    { name: 'knotTopR', a: [{ piece: 'ribbon', edge: 'top_knotR' }], b: [{ piece: 'ribbon', edge: 'top_pinchR', reversed: true }] },
+    { name: 'knotTopL', a: [{ piece: 'ribbon', edge: 'top_knotL' }], b: [{ piece: 'ribbon', edge: 'top_pinchL', reversed: true }] },
+  ];
+  // Tie the back pinch directly onto the gown.
+  const ties: ClothTie[] = [
+    { piece: 'ribbon', edge: 'endR', toCloth: onto },
+    { piece: 'ribbon', edge: 'endL', toCloth: onto },
+    { piece: 'ribbon', edge: 'bot_pinchR', toCloth: onto },
+    { piece: 'ribbon', edge: 'top_pinchR', toCloth: onto },
+    { piece: 'ribbon', edge: 'bot_pinchL', toCloth: onto },
+    { piece: 'ribbon', edge: 'top_pinchL', toCloth: onto },
+  ];
+  return { id, name: id, pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces, seams, ties, material: 'velvet', spacing: 0.02, sewTime: 1, layer } } as unknown as SceneNode;
+}
+
+/** A ballgown with a train and batwing sleeves, a large velvet bow on its back. */
+function ballgown(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'female' });
+  const gown = wearing('gown', { garment: 'gown' }, form, 0);
+  // The back of the gown at the waist, from the form and the gown's ease.
+  const m = form.bodyForm!, L = bodyLandmarks(m), sec = bodyFormSection(m, L.waistZ);
+  const back = sec.centreY + sec.radii[Math.round(sec.radii.length / 4)] + GARMENT_DEFAULTS.gown.ease / (2 * Math.PI) + 0.004;
+  return { nodes: [form, gown, bow('bow', 'gown', back + 0.006, L.waistZ + 0.02, 1, [0.08, 0.08, 0.1, 1])] } as SceneGraph;
+}
+
+/**
+ * Knitwear, each a tube round a span of a limb: a hat over the crown, a sock
+ * on each foot, and leg warmers over the socks (a layer above them).
+ */
+function knitwear(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'female' });
+  return {
+    nodes: [
+      form,
+      wearing('hat', { garment: 'hat' }, form, 0),
+      wearing('sockL', { garment: 'sock', over: 'legL' }, form, 0),
+      wearing('sockR', { garment: 'sock', over: 'legR' }, form, 0),
+      wearing('legWarmerL', { garment: 'tube', over: 'legL', from: 0.5, to: 0.78, ease: 0.06, rgba: [0.55, 0.3, 0.45, 1] }, form, 1),
+      wearing('legWarmerR', { garment: 'tube', over: 'legR', from: 0.5, to: 0.78, ease: 0.06, rgba: [0.55, 0.3, 0.45, 1] }, form, 1),
+    ],
+  } as SceneGraph;
+}
+
+/** A flared skirt, from the waist, on a female form. */
+function skirt(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'female' });
+  return { nodes: [form, wearing('skirt', { garment: 'skirt' }, form, 0)] } as SceneGraph;
+}
+
+export const knitwearPreset = knitwear();
+export const skirtPreset = skirt();
+export const menswearPreset = menswear();
+export const ballgownPreset = ballgown();
 
 /** A sail edge from `a` to `b`, cut in toward the middle by `sag` of its length, as sails are. */
 function catenaryEdge(id: string, a: UV, b: UV, sag: number): ClothEdge {

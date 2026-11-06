@@ -91,7 +91,7 @@ import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
-import { applyCloth, clothTieLoads, initClothRuntime, placeCloth, type ClothRuntime } from '../utils/cloth/clothStep';
+import { buildClothWorld, type ClothWorld } from '../utils/cloth/clothWorld';
 import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -190,11 +190,17 @@ const history = new HistoryRing(5000);
 const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
 
 /**
- * The current model's cloth: seams to close, flexes to float and blow about
- * (utils/cloth/clothStep). Rebuilt with the id caches, so the live run, a
- * headless run and a mid-run rebuild each get their own model's.
+ * The scene's cloth, simulated beside MuJoCo by XPBD (utils/cloth/xpbd.ts):
+ * it reads where every body is after each MuJoCo step and is drawn from its
+ * own particles. Rebuilt with the model; a rebuild that carries the scene
+ * over carries the cloth too.
  */
-let clothRt: ClothRuntime | null = null;
+let cloth: ClothWorld | null = null;
+
+/** Builds the scene's cloth (utils/cloth/clothWorld); `carry` keeps it where it is if it is the same cloth. */
+const buildCloth = (carry: boolean) => {
+  cloth = model && data ? buildClothWorld(mujoco, model, data, sceneGraph, cloth, carry) : null;
+};
 
 let sharedBuffers: {
   qpos?: Float64Array;
@@ -225,7 +231,7 @@ const updateSharedBuffers = () => {
   cvel.set(data.cvel);
   geom_xpos.set(data.geom_xpos);
   geom_xmat.set(data.geom_xmat);
-  if (sharedBuffers.flexvert_xpos?.length) sharedBuffers.flexvert_xpos.set(data.flexvert_xpos);
+  if (sharedBuffers.flexvert_xpos?.length && cloth) cloth.sim.writeRender(sharedBuffers.flexvert_xpos);
 };
 
 
@@ -279,7 +285,6 @@ const findNodeById = (nodes: SceneNode[], targetId: string): SceneNode | null =>
 const rebuildIdCaches = () => {
   const mj = mujoco!;
   const mdl = model!;
-  clothRt = initClothRuntime(mj, mdl);
   const bCache: Record<string, number> = {};
   const jCache: Record<string, number> = {};
   const collectIds = (nodes: SceneNode[]) => {
@@ -875,15 +880,17 @@ const WAKE_NUDGE_N = 1e-12;
  * it was read on every tick; the values cannot change under a built model.
  * Keyed on the model object because headless runs swap it out and back.
  */
-let optCache: { model: MjModel; timestep: number; enableflags: number; gravityZ: number } | null = null;
+let optCache: { model: MjModel; timestep: number; enableflags: number; gravityZ: number; gravity: number[] } | null = null;
 const modelOpt = (mdl: MjModel) => {
   if (optCache?.model !== mdl) {
     const opt = mdl.opt;
+    const gravity = Array.from((opt.gravity ?? [0, 0, -9.81]) as ArrayLike<number>);
     optCache = {
       model: mdl,
       timestep: opt.timestep,
       enableflags: opt.enableflags,
-      gravityZ: opt.gravity?.[2] ?? -9.81,
+      gravityZ: gravity[2] ?? -9.81,
+      gravity,
     };
   }
   return optCache;
@@ -3328,9 +3335,11 @@ const flushAeroAudio = () => {
   }
 };
 
-/** Sews, floats and blows the cloth for the coming step; xfrc_applied is already cleared. */
-const stepCloth = () => {
-  if (clothRt && model && data) applyCloth(clothRt, model, data, [envWindX || 0, envWindY || 0, 0], envDensity > 0 ? envDensity : 1.225);
+/** Moves the cloth on by a step, after MuJoCo's: it reads where every body has just got to. */
+const stepCloth = (dt: number) => {
+  if (!cloth || !model) return;
+  const g = modelOpt(model).gravity;
+  cloth.advance(dt, { gravity: [g[0], g[1], g[2]], wind: [envWindX || 0, envWindY || 0, 0], airDensity: envDensity > 0 ? envDensity : 1.225 });
 };
 
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
@@ -3368,7 +3377,7 @@ const snapshot = () => {
     cvel: Float64Array.from(dat.cvel),
     geom_xpos: Float64Array.from(dat.geom_xpos),
     geom_xmat: Float64Array.from(dat.geom_xmat),
-    flexvert_xpos: model?.nflexvert ? Float64Array.from(dat.flexvert_xpos) : undefined,
+    flexvert_xpos: cloth ? (() => { const a = new Float64Array(3 * cloth.sim.renderSize()); cloth.sim.writeRender(a); return a; })() : undefined,
   };
 };
 
@@ -3773,13 +3782,13 @@ const stepOnce = (stepSize: number): boolean => {
     applyCompositeAeroForces();
     applyFreeJointDamping(sceneGraph.nodes);
     wakeBodies();
-    stepCloth();
 
     const prevTime = data.time;
     // The clock alone misses a reset on the first step (it also ends at one
     // timestep), so the reset warning is watched as well. See mujocoAutoReset.
     const prevResets = autoResetCount(data);
     mujoco.mj_step(model, data);
+    stepCloth(stepSize);
     if (data.time <= prevTime || autoResetCount(data) !== prevResets) {
       const message = prevTime === 0
         ? 'Simulation diverged on its first step: MuJoCo reset it to the starting pose at rest — simulation stopped.' +
@@ -3873,44 +3882,8 @@ const stepFor = (dtMs: number, inputs: Record<string, number>, outputNames: stri
   return { ok: true as const, t: data.time, steps, outputs, unknown: [...unknownInputs, ...unknownOutputs] };
 };
 
+/** With cloth in the scene a frame stops stepping after this much work and lets the rest go: slow motion, smoothly. */
 const CLOTH_FRAME_BUDGET_MS = 24;
-
-/** Each flex's vertices and triangles, for the viewport to draw. */
-const flexInfo = (m: MjModel) => {
-  const out: { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[] }[] = [];
-  for (let f = 0; f < (m.nflex ?? 0); f++) {
-    if (m.flex_dim[f] !== 2) continue;
-    const ea = m.flex_elemdataadr[f], en = m.flex_elemnum[f];
-    out.push({
-      name: mujoco!.mj_id2name(m, mujoco!.mjtObj.mjOBJ_FLEX.value, f) ?? '',
-      vertadr: m.flex_vertadr[f],
-      vertnum: m.flex_vertnum[f],
-      elems: Array.from((m.flex_elem as ArrayLike<number> & { slice(a: number, b: number): ArrayLike<number> }).slice(ea, ea + 3 * en)),
-      rgba: Array.from((m.flex_rgba as ArrayLike<number> & { slice(a: number, b: number): ArrayLike<number> }).slice(4 * f, 4 * f + 4)),
-    });
-  }
-  return out;
-};
-
-/**
- * Each cloth stitch as the pair of flex vertices it joins (indices into
- * flexvert_xpos), for the viewport to draw them as one point. Physically a
- * stitch joins them; what is left between them is the solver's tolerance,
- * and drawn apart it showed as a slit along every seam.
- */
-const clothStitchPairs = (m: MjModel): number[] => {
-  const vertOfBody = new Map<number, number>();
-  const vb = m.flex_vertbodyid as ArrayLike<number>;
-  for (let v = 0; v < (m.nflexvert ?? 0); v++) vertOfBody.set(vb[v], v);
-  const out: number[] = [];
-  for (let e = 0; e < m.neq; e++) {
-    const name = mujoco!.mj_id2name(m, mujoco!.mjtObj.mjOBJ_EQUALITY.value, e) ?? '';
-    if (!name.startsWith('cloth_') || !name.includes('_stitch')) continue;
-    const a = vertOfBody.get(m.eq_obj1id[e]), b = vertOfBody.get(m.eq_obj2id[e]);
-    if (a !== undefined && b !== undefined) out.push(a, b);
-  }
-  return out;
-};
 
 const stepTick = (delta: number) => {
   if (!isPlaying || !model || !data || !mujoco) return;
@@ -3928,7 +3901,7 @@ const stepTick = (delta: number) => {
   // Cloth can cost more per step than a step is long. Rather than run every
   // step owed and post a frame a few times a second, stop at a frame's worth
   // of work and let the rest go: the cloth plays in slow motion, smoothly.
-  const budgetEnd = clothRt ? performance.now() + CLOTH_FRAME_BUDGET_MS : Infinity;
+  const budgetEnd = cloth ? performance.now() + CLOTH_FRAME_BUDGET_MS : Infinity;
   for (let i = 0; i < stepsNeeded; i++) {
     if (!stepOnce(stepSize)) return;
     if (performance.now() > budgetEnd) { accumulator = 0; break; }
@@ -3986,7 +3959,10 @@ const postScriptStatus = (force = false) => {
 };
 
 /** The loads on the cloth's ties, for the inspector. Absent without any. */
-const clothFrame = () => (clothRt?.ties.length && data ? { clothTies: clothTieLoads(clothRt, data) } : {});
+const clothFrame = () => {
+  const ties = cloth?.sim?.tieLoads();
+  return ties?.length ? { clothTies: ties } : {};
+};
 
 const postFrame = () => {
   framePending = false;
@@ -4311,11 +4287,9 @@ const doBuild = (
     if (needForward) mujoco.mj_forward(newModel, newData);
   }
 
-  // Cloth still at its cutting place (a fresh start, or a rebuild whose
-  // unnamed flex joints could not be carried) goes to where it starts, however
-  // the state above was arrived at; its seams are aimed from there when it is
-  // first stepped (utils/cloth/clothStep).
-  if (clothRt) placeCloth(clothRt, mujoco, newModel, newData);
+  // The cloth, built after the model so it can read where the bodies are; a
+  // rebuild that carried the scene over carries the cloth with it.
+  buildCloth(!freshRun);
 
   // Last, so nothing above can put a broken weld back together. A rebuild is
   // the one moment a break can be silently undone — the model is new, every
@@ -4336,8 +4310,12 @@ const doBuild = (
       cvel: createSharedArray(newModel.nbody * 6),
       geom_xpos: createSharedArray(newModel.ngeom * 3),
       geom_xmat: createSharedArray(newModel.ngeom * 9),
-      flexvert_xpos: createSharedArray(newModel.nflexvert * 3),
+      flexvert_xpos: createSharedArray(cloth ? 3 * cloth.sim.renderSize() : 0),
     };
+    // Filled now, not at the next step: the viewport reads it as soon as the
+    // model arrives, and read empty it drew the cloth at the origin (a
+    // garment flashed up, then vanished until something asked for a frame).
+    if (cloth && sharedBuffers.flexvert_xpos?.length) cloth.sim.writeRender(sharedBuffers.flexvert_xpos);
   } else {
     sharedBuffers = {};
   }
@@ -4384,8 +4362,8 @@ const doBuild = (
     jnt_qposadr: Array.from(newModel.jnt_qposadr as ArrayLike<number>),
     jnt_dofadr: Array.from(newModel.jnt_dofadr as ArrayLike<number>),
     idMaps: buildIdMaps(),
-    flexes: flexInfo(newModel),
-    clothStitches: clothStitchPairs(newModel),
+    flexes: cloth?.sim?.renderLayout() ?? [],
+    clothStitches: [],
     isShared: isSharedSupported,
     ...snapshot(),
   };
@@ -4481,7 +4459,7 @@ const runHeadless = async (
   );
   const savedPluckTouchSite = new Map(recentPluckTouchSite);
   const savedContinuousPairStart = new Map(continuousPairStartSimTime);
-  const savedClothRt = clothRt;
+  const savedCloth = cloth;
   // A headless run starts its scripts from nothing and must not leave its
   // state or compiled closures in the live scene's.
   const savedScriptState = scriptState;
@@ -4536,7 +4514,7 @@ const runHeadless = async (
 
     seedActuatorCtrl(sceneGraph.nodes, data);
     mujoco.mj_forward(model, data);
-    if (clothRt) placeCloth(clothRt, mujoco, model, data);
+    buildCloth(false);
 
     const initVelJoints: { name: string; vel: number[] }[] = [];
     const traverseVel = (nodes: SceneNode[]) => {
@@ -4631,9 +4609,9 @@ const runHeadless = async (
         applyCompositeAeroForces();
         applyFreeJointDamping(sceneGraph.nodes);
         wakeBodies();
-        stepCloth();
         solverWork.before(data!);
         mujoco!.mj_step(model!, data!);
+        stepCloth(timestep);
         syncKinematics(mujoco!, model!, data!);
         solverWork.after(data!, timestep);
         checkConstraintBreaks();
@@ -4705,7 +4683,7 @@ const runHeadless = async (
     if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
     if (threaded && savedData && mujoco) { try { mujoco.mju_threadpool(savedData, STEP_THREADS); } catch { /* ignore */ } }
     model = savedModel; data = savedData; sceneGraph = savedSceneGraph;
-    clothRt = savedClothRt;
+    cloth = savedCloth;
     scriptState = savedScriptState;
     scriptCache = savedScriptCache;
     pendingWake.clear();

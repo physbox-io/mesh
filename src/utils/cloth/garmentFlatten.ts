@@ -91,24 +91,33 @@ function triangleFrames(P: number[][], tris: number[]) {
   return out;
 }
 
-/** Conjugate gradients on a symmetric positive (semi)definite operator. */
-function cg(apply: (x: Float64Array, out: Float64Array) => void, b: Float64Array, x: Float64Array, iters = 2000, tol = 1e-12) {
-  const n = b.length, r = new Float64Array(n), p = new Float64Array(n), Ap = new Float64Array(n);
+/**
+ * Conjugate gradients on a symmetric positive (semi)definite operator,
+ * preconditioned by its diagonal `diag` (Jacobi): without it the conformal
+ * map of a panel of several thousand triangles had not converged in its
+ * budget of steps, and the layout folded over itself.
+ */
+function cg(apply: (x: Float64Array, out: Float64Array) => void, b: Float64Array, x: Float64Array, diag: Float64Array, iters = 2000, tol = 1e-12) {
+  const n = b.length, r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), Ap = new Float64Array(n);
+  const inv = diag.map((d) => (d > 1e-300 ? 1 / d : 1));
   apply(x, Ap);
-  for (let i = 0; i < n; i++) { r[i] = b[i] - Ap[i]; p[i] = r[i]; }
-  let rr = r.reduce((s, v) => s + v * v, 0);
+  for (let i = 0; i < n; i++) { r[i] = b[i] - Ap[i]; z[i] = inv[i] * r[i]; p[i] = z[i]; }
+  let rz = 0, rr = 0;
+  for (let i = 0; i < n; i++) { rz += r[i] * z[i]; rr += r[i] * r[i]; }
   const stop = tol * Math.max(1e-30, b.reduce((s, v) => s + v * v, 0));
   for (let it = 0; it < iters && rr > stop; it++) {
     apply(p, Ap);
     let pAp = 0;
     for (let i = 0; i < n; i++) pAp += p[i] * Ap[i];
     if (Math.abs(pAp) < 1e-300) break;
-    const alpha = rr / pAp;
-    for (let i = 0; i < n; i++) { x[i] += alpha * p[i]; r[i] -= alpha * Ap[i]; }
-    const rr2 = r.reduce((s, v) => s + v * v, 0);
-    const beta = rr2 / rr;
-    rr = rr2;
-    for (let i = 0; i < n; i++) p[i] = r[i] + beta * p[i];
+    const alpha = rz / pAp;
+    rr = 0;
+    for (let i = 0; i < n; i++) { x[i] += alpha * p[i]; r[i] -= alpha * Ap[i]; z[i] = inv[i] * r[i]; rr += r[i] * r[i]; }
+    let rz2 = 0;
+    for (let i = 0; i < n; i++) rz2 += r[i] * z[i];
+    const beta = rz2 / rz;
+    rz = rz2;
+    for (let i = 0; i < n; i++) p[i] = z[i] + beta * p[i];
   }
   return x;
 }
@@ -161,8 +170,11 @@ function lscm(n: number, tris: number[], frames: { p: V2[]; area: number }[], pi
     }
   }
   for (const i of pinned.keys()) { b[2 * i] = 0; b[2 * i + 1] = 0; }
+  const diag = new Float64Array(2 * n);
+  for (const { idx, cu, cv } of rows) for (let c = 0; c < 2; c++) for (let j = 0; j < 3; j++) { diag[2 * idx[j]] += cu[c][j] ** 2; diag[2 * idx[j] + 1] += cv[c][j] ** 2; }
+  for (const i of pinned.keys()) { diag[2 * i] = 1; diag[2 * i + 1] = 1; }
   const free = new Float64Array(2 * n);
-  cg(apply, b, free, 4000, 1e-20);
+  cg(apply, b, free, diag, 4000, 1e-20);
   const out: V2[] = [];
   for (let i = 0; i < n; i++) out.push(pinned.get(i) ?? [free[2 * i], free[2 * i + 1]]);
   return out;
@@ -193,6 +205,9 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
     }
     out[0] += x[0]; // anchor the first point, so the system is not singular
   };
+  const diag = new Float64Array(n);
+  for (let t = 0; t < frames.length; t++) for (let j = 0; j < 3; j++) { const w = cot[t][j]; diag[tris[3 * t + ((j + 1) % 3)]] += w; diag[tris[3 * t + ((j + 2) % 3)]] += w; }
+  diag[0] += 1;
   for (let it = 0; it < iters; it++) {
     const bu = new Float64Array(n), bv = new Float64Array(n);
     for (let t = 0; t < frames.length; t++) {
@@ -216,8 +231,9 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
     }
     bu[0] += uv[0][0]; bv[0] += uv[0][1];
     const xu = Float64Array.from(uv.map((q) => q[0])), xv = Float64Array.from(uv.map((q) => q[1]));
-    cg(applyL, bu, xu, 1500, 1e-18);
-    cg(applyL, bv, xv, 1500, 1e-18);
+    // Warm-started from the last layout, so a few hundred steps converge.
+    cg(applyL, bu, xu, diag, 300, 1e-14);
+    cg(applyL, bv, xv, diag, 300, 1e-14);
     for (let i = 0; i < n; i++) uv[i] = [xu[i], xv[i]];
   }
   return uv;
@@ -245,7 +261,7 @@ function outlineOf(n: number, tris: number[]): number[] {
   return best;
 }
 
-export function flattenPanel(name: string, shellPoints: number[][], shellTris: number[], panelTris: number[], seamPaths: number[][] = [], arapIters = 25): FlatPiece {
+export function flattenPanel(name: string, shellPoints: number[][], shellTris: number[], panelTris: number[], seamPaths: number[][] = [], arapIters = 15): FlatPiece {
   const n0 = shellPoints.length;
   const seams = new Set<number>();
   for (const path of seamPaths) for (let k = 1; k < path.length; k++) { const a = path[k - 1], b = path[k]; seams.add(a < b ? a * n0 + b : b * n0 + a); }
@@ -262,6 +278,44 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   }
   let uv = lscm(P.length, tris, frames, [[a, [0, 0]], [b, [far, 0]]]);
   uv = arap(P.length, tris, frames, uv, arapIters);
+  const outline = outlineOf(P.length, tris);
+  // Fair smooth runs of the 2D outline between corners (Taubin lambda/mu
+  // filter, which removes alternating triangle-split sawtooth noise without
+  // shrinking curved edges), then relax a few ARAP steps so interior
+  // triangles conform smoothly.
+  if (outline.length >= 6) {
+    const m = outline.length;
+    const smoothVtx: [number, number, number][] = [];
+    for (let k = 0; k < m; k++) {
+      const iPrev = outline[(k - 1 + m) % m], iCur = outline[k], iNext = outline[(k + 1) % m];
+      const u1 = [P[iCur][0] - P[iPrev][0], P[iCur][1] - P[iPrev][1], P[iCur][2] - P[iPrev][2]];
+      const u2 = [P[iNext][0] - P[iCur][0], P[iNext][1] - P[iCur][1], P[iNext][2] - P[iCur][2]];
+      const l1 = Math.hypot(u1[0], u1[1], u1[2]) || 1, l2 = Math.hypot(u2[0], u2[1], u2[2]) || 1;
+      const cos3 = (u1[0] * u2[0] + u1[1] * u2[1] + u1[2] * u2[2]) / (l1 * l2);
+      const v1 = [uv[iCur][0] - uv[iPrev][0], uv[iCur][1] - uv[iPrev][1]];
+      const v2 = [uv[iNext][0] - uv[iCur][0], uv[iNext][1] - uv[iCur][1]];
+      const d1 = Math.hypot(v1[0], v1[1]) || 1, d2 = Math.hypot(v2[0], v2[1]) || 1;
+      const cos2 = (v1[0] * v2[0] + v1[1] * v2[1]) / (d1 * d2);
+      if (cos3 > 0.78 && cos2 > 0.78) smoothVtx.push([iPrev, iCur, iNext]);
+    }
+    for (let pass = 0; pass < 4; pass++) {
+      for (const w of [0.40, -0.41]) {
+        const next = new Map<number, V2>();
+        for (const [iPrev, iCur, iNext] of smoothVtx) {
+          const pa = uv[iPrev], pv = uv[iCur], pb = uv[iNext];
+          const cu = pb[0] - pa[0], cv = pb[1] - pa[1];
+          const c2 = cu * cu + cv * cv;
+          if (c2 < 1e-12) continue;
+          const t = ((pv[0] - pa[0]) * cu + (pv[1] - pa[1]) * cv) / c2;
+          next.set(iCur, [
+            pv[0] + w * (pa[0] + t * cu - pv[0]),
+            pv[1] + w * (pa[1] + t * cv - pv[1]),
+          ]);
+        }
+        for (const [iCur, q] of next) uv[iCur] = q;
+      }
+    }
+  }
   // Turned so the body's up (z) runs up the piece (+v), and mirrored if the
   // layout came out face down.
   let su = 0, sv = 0;

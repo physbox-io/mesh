@@ -8,7 +8,7 @@
 
 import { delaunay } from './delaunay';
 import type {
-  AlongPlacement, ClothEdge, ClothMaterial, ClothMaterialName, ClothPiece, ClothPlacement, ClothSpec, GirthPlacement, SeamSide, UV,
+  AlongPlacement, ClothEdge, ClothMaterial, ClothMaterialName, ClothPiece, ClothPlacement, ClothSpec, GirthPlacement, PathPlacement, SeamSide, UV,
 } from '../../types/cloth';
 
 /*
@@ -22,14 +22,22 @@ export const CLOTH_MATERIALS: Record<ClothMaterialName, ClothMaterial> = {
   // 160 g/m2 cotton jersey, a t-shirt: 0.8 mm, as jersey is. Modelled 2 mm
   // thick (the same stretch at 2.5x less modulus), it was 15x stiffer to
   // bend, could not follow the form into the armpit, and chattered there.
-  jersey: { arealDensity: 0.16, young: 2.5e6, poisson: 0.2, thickness: 0.0008, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2 },
+  jersey: { arealDensity: 0.16, young: 2.5e6, poisson: 0.2, thickness: 0.0008, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2, give: 0.15 },
   // Shirting or poplin: about twice as heavy for its stretch, and stiffer.
-  woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.2, friction: 0.5, windCd: 1.2 },
+  woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.2, friction: 0.5, windCd: 1.2, give: 0.02 },
   // Heavy cotton duck.
-  canvas: { arealDensity: 0.4, young: 1e7, poisson: 0.25, thickness: 0.001, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2 },
+  canvas: { arealDensity: 0.4, young: 1e7, poisson: 0.25, thickness: 0.001, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2, give: 0.01 },
   // Knitted HDPE shade cloth. Open, so it takes less of the wind; a membrane
   // with no bending stiffness worth paying for.
-  shadeCloth: { arealDensity: 0.185, young: 1e7, poisson: 0.3, thickness: 0.0008, bending: false, damping: 0.2, friction: 0.6, windCd: 0.8 },
+  // 12 oz denim: heavy, stiff, barely gives.
+  denim: { arealDensity: 0.4, young: 1.2e7, poisson: 0.25, thickness: 0.0009, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2, give: 0.02 },
+  // Garment leather, about 1 mm: heavy and stiff to bend, no give to speak of.
+  leather: { arealDensity: 0.7, young: 2e7, poisson: 0.35, thickness: 0.0012, bending: true, damping: 0.25, friction: 0.8, windCd: 1.2, give: 0.01 },
+  // Silk taffeta: light and crisp, so a full skirt of it stands out in folds.
+  taffeta: { arealDensity: 0.09, young: 6e6, poisson: 0.2, thickness: 0.001, bending: true, damping: 0.2, friction: 0.35, windCd: 1.2, give: 0.01 },
+  // Velvet: heavy and soft, its pile thick.
+  velvet: { arealDensity: 0.3, young: 2.5e6, poisson: 0.25, thickness: 0.0016, bending: true, damping: 0.25, friction: 0.8, windCd: 1.2, give: 0.03 },
+  shadeCloth: { arealDensity: 0.185, young: 1e7, poisson: 0.3, thickness: 0.0008, bending: false, damping: 0.2, friction: 0.6, windCd: 0.8, give: 0.05 },
 };
 
 /**
@@ -116,7 +124,7 @@ export interface PieceMesh {
 }
 
 /** Boundary sampled at `step`, interior a triangular lattice, Delaunay, clipped to the outline. */
-export function meshOutline(edges: ClothEdge[], step: number, counts: Record<string, number> = {}): Omit<PieceMesh, 'pts'> {
+export function meshOutline(edges: ClothEdge[], step: number, counts: Record<string, number> = {}): Omit<PieceMesh, 'pts' | 'start'> {
   if (edges.length === 0) throw new Error('a cloth piece needs at least one edge');
   const uv: UV[] = [];
   const ids: number[][] = [];
@@ -242,11 +250,69 @@ function girthPlacer(p: GirthPlacement, outline: UV[]): (q: UV) => number[] {
   };
 }
 
+export function samplePathStations(stations: PathPlacement['stations'], stepsPerSeg = 16) {
+  const m = stations.length;
+  if (m < 2) throw new Error('a path placement needs at least two stations');
+  const get = (i: number) => stations[Math.max(0, Math.min(m - 1, i))];
+  const catmull = (a: number, b: number, c: number, d: number, t: number) => {
+    const t2 = t * t, t3 = t2 * t;
+    return 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+  };
+  const pos: number[][] = [], rawAcross: number[][] = [], cum: number[] = [0], stationS: number[] = [0];
+  for (let seg = 0; seg < m - 1; seg++) {
+    const s0 = get(seg - 1), s1 = get(seg), s2 = get(seg + 1), s3 = get(seg + 2);
+    const nSteps = stepsPerSeg;
+    for (let j = seg === 0 ? 0 : 1; j <= nSteps; j++) {
+      const t = j / nSteps;
+      const p = [0, 1, 2].map((k) => catmull(s0.p[k], s1.p[k], s2.p[k], s3.p[k], t));
+      const ac = norm([0, 1, 2].map((k) => s1.across[k] * (1 - t) + s2.across[k] * t));
+      if (pos.length > 0) {
+        const prev = pos[pos.length - 1];
+        cum.push(cum[cum.length - 1] + Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]));
+      }
+      pos.push(p); rawAcross.push(ac);
+    }
+    stationS.push(cum[cum.length - 1]);
+  }
+  const across: number[][] = [], nrm: number[][] = [];
+  for (let i = 0; i < pos.length; i++) {
+    const prev = pos[Math.max(0, i - 1)], next = pos[Math.min(pos.length - 1, i + 1)];
+    const t = norm([next[0] - prev[0], next[1] - prev[1], next[2] - prev[2]]);
+    const a = rawAcross[i], d = a[0] * t[0] + a[1] * t[1] + a[2] * t[2];
+    const b = norm([a[0] - d * t[0], a[1] - d * t[1], a[2] - d * t[2]]);
+    across.push(b);
+    nrm.push(cross3(t, b));
+  }
+  return { pos, across, nrm, cum, stationS, totalLen: cum[cum.length - 1] || 1 };
+}
+
+function pathPlacer(p: PathPlacement, outline: UV[]): (q: UV) => number[] {
+  const { pos, across, cum, totalLen } = samplePathStations(p.stations);
+  let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+  for (const [u, v] of outline) { uMin = Math.min(uMin, u); uMax = Math.max(uMax, u); vMin = Math.min(vMin, v); vMax = Math.max(vMax, v); }
+  if (!Number.isFinite(uMin)) { uMin = 0; uMax = totalLen; vMin = -0.05; vMax = 0.05; }
+  const vMid = (vMin + vMax) / 2;
+  return ([u, v]) => {
+    const s = Math.max(0, Math.min(totalLen, ((u - uMin) / (uMax - uMin || 1)) * totalLen));
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < s) i++;
+    const f = (s - cum[i - 1]) / (cum[i] - cum[i - 1] || 1);
+    const P = [0, 1, 2].map((k) => pos[i - 1][k] + (pos[i][k] - pos[i - 1][k]) * f);
+    const B = norm([0, 1, 2].map((k) => across[i - 1][k] + (across[i][k] - across[i - 1][k]) * f));
+    const dv = v - vMid;
+    return [0, 1, 2].map((k) => P[k] + dv * B[k]);
+  };
+}
+
 export function placer(p: ClothPlacement | undefined, outline: UV[] = []): (q: UV) => number[] {
   if (p?.kind === 'girth') return girthPlacer(p, outline);
+  if (p?.kind === 'path') return pathPlacer(p, outline);
   if (p?.kind === 'along') throw new Error('an along placement is placed after the pieces it follows');
   if (!p || p.kind === 'plane') {
-    const o = p?.origin ?? [0, 0, 0], U = p?.uAxis ?? [1, 0, 0], V = p?.vAxis ?? [0, 1, 0];
+    const o = p?.origin ?? [0, 0, 0], V = norm(p?.vAxis ?? [0, 1, 0]), u0 = p?.uAxis ?? [1, 0, 0];
+    // Make `uAxis` square to `vAxis`, so a tilted plane placement starts free of shear.
+    const d = u0[0] * V[0] + u0[1] * V[1] + u0[2] * V[2];
+    const U = norm([u0[0] - d * V[0], u0[1] - d * V[1], u0[2] - d * V[2]]);
     return ([u, v]) => [0, 1, 2].map((k) => o[k] + u * U[k] + v * V[k]);
   }
   const axis = norm(p.axis);
@@ -330,7 +396,7 @@ function pairChains(a: ChainPoint[], b: ChainPoint[]): [ChainPoint, ChainPoint][
  */
 function matchedCounts(spec: ClothSpec, spacing: number): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
-  const piece = (name: string) => spec.pieces.find((p) => p.name === name);
+  const piece = (name: string) => (spec.pieces ?? []).find((p) => p.name === name);
   const len = (side: SeamSide[number]) => {
     const e = piece(side.piece)?.edges.find((x) => x.id === side.edge);
     return e ? polyLen(e.pts) : 0;
@@ -362,7 +428,7 @@ export function meshCloth(spec: ClothSpec): ClothMesh {
   if (!(spacing > 0.002)) throw new Error('cloth spacing must be over 2 mm');
   const pieces: Record<string, PieceMesh> = {};
   const counts = matchedCounts(spec, spacing);
-  for (const p of spec.pieces) {
+  for (const p of spec.pieces ?? []) {
     if (pieces[p.name]) throw new Error(`two cloth pieces are called "${p.name}"`);
     const m = meshOutline(p.edges, spacing * (p.spacingScale ?? 1), counts[p.name]);
     const outline = p.edges.flatMap((e) => e.pts.slice(0, -1));
@@ -371,7 +437,7 @@ export function meshCloth(spec: ClothSpec): ClothMesh {
     pieces[p.name] = { ...m, pts, start };
   }
   // Then whatever starts along the others, now they are placed.
-  for (const p of spec.pieces) {
+  for (const p of spec.pieces ?? []) {
     if (p.start?.kind === 'along') pieces[p.name].start = placeAlong(p.start, pieces[p.name], pieces);
   }
   const stitches: ClothMesh['stitches'] = [];

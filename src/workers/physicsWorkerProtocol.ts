@@ -6,6 +6,7 @@
 import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
 import type { HydroBodyModel, WaterBasinWorld } from '../utils/hydrostatics';
+import type { ClothMaterialName } from '../types/cloth';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
@@ -72,6 +73,20 @@ export interface FlexInfo {
   vertnum: number;
   /** Triangles as indices local to this flex, three each. */
   elems: number[];
+  rgba: number[];
+  /** The fabric, for how it is drawn. */
+  material?: ClothMaterialName;
+  /** The piece as it is cut, flat, for a garment modelled on a form (utils/cloth/clothModel FlatPattern). */
+  flat?: { uv: [number, number][]; outline: number[]; strain95: number; marks?: ClothTrimInfo[] };
+  /** Studs, buttons, beads, zipper teeth riding on its vertices. */
+  trims?: ClothTrimInfo[];
+}
+
+export interface ClothTrimInfo {
+  kind: 'stud' | 'button' | 'bead' | 'zipper';
+  /** Local vertex index. */
+  particle: number;
+  size: number;
   rgba: number[];
 }
 

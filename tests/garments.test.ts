@@ -1,58 +1,58 @@
-// Garments drafted onto a body form, sewn and draped in real MuJoCo, held to
-// what a person looks at: every seam closed to a few mm, the garment at rest
-// (not just its seams closed: at a 4 ms step a shirt passed that and never
-// stopped moving), and nothing sunk into the form (a fitted dress sank 13 mm
-// and showed the form through it in patches). Six seconds each.
+// Garments modelled in 3D on a body form (garmentShell), cut into flat
+// pieces (garmentFlatten), and draped by the cloth solver: held to what a
+// person looks at. The form measures what it was given; the modelled garment
+// stands clear of it; the pieces lie flat with little distortion; and draped,
+// the garment comes to rest on the form, nothing inside it, its cut lengths
+// held.
 
-import { describe, it, expect, beforeAll } from 'vitest';
-import load_mujoco from '@mujoco/mujoco';
-import { compileToMJCF } from '../src/utils/mjcf';
-import { applyCloth, applyClothStart, initClothRuntime } from '../src/utils/cloth/clothStep';
-import { meshCloth } from '../src/utils/cloth/clothMesh';
+import { describe, it, expect } from 'vitest';
 import { bodyFormNode, garmentNode } from '../src/utils/cloth/clothNodes';
-import { bodyLandmarks, ellipseHalfWidth } from '../src/utils/cloth/bodyForm';
-import type { SceneGraph } from '../src/types/scene';
+import { bodyFormSection, bodyLandmarks, clampBodyForm } from '../src/utils/cloth/bodyForm';
+import { garmentShell } from '../src/utils/cloth/garmentShell';
+import { flattenPanel } from '../src/utils/cloth/garmentFlatten';
+import { CLOTH_THICKNESS } from '../src/utils/cloth/xpbd';
+import { CLOTH_MATERIALS } from '../src/utils/cloth/clothMesh';
+import { GARMENT_DEFAULTS } from '../src/utils/cloth/garments';
+import { ballgownPreset, menswearPreset } from '../src/presets/clothPresets';
 import type { BodyFormMeasurements, GarmentDraft, GarmentKind } from '../src/types/cloth';
+import { clothRun, percentile } from './clothSimHarness';
+import { clothModel } from '../src/utils/cloth/clothModel';
+import { patternSvg } from '../src/utils/cloth/patternSvg';
+import * as THREE from 'three';
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-let mj: any;
-beforeAll(async () => { mj = await load_mujoco(); }, 60_000);
+/** Perimeter of a section given as radii at even angles round a centre. */
+const girth = (sec: { radii: number[] }) => {
+  const n = sec.radii.length;
+  let L = 0;
+  for (let i = 0; i < n; i++) {
+    const a = (2 * Math.PI * i) / n, b = (2 * Math.PI * (i + 1)) / n, ra = sec.radii[i], rb = sec.radii[(i + 1) % n];
+    L += Math.hypot(rb * Math.cos(b) - ra * Math.cos(a), rb * Math.sin(b) - ra * Math.sin(a));
+  }
+  return L;
+};
 
 describe('body form', () => {
-  it('sizes its slices to the tape measurements', () => {
-    const a = ellipseHalfWidth(1, 0.7), b = 0.7 * a;
-    const h = ((a - b) / (a + b)) ** 2;
-    // Ramanujan's second approximation, inverted: back to 1 m round.
-    expect(Math.PI * (a + b) * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)))).toBeCloseTo(1, 3);
-    const form = bodyFormNode('f', 'form', { chest: 1.1, waist: 0.9 });
-    const torso = form.geoms!.filter((g) => g.name.startsWith('form_torso'));
-    const widest = torso.reduce((p, q) => (q.size[0] > p.size[0] ? q : p));
-    expect(widest.size[0]).toBeCloseTo(ellipseHalfWidth(1.1, 0.7), 2);
-    expect(Math.abs(widest.pos![2] - bodyLandmarks(form.bodyForm!).bustZ)).toBeLessThan(0.05);
-  });
-
-  it("measures a female form's bust round the bust, as a tape would", () => {
-    const form = bodyFormNode('f', 'form', { figure: 'female', chest: 0.94, underbust: 0.78 });
-    const z = bodyLandmarks(form.bodyForm!).bustZ;
-    // Every geom cut at the bust line, sampled, then the convex hull's perimeter.
-    const pts: [number, number][] = [];
-    for (const g of form.geoms!) {
-      if (g.type !== 'ellipsoid' || !/torso|bust/.test(g.name)) continue;
-      const [a, b, c] = g.size, p = g.pos!, t = (z - p[2]) / c;
-      if (Math.abs(t) >= 1) continue;
-      const k = Math.sqrt(1 - t * t);
-      for (let i = 0; i < 90; i++) { const th = (2 * Math.PI * i) / 90; pts.push([p[0] + a * k * Math.cos(th), p[1] + b * k * Math.sin(th)]); }
+  it.each(['male', 'female'] as const)('a %s form is drawn as closed, outward surfaces', (figure) => {
+    // Every limb and the torso: a mesh whose triangles all face out encloses a positive volume.
+    for (const g of bodyFormNode('form', 'form', { figure }).geoms.filter((q) => q.type === 'mesh')) {
+      const v = g.vertices!, f = g.faces!;
+      let vol = 0;
+      for (let t = 0; t < f.length; t += 3) {
+        const [a, b, c] = [f[t], f[t + 1], f[t + 2]].map((i) => [v[3 * i], v[3 * i + 1], v[3 * i + 2]]);
+        vol += a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+      }
+      expect(vol, g.name).toBeGreaterThan(0);
     }
-    pts.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
-    const cross = (o: number[], a: number[], b: number[]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-    const lo: number[][] = [], hi: number[][] = [];
-    for (const p of pts) { while (lo.length > 1 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
-    for (const p of pts.slice().reverse()) { while (hi.length > 1 && cross(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); }
-    const hull = [...lo.slice(0, -1), ...hi.slice(0, -1)];
-    let girth = 0;
-    for (let i = 0; i < hull.length; i++) girth += Math.hypot(hull[i][0] - hull[(i + 1) % hull.length][0], hull[i][1] - hull[(i + 1) % hull.length][1]);
-    expect(girth).toBeCloseTo(0.94, 2);
-    expect(bodyLandmarks(form.bodyForm!).bustProminence).toBeGreaterThan(0.02);
+  });
+  it.each(['male', 'female'] as const)('a %s form tapes at its chest, waist and hip measurements', (figure) => {
+    const m = clampBodyForm({ figure });
+    const L = bodyLandmarks(m);
+    // The skin is smoothed up the body, so within a few percent.
+    expect(girth(bodyFormSection(m, L.bustZ)) / m.chest).toBeCloseTo(1, 1);
+    expect(girth(bodyFormSection(m, L.waistZ)) / m.waist).toBeCloseTo(1, 1);
+    expect(girth(bodyFormSection(m, L.hipZ)) / m.hip).toBeCloseTo(1, 1);
+    if (figure === 'female') expect(L.bustProminence).toBeGreaterThan(0.02);
+    else expect(L.bustProminence).toBe(0);
   });
 });
 
@@ -65,56 +65,193 @@ const cases: [string, GarmentKind, Partial<BodyFormMeasurements>, Partial<Garmen
   ['dress on a fuller female form', 'dress', { ...FEMALE, chest: 1.02, underbust: 0.84, waist: 0.82, hip: 1.08 }],
   ['dress with sleeves', 'dress', FEMALE, { sleeve: 0.2 }],
   ['knit dress', 'dress', FEMALE, { material: 'jersey' }],
+  ['woven shirt on a female form, darted', 'tshirt', FEMALE, { material: 'woven' }],
   ['skirt', 'skirt', FEMALE],
+  // The same machinery for everything else: trousers, a jacket, a gown with
+  // a train and batwing sleeves, and tubes round any span of a limb.
+  ['jeans on a male form', 'trousers', {}],
+  ['leather jacket on a male form', 'jacket', {}],
+  ['ballgown with a train and batwing sleeves', 'gown', FEMALE],
+  ['sock', 'sock', {}],
+  ['knit hat', 'hat', FEMALE],
+  ['leg warmer, open at both ends', 'tube', {}, { over: 'legR', from: 0.55, to: 0.8, cap: false }],
 ];
 
+/**
+ * The panels each is cut in: bodices front and back, with their set-in
+ * sleeves (a batwing's are cut in one with the body; a sleeve past the
+ * elbow is cut round there, upper and lower); the rest as named.
+ */
+const expectedPanels = (garment: GarmentKind, options: Partial<GarmentDraft>): string[] | null => {
+  const d = { ...GARMENT_DEFAULTS[garment], ...options };
+  if (d.legs) return ['backL', 'backR', 'frontL', 'frontR'];
+  if (garment === 'hat') return ['gore1', 'gore2', 'gore3', 'gore4', 'gore5', 'gore6'];
+  if (garment === 'sock') return ['gore1', 'gore2', 'gore3', 'gore4'];
+  if (d.over) return null;
+  const fronts = d.opening ? ['frontL', 'frontR'] : ['front'];
+  if (d.top === 'waist' || d.sleeve <= 0.03 || d.armhole > 0.05) return ['back', ...fronts];
+  return d.sleeve > 0.35 ? ['back', ...fronts, 'sleeveLLower', 'sleeveLUpper', 'sleeveRLower', 'sleeveRUpper'] : ['back', ...fronts, 'sleeveL', 'sleeveR'];
+};
+
 describe.each(cases)('%s', (_label, garment, measurements, options = {}) => {
-  it('is sewn shut, at rest, and sits on the form', { timeout: 300_000 }, () => {
-    const form = bodyFormNode('f', 'form', measurements);
-    const g = garmentNode('g', 'garment', { garment, ...options }, form);
-    const model = mj.MjModel.from_xml_string(compileToMJCF({ nodes: [form, g] } as SceneGraph));
-    const data = new mj.MjData(model);
-    mj.mj_forward(model, data);
-    const rt = initClothRuntime(mj, model)!;
-    applyClothStart(rt, mj, model, data);
-    let before: Float64Array | null = null;
-    while (data.time < 6) {
-      if (!before && data.time >= 5.5) before = Float64Array.from(data.flexvert_xpos);
-      data.xfrc_applied.fill(0);
-      applyCloth(rt, model, data, [0, 0, 0], 1.225);
-      mj.mj_step(model, data);
-    }
-    let moved = 0;
-    for (let v = 0; v < model.nflexvert; v++) moved += Math.hypot(...[0, 1, 2].map((k) => data.flexvert_xpos[3 * v + k] - before![3 * v + k]));
-    const speed = moved / model.nflexvert / 0.5;
+  const form = bodyFormNode('form', 'form', measurements);
+  const g = garmentNode('g', 'garment', { garment, ...options }, form);
 
-    const bySeam: Record<string, number> = {};
-    for (const s of meshCloth(g.cloth!).stitches) {
-      const ia = mj.mj_name2id(model, 1, `garment__${s.a[0]}_${s.a[1]}`), ib = mj.mj_name2id(model, 1, `garment__${s.b[0]}_${s.b[1]}`);
-      const gap = Math.hypot(...[0, 1, 2].map((k) => data.xpos[3 * ia + k] - data.xpos[3 * ib + k]));
-      const name = g.cloth!.seams![s.seam].name!;
-      bySeam[name] = Math.max(bySeam[name] ?? 0, gap);
-    }
-    // How far cloth has gone into the form, past its own 4 mm skin.
-    let deepest = 0;
-    const vec = data.contact;
-    try {
-      for (let i = 0; i < vec.size(); i++) { const c = vec.get(i); if (c.geom1 < 0 || c.geom2 < 0) deepest = Math.min(deepest, c.dist); c.delete(); }
-    } finally { vec.delete(); }
-    const z: number[] = [];
-    for (let v = 0; v < model.nflexvert; v++) z.push(data.flexvert_xpos[3 * v + 2]);
-    console.log(_label, `${(speed * 1000).toFixed(1)} mm/s, deepest ${(deepest * 1000).toFixed(1)} mm`,
-      Object.fromEntries(Object.entries(bySeam).map(([k, v]) => [k, +(v * 1000).toFixed(1)])));
-
-    expect(z.every(Number.isFinite)).toBe(true);
-    for (const [name, gap] of Object.entries(bySeam)) expect(gap, name).toBeLessThan(0.006);
-    expect(speed).toBeLessThan(0.005);
-    // Contacts are measured from the cloth's 4 mm collision skin, while the
-    // fabric is drawn through its vertices: 3 mm into the skin still leaves
-    // the drawn surface 1 mm clear of the form, so nothing shows through.
-    expect(deepest).toBeGreaterThan(-0.003);
+  it('is modelled clear of the body and splits into panels that lie flat', () => {
+    const shell = garmentShell(g.cloth!.garment!, form.bodyForm!);
     const L = bodyLandmarks(form.bodyForm!);
-    expect(Math.max(...z)).toBeGreaterThan(garment === 'skirt' ? L.hipZ : L.bustZ);
-    expect(Math.max(...z)).toBeLessThan(L.hpsZ + 0.15);
+    for (const p of shell.points) {
+      if (p[2] > L.hpsZ || p[2] < L.hipZ) continue;
+      const sec = bodyFormSection(form.bodyForm!, p[2]);
+      const th = Math.atan2(p[1] - sec.centreY, p[0]), n = sec.radii.length;
+      const f = (((th / (2 * Math.PI)) % 1) + 1) % 1 * n, i = Math.floor(f), t = f - i;
+      const r = sec.radii[i % n] * (1 - t) + sec.radii[(i + 1) % n] * t;
+      expect(Math.hypot(p[0], p[1] - sec.centreY) - r).toBeGreaterThan(0.002);
+    }
+    const names = shell.panels.map((p) => p.name).sort();
+    const expected = expectedPanels(garment, options);
+    if (expected) expect(names).toEqual(expected);
+    else { expect(names.length).toBeGreaterThanOrEqual(2); expect(new Set(names).size).toBe(names.length); }
+    for (const p of shell.panels) {
+      const piece = flattenPanel(p.name, shell.cut ?? shell.points, shell.tris, p.tris, shell.seams.map((s) => s.path));
+      // As flat as the fabric needs: a knit goes over a bust by stretching.
+      const give = CLOTH_MATERIALS[options.material ?? GARMENT_DEFAULTS[garment].material].give;
+      expect(piece.strain95, p.name).toBeLessThan(Math.max(0.05, Math.min(give, 0.08)));
+      expect(Math.abs(piece.areaChange), p.name).toBeLessThan(0.01);
+    }
   });
+
+  it('drapes, comes to rest on the form, and holds its cut', async () => {
+    const r = await clothRun([form, g]);
+    r.run(2.5);
+    const speed = r.speedOver(0.5);
+    const clear = r.clearance();
+    const s = r.strains();
+    console.log(_label, `${(speed * 1000).toFixed(1)} mm/s, nearest ${(clear * 1000).toFixed(1)} mm, strain p95 ${(percentile(s, 0.95) * 100).toFixed(1)}% p99 ${(percentile(s, 0.99) * 100).toFixed(1)}% max ${(percentile(s, 1) * 100).toFixed(0)}%`);
+    expect(speed).toBeLessThan(0.005);
+    // Nothing inside the form: the cloth's middle stays at its thickness off it.
+    expect(clear).toBeGreaterThan(CLOTH_THICKNESS - 0.001);
+    // Holds its cut; a close-fitting knit (a sock, a hat) within what the
+    // fabric gives, as it is worn stretched over the body.
+    const d = { ...GARMENT_DEFAULTS[garment], ...options };
+    const give = (d.ease ?? 0) <= 0.02 ? CLOTH_MATERIALS[d.material].give : 0;
+    expect(percentile(s, 0.95)).toBeLessThan(Math.max(0.03, give));
+    expect(percentile(s, 0.99)).toBeLessThan(Math.max(0.08, 1.5 * give));
+  }, 120_000);
+});
+
+// Trims: a jacket's open edges are named for the cuts that made them, its
+// zipper runs the opening and its studs the neckline and cuffs, and every
+// one is marked on the piece it sits on.
+describe('trims', () => {
+  it('a jacket carries its zipper and studs on named edges, and on the pattern', () => {
+    const form = bodyFormNode('form', 'form', { figure: 'male' });
+    const g = garmentNode('g', 'garment', { garment: 'jacket' }, form);
+    const shell = garmentShell(g.cloth!.garment!, form.bodyForm!);
+    const names = new Set([...shell.edges.map((e) => e.name), ...shell.seams.filter((sm) => sm.open).map((sm) => sm.name)]);
+    for (const n of ['opening', 'neckline', 'hem', 'cuffL', 'cuffR']) expect([...names], n).toContain(n);
+    const m = clothModel(g, new THREE.Matrix4(), [form, g]);
+    const by = (kind: string) => m.groups.flatMap((gr) => (gr.trims ?? []).filter((t) => t.kind === kind).map((t) => gr.name.split('__')[1]));
+    const zipper = by('zipper'), studs = by('stud');
+    expect(zipper.length).toBeGreaterThan(20);
+    expect(new Set(zipper)).toEqual(new Set(['frontL', 'frontR']));
+    expect(studs.length).toBeGreaterThan(12);
+    expect(new Set(studs)).toEqual(new Set(['frontL', 'frontR', 'back', 'sleeveLLower', 'sleeveRLower']));
+    const svg = patternSvg(m.groups.map((gr) => ({ name: gr.name, ...gr.flat! })));
+    expect((svg.match(/<circle/g) ?? []).length).toBe(zipper.length + studs.length);
+  });
+});
+
+// A garment laid out as its pieces, each flat a little off where it goes,
+// sews up onto the form when the scene plays: the stitches close over the
+// sew time and it settles clear of the body, holding its cut.
+describe('laid out as pieces', () => {
+  it('a t-shirt sews up from its flat pieces', async () => {
+    const form = bodyFormNode('form', 'form', { figure: 'male' });
+    const g = garmentNode('g', 'garment', { garment: 'tshirt' }, form);
+    g.cloth!.layout = 'pieces';
+    const r = await clothRun([form, g]);
+    r.run(4);
+    expect(r.speedOver(0.5)).toBeLessThan(0.005);
+    expect(r.clearance()).toBeGreaterThan(CLOTH_THICKNESS - 0.001);
+    expect(percentile(r.strains(), 0.95)).toBeLessThan(0.03);
+  }, 300_000);
+});
+
+// Several garments together: each worn over those of lower layers, and an
+// ornament sewn onto a garment.
+describe('worn together', () => {
+  it('keeps each layer outside the ones under it: jeans, a t-shirt over them, a jacket over that', async () => {
+    const r = await clothRun(menswearPreset.nodes);
+    r.run(3);
+    expect(r.speedOver(0.5)).toBeLessThan(0.005);
+    expect(r.clearance()).toBeGreaterThan(CLOTH_THICKNESS - 0.001);
+    // Each outer particle against the nearest triangle of each lower layer,
+    // by that triangle's outward normal (garments are wound outward).
+    const x = r.sim.x;
+    let base = 0;
+    const bases = r.models.map((m) => { const b = base; base += m.invMass.length; return b; });
+    for (const [oi, outer] of r.models.entries()) {
+      for (const [ii, inner] of r.models.entries()) {
+        if (inner.layer >= outer.layer) continue;
+        let inside = 0, near = 0;
+        for (let p = 0; p < outer.invMass.length; p++) {
+          const k = 3 * (bases[oi] + p);
+          let best = Infinity, sd = 0;
+          for (let t = 0; t < inner.tris.length; t += 3) {
+            const [a, b, c] = [0, 1, 2].map((q) => 3 * (bases[ii] + inner.tris[t + q]));
+            const cx = (x[a] + x[b] + x[c]) / 3, cy = (x[a + 1] + x[b + 1] + x[c + 1]) / 3, cz = (x[a + 2] + x[b + 2] + x[c + 2]) / 3;
+            const d = Math.hypot(x[k] - cx, x[k + 1] - cy, x[k + 2] - cz);
+            if (d >= best) continue;
+            best = d;
+            const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2], vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2];
+            const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, nl = Math.hypot(nx, ny, nz) || 1;
+            sd = ((x[k] - cx) * nx + (x[k + 1] - cy) * ny + (x[k + 2] - cz) * nz) / nl;
+          }
+          if (best > 0.03) continue;
+          near++;
+          if (sd < -0.002) inside++;
+        }
+        console.log(`${outer.name} over ${inner.name}: ${near} points near it, ${inside} inside it`);
+        expect(inside / Math.max(1, near), `${outer.name} through ${inner.name}`).toBeLessThan(0.01);
+      }
+    }
+    const jIdx = r.models.findIndex((m) => m.name === 'jacket'), jm = r.models[jIdx], jb = bases[jIdx];
+    const frontL = jm.groups.find((gr) => gr.name.endsWith('__frontL'))!;
+    const frontR = jm.groups.find((gr) => gr.name.endsWith('__frontR'))!;
+    const topZL = Math.max(...frontL.particles.map((i) => x[3 * (jb + i) + 2]));
+    const topZR = Math.max(...frontR.particles.map((i) => x[3 * (jb + i) + 2]));
+    expect(Math.abs(topZL - topZR)).toBeLessThan(0.02);
+    expect(Math.min(topZL, topZR)).toBeGreaterThan(1.45);
+  }, 300_000);
+
+  it('holds a bow sewn onto the back of a gown, and the gown on the form', async () => {
+    const r = await clothRun(ballgownPreset.nodes);
+    r.run(3);
+    const gown = r.models.find((m) => m.name === 'gown')!, bow = r.models.find((m) => m.name === 'bow')!;
+    const x = r.sim.x, gb = 0, bb = gown.invMass.length;
+    let gownTop = -Infinity, bowLow = Infinity;
+    for (let i = 0; i < gown.invMass.length; i++) gownTop = Math.max(gownTop, x[3 * (gb + i) + 2]);
+    for (let i = 0; i < bow.invMass.length; i++) bowLow = Math.min(bowLow, x[3 * (bb + i) + 2]);
+    // Still up on the shoulders, and the bow still on its back (not fallen to the train).
+    expect(gownTop).toBeGreaterThan(1.35);
+    expect(bowLow).toBeGreaterThan(0.45);
+    expect(r.clearance()).toBeGreaterThan(CLOTH_THICKNESS - 0.001);
+    const sim = r.sim as unknown as { stitches: Int32Array };
+    let gap = 0;
+    for (let k = 0; k < sim.stitches.length; k += 2) {
+      const a = 3 * sim.stitches[k], b = 3 * sim.stitches[k + 1];
+      if ((sim.stitches[k] < bb) === (sim.stitches[k + 1] < bb)) continue; // the bow's own seams
+      gap = Math.max(gap, Math.hypot(x[a] - x[b], x[a + 1] - x[b + 1], x[a + 2] - x[b + 2]));
+    }
+    console.log('bow to gown, widest stitch', (gap * 1000).toFixed(1), 'mm');
+    expect(gap).toBeLessThan(0.025);
+    expect(bow.groups.length).toBe(1);
+    const ribbon = bow.groups[0];
+    const tailLPts = ribbon.particles.filter((p) => bow.x0[3 * p] > 0.04 && bow.x0[3 * p + 2] < 0.85);
+    const tailRPts = ribbon.particles.filter((p) => bow.x0[3 * p] < -0.04 && bow.x0[3 * p + 2] < 0.85);
+    const minXL = Math.min(...tailLPts.map((p) => x[3 * (bb + p)]));
+    const maxXR = Math.max(...tailRPts.map((p) => x[3 * (bb + p)]));
+    expect(minXL).toBeGreaterThan(maxXR);
+  }, 300_000);
 });
