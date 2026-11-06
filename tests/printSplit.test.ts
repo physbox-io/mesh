@@ -452,3 +452,50 @@ describe('Split for Print: what the search leaves out', () => {
     expect(r.sections[0].supportMm2).toBeGreaterThan(0);
   });
 });
+
+describe('Split for Print: necks', () => {
+  /** A Manifold as a soup, metres. */
+  const soupOf = (m: { getMesh(): { triVerts: Uint32Array; numProp: number; vertProperties: Float32Array } }) => {
+    const g = m.getMesh();
+    const out = new Float64Array(g.triVerts.length * 3);
+    for (let i = 0; i < g.triVerts.length; i++) {
+      for (let k = 0; k < 3; k++) out[i * 3 + k] = g.vertProperties[g.triVerts[i] * g.numProp + k] / 1000;
+    }
+    return out;
+  };
+  const count = (m: Parameters<typeof soupOf>[0]) => ok(splitForPrint(wasm, [soupOf(m)], { bed: bed200 })).sections.length;
+  const rod = (length: number, r: number, at: number[]) => wasm.Manifold.cylinder(length, r, r, 24).rotate([0, 90, 0]).translate(at as [number, number, number]);
+  const cube = (s: number, x: number) => wasm.Manifold.cube([s, s, s]).translate([x, 0, 0]);
+
+  it('parts two blocks on a thin rod at the rod, not through the blocks', () => {
+    // 11 sections when the box round each piece was all the search could see.
+    expect(count(cube(150, 0).add(cube(150, 350)).add(rod(200, 2, [150, 75, 75])))).toBeLessThanOrEqual(4);
+  });
+
+  it('does the same with the blocks off centre and with three in a row', () => {
+    expect(count(cube(120, 0).add(cube(170, 420)).add(rod(310, 2, [110, 60, 60])))).toBeLessThanOrEqual(4);
+    // 45 sections.
+    expect(count(cube(120, 0).add(cube(120, 320)).add(cube(120, 640)).add(rod(540, 2, [100, 60, 60])))).toBeLessThanOrEqual(7);
+  });
+
+  it('says so when it cuts through something too thin to glue', () => {
+    const m = cube(150, 0).add(cube(150, 350)).add(rod(200, 2, [150, 75, 75]));
+    expect(ok(splitForPrint(wasm, [soupOf(m)], { bed: bed200 })).warnings.some((w) => /thinner than the minimum wall/.test(w))).toBe(true);
+  });
+
+  it('sees no neck in a thin wall that spreads the width of the part', () => {
+    // Measured by material, a hollow box was all waists: 48 sections.
+    const shell = wasm.Manifold.cube([300, 300, 300]).subtract(wasm.Manifold.cube([295, 295, 295]).translate([2.5, 2.5, 2.5]));
+    expect(count(shell)).toBe(8);
+  });
+
+  it('keeps to three sections wherever a neck falls along a bar', () => {
+    for (const f of [0.25, 0.333, 0.5, 0.667, 0.8]) {
+      const at = f * 520;
+      const bar = wasm.Manifold.cube([at - 5, 60, 60])
+        .add(wasm.Manifold.cube([515 - at, 60, 60]).translate([at + 5, 0, 0]))
+        .add(wasm.Manifold.cube([10, 3, 3]).translate([at - 5, 28.5, 28.5]));
+      expect(count(bar)).toBe(3);
+    }
+  });
+});

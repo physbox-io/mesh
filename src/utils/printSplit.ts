@@ -19,6 +19,9 @@
 //      slabs and a little either side of each. A cut that leaves a sliver, or a face
 //      too thin to glue, loses; of the rest, the one predicted to need the
 //      fewest sections wins, then the least support, then the smallest seam.
+//      A part with a waist, where its section narrows between two wider ones,
+//      has cuts tried there too, and is counted lump by lump rather than by the
+//      box round it, which says nothing about a neck.
 //   3. Both halves go back to 1.
 //
 // Joinery goes on once the cutting is done, joint by joint, where a joint is
@@ -642,16 +645,161 @@ function judgeFace(cs: CrossSection, ctx: Ctx): { area: number; thin: boolean; n
   return { area, thin, noRoom };
 }
 
-interface CutChoice { n: Vec3; offset: number; pos: Piece; neg: Piece; score: number }
+interface CutChoice { n: Vec3; offset: number; pos: Piece; neg: Piece; score: number; thin: boolean }
 
-/** The best single cut of a piece that does not fit, or null if no cut works at all. */
-function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
+/** A section along a part narrower than this share of its widest is a waist. */
+const WAIST_SHARE = 0.35;
+/** Sections sampled along each direction to find one. */
+const WAIST_SAMPLES = 32;
+/** Narrow sections at the end of a piece that are only a tip tapering off, not a neck. */
+const MOST_TIP_SAMPLES = 3;
+/** Waist planes tried on a piece, narrowest first. */
+const MOST_WAIST_CUTS = 6;
+/** Waists followed down when counting a piece: past a chain this long, the box will do. */
+const MOST_WAISTS_FOLLOWED = 12;
+/**
+ * What a seam too thin to glue costs, in sections. Dear, because it is a weak
+ * joint, but not forbidden: two 150 mm cubes on a 4 mm rod came to 11 sections
+ * going round the rod, where cutting it takes 3.
+ */
+const THIN_SEAM_SECTIONS = 2;
+
+/**
+ * Planes through a piece's waists, those between two wider parts first, then
+ * narrowest first: the middle of a run of narrow sections, and each end of it,
+ * which leaves the rod with one side.
+ */
+function waistPlanes(piece: Piece, normals: Vec3[]): { n: Vec3; offset: number }[] {
+  const found: { n: Vec3; offset: number; area: number; end: boolean }[] = [];
+  for (const n of normals) {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < piece.geo.hull.length; i += 3) {
+      const d = dot(n, [piece.geo.hull[i], piece.geo.hull[i + 1], piece.geo.hull[i + 2]]);
+      if (d < lo) lo = d; if (d > hi) hi = d;
+    }
+    if (!(hi - lo > 1)) continue;
+    const at = (i: number) => lo + ((i + 0.5) * (hi - lo)) / WAIST_SAMPLES;
+    const t = piece.m.transform(toPlaneMatrix(n));
+    const areas: number[] = [];
+    for (let i = 0; i < WAIST_SAMPLES; i++) {
+      // How far the section spreads, not how much of it there is: a hollow box
+      // has little in any section, and no neck. Measured by material, its walls
+      // all read as waists and it came to 48 sections for 8.
+      const cs = t.slice(at(i));
+      const { min, max } = cs.bounds();
+      areas.push(cs.isEmpty() ? 0 : (max[0] - min[0]) * (max[1] - min[1]));
+      cs.delete();
+    }
+    t.delete();
+    const narrow = WAIST_SHARE * Math.max(...areas);
+    const isNarrow = (a: number) => a > 0 && a <= narrow;
+    for (let i = 0; i < WAIST_SAMPLES;) {
+      if (!isNarrow(areas[i])) { i++; continue; }
+      let end = i;
+      while (end + 1 < WAIST_SAMPLES && isNarrow(areas[end + 1])) end++;
+      // Running out at the end of the piece is still a neck, a rod left standing
+      // out of a block, as long as it is more than a pointed tip.
+      const atEnd = i === 0 || end === WAIST_SAMPLES - 1;
+      if (!atEnd || end - i >= MOST_TIP_SAMPLES) {
+        for (const k of [(i + end) / 2, i, end]) found.push({ n, offset: at(k), area: areas[Math.round(k)], end: atEnd });
+      }
+      i = end + 1;
+    }
+  }
+  return found.sort((a, b) => Number(a.end) - Number(b.end) || a.area - b.area).slice(0, MOST_WAIST_CUTS);
+}
+
+function dropChoice(c: CutChoice) {
+  c.pos.m.delete();
+  c.neg.m.delete();
+}
+
+/**
+ * Sections a piece will come to, seeing its necks. A box says nothing about
+ * them: two blocks on a rod read as one long block, which a cut through either
+ * block seems to halve. So a piece is parted at its narrowest waist and each
+ * side counted, down to pieces with none, whose box is a fair guess.
+ */
+function sectionsPast(piece: Piece, ctx: Ctx, depth = 0): number {
+  if (piece.pose.fits) return 1;
+  let c: CutChoice | null = null;
+  if (depth < MOST_WAISTS_FOLLOWED) {
+    for (const { n, offset } of waistPlanes(piece, cutNormals(piece))) {
+      c = tryCut(piece, n, offset, ctx, true);
+      if (c) break;
+    }
+  }
+  if (!c) return predictedSections(piece, ctx);
+  const total = sectionsPast(c.pos, ctx, depth + 1) + sectionsPast(c.neg, ctx, depth + 1) + (c.thin ? THIN_SEAM_SECTIONS : 0);
+  dropChoice(c);
+  return total;
+}
+
+/** The directions a piece is cut along: the world's and its own, without near repeats. */
+function cutNormals(piece: Piece): Vec3[] {
   const normals: Vec3[] = [];
   for (const n of [[1, 0, 0], [0, 1, 0], [0, 0, 1], ...principalAxes(piece.geo.hull)] as Vec3[]) {
     const u = unit(n);
     if (normals.some((e) => Math.abs(dot(e, u)) > Math.cos(5 * Math.PI / 180))) continue;
     normals.push(u);
   }
+  return normals;
+}
+
+/**
+ * One candidate cut, or null if it leaves nothing, or a sliver unless
+ * `slender` says thin is expected: a rod parted at a waist is a sliver by
+ * volume and 200 mm long.
+ */
+function tryCut(piece: Piece, n: Vec3, offset: number, ctx: Ctx, slender = false): CutChoice | null {
+  const [posM, negM] = piece.m.splitByPlane(n, offset);
+  const vp = posM.volume(), vn = negM.volume();
+  const least = slender ? 0 : SLIVER_SHARE * piece.geo.volume;
+  if (posM.isEmpty() || negM.isEmpty() || vp < least || vn < least) {
+    posM.delete(); negM.delete();
+    return null;
+  }
+  const cs = sliceAt(piece.m, n, offset);
+  const face = judgeFace(cs, ctx);
+  cs.delete();
+  // The pos half's cut face looks back down the normal, and the neg half's along it.
+  const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], ctx);
+  const neg = makePiece(negM, [...piece.cutDowns, n], ctx);
+  const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
+  const support = pos.pose.supportMm2 + neg.pose.supportMm2;
+  const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area;
+  return { n, offset, pos, neg, score, thin: face.thin };
+}
+
+/**
+ * The cut to make, given the best of the even ones: a waist's, if it comes to
+ * fewer sections once the necks are seen. Any part without a waist costs one
+ * look along each direction, and splits as it would have.
+ */
+function throughWaists(piece: Piece, normals: Vec3[], best: CutChoice | null, ctx: Ctx): CutChoice | null {
+  const planes = waistPlanes(piece, normals);
+  if (planes.length === 0) return best;
+  const count = (c: CutChoice) => sectionsPast(c.pos, ctx) + sectionsPast(c.neg, ctx) + (c.thin ? THIN_SEAM_SECTIONS : 0);
+  let chosen = best;
+  let least = best ? count(best) : Infinity;
+  for (const { n, offset } of planes) {
+    const c = tryCut(piece, n, offset, ctx, true);
+    if (!c) continue;
+    const sections = count(c);
+    if (sections < least) {
+      if (chosen) dropChoice(chosen);
+      chosen = c;
+      least = sections;
+    } else {
+      dropChoice(c);
+    }
+  }
+  return chosen;
+}
+
+/** The best single cut of a piece that does not fit, or null if no cut works at all. */
+function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
+  const normals = cutNormals(piece);
   // A slab as long as each of the bed's sides: the longest is not always the
   // one to use, since a piece cut to it may then fit no other way (the halves
   // of a 500 × 250 mm plate on a 246 × 246 × 256 mm bed are 250 mm square and
@@ -677,37 +825,21 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
       for (const start of slabs > 2 ? [lo + slab, hi - slab] : [lo + slab]) for (let step = -3; step <= 3; step++) {
         const offset = start + step * 0.05 * slab;
         if (offset <= lo + 0.5 || offset >= hi - 0.5) continue;
-        const [posM, negM] = piece.m.splitByPlane(n, offset);
-        const vp = posM.volume(), vn = negM.volume();
-        if (posM.isEmpty() || negM.isEmpty() || vp < SLIVER_SHARE * piece.geo.volume || vn < SLIVER_SHARE * piece.geo.volume) {
-          posM.delete(); negM.delete();
-          continue;
-        }
-        const cs = sliceAt(piece.m, n, offset);
-        const face = judgeFace(cs, ctx);
-        cs.delete();
-        // The pos half's cut face looks back down the normal, and the neg half's along it.
-        const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], ctx);
-        const neg = makePiece(negM, [...piece.cutDowns, n], ctx);
-        const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
-        const support = pos.pose.supportMm2 + neg.pose.supportMm2;
+        const c = tryCut(piece, n, offset, ctx);
+        if (!c) continue;
         // Off the even split only for a reason: a tie goes to the even cut, so
         // the sections come out the same size rather than one barely fitting.
-        const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area
-          + Math.abs(step) * 0.01 * slab;
-        if (!best || score < best.score) {
-          if (best) { best.pos.m.delete(); best.neg.m.delete(); }
-          best = { n, offset, pos, neg, score };
+        c.score += Math.abs(step) * 0.01 * slab;
+        if (!best || c.score < best.score) {
+          if (best) dropChoice(best);
+          best = c;
         } else {
-          posM.delete(); negM.delete();
+          dropChoice(c);
         }
       }
     }
   }
-  if (best && best.score >= 1e12) {
-    ctx.warnings.push('One cut runs through material thinner than the minimum wall, because no cut avoided it. Check that seam before gluing.');
-  }
-  return best;
+  return throughWaists(piece, normals, best, ctx);
 }
 
 /**
@@ -1186,6 +1318,7 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
     if (!piece.pose.fits && plain.length + open < maxSections) {
       const choice = chooseCut(piece, ctx);
       if (choice) {
+        if (choice.thin) ctx.warnings.push('One cut runs through material thinner than the minimum wall, because that came to the fewest sections. Check that seam before gluing.');
         piece.m.delete();
         const cut = cuts.length;
         cuts.push({ normal: choice.n, offset: choice.offset / MM });
