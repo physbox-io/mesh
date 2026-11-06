@@ -19,15 +19,15 @@
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import type { ManifoldToplevel, Manifold } from 'manifold-3d';
-import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, unsolidPartRefusal, type Mat4Tuple, type Triangle3D } from './moldManifold';
+import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, sameFloat32, unsolidPartRefusal, type Mat4Tuple, type Triangle3D } from './moldManifold';
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
 import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
-import type { CastMaterialId } from './castMaterials';
+import { castMaterial, type CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
-import { channelSolid, planSprue, sprueNeckDiaMm, ventBoreDiaMm, VENT_TAPER_MM } from './moldSprue';
-import { boreTriangles, bottomFillFloorMm, cutBores, exactPourSpans, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
+import { gateDiaMm, planSprue, sprueNeckDiaMm, ventBoreDiaMm, withPourMouth, VENT_TAPER_MM } from './moldSprue';
+import { bottomFillFloorMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
 import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
@@ -127,6 +127,12 @@ export interface MoldOptions {
   ventDiaMm: number;
   /** Whether to include corner pry notches on the parting seam. */
   includePryNotches: boolean;
+  /**
+   * Sample the cavity twice as fine, for a fine nozzle. A rigid mold's walls lie
+   * half a grid cell off the part, and this halves that; it is four times the
+   * triangles. A lined mold's cavity is exact already, so it changes nothing there.
+   */
+  highFidelity?: boolean;
 }
 
 export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
@@ -270,9 +276,6 @@ export interface HalfFeatures {
 }
 
 const NO_FEATURES: HalfFeatures = { sockets: [], pins: [], channels: [] };
-
-/** How far a vent starts inside the pocket it serves, mm. */
-const VENT_SINK_MM = 0.3;
 
 /**
  * Where the pour sprue and the vents go: on the part's own footprint, so they
@@ -495,7 +498,9 @@ function buildHalf(
   depth: Float64Array,
   baseThicknessMm: number,
   feats: HalfFeatures = NO_FEATURES,
-  minBlockDepthMm: number = 0
+  minBlockDepthMm: number = 0,
+  /** Sockets, pins and channels only size the block: the geometry engine cuts them after. */
+  cutAfter = false
 ): { triangles: Triangle3D[]; blockHeightMm: number; pinRiseMm: number } {
   const n = grid.cols * grid.rows;
 
@@ -521,6 +526,7 @@ function buildHalf(
   const zTop = new Float64Array(n);
   const zBot = new Float64Array(n);
   const solid = new Uint8Array(n);
+  const edits = cutAfter ? NO_FEATURES : feats;
 
   for (let r = 0; r < grid.rows; r++) {
     const y = ys[r];
@@ -530,14 +536,14 @@ function buildHalf(
 
       let top = -depth[i];
 
-      for (const s of feats.sockets) {
+      for (const s of edits.sockets) {
         const d = Math.hypot(x - s.x, y - s.y);
         if (d >= s.rimR) continue;
         const t = d <= s.botR ? 1 : (s.rimR - d) / (s.rimR - s.botR);
         top = Math.min(top, -s.depth * t);
       }
 
-      for (const p of feats.pins) {
+      for (const p of edits.pins) {
         const d = Math.hypot(x - p.x, y - p.y);
         if (d >= p.baseR) continue;
         const t = d <= p.topR ? 1 : (p.baseR - d) / (p.baseR - p.topR);
@@ -558,7 +564,7 @@ function buildHalf(
       // at all four corners and the heightfield lid closes the vent over with a skin.
       const minChannelR = 0.55 * Math.hypot(grid.stepX, grid.stepY);
       let bot = floorZ;
-      for (const ch of feats.channels) {
+      for (const ch of edits.channels) {
         const reach = (ch.pocketZMm ?? 0) > 0 ? Math.min(top, -ch.pocketZMm!) : top;
         const innerR = Math.max(ch.innerR, minChannelR);
         const outerR = Math.max(ch.outerR, innerR + 0.2);
@@ -675,7 +681,10 @@ function buildHalf(
 /** Lifts a half off its parting plane onto the build plate at X = offset. */
 function toPlate(tris: Triangle3D[], xOffset: number, lift: number): Triangle3D[] {
   const move = (v: [number, number, number]): [number, number, number] => [v[0] + xOffset, v[1], v[2] + lift];
-  return tris.map((t) => ({ a: move(t.a), b: move(t.b), c: move(t.c), normal: t.normal }));
+  // Moved, corners a cut left microns apart can land on one float32.
+  return tris
+    .map((t) => ({ a: move(t.a), b: move(t.b), c: move(t.c), normal: t.normal }))
+    .filter((t) => !sameFloat32(t.a, t.b) && !sameFloat32(t.b, t.c) && !sameFloat32(t.a, t.c));
 }
 
 /**
@@ -794,28 +803,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
     const moldBlock = fittedBlock(wasm, wasm.Manifold.cube([moldWidthMm, moldDepthMm, blockHeight], false)
       .translate([-mw2, -md2, -blockHeight]), ctx.outlines?.base, -blockHeight, 0);
 
-    // pour_ext: cross section at open face Z = -0.01 extruded Z in [-0.5, +2.0]
-    let pour_ext: Manifold | null = null;
-    try {
-      let slice = partManifold.slice(-0.01);
-      if (slice.isEmpty()) {
-        slice.delete();
-        slice = partManifold.slice(-0.1);
-      }
-      if (!slice.isEmpty()) {
-        pour_ext = wasm.Manifold.extrude(slice, 2.5).translate([0, 0, -0.5]);
-      }
-      slice.delete();
-    } catch {
-      pour_ext = null;
-    }
-
-    let cutter = partManifold;
-    if (pour_ext) {
-      cutter = partManifold.add(pour_ext);
-      partManifold.delete();
-      pour_ext.delete();
-    }
+    const cutter = withPourMouth(wasm, partManifold, sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial));
 
     let openMold = moldBlock.subtract(cutter);
     moldBlock.delete();
@@ -927,43 +915,16 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
   const baseBlock = fittedBlock(wasm, wasm.Manifold.cube([moldWidthMm, moldDepthMm, baseBlockHeight], false)
     .translate([-mw2, -md2, -baseBlockHeight]), ctx.outlines?.base, -baseBlockHeight, 0);
 
-  let carvedBase = baseBlock.subtract(basePart);
+  const carvedBase = cutHalfFeatures(wasm, baseBlock.subtract(basePart), baseFeatures, baseBlockHeight);
   baseBlock.delete();
   basePart.delete();
-
-  for (const s of baseFeatures.sockets) {
-    const sock = wasm.Manifold.cylinder(s.depth + 0.5, s.botR, s.rimR, 24, false)
-      .translate([s.x, s.y, -s.depth]);
-    const next = carvedBase.subtract(sock);
-    carvedBase.delete();
-    sock.delete();
-    carvedBase = next;
-  }
-  if (baseFeatures.bores?.length) carvedBase = cutBores(wasm, carvedBase, baseFeatures.bores);
 
   const lidBlock = fittedBlock(wasm, wasm.Manifold.cube([moldWidthMm, moldDepthMm, lidBlockHeight], false)
     .translate([-mw2, -md2, -lidBlockHeight]), ctx.outlines?.lid, -lidBlockHeight, 0);
 
-  let carvedLid = lidBlock.subtract(lidPart);
+  const carvedLid = cutHalfFeatures(wasm, lidBlock.subtract(lidPart), lidFeatures, lidBlockHeight);
   lidBlock.delete();
   lidPart.delete();
-
-  for (const p of lidFeatures.pins) {
-    const pin = wasm.Manifold.cylinder(p.height + 0.5, p.baseR, p.topR, 24, false)
-      .translate([p.x, p.y, -0.5]);
-    const next = carvedLid.add(pin);
-    carvedLid.delete();
-    pin.delete();
-    carvedLid = next;
-  }
-
-  for (const ch of lidFeatures.channels) {
-    const chan = channelSolid(wasm, ch, lidBlockHeight);
-    const next = carvedLid.subtract(chan);
-    carvedLid.delete();
-    chan.delete();
-    carvedLid = next;
-  }
 
   const plateGapMm = 6;
   const plateOffset = moldWidthMm / 2 + plateGapMm / 2;
@@ -1296,8 +1257,9 @@ export function generateMoldMeshes(
 
   // One grid spans the whole block, not just the part, so a pin, a socket or a
   // vent out in the flange is the same kind of height edit as the cavity itself.
-  const target = 150;
-  const res = Math.min(1.5, Math.max(0.3, Math.max(moldWidthMm, moldDepthMm) / target));
+  const fineness = opts.highFidelity && !opts.dissolvableLiner ? 2 : 1;
+  const target = 150 * fineness;
+  const res = Math.min(1.5 / fineness, Math.max(0.3 / fineness, Math.max(moldWidthMm, moldDepthMm) / target));
   const cols = Math.max(8, Math.round(moldWidthMm / res) + 1);
   const rows = Math.max(8, Math.round(moldDepthMm / res) + 1);
   const grid: Grid = {
@@ -1565,15 +1527,17 @@ export function generateMoldMeshes(
   const ventPeaks: Array<{ x: number; y: number }> = [];
   const baseBores: BoreCut[] = [];
   if (pourSpans && opts.includeVents) {
-    const peaks = planPeakVents(pourSpans, grid);
+    const peaks = fineness > 1 ? planPeakVents(...everyOtherColumn(pourSpans, grid)) : planPeakVents(pourSpans, grid);
+    const bubbleR = castMaterial(opts.castMaterial ?? 'epoxy').bubbleRiseMm / 2;
     for (const v of peaks) {
       // From the top of its pocket out, not on through to the parting face: a
       // bore wider than the feature under it would thicken all of it, as a
-      // collar. A little inside the pocket, so its rim is not left as a skin.
-      ventChannels.push({ x: v.x, y: -v.y, outerR: ventMouthR, innerR: ventR, pocketZMm: v.z - VENT_SINK_MM });
+      // collar. Far enough inside the pocket to open as wide as air needs.
+      const stop = v.z - mouthSinkMm(pourSpans, grid, v, ventR, -1, Math.PI * bubbleR * bubbleR, ventR);
+      ventChannels.push({ x: v.x, y: -v.y, outerR: ventMouthR, innerR: ventR, pocketZMm: stop });
       ventPeaks.push({ x: v.x, y: v.y });
       if (exactCavity && v.z < -Math.min(grid.stepX, grid.stepY)) {
-        baseBores.push({ a: [v.x, v.y, v.z - VENT_SINK_MM], b: [v.x, v.y, 1], r: ventR });
+        baseBores.push({ a: [v.x, v.y, stop], b: [v.x, v.y, 1], r: ventR });
       }
     }
   }
@@ -1595,8 +1559,9 @@ export function generateMoldMeshes(
     const room = opts.blockShape === 'fit' ? opts.wallMarginMm : Infinity;
     const funnelR = Math.max(opts.sprueTopDiaMm / 2, neckR * 2);
     const ventsAt = (r: number) => ventPeaks.map((v) => ({ x: v.x, y: v.y, r }));
-    bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room)
-      ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room);
+    const gateDia = gateDiaMm(opts.castMaterial);
+    bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room, gateDia)
+      ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room, gateDia);
     if (!bottomFill) {
       const need = Math.ceil((2 * (neckR + FEED_WALL_MM)) * 10) / 10;
       return {
@@ -1606,7 +1571,7 @@ export function generateMoldMeshes(
         ...setupFields,
       };
     }
-    const { down, gate, runnerZ, r, gateR } = bottomFill;
+    const { down, gate, runnerZ, r, gateR, gateTopZ } = bottomFill;
     const ventRoomR = Math.min(Infinity, ...ventPeaks.map((v) => Math.hypot(v.x - down.x, v.y - down.y) - ventMouthR));
     sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, Math.min(bottomFill.roomR, ventRoomR));
     baseBores.push(
@@ -1614,8 +1579,8 @@ export function generateMoldMeshes(
       { a: [down.x, down.y, 1], b: [down.x, down.y, runnerZ], r },
       // ...along under the cavity...
       { a: [down.x, down.y, runnerZ], b: [gate.x, gate.y, runnerZ], r, ends: true },
-      // ...and up into its lowest point, a little way in.
-      { a: [gate.x, gate.y, runnerZ], b: [gate.x, gate.y, gate.z + 0.3], r: gateR },
+      // ...and up into its lowest point, in as far as gives it a whole mouth.
+      { a: [gate.x, gate.y, runnerZ], b: [gate.x, gate.y, gateTopZ], r: gateR },
     );
   } else if (opts.includeSprue && clamshell) {
     sprueChannel = planSprue(pour.sprue.x, lidChannelY(pour.sprue.y), opts, grid, lidCavityDepth, lidBlockHeight);
@@ -1720,15 +1685,24 @@ export function generateMoldMeshes(
     return 'error' in csgRes ? { ...emptyMoldResult(csgRes.error), ...setupFields } : csgRes;
   }
 
-  const heightfieldBase = buildHalf(grid, baseDepth, baseFloorMm, baseFeatures, baseTrueDepth);
-  // The down-sprue, runner and vents' bores are tunnels a depth field cannot hold.
-  const builtBase = baseFeatures.bores?.length && activeWasm
-    ? { ...heightfieldBase, triangles: boreTriangles(activeWasm, heightfieldBase.triangles, baseFeatures.bores) }
-    : heightfieldBase;
-  const builtLid =
-    opts.moldType === 'clamshell'
-      ? buildHalf(grid, lidDepth, opts.baseThicknessMm, lidFeatures, lidTrueDepth)
-      : null;
+  // Pins, sockets, sprue and vents are exact, whatever the grid. Without the
+  // engine only a top-filled mold gets here, and they are edits to the depths.
+  const builtHalf = (depth: Float64Array, floor: number, feats: HalfFeatures, minDepth: number) => {
+    const anyCut = feats.sockets.length + feats.pins.length + feats.channels.length + (feats.bores?.length ?? 0) > 0;
+    if (activeWasm && anyCut) {
+      const bare = buildHalf(grid, depth, floor, feats, minDepth, true);
+      const cut = cutHalfTriangles(activeWasm, bare.triangles, feats, bare.blockHeightMm);
+      if (cut) return { ...bare, triangles: cut };
+      // Bores are tunnels, which the depths cannot hold.
+      if (feats.bores?.length) return null;
+    }
+    return buildHalf(grid, depth, floor, feats, minDepth);
+  };
+  const builtBase = builtHalf(baseDepth, baseFloorMm, baseFeatures, baseTrueDepth);
+  const builtLid = opts.moldType === 'clamshell' ? builtHalf(lidDepth, opts.baseThicknessMm, lidFeatures, lidTrueDepth) : null;
+  if (!builtBase || (opts.moldType === 'clamshell' && !builtLid)) {
+    return { ...emptyMoldResult("The mold half would not close into a solid, so its runner can't be cut; repair the part's mesh and try again."), ...setupFields };
+  }
   // Cut to the part's outline when the block follows it.
   const base = outlines && activeWasm ? { ...builtBase, triangles: trimTriangles(activeWasm, builtBase.triangles, outlines.base) } : builtBase;
   const lid = builtLid && outlines && activeWasm ? { ...builtLid, triangles: trimTriangles(activeWasm, builtLid.triangles, outlines.lid) } : builtLid;

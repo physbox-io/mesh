@@ -34,6 +34,7 @@ import { sceneStockTransform, useAddSimulation } from '../../hooks/useAddSimulat
 import { stlToMesh } from '../../utils/stlMesh';
 import type { SimulationPlacement } from '../../utils/simulatedPart';
 import { useStore } from '../../store/useStore';
+import { useHighFidelity } from '../../store/highFidelityStore';
 import { PanelBody, PanelFooter } from './CastDialogFrame';
 import { MoldPreviewView } from './MoldPreviewView';
 import { effectiveMoldView, type PreviewViewMode } from './moldViewMode';
@@ -141,12 +142,13 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
     setOptions((prev) => ({ ...prev, [key]: value }));
   };
   const draftLocked = bakedDraftDeg > 0;
+  const highFidelity = useHighFidelity((s) => s.highFidelity);
   // The pour is about the part's own volume until a cast preview measures it.
   const partVolumeMm3 = useMemo(() => Math.abs(soupVolume(collectSceneTriangles(scene).tris)) * 1e9, [scene]);
   // The material is the tab's, and draft the model already has is not cut again.
   const options = useMemo<MoldOptions>(
-    () => ({ ...chosen, castMaterial: material, ...(draftLocked ? { draftAngleDeg: 0 } : {}) }),
-    [chosen, material, draftLocked],
+    () => ({ ...chosen, castMaterial: material, highFidelity, ...(draftLocked ? { draftAngleDeg: 0 } : {}) }),
+    [chosen, material, highFidelity, draftLocked],
   );
   /** What a lined mold is printed in, and what dissolves its liner. */
   const pair = linerPair(options.linerPair);

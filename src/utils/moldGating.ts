@@ -29,8 +29,9 @@
 import type { Manifold, ManifoldToplevel } from 'manifold-3d';
 import type { Grid, ColumnField } from './moldColumns';
 import type { FeedRoute, VentStub } from '../types/scene';
-import type { MoldFeatureReport } from './moldExporter';
+import type { HalfFeatures, MoldFeatureReport } from './moldExporter';
 import { buildPartManifold, manifoldToTriangles, type Triangle3D } from './moldManifold';
+import { channelSolid } from './moldSprue';
 
 /** The cavity as poured, per grid column: solid spans (bottom, top) in z, mm, parting face at 0. */
 export type PourSpans = Float64Array[];
@@ -74,6 +75,123 @@ export function exactPourSpans(field: ColumnField, grid: Grid, partingZ: number,
     }
   }
   return out;
+}
+
+/**
+ * Every column of a connected region of the grid, by how many cells it lies
+ * inside the region's edge: peeled from the edge in, so the highest is the
+ * region's middle.
+ */
+function peelRegion(region: Set<number>, cols: number, rows: number): Map<number, number> {
+  const around = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const inRegion = (c: number, r: number) => c >= 0 && r >= 0 && c < cols && r < rows && region.has(r * cols + c);
+  const depth = new Map<number, number>();
+  let ring = [...region].filter((col) => {
+    const r = Math.floor(col / cols), c = col - r * cols;
+    return around.some(([dc, dr]) => !inRegion(c + dc, r + dr));
+  });
+  for (let d = 0; ring.length; d++) {
+    for (const col of ring) depth.set(col, d);
+    const next = new Set<number>();
+    for (const col of ring) {
+      const r = Math.floor(col / cols), c = col - r * cols;
+      for (const [dc, dr] of around) {
+        if (inRegion(c + dc, r + dr) && !depth.has((r + dr) * cols + c + dc)) next.add((r + dr) * cols + c + dc);
+      }
+    }
+    ring = [...next];
+  }
+  return depth;
+}
+
+/** The columns connected to `start` that pass `keep`. */
+function floodRegion(start: number, cols: number, rows: number, keep: (col: number) => boolean): Set<number> {
+  const seen = new Set([start]);
+  const queue = [start];
+  for (let q = 0; q < queue.length; q++) {
+    const col = queue[q], r = Math.floor(col / cols), c = col - r * cols;
+    for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const cc = c + dc, rr = r + dr;
+      if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) continue;
+      const n = rr * cols + cc;
+      if (seen.has(n) || !keep(n)) continue;
+      seen.add(n);
+      queue.push(n);
+    }
+  }
+  return seen;
+}
+
+/** The least a vent or gate goes into the cavity, so its rim is not left as a skin, mm. */
+export const MOUTH_SINK_MM = 0.3;
+
+/**
+ * How far a round bore (a vent coming down on a peak, a gate coming up to a
+ * low point) has to go into the cavity past that point, mm. The bore stops
+ * flat, so what it opens is the cavity's section there. On a ball that is all
+ * of it at 0.3 mm; on a ridge or a cone's tip the same 0.3 mm opened a slot
+ * ⌀1.4 mm across, for a bore of ⌀4, however wide the bore was.
+ *
+ * So it goes in until the section inside it reaches `wantMm2`, no further than
+ * `maxMm`, and no further than the feature widens: a post the same all the
+ * way down would gain nothing, and every millimetre is a collar on the casting.
+ */
+export function mouthSinkMm(
+  spans: PourSpans,
+  grid: Grid,
+  at: { x: number; y: number; z: number },
+  r: number,
+  /** +1 going up into the cavity from a low point, -1 coming down from a peak. */
+  dir: 1 | -1,
+  wantMm2: number,
+  maxMm: number,
+): number {
+  const { cols, rows, stepX, stepY, halfW, halfD } = grid;
+  const c0 = Math.max(0, Math.floor((at.x - r + halfW) / stepX));
+  const c1 = Math.min(cols - 1, Math.ceil((at.x + r + halfW) / stepX));
+  const r0 = Math.max(0, Math.floor((at.y - r + halfD) / stepY));
+  const r1 = Math.min(rows - 1, Math.ceil((at.y + r + halfD) / stepY));
+  const under: Float64Array[] = [];
+  for (let row = r0; row <= r1; row++) {
+    for (let c = c0; c <= c1; c++) {
+      if (Math.hypot(-halfW + c * stepX - at.x, -halfD + row * stepY - at.y) <= r) under.push(spans[row * cols + c]);
+    }
+  }
+  const sectionMm2 = (sink: number) => {
+    const z = at.z + dir * sink;
+    let n = 0;
+    for (const s of under) {
+      for (let k = 0; k + 1 < s.length; k += 2) {
+        if (z >= s[k] && z <= s[k + 1]) {
+          n++;
+          break;
+        }
+      }
+    }
+    return n * stepX * stepY;
+  };
+  const tries: number[] = [];
+  for (let sink = MOUTH_SINK_MM; sink < maxMm + 1e-9; sink += 0.1) tries.push(sink);
+  if (!tries.length) return MOUTH_SINK_MM;
+  const areas = tries.map(sectionMm2);
+  const enough = Math.min(wantMm2, 0.9 * Math.max(...areas));
+  return tries[Math.max(0, areas.findIndex((a) => a >= enough))];
+}
+
+/**
+ * The cavity on a grid of half the columns each way, whose columns are still
+ * columns of the full one. Finding high points fills a voxel grid, so twice the
+ * resolution is eight times the memory, for pockets that are no finer: a tall
+ * mold would run out of it.
+ */
+export function everyOtherColumn(spans: PourSpans, grid: Grid): [PourSpans, Grid] {
+  const cols = Math.ceil(grid.cols / 2);
+  const rows = Math.ceil(grid.rows / 2);
+  const out: PourSpans = new Array(cols * rows);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) out[r * cols + c] = spans[2 * r * grid.cols + 2 * c];
+  }
+  return [out, { ...grid, cols, rows, stepX: grid.stepX * 2, stepY: grid.stepY * 2 }];
 }
 
 export interface PeakVent {
@@ -127,43 +245,7 @@ export function planPeakVents(spans: PourSpans, grid: Grid, minProminenceMm = 0.
   const cellXYZ = (i: number) => {
     const k = Math.floor(i / plane);
     const start = i - k * plane;
-    const region = [start];
-    const seen = new Set([start]);
-    for (let q = 0; q < region.length; q++) {
-      const col = region[q], r = Math.floor(col / cols), c = col - r * cols;
-      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const cc = c + dc, rr = r + dr;
-        if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) continue;
-        const n = rr * cols + cc;
-        if (seen.has(n) || !solid(n, k)) continue;
-        seen.add(n);
-        region.push(n);
-      }
-    }
-    // Peel the region from its edge in; the last cell left is the middle.
-    const depth = new Map<number, number>();
-    let ring = region.filter((col) => {
-      const r = Math.floor(col / cols), c = col - r * cols;
-      return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dc, dr]) => !seen.has((r + dr) * cols + c + dc) || c + dc < 0 || c + dc >= cols);
-    });
-    let d = 0;
-    for (const col of ring) depth.set(col, d);
-    while (ring.length) {
-      d++;
-      const next: number[] = [];
-      for (const col of ring) {
-        const r = Math.floor(col / cols), c = col - r * cols;
-        for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const cc = c + dc, rr = r + dr;
-          if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) continue;
-          const n = rr * cols + cc;
-          if (!seen.has(n) || depth.has(n)) continue;
-          depth.set(n, d);
-          next.push(n);
-        }
-      }
-      ring = next;
-    }
+    const depth = peelRegion(floodRegion(start, cols, rows, (n) => solid(n, k)), cols, rows);
     let mid = start;
     for (const [col, dd] of depth) if (dd > (depth.get(mid) ?? -1)) mid = col;
     const r = Math.floor(mid / cols), c = mid - r * cols;
@@ -226,6 +308,8 @@ export interface BottomFill {
   r: number;
   /** The gate's radius, up from the runner into the lowest point: no air has to pass it, so it can be narrow. */
   gateR: number;
+  /** Where the gate stops, mm: inside the cavity, as far as gives it a mouth as wide as it is. */
+  gateTopZ: number;
   /** How wide the funnel above it may be and stay inside a block that follows the part. */
   roomR: number;
 }
@@ -234,12 +318,48 @@ export interface BottomFill {
 export const FEED_WALL_MM = 1.5;
 /** Mold between the runner and the cavity's lowest point, mm. */
 export const RUNNER_CLEARANCE_MM = 1;
-/** The widest a bottom-fill gate is, mm radius. */
-const MAX_GATE_R = 2;
-
 /** How much floor a bottom-fill runner of radius `r` needs under the cavity's lowest point, mm. */
 export function bottomFillFloorMm(r: number): number {
   return RUNNER_CLEARANCE_MM + 2 * r + FEED_WALL_MM;
+}
+
+/**
+ * Where a gate of radius `gateR` meets the cavity's lowest point. On a flat
+ * underside every column is equally low, and taking the first found put the
+ * gate on the part's corner, three quarters of it in solid mold. So: inside
+ * the low region by the gate's radius (or as far as it goes), and of those the
+ * spot nearest the block's edge, for the shortest runner.
+ */
+function lowestSpot(spans: PourSpans, grid: Grid, gateR: number): BottomFill['gate'] | null {
+  const { cols, rows, stepX, stepY, halfW, halfD } = grid;
+  let start = -1;
+  let z = Infinity;
+  for (let i = 0; i < spans.length; i++) {
+    if (spans[i].length && spans[i][0] < z) {
+      z = spans[i][0];
+      start = i;
+    }
+  }
+  if (start < 0) return null;
+  const low = floodRegion(start, cols, rows, (n) => spans[n].length > 0 && spans[n][0] <= z + MOUTH_SINK_MM);
+  const depth = peelRegion(low, cols, rows);
+  const cell = Math.min(stepX, stepY);
+  const need = Math.min(Math.ceil(gateR / cell), Math.max(...depth.values()));
+  let best = start;
+  let bestEdge = Infinity;
+  let bestOff = Infinity;
+  for (const [col, d] of depth) {
+    if (d < need) continue;
+    const x = -halfW + (col % cols) * stepX, y = -halfD + Math.floor(col / cols) * stepY;
+    const edge = Math.min(halfW - Math.abs(x), halfD - Math.abs(y));
+    const off = Math.hypot(x, y);
+    if (edge < bestEdge - 1e-9 || (edge < bestEdge + 1e-9 && off < bestOff)) {
+      best = col;
+      bestEdge = edge;
+      bestOff = off;
+    }
+  }
+  return { x: -halfW + (best % cols) * stepX, y: -halfD + Math.floor(best / cols) * stepY, z };
 }
 
 /**
@@ -247,6 +367,7 @@ export function bottomFillFloorMm(r: number): number {
  * the wall beside the cavity a down-sprue fits, clear of the cavity, the
  * block's edge (`maxFromPartMm` of wall round the part, for a block that
  * follows it) and anything in `avoid`. Null when there is no such spot.
+ * `gateDia` is what the cast material can pass (`gateDiaMm`, moldSprue.ts).
  */
 export function planBottomFill(
   spans: PourSpans,
@@ -254,19 +375,16 @@ export function planBottomFill(
   r: number,
   avoid: Array<{ x: number; y: number; r: number }>,
   maxFromPartMm: number,
+  gateDia: number,
 ): BottomFill | null {
   const { cols, rows, stepX, stepY, halfW, halfD } = grid;
   const xOf = (c: number) => -halfW + c * stepX;
   const yOf = (row: number) => -halfD + row * stepY;
-  let gate: BottomFill['gate'] | null = null;
-  const hit = new Uint8Array(cols * rows);
-  for (let i = 0; i < spans.length; i++) {
-    const s = spans[i];
-    if (s.length === 0) continue;
-    hit[i] = 1;
-    if (!gate || s[0] < gate.z) gate = { x: xOf(i % cols), y: yOf(Math.floor(i / cols)), z: s[0] };
-  }
+  const gateR = Math.min(r, gateDia / 2);
+  const gate = lowestSpot(spans, grid, gateR);
   if (!gate) return null;
+  const hit = new Uint8Array(cols * rows);
+  for (let i = 0; i < spans.length; i++) if (spans[i].length) hit[i] = 1;
 
   // Distance from every column to the part's footprint.
   const dist = new Float64Array(cols * rows);
@@ -295,14 +413,20 @@ export function planBottomFill(
   let best: { x: number; y: number; fromPart: number } | null = null;
   let bestD = Infinity;
   for (let i = 0; i < dist.length; i++) {
-    if (dist[i] < minFromPart || dist[i] > maxFromPartMm - edge) continue;
-    const x = xOf(i % cols), y = yOf(Math.floor(i / cols));
-    if (Math.abs(x) > halfW - edge || Math.abs(y) > halfD - edge) continue;
+    if (dist[i] < minFromPart) continue;
+    // Bores are cut exactly, so a column just outside the block's limit comes
+    // in to it. Held to the grid, a 10 mm wall on the 1.47 mm grid of a 200 mm
+    // part had no column in the 1 mm band that fits, and was refused.
+    const gx = xOf(i % cols), gy = yOf(Math.floor(i / cols));
+    const x = Math.max(edge - halfW, Math.min(halfW - edge, gx));
+    const y = Math.max(edge - halfD, Math.min(halfD - edge, gy));
+    const fromPart = dist[i] - Math.hypot(gx - x, gy - y);
+    if (fromPart < minFromPart || fromPart > maxFromPartMm - edge) continue;
     if (avoid.some((a) => Math.hypot(x - a.x, y - a.y) < a.r + r + FEED_WALL_MM)) continue;
     const d = Math.hypot(x - gate.x, y - gate.y);
     if (d < bestD) {
       bestD = d;
-      best = { x, y, fromPart: dist[i] };
+      best = { x, y, fromPart };
     }
   }
   if (!best) return null;
@@ -311,7 +435,8 @@ export function planBottomFill(
     gate,
     runnerZ: gate.z - RUNNER_CLEARANCE_MM - r,
     r,
-    gateR: Math.min(r, MAX_GATE_R),
+    gateR,
+    gateTopZ: gate.z + mouthSinkMm(spans, grid, gate, gateR, 1, Math.PI * gateR * gateR, gateR),
     roomR: maxFromPartMm - best.fromPart,
   };
 }
@@ -363,17 +488,45 @@ export function cutBores(wasm: ManifoldToplevel, m: Manifold, cuts: BoreCut[]): 
   return out;
 }
 
-/** A half built as triangles (the depth-field mold) with its bores cut, through the geometry engine. */
-export function boreTriangles(wasm: ManifoldToplevel, tris: Triangle3D[], cuts: BoreCut[]): Triangle3D[] {
-  if (!cuts.length || !tris.length) return tris;
+/**
+ * A half's sockets, channels, pins and bores cut into it, in that half's own
+ * frame; `m` is consumed. Every mold gets the same exact, round features.
+ */
+export function cutHalfFeatures(wasm: ManifoldToplevel, m: Manifold, feats: HalfFeatures, blockHeightMm: number): Manifold {
+  let out = m;
+  const take = (tool: Manifold) => {
+    const next = out.subtract(tool);
+    out.delete();
+    tool.delete();
+    out = next;
+  };
+  for (const s of feats.sockets) take(wasm.Manifold.cylinder(s.depth + 0.5, s.botR, s.rimR, 24, false).translate([s.x, s.y, -s.depth]));
+  for (const ch of feats.channels) take(channelSolid(wasm, ch, blockHeightMm));
+  for (const p of feats.pins) {
+    const pin = wasm.Manifold.cylinder(p.height + 0.5, p.baseR, p.topR, 24, false).translate([p.x, p.y, -0.5]);
+    const next = out.add(pin);
+    out.delete();
+    pin.delete();
+    out = next;
+  }
+  return feats.bores?.length ? cutBores(wasm, out, feats.bores) : out;
+}
+
+/**
+ * A depth-field half with its features cut through the geometry engine. Null
+ * if the half will not close. Sampled onto the grid instead, a pin and its
+ * socket come out as two different lumps: 14 mm³ of them collided on a 300 mm
+ * mold, and the seam stood open by it.
+ */
+export function cutHalfTriangles(wasm: ManifoldToplevel, tris: Triangle3D[], feats: HalfFeatures, blockHeightMm: number): Triangle3D[] | null {
   const flat = new Float64Array(tris.length * 9);
   tris.forEach((t, i) => flat.set([...t.a, ...t.b, ...t.c], i * 9));
   const { part } = buildPartManifold(wasm, flat);
-  if (!part) return tris;
-  const cut = cutBores(wasm, part, cuts);
+  if (!part) return null;
+  const cut = cutHalfFeatures(wasm, part, feats, blockHeightMm);
   const out = manifoldToTriangles(cut);
   cut.delete();
-  return out.length ? out : tris;
+  return out.length ? out : null;
 }
 
 /** A bottom-filled mold's route from its feature report, for trimming it off a casting. */

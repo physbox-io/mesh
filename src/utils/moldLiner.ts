@@ -26,7 +26,7 @@
 // it), the casting comes out wearing its PVA, and the PVA dissolves off it.
 // ---------------------------------------------------------------------------
 
-import type { CrossSection, Manifold, ManifoldToplevel } from 'manifold-3d';
+import type { Manifold, ManifoldToplevel } from 'manifold-3d';
 import type { Grid, ColumnField } from './moldColumns';
 import {
   boundsOf,
@@ -42,7 +42,7 @@ import { castMaterial, castMaterialWarnings, type CastMaterialId } from './castM
 import { applyDraft, erodeDepth, type DraftMode } from './moldDraft';
 import { linerPair, pairSoftenC, type LinerPair, type LinerPairId } from './linerMaterials';
 import { fittedBlock, type Outline } from './moldOutline';
-import { channelSolid } from './moldSprue';
+import { channelSolid, sprueNeckDiaMm, withPourMouth } from './moldSprue';
 import { boreSolids } from './moldGating';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
@@ -355,11 +355,6 @@ function replace(prev: Manifold, next: Manifold): Manifold {
   return next;
 }
 
-function replaceSection(prev: CrossSection, next: CrossSection): CrossSection {
-  prev.delete();
-  return next;
-}
-
 interface HalfPair {
   shell: Manifold;
   liner: Manifold;
@@ -396,14 +391,7 @@ function buildHalfPair(
     // another that shares its face is left with a sheet of nothing there. So
     // the part's outline at the face is carried up through it, as the exact
     // open mold does.
-    let slice = part.slice(-0.01);
-    if (slice.isEmpty()) slice = replaceSection(slice, part.slice(-0.1));
-    if (!slice.isEmpty()) {
-      const pour = wasm.Manifold.extrude(slice, 2.5).translate([0, 0, -0.5]);
-      part = replace(part, part.add(pour));
-      pour.delete();
-    }
-    slice.delete();
+    part = withPourMouth(wasm, part, ctx.opts.moldType === 'open' ? sprueNeckDiaMm(ctx.opts.sprueBottomDiaMm, ctx.castMaterial) : 0);
   }
 
   const envelope = envelopeDepth(reach, grid, ctx.skinMm, blockHeight - MIN_FLOOR_MM);

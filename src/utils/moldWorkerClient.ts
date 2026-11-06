@@ -12,6 +12,7 @@
 // module exists to avoid, but a modal that works slowly beats one that does not
 // work.
 
+import { useHighFidelity } from '../store/highFidelityStore';
 import {
   DEFAULT_MOLD_OPTIONS,
   generateMoldMeshes,
@@ -360,6 +361,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
       ...(castMaterial ? { castMaterial } : {}),
       ...(linerPairId ? { linerPair: linerPairId } : {}),
+      highFidelity: typeof msg.highFidelity === 'boolean' ? msg.highFidelity : useHighFidelity.getState().highFidelity,
     },
   };
 }

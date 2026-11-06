@@ -39,6 +39,10 @@ export type Mat4Tuple = [
   number, number, number, number
 ];
 
+/** Whether two corners are one point once written to an STL. */
+export const sameFloat32 = (p: number[], q: number[]) =>
+  Math.fround(p[0]) === Math.fround(q[0]) && Math.fround(p[1]) === Math.fround(q[1]) && Math.fround(p[2]) === Math.fround(q[2]);
+
 export function manifoldToTriangles(m: Manifold): Triangle3D[] {
   const mesh = m.getMesh();
   const tris: Triangle3D[] = [];
@@ -53,13 +57,9 @@ export function manifoldToTriangles(m: Manifold): Triangle3D[] {
     const a: [number, number, number] = [p[i0 * stride], p[i0 * stride + 1], p[i0 * stride + 2]];
     const b: [number, number, number] = [p[i1 * stride], p[i1 * stride + 1], p[i1 * stride + 2]];
     const c: [number, number, number] = [p[i2 * stride], p[i2 * stride + 1], p[i2 * stride + 2]];
-    if (
-      (a[0] === b[0] && a[1] === b[1] && a[2] === b[2]) ||
-      (b[0] === c[0] && b[1] === c[1] && b[2] === c[2]) ||
-      (a[0] === c[0] && a[1] === c[1] && a[2] === c[2])
-    ) {
-      continue;
-    }
+    // As the STL will hold them: corners 4 µm apart are one point in float32,
+    // and the triangle between them is no triangle there.
+    if (sameFloat32(a, b) || sameFloat32(b, c) || sameFloat32(a, c)) continue;
     tris.push({ a, b, c, normal: computeNormal(a, b, c) });
   }
   return tris;

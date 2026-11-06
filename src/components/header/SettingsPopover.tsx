@@ -2,6 +2,7 @@ import { Settings, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { useViewQuality } from '../../store/viewQualityStore';
+import { useHighFidelity } from '../../store/highFidelityStore';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS } from '../../utils/llmSettings';
@@ -9,7 +10,7 @@ import { useLlmSettings } from '../../hooks/useLlmSettings';
 
 /**
  * The Environment popover: view quality, gravity, wind, drag, the floor,
- * contact fidelity, and the copilot's keys, model and reply budget.
+ * contact and mold fidelity, and the copilot's keys, model and reply budget.
  *
  * Mounted all the time and empty while closed, so the copilot settings are
  * read (and the live model lists fetched) when the app opens, not on first
@@ -18,6 +19,8 @@ import { useLlmSettings } from '../../hooks/useLlmSettings';
 export function SettingsPopover() {
   const hiRes = useViewQuality(s => s.hiRes);
   const setHiRes = useViewQuality(s => s.setHiRes);
+  const highFidelity = useHighFidelity(s => s.highFidelity);
+  const setHighFidelity = useHighFidelity(s => s.setHighFidelity);
   const simFidelity = useStore((s) => s.sceneGraph.simFidelity ?? 'standard');
   const setSimFidelity = useStore((s) => s.setSimFidelity);
   const {
@@ -94,6 +97,21 @@ export function SettingsPopover() {
             className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${simFidelity === 'print' ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
           >
             <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${simFidelity === 'print' ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+        {/* Per machine, not per scene: it follows the printer on the bench. */}
+        <div className="flex items-center justify-between gap-2">
+          <span id="highFidelityLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Rigid molds sampled twice as fine: truer walls for a fine nozzle, but larger files and slower to build.">High Fidelity</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={highFidelity}
+            aria-labelledby="highFidelityLabel"
+            title="Rigid molds sampled twice as fine: truer walls for a fine nozzle, but larger files and slower to build."
+            onClick={() => setHighFidelity(!highFidelity)}
+            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${highFidelity ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+          >
+            <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${highFidelity ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
           </button>
         </div>
         <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-2.5">

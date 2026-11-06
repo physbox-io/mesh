@@ -40,6 +40,16 @@ export function sprueNeckDiaMm(askedMm: number, material: CastMaterialId = 'epox
   return Math.max(askedMm, castMaterial(material).sprueNeckMm);
 }
 
+/**
+ * A bottom-fill gate's diameter. No air has to pass it, and it is what snaps
+ * when the casting is lifted off the runner under it, so it is narrow: 4 mm,
+ * or the thinnest section the material can flow through at all (concrete's
+ * aggregate jams anything under 10).
+ */
+export function gateDiaMm(material: CastMaterialId = 'epoxy'): number {
+  return Math.max(4, castMaterial(material).minSectionMm);
+}
+
 /** What a printed hole loses to the first perimeter and to ooze, mm. */
 const PRINTED_HOLE_LOSS_MM = 0.5;
 
@@ -99,6 +109,51 @@ export function planSprue(
   }
   depth = Math.max(0, depth);
   return { x, y, outerR: neckR + depth, innerR: neckR, funnelDepth: depth };
+}
+
+/**
+ * The way into an open mold: the part's section, in the half's own frame
+ * (cavity below z = 0, the part ending on the face), carried up through the
+ * face. Taken right at the face, a part that only touches it (a ball, a dome)
+ * got a mouth the size of its tangent patch, ⌀4 mm into a ⌀40 mm ball with a
+ * roof over the rest. So the section is taken as deep as it needs to be to hold
+ * a circle of `mouthR`, or at its widest if it never does. Returned as the part
+ * with its mouth added, `part` consumed; as it was if it does not reach the face.
+ *
+ * Evaluated before the two are deleted: this union, left lazy, lost the mouth
+ * altogether, as one once lost a lined lid its sprue.
+ */
+export function withPourMouth(wasm: ManifoldToplevel, part: Manifold, mouthR: number): Manifold {
+  const bottom = part.boundingBox().min[2];
+  if (!(bottom < 0)) return part;
+  let best: { z: number; area: number } | null = null;
+  for (let z = -0.01; z > bottom; z = z > -0.1 ? -0.1 : z - 0.25) {
+    const slice = part.slice(z);
+    const area = slice.area();
+    let fits = false;
+    if (area > 0) {
+      const inner = slice.offset(-mouthR);
+      fits = !inner.isEmpty();
+      inner.delete();
+    }
+    slice.delete();
+    if (area > 0 && (!best || area > best.area)) best = { z, area };
+    if (fits) {
+      best = { z, area };
+      break;
+    }
+  }
+  if (!best) return part;
+  const slice = part.slice(best.z);
+  const stub = wasm.Manifold.extrude(slice, 2 - best.z);
+  slice.delete();
+  const mouth = stub.translate([0, 0, best.z]);
+  stub.delete();
+  const out = part.add(mouth);
+  out.numTri();
+  part.delete();
+  mouth.delete();
+  return out;
 }
 
 /**
