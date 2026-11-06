@@ -8,6 +8,8 @@ import { estimateGcodeTime } from './timeEstimate';
 import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
 import { offsetRegion, offsetNestedLoops, nestingDepths } from './polygonOffset';
 import { clearingRings } from './adaptiveClearing';
+import { commentText } from './gcodeComments';
+import { measureGcodeBounds } from './workEnvelope';
 
 export interface GcodeExportOptions {
   machineMode: 'laser' | 'cnc';
@@ -41,7 +43,7 @@ export interface GcodeExportOptions {
   plungeFeedrate: number;
   /** CNC Z safe height above bed in mm (default 5.0). */
   safeZ: number;
-  /** Total cut depth in mm for CNC (default 3.0). */
+  /** Stock depth to cut through in mm for CNC (default 3.0). */
   cutDepthZ: number;
   /**
    * Face stock down to the thickness each panel was drawn at, before cutting
@@ -182,7 +184,8 @@ export interface GcodeExportResult {
   estimatedTimeSeconds: number;
   sheetCount: number;
   operations: GcodeOperation[];
-  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  /** The tool centre's reach. A router's also says how far Z runs, retracts included. */
+  bounds: { minX: number; minY: number; maxX: number; maxY: number; minZ?: number; maxZ?: number };
   /** How many holding attachments were left across the whole job. */
   attachmentCount: number;
   /**
@@ -197,6 +200,62 @@ export interface GcodeExportResult {
    */
   warnings?: string[];
   error?: string;
+}
+
+/** How far a sheet CNC through-cut goes below the stock, as solid machining's `throughCutMm`. */
+const SHEET_THROUGH_CUT_MM = 0.2;
+
+function refusedResult(error: string): GcodeExportResult {
+  return {
+    success: false,
+    gcode: '',
+    totalCutDistanceMm: 0,
+    estimatedTimeSeconds: 0,
+    sheetCount: 0,
+    operations: [],
+    bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+    attachmentCount: 0,
+    compensationMm: 0,
+    error,
+  };
+}
+
+/** Why these settings cannot go to a controller, in a sentence, or null. */
+function unusableSetting(o: GcodeExportOptions, depthsMm: number[]): string | null {
+  const router = o.machineMode === 'cnc';
+  const aboveZero: [string, number][] = [['cut feedrate', o.cutFeedrate], ['travel feedrate', o.travelFeedrate]];
+  const numbers: [string, number][] = [];
+  if (router) {
+    aboveZero.push(['plunge feedrate', o.plungeFeedrate]);
+    numbers.push(['spindle speed', o.spindleRpm], ['safe height', o.safeZ], ['bit diameter', o.bitDiameterMm], ['stepdown', o.zStepdown]);
+  } else {
+    aboveZero.push(['engrave speed', o.engraveFeedrate], ['maximum S-value', o.laserMaxPower], ['passes', o.laserPasses]);
+    numbers.push(['laser power', o.laserPower], ['engrave power', o.laserEngravePower]);
+  }
+  for (const [name, value] of aboveZero) {
+    if (!(value > 0 && Number.isFinite(value))) return `Set the ${name}: it has to be a number above zero.`;
+  }
+  for (const [name, value] of numbers) {
+    if (!Number.isFinite(value)) return `Set the ${name}: it is not a number.`;
+  }
+  if (router && depthsMm.some((d) => !(Math.abs(d) > 0 && Number.isFinite(d)))) {
+    return 'Set the stock thickness: the cut depth is not above zero.';
+  }
+  return null;
+}
+
+/** The same move with its Z word raised. Text in a comment is left as it is. */
+function raiseZ(line: string, mm: number): string {
+  const cut = line.search(/[;(]/);
+  const code = cut >= 0 ? line.slice(0, cut) : line;
+  const rest = cut >= 0 ? line.slice(cut) : '';
+  return code.replace(/\bZ(-?[\d.]+)/, (_, z) => `Z${f(parseFloat(z) + mm)}`) + rest;
+}
+
+/** Bounds plus the Z range of the finished program, for a router. */
+function withZRange(bounds: GcodeExportResult['bounds'], gcode: string): GcodeExportResult['bounds'] {
+  const measured = measureGcodeBounds(gcode);
+  return measured?.minZ !== undefined ? { ...bounds, minZ: measured.minZ, maxZ: measured.maxZ } : bounds;
 }
 
 /** Cut S-value, clamped to the controller's $30 ceiling. */
@@ -286,11 +345,11 @@ interface AttachmentSpan {
  * Where to leave attachments around a loop of the given perimeter.
  *
  * Count comes from the requested spacing, but is capped so no attachment can
- * take more than half of the run it sits in — that keeps two of them from
- * merging into one long uncut stretch on a small part, and it is also what
- * guarantees no span straddles the loop's start point, so the emitters below
- * never have to deal with wrapping. A loop too short to hold even one gets
- * none, which is how small mortises and slots stay clean.
+ * take more than half of the run it sits in. A part gets two regardless, since
+ * it swings on one and cuts free on none, as long as they leave at least half
+ * its outline cut and do not meet: that is what guarantees no span straddles
+ * the loop's start point, so the emitters below never have to deal with
+ * wrapping. A loop too short for two keeps what the cap allows.
  */
 function planAttachments(perimeterMm: number, options: GcodeExportOptions): AttachmentSpan[] {
   if (!options.attachmentsEnabled) return [];
@@ -308,7 +367,8 @@ function planAttachments(perimeterMm: number, options: GcodeExportOptions): Atta
   const spacing = Math.max(span, options.attachmentSpacingMm);
 
   const maxCount = Math.floor(perimeterMm / (2 * span));
-  const count = Math.min(maxCount, Math.round(perimeterMm / spacing));
+  const wanted = Math.min(maxCount, Math.round(perimeterMm / spacing));
+  const count = perimeterMm >= 4 * width && perimeterMm > 2 * span ? Math.max(2, wanted) : wanted;
   if (count < 1) return [];
 
   const spans: AttachmentSpan[] = [];
@@ -495,20 +555,7 @@ export function generateLaserCutGcode(
   userOptions?: Partial<GcodeExportOptions>
 ): GcodeExportResult {
   const options: GcodeExportOptions = { ...DEFAULT_GCODE_OPTIONS, ...userOptions };
-  if (!panels || panels.length === 0) {
-    return {
-      success: false,
-      gcode: '',
-      totalCutDistanceMm: 0,
-      estimatedTimeSeconds: 0,
-      sheetCount: 0,
-      operations: [],
-      bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
-      attachmentCount: 0,
-      compensationMm: 0,
-      error: 'No panels provided for G-code generation.',
-    };
-  }
+  if (!panels || panels.length === 0) return refusedResult('No panels provided for G-code generation.');
 
   // Group by the sheet the packer nested each panel on. Placements are already
   // in sheet-local coordinates: every sheet is loaded against the same machine
@@ -531,6 +578,12 @@ export function generateLaserCutGcode(
   const sheetIndices = Array.from(sheetMap.keys()).sort((a, b) => a - b);
   const sheetCount = sheetIndices.length;
   const operations: GcodeOperation[] = [];
+
+  const unusable = unusableSetting(
+    options,
+    sheetIndices.map((k) => options.sheetStockThicknessMm?.[k] ?? options.cutDepthZ)
+  );
+  if (unusable) return refusedResult(unusable);
 
   const radius = compensationRadius(options);
   const warnings: string[] = [];
@@ -574,9 +627,32 @@ export function generateLaserCutGcode(
   let attachmentCount = 0;
 
   /*
+   * Every sheet rests on the same bed and Z0 stays where it was set, on the
+   * first sheet's top, so a thicker sheet's top stands above Z0 and a thinner
+   * one's below it. Each sheet's program is written from its own top, then
+   * raised by that difference. A tool change is touched off on the sheet then
+   * on the bed, which moves Z0 there for everything after it.
+   */
+  const sheetStock = (key: number) =>
+    options.machineMode === 'cnc' ? options.sheetStockThicknessMm?.[key] : undefined;
+  let zeroStockMm = sheetStock(sheetIndices[0]);
+  const shiftOf = (key: number) => {
+    const stock = sheetStock(key);
+    return stock !== undefined && zeroStockMm !== undefined ? stock - zeroStockMm : 0;
+  };
+  let zShift = 0;
+  let shiftFrom = lines.length;
+  const applyShift = () => {
+    if (zShift !== 0) {
+      for (let i = shiftFrom; i < lines.length; i++) lines[i] = raiseZ(lines[i], zShift);
+    }
+    shiftFrom = lines.length;
+  };
+
+  /*
    * Facing and profiling are two bits when the facing bit is a surfacing
    * cutter, and the operator swaps between them: M6 parks and holds the job
-   * (Mesh's streamer lifts, parks and waits), and the new bit is touched off
+   * (Mesh's streamer lifts and waits), and the new bit is touched off
    * before it goes on. Whichever is needed first is the one fitted at the start.
    */
   const facingBit = Math.max(1, options.facingBitDiameterMm);
@@ -596,7 +672,10 @@ export function generateLaserCutGcode(
       lines.push(`G0 X0.000 Y0.000 ; park over the work origin`);
       head = { x: 0, y: 0 };
       lines.push(`T${toolNumber} M6 ; fit the ${f(dia)}mm ${what} and re-zero Z`);
+      applyShift();
       // The operator has just touched the new bit off on the work.
+      zeroStockMm = sheetStock(sheetIndices[sIdx]);
+      zShift = 0;
       lines.push(`G0 Z${travel} ; back to travel height after the change`);
       lines.push(`M3 S${Math.round(options.spindleRpm)}`);
       lines.push(`G4 P2`);
@@ -612,6 +691,8 @@ export function generateLaserCutGcode(
   for (let sIdx = 0; sIdx < sheetIndices.length; sIdx++) {
     const sKey = sheetIndices[sIdx];
     const sheetPanels = sheetMap.get(sKey)!;
+    applyShift();
+    const sheetShift = shiftOf(sKey);
 
     if (sIdx > 0 && options.pauseBetweenSheets) {
       operations.push({
@@ -625,7 +706,8 @@ export function generateLaserCutGcode(
       lines.push(`; --- PAUSE: MATERIAL SHEET SWAP ---`);
       if (options.machineMode === 'laser') lines.push(`M5 ; Laser OFF`);
       else {
-        lines.push(`G0 Z${f(options.safeZ)}`);
+        // High enough for the sheet coming on as well as the one going off.
+        lines.push(`G0 Z${f(options.safeZ + Math.max(zShift, sheetShift))}`);
         lines.push(`M5 ; Spindle OFF`);
       }
       lines.push(`G0 X0.000 Y0.000 ; Park head at origin`);
@@ -635,7 +717,9 @@ export function generateLaserCutGcode(
         lines.push(`M3 S${Math.round(options.spindleRpm)}`);
         lines.push(`G4 P2`);
       }
+      shiftFrom = lines.length;
     }
+    zShift = sheetShift;
 
     lines.push(``);
     lines.push(`; ==================================================`);
@@ -684,7 +768,7 @@ export function generateLaserCutGcode(
           sheetIndex: sIdx,
         });
         lines.push(``);
-        lines.push(`; --- Facing: ${panel.name} (${f(removal)}mm off a ${f(stockMm!)}mm sheet) ---`);
+        lines.push(`; --- Facing: ${commentText(panel.name)} (${f(removal)}mm off a ${f(stockMm!)}mm sheet) ---`);
         lines.push(...faced.lines);
         totalCutDistanceMm += faced.distanceMm;
         head = faced.lastPoint;
@@ -694,7 +778,7 @@ export function generateLaserCutGcode(
     for (const panel of sheetPanels) {
       const pos = panel.placedPos2D || { x: 0, y: 0 };
       if (options.machineMode === 'cnc') fit('profile', sIdx);
-      lines.push(`; --- Panel: ${panel.name} ---`);
+      lines.push(`; --- Panel: ${commentText(panel.name)} ---`);
       const fromDepthMm = facedDownMm.get(panel.id) ?? 0;
 
       // What the tool actually follows. On a laser that is the geometry itself;
@@ -801,6 +885,7 @@ export function generateLaserCutGcode(
     lines.push(`G0 X0.000 Y0.000 F${options.travelFeedrate} ; Park X/Y`);
   }
   lines.push(`M30 ; End of program`);
+  applyShift();
 
   // Every laser pass retraces the whole path, so the head really does travel that far.
   totalCutDistanceMm *= laserPassCount(options);
@@ -810,6 +895,10 @@ export function generateLaserCutGcode(
       `${skippedEngraving.join(', ')}: the surface pattern is laser engraving, so a router leaves it out. ` +
         `Carve it with Relief carve instead.`
     );
+  }
+
+  if (!operations.some((op) => op.type === 'cut' || op.type === 'engrave')) {
+    return refusedResult(warnings[0] ?? 'Nothing here for the machine to cut.');
   }
 
   const gcodeText = tidyModal(lines).join('\n');
@@ -831,12 +920,12 @@ export function generateLaserCutGcode(
     // The tool runs a radius outside the outermost outline, so that is what the
     // job really occupies — which is what the framing trace and the travel
     // check downstream both need to know.
-    bounds: {
+    bounds: withZRange({
       minX: Math.min(minX - radius, faceMinX),
       minY: Math.min(minY - radius, faceMinY),
       maxX: Math.max(maxX + radius, faceMaxX),
       maxY: Math.max(maxY + radius, faceMaxY),
-    },
+    }, gcodeText),
     attachmentCount,
     compensationMm: radius,
     warnings: warnings.length > 0 ? warnings : undefined,
@@ -1032,7 +1121,7 @@ function generateLoopGcode(
     const stepdown = Math.max(0.1, Math.abs(options.zStepdown));
     const from = Math.min(Math.max(0, fromDepthMm), totalDepth);
     const passes = Math.max(1, Math.ceil((totalDepth - from) / stepdown - 1e-9));
-    // The attachment's top surface. Clamped below the stock surface so a height
+    // The attachment's top surface, measured up from the bottom of the stock. Clamped below the stock surface so a height
     // set at or above the cut depth cannot turn the whole outline into a no-op.
     const attachTopZ = -Math.max(0.1, totalDepth - Math.max(0, options.attachmentHeightMm));
 
@@ -1040,7 +1129,9 @@ function generateLoopGcode(
     lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
 
     for (let pass = 1; pass <= passes; pass++) {
-      const currentZ = -Math.min(totalDepth, from + pass * stepdown);
+      const currentZ = pass === passes
+        ? -(totalDepth + SHEET_THROUGH_CUT_MM)
+        : -Math.min(totalDepth, from + pass * stepdown);
       lines.push(`; Pass ${pass}/${passes} (Z = ${f(currentZ)}mm)`);
       lines.push(`G1 Z${f(currentZ)} F${options.plungeFeedrate}`);
 
@@ -1254,20 +1345,9 @@ export function generateContourSliceGcode(
   userOptions?: Partial<GcodeExportOptions>
 ): GcodeExportResult {
   const options: GcodeExportOptions = { ...DEFAULT_GCODE_OPTIONS, ...userOptions };
-  if (!result || !result.success || !result.layers) {
-    return {
-      success: false,
-      gcode: '',
-      totalCutDistanceMm: 0,
-      estimatedTimeSeconds: 0,
-      sheetCount: 0,
-      operations: [],
-      bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
-      attachmentCount: 0,
-      compensationMm: 0,
-      error: 'Invalid contour slice result provided.',
-    };
-  }
+  if (!result || !result.success || !result.layers) return refusedResult('Invalid contour slice result provided.');
+  const unusable = unusableSetting(options, [options.cutDepthZ]);
+  if (unusable) return refusedResult(unusable);
 
   const layers = result.layers;
   const sheetCount = result.sheetCount || layers.length;
@@ -1456,6 +1536,10 @@ export function generateContourSliceGcode(
 
   totalCutDistanceMm *= laserPassCount(options);
 
+  if (!operations.some((op) => op.type === 'cut')) {
+    return refusedResult(warnings[0] ?? 'Nothing here for the machine to cut.');
+  }
+
   const gcodeText = tidyModal(lines).join('\n');
   const estimatedTimeSeconds = Math.round(
     estimateGcodeTime(gcodeText, { profile: options.motionProfile ?? DEFAULT_MOTION_PROFILE }).seconds
@@ -1468,7 +1552,10 @@ export function generateContourSliceGcode(
     estimatedTimeSeconds,
     sheetCount,
     operations,
-    bounds: { minX: isFinite(minX) ? minX : 0, minY: isFinite(minY) ? minY : 0, maxX: isFinite(maxX) ? maxX : 0, maxY: isFinite(maxY) ? maxY : 0 },
+    bounds: withZRange(
+      { minX: isFinite(minX) ? minX : 0, minY: isFinite(minY) ? minY : 0, maxX: isFinite(maxX) ? maxX : 0, maxY: isFinite(maxY) ? maxY : 0 },
+      gcodeText
+    ),
     attachmentCount,
     compensationMm: radius,
     warnings: warnings.length > 0 ? warnings : undefined,

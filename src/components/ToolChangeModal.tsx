@@ -2,29 +2,11 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { ToolChangeDialog } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { useJobPause, pauseKey } from '../store/jobPauseStore';
+import { useJobPause, pauseKey, toolStopKey } from '../store/jobPauseStore';
+import { readStoredMm, readTouchPlateMm, writeStoredMm, writeTouchPlateMm } from '../utils/touchPlate';
 import { CheckpointBadge } from './CheckpointBadge';
 
-const PLATE_KEY = 'meshTouchPlateMm';
 const SHIM_KEY = 'meshZeroShimMm';
-
-function readMm(key: string, fallback: number): number {
-  try {
-    const v = parseFloat(localStorage.getItem(key) ?? '');
-    return Number.isFinite(v) && v >= 0 ? v : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeMm(key: string, mm: number): number {
-  try {
-    localStorage.setItem(key, String(mm));
-  } catch {
-    // Private mode: the value holds for this session only.
-  }
-  return mm;
-}
 
 /**
  * A job parked at a tool change, as its own dialog: the pad to bring the new
@@ -39,8 +21,8 @@ export const ToolChangeModal: React.FC = () => {
   const [machineState, setMachineState] = React.useState<MachineState>(webSerialManager.getState());
   const hiddenKey = useJobPause((s) => s.hiddenKey);
   const hide = useJobPause((s) => s.hide);
-  const [plateMm, setPlateMm] = React.useState(() => readMm(PLATE_KEY, 12));
-  const [shimMm, setShimMm] = React.useState(() => readMm(SHIM_KEY, 0));
+  const [plateMm, setPlateMm] = React.useState(readTouchPlateMm);
+  const [shimMm, setShimMm] = React.useState(() => readStoredMm(SHIM_KEY, 0));
   const [overrideFor, setOverrideFor] = React.useState<string | null>(null);
 
   React.useEffect(() => webSerialManager.addListener(setMachineState), []);
@@ -51,7 +33,8 @@ export const ToolChangeModal: React.FC = () => {
 
   const laser = webSerialManager.isLaserJob();
   // An override given at the last tool change must not stand at this one.
-  const overridden = overrideFor === key;
+  const stop = toolStopKey(key, machineState.currentLine);
+  const overridden = overrideFor === stop;
   const blocked = !laser && machineState.needsZZero && !overridden;
 
   const dialog = (
@@ -70,13 +53,13 @@ export const ToolChangeModal: React.FC = () => {
               zeroed: !machineState.needsZZero,
               plate: {
                 mm: plateMm,
-                onMmChange: (mm) => setPlateMm(writeMm(PLATE_KEY, mm)),
+                onMmChange: (mm) => setPlateMm(writeTouchPlateMm(mm)),
                 onProbe: (mm) => webSerialManager.zeroZ(mm),
               },
               byHand: {
                 onZeroHere: (mm) => webSerialManager.zeroZHere(mm),
                 shimMm,
-                onShimMmChange: (mm) => setShimMm(writeMm(SHIM_KEY, mm)),
+                onShimMmChange: (mm) => setShimMm(writeStoredMm(SHIM_KEY, mm)),
               },
               probeCircuit: { active: machineState.probePinActive, seen: machineState.probeCircuitSeen },
             }
@@ -89,7 +72,7 @@ export const ToolChangeModal: React.FC = () => {
         blocked ? (
           <button
             type="button"
-            onClick={() => setOverrideFor(key)}
+            onClick={() => setOverrideFor(stop)}
             title="Resume using current Z zero"
             className="px-2 py-2 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
           >

@@ -30,8 +30,10 @@ export abstract class GuideSpotMachine extends MachineCore {
    *
    * The beam is left burning at the operator's discretion on a head that is not
    * moving, so it carries its own deadline: `GUIDE_SPOT_TIMEOUT_MS` after being
-   * lit it goes out on its own. Every other exit from this state — disconnect,
-   * E-stop, starting a job — kills it too, through `guideSpotOff`.
+   * lit it goes out on its own. A disconnect and starting a job put it out too,
+   * through `guideSpotOff`, and an E-stop with its reset. A pulled cable leaves
+   * it to the controller: nothing here can reach the beam, and its deadline goes
+   * with the link, so it burns until the controller is reset or powered off.
    */
   public async guideSpotOn(power: number = readGuidePower()): Promise<void> {
     if (!this.state.connected) {
@@ -70,13 +72,15 @@ export abstract class GuideSpotMachine extends MachineCore {
      * moment it goes out. `$32` is only accepted in Idle, which the state check
      * above has already established.
      */
-    if (this.laserModeEnabled() && !this.guideSpotRestoreLaserMode) {
+    if (this.laserModeEnabled()) {
+      // A parked job's borrow may already want it at 0 afterwards.
+      const home = this.laserModeHome ?? 1;
       // Written down before the setting is changed, not after: the case this
       // covers is the page disappearing between the two.
-      writeLaserModeBorrowed(true);
+      writeLaserModeBorrowed(home === 1 ? 1 : null);
       await this.sendLine('$32=0');
-      this.updateState({ grblSettings: { ...this.state.grblSettings, 32: 0 } });
-      this.guideSpotRestoreLaserMode = true;
+      this.noteLaserMode(0);
+      this.laserModeHome = home === 1 ? 1 : null;
     }
 
     // Scaled here as well as in the UI: this is a public method, and the
@@ -152,7 +156,7 @@ export abstract class GuideSpotMachine extends MachineCore {
       // Nothing to send to, but the flag must not survive: the beam is out
       // because the machine is gone.
       if (this.state.guideSpot) this.updateState({ guideSpot: false });
-      this.guideSpotRestoreLaserMode = false;
+      this.laserModeHome = null;
       return;
     }
     // The flag goes down *first*, and is what the jiggle loop watches. Sending
@@ -168,10 +172,7 @@ export abstract class GuideSpotMachine extends MachineCore {
     // S0 as well as M5, so the next `M3` in a hand-typed command or a program
     // header does not inherit the pointer's S word and fire at it.
     await this.sendAndWait('S0', QUICK_REPLY_TIMEOUT_MS);
-    // Laser mode back on before anything else can run. A job streamed with
-    // `$32=0` still cuts, but it burns through every rapid on the way, so
-    // leaving it off would be a far worse bug than the one it was turned off to
-    // fix.
+    // Laser mode back before anything else can run.
     await this.restoreLaserMode();
   }
 

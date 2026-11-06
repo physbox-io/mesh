@@ -52,6 +52,7 @@ export async function restoreInterruptedJob(): Promise<RestorableCheckpoint | nu
       startedAt: cp.program.startedAt,
       stoppedAt: cp.progress.at,
       pendingPause: cp.progress.pendingPause,
+      mpos: cp.progress.mpos,
     });
     return ok ? cp : null;
   } catch {

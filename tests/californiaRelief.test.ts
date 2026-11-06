@@ -160,11 +160,17 @@ describe('California relief preset', () => {
 
   it('cuts the full relief depth and never breaks through the stock', () => {
     const result = generateReliefCarveGcode(californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS);
-    const zs = result.gcode
-      .split('\n')
-      .map((l) => l.match(/Z(-?\d+\.\d+)/))
-      .filter(Boolean)
-      .map((m) => parseFloat(m![1]));
+    // Roughing clears this whole board, so the finishing bit is zeroed on a
+    // roughing floor and its block counts from there. Back to stock coordinates:
+    const lines = result.gcode.split('\n');
+    const change = lines.findIndex((l) => /\bM6\b/.test(l));
+    const zOf = (l: string) => l.match(/Z(-?\d+\.\d+)/);
+    const floorBelowTop = parseFloat(zOf(lines[change + 1])![1]) - 20;
+    expect(floorBelowTop).toBeGreaterThan(0);
+    const zs = lines.flatMap((l, i) => {
+      const m = zOf(l);
+      return m ? [parseFloat(m[1]) - (i > change ? floorBelowTop : 0)] : [];
+    });
 
     const deepest = Math.min(...zs);
     // The background floor is the deepest the job is allowed to go, and it is

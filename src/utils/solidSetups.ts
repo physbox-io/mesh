@@ -30,6 +30,7 @@ import {
 import { collectSceneTriangles } from './contourSliceExporter';
 import { castColumnSpans } from './columnSolid';
 import { describeTurn, FACE_NAME, setupFrame, type BlockFace } from './orient';
+import { simulateMilling } from './cutSimulation';
 import { neededDepth, planSetups, type PartBox, type SetupPlan } from './setupPlanner';
 
 /** One setup of a part machined from several faces, in the order they run. */
@@ -57,6 +58,8 @@ export interface SolidSetupResult extends SurfaceMachiningResult {
   datum?: { description: string; touches: { axis: 'x' | 'y' | 'z'; face: string; valueMm: number; wallMm?: number }[] };
   /** What the operator does before this setup runs, in order. */
   instructions: string[];
+  /** The corners this setup cuts a datum notch out of, which a clamp has to stay off. */
+  notchCorners?: string[];
   /** Part of the stock this setup cuts in, its own frame. */
   windowBounds: { minX: number; minY: number; maxX: number; maxY: number };
   /** Material the plan gave this setup, mm³. */
@@ -106,6 +109,14 @@ const ORIENTATION_MARGIN = 0.25;
 
 /** Turn error per setup: a quarter of a degree, as a dial indicator on a vise jaw finds it. */
 const TILT_RAD = (0.25 * Math.PI) / 180;
+/**
+ * How far a bit nobody has measured reaches down from the top or the underside,
+ * mm: a long catalogue bit in a collet. Past this the part is on end for
+ * nothing, since no bit in the rack gets to the bottom of it.
+ */
+const ASSUMED_STICKOUT_MM = 50;
+/** Grid the earlier setups are cut back out on to see what they left of a face, mm. */
+const STOOD_CELL_MM = 1;
 /** How well a bit's side touches off on paper. */
 const TOUCH_MM = 0.1;
 
@@ -222,13 +233,14 @@ function place(sceneTris: ArrayLike<number>, opts: SolidMachiningOptions, up: Up
 }
 
 /** The cutter a side setup reaches in with, and how far it can. */
-function sideTool(opts: SolidMachiningOptions): { dia: number; reach: number } {
+function sideTool(opts: SolidMachiningOptions): { dia: number; reach: number; reachZ: number } {
   const dia = Math.max(0.1, opts.finishingToolDiaMm);
   const byDiameters = dia * MAX_AVAILABLE_REACH_DIAMETERS;
   // A declared stickout is the bit actually fitted: past 8 D it is a long-reach
   // bit, and the operator has said so by fitting it.
-  const reach = opts.toolStickoutMm > 0 ? Math.max(byDiameters, opts.toolStickoutMm - 1) : byDiameters;
-  return { dia, reach };
+  const declared = opts.toolStickoutMm > 0;
+  const reach = declared ? Math.max(byDiameters, opts.toolStickoutMm - 1) : byDiameters;
+  return { dia, reach, reachZ: declared ? reach : Math.max(byDiameters, ASSUMED_STICKOUT_MM) };
 }
 
 function plannerInput(p: Placement, opts: SolidMachiningOptions, only?: BlockFace[], cellMm?: number) {
@@ -240,6 +252,7 @@ function plannerInput(p: Placement, opts: SolidMachiningOptions, only?: BlockFac
     stock: p.stock,
     toolDiaMm: tool.dia,
     reachMm: tool.reach,
+    reachZMm: tool.reachZ,
     maxSetups: Math.max(1, opts.maxSetups ?? 6),
     allowUnderside: only ? only.includes('-z') : true,
     allowSides: only ? only.some((f) => f !== '+z' && f !== '-z') : true,
@@ -371,6 +384,41 @@ function toSetupTris(
 }
 
 /**
+ * Whether a point of a turned setup's top face is still there. The earlier
+ * setups have been at the block, and a side that ends flush with the part has
+ * been cut away wherever the top setup ran off it. Those programs are only run
+ * if a tool change asks.
+ */
+function stoodAfter(
+  frame: ReturnType<typeof setupFrame>,
+  block: Placement['stock'],
+  earlier: { upFace: BlockFace; gcode: string; stock: SolidSetupResult['stock'] }[],
+  opts: SolidMachiningOptions
+): (x: number, y: number) => boolean {
+  let cut: { frame: ReturnType<typeof setupFrame>; at: (x: number, y: number) => number }[] | null = null;
+  return (x, y) => {
+    cut ??= earlier.map((e) => ({
+      frame: setupFrame(e.upFace, block),
+      at: simulateMilling(e.gcode, {
+        widthMm: e.stock.widthMm,
+        depthMm: e.stock.depthMm,
+        cellMm: STOOD_CELL_MM,
+        tools: {
+          1: { shape: 'flat', diameterMm: opts.roughingToolDiaMm },
+          2: { shape: 'flat', diameterMm: opts.finishingToolDiaMm },
+        },
+        initialTool: opts.roughingEnabled ? 1 : 2,
+      }).at,
+    }));
+    const onBlock = frame.toFirst([x, y, 0]);
+    return cut.every((c) => {
+      const q = c.frame.toSetup(onBlock);
+      return c.at(q[0], q[1]) >= q[2] - STOOD_CELL_MM / 2;
+    });
+  };
+}
+
+/**
  * One side setup: the block stood with `face` up, cut down to the material
  * the plan gave that face and never below the part.
  */
@@ -383,7 +431,9 @@ function sideSetup(
   warnings: string[],
   notchMm?: number,
   /** Datum notches this setup cuts for the ones after it, in the block's first frame. */
-  cutsNotches: NotchBox[] = []
+  cutsNotches: NotchBox[] = [],
+  /** The setups that run before this one. */
+  earlier: { upFace: BlockFace; gcode: string; stock: SolidSetupResult['stock'] }[] = []
 ): Omit<SolidSetupResult, 'index' | 'of' | 'instructions'> | { error: string } {
   const frame = setupFrame(face, p.stock);
   const s = frame.stock;
@@ -513,6 +563,10 @@ function sideSetup(
       resolution: Math.min(stepX, stepY),
       header,
       noun: 'cut',
+      touchOff: {
+        area: { minX: 0, minY: 0, maxX: s.widthMm, maxY: s.depthMm },
+        standsAt: stoodAfter(frame, p.stock, earlier, opts),
+      },
     },
     {
       ...carveOpts,
@@ -619,7 +673,11 @@ function instructionsFor(s: Omit<SolidSetupResult, 'index' | 'of' | 'instruction
   const zero = s.datum
     ? `Zero ${s.datum.description}`
     : 'Zero X and Y on the near-left corner of the top, and Z on the top face.';
-  if (index === 1) return [s.upFace === '+z' ? 'Clamp the block flat, top up.' : turn, zero];
+  if (index === 1) {
+    const corners = s.notchCorners ?? [];
+    const clear = corners.length > 0 ? `clear of the ${corners.join(' and ')} corner${corners.length > 1 ? 's' : ''}, ` : '';
+    return [s.upFace === '+z' ? `Clamp the block flat, ${clear}top up.` : turn, zero];
+  }
   const steps = ['Park the spindle high and stop it.', turn];
   if (s.locate === 'pins') {
     steps.push('Drop the block onto the pins, and confirm it is seated.', 'Zero Z on the new top face.');
@@ -704,6 +762,7 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   const sidesOpts: SolidMachiningOptions = {
     ...opts,
     ...(notches.length > 0 ? { datumNotches: notches } : {}),
+    ...(notchBoxes.length > 0 ? { earlierCuts: notchBoxes } : {}),
     up: chosen.p.up,
     sides: twoSided ? 2 : 1,
     // Pins go in the frame at the ends; with an end flush there is none, and
@@ -730,7 +789,7 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   const turned = plan.order.some((f) => f !== '+z' && f !== '-z');
   const levelledTopOnly = turned && !!opts.applyMeshLeveling && !!opts.meshLevelGrid;
   const warnings = [
-    ...result.warnings.filter((w) => !/material neither side can see|under a surface the one side cannot see/.test(w)),
+    ...result.warnings.filter((w) => !/occluded from both \+Z and -Z|lies beneath overhangs/.test(w)),
     ...notchWarnings,
     ...(levelledTopOnly
       ? ['Bed levelling is applied to the top-up setup only. The other setups cut faces the probed grid does not describe, so they are cut without levelling.']
@@ -738,9 +797,17 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   ].filter((w) => !(levelledTopOnly && /^Bed levelling is applied to side A only/.test(w)));
   const built: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>[] = [];
   for (const face of plan.order) {
-    if (face === '+z') { built.push(asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm, notchFor.get('+z'))); continue; }
+    if (face === '+z') {
+      built.push({
+        ...asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm, notchFor.get('+z')),
+        ...(notches.length > 0
+          ? { notchCorners: [...new Set(notches.map((n) => `${n.y0 <= 0 ? 'near' : 'far'}-${n.x0 <= 0 ? 'left' : 'right'}`))] }
+          : {}),
+      });
+      continue;
+    }
     if (face === '-z') { built.push(asSetup(result.sides[1], result, plan, sidesOpts.finishingToolDiaMm)); continue; }
-    const s = sideSetup(face, exact, plan, sidesOpts, carveOpts, warnings, notchFor.get(face), face === first ? notchBoxes : []);
+    const s = sideSetup(face, exact, plan, sidesOpts, carveOpts, warnings, notchFor.get(face), face === first ? notchBoxes : [], built);
     // A setup the plan needs and cannot have is a part that comes out wrong.
     if ('error' in s) {
       return {

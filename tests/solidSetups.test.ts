@@ -218,3 +218,64 @@ describe('a round body with a box tail, flipped and opened from the end', () => 
     expect(r.warnings.join(' ')).toMatch(/registration pins/i);
   }, 60_000);
 });
+
+describe('how the plan reads', () => {
+  const r0 = (() => {
+    let made: ReturnType<typeof generateSolidMachining> | null = null;
+    return () => {
+      if (!made) {
+        const scene = tray(15);
+        const asked = { ...tooling, sides: 2 as const, stockWidthMm: 156, stockDepthMm: 160, stockThicknessMm: 40 };
+        made = generateSolidMachining(scene, { ...deriveSolidOptions(scene, asked), setups: ['+z', '+x', '-x', '-z'] });
+        expect(made.success, made.error).toBe(true);
+      }
+      return made;
+    };
+  })();
+
+  it('keeps the tray flat, with no bit that could reach it on end', () => {
+    const scene = tray(0);
+    const asked = { ...tooling, toolStickoutMm: 0, stockWidthMm: 0, stockDepthMm: 0, stockThicknessMm: 0 };
+    const r = generateSolidMachining(scene, { ...deriveSolidOptions(scene, asked), setups: 'auto' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.setups![0].stock.thicknessMm).toBeLessThan(30);
+  }, 120000);
+
+  const groovedPlate: SceneGraph = {
+    nodes: [{
+      id: 'b1', name: 'p', type: 'body', pos: [0, 0, 0],
+      // A plate grooved end to end on both faces. Stood on end, one setup sees
+      // both grooves, 135 mm down.
+      geoms: [[0, 40, 8, 67.5, 20, 3], [0, 10, 8, 67.5, 10, 8], [0, 70, 8, 67.5, 10, 8]].map(([x, y, z, hx, hy, hz], i) => ({
+        name: `g${i}`, type: 'box', size: [hx / 1000, hy / 1000, hz / 1000], pos: [x / 1000, y / 1000, z / 1000],
+      } as SceneGeom)),
+      joints: [], children: [],
+    }],
+  };
+
+  it('does not stand a plate on end for a depth no bit reaches', () => {
+    const asked = { ...tooling, sides: 2 as const, toolStickoutMm: 0, stockWidthMm: 0, stockDepthMm: 0, stockThicknessMm: 0 };
+    const r = generateSolidMachining(groovedPlate, { ...deriveSolidOptions(groovedPlate, asked), setups: 'auto' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.setups![0].stock.thicknessMm).toBeLessThan(30);
+    expect(r.setups!.map((s) => s.upFace)).toEqual(['+z', '-z']);
+  }, 120000);
+
+  it('still stands it on end when the bit fitted reaches that far', () => {
+    const asked = { ...tooling, sides: 2 as const, toolStickoutMm: 150, stockWidthMm: 0, stockDepthMm: 0, stockThicknessMm: 0 };
+    const r = generateSolidMachining(groovedPlate, { ...deriveSolidOptions(groovedPlate, asked), setups: 'auto' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.setups![0].stock.thicknessMm).toBeGreaterThan(100);
+  }, 120000);
+
+  it('tells the operator to clamp clear of a datum notch, and only then', () => {
+    const steps = r0().setups!;
+    expect(steps[0].upFace).toBe('+z');
+    expect(steps.some((s) => /notch/.test(s.datum?.description ?? ''))).toBe(true);
+    expect(steps[0].instructions[0]).toMatch(/^Clamp the block flat, clear of the (near|far)-(left|right)( and (near|far)-(left|right))? corners?, top up\.$/);
+  }, 120000);
+
+  it('says nothing about material a turned setup goes on to reach', () => {
+    expect(r0().warnings.join(' ')).not.toMatch(/occluded from both|lies beneath overhangs/);
+  }, 120000);
+});

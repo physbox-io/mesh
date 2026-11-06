@@ -28,7 +28,7 @@ function attachBoard() {
     state: Record<string, unknown>;
     parseLine: (line: string) => void;
     ackQueue: unknown[];
-    guideSpotRestoreLaserMode: boolean;
+    laserModeHome: 0 | 1 | null;
   };
 
   const board = {
@@ -65,7 +65,8 @@ function attachBoard() {
   mgr.state.probePinActive = false;
   // A singleton: a $32=1 restored by one test would make the next a laser.
   mgr.state.grblSettings = {};
-  mgr.guideSpotRestoreLaserMode = false;
+  mgr.grblSettings.clear();
+  mgr.laserModeHome = null;
   mgr.ackQueue = [];
 
   mgr.transport = {
@@ -130,7 +131,7 @@ function attachBoard() {
       mgr.transport = null;
       mgr.state.connected = false;
       mgr.state.status = 'DISCONNECTED';
-      mgr.guideSpotRestoreLaserMode = false;
+      mgr.laserModeHome = null;
     },
   };
 }
@@ -154,7 +155,7 @@ afterEach(async () => {
 
 describe('soft reset', () => {
   it('sends nothing behind the reset until the controller is back up', async () => {
-    fake.mgr.guideSpotRestoreLaserMode = true;
+    fake.mgr.laserModeHome = 1;
     await webSerialManager.eStop();
 
     // The borrowed laser mode is put back, after the welcome line, and answered.
@@ -213,7 +214,7 @@ describe('soft reset', () => {
 describe('the guide spot and a starting job', () => {
   it('puts the beam out, and laser mode back, before the first line of the job', async () => {
     fake.mgr.state.guideSpot = true;
-    fake.mgr.guideSpotRestoreLaserMode = true;
+    fake.mgr.laserModeHome = 1;
 
     webSerialManager.startJob(JOB);
     for (let i = 0; i < 40; i++) await wait();

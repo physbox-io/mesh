@@ -10,6 +10,7 @@ import {
 } from './jobCheckpoint';
 import { QUICK_REPLY_TIMEOUT_MS, StreamAbortedError } from './machineCore';
 import { JobMachine } from './machineJob';
+import { unlockAllowed } from './machineGates';
 import { classifyJobLine, describeGrblError, prepareJobLines } from './machineJobLines';
 import type { ResumePoint } from './machineTypes';
 
@@ -94,7 +95,12 @@ export abstract class RecoveryMachine extends JobMachine {
   public restoreCheckpoint(
     program: CheckpointProgram,
     fromLine: number,
-    from: NonNullable<ResumePoint['from']> & { approximate: boolean; pendingPause?: PendingPause }
+    from: NonNullable<ResumePoint['from']> & {
+      approximate: boolean;
+      pendingPause?: PendingPause;
+      /** Where the machine last read. A first report of exactly zero then means it restarted. */
+      mpos?: { x: number; y: number; z: number };
+    }
   ): boolean {
     if (this.isJobRunning || this.isPaused) return false;
 
@@ -102,8 +108,13 @@ export abstract class RecoveryMachine extends JobMachine {
     if (prepared.length === 0) return false;
 
     this.program = prepared;
+    const machine = program.settings?.machine;
+    if (machine === 'laser' || machine === 'cnc') {
+      this.programKind = { program: prepared, laser: machine === 'laser' };
+    }
     this.jobContext = { name: program.jobName ?? undefined, settings: program.settings };
     adoptCheckpoint(program);
+    if (from.mpos) this.expectMachinePosition(from.mpos);
 
     this.updateState({
       totalLines: prepared.length,
@@ -168,8 +179,6 @@ export abstract class RecoveryMachine extends JobMachine {
       return { ok: false, message: blocked };
     }
 
-    fromLine = this.pastHandledToolChange(fromLine);
-
     const plan = planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
       isLaser: this.jobIsLaser(options?.isLaser),
@@ -183,6 +192,13 @@ export abstract class RecoveryMachine extends JobMachine {
     const offTheBed = this.travelBlockedReason([...preamble, ...tail].map((l) => l.code));
     if (offTheBed) return { ok: false, message: offTheBed };
 
+    const offer: ResumePoint = this.state.resume ?? {
+      fromLine: plan.fromLine,
+      stoppedAtLine: plan.fromLine,
+      totalLines: this.programLength(),
+      reason: 'cancelled',
+      jobName: this.jobContext.name ?? null,
+    };
     this.gcodeNotes = [...preamble.map((l) => l.note), ...tail.map((l) => l.note)];
     // The preamble's lines are not in the program, so the program line that
     // queue position 0 corresponds to is behind where it picks up.
@@ -204,7 +220,7 @@ export abstract class RecoveryMachine extends JobMachine {
       lastCompletedJob: null,
     });
 
-    void this.beginStreaming([...preamble.map((l) => l.code), ...tail.map((l) => l.code)]);
+    void this.beginStreaming([...preamble.map((l) => l.code), ...tail.map((l) => l.code)], { resume: offer });
 
     return {
       ok: true,
@@ -218,10 +234,11 @@ export abstract class RecoveryMachine extends JobMachine {
    * Why a stopped job may not be picked up again right now, or null.
    *
    * Two things make a resume cut in the wrong place. An alarm, an unrequested
-   * restart or a dropped link mid-job leaves the controller unsure of X and Y —
-   * a hard limit that browns out the board brings it back reading zero wherever
-   * the gantry stopped, while G54 survives in EEPROM — so the package holds
-   * them lost until the machine homes or the operator zeroes them again. And a
+   * restart, or a board found reading zero after the link was away leaves the
+   * controller unsure of X and Y — a hard limit that browns out the board brings
+   * it back reading zero wherever the gantry stopped, while G54 survives in
+   * EEPROM — so the package holds them lost until the machine homes or the
+   * operator zeroes them again. A dropped link alone is no such evidence. And a
    * router whose Z datum is untrusted (a fresh connection, a new bit) would
    * descend to the stopped depth measured from the wrong tip. A laser's Z never
    * moves in a job, so only the first applies to it.
@@ -247,32 +264,11 @@ export abstract class RecoveryMachine extends JobMachine {
    */
   public previewResume(fromLine: number, options?: ResumeOptions) {
     if (this.program.length === 0) return null;
-    fromLine = this.pastHandledToolChange(fromLine);
     return planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
       isLaser: this.jobIsLaser(options?.isLaser),
       arrivingAtPause: this.lineIsPause(fromLine),
     });
-  }
-
-  /**
-   * Steps a resume past a tool change the operator has already made.
-   *
-   * An offer standing at a tool change whose new bit has since been zeroed
-   * has had its tool change: replaying the `M6` would only stop the job again
-   * at once, for the same bit, and demand the same zero a second time.
-   */
-  protected pastHandledToolChange(fromLine: number): number {
-    const offer = this.state.resume;
-    if (
-      offer?.pendingPause?.kind === 'tool-change'
-      && offer.fromLine === fromLine
-      && !this.state.needsZZero
-      && this.lineIsPause(fromLine)
-    ) {
-      return Math.min(this.programLength(), fromLine + 1);
-    }
-    return fromLine;
   }
 
   /**
@@ -309,18 +305,25 @@ export abstract class RecoveryMachine extends JobMachine {
     // that `assertReadyToResume` keys on PAUSED_TOOL.
     if (this.state.status === 'PAUSED_TOOL' || this.state.status === 'PAUSED_MATERIAL') return false;
 
+    // An e-stop at any await below has already stopped the machine. What is
+    // left of this sequence must not run after it.
+    const epoch = this.jobEpoch;
+    const stoppedMeanwhile = () => epoch !== this.jobEpoch;
+
     // 1. Hold, and let the deceleration finish.
     if (!this.isPaused) {
       this.isPaused = true;
       // The sender stops with the machine, or it fills the planner behind the hold.
       this.queue.hold();
       await this.writeRealtime(0x21); // '!'
+      if (stoppedMeanwhile()) return false;
     }
     this.updateState({
       status: 'PAUSED_OPERATOR',
       pauseMessage: 'Stopping the axes before standing the job down…',
     });
     const stopped = await this.waitForHoldComplete();
+    if (stoppedMeanwhile()) return false;
     /*
      * Never reset a machine that has not confirmed it stopped. This used to
      * carry on regardless: a reset taken while the axes are still moving is a
@@ -345,11 +348,9 @@ export abstract class RecoveryMachine extends JobMachine {
     const at = { ...this.state.wpos };
     const sentLine = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
     const fromLine = this.program.length
-      ? locateExecutedLine(
-          this.program.map((l) => l.code),
-          at,
-          sentLine,
-          PARK_LOOKBACK_LINES
+      ? Math.max(
+          this.rewindFloor(sentLine),
+          locateExecutedLine(this.program.map((l) => l.code), at, sentLine, PARK_LOOKBACK_LINES)
         )
       : sentLine;
 
@@ -379,9 +380,12 @@ export abstract class RecoveryMachine extends JobMachine {
     //    no Z back on a laser, so a lift here cut the rest of the job 5 mm out
     //    of focus.
     await reset;
+    if (stoppedMeanwhile()) return false;
     await this.sendAndWait('G21 G90', QUICK_REPLY_TIMEOUT_MS);
+    if (stoppedMeanwhile()) return false;
     if (!this.jobIsLaser(laser)) {
       const parkRetractZ = await this.clampedRetractZ(5);
+      if (stoppedMeanwhile()) return false;
       await this.sendAndWait(`G0 Z${parkRetractZ.toFixed(3)}`);
     }
     return true;
@@ -446,6 +450,12 @@ export abstract class RecoveryMachine extends JobMachine {
   /** Throws away a parked job without resuming it. */
   public discardPark(): void {
     if (!this.state.park) return;
+    this.dropPark();
+    void this.restoreLaserMode();
+  }
+
+  protected dropPark(): void {
+    if (!this.state.park) return;
     clearCheckpoint();
     this.updateState({
       park: null,
@@ -477,10 +487,24 @@ export abstract class RecoveryMachine extends JobMachine {
   /** Cancels the running job. */
   public async cancelJob(): Promise<void> {
     this.abandonJob('cancelled');
-    await this.eStop();
+    await this.stopForCancel();
     // The soft reset leaves GRBL in Alarm if it was moving, so the status the
     // machine reports next is the truth here rather than an assumed IDLE.
     this.updateState({ progressPercent: 0, remainingSeconds: null, pauseMessage: undefined });
+  }
+
+  /**
+   * How far back from `sent` a stopped job may be picked up: a planner's worth,
+   * and never past the line this run was resumed from, or a tool change or
+   * programmed stop, which would cut the last tool's path with the new one.
+   */
+  protected rewindFloor(sent: number): number {
+    const floor = Math.max(this.cutFloorLine, sent - PARK_LOOKBACK_LINES);
+    for (let i = sent - 1; i >= floor; i--) {
+      const code = (this.program[i]?.code ?? '').replace(/\([^)]*\)|;.*$/g, '');
+      if (classifyJobLine(code) !== 'motion') return i + 1;
+    }
+    return floor;
   }
 
   /**
@@ -528,11 +552,7 @@ export abstract class RecoveryMachine extends JobMachine {
        * was resumed from, which the operator chose and whose preamble lines
        * are not program lines at all.
        */
-      let stoppedAt = Math.max(this.cutFloorLine, sent - PARK_LOOKBACK_LINES);
-      for (let i = sent - 1; i >= stoppedAt; i--) {
-        const code = (this.program[i]?.code ?? '').replace(/\([^)]*\)|;.*$/g, '');
-        if (classifyJobLine(code) !== 'motion') { stoppedAt = i + 1; break; }
-      }
+      const stoppedAt = this.rewindFloor(sent);
       // Forced past the throttle: what follows a drop or an alarm is often the
       // operator closing the tab, and a write that waited out its interval would
       // be the one write that mattered and did not happen.
@@ -547,6 +567,11 @@ export abstract class RecoveryMachine extends JobMachine {
           jobName: this.jobContext.name ?? null,
         },
       });
+    }
+
+    // A cancelled setup leaves the block as it left it, not as its zeros found it.
+    if (reason === 'cancelled' && this.runningSetup && (this.isJobRunning || this.isPaused)) {
+      this.setupEndedAt = ++this.datumSeq;
     }
 
     this.isJobRunning = false;
@@ -575,8 +600,16 @@ export abstract class RecoveryMachine extends JobMachine {
    * The local state is cleared alongside it: the alarm arrived with a half-sent
    * job behind it, and leaving that queue and its pause flag in place is what
    * used to make the app unusable after a limit switch until it was reloaded.
+   *
+   * Only for an alarm or a controller at rest with no job on it: standing a job
+   * down is the one thing this does that an unlock has no business doing to a
+   * job that is fine, and an alarm has already taken any job off the machine.
    */
   public async unlockAlarm(): Promise<void> {
+    if (!unlockAllowed(this.state)) {
+      this.refuseWhileJobHoldsMachine('unlock');
+      throw new Error("Can't unlock while a job is running or on feed hold. Stop or finish the job first.");
+    }
     this.abandonJob('alarm');
     this.updateState({
       lastError: undefined,
@@ -590,5 +623,6 @@ export abstract class RecoveryMachine extends JobMachine {
       // replaced, still has to be zeroed before a start or a resume.
     });
     await super.unlockAlarm();
+    await this.restoreLaserMode();
   }
 }

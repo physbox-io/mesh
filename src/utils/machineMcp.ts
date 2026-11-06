@@ -1,7 +1,11 @@
 import {
   ArmingGate,
+  cancelAgentJobOnDisarm,
   createMachineHandlers,
   describeMachine,
+  disarmWhenMachineStops,
+  refuseWhileJobHoldsMachine,
+  requireNumber,
   type ArmingState,
   type MachineControl,
 } from '@physbox-io/machining';
@@ -11,6 +15,7 @@ import { fetchMachineDevices } from './apiClient';
 import { generateSolidMachining, measurePart, deriveSolidOptions, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
 import { MATERIALS } from './feedsAndSpeeds';
 import { runSettings } from './runSettings';
+import { readTouchPlateMm } from './touchPlate';
 import type { SceneGraph } from '../types/scene';
 
 // ---------------------------------------------------------------------------
@@ -21,28 +26,18 @@ import type { SceneGraph } from '../types/scene';
 // here is the part that is Mesh's: carving the scene that is loaded, and the
 // zeroing and probing routines that are shaped by cutting a solid rather than
 // a board.
-//
-// The manager this drives does not extend the package's GrblMachine — its
-// streaming is ack-driven and woven through resume-from-line and park — and it
-// does not need to. The handlers depend on `MachineControl`, which is the set
-// of things a machine has to be able to do to be driven from a conversation,
-// and this manager satisfies it.
 
 /**
  * The gate. One per tab, because there is one machine.
  *
- * Disarming cancels whatever the agent had running. A window closed while a
- * carve is streaming has to stop the carve — otherwise "stop letting Claude
- * move this" would be a button that changes nothing until the next command,
- * which is the opposite of what someone reaching for it wants.
+ * A person disarming stops the job the agent started, and only that: "stop
+ * letting Claude move this" has to change something now, but it is no reason to
+ * reset a job a person started. An e-stop, an alarm or a lost link closes it too.
  */
 export const machineArming = new ArmingGate({
-  onDisarm: () => {
-    if (webSerialManager.isRunning() || webSerialManager.isJobPaused()) {
-      void webSerialManager.cancelJob();
-    }
-  },
+  onDisarm: reason => cancelAgentJobOnDisarm(webSerialManager, reason),
 });
+disarmWhenMachineStops(webSerialManager, machineArming);
 
 /** What the UI banner watches. */
 export function subscribeToArming(listener: (state: ArmingState) => void): () => void {
@@ -74,11 +69,13 @@ export function setCurrentScene(scene: SceneGraph | null, stock?: { thicknessMm:
  * taller than the bench stock falls back to stock sized from the part.
  */
 export function carveOptions(args: Record<string, unknown>) {
-  const dia = typeof args.toolDiaMm === 'number' && args.toolDiaMm > 0 ? args.toolDiaMm : 3;
+  const dia = requireNumber(args, 'toolDiaMm', { default: 3, min: 0.01, max: MAX_TOOL_DIA_MM })!;
+  const sides = requireNumber(args, 'sides', { min: 1, max: 2 });
+  const askedThickness = requireNumber(args, 'stockThicknessMm', { min: 0.01, max: MAX_STOCK_THICKNESS_MM });
   let stockThicknessMm: number | undefined;
   let stockFrom: 'asked' | 'bench' | 'part' = 'part';
-  if (typeof args.stockThicknessMm === 'number') {
-    stockThicknessMm = args.stockThicknessMm;
+  if (askedThickness !== undefined) {
+    stockThicknessMm = askedThickness;
     stockFrom = 'asked';
   } else if (benchThicknessMm && currentScene) {
     const part = measurePart(currentScene, '+z', 100);
@@ -94,7 +91,7 @@ export function carveOptions(args: Record<string, unknown>) {
   // seven times the feed a 1 mm bit can take in aluminium.
   const motion = webSerialManager.getState().motion;
   const asked = {
-    ...(typeof args.sides === 'number' ? { sides: args.sides } : {}),
+    ...(sides !== undefined ? { sides } : {}),
     // Planned from any face; only setup 1 is ever run from here.
     ...(args.setups === 'auto' ? { setups: 'auto' as const } : {}),
     ...(stockThicknessMm !== undefined ? { stockThicknessMm } : {}),
@@ -125,6 +122,28 @@ function jobBounds(): { minX: number; minY: number; maxX: number; maxY: number }
 }
 
 /**
+ * Which program a carve asked for: a planned job's setup number, or side A or B,
+ * given as a letter or as 1 or 2. Agents send these as strings as often as not.
+ */
+export function pickCarveTarget<P extends { index: number }, S extends { side: 'A' | 'B' }>(
+  args: Record<string, unknown>,
+  planned: P[] | null,
+  sides: S[]
+): { wanted: number | 'A' | 'B' | undefined; side: P | S | undefined } {
+  if (planned) {
+    const wanted = requireNumber(args, 'setup', { default: 1, min: 1 })!;
+    return { wanted, side: planned.find(s => s.index === wanted) };
+  }
+  if (args.side === undefined || args.side === null) return { wanted: sides[0]?.side, side: sides[0] };
+  const asked = String(args.side).trim().toUpperCase();
+  const wanted = asked === 'A' || asked === '1' ? 'A' : asked === 'B' || asked === '2' ? 'B' : null;
+  if (!wanted) {
+    throw new Error(`\`side\` has to be A, B, 1 or 2; got ${JSON.stringify(args.side)}. Nothing was sent to the machine.`);
+  }
+  return { wanted, side: sides.find(s => s.side === wanted) };
+}
+
+/**
  * Carves the scene that is loaded.
  *
  * A solid is machined from more than one side, and the sides are separate
@@ -147,10 +166,7 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
 
   // A planned job is run by setup number; a one- or two-sided one by side, as before.
   const planned = result.plan && result.setups ? result.setups : null;
-  const wanted = planned ? (typeof args.setup === 'number' ? args.setup : 1) : typeof args.side === 'number' ? args.side : result.sides[0]?.side;
-  const side = planned
-    ? planned.find(s => s.index === wanted)
-    : result.sides.find(s => s.side === wanted);
+  const { wanted, side } = pickCarveTarget(args, planned, result.sides);
   if (!side?.gcode) {
     throw new Error(
       planned
@@ -177,6 +193,7 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     name: planned ? `carve setup ${wanted}` : `carve side ${side.side}`,
     // Every setup after the first needs the block turned by hand, so the runner refuses it here.
     origin: 'mcp',
+    machine: 'cnc',
     setup: {
       sequenceId: `mcp-solid-${result.sides[0].gcode.length}`,
       index: planned ? Number(wanted) : side.side === 'B' ? 2 : 1,
@@ -202,7 +219,8 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
   // already running), which used to be reported to the agent as a cut under
   // way - so a null with nothing streaming is the refusal, and says why.
   if (run && !run.delivered) throw new Error(run.message);
-  if (!run && !webSerialManager.isRunning()) {
+  // RUNNING rather than `isRunning`: the stream is still starting at this point.
+  if (!run && webSerialManager.getState().status !== 'RUNNING') {
     throw new Error(webSerialManager.getState().lastError ?? 'The job did not start.');
   }
 
@@ -227,15 +245,65 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
  *
  * `unknown` rather than `any`: these arrive as JSON over the bridge, from an
  * agent that may be a different version of a different app, so every field is a
- * claim rather than a fact. The handlers below narrow what they read — a
- * `feedRate` that arrived as the string "50" should fall back to the default
- * rather than be handed to the machine.
+ * claim rather than a fact. Numbers are read with the package's `requireNumber`,
+ * so "0.1" is a tenth of a millimetre and "fast" is a refusal, not a default.
  */
 type McpArgs = Record<string, unknown>;
 
-/** A number from an argument, or the fallback when it is anything else. */
-function num<T extends number | undefined>(value: unknown, fallback: T): number | T {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+/** Past any bit a hobby machine holds, and any thickness: only a typo gets here. */
+const MAX_TOOL_DIA_MM = 100;
+const MAX_STOCK_THICKNESS_MM = 2000;
+/** A touch plate, in the range the panel's own field takes. */
+const MAX_TOUCH_PLATE_MM = 100;
+/** A machine that has not reported `$130`-`$132` gets this, not the benefit of the doubt. */
+const UNKNOWN_TRAVEL_MM = 5000;
+/** A hundred points a side is hours of probing: past that it is a typo. */
+const MAX_PROBE_POINTS = 100;
+
+/** The machine's own travel on each axis, as far as it has said. */
+function travel() {
+  const reported = webSerialManager.getState().motion.travel;
+  return {
+    x: reported?.x || UNKNOWN_TRAVEL_MM,
+    y: reported?.y || UNKNOWN_TRAVEL_MM,
+    z: reported?.z || UNKNOWN_TRAVEL_MM,
+  };
+}
+
+/** The fastest this machine moves, when it has said; unbounded on an assumed profile. */
+function maxFeed(): number | undefined {
+  const { source, maxRate } = webSerialManager.getState().motion;
+  return source === 'machine' ? Math.max(maxRate.x, maxRate.y, maxRate.z) : undefined;
+}
+
+/** A guide lap's arguments: what `frameJob` takes. */
+function frameArgs(args: McpArgs) {
+  return {
+    guidePower: requireNumber(args, 'guidePower', { min: 0, max: 100 }),
+    safeZMm: requireNumber(args, 'safeZMm', { min: 0, max: travel().z }),
+  };
+}
+
+/** Bounds an agent gave for a probe grid, checked against the machine. */
+function probeBounds(raw: Record<string, unknown>) {
+  const reach = travel();
+  const side = (name: string, max: number) => requireNumber(raw, name, { default: 0, min: -max, max })!;
+  return {
+    minX: side('minX', reach.x),
+    minY: side('minY', reach.y),
+    maxX: side('maxX', reach.x),
+    maxY: side('maxY', reach.y),
+  };
+}
+
+/** A resume's options, each one a checked number or left out. */
+function resumeOptions(raw: unknown): ResumeOptions {
+  const options = (raw ?? {}) as Record<string, unknown>;
+  return {
+    plungeFeed: requireNumber(options, 'plungeFeed', { min: 1, max: maxFeed() }),
+    spindleWarmupSeconds: requireNumber(options, 'spindleWarmupSeconds', { min: 0, max: 600 }),
+    extraClearance: requireNumber(options, 'extraClearance', { min: 0, max: travel().z }),
+  };
 }
 
 /** Mesh's full machine command set, keyed by the bridge command names. */
@@ -243,8 +311,6 @@ export function createMeshMachineHandlers(): Record<
   string,
   (args: McpArgs) => Promise<unknown>
 > {
-  // The manager satisfies MachineControl without extending GrblMachine — see
-  // the note at the top of this file.
   const machine: MachineControl = webSerialManager;
 
   const shared = createMachineHandlers({
@@ -258,10 +324,14 @@ export function createMeshMachineHandlers(): Record<
        * guide beam lit — that is the whole point of it, since the operator is
        * watching where the outline falls on the material.
        */
-      frameJob: async (bounds, args) =>
-        webSerialManager.frameJob(bounds, num(args.guidePower, undefined), {
-          safeZMm: num(args.safeZMm, undefined),
-        }),
+      frameJob: async (bounds, args) => {
+        const { guidePower, safeZMm } = frameArgs(args);
+        return webSerialManager.frameJob(bounds, guidePower, {
+          // The lap of a carve is a router's, whatever `$32` says.
+          ...(args.bounds ? {} : { laserMode: false }),
+          safeZMm,
+        });
+      },
       listDevices: async () => {
         const devices = await fetchMachineDevices();
         return devices.map(d => ({ id: d.deviceId, name: d.name, online: d.online }));
@@ -277,10 +347,23 @@ export function createMeshMachineHandlers(): Record<
     MACHINE_DISARM: shared.disarm,
     MACHINE_CONNECT: shared.connect,
     MACHINE_DISCONNECT: shared.disconnect,
-    MACHINE_JOG: shared.jog,
+    MACHINE_JOG: async (args: McpArgs) => {
+      const reach = travel();
+      for (const axis of ['x', 'y', 'z'] as const) {
+        requireNumber(args, axis, { min: -reach[axis], max: reach[axis] });
+      }
+      requireNumber(args, 'feedRate', { max: maxFeed() });
+      return shared.jog(args);
+    },
     MACHINE_HOME: shared.home,
     MACHINE_UNLOCK: shared.unlock,
-    MACHINE_GOTO_ORIGIN: shared.goto_origin,
+    MACHINE_GOTO_ORIGIN: async (args: McpArgs) => {
+      machineArming.requireArmed('goto_origin');
+      requireNumber(args, 'safeZMm', { min: 0, max: travel().z });
+      const refusal = webSerialManager.unzeroedLiftRefusal('going to the origin');
+      if (refusal) throw new Error(refusal);
+      return shared.goto_origin(args);
+    },
     MACHINE_ZERO_XY: shared.zero_xy,
     MACHINE_FRAME_JOB: shared.frame_job,
     MACHINE_TRIM: shared.trim,
@@ -300,21 +383,25 @@ export function createMeshMachineHandlers(): Record<
      */
     MACHINE_ZERO_Z: async (args: McpArgs) => {
       machineArming.requireArmed('zero_z');
+      refuseWhileJobHoldsMachine(machine, 'zero Z');
 
-      if (args.here === true) {
-        const offset = num(args.offsetMm, 0);
+      if (args.here === true || args.here === 'true') {
+        const offset = requireNumber(args, 'offsetMm', { default: 0, min: -travel().z, max: travel().z })!;
         machineArming.noteAgentCommand('zero_z', `here offset=${offset}`);
         const result = await webSerialManager.zeroZHere(offset);
         if (!result.success) throw new Error(result.message);
         return { ...describeMachine(machine, machineArming), message: result.message };
       }
 
-      machineArming.noteAgentCommand('zero_z', `plate=${num(args.touchPlateMm, 12)}`);
-      const result = await webSerialManager.zeroZ(
-        num(args.touchPlateMm, 12),
-        num(args.searchDepthMm, ZERO_SEARCH_MM),
-        num(args.feedRate, 50)
-      );
+      const plate = requireNumber(args, 'touchPlateMm', {
+        default: readTouchPlateMm(),
+        min: 0,
+        max: MAX_TOUCH_PLATE_MM,
+      })!;
+      const search = requireNumber(args, 'searchDepthMm', { default: ZERO_SEARCH_MM, min: 0.1, max: travel().z })!;
+      const feed = requireNumber(args, 'feedRate', { default: 50, min: 1, max: maxFeed() })!;
+      machineArming.noteAgentCommand('zero_z', `plate=${plate}`);
+      const result = await webSerialManager.zeroZ(plate, search, feed);
       if (!result.success) throw new Error(result.message);
       return {
         ...describeMachine(machine, machineArming),
@@ -326,6 +413,7 @@ export function createMeshMachineHandlers(): Record<
     /** Sets X, Y and Z all at once, where the tool is standing. */
     MACHINE_ZERO_ALL: async () => {
       machineArming.requireArmed('zero_all');
+      refuseWhileJobHoldsMachine(machine, 'zero the axes');
       machineArming.noteAgentCommand('zero_all');
       await webSerialManager.zeroAllHere();
       await webSerialManager.refreshPosition();
@@ -338,11 +426,12 @@ export function createMeshMachineHandlers(): Record<
      */
     MACHINE_PROBE_SURFACE: async (args: McpArgs) => {
       machineArming.requireArmed('probe_surface');
+      refuseWhileJobHoldsMachine(machine, 'probe the surface');
       machineArming.noteAgentCommand('probe_surface');
 
       const bounds =
         args.bounds && typeof args.bounds === 'object'
-          ? (args.bounds as ReturnType<typeof jobBounds>)
+          ? probeBounds(args.bounds as Record<string, unknown>)
           : jobBounds();
       if (!bounds) {
         throw new Error('There is nothing to probe: pass bounds, or load a scene first.');
@@ -350,8 +439,8 @@ export function createMeshMachineHandlers(): Record<
 
       const grid = await webSerialManager.probeGrid(
         bounds,
-        num(args.cols, 3),
-        num(args.rows, 3)
+        requireNumber(args, 'cols', { default: 3, min: 2, max: MAX_PROBE_POINTS })!,
+        requireNumber(args, 'rows', { default: 3, min: 2, max: MAX_PROBE_POINTS })!
       );
 
       const zs = grid.points.flat().map(p => p.z);
@@ -376,32 +465,38 @@ export function createMeshMachineHandlers(): Record<
      */
     MACHINE_RESUME_FROM_LINE: async (args: McpArgs) => {
       machineArming.requireArmed('resume_from_line');
-      const fromLine = Number(args.fromLine);
-      if (!Number.isFinite(fromLine)) {
+      refuseWhileJobHoldsMachine(machine, 'resume from a line');
+      const fromLine = requireNumber(args, 'fromLine', { min: 0 });
+      if (fromLine === undefined) {
         throw new Error('Give fromLine: the program line to pick the job back up at.');
       }
       machineArming.noteAgentCommand('resume_from_line', `line=${fromLine}`);
-      // Only finite numbers get through: these go straight into G-code, where a
+      // Only checked numbers get through: these go straight into G-code, where a
       // string extraClearance concatenated into "G0 Z105" and a bad plungeFeed
       // became "FNaN", refused only after the spindle had been started.
-      const raw = (args.options ?? {}) as Record<string, unknown>;
-      const options: ResumeOptions = {
-        plungeFeed: num(raw.plungeFeed, undefined),
-        spindleWarmupSeconds: num(raw.spindleWarmupSeconds, undefined),
-        extraClearance: num(raw.extraClearance, undefined),
-      };
-      const result = webSerialManager.resumeFromLine(fromLine, options);
-      if (!result.ok) throw new Error(result.message);
+      const options = resumeOptions(args.options);
+      webSerialManager.expectAgentJob();
+      let result: { ok: boolean; message: string };
+      try {
+        result = webSerialManager.resumeFromLine(fromLine, options);
+      } catch (err) {
+        webSerialManager.expectAgentJob(false);
+        throw err;
+      }
+      if (!result.ok) {
+        webSerialManager.expectAgentJob(false);
+        throw new Error(result.message);
+      }
       return { ...describeMachine(machine, machineArming), message: result.message };
     },
 
     /** What a resume would do, without doing it. Read-only, so never gated. */
     MACHINE_PREVIEW_RESUME: async (args: McpArgs) => {
-      const fromLine = Number(args.fromLine);
-      if (!Number.isFinite(fromLine)) {
+      const fromLine = requireNumber(args, 'fromLine', { min: 0 });
+      if (fromLine === undefined) {
         throw new Error('Give fromLine: the program line a resume would pick up at.');
       }
-      const plan = webSerialManager.previewResume(fromLine, args.options as ResumeOptions | undefined);
+      const plan = webSerialManager.previewResume(fromLine, resumeOptions(args.options));
       if (!plan) return { ok: false, error: 'No program has been sent this session.' };
       return {
         ok: true,

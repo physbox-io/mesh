@@ -205,7 +205,10 @@ export function emitAdaptiveLayer(w: ToolpathWriter, layout: RoughingLayout, lay
     const slotting = slot > Math.max(0.1, baseStepdown * 0.1);
     // A slot is fed for the chip it is actually taking rather than the one
     // the stepover implies.
-    const feed = feedForEngagement(opts.roughingFeedrate, slotting ? 1 : ring.engagement);
+    const feed = Math.min(
+      feedForEngagement(opts.roughingFeedrate, slotting ? 1 : ring.engagement),
+      Math.min(opts.motionProfile.maxRate.x, opts.motionProfile.maxRate.y)
+    );
 
     /*
      * ...and cut at the depth its engagement earns, not the layer's.

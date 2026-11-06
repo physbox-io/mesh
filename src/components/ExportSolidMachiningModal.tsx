@@ -12,6 +12,7 @@ import {
 import { useExportJob } from '../utils/exportWorkerClient';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager } from '../utils/webSerialManager';
+import { canStartProgram } from '../utils/machineGates';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
@@ -244,12 +245,13 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     secondTool: swaps ? finishTool : undefined,
     caveat: speedNote,
   };
-  const canCut = !!current && machineState.connected && machineState.status === 'IDLE';
+  const canCut = canStartProgram(machineState, { ready: !!current, busy, pending, failure });
   /** Runs a setup. A later setup is refused by the runner until the turned block is zeroed again. */
   const runSetup = (i: number, pinsSeated = false) => {
     const s = setups[i];
     if (!s?.gcode) return;
     void webSerialManager.runJob(s.gcode, {
+      machine: 'cnc',
       name: `Solid part, setup ${s.index} of ${s.of}`,
       estimatedSeconds: s.estimatedTimeSeconds,
       setup: { sequenceId, index: s.index, of: s.of, locate: s.locate, pinsSeated },
@@ -823,8 +825,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
           firstStock={result.stock}
           carved={setups.slice(0, turning).map((q) => q.upFace)}
           pins={result.pins}
-          toolDiaMm={settled.finishingToolDiaMm}
-          toolLabel={finishTool}
+          toolDiaMm={settled.roughingEnabled ? settled.roughingToolDiaMm : settled.finishingToolDiaMm}
+          toolLabel={settled.roughingEnabled ? roughTool : finishTool}
           stickoutMm={settled.toolStickoutMm}
           clearanceMm={options.clearanceMm ?? 0}
           safeZMm={options.safeZ}

@@ -148,21 +148,23 @@ export function writeGuideJiggle(enabled: boolean): boolean {
  * written down before the setting is changed and acted on at the next
  * connection.
  */
-export function readLaserModeBorrowed(): boolean {
+export function readLaserModeBorrowed(): 0 | 1 | null {
   try {
-    return localStorage.getItem(LASER_MODE_BORROWED_KEY) === '1';
+    const stored = localStorage.getItem(LASER_MODE_BORROWED_KEY);
+    return stored === '1' ? 1 : stored === '0' ? 0 : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-export function writeLaserModeBorrowed(borrowed: boolean): void {
+/** Writes down the `$32` to go back to, or null when it is not borrowed. */
+export function writeLaserModeBorrowed(home: 0 | 1 | null): void {
   try {
-    if (borrowed) localStorage.setItem(LASER_MODE_BORROWED_KEY, '1');
+    if (home !== null) localStorage.setItem(LASER_MODE_BORROWED_KEY, String(home));
     else localStorage.removeItem(LASER_MODE_BORROWED_KEY);
   } catch {
-    // Non-fatal, but it does mean a tab closed mid-spot leaves `$32` off. The
-    // in-session restore paths still cover every other exit.
+    // Non-fatal, but it does mean a tab closed mid-borrow leaves `$32` changed.
+    // The in-session restore paths still cover every other exit.
   }
 }
 

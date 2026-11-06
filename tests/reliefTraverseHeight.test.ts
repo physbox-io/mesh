@@ -93,19 +93,19 @@ describe('Traverse height', () => {
 });
 
 describe('Tool change', () => {
-  it('parks over the work origin, clear of the work, for the change', () => {
+  it('parks off the work origin, clear of the work, for the change', () => {
     const res = generateReliefCarveGcode(scattered, { ...options, roughingEnabled: true });
     expect(res.toolChange).toBe(true);
     const lines = res.gcode.split('\n').map((l) => l.split(';')[0].trim()).filter(Boolean);
     const change = lines.findIndex((l) => /^T2\s*M6/.test(l));
     expect(change).toBeGreaterThan(0);
-    // Since the last cut: up first, then over to X0 Y0, then the change.
+    // Since the last cut: up first, then over to the spot, then the change.
     // (The spindle stops straight after the lift, wherever it is.)
     let lastCut = change;
     while (lastCut > 0 && !lines[lastCut].startsWith('G1')) lastCut--;
     const between = lines.slice(lastCut + 1, change);
     const lift = between.findIndex((l) => /^G0 Z/.test(l));
-    const park = between.findIndex((l) => /^G0 X0(\.0+)? Y0(\.0+)?$/.test(l));
+    const park = between.findIndex((l) => /^G0 X[\d.]+ Y[\d.]+$/.test(l));
     expect(lift).toBeGreaterThanOrEqual(0);
     expect(park).toBeGreaterThan(lift);
   });

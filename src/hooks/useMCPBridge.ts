@@ -4,7 +4,7 @@
  */
 
 import { useEffect } from 'react';
-import { getStoredAuthToken } from '../utils/apiClient';
+import { getStoredAuthToken, hubToken } from '../utils/apiClient';
 import { tabSession } from '../utils/tabSession';
 import { useStore } from '../store/useStore';
 import { createMeshMachineHandlers, setCurrentScene } from '../utils/machineMcp';
@@ -81,21 +81,20 @@ export function useMCPBridge() {
 
       ws.onopen = () =>
         /*
-         * The handshake also offers this tab's session, as a fallback
-         * credential for the MCP server's cloud tools — the ones that read the
-         * run archive over HTTPS rather than driving this tab. It means an
-         * agent can answer a question about last month's job with no setup at
-         * all, as long as the app is open.
+         * The handshake also offers this tab's API token, if it has one, as a
+         * fallback credential for the MCP server's cloud tools: the ones that
+         * read the run archive over HTTPS rather than driving this tab.
          *
          * The server treats it as a last resort behind PHYSBOX_API_TOKEN and its
-         * config file, because this socket has no origin check. It is localhost
-         * only, and the server binds loopback.
+         * config file, because this socket has no origin check, which is also
+         * why the session token is never sent. It is localhost only, and the
+         * server binds loopback.
          */
         ws!.send(JSON.stringify({
           event: 'HELLO',
           app: 'physics',
           port: location.port,
-          token: getStoredAuthToken() ?? undefined,
+          token: hubToken(getStoredAuthToken()),
           // Which TAB this is. Several tabs of the same app all connect to the
           // one hub, and without a name for each the hub could only shout: every
           // command went to all of them and whichever answered first won. That

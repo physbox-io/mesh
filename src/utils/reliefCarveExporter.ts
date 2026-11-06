@@ -360,9 +360,6 @@ export function generateReliefCarveGcode(
     // A through-cut is a depth the operator asked for by name, not one to
     // second-guess: the stock and a skim of spoilboard, and no less.
     reliefDepth = opts.stockThicknessMm + cutThrough;
-    warnings.push(
-      `Cuts through ${opts.stockThicknessMm} mm stock and ${cutThrough} mm into the spoilboard.`
-    );
   } else if (asModelled && reliefDepth > maxDepthForStock) {
     warnings.push(
       `The model needs ${reliefDepth.toFixed(1)} mm of depth; the stock is ${opts.stockThicknessMm} mm ` +
@@ -502,7 +499,17 @@ export function generateReliefCarveGcode(
       }
     : carveBounds;
 
+  // Only a surface that goes through the stock gets the program held to it: a
+  // model standing on the board all round asks for no through cut at all.
+  let throughDepth: number | undefined;
   if (cutThrough > 0) {
+    let lowest = 0;
+    for (let k = 0; k < surface.z.length; k++) if (surface.z[k] < lowest) lowest = surface.z[k];
+    if (lowest <= -opts.stockThicknessMm + 1e-3) {
+      throughDepth = opts.stockThicknessMm;
+      warnings.push(`Cuts through ${opts.stockThicknessMm} mm stock and ${cutThrough} mm into the spoilboard.`);
+    }
+
     let loose = countLoosePieces(surface, -opts.stockThicknessMm, res);
     if (loose > 0 && opts.holdingTabs !== false) {
       const freed = loose;
@@ -543,7 +550,10 @@ export function generateReliefCarveGcode(
   ];
 
   const cut = machineSurface(
-    { surface, bounds, depthMm: reliefDepth, resolution: res, header, runOff },
+    {
+      surface, bounds, depthMm: reliefDepth, resolution: res, header, runOff,
+      ...(throughDepth !== undefined ? { mustReachMm: throughDepth } : {}),
+    },
     opts,
     warnings
   );

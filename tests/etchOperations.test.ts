@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { exportPcbFaceplateSvg, PCB_PRESETS } from '../src/utils/pcbEnclosureSync';
 import { exportSheetUnfold } from '../src/utils/sheetUnfoldExporter';
 import { exportLaserCutSvg, DEFAULT_LASER_OPTIONS } from '../src/utils/laserCutExporter';
+import { exportContourSliceSvg, DEFAULT_CONTOUR_OPTIONS } from '../src/utils/contourSliceExporter';
 import { birdhousePreset } from '../src/presets/presetScenes';
 import type { SceneGraph } from '../src/types/scene';
 
@@ -42,5 +43,20 @@ describe('SVG sent to Etch declares its operations', () => {
     for (const g of groups(r.svg!)) expect(op(g), g).toBeDefined();
     expect(groupOp(r.svg!, 'cut-paths')).toBe('cut');
     for (const rect of r.svg!.match(/<rect\b[^>]*stroke-dasharray[^>]*>/g) ?? []) expect(op(rect)).toBe('ghost');
+  });
+
+  it('contour: cuts and numbers, and a sheet frame that is only a guide', () => {
+    const cube = {
+      nodes: [{ id: 'b', name: 'b', pos: [0, 0, 0.03], joints: [], children: [], geoms: [{ type: 'box', size: [0.03, 0.03, 0.03] }] }],
+    } as unknown as SceneGraph;
+    const r = exportContourSliceSvg(cube, { ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.02 });
+    expect(r.success).toBe(true);
+    for (const g of groups(r.svg!)) expect(op(g), g).toBeDefined();
+    expect(groupOp(r.svg!, 'cut-paths')).toBe('cut');
+    expect(groupOp(r.svg!, 'engrave-labels')).toBe('etch');
+    const frames = r.svg!.match(/<rect\b[^>]*stroke-dasharray[^>]*>/g) ?? [];
+    expect(frames.length).toBeGreaterThan(0);
+    for (const rect of frames) expect(op(rect)).toBe('ghost');
+    for (const caption of r.svg!.match(/<text x="10"[^>]*>/g) ?? []) expect(op(caption)).toBe('ghost');
   });
 });

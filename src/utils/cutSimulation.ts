@@ -42,7 +42,11 @@ export interface SimulateOptions {
   /** Where the stock starts, in work coordinates. Default 0, 0. */
   originX?: number;
   originY?: number;
-  /** Cutters by tool number. Switched at each `T<n> M6`. */
+  /**
+   * Cutters by tool number. Switched at each `T<n> M6`, where the new one is
+   * touched off on whatever is under it, as the operator does: Z0 is that
+   * ground from then on.
+   */
   tools: Record<number, SimTool>;
   /** The tool in the spindle when the program starts. Default the lowest number. */
   initialTool?: number;
@@ -209,7 +213,28 @@ export function simulateMilling(gcode: string, opts: SimulateOptions): CutResult
     return removed;
   };
 
-  let x = 0, y = 0, z = 5, mode = 0;
+  /** The tip height at which a cutter standing at (px, py) first touches the stock. */
+  const touchHeight = (px: number, py: number, c: Cutter): number => {
+    const { r, r2, shape, k } = c;
+    let high = -Infinity;
+    const j1 = Math.min(rows - 1, Math.floor((py + r - y0) / cell));
+    const i1 = Math.min(cols - 1, Math.floor((px + r - x0) / cell));
+    for (let j = Math.max(0, Math.floor((py - r - y0) / cell)); j <= j1; j++) {
+      const dy = y0 + (j + 0.5) * cell - py;
+      for (let i = Math.max(0, Math.floor((px - r - x0) / cell)); i <= i1; i++) {
+        const dx = x0 + (i + 0.5) * cell - px;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > r2) continue;
+        const lift = shape === 'flat' ? 0 : shape === 'ball' ? r - Math.sqrt(r2 - d2) : k * Math.sqrt(d2);
+        high = Math.max(high, h[j * cols + i] - lift);
+      }
+    }
+    return high === -Infinity ? 0 : high;
+  };
+
+  // `z` is where the tip is against the stock; a program's Z words are against
+  // the Z0 of the last touch-off, `workZ0`.
+  let x = 0, y = 0, z = 5, mode = 0, workZ0 = 0;
   const lines = gcode.split('\n');
   const every = Math.max(1, Math.floor(lines.length / 100));
   for (let n = 0; n < lines.length; n++) {
@@ -219,6 +244,8 @@ export function simulateMilling(gcode: string, opts: SimulateOptions): CutResult
     if (/\bM0?6\b/.test(code)) {
       const t = /\bT(\d+)/.exec(code);
       if (t) toolNo = parseInt(t[1], 10);
+      const fitted = cutterFor(toolNo);
+      if (fitted) workZ0 = touchHeight(x, y, fitted);
     }
     let nx = x, ny = y, nz = z, motion = false;
     for (const [, key, v] of code.matchAll(/([GXYZ])\s*(-?\d*\.?\d+)/g)) {
@@ -230,7 +257,7 @@ export function simulateMilling(gcode: string, opts: SimulateOptions): CutResult
         motion = true;
         if (key === 'X') nx = val;
         else if (key === 'Y') ny = val;
-        else nz = val;
+        else nz = val + workZ0;
       }
     }
     if (motion && mode >= 0 && (nx !== x || ny !== y || nz !== z)) {

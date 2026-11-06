@@ -20,7 +20,7 @@ import { reliefSimulationTools } from '../../utils/simulatedPart';
 import { simulationSetups } from '../../utils/solidSetups';
 import { FACE_NAME } from '../../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../../utils/sheetSimulation';
-import { defaultCornerRelief, layoutKerf } from '../../utils/sheetCutRecipe';
+import { defaultCornerRelief, layoutKerf, layoutMargin } from '../../utils/sheetCutRecipe';
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from '../useAddSimulation';
 import { addMcpSimulationSteps } from '../useSimulationSteps';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../../utils/timberSimulation';
@@ -305,6 +305,7 @@ export const machiningCommands: McpCommands = {
           ...DEFAULT_LASER_OPTIONS,
           materialThickness: thicknessMm / 1000,
           kerf: layoutKerf(machine, DEFAULT_LASER_OPTIONS.kerf),
+          margin: layoutMargin(machine, bitDiaMm / 1000),
           cornerRelief: defaultCornerRelief(machine),
           bitDiameter: bitDiaMm / 1000,
         }));
@@ -331,6 +332,7 @@ export const machiningCommands: McpCommands = {
           ...DEFAULT_CONTOUR_OPTIONS,
           materialThickness: thicknessMm / 1000,
           kerf: layoutKerf(machine, DEFAULT_CONTOUR_OPTIONS.kerf),
+          margin: layoutMargin(machine, bitDiaMm / 1000),
         }));
       if (!result.success || !result.layers?.length || !result.stockTransform) {
         return { ok: false, error: result.error || 'The model could not be sliced.', warnings: result.warnings ?? [] };

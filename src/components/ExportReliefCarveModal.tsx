@@ -9,6 +9,7 @@ import {
 } from '../utils/reliefCarveExporter';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager } from '../utils/webSerialManager';
+import { canStartProgram } from '../utils/machineGates';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
@@ -200,11 +201,12 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     caveat: speedNote,
   };
 
-  const canCarve = !!result?.success && machineState.connected && machineState.status === 'IDLE';
+  const canCarve = canStartProgram(machineState, { ready: !!result?.success, busy, pending, failure });
 
   const handleStartCarve = () => {
     if (!result?.gcode) return;
     void webSerialManager.runJob(result.gcode, {
+      machine: 'cnc',
       name: 'Relief carve',
       estimatedSeconds: result.estimatedTimeSeconds,
       // The same preflight the operator is shown before pressing this, kept

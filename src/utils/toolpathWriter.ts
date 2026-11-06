@@ -28,6 +28,8 @@ export class ToolpathWriter {
   readonly segments: ToolpathSegment[] = [];
   /** Cutting travel in mm, rapids excluded. */
   cutDistance = 0;
+  /** The lowest the tip has been sent by a cutting move, mm below the stock's top face as a negative. */
+  deepestZ = 0;
 
   // Where the tool is, so a path can be built relative to it. The clock used to
   // be kept here as well, as distance over feedrate; it is now taken off the
@@ -55,7 +57,7 @@ export class ToolpathWriter {
    * only at its end point, so a traverse across a crowned sheet runs a straight
    * line under the crown - up to the grid's span below where it should be.
    */
-  private readonly levellingSpanMm: number;
+  readonly levellingSpanMm: number;
   private readonly traverseClearanceMm: number;
   /** The height the last `leadIn` traversed at, recorded for the preview. */
   lastTraverseZ: number;
@@ -88,12 +90,14 @@ export class ToolpathWriter {
   }
 
   plungeTo(z: number) {
+    this.deepestZ = Math.min(this.deepestZ, z);
     this.stock.cut(this.atX, this.atY, this.atZ, this.atX, this.atY, z, this.cutter.radius, this.cutter.profile);
     this.atZ = z;
   }
 
   cutTo(x: number, y: number, z: number) {
     this.cutDistance += Math.hypot(x - this.atX, y - this.atY, z - this.atZ);
+    this.deepestZ = Math.min(this.deepestZ, z);
     this.stock.cut(this.atX, this.atY, this.atZ, x, y, z, this.cutter.radius, this.cutter.profile);
     this.atX = x; this.atY = y; this.atZ = z;
   }

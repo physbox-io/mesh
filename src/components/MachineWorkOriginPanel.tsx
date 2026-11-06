@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ChevronsDown, Crosshair, Lightbulb, Navigation, Info, Check, Hand, AlertTriangle } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { readTouchPlateMm, writeTouchPlateMm } from '../utils/touchPlate';
 import { ProbeCircuitStatus } from './ProbeCircuitStatus';
 import { JogPad } from './JogPad';
 import {
@@ -47,7 +48,7 @@ export const MachineWorkOriginPanel: React.FC<{
   /** Deep-links to the zeroing walkthrough in the app's Reference Guide. */
   onOpenDocs?: () => void;
 }> = ({ machineState, showZProbe = true, isLaser = false, onOpenDocs }) => {
-  const [plateThickness, setPlateThickness] = useState(12.0);
+  const [plateThickness, setPlateThickness] = useState(readTouchPlateMm);
   const [isProbingZ, setIsProbingZ] = useState(false);
   const [probeMessage, setProbeMessage] = useState<{ ok: boolean; text: string } | null>(null);
   /** Thickness of whatever is between the tool tip and the surface for a manual touch-off. */
@@ -313,7 +314,7 @@ export const MachineWorkOriginPanel: React.FC<{
                     max={100}
                     step={0.1}
                     value={plateThickness}
-                    onChange={(v) => v !== undefined && setPlateThickness(v)}
+                    onChange={(v) => v !== undefined && setPlateThickness(writeTouchPlateMm(v))}
                     title="Touch plate thickness. Work Z 0 ends up this far below the plate's top face"
                     className="w-16 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200"
                   />

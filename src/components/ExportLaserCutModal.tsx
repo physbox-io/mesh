@@ -4,7 +4,8 @@ import {
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { derivedFingerWidthMm, type LaserCutOptions, type LaserCutResult, type StockItem } from '../utils/laserCutExporter';
-import { defaultCornerRelief, layoutKerf } from '../utils/sheetCutRecipe';
+import { canStartSheetJob, defaultCornerRelief, layoutKerf, layoutMargin, routerStepdownMm } from '../utils/sheetCutRecipe';
+import { useLaserPowers } from '../hooks/useLaserPowers';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { buildEtchHandoffUrl } from '../utils/etchHandoff';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
@@ -254,10 +255,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    * plain default, since a beam has no chipload.
    */
   const [cutFeedrateOverride, setCutFeedrateOverride] = useState<number | null>(null);
-  const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
-  const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
   const [laserPasses, setLaserPasses] = useState<number>(1);
-  const [engravePower, setEngravePower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserEngravePower);
   const [engraveFeedrate, setEngraveFeedrate] = useState<number>(DEFAULT_GCODE_OPTIONS.engraveFeedrate);
   const [attachments, setAttachments] = useState<boolean>(DEFAULT_GCODE_OPTIONS.attachmentsEnabled);
   const [attachmentWidthMm, setAttachmentWidthMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentWidthMm);
@@ -266,6 +264,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [probedGrid, setProbedGrid] = useState<ProbeGrid | null>(null);
   const [isProbing, setIsProbing] = useState<boolean>(false);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
+  const { laserMaxPower, laserPower, engravePower, pickLaserMaxPower, setLaserPower, setEngravePower } = useLaserPowers(machineMode, machineState);
 
   /**
    * What to run the spindle and the feed at, from the material and the cutter.
@@ -297,15 +296,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     return () => unsub();
   }, [isOpen]);
 
-  // $30 is a machine setting, not a power change: retarget the S-value so the
-  // percentage the user dialled in survives the switch.
-  const handleLaserMaxPowerChange = (next: number) => {
-    const ceiling = Math.max(1, next);
-    const fraction = laserPower / Math.max(1, laserMaxPower);
-    setLaserMaxPower(ceiling);
-    setLaserPower(Math.max(0, Math.min(ceiling, Math.round(fraction * ceiling))));
-  };
-
   /*
    * Laying the panels out is main-thread work, and every keystroke in a field
    * below used to ask for it again — typing "12" into the thickness box nested
@@ -315,13 +305,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    */
   // Only a laser is sent a kerf (sheetCutRecipe), as the MCP simulation is.
   const layoutKerfMm = layoutKerf(machineMode, kerfMm);
+  const marginM = layoutMargin(machineMode, bitDiameterMm / 1000);
   const liveLayoutFields = useMemo(() => ({
     jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm: layoutKerfMm, cornerRelief,
     bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
-    allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations,
+    allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations, marginM,
   }), [jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, layoutKerfMm, cornerRelief,
       bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
-      allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations]);
+      allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations, marginM]);
   const layoutFields = useSettled(liveLayoutFields, 250);
   // Nesting a big model takes long enough to freeze the tab, so it runs on the
   // export worker; the drawing on screen stays up, dimmed, until the new one lands.
@@ -350,6 +341,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       splitOversized: f.splitOversized,
       sheetWidth: Math.max(0.05, f.sheetWidthMm / 1000),
       sheetHeight: Math.max(0.05, f.sheetHeightMm / 1000),
+      margin: f.marginM,
       scaleFactor: f.customScalePct / 100,
       autoScale: f.autoScale,
       maxSheets: f.autoScale ? f.maxSheets : 0,
@@ -408,7 +400,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       sheetStockThicknessMm,
       // And their sizes, so a surfacing bit's edge is kept on the sheet.
       sheetSizeMm: exportResult.sheets?.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm })),
-      zStepdown: Math.min(f.materialThicknessMm, 3.0),
+      zStepdown: routerStepdownMm(f.materialThicknessMm, f.bitDiameterMm),
       attachmentsEnabled: f.attachments,
       attachmentWidthMm: f.attachmentWidthMm,
       attachmentSpacingMm: f.attachmentSpacingMm,
@@ -421,6 +413,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     }
     return res;
   }, [exportResult, gcodeFields, machineState.motion, probedGrid]);
+  const failure = exportResult?.success ? gcodeResult?.error : exportResult?.error;
 
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged
@@ -496,6 +489,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const handleStartJob = () => {
     if (!gcodeResult?.gcode) return;
     void webSerialManager.runJob(gcodeResult.gcode, {
+      machine: machineMode,
       name: 'Laser cut',
       estimatedSeconds: gcodeResult.estimatedTimeSeconds,
       // What this run was cut from and at, for the archive. The machine layer
@@ -763,12 +757,15 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 <select
                   disabled={machineMode !== 'laser'}
                   value={laserMaxPower}
-                  onChange={(e) => handleLaserMaxPowerChange(parseInt(e.target.value) || 10000)}
+                  onChange={(e) => pickLaserMaxPower(parseInt(e.target.value) || 10000)}
                   className={`${inputClass} font-sans cursor-pointer`}
                 >
                   <option value={10000}>10000 (most diode boards)</option>
                   <option value={1000}>1000 (stock GRBL)</option>
                   <option value={255}>255</option>
+                  {![10000, 1000, 255].includes(laserMaxPower) && (
+                    <option value={laserMaxPower}>{laserMaxPower}</option>
+                  )}
                 </select>
               </Field>
 
@@ -1173,10 +1170,10 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             </Advanced>
           </div>
 
-          {exportResult && !exportResult.success && (
+          {failure && (
             <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <span className="leading-relaxed">{exportResult.error}</span>
+              <span className="leading-relaxed">{failure}</span>
             </div>
           )}
 
@@ -1348,7 +1345,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 <div className="ml-auto">
                   <JobTransport
                     machineState={machineState}
-                    canStart={!!gcodeResult?.success}
+                    canStart={canStartSheetJob(exportResult, gcodeResult)}
                     onStart={handleStartJob}
                     startLabel="Start Cut Job"
                     variant="inline"
@@ -1374,22 +1371,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     : null
                 }
                 extent={
-                  gcodeResult
-                    ? {
-                        ...gcodeResult.bounds,
-                        // A laser has no Z to check; a router sweeps from its
-                        // retract height down to the full depth of cut.
-                        ...(machineMode === 'cnc'
-                          ? {
-                              minZ: -Math.max(
-                                materialThicknessMm,
-                                ...(exportResult?.sheets?.map((s) => s.thicknessMm) ?? [])
-                              ),
-                              maxZ: DEFAULT_GCODE_OPTIONS.safeZ,
-                            }
-                          : {}),
-                      }
-                    : undefined
+                  gcodeResult?.bounds
                 }
               />
               </>

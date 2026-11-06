@@ -14,7 +14,8 @@ const quick = {
 };
 
 describe('solid machining of the wall bracket', () => {
-  const twoSided = generateSolidMachining(latticeBracketPreset, { ...quick, sides: 2 });
+  // A long-reach bit: the pin holes go 70 mm, through the block and on into the spoilboard.
+  const twoSided = generateSolidMachining(latticeBracketPreset, { ...quick, sides: 2, toolStickoutMm: 75 });
 
   it('produces a program for each side', () => {
     expect(twoSided.success, twoSided.error).toBe(true);

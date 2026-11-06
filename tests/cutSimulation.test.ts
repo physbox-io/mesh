@@ -94,12 +94,31 @@ describe('cutSimulation', () => {
     }
   });
 
+  it('takes Z0 from the ground under the new cutter at a tool change', () => {
+    const gcode = [
+      'G0 X10 Y20 Z5', 'G1 Z-3', 'G1 X30', 'G0 Z20',
+      'T2 M6 ; fit the same again',
+      'G0 Z20', 'G0 X20 Y20', 'G1 Z-1', 'G1 X25', 'G0 Z20',
+    ].join('\n');
+    const options = {
+      widthMm: 40, depthMm: 40, cellMm: 0.1,
+      tools: { 1: { shape: 'flat', diameterMm: 4 }, 2: { shape: 'flat', diameterMm: 4 } },
+    } as const;
+    // Parked over the slot it was left in, the touch-off is on the slot's floor,
+    // so the same words now cut a millimetre below that.
+    expect(simulateMilling(gcode, options).at(22, 20)).toBeCloseTo(-4, 6);
+    // Parked over uncut stock, Z0 is where it always was.
+    const parked = gcode.replace('T2 M6', 'G0 X20 Y32\nT2 M6');
+    expect(simulateMilling(parked, options).at(22, 20)).toBeCloseTo(-3, 6);
+  });
+
   it('switches cutters at the tool change, not at a comment', () => {
     const gcode = [
       '; T1: flat',
       'G0 X5 Y10 Z5', 'G1 Z-2', 'G1 X35', 'G0 Z20',
       '; --- OP 2: finishing',
       'G0 X5 Y30', 'G1 Z-2', 'G1 X10', 'G0 Z20',
+      'G0 X20 Y20',
       'T2 M6 ; fit the ball',
       'G0 X20 Y30', 'G1 Z-2', 'G1 X35', 'G0 Z20',
     ].join('\n');

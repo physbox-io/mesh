@@ -94,3 +94,18 @@ export function describeGrblError(line: string): string {
       return 'The controller did not say more than that.';
   }
 }
+
+/**
+ * Whether a program is a laser's, read from what it commands. `M4` is dynamic
+ * power, which only a laser uses; past that, a program with a Z word plunges,
+ * so it is a router's, and one with none has no Z to plunge with.
+ */
+export function programIsLaser(lines: readonly string[]): boolean {
+  let hasZ = false;
+  for (const line of lines) {
+    const code = line.replace(/\([^)]*\)|;.*$/g, '').toUpperCase();
+    if (/\bM0*4\b/.test(code)) return true;
+    if (/Z\s*[-+]?[\d.]/.test(code)) hasZ = true;
+  }
+  return !hasZ;
+}

@@ -63,6 +63,14 @@ export function getStoredAuthToken(): string | null {
   }
 }
 
+/**
+ * What a tab may offer the local MCP hub: an API token, which the hub keeps. The
+ * session itself stays in this browser.
+ */
+export function hubToken(stored: string | null): string | undefined {
+  return stored?.startsWith('pbx_') ? stored : undefined;
+}
+
 export function getStoredUser(): PhysBoxUser | null {
   try {
     const raw = localStorage.getItem(USER_KEY);

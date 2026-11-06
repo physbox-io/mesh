@@ -1,6 +1,6 @@
 // The fields and shared helpers every layer of Mesh's machine stands on.
 
-import { AckTimeoutError, GrblMachine, scanModalState } from '@physbox-io/machining';
+import { AckTimeoutError, GrblMachine } from '@physbox-io/machining';
 import { machineSocketUrl, submitMachineJob } from './apiClient';
 import {
   DEFAULT_SPINDLE_PWM_MAX,
@@ -17,7 +17,7 @@ import {
   secondsAtLine,
   type CutState,
 } from './jobProgress';
-import { classifyJobLine, type JobLine } from './machineJobLines';
+import { classifyJobLine, programIsLaser, type JobLine } from './machineJobLines';
 import type { JobSetup, MachineLink, MachineState } from './machineTypes';
 import { DEFAULT_MOTION_PROFILE, motionProfileFromSettings, type MotionProfile } from './motionProfile';
 import { readSpindleMaxOverride, spindleCeilingRefusal, withSpindleOverride } from './spindleOverride';
@@ -340,9 +340,16 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
     };
   }
 
-  /** The guide spot's own deadline, and the `$32` it borrowed to exist. */
+  /** The guide spot's own deadline. */
   protected guideSpotTimer: ReturnType<typeof setTimeout> | null = null;
-  protected guideSpotRestoreLaserMode = false;
+  /**
+   * What `$32` goes back to, while the guide spot or a job has it borrowed.
+   * Written to storage before the setting changes, for a session that ends first.
+   */
+  protected laserModeHome: 0 | 1 | null = null;
+  /** The `$32` write under way, which a job starting has to wait out. */
+  protected laserModeRestoring: Promise<void> | null = null;
+  private laserModeRestoreAgain = false;
   protected guideJiggleRunning = false;
   /** What the running job is, as the run archive should remember it. */
   protected jobContext: { name?: string; settings?: Record<string, unknown> | null } = {};
@@ -507,17 +514,17 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
    * every feed at 2.4 times the chip load. Not when the operator has given this
    * machine a spindle override (its `S` drives nothing), and not on a laser.
    */
-  protected spindleBlockedReason(lines: readonly string[]): string | null {
+  protected spindleBlockedReason(lines: readonly string[], laser: boolean): string | null {
     return spindleCeilingRefusal(lines, {
       maxRpm: this.state.grblSettings[30],
-      laser: this.laserModeEnabled(),
+      laser,
       overridden: readSpindleMaxOverride(this.machineKey) !== null,
     });
   }
 
   /** A laser focuses once by hand and its Z never moves during a job. */
   protected hasJobZAxis(): boolean {
-    return !this.laserModeEnabled();
+    return !this.jobIsLaser();
   }
 
   /** How many lines the program has, which is what progress is measured against. */
@@ -538,20 +545,29 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
     return classifyJobLine(line.code) !== 'motion';
   }
 
-  /** Whether the loaded job is for a laser, for UI that has no export modal to ask. */
-  public isLaserJob(): boolean {
-    return this.jobIsLaser();
+  /**
+   * Whether the job on the machine is for a laser, for UI that should go by the
+   * job and not by the modal it is drawn in. `noJob` answers when none is loaded.
+   */
+  public isLaserJob(noJob?: boolean): boolean {
+    return this.program.length === 0 && noJob !== undefined ? noJob : this.jobIsLaser();
   }
+
+  /** What the loaded program is, once worked out or as its caller said. */
+  protected programKind: { program: JobLine[]; laser: boolean } | null = null;
 
   /**
    * Whether the job is for a laser: the caller's word when it has one, then
-   * `$32` laser mode, then a program that never commands a Z.
+   * what the program commands. `$32` says what the controller is set to, not
+   * what the job is, and answers only when there is no job.
    */
   protected jobIsLaser(explicit?: boolean): boolean {
     if (explicit !== undefined) return explicit;
-    if (this.laserModeEnabled()) return true;
-    // `upTo` 0: only the whole-program safe Z is wanted, not a replay.
-    return this.program.length > 0 && scanModalState(this.program.map((l) => l.code), 0).safeZ === null;
+    if (this.program.length === 0) return this.laserModeEnabled();
+    if (this.programKind?.program !== this.program) {
+      this.programKind = { program: this.program, laser: programIsLaser(this.program.map((l) => l.code)) };
+    }
+    return this.programKind.laser;
   }
 
   /**
@@ -571,6 +587,8 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
    */
   public async refreshMachineSettings(timeoutMs = 4000, attempts = 3): Promise<MotionProfile> {
     if (!this.state.connected || !this.transport) return this.state.motion;
+    // GRBL refuses `$$` under a running program.
+    this.refuseWhileJobHoldsMachine('read the settings');
 
     /*
      * Asked more than once, because the first ask is made at the worst possible
@@ -620,13 +638,15 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
         motion,
         grblSettings: Object.fromEntries(settings),
       });
-      // A `$32` this app switched off to light a guide spot, on a session that
-      // ended before it could switch it back on. Cutting with laser mode off
-      // burns a line through every rapid, so it is put right at the first
-      // opportunity — which is here, the first moment the setting is known.
-      if (settings.get(32) === 0 && readLaserModeBorrowed()) {
-        this.guideSpotRestoreLaserMode = true;
-        void this.restoreLaserMode();
+      // A `$32` this app borrowed, on a session that ended before it could give
+      // it back. Either way round it is a bad setting to be left on (a laser
+      // burning through every rapid, a spindle stopping on each one), so it is
+      // put right at the first opportunity: the first moment it is known.
+      const home = this.laserModeHome ?? readLaserModeBorrowed();
+      if (home !== null && settings.has(32)) {
+        this.laserModeHome = settings.get(32) === home ? null : home;
+        if (this.laserModeHome === null) writeLaserModeBorrowed(null);
+        else void this.restoreLaserMode();
       }
       return motion;
     }
@@ -649,22 +669,48 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
   }
 
   /**
-   * Puts `$32` back if the guide spot borrowed it, without the `M5`/`S0` of a
-   * full `guideSpotOff`.
+   * Puts a borrowed `$32` back, without the `M5`/`S0` of a full `guideSpotOff`.
    *
-   * For the paths that have already killed output by other means — a job's own
-   * header, a soft reset — where what still has to happen is restoring laser
-   * mode, and where restoring it *late* would mean a job streaming with the
-   * beam burning through its rapids.
+   * For the paths that have already killed output by other means: the end of a
+   * job, a soft reset. Waited for: GRBL writes EEPROM for a setting, and a stream
+   * started before the `ok` would be racing that write. If the controller will
+   * not take it now the borrow stands, and the next chance tries again: an
+   * unlock, a home, a job, or the next connection.
    */
-  protected async restoreLaserMode(): Promise<void> {
-    if (!this.guideSpotRestoreLaserMode) return;
-    this.guideSpotRestoreLaserMode = false;
-    writeLaserModeBorrowed(false);
-    this.updateState({ grblSettings: { ...this.state.grblSettings, 32: 1 } });
-    // Waited for: GRBL writes EEPROM for a setting, and a stream started
-    // before the `ok` would be racing that write.
-    await this.sendAndWait('$32=1', QUICK_REPLY_TIMEOUT_MS);
+  protected restoreLaserMode(): Promise<void> {
+    if (this.laserModeHome === null) return Promise.resolve();
+    if (this.laserModeRestoring) {
+      // That write may be about to die in a reset, which is what asks for this one.
+      this.laserModeRestoreAgain = true;
+      return this.laserModeRestoring;
+    }
+    this.laserModeRestoring = this.writeLaserModeHome().finally(() => {
+      this.laserModeRestoring = null;
+      if (!this.laserModeRestoreAgain) return;
+      this.laserModeRestoreAgain = false;
+      return this.restoreLaserMode();
+    });
+    return this.laserModeRestoring;
+  }
+
+  private async writeLaserModeHome(): Promise<void> {
+    await this.whenHalted();
+    const home = this.laserModeHome;
+    if (home === null) return;
+    try {
+      await this.sendLine(`$32=${home}`, { timeoutMs: QUICK_REPLY_TIMEOUT_MS });
+    } catch {
+      return;
+    }
+    this.laserModeHome = null;
+    writeLaserModeBorrowed(null);
+    this.noteLaserMode(home);
+  }
+
+  /** `$32` as the controller now has it, in both places it is read from. */
+  protected noteLaserMode(value: 0 | 1): void {
+    this.grblSettings.set(32, value);
+    this.updateState({ grblSettings: { ...this.state.grblSettings, 32: value } });
   }
 
   /** Full-scale S for this controller — `$30`, or the usual 1000 if unasked. */

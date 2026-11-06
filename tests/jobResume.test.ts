@@ -174,8 +174,11 @@ describe('jobResume', () => {
       const joined = planResume(inch, 7, { currentZ: 25.4 }).preamble.join('\n');
       // One inch up, not 25.4 inches into the top of travel.
       expect(joined).toContain('G0 Z1.000');
-      // And the default plunge is 300 mm/min, not 300 in/min.
-      expect(joined).toMatch(/G1 Z-0\.100 F12\b/);
+      // And the plunge is the program's own, in its own units.
+      expect(joined).toMatch(/G1 Z-0\.100 F10\b/);
+      // With none to go by, 300 mm/min, not 300 in/min.
+      const noPlunge = ['G20', 'G90', 'G0 Z0.2', 'M3 S10000', 'G0 X1 Y1 Z-0.1', 'G1 X2 F10'];
+      expect(planResume(noPlunge, 6).preamble.join('\n')).toMatch(/G1 Z-0\.100 F12\b/);
     });
   });
 
@@ -276,7 +279,8 @@ describe('jobResume', () => {
       const res = generateLaserCutGcode([panel], { ...DEFAULT_GCODE_OPTIONS, machineMode: 'laser' });
       const lines = prepareJobLines(res.gcode).map((l) => l.code);
       expect(planResume(lines, 999999).fromLine).toBe(lines.length);
-      expect(planResume(lines, -5).fromLine).toBe(0);
+      // A silent clamp at the low end would be a restart from the top.
+      expect(() => planResume(lines, -5)).toThrow(/not in the program/);
     });
 
     it('ignores G53 machine coordinates and G91 relative Z when computing safeZ and work position', () => {

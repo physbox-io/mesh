@@ -11,6 +11,7 @@ import type {
 } from './timberJoinery';
 import type { Vec3 } from './printPlate';
 import { DEFAULT_MATERIAL, recommendSpeeds, type MaterialId, type SpindleRange } from './feedsAndSpeeds';
+import { commentText } from './gcodeComments';
 
 export interface TimberStockBarSpec {
   /** Nominal cross-section [widthMm, thicknessMm]. */
@@ -237,9 +238,9 @@ export function generateWindowGcode(params: {
   const rBit = cutterDiaMm * 0.5;
   const stepover = Math.max(1.0, cutterDiaMm * 0.42);
   const lines: string[] = [
-    `; Setup: ${setupId} — Part ${partId}`,
-    `; Face UP: ${faceUpLabel}`,
-    `; Against Y-Axis Fence: ${fenceFaceLabel}`,
+    `; Setup: ${commentText(setupId)} — Part ${commentText(partId)}`,
+    `; Face UP: ${commentText(faceUpLabel)}`,
+    `; Against Y-Axis Fence: ${commentText(fenceFaceLabel)}`,
     `; Index Stop Offset from Top End: ${indexOffsetFromTopMm} mm`,
     `; Tool: ${cutterDiaMm} mm Flat End Mill`,
     `G21 G90 G17`,
@@ -253,7 +254,7 @@ export function generateWindowGcode(params: {
   let cuttingDistMm = 0;
 
   for (const m of mortises) {
-    lines.push(`; Mortise ${m.id}: ${m.thicknessXMm} × ${m.widthYMm} × ${m.depthMm} mm`);
+    lines.push(`; Mortise ${commentText(m.id)}: ${m.thicknessXMm} × ${m.widthYMm} × ${m.depthMm} mm`);
     const halfX = Math.max(0, m.thicknessXMm * 0.5 - rBit);
     const halfY = Math.max(0, m.widthYMm * 0.5 - rBit);
     const passes = Math.max(1, Math.ceil(m.depthMm / stepdownMm));
@@ -300,7 +301,7 @@ export function generateWindowGcode(params: {
   }
 
   for (const zc of zClips) {
-    lines.push(`; Tabletop Z-Clip Expansion Slot ${zc.id}: ${zc.lengthYMm} × ${zc.widthXMm} × ${zc.depthMm} mm`);
+    lines.push(`; Tabletop Z-Clip Expansion Slot ${commentText(zc.id)}: ${zc.lengthYMm} × ${zc.widthXMm} × ${zc.depthMm} mm`);
     const halfX = Math.max(0, zc.widthXMm * 0.5 - rBit);
     const halfY = Math.max(0.5, zc.lengthYMm * 0.5 - rBit);
     const passes = Math.max(1, Math.ceil(zc.depthMm / stepdownMm));

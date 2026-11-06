@@ -188,6 +188,40 @@ describe('through-cut relief export', () => {
     expect(bare).toMatch(/no holding tabs/);
   }, 60_000);
 
+  it('claims a through cut only where the surface goes through the stock', () => {
+    // A boss on a shelf, on the board: the model stands on it all round, so
+    // nothing is cut free.
+    const standing = {
+      nodes: [{
+        id: 'b1', name: 'part', type: 'body', pos: [0, 0, 0],
+        geoms: [
+          { name: 'g0', type: 'box', size: [0.04, 0.04, 0.006], pos: [0, 0, 0.006] },
+          { name: 'g1', type: 'box', size: [0.02, 0.02, 0.008], pos: [0, 0, 0.02] },
+        ],
+        joints: [], children: [],
+      }],
+    } as unknown as Parameters<typeof generateReliefCarveGcode>[0];
+    const result = generateReliefCarveGcode(standing, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 140, stockDepthMm: 140, stockThicknessMm: 40,
+      fitMode: 'manual', scalePercent: 100, verticalScaleMode: 'proportional', verticalExaggeration: 1,
+      backgroundMode: 'skip', roughingToolDiaMm: 6.35, finishingToolDiaMm: 6.35, finishingToolType: 'flat',
+      carveDepthMm: 20, cutThroughMm: 0.3,
+    });
+    expect(result.success, result.error).toBe(true);
+    expect(deepestZ(result.gcode)).toBeGreaterThan(-40);
+    expect(result.warnings.join(' ')).not.toMatch(/Cuts through/);
+  }, 60_000);
+
+  it('fails, naming the bit, when the holder stops it short of a through cut', () => {
+    const result = carve({
+      carveDepthMm: 6 + THROUGH_CUT_OVERCUT_MM, cutThroughMm: THROUGH_CUT_OVERCUT_MM,
+      toolBodyClearance: true, toolStickoutMm: 4, holderDiaMm: 25,
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/this cut has to reach: fit a longer bit/);
+  }, 60_000);
+
   it('never goes below the stock without being asked to', () => {
     const result = carve({ carveDepthMm: 6 + THROUGH_CUT_OVERCUT_MM, cutThroughMm: 0 });
     expect(deepestZ(result.gcode)).toBeGreaterThanOrEqual(-6);

@@ -3,6 +3,7 @@ import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw,
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
+import { readTouchPlateMm } from '../utils/touchPlate';
 import { clampRunFromLine, describeStoppedJob, runFromGate } from '../utils/runFrom';
 import { NumberInput } from '@physbox-io/ui';
 import { ProbeCircuitStatus } from './ProbeCircuitStatus';
@@ -60,11 +61,11 @@ export const JobPauseBanner: React.FC<{
   machineState: MachineState;
   /** e.g. "Resume Carve", "Resume Next Sheet". */
   resumeLabel: string;
-  /** A laser has no Z datum and no touch plate, so it gets neither offer. */
+  /** With no job loaded: a laser has no Z datum and no touch plate, so it gets neither offer. */
   showZTools?: boolean;
-  /** Touch plate thickness for the probe route, matching the origin panel's default. */
-  plateThicknessMm?: number;
-}> = ({ machineState, resumeLabel, showZTools = true, plateThicknessMm = 12.0 }) => {
+}> = ({ machineState, resumeLabel, showZTools: noJobZTools = true }) => {
+  // The job on the machine decides, not the modal this is drawn in.
+  const showZTools = !webSerialManager.isLaserJob(!noJobZTools);
   const [overridden, setOverridden] = React.useState(false);
   const [overrideFor, setOverrideFor] = React.useState<string | null>(null);
   const [probingZ, setProbingZ] = React.useState(false);
@@ -167,7 +168,7 @@ export const JobPauseBanner: React.FC<{
                 if (probingZ) return;
                 setProbingZ(true);
                 try {
-                  await webSerialManager.zeroZ(plateThicknessMm);
+                  await webSerialManager.zeroZ(readTouchPlateMm());
                 } finally {
                   setProbingZ(false);
                 }
@@ -232,14 +233,16 @@ export const JobPauseBanner: React.FC<{
  */
 export const JobResumeBanner: React.FC<{
   machineState: MachineState;
-  /** A laser has no Z to descend to, so it gets none of the depth talk. */
+  /** With no job loaded: a laser has no Z to descend to, so it gets none of the depth talk. */
   showZTools?: boolean;
   /**
    * Runs before Machine Setup opens. The restore dialog sits above Setup, so it
    * steps aside first; the offer itself stays live in the export modals.
    */
   onOpenSetup?: () => void;
-}> = ({ machineState, showZTools = true, onOpenSetup }) => {
+}> = ({ machineState, showZTools: noJobZTools = true, onOpenSetup }) => {
+  // The job on the machine decides, not the modal this is drawn in.
+  const showZTools = !webSerialManager.isLaserJob(!noJobZTools);
   const resume = machineState.resume;
   const [line, setLine] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -256,10 +259,7 @@ export const JobResumeBanner: React.FC<{
   const target = line ?? resume?.fromLine ?? 0;
   const preview = React.useMemo(
     () => (resume ? webSerialManager.previewResume(target, { isLaser: !showZTools }) : null),
-    // needsZZero too: the manager reads it, and once Z is zeroed a resume at a
-    // tool change steps past the M6, which changes the plan.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [resume, target, machineState.needsZZero, showZTools]
+    [resume, target, showZTools]
   );
 
   if (!resume || running) return null;
@@ -470,7 +470,9 @@ export const JobTransport: React.FC<{
   // A laser has no Z datum to set, so its never-set one must not hold any
   // button here shut: Start, Resume from line, Resume Here or Resume.
   const blockedByZZero = requiresZZero && machineState.needsZZero;
-  const isLaser = !requiresZZero;
+  // A stopped job is the machine's, whatever this modal is set up to cut next.
+  const isLaser = webSerialManager.isLaserJob(!requiresZZero);
+  const jobBlockedByZZero = !isLaser && machineState.needsZZero;
 
   /*
    * `whitespace-nowrap` on both, and `px-2` inline rather than `px-3`.
@@ -579,9 +581,9 @@ export const JobTransport: React.FC<{
       <div className={variant === 'footer' ? 'flex items-center gap-2' : 'flex items-center gap-2 w-full'}>
         <button
           onClick={() => webSerialManager.resumeFromPark({ isLaser })}
-          disabled={blockedByZZero}
+          disabled={jobBlockedByZZero}
           title={
-            blockedByZZero
+            jobBlockedByZZero
               ? 'Set Z zero for the new tool first'
               : 'Drive back over the parked point and carry on cutting from the line that was actually reached'
           }
@@ -616,8 +618,8 @@ export const JobTransport: React.FC<{
       ) : (
         <button
           onClick={() => webSerialManager.resumeJob({ zIsSet: isLaser })}
-          disabled={blockedByZZero}
-          title={blockedByZZero ? 'Set Z zero for the new tool first' : 'Cycle start'}
+          disabled={jobBlockedByZZero}
+          title={jobBlockedByZZero ? 'Set Z zero for the new tool first' : 'Cycle start'}
           className={`${base} bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950`}
         >
           <Play className={`${icon} fill-current`} />
@@ -717,7 +719,7 @@ export const JobPreflight: React.FC<{
   if (rpm !== undefined && rpm > 0) {
     rows.push({
       n: rows.length + 1,
-      label: 'Set the spindle to',
+      label: 'Switch the spindle on at',
       value: (
         <span>
           <span className="font-bold text-base text-emerald-400">{rpm.toLocaleString()} RPM</span>

@@ -2,7 +2,7 @@
 // finishing passes, and the numbers about it.
 
 import { materialSpec } from './feedsAndSpeeds';
-import { warpGcode } from './meshLeveler';
+import { interpolateGridZ, warpGcode } from './meshLeveler';
 import { MAX_PREVIEW_POINTS, f } from './reliefPaths';
 import { describeCutter } from './reliefTooling';
 import { estimateGcodeTime } from './timeEstimate';
@@ -11,7 +11,11 @@ import { warnAboutTooling } from './surfaceToolingWarnings';
 import { ToolpathWriter } from './toolpathWriter';
 import { roughSurface } from './surfaceRoughing';
 import { finishSurface } from './surfaceFinishing';
+import { chooseTouchSpot } from './touchSpot';
 import type { ReliefCarveOptions } from './reliefOptions';
+
+/** How far short of a depth a program may stop and still be said to reach it, mm. */
+const REACH_TOLERANCE_MM = 0.05;
 
 /**
  * Cuts a surface into the top of a block: roughing layers, a tool change, and
@@ -122,24 +126,45 @@ export function machineSurface(
       opts.finishingToolType !== 'flat' ||
       Math.round(opts.roughingFlutes) !== Math.round(opts.finishingFlutes) ||
       opts.roughingGeometry !== opts.finishingGeometry);
+  // Where the finishing block starts, and what Z0 means from there on.
+  let afterChange = -1;
+  let touchZ = 0;
   if (toolChange) {
+    // Clear of everything standing, the levelling grid's crown included, and
+    // no higher: an un-homed machine lifts no further than this at the M6, and
+    // this is the height it has been seen to reach.
+    const changeZ = Math.max(opts.safeZ, 20) + w.levellingSpanMm;
+    const spot = chooseTouchSpot(
+      w.stock,
+      job.touchOff?.area ?? job.bounds,
+      Math.max(0.05, opts.finishingToolDiaMm / 2),
+      job.touchOff?.standsAt
+    );
+    if (!spot) {
+      return fail('Roughing leaves nothing flat to zero the finishing bit on: finish with the roughing bit, or raise the allowance.');
+    }
     // Out of the cut before the spindle stops, and in the air before it
     // starts again: a spindle stopped in the work drags its bit, and one
     // started at touch-off height spins the new bit up on the stock. Mesh's
     // own streamer retracts on resume, but another sender runs this as written.
-    w.gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))}`);
+    w.gcode.push(`G0 Z${f(changeZ)}`);
     w.gcode.push('M5 ; spindle off for the tool change');
     /*
-     * Over the work origin for the change, not over the pocket roughing
-     * happened to finish in: the corner is where the operator reaches the
-     * collet from and touches the new bit off.
+     * Over ground the new bit can be zeroed on, so the operator need not jog
+     * there. The stock's top face where any of it is left; where roughing took
+     * all of that, a roughing floor, whose height the rest of the program is
+     * rewritten for below, so that Z0 there is right.
      *
-     * The path planner is not told. The finishing order still starts from
-     * where roughing finished - planned from the corner instead, the dome's
-     * finishing lifted 73 times against 56 - and the flight from the corner
-     * to its first run is at the change height, over everything.
+     * The levelling grid moves the ground at the spot as well: a touch-off
+     * there takes the grid's height with it, which the warp below would then
+     * add a second time.
+     *
+     * The path planner is not told. The finishing order is still planned from
+     * the work origin - planned from the spot, a 100 mm dome on a 140 mm board
+     * took 5473 s against 5383 - and the flight from the spot to its first run
+     * is at the change height, over everything.
      */
-    w.gcode.push('G0 X0 Y0 ; park over the work origin');
+    w.gcode.push(`G0 X${f(spot.x)} Y${f(spot.y)}`);
     w.gcode.push(
       `T2 M6 ; fit the ${describeCutter(
         opts.finishingToolDiaMm,
@@ -149,6 +174,10 @@ export function machineSurface(
         opts.finishingVBitAngleDeg
       )} and re-zero Z`
     );
+    afterChange = w.gcode.length;
+    touchZ =
+      spot.levelMm +
+      (opts.applyMeshLeveling && opts.meshLevelGrid ? interpolateGridZ(opts.meshLevelGrid, spot.x, spot.y) : 0);
     // Back up to the travel height, said out loud rather than assumed.
     //
     // Everything after this point traverses at whatever Z it thinks the tool is
@@ -157,12 +186,12 @@ export function machineSurface(
     // work to touch off the new bit, so what the file assumes and where the
     // machine is standing are as far apart as they ever get — and the next
     // traverse would be a rapid across the job at the surface of it.
-    w.gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))} ; back to travel height after the change`);
+    w.gcode.push(`G0 Z${f(changeZ)} ; back to travel height after the change`);
     w.gcode.push(`M3 S${Math.round(opts.spindleRpm)}`);
     w.gcode.push('G4 P2');
     w.atX = 0;
     w.atY = 0;
-    w.atZ = Math.max(opts.safeZ, 20);
+    w.atZ = changeZ;
   }
 
   // --- Finishing -------------------------------------------------------------
@@ -180,6 +209,21 @@ export function machineSurface(
   w.gcode.push('M5 ; spindle off, clear of the work');
   w.gcode.push('G0 X0 Y0 ; back to the work origin');
   w.gcode.push('M30 ; end of program');
+
+  if (job.mustReachMm !== undefined && -w.deepestZ < job.mustReachMm - REACH_TOLERANCE_MM) {
+    return fail(
+      `The bit stops at ${(-w.deepestZ).toFixed(1)} mm of the ${job.mustReachMm.toFixed(1)} mm this cut has to reach: ` +
+        'fit a longer bit, or a narrower one where the channel is tight.'
+    );
+  }
+
+  // Finishing is planned against the stock's top face throughout, as the stock
+  // model is: only the words on the wire move to the Z0 the new bit was set to.
+  if (afterChange >= 0 && Math.abs(touchZ) >= 5e-4) {
+    for (let i = afterChange; i < w.gcode.length; i++) {
+      w.gcode[i] = w.gcode[i].replace(/\bZ(-?\d+(?:\.\d+)?)/g, (_, z) => `Z${f(parseFloat(z) - touchZ)}`);
+    }
+  }
 
   let text = w.gcode.join('\n');
   if (opts.applyMeshLeveling && opts.meshLevelGrid) {

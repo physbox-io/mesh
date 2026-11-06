@@ -20,6 +20,11 @@ export function pauseKey(status: string, message: string | undefined): string {
   return `${status}|${message ?? ''}`;
 }
 
+/** One tool change: two stops can ask for the same bit in the same words. */
+export function toolStopKey(key: string, line: number): string {
+  return `${key}@${line}`;
+}
+
 export const useJobPause = create<JobPauseState>()((set) => ({
   hiddenKey: null,
   hide: (key) => set({ hiddenKey: key }),

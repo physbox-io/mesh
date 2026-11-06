@@ -4,9 +4,13 @@ import { planResume, type JobPauseKind } from '@physbox-io/machining';
 import { cloudAutosave } from './cloudDocuments';
 import { beginCheckpoint, clearCheckpoint } from './jobCheckpoint';
 import { QUICK_REPLY_TIMEOUT_MS } from './machineCore';
-import { classifyJobLine, prepareJobLines } from './machineJobLines';
+import { classifyJobLine, prepareJobLines, programIsLaser, type JobLine } from './machineJobLines';
 import { ProbingMachine } from './machineProbing';
 import type { JobSetup, MachineState } from './machineTypes';
+import { writeLaserModeBorrowed } from './guideSpot';
+
+/** How long the end of a job may wait for the planner to run dry. */
+const END_OF_JOB_DRAIN_MS = 10 * 60 * 1000;
 
 /** Running a program: start, stream, the pauses it asks for, resume from them, finish. */
 export abstract class JobMachine extends ProbingMachine {
@@ -32,6 +36,8 @@ export abstract class JobMachine extends ProbingMachine {
       setup?: JobSetup;
       /** Who asked. A later setup is only ever started by the operator at the machine. */
       origin?: 'ui' | 'mcp';
+      /** What the program is for, when the caller knows. Otherwise it is read from the program. */
+      machine?: 'laser' | 'cnc';
     } = {}
   ): Promise<{ delivered: boolean; message: string } | null> {
     /*
@@ -59,10 +65,14 @@ export abstract class JobMachine extends ProbingMachine {
       return null;
     }
 
+    const prepared = prepareJobLines(gcode);
+    const codes = prepared.map((l) => l.code);
+    const laser = options.machine ? options.machine === 'laser' : programIsLaser(codes);
+
     // A laser job has no Z to plunge with, so an untouched Z datum cannot hurt
     // it — everything else routes a spinning or moving tool toward a surface
     // whose height this session has not actually confirmed.
-    if (this.state.needsZZero && !this.laserModeEnabled()) {
+    if (this.state.needsZZero && !laser) {
       const message =
         'Z zero has not been set this session. Set Z zero in Machine Setup before running a job.';
       this.updateState({ lastError: message });
@@ -75,10 +85,13 @@ export abstract class JobMachine extends ProbingMachine {
      * which a handed-over job never reaches, so a Tekno Box ran programs that
      * went past the end of an axis that the same machine on a cable refused.
      * Before the setup bookkeeping below, which a refused job must not touch.
+     * The box streams it, so there is no moment here to borrow `$32` in.
      */
     if (this.transport.runJob) {
-      const codes = prepareJobLines(gcode).map((l) => l.code);
-      const refusal = this.travelBlockedReason(codes) ?? this.spindleBlockedReason(codes);
+      const refusal =
+        this.travelBlockedReason(codes) ??
+        this.spindleBlockedReason(codes, laser) ??
+        this.laserModeBlockedReason(!laser);
       if (refusal) {
         this.updateState({ lastError: refusal });
         return { delivered: false, message: refusal };
@@ -131,7 +144,7 @@ export abstract class JobMachine extends ProbingMachine {
       return result;
     }
 
-    void this.startJob(gcode, options.estimatedSeconds);
+    void this.startPrepared(gcode, prepared, laser, options.estimatedSeconds);
     return null;
   }
 
@@ -142,17 +155,26 @@ export abstract class JobMachine extends ProbingMachine {
    * which is where the export modals and MCP look.
    */
   public async startJob(gcode: string, estimatedSeconds?: number): Promise<void> {
+    const prepared = prepareJobLines(gcode);
+    await this.startPrepared(gcode, prepared, programIsLaser(prepared.map((l) => l.code)), estimatedSeconds);
+  }
+
+  private async startPrepared(
+    gcode: string,
+    prepared: JobLine[],
+    laser: boolean,
+    estimatedSeconds?: number
+  ): Promise<void> {
     if (!this.state.connected) return;
     if (this.isJobRunning || this.isPaused || this.starting) return; // see runJob
 
-    const prepared = prepareJobLines(gcode);
     // Before anything is set up for it: the package refuses these too, but by
     // then this job would already read as running, with its clock going, and
     // the last job's resume offer and checkpoint gone. `resumeFromLine` had
     // the same fault, and checks the position up front for the same reason.
     const codes = prepared.map((l) => l.code);
     const refusal =
-      this.positionBlockedReason() ?? this.travelBlockedReason(codes) ?? this.spindleBlockedReason(codes);
+      this.positionBlockedReason() ?? this.travelBlockedReason(codes) ?? this.spindleBlockedReason(codes, laser);
     if (refusal) {
       this.updateState({ lastError: refusal });
       return;
@@ -162,6 +184,7 @@ export abstract class JobMachine extends ProbingMachine {
     this.startElapsedTicker();
 
     this.program = prepared;
+    this.programKind = { program: prepared, laser };
     this.gcodeNotes = prepared.map(l => l.note);
     this.jobLineBase = 0;
     this.jobPeakWorkZ = null;
@@ -217,8 +240,10 @@ export abstract class JobMachine extends ProbingMachine {
    * the job it had just started and left laser mode off. Its jiggle has to have
    * stopped too: GRBL takes no G-code while it is jogging. The package then
    * lets go of any reply still owed from before (see `letGoOfStaleAcks`).
+   *
+   * `ifRefused` is what to put back if the stream never begins.
    */
-  protected async beginStreaming(lines: string[]): Promise<void> {
+  protected async beginStreaming(lines: string[], ifRefused: Partial<MachineState> = {}): Promise<void> {
     this.starting = true;
     this.streamBegan = false;
     const epoch = this.jobEpoch;
@@ -226,6 +251,8 @@ export abstract class JobMachine extends ProbingMachine {
       if (this.state.guideSpot) await this.guideSpotOff();
       // Cancelled while the beam was going out.
       if (epoch !== this.jobEpoch || this.state.status !== 'RUNNING') return;
+      await this.fitLaserModeToJob();
+      if (epoch !== this.jobEpoch) return;
       // `starting` stays up until this settles: the package marks the job
       // running only after its own first await.
       await this.streamProgram({ lines, layers: [], spindleLine: null });
@@ -238,10 +265,62 @@ export abstract class JobMachine extends ProbingMachine {
       // job read as RUNNING with its clock counting up from nothing.
       if (!this.streamBegan) {
         this.stopElapsedTicker();
-        if (this.state.status === 'RUNNING') this.updateState({ status: 'IDLE' });
+        if (this.state.status === 'RUNNING') this.updateState({ status: 'IDLE', ...ifRefused });
       }
       this.releaseStreamWaiters();
+      // However the job went. `starting` held off the other ways back until now.
+      if (!this.isJobRunning && this.state.status !== 'PAUSED_PARKED') void this.restoreLaserMode();
     }
+  }
+
+  /**
+   * Sets `$32` to suit the job, if it does not, for as long as the job lasts.
+   *
+   * Laser mode stops a spindle on every rapid, and its absence burns a laser's
+   * beam through them, so a controller left set for the other head is corrected
+   * rather than argued with. The way back is written down first, by the same
+   * route as the guide spot's borrow, so that a session ending mid-job still
+   * puts it right at the next connection. Unknown is left alone. Throws if the
+   * controller will not take it: a job must not run on the wrong setting.
+   */
+  protected async fitLaserModeToJob(): Promise<void> {
+    await this.whenHalted();
+    if (this.laserModeRestoring) await this.laserModeRestoring;
+    const laser = this.jobIsLaser();
+    const wanted = laser ? 1 : 0;
+    const current = this.state.grblSettings[32];
+    if (current === undefined || current === wanted) return;
+    const home = this.laserModeHome ?? (current as 0 | 1);
+    const after = home === wanted ? null : home;
+    writeLaserModeBorrowed(home);
+    try {
+      await this.sendLine(`$32=${wanted}`, { timeoutMs: QUICK_REPLY_TIMEOUT_MS });
+    } catch {
+      writeLaserModeBorrowed(this.laserModeHome);
+      throw new Error(
+        this.laserModeBlockedReason(!laser) ??
+          'Laser mode is off ($32=0), which leaves the beam on through every rapid. Send $32=1 before running a laser job.'
+      );
+    }
+    this.laserModeHome = after;
+    writeLaserModeBorrowed(after);
+    this.noteLaserMode(wanted);
+  }
+
+  /**
+   * Gives a job's `$32` back once it has finished. GRBL refuses a setting while
+   * it moves, and the last `ok` is for parsing the last line, so this waits for
+   * the planner to run dry first.
+   */
+  protected async returnLaserModeAfterJob(): Promise<void> {
+    if (this.laserModeHome === null) return;
+    try {
+      await this.sendLine('G4 P0', { timeoutMs: END_OF_JOB_DRAIN_MS });
+    } catch {
+      // Stopped some other way, which brings its own chance to restore it.
+      return;
+    }
+    if (!this.isJobRunning && !this.starting) await this.restoreLaserMode();
   }
 
   protected onJobStarted(): void {
@@ -330,7 +409,7 @@ export abstract class JobMachine extends ProbingMachine {
       const m = this.gcodeQueue[i].match(/\bM0*3\b.*?\bS(\d+)/i);
       if (m) {
         const s = parseInt(m[1], 10);
-        if (s > 0) rpm = `, set the spindle to ${s.toLocaleString()} RPM`;
+        if (s > 0) rpm = `, switch the spindle on at ${s.toLocaleString()} RPM`;
         break;
       }
     }
@@ -368,9 +447,7 @@ export abstract class JobMachine extends ProbingMachine {
     // Drained, so everything acked has been cut: the progress stands at the pause.
     this.updateState(this.advanceCut(null, 0));
 
-    // Get clear of the work, then bring the spindle out where it can be reached.
-    //
-    // Not at a sheet swap on a laser.
+    // Get clear of the work. Not at a sheet swap on a laser.
     // Resume puts back only the program's own Z (restoreAfterProgramPause), and
     // a laser program has none, so the lift stayed and every later sheet was cut
     // 25 mm out of focus. A tool change always lifts: it means a spindle.
@@ -386,7 +463,9 @@ export abstract class JobMachine extends ProbingMachine {
       }
     }
     await this.sendLine('G90'); // Absolute, whichever way the lift was made
-    await this.sendLine('G0 X0.000 Y0.000'); // Park XY where the collet is reachable
+    // A tool change stays where the program brought it: an exporter that parks
+    // chooses that spot, over stock Z can be taken from again.
+    if (type !== 'PAUSED_TOOL') await this.sendLine('G0 X0.000 Y0.000'); // Where the work can be reached
   }
 
   /**
@@ -405,6 +484,11 @@ export abstract class JobMachine extends ProbingMachine {
     if (done > this.ackedLines) this.ackedLines = done;
   }
 
+  /** A run from a line starts its queue with a preamble, so it is counted from the program. */
+  protected programLinesBefore(index: number): readonly string[] {
+    return this.program.slice(0, Math.max(0, this.jobLineBase + index)).map((l) => l.code);
+  }
+
   /**
    * Why a setup after the first cannot start yet, or null when it can.
    *
@@ -420,6 +504,11 @@ export abstract class JobMachine extends ProbingMachine {
     const which = `Setup ${setup.index} of ${setup.of}`;
     if (origin !== 'ui' || relayed) {
       return `${which} turns the block by hand, so it can only be started from this screen, by someone at the machine.`;
+    }
+    // Setup 1 is let through above: running the first face again starts over.
+    const pending = this.state.setupPending;
+    if (pending?.sequenceId === setup.sequenceId && setup.index !== pending.next) {
+      return `${which}: run setup ${pending.next} first.`;
     }
     if (this.zZeroedAt <= this.setupEndedAt || this.zZeroedAt === 0) {
       return `${which}: set Z zero on the new top face first. The last setup's Z is from a face that has moved.`;
@@ -462,6 +551,7 @@ export abstract class JobMachine extends ProbingMachine {
     // where an offer left standing would invite somebody to descend into a
     // piece that has already come off the bed.
     clearCheckpoint();
+    void this.returnLaserModeAfterJob();
     return {
       ...between,
       currentLine: this.programLength(),
@@ -521,8 +611,8 @@ export abstract class JobMachine extends ProbingMachine {
    * Puts the machine back the way the program left it at a tool change or a
    * programmed stop, before the stream restarts.
    *
-   * The pause turned the spindle off, lifted, parked at X0 Y0, and then the
-   * operator was free to jog, touch off (which sends `G21 G90`) and fit a new
+   * The pause turned the spindle off and lifted, a stop other than a tool change
+   * parked at X0 Y0, and then the operator was free to jog, touch off (which sends `G21 G90`) and fit a new
    * bit. The program knows none of that. The exporter writes its lift *before*
    * the `M6` and assumes the machine is still up there, over the same point, in
    * the same modes, with the spindle as it was - so the next line may be a bare

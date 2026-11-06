@@ -41,6 +41,8 @@ export interface PlannerInput {
    * long-reach one.
    */
   reachMm: number;
+  /** The same from the top and the underside, where the block's own channel is the way in. Default `reachMm`. */
+  reachZMm?: number;
   /** At most this many setups. Default 6, one per face. */
   maxSetups?: number;
   /** Whether the underside may be a setup (the flip). */
@@ -100,7 +102,7 @@ export interface SetupPlan {
   cost: number;
   /**
    * When what is left is out of the bit's reach rather than out of sight: the
-   * side faces that would clear most of it, and how far the bit would have to
+   * faces that would clear most of it, and how far the bit would have to
    * reach (most of the way is often through the channel and frame).
    */
   longerBit: { faces: BlockFace[]; reachMm: number; mm3: number } | null;
@@ -265,7 +267,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
   const planKey = [
     b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ,
     input.stock.widthMm, input.stock.depthMm, input.stock.thicknessMm,
-    input.toolDiaMm, input.reachMm, input.maxSetups ?? 6,
+    input.toolDiaMm, input.reachMm, input.reachZMm ?? input.reachMm, input.maxSetups ?? 6,
     input.allowUnderside ?? true, input.allowSides ?? true,
     input.clearanceMm ?? 0, input.stickoutMm ?? 0, input.cellMm ?? 0,
     input.onlyFaces ? input.onlyFaces.join(',') : '*',
@@ -314,7 +316,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
   const air: number[] = [];
   for (let i = 0; i < grid.solid.length; i++) if (!grid.solid[i]) air.push(i);
   const depthMm = new Map<BlockFace, Float32Array>();
-  /** Depth below each side face ignoring the bit's reach, for saying what a longer bit would do. */
+  /** Depth below each face ignoring the bit's reach, for saying what a longer bit would do. */
   const unlimitedMm = new Map<BlockFace, Float32Array>();
   /** Depth below each face at which a point (no cutter radius) sees each air voxel, within reach. */
   const sightMm = new Map<BlockFace, Float32Array>();
@@ -323,9 +325,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
     const d = new Float32Array(air.length);
     const u = new Float32Array(air.length);
     const seen = new Float32Array(air.length);
-    // The top and underside are cut by solid machining's own surface jobs,
-    // which hold the cutter's body clear and warn about reach themselves.
-    const limit = f === '+z' || f === '-z' ? Infinity : input.reachMm;
+    const limit = f === '+z' || f === '-z' ? (input.reachZMm ?? input.reachMm) : input.reachMm;
     for (let a = 0; a < air.length; a++) {
       const r = reach[air[a]];
       const mm = r < 0 ? Infinity : (r + 1) * cell + margin[f];
@@ -480,7 +480,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
     const best: { a: number; f: BlockFace; mm: number }[] = [];
     for (const a of leftIdx) {
       let mm = Infinity, face: BlockFace | null = null;
-      for (const f of sides) {
+      for (const f of allowed) {
         const v = unlimitedMm.get(f)![a];
         if (v < mm) { mm = v; face = f; }
       }

@@ -31,3 +31,13 @@ export function splitGcodeComments(raw: string): { code: string; notes: string[]
   }
   return { code: code.replace(/\s+/g, ' ').trim(), notes: notes.filter(Boolean) };
 }
+
+/**
+ * Text from outside the exporter, made safe to write into a G-code comment.
+ *
+ * A comment ends at the line break, so a newline in a part's name would put the
+ * rest of the name on a line of its own, where the controller runs it.
+ */
+export function commentText(text: string): string {
+  return text.replace(/[\p{Cc}\u2028\u2029]+/gu, ' ').trim();
+}

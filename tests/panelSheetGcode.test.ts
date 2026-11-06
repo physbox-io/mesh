@@ -40,14 +40,15 @@ describe('a mixed stock rack on a router', () => {
       sheetStockThicknessMm: [6, 12],
     });
     expect(r.success).toBe(true);
-    expect(deepestPerSheet(r.gcode)).toEqual([-6, -12]);
+    // Both sheets rest on one bed, so they end at the same Z, just through it.
+    expect(deepestPerSheet(r.gcode)).toEqual([-6.2, -6.2]);
   });
 
   it('falls back to the one cut depth when the sheets are not known', () => {
     const r = generateLaserCutGcode([panel('a', 6, 0), panel('b', 6, 1)], {
       ...DEFAULT_GCODE_OPTIONS, machineMode: 'cnc', cutDepthZ: 6, zStepdown: 3,
     });
-    expect(deepestPerSheet(r.gcode)).toEqual([-6, -6]);
+    expect(deepestPerSheet(r.gcode)).toEqual([-6.2, -6.2]);
   });
 });
 

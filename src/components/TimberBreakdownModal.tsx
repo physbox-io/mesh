@@ -461,6 +461,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
     }
     if (machineState.status !== 'IDLE') return;
     void webSerialManager.runJob(setup.gcode, {
+      machine: 'cnc',
       name: setup.id,
       estimatedSeconds: setup.estimatedMinutes * 60,
     });

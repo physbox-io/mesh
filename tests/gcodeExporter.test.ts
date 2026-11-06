@@ -46,7 +46,7 @@ describe('G-Code Generator Engine', () => {
     expect(cncResult.success).toBe(true);
     expect(cncResult.gcode).toContain('G0 Z5.000');
     expect(cncResult.gcode).toContain('Pass 1/2 (Z = -3.000mm)');
-    expect(cncResult.gcode).toContain('Pass 2/2 (Z = -6.000mm)');
+    expect(cncResult.gcode).toContain('Pass 2/2 (Z = -6.200mm)');
     expect(cncResult.gcode).toContain('M3 S12000');
   });
 
@@ -203,14 +203,14 @@ describe('Holding attachments', () => {
 
     // 1 mm of stock under a 6 mm cut puts the attachment tops at Z-5, so the
     // pass at -3 mm is still above them and needs no Z at all; only the -6 mm
-    // pass rides, and it never dips below the cut depth or above the tab top.
+    // pass rides, and it never dips below the through-cut or above the tab top.
     const passes = res.gcode.split('; Pass ');
     expect(passes[1]).not.toMatch(/G1 X[-\d.]+ Y[-\d.]+ Z/);
 
     const zs = [...res.gcode.matchAll(/G1 X[-\d.]+ Y[-\d.]+ Z([-\d.]+)/g)].map(m => parseFloat(m[1]));
     expect(zs.length).toBeGreaterThan(0);
     expect(Math.max(...zs)).toBeCloseTo(-5.0, 3);
-    expect(Math.min(...zs)).toBeCloseTo(-6.0, 3);
+    expect(Math.min(...zs)).toBeCloseTo(-6.2, 3);
 
     // The climb to the tab top is a ramp, not a plunge: every Z change happens
     // over a move that also travels in XY.
@@ -511,7 +511,7 @@ describe('Contour stack top layer', () => {
     const profile = top.slice(top.indexOf('; Pass 1/'));
     const profileZ = zs(profile);
     expect(Math.max(...profileZ)).toBeLessThan(-29);
-    expect(Math.min(...profileZ)).toBeCloseTo(-50, 3);
+    expect(Math.min(...profileZ)).toBeCloseTo(-50.2, 3);
   });
 
   it('faces only the wall band a frame needs, not the hole it drops', () => {

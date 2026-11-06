@@ -164,7 +164,7 @@ describe('facing, then the profile bit', () => {
     const firstPanel = g.findIndex((l) => /^; --- Panel/.test(l));
     const plunges = g.slice(firstPanel).filter((l) => /^G1 Z/.test(l)).map((l) => parseFloat(/Z(-?[\d.]+)/.exec(l)![1]));
     expect(plunges[0]).toBeCloseTo(-5, 3);
-    expect(Math.min(...plunges)).toBeCloseTo(-10, 3);
+    expect(Math.min(...plunges)).toBeCloseTo(-10.2, 3);
   });
 
   it('steps evenly across the footprint and reaches its far edge', () => {

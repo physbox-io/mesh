@@ -287,6 +287,7 @@ export function splitPanelsToFit(
         out.push({
           ...panel,
           id: `${panel.id}_s${i + 1}${pieces.length > 1 ? `_${j + 1}` : ''}`,
+          splitFrom: panel.id,
           name: `${panel.name}_${i + 1}${pieces.length > 1 ? `${String.fromCharCode(97 + j)}` : ''}`,
           outerPolygon2D: piece,
           innerCutouts2D: [],

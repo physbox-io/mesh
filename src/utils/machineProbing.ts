@@ -217,6 +217,16 @@ export abstract class ProbingMachine extends SetupMachine {
 
       await this.sendAndWait('G21 G90');
 
+      // The first hop has no lift behind it, so a tool left on the stock would
+      // drag there. Relative like every other Z move here, and only off a datum
+      // that means something: with none, the reading is no measure of the gap.
+      await this.awaitStatus();
+      const short = PROBE_LIFT_MM - this.state.wpos.z;
+      if (!this.state.needsZZero && short > 0.001) {
+        await this.sendAndWait(`G91 G0 Z${short.toFixed(3)}`);
+        await this.sendAndWait('G90');
+      }
+
       // Machine Z of the first contact. Every later point is reported against it,
       // so the grid comes out as offsets whatever the tool length or datum.
       let referenceZ: number | null = null;

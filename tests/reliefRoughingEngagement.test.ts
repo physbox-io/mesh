@@ -129,6 +129,23 @@ function measure(scene: SceneGraph, opts = deep): Worst {
 }
 
 describe('Adaptive roughing engagement', () => {
+  it('never boosts a thin ring past what the machine can feed', () => {
+    const options = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 120, stockDepthMm: 120, stockThicknessMm: 30, carveDepthMm: 15,
+      roughingStrategy: 'adaptive' as const, roughingEnabled: true, finishingEnabled: false,
+      roughingToolDiaMm: 6.35, roughingStepoverMm: 1, roughingFeedrate: 1000,
+    };
+    const unlimited = generateReliefCarveGcode(dome, options);
+    const fastest = (g: string) => Math.max(...[...g.matchAll(/^G1 .*F(\d+)/gm)].map((m) => parseInt(m[1], 10)));
+    expect(fastest(unlimited.gcode)).toBeGreaterThan(1100);
+    const motionProfile = {
+      ...DEFAULT_RELIEF_OPTIONS.motionProfile,
+      maxRate: { ...DEFAULT_RELIEF_OPTIONS.motionProfile.maxRate, x: 1100, y: 1100 },
+    };
+    expect(fastest(generateReliefCarveGcode(dome, { ...options, motionProfile }).gcode)).toBe(1100);
+  }, 60000);
+
   // A cell of the stock model either side of the flank sample, and the
   // rounding of the program's coordinates.
   const SLACK = 0.3;

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Send, Square, Wrench,
 } from 'lucide-react';
@@ -11,6 +12,7 @@ import { DEFAULT_PRINT_BED, MAX_PRINT_BED_MM, MIN_PRINT_BED_MM } from '../utils/
 import { FILAMENTS, filamentSpec, type FilamentId } from '../utils/filaments';
 import { FdmNotice } from './FdmNotice';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { stopControl } from '../utils/machineGates';
 import { MATERIALS, type MaterialId } from '../utils/feedsAndSpeeds';
 import { formatDuration } from '../utils/timeEstimate';
 import type { LatticeTool } from '../utils/latticeMesh';
@@ -392,11 +394,31 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const parked = machineState.status === 'PAUSED_PARKED';
   // The same gate the job panel's banner applies: a new bit, and no Z datum for it yet.
   const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
-  // Moving with no job to stop: a probe, a go-to-origin, homing, a frame. The
-  // job's stop is no use there and jog-cancel does not stop a G0 or a probe,
-  // so this is the one way to halt it short of the power switch.
-  const movingOutsideJob = !running && machineState.connected
-    && /^(Run|Jog|Home|Hold)/.test(machineState.grblState ?? '');
+  /*
+   * The one stop, above every dialog: a modal's backdrop covers this bar, and a
+   * frame, a probe or a tool change is started from a modal. In the strip below
+   * them, at the window's corner, so it never sits on a modal's own Start.
+   *
+   * With no job to stop (a probe, a go-to-origin, homing, a frame, a spindle
+   * left on) jog-cancel does not stop a G0 or a probe, so this is the one way
+   * to halt it short of the power switch. Not a twin of Pause when there is a
+   * job: this is a soft reset, which ends the piece and loses the position.
+   * Labelled and coloured as the E-Stop it is, and set apart, so it is not the
+   * icon hit when Pause was meant.
+   */
+  const stop = stopControl(machineState);
+  const stopButton = stop && (
+    <button
+      onClick={() => void (stop === 'job' ? webSerialManager.cancelJob() : webSerialManager.eStop())}
+      title={stop === 'job'
+        ? 'E-Stop: soft reset. Stops the machine now and loses the position. The line it reached is kept, to resume after re-homing and re-zeroing.'
+        : 'Soft reset: stops the machine now. If it was moving, the position is lost and it wants homing.'}
+      className="fixed bottom-1 right-4 z-[100000] flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold font-mono text-[11px] cursor-pointer"
+    >
+      <Square className="w-3.5 h-3.5" />
+      <span>{stop === 'job' ? 'E-Stop' : 'Stop machine'}</span>
+    </button>
+  );
 
   const selectClass =
     'bg-transparent text-slate-800 dark:text-slate-200 font-semibold rounded px-1 py-0.5 outline-none cursor-pointer border-none';
@@ -825,30 +847,10 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             >
               {paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
             </button>
-            {/* Not a twin of Pause: this is a soft reset, which ends the piece
-                and loses the position. Labelled and coloured as the E-Stop it
-                is, and set apart, so it is not the icon hit when Pause was meant. */}
-            <button
-              onClick={() => webSerialManager.cancelJob()}
-              title="E-Stop: soft reset. Stops the machine now and loses the position. The line it reached is kept, to resume after re-homing and re-zeroing."
-              className="ml-2 flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold cursor-pointer"
-            >
-              <Square className="w-3.5 h-3.5" />
-              <span>E-Stop</span>
-            </button>
           </div>
         )}
 
-        {movingOutsideJob && (
-          <button
-            onClick={() => void webSerialManager.eStop()}
-            title="Soft reset: stops the machine now. If it was moving, the position is lost and it wants homing."
-            className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold cursor-pointer"
-          >
-            <Square className="w-3.5 h-3.5" />
-            <span>Stop machine</span>
-          </button>
-        )}
+        {stopButton && (typeof document !== 'undefined' ? createPortal(stopButton, document.body) : stopButton)}
 
         <RemoteJobChip />
 

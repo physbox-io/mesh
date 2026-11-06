@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateSolidMachining } from '../src/utils/solidMachiningExporter';
+import { deriveSolidOptions, generateSolidMachining } from '../src/utils/solidMachiningExporter';
 import { simulateMilling } from '../src/utils/cutSimulation';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 
@@ -238,4 +238,40 @@ describe('Holding tabs', () => {
     }
     expect(res.tabsPlaced).toBe(res.tabs.length);
   });
+});
+
+describe('Reach', () => {
+  it('leaves out pins the bit could not bore to the bottom of, in the words it always did', () => {
+    // 46 mm of block and 8 of spoilboard is 17 x D on a 3.175 mm bit.
+    const r = generateSolidMachining(flanged, { ...quick, sides: 2, roughingToolDiaMm: 3.175, finishingToolDiaMm: 3.175 });
+    expect(r.success, r.error).toBe(true);
+    expect(r.pins).toEqual([]);
+    expect(r.sides[0].gcode).not.toContain('OP 0: registration pins');
+    expect(r.warnings.join(' ')).toMatch(/the pins are skipped/);
+    expect(r.warnings.join(' ')).not.toMatch(/Pin bore/);
+  }, 60000);
+
+  it('fails, naming the bit, when the holder stops it short of cutting the part free', () => {
+    const r = generateSolidMachining(flanged, { ...quick, sides: 1, toolStickoutMm: 15, holderDiaMm: 30 });
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/of the \d+\.\d mm this cut has to reach: fit a longer bit/);
+  }, 60000);
+
+  it('does not count an inside corner the cutter rounds as stopping short', () => {
+    // A round cutter leaves a radius in the block's outside corners of the
+    // channel; that is the part, not a shortfall.
+    const r = generateSolidMachining(block, { ...quick, sides: 1 });
+    expect(r.success, r.error).toBe(true);
+  }, 60000);
+});
+
+describe('A part smaller than the search for its tabs', () => {
+  for (const mm of [3, 6, 9]) {
+    it(`plans a ${mm} mm part`, () => {
+      const scene = body([{ type: 'box', size: [mm / 2000, mm / 2000, mm / 2000], pos: [0, 0, mm / 2000] } as never]);
+      const asked = { sides: 1 as const, material: 'softwood' as const, roughingToolDiaMm: 3.175, finishingToolDiaMm: 3.175 };
+      const r = generateSolidMachining(scene, deriveSolidOptions(scene, asked));
+      expect(r.success, r.error).toBe(true);
+    }, 60000);
+  }
 });

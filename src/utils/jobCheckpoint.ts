@@ -162,6 +162,11 @@ export interface CheckpointProgress {
    */
   pendingPause?: PendingPause;
   /**
+   * Where the machine last read, so a board that restarted while this page was
+   * gone can be told from one that kept counting. See `restoreCheckpoint`.
+   */
+  mpos?: { x: number; y: number; z: number };
+  /**
    * Who is streaming the job: this browser's install id and the tab's session
    * id. Absent on records written before it existed, which are never taken as
    * live.
@@ -471,6 +476,14 @@ export function beginCheckpoint(input: {
   return getCheckpointStatus();
 }
 
+/** Set from the status reports; written with each record of progress. */
+let lastMPos: { x: number; y: number; z: number } | null = null;
+
+/** The machine position the next record of progress carries. */
+export function noteCheckpointPosition(mpos: { x: number; y: number; z: number }): void {
+  lastMPos = mpos;
+}
+
 /**
  * Records how far the job has got.
  *
@@ -498,6 +511,7 @@ export function recordProgress(
     fromLine,
     reason,
     ...(pendingPause ? { pendingPause } : {}),
+    ...(lastMPos ? { mpos: lastMPos } : {}),
     writer: { install: installId(), tab: tabSession().id },
   };
   lastRecorded = { fromLine, reason };

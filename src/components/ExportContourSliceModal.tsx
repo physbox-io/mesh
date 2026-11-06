@@ -4,7 +4,8 @@ import {
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { type ContourSliceOptions, type ContourSliceResult } from '../utils/contourSliceExporter';
-import { layoutKerf } from '../utils/sheetCutRecipe';
+import { canStartSheetJob, layoutKerf, layoutMargin, routerStepdownMm } from '../utils/sheetCutRecipe';
+import { useLaserPowers } from '../hooks/useLaserPowers';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
@@ -218,14 +219,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [cutFeedrateOverride, setCutFeedrateOverride] = useState<number | null>(null);
   /** Cutter diameter, for the feeds-and-speeds arithmetic in routing mode. */
   const [bitDiameterMm, setBitDiameterMm] = useState<number>(3.175);
-  const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
-  const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
   const [laserPasses, setLaserPasses] = useState<number>(1);
   const [attachments, setAttachments] = useState<boolean>(DEFAULT_GCODE_OPTIONS.attachmentsEnabled);
   const [attachmentWidthMm, setAttachmentWidthMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentWidthMm);
   const [attachmentSpacingMm, setAttachmentSpacingMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentSpacingMm);
   const [attachmentHeightMm, setAttachmentHeightMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentHeightMm);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
+  const { laserMaxPower, laserPower, pickLaserMaxPower, setLaserPower } = useLaserPowers(machineMode, machineState);
 
   /**
    * What to run the spindle and the feed at, from the material and the cutter.
@@ -257,15 +257,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     return () => unsub();
   }, [isOpen]);
 
-  // $30 is a machine setting, not a power change: retarget the S-value so the
-  // percentage the user dialled in survives the switch.
-  const handleLaserMaxPowerChange = (next: number) => {
-    const ceiling = Math.max(1, next);
-    const fraction = laserPower / Math.max(1, laserMaxPower);
-    setLaserMaxPower(ceiling);
-    setLaserPower(Math.max(0, Math.min(ceiling, Math.round(fraction * ceiling))));
-  };
-
   /*
    * Slicing the whole model and laying the layers out is main-thread work, and
    * every keystroke in a field below used to ask for it again: typing "12" into
@@ -276,11 +267,12 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
    */
   // Only a laser is sent a kerf (sheetCutRecipe), as the MCP simulation is.
   const slicedKerfMm = layoutKerf(machineMode, kerfMm);
+  const marginM = layoutMargin(machineMode, bitDiameterMm / 1000);
   const liveSliceFields = useMemo(() => ({
     materialThicknessMm, layerOverride, slicePosition, kerfMm: slicedKerfMm, pinCount, pinDiameterMm,
-    sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations,
+    sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM,
   }), [materialThicknessMm, layerOverride, slicePosition, slicedKerfMm, pinCount, pinDiameterMm,
-      sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations]);
+      sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM]);
   const sliceFields = useSettled(liveSliceFields, 250);
   // Slicing a big model takes long enough to freeze the tab, so it runs on the
   // export worker; the drawing on screen stays up, dimmed, until the new one lands.
@@ -297,6 +289,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       pinDiameter: f.pinDiameterMm / 1000,
       sheetWidth: Math.max(0.05, f.sheetWidthMm / 1000),
       sheetHeight: Math.max(0.05, f.sheetHeightMm / 1000),
+      margin: f.marginM,
       scaleFactor: f.customScalePct / 100,
       autoScale: f.autoScale,
       maxSheets: f.autoScale ? f.maxSheets : 0,
@@ -344,7 +337,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
         laserMaxPower: f.laserMaxPower,
         laserPasses: f.laserPasses,
         cutDepthZ: f.materialThicknessMm,
-        zStepdown: Math.min(f.materialThicknessMm, 3.0),
+        zStepdown: routerStepdownMm(f.materialThicknessMm, f.bitDiameterMm),
         attachmentsEnabled: f.attachments,
         attachmentWidthMm: f.attachmentWidthMm,
         attachmentSpacingMm: f.attachmentSpacingMm,
@@ -355,6 +348,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     });
   }, [exportResult, gcodeFields, machineState.motion, probedGrid, scene]);
   const gcodeResult = exportResult?.success && exportResult.layers ? gcodeJob.result : null;
+  const failure = exportResult?.success ? (gcodeResult?.error ?? gcodeJob.failure) : exportResult?.error;
 
   const previewSvg = useMemo(() => {
     if (!exportResult?.success) return '';
@@ -422,6 +416,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const handleStartJob = () => {
     if (!gcodeResult?.gcode) return;
     void webSerialManager.runJob(gcodeResult.gcode, {
+      machine: machineMode,
       name: 'Contour slices',
       estimatedSeconds: gcodeResult.estimatedTimeSeconds,
       // What the sheet was and what it was cut at — see `runSettings`.
@@ -654,12 +649,15 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 <select
                   disabled={machineMode !== 'laser'}
                   value={laserMaxPower}
-                  onChange={(e) => handleLaserMaxPowerChange(parseInt(e.target.value) || 10000)}
+                  onChange={(e) => pickLaserMaxPower(parseInt(e.target.value) || 10000)}
                   className={`${inputClass} font-sans cursor-pointer`}
                 >
                   <option value={10000}>10000 (most diode boards)</option>
                   <option value={1000}>1000 (stock GRBL)</option>
                   <option value={255}>255</option>
+                  {![10000, 1000, 255].includes(laserMaxPower) && (
+                    <option value={laserMaxPower}>{laserMaxPower}</option>
+                  )}
                 </select>
               </Field>
 
@@ -858,10 +856,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             </Advanced>
           </div>
 
-          {exportResult && !exportResult.success && (
+          {failure && (
             <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <span className="leading-relaxed">{exportResult.error}</span>
+              <span className="leading-relaxed">{failure}</span>
             </div>
           )}
 
@@ -1018,7 +1016,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 <div className="ml-auto">
                   <JobTransport
                     machineState={machineState}
-                    canStart={!!gcodeResult?.success}
+                    canStart={canStartSheetJob(exportResult, gcodeResult)}
                     onStart={handleStartJob}
                     startLabel="Start Cut Job"
                     variant="inline"
@@ -1044,16 +1042,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                     : null
                 }
                 extent={
-                  gcodeResult
-                    ? {
-                        ...gcodeResult.bounds,
-                        // A laser has no Z to check; a router sweeps from its
-                        // retract height down through the sheet.
-                        ...(machineMode === 'cnc'
-                          ? { minZ: -materialThicknessMm, maxZ: DEFAULT_GCODE_OPTIONS.safeZ }
-                          : {}),
-                      }
-                    : undefined
+                  gcodeResult?.bounds
                 }
               />
               </>

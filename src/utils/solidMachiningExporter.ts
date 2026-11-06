@@ -28,7 +28,7 @@ import {
   DEFAULT_RELIEF_OPTIONS,
   deriveReliefFeeds,
   machineSurface,
-  MAX_REACH_DIAMETERS,
+  MAX_AVAILABLE_REACH_DIAMETERS,
   type Heightmap,
   type ReliefCarveOptions,
   type StockTransform,
@@ -39,6 +39,7 @@ import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
 import { ORIENT_MATRIX, orient, type BlockFace, type UpAxis } from './orient';
 import { generateSetups, sidesAsSetups, type SetupPlanSummary, type SolidSetupResult } from './solidSetups';
 import { sampleColumns } from './partColumns';
+import { distanceTransform } from './distanceTransform';
 
 export type { UpAxis };
 
@@ -159,6 +160,12 @@ export interface SolidMachiningOptions extends Omit<ReliefCarveOptions, ReliefOn
    * block. Set by the setup planner; see `planDatumNotches`.
    */
   datumNotches?: DatumNotch[];
+  /**
+   * Boxes a setup that runs before this job's has taken out of the block, in
+   * the first setup's frame (see `NotchBox`). Set by the setup planner, so the
+   * new bit at a tool change is not sent to zero on a face that is not there.
+   */
+  earlierCuts?: { x0: number; x1: number; y0: number; y1: number; z0: number; z1: number }[];
 }
 
 /** A cube of waste cut out of one corner of the block from the top. mm, setup 1's frame. */
@@ -330,61 +337,6 @@ function f(num: number): string {
 
 
 /**
- * Exact Euclidean distance from every cell to the nearest set cell, in cells.
- *
- * Felzenszwalb and Huttenlocher's two-pass parabola method: a 1D transform
- * down every column, then along every row of the result. Linear in the number
- * of cells, where scanning a kernel round each cell is quadratic in the
- * channel width — and the channel here is tens of cells wide.
- */
-function distanceTransform(mask: Uint8Array, cols: number, rows: number): Float32Array {
-  const INF = 1e20;
-  const g = new Float32Array(cols * rows);
-  for (let i = 0; i < g.length; i++) g[i] = mask[i] ? 0 : INF;
-
-  const n = Math.max(cols, rows);
-  const fIn = new Float64Array(n);
-  const d = new Float64Array(n);
-  const v = new Int32Array(n);
-  const z = new Float64Array(n + 1);
-
-  const edt1d = (len: number) => {
-    let k = 0;
-    v[0] = 0;
-    z[0] = -INF;
-    z[1] = INF;
-    for (let q = 1; q < len; q++) {
-      let s = ((fIn[q] + q * q) - (fIn[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
-      while (s <= z[k]) {
-        k--;
-        s = ((fIn[q] + q * q) - (fIn[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
-      }
-      k++;
-      v[k] = q;
-      z[k] = s;
-      z[k + 1] = INF;
-    }
-    k = 0;
-    for (let q = 0; q < len; q++) {
-      while (z[k + 1] < q) k++;
-      d[q] = (q - v[k]) * (q - v[k]) + fIn[v[k]];
-    }
-  };
-
-  for (let c = 0; c < cols; c++) {
-    for (let r = 0; r < rows; r++) fIn[r] = g[r * cols + c];
-    edt1d(rows);
-    for (let r = 0; r < rows; r++) g[r * cols + c] = d[r];
-  }
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) fIn[c] = g[r * cols + c];
-    edt1d(cols);
-    for (let c = 0; c < cols; c++) g[r * cols + c] = Math.sqrt(d[c]);
-  }
-  return g;
-}
-
-/**
  * Cells not under the part that can be reached from the edge of the stock.
  *
  * What is left — empty cells the part surrounds — is a hole or a pocket, which
@@ -496,7 +448,8 @@ function placeTabs(
     }
     let done = false;
     for (let step = 0; step < TAB_SEARCH_STEPS && !done; step++) {
-      const idx = (lo + (step % 2 === 0 ? step / 2 : -(step + 1) / 2) + byAngle.length * 4) % byAngle.length;
+      // A small part's outline is shorter than the search, so this wraps both ways.
+      const idx = (((lo + (step % 2 === 0 ? step / 2 : -(step + 1) / 2)) % byAngle.length) + byAngle.length) % byAngle.length;
       const p = byAngle[idx];
       if (anchors.some((k) => {
         const r = Math.floor(k / cols);
@@ -1158,22 +1111,17 @@ function generateSolidSides(
     }
   }
 
-  const reachWarn = (depthMm: number, dia: number, label: string) => {
-    const ratio = depthMm / Math.max(0.05, dia);
-    if (ratio > MAX_REACH_DIAMETERS) {
-      warnings.push(
-        `${label}: ${depthMm.toFixed(1)} mm bore is ${ratio.toFixed(1)}×D for the ${dia} mm bit (>${MAX_REACH_DIAMETERS}×D); verify flute length and collet clearance.`
-      );
-    }
-  };
-
   // Bored with whichever cutter does the roughing.
   const pinToolDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
   if (pins.length > 0) {
     const boreDepth = stockT + opts.pinDepthMm;
     // A pin hole has to go right through the block to register the flip, so
-    // one the holder stops short of is no hole at all.
-    const holderAt = opts.holderDiaMm > 0 && opts.toolStickoutMm > 0 ? opts.toolStickoutMm : Infinity;
+    // one the bit cannot get to the bottom of is no hole at all: the holder
+    // stops it at the stickout, and without one said it reaches as far as the
+    // planner lets it.
+    const holderAt = opts.toolStickoutMm > 0
+      ? (opts.holderDiaMm > 0 ? opts.toolStickoutMm : Math.max(opts.toolStickoutMm - 1, pinToolDia * MAX_AVAILABLE_REACH_DIAMETERS))
+      : pinToolDia * MAX_AVAILABLE_REACH_DIAMETERS;
     if (pinToolDia > opts.pinDiaMm + 1e-6) {
       warnings.push(
         `The ${pinToolDia} mm cutter is too wide to bore a ${opts.pinDiaMm} mm pin hole; the pins are skipped.`
@@ -1186,13 +1134,10 @@ function generateSolidSides(
           `Fit the cutter longer, or register the flip by hand.`
       );
       pins.length = 0;
-    } else {
-      reachWarn(boreDepth, pinToolDia, 'Pin bore');
-      if (opts.pinDiaMm - pinToolDia < 2 * PECK_BELOW_MM) {
-        warnings.push(
-          `${opts.pinDiaMm} mm pin holes are peck-drilled at the ${pinToolDia} mm cutter diameter (insufficient radial clearance for helical boring).`
-        );
-      }
+    } else if (opts.pinDiaMm - pinToolDia < 2 * PECK_BELOW_MM) {
+      warnings.push(
+        `${opts.pinDiaMm} mm pin holes are peck-drilled at the ${pinToolDia} mm cutter diameter (insufficient radial clearance for helical boring).`
+      );
     }
   }
 
@@ -1380,9 +1325,21 @@ function generateSolidSides(
     for (let k = 0; k < surface.z.length; k++) deepest = Math.max(deepest, -surface.z[k]);
     // Past the half only by more than the surface's own float rounding.
     const depth = deepest > depthA + 1e-3 ? deepest : depthA;
+    // Side B stands turned left to right, so what is gone from its face is mirrored.
+    const touchOff = {
+      standsAt: (px: number, py: number) => {
+        const x = side === 'A' ? px : stockW - px;
+        return !pins.some((p) => Math.hypot(p.x - x, p.y - py) <= opts.pinDiaMm / 2) &&
+          !(opts.earlierCuts ?? []).some((b) =>
+            x >= b.x0 && x <= b.x1 && py >= b.y0 && py <= b.y1 && (side === 'A' ? b.z1 > -1e-6 : b.z0 < -stockT + 1e-6));
+      },
+    };
+    const channel = moatMask.some((m, k) => m === 1 && !tabs.mask[k]);
     const cut = machineSurface(
       {
-        surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut',
+        surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut', touchOff,
+        // Until the channel is down to its floor, the part is not free of the block.
+        ...(channel ? { mustReachMm: depthA } : {}),
         // Off a flush side, as the relief runs off an open edge. Side B is
         // turned left to right, so its ends are the other way round.
         ...(flush.size > 0

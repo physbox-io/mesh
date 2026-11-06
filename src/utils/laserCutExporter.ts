@@ -12,6 +12,7 @@ import { isBoughtIn } from './boughtIn';
 import { isNodeRotationBaked } from './sceneTree';
 import { HARDWARE_KINDS } from './hardwareCuts';
 import { tapDrillRadius } from './metricThreads';
+import { SHEET_MARGIN } from './sheetCutRecipe';
 
 export interface LaserCutOptions {
   jointMode: 'finger' | 'slot' | 'glue';
@@ -127,7 +128,7 @@ export const DEFAULT_LASER_OPTIONS: LaserCutOptions = {
   bitDiameter: 0.003175, // 1/8"
   sheetWidth: 0.600,
   sheetHeight: 0.400,
-  margin: 0.008,
+  margin: SHEET_MARGIN,
   scaleFactor: 1.0,
   autoScale: false,
   maxSheets: 0,
@@ -198,6 +199,8 @@ export interface LaserPanel {
    * how a loop point goes back to the panel's place in the model.
    */
   turnedOnSheet?: boolean;
+  /** The panel this piece was split from, whose stock it is cut from. */
+  splitFrom?: string;
   width2D?: number;
   height2D?: number;
 }
@@ -222,6 +225,10 @@ export interface LaserCutResult {
   sheets?: SheetSpec[];
   scaleFactor?: number;
   error?: string;
+  /** Panels short of a margin on both sides of their sheet. */
+  oversized?: string[];
+  /** Panels that run past the far edge of the sheet, placed one margin in. They must not be cut. */
+  offSheet?: string[];
   /**
    * Non-fatal notes about the cut: panels that got no joints because nothing
    * butts against them, or joints the chosen mode could not express. These need
@@ -2905,8 +2912,10 @@ function packPanels(
   stock: StockItem[],
   marginMm: number,
   thicknessOf: (panel: LaserPanel) => number
-): { sheetCount: number; oversized: string[]; sheets: SheetSpec[]; rotated: string[] } {
+): { sheetCount: number; oversized: string[]; offSheet: string[]; unplaced: string[]; sheets: SheetSpec[]; rotated: string[] } {
   const oversized: string[] = [];
+  const offSheet: string[] = [];
+  const unplaced: string[] = [];
   const sheets: SheetSpec[] = [];
   const rotated: string[] = [];
 
@@ -2957,60 +2966,64 @@ function packPanels(
 
     const order = [...mine].sort((a, b) => (b.height2D || 0) - (a.height2D || 0));
 
-    let binIdx = 0;
     let openSheet = -1;
     let currentX = marginMm;
     let currentY = marginMm;
     let rowHeight = 0;
 
-    /** Starts a fresh piece of stock, moving down the rack when one runs out. */
-    const openNext = (): boolean => {
-      while (binIdx < bins.length) {
-        const bin = bins[binIdx];
-        if (bin.left !== null && bin.left <= 0) {
-          binIdx++;
-          continue;
-        }
-        if (bin.left !== null) bin.left -= 1;
-        sheets.push({
-          widthMm: bin.item.widthMm,
-          heightMm: bin.item.heightMm,
-          thicknessMm,
-        });
-        openSheet = sheets.length - 1;
-        currentX = marginMm;
-        currentY = marginMm;
-        rowHeight = 0;
-        return true;
-      }
-      return false;
+    /**
+     * Starts a fresh piece of stock, the largest left that holds this panel. A
+     * panel that fits nothing takes the largest left, to be drawn overhanging.
+     */
+    const openNext = (pw: number, ph: number): boolean => {
+      const left = bins.filter((b) => b.left === null || b.left > 0);
+      const bin = fitsAnywhere(pw, ph)
+        ? left.find((b) => pw + 2 * marginMm <= b.item.widthMm && ph + 2 * marginMm <= b.item.heightMm)
+        : left[0];
+      if (!bin) return false;
+      if (bin.left !== null) bin.left -= 1;
+      sheets.push({
+        widthMm: bin.item.widthMm,
+        heightMm: bin.item.heightMm,
+        thicknessMm,
+      });
+      openSheet = sheets.length - 1;
+      currentX = marginMm;
+      currentY = marginMm;
+      rowHeight = 0;
+      return true;
     };
 
     for (const panel of order) {
       const pw = panel.width2D || 50;
       const ph = panel.height2D || 50;
+      const fits = fitsAnywhere(pw, ph);
 
-      if (!fitsAnywhere(pw, ph)) {
+      if (!fits) {
         oversized.push(`${panel.name} (${pw.toFixed(0)} x ${ph.toFixed(0)} mm, ${thicknessMm.toFixed(1)} mm)`);
+        if (!bins.some((b) => pw + marginMm <= b.item.widthMm && ph + marginMm <= b.item.heightMm)) offSheet.push(panel.name);
       }
 
-      if (openSheet < 0 && !openNext()) break;
-      const sheet = sheets[openSheet];
+      if (openSheet < 0 && !openNext(pw, ph)) {
+        unplaced.push(panel.name);
+        continue;
+      }
 
       // Wrap to the next row, then to the next piece of stock. A panel that
       // fits nothing still gets placed — on the last sheet, overhanging and
-      // reported — rather than vanishing from the drawing.
+      // reported — rather than vanishing from the drawing. One that would fit
+      // if there were stock left is not placed at all, and the job is refused.
+      const sheet = sheets[openSheet];
       if (currentX + pw + marginMm > sheet.widthMm) {
         currentX = marginMm;
         currentY += rowHeight + marginMm;
         rowHeight = 0;
       }
-      if (currentY + ph + marginMm > sheet.heightMm) {
-        // Out of room on this piece: open the next one. If the rack is empty
-        // the panel stays on this sheet, overhanging and reported, rather than
-        // disappearing from the drawing.
-        const had = openSheet;
-        if (!openNext()) openSheet = had;
+      const pastEdge =
+        currentY + ph + marginMm > sheet.heightMm || (fits && currentX + pw + marginMm > sheet.widthMm);
+      if (pastEdge && !openNext(pw, ph) && fits) {
+        unplaced.push(panel.name);
+        continue;
       }
 
       panel.placedPos2D = { x: currentX, y: currentY };
@@ -3020,7 +3033,7 @@ function packPanels(
     }
   }
 
-  return { sheetCount: Math.max(sheets.length, 1), oversized, sheets, rotated };
+  return { sheetCount: Math.max(sheets.length, 1), oversized, offSheet, unplaced, sheets, rotated };
 }
 
 export function exportLaserCutSvg(
@@ -3081,7 +3094,7 @@ export function exportLaserCutSvg(
     };
   }
   const thicknessOf = (panel: LaserPanel) =>
-    assignment.byPanelId.get(panel.id) ?? options.materialThickness * 1000;
+    assignment.byPanelId.get(panel.splitFrom ?? panel.id) ?? options.materialThickness * 1000;
   const singleThicknessMm = thicknesses.length === 1 ? thicknesses[0] : null;
   const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
 
@@ -3114,8 +3127,8 @@ export function exportLaserCutSvg(
     return { panels: working, warnings: [...assignment.warnings, ...splitNotes, ...warnings], ...packed };
   };
 
-  const fits = (b: { sheetCount: number; oversized: string[] }) =>
-    b.oversized.length === 0 && (maxSheets === 0 || b.sheetCount <= maxSheets);
+  const fits = (b: { sheetCount: number; oversized: string[]; unplaced: string[] }) =>
+    b.oversized.length === 0 && b.unplaced.length === 0 && (maxSheets === 0 || b.sheetCount <= maxSheets);
 
   // Search from full size (auto) or the user's own scale (manual + sheet cap) for
   // the largest scale that still respects the sheet budget. Percent steps,
@@ -3155,10 +3168,21 @@ export function exportLaserCutSvg(
     }
   }
 
+  if (build.unplaced.length) {
+    const named = build.unplaced.slice(0, 4).join(', ');
+    const more = build.unplaced.length > 4 ? `, +${build.unplaced.length - 4} more` : '';
+    return {
+      success: false,
+      error: `The rack has run out of stock for ${named}${more}. Add stock or enable Auto Scale.`,
+      warnings: build.warnings,
+    };
+  }
+
   panels = build.panels;
   const warnings = build.warnings;
   const sheetCount = build.sheetCount;
   const oversized = build.oversized;
+  const offSheet = build.offSheet;
   const sheets = build.sheets;
 
   // A pattern on the face that lies down on the bed is engraved on the face
@@ -3259,7 +3283,7 @@ export function exportLaserCutSvg(
         // sheet comes off and it cannot be read back off the drawing. With one
         // thickness it would be noise on every caption of every existing job.
         const thick = thicknesses.length > 1 ? ` x ${sheet.thicknessMm.toFixed(1)}mm` : '';
-        svg += `  <text x="10" y="${sheetY + 20}" fill="#64748B" font-family="sans-serif" font-size="12" font-weight="bold">Sheet ${s + 1} (${sheet.widthMm}mm x ${sheet.heightMm}mm${thick}${scaleFactor !== 1 ? ` @ ${(scaleFactor*100).toFixed(0)}% scale` : ''})</text>\n`;
+        svg += `  <text x="10" y="${sheetY + 20}" data-operation="ghost" fill="#64748B" font-family="sans-serif" font-size="12" font-weight="bold">Sheet ${s + 1} (${sheet.widthMm}mm x ${sheet.heightMm}mm${thick}${scaleFactor !== 1 ? ` @ ${(scaleFactor*100).toFixed(0)}% scale` : ''})</text>\n`;
       }
       svg += `\n`;
     }
@@ -3273,14 +3297,17 @@ export function exportLaserCutSvg(
     const pos = panel.placedPos2D || { x: 0, y: 0 };
     return { x: pos.x, y: pos.y + (sheetTop[panel.sheetIndex || 0] ?? 0) };
   };
+  // Panel y runs up and SVG y runs down, so each panel turns over in its own box.
+  const drawPoint = (panel: LaserPanel, pos: Point2D, pt: Point2D) =>
+    `${(pos.x + pt.x).toFixed(2)} ${(pos.y + (panel.height2D || 0) - pt.y).toFixed(2)}`;
 
   for (const panel of panels) {
     const pos = drawPos(panel);
 
     if (panel.outerPolygon2D.length > 0) {
-      let pathData = `M ${(pos.x + panel.outerPolygon2D[0].x).toFixed(2)} ${(pos.y + panel.outerPolygon2D[0].y).toFixed(2)}`;
+      let pathData = `M ${drawPoint(panel, pos, panel.outerPolygon2D[0])}`;
       for (let i = 1; i < panel.outerPolygon2D.length; i++) {
-        pathData += ` L ${(pos.x + panel.outerPolygon2D[i].x).toFixed(2)} ${(pos.y + panel.outerPolygon2D[i].y).toFixed(2)}`;
+        pathData += ` L ${drawPoint(panel, pos, panel.outerPolygon2D[i])}`;
       }
       pathData += ` Z`;
       svg += `    <path d="${pathData}" />\n`;
@@ -3288,9 +3315,9 @@ export function exportLaserCutSvg(
 
     for (const cutout of panel.innerCutouts2D) {
       if (cutout.length === 0) continue;
-      let cData = `M ${(pos.x + cutout[0].x).toFixed(2)} ${(pos.y + cutout[0].y).toFixed(2)}`;
+      let cData = `M ${drawPoint(panel, pos, cutout[0])}`;
       for (let i = 1; i < cutout.length; i++) {
-        cData += ` L ${(pos.x + cutout[i].x).toFixed(2)} ${(pos.y + cutout[i].y).toFixed(2)}`;
+        cData += ` L ${drawPoint(panel, pos, cutout[i])}`;
       }
       cData += ` Z`;
       svg += `    <path d="${cData}" />\n`;
@@ -3307,8 +3334,8 @@ export function exportLaserCutSvg(
       const pos = drawPos(panel);
       for (const line of panel.engrave2D ?? []) {
         if (line.length < 2) continue;
-        let d = `M ${(pos.x + line[0].x).toFixed(2)} ${(pos.y + line[0].y).toFixed(2)}`;
-        for (let i = 1; i < line.length; i++) d += ` L ${(pos.x + line[i].x).toFixed(2)} ${(pos.y + line[i].y).toFixed(2)}`;
+        let d = `M ${drawPoint(panel, pos, line[0])}`;
+        for (let i = 1; i < line.length; i++) d += ` L ${drawPoint(panel, pos, line[i])}`;
         svg += `    <path d="${d}" />\n`;
       }
     }
@@ -3341,6 +3368,8 @@ export function exportLaserCutSvg(
     sheetCount,
     sheets,
     scaleFactor,
+    oversized,
+    offSheet,
     warnings,
   };
 }

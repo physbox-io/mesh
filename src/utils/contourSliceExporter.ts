@@ -25,6 +25,7 @@ import { appendGeomTriangles } from './geomSurface';
 import { nestingDepths, offsetLoop } from './polygonOffset';
 import type { StockTransform } from './reliefCarveExporter';
 import { isBoughtIn } from './boughtIn';
+import { SHEET_MARGIN } from './sheetCutRecipe';
 
 export interface ContourSliceOptions {
   /** Stock thickness, in meters. One layer is cut per thickness of model height. */
@@ -72,7 +73,7 @@ export const DEFAULT_CONTOUR_OPTIONS: ContourSliceOptions = {
   pinCount: 2,
   sheetWidth: 0.600,
   sheetHeight: 0.400,
-  margin: 0.008,
+  margin: SHEET_MARGIN,
   scaleFactor: 1.0,
   autoScale: false,
   maxSheets: 0,
@@ -114,6 +115,10 @@ export interface ContourLayer {
 
 export interface ContourSliceResult {
   success: boolean;
+  /** Layers short of a margin on both sides of their sheet. */
+  oversized?: string[];
+  /** Layers that run past the far edge of the sheet, placed one margin in. They must not be cut. */
+  offSheet?: string[];
   /** The nested cut sheets. */
   svg?: string;
   /** All contours overlaid in model space — the relief map itself. */
@@ -1296,11 +1301,13 @@ export function exportContourSliceSvg(
   }
 
   const oversized: string[] = [];
+  const offSheet: string[] = [];
   const sizes = layers.map((layer) => {
     const w = layer.width2D || 1;
     const h = layer.height2D || 1;
     if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
       oversized.push(`layer ${layer.index + 1}`);
+      if (w + marginMm > sheetWidthMm || h + marginMm > sheetHeightMm) offSheet.push(`layer ${layer.index + 1}`);
     }
     return { w, h };
   });
@@ -1356,15 +1363,15 @@ export function exportContourSliceSvg(
   if (options.includeSheetOutline) {
     for (let s = 0; s < sheetCount; s++) {
       const sheetY = s * sheetHeightMm;
-      svg += `  <rect x="0" y="${sheetY}" width="${sheetWidthMm}" height="${sheetHeightMm}" fill="none" stroke="#94A3B8" stroke-width="0.5" stroke-dasharray="4 4" />\n`;
+      svg += `  <rect x="0" y="${sheetY}" width="${sheetWidthMm}" height="${sheetHeightMm}" data-operation="ghost" fill="none" stroke="#94A3B8" stroke-width="0.5" stroke-dasharray="4 4" />\n`;
       if (options.includeLabels) {
-        svg += `  <text x="10" y="${sheetY + 20}" fill="#64748B" font-family="sans-serif" font-size="12" font-weight="bold">Sheet ${s + 1} (${sheetWidthMm}mm x ${sheetHeightMm}mm${scaleFactor !== 1 ? ` @ ${(scaleFactor * 100).toFixed(0)}% scale` : ''})</text>\n`;
+        svg += `  <text x="10" y="${sheetY + 20}" data-operation="ghost" fill="#64748B" font-family="sans-serif" font-size="12" font-weight="bold">Sheet ${s + 1} (${sheetWidthMm}mm x ${sheetHeightMm}mm${scaleFactor !== 1 ? ` @ ${(scaleFactor * 100).toFixed(0)}% scale` : ''})</text>\n`;
       }
     }
     svg += `\n`;
   }
 
-  svg += `  <g id="cut-paths" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
+  svg += `  <g id="cut-paths" data-operation="cut" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
   // The sheets are drawn one below another, so each layer drops by its sheet.
   const sheetTop = (layer: ContourLayer) => (layer.sheetIndex ?? 0) * sheetHeightMm;
   for (const layer of layers) {
@@ -1375,7 +1382,7 @@ export function exportContourSliceSvg(
   svg += `  </g>\n\n`;
 
   if (options.includeLabels) {
-    svg += `  <g id="engrave-labels" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
+    svg += `  <g id="engrave-labels" data-operation="etch" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
     for (const layer of layers) {
       const anchor = layer.labelPos2D;
       if (!anchor) continue;
@@ -1420,6 +1427,8 @@ export function exportContourSliceSvg(
     stackHeight,
     pins,
     scaleFactor,
+    oversized,
+    offSheet,
     stockTransform: (() => {
       const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
       for (let i = 0; i < tris.length; i++) {

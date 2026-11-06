@@ -240,6 +240,38 @@ export class StockModel {
     return best;
   }
 
+  /**
+   * The lowest and highest the model holds under each cell of a grid laid over
+   * the block. Beyond the model nothing has been cut, so that reads as the
+   * stock's face.
+   */
+  levelsOver(grid: { minX: number; minY: number; cell: number; cols: number; rows: number }): { low: Float32Array; high: Float32Array } {
+    const { minX, minY, cell, cols, rows } = grid;
+    const low = new Float32Array(cols * rows);
+    const high = new Float32Array(cols * rows);
+    const c = this.cell;
+    for (let r = 0; r < rows; r++) {
+      const ya = minY + r * cell, yb = ya + cell;
+      const j0 = Math.floor((ya - this.y0) / c + 1e-6), j1 = Math.ceil((yb - this.y0) / c - 1e-6) - 1;
+      for (let q = 0; q < cols; q++) {
+        const xa = minX + q * cell, xb = xa + cell;
+        const i0 = Math.floor((xa - this.x0) / c + 1e-6), i1 = Math.ceil((xb - this.x0) / c - 1e-6) - 1;
+        const beyond = i0 < 0 || j0 < 0 || i1 >= this.cols || j1 >= this.rows;
+        let lo = beyond ? 0 : Infinity, hi = beyond ? 0 : -Infinity;
+        for (let j = Math.max(0, j0); j <= Math.min(this.rows - 1, j1); j++) {
+          for (let i = Math.max(0, i0); i <= Math.min(this.cols - 1, i1); i++) {
+            const z = this.z[j * this.cols + i];
+            if (z < lo) lo = z;
+            if (z > hi) hi = z;
+          }
+        }
+        low[r * cols + q] = lo === Infinity ? 0 : lo;
+        high[r * cols + q] = hi === -Infinity ? 0 : hi;
+      }
+    }
+    return { low, high };
+  }
+
   /** Highest material a cutter of `radius` would touch flying from one point to another. */
   highestAlong(x0: number, y0: number, x1: number, y1: number, radius: number): number {
     let best = -Infinity;

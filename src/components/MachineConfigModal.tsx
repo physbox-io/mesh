@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff, Wrench } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { settingsReadable, unlockAllowed } from '../utils/machineGates';
 import { useStore, type MachineTarget } from '../store/useStore';
 import { DEFAULT_CNC_BED, MAX_CNC_BED_MM, MIN_CNC_BED_MM } from '../utils/printBedSettings';
 import { FdmNotice } from './FdmNotice';
@@ -334,7 +335,8 @@ export const MachineConfigModal: React.FC<{
                 </button>
                 <button
                   onClick={() => webSerialManager.unlockAlarm()}
-                  className="py-1.5 px-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-xs font-semibold rounded-lg flex items-center justify-center gap-1 cursor-pointer"
+                  disabled={!unlockAllowed(machineState)}
+                  className="py-1.5 px-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold rounded-lg flex items-center justify-center gap-1 cursor-pointer"
                 >
                   <ShieldAlert className="w-3.5 h-3.5 text-red-500" />
                   <span>Unlock ($X)</span>
@@ -365,8 +367,9 @@ export const MachineConfigModal: React.FC<{
               {machineState.connected && (
                 <button
                   onClick={() => void webSerialManager.refreshMachineSettings()}
+                  disabled={!settingsReadable(machineState)}
                   title="Ask the controller for its $$ settings again"
-                  className="ml-auto p-1 rounded-lg text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 cursor-pointer"
+                  className="ml-auto p-1 rounded-lg text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                 </button>

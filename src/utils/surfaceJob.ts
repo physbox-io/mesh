@@ -37,6 +37,20 @@ export interface SurfaceJob {
    * inside it. Absent, every side holds the cutter on the stock as before.
    */
   runOff?: OpenEdges | null;
+  /**
+   * Depth the program has to get the tip to, mm, when anything less leaves the
+   * part joined to the block.
+   */
+  mustReachMm?: number;
+  /**
+   * What the stock model cannot know when a spot is chosen to zero the new bit
+   * on: the whole top face where `bounds` is only a window of it, and where
+   * that face is gone, to pin bores or to setups that ran before this one.
+   */
+  touchOff?: {
+    area?: { minX: number; minY: number; maxX: number; maxY: number };
+    standsAt: (x: number, y: number) => boolean;
+  };
 }
 
 /** Which sides of the stock a surface leaves at, below its top face. */

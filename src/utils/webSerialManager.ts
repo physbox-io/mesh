@@ -10,6 +10,7 @@ import {
   RAPID_OVERRIDE_BYTES,
   SPINDLE_OVERRIDE_BYTES,
   TelemetryThrottle,
+  remoteResumeRefusal,
   type MachineStatus,
   type OverrideStep,
   type ResolvedFrames,
@@ -17,7 +18,7 @@ import {
 } from '@physbox-io/machining';
 import { postMachineTelemetry, type MachiningTelemetry, type RemoteCommand } from './apiClient';
 import { cloudAutosave } from './cloudDocuments';
-import { getRunProgramDocumentId } from './jobCheckpoint';
+import { getRunProgramDocumentId, noteCheckpointPosition } from './jobCheckpoint';
 import { RecoveryMachine } from './machineRecovery';
 import type { MachineState } from './machineTypes';
 import { DEFAULT_MOTION_PROFILE } from './motionProfile';
@@ -215,12 +216,10 @@ class WebSerialManager extends RecoveryMachine {
    * The tool is still in the cut and Z has not moved, so there is nothing to
    * put back before the stream restarts.
    *
-   * The state is read from `status` rather than from a pause kind: a tool
-   * change and a material swap are the two that park the machine, and they are
-   * exactly the two that are refused here.
+   * The rule is the package's, shared with an agent's `resume`.
    */
   private async resumeRemotely(): Promise<void> {
-    if (this.state.status !== 'PAUSED_OPERATOR') return;
+    if (remoteResumeRefusal(this.state.status)) return;
     await this.resumeJob();
   }
 
@@ -242,6 +241,19 @@ class WebSerialManager extends RecoveryMachine {
     // connection is usable the moment it is open, and a controller that is
     // slow to answer `$$` must not hold the UI on "connecting".
     void this.refreshMachineSettings();
+  }
+
+  /**
+   * A deliberate disconnect, while the port can still be written to. A closed
+   * port would leave the guide spot burning and `$32` borrowed. A job on the
+   * wire is the package's to stop, and its `$32` waits for the next connection.
+   */
+  protected async beforeLinkCloses(): Promise<void> {
+    if (this.isJobRunning) return;
+    if (!this.state.guideSpot && this.laserModeHome === null) return;
+    await this.guideSpotOff();
+    // A report after those lines, or the package takes the machine for busy.
+    await this.awaitStatus();
   }
 
   /**
@@ -303,6 +315,9 @@ class WebSerialManager extends RecoveryMachine {
       this.stopElapsedTicker();
       this.updateState({ status: 'IDLE', lastError: message });
     }
+    if (!this.isJobRunning && !this.starting && this.state.status !== 'PAUSED_PARKED') {
+      void this.restoreLaserMode();
+    }
   }
 
   /**
@@ -315,6 +330,7 @@ class WebSerialManager extends RecoveryMachine {
   protected onAlarm(): void {
     if (this.isJobRunning || this.isPaused) this.abandonJob('alarm');
     this.parkToResume('alarm');
+    void this.restoreLaserMode();
   }
 
   /**
@@ -356,7 +372,10 @@ class WebSerialManager extends RecoveryMachine {
     // The alarm word as well as the `ALARM:` line, which a controller does not
     // always send: the job is dropped so nothing streams on into a machine
     // that has lost its position.
-    if (machineWord === 'Alarm' && (this.isJobRunning || this.isPaused)) this.abandonJob('alarm');
+    if (machineWord === 'Alarm' && (this.isJobRunning || this.isPaused)) {
+      this.abandonJob('alarm');
+      void this.restoreLaserMode();
+    }
     if (machineWord === 'Alarm') this.parkToResume('alarm');
 
     // A job still starting counts: the package marks it running only once its
@@ -364,6 +383,7 @@ class WebSerialManager extends RecoveryMachine {
     const inJob = this.isJobRunning || this.isPaused || this.starting;
     if (inJob && machineWord !== 'Alarm') {
       this.jobPeakWorkZ = Math.max(this.jobPeakWorkZ ?? -Infinity, frames.wpos.z);
+      noteCheckpointPosition(frames.mpos);
     }
 
     // `Bf:15,128` — planner blocks and serial bytes free. Only sent when `$10`
@@ -388,6 +408,11 @@ class WebSerialManager extends RecoveryMachine {
       this.abandonJob('cancelled');
       this.updateState({ progressPercent: 0, remainingSeconds: null, pauseMessage: undefined });
     }
+    // A parked job is standing still, so its line is still a good one.
+    if (this.state.park) {
+      this.parkToResume('alarm');
+      this.updateState({ status: 'IDLE', progressPercent: 0, remainingSeconds: null });
+    }
     if (!this.transport) return;
     this.clearGuideSpotTimeout();
     if (this.state.guideSpot) this.updateState({ guideSpot: false });
@@ -399,8 +424,8 @@ class WebSerialManager extends RecoveryMachine {
      * returns only once the controller is listening again.
      */
     await super.eStop();
-    // What is left is the `$32` the spot borrowed, which must not be left
-    // off. GRBL takes settings in Alarm as well as Idle.
+    // What is left is a borrowed `$32`. GRBL takes settings in Alarm as well
+    // as Idle.
     await this.restoreLaserMode();
   }
 }

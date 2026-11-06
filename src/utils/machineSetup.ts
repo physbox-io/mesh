@@ -33,20 +33,23 @@ export abstract class SetupMachine extends GuideSpotMachine {
    * `G10 L20 P1`, the same persistent G54 offset the zeroing buttons write.
    *
    * How a turned block is located on its own faces: the bit's side is brought
-   * up to a face on a slip of paper and that axis is set to minus the bit's
-   * radius (the centre stands a radius outside the face), and Z on the top.
-   * `paperMm` is the feeler's thickness, added on the side away from the work.
+   * up to a wall on a slip of paper and that axis is set to where its centre
+   * stands, a radius off the wall, and Z on the top. `paperMm` is the feeler's
+   * thickness, and it holds the bit further off the wall. Which way that is
+   * comes from `bitSide`, the side of the wall the bit is on: the low side
+   * unless said, as it is for a face at 0 and for a notch wall alike. The sign
+   * of the figure says nothing: inside a notch the centre is positive.
    */
   public async setWorkPosition(
     at: { x?: number; y?: number; z?: number },
-    paperMm = 0
+    paperMm = 0,
+    bitSide: { x?: 1 | -1; y?: 1 | -1 } = {}
   ): Promise<{ success: boolean; message: string }> {
     this.refuseWhileJobHoldsMachine('set the work position');
     if (!this.state.connected) return { success: false, message: 'Not connected to a machine.' };
     const words: string[] = [];
-    // The paper holds the bit further out from the face it is touching.
-    if (at.x !== undefined) words.push(`X${(at.x + Math.sign(at.x) * paperMm).toFixed(3)}`);
-    if (at.y !== undefined) words.push(`Y${(at.y + Math.sign(at.y) * paperMm).toFixed(3)}`);
+    if (at.x !== undefined) words.push(`X${(at.x + (bitSide.x ?? -1) * paperMm).toFixed(3)}`);
+    if (at.y !== undefined) words.push(`Y${(at.y + (bitSide.y ?? -1) * paperMm).toFixed(3)}`);
     if (at.z !== undefined) words.push(`Z${(at.z + paperMm).toFixed(3)}`);
     if (words.length === 0) return { success: false, message: 'No axis given.' };
     await this.sendAndWait('G21 G90');
@@ -83,6 +86,8 @@ export abstract class SetupMachine extends GuideSpotMachine {
   public async homeMachine(): Promise<void> {
     this.refuseWhileJobHoldsMachine('home');
     await super.homeMachine();
+    // Not while a stop or a park is standing: that job keeps its borrow.
+    if (this.state.status === 'IDLE') await this.restoreLaserMode();
   }
 
   /** Sets current XY position as G54 Work Origin (0,0). */
@@ -207,9 +212,26 @@ export abstract class SetupMachine extends GuideSpotMachine {
   public async gotoWorkOrigin(safeZ = 5): Promise<void> {
     this.refuseWhileJobHoldsMachine('go to the origin');
     await this.sendLine('G21 G90');
-    const retractZ = await this.clampedRetractZ(safeZ);
-    await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
+    // A laser's Z is its focus height.
+    if (!this.jobIsLaser()) {
+      const retractZ = await this.clampedRetractZ(safeZ);
+      await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
+    }
     await this.sendLine('G0 X0.000 Y0.000');
+  }
+
+  /**
+   * Why a move that lifts by a work height should not run, or null. With no
+   * datum set this session the work Z reading is whatever an earlier job left:
+   * the tool can be on the stock while it reads +50, so "lift to at least 5"
+   * lifts nothing.
+   */
+  public unzeroedLiftRefusal(what: string): string | null {
+    if (!this.state.needsZZero || this.jobIsLaser()) return null;
+    return (
+      `Z zero has not been set this session. Set it in Machine Setup before ${what} — ` +
+      'the lift clear of the stock is measured from that datum.'
+    );
   }
 
   /**
@@ -250,14 +272,11 @@ export abstract class SetupMachine extends GuideSpotMachine {
     // that stays the default reading of it. Guide power alone is not enough to
     // mean laser: MCP passes the default 5 whatever the machine, and on a
     // relay-switched router `M3 S5` is full RPM with the bit still at stock
-    // height. Unless the caller says, a lit lap also needs `$32` laser mode on.
-    const { laserMode = guidePower > 0 && this.laserModeEnabled(), safeZMm = 5 } = opts;
+    // height. Unless the caller says, a lit lap also needs a laser's job, or
+    // `$32` laser mode on with no job loaded.
+    const { laserMode = guidePower > 0 && this.jobIsLaser(), safeZMm = 5 } = opts;
     const { minX, minY, maxX, maxY } = bounds;
 
-    // The retract below is a work height, and with no datum set this session
-    // the work Z reading is whatever an earlier job left: the tool can be on
-    // the stock while it reads +50, so "lift to at least 5" lifts nothing and
-    // the lap drags the bit round the outline.
     if (!laserMode && this.state.needsZZero) {
       const message =
         'Z zero has not been set this session. Set it in Machine Setup before framing — ' +

@@ -293,6 +293,7 @@ describe('the Z datum across a tool change', () => {
     await advance(6);
     expect(webSerialManager.getState().needsZZero).toBe(true);
 
+    (webSerialManager as unknown as { parseLine: (l: string) => void }).parseLine('ALARM:1');
     await webSerialManager.unlockAlarm();
     expect(webSerialManager.getState().needsZZero).toBe(true);
   });
@@ -331,7 +332,7 @@ describe('the Z datum across a tool change', () => {
     await advance(12);
 
     const message = webSerialManager.getState().pauseMessage ?? '';
-    expect(message).toBe('Tool change: fit the 3.175 mm ball nose, set the spindle to 12,000 RPM.');
+    expect(message).toBe('Tool change: fit the 3.175 mm ball nose, switch the spindle on at 12,000 RPM.');
     // Once, in the banner underneath — not here, and not twice here.
     expect(message.toLowerCase()).not.toContain('zero');
   });
@@ -580,7 +581,8 @@ describe('getting clear of the work for a tool change', () => {
     expect(lines).toContain('G53 G0 Z-3.000');
     expect(lines.some((l) => l.startsWith('G91 G0 Z'))).toBe(false);
     const lift = lines.indexOf('G53 G0 Z-3.000');
-    expect(lines.indexOf('G0 X0.000 Y0.000', lift)).toBeGreaterThan(lift);
+    // It stays over the XY the program brought it to.
+    expect(lines.slice(lift)).not.toContain('G0 X0.000 Y0.000');
   });
 
   /*
@@ -612,7 +614,6 @@ describe('getting clear of the work for a tool change', () => {
     // Already at the highest height the job has reached: nothing more to ask.
     expect(lines.some((l) => /^G91 G0 Z/.test(l))).toBe(false);
     expect(lines.some((l) => /G0 Z(2[1-9]|[3-9]\d)/.test(l))).toBe(false);
-    expect(lines.indexOf('G0 X0.000 Y0.000')).toBeGreaterThan(drain);
     expect(webSerialManager.getState().pauseMessage).toBe('Tool change: fit the ball nose.');
   });
 
@@ -625,7 +626,6 @@ describe('getting clear of the work for a tool change', () => {
 
     const lines = fake.lines();
     expect(lines).toContain('G90 G0 Z12.000');
-    expect(lines.indexOf('G0 X0.000 Y0.000')).toBeGreaterThan(lines.indexOf('G90 G0 Z12.000'));
   });
 
   it('forgets that it was homed when the controller alarms', async () => {
@@ -827,7 +827,7 @@ describe('a job that alarms while stopped for a tool change', () => {
     expect(resume?.fromLine).toBe(6);
     expect(resume?.pendingPause).toEqual({
       kind: 'tool-change',
-      message: 'Tool change: fit the 1.5875 mm ball nose, set the spindle to 16,000 RPM.',
+      message: 'Tool change: fit the 1.5875 mm ball nose, switch the spindle on at 16,000 RPM.',
     });
   });
 
@@ -842,21 +842,16 @@ describe('a job that alarms while stopped for a tool change', () => {
     expect(webSerialManager.getState().resume).toEqual(before);
   });
 
-  it('does not stop for the same tool change again once Z has been zeroed', async () => {
+  it('stops for the same tool change again, a zero being no proof it was made', async () => {
     await alarmAtToolChange();
     await webSerialManager.unlockAlarm();
     await webSerialManager.zeroZHere();
-    const sentBefore = fake.lines().length;
 
     const res = webSerialManager.resumeFromLine(6);
     expect(res.ok).toBe(true);
-    // The preamble alone is ten lines, and this board takes a tick to answer each.
     await advance(24);
 
-    const after = fake.lines().slice(sentBefore);
-    expect(after.some((l) => /M6/.test(l))).toBe(false);
-    expect(after).toContain('G1 X30 F600');
-    expect(webSerialManager.getState().status).not.toBe('PAUSED_TOOL');
+    expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
   });
 
   it('does not wind back past the line a resumed run started from', async () => {

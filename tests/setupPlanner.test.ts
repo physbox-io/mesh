@@ -129,7 +129,7 @@ describe('planning setups', () => {
     const t = [...base, ...o, ...T];
     const plan = planSetups({
       tris: Float64Array.from(t), partBox: boundsOf(t), stock: { widthMm: 100, depthMm: 30, thicknessMm: 47 },
-      toolDiaMm: 3, reachMm: 24,
+      toolDiaMm: 3, reachMm: 24, reachZMm: 50,
     });
     expect(new Set(plan.order)).toEqual(new Set(['-y', '+z']));
     expect(plan.unreachedMm3).toBeLessThan(0.05 * plan.topOnlyUnreachedMm3);
