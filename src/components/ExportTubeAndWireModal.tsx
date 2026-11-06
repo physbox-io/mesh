@@ -349,6 +349,18 @@ export function ExportTubeAndWireModal({
                                                     {breakdown.shoppingList.standardTees90}
                                                 </div>
                                             </div>
+                                            <div className="bg-white dark:bg-slate-900/80 rounded p-2 border border-slate-200 dark:border-slate-800">
+                                                <div className="text-slate-500 dark:text-slate-400 text-[11px]">Std 3-Way Corners</div>
+                                                <div className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                                                    {breakdown.shoppingList.standardCorners3Way}
+                                                </div>
+                                            </div>
+                                            <div className="bg-white dark:bg-slate-900/80 rounded p-2 border border-slate-200 dark:border-slate-800">
+                                                <div className="text-slate-500 dark:text-slate-400 text-[11px]">Straight Couplers</div>
+                                                <div className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                                                    {breakdown.shoppingList.straightCouplers}
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
 
@@ -376,7 +388,7 @@ export function ExportTubeAndWireModal({
                                         10-Foot / 3m Stick Cut-List ({breakdown.sticks.length} Sticks, {breakdown.struts.length} Cut Struts)
                                     </h3>
                                     <span className="text-xs text-slate-500 dark:text-slate-400">
-                                        Includes socket end-pullback deduction ({breakdown.pipeSpec.socketDepthMm}mm depth)
+                                        Lengths allow for each fitting's pipe stop
                                     </span>
                                 </div>
 

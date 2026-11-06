@@ -8,6 +8,7 @@ import {
   buildAllCustomHubNodes,
 } from '../src/utils/tubeAndWireExporter';
 import type { SceneGraph } from '../src/types/scene';
+import { simulatePipeFrame } from '../src/utils/tubeSimulation';
 
 describe('tubeAndWireExporter', () => {
   describe('1. Hardware-Store Pipe & Conduit Standards (PIPE_STANDARDS)', () => {
@@ -107,6 +108,32 @@ describe('tubeAndWireExporter', () => {
       expect(bd.hubs).toHaveLength(8);
       expect(bd.shoppingList.standardCorners3Way).toBe(8);
       expect(bd.shoppingList.customPrintedHubs).toBe(0);
+    });
+
+    it('cuts pipes in line to meet at the coupler\'s web, and rods to meet end to end', () => {
+      const line = {
+        nodes: [
+          { id: 'a', name: 'a', type: 'body', pos: [0, 0, 0], joints: [], children: [], geoms: [{ name: 'a', type: 'cylinder', fromto: [0, 0, 0, 0.5, 0, 0], size: [0.0133] }] },
+          { id: 'b', name: 'b', type: 'body', pos: [0, 0, 0], joints: [], children: [], geoms: [{ name: 'b', type: 'cylinder', fromto: [0.5, 0, 0, 1, 0, 0], size: [0.0133] }] },
+        ],
+      } as unknown as SceneGraph;
+      const pvc = breakdownPipeFrame(line);
+      expect(pvc.struts).toHaveLength(2);
+      expect(pvc.shoppingList.straightCouplers).toBe(1);
+      expect(pvc.struts[0].cutLengthMm).toBeCloseTo(500 - 1.25, 1);
+      const rod = breakdownPipeFrame(line, { pipeStandardId: 'spaghetti' });
+      expect(rod.struts[0].cutLengthMm).toBeCloseTo(500, 1);
+      expect(rod.shoppingList.straightCouplers).toBe(0);
+      expect(simulatePipeFrame(rod).clashes).toEqual([]);
+    });
+
+    it('prints the fittings for tube no store sells them for', async () => {
+      const { frameBodyInScene } = await import('../src/utils/pipeSkeleton');
+      const cube = { nodes: [{ id: 'c', name: 'c', type: 'body', pos: [0, 0, 0.5], joints: [], children: [], geoms: [{ type: 'box', size: [0.4, 0.3, 0.5] }] }] } as unknown as SceneGraph;
+      const framed = { nodes: frameBodyInScene(cube, 'c', { pipeStandardId: 'dowel_12' }).nodes } as SceneGraph;
+      const { shoppingList } = breakdownPipeFrame(framed, { pipeStandardId: 'dowel_12' });
+      expect(shoppingList.customPrintedHubs).toBeGreaterThanOrEqual(8);
+      expect(shoppingList.standardCorners3Way).toBe(0);
     });
 
     it('models an elbow about its centre of mass, so it compiles where its pipes are', async () => {

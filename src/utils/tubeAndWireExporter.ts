@@ -187,6 +187,12 @@ export function pipeColour(spec: PipeStandardSpec): [number, number, number, num
  */
 export const GLUED_BELOW_OD_MM = 4;
 
+/** Half the web a coupler stops two pipes against. */
+const COUPLER_STOP_MM = 1.25;
+
+/** Tube a hardware store sells fittings for; anything else is joined by a printed hub. */
+const STORE_FITTING_MATERIALS: PipeStandardSpec['material'][] = ['pvc', 'emt'];
+
 // ============================================================================
 // 2. PVC / EMT Pipe Frame Breakdown, Presets & Printable 3D Hub Connectors
 // ============================================================================
@@ -847,6 +853,8 @@ export function breakdownPipeFrame(
     });
   }
 
+  const glued = pipeSpec.odMm < GLUED_BELOW_OD_MM;
+  const storeSold = STORE_FITTING_MATERIALS.includes(pipeSpec.material);
   const hubs: PipeFrameHub[] = [];
   let standardElbows90 = 0;
   let standardTees90 = 0;
@@ -856,7 +864,11 @@ export function breakdownPipeFrame(
 
   for (const hub of hubsMap.values()) {
     if (hub.ports.length === 0) continue;
-    const { minAngleDeg, classification, needsCustomPrint } = classifyHubPorts(hub.ports);
+    const fitting = classifyHubPorts(hub.ports);
+    const { minAngleDeg } = fitting;
+    const printed = !glued && hub.ports.length >= 2 && !storeSold;
+    const classification = printed ? 'custom_printed_hub' : fitting.classification;
+    const needsCustomPrint = !glued && (printed || fitting.needsCustomPrint);
     hub.minAngleDeg = minAngleDeg;
     hub.classification = classification;
     hub.needsCustomPrint = needsCustomPrint;
@@ -867,11 +879,15 @@ export function breakdownPipeFrame(
       Math.max(pipeSpec.odMm * 0.4, Math.min(pipeSpec.odMm * 1.5, rawShoulder))
     );
 
+    // Pipes in line meet at the coupler's web, not clear of each other's sides;
+    // glued rod meets end to end.
+    const inLine = Math.max(rawShoulder, glued ? 0 : COUPLER_STOP_MM);
+    const shoulder = round2(fitting.classification === 'straight_coupler' ? inLine : clampedShoulder);
     for (const p of hub.ports) {
-      p.shoulderOffsetMm = hub.ports.length <= 1 ? 0 : clampedShoulder;
+      p.shoulderOffsetMm = hub.ports.length <= 1 ? 0 : shoulder;
     }
 
-    if (hub.ports.length >= 2) {
+    if (hub.ports.length >= 2 && !glued) {
       if (classification === '90_elbow') standardElbows90++;
       else if (classification === '90_tee') standardTees90++;
       else if (classification === '90_corner_3way') standardCorners3Way++;
@@ -934,8 +950,9 @@ export function breakdownPipeFrame(
       const pieceLen = round2(Math.min(remainingMm, stockLengthMm));
       const pieceName =
          strut.cutLengthMm > stockLengthMm ? `${strut.name} (Part ${partIdx})` : strut.name;
-      if (partIdx > 1) {
-        straightCouplers++;
+      if (partIdx > 1 && !glued) {
+        if (storeSold) straightCouplers++;
+        else customPrintedHubs++;
       }
 
       let placed = false;
