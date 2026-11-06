@@ -17,6 +17,7 @@ import { MoldWorkerClient, moldMasterRecord, moldSceneParts, type MoldPreview } 
 import { DEFAULT_LINER_SKIN_MM } from '../../utils/moldLiner';
 import { LINER_PAIRS, linerPair, pairSoftenC, type LinerPairId } from '../../utils/linerMaterials';
 import { moldFeatureLines } from '../../utils/moldExporter';
+import { ventBoreDiaMm } from '../../utils/moldSprue';
 import { castMaterial, castMaterialWarnings, castWeightG, mixGrams, type CastMaterialId } from '../../utils/castMaterials';
 import { ChainResult } from './ChainRun';
 import { OPEN_MOLD_ALLOWANCE } from '../../utils/moldExporter';
@@ -740,11 +741,11 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
               </label>
               {options.includeVents && (
                 <div className="pl-5 border-l-2 border-purple-200 dark:border-purple-900">
-                  <Field label="Vent Dia (mm)">
+                  <Field label="Vent Dia (mm)" hint={`${castMaterial(material).label} needs at least ${ventBoreDiaMm(0, material)} mm for a bubble to rise through a printed hole.`} hintAlign="end">
                     <NumberInput
-                      value={options.ventDiaMm}
-                      min={0.8}
-                      max={6}
+                      value={ventBoreDiaMm(options.ventDiaMm, material)}
+                      min={ventBoreDiaMm(0, material)}
+                      max={12}
                       step={0.1}
                       onChange={(v) => set('ventDiaMm', v)}
                       className={inputClass}

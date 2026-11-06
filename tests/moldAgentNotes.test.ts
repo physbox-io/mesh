@@ -61,7 +61,7 @@ describe('mold features in the reply', () => {
     expect(f.downSprue?.half).toBe('cavity half');
     expect(f.gate?.diaMm).toBeGreaterThan(0);
     expect(f.vents).toHaveLength(1);
-    expect(f.vents.every((v) => v.half === 'lid half' && v.diaMm === 1.5)).toBe(true);
+    expect(f.vents.every((v) => v.half === 'lid half' && v.diaMm === 4)).toBe(true);
     expect(f.pins).toHaveLength(4);
     expect(f.sockets).toHaveLength(4);
     // The notches are on the seam at the side edges, not more sockets or channels.

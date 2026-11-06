@@ -28,7 +28,7 @@
 
 import type { Manifold, ManifoldToplevel } from 'manifold-3d';
 import type { Grid, ColumnField } from './moldColumns';
-import type { FeedRoute } from '../types/scene';
+import type { FeedRoute, VentStub } from '../types/scene';
 import type { MoldFeatureReport } from './moldExporter';
 import { buildPartManifold, manifoldToTriangles, type Triangle3D } from './moldManifold';
 
@@ -87,11 +87,13 @@ export interface PeakVent {
 
 /**
  * The tops of the cavity's pockets of air, as poured: every place a rising
- * level would close over air with nowhere to go. Pockets shallower than
- * `minProminenceMm` are left (a bubble that small is a pit, not a void), and
- * no more than `max` are kept, the deepest first.
+ * level would close over air with nowhere to go. Pockets both shallower than
+ * `minProminenceMm` and smaller than `minPocketMm3` are left (a bubble that
+ * small is a pit, not a void; depth alone let a wide shallow ceiling go, 12 mm³
+ * of air on a gear sculpture's face), and no more than `max` are kept, the
+ * deepest first.
  */
-export function planPeakVents(spans: PourSpans, grid: Grid, minProminenceMm = 0.5, max = 24): PeakVent[] {
+export function planPeakVents(spans: PourSpans, grid: Grid, minProminenceMm = 0.5, max = 24, minPocketMm3 = 3): PeakVent[] {
   const { cols, rows, stepX, stepY, halfW, halfD } = grid;
   const dz = Math.min(stepX, stepY);
   let zMin = Infinity, zMax = -Infinity;
@@ -110,6 +112,8 @@ export function planPeakVents(spans: PourSpans, grid: Grid, minProminenceMm = 0.
   // Union-find over cells, the level swept down from the top.
   const parent = new Int32Array(plane * layers).fill(-1);
   const birth = new Int32Array(plane * layers); // the root's highest cell
+  const size = new Int32Array(plane * layers); // the root's cells
+  const cellMm3 = stepX * stepY * dz;
   const find = (i: number): number => {
     while (parent[i] !== i) {
       parent[i] = parent[parent[i]];
@@ -173,11 +177,13 @@ export function planPeakVents(spans: PourSpans, grid: Grid, minProminenceMm = 0.
     const [elder, younger] = za >= zb ? [ra, rb] : [rb, ra];
     // Measured from the layer it was born in; only a pocket kept is centred.
     const prominence = zOf(Math.min(za, zb)) - zNow;
-    if (prominence >= minProminenceMm) {
+    // Cells of one flat ceiling meeting each other are not a pocket: it needs a layer of depth.
+    if (prominence >= minProminenceMm || (prominence > dz / 2 && size[younger] * cellMm3 >= minPocketMm3)) {
       const top = cellXYZ(birth[younger]);
       peaks.push({ x: top.x, y: top.y, z: top.z, prominenceMm: prominence });
     }
     parent[younger] = elder;
+    size[elder] += size[younger];
   };
 
   for (let k = layers - 1; k >= 0; k--) {
@@ -187,6 +193,7 @@ export function planPeakVents(spans: PourSpans, grid: Grid, minProminenceMm = 0.
       const i = k * plane + col;
       parent[i] = i;
       birth[i] = i;
+      size[i] = 1;
     }
     for (let col = 0; col < plane; col++) {
       const i = k * plane + col;
@@ -307,6 +314,12 @@ export function planBottomFill(
     gateR: Math.min(r, MAX_GATE_R),
     roomR: maxFromPartMm - best.fromPart,
   };
+}
+
+/** The stubs a closed mold's vents leave on a casting, for trimming; `at` in the cavity half's frame. */
+export function ventStubsOf(f: MoldFeatureReport | undefined): VentStub[] | undefined {
+  if (!f?.vents.length) return undefined;
+  return f.vents.flatMap((v) => (v.pocketZMm === undefined ? [] : [{ at: [v.atMm[0], -v.atMm[1]] as [number, number], r: v.diaMm / 2, z: v.pocketZMm }]));
 }
 
 /** A round bore from `a` to `b` in a half's own frame, mm; `ends` rounds its ends off with balls. */

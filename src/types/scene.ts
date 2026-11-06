@@ -1013,6 +1013,8 @@ export interface SceneNode {
       cavityHoldsTop?: boolean;
       /** A bottom-filled mold's route, mm in the cavity half's frame (parting face at 0), so trimming takes it off the casting. */
       feed?: FeedRoute;
+      /** Where its vents meet the cavity, same frame, so trimming takes their stubs off too. */
+      ventStubs?: VentStub[];
       /** What every hole and peg is, in words (moldFeatureLines), for the mold's inspector card. */
       featureLines?: string[];
     };
@@ -1020,6 +1022,13 @@ export interface SceneNode {
 }
 
 /** A bottom-fill route: down-sprue at `down`, runner at height `runnerZ`, gate up into the lowest point at `gate` (z its top). */
+/** A vent's stub on a casting: from the mold's outer face down to `z`, where its radius is `r`. */
+export interface VentStub {
+  at: [number, number];
+  r: number;
+  z: number;
+}
+
 export interface FeedRoute {
   down: [number, number];
   gate: [number, number, number];

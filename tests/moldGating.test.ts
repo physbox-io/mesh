@@ -50,6 +50,21 @@ describe('high points', () => {
     // The bump is 0.25 mm: one vent, for the slab's top, none for the bump.
     expect(planPeakVents(spans, g)).toHaveLength(1);
   });
+
+  it('vents a wide shallow pocket, and a flat ceiling once', () => {
+    // Two ceilings 0.25 mm proud of the roof between them, 3 x 3 mm: too shallow
+    // for the depth test, but several cubic millimetres of air each.
+    const g = grid(21, 0.25);
+    const spans: PourSpans = [];
+    for (let r = 0; r < 21; r++) {
+      for (let c = 0; c < 21; c++) {
+        const proud = r >= 4 && r <= 16 && (c <= 7 || c >= 13);
+        spans.push(Float64Array.of(-2, proud ? 0.25 : 0));
+      }
+    }
+    const xs = planPeakVents(spans, g).map((p) => Math.sign(p.x)).sort();
+    expect(xs).toEqual([-1, 1]);
+  });
 });
 
 /** A thin plate with a post 2.4 mm across hanging from it to a bulb: the gear sculpture's trouble in small. */

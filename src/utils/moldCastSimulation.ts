@@ -23,7 +23,7 @@
 
 import * as THREE from 'three';
 import type { Manifold as ManifoldT, ManifoldToplevel } from 'manifold-3d';
-import type { FeedRoute, SceneNode } from '../types/scene';
+import type { FeedRoute, SceneNode, VentStub } from '../types/scene';
 import type { SurfaceTexture } from './surfaceTexture';
 import { loadManifold } from './sculptCut';
 import { manifoldToMeshMm } from './timberBreakdown';
@@ -39,7 +39,8 @@ import { unrotateFromPull } from './moldPullDirection';
 import { pourIntoCavity, probeFacesTouched, type PourInfo, type PourOptions } from './pourCast';
 import { castMaterial, type CastMaterialId } from './castMaterials';
 import { fillCellMm, simulateFill, voxelizeCavity, type FillDomain, type FillResult } from './pourFill';
-import { cutBores, feedRouteOf, FEED_WALL_MM, type BoreCut } from './moldGating';
+import { VENT_TAPER_MM } from './moldSprue';
+import { cutBores, feedRouteOf, FEED_WALL_MM, ventStubsOf, type BoreCut } from './moldGating';
 
 export interface MoldCastSimulationOptions {
   /** Whether to trim narrow sprue/vent runner stubs sticking up to the outer mold face (default: false — keeps what the mold actually casts, or true when comparing part volume). */
@@ -99,7 +100,7 @@ export interface RawMoldTexture {
 
 export type InternalCastOptions = MoldCastSimulationOptions & {
   isClamshell?: boolean;
-  /** A bottom-filled clamshell's route in the closed mold's frame, for trimming. */
+  /** What comes off a clamshell's casting along its own bores: a bottom fill's route, the vents' stubs. */
   feedTrim?: BoreCut[];
   flipUpright?: boolean;
   partingZ?: number;
@@ -399,7 +400,7 @@ export async function simulateCastFromMoldResult(
         topTrisMm[ti++] = v[2];
       }
     }
-    return restorePartFrame(await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(mold.features)), mold, options);
+    return restorePartFrame(await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(mold.features), ventStubsOf(mold.features)), mold, options);
   } else {
     // 1-part open mold
     return restorePartFrame(
@@ -521,6 +522,7 @@ async function castClosedClamshell(
   lidPartingZ: number,
   options?: MoldCastSimulationOptions,
   feed?: FeedRoute,
+  ventStubs?: VentStub[],
 ): Promise<MoldCastSimulationResult> {
   const turned = new Float64Array(top.length);
   for (let i = 0; i < top.length; i += 3) {
@@ -537,7 +539,16 @@ async function castClosedClamshell(
   const z = (v: number) => botPartingZ + v;
   const ragged = FEED_WALL_MM - 0.1;
   const face = botPartingZ + lidPartingZ;
-  const feedTrim: BoreCut[] | undefined = feed && [
+  const feedTrim: BoreCut[] = [
+    ...(ventStubs ?? []).map((v): BoreCut => ({ a: [v.at[0], v.at[1], face + 1], b: [v.at[0], v.at[1], z(v.z)], r: v.r + VENT_TAPER_MM + 0.1, rB: v.r + 0.1 })),
+    ...(feed ? feedTrimOf(feed, face, z, ragged) : []),
+  ];
+  return simulateCastFromMoldTriangles(assembled, { ...options, isClamshell: true, partingZ: botPartingZ, halves: [bot, turned], feedTrim });
+}
+
+/** A bottom fill's route as bores, in the closed mold's frame. */
+function feedTrimOf(feed: FeedRoute, face: number, z: (v: number) => number, ragged: number): BoreCut[] {
+  return [
     // The funnel, 45° from a millimetre above the lid's face...
     ...(feed.funnelR && feed.funnelDepth
       ? [{ a: [feed.down[0], feed.down[1], face + 1], b: [feed.down[0], feed.down[1], face - feed.funnelDepth - ragged], r: feed.funnelR + 1 + ragged, rB: feed.r + ragged } as BoreCut]
@@ -546,7 +557,6 @@ async function castClosedClamshell(
     { a: [feed.down[0], feed.down[1], z(feed.runnerZ)], b: [feed.gate[0], feed.gate[1], z(feed.runnerZ)], r: feed.r + 0.05, ends: true },
     { a: [feed.gate[0], feed.gate[1], z(feed.runnerZ)], b: [feed.gate[0], feed.gate[1], z(feed.gate[2])], r: feed.gateR + 0.05 },
   ];
-  return simulateCastFromMoldTriangles(assembled, { ...options, isClamshell: true, partingZ: botPartingZ, halves: [bot, turned], ...(feedTrim ? { feedTrim } : {}) });
 }
 
 /**
@@ -620,7 +630,7 @@ async function castLaidOpenClamshell(
   // A closed mold is poured through its sprue: the side and level of an open pour do not apply.
   const rest: MoldCastSimulationOptions = { ...options };
   delete rest.pour;
-  const res = await castClosedClamshell(bot, top, botPartingZ, lidPartingZ, rest, rec.feed);
+  const res = await castClosedClamshell(bot, top, botPartingZ, lidPartingZ, rest, rec.feed, rec.ventStubs);
   return restorePartFrame(
     res,
     { moldType: 'clamshell', pullDirection: rec.pullDirection ?? '+z', cavityHoldsTop: Boolean(rec.cavityHoldsTop), topHalf: {} as MoldSummary['topHalf'] },
@@ -745,7 +755,7 @@ export async function simulateCastFromMoldBuffers(
       topTrisMm[i + 2] = topPositions[i + 2];
     }
     return restorePartFrame(
-      await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(summary.features)),
+      await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(summary.features), ventStubsOf(summary.features)),
       summary,
       options,
     );

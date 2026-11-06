@@ -26,7 +26,7 @@ import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type Pull
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
 import type { CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
-import { channelSolid, planSprue, sprueNeckDiaMm } from './moldSprue';
+import { channelSolid, planSprue, sprueNeckDiaMm, ventBoreDiaMm, VENT_TAPER_MM } from './moldSprue';
 import { boreTriangles, bottomFillFloorMm, cutBores, exactPourSpans, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
 import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
 
@@ -123,7 +123,7 @@ export interface MoldOptions {
   sprueFeed?: 'bottom' | 'top';
   /** Whether to include air riser vent channels. */
   includeVents: boolean;
-  /** Air vent diameter in mm. */
+  /** Air vent diameter in mm; never under what the cast material needs (`ventBoreDiaMm`). */
   ventDiaMm: number;
   /** Whether to include corner pry notches on the parting seam. */
   includePryNotches: boolean;
@@ -145,7 +145,7 @@ export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
   sprueBottomDiaMm: 6,
   sprueFeed: 'bottom',
   includeVents: true,
-  ventDiaMm: 1.5,
+  ventDiaMm: 4,
   includePryNotches: true,
 };
 
@@ -260,12 +260,19 @@ export interface HalfFeatures {
   /** Round bores (down-sprue, runner, a vent's way up from a pocket), cut with the geometry engine. */
   bores?: BoreCut[];
   /** Channels bored from the outer face through to the cavity. */
-  channels: Array<{ x: number; y: number; outerR: number; innerR: number; funnelDepth?: number }>;
+  /**
+   * `pocketZMm`, a vent's: how far it reaches, mm above the parting face (below
+   * it, negative: the pocket is in the other half, and the vent goes through).
+   */
+  channels: Array<{ x: number; y: number; outerR: number; innerR: number; funnelDepth?: number; pocketZMm?: number }>;
   /** Vents bored from the open top face down to overhanging cavity roof (for open molds). */
   topVents?: Array<{ x: number; y: number; r: number; zRoof: number }>;
 }
 
 const NO_FEATURES: HalfFeatures = { sockets: [], pins: [], channels: [] };
+
+/** How far a vent starts inside the pocket it serves, mm. */
+const VENT_SINK_MM = 0.3;
 
 /**
  * Where the pour sprue and the vents go: on the part's own footprint, so they
@@ -552,6 +559,7 @@ function buildHalf(
       const minChannelR = 0.55 * Math.hypot(grid.stepX, grid.stepY);
       let bot = floorZ;
       for (const ch of feats.channels) {
+        const reach = (ch.pocketZMm ?? 0) > 0 ? Math.min(top, -ch.pocketZMm!) : top;
         const innerR = Math.max(ch.innerR, minChannelR);
         const outerR = Math.max(ch.outerR, innerR + 0.2);
         const d = Math.hypot(x - ch.x, y - ch.y);
@@ -561,12 +569,12 @@ function buildHalf(
         // to wherever the cone wall passes it.
         if (ch.funnelDepth !== undefined) {
           // The sprue: a 45° funnel this deep, then the neck straight on.
-          const h = d <= innerR ? top - floorZ : ch.funnelDepth * (outerR - d) / (outerR - innerR);
-          bot = Math.max(bot, floorZ + Math.min(h, top - floorZ));
+          const h = d <= innerR ? reach - floorZ : ch.funnelDepth * (outerR - d) / (outerR - innerR);
+          bot = Math.max(bot, floorZ + Math.min(h, reach - floorZ));
           continue;
         }
         const t = d <= innerR ? 1 : (outerR - d) / (outerR - innerR);
-        bot = Math.max(bot, floorZ + (top - floorZ) * t);
+        bot = Math.max(bot, floorZ + (reach - floorZ) * t);
       }
 
       zTop[i] = top;
@@ -1061,7 +1069,7 @@ function describeMoldFeatures(
           gate: { half: 'cavity half' as const, atMm: at(bottomFill.gate.x, bottomFill.gate.y), diaMm: r1(bottomFill.gateR * 2), depthMm: r1(-bottomFill.gate.z) },
         }
       : {}),
-    vents: vents.map((v) => ({ half: 'lid half' as const, atMm: at(v.x, v.y), diaMm: r1(v.innerR * 2) })),
+    vents: vents.map((v) => ({ half: 'lid half' as const, atMm: at(v.x, v.y), diaMm: r1(v.innerR * 2), ...(v.pocketZMm !== undefined ? { pocketZMm: r1(v.pocketZMm) } : {}) })),
     blindVents: (base.topVents ?? []).map((v) => ({ half: baseHalf, atMm: at(v.x, v.y), diaMm: r1(v.r * 2), depthMm: r1(Math.abs(v.zRoof)) })),
     pins: lid.pins.map((p) => ({ half: 'lid half' as const, atMm: at(p.x, p.y), diaMm: r1(p.baseR * 2), narrowDiaMm: r1(p.topR * 2), heightMm: r1(p.height) })),
     sockets: sockets.map((k) => ({ half: baseHalf, atMm: at(k.x, k.y), diaMm: r1(k.rimR * 2), narrowDiaMm: r1(k.botR * 2), depthMm: r1(k.depth) })),
@@ -1105,6 +1113,8 @@ export interface MoldFeature {
   narrowDiaMm?: number;
   depthMm?: number;
   heightMm?: number;
+  /** A vent's: where it meets its pocket, mm above the parting face in the closed mold. */
+  pocketZMm?: number;
 }
 
 /**
@@ -1502,7 +1512,10 @@ export function generateMoldMeshes(
     channels: [],
   };
 
-  const pour = placePourChannels(field, grid, opts.ventDiaMm / 2, 0, detailIsAbove ? below : above);
+  const ventDiaMm = ventBoreDiaMm(opts.ventDiaMm, opts.castMaterial);
+  const ventR = ventDiaMm / 2;
+  const ventMouthR = ventR + VENT_TAPER_MM;
+  const pour = placePourChannels(field, grid, ventR, 0, detailIsAbove ? below : above);
 
   if (opts.moldType === 'open' && opts.includeVents && undercutColumns > 0) {
     const blindVents = placeOpenMoldBlindVents(
@@ -1516,7 +1529,7 @@ export function generateMoldMeshes(
     baseFeatures.topVents = blindVents.map((v) => ({
       x: v.x,
       y: detailIsAbove ? -v.y : v.y,
-      r: opts.ventDiaMm / 2,
+      r: ventR,
       zRoof: v.zRoof,
     }));
   }
@@ -1548,16 +1561,19 @@ export function generateMoldMeshes(
   // A vent at every high point: up from the top of each pocket the rising
   // level would close over, through the cavity half if it is in it, and
   // through the lid (whose y is the cavity half's negated).
-  const ventR = opts.ventDiaMm / 2;
   const ventChannels: HalfFeatures['channels'] = [];
+  const ventPeaks: Array<{ x: number; y: number }> = [];
   const baseBores: BoreCut[] = [];
   if (pourSpans && opts.includeVents) {
     const peaks = planPeakVents(pourSpans, grid);
     for (const v of peaks) {
-      ventChannels.push({ x: v.x, y: -v.y, outerR: opts.ventDiaMm * 0.8, innerR: ventR });
-      // Started a little inside the pocket, so its rim is not left as a skin.
+      // From the top of its pocket out, not on through to the parting face: a
+      // bore wider than the feature under it would thicken all of it, as a
+      // collar. A little inside the pocket, so its rim is not left as a skin.
+      ventChannels.push({ x: v.x, y: -v.y, outerR: ventMouthR, innerR: ventR, pocketZMm: v.z - VENT_SINK_MM });
+      ventPeaks.push({ x: v.x, y: v.y });
       if (exactCavity && v.z < -Math.min(grid.stepX, grid.stepY)) {
-        baseBores.push({ a: [v.x, v.y, v.z - 0.3], b: [v.x, v.y, 1], r: ventR });
+        baseBores.push({ a: [v.x, v.y, v.z - VENT_SINK_MM], b: [v.x, v.y, 1], r: ventR });
       }
     }
   }
@@ -1573,7 +1589,14 @@ export function generateMoldMeshes(
   }
   if (opts.includeSprue && feed === 'bottom' && pourSpans) {
     const avoid = baseFeatures.sockets.map((s) => ({ x: s.x, y: s.y, r: s.rimR }));
-    bottomFill = planBottomFill(pourSpans, grid, neckR, avoid, opts.blockShape === 'fit' ? opts.wallMarginMm : Infinity);
+    // Clear of the vents: a funnel that takes in a vent's mouth pours down the
+    // vent, from the top, whenever it is full. With room for the whole funnel
+    // if there is any; if not the funnel gives way (roomR, below), not the neck.
+    const room = opts.blockShape === 'fit' ? opts.wallMarginMm : Infinity;
+    const funnelR = Math.max(opts.sprueTopDiaMm / 2, neckR * 2);
+    const ventsAt = (r: number) => ventPeaks.map((v) => ({ x: v.x, y: v.y, r }));
+    bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room)
+      ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room);
     if (!bottomFill) {
       const need = Math.ceil((2 * (neckR + FEED_WALL_MM)) * 10) / 10;
       return {
@@ -1584,7 +1607,8 @@ export function generateMoldMeshes(
       };
     }
     const { down, gate, runnerZ, r, gateR } = bottomFill;
-    sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, bottomFill.roomR);
+    const ventRoomR = Math.min(Infinity, ...ventPeaks.map((v) => Math.hypot(v.x - down.x, v.y - down.y) - ventMouthR));
+    sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, Math.min(bottomFill.roomR, ventRoomR));
     baseBores.push(
       // Down the wall from the parting face...
       { a: [down.x, down.y, 1], b: [down.x, down.y, runnerZ], r },

@@ -30,7 +30,7 @@ import {
   type MoldCastSimulationResult,
 } from './moldCastSimulation';
 import type { SceneGraph, SceneNode } from '../types/scene';
-import { feedRouteOf } from './moldGating';
+import { feedRouteOf, ventStubsOf } from './moldGating';
 import { loadManifold } from './sculptCut';
 import {
   CAST_MATERIALS,
@@ -267,6 +267,7 @@ export function moldMasterRecord(
     ...(summary.pullDirection ? { pullDirection: summary.pullDirection } : {}),
     cavityHoldsTop: Boolean(summary.cavityHoldsTop),
     ...(feedRouteOf(summary.features) ? { feed: feedRouteOf(summary.features) } : {}),
+    ...(ventStubsOf(summary.features) ? { ventStubs: ventStubsOf(summary.features) } : {}),
     ...(summary.features ? { featureLines: moldFeatureLines(summary.features) } : {}),
   };
 }

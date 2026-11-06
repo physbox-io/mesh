@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { generateMoldMeshes, DEFAULT_MOLD_OPTIONS, type MoldOptions, type MoldExportResult, type Triangle3D } from '../src/utils/moldExporter';
-import { MIN_FUNNEL_WALL_MM, sprueNeckDiaMm } from '../src/utils/moldSprue';
+import { MIN_FUNNEL_WALL_MM, sprueNeckDiaMm, ventBoreDiaMm, VENT_TAPER_MM } from '../src/utils/moldSprue';
+import { simulateCastFromMoldResult } from '../src/utils/moldCastSimulation';
 import { loadManifold } from '../src/utils/sculptCut';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 
@@ -169,4 +170,72 @@ describe('pour sprue', () => {
     const rigid = generateMoldMeshes(lopsided, OPTS);
     expectFunnelAndNeck(rigid);
   });
+});
+
+// Seven 1.5 mm vents came off the printer as pinpricks. They are held to what a
+// bubble of the material rises through, and that much bore must not cost the
+// part anything: no collar down a thin post, no funnel taking in a vent's mouth.
+describe('vents wide enough to use', () => {
+  let wasm: ManifoldToplevel;
+  beforeAll(async () => { wasm = await loadManifold(); });
+
+  /** A 40 mm slab on two posts 3 mm across, one taller: the cavity half holds the part's top, so the posts stand up into the lid. */
+  const posted: SceneGraph = {
+    nodes: [{
+      id: 'b1', name: 'posted', type: 'body', pos: [0, 0, 0],
+      geoms: [
+        box('slab', [0.02, 0.02, 0.004], 0.016),
+        { ...box('tall', [0.0015, 0.0015, 0.006], 0), pos: [-0.01, 0, 0.006] } as SceneGeom,
+        { ...box('short', [0.0015, 0.0015, 0.004], 0), pos: [0.012, 0.012, 0.008] } as SceneGeom,
+      ],
+      joints: [], children: [],
+    }],
+  };
+  const VENTED: MoldOptions = { ...OPTS, includeVents: true, sprueFeed: 'bottom', sprueBottomDiaMm: 6 };
+
+  it('never bores one narrower than a bubble passes, whatever is asked', () => {
+    expect(ventBoreDiaMm(1.5, 'epoxy')).toBe(4);
+    expect(ventBoreDiaMm(5, 'epoxy')).toBe(5);
+    const r = generateMoldMeshes(posted, { ...VENTED, ventDiaMm: 1.5 }, wasm);
+    expect(r.success).toBe(true);
+    expect(r.features!.vents.length).toBeGreaterThan(0);
+    for (const v of r.features!.vents) expect(v.diaMm).toBe(4);
+  });
+
+  it('keeps the bottom-fill funnel off every vent mouth', () => {
+    const r = generateMoldMeshes(posted, { ...VENTED, blockShape: 'fit' }, wasm);
+    expect(r.success).toBe(true);
+    const f = r.features!;
+    expect(f.feed).toBe('bottom');
+    for (const v of f.vents) {
+      const gap = Math.hypot(v.atMm[0] - f.sprue!.atMm[0], v.atMm[1] - f.sprue!.atMm[1]) - f.sprue!.diaMm / 2 - v.diaMm / 2 - VENT_TAPER_MM;
+      expect(gap).toBeGreaterThan(0);
+    }
+  });
+
+  for (const lined of [false, true]) {
+    it(`stops a vent at its pocket, and trims off clean (${lined ? 'lined' : 'rigid'})`, async () => {
+      const r = generateMoldMeshes(posted, { ...VENTED, allowUndercuts: true, ...(lined ? { dissolvableLiner: true, linerPair: 'abs_hips' as const } : {}) }, wasm);
+      expect(r.success).toBe(true);
+      const inLid = r.features!.vents.filter((v) => (v.pocketZMm ?? 0) > 0);
+      expect(inLid.length).toBeGreaterThan(0);
+      // The lid stays solid under a vent that ends above the parting face.
+      const lid = r.topHalf!;
+      const parting = lid.partingZMm!;
+      const centre = (lid.bounds.minX + lid.bounds.maxX) / 2;
+      for (const v of inLid) {
+        // Inside the bore, just off the post: void from the outer face, then
+        // mold again up to the parting face. Bored through, that was a collar.
+        const rim = crossings(lid.triangles, centre + v.atMm[0] + 1.9, v.atMm[1]);
+        expect(rim[rim.length - 1]).toBeGreaterThan(parting - 0.1);
+        expect(rim[0]).toBeGreaterThan(parting - (v.pocketZMm! + 1));
+      }
+      const cast = await simulateCastFromMoldResult(r, { castMaterial: 'epoxy', trimChannels: true });
+      expect(cast.success).toBe(true);
+      // No collar down a post and no stub left on one: the casting is the part.
+      expect(cast.sizeMm.height).toBeLessThan(20.5);
+      const part = 40 * 40 * 8 + 9 * 12 + 9 * 8;
+      expect(Math.abs(cast.castVolumeMm3 - part)).toBeLessThan(part * 0.03);
+    });
+  }
 });

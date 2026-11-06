@@ -457,13 +457,12 @@ describe('Pour channels', () => {
     }
   });
 
-  it('opens a 1.5 mm vent on the coarse grid of a large mold', () => {
-    // A 240 mm part gets the 1.5 mm grid, as wide as the vent itself.
+  it('opens a vent on the coarse grid of a large mold', () => {
+    // A 240 mm part gets the 1.5 mm grid.
     const res = generateMoldMeshes(frame(240, 40), {
       ...DEFAULT_MOLD_OPTIONS,
       includeSprue: false,
       includeVents: true,
-      ventDiaMm: 1.5,
     });
     const holes = lidHoles(res);
     expect(holes.length).toBe(res.features!.vents.length);
@@ -508,12 +507,14 @@ describe('Pour channels', () => {
     // `lidHoles` returns `(x_lid, -y_lid)`, which is the exact `(x_base, y_base)`
     // coordinate where each hole lands when the lid is flipped around X (`y -> -y`)
     // to close onto the base. In `base` (`mirrorY(above)`), the `main` bar cavity
-    // sits at `y_base < -2`, and the thin `ref` bar at y_base = +15, which has
+    // sits at `y_base < -2`, and the thin `ref` bar near y_base = +16, which has
     // a high point of its own and so a vent of its own. Every flipped hole cell
     // must land on one of them, never on the uncarved mold wall between.
     for (const hole of holes) {
       for (const cell of hole) {
-        expect(cell.y < -2 || Math.abs(cell.y - 15) < 2).toBe(true);
+        // The part is off-centre, so the bar is at 16.3 in the mold; its vent
+        // overhangs the 0.8 mm bar by its own radius.
+        expect(cell.y < -2 || Math.abs(cell.y - 16.3) < 2.3).toBe(true);
       }
     }
   });

@@ -40,6 +40,23 @@ export function sprueNeckDiaMm(askedMm: number, material: CastMaterialId = 'epox
   return Math.max(askedMm, castMaterial(material).sprueNeckMm);
 }
 
+/** What a printed hole loses to the first perimeter and to ooze, mm. */
+const PRINTED_HOLE_LOSS_MM = 0.5;
+
+/**
+ * The vent diameter a pour of this material gets: the asked one, or the least
+ * that still lets a bubble rise through it once printed. It was 1.5 mm for
+ * everything: a gear sculpture's seven vents came off the printer as pinpricks
+ * that shut for good the moment liquid wet their mouths, with any air still
+ * behind it left in the casting, and nothing could clear them.
+ */
+export function ventBoreDiaMm(askedMm: number, material: CastMaterialId = 'epoxy'): number {
+  return Math.max(askedMm, castMaterial(material).bubbleRiseMm + PRINTED_HOLE_LOSS_MM);
+}
+
+/** A vent's taper, wider at the outer face by this radius, mm. */
+export const VENT_TAPER_MM = 0.4;
+
 /**
  * The sprue at (x, y) on the lid's grid. `cavityDepth` is how deep the lid's
  * cavity goes below its parting face per grid column (the deepest of any
@@ -87,16 +104,19 @@ export function planSprue(
 /**
  * A channel bored from the outer face of a half `blockHeight` thick (cavity
  * below z = 0, outer face at -blockHeight) as a solid to subtract. A sprue is
- * its funnel and neck; a vent the old single taper, wide end out.
+ * its funnel and neck; a vent a single taper, wide end out, that stops at
+ * `pocketZMm` above the parting face if the pocket it serves ends in this half.
  */
 export function channelSolid(
   wasm: ManifoldToplevel,
-  ch: { x: number; y: number; outerR: number; innerR: number; funnelDepth?: number },
+  ch: { x: number; y: number; outerR: number; innerR: number; funnelDepth?: number; pocketZMm?: number },
   blockHeight: number,
 ): Manifold {
   const through = blockHeight + 2;
   if (ch.funnelDepth === undefined) {
-    return wasm.Manifold.cylinder(through, ch.outerR, ch.innerR, 24, false).translate([ch.x, ch.y, -blockHeight - 1]);
+    const stop = ch.pocketZMm ?? 0;
+    const height = stop > 0 ? blockHeight + 1 - stop : through;
+    return wasm.Manifold.cylinder(height, ch.outerR, ch.innerR, 24, false).translate([ch.x, ch.y, -blockHeight - 1]);
   }
   // One revolved profile, not a cone added to a cylinder. The union, its two
   // parts deleted before Manifold had evaluated it, left the gear sculpture's
