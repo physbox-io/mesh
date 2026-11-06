@@ -306,7 +306,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
         />
         {/* The halo round a geom with `glow`, in linear light, before the
             tone mapping squeezes it. Only in a scene that has one. */}
-        {glows && <Bloom mipmapBlur intensity={0.9} radius={0.72} luminanceThreshold={GLOW_THRESHOLD} luminanceSmoothing={0.12} />}
+        {glows && <Bloom mipmapBlur intensity={1.5} radius={0.78} luminanceThreshold={GLOW_THRESHOLD} luminanceSmoothing={0.12} />}
         {/* Tone maps the bodies only, not the backdrop, grid or floor
             shadow — see BodyToneMapping. Last in the chain so it sees
             AO's output in linear light. Hi-Res only. */}
