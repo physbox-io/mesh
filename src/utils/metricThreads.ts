@@ -22,6 +22,17 @@ export function metricThread(name: string): MetricThread | undefined {
 }
 
 /**
+ * The radius a profile cutter takes a threaded hole out to, ready for the tap:
+ * major diameter less a pitch, opened by the thread's fit. M6 x 1 is a 5.0 mm
+ * drill, the tables' figure. Undefined for anything that is not a threaded hole.
+ */
+export function tapDrillRadius(geom: SceneGeom): number | undefined {
+  const pitch = geom.thread?.pitch;
+  if (geom.csg !== 'difference' || !pitch) return undefined;
+  return (geom.size?.[0] ?? 0) - pitch / 2 + (geom.thread?.fit ?? 0) / 2;
+}
+
+/**
  * The standard size a threaded cylinder is, or undefined when its diameter and
  * pitch match none — which is what a menu shows as "Custom".
  */

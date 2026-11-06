@@ -10,6 +10,8 @@ import { appendBaseGeomTriangles, texturedSurfaceOf } from './geomSurface';
 import { reliefContours } from './patternEngrave';
 import { isBoughtIn } from './boughtIn';
 import { isNodeRotationBaked } from './sceneTree';
+import { HARDWARE_KINDS } from './hardwareCuts';
+import { tapDrillRadius } from './metricThreads';
 
 export interface LaserCutOptions {
   jointMode: 'finger' | 'slot' | 'glue';
@@ -510,6 +512,8 @@ function chainBoundaryLoops2D(edges: { p1: Point2D; p2: Point2D }[]): Point2D[][
 }
 
 const CUTOUT_ARC_STEPS = 48;
+/** How far a cutter has to be into, or short of, a sheet's skin to count, in m. */
+const SHEET_TOUCH_M = 1e-5;
 
 /** Andrew's monotone chain. Returns a CCW hull with colinear points dropped. */
 function convexHull2D(pts: Point2D[]): Point2D[] {
@@ -544,7 +548,9 @@ function convexHull2D(pts: Point2D[]): Point2D[] {
  */
 function cutoutHullSamples(geom: SceneGeom): { local: THREE.Vector3[]; pad: number } | null {
   const s = geom.size || [];
-  const r = s[0] || 0.018;
+  // A tapped hole is modelled at the thread's major diameter; what gets cut is
+  // the hole the tap goes into.
+  const r = tapDrillRadius(geom) ?? (s[0] || 0.018);
 
   switch (geom.type) {
     case 'box': {
@@ -590,11 +596,13 @@ function cutoutHullSamples(geom: SceneGeom): { local: THREE.Vector3[]; pad: numb
  * arbitrarily oriented plane recovered from a mesh — and for any cutter
  * orientation, including geoms rotated by quat/euler or placed by fromto.
  *
- * `planeTol` is how far off the panel's plane a cutter may sit and still count
- * as passing through it. Panel planes are mid-planes or outer skins depending
- * on how the panel was found, so this wants to be about the stock thickness.
- * Without it, a pocket in one face of a shelled solid would also be cut out of
- * the opposite face, whose 2D bounds contain the same projected point.
+ * `sheet` is where the panel's material stands along its normal, measured from
+ * `worldOrigin`. A cutter clear of it is nothing to do with this panel: a pocket
+ * in one face of a shelled solid must not be cut out of the opposite face, whose
+ * 2D bounds contain the same projected point. A cutter that enters it and stops
+ * is a blind cut, which no sheet cut can make, so it goes on `blind` instead of
+ * becoming a hole: a counterbore's head would come out as a hole the screw falls
+ * through, and an O-ring groove as a disc taken out of the seal face.
  */
 function projectCutouts2D(
   diffGeoms: SceneGeom[],
@@ -603,7 +611,8 @@ function projectCutouts2D(
   worldU: THREE.Vector3,
   worldV: THREE.Vector3,
   contains: (pt: Point2D) => boolean,
-  planeTol: number
+  sheet: { lo: number; hi: number },
+  blind: SceneGeom[]
 ): Point2D[][] {
   const worldN = new THREE.Vector3().crossVectors(worldU, worldV).normalize();
   const cutouts: Point2D[][] = [];
@@ -636,8 +645,9 @@ function projectCutouts2D(
       }
     }
 
-    // Ignore cutters that never reach this panel's plane.
-    if (nHi + samples.pad < -planeTol || nLo - samples.pad > planeTol) continue;
+    const cutLo = nLo - samples.pad;
+    const cutHi = nHi + samples.pad;
+    if (Math.min(cutHi, sheet.hi) - Math.max(cutLo, sheet.lo) <= SHEET_TOUCH_M) continue;
 
     const loop = convexHull2D(projected);
     if (loop.length < 3) continue;
@@ -650,6 +660,10 @@ function projectCutouts2D(
     const centre = { x: cx / loop.length, y: cy / loop.length };
     if (!contains(centre) && !loop.some(contains)) continue;
 
+    if (cutLo > sheet.lo + SHEET_TOUCH_M || cutHi < sheet.hi - SHEET_TOUCH_M) {
+      blind.push(diffGeom);
+      continue;
+    }
     cutouts.push(loop);
   }
 
@@ -764,9 +778,10 @@ function primitiveAsMesh(geom: SceneGeom, geomMatrix: THREE.Matrix4): SceneGeom 
 export function extractPanelsFromScene(
   scene: SceneGraph,
   options: LaserCutOptions
-): { panels: LaserPanel[]; invalidGeoms: string[] } {
+): { panels: LaserPanel[]; invalidGeoms: string[]; blindCuts: string[] } {
   const panels: LaserPanel[] = [];
   const invalidGeoms: string[] = [];
+  const blindCuts = new Set<string>();
 
   let panelIdCounter = 1;
 
@@ -779,6 +794,7 @@ export function extractPanelsFromScene(
 
     const rawGeoms = node.geoms || [];
     const diffGeoms = rawGeoms.filter(g => g.csg === 'difference');
+    const blind: SceneGeom[] = [];
     // Subtractive geoms are cutters, not stock: a `difference` box became six
     // panels of its own, and a `difference` capsule failed the whole export as
     // an unsupported curved solid. They are projected as cutouts instead.
@@ -796,7 +812,7 @@ export function extractPanelsFromScene(
         // skipped or refused by type, so a disc came back as "nothing to cut".
         const asMesh = primitiveAsMesh(geom, geomMatrix);
         const meshPanels = asMesh
-          ? extractPanelsFromMeshGeom(asMesh, new THREE.Matrix4(), node.name, options, panelIdCounter, diffGeoms, bodyMatrix)
+          ? extractPanelsFromMeshGeom(asMesh, new THREE.Matrix4(), node.name, options, panelIdCounter, diffGeoms, bodyMatrix, blind)
           : [];
         if (meshPanels.length === 0) {
           invalidGeoms.push(`${node.name} (${geom.name || geom.type}: curved sides a flat sheet cannot make)`);
@@ -874,7 +890,8 @@ export function extractPanelsFromScene(
           const innerCutouts2D = projectCutouts2D(
             diffGeoms, bodyMatrix, worldOrigin, worldU, worldV,
             (pt) => Math.abs(pt.x) <= hw * 1000 && Math.abs(pt.y) <= hh * 1000,
-            Math.max(th, options.materialThickness)
+            { lo: -th / 2, hi: th / 2 },
+            blind
           );
 
           const p1_3d = worldOrigin.clone().addScaledVector(worldU, -hw).addScaledVector(worldV, -hh);
@@ -954,7 +971,14 @@ export function extractPanelsFromScene(
               uAxis3D: worldU,
               vAxis3D: worldV,
               outerPolygon2D,
-              innerCutouts2D: [],
+              // The sheet's thickness, not the solid's: a hole through this
+              // wall has only the wall to get through.
+              innerCutouts2D: projectCutouts2D(
+                diffGeoms, bodyMatrix, worldOrigin, worldU, worldV,
+                (pt) => Math.abs(pt.x) <= hw * 1000 && Math.abs(pt.y) <= hh * 1000,
+                { lo: -options.materialThickness / 2, hi: options.materialThickness / 2 },
+                blind
+              ),
               edges3D,
             });
             attachPatternEngraving(panels[panels.length - 1], geom, geomMatrix);
@@ -968,7 +992,8 @@ export function extractPanelsFromScene(
           options,
           panelIdCounter,
           diffGeoms,
-          bodyMatrix
+          bodyMatrix,
+          blind
         );
 
         if (meshPanels.length === 0) {
@@ -979,6 +1004,11 @@ export function extractPanelsFromScene(
           panelIdCounter += meshPanels.length;
         }
       }
+    }
+
+    for (const g of blind) {
+      const kind = g.hardware ? HARDWARE_KINDS[g.hardware.kind]?.label : undefined;
+      blindCuts.add(`${kind ?? g.name ?? 'A cut'} in ${node.name}`);
     }
 
     if (node.children) {
@@ -992,7 +1022,7 @@ export function extractPanelsFromScene(
     traverseNode(rootNode);
   }
 
-  return { panels, invalidGeoms };
+  return { panels, invalidGeoms, blindCuts: [...blindCuts] };
 }
 
 function extractPanelsFromMeshGeom(
@@ -1002,7 +1032,8 @@ function extractPanelsFromMeshGeom(
   options: LaserCutOptions,
   startId: number,
   diffGeoms: SceneGeom[],
-  bodyMatrix: THREE.Matrix4
+  bodyMatrix: THREE.Matrix4,
+  blind: SceneGeom[]
 ): LaserPanel[] {
   const meshPanels: LaserPanel[] = [];
   // SceneGeom.vertices is Y-up (three.js); renderVertices is the Z-up copy that
@@ -1153,6 +1184,7 @@ function extractPanelsFromMeshGeom(
   // them open, and a cylinder came out as two loose discs.
   let shelledArea = 0;
   const pairedPanels = new Set<number>();
+  const stoppedBy = new Map<number, SceneGeom[]>();
   for (const slab of slabs) {
     const group = slab.info.group;
 
@@ -1232,10 +1264,16 @@ function extractPanelsFromMeshGeom(
     // Holes modelled as CSG subtractions live on the body, not in the mesh, so
     // they have to be projected on separately — otherwise a laser-cut panel
     // comes out solid where the model has an opening.
+    const stoppedIn: SceneGeom[] = [];
     innerCutouts2D.push(
       ...projectCutouts2D(diffGeoms, bodyMatrix, origin3D, uAxis, vAxis,
                           pt => pointInPolygon2D(outerPolygon2D, pt),
-                          Math.max(slab.thickness, options.materialThickness))
+                          // A paired slab stands either side of its mid-plane; a
+                          // lone face is a solid's skin, the sheet behind it.
+                          slab.paired
+                            ? { lo: -slab.thickness / 2, hi: slab.thickness / 2 }
+                            : { lo: -slab.thickness, hi: 0 },
+                          stoppedIn)
     );
 
     if (outerPolygon2D.length < 3) continue;
@@ -1273,6 +1311,8 @@ function extractPanelsFromMeshGeom(
       if (Math.min(maxX - minX, maxY - minY) < 2 * slab.thickness * 1000) continue;
     }
 
+    // Only now: an edge band dropped above is no panel to stop inside.
+    stoppedBy.set(idCounter, stoppedIn);
     if (!slab.paired) shelledArea += slab.info.area;
     else pairedPanels.add(idCounter);
     meshPanels.push({
@@ -1289,10 +1329,11 @@ function extractPanelsFromMeshGeom(
     });
   }
 
-  if (shelledArea > 0 && shelledArea < 0.95 * totalArea) {
-    return meshPanels.filter((p) => pairedPanels.has(Number(p.id.replace('panel_', ''))));
-  }
-  return meshPanels;
+  const kept = shelledArea > 0 && shelledArea < 0.95 * totalArea
+    ? meshPanels.filter((p) => pairedPanels.has(Number(p.id.replace('panel_', ''))))
+    : meshPanels;
+  for (const p of kept) blind.push(...(stoppedBy.get(Number(p.id.replace('panel_', ''))) ?? []));
+  return kept;
 }
 
 // ---------------------------------------------------------------------------
@@ -2078,7 +2119,9 @@ function buildJointWork(
     const tenonThickness = maleIdx === ia ? j.stockA : j.stockB;
 
     const push = (panelIdx: number, m: EdgeMatch, sa: number, sb: number, depth: number) => {
-      if (Math.abs(depth) < MIN_FEATURE_MM) return;
+      // A tab that stops flush still has half a kerf to grow, which is less than
+      // any feature: that is the compensation, not a sliver.
+      if (Math.abs(depth) < 1e-6) return;
       const t0 = sToEdgeT(m, sa);
       const t1 = sToEdgeT(m, sb);
       work[panelIdx].features.push({
@@ -2225,7 +2268,7 @@ function buildMortise(
  * outline diving to a point that isn't on the boundary and straight back out
  * again, which is where the stray hairlines at corners came from.
  */
-function applyEdgeFeatures(poly: Point2D[], features: EdgeFeature[]): Point2D[] {
+function applyEdgeFeatures(poly: Point2D[], features: EdgeFeature[], kerfMm: number): Point2D[] {
   if (features.length === 0) return poly;
 
   const n = poly.length;
@@ -2264,9 +2307,12 @@ function applyEdgeFeatures(poly: Point2D[], features: EdgeFeature[]): Point2D[] 
       let tb = Math.min(len, f.tb);
       // Kerf compensation nudges a cell boundary in by half a beam width. Where
       // that boundary is the panel's own corner it would leave a nub thinner
-      // than the beam cutting it, so snap those onto the corner.
-      if (ta < MIN_FEATURE_MM) ta = 0;
-      if (len - tb < MIN_FEATURE_MM) tb = len;
+      // than the beam cutting it, so snap those onto the corner. By the beam,
+      // not a fixed figure: past 0.4 mm of kerf the nub cleared a fixed 0.2 and
+      // stood as a fin the full depth of the joint.
+      const nub = Math.max(MIN_FEATURE_MM, kerfMm);
+      if (ta < nub) ta = 0;
+      if (len - tb < nub) tb = len;
       if (tb - ta < MIN_FEATURE_MM) continue;
 
       // Neighbouring stretches at the same depth are one stretch. Keeping them
@@ -2288,7 +2334,19 @@ function applyEdgeFeatures(poly: Point2D[], features: EdgeFeature[]): Point2D[] 
       else runs.push({ t0: cursor, t1: len, depth: 0 });
     }
 
-    profiles.push({ origin: e0, u, m, len, runs });
+    // What is flush on an edge is one line. Where its tabs grow half a kerf the
+    // stretches between them go with them: left behind, each is a jog thinner
+    // than the beam that has to cut it.
+    const grown = runs.find((r) => r.depth !== 0 && Math.abs(r.depth) <= kerfMm / 2 + 1e-6);
+    const line: typeof runs = [];
+    for (const r of runs) {
+      const depth = grown && r.depth === 0 ? grown.depth : r.depth;
+      const prev = line[line.length - 1];
+      if (prev && Math.abs(prev.depth - depth) < 1e-9) prev.t1 = r.t1;
+      else line.push({ ...r, depth });
+    }
+
+    profiles.push({ origin: e0, u, m, len, runs: line });
   }
 
   const at = (p: EdgeProfile, t: number, d: number): Point2D => ({
@@ -2687,7 +2745,7 @@ function applyJointsToPanels(
     if (work[i].features.length === 0 && work[i].mortises.length === 0) {
       unjointed.push(panel.name);
     }
-    panel.outerPolygon2D = applyEdgeFeatures(panel.outerPolygon2D, work[i].features);
+    panel.outerPolygon2D = applyEdgeFeatures(panel.outerPolygon2D, work[i].features, options.kerf * 1000);
     for (const mortise of work[i].mortises) {
       panel.innerCutouts2D.push(mortise);
     }
@@ -2974,6 +3032,13 @@ export function exportLaserCutSvg(
   const extracted = extractPanelsFromScene(scene, options);
   const invalidGeoms = extracted.invalidGeoms;
   let panels = extracted.panels;
+
+  if (extracted.blindCuts.length > 0) {
+    return {
+      success: false,
+      error: `A sheet cut only goes right through, and these stop inside the sheet: ${extracted.blindCuts.join(', ')}. Make them through cuts, or machine the part instead.`,
+    };
+  }
 
   if (panels.length === 0) {
     if (invalidGeoms.length > 0) {
