@@ -64,10 +64,11 @@ describe('the Etch button', () => {
   });
 
   it('builds a link that opens the layout in Etch at the stock thickness', async () => {
-    const url = await etchUrlForScene({ scene: moldSubject(scene, ['lid']).scene, name: 'lid', machine: 'cnc', stock, baseUrl: 'https://etch.physbox.io/' });
+    const url = await etchUrlForScene({ scene: moldSubject(scene, ['lid']).scene, name: 'lid', machine: 'cnc', material: 'mdf', stock, baseUrl: 'https://etch.physbox.io/' });
     expect(url).toMatch(/^https?:\/\/.+#/);
     const params = new URLSearchParams(url.split('#')[1]);
     expect(params.get('thickness')).toBe('6');
+    expect(params.get('material')).toBe('mdf');
     expect(params.get('name')).toBe('lid');
     expect(params.get('data')?.length).toBeGreaterThan(100);
   });

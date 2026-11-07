@@ -48,7 +48,7 @@ export const cutCommands: McpCommands = {
       machine,
       cut: { label: subject.label, ids: subject.ids },
       // What the server hands Etch with the drawing (etch_set_svg's fields).
-      etch: { name, thicknessMm, machine },
+      etch: { name, thicknessMm, machine, material: state.material },
       summary: { ...summary, thicknessMm },
       warnings,
       files: describeFiles([{ name: `${fileSafe(name)}.svg`, bytes: new TextEncoder().encode(svg) }], msg.includeFiles !== false),

@@ -13,6 +13,7 @@
 // cannot hit a request-line limit and never lands in an access log.
 // ---------------------------------------------------------------------------
 
+import type { MaterialId } from './feedsAndSpeeds';
 import { gzip, toBase64Url } from './shareLink';
 
 /** The only format Etch understands. Bump only with the reader. */
@@ -59,17 +60,16 @@ export interface EtchHandoff {
   name?: string;
   /** Stock thickness in mm, so Etch derives feeds for the right material. */
   thicknessMm?: number;
+  /** What the bench is set to, by the id Mesh and Etch share. */
+  material?: MaterialId;
 }
 
 /**
  * Builds the URL that opens this cut in Etch.
  *
- * Thickness travels because Etch derives every feed, power and depth from the
- * material and how thick it is; artwork arriving without it is planned against
- * whatever the last document happened to be set to. The material *name* does
- * not, because Mesh's list and Etch's catalogue are not the same set, and an id
- * Etch does not recognise is discarded there with a note — noise in place of
- * information.
+ * Material and thickness travel because Etch derives every feed, power and depth
+ * from them; artwork arriving without them is planned against whatever the last
+ * design happened to be set to.
  */
 export async function buildEtchHandoffUrl(
   handoff: EtchHandoff,
@@ -87,6 +87,7 @@ export async function buildEtchHandoffUrl(
   if (handoff.thicknessMm && handoff.thicknessMm > 0) {
     params.set('thickness', String(handoff.thicknessMm));
   }
+  if (handoff.material) params.set('material', handoff.material);
 
   const fragment = params.toString();
   if (fragment.length > HANDOFF_SOFT_LIMIT) throw new HandoffTooLargeError(fragment.length);

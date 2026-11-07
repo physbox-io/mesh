@@ -117,6 +117,7 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
       name: subject.label,
       machine: state.machineTarget === 'laser' ? 'laser' : 'cnc',
       stock: state.stock,
+      material: state.material,
     })
       .catch((e: Error) => setEtchError(e.message))
       .finally(() => setEtchBusy(false));

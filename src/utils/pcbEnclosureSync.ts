@@ -15,6 +15,7 @@ import type { HardwareBore, SceneGeom, SceneNode } from '../types/scene';
 import { hardwareCutGeoms, CLEARANCE_HOLES, INSERTS } from './hardwareCuts';
 import { boxGeom, cylinderGeom, ringGeom, mm, visual } from './hardwareGeometry';
 import { buildEtchHandoffUrl, etchBaseUrl } from './etchHandoff';
+import type { MaterialId } from './feedsAndSpeeds';
 import { voltBaseUrl } from './voltHandoff';
 import { toBase64Url } from './shareLink';
 import { CSG_DEFAULT_SECTORS, cutGeometry, sourcePositiveBounds } from './csg';
@@ -2035,7 +2036,7 @@ function buildSyncEtchUrl(svg: string, name: string, thicknessMm = 2.0): string 
 export async function buildPcbFaceplateEtchUrl(
   spec: PcbMechanicalSpec,
   face: PcbEnclosureFace = 'top',
-  options?: FaceplateSvgOptions & { baseUrl?: string },
+  options?: FaceplateSvgOptions & { baseUrl?: string; material?: MaterialId },
 ): Promise<string> {
   const { svg } = exportPcbFaceplateSvg(spec, face, options);
   return buildEtchHandoffUrl(
@@ -2043,6 +2044,7 @@ export async function buildPcbFaceplateEtchUrl(
       svg,
       name: `${spec.name} (${face} panel)`,
       thicknessMm: options?.thicknessMm ?? 2.0,
+      material: options?.material,
     },
     options?.baseUrl ?? etchBaseUrl(safeLocation()),
   );

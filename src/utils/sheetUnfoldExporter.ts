@@ -20,6 +20,7 @@ import { csgSourceGeoms, fromtoFrame } from './csg';
 import { isBoughtIn } from './boughtIn';
 import { isNodeRotationBaked } from './sceneTree';
 import { buildEtchHandoffUrl, etchBaseUrl } from './etchHandoff';
+import type { MaterialId } from './feedsAndSpeeds';
 import { toBase64Url } from './shareLink';
 
 export type SheetUnfoldMode = 'papercraft' | 'sheet_metal' | 'soft_goods';
@@ -2336,7 +2337,7 @@ export function exportSheetUnfold(
  */
 export async function buildSheetUnfoldEtchUrl(
   result: SheetUnfoldResult,
-  options?: Partial<SheetUnfoldOptions>,
+  options?: Partial<SheetUnfoldOptions> & { material?: MaterialId },
   baseUrl: string = typeof window !== 'undefined' && window.location
     ? etchBaseUrl(window.location)
     : etchBaseUrl({ hostname: 'localhost', protocol: 'http:' })
@@ -2347,6 +2348,7 @@ export async function buildSheetUnfoldEtchUrl(
       svg: result.svg,
       name: `unfold_${result.mode}`,
       thicknessMm: opts.thicknessMm,
+      material: options?.material,
     },
     baseUrl
   );

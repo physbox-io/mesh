@@ -12,6 +12,7 @@ import { ExportWorkerClient } from './exportWorkerClient';
 import { DEFAULT_LASER_OPTIONS, type LaserCutOptions } from './laserCutExporter';
 import { defaultCornerRelief, layoutKerf } from './sheetCutRecipe';
 import { buildEtchHandoffUrl } from './etchHandoff';
+import type { MaterialId } from './feedsAndSpeeds';
 import type { SceneGraph } from '../types/scene';
 
 /** A router's bit when nothing says otherwise: 1/8", as the SVG dialog and the MCP default. */
@@ -24,6 +25,7 @@ export interface EtchSceneRequest {
   name: string;
   machine: 'laser' | 'cnc';
   stock: { widthMm: number; depthMm: number; thicknessMm: number };
+  material: MaterialId;
   /** Where Etch is; by default worked out from where Mesh runs (etchBaseUrl). */
   baseUrl?: string;
 }
@@ -60,7 +62,12 @@ export async function etchUrlForScene(req: EtchSceneRequest): Promise<string> {
     if (!result.success || !result.svg || !result.panels?.length) {
       throw new Error(panelRefusal(result.error));
     }
-    const handoff = { svg: result.svg, name: req.name, thicknessMm: req.stock.thicknessMm };
+    const handoff = {
+      svg: result.svg,
+      name: req.name,
+      thicknessMm: req.stock.thicknessMm,
+      material: req.material,
+    };
     return await (req.baseUrl ? buildEtchHandoffUrl(handoff, req.baseUrl) : buildEtchHandoffUrl(handoff));
   } finally {
     client.dispose();

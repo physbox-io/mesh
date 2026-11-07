@@ -35,6 +35,15 @@ describe('the Etch handoff link', () => {
     expect(url.startsWith('http://localhost:5176/#')).toBe(true);
   });
 
+  it('carries the stock Etch derives its feeds from', async () => {
+    const p = fragment(
+      await buildEtchHandoffUrl({ svg: '<svg/>', thicknessMm: 6, material: 'acrylic' }, 'http://x/')
+    );
+    expect(p.get('thickness')).toBe('6');
+    expect(p.get('material')).toBe('acrylic');
+    expect(fragment(await buildEtchHandoffUrl({ svg: '<svg/>' }, 'http://x/')).has('material')).toBe(false);
+  });
+
   it('puts it in the fragment, never the query string', async () => {
     // A fragment is not sent to the server: no request-line limit, no access log.
     const url = await buildEtchHandoffUrl({ svg: '<svg/>' }, 'http://localhost:5176/');

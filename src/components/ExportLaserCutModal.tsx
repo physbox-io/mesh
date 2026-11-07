@@ -478,6 +478,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
         svg: exportResult.svg,
         name: `${jointMode} cut`,
         thicknessMm: materialThicknessMm,
+        material,
       });
       window.open(url, '_blank', 'noopener');
     } catch (err) {

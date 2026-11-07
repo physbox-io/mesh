@@ -390,6 +390,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
         svg: exportResult.svg,
         name: `${subjectLabel ?? 'Contour'} slices`,
         thicknessMm: materialThicknessMm,
+        material,
       });
       const tab = window.open(url, '_blank');
       if (!tab) throw new Error('The browser blocked the new tab: allow pop-ups for this site, then try again.');
