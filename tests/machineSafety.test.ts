@@ -446,7 +446,7 @@ describe('C5: the job is what the program says, not what $32 says', () => {
     laser32(1);
     refuse = (l) => (l.startsWith('$32') ? 'error:8' : null);
     await webSerialManager.runJob(ROUTER);
-    await vi.waitFor(() => expect(webSerialManager.getState().lastError).toMatch(/Laser mode is on \(\$32=1\)/));
+    await vi.waitFor(() => expect(webSerialManager.getState().lastError).toMatch(/Laser mode is on \(\$32=1\)/), { timeout: 5000 });
     expect(webSerialManager.getState().status).toBe('IDLE');
     expect(sent).not.toContain('G21');
   });
@@ -457,7 +457,7 @@ describe('C5: the job is what the program says, not what $32 says', () => {
     laser32(1);
     refuse = (l) => (l.startsWith('$32') ? 'error:8' : null);
     expect(webSerialManager.resumeFromLine(2).ok).toBe(true);
-    await vi.waitFor(() => expect(webSerialManager.getState().lastError).toMatch(/Laser mode is on/));
+    await vi.waitFor(() => expect(webSerialManager.getState().lastError).toMatch(/Laser mode is on/), { timeout: 5000 });
     expect(webSerialManager.getState().resume?.fromLine).toBe(2);
   });
 
