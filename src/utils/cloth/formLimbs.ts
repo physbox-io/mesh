@@ -13,7 +13,9 @@
  */
 
 import type { BodyFormMeasurements } from '../../types/cloth';
-import { ellipseHalfWidth, NECK_TOP, proportions } from './formProportions';
+import { ellipseHalfWidth, legTuck, NECK_TOP, proportions } from './formProportions';
+import { headField, headRadius } from './formHead';
+import { armRelief, legRelief } from './formMuscles';
 import { makeLimbPath, type LimbPath } from './limbPath';
 
 export type LimbName = 'armL' | 'armR' | 'legL' | 'legR' | 'head';
@@ -43,12 +45,22 @@ export interface FormLimb {
   section(s: number): LimbSectionAt;
 }
 
+/** Where the elbow falls along the arm: the upper arm is the longer of the two. */
+const ELBOW_AT = 0.55;
+/** A hand's length past the wrist, at a 1.75 m figure. */
+export const HAND_LENGTH = 0.168;
+
 /** Room under a foot for cloth (twice its thickness, and a little), metres. */
 const FOOT_ROOM = 0.012;
 
 const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const unit = (a: number[]) => { const l = Math.sqrt(dot(a, a)) || 1; return a.map((v) => v / l); };
+
+const smooth = (t0: number, t1: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - t0) / (t1 - t0 || 1)));
+  return t * t * (3 - 2 * t);
+};
 
 /** Linear through a table of [x, ...values]; clamped at the ends. */
 function table(rows: number[][], x: number): number[] {
@@ -72,14 +84,16 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const th = (m.armAngle * Math.PI) / 180;
   const rA = m.upperArm / (2 * Math.PI);
   const origin = [side * (m.shoulderWidth / 2 - P.shoulderR * 0.6), 0, P.shoulderZ - P.shoulderDrop - 0.01 * S];
-  const path = makeLimbPath(origin, [side * Math.cos(th), 0, -Math.sin(th)], [0, -1, 0], m.armLength * 0.47, m.armLength, m.elbowBend, 0.07 * S);
+  const path = makeLimbPath(origin, [side * Math.cos(th), 0, -Math.sin(th)], [0, -1, 0], m.armLength * ELBOW_AT, m.armLength, m.elbowBend, 0.07 * S);
   const A = m.armLength;
   // Real proportions (a man's arm about 31, 26, 27 and 17 cm round at the
   // bicep, elbow, forearm and wrist): [distance along, half width, half
   // height]; then the hand, a mitten curling a little toward the body:
   // [past the wrist, curl, half width, half height].
-  const armRows = [[0, rA, rA], [0.2 * A, rA * 1.02, rA * 0.98], [0.4 * A, rA * 0.92, rA * 0.88], [0.47 * A, rA * 0.86, rA * 0.8], [0.6 * A, rA * 0.92, rA * 0.8], [0.85 * A, rA * 0.72, rA * 0.58], [A, 0.028 * S, 0.02 * S]];
-  const handRows = [[0, 0, 0.028 * S, 0.02 * S], [0.035 * S, 0, 0.042 * S, 0.022 * S], [0.075 * S, 0.004 * S, 0.045 * S, 0.019 * S], [0.112 * S, 0.012 * S, 0.042 * S, 0.014 * S], [0.15 * S, 0.026 * S, 0.034 * S, 0.011 * S]];
+  const E = ELBOW_AT;
+  const armRows = [[0, rA * 0.8, rA * 0.8], [0.1 * A, rA * 0.92, rA * 0.92], [0.25 * A, rA * 0.97, rA * 0.97], [(E - 0.09) * A, rA * 0.9, rA * 0.88], [E * A, rA * 0.82, rA * 0.76], [(E + 0.11) * A, rA * 0.84, rA * 0.74], [0.86 * A, rA * 0.66, rA * 0.54], [A, 0.029 * S, 0.0205 * S]];
+  const handL = HAND_LENGTH * S;
+  const handRows = [[0, 0, 0.029 * S, 0.0205 * S], [0.23 * handL, 0, 0.042 * S, 0.022 * S], [0.5 * handL, 0.004 * S, 0.045 * S, 0.019 * S], [0.75 * handL, 0.012 * S, 0.042 * S, 0.014 * S], [handL, 0.026 * S, 0.034 * S, 0.011 * S]];
   // The palm faces the body; across it lies the hand's width, thumb side to
   // the front and up. Widths elsewhere are square to the elbow's axis (so
   // the sections stay square through the turn), twisting to the hand's.
@@ -97,10 +111,30 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
     const f = Math.min(1, Math.max(0, (s / A - 0.6) / 0.4));
     return unit(base.map((v, k) => v * (1 - f) + across[k] * f));
   };
+  // Which way a point on the arm faces: into the elbow's crook, and out away from the body.
+  const facings = (s: number) => {
+    const t = path.tangent(s);
+    let fwd = cross(axis, t);
+    if (Math.sqrt(dot(fwd, fwd)) < 1e-6) fwd = [0, -1, 0];
+    fwd = unit(fwd.map((v, k) => v - t[k] * dot(fwd, t)));
+    if (dot(fwd, [0, -1, 0]) + dot(fwd, tw) < 0) fwd = fwd.map((v) => -v);
+    return { fwd, out: cross(fwd, t).map((v) => v * side) };
+  };
   return {
-    name: side > 0 ? 'armL' : 'armR', path, length: A + 0.15 * S,
+    name: side > 0 ? 'armL' : 'armR', path, length: A + handL,
     section(s) {
-      if (s <= A) { const [w, h] = table(armRows, s); return frame(path, s, widthAt(s), path.at(s), w, h); }
+      if (s <= A) {
+        const [w, h] = table(armRows, s);
+        const sec = frame(path, s, widthAt(s), path.at(s), w, h);
+        const { fwd, out } = facings(s), u = Math.min(1, Math.max(0, s / A));
+        const shape = (ang: number): [number, number] => {
+          const ca = Math.cos(ang), sa = Math.sin(ang);
+          const d = sec.side.map((v, k) => v * ca + sec.up[k] * sa);
+          const r = armRelief(m.figure, u, E, dot(d, fwd), dot(d, out)) * S;
+          return [ca * (w + r), sa * (h + r)];
+        };
+        return { ...sec, shape };
+      }
       const [curl, w, h] = table(handRows, s - A);
       return frame(path, s, across, path.at(s).map((v, k) => v + inward[k] * curl), w, h);
     },
@@ -109,7 +143,7 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
 
 function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const P = proportions(m), S = P.s, H = m.height, female = m.figure === 'female';
-  const thighR = (m.hip * (female ? 0.58 : 0.55)) / (2 * Math.PI), calfR = thighR * 0.62;
+  const thighR = (m.hip * (female ? 0.58 : 0.55)) / (2 * Math.PI), calfR = thighR * 0.66;
   const hipHalf = ellipseHalfWidth(m.hip, female ? 0.74 : 0.72);
   const hipDepth = hipHalf * (female ? 0.74 : 0.72);
   // The foot stands a sock's thickness clear of the floor: with its sole on
@@ -118,7 +152,7 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   // outer contour and front-to-back depth there so the hip flows continuously
   // into the thigh with no cylinder step at the crotch.
   const kneeZ = 0.285 * H, footZ = 0.035 * S + FOOT_ROOM, topZ = P.hipZ - 0.015 * S;
-  const xTop = side * hipHalf * 0.46, xAnkle = side * hipHalf * (female ? 0.33 : 0.36);
+  const xTop = side * hipHalf * 0.5, xAnkle = side * hipHalf * 0.56;
   const top = [xTop, P.centre.hip, topZ], ankle = [xAnkle, 0.01 * S, footZ];
   const down = unit(ankle.map((v, k) => v - top[k]));
   const fwd = unit([0, -1, 0].map((v, k) => v - down[k] * -down[1]));
@@ -130,15 +164,15 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const path = makeLimbPath(top, down, fwd, upper, upper + foot, bend, 0.08 * S);
   // Down the leg by height: [height, half width (across), half depth].
   const legRows = [
-    [0.035 * S + 0.03 * S, calfR * 0.5, calfR * 0.56],
-    [0.05 * H + 0.01 * S, calfR * 0.46, calfR * 0.5],
-    [0.05 * H + 0.1 * S, calfR * 0.6, calfR * 0.66],
-    [kneeZ - 0.11 * S, calfR * 0.92, calfR * 1.05],
-    [kneeZ - 0.02 * S, thighR * 0.62, thighR * 0.64],
-    [kneeZ + 0.03 * S, thighR * 0.66, thighR * 0.68],
-    [P.crotchZ - (P.crotchZ - kneeZ) * 0.45, thighR * 0.84, thighR * 0.87],
-    [P.crotchZ, thighR * 0.95, thighR * 1.02],
-    [topZ, hipHalf * 0.53, hipDepth * 0.88],
+    [0.035 * S + 0.03 * S, calfR * 0.56, calfR * 0.66],
+    [0.05 * H + 0.015 * S, calfR * 0.53, calfR * 0.6],
+    [0.05 * H + 0.1 * S, calfR * 0.66, calfR * 0.72],
+    [kneeZ - 0.12 * S, calfR * 0.86, calfR * 0.94],
+    [kneeZ - 0.035 * S, thighR * 0.6, thighR * 0.6],
+    [kneeZ + 0.03 * S, thighR * 0.62, thighR * 0.64],
+    [P.crotchZ - (P.crotchZ - kneeZ) * 0.45, thighR * 0.78, thighR * 0.92],
+    [P.crotchZ, hipHalf * 0.5, hipDepth * 0.86],
+    [topZ, hipHalf * 0.47, hipDepth * 0.72],
   ];
   // Along the foot past the ankle: [distance, half width, half height, how far its centre drops].
   const footRows = [[-0.02 * S, calfR * 0.5, calfR * 0.56, 0], [0.01 * S, 0.034 * S, 0.033 * S, 0], [0.05 * S, 0.04 * S, 0.03 * S, 0.003 * S], [0.1 * S, 0.045 * S, 0.022 * S, 0.01 * S], [foot, 0.035 * S, 0.015 * S, 0.017 * S]];
@@ -148,9 +182,20 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
     name: side > 0 ? 'legL' : 'legR', path, length: upper + foot, startCap: 0.045 * S,
     section(s) {
       const along = s - upper;
-      const [w, h, drop] = along < -0.02 * S ? [...table(legRows, path.at(s)[2]), 0] : table(footRows, along);
+      const [w0, h0, drop] = along < -0.02 * S ? [...table(legRows, path.at(s)[2]), 0] : table(footRows, along);
       const p = path.at(s), c = [p[0], p[1], p[2] - drop];
-      if (along < -0.08 * S) return frame(path, s, [1, 0, 0], c, w, h);
+      const tuck = legTuck(p[2], P.crotchZ, S), w = w0 - tuck, h = h0 - tuck;
+      // Round the leg: `out` is away from the other leg, `fwd` to the front. Gone by the instep.
+      const relief = (ang: number, sec: LimbSectionAt) => {
+        const ca = Math.cos(ang), sa = Math.sin(ang);
+        const d = sec.side.map((v, k) => v * ca + sec.up[k] * sa);
+        return legRelief(m.figure, (p[2] - kneeZ) / S, -d[1], d[0] * side) * S * (1 - smooth(-0.06 * S, -0.02 * S, along));
+      };
+      if (along < -0.08 * S) {
+        const sec = frame(path, s, [1, 0, 0], c, w, h);
+        const shape = (ang: number): [number, number] => { const r = relief(ang, sec); return [Math.cos(ang) * (w + r), Math.sin(ang) * (h + r)]; };
+        return { ...sec, shape };
+      }
       const base = frame(path, s, [1, 0, 0], c, w, h);
       const uy = base.up[1], uz = base.up[2];
       // The 0.08 S ankle fillet rounds the instep (+up), pulling the path
@@ -162,8 +207,8 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
       const k = 0.018 * S, d = Math.max(0, k - Math.abs(toFloor - toAchilles)) / k;
       const hBot = Math.max(h, Math.min(toFloor, toAchilles) - 0.25 * k * d * d);
       const shape = (ang: number): [number, number] => {
-        const ca = Math.cos(ang), sa = Math.sin(ang);
-        return [ca * w, sa * (sa < 0 ? hBot : h)];
+        const ca = Math.cos(ang), sa = Math.sin(ang), r = relief(ang, base);
+        return [ca * (w + r), sa * ((sa < 0 ? hBot : h) + r)];
       };
       return frame(path, s, [1, 0, 0], c, w, h, shape);
     },
@@ -171,52 +216,32 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
 }
 
 function head(m: BodyFormMeasurements): FormLimb {
-  const P = proportions(m), S = P.s, H = m.height, female = m.figure === 'female';
-  const neckR = m.neck / (2 * Math.PI);
+  const P = proportions(m), S = P.s, H = m.height;
   const cTop = 0.076 * S, zc = H - cTop;
   const z0 = NECK_TOP * H - 0.03 * S;
   const length = zc + 0.8 * cTop - z0;
-  const origin = [0, -0.012 * S, z0];
-  // A round-crowned ovoid mannequin head on the neck: zc is high on the skull
-  // (H - 0.076 S) so the crown is a wide hemisphere (cTop ~ a) rather than a
-  // conehead, and below zc the head widens smoothly from the neck to the
-  // temples with a gentle <10 deg slope (no shadow bands or hollows). Wide,
-  // gently sloped orbital hollows sit high on the face just below zc.
-  const a = (female ? 0.075 : 0.078) * S, bFront = neckR + 0.02 * S, bBack = (female ? 0.088 : 0.091) * S;
-  const smooth = (t0: number, t1: number, x: number) => {
-    const t = Math.min(1, Math.max(0, (x - t0) / (t1 - t0 || 1)));
-    return t * t * (3 - 2 * t);
+  const axisY = -0.012 * S;
+  const field = headField(m.figure, m.neck / (2 * Math.PI) / S);
+  const path = makeLimbPath([0, axisY, z0], [0, 0, 1], [0, -1, 0], length, length, 0, 0.01);
+  // The same heights and angles are asked for again whenever the form is built.
+  const memo = new Map<number, Map<number, number>>();
+  const radiusAt = (z: number, a: number) => {
+    let row = memo.get(z);
+    if (!row) memo.set(z, row = new Map());
+    let r = row.get(a);
+    if (r === undefined) row.set(a, r = headRadius(field, (z - H) / S, a) * S);
+    return r;
   };
-  const path = makeLimbPath(origin, [0, 0, 1], [0, -1, 0], length, length, 0, 0.01);
   return {
     name: 'head', path, length, startCap: 0.035 * S, endCap: 0.2 * cTop,
     section(s) {
       const z = z0 + s;
-      const u = Math.min(1, Math.max(0, (z - z0) / Math.max(1e-6, zc - z0)));
-      const kDome = z >= zc ? Math.sqrt(Math.max(0.01, 1 - ((z - zc) / cTop) ** 2)) : 1;
-
-      const r0 = neckR * 0.95;
-      const inW = smooth(0, 1, u);
-      const inFront = smooth(0.04, 0.82, u);
-      const inBack = smooth(0.08, 0.92, u);
-
-      const w = (r0 + (a - r0) * inW) * kDome;
-      const hFront = (r0 + (bFront - r0) * inFront) * kDome;
-      const hBack = (r0 + (bBack - r0) * inBack) * kDome;
-      const h = (hFront + hBack) / 2;
-
-      // Wide, gently sloped orbital hollows high on the head just below the brow equator zc.
+      const w = radiusAt(z, 0), h = (radiusAt(z, Math.PI / 2) + radiusAt(z, -Math.PI / 2)) / 2;
       const shape = (ang: number): [number, number] => {
-        const ca = Math.cos(ang), sa = Math.sin(ang), aca = Math.abs(ca);
-        const front = Math.max(0, -sa);
-        if (sa >= 0) return [ca * w, sa * hBack];
-        const zOrb = zc - 0.018 * S + 0.008 * S * (aca - 0.2);
-        const latOrb = smooth(0.135, 0.42, aca) * (1 - smooth(0.68, 0.96, aca));
-        const vertOrb = Math.exp(-(((z - zOrb) / (0.018 * S)) ** 2));
-        const orbit = 0.0105 * S * latOrb * vertOrb * front;
-        return [ca * w, sa * (hFront - orbit)];
+        const r = radiusAt(z, ang);
+        return [Math.cos(ang) * r, Math.sin(ang) * r];
       };
-      return frame(path, s, [1, 0, 0], [0, -0.012 * S, z], w, h, shape);
+      return frame(path, s, [1, 0, 0], [0, axisY, z], w, h, shape);
     },
   };
 }

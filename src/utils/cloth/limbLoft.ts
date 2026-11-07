@@ -32,9 +32,9 @@ const unit = (a: number[]) => { const l = Math.sqrt(dot(a, a)) || 1; return [a[0
  * The limb's mesh. `side` is the direction the sections' width lies along
  * (made square to the path at each point).
  */
-export function limbLoft(path: LimbSection[], side: number[], caps: { start?: number; end?: number } = {}): { vertices: number[]; faces: number[] } {
+export function limbLoft(path: LimbSection[], side: number[], caps: { start?: number; end?: number; angles?: number } = {}): { vertices: number[]; faces: number[] } {
   const n = path.length;
-  const ang = path.some((s) => s.shape) ? 48 : ANG;
+  const ang = caps.angles ?? (path.some((s) => s.shape) ? 48 : ANG);
   const frames = path.map((s, i) => {
     const t = unit(sub(path[Math.min(n - 1, i + 1)].p, path[Math.max(0, i - 1)].p));
     const sd = s.side ?? side;

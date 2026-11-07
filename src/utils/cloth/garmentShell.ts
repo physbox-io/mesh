@@ -358,6 +358,8 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       }
     }
     const dissolve = new Set<string>();
+    // A speck a cut left touching nothing is not a panel: it goes.
+    const specks = new Set<number>();
     for (let idx = 0; idx < panelTris.length; idx++) {
       if (panelTris[idx].length >= 6) continue;
       // Find the single best neighbouring large panel to absorb this sliver into,
@@ -379,8 +381,17 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       }
       const best = [...byNeighbour.entries()].sort((a, b) => b[1].length - a[1].length)[0];
       if (best) for (const k of best[1]) dissolve.add(k);
+      else if (panelTris[idx].every((t) => [0, 1, 2].every((e) => {
+        const a = tris[3 * t + e], b = tris[3 * t + ((e + 1) % 3)];
+        return (edgeTris.get(a < b ? `${a},${b}` : `${b},${a}`) ?? []).every((ot) => triPanel[ot] === idx);
+      })) && panelTris.length > 1) panelTris[idx].forEach((t) => specks.add(t));
     }
-    if (dissolve.size > 0) {
+    if (specks.size > 0) {
+      const kept: number[] = [];
+      for (let t = 0; t < tris.length / 3; t++) if (!specks.has(t)) kept.push(tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]);
+      tris = kept;
+    }
+    if (dissolve.size > 0 || specks.size > 0) {
       seams = seams.filter((sm) => sm.open || !dissolve.has(sm.path[0] < sm.path[1] ? `${sm.path[0]},${sm.path[1]}` : `${sm.path[1]},${sm.path[0]}`));
       panelTris = splitPanels(points.length, tris, seams.map((sm) => sm.path));
     }

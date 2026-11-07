@@ -19,13 +19,23 @@ export function ellipseHalfWidth(c: number, k: number): number {
  */
 export const NECK_TOP = 0.875;
 
+/**
+ * How far inside the skin a leg's own surface runs above the crotch, at scale
+ * s: there the skin is the leg (bodyForm, blendLimbRoots), and the two would
+ * otherwise lie on each other.
+ */
+export function legTuck(z: number, crotchZ: number, s: number): number {
+  const t = Math.min(1, Math.max(0, (z - crotchZ) / (0.05 * s)));
+  return 0.022 * s * t * t * (3 - 2 * t);
+}
+
 export function proportions(m: BodyFormMeasurements) {
   const female = m.figure === 'female';
   const s = m.height / 1.75;
   return {
     s,
     shoulderZ: 0.817 * m.height,
-    shoulderDrop: (female ? 0.05 : 0.04) * s,
+    shoulderDrop: (female ? 0.066 : 0.058) * s,
     shoulderR: 0.045 * s,
     bustZ: (female ? 0.715 : 0.72) * m.height,
     waistZ: (female ? 0.625 : 0.6) * m.height,
