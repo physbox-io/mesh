@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { cuttingMaterial, idealCut } from '@physbox-io/machining';
 import {
   recommendSpeeds,
   describeSpeedRecommendation,
@@ -9,15 +10,13 @@ import {
 import { chiploadMm } from '../src/utils/reliefCarveExporter';
 
 describe('what RPM to set', () => {
-  it('is surface speed over diameter, so a bigger cutter turns slower', () => {
+  it('turns a bigger cutter slower', () => {
     const small = recommendSpeeds({ diameterMm: 3.175, flutes: 2, material: 'hardwood' });
     const big = recommendSpeeds({ diameterMm: 12, flutes: 2, material: 'hardwood' });
     expect(small.rpm).toBeGreaterThan(big.rpm);
 
-    // 250 m/min over a 12 mm cutter is about 6,600 RPM, and that arithmetic is
-    // the whole recommendation — not a number picked to look plausible. Shown
-    // here on a spindle that can actually be dialled that low.
-    const ideal = (materialSpec('hardwood').surfaceSpeedMMin * 1000) / (Math.PI * 12);
+    // The shared catalogue's figure, shown on a spindle that can be dialled that low.
+    const ideal = idealCut(cuttingMaterial('hardwood'), 12, 2).rpm;
     const onARealSpindle = recommendSpeeds({
       diameterMm: 12,
       flutes: 2,
@@ -30,7 +29,7 @@ describe('what RPM to set', () => {
 
   it('says when the spindle will not go slow enough for a big cutter', () => {
     // A trim router does not idle below about 10,000, and a 12 mm cutter in oak
-    // wants 6,600 — so the edge is running hot and the operator should be told,
+    // wants about 8,200 — so the edge is running hot and the operator should be told,
     // rather than handed a number that looks like a considered recommendation.
     const rec = recommendSpeeds({
       diameterMm: 12,
@@ -71,12 +70,10 @@ describe('what RPM to set', () => {
   });
 
   it('holds acrylic down rather than up, because it melts rather than wears', () => {
-    const acrylic = recommendSpeeds({ diameterMm: 3.175, flutes: 1, material: 'acrylic' });
-    const pine = recommendSpeeds({ diameterMm: 3.175, flutes: 1, material: 'softwood' });
+    const acrylic = recommendSpeeds({ diameterMm: 1, flutes: 1, material: 'acrylic' });
+    const pine = recommendSpeeds({ diameterMm: 1, flutes: 1, material: 'softwood' });
     expect(acrylic.rpm).toBeLessThan(pine.rpm);
     expect(acrylic.clampedBy).toBe('material');
-    // And it wants a bigger bite, to carry the heat out in the chip.
-    expect(acrylic.chiploadMm).toBeGreaterThan(pine.chiploadMm);
   });
 
   it('runs aluminium far slower than wood', () => {

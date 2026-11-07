@@ -11,18 +11,16 @@
 // the dial still on the setting used for acrylic is how you get a burnt cut and
 // a blunt bit, and the file that caused it never mentioned a number.
 //
-// So: a real recommendation, from the same two pieces of arithmetic every
-// machinist uses.
+// So: a real recommendation, from the catalogue Etch, Volt and Mesh share in
+// @physbox-io/machining, so one job gets one feed whichever app planned it.
 //
-//   RPM   = surface speed x 1000 / (pi x diameter)
 //   feed  = RPM x flutes x chip per tooth
 //
-// Surface speed is how fast the edge may be dragged through a given material
-// before it stops cutting and starts rubbing; chip load is how big a bite each
-// edge should take. Both are properties of the material and the cutter, not of
-// the model being carved, which is why they live here rather than in an
-// exporter.
+// Both figures are properties of the material and the cutter, not of the model
+// being carved, which is why they live here rather than in an exporter.
 // ---------------------------------------------------------------------------
+
+import { cuttingMaterial, idealCut, type CuttingMaterial } from '@physbox-io/machining';
 
 export type MaterialId =
   | 'softwood'
@@ -36,30 +34,6 @@ export type MaterialId =
 export interface MaterialSpec {
   id: MaterialId;
   label: string;
-  /**
-   * Surface speed for a carbide cutter, m/min. The speed the cutting edge
-   * itself travels through the work, which is what actually wears it.
-   */
-  surfaceSpeedMMin: number;
-  /**
-   * Chip per tooth as a fraction of cutter diameter.
-   *
-   * Expressed as a fraction rather than an absolute because the right chip for
-   * a 1 mm cutter and a 6 mm one differ by the same ratio as the cutters do —
-   * a small bit simply has no room in its gullet for a big chip, and no
-   * stiffness to take the load of one.
-   */
-  chiploadPerDia: number;
-  /**
-   * Hard ceiling on spindle speed, RPM, where the material sets one that the
-   * surface-speed arithmetic does not.
-   *
-   * Only thermoplastics have this. Acrylic does not wear the tool out, it melts
-   * and welds itself back into the cut behind the cutter, and the way to stop
-   * that is a big chip carrying the heat away — which means a *lower* RPM than
-   * the surface speed alone would ask for, not a higher one.
-   */
-  maxRpm?: number;
   /**
    * Thinnest wall or rib that survives being cut in this, in mm.
    *
@@ -83,61 +57,50 @@ export const MATERIALS: MaterialSpec[] = [
     id: 'softwood',
     minWallMm: 2.0,
     label: 'Softwood (pine, cedar)',
-    surfaceSpeedMMin: 320,
-    chiploadPerDia: 0.03,
     note: 'Cuts fast and fuzzes at the edges. A sharp upcut and a brisk feed leave less fuzz than a slow one.',
   },
   {
     id: 'hardwood',
     minWallMm: 1.5,
     label: 'Hardwood (oak, maple, walnut)',
-    surfaceSpeedMMin: 250,
-    chiploadPerDia: 0.025,
     note: 'The default assumption. Burns if the feed is too slow for the speed — burn marks mean rubbing, not cutting.',
   },
   {
     id: 'plywood',
     minWallMm: 2.0,
     label: 'Plywood',
-    surfaceSpeedMMin: 250,
-    chiploadPerDia: 0.025,
     note: 'Glue lines blunt cutters faster than the timber does. Expect a shorter bit life than solid wood of the same hardness.',
   },
   {
     id: 'mdf',
     minWallMm: 2.5,
     label: 'MDF',
-    surfaceSpeedMMin: 300,
-    chiploadPerDia: 0.03,
     note: 'Cuts evenly at high feedrates; abrasive on tool edges.',
   },
   {
     id: 'acrylic',
     minWallMm: 1.2,
     label: 'Acrylic / polycarbonate',
-    surfaceSpeedMMin: 200,
-    chiploadPerDia: 0.035,
-    maxRpm: 16000,
     note: 'Keep chipload up and RPM moderate to evacuate heat in the chip rather than melting the cut.',
   },
   {
     id: 'aluminium',
     minWallMm: 0.8,
     label: 'Aluminium',
-    surfaceSpeedMMin: 150,
-    chiploadPerDia: 0.012,
-    maxRpm: 18000,
     note: 'Shallow passes, and something wet or waxy on the cut. A dry aluminium cut packs the flutes and snaps the bit.',
   },
   {
     id: 'foam',
     minWallMm: 6.0,
     label: 'Modelling foam / wax',
-    surfaceSpeedMMin: 400,
-    chiploadPerDia: 0.05,
     note: 'Almost no cutting load. The limit is the machine, not the material — feed it as fast as the axes will go.',
   },
 ];
+
+/** How hard this stock is cut, from the catalogue every PhysBox app shares. */
+export function cuttingSpec(id: MaterialId): CuttingMaterial {
+  return cuttingMaterial(id);
+}
 
 export const DEFAULT_MATERIAL: MaterialId = 'hardwood';
 
@@ -213,22 +176,18 @@ export function recommendSpeeds(input: {
    */
   derate?: number;
 }): SpeedRecommendation {
-  const spec = materialSpec(input.material);
+  const spec = cuttingSpec(input.material);
   const range = input.spindle ?? DEFAULT_SPINDLE_RANGE;
   const dia = Math.max(0.1, input.diameterMm);
   const flutes = Math.max(1, Math.round(input.flutes));
   const derate = Math.min(1, Math.max(0.2, input.derate ?? 1));
 
-  const ideal = (spec.surfaceSpeedMMin * 1000) / (Math.PI * dia);
-  const chipload = spec.chiploadPerDia * dia * derate;
+  const ideal = idealCut(spec, dia, flutes);
+  const chipload = ideal.chiploadMm * derate;
   const feedPerRev = flutes * chipload;
 
-  let clampedBy: SpeedRecommendation['clampedBy'] = null;
-  let rpm = ideal;
-  if (spec.maxRpm !== undefined && rpm > spec.maxRpm) {
-    rpm = spec.maxRpm;
-    clampedBy = 'material';
-  }
+  let clampedBy: SpeedRecommendation['clampedBy'] = ideal.rpm === spec.maxRpm ? 'material' : null;
+  let rpm = ideal.rpm;
   // Turn the spindle down rather than starve the chip — see `maxFeedMmMin`.
   if (input.maxFeedMmMin !== undefined && input.maxFeedMmMin > 0 && feedPerRev > 0) {
     const rpmForMaxFeed = input.maxFeedMmMin / feedPerRev;

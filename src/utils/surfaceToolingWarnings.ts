@@ -1,6 +1,7 @@
 // What the tooling and feeds of a surface job say about it before a line is cut.
 
-import { materialSpec } from './feedsAndSpeeds';
+import { idealCut } from '@physbox-io/machining';
+import { cuttingSpec, materialSpec } from './feedsAndSpeeds';
 import {
   vBitConeHeight,
   vBitHalfAngleRad,
@@ -126,7 +127,7 @@ export function warnAboutTooling(
     // The band is the material's own, scaled to the bit. A generic one is worse
     // than useless here: 0.05 mm a tooth is a healthy chip in pine and roughly
     // four times what a cutter should be taking in aluminium.
-    const ideal = material.chiploadPerDia * dia;
+    const ideal = idealCut(cuttingSpec(opts.material), dia, flutes).chiploadMm;
     const floor = ideal * 0.25;
     const ceiling = ideal * 2;
     if (chip < floor) {
@@ -149,12 +150,12 @@ export function warnAboutTooling(
   // finishing pass the roughing one, which is then the only bit fitted.
   {
     const dia = opts.finishingEnabled ? opts.finishingToolDiaMm : opts.roughingToolDiaMm;
-    const ideal = (material.surfaceSpeedMMin * 1000) / (Math.PI * Math.max(0.1, dia));
-    const capped = material.maxRpm !== undefined ? Math.min(ideal, material.maxRpm) : ideal;
+    const cut = cuttingSpec(opts.material);
+    const capped = idealCut(cut, dia, 1).rpm;
     if (opts.spindleRpm > capped * 1.6) {
       warnings.push(
         `${opts.spindleRpm.toLocaleString()} RPM exceeds the recommended ~${Math.round(capped / 500) * 500} RPM for a ${dia} mm cutter in ${material.label.toLowerCase()}` +
-          (material.maxRpm !== undefined
+          (cut.maxRpm !== undefined
             ? ` (risk of melting).`
             : ` (risk of rubbing and excess heat).`)
       );
