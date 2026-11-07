@@ -256,6 +256,68 @@ describe('pulling the account into another browser', () => {
     expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
   });
 
+  describe('a later save of a preset this browser holds', () => {
+    const SAVED_HERE = Date.parse('2026-11-01T10:00:00Z');
+    const LATER = '2026-11-02T10:00:00Z';
+    const hold = () => presets.saveUserPreset('job', { nodes: [{ id: 'old' }], savedAt: SAVED_HERE } as never);
+    const cloudCopy = (id: string, savedAt: number) => ({ nodes: [{ id }], savedAt });
+
+    it('replaces the copy here when opened', async () => {
+      hold();
+      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      cloud.fetchCloudPresetData.mockResolvedValue(cloudCopy('new', Date.parse(LATER)));
+
+      expect(await presets.ensureUserPreset('job')).toBe(true);
+      expect(presets.readUserPreset('job')?.nodes?.[0].id).toBe('new');
+    });
+
+    it('fetches nothing until the preset is wanted', () => {
+      hold();
+      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
+    });
+
+    it('fetches nothing when the account has no later save', async () => {
+      hold();
+      presets.mergePulledPresets(['job'], { job: { updatedAt: '2026-10-01T10:00:00Z' } });
+      expect(await presets.catchUpPreset('job')).toBe(false);
+      expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
+    });
+
+    it('keeps the copy here when the list only reflects the save made here', async () => {
+      hold();
+      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      cloud.fetchCloudPresetData.mockResolvedValue(cloudCopy('same', SAVED_HERE));
+
+      expect(await presets.catchUpPreset('job')).toBe(false);
+      expect(presets.readUserPreset('job')?.nodes?.[0].id).toBe('old');
+
+      // The same listing on the next pull is not fetched again.
+      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      expect(await presets.catchUpPreset('job')).toBe(false);
+      expect(cloud.fetchCloudPresetData).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens the copy here when the account cannot hand the later one over', async () => {
+      hold();
+      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+
+      expect(await presets.ensureUserPreset('job')).toBe(true);
+      expect(presets.readUserPreset('job')?.nodes?.[0].id).toBe('old');
+    });
+
+    it('holds the later copy for the session when this browser is full', async () => {
+      hold();
+      store.limit = 2_000;
+      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      cloud.fetchCloudPresetData.mockResolvedValue({ ...bigScene(1), savedAt: Date.parse(LATER) });
+
+      expect(await presets.ensureUserPreset('job')).toBe(true);
+      expect(presets.readUserPreset('job')?.nodes?.[0].id).toBe('x');
+      expect(presets.cloudOnlyPresetNames()).toEqual(['job']);
+    });
+  });
+
   it('hands out a copy, so edits to a loaded scene do not reach the stored preset', () => {
     presets.saveUserPreset('mine', { nodes: [{ id: 'local' }] } as never);
     presets.readUserPreset('mine')!.nodes![0].id = 'edited';

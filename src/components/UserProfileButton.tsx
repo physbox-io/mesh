@@ -33,6 +33,9 @@ export const SIGN_IN_REQUESTED_EVENT = 'physbox:sign-in-requested';
  */
 export const SIGNED_IN_EVENT = 'physbox:signed-in';
 
+/** Tab focus fires far more often than the account's presets can change. */
+const CLOUD_RESYNC_INTERVAL_MS = 30_000;
+
 export const UserProfileButton: React.FC = () => {
   const [user, setUser] = useState<PhysBoxUser | null>(getStoredUser());
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -127,6 +130,27 @@ export const UserProfileButton: React.FC = () => {
     // to an external system, not derived state computed during render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void pullAccountState();
+  }, [pullAccountState]);
+
+  /**
+   * Coming back to the tab pulls again, so a scene saved on another machine is
+   * here without a reload. `visibilitychange` covers a backgrounded tab, `focus`
+   * a window that was merely behind another one.
+   */
+  useEffect(() => {
+    let lastPull = Date.now();
+    const resync = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - lastPull < CLOUD_RESYNC_INTERVAL_MS) return;
+      lastPull = Date.now();
+      void pullAccountState();
+    };
+    document.addEventListener('visibilitychange', resync);
+    window.addEventListener('focus', resync);
+    return () => {
+      document.removeEventListener('visibilitychange', resync);
+      window.removeEventListener('focus', resync);
+    };
   }, [pullAccountState]);
 
   /**

@@ -10,7 +10,7 @@
  *
  * Ported from `etch/src/utils/cloudSync.ts`, including the two things that
  * module learned the hard way: presets are addressed by the id the SERVER gave
- * them, and a pull never overwrites a local preset of the same name.
+ * them, and a pull never overwrites a later local save of the same name.
  *
  * It deliberately does not import userPresets: that module saves and deletes
  * through here, so a dependency the other way would be a cycle. Pulled presets
@@ -160,12 +160,10 @@ export interface CloudPullResult {
  * Throws if the preset list cannot be fetched, so the caller can say the
  * account was not reached instead of reporting it up to date.
  *
- * Presets come back for the caller to merge additively: a name already saved in
- * this browser is left alone. Taking the cloud copy instead would be the wrong
- * call for the case that actually happens — edits made while offline are newer
- * than what the account holds, and overwriting them would lose work to restore
- * a stale copy. Ids for the skipped names are still recorded, so deleting them
- * later removes the cloud copy too.
+ * Presets come back for the caller to merge. For a name saved on both sides the
+ * later save wins, which carries a re-save from another machine down and leaves
+ * alone edits made offline. The server does not keep names unique and lists the
+ * latest first, so the first row of a name is the one that counts.
  */
 export async function pullCloudState(): Promise<CloudPullResult> {
   const result: CloudPullResult = { parameters: 0, presets: [], cards: {} };
@@ -193,8 +191,10 @@ export async function pullCloudState(): Promise<CloudPullResult> {
   // The machine's envelope is shared with Etch and Volt, like the rack.
   if (cncBedStore.adoptRemote(globalParams[CNC_BED_PARAMETER] ?? appParams[CNC_BED_PARAMETER])) result.parameters += 1;
 
+  const seen = new Set<string>();
   for (const preset of presets) {
-    if (!preset?.name || !preset.id) continue;
+    if (!preset?.name || !preset.id || seen.has(preset.name)) continue;
+    seen.add(preset.name);
     rememberPresetId(preset.name, preset.id);
     result.presets.push(preset.name);
     result.cards[preset.name] = { thumbnail: preset.thumbnail, updatedAt: preset.updatedAt };

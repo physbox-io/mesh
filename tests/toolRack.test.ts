@@ -93,6 +93,18 @@ describe('the shared tool rack, in Mesh', () => {
     expect(toolRackStore.get().tools[0].uid).toBe('from-etch');
   });
 
+  it('reads the latest row of a name the server holds twice', async () => {
+    api.fetchCloudParameters.mockResolvedValue({});
+    api.fetchCloudPresetList.mockResolvedValueOnce([
+      { id: 'pst_new', name: 'Job', updatedAt: '2026-11-02T10:00:00Z' },
+      { id: 'pst_old', name: 'Job', updatedAt: '2026-11-01T10:00:00Z' },
+    ]);
+    const result = await pullCloudState();
+    expect(result.presets).toEqual(['Job']);
+    expect(result.cards.Job.updatedAt).toBe('2026-11-02T10:00:00Z');
+    expect(JSON.parse(localStorage.getItem('physics_cloud_preset_ids')!).Job).toBe('pst_new');
+  });
+
   it('offers only bits in the drawer, of a shape the field can use', () => {
     const rack = defaultToolRack();
     rack.tools[0].available = false; // T1, the 3.175 mm flat, retired

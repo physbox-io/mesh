@@ -103,12 +103,13 @@ export function rememberCloudOnlyPreset(name: string, preset: UserPreset): void 
  * Makes a preset's data readable before it is loaded.
  *
  * Presets this browser holds, or whose data was already fetched, are ready at
- * once. One listed from the account by name only is fetched, and kept here too
+ * once, unless the account has a later save of them to fetch first. One listed from the account by name only is fetched, and kept here too
  * when there is room, so opening it again does not go back to the network.
  * False when the preset is unknown or the account could not be reached.
  */
 export async function ensureUserPreset(name: string): Promise<boolean> {
   const key = name.replace(/^user:/, '');
+  await catchUpPreset(key);
   if (Object.hasOwn(readCachedPresets(), key)) return true;
   if (!Object.hasOwn(cloudOnly, key)) return false;
   if (cloudOnly[key]) return true;
@@ -129,6 +130,55 @@ export async function ensureUserPreset(name: string): Promise<boolean> {
 export function cloudOnlyPresetNames(): string[] {
   const local = readCachedPresets();
   return Object.keys(cloudOnly).filter(name => !Object.hasOwn(local, name));
+}
+
+/**
+ * Presets held here that the account's list says were saved later, by name,
+ * with the listed time. The list carries no data, so this is only a suspicion
+ * until catchUpPreset fetches the copy: the list's time is the server's, and is
+ * also later than the `savedAt` of a save made in this very browser.
+ */
+const behindAccount = new Map<string, number>();
+
+/** The listed time each preset was last fetched and compared at, so one save is fetched once. */
+const comparedAt = new Map<string, number>();
+
+function markIfBehindAccount(name: string, updatedAt: string | undefined): boolean {
+  const held = readCachedPresets()[name] ?? cloudOnly[name];
+  const listedAt = updatedAt ? Date.parse(updatedAt) : NaN;
+  if (!held || !Number.isFinite(listedAt) || listedAt <= (held.savedAt ?? 0)) return false;
+  if (comparedAt.get(name) === listedAt || behindAccount.get(name) === listedAt) return false;
+  behindAccount.set(name, listedAt);
+  return true;
+}
+
+/**
+ * Brings a held preset up to the account's copy, if that is the later save.
+ *
+ * True when the copy here was replaced. A preset the account cannot hand over
+ * stays as it is and is tried again next time. When this browser is full the
+ * older copy makes way, since the account holds the newer one.
+ */
+export async function catchUpPreset(name: string): Promise<boolean> {
+  const key = name.replace(/^user:/, '');
+  const listedAt = behindAccount.get(key);
+  if (listedAt === undefined) return false;
+  const data = await fetchCloudPresetData(key);
+  if (!data) return false;
+  behindAccount.delete(key);
+  comparedAt.set(key, listedAt);
+  // Deleted or saved again here while this was in flight: the newer state stands.
+  const held = readCachedPresets()[key] ?? cloudOnly[key];
+  if (!held || (data.savedAt ?? 0) <= (held.savedAt ?? 0)) return false;
+  if (!writeLocalPreset(key, data)) {
+    takeLastWriteError();
+    const rest = readUserPresets();
+    delete rest[key];
+    writeAll(rest);
+    cloudOnly[key] = data;
+  }
+  announceChange();
+  return true;
 }
 
 let cachedRaw: string | null = null;
@@ -300,6 +350,7 @@ export function deleteUserPreset(name: string): boolean {
   const key = name.replace(/^user:/, '');
   const wasCloudOnly = Object.hasOwn(cloudOnly, key);
   delete cloudOnly[key];
+  behindAccount.delete(key);
   const presets = readUserPresets();
   if (Object.hasOwn(presets, key)) {
     delete presets[key];
@@ -312,10 +363,10 @@ export function deleteUserPreset(name: string): boolean {
 }
 
 /**
- * Lists the account's presets that this browser does not hold.
+ * Lists the account's presets that this browser does not hold, and notes the
+ * ones it holds an older save of, for catchUpPreset.
  *
- * Additive on purpose — see the note in cloudSync.pullCloudState. Names only:
- * the pull used to bring every preset down whole and copy it in here, which
+ * Names only: the pull used to bring every preset down whole and copy it in here, which
  * meant downloading the whole account on every page load until the list went
  * over the server's response cap and the pull failed outright. Each one is
  * fetched when it is opened (ensureUserPreset). Returns how many were listed.
@@ -327,11 +378,15 @@ export function mergePulledPresets(
   for (const [name, card] of Object.entries(cards)) rememberCloudPresetCard(name, card);
   const local = readCachedPresets();
   let listed = 0;
+  let behind = false;
   for (const name of names) {
-    if (Object.hasOwn(local, name) || Object.hasOwn(cloudOnly, name)) continue;
+    if (Object.hasOwn(local, name) || Object.hasOwn(cloudOnly, name)) {
+      if (markIfBehindAccount(name, cards[name]?.updatedAt)) behind = true;
+      continue;
+    }
     cloudOnly[name] = null;
     listed += 1;
   }
-  if (listed > 0) announceChange();
+  if (listed > 0 || behind) announceChange();
   return listed;
 }
