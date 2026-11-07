@@ -60,7 +60,7 @@ export function PresetPicker({ presets }: { presets: PresetActions }) {
               saveUserPresetByName(presetName);
             }}
             className="flex items-center justify-center p-1 rounded-md text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors focus:outline-none cursor-pointer"
-            title={`Update preset "${activePreset.replace('user:', '')}"`}
+            title={`Update scene "${activePreset.replace('user:', '')}"`}
           >
             <Save className="w-3.5 h-3.5" />
           </button>
@@ -68,8 +68,8 @@ export function PresetPicker({ presets }: { presets: PresetActions }) {
             onClick={() => {
               const presetName = activePreset.replace('user:', '');
               openDialog({
-                title: `Delete preset "${presetName}"?`,
-                confirmLabel: 'Delete preset',
+                title: `Delete scene "${presetName}"?`,
+                confirmLabel: 'Delete scene',
                 tone: 'red',
                 body: (
                   <p>
@@ -87,7 +87,7 @@ export function PresetPicker({ presets }: { presets: PresetActions }) {
                     useStore.getState().setActivePreset(undefined);
                   } else {
                     showNotice(
-                      'Could not delete preset',
+                      'Could not delete scene',
                       `Could not delete "${presetName}": this browser would not write the preset list.`,
                       'red',
                     );
@@ -96,7 +96,7 @@ export function PresetPicker({ presets }: { presets: PresetActions }) {
               });
             }}
             className="flex items-center justify-center p-1 rounded-md text-red-500 hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors focus:outline-none cursor-pointer"
-            title={`Delete preset "${activePreset.replace('user:', '')}"`}
+            title={`Delete scene "${activePreset.replace('user:', '')}"`}
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>

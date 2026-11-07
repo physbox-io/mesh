@@ -229,7 +229,7 @@ export function HierarchyTree() {
         {/* A blank scene said nothing at all about where to start. */}
         {nodes.length === 0 && (
           <p className="px-3 py-2 text-[11px] leading-relaxed text-slate-400 dark:text-slate-500">
-            Nothing here yet. Drag a part in from Components below, pick a preset at the top, or ask the Copilot to build one.
+            Nothing here yet. Drag a part in from Components below, open a scene at the top, or ask the Copilot to build one.
           </p>
         )}
       </div>

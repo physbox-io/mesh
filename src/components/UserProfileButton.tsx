@@ -39,7 +39,7 @@ const CLOUD_RESYNC_INTERVAL_MS = 30_000;
 function syncSummaryText(parameters: number, presets: number): string {
   if (parameters === 0 && presets === 0) return 'Account is up to date';
   const settings = `Restored ${parameters} setting${parameters === 1 ? '' : 's'}`;
-  return presets > 0 ? `${settings} and synced ${presets} preset${presets === 1 ? '' : 's'}` : settings;
+  return presets > 0 ? `${settings} and synced ${presets} scene${presets === 1 ? '' : 's'}` : settings;
 }
 
 export const UserProfileButton: React.FC = () => {
@@ -396,7 +396,7 @@ export const UserProfileButton: React.FC = () => {
                   {syncFailed
                     ? <AlertCircle className="w-3 h-3 text-amber-500 dark:text-amber-400" />
                     : <CheckCircle className="w-3 h-3 text-emerald-500 dark:text-emerald-400" />}
-                  <span>{syncSummary ?? 'Syncing parameters and presets…'}</span>
+                  <span>{syncSummary ?? 'Syncing parameters and scenes…'}</span>
                 </div>
               </div>
 
@@ -416,7 +416,7 @@ export const UserProfileButton: React.FC = () => {
             <div className="space-y-3 p-1">
               <div className="text-center">
                 <p className="font-bold text-slate-800 dark:text-slate-100 text-xs">PhysBox Account Sign In</p>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">Sign in to synchronize parameters, saved presets, and remote telemetry.</p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">Sign in to synchronize parameters, saved scenes, and remote telemetry.</p>
               </div>
 
               <button

@@ -182,10 +182,10 @@ export async function savePreset(
     if (quota && freeing.names.length) remedies.push({ kind: 'delete', ...freeing });
     remedies.push({ kind: 'download' }, { kind: 'signIn' });
     message = quota
-      ? `“${key}” is ${formatBytes(bytes)} and this browser's preset storage is full `
+      ? `“${key}” is ${formatBytes(bytes)} and this browser's scene storage is full `
         + `(${formatBytes(store)} in use across ${listUserPresetNames().length} presets). `
-        + `Nothing has been saved. Delete a preset to make room, or download this one as a file. `
-        + `Signing in from the account menu keeps presets in your account rather than this browser.`
+        + `Nothing has been saved. Delete a scene to make room, or download this one as a file. `
+        + `Signing in from the account menu keeps scenes in your account rather than this browser.`
       : `“${key}” could not be saved: this browser refused to store it. Download it as a file so the work is not lost.`;
   }
 

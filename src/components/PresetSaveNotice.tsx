@@ -224,7 +224,7 @@ export const PresetSaveNotice: React.FC = () => {
             <button
               onClick={signInAndRetry}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-cyan-300 dark:border-cyan-500/40 text-cyan-700 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-500/10 font-bold cursor-pointer text-xs"
-              title="Sign in, then save this preset to your account"
+              title="Sign in, then save this scene to your account"
             >
               <LogIn className="w-3.5 h-3.5" /> Sign in and save
             </button>

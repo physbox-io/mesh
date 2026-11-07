@@ -79,7 +79,7 @@ export function usePresetActions(doc: SceneDocument) {
     await openingScene(label, async () => {
       // A preset listed from the account has its data fetched on first open.
       if (!(await ensureUserPreset(name))) {
-        showNotice('Could not open preset', `"${label}" could not be fetched from your account. Check the connection and try again.`, 'red');
+        showNotice('Could not open scene', `"${label}" could not be fetched from your account. Check the connection and try again.`, 'red');
         return false;
       }
       loadPreset(name);
@@ -155,7 +155,7 @@ export function usePresetActions(doc: SceneDocument) {
       void cloudAutosave.saveExplicit(trimmed, packMeshArrays(preset), `Saved as “${trimmed}”`);
     } catch (e) {
       console.error('Failed to save user preset', e);
-      showNotice('Could not save preset', `Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`, 'red');
+      showNotice('Could not save scene', `Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`, 'red');
     }
   }, [sceneGraph, mujoco, noteCards, copilotMessages, markClean, showNotice]);
 

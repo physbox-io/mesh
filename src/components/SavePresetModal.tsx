@@ -23,7 +23,7 @@ export function SavePresetModal({ isOpen, name, setName, close, confirm }: {
             <Save className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">Save Scene Preset</h2>
+            <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">Save Scene</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">Saved in this browser, and to your account when signed in</p>
           </div>
         </div>

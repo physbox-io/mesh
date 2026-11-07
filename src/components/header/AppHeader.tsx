@@ -115,7 +115,7 @@ export function AppHeader({
             <button 
               onClick={handleSavePresetClick}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Save scene preset (Ctrl+S)"
+              title="Save scene (Ctrl+S)"
             >
               <Save className="w-3.5 h-3.5" />
             </button>

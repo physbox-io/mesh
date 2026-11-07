@@ -572,7 +572,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
 
                 <h4 className="font-bold text-slate-700 text-sm mt-1">A worked example: the shelf bracket</h4>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Load the <strong>Wall Bracket (Lattice)</strong> preset to see the finished part, or build one:
+                  Load the <strong>Wall Bracket (Lattice)</strong> example to see the finished part, or build one:
                 </p>
                 <ol className="text-xs text-slate-600 leading-relaxed list-decimal ml-4 flex flex-col gap-1.5">
                   <li>Drop in a <strong>Lattice</strong> body. It starts as an empty grid at the origin; press <strong>Add cube</strong> in the panel for a 40&nbsp;mm box of six quads.</li>
