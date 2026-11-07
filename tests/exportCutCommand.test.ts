@@ -32,7 +32,12 @@ describe('EXPORT_CUT', () => {
     const res = await run({ kind: 'panels', masterId: 'lid', machine: 'laser' });
     expect(res.error ?? null).toBeNull();
     expect((res.cut as { ids: string[] }).ids).toEqual(['lid']);
-    expect(res.etch).toEqual({ name: 'lid panels', thicknessMm: 3, machine: 'laser' });
+    expect(res.etch).toEqual({
+      name: 'lid panels',
+      thicknessMm: 3,
+      machine: 'laser',
+      material: useStore.getState().material,
+    });
     expect(svgOf(res)).toMatch(/^<\?xml|<svg/);
   });
 
