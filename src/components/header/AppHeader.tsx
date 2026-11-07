@@ -1,4 +1,4 @@
-import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu } from 'lucide-react';
+import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Hammer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -110,6 +110,20 @@ export function AppHeader({
             </button>
           </div>
 
+          {/* Make: the same control, in the same place, in every PhysBox app. Exporting
+              is done from the status bar, beside the machine it is exported for, so this
+              sends people there. */}
+          <div className="flex items-center max-lg:shrink-0 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent(SHOW_EXPORTS_EVENT))}
+              className="flex items-center justify-center gap-1.5 px-3 py-1 rounded-md font-semibold text-xs hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-100 transition-all cursor-pointer"
+              title="Make this on a printer, laser or router. The options are on the bottom bar, beside the machine and material they depend on."
+            >
+              <Hammer className="w-3 h-3 text-amber-500 dark:text-amber-400" />
+              <span className="hidden md:inline">Make</span>
+            </button>
+          </div>
+
           {/* Files Segmented Group */}
           <div className="flex items-center max-lg:shrink-0 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
             <button 
@@ -157,17 +171,6 @@ export function AppHeader({
               title="Copy a share link — the scene travels inside it"
             >
               <Share2 className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Exporting is done from the status bar, beside the machine it
-                is exported for. This stays because it is where people look
-                for it, and it sends them there. */}
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent(SHOW_EXPORTS_EVENT))}
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Export for a printer, laser or router. The buttons are on the bottom bar, beside the machine and material they depend on."
-            >
-              <Printer className="w-3.5 h-3.5" />
             </button>
 
             <button
