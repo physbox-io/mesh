@@ -221,3 +221,56 @@ describe('exportThreeMf', () => {
     expect(model).toContain('name="lid &amp; &lt;body&gt;"');
   });
 });
+
+describe('what a slicer treats as one object', () => {
+  /** A box's corners as a triangle soup, `tris` triangles long: enough for the bounds. */
+  const box = (name: string, min: number[], max: number[], baseColor: number[], tris = 2): ThreeMfMesh => {
+    const positions: number[] = [];
+    for (let i = 0; i < tris; i++) positions.push(...min, ...max, max[0], min[1], max[2]);
+    return { name, positions, indices: null, colors: null, baseColor };
+  };
+  const WOOD = [0.7, 0.45, 0.2];
+  const CREAM = [0.9, 0.85, 0.65];
+  const objects = (config: string) => [...config.matchAll(/<object id="\d+">[\s\S]*?<\/object>/g)].map((m) => ({
+    parts: [...m[0].matchAll(/<part id="\d+"[^>]*>\s*<metadata key="name" value="([^"]*)"\/>\s*<metadata key="extruder" value="(\d+)"/g)]
+      .map((p) => [p[1], Number(p[2])]),
+  }));
+
+  it('keeps a liner where it sits in its shell, and the two halves of a mold apart', () => {
+    // Two objects dropped to the bed apart put the liner 7 mm down, through the shell's floor.
+    const { data } = exportThreeMf([
+      box('cavity shell', [-62, -30, 0], [-3, 30, 26], WOOD),
+      box('cavity liner', [-53, -21, 7.3], [-12, 21, 26], CREAM, 3),
+      box('lid shell', [3, -30, 0], [62, 30, 11.5], WOOD),
+      box('lid liner', [12, -21, 3.8], [53, 21, 7.5], CREAM, 3),
+    ]);
+    const files = unzip(data);
+
+    expect(files.get('3D/3dmodel.model')!.match(/<item /g)).toHaveLength(2);
+    expect(objects(files.get('Metadata/model_settings.config')!).map((o) => o.parts)).toEqual([
+      [['cavity shell', 1], ['cavity liner', 2]],
+      [['lid shell', 1], ['lid liner', 2]],
+    ]);
+  });
+
+  it('holds together what overlaps only through a third part', () => {
+    const { data } = exportThreeMf([
+      box('a', [0, 0, 0], [10, 10, 5], WOOD),
+      box('b', [5, 0, 0], [15, 10, 5], WOOD),
+      box('c', [12, 0, 0], [20, 10, 5], WOOD),
+    ]);
+    expect(unzip(data).get('3D/3dmodel.model')!.match(/<item /g)).toHaveLength(1);
+  });
+
+  it('leaves parts side by side, even touching, as objects to arrange', () => {
+    const { data } = exportThreeMf([
+      box('a', [0, 0, 0], [10, 10, 5], WOOD),
+      box('b', [10, 0, 0], [20, 10, 5], CREAM, 5),
+      box('c', [30, 0, 0], [40, 10, 5], WOOD),
+    ]);
+    const files = unzip(data);
+    expect(files.get('3D/3dmodel.model')!.match(/<item /g)).toHaveLength(3);
+    // Nothing nested, so the commonest colour is filament 1 as ever.
+    expect(objects(files.get('Metadata/model_settings.config')!)[1].parts).toEqual([['b', 1]]);
+  });
+});

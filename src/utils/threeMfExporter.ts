@@ -59,7 +59,8 @@ export interface ThreeMfMesh {
   /**
    * Meshes with the same key are one printed object, each mesh a volume of
    * it printed in the filament its baseColor falls in: a part whose inside is
-   * a different material from its outside. Absent: an object of its own.
+   * a different material from its outside. Absent: an object of its own,
+   * unless it overlaps another on the bed (see printedObjects).
    */
   object?: string;
 }
@@ -158,7 +159,7 @@ interface TriangleColor { r: number; g: number; b: number; }
  * actually laid down; the triangle is then given whichever slot is nearest its
  * average.
  */
-function buildPalette(cornerColors: number[][], maxExtruders: number, required: number[][] = []) {
+function buildPalette(cornerColors: number[][], maxExtruders: number, required: number[][] = [], outerFirst: number[][] = []) {
   const buckets = new Map<string, { color: TriangleColor; count: number }>();
   for (const [r, g, b] of cornerColors) {
     const c = { r, g, b };
@@ -173,13 +174,17 @@ function buildPalette(cornerColors: number[][], maxExtruders: number, required: 
   const ranked = [...buckets.values()].sort((a, b) => b.count - a.count);
   // A volume's own colour is a material chosen on purpose, so it keeps a slot
   // ahead of a paint colour however few corners it has.
-  const keyOf = (c: number[]) => `${Math.round(c[0] * 15)},${Math.round(c[1] * 15)},${Math.round(c[2] * 15)}`;
-  const must = new Set(required.map(keyOf));
-  const kept = ranked.filter((b) => must.has(keyOf([b.color.r, b.color.g, b.color.b])));
-  const rest = ranked.filter((b) => !must.has(keyOf([b.color.r, b.color.g, b.color.b])));
+  const must = new Set(required.map(colourKey));
+  const kept = ranked.filter((b) => must.has(colourKey([b.color.r, b.color.g, b.color.b])));
+  const rest = ranked.filter((b) => !must.has(colourKey([b.color.r, b.color.g, b.color.b])));
   const room = Math.max(1, maxExtruders);
   const chosen = [...kept.slice(0, room), ...rest.slice(0, Math.max(0, room - kept.length))];
-  const slots = chosen.sort((a, b) => b.count - a.count).map((b) => b.color);
+  // Volumes nested in one object are materials, not a body and its paint: the
+  // outer one is filament 1 however fine the inner one's mesh is, which is the
+  // way round a shell and its soluble liner are loaded.
+  const outerRank = new Map(outerFirst.map((c, i) => [colourKey(c), i]));
+  const rank = (b: { color: TriangleColor }) => outerRank.get(colourKey([b.color.r, b.color.g, b.color.b])) ?? outerRank.size;
+  const slots = chosen.sort((a, b) => rank(a) - rank(b) || b.count - a.count).map((b) => b.color);
 
   const assign = (c: TriangleColor) => {
     let best = 0;
@@ -193,6 +198,89 @@ function buildPalette(cornerColors: number[][], maxExtruders: number, required: 
   };
 
   return { slots, assign };
+}
+
+/** 4 bits a channel: two colours this close are one filament. */
+const colourKey = (c: number[]) => `${Math.round(c[0] * 15)},${Math.round(c[1] * 15)},${Math.round(c[2] * 15)}`;
+
+function meshBounds(positions: ArrayLike<number>): { min: number[]; max: number[] } {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const v = positions[i + k];
+      if (v < min[k]) min[k] = v;
+      if (v > max[k]) max[k] = v;
+    }
+  }
+  return { min, max };
+}
+
+/** Footprints must overlap by this much, mm; parts that only touch stay apart. */
+const FOOTPRINT_OVERLAP_MM = 0.01;
+
+/**
+ * Which printed object each mesh belongs to.
+ *
+ * A slicer drops every object onto the bed on its own, so the objects of a file
+ * keep their footprints and lose their heights. A liner that sits 7 mm up inside
+ * its shell lands on the bed, inside the shell's floor, and the two print
+ * through each other (Bambu calls that a G-code path conflict). Meshes whose
+ * footprints overlap only keep their places as volumes of one object. Footprints
+ * clear of each other stay separate objects, to be arranged however the user likes.
+ */
+function printedObjects(meshes: ThreeMfMesh[]): string[] {
+  const parent = meshes.map((_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  // The lower index stays the root, so the object keeps its first mesh's place and name.
+  const join = (a: number, b: number) => {
+    const [ra, rb] = [find(a), find(b)];
+    parent[Math.max(ra, rb)] = Math.min(ra, rb);
+  };
+  const named = new Map<string, number>();
+  meshes.forEach((m, i) => {
+    if (m.object === undefined) return;
+    const first = named.get(m.object);
+    if (first === undefined) named.set(m.object, i);
+    else join(first, i);
+  });
+  const boxes = meshes.map((m) => meshBounds(m.positions));
+  const overlap = (a: number, b: number, k: number) =>
+    Math.min(boxes[a].max[k], boxes[b].max[k]) - Math.max(boxes[a].min[k], boxes[b].min[k]) > FOOTPRINT_OVERLAP_MM;
+  for (let a = 0; a < meshes.length; a++) {
+    for (let b = a + 1; b < meshes.length; b++) {
+      if (overlap(a, b, 0) && overlap(a, b, 1)) join(a, b);
+    }
+  }
+  return meshes.map((_, i) => String(find(i)));
+}
+
+/**
+ * The colours of volumes that share an object, the outermost first, by the size
+ * of the box each colour's largest mesh fills.
+ */
+function nestedMaterials(meshes: ThreeMfMesh[], objectOf: string[]): number[][] {
+  const colours = new Map<string, Set<string>>();
+  meshes.forEach((m, i) => {
+    const set = colours.get(objectOf[i]) ?? new Set<string>();
+    set.add(colourKey(m.baseColor));
+    colours.set(objectOf[i], set);
+  });
+  const largest = new Map<string, { colour: number[]; size: number }>();
+  meshes.forEach((m, i) => {
+    if (colours.get(objectOf[i])!.size < 2) return;
+    const { min, max } = meshBounds(m.positions);
+    const size = (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+    const key = colourKey(m.baseColor);
+    if (size > (largest.get(key)?.size ?? -1)) largest.set(key, { colour: m.baseColor, size });
+  });
+  return [...largest.values()].sort((a, b) => b.size - a.size).map((c) => c.colour);
 }
 
 /** Zips a 3D model part with the package boilerplate every 3MF carries, plus any extra files. */
@@ -222,10 +310,11 @@ function packModel(model: string, extra: ZipEntry[] = []): Uint8Array {
 /**
  * Packs meshes into a .3mf.
  *
- * Every mesh becomes one object and every object one build item, which is how a
- * slicer sees several separate parts laid out on a plate rather than one welded
- * lump. Positions are taken as given: in millimetres, Z-up, arranged however
- * the caller wants them.
+ * Every object is one build item, which is how a slicer sees several separate
+ * parts laid out on a plate rather than one welded lump. A mesh is an object of
+ * its own unless `object` or an overlapping footprint says otherwise
+ * (printedObjects). Positions are taken as given: in millimetres, Z-up, arranged
+ * however the caller wants them.
  */
 export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {}): ThreeMfResult {
   const maxExtruders = Math.min(32, Math.max(1, Math.round(options.maxExtruders ?? 5)));
@@ -280,10 +369,12 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     for (const c of cornerColors) allCornerColors.push(c);
   }
 
+  const objectOf = printedObjects(meshes);
   const { slots, assign } = buildPalette(
     allCornerColors,
     maxExtruders,
     meshes.map((m) => m.baseColor),
+    nestedMaterials(meshes, objectOf),
   );
   const slotCounts = new Array(slots.length).fill(0);
   const filamentOf = (rgb: number[]) => assign({ r: rgb[0] ?? 0.8, g: rgb[1] ?? 0.8, b: rgb[2] ?? 0.8 }) + 1;
@@ -351,7 +442,7 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
       `<mesh><vertices>${vertexLines.join('')}</vertices>` +
       `<triangles>${triangleLines.join('')}</triangles></mesh></object>`
     );
-    const key = mesh.object ?? `\u0000${meshIndex}`;
+    const key = objectOf[meshIndex];
     const entry = printed.get(key) ?? { name: mesh.object ?? mesh.name, volumes: [] };
     entry.volumes.push({ id: objectId, name: mesh.name, extruder, triangles: face });
     printed.set(key, entry);
