@@ -13,8 +13,10 @@ export default defineConfig({
     // seconds of physics, which is slower than vitest's 5s default allows.
     testTimeout: 60000,
     hookTimeout: 60000,
-    // One process for the whole run: MuJoCo's wasm heap only ever grows (it has a
-    // hard 2GB ceiling), and each worker would pay the module load again.
-    fileParallelism: false,
+    // Four files at a time: 10 minutes for the suite against 34 one at a time,
+    // measured clean. Each file gets its own process, so MuJoCo's wasm heap, which
+    // only ever grows to a hard 2 GB, does not build up across a run.
+    fileParallelism: true,
+    maxWorkers: 4,
   },
 });
