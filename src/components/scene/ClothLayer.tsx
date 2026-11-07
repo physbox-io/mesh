@@ -7,7 +7,7 @@
  * seen, unlike a solid, whose back faces must stay culled (CLAUDE.md, face
  * winding).
  */
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
@@ -100,6 +100,9 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
       const mat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(c[0], c[1], c[2]), metalness: kind === 'button' ? 0 : 0.9, roughness: kind === 'button' ? 0.5 : 0.3 });
       const mesh = new THREE.InstancedMesh(geom, mat, items.length);
       mesh.frustumCulled = false; mesh.castShadow = true;
+      // Hidden until placed: a new InstancedMesh is all identity matrices, which
+      // draws every trim at full unit size at the origin, a metre-wide box.
+      mesh.visible = false;
       out.push({ items, mesh });
     }
     return out;
@@ -179,13 +182,16 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
         mesh.setMatrixAt(i, dummy.matrix);
       });
       mesh.instanceMatrix.needsUpdate = true;
+      mesh.visible = true;
     }
   };
-  // And a frame asked for once filled: on demand, the frame after a rebuild
-  // drew the new geometry empty, before this effect, and nothing asked for
-  // another (the cloth vanished until the next pointer event).
+  // A layout effect, so the new geometry is filled in the commit that made it.
+  // Any rebuild hands this a new flex, and from a passive effect a frame could
+  // land first: the cloth gone and its trims a box round the legs.
+  // And a frame asked for once filled: on demand, nothing else asks for one
+  // (the cloth stayed vanished until the next pointer event).
   const invalidate = useThree((s) => s.invalidate);
-  useEffect(() => { sync(); if (filled.current) invalidate(); }); // eslint-disable-line react-hooks/exhaustive-deps -- every render, on purpose
+  useLayoutEffect(() => { sync(); if (filled.current) invalidate(); }); // eslint-disable-line react-hooks/exhaustive-deps -- every render, on purpose
   const lastTime = useRef(-1);
   useFrame(() => {
     if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;

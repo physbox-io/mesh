@@ -25,7 +25,7 @@ vi.mock('../src/utils/convexDecomposition', async (importOriginal) => {
       const hash = real.collisionHashOf(node);
       // The first body is quick, the second slow: the first lands while the second is still running.
       await new Promise(r => setTimeout(r, node.id === 'bowl1' ? 20 : 200));
-      const pieces = n === 1 ? 55 : 15;
+      const pieces = node.id === 'convex' ? 0 : n === 1 ? 55 : 15;
       const geoms: SceneGeom[] = Array.from({ length: pieces }, (_, i) => ({
         name: `${node.name}_csg_col${i}`, type: 'mesh', size: [1], csgDerived: 'collider',
         vertices: [0, 0, 0, 0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01], faces: [0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3],
@@ -49,7 +49,7 @@ const bowl = (id: string): SceneNode => {
   } as SceneNode;
 };
 
-const pieces = (id: string) => (useStore.getState().sceneGraph.nodes.find(n => n.id === id)!.geoms || [])
+const colliderCount = (id: string) => (useStore.getState().sceneGraph.nodes.find(n => n.id === id)!.geoms || [])
   .filter(g => g.csgDerived === 'collider').length;
 
 describe('two compile passes over the same stale bodies', () => {
@@ -64,7 +64,7 @@ describe('two compile passes over the same stale bodies', () => {
     const first = compileCsgNodes(true);
     // bowl1 lands at 20 ms and changes the scene; the effect schedules the next pass.
     await new Promise(r => setTimeout(r, 60));
-    expect(pieces('bowl1')).toBe(55);
+    expect(colliderCount('bowl1')).toBe(55);
     expect(collidersBeingDecomposed()).toEqual(['bowl2']);
     // What physics_run_headless and a scene build wait on.
     expect(pendingColliderBodies()).toEqual(['bowl2']);
@@ -72,7 +72,7 @@ describe('two compile passes over the same stale bodies', () => {
     await Promise.all([first, second]);
 
     expect(calls.get('bowl2')).toBe(1);
-    expect(pieces('bowl2')).toBe(55);
+    expect(colliderCount('bowl2')).toBe(55);
     expect(collidersBeingDecomposed()).toEqual([]);
     expect(pendingColliderBodies()).toEqual([]);
   });
@@ -83,9 +83,32 @@ describe('two compile passes over the same stale bodies', () => {
     const t0 = Date.now();
     await compileCsgNodes(true, { colliderWaitMs: 50 });
     expect(Date.now() - t0).toBeLessThan(150);
-    expect(pieces('bowl2')).toBe(0);
+    expect(colliderCount('bowl2')).toBe(0);
     await new Promise(r => setTimeout(r, 250));
-    expect(pieces('bowl2')).toBe(55);
+    expect(colliderCount('bowl2')).toBe(55);
     expect(recompiled).toHaveBeenCalled();
+  });
+
+  it('rebuilds when pieces landed, and not when the verdict was that none are needed', async () => {
+    const recompiled = vi.fn(async () => {});
+    useStore.setState({ recompile: recompiled });
+    await compileCsgNodes();
+    expect(recompiled).toHaveBeenCalledTimes(1);
+
+    recompiled.mockClear();
+    useStore.setState({ sceneGraph: { nodes: [bowl('convex')] } });
+    await compileCsgNodes();
+    expect(useStore.getState().sceneGraph.nodes[0].collisionHash).toBeTruthy();
+    expect(recompiled).not.toHaveBeenCalled();
+  });
+
+  it('rebuilds when a body loses the pieces it had', async () => {
+    const recompiled = vi.fn(async () => {});
+    const node = bowl('convex');
+    node.geoms!.push({ name: 'old_csg_col0', type: 'mesh', size: [1], csgDerived: 'collider' } as SceneGeom);
+    useStore.setState({ sceneGraph: { nodes: [node] }, recompile: recompiled });
+    await compileCsgNodes();
+    expect(colliderCount('convex')).toBe(0);
+    expect(recompiled).toHaveBeenCalledTimes(1);
   });
 });

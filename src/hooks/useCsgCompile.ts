@@ -129,6 +129,18 @@ export function pendingColliderBodies(): string[] {
   return out;
 }
 
+/**
+ * Whether any of these bodies, as they stood before their decomposition, has or
+ * had convex pieces. Most meshes turn out convex enough to need none: that
+ * outcome is a note on the node, nothing the compiler reads, and rebuilding for
+ * it replaced the model with an identical one, seconds after a scene appeared.
+ */
+function colliderPiecesChanged(before: SceneNode[]): boolean {
+  const hasPieces = (n: SceneNode | null | undefined) => !!n?.geoms?.some((g) => g.csgDerived === 'collider');
+  const nodes = useStore.getState().sceneGraph.nodes;
+  return before.some((n) => hasPieces(n) || hasPieces(findNodeById(nodes, n.id)));
+}
+
 /** One decomposition per body and hash: a second ask joins the first. */
 function decomposeColliders(node: SceneNode): Promise<void> {
   const hash = collisionHashOf(node);
@@ -260,12 +272,13 @@ export async function compileCsgNodes(
     ]);
     if (late) {
       decomposed
-        .then(() => useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false))
+        .then(() => { if (colliderPiecesChanged(staleColliders)) return useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false); })
         .catch((err) => console.error('Rebuilding after late convex pieces failed:', err));
     }
   }
 
-  if (!skipFinalRecompile) {
+  const meshesChanged = stale.length + unbuilt.length + unlaid.length > 0;
+  if (!skipFinalRecompile && (meshesChanged || colliderPiecesChanged(staleColliders))) {
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);
   }
   return stale.length + unbuilt.length + unlaid.length + staleColliders.length;
