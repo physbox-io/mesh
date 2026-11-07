@@ -3,7 +3,6 @@ import { cuttingMaterial, idealCut } from '@physbox-io/machining';
 import {
   recommendSpeeds,
   describeSpeedRecommendation,
-  materialSpec,
   MATERIALS,
   DEFAULT_SPINDLE_RANGE,
 } from '../src/utils/feedsAndSpeeds';
