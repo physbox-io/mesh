@@ -11,6 +11,7 @@ import { exportPrintFiles } from '../utils/printExport';
 import { zipStore } from '../utils/zipStore';
 import { downloadBlob } from '../utils/downloadBlob';
 import { exportBaseName } from '../utils/exportBaseName';
+import { footprintGroups } from '../utils/footprintGroups';
 
 /**
  * STL and 3MF, made from what the viewport draws. `threeSceneRef` is the
@@ -199,9 +200,8 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     }
 
     // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
-    // wrapper <group name={nodeId}>), so multi-part scenes (e.g. an enclosure's
-    // box + lid sitting side by side) can be scaled by a single part's size
-    // rather than the combined footprint of everything visible.
+    // wrapper <group name={nodeId}>): it names each exported mesh, and bought
+    // hardware is left out by it.
     const findNodeId = (obj: THREE.Object3D): string | null => {
       let cur: THREE.Object3D | null = obj;
       while (cur) {
@@ -212,7 +212,7 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     };
 
     const exportGroup = new THREE.Group();
-    const partBboxes = new Map<string, THREE.Box3>();
+    const meshBoxes: THREE.Box3[] = [];
     let ungroupedIdx = 0;
     const ownedByOnly = (obj: THREE.Object3D) => {
       for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
@@ -248,14 +248,9 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       const material = standard.clone();
       material.wireframe = false;
       const exported = new THREE.Mesh(geo, material);
-      exported.name = findNodeId(mesh) ?? mesh.name ?? `part_${ungroupedIdx}`;
+      exported.name = findNodeId(mesh) ?? mesh.name ?? `part_${ungroupedIdx++}`;
       exportGroup.add(exported);
-
-      const partKey = findNodeId(mesh) ?? `__ungrouped_${ungroupedIdx++}`;
-      const meshBbox = new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute);
-      const existing = partBboxes.get(partKey);
-      if (existing) existing.union(meshBbox);
-      else partBboxes.set(partKey, meshBbox);
+      meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
     });
 
     if (exportGroup.children.length === 0) {
@@ -267,15 +262,29 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
 
     // Normalize: fit the LONGEST SINGLE PART's longest side to a user-specified
     // target in mm (not the combined bounding box of everything visible), centered
-    // at origin. Also convert from Three.js Y-up (the scene's convention) to the
+    // at origin. A part is what prints as one piece: meshes whose footprints
+    // overlap, by the rule the 3MF writer groups its objects with. Not a body,
+    // which can hold pieces laid side by side (a mold's two halves), nor a
+    // mesh, which can be a liner nested inside its shell. Also convert from Three.js Y-up (the scene's convention) to the
     // Z-up convention STL/slicers expect - otherwise the export comes out on its
     // side even though the on-screen render (Y-up, handled natively by Three.js)
     // looks correct.
     const bbox = new THREE.Box3().setFromObject(exportGroup);
+    // Three.js is Y-up here, so the bed is X and Z; 10 µm, in metres, as the 3MF writer's 0.01 mm.
+    const pieceOf = footprintGroups(
+      meshBoxes.map((b) => ({ min: b.min.toArray(), max: b.max.toArray() })),
+      { axes: [0, 2], minOverlap: 1e-5 },
+    );
+    const pieceBoxes = new Map<number, THREE.Box3>();
+    meshBoxes.forEach((box, i) => {
+      const piece = pieceBoxes.get(pieceOf[i]);
+      if (piece) piece.union(box);
+      else pieceBoxes.set(pieceOf[i], box.clone());
+    });
     let longestPartDim = 0;
-    for (const partBbox of partBboxes.values()) {
-      const partSize = partBbox.getSize(new THREE.Vector3());
-      longestPartDim = Math.max(longestPartDim, partSize.x, partSize.y, partSize.z);
+    for (const pieceBox of pieceBoxes.values()) {
+      const size = pieceBox.getSize(new THREE.Vector3());
+      longestPartDim = Math.max(longestPartDim, size.x, size.y, size.z);
     }
     if (longestPartDim > 0) {
       const defaultMm = Math.round(longestPartDim * 1000).toString();

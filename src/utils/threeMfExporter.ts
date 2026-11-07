@@ -38,6 +38,7 @@
 // ---------------------------------------------------------------------------
 
 import { zipStore, utf8, type ZipEntry } from './zipStore';
+import { footprintGroups } from './footprintGroups';
 
 const CORE_NS = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02';
 const MATERIAL_NS = 'http://schemas.microsoft.com/3dmanufacturing/material/2015/02';
@@ -230,35 +231,19 @@ const FOOTPRINT_OVERLAP_MM = 0.01;
  * clear of each other stay separate objects, to be arranged however the user likes.
  */
 function printedObjects(meshes: ThreeMfMesh[]): string[] {
-  const parent = meshes.map((_, i) => i);
-  const find = (i: number): number => {
-    while (parent[i] !== i) {
-      parent[i] = parent[parent[i]];
-      i = parent[i];
-    }
-    return i;
-  };
-  // The lower index stays the root, so the object keeps its first mesh's place and name.
-  const join = (a: number, b: number) => {
-    const [ra, rb] = [find(a), find(b)];
-    parent[Math.max(ra, rb)] = Math.min(ra, rb);
-  };
-  const named = new Map<string, number>();
+  const named = new Map<string, number[]>();
   meshes.forEach((m, i) => {
     if (m.object === undefined) return;
-    const first = named.get(m.object);
-    if (first === undefined) named.set(m.object, i);
-    else join(first, i);
+    const group = named.get(m.object);
+    if (group) group.push(i);
+    else named.set(m.object, [i]);
   });
-  const boxes = meshes.map((m) => meshBounds(m.positions));
-  const overlap = (a: number, b: number, k: number) =>
-    Math.min(boxes[a].max[k], boxes[b].max[k]) - Math.max(boxes[a].min[k], boxes[b].min[k]) > FOOTPRINT_OVERLAP_MM;
-  for (let a = 0; a < meshes.length; a++) {
-    for (let b = a + 1; b < meshes.length; b++) {
-      if (overlap(a, b, 0) && overlap(a, b, 1)) join(a, b);
-    }
-  }
-  return meshes.map((_, i) => String(find(i)));
+  const groups = footprintGroups(meshes.map((m) => meshBounds(m.positions)), {
+    axes: [0, 1],
+    minOverlap: FOOTPRINT_OVERLAP_MM,
+    joined: named.values(),
+  });
+  return groups.map(String);
 }
 
 /**
