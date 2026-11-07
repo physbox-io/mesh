@@ -415,6 +415,7 @@ describe('Relief carve exporter', () => {
     expect(deepest).toBeLessThanOrEqual(2.5 + 1e-6);
   });
 
+  // Two full finishing plans at 1.6 mm over a 20 mm dome: ~35 s on a CI runner, and runners vary 2x.
   it('ramps into the cut instead of plunging, unless told not to', () => {
     const opts = {
       ...DEFAULT_RELIEF_OPTIONS,
@@ -448,7 +449,7 @@ describe('Relief carve exporter', () => {
 
     // Ramping costs travel — it descends along the path and backs up over it.
     expect(ramped.totalCutDistanceMm).toBeGreaterThan(plunged.totalCutDistanceMm);
-  });
+  }, 120_000);
 
   it('holds the shank out of a wall the flutes alone would have cleared', () => {
     // A narrow trench: the flutes fit, the shank does not.
