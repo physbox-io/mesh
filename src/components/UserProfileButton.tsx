@@ -5,7 +5,6 @@ import { getStoredUser, getStoredAuthToken, clearStoredAuth, fetchCurrentUser } 
 import type { PhysBoxUser } from '../utils/apiClient';
 import { signInWithGooglePopup, disableGoogleAutoSelect } from '../utils/googleAuth';
 import { pullCloudState } from '../utils/cloudSync';
-import { mergePulledPresets } from '../utils/userPresets';
 import { webSerialManager } from '../utils/webSerialManager';
 import { RemoteMachiningModal } from './RemoteMachiningModal';
 import { JobHistoryModal } from './JobHistoryModal';
@@ -35,6 +34,13 @@ export const SIGNED_IN_EVENT = 'physbox:signed-in';
 
 /** Tab focus fires far more often than the account's presets can change. */
 const CLOUD_RESYNC_INTERVAL_MS = 30_000;
+
+/** What a pull did, for the account menu. */
+function syncSummaryText(parameters: number, presets: number): string {
+  if (parameters === 0 && presets === 0) return 'Account is up to date';
+  const settings = `Restored ${parameters} setting${parameters === 1 ? '' : 's'}`;
+  return presets > 0 ? `${settings} and synced ${presets} preset${presets === 1 ? '' : 's'}` : settings;
+}
 
 export const UserProfileButton: React.FC = () => {
   const [user, setUser] = useState<PhysBoxUser | null>(getStoredUser());
@@ -105,18 +111,12 @@ export const UserProfileButton: React.FC = () => {
   const pullAccountState = React.useCallback(async () => {
     if (!getStoredAuthToken()) return;
     try {
-      const { parameters, presets, cards } = await pullCloudState();
+      const { parameters, presets } = await pullCloudState();
       // The machine state holds the spindle override already applied, so a
       // value just restored from the account has to be pushed into it.
       webSerialManager.reapplySpindleOverride();
-      const listed = mergePulledPresets(presets, cards);
       setSyncFailed(false);
-      setSyncSummary(
-        parameters === 0 && listed === 0
-          ? 'Account is up to date'
-          : `Restored ${parameters} setting${parameters === 1 ? '' : 's'}` +
-              (listed > 0 ? ` and listed ${listed} preset${listed === 1 ? '' : 's'} from your account` : '')
-      );
+      setSyncSummary(syncSummaryText(parameters, presets.received + presets.sent));
     } catch (e) {
       console.warn('[PhysBox Cloud] Could not pull account state:', e);
       setSyncFailed(true);
@@ -147,9 +147,11 @@ export const UserProfileButton: React.FC = () => {
     };
     document.addEventListener('visibilitychange', resync);
     window.addEventListener('focus', resync);
+    window.addEventListener('online', resync);
     return () => {
       document.removeEventListener('visibilitychange', resync);
       window.removeEventListener('focus', resync);
+      window.removeEventListener('online', resync);
     };
   }, [pullAccountState]);
 

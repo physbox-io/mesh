@@ -306,16 +306,37 @@ export async function fetchCloudParameters(appId: string): Promise<Record<string
   }
 }
 
-export async function syncCloudPreset(appId: string, name: string, data: unknown, id?: string): Promise<string | null> {
+/** What became of a save: taken, stale, refused for good, or null for could not ask. */
+export type PresetSaveOutcome =
+  | { id: string; revision: number }
+  | { conflict: { id: string; revision: number } }
+  | { refused: true }
+  | null;
+
+/**
+ * Saves a preset onto the revision `baseRevision`, 0 for none. A row that has
+ * moved past that comes back as a conflict, for the caller to keep both.
+ */
+export async function syncCloudPreset(
+  appId: string,
+  name: string,
+  data: unknown,
+  id?: string,
+  baseRevision?: number,
+): Promise<PresetSaveOutcome> {
   if (!getStoredAuthToken()) return null;
   try {
-    const res = await request<{ id: string }>('/api/presets', {
+    const res = await request<{ id: string; revision: number }>('/api/presets', {
       method: 'POST',
-      body: JSON.stringify({ id, app_id: appId, preset_name: name, preset_data: data }),
+      body: JSON.stringify({ id, app_id: appId, preset_name: name, preset_data: data, base_revision: baseRevision }),
     });
-    return res.id || null;
+    return { id: res.id, revision: res.revision };
   } catch (err) {
+    if (err instanceof PhysBoxApiError && err.code === 'preset_conflict') {
+      return { conflict: { id: String(err.body.id), revision: Number(err.body.revision) } };
+    }
     console.warn('[PhysBox Cloud] Preset sync failed:', err);
+    if (err instanceof PhysBoxApiError && err.status === 413) return { refused: true };
     return null;
   }
 }
@@ -325,6 +346,7 @@ export interface CloudPreset {
   id?: string;
   name?: string;
   data?: unknown;
+  revision?: number;
   /** Read URLs for the blobs `data` names, by SHA-256 (meshBlobs.ts). */
   blobUrls?: Record<string, string>;
 }
@@ -348,8 +370,12 @@ export async function requestBlobUploads(
 
 /** A preset row listed without its data. */
 export interface CloudPresetMeta {
-  id?: string;
-  name?: string;
+  id: string;
+  name: string;
+  revision: number;
+  /** The preset's own save date. */
+  savedAt: number | null;
+  deleted?: boolean;
   bytes?: number;
   /** The small JPEG saved with it, for the scene browser's card. */
   thumbnail?: string | null;
@@ -370,7 +396,7 @@ export interface CloudPresetMeta {
 export async function fetchCloudPresetList(appId: string): Promise<CloudPresetMeta[]> {
   if (!getStoredAuthToken()) return [];
   const res = await request<{ presets: CloudPresetMeta[] }>(
-    `/api/presets?app_id=${encodeURIComponent(appId)}&fields=meta`,
+    `/api/presets?app_id=${encodeURIComponent(appId)}&fields=meta&include_deleted=1`,
   );
   return res.presets || [];
 }
@@ -588,6 +614,8 @@ export interface CloudDocumentMeta {
 
 export interface CloudDocument extends CloudDocumentMeta {
   data: unknown;
+  /** Signed read URLs for the meshes it keeps in the blob store, by hash. */
+  blobUrls?: Record<string, string>;
 }
 
 export interface CloudRevisionMeta {

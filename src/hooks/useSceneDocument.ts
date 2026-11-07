@@ -9,6 +9,9 @@ import { unloadIsAllowed } from '../utils/rescueScene';
 /** Marks a clean point whose undo step has not landed yet. See markClean. */
 const PENDING_CLEAN = Symbol('pending');
 
+/** Marks a document nothing has saved, which no undo gets back to. */
+const NEVER_CLEAN = Symbol('never');
+
 /**
  * The parts of a scene that are not in the store: its note cards and its
  * copilot chat — both saved, shared and exported with it — and whether any of
@@ -81,6 +84,12 @@ export function useSceneDocument() {
     });
     stopWatchingClean.current = unsubscribe;
   }, []);
+  /** The document on screen was restored unsaved, so it stays unsaved until someone saves it. */
+  const markUnsaved = useCallback(() => {
+    stopWatchingClean.current?.();
+    stopWatchingClean.current = null;
+    cleanRef.current = { top: NEVER_CLEAN, notes: null, chat: null };
+  }, []);
   const hasUnsavedWork = (): boolean => {
     const clean = cleanRef.current;
     const { undoStack: undoNow, tempUndoState } = useStore.getState();
@@ -126,7 +135,7 @@ export function useSceneDocument() {
     noteCards, setNoteCards,
     copilotMessages, setCopilotMessages,
     editingCardId, setEditingCardId,
-    markClean, hasUnsavedWork, replaceDocument,
+    markClean, markUnsaved, hasUnsavedWork, replaceDocument,
   };
 }
 

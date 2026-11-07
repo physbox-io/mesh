@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store/useStore';
 import { useDialogs } from '../store/dialogStore';
@@ -9,11 +9,13 @@ import { getSyncedSceneGraph } from '../utils/mujocoSync';
 import { withEnvironment } from '../store/sceneEnvironment';
 import { packMeshArrays, unpackMeshArrays } from '../utils/meshPacking';
 import { exportBaseName } from '../utils/exportBaseName';
+import { cloudAutosave } from '../utils/cloudDocuments';
+import { listUserPresetNames } from '../utils/userPresets';
 import type { SceneDocument } from './useSceneDocument';
 
 /** The scene as a JSON file: written by the header's download button, read by its import button or a drop. */
 export function useSceneIo(doc: SceneDocument) {
-  const { noteCards, copilotMessages, replaceDocument } = doc;
+  const { noteCards, copilotMessages, replaceDocument, markUnsaved, hasUnsavedWork } = doc;
   const { model, data, mujoco, activePreset, sceneGraph, togglePlay, updateScene } = useStore(useShallow((s) => ({
     model: s.model, data: s.data, mujoco: s.mujoco, activePreset: s.activePreset, sceneGraph: s.sceneGraph,
     togglePlay: s.togglePlay, updateScene: s.updateScene,
@@ -39,6 +41,35 @@ export function useSceneIo(doc: SceneDocument) {
     }
   }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, activePreset, showNotice]);
 
+  // Puts a scene on screen, in place of whatever was: from a file, or from the account.
+  const showScene = useCallback((parsed: { noteCards?: unknown; copilotMessages?: unknown }) => {
+    const s = useStore.getState();
+    if (s.isPlaying) togglePlay();
+    s.setSculptNodeId(null);
+    s.setLatticeNodeId(null);
+    s.setActivePreset(undefined);
+    // The notes and chat are the document's, not the graph's.
+    const { noteCards, copilotMessages, ...graph } = parsed;
+    updateScene(graph as SceneGraph);
+    const notes = Array.isArray(noteCards) ? noteCards as NoteCard[] : [];
+    const chat = Array.isArray(copilotMessages) ? copilotMessages as CopilotMessage[] : [];
+    replaceDocument(notes, chat);
+  }, [togglePlay, updateScene, replaceDocument]);
+
+  // Unsaved work from the last session comes back as it was left: unsaved, and
+  // on the preset it was an edit of, so saving it saves over that preset.
+  const unsavedWorkRef = useRef(hasUnsavedWork);
+  useEffect(() => {
+    unsavedWorkRef.current = hasUnsavedWork;
+  });
+  useEffect(() => {
+    cloudAutosave.connectDocument(() => unsavedWorkRef.current(), (draft, name) => {
+      showScene(draft as { noteCards?: unknown; copilotMessages?: unknown });
+      if (listUserPresetNames().includes(name)) useStore.getState().setActivePreset(`user:${name}`);
+      markUnsaved();
+    });
+  }, [showScene, markUnsaved]);
+
   /*
    * Opens a scene file, from the Import button or dropped on the viewport.
    *
@@ -61,19 +92,7 @@ export function useSceneIo(doc: SceneDocument) {
       showNotice('Invalid scene file', `${fileName} is not a scene: it has no "nodes" array.`, 'red');
       return;
     }
-    const applyImport = () => {
-      const s = useStore.getState();
-      if (s.isPlaying) togglePlay();
-      s.setSculptNodeId(null);
-      s.setLatticeNodeId(null);
-      s.setActivePreset(undefined);
-      // The notes and chat are the document's, not the graph's.
-      const { noteCards, copilotMessages, ...graph } = parsed;
-      updateScene(graph as SceneGraph);
-      const notes = Array.isArray(noteCards) ? noteCards as NoteCard[] : [];
-      const chat = Array.isArray(copilotMessages) ? copilotMessages as CopilotMessage[] : [];
-      replaceDocument(notes, chat);
-    };
+    const applyImport = () => showScene(parsed);
     if (dropped) {
       openDialog({
         title: `Replace the current scene with ${fileName}?`,
@@ -89,7 +108,7 @@ export function useSceneIo(doc: SceneDocument) {
       return;
     }
     applyImport();
-  }, [togglePlay, updateScene, replaceDocument, showNotice, openDialog, closeDialog]);
+  }, [showScene, showNotice, openDialog, closeDialog]);
 
   const importJson = useCallback(() => {
     const input = document.createElement('input');

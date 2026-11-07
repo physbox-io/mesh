@@ -163,6 +163,11 @@ export async function resolveMeshBlobs<T>(doc: T, urls: Record<string, string> |
   }) as T;
 }
 
+/** Whether any of the document's meshes are still only named, their bytes not fetched. */
+export function hasBlobRefs(doc: unknown): boolean {
+  return collect(doc, isRef).length > 0;
+}
+
 // This browser's copy of each blob, by hash. Content-addressed, so an entry is
 // never stale; it saves downloading a scene's meshes every time it is opened.
 // Everything is best-effort: no IndexedDB just means fetching.

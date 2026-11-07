@@ -5,7 +5,7 @@ import { useDialogs } from '../store/dialogStore';
 import { PRESETS } from '../presets/presetScenes';
 import { makePresetNoteCard, type NoteCard } from '../utils/noteCards';
 import type { CopilotMessage } from '../physicsGlobals';
-import { readUserPreset, ensureUserPreset, catchUpPreset, USER_PRESETS_CHANGED_EVENT } from '../utils/userPresets';
+import { readUserPreset, ensureUserPreset, catchUpPreset, listUserPresetNames, USER_PRESETS_CHANGED_EVENT } from '../utils/userPresets';
 import { webSerialManager } from '../utils/webSerialManager';
 import { savePreset } from '../utils/presetStorage';
 import { announcePresetSave } from '../utils/presetNotices';
@@ -26,7 +26,7 @@ export type PresetEntry = { name: string; emoji?: string };
  * auto-save that follows every edit.
  */
 export function usePresetActions(doc: SceneDocument) {
-  const { noteCards, copilotMessages, markClean, replaceDocument, hasUnsavedWork } = doc;
+  const { noteCards, copilotMessages, markClean, markUnsaved, replaceDocument, hasUnsavedWork } = doc;
   const { mujoco, activePreset, sceneGraph, loadPreset } = useStore(useShallow((s) => ({
     mujoco: s.mujoco, activePreset: s.activePreset,
     sceneGraph: s.sceneGraph, loadPreset: s.loadPreset,
@@ -99,22 +99,30 @@ export function usePresetActions(doc: SceneDocument) {
   }, [loadPreset, replaceDocument, showNotice]);
 
   // A later save of the open scene, from another machine. Edits made here stay
-  // on screen, and so does anything a running job is being cut from.
+  // on screen, and so does a running simulation or anything a job is being cut from.
   const unsavedWorkRef = useRef(hasUnsavedWork);
   useEffect(() => {
     unsavedWorkRef.current = hasUnsavedWork;
   });
   useEffect(() => {
-    const canReplaceScene = () => !unsavedWorkRef.current() && !webSerialManager.isRunning();
+    const canReplaceScene = () =>
+      !unsavedWorkRef.current() && !useStore.getState().isPlaying && !webSerialManager.isRunning();
     const reloadOpenScene = async () => {
       const open = useStore.getState().activePreset;
-      if (!open?.startsWith('user:') || !canReplaceScene()) return;
+      if (!open?.startsWith('user:')) return;
+      // Deleted on another machine: the scene stays, as work nothing holds any more.
+      if (!listUserPresetNames().includes(open.slice('user:'.length))) {
+        useStore.getState().setActivePreset(undefined);
+        markUnsaved();
+        return;
+      }
+      if (!canReplaceScene()) return;
       if (!(await catchUpPreset(open))) return;
       if (useStore.getState().activePreset === open && canReplaceScene()) void loadUserPresetWithCard(open);
     };
     window.addEventListener(USER_PRESETS_CHANGED_EVENT, reloadOpenScene);
     return () => window.removeEventListener(USER_PRESETS_CHANGED_EVENT, reloadOpenScene);
-  }, [loadUserPresetWithCard]);
+  }, [loadUserPresetWithCard, markUnsaved]);
 
   const saveUserPresetByName = useCallback((name: string) => {
     const trimmed = name.trim();

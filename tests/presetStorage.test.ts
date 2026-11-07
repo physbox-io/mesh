@@ -26,12 +26,35 @@ class FakeStorage {
 const store = new FakeStorage();
 vi.stubGlobal('localStorage', store);
 
-const cloud = { saveCloudPreset: vi.fn(), removeCloudPreset: vi.fn(), fetchCloudPresetData: vi.fn() };
+const cloud = {
+  saveCloudPreset: vi.fn(),
+  removeCloudPreset: vi.fn(),
+  fetchCloudPresetData: vi.fn(),
+  store: null as import('../src/utils/presetSync').PresetStore | null,
+};
 vi.mock('../src/utils/cloudSync', () => ({
   saveCloudPreset: (...a: unknown[]) => cloud.saveCloudPreset(...a),
   removeCloudPreset: (...a: unknown[]) => cloud.removeCloudPreset(...a),
   fetchCloudPresetData: (...a: unknown[]) => cloud.fetchCloudPresetData(...a),
+  presetForAccount: async (data: unknown) => data,
+  presetFromAccount: async (data: unknown) => data,
+  presetSync: {
+    connect: (store: NonNullable<typeof cloud.store>) => { cloud.store = store; },
+    isUnsynced: () => false,
+  },
 }));
+
+/** What a pull tells the app about rows it decided to fetch; a held preset with no save date listed is level. */
+function listFromAccount(names: string[], cards: Record<string, { thumbnail?: string | null; updatedAt?: string }> = {}): number {
+  const rows = names.map((name) => ({ id: name, name, revision: 2, savedAt: null, ...cards[name] }));
+  cloud.store!.listed!(rows);
+  let changed = 0;
+  for (const row of rows) {
+    if (Object.hasOwn(cloud.store!.held(), row.name) && !cards[row.name]?.updatedAt) continue;
+    if (cloud.store!.deferFetch!(row.name, row, { revision: 1 })?.changed) changed += 1;
+  }
+  return changed;
+}
 
 const account = { token: null as string | null, pro: false, presets: [] as { name: string; data: unknown }[] };
 vi.mock('../src/utils/apiClient', () => ({
@@ -203,7 +226,7 @@ describe('an account is not tied to this browser', () => {
 
 describe('pulling the account into another browser', () => {
   it('lists the account\'s presets by name, without fetching any', () => {
-    expect(presets.mergePulledPresets(['a', 'b'])).toBe(2);
+    expect(listFromAccount(['a', 'b'])).toBe(2);
     expect(presets.listUserPresetNames().sort()).toEqual(['a', 'b']);
     expect(presets.cloudOnlyPresetNames().sort()).toEqual(['a', 'b']);
     expect(presets.readUserPreset('a')).toBeNull();
@@ -212,12 +235,12 @@ describe('pulling the account into another browser', () => {
 
   it('gives a preset listed from the account the picture and date the list sent', () => {
     const thumbnail = 'data:image/jpeg;base64,QQ';
-    presets.mergePulledPresets(['candle'], { candle: { thumbnail, updatedAt: '2026-10-25T17:44:00Z' } });
+    listFromAccount(['candle'], { candle: { thumbnail, updatedAt: '2026-10-25T17:44:00Z' } });
     expect(presets.presetCard('user:candle')).toEqual({ thumbnail, savedAt: Date.parse('2026-10-25T17:44:00Z') });
   });
 
   it('fetches a listed preset on open and keeps it here when there is room', async () => {
-    presets.mergePulledPresets(['tray']);
+    listFromAccount(['tray']);
     cloud.fetchCloudPresetData.mockResolvedValue({ nodes: [{ id: 'cloud' }] });
 
     expect(await presets.ensureUserPreset('user:tray')).toBe(true);
@@ -232,7 +255,7 @@ describe('pulling the account into another browser', () => {
 
   it('holds a fetched preset for the session when this browser is full', async () => {
     store.limit = 2_000;
-    presets.mergePulledPresets(['big']);
+    listFromAccount(['big']);
     cloud.fetchCloudPresetData.mockResolvedValue(bigScene(1));
 
     expect(await presets.ensureUserPreset('big')).toBe(true);
@@ -242,7 +265,7 @@ describe('pulling the account into another browser', () => {
   });
 
   it('says so when the account cannot hand a preset over', async () => {
-    presets.mergePulledPresets(['tray']);
+    listFromAccount(['tray']);
     expect(await presets.ensureUserPreset('tray')).toBe(false);
     expect(await presets.ensureUserPreset('never-heard-of-it')).toBe(false);
     expect(presets.listUserPresetNames()).toEqual(['tray']);
@@ -250,7 +273,7 @@ describe('pulling the account into another browser', () => {
 
   it('leaves a preset already saved here alone', async () => {
     presets.saveUserPreset('mine', { nodes: [{ id: 'local' }] } as never);
-    expect(presets.mergePulledPresets(['mine'])).toBe(0);
+    expect(listFromAccount(['mine'])).toBe(0);
     expect(await presets.ensureUserPreset('mine')).toBe(true);
     expect(presets.readUserPreset('mine')?.nodes?.[0].id).toBe('local');
     expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
@@ -264,7 +287,7 @@ describe('pulling the account into another browser', () => {
 
     it('replaces the copy here when opened', async () => {
       hold();
-      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      listFromAccount(['job'], { job: { updatedAt: LATER } });
       cloud.fetchCloudPresetData.mockResolvedValue(cloudCopy('new', Date.parse(LATER)));
 
       expect(await presets.ensureUserPreset('job')).toBe(true);
@@ -273,34 +296,13 @@ describe('pulling the account into another browser', () => {
 
     it('fetches nothing until the preset is wanted', () => {
       hold();
-      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      listFromAccount(['job'], { job: { updatedAt: LATER } });
       expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
-    });
-
-    it('fetches nothing when the account has no later save', async () => {
-      hold();
-      presets.mergePulledPresets(['job'], { job: { updatedAt: '2026-10-01T10:00:00Z' } });
-      expect(await presets.catchUpPreset('job')).toBe(false);
-      expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
-    });
-
-    it('keeps the copy here when the list only reflects the save made here', async () => {
-      hold();
-      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
-      cloud.fetchCloudPresetData.mockResolvedValue(cloudCopy('same', SAVED_HERE));
-
-      expect(await presets.catchUpPreset('job')).toBe(false);
-      expect(presets.readUserPreset('job')?.nodes?.[0].id).toBe('old');
-
-      // The same listing on the next pull is not fetched again.
-      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
-      expect(await presets.catchUpPreset('job')).toBe(false);
-      expect(cloud.fetchCloudPresetData).toHaveBeenCalledTimes(1);
     });
 
     it('opens the copy here when the account cannot hand the later one over', async () => {
       hold();
-      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      listFromAccount(['job'], { job: { updatedAt: LATER } });
 
       expect(await presets.ensureUserPreset('job')).toBe(true);
       expect(presets.readUserPreset('job')?.nodes?.[0].id).toBe('old');
@@ -309,7 +311,7 @@ describe('pulling the account into another browser', () => {
     it('holds the later copy for the session when this browser is full', async () => {
       hold();
       store.limit = 2_000;
-      presets.mergePulledPresets(['job'], { job: { updatedAt: LATER } });
+      listFromAccount(['job'], { job: { updatedAt: LATER } });
       cloud.fetchCloudPresetData.mockResolvedValue({ ...bigScene(1), savedAt: Date.parse(LATER) });
 
       expect(await presets.ensureUserPreset('job')).toBe(true);

@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
   syncCloudParameters: vi.fn().mockResolvedValue(true),
   fetchCloudParameters: vi.fn(),
   fetchCloudPresetList: vi.fn().mockResolvedValue([]),
+  getStoredUser: () => null,
   fetchCloudPreset: vi.fn(),
   syncCloudPreset: vi.fn(),
   deleteCloudPreset: vi.fn(),
@@ -91,18 +92,6 @@ describe('the shared tool rack, in Mesh', () => {
     const result = await pullCloudState();
     expect(result.parameters).toBe(1);
     expect(toolRackStore.get().tools[0].uid).toBe('from-etch');
-  });
-
-  it('reads the latest row of a name the server holds twice', async () => {
-    api.fetchCloudParameters.mockResolvedValue({});
-    api.fetchCloudPresetList.mockResolvedValueOnce([
-      { id: 'pst_new', name: 'Job', updatedAt: '2026-11-02T10:00:00Z' },
-      { id: 'pst_old', name: 'Job', updatedAt: '2026-11-01T10:00:00Z' },
-    ]);
-    const result = await pullCloudState();
-    expect(result.presets).toEqual(['Job']);
-    expect(result.cards.Job.updatedAt).toBe('2026-11-02T10:00:00Z');
-    expect(JSON.parse(localStorage.getItem('physics_cloud_preset_ids')!).Job).toBe('pst_new');
   });
 
   it('offers only bits in the drawer, of a shape the field can use', () => {

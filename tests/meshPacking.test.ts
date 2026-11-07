@@ -110,7 +110,7 @@ describe('saved presets', () => {
       removeItem: (k: string) => void map.delete(k),
     });
     vi.doMock('../src/utils/cloudSync', () => ({
-      saveCloudPreset: vi.fn(), removeCloudPreset: vi.fn(), fetchCloudPresetData: vi.fn(),
+      saveCloudPreset: vi.fn(), removeCloudPreset: vi.fn(), fetchCloudPresetData: vi.fn(), presetSync: { connect: () => {} }, presetForAccount: vi.fn(), presetFromAccount: vi.fn(),
     }));
     const { writeLocalPreset, readUserPreset } = await import('../src/utils/userPresets');
     const s = scene(40, 60);
