@@ -421,21 +421,20 @@ export async function siliconeChain(
     // foot closed by the base; otherwise it is turned over and poured through
     // the master's foot, a wick or fixing hole plugged.
     const S = pourHole ? own.take(turned.rotate([180, 0, 0])) : turned;
+    const flash = Math.max(0, box.report.pourDepthMm - box.report.fillHeightMm);
     let closed = S;
     if (pourHole) {
       // The base it stands on, up through the flash the groove left round the
       // rim to the mold's underside, where the master stood.
-      const flash = Math.max(0, box.report.pourDepthMm - box.report.fillHeightMm);
       const b = S.boundingBox();
       const base = own.take(wasm.Manifold.cube([b.max[0] - b.min[0], b.max[1] - b.min[1], 2 + flash + 0.01], false).translate([b.min[0], b.min[1], b.min[2] - 2]));
       closed = own.take(S.add(base));
     }
     const { min, max } = closed.boundingBox();
-    // Inset a little in plan, as the pour simulation does: the flash the
-    // groove leaves standing round the rim is thinner than that, so it is cut
-    // away and holds nothing, and the pour stops at the mold's face.
+    // Inset a little in plan, as the pour simulation does, and stop below the
+    // groove flash standing round the open rim so the pour stops at the mold's face.
     const inset = Math.min(0.5, Math.max(0.01, (max[0] - min[0]) * 0.01), Math.max(0.01, (max[1] - min[1]) * 0.01));
-    const probeBox = { minX: min[0] + inset, maxX: max[0] - inset, minY: min[1] + inset, maxY: max[1] - inset, minZ: min[2] + 0.001, maxZ: max[2] - 0.001 };
+    const probeBox = { minX: min[0] + inset, maxX: max[0] - inset, minY: min[1] + inset, maxY: max[1] - inset, minZ: min[2] + 0.001, maxZ: max[2] - (pourHole ? 0 : flash) - 0.001 };
     const probe = own.take(wasm.Manifold.cube(
       [probeBox.maxX - probeBox.minX, probeBox.maxY - probeBox.minY, probeBox.maxZ - probeBox.minZ], false,
     ).translate([probeBox.minX, probeBox.minY, probeBox.minZ]));

@@ -170,6 +170,19 @@ describe('pour sprue', () => {
     const rigid = generateMoldMeshes(lopsided, OPTS);
     expectFunnelAndNeck(rigid);
   });
+
+  it('places four vertical air-bleed ribs along the sprue wall at 45°, 135°, 225°, 315° by default', () => {
+    const r = generateMoldMeshes(ball, OPTS, wasm);
+    const { tris, x, y, sprue } = lidAndSprue(r);
+    const probeR = sprue.narrowDiaMm! / 2 - 0.22;
+    for (const a of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
+      expect(crossings(tris, x + probeR * Math.cos(a), y + probeR * Math.sin(a))).toEqual([]);
+    }
+    for (const a of [Math.PI / 4, (3 * Math.PI) / 4, (5 * Math.PI) / 4, (7 * Math.PI) / 4]) {
+      const zs = crossings(tris, x + probeR * Math.cos(a), y + probeR * Math.sin(a));
+      expect(zs.length).toBeGreaterThanOrEqual(2);
+    }
+  });
 });
 
 // Seven 1.5 mm vents came off the printer as pinpricks. They are held to what a

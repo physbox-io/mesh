@@ -1503,12 +1503,19 @@ export function generateMoldMeshes(
   const lidChannelY = (y: number) => (detailIsAbove ? y : -y);
   const baseTrueDepth = opts.moldType === 'open' ? partHeightMm : (detailIsAbove ? zMax - partingZ : partingZ - zMin);
   const lidTrueDepth = detailIsAbove ? partingZ - zMin : zMax - partingZ;
-  // Filled from the bottom, the cavity half's floor holds the runner under the cavity.
+  // Filled from the bottom, the cavity half's floor holds the runner under the cavity
+  // (and under the soluble liner skin when lined, so the runner stays in the rigid shell).
   const feed = opts.moldType === 'clamshell' && opts.includeSprue ? (opts.sprueFeed ?? 'bottom') : 'top';
   const neckR = sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial) / 2;
-  const baseFloorMm = feed === 'bottom' ? Math.max(opts.baseThicknessMm, bottomFillFloorMm(neckR)) : opts.baseThicknessMm;
+  const linerSkinMm = opts.dissolvableLiner
+    ? (opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM)
+    : 0;
+  const baseFloorMm = feed === 'bottom'
+    ? Math.max(opts.baseThicknessMm, bottomFillFloorMm(neckR, linerSkinMm))
+    : Math.max(opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0);
+  const lidFloorMm = Math.max(opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0);
   const baseBlockHeight = baseTrueDepth + baseFloorMm;
-  const lidBlockHeight = lidTrueDepth + opts.baseThicknessMm;
+  const lidBlockHeight = lidTrueDepth + lidFloorMm;
   // Whatever cuts the lid deepest in each column, drafted or not: the funnel stays clear of all of it.
   const lidCavityDepth = lidDepth.map((d, i) => Math.max(d, rawLidDepth[i]));
 
@@ -1517,7 +1524,14 @@ export function generateMoldMeshes(
   const clamshell = opts.moldType === 'clamshell';
   const exactCavity = Boolean(opts.dissolvableLiner) || Boolean(opts.allowUndercuts && undercutColumns > 0);
   const pourSpans = !clamshell ? null : exactCavity
-    ? exactPourSpans(field, grid, partingZ, detailIsAbove)
+    ? exactPourSpans(
+        field,
+        grid,
+        partingZ,
+        detailIsAbove,
+        opts.draftAngleDeg > 0 ? baseDepth : undefined,
+        opts.draftAngleDeg > 0 ? lidDepth : undefined,
+      )
     : rigidPourSpans(baseDepth, lidDepth, grid);
 
   // A vent at every high point: up from the top of each pocket the rising
@@ -1560,8 +1574,8 @@ export function generateMoldMeshes(
     const funnelR = Math.max(opts.sprueTopDiaMm / 2, neckR * 2);
     const ventsAt = (r: number) => ventPeaks.map((v) => ({ x: v.x, y: v.y, r }));
     const gateDia = gateDiaMm(opts.castMaterial);
-    bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room, gateDia)
-      ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room, gateDia);
+    bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room, gateDia, linerSkinMm)
+      ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room, gateDia, linerSkinMm);
     if (!bottomFill) {
       const need = Math.ceil((2 * (neckR + FEED_WALL_MM)) * 10) / 10;
       return {
@@ -1576,7 +1590,7 @@ export function generateMoldMeshes(
     sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, Math.min(bottomFill.roomR, ventRoomR));
     baseBores.push(
       // Down the wall from the parting face...
-      { a: [down.x, down.y, 1], b: [down.x, down.y, runnerZ], r },
+      { a: [down.x, down.y, 1], b: [down.x, down.y, runnerZ], r, fluted: true },
       // ...along under the cavity...
       { a: [down.x, down.y, runnerZ], b: [gate.x, gate.y, runnerZ], r, ends: true },
       // ...and up into its lowest point, in as far as gives it a whole mouth.
@@ -1699,7 +1713,7 @@ export function generateMoldMeshes(
     return buildHalf(grid, depth, floor, feats, minDepth);
   };
   const builtBase = builtHalf(baseDepth, baseFloorMm, baseFeatures, baseTrueDepth);
-  const builtLid = opts.moldType === 'clamshell' ? builtHalf(lidDepth, opts.baseThicknessMm, lidFeatures, lidTrueDepth) : null;
+  const builtLid = opts.moldType === 'clamshell' ? builtHalf(lidDepth, lidFloorMm, lidFeatures, lidTrueDepth) : null;
   if (!builtBase || (opts.moldType === 'clamshell' && !builtLid)) {
     return { ...emptyMoldResult("The mold half would not close into a solid, so its runner can't be cut; repair the part's mesh and try again."), ...setupFields };
   }

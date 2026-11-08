@@ -524,11 +524,16 @@ async function castClosedClamshell(
   feed?: FeedRoute,
   ventStubs?: VentStub[],
 ): Promise<MoldCastSimulationResult> {
+  const seamZ = Math.fround(botPartingZ);
+  for (let i = 2; i < bot.length; i += 3) {
+    if (Math.abs(bot[i] - botPartingZ) < 1e-4) bot[i] = seamZ;
+  }
   const turned = new Float64Array(top.length);
   for (let i = 0; i < top.length; i += 3) {
     turned[i] = top[i];
     turned[i + 1] = -top[i + 1];
-    turned[i + 2] = botPartingZ + lidPartingZ - top[i + 2];
+    const zTop = top[i + 2];
+    turned[i + 2] = Math.abs(zTop - lidPartingZ) < 1e-4 ? seamZ : botPartingZ + lidPartingZ - zTop;
   }
   const assembled = new Float64Array(bot.length + turned.length);
   assembled.set(bot, 0);

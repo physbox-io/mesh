@@ -122,6 +122,16 @@ describe('silicone chain', () => {
     expect(r.piece.volumeMm3 / 8000).toBeCloseTo(1, 1);
   }, 60000);
 
+  it('stops at the mold face below the base groove flash even on a compact (<20 mm) mold', async () => {
+    // 8 x 8 x 8 mm cube with 3 mm walls -> 14 mm outer mold width (1% inset = 0.14 mm < 0.2 mm groove clearance).
+    const smallCube: SceneGraph = { nodes: [body('small', [box('b', [0.004, 0.004, 0.004])], [0, 0, 0.004])] };
+    const r = await siliconeChain(smallCube, ['small'], { wallMm: 3 }, 'epoxy');
+    expect(r.ok, r.ok ? '' : r.error).toBe(true);
+    if (!r.ok) return;
+    expect(r.piece.volumeMm3 / 512).toBeCloseTo(1, 1);
+    expect(r.piece.deviation!.maxMm).toBeLessThan(0.3);
+  }, 60000);
+
   it('refuses a foot too narrow to pour through, and points to Rigid', async () => {
     const r = await siliconeChain(onAStalk, ['ball'], {}, 'epoxy');
     expect(r.ok).toBe(false);

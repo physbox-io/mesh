@@ -219,6 +219,10 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
   // allowed to: a rigid mold would hold it in for good.
   const locksOn = result.success && !options.dissolvableLiner && !options.allowUndercuts
     && result.lostFraction > OPEN_MOLD_ALLOWANCE;
+  // Even without undercuts, deep vertical walls (< 3° draft over >= 8 mm depth)
+  // grip rigid castings along print layer lines unless drafted or lined.
+  const steepWallsGrip = result.success && !options.dissolvableLiner && !options.allowUndercuts
+    && !locksOn && result.flexibleMoldAdvised;
 
   useEffect(() => {
     const client = clientRef.current;
@@ -466,6 +470,31 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                 </button>
                 <button type="button" onClick={onSilicone}
                   className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
+                  Silicone
+                </button>
+              </div>
+            )}
+
+            {steepWallsGrip && (
+              <div className="flex flex-wrap items-center gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200">
+                <span className="basis-full">
+                  Steep cavity walls ({result.minDraftDeg.toFixed(1)}° min draft over {result.cavityDepthMm.toFixed(1)} mm depth) can lock rigid castings onto print layer lines. Add 3° draft, a dissolvable liner, or use Silicone.
+                </span>
+                {!draftLocked && (
+                  <button type="button" onClick={() => set('draftAngleDeg', 3)}
+                    className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
+                    Add 3° draft
+                  </button>
+                )}
+                <button type="button" onClick={() => {
+                    if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
+                    set('dissolvableLiner', true);
+                  }}
+                  className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
+                  {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
+                </button>
+                <button type="button" onClick={onSilicone}
+                  className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
                   Silicone
                 </button>
               </div>

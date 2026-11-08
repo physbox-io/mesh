@@ -57,13 +57,23 @@ export function rigidPourSpans(baseDepth: Float64Array, lidDepth: Float64Array, 
 /**
  * The exact part's cavity (undercuts kept: the lined mold and the exact one)
  * from its column field. `flipped` is the cavity half holding the part turned
- * over, as the exporter builds it when the detail is above the parting.
+ * over, as the exporter builds it when the detail is above the parting. When
+ * `baseDepth` / `lidDepth` are passed (a drafted exact/lined mold), columns the
+ * draft taper widened into are included so a down-sprue stays clear of them.
  */
-export function exactPourSpans(field: ColumnField, grid: Grid, partingZ: number, flipped: boolean): PourSpans {
+export function exactPourSpans(
+  field: ColumnField,
+  grid: Grid,
+  partingZ: number,
+  flipped: boolean,
+  baseDepth?: Float64Array,
+  lidDepth?: Float64Array,
+): PourSpans {
   const { cols, rows } = grid;
   const out: PourSpans = new Array(cols * rows);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
       const src = field.spans[(flipped ? rows - 1 - r : r) * cols + c];
       const mapped: number[] = [];
       for (let k = 0; k + 1 < src.length; k += 2) {
@@ -71,7 +81,17 @@ export function exactPourSpans(field: ColumnField, grid: Grid, partingZ: number,
         const hi = flipped ? partingZ - src[k] : src[k + 1] - partingZ;
         mapped.push(lo, hi);
       }
-      out[r * cols + c] = Float64Array.from(mapped);
+      if (baseDepth || lidDepth) {
+        const dLo = baseDepth && baseDepth[i] > 0 ? -baseDepth[i] : 0;
+        const dHi = lidDepth && lidDepth[(rows - 1 - r) * cols + c] > 0 ? lidDepth[(rows - 1 - r) * cols + c] : 0;
+        if (mapped.length >= 2) {
+          if (dLo < mapped[0]) mapped[0] = dLo;
+          if (dHi > mapped[mapped.length - 1]) mapped[mapped.length - 1] = dHi;
+        } else if (dHi > dLo) {
+          mapped.push(dLo, dHi);
+        }
+      }
+      out[i] = Float64Array.from(mapped);
     }
   }
   return out;
@@ -319,8 +339,8 @@ export const FEED_WALL_MM = 1.5;
 /** Mold between the runner and the cavity's lowest point, mm. */
 export const RUNNER_CLEARANCE_MM = 1;
 /** How much floor a bottom-fill runner of radius `r` needs under the cavity's lowest point, mm. */
-export function bottomFillFloorMm(r: number): number {
-  return RUNNER_CLEARANCE_MM + 2 * r + FEED_WALL_MM;
+export function bottomFillFloorMm(r: number, linerSkinMm = 0): number {
+  return Math.ceil((linerSkinMm + RUNNER_CLEARANCE_MM + 2 * r + FEED_WALL_MM) * 2) / 2;
 }
 
 /**
@@ -376,6 +396,7 @@ export function planBottomFill(
   avoid: Array<{ x: number; y: number; r: number }>,
   maxFromPartMm: number,
   gateDia: number,
+  linerSkinMm = 0,
 ): BottomFill | null {
   const { cols, rows, stepX, stepY, halfW, halfD } = grid;
   const xOf = (c: number) => -halfW + c * stepX;
@@ -433,7 +454,7 @@ export function planBottomFill(
   return {
     down: { x: best.x, y: best.y },
     gate,
-    runnerZ: gate.z - RUNNER_CLEARANCE_MM - r,
+    runnerZ: gate.z - linerSkinMm - RUNNER_CLEARANCE_MM - r,
     r,
     gateR,
     gateTopZ: gate.z + mouthSinkMm(spans, grid, gate, gateR, 1, Math.PI * gateR * gateR, gateR),
@@ -455,6 +476,8 @@ export interface BoreCut {
   /** Radius at `b`, for a cone; `r` if not given. */
   rB?: number;
   ends?: boolean;
+  /** Four vertical air-bleed ribs along the wall (45°, 135°, 225°, 315°) for a down-sprue. */
+  fluted?: boolean;
 }
 
 /**
@@ -469,7 +492,26 @@ export function boreSolids(wasm: ManifoldToplevel, cut: BoreCut): Manifold[] {
   // From +z onto the axis: tilt about y, then turn about z.
   const tilt = len > 1e-9 ? (Math.acos(Math.max(-1, Math.min(1, d[2] / len))) * 180) / Math.PI : 0;
   const turn = len > 1e-9 ? (Math.atan2(d[1], d[0]) * 180) / Math.PI : 0;
-  const out = [wasm.Manifold.cylinder(Math.max(len, 1e-3), cut.r, cut.rB ?? cut.r, 32, false).rotate([0, tilt, 0]).rotate([0, 0, turn]).translate([ax, ay, az])];
+  const h = Math.max(len, 1e-3);
+  let cyl = wasm.Manifold.cylinder(h, cut.r, cut.rB ?? cut.r, 32, false);
+  const ribDepth = Math.min(0.45, Math.max(0, cut.r - 0.8));
+  const ribWidth = Math.min(0.6, cut.r * 0.3);
+  if (cut.fluted && ribDepth > 0.1 && ribWidth > 0.1) {
+    const slab = wasm.Manifold.cube([ribDepth + 0.4, ribWidth, h + 1], false).translate([cut.r - ribDepth, -ribWidth / 2, -0.5]);
+    for (const deg of [45, 135, 225, 315]) {
+      const rib = slab.rotate([0, 0, deg]);
+      const next = cyl.subtract(rib);
+      cyl.delete();
+      rib.delete();
+      cyl = next;
+    }
+    slab.delete();
+    cyl.numTri();
+  }
+  const rotated = cyl.rotate([0, tilt, 0]).rotate([0, 0, turn]).translate([ax, ay, az]);
+  cyl.delete();
+  rotated.numTri();
+  const out = [rotated];
   if (cut.ends) for (const p of [cut.a, cut.b]) out.push(wasm.Manifold.sphere(cut.r, 32).translate(p));
   return out;
 }

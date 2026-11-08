@@ -180,12 +180,44 @@ export function channelSolid(
   // starts a millimetre outside the face, and so a millimetre wider, to keep 45°.
   const z0 = -blockHeight - 1;
   const zFoot = -blockHeight + Math.max(0, ch.funnelDepth);
+  const zTop = z0 + through;
+  const r0 = ch.funnelDepth > 0 ? ch.outerR + 1 : ch.innerR;
+  const r1 = ch.innerR;
   const profile: [number, number][] = [
     [0, z0],
-    [ch.funnelDepth > 0 ? ch.outerR + 1 : ch.innerR, z0],
-    ...(ch.funnelDepth > 0 ? [[ch.innerR, zFoot] as [number, number]] : []),
-    [ch.innerR, z0 + through],
-    [0, z0 + through],
+    [r0, z0],
+    ...(ch.funnelDepth > 0 ? [[r1, zFoot] as [number, number]] : []),
+    [r1, zTop],
+    [0, zTop],
   ];
-  return wasm.Manifold.revolve([profile], 48).translate([ch.x, ch.y, 0]);
+  let body = wasm.Manifold.revolve([profile], 48);
+  // Four vertical air-bleed ribs at 45°, 135°, 225°, 315° projecting into the
+  // funnel and neck wall: their sharp interior corners break the circular
+  // capillary meniscus so air escapes up the corners while liquid pours down.
+  const ribDepth = Math.min(0.45, Math.max(0, r1 - 0.8));
+  const ribWidth = Math.min(0.6, r1 * 0.3);
+  if (ribDepth > 0.1 && ribWidth > 0.1) {
+    const ribPoly: [number, number][] = [
+      [r0 - ribDepth, z0 - 0.5],
+      [r0 + 0.5, z0 - 0.5],
+      ...(ch.funnelDepth > 0 ? [[r1 + 0.5, zFoot] as [number, number]] : []),
+      [r1 + 0.5, zTop + 0.5],
+      [r1 - ribDepth, zTop + 0.5],
+      ...(ch.funnelDepth > 0 ? [[r1 - ribDepth, zFoot] as [number, number]] : []),
+    ];
+    const slab = wasm.Manifold.extrude([ribPoly], ribWidth).translate([0, 0, -ribWidth / 2]).rotate([90, 0, 0]);
+    for (const deg of [45, 135, 225, 315]) {
+      const rib = slab.rotate([0, 0, deg]);
+      const next = body.subtract(rib);
+      body.delete();
+      rib.delete();
+      body = next;
+    }
+    slab.delete();
+    body.numTri();
+  }
+  const out = body.translate([ch.x, ch.y, 0]);
+  body.delete();
+  out.numTri();
+  return out;
 }

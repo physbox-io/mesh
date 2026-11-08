@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { generateMoldMeshes, DEFAULT_MOLD_OPTIONS, type MoldOptions } from '../src/utils/moldExporter';
 import { simulateCastFromMoldResult } from '../src/utils/moldCastSimulation';
-import { planPeakVents, type PourSpans } from '../src/utils/moldGating';
+import { planPeakVents, feedRouteOf, type PourSpans } from '../src/utils/moldGating';
 import { loadManifold } from '../src/utils/sculptCut';
 import type { Grid } from '../src/utils/moldColumns';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
@@ -90,7 +90,7 @@ describe('bottom fill', () => {
     expect(r.features!.vents.length).toBeGreaterThan(0);
     const cast = await simulateCastFromMoldResult(r, { castMaterial: 'epoxy' });
     expect(cast.success, cast.error).toBe(true);
-    expect(cast.fill!.filledShare).toBeGreaterThan(0.97);
+    expect(cast.fill!.filledShare, JSON.stringify({ fill: cast.fill, vol: cast.castVolumeMm3, comps: cast.cavityComponents, size: cast.sizeMm, warn: cast.warnings })).toBeGreaterThan(0.97);
     // Poured from the top it fills no better.
     const top = await simulateCastFromMoldResult(generateMoldMeshes(plateAndBulb, { ...OPTS, sprueFeed: 'top' }, wasm), { castMaterial: 'epoxy' });
     expect(top.fill!.filledShare).toBeLessThanOrEqual(cast.fill!.filledShare + 1e-3);
@@ -115,5 +115,31 @@ describe('bottom fill', () => {
     const r = generateMoldMeshes(plateAndBulb, { ...OPTS, includeVents: false }, wasm);
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/needs its vents/);
+  });
+
+  it('places the bottom-fill horizontal runner below the soluble liner skin in the rigid shell', () => {
+    const skinMm = 2.4;
+    const r = generateMoldMeshes(plateAndBulb, { ...OPTS, dissolvableLiner: true, linerSkinMm: skinMm }, wasm);
+    expect(r.success, r.error).toBe(true);
+    const route = feedRouteOf(r.features)!;
+    // Top of the horizontal runner (`runnerZ + r`) must sit at least 1 mm below the liner floor (`gate[2] - skinMm`).
+    expect(route.runnerZ + route.r).toBeLessThanOrEqual(route.gate[2] - skinMm - 1 + 1e-6);
+  });
+
+  it('keeps the down-sprue clear of the widened cavity when draft is added to an exact/lined mold', () => {
+    const deepBlock: SceneGraph = {
+      nodes: [{
+        id: 'b1', name: 'deep', type: 'body', pos: [0, 0, 0],
+        geoms: [{ name: 'b', type: 'box', size: [0.01, 0.01, 0.01], pos: [0, 0, 0.01] } as SceneGeom],
+        joints: [], children: [],
+      }],
+    };
+    const undrafted = generateMoldMeshes(deepBlock, { ...OPTS, draftAngleDeg: 0, wallMarginMm: 15 }, wasm);
+    const drafted = generateMoldMeshes(deepBlock, { ...OPTS, draftAngleDeg: 8, draftMode: 'add', wallMarginMm: 15 }, wasm);
+    expect(undrafted.success, undrafted.error).toBe(true);
+    expect(drafted.success, drafted.error).toBe(true);
+    const d0 = Math.hypot(...feedRouteOf(undrafted.features)!.down);
+    const d8 = Math.hypot(...feedRouteOf(drafted.features)!.down);
+    expect(d8).toBeGreaterThan(d0 + 0.5);
   });
 });
