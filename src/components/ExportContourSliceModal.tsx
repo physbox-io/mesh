@@ -30,7 +30,7 @@ import { RackToolPicker } from './RackToolPicker';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { contourSheetParts } from '../utils/sheetSimulation';
 import { ExportSubjectLine } from './ExportSubjectLine';
-import { buildEtchHandoffUrl } from '../utils/etchHandoff';
+import { buildEtchHandoffUrl, openInEtch } from '../utils/etchHandoff';
 
 interface ExportContourSliceModalProps {
   /** What it works on: the selection, or the whole scene (shown under the title). */
@@ -392,9 +392,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
         thicknessMm: materialThicknessMm,
         material,
       });
-      const tab = window.open(url, '_blank');
-      if (!tab) throw new Error('The browser blocked the new tab: allow pop-ups for this site, then try again.');
-      tab.opener = null;
+      openInEtch(url);
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'The slices could not be sent to Etch.');
     }

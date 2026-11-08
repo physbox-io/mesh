@@ -32,6 +32,25 @@ export function etchBaseUrl(location: { hostname: string; protocol: string } = w
   return local ? `${location.protocol}//${location.hostname}:5176/` : 'https://etch.physbox.io/';
 }
 
+/** The window name every send to Etch targets, so a re-send lands in the same tab. */
+export const ETCH_TAB_NAME = 'physbox-etch';
+
+/**
+ * Opens a handoff URL in Etch, reusing the Etch tab an earlier send opened.
+ *
+ * A named target rather than '_blank': the second send navigates the first
+ * tab, and because only the fragment differs Etch takes it without a reload
+ * (it listens for `hashchange`). The opener is kept on purpose — the browser
+ * only lets this window find the tab again by name while it is the tab's
+ * opener, and the other end is our own app. A tab of Etch the person opened
+ * themselves cannot be reached this way; the first send opens one alongside it.
+ */
+export function openInEtch(url: string): void {
+  const tab = window.open(url, ETCH_TAB_NAME);
+  if (!tab) throw new Error('The browser blocked the Etch tab: allow pop-ups for this site, then try again.');
+  tab.focus();
+}
+
 /**
  * Past this, the link is more likely to be truncated than opened.
  *

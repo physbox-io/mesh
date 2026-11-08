@@ -7,7 +7,7 @@ import { derivedFingerWidthMm, type LaserCutOptions, type LaserCutResult, type S
 import { canStartSheetJob, defaultCornerRelief, layoutKerf, layoutMargin, routerStepdownMm } from '../utils/sheetCutRecipe';
 import { useLaserPowers } from '../hooks/useLaserPowers';
 import { useExportJob } from '../utils/exportWorkerClient';
-import { buildEtchHandoffUrl } from '../utils/etchHandoff';
+import { buildEtchHandoffUrl, openInEtch } from '../utils/etchHandoff';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
@@ -480,7 +480,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
         thicknessMm: materialThicknessMm,
         material,
       });
-      window.open(url, '_blank', 'noopener');
+      openInEtch(url);
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'That cut could not be sent to Etch.');
     }

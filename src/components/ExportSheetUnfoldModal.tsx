@@ -1,3 +1,4 @@
+import { openInEtch } from '../utils/etchHandoff';
 import React, { useState, useMemo } from 'react';
 import {
   X,
@@ -262,7 +263,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
         ...options,
         material: useStore.getState().material,
       });
-      window.open(url, '_blank', 'noopener');
+      openInEtch(url);
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'Could not send flat pattern to Etch.');
     }

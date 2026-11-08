@@ -11,7 +11,7 @@
 import { ExportWorkerClient } from './exportWorkerClient';
 import { DEFAULT_LASER_OPTIONS, type LaserCutOptions } from './laserCutExporter';
 import { defaultCornerRelief, layoutKerf } from './sheetCutRecipe';
-import { buildEtchHandoffUrl } from './etchHandoff';
+import { buildEtchHandoffUrl, openInEtch } from './etchHandoff';
 import type { MaterialId } from './feedsAndSpeeds';
 import type { SceneGraph } from '../types/scene';
 
@@ -82,9 +82,5 @@ export async function etchUrlForScene(req: EtchSceneRequest): Promise<string> {
  */
 export async function openSceneInEtch(req: EtchSceneRequest): Promise<void> {
   const url = await etchUrlForScene(req);
-  // Not 'noopener': with it window.open returns null whether or not the tab
-  // opened, and a blocked one could not be told apart. Cut loose by hand.
-  const tab = window.open(url, '_blank');
-  if (!tab) throw new Error('The browser blocked the new tab: allow pop-ups for this site, then press Etch again.');
-  tab.opener = null;
+  openInEtch(url);
 }

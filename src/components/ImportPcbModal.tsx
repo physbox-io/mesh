@@ -1,3 +1,4 @@
+import { openInEtch } from '../utils/etchHandoff';
 import React, { useMemo, useState } from 'react';
 import {
   X,
@@ -214,7 +215,7 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
         ...faceplateOptions,
         material: useStore.getState().material,
       });
-      window.open(url, '_blank', 'noopener,noreferrer');
+      openInEtch(url);
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'Failed to open faceplate in Etch.');
     }
