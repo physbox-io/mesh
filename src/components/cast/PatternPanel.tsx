@@ -160,9 +160,17 @@ export const PatternPanel: React.FC<{
                   {' '}pattern ≈ {round(summary.patternPlasticG)} g of PLA
                   {options.addGating && (
                     <>
-                      {' '}· {summary.ventsMm.length === 0
-                        ? 'no vents, the sprue breathes it'
-                        : `${summary.ventsMm.length} vent${summary.ventsMm.length === 1 ? '' : 's'}, one per air pocket`}
+                      {' '}· {(() => {
+                        const n = summary.ventsMm.length;
+                        const far = summary.ventsMm.some((v) => v.reason === 'far-end');
+                        const pockets = n - (far ? 1 : 0);
+                        if (n === 0) return 'no vents, the sprue breathes it';
+                        const parts = [
+                          ...(pockets > 0 ? [`${pockets} air pocket${pockets === 1 ? '' : 's'}`] : []),
+                          ...(far ? ['the far end'] : []),
+                        ];
+                        return `${n} vent${n === 1 ? '' : 's'}: ${parts.join(' + ')}`;
+                      })()}
                     </>
                   )}
                 </p>

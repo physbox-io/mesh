@@ -42,7 +42,7 @@ import { draftTriangles } from './castPrep';
 import { sampleColumns } from './partColumns';
 
 import { castMetal } from './castMaterials';
-import { trappedAirInSoup } from './trappedAir';
+import { planBurnoutVents } from './trappedAir';
 
 /**
  * Which of the two routes the pattern is being printed for. They share the
@@ -157,10 +157,11 @@ export interface CastSummary {
   gateAtMm: { x: number; y: number };
   /**
    * Lost PLA: where each vent rod leaves the casting (pattern coordinates, mm,
-   * Z from the base) — one per pocket that would trap air; empty when the sprue
-   * vents the only one, or with no gating.
+   * Z from the base): one per pocket that would hold air, and one at the far
+   * end of a casting that reaches well away from the sprue. Empty when the
+   * sprue vents it all, or with no gating.
    */
-  ventsMm: { x: number; y: number; z: number }[];
+  ventsMm: { x: number; y: number; z: number; reason: 'pocket' | 'far-end' }[];
   partingFromBaseMm: number;
   /** The parting plane as a world height, metres — what castPrep tapers draft from. */
   partingWorldZ: number;
@@ -239,6 +240,12 @@ const MAX_BURNOUT_VENTS = 12;
  * breathes not at all, which is why its vents take every pocket.
  */
 const MIN_BURNOUT_POCKET_MM = 1;
+/**
+ * Air past this much, mm³, is vented however shallow it stands: a broad flat
+ * that the investment would need too long to breathe out while the metal is
+ * still running.
+ */
+const MIN_BURNOUT_AIR_MM3 = 500;
 
 /** Signed volume of a triangle soup (9 numbers per tri), mm³. */
 function triSoupVolume(tris: Float64Array, solidIds?: number[]): number {
@@ -296,6 +303,32 @@ function appendCylinder(out: number[], cx: number, cy: number, z0: number, z1: n
     pushTri(out, bot, p1, p0); // bottom cap
     pushTri(out, top, q0, q1); // top cap
     pushTri(out, p0, p1, q1); // wall
+    pushTri(out, p0, q1, q0);
+  }
+}
+
+/** A closed cylinder of radius `r` from point `a` to point `b`, wound outward. */
+function appendTube(out: number[], a: number[], b: number[], r: number, seg = 16): void {
+  const wx = b[0] - a[0], wy = b[1] - a[1], wz = b[2] - a[2];
+  const len = Math.hypot(wx, wy, wz);
+  if (len < 1e-9) return;
+  const w = [wx / len, wy / len, wz / len];
+  // u, v, w right-handed, as x, y, z are for the vertical cylinder.
+  const helper = Math.abs(w[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  let u = [helper[1] * w[2] - helper[2] * w[1], helper[2] * w[0] - helper[0] * w[2], helper[0] * w[1] - helper[1] * w[0]];
+  const ul = Math.hypot(u[0], u[1], u[2]);
+  u = [u[0] / ul, u[1] / ul, u[2] / ul];
+  const v = [w[1] * u[2] - w[2] * u[1], w[2] * u[0] - w[0] * u[2], w[0] * u[1] - w[1] * u[0]];
+  const ring = (c: number[], t: number) => {
+    const ct = Math.cos(t), st = Math.sin(t);
+    return [c[0] + r * (ct * u[0] + st * v[0]), c[1] + r * (ct * u[1] + st * v[1]), c[2] + r * (ct * u[2] + st * v[2])];
+  };
+  for (let i = 0; i < seg; i++) {
+    const t0 = (i / seg) * 2 * Math.PI, t1 = ((i + 1) / seg) * 2 * Math.PI;
+    const p0 = ring(a, t0), p1 = ring(a, t1), q0 = ring(b, t0), q1 = ring(b, t1);
+    pushTri(out, a, p1, p0);
+    pushTri(out, b, q0, q1);
+    pushTri(out, p0, p1, q1);
     pushTri(out, p0, q1, q0);
   }
 }
@@ -875,7 +908,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // Where the metal goes in, filled by whichever branch builds the rig.
   const gateAt = { x: 0, y: 0 };
   /** Lost PLA: where each vent leaves the casting, pattern coordinates, mm. */
-  const ventsMm: { x: number; y: number; z: number }[] = [];
+  const ventsMm: CastSummary['ventsMm'] = [];
   if (opts.addGating && !lostPla) {
     // Everything below is laid out along the gate-to-riser line rather than
     // along X, so the rig follows the casting whichever way it lies.
@@ -1022,45 +1055,64 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     gatingVolumeMm3 += Math.PI * sprueR * sprueR * Math.max(0, sprueZ1 - sprueZ0);
     gatingVolumeMm3 += (Math.PI * cupH * (sprueR * sprueR + sprueR * cupR + cupR * cupR)) / 3;
     rigTopZ = Math.max(rigTopZ, sprueZ1 + cupH);
-    // Vents: one for every pocket where the air would be trapped, up to the
-    // cup rim. Not the two highest points: a second boss lower than the first,
-    // or a pocket under a ledge, holds its own air whatever the peak is doing.
-    // The search is the silicone mold's, run on the cavity as it will be filled
-    // — the part with the sprue standing in it — so the sprue's own pocket
-    // reads as open and only the others are vented.
-    const ventDia = Math.max(2, Math.min(4, sprueDia * 0.35));
+    // Vents: one for every pocket that would hold air, and one at the far end
+    // of the casting, each up to the cup rim. Not the two highest points: a
+    // second boss lower than the first, or a pocket under a ledge, holds its
+    // own air whatever the peak is doing. The cavity is read as it will be
+    // filled — the part with the sprue standing in it, each solid on its own —
+    // so the sprue's own pocket reads as open and only the others are vented.
+    // Printed rods under 3 mm snap while the flask is invested.
+    const ventDia = Math.max(3, Math.min(4, sprueDia * 0.35));
     const ventR = ventDia / 2;
     const cavity: number[] = Array.from(part);
+    const cavityIds: number[] = solidIds.length * 9 >= part.length ? solidIds.slice(0, part.length / 9) : new Array(part.length / 9).fill(0);
+    const before = cavity.length;
     appendCylinder(cavity, attX, attY, sprueZ0 / grow, rigTopZ / grow, sprueR / grow);
-    const pockets = trappedAirInSoup(Float64Array.from(cavity), rigTopZ / grow);
-    // Two vents this close are one pocket read twice (a faceted dome, a flat
-    // top split by the grid) or two bumps of a texture that a single vent
-    // serves; measured in 3D, so a pocket under a ledge is never merged with
-    // the ledge's own vent above it.
-    const merge = Math.max(6, 3 * ventDia, span * 0.1 * grow);
-    const sprueAxisDist = (x: number, y: number, z: number) => {
-      const dz = z < sprueZ0 ? sprueZ0 - z : 0;
-      return Math.hypot(Math.hypot(x - attX * grow, y - attY * grow), dz);
-    };
-    const vents: { x: number; y: number; z: number; floorZ: number; metalAboveMm: number }[] = [];
-    let skipped = 0;
-    for (const p of pockets) {
-      if (p.depthMm * grow < MIN_BURNOUT_POCKET_MM) continue;
-      const v = { x: p.x * grow, y: p.y * grow, z: p.z * grow, floorZ: p.floorZ * grow, metalAboveMm: p.metalAboveMm * grow };
-      if (sprueAxisDist(v.x, v.y, v.z) < Math.max(merge, sprueR + ventR + 2)) continue;
-      if (vents.some((w) => Math.hypot(v.x - w.x, v.y - w.y, v.z - w.z) < merge)) continue;
-      if (vents.length >= MAX_BURNOUT_VENTS) { skipped++; continue; }
-      vents.push(v);
-    }
-    if (skipped > 0) {
+    let sprueId = 1;
+    for (const id of cavityIds) if (id >= sprueId) sprueId = id + 1;
+    for (let t = before / 9; t < cavity.length / 9; t++) cavityIds.push(sprueId);
+    // A vent has to stay clear of the sprue and of the cup that opens out above
+    // it — one that broke into either would be a second downsprue, feeding the
+    // pocket instead of venting it. Far enough out, a rod runs straight up to
+    // the rim beside the cup. Closer in, it rises clear of the sprue, then
+    // leans out at 45° under the cup until it clears the rim, then goes up.
+    // Only a pocket under the sprue itself has no way round.
+    const ventGap = ventR + 2;
+    const clearOfSprue = (xPart: number, yPart: number) =>
+      Math.hypot((xPart - attX) * grow, (yPart - attY) * grow) >= sprueR * 1.35 + ventGap;
+    const plan = planBurnoutVents(
+      Float64Array.from(cavity),
+      rigTopZ / grow,
+      {
+        minDepthMm: MIN_BURNOUT_POCKET_MM / grow,
+        minAirMm3: MIN_BURNOUT_AIR_MM3 / (grow * grow * grow),
+        maxVents: MAX_BURNOUT_VENTS,
+        farEndMm: Math.max(25, 5 * sprueDia) / grow,
+        accepts: (x, y) => clearOfSprue(x, y),
+      },
+      cavityIds,
+    );
+    if (plan.leftOver > 0) {
       warnings.push(
-        `Air is trapped in ${vents.length + skipped} places; the ${MAX_BURNOUT_VENTS} highest are vented. Turning the part to stand another way may trap less.`
+        `Air is trapped in ${plan.vents.length + plan.leftOver} places; the ${MAX_BURNOUT_VENTS} biggest are vented. Turning the part to stand another way may trap less.`
       );
     }
-    for (const v of vents) {
-      // Rooted a little into the metal under the ceiling, never through its floor,
-      // with a flared foot so it cannot snap off along one layer line.
-      const z0 = Math.max(v.floorZ + 0.8, v.z - Math.max(1.2, ventR));
+    for (const u of plan.unventable) {
+      warnings.push(
+        `Air is trapped ${(u.z * grow).toFixed(0)} mm up, beside the sprue, where no vent clears the sprue and cup. Move the sprue or turn the part.`
+      );
+    }
+    if (plan.unreached.length > 0) {
+      warnings.push(
+        `${plan.unreached.length === 1 ? 'A piece' : `${plan.unreached.length} pieces`} of the part ${plan.unreached.length === 1 ? 'is' : 'are'} not joined to the rest, so the metal from the sprue never reaches ${plan.unreached.length === 1 ? 'it' : 'them'}. Join ${plan.unreached.length === 1 ? 'it' : 'them'} on, or cast ${plan.unreached.length === 1 ? 'it' : 'them'} separately.`
+      );
+    }
+    for (const pv of plan.vents) {
+      const v = { x: pv.x * grow, y: pv.y * grow, z: pv.z * grow, floorZ: pv.floorZ * grow };
+      // Rooted part way into the metal under the ceiling and never through its
+      // floor — nor above the ceiling, however thin the metal there — with a
+      // flared foot so it cannot snap off along one layer line.
+      const z0 = Math.min(v.z - 0.2, Math.max(v.floorZ + 0.4 * (v.z - v.floorZ), v.z - Math.max(1.2, ventR)));
       const ventFilletZ1 = Math.min(rigTopZ, v.z + Math.min(2.0, ventR * 0.9));
       const ventStops: Array<{ z: number; r: number }> =
         ventFilletZ1 > z0 + 0.4
@@ -1073,12 +1125,33 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
               { z: z0, r: ventR },
               { z: rigTopZ, r: ventR },
             ];
-      appendRevolutionStack(pat, v.x, v.y, ventStops, 16);
-      // A vent that rises through a ledge above its pocket is metal only where it
-      // is not already part.
-      const ventLen = Math.max(0, rigTopZ - v.z - v.metalAboveMm);
-      gatingVolumeMm3 += Math.PI * ventR * ventR * ventLen;
-      ventsMm.push({ x: v.x, y: v.y, z: v.z });
+      // Metal only where it is not already part: not the stretch through a
+      // ledge above the pocket, and the flared foot above the ceiling counted.
+      const footH = Math.max(0, ventFilletZ1 - v.z);
+      const footR = ventR * 1.5 - (ventR * 0.5 * (v.z - z0)) / Math.max(1e-9, ventFilletZ1 - z0);
+      gatingVolumeMm3 += (Math.PI * footH * (footR * footR + footR * ventR + ventR * ventR)) / 3;
+      const offX = v.x - attX * grow, offY = v.y - attY * grow;
+      const d = Math.hypot(offX, offY);
+      const lean = cupR + ventGap - d;
+      if (lean <= 0) {
+        appendRevolutionStack(pat, v.x, v.y, ventStops, 16);
+        gatingVolumeMm3 += Math.PI * ventR * ventR * Math.max(0, rigTopZ - Math.max(v.z, ventFilletZ1) - pv.metalAboveMm * grow);
+      } else {
+        // Up, out under the cup, up again. Each upright overlaps the lean by
+        // its radius so the elbows close.
+        const ux = offX / d, uy = offY / d;
+        const bendTop = Math.max(sprueZ1 - 1, Math.max(v.z, ventFilletZ1) + 2 + lean);
+        const bendBot = bendTop - lean;
+        const ox = v.x + ux * lean, oy = v.y + uy * lean;
+        const lower = ventStops.filter((st) => st.z < bendBot);
+        appendRevolutionStack(pat, v.x, v.y, [...lower, { z: bendBot + ventR, r: ventR }], 16);
+        appendTube(pat, [v.x, v.y, bendBot], [ox, oy, bendTop], ventR, 16);
+        appendRevolutionStack(pat, ox, oy, [{ z: bendTop - ventR, r: ventR }, { z: rigTopZ, r: ventR }], 16);
+        gatingVolumeMm3 += Math.PI * ventR * ventR * (
+          Math.max(0, bendBot - Math.max(v.z, ventFilletZ1) - pv.metalAboveMm * grow) + lean * Math.SQRT2 + (rigTopZ - bendTop)
+        );
+      }
+      ventsMm.push({ x: v.x, y: v.y, z: v.z, reason: pv.reason });
     }
   }
 

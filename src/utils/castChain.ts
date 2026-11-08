@@ -290,7 +290,7 @@ function piece(
 
 /** Where air would be trapped in a cavity poured from the top to `level`; see `trappedAirInSoup`. */
 export function trappedAirPoints(casting: Manifold, level: number): { x: number; y: number; z: number }[] {
-  return trappedAirInSoup(soupOf(meshOf(casting)), level).map(({ x, y, z }) => ({ x, y, z }));
+  return trappedAirInSoup(soupOf(meshOf(casting)), level);
 }
 
 /**

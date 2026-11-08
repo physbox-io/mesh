@@ -670,11 +670,147 @@ describe('burnout vents', () => {
     const r = generateCastPattern({ nodes } as unknown as SceneGraph, { method: 'lost-pla', metalId: 'aluminium' });
     expect(r.success, r.error).toBe(true);
     expect(r.summary.ventsMm).toHaveLength(12);
-    expect(r.warnings.join(' ')).toMatch(/trapped in \d+ places; the 12 highest are vented/);
+    expect(r.warnings.join(' ')).toMatch(/trapped in \d+ places; the 12 biggest are vented/);
   });
 
   it('leaves the sand route and an ungated pattern without vents', () => {
     expect(generateCastPattern(bossPlate(), { method: 'sand' }).summary.ventsMm).toHaveLength(0);
     expect(generateCastPattern(bossPlate(), { method: 'lost-pla', addGating: false }).summary.ventsMm).toHaveLength(0);
+  });
+});
+
+// The cases a review of the first version found it getting wrong. Scenes of
+// separate primitives, as Mesh users build them: bodies sharing a floor,
+// standing on one another, touching face to face.
+describe('burnout vents on scenes of separate bodies', () => {
+  const lost = (scene: SceneGraph) => generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium' });
+  const grown = (r: ReturnType<typeof generateCastPattern>) => 1 + r.summary.shrinkPercent / 100;
+  const pockets = (r: ReturnType<typeof generateCastPattern>) => r.summary.ventsMm.filter((v) => v.reason === 'pocket');
+
+  it('sees pins that share the floor with the block the sprue stands on', () => {
+    // All from z = 0: a winding count over the raw scene used to drop the
+    // pins' entries and read the sprue as a dead end.
+    const r = lost({ nodes: [
+      box('plate', 0, 0, 2.5, 60, 15, 2.5),
+      box('block', -40, 0, 15, 15, 15, 15),
+      box('pinA', 20, 0, 12, 1.5, 1.5, 12),
+      box('pinB', 45, 0, 11, 1.5, 1.5, 11),
+    ] } as unknown as SceneGraph);
+    expect(r.success, r.error).toBe(true);
+    expect(ventsNear(r, 20, 0, 3).length, 'pin A').toBe(1);
+    expect(ventsNear(r, 45, 0, 3).length, 'pin B').toBe(1);
+    expect(r.warnings.join(' ')).not.toMatch(/not joined/);
+  });
+
+  it('puts no pocket vent where one body stands on another', () => {
+    const r = lost(bossPlate());
+    const g = grown(r);
+    for (const v of pockets(r)) {
+      expect([-40, 0, 40].some((bx) => Math.abs(v.x / g - bx) < 8), `vent at ${v.x / g},${v.y / g}`).toBe(true);
+    }
+  });
+
+  it('finds no phantom pockets on the diagonal of a square top', () => {
+    const r = lost({ nodes: [box('block', 0, 0, 10, 50, 50, 10), box('pin', 30, 30, 30, 1.5, 1.5, 10)] } as unknown as SceneGraph);
+    const g = grown(r);
+    for (const v of pockets(r)) expect(Math.hypot(v.x / g - 30, v.y / g - 30), `vent at ${v.x / g},${v.y / g}`).toBeLessThan(3);
+  });
+
+  it('vents two blind pins side by side, each its own pocket', () => {
+    const r = lost({ nodes: [
+      box('plate', 0, 0, 2.5, 60, 15, 2.5),
+      box('block', -40, 0, 15, 15, 15, 15),
+      box('pinA', 30, 0, 12, 1.5, 1.5, 12),
+      box('pinB', 38, 0, 11, 1.5, 1.5, 11),
+    ] } as unknown as SceneGraph);
+    expect(ventsNear(r, 30, 0, 3).length).toBe(1);
+    expect(ventsNear(r, 38, 0, 3).length).toBe(1);
+  });
+
+  it('gives a boss studded with small bumps one vent, not one per bump', () => {
+    const nodes = [box('plate', 0, 0, 2.5, 60, 15, 2.5), box('block', -40, 0, 15, 15, 15, 15), box('boss', 35, 0, 10, 6, 6, 10)];
+    for (const [dx, dy] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) nodes.push(box(`bump${dx}${dy}`, 35 + dx, dy, 20.25, 1, 1, 0.25));
+    const r = lost({ nodes } as unknown as SceneGraph);
+    expect(ventsNear(r, 35, 0, 7)).toHaveLength(1);
+  });
+
+  it('puts the vent in the middle of a flat ceiling, not on its corner', () => {
+    const r = lost({ nodes: [
+      box('plate', 0, 0, 2.5, 60, 15, 2.5),
+      box('block', -40, 0, 15, 15, 15, 15),
+      box('boss', 30, 0, 10, 10, 10, 10),
+    ] } as unknown as SceneGraph);
+    const [v] = ventsNear(r, 30, 0, 12);
+    const g = grown(r);
+    expect(v).toBeDefined();
+    expect(Math.hypot(v.x / g - 30, v.y / g)).toBeLessThan(4);
+  });
+
+  it('never runs a vent into the cup or the sprue, leaning it out under the cup instead', () => {
+    // A pin 7 mm from a block's middle, where the sprue lands: a straight rod
+    // would break into the cup.
+    const r = lost({ nodes: [box('block', 0, 0, 5, 12, 12, 5), box('pin', 7, 0, 15, 1.5, 1.5, 5)] } as unknown as SceneGraph);
+    expect(r.success, r.error).toBe(true);
+    const g = grown(r);
+    expect(ventsNear(r, 7, 0, 3).length + (r.warnings.join(' ').match(/beside the sprue/) ? 1 : 0)).toBe(1);
+    // At the rim — the top of the rig — every point is either the cup's own
+    // or a vent's, standing clear outside the cup: read off the STL.
+    const view = new DataView(r.patternStl.buffer, r.patternStl.byteOffset, r.patternStl.byteLength);
+    const count = view.getUint32(80, true);
+    const sx = r.summary.gateAtMm.x, sy = r.summary.gateAtMm.y;
+    const pts: number[][] = [];
+    let rim = -Infinity;
+    for (let t = 0; t < count; t++) {
+      for (let k = 0; k < 3; k++) {
+        const o = 84 + t * 50 + 12 + k * 12;
+        const p = [view.getFloat32(o, true), view.getFloat32(o + 4, true), view.getFloat32(o + 8, true)];
+        pts.push(p);
+        rim = Math.max(rim, p[2]);
+      }
+    }
+    const cupR = Math.max(1.5 * r.summary.sprueDiaMm, 9);
+    const atRim = pts.filter((p) => Math.abs(p[2] - rim) < 1e-3).map((p) => Math.hypot(p[0] - sx, p[1] - sy));
+    expect(atRim.every((d) => d <= cupR + 0.01 || d >= cupR + 1)).toBe(true);
+    expect(atRim.some((d) => d >= cupR + 1), 'a vent reaches the rim').toBe(true);
+    void g;
+  });
+
+  it('roots a vent in a thin ceiling, never above it', () => {
+    // Laid out symmetric about x = 0, so pattern and scene share their centre.
+    const r = lost({ nodes: [
+      box('block', -32, 0, 15, 8, 12, 15),
+      box('arm', 8, 0, 12, 32, 4, 2),
+      box('cap', 36, 0, 20.25, 4, 4, 0.25),
+      box('stem', 33, 0, 17, 1, 1, 3), // at the cap's edge: its middle is 0.5 mm of metal
+    ] } as unknown as SceneGraph);
+    const g = grown(r);
+    const [v] = ventsNear(r, 36, 0, 4);
+    expect(v).toBeDefined();
+    // The STL has the rod's foot at or below the ceiling it leaves from.
+    const view = new DataView(r.patternStl.buffer, r.patternStl.byteOffset, r.patternStl.byteLength);
+    let lowest = Infinity;
+    for (let t = 0; t < view.getUint32(80, true); t++) {
+      for (let k = 0; k < 3; k++) {
+        const o = 84 + t * 50 + 12 + k * 12;
+        const x = view.getFloat32(o, true), y = view.getFloat32(o + 4, true), z = view.getFloat32(o + 8, true);
+        if (Math.hypot(x - v.x, y - v.y) < 0.01) lowest = Math.min(lowest, z);
+      }
+    }
+    expect(lowest).toBeLessThanOrEqual(v.z);
+    expect(lowest).toBeGreaterThan(20 * g);
+  });
+
+  it('vents the far end of a long flat plate, where the metal drives the air', () => {
+    const r = lost({ nodes: [box('plate', 0, 0, 2.5, 50, 50, 2.5), box('lump', -40, -40, 6, 8, 8, 6)] } as unknown as SceneGraph);
+    const far = r.summary.ventsMm.filter((v) => v.reason === 'far-end');
+    expect(far).toHaveLength(1);
+    expect(far[0].x).toBeGreaterThan(20);
+    expect(far[0].y).toBeGreaterThan(20);
+  });
+
+  it('says so when a body is not joined to the one the sprue feeds, and does not vent it', () => {
+    const r = lost({ nodes: [box('a', -30, 0, 10, 10, 10, 10), box('b', 30, 0, 5, 5, 5, 5)] } as unknown as SceneGraph);
+    expect(r.warnings.join(' ')).toMatch(/not joined to the rest/);
+    expect(ventsNear(r, 30, 0, 6)).toHaveLength(0);
   });
 });
