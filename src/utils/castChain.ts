@@ -24,7 +24,7 @@ import type { IndexedMesh } from './stlMesh';
 import { stlToMesh } from './stlMesh';
 import { loadManifold } from './sculptCut';
 import { manifoldToMeshMm } from './timberBreakdown';
-import { castColumnSpans } from './columnSolid';
+import { trappedAirInSoup } from './trappedAir';
 import { pourIntoCavity } from './pourCast';
 import { pourNodeFor } from './pourTarget';
 import { planPourBox, sceneWithPourBox, masterSoupMm } from './pourBoxScene';
@@ -288,74 +288,9 @@ function piece(
 
 // --- Silicone ---------------------------------------------------------------
 
-/**
- * Where air would be trapped in a cavity poured from the top to `level`.
- *
- * The cavity is read as columns of solid spans. Each span's top is a ceiling
- * (unless it is the free surface at the fill level), and air under it rises
- * into a neighbouring column's span that overlaps it and reaches higher. A
- * ceiling with nowhere higher to go traps air: every span is checked, not just
- * the top one in its column, so a pocket under a ledge under another ledge is
- * found too. Each connected patch of trapped ceilings gets one vent, at its
- * highest point.
- */
+/** Where air would be trapped in a cavity poured from the top to `level`; see `trappedAirInSoup`. */
 export function trappedAirPoints(casting: Manifold, level: number): { x: number; y: number; z: number }[] {
-  const { min, max } = casting.boundingBox();
-  const span = Math.max(max[0] - min[0], max[1] - min[1]);
-  const cell = Math.max(0.5, span / 150);
-  const cols = Math.ceil((max[0] - min[0]) / cell) + 1;
-  const rows = Math.ceil((max[1] - min[1]) / cell) + 1;
-  const spans = castColumnSpans(soupOf(meshOf(casting)), { minX: min[0], minY: min[1], stepX: cell, stepY: cell, cols, rows });
-  const tol = Math.max(0.5, cell);
-  // Spans of column k are nodes offset[k]/2 .. offset[k+1]/2.
-  const node = (k: number) => [spans.offset[k] / 2, spans.offset[k + 1] / 2] as const;
-  const bot = (n: number) => spans.z[n * 2];
-  const top = (n: number) => spans.z[n * 2 + 1];
-  const nodeCount = spans.z.length / 2;
-  const colOf = new Int32Array(nodeCount);
-  for (let k = 0; k < cols * rows; k++) { const [a, b] = node(k); for (let n = a; n < b; n++) colOf[n] = k; }
-  const overlapping = (n: number, k: number): number[] => {
-    const out: number[] = [];
-    const [a, b] = node(k);
-    for (let m = a; m < b; m++) if (bot(m) < top(n) - 1e-6 && top(m) > bot(n) + 1e-6) out.push(m);
-    return out;
-  };
-  const neighbours = (k: number): number[] => {
-    const c = k % cols, r = Math.floor(k / cols);
-    const out: number[] = [];
-    for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-      const cc = c + dc, rr = r + dr;
-      if (cc >= 0 && rr >= 0 && cc < cols && rr < rows) out.push(rr * cols + cc);
-    }
-    return out;
-  };
-  const trapped = new Uint8Array(nodeCount);
-  for (let n = 0; n < nodeCount; n++) {
-    if (top(n) >= level - tol) continue;
-    let escapes = false;
-    for (const k of neighbours(colOf[n])) {
-      if (overlapping(n, k).some((m) => top(m) > top(n) + 1e-4)) { escapes = true; break; }
-    }
-    if (!escapes) trapped[n] = 1;
-  }
-  const seen = new Uint8Array(nodeCount);
-  const out: { x: number; y: number; z: number }[] = [];
-  for (let n0 = 0; n0 < nodeCount; n0++) {
-    if (!trapped[n0] || seen[n0]) continue;
-    let best = n0;
-    const stack = [n0];
-    seen[n0] = 1;
-    while (stack.length) {
-      const n = stack.pop()!;
-      if (top(n) > top(best)) best = n;
-      for (const k of neighbours(colOf[n])) {
-        for (const m of overlapping(n, k)) if (trapped[m] && !seen[m]) { seen[m] = 1; stack.push(m); }
-      }
-    }
-    const k = colOf[best];
-    out.push({ x: min[0] + (k % cols) * cell, y: min[1] + Math.floor(k / cols) * cell, z: top(best) });
-  }
-  return out.sort((a, b) => b.z - a.z);
+  return trappedAirInSoup(soupOf(meshOf(casting)), level).map(({ x, y, z }) => ({ x, y, z }));
 }
 
 /**

@@ -577,3 +577,104 @@ describe('a parting height on a model drafted by Prepare for Casting', () => {
     expect(r.warnings.some((w) => /draft was prepared there/.test(w))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Burnout vents: one for every pocket that would trap air
+// ---------------------------------------------------------------------------
+//
+// Investment does not breathe the way sand does, so any high point the metal
+// rises into and cannot leave holds its air there. That is every local top of
+// the cavity, not the two highest points of it.
+
+const box = (name: string, x: number, y: number, z: number, hx: number, hy: number, hz: number) => ({
+  name,
+  pos: [x / 1000, y / 1000, z / 1000],
+  geoms: [{ name: 'g', type: 'box', size: [hx / 1000, hy / 1000, hz / 1000] }],
+});
+
+/** A 120 x 40 x 10 mm plate with bosses topping out at 40, 30 and 22 mm, at x = -40, 0, 40. */
+function bossPlate(): SceneGraph {
+  return {
+    nodes: [
+      box('plate', 0, 0, 5, 60, 20, 5),
+      box('tall', -40, 0, 25, 6, 6, 15),
+      box('mid', 0, 0, 20, 6, 6, 10),
+      box('low', 40, 0, 16, 6, 6, 6),
+    ],
+  } as unknown as SceneGraph;
+}
+
+/**
+ * A post with a high arm and, under the arm, a low arm ending in a 4 mm bump:
+ * the bump's top is a pocket the heightmap from above never sees, because the
+ * high arm is over it.
+ */
+function bumpUnderLedge(): SceneGraph {
+  return {
+    nodes: [
+      box('post', -30, 0, 25, 8, 8, 25),
+      box('high', 0, 0, 45, 30, 8, 5),
+      box('low', 0, 0, 5, 30, 8, 5),
+      box('bump', 20, 0, 12, 4, 4, 2),
+    ],
+  } as unknown as SceneGraph;
+}
+
+/** Plan positions of the pattern's vents in part terms (shrink taken out). */
+function ventsNear(r: ReturnType<typeof generateCastPattern>, x: number, y: number, within: number) {
+  const grow = 1 + r.summary.shrinkPercent / 100;
+  return r.summary.ventsMm.filter((v) => Math.hypot(v.x / grow - x, v.y / grow - y) < within);
+}
+
+describe('burnout vents', () => {
+  it('vents every boss the sprue is not on, not just the two highest', () => {
+    const r = generateCastPattern(bossPlate(), { method: 'lost-pla', metalId: 'aluminium' });
+    expect(r.success, r.error).toBe(true);
+    const grow = 1 + r.summary.shrinkPercent / 100;
+    const sprueX = r.summary.gateAtMm.x / grow;
+    for (const bx of [-40, 0, 40]) {
+      if (Math.abs(sprueX - bx) < 8) continue;
+      expect(ventsNear(r, bx, 0, 8).length, `boss at x=${bx}`).toBeGreaterThanOrEqual(1);
+    }
+    // Each vent leaves from the top of its boss, where the air collects.
+    for (const v of r.summary.ventsMm) {
+      const top = [[-40, 40], [0, 30], [40, 22]].find(([bx]) => Math.abs(v.x / grow - bx) < 8);
+      if (top) expect(v.z / grow).toBeCloseTo(top[1], 0);
+    }
+  });
+
+  it('finds a pocket under a ledge and vents it up through the ledge', () => {
+    const r = generateCastPattern(bumpUnderLedge(), { method: 'lost-pla', metalId: 'aluminium' });
+    expect(r.success, r.error).toBe(true);
+    const grow = 1 + r.summary.shrinkPercent / 100;
+    const under = ventsNear(r, 20, 0, 5).filter((v) => Math.abs(v.z / grow - 14) < 1);
+    expect(under).toHaveLength(1);
+    // The vent rod is metal only where the ledge is not, so the pour is not
+    // charged twice for the 10 mm of arm it passes through.
+    const without = generateCastPattern(bumpUnderLedge(), { method: 'lost-pla', metalId: 'aluminium', addGating: false });
+    expect(r.summary.gatingVolumeMm3).toBeGreaterThan(0);
+    expect(r.summary.pourWeightG).toBeGreaterThan(without.summary.pourWeightG);
+  });
+
+  it('puts no vent on a block the sprue already vents, and says nothing about it', () => {
+    const block = { nodes: [box('block', 0, 0, 10, 15, 15, 10)] } as unknown as SceneGraph;
+    const r = generateCastPattern(block, { method: 'lost-pla', metalId: 'bronze' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.ventsMm.length).toBeLessThanOrEqual(1);
+    expect(r.warnings.join(' ')).not.toMatch(/vent/i);
+  });
+
+  it('vents at most twelve pockets and says how many it left', () => {
+    const nodes = [box('plate', 0, 0, 3, 100, 100, 3)];
+    for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) nodes.push(box(`b${i}${j}`, -80 + 40 * i, -80 + 40 * j, 8, 4, 4, 2));
+    const r = generateCastPattern({ nodes } as unknown as SceneGraph, { method: 'lost-pla', metalId: 'aluminium' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.ventsMm).toHaveLength(12);
+    expect(r.warnings.join(' ')).toMatch(/trapped in \d+ places; the 12 highest are vented/);
+  });
+
+  it('leaves the sand route and an ungated pattern without vents', () => {
+    expect(generateCastPattern(bossPlate(), { method: 'sand' }).summary.ventsMm).toHaveLength(0);
+    expect(generateCastPattern(bossPlate(), { method: 'lost-pla', addGating: false }).summary.ventsMm).toHaveLength(0);
+  });
+});

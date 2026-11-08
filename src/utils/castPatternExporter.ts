@@ -42,6 +42,7 @@ import { draftTriangles } from './castPrep';
 import { sampleColumns } from './partColumns';
 
 import { castMetal } from './castMaterials';
+import { trappedAirInSoup } from './trappedAir';
 
 /**
  * Which of the two routes the pattern is being printed for. They share the
@@ -154,6 +155,12 @@ export interface CastSummary {
    * this went looking for.
    */
   gateAtMm: { x: number; y: number };
+  /**
+   * Lost PLA: where each vent rod leaves the casting (pattern coordinates, mm,
+   * Z from the base) — one per pocket that would trap air; empty when the sprue
+   * vents the only one, or with no gating.
+   */
+  ventsMm: { x: number; y: number; z: number }[];
   partingFromBaseMm: number;
   /** The parting plane as a world height, metres — what castPrep tapers draft from. */
   partingWorldZ: number;
@@ -223,6 +230,15 @@ function draftSolids(
 
 /** Beyond this the draw analysis costs more than the extra fidelity is worth. */
 const MAX_ANALYSIS_CELLS = 120_000;
+/** More trapped pockets than this and the part wants standing another way, not venting. */
+const MAX_BURNOUT_VENTS = 12;
+/**
+ * A pocket whose air stands less than this deep, mm, is left to the
+ * investment: burnt out, it is porous enough to breathe a skin that thin, and
+ * venting it would stud a relief with a rod on every hilltop. A silicone mold
+ * breathes not at all, which is why its vents take every pocket.
+ */
+const MIN_BURNOUT_POCKET_MM = 1;
 
 /** Signed volume of a triangle soup (9 numbers per tri), mm³. */
 function triSoupVolume(tris: Float64Array, solidIds?: number[]): number {
@@ -458,6 +474,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       sprueDiaMm: 0,
       riserDiaMm: 0,
       gateAtMm: { x: 0, y: 0 },
+      ventsMm: [],
       partingFromBaseMm: 0,
       partingWorldZ: 0,
       draftDeg: bakedDraft || patternDraft,
@@ -857,6 +874,8 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   let rigTopZ = gPartH;
   // Where the metal goes in, filled by whichever branch builds the rig.
   const gateAt = { x: 0, y: 0 };
+  /** Lost PLA: where each vent leaves the casting, pattern coordinates, mm. */
+  const ventsMm: { x: number; y: number; z: number }[] = [];
   if (opts.addGating && !lostPla) {
     // Everything below is laid out along the gate-to-riser line rather than
     // along X, so the rig follows the casting whichever way it lies.
@@ -1003,31 +1022,46 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     gatingVolumeMm3 += Math.PI * sprueR * sprueR * Math.max(0, sprueZ1 - sprueZ0);
     gatingVolumeMm3 += (Math.PI * cupH * (sprueR * sprueR + sprueR * cupR + cupR * cupR)) / 3;
     rigTopZ = Math.max(rigTopZ, sprueZ1 + cupH);
-    // Vents, from the high points furthest from the sprue, up to the cup rim.
+    // Vents: one for every pocket where the air would be trapped, up to the
+    // cup rim. Not the two highest points: a second boss lower than the first,
+    // or a pocket under a ledge, holds its own air whatever the peak is doing.
+    // The search is the silicone mold's, run on the cavity as it will be filled
+    // — the part with the sprue standing in it — so the sprue's own pocket
+    // reads as open and only the others are vented.
     const ventDia = Math.max(2, Math.min(4, sprueDia * 0.35));
-    const minVentSpacing = Math.max(8, span * 0.25 * grow);
-    // Vents still come off the high points — that is where the air collects,
-    // whatever the sprue is doing.
-    const vents: { x: number; y: number; z: number; xPart: number; yPart: number; topPart: number }[] = [];
-    const ordered: number[] = [];
-    for (let k = 0; k < hit.length; k++) if (hit[k]) ordered.push(k);
-    ordered.sort((a, b) => top[b] - top[a]);
-    for (const k of ordered) {
-      if (vents.length >= 2) break;
-      const i = k % cols, j = Math.floor(k / cols);
-      const xPart = bounds2d.minX + (i * (bounds2d.maxX - bounds2d.minX)) / (cols - 1);
-      const yPart = bounds2d.minY + (j * (bounds2d.maxY - bounds2d.minY)) / (rows - 1);
-      const x = xPart * grow;
-      const y = yPart * grow;
-      if (Math.hypot(x - attX * grow, y - attY * grow) < minVentSpacing) continue;
-      if (vents.some((v) => Math.hypot(x - v.x, y - v.y) < minVentSpacing)) continue;
-      vents.push({ x, y, z: top[k] * grow, xPart, yPart, topPart: top[k] });
-    }
     const ventR = ventDia / 2;
+    const cavity: number[] = Array.from(part);
+    appendCylinder(cavity, attX, attY, sprueZ0 / grow, rigTopZ / grow, sprueR / grow);
+    const pockets = trappedAirInSoup(Float64Array.from(cavity), rigTopZ / grow);
+    // Two vents this close are one pocket read twice (a faceted dome, a flat
+    // top split by the grid) or two bumps of a texture that a single vent
+    // serves; measured in 3D, so a pocket under a ledge is never merged with
+    // the ledge's own vent above it.
+    const merge = Math.max(6, 3 * ventDia, span * 0.1 * grow);
+    const sprueAxisDist = (x: number, y: number, z: number) => {
+      const dz = z < sprueZ0 ? sprueZ0 - z : 0;
+      return Math.hypot(Math.hypot(x - attX * grow, y - attY * grow), dz);
+    };
+    const vents: { x: number; y: number; z: number; floorZ: number; metalAboveMm: number }[] = [];
+    let skipped = 0;
+    for (const p of pockets) {
+      if (p.depthMm * grow < MIN_BURNOUT_POCKET_MM) continue;
+      const v = { x: p.x * grow, y: p.y * grow, z: p.z * grow, floorZ: p.floorZ * grow, metalAboveMm: p.metalAboveMm * grow };
+      if (sprueAxisDist(v.x, v.y, v.z) < Math.max(merge, sprueR + ventR + 2)) continue;
+      if (vents.some((w) => Math.hypot(v.x - w.x, v.y - w.y, v.z - w.z) < merge)) continue;
+      if (vents.length >= MAX_BURNOUT_VENTS) { skipped++; continue; }
+      vents.push(v);
+    }
+    if (skipped > 0) {
+      warnings.push(
+        `Air is trapped in ${vents.length + skipped} places; the ${MAX_BURNOUT_VENTS} highest are vented. Turning the part to stand another way may trap less.`
+      );
+    }
     for (const v of vents) {
-      const vFp = footprintZ(v.xPart, v.yPart, ventR / grow, v.topPart);
-      const z0 = Math.max(vFp.maxBot + 0.8, Math.min(vFp.minTop - 1.2, vFp.maxTop - 1.5));
-      const ventFilletZ1 = Math.min(rigTopZ, vFp.maxTop + Math.min(2.0, ventR * 0.9));
+      // Rooted a little into the metal under the ceiling, never through its floor,
+      // with a flared foot so it cannot snap off along one layer line.
+      const z0 = Math.max(v.floorZ + 0.8, v.z - Math.max(1.2, ventR));
+      const ventFilletZ1 = Math.min(rigTopZ, v.z + Math.min(2.0, ventR * 0.9));
       const ventStops: Array<{ z: number; r: number }> =
         ventFilletZ1 > z0 + 0.4
           ? [
@@ -1040,12 +1074,11 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
               { z: rigTopZ, r: ventR },
             ];
       appendRevolutionStack(pat, v.x, v.y, ventStops, 16);
-      gatingVolumeMm3 += (Math.PI * ventDia * ventDia * Math.max(0, rigTopZ - z0)) / 4;
-    }
-    if (vents.length === 0) {
-      warnings.push(
-        'Pattern is too small for a separate vent clear of the sprue; pour slowly to vent through the sprue.'
-      );
+      // A vent that rises through a ledge above its pocket is metal only where it
+      // is not already part.
+      const ventLen = Math.max(0, rigTopZ - v.z - v.metalAboveMm);
+      gatingVolumeMm3 += Math.PI * ventR * ventR * ventLen;
+      ventsMm.push({ x: v.x, y: v.y, z: v.z });
     }
   }
 
@@ -1141,6 +1174,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       sprueDiaMm: opts.addGating ? sprueDia : 0,
       riserDiaMm: opts.addGating && riserWanted ? riserDia : 0,
       gateAtMm: opts.addGating ? { x: gateAt.x, y: gateAt.y } : { x: 0, y: 0 },
+      ventsMm,
       partingFromBaseMm: lostPla ? 0 : parting,
       partingWorldZ: (mnZ + parting) / 1000,
       draftDeg: bakedDraft || patternDraft,

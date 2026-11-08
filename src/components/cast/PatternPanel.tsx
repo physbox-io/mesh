@@ -158,6 +158,13 @@ export const PatternPanel: React.FC<{
                   Flask ⌀{round(summary.flaskDiaMm)} × {round(summary.flaskHeightMm)} mm ·
                   {' '}investment ≈ {round(summary.investmentPowderG)} g powder + {round(summary.investmentWaterG)} g water ·
                   {' '}pattern ≈ {round(summary.patternPlasticG)} g of PLA
+                  {options.addGating && (
+                    <>
+                      {' '}· {summary.ventsMm.length === 0
+                        ? 'no vents, the sprue breathes it'
+                        : `${summary.ventsMm.length} vent${summary.ventsMm.length === 1 ? '' : 's'}, one per air pocket`}
+                    </>
+                  )}
                 </p>
               )}
               <p className={`text-[10px] leading-snug ${!lostPla && summary.undrawablePercent > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
