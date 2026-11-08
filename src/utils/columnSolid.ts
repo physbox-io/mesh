@@ -32,11 +32,24 @@ export interface ColumnSpans {
  */
 const NUDGE = 0.0137;
 
+/** Whether triangles starting at offsets `a` and `b` of `tris` have a corner in common. */
+function sharesCorner(tris: Float64Array, a: number, b: number): boolean {
+  if (a < 0 || b < 0) return false;
+  for (let i = 0; i < 9; i += 3) {
+    for (let j = 0; j < 9; j += 3) {
+      if (tris[a + i] === tris[b + j] && tris[a + i + 1] === tris[b + j + 1] && tris[a + i + 2] === tris[b + j + 2]) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Casts a ray up every column of `grid` through `tris` (flat xyz triples, mm)
  * and keeps where it is inside. A winding count, not hits paired off, so
  * overlapping solids that were never merged read as one; coincident hits
- * facing the same way (a ray through an edge two triangles share) count once.
+ * facing the same way (a ray through an edge two triangles share) count once
+ * — only when those triangles share a corner, so two bodies that start at the
+ * same height still both count.
  */
 const columnSpansCache = new WeakMap<Float64Array, Map<string, ColumnSpans>>();
 
@@ -74,6 +87,7 @@ export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpa
   const out: number[] = [];
   const hitZ: number[] = [];
   const hitDir: number[] = [];
+  const hitTri: number[] = [];
   const order: number[] = [];
   const midRow = (rows - 1) / 2, midCol = (cols - 1) / 2;
   for (let row = 0; row < rows; row++) {
@@ -86,6 +100,7 @@ export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpa
       if (bucket.length === 0) continue;
       hitZ.length = 0;
       hitDir.length = 0;
+      hitTri.length = 0;
       for (const i of bucket) {
         const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
         const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
@@ -99,6 +114,7 @@ export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpa
         const v = (v0x * v2y - v2x * v0y) / den;
         if (u < 0 || v < 0 || u + v > 1) continue;
         hitZ.push(az + u * (cz - az) + v * (bz - az));
+        hitTri.push(i);
         // `den` is minus the face normal's Z: positive looks down, which a ray
         // going up enters through.
         hitDir.push(den > 0 ? 1 : -1);
@@ -109,12 +125,17 @@ export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpa
       order.sort((a, b) => hitZ[a] - hitZ[b]);
       // A mesh wound inside out enters through its up-facing faces; read it flipped.
       const flip = hitDir[order[0]] < 0 ? -1 : 1;
-      let depth = 0, lastZ = NaN, lastDir = 0, enteredAt = 0;
+      let depth = 0, lastZ = NaN, lastDir = 0, lastTri = -1, enteredAt = 0;
       for (const h of order) {
         const z = hitZ[h], dir = hitDir[h] * flip;
-        if (dir === lastDir && Math.abs(z - lastZ) <= 1e-4) continue;
+        // The same crossing twice — a ray down an edge two triangles of one
+        // mesh share — only when the triangles do share a corner. Two bodies
+        // that merely start at the same height are two crossings: dropping the
+        // second read a boss standing on its plate's floor as plate-high.
+        if (dir === lastDir && Math.abs(z - lastZ) <= 1e-4 && sharesCorner(tris, hitTri[h], lastTri)) continue;
         lastZ = z;
         lastDir = dir;
+        lastTri = hitTri[h];
         if (dir > 0) {
           if (depth === 0) enteredAt = z;
           depth++;
