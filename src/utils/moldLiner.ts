@@ -356,7 +356,6 @@ function replace(prev: Manifold, next: Manifold): Manifold {
 }
 
 interface HalfPair {
-  whole: Manifold;
   shell: Manifold;
   liner: Manifold;
   envelope: Float64Array;
@@ -408,7 +407,6 @@ function buildHalfPair(
   outside.delete();
   escaped.delete();
 
-  let whole = block.subtract(part);
   const cavity = env.add(part);
   let shell = block.subtract(cavity);
   cavity.delete();
@@ -420,7 +418,6 @@ function buildHalfPair(
   part.delete();
 
   const cutBoth = (tool: Manifold) => {
-    whole = replace(whole, whole.subtract(tool));
     shell = replace(shell, shell.subtract(tool));
     liner = replace(liner, liner.subtract(tool));
     tool.delete();
@@ -438,7 +435,6 @@ function buildHalfPair(
   }
   for (const p of features.pins) {
     const pin = wasm.Manifold.cylinder(p.height + 0.5, p.baseR, p.topR, 24, false).translate([p.x, p.y, -0.5]);
-    whole = replace(whole, whole.add(pin));
     shell = replace(shell, shell.add(pin));
     pin.delete();
   }
@@ -449,7 +445,7 @@ function buildHalfPair(
     for (const tool of boreSolids(wasm, cut)) cutBoth(tool);
   }
 
-  return { whole, shell, liner, envelope, spans: halfSpans(ctx.field, grid, partingZ, flipped), escapedMm3 };
+  return { shell, liner, envelope, spans: halfSpans(ctx.field, grid, partingZ, flipped), escapedMm3 };
 }
 
 /** Everything the exact-CSG mold build has, plus what the liner needs from the column field. */
@@ -519,13 +515,11 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const plateGapMm = 6;
   const plateOffset = lid ? ctx.moldWidthMm / 2 + plateGapMm / 2 : 0;
   const placed = (h: HalfPair, x: number, lift: number) => {
-    const whole = h.whole.translate([x, 0, lift]);
     const shell = h.shell.translate([x, 0, lift]);
     const liner = h.liner.translate([x, 0, lift]);
-    h.whole.delete();
     h.shell.delete();
     h.liner.delete();
-    return { whole, shell, liner };
+    return { shell, liner };
   };
   const basePlaced = placed(base, -plateOffset, ctx.baseBlockHeight);
   const lidPlaced = lid ? placed(lid, plateOffset, ctx.lidBlockHeight) : null;
@@ -542,10 +536,10 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     parts: [meshPart(h.shell, `${names[i]} shell (${pair.shell.name})`, 1), meshPart(h.liner, `${names[i]} liner (${pair.liner.name})`, 2)],
   }));
 
-  const halfOf = (h: { whole: Manifold; shell: Manifold; liner: Manifold }, name: string, blockHeight: number, pinRise: number): MoldMeshHalf => {
+  const halfOf = (h: { shell: Manifold; liner: Manifold }, name: string, blockHeight: number, pinRise: number): MoldMeshHalf => {
     const shell = manifoldToTriangles(h.shell);
     const liner = manifoldToTriangles(h.liner);
-    const triangles = manifoldToTriangles(h.whole);
+    const triangles = [...shell, ...liner];
     return {
       name,
       triangles,
@@ -561,7 +555,6 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const bottomHalf = halfOf(basePlaced, 'Cavity Half', ctx.baseBlockHeight, 0);
   const topHalf = lidPlaced ? halfOf(lidPlaced, 'Lid Half (Pins, Sprue & Vents)', ctx.lidBlockHeight, opts.pinHeightMm) : undefined;
   for (const h of all) {
-    h.whole.delete();
     h.shell.delete();
     h.liner.delete();
   }
