@@ -164,7 +164,7 @@ export const PatternPanel: React.FC<{
                         const n = summary.ventsMm.length;
                         const far = summary.ventsMm.some((v) => v.reason === 'far-end');
                         const pockets = n - (far ? 1 : 0);
-                        if (n === 0) return 'no vents, the sprue breathes it';
+                        if (n === 0) return summary.unventedPockets > 0 ? 'no vents (see the warnings)' : 'no vents, the sprue breathes it';
                         const parts = [
                           ...(pockets > 0 ? [`${pockets} air pocket${pockets === 1 ? '' : 's'}`] : []),
                           ...(far ? ['the far end'] : []),

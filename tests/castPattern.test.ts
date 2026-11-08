@@ -670,7 +670,7 @@ describe('burnout vents', () => {
     const r = generateCastPattern({ nodes } as unknown as SceneGraph, { method: 'lost-pla', metalId: 'aluminium' });
     expect(r.success, r.error).toBe(true);
     expect(r.summary.ventsMm).toHaveLength(12);
-    expect(r.warnings.join(' ')).toMatch(/trapped in \d+ places; the 12 biggest are vented/);
+    expect(r.warnings.join(' ')).toMatch(/trapped in \d+ places; the 12 deepest are vented/);
   });
 
   it('leaves the sand route and an ungated pattern without vents', () => {
@@ -752,7 +752,7 @@ describe('burnout vents on scenes of separate bodies', () => {
     const r = lost({ nodes: [box('block', 0, 0, 5, 12, 12, 5), box('pin', 7, 0, 15, 1.5, 1.5, 5)] } as unknown as SceneGraph);
     expect(r.success, r.error).toBe(true);
     const g = grown(r);
-    expect(ventsNear(r, 7, 0, 3).length + (r.warnings.join(' ').match(/beside the sprue/) ? 1 : 0)).toBe(1);
+    expect(ventsNear(r, 7, 0, 3).length + (r.warnings.join(' ').match(/no vent fits clear of the sprue/) ? 1 : 0)).toBe(1);
     // At the rim — the top of the rig — every point is either the cup's own
     // or a vent's, standing clear outside the cup: read off the STL.
     const view = new DataView(r.patternStl.buffer, r.patternStl.byteOffset, r.patternStl.byteLength);
@@ -770,8 +770,9 @@ describe('burnout vents on scenes of separate bodies', () => {
     }
     const cupR = Math.max(1.5 * r.summary.sprueDiaMm, 9);
     const atRim = pts.filter((p) => Math.abs(p[2] - rim) < 1e-3).map((p) => Math.hypot(p[0] - sx, p[1] - sy));
-    expect(atRim.every((d) => d <= cupR + 0.01 || d >= cupR + 1)).toBe(true);
-    expect(atRim.some((d) => d >= cupR + 1), 'a vent reaches the rim').toBe(true);
+    // Clear of the cup's lip by a splash's width.
+    expect(atRim.every((d) => d <= cupR + 0.01 || d >= cupR + 3.9)).toBe(true);
+    expect(atRim.some((d) => d >= cupR + 3.9), 'a vent reaches the rim').toBe(true);
     void g;
   });
 
@@ -812,5 +813,120 @@ describe('burnout vents on scenes of separate bodies', () => {
     const r = lost({ nodes: [box('a', -30, 0, 10, 10, 10, 10), box('b', 30, 0, 5, 5, 5, 5)] } as unknown as SceneGraph);
     expect(r.warnings.join(' ')).toMatch(/not joined to the rest/);
     expect(ventsNear(r, 30, 0, 6)).toHaveLength(0);
+  });
+});
+
+// A second review's cases: thin shells and slopes the planner's grid broke
+// apart, a blocked pocket hiding ventable air, far ends measured in a
+// straight line, flats vented at the wrong end, rods wider than their feature.
+describe('burnout vents on thin walls, far ends and fine features', () => {
+  const lost = (scene: SceneGraph) => generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium' });
+  const grown = (r: ReturnType<typeof generateCastPattern>) => 1 + r.summary.shrinkPercent / 100;
+  const turned = (name: string, x: number, y: number, z: number, hx: number, hy: number, hz: number, q: number[]) =>
+    ({ ...box(name, x, y, z, hx, hy, hz), quat: q });
+  const aboutZ = (deg: number) => [Math.cos((deg * Math.PI) / 360), 0, 0, Math.sin((deg * Math.PI) / 360)];
+  const aboutY = (deg: number) => [Math.cos((deg * Math.PI) / 360), 0, Math.sin((deg * Math.PI) / 360), 0];
+  /** Pattern vents in scene terms, for a scene whose bounding box is centred on (cx, cy). */
+  const near = (r: ReturnType<typeof generateCastPattern>, x: number, y: number, within: number, cx = 0, cy = 0) =>
+    ventsNear(r, x - cx, y - cy, within);
+
+  it('keeps a 1.5 mm ring wall, 200 mm across, in one piece', () => {
+    const nodes = [box('hub', 0, 0, 10, 12, 12, 10)];
+    const segs = 48, R = 100;
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * 360;
+      const t = (a * Math.PI) / 180;
+      nodes.push(turned(`w${i}`, R * Math.cos(t), R * Math.sin(t), 10, 0.75, (Math.PI * R) / segs + 0.6, 10, aboutZ(a)));
+    }
+    for (let i = 0; i < 4; i++) {
+      const a = i * 90;
+      const t = (a * Math.PI) / 180;
+      nodes.push(turned(`s${i}`, 56 * Math.cos(t), 56 * Math.sin(t), 2, 45, 2, 2, aboutZ(a)));
+    }
+    const r = lost({ nodes } as unknown as SceneGraph);
+    expect(r.success, r.error).toBe(true);
+    expect(r.warnings.join(' ')).not.toMatch(/not joined/);
+  });
+
+  it('keeps a 1.5 mm bar running at 45° in one piece', () => {
+    const r = lost({ nodes: [
+      box('block', -80, -80, 10, 15, 15, 10),
+      turned('bar', 0, 0, 3, 110, 0.75, 3, aboutZ(45)),
+    ] } as unknown as SceneGraph);
+    expect(r.warnings.join(' ')).not.toMatch(/not joined/);
+  });
+
+  it('keeps a thin plate on a steep slope joined, and vents the pocket at its top edge', () => {
+    const r = lost({ nodes: [
+      box('slab', 0, 0, 2.5, 150, 20, 2.5),
+      box('block', -120, 0, 15, 15, 15, 15),
+      turned('fin', 120, 0, 38.6, 40, 15, 0.75, aboutY(-60)),
+    ] } as unknown as SceneGraph);
+    expect(r.warnings.join(' ')).not.toMatch(/not joined/);
+    const g = grown(r);
+    expect(r.summary.ventsMm.some((v) => v.z / g > 65 && v.x / g > 125)).toBe(true);
+  });
+
+  it('still vents the rest of a pocket when its highest point sits too close to the sprue', () => {
+    // Bounding box x -12..32, centred on 10.
+    const r = lost({ nodes: [
+      box('block', 0, 0, 5, 12, 12, 5),
+      box('pin', 5.5, 0, 15, 1.5, 1.5, 5),
+      box('arm', 18.75, 0, 11, 13.25, 1.5, 1),
+      box('bump', 30, 0, 15.5, 1.5, 1.5, 3.5),
+    ] } as unknown as SceneGraph);
+    expect(near(r, 30, 0, 3, 10).length, 'the bump').toBe(1);
+  });
+
+  it('vents the far tip of a horseshoe sprued at the other tip, not its bend', () => {
+    const r = lost({ nodes: [
+      box('legA', 0, 40, 3, 50, 5, 3),
+      box('legB', 0, -40, 3, 50, 5, 3),
+      box('bend', 50, 0, 3, 5, 45, 3),
+      box('lump', -45, 40, 10, 10, 5, 10),
+    ] } as unknown as SceneGraph);
+    expect(near(r, -45, -40, 15).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('vents both ends of a bar fed from its middle', () => {
+    const r = lost({ nodes: [box('bar', 0, 0, 3, 100, 5, 3), box('lump', 0, 0, 10, 10, 10, 10)] } as unknown as SceneGraph);
+    expect(near(r, -95, 0, 15).length, 'left end').toBeGreaterThanOrEqual(1);
+    expect(near(r, 95, 0, 15).length, 'right end').toBeGreaterThanOrEqual(1);
+  });
+
+  it('vents a long rib at its far end from the sprue, where the driven air ends up', () => {
+    const r = lost({ nodes: [
+      box('plate', 0, 0, 2.5, 80, 15, 2.5),
+      box('block', -60, 0, 15, 15, 15, 15),
+      box('rib', 30, 0, 12.5, 40, 5, 7.5),
+    ] } as unknown as SceneGraph);
+    const g = grown(r);
+    const onRib = r.summary.ventsMm.filter((v) => Math.abs(v.z / g - 20) < 0.5);
+    expect(onRib.length).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...onRib.map((v) => v.x / g))).toBeGreaterThan(50);
+  });
+
+  it('gives a 1.5 mm pin a rod no wider than the pin, standing on it', () => {
+    const r = lost({ nodes: [
+      box('plate', 0, 0, 2.5, 60, 15, 2.5),
+      box('block', -40, 0, 15, 15, 15, 15),
+      box('pin', 40, 0, 12.5, 0.75, 0.75, 7.5),
+    ] } as unknown as SceneGraph);
+    const g = grown(r);
+    const [v] = near(r, 40, 0, 1);
+    expect(v, 'a vent on the pin').toBeDefined();
+    // Every pattern vertex round the vent's axis, above the pin, lies within the pin's half-width.
+    const view = new DataView(r.patternStl.buffer, r.patternStl.byteOffset, r.patternStl.byteLength);
+    let widest = 0;
+    for (let t = 0; t < view.getUint32(80, true); t++) {
+      for (let k = 0; k < 3; k++) {
+        const o = 84 + t * 50 + 12 + k * 12;
+        const x = view.getFloat32(o, true), y = view.getFloat32(o + 4, true), z = view.getFloat32(o + 8, true);
+        const d = Math.hypot(x - v.x, y - v.y);
+        // Above the pin's own top face, whose corners stand further out than its half-width.
+        if (z > v.z + 0.05 && d < 3) widest = Math.max(widest, d);
+      }
+    }
+    expect(widest).toBeLessThanOrEqual(0.76 * g + 0.05);
   });
 });
