@@ -6,6 +6,14 @@ import { compileSCAD, isCompilerReady } from '../../utils/openscad';
 import { generateScadForNode, parseScadVariables, replaceVarInCode } from '../../utils/scadSource';
 import type { SceneNode } from '../../types/scene';
 import { RangeInput } from '../RangeInput';
+import { SliderValue } from '../SliderValue';
+
+/** Digits a number is written to, up to six: 0.05 has two and 1 none. */
+function digitsOf(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  for (let d = 0; d <= 6; d++) if (Math.abs(Math.round(n * 10 ** d) - n * 10 ** d) < 1e-9 * Math.max(1, 10 ** d)) return d;
+  return 6;
+}
 
 /**
  * The OpenSCAD editor, for a body whose shape is OpenSCAD source.
@@ -191,9 +199,17 @@ function ScadEditor({ node }: { node: SceneNode }) {
                 <div key={v.name} className="flex flex-col gap-1">
                   <div className="flex justify-between items-center text-xs">
                     <span className="font-mono text-slate-700 dark:text-slate-300 font-medium">{v.name}</span>
-                    <span className="font-mono text-violet-600 dark:text-violet-400 font-bold bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded border border-violet-100 dark:border-violet-900/50">
-                      {Number((slidingValues[v.name] ?? v.value).toPrecision(4))}
-                    </span>
+                    {/* Typeable, and not held to the slider's range: the range is the
+                        customizer's hint for dragging, not a limit on the model. */}
+                    <SliderValue
+                      value={slidingValues[v.name] ?? v.value}
+                      decimals={Math.max(digitsOf(v.step), digitsOf(slidingValues[v.name] ?? v.value))}
+                      onChange={(val) => {
+                        setSlidingValues(prev => ({ ...prev, [v.name]: val }));
+                        debouncedUpdateCode();
+                      }}
+                      className="text-violet-600 dark:text-violet-400 font-bold"
+                    />
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{Number(v.min.toPrecision(3))}</span>
