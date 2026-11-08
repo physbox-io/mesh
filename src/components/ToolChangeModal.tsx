@@ -1,12 +1,9 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { ToolChangeDialog } from '@physbox-io/ui';
+import { ToolChangeDialog, setShimMm, setTouchPlateMm, useShimMm, useTouchPlateMm } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { useJobPause, pauseKey, toolStopKey } from '../store/jobPauseStore';
-import { readStoredMm, readTouchPlateMm, writeStoredMm, writeTouchPlateMm } from '../utils/touchPlate';
 import { CheckpointBadge } from './CheckpointBadge';
-
-const SHIM_KEY = 'meshZeroShimMm';
 
 /**
  * A job parked at a tool change, as its own dialog: the pad to bring the new
@@ -21,8 +18,8 @@ export const ToolChangeModal: React.FC = () => {
   const [machineState, setMachineState] = React.useState<MachineState>(webSerialManager.getState());
   const hiddenKey = useJobPause((s) => s.hiddenKey);
   const hide = useJobPause((s) => s.hide);
-  const [plateMm, setPlateMm] = React.useState(readTouchPlateMm);
-  const [shimMm, setShimMm] = React.useState(() => readStoredMm(SHIM_KEY, 0));
+  const plateMm = useTouchPlateMm();
+  const shimMm = useShimMm();
   const [overrideFor, setOverrideFor] = React.useState<string | null>(null);
 
   React.useEffect(() => webSerialManager.addListener(setMachineState), []);
@@ -53,13 +50,13 @@ export const ToolChangeModal: React.FC = () => {
               zeroed: !machineState.needsZZero,
               plate: {
                 mm: plateMm,
-                onMmChange: (mm) => setPlateMm(writeTouchPlateMm(mm)),
+                onMmChange: (mm) => void setTouchPlateMm(mm),
                 onProbe: (mm) => webSerialManager.zeroZ(mm),
               },
               byHand: {
                 onZeroHere: (mm) => webSerialManager.zeroZHere(mm),
                 shimMm,
-                onShimMmChange: (mm) => setShimMm(writeStoredMm(SHIM_KEY, mm)),
+                onShimMmChange: (mm) => void setShimMm(mm),
               },
               probeCircuit: { active: machineState.probePinActive, seen: machineState.probeCircuitSeen },
             }

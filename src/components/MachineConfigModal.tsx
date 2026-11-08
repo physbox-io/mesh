@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff, Wrench } from 'lucide-react';
+import { Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff, Wrench } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { settingsReadable, unlockAllowed } from '../utils/machineGates';
 import { useStore, type MachineTarget } from '../store/useStore';
@@ -10,18 +10,18 @@ import { ControllerSilenceBanner } from './MachineFaultBanner';
 import { JobOverrides } from './MachineJobControls';
 import { describeMotionProfile } from '../utils/motionProfile';
 import { webSerialUnavailableReason } from '@physbox-io/machining';
-import { TeknoBoxPicker } from './TeknoBoxPicker';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
-import { NumberInput } from '@physbox-io/ui';
+import { NumberInput, TeknoBoxPicker, readMachineLink, setMachineLink, useSafetyGate, type MachineLinkKind, type TeknoBoxApi } from '@physbox-io/ui';
+import { claimMachineDevice, fetchMachineDevices, forgetMachineDevice, getStoredAuthToken } from '../utils/apiClient';
 import { readSpindleMaxOverride, writeSpindleMaxOverride } from '../utils/spindleOverride';
 import { DEFAULT_SPINDLE_RANGE } from '../utils/feedsAndSpeeds';
 import { ToolRackDialog } from './ToolRackDialog';
-
-/** The three ways this app can reach a machine. */
-type MachineLinkKind = 'usb' | 'cloud';
+import { usePanels } from '../store/panelsStore';
 
 /** Shown once per browser before the first connect; never again after acknowledged. */
 const SAFETY_ACK_KEY = 'physbox.safetyAck';
+
+const TEKNO_BOX_API_BASE = { list: fetchMachineDevices, claim: claimMachineDevice, forget: forgetMachineDevice };
 
 /**
  * The machine itself, in one place.
@@ -61,22 +61,16 @@ export const MachineConfigModal: React.FC<{
   const cncBed = useStore((s) => s.cncBed);
   const setCncBed = useStore((s) => s.setCncBed);
 
-  /*
-   * How to reach the machine, remembered between sessions.
-   *
-   * The address is worth keeping because it is the one thing here nobody can
-   * guess: a Tekno Box on the bench has whatever address the router gave it,
-   * and retyping it before every job is exactly the friction that sends people
-   * back to the USB cable.
+  /**
+   * How to reach the machine. Shared by every PhysBox app on this computer, and
+   * saved only on connect: the apps reconnect to it at launch, so a tab merely
+   * looked at must not become what they all dial next time.
    */
-  const [link, setLink] = useState<MachineLinkKind>(
-    () => (localStorage.getItem('physbox.machineLink') as MachineLinkKind) || 'usb'
-  );
+  const [link, setLink] = useState<MachineLinkKind>(() => readMachineLink().kind);
+  const [selectedDevice, setSelectedDevice] = useState(() => readMachineLink().deviceId ?? '');
   const [connecting, setConnecting] = useState(false);
-
-  const [selectedDevice, setSelectedDevice] = useState(
-    () => localStorage.getItem('physbox.cloudDeviceId') || ''
-  );
+  const signedIn = Boolean(getStoredAuthToken());
+  const teknoBoxApi = React.useMemo<TeknoBoxApi>(() => ({ ...TEKNO_BOX_API_BASE, signedIn }), [signedIn]);
 
   // Subscribed while open; addListener hands over the current state at once.
   useEffect(() => {
@@ -116,15 +110,15 @@ export const MachineConfigModal: React.FC<{
   // Gate on the first real connect attempt only. The auto-resume effect below
   // never reaches this — it only fires for a device already connected once
   // before, which means the warning already ran.
-  const [showSafetyWarning, setShowSafetyWarning] = useState(false);
-  const pendingConnectRef = useRef<(() => void) | null>(null);
+  const openDocs = usePanels((s) => s.openDocs);
+  const safety = useSafetyGate(SAFETY_ACK_KEY, {
+    laser: machineTarget === 'laser',
+    onOpenLicense: () => openDocs('license'),
+  });
   const requestConnect = (action: () => void) => {
-    if (localStorage.getItem(SAFETY_ACK_KEY)) {
-      action();
-      return;
-    }
-    pendingConnectRef.current = action;
-    setShowSafetyWarning(true);
+    void safety.request().then((ok) => {
+      if (ok) action();
+    });
   };
 
   /*
@@ -167,9 +161,7 @@ export const MachineConfigModal: React.FC<{
   const doConnect = async () => {
     setConnecting(true);
     try {
-      localStorage.setItem('physbox.machineLink', link);
-      if (link === 'cloud') localStorage.setItem('physbox.cloudDeviceId', selectedDevice);
-
+      setMachineLink(link === 'cloud' ? { kind: 'cloud', deviceId: selectedDevice || null } : { kind: 'usb' });
       await webSerialManager.connect(
         link === 'cloud' ? { kind: 'cloud', deviceId: selectedDevice } : { kind: 'usb' }
       );
@@ -301,6 +293,7 @@ export const MachineConfigModal: React.FC<{
                 {link === 'cloud' && (
                   <div className="basis-full">
                     <TeknoBoxPicker
+                      api={teknoBoxApi}
                       value={selectedDevice}
                       onChange={(deviceId) => setSelectedDevice(deviceId)}
                       disabled={machineState.connected}
@@ -308,7 +301,8 @@ export const MachineConfigModal: React.FC<{
                         // Straight on to the machine. Having just proved you are
                         // standing in front of it, being asked to press Connect
                         // is a step with nothing behind it.
-                        localStorage.setItem('physbox.cloudDeviceId', deviceId);
+                        setSelectedDevice(deviceId);
+                        setMachineLink({ kind: 'cloud', deviceId });
                         requestConnect(() => void webSerialManager.connect({ kind: 'cloud', deviceId }));
                       }}
                     />
@@ -500,51 +494,7 @@ export const MachineConfigModal: React.FC<{
 
       <ToolRackDialog open={toolsOpen} onClose={() => setToolsOpen(false)} />
 
-      {showSafetyWarning && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-5 space-y-4">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-5 h-5 text-amber-500" />
-              <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100">
-                Before you connect a machine
-              </h3>
-            </div>
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              This connects to a real machine that moves and cuts under its own power. Keep clear of
-              moving parts, wear eye protection{machineTarget === 'laser' ? ' rated for the beam' : ''},
-              and never leave a running job unattended. Use your own judgment. You are responsible
-              for the machine&apos;s safe operation.
-            </p>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-              Provided with no warranty and no liability for injury, loss, or damage of any kind. Full
-              terms: PhysBox Permissive Public License (PPPL-1.0), see License &amp; Disclaimers in
-              this app&apos;s Reference Guide.
-            </p>
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                onClick={() => {
-                  pendingConnectRef.current = null;
-                  setShowSafetyWarning(false);
-                }}
-                className="px-3 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg cursor-pointer"
-              >
-                No Machine Control
-              </button>
-              <button
-                onClick={() => {
-                  localStorage.setItem(SAFETY_ACK_KEY, '1');
-                  setShowSafetyWarning(false);
-                  pendingConnectRef.current?.();
-                  pendingConnectRef.current = null;
-                }}
-                className="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold rounded-lg cursor-pointer"
-              >
-                Acknowledged
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {safety.dialog}
     </div>
   );
 };

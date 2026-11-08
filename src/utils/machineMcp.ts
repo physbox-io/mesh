@@ -15,7 +15,7 @@ import { fetchMachineDevices } from './apiClient';
 import { generateSolidMachining, measurePart, deriveSolidOptions, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
 import { MATERIALS } from './feedsAndSpeeds';
 import { runSettings } from './runSettings';
-import { readTouchPlateMm } from './touchPlate';
+import { readTouchPlateMm } from '@physbox-io/ui/suite';
 import type { SceneGraph } from '../types/scene';
 
 // ---------------------------------------------------------------------------

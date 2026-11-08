@@ -63,8 +63,13 @@
       // Kept in step with utils/apiClient.ts and utils/googleAuth.ts. They are
       // not importable here: this page is deliberately outside the bundle so it
       // can be served with different headers from the app.
-      var AUTH_TOKEN_KEY = 'physbox_auth_token';
+      // The session is shared by every PhysBox app through a cookie on
+      // physbox.io; this must write it exactly as setSession in @physbox-io/ui.
+      var SESSION_COOKIE = 'physbox_session';
+      var SHARED_MARKER_COOKIE = 'physbox_session_shared';
+      var LEGACY_TOKEN_KEY = 'physbox_auth_token';
       var USER_KEY = 'physbox_user_profile';
+      var USER_TOKEN_KEY = 'physbox_user_profile_token';
       // The signal the app waits on. Written last, after the token and profile
       // are already in place, so a listener that wakes on it never reads a
       // half-written session.
@@ -85,6 +90,14 @@
       // swaps the browsing context group on navigation and severs the handle
       // the opener was given. So the window says so itself.
       var ALIVE_KEY = 'physbox_auth_alive';
+
+      function writeSuiteCookie(name, value) {
+        var host = location.hostname;
+        var attrs = ['Path=/', 'Max-Age=34560000', 'SameSite=Lax'];
+        if (host === 'physbox.io' || /\.physbox\.io$/.test(host)) attrs.push('Domain=physbox.io');
+        if (location.protocol === 'https:') attrs.push('Secure');
+        document.cookie = name + '=' + encodeURIComponent(value) + '; ' + attrs.join('; ');
+      }
 
       function beat() {
         try {
@@ -158,8 +171,11 @@
           })
           .then(function (data) {
             if (!data.token || !data.user) throw new Error('Sign-in did not return a session.');
-            localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+            writeSuiteCookie(SHARED_MARKER_COOKIE, '1');
+            writeSuiteCookie(SESSION_COOKIE, data.token);
+            localStorage.removeItem(LEGACY_TOKEN_KEY);
             localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+            localStorage.setItem(USER_TOKEN_KEY, data.token);
             localStorage.setItem(ADMIN_KEY, data.is_admin ? '1' : '0');
 
             // The avatar is fetched before the handoff is announced, so the app

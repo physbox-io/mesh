@@ -5,6 +5,7 @@ import { usePanels } from '../store/panelsStore';
 import type { NoteCard } from '../utils/noteCards';
 import { useMeshExport } from '../hooks/useMeshExport';
 import { webSerialManager } from '../utils/webSerialManager';
+import { readMachineLink } from '@physbox-io/ui';
 import { ExportLaserCutModal } from './ExportLaserCutModal';
 import { ExportContourSliceModal } from './ExportContourSliceModal';
 import { ExportReliefCarveModal } from './ExportReliefCarveModal';
@@ -82,14 +83,13 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   // even while MachineConfigModal is not mounted.
   useEffect(() => {
     if (webSerialManager.getState().connected) return;
-    const link = localStorage.getItem('physbox.machineLink') || 'usb';
-    if (link !== 'cloud') {
+    const link = readMachineLink();
+    if (link.kind !== 'cloud') {
       void webSerialManager.autoConnect().catch(() => {});
       return;
     }
-    const selectedDevice = localStorage.getItem('physbox.cloudDeviceId') || '';
-    if (!selectedDevice) return;
-    void webSerialManager.connect({ kind: 'cloud', deviceId: selectedDevice }).catch(() => {});
+    if (!link.deviceId) return;
+    void webSerialManager.connect({ kind: 'cloud', deviceId: link.deviceId }).catch(() => {});
   }, []);
 
   const { exportStl, export3mf } = useMeshExport(threeSceneRef, noteCards);

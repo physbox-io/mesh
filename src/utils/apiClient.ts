@@ -3,6 +3,8 @@
  * Enables cloud authentication, parameter sync, preset sync, and remote telemetry monitoring.
  */
 
+import { clearSession, getSessionToken, getSessionUser, setSession } from '@physbox-io/ui/suite';
+
 export interface PhysBoxUser {
   id: string;
   email: string;
@@ -39,9 +41,6 @@ export interface MachiningTelemetry {
   settings?: Record<string, unknown> | null;
 }
 
-const AUTH_TOKEN_KEY = 'physbox_auth_token';
-const USER_KEY = 'physbox_user_profile';
-
 export function getApiBaseUrl(): string {
   const override = typeof window !== 'undefined'
     ? (window as Window & { PHYSBOX_API_URL?: string }).PHYSBOX_API_URL
@@ -56,11 +55,7 @@ export function getApiBaseUrl(): string {
 }
 
 export function getStoredAuthToken(): string | null {
-  try {
-    return localStorage.getItem(AUTH_TOKEN_KEY);
-  } catch {
-    return null;
-  }
+  return getSessionToken();
 }
 
 /**
@@ -72,27 +67,17 @@ export function hubToken(stored: string | null): string | undefined {
 }
 
 export function getStoredUser(): PhysBoxUser | null {
-  try {
-    const raw = localStorage.getItem(USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+  return getSessionUser<PhysBoxUser>();
 }
 
 export function setStoredAuth(token: string, user: PhysBoxUser): void {
-  try {
-    localStorage.setItem(AUTH_TOKEN_KEY, token);
-    localStorage.setItem(USER_KEY, JSON.stringify(user));
-  } catch (e) {
-    console.error('Failed to store auth session', e);
-  }
+  setSession(token, user);
 }
 
+/** Signs out of every PhysBox app in this browser. */
 export function clearStoredAuth(): void {
+  clearSession();
   try {
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
     // Everything the sign-in window leaves behind goes too. A cached avatar
     // outliving the account it belongs to means the next person to sign in on
     // this machine is greeted by the last one's face.

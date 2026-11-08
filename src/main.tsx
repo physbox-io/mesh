@@ -5,6 +5,8 @@ import App from './App.tsx'
 import { AppErrorBoundary } from './components/AppErrorBoundary'
 import { restoreInterruptedJob } from './utils/jobRestore'
 import { noteWorkerStopped } from './utils/staleBuild'
+import { setSuiteParameterPusher } from '@physbox-io/ui'
+import { syncCloudParameters } from './utils/apiClient'
 
 // Was a job still cutting when this browser last went away? Asked once, here,
 // rather than from an effect: the answer comes from storage and from the
@@ -17,6 +19,9 @@ void restoreInterruptedJob()
 // deploy: the same thing that kills its workers. Raise the update banner; the
 // error itself still reaches whatever imported the chunk.
 window.addEventListener('vite:preloadError', noteWorkerStopped)
+
+// Settings shared across the PhysBox apps follow the account under `global`.
+setSuiteParameterPusher((p) => void syncCloudParameters('global', p))
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -3,7 +3,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { JobPreflight, JobResumeBanner } from '../src/components/MachineJobControls';
 import { canStartProgram, settingsReadable, stopControl, unlockAllowed } from '../src/utils/machineGates';
-import { readTouchPlateMm, writeTouchPlateMm } from '../src/utils/touchPlate';
+import { readTouchPlateMm, setTouchPlateMm } from '@physbox-io/ui';
 import { hubToken } from '../src/utils/apiClient';
 import { toolStopKey } from '../src/store/jobPauseStore';
 import { webSerialManager, type MachineState } from '../src/utils/webSerialManager';
@@ -123,22 +123,38 @@ describe('H13: a resume banner goes by the job', () => {
 
 describe('H14: the touch plate', () => {
   const store = new Map<string, string>();
+  const cookies = new Map<string, string>();
   beforeEach(() => {
     store.clear();
+    cookies.clear();
     vi.stubGlobal('localStorage', {
       getItem: (k: string) => store.get(k) ?? null,
       setItem: (k: string, v: string) => void store.set(k, v),
       removeItem: (k: string) => void store.delete(k),
     });
+    vi.stubGlobal('document', {
+      get cookie() {
+        return [...cookies].map(([k, v]) => `${k}=${v}`).join('; ');
+      },
+      set cookie(line: string) {
+        const pair = line.split(';')[0];
+        const eq = pair.indexOf('=');
+        const name = pair.slice(0, eq).trim();
+        if (/Max-Age=0\b/.test(line)) cookies.delete(name);
+        else cookies.set(name, pair.slice(eq + 1));
+      },
+    });
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('is one stored figure, under the key the tool-change dialog always used', () => {
+  it('is one figure shared by the suite, adopting the key Mesh used before', () => {
     expect(readTouchPlateMm()).toBe(12);
-    writeTouchPlateMm(19.05);
-    expect(store.get('meshTouchPlateMm')).toBe('19.05');
+    store.set('meshTouchPlateMm', '19.05');
     expect(readTouchPlateMm()).toBe(19.05);
-    store.set('meshTouchPlateMm', 'junk');
+    expect(cookies.get('physbox_touch_plate_mm')).toBe('19.05');
+    setTouchPlateMm(6.35);
+    expect(readTouchPlateMm()).toBe(6.35);
+    cookies.set('physbox_touch_plate_mm', 'junk');
     expect(readTouchPlateMm()).toBe(12);
   });
 });

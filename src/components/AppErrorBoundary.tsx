@@ -11,12 +11,13 @@
 
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import { readDarkMode } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { downloadSceneRescue } from '../utils/rescueScene';
 
 function isDark(): boolean {
   try {
-    return localStorage.getItem('physics_dark_mode') === 'true';
+    return readDarkMode('physics_dark_mode');
   } catch {
     return false;
   }

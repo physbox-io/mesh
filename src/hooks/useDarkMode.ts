@@ -1,27 +1,7 @@
-import { useEffect, useState } from 'react';
-import { pushAppParameter } from '../utils/cloudSync';
+import { useSuiteDarkMode } from '@physbox-io/ui';
 
-/** The light/dark switch: the `dark` class on <html>, kept in storage and synced to the account. */
+/** The light/dark switch, shared by every PhysBox app and synced to the account. */
 export function useDarkMode(): [boolean, () => void] {
-  const [darkMode, setDarkMode] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('physics_dark_mode') === 'true';
-    }
-    return false;
-  });
-
-  useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-      localStorage.setItem('physics_dark_mode', 'true');
-      pushAppParameter('physics_dark_mode', 'true');
-    } else {
-      document.documentElement.classList.remove('dark');
-      localStorage.setItem('physics_dark_mode', 'false');
-      pushAppParameter('physics_dark_mode', 'false');
-    }
-  }, [darkMode]);
-
-  const toggleDarkMode = () => setDarkMode(prev => !prev);
+  const [darkMode, toggleDarkMode] = useSuiteDarkMode('physics_dark_mode');
   return [darkMode, toggleDarkMode];
 }
