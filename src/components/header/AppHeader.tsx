@@ -292,7 +292,7 @@ export function AppHeader({
                   ? 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-950 dark:border-blue-700 dark:text-blue-400' 
                   : 'border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-900/40'
               }`}
-              title="AI Copilot Expert"
+              title="AI Copilot"
             >
               <Sparkles className="w-4 h-4" />
             </button>
