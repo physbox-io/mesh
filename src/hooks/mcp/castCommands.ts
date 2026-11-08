@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import { useStore } from '../../store/useStore';
-import { generateCastPattern, DEFAULT_CAST_OPTIONS, rememberCastOptions, type CastMethod } from '../../utils/castPatternExporter';
+import { generateCastPattern, DEFAULT_CAST_OPTIONS, rememberCastOptions, type CastMethod, type CastResult } from '../../utils/castPatternExporter';
+import { ExportWorkerClient } from '../../utils/exportWorkerClient';
 import { runCastPrep } from '../../utils/castPrepRunner';
 import { planPourBox } from '../../utils/pourBoxScene';
 import { addPourBoxToScene, pourBoxStl } from '../../utils/pourBoxActions';
@@ -133,7 +134,14 @@ export const castCommands: McpCommands = {
       draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : msg.method === 'lost-pla' ? 0 : DEFAULT_TAB_DRAFT.sand,
       ...(typeof msg.shrinkPercent === 'number' && msg.shrinkPercent >= 0 ? { shrinkPercent: msg.shrinkPercent } : {}),
     };
-    const result = generateCastPattern(scene, options);
+    // On the export worker, as the Sand and Lost PLA tabs run it: finding
+    // every air pocket in a big pattern takes seconds, not a frame.
+    let result: CastResult;
+    if (typeof Worker === 'undefined') result = generateCastPattern(scene, options);
+    else {
+      const client = new ExportWorkerClient();
+      try { result = await client.run('cast', scene, options); } finally { client.dispose(); }
+    }
     if (!result.success) return { ok: false, error: result.error || 'The cast pattern could not be generated.', warnings: result.warnings ?? [] };
     // physics_add_simulation's sand and lost-PLA chains simulate this pattern next.
     rememberCastOptions(options);
