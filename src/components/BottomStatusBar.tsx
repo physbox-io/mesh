@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Send, Square, Wrench,
+  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Printer, Puzzle, Scissors, Send, Square, Wrench,
 } from 'lucide-react';
-import { NumberInput } from '@physbox-io/ui';
+import { JobWaitingButton, NumberInput, jobPauseKind } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
 import {
   DEFAULT_STOCK, MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM,
@@ -413,7 +413,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       title={stop === 'job'
         ? 'E-Stop: soft reset. Stops the machine now and loses the position. The line it reached is kept, to resume after re-homing and re-zeroing.'
         : 'Soft reset: stops the machine now. If it was moving, the position is lost and it wants homing.'}
-      className="fixed bottom-1 right-4 z-[100000] flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold font-mono text-[11px] cursor-pointer"
+      className="fixed bottom-1 right-4 z-[100001] flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold font-mono text-[11px] cursor-pointer"
     >
       <Square className="w-3.5 h-3.5" />
       <span>{stop === 'job' ? 'E-Stop' : 'Stop machine'}</span>
@@ -831,22 +831,27 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 change is an instruction, and it is no use only in a panel the
                 operator has closed. */}
             {machineState.pauseMessage && (
-              <button
-                onClick={showPause}
-                title="Open the pause dialog"
-                className="text-amber-600 dark:text-amber-400 truncate max-w-[22rem] hover:underline cursor-pointer"
-              >
+              <span className="text-amber-600 dark:text-amber-400 truncate max-w-[22rem]">
                 {machineState.pauseMessage}
+              </span>
+            )}
+            {/* Paused, the way back to the dialog: Resume and the re-zero are
+                there, and Hide only ever tucked them away. */}
+            {paused ? (
+              <JobWaitingButton
+                kind={machineState.status === 'PAUSED_TOOL' ? 'tool' : (jobPauseKind(machineState.status) ?? 'hold')}
+                needsZero={needsReZero}
+                onOpen={showPause}
+              />
+            ) : (
+              <button
+                onClick={() => void webSerialManager.pauseJob()}
+                title="Pause the job"
+                className="p-0.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+              >
+                <Pause className="w-3.5 h-3.5" />
               </button>
             )}
-            <button
-              onClick={() => void (paused ? webSerialManager.resumeJob() : webSerialManager.pauseJob())}
-              disabled={needsReZero}
-              title={needsReZero ? 'Set Z zero for the new tool first' : paused ? 'Resume the job' : 'Pause the job'}
-              className="p-0.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-            >
-              {paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
-            </button>
           </div>
         )}
 

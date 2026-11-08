@@ -7,7 +7,7 @@ import { defineConfig } from 'vitest/config';
 // physics worker client and the MuJoCo wasm glue).
 export default defineConfig({
   test: {
-    include: ['tests/**/*.test.ts'],
+    include: ['tests/**/*.test.{ts,tsx}'],
     environment: 'node',
     // The preset behaviour tests load the MuJoCo wasm module and simulate tens of
     // seconds of physics, which is slower than vitest's 5s default allows.

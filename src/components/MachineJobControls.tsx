@@ -1,14 +1,10 @@
 import React, { useState } from 'react';
-import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw, Cpu, Box, Loader2 } from 'lucide-react';
+import { AlertCircle, Play, Pause, Square, ChevronsDown, Gauge, RotateCcw, Cpu, Box, Loader2 } from 'lucide-react';
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
-import { readTouchPlateMm } from '../utils/touchPlate';
 import { clampRunFromLine, describeStoppedJob, runFromGate } from '../utils/runFrom';
 import { NumberInput } from '@physbox-io/ui';
-import { ProbeCircuitStatus } from './ProbeCircuitStatus';
-import { CheckpointBadge } from './CheckpointBadge';
-import { JogPad } from './JogPad';
 import { ConfirmModal } from './ConfirmModal';
 import { useStore } from '../store/useStore';
 
@@ -30,7 +26,7 @@ import { useStore } from '../store/useStore';
  * unlock, home or zero: that is where all three live, and a banner that names
  * them without a way there leaves the operator hunting for it.
  */
-const OpenSetupButton: React.FC<{ onOpen?: () => void }> = ({ onOpen }) => {
+export const OpenSetupButton: React.FC<{ onOpen?: () => void }> = ({ onOpen }) => {
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   return (
     <button
@@ -44,172 +40,6 @@ const OpenSetupButton: React.FC<{ onOpen?: () => void }> = ({ onOpen }) => {
       <Cpu className="w-3.5 h-3.5" />
       <span>Machine Setup</span>
     </button>
-  );
-};
-
-/**
- * What the machine stopped for, and what has to happen before it carries on.
- *
- * The gate on Resume is the point of this. A tool change means a different tool
- * length, so the Z datum the job started with is now wrong — and wrong in the
- * direction that drives the new bit into the work. Nothing on the controller
- * knows that has happened, so the button that would send it back into the cut
- * stays shut until one of the two zeroing routes has run, or until the operator
- * says outright that they have already dealt with it.
- */
-export const JobPauseBanner: React.FC<{
-  machineState: MachineState;
-  /** e.g. "Resume Carve", "Resume Next Sheet". */
-  resumeLabel: string;
-  /** With no job loaded: a laser has no Z datum and no touch plate, so it gets neither offer. */
-  showZTools?: boolean;
-}> = ({ machineState, resumeLabel, showZTools: noJobZTools = true }) => {
-  // The job on the machine decides, not the modal this is drawn in.
-  const showZTools = !webSerialManager.isLaserJob(!noJobZTools);
-  const [overridden, setOverridden] = React.useState(false);
-  const [overrideFor, setOverrideFor] = React.useState<string | null>(null);
-  const [probingZ, setProbingZ] = React.useState(false);
-
-  const paused = machineState.status.startsWith('PAUSED');
-  // A fresh pause is a fresh decision: an override given for the last tool
-  // change must not still be standing at the next one. Derived during render
-  // rather than in an effect, so there is no frame in which the stale override
-  // is still live.
-  if (overridden && overrideFor !== machineState.pauseMessage) {
-    setOverridden(false);
-    setOverrideFor(null);
-  }
-
-  if (!paused) return null;
-
-  const toolChange = machineState.status === 'PAUSED_TOOL';
-  const parked = machineState.status === 'PAUSED_PARKED';
-  // `resumeFromPark` takes no override, so neither does its button here — the
-  // same gate as the Resume Here in the transport.
-  const blocked = showZTools && machineState.needsZZero && (parked || !overridden);
-  const allowResume = () => {
-    setOverridden(true);
-    setOverrideFor(machineState.pauseMessage ?? null);
-  };
-
-  return (
-    <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 text-amber-800 dark:text-amber-300">
-      <div className="flex items-center space-x-3">
-        <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
-        <div>
-          <h4 className="font-bold text-sm">
-            {machineState.status === 'PAUSED_OPERATOR' ? 'Paused' : 'Action Required: Machine Paused'}
-          </h4>
-          <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
-        </div>
-      </div>
-
-      {toolChange && showZTools && (
-        <p className="text-[11px] leading-relaxed">
-          Zero Z on the new tool before resuming.
-        </p>
-      )}
-      {toolChange && showZTools && (
-        <ProbeCircuitStatus active={machineState.probePinActive} seen={machineState.probeCircuitSeen} />
-      )}
-
-      {/* The same freedom, for a stop that needs no touching off: the sheet
-          being swapped is the one the tool is parked over. */}
-      {machineState.status === 'PAUSED_MATERIAL' && (
-        <p className="text-[11px] leading-relaxed">
-          Swap the stock, then resume.
-        </p>
-      )}
-
-      {/* The pad the text above keeps mentioning. Not on a feed hold: GRBL
-          refuses to jog in Hold, and the tool is still in the cut. */}
-      {machineState.status !== 'PAUSED_OPERATOR' && (
-        <div className="rounded-lg bg-white/60 dark:bg-slate-950/40 border border-amber-500/30 p-2.5 space-y-2 text-slate-700 dark:text-slate-200">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <span className="text-[10px] uppercase font-bold text-slate-500">Jog</span>
-            <span className="text-[11px] font-mono tabular-nums">
-              <span className="text-slate-500">WPos </span>
-              X:{machineState.wpos.x.toFixed(2)} Y:{machineState.wpos.y.toFixed(2)} Z:
-              {machineState.wpos.z.toFixed(2)}
-            </span>
-          </div>
-          <JogPad />
-        </div>
-      )}
-
-      {/*
-        What a pause is and is not insurance against.
-        A feed hold holds the position in the controller, which is why Resume
-        picks the cut up exactly — and which is also why it is worth nothing at
-        all once the controller loses power. The program is written down
-        separately so that case has a way back, and this says so at the moment
-        somebody is deciding whether they can walk away.
-      */}
-      <CheckpointBadge
-        feedHold={machineState.status === 'PAUSED_OPERATOR'}
-        className="text-amber-700/90 dark:text-amber-300/80"
-      />
-
-      <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-amber-500/30">
-        <OpenSetupButton />
-        {toolChange && showZTools && (
-          <>
-            <button
-              onClick={() => webSerialManager.zeroZHere()}
-              disabled={probingZ}
-              title="Take work Z 0 from where the tool is standing right now"
-              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
-            >
-              <Hand className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Set Z Zero Here</span>
-            </button>
-            <button
-              onClick={async () => {
-                if (probingZ) return;
-                setProbingZ(true);
-                try {
-                  await webSerialManager.zeroZ(readTouchPlateMm());
-                } finally {
-                  setProbingZ(false);
-                }
-              }}
-              disabled={probingZ}
-              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
-            >
-              <ChevronsDown className="w-3.5 h-3.5 text-amber-400" />
-              <span>{probingZ ? 'Probing Z…' : 'Probe Z Zero'}</span>
-            </button>
-          </>
-        )}
-
-        {blocked && !parked && (
-          <button
-            onClick={allowResume}
-            disabled={probingZ}
-            title="Resume using current Z zero"
-            className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold cursor-pointer"
-          >
-            Skip Z zero
-          </button>
-        )}
-
-        <button
-          // A park let go of the program, so `resumeJob` has nothing to release
-          // and returned without a word; it is put back from the park point.
-          onClick={() =>
-            void (parked
-              ? webSerialManager.resumeFromPark({ isLaser: !showZTools })
-              : webSerialManager.resumeJob({ zIsSet: overridden }))
-          }
-          disabled={blocked || probingZ}
-          title={blocked ? 'Set Z zero for the new tool first' : undefined}
-          className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5 cursor-pointer"
-        >
-          <Play className="w-3.5 h-3.5 fill-current" />
-          <span>{resumeLabel}</span>
-        </button>
-      </div>
-    </div>
   );
 };
 
