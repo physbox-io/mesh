@@ -314,7 +314,7 @@ describe('the Z datum across a tool change', () => {
   });
 
   it('clears the flag once Z has been set by hand', async () => {
-    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nT2 M6\nG1 X20\n');
+    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nT9 M6\nG1 X20\n');
     await advance(6);
     expect(webSerialManager.getState().needsZZero).toBe(true);
 
@@ -1116,7 +1116,7 @@ describe('parking at a programmed pause', () => {
   });
 
   it('leaves a tool change as it was, re-zero gate and all', async () => {
-    webSerialManager.startJob('G21\nG90\nG1 X10 Z-1 F600\nT2 M6 ; fit the 3 mm ball nose\nG1 X20\n');
+    webSerialManager.startJob('G21\nG90\nG1 X10 Z-1 F600\nT9 M6 ; fit the 3 mm ball nose\nG1 X20\n');
     await advance(6);
     const before = webSerialManager.getState();
     expect(before.status).toBe('PAUSED_TOOL');
