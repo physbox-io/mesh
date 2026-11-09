@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AlertCircle, Play, Pause, Square, ChevronsDown, Gauge, RotateCcw, Cpu, Box, Loader2 } from 'lucide-react';
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
@@ -632,7 +632,26 @@ export const JobPreflight: React.FC<{
  * of the wait. The line number is still here, because it is the one to quote
  * when something has gone wrong and the one a resume would restart on.
  */
+/** How many windows showing a job's progress are mounted. See `showJobWindow`. */
+let jobWindows = 0;
+
+/**
+ * After a resume: brings back a window that shows the job, as Etch's Make
+ * panel and Volt's mill window come back. An export dialog with the job in it
+ * stays as it is; with none open, Machine Setup opens, which carries the
+ * progress and the overrides whatever started the job (MCP included).
+ */
+export function showJobWindow(): void {
+  if (jobWindows === 0) useStore.getState().setMachineConfigOpen(true);
+}
+
 export const JobProgress: React.FC<{ machineState: MachineState }> = ({ machineState }) => {
+  useEffect(() => {
+    jobWindows++;
+    return () => {
+      jobWindows--;
+    };
+  }, []);
   const running =
     machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   if (!machineState.connected || !running) return null;

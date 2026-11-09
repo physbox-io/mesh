@@ -7,7 +7,7 @@ import { DEFAULT_CNC_BED, MAX_CNC_BED_MM, MIN_CNC_BED_MM } from '../utils/printB
 import { FdmNotice } from './FdmNotice';
 import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
 import { ControllerSilenceBanner } from './MachineFaultBanner';
-import { JobOverrides } from './MachineJobControls';
+import { JobOverrides, JobProgress } from './MachineJobControls';
 import { describeMotionProfile } from '../utils/motionProfile';
 import { webSerialUnavailableReason } from '@physbox-io/machining';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
@@ -456,6 +456,7 @@ export const MachineConfigModal: React.FC<{
 
           {machineState.connected && (
             <>
+              <JobProgress machineState={machineState} />
               <JobOverrides machineState={machineState} />
               <MachineWorkOriginPanel
                 machineState={machineState}

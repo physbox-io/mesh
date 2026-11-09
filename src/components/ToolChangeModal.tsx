@@ -4,6 +4,7 @@ import { ToolChangeDialog, setShimMm, setTouchPlateMm, useShimMm, useTouchPlateM
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { useJobPause, pauseKey } from '../store/jobPauseStore';
 import { CheckpointBadge } from './CheckpointBadge';
+import { showJobWindow } from './MachineJobControls';
 
 /**
  * A job parked at a tool change, as its own dialog: the pad to bring the new
@@ -58,7 +59,7 @@ export const ToolChangeModal: React.FC = () => {
             }
       }
       resumeBlockedReason={blocked ? 'Zero Z on the new bit before resuming.' : null}
-      onResume={() => webSerialManager.resumeJob()}
+      onResume={() => webSerialManager.resumeJob().then(showJobWindow)}
       onStop={() => webSerialManager.cancelJob()}
       onHide={() => hide(key)}
     >

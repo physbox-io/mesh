@@ -2,7 +2,7 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { JobPauseDialog, jobPauseKind } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { OpenSetupButton } from './MachineJobControls';
+import { OpenSetupButton, showJobWindow } from './MachineJobControls';
 import { CheckpointBadge } from './CheckpointBadge';
 import { useJobPause, pauseKey } from '../store/jobPauseStore';
 
@@ -53,9 +53,10 @@ export const JobPauseModal: React.FC = () => {
       onResume={() =>
         // A park let go of the program, so `resumeJob` has nothing to release;
         // it is put back from the park point.
-        parked
+        (parked
           ? webSerialManager.resumeFromPark({ isLaser: laser })
           : webSerialManager.resumeJob()
+        ).then((ok) => ok !== false && showJobWindow())
       }
       onStop={() => webSerialManager.cancelJob()}
       onHide={() => hide(key)}
