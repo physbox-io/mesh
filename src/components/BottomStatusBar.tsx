@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
 import {
-  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Printer, Puzzle, Scissors, Send, Square, Wrench,
+  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Printer, Puzzle, Scissors, Send, Wrench,
 } from 'lucide-react';
-import { JobWaitingButton, NumberInput, jobPauseKind } from '@physbox-io/ui';
+import { FloatingStop, JobWaitingButton, NumberInput, jobPauseKind } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
 import {
   DEFAULT_STOCK, MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM,
@@ -394,31 +393,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const parked = machineState.status === 'PAUSED_PARKED';
   // The same gate the job panel's banner applies: a new bit, and no Z datum for it yet.
   const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
-  /*
-   * The one stop, above every dialog: a modal's backdrop covers this bar, and a
-   * frame, a probe or a tool change is started from a modal. In the strip below
-   * them, at the window's corner, so it never sits on a modal's own Start.
-   *
-   * With no job to stop (a probe, a go-to-origin, homing, a frame, a spindle
-   * left on) jog-cancel does not stop a G0 or a probe, so this is the one way
-   * to halt it short of the power switch. Not a twin of Pause when there is a
-   * job: this is a soft reset, which ends the piece and loses the position.
-   * Labelled and coloured as the E-Stop it is, and set apart, so it is not the
-   * icon hit when Pause was meant.
-   */
-  const stop = stopControl(machineState);
-  const stopButton = stop && (
-    <button
-      onClick={() => void (stop === 'job' ? webSerialManager.cancelJob() : webSerialManager.eStop())}
-      title={stop === 'job'
-        ? 'E-Stop: soft reset. Stops the machine now and loses the position. The line it reached is kept, to resume after re-homing and re-zeroing.'
-        : 'Soft reset: stops the machine now. If it was moving, the position is lost and it wants homing.'}
-      className="fixed bottom-1 right-4 z-[100001] flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold font-mono text-[11px] cursor-pointer"
-    >
-      <Square className="w-3.5 h-3.5" />
-      <span>{stop === 'job' ? 'E-Stop' : 'Stop machine'}</span>
-    </button>
-  );
 
   const selectClass =
     'bg-transparent text-slate-800 dark:text-slate-200 font-semibold rounded px-1 py-0.5 outline-none cursor-pointer border-none';
@@ -855,7 +829,12 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
           </div>
         )}
 
-        {stopButton && (typeof document !== 'undefined' ? createPortal(stopButton, document.body) : stopButton)}
+        {/* The one stop, above every dialog (see FloatingStop). */}
+        <FloatingStop
+          stop={stopControl(machineState)}
+          onCancelJob={() => void webSerialManager.cancelJob()}
+          onEStop={() => void webSerialManager.eStop()}
+        />
 
         <RemoteJobChip />
 

@@ -13,17 +13,8 @@ const BUSY_WORD = /^(Run|Jog|Home|Hold|Door)/;
 
 const jobHolds = (s: Gated) => s.status === 'RUNNING' || s.status.startsWith('PAUSED');
 
-/**
- * Which stop the operator needs, if any: the job's, or the machine's when it is
- * moving with no job, or left a spindle on. A lit guide spot reports an S word
- * too, and has its own off.
- */
-export function stopControl(s: Gated): 'job' | 'machine' | null {
-  if (!s.connected) return null;
-  if (jobHolds(s)) return 'job';
-  if (BUSY_WORD.test(s.grblState ?? '')) return 'machine';
-  return s.spindleSpeed > 0 && !s.guideSpot ? 'machine' : null;
-}
+/** Which stop the operator needs: the suite's one rule, shared with Etch and Volt. */
+export { stopControl } from '@physbox-io/ui/suite';
 
 /** `$X`: to clear an alarm, or on a controller at rest with no job on it. */
 export function unlockAllowed(s: Gated): boolean {
