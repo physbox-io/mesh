@@ -4,7 +4,7 @@ import { ToolChangeDialog, setShimMm, setTouchPlateMm, useShimMm, useTouchPlateM
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { useJobPause, pauseKey } from '../store/jobPauseStore';
 import { CheckpointBadge } from './CheckpointBadge';
-import { showJobWindow } from './MachineJobControls';
+import { showJobWindow } from '../utils/jobWindow';
 
 /**
  * A job parked at a tool change, as its own dialog: the pad to bring the new

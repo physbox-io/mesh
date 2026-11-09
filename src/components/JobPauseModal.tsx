@@ -2,7 +2,8 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { JobPauseDialog, jobPauseKind } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { OpenSetupButton, showJobWindow } from './MachineJobControls';
+import { OpenSetupButton } from './MachineJobControls';
+import { showJobWindow } from '../utils/jobWindow';
 import { CheckpointBadge } from './CheckpointBadge';
 import { useJobPause, pauseKey } from '../store/jobPauseStore';
 
