@@ -2,7 +2,7 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { ToolChangeDialog, setShimMm, setTouchPlateMm, useShimMm, useTouchPlateMm } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { useJobPause, pauseKey, toolStopKey } from '../store/jobPauseStore';
+import { useJobPause, pauseKey } from '../store/jobPauseStore';
 import { CheckpointBadge } from './CheckpointBadge';
 
 /**
@@ -11,8 +11,8 @@ import { CheckpointBadge } from './CheckpointBadge';
  * describes the bit in the spindle.
  *
  * Material swaps and parks keep `JobPauseModal`; they have nothing to zero.
- * The escape hatch stays: an operator whose datum already suits the new bit
- * (a tool-length setter, a collet-stop) can say so, for this stop only.
+ * No override: the bit Z was zeroed with is not asked about again (the
+ * package keeps that datum), and a different bit always takes a re-zero.
  */
 export const ToolChangeModal: React.FC = () => {
   const [machineState, setMachineState] = React.useState<MachineState>(webSerialManager.getState());
@@ -20,7 +20,6 @@ export const ToolChangeModal: React.FC = () => {
   const hide = useJobPause((s) => s.hide);
   const plateMm = useTouchPlateMm();
   const shimMm = useShimMm();
-  const [overrideFor, setOverrideFor] = React.useState<string | null>(null);
 
   React.useEffect(() => webSerialManager.addListener(setMachineState), []);
 
@@ -29,10 +28,7 @@ export const ToolChangeModal: React.FC = () => {
   if (status !== 'PAUSED_TOOL' || hiddenKey === key) return null;
 
   const laser = webSerialManager.isLaserJob();
-  // An override given at the last tool change must not stand at this one.
-  const stop = toolStopKey(key, machineState.currentLine);
-  const overridden = overrideFor === stop;
-  const blocked = !laser && machineState.needsZZero && !overridden;
+  const blocked = !laser && machineState.needsZZero;
 
   const dialog = (
     <ToolChangeDialog
@@ -62,21 +58,9 @@ export const ToolChangeModal: React.FC = () => {
             }
       }
       resumeBlockedReason={blocked ? 'Zero Z on the new bit before resuming.' : null}
-      onResume={() => webSerialManager.resumeJob({ zIsSet: overridden })}
+      onResume={() => webSerialManager.resumeJob()}
       onStop={() => webSerialManager.cancelJob()}
       onHide={() => hide(key)}
-      footerExtra={
-        blocked ? (
-          <button
-            type="button"
-            onClick={() => setOverrideFor(stop)}
-            title="Resume using current Z zero"
-            className="px-2 py-2 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
-          >
-            Skip Z zero
-          </button>
-        ) : undefined
-      }
     >
       <CheckpointBadge feedHold={false} className="text-slate-500 dark:text-slate-400" />
       {machineState.lastError && (

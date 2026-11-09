@@ -447,7 +447,7 @@ export const JobTransport: React.FC<{
         </button>
       ) : (
         <button
-          onClick={() => webSerialManager.resumeJob({ zIsSet: isLaser })}
+          onClick={() => webSerialManager.resumeJob()}
           disabled={jobBlockedByZZero}
           title={jobBlockedByZZero ? 'Set Z zero for the new tool first' : 'Cycle start'}
           className={`${base} bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950`}

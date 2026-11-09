@@ -17,15 +17,13 @@ import { useJobPause, pauseKey } from '../store/jobPauseStore';
  * Hide tucks it away for this stop; the pause line in the export modal brings
  * it back, and the next stop opens it again by itself.
  *
- * Resume stays shut while Z is unset on a cutting job, as it did in the card
- * this replaced: "Skip Z zero" lets the operator say they have dealt with it,
- * except at a park, whose resume takes no override.
+ * Resume stays shut while Z is unset on a cutting job, with no override:
+ * Machine Setup re-zeroes it.
  */
 export const JobPauseModal: React.FC = () => {
   const [machineState, setMachineState] = React.useState<MachineState>(webSerialManager.getState());
   const hiddenKey = useJobPause((s) => s.hiddenKey);
   const hide = useJobPause((s) => s.hide);
-  const [overrideFor, setOverrideFor] = React.useState<string | null>(null);
 
   React.useEffect(() => webSerialManager.addListener(setMachineState), []);
 
@@ -36,9 +34,7 @@ export const JobPauseModal: React.FC = () => {
 
   const laser = webSerialManager.isLaserJob();
   const parked = kind === 'parked';
-  // An override belongs to the stop it was given at, never the next one.
-  const overridden = overrideFor === key;
-  const blocked = !laser && machineState.needsZZero && (parked || !overridden);
+  const blocked = !laser && machineState.needsZZero;
 
   const dialog = (
     <JobPauseDialog
@@ -59,25 +55,11 @@ export const JobPauseModal: React.FC = () => {
         // it is put back from the park point.
         parked
           ? webSerialManager.resumeFromPark({ isLaser: laser })
-          : webSerialManager.resumeJob({ zIsSet: overridden })
+          : webSerialManager.resumeJob()
       }
       onStop={() => webSerialManager.cancelJob()}
       onHide={() => hide(key)}
-      footerExtra={
-        <>
-          <OpenSetupButton />
-          {blocked && !parked && (
-            <button
-              type="button"
-              onClick={() => setOverrideFor(key)}
-              title="Resume using the current Z zero"
-              className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
-            >
-              Skip Z zero
-            </button>
-          )}
-        </>
-      }
+      footerExtra={<OpenSetupButton />}
     >
       {/* What a pause is and is not insurance against: a feed hold lives in
           the controller and dies with its power; the checkpoint does not. */}

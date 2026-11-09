@@ -680,7 +680,8 @@ describe('the medium findings', () => {
     await job('PAUSED_TOOL');
     await vi.waitFor(() => expect(mgr.drainedPause).not.toBeNull());
     hold = (l) => l === 'G1 X10 F500';
-    await webSerialManager.resumeJob({ zIsSet: true });
+    (webSerialManager as unknown as { updateState: (p: object) => void }).updateState({ zDatumTrusted: true });
+    await webSerialManager.resumeJob();
     await vi.waitFor(() => expect(held.length).toBeGreaterThan(0));
     // Stands at X0: the same point as the cut before the tool change.
     report = '<Hold:0|MPos:0,0,0|WPos:0.000,0.000,5.000|FS:0,0>';
@@ -769,7 +770,8 @@ describe('C11: a tool change stays over the spot the exporter chose', () => {
     expect(atStop).toContain('M5');
 
     sent = [];
-    await webSerialManager.resumeJob({ zIsSet: true });
+    (webSerialManager as unknown as { updateState: (p: object) => void }).updateState({ zDatumTrusted: true });
+    await webSerialManager.resumeJob();
     await finished();
     const back = sent.find((l) => /^G0 X/.test(l));
     expect(back).toMatch(/^G0 X70\.000 Y70\.000/);

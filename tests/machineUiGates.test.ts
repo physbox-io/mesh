@@ -5,7 +5,6 @@ import { JobPreflight, JobResumeBanner } from '../src/components/MachineJobContr
 import { canStartProgram, settingsReadable, stopControl, unlockAllowed } from '../src/utils/machineGates';
 import { readTouchPlateMm, setTouchPlateMm } from '@physbox-io/ui';
 import { hubToken } from '../src/utils/apiClient';
-import { toolStopKey } from '../src/store/jobPauseStore';
 import { webSerialManager, type MachineState } from '../src/utils/webSerialManager';
 import { prepareJobLines } from '../src/utils/machineJobLines';
 
@@ -164,12 +163,5 @@ describe('H22: what the hub is offered', () => {
     expect(hubToken('pbx_abc123')).toBe('pbx_abc123');
     expect(hubToken('eyJhbGciOiJIUzI1NiJ9.e30.sig')).toBeUndefined();
     expect(hubToken(null)).toBeUndefined();
-  });
-});
-
-describe('Skip Z zero', () => {
-  it('belongs to the one stop, not the next with the same words', () => {
-    expect(toolStopKey('PAUSED_TOOL|Tool change: 3 mm.', 40)).not.toBe(toolStopKey('PAUSED_TOOL|Tool change: 3 mm.', 90));
-    expect(toolStopKey('PAUSED_TOOL|Tool change: 3 mm.', 40)).toBe(toolStopKey('PAUSED_TOOL|Tool change: 3 mm.', 40));
   });
 });

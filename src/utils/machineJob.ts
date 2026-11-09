@@ -568,27 +568,13 @@ export abstract class JobMachine extends ProbingMachine {
   }
 
   /**
-   * Resumes a paused job — the operator's own pause, a tool change, or a
-   * material swap.
-   *
-   * The re-zero gate is applied here, not only in the banner's button: the
-   * bottom bar's play button and MCP `resume` came straight here and plunged
-   * the new bit against the old one's datum. `zIsSet` is the operator saying,
-   * by the banner's "Z is already set" link, that it already describes this
-   * tool.
+   * The re-zero gate for a paused job, whichever button or MCP call resumes
+   * it: the bottom bar's play button and MCP `resume` once plunged the new bit
+   * against the old one's datum. No override; the bit Z was zeroed with keeps
+   * its datum in the package, so only a real change of bit asks.
    */
-  public async resumeJob({ zIsSet = false }: { zIsSet?: boolean } = {}): Promise<void> {
-    if (!this.isPaused) return;
-    // Read inside the package's resume before its first await, so it applies
-    // to this resume and no other.
-    this.zIsSetForResume = zIsSet;
-    const resumed = super.resumeJob();
-    this.zIsSetForResume = false;
-    await resumed;
-  }
-
   protected assertReadyToResume(): void {
-    if (this.state.status === 'PAUSED_TOOL' && this.state.needsZZero && !this.zIsSetForResume) {
+    if (this.state.status === 'PAUSED_TOOL' && this.state.needsZZero && this.hasJobZAxis()) {
       throw new Error('Set Z zero for the new tool before resuming: the Z datum still belongs to the last one.');
     }
   }

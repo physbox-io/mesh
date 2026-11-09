@@ -298,8 +298,6 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
 
   /** The controller's last refusal, and the line it refused. See `failJob`. */
   protected lastRefusal: { reply: string; line: string | undefined } | null = null;
-  /** The operator's "Z is already set" for the resume in progress. See `resumeJob`. */
-  protected zIsSetForResume = false;
   /** A start is waiting on the guide spot or stale replies. See `startJob`. */
   protected starting = false;
   /** Whether the stream `beginStreaming` is waiting on ever began. */

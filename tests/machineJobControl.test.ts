@@ -299,7 +299,7 @@ describe('the Z datum across a tool change', () => {
   });
 
   it('refuses to resume past a tool change until Z is set, from any button', async () => {
-    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nT2 M6\nG1 X20\n');
+    webSerialManager.startJob('G21\nG90\nG1 X10 Z-1 F600\nT2 M6\nG1 X20\n');
     await advance(6);
     const before = fake.lines().length;
 
@@ -307,8 +307,9 @@ describe('the Z datum across a tool change', () => {
     expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
     expect(fake.lines().length).toBe(before);
 
-    // The banner's "Z is already set" override still gets through.
-    await webSerialManager.resumeJob({ zIsSet: true });
+    // Once Z is set for the new bit, it goes.
+    (webSerialManager as unknown as { updateState: (p: object) => void }).updateState({ zDatumTrusted: true });
+    await webSerialManager.resumeJob();
     expect(webSerialManager.getState().status).toBe('RUNNING');
   });
 
@@ -672,7 +673,8 @@ describe('getting clear of the work for a tool change', () => {
 
     const atPause = fake.sent.length;
     // Resumed as after touching off: the datum has been dealt with.
-    const resumed = webSerialManager.resumeJob({ zIsSet: true });
+    (webSerialManager as unknown as { updateState: (p: object) => void }).updateState({ zDatumTrusted: true });
+    const resumed = webSerialManager.resumeJob();
     // Standing where the operator touched off: on the work, two millimetres
     // below the datum the program was cut against.
     mgr.parseLine('<Idle|MPos:0.000,0.000,-2.000|FS:0,0>');
@@ -692,7 +694,8 @@ describe('getting clear of the work for a tool change', () => {
     await advance(12);
     expect(webSerialManager.getState().status).toBe(status);
     const atPause = fake.sent.length;
-    await webSerialManager.resumeJob({ zIsSet: true });
+    (webSerialManager as unknown as { updateState: (p: object) => void }).updateState({ zDatumTrusted: true });
+    await webSerialManager.resumeJob();
     await advance(12);
     return fake.sent.slice(atPause);
   }
@@ -1113,7 +1116,7 @@ describe('parking at a programmed pause', () => {
   });
 
   it('leaves a tool change as it was, re-zero gate and all', async () => {
-    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nT2 M6 ; fit the 3 mm ball nose\nG1 X20\n');
+    webSerialManager.startJob('G21\nG90\nG1 X10 Z-1 F600\nT2 M6 ; fit the 3 mm ball nose\nG1 X20\n');
     await advance(6);
     const before = webSerialManager.getState();
     expect(before.status).toBe('PAUSED_TOOL');
