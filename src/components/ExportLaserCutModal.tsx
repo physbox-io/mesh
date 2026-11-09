@@ -473,14 +473,16 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const handleSendToEtch = async () => {
     if (!exportResult || !exportResult.success || !exportResult.svg) return;
     setEtchError(null);
+    const svg = exportResult.svg;
     try {
-      const url = await buildEtchHandoffUrl({
-        svg: exportResult.svg,
-        name: `${jointMode} cut`,
-        thicknessMm: materialThicknessMm,
-        material,
-      });
-      openInEtch(url);
+      await openInEtch(() =>
+        buildEtchHandoffUrl({
+          svg,
+          name: `${jointMode} cut`,
+          thicknessMm: materialThicknessMm,
+          material,
+        })
+      );
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'That cut could not be sent to Etch.');
     }

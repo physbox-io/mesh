@@ -211,11 +211,12 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
     if (!activeSpec) return;
     setEtchError(null);
     try {
-      const url = await buildPcbFaceplateEtchUrl(activeSpec, previewFace, {
-        ...faceplateOptions,
-        material: useStore.getState().material,
-      });
-      openInEtch(url);
+      await openInEtch(() =>
+        buildPcbFaceplateEtchUrl(activeSpec, previewFace, {
+          ...faceplateOptions,
+          material: useStore.getState().material,
+        })
+      );
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'Failed to open faceplate in Etch.');
     }

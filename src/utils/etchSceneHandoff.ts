@@ -75,12 +75,10 @@ export async function etchUrlForScene(req: EtchSceneRequest): Promise<string> {
 }
 
 /**
- * Opens the scene in Etch in a new tab, once the layout is done. A blank tab
- * opened first and closed on failure was a flash of nothing; the click's
- * permission to open a tab outlasts a layout (a few seconds in Chrome), and
- * a blocked one is said rather than lost.
+ * Opens the scene in Etch. The tab opens at once, inside the click, and is
+ * navigated when the layout is done (see `openInEtch`): a layout can outlast
+ * the click's permission to open a tab, and then the send was refused.
  */
-export async function openSceneInEtch(req: EtchSceneRequest): Promise<void> {
-  const url = await etchUrlForScene(req);
-  openInEtch(url);
+export function openSceneInEtch(req: EtchSceneRequest): Promise<void> {
+  return openInEtch(() => etchUrlForScene(req));
 }

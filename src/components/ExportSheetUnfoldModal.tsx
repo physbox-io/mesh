@@ -259,11 +259,12 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
     if (!exportResult || !exportResult.success || !exportResult.svg) return;
     setEtchError(null);
     try {
-      const url = await buildSheetUnfoldEtchUrl(exportResult, {
-        ...options,
-        material: useStore.getState().material,
-      });
-      openInEtch(url);
+      await openInEtch(() =>
+        buildSheetUnfoldEtchUrl(exportResult, {
+          ...options,
+          material: useStore.getState().material,
+        })
+      );
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'Could not send flat pattern to Etch.');
     }

@@ -385,14 +385,16 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const handleOpenInEtch = async () => {
     if (!exportResult?.success || !exportResult.svg) return;
     setEtchError(null);
+    const svg = exportResult.svg;
     try {
-      const url = await buildEtchHandoffUrl({
-        svg: exportResult.svg,
-        name: `${subjectLabel ?? 'Contour'} slices`,
-        thicknessMm: materialThicknessMm,
-        material,
-      });
-      openInEtch(url);
+      await openInEtch(() =>
+        buildEtchHandoffUrl({
+          svg,
+          name: `${subjectLabel ?? 'Contour'} slices`,
+          thicknessMm: materialThicknessMm,
+          material,
+        })
+      );
     } catch (err) {
       setEtchError(err instanceof Error ? err.message : 'The slices could not be sent to Etch.');
     }

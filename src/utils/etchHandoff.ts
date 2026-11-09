@@ -44,11 +44,44 @@ export const ETCH_TAB_NAME = 'physbox-etch';
  * only lets this window find the tab again by name while it is the tab's
  * opener, and the other end is our own app. A tab of Etch the person opened
  * themselves cannot be reached this way; the first send opens one alongside it.
+ *
+ * Takes the URL as a promise-maker and opens the tab *before* building it: a
+ * build gzips, and often lays the parts out first, and a window opened after an
+ * await is no longer plainly the click's. Chrome lets that slide for a few
+ * seconds, Safari and Firefox do not, so a slow layout or another browser
+ * refused the first send. An empty URL leaves an existing Etch tab where it is
+ * until the new one is ready (as Volt does); a fresh tab says what it is
+ * waiting for, and is closed again if the build fails.
  */
-export function openInEtch(url: string): void {
-  const tab = window.open(url, ETCH_TAB_NAME);
+export async function openInEtch(buildUrl: () => Promise<string>): Promise<void> {
+  const tab = window.open('', ETCH_TAB_NAME);
   if (!tab) throw new Error('The browser blocked the Etch tab: allow pop-ups for this site, then try again.');
-  tab.focus();
+  // A tab opened just now is a blank page of this origin, so readable; an
+  // Etch tab from an earlier send is cross-origin and throws.
+  let fresh = false;
+  try {
+    fresh = tab.location.href === 'about:blank';
+  } catch {
+    /* Etch's own tab */
+  }
+  if (fresh) {
+    try {
+      tab.document.title = 'Etch';
+      tab.document.body.style.cssText =
+        'margin:0;height:100vh;display:flex;align-items:center;justify-content:center;' +
+        'font:14px system-ui,sans-serif;color:#64748b;background:#0f172a';
+      tab.document.body.textContent = 'Opening in Etch…';
+    } catch {
+      /* cosmetic only */
+    }
+  }
+  try {
+    tab.location.href = await buildUrl();
+    tab.focus();
+  } catch (e) {
+    if (fresh) tab.close();
+    throw e;
+  }
 }
 
 /**
