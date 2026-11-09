@@ -107,7 +107,7 @@ describe('bottom fill', () => {
   it('refuses a wall too thin for its down-sprue, in one sentence', () => {
     const r = generateMoldMeshes(plateAndBulb, { ...OPTS, wallMarginMm: 4 }, wasm);
     expect(r.success).toBe(false);
-    expect(r.error).toMatch(/needs 9 mm of wall/);
+    expect(r.error).toMatch(/needs 9.7 mm of wall/);
     expect(r.error).toMatch(/fill from the top/);
   });
 
@@ -117,9 +117,10 @@ describe('bottom fill', () => {
     expect(r.error).toMatch(/needs its vents/);
   });
 
-  it('places the bottom-fill horizontal runner below the soluble liner skin in the rigid shell', () => {
+  it('places the bottom-fill horizontal runner below the soluble liner skin', () => {
     const skinMm = 2.4;
-    const r = generateMoldMeshes(plateAndBulb, { ...OPTS, dissolvableLiner: true, linerSkinMm: skinMm }, wasm);
+    // A thicker skin sleeves the down-sprue thicker too, so it wants a wider wall.
+    const r = generateMoldMeshes(plateAndBulb, { ...OPTS, dissolvableLiner: true, linerSkinMm: skinMm, wallMarginMm: 12 }, wasm);
     expect(r.success, r.error).toBe(true);
     const route = feedRouteOf(r.features)!;
     // Top of the horizontal runner (`runnerZ + r`) must sit at least 1 mm below the liner floor (`gate[2] - skinMm`).

@@ -52,7 +52,7 @@ const OpenMoldModal: React.FC<ExportMoldModalProps> = ({ onClose, scene }) => {
   const onMaterial = (t: MoldTab) => (id: CastMaterialId) => rememberMaterial(t, id);
 
   const tabs = (
-    <div role="tablist" className="flex gap-1 px-6 pt-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 overflow-x-auto">
+    <div role="tablist" className="shrink-0 flex gap-1 px-6 pt-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 overflow-x-auto overflow-y-hidden">
       {MOLD_TABS.map((t) => (
         <button
           key={t.id}
@@ -120,6 +120,9 @@ const OpenMoldModal: React.FC<ExportMoldModalProps> = ({ onClose, scene }) => {
       title="Mold"
       subtitle={<span title={subject.label}>Molding: {subject.label}</span>}
       onClose={onClose}
+      // One size from the start, whatever the tab, warnings or steps show: a
+      // dialog that jumps as a mold rebuilds reads as a glitch.
+      height="h-[min(95dvh,56rem)]"
       tabs={tabs}
     >
       {subject.ids.length === 0 ? (

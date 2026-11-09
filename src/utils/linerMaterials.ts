@@ -10,7 +10,7 @@
 // PETG's shell takes a hotter pour than PLA's, and PVB goes in IPA. So the
 // pair is chosen, and every figure follows from it.
 
-export type LinerPairId = 'pla_pva' | 'pla_bvoh' | 'petg_pva' | 'abs_hips' | 'pla_pvb';
+export type LinerPairId = 'pla_pva' | 'pla_bvoh' | 'petg_pva' | 'abs_hips' | 'asa_hips' | 'pla_pvb';
 
 export interface LinerFilament {
   /** As a slicer names it: 'PLA', 'PVA'. */
@@ -36,14 +36,20 @@ export interface LinerPair {
    * says it is one and promises nothing.
    */
   dissolveMmPerHour: number;
+  /** How to get the liner off quickly, as one step. */
+  dissolveTip: string;
 }
+
+const WATER_TIP = 'Use warm (30–40 °C) water and keep it moving (stir it, or use an ultrasonic bath). Change the water when it turns cloudy.';
+const LIMONENE_TIP = 'Stir it, and warm it no hotter than 40 °C in a water bath, never over a flame (d-limonene flashes at 48 °C). HIPS swells into a gel before it dissolves: scrape the gel off every few hours, and change the limonene once it thickens.';
+const IPA_TIP = 'Work cold, ventilated and away from flame. Stir, and change the IPA once it turns syrupy.';
 
 export const LINER_PAIRS: LinerPair[] = [
   {
     id: 'pla_pva', label: 'PLA + PVA',
     shell: { name: 'PLA', densityGcm3: 1.24, softenC: 60 },
     liner: { name: 'PVA', densityGcm3: 1.23, softenC: 60 },
-    solvent: 'warm (30–40 °C) water', waterSoluble: true, dissolveMmPerHour: 1,
+    solvent: 'warm (30–40 °C) water', waterSoluble: true, dissolveMmPerHour: 1, dissolveTip: WATER_TIP,
   },
   {
     // BVOH dissolves several times faster than PVA and takes less moisture
@@ -51,7 +57,7 @@ export const LINER_PAIRS: LinerPair[] = [
     id: 'pla_bvoh', label: 'PLA + BVOH',
     shell: { name: 'PLA', densityGcm3: 1.24, softenC: 60 },
     liner: { name: 'BVOH', densityGcm3: 1.14, softenC: 60 },
-    solvent: 'warm (30–40 °C) water', waterSoluble: true, dissolveMmPerHour: 3,
+    solvent: 'warm (30–40 °C) water', waterSoluble: true, dissolveMmPerHour: 3, dissolveTip: WATER_TIP,
   },
   {
     // PETG's shell takes a pour around 75 °C; the PVA liner, a bead away from
@@ -59,7 +65,7 @@ export const LINER_PAIRS: LinerPair[] = [
     id: 'petg_pva', label: 'PETG + PVA',
     shell: { name: 'PETG', densityGcm3: 1.27, softenC: 75 },
     liner: { name: 'PVA', densityGcm3: 1.23, softenC: 60 },
-    solvent: 'warm (30–40 °C) water', waterSoluble: true, dissolveMmPerHour: 1,
+    solvent: 'warm (30–40 °C) water', waterSoluble: true, dissolveMmPerHour: 1, dissolveTip: WATER_TIP,
   },
   {
     // HIPS dissolves in d-limonene and not in water, so plaster, concrete
@@ -67,7 +73,15 @@ export const LINER_PAIRS: LinerPair[] = [
     id: 'abs_hips', label: 'ABS + HIPS',
     shell: { name: 'ABS', densityGcm3: 1.04, softenC: 95 },
     liner: { name: 'HIPS', densityGcm3: 1.04, softenC: 95 },
-    solvent: 'd-limonene', waterSoluble: false, dissolveMmPerHour: 0.5,
+    solvent: 'd-limonene', waterSoluble: false, dissolveMmPerHour: 0.5, dissolveTip: LIMONENE_TIP,
+  },
+  {
+    // ASA is ABS's outdoor cousin: it prints alongside HIPS the same way and
+    // stands up to the limonene as well.
+    id: 'asa_hips', label: 'ASA + HIPS',
+    shell: { name: 'ASA', densityGcm3: 1.07, softenC: 95 },
+    liner: { name: 'HIPS', densityGcm3: 1.04, softenC: 95 },
+    solvent: 'd-limonene', waterSoluble: false, dissolveMmPerHour: 0.5, dissolveTip: LIMONENE_TIP,
   },
   {
     // PVB (PolySmooth and the like) dissolves in isopropyl alcohol, which PLA
@@ -76,7 +90,7 @@ export const LINER_PAIRS: LinerPair[] = [
     id: 'pla_pvb', label: 'PLA + PVB',
     shell: { name: 'PLA', densityGcm3: 1.24, softenC: 60 },
     liner: { name: 'PVB', densityGcm3: 1.08, softenC: 65 },
-    solvent: 'isopropyl alcohol (IPA, 99%), ventilated and away from flame', waterSoluble: false, dissolveMmPerHour: 0.5,
+    solvent: 'isopropyl alcohol (IPA, 99%), ventilated and away from flame', waterSoluble: false, dissolveMmPerHour: 0.5, dissolveTip: IPA_TIP,
   },
 ];
 

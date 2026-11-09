@@ -336,11 +336,21 @@ export interface BottomFill {
 
 /** Wall between a down-sprue and the cavity or the block's edge, mm. */
 export const FEED_WALL_MM = 1.5;
+/** Shell outside a lined down-sprue's sleeve, mm: what the shell's floor keeps too. */
+const SLEEVED_EDGE_WALL_MM = 1;
+/** How far a down-sprue's axis stays inside the block's edge, mm. */
+export function feedEdgeMm(r: number, sleeveMm = 0): number {
+  return sleeveMm > 0 ? r + sleeveMm + SLEEVED_EDGE_WALL_MM : r + FEED_WALL_MM;
+}
 /** Mold between the runner and the cavity's lowest point, mm. */
 export const RUNNER_CLEARANCE_MM = 1;
-/** How much floor a bottom-fill runner of radius `r` needs under the cavity's lowest point, mm. */
+/**
+ * How much floor a bottom-fill runner of radius `r` needs under the cavity's
+ * lowest point, mm. Lined, the skin under the cavity and the runner's own
+ * sleeve of liner under it as well.
+ */
 export function bottomFillFloorMm(r: number, linerSkinMm = 0): number {
-  return Math.ceil((linerSkinMm + RUNNER_CLEARANCE_MM + 2 * r + FEED_WALL_MM) * 2) / 2;
+  return Math.ceil((2 * linerSkinMm + RUNNER_CLEARANCE_MM + 2 * r + FEED_WALL_MM) * 2) / 2;
 }
 
 /**
@@ -397,6 +407,8 @@ export function planBottomFill(
   maxFromPartMm: number,
   gateDia: number,
   linerSkinMm = 0,
+  /** Sleeve round the down-sprue inside its wall to the block's edge, mm. */
+  sleeveMm = 0,
 ): BottomFill | null {
   const { cols, rows, stepX, stepY, halfW, halfD } = grid;
   const xOf = (c: number) => -halfW + c * stepX;
@@ -430,7 +442,7 @@ export function planBottomFill(
   sweep(false);
 
   const minFromPart = r + FEED_WALL_MM;
-  const edge = r + FEED_WALL_MM;
+  const edge = feedEdgeMm(r, sleeveMm);
   let best: { x: number; y: number; fromPart: number } | null = null;
   let bestD = Infinity;
   for (let i = 0; i < dist.length; i++) {

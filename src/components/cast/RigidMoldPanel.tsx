@@ -13,8 +13,8 @@ import {
   type MoldOptions,
   type MoldSummary,
 } from '../../utils/moldExporter';
-import { MoldWorkerClient, moldMasterRecord, moldSceneParts, type MoldPreview } from '../../utils/moldWorkerClient';
-import { DEFAULT_LINER_SKIN_MM } from '../../utils/moldLiner';
+import { MoldWorkerClient, moldMasterRecord, moldSceneParts, moldStepLines, type MoldPreview } from '../../utils/moldWorkerClient';
+import { clampGrams, DEFAULT_LINER_SKIN_MM } from '../../utils/moldLiner';
 import { LINER_PAIRS, linerPair, pairSoftenC, type LinerPairId } from '../../utils/linerMaterials';
 import { moldFeatureLines } from '../../utils/moldExporter';
 import { ventBoreDiaMm } from '../../utils/moldSprue';
@@ -275,7 +275,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
       kind: 'mold',
       label: 'Mold',
       placement: 'beside',
-      details: moldFeatureLines(preview?.summary.features),
+      details: [...moldFeatureLines(preview?.summary.features), ...(preview ? moldStepLines(preview.summary) : [])],
     });
   };
 
@@ -411,7 +411,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
           )}
 
           {result.warnings.length > 0 && (
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
               {result.warnings.map((w, i) => (
                 <div
                   key={i}
@@ -501,7 +501,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             )}
 
             <div className="flex flex-wrap items-center gap-2">
-              <HintAnchor hint="A rigid shell, with a soluble liner where the casting touches it. Every undercut is kept; the liner dissolves and the shell lifts off. Needs a two-filament printer.">
+              <HintAnchor hint="A rigid shell with a soluble liner wherever the pour touches: cavity, sprue, vents, runner. Keeps every undercut.">
                 <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
                   <input
                     type="checkbox"
@@ -526,13 +526,33 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                 </select>
               )}
             </div>
+            {options.dissolvableLiner && (
+              <div className="pl-6">
+                <Field label="Print As" hint="One print: shell and liner together, two filaments. Holder + insert: four single-filament prints; the insert dissolves from every side.">
+                  <Segmented
+                    value={options.linerConstruction ?? 'combined'}
+                    onChange={(v) => set('linerConstruction', v)}
+                    options={[['combined', 'One print'], ['insert', 'Holder + insert']] as const}
+                  />
+                </Field>
+              </div>
+            )}
+            {!result.liner && moldType === 'clamshell' && (
+              <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+                <span className="font-semibold text-slate-600 dark:text-slate-300">Before pouring: </span>
+                wipe mold release or petroleum jelly over the parting faces, pins and cavity, then clamp the halves
+                (binder clips, or at least {clampGrams(material, result.moldWidthMm, result.moldDepthMm, result.topHalf?.partingZMm ?? 0)} g on the lid).
+                Tape alone lets the lid float once the pour reaches the funnel.
+              </p>
+            )}
             {result.liner && (
               <div className="pl-6 text-[11px] leading-snug text-slate-600 dark:text-slate-300 space-y-1">
                 <div>
                   {result.liner.linerMaterial} <strong>{result.liner.linerGrams} g</strong> · {result.liner.shellMaterial} <strong>{result.liner.shellGrams} g</strong> ·
-                  thickest liner {result.liner.thickestLinerMm} mm, about {result.liner.dissolveHours} h in {result.liner.solvent}
+                  about {result.liner.dissolveHours} h in {result.liner.solvent}
                 </div>
-                <ol className="list-decimal pl-4 space-y-0.5 text-slate-500 dark:text-slate-400">
+                <div className="font-semibold">How to use it</div>
+                <ol className="max-h-40 overflow-y-auto pr-1 list-decimal pl-4 space-y-0.5 text-slate-500 dark:text-slate-400">
                   {result.liner.steps.map((step, i) => <li key={i}>{step}</li>)}
                 </ol>
               </div>
@@ -644,6 +664,20 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
               />
               Keep 3D Undercuts (Flexible / Silicone Mold)
             </label>
+
+            {options.dissolvableLiner && moldType === 'clamshell' && (
+              <HintAnchor hint="A tongue on the lid's shell and a groove in the cavity half's, round the liner, so resin stays out of the seam without tape.">
+                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={options.sealRidge !== false}
+                    onChange={(e) => set('sealRidge', e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                  />
+                  Sealing Ridge
+                </label>
+              </HintAnchor>
+            )}
 
             {options.dissolvableLiner && (
               <div className="grid grid-cols-2 gap-3 min-w-0">

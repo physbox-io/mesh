@@ -82,13 +82,15 @@ export function planSprue(
   blockHeight: number,
   /** The widest the mouth may be where it is, for a block that follows the part's outline. */
   roomR = Infinity,
+  /** More wall to keep round the funnel: a lined mold's sleeve, an insert's clearance, the seal. */
+  wallExtraMm = 0,
 ): SprueChannel {
   const { cols, rows, stepX, stepY, halfW, halfD } = grid;
   const neckR = sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial) / 2;
   // At least twice the neck across, so there is a funnel to pour into, and
   // the wall's thickness inside the block's edge: a down-sprue in the wall
   // had its funnel 0.4 mm from breaking out of the side.
-  const inside = Math.min(roomR, halfW - Math.abs(x), halfD - Math.abs(y)) - MIN_FUNNEL_WALL_MM;
+  const inside = Math.min(roomR, halfW - Math.abs(x) - wallExtraMm, halfD - Math.abs(y) - wallExtraMm) - MIN_FUNNEL_WALL_MM;
   const askedMouthR = Math.max(neckR, Math.min(Math.max(opts.sprueTopDiaMm / 2, neckR * 2), inside));
   let depth = askedMouthR - neckR;
 
@@ -166,6 +168,8 @@ export function channelSolid(
   wasm: ManifoldToplevel,
   ch: { x: number; y: number; outerR: number; innerR: number; funnelDepth?: number; pocketZMm?: number },
   blockHeight: number,
+  /** The air-bleed ribs; off for the sleeve of liner round a channel, which carries none. */
+  ribs = true,
 ): Manifold {
   const through = blockHeight + 2;
   if (ch.funnelDepth === undefined) {
@@ -196,7 +200,7 @@ export function channelSolid(
   // capillary meniscus so air escapes up the corners while liquid pours down.
   const ribDepth = Math.min(0.45, Math.max(0, r1 - 0.8));
   const ribWidth = Math.min(0.6, r1 * 0.3);
-  if (ribDepth > 0.1 && ribWidth > 0.1) {
+  if (ribs && ribDepth > 0.1 && ribWidth > 0.1) {
     const ribPoly: [number, number][] = [
       [r0 - ribDepth, z0 - 0.5],
       [r0 + 0.5, z0 - 0.5],

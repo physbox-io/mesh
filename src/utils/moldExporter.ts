@@ -23,11 +23,11 @@ import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldTo
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
 import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
-import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
+import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, INSERT_CLEARANCE_MM, SEAL_RING_ROOM_MM, NO_MANIFOLD_REFUSAL, type LinerConstruction, type MoldLinerInfo } from './moldLiner';
 import { castMaterial, type CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
 import { gateDiaMm, planSprue, sprueNeckDiaMm, ventBoreDiaMm, withPourMouth, VENT_TAPER_MM } from './moldSprue';
-import { bottomFillFloorMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
+import { bottomFillFloorMm, feedEdgeMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
 import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
@@ -102,6 +102,13 @@ export interface MoldOptions {
   castMaterial?: CastMaterialId;
   /** The liner's shell and soluble filament (linerMaterials.ts, default PLA + PVA). */
   linerPair?: LinerPairId;
+  /**
+   * 'combined' (default): shell and liner printed together, two filaments.
+   * 'insert': the liner a separate insert in a reusable holder, four prints.
+   */
+  linerConstruction?: LinerConstruction;
+  /** A tongue and groove round a lined clamshell's cavity, so the seam needs no tape (default on). */
+  sealRidge?: boolean;
   /** Base diameter of alignment pins in mm. */
   pinDiameterMm: number;
   /** Height of alignment pins in mm. */
@@ -1503,8 +1510,8 @@ export function generateMoldMeshes(
   const lidChannelY = (y: number) => (detailIsAbove ? y : -y);
   const baseTrueDepth = opts.moldType === 'open' ? partHeightMm : (detailIsAbove ? zMax - partingZ : partingZ - zMin);
   const lidTrueDepth = detailIsAbove ? partingZ - zMin : zMax - partingZ;
-  // Filled from the bottom, the cavity half's floor holds the runner under the cavity
-  // (and under the soluble liner skin when lined, so the runner stays in the rigid shell).
+  // Filled from the bottom, the cavity half's floor holds the runner under the cavity;
+  // lined, it holds the runner's own sleeve of liner too, with shell under that.
   const feed = opts.moldType === 'clamshell' && opts.includeSprue ? (opts.sprueFeed ?? 'bottom') : 'top';
   const neckR = sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial) / 2;
   const linerSkinMm = opts.dissolvableLiner
@@ -1565,8 +1572,19 @@ export function generateMoldMeshes(
       ...setupFields,
     };
   }
+  // A lined sprue wears a sleeve of liner inside its wall, and the sealing
+  // ridge wants room past that. An insert's sleeve and its holder's pocket are
+  // each held on the grid, a half cell's diagonal generous, plus the clearance.
+  const sleeveMm = linerSkinMm > 0
+    ? linerSkinMm + (opts.linerConstruction === 'insert' ? INSERT_CLEARANCE_MM + Math.hypot(grid.stepX, grid.stepY) : 0)
+    : 0;
+  const sealMm = linerSkinMm > 0 && clamshell && opts.sealRidge !== false ? SEAL_RING_ROOM_MM : 0;
+  // The funnel keeps its sleeve inside the lid's edge. Only an insert carries
+  // the funnel's full width down to the seam, where the seal goes round it.
+  const funnelWallMm = opts.linerConstruction === 'insert' ? sleeveMm + sealMm : linerSkinMm;
   if (opts.includeSprue && feed === 'bottom' && pourSpans) {
-    const avoid = baseFeatures.sockets.map((s) => ({ x: s.x, y: s.y, r: s.rimR }));
+    // With the seal, the ring has to pass between the down-sprue's sleeve and the pins too.
+    const avoidAt = (extraMm: number) => baseFeatures.sockets.map((s) => ({ x: s.x, y: s.y, r: s.rimR + extraMm }));
     // Clear of the vents: a funnel that takes in a vent's mouth pours down the
     // vent, from the top, whenever it is full. With room for the whole funnel
     // if there is any; if not the funnel gives way (roomR, below), not the neck.
@@ -1574,10 +1592,26 @@ export function generateMoldMeshes(
     const funnelR = Math.max(opts.sprueTopDiaMm / 2, neckR * 2);
     const ventsAt = (r: number) => ventPeaks.map((v) => ({ x: v.x, y: v.y, r }));
     const gateDia = gateDiaMm(opts.castMaterial);
-    bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room, gateDia, linerSkinMm)
-      ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room, gateDia, linerSkinMm);
+    // Tried with room for the seal (and, in an insert, for the whole funnel's
+    // sleeve down to the seam), then with less, then with none.
+    const insertFunnelMm = opts.linerConstruction === 'insert' ? funnelR - neckR : 0;
+    const tries: Array<{ keep: boolean; edgeMm: number; pinMm: number }> = sealMm > 0
+      ? [
+          ...(insertFunnelMm > 0 ? [{ keep: true, edgeMm: sleeveMm + sealMm + insertFunnelMm, pinMm: sleeveMm + sealMm + insertFunnelMm }] : []),
+          { keep: true, edgeMm: sleeveMm + sealMm, pinMm: sleeveMm + sealMm },
+          { keep: false, edgeMm: sleeveMm, pinMm: 0 },
+        ]
+      : [{ keep: false, edgeMm: sleeveMm, pinMm: 0 }];
+    let sealRoomKept = false;
+    for (const { keep, edgeMm, pinMm } of tries) {
+      const avoid = avoidAt(pinMm);
+      bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room, gateDia, linerSkinMm, edgeMm)
+        ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room, gateDia, linerSkinMm, edgeMm);
+      sealRoomKept = keep;
+      if (bottomFill) break;
+    }
     if (!bottomFill) {
-      const need = Math.ceil((2 * (neckR + FEED_WALL_MM)) * 10) / 10;
+      const need = Math.ceil((neckR + FEED_WALL_MM + feedEdgeMm(neckR, sleeveMm)) * 10) / 10;
       return {
         ...emptyMoldResult(
           `Bottom fill needs ${need} mm of wall beside the cavity for its down-sprue, clear of the pins; widen the wall margin, or fill from the top.`,
@@ -1587,7 +1621,11 @@ export function generateMoldMeshes(
     }
     const { down, gate, runnerZ, r, gateR, gateTopZ } = bottomFill;
     const ventRoomR = Math.min(Infinity, ...ventPeaks.map((v) => Math.hypot(v.x - down.x, v.y - down.y) - ventMouthR));
-    sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, Math.min(bottomFill.roomR, ventRoomR));
+    // An insert carries the funnel's width down to the seam, so it stops short of the pins by the seal's room as well.
+    const pinRoomR = opts.linerConstruction === 'insert' && sealRoomKept
+      ? Math.min(Infinity, ...baseFeatures.sockets.map((k) => Math.hypot(k.x - down.x, k.y - down.y) - k.rimR - SEAL_RING_ROOM_MM - sleeveMm - 1))
+      : Infinity;
+    sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, Math.min(bottomFill.roomR, ventRoomR, pinRoomR), funnelWallMm);
     baseBores.push(
       // Down the wall from the parting face...
       { a: [down.x, down.y, 1], b: [down.x, down.y, runnerZ], r, fluted: true },
@@ -1597,7 +1635,18 @@ export function generateMoldMeshes(
       { a: [gate.x, gate.y, runnerZ], b: [gate.x, gate.y, gateTopZ], r: gateR },
     );
   } else if (opts.includeSprue && clamshell) {
-    sprueChannel = planSprue(pour.sprue.x, lidChannelY(pour.sprue.y), opts, grid, lidCavityDepth, lidBlockHeight);
+    sprueChannel = planSprue(pour.sprue.x, lidChannelY(pour.sprue.y), opts, grid, lidCavityDepth, lidBlockHeight, Infinity, funnelWallMm);
+  }
+  if (sprueChannel && funnelWallMm > 0) {
+    // A lined funnel keeps its sleeve (and an insert's, the seal) inside the edge, and gives way to do it.
+    const askedR = Math.max(opts.sprueTopDiaMm / 2, neckR * 2);
+    const shortMm = askedR - sprueChannel.outerR;
+    if (shortMm > 1) {
+      warnings.push(
+        `The sprue's funnel is cut to ⌀${(sprueChannel.outerR * 2).toFixed(1)} mm to keep its liner sleeve${opts.linerConstruction === 'insert' ? ' and the seal' : ''} inside the block's edge${opts.linerConstruction === 'insert' ? ' and clear of the pins' : ''}; ` +
+        `a wider wall margin gives it the full ⌀${(askedR * 2).toFixed(1)} mm.`,
+      );
+    }
   }
   if (baseBores.length) baseFeatures.bores = baseBores;
   // A vent under the sprue's own mouth is the sprue: that air goes out up it.
@@ -1684,6 +1733,8 @@ export function generateMoldMeshes(
       skinMm: opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM,
       castMaterial: opts.castMaterial ?? 'epoxy',
       linerPair: opts.linerPair,
+      construction: opts.linerConstruction ?? 'combined',
+      sealRidge: opts.sealRidge !== false,
     });
     return 'error' in lined ? { ...emptyMoldResult(lined.error), ...setupFields } : lined;
   }
@@ -1836,11 +1887,12 @@ export interface MoldStlPart {
  */
 export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf' | 'liner'>): MoldStlPart[] {
   const pair = linerPair(r.liner?.pair);
+  const insert = r.liner?.construction === 'insert';
   const of = (h: MoldMeshHalf): MoldStlPart[] =>
     h.liner
       ? [
-          { name: `${h.name} shell`, triangles: h.liner.shell.length, role: 'shell', material: pair.shell.name },
-          { name: `${h.name} liner`, triangles: h.liner.liner.length, role: 'liner', material: pair.liner.name },
+          { name: `${h.name} ${insert ? 'holder' : 'shell'}`, triangles: h.liner.shell.length, role: 'shell', material: pair.shell.name },
+          { name: `${h.name} ${insert ? 'insert' : 'liner'}`, triangles: h.liner.liner.length, role: 'liner', material: pair.liner.name },
         ]
       : [{ name: h.name, triangles: h.triangles.length, role: 'shell', material: 'PLA' }];
   return [...of(r.bottomHalf), ...(r.topHalf ? of(r.topHalf) : [])].filter((p) => p.triangles > 0);

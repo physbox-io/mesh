@@ -32,7 +32,7 @@ describe('liner pairs', () => {
     const info = res.liner!;
     expect([info.shellMaterial, info.linerMaterial, info.solvent]).toEqual(['ABS', 'HIPS', 'd-limonene']);
     expect(info.linerGrams).toBeCloseTo((info.linerVolumeMm3 / 1000) * 1.04, 0);
-    expect(info.steps.join(' ')).toMatch(/HIPS liner in d-limonene/);
+    expect(info.steps.join(' ')).toMatch(/Dissolve the HIPS off the casting in d-limonene/);
     const model = strFromU8(unzipSync(res.threeMf!)['3D/3dmodel.model']);
     expect(model).toContain('shell (ABS)');
     expect(model).toContain('liner (HIPS)');

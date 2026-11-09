@@ -22,11 +22,28 @@
 // simulation and the STL read the halves whole; only the 3MF and the preview
 // tell the two materials apart.
 //
+// Nothing the pour touches is shell. The sprue, vents, down-sprue, runner and
+// gate each get a sleeve of liner the skin thick, because epoxy cured in a
+// bare shell bore holds on for good: a real ASA + HIPS gear mold came out of
+// four hours of limonene with its lid glued on by nine vent plugs and the
+// casting held in the cavity half by a runner buried under it.
+//
+// Two constructions:
+//  - 'combined': shell and liner printed together, two filaments, a pair of
+//    bodies per half.
+//  - 'insert': the liner is a separate insert, printed alone in the soluble
+//    filament, sitting with a clearance in a pocket of a reusable holder,
+//    printed alone in the rigid one. Four prints. The holder lifts off and the
+//    whole insert is open to the solvent, instead of only its rim.
+//
+// A clamshell's shell (or holder) carries a tongue round the cavity on the lid
+// and a groove for it on the cavity half, so the seam needs no tape.
+//
 // Using it: the shell lifts off along the pull (soaked a while if the PVA holds
 // it), the casting comes out wearing its PVA, and the PVA dissolves off it.
 // ---------------------------------------------------------------------------
 
-import type { Manifold, ManifoldToplevel } from 'manifold-3d';
+import type { CrossSection, Manifold, ManifoldToplevel, SimplePolygon } from 'manifold-3d';
 import type { Grid, ColumnField } from './moldColumns';
 import {
   boundsOf,
@@ -43,9 +60,26 @@ import { applyDraft, erodeDepth, type DraftMode } from './moldDraft';
 import { linerPair, pairSoftenC, type LinerPair, type LinerPairId } from './linerMaterials';
 import { fittedBlock, type Outline } from './moldOutline';
 import { channelSolid, sprueNeckDiaMm, withPourMouth } from './moldSprue';
-import { boreSolids } from './moldGating';
+import { boreSolids, type BoreCut } from './moldGating';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
+
+/** How a lined mold prints: shell and liner together, or a separate insert in a holder. */
+export type LinerConstruction = 'combined' | 'insert';
+/** Gap between an insert and its holder's pocket, all round, mm. */
+export const INSERT_CLEARANCE_MM = 0.25;
+/** The seal: a tongue on the lid's shell and a groove for it on the cavity half's, mm. */
+export const SEAL_TONGUE_W_MM = 1.2;
+export const SEAL_TONGUE_H_MM = 1.0;
+export const SEAL_GROOVE_CLEAR_MM = 0.15;
+/** Deeper than the tongue is tall, so the faces still meet. */
+export const SEAL_GROOVE_D_MM = 1.3;
+/** Shell kept between the groove and the block's edge, mm. */
+const SEAL_EDGE_MM = 1;
+/** Room the seal takes outside the liner, beyond a 1 mm wall: the nearest gap, the groove and its edge. */
+export const SEAL_RING_ROOM_MM = 0.8 + SEAL_TONGUE_W_MM + 2 * SEAL_GROOVE_CLEAR_MM + SEAL_EDGE_MM - 1;
+/** Kept clear round a pin, socket or pry notch, mm. */
+const SEAL_PIN_CLEAR_MM = 0.8;
 /** Said of a water-soluble liner; an ABS + HIPS mold takes water-based casts. */
 export const WATER_BASED_REFUSAL = 'Water-based casts dissolve a water-soluble liner while they cure; use an ABS + HIPS or PLA + PVB liner, the rigid mold or a silicone one.';
 export const MELTS_REFUSAL = (label: string) =>
@@ -73,6 +107,12 @@ export interface MoldLinerInfo {
   /** The deepest liner anywhere from a face the solvent reaches once the shell is off, mm. */
   thickestLinerMm: number;
   dissolveHours: number;
+  /** Shell and liner printed together, or an insert in a holder. */
+  construction: LinerConstruction;
+  /** Whether the clamshell's shell carries the tongue and groove. */
+  sealRidge: boolean;
+  /** Weight on the lid that holds it down through the pour, g (clamshells). */
+  clampGrams?: number;
   /** What to do with it, in order. */
   steps: string[];
 }
@@ -355,9 +395,122 @@ function replace(prev: Manifold, next: Manifold): Manifold {
   return next;
 }
 
+/** Smaller than this, a separate piece of a printed body is a crumb: a slicer's sliver, or a loose pillar left between sleeves. */
+const CRUMB_MM3 = 2;
+
+/** `m` without its crumbs; `m` is consumed. */
+function withoutCrumbs(wasm: ManifoldToplevel, m: Manifold): Manifold {
+  const pieces = m.decompose();
+  if (pieces.length <= 1) {
+    for (const p of pieces) p.delete();
+    return m;
+  }
+  const kept = pieces.filter((p) => p.volume() >= CRUMB_MM3);
+  const out = wasm.Manifold.compose(kept.length ? kept : pieces);
+  for (const p of pieces) p.delete();
+  m.delete();
+  return out;
+}
+
+/**
+ * A sleeve of liner round every feature the pour runs through (sprue, vents,
+ * down-sprue, runner, gate, an open mold's blind vents), the skin thick, as
+ * solids in the half's own frame. Not the sockets: pins go in those.
+ */
+export function featureSleeves(wasm: ManifoldToplevel, features: HalfFeatures, blockHeight: number, skinMm: number): Manifold[] {
+  const out: Manifold[] = [];
+  for (const ch of features.channels) {
+    const stop = ch.pocketZMm !== undefined && ch.pocketZMm > 0 ? Math.max(0, ch.pocketZMm - skinMm) : ch.pocketZMm;
+    out.push(channelSolid(wasm, { ...ch, outerR: ch.outerR + skinMm, innerR: ch.innerR + skinMm, ...(stop !== undefined ? { pocketZMm: stop } : {}) }, blockHeight, false));
+  }
+  for (const v of features.topVents ?? []) {
+    if (v.zRoof < -0.1 && v.zRoof > -blockHeight + 0.5) {
+      const z0 = v.zRoof - 0.3 - skinMm;
+      out.push(wasm.Manifold.cylinder(1.0 - z0, v.r + skinMm, v.r + skinMm, 24, false).translate([v.x, v.y, z0]));
+    }
+  }
+  for (const cut of features.bores ?? []) {
+    // Round-ended: the ball on each end puts the skin past it as well.
+    const grown: BoreCut = { ...cut, r: cut.r + skinMm, ...(cut.rB !== undefined ? { rB: cut.rB + skinMm } : {}), fluted: false, ends: true };
+    out.push(...boreSolids(wasm, grown));
+  }
+  return out;
+}
+
+/**
+ * How deep below the parting face each grid column holds a sleeve: the same
+ * features as featureSleeves, as a depth field, so an insert can carry them as
+ * columns it lifts out with. Generous by half a grid diagonal, as the envelope
+ * is, so the heightfield between the samples still holds the exact sleeves.
+ * A channel goes right through the half.
+ */
+export function sleeveColumnDepth(features: HalfFeatures, grid: Grid, blockHeight: number, skinMm: number): Float64Array {
+  const { cols, rows, stepX, stepY, halfW, halfD } = grid;
+  const pad = Math.hypot(stepX, stepY) / 2;
+  const out = new Float64Array(cols * rows);
+  const through = blockHeight + 2;
+  const stamp = (x: number, y: number, R: number, depthAt: (d: number) => number) => {
+    const c0 = Math.max(0, Math.floor((x - R - pad + halfW) / stepX));
+    const c1 = Math.min(cols - 1, Math.ceil((x + R + pad + halfW) / stepX));
+    const r0 = Math.max(0, Math.floor((y - R - pad + halfD) / stepY));
+    const r1 = Math.min(rows - 1, Math.ceil((y + R + pad + halfD) / stepY));
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const d = Math.max(0, Math.hypot(-halfW + c * stepX - x, -halfD + r * stepY - y) - pad);
+        if (d > R) continue;
+        const depth = depthAt(d);
+        const i = r * cols + c;
+        if (depth > out[i]) out[i] = depth;
+      }
+    }
+  };
+  for (const ch of features.channels) stamp(ch.x, ch.y, Math.max(ch.outerR, ch.innerR) + skinMm, () => through);
+  for (const v of features.topVents ?? []) {
+    if (v.zRoof < -0.1 && v.zRoof > -blockHeight + 0.5) stamp(v.x, v.y, v.r + skinMm, () => 0.3 + skinMm - v.zRoof);
+  }
+  for (const cut of features.bores ?? []) {
+    // Balls along the axis: the round-ended sleeve exactly.
+    const len = Math.hypot(cut.b[0] - cut.a[0], cut.b[1] - cut.a[1], cut.b[2] - cut.a[2]);
+    const n = Math.max(1, Math.ceil(len / 0.25));
+    for (let k = 0; k <= n; k++) {
+      const t = k / n;
+      const z = cut.a[2] + t * (cut.b[2] - cut.a[2]);
+      const R = cut.r + t * ((cut.rB ?? cut.r) - cut.r) + skinMm;
+      stamp(cut.a[0] + t * (cut.b[0] - cut.a[0]), cut.a[1] + t * (cut.b[1] - cut.a[1]), R, (d) => Math.sqrt(R * R - d * d) - z);
+    }
+  }
+  return out;
+}
+
+/** How far down from the parting face a holder's pocket fits its insert to the clearance exactly, mm. */
+const INSERT_RIM_FIT_MM = 3;
+
+/** Signed area of a contour: positive is an outer boundary, negative a hole. */
+function contourArea(poly: SimplePolygon): number {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x0, y0] = poly[i];
+    const [x1, y1] = poly[(i + 1) % poly.length];
+    a += x0 * y1 - x1 * y0;
+  }
+  return a / 2;
+}
+
+/** A solid's outline where it meets the parting face, holes filled. */
+function faceOutline(wasm: ManifoldToplevel, m: Manifold): CrossSection {
+  const cs = m.slice(-0.05);
+  const outer = cs.toPolygons().filter((p) => contourArea(p) > 0);
+  cs.delete();
+  return new wasm.CrossSection(outer, 'Positive');
+}
+
 interface HalfPair {
   shell: Manifold;
   liner: Manifold;
+  /** Where the liner (or the holder's pocket) meets the parting face, holes filled: the seal goes round it. */
+  face: CrossSection;
+  /** The block's own outline at the parting face. */
+  blockFace: CrossSection;
   envelope: Float64Array;
   spans: Float64Array[];
   /** Part volume outside the envelope: where the shell would touch the casting. */
@@ -407,12 +560,64 @@ function buildHalfPair(
   outside.delete();
   escaped.delete();
 
-  const cavity = env.add(part);
-  let shell = block.subtract(cavity);
-  cavity.delete();
-  const inBlock = block.intersect(env);
-  let liner = inBlock.subtract(part);
-  inBlock.delete();
+  // Every bore the pour runs through, sleeved in liner.
+  const sleeveTools = featureSleeves(wasm, features, blockHeight, ctx.skinMm);
+  const sleeveAll = sleeveTools.length ? wasm.Manifold.union(sleeveTools) : null;
+  for (const t of sleeveTools) t.delete();
+  const sleeves = sleeveAll ? sleeveAll.intersect(block) : null;
+  sleeveAll?.delete();
+  const linerReach = sleeves ? env.add(sleeves) : env;
+
+  let shell: Manifold;
+  let liner: Manifold;
+  let face: CrossSection;
+  if (ctx.construction === 'insert') {
+    // The insert is a heightfield sunk from the parting face, holding the
+    // envelope and every sleeve, so it lifts out of its holder. A column it
+    // would leave too thin a floor under goes on through.
+    const sd = sleeveColumnDepth(features, grid, blockHeight, ctx.skinMm);
+    const limit = blockHeight - MIN_FLOOR_MM;
+    const insertDepth = envelope.map((d, i) => {
+      const v = Math.max(d, sd[i]);
+      return v > limit ? blockHeight + 2 : v;
+    });
+    const outer = envelopeSolid(wasm, grid, insertDepth);
+    const shape = sleeves ? outer.add(sleeves) : outer;
+    const inBlock = shape.intersect(block);
+    liner = inBlock.subtract(part);
+    inBlock.delete();
+    // The pocket: the heightfield grown by the clearance on the grid, and to
+    // the clearance exactly round the rim, where it sets how the two inserts
+    // line up with each other.
+    const gridPocket = envelopeSolid(wasm, grid, envelopeDepth(insertDepth, grid, INSERT_CLEARANCE_MM, Infinity));
+    const rimFace = faceOutline(wasm, outer);
+    const rimGrown = rimFace.offset(INSERT_CLEARANCE_MM, 'Round');
+    rimFace.delete();
+    const rimSlab = wasm.Manifold.extrude(rimGrown, INSERT_RIM_FIT_MM + ENVELOPE_TOP);
+    rimGrown.delete();
+    const rim = rimSlab.translate([0, 0, -INSERT_RIM_FIT_MM]);
+    rimSlab.delete();
+    let pocket = gridPocket.add(rim);
+    gridPocket.delete();
+    rim.delete();
+    if (sleeves) pocket = replace(pocket, pocket.add(sleeves));
+    if (shape !== outer) shape.delete();
+    outer.delete();
+    shell = block.subtract(pocket);
+    face = faceOutline(wasm, pocket);
+    pocket.delete();
+  } else {
+    const cavity = linerReach.add(part);
+    shell = block.subtract(cavity);
+    face = faceOutline(wasm, cavity);
+    cavity.delete();
+    const inBlock = block.intersect(linerReach);
+    liner = inBlock.subtract(part);
+    inBlock.delete();
+  }
+  const blockFace = faceOutline(wasm, block);
+  if (linerReach !== env) linerReach.delete();
+  sleeves?.delete();
   block.delete();
   env.delete();
   part.delete();
@@ -445,7 +650,7 @@ function buildHalfPair(
     for (const tool of boreSolids(wasm, cut)) cutBoth(tool);
   }
 
-  return { shell, liner, envelope, spans: halfSpans(ctx.field, grid, partingZ, flipped), escapedMm3 };
+  return { shell, liner, face, blockFace, envelope, spans: halfSpans(ctx.field, grid, partingZ, flipped), escapedMm3 };
 }
 
 /** Everything the exact-CSG mold build has, plus what the liner needs from the column field. */
@@ -455,6 +660,118 @@ export interface LinerContext extends CsgContext {
   castMaterial: CastMaterialId;
   /** What it is printed in (default PLA + PVA). */
   linerPair?: LinerPairId;
+  /** Shell and liner printed together (default), or an insert in a holder. */
+  construction?: LinerConstruction;
+  /** A tongue and groove round the cavity on a clamshell's shell (default on). */
+  sealRidge?: boolean;
+}
+
+/**
+ * The tongue (in the lid's frame) and the groove (in the cavity half's) that
+ * seal a clamshell's seam, or why there is no room for them. The lid's frame is
+ * the cavity half's mirrored in Y. The ring goes round both halves' liner, as
+ * close as it fits inside the block's edge and clear of every pin, socket and
+ * pry notch.
+ */
+export function sealRing(
+  wasm: ManifoldToplevel,
+  base: { face: CrossSection; blockFace: CrossSection; features: HalfFeatures },
+  lid: { face: CrossSection; blockFace: CrossSection; features: HalfFeatures },
+): { groove: CrossSection; tongue: CrossSection } | { error: string } {
+  const lidFace = lid.face.mirror([0, 1]);
+  const lidBlock = lid.blockFace.mirror([0, 1]);
+  const inside = base.face.add(lidFace);
+  const blocks = base.blockFace.intersect(lidBlock);
+  const allowed = blocks.offset(-SEAL_EDGE_MM, 'Miter');
+  lidFace.delete();
+  lidBlock.delete();
+  blocks.delete();
+  const discs: SimplePolygon[] = [];
+  const disc = (x: number, y: number, r: number) => {
+    const ring: [number, number][] = [];
+    for (let k = 0; k < 32; k++) ring.push([x + r * Math.cos((k * Math.PI) / 16), y + r * Math.sin((k * Math.PI) / 16)]);
+    discs.push(ring);
+  };
+  for (const s of base.features.sockets) disc(s.x, s.y, s.rimR + SEAL_PIN_CLEAR_MM);
+  for (const p of lid.features.pins) disc(p.x, -p.y, p.baseR + SEAL_PIN_CLEAR_MM);
+  const obstacles = new wasm.CrossSection(discs.length ? discs : [[[1e6, 1e6], [1e6 + 1, 1e6], [1e6, 1e6 + 1]]], 'Positive');
+
+  const grooveW = SEAL_TONGUE_W_MM + 2 * SEAL_GROOVE_CLEAR_MM;
+  let found: { groove: CrossSection; tongue: CrossSection } | null = null;
+  for (const gap of [0.8, 1.2, 1.6, 2.0, 2.5, 3.0]) {
+    const inner = inside.offset(gap, 'Round');
+    const outer = inside.offset(gap + grooveW, 'Round');
+    const groove = outer.subtract(inner);
+    inner.delete();
+    outer.delete();
+    const out = groove.subtract(allowed);
+    const hit = groove.intersect(obstacles);
+    const fits = out.area() < 1e-3 && hit.area() < 1e-3;
+    out.delete();
+    hit.delete();
+    if (!fits) {
+      groove.delete();
+      continue;
+    }
+    const tIn = inside.offset(gap + SEAL_GROOVE_CLEAR_MM, 'Round');
+    const tOut = inside.offset(gap + SEAL_GROOVE_CLEAR_MM + SEAL_TONGUE_W_MM, 'Round');
+    const tongueBase = tOut.subtract(tIn);
+    tIn.delete();
+    tOut.delete();
+    found = { groove, tongue: tongueBase.mirror([0, 1]) };
+    tongueBase.delete();
+    break;
+  }
+  const room = allowed.isEmpty() ? 0 : 1;
+  inside.delete();
+  allowed.delete();
+  obstacles.delete();
+  if (found) return found;
+  return {
+    error: room
+      ? `No room for the sealing ridge between the cavity and the pins or the block's edge; a wall margin ${Math.ceil(grooveW + 0.8 + SEAL_EDGE_MM + SEAL_PIN_CLEAR_MM)} mm wider makes room. Tape the seam and clamp it instead.`
+      : 'No room for the sealing ridge; tape the seam and clamp it instead.',
+  };
+}
+
+/** Grams on the lid that the pour, full to the top of the funnel, would lift off: twice that, for margin. */
+export function clampGrams(castMaterialId: CastMaterialId, moldWidthMm: number, moldDepthMm: number, headMm: number): number {
+  const lift = (castMaterial(castMaterialId).densityGcm3 * moldWidthMm * moldDepthMm * headMm) / 1000;
+  return Math.ceil((2 * lift) / 10) * 10;
+}
+
+/** What to do with a lined mold, in order: the printing, the release, the clamp, the pour and the dissolving. */
+export function linerSteps(o: {
+  pair: LinerPair;
+  construction: LinerConstruction;
+  clamshell: boolean;
+  sealed: boolean;
+  castLabel: string;
+  clampG: number;
+  dissolveHours: number;
+  thickestMm: number;
+}): string[] {
+  const { pair, construction, clamshell, sealed } = o;
+  const insert = construction === 'insert';
+  const shell = pair.shell.name;
+  const sol = pair.liner.name;
+  return [
+    insert
+      ? `Print the ${clamshell ? 'two holder halves' : 'holder'} in ${shell} and the ${clamshell ? 'two inserts' : 'insert'} in ${sol}, each on its own. Print the inserts parting face up, with supports from the build plate only: they touch only the outside.`
+      : `Print with ${shell} on extruder 1 and ${sol} on extruder 2 (already set in the 3MF).`,
+    ...(insert ? [`Press each insert into its holder${clamshell ? ', and close the halves dry once to check they seat flat' : ''}.`] : []),
+    clamshell
+      ? `Wipe a thin film of mold release or petroleum jelly over both parting faces${sealed ? ', the sealing ridge and its groove' : ''}, the pins and sockets, and the sprue and vent mouths. The cavity needs none: the ${sol} dissolves.`
+      : `Wipe a thin film of mold release or petroleum jelly over the top face and round the rim. The cavity needs none: the ${sol} dissolves.`,
+    ...(clamshell
+      ? [`Close the halves${sealed ? ' with the tongue in its groove' : ''} and clamp them: binder clips round the edge, or at least ${o.clampG} g on the lid. Once the pour reaches the funnel it can lift a lid that is only taped, and resin gets into the seam.`]
+      : []),
+    `Pour the ${o.castLabel} slowly into the funnel until it shows at every vent, then leave it to cure.`,
+    insert
+      ? `Unclamp, lift the holder off and push the ${clamshell ? 'inserts' : 'insert'} out with the casting inside. The holder is reusable.`
+      : `Unclamp and lift the ${shell} shell off along the pull. If it holds on, soak it in the solvent for an hour first.`,
+    `Dissolve the ${sol} off the casting in ${pair.solvent}: about ${o.dissolveHours} h for its thickest ${o.thickestMm} mm${insert ? ', now that the solvent reaches every side' : ''}. ${pair.dissolveTip}`,
+  ];
 }
 
 function meshPart(m: Manifold, name: string, extruder: number): ThreeMfPart {
@@ -503,7 +820,35 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     : null;
   rawPart.delete();
 
+  const construction: LinerConstruction = ctx.construction ?? 'combined';
+  let sealed = false;
+  if (lid && ctx.sealRidge !== false) {
+    const ring = sealRing(
+      wasm,
+      { face: base.face, blockFace: base.blockFace, features: ctx.baseFeatures },
+      { face: lid.face, blockFace: lid.blockFace, features: ctx.lidFeatures },
+    );
+    if ('error' in ring) {
+      notes.push(ring.error);
+    } else {
+      const groove = wasm.Manifold.extrude(ring.groove, SEAL_GROOVE_D_MM + 0.5).translate([0, 0, -SEAL_GROOVE_D_MM]);
+      base.shell = replace(base.shell, base.shell.subtract(groove));
+      groove.delete();
+      const tongue = wasm.Manifold.extrude(ring.tongue, SEAL_TONGUE_H_MM + 0.5).translate([0, 0, -0.5]);
+      lid.shell = replace(lid.shell, lid.shell.add(tongue));
+      tongue.delete();
+      ring.groove.delete();
+      ring.tongue.delete();
+      sealed = true;
+    }
+  }
   const halves = lid ? [base, lid] : [base];
+  for (const h of halves) {
+    h.face.delete();
+    h.blockFace.delete();
+    h.shell = withoutCrumbs(wasm, h.shell);
+    h.liner = withoutCrumbs(wasm, h.liner);
+  }
   const escaped = halves.reduce((sum, h) => sum + h.escapedMm3, 0);
   if (escaped > castVolumeMl * 1000 * 0.002) {
     notes.push(
@@ -531,10 +876,22 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const dissolveHours = Math.max(1, Math.ceil(thickest / pair.dissolveMmPerHour));
 
   const names = lid ? ['Cavity half', 'Lid half'] : ['Open mold'];
-  const assemblies: ThreeMfAssembly[] = all.map((h, i) => ({
-    name: names[i],
-    parts: [meshPart(h.shell, `${names[i]} shell (${pair.shell.name})`, 1), meshPart(h.liner, `${names[i]} liner (${pair.liner.name})`, 2)],
-  }));
+  const insertGapMm = 10;
+  const assemblies: ThreeMfAssembly[] = construction === 'insert'
+    // Four separate prints: the holders in a row, the inserts in a row in front of them.
+    ? [
+        ...all.map((h, i) => ({ name: `${names[i]} holder`, parts: [meshPart(h.shell, `${names[i]} holder (${pair.shell.name})`, 1)] })),
+        ...all.map((h, i) => {
+          const moved = h.liner.translate([0, -(ctx.moldDepthMm + insertGapMm), 0]);
+          const part = meshPart(moved, `${names[i]} insert (${pair.liner.name})`, 2);
+          moved.delete();
+          return { name: `${names[i]} insert`, parts: [part] };
+        }),
+      ]
+    : all.map((h, i) => ({
+        name: names[i],
+        parts: [meshPart(h.shell, `${names[i]} shell (${pair.shell.name})`, 1), meshPart(h.liner, `${names[i]} liner (${pair.liner.name})`, 2)],
+      }));
 
   const halfOf = (h: { shell: Manifold; liner: Manifold }, name: string, blockHeight: number, pinRise: number): MoldMeshHalf => {
     const shell = manifoldToTriangles(h.shell);
@@ -566,6 +923,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const totalHeight = Math.max(ctx.baseBlockHeight, lid ? ctx.lidBlockHeight + opts.pinHeightMm : 0);
 
   const thickR = Math.round(thickest * 10) / 10;
+  const clampG = lid ? clampGrams(ctx.castMaterial, ctx.moldWidthMm, ctx.moldDepthMm, ctx.lidBlockHeight) : undefined;
   const liner: MoldLinerInfo = {
     pair: pair.id,
     shellMaterial: pair.shell.name,
@@ -580,12 +938,19 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     castVolumeMl: Math.round(castVolumeMl * 10) / 10,
     thickestLinerMm: thickR,
     dissolveHours,
-    steps: [
-      `Print with ${pair.shell.name} on extruder 1 and ${pair.liner.name} on extruder 2 (pre-assigned in 3MF).`,
-      `Cast ${castMaterial(ctx.castMaterial).label.toLowerCase()} and allow to cure.`,
-      `Remove the ${pair.shell.name} outer shell along the pull direction.`,
-      `Dissolve the ${pair.liner.name} liner in ${pair.solvent} (~${dissolveHours} h for ${thickR} mm max thickness).`,
-    ],
+    construction,
+    sealRidge: sealed,
+    ...(clampG !== undefined ? { clampGrams: clampG } : {}),
+    steps: linerSteps({
+      pair,
+      construction,
+      clamshell: Boolean(lid),
+      sealed,
+      castLabel: castMaterial(ctx.castMaterial).label.toLowerCase(),
+      clampG: clampG ?? 0,
+      dissolveHours,
+      thickestMm: thickR,
+    }),
   };
 
   return {

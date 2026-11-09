@@ -273,6 +273,11 @@ export function moldMasterRecord(
   };
 }
 
+/** How to use a lined mold, for its note card: the clamp, the release and the dissolving go with every one. */
+export function moldStepLines(summary: Pick<MoldSummary, 'liner'>): string[] {
+  return summary.liner ? summary.liner.steps.map((step, i) => `Step ${i + 1}: ${step}`) : [];
+}
+
 /** A pour this far under the master's volume is not the casting. */
 const SHORT_POUR_SHARE = 0.9;
 
@@ -323,6 +328,9 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
     ...(msg.blockShape !== undefined && msg.blockShape !== 'box' && msg.blockShape !== 'fit' ? { error: "block_shape is 'box' or 'fit'." } : {}),
     ...(badLiner ? { error: `liner_material is one of ${LINER_PAIRS.map((p) => p.id).join(', ')}.` } : {}),
     ...(msg.sprueFeed !== undefined && msg.sprueFeed !== 'bottom' && msg.sprueFeed !== 'top' ? { error: "sprue_feed is 'bottom' or 'top'." } : {}),
+    ...(msg.linerConstruction !== undefined && msg.linerConstruction !== 'combined' && msg.linerConstruction !== 'insert'
+      ? { error: "liner_construction is 'combined' or 'insert'." }
+      : {}),
     ...(badMaterial
       ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast).` }
       : {}),
@@ -361,6 +369,8 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
       ...(castMaterial ? { castMaterial } : {}),
       ...(linerPairId ? { linerPair: linerPairId } : {}),
+      ...(msg.linerConstruction === 'combined' || msg.linerConstruction === 'insert' ? { linerConstruction: msg.linerConstruction } : {}),
+      ...(typeof msg.sealRidge === 'boolean' ? { sealRidge: msg.sealRidge } : {}),
       highFidelity: typeof msg.highFidelity === 'boolean' ? msg.highFidelity : useHighFidelity.getState().highFidelity,
     },
   };
@@ -782,6 +792,7 @@ export async function runMcpMoldSimulation(params: {
       `Mold block: ${moldRes.moldWidthMm} × ${moldRes.moldDepthMm} × ${moldRes.moldHeightMm} mm`,
       `Cavity depth: ${moldRes.cavityDepthMm} mm (${moldRes.minDraftDeg}° min draft)`,
       ...moldFeatureLines(moldRes.features),
+      ...moldStepLines(moldRes),
     ],
   });
   return {
