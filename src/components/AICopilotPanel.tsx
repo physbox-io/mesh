@@ -10,7 +10,7 @@ import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
 import { pushGlobalParameter } from '../utils/llmSettings';
 import { anthropicUrl, geminiUrl } from '../utils/llmEndpoints';
 import { callLlm, keyFor, isClaudeModel, DEFAULT_MODEL, type LlmImage } from '../utils/llmCall';
-import { llmImageUrl } from '../utils/llmImageInput';
+import { llmImageThumb } from '../utils/llmImageInput';
 import { useCopilotAttachments, CopilotAttachmentTray } from './copilot/CopilotAttachments';
 import { usePictureToPart } from './copilot/usePictureToPart';
 import { formatLoopReport, DEFAULT_LOOP_ROUNDS } from '../utils/pictureToPart';
@@ -27,8 +27,10 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   mode?: 'explain' | 'generate' | 'mutate' | 'implement';
   content: string;
-  /** Pictures sent with a user message, as data URLs, to show it as it was sent. */
+  /** Pictures with a message, as small data URLs (saved with the scene, so kept small). */
   images?: string[];
+  /** A picture-to-part report: its retry is a new run, not "implement the modifications". */
+  fromPictureLoop?: boolean;
   questions?: DiagnosticQuestion[];
   userAnswers?: Record<string, string>;
   userAnswersSubmitted?: boolean;
@@ -606,7 +608,9 @@ Based on these functional clarifications and your physical analysis:
       setError('Please enter a description of the scene you want to generate, or attach a picture of it.');
       return;
     }
+    if (!hasKey()) return;
     const images = att.take();
+    const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
     const currentPrompt = prompt.trim() || 'Build the part shown in the picture.';
     setPrompt('');
     setMode('generate');
@@ -617,13 +621,13 @@ Based on these functional clarifications and your physical analysis:
       role: 'user',
       mode: 'generate',
       content: `🪄 Generate Scene: ${currentPrompt}`,
-      ...(images.length ? { images: images.map(llmImageUrl) } : {}),
+      ...(thumbs.length ? { images: thumbs } : {}),
       timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
     if (images.length && refineAgainstPicture) {
-      await runPictureLoop(currentPrompt, images);
+      await runPictureLoop(currentPrompt, images, thumbs[0]);
       return;
     }
 
@@ -673,25 +677,40 @@ Based on these functional clarifications and your physical analysis:
     }
   };
 
-  const runPictureLoop = async (request: string, images: LlmImage[]) => {
+  /** The copilot needs its model's key before anything leaves the prompt box. */
+  const hasKey = (): boolean => {
+    const found = keyFor(selectedModel || localStorage.getItem('gemini_model') || DEFAULT_MODEL, geminiApiKey, claudeApiKey);
+    if ('missing' in found) { setError(found.missing); return false; }
+    return true;
+  };
+
+  const runPictureLoop = async (request: string, images: LlmImage[], photoThumb: string) => {
     setError('');
     setLoading(true);
     setLoadingStatus('Building from the picture…');
     try {
       const report = await pictureLoop.run(request, images);
-      const kept = report.rounds.find((r) => r.round === report.bestRound && !r.rolledBack)
-        ?? report.rounds.filter((r) => !r.rolledBack).pop();
+      const kept = report.rounds.find((r) => r.round === report.bestRound && !r.rolledBack && !r.failed);
+      const partThumb = kept?.render ? await llmImageThumb(kept.render, 384) : '';
+      const built = report.bestRound > 0 || !!report.unchecked;
       setMessages(prev => [...prev, {
         id: makeId('ast'),
         role: 'assistant',
         mode: 'generate',
         content: formatLoopReport(report),
-        images: [llmImageUrl(images[0]), ...(kept?.render ? [llmImageUrl(kept.render)] : [])],
-        isImplemented: report.bestRound > 0,
-        hasError: report.stoppedBecause === 'failed',
-        errorMsg: report.stoppedBecause === 'failed' ? report.error : undefined,
+        images: [photoThumb, partThumb].filter(Boolean),
+        fromPictureLoop: true,
+        questions: report.questions,
+        userAnswers: {},
+        isImplemented: built,
+        // A run that kept a part has not failed, whatever stopped it.
+        hasError: !built,
+        errorMsg: !built ? (report.error || 'Nothing was built.') : undefined,
         timestamp: getTimestamp(),
       }]);
+      if (built) {
+        handleNotecardUpdate('generate', request, report.builderNotes, report.noteCardMarkdown ?? null, useStore.getState().sceneGraph.nodes as RawNode[]);
+      }
     } finally {
       setLoading(false);
     }
@@ -702,7 +721,9 @@ Based on these functional clarifications and your physical analysis:
       setError('Please enter what changes you want to apply to the scene.');
       return;
     }
+    if (!hasKey()) return;
     const images = att.take();
+    const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
     const currentPrompt = prompt.trim() || 'Make the scene match the picture.';
     setPrompt('');
     setMode('mutate');
@@ -713,7 +734,7 @@ Based on these functional clarifications and your physical analysis:
       role: 'user',
       mode: 'mutate',
       content: `🛠️ Mutate Scene: ${currentPrompt}`,
-      ...(images.length ? { images: images.map(llmImageUrl) } : {}),
+      ...(thumbs.length ? { images: thumbs } : {}),
       timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
@@ -845,7 +866,20 @@ CRITICAL INSTRUCTIONS:
 
   const handleSendFollowup = async () => {
     if ((!followupInput.trim() && !att.images.length) || loading) return;
+    if (!hasKey()) return;
+    // A picture sent from this box in Generate, with checking on, is the same
+    // request as one sent from the box above.
+    if (mode === 'generate' && att.images.length && refineAgainstPicture) {
+      const loopImages = att.take();
+      const thumbs = await Promise.all(loopImages.map((im) => llmImageThumb(im)));
+      const request = followupInput.trim() || 'Build the part shown in the picture.';
+      setFollowupInput('');
+      setMessages(prev => [...prev, { id: makeId('user'), role: 'user', mode: 'generate', content: `🪄 Generate Scene: ${request}`, images: thumbs, timestamp: getTimestamp() }]);
+      await runPictureLoop(request, loopImages, thumbs[0]);
+      return;
+    }
     const images = att.take();
+    const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
     const currentInput = followupInput.trim() || 'Here is a picture.';
     setFollowupInput('');
     setLoadingStatus('Processing follow-up request...');
@@ -854,7 +888,7 @@ CRITICAL INSTRUCTIONS:
       id: makeId('user'),
       role: 'user',
       content: currentInput,
-      ...(images.length ? { images: images.map(llmImageUrl) } : {}),
+      ...(thumbs.length ? { images: thumbs } : {}),
       timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
@@ -1046,7 +1080,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         {mode !== 'explain' ? (
           <div className="flex flex-col gap-2 shrink-0">
             <textarea
-              placeholder={mode === 'generate' ? "Describe the physics scene you want to generate. e.g. A stack of 3 cubes falling on top of each other, or a double pendulum connected to a hinge..." : "Describe the modifications you want to apply. e.g. Add a sphere body with free joint at position [0, 0, 4], or increase joint damping..."}
+              placeholder={mode === 'generate' ? "Describe the scene or part you want, or paste a photo or a sketch with its dimensions. e.g. A stack of 3 cubes falling on top of each other, or a wall bracket like the one in this picture..." : "Describe the modifications you want to apply. e.g. Add a sphere body with free joint at position [0, 0, 4], or increase joint damping..."}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onPaste={att.onPaste}
@@ -1369,7 +1403,13 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                     )}
 
                     {/* Error Retry Card */}
-                    {msg.hasError && (
+                    {msg.hasError && msg.fromPictureLoop && (
+                      <div className="mt-2 p-2.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl flex items-center gap-1.5 text-xs font-semibold text-red-700 dark:text-red-300">
+                        <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                        <span>{msg.errorMsg} Attach the picture again to retry.</span>
+                      </div>
+                    )}
+                    {msg.hasError && !msg.fromPictureLoop && (
                       <div className="mt-2 p-2.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl flex items-center justify-between gap-2 text-red-700 dark:text-red-300">
                         <div className="flex items-center gap-1.5 text-xs font-semibold">
                           <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
@@ -1438,6 +1478,12 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               </button>
             </div>
             {mode === 'explain' && <CopilotAttachmentTray att={att} disabled={loading} />}
+            {mode === 'explain' && att.images.length > 0 && (
+              <button type="button" onClick={() => setMode('generate')}
+                className="self-start text-[10px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer">
+                To build the part in the picture, switch to Generate
+              </button>
+            )}
           </div>
         </div>
       </div>

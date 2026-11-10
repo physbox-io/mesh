@@ -14,7 +14,8 @@ export function useCopilotAttachments() {
   const [attachError, setAttachError] = useState<string | null>(null);
 
   const addFiles = useCallback(async (files: Iterable<File>) => {
-    const pictures = Array.from(files).filter((f) => f.type.startsWith('image/'));
+    // Only as many as there is room for, before decoding any: ten phone photos are a lot of pixels.
+    const pictures = Array.from(files).filter((f) => f.type.startsWith('image/')).slice(0, MAX_COPILOT_IMAGES);
     if (!pictures.length) return false;
     setAttachError(null);
     try {
@@ -30,8 +31,13 @@ export function useCopilotAttachments() {
     return true;
   }, []);
 
-  /** For a textarea's onPaste: takes pictures, leaves text to the textarea. */
+  /**
+   * For a textarea's onPaste: takes pictures, leaves text to the textarea.
+   * Cells copied from a spreadsheet or a paragraph from Word come with a
+   * picture of themselves as well; the text is what was meant.
+   */
   const onPaste = useCallback((e: React.ClipboardEvent) => {
+    if ((e.clipboardData?.getData('text/plain') ?? '').trim()) return;
     const files = Array.from(e.clipboardData?.files ?? []);
     if (files.some((f) => f.type.startsWith('image/'))) {
       e.preventDefault();

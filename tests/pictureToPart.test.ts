@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { partMask, normalizeMask, maskIoU, bestView, usablePhotoMask, viewDirection, MASK_N } from '../src/utils/silhouette';
-import { runPictureToPart, sizeDifferences, sizeMm, type PartLoopDeps } from '../src/utils/pictureToPart';
+import { runPictureToPart, sizeDifferences, sizeMm, formatLoopReport, type PartLoopDeps } from '../src/utils/pictureToPart';
 import type { RawNode } from '../src/utils/sceneNodes';
 
 /** Triangles of an axis-aligned box, metres. */
@@ -177,5 +177,77 @@ describe('runPictureToPart', () => {
     const r = await runPictureToPart({ request: '', photos: [], photoMask: null, sceneSystem: 'S' }, deps);
     expect(r.stoppedBecause).toBe('failed');
     expect(r.error).toMatch(/no "nodes"/);
+  });
+});
+
+describe('fixes from validation', () => {
+  const photos = [{ mediaType: 'image/jpeg' as const, data: 'P' }];
+
+  it('puts the kept round back when stopped mid-check, and says round 1 is in the scene', async () => {
+    const ctl = new AbortController();
+    const { deps, applied } = session([0.06, 0.2], [{ differences: ['x'], match: 7 }]);
+    deps.signal = ctl.signal;
+    deps.onProgress = (p) => { if (p.round === 2 && p.stage === 'matching view') ctl.abort(); };
+    const r = await runPictureToPart({ request: '', photos, photoMask: photo, sceneSystem: 'S' }, deps);
+    expect(r.stoppedBecause).toBe('stopped');
+    expect(r.bestRound).toBe(1);
+    expect((applied[applied.length - 1][0] as unknown as { foot: number }).foot).toBe(0.06);
+  });
+
+  it('reports a first build stopped before its check as built but unchecked', async () => {
+    const ctl = new AbortController();
+    const { deps } = session([0.06], [{ differences: [], match: 10 }]);
+    deps.signal = ctl.signal;
+    deps.onProgress = (p) => { if (p.stage === 'matching view') ctl.abort(); };
+    const r = await runPictureToPart({ request: '', photos, photoMask: photo, sceneSystem: 'S' }, deps);
+    expect(r.unchecked).toBe(true);
+    expect(formatLoopReport(r)).toMatch(/before it was checked/);
+  });
+
+  it('reads a critic reply with no code fences', async () => {
+    const { deps } = session([0.06], [{ differences: [], match: 10 }]);
+    const llm = deps.llm;
+    deps.llm = async (system, user, images) => {
+      const r = await llm(system, user, images);
+      return system.startsWith('You are an inspector') ? { ...r, text: r.text.replace(/```json\n|\n```/g, '') } : r;
+    };
+    const r = await runPictureToPart({ request: '', photos, photoMask: photo, sceneSystem: 'S' }, deps);
+    expect(r.stoppedBecause).toBe('matched');
+  });
+
+  it('labels a revision that did not build, and keeps the builder\'s notes', async () => {
+    let calls = 0;
+    const { deps } = session([0.06], [{ differences: ['a chamfer'], match: 7 }]);
+    const llm = deps.llm;
+    deps.llm = async (system, user, images) => {
+      if (!system.startsWith('You are an inspector') && calls++ >= 1) return { text: 'no json here', truncated: false };
+      const r = await llm(system, user, images);
+      return system.startsWith('You are an inspector') ? r : { ...r, text: `Assumed a 3 mm wall.\n${r.text}` };
+    };
+    const r = await runPictureToPart({ request: '', photos, photoMask: photo, sceneSystem: 'S' }, deps);
+    expect(r.rounds[1].failed).toBe(true);
+    expect(r.bestRound).toBe(1);
+    const md = formatLoopReport(r);
+    expect(md).toMatch(/did not build/);
+    expect(md).not.toMatch(/worse, undone/);
+    expect(md).toMatch(/Assumed a 3 mm wall/);
+  });
+
+  it('stops trusting a photo outline that matches no view of the part', async () => {
+    // a disc outline vs an L
+    const disc = new Uint8Array(100 * 100);
+    for (let y = 0; y < 100; y++) for (let x = 0; x < 100; x++) disc[y * 100 + x] = Math.hypot(x - 50, y - 50) < 45 ? 1 : 0;
+    const { deps } = session([0.06], [{ differences: [], match: 8 }]);
+    const r = await runPictureToPart({ request: '', photos, photoMask: normalizeMask(disc, 100, 100), sceneSystem: 'S' }, deps);
+    expect(r.rounds[0].scoreKind).toBe('critic');
+    expect(r.rounds[0].note).toMatch(/matched no view/);
+  });
+
+  it('turns a top-down view by its azimuth, continuously with the views beside the pole', () => {
+    const a = partMask(L, { azimuthDeg: 90, elevationDeg: 90 })!;
+    const b = partMask(L, { azimuthDeg: 90, elevationDeg: 89 })!;
+    const c = partMask(L, { azimuthDeg: 0, elevationDeg: 90 })!;
+    expect(maskIoU(a, b)).toBeGreaterThan(0.9);
+    expect(maskIoU(a, c)).toBeLessThan(0.5);
   });
 });

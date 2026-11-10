@@ -94,10 +94,16 @@ export function viewDirection(v: View): [number, number, number] {
   return [Math.sin(az) * Math.cos(el), -Math.cos(az) * Math.cos(el), Math.sin(el)];
 }
 
-/** Screen right and up for a camera looking along -viewDirection, Z up (Y up when looking straight down). */
+/**
+ * Screen right and up for a camera looking along -viewDirection, world Z up.
+ * Straight down, Z says nothing, and up is the way the camera was facing as
+ * it tipped over: the azimuth still turns the picture, continuously with the
+ * views just short of the pole.
+ */
 function screenAxes(v: View): { right: number[]; up: number[] } {
   const d = viewDirection(v);
-  const worldUp = Math.abs(d[2]) > 0.999 ? [0, 1, 0] : [0, 0, 1];
+  const az = v.azimuthDeg * RAD;
+  const worldUp = Math.abs(d[2]) > 0.9999 ? [-Math.sin(az), Math.cos(az), 0] : [0, 0, 1];
   // right = worldUp x d, normalised; up = d x right.
   let right = [worldUp[1] * d[2] - worldUp[2] * d[1], worldUp[2] * d[0] - worldUp[0] * d[2], worldUp[0] * d[1] - worldUp[1] * d[0]];
   const rl = Math.hypot(right[0], right[1], right[2]) || 1;
@@ -176,7 +182,7 @@ export function bestView(tris: ArrayLike<number>, photo: Mask, near?: View, n = 
     if (score > bestScore) best = { ...v, iou };
   };
   for (const el of [0, 15, 30, 45, 60, 75, 90]) {
-    for (let az = 0; az < 360; az += el === 90 ? 90 : 30) tryView({ azimuthDeg: az, elevationDeg: el });
+    for (let az = 0; az < 360; az += 30) tryView({ azimuthDeg: az, elevationDeg: el });
   }
   if (!best) return null;
   const coarse: ViewMatch = best;

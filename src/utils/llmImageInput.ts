@@ -43,5 +43,24 @@ export async function fileToLlmImage(file: Blob, maxPx = LLM_IMAGE_MAX_PX): Prom
   }
 }
 
-/** A data URL, for showing the picture back in the chat. */
+/** A data URL of the picture as sent. */
 export const llmImageUrl = (im: LlmImage): string => `data:${im.mediaType};base64,${im.data}`;
+
+/**
+ * A small JPEG data URL of the picture, for the chat history. The history is
+ * saved with the scene (local presets live in a few MB of localStorage), and a
+ * full 1568 px picture is half a megabyte of it.
+ */
+export async function llmImageThumb(im: LlmImage, maxPx = 256): Promise<string> {
+  try {
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('undecodable'));
+      img.src = llmImageUrl(im);
+    });
+    return llmImageUrl(drawableToLlmImage(img, img.naturalWidth, img.naturalHeight, maxPx));
+  } catch {
+    return '';
+  }
+}
