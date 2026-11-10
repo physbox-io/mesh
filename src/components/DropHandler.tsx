@@ -6,11 +6,12 @@ import type { useStore } from '../store/useStore';
 type StoreState = ReturnType<typeof useStore.getState>;
 type AddComponentType = Parameters<StoreState['addComponent']>[0];
 
-// Drop Handler for precise spawning & external file imports (.scad, .stl, .json)
-export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onImportSceneJson, onUnsupportedDrop }: {
+// Drop Handler for precise spawning & external file imports (.scad, .stl, .svg, images, .json)
+export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onImportProfileFile, onImportSceneJson, onUnsupportedDrop }: {
   addComponent: (type: AddComponentType, pos: [number, number, number]) => void;
   onImportFile: (file: File) => void;
   onImportImageFile: (file: File) => void;
+  onImportProfileFile: (file: File) => void;
   onImportSceneJson: (text: string, fileName: string, dropped: boolean) => void;
   onUnsupportedDrop?: (message: string) => void;
 }) => {
@@ -41,9 +42,15 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
             onImportSceneJson(await file.text(), fileName, true);
             handled = true;
             break;
+          } else if (ext === '.svg' || file.type === 'image/svg+xml') {
+            // A drawing is outlines, not tones: the profile importer extrudes
+            // them. Checked before images, since an SVG's type is image/*.
+            onImportProfileFile(file);
+            handled = true;
+            break;
           } else if (file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|gif|avif)$/.test(ext)) {
-            // An image can only mean the heightmap importer — it is the one
-            // path that turns 2D pixels into a body.
+            // A picture opens the relief importer, which can hand it to the
+            // outline tracer instead.
             onImportImageFile(file);
             handled = true;
             break;
@@ -61,7 +68,7 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
         // ignored reads as the app not working.
         if (!handled) {
           const names = Array.from(files, (f) => f.name).join(', ');
-          const msg = `Mesh can open .json scenes, .stl and .scad models, and images. ${names} ${files.length === 1 ? "isn't" : "aren't"} one of those.`;
+          const msg = `Mesh can open .json scenes, .stl and .scad models, .svg drawings, and images. ${names} ${files.length === 1 ? "isn't" : "aren't"} one of those.`;
           unsupportedRef.current?.(msg);
         }
         return;
@@ -109,7 +116,7 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
       window.removeEventListener('drop', handler);
       window.removeEventListener('dragover', dragOverHandler);
     };
-  }, [camera, gl, addComponent, onImportFile, onImportImageFile, onImportSceneJson]);
+  }, [camera, gl, addComponent, onImportFile, onImportImageFile, onImportProfileFile, onImportSceneJson]);
   
   return null;
 };

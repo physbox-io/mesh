@@ -24,6 +24,7 @@ import { dfmCommands } from './mcp/dfmCommands';
 import { viewCommands } from './mcp/viewCommands';
 import { objectCommands } from './mcp/objectCommands';
 import { sceneCommands } from './mcp/sceneCommands';
+import { profileCommands } from './mcp/profileCommands';
 
 // Moved into ./mcp, and still imported from here.
 export { type LatticeOpSpec, runLatticeOps } from './mcp/latticeState';
@@ -54,6 +55,7 @@ function tabIdentity(): { sessionId: string; label: string; href: string; starte
 /** Every command but the machine ones, by name; the modules under ./mcp each add a family. */
 const COMMANDS: McpCommands = {
   ...sceneCommands,
+  ...profileCommands,
   ...objectCommands,
   ...viewCommands,
   ...machiningCommands,

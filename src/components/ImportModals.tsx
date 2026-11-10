@@ -2,6 +2,7 @@ import { useStore } from '../store/useStore';
 import { usePanels } from '../store/panelsStore';
 import { ImportStlModal } from './ImportStlModal';
 import { ImportImageModal } from './ImportImageModal';
+import { ImportProfileModal } from './ImportProfileModal';
 import { GeneratePatternModal } from './GeneratePatternModal';
 import { MechanismBuilderModal } from './MechanismBuilderModal';
 import { ImportPcbModal } from './ImportPcbModal';
@@ -13,6 +14,8 @@ export function ImportModals() {
   const imageImport = usePanels((s) => s.imageImport);
   const closeStlImport = usePanels((s) => s.closeStlImport);
   const closeImageImport = usePanels((s) => s.closeImageImport);
+  const profileImport = usePanels((s) => s.profileImport);
+  const closeProfileImport = usePanels((s) => s.closeProfileImport);
   const isMechanismBuilderOpen = usePanels((s) => s.isMechanismBuilderOpen);
   const setMechanismBuilderOpen = usePanels((s) => s.setMechanismBuilderOpen);
   const isPcbImportOpen = usePanels((s) => s.isPcbImportOpen);
@@ -44,6 +47,18 @@ export function ImportModals() {
         isOpen
         initialFile={imageImport.file}
         onClose={closeImageImport}
+        onImportNode={(newNode) => {
+          const currentNodes = useStore.getState().sceneGraph.nodes || [];
+          useStore.getState().updateScene({ ...useStore.getState().sceneGraph, nodes: [...currentNodes, newNode] });
+        }}
+      />
+      )}
+
+      {/* SVG / traced-outline importer — mounted only while open, like the others */}
+      {profileImport && (
+      <ImportProfileModal
+        initialFile={profileImport.file}
+        onClose={closeProfileImport}
         onImportNode={(newNode) => {
           const currentNodes = useStore.getState().sceneGraph.nodes || [];
           useStore.getState().updateScene({ ...useStore.getState().sceneGraph, nodes: [...currentNodes, newNode] });

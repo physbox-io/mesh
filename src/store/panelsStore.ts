@@ -45,6 +45,10 @@ interface PanelsState {
    */
   stlImport: { file: File | null } | null;
   imageImport: { file: File | null } | null;
+  /** The profile importer: an SVG, or an outline traced from a picture. */
+  profileImport: { file: File | null } | null;
+  openProfileImport: (file?: File) => void;
+  closeProfileImport: () => void;
   openStlImport: (file?: File) => void;
   openImageImport: (file?: File) => void;
   closeStlImport: () => void;
@@ -86,6 +90,10 @@ export const usePanels = create<PanelsState>((set) => ({
   openImageImport: (file) => set({ imageImport: { file: file ?? null } }),
   closeStlImport: () => set({ stlImport: null }),
   closeImageImport: () => set({ imageImport: null }),
+  profileImport: null,
+  // One importer at a time: the relief dialog hands its picture over to this one.
+  openProfileImport: (file) => set({ profileImport: { file: file ?? null }, imageImport: null }),
+  closeProfileImport: () => set({ profileImport: null }),
   isMechanismBuilderOpen: false,
   setMechanismBuilderOpen: (isMechanismBuilderOpen) => set({ isMechanismBuilderOpen }),
   isPcbImportOpen: false,

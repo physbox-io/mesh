@@ -72,6 +72,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
   const composerRef = useRef<ComponentRef<typeof EffectComposer> | null>(null);
   const openStlImport = usePanels((s) => s.openStlImport);
   const openImageImport = usePanels((s) => s.openImageImport);
+  const openProfileImport = usePanels((s) => s.openProfileImport);
   const showNotice = useDialogs((s) => s.showNotice);
   const {
     model, data, mujoco, recompileId, isPlaying, paintMode, gridCellSizeMm,
@@ -161,7 +162,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
     >
       <SceneCapture sceneRef={threeSceneRef} />
       <RenderOnChange />
-      <DropHandler addComponent={addComponentUnderSelection} onImportFile={openStlImport} onImportImageFile={openImageImport} onImportSceneJson={onImportSceneJson} onUnsupportedDrop={(msg) => showNotice('Unsupported file', msg, 'amber')} />
+      <DropHandler addComponent={addComponentUnderSelection} onImportFile={openStlImport} onImportImageFile={openImageImport} onImportProfileFile={openProfileImport} onImportSceneJson={onImportSceneJson} onUnsupportedDrop={(msg) => showNotice('Unsupported file', msg, 'amber')} />
       <StudioBackdrop darkMode={darkMode} />
       {/* A photo studio, built here rather than loaded: a broad softbox
           overhead, two strip lights either side and a dim grey room. It

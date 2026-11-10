@@ -9,6 +9,7 @@ A browser-based rigid-body physics simulator and CAD fabrication studio built on
 * **MuJoCo WASM physics engine.** Contact dynamics, multi-axis joints, motor actuators, and proximity mechanical constraints (gears, pinion-rack, pulley ropes, welds).
 * **3D CSG parametric modelling.** Manifold boolean operations (union, subtract, intersect) and OpenSCAD in a web worker.
 * **Free-form sculpting.** Draw, grab, smooth, inflate, flatten and pinch brushes with dynamic topology, plus scissors: draw a loop to cut a hole straight through the clay or cut a piece off, with the cut filled or left open.
+* **Profiles from an SVG or a photo.** Drop in an SVG (fills, or a laser file's stroked cut lines) or a picture of a part on paper, a logo, a scan: the outline is traced against its background, sized from the one dimension you know, and extruded into a flat part whose thickness stays a slider. Combine → Subtract cuts it into another part.
 * **Drawing views with dimensions.** Top Down, Front and Side are orthographic views. Turn on **Dims** and the selected part (or every part) is marked in mm: true sizes along each part's own axes (a turned or pitched part included), a chain between face edges and hole centres, diameters, angles, and where each part sits from its parent.
 * **Mouse spring dragging.** Click and drag live objects in the 3D viewport during playback, with the spring force drawn as a line.
 * **Fabrication exporters:**

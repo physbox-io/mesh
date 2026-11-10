@@ -1,4 +1,4 @@
-import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Hammer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu } from 'lucide-react';
+import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Hammer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu, Shapes } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -32,6 +32,7 @@ export function AppHeader({
   const openDocs = usePanels((s) => s.openDocs);
   const openStlImport = usePanels((s) => s.openStlImport);
   const openImageImport = usePanels((s) => s.openImageImport);
+  const openProfileImport = usePanels((s) => s.openProfileImport);
   const setPcbImportOpen = usePanels((s) => s.setPcbImportOpen);
   const {
     isPlaying, togglePlay, isLoaded, resetSimulation,
@@ -179,6 +180,14 @@ export function AppHeader({
               title="Import Image as 3D Relief (heightmap)"
             >
               <ImageIcon className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => openProfileImport()}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 transition-colors focus:outline-none cursor-pointer"
+              title="Import a profile: an SVG, or the outline of a part traced from a photo or logo, made into a flat part"
+            >
+              <Shapes className="w-3.5 h-3.5" />
             </button>
 
             <button

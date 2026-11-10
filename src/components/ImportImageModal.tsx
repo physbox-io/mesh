@@ -16,6 +16,7 @@ import { useSettled } from '../hooks/useSettled';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { decodeImageFile } from '../utils/decodeImage';
+import { usePanels } from '../store/panelsStore';
 
 interface ImportImageModalProps {
   isOpen: boolean;
@@ -59,6 +60,9 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
 }) => {
   useEscapeToClose(isOpen, onClose);
   const [image, setImage] = useState<LoadedImage | null>(null);
+  /** The picture as picked, so the outline tracer can be handed the original. */
+  const [file, setFile] = useState<File | null>(null);
+  const openProfileImport = usePanels((s) => s.openProfileImport);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -89,6 +93,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
     }
     try {
       setImage(await decodeImage(file));
+      setFile(file);
     } catch (err) {
       setError(`Failed to read image: ${String(err)}`);
       setImage(null);
@@ -263,6 +268,17 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
               <span className="text-xs text-slate-400 dark:text-slate-500">Grayscale brightness becomes height</span>
             </label>
           </div>
+
+          {/* A photo of a part, or a logo, usually wants its outline, not its tones. */}
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 text-center -mt-2">
+            Want the outline as a flat part instead?{' '}
+            <button
+              onClick={() => openProfileImport(file ?? undefined)}
+              className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
+            >
+              Trace outline
+            </button>
+          </p>
 
           {error && (
             <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 text-xs rounded-lg border border-red-200 dark:border-red-800">
