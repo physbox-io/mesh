@@ -3,6 +3,7 @@ import {
   cancelAgentJobOnDisarm,
   createMachineHandlers,
   describeMachine,
+  describeResumePreview,
   disarmWhenMachineStops,
   refuseWhileJobHoldsMachine,
   requireNumber,
@@ -497,14 +498,8 @@ export function createMeshMachineHandlers(): Record<
         throw new Error('Give fromLine: the program line a resume would pick up at.');
       }
       const plan = webSerialManager.previewResume(fromLine, resumeOptions(args.options));
-      if (!plan) return { ok: false, error: 'No program has been sent this session.' };
-      return {
-        ok: true,
-        fromLine: plan.fromLine,
-        preamble: plan.preamble,
-        uncertain: plan.state.uncertain,
-        uncertainBecause: plan.state.uncertainBecause,
-      };
+      // The same shape as Etch's and Volt's.
+      return describeResumePreview(plan && { ...plan, totalLines: webSerialManager.getState().totalLines });
     },
   };
 }

@@ -9,6 +9,7 @@ import {
   writeLaserModeBorrowed,
 } from './guideSpot';
 import { recordProgress } from './jobCheckpoint';
+import { interruptionFor } from './resumeInterruption';
 import {
   CUT_START,
   DEFAULT_PLANNER_BLOCKS,
@@ -411,6 +412,12 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
       patch = { ...patch, needsZZero: !patch.zDatumTrusted };
     } else if (patch.needsZZero !== undefined && patch.zDatumTrusted === undefined) {
       patch = { ...patch, zDatumTrusted: !patch.needsZZero };
+    }
+    // `interruption` mirrors `resume`, so agents see the shape Etch and Volt report.
+    if ('resume' in patch || 'status' in patch) {
+      const resume = 'resume' in patch ? patch.resume : this.state.resume;
+      const interruption = interruptionFor(resume, this.isJobRunning, this.state.interruption);
+      if (interruption !== this.state.interruption) patch = { ...patch, interruption };
     }
     super.updateState(patch);
   }
