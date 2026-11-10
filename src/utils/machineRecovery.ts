@@ -92,7 +92,7 @@ export abstract class RecoveryMachine extends JobMachine {
    * carries that to the banner, and `needsZZero` is already true because a
    * connection sets it.
    */
-  public restoreCheckpoint(
+  public restoreMeshCheckpoint(
     program: CheckpointProgram,
     fromLine: number,
     from: NonNullable<ResumePoint['from']> & {

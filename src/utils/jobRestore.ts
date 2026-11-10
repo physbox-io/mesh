@@ -45,7 +45,7 @@ export async function restoreInterruptedJob(): Promise<RestorableCheckpoint | nu
     const now = webSerialManager.getState();
     if (now.status === 'RUNNING' || now.status.startsWith('PAUSED')) return null;
 
-    const ok = webSerialManager.restoreCheckpoint(cp.program, cp.progress.fromLine, {
+    const ok = webSerialManager.restoreMeshCheckpoint(cp.program, cp.progress.fromLine, {
       source: cp.source,
       approximate: cp.approximate,
       jobName: cp.program.jobName,

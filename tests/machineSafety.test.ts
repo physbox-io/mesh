@@ -521,7 +521,7 @@ describe('H5: a checkpoint read back after a reload', () => {
     bytes: 1,
   });
   const restore = (mpos?: { x: number; y: number; z: number }) =>
-    webSerialManager.restoreCheckpoint(program() as never, 3, {
+    webSerialManager.restoreMeshCheckpoint(program() as never, 3, {
       source: 'local',
       approximate: false,
       jobName: 'job',
