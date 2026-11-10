@@ -61,6 +61,13 @@ export function jointTypes(graph: SceneGraph): Record<string, string> {
   return out;
 }
 
+/** A body's name from its id (the id itself where the name is the same or missing). */
+export function bodyNamer(graph: SceneGraph): (id: string) => string {
+  const names = new Map<string, string>();
+  walk(graph.nodes, (n) => names.set(n.id, n.name || n.id));
+  return (id) => names.get(id) ?? id;
+}
+
 /** Bodies in the scene, at any depth. */
 export function countSceneBodies(graph: SceneGraph): number {
   let n = 0;

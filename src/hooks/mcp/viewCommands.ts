@@ -37,7 +37,8 @@ import { withEnvironment } from '../../store/sceneEnvironment';
 import type { HistoryQuery } from '../../workers/physicsWorkerProtocol';
 import { type PhysicsWindow, workerStatusNow, type Msg, findNodeInScene, stripMeshArrays } from './bridgeUtils';
 import { sealCheckFor } from './bodyFeatures';
-import { resolveBodyFilter } from '../../utils/headlessReport';
+import { bodyNamer, jointTypes, resolveBodyFilter } from '../../utils/headlessReport';
+import { digestTelemetry } from '../../utils/telemetryDigest';
 import type { McpCommands } from './types';
 
 export const viewCommands: McpCommands = {
@@ -226,15 +227,24 @@ export const viewCommands: McpCommands = {
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
     // Names or ids, as physics_run_headless takes them; frames are keyed by id.
     const filter = resolveBodyFilter(store.sceneGraph, msg.bodies);
+    const summaryOnly = msg.summary === true;
     const { frames, total, stride } = await getPhysicsWorkerClient().getHistory({
       sinceTime: num(msg.sinceTime),
       last: num(msg.last),
       stride: num(msg.stride),
-      maxFrames: num(msg.maxFrames) ?? 200,
+      maxFrames: num(msg.maxFrames) ?? (summaryOnly ? 400 : 200),
       // Nothing matched keeps nothing, not everything.
       bodies: filter.ids ? (filter.ids.size ? [...filter.ids] : ['\u0000none']) : undefined,
       include: Array.isArray(msg.include) ? (msg.include as HistoryQuery['include']) : undefined,
     });
+    const unknown = filter.unknown.length ? { warning: `bodies: no body has the name or id ${filter.unknown.map((u) => `"${u}"`).join(', ')}.` } : {};
+    if (summaryOnly) {
+      return {
+        total, stride,
+        digest: digestTelemetry(frames, { jointTypes: jointTypes(store.sceneGraph), nameOf: bodyNamer(store.sceneGraph) }),
+        ...unknown,
+      };
+    }
     return {
       total, returned: frames.length, stride, frames,
       ...(filter.unknown.length ? { warning: `bodies: no body has the name or id ${filter.unknown.map((u) => `"${u}"`).join(', ')}.` } : {}),

@@ -6,7 +6,8 @@
 import { captureViewportThumb } from '../../utils/viewportCapture';
 import { savePreset } from '../../utils/presetStorage';
 import { announcePresetSave } from '../../utils/presetNotices';
-import { emptySceneRefusal, frameSections, reportHeadless } from '../../utils/headlessReport';
+import { bodyNamer, emptySceneRefusal, frameSections, jointTypes, reportHeadless } from '../../utils/headlessReport';
+import { digestTelemetry } from '../../utils/telemetryDigest';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
@@ -103,7 +104,10 @@ export const sceneCommands: McpCommands = {
     // trajectory is ~500KB per 900 ticks, and striding only after the run
     // left the worker's 20,000-frame cap in force, so a long run stopped
     // early and told the caller to raise the stride it had already raised.
-    const stride = Math.max(1, Math.floor(Number(msg.stride) || 1));
+    // summary: the digest is read from the frames, and a few hundred across
+    // the run is plenty for it; the frames themselves are not returned.
+    const summaryOnly = msg.summary === true;
+    const stride = Math.max(1, Math.floor(Number(msg.stride) || 1), summaryOnly ? Math.ceil(ticks / 400) : 1);
     // Every blow is judged as the live run's are: a body that shatters is
     // rebuilt as its pieces at that tick (with sleeping on, as live), and
     // dents are recorded. See headlessImpacts.ts.
@@ -134,8 +138,22 @@ export const sceneCommands: McpCommands = {
       ? [...asked, ...impacts.shattered.filter((b) => asked.includes(b.id) || asked.includes(b.name)).flatMap((b) => b.shards)]
       : msg.bodies;
     // Names or ids; `final` judged on the whole scene before the filter.
+    const reply = reportHeadless(result, reportGraph, requested, msg.include);
+    if (summaryOnly) {
+      // `final.bodies` lists every body; the digest lists the ones that moved.
+      const { trajectory, final, ...rest } = reply;
+      const { bodies: _bodies, ...finalLean } = final ?? { bodies: undefined };
+      void _bodies;
+      return {
+        ...rest,
+        final: final ? finalLean : final,
+        digest: trajectory ? digestTelemetry(trajectory, { jointTypes: jointTypes(reportGraph), nameOf: bodyNamer(reportGraph) }) : null,
+        ...(impacts.shattered.length ? { shattered: impacts.shattered } : {}),
+        ...(impacts.dented.length ? { dented: impacts.dented } : {}),
+      };
+    }
     return {
-      ...reportHeadless(result, reportGraph, requested, msg.include),
+      ...reply,
       ...(impacts.shattered.length ? { shattered: impacts.shattered } : {}),
       ...(impacts.dented.length ? { dented: impacts.dented } : {}),
     };
