@@ -63,3 +63,6 @@ export async function restoreInterruptedJob(): Promise<RestorableCheckpoint | nu
     inFlight = false;
   }
 }
+
+/** Looks again, for `RemoteJobChip` while it shows a job running elsewhere. */
+export const recheckInterruptedJob = (): void => void restoreInterruptedJob();

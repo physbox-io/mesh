@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Printer, Puzzle, Scissors, Send, Wrench,
 } from 'lucide-react';
-import { FloatingStop, JobWaitingButton, NumberInput, jobPauseKind } from '@physbox-io/ui';
+import { FloatingStop, JobWaitingButton, NumberInput, RemoteJobChip, jobPauseKind } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
 import {
   DEFAULT_STOCK, MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM,
@@ -21,7 +21,8 @@ import { useModifier } from '../hooks/useModifier';
 import { CastPrepGuardModal } from './CastPrepGuardModal';
 import { useCastDialog } from '../store/castDialogStore';
 import { jobPause } from '../utils/jobPause';
-import { RemoteJobChip } from './RemoteJobChip';
+import { subscribeRemoteJob } from '../utils/jobCheckpoint';
+import { recheckInterruptedJob } from '../utils/jobRestore';
 import { openHardwareList } from './HardwareListDialog';
 import { BuildMenu } from './BuildMenu';
 import { buildItems } from './buildItems';
@@ -836,7 +837,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
           onEStop={() => void webSerialManager.eStop()}
         />
 
-        <RemoteJobChip />
+        <RemoteJobChip subscribe={subscribeRemoteJob} recheck={recheckInterruptedJob} />
 
         <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
           <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
