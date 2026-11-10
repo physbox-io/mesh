@@ -20,6 +20,7 @@ A browser-based rigid-body physics simulator and CAD fabrication studio built on
   * **Relief carve.** Heightmap roughing and finishing toolpaths with probed mesh levelling.
 * **Machine control and work origin.** Jog pad (0.1/1/10 mm steps) to drive the tool to the job origin, `G10 L20` XY zeroing, touch-plate Z probing that refuses to set a datum when the probe makes no contact, and 3×3+ bed probing that warps G-code to follow an untrue bed. GRBL 1.1, FluidNC and grblHAL over WebSerial. See **Docs → Fabrication → Machine Setup &amp; Zeroing** in the app.
 * **Hardware, cut into your part.** Hex nut traps and counterbored screw holes (M2 to M24), heat-set insert holes and bosses (M2 to M8), bearing pockets, all sized from ISO tables and changeable after placing. Threads on any cylinder: tapped holes and threaded rods, M2 to M24 or any pitch, either hand. D-shaft motor couplers.
+* **Picture to part.** Paste a photo or a dimensioned sketch into the copilot. It builds the part, turns the camera to the photo's direction (found by matching outlines), has a second model list what differs, fixes it, and keeps only the rounds that match better. It reports what a photo cannot show.
 * **AI copilot and MCP bridge.** In-app AI agent panel and a WebSocket MCP server bridge (`physbox_mcp`) for scene generation by external agents.
 
 ---

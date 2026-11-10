@@ -309,11 +309,25 @@ function boxBlur(src: Float32Array, w: number, h: number, passes: number): Float
   return a;
 }
 
-/** Traces the outline of the part in an RGBA picture. */
-export function traceProfile(rgba: Uint8ClampedArray, width: number, height: number, opts: TraceOptions = {}): TraceResult {
+export interface Segmentation {
+  /** 0 (dark, or opaque) to 1 (light, or clear), per pixel, blurred by the detail setting. */
+  tone: Float32Array;
+  threshold: number;
+  darkSubject: boolean;
+  byAlpha: boolean;
+}
+
+/**
+ * Splits a picture into part and background: by alpha when it has real
+ * transparency, else by brightness at the threshold given or Otsu's, with the
+ * part being whichever side the border is not (unless `subject` says).
+ */
+export function segmentPicture(
+  rgba: Uint8ClampedArray, width: number, height: number,
+  opts: { threshold?: number; subject?: ProfileSubject; blur?: number } = {},
+): Segmentation {
   const n = width * height;
   if (!n) throw new Error('The picture is empty.');
-  const detail = DETAIL[opts.detail ?? PROFILE_DEFAULTS.detail];
   const subject = opts.subject ?? PROFILE_DEFAULTS.subject;
 
   // A picture that is mostly see-through somewhere is a cut-out: trace its alpha.
@@ -321,7 +335,6 @@ export function traceProfile(rgba: Uint8ClampedArray, width: number, height: num
   for (let i = 0; i < n; i++) if (rgba[i * 4 + 3] < 128) clear++;
   const byAlpha = subject === 'auto' && clear > n * 0.02;
 
-  // `tone` runs 0 (dark, or opaque) to 1 (light, or clear).
   const raw = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const a = rgba[i * 4 + 3] / 255;
@@ -331,7 +344,7 @@ export function traceProfile(rgba: Uint8ClampedArray, width: number, height: num
       raw[i] = lum * a + (1 - a); // see-through reads as white paper
     }
   }
-  const tone = boxBlur(raw, width, height, detail.blur);
+  const tone = boxBlur(raw, width, height, opts.blur ?? DETAIL[PROFILE_DEFAULTS.detail].blur);
   const threshold = Math.min(0.98, Math.max(0.02, opts.threshold ?? (byAlpha ? 0.5 : otsuThreshold(tone))));
 
   // The part is whichever side of the threshold the border is not.
@@ -345,6 +358,22 @@ export function traceProfile(rgba: Uint8ClampedArray, width: number, height: num
     for (let y = 1; y < height - 1; y++) { visit(y * width); visit(y * width + width - 1); }
     darkSubject = darkBorder <= border / 2;
   }
+  return { tone, threshold, darkSubject, byAlpha };
+}
+
+/** 1 where the segmentation says part, 0 where background. */
+export function segmentationMask(seg: Segmentation): Uint8Array {
+  const out = new Uint8Array(seg.tone.length);
+  for (let i = 0; i < out.length; i++) out[i] = (seg.tone[i] < seg.threshold) === seg.darkSubject ? 1 : 0;
+  return out;
+}
+
+/** Traces the outline of the part in an RGBA picture. */
+export function traceProfile(rgba: Uint8ClampedArray, width: number, height: number, opts: TraceOptions = {}): TraceResult {
+  const detail = DETAIL[opts.detail ?? PROFILE_DEFAULTS.detail];
+  const { tone, threshold, darkSubject, byAlpha } = segmentPicture(rgba, width, height, {
+    threshold: opts.threshold, subject: opts.subject, blur: detail.blur,
+  });
 
   // Inside is high. A ring of background round the edge closes every loop,
   // including a part that runs off the side of the picture.

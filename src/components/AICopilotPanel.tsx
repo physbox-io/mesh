@@ -12,23 +12,14 @@ import { anthropicUrl, geminiUrl } from '../utils/llmEndpoints';
 import { callLlm, keyFor, isClaudeModel, DEFAULT_MODEL, type LlmImage } from '../utils/llmCall';
 import { llmImageUrl } from '../utils/llmImageInput';
 import { useCopilotAttachments, CopilotAttachmentTray } from './copilot/CopilotAttachments';
+import { usePictureToPart } from './copilot/usePictureToPart';
+import { formatLoopReport, DEFAULT_LOOP_ROUNDS } from '../utils/pictureToPart';
+import { parseAIResponse, cleanLaTeXMath, type DiagnosticQuestion, type ProposedModification } from '../utils/copilotReply';
 
 interface AICopilotPanelProps {
   onClose: () => void;
   messages?: ChatMessage[];
   setMessages?: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-}
-
-interface DiagnosticQuestion {
-  id: string;
-  question: string;
-  options?: string[];
-}
-
-interface ProposedModification {
-  id: string;
-  text: string;
-  selected: boolean;
 }
 
 interface ChatMessage {
@@ -54,206 +45,6 @@ interface ChatMessage {
   timestamp?: number;
 }
 
-const cleanLaTeXMath = (str: string): string => {
-  if (!str) return '';
-  return str
-    .replace(/\\text\s*\{\s*([^}]+)\s*\}/g, '$1')
-    .replace(/\\mathrm\s*\{\s*([^}]+)\s*\}/g, '$1')
-    .replace(/\\mathbf\s*\{\s*([^}]+)\s*\}/g, '$1')
-    .replace(/\\mathit\s*\{\s*([^}]+)\s*\}/g, '$1')
-    .replace(/\$\s*([^$]+?)\s*\$/g, '$1')
-    .replace(/\\\(\s*([\s\S]+?)\s*\\\)/g, '$1')
-    .replace(/\\sim\s*/g, '~')
-    .replace(/\\times\s*/g, '×')
-    .replace(/\\pm\s*/g, '±')
-    .replace(/\\degree\s*/g, '°');
-};
-
-const cleanJSONString = (str: string): string => {
-  return str.replace(/,\s*([\]}])/g, '$1'); // Only remove trailing commas before ] or }
-};
-
-const extractJSON = (text: string): unknown => {
-  if (!text) return null;
-
-  // 1. Check for code blocks ```json ... ``` or ``` ... ```
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
-  let match;
-  while ((match = codeBlockRegex.exec(text)) !== null) {
-    if (match[1]) {
-      const code = match[1].trim();
-      try {
-        return JSON.parse(code);
-      } catch {
-        try {
-          return JSON.parse(cleanJSONString(code));
-        } catch {
-          // ignore
-        }
-      }
-    }
-  }
-
-  // 2. Search for outermost JSON Array [...]
-  const arrayStart = text.indexOf('[');
-  const arrayEnd = text.lastIndexOf(']');
-  if (arrayStart !== -1 && arrayEnd > arrayStart) {
-    const candidate = text.substring(arrayStart, arrayEnd + 1).trim();
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      try {
-        return JSON.parse(cleanJSONString(candidate));
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  // 3. Search for outermost JSON Object {...}
-  const objStart = text.indexOf('{');
-  const objEnd = text.lastIndexOf('}');
-  if (objStart !== -1 && objEnd > objStart) {
-    const candidate = text.substring(objStart, objEnd + 1).trim();
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      try {
-        return JSON.parse(cleanJSONString(candidate));
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  return null;
-};
-
-// Distinguishes a bare `nodes` array from the other bare arrays a response can
-// carry. Anything that identifies a body - an id/name, or any of the structural
-// keys - counts, so a minimal positional tweak is accepted; question and
-// modification objects are excluded by shape.
-const isLikelyNodeArray = (arr: unknown[]): boolean =>
-  arr.every(item => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
-    const obj = item as Record<string, unknown>;
-    return obj.question === undefined && obj.options === undefined && obj.text === undefined &&
-      (obj.id !== undefined || obj.name !== undefined ||
-       obj.geoms !== undefined || obj.joints !== undefined || obj.scad !== undefined ||
-       obj.pos !== undefined || obj.euler !== undefined || obj.type === 'body');
-  });
-
-const parseAIResponse = (text: string): {
-  markdown: string;
-  questions: DiagnosticQuestion[];
-  proposedModifications: ProposedModification[];
-  nodes: RawNode[] | null;
-  noteCardMarkdown: string | null;
-} => {
-  let questions: DiagnosticQuestion[] = [];
-  let proposedModifications: ProposedModification[] = [];
-  let nodes: RawNode[] | null = null;
-  let noteCardMarkdown: string | null = null;
-  let markdown = cleanLaTeXMath(text);
-
-  // Scan code blocks for questions, proposedModifications, or nodes
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
-  let match;
-  const blocksToRemove: string[] = [];
-  const jsonMatches: RegExpExecArray[] = [];
-
-  while ((match = codeBlockRegex.exec(text)) !== null) {
-    jsonMatches.push(match);
-  }
-
-  for (const match of jsonMatches) {
-    const fullMatch = match[0];
-    const code = match[1].trim();
-    try {
-      const parsed = extractJSON(code);
-      if (parsed && typeof parsed === 'object') {
-        const p = parsed as Record<string, unknown>;
-        if (!noteCardMarkdown) {
-          if (typeof p.noteCardMarkdown === 'string') noteCardMarkdown = p.noteCardMarkdown;
-          else if (typeof p.noteCard === 'string') noteCardMarkdown = p.noteCard;
-          else if (typeof p.notecard === 'string') noteCardMarkdown = p.notecard;
-        }
-
-        if (questions.length === 0 && Array.isArray(p.questions)) {
-          questions = (p.questions as Record<string, unknown>[]).map((q, idx: number) => ({
-            id: (typeof q.id === 'string' ? q.id : '') || `q_${idx}`,
-            question: cleanLaTeXMath(typeof q.question === 'string' ? q.question : ''),
-            options: Array.isArray(q.options) && q.options.length > 0
-              ? q.options.map((o: unknown) => cleanLaTeXMath(String(o)))
-              : undefined
-          })).filter((q) => q.question.trim().length > 0);
-          blocksToRemove.push(fullMatch);
-        }
-
-        if (proposedModifications.length === 0 && Array.isArray(p.proposedModifications)) {
-          proposedModifications = (p.proposedModifications as (Record<string, unknown> | string)[]).map((m, idx: number) => ({
-            id: (typeof m === 'object' && m && typeof m.id === 'string' ? m.id : '') || `m_${idx}`,
-            text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(String(m.text || m.description || m)),
-            selected: true
-          })).filter((m: ProposedModification) => m.text.trim().length > 0);
-          blocksToRemove.push(fullMatch);
-        }
-
-        if (nodes === null) {
-          if (Array.isArray(p.nodes)) {
-            nodes = p.nodes as RawNode[];
-            blocksToRemove.push(fullMatch);
-          // A bare array is nodes if it isn't one of the other two shapes we
-          // accept (questions / proposedModifications). The old test demanded
-          // geoms|joints|scad|type on the first element, which threw away the
-          // most natural way to express a small mutation - [{"id": "...",
-          // "pos": [0,0,0.3]}] - leaving nodes null while the chat still
-          // reported the change as applied.
-          } else if (Array.isArray(parsed) && parsed.length > 0 && isLikelyNodeArray(parsed)) {
-            nodes = parsed as RawNode[];
-            blocksToRemove.push(fullMatch);
-          }
-        }
-      }
-    } catch {
-      // ignore parse errors
-    }
-  }
-
-  for (const block of blocksToRemove) {
-    markdown = markdown.replace(block, '').trim();
-  }
-
-  // Fallback logic
-  if (proposedModifications.length === 0) {
-    const lines = text.split('\n');
-    let inPropsSection = false;
-
-    lines.forEach((line, lineIdx) => {
-      const trimmed = line.trim();
-      if (trimmed.match(/^(?:#+|\*\*|\b)(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
-        inPropsSection = true;
-      } else if (trimmed.match(/^#+\s/) && !trimmed.match(/(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
-        inPropsSection = false;
-      } else if (inPropsSection && (trimmed.startsWith('* ') || trimmed.startsWith('- ') || trimmed.match(/^\d+\.\s/))) {
-        const itemText = trimmed.replace(/^[*\-\d.]+\s*/, '').trim();
-        if (itemText.length > 5) {
-          proposedModifications.push({
-            id: `mod_${lineIdx}`,
-            text: cleanLaTeXMath(itemText),
-            selected: true
-          });
-        }
-      }
-    });
-  }
-
-  let cleanMarkdown = text.replace(/```(?:json)?\s*[\s\S]*?\s*```/gi, '').trim();
-  cleanMarkdown = cleanLaTeXMath(cleanMarkdown);
-
-  return { markdown: cleanMarkdown, questions, proposedModifications, nodes, noteCardMarkdown };
-};
-
 const getTimestamp = () => Date.now();
 const makeId = (prefix: string) => `${prefix}_${Date.now()}`;
 
@@ -277,6 +68,9 @@ interface ClaudeModelItem {
 export default function AICopilotPanel({ onClose, messages: propsMessages, setMessages: propsSetMessages }: AICopilotPanelProps) {
   const sceneGraph = useStore(state => state.sceneGraph);
   const att = useCopilotAttachments();
+  const pictureLoop = usePictureToPart(SYSTEM_INSTRUCTIONS);
+  /** Generate from a picture as a build / inspect / fix loop rather than one reply. */
+  const [refineAgainstPicture, setRefineAgainstPicture] = useState(true);
   const updateScene = useStore(state => state.updateScene);
 
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
@@ -828,6 +622,11 @@ Based on these functional clarifications and your physical analysis:
     };
     setMessages(prev => [...prev, userMsg]);
 
+    if (images.length && refineAgainstPicture) {
+      await runPictureLoop(currentPrompt, images);
+      return;
+    }
+
     const systemPromptWithQuestions = `${SYSTEM_INSTRUCTIONS}${getModeHistoryStr('generate')}${getExistingCardContextStr()}\n\nIn addition to the "nodes" JSON block, if there are optional design choices or follow-up options for the user, include a "questions" array JSON block at the bottom with 1-3 questions having 2-4 options each.`;
 
     const response = await callGemini(systemPromptWithQuestions, currentPrompt, images);
@@ -871,6 +670,30 @@ Based on these functional clarifications and your physical analysis:
       };
       setMessages(prev => [...prev, assistantMsg]);
       handleNotecardUpdate('generate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
+    }
+  };
+
+  const runPictureLoop = async (request: string, images: LlmImage[]) => {
+    setError('');
+    setLoading(true);
+    setLoadingStatus('Building from the picture…');
+    try {
+      const report = await pictureLoop.run(request, images);
+      const kept = report.rounds.find((r) => r.round === report.bestRound && !r.rolledBack)
+        ?? report.rounds.filter((r) => !r.rolledBack).pop();
+      setMessages(prev => [...prev, {
+        id: makeId('ast'),
+        role: 'assistant',
+        mode: 'generate',
+        content: formatLoopReport(report),
+        images: [llmImageUrl(images[0]), ...(kept?.render ? [llmImageUrl(kept.render)] : [])],
+        isImplemented: report.bestRound > 0,
+        hasError: report.stoppedBecause === 'failed',
+        errorMsg: report.stoppedBecause === 'failed' ? report.error : undefined,
+        timestamp: getTimestamp(),
+      }]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -1240,6 +1063,13 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs shadow-inner bg-white dark:bg-slate-955 text-slate-800 dark:text-slate-200 min-h-[75px] leading-normal placeholder-slate-400 dark:placeholder-slate-500"
             />
             <CopilotAttachmentTray att={att} disabled={loading} />
+            {mode === 'generate' && att.images.length > 0 && (
+              <label className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 select-none cursor-pointer"
+                title={`Build, look at the part from the photo's direction, have a second model list what differs, fix it, and keep only rounds that match better. Up to ${DEFAULT_LOOP_ROUNDS} rounds, a few requests each.`}>
+                <input type="checkbox" checked={refineAgainstPicture} onChange={(e) => setRefineAgainstPicture(e.target.checked)} className="accent-blue-600" />
+                Check against the picture and refine (up to {DEFAULT_LOOP_ROUNDS} rounds)
+              </label>
+            )}
             <button
               onClick={mode === 'generate' ? handleGenerate : handleMutate}
               disabled={loading}
@@ -1375,6 +1205,16 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                   </div>
                 ) : (
                   <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 p-3 rounded-2xl rounded-tl-xs shadow-sm flex flex-col gap-3">
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {msg.images.map((src, i) => (
+                          <figure key={i} className="flex flex-col gap-0.5">
+                            <img src={src} alt={i === 0 ? 'The photo' : 'The part'} className="w-full rounded-md border border-slate-200 dark:border-slate-700" />
+                            <figcaption className="text-[10px] text-slate-400 text-center">{i === 0 ? 'Photo' : 'Part, same view'}</figcaption>
+                          </figure>
+                        ))}
+                      </div>
+                    )}
                     <div className="prose prose-slate dark:prose-invert max-w-none text-xs font-normal">
                       {renderMarkdown(msg.content)}
                     </div>
@@ -1555,7 +1395,19 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
           {loading && (
             <div className="flex items-center gap-2.5 p-3 bg-blue-50/80 dark:bg-slate-900/80 rounded-xl border border-blue-100 dark:border-slate-800 text-blue-600 dark:text-blue-400 select-none">
               <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-              <span className="text-xs font-semibold">{loadingStatus}</span>
+              <span className="text-xs font-semibold flex-1">
+                {pictureLoop.progress
+                  ? `Round ${pictureLoop.progress.round} of ${pictureLoop.progress.maxRounds}: ${pictureLoop.progress.stage}${
+                      pictureLoop.progress.rounds.length
+                        ? ` · best ${Math.round(Math.max(...pictureLoop.progress.rounds.filter((r) => !r.rolledBack).map((r) => r.score), 0) * 100)}%`
+                        : ''}`
+                  : loadingStatus}
+              </span>
+              {pictureLoop.progress && (
+                <button onClick={pictureLoop.stop} className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white dark:bg-slate-800 border border-blue-200 dark:border-slate-700 hover:bg-red-50 hover:text-red-600 cursor-pointer">
+                  Stop
+                </button>
+              )}
             </div>
           )}
 
