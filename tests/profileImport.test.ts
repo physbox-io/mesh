@@ -180,3 +180,105 @@ describe('profileScad', () => {
     expect(scad).toMatch(/paths=\[\[0,1,2,3\],\[4,5,6,7\]\]/);
   });
 });
+
+describe('fixes from the first validation', () => {
+  // A dark rectangular plate with four round holes, 500 x 350 px.
+  const plate = (x: number, y: number) => {
+    if (x < 50 || x > 450 || y < 50 || y > 300) return false;
+    for (const [cx, cy] of [[100, 100], [400, 100], [100, 250], [400, 250]]) if (Math.hypot(x - cx, y - cy) < 15) return false;
+    return true;
+  };
+
+  it('keeps a traced plate\'s corners and its holes at every detail', () => {
+    for (const detail of ['fine', 'normal', 'coarse'] as const) {
+      const t = traceProfile(picture(500, 350, 240, 20, plate), 500, 350, { detail, widthMm: 200 });
+      expect(t.shapes, detail).toHaveLength(1);
+      expect(t.shapes[0].holes, detail).toHaveLength(4);
+      expect(t.heightMm, detail).toBeCloseTo(125, 0);
+    }
+  });
+
+  it('keeps small round holes round instead of dropping them', () => {
+    const small = (x: number, y: number) => x >= 20 && x < 980 && y >= 20 && y < 680 && Math.hypot(x - 200, y - 200) >= 5;
+    const t = traceProfile(picture(1000, 700, 240, 20, small), 1000, 700, { widthMm: 200 });
+    expect(t.shapes[0].holes).toHaveLength(1);
+    expect(t.shapes[0].holes[0].length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('traces the part, not the sheet of paper it lies on, when the table shows round it', () => {
+    // mid-grey table, white paper, dark washer on the paper
+    const d = new Uint8ClampedArray(400 * 300 * 4);
+    for (let y = 0; y < 300; y++) for (let x = 0; x < 400; x++) {
+      const onPaper = x > 40 && x < 360 && y > 30 && y < 270;
+      const r = Math.hypot(x - 200, y - 150);
+      const v = onPaper ? (r >= 20 && r <= 60 ? 25 : 245) : 120;
+      const i = (y * 400 + x) * 4; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+    }
+    const t = traceProfile(d, 400, 300, { widthMm: 40 });
+    expect(t.shapes).toHaveLength(1);
+    expect(t.shapes[0].holes).toHaveLength(1);
+    expect(t.heightMm).toBeCloseTo(40, 0);
+    expect(t.notes.join(' ')).toMatch(/sheet/);
+  });
+
+  it('traces a photo with a transparent margin by its colours', () => {
+    const px = picture(100, 100, 240, 20, ring, (x, y) => (x < 4 || x > 95 || y < 4 || y > 95 ? 0 : 255));
+    const t = traceProfile(px, 100, 100, { widthMm: 70 });
+    expect(t.shapes).toHaveLength(1);
+    expect(t.shapes[0].holes).toHaveLength(1);
+    expect(t.widthMm).toBeCloseTo(70, 3);
+  });
+
+  it('reads a white-filled, red-stroked laser file as cut lines', () => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="40mm" viewBox="0 0 80 40">
+      <rect width="80" height="40" fill="#fff" stroke="red"/><circle cx="10" cy="10" r="3" fill="#fff" stroke="red"/></svg>`;
+    const p = svgProfile(svg);
+    expect(p.shapes).toHaveLength(1);
+    expect(p.shapes[0].holes).toHaveLength(1);
+  });
+
+  it('cuts a white knockout out of a black fill', () => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="20mm" height="20mm" viewBox="0 0 20 20">
+      <rect width="20" height="20" fill="black"/><circle cx="10" cy="10" r="4" fill="white"/></svg>`;
+    const p = svgProfile(svg);
+    expect(p.cutouts).toHaveLength(1);
+    expect(profileScad(p)).toMatch(/difference\(\)/);
+  });
+
+  it('leaves hidden layers and clip paths out', () => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="20mm" height="20mm" viewBox="0 0 20 20">
+      <rect width="20" height="20"/>
+      <g style="display:none"><rect x="100" width="200" height="20"/></g>
+      <rect x="-300" width="10" height="10" visibility="hidden"/>
+      <rect x="300" width="10" height="10" opacity="0"/>
+      <clipPath id="c"><rect x="500" width="10" height="10"/></clipPath></svg>`;
+    const p = svgProfile(svg);
+    expect(p.widthMm).toBeCloseTo(20, 3);
+    expect(p.notes.join(' ')).toMatch(/hidden/);
+  });
+
+  it('closes an outline left a hair open, and joins separate line segments', () => {
+    const nearly = `<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10">
+      <path d="M0 0 L10 0 L10 10 L0 10 L0 0.001" fill="none" stroke="black"/></svg>`;
+    expect(svgProfile(nearly).shapes).toHaveLength(1);
+    const lines = `<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10">
+      <line x1="0" y1="0" x2="10" y2="0" stroke="black"/><line x1="10" y1="10" x2="10" y2="0" stroke="black"/>
+      <line x1="10" y1="10" x2="0" y2="10" stroke="black"/><line x1="0" y1="10" x2="0" y2="0" stroke="black"/></svg>`;
+    const p = svgProfile(lines);
+    expect(p.shapes).toHaveLength(1);
+    expect(p.widthMm).toBeCloseTo(10, 3);
+  });
+
+  it('reads exponent sizes, fits a non-square viewBox, follows <use href>, and names text', () => {
+    expect(svgProfile(`<svg xmlns="http://www.w3.org/2000/svg" width="1e2mm" height="1e2mm" viewBox="0 0 100 100"><rect width="50" height="50"/></svg>`).widthMm).toBeCloseTo(50, 3);
+    expect(svgProfile(`<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="10mm" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>`).widthMm).toBeCloseTo(10, 3);
+    const use = `<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10"><defs><rect id="r" width="10" height="10"/></defs><use href="#r"/></svg>`;
+    expect(svgProfile(use).widthMm).toBeCloseTo(10, 3);
+    expect(() => svgProfile(`<svg xmlns="http://www.w3.org/2000/svg"><text>Hi</text></svg>`)).toThrow(/convert the text to paths/i);
+  });
+
+  it('keeps the thickness slider when the name has a brace in it', () => {
+    const p = svgProfile(`<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>`);
+    expect(parseScadVariables(profileScad(p, 3, 'logo{v2')).map((v) => v.name)).toContain('thickness');
+  });
+});

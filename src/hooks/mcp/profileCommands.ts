@@ -15,6 +15,7 @@ import {
   type TraceResult,
 } from '../../utils/profileImport';
 import { settleScene } from './settleScene';
+import { findNodeInScene } from './bridgeUtils';
 import type { McpCommands } from './types';
 
 /** The dialog's own cap on a traced picture's long side. */
@@ -70,6 +71,12 @@ export const profileCommands: McpCommands = {
     const pos = Array.isArray(m.pos) && m.pos.length === 3 ? m.pos : undefined;
     const node = profileNode(profile, { name: m.name || (m.svg ? 'svg_profile' : 'traced_profile'), thicknessMm, ...(pos ? { pos } : {}) });
     const res = await settleScene([...(useStore.getState().sceneGraph.nodes || []), node], { replacesScene: false });
+    // The scad compile only logs a failure, so look for the mesh it should have made.
+    const built = findNodeInScene(useStore.getState().sceneGraph.nodes || [], node.id);
+    const compiled = !!built?.geoms?.some((g) => (g.renderVertices?.length ?? g.vertices?.length ?? 0) > 0);
+    if (res.ok && !compiled) {
+      return { ok: false, nodeId: node.id, error: 'The outline was read but its OpenSCAD body did not compile, so the part has no shape. Try detail "coarse" (fewer points) or a simpler drawing.' };
+    }
     const traced = m.imageData ? (profile as TraceResult) : null;
     return {
       ok: res.ok,

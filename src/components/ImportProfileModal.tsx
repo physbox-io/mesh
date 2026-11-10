@@ -41,6 +41,14 @@ const Field: React.FC<{ label: string; hint?: string; children: React.ReactNode 
   </label>
 );
 
+/** A caption over a group of buttons: a <div>, since a <label> would press the first button when the caption is clicked. */
+const Group: React.FC<{ label: string; hint?: string; children: React.ReactNode }> = ({ label, hint, children }) => (
+  <div className="space-y-1" title={hint}>
+    <span className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
+    {children}
+  </div>
+);
+
 const Segmented = <T extends string>({ value, options, onChange }: {
   value: T; options: { value: T; label: string; hint: string }[]; onChange: (v: T) => void;
 }) => (
@@ -233,20 +241,20 @@ export const ImportProfileModal: React.FC<{
 
                 {source.kind === 'image' && (
                   <div className="space-y-2.5">
-                    <Field label="The part is" hint="Auto: whatever does not touch the edge of the picture.">
+                    <Group label="The part is" hint="Auto: whatever does not touch the edge of the picture.">
                       <Segmented value={subject} onChange={setSubject} options={[
                         { value: 'auto', label: 'Auto', hint: 'The background is what touches the edge of the picture' },
                         { value: 'dark', label: 'Dark', hint: 'The dark tone is the part' },
                         { value: 'light', label: 'Light', hint: 'The light tone is the part' },
                       ]} />
-                    </Field>
-                    <Field label="Detail" hint="Fine follows every bump; coarse smooths shadows and paper texture.">
+                    </Group>
+                    <Group label="Detail" hint="Fine follows every bump; coarse smooths shadows and paper texture.">
                       <Segmented value={detail} onChange={setDetail} options={[
                         { value: 'fine', label: 'Fine', hint: 'Every bump of the outline' },
                         { value: 'normal', label: 'Normal', hint: 'A little smoothing' },
                         { value: 'coarse', label: 'Coarse', hint: 'Smooths shadows, texture and noise' },
                       ]} />
-                    </Field>
+                    </Group>
                     <Field label={`Threshold${threshold === null ? ' (auto)' : ''}`} hint="Where part and background divide. Starts where the picture's two tones split.">
                       <div className="flex items-center gap-2">
                         <input type="range" min={2} max={98} step={1} aria-label="Trace threshold"
@@ -264,7 +272,7 @@ export const ImportProfileModal: React.FC<{
                 {profile && (
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
                     {profile.shapes.length} shape{profile.shapes.length === 1 ? '' : 's'},{' '}
-                    {profile.shapes.reduce((n, s) => n + s.holes.length, 0)} holes.
+                    {(() => { const h = profile.shapes.reduce((n, s) => n + s.holes.length, 0); return `${h} hole${h === 1 ? '' : 's'}.`; })()}
                     {traced?.byAlpha && ' Traced by transparency.'}
                     {' '}To cut it into a part: overlap them, select the part, Shift-click this, and Combine → Subtract.
                   </p>

@@ -87,7 +87,7 @@ export const usePanels = create<PanelsState>((set) => ({
   stlImport: null,
   imageImport: null,
   openStlImport: (file) => set({ stlImport: { file: file ?? null } }),
-  openImageImport: (file) => set({ imageImport: { file: file ?? null } }),
+  openImageImport: (file) => set({ imageImport: { file: file ?? null }, profileImport: null }),
   closeStlImport: () => set({ stlImport: null }),
   closeImageImport: () => set({ imageImport: null }),
   profileImport: null,

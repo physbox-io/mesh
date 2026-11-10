@@ -5,9 +5,32 @@
 
 import type { Point2D } from './laserCutExporter';
 
+/**
+ * The loop restarted at the vertex farthest from its centroid: a corner of its
+ * hull, so never a point in the middle of an edge.
+ *
+ * A traced or sliced contour starts wherever its chaining happened to begin,
+ * often a hair to one side of a corner with the loop's last point a hair to
+ * the other. Each pass below treats its first and last points specially, and
+ * started there they judged each other collinear and the corner went with
+ * them: a traced plate came back a triangle and its holes fell outside it.
+ */
+function fromExtreme(pts: Point2D[]): Point2D[] {
+  let cx = 0, cy = 0;
+  for (const p of pts) { cx += p.x; cy += p.y; }
+  cx /= pts.length; cy /= pts.length;
+  let far = 0, best = -1;
+  pts.forEach((p, i) => {
+    const d = (p.x - cx) ** 2 + (p.y - cy) ** 2;
+    if (d > best) { best = d; far = i; }
+  });
+  return far === 0 ? pts : [...pts.slice(far), ...pts.slice(0, far)];
+}
+
 /** Ramer–Douglas–Peucker on a closed loop, splitting it at two far-apart anchors. */
-export function simplifyLoop(pts: Point2D[], tolMm: number): Point2D[] {
-  if (pts.length <= 4) return pts;
+export function simplifyLoop(loop: Point2D[], tolMm: number): Point2D[] {
+  if (loop.length <= 4) return loop;
+  const pts = fromExtreme(loop);
 
   const perp = (p: Point2D, a: Point2D, b: Point2D) => {
     const dx = b.x - a.x, dy = b.y - a.y;
@@ -57,14 +80,17 @@ export function simplifyLoop(pts: Point2D[], tolMm: number): Point2D[] {
  * side of every layer; this closes the loop properly.
  */
 export function dropCollinear(pts: Point2D[], tolMm: number): Point2D[] {
-  let current = pts;
+  if (pts.length <= 3) return pts;
+  // Point 0 is a hull corner and stays; everything is judged between kept
+  // neighbours, the last point against point 0 as kept.
+  let current = fromExtreme(pts);
   for (let pass = 0; pass < 3; pass++) {
     if (current.length <= 3) break;
-    const out: Point2D[] = [];
-    for (let i = 0; i < current.length; i++) {
-      const prev = out.length ? out[out.length - 1] : current[(i - 1 + current.length) % current.length];
+    const out: Point2D[] = [current[0]];
+    for (let i = 1; i < current.length; i++) {
+      const prev = out[out.length - 1];
       const curr = current[i];
-      const next = current[(i + 1) % current.length];
+      const next = i === current.length - 1 ? out[0] : current[i + 1];
       const dx = next.x - prev.x;
       const dy = next.y - prev.y;
       const len = Math.hypot(dx, dy);

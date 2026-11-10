@@ -14,11 +14,11 @@ the same defaults ([[ui-mcp-parity]]). Pushes coalesced.
 - The body is a SCAD node, so the thickness is a slider, the compile is the scad
   worker's, overlapping fills union, and cutting it into a part is the existing
   Combine → difference. No new worker, no new geometry engine.
-- UI: `ImportProfileModal` — SVG or image; for an image a threshold, invert,
-  detail and size-from-a-known-width. Header button; a dropped `.svg` opens it;
+- UI: `ImportProfileModal` — SVG or image; for an image which tone is the
+  part (auto/dark/light), threshold, detail and size-from-a-known-width. Header button; a dropped `.svg` opens it;
   the relief dialog offers "Trace outline instead".
 - MCP: `physics_import_profile` (svg text or path, or image path/data; width,
-  thickness, threshold, invert, detail).
+  thickness, threshold, subject, detail).
 
 ## 2. Images in the copilot
 Paste / drop / attach an image in `AICopilotPanel`; sent as inline image parts
@@ -46,3 +46,9 @@ hardware cuts.
 
 ## Status
 (updated as each lands)
+- 1 done: 67f0132; validator fixes (corner loss in loopSimplify, sheet of
+  paper, knockouts, hidden layers, near-closed/segmented strokes, small holes,
+  transparent margins, root size, <use href>, text) in the next commit.
+  physbox_mcp 89bb245 (tool + docs), unreleased.
+- 2 done: 275686d.
+- 3 done: f65c83b. Not yet run against a real model in the browser.

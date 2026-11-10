@@ -41,6 +41,8 @@ export interface ProfileShape {
 
 export interface Profile {
   shapes: ProfileShape[];
+  /** Regions cut out of the shapes after they are joined: an SVG's white knockout fills. */
+  cutouts?: ProfileShape[];
   /** Bounding size of all the shapes, mm. The shapes are centred on the origin. */
   widthMm: number;
   heightMm: number;
@@ -75,7 +77,7 @@ const MAX_POINTS = 20000;
  */
 export function shapesFromLoops(loops: Point2D[][]): ProfileShape[] {
   const usable = loops.filter((l) => l.length >= 3);
-  const depths = nestingDepths(usable);
+  const depths = usable.map((loop, i) => usable.reduce((d, other, j) => d + (i !== j && insideOf(loop, other) ? 1 : 0), 0));
   const areas = usable.map((l) => Math.abs(polygonArea(l)));
   const shapes: ProfileShape[] = [];
   const shapeOf = new Map<number, ProfileShape>();
@@ -90,12 +92,34 @@ export function shapesFromLoops(loops: Point2D[][]): ProfileShape[] {
     if (depths[i] % 2 === 0) return;
     let owner = -1;
     for (let j = 0; j < usable.length; j++) {
-      if (depths[j] !== depths[i] - 1 || !pointInPolygon(loop[0], usable[j])) continue;
+      if (depths[j] !== depths[i] - 1 || !insideOf(loop, usable[j])) continue;
       if (owner < 0 || areas[j] < areas[owner]) owner = j;
     }
     if (owner >= 0) shapeOf.get(owner)!.holes.push(loop);
   });
   return shapes;
+}
+
+/**
+ * Whether `loop` lies inside `other`, by a vote of three of its vertices: once
+ * the two have been simplified independently a single vertex can land on the
+ * wrong side of a nearby edge, and a hole was promoted to a solid that way.
+ */
+function insideOf(loop: Point2D[], other: Point2D[]): boolean {
+  const n = loop.length;
+  const votes = [0, Math.floor(n / 3), Math.floor((2 * n) / 3)].filter((v, i, a) => a.indexOf(v) === i);
+  const ins = votes.reduce((c, k) => c + (pointInPolygon(loop[k], other) ? 1 : 0), 0);
+  return ins * 2 > votes.length;
+}
+
+function hullArea(pts: Point2D[]): number {
+  const p = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
+  if (p.length < 3) return 0;
+  const cross = (o: Point2D, a: Point2D, b: Point2D) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: Point2D[] = [], upper: Point2D[] = [];
+  for (const q of p) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop(); lower.push(q); }
+  for (const q of [...p].reverse()) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop(); upper.push(q); }
+  return Math.abs(polygonArea([...lower.slice(0, -1), ...upper.slice(0, -1)]));
 }
 
 function bounds(shapes: ProfileShape[]) {
@@ -121,7 +145,7 @@ function countPoints(shapes: ProfileShape[]): number {
  */
 function placeShapes(
   shapes: ProfileShape[],
-  opts: { widthMm?: number; heightMm?: number; scale: number; flipY: boolean },
+  opts: { widthMm?: number; heightMm?: number; scale: number; flipY: boolean; cutouts?: ProfileShape[] },
   notes: string[],
 ): Profile {
   if (!shapes.length) throw new Error('No closed outline was found, so there is nothing to make a part from.');
@@ -135,8 +159,16 @@ function placeShapes(
   const cy = (b.minY + b.maxY) / 2;
   const sy = opts.flipY ? -1 : 1;
   const map = (loop: Point2D[]) => loop.map((p) => ({ x: (p.x - cx) * k, y: sy * (p.y - cy) * k }));
-  const placed = shapes.map((s) => ({ outline: map(s.outline), holes: s.holes.map(map) }));
-  return { shapes: placed, widthMm: w * k, heightMm: h * k, pointCount: countPoints(placed), notes };
+  const place = (list: ProfileShape[]) => list.map((s) => ({ outline: map(s.outline), holes: s.holes.map(map) }));
+  const placed = place(shapes);
+  const cut = opts.cutouts?.length ? place(opts.cutouts) : undefined;
+  return {
+    shapes: placed,
+    ...(cut ? { cutouts: cut } : {}),
+    widthMm: w * k, heightMm: h * k,
+    pointCount: countPoints(placed) + (cut ? countPoints(cut) : 0),
+    notes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -148,19 +180,96 @@ const UNIT_MM: Record<string, number> = { mm: 1, cm: 10, in: 25.4, pt: 25.4 / 72
 /** Millimetres per SVG user unit, from the root's width/height and viewBox; 96 dpi when it says nothing. */
 export function svgUnitMm(root: Element): number {
   const viewBox = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
-  const hasViewBox = viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0;
-  for (const [attr, vbIndex] of [['width', 2], ['height', 3]] as const) {
-    const m = /^\s*([\d.]+)\s*([a-z]*)\s*$/i.exec(root.getAttribute(attr) || '');
-    if (!m || !(m[2].toLowerCase() in UNIT_MM)) continue;
-    const sizeMm = parseFloat(m[1]) * UNIT_MM[m[2].toLowerCase()];
-    if (!(sizeMm > 0)) continue;
-    return hasViewBox ? sizeMm / viewBox[vbIndex] : UNIT_MM[m[2].toLowerCase()];
-  }
-  return UNIT_MM.px;
+  const hasViewBox = viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0;
+  const size = (attr: string): { mm: number; unit: number } | null => {
+    const m = /^\s*([\d.]+(?:e[+-]?\d+)?)\s*([a-z]*)\s*$/i.exec(root.getAttribute(attr) || '');
+    if (!m || !(m[2].toLowerCase() in UNIT_MM)) return null;
+    const unit = UNIT_MM[m[2].toLowerCase()];
+    const mm = parseFloat(m[1]) * unit;
+    return mm > 0 ? { mm, unit } : null;
+  };
+  const w = size('width'), h = size('height');
+  if (!hasViewBox) return (w ?? h)?.unit ?? UNIT_MM.px;
+  // The viewBox is fitted inside width x height keeping its aspect (the
+  // default preserveAspectRatio, "meet"), so the tighter of the two governs.
+  const kw = w ? w.mm / viewBox[2] : Infinity;
+  const kh = h ? h.mm / viewBox[3] : Infinity;
+  if (/^\s*none/.test(root.getAttribute('preserveAspectRatio') || '')) return Number.isFinite(kw) ? kw : Number.isFinite(kh) ? kh : UNIT_MM.px;
+  const k = Math.min(kw, kh);
+  return Number.isFinite(k) ? k : UNIT_MM.px;
 }
 
 const isNone = (paint: unknown) =>
-  paint === undefined || paint === null || paint === 'none' || paint === 'transparent' || paint === '';
+  paint === undefined || paint === null || paint === 'none' || paint === 'transparent' || paint === '' ||
+  (typeof paint === 'string' && /^(rgba|hsla)\(.*,\s*0(\.0*)?\s*\)$/i.test(paint.replace(/\s+/g, ' ')));
+
+/** Paper-coloured paint: a knockout when filled, a white-filled cut line when stroked too. */
+const isWhite = (paint: unknown) => {
+  if (typeof paint !== 'string') return false;
+  const v = paint.trim().toLowerCase().replace(/\s+/g, '');
+  return v === 'white' || v === '#fff' || v === '#ffffff' || v === '#ffff' || v === '#ffffffff' ||
+    /^rgba?\(255,255,255(,1(\.0*)?)?\)$/.test(v) || /^rgba?\(100%,100%,100%/.test(v);
+};
+
+/**
+ * Elements whose contents are never drawn where they stand. Not <defs> or
+ * <symbol>: the loader already skips a defs' contents, and what a <use> draws
+ * from either is reported with the node it copied, which lives there.
+ */
+const UNDRAWN = new Set(['clippath', 'mask', 'marker', 'pattern', 'title', 'desc', 'metadata']);
+
+/** Whether an element, or anything round it, hides it: display, visibility, opacity, or an undrawn container. */
+function isHidden(node: Element | null | undefined): boolean {
+  for (let el: Element | null | undefined = node; el && el.nodeType === 1; el = el.parentElement) {
+    const tag = el.nodeName.toLowerCase().replace(/^svg:/, '');
+    if (UNDRAWN.has(tag)) return true;
+    const style = (el.getAttribute('style') || '').toLowerCase();
+    const prop = (name: string) => {
+      const m = new RegExp(`(?:^|;)\\s*${name}\\s*:\\s*([^;]+)`).exec(style);
+      return (m?.[1] ?? el!.getAttribute(name) ?? '').trim().toLowerCase();
+    };
+    if (prop('display') === 'none') return true;
+    const vis = prop('visibility');
+    if (vis === 'hidden' || vis === 'collapse') return true;
+    const op = prop('opacity');
+    if (op !== '' && Number(op) === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Joins open lines whose ends meet into closed loops: a rectangle drawn as four
+ * <line>s, or a DXF conversion's separate segments. Returns the loops and how
+ * many pieces were left open.
+ */
+function chainOpen(pieces: Point2D[][], tol: number): { loops: Point2D[][]; open: number } {
+  const left = pieces.filter((p) => p.length >= 2).map((p) => [...p]);
+  const loops: Point2D[][] = [];
+  let open = 0;
+  const near = (a: Point2D, b: Point2D) => Math.hypot(a.x - b.x, a.y - b.y) <= tol;
+  while (left.length) {
+    let chain = left.shift()!;
+    let grew = true;
+    while (grew && !(chain.length >= 3 && near(chain[0], chain[chain.length - 1]))) {
+      grew = false;
+      for (let i = 0; i < left.length; i++) {
+        const p = left[i];
+        const end = chain[chain.length - 1];
+        if (near(end, p[0])) chain = [...chain, ...p.slice(1)];
+        else if (near(end, p[p.length - 1])) chain = [...chain, ...[...p].reverse().slice(1)];
+        else if (near(chain[0], p[p.length - 1])) chain = [...p.slice(0, -1), ...chain];
+        else if (near(chain[0], p[0])) chain = [...[...p].reverse().slice(0, -1), ...chain];
+        else continue;
+        left.splice(i, 1);
+        grew = true;
+        break;
+      }
+    }
+    if (chain.length >= 3 && near(chain[0], chain[chain.length - 1])) loops.push(openRing(chain));
+    else open++;
+  }
+  return { loops: loops.filter((l) => l.length >= 3), open };
+}
 
 /** Points of a closed loop without the repeated closing point. */
 function openRing(pts: { x: number; y: number }[]): Point2D[] {
@@ -180,58 +289,95 @@ export interface SvgProfileOptions {
 }
 
 export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profile {
+  // SVG 2 writes <use href>; three's loader reads only xlink:href.
+  let text = svgText;
+  if (/<use\b[^>]*\shref=/i.test(text)) {
+    text = text.replace(/<use\b([^>]*?)\shref=/gi, '<use$1 xlink:href=');
+    if (!/xmlns:xlink=/.test(text)) text = text.replace(/<svg\b/i, '<svg xmlns:xlink="http://www.w3.org/1999/xlink"');
+  }
   const loader = new SVGLoader();
   let data: ReturnType<SVGLoader['parse']>;
   try {
-    data = loader.parse(svgText);
+    data = loader.parse(text);
   } catch (e) {
     throw new Error(`Could not read the SVG: ${(e as Error)?.message || String(e)}`);
   }
   if (!data.xml || data.xml.nodeName.toLowerCase() !== 'svg') {
     throw new Error('That is not an SVG drawing (no <svg> element at the top).');
   }
-  const unit = svgUnitMm(data.xml as unknown as Element);
-  const DIV = 16;
-  const shapes: ProfileShape[] = [];
-  const strokeLoops: Point2D[][] = [];
-  let openStrokes = 0;
+  const root = data.xml as unknown as Element;
+  const unit = svgUnitMm(root);
+  const DIV = 24;
+  const solids: ProfileShape[] = [];
+  const cutouts: ProfileShape[] = [];
+  const strokeSubs: { pts: Point2D[]; closed: boolean }[] = [];
+  let hidden = 0;
   for (const path of data.paths) {
-    const style = (path.userData?.style ?? {}) as { fill?: string; stroke?: string; fillOpacity?: number };
+    const node = (path.userData as { node?: Element } | undefined)?.node;
+    if (isHidden(node)) { hidden++; continue; }
+    const style = (path.userData?.style ?? {}) as { fill?: string; stroke?: string; fillOpacity?: number; strokeOpacity?: number };
     const filled = !isNone(style.fill) && style.fillOpacity !== 0;
-    if (filled) {
+    const stroked = !isNone(style.stroke) && style.strokeOpacity !== 0;
+    const tag = node?.nodeName.toLowerCase() ?? '';
+    // A cut line is a stroke, whether or not the drawing filled it white; a
+    // <line> or <polyline> encloses nothing to fill.
+    if ((stroked && (!filled || isWhite(style.fill))) || tag === 'line' || tag === 'polyline') {
+      for (const sub of path.subPaths) {
+        const pts = sub.getPoints(DIV).map((q) => ({ x: q.x, y: q.y }));
+        if (pts.length < 2) continue;
+        strokeSubs.push({ pts, closed: !!(sub as unknown as { autoClose?: boolean }).autoClose });
+      }
+    } else if (filled) {
+      const into = isWhite(style.fill) ? cutouts : solids;
       for (const shape of SVGLoader.createShapes(path)) {
         const outline = openRing(shape.getPoints(DIV));
         if (outline.length < 3) continue;
-        shapes.push({ outline, holes: shape.holes.map((h) => openRing(h.getPoints(DIV))).filter((h) => h.length >= 3) });
-      }
-    } else if (!isNone(style.stroke)) {
-      for (const sub of path.subPaths) {
-        const pts = sub.getPoints(DIV);
-        if (pts.length < 2) continue;
-        const a = pts[0], z = pts[pts.length - 1];
-        const closed = (sub as unknown as { autoClose?: boolean }).autoClose || Math.hypot(a.x - z.x, a.y - z.y) < 1e-6;
-        const ring = openRing(pts);
-        if (closed && ring.length >= 3) strokeLoops.push(ring);
-        else if (!closed) openStrokes++;
+        into.push({ outline, holes: shape.holes.map((h) => openRing(h.getPoints(DIV))).filter((h) => h.length >= 3) });
       }
     }
   }
-  shapes.push(...shapesFromLoops(strokeLoops));
-  // Curves come in as straight runs of 16 points; points on a line add nothing.
+
+  // Ends that nearly meet are closed: a drawing's "closed" outline is often a
+  // hair open, and separate segments that meet end to end are one outline.
+  let lo = Infinity, hi = -Infinity, loY = Infinity, hiY = -Infinity;
+  for (const sp of strokeSubs) for (const q of sp.pts) { lo = Math.min(lo, q.x); hi = Math.max(hi, q.x); loY = Math.min(loY, q.y); hiY = Math.max(hiY, q.y); }
+  const tol = strokeSubs.length ? Math.max(1e-6, 0.002 * Math.hypot(hi - lo, hiY - loY)) : 0;
+  const strokeLoops: Point2D[][] = [];
+  const openPieces: Point2D[][] = [];
+  for (const sp of strokeSubs) {
+    const a = sp.pts[0], z = sp.pts[sp.pts.length - 1];
+    const ring = openRing(sp.pts);
+    if ((sp.closed || Math.hypot(a.x - z.x, a.y - z.y) <= tol) && ring.length >= 3) strokeLoops.push(ring);
+    else openPieces.push(sp.pts);
+  }
+  const chained = chainOpen(openPieces, tol);
+  strokeLoops.push(...chained.loops);
+  const openStrokes = chained.open;
+  solids.push(...shapesFromLoops(strokeLoops));
+
+  // Curves come in as straight runs of points; points on a line add nothing.
   const tidy = (l: Point2D[]) => dropCollinear(l, 0.005 / unit);
-  const cleaned = shapes
-    .map((s) => ({ outline: tidy(s.outline), holes: s.holes.map(tidy).filter((h) => h.length >= 3) }))
-    .filter((s) => s.outline.length >= 3);
+  const clean = (list: ProfileShape[]) => list
+    .map((sh) => ({ outline: tidy(sh.outline), holes: sh.holes.map(tidy).filter((h) => h.length >= 3) }))
+    .filter((sh) => sh.outline.length >= 3);
+  const cleaned = clean(solids);
+  const cleanedCuts = clean(cutouts);
+  const hasText = !!root.querySelector?.('text');
   const notes: string[] = [];
   if (openStrokes) {
     notes.push(`${openStrokes} open line${openStrokes === 1 ? '' : 's'} skipped: an open stroke encloses nothing. Close the path to make it an outline.`);
   }
+  if (hidden) notes.push(`${hidden} hidden or clipping shape${hidden === 1 ? '' : 's'} left out.`);
+  if (hasText && cleaned.length) notes.push('Text in the SVG is not imported: convert it to paths (Object to Path, Create Outlines) first.');
+  if (cleanedCuts.length) notes.push(`${cleanedCuts.length} white shape${cleanedCuts.length === 1 ? '' : 's'} cut out of the others.`);
   if (!cleaned.length) {
-    throw new Error(openStrokes
-      ? 'The SVG has only open lines, which enclose nothing. Close the paths, or give them a fill.'
-      : 'The SVG has no filled shapes and no closed outlines to make a part from.');
+    throw new Error(hasText
+      ? 'The SVG\'s only content is text, which is not imported. Convert the text to paths (Object to Path in Inkscape, Create Outlines in Illustrator) and import it again.'
+      : openStrokes
+        ? 'The SVG has only open lines, which enclose nothing. Close the paths, or give them a fill.'
+        : 'The SVG has no filled shapes and no closed outlines to make a part from.');
   }
-  return placeShapes(cleaned, { ...opts, scale: unit, flipY: true }, notes);
+  return placeShapes(cleaned, { ...opts, scale: unit, flipY: true, cutouts: cleanedCuts }, notes);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +470,7 @@ export interface Segmentation {
  */
 export function segmentPicture(
   rgba: Uint8ClampedArray, width: number, height: number,
-  opts: { threshold?: number; subject?: ProfileSubject; blur?: number } = {},
+  opts: { threshold?: number; subject?: ProfileSubject; blur?: number; ignoreAlpha?: boolean } = {},
 ): Segmentation {
   const n = width * height;
   if (!n) throw new Error('The picture is empty.');
@@ -333,7 +479,7 @@ export function segmentPicture(
   // A picture that is mostly see-through somewhere is a cut-out: trace its alpha.
   let clear = 0;
   for (let i = 0; i < n; i++) if (rgba[i * 4 + 3] < 128) clear++;
-  const byAlpha = subject === 'auto' && clear > n * 0.02;
+  const byAlpha = subject === 'auto' && !opts.ignoreAlpha && clear > n * 0.02;
 
   const raw = new Float32Array(n);
   for (let i = 0; i < n; i++) {
@@ -368,12 +514,42 @@ export function segmentationMask(seg: Segmentation): Uint8Array {
   return out;
 }
 
+/** Mean tone of the pixels inside a loop given in the tracer's padded grid. */
+function meanToneIn(loop: Point2D[], tone: Float32Array, width: number, height: number): number {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const q of loop) { x0 = Math.min(x0, q.x); x1 = Math.max(x1, q.x); y0 = Math.min(y0, q.y); y1 = Math.max(y1, q.y); }
+  const step = Math.max(1, Math.floor(Math.max(x1 - x0, y1 - y0) / 40));
+  let sum = 0, n = 0;
+  for (let y = Math.ceil(y0); y <= y1; y += step) {
+    for (let x = Math.ceil(x0); x <= x1; x += step) {
+      const px = x - 1, py = y - 1;
+      if (px < 0 || py < 0 || px >= width || py >= height || !pointInPolygon({ x, y }, loop)) continue;
+      sum += tone[py * width + px];
+      n++;
+    }
+  }
+  return n ? sum / n : 0.5;
+}
+
+function borderTone(tone: Float32Array, width: number, height: number): number {
+  let sum = 0, n = 0;
+  for (let x = 0; x < width; x++) { sum += tone[x] + tone[(height - 1) * width + x]; n += 2; }
+  for (let y = 1; y < height - 1; y++) { sum += tone[y * width] + tone[y * width + width - 1]; n += 2; }
+  return n ? sum / n : 0.5;
+}
+
 /** Traces the outline of the part in an RGBA picture. */
 export function traceProfile(rgba: Uint8ClampedArray, width: number, height: number, opts: TraceOptions = {}): TraceResult {
+  return traceWith(rgba, width, height, opts, false);
+}
+
+function traceWith(rgba: Uint8ClampedArray, width: number, height: number, opts: TraceOptions, ignoreAlpha: boolean): TraceResult {
   const detail = DETAIL[opts.detail ?? PROFILE_DEFAULTS.detail];
-  const { tone, threshold, darkSubject, byAlpha } = segmentPicture(rgba, width, height, {
-    threshold: opts.threshold, subject: opts.subject, blur: detail.blur,
+  const seg = segmentPicture(rgba, width, height, {
+    threshold: opts.threshold, subject: opts.subject, blur: detail.blur, ignoreAlpha,
   });
+  const { tone, threshold, byAlpha } = seg;
+  let { darkSubject } = seg;
 
   // Inside is high. A ring of background round the edge closes every loop,
   // including a part that runs off the side of the picture.
@@ -388,24 +564,68 @@ export function traceProfile(rgba: Uint8ClampedArray, width: number, height: num
   const level = darkSubject ? 1 - threshold : threshold;
   const rawLoops = isoContours(field, cols, rows, level);
 
-  // Specks: anything smaller than a square 1% of the picture across.
-  const speck = (Math.max(width, height) * 0.01) ** 2;
-  const kept = rawLoops.filter((l) => Math.abs(polygonArea(l)) >= speck);
+  // Specks: an outline smaller than a square 1% of the picture's long side,
+  // a hole smaller than one 0.3% across. A small bolt hole is a hole, not dirt.
+  const side = Math.max(width, height);
+  const rawDepths = nestingDepths(rawLoops);
+  const kept = rawLoops.filter((l, i) => Math.abs(polygonArea(l)) >= (side * (rawDepths[i] % 2 ? 0.003 : 0.01)) ** 2);
   const dropped = rawLoops.length - kept.length;
 
-  let tol = Math.max(width, height) * detail.tol;
+  let tol = side * detail.tol;
+  let loops: Point2D[][] = [];
   let shapes: ProfileShape[] = [];
   for (let attempt = 0; attempt < 6; attempt++) {
-    const thin = (l: Point2D[]) => dropCollinear(simplifyLoop(l, tol), tol * 0.5);
-    shapes = shapesFromLoops(kept.map(thin).filter((l) => l.length >= 3));
+    // No coarser than 3% of the loop's own size, so a small hole stays round.
+    const thin = (l: Point2D[]) => {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const q of l) { x0 = Math.min(x0, q.x); x1 = Math.max(x1, q.x); y0 = Math.min(y0, q.y); y1 = Math.max(y1, q.y); }
+      const t = Math.max(0.3, Math.min(tol, 0.03 * Math.hypot(x1 - x0, y1 - y0)));
+      return dropCollinear(simplifyLoop(l, t), t * 0.5);
+    };
+    loops = kept.map(thin).filter((l) => l.length >= 3);
+    shapes = shapesFromLoops(loops);
     if (countPoints(shapes) <= MAX_POINTS) break;
     tol *= 2;
   }
+
+  const notes: string[] = [];
+  // A part on a sheet of paper with the table showing round it: the border
+  // vote takes the table for background and the paper for the part, with the
+  // real part a hole in it. A large, convex light region holding a large hole
+  // is that sheet; peel it off and the hole is the part.
+  if ((opts.subject ?? 'auto') === 'auto' && !byAlpha && !darkSubject) {
+    const picture = width * height;
+    for (let peel = 0; peel < 2; peel++) {
+      // What shows through a light washer's hole is the bench, the border's
+      // tone; what fills the hole in a sheet of paper is the part, which is not.
+      const sheet = shapes.find((sh) => {
+        const a = Math.abs(polygonArea(sh.outline));
+        if (a < 0.2 * picture || a < 0.95 * hullArea(sh.outline)) return false;
+        const big = sh.holes.filter((h) => Math.abs(polygonArea(h)) >= 0.05 * a);
+        return big.some((h) => Math.abs(meanToneIn(h, tone, width, height) - borderTone(tone, width, height)) > 0.15);
+      });
+      if (!sheet) break;
+      loops = loops.filter((l) => l !== sheet.outline);
+      shapes = shapesFromLoops(loops);
+      darkSubject = !darkSubject;
+      notes.push('Traced the part inside the sheet it lies on (the sheet is the background).');
+    }
+  }
+
+  // A photo with a transparent margin or rounded corners is not a cut-out:
+  // alpha gives back the opaque rectangle. Trace its colours instead.
+  if (byAlpha && !ignoreAlpha && shapes.length === 1 && !shapes[0].holes.length) {
+    const a = Math.abs(polygonArea(shapes[0].outline));
+    const b = bounds(shapes);
+    if (a >= 0.5 * width * height && a >= 0.9 * (b.maxX - b.minX) * (b.maxY - b.minY)) {
+      return traceWith(rgba, width, height, opts, true);
+    }
+  }
+
   if (!shapes.length) {
     throw new Error('No outline stood out from the background. Try the threshold, or say which tone the part is.');
   }
-  const notes: string[] = [];
-  if (dropped) notes.push(`${dropped} speck${dropped === 1 ? '' : 's'} smaller than 1% of the picture dropped.`);
+  if (dropped) notes.push(`${dropped} speck${dropped === 1 ? '' : 's'} dropped (smaller than 1% of the picture's width, or 0.3% for a hole).`);
   const width0 = opts.widthMm ?? (opts.heightMm ? undefined : PROFILE_DEFAULTS.tracedWidthMm);
   const placed = placeShapes(shapes, { widthMm: width0, heightMm: opts.heightMm, scale: 1, flipY: true }, notes);
   return { ...placed, threshold, darkSubject, byAlpha };
@@ -427,7 +647,7 @@ const fmt = (v: number) => {
  */
 export function profileScad(profile: Profile, thicknessMm: number = PROFILE_DEFAULTS.thicknessMm, label = 'Profile'): string {
   const t = Math.max(0.1, thicknessMm);
-  const polys = profile.shapes.map((s) => {
+  const polygons = (list: ProfileShape[], indent: string) => list.map((s) => {
     const loops = [s.outline, ...s.holes];
     const points: string[] = [];
     const paths: string[] = [];
@@ -441,16 +661,21 @@ export function profileScad(profile: Profile, thicknessMm: number = PROFILE_DEFA
       paths.push(`[${idx.join(',')}]`);
     }
     return s.holes.length
-      ? `    polygon(points=[${points.join(',')}], paths=[${paths.join(',')}]);`
-      : `    polygon([${points.join(',')}]);`;
+      ? `${indent}polygon(points=[${points.join(',')}], paths=[${paths.join(',')}]);`
+      : `${indent}polygon([${points.join(',')}]);`;
   });
+  // Braces in a comment still count toward parseScadVariables' depth, and a
+  // stray one hid the thickness slider.
+  const title = label.replace(/[\r\n{}]+/g, ' ').trim();
+  const body = profile.cutouts?.length
+    ? ['scale(0.001) linear_extrude(height=thickness) difference() {', '  union() {', ...polygons(profile.shapes, '    '), '  }',
+       '  union() {', ...polygons(profile.cutouts, '    '), '  }', '}']
+    : ['scale(0.001) linear_extrude(height=thickness) union() {', ...polygons(profile.shapes, '    '), '}'];
   return [
-    `// ${label.replace(/[\r\n]+/g, ' ')}: ${fmt(profile.widthMm)} x ${fmt(profile.heightMm)} mm outline`,
+    `// ${title}: ${fmt(profile.widthMm)} x ${fmt(profile.heightMm)} mm outline`,
     `thickness = ${fmt(t)}; // [0.4:0.2:${fmt(Math.max(50, t))}]`,
     '',
-    'scale(0.001) linear_extrude(height=thickness) union() {',
-    ...polys,
-    '}',
+    ...body,
   ].join('\n');
 }
 

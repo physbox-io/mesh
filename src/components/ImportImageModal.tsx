@@ -97,6 +97,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
     } catch (err) {
       setError(`Failed to read image: ${String(err)}`);
       setImage(null);
+      setFile(null);
     } finally {
       setIsProcessing(false);
     }
