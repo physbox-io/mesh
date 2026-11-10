@@ -9,6 +9,9 @@ import { readMaxTokens } from '../utils/llmSettings';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
 import { pushGlobalParameter } from '../utils/llmSettings';
 import { anthropicUrl, geminiUrl } from '../utils/llmEndpoints';
+import { callLlm, keyFor, isClaudeModel, DEFAULT_MODEL, type LlmImage } from '../utils/llmCall';
+import { llmImageUrl } from '../utils/llmImageInput';
+import { useCopilotAttachments, CopilotAttachmentTray } from './copilot/CopilotAttachments';
 
 interface AICopilotPanelProps {
   onClose: () => void;
@@ -33,6 +36,8 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   mode?: 'explain' | 'generate' | 'mutate' | 'implement';
   content: string;
+  /** Pictures sent with a user message, as data URLs, to show it as it was sent. */
+  images?: string[];
   questions?: DiagnosticQuestion[];
   userAnswers?: Record<string, string>;
   userAnswersSubmitted?: boolean;
@@ -269,13 +274,9 @@ interface ClaudeModelItem {
   display_name?: string;
 }
 
-interface AnthropicContentBlock {
-  type: string;
-  text?: string;
-}
-
 export default function AICopilotPanel({ onClose, messages: propsMessages, setMessages: propsSetMessages }: AICopilotPanelProps) {
   const sceneGraph = useStore(state => state.sceneGraph);
+  const att = useCopilotAttachments();
   const updateScene = useStore(state => state.updateScene);
 
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
@@ -490,112 +491,22 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   // check `truncated` and refuse to report success.
   type LLMResult = { text: string; truncated: boolean };
 
-  const callGemini = async (systemInstructions: string, userQuery: string): Promise<LLMResult | null> => {
-    const currentModel = selectedModel || localStorage.getItem('gemini_model') || 'gemini-3.6-flash';
-    const isClaude = currentModel.startsWith('claude');
-    const maxTokens = readMaxTokens();
-
-    if (isClaude) {
-      const effectiveKey = claudeApiKey.trim() || localStorage.getItem('anthropic_api_key')?.trim() || '';
-      if (!effectiveKey) {
-        setError('Please configure your Anthropic Claude API Key in Global Settings or the setup drawer below.');
-        return null;
-      }
-      setError('');
-      setLoading(true);
-
-      const headers = {
-        'x-api-key': effectiveKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      };
-      const body = JSON.stringify({
-        model: currentModel,
-        max_tokens: maxTokens,
-        system: systemInstructions,
-        messages: [{ role: 'user', content: userQuery }],
-      });
-
-      try {
-        const response = await fetch(anthropicUrl('/v1/messages'), { method: 'POST', headers, body });
-
-        const json = await response.json();
-        if (json.error) {
-          throw new Error(json.error.message || json.error.type || 'Claude API Error');
-        }
-
-        const text = Array.isArray(json.content)
-          ? (json.content as AnthropicContentBlock[]).filter((b) => b.type === 'text' && !!b.text).map((b) => b.text).join('\n')
-          : (json.content?.[0]?.text || '');
-
-        if (!text.trim()) {
-          throw new Error(json.stop_reason === 'refusal'
-            ? 'The model declined to answer this request.'
-            : 'The model returned an empty response.');
-        }
-        return { text, truncated: json.stop_reason === 'max_tokens' };
-      } catch (e: unknown) {
-        const message = e instanceof Error ? e.message : String(e);
-        setError(`Claude API Error (${currentModel}): ${message}`);
-        setLoading(false);
-        return null;
-      }
-    } else {
-      const effectiveKey = geminiApiKey.trim() || localStorage.getItem('gemini_api_key')?.trim() || '';
-      if (!effectiveKey) {
-        setError('Please configure your Google Gemini API Key in Global Settings or the setup drawer below.');
-        return null;
-      }
-      setError('');
-      setLoading(true);
-
-      const requestBody = JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: `${systemInstructions}\n\nUser Request: ${userQuery}` }]
-          }
-        ],
-        generationConfig: { maxOutputTokens: maxTokens },
-      });
-
-      try {
-        const response = await fetch(geminiUrl(`/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: requestBody,
-        });
-
-        const json = await response.json();
-        if (json.error) {
-          throw new Error(json.error.message);
-        }
-
-        const candidate = json.candidates?.[0];
-        // Every text part, not just parts[0]: thinking models routinely split a
-        // reply across parts, and taking only the first one dropped whatever
-        // followed - usually the trailing JSON block the scene update needs.
-        const text = Array.isArray(candidate?.content?.parts)
-          ? (candidate.content.parts as { text?: string }[])
-              .filter((pt) => typeof pt?.text === 'string' && !!pt.text)
-              .map((pt) => pt.text)
-              .join('\n')
-          : '';
-
-        if (!text.trim()) {
-          const blockReason = json.promptFeedback?.blockReason || candidate?.finishReason;
-          throw new Error(blockReason
-            ? `The model returned no content (${blockReason}).`
-            : 'The model returned an empty response.');
-        }
-        return { text, truncated: candidate?.finishReason === 'MAX_TOKENS' };
-      } catch (e: unknown) {
-        const message = e instanceof Error ? e.message : String(e);
-        setError(`Gemini API Error (${currentModel}): ${message}`);
-        setLoading(false);
-        return null;
-      }
+  const callGemini = async (systemInstructions: string, userQuery: string, images?: LlmImage[]): Promise<LLMResult | null> => {
+    const currentModel = selectedModel || localStorage.getItem('gemini_model') || DEFAULT_MODEL;
+    const found = keyFor(currentModel, geminiApiKey, claudeApiKey);
+    if ('missing' in found) {
+      setError(found.missing);
+      return null;
+    }
+    setError('');
+    setLoading(true);
+    try {
+      return await callLlm({ system: systemInstructions, user: userQuery, images, model: currentModel, geminiKey: geminiApiKey, claudeKey: claudeApiKey });
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(`${isClaudeModel(currentModel) ? 'Claude' : 'Gemini'} API Error (${currentModel}): ${message}`);
+      setLoading(false);
+      return null;
     }
   };
 
@@ -897,11 +808,12 @@ Based on these functional clarifications and your physical analysis:
   };
 
   const handleGenerate = async () => {
-    if (!prompt.trim()) {
-      setError('Please enter a description of the scene you want to generate.');
+    if (!prompt.trim() && !att.images.length) {
+      setError('Please enter a description of the scene you want to generate, or attach a picture of it.');
       return;
     }
-    const currentPrompt = prompt;
+    const images = att.take();
+    const currentPrompt = prompt.trim() || 'Build the part shown in the picture.';
     setPrompt('');
     setMode('generate');
     setLoadingStatus('Generating 3D scene schematic...');
@@ -911,13 +823,14 @@ Based on these functional clarifications and your physical analysis:
       role: 'user',
       mode: 'generate',
       content: `🪄 Generate Scene: ${currentPrompt}`,
+      ...(images.length ? { images: images.map(llmImageUrl) } : {}),
       timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
     const systemPromptWithQuestions = `${SYSTEM_INSTRUCTIONS}${getModeHistoryStr('generate')}${getExistingCardContextStr()}\n\nIn addition to the "nodes" JSON block, if there are optional design choices or follow-up options for the user, include a "questions" array JSON block at the bottom with 1-3 questions having 2-4 options each.`;
 
-    const response = await callGemini(systemPromptWithQuestions, currentPrompt);
+    const response = await callGemini(systemPromptWithQuestions, currentPrompt, images);
     setLoading(false);
     if (response) {
       const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
@@ -962,11 +875,12 @@ Based on these functional clarifications and your physical analysis:
   };
 
   const handleMutate = async () => {
-    if (!prompt.trim()) {
+    if (!prompt.trim() && !att.images.length) {
       setError('Please enter what changes you want to apply to the scene.');
       return;
     }
-    const currentPrompt = prompt;
+    const images = att.take();
+    const currentPrompt = prompt.trim() || 'Make the scene match the picture.';
     setPrompt('');
     setMode('mutate');
     setLoadingStatus('Mutating active 3D scene...');
@@ -976,6 +890,7 @@ Based on these functional clarifications and your physical analysis:
       role: 'user',
       mode: 'mutate',
       content: `🛠️ Mutate Scene: ${currentPrompt}`,
+      ...(images.length ? { images: images.map(llmImageUrl) } : {}),
       timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
@@ -983,7 +898,7 @@ Based on these functional clarifications and your physical analysis:
     const compactNodes = getSerializedNodesCompact();
     const promptWithContext = `The user wants to modify the active physics scene graph.\n\nActive SceneGraph Nodes:\n${JSON.stringify(compactNodes)}${getModeHistoryStr('mutate')}${getExistingCardContextStr()}\n\nUser Request: ${currentPrompt}\n\nIf there are follow-up clarifying choices, append a "questions" JSON block at the bottom. Return the mutated "nodes" array in \`\`\`json \`\`\` code fences.`;
 
-    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
+    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, images);
     setLoading(false);
     if (response) {
       const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
@@ -1106,8 +1021,9 @@ CRITICAL INSTRUCTIONS:
   };
 
   const handleSendFollowup = async () => {
-    if (!followupInput.trim() || loading) return;
-    const currentInput = followupInput;
+    if ((!followupInput.trim() && !att.images.length) || loading) return;
+    const images = att.take();
+    const currentInput = followupInput.trim() || 'Here is a picture.';
     setFollowupInput('');
     setLoadingStatus('Processing follow-up request...');
 
@@ -1115,6 +1031,7 @@ CRITICAL INSTRUCTIONS:
       id: makeId('user'),
       role: 'user',
       content: currentInput,
+      ...(images.length ? { images: images.map(llmImageUrl) } : {}),
       timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
@@ -1130,7 +1047,7 @@ ${currentInput}
 
 If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json \`\`\` code fences. If proposing optional questions/choices, include a "questions" JSON block at the bottom.`;
 
-    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
+    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, images);
     setLoading(false);
 
     if (response) {
@@ -1309,6 +1226,8 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               placeholder={mode === 'generate' ? "Describe the physics scene you want to generate. e.g. A stack of 3 cubes falling on top of each other, or a double pendulum connected to a hinge..." : "Describe the modifications you want to apply. e.g. Add a sphere body with free joint at position [0, 0, 4], or increase joint damping..."}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              onPaste={att.onPaste}
+              {...att.dropProps}
               // Ctrl/Cmd+Enter sends, as it does in most prompt boxes; a plain
               // Enter stays a new line, since a scene description runs long.
               onKeyDown={(e) => {
@@ -1317,9 +1236,10 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                 if (mode === 'generate') handleGenerate();
                 else handleMutate();
               }}
-              title="Ctrl+Enter to send"
+              title="Ctrl+Enter to send. Paste or drop a picture to send it too."
               className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs shadow-inner bg-white dark:bg-slate-955 text-slate-800 dark:text-slate-200 min-h-[75px] leading-normal placeholder-slate-400 dark:placeholder-slate-500"
             />
+            <CopilotAttachmentTray att={att} disabled={loading} />
             <button
               onClick={mode === 'generate' ? handleGenerate : handleMutate}
               disabled={loading}
@@ -1446,6 +1366,11 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               <div key={msg.id} className="flex flex-col gap-2">
                 {msg.role === 'user' ? (
                   <div className="self-end bg-blue-600 text-white px-3 py-2 rounded-2xl rounded-tr-xs text-xs font-semibold max-w-[85%] shadow-sm">
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="flex gap-1 mb-1.5 flex-wrap">
+                        {msg.images.map((src, i) => <img key={i} src={src} alt={`Sent picture ${i + 1}`} className="w-16 h-16 object-cover rounded-md" />)}
+                      </div>
+                    )}
                     {msg.content}
                   </div>
                 ) : (
@@ -1641,6 +1566,8 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                 placeholder="Type an open-ended follow-up request or scene edit..."
                 value={followupInput}
                 onChange={(e) => setFollowupInput(e.target.value)}
+                onPaste={att.onPaste}
+                {...att.dropProps}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -1651,13 +1578,14 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               />
               <button
                 onClick={handleSendFollowup}
-                disabled={loading || !followupInput.trim()}
+                disabled={loading || (!followupInput.trim() && !att.images.length)}
                 className="p-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white rounded-xl transition-all cursor-pointer flex items-center justify-center shrink-0 shadow-sm"
                 title="Send Request"
               >
                 <Send className="w-4 h-4" />
               </button>
             </div>
+            {mode === 'explain' && <CopilotAttachmentTray att={att} disabled={loading} />}
           </div>
         </div>
       </div>
