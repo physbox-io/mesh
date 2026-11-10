@@ -39,7 +39,7 @@ vi.mock('../src/utils/webSerialManager', () => ({ webSerialManager: machine }));
 const { BottomStatusBar } = await import('../src/components/BottomStatusBar');
 const { JobPauseModal } = await import('../src/components/JobPauseModal');
 const { ToolChangeModal } = await import('../src/components/ToolChangeModal');
-const { useJobPause } = await import('../src/store/jobPauseStore');
+const { jobPause } = await import('../src/utils/jobPause');
 
 let root: Root;
 let host: HTMLDivElement;
@@ -60,7 +60,7 @@ const click = (b: HTMLButtonElement | undefined) => {
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
-  useJobPause.getState().show();
+  jobPause.show();
   state = { ...base };
   host = document.createElement('div');
   document.body.appendChild(host);

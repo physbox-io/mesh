@@ -1,11 +1,11 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { JobPauseDialog, jobPauseKind } from '@physbox-io/ui';
+import { JobPauseDialog, jobPauseKind, jobStopKey } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { OpenSetupButton } from './MachineJobControls';
 import { showJobWindow } from '../utils/jobWindow';
 import { CheckpointBadge } from './CheckpointBadge';
-import { useJobPause, pauseKey } from '../store/jobPauseStore';
+import { jobPause } from '../utils/jobPause';
 
 /**
  * The job has stopped and is waiting for somebody: a feed hold, a sheet swap,
@@ -23,14 +23,14 @@ import { useJobPause, pauseKey } from '../store/jobPauseStore';
  */
 export const JobPauseModal: React.FC = () => {
   const [machineState, setMachineState] = React.useState<MachineState>(webSerialManager.getState());
-  const hiddenKey = useJobPause((s) => s.hiddenKey);
-  const hide = useJobPause((s) => s.hide);
+  const hiddenKey = jobPause.useHiddenKey();
+  const hide = jobPause.hide;
 
   React.useEffect(() => webSerialManager.addListener(setMachineState), []);
 
   const { status, pauseMessage } = machineState;
-  const key = pauseKey(status, pauseMessage);
   const kind = jobPauseKind(status);
+  const key = jobStopKey(status, kind === 'hold' ? 0 : machineState.currentLine, pauseMessage);
   if (!kind || hiddenKey === key) return null;
 
   const laser = webSerialManager.isLaserJob();
@@ -81,7 +81,7 @@ export const InlineJobPause: React.FC<{
   resumeLabel?: string;
   showZTools?: boolean;
 }> = ({ machineState }) => {
-  const show = useJobPause((s) => s.show);
+  const show = jobPause.show;
   // A tool change hidden from `ToolChangeModal` comes back through here too.
   if (!jobPauseKind(machineState.status) && machineState.status !== 'PAUSED_TOOL') return null;
   return (

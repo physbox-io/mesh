@@ -1,8 +1,8 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { ToolChangeDialog, setShimMm, setTouchPlateMm, useShimMm, useTouchPlateMm } from '@physbox-io/ui';
+import { ToolChangeDialog, jobStopKey, setShimMm, setTouchPlateMm, useShimMm, useTouchPlateMm } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { useJobPause, pauseKey } from '../store/jobPauseStore';
+import { jobPause } from '../utils/jobPause';
 import { CheckpointBadge } from './CheckpointBadge';
 import { showJobWindow } from '../utils/jobWindow';
 
@@ -17,15 +17,15 @@ import { showJobWindow } from '../utils/jobWindow';
  */
 export const ToolChangeModal: React.FC = () => {
   const [machineState, setMachineState] = React.useState<MachineState>(webSerialManager.getState());
-  const hiddenKey = useJobPause((s) => s.hiddenKey);
-  const hide = useJobPause((s) => s.hide);
+  const hiddenKey = jobPause.useHiddenKey();
+  const hide = jobPause.hide;
   const plateMm = useTouchPlateMm();
   const shimMm = useShimMm();
 
   React.useEffect(() => webSerialManager.addListener(setMachineState), []);
 
   const { status, pauseMessage } = machineState;
-  const key = pauseKey(status, pauseMessage);
+  const key = jobStopKey(status, machineState.currentLine, pauseMessage);
   if (status !== 'PAUSED_TOOL' || hiddenKey === key) return null;
 
   const laser = webSerialManager.isLaserJob();

@@ -20,7 +20,7 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useModifier } from '../hooks/useModifier';
 import { CastPrepGuardModal } from './CastPrepGuardModal';
 import { useCastDialog } from '../store/castDialogStore';
-import { useJobPause } from '../store/jobPauseStore';
+import { jobPause } from '../utils/jobPause';
 import { RemoteJobChip } from './RemoteJobChip';
 import { openHardwareList } from './HardwareListDialog';
 import { BuildMenu } from './BuildMenu';
@@ -389,7 +389,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
 
   const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   const paused = machineState.status.startsWith('PAUSED');
-  const showPause = useJobPause((st) => st.show);
+  const showPause = jobPause.show;
   const parked = machineState.status === 'PAUSED_PARKED';
   // The same gate the job panel's banner applies: a new bit, and no Z datum for it yet.
   const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
