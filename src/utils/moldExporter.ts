@@ -23,6 +23,7 @@ import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldTo
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
 import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
+import { linerPartingChoice, linerPullChoice } from './moldRoofScore';
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, INSERT_CLEARANCE_MM, SEAL_RING_ROOM_MM, NO_MANIFOLD_REFUSAL, type LinerConstruction, type MoldLinerInfo } from './moldLiner';
 import { castMaterial, type CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
@@ -163,8 +164,12 @@ export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
 };
 
 export interface MoldMeshHalf {
-  /** With a dissolvable liner, the half's two materials apart; `triangles` is both. */
-  liner?: { shell: Triangle3D[]; liner: Triangle3D[] };
+  /**
+   * With a dissolvable liner, the half's two materials apart; `triangles` is
+   * both. An insert cut into pieces lists its liner piece after piece, bottom
+   * first, `pieceTriangles` long each.
+   */
+  liner?: { shell: Triangle3D[]; liner: Triangle3D[]; pieceTriangles?: number[] };
   name: string;
   triangles: Triangle3D[];
   bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
@@ -1179,6 +1184,13 @@ function resolveMoldSetup(
     moldType = opts.moldType;
     direction = fixedDirection ?? lossOf(moldType).direction;
   }
+  // A lined clamshell loses no undercut whichever way it opens; it is turned
+  // to the axis that leaves least liner it cannot print over the casting.
+  if (opts.dissolvableLiner && moldType === 'clamshell' && !fixedDirection) {
+    const mm = new Float64Array(sceneTris.length);
+    for (let i = 0; i < sceneTris.length; i++) mm[i] = sceneTris[i] * 1000;
+    direction = linerPullChoice(mm, direction) ?? direction;
+  }
 
   let note: string | undefined;
   const turned = !fixedDirection && direction !== '+z' && direction !== '-z';
@@ -1309,6 +1321,9 @@ export function generateMoldMeshes(
         : choosePartingZ(field, zMin, zMax);
   } else {
     partingZ = choosePartingZ(field, zMin, zMax);
+    // A lined mold keeps every undercut, so what matters is what it can print:
+    // the plane that leaves least liner hanging over the casting (moldRoofScore).
+    if (opts.dissolvableLiner && opts.moldType === 'clamshell') partingZ = linerPartingChoice(tris, zMin, zMax, partingZ).z;
   }
 
   if (scene.castPrep && scene.castPrep.draftDeg > 0 && opts.draftAngleDeg > 0) {
@@ -1888,13 +1903,21 @@ export interface MoldStlPart {
 export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf' | 'liner'>): MoldStlPart[] {
   const pair = linerPair(r.liner?.pair);
   const insert = r.liner?.construction === 'insert';
-  const of = (h: MoldMeshHalf): MoldStlPart[] =>
-    h.liner
-      ? [
-          { name: `${h.name} ${insert ? 'holder' : 'shell'}`, triangles: h.liner.shell.length, role: 'shell', material: pair.shell.name },
-          { name: `${h.name} ${insert ? 'insert' : 'liner'}`, triangles: h.liner.liner.length, role: 'liner', material: pair.liner.name },
-        ]
-      : [{ name: h.name, triangles: h.triangles.length, role: 'shell', material: 'PLA' }];
+  const of = (h: MoldMeshHalf): MoldStlPart[] => {
+    if (!h.liner) return [{ name: h.name, triangles: h.triangles.length, role: 'shell', material: 'PLA' }];
+    const pieces = h.liner.pieceTriangles;
+    return [
+      { name: `${h.name} ${insert ? 'holder' : 'shell'}`, triangles: h.liner.shell.length, role: 'shell', material: pair.shell.name },
+      ...(pieces && pieces.length > 1
+        ? pieces.map((n, k): MoldStlPart => ({
+            name: `${h.name} insert, piece ${k + 1} of ${pieces.length}${k === 0 ? ' (bottom)' : k === pieces.length - 1 ? ' (top)' : ''}`,
+            triangles: n,
+            role: 'liner',
+            material: pair.liner.name,
+          }))
+        : [{ name: `${h.name} ${insert ? 'insert' : 'liner'}`, triangles: h.liner.liner.length, role: 'liner' as const, material: pair.liner.name }]),
+    ];
+  };
   return [...of(r.bottomHalf), ...(r.topHalf ? of(r.topHalf) : [])].filter((p) => p.triangles > 0);
 }
 

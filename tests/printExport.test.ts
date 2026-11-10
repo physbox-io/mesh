@@ -250,3 +250,53 @@ describe('the plate', () => {
     expect(result.files.map((f) => items(f.bytes).items)).toEqual([1, 1]);
   });
 });
+
+describe("a generated mold's printed parts", () => {
+  const meshBox = (name: string, [cx, cy, cz]: number[], [x, y, z]: number[]) => ({
+    name, type: 'mesh' as const, rgba: [0.9, 0.8, 0.6, 1],
+    renderVertices: [-x, -y, -z, x, -y, -z, x, y, -z, -x, y, -z, -x, -y, z, x, -y, z, x, y, z, -x, y, z].map((v, i) => v + [cx, cy, cz][i % 3]),
+    faces: [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7],
+  });
+  // A holder and the two pieces of the insert stacked in it, as a mold body
+  // lies in the scene, and the part it was made from.
+  const moldScene = (): SceneGraph => ({
+    nodes: [
+      body('master', [0, 0.2, 0.01], [0.01, 0.01, 0.01]),
+      {
+        id: 'mold', name: 'Simulated: Mold', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        simulation: { kind: 'mold', createdAt: '2026-11-09T00:00:00Z' },
+        geoms: [
+          meshBox('Cavity Half holder', [0, 0, 0.01], [0.03, 0.03, 0.01]),
+          meshBox('Cavity Half insert, piece 1 of 2 (bottom)', [0, 0, 0.012], [0.01, 0.01, 0.004]),
+          meshBox('Cavity Half insert, piece 2 of 2 (top)', [0, 0, 0.018], [0.01, 0.01, 0.002]),
+        ],
+      } as unknown as SceneNode,
+    ],
+  });
+
+  it('lays each out on the bed as an object of its own, without the master', () => {
+    const result = exportPrintFiles(moldScene(), { format: '3mf', plate: true, bed: { widthMm: 256, depthMm: 256 }, ids: ['mold'], moldParts: true });
+    expect(result.parts.map((p) => p.name)).toEqual(['Cavity Half holder', 'Cavity Half insert, piece 1 of 2 (bottom)', 'Cavity Half insert, piece 2 of 2 (top)']);
+    const model = new TextDecoder().decode((unzipSync(result.files[0].bytes) as Record<string, Uint8Array>)['3D/3dmodel.model']);
+    expect(model.match(/<item /g)).toHaveLength(3);
+    // On the bed apart: no two parts' footprints overlap, and each sits on z = 0.
+    const boxes = [...model.matchAll(/<object id="\d+"[^>]*>([\s\S]*?)<\/object>/g)]
+      .map((m) => [...m[1].matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)].map((v) => [+v[1], +v[2], +v[3]]))
+      .filter((pts) => pts.length)
+      .map(extent);
+    expect(boxes).toHaveLength(3);
+    for (const b of boxes) expect(b.min[2]).toBeCloseTo(0, 3);
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const [p, q] = [boxes[i], boxes[j]];
+        const apart = p.max[0] <= q.min[0] || q.max[0] <= p.min[0] || p.max[1] <= q.min[1] || q.max[1] <= p.min[1];
+        expect(apart, `parts ${i} and ${j}`).toBe(true);
+      }
+    }
+  });
+
+  it('leaves a mold out of an ordinary export, as before', () => {
+    const result = exportPrintFiles(moldScene(), { format: '3mf' });
+    expect(result.parts.map((p) => p.name)).toEqual(['master']);
+  });
+});

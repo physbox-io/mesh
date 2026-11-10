@@ -131,13 +131,51 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
     // paint and every part's volumes go with it.
     const { sceneGraph: graph, printBed } = useStore.getState();
     let posed = 0;
+    // Generated molds lie in the scene as they close and pour, each insert in
+    // its holder. To print, every holder, insert and insert piece is an object
+    // of its own, laid out on the bed.
+    const molds: SceneNode[] = [];
     const walk = (nodes: SceneNode[]) => {
       for (const n of nodes) {
         if (n.printPose) posed++;
+        if (n.simulation?.kind === 'mold' && (n.geoms?.length ?? 0) > 0) molds.push(n);
         walk(n.children || []);
       }
     };
     walk(graph.nodes);
+    if (molds.length) {
+      const pieces = molds.reduce((sum, n) => sum + (n.geoms?.length ?? 0), 0);
+      openDialog({
+        title: `Lay out the mold's ${pieces} printed parts on the print bed?`,
+        confirmLabel: 'Lay out on bed',
+        cancelLabel: 'Export scene as-is',
+        body: (
+          <>
+            <p>
+              Each holder, insert and insert piece of {molds.length === 1 ? (molds[0].name || 'the mold') : `the ${molds.length} molds`} becomes
+              an object of its own, standing the way it prints, arranged across the <strong>{printBed.widthMm} × {printBed.depthMm} mm</strong> bed.
+              The part the mold was made from is left out.
+            </p>
+            <p>Choose “Export scene as-is” to export the whole scene as it is placed instead.</p>
+          </>
+        ),
+        onConfirm: () => {
+          closeDialog();
+          const result = exportPrintFiles(graph, { format: '3mf', plate: true, bed: printBed, ids: molds.map((n) => n.id), moldParts: true });
+          const file = result.files[0];
+          if (!file) {
+            showNotice('Nothing to export', 'The mold has no printable parts to export.');
+            return;
+          }
+          downloadBlob(new Blob([file.bytes.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${baseName()}_mold_plate.3mf`);
+        },
+        onCancel: () => {
+          closeDialog();
+          exportWholeScene3mf();
+        },
+      });
+      return;
+    }
     if (posed) {
       openDialog({
         title: `Lay out ${posed} split section${posed === 1 ? '' : 's'} on the print bed?`,

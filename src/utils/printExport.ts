@@ -80,6 +80,12 @@ export interface PrintExportOptions {
   baseName?: string;
   /** Filaments the printer has, for a 3MF's colours: default 5 (an AMS and the external spool). */
   filaments?: number;
+  /**
+   * A generated mold's printed parts (every holder, shell, insert and insert
+   * piece of a simulated mold body), each its own part, rather than leaving the
+   * simulation out. They already stand the way they print.
+   */
+  moldParts?: boolean;
 }
 
 export interface PrintExportResult {
@@ -106,7 +112,7 @@ const solid = (length: number, colour: number[]): number[] =>
   Array.from({ length }, (_, i) => colour[i % 3]);
 
 /** Every body's printable triangles, one part a body, world-placed. */
-export function printableParts(scene: SceneGraph, ids?: string[]): { parts: PrintPart[]; warnings: string[]; missing: string[] } {
+export function printableParts(scene: SceneGraph, ids?: string[], moldParts = false): { parts: PrintPart[]; warnings: string[]; missing: string[] } {
   const want = ids?.length ? new Set(ids) : null;
   const found = new Set<string>();
   const parts: PrintPart[] = [];
@@ -117,6 +123,23 @@ export function printableParts(scene: SceneGraph, ids?: string[]): { parts: Prin
     if (want?.has(node.id)) found.add(node.id);
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
     if (node.simulation) {
+      if (inside && moldParts && node.simulation.kind === 'mold') {
+        // Each printed piece of the mold is an object of its own.
+        for (const geom of resolveCsgGeoms(node, 'render')) {
+          if (geom.role === 'collision') continue;
+          const frame = getGeomFrame(geom);
+          const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix));
+          if (!piece || !piece.tris.length) continue;
+          const colour = linear(geom.rgba);
+          parts.push({
+            id: `${node.id}:${geom.name}`,
+            name: geom.name || node.name || node.id,
+            tris: Array.from(piece.tris),
+            volumes: [{ tris: Array.from(piece.tris), colors: piece.colors ? Array.from(piece.colors) : null, colour }],
+          });
+        }
+        return;
+      }
       if (inside) warnings.push(`${node.name || node.id}: a simulated cut, so it is left out.`);
       return;
     }
@@ -199,7 +222,7 @@ function stlBytes(mm: Float32Array, name: string): Uint8Array {
 const safeName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'part';
 
 export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions): PrintExportResult {
-  const { parts, warnings, missing } = printableParts(scene, options.ids);
+  const { parts, warnings, missing } = printableParts(scene, options.ids, options.moldParts);
   const base = safeName(options.baseName ?? 'model');
   const summary = parts.map((p) => {
     const b = bounds(p.tris);

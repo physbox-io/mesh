@@ -34,7 +34,7 @@ import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform, getGeomFrame } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import { analyzeMesh } from './meshIntegrity';
-import type { MoldExportResult, MoldSummary } from './moldExporter';
+import type { MoldExportResult, MoldMeshHalf, MoldSummary } from './moldExporter';
 import { unrotateFromPull } from './moldPullDirection';
 import { pourIntoCavity, probeFacesTouched, type PourInfo, type PourOptions } from './pourCast';
 import { castMaterial, type CastMaterialId } from './castMaterials';
@@ -105,6 +105,14 @@ export type InternalCastOptions = MoldCastSimulationOptions & {
   flipUpright?: boolean;
   partingZ?: number;
   halves?: (Float64Array | number[])[];
+  /**
+   * How many triangles each printed piece of each half has, in order, where a
+   * half is more than one shell and its liner: an insert cut into a stack of
+   * pieces. Those pieces touch along cut faces each triangulated its own way,
+   * which no weld closes, so each is made a solid alone and the half is their
+   * union.
+   */
+  halfPieceTriangles?: (number[] | undefined)[];
   negativeHalves?: (Float64Array | number[])[];
   rawTextures?: RawMoldTexture[];
   /** The mold body's name, for a refusal. */
@@ -400,7 +408,15 @@ export async function simulateCastFromMoldResult(
         topTrisMm[ti++] = v[2];
       }
     }
-    return restorePartFrame(await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(mold.features), ventStubsOf(mold.features)), mold, options);
+    const piecesOf = (h?: MoldMeshHalf) => (h?.liner?.pieceTriangles ? [h.liner.shell.length, ...h.liner.pieceTriangles] : undefined);
+    return restorePartFrame(
+      await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(mold.features), ventStubsOf(mold.features), [
+        piecesOf(mold.bottomHalf),
+        piecesOf(mold.topHalf),
+      ]),
+      mold,
+      options,
+    );
   } else {
     // 1-part open mold
     return restorePartFrame(
@@ -523,6 +539,7 @@ async function castClosedClamshell(
   options?: MoldCastSimulationOptions,
   feed?: FeedRoute,
   ventStubs?: VentStub[],
+  pieceTriangles?: [number[] | undefined, number[] | undefined],
 ): Promise<MoldCastSimulationResult> {
   const seamZ = Math.fround(botPartingZ);
   for (let i = 2; i < bot.length; i += 3) {
@@ -548,7 +565,14 @@ async function castClosedClamshell(
     ...(ventStubs ?? []).map((v): BoreCut => ({ a: [v.at[0], v.at[1], face + 1], b: [v.at[0], v.at[1], z(v.z)], r: v.r + VENT_TAPER_MM + 0.1, rB: v.r + 0.1 })),
     ...(feed ? feedTrimOf(feed, face, z, ragged) : []),
   ];
-  return simulateCastFromMoldTriangles(assembled, { ...options, isClamshell: true, partingZ: botPartingZ, halves: [bot, turned], feedTrim });
+  return simulateCastFromMoldTriangles(assembled, {
+    ...options,
+    isClamshell: true,
+    partingZ: botPartingZ,
+    halves: [bot, turned],
+    ...(pieceTriangles ? { halfPieceTriangles: pieceTriangles } : {}),
+    feedTrim,
+  });
 }
 
 /** A bottom fill's route as bores, in the closed mold's frame. */
@@ -596,6 +620,11 @@ async function castLaidOpenClamshell(
   };
   const bot = join(false);
   const top = join(true);
+  // A half of more than a shell and a liner is an insert in pieces (castClosedClamshell).
+  const counts = (lid: boolean) => {
+    const n = shells.filter((_, i) => isLid[i] === lid).map((p) => p.length / 9);
+    return n.length > 2 ? n : undefined;
+  };
   // Back into the body's own frame, wherever it has been moved to: there the
   // plate's centreline is y = 0, the footprint of a half and its mirror.
   const toBody = getNodeWorldTransform(node).invert();
@@ -635,7 +664,7 @@ async function castLaidOpenClamshell(
   // A closed mold is poured through its sprue: the side and level of an open pour do not apply.
   const rest: MoldCastSimulationOptions = { ...options };
   delete rest.pour;
-  const res = await castClosedClamshell(bot, top, botPartingZ, lidPartingZ, rest, rec.feed, rec.ventStubs);
+  const res = await castClosedClamshell(bot, top, botPartingZ, lidPartingZ, rest, rec.feed, rec.ventStubs, [counts(false), counts(true)]);
   return restorePartFrame(
     res,
     { moldType: 'clamshell', pullDirection: rec.pullDirection ?? '+z', cavityHoldsTop: Boolean(rec.cavityHoldsTop), topHalf: {} as MoldSummary['topHalf'] },
@@ -903,10 +932,42 @@ export async function simulateCastFromMoldTriangles(
     const shells: ManifoldT[] = [];
 
     if (options?.halves && options.halves.length > 0) {
-      for (const h of options.halves) {
+      options.halves.forEach((h, k) => {
+        const counts = options.halfPieceTriangles?.[k];
+        if (counts && counts.length > 2) {
+          // The shell, then the liner's pieces: the pieces become one liner,
+          // which is then read with the shell as one soup, as an uncut half is.
+          const pieces: ManifoldT[] = [];
+          let at = counts[0];
+          for (const n of counts.slice(1)) {
+            const piece = convertSoupToManifold(Array.prototype.slice.call(h, at * 9, (at + n) * 9));
+            at += n;
+            if (piece) pieces.push(piece);
+          }
+          if (pieces.length === counts.length - 1) {
+            const liner = wasm.Manifold.union(pieces);
+            const mesh = liner.getMesh();
+            liner.delete();
+            const shellSoup = Array.prototype.slice.call(h, 0, counts[0] * 9) as number[];
+            const soup = new Float64Array(shellSoup.length + mesh.triVerts.length * 3);
+            soup.set(shellSoup, 0);
+            let o = shellSoup.length;
+            for (let t = 0; t < mesh.triVerts.length; t++) {
+              const v = mesh.triVerts[t] * mesh.numProp;
+              soup[o++] = mesh.vertProperties[v];
+              soup[o++] = mesh.vertProperties[v + 1];
+              soup[o++] = mesh.vertProperties[v + 2];
+            }
+            for (const p of pieces) p.delete();
+            const m = convertSoupToManifold(soup);
+            if (m) shells.push(m);
+            return;
+          }
+          for (const p of pieces) p.delete();
+        }
         const m = convertSoupToManifold(h);
         if (m) shells.push(m);
-      }
+      });
     }
 
     if (shells.length === 0) {

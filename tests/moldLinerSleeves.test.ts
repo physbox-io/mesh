@@ -200,7 +200,7 @@ describe('holder and insert', () => {
       expect(steps).toMatch(/never over a flame/);
       expect(moldStepLines(moldSummary(r))[0]).toMatch(/^Step 1: Print/);
     }
-    expect(insert.liner!.steps.join(' ')).toMatch(/supports from the build plate only/);
+    expect(insert.liner!.steps.join(' ')).toMatch(/supports off: nothing in them needs any, and support printed inside the cavity would take the casting's place/);
     expect(combined.liner!.clampGrams).toBeGreaterThan(0);
   });
 
