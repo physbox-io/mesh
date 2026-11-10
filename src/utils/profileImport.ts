@@ -300,7 +300,7 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
   try {
     data = loader.parse(text);
   } catch (e) {
-    throw new Error(`Could not read the SVG: ${(e as Error)?.message || String(e)}`);
+    throw new Error(`Could not read the SVG: ${(e as Error)?.message || String(e)}`, { cause: e });
   }
   if (!data.xml || data.xml.nodeName.toLowerCase() !== 'svg') {
     throw new Error('That is not an SVG drawing (no <svg> element at the top).');
