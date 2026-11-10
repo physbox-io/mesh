@@ -46,9 +46,20 @@ hardware cuts.
 
 ## Status
 (updated as each lands)
-- 1 done: 67f0132; validator fixes (corner loss in loopSimplify, sheet of
-  paper, knockouts, hidden layers, near-closed/segmented strokes, small holes,
-  transparent margins, root size, <use href>, text) in the next commit.
-  physbox_mcp 89bb245 (tool + docs), unreleased.
-- 2 done: 275686d.
-- 3 done: f65c83b. Not yet run against a real model in the browser.
+- 1 done: 67f0132 + validator fixes 087c7f5 (corner loss in loopSimplify,
+  shared with the contour slicer; sheet of paper; knockouts; hidden layers;
+  near-closed/segmented strokes; small holes; transparent margins; root
+  size; <use href>; text).
+- 2 done: 275686d. 3 done: f65c83b + validator fixes 76e83fe (stop restores
+  the kept round, unfenced critic, worker view search, hidden-tab hang,
+  thumbnails in chat, builder notes/questions/note card). Not yet run
+  against a real model in the browser.
+- 4 done: acf329c. 6 done: 29a2291. Validator running on both.
+- 5 PARKED for a decision: needs a public https URL ending .3mf (new
+  physbox_api route, sign-in, deploy first) and the slicers' URL handlers
+  may only accept their own sites' domains (PrusaSlicer: printables.com).
+- physbox_mcp: 89bb245, f2be205, fb89bc8, 56c2666 unreleased, on top of
+  someone else's unpushed 60bb2bc (v0.68.0). New tool physics_import_profile
+  needs the count test + website + minor bump + release.
+- Suggested by a validator: physics_match_photo (photo -> view + overlap,
+  camera turned there) for agents; not built.
