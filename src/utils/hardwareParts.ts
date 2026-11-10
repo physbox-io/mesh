@@ -110,6 +110,9 @@ export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
   rod_clamp: ['linear_rod'],
   // A housing takes the bushing of a rod already on its line: see rideOnRod.
   lm_housing: [],
+  // Printed, not bought: nothing goes in them.
+  snap_hook: [],
+  snap_catch: [],
 };
 
 export { isBoughtIn };
@@ -342,7 +345,7 @@ function quiet(node: SceneNode) {
 /** The cut piece a part is placed against: the pocket it drops into, or the bore it goes down. */
 const SEAT_PIECE: Record<HardwareCutKind, string> = {
   bearing: 'pocket', nut_trap: 'pocket', nut_slot: 'slot', counterbore: 'head', insert: 'bore', insert_boss: 'bore', oring: 'groove', seal_cord: 'groove',
-  rail_seat: 'channel', rod_clamp: 'bore', lm_housing: 'pocket',
+  rail_seat: 'channel', rod_clamp: 'bore', lm_housing: 'pocket', snap_hook: 'hook', snap_catch: 'window',
 };
 
 export interface Seat {

@@ -12,7 +12,7 @@ import {
   TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon, PuttyIcon,
 } from './shapeIcons';
 import { InsertBossIcon, NutTrapIcon, NutSlotIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon, ORingGrooveIcon, RimSealIcon,
-  LinearRailIcon, RodBushingIcon, DrawerRunnerIcon, RailSeatIcon, RodSocketIcon, BushingHousingIcon,
+  LinearRailIcon, RodBushingIcon, DrawerRunnerIcon, RailSeatIcon, RodSocketIcon, BushingHousingIcon, SnapHookIcon, SnapCatchIcon,
   SpringIcon, StepperIcon } from './hardwareIcons';
 import { Frame } from 'lucide-react';
 import { addReferencePicture } from '../../utils/addReferencePicture';
@@ -93,6 +93,8 @@ const CUT_TILES: { kind: HardwareCutKind; label: string; color: TileColor; spin:
   { kind: 'rail_seat', label: 'Rail Seat', color: 'rose', spin: 'group-hover:rotate-3', Icon: RailSeatIcon },
   { kind: 'rod_clamp', label: 'Rod Socket', color: 'rose', spin: 'group-hover:-rotate-3', Icon: RodSocketIcon },
   { kind: 'lm_housing', label: 'Bushing Housing', color: 'rose', spin: 'group-hover:rotate-6', Icon: BushingHousingIcon },
+  { kind: 'snap_hook', label: 'Snap Hook', color: 'violet', spin: 'group-hover:-rotate-6', Icon: SnapHookIcon },
+  { kind: 'snap_catch', label: 'Snap Catch', color: 'violet', spin: 'group-hover:rotate-3', Icon: SnapCatchIcon },
 ];
 
 /** Bought parts, which go into those cuts or stand on their own. */

@@ -384,3 +384,23 @@ export const NutSlotIcon = () => (
     <path d="M18.5 12h3.2m-1.4-1.4 1.4 1.4-1.4 1.4" className="stroke-blue-700 dark:stroke-blue-300" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
+
+/** A springy beam on a part with a hooked lip at its top, the lead-in ramp facing up. */
+export const SnapHookIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <ellipse cx="12" cy="20.8" rx="8.5" ry="1.5" className="fill-violet-900/12 dark:fill-black/35" />
+    <rect x="3" y="16" width="18" height="4" rx="1" className="fill-violet-200 dark:fill-violet-400/30 stroke-violet-600 dark:stroke-violet-400" strokeWidth="1.3" />
+    <path d="M9.5 16V5.5h2.6v6.3h3.4L12.1 4H9.5" className="fill-violet-300 dark:fill-violet-500/60 stroke-violet-600 dark:stroke-violet-300" strokeWidth="1.2" strokeLinejoin="round" />
+    <path d="M14.5 7.5l1.5 -1.5" className="stroke-violet-700 dark:stroke-violet-300" strokeWidth="1" strokeLinecap="round" />
+  </svg>
+);
+
+/** A wall with a rectangular window, a lip clicked into it. */
+export const SnapCatchIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <ellipse cx="12" cy="20.8" rx="8.5" ry="1.5" className="fill-violet-900/12 dark:fill-black/35" />
+    <rect x="4" y="3" width="16" height="17" rx="1.5" className="fill-violet-200 dark:fill-violet-400/30 stroke-violet-600 dark:stroke-violet-400" strokeWidth="1.3" />
+    <rect x="8" y="8" width="8" height="4.5" className="fill-violet-950/75 dark:fill-black/70" />
+    <path d="M9 12.5h4.5l-2-3.5H9z" className="fill-violet-400 dark:fill-violet-500/80" />
+  </svg>
+);

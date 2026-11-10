@@ -22,7 +22,7 @@ export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives';
 
 /** The hardware features a part can have cut into it; see utils/hardwareCuts.ts. */
 export type HardwareCutKind = 'nut_trap' | 'nut_slot' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord'
-  | 'rail_seat' | 'rod_clamp' | 'lm_housing';
+  | 'rail_seat' | 'rod_clamp' | 'lm_housing' | 'snap_hook' | 'snap_catch';
 /**
  * Where an O-ring groove seals: in a face, against a lid pressed onto it; in a
  * bore's wall, around a shaft pushed through; or around a boss, inside the bore
@@ -296,6 +296,15 @@ export interface SceneGeom {
    * becomes a ring the shape of the outline, as a groove that follows a rim is.
    */
   cutHoles?: number[][][];
+  /**
+   * A feature seen from the side rather than from above: its profile in the
+   * plane of the cut's own X (along the face) and the normal, [x, z] in
+   * metres with z = 0 on the surface, extruded `cutWidth` across the face
+   * (the cut's Y). The geom is a mesh; cutGeometry builds it. A snap hook's
+   * beam and lip, ramp and catch face.
+   */
+  cutProfile?: number[][];
+  cutWidth?: number;
   /**
    * A cut that stands on an axis rather than on the face it was put on: a
    * groove round a bore or a boss. [x, y, z, dx, dy, dz] in the body's frame;

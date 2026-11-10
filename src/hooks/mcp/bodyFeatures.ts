@@ -52,7 +52,7 @@ export function sealCheckFor(scene: SceneGraph, nodeId: string, group: string) {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applySingleCutToBody(targetId: string, spec: Record<string, any>): Record<string, any> {
   const store = useStore.getState();
-  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned } = spec;
+  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned, quarter } = spec;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) return { ok: false, error: `No object with id '${targetId}'` };
   const spotIn = Array.isArray(at) && at.length >= 3
@@ -67,7 +67,8 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     const group = store.addHardwareCut(targetId, hwKind, spotIn);
     if (!group) return { ok: false, error: store.hardwareCutProblemAt(targetId, hwKind, spotIn) ?? 'That body has no solid shape to cut into' };
     const railSeat = hwKind === 'rail_seat' && (typeof lengthMm === 'number' || typeof turned === 'boolean');
-    if (size !== undefined || bore !== undefined || fitMm !== undefined || seal !== undefined || railSeat) {
+    const turnable = (hwKind === 'nut_slot' || hwKind === 'snap_hook' || hwKind === 'snap_catch') && typeof quarter === 'number';
+    if (size !== undefined || bore !== undefined || fitMm !== undefined || seal !== undefined || railSeat || turnable) {
       const current = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
       const before = current && hardwareSpecOf(current.geoms ?? [], group);
       const changes = {
@@ -78,6 +79,8 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
         // A rail seat's own length and direction.
         ...(hwKind === 'rail_seat' && typeof lengthMm === 'number' ? { lengthMm } : {}),
         ...(hwKind === 'rail_seat' && typeof turned === 'boolean' ? { turned } : {}),
+        // Which way a nut slot runs out, or a snap hook's lip faces: quarter turns about the normal.
+        ...(turnable ? { quarter: ((Math.round(quarter as number) % 4) + 4) % 4 } : {}),
       };
       // A groove a size cannot fit is not changed: say why rather than hand back the wrong one.
       const why = current && before && hardwareCutProblem({ ...before, ...changes }, current);
@@ -103,6 +106,7 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
       normal: hwSpec?.normal,
       pieces: (after?.geoms ?? []).filter((g) => g.hardware?.group === group).map((g) => g.hardware!.part),
       ...(hwSpec?.seal ? { seal: hwSpec.seal } : {}),
+      ...(hwSpec?.quarter !== undefined ? { quarter: hwSpec.quarter } : {}),
       ...(hwKind === 'oring' || hwKind === 'seal_cord' ? { sealCheck: sealCheckFor(useStore.getState().sceneGraph, targetId, group) } : {}),
     };
   }

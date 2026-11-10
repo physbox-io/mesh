@@ -23,6 +23,7 @@ import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, O_RI
 import { planSealGroove, sealGrooveProblem } from './sealGrooves';
 import { LM_UU, MGN } from './linearParts';
 import { probeRay, surfaceUnder } from './csg';
+import { SNAP_SIZES, snapHookProfileMm, snapWindowMm } from './snapFits';
 
 export { HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS } from './hardwareSizes';
 
@@ -84,6 +85,14 @@ export const HARDWARE_KINDS: Record<HardwareCutKind, HardwareKindInfo> = {
   lm_housing: {
     label: 'Bushing housing', sizes: Object.keys(LM_UU), defaultSize: '8', defaultFitMm: 0.1,
     hint: 'A pocket for an LM-UU linear bushing, with room for its rod right through, so the part rides on a rod.',
+  },
+  snap_hook: {
+    label: 'Snap hook', sizes: Object.keys(SNAP_SIZES), defaultSize: 'M', defaultFitMm: 0,
+    hint: 'A springy beam stood on the face with a hooked lip, long enough not to crack in PLA. Put a snap catch where the lip lands on the other part. Print it with the beam lying flat.',
+  },
+  snap_catch: {
+    label: 'Snap catch', sizes: Object.keys(SNAP_SIZES), defaultSize: 'M', defaultFitMm: 0.3,
+    hint: 'The window a snap hook\'s lip clicks into, through the wall. Same size as the hook.',
   },
 };
 
@@ -294,6 +303,38 @@ export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: S
     case 'rod_clamp': {
       const d = Number(size);
       return [cut('bore', (d + fit) / 2, Math.max(12, 2 * d))];
+    }
+    case 'snap_hook': {
+      const s = SNAP_SIZES[size];
+      // Material, in the part's colour; the lip faces the face's own X turned by `quarter`.
+      const quarter = ((spec.quarter ?? 0) % 4 + 4) % 4;
+      const hook: SceneGeom = {
+        name: `${nodeId}_${spec.group}_hook`,
+        type: 'mesh',
+        size: [1],
+        csg: 'union',
+        cutAt: spec.at.map((v) => +v.toFixed(6)),
+        cutNormal: [...spec.normal],
+        cutProfile: snapHookProfileMm(s).map(([x, z]) => [m(x), m(z)]),
+        cutWidth: m(s.width),
+        ...(quarter ? { cutTwist: +(quarter * Math.PI / 2).toFixed(9) } : {}),
+        hardware: { ...tag('hook'), quarter },
+      };
+      return [hook];
+    }
+    case 'snap_catch': {
+      const s = SNAP_SIZES[size];
+      const quarter = ((spec.quarter ?? 0) % 4 + 4) % 4;
+      const [across, along] = snapWindowMm(s, fit);
+      // Through the wall; its long side across the face's X turned by `quarter`, as the hook's lip.
+      const window: SceneGeom = {
+        ...cut('window', 0, 0),
+        type: 'box',
+        size: [m(along / 2), m(across / 2), 0],
+        ...(quarter ? { cutTwist: +(quarter * Math.PI / 2).toFixed(9) } : {}),
+      };
+      window.hardware = { ...window.hardware!, quarter };
+      return [window];
     }
     case 'lm_housing': {
       const [od, length] = LM_UU[size];

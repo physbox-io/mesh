@@ -82,7 +82,12 @@ function scaleCutIntent(g: SceneGeom, sx: number, sy: number, sz: number) {
   if (g.cutDepth) g.cutDepth *= Math.abs(n.clone().multiply(S).dot(n2));
   g.cutNormal = n2.toArray();
   if (g.cutBorder) g.cutBorder *= across;
-  if (g.cutOutline) {
+  if (g.cutProfile) {
+    // Along the face by the face's stretch, up the normal by the normal's.
+    const up = Math.abs(n.clone().multiply(S).dot(n2));
+    g.cutProfile = g.cutProfile.map(([x, z]) => [x * stretch(ax), z * up]);
+    if (g.cutWidth) g.cutWidth *= stretch(ay);
+  } else if (g.cutOutline) {
     g.cutOutline = g.cutOutline.map(([x, y]) => {
       const p = ax.clone().multiplyScalar(x).addScaledVector(ay, y).multiply(S);
       return [p.dot(bx), p.dot(by)];

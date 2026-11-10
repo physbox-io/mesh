@@ -1427,6 +1427,28 @@ export function cutGeometry(
   if (geom.cutTwist) quat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), geom.cutTwist));
   const mjQuat = [quat.w, quat.x, quat.y, quat.z].map(v => +v.toFixed(9));
 
+  if (geom.type === 'mesh' && geom.cutProfile && geom.cutProfile.length >= 3) {
+    // A side profile stood up on the face and extruded across it. Points on
+    // the surface (z = 0) are sunk by the overshoot, so a boss overlaps the
+    // part instead of touching it.
+    const width = Math.max(1e-6, geom.cutWidth || 0.005);
+    const profile = geom.cutProfile.map(([x, z]) => [x, z <= 1e-9 ? z - over : z]);
+    // prismMesh extrudes (u, v) along its own Z; here u is the cut's X, v its
+    // normal and the extrusion its Y. That swap is a mirror, so the faces are
+    // turned back round to keep them facing out.
+    const shape = prismMesh(profile, -width / 2, width / 2);
+    const m = new THREE.Matrix4().makeRotationFromQuaternion(quat).setPosition(entry);
+    const p = new THREE.Vector3();
+    const zup: number[] = [];
+    for (let i = 0; i < shape.positions.length; i += 3) {
+      p.set(shape.positions[i], shape.positions[i + 2], shape.positions[i + 1]).applyMatrix4(m);
+      zup.push(+p.x.toFixed(7), +p.y.toFixed(7), +p.z.toFixed(7));
+    }
+    const faces: number[] = [];
+    for (let i = 0; i < shape.faces.length; i += 3) faces.push(shape.faces[i], shape.faces[i + 2], shape.faces[i + 1]);
+    return { renderVertices: zup, vertices: zupArrayToYup(zup), faces, dynamic: true };
+  }
+
   if (prism && geom.cutOutline) {
     // A face of any other shape: its outline stood up as a prism, over the
     // same length a box cut would have, baked into the body frame — the frame
