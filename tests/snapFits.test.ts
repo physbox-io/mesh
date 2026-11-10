@@ -98,3 +98,42 @@ describe('snap catch', () => {
     expect(win.size[2] * 2000).toBeGreaterThan(4);
   });
 });
+
+describe('on a hollow box', () => {
+  // 80 x 60 x 40 box, 2 mm walls, open top: outer minus inner, as a box is built here.
+  const box = (): SceneNode => {
+    const node = {
+      id: 'box', name: 'box', pos: [0, 0, 0], csgEnabled: true,
+      geoms: [
+        { name: 'outer', type: 'box', size: [0.04, 0.03, 0.02] },
+        { name: 'inner', type: 'box', size: [0.038, 0.028, 0.02], pos: [0, 0, 0.002], csg: 'difference' },
+      ] as SceneGeom[],
+    } as SceneNode;
+    return node;
+  };
+
+  it('cuts the catch window through the near wall only', () => {
+    const node = box();
+    const [win] = place(node, spec({ kind: 'snap_catch', at: [0.04, 0, 0.005], normal: [1, 0, 0] }));
+    // the window's centre sits in the +X wall, and it is about a wall long
+    expect(win.pos![0] * 1000).toBeCloseTo(39, 1);
+    expect(win.size[2] * 2000).toBeLessThan(4);
+  });
+
+  it('stands a hook on an inside face, on that wall, not the far one', () => {
+    const node = box();
+    const [hook] = place(node, spec({ at: [0.038, 0, 0.005], normal: [-1, 0, 0] }));
+    const [xLo, xHi] = extent(hook.renderVertices!, 0);
+    // from the inner face at x = 38 mm inward, not out from the -X wall
+    expect(xHi * 1000).toBeGreaterThan(37);
+    expect(xHi * 1000).toBeLessThan(40);
+    expect(xLo * 1000).toBeGreaterThan(15);
+  });
+
+  it('never pokes the hook\'s root out through a thin lid', () => {
+    const lid: SceneNode = { id: 'l', name: 'l', pos: [0, 0, 0], csgEnabled: true, geoms: [{ name: 'b', type: 'box', size: [0.06, 0.04, 0.001] } as SceneGeom] } as SceneNode;
+    const [hook] = place(lid, spec({ at: [0, 0, -0.001], normal: [0, 0, -1] }));
+    const [, zHi] = extent(hook.renderVertices!, 2);
+    expect(zHi * 1000).toBeLessThan(1);
+  });
+});

@@ -25,7 +25,8 @@ import { geomHalfLen } from '../../utils/geomSurface';
 import { requestTexturedSurface } from '../../utils/textureClient';
 import { Quaternion, Vector3 } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, HardwareBore, HardwareCutKind, SealType } from '../../types/scene';
-import { HARDWARE_KINDS, hardwareCutProblem, hardwareSpecOf } from '../../utils/hardwareCuts';
+import { HARDWARE_KINDS, hardwareCutProblem, hardwareSpecOf, quarterDirection, quarterFacing } from '../../utils/hardwareCuts';
+import { SNAP_SIZES, snapBeamLength, snapLipHeight } from '../../utils/snapFits';
 import { sealFindings } from '../../utils/hardwareChecks';
 import { pointList, findNodeInScene } from './bridgeUtils';
 import { sculptMeshOf } from './sculptState';
@@ -52,7 +53,8 @@ export function sealCheckFor(scene: SceneGraph, nodeId: string, group: string) {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applySingleCutToBody(targetId: string, spec: Record<string, any>): Record<string, any> {
   const store = useStore.getState();
-  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned, quarter } = spec;
+  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned, facing } = spec;
+  const quarterIn = spec.quarter === undefined || spec.quarter === null ? undefined : Number(spec.quarter);
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) return { ok: false, error: `No object with id '${targetId}'` };
   const spotIn = Array.isArray(at) && at.length >= 3
@@ -67,7 +69,14 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     const group = store.addHardwareCut(targetId, hwKind, spotIn);
     if (!group) return { ok: false, error: store.hardwareCutProblemAt(targetId, hwKind, spotIn) ?? 'That body has no solid shape to cut into' };
     const railSeat = hwKind === 'rail_seat' && (typeof lengthMm === 'number' || typeof turned === 'boolean');
-    const turnable = (hwKind === 'nut_slot' || hwKind === 'snap_hook' || hwKind === 'snap_catch') && typeof quarter === 'number';
+    const turns = hwKind === 'nut_slot' || hwKind === 'snap_hook' || hwKind === 'snap_catch';
+    // `facing`, a direction in the body's frame, is the easy way to say it: the nearest quarter on this face.
+    const placed = turns ? findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) : null;
+    const faceNormal = (placed && hardwareSpecOf(placed.geoms ?? [], group)?.normal) ?? spotIn?.normal ?? [0, 0, 1];
+    const quarter = turns && Array.isArray(facing) && facing.length >= 3
+      ? quarterFacing(faceNormal, facing.map(Number))
+      : quarterIn;
+    const turnable = turns && typeof quarter === 'number' && Number.isFinite(quarter);
     if (size !== undefined || bore !== undefined || fitMm !== undefined || seal !== undefined || railSeat || turnable) {
       const current = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
       const before = current && hardwareSpecOf(current.geoms ?? [], group);
@@ -106,7 +115,17 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
       normal: hwSpec?.normal,
       pieces: (after?.geoms ?? []).filter((g) => g.hardware?.group === group).map((g) => g.hardware!.part),
       ...(hwSpec?.seal ? { seal: hwSpec.seal } : {}),
-      ...(hwSpec?.quarter !== undefined ? { quarter: hwSpec.quarter } : {}),
+      ...(hwSpec?.quarter !== undefined ? { quarter: hwSpec.quarter, direction: quarterDirection(hwSpec.normal, hwSpec.quarter) } : {}),
+      ...((hwKind === 'snap_hook' || hwKind === 'snap_catch') && hwSpec && SNAP_SIZES[hwSpec.size] ? (() => {
+        const s = SNAP_SIZES[hwSpec.size];
+        const beam = snapBeamLength(s), lip = snapLipHeight(s);
+        return {
+          beamLengthMm: +beam.toFixed(2), lipHeightMm: +lip.toFixed(2), lipDepthMm: s.depth, widthMm: s.width,
+          note: hwKind === 'snap_hook'
+            ? `The lip faces \`direction\`. The beam's outer face is on \`atMm\`: put it on the line of the wall's inside face. Centre the catch window ${(beam + lip / 2).toFixed(1)} mm from this face, in the wall the lip faces.`
+            : `\`direction\` should be the way the hook's beam runs past it, up or down the wall: the window is the lip's height along it and its width across, plus fitMm, through this wall only.`,
+        };
+      })() : {}),
       ...(hwKind === 'oring' || hwKind === 'seal_cord' ? { sealCheck: sealCheckFor(useStore.getState().sceneGraph, targetId, group) } : {}),
     };
   }

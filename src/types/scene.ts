@@ -305,6 +305,8 @@ export interface SceneGeom {
    */
   cutProfile?: number[][];
   cutWidth?: number;
+  /** A cut through only the wall it is on, not on through the part beyond: a snap catch's window. */
+  cutWall?: boolean;
   /**
    * A cut that stands on an axis rather than on the face it was put on: a
    * groove round a bore or a boss. [x, y, z, dx, dy, dz] in the body's frame;

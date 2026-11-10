@@ -61,3 +61,31 @@ describe('digestTelemetry', () => {
     expect(digestTelemetry([])).toBeNull();
   });
 });
+
+describe('fixes from validation', () => {
+  it('does not call a wheel spinning on its axle settled', () => {
+    const frames: HistoryFrame[] = [0, 0.5, 1].map((t) => ({
+      time: t,
+      bodies: { wheel: { ...body([0, 0, 0.1]), angvel: [0, 0, 10] } },
+      joints: { axle: { pos: 10 * t, vel: 10, qfrc_applied: 0 } },
+    }));
+    const d = digestTelemetry(frames, { jointTypes: { axle: 'hinge' } })!;
+    expect(d.settledAtS).toBeNull();
+    expect(Object.keys(d.moved)).toEqual(['wheel']);
+  });
+
+  it('lists the 20 that moved furthest and counts the rest', () => {
+    const bodies0: Record<string, ReturnType<typeof body>> = {}, bodies1: Record<string, ReturnType<typeof body>> = {};
+    for (let i = 0; i < 300; i++) { bodies0[`b${i}`] = body([0, 0, 0]); bodies1[`b${i}`] = body([i / 1000 + 0.01, 0, 0]); }
+    const d = digestTelemetry([{ time: 0, bodies: bodies0 }, { time: 1, bodies: bodies1 }])!;
+    expect(Object.keys(d.moved)).toHaveLength(20);
+    expect(d.movedNotListed).toBe(280);
+    expect(Object.keys(d.moved)[0]).toBe('b299');
+  });
+
+  it('says nothing about movement when no bodies were recorded', () => {
+    const d = digestTelemetry([{ time: 0, joints: {} }, { time: 1, joints: {} }])!;
+    expect(d.settledAtS).toBeNull();
+    expect(d.note).toMatch(/No body positions/);
+  });
+});

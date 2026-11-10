@@ -1387,6 +1387,72 @@ function exitFrom(
   return { exit: [at[0] + n.x * t, at[1] + n.y * t, at[2] + n.z * t], distance: t };
 }
 
+/** Entry/exit pairs of one geom along a ray, starting inside when the hits are odd. */
+function spansOf(geom: SceneGeom, o: THREE.Vector3, d: THREE.Vector3): [number, number][] {
+  const ts = geomRayHits(geom, o, d).map((h) => h.t).sort((a, b) => a - b);
+  if (ts.length % 2) ts.unshift(0);
+  const out: [number, number][] = [];
+  for (let i = 0; i + 1 < ts.length; i += 2) if (ts[i + 1] > ts[i]) out.push([ts[i], ts[i + 1]]);
+  return out;
+}
+
+function unionSpans(spans: [number, number][]): [number, number][] {
+  const sorted = [...spans].sort((a, b) => a[0] - b[0]);
+  const out: [number, number][] = [];
+  for (const [a, b] of sorted) {
+    const last = out[out.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+
+/**
+ * The stretches of real material along a ray: the positive shapes joined, the
+ * negative ones taken out. probeRay sees only the positives, so to it a box
+ * hollowed by a smaller box is solid right across, and a window "through" one
+ * wall went through the far wall as well.
+ */
+export function materialSpans(node: SceneNode, origin: number[], direction: number[], exclude?: SceneGeom): [number, number][] {
+  const o = new THREE.Vector3(origin[0] ?? 0, origin[1] ?? 0, origin[2] ?? 0);
+  const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0);
+  if (d.lengthSq() < 1e-18) return [];
+  d.normalize();
+  const plus: [number, number][] = [], minus: [number, number][] = [];
+  for (const g of csgSourceGeoms(node)) {
+    if (g === exclude || g.role === 'visual' || g.hardware?.kind === 'snap_hook' || g.hardware?.kind === 'snap_catch') continue;
+    if (isPositive(g)) plus.push(...spansOf(g, o, d));
+    else if (g.csg === 'difference' && (g.type === 'mesh' || g.pos)) minus.push(...spansOf(g, o, d));
+  }
+  let out = unionSpans(plus);
+  for (const [a, b] of unionSpans(minus)) {
+    out = out.flatMap(([x, y]): [number, number][] => {
+      if (b <= x || a >= y) return [[x, y]];
+      const keep: [number, number][] = [];
+      if (a > x) keep.push([x, a]);
+      if (b < y) keep.push([b, y]);
+      return keep;
+    });
+  }
+  return out.filter(([a, b]) => b - a > 1e-7);
+}
+
+/**
+ * The wall a feature stands on or cuts through, from a spot on any face of
+ * it, inside or out: just off the face, looking back in, the first stretch of
+ * material met. Its start is the face, its length the wall's thickness.
+ */
+export function wallUnder(node: SceneNode, at: number[], normal: number[], exclude?: SceneGeom): { entry: number[]; thickness: number } | null {
+  const n = new THREE.Vector3(normal[0] ?? 0, normal[1] ?? 0, normal[2] ?? 1);
+  if (n.lengthSq() < 1e-18) return null;
+  n.normalize();
+  const lift = 0.001;
+  const origin = [(at[0] ?? 0) + n.x * lift, (at[1] ?? 0) + n.y * lift, (at[2] ?? 0) + n.z * lift];
+  const first = materialSpans(node, origin, [-n.x, -n.y, -n.z], exclude)[0];
+  if (!first) return null;
+  return { entry: [origin[0] - n.x * first[0], origin[1] - n.y * first[0], origin[2] - n.z * first[0]], thickness: first[1] - first[0] };
+}
+
 /**
  * `pos`, `size` and `quat` for a cut, from where it enters and how deep it goes.
  *
@@ -1428,16 +1494,20 @@ export function cutGeometry(
   const mjQuat = [quat.w, quat.x, quat.y, quat.z].map(v => +v.toFixed(9));
 
   if (geom.type === 'mesh' && geom.cutProfile && geom.cutProfile.length >= 3) {
-    // A side profile stood up on the face and extruded across it. Points on
-    // the surface (z = 0) are sunk by the overshoot, so a boss overlaps the
-    // part instead of touching it.
+    // A side profile stood up on the face and extruded across it, from the
+    // wall it was put on (an inside face too). Points on the surface (z = 0)
+    // are sunk into that wall so the boss overlaps it, but never out through
+    // its far side.
+    const wall = wallUnder(node, anchor, n.toArray(), geom);
+    const base = new THREE.Vector3(...(wall ? wall.entry : entry.toArray()));
+    const sink = wall ? Math.min(over, 0.9 * wall.thickness) : over;
     const width = Math.max(1e-6, geom.cutWidth || 0.005);
-    const profile = geom.cutProfile.map(([x, z]) => [x, z <= 1e-9 ? z - over : z]);
+    const profile = geom.cutProfile.map(([x, z]) => [x, z <= 1e-9 ? z - sink : z]);
     // prismMesh extrudes (u, v) along its own Z; here u is the cut's X, v its
     // normal and the extrusion its Y. That swap is a mirror, so the faces are
     // turned back round to keep them facing out.
     const shape = prismMesh(profile, -width / 2, width / 2);
-    const m = new THREE.Matrix4().makeRotationFromQuaternion(quat).setPosition(entry);
+    const m = new THREE.Matrix4().makeRotationFromQuaternion(quat).setPosition(base);
     const p = new THREE.Vector3();
     const zup: number[] = [];
     for (let i = 0; i < shape.positions.length; i += 3) {
@@ -1447,6 +1517,18 @@ export function cutGeometry(
     const faces: number[] = [];
     for (let i = 0; i < shape.faces.length; i += 3) faces.push(shape.faces[i], shape.faces[i + 2], shape.faces[i + 1]);
     return { renderVertices: zup, vertices: zupArrayToYup(zup), faces, dynamic: true };
+  }
+
+  if (geom.cutWall && geom.type === 'box') {
+    // Through the one wall it is on, not the part: a catch window in a box's
+    // side must not come out through the opposite side too.
+    const wall = wallUnder(node, anchor, n.toArray(), geom);
+    if (wall) {
+      const extra = 0.0005;
+      const length = wall.thickness + 2 * extra;
+      const centre = new THREE.Vector3(...wall.entry).addScaledVector(n, -wall.thickness / 2);
+      return { pos: centre.toArray().map(v => +v.toFixed(6)), size: [s[0] ?? 0.005, s[1] ?? 0.005, length / 2], quat: mjQuat };
+    }
   }
 
   if (prism && geom.cutOutline) {

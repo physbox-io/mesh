@@ -88,7 +88,7 @@ export const HARDWARE_KINDS: Record<HardwareCutKind, HardwareKindInfo> = {
   },
   snap_hook: {
     label: 'Snap hook', sizes: Object.keys(SNAP_SIZES), defaultSize: 'M', defaultFitMm: 0,
-    hint: 'A springy beam stood on the face with a hooked lip, long enough not to crack in PLA. Put a snap catch where the lip lands on the other part. Print it with the beam lying flat.',
+    hint: 'A springy beam stood on the face with a hooked lip, long enough not to crack in PLA. Put a snap catch where the lip lands on the other part: its middle a beam and half a lip from the face the hook stands on. Strongest printed with the beam lying flat; standing (a lid printed face down) take a size up.',
   },
   snap_catch: {
     label: 'Snap catch', sizes: Object.keys(SNAP_SIZES), defaultSize: 'M', defaultFitMm: 0.3,
@@ -132,6 +132,22 @@ function slotDirection(normal: number[], quarter: number): THREE.Vector3 {
   const { x, y } = faceAxes(normal);
   const a = (((quarter % 4) + 4) % 4) * (Math.PI / 2);
   return x.multiplyScalar(Math.cos(a)).addScaledVector(y, Math.sin(a)).normalize();
+}
+
+/** The way a quarter turn points along the face: a snap hook's lip, a nut slot's run. */
+export function quarterDirection(normal: number[], quarter: number): number[] {
+  return slotDirection(normal, quarter).toArray().map((v) => +v.toFixed(6));
+}
+
+/** The quarter turn whose direction along the face is nearest `dir`. */
+export function quarterFacing(normal: number[], dir: number[]): number {
+  const want = new THREE.Vector3(...(dir as [number, number, number]));
+  let best = 0, bestDot = -Infinity;
+  for (let q = 0; q < 4; q++) {
+    const dot = slotDirection(normal, q).dot(want);
+    if (dot > bestDot) { bestDot = dot; best = q; }
+  }
+  return best;
 }
 
 /** Where the nut's middle sits: on the bolt's line, under the cover. */
@@ -330,6 +346,7 @@ export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: S
       const window: SceneGeom = {
         ...cut('window', 0, 0),
         type: 'box',
+        cutWall: true,
         size: [m(along / 2), m(across / 2), 0],
         ...(quarter ? { cutTwist: +(quarter * Math.PI / 2).toFixed(9) } : {}),
       };

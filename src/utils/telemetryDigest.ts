@@ -36,10 +36,12 @@ export interface JointDigest {
 export interface TelemetryDigest {
   durationS: number;
   frames: number;
-  /** Every body under 1 mm/s from this time to the end; null if it never got there. */
+  /** Every body under 1 mm/s and 0.5 deg/s, and every hinge and slide as still, from this time to the end; null if never (or no bodies were recorded). */
   settledAtS: number | null;
-  /** Bodies that moved (more than 1 mm net, 5 mm/s or 5 deg/s at some point), by name. */
+  /** Bodies that moved (more than 1 mm net, 5 mm/s or 5 deg/s at some point), by name: the 20 that moved furthest. */
   moved: Record<string, BodyDigest>;
+  /** How many more moved than are listed. */
+  movedNotListed?: number;
   /** How many bodies did not move. */
   still: number;
   /** Joints that travelled more than half a degree or millimetre. */
@@ -50,6 +52,8 @@ export interface TelemetryDigest {
 }
 
 const SETTLED_MMS = 1;
+const SETTLED_DEGS = 0.5;
+const MAX_MOVED = 20;
 const MOVED_MM = 1;
 const MOVED_PEAK_MMS = 5;
 const MOVED_PEAK_DEGS = 5;
@@ -76,7 +80,13 @@ export function digestTelemetry(
       peak.set(id, Math.max(peak.get(id) ?? 0, speed));
       const turn = Math.hypot(b.angvel?.[0] ?? 0, b.angvel?.[1] ?? 0, b.angvel?.[2] ?? 0) * 180 / Math.PI;
       peakTurn.set(id, Math.max(peakTurn.get(id) ?? 0, turn));
-      if (speed > SETTLED_MMS) anyMoving = true;
+      if (speed > SETTLED_MMS || turn > SETTLED_DEGS) anyMoving = true;
+    }
+    // A wheel turning on its axle has a still origin; its joint is not still.
+    for (const [jn, j] of Object.entries(f.joints ?? {})) {
+      if (typeof j.vel !== 'number') continue;
+      const slide = opts.jointTypes?.[jn] === 'slide';
+      if (slide ? Math.abs(j.vel) * 1000 > SETTLED_MMS : Math.abs(j.vel) * 180 / Math.PI > SETTLED_DEGS) anyMoving = true;
     }
     if (anyMoving) settledAtS = null;
     else if (settledAtS === null) settledAtS = f.time;
@@ -89,7 +99,7 @@ export function digestTelemetry(
     const peakSpeedMmS = peak.get(id) ?? 0;
     const peakTurnDegS = peakTurn.get(id) ?? 0;
     if (netMm < MOVED_MM && peakSpeedMmS < MOVED_PEAK_MMS && peakTurnDegS < MOVED_PEAK_DEGS) { still++; continue; }
-    const leftScene = b.pos[2] < -0.2 || Math.hypot(b.pos[0] - s[0], b.pos[1] - s[1]) > 5;
+    const leftScene = b.pos[2] < -0.2 || netMm > 5000;
     moved[name(id)] = {
       netMm: round(netMm),
       peakSpeedMmS: round(peakSpeedMmS),
@@ -98,6 +108,11 @@ export function digestTelemetry(
       ...(leftScene ? { leftScene: true as const } : {}),
     };
   }
+
+  // The furthest-moved first, and only so many: a collapsing wall of 300 bricks is not a few hundred bytes.
+  const movedAll = Object.entries(moved).sort((a, b) => b[1].netMm - a[1].netMm);
+  const movedNotListed = Math.max(0, movedAll.length - MAX_MOVED);
+  const movedListed = Object.fromEntries(movedAll.slice(0, MAX_MOVED));
 
   // Joints: hinge and slide (numeric positions).
   const lo = new Map<string, number>(), hi = new Map<string, number>(), effort = new Map<string, number>();
@@ -148,15 +163,19 @@ export function digestTelemetry(
     contacts = { peak: peakCount, longest };
   }
 
+  const noBodies = !frames.some((f) => f.bodies && Object.keys(f.bodies).length);
   return {
     durationS: round(durationS, 3),
     frames: frames.length,
-    settledAtS: settledAtS === null ? null : round(settledAtS, 3),
-    moved,
+    settledAtS: settledAtS === null || noBodies ? null : round(settledAtS, 3),
+    moved: movedListed,
+    ...(movedNotListed ? { movedNotListed } : {}),
     still,
     joints,
     ...(contacts ? { contacts } : {}),
-    note: frames.length === 1
+    note: noBodies
+      ? 'No body positions were recorded (include left out \'bodies\'), so nothing is said about what moved.'
+      : frames.length === 1
       ? 'Read from a single frame: run or play the simulation for more.'
       : `Read from ${frames.length} frames across the run: a peak between two frames can be missed.`,
   };
