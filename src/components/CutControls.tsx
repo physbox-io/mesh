@@ -48,7 +48,7 @@ import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
 import type { HardwareCutKind, SceneGeom, SceneNode } from '../types/scene';
 
 const SHAPES = [
-  ['cylinder', 'Hole', Circle, 'A round hole at a diameter you type, square to the surface you last clicked. Goes right through until you give it a depth.'],
+  ['cylinder', 'Hole', Circle, 'A round hole at a diameter you type, square to the surface you last clicked. Goes through the wall it is on (one side of a hollow box) until you give it a depth.'],
   ['box', 'Slot', Square, 'A rectangular pocket or slot, sized in millimetres, square to the surface you last clicked.'],
   ['sphere', 'Dish', Circle, 'A spherical scoop: a seat for a ball, or a rounded pocket. Always blind.'],
 ] as const;
@@ -220,8 +220,8 @@ function CutRow({ node, geom, index }: {
             type="button"
             onClick={() => setCutDepth(node.id, index, through ? mm(depth) / 2 : 0)}
             title={through
-              ? 'Going right through. Press to make it a blind hole half the depth, then type the depth you want.'
-              : 'Make it go right through, however thick the part is or becomes.'}
+              ? 'Going through the wall. Press to make it a blind hole half the depth, then type the depth you want.'
+              : 'Make it go through the wall it is on, however thick that is or becomes.'}
             className={`px-1.5 py-1 rounded text-[9px] font-bold uppercase cursor-pointer transition-colors ${
               through
                 ? 'bg-rose-500/20 text-rose-600 dark:text-rose-300'

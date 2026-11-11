@@ -1337,8 +1337,12 @@ function faceRegionOf(geom: SceneGeom, hitNormal: number[], hitFace?: number): F
  *
  * The ray is the cut's line: it starts well outside along the stored normal and
  * travels back down it, so a hole re-measures itself against whatever is under
- * it now. `thickness` is from the first surface to the last, which is what a
- * hole going right through has to clear.
+ * it now. What it measures is the one wall the cut is on: the stretch of
+ * material the stored point is in, or the next one along the line when the
+ * face has moved away from it. A hole "through" the side of a hollow box goes
+ * through that side, not the far one too; a second hole is a second cut. It
+ * also finds an inside face's own wall, where the first surface from outside
+ * is the opposite wall.
  *
  * Returns null when the line misses the part altogether — a hole hanging off
  * the edge — and the caller keeps whatever the cut had.
@@ -1363,10 +1367,26 @@ export function surfaceUnder(
     (at[1] ?? 0) + n.y * away,
     (at[2] ?? 0) + n.z * away,
   ];
-  const hits = probeRay(node, origin, [-n.x, -n.y, -n.z], exclude);
+  const back = [-n.x, -n.y, -n.z];
+  const hits = probeRay(node, origin, back, exclude);
   if (hits.length === 0) return null;
-  const first = hits[0].t;
-  const last = hits[hits.length - 1].t;
+  const outline: [number, number] = [hits[0].t, hits[hits.length - 1].t];
+  const spans = materialSpans(node, origin, back, exclude);
+  const eps = 1e-6;
+  let wall = outline;
+  // The line starts outside the part, so a stretch starting at 0 is an open
+  // mesh with an odd count of crossings, no telling inside from out: those
+  // keep the outline, first surface to last.
+  if (spans.length && spans[0][0] > 1e-9) {
+    const holding = spans.find(([a, b]) => a - eps <= away && away <= b + eps);
+    // A point in no wall but on the outline is a ring or a groove centred on
+    // a hole (an O-ring round a jar's rim): it was put on that outer face and
+    // measures from it.
+    const onOutline = hits.some((h) => Math.abs(h.t - away) < eps);
+    if (holding) wall = holding;
+    else if (!onOutline) wall = spans.find(([a]) => a > away) ?? spans[spans.length - 1];
+  }
+  const [first, last] = wall;
   return {
     entry: [origin[0] - n.x * first, origin[1] - n.y * first, origin[2] - n.z * first],
     thickness: Math.max(0, last - first),
@@ -1422,7 +1442,10 @@ export function materialSpans(node: SceneNode, origin: number[], direction: numb
   for (const g of csgSourceGeoms(node)) {
     if (g === exclude || g.role === 'visual' || g.hardware?.kind === 'snap_hook' || g.hardware?.kind === 'snap_catch') continue;
     if (isPositive(g)) plus.push(...spansOf(g, o, d));
-    else if (g.csg === 'difference' && (g.type === 'mesh' || g.pos)) minus.push(...spansOf(g, o, d));
+    // Not the face cuts (they carry a normal): a hole or a nut's pocket is a
+    // feature in a wall, not where the wall is, and the pieces of one fastener
+    // would otherwise shorten each other.
+    else if (g.csg === 'difference' && !g.cutNormal && (g.type === 'mesh' || g.pos)) minus.push(...spansOf(g, o, d));
   }
   let out = unionSpans(plus);
   for (const [a, b] of unionSpans(minus)) {
