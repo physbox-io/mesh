@@ -52,12 +52,12 @@ hardware cuts.
   size; <use href>; text).
 - 2 done: 275686d. 3 done: f65c83b + validator fixes 76e83fe (stop restores
   the kept round, unfenced critic, worker view search, hidden-tab hang,
-  thumbnails in chat, builder notes/questions/note card). Not yet run
-  against a real model in the browser.
+  thumbnails in chat, builder notes/questions/note card).
 - 4 done: acf329c. 6 done: 29a2291. Validator running on both.
-- 5 PARKED for a decision: needs a public https URL ending .3mf (new
-  physbox_api route, sign-in, deploy first) and the slicers' URL handlers
-  may only accept their own sites' domains (PrusaSlicer: printables.com).
+- 5 DROPPED by the user 2026-11-10 (it needed a public https .3mf URL, and
+  the slicers' URL handlers may only accept their own domains).
+- 3 run against a real model by the user 2026-11-10: works well. Photos now
+  go with any chat turn, not just the request box.
 - physbox_mcp: 89bb245, f2be205, fb89bc8, 56c2666 unreleased, on top of
   someone else's unpushed 60bb2bc (v0.68.0). New tool physics_import_profile
   needs the count test + website + minor bump + release.

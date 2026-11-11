@@ -71,6 +71,8 @@ interface ClaudeModelItem {
 export default function AICopilotPanel({ onClose, messages: propsMessages, setMessages: propsSetMessages }: AICopilotPanelProps) {
   const sceneGraph = useStore(state => state.sceneGraph);
   const att = useCopilotAttachments();
+  // The chat box at the bottom has its own pictures, so a photo can go with any turn.
+  const followAtt = useCopilotAttachments();
   const pictureLoop = usePictureToPart(SYSTEM_INSTRUCTIONS);
   /** Generate from a picture as a build / inspect / fix loop rather than one reply. */
   const [refineAgainstPicture, setRefineAgainstPicture] = useState(true);
@@ -866,12 +868,12 @@ CRITICAL INSTRUCTIONS:
   };
 
   const handleSendFollowup = async () => {
-    if ((!followupInput.trim() && !att.images.length) || loading) return;
+    if ((!followupInput.trim() && !followAtt.images.length) || loading) return;
     if (!hasKey()) return;
     // A picture sent from this box in Generate, with checking on, is the same
     // request as one sent from the box above.
-    if (mode === 'generate' && att.images.length && refineAgainstPicture) {
-      const loopImages = att.take();
+    if (mode === 'generate' && followAtt.images.length && refineAgainstPicture) {
+      const loopImages = followAtt.take();
       const thumbs = await Promise.all(loopImages.map((im) => llmImageThumb(im)));
       const request = followupInput.trim() || 'Build the part shown in the picture.';
       setFollowupInput('');
@@ -879,7 +881,7 @@ CRITICAL INSTRUCTIONS:
       await runPictureLoop(request, loopImages, thumbs[0]);
       return;
     }
-    const images = att.take();
+    const images = followAtt.take();
     const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
     const currentInput = followupInput.trim() || 'Here is a picture.';
     setFollowupInput('');
@@ -1459,8 +1461,8 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                 placeholder="Type an open-ended follow-up request or scene edit..."
                 value={followupInput}
                 onChange={(e) => setFollowupInput(e.target.value)}
-                onPaste={att.onPaste}
-                {...att.dropProps}
+                onPaste={followAtt.onPaste}
+                {...followAtt.dropProps}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -1471,15 +1473,22 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               />
               <button
                 onClick={handleSendFollowup}
-                disabled={loading || (!followupInput.trim() && !att.images.length)}
+                disabled={loading || (!followupInput.trim() && !followAtt.images.length)}
                 className="p-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white rounded-xl transition-all cursor-pointer flex items-center justify-center shrink-0 shadow-sm"
                 title="Send Request"
               >
                 <Send className="w-4 h-4" />
               </button>
             </div>
-            {mode === 'explain' && <CopilotAttachmentTray att={att} disabled={loading} />}
-            {mode === 'explain' && att.images.length > 0 && (
+            <CopilotAttachmentTray att={followAtt} disabled={loading} />
+            {mode === 'generate' && followAtt.images.length > 0 && (
+              <label className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 select-none cursor-pointer"
+                title={`Build, look at the part from the photo's direction, have a second model list what differs, fix it, and keep only rounds that match better. Up to ${DEFAULT_LOOP_ROUNDS} rounds, a few requests each.`}>
+                <input type="checkbox" checked={refineAgainstPicture} onChange={(e) => setRefineAgainstPicture(e.target.checked)} className="accent-blue-600" />
+                Check against the picture and refine (up to {DEFAULT_LOOP_ROUNDS} rounds)
+              </label>
+            )}
+            {mode === 'explain' && followAtt.images.length > 0 && (
               <button type="button" onClick={() => setMode('generate')}
                 className="self-start text-[10px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer">
                 To build the part in the picture, switch to Generate

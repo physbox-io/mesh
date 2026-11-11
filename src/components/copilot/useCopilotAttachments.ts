@@ -1,6 +1,6 @@
 // The pictures waiting to go with the next copilot request: pasted, dropped
-// on the prompt, or picked. One set for the panel, sent with whichever box
-// sends next. The tray that shows them is CopilotAttachments.tsx.
+// on the prompt, or picked. One set per prompt box (the request box and the
+// chat box each have their own). The tray that shows them is CopilotAttachments.tsx.
 
 import type React from 'react';
 import { useCallback, useState } from 'react';
