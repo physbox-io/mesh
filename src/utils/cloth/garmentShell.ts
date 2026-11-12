@@ -14,13 +14,26 @@
  * Z-up, metres, in the form's frame; +x the wearer's left, -y the front.
  */
 
-import type { BodyFormMeasurements, GarmentDraft } from '../../types/cloth';
+import type { BodyFormMeasurements, GarmentDraft, GarmentPlane } from '../../types/cloth';
 import { bodyFormGeoms, bodyFormSection, bodyLandmarks, formSkin } from './bodyForm';
-import { formLimbs, type FormLimb } from './formLimbs';
-import { gridOver, meshSdf, sampleGrid } from './formSdf';
-import { surfaceNet } from './surfaceNets';
-import { clipSurface, collapseShortBoundaryEdges, compact, healFlatTriangles, splitAlong, splitPanels } from './garmentSurface';
-import { garmentPlan, type GarmentCut, type GarmentSeam, type Part, type PartCover } from './garmentPlan';
+import { formLimbs, type FormLimb, type LimbName } from './formLimbs';
+import { gridOver, meshSdfWithin, sampleGrid } from './formSdf';
+import { CLOTH_MATERIALS } from './clothMesh';
+import { garmentSettings } from './garments';
+import { ontoField, surfaceNet } from './surfaceNets';
+import { coarsenSurface, curvatureSize } from './surfaceCoarsen';
+import { clipSurface, refineNear, collapseShortBoundaryEdges, compact, healFlatTriangles, splitAlong, splitPanels } from './garmentSurface';
+import { dartSlit } from './garmentDarts';
+import { profileAt, turnRound } from './edgeProfile';
+import { sculptDabs, sculptField } from './garmentSculpt';
+import { sculptDarts } from './sculptDarts';
+import { curveSlit, draftLines, surfaceCurve, trimOvershoot } from './garmentCurves';
+import type { GarmentCurve } from '../../types/cloth';
+import type { EdgeProfile } from '../../types/cloth';
+
+/** The most a profile lengthens its edge anywhere (none below 0). */
+const profileMax = (pr?: EdgeProfile) => (pr ? Math.max(0, ...pr.points.map((q) => q[1] ?? 0)) : 0);
+import { garmentPlan, restOff, type GarmentCut, type Part, type PartCover } from './garmentPlan';
 
 export { boundaryLoops, splitPanels } from './garmentSurface';
 
@@ -31,12 +44,18 @@ export interface GarmentShell {
   tris: number[];
   /** Seams: chains of point indices, each run along the edges between them. `open`: cut and left open (a jacket's front), not sewn. */
   seams: { name: string; path: number[]; open?: boolean }[];
-  /** The surface split along its seams: each panel's triangles (indices into tris / 3). */
-  panels: { name: string; tris: number[] }[];
+  /** The surface split along its seams: each panel's triangles (indices into tris / 3) and the 3D direction that runs up (+v) its flat piece. */
+  panels: { name: string; tris: number[]; upAxis?: number[] }[];
   /** Its open edges, each run named for the cut that made it: neckline, hem, waist, cuffL, armholeL, opening, top, end. */
   edges: { name: string; path: number[] }[];
   /** The same points as the garment is cut, where that differs from how it is modelled. What it is flattened from. */
   cut?: number[][];
+  /** Round the form under each point, metres: what the garment's ease is added to there. */
+  girth?: number[];
+  /** The part of the form each point is nearest: skin, armL, legR, webL, ... */
+  part?: string[];
+  /** How far each point was let down from where it was cut to hang on the form, metres (garmentShell's hang). */
+  hang?: number[];
 }
 
 /** The grid's spacing at most: about the size of a triangle of a garment round the body. */
@@ -47,12 +66,40 @@ const H_MIN = 0.0075;
 const FLOOR = 0.006;
 /** Over this, where parts' distances are within it of each other, their ease blends (an armpit). */
 const BLEND = 0.02;
+/** Past this a part's ease no longer blends with a nearer one's (its weight under 1e-3). */
+const BLEND_REACH = 7 * BLEND;
+/**
+ * Cloth spans a hollow in the form (between two muscles, the small of the
+ * back, the crook of an arm) unless it can stretch down into it: the widest
+ * ball whose dip a woven cloth spans, metres. A fabric with give follows the
+ * form further in, by its give over HUG_GIVE (spandex at 60% follows it all).
+ */
+const BRIDGE = 0.04;
+const HUG_GIVE = 0.4;
 
 export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, layer = 0): GarmentShell {
   const plan = garmentPlan(draft, form, layer);
   const L = bodyLandmarks(form);
-  const limbs = formLimbs(form);
+  const rawLimbs = formLimbs(form);
   const covers = new Map<Part, PartCover>(plan.covers.map((c) => [c.part, c]));
+  const limbs = { ...rawLimbs };
+  for (const c of plan.covers) {
+    if (c.part === 'skin' || c.part === 'webL' || c.part === 'webR') continue;
+    const l = rawLimbs[c.part];
+    if (l.path.bend > 0) {
+      const sec = l.section(l.path.jointAt);
+      limbs[c.part] = { ...l, path: l.path.refillet(Math.max(sec.w, sec.h) + c.off + H_MAX) };
+    }
+  }
+  // The plan measures along the form's own limbs; carry its distances onto
+  // the rounder lines the shell follows (past a bent elbow the two differ by
+  // a centimetre or more, and a sleeve ended short of its length).
+  const onShellLimb = (limb: LimbName, sAlong: number) => (limbs[limb] === rawLimbs[limb] ? sAlong : limbs[limb].path.closest(rawLimbs[limb].path.at(sAlong), limbs[limb].length + 0.2).s);
+  for (const c of plan.cuts) if (c.kind === 'limbEnd' || c.kind === 'limbStart') c.s = onShellLimb(c.limb, c.s);
+  for (const sm of plan.seams) if (sm.kind === 'limbRing') sm.s = onShellLimb(sm.limb, sm.s);
+  for (const c of plan.covers) {
+    if (c.taper && c.part !== 'skin' && c.part !== 'webL' && c.part !== 'webR') c.taper.len = onShellLimb(c.part, c.taper.len);
+  }
   const parts = plan.covers.map((c) => c.part);
   const limbOf = (part: Part): FormLimb | null => (part === 'skin' || part === 'webL' || part === 'webR' ? null : limbs[part]);
   const alongLimb = (part: Part, p: number[]) => { const limb = limbOf(part); return limb ? limb.path.closest(p, limb.length + 0.2).s : 0; };
@@ -67,24 +114,38 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     for (const ct of plan.cuts) {
       if (ct.kind === 'limbStart' && ct.limb === limb.name) s0 = Math.max(s0, ct.s);
       if (ct.kind === 'limbEnd' && ct.limb === limb.name) s1 = Math.min(s1, ct.s);
-      if (ct.kind === 'hem' && ct.on.includes(c.part)) zMin = Math.max(zMin, ct.z - ct.train);
+      if (ct.kind === 'hem' && ct.on.includes(c.part)) zMin = Math.max(zMin, ct.z - ct.train - profileMax(ct.profile));
     }
     for (let k = 0; k <= 24; k++) {
       const sec = limb.section(s0 + ((s1 - s0) * k) / 24);
       if (sec.c[2] < zMin) continue;
       across = Math.min(across, Math.min(sec.w, sec.h) + c.off);
     }
+    across = Math.min(across, Math.max(0.02, s1 - s0));
   }
   const H = Math.min(H_MAX, Math.max(H_MIN, across / 2));
+  // The silhouette as sculpted: stand-off added round points, any shape.
+  const sculpt = sculptField(draft.sculpt);
+  const sculptReach = 1.25 * sculpt.most;
 
+
+  // The middle of the body front to back at a height, to a tenth of a
+  // millimetre: asked of every cell of the grid, and a section is slow.
+  const centres = new Map<number, number>();
+  const centreY = (z: number) => {
+    const key = Math.round(Math.min(L.hpsZ, Math.max(L.hipZ, z)) * 1e4);
+    let cy = centres.get(key);
+    if (cy === undefined) { cy = bodyFormSection(form, key / 1e4).centreY; centres.set(key, cy); }
+    return cy;
+  };
 
   // ---- How far off each part, at a point.
   const flareAt = (c: PartCover, z: number) => (c.flare ? c.flare.add * Math.max(0, (c.flare.z0 - z) / Math.max(1e-3, c.flare.z0 - c.flare.z1)) : 0);
-  const partOff = (c: PartCover, p: number[]): number => {
-    let v = c.off + flareAt(c, p[2]);
+  const partOff = (c: PartCover, p: number[], flare = true): number => {
+    let v = c.off + (flare ? flareAt(c, p[2]) : 0);
     if (c.snug) {
       const dz = Math.max(0, c.snug.z - p[2]);
-      const cy = c.snug.r !== undefined ? bodyFormSection(form, Math.min(L.hpsZ, Math.max(L.hipZ, p[2]))).centreY : 0;
+      const cy = c.snug.r !== undefined ? centreY(p[2]) : 0;
       const dr = c.snug.r !== undefined ? Math.max(0, Math.hypot(p[0], p[1] - cy) - c.snug.r) : 0;
       const u = Math.min(1, Math.hypot(dz, dr) / c.snug.over);
       const t = u * u * (3 - 2 * u);
@@ -107,23 +168,40 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   const skin = covers.get('skin');
   if (skin) meshes.skin = formSkin(form, skin.skin?.hangFrom, skin.skin?.downTo);
   for (const c of plan.covers) if (c.web) meshes[c.part] = webSheet(limbs[c.web.limb], c.web.along, c.web.depth, (z) => { const sec = bodyFormSection(form, z); return [Math.sign(limbs[c.web!.limb].path.at(0)[0]) * sec.radii[limbs[c.web!.limb].path.at(0)[0] > 0 ? 0 : sec.radii.length / 2], sec.centreY, z]; });
-  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (const part of parts) for (const p of meshes[part].points) for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], p[a]); hi[a] = Math.max(hi[a], p[a]); }
-  // The grid reaches down to the lowest cut (what lies on the floor included),
-  // and out as far as the cloth stands off anywhere.
-  let lowest = Infinity;
-  for (const c of plan.cuts) if (c.kind === 'hem') lowest = Math.min(lowest, Math.min(c.z, 0) - c.train);
+  // Each part's box: the part, out as far as the cloth stands off it (more
+  // at a flared hem, less above it) and its ease blends with its
+  // neighbours'; down to the lowest cut that ends it (what lies on the floor
+  // included). The grid is the boxes together.
+  const lowestOn = (part: Part) => plan.cuts.reduce((z, c) => (c.kind === 'hem' && (!c.on || c.on.includes(part)) ? Math.min(z, c.z - c.train - profileMax(c.profile)) : z), Infinity);
   let reach = 0;
-  for (const c of plan.covers) reach = Math.max(reach, c.off + flareAt(c, lowest) + (c.taper ? Math.max(0, c.taper.end - c.off) : 0));
-  reach += 3 * H;
-  // Every part whole inside the grid: inside and out are told by flooding in
-  // from its edge, and a part cut off by the edge let the flood inside it
-  // (a second surface grew inside the body).
-  for (let a = 0; a < 3; a++) { lo[a] -= reach; hi[a] += reach; }
-  if (lowest < Infinity) lo[2] = Math.min(lo[2], lowest - 2 * H);
+  const boxes = new Map<Part, { lo: number[]; hi: number[] }>();
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const c of plan.covers) {
+    const bl = [Infinity, Infinity, Infinity], bh = [-Infinity, -Infinity, -Infinity];
+    for (const p of meshes[c.part].points) for (let a = 0; a < 3; a++) { bl[a] = Math.min(bl[a], p[a]); bh[a] = Math.max(bh[a], p[a]); }
+    const hem = lowestOn(c.part), base = Math.max(c.off, c.snug?.off ?? 0) + (c.taper ? Math.max(0, c.taper.end - c.off) : 0) + sculptReach;
+    const down = base + flareAt(c, Math.min(hem, bl[2])) + 3 * H, up = base + flareAt(c, bh[2]) + 3 * H;
+    reach = Math.max(reach, down);
+    // Every part whole inside its box: inside and out are told by flooding in
+    // from its edge, and a part cut off by the edge let the flood inside it
+    // (a second surface grew inside the body).
+    const box = {
+      lo: [bl[0] - down - BLEND_REACH, bl[1] - down - BLEND_REACH, Math.min(bl[2] - 3 * H, Math.max(bl[2] - down - BLEND_REACH, hem < Infinity ? hem - 2 * H : -Infinity))],
+      hi: [bh[0] + down + BLEND_REACH, bh[1] + down + BLEND_REACH, bh[2] + up + BLEND_REACH],
+    };
+    boxes.set(c.part, box);
+    for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], box.lo[a]); hi[a] = Math.max(hi[a], box.hi[a]); }
+  }
+  // Symmetric about the middle, as the form is.
+  const halfX = Math.max(-lo[0], hi[0]);
+  lo[0] = -halfX; hi[0] = halfX;
   const grid = gridOver(lo, hi, H);
   const sdf = new Map<Part, Float32Array>();
-  for (const part of parts) sdf.set(part, meshSdf(grid, meshes[part].points, meshes[part].tris));
+  // Each part as the cloth meets it: its hollows spanned as far as the fabric
+  // cannot stretch into them. Part by part, so the gap between an arm and the
+  // side it hangs by stays open.
+  const bridge = BRIDGE * Math.max(0, 1 - CLOTH_MATERIALS[garmentSettings(draft).material ?? 'jersey'].give / HUG_GIVE);
+  for (const part of parts) sdf.set(part, meshSdfWithin(grid, meshes[part].points, meshes[part].tris, boxes.get(part)!.lo, boxes.get(part)!.hi, bridge));
 
   // ---- Which part a point is nearest.
   const nearest = (p: number[]) => {
@@ -134,7 +212,9 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   const on = (list: Part[] | undefined, p: number[]) => !list || list.includes(nearest(p));
 
   // ---- The garment's surface: where the distance to what it covers is its ease.
+  const rest = restOff(layer);
   const field = new Float32Array(grid.dims[0] * grid.dims[1] * grid.dims[2]);
+  const sinkGrid = new Float32Array(field.length);
   const [nx, ny] = grid.dims;
   for (let idx = 0; idx < field.length; idx++) {
     const i = idx % nx, j = Math.floor(idx / nx) % ny, k = Math.floor(idx / (nx * ny));
@@ -142,25 +222,110 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     let dmin = Infinity;
     for (const part of parts) dmin = Math.min(dmin, sdf.get(part)![idx]);
     if (dmin > reach + H) { field[idx] = dmin; continue; }
-    let wsum = 0, esum = 0;
-    for (const c of plan.covers) {
-      const w = Math.exp(-(sdf.get(c.part)![idx] - dmin) / BLEND);
-      if (w < 1e-3) continue;
-      wsum += w;
-      esum += w * partOff(c, p);
+    // Hung from what it rests on: its girth ease below it, not round it. The
+    // surface is the form's moved down by the ease there (a sleeve on an arm,
+    // slack underneath; a bodice's shoulder seam on the shoulder), so a girth
+    // is kept and what faces up is at the rest clearance. One move at a point
+    // for every part, blended as the ease is: moved apart, an arm's root
+    // stood up through a body moved further down. A flare is length, not
+    // girth, and is not moved.
+    // The move is the ease where it is read from, the lifted point (a snug
+    // band's eases off above it): found in a few steps, as it varies slowly.
+    const weights: number[] = [];
+    let w0 = 0;
+    for (const c of plan.covers) { const w = Math.exp(-(sdf.get(c.part)![idx] - dmin) / BLEND); weights.push(w < 1e-3 ? 0 : w); w0 += weights.at(-1)!; }
+    let sink = 0;
+    for (let it = 0; it < 3; it++) {
+      const at = [p[0], p[1], p[2] + sink];
+      let next = 0;
+      plan.covers.forEach((c, ci) => { if (weights[ci]) next += weights[ci] * Math.max(0, partOff(c, at, false) - rest); });
+      sink = next / w0;
     }
-    field[idx] = dmin - esum / wsum;
+    sinkGrid[idx] = sink;
+    // The surface as the form has it, at the height it hangs from: each
+    // part's distance and stand-off (a flare by height, a snug band) read there.
+    const up = [p[0], p[1], p[2] + sink];
+    const d: number[] = [];
+    let hung = Infinity;
+    for (const c of plan.covers) {
+      const v = sink > 0 ? sampleGrid(grid, sdf.get(c.part)!, up) : sdf.get(c.part)![idx];
+      d.push(v); hung = Math.min(hung, v);
+    }
+    let wsum = 0, esum = 0;
+    plan.covers.forEach((c, ci) => {
+      const w = Math.exp(-(d[ci] - hung) / BLEND);
+      if (w < 1e-3) return;
+      wsum += w;
+      esum += w * partOff(c, up);
+    });
+    // Sculpted out, or in no closer than resting on what it covers.
+    const off = esum / wsum, more = sculpt.at(p);
+    field[idx] = hung - (more >= 0 ? off + more : Math.max(off + more, Math.min(off, rest)));
   }
+  // Off the grid as fine as its thinnest part needs; then each part's
+  // triangles as large as its own curvature allows.
   const net = surfaceNet(grid, field);
-  const points = net.points;
-  let tris = largestPieces(points.length, net.tris);
+  const fieldAt = (p: number[]) => sampleGrid(grid, field, p);
+  const fine = { points: net.points, tris: largestPieces(net.points.length, net.tris) };
+  const want = fine.points.map((p) => curvatureSize(fieldAt, p, H, H, H_MAX));
+  {
+    const nbr: number[][] = fine.points.map(() => []);
+    for (let t = 0; t < fine.tris.length; t += 3) for (let e = 0; e < 3; e++) nbr[fine.tris[t + e]].push(fine.tris[t + ((e + 1) % 3)]);
+    for (let it = 0; it < 3; it++) {
+      const next = want.map((w, i) => nbr[i].reduce((m, j) => Math.min(m, want[j] * 1.25), w));
+      for (let i = 0; i < want.length; i++) want[i] = next[i];
+    }
+  }
+  const coarse = coarsenSurface(fine.points, fine.tris, want, ontoField(grid, field));
+  const points = coarse.points;
+  let tris = coarse.tris;
+  // Cut and seamed where the form says (a waist at the waist), so a girth
+  // cut is the form's there with its ease: on the surface lifted back up by
+  // what it hangs, and let down again once cut (below). Cut where it hangs,
+  // the waist seam was the form's girth from higher up, loose, and slid down
+  // the hips (7 cm under a gathered skirt). Lifting only by how far a point
+  // stands off past resting (so a shoulder is cut where it lies) put the
+  // back of a waist at another height from its front: measured worse.
+  const sinkAt = (p: number[]) => Math.max(0, sampleGrid(grid, sinkGrid, p));
+  for (const p of points) p[2] += sinkAt(p);
 
   // ---- Openings.
-  const centreY = (z: number) => bodyFormSection(form, Math.min(L.hpsZ, Math.max(L.hipZ, z))).centreY;
+  // A draft's plane, and where on the garment it applies.
+  const planeDist = (pl: GarmentPlane, p: number[]) => ((p[0] - pl.point[0]) * pl.normal[0] + (p[1] - pl.point[1]) * pl.normal[1] + (p[2] - pl.point[2]) * pl.normal[2]) / (Math.hypot(pl.normal[0], pl.normal[1], pl.normal[2]) || 1);
+  const inPlaneMask = (pl: GarmentPlane, p: number[], isFront: boolean) => (!pl.on || (pl.on as Part[]).includes(nearest(p)))
+    && (pl.front === undefined || isFront === pl.front)
+    && (!pl.z || (p[2] >= pl.z[0] && p[2] <= pl.z[1]))
+    && (!pl.x || (p[0] >= pl.x[0] && p[0] <= pl.x[1]));
+  // Where round a part a point is, for an edge profile (GarmentEdge): round
+  // the body from the centre front toward the wearer's left (+x); round a
+  // limb from its underside toward the front.
+  const bodyTurn = (dx: number, dy: number) => turnRound(dx, dy, 0, [0, -1, 0], [1, 0, 0]);
+  const limbTurn = (limb: LimbName, p: number[]) => {
+    const path = limbs[limb].path, cl = path.closest(p, limbs[limb].length + 0.2), T = path.tangent(cl.s);
+    const flat = (v: number[]) => { const k = v[0] * T[0] + v[1] * T[1] + v[2] * T[2]; return [v[0] - k * T[0], v[1] - k * T[1], v[2] - k * T[2]]; };
+    const unitV = (v: number[]) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+    const down = unitV(flat([0, 0, -1]));
+    const fwd = unitV([T[1] * down[2] - T[2] * down[1], T[2] * down[0] - T[0] * down[2], T[0] * down[1] - T[1] * down[0]]);
+    // Toward the front (-y) whichever way the limb runs.
+    const f = fwd[1] > 0 ? fwd.map((v) => -v) : fwd;
+    return turnRound(p[0] - cl.p[0], p[1] - cl.p[1], p[2] - cl.p[2], down, f);
+  };
   const cutValue = (c: GarmentCut, p: number[]): number => {
     const [x, y, z] = p;
     switch (c.kind) {
-      case 'neckline': {
+      case 'neckline': if (c.shapeFront || c.shapeBack) {
+        // Shaped: the edge drops depth x profile(t) at t = |x| / half across,
+        // front and back blended round the neck as the depths are.
+        const cy = centreY(z), s = form.height / 1.75;
+        const r = Math.hypot(x, y - cy), u = r > 1e-6 ? 0.5 * (1 + (y - cy) / r) : 0.5;
+        const sm = u * u * (3 - 2 * u), t = Math.min(1, Math.abs(x) / c.half);
+        const round = Math.sqrt(Math.max(0, 1 - t * t));
+        const dropF = c.front * (c.shapeFront ? profileAt(c.shapeFront, t) : round), dropB = c.back * (c.shapeBack ? profileAt(c.shapeBack, t) : round);
+        const zTop = L.hpsZ - 0.015 * s * Math.min(1, Math.abs(x) / c.half) * (1 - Math.abs(2 * u - 1));
+        let v = Math.max(zTop - z - (dropF + (dropB - dropF) * sm), Math.abs(x) - c.half);
+        if (z > L.hpsZ - 0.01 * s) v = Math.min(v, r - c.half);
+        return v;
+      } else {
         // An ellipse down from the shoulder line round the neck, blending
         // smoothly between front and back depths so the shoulder seam has no step.
         const cy = centreY(z), s = form.height / 1.75;
@@ -179,16 +344,39 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       case 'hem': {
         if (!on(c.on, p)) return 1;
         const cy = centreY(z), back = Math.max(0, (y - cy) / Math.max(1e-6, Math.hypot(x, y - cy)));
-        return z - (c.z - c.train * back * back);
+        return z - (c.z - c.train * back * back - (c.profile ? profileAt(c.profile, bodyTurn(x, y - cy)) : 0));
       }
-      case 'waist': return on(c.on, p) ? c.z - z : 1;
-      case 'limbEnd': return on(c.on, p) ? c.s - alongLimb(c.limb, p) : 1;
+      case 'waist': return on(c.on, p) ? c.z + (c.profile ? profileAt(c.profile, bodyTurn(x, y - centreY(z))) : 0) - z : 1;
+      case 'limbEnd': return on(c.on, p) ? c.s + (c.profile ? profileAt(c.profile, limbTurn(c.limb, p)) : 0) - alongLimb(c.limb, p) : 1;
       case 'limbStart': return on(c.on, p) ? alongLimb(c.limb, p) - c.s : 1;
+      case 'plane': return inPlaneMask(c, p, y < centreY(z)) ? -planeDist(c, p) : 1;
     }
   };
-  tris = clipSurface(points, tris, (p) => plan.cuts.reduce((v, c) => Math.min(v, cutValue(c, p)), 1)).tris;
+  // A shaped edge (GarmentEdge) cut across triangles a quarter the size, so
+  // its corners keep their points (a V's tip came out 2 cm short).
+  const shaped = plan.cuts.filter((c) => ('profile' in c && c.profile) || (c.kind === 'neckline' && (c.shapeFront || c.shapeBack)));
+  if (shaped.length) {
+    // Midpoints stay on the chords: the points are lifted by their sink here,
+    // off the field, and a chord of a 2 cm edge strays well under a millimetre.
+    tris = refineNear(points, tris, (p) => shaped.reduce((v, c) => Math.min(v, cutValue(c, p)), 1));
+  }
+  // The size of the triangles round each point (a cut point, the edge it cut):
+  // a short edge where a cut crossed is short for the triangles there.
+  const size = new Float64Array(points.length);
   {
-    const remap = collapseShortBoundaryEdges(points, tris, 0.35 * H);
+    const count = new Uint16Array(points.length);
+    for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) {
+      const a = tris[t + e], b = tris[t + ((e + 1) % 3)], l = Math.hypot(points[a][0] - points[b][0], points[a][1] - points[b][1], points[a][2] - points[b][2]);
+      size[a] += l; size[b] += l; count[a] += 2; count[b] += 2;
+    }
+    for (let i = 0; i < points.length; i++) size[i] = count[i] ? size[i] / count[i] : H;
+  }
+  const clipped = clipSurface(points, tris, (p) => plan.cuts.reduce((v, c) => Math.min(v, cutValue(c, p)), 1));
+  tris = clipped.tris;
+  const sizeAt = Array.from(size);
+  for (const [k, id] of clipped.crossing) { const [a, b] = k.split(',').map(Number); sizeAt[id] = (size[a] + size[b]) / 2; }
+  {
+    const remap = collapseShortBoundaryEdges(points, tris, (a, b) => 0.35 * Math.min(sizeAt[a] ?? H, sizeAt[b] ?? H));
     const kept: number[] = [];
     for (let t = 0; t < tris.length; t += 3) {
       const a = remap[tris[t]], b = remap[tris[t + 1]], c = remap[tris[t + 2]];
@@ -206,6 +394,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       case 'armhole': return `armhole${c.limb.slice(3)}`;
       case 'limbEnd': return c.limb.startsWith('arm') ? `cuff${c.limb.slice(3)}` : 'end';
       case 'limbStart': return 'top';
+      case 'plane': return c.name ?? 'cut';
     }
   };
   let edges: GarmentShell['edges'] = [];
@@ -223,6 +412,38 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     }
   }
 
+  // ---- Lines drawn on it (GarmentCurve), laid where it is cut: on the surface lifted as it is here.
+  const liftCurve = (line: GarmentCurve): GarmentCurve => ({ ...line, points: line.points.map((p) => [p[0], p[1], p[2] + sinkAt(p)] as [number, number, number]) });
+  // Drawn cuts, with the openings: the smaller part each cuts off taken away,
+  // its edge named for it. One that cuts nothing off is left as a slit.
+  const slits: { name: string; path: [number, number] }[] = [];
+  for (const line of draftLines(draft.curves)) {
+    if (line.kind !== 'cut') continue;
+    const curve = surfaceCurve(liftCurve(line), points, tris);
+    if (!curve) continue;
+    const slit = curveSlit(curve);
+    const locked = new Set<number>(edges.flatMap((e) => e.path));
+    const r = splitAlong(points, tris, slit.f, (c, corners) => slit.where(c, corners), locked);
+    tris = r.tris;
+    edges = carryThrough(edges, r.split);
+    const parts = splitPanels(points.length, tris, r.edges);
+    const n = points.length, key = (a: number, b: number) => (a < b ? a * n + b : b * n + a);
+    const onLine = new Set(r.edges.map(([a, b]) => key(a, b)));
+    const area = (t: number) => { const [a, b, c] = [0, 1, 2].map((k) => points[tris[3 * t + k]]); const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]; return Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) / 2; };
+    const touching = parts.filter((p) => p.some((t) => [0, 1, 2].some((e) => onLine.has(key(tris[3 * t + e], tris[3 * t + ((e + 1) % 3)])))));
+    if (touching.length < 2) { for (const e of r.edges) slits.push({ name: line.name, path: e }); continue; }
+    const sized = touching.map((p) => ({ p, a: p.reduce((acc, t) => acc + area(t), 0) })).sort((x, y) => y.a - x.a);
+    const gone = new Set(sized.slice(1).flatMap((x) => x.p));
+    const kept: number[] = [];
+    for (let t = 0; t < tris.length / 3; t++) if (!gone.has(t)) kept.push(tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]);
+    tris = kept;
+    // The open edges as they are now: the old ones still on the cloth, and the line's.
+    const uses = new Map<number, number>();
+    for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) { const k = key(tris[t + e], tris[t + ((e + 1) % 3)]); uses.set(k, (uses.get(k) ?? 0) + 1); }
+    edges = edges.filter((e) => uses.get(key(e.path[0], e.path[1])) === 1);
+    for (const e of r.edges) if (uses.get(key(e[0], e[1])) === 1) edges.push({ name: line.name, path: e });
+  }
+
   // ---- Seams.
   const front = (p: number[]) => p[1] - centreY(p[2]);
   // The surface between front and back: the body's front plane, and along
@@ -232,8 +453,8 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   // Negative to the front, on either arm: the plane's normal turns with the
   // arm's own side (left as the tangent gave it, the right arm's was the
   // left's reversed, and the blend closed a loop round that sleeve).
-  const limbPlane = (limb: FormLimb, p: number[]) => front(limb.path.straighten(p));
-  const frontOf = (c: PartCover, p: number[]) => { const limb = limbOf(c.part) ?? (c.web ? limbs[c.web.limb] : null); return limb && limb.name.startsWith('arm') ? limbPlane(limb, p) : front(p); };
+  const limbPlane = (limb: FormLimb, p: number[]) => { const c = limb.path.closest(p, limb.length + 0.2), t = limb.path.tangent(c.s), l = Math.hypot(t[0], t[1]), side = Math.sign(limb.path.at(0)[0]) || 1; return l < 0.2 ? front(p) : (side * ((p[0] - c.p[0]) * -t[1] + (p[1] - c.p[1]) * t[0])) / l; };
+  const frontOf = (c: PartCover, p: number[]) => { const limb = limbOf(c.part); return limb && limb.name.startsWith('arm') ? limbPlane(limb, p) : front(p); };
   const frontBlend = (p: number[]) => {
     let dmin = Infinity;
     const ds = plan.covers.map((c) => { const v = sampleGrid(grid, sdf.get(c.part)!, p); dmin = Math.min(dmin, v); return v; });
@@ -241,7 +462,15 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     plan.covers.forEach((c, i) => { const w = Math.exp(-(ds[i] - dmin) / BLEND); if (w < 1e-3) return; ws += w; fs += w * frontOf(c, p); });
     return fs / ws;
   };
-  let seams: GarmentShell['seams'] = [];
+  // Darts for what the sculpting made that cannot lie flat (sculptDarts), after the plan's own.
+  if (sculpt.most > 0) {
+    const reach = Math.max(...sculptDabs(draft.sculpt).map((d) => d.radius));
+    const taken = plan.seams.flatMap((sm) => (sm.kind === 'dart' ? [sm.apex.point] : []));
+    const live = (p: number[]) => sculpt.at([p[0], p[1], p[2] - sinkAt(p)]) > 0.25 * sculpt.most;
+    const symmetric = (draft.sculpt ?? []).every((d) => d.mirror !== false);
+    for (const line of sculptDarts(points, tris, live, reach, taken, symmetric)) plan.seams.push({ kind: 'dart', ...line });
+  }
+  let seams: GarmentShell['seams'] = slits.map((e) => ({ ...e, open: true }));
   for (const sm of plan.seams) {
     // Topological panel membership from seams already cut: once a boundary seam
     // (such as an armhole) partitions the mesh into discrete components, subsequent
@@ -286,9 +515,16 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       case 'centre':
         runSeam('centre', (p) => p[0], () => true);
         break;
-      case 'frontOpening':
-        runSeam('opening', (p) => p[0], (c, _, t) => inParts(sm.on, t) && (triFront[t] || c[1] < centreY(c[2])), true);
+      case 'frontOpening': {
+        const limb = sm.on.length === 1 ? limbOf(sm.on[0]) : null;
+        runSeam(
+          'opening',
+          (p) => (limb ? p[0] - limb.section(Math.min(limb.length, Math.max(0, alongLimb(sm.on[0], p)))).c[0] : p[0]),
+          (c, _, t) => inParts(sm.on, t) && (triFront[t] || c[1] < (limb ? limb.section(Math.min(limb.length, Math.max(0, alongLimb(sm.on[0], c)))).c[1] : centreY(c[2]))),
+          true,
+        );
         break;
+      }
       case 'partBoundary': {
         const limb = limbs[sm.b], side = Math.sign(limb.path.at(0)[0]);
         runSeam(sm.name, (p) => sampleGrid(grid, sdf.get(sm.a)!, p) - sampleGrid(grid, sdf.get(sm.b)!, p), (p) => Math.sign(p[0]) === side && alongLimb(sm.b, p) < sm.within * limb.length);
@@ -310,19 +546,29 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       case 'limbRing':
         runSeam(sm.name, (p) => alongLimb(sm.limb, p) - sm.s, (_, __, t) => triPart[t] === sm.limb);
         break;
-      case 'gores': {
+      case 'plane':
+        runSeam(sm.name, (p) => planeDist(sm, p), (c, _, t) => inPlaneMask(sm, c, triFront[t]), sm.open);
+        break;
+      case 'curve': {
+        const lines = [...seams, ...edges];
+        const curve = surfaceCurve(liftCurve(sm.line), points, tris, lines.flatMap((x) => x.path.map((i) => points[i])));
+        if (!curve) break;
+        const slit = curveSlit(curve);
+        runSeam(sm.line.name, slit.f, (c, corners) => slit.where(c, corners), sm.line.kind === 'open');
+        // What ran on past a seam it was drawn to, off again.
+        const anchored = new Set<number>();
+        for (const x of seams) if (x.name !== sm.line.name) for (const i of x.path) anchored.add(i);
+        for (const x of edges) for (const i of x.path) anchored.add(i);
+        const drop = trimOvershoot(seams.filter((x) => x.name === sm.line.name).map((x) => x.path as [number, number]), anchored, points);
+        if (drop.size) seams = seams.filter((x) => x.name !== sm.line.name || !drop.has(x.path[0] < x.path[1] ? `${x.path[0]},${x.path[1]}` : `${x.path[1]},${x.path[0]}`));
         break;
       }
-      case 'dart':
-        runSeam(
-          sm.name,
-          sm.axis === 'z' ? (p) => p[2] - sm.at : (p) => sm.side * p[0] - sm.at,
-          (p) => nearest(p) === sm.on
-            && (sm.front === undefined || (front(p) < 0) === sm.front)
-            && (sm.xBeyond === undefined || sm.side * p[0] > sm.xBeyond)
-            && (sm.zRange === undefined || (p[2] > sm.zRange[0] && p[2] < sm.zRange[1])),
-        );
+      case 'dart': {
+        // Slit from its apex along its line, through the panel it lies in.
+        const slit = dartSlit(sm, points, tris, curPanels, [...seams, ...edges].map((x) => x.path));
+        if (slit) runSeam(sm.name, slit.f, (_, __, t) => slit.tris.has(t));
         break;
+      }
     }
   }
 
@@ -343,8 +589,19 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   const rings = new Map<Part, number>();
   for (const sm of plan.seams) if (sm.kind === 'limbRing') rings.set(sm.limb, sm.s);
   let panelTris = splitPanels(points.length, tris, seams.map((sm) => sm.path));
-  // Absorb any microscopic corner slivers (< 6 triangles) across non-open seam edges.
-  if (panelTris.some((p) => p.length < 6)) {
+  // Absorb corner slivers across non-open seam edges: where seams cross near
+  // a point (a crotch, four panels meeting) they can box in a scrap. A
+  // scrap by area, under 1% of the largest panel: triangles are sized by
+  // curvature, so a count says nothing of size.
+  const triArea = (t: number) => {
+    const a = points[tris[3 * t]], b = points[tris[3 * t + 1]], c = points[tris[3 * t + 2]];
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    return Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) / 2;
+  };
+  const panelArea = panelTris.map((p) => p.reduce((acc, t) => acc + triArea(t), 0));
+  const scrapUnder = 0.01 * Math.max(...panelArea);
+  const scrap = panelArea.map((a) => a < scrapUnder);
+  if (scrap.some(Boolean)) {
     const triPanel = new Int32Array(tris.length / 3);
     panelTris.forEach((p, idx) => p.forEach((t) => { triPanel[t] = idx; }));
     const edgeTris = new Map<string, number[]>();
@@ -361,7 +618,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     // A speck a cut left touching nothing is not a panel: it goes.
     const specks = new Set<number>();
     for (let idx = 0; idx < panelTris.length; idx++) {
-      if (panelTris[idx].length >= 6) continue;
+      if (!scrap[idx]) continue;
       // Find the single best neighbouring large panel to absorb this sliver into,
       // so we never dissolve edges to two different large panels and merge them.
       const byNeighbour = new Map<number, string[]>();
@@ -371,7 +628,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
           const k = a < b ? `${a},${b}` : `${b},${a}`;
           for (const ot of edgeTris.get(k) ?? []) {
             const np = triPanel[ot];
-            if (np !== idx && panelTris[np].length >= 6) {
+            if (np !== idx && !scrap[np]) {
               let list = byNeighbour.get(np);
               if (!list) { list = []; byNeighbour.set(np, list); }
               list.push(k);
@@ -392,72 +649,24 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       tris = kept;
     }
     if (dissolve.size > 0 || specks.size > 0) {
-      seams = seams.filter((sm) => sm.open || !dissolve.has(sm.path[0] < sm.path[1] ? `${sm.path[0]},${sm.path[1]}` : `${sm.path[1]},${sm.path[0]}`));
+      // Each seam without its dissolved edges, in the runs that are left.
+      seams = seams.flatMap((sm) => {
+        if (sm.open) return [sm];
+        const runs: number[][] = [[sm.path[0]]];
+        for (let k = 1; k < sm.path.length; k++) {
+          const a = sm.path[k - 1], b = sm.path[k];
+          if (dissolve.has(a < b ? `${a},${b}` : `${b},${a}`)) runs.push([b]);
+          else runs[runs.length - 1].push(b);
+        }
+        return runs.filter((r) => r.length > 1).map((path) => ({ ...sm, path }));
+      });
       panelTris = splitPanels(points.length, tris, seams.map((sm) => sm.path));
     }
   }
-  // Fair interior vertices of each smooth seam and cut-edge chain (Taubin
-  // lambda/mu filter projected back onto the garment surface), then relax
-  // adjacent interior mesh vertices tangentially so cut boundaries have even,
-  // wobble-free triangles before flattening.
-  {
-    const curveNbr = new Map<number, { to: number; tag: string }[]>();
-    const addSeg = (a: number, b: number, tag: string) => {
-      let la = curveNbr.get(a); if (!la) { la = []; curveNbr.set(a, la); }
-      if (!la.some((x) => x.to === b)) la.push({ to: b, tag });
-      let lb = curveNbr.get(b); if (!lb) { lb = []; curveNbr.set(b, lb); }
-      if (!lb.some((x) => x.to === a)) lb.push({ to: a, tag });
-    };
-    for (const sm of seams) addSeg(sm.path[0], sm.path[1], `s:${sm.name}`);
-    for (const ed of edges) addSeg(ed.path[0], ed.path[1], `e:${ed.name}`);
-    const smoothCurveVtx = new Map<number, [number, number]>();
-    for (const [v, list] of curveNbr) {
-      if (list.length !== 2 || list[0].tag !== list[1].tag) continue;
-      const a = points[list[0].to], p = points[v], b = points[list[1].to];
-      const u1 = [p[0] - a[0], p[1] - a[1], p[2] - a[2]], u2 = [b[0] - p[0], b[1] - p[1], b[2] - p[2]];
-      const l1 = Math.hypot(u1[0], u1[1], u1[2]) || 1, l2 = Math.hypot(u2[0], u2[1], u2[2]) || 1;
-      if ((u1[0] * u2[0] + u1[1] * u2[1] + u1[2] * u2[2]) / (l1 * l2) > 0.75) {
-        smoothCurveVtx.set(v, [list[0].to, list[1].to]);
-      }
-    }
-    const gradField = (p: number[]) => {
-      const e = H * 0.5;
-      return [0, 1, 2].map((ax) => {
-        const a = p.slice(), b = p.slice(); a[ax] += e; b[ax] -= e;
-        return (sampleGrid(grid, field, a) - sampleGrid(grid, field, b)) / (2 * e);
-      });
-    };
-    const projectField = (p: number[]) => {
-      if (p[2] <= FLOOR + 0.01) return;
-      for (let it = 0; it < 2; it++) {
-        const val = sampleGrid(grid, field, p), n = gradField(p), l2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
-        if (l2 < 1e-12) return;
-        for (let k = 0; k < 3; k++) p[k] -= (val * n[k]) / l2;
-      }
-    };
-    for (let pass = 0; pass < 4; pass++) {
-      for (const w of [0.40, -0.41]) {
-        const next = new Map<number, number[]>();
-        for (const [v, [a, b]] of smoothCurveVtx) {
-          const pa = points[a], pv = points[v], pb = points[b];
-          const cx = pb[0] - pa[0], cy = pb[1] - pa[1], cz = pb[2] - pa[2];
-          const c2 = cx * cx + cy * cy + cz * cz;
-          if (c2 < 1e-12) continue;
-          const t = ((pv[0] - pa[0]) * cx + (pv[1] - pa[1]) * cy + (pv[2] - pa[2]) * cz) / c2;
-          const q = [
-            pv[0] + w * (pa[0] + t * cx - pv[0]),
-            pv[1] + w * (pa[1] + t * cy - pv[1]),
-            pv[2] + w * (pa[2] + t * cz - pv[2]),
-          ];
-          projectField(q);
-          next.set(v, q);
-        }
-        for (const [v, q] of next) points[v] = q;
-      }
-    }
-  }
-  const used = new Map<string, number>();
-  const panels = panelTris.map((p) => {
+  // Each panel named for what it covers; panels that would share a name (a
+  // front split by an opening, a centre seam, princess lines) by their side,
+  // the one across the middle keeping the name; any still alike, numbered.
+  const named = panelTris.map((p) => {
     const c = [0, 0, 0], votes = new Map<Part, number>();
     for (const t of p) for (let q = 0; q < 3; q++) { const pt = points[tris[3 * t + q]]; for (let k = 0; k < 3; k++) c[k] += pt[k] / (3 * p.length); }
     for (let i = 0; i < p.length; i += Math.max(1, Math.floor(p.length / 40))) { const part = nearest(points[tris[3 * p[i]]]); votes.set(part, (votes.get(part) ?? 0) + 1); }
@@ -465,27 +674,61 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     const cover = covers.get(part)!, tag = part.slice(-1);
     const fb = c[1] < centreY(c[2]) ? 'front' : 'back';
     const ring = rings.get(part);
-    const opened = fb === 'front' && plan.seams.some((o) => o.kind === 'frontOpening');
-    const name = cover.names === 'gore' ? 'gore'
+    const base = cover.names === 'gore' ? 'gore'
       : cover.names === 'sleeve' ? `sleeve${tag}${ring !== undefined ? (alongLimb(part, c) < ring ? 'Upper' : 'Lower') : ''}`
-        : cover.names === 'frontBackSide' || opened ? `${fb}${c[0] > 0 ? 'L' : 'R'}` : fb;
-    const n = (used.get(name) ?? 0) + 1;
-    used.set(name, n);
-    return { name: cover.names === 'gore' || n > 1 ? `${name}${n}` : name, tris: p };
+        : cover.names === 'frontBackSide' ? `${fb}${c[0] > 0 ? 'L' : 'R'}` : fb;
+    const limb = limbOf(part);
+    const t = limb ? limb.path.tangent(alongLimb(part, c)) : null;
+    const upAxis = t ? (t[2] <= 0 ? [-t[0], -t[1], -t[2]] : t) : [0, 0, 1];
+    return { base, cx: c[0], gore: cover.names === 'gore', tris: p, upAxis };
   });
+  const count = (key: string, list: string[]) => list.filter((n) => n === key).length;
+  const bases = named.map((q) => q.base);
+  // Told apart by side only where they lie either side (a sleeve, already
+  // named for its side, cut in two by a dart is numbered, not sided again).
+  const bothSides = (base: string) => { const xs = named.filter((q) => q.base === base && Math.abs(q.cx) >= 0.02).map((q) => q.cx > 0); return xs.includes(true) && xs.includes(false); };
+  const sided = named.map((q) => (q.gore || count(q.base, bases) < 2 || Math.abs(q.cx) < 0.02 || !bothSides(q.base) ? q.base : `${q.base}${q.cx > 0 ? 'L' : 'R'}`));
+  // Numbered from the middle out (a centre back before a side back), gores round.
+  const rank = named.map((_, k) => k).sort((a, b) => (named[a].gore ? a - b : Math.abs(named[a].cx) - Math.abs(named[b].cx)));
+  const used = new Map<string, number>(), number = new Array<number>(named.length);
+  for (const k of rank) { const n = (used.get(sided[k]) ?? 0) + 1; used.set(sided[k], n); number[k] = n; }
+  const panels = named.map((q, k) => ({ name: q.gore || count(sided[k], sided) > 1 ? `${sided[k]}${number[k]}` : sided[k], tris: q.tris, upAxis: q.upAxis }));
   // What reaches below the floor lies on it, out from the body: a floor-length
-  // hem pools, a train spreads out behind; flattened from the unpooled cut,
-  // with bent limbs straightened as a pattern is cut.
-  const cut = points.map((p) => {
-    const part = nearest(p), limb = limbOf(part) ?? (covers.get(part)?.web ? limbs[covers.get(part)!.web!.limb] : null);
-    return limb && limb.path.bend > 0 ? limb.path.straighten(p) : p.slice();
-  });
+  // hem pools, a train spreads out behind; flattened from the unpooled cut.
+  // Let down to where it hangs: each point to where it was lifted from (a
+  // point a cut made, found as the lift there gives it).
+  const lifted = points.map((p) => p.slice());
+  for (const p of points) {
+    let z = p[2] - sinkAt(p);
+    for (let it = 0; it < 4; it++) z = p[2] - sinkAt([p[0], p[1], z]);
+    p[2] = z;
+  }
+  const cut = points.map((p) => p.slice());
   for (const p of points) {
     if (p[2] >= FLOOR) continue;
     const cy = centreY(L.hipZ), dx = p[0], dy = p[1] - cy, l = Math.hypot(dx, dy) || 1;
     p[0] += (dx / l) * (FLOOR - p[2]); p[1] += (dy / l) * (FLOOR - p[2]); p[2] = FLOOR;
   }
-  return compact({ points, cut, tris, seams, panels, edges });
+  const shell: GarmentShell = compact({ points, cut, tris, seams, panels, edges });
+  // Round the form under each point, where it is cut from: what an ease of
+  // circumference is measured against.
+  const perimeter = (radii: number[]) => radii.reduce((acc, r, i) => {
+    const r2 = radii[(i + 1) % radii.length], a = (2 * Math.PI) / radii.length;
+    return acc + Math.sqrt(r * r + r2 * r2 - 2 * r * r2 * Math.cos(a));
+  }, 0);
+  // Measured where it was cut, against the form there.
+  const liftedOf = new Map<number[], number[]>();
+  points.forEach((p, i) => liftedOf.set(p, lifted[i]));
+  const asCut = shell.points.map((p) => liftedOf.get(p) ?? p);
+  shell.part = asCut.map((p) => nearest(p));
+  shell.hang = asCut.map((p, i) => p[2] - (shell.cut ?? shell.points)[i][2]);
+  shell.girth = asCut.map((p, i) => {
+    const part = shell.part![i] as Part, limb = limbOf(part);
+    if (!limb) return perimeter(bodyFormSection(form, Math.min(L.hpsZ, p[2])).radii);
+    const sec = limb.section(Math.min(limb.length, Math.max(0, alongLimb(part, p))));
+    return Math.PI * (3 * (sec.w + sec.h) - Math.sqrt((3 * sec.w + sec.h) * (sec.w + 3 * sec.h)));
+  });
+  return shell;
 }
 
 /** Runs of two points, each split in two through the point let into its edge, if one was. */
@@ -503,12 +746,12 @@ function carryThrough<T extends { path: number[] }>(list: T[], split: Map<string
  * batwing sleeve, the cloth stands off it as off any part.
  */
 function webSheet(limb: FormLimb, along: number, depth: number, sideAt: (z: number) => number[]): { points: number[][]; tris: number[] } {
-  const n = Math.max(2, Math.ceil(along / 0.03)), z0 = limb.path.at(0)[2];
+  const n = Math.max(2, Math.ceil(along / 0.03)), zTop = limb.path.at(0)[2], z0 = zTop - limb.section(0).h, z1 = Math.min(z0 - 0.02, zTop - depth);
   const a: number[][] = [], b: number[][] = [];
   for (let i = 0; i <= n; i++) {
     const s = (along * i) / n, sec = limb.section(s);
     a.push([sec.c[0], sec.c[1], sec.c[2] - sec.h]);
-    b.push(sideAt(z0 - (depth * i) / n));
+    b.push(sideAt(z0 + ((z1 - z0) * i) / n));
   }
   // Each pair of points' normal, from the strip's surface there.
   const cross = (u: number[], v: number[]) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
@@ -516,7 +759,7 @@ function webSheet(limb: FormLimb, along: number, depth: number, sideAt: (z: numb
   const normals: number[][] = [];
   for (let i = 0; i <= n; i++) {
     const j = Math.min(n - 1, i), along3 = a[j + 1].map((v, k) => v - a[j][k]), across = b[i].map((v, k) => v - a[i][k]);
-    normals.push(unit(cross(along3, across)));
+    normals.push(unit(cross(across, along3)));
   }
   const THK = 0.01;
   const points: number[][] = [];

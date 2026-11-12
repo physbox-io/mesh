@@ -13,7 +13,7 @@
  */
 
 import { limbLoft } from './limbLoft';
-import { ellipseHalfWidth, legTuck, NECK_TOP, proportions } from './formProportions';
+import { ellipseHalfWidth, formHeightMeasurements, legTuck, NECK_TOP, proportions } from './formProportions';
 import { neckAxisY } from './formHead';
 
 export { ellipseHalfWidth } from './formProportions';
@@ -37,7 +37,17 @@ export const FIGURE_DEFAULTS: Record<BodyFigure, BodyFormMeasurements> = {
 
 export const DEFAULT_BODY_FORM: BodyFormMeasurements = FIGURE_DEFAULTS.male;
 
-/** Limits the inspector and MCP clamp to, metres (degrees for the arm). */
+/** The measurements a form may leave unset, to be the usual proportion for its height. */
+export type OptionalBodyMeasurement = 'inseam' | 'rise' | 'waistToHip' | 'backLength' | 'shoulderToBust' | 'bustSpan' | 'wrist' | 'thigh' | 'knee' | 'calf' | 'ankle';
+const OPTIONAL_MEASUREMENTS: OptionalBodyMeasurement[] = ['inseam', 'rise', 'waistToHip', 'backLength', 'shoulderToBust', 'bustSpan', 'wrist', 'thigh', 'knee', 'calf', 'ankle'];
+/** The height measurements, which resolveHeights keeps in order (and may move to). */
+const HEIGHT_MEASUREMENTS = ['inseam', 'rise', 'waistToHip', 'backLength', 'shoulderToBust'] as const;
+
+/**
+ * Limits the inspector and MCP clamp to, metres (degrees for the arm). The
+ * heights are also kept in order against each other and the form's height
+ * (formProportions resolveHeights), which can narrow these.
+ */
 export const BODY_FORM_LIMITS: Record<Exclude<keyof BodyFormMeasurements, 'legs' | 'figure'>, [number, number]> = {
   height: [0.9, 2.2],
   chest: [0.5, 1.6],
@@ -50,6 +60,17 @@ export const BODY_FORM_LIMITS: Record<Exclude<keyof BodyFormMeasurements, 'legs'
   upperArm: [0.15, 0.5],
   armAngle: [10, 90],
   elbowBend: [0, 150],
+  inseam: [0.4, 1.05],
+  rise: [0.15, 0.4],
+  waistToHip: [0.1, 0.3],
+  backLength: [0.3, 0.6],
+  shoulderToBust: [0.15, 0.4],
+  bustSpan: [0.12, 0.26],
+  wrist: [0.12, 0.25],
+  thigh: [0.35, 0.85],
+  knee: [0.28, 0.55],
+  calf: [0.25, 0.55],
+  ankle: [0.17, 0.35],
 };
 
 /**
@@ -63,12 +84,22 @@ export function clampBodyForm(m: Partial<BodyFormMeasurements>): BodyFormMeasure
   const out: BodyFormMeasurements = { ...base, ...m, figure };
   // Scale an unstated underbust with a stated chest, keeping the figure's difference.
   if (m.underbust === undefined && m.chest !== undefined) out.underbust = m.chest - (base.chest - base.underbust);
+  const optional = new Set<string>(OPTIONAL_MEASUREMENTS);
   for (const [k, [lo, hi]] of Object.entries(BODY_FORM_LIMITS) as [keyof typeof BODY_FORM_LIMITS, [number, number]][]) {
+    // An optional measurement not given (or given as null) is left unset: the usual proportion.
+    if (optional.has(k) && (out[k] === undefined || out[k] === null || !Number.isFinite(Number(out[k])))) { delete (out as unknown as Record<string, unknown>)[k]; continue; }
     const v = Number(out[k]);
-    out[k] = Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : base[k];
+    (out as unknown as Record<string, number>)[k] = Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : base[k] as number;
   }
   out.underbust = Math.min(out.underbust, out.chest);
   out.legs = out.legs !== false;
+  // The heights set, as resolveHeights placed them in order: a set one it had
+  // to move is stored where it went, so the form says what it is.
+  const placed = formHeightMeasurements(out);
+  for (const k of HEIGHT_MEASUREMENTS) {
+    const v = out[k];
+    if (v !== undefined && Math.abs(placed[k] - v) > 1e-6) out[k] = +placed[k].toFixed(6);
+  }
   return out;
 }
 

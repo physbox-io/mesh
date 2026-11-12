@@ -23,8 +23,18 @@ export interface FlatPiece {
   maxStrain: number;
   /** Area flat over area in 3D, minus one. */
   areaChange: number;
-  /** The strain 95% of the piece's edges are within, as a fraction: maxStrain without its few worst slivers. */
+  /**
+   * The strain 95% of the piece is within, as a fraction: maxStrain without
+   * its few worst slivers. Each edge counts for the cloth it stands for (a
+   * third of each triangle it bounds): the triangles are smaller where the surface curves, which
+   * is where a piece must stretch to lie flat, and counted alike, those edges
+   * read half as much again as the cloth they are.
+   */
   strain95: number;
+  /** Loops inside the outline along seams, as indices into `points`: double-ended darts, their slits opened. */
+  darts?: number[][];
+  /** Eased cloth: per triangle corner j (indices into `tris`), how much longer than it is the edge from corner j to j+1 lies flat by its ease. */
+  edgeEase?: number[];
 }
 
 type V2 = [number, number];
@@ -129,49 +139,46 @@ function cg(apply: (x: Float64Array, out: Float64Array) => void, b: Float64Array
  */
 function lscm(n: number, tris: number[], frames: { p: V2[]; area: number }[], pin: [number, V2][]): V2[] {
   // Each triangle's rows: r = sum_j (v_j g_j - u_j R90 g_j), g_j = grad phi_j.
-  const rows: { idx: number[]; cu: number[][]; cv: number[][] }[] = [];
+  // Flat arrays (corner j of row c of triangle t at 6t + 3c + j): the
+  // operator is applied thousands of times.
+  const T = frames.length, idx = new Int32Array(3 * T), cu = new Float64Array(6 * T), cv = new Float64Array(6 * T);
   frames.forEach(({ p, area }, t) => {
     const w = Math.sqrt(Math.max(area, 1e-16));
-    const idx = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
-    const cu: number[][] = [[0, 0, 0], [0, 0, 0]], cv: number[][] = [[0, 0, 0], [0, 0, 0]];
     for (let j = 0; j < 3; j++) {
+      idx[3 * t + j] = tris[3 * t + j];
       const a = p[(j + 1) % 3], b = p[(j + 2) % 3];
       // Opposite edge turned a quarter, over twice the area.
       const g: V2 = [-(b[1] - a[1]) / (2 * area || 1e-16), (b[0] - a[0]) / (2 * area || 1e-16)];
       const r90: V2 = [-g[1], g[0]];
-      for (let c = 0; c < 2; c++) { cv[c][j] = w * g[c]; cu[c][j] = -w * r90[c]; }
+      for (let c = 0; c < 2; c++) { cv[6 * t + 3 * c + j] = w * g[c]; cu[6 * t + 3 * c + j] = -w * r90[c]; }
     }
-    rows.push({ idx, cu, cv });
   });
   const pinned = new Map(pin);
-  const x = new Float64Array(2 * n); // u0 v0 u1 v1 ...
-  for (const [i, q] of pin) { x[2 * i] = q[0]; x[2 * i + 1] = q[1]; }
-  // Normal equations restricted to the free unknowns.
-  const apply = (y: Float64Array, out: Float64Array) => {
-    out.fill(0);
-    for (const { idx, cu, cv } of rows) {
+  const isPinned = new Uint8Array(n);
+  for (const [i] of pin) isPinned[i] = 1;
+  // y's rows' residuals, spread back: out += sign * A^T A y.
+  const normal = (y: Float64Array, out: Float64Array, sign: number) => {
+    for (let t = 0; t < T; t++) {
+      const i0 = 2 * idx[3 * t], i1 = 2 * idx[3 * t + 1], i2 = 2 * idx[3 * t + 2];
       for (let c = 0; c < 2; c++) {
-        let r = 0;
-        for (let j = 0; j < 3; j++) r += cu[c][j] * y[2 * idx[j]] + cv[c][j] * y[2 * idx[j] + 1];
-        for (let j = 0; j < 3; j++) { out[2 * idx[j]] += cu[c][j] * r; out[2 * idx[j] + 1] += cv[c][j] * r; }
+        const o = 6 * t + 3 * c;
+        const r = cu[o] * y[i0] + cv[o] * y[i0 + 1] + cu[o + 1] * y[i1] + cv[o + 1] * y[i1 + 1] + cu[o + 2] * y[i2] + cv[o + 2] * y[i2 + 1];
+        out[i0] += sign * cu[o] * r; out[i0 + 1] += sign * cv[o] * r;
+        out[i1] += sign * cu[o + 1] * r; out[i1 + 1] += sign * cv[o + 1] * r;
+        out[i2] += sign * cu[o + 2] * r; out[i2 + 1] += sign * cv[o + 2] * r;
       }
     }
-    for (const i of pinned.keys()) { out[2 * i] = 0; out[2 * i + 1] = 0; }
+    for (let i = 0; i < n; i++) if (isPinned[i]) { out[2 * i] = 0; out[2 * i + 1] = 0; }
   };
+  // Normal equations restricted to the free unknowns.
+  const apply = (y: Float64Array, out: Float64Array) => { out.fill(0); normal(y, out, 1); };
   // Right-hand side: minus what the pinned values contribute.
   const xp = new Float64Array(2 * n);
   for (const [i, q] of pin) { xp[2 * i] = q[0]; xp[2 * i + 1] = q[1]; }
   const b = new Float64Array(2 * n);
-  for (const { idx, cu, cv } of rows) {
-    for (let c = 0; c < 2; c++) {
-      let r = 0;
-      for (let j = 0; j < 3; j++) r += cu[c][j] * xp[2 * idx[j]] + cv[c][j] * xp[2 * idx[j] + 1];
-      for (let j = 0; j < 3; j++) { b[2 * idx[j]] -= cu[c][j] * r; b[2 * idx[j] + 1] -= cv[c][j] * r; }
-    }
-  }
-  for (const i of pinned.keys()) { b[2 * i] = 0; b[2 * i + 1] = 0; }
+  normal(xp, b, -1);
   const diag = new Float64Array(2 * n);
-  for (const { idx, cu, cv } of rows) for (let c = 0; c < 2; c++) for (let j = 0; j < 3; j++) { diag[2 * idx[j]] += cu[c][j] ** 2; diag[2 * idx[j] + 1] += cv[c][j] ** 2; }
+  for (let t = 0; t < T; t++) for (let c = 0; c < 2; c++) for (let j = 0; j < 3; j++) { const v = idx[3 * t + j], o = 6 * t + 3 * c + j; diag[2 * v] += cu[o] ** 2; diag[2 * v + 1] += cv[o] ** 2; }
   for (const i of pinned.keys()) { diag[2 * i] = 1; diag[2 * i + 1] = 1; }
   const free = new Float64Array(2 * n);
   cg(apply, b, free, diag, 4000, 1e-20);
@@ -185,8 +192,9 @@ function lscm(n: number, tris: number[], frames: { p: V2[]; area: number }[], pi
  * rotation of its true shape onto the current layout, then the layout that
  * best fits those rotated triangles (a cotangent Laplacian, solved by CG).
  */
-function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], init: V2[], iters: number): V2[] {
+function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], init: V2[], iters: number, eased: EasedTri[] = []): V2[] {
   const uv = init.map((q) => [q[0], q[1]] as V2);
+  const frames0 = eased.length ? frames.map((f) => f.p.map((q) => [q[0], q[1]] as V2)) : [];
   // Cotangent weights per triangle edge (half the cotangent of the opposite angle).
   const cot = frames.map(({ p }) => [0, 1, 2].map((j) => {
     const a = p[j], b = p[(j + 1) % 3], c = p[(j + 2) % 3];
@@ -194,14 +202,14 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
     const cr = Math.abs(u[0] * v[1] - u[1] * v[0]) || 1e-12;
     return Math.max(1e-6, (u[0] * v[0] + u[1] * v[1]) / cr) / 2;
   }));
+  // Edge opposite corner j of triangle t (between corners j+1 and j+2), its weight, flat.
+  const E = 3 * frames.length, ea = new Int32Array(E), eb = new Int32Array(E), ew = new Float64Array(E);
+  for (let t = 0; t < frames.length; t++) for (let j = 0; j < 3; j++) { ea[3 * t + j] = tris[3 * t + ((j + 1) % 3)]; eb[3 * t + j] = tris[3 * t + ((j + 2) % 3)]; ew[3 * t + j] = cot[t][j]; }
   const applyL = (x: Float64Array, out: Float64Array) => {
     out.fill(0);
-    for (let t = 0; t < frames.length; t++) {
-      for (let j = 0; j < 3; j++) {
-        // Edge opposite corner j: between corners j+1 and j+2.
-        const a = tris[3 * t + ((j + 1) % 3)], b = tris[3 * t + ((j + 2) % 3)], w = cot[t][j];
-        out[a] += w * (x[a] - x[b]); out[b] += w * (x[b] - x[a]);
-      }
+    for (let e = 0; e < E; e++) {
+      const a = ea[e], b = eb[e], d = ew[e] * (x[a] - x[b]);
+      out[a] += d; out[b] -= d;
     }
     out[0] += x[0]; // anchor the first point, so the system is not singular
   };
@@ -209,6 +217,20 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
   for (let t = 0; t < frames.length; t++) for (let j = 0; j < 3; j++) { const w = cot[t][j]; diag[tris[3 * t + ((j + 1) % 3)]] += w; diag[tris[3 * t + ((j + 2) % 3)]] += w; }
   diag[0] += 1;
   for (let it = 0; it < iters; it++) {
+    // Eased cloth rests as long along the seam as the layout makes it, between
+    // its true length and that plus its ease: its triangle stretched that way.
+    for (const { t, ease, dir } of eased) {
+      const p0 = frames0[t], ids = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
+      const a = [p0[1][0] - p0[0][0], p0[1][1] - p0[0][1]], b = [p0[2][0] - p0[0][0], p0[2][1] - p0[0][1]];
+      const det = a[0] * b[1] - a[1] * b[0];
+      if (Math.abs(det) < 1e-16) continue;
+      // The layout's stretch along the seam: F dir, F = (current edges) (true edges)^-1.
+      const x = (dir[0] * b[1] - dir[1] * b[0]) / det, y = (a[0] * dir[1] - a[1] * dir[0]) / det;
+      const u0 = uv[ids[0]], u1 = uv[ids[1]], u2 = uv[ids[2]];
+      const fx = x * (u1[0] - u0[0]) + y * (u2[0] - u0[0]), fy = x * (u1[1] - u0[1]) + y * (u2[1] - u0[1]);
+      const f = Math.min(1 + ease, Math.max(1, Math.hypot(fx, fy)));
+      frames[t].p = p0.map((q) => { const along = (q[0] - p0[0][0]) * dir[0] + (q[1] - p0[0][1]) * dir[1]; return [q[0] + (f - 1) * along * dir[0], q[1] + (f - 1) * along * dir[1]] as V2; });
+    }
     const bu = new Float64Array(n), bv = new Float64Array(n);
     for (let t = 0; t < frames.length; t++) {
       const p = frames[t].p, ids = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
@@ -239,8 +261,8 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
   return uv;
 }
 
-/** The piece's outline, in order: its boundary edges chained. */
-function outlineOf(n: number, tris: number[]): number[] {
+/** The piece's boundary loops, in order, each its boundary edges chained: the longest first (its outline), then any inside it (a double-ended dart's slit, opened). */
+function loopsOf(n: number, tris: number[]): number[][] {
   const key = (a: number, b: number) => a * n + b;
   const has = new Set<number>();
   for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) has.add(key(tris[t + e], tris[t + ((e + 1) % 3)]));
@@ -249,19 +271,41 @@ function outlineOf(n: number, tris: number[]): number[] {
     const a = tris[t + e], b = tris[t + ((e + 1) % 3)];
     if (!has.has(key(b, a))) next.set(a, b);
   }
-  let best: number[] = [];
+  const loops: number[][] = [];
   const seen = new Set<number>();
   for (const s of next.keys()) {
     if (seen.has(s)) continue;
     const loop: number[] = [];
     let v: number | undefined = s;
     while (v !== undefined && !seen.has(v)) { seen.add(v); loop.push(v); v = next.get(v); }
-    if (loop.length > best.length) best = loop;
+    loops.push(loop);
   }
-  return best;
+  return loops.sort((a, b) => b.length - a.length);
 }
 
-export function flattenPanel(name: string, shellPoints: number[][], shellTris: number[], panelTris: number[], seamPaths: number[][] = [], arapIters = 15): FlatPiece {
+/** The piece's outline, in order: its boundary edges chained. */
+const outlineOf = (n: number, tris: number[]): number[] => loopsOf(n, tris)[0] ?? [];
+
+/** A triangle within EASE_BAND of an eased edge: how much longer it may lie along the seam (`dir`, in its own frame). */
+interface EasedTri { t: number; ease: number; dir: V2 }
+
+/**
+ * How far from an eased edge its ease is worked in, metres: a cap's ease is
+ * shrunk into its seam allowance and the cloth just inside it. Measured on a
+ * woven shirt's caps at 4%: over 3 cm, strain95 4.9%; over 2 cm (about a ring
+ * of triangles), 5.4-5.7%; tapered to nothing at 3 cm, 5.4-5.8% even at 5%;
+ * none, 6.2-6.4%.
+ */
+const EASE_BAND = 0.03;
+
+/**
+ * `edgeEase` (shell points a, b of an outline edge): how much longer than it
+ * is that edge may lie flat, a fraction (a sleeve cap eased into its
+ * armhole). The cloth along it, within EASE_BAND inside it, is
+ * free to lie that much longer along the seam, and that much of its stretch
+ * along the seam is not counted as strain.
+ */
+export function flattenPanel(name: string, shellPoints: number[][], shellTris: number[], panelTris: number[], seamPaths: number[][] = [], arapIters = 15, upAxis: number[] = [0, 0, 1], edgeEase?: (a: number, b: number) => number): FlatPiece {
   const n0 = shellPoints.length;
   const seams = new Set<number>();
   for (const path of seamPaths) for (let k = 1; k < path.length; k++) { const a = path[k - 1], b = path[k]; seams.add(a < b ? a * n0 + b : b * n0 + a); }
@@ -277,7 +321,44 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
     }
   }
   let uv = lscm(P.length, tris, frames, [[a, [0, 0]], [b, [far, 0]]]);
-  uv = arap(P.length, tris, frames, uv, arapIters);
+  const eased: EasedTri[] = [];
+  if (edgeEase) {
+    const has = new Set<number>();
+    for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) has.add(tris[t + e] * P.length + tris[t + ((e + 1) % 3)]);
+    const segs: { a: number[]; b: number[]; ease: number }[] = [];
+    for (let t = 0; t < tris.length; t += 3) for (let j = 0; j < 3; j++) {
+      const a = tris[t + j], b = tris[t + ((j + 1) % 3)];
+      if (has.has(b * P.length + a)) continue; // inside the piece
+      const ease = edgeEase(points[a], points[b]);
+      if (ease > 0) segs.push({ a: P[a], b: P[b], ease });
+    }
+    if (segs.length) {
+      for (let t = 0; t < tris.length; t += 3) {
+        const A = P[tris[t]], B = P[tris[t + 1]], C = P[tris[t + 2]];
+        const c = [0, 1, 2].map((k) => (A[k] + B[k] + C[k]) / 3);
+        let best = Infinity, dir3 = [0, 0, 0], ease = 0;
+        for (const sg of segs) {
+          const d = [sg.b[0] - sg.a[0], sg.b[1] - sg.a[1], sg.b[2] - sg.a[2]], l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] || 1e-18;
+          const u = Math.max(0, Math.min(1, ((c[0] - sg.a[0]) * d[0] + (c[1] - sg.a[1]) * d[1] + (c[2] - sg.a[2]) * d[2]) / l2));
+          const dist = Math.hypot(c[0] - sg.a[0] - u * d[0], c[1] - sg.a[1] - u * d[1], c[2] - sg.a[2] - u * d[2]);
+          if (dist < best) { best = dist; const l = Math.sqrt(l2); dir3 = [d[0] / l, d[1] / l, d[2] / l]; ease = sg.ease; }
+        }
+        const e = best < EASE_BAND ? ease : 0;
+        if (e <= 0) continue;
+        // The seam's direction in the triangle's own frame (triangleFrames: x along its first edge).
+        const e1 = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], e2 = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
+        const l1 = Math.hypot(e1[0], e1[1], e1[2]) || 1e-12, x = e1.map((v) => v / l1);
+        const nn = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        const y = [nn[1] * x[2] - nn[2] * x[1], nn[2] * x[0] - nn[0] * x[2], nn[0] * x[1] - nn[1] * x[0]], yl = Math.hypot(y[0], y[1], y[2]) || 1e-12;
+        const dx = dir3[0] * x[0] + dir3[1] * x[1] + dir3[2] * x[2], dy = (dir3[0] * y[0] + dir3[1] * y[1] + dir3[2] * y[2]) / yl, dl = Math.hypot(dx, dy);
+        if (dl < 1e-6) continue;
+        eased.push({ t: t / 3, ease: e, dir: [dx / dl, dy / dl] });
+      }
+    }
+  }
+  const easeOf = new Map(eased.map((et) => [et.t, et]));
+  const frames3 = eased.length ? frames.map((f) => ({ p: f.p.map((q) => [q[0], q[1]] as V2), area: f.area })) : frames;
+  uv = arap(P.length, tris, frames3, uv, arapIters, eased);
   const outline = outlineOf(P.length, tris);
   // Fair smooth runs of the 2D outline between corners (Taubin lambda/mu
   // filter, which removes alternating triangle-split sawtooth noise without
@@ -298,6 +379,16 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
       const cos2 = (v1[0] * v2[0] + v1[1] * v2[1]) / (d1 * d2);
       if (cos3 > 0.78 && cos2 > 0.78) smoothVtx.push([iPrev, iCur, iNext]);
     }
+    const minEdge = new Float64Array(P.length).fill(Infinity);
+    for (let t = 0; t < tris.length; t += 3) {
+      for (let e = 0; e < 3; e++) {
+        const i = tris[t + e], j = tris[t + ((e + 1) % 3)];
+        const l3 = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
+        if (l3 < minEdge[i]) minEdge[i] = l3;
+        if (l3 < minEdge[j]) minEdge[j] = l3;
+      }
+    }
+    const uv0 = uv.map((q) => [q[0], q[1]] as V2);
     for (let pass = 0; pass < 4; pass++) {
       for (const w of [0.40, -0.41]) {
         const next = new Map<number, V2>();
@@ -307,20 +398,23 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
           const c2 = cu * cu + cv * cv;
           if (c2 < 1e-12) continue;
           const t = ((pv[0] - pa[0]) * cu + (pv[1] - pa[1]) * cv) / c2;
-          next.set(iCur, [
-            pv[0] + w * (pa[0] + t * cu - pv[0]),
-            pv[1] + w * (pa[1] + t * cv - pv[1]),
-          ]);
+          let nu = pv[0] + w * (pa[0] + t * cu - pv[0]);
+          let nv = pv[1] + w * (pa[1] + t * cv - pv[1]);
+          const du = nu - uv0[iCur][0], dv = nv - uv0[iCur][1], dl = Math.hypot(du, dv);
+          const cap = 0.03 * minEdge[iCur];
+          if (dl > cap && dl > 1e-12) { nu = uv0[iCur][0] + (du * cap) / dl; nv = uv0[iCur][1] + (dv * cap) / dl; }
+          next.set(iCur, [nu, nv]);
         }
         for (const [iCur, q] of next) uv[iCur] = q;
       }
     }
   }
-  // Turned so the body's up (z) runs up the piece (+v), and mirrored if the
-  // layout came out face down.
+  // Turned so `upAxis` (the body's +z, or along a limb toward its root) runs
+  // up the piece (+v), and mirrored if the layout came out face down.
   let su = 0, sv = 0;
-  const zMean = P.reduce((s, q) => s + q[2], 0) / P.length;
-  for (let i = 0; i < P.length; i++) { su += uv[i][0] * (P[i][2] - zMean); sv += uv[i][1] * (P[i][2] - zMean); }
+  const hAt = (q: number[]) => q[0] * upAxis[0] + q[1] * upAxis[1] + q[2] * upAxis[2];
+  const hMean = P.reduce((s, q) => s + hAt(q), 0) / P.length;
+  for (let i = 0; i < P.length; i++) { const dh = hAt(P[i]) - hMean; su += uv[i][0] * dh; sv += uv[i][1] * dh; }
   const ang = Math.PI / 2 - Math.atan2(sv, su), c = Math.cos(ang), s = Math.sin(ang);
   uv = uv.map(([u, v]) => [c * u - s * v, s * u + c * v] as V2);
   let signed = 0;
@@ -331,7 +425,8 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   if (signed < 0) uv = uv.map(([u, v]) => [-u, v] as V2);
   // Distortion: edges and area, flat against true.
   let maxStrain = 0, area3 = 0, area2 = 0;
-  const strains: number[] = [];
+  const edgeEaseOut = eased.length ? new Array(tris.length).fill(0) : undefined;
+  const strains: [number, number][] = [];
   for (let t = 0; t < tris.length; t += 3) {
     area3 += frames[t / 3].area;
     const [p, q, r] = [uv[tris[t]], uv[tris[t + 1]], uv[tris[t + 2]]];
@@ -340,14 +435,28 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
       const i = tris[t + e], j = tris[t + ((e + 1) % 3)];
       const l3 = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
       const l2 = Math.hypot(uv[i][0] - uv[j][0], uv[i][1] - uv[j][1]);
-      if (l3 > 1e-6) { const st = l2 / l3 - 1; strains.push(Math.abs(st)); if (Math.abs(st) > Math.abs(maxStrain)) maxStrain = st; }
+      // Eased cloth: its stretch along the seam, up to its ease, is the ease.
+      const et = easeOf.get(t / 3);
+      let allowed = 0;
+      if (et) {
+        const fp = frames[t / 3].p, ex = fp[(e + 1) % 3][0] - fp[e][0], ey = fp[(e + 1) % 3][1] - fp[e][1], el2 = ex * ex + ey * ey || 1e-18;
+        allowed = (et.ease * (ex * et.dir[0] + ey * et.dir[1]) ** 2) / el2;
+        edgeEaseOut![t + e] = allowed;
+      }
+      if (l3 > 1e-6) { const st0 = l2 / l3 - 1, st = st0 > 0 ? Math.max(0, st0 - allowed) : st0; strains.push([Math.abs(st), frames[t / 3].area / 3]); if (Math.abs(st) > Math.abs(maxStrain)) maxStrain = st; }
     }
   }
   // Centred on its own bounding box.
   let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
   for (const [u, v] of uv) { u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
   uv = uv.map(([u, v]) => [u - (u0 + u1) / 2, v - (v0 + v1) / 2] as V2);
-  strains.sort((x, y) => x - y);
-  const strain95 = strains[Math.floor(strains.length * 0.95)] ?? 0;
-  return { name, points, uv, tris, outline: outlineOf(P.length, tris), maxStrain, strain95, areaChange: area2 / Math.max(1e-12, area3) - 1 };
+  strains.sort((x, y) => x[0] - y[0]);
+  const whole = strains.reduce((acc, [, w]) => acc + w, 0);
+  let strain95 = 0;
+  for (let k = 0, acc = 0; k < strains.length; k++) { acc += strains[k][1]; strain95 = strains[k][0]; if (acc >= 0.95 * whole) break; }
+  // Loops inside it that run all along seams: slits sewn closed, darts.
+  const [outer = [], ...inner] = loopsOf(P.length, tris);
+  const sewnShut = (l: number[]) => l.length >= 3 && l.every((v, k) => { const a = points[v], b = points[l[(k + 1) % l.length]]; return seams.has(a < b ? a * n0 + b : b * n0 + a); });
+  const darts = inner.filter(sewnShut);
+  return { name, points, uv, tris, outline: outer, ...(darts.length ? { darts } : {}), maxStrain, strain95, areaChange: area2 / Math.max(1e-12, area3) - 1, ...(edgeEaseOut ? { edgeEase: edgeEaseOut } : {}) };
 }

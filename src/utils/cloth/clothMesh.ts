@@ -22,22 +22,27 @@ export const CLOTH_MATERIALS: Record<ClothMaterialName, ClothMaterial> = {
   // 160 g/m2 cotton jersey, a t-shirt: 0.8 mm, as jersey is. Modelled 2 mm
   // thick (the same stretch at 2.5x less modulus), it was 15x stiffer to
   // bend, could not follow the form into the armpit, and chattered there.
-  jersey: { arealDensity: 0.16, young: 2.5e6, poisson: 0.2, thickness: 0.0008, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2, give: 0.15 },
+  jersey: { arealDensity: 0.16, young: 2.5e6, poisson: 0.2, thickness: 0.0008, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2, give: 0.15, easeIn: 0 },
+  // 2x2 rib knit: heavier and softer to stretch across the wales, for cuffs,
+  // waistbands, socks and close-fitting tops.
+  rib: { arealDensity: 0.22, young: 1.5e6, poisson: 0.25, thickness: 0.0012, bending: true, damping: 0.2, friction: 0.65, windCd: 1.2, give: 0.35, easeIn: 0 },
+  // Elastane (spandex, Lycra) jersey: soft to stretch, and gives up to 60%.
+  spandex: { arealDensity: 0.19, young: 8e5, poisson: 0.35, thickness: 0.0007, bending: true, damping: 0.2, friction: 0.65, windCd: 1.2, give: 0.6, easeIn: 0 },
   // Shirting or poplin: about twice as heavy for its stretch, and stiffer.
-  woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.2, friction: 0.5, windCd: 1.2, give: 0.02 },
+  woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.2, friction: 0.5, windCd: 1.2, give: 0.02, easeIn: 0.06 },
   // Heavy cotton duck.
-  canvas: { arealDensity: 0.4, young: 1e7, poisson: 0.25, thickness: 0.001, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2, give: 0.01 },
+  canvas: { arealDensity: 0.4, young: 1e7, poisson: 0.25, thickness: 0.001, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2, give: 0.01, easeIn: 0.03 },
   // Knitted HDPE shade cloth. Open, so it takes less of the wind; a membrane
   // with no bending stiffness worth paying for.
   // 12 oz denim: heavy, stiff, barely gives.
-  denim: { arealDensity: 0.4, young: 1.2e7, poisson: 0.25, thickness: 0.0009, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2, give: 0.02 },
+  denim: { arealDensity: 0.4, young: 1.2e7, poisson: 0.25, thickness: 0.0009, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2, give: 0.02, easeIn: 0.04 },
   // Garment leather, about 1 mm: heavy and stiff to bend, no give to speak of.
-  leather: { arealDensity: 0.7, young: 2e7, poisson: 0.35, thickness: 0.0012, bending: true, damping: 0.25, friction: 0.8, windCd: 1.2, give: 0.01 },
+  leather: { arealDensity: 0.7, young: 2e7, poisson: 0.35, thickness: 0.0012, bending: true, damping: 0.25, friction: 0.8, windCd: 1.2, give: 0.01, easeIn: 0 },
   // Silk taffeta: light and crisp, so a full skirt of it stands out in folds.
-  taffeta: { arealDensity: 0.09, young: 6e6, poisson: 0.2, thickness: 0.001, bending: true, damping: 0.2, friction: 0.35, windCd: 1.2, give: 0.01 },
+  taffeta: { arealDensity: 0.09, young: 6e6, poisson: 0.2, thickness: 0.001, bending: true, damping: 0.2, friction: 0.35, windCd: 1.2, give: 0.01, easeIn: 0.02 },
   // Velvet: heavy and soft, its pile thick.
-  velvet: { arealDensity: 0.3, young: 2.5e6, poisson: 0.25, thickness: 0.0016, bending: true, damping: 0.25, friction: 0.8, windCd: 1.2, give: 0.03 },
-  shadeCloth: { arealDensity: 0.185, young: 1e7, poisson: 0.3, thickness: 0.0008, bending: false, damping: 0.2, friction: 0.6, windCd: 0.8, give: 0.05 },
+  velvet: { arealDensity: 0.3, young: 2.5e6, poisson: 0.25, thickness: 0.0016, bending: true, damping: 0.25, friction: 0.8, windCd: 1.2, give: 0.03, easeIn: 0.02 },
+  shadeCloth: { arealDensity: 0.185, young: 1e7, poisson: 0.3, thickness: 0.0008, bending: false, damping: 0.2, friction: 0.6, windCd: 0.8, give: 0.05, easeIn: 0 },
 };
 
 /**
@@ -291,16 +296,19 @@ function pathPlacer(p: PathPlacement, outline: UV[]): (q: UV) => number[] {
   let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
   for (const [u, v] of outline) { uMin = Math.min(uMin, u); uMax = Math.max(uMax, u); vMin = Math.min(vMin, v); vMax = Math.max(vMax, v); }
   if (!Number.isFinite(uMin)) { uMin = 0; uMax = totalLen; vMin = -0.05; vMax = 0.05; }
-  const vMid = (vMin + vMax) / 2;
+  const alongV = p.along === 'v';
+  const aMin = alongV ? vMin : uMin, aMax = alongV ? vMax : uMax;
+  const xMid = alongV ? (uMin + uMax) / 2 : (vMin + vMax) / 2;
   return ([u, v]) => {
-    const s = Math.max(0, Math.min(totalLen, ((u - uMin) / (uMax - uMin || 1)) * totalLen));
+    const a = alongV ? v : u, x = alongV ? u : v;
+    const s = Math.max(0, Math.min(totalLen, ((a - aMin) / (aMax - aMin || 1)) * totalLen));
     let i = 1;
     while (i < cum.length - 1 && cum[i] < s) i++;
     const f = (s - cum[i - 1]) / (cum[i] - cum[i - 1] || 1);
     const P = [0, 1, 2].map((k) => pos[i - 1][k] + (pos[i][k] - pos[i - 1][k]) * f);
     const B = norm([0, 1, 2].map((k) => across[i - 1][k] + (across[i][k] - across[i - 1][k]) * f));
-    const dv = v - vMid;
-    return [0, 1, 2].map((k) => P[k] + dv * B[k]);
+    const dx = x - xMid;
+    return [0, 1, 2].map((k) => P[k] + dx * B[k]);
   };
 }
 
@@ -338,7 +346,7 @@ export interface ClothMesh {
 }
 
 /** Vertex chain along one seam side, with arc-length fractions measured flat. */
-function chain(side: SeamSide, pieces: Record<string, PieceMesh>) {
+export function chain(side: SeamSide, pieces: Record<string, PieceMesh>) {
   const out: { piece: string; id: number; t: number }[] = [];
   for (const { piece, edge, reversed } of side) {
     const m = pieces[piece];

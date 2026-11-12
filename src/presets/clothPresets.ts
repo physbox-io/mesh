@@ -6,7 +6,7 @@
  */
 
 import type { SceneGraph, SceneNode } from '../types/scene';
-import type { ClothEdge, ClothPiece, ClothSeam, ClothTie, PathPlacement, UV } from '../types/cloth';
+import type { ClothEdge, ClothPiece, ClothSeam, ClothTie, UV } from '../types/cloth';
 import { bodyFormNode, garmentNode } from '../utils/cloth/clothNodes';
 import { bodyFormSection, bodyLandmarks } from '../utils/cloth/bodyForm';
 import { GARMENT_DEFAULTS } from '../utils/cloth/garments';
@@ -49,20 +49,23 @@ function menswear(): SceneGraph {
  * of `onto` at height z: from the right tail up into the right loop, across
  * the front of the knot into the left loop, and down into the left tail.
  */
-function bow(id: string, onto: string, backY: number, z: number, layer: number, rgba: number[]): SceneNode {
-  // Placed as a vertical generalized cylinder (across = [0, 0, 1] everywhere)
-  // over a smooth horizontal curve in (x, y), so every triangle of the loops,
-  // center knot, and hanging tails starts isometric to its flat 2D pattern.
+function bow(id: string, onto: string, backY: number, z: number, layer: number, rgba: number[], lean = 0): SceneNode {
+  // Placed as a generalized cylinder over a smooth horizontal curve in (x, y),
+  // so every triangle of the loops, center knot, and hanging tails starts
+  // isometric to its flat 2D pattern. Vertical, but where the tails hang it
+  // leans back by `lean` (y per metre down), so they start along the back
+  // below the knot rather than inside it; moved out at the top by as much,
+  // so the loops above stay off it.
   const vMin = -0.40, vMax = 0.055, vMid = (vMin + vMax) / 2, z0 = z + vMid;
-  const ac = [0, 0, 1];
+  const ac = [0, 0, 1], tail = [0, -lean / Math.hypot(1, lean), 1 / Math.hypot(1, lean)];
   const stations: { p: number[]; across: number[] }[] = [
     // Right back pinch (0..1), tied to the gown.
     { p: [-0.006, backY + 0.005, z0], across: ac },
     { p: [-0.024, backY + 0.006, z0], across: ac },
     // Right tail & back of right loop (1..5).
-    { p: [-0.058, backY + 0.008, z0], across: ac },
-    { p: [-0.068, backY + 0.009, z0], across: ac },
-    { p: [-0.135, backY + 0.014, z0], across: ac },
+    { p: [-0.058, backY + 0.008 + lean * 0.040, z0], across: tail },
+    { p: [-0.068, backY + 0.009 + lean * 0.044, z0], across: tail },
+    { p: [-0.135, backY + 0.014 + lean * 0.053, z0], across: tail },
     // Right loop outer tip (5) and front sheet (6..7).
     { p: [-0.155, backY + 0.025, z0], across: ac },
     { p: [-0.092, backY + 0.038, z0], across: ac },
@@ -74,9 +77,9 @@ function bow(id: string, onto: string, backY: number, z: number, layer: number, 
     { p: [0.092, backY + 0.038, z0], across: ac },
     { p: [0.155, backY + 0.025, z0], across: ac },
     // Left tail & back of left loop (11..15).
-    { p: [0.135, backY + 0.014, z0], across: ac },
-    { p: [0.068, backY + 0.009, z0], across: ac },
-    { p: [0.058, backY + 0.008, z0], across: ac },
+    { p: [0.135, backY + 0.014 + lean * 0.053, z0], across: tail },
+    { p: [0.068, backY + 0.009 + lean * 0.044, z0], across: tail },
+    { p: [0.058, backY + 0.008 + lean * 0.040, z0], across: tail },
     // Left back pinch (15..16), tied to the gown.
     { p: [0.024, backY + 0.006, z0], across: ac },
     { p: [0.006, backY + 0.005, z0], across: ac },
@@ -145,9 +148,14 @@ function ballgown(): SceneGraph {
   const form = bodyFormNode('form', 'form', { figure: 'female' });
   const gown = wearing('gown', { garment: 'gown' }, form, 0);
   // The back of the gown at the waist, from the form and the gown's ease.
-  const m = form.bodyForm!, L = bodyLandmarks(m), sec = bodyFormSection(m, L.waistZ);
-  const back = sec.centreY + sec.radii[Math.round(sec.radii.length / 4)] + GARMENT_DEFAULTS.gown.ease / (2 * Math.PI) + 0.004;
-  return { nodes: [form, gown, bow('bow', 'gown', back + 0.006, L.waistZ + 0.02, 1, [0.08, 0.08, 0.1, 1])] } as SceneGraph;
+  const m = form.bodyForm!, L = bodyLandmarks(m);
+  const off = GARMENT_DEFAULTS.gown.ease / (2 * Math.PI) + 0.004;
+  const backAt = (z: number) => { const q = bodyFormSection(m, z); return q.centreY + q.radii[Math.round(q.radii.length / 4)]; };
+  const back = backAt(L.waistZ) + off, knot = L.waistZ + 0.02;
+  // The tails lean back along the line from the knot that clears the back below it.
+  let lean = 0;
+  for (let dz = 0.02; dz <= 0.4; dz += 0.02) lean = Math.max(lean, (backAt(knot - dz) + off - (back + 0.006)) / dz);
+  return { nodes: [form, gown, bow('bow', 'gown', back + 0.006, knot, 1, [0.08, 0.08, 0.1, 1], lean)] } as SceneGraph;
 }
 
 /**
@@ -174,10 +182,233 @@ function skirt(): SceneGraph {
   return { nodes: [form, wearing('skirt', { garment: 'skirt' }, form, 0)] } as SceneGraph;
 }
 
+const FLORAL_DIAMOND_SVG = [
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">',
+  '<circle cx="16" cy="16" r="7" fill="#fb7185"/>',
+  '<circle cx="16" cy="16" r="2.8" fill="#fef08a"/>',
+  '<circle cx="48" cy="48" r="7" fill="#fb7185"/>',
+  '<circle cx="48" cy="48" r="2.8" fill="#fef08a"/>',
+  '<path d="M48 9 L55 16 L48 23 L41 16 Z" fill="#38bdf8"/>',
+  '<path d="M16 41 L23 48 L16 55 L9 48 Z" fill="#38bdf8"/>',
+  '</svg>',
+].join('');
+
+/**
+ * Showcase outfit combining all garment features:
+ * - Layer 0: Belted denim trousers with front/back patch pockets, 5 belt loops, and a buckled leather belt drawn in.
+ * - Layer 1: Negative-ease spandex top with an SVG surface print and elasticated cuffs.
+ * - Layer 2: Rib-knit cardigan with functional buttons & buttonholes along the front opening, chest pocket, and gathered elastic cuffs/hem.
+ */
+function tailoredOutfit(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'female' });
+  return {
+    nodes: [
+      form,
+      wearing('jeans', {
+        garment: 'trousers',
+        pockets: [{ panel: 'front', at: [0.62, 0.86] }, { panel: 'back', at: [0.5, 0.8] }],
+        beltLoops: 5,
+        belt: { width: 0.035, material: 'leather', rgba: [0.22, 0.13, 0.07, 1] },
+      }, form, 0),
+      wearing('stretchTop', {
+        garment: 'tshirt',
+        material: 'spandex',
+        ease: -0.04,
+        length: 0.03,
+        sleeve: 0.18,
+        rgba: [0.14, 0.22, 0.42, 1],
+        elastics: [{ along: 'cuff', ratio: 0.85, stiffness: 10 }, { along: 'hem', ratio: 0.92, stiffness: 10 }],
+        pattern: { svg: FLORAL_DIAMOND_SVG, scale: 0.14, tile: true },
+      }, form, 1),
+      wearing('cardigan', {
+        garment: 'jacket',
+        material: 'rib',
+        opening: true,
+        ease: 0.14,
+        length: 0.26,
+        sleeve: 0.49,
+        cuff: 0.20,
+        neckline: 0.12,
+        rgba: [0.58, 0.22, 0.28, 1],
+        trims: [{ kind: 'button', along: 'opening', spacing: 0.075, size: 0.015, fastened: true, rgba: [0.92, 0.86, 0.72, 1] }],
+        elastics: [{ along: 'cuff', ratio: 0.82, stiffness: 12 }, { along: 'hem', ratio: 0.88, stiffness: 12 }],
+        pockets: [{ panel: 'frontL', at: [0.5, 0.66], width: 0.095, height: 0.105 }],
+      }, form, 2),
+    ],
+  } as SceneGraph;
+}
+
+/**
+ * A boned strapless gown under a cropped velvet spencer, every part from the
+ * draft: princess seams down to the hem, a zip done up the centre back,
+ * spiral steel bones in the bodice's seams from just below the waist, and a
+ * polyester hoop round the skirt near the floor, in a seam of its own (a
+ * steel one weighs 85 g, more than the taffeta hung from it). The spencer's
+ * left front laps over the right on a button stand.
+ */
+function bonedGown(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'female' });
+  const L = bodyLandmarks(form.bodyForm!);
+  const bones: [number, number] = [L.waistZ - 0.06, 3];
+  return {
+    nodes: [
+      form,
+      wearing('gown', {
+        garment: 'dress',
+        top: L.bustZ + 0.05,
+        length: 1.0,
+        flare: 2.4,
+        material: 'taffeta',
+        rgba: [0.1, 0.32, 0.36, 1],
+        seams: [
+          { name: 'princess', point: [L.bustPoint[0], 0, 0], normal: [1, 0, 0], mirror: true, on: ['skin'] },
+          { name: 'zip', point: [0, 0, 0], normal: [1, 0, 0], front: false, open: true },
+          { name: 'hoop', point: [0, 0, 0.36], normal: [0, 0, 1] },
+        ],
+        rods: [
+          { along: 'princessL', z: bones },
+          { along: 'princessR', z: bones },
+          { along: 'side', z: bones },
+          { along: 'hoop', kind: 'plastic' },
+        ],
+        trims: [{ kind: 'zipper', along: 'zip' }],
+      }, form, 0),
+      wearing('spencer', {
+        garment: 'jacket',
+        material: 'velvet',
+        ease: 0.12,
+        length: 0.02,
+        sleeve: 0.6,
+        cuff: 0.18,
+        neckline: 0.12,
+        rgba: [0.42, 0.08, 0.14, 1],
+        trims: [{ kind: 'button', along: 'opening', spacing: 0.06, fastened: true, lap: 'left', stand: 0.03, rgba: [0.85, 0.72, 0.4, 1] }],
+      }, form, 1),
+    ],
+  } as SceneGraph;
+}
+
+/**
+ * A shirt under a single-breasted jacket, both collared from the draft. The
+ * shirt's collar has a stand of its own (a band, buttoned at the front) and
+ * a fall folded over it; the jacket's fronts turn back into notched lapels
+ * from the top button, its collar running round from one lapel to the other,
+ * its stand easing from 3 cm at the back to 1 cm where it meets them.
+ */
+function shirtAndJacket(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'male' });
+  return {
+    nodes: [
+      form,
+      wearing('shirt', {
+        garment: 'tshirt',
+        material: 'woven',
+        opening: true,
+        ease: 0.12,
+        length: 0.26,
+        sleeve: 0.6,
+        cuff: 0.24,
+        neckline: 0.03,
+        rgba: [0.86, 0.9, 0.96, 1],
+        collar: { stand: 0.03, fall: 0.042, point: -0.012, separateStand: true },
+        trims: [{ kind: 'button', along: 'opening', spacing: 0.09, size: 0.01, rgba: [0.95, 0.95, 0.92, 1] }],
+      }, form, 1),
+      wearing('jacket', {
+        garment: 'jacket',
+        material: 'woven',
+        ease: 0.16,
+        length: 0.26,
+        neckline: 0.05,
+        rgba: [0.16, 0.2, 0.3, 1],
+        lapels: { break: 0.24, width: 0.075, peak: 0.01 },
+        collar: { stand: 0.03, standFront: 0.01, fall: 0.045, separateStand: true },
+        trims: [{ kind: 'button', along: 'opening', spacing: 0.1, size: 0.02, rgba: [0.1, 0.1, 0.12, 1] }],
+        // Worn two layers out from the shirt: round the neck, the shirt's collar is two more layers of cloth.
+      }, form, 3),
+    ],
+  } as SceneGraph;
+}
+
+/**
+ * A fitted woven sheath dress shaped by darts alone, on a form with its
+ * elbows bent: double-ended back waist darts in place of the plan's own,
+ * and on each three-quarter sleeve an elbow dart across the inside of the
+ * bend and a dart down from the shoulder over the cap. Without the sleeve
+ * darts a one-piece sleeve over a bent elbow needs 7% to lie flat; with
+ * them about 4%.
+ */
+function dartedSheath(): SceneGraph {
+  const form = bodyFormNode('form', 'form', { figure: 'female', elbowBend: 25 });
+  return {
+    nodes: [
+      form,
+      wearing('sheath', {
+        garment: 'dress',
+        material: 'woven',
+        fitted: true,
+        length: 0.55,
+        sleeve: 0.45,
+        cuff: 0.2,
+        rgba: [0.55, 0.12, 0.1, 1],
+        darts: [
+          { name: 'backWaist', apex: { z: 'waist', x: 0.075, back: true }, direction: [0, 0, 1], length: 0.15, back: 0.12, mirror: true },
+          { name: 'elbow', apex: { limb: 'armL', along: 'joint', face: [1, 0, 1] }, to: { limb: 'armL', along: 'joint', face: [0, -1, -1] }, mirror: true },
+          { name: 'cap', apex: { limb: 'armL', along: 0.12, face: [0, 0, 1] }, direction: [-1, 0, 1], mirror: true },
+        ],
+      }, form, 0),
+    ],
+  } as SceneGraph;
+}
+
+/**
+ * Fullness: a dress whose skirt is gathered into its bodice at a waist seam,
+ * twice the waist's length of cloth eased in evenly, release tucks up its
+ * back bodice from the same seam; and a skirt knife-pleated
+ * from a yoke, two and a half times round, the pleats stitched down 10 cm.
+ * The extra is in the pieces (spread along the seam) and the sewing; the drape
+ * makes the folds.
+ */
+function gathersAndPleats(): SceneGraph {
+  const left = bodyFormNode('formA', 'formA', { figure: 'female' }, [-0.45, 0, 0]);
+  const right = bodyFormNode('formB', 'formB', { figure: 'female' }, [0.45, 0, 0]);
+  const L = bodyLandmarks(left.bodyForm!);
+  return {
+    nodes: [
+      left,
+      wearing('gathered', {
+        garment: 'dress',
+        rgba: [0.2, 0.36, 0.62, 1],
+        seams: [{ name: 'waist', point: [0, 0, L.waistZ], normal: [0, 0, 1] }],
+        // Two release tucks up the back bodice from the waist: stitched 6 cm,
+        // falling open above. (The front's bust darts reach the waist's
+        // stretch; spread across a dart, its legs no longer match.)
+        fullness: [
+          { along: 'waist', kind: 'gather', ratio: 2 },
+          { along: 'waist', kind: 'knife', panels: ['back1'], ratio: 1.4, count: 2, stitched: 0.06, pressed: false },
+        ],
+      }, left, 0),
+      right,
+      wearing('pleated', {
+        garment: 'skirt',
+        length: 0.55,
+        flare: 1.3,
+        rgba: [0.55, 0.16, 0.2, 1],
+        seams: [{ name: 'yoke', point: [0, 0, L.waistZ - 0.07], normal: [0, 0, 1] }],
+        fullness: [{ along: 'yoke', kind: 'knife', ratio: 2.5, count: 6, stitched: 0.1 }],
+      }, right, 0),
+    ],
+  } as SceneGraph;
+}
+
+export const gathersAndPleatsPreset = gathersAndPleats();
 export const knitwearPreset = knitwear();
 export const skirtPreset = skirt();
 export const menswearPreset = menswear();
 export const ballgownPreset = ballgown();
+export const tailoredOutfitPreset = tailoredOutfit();
+export const bonedGownPreset = bonedGown();
+export const shirtAndJacketPreset = shirtAndJacket();
+export const dartedSheathPreset = dartedSheath();
 
 /** A sail edge from `a` to `b`, cut in toward the middle by `sag` of its length, as sails are. */
 function catenaryEdge(id: string, a: UV, b: UV, sag: number): ClothEdge {

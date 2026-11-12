@@ -62,10 +62,14 @@ export function prepareScene(scene: SceneGraph): { nodes: SceneNode[]; breaks: R
   // really be emitted. A body with nothing derived is returned untouched.
   // Each body's own geom list, before it is resolved: a convex piece's source
   // mesh is dropped from what is emitted, and bodyMass needs to find it.
+  // Cloth collides with the drawn meshes, read from the model by name, so with
+  // cloth in the scene a decomposed body keeps them (massless, out of contact).
   const authoredGeoms = new Map<SceneNode, SceneGeom[]>();
+  let hasCloth = false;
+  eachNode(nodes, (node) => { if (node.cloth) hasCloth = true; });
   eachNode(nodes, (node) => {
     authoredGeoms.set(node, node.geoms || []);
-    node.geoms = resolveCsgGeoms(node, 'physics');
+    node.geoms = resolveCsgGeoms(node, 'physics', { keepDrawn: hasCloth });
   });
 
   applyContactClasses(nodes, scene.simFidelity === 'print');

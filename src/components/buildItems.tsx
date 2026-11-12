@@ -1,4 +1,4 @@
-import { BrickWall, ListChecks, Puzzle, Wrench } from 'lucide-react';
+import { BrickWall, ListChecks, PersonStanding, Puzzle, Wrench } from 'lucide-react';
 import type { BuildItem } from './BuildMenu';
 
 /** The building methods, in the order a person would reach for them. */
@@ -6,6 +6,7 @@ export function buildItems(actions: {
   pipes?: () => void;
   joinery?: () => void;
   brick?: () => void;
+  dressForm?: () => void;
   partsList: () => void;
   hasHardware: boolean;
 }): BuildItem[] {
@@ -19,6 +20,9 @@ export function buildItems(actions: {
       : []),
     ...(actions.brick
       ? [{ label: 'Brick', hint: 'Lay a shape in brick, course by course, with the bricks to buy, the cuts, the mortar and the lintels. Best for: walls, piers, planters and barbecues.', icon: <BrickWall className={icon} />, run: actions.brick }]
+      : []),
+    ...(actions.dressForm
+      ? [{ label: 'Dress form', hint: 'A tailor\'s dummy to make garments on, sized by tape measurements in its card. Its garments are in the left sidebar.', icon: <PersonStanding className={icon} />, run: actions.dressForm }]
       : []),
     {
       label: 'Parts list',

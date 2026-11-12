@@ -29,6 +29,8 @@ import { sceneContentBounds } from '../../utils/frameScene';
 import { checkIncomingBody } from '../../utils/incomingBodyCheck';
 import { geomSizeProblem } from '../../utils/geomSize';
 import { withoutNulls } from '../../utils/withoutNulls';
+import { clampBodyForm } from '../../utils/cloth/bodyForm';
+import type { BodyFormMeasurements } from '../../types/cloth';
 
 export interface PendingDeclarativeOps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -316,7 +318,11 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
   // so a default free joint and 0.25 m box were ghosts that only the scene
   // summary showed. Cloth likewise: its pieces are its substance, and its
   // vertices move, not the body.
-  const logical = b.isPulleyRope === true || (b.cloth != null && typeof b.cloth === 'object');
+  // A dress form is generated: its geoms are built from its measurements
+  // (compileCsgNodes, in a worker) and it stands still, so it gets neither a
+  // default box nor a free joint.
+  const generated = (b as { bodyForm?: unknown }).bodyForm != null && typeof (b as { bodyForm?: unknown }).bodyForm === 'object';
+  const logical = b.isPulleyRope === true || (b.cloth != null && typeof b.cloth === 'object') || generated;
   // A nested body with no joints given is fixed rigidly to its parent.
   const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested || logical) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)
@@ -581,6 +587,7 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
 
   const node: SceneNode = {
     ...(rest as SceneNode),
+    ...(generated ? { bodyForm: clampBodyForm((b as { bodyForm: Partial<BodyFormMeasurements> }).bodyForm) } : {}),
     ...(latticeFields ?? {}),
     ...(sculptFields ?? {}),
     id,

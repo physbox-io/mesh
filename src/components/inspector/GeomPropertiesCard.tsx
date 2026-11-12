@@ -1,5 +1,7 @@
 import { Trash2 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
+import { geomIsRebuilt } from '../../utils/generatedGeoms';
+import { useTreeView } from '../../store/treeViewStore';
 import { sliderSpan } from '../../utils/sliderSpan';
 import type { SceneGeom, SceneNode } from '../../types/scene';
 import { SliderValue } from '../SliderValue';
@@ -39,6 +41,8 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
   const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
   const geom = selectedNode.geoms[activeIndex];
   if (!geom) return null;
+  // Rebuilt from the body's measurements: anything set here would be lost on the next rebuild.
+  if (geomIsRebuilt(selectedNode, geom)) return part === 'main' ? null : <SubGeomSelector node={selectedNode} />;
   const bodyId = model?._idMaps?.body?.[selectedNode.id];
   const bodyMass = bodyId !== undefined && bodyId >= 0 ? model?.body_mass?.[bodyId] : undefined;
   const mass = displayedGeomMass(selectedNode, activeIndex, bodyMass);
@@ -276,7 +280,10 @@ export function SubGeomSelector({ node: selectedNode }: { node: SceneNode }) {
   const activeGeomIndex = useStore((s) => s.activeGeomIndex);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const deleteNodeGeom = useStore((s) => s.deleteNodeGeom);
+  const showInternal = useTreeView((s) => s.showInternalParts);
   if (!selectedNode.geoms || selectedNode.geoms.length < 2) return null;
+  // A builder's parts are picked here only when the tree lists them too.
+  if (!showInternal && selectedNode.geoms.filter((g) => !g.csgDerived && !g.internal).length < 2) return null;
   const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
   const geom = selectedNode.geoms[activeIndex];
   const hwGroup = geom?.hardware?.group;
@@ -298,7 +305,7 @@ export function SubGeomSelector({ node: selectedNode }: { node: SceneNode }) {
             // 16 sector colliders would otherwise bury its two real
             // shapes at the bottom of this list. Values stay the
             // real indices so activeGeomIndex still means one thing.
-            g.csgDerived ? null : (
+            g.csgDerived || (g.internal && !showInternal) ? null : (
             <option key={idx} value={idx}>
               {g.csg === 'difference' ? '\u2796 ' : g.csg === 'intersection' ? '\u2229 ' : ''}{g.name || `Geom ${idx + 1}`} ({g.type})
             </option>

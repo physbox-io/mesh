@@ -14,10 +14,12 @@ import {
   translateMeshGeoms, rotateMeshGeomsAbsolute,
 } from './meshGeomTransforms';
 import { detachReferencesTo } from './breakage';
+import { releaseGarments } from '../utils/cloth/clothNodes';
 import { MUJOCO_SHIM, getPhysicsWorkerClient } from './physicsEngine';
 import type { SliceDeps } from './sliceDeps';
 import { takeEnvironment } from './sceneEnvironment';
 import { assertGeomSizes } from '../utils/geomSize';
+import { mergeBodyForm } from '../utils/cloth/bodyFormEdit';
 
 /** A node's own transform, as MJCF would apply it under its parent. */
 const localMatrixOf = (node: SceneNode): THREE.Matrix4 => {
@@ -226,8 +228,12 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
         for (const node of nodes) {
           if (node.id === id) {
             const wasJointless = !(node.joints?.length > 0);
+            const prevBodyForm = node.bodyForm;
             Object.assign(node, updates);
             if (updates.geoms) promotePosedStaticMeshes(node);
+            // A body form's measurements take a change of a few fields; its
+            // geoms are rebuilt from them in a worker (useCsgCompile).
+            if (updates.bodyForm) node.bodyForm = mergeBodyForm(prevBodyForm, updates.bodyForm);
             // Body-level rgba is a shorthand for colouring the body's geoms:
             // SceneNode has no colour of its own in MJCF or the renderer, so
             // storing it on the node alone left SCAD and primitive bodies lilac.
@@ -402,6 +408,11 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
         };
         collect(get().sceneGraph.nodes);
         for (const id of gone) newScene.nodes = detachReferencesTo(newScene.nodes, id);
+        // A garment on a deleted form keeps the cut it had and falls.
+        const goneForms: SceneNode[] = [];
+        const forms = (nodes: SceneNode[]) => { for (const n of nodes) { if (gone.includes(n.id) && n.bodyForm) goneForms.push(n); forms(n.children || []); } };
+        forms(get().sceneGraph.nodes);
+        newScene.nodes = releaseGarments(newScene.nodes, goneForms);
         set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [] });
         get().recompile(newScene, null);
       }

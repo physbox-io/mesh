@@ -18,6 +18,8 @@ import { TimberBreakdownModal } from './TimberBreakdownModal';
 import { ExportSheetUnfoldModal } from './ExportSheetUnfoldModal';
 import { ExportTubeAndWireModal } from './ExportTubeAndWireModal';
 import { BrickworkModal } from './BrickworkModal';
+import { addClothNode, frameForm } from './palette/clothStartActions';
+import { newFormNode } from '../utils/cloth/clothStart';
 import { BottomStatusBar } from './BottomStatusBar';
 import { MachineConfigModal } from './MachineConfigModal';
 import { moldSubject, selectedIds } from '../utils/moldSubject';
@@ -242,6 +244,7 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           unfold: opening(setIsSheetUnfoldModalOpen),
           pipes: opening(setIsTubeAndWireModalOpen),
           brick: () => setIsBrickModalOpen(true),
+          dressForm: () => { const form = newFormNode(useStore.getState().sceneGraph.nodes, 'female'); addClothNode(form); frameForm(form); },
           etch: { run: sendToEtch, busy: etchBusy, error: etchError },
         }}
       />

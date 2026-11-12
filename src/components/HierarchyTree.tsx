@@ -1,7 +1,8 @@
 import { useCallback, useState } from 'react';
-import { ChevronRight, ChevronDown, Eye, EyeOff, Trash2 } from 'lucide-react';
+import { ChevronRight, ChevronDown, Eye, EyeOff, ListPlus, Trash2 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { usePanels } from '../store/panelsStore';
+import { useTreeView } from '../store/treeViewStore';
 import { HARDWARE_KINDS } from '../utils/hardwareCuts';
 import type { SceneGeom, SceneNode } from '../types/scene';
 
@@ -45,6 +46,20 @@ function geomEmoji(node: SceneNode, g: SceneGeom): string {
   return '🔹';
 }
 
+/**
+ * Whether a geom gets a row of its own: not a boolean's output, not a
+ * generated collider, and not a builder's part unless those are being shown.
+ */
+function listsGeom(g: SceneGeom, showInternal: boolean): boolean {
+  return !g.csgDerived && g.role !== 'collision' && (showInternal || !g.internal);
+}
+
+function countInternal(nodes: SceneNode[]): number {
+  let n = 0;
+  for (const node of nodes) n += (node.geoms ?? []).filter((g) => g.internal && listsGeom(g, true)).length + countInternal(node.children ?? []);
+  return n;
+}
+
 /** Picking a row selects it and, as an overlay on a phone, gets the drawer out of the way. */
 function useSelectRow() {
   const setSelectedNodeId = useStore((s) => s.setSelectedNodeId);
@@ -81,10 +96,12 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
   const toggleNodeHidden = useStore((s) => s.toggleNodeHidden);
   const deleteNodeGeom = useStore((s) => s.deleteNodeGeom);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
+  const updateNodeGeom = useStore((s) => s.updateNodeGeom);
+  const showInternal = useTreeView((s) => s.showInternalParts);
   const select = useSelectRow();
 
   const dimmed = isHidden || ancestorHidden;
-  const userGeoms = node.geoms?.filter((g) => !g.csgDerived && g.role !== 'collision') ?? [];
+  const userGeoms = node.geoms?.filter((g) => listsGeom(g, showInternal)) ?? [];
   const showGeoms = userGeoms.length > 1 && !node.isCurve;
   const hasChildren = !!node.children && node.children.length > 0;
   const collapsible = showGeoms || hasChildren;
@@ -143,7 +160,7 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
               || (!!hw && node.geoms[activeGeomIndex]?.hardware?.group === hw.group));
             // Generated boolean output is derived data, not something to select
             // and edit — the primitives above it are the real controls.
-            if (g.csgDerived || g.role === 'collision') return null;
+            if (!listsGeom(g, showInternal)) return null;
 
             const hwGroup = hw?.group;
             const canDeleteSubGeom = node.geoms.filter(
@@ -163,12 +180,22 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
                 <span className="flex items-center gap-1.5 text-[11px] font-medium truncate min-w-0">
                   <span>{geomEmoji(node, g)}</span>
                   <span
-                    className={`truncate ${g.csg === 'difference' && !hw ? 'line-through decoration-rose-400/70' : ''}`}
+                    className={`truncate ${g.csg === 'difference' && !hw ? 'line-through decoration-rose-400/70' : ''} ${g.internal ? 'italic' : ''}`}
                     title={hw ? 'G moves it, S steps its size; or use its row in the Cut panel' : undefined}
                   >
                     {hw ? `${HARDWARE_KINDS[hw.kind].label} ${hw.size}` : (g.name || `Geom ${idx + 1}`)}
                   </span>
                 </span>
+                {/* Listed only because generated parts are shown: this lists it always. */}
+                {g.internal && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); updateNodeGeom(node.id, { internal: undefined }, idx); }}
+                    className="ml-auto pl-1 p-0.5 rounded cursor-pointer shrink-0 text-slate-400/70 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700/60"
+                    title="Generated part. Click to list it always, not only with Show generated parts"
+                  >
+                    <ListPlus className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 {canDeleteSubGeom && (
                   <button
                     type="button"
@@ -177,7 +204,7 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
                       deleteNodeGeom(node.id, idx);
                       setActiveGeomIndex(0, false);
                     }}
-                    className={`ml-auto pl-1 p-0.5 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 cursor-pointer shrink-0 transition-opacity ${
+                    className={`${g.internal ? '' : 'ml-auto '}pl-1 p-0.5 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 cursor-pointer shrink-0 transition-opacity ${
                       isGeomSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
                     }`}
                     title={`Delete shape "${hw ? `${HARDWARE_KINDS[hw.kind].label} ${hw.size}` : (g.name || `Geom ${idx + 1}`)}"`}
@@ -214,6 +241,9 @@ export function HierarchyTree() {
   const nodes = useStore((s) => s.sceneGraph.nodes);
   const worldSelected = useStore((s) => !s.selectedNodeId);
   const select = useSelectRow();
+  const internalCount = countInternal(nodes);
+  const showInternal = useTreeView((s) => s.showInternalParts);
+  const setShowInternal = useTreeView((s) => s.setShowInternalParts);
 
   // Bodies folded shut in the hierarchy. View state only, so not in the store,
   // and everything starts open.
@@ -254,6 +284,17 @@ export function HierarchyTree() {
           <p className="px-3 py-2 text-[11px] leading-relaxed text-slate-400 dark:text-slate-500">
             Nothing here yet. Drag a part in from Components below, open a scene at the top, or ask the Copilot to build one.
           </p>
+        )}
+        {/* Parts a builder made from a body's own settings (a dress form's
+            head, limbs and torso slabs) are listed only on request. */}
+        {internalCount > 0 && (
+          <button
+            onClick={() => setShowInternal(!showInternal)}
+            className="mt-1 self-start px-2 py-1 rounded text-[11px] text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 cursor-pointer"
+            title="Parts made from a body's settings, such as a dress form's head, limbs and torso. Listed or not, they draw and collide."
+          >
+            {showInternal ? 'Hide generated parts' : `Show generated parts (${internalCount})`}
+          </button>
         )}
       </div>
     </div>

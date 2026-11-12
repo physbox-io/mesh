@@ -2940,14 +2940,17 @@ export function isCollidingMeshGeom(g: SceneGeom): boolean {
  * any other keeps the old way round, its pieces carrying the mass and the mesh
  * dropped (dynamic) or kept massless (static) — a STATIC mesh is drawn from
  * data.geom_xpos via its geom id, and dropped it would jump to the origin.
+ * `keepDrawn` keeps a dynamic one massless too: cloth collides with the drawn
+ * meshes, read from the model by name, and a dropped one let a garment fall
+ * through its decomposed form.
  */
-function demoteDecomposedGeom(g: SceneGeom, pieces: SceneGeom[]): SceneGeom[] {
+function demoteDecomposedGeom(g: SceneGeom, pieces: SceneGeom[], keepDrawn = false): SceneGeom[] {
   if (g.type !== 'mesh') return [g];
   if (pieces.length > 0 && meshWeighsExactly(g)) {
     const mass = +pieces.reduce((m, c) => m + (c.mass ?? 0), 0).toFixed(8);
     if (mass > 0) return [{ ...g, role: 'visual' as const, mass, density: undefined }];
   }
-  return g.dynamic ? [] : [{ ...g, role: 'visual' as const, mass: 0 }];
+  return g.dynamic && !keepDrawn ? [] : [{ ...g, role: 'visual' as const, mass: 0 }];
 }
 
 const exactlyWeighable = new WeakMap<object, boolean>();
@@ -2970,7 +2973,12 @@ export function meshWeighsExactly(g: SceneGeom): boolean {
   return ok;
 }
 
-export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): SceneGeom[] {
+/**
+ * `keepDrawn` (physics only): a decomposed body's drawn meshes stay in the
+ * model, massless and out of contact, rather than being dropped — for scenes
+ * with cloth, which collides with what is drawn (utils/cloth/clothWorld).
+ */
+export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render', opts: { keepDrawn?: boolean } = {}): SceneGeom[] {
   const geoms = node.geoms || [];
   // A negative is a hole. It is never a solid — not drawn, not simulated — and
   // that holds whether or not csgEnabled is set. Enforcing it here rather than
@@ -3007,7 +3015,7 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
     const kept = authored.flatMap(g => {
       if (!demoted(g)) return [g];
       const pieces = legacy ? [] : colliders.filter(c => c.colliderOf === g.name);
-      const out = demoteDecomposedGeom(g, pieces);
+      const out = demoteDecomposedGeom(g, pieces, opts.keepDrawn);
       if (out.some(o => (o.mass ?? 0) > 0)) weighed.add(g.name);
       return out;
     });

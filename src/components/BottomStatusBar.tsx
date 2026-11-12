@@ -206,6 +206,8 @@ export interface ExportActions {
   pipes?: () => void;
   /** Lay a shape in brick: the bricks to buy, the cuts, the mortar and the lintels. */
   brick?: () => void;
+  /** A new dress form, measurements to set in its card. */
+  dressForm?: () => void;
   /** The part laid flat and opened in Etch, cut for the bench's machine. */
   etch?: { run: () => void; busy: boolean; error: string | null };
 }
@@ -468,7 +470,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             : []),
         ];
   // Built by hand from bought stock, whatever is on the bench.
-  const build = buildItems({ pipes: exports.pipes, joinery: exports.joinery, brick: exports.brick, partsList: () => openHardwareList(), hasHardware });
+  const build = buildItems({ pipes: exports.pipes, joinery: exports.joinery, brick: exports.brick, dressForm: exports.dressForm, partsList: () => openHardwareList(), hasHardware });
 
   return (
     /*

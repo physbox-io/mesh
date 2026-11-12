@@ -59,20 +59,7 @@ export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: numbe
     if (!nbr[a].includes(b)) nbr[a].push(b);
     if (!nbr[b].includes(a)) nbr[b].push(a);
   }
-  const grad = (p: number[]) => {
-    const e = h * 0.5;
-    return [0, 1, 2].map((ax) => {
-      const a = p.slice(), b = p.slice(); a[ax] += e; b[ax] -= e;
-      return (sampleGrid(g, f, a) - sampleGrid(g, f, b)) / (2 * e);
-    });
-  };
-  const project = (p: number[]) => {
-    for (let it = 0; it < 3; it++) {
-      const val = sampleGrid(g, f, p), n = grad(p), l2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
-      if (l2 < 1e-12) return;
-      for (let a = 0; a < 3; a++) p[a] -= (val * n[a]) / l2;
-    }
-  };
+  const grad = fieldGradient(g, f), project = ontoField(g, f);
   for (let it = 0; it < relax; it++) {
     const next = points.map((p, i) => {
       if (!nbr[i].length) return p;
@@ -87,4 +74,25 @@ export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: numbe
     for (let i = 0; i < points.length; i++) points[i] = next[i];
   }
   return { points, tris };
+}
+
+/** The gradient of a grid field at p, by central differences half a cell wide. */
+export function fieldGradient(g: Grid, f: Float32Array): (p: number[]) => number[] {
+  const e = g.h * 0.5;
+  return (p) => [0, 1, 2].map((ax) => {
+    const a = p.slice(), b = p.slice(); a[ax] += e; b[ax] -= e;
+    return (sampleGrid(g, f, a) - sampleGrid(g, f, b)) / (2 * e);
+  });
+}
+
+/** Moves a point onto the field's zero set, in place, by a few Newton steps along its gradient. */
+export function ontoField(g: Grid, f: Float32Array): (p: number[]) => void {
+  const grad = fieldGradient(g, f);
+  return (p) => {
+    for (let it = 0; it < 3; it++) {
+      const val = sampleGrid(g, f, p), n = grad(p), l2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+      if (l2 < 1e-12) return;
+      for (let a = 0; a < 3; a++) p[a] -= (val * n[a]) / l2;
+    }
+  };
 }

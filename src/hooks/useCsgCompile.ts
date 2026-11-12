@@ -26,6 +26,7 @@ import { bodyEdges, bodyUp } from '../utils/edgeRoundBase';
 import { keepFoundEdges } from '../utils/edgeRound';
 import { findNodeById } from '../utils/sceneTree';
 import { describeLoadFailure } from '../utils/staleBuild';
+import { bodyFormKey, finishBodyFormGeoms, needsBodyFormBuild } from '../utils/cloth/bodyFormEdit';
 
 const COMPILE_DEBOUNCE_MS = 100;
 
@@ -85,6 +86,44 @@ function collectUnbuiltBrickwork(nodes: SceneNode[], out: SceneNode[] = []): Sce
     collectUnbuiltBrickwork(node.children || [], out);
   }
   return out;
+}
+
+/**
+ * Body forms whose geoms were built from other measurements (a slider moved,
+ * an MCP update, a body arriving as measurements alone). Built in the body
+ * form worker; the old geoms stay until the new ones land, so a garment on
+ * the form is not dropped meanwhile. One build per body and key at a time,
+ * and a failed key is not retried until the measurements change.
+ */
+const failedBodyForms = new Set<string>();
+const bodyFormsInFlight = new Set<string>();
+const bodyFormJob = (node: SceneNode) => `${node.id}|${bodyFormKey(node)}`;
+function collectStaleBodyForms(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
+  for (const node of nodes || []) {
+    if (needsBodyFormBuild(node) && !failedBodyForms.has(bodyFormJob(node)) && !bodyFormsInFlight.has(bodyFormJob(node))) out.push(node);
+    collectStaleBodyForms(node.children || [], out);
+  }
+  return out;
+}
+
+async function buildBodyForms(stale: SceneNode[]): Promise<void> {
+  if (stale.length === 0) return;
+  const { buildBodyFormOffThread } = await import('../utils/cloth/bodyFormClient');
+  await Promise.all(stale.map(async (node) => {
+    const job = bodyFormJob(node), key = bodyFormKey(node);
+    bodyFormsInFlight.add(job);
+    try {
+      const geoms = await buildBodyFormOffThread(node.bodyForm!, node.name || node.id);
+      // Built from the measurements it still has: if they changed meanwhile, the next pass builds the new ones.
+      const now = findNodeById(useStore.getState().sceneGraph.nodes, node.id);
+      if (now && bodyFormKey(now) === key) useStore.getState().updateNode(node.id, { geoms: finishBodyFormGeoms(geoms), bodyFormBuilt: key });
+    } catch (err) {
+      failedBodyForms.add(job);
+      console.error(`Building the body form failed for ${node.id}:`, err);
+    } finally {
+      bodyFormsInFlight.delete(job);
+    }
+  }));
 }
 
 function collectUnbuiltScad(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
@@ -190,9 +229,11 @@ export async function compileCsgNodes(
   const stale = collectStale(scene.nodes);
   const unbuilt = collectUnbuiltScad(scene.nodes);
   const unlaid = collectUnbuiltBrickwork(scene.nodes);
+  const staleForms = collectStaleBodyForms(scene.nodes);
+  await buildBodyForms(staleForms);
   if (stale.length === 0 && unbuilt.length === 0 && unlaid.length === 0 && (!colliders || collectStaleColliders(scene.nodes).length === 0)) {
     if (!colliders && collectStaleColliders(scene.nodes).length > 0) scheduleCsgCompile();
-    return 0;
+    return staleForms.length;
   }
   if (unlaid.length > 0) {
     const { layBrickworkSourceOffThread } = await import('../utils/brickworkClient');
@@ -277,11 +318,11 @@ export async function compileCsgNodes(
     }
   }
 
-  const meshesChanged = stale.length + unbuilt.length + unlaid.length > 0;
+  const meshesChanged = stale.length + unbuilt.length + unlaid.length + staleForms.length > 0;
   if (!skipFinalRecompile && (meshesChanged || colliderPiecesChanged(staleColliders))) {
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);
   }
-  return stale.length + unbuilt.length + unlaid.length + staleColliders.length;
+  return stale.length + unbuilt.length + unlaid.length + staleForms.length + staleColliders.length;
 }
 
 /**
@@ -312,6 +353,7 @@ export function useCsgAutoCompile() {
     if (collectStale(sceneGraph.nodes).length === 0 &&
         collectUnbuiltScad(sceneGraph.nodes).length === 0 &&
         collectUnbuiltBrickwork(sceneGraph.nodes).length === 0 &&
+        collectStaleBodyForms(sceneGraph.nodes).length === 0 &&
         collectStaleColliders(sceneGraph.nodes).length === 0) return;
     scheduleCsgCompile();
   }, [sceneGraph]);

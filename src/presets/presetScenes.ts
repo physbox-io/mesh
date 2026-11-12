@@ -29,7 +29,8 @@ import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
 import { hydrostaticFlotationPreset } from './hydrostaticFlotation';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
-import { ballgownPreset, dressOnFormPreset, knitwearPreset, menswearPreset, shadeSailPreset, skirtPreset, tshirtOnFormPreset } from './clothPresets';
+import { urbanCollectionPreset } from './urbanCollection';
+import { ballgownPreset, bonedGownPreset, dartedSheathPreset, dressOnFormPreset, gathersAndPleatsPreset, knitwearPreset, menswearPreset, shadeSailPreset, shirtAndJacketPreset, skirtPreset, tailoredOutfitPreset, tshirtOnFormPreset } from './clothPresets';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
   bearingCartPreset, chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
@@ -3490,11 +3491,29 @@ export const PRESETS = {
     scene: dressOnFormPreset,
     camera: { position: [1.4, -2.8, 1.4], target: [0, 0, 0.95] } satisfies PresetCamera,
   },
+  urban_collection: {
+    name: 'Urban Collection: Puffer & Shorts, Hoodie & Cut-offs',
+    emoji: '🧢',
+    scene: urbanCollectionPreset,
+    camera: { position: [0.7, -2.7, 1.4], target: [0, 0, 1.0] } satisfies PresetCamera,
+  },
   menswear_on_form: {
     name: 'Jeans, T-shirt and Leather Jacket',
     emoji: '🧥',
     scene: menswearPreset,
     camera: { position: [1.4, -2.9, 1.4], target: [0, 0, 0.95] } satisfies PresetCamera,
+  },
+  shirt_and_jacket_on_form: {
+    name: 'Collared Shirt and Jacket with Notched Lapels',
+    emoji: '👔',
+    scene: shirtAndJacketPreset,
+    camera: { position: [1.0, -2.0, 1.45], target: [0, 0, 1.2] } satisfies PresetCamera,
+  },
+  tailored_outfit_on_form: {
+    name: 'Belted Jeans, Printed Spandex Top & Buttoned Cardigan',
+    emoji: '🧶',
+    scene: tailoredOutfitPreset,
+    camera: { position: [1.35, -2.7, 1.38], target: [0, 0, 0.95] } satisfies PresetCamera,
   },
   knitwear_on_form: {
     name: 'Knit Hat, Socks and Leg Warmers',
@@ -3513,6 +3532,24 @@ export const PRESETS = {
     emoji: '👑',
     scene: ballgownPreset,
     camera: { position: [2.6, 1.9, 1.5], target: [0, 0.25, 0.75] } satisfies PresetCamera,
+  },
+  boned_gown_on_form: {
+    name: 'Boned Strapless Gown with a Hoop and Spencer',
+    emoji: '🎀',
+    scene: bonedGownPreset,
+    camera: { position: [1.9, -2.5, 1.3], target: [0, 0, 0.8] } satisfies PresetCamera,
+  },
+  darted_sheath_on_form: {
+    name: 'Darted Sheath Dress with Elbow Darts',
+    emoji: '🪡',
+    scene: dartedSheathPreset,
+    camera: { position: [1.6, -2.4, 1.3], target: [0, 0, 1.0] } satisfies PresetCamera,
+  },
+  gathers_and_pleats_on_form: {
+    name: 'Gathered Dress and Pleated Skirt',
+    emoji: '👗',
+    scene: gathersAndPleatsPreset,
+    camera: { position: [0, -3.4, 1.2], target: [0, 0, 0.8] } satisfies PresetCamera,
   },
   shade_sail: {
     name: 'Shade Sail',

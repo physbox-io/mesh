@@ -119,6 +119,14 @@ export interface SceneGeom {
   // other meshes go on as they were. Absent on older colliders, which stand in
   // for every colliding mesh of the body.
   colliderOf?: string;
+  /**
+   * Made by a builder from the body's own parameters (a dress form's head,
+   * limbs and torso slabs), not authored one by one: the hierarchy and the
+   * sub-geometry picker leave it out unless "Show generated parts" is on
+   * (store/treeViewStore). UI only: it is compiled, drawn and collides as
+   * any other geom.
+   */
+  internal?: boolean;
   rgba?: number[];
   // Colour brushed onto part of this geom's surface (see utils/vertexPaint).
   // Purely decorative: nothing in the physics, the MJCF emitter or any exporter
@@ -913,6 +921,12 @@ export interface SceneNode {
    * any garment drafted for it.
    */
   bodyForm?: BodyFormMeasurements;
+  /**
+   * The measurements (and name) the geoms were last built from
+   * (utils/cloth/bodyFormEdit.ts, bodyFormKey). When bodyForm no longer
+   * matches, the background compiler rebuilds the geoms in a worker.
+   */
+  bodyFormBuilt?: string;
   pulleyWheelId?: string;
   /**
    * A rope's strands holding each end (default 1): 2 for a load hung in a

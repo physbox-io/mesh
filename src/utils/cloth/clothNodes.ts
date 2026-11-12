@@ -7,18 +7,25 @@ import type { BodyFormMeasurements, GarmentDraft } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import { bodyFormGeoms, clampBodyForm } from './bodyForm';
 import { GARMENT_DEFAULTS } from './garments';
+import { bodyFormKey, finishBodyFormGeoms } from './bodyFormEdit';
 
 /** A static dress form standing at `pos`. */
 export function bodyFormNode(id: string, name: string, measurements: Partial<BodyFormMeasurements> = {}, pos: number[] = [0, 0, 0]): SceneNode {
   const m = clampBodyForm(measurements);
-  return { id, name, pos: [...pos], bodyForm: m, geoms: bodyFormGeoms(m, name), joints: [], children: [] } as unknown as SceneNode;
+  const node = { id, name, pos: [...pos], bodyForm: m, geoms: finishBodyFormGeoms(bodyFormGeoms(m, name)), joints: [], children: [] } as unknown as SceneNode;
+  node.bodyFormBuilt = bodyFormKey(node);
+  return node;
 }
 
-/** The node's geoms, regenerated from its measurements. */
+/**
+ * The node's geoms, regenerated from its measurements, here and now. The
+ * editor rebuilds a changed form in a worker instead (useCsgCompile).
+ */
 export function rebuildBodyForm(node: SceneNode): void {
   if (!node.bodyForm) return;
   node.bodyForm = clampBodyForm(node.bodyForm);
-  node.geoms = bodyFormGeoms(node.bodyForm, node.name || node.id);
+  node.geoms = finishBodyFormGeoms(bodyFormGeoms(node.bodyForm, node.name || node.id));
+  node.bodyFormBuilt = bodyFormKey(node);
 }
 
 /**
@@ -38,4 +45,42 @@ export function garmentNode(id: string, name: string, draft: Omit<GarmentDraft, 
     joints: [],
     children: [],
   } as unknown as SceneNode;
+}
+
+/**
+ * A garment on no form, cut to `measurements` and standing at `pos` as it
+ * would be worn on a form of them there: with nothing inside it, it falls
+ * when the scene plays.
+ */
+export function looseGarmentNode(id: string, name: string, draft: Omit<GarmentDraft, 'fitTo' | 'form'>, measurements: Partial<BodyFormMeasurements>, pos: number[]): SceneNode {
+  const garment: GarmentDraft = { ...draft, form: clampBodyForm(measurements) };
+  return {
+    id, name, pos: [...pos],
+    cloth: { garment, material: draft.material ?? GARMENT_DEFAULTS[draft.garment].material },
+    geoms: [], joints: [], children: [],
+  } as unknown as SceneNode;
+}
+
+/**
+ * `nodes` with every garment fitted to one of `forms` let go of it: cut to
+ * that form's measurements as it was, on no form. How deleting a form leaves
+ * what it wore to fall, rather than naming a form that is not there (the
+ * scene would not build).
+ */
+export function releaseGarments(nodes: SceneNode[], forms: SceneNode[]): SceneNode[] {
+  const by = new Map(forms.filter((f) => f.bodyForm).map((f) => [f.name || f.id, f.bodyForm!]));
+  if (!by.size) return nodes;
+  const walk = (list: SceneNode[]): SceneNode[] => {
+    const out = list.map(one);
+    return out.every((n, i) => n === list[i]) ? list : out;
+  };
+  const one = (n: SceneNode): SceneNode => {
+    const children = n.children?.length ? walk(n.children) : n.children;
+    const draft = n.cloth?.garment, m = draft?.fitTo ? by.get(draft.fitTo) : undefined;
+    if (!m && children === n.children) return n;
+    if (!m) return { ...n, children };
+    const { fitTo: _fitTo, ...rest } = draft!;
+    return { ...n, children, cloth: { ...n.cloth!, garment: { ...rest, form: structuredClone(m) } } };
+  };
+  return walk(nodes);
 }

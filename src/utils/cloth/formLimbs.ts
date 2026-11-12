@@ -79,6 +79,41 @@ function frame(path: LimbPath, s: number, side: number[], c: number[], w: number
   return { c, w, h, side: sd, up: cross(t, sd), ...(shape ? { shape } : {}) };
 }
 
+/** Perimeter of an ellipse of half-axes a and b (Ramanujan). */
+const ellipseGirth = (a: number, b: number) => Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
+
+/** The wrist's half width and half height at scale S, before a wrist measurement scales them. */
+const wristAxes = (S: number) => [0.029 * S, 0.0205 * S];
+
+/** The thigh's and calf's radius from the hip, before girth measurements scale the leg's sections. */
+function legRadii(m: BodyFormMeasurements) {
+  const thighR = (m.hip * (m.figure === 'female' ? 0.58 : 0.55)) / (2 * Math.PI);
+  return { thighR, calfR: thighR * 0.66 };
+}
+
+/**
+ * The limb girths as the proportions give them: round the section at the
+ * thigh, knee, calf, ankle and wrist (an ellipse; the muscles' relief over it
+ * adds a few millimetres). A girth measurement scales its section to read it.
+ */
+export function defaultLimbGirths(m: BodyFormMeasurements) {
+  const { thighR, calfR } = legRadii(m), S = m.height / 1.75, [wa, wb] = wristAxes(S);
+  return {
+    thigh: ellipseGirth(thighR * 0.78, thighR * 0.92),
+    knee: ellipseGirth(thighR * 0.6, thighR * 0.6),
+    calf: ellipseGirth(calfR * 0.86, calfR * 0.94),
+    ankle: ellipseGirth(calfR * 0.53, calfR * 0.6),
+    wrist: ellipseGirth(wa, wb),
+  };
+}
+
+/** How much each girth measurement scales its section: 1 for one not set. */
+function girthScales(m: BodyFormMeasurements) {
+  const d = defaultLimbGirths(m);
+  const f = (v: number | undefined, d0: number) => (v === undefined ? 1 : v / d0);
+  return { thigh: f(m.thigh, d.thigh), knee: f(m.knee, d.knee), calf: f(m.calf, d.calf), ankle: f(m.ankle, d.ankle), wrist: f(m.wrist, d.wrist) };
+}
+
 function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const P = proportions(m), S = P.s;
   const th = (m.armAngle * Math.PI) / 180;
@@ -91,9 +126,11 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   // height]; then the hand, a mitten curling a little toward the body:
   // [past the wrist, curl, half width, half height].
   const E = ELBOW_AT;
-  const armRows = [[0, rA * 0.8, rA * 0.8], [0.1 * A, rA * 0.92, rA * 0.92], [0.25 * A, rA * 0.97, rA * 0.97], [(E - 0.09) * A, rA * 0.9, rA * 0.88], [E * A, rA * 0.82, rA * 0.76], [(E + 0.11) * A, rA * 0.84, rA * 0.74], [0.86 * A, rA * 0.66, rA * 0.54], [A, 0.029 * S, 0.0205 * S]];
+  // The wrist measurement scales the wrist, and half as much the forearm above it.
+  const fw = girthScales(m).wrist, fwa = fw === 1 ? 1 : (1 + fw) / 2, [wa, wb] = wristAxes(S);
+  const armRows = [[0, rA * 0.8, rA * 0.8], [0.1 * A, rA * 0.92, rA * 0.92], [0.25 * A, rA * 0.97, rA * 0.97], [(E - 0.09) * A, rA * 0.9, rA * 0.88], [E * A, rA * 0.82, rA * 0.76], [(E + 0.11) * A, rA * 0.84, rA * 0.74], [0.86 * A, rA * 0.66 * fwa, rA * 0.54 * fwa], [A, wa * fw, wb * fw]];
   const handL = HAND_LENGTH * S;
-  const handRows = [[0, 0, 0.029 * S, 0.0205 * S], [0.23 * handL, 0, 0.042 * S, 0.022 * S], [0.5 * handL, 0.004 * S, 0.045 * S, 0.019 * S], [0.75 * handL, 0.012 * S, 0.042 * S, 0.014 * S], [handL, 0.026 * S, 0.034 * S, 0.011 * S]];
+  const handRows = [[0, 0, wa * fw, wb * fw], [0.23 * handL, 0, 0.042 * S, 0.022 * S], [0.5 * handL, 0.004 * S, 0.045 * S, 0.019 * S], [0.75 * handL, 0.012 * S, 0.042 * S, 0.014 * S], [handL, 0.026 * S, 0.034 * S, 0.011 * S]];
   // The palm faces the body; across it lies the hand's width, thumb side to
   // the front and up. Widths elsewhere are square to the elbow's axis (so
   // the sections stay square through the turn), twisting to the hand's.
@@ -143,7 +180,7 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
 
 function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const P = proportions(m), S = P.s, H = m.height, female = m.figure === 'female';
-  const thighR = (m.hip * (female ? 0.58 : 0.55)) / (2 * Math.PI), calfR = thighR * 0.66;
+  const { thighR, calfR } = legRadii(m), g = girthScales(m);
   const hipHalf = ellipseHalfWidth(m.hip, female ? 0.74 : 0.72);
   const hipDepth = hipHalf * (female ? 0.74 : 0.72);
   // The foot stands a sock's thickness clear of the floor: with its sole on
@@ -151,7 +188,12 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   // The leg's root sits up in the hip, its top section matching the hip's
   // outer contour and front-to-back depth there so the hip flows continuously
   // into the thigh with no cylinder step at the crotch.
-  const kneeZ = 0.285 * H, footZ = 0.035 * S + FOOT_ROOM, topZ = P.hipZ - 0.015 * S;
+  const footZ = 0.035 * S + FOOT_ROOM, topZ = P.hipZ - 0.015 * S;
+  // Heights down the leg, at the usual proportions, stretched between the
+  // ankle and the crotch where an inseam moves the crotch.
+  const k = (P.crotchZ - footZ) / (0.47 * H - footZ);
+  const lz = (z: number) => (P.crotchZ === 0.47 * H ? z : footZ + (z - footZ) * k);
+  const kneeZ = lz(0.285 * H);
   const xTop = side * hipHalf * 0.5, xAnkle = side * hipHalf * 0.56;
   const top = [xTop, P.centre.hip, topZ], ankle = [xAnkle, 0.01 * S, footZ];
   const down = unit(ankle.map((v, k) => v - top[k]));
@@ -163,19 +205,21 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   // hem or a sock's top and crushed it.
   const path = makeLimbPath(top, down, fwd, upper, upper + foot, bend, 0.08 * S);
   // Down the leg by height: [height, half width (across), half depth].
+  // Each girth measurement scales its own row, and the rows between take the mean.
+  const mid = (a: number, b: number) => (a === b ? a : (a + b) / 2);
   const legRows = [
-    [0.035 * S + 0.03 * S, calfR * 0.56, calfR * 0.66],
-    [0.05 * H + 0.015 * S, calfR * 0.53, calfR * 0.6],
-    [0.05 * H + 0.1 * S, calfR * 0.66, calfR * 0.72],
-    [kneeZ - 0.12 * S, calfR * 0.86, calfR * 0.94],
-    [kneeZ - 0.035 * S, thighR * 0.6, thighR * 0.6],
-    [kneeZ + 0.03 * S, thighR * 0.62, thighR * 0.64],
-    [P.crotchZ - (P.crotchZ - kneeZ) * 0.45, thighR * 0.78, thighR * 0.92],
+    [lz(0.035 * S + 0.03 * S), calfR * 0.56 * g.ankle, calfR * 0.66 * g.ankle],
+    [lz(0.05 * H + 0.015 * S), calfR * 0.53 * g.ankle, calfR * 0.6 * g.ankle],
+    [lz(0.05 * H + 0.1 * S), calfR * 0.66 * mid(g.ankle, g.calf), calfR * 0.72 * mid(g.ankle, g.calf)],
+    [lz(0.285 * H - 0.12 * S), calfR * 0.86 * g.calf, calfR * 0.94 * g.calf],
+    [lz(0.285 * H - 0.035 * S), thighR * 0.6 * g.knee, thighR * 0.6 * g.knee],
+    [lz(0.285 * H + 0.03 * S), thighR * 0.62 * g.knee, thighR * 0.64 * g.knee],
+    [P.crotchZ - (P.crotchZ - kneeZ) * 0.45, thighR * 0.78 * g.thigh, thighR * 0.92 * g.thigh],
     [P.crotchZ, hipHalf * 0.5, hipDepth * 0.86],
     [topZ, hipHalf * 0.47, hipDepth * 0.72],
   ];
   // Along the foot past the ankle: [distance, half width, half height, how far its centre drops].
-  const footRows = [[-0.02 * S, calfR * 0.5, calfR * 0.56, 0], [0.01 * S, 0.034 * S, 0.033 * S, 0], [0.05 * S, 0.04 * S, 0.03 * S, 0.003 * S], [0.1 * S, 0.045 * S, 0.022 * S, 0.01 * S], [foot, 0.035 * S, 0.015 * S, 0.017 * S]];
+  const footRows = [[-0.02 * S, calfR * 0.5 * g.ankle, calfR * 0.56 * g.ankle, 0], [0.01 * S, 0.034 * S, 0.033 * S, 0], [0.05 * S, 0.04 * S, 0.03 * S, 0.003 * S], [0.1 * S, 0.045 * S, 0.022 * S, 0.01 * S], [foot, 0.035 * S, 0.015 * S, 0.017 * S]];
   const soleZ = FOOT_ROOM + 0.004 * S;
   const yHeel = ankle[1] + calfR * 0.54;
   return {

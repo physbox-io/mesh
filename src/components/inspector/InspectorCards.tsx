@@ -14,6 +14,10 @@ import { ContainerWaterCard } from './ContainerWaterCard';
 import { FlexureCard } from './FlexureCard';
 import { MoldCard } from './MoldCard';
 import { GarmentCard } from './GarmentCard';
+import { ClothCard } from './ClothCard';
+import { GarmentDraftCard } from './GarmentDraftCard';
+import { BodyFormCard } from './BodyFormCard';
+import { GeomListingCard } from './GeomListingCard';
 import { CollisionCard } from './CollisionCard';
 import { CombineCard } from './CombineCard';
 import { ConstraintsCard } from './ConstraintsCard';
@@ -89,11 +93,15 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
           <BodyBasicsCard node={node} />
           <PartActions node={node} threeSceneRef={threeSceneRef} />
           <MoldCard node={node} />
+          <BodyFormCard node={node} />
+          <GarmentDraftCard node={node} />
+          <ClothCard node={node} />
           <GarmentCard node={node} />
           <JoinCard node={node} />
           <HardwarePartCard node={node} />
           <PositionCard node={node} />
           <SubGeomSelector node={node} />
+          <GeomListingCard node={node} />
           <ResizeCard node={node} />
           <GeomPropertiesCard node={node} part="main" />
         </>

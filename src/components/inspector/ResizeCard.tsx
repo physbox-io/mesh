@@ -1,4 +1,5 @@
 import { useStore } from '../../store/useStore';
+import { geomIsRebuilt } from '../../utils/generatedGeoms';
 import { lengthSpan } from '../../utils/sliderSpan';
 import { guardedEdit, resizedGeomSize } from '../../utils/sizeEdit';
 import type { SceneNode } from '../../types/scene';
@@ -28,6 +29,8 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
   const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
   const geom = selectedNode.geoms[activeIndex];
   if (!geom) return null;
+  // Rebuilt from the body's measurements: a size set here would be lost (GeomListingCard says where to go).
+  if (geomIsRebuilt(selectedNode, geom)) return null;
   // A size that is not a positive number is refused here and the control
   // keeps the size in force; a short size is filled out (utils/sizeEdit).
   const setSize = (index: number, value: number, entries: number) => {

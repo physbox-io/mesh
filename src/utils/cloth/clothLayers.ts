@@ -24,15 +24,25 @@ const REBUILD = 4;
 const MOVE_MARGIN = 0.008;
 /** How deep through an inner cloth a point may be found and still be put back. */
 const MAX_DEPTH = 0.03;
+/**
+ * In the settle, how far inside a garment a point is looked for: its outward
+ * normals say which side is out, so a cloth modelled deep inside (a bow's
+ * tails, placed from a guess at the gown's back) is brought out before it is
+ * first drawn. The nearest triangle within this decides, so a point outside
+ * between two parts (an arm and the body) still reads outside.
+ */
+const SETTLE_DEPTH = 0.08;
 
 interface Group {
-  /** Inner cloth's triangles, by particle (global indices). */
+  /** Triangles in the spatial hash, by particle (global indices). */
   tris: Int32Array;
   /** Whether each faces out (a garment's do): its outside is then its normal's side, not just the side a point was on. */
   outward: Uint8Array;
-  /** Outer particles to keep off them, and their friction. */
+  /** Particles to test against `tris`, and their friction. */
   particles: Int32Array;
   mu: Float64Array;
+  /** When true, `tris` belong to the outer garment and `particles` to the inner cloth (pushes the outer triangle's corners outward). */
+  pushTris?: boolean;
   start: Int32Array; // per bucket, into entries
   entries: Int32Array; // triangle numbers
   /** Each triangle's box as of the last build, grown by the reach: min x, y, z, max x, y, z. */
@@ -43,93 +53,52 @@ const hash = (ix: number, iy: number, iz: number) => ((Math.imul(ix, 73856093) ^
 
 export class LayerContacts {
   private groups: Group[] = [];
+  private w: Float64Array;
   private sinceBuild = REBUILD;
+  private settling = false;
 
   constructor(pieces: { model: ClothModel; base: number }[], w: Float64Array) {
+    this.w = w;
     const layers = [...new Set(pieces.map((p) => p.model.layer))].sort((a, b) => a - b);
     for (const layer of layers) {
-      const inner = pieces.filter((p) => p.model.layer < layer);
+      const inner = pieces.filter((p) => p.model.layer < layer).sort((a, b) => a.model.layer - b.model.layer);
       if (!inner.length) continue;
-      const tris: number[] = [], outward: number[] = [];
-      for (const { model, base } of inner) {
-        for (const i of model.tris) tris.push(base + i);
-        for (let t = 0; t < model.tris.length / 3; t++) outward.push(model.outward ? 1 : 0);
-      }
+      const outerPieces = pieces.filter((p) => p.model.layer === layer);
       const particles: number[] = [], mu: number[] = [];
-      for (const { model, base } of pieces.filter((p) => p.model.layer === layer)) {
+      for (const { model, base } of outerPieces) {
         for (let i = 0; i < model.invMass.length; i++) if (w[base + i] > 0) { particles.push(base + i); mu.push(model.material.friction); }
       }
-      this.groups.push({ tris: Int32Array.from(tris), outward: Uint8Array.from(outward), particles: Int32Array.from(particles), mu: Float64Array.from(mu), start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((tris.length / 3) * 6) });
-    }
-    // Non-adjacent regions of a non-garment cloth also stay their thickness
-    // clear of one another so separate pieces or folds cannot pass through
-    // each other. Particles are grouped into topological bands by mesh-edge
-    // distance; each band collides against earlier triangles outside its
-    // local neighbourhood (including across stitches).
-    for (const { model, base } of pieces) {
-      if (model.outward) continue;
-      const n = model.invMass.length;
-      const meshAdj: number[][] = Array.from({ length: n }, () => []);
-      const fullAdj: number[][] = Array.from({ length: n }, () => []);
-      for (let e = 0; e < model.edges.length; e += 2) {
-        const a = model.edges[e], b = model.edges[e + 1];
-        meshAdj[a].push(b); meshAdj[b].push(a);
-        fullAdj[a].push(b); fullAdj[b].push(a);
-      }
-      for (let s = 0; s < model.stitches.length; s += 2) {
-        const a = model.stitches[s], b = model.stitches[s + 1];
-        fullAdj[a].push(b); fullAdj[b].push(a);
-      }
-      const hop = new Int32Array(n).fill(-1);
-      let nextStart = 0;
-      for (let root = 0; root < n; root++) {
-        if (hop[root] >= 0) continue;
-        hop[root] = nextStart;
-        let maxInComp = nextStart;
-        const queue: number[] = [root];
-        for (let head = 0; head < queue.length; head++) {
-          const u = queue[head];
-          for (const v of meshAdj[u]) if (hop[v] < 0) {
-            hop[v] = hop[u] + 1;
-            if (hop[v] > maxInComp) maxInComp = hop[v];
-            queue.push(v);
-          }
+      if (!particles.length) continue;
+      // Separate group per inner surface (base shell first, then tacked overlays, in layer order)
+      // so a deeper shell never shadows a raised pocket, belt, or higher inner layer.
+      for (const { model, base } of inner) {
+        const split = model.overlayTrisStart ?? model.tris.length;
+        for (const [t0, t1] of [[0, split], [split, model.tris.length]] as const) {
+          if (t1 <= t0) continue;
+          const tris: number[] = [], outward: number[] = [];
+          for (let k = t0; k < t1; k++) tris.push(base + model.tris[k]);
+          for (let t = 0; t < (t1 - t0) / 3; t++) outward.push(model.outward ? 1 : 0);
+          this.groups.push({ tris: Int32Array.from(tris), outward: Uint8Array.from(outward), particles: Int32Array.from(particles), mu: Float64Array.from(mu), start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((tris.length / 3) * 6) });
         }
-        nextStart = maxInComp + 6;
       }
-      // 4-hop neighbourhood across stitches so stitched seam vertices do not fight their own seam.
-      const stitchNear: Set<number>[] = Array.from({ length: n }, (_, start) => {
-        const seen = new Set<number>([start]);
-        let frontier = [start];
-        for (let d = 0; d < 4; d++) {
-          const next: number[] = [];
-          for (const u of frontier) for (const v of fullAdj[u]) if (!seen.has(v)) { seen.add(v); next.push(v); }
-          frontier = next;
+      // Reciprocal pass: keep outer garment triangles clear of inner particles (such as raised pocket corners,
+      // belt loops, or curved hip vertices that fall under the interior of an outer triangle).
+      const outerTris: number[] = [], outerOutward: number[] = [];
+      for (const { model, base } of outerPieces) {
+        if (!model.outward) continue;
+        const split = model.overlayTrisStart ?? model.tris.length;
+        for (let k = 0; k < split; k++) outerTris.push(base + model.tris[k]);
+        for (let t = 0; t < split / 3; t++) outerOutward.push(1);
+      }
+      if (outerTris.length) {
+        const innerParticles: number[] = [], innerMu: number[] = [];
+        for (const { model, base } of inner) {
+          for (let i = 0; i < model.invMass.length; i++) { innerParticles.push(base + i); innerMu.push(model.material.friction); }
         }
-        return seen;
-      });
-      const bandStep = 3, nBands = Math.ceil((nextStart + 1) / bandStep);
-      for (let bi = 2; bi < nBands; bi++) {
-        const hLo = bi * bandStep, hHi = hLo + bandStep;
-        const bandPts: number[] = [];
-        for (let p = 0; p < n; p++) if (hop[p] >= hLo && hop[p] < hHi && w[base + p] > 0) bandPts.push(p);
-        if (!bandPts.length) continue;
-        const nearSet = new Set<number>();
-        for (const p of bandPts) for (const q of stitchNear[p]) nearSet.add(q);
-        const tris: number[] = [], outward: number[] = [];
-        for (let t = 0; t < model.tris.length; t += 3) {
-          const a = model.tris[t], b = model.tris[t + 1], c = model.tris[t + 2];
-          if (Math.max(hop[a], hop[b], hop[c]) >= hLo - 4) continue;
-          if (nearSet.has(a) || nearSet.has(b) || nearSet.has(c)) continue;
-          tris.push(base + a, base + b, base + c);
-          outward.push(0);
-        }
-        if (!tris.length) continue;
-        const particles = bandPts.map((p) => base + p);
-        const mu = bandPts.map(() => model.material.friction);
-        this.groups.push({ tris: Int32Array.from(tris), outward: Uint8Array.from(outward), particles: Int32Array.from(particles), mu: Float64Array.from(mu), start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((tris.length / 3) * 6) });
+        this.groups.push({ tris: Int32Array.from(outerTris), outward: Uint8Array.from(outerOutward), particles: Int32Array.from(innerParticles), mu: Float64Array.from(innerMu), pushTris: true, start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((outerTris.length / 3) * 6) });
       }
     }
+    // Cloth against itself and its own layer: clothSelf.
   }
 
   get active() { return this.groups.length > 0; }
@@ -138,11 +107,18 @@ export class LayerContacts {
    * Keeps outer particles `thick` clear of inner cloth; records the contact
    * (normal, push, friction) for the velocity update's friction.
    */
-  collide(x: Float64Array, prev: Float64Array, thick: number, contactN: Float64Array, contactPush: Float64Array, contactMu: Float64Array, step = true) {
-    const reach = thick * 2;
-    const rebuild = step && ++this.sinceBuild >= REBUILD;
+  collide(x: Float64Array, prev: Float64Array, thick: number, contactN: Float64Array, contactPush: Float64Array, contactMu: Float64Array, step = true, settle = false) {
+    const minSep = thick * 1.2;
+    // Into and out of the settle the reach changes, so the hash is rebuilt for it.
+    const switched = settle !== this.settling;
+    this.settling = settle;
+    const rebuild = switched || (step && ++this.sinceBuild >= REBUILD);
     if (rebuild) this.sinceBuild = 0;
+    const w = this.w;
     for (const g of this.groups) {
+      const deep = settle && !g.pushTris && g.outward[0] === 1;
+      const reach = deep ? SETTLE_DEPTH : g.pushTris || g.outward[0] ? thick * 2.5 : thick * 2;
+      const maxDepth = deep ? SETTLE_DEPTH : MAX_DEPTH;
       if (rebuild) this.build(g, x, reach + MOVE_MARGIN);
       const T = g.tris;
       for (let pi = 0; pi < g.particles.length; pi++) {
@@ -167,6 +143,34 @@ export class LayerContacts {
         const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
         if (nl < 1e-14) continue;
         nx /= nl; ny /= nl; nz /= nl;
+        if (g.pushTris) {
+          const sd = (bq0 - px) * nx + (bq1 - py) * ny + (bq2 - pz) * nz;
+          if (sd >= minSep || sd < -MAX_DEPTH) continue;
+          // Only push when the inner particle projects onto the outer triangle (not past an open hem/edge).
+          if (best * best - sd * sd > 0.0035 * 0.0035) continue;
+          // The triangle moved out so the point on it under the inner particle
+          // moves `depth`, shared by its corners as that point weighs them
+          // (each corner the full depth over-pushed, three times over at a
+          // triangle's middle).
+          const depth = minSep - sd;
+          const wx = bq0 - x[a], wy = bq1 - x[a + 1], wz = bq2 - x[a + 2];
+          const d00 = ux * ux + uy * uy + uz * uz, d01 = ux * vx + uy * vy + uz * vz, d11 = vx * vx + vy * vy + vz * vz;
+          const d20 = wx * ux + wy * uy + wz * uz, d21 = wx * vx + wy * vy + wz * vz, den = d00 * d11 - d01 * d01;
+          if (den < 1e-20) continue;
+          const b1 = (d11 * d20 - d01 * d21) / den, b2 = (d00 * d21 - d01 * d20) / den, bw = [1 - b1 - b2, b1, b2];
+          let sum = 0;
+          for (let q = 0; q < 3; q++) sum += bw[q] * bw[q] * w[T[3 * bt + q]];
+          if (sum <= 0) continue;
+          for (let q = 0; q < 3; q++) {
+            const vtx = T[3 * bt + q], push = (bw[q] * w[vtx] * depth) / sum;
+            if (push <= 0) continue;
+            const vk = 3 * vtx;
+            x[vk] += nx * push; x[vk + 1] += ny * push; x[vk + 2] += nz * push;
+            contactN[vk] = nx; contactN[vk + 1] = ny; contactN[vk + 2] = nz;
+            contactPush[vtx] += push; contactMu[vtx] = g.mu[pi];
+          }
+          continue;
+        }
         // Outside a garment is its normal's side; of other cloth, the side
         // the point was on when the substep began. (By that rule alone, a
         // jacket's points that started inside a shirt were kept inside it.)
@@ -178,8 +182,9 @@ export class LayerContacts {
           if (was < 0) { nx = -nx; ny = -ny; nz = -nz; }
         }
         const sd = (px - bq0) * nx + (py - bq1) * ny + (pz - bq2) * nz;
-        if (sd >= thick || sd < -MAX_DEPTH) continue;
-        const depth = thick - sd;
+        const target = g.outward[bt] ? minSep : thick;
+        if (sd >= target || sd < -maxDepth) continue;
+        const depth = target - sd;
         x[k] += nx * depth; x[k + 1] += ny * depth; x[k + 2] += nz * depth;
         contactN[k] = nx; contactN[k + 1] = ny; contactN[k + 2] = nz;
         contactPush[i] += depth; contactMu[i] = g.mu[pi];

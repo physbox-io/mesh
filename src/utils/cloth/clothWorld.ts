@@ -25,6 +25,8 @@ export interface ClothWorld {
   sim: ClothSim;
   /** What each cloth was built from, to tell whether a rebuild is the same cloth. */
   keys: string[];
+  /** Per cloth, which build of its form's geoms it was carried against (null: on no form). */
+  formBuilds: (string | null)[];
   /** Pose the colliders from where MuJoCo has every body now. */
   pose: () => void;
   advance: (dt: number, env: ClothEnv) => void;
@@ -69,16 +71,27 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
     if (n.cloth) cloths.push({ node: n, world });
   });
   if (!cloths.length) return null;
-  const formOf = (n: SceneNode) => {
+  // What each cloth is built from (its spec, where it stands, and the
+  // measurements it is cut to), and the build of its form's geoms. A garment
+  // let go of its deleted form is the same cloth, cut the same, and is carried
+  // over as it is to fall; one whose form's geoms come or change is not: a
+  // form added without geoms (built in a worker) gets them a moment later with
+  // the same measurements, and cloth carried over from the world without them
+  // had fallen through where the form now is.
+  const formNode = (n: SceneNode) => {
     const fit = n.cloth?.garment?.fitTo;
     let found: SceneNode | undefined;
-    walkBodiesWorld(scene.nodes, (m) => { if ((m.name || m.id) === fit) found = m; });
-    return found?.bodyForm ?? null;
+    if (fit) walkBodiesWorld(scene.nodes, (m) => { if ((m.name || m.id) === fit && m.bodyForm) found = m; });
+    return found;
   };
-  const keys: string[] = [];
+  const keys: string[] = [], formBuilds: (string | null)[] = [];
   const models = cloths.map(({ node, world }) => {
-    const key = JSON.stringify([node.name || node.id, node.cloth, Array.from(world.elements), formOf(node)]);
+    const draft = node.cloth?.garment, form = formNode(node);
+    const cut = draft ? (form?.bodyForm ?? draft.form ?? null) : null;
+    const spec = draft ? { ...node.cloth, garment: { ...draft, fitTo: undefined, form: undefined } } : node.cloth;
+    const key = JSON.stringify([node.name || node.id, spec, Array.from(world.elements), cut]);
     keys.push(key);
+    formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.length ?? 0]) : null);
     let m = modelCache.get(key);
     if (!m) {
       m = clothModel(node, world, scene.nodes);
@@ -95,7 +108,10 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
   const geomPose = (id: number): THREE.Matrix4 | null => fromMujoco(data.geom_xmat, 9 * id, data.geom_xpos, id);
   const sim = new ClothSim(models, [...sceneColliders(scene.nodes), ...mujocoMeshColliders(mujoco, model, scene.nodes)]);
   sim.setPoses(bodyPose, geomPose);
-  if (carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i])) sim.restore(previous.sim.state());
+  const sameForm = (i: number) => formBuilds[i] === null || previous!.formBuilds?.[i] === formBuilds[i];
+  if (carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i] && sameForm(i))) sim.restore(previous.sim.state());
+  // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
+  sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
-  return { sim, keys, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
+  return { sim, keys, formBuilds, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
 }

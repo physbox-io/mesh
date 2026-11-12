@@ -1,4 +1,5 @@
 import React from 'react';
+import { FabricPalette } from './FabricPalette';
 import type { SceneNode } from '../../types/scene';
 import type { PhysicsState } from '../../store/useStore';
 import type { HardwareCutKind, HardwarePartKind } from '../../types/scene';
@@ -253,6 +254,9 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
         </div>
         <ExtrusionTiles onDone={() => onPlaced?.()} />
       </div>
+
+      {/* Cloth sheets and garments; folded until a dress form comes into the scene. */}
+      <FabricPalette onPlaced={onPlaced} />
 
       {/* Others */}
       <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">

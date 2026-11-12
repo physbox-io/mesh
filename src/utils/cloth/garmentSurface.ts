@@ -176,11 +176,13 @@ export function walkToward(points: number[][], tris: number[], start: number, ta
 }
 
 /**
- * Merges each point at the end of an edge shorter than `minLen` that touches
- * the surface's open edge into its neighbour on that edge (which keeps its
- * place). Returns where each point went.
+ * Merges each point at the end of an edge shorter than `minLen` (a length,
+ * or one for the edge between two points: a share of the triangles' size
+ * there) that touches the surface's open edge into its neighbour on that
+ * edge (which keeps its place). Returns where each point went.
  */
-export function collapseShortBoundaryEdges(points: number[][], tris: number[], minLen: number): number[] {
+export function collapseShortBoundaryEdges(points: number[][], tris: number[], minLen: number | ((a: number, b: number) => number)): number[] {
+  const shortOf = typeof minLen === 'number' ? () => minLen : minLen;
   const parent = points.map((_, i) => i);
   const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
   for (let pass = 0; pass < 4; pass++) {
@@ -205,7 +207,7 @@ export function collapseShortBoundaryEdges(points: number[][], tris: number[], m
       for (let e = 0; e < 3; e++) {
         const a = find(live[t + e]), b = find(live[t + ((e + 1) % 3)]);
         if (a === b || (!onEdge.has(a) && !onEdge.has(b))) continue;
-        if (len(a, b) >= minLen && !(quality < 0.3 && e === shortest)) continue;
+        if (len(a, b) >= shortOf(a, b) && !(quality < 0.3 && e === shortest)) continue;
         // The point on the open edge stays; the other joins it.
         const [keep, drop] = onEdge.has(a) ? [a, b] : [b, a];
         parent[drop] = keep;
@@ -400,4 +402,57 @@ export function healFlatTriangles(points: number[][], tris: number[], minArea: n
     if (!changed) break;
   }
   return { tris: out, split, remap: points.map((_, i) => find(i)) };
+}
+
+/**
+ * Splits the edges near where `value` crosses zero, `levels` times over:
+ * every edge with an end within its own length of the crossing (or across
+ * it) is halved, and each triangle is re-cut by how many of its edges were.
+ * A cut is then interpolated across triangles a quarter the size, so a
+ * corner in it (a V's point, a hem's points) is not shaved off at the mesh's
+ * scale. Points are added to `points`; the triangles are returned.
+ */
+export function refineNear(points: number[][], tris: number[], value: (p: number[]) => number, levels = 2): number[] {
+  let T = tris;
+  for (let lv = 0; lv < levels; lv++) {
+    const v = new Map<number, number>();
+    const at = (i: number) => { let x = v.get(i); if (x === undefined) { x = value(points[i]); v.set(i, x); } return x; };
+    const mid = new Map<string, number>();
+    const key = (a: number, b: number) => (a < b ? `${a},${b}` : `${b},${a}`);
+    const wants = (a: number, b: number) => {
+      const l = Math.hypot(points[a][0] - points[b][0], points[a][1] - points[b][1], points[a][2] - points[b][2]);
+      const va = at(a), vb = at(b);
+      return va * vb <= 0 || Math.min(Math.abs(va), Math.abs(vb)) < l;
+    };
+    const split = (a: number, b: number): number => {
+      const k = key(a, b);
+      let m = mid.get(k);
+      if (m === undefined) { m = points.length; points.push([(points[a][0] + points[b][0]) / 2, (points[a][1] + points[b][1]) / 2, (points[a][2] + points[b][2]) / 2]); mid.set(k, m); }
+      return m;
+    };
+    // Decide per edge first, so both triangles on an edge agree.
+    for (let t = 0; t < T.length; t += 3) for (let e = 0; e < 3; e++) { const a = T[t + e], b = T[t + (e + 1) % 3]; if (wants(a, b)) split(a, b); }
+    const out: number[] = [];
+    for (let t = 0; t < T.length; t += 3) {
+      const c = [T[t], T[t + 1], T[t + 2]];
+      const m = [0, 1, 2].map((e) => mid.get(key(c[e], c[(e + 1) % 3])));
+      const n = m.filter((x) => x !== undefined).length;
+      if (n === 0) { out.push(...c); continue; }
+      if (n === 3) {
+        const [ab, bc, ca] = m as number[];
+        out.push(c[0], ab, ca, ab, c[1], bc, ca, bc, c[2], ab, bc, ca);
+        continue;
+      }
+      // Rotate so the first split edge is edge 0 (a-b).
+      let r = m.findIndex((x) => x !== undefined);
+      if (n === 2 && m[(r + 2) % 3] !== undefined && m[r] !== undefined && m[(r + 1) % 3] === undefined) r = (r + 2) % 3;
+      const a = c[r], b = c[(r + 1) % 3], cc = c[(r + 2) % 3];
+      const ab = m[r]!, bc = m[(r + 1) % 3];
+      if (n === 1) { out.push(a, ab, cc, ab, b, cc); continue; }
+      // Edges a-b and b-c split.
+      out.push(a, ab, cc, ab, b, bc!, ab, bc!, cc);
+    }
+    T = out;
+  }
+  return T;
 }

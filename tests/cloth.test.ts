@@ -131,4 +131,72 @@ describe('cloth', () => {
     expect(speed).toBeLessThan(wx ? 0.05 : 0.005);
     for (const n of loads) { expect(n).toBeGreaterThan(20); expect(n).toBeLessThan(1000); }
   }, 300_000);
+
+  it('gathers a piece edge with embedded elastic (by ratio or target length) and propagates SVG print patterns', async () => {
+    const svg = '<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6" fill="#ff3366"/></svg>';
+    const nodes: SceneNode[] = [{
+      id: 'curtain', name: 'curtain', pos: [0, 0, 1.5],
+      cloth: {
+        pieces: [{ name: 'p', edges: square(0.5), placement: { kind: 'plane', origin: [0, 0, 0], uAxis: [1, 0, 0], vAxis: [0, 0, 1] } }],
+        spacing: 0.05, sewTime: 0,
+        ties: [{ piece: 'p', edge: 'top', at: 0 }, { piece: 'p', edge: 'top', at: 1 }],
+        elastics: [{ along: [{ piece: 'p', edge: 'bottom' }], length: 0.3, stiffness: 80 }],
+        pattern: { svg, scale: 0.2, tile: true },
+      },
+    } as SceneNode];
+    const r = await clothRun(nodes);
+    const layout = r.sim.renderLayout();
+    // The cloth's own print is read from the node, not copied onto every group.
+    expect(layout[0].pattern).toBeUndefined();
+    expect(layout[0].flat?.uv.length).toBe(layout[0].vertnum);
+    expect(r.models[0].elastics?.length).toBeGreaterThan(0);
+    r.run(2);
+    // The bottom edge (with 0.3 m embedded elastic on a 0.5 m cut edge) gathers
+    // noticeably narrower than the 0.5 m top edge held between the two ties.
+    const m = meshCloth(nodes[0].cloth!);
+    const bot = m.pieces.p.edgeVerts.bottom;
+    const p0 = at(r.sim.x, bot[0]), p1 = at(r.sim.x, bot[bot.length - 1]);
+    const botSpan = Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+    expect(botSpan).toBeLessThan(0.42);
+    // And gathered edges never report false positive stretch against their cut length.
+    expect(percentile(r.strains(), 0.95)).toBeLessThan(0.03);
+  }, 60_000);
+
+  it('wraps a stretch fabric (spandex) round a drum it is cut short for', async () => {
+    // A cylinder of radius 0.15 m (circumference 0.942 m) wrapped in a spandex
+    // band cut only 0.78 m round (~21% stretch, well within spandex's 60% give).
+    const cutW = 0.78, h = 0.24, rCyl = 0.15;
+    const bandEdges = [
+      { id: 'bottom', pts: [[-cutW / 2, -h / 2], [cutW / 2, -h / 2]] },
+      { id: 'right', pts: [[cutW / 2, -h / 2], [cutW / 2, h / 2]] },
+      { id: 'top', pts: [[cutW / 2, h / 2], [-cutW / 2, h / 2]] },
+      { id: 'left', pts: [[-cutW / 2, h / 2], [-cutW / 2, -h / 2]] },
+    ] as NonNullable<ClothSpec['pieces']>[number]['edges'];
+    const nodes: SceneNode[] = [
+      { id: 'drum', name: 'drum', pos: [0, 0, 1.2], geoms: [{ name: 'drum_g', type: 'cylinder', size: [rCyl, 0.3], friction: 0.8 }] } as SceneNode,
+      {
+        id: 'band', name: 'band', pos: [0, 0, 1.2],
+        cloth: {
+          pieces: [{
+            name: 'p',
+            edges: bandEdges,
+            placement: { kind: 'plane', origin: [0, 0, 0], uAxis: [1, 0, 0], vAxis: [0, 0, 1] },
+            start: { kind: 'wrap', origin: [0, 0, 0], axis: [0, 0, 1], ref: [0, -1, 0], radius: rCyl + 0.008 },
+          }],
+          seams: [{ a: [{ piece: 'p', edge: 'left' }], b: [{ piece: 'p', edge: 'right', reversed: true }] }],
+          material: 'spandex', spacing: 0.04, sewTime: 0.4,
+        },
+      } as SceneNode,
+    ];
+    const r = await clothRun(nodes);
+    r.run(1.5);
+    expect(r.speedOver(0.3)).toBeLessThan(0.01);
+    const s = r.strains();
+    // Stretched round the drum, and held on it by its hoop tension.
+    expect(percentile(s, 0.9)).toBeGreaterThan(0.05);
+    expect(percentile(s, 0.95)).toBeLessThan(0.6);
+    let meanZ = 0;
+    for (let i = 0; i < r.sim.n; i++) meanZ += r.sim.x[3 * i + 2] / r.sim.n;
+    expect(meanZ).toBeGreaterThan(1.05);
+  }, 60_000);
 });
