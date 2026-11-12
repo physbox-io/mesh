@@ -505,13 +505,100 @@ export function offsetLoop(
         break;
       }
     }
-    if (!valid) continue;
+    if (!valid && !repairNearMiss(c, ccw, Math.abs(delta), keepDist, opt.arcTolerance)) continue;
 
     const tidy = dropCollinear(c);
     result.push(wasClockwise ? tidy.reverse() : tidy);
   }
 
+  /*
+   * Crumbs. A dense arc in the outline - a dogbone drawn as a fan of short
+   * edges, say - throws off loops a few hundredths of a millimetre across that
+   * pass both tests, since each sits right at the offset distance. On a router
+   * every one is a lift and a plunge: 1,600 of them on one birdhouse panel,
+   * and 355 minutes for a 6.5 minute job.
+   *
+   * Grown outward, a simple loop gives one loop and nothing else, so the
+   * largest is the answer. Shrunk inward it can genuinely split in two, but
+   * not into pieces smaller than the tolerance it was traced to while a real
+   * piece remains beside them.
+   */
+  if (result.length > 1) {
+    if (delta > 0) {
+      let best = result[0];
+      for (const r of result) if (Math.abs(signedArea2(r)) > Math.abs(signedArea2(best))) best = r;
+      return [best];
+    }
+    const crumb = 4 * opt.arcTolerance;
+    const real = result.filter((r) => loopSpan(r) > crumb);
+    if (real.length > 0) return real;
+  }
+
   return result;
+}
+
+/**
+ * Puts a real offset back that crossing-splitting nearly got right, in place.
+ *
+ * Where the outline has a concave arc about as tight as the offset - a T-bone
+ * a whisker wider than the bit - thirty-odd offset edges meet at nearly one
+ * point, and the walk through their crossings can carry a short stretch of the
+ * loop a tenth of a millimetre inside the offset distance. The test above then
+ * threw the whole outline away, and the router cut crumbs where four birdhouse
+ * panels should have been.
+ *
+ * A true offset is the set of points at exactly the offset distance, so such a
+ * loop is mended by moving each point that is too close straight out from the
+ * nearest point of the outline to that distance. Only a near miss is mended:
+ * the spurious loops a fold throws off run far closer than that, and a loop
+ * no bigger than the tolerance is a crumb, not a near miss.
+ */
+function repairNearMiss(
+  loop: Point2D[],
+  outline: Point2D[],
+  dist: number,
+  keepDist: number,
+  tolerance: number
+): boolean {
+  if (loopSpan(loop) <= 4 * tolerance) return false;
+  const floor = dist - Math.max(4 * tolerance, 0.1 * dist);
+  const nearest = (p: Point2D) => {
+    let best = Infinity, bx = p.x, by = p.y;
+    for (let i = 0; i < outline.length; i++) {
+      const a = outline[i], b = outline[(i + 1) % outline.length];
+      const ex = b.x - a.x, ey = b.y - a.y;
+      const len2 = ex * ex + ey * ey;
+      let t = len2 > 0 ? ((p.x - a.x) * ex + (p.y - a.y) * ey) / len2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const qx = a.x + ex * t, qy = a.y + ey * t;
+      const d = (p.x - qx) ** 2 + (p.y - qy) ** 2;
+      if (d < best) { best = d; bx = qx; by = qy; }
+    }
+    return { x: bx, y: by, d: Math.sqrt(best) };
+  };
+  const moved: Point2D[] = [];
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i], b = loop[(i + 1) % loop.length];
+    const q = nearest(a);
+    if (q.d < floor || nearest({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }).d < floor) return false;
+    moved.push(q.d < keepDist && q.d > 1e-12
+      ? { x: q.x + ((a.x - q.x) * dist) / q.d, y: q.y + ((a.y - q.y) * dist) / q.d }
+      : a);
+  }
+  for (let i = 0; i < loop.length; i++) loop[i] = moved[i];
+  return true;
+}
+
+/** The larger side of a loop's bounding box. */
+function loopSpan(loop: Point2D[]): number {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of loop) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return Math.max(maxX - minX, maxY - minY);
 }
 
 export interface RegionOffsetResult {
