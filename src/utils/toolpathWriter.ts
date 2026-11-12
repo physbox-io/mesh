@@ -355,6 +355,11 @@ export class ToolpathWriter {
       forward = !forward;
       left.push(above);
       if (above <= 1e-6 || (leg >= 2 && above >= left[leg - 2] - 1e-6)) break;
+      // At the surface where the leg ends, the ramp is done: what it rode over
+      // behind it is the return's to clear, or the pass's own. Carried on, a
+      // 50 mm waterline that reached depth on its first leg went all the way
+      // back at the plunge rate and was then cut a third time by the pass.
+      if (Math.abs(z - stops[at].pz) <= 1e-6) break;
     }
 
     // Where a ramp on a short run (`!fits`) with no wall step ends at the far
