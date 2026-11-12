@@ -269,7 +269,8 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     collectBought(useStore.getState().sceneGraph.nodes);
     scene.traverse((obj) => {
       if (!(obj as THREE.Mesh).isMesh) return;
-      if (only && !ownedByOnly(obj)) return;
+      // An instanced mesh is owned instance by instance; see below.
+      if (only && !(obj as THREE.InstancedMesh).isInstancedMesh && !ownedByOnly(obj)) return;
       const owner = findNodeId(obj);
       if (owner && bought.has(owner)) return;
       const mesh = obj as THREE.Mesh;
@@ -279,6 +280,35 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       // shadow catcher are all basic/shadow materials and stay out of the file.
       if (!standard) return;
       mesh.updateWorldMatrix(true, false);
+      /*
+       * Static boxes are drawn as one InstancedMesh: a unit cube, placed per
+       * instance. Taken as an ordinary mesh it went out as that unit cube - one
+       * metre on a side at the origin, every real box missing, and the size
+       * prompt scaling the parts against it. So each instance goes out as a
+       * box of its own, owned by its body and in its colour. A hidden one is
+       * drawn at zero scale and stays out.
+       */
+      const instanced = mesh as THREE.InstancedMesh;
+      if (instanced.isInstancedMesh) {
+        const owners = (instanced.userData?.nodeIds ?? []) as (string | undefined)[];
+        const placed = new THREE.Matrix4();
+        for (let i = 0; i < instanced.count; i++) {
+          instanced.getMatrixAt(i, placed);
+          if (Math.abs(placed.determinant()) < 1e-18) continue;
+          const instanceOwner = owners[i];
+          if (instanceOwner && bought.has(instanceOwner)) continue;
+          if (only && !(instanceOwner && only.has(instanceOwner))) continue;
+          const geo = instanced.geometry.clone().applyMatrix4(placed.premultiply(instanced.matrixWorld));
+          const material = standard.clone();
+          material.wireframe = false;
+          if (instanced.instanceColor) instanced.getColorAt(i, material.color);
+          const exported = new THREE.Mesh(geo, material);
+          exported.name = instanceOwner ?? `part_${ungroupedIdx++}`;
+          exportGroup.add(exported);
+          meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
+        }
+        return;
+      }
       const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
       // The material is cloned so that turning the viewport to wireframe does
       // not export a wireframe — that is a way of looking at the model, not a
