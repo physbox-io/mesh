@@ -392,11 +392,21 @@ export function finishSurface(
           if (ok) link = candidate;
         }
 
+        /*
+         * A link's straight drops - the foot of a wall it squares up at, or the
+         * step from one waterline level to the next - go down at the plunge
+         * rate, as a pass's own do. They went at the cutting feed: 150 times
+         * on one bracket, a 3.8 mm vertical plunge at 2240 mm/min on a monkey,
+         * three times the rate the bit is rated to go straight down at.
+         */
+        let linkRate = 0;
         if (link) {
           for (let i = 1; i < link.length; i++) {
-            const p = link[i];
+            const p = link[i], prev = link[i - 1];
+            const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
+            linkRate = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
             w.cutTo(p.x, p.y, p.z);
-            w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)} F${Math.round(opts.finishingFeedrate)}`);
+            w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)} F${Math.round(linkRate)}`);
           }
         } else {
           /*
@@ -424,7 +434,8 @@ export function finishSurface(
         // at the start, and either side of the straight drops `squareUpWalls`
         // puts at the foot of a wall, which go down at the plunge rate. A link
         // stated the feed already.
-        let rate = link ? opts.finishingFeedrate : 0;
+        // A link that ended on a drop left the plunge rate set.
+        let rate = link ? linkRate : 0;
         for (let i = 1; i < pass.length; i++) {
           const p = pass[i];
           const prev = pass[i - 1];

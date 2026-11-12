@@ -375,12 +375,40 @@ export class ToolpathWriter {
      * slower than the same tool wants for an ordinary cut sideways. It is
      * stated once and then held, the same way the passes themselves do it.
      */
+    /*
+     * Down no steeper than the ramp, here as on the way in. A ramp that gave up
+     * above the surface - over a run that stands high in the middle and steps
+     * down at its ends, it rides the top and cannot reach the feet of the
+     * steps - left the return to slant 4.3 mm down at the cutting feed. Such a
+     * drop goes across at the height the ramp rode, which it has cut, and then
+     * straight down at the plunge rate.
+     */
     let stated = false;
+    let rateNow = rate;
+    let zNow = z;
+    let xNow = stops[at].x, yNow = stops[at].y;
+    const feedTo = (x: number, y: number, zz: number, want: number) => {
+      this.cutTo(x, y, zz);
+      const r = want > 0 ? want : rateNow;
+      const word: string = want > 0 && (!stated || r !== rateNow) ? ` F${Math.round(r)}` : '';
+      stated = stated || (word !== '' && want === returnRate);
+      rateNow = r;
+      this.gcode.push(`G1 X${f(x)} Y${f(y)} Z${f(zz)}${word}`);
+      xNow = x; yNow = y; zNow = zz;
+    };
+    // A last leg that ended at the head above the surface: straight down to it.
+    if (at === 0 && zNow > stops[0].pz + 1e-6) feedTo(stops[0].x, stops[0].y, stops[0].pz, rate);
     for (let k = at - 1; k >= 0; k--) {
-      this.cutTo(stops[k].x, stops[k].y, stops[k].pz);
-      const word: string = returnRate > 0 && !stated ? ` F${Math.round(returnRate)}` : '';
-      stated = stated || word !== '';
-      this.gcode.push(`G1 X${f(stops[k].x)} Y${f(stops[k].y)} Z${f(stops[k].pz)}${word}`);
+      const s = stops[k];
+      const run = Math.hypot(s.x - xNow, s.y - yNow);
+      if (zNow - s.pz > run * this.leadInTan + 1e-6) {
+        // A step's own straight drop as well: the return is at the cutting
+        // feed, and it took a lattice's wall steps, 10 mm each, at that.
+        if (run > 1e-9) feedTo(s.x, s.y, zNow, returnRate);
+        feedTo(s.x, s.y, s.pz, rate);
+      } else {
+        feedTo(s.x, s.y, s.pz, returnRate);
+      }
     }
     return path;
 
