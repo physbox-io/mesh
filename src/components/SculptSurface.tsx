@@ -856,7 +856,7 @@ export function SculptSurface({
   const rgb = bodyColor(color, [0.82, 0.72, 0.62]);
 
   return (
-    <group ref={groupRef} name={`${nodeId}_sculpt`}>
+    <group ref={groupRef} name={`${nodeId}_sculpt`} userData={{ bodyId: nodeId }}>
       <mesh
         ref={meshRef}
         name={geomName}

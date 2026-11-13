@@ -240,7 +240,14 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
     // wrapper <group name={nodeId}>): it names each exported mesh, and bought
     // hardware is left out by it.
+    // The lattice and sculpt tools draw a body under a group of their own,
+    // named for the tool and tagged with the body (`userData.bodyId`); its mesh
+    // is named for the geom. Read by name alone, an export with either tool
+    // open named the part after its geom, and a per-body export found nothing.
     const findNodeId = (obj: THREE.Object3D): string | null => {
+      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+        if (typeof cur.userData?.bodyId === 'string') return cur.userData.bodyId;
+      }
       let cur: THREE.Object3D | null = obj;
       while (cur) {
         if (cur.name) return cur.name;
@@ -254,7 +261,7 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     let ungroupedIdx = 0;
     const ownedByOnly = (obj: THREE.Object3D) => {
       for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
-        if (only!.has(cur.name)) return true;
+        if (only!.has(cur.name) || (typeof cur.userData?.bodyId === 'string' && only!.has(cur.userData.bodyId))) return true;
       }
       return false;
     };
@@ -279,6 +286,10 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
       // shadow catcher are all basic/shadow materials and stay out of the file.
       if (!standard) return;
+      // Nor is a surface drawn only from behind: the lattice and sculpt tools'
+      // shading of a body's inside, so a hole in it reads as one. Exported, it
+      // was every triangle of the body a second time.
+      if (standard.side === THREE.BackSide) return;
       mesh.updateWorldMatrix(true, false);
       /*
        * Static boxes are drawn as one InstancedMesh: a unit cube, placed per
