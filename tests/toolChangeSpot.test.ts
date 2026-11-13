@@ -141,8 +141,11 @@ describe('Background Carve, with only a point left at the top face', () => {
     expect(done.cuts.filter((m) => m.rapid && m.removedMm > 0.05)).toEqual([]);
     // Pyramid: 20 mm below the point at 30 mm out along an axis, and flat beyond.
     const cx = 60, cy = 60;
+    // 0.4, not 0.35: the flat finisher's stairs on the 34° flank. At 0,-22 it
+    // left 0.337 mm at a 25% stepover and 0.362 mm at the 30% a flat bit now
+    // gets (deriveReliefFeeds) - stock left on, not a gouge, and not the re-zero.
     for (const [dx, dy, want] of [[0, 0, 0], [15, 0, -10], [0, -22, -14.67], [40, 0, -20], [45, 45, -20], [-40, 20, -20]]) {
-      expect(Math.abs(done.at(cx + dx, cy + dy) - want), `at ${dx},${dy}`).toBeLessThan(0.35);
+      expect(Math.abs(done.at(cx + dx, cy + dy) - want), `at ${dx},${dy}`).toBeLessThan(0.4);
     }
   });
 
