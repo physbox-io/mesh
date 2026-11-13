@@ -43,6 +43,12 @@ export interface SurfaceJob {
    */
   mustReachMm?: number;
   /**
+   * Ground that is not the part - a solid job's channel and frame, away from
+   * the part - whose walls the finishing pass does not finish (see
+   * `finishSurface`). Their floor it still does: that cuts the part free.
+   */
+  scrap?: (x: number, y: number) => boolean;
+  /**
    * What the stock model cannot know when a spot is chosen to zero the new bit
    * on: the whole top face where `bounds` is only a window of it, and where
    * that face is gone, to pin bores or to setups that ran before this one.

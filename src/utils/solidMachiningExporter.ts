@@ -1335,9 +1335,19 @@ function generateSolidSides(
       },
     };
     const channel = moatMask.some((m, k) => m === 1 && !tabs.mask[k]);
+    // The channel and the frame, more than a finishing bit's radius off the
+    // part: scrap, whose walls are not finished (see `SurfaceJob.scrap`).
+    // Within that radius the passes down the part's own walls still run.
+    const scrapBeyond = (finishRad + res) / res;
+    const scrap = (px: number, py: number) => {
+      const c = Math.min(cols - 1, Math.max(0, Math.round(px / stepX)));
+      const r = Math.min(rows - 1, Math.max(0, Math.round(py / stepY)));
+      const src = side === 'A' ? r * cols + c : r * cols + (cols - 1 - c);
+      return (moatMask[src] === 1 || frameMask[src] === 1) && !tabs.mask[src] && dist[src] > scrapBeyond;
+    };
     const cut = machineSurface(
       {
-        surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut', touchOff,
+        surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut', touchOff, scrap,
         // Until the channel is down to its floor, the part is not free of the block.
         ...(channel ? { mustReachMm: depthA } : {}),
         // Off a flush side, as the relief runs off an open edge. Side B is

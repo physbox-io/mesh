@@ -261,15 +261,38 @@ export function finishSurface(
   // for the first, whatever the layer before it left for the rest.
   let prevLimit = 0;
 
+  /*
+   * A waterline on scrap (`job.scrap`) above the scrap's own floor is
+   * finishing a wall nobody keeps - the frame's inner face, at every level of
+   * it, seven of them above the part's top on a bracket - and is left out. The
+   * floor itself is finished as before: roughing leaves its allowance there,
+   * and where the roughing bit does not reach, the finishing pass is what
+   * cuts the part free.
+   */
+  const scrapWall = (pt: PathPoint, level: number) =>
+    job.scrap !== undefined && job.scrap(pt.x, pt.y) &&
+    level > Math.min(0, sampleHeightmap(surface, pt.x, pt.y)) + Math.max(0, opts.roughingAllowanceMm) + 0.05;
   // Where each pass point stands and how high, worked out once: it is the
   // same on every layer, and checking a waterline against its walls again
   // per layer nearly doubled the time a layered job took to plan.
-  const placed = planGroups.map((group) => group.map((plan) => plan.map((pt) => {
-    const level = waterlineLevel(pt);
-    return level === undefined
-      ? { x: pt.x, y: pt.y, z: sampleHeightmap(finishMap, pt.x, pt.y) }
-      : holdOffWall(pt, level);
-  })));
+  // Whole waterlines, not points: cut into pieces where it crosses onto the
+  // part's ground, a waterline needs a ramp into every piece, and a bowl's
+  // finishing went from 10 lifts to 181.
+  const onScrapWall = (plan: PathPoint[]) => {
+    const level = plan.length > 0 ? waterlineLevel(plan[0]) : undefined;
+    if (level === undefined || job.scrap === undefined) return false;
+    let n = 0;
+    for (const pt of plan) if (scrapWall(pt, level)) n++;
+    return n > plan.length / 2;
+  };
+  const placed = planGroups.map((group) => group.map((plan) => onScrapWall(plan)
+    ? plan.map((pt) => ({ x: pt.x, y: pt.y, z: 0 }))
+    : plan.map((pt) => {
+      const level = waterlineLevel(pt);
+      return level === undefined
+        ? { x: pt.x, y: pt.y, z: sampleHeightmap(finishMap, pt.x, pt.y) }
+        : holdOffWall(pt, level);
+    })));
   // The level each pass was traced at, where it is a waterline.
   const placedLevels = planGroups.map((group) => group.map((plan) =>
     plan.length > 0 ? waterlineLevel(plan[0]) : undefined));
