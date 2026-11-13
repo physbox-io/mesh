@@ -56,8 +56,9 @@ const WEAVES: Record<ClothMaterialName, Weave> = {
   shadeCloth: { tile: 0.02, depth: 0.9, height: plain(8) },
   denim: { tile: 0.012, depth: 0.8, height: twill(12) },
   leather: { tile: 0.04, depth: 0.5, height: (x, y) => 0.6 * noise(x, y, 24) + 0.4 * noise(x, y, 48) },
-  // A ripstop shell: a fine weave with a heavier thread every few millimetres.
-  taffeta: { tile: 0.016, depth: 0.5, height: (x, y) => 0.5 * plain(32)(x, y) + 0.5 * Math.max(Math.pow(thread(x * 4), 24), Math.pow(thread(y * 4), 24)) },
+  // A ripstop shell: a fine weave with a heavier thread every 6 mm, barely
+  // proud of it (stronger, a puffer read as waffle).
+  taffeta: { tile: 0.024, depth: 0.25, height: (x, y) => 0.6 * plain(48)(x, y) + 0.4 * Math.max(Math.pow(thread(x * 4), 8), Math.pow(thread(y * 4), 8)) },
   velvet: { tile: 0.01, depth: 0.25, height: (x, y) => noise(x, y, 32) },
 };
 
