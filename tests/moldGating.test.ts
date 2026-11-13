@@ -144,3 +144,32 @@ describe('bottom fill', () => {
     expect(d8).toBeGreaterThan(d0 + 0.5);
   });
 });
+
+describe('the bottom-fill funnel', () => {
+  const body = (g: Partial<SceneGeom>): SceneGraph => ({
+    nodes: [{ id: 'b', name: 'p', type: 'body', pos: [0, 0, 0], geoms: [{ name: 'g', ...g } as SceneGeom], joints: [], children: [] }],
+  });
+  const cup = body({ type: 'cylinder', size: [0.04, 0.04], pos: [0, 0, 0.04] });
+  const plaque = body({ type: 'box', size: [0.05, 0.035, 0.004], pos: [0, 0, 0.004] });
+
+  it('goes where the block has room for it: a round part\'s corner, not the middle of its wall', () => {
+    // In the middle of the 10 mm wall it was ⌀9 mm and 1.5 mm deep.
+    const r = generateMoldMeshes(cup, {}, wasm);
+    expect(r.success, r.error).toBe(true);
+    expect(r.features!.feed).toBe('bottom');
+    expect(r.features!.sprue!.diaMm).toBeGreaterThanOrEqual(14);
+    expect(r.features!.sprue!.depthMm).toBeGreaterThanOrEqual(4);
+    expect(r.warnings.join(' ')).not.toMatch(/funnel is cut/);
+  });
+
+  it('says so when the wall cuts it down, unlined, and names a wall that does not', () => {
+    const r = generateMoldMeshes(plaque, {}, wasm);
+    expect(r.success, r.error).toBe(true);
+    const line = r.warnings.find((w) => /funnel is cut/.test(w));
+    expect(line).toBeDefined();
+    const wall = Number(line!.match(/a (\d+) mm wall margin/)![1]);
+    const wider = generateMoldMeshes(plaque, { wallMarginMm: wall }, wasm);
+    expect(wider.warnings.join(' ')).not.toMatch(/funnel is cut/);
+    expect(wider.features!.sprue!.diaMm).toBeGreaterThanOrEqual(14);
+  });
+});

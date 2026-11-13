@@ -27,7 +27,7 @@ import { linerPartingChoice, linerPullChoice } from './moldRoofScore';
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, INSERT_CLEARANCE_MM, SEAL_RING_ROOM_MM, NO_MANIFOLD_REFUSAL, type LinerConstruction, type MoldLinerInfo } from './moldLiner';
 import { castMaterial, type CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
-import { gateDiaMm, planSprue, sprueNeckDiaMm, ventBoreDiaMm, withPourMouth, VENT_TAPER_MM } from './moldSprue';
+import { funnelClearDepths, gateDiaMm, planSprue, sprueNeckDiaMm, ventBoreDiaMm, withPourMouth, VENT_TAPER_MM } from './moldSprue';
 import { bottomFillFloorMm, feedEdgeMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
 import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
 
@@ -1540,6 +1540,8 @@ export function generateMoldMeshes(
   const lidBlockHeight = lidTrueDepth + lidFloorMm;
   // Whatever cuts the lid deepest in each column, drafted or not: the funnel stays clear of all of it.
   const lidCavityDepth = lidDepth.map((d, i) => Math.max(d, rawLidDepth[i]));
+  // Unlined, the funnel may sink to near the face where the other half is solid under it.
+  const lidFunnelDepth = linerSkinMm > 0 ? lidCavityDepth : funnelClearDepths(lidCavityDepth, mirrorY(baseDepth), grid);
 
   // The closed mold as it is poured, lid up, in the cavity half's frame: the
   // exact part where undercuts are kept, the depth fields where they are filled.
@@ -1610,6 +1612,9 @@ export function generateMoldMeshes(
     // Tried with room for the seal (and, in an insert, for the whole funnel's
     // sleeve down to the seam), then with less, then with none.
     const insertFunnelMm = opts.linerConstruction === 'insert' ? funnelR - neckR : 0;
+    const ventRoomAt = (x: number, y: number) => Math.min(Infinity, ...ventPeaks.map((v) => Math.hypot(v.x - x, v.y - y) - ventMouthR));
+    const funnelFits = (x: number, y: number, roomR: number) =>
+      planSprue(x, -y, opts, grid, lidFunnelDepth, lidBlockHeight, Math.min(roomR, ventRoomAt(x, y)), funnelWallMm).outerR >= funnelR - 0.5;
     const tries: Array<{ keep: boolean; edgeMm: number; pinMm: number }> = sealMm > 0
       ? [
           ...(insertFunnelMm > 0 ? [{ keep: true, edgeMm: sleeveMm + sealMm + insertFunnelMm, pinMm: sleeveMm + sealMm + insertFunnelMm }] : []),
@@ -1620,8 +1625,8 @@ export function generateMoldMeshes(
     let sealRoomKept = false;
     for (const { keep, edgeMm, pinMm } of tries) {
       const avoid = avoidAt(pinMm);
-      bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room, gateDia, linerSkinMm, edgeMm)
-        ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room, gateDia, linerSkinMm, edgeMm);
+      bottomFill = planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR + funnelR - neckR)], room, gateDia, linerSkinMm, edgeMm, funnelFits)
+        ?? planBottomFill(pourSpans, grid, neckR, [...avoid, ...ventsAt(ventMouthR)], room, gateDia, linerSkinMm, edgeMm, funnelFits);
       sealRoomKept = keep;
       if (bottomFill) break;
     }
@@ -1635,12 +1640,12 @@ export function generateMoldMeshes(
       };
     }
     const { down, gate, runnerZ, r, gateR, gateTopZ } = bottomFill;
-    const ventRoomR = Math.min(Infinity, ...ventPeaks.map((v) => Math.hypot(v.x - down.x, v.y - down.y) - ventMouthR));
+    const ventRoomR = ventRoomAt(down.x, down.y);
     // An insert carries the funnel's width down to the seam, so it stops short of the pins by the seal's room as well.
     const pinRoomR = opts.linerConstruction === 'insert' && sealRoomKept
       ? Math.min(Infinity, ...baseFeatures.sockets.map((k) => Math.hypot(k.x - down.x, k.y - down.y) - k.rimR - SEAL_RING_ROOM_MM - sleeveMm - 1))
       : Infinity;
-    sprueChannel = planSprue(down.x, -down.y, opts, grid, lidCavityDepth, lidBlockHeight, Math.min(bottomFill.roomR, ventRoomR, pinRoomR), funnelWallMm);
+    sprueChannel = planSprue(down.x, -down.y, opts, grid, lidFunnelDepth, lidBlockHeight, Math.min(bottomFill.roomR, ventRoomR, pinRoomR), funnelWallMm);
     baseBores.push(
       // Down the wall from the parting face...
       { a: [down.x, down.y, 1], b: [down.x, down.y, runnerZ], r, fluted: true },
@@ -1650,11 +1655,21 @@ export function generateMoldMeshes(
       { a: [gate.x, gate.y, runnerZ], b: [gate.x, gate.y, gateTopZ], r: gateR },
     );
   } else if (opts.includeSprue && clamshell) {
-    sprueChannel = planSprue(pour.sprue.x, lidChannelY(pour.sprue.y), opts, grid, lidCavityDepth, lidBlockHeight, Infinity, funnelWallMm);
+    sprueChannel = planSprue(pour.sprue.x, lidChannelY(pour.sprue.y), opts, grid, lidFunnelDepth, lidBlockHeight, Infinity, funnelWallMm);
+  }
+  // A funnel gives way to fit; a wall that took most of it away is named, lined or not.
+  // Unlined, a ⌀16 funnel down to ⌀6 in a 10 mm wall once went by with no word.
+  const askedFunnelR = Math.max(opts.sprueTopDiaMm / 2, neckR * 2);
+  if (sprueChannel && funnelWallMm <= 0 && askedFunnelR - sprueChannel.outerR > 1) {
+    const roomMm = Math.ceil(opts.wallMarginMm + askedFunnelR - sprueChannel.outerR + 1);
+    warnings.push(
+      `The sprue's funnel is cut to ⌀${(sprueChannel.outerR * 2).toFixed(1)} mm to fit the mold beside the cavity; ` +
+      `a ${roomMm} mm wall margin gives it the full ⌀${(askedFunnelR * 2).toFixed(1)} mm.`,
+    );
   }
   if (sprueChannel && funnelWallMm > 0) {
     // A lined funnel keeps its sleeve (and an insert's, the seal) inside the edge, and gives way to do it.
-    const askedR = Math.max(opts.sprueTopDiaMm / 2, neckR * 2);
+    const askedR = askedFunnelR;
     const shortMm = askedR - sprueChannel.outerR;
     if (shortMm > 1) {
       warnings.push(

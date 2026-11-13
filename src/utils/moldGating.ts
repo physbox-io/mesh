@@ -409,6 +409,13 @@ export function planBottomFill(
   linerSkinMm = 0,
   /** Sleeve round the down-sprue inside its wall to the block's edge, mm. */
   sleeveMm = 0,
+  /**
+   * Whether the lid's funnel gets its full size over a spot (x, y, and the
+   * room left to the block's edge for a block that follows the part). The
+   * nearest such spot to the gate wins, the nearest of any if none does: the
+   * middle of a cup's wall had room for a ⌀9 mm funnel, nearer its corner a ⌀15.
+   */
+  funnelFits?: (x: number, y: number, roomR: number) => boolean,
 ): BottomFill | null {
   const { cols, rows, stepX, stepY, halfW, halfD } = grid;
   const xOf = (c: number) => -halfW + c * stepX;
@@ -445,6 +452,8 @@ export function planBottomFill(
   const edge = feedEdgeMm(r, sleeveMm);
   let best: { x: number; y: number; fromPart: number } | null = null;
   let bestD = Infinity;
+  let roomy: { x: number; y: number; fromPart: number } | null = null;
+  let roomyD = Infinity;
   for (let i = 0; i < dist.length; i++) {
     if (dist[i] < minFromPart) continue;
     // Bores are cut exactly, so a column just outside the block's limit comes
@@ -461,7 +470,12 @@ export function planBottomFill(
       bestD = d;
       best = { x, y, fromPart };
     }
+    if (funnelFits && d < roomyD && funnelFits(x, y, maxFromPartMm - fromPart)) {
+      roomyD = d;
+      roomy = { x, y, fromPart };
+    }
   }
+  if (roomy) best = roomy;
   if (!best) return null;
   return {
     down: { x: best.x, y: best.y },

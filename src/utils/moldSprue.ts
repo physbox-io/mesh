@@ -23,6 +23,34 @@ import { castMaterial, type CastMaterialId } from './castMaterials';
 
 /** Mold left between the funnel and the cavity under it, mm. */
 export const MIN_FUNNEL_WALL_MM = 1.5;
+/** Lid left between the funnel and the parting face where the other half is solid under it, mm. */
+export const FUNNEL_SEAM_SKIN_MM = 0.8;
+
+/**
+ * The depth field a funnel keeps clear of: the lid's cavity depth, and where
+ * neither half has any cavity under a column, a depth that lets the funnel
+ * come to within `FUNNEL_SEAM_SKIN_MM` of the parting face. Kept 1.5 mm off
+ * the face everywhere, a 5 mm backing-plate lid gave a down-sprue in the wall
+ * a funnel 1.5 mm deep. Columns next to the cavity count as cavity.
+ */
+export function funnelClearDepths(lidCavityDepth: Float64Array, cavityHalfDepthInLidFrame: Float64Array, grid: Grid): Float64Array {
+  const { cols, rows } = grid;
+  const out = Float64Array.from(lidCavityDepth);
+  const open = -(MIN_FUNNEL_WALL_MM - FUNNEL_SEAM_SKIN_MM);
+  const cavity = (r: number, c: number) => {
+    if (r < 0 || c < 0 || r >= rows || c >= cols) return false;
+    const i = r * cols + c;
+    return lidCavityDepth[i] > 0 || cavityHalfDepthInLidFrame[i] > 0;
+  };
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      let near = false;
+      for (let dr = -1; dr <= 1 && !near; dr++) for (let dc = -1; dc <= 1 && !near; dc++) near = cavity(r + dr, c + dc);
+      if (!near) out[r * cols + c] = open;
+    }
+  }
+  return out;
+}
 
 export interface SprueChannel {
   x: number;
