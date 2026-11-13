@@ -603,3 +603,56 @@ garments, (4) an open material editor. Presets stay as on-ramps.
   - the hoodie hem and cuffs are coverstitched;
   - the bag has a flap sewn across the back's top and fastened to the front with a clasp.
 - The existing trim tests in garments.test.ts pass (5/5).
+
+### Next session: where to pick up (written 2026-11-12, after a8a9729)
+
+**State.** Branch `spike/cloth-sim`, not pushed. The dev server is on 5186 (`npx vite --config
+vite.worktree.config.ts`, an untracked file; keep it). The preset `urban_collection` shows most of this work.
+
+**Rendering it headless.** `node /tmp/claude-1000/-home-boab-mesh-cloth-spike/17d73438-052a-4331-9117-a0236c3bdcf9/scratchpad/render.mjs`
+(Playwright, swiftshader, loads the preset on 5186, closes the note card, turns edges off, and writes several camera
+views to `scratchpad/render/`). Copy it somewhere permanent if the scratchpad is gone. The MCP screenshot fails with
+"Renderer not ready" while the user's tab is in the background.
+
+**User direction, keep it.**
+- Tooling is for hundreds of people making garments of any shape. No placement flags or options shaped around one
+  item; fix the engine or draft the pattern properly instead.
+- When a fix needs a new option, ask whether it is really a material property, an arrangement (the wearer's), or
+  pattern drafting.
+- Verify with a critical subagent looking at renders before calling a look done.
+
+**Last critique ("good but not there"), in order of value:**
+1. **Puffer quilting seams sawtooth up close.** The drawn-curve cutter (`garmentCurves.curveSlit` with
+   `splitAlong`) leaves teeth at triangle scale. Smoothing the normals didn't fix it. Look at how the zero-crossing
+   points are placed across masked triangles, and at snapping.
+2. **Fabric normal maps too strong or coarse** (taffeta reads as waffle). Tune `clothWeaveTexture.ts` tiles, depth
+   and `normalScale`.
+3. **Hood still a cone from behind, gap at the nape.** Two-piece hood in `urbanCollection.ts`; draft the back seam
+   lower and rounder.
+4. **Bag flap crumples.** Its top seam spans the open top (gusset gap); it wants a stiffer piece (materialOverrides
+   per plain-cloth piece?) or a different construction.
+5. **Neckerchief reads as a gaiter under the zipped jacket** (the user asked for it tucked under). Consider a visible
+   knot.
+6. **Zip:** the slider and pull read as separate pieces (geometry in `clothTrims.ts`) and the tape shows slivers.
+7. **Jeans:** the fly J shows as dashes (check `flyJ` points and the 'line' mark), and the side-seam stitches look
+   speckled.
+
+**Measured, sewn-on piece battery** (`tests/_attachbattery.test.ts`, `_attachbuild.test.ts`; scratch). After this
+session: cape 13 crossings at t3, ruffle 31, ribbons 0, cap peak about 25° down. The best earlier ruffle was 3.
+`LAY_ON = false` in garmentAttached (laying pieces on with lifts measured worse).
+
+**Changes that affect every garment, not run against the full garments suite:**
+- bending solved in every stretch pass;
+- bending stencils across tacked seams;
+- pre-sew changes.
+
+The trim tests in garments.test pass. Run garments.test (long) before merging.
+
+**Still to do for parity and merging:**
+- UI to add sewn-on pieces (presets, SVG import; main's `profileImport.svgProfile` once rebased) and to edit
+  per-piece `materialOverrides`;
+- MCP docs for sculpt, curves, attached, arrange, fasten, stitch, bodyForm, internal and edges (mcp-docs.json, the
+  physbox_mcp mirror and systemInstructions.txt), held until the user says the branch is ready;
+- remove the MEASURE-ONLY env switches (CLOTH_NOGAP in clothSelf, CLOTH_UNTANGLE in xpbd);
+- delete the scratch `tests/_*.test.ts`;
+- rebase on main.
