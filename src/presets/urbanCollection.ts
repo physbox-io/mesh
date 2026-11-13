@@ -327,8 +327,11 @@ function handbag(id: string, fm: BodyFormMeasurements, x: number, layer: number)
       placement: { kind: 'path', stations },
     };
   };
-  // A flap from the back's top over the front, fastened to it by a clasp.
-  const F = 0.1;
+  // A flap from the back's top over the front, fastened to it by a clasp
+  // CLASP below the front's top: long enough to cross the bag's mouth (the
+  // gusset's width) and come down to it, and a little past (drafted to the
+  // clasp alone, it was 5 cm short, pulled the back's top over and crumpled).
+  const CLASP = 0.06, F = 2 * gap + CLASP + 0.014;
   const flap: ClothPiece = {
     name: 'flap', rgba: leather,
     edges: [
@@ -351,7 +354,7 @@ function handbag(id: string, fm: BodyFormMeasurements, x: number, layer: number)
     { name: 'bB', a: [{ piece: 'handleB', edge: 'endB' }], b: [{ piece: 'back', edge: 'handleR', reversed: true }] },
     { name: 'flap', a: [{ piece: 'flap', edge: 'top' }], b: ['topR', 'handleR', 'topMid', 'handleL', 'topL'].map((edge) => ({ piece: 'back', edge })) },
   ];
-  const fasten: ClothFastening[] = [{ a: { piece: 'flap', at: [0, -F + 0.012] }, b: { piece: 'front', at: [0, H / 2 - F + 0.012] }, trim: { kind: 'buckle', size: 0.028, rgba: [0.83, 0.68, 0.32, 1] } }];
+  const fasten: ClothFastening[] = [{ a: { piece: 'flap', at: [0, -(2 * gap + CLASP)] }, b: { piece: 'front', at: [0, H / 2 - CLASP] }, trim: { kind: 'buckle', size: 0.028, rgba: [0.83, 0.68, 0.32, 1] } }];
   return { id, name: id, pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces, seams, fasten, material: 'leather', spacing: 0.018, sewTime: 1, layer } } as unknown as SceneNode;
 }
 
