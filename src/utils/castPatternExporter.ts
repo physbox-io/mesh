@@ -599,19 +599,65 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   for (let k = 0; k < hit.length; k++) if (hit[k]) columnVolumeMm3 += thickness[k] * cellArea;
   const drawBasisMm3 = columnVolumeMm3 > 1e-9 ? columnVolumeMm3 : partVolumeMm3;
 
-  /** Material that will not draw with a parting plane `p` mm above the base, mm³. */
+  // The columns are stored as 32-bit floats, a few millionths of a millimetre
+  // apart at a 60 mm ball's height: compared exactly, a solid ball's columns
+  // read as holding a void, and 12% of it as undrawable. A gap or a step
+  // under a hundredth of a millimetre is neither.
+  const COLUMN_TOL_MM = 0.01;
+  const label = new Int32Array(hit.length);
+  const stack: number[] = [];
+
+  /**
+   * Material that will not draw with a parting plane `p` mm above the base, mm³.
+   *
+   * A column whose metal is all above the plane has the lower half's sand
+   * under it, which is only trapped if that sand is also open to the upper
+   * half's round the side: under a mushroom's cap, yes; inside a bowl parted
+   * at its rim, no — the bowl's own wall closes it off, and the sand inside
+   * is a green-sand core the pattern lifts off. Counted as trapped, a dome
+   * read 96% undrawable. So each run of such columns is trapped only if it
+   * reaches a column with no part in it; mirrored for metal all below.
+   */
   const trappedAt = (p: number): number => {
     let trapped = 0;
+    label.fill(0);
+    // 1 = above the plane, 2 = below it; a run sealed by columns that cross the plane is a core.
+    const side = (k: number) => (!hit[k] || thickness[k] <= 0 ? 0 : bottom[k] > p + COLUMN_TOL_MM ? 1 : top[k] < p - COLUMN_TOL_MM ? 2 : 0);
+    const sealed = new Map<number, boolean>();
+    let next = 1;
+    for (let k0 = 0; k0 < hit.length; k0++) {
+      const s0 = side(k0);
+      if (!s0 || label[k0]) continue;
+      const id = next++;
+      let closed = true;
+      label[k0] = id;
+      stack.push(k0);
+      while (stack.length) {
+        const k = stack.pop()!;
+        const r = Math.floor(k / cols), c = k % cols;
+        for (const [rr, cc] of [[r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]]) {
+          if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) { closed = false; continue; }
+          const n = rr * cols + cc;
+          if (!hit[n]) { closed = false; continue; }
+          // A grazed column (one face hit, no metal) is passed through, whichever side it is.
+          const sn = thickness[n] <= 0 ? s0 : side(n);
+          if (sn === s0) {
+            if (!label[n]) { label[n] = id; stack.push(n); }
+          } else if (sn !== 0) closed = false;
+        }
+      }
+      sealed.set(id, closed);
+    }
     for (let k = 0; k < hit.length; k++) {
       if (!hit[k]) continue;
       const mat = thickness[k];
       if (mat <= 0) continue;
-      if (bottom[k] > p || top[k] < p) {
+      if (label[k]) {
         // Every millimetre of metal in this column is on the wrong side of the
-        // plane with nothing under (or over) it holding the sand up: all of it
-        // is re-entrant to whichever half would have to pull it.
-        trapped += mat * cellArea;
-      } else if (top[k] - bottom[k] - mat > 1e-6) {
+        // plane with sand under (or over) it that belongs to the other half:
+        // all of it is re-entrant to whichever half would have to pull it.
+        if (!sealed.get(label[k])) trapped += mat * cellArea;
+      } else if (top[k] - bottom[k] - mat > COLUMN_TOL_MM) {
         // The plane passes through the column, but so does a void, so the metal
         // comes in two or more spans and only the one touching the plane draws.
         // The column sampler hands back totals rather than the spans themselves,

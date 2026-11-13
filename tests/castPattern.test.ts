@@ -930,3 +930,64 @@ describe('burnout vents on thin walls, far ends and fine features', () => {
     expect(widest).toBeLessThanOrEqual(0.76 * g + 0.05);
   });
 });
+
+// A hollow hemisphere, rim down on the base, 3 mm wall: a bowl turned over.
+function domeShell(R = 0.03, r = 0.027, n = 32, m = 12): SceneGraph {
+  const v: number[] = [];
+  const f: number[] = [];
+  const ring = (rad: number) => {
+    const base = v.length / 3;
+    for (let j = 0; j <= m; j++) {
+      for (let i = 0; i < n; i++) {
+        const el = (j / m) * (Math.PI / 2), az = (i / n) * 2 * Math.PI;
+        // Z-up, written Y-up as mesh vertices are.
+        v.push(rad * Math.cos(el) * Math.cos(az), rad * Math.sin(el), -rad * Math.cos(el) * Math.sin(az));
+      }
+    }
+    return base;
+  };
+  const o = ring(R), q = ring(r);
+  const at = (b: number, j: number, i: number) => b + j * n + (i % n);
+  for (let j = 0; j < m; j++) {
+    for (let i = 0; i < n; i++) {
+      f.push(at(o, j, i), at(o, j, i + 1), at(o, j + 1, i + 1), at(o, j, i), at(o, j + 1, i + 1), at(o, j + 1, i));
+      f.push(at(q, j, i), at(q, j + 1, i + 1), at(q, j, i + 1), at(q, j, i), at(q, j + 1, i), at(q, j + 1, i + 1));
+    }
+  }
+  for (let i = 0; i < n; i++) f.push(at(o, 0, i), at(q, 0, i + 1), at(o, 0, i + 1), at(o, 0, i), at(q, 0, i), at(q, 0, i + 1));
+  return { nodes: [{ id: 'd', name: 'dome', type: 'body', pos: [0, 0, 0], geoms: [{ name: 'g', type: 'mesh', vertices: v, faces: f }], joints: [], children: [] }] } as unknown as SceneGraph;
+}
+
+describe('sand draw check on round work', () => {
+  it('reads a solid ball as solid: parted at its middle, nothing is undrawable', () => {
+    // The columns are 32-bit floats; compared exactly they read as hollow, and 12% was undrawable.
+    const ball = { nodes: [{ id: 'b', name: 'ball', type: 'body', pos: [0, 0, 0], geoms: [{ name: 'g', type: 'sphere', size: [0.03], pos: [0, 0, 0.03] }], joints: [], children: [] }] } as unknown as SceneGraph;
+    const r = generateCastPattern(ball, { method: 'sand', metalId: 'aluminium' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.undrawablePercent).toBeLessThan(0.5);
+    expect(r.summary.partingFromBaseMm).toBeCloseTo(30, 0);
+    expect(r.warnings.join(' ')).not.toMatch(/overhangs the pull/);
+  });
+
+  it('draws a bowl parted at its rim: the sand inside it is a core, not an undercut', () => {
+    const r = generateCastPattern(domeShell(), { method: 'sand', metalId: 'aluminium' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.undrawablePercent).toBeLessThan(0.5);
+    expect(r.summary.partingFromBaseMm).toBeCloseTo(0, 1);
+  });
+
+  it('still finds a mushroom\'s cap undrawable from its foot: that sand is open round the side', () => {
+    const mushroom = {
+      nodes: [{
+        id: 'm', name: 'mushroom', type: 'body', pos: [0, 0, 0],
+        geoms: [
+          { name: 'stem', type: 'cylinder', size: [0.006, 0.015], pos: [0, 0, 0.015] },
+          { name: 'cap', type: 'cylinder', size: [0.02, 0.004], pos: [0, 0, 0.034] },
+        ],
+        joints: [], children: [],
+      }],
+    } as unknown as SceneGraph;
+    const r = generateCastPattern(mushroom, { method: 'sand', metalId: 'aluminium', partingFromBaseMm: 0 });
+    expect(r.summary.undrawablePercent).toBeGreaterThan(50);
+  });
+});
