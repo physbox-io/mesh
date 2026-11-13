@@ -508,8 +508,11 @@ export interface BoreCut {
 
 /**
  * A bore as solids to subtract one at a time: a cylinder turned onto its
- * axis, and balls on its ends if asked. Not unioned: a union whose parts were
- * deleted before Manifold evaluated it once lost a mold its sprue (moldSprue.ts).
+ * axis, and balls on its ends if asked. Horizontal runner bores use a 45°
+ * teardrop roof and vertical blind gates a 45° conical tip so neither leaves
+ * a mid-air flat ceiling when printed parting face up without support. Not
+ * unioned: a union whose parts were deleted before Manifold evaluated it once
+ * lost a mold its sprue (moldSprue.ts).
  */
 export function boreSolids(wasm: ManifoldToplevel, cut: BoreCut): Manifold[] {
   const [ax, ay, az] = cut.a;
@@ -519,7 +522,47 @@ export function boreSolids(wasm: ManifoldToplevel, cut: BoreCut): Manifold[] {
   const tilt = len > 1e-9 ? (Math.acos(Math.max(-1, Math.min(1, d[2] / len))) * 180) / Math.PI : 0;
   const turn = len > 1e-9 ? (Math.atan2(d[1], d[0]) * 180) / Math.PI : 0;
   const h = Math.max(len, 1e-3);
-  let cyl = wasm.Manifold.cylinder(h, cut.r, cut.rB ?? cut.r, 32, false);
+  const rB = cut.rB ?? cut.r;
+  // A horizontal bore in the half's XY plane prints sideways: a teardrop, its
+  // 45° roof tangent to the circle and peaked at r·√2 over the axis, builds up
+  // without support and still holds the whole round bore (a peak at r cut its
+  // upper corners off, an eighth less runner).
+  if (Math.abs(d[2]) < 1e-6 && len > 1e-6 && Math.abs(cut.r - rB) < 1e-6 && !cut.fluted) {
+    const r = cut.r;
+    // In the section, -x is up once the extrusion is turned onto the axis.
+    const ring: [number, number][] = [[-r * Math.SQRT2, 0]];
+    for (let k = 0; k <= 48; k++) {
+      const t = (5 * Math.PI) / 4 + (k * 3 * Math.PI) / 2 / 48;
+      ring.push([r * Math.cos(t), r * Math.sin(t)]);
+    }
+    const cs = new wasm.CrossSection([ring], 'Positive');
+    const ext = wasm.Manifold.extrude(cs, h);
+    cs.delete();
+    const rotated = ext.rotate([0, 90, 0]).rotate([0, 0, turn]).translate([ax, ay, az]);
+    ext.delete();
+    rotated.numTri();
+    const out = [rotated];
+    if (cut.ends) {
+      // A ball with a 45° cone on top, tangent to it and peaked at r·√2, as the teardrop is.
+      const half: [number, number][] = [[0, -r]];
+      for (let k = 1; k <= 24; k++) {
+        const ang = -Math.PI / 2 + (k * (3 * Math.PI) / 4) / 24;
+        half.push([r * Math.cos(ang), r * Math.sin(ang)]);
+      }
+      half.push([0, r * Math.SQRT2]);
+      const capCs = new wasm.CrossSection([half], 'Positive');
+      const cap = wasm.Manifold.revolve(capCs, 32).rotate([0, 0, turn]);
+      capCs.delete();
+      for (const p of [cut.a, cut.b]) {
+        const placed = cap.translate(p);
+        placed.numTri();
+        out.push(placed);
+      }
+      cap.delete();
+    }
+    return out;
+  }
+  let cyl = wasm.Manifold.cylinder(h, cut.r, rB, 32, false);
   const ribDepth = Math.min(0.45, Math.max(0, cut.r - 0.8));
   const ribWidth = Math.min(0.6, cut.r * 0.3);
   if (cut.fluted && ribDepth > 0.1 && ribWidth > 0.1) {
@@ -539,6 +582,16 @@ export function boreSolids(wasm: ManifoldToplevel, cut: BoreCut): Manifold[] {
   rotated.numTri();
   const out = [rotated];
   if (cut.ends) for (const p of [cut.a, cut.b]) out.push(wasm.Manifold.sphere(cut.r, 32).translate(p));
+  // An upward vertical bore ending below the parting face (a bottom-fill gate)
+  // capped with a 45° cone so its top never leaves a flat ceiling in the liner.
+  if (Math.hypot(d[0], d[1]) < 1e-6 && d[2] > 0 && cut.b[2] < -1e-3 && !cut.fluted) {
+    const tipH = Math.min(-cut.b[2], rB);
+    if (tipH > 1e-3) {
+      const tip = wasm.Manifold.cylinder(tipH + 0.02, rB, 0.01, 32, false).translate([cut.b[0], cut.b[1], cut.b[2] - 0.02]);
+      tip.numTri();
+      out.push(tip);
+    }
+  }
   return out;
 }
 

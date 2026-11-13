@@ -61,7 +61,8 @@ import { linerPair, pairSoftenC, type LinerPair, type LinerPairId } from './line
 import { fittedBlock, type Outline } from './moldOutline';
 import { channelSolid, sprueNeckDiaMm, withPourMouth } from './moldSprue';
 import { boreSolids, type BoreCut } from './moldGating';
-import { unprintableRoofs, ROOF_LAYER_MM, type CavityRoof } from './moldRoofs';
+import { unprintableRoofs, ROOF_LAYER_MM, ROOF_REACH_MM, type CavityRoof } from './moldRoofs';
+import { DEFAULT_PRINTER, printLimits } from './printLimits';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
 
@@ -519,92 +520,21 @@ function stampFootprint(depth: Float64Array, grid: Grid, footprint: CrossSection
 }
 
 /**
- * An insert's depth field deepened so that, printed parting face up, its
- * underside builds up from the bed at 45° or steeper everywhere: no piece of
- * it, cut or not, needs support. Each column's underside comes down to no
- * higher above the bed than its distance, through the insert, from where the
- * insert stands on the bed; a low point the slopes cannot reach is taken down
- * to the bed itself, and the slopes then run to it. Only ever deeper, and only
- * under the insert's own footprint.
+ * An insert's depth field taken down to one flat base: every column of the
+ * insert's footprint goes as deep as its deepest, so printed parting face up
+ * it stands on the bed by its whole outline. A 45° self-supporting underside
+ * needed no support, but on a part with an uneven underside (a gear
+ * sculpture) it built a cup 17 mm tall on a few feet a fifth of its width,
+ * and in HIPS the nozzle knocked it off the bed every time. In a half a
+ * channel goes right through (a lid's sprue and vents), the base is the
+ * block's back: the insert goes through its holder, which keeps it by its
+ * sides, and the clamping presses on it. Only ever deeper, and only under the insert.
  */
-/** Half the width of the least footprint an insert stands on the bed by, mm: a few nozzle lines. */
-const BED_FOOT_R = 1.2;
-
-export function selfSupporting(depth: Float64Array, grid: Grid, blockHeight: number): Float64Array {
-  const { cols, rows, stepX, stepY } = grid;
-  const n = cols * rows;
-  const deepest = Math.min(blockHeight, depth.reduce((m, d) => Math.max(m, d), 0));
+export function flatBase(depth: Float64Array, blockHeight: number): Float64Array {
+  let deepest = 0;
+  for (const d of depth) if (d > deepest) deepest = Math.min(d, blockHeight);
   if (!(deepest > 0)) return depth;
-  // Height of each column's underside above the bed; outside the insert, none.
-  const height = new Float64Array(n).fill(Infinity);
-  for (let i = 0; i < n; i++) if (depth[i] > 0) height[i] = Math.max(0, deepest - Math.min(depth[i], blockHeight));
-  const diag = Math.hypot(stepX, stepY);
-  const nb: Array<[number, number, number]> = [[-1, 0, stepX], [1, 0, stepX], [0, -1, stepY], [0, 1, stepY], [-1, -1, diag], [1, -1, diag], [-1, 1, diag], [1, 1, diag]];
-  // Where the insert stands on the bed, grown to a footprint a slicer keeps:
-  // a needle that meets the bed at a point is a first-layer speck it drops,
-  // and everything built up from it is then floating.
-  const reach: Array<[number, number]> = [];
-  const rc = Math.ceil(BED_FOOT_R / stepX), rr = Math.ceil(BED_FOOT_R / stepY);
-  for (let dr = -rr; dr <= rr; dr++) for (let dc = -rc; dc <= rc; dc++) if (Math.hypot(dc * stepX, dr * stepY) <= BED_FOOT_R) reach.push([dc, dr]);
-  const onBed = new Uint8Array(n);
-  const standOnBed = (i: number) => {
-    const r0 = Math.floor(i / cols), c0 = i - r0 * cols;
-    for (const [dc, dr] of reach) {
-      const c = c0 + dc, r = r0 + dr;
-      if (c < 0 || r < 0 || c >= cols || r >= rows) continue;
-      const j = r * cols + c;
-      if (Number.isFinite(height[j])) onBed[j] = 1;
-    }
-  };
-  for (let i = 0; i < n; i++) if (height[i] <= 1e-6) standOnBed(i);
-  const out = new Float64Array(height);
-  for (let round = 0; round < 64; round++) {
-    // Distance through the insert to where it stands on the bed: two chamfer sweeps each way.
-    const dist = new Float64Array(n).fill(Infinity);
-    for (let i = 0; i < n; i++) if (onBed[i]) dist[i] = 0;
-    for (let pass = 0; pass < 2; pass++) {
-      for (const dir of [1, -1]) {
-        for (let k = 0; k < n; k++) {
-          const i = dir > 0 ? k : n - 1 - k;
-          if (!Number.isFinite(height[i])) continue;
-          const r = Math.floor(i / cols), c = i - r * cols;
-          let best = dist[i];
-          for (const [dc, dr, w] of nb) {
-            const cc = c + dc, rr = r + dr;
-            if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) continue;
-            const v = dist[rr * cols + cc] + w;
-            if (v < best) best = v;
-          }
-          dist[i] = best;
-        }
-      }
-    }
-    for (let i = 0; i < n; i++) if (Number.isFinite(height[i])) out[i] = onBed[i] ? 0 : Math.min(height[i], dist[i]);
-    // A column with nothing lower beside it to build up from goes down to the bed.
-    let added = 0;
-    for (let i = 0; i < n; i++) {
-      if (!Number.isFinite(out[i]) || out[i] <= 1e-6) continue;
-      const r = Math.floor(i / cols), c = i - r * cols;
-      let held = false;
-      for (const [dc, dr, w] of nb) {
-        const cc = c + dc, rr = r + dr;
-        if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) continue;
-        const j = rr * cols + cc;
-        if (Number.isFinite(out[j]) && out[j] <= out[i] - w + 1e-6) {
-          held = true;
-          break;
-        }
-      }
-      if (!held) {
-        standOnBed(i);
-        added++;
-      }
-    }
-    if (!added) break;
-  }
-  const result = new Float64Array(n);
-  for (let i = 0; i < n; i++) result[i] = Number.isFinite(out[i]) ? Math.max(depth[i], deepest - out[i]) : depth[i];
-  return result;
+  return depth.map((d) => (d > 0 ? Math.max(d, deepest) : d));
 }
 
 /** How far down from the parting face a holder's pocket fits its insert to the clearance exactly, mm. */
@@ -645,12 +575,53 @@ interface HalfPair {
 }
 
 /**
+ * Carries any flat upward face of `part` that lies on the parting plane
+ * (|z| < 0.01 mm) up through z = 0, so float32 rounding never leaves a
+ * sub-micron sheet of liner across the cavity mouth when `part` is subtracted
+ * from the block. Curved surfaces crossing z = 0 are left alone.
+ */
+function carryPartingFlats(wasm: ManifoldToplevel, part: Manifold): Manifold {
+  const mesh = part.getMesh();
+  const p = mesh.vertProperties;
+  const st = mesh.numProp;
+  const t = mesh.triVerts;
+  const polys: SimplePolygon[] = [];
+  for (let k = 0; k < t.length; k += 3) {
+    const [a, b, c] = [t[k] * st, t[k + 1] * st, t[k + 2] * st];
+    const z = (p[a + 2] + p[b + 2] + p[c + 2]) / 3;
+    if (Math.abs(z) > FACE_TOUCH_MM) continue;
+    const ux = p[b] - p[a], uy = p[b + 1] - p[a + 1], uz = p[b + 2] - p[a + 2];
+    const vx = p[c] - p[a], vy = p[c + 1] - p[a + 1], vz = p[c + 2] - p[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz);
+    if (len > 1e-12 && nz / len > 0.999) {
+      polys.push([[p[a], p[a + 1]], [p[b], p[b + 1]], [p[c], p[c + 1]]]);
+    }
+  }
+  if (!polys.length) return part;
+  const cs = new wasm.CrossSection(polys, 'Positive');
+  if (cs.isEmpty()) {
+    cs.delete();
+    return part;
+  }
+  const plug = wasm.Manifold.extrude(cs, 0.5 + FACE_TOUCH_MM + 0.02).translate([0, 0, -(FACE_TOUCH_MM + 0.02)]);
+  cs.delete();
+  const out = part.add(plug);
+  out.numTri();
+  plug.delete();
+  return replace(part, out);
+}
+
+/**
  * The part in one half's own frame (cavity below z = 0), as that half's mold
  * casts it: drafted, and carried up through the face where it ends on it.
  */
 function halfPart(ctx: LinerContext, rawPart: Manifold, flipped: boolean, rawDepth: Float64Array): Manifold {
   const { wasm, grid, partingZ } = ctx;
   let part = flipped ? rawPart.transform(flipAbout(partingZ)) : rawPart.translate([0, 0, -partingZ]);
+  if (ctx.opts.moldType !== 'open' && !ctx.lidIsBackingPlate) {
+    part = carryPartingFlats(wasm, part);
+  }
   // The casting as the draft leaves it; the shell's envelope then has to hold
   // both it and the undrafted part, whichever reaches further.
   const { draftAngleDeg, draftMode } = ctx.opts;
@@ -728,8 +699,11 @@ function buildHalfPair(
     const raw = envelope.map((d, i) => Math.max(d, sd[i]));
     // What lands from the other half stands on insert, a skin deep at least.
     if (landingFoot) stampFootprint(raw, grid, landingFoot, ctx.skinMm);
-    // Built down to the bed at 45° or steeper, so no piece of it needs support.
-    const insertDepth = selfSupporting(raw, grid, blockHeight).map((v) => (v > limit ? blockHeight + 2 : v));
+    // Down to one flat base, so it stands on the bed by its whole outline and
+    // nothing under it needs support. Any column that goes within MIN_FLOOR_MM
+    // of the block's bottom (such as a lid's sprue and vent sleeves) goes
+    // through the holder's floor.
+    const insertDepth = flatBase(raw, blockHeight).map((v) => (v > limit ? blockHeight + 2 : v));
     const outer = envelopeSolid(wasm, grid, insertDepth);
     const withSleeves = sleeves ? outer.add(sleeves) : outer;
     const shape = landing ? withSleeves.add(landing) : withSleeves;
@@ -828,9 +802,9 @@ const LIFT_INSET_MM = 0.02;
 /** Turns a solid in one half's frame into the other's: the lid's frame is the cavity half's turned over about X. */
 const otherHalf = (m: Manifold) => m.rotate([180, 0, 0]);
 
-/** The part's shadow on the face from the half's own side of it (z < 0). */
+/** The part's shadow on the face within LIFT_MAX_MM of the half's own side of it (z < 0). */
 function halfShadow(wasm: ManifoldToplevel, part: Manifold): CrossSection {
-  const side = wasm.Manifold.cube([1e4, 1e4, 1e4], true).translate([0, 0, -5e3]);
+  const side = wasm.Manifold.cube([1e4, 1e4, LIFT_MAX_MM], true).translate([0, 0, -LIFT_MAX_MM / 2]);
   const below = part.intersect(side);
   side.delete();
   const shadow = below.project();
@@ -846,24 +820,36 @@ function halfShadow(wasm: ManifoldToplevel, part: Manifold): CrossSection {
  * the cavity under it with support. Belonging to the other half instead, it is
  * a pad standing on that half's face. `otherShadow` is in this half's frame.
  */
-function roofFootprint(wasm: ManifoldToplevel, part: Manifold, shadow: CrossSection, otherShadow: CrossSection): CrossSection {
-  // Only where the part comes within LIFT_MAX_MM of the face.
+function roofFootprint(wasm: ManifoldToplevel, part: Manifold, shadow: CrossSection, otherShadow: CrossSection, minWallMm = 0.4): CrossSection {
+  // Only where the part comes within LIFT_MAX_MM of the face. Shrinking
+  // `touching` by LIFT_INSET_MM rather than shrinking after subtracting it
+  // avoids leaving a 20 µm foil of liner standing along the wall of `touching`.
   const slab = wasm.Manifold.cube([1e4, 1e4, LIFT_MAX_MM], true).translate([0, 0, -LIFT_MAX_MM / 2]);
   const near = part.intersect(slab);
   slab.delete();
   const nearShadow = near.project();
   near.delete();
-  const touching = part.slice(-FACE_TOUCH_MM);
-  const short = nearShadow.subtract(touching);
+  const nearInset = nearShadow.offset(-LIFT_INSET_MM, 'Miter');
   nearShadow.delete();
+  const touching = part.slice(-FACE_TOUCH_MM);
+  const touchInset = touching.offset(-LIFT_INSET_MM, 'Miter');
   touching.delete();
-  const free = short.subtract(otherShadow);
+  const short = nearInset.subtract(touchInset);
+  nearInset.delete();
+  touchInset.delete();
+  const otherGrown = otherShadow.offset(LIFT_INSET_MM, 'Miter');
+  const inset = short.subtract(otherGrown);
   short.delete();
-  const inset = free.offset(-LIFT_INSET_MM, 'Miter');
-  free.delete();
-  // Specks are left where they are.
+  otherGrown.delete();
+  // Specks and slivers narrower than one nozzle line (< minWallMm) are left where they are;
+  // anything at least a line wide (such as gear-tooth roofs) lifts onto the other half's face
+  // rather than hanging over the cavity as a thin cantilevered wafer.
+  const rMin = Math.max(0.05, minWallMm / 2);
+  const aMin = Math.max(0.05, minWallMm * minWallMm * 0.75);
   const kept = inset.decompose().filter((p) => {
-    const keep = p.area() > 0.5;
+    const core = p.offset(-rMin, 'Round');
+    const keep = p.area() > aMin && !core.isEmpty();
+    core.delete();
     if (!keep) p.delete();
     return keep;
   });
@@ -886,7 +872,7 @@ function liftRoofs(wasm: ManifoldToplevel, from: HalfPair, to: HalfPair, footpri
   prism.delete();
   const pieces = inside.decompose();
   inside.delete();
-  const top = pieces.filter((p) => p.boundingBox().max[2] > -1e-3 && p.volume() > 1e-3);
+  const top = pieces.filter((p) => p.boundingBox().max[2] > -1e-3 && p.volume() >= 0.005);
   const moved = top.length ? wasm.Manifold.compose(top) : null;
   for (const p of pieces) p.delete();
   if (!moved) return 0;
@@ -913,13 +899,13 @@ function castSpace(wasm: ManifoldToplevel, part: Manifold, features: HalfFeature
   return cast;
 }
 
-/** Heights of the flat faces a solid turns upward, mm, at least `minAreaMm2` each. */
-function upwardFlats(m: Manifold, minAreaMm2 = 1): number[] {
+/** Flat faces a solid turns upward below the parting face, grouped by height (mm), at least `minAreaMm2` each. */
+function upwardFlats(wasm: ManifoldToplevel, m: Manifold, minAreaMm2 = 1): Array<{ z: number; cs: CrossSection }> {
   const mesh = m.getMesh();
   const p = mesh.vertProperties;
   const st = mesh.numProp;
   const t = mesh.triVerts;
-  const area = new Map<number, number>();
+  const byZ = new Map<number, { area: number; polys: SimplePolygon[] }>();
   for (let k = 0; k < t.length; k += 3) {
     const [a, b, c] = [t[k] * st, t[k + 1] * st, t[k + 2] * st];
     const ux = p[b] - p[a], uy = p[b + 1] - p[a + 1], uz = p[b + 2] - p[a + 2];
@@ -928,13 +914,40 @@ function upwardFlats(m: Manifold, minAreaMm2 = 1): number[] {
     const len = Math.hypot(nx, ny, nz);
     if (len < 1e-12 || nz / len < 0.999) continue;
     const z = Math.round(((p[a + 2] + p[b + 2] + p[c + 2]) / 3) * 100) / 100;
-    area.set(z, (area.get(z) ?? 0) + len / 2);
+    if (z >= -ROOF_LAYER_MM) continue;
+    let entry = byZ.get(z);
+    if (!entry) {
+      entry = { area: 0, polys: [] };
+      byZ.set(z, entry);
+    }
+    entry.area += len / 2;
+    entry.polys.push([[p[a], p[a + 1]], [p[b], p[b + 1]], [p[c], p[c + 1]]]);
   }
-  return [...area].filter(([, a]) => a >= minAreaMm2).map(([z]) => z);
+  const out: Array<{ z: number; cs: CrossSection }> = [];
+  for (const [z, { area, polys }] of byZ) {
+    if (area < minAreaMm2) continue;
+    const raw = new wasm.CrossSection(polys, 'Positive');
+    // Each contiguous flat face must reach `minAreaMm2` on its own, so a ring of
+    // tiny polar-cap facets on curved domes or petals at the same height never
+    // adds up to look like one flat shelf.
+    const bigPolys: SimplePolygon[] = [];
+    for (const island of raw.decompose()) {
+      if (island.area() >= minAreaMm2) bigPolys.push(...island.toPolygons());
+      island.delete();
+    }
+    raw.delete();
+    if (!bigPolys.length) continue;
+    const cs = new wasm.CrossSection(bigPolys, 'Positive');
+    if (cs.area() >= minAreaMm2) out.push({ z, cs });
+    else cs.delete();
+  }
+  return out;
 }
 
 /** How far under the face it frees an insert is cut, mm: far under a layer. */
 const CUT_UNDER_MM = 0.02;
+/** Minimum vertical spacing between two insert cuts so no cut slices out a sub-millimetre wafer, mm. */
+const MIN_CUT_STEP_MM = 0.8;
 /** A peg on each cut face of an insert in pieces, into a hole in the piece above, mm. */
 const PEG_R = 1.0;
 const PEG_TOP_R = 0.8;
@@ -958,18 +971,19 @@ const PEG_SPREAD = 6;
 function pegPieces(wasm: ManifoldToplevel, pieces: Manifold[], cuts: number[]): { pieces: Manifold[]; pegs: number } {
   const out = [...pieces];
   let pegs = 0;
+  const rHole = PEG_R + PEG_HOLE_CLEAR;
   for (let k = 0; k + 1 < out.length && k < cuts.length; k++) {
     const z = cuts[k];
     const below = out[k].slice(z - 0.05);
     const above = out[k + 1].slice(z + 0.05);
-    // Solid all the way up the hole and past its end, not only at the cut.
+    // Solid all the way up the hole and its 45° conical roof, not only at the cut.
     let solid = below.intersect(above);
-    for (const h of [0.5, 1, PEG_HOLE_DEEP, PEG_HOLE_DEEP + PEG_MARGIN]) {
+    for (const h of [0.5, 1, PEG_HOLE_DEEP, PEG_HOLE_DEEP + rHole + PEG_MARGIN]) {
       const at = out[k + 1].slice(z + h);
       solid = replace2(solid, solid.intersect(at));
       at.delete();
     }
-    const room = solid.offset(-(PEG_R + PEG_HOLE_CLEAR + PEG_MARGIN), 'Round');
+    const room = solid.offset(-(rHole + PEG_MARGIN), 'Round');
     for (const c of [below, above, solid]) c.delete();
     const spots = room.toPolygons().flat();
     room.delete();
@@ -987,15 +1001,22 @@ function pegPieces(wasm: ManifoldToplevel, pieces: Manifold[], cuts: number[]): 
       }
     }
     if (far < PEG_SPREAD) best = [best[0]];
+    const holeCs = new wasm.CrossSection(
+      [[[0, -0.05], [rHole, -0.05], [rHole, PEG_HOLE_DEEP], [0, PEG_HOLE_DEEP + rHole]]],
+      'Positive',
+    );
+    const holeShape = wasm.Manifold.revolve(holeCs, 24);
+    holeCs.delete();
     for (const [x, y] of best) {
       const peg = wasm.Manifold.cylinder(PEG_H + 0.05, PEG_R, PEG_TOP_R, 24, false).translate([x, y, z - 0.05]);
       out[k] = replace(out[k], out[k].add(peg));
       peg.delete();
-      const hole = wasm.Manifold.cylinder(PEG_HOLE_DEEP + 0.05, PEG_R + PEG_HOLE_CLEAR, PEG_R + PEG_HOLE_CLEAR, 24, false).translate([x, y, z - 0.05]);
+      const hole = holeShape.translate([x, y, z]);
       out[k + 1] = replace(out[k + 1], out[k + 1].subtract(hole));
       hole.delete();
       pegs++;
     }
+    holeShape.delete();
   }
   return { pieces: out, pegs };
 }
@@ -1007,24 +1028,66 @@ function pegPieces(wasm: ManifoldToplevel, pieces: Manifold[], cuts: number[]): 
  * face of the casting is cut at exactly that face. Pieces bottom first, with
  * the heights they were cut at and whatever roofs no cut could fix.
  */
-function splitInsert(wasm: ManifoldToplevel, liner: Manifold, cast: Manifold): { pieces: Manifold[]; cutsMm: number[]; pegs: number; left: CavityRoof[] } {
-  const flats = upwardFlats(cast);
+function splitInsert(wasm: ManifoldToplevel, liner: Manifold, cast: Manifold, bridgeMm: number): { pieces: Manifold[]; cutsMm: number[]; pegs: number; left: CavityRoof[] } {
+  const flats = upwardFlats(wasm, cast, 2);
   const cuts: number[] = [];
   let pieces: Manifold[] = [liner];
   // The roofs the last round found that no cut could fix.
   let left: CavityRoof[] = [];
   for (let round = 0; round < 8; round++) {
-    const fresh: number[] = [];
+    const candidates: Array<{ z: number; area: number; roof: CavityRoof }> = [];
     left = [];
     for (const piece of pieces) {
-      for (const roof of unprintableRoofs(piece, cast)) {
-        // The roof starts on the layer above the face it hangs over.
-        const face = flats.find((f) => Math.abs(f + roof.depthMm) <= ROOF_LAYER_MM * 0.75);
+      const box = piece.boundingBox();
+      for (const roof of unprintableRoofs(piece, cast, ROOF_LAYER_MM, ROOF_REACH_MM, bridgeMm)) {
+        // The roof starts on the layer above the flat face it hangs over — and
+        // only when a substantial share of that roof actually lies over the flat
+        // face in XY, not at a curved petal grazing a small facet elsewhere.
+        let face: number | undefined;
+        let bestArea = 0;
+        let bestDist = ROOF_LAYER_MM * 0.75;
+        let roofCs: CrossSection | null = null;
+        if (roof.polys && roof.polys.length > 0) {
+          const rawCs = new wasm.CrossSection(roof.polys, 'Positive');
+          roofCs = rawCs.offset(ROOF_REACH_MM + 0.1, 'Round');
+          rawCs.delete();
+        }
+        const minOverlap = Math.max(0.5, roof.areaMm2 * 0.4);
+        for (const f of flats) {
+          const d = Math.abs(f.z + roof.depthMm);
+          if (d > bestDist) continue;
+          let overArea = roof.areaMm2;
+          if (roofCs) {
+            const under = f.cs.intersect(roofCs);
+            overArea = under.area();
+            under.delete();
+            if (overArea < minOverlap) continue;
+          }
+          bestDist = d;
+          bestArea = overArea;
+          face = f.z;
+        }
+        roofCs?.delete();
         // A hair under the face: cut on it, the pieces touch each other along
         // its edges, and no slicer reads a body that does as solid.
         const z = face === undefined ? undefined : Math.round((face - CUT_UNDER_MM) * 1000) / 1000;
-        if (z === undefined) left.push(roof);
-        else if (!cuts.includes(z) && !fresh.includes(z)) fresh.push(z);
+        if (z === undefined || z <= box.min[2] + 0.4 || z >= box.max[2] - 0.4) {
+          left.push(roof);
+        } else {
+          candidates.push({ z, area: bestArea, roof });
+        }
+      }
+    }
+    candidates.sort((a, b) => b.area - a.area);
+    const fresh: number[] = [];
+    for (const cand of candidates) {
+      const tooClose =
+        cuts.some((c) => Math.abs(c - cand.z) < MIN_CUT_STEP_MM) ||
+        fresh.some((c) => Math.abs(c - cand.z) < MIN_CUT_STEP_MM);
+      if (tooClose) {
+        if (!cuts.includes(cand.z) && !fresh.includes(cand.z)) left.push(cand.roof);
+      } else {
+        fresh.push(cand.z);
       }
     }
     if (!fresh.length) break;
@@ -1050,6 +1113,7 @@ function splitInsert(wasm: ManifoldToplevel, liner: Manifold, cast: Manifold): {
       return true;
     });
   }
+  for (const f of flats) f.cs.delete();
   cuts.sort((a, b) => a - b);
   pieces.sort((p, q) => p.boundingBox().min[2] - q.boundingBox().min[2]);
   // Pegs stand on a piece's top and go into holes opening on the next one's
@@ -1178,7 +1242,10 @@ export function linerSteps(o: {
       ? `Wipe a thin film of mold release or petroleum jelly over both parting faces${sealed ? ', the sealing ridge and its groove' : ''}, the pins and sockets, and the sprue and vent mouths. The cavity needs none: the ${sol} dissolves.`
       : `Wipe a thin film of mold release or petroleum jelly over the top face and round the rim. The cavity needs none: the ${sol} dissolves.`,
     ...(clamshell
-      ? [`Close the halves${sealed ? ' with the tongue in its groove' : ''} and clamp them: binder clips round the edge, or at least ${o.clampG} g on the lid. Once the pour reaches the funnel it can lift a lid that is only taped, and resin gets into the seam.`]
+      ? [
+          `Close the halves${sealed ? ' with the tongue in its groove' : ''} and clamp them: binder clips round the edge, or at least ${o.clampG} g on the lid. Once the pour reaches the funnel it can lift a lid that is only taped, and resin gets into the seam.` +
+            (insert ? " Lay a flat board across the lid's back first, clear of the funnel and vents, so the clamping presses on the lid's insert as well as its holder: where the sprue and vents go through, the insert goes right through its holder, held only by its sides." : ''),
+        ]
       : []),
     `Pour the ${o.castLabel} slowly into the funnel until it shows at every vent, then leave it to cure.`,
     insert
@@ -1188,8 +1255,18 @@ export function linerSteps(o: {
   ];
 }
 
+/**
+ * Edges shorter than this are collapsed before a part is written, mm. The 3MF
+ * keeps a tenth of a micron, and the booleans leave sliver triangles finer
+ * than that: rounded, they fold onto each other, and a slicer has to repair
+ * the part (the gear insert's lid had 581 such edges).
+ */
+const EXPORT_TOLERANCE_MM = 1e-3;
+
 function meshPart(m: Manifold, name: string, extruder: number): ThreeMfPart {
-  const mesh = m.getMesh();
+  const clean = m.simplify(EXPORT_TOLERANCE_MM);
+  const mesh = clean.getMesh();
+  clean.delete();
   const stride = mesh.numProp;
   const count = mesh.vertProperties.length / stride;
   const positions = new Float32Array(count * 3);
@@ -1233,6 +1310,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   rawPart.delete();
   // Liner roofing one half's cavity up to the face goes to the other half, so
   // that neither prints with liner hanging over the casting (roofFootprint).
+  const limits = opts.printLimits ?? printLimits(DEFAULT_PRINTER);
   let baseRoof: CrossSection | null = null;
   let lidRoof: CrossSection | null = null;
   if (lidPart && !ctx.lidIsBackingPlate) {
@@ -1240,8 +1318,8 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     const lidShadow = halfShadow(wasm, lidPart);
     const lidInBase = lidShadow.mirror([0, 1]);
     const baseInLid = baseShadow.mirror([0, 1]);
-    baseRoof = roofFootprint(wasm, basePart, baseShadow, lidInBase);
-    lidRoof = roofFootprint(wasm, lidPart, lidShadow, baseInLid);
+    baseRoof = roofFootprint(wasm, basePart, baseShadow, lidInBase, limits.minWallMm);
+    lidRoof = roofFootprint(wasm, lidPart, lidShadow, baseInLid, limits.minWallMm);
     for (const c of [baseShadow, lidShadow, lidInBase, baseInLid]) c.delete();
   }
   // Each half's face is liner, a skin deep, wherever the other half's part
@@ -1309,13 +1387,15 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const halfFeatures = lid ? [ctx.baseFeatures, ctx.lidFeatures] : [ctx.baseFeatures];
   const halfHeights = lid ? [ctx.baseBlockHeight, ctx.lidBlockHeight] : [ctx.baseBlockHeight];
   const roofNames = lid ? ['cavity half', 'lid'] : ['mold'];
+  // Roofs the printer bridges with supports off print as they are; only the rest are cut or warned about.
+  const bridgeMm = (opts.printLimits ?? printLimits(DEFAULT_PRINTER)).bridgeMm;
   const insertCuts: Array<{ half: string; cutsMm: number[]; pegs: number }> = [];
   let roofsLeft = false;
   halves.forEach((h, i) => {
     const cast = castSpace(wasm, halfParts[i], halfFeatures[i], halfHeights[i]);
     let left: CavityRoof[];
     if (construction === 'insert') {
-      const split = splitInsert(wasm, h.liner, cast);
+      const split = splitInsert(wasm, h.liner, cast, bridgeMm);
       if (split.cutsMm.length) {
         h.pieces = split.pieces;
         insertCuts.push({ half: roofNames[i], cutsMm: split.cutsMm, pegs: split.pegs });
@@ -1325,7 +1405,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
       left = split.left;
     } else {
       const body = h.shell.add(h.liner);
-      left = unprintableRoofs(body, cast);
+      left = unprintableRoofs(body, cast, ROOF_LAYER_MM, ROOF_REACH_MM, bridgeMm);
       body.delete();
     }
     cast.delete();
@@ -1359,12 +1439,18 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   const plateGapMm = 6;
   const plateOffset = lid ? ctx.moldWidthMm / 2 + plateGapMm / 2 : 0;
   const placed = (h: HalfPair, x: number, lift: number) => {
-    const shell = h.shell.translate([x, 0, lift]);
-    const liner = h.liner.translate([x, 0, lift]);
+    const clean = (m: Manifold) => {
+      const moved = m.translate([x, 0, lift]);
+      const simplified = moved.simplify(EXPORT_TOLERANCE_MM);
+      moved.delete();
+      return simplified;
+    };
+    const shell = clean(h.shell);
+    const liner = clean(h.liner);
     const pieces = h.pieces?.map((p) => {
-      const moved = p.translate([x, 0, lift]);
+      const s = clean(p);
       p.delete();
-      return moved;
+      return s;
     });
     h.shell.delete();
     h.liner.delete();
@@ -1387,7 +1473,8 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
         ...all.map((h, i) => ({ name: `${names[i]} holder`, parts: [meshPart(h.shell, `${names[i]} holder (${pair.shell.name})`, 1)] })),
         ...all.flatMap((h, i) => {
           if (!h.pieces) {
-            const moved = h.liner.translate([0, -(ctx.moldDepthMm + insertGapMm), 0]);
+            const box = h.liner.boundingBox();
+            const moved = h.liner.translate([0, -(ctx.moldDepthMm + insertGapMm), -box.min[2]]);
             const part = meshPart(moved, `${names[i]} insert (${pair.liner.name})`, 2);
             moved.delete();
             return [{ name: `${names[i]} insert`, parts: [part] }];

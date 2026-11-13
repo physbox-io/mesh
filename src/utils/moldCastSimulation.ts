@@ -102,6 +102,8 @@ export type InternalCastOptions = MoldCastSimulationOptions & {
   isClamshell?: boolean;
   /** What comes off a clamshell's casting along its own bores: a bottom fill's route, the vents' stubs. */
   feedTrim?: BoreCut[];
+  /** True when `feedTrim` already cuts the sprue/gate route, so no blind top-slice channel trim is needed. */
+  hasSprueTrim?: boolean;
   flipUpright?: boolean;
   partingZ?: number;
   halves?: (Float64Array | number[])[];
@@ -408,7 +410,8 @@ export async function simulateCastFromMoldResult(
         topTrisMm[ti++] = v[2];
       }
     }
-    const piecesOf = (h?: MoldMeshHalf) => (h?.liner?.pieceTriangles ? [h.liner.shell.length, ...h.liner.pieceTriangles] : undefined);
+    const piecesOf = (h?: MoldMeshHalf) =>
+      h?.liner ? [h.liner.shell.length, ...(h.liner.pieceTriangles ?? [h.liner.liner.length])] : undefined;
     return restorePartFrame(
       await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(mold.features), ventStubsOf(mold.features), [
         piecesOf(mold.bottomHalf),
@@ -572,6 +575,7 @@ async function castClosedClamshell(
     halves: [bot, turned],
     ...(pieceTriangles ? { halfPieceTriangles: pieceTriangles } : {}),
     feedTrim,
+    hasSprueTrim: Boolean(feed),
   });
 }
 
@@ -623,7 +627,7 @@ async function castLaidOpenClamshell(
   // A half of more than a shell and a liner is an insert in pieces (castClosedClamshell).
   const counts = (lid: boolean) => {
     const n = shells.filter((_, i) => isLid[i] === lid).map((p) => p.length / 9);
-    return n.length > 2 ? n : undefined;
+    return n.length >= 2 ? n : undefined;
   };
   // Back into the body's own frame, wherever it has been moved to: there the
   // plate's centreline is y = 0, the footprint of a half and its mirror.
@@ -934,36 +938,24 @@ export async function simulateCastFromMoldTriangles(
     if (options?.halves && options.halves.length > 0) {
       options.halves.forEach((h, k) => {
         const counts = options.halfPieceTriangles?.[k];
-        if (counts && counts.length > 2) {
-          // The shell, then the liner's pieces: the pieces become one liner,
-          // which is then read with the shell as one soup, as an uncut half is.
-          const pieces: ManifoldT[] = [];
-          let at = counts[0];
-          for (const n of counts.slice(1)) {
-            const piece = convertSoupToManifold(Array.prototype.slice.call(h, at * 9, (at + n) * 9));
+        if (counts && counts.length >= 2) {
+          // A lined half is a shell plus one or more liner pieces that touch
+          // along coplanar rims or cut planes: convert each closed solid on its
+          // own and union them through Manifold rather than welding raw soup.
+          const subSolids: ManifoldT[] = [];
+          let at = 0;
+          for (const n of counts) {
+            const sub = convertSoupToManifold(Array.prototype.slice.call(h, at * 9, (at + n) * 9));
             at += n;
-            if (piece) pieces.push(piece);
+            if (sub) subSolids.push(sub);
           }
-          if (pieces.length === counts.length - 1) {
-            const liner = wasm.Manifold.union(pieces);
-            const mesh = liner.getMesh();
-            liner.delete();
-            const shellSoup = Array.prototype.slice.call(h, 0, counts[0] * 9) as number[];
-            const soup = new Float64Array(shellSoup.length + mesh.triVerts.length * 3);
-            soup.set(shellSoup, 0);
-            let o = shellSoup.length;
-            for (let t = 0; t < mesh.triVerts.length; t++) {
-              const v = mesh.triVerts[t] * mesh.numProp;
-              soup[o++] = mesh.vertProperties[v];
-              soup[o++] = mesh.vertProperties[v + 1];
-              soup[o++] = mesh.vertProperties[v + 2];
-            }
-            for (const p of pieces) p.delete();
-            const m = convertSoupToManifold(soup);
-            if (m) shells.push(m);
+          if (subSolids.length === counts.length) {
+            const m = wasm.Manifold.union(subSolids);
+            for (const p of subSolids) p.delete();
+            shells.push(m);
             return;
           }
-          for (const p of pieces) p.delete();
+          for (const p of subSolids) p.delete();
         }
         const m = convertSoupToManifold(h);
         if (m) shells.push(m);
@@ -1110,7 +1102,7 @@ export async function simulateCastFromMoldTriangles(
           // Trimmed, the bottom fill's down-sprue, runner and gate come off along
           // their own bores, and then the sprue and vents off the top.
           if (options?.trimChannels && options.feedTrim?.length) best = cutBores(wasm, best, options.feedTrim);
-          if (options?.trimChannels) best = trimRunnerChannels(wasm, best);
+          if (options?.trimChannels && !options.hasSprueTrim) best = trimRunnerChannels(wasm, best);
           // Trimming along a depth-field lid's ragged holes leaves slivers of
           // nothing floating where they were; they are not casting.
           if (options?.trimChannels) best = dropSlivers(wasm, best);

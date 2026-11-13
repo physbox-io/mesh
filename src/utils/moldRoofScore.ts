@@ -25,6 +25,12 @@ const STEEP_COS = Math.SQRT1_2;
 const FLAT_COS = 0.999;
 /** A flat roof counts this much against a plane: it prints, at the price of a seam. */
 const FLAT_WEIGHT = 0.2;
+/** Within this of the parting face a flat roof lifts onto the other half as a pad without cutting the insert, mm. */
+const LIFT_MAX_MM = 1.5;
+/** A plane that shaves a skin thinner than this off an interior flat face leaves a fragile wafer or foil, mm. */
+const SHAVE_MM = 1.0;
+/** Parting directly on an interior flat face puts it on the seam rather than slicing a vertical wall. */
+const ON_PLANE_BONUS = 0.05 * FLAT_WEIGHT;
 /** A face this close to the plane is on it, mm. */
 const ON_PLANE_MM = 0.05;
 
@@ -99,7 +105,8 @@ function scoreAt(f: Faces, plane: number): { curved: number; flat: number } {
   return { curved, flat };
 }
 
-const total = (s: { curved: number; flat: number }) => s.curved + FLAT_WEIGHT * s.flat;
+const total = (s: { curved: number; flatDeep: number; shaved: number; onPlane: number }) =>
+  s.curved + FLAT_WEIGHT * s.flatDeep + FLAT_WEIGHT * s.shaved - ON_PLANE_BONUS * s.onPlane;
 
 /**
  * The roof each plane between zMin and zMax would leave, from one pass over
@@ -115,17 +122,10 @@ function roofLadder(f: Faces, zMin: number, zMax: number) {
   const step = (zMax - zMin + 2) / N;
   // Upward area below a height and downward area above it, curved and flat apart.
   const make = () => ({ slope: new Float64Array(N + 2), jump: new Float64Array(N + 2) });
-  const up = { curved: make(), flat: make() };
-  const down = { curved: make(), flat: make() };
+  const up = { curved: make(), flat: make(), interiorFlat: make() };
+  const down = { curved: make(), flat: make(), interiorFlat: make() };
   const bin = (z: number) => Math.min(N, Math.max(0, (z - lo) / step));
-  for (let t = 0; t < f.kind.length; t++) {
-    const k = f.kind[t];
-    if (k === 0) continue;
-    const a = f.area[t];
-    const z0 = Math.min(f.z0[t], f.z1[t], f.z2[t]);
-    const z1 = Math.max(f.z0[t], f.z1[t], f.z2[t]);
-    const target = (k > 0 ? up : down)[Math.abs(k) === 2 ? 'flat' : 'curved'];
-    const b0 = bin(z0), b1 = bin(z1);
+  const add = (target: { slope: Float64Array; jump: Float64Array }, b0: number, b1: number, a: number) => {
     if (b1 - b0 < 1e-9) {
       target.jump[Math.ceil(b0)] += a;
     } else {
@@ -134,6 +134,18 @@ function roofLadder(f: Faces, zMin: number, zMax: number) {
       target.slope[Math.ceil(b0)] += rate;
       target.slope[Math.ceil(b1)] -= rate;
     }
+  };
+  for (let t = 0; t < f.kind.length; t++) {
+    const k = f.kind[t];
+    if (k === 0) continue;
+    const a = f.area[t];
+    const z0 = Math.min(f.z0[t], f.z1[t], f.z2[t]);
+    const z1 = Math.max(f.z0[t], f.z1[t], f.z2[t]);
+    const side = k > 0 ? up : down;
+    const b0 = bin(z0), b1 = bin(z1);
+    add(side[Math.abs(k) === 2 ? 'flat' : 'curved'], b0, b1, a);
+    if (k === 2 && z1 < zMax - ON_PLANE_MM) add(up.interiorFlat, b0, b1, a);
+    else if (k === -2 && z0 > zMin + ON_PLANE_MM) add(down.interiorFlat, b0, b1, a);
   }
   // Cumulative area below each rung.
   const below = (c: { slope: Float64Array; jump: Float64Array }) => {
@@ -147,13 +159,26 @@ function roofLadder(f: Faces, zMin: number, zMax: number) {
     }
     return out;
   };
-  const upC = below(up.curved), upF = below(up.flat), dnC = below(down.curved), dnF = below(down.flat);
+  const upC = below(up.curved), upF = below(up.flat), upIF = below(up.interiorFlat);
+  const dnC = below(down.curved), dnF = below(down.flat), dnIF = below(down.interiorFlat);
   const dnCTotal = dnC[N + 1], dnFTotal = dnF[N + 1];
   const at = (arr: Float64Array, z: number) => arr[Math.min(N + 1, Math.max(0, Math.floor(bin(z))))];
-  return (plane: number) => ({
-    curved: at(upC, plane - ON_PLANE_MM) + (dnCTotal - at(dnC, plane + ON_PLANE_MM)),
-    flat: at(upF, plane - ON_PLANE_MM) + (dnFTotal - at(dnF, plane + ON_PLANE_MM)),
-  });
+  return (plane: number) => {
+    const upFlatDeep = at(upF, plane - LIFT_MAX_MM);
+    const dnFlatDeep = dnFTotal - at(dnF, plane + LIFT_MAX_MM);
+    // Interior flat faces shaved just above or below the plane leave a paper-thin roof or step.
+    const shavedUp = at(upIF, plane + SHAVE_MM) - at(upIF, plane + ON_PLANE_MM);
+    const shavedDn = at(dnIF, plane - ON_PLANE_MM) - at(dnIF, plane - SHAVE_MM);
+    const onPlane =
+      (at(upIF, plane + ON_PLANE_MM) - at(upIF, plane - ON_PLANE_MM)) +
+      (at(dnIF, plane + ON_PLANE_MM) - at(dnIF, plane - ON_PLANE_MM));
+    return {
+      curved: at(upC, plane - ON_PLANE_MM) + (dnCTotal - at(dnC, plane + ON_PLANE_MM)),
+      flatDeep: upFlatDeep + dnFlatDeep,
+      shaved: shavedUp + shavedDn,
+      onPlane,
+    };
+  };
 }
 
 /**
@@ -166,12 +191,23 @@ function roofLadder(f: Faces, zMin: number, zMax: number) {
 export function linerPartingChoice(tris: ArrayLike<number>, zMin: number, zMax: number, preferZ: number): RoofScore {
   const f = facesOf(tris);
   const levels = new Set<number>();
+  const flatLevels: number[] = [];
   for (let t = 0; t < f.kind.length; t++) {
-    if (Math.abs(f.kind[t]) === 2 && f.z0[t] > zMin && f.z0[t] < zMax) levels.add(Math.round(f.z0[t] * 1000) / 1000);
+    if (Math.abs(f.kind[t]) === 2 && f.z0[t] > zMin && f.z0[t] < zMax) {
+      const z = Math.round(f.z0[t] * 1000) / 1000;
+      if (!levels.has(z)) {
+        levels.add(z);
+        flatLevels.push(z);
+      }
+    }
   }
+  const nearFlat = (z: number) => flatLevels.some((fl) => Math.abs(fl - z) < ON_PLANE_MM);
   const SAMPLES = 128;
-  for (let s = 0; s <= SAMPLES; s++) levels.add(zMin + ((zMax - zMin) * s) / SAMPLES);
-  levels.add(preferZ);
+  for (let s = 0; s <= SAMPLES; s++) {
+    const z = zMin + ((zMax - zMin) * s) / SAMPLES;
+    if (!nearFlat(z)) levels.add(z);
+  }
+  if (!nearFlat(preferZ)) levels.add(preferZ);
   const ladder = roofLadder(f, zMin, zMax);
   const scored = [...levels].map((z) => ({ z, ...ladder(z) }));
   const least = Math.min(...scored.map(total));

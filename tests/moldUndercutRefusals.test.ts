@@ -76,7 +76,8 @@ describe('undercut-keeping and lined molds refuse what they cannot build', () =>
   it('keeping undercuts on a part that is no solid is refused, not filled in under a "kept" warning', async () => {
     const r = mold(scene(pinchedSheet()), { allowUndercuts: true, moldType: 'clamshell', pullDirection: '+z' }, await loadManifold());
     expect(r.success).toBe(false);
-    expect(r.error).toMatch(/could not be made into a solid/);
+    // Named, as any body that will not close is.
+    expect(r.error).toMatch(/^sheet is not a closed solid even after repair, so the undercut-keeping mold cannot hold it/);
     expect(r.warnings.join(' ')).not.toMatch(/kept in the cavity/);
   }, 60000);
 

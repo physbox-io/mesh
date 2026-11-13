@@ -45,7 +45,9 @@ export const sameFloat32 = (p: number[], q: number[]) =>
 
 export function manifoldToTriangles(m: Manifold): Triangle3D[] {
   const mesh = m.getMesh();
-  const tris: Triangle3D[] = [];
+  const tris: (Triangle3D | null)[] = [];
+  const liveByOriented = new Map<string, number[]>();
+  let cancelled = 0;
   const numTris = mesh.triVerts.length / 3;
   const stride = mesh.numProp;
   const p = mesh.vertProperties;
@@ -54,15 +56,35 @@ export function manifoldToTriangles(m: Manifold): Triangle3D[] {
     const i1 = mesh.triVerts[t * 3 + 1];
     const i2 = mesh.triVerts[t * 3 + 2];
     if (i0 === i1 || i1 === i2 || i0 === i2) continue;
-    const a: [number, number, number] = [p[i0 * stride], p[i0 * stride + 1], p[i0 * stride + 2]];
-    const b: [number, number, number] = [p[i1 * stride], p[i1 * stride + 1], p[i1 * stride + 2]];
-    const c: [number, number, number] = [p[i2 * stride], p[i2 * stride + 1], p[i2 * stride + 2]];
+    const a: [number, number, number] = [Math.fround(p[i0 * stride]), Math.fround(p[i0 * stride + 1]), Math.fround(p[i0 * stride + 2])];
+    const b: [number, number, number] = [Math.fround(p[i1 * stride]), Math.fround(p[i1 * stride + 1]), Math.fround(p[i1 * stride + 2])];
+    const c: [number, number, number] = [Math.fround(p[i2 * stride]), Math.fround(p[i2 * stride + 1]), Math.fround(p[i2 * stride + 2])];
     // As the STL will hold them: corners 4 µm apart are one point in float32,
-    // and the triangle between them is no triangle there.
-    if (sameFloat32(a, b) || sameFloat32(b, c) || sameFloat32(a, c)) continue;
+    // and the triangle between them is no triangle there. When two corners merge
+    // in float32, a collapsed fin can also leave two opposite-wound copies of
+    // the same triangle, which cancel out cleanly.
+    const ka = `${a[0]},${a[1]},${a[2]}`;
+    const kb = `${b[0]},${b[1]},${b[2]}`;
+    const kc = `${c[0]},${c[1]},${c[2]}`;
+    if (ka === kb || kb === kc || ka === kc) continue;
+    const [u, v, w] = ka < kb && ka < kc ? [ka, kb, kc] : kb < kc ? [kb, kc, ka] : [kc, ka, kb];
+    const rev = `${u}|${w}|${v}`;
+    const opp = liveByOriented.get(rev);
+    if (opp && opp.length > 0) {
+      tris[opp.pop()!] = null;
+      cancelled++;
+      continue;
+    }
+    const fwd = `${u}|${v}|${w}`;
+    let stack = liveByOriented.get(fwd);
+    if (!stack) {
+      stack = [];
+      liveByOriented.set(fwd, stack);
+    }
+    stack.push(tris.length);
     tris.push({ a, b, c, normal: computeNormal(a, b, c) });
   }
-  return tris;
+  return cancelled > 0 ? tris.filter((t): t is Triangle3D => t !== null) : (tris as Triangle3D[]);
 }
 
 /**
@@ -98,85 +120,110 @@ export function buildPartManifold(
 
   const unsolid: number[] = [];
   for (const [sid, triIndices] of groups) {
-    const vMap = new Map<string, number>();
-    const positions: number[] = [];
-    const faces: number[] = [];
+    let solidManifold: Manifold | null = null;
 
-    for (const t of triIndices) {
-      const i = t * 9;
-      const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
-      const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
-      const cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
-
-      const d1x = bx - ax, d1y = by - ay, d1z = bz - az;
-      const d2x = cx - ax, d2y = cy - ay, d2z = cz - az;
-      const cpx = d1y * d2z - d1z * d2y;
-      const cpy = d1z * d2x - d1x * d2z;
-      const cpz = d1x * d2y - d1y * d2x;
-      if (cpx * cpx + cpy * cpy + cpz * cpz < 1e-12) continue;
-
-      const ka = `${Math.round(ax * 1000)},${Math.round(ay * 1000)},${Math.round(az * 1000)}`;
-      const kb = `${Math.round(bx * 1000)},${Math.round(by * 1000)},${Math.round(bz * 1000)}`;
-      const kc = `${Math.round(cx * 1000)},${Math.round(cy * 1000)},${Math.round(cz * 1000)}`;
-      if (ka === kb || kb === kc || ka === kc) continue;
-
-      let va = vMap.get(ka);
-      if (va === undefined) {
-        va = positions.length / 3;
-        vMap.set(ka, va);
-        positions.push(ax, ay, az);
+    if (triIndices.length >= 4) {
+      try {
+        const vertProperties = new Float32Array(triIndices.length * 9);
+        const triVerts = new Uint32Array(triIndices.length * 3);
+        let outV = 0;
+        for (const t of triIndices) {
+          const i = t * 9;
+          for (let k = 0; k < 9; k++) vertProperties[outV * 3 + k] = tris[i + k];
+          triVerts[outV] = outV;
+          triVerts[outV + 1] = outV + 1;
+          triVerts[outV + 2] = outV + 2;
+          outV += 3;
+        }
+        const rawMesh = new wasm.Mesh({ numProp: 3, vertProperties, triVerts });
+        rawMesh.merge();
+        const direct = new wasm.Manifold(rawMesh);
+        if (direct.status() === 'NoError' && !direct.isEmpty() && direct.volume() > 0) {
+          solidManifold = direct;
+        } else {
+          direct.delete();
+        }
+      } catch {
+        solidManifold = null;
       }
-      let vb = vMap.get(kb);
-      if (vb === undefined) {
-        vb = positions.length / 3;
-        vMap.set(kb, vb);
-        positions.push(bx, by, bz);
-      }
-      let vc = vMap.get(kc);
-      if (vc === undefined) {
-        vc = positions.length / 3;
-        vMap.set(kc, vc);
-        positions.push(cx, cy, cz);
-      }
-      faces.push(va, vb, vc);
     }
 
-    if (faces.length < 3) continue;
+    if (!solidManifold) {
+      const vMap = new Map<string, number>();
+      const positions: number[] = [];
+      const faces: number[] = [];
 
-    let solidManifold: Manifold | null = null;
-    const sculptMesh = createSculptMesh(positions, faces);
-    const mRes = toManifold(wasm, sculptMesh);
-    if (mRes.ok) {
-      solidManifold = mRes.manifold;
-    } else {
-      const repaired = repairMesh(positions, faces, {
-        weldTolerance: 0.02,
-        fillHoles: true,
-        fixWinding: true,
-      });
-      if (repaired.faces.length >= 12) {
-        const rMesh = createSculptMesh(repaired.positions, repaired.faces);
-        const rRes = toManifold(wasm, rMesh);
-        if (rRes.ok) {
-          solidManifold = rRes.manifold;
+      for (const t of triIndices) {
+        const i = t * 9;
+        const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+        const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
+        const cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+
+        const ka = `${Math.round(ax * 1000)},${Math.round(ay * 1000)},${Math.round(az * 1000)}`;
+        const kb = `${Math.round(bx * 1000)},${Math.round(by * 1000)},${Math.round(bz * 1000)}`;
+        const kc = `${Math.round(cx * 1000)},${Math.round(cy * 1000)},${Math.round(cz * 1000)}`;
+        if (ka === kb || kb === kc || ka === kc) continue;
+
+        let va = vMap.get(ka);
+        if (va === undefined) {
+          va = positions.length / 3;
+          vMap.set(ka, va);
+          positions.push(ax, ay, az);
         }
+        let vb = vMap.get(kb);
+        if (vb === undefined) {
+          vb = positions.length / 3;
+          vMap.set(kb, vb);
+          positions.push(bx, by, bz);
+        }
+        let vc = vMap.get(kc);
+        if (vc === undefined) {
+          vc = positions.length / 3;
+          vMap.set(kc, vc);
+          positions.push(cx, cy, cz);
+        }
+        faces.push(va, vb, vc);
       }
-      if (!solidManifold) {
-        try {
-          const direct = new wasm.Manifold(
-            new wasm.Mesh({
+
+      if (faces.length < 12) {
+        unsolid.push(sid);
+        continue;
+      }
+
+      const sculptMesh = createSculptMesh(positions, faces);
+      const mRes = toManifold(wasm, sculptMesh);
+      if (mRes.ok) {
+        solidManifold = mRes.manifold;
+      } else {
+        const repaired = repairMesh(positions, faces, {
+          weldTolerance: 0.02,
+          fillHoles: true,
+          fixWinding: true,
+        });
+        if (repaired.faces.length >= 12) {
+          const rMesh = createSculptMesh(repaired.positions, repaired.faces);
+          const rRes = toManifold(wasm, rMesh);
+          if (rRes.ok) {
+            solidManifold = rRes.manifold;
+          }
+        }
+        if (!solidManifold) {
+          try {
+            const snapMesh = new wasm.Mesh({
               numProp: 3,
               vertProperties: Float32Array.from(positions),
               triVerts: Uint32Array.from(faces),
-            })
-          );
-          if (direct.status() === 'NoError') {
-            solidManifold = direct;
-          } else {
-            direct.delete();
+            });
+            snapMesh.merge();
+            const direct = new wasm.Manifold(snapMesh);
+            if (direct.status() === 'NoError' && !direct.isEmpty() && direct.volume() > 0) {
+              solidManifold = direct;
+            } else {
+              direct.delete();
+            }
+          } catch {
+            solidManifold = null;
           }
-        } catch {
-          solidManifold = null;
         }
       }
     }
