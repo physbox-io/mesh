@@ -216,3 +216,36 @@ describe('rigid mold', () => {
     }
   }, 60000);
 });
+
+describe('deviation from the master', () => {
+  // A hemisphere as a soup in mm, Z up: its dome, and either a floor (solid) or an inner dome (a shell).
+  const hemisphere = (R: number, inner: number | null, n = 32, m = 12): Float64Array => {
+    const out: number[] = [];
+    const p = (rad: number, j: number, i: number) => {
+      const el = (j / m) * (Math.PI / 2), az = (i / n) * 2 * Math.PI;
+      return [rad * Math.cos(el) * Math.cos(az), rad * Math.cos(el) * Math.sin(az), rad * Math.sin(el)];
+    };
+    for (let j = 0; j < m; j++) {
+      for (let i = 0; i < n; i++) {
+        out.push(...p(R, j, i), ...p(R, j, i + 1), ...p(R, j + 1, i + 1), ...p(R, j, i), ...p(R, j + 1, i + 1), ...p(R, j + 1, i));
+        if (inner !== null) out.push(...p(inner, j, i), ...p(inner, j + 1, i + 1), ...p(inner, j, i + 1), ...p(inner, j, i), ...p(inner, j + 1, i), ...p(inner, j + 1, i + 1));
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      if (inner === null) out.push(0, 0, 0, ...p(R, 0, i + 1), ...p(R, 0, i));
+      else out.push(...p(R, 0, i), ...p(inner, 0, i + 1), ...p(R, 0, i + 1), ...p(R, 0, i), ...p(inner, 0, i), ...p(inner, 0, i + 1));
+    }
+    return Float64Array.from(out);
+  };
+
+  it('sees a hollow filled in: a dome shell cast solid strays by most of its radius, not its wall', () => {
+    // Measured at vertices only, the solid's floor (all rim) was 3 mm from the shell at most.
+    const dev = deviationMm(hemisphere(30, null), hemisphere(30, 27))!;
+    expect(dev.maxMm).toBeGreaterThan(20);
+  });
+
+  it('reads a piece true to its master as true', () => {
+    const dev = deviationMm(hemisphere(30, 27), hemisphere(30, 27))!;
+    expect(dev.maxMm).toBeLessThan(0.01);
+  });
+});

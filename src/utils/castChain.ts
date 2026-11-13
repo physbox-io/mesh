@@ -221,19 +221,64 @@ function bvhOf(soup: ArrayLike<number>): MeshBVH {
   return new MeshBVH(geo);
 }
 
-/** Up to `cap` points spread evenly through a soup's vertices. */
+/** The radical inverse of i in `base`: a Halton sequence's coordinate, in [0, 1). */
+function halton(i: number, base: number): number {
+  let f = 1, r = 0;
+  for (let k = i; k > 0; k = Math.floor(k / base)) {
+    f /= base;
+    r += f * (k % base);
+  }
+  return r;
+}
+
+/**
+ * Points over a soup's surface: up to `cap / 2` of its vertices, for its
+ * corners and tips, and `cap / 2` spread evenly by area. Vertices alone missed
+ * a flat face's middle: a silicone chain filled a dome shell solid, 3.7 times
+ * the master, and its new floor's vertices were all on the rim, 3 mm from the
+ * master at most, which is what it reported.
+ */
 function samplePoints(soup: ArrayLike<number>, cap = 20000): THREE.Vector3[] {
   const n = soup.length / 3;
-  const stride = Math.max(1, Math.floor(n / cap));
+  const stride = Math.max(1, Math.floor(n / (cap / 2)));
   const out: THREE.Vector3[] = [];
   for (let v = 0; v < n; v += stride) out.push(new THREE.Vector3(soup[v * 3], soup[v * 3 + 1], soup[v * 3 + 2]));
+  const tris = Math.floor(soup.length / 9);
+  const cum = new Float64Array(tris);
+  let total = 0;
+  for (let t = 0; t < tris; t++) {
+    const i = t * 9;
+    const ux = soup[i + 3] - soup[i], uy = soup[i + 4] - soup[i + 1], uz = soup[i + 5] - soup[i + 2];
+    const vx = soup[i + 6] - soup[i], vy = soup[i + 7] - soup[i + 1], vz = soup[i + 8] - soup[i + 2];
+    total += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+    cum[t] = total;
+  }
+  if (!(total > 0)) return out;
+  const count = Math.floor(cap / 2);
+  for (let k = 0; k < count; k++) {
+    const at = ((k + 0.5) / count) * total;
+    let lo = 0, hi = tris - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] < at) lo = mid + 1;
+      else hi = mid;
+    }
+    let a = halton(k + 1, 2), b = halton(k + 1, 3);
+    if (a + b > 1) { a = 1 - a; b = 1 - b; }
+    const i = lo * 9;
+    out.push(new THREE.Vector3(
+      soup[i] + a * (soup[i + 3] - soup[i]) + b * (soup[i + 6] - soup[i]),
+      soup[i + 1] + a * (soup[i + 4] - soup[i + 1]) + b * (soup[i + 7] - soup[i + 1]),
+      soup[i + 2] + a * (soup[i + 5] - soup[i + 2]) + b * (soup[i + 8] - soup[i + 2]),
+    ));
+  }
   return out;
 }
 
 /**
- * How far the piece strays from the master: every sampled point of each is
- * measured to the other's surface, so a lump on one and a dent in the other
- * both count. Both are taken as they stand, settled the same way.
+ * How far the piece strays from the master: points over each surface are
+ * measured to the other's surface, so a lump on one, a dent in the other and
+ * a hollow filled in all count. Both are taken as they stand, settled the same way.
  */
 export function deviationMm(piece: ArrayLike<number>, master: ArrayLike<number>): { maxMm: number; meanMm: number } | null {
   if (piece.length < 9 || master.length < 9) return null;
