@@ -233,6 +233,13 @@ function draftSolids(
 
 /** Beyond this the draw analysis costs more than the extra fidelity is worth. */
 const MAX_ANALYSIS_CELLS = 120_000;
+/** The widest sand riser stood up beside a pattern, mm. */
+const MAX_FEEDER_DIA_MM = 40;
+/**
+ * The widest burnout sprue sized to feed, mm. A feed path is never as wide as
+ * the lump it feeds (a ball's is 0.73 of it), so this only stops a flask-sized rod.
+ */
+const MAX_BURNOUT_SPRUE_MM = 60;
 /** More trapped pockets than this and the part wants standing another way, not venting. */
 const MAX_BURNOUT_VENTS = 12;
 /**
@@ -778,13 +785,25 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // dimension is a fair stand-in for that feed cross-section — because a sprue
   // fatter than the part it feeds is just a scar to saw off.
   const feedSectionMm2 = partVolumeMm3 / Math.max(partW, partD, 1e-6);
-  const sprueDia =
-    opts.sprueDiaMm > 0
-      ? opts.sprueDiaMm
-      : Math.max(
-          2.5,
-          Math.min(25, Math.sqrt((4 * feedSectionMm2 * 1.5) / Math.PI), Math.sqrt((4 * chokeAreaMm2) / Math.PI))
-        );
+  const pourDia = Math.max(
+    2.5,
+    Math.min(25, Math.sqrt((4 * feedSectionMm2 * 1.5) / Math.PI), Math.sqrt((4 * chokeAreaMm2) / Math.PI))
+  );
+  // The section that freezes last, by modulus: the riser goes by it in sand, the sprue lands on it in burnout.
+  const heavy = heaviestSection(part, solidIds);
+  // In burnout the sprue is also the only way the cup's metal reaches the
+  // casting as it shrinks, so it must still be liquid when the heaviest section
+  // freezes: a round bar's modulus is a quarter of its diameter, and a feed
+  // path wants 1.1 times the section's. Sized for the pour alone, a 990 g bronze
+  // ball got a ⌀5.7 mm sprue that froze long before the ball and left it porous.
+  const feedDia = lostPla && heavy ? 4 * 1.1 * heavy.modulusMm : 0;
+  let sprueDia = opts.sprueDiaMm > 0 ? opts.sprueDiaMm : Math.max(pourDia, Math.min(MAX_BURNOUT_SPRUE_MM, feedDia));
+  if (lostPla && opts.addGating && opts.sprueDiaMm <= 0 && feedDia > MAX_BURNOUT_SPRUE_MM + 0.5) {
+    warnings.push(
+      `The sprue is ⌀${MAX_BURNOUT_SPRUE_MM} mm, short of the ⌀${feedDia.toFixed(0)} mm the heaviest section needs to stay fed as it freezes; ` +
+        'expect shrinkage porosity in its middle.',
+    );
+  }
 
   // Riser, by Chvorinov rather than by plan size. A feeder has to still be
   // liquid when the casting has frozen, so its modulus (volume over cooling
@@ -807,7 +826,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   const modulusDia = reqModulusMm / 0.2143;
   const feedVolMm3 = (partVolumeMm3 * metal.shrinkPercent) / 100 / 0.14;
   const volumeDia = Math.cbrt(feedVolMm3 / (0.375 * Math.PI));
-  const autoRiserDia = Math.min(40, Math.max(modulusDia, volumeDia));
+  const autoRiserDia = Math.min(MAX_FEEDER_DIA_MM, Math.max(modulusDia, volumeDia));
   // And the part may simply not want a riser. A casting whose modulus is under
   // a millimetre — a plate thinner than about 2 mm, a jewellery band — freezes
   // in a second or two and is fed perfectly well back through its own gate and
@@ -859,7 +878,6 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // to gate into but air, and the rig came out as a sprue to nothing.
   const colX = (i: number) => bounds2d.minX + (i * (bounds2d.maxX - bounds2d.minX)) / (cols - 1);
   const colY = (j: number) => bounds2d.minY + (j * (bounds2d.maxY - bounds2d.minY)) / (rows - 1);
-  const heavy = heaviestSection(part, solidIds);
 
   /** Columns the parting plane passes through material in, as plan points. */
   const onPlane: { x: number; y: number }[] = [];
@@ -995,12 +1013,6 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       // top before its metal is called for.
       const riserG = { x: riserStandAt.x * grow, y: riserStandAt.y * grow };
       const riserEdgeG = { x: riserStand.edge.x * grow, y: riserStand.edge.y * grow };
-      // It too stands on the bed, for the same reason as the sprue; its
-      // working height is still measured from the plane.
-      const riserH = riserDia * 1.5;
-      appendCylinder(pat, riserG.x, riserG.y, 0, partingZ + riserH, riserDia / 2);
-      gatingVolumeMm3 += (Math.PI * riserDia * riserDia * (partingZ + riserH)) / 4;
-      rigTopZ = Math.max(rigTopZ, partingZ + riserH);
       const neckSpan = Math.hypot(riserEdgeG.x - riserG.x, riserEdgeG.y - riserG.y);
       const inX = (riserEdgeG.x - riserG.x) / (neckSpan || 1), inY = (riserEdgeG.y - riserG.y) / (neckSpan || 1);
       const neckBite = Math.min(gateLen, Math.max(1.5, riserStand.exit * grow * 0.35));
@@ -1011,6 +1023,29 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       const neckZ0 = partCopeAtRiser >= neckRunH ? partingZ : Math.max(0, partingZ + partCopeAtRiser - neckRunH);
       appendBeam(pat, riserG.x, riserG.y, neckEndX, neckEndY, runnerH, neckZ0, neckZ0 + neckRunH);
       gatingVolumeMm3 += (neckSpan + neckBite) * runnerH * neckRunH;
+      // Its working height is measured from the plane, and it reaches down to
+      // the neck's floor. It used to stand on the bed as one column, and all of
+      // it below the neck fed nothing: a ball parted at its middle carried
+      // 100 g of dead aluminium under its riser, and a warning that the gating
+      // outweighed the part. Below the neck it is a 45° cone onto a slim post,
+      // which still prints standing on the bed and still draws from the drag.
+      const riserH = riserDia * 1.5;
+      const riserR = riserDia / 2;
+      const postR = Math.min(riserR, Math.max(3, riserR * 0.25));
+      const coneH = Math.min(neckZ0, riserR - postR);
+      const postTop = neckZ0 - coneH;
+      const stops: Array<{ z: number; r: number }> = [
+        ...(postTop > 1e-6 ? [{ z: 0, r: postR }] : []),
+        { z: postTop, r: riserR - coneH },
+        { z: neckZ0, r: riserR },
+        { z: partingZ + riserH, r: riserR },
+      ];
+      appendRevolutionStack(pat, riserG.x, riserG.y, stops, 32);
+      for (let i = 0; i + 1 < stops.length; i++) {
+        const lo = stops[i], hi = stops[i + 1];
+        gatingVolumeMm3 += (Math.PI * (hi.z - lo.z) * (lo.r * lo.r + lo.r * hi.r + hi.r * hi.r)) / 3;
+      }
+      rigTopZ = Math.max(rigTopZ, partingZ + riserH);
     }
   } else if (opts.addGating && lostPla) {
     // Burnout gating is a different shape of thing, because nothing rams it and
@@ -1031,7 +1066,6 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     //   - Vents rise from the far high points. Investment is not permeable the
     //     way sand is, so without them the air in a blind pocket stops the
     //     metal dead, and the burnout gas has nowhere to leave from either.
-    const sprueR = sprueDia / 2;
     // The heavy section's plan centroid, snapped to the nearest column that
     // actually has metal under it — a centroid can fall down a hole, and a
     // sprue has to land on something. In part coordinates, grown to the pattern
@@ -1052,6 +1086,27 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
         if (score > bestScore) { bestScore = score; attX = x; attY = y; attTop = top[k]; }
       }
     }
+    // A sprue widened to feed stops short of anything standing taller beside
+    // where it lands, by room for that feature's vent (as `fits` below needs
+    // it): it would swallow the feature, which goes with the sprue when it is
+    // cut off, or leave its air no way out.
+    if (opts.sprueDiaMm <= 0 && sprueDia > pourDia) {
+      const VENT_ROOM_MM = 2 + 2; // the gap to the sprue, and the widest rod's radius
+      let wideR = sprueDia / 2;
+      const reach = (wideR * 1.35 + VENT_ROOM_MM) / grow;
+      for (let j = 0; j < rows; j++) {
+        const y = colY(j);
+        if (Math.abs(y - attY) > reach) continue;
+        for (let i = 0; i < cols; i++) {
+          const k = j * cols + i;
+          if (!hit[k] || thickness[k] <= 0 || top[k] <= attTop + 0.5) continue;
+          const d = Math.hypot(colX(i) - attX, y - attY) * grow;
+          if (wideR * 1.35 + VENT_ROOM_MM > d) wideR = Math.max(0, (d - VENT_ROOM_MM) / 1.35);
+        }
+      }
+      sprueDia = Math.max(pourDia, 2 * wideR);
+    }
+    const sprueR = sprueDia / 2;
     // Helper: find the lowest top and highest bottom within a footprint radius
     // (in part coords) so a sprue or vent embeds below any embossed relief valleys
     // rather than balancing on the tip of a relief peak, without punching through
@@ -1081,14 +1136,17 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     // happens to stand on: it is the top of the flask and the thing the metal
     // is poured into. A sprue rooted on a low heavy section still rises clear
     // of the tallest part of the pattern first.
-    const sprueZ1 = Math.max(attTop * grow, gPartH) + Math.max(12, sprueDia * 2);
+    // Two diameters clear, but a fat feeding sprue only as far as it needs to be: its metal is scrap.
+    const sprueZ1 = Math.max(attTop * grow, gPartH) + Math.max(12, Math.min(sprueDia * 2, 20));
     // Flared base fillet where the sprue meets the pattern so it cannot snap off
     // along a single horizontal layer line when pried from the build plate,
     // and pouring cup cone opening out to three sprue diameters at the top —
     // emitted as one continuous revolution surface with no internal diaphragms.
     const sprueFilletZ1 = Math.min(sprueZ1, sprueFp.maxTop + Math.min(2.5, sprueR * 0.6));
-    const cupH = Math.max(8, sprueDia * 1.6);
-    const cupR = Math.max(sprueR * 3, 9);
+    // A basin to pour into: three sprue diameters across a thin sprue, a 10 mm
+    // lip round a fat one, whose own metal is the feed reserve already.
+    const cupH = Math.max(8, Math.min(sprueDia * 1.6, 20));
+    const cupR = Math.max(9, sprueR + Math.min(2 * sprueR, 10));
     const sprueStops: Array<{ z: number; r: number }> =
       sprueFilletZ1 > sprueZ0 + 0.5
         ? [
@@ -1242,7 +1300,9 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // for someone to notice in the pattern preview.
   const castingMetalG = ((partVolumeMm3 * grow * grow * grow) / 1000) * metal.densityGcm3;
   const gatingMetalG = (gatingVolumeMm3 / 1000) * metal.densityGcm3;
-  if (opts.addGating && gatingMetalG > castingMetalG) {
+  // A burnout sprue sized to feed a chunky casting outweighs it by design; height is not why.
+  const fedByWidth = lostPla && opts.sprueDiaMm <= 0 && feedDia > pourDia;
+  if (opts.addGating && gatingMetalG > castingMetalG && !fedByWidth) {
     warnings.push(
       `Gating mass (${Math.round(gatingMetalG)} g) exceeds part mass (${Math.round(castingMetalG)} g) across the ${Math.round(gPartH)} mm pattern height. Consider orienting the part flat or casting in sections.`
     );

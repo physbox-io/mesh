@@ -991,3 +991,32 @@ describe('sand draw check on round work', () => {
     expect(r.summary.undrawablePercent).toBeGreaterThan(50);
   });
 });
+
+describe('feeding a chunky casting', () => {
+  const ball = { nodes: [{ id: 'b', name: 'ball', type: 'body', pos: [0, 0, 0], geoms: [{ name: 'g', type: 'sphere', size: [0.03], pos: [0, 0, 0.03] }], joints: [], children: [] }] } as unknown as SceneGraph;
+
+  it('gives a burnout ball a sprue wide enough to stay liquid until the ball has frozen', () => {
+    // Sized for the pour alone it was ⌀5.7 mm on a 990 g bronze ball, and froze long before it.
+    const r = generateCastPattern(ball, { method: 'lost-pla', metalId: 'bronze' });
+    expect(r.success, r.error).toBe(true);
+    // A Ø60 ball's modulus is 10 mm; a round sprue's is a quarter of its diameter.
+    expect(r.summary.sprueDiaMm / 4).toBeGreaterThanOrEqual(10);
+    expect(r.warnings.join(' ')).not.toMatch(/Gating mass/);
+  });
+
+  it('keeps a thin casting\'s burnout sprue thin', () => {
+    const plate = { nodes: [{ id: 'p', name: 'plate', type: 'body', pos: [0, 0, 0], geoms: [{ name: 'g', type: 'box', size: [0.03, 0.02, 0.0015], pos: [0, 0, 0.0015] }], joints: [], children: [] }] } as unknown as SceneGraph;
+    expect(generateCastPattern(plate, { method: 'lost-pla', metalId: 'bronze' }).summary.sprueDiaMm).toBeLessThan(8);
+  });
+
+  it('stands the sand riser on the neck, with no dead column of metal under it to the bed', () => {
+    const r = generateCastPattern(ball, { method: 'sand', metalId: 'aluminium' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.partingFromBaseMm).toBeCloseTo(30, 0);
+    const riserR = r.summary.riserDiaMm / 2;
+    // Riser above the plane, sprue and runner: well under the riser carried on down to the bed.
+    const fullColumn = Math.PI * riserR * riserR * (riserR * 3 + r.summary.partingFromBaseMm);
+    expect(r.summary.gatingVolumeMm3).toBeLessThan(fullColumn - 0.5 * Math.PI * riserR * riserR * r.summary.partingFromBaseMm);
+    expect(r.warnings.join(' ')).not.toMatch(/Gating mass/);
+  });
+});
