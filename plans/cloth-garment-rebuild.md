@@ -690,3 +690,23 @@ argument: `node renderv.mjs <outdir> '{"name":{"position":[..],"target":[..]}}'`
 - **Not done:** jeans side-seam topstitch looks speckled (dash orientation per segment); the fly J is mostly under
   the hoodie. MCP docs for `fastened` as a number (with the rest of the held docs).
 - Scratch probes added this session: `tests/_quiltprobe`, `_hoodprobe`, `_bagprobe`, `_collarprobe`, `_peakprobe`.
+
+### Session 11b (2026-11-12/13): the cap, boards, cloth grabbed while running
+
+- **The cap** (user: "a very silly brim", then "still not a usual hat"; done when a critical subagent said GOOD from
+  front/side/three-quarter/back renders). What it took, in order of what mattered:
+  - **Boards (123ee06, `clothBoards.ts`).** The solver could not hold a stiff piece: the peak coned 55 deg down under
+    its weight whatever its stiffness (100x changed nothing). Pieces with E t^3/12 >= 0.05 N m are shape-matched once a
+    substep (whole board + each point's 1-ring, Mueller warm rotations); tacked points are matched to, not moved
+    (moved: unstable). ~50 ms per simulated second for the cap. Boards are flat; a bill set in a curve is not modelled.
+  - Sewn-on pieces' start swing is tried past 90 deg (level on a sloping forehead is beyond it).
+  - Hat/tube bands take an edge profile (`edges: [{ along: 'top' }]`); on the upright head it runs from the front.
+  - Drafting: the peak is a D (half-ellipse outer edge) on the band's own oval, 0.26 of the band, 7.5 cm deep; the band
+    lower at the back and over the ears; sculpt dabs stand the front up (kept clear of the band: reaching it, the
+    crown's edge stood out over the peak in teeth), broaden the top and draw in the apex; a strap arch at the back.
+  - Bill pitch is sensitive: headless 1-10 deg down, the browser ~15 deg (they differ; not chased).
+  - Left (critic's finish notes): ragged peak/crown join, a slight kink at the bill tip, no button, no strap across the arch.
+- **Collars take `materialOverrides`** (puffer's padded stand collar stands at the back with the zip undone).
+- **Grab while running (f9e6a64).** Press on cloth while playing and drag; `ClothSim.grab` (held point 200x heavier,
+  moved at most 1.5 m/s). UI only: no MCP command yet (UI/MCP parity owed, with the held MCP docs).
+- Render script `renderv.mjs` (session 9de75c9f scratchpad) takes a JSON views argument.
