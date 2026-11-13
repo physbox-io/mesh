@@ -290,6 +290,7 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
       baseColor: v.colour,
       // A body is one object; its colours are its volumes.
       object: p.id,
+      objectName: p.name,
     })));
     const result = exportThreeMf(meshes, { maxExtruders: options.filaments });
     filaments.push(result.palette);

@@ -64,6 +64,12 @@ export interface ThreeMfMesh {
    * unless it overlaps another on the bed (see printedObjects).
    */
   object?: string;
+  /**
+   * What the object is called in the file and in the slicer's list, where
+   * `object` is only a key: a split section was listed by its node id,
+   * "split_qvoc0s1n", where its part said "beam_part2". Absent: `object`.
+   */
+  objectName?: string;
 }
 
 export interface ThreeMfOptions {
@@ -428,7 +434,7 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
       `<triangles>${triangleLines.join('')}</triangles></mesh></object>`
     );
     const key = objectOf[meshIndex];
-    const entry = printed.get(key) ?? { name: mesh.object ?? mesh.name, volumes: [] };
+    const entry = printed.get(key) ?? { name: mesh.objectName ?? mesh.object ?? mesh.name, volumes: [] };
     entry.volumes.push({ id: objectId, name: mesh.name, extruder, triangles: face });
     printed.set(key, entry);
   });
