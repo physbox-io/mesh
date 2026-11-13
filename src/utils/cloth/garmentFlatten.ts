@@ -411,10 +411,22 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   }
   // Turned so `upAxis` (the body's +z, or along a limb toward its root) runs
   // up the piece (+v), and mirrored if the layout came out face down.
+  // Which way is up, triangle by triangle (the way height climbs across it
+  // flat), each by its area and how steeply it climbs: a short band wrapped round the body flattens to
+  // an arc, and its points' height against where they lie flat turned the
+  // grain of a puffer's channels diagonal.
   let su = 0, sv = 0;
   const hAt = (q: number[]) => q[0] * upAxis[0] + q[1] * upAxis[1] + q[2] * upAxis[2];
-  const hMean = P.reduce((s, q) => s + hAt(q), 0) / P.length;
-  for (let i = 0; i < P.length; i++) { const dh = hAt(P[i]) - hMean; su += uv[i][0] * dh; sv += uv[i][1] * dh; }
+  for (let t = 0; t < tris.length; t += 3) {
+    const [i, j, k] = [tris[t], tris[t + 1], tris[t + 2]];
+    const e1 = [uv[j][0] - uv[i][0], uv[j][1] - uv[i][1]], e2 = [uv[k][0] - uv[i][0], uv[k][1] - uv[i][1]];
+    const det = e1[0] * e2[1] - e1[1] * e2[0];
+    if (Math.abs(det) < 1e-14) continue;
+    const d1 = hAt(P[j]) - hAt(P[i]), d2 = hAt(P[k]) - hAt(P[i]);
+    // Not made unit: a triangle lying level (the top of a shoulder) has no up to give.
+    const gu = (d1 * e2[1] - d2 * e1[1]) / det, gv = (e1[0] * d2 - e2[0] * d1) / det, area = Math.abs(det) / 2;
+    su += gu * area; sv += gv * area;
+  }
   const ang = Math.PI / 2 - Math.atan2(sv, su), c = Math.cos(ang), s = Math.sin(ang);
   uv = uv.map(([u, v]) => [c * u - s * v, s * u + c * v] as V2);
   let signed = 0;
