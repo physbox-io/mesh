@@ -8,7 +8,7 @@ import { canStartSheetJob, defaultCornerRelief, layoutKerf, layoutMargin, router
 import { useLaserPowers } from '../hooks/useLaserPowers';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { buildEtchHandoffUrl, openInEtch } from '../utils/etchHandoff';
-import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
+import { DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
@@ -24,7 +24,7 @@ import {
   materialSpec,
   recommendSpeeds,
 } from '../utils/feedsAndSpeeds';
-import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
+import type { ProbeGrid } from '../utils/meshLeveler';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { HintAnchor } from './ExportFields';
 import { RackToolPicker } from './RackToolPicker';
@@ -372,7 +372,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const gcodeFields = useSettled(liveGcodeFields, 250);
 
   // Compute G-Code output result
-  const gcodeResult = useMemo(() => {
+  // Offsetting a dense outline for the router bit is real work; it runs on the
+  // export worker like the layout, so a big rack does not freeze the tab.
+  const gcodeJob = useExportJob(isOpen, (client) => {
     if (!exportResult?.success || !exportResult.panels) return null;
     const f = gcodeFields;
     const sheetStockThicknessMm = exportResult.sheets?.map((s) => s.thicknessMm);
@@ -383,37 +385,37 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
         const stockMm = sheetStockThicknessMm[p.sheetIndex ?? 0];
         return stockMm !== undefined && stockMm - p.thickness * 1000 > 0.1;
       });
-    const res = generateLaserCutGcode(exportResult.panels, {
-      ...DEFAULT_GCODE_OPTIONS,
-      machineMode: f.machineMode,
-      cutFeedrate: f.cutFeedrate,
-      spindleRpm: f.spindleRpm,
-      motionProfile: machineState.motion,
-      laserPower: f.laserPower,
-      laserMaxPower: f.laserMaxPower,
-      laserPasses: f.laserPasses,
-      laserEngravePower: f.engravePower,
-      engraveFeedrate: f.engraveFeedrate,
-      cutDepthZ: f.materialThicknessMm,
-      faceToThickness,
-      // Each sheet's own thickness, for a rack of mixed stock.
-      sheetStockThicknessMm,
-      // And their sizes, so a surfacing bit's edge is kept on the sheet.
-      sheetSizeMm: exportResult.sheets?.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm })),
-      zStepdown: routerStepdownMm(f.materialThicknessMm, f.bitDiameterMm),
-      attachmentsEnabled: f.attachments,
-      attachmentWidthMm: f.attachmentWidthMm,
-      attachmentSpacingMm: f.attachmentSpacingMm,
-      attachmentHeightMm: f.attachmentHeightMm,
-      bitDiameterMm: f.bitDiameterMm,
+    return client.run('laserGcode', scene, {
+      panels: exportResult.panels,
+      gcodeOptions: {
+        ...DEFAULT_GCODE_OPTIONS,
+        machineMode: f.machineMode,
+        cutFeedrate: f.cutFeedrate,
+        spindleRpm: f.spindleRpm,
+        motionProfile: machineState.motion,
+        laserPower: f.laserPower,
+        laserMaxPower: f.laserMaxPower,
+        laserPasses: f.laserPasses,
+        laserEngravePower: f.engravePower,
+        engraveFeedrate: f.engraveFeedrate,
+        cutDepthZ: f.materialThicknessMm,
+        faceToThickness,
+        // Each sheet's own thickness, for a rack of mixed stock.
+        sheetStockThicknessMm,
+        // And their sizes, so a surfacing bit's edge is kept on the sheet.
+        sheetSizeMm: exportResult.sheets?.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm })),
+        zStepdown: routerStepdownMm(f.materialThicknessMm, f.bitDiameterMm),
+        attachmentsEnabled: f.attachments,
+        attachmentWidthMm: f.attachmentWidthMm,
+        attachmentSpacingMm: f.attachmentSpacingMm,
+        attachmentHeightMm: f.attachmentHeightMm,
+        bitDiameterMm: f.bitDiameterMm,
+      },
+      probedGrid,
     });
-
-    if (res.success && f.machineMode === 'cnc' && probedGrid) {
-      res.gcode = warpGcode(res.gcode, probedGrid);
-    }
-    return res;
-  }, [exportResult, gcodeFields, machineState.motion, probedGrid]);
-  const failure = exportResult?.success ? gcodeResult?.error : exportResult?.error;
+  }, [exportResult, gcodeFields, machineState.motion, probedGrid, scene]);
+  const gcodeResult = exportResult?.success && exportResult.panels ? gcodeJob.result : null;
+  const failure = exportResult?.success ? (gcodeResult?.error ?? gcodeJob.failure) : exportResult?.error;
 
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged

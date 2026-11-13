@@ -29,6 +29,7 @@ import {
   exportLaserCutSvg,
   type LaserCutOptions,
   type LaserCutResult,
+  type LaserPanel,
 } from './laserCutExporter';
 import {
   exportContourSliceSvg,
@@ -49,6 +50,7 @@ import { runSheetJob, type SheetJobOptions, type SheetJobResult } from './sheetS
 import { runTimberSimulation, type TimberSimJobOptions, type TimberSimJobResult } from './timberSimulation';
 import {
   generateContourSliceGcode,
+  generateLaserCutGcode,
   type GcodeExportOptions,
   type GcodeExportResult,
 } from './gcodeExporter';
@@ -67,6 +69,13 @@ import {
 import { buildTimberCutPlan, type TimberCutPlan } from './timberCutList';
 
 import type { SpindleRange } from './feedsAndSpeeds';
+/** Sheet G-code: the panels a 'laser' job laid out, cut on a laser or a router. */
+export interface LaserGcodeJobOptions {
+  panels: LaserPanel[];
+  gcodeOptions: Partial<GcodeExportOptions>;
+  probedGrid?: ProbeGrid | null;
+}
+
 export interface ContourGcodeJobOptions {
   sliceResult: ContourSliceResult;
   gcodeOptions: GcodeExportOptions;
@@ -103,6 +112,7 @@ export type ExportJobKind =
   | 'laser'
   | 'contour'
   | 'contourGcode'
+  | 'laserGcode'
   | 'simulate'
   | 'simulateSheets'
   | 'simulateTimber'
@@ -116,6 +126,8 @@ export interface ExportJobMap {
   laser: { options: LaserCutOptions; result: LaserCutResult };
   contour: { options: ContourSliceOptions; result: ContourSliceResult };
   contourGcode: { options: ContourGcodeJobOptions; result: GcodeExportResult };
+  /** Off the main thread: offsetting a dense outline for a router bit took the tab with it. */
+  laserGcode: { options: LaserGcodeJobOptions; result: GcodeExportResult };
   /** Add Simulation: cuts a program out of a block. Takes the program, not the scene. */
   simulate: { options: SimulationJobOptions; result: SimulationJobResult };
   /** The same for sheet parts: outlines extruded at the stock's thickness. */
@@ -171,6 +183,14 @@ export function runExportJob<K extends ExportJobKind>(
     case 'contourGcode': {
       const { sliceResult, gcodeOptions, probedGrid } = options as ContourGcodeJobOptions;
       const res = generateContourSliceGcode(sliceResult, gcodeOptions);
+      if (res.success && gcodeOptions.machineMode === 'cnc' && probedGrid) {
+        res.gcode = warpGcode(res.gcode, probedGrid);
+      }
+      return res as ExportJobResult<K>;
+    }
+    case 'laserGcode': {
+      const { panels = [], gcodeOptions = {}, probedGrid } = options as LaserGcodeJobOptions;
+      const res = generateLaserCutGcode(panels, gcodeOptions);
       if (res.success && gcodeOptions.machineMode === 'cnc' && probedGrid) {
         res.gcode = warpGcode(res.gcode, probedGrid);
       }
