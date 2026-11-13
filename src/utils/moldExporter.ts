@@ -25,7 +25,7 @@ import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './
 import { choosePullDirection, rotateTrianglesForPull, SHALLOWER_PULL, type PullChoice, type PullDirection } from './moldPullDirection';
 import { linerPartingChoice, linerPullChoice } from './moldRoofScore';
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, INSERT_CLEARANCE_MM, SEAL_RING_ROOM_MM, NO_MANIFOLD_REFUSAL, type LinerConstruction, type MoldLinerInfo } from './moldLiner';
-import { castMaterial, type CastMaterialId } from './castMaterials';
+import { castMaterial, defaultSprueFeed, type CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
 import { funnelClearDepths, gateDiaMm, planSprue, sprueNeckDiaMm, ventBoreDiaMm, withPourMouth, VENT_TAPER_MM } from './moldSprue';
 import { bottomFillFloorMm, feedEdgeMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
@@ -123,7 +123,9 @@ export interface MoldOptions {
   /** The neck into the cavity, mm; never under the cast material's least (castMaterials.ts sprueNeckMm). */
   sprueBottomDiaMm: number;
   /**
-   * Where a clamshell is filled from (moldGating.ts). 'bottom' (default): a
+   * Where a clamshell is filled from (moldGating.ts); unset, as the cast
+   * material wants it (castMaterials.ts defaultSprueFeed: plaster, concrete
+   * and Jesmonite from the top, the rest from the bottom). 'bottom': a
    * down-sprue in the wall and a runner to the cavity's lowest point, so the
    * liquid rises and pushes the air out ahead of it. 'top': straight down
    * through the lid into the cavity.
@@ -157,7 +159,6 @@ export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
   includeSprue: true,
   sprueTopDiaMm: 16,
   sprueBottomDiaMm: 6,
-  sprueFeed: 'bottom',
   includeVents: true,
   ventDiaMm: 4,
   includePryNotches: true,
@@ -1532,7 +1533,7 @@ export function generateMoldMeshes(
   const lidTrueDepth = detailIsAbove ? partingZ - zMin : zMax - partingZ;
   // Filled from the bottom, the cavity half's floor holds the runner under the cavity;
   // lined, it holds the runner's own sleeve of liner too, with shell under that.
-  const feed = opts.moldType === 'clamshell' && opts.includeSprue ? (opts.sprueFeed ?? 'bottom') : 'top';
+  const feed = opts.moldType === 'clamshell' && opts.includeSprue ? (opts.sprueFeed ?? defaultSprueFeed(opts.castMaterial ?? 'epoxy')) : 'top';
   const neckR = sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial) / 2;
   const linerSkinMm = opts.dissolvableLiner
     ? (opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM)

@@ -18,7 +18,7 @@ import { clampGrams, DEFAULT_LINER_SKIN_MM } from '../../utils/moldLiner';
 import { LINER_PAIRS, linerPair, pairSoftenC, type LinerPairId } from '../../utils/linerMaterials';
 import { moldFeatureLines } from '../../utils/moldExporter';
 import { ventBoreDiaMm } from '../../utils/moldSprue';
-import { castMaterial, castMaterialWarnings, castWeightG, mixGrams, type CastMaterialId } from '../../utils/castMaterials';
+import { castMaterial, castMaterialWarnings, castWeightG, defaultSprueFeed, mixGrams, type CastMaterialId } from '../../utils/castMaterials';
 import { ChainResult } from './ChainRun';
 import { OPEN_MOLD_ALLOWANCE } from '../../utils/moldExporter';
 import { soupVolume } from '../../utils/siliconeMold';
@@ -756,17 +756,17 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                     <div className="grid grid-cols-2 gap-3 pl-6 min-w-0">
                       <Field
                         label="Fill From"
-                        hint="Bottom: down the wall and into the lowest point, so the resin rises and pushes the air out. Top: straight down through the lid."
+                        hint="Bottom: down the wall and into the lowest point, so the resin rises and pushes the air out. Top: straight down through the lid, for plaster, concrete and Jesmonite, which settle in a runner."
                         hintAlign="start"
                         className="col-span-2"
                       >
                         <select
-                          value={options.sprueFeed ?? 'bottom'}
+                          value={options.sprueFeed ?? defaultSprueFeed(material)}
                           onChange={(e) => set('sprueFeed', e.target.value as 'bottom' | 'top')}
                           className={inputClass}
                         >
-                          <option value="bottom">Bottom (recommended)</option>
-                          <option value="top">Top</option>
+                          <option value="bottom">Bottom{defaultSprueFeed(material) === 'bottom' ? ' (recommended)' : ''}</option>
+                          <option value="top">Top{defaultSprueFeed(material) === 'top' ? ' (recommended)' : ''}</option>
                         </select>
                       </Field>
                       <Field label="Funnel Dia (mm)" hint="The funnel's mouth on the lid's outside. It goes as deep as the lid allows." hintAlign="start">

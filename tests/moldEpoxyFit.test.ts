@@ -77,7 +77,8 @@ describe('gate', () => {
   });
 
   it('is as wide as the material can flow through', () => {
-    const concrete = generateMoldMeshes(slab(60), { ...clamshell, castMaterial: 'concrete', wallMarginMm: 25, baseThicknessMm: 10 }, wasm);
+    // Concrete pours from the top unless asked; asked, its gate passes the aggregate.
+    const concrete = generateMoldMeshes(slab(60), { ...clamshell, castMaterial: 'concrete', sprueFeed: 'bottom', wallMarginMm: 25, baseThicknessMm: 10 }, wasm);
     expect(concrete.success, concrete.error).toBe(true);
     expect(concrete.features!.gate!.diaMm).toBe(10);
     expect(generateMoldMeshes(slab(60), { ...clamshell, castMaterial: 'epoxy' }, wasm).features!.gate!.diaMm).toBe(4);
@@ -159,5 +160,17 @@ describe('open mold mouth', () => {
     const taken = pieces.reduce((sum, t) => sum + solidOf(t).slice(r.bottomHalf.partingZMm - 0.02).area(), 0);
     const free = r.moldWidthMm * r.moldDepthMm - taken;
     expect(2 * Math.sqrt(free / Math.PI)).toBeGreaterThanOrEqual(12);
+  });
+});
+
+describe('which way a closed mold fills', () => {
+  it('pours a slurry from the top unless asked, and a resin from the bottom', () => {
+    // Bottom fill ran plaster and concrete through a runner under the cavity, where the aggregate settles.
+    for (const m of ['plaster', 'concrete', 'jesmonite'] as const) {
+      const r = generateMoldMeshes(slab(60), { ...clamshell, castMaterial: m, wallMarginMm: 25, baseThicknessMm: 10 }, wasm);
+      expect(r.success, r.error).toBe(true);
+      expect(r.features!.feed, m).toBe('top');
+    }
+    expect(generateMoldMeshes(slab(60), { ...clamshell, castMaterial: 'epoxy' }, wasm).features!.feed).toBe('bottom');
   });
 });

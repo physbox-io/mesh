@@ -93,6 +93,12 @@ export interface CastMaterial {
    * bath ruin it, so no dissolvable liner takes it.
    */
   meltsInBath?: true;
+  /**
+   * Poured from the top of a closed mold unless asked otherwise: a mineral
+   * slurry carries sand or aggregate that settles in, and jams, a runner
+   * under the cavity, and it starts to set before it has climbed the far side.
+   */
+  pourFromTop?: true;
   /** Poured into a sand or investment mold, from a printed pattern. */
   metal: boolean;
   /** It can make a silicone mold itself, and it sticks to one. */
@@ -141,9 +147,9 @@ export const CAST_MATERIALS: CastMaterial[] = [
     id: 'water', label: 'Water (ice)', minSectionMm: 2.0, sprueNeckMm: 5, bubbleRiseMm: 5.3, densityGcm3: 0.92, meltsInBath: true, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
     warnings: [],
   },
-  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70, wetDensityGcm3: PLASTER_SLURRY_GCM3 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
-  { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, sprueNeckMm: 15, bubbleRiseMm: 10, densityGcm3: 2.4, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
-  { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
+  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70, wetDensityGcm3: PLASTER_SLURRY_GCM3 }, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
+  { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, sprueNeckMm: 15, bubbleRiseMm: 10, densityGcm3: 2.4, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
+  { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
   { id: 'aluminium', label: 'Aluminium', minSectionMm: 3.0, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 2.7, shrinkPercent: 1.3, pourC: 720, waterBased: false, metal: true, silicone: false, rgba: [0.78, 0.8, 0.83, 1], warnings: [] },
   { id: 'brass', label: 'Brass', minSectionMm: 2.5, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 8.5, shrinkPercent: 1.5, pourC: 1000, waterBased: false, metal: true, silicone: false, rgba: [0.8, 0.66, 0.3, 1], warnings: [] },
   { id: 'bronze', label: 'Bronze', minSectionMm: 2.5, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 8.8, shrinkPercent: 1.5, pourC: 1150, waterBased: false, metal: true, silicone: false, rgba: [0.72, 0.48, 0.25, 1], warnings: [] },
@@ -187,6 +193,11 @@ export const SILICONES: CastMaterial[] = CAST_MATERIALS.filter((m) => m.silicone
 
 export function isSiliconeId(value: unknown): value is SiliconeId {
   return isCastMaterialId(value) && castMaterial(value).silicone;
+}
+
+/** Which way a closed mold is filled when nobody says: from the bottom, but a slurry from the top. */
+export function defaultSprueFeed(id: CastMaterialId): 'bottom' | 'top' {
+  return castMaterial(id).pourFromTop ? 'top' : 'bottom';
 }
 
 /** What a piece of this volume weighs, grams. */
