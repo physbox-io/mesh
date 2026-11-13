@@ -23,6 +23,7 @@ import { doneUp } from './fastening';
 import { flattenPanel, type FlatPiece } from './garmentFlatten';
 import { spreadPanel } from './garmentSpread';
 import { addRod, rodLines, type RodConstraints } from './clothRods';
+import { BOARD_STIFFNESS, type Board } from './clothBoards';
 import { garmentForm, garmentSettings } from './garments';
 import { bodyFormGeoms, bodyLandmarks } from './bodyForm';
 import { beltPaths, beltPieces, pocketPieces, standPiece, type AddOnPiece, type HostPanel } from './garmentAddOns';
@@ -281,6 +282,8 @@ export interface ClothModel {
   stitchSew?: number[];
   /** Boning (clothRods). */
   rods?: RodConstraints;
+  /** Pieces stiff enough to keep their shape, held rigid in their plane (clothBoards): particles, flat pattern, local triangles. */
+  boards?: Board[];
   /** Surface tacks holding overlay pieces (pockets, belts, belt loops) at a clean normal offset outside a garment triangle. */
   tacks?: ClothTack[];
   ties: ClothTieSpec[];
@@ -476,6 +479,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
   const edges = new EdgeSet(), bends = new BendSet(), limits = new EdgeSet();
   const elastics: number[] = [], elasticRest: number[] = [], elasticFlat: number[] = [], elasticAlpha: number[] = [];
   const tacks: ClothTack[] = [];
+  const boards: Board[] = [];
   const drop: number[] = [];
   const rods: RodConstraints = { links: [], linkRest: [], bends: [], bendRest: [], bendAlpha: [] };
   const groups: ClothRenderGroup[] = [];
@@ -902,6 +906,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (sharedAt.size) anyShared = true;
       const pm = { ...(CLOTH_MATERIALS[piece.material ?? materialName] ?? material), ...(piece.materialOverrides ?? {}) };
       const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bend = (pm.young * pm.thickness ** 3) / (material.young * material.thickness ** 3);
+      if ((pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS) boards.push({ particles: piece.uv.map((_, i) => particleOf(i)), rest: piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]), tris: piece.tris, held: [...piece.tacks.map((tk) => tk.local), ...(piece.shared ?? []).map((sh) => sh.local)] });
       // Cut short of where it starts, if drawn in: its flat length is its rest.
       const uv = piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]);
       piece.start.forEach((q, i) => { if (own.has(i)) { x0.push(q); mass.push(0); } });
@@ -1062,7 +1067,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     elastics, elasticRest, elasticFlat, elasticAlpha,
     bends: bends.quads, bendWeights: bends.weights, bendArea: bends.area, bendRest: bends.rest, bendStiffness: bends.scale,
     limits: limitPairs, limitRest,
-    stitches, stitchSew, tacks, ties, groups,
+    stitches, stitchSew, tacks, ties, groups, ...(boards.length ? { boards } : {}),
     ...(rods.links.length ? { rods } : {}),
   };
 }

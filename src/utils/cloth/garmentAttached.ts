@@ -305,7 +305,11 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           // start read as bent.
           const hangs = relaxed(lifted ?? base.map((_, i) => swung(i, swing)), mesh, onSewn);
           let bestE = restEnergy(hangs, mesh.tris, pm), bestTh = -1, bestAt: number[][] | null = null;
-          for (let th = Math.max(swing, 0) + Math.PI / 12; th <= Math.PI / 2 + 1e-9; th += Math.PI / 12) {
+          // On past square to the face: where the face slopes back (a forehead
+          // under a cap's band), the one start a peak lies in unbent, level,
+          // is beyond 90 deg from hanging; stopped at 90, it started (and its
+          // seam rested) pitched down over the eyes.
+          for (let th = Math.max(swing, 0) + Math.PI / 24; th <= (3 * Math.PI) / 4 + 1e-9; th += Math.PI / 24) {
             const at = relaxed(base.map((_, i) => swung(i, th)), mesh, onSewn);
             if (!at.every((q, i) => onSewn.has(i) || clearAt(q))) continue;
             const e = restEnergy(at, mesh.tris, pm);

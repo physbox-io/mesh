@@ -20,6 +20,7 @@ import type { ClothModel, ClothTrim, FlatPattern } from './clothModel';
 import type { ClothMaterialName, ClothPatternPrint } from '../../types/cloth';
 import { LayerContacts } from './clothLayers';
 import { SelfContacts } from './clothSelf';
+import { BoardShapes, type Board } from './clothBoards';
 import { contourStep, findCrossings, trianglesNear, untangleMesh, type UntangleMesh } from './clothUntangle';
 import { colliderContact, type Collider } from './clothColliders';
 
@@ -91,6 +92,7 @@ export class ClothSim {
   private pieces: Piece[];
   private edges: Int32Array; private edgeRest: Float64Array; private edgeMin: Float64Array; private edgeAlpha: Float64Array;
   private elastics: Int32Array; private elasticFlat: Float64Array; private elasticRest: Float64Array; private elasticAlpha: Float64Array;
+  private boards: BoardShapes;
   private bends: Int32Array; private bendWeights: Float64Array; private bendAlpha: Float64Array; private bendRest: Float64Array;
   private limits: Int32Array; private limitRest: Float64Array;
   private stitches: Int32Array; private stitchGap: Float64Array; private stitchSew: Float64Array;
@@ -224,6 +226,9 @@ export class ClothSim {
     this.inv = colliders.map(() => new THREE.Matrix4());
     this.layers = new LayerContacts(this.pieces, this.w);
     this.self = new SelfContacts(this.pieces, this.w, this.stitches, this.x);
+    const boards: Board[] = [];
+    for (const pc of this.pieces) for (const b of pc.model.boards ?? []) boards.push({ ...b, particles: b.particles.map((q) => pc.base + q) });
+    this.boards = new BoardShapes(boards, this.n);
     this.clearBudget = new Float64Array(n); this.nearest = new Float64Array(n); this.skip = new Uint8Array(n);
     this.prev.set(this.x);
     this.aim();
@@ -492,6 +497,7 @@ export class ClothSim {
         if (sp === 0) {
           this.solveBends(h2);
         }
+        this.boards.solve(this.x, this.w);
         for (let k = 0; k < this.stitchGap.length; k++) {
           if (this.stitchSew[k] <= 0) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
         }
@@ -543,6 +549,10 @@ export class ClothSim {
       // Every pass: once a substep, a stiff piece (a board, heavy leather)
       // bent however stiff its material, held to what one pass could do.
       this.solveBends(h2);
+      // Boards held to their shape in their plane, once a substep (a few
+      // passes of the rest hold a cloth, not a board; every pass cost a cap
+      // a sixth of a second a simulated second and held it no better).
+      if (pass === STRETCH_PASSES - 1) this.boards.solve(x, w);
       // Stitches close from their starting gap to nothing over the sew time.
       for (let k = 0; k < this.stitchGap.length; k++) {
         const sew = this.stitchSew[k];
