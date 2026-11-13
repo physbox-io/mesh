@@ -2,7 +2,6 @@ import { Settings, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { useViewQuality } from '../../store/viewQualityStore';
-import { useHighFidelity } from '../../store/highFidelityStore';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS } from '../../utils/llmSettings';
@@ -10,7 +9,7 @@ import { useLlmSettings } from '../../hooks/useLlmSettings';
 
 /**
  * The Environment popover: view quality, gravity, wind, drag, the floor,
- * contact and mold fidelity, and the copilot's keys, model and reply budget.
+ * simulation and mold fidelity, and the copilot's keys, model and reply budget.
  *
  * Mounted all the time and empty while closed, so the copilot settings are
  * read (and the live model lists fetched) when the app opens, not on first
@@ -19,10 +18,9 @@ import { useLlmSettings } from '../../hooks/useLlmSettings';
 export function SettingsPopover() {
   const hiRes = useViewQuality(s => s.hiRes);
   const setHiRes = useViewQuality(s => s.setHiRes);
-  const highFidelity = useHighFidelity(s => s.highFidelity);
-  const setHighFidelity = useHighFidelity(s => s.setHighFidelity);
   const simFidelity = useStore((s) => s.sceneGraph.simFidelity ?? 'standard');
   const setSimFidelity = useStore((s) => s.setSimFidelity);
+  const highFidelity = simFidelity === 'print';
   const {
     isSettingsOpen, setSettingsOpen,
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
@@ -81,34 +79,18 @@ export function SettingsPopover() {
           <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <SliderValue value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} decimals={2} min={0} max={1} /></label>
           <RangeInput min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} className="w-full accent-blue-500 cursor-pointer" />
         </div>
-        {/* Contact fidelity. Print is for millimetre parts that have to
-            fit: stiffer contact, and pins colliding with their holes
-            exactly. A property of the scene, so it is undone and saved
-            with it. */}
+        {/* High fidelity: stiff contact and exact pin-and-hole collision for
+            millimetre clearances, plus rigid molds sampled twice as fine. A
+            property of the scene, so it is undone and saved with it. */}
         <div className="flex items-center justify-between gap-2">
-          <span id="fidelityLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Print: contact stiff enough for millimetre clearances, and pegs and dowels that really go into their holes. For split parts and anything else that has to fit together.">Print Fidelity</span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={simFidelity === 'print'}
-            aria-labelledby="fidelityLabel"
-            title="Print: contact stiff enough for millimetre clearances, and pegs and dowels that really go into their holes. For split parts and anything else that has to fit together."
-            onClick={() => setSimFidelity(simFidelity === 'print' ? 'standard' : 'print')}
-            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${simFidelity === 'print' ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
-          >
-            <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${simFidelity === 'print' ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-          </button>
-        </div>
-        {/* Per machine, not per scene: it follows the printer on the bench. */}
-        <div className="flex items-center justify-between gap-2">
-          <span id="highFidelityLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Rigid molds sampled twice as fine: truer walls for a fine nozzle, but larger files and slower to build.">High Fidelity</span>
+          <span id="highFidelityLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Stiff contact and exact pin-and-hole collision for millimetre clearances, plus rigid molds sampled twice as fine (larger files, slower to build).">High Fidelity</span>
           <button
             type="button"
             role="switch"
             aria-checked={highFidelity}
             aria-labelledby="highFidelityLabel"
-            title="Rigid molds sampled twice as fine: truer walls for a fine nozzle, but larger files and slower to build."
-            onClick={() => setHighFidelity(!highFidelity)}
+            title="Stiff contact and exact pin-and-hole collision for millimetre clearances, plus rigid molds sampled twice as fine (larger files, slower to build)."
+            onClick={() => setSimFidelity(highFidelity ? 'standard' : 'print')}
             className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${highFidelity ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
           >
             <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${highFidelity ? 'translate-x-3.5' : 'translate-x-0.5'}`} />

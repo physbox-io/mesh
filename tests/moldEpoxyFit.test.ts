@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Manifold, ManifoldToplevel } from 'manifold-3d';
 import { generateMoldMeshes, DEFAULT_MOLD_OPTIONS, type MoldExportResult, type MoldOptions, type Triangle3D } from '../src/utils/moldExporter';
+import { moldOptionsFor } from '../src/utils/moldWorkerClient';
 import { buildPartManifold } from '../src/utils/moldManifold';
 import { loadManifold } from '../src/utils/sculptCut';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
@@ -138,6 +139,14 @@ describe('high fidelity', () => {
     const plain = generateMoldMeshes(wedge, clamshell, wasm);
     const fine = generateMoldMeshes(wedge, { ...clamshell, highFidelity: true }, wasm);
     expect(fine.features!.vents.length).toBe(plain.features!.vents.length);
+  });
+
+  it('follows the scene High Fidelity switch unless highFidelity overrides it', () => {
+    expect(moldOptionsFor({}, { simFidelity: undefined }).options.highFidelity).toBe(false);
+    expect(moldOptionsFor({}, { simFidelity: 'standard' }).options.highFidelity).toBe(false);
+    expect(moldOptionsFor({}, { simFidelity: 'print' }).options.highFidelity).toBe(true);
+    expect(moldOptionsFor({ highFidelity: false }, { simFidelity: 'print' }).options.highFidelity).toBe(false);
+    expect(moldOptionsFor({ highFidelity: true }, { simFidelity: 'standard' }).options.highFidelity).toBe(true);
   });
 });
 

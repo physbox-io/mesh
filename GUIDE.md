@@ -604,11 +604,13 @@ joinery on the cut faces. The bed is a workshop setting beside the stock (`store
   (`layoutOnBed` in `utils/printPlate.ts`) inside the margin they were split with, with no size
   prompt; Export STL offers a file each, stood the same way.
 
-**Print fidelity** (`sceneGraph.simFidelity: 'print'`, the Environment panel's switch, or
+**High fidelity** (`sceneGraph.simFidelity: 'print'`, the Environment panel's High Fidelity switch, or
 `physics_set_environment(fidelity)`) is generic, not specific to the split:
 
 * **Stiffer contact.** Contact uses `solref 0.002`, the stiffest the 1 ms timestep allows, so a resting
   part sinks about 0.04 mm rather than 4 mm.
+* **Finer rigid molds.** Depth-field rigid molds sample at twice the standard resolution (`fineness = 2`,
+  four times the triangles) unless `high_fidelity` overrides it.
 * **Bodies collide as their plain mesh.** `mjcf.ts` emits a mesh with a collider source as its own
   plain-mesh collision geom, and draws the original visual-only. A hull of the drilled section would
   fill the holes, and a hull of the pegged one would wrap a cone round each peg that the next section

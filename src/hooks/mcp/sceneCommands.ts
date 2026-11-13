@@ -543,8 +543,10 @@ export const sceneCommands: McpCommands = {
     };
     if (Object.keys(stockPatch).length > 0) store.setStock(stockPatch);
     if (fidelity !== undefined) {
-      if (fidelity !== 'standard' && fidelity !== 'print') return { ok: false, error: `fidelity must be 'standard' or 'print', not '${fidelity}'.` };
-      store.setSimFidelity(fidelity);
+      if (fidelity !== 'standard' && fidelity !== 'print' && fidelity !== 'high') {
+        return { ok: false, error: `fidelity must be 'standard', 'print' or 'high', not '${fidelity}'.` };
+      }
+      store.setSimFidelity(fidelity === 'standard' ? 'standard' : 'print');
     }
     const env: Record<string, number> = {};
     if (gravityZ !== undefined) env.gravityZ = gravityZ;

@@ -12,7 +12,6 @@
 // module exists to avoid, but a modal that works slowly beats one that does not
 // work.
 
-import { useHighFidelity } from '../store/highFidelityStore';
 import {
   DEFAULT_MOLD_OPTIONS,
   generateMoldMeshes,
@@ -311,7 +310,10 @@ export function moldSceneParts(summary: Pick<MoldSummary, 'parts'>): SimulationP
 
 const PULL_DIRECTIONS: readonly string[] = ['auto', '+z', '-z', '+y', '-y', '+x', '-x'];
 
-export function moldOptionsFor(msg: Record<string, unknown>): {
+export function moldOptionsFor(
+  msg: Record<string, unknown>,
+  scene?: Pick<SceneGraph, 'simFidelity'>,
+): {
   options: Partial<MoldOptions>;
   fromDialog: boolean;
   /** Set when an option names something that does not exist. */
@@ -371,7 +373,9 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(linerPairId ? { linerPair: linerPairId } : {}),
       ...(msg.linerConstruction === 'combined' || msg.linerConstruction === 'insert' ? { linerConstruction: msg.linerConstruction } : {}),
       ...(typeof msg.sealRidge === 'boolean' ? { sealRidge: msg.sealRidge } : {}),
-      highFidelity: typeof msg.highFidelity === 'boolean' ? msg.highFidelity : useHighFidelity.getState().highFidelity,
+      highFidelity: typeof msg.highFidelity === 'boolean'
+        ? msg.highFidelity
+        : (scene ?? useStore.getState().sceneGraph).simFidelity === 'print',
     },
   };
 }
@@ -606,7 +610,7 @@ export async function runMcpMoldSimulation(params: {
     }
     return runMcpChain(msg, fullScene, pickSubject);
   }
-  const { options: moldOpts, fromDialog, error: optionError } = moldOptionsFor(msg);
+  const { options: moldOpts, fromDialog, error: optionError } = moldOptionsFor(msg, fullScene);
   if (optionError) return { ok: false, error: optionError };
   const optionsFrom = fromDialog ? "the Mold dialog's Rigid tab" : 'the scene defaults';
 
