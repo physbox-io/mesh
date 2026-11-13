@@ -19,6 +19,7 @@ import type { ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, 
 import type { SceneNode } from '../../types/scene';
 import { chain, CLOTH_MATERIALS, clothMaterial, DEFAULT_CLOTH_SPACING, DEFAULT_SEW_TIME, meshCloth } from './clothMesh';
 import { garmentShell } from './garmentShell';
+import { doneUp } from './fastening';
 import { flattenPanel, type FlatPiece } from './garmentFlatten';
 import { spreadPanel } from './garmentSpread';
 import { addRod, rodLines, type RodConstraints } from './clothRods';
@@ -109,7 +110,7 @@ function chainLineRuns(lines: { name: string; path: number[] }[], along: string)
 }
 
 /** A trim placed on a line: at `point`, or `t` of the way on to `toward`; its row's offset, its run, and whether it ends it. */
-interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean }
+interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean; /** Done up (a fastening's part of the run below how far it is fastened). */ closed: boolean }
 
 let trimRuns = 0;
 
@@ -159,15 +160,18 @@ function trimPoints(points: number[][], lines: { name: string; path: number[] }[
       for (const offset0 of offsets) {
         const offset = offset0 * into;
         const id = trimRuns++;
-        for (let j = 0; j < count; j++) {
-          // A zip's two sides interlock: the second's teeth half a tooth along from the first's.
-          const want = (total - (count - 1) * spacing) / 2 + j * spacing + (trim.kind === 'zipper' && side % 2 ? spacing / 2 : 0);
+        // A zip's two sides interlock: the second's teeth half a tooth along from the first's.
+        const wants = Array.from({ length: count }, (_, j) => (total - (count - 1) * spacing) / 2 + j * spacing + (trim.kind === 'zipper' && side % 2 ? spacing / 2 : 0));
+        // Done up from the bottom as far as it is fastened; a zip's slider at the top of that.
+        const up = doneUp(trim), closed = wants.map((w) => (topLast ? w / total : 1 - w / total) <= up + 1e-9);
+        const shut = closed.flatMap((c, j) => (c ? [j] : []));
+        const slider = trim.kind === 'zipper' && shut.length ? (topLast ? shut[shut.length - 1] : shut[0]) : -1;
+        wants.forEach((want, j) => {
           let k = 1;
           while (k < run.length - 1 && at[k] < want) k++;
           const seg = at[k] - at[k - 1], t = seg > 0 ? Math.max(0, Math.min(1, (want - at[k - 1]) / seg)) : 0;
-          const end = trim.kind === 'zipper' && trim.fastened !== false && (topLast ? j === count - 1 : j === 0);
-          out.push({ trim, point: run[k - 1], toward: run[k], t, offset, run: id, end });
-        }
+          out.push({ trim, point: run[k - 1], toward: run[k], t, offset, run: id, end: j === slider, closed: closed[j] });
+        });
       }
     });
   }
@@ -568,6 +572,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const openFirst = new Map<number, number>(), openSecond = new Map<number, number>();
     const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams, ...(shell.marks ?? [])], settings.trims ?? [], shell.tris);
     const trimAt = new Map<number, TrimPlace[]>();
+    const sliderDrawn = new Set<TrimPlace>();
     for (const t of trimList) (trimAt.get(t.point) ?? trimAt.set(t.point, []).get(t.point)!).push(t);
     // Negative ease: the pattern cut narrower than the form, by the ease
     // over the girth under each point (a band's own ease at its top edge,
@@ -699,6 +704,9 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
             if (tr) trims.push(tr);
           } else {
             const tr = placedTrim(pl, (q) => localOfG.get(q));
+            // A zip's slider once, on the first panel its tooth is on: an
+            // opening's points are on both its sides, and each drew one.
+            if (tr?.end) { if (sliderDrawn.has(pl)) delete tr.end; else sliderDrawn.add(pl); }
             if (tr) trims.push(tr);
           }
         }
@@ -779,10 +787,15 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     }
     // Fastened buttons, buckles or a zip along an open seam hold the two sides together.
     // Each point a fastening sits at or between (a zip's teeth fall between the line's points).
+    // Only where it is done up (a zip undone at the neck stands open there).
     const fastenAt = new Map<number, GarmentTrim>();
-    for (const pl of trimList) { fastenAt.set(pl.point, pl.trim); if (pl.toward !== undefined && pl.trim.kind === 'zipper') fastenAt.set(pl.toward, pl.trim); }
-    for (const [g, trim] of fastenAt) {
-      if ((trim.kind !== 'button' && trim.kind !== 'buckle' && trim.kind !== 'zipper') || !openPoints.has(g) || trim.fastened === false) continue;
+    for (const pl of trimList) {
+      if (!pl.closed || (pl.trim.kind !== 'button' && pl.trim.kind !== 'buckle' && pl.trim.kind !== 'zipper')) continue;
+      fastenAt.set(pl.point, pl.trim);
+      if (pl.toward !== undefined && pl.trim.kind === 'zipper') fastenAt.set(pl.toward, pl.trim);
+    }
+    for (const [g] of fastenAt) {
+      if (!openPoints.has(g)) continue;
       if (asPieces) {
         const list = copies.get(g);
         if (list && list.length >= 2) addStitch(list[0], list[1], sewTime);
@@ -818,7 +831,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           const holders = hostPanels.map((_, k) => k).filter((k) => wornPanels[k].particles.includes(run[Math.floor(run.length / 2)]));
           const overK = holders.find((k) => panelSide[k] === (trim.lap ?? 'right')), underK = holders.find((k) => panelSide[k] !== (trim.lap ?? 'right'));
           if (overK === undefined || underK === undefined) continue;
-          const stand = standPiece(`stand_${hostPanels[overK].name}`, run, hostPanels[overK], hostPanels[underK], wornPanels[overK].particles, wornPanels[underK].particles, standWidth(trim), buttons, { ...trim, size: trim.size ?? TRIM_DEFAULTS.button.size, rgba: trim.rgba ?? TRIM_DEFAULTS.button.rgba }, trim.fastened !== false, x0);
+          const stand = standPiece(`stand_${hostPanels[overK].name}`, run, hostPanels[overK], hostPanels[underK], wornPanels[overK].particles, wornPanels[underK].particles, standWidth(trim), buttons, { ...trim, size: trim.size ?? TRIM_DEFAULTS.button.size, rgba: trim.rgba ?? TRIM_DEFAULTS.button.rgba }, doneUp(trim) > 0, x0);
           if (stand) { stand.rgba = colour; addOns.push(stand); }
         }
       }

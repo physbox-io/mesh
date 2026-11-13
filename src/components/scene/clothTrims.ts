@@ -21,11 +21,13 @@ const TRIM_GEOMETRY: Record<string, () => THREE.BufferGeometry> = {
   // Low, as a zip's teeth are: half their width tall, they stood through what lay over them.
   // Each side's teeth reach across the middle into the other's gaps.
   zipper: () => new THREE.BoxGeometry(0.55, 0.3, 1.5).translate(0, 0.15, 0),
-  // A slider and its pull, hanging down the line.
+  // A slider and its pull, hanging down the line: the pull's tab runs along
+  // the line from the slider to its ring (across it, it read as a bar apart
+  // from the slider).
   slider: () => mergeGeometries([
-    new THREE.BoxGeometry(2.2, 1.0, 3.2).translate(0, 0.5, 0),
-    new THREE.BoxGeometry(1.0, 0.35, 3.6).translate(-2.6, 1.0, 0),
-    new THREE.TorusGeometry(0.45, 0.15, 6, 12).rotateX(Math.PI / 2).translate(-4.6, 1.0, 0),
+    new THREE.BoxGeometry(2.4, 0.5, 1.6).translate(0, 0.25, 0),
+    new THREE.BoxGeometry(3.0, 0.22, 0.8).translate(-2.4, 0.55, 0),
+    new THREE.TorusGeometry(0.42, 0.13, 6, 12).rotateX(Math.PI / 2).translate(-4.3, 0.55, 0),
   ])!,
   // A dash of thread, its length along the line.
   stitch: () => new THREE.BoxGeometry(1, 0.22, 0.22).translate(0, 0.11, 0),
@@ -119,8 +121,10 @@ export function useClothTrims(flex: FlexInfo) {
       items.forEach((t, i) => {
         frame(t);
         if (ALONG.has(kind)) {
-          // Local +x along the line (a slider's pull hangs back down it, from its top).
-          tx.copy(tan).multiplyScalar(kind === 'slider' && t.end ? -1 : 1);
+          // Local +x along the line; a slider's pull (its -x) hangs down it,
+          // whichever way the line's run goes.
+          tx.copy(tan);
+          if (kind === 'slider' && tx.z < 0) tx.negate();
           tz.crossVectors(tx, nv);
         } else {
           // Local +z up the body, local +x across it.
@@ -151,13 +155,26 @@ export function useClothTrims(flex: FlexInfo) {
       mesh.instanceMatrix.needsUpdate = true;
       mesh.visible = true;
     }
+    // The piece's middle, for which side of its edge its cloth is on.
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < p.length; i += 3) { cx += p[i]; cy += p[i + 1]; cz += p[i + 2]; }
+    const np = Math.max(1, p.length / 3);
+    cx /= np; cy /= np; cz /= np;
     for (const { items, mesh, geometry } of built.tapes) {
       const pos = geometry.attributes.position as THREE.BufferAttribute;
+      // Each side's tape under its own edge, on the cloth's inner face, from
+      // just past the teeth into its cloth: laid both ways about the line,
+      // half of it stood in the air once the zip was undone, and laid on the
+      // outer face a puffed cloth curving away from it showed it in tatters.
+      let into = 0;
+      for (const t of items) { frame(t); into += side.x * (cx - at.x) + side.y * (cy - at.y) + side.z * (cz - at.z); }
+      const s = into >= 0 ? 1 : -1;
       items.forEach((t, k) => {
         frame(t);
-        const w = t.size * TAPE_HALF;
-        pos.setXYZ(2 * k, at.x + side.x * w, at.y + side.y * w, at.z + side.z * w);
-        pos.setXYZ(2 * k + 1, at.x - side.x * w, at.y - side.y * w, at.z - side.z * w);
+        const w = t.size * TAPE_HALF, out = -0.4 * w * s, inn = 0.8 * w * s;
+        at.addScaledVector(nv, -2 * h);
+        pos.setXYZ(2 * k, at.x + side.x * inn, at.y + side.y * inn, at.z + side.z * inn);
+        pos.setXYZ(2 * k + 1, at.x + side.x * out, at.y + side.y * out, at.z + side.z * out);
       });
       pos.needsUpdate = true;
       geometry.computeVertexNormals();

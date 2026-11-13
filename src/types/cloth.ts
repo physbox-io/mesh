@@ -324,9 +324,11 @@ export interface GarmentTrim {
   /**
    * For buttons or a zip along an open seam (`opening`): whether each button
    * is fastened through its matching buttonhole on the opposite edge, or the
-   * zip done up, holding the two sides together (default true).
+   * zip done up, holding the two sides together (default true). A number is
+   * how much of it is done up from the bottom, 0 to 1 (a zip undone at the
+   * neck: 0.85; the top button open). Buttons on a stand are all or none.
    */
-  fastened?: boolean;
+  fastened?: boolean | number;
   /** For buttons on an opening: the wearer's side whose front laps over and carries the holes (default 'right'). */
   lap?: 'left' | 'right';
   /** For buttons on an opening: how far the lapping front runs on over the other, metres (default 2.2 buttons; 0 for edge to edge). */
