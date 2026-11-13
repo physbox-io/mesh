@@ -38,10 +38,12 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
   // part that did not fit, and the size prompt scales them all by one section.
   // So sections go out as a file each, stood the way they print, at true size.
   const exportStl = useCallback(() => {
-    const { sceneGraph: graph } = useStore.getState();
+    const { sceneGraph: graph, hiddenNodeIds } = useStore.getState();
+    const hidden = new Set(hiddenNodeIds);
     let posed = 0;
     const walk = (nodes: SceneNode[]) => {
       for (const n of nodes) {
+        if (hidden.has(n.id)) continue;
         if (n.printPose) posed++;
         walk(n.children || []);
       }
@@ -129,7 +131,8 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
     // this bed, and rescaling would undo that. The plate is built from the
     // graph (utils/printExport), the same file physics_export_print writes, so
     // paint and every part's volumes go with it.
-    const { sceneGraph: graph, printBed } = useStore.getState();
+    const { sceneGraph: graph, printBed, hiddenNodeIds } = useStore.getState();
+    const hidden = new Set(hiddenNodeIds);
     let posed = 0;
     // Generated molds lie in the scene as they close and pour, each insert in
     // its holder. To print, every holder, insert and insert piece is an object
@@ -137,6 +140,7 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
     const molds: SceneNode[] = [];
     const walk = (nodes: SceneNode[]) => {
       for (const n of nodes) {
+        if (hidden.has(n.id)) continue;
         if (n.printPose) posed++;
         if (n.simulation?.kind === 'mold' && (n.geoms?.length ?? 0) > 0) molds.push(n);
         walk(n.children || []);
