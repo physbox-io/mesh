@@ -229,12 +229,15 @@ export function collapseShortBoundaryEdges(points: number[][], tris: number[], m
  * edges it split.
  */
 export function splitAlong(points: number[][], tris: number[], f: (p: number[]) => number, where: (centroid: number[], corners: number[][], triIdx: number) => boolean, locked?: Set<number>): { tris: number[]; edges: [number, number][]; split: Map<string, number> } {
-  const value = points.map(f);
+  // f at a point, found when first wanted: only the corners of the triangles
+  // the cut is in are (a drawn curve's f is costly far from it).
+  const value: number[] = new Array(points.length).fill(NaN);
+  const val = (i: number) => { let v = value[i]; if (Number.isNaN(v)) v = value[i] = f(points[i]); return v; };
   const len = (a: number, b: number) => Math.hypot(points[a][0] - points[b][0], points[a][1] - points[b][1], points[a][2] - points[b][2]);
-  const across = (a: number, b: number) => (value[a] > 0 && value[b] < 0) || (value[a] < 0 && value[b] > 0);
+  const across = (a: number, b: number) => (val(a) > 0 && val(b) < 0) || (val(a) < 0 && val(b) > 0);
   const edgeT = (a: number, b: number) => {
     let lo = 0, hi = 1;
-    const fa = value[a] > 0;
+    const fa = val(a) > 0;
     for (let it = 0; it < 20; it++) {
       const m = (lo + hi) / 2;
       if ((f(points[a].map((v, k) => v + (points[b][k] - v) * m)) > 0) === fa) lo = m; else hi = m;
@@ -304,19 +307,19 @@ export function splitAlong(points: number[][], tris: number[], f: (p: number[]) 
     const tri = [tris[t], tris[t + 1], tris[t + 2]];
     const on = where(centroid(tri), tri.map((id) => points[id]), t / 3);
     ons.push(on);
-    if (on && tri.some((id) => value[id] > 0) && tri.some((id) => value[id] < 0)) for (let e = 0; e < 3; e++) if (across(tri[e], tri[(e + 1) % 3])) pointOn(tri[e], tri[(e + 1) % 3]);
+    if (on && tri.some((id) => val(id) > 0) && tri.some((id) => val(id) < 0)) for (let e = 0; e < 3; e++) if (across(tri[e], tri[(e + 1) % 3])) pointOn(tri[e], tri[(e + 1) % 3]);
   }
   for (let t = 0; t < tris.length; t += 3) {
     const tri = [tris[t], tris[t + 1], tris[t + 2]];
     const on = ons[t / 3];
-    const crosses = on && tri.some((id) => value[id] > 0) && tri.some((id) => value[id] < 0);
+    const crosses = on && tri.some((id) => val(id) > 0) && tri.some((id) => val(id) < 0);
     if (!crosses) {
       // A neighbour split along an edge of this one (where the seam stops):
       // take its new point in, so no crack opens there.
       const poly: number[] = [];
       for (let e = 0; e < 3; e++) { poly.push(tri[e]); const c = crossing.get(keyOf(tri[e], tri[(e + 1) % 3])); if (c !== undefined) poly.push(c); }
       // An edge lying on the line (both ends snapped onto it) is the seam's too.
-      if (on) for (let e = 0; e < 3; e++) { const a = tri[e], b = tri[(e + 1) % 3]; if (value[a] === 0 && value[b] === 0 && a !== b) edges.push([a, b]); }
+      if (on) for (let e = 0; e < 3; e++) { const a = tri[e], b = tri[(e + 1) % 3]; if (val(a) === 0 && val(b) === 0 && a !== b) edges.push([a, b]); }
       if (poly.length > 3) { earClip(poly); continue; }
       out.push(...tri);
       continue;
@@ -324,9 +327,9 @@ export function splitAlong(points: number[][], tris: number[], f: (p: number[]) 
     const pos: number[] = [], neg: number[] = [], cut: number[] = [];
     for (let e = 0; e < 3; e++) {
       const a = tri[e], b = tri[(e + 1) % 3];
-      if (value[a] >= 0) pos.push(a);
-      if (value[a] <= 0) neg.push(a);
-      if (value[a] === 0) cut.push(a);
+      if (val(a) >= 0) pos.push(a);
+      if (val(a) <= 0) neg.push(a);
+      if (val(a) === 0) cut.push(a);
       if (across(a, b)) { const c = pointOn(a, b); pos.push(c); neg.push(c); cut.push(c); }
     }
     fan(pos); fan(neg);

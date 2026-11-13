@@ -22,6 +22,8 @@ const STEP = 0.004;
 const END_TO_EDGE = 0.025;
 /** Points each side a curve's facing is averaged over (STEP apart). */
 const NORMAL_WINDOW = 6;
+/** Points each side its move onto the surface is averaged over: about two triangles. */
+const OFFSET_WINDOW = 6;
 
 /** Each line, and its mirror (named L and R) where it has one. */
 export function draftLines(lines: GarmentCurve[] | undefined): GarmentCurve[] {
@@ -106,7 +108,23 @@ export function surfaceCurve(line: GarmentCurve, points: number[][], tris: numbe
   if (!closed) fine.push(raw[raw.length - 1]);
   if (fine.length < 2) return null;
   const on = project(fine, points, tris);
-  const path = on.map((o) => o.p), normal = on.map((o) => o.n);
+  // How far each point moved onto the surface, smoothed along the line: from
+  // a line drawn off the surface (round the body, under a puffed garment) the
+  // nearest point jumped facet to facet, and the cut zigzagged at triangle
+  // scale. The drawn line's own corners stay; only the move is smoothed.
+  const moved = on.map((o, i) => sub(o.p, fine[i]));
+  const path = fine.map((q, i) => {
+    const acc = [0, 0, 0];
+    let w = 0;
+    for (let d = -OFFSET_WINDOW; d <= OFFSET_WINDOW; d++) {
+      let j = i + d;
+      if (closed) j = ((j % fine.length) + fine.length) % fine.length; else if (j < 0 || j >= fine.length) continue;
+      for (let c = 0; c < 3; c++) acc[c] += moved[j][c];
+      w++;
+    }
+    return q.map((v, c) => v + acc[c] / w);
+  });
+  const normal = on.map((o) => o.n);
   const through: [boolean, boolean] = [false, false];
   if (!closed) {
     // The open edges' points, to find an end that stops just short of one.
@@ -178,21 +196,49 @@ export function curveSlit(c: SurfaceCurve): { f: (p: number[]) => number; where:
     const nrm = unit(normal[i].map((v, k) => v + normal[(i + 1) % path.length][k])) ?? normal[i];
     side.push(unit(cross(t, nrm)) ?? [0, 0, 1]);
   }
-  // Bucketed segments, so a query looks at the few near it.
-  const cell = 0.03, key = (p: number[]) => `${Math.floor(p[0] / cell)},${Math.floor(p[1] / cell)},${Math.floor(p[2] / cell)}`;
-  const buckets = new Map<string, number[]>();
+  // Segments bucketed by their midpoints' cells; a query searches outward
+  // ring by ring until nothing unsearched can be nearer.
+  const cell = 0.03, at = (v: number) => Math.floor(v / cell), key = (x: number, y: number, z: number) => ((x + 1024) * 2048 + (y + 1024)) * 2048 + (z + 1024);
+  const buckets = new Map<number, number[]>();
+  let longest = 0;
   for (let i = 0; i < nSeg; i++) {
-    const m = path[i].map((v, k) => (v + path[(i + 1) % path.length][k]) / 2);
-    const [x, y, z] = m.map((v) => Math.floor(v / cell));
-    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
-      const k = `${x + dx},${y + dy},${z + dz}`;
-      (buckets.get(k) ?? buckets.set(k, []).get(k)!).push(i);
-    }
+    const a = path[i], b = path[(i + 1) % path.length];
+    longest = Math.max(longest, Math.sqrt(dist2(a, b)));
+    const k = key(at((a[0] + b[0]) / 2), at((a[1] + b[1]) / 2), at((a[2] + b[2]) / 2));
+    (buckets.get(k) ?? buckets.set(k, []).get(k)!).push(i);
   }
-  /** The nearest segment, the point on it, and how far past an open end it is (0 if not). */
-  const nearest = (p: number[]) => {
+  const lo = [0, 1, 2].map((k) => Math.min(...path.map((p) => at(p[k])))), hi = [0, 1, 2].map((k) => Math.max(...path.map((p) => at(p[k]))));
+  /**
+   * The nearest segment, the point on it, and how far past an open end it is
+   * (0 if not); none (i -1) if none is within `reach`. Every segment counts:
+   * a corner of a big triangle beyond a fixed search, taken as off the line,
+   * read as the positive side and the cut zigzagged.
+   */
+  const nearest = (p: number[], reach = Infinity) => {
+    // Further than `reach` from the curve's box: none.
+    for (let k = 0; k < 3; k++) if (p[k] < lo[k] * cell - reach || p[k] > (hi[k] + 1) * cell + reach) return { i: -1, d: Infinity, q: p, past: 0 };
+    const c = p.map(at);
+    let best = { i: -1, d: Infinity, q: p, past: 0 };
+    // Past the curve's own box by r cells, every segment has been searched.
+    const rMax = Math.max(...[0, 1, 2].map((k) => Math.max(c[k] - lo[k], hi[k] - c[k]))) + 1;
+    for (let r = 0; r <= rMax; r++) {
+      const near: number[] = [];
+      for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) !== r) continue;
+        const got = buckets.get(key(c[0] + dx, c[1] + dy, c[2] + dz));
+        if (got) near.push(...got);
+      }
+      if (near.length) { const s = scan(p, near); if (s.d < best.d) best = s; }
+      // Any segment not yet searched has its midpoint over r cells off.
+      const unseen = r * cell - longest / 2;
+      if (best.d <= unseen) return best;
+      if (unseen > reach) return { i: -1, d: Infinity, q: p, past: 0 };
+    }
+    return best;
+  };
+  const scan = (p: number[], near: number[]) => {
     let bi = -1, bd = Infinity, bq = p, past = 0;
-    for (const i of buckets.get(key(p)) ?? []) {
+    for (const i of near) {
       const a = path[i], b = path[(i + 1) % path.length], ab = sub(b, a), l2 = dot(ab, ab);
       const raw = l2 > 0 ? dot(sub(p, a), ab) / l2 : 0, u = Math.max(0, Math.min(1, raw));
       const q = a.map((v, k) => v + ab[k] * u), d = dist2(p, q);
@@ -212,9 +258,9 @@ export function curveSlit(c: SurfaceCurve): { f: (p: number[]) => number; where:
     return v === 0 ? 1e-9 : v;
   };
   const where = (centroid: number[], corners: number[][]) => {
-    const n = nearest(centroid);
-    if (n.i < 0 || n.past > 1e-4) return false;
     const size = Math.max(...corners.map((a, k) => Math.sqrt(dist2(a, corners[(k + 1) % 3]))));
+    const n = nearest(centroid, 1.2 * size);
+    if (n.i < 0 || n.past > 1e-4) return false;
     return n.d < 1.2 * size;
   };
   return { f, where };

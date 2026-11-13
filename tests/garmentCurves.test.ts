@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { garmentShell } from '../src/utils/cloth/garmentShell';
-import { clampBodyForm, bodyLandmarks } from '../src/utils/cloth/bodyForm';
+import { clampBodyForm, bodyLandmarks, bodyFormSection } from '../src/utils/cloth/bodyForm';
 import type { GarmentCurve, GarmentDraft } from '../src/types/cloth';
 import { penCurve } from '../src/utils/cloth/garmentCurves';
 
@@ -79,4 +79,30 @@ describe('curves drawn on a garment', () => {
     expect(across.mirror).toBeUndefined();
     expect(penCurve([[0, 0, 1], [0.001, 0, 1]], 'seam', false, [])).toBeNull();
   });
+  it('sews a ring drawn well inside a loose garment as one smooth closed seam', () => {
+    // Round the body at a height, on the skin: the garment stands off it by its
+    // ease and its puffing, so every point lands on the surface from inside.
+    // It used to land facet to facet (a sawtooth seam) and, past the reach of a
+    // fixed search, read big triangles' corners as off the line (seams doubled).
+    const z = L.waistZ + 0.08, q = bodyFormSection(form, z), n = q.radii.length;
+    const pts = Array.from({ length: 32 }, (_, k): [number, number, number] => {
+      const a = (2 * Math.PI * k) / 32, f = (a / (2 * Math.PI)) * n, i = Math.floor(f) % n, u = f - Math.floor(f);
+      const r = q.radii[i] * (1 - u) + q.radii[(i + 1) % n] * u;
+      return [Math.cos(a) * r, q.centreY + Math.sin(a) * r, z];
+    });
+    const sh = shell([{ name: 'quilt', kind: 'seam', closed: true, points: pts }], { ease: 0.24, sculpt: [{ at: [0, -0.2, z + 0.05], radius: 0.08, amount: 0.02 }] } as Partial<GarmentDraft>);
+    const segs = sh.seams.filter((s) => s.name === 'quilt');
+    const adj = new Map<number, number[]>();
+    for (const { path: [a, b] } of segs) { (adj.get(a) ?? adj.set(a, []).get(a)!).push(b); (adj.get(b) ?? adj.set(b, []).get(b)!).push(a); }
+    // One loop: every point on it has two neighbours along it, and walking it visits all.
+    expect([...adj.values()].every((v) => v.length === 2)).toBe(true);
+    const start = segs[0].path[0], loop = [start];
+    for (let prev = -1, at = start; ;) { const next = adj.get(at)!.find((v) => v !== prev)!; if (next === start) break; loop.push(next); prev = at; at = next; }
+    expect(loop.length).toBe(adj.size);
+    // Smooth: no point up or down off the middle of its neighbours by more than a few mm
+    // (it hangs lower at the front than the back, so not level, but not toothed).
+    const zs = loop.map((i) => sh.points[i][2]);
+    const tooth = zs.map((v, k) => Math.abs(v - (zs[(k + zs.length - 1) % zs.length] + zs[(k + 1) % zs.length]) / 2));
+    expect(Math.max(...tooth)).toBeLessThan(0.003);
+  }, 120000);
 });
