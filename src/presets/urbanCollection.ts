@@ -192,9 +192,14 @@ const FRAY: [number, number][] = Array.from({ length: 73 }, (_, k) => {
  * (its back would have to cross its own middle), and stood in a point.
  */
 const HOOD_SIDE: [number, number][] = [
-  [0, 0], [0.22, 0],
-  // Fullest at the back of the head, then sweeping forward over the crown, with no corner to stand up in a point.
-  [0.265, -0.055], [0.295, -0.13], [0.305, -0.21], [0.285, -0.285], [0.235, -0.34], [0.165, -0.372], [0.095, -0.38], [0.035, -0.367], [0, -0.345],
+  // Its neck edge its share of the hoodie's neckline (0.73 m round, each side
+  // 46% of it); shorter, it was sewn in the middle of its share and the hood
+  // stood open at the nape.
+  [0, 0], [0.34, 0],
+  // Up the back from the nape, leaning in to the back of the head, fullest
+  // there, then sweeping forward over the crown a couple of centimetres
+  // above the head (taller, the spare cloth stood up in a point).
+  [0.335, -0.06], [0.32, -0.13], [0.305, -0.2], [0.282, -0.268], [0.235, -0.32], [0.168, -0.35], [0.1, -0.358], [0.04, -0.348], [0, -0.328],
 ];
 const HOOD_TOP = HOOD_SIDE.length - 1;
 /** The other side: mirrored, run the other way round, so its neck edge runs from the nape to the front as the neckline does there. */
