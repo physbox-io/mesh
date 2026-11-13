@@ -8,7 +8,7 @@
  * Tacks pull both ways, so a belt drawn tight takes the garment in.
  */
 
-import type { ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentPocket, GarmentTrim } from '../../types/cloth';
+import type { ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentPocket, GarmentTrim } from '../../types/cloth';
 import { meshOutline } from './clothMesh';
 
 /** A panel of the garment as the add-ons see it: flat, by particle. */
@@ -50,10 +50,14 @@ export interface AddOnPiece {
   /** Points sewn to a garment particle where they start (a button stand's edge to its front's). */
   stitches?: { local: number; particle: number; /** Closed over the sew time from where they start, not at once. */ sew?: boolean }[];
   trims?: { trim: GarmentTrim; local: number }[];
+  /** Its fabric's properties changed from its material's. */
+  materialOverrides?: Partial<ClothMaterial>;
   /** Starts lifted off the garment, to fall onto it before it is first drawn. */
   drop?: boolean;
   /** Printed on it, its own print (not the garment's). */
   pattern?: ClothPatternPrint;
+  /** Its points sewn to another piece's (by name, its point `at`) over the sew time: pieces sewn together. */
+  joinTo?: { local: number; piece: string; at: number }[];
   /** Its own points sewn together over the sew time (a fold sewn shut). */
   selfStitches?: [number, number][];
   /**

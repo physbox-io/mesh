@@ -19,31 +19,7 @@ import { CLOTH_THICKNESS } from '../../utils/cloth/xpbd';
 import { acquirePrintTexture } from './clothPrintTexture';
 import { useClothSculpt } from './useClothSculpt';
 import { weaveTexture } from './clothWeaveTexture';
-
-/** A unit trim of each kind, its base on the cloth and its height up +y (turned to the surface normal), scaled by the trim's size. */
-const TRIM_GEOMETRY = {
-  stud: () => new THREE.ConeGeometry(0.5, 0.55, 10).translate(0, 0.27, 0),
-  button: () => new THREE.CylinderGeometry(0.5, 0.5, 0.15, 14).translate(0, 0.08, 0),
-  buttonhole: () => new THREE.BoxGeometry(1.1, 0.07, 0.26).translate(0, 0.04, 0),
-  bead: () => new THREE.SphereGeometry(0.5, 10, 8).translate(0, 0.4, 0),
-  // Low, as a zip's teeth are: half their width tall, they stood through what lay over them.
-  zipper: () => new THREE.BoxGeometry(0.9, 0.25, 0.9).translate(0, 0.125, 0),
-  buckle: () => {
-    const outer = new THREE.Shape();
-    const w = 0.62, h = 0.46, iw = 0.40, ih = 0.27;
-    outer.moveTo(-w, -h); outer.lineTo(w, -h); outer.lineTo(w, h); outer.lineTo(-w, h); outer.closePath();
-    const hole = new THREE.Path();
-    hole.moveTo(-iw, -ih); hole.lineTo(iw, -ih); hole.lineTo(iw, ih); hole.lineTo(-iw, ih); hole.closePath();
-    outer.holes.push(hole);
-    return new THREE.ExtrudeGeometry(outer, {
-      depth: 0.14,
-      bevelEnabled: true,
-      bevelThickness: 0.025,
-      bevelSize: 0.025,
-      bevelSegments: 2,
-    }).rotateX(-Math.PI / 2);
-  },
-};
+import { useClothTrims } from './clothTrims';
 
 /** Stitched points further apart than this are still being sewn, and drawn where they are. */
 const MEET = 0.03;
@@ -136,27 +112,8 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
     return g;
   }, [flex, N, pattern]);
   const scratch = useMemo(() => ({ p: new Float32Array(3 * N), n: new Float32Array(3 * N) }), [N]);
-  // Trims ride on the cloth: one instanced mesh per kind, placed on their
-  // vertices along the surface normal every time the cloth is drawn.
-  const trimMeshes = useMemo(() => {
-    const out: { items: NonNullable<FlexInfo['trims']>; mesh: THREE.InstancedMesh }[] = [];
-    const byKind = new Map<string, NonNullable<FlexInfo['trims']>>();
-    for (const t of flex.trims ?? []) (byKind.get(t.kind) ?? byKind.set(t.kind, []).get(t.kind)!).push(t);
-    for (const [kind, items] of byKind) {
-      const geom = (TRIM_GEOMETRY[kind as keyof typeof TRIM_GEOMETRY] ?? TRIM_GEOMETRY.stud)();
-      const c = items[0].rgba;
-      const isMatte = kind === 'button' || kind === 'buttonhole';
-      const mat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(c[0], c[1], c[2]), metalness: isMatte ? 0 : 0.9, roughness: isMatte ? 0.5 : 0.3 });
-      const mesh = new THREE.InstancedMesh(geom, mat, items.length);
-      mesh.frustumCulled = false; mesh.castShadow = true;
-      // Hidden until placed: a new InstancedMesh is all identity matrices, which
-      // draws every trim at full unit size at the origin, a metre-wide box.
-      mesh.visible = false;
-      out.push({ items, mesh });
-    }
-    return out;
-  }, [flex]);
-  useEffect(() => () => { for (const { mesh } of trimMeshes) { mesh.geometry.dispose(); (mesh.material as THREE.Material).dispose(); } }, [trimMeshes]);
+  // Trims ride on the cloth (clothTrims), placed from it each time it is drawn.
+  const trims = useClothTrims(flex);
   useEffect(() => () => geometry.dispose(), [geometry]);
   // The fabric's look: leather and taffeta take a shine, velvet and knits a
   // soft sheen; one matte shading for all made a leather jacket a sweater.
@@ -238,26 +195,7 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
     pos.needsUpdate = true;
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
-    const dummy = new THREE.Object3D(), nv = new THREE.Vector3(), tx = new THREE.Vector3(), tz = new THREE.Vector3(), basis = new THREE.Matrix4();
-    for (const { items, mesh } of trimMeshes) {
-      items.forEach((t, i) => {
-        const j = 3 * t.particle, l = Math.hypot(n[j], n[j + 1], n[j + 2]) || 1;
-        nv.set(n[j] / l, n[j + 1] / l, n[j + 2] / l);
-        // Orient local +Y along the outward normal, local +Z up the body, and local +X horizontally along the cloth.
-        tz.set(0, 0, 1).addScaledVector(nv, -nv.z);
-        if (tz.lengthSq() < 1e-6) tz.set(0, 1, 0).addScaledVector(nv, -nv.y);
-        tz.normalize();
-        tx.crossVectors(nv, tz).normalize();
-        basis.makeBasis(tx, nv, tz);
-        dummy.position.set(p[j] + nv.x * h, p[j + 1] + nv.y * h, p[j + 2] + nv.z * h);
-        dummy.quaternion.setFromRotationMatrix(basis);
-        dummy.scale.setScalar(t.size);
-        dummy.updateMatrix();
-        mesh.setMatrixAt(i, dummy.matrix);
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.visible = true;
-    }
+    trims.place(p, n, h);
   };
   // A layout effect, so the new geometry is filled in the commit that made it.
   // Any rebuild hands this a new flex, and from a passive effect a frame could
@@ -286,7 +224,7 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
     <>
       <mesh geometry={geometry} material={material} frustumCulled={false} castShadow receiveShadow onClick={onClick} {...sculpt.handlers} />
       {sculpt.overlay}
-      {trimMeshes.map(({ mesh }, i) => <primitive key={i} object={mesh} />)}
+      {trims.objects.map((o, i) => <primitive key={i} object={o} />)}
     </>
   );
 }

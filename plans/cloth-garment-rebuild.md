@@ -529,3 +529,77 @@ garments, (4) an open material editor. Presets stay as on-ramps.
   - trims and rods along a curve by name, which should work since curve seams and edges carry the name, but are
     untested;
   - MCP docs.
+
+### Session 10d: sewn-on pieces (step 3), per-piece material, arrangement, urban collection preset
+
+- **Sewn-on pieces.** `GarmentDraft.attached: GarmentAttachment[]` is any outline sewn along a named garment line,
+  in `utils/cloth/garmentAttached.ts`.
+  - `sewn` gives the stretch of the outline that is sewn.
+  - `span` is a fraction of the line. On closed lines it starts at the front-most point and runs toward +x, and a
+    span from more to less wraps across the front.
+  - `repeat`; a sewn side shorter than its share is sewn at its own length, a longer one is gathered.
+  - `joins` sew stretches of its own outline, or another piece's with `with`. The hood is two sides sewn along a
+    curved back seam; a one-piece folded hood cannot round the back of the head.
+  - `pattern` (its own print) and `materialOverrides` (its own fabric).
+- **Start placement, in order.**
+  1. Lie it on the garment with small per-point lifts (up to 6 cm, 3% of points may stray), tacked.
+  2. Else swing it out about its line.
+  3. Else move it out as a whole until clear of the garment and the form, then sew it in over the sew time.
+  - Choice by least energy: of hanging and swung out (0–90°), the start with the least bending (the piece's own E
+    t³/12) plus weight, each relaxed to its cut lengths first. A stiff piece cut to stand (a cap's peak) starts
+    standing; a soft one hangs.
+  - Which side of the sewn edge the piece lies on is decided by inside-the-outline votes along the edge, not the
+    centroid (a deep crescent's centroid is on the wrong side).
+- **Arrangement (`ClothSpec.arrange`), the wearer's arrangement.**
+  - `ClothPull`: a point of a piece (by its pattern position) drawn to a place, optionally `via` a route, held with
+    zero inverse mass during the pull, then let go.
+  - `ClothTurn`: a sewn-on piece turned about its line (hood up 165°).
+  - UI: Garment card ▸ Arrange (`ClothArrangePanel.tsx`), with drag-to-pull in the viewport (`useClothSculpt`,
+    tool `arrange`) and turn sliders per sewn-on piece.
+  - The earlier `turn`/`pressed` options on the attachment were removed (the user said they were not generic).
+- **Pre-sew (xpbd `settleNow`).** Cloth that starts apart, lifted, or arranged is run before the first draw. Only
+  the smaller piece of each open stitch, plus dropped and pulled pieces, moves; everything else is held still.
+  - Steps are 1/200 s, then the final rest is at the scene's own step (stiff pieces sag at long steps).
+  - Speed is capped so nothing tunnels.
+  - Stitches that were held still finish over their sew time instead of snapping shut.
+- **Solver.** Bending is solved in every stretch pass (it was the first pass only), and there are bending stencils
+  across tacked seams at the piece's own stiffness.
+- **Fabric normal maps** (`components/scene/clothWeaveTexture.ts`): knit, plain weave, twill, ripstop and leather
+  grain, laid by the flat pattern in metres (`uv1`).
+- **Drawn curves:** normals smoothed along the curve (cuts came out toothed).
+- **Zip teeth** are drawn low.
+- **Preset `urban_collection`** (`src/presets/urbanCollection.ts`, in PRESETS and PRESET_SHELF):
+  - puffer (quilting curves plus sculpt, stand collar, zip), canvas shorts with a belt, a neckerchief (plain cloth
+    wrapped round the neck, layer 0 under the puffer), and a structured cap whose peak is drafted to the band's
+    front curvature;
+  - hoodie with a two-piece hood turned up, drawstrings and a kangaroo pocket; ankle cut-offs with an irregular
+    `FRAY` hem; a leather bag with a gusset, clasp and handles over the forearm.
+  - Rendered headless with `scratchpad/render.mjs` (Playwright on 5186).
+- **Not yet:**
+  - UI to add sewn-on pieces (presets and SVG import), and UI for per-piece `materialOverrides` (step 4);
+  - MCP docs for attached/arrange/curves/sculpt;
+  - the `untangle` and MEASURE-ONLY switches;
+  - scratch tests `tests/_*.test.ts`.
+
+### Session 10e: general features — continuous trims, stitch lines, marked lines, fastenings
+
+- **Trims** are placed exactly along a line, between the cloth's points (`toward`, `t`), finer than the mesh. They
+  carry `offset` rows (into the cloth from an edge; into one consistent side of a seam), a `run` id, and `end` (the
+  top of a fastened zip).
+  - The renderer is now `components/scene/clothTrims.ts`, taken out of ClothLayer.
+  - A zip is tape (a ribbon per run, the cloth's colour darkened), teeth (the second side offset half a tooth, so
+    they interlock) and a slider with its pull at the top.
+  - `stitch` is a new kind: thread dashes along any line, oriented along it, in single or double rows.
+  - The flat pattern export leaves stitches out of the placement marks.
+  - The fastening of a zipped opening counts the points on both sides of each tooth.
+- **Marked lines:** `GarmentCurve.kind: 'line'` marks a named line without cutting (`GarmentShell.marks`, remapped
+  by `compact`). Every garment line lookup includes marks.
+- **Fastenings:** `ClothSpec.fasten: ClothFastening[]`, a point of one piece held to a point of another (by
+  pattern position), closed over the sew time, with an optional trim drawn at the first point. `pointOf` in
+  clothModel is shared with arrangement pulls.
+- **Preset:**
+  - the puffer's quilting is stitched and its hem double-stitched; shorts and cut-offs are topstitched, the
+    cut-offs with a gold J fly marked as a `line`;
+  - the hoodie hem and cuffs are coverstitched;
+  - the bag has a flap sewn across the back's top and fastened to the front with a clasp.
+- The existing trim tests in garments.test.ts pass (5/5).

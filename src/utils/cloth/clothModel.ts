@@ -47,6 +47,14 @@ export interface ClothTrim {
   particle: number;
   size: number;
   rgba: number[];
+  /** Between `particle` and this one, `t` of the way (finer than the cloth's points). */
+  toward?: number;
+  t?: number;
+  /** Set off across its line, metres. */
+  offset?: number;
+  /** Its run along a line, in order (a zip's tape is drawn through one), and whether it ends one (where a zip's slider sits). */
+  run?: number;
+  end?: boolean;
 }
 
 const TRIM_DEFAULTS: Record<GarmentTrim['kind'], { size: number; spacing: number; rgba: number[] }> = {
@@ -56,6 +64,8 @@ const TRIM_DEFAULTS: Record<GarmentTrim['kind'], { size: number; spacing: number
   bead: { size: 0.006, spacing: 0.009, rgba: [0.9, 0.84, 0.45, 1] },
   zipper: { size: 0.004, spacing: 0.005, rgba: [0.8, 0.8, 0.84, 1] },
   buckle: { size: 0.038, spacing: 1, rgba: [0.82, 0.78, 0.65, 1] },
+  // Topstitching: a dash of thread `size` long every `spacing`.
+  stitch: { size: 0.0032, spacing: 0.0048, rgba: [0.86, 0.68, 0.32, 1] },
 };
 
 /**
@@ -96,32 +106,78 @@ function chainLineRuns(lines: { name: string; path: number[] }[], along: string)
   return out;
 }
 
+/** A trim placed on a line: at `point`, or `t` of the way on to `toward`; its row's offset, its run, and whether it ends it. */
+interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean }
+
+let trimRuns = 0;
+
 /**
  * Where a garment's trims sit: the lines named (`cuff` takes both cuffs)
- * chained into runs, and along each a point every `spacing`, at the run's
- * own point nearest it (a zipper's teeth at every point). Shell point
- * indices, with the trim they carry.
+ * chained into runs, and along each one every `spacing`, exactly there,
+ * between the run's points (teeth and stitches far finer than the cloth's
+ * points); a row of them at each of its offsets across the line. A fastened
+ * zip's run ends at its top, where its slider is. Shell point indices.
  */
-function trimPoints(points: number[][], lines: { name: string; path: number[] }[], trims: GarmentTrim[]): { trim: GarmentTrim; point: number }[] {
-  const out: { trim: GarmentTrim; point: number }[] = [];
+function trimPoints(points: number[][], lines: { name: string; path: number[] }[], trims: GarmentTrim[], tris: number[] = []): TrimPlace[] {
+  const out: TrimPlace[] = [];
+  // Which side of a run the cloth is on (an edge's one side; a seam's, one of
+  // them, the same all along): an offset is into it. Left going along the
+  // line instead, a hem's topstitching came out in the air past its edge.
+  const n = points.length, opposite = new Map<number, number>();
+  for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) {
+    const a = tris[t + e], b = tris[t + ((e + 1) % 3)], o = tris[t + ((e + 2) % 3)];
+    opposite.set(a * n + b, o); opposite.set(b * n + a, o);
+  }
+  const intoCloth = (run: number[]) => {
+    for (let k = 1; k < run.length; k++) {
+      const a = run[k - 1], b = run[k], o = opposite.get(a * n + b);
+      if (o === undefined) continue;
+      const pa = points[a], ab = [0, 1, 2].map((c) => points[b][c] - pa[c]), ao = [0, 1, 2].map((c) => points[o][c] - pa[c]);
+      // The triangle's own normal, wound outward, as the cloth's normal is drawn.
+      const t0 = tris.findIndex((_, i) => i % 3 === 0 && [tris[i], tris[i + 1], tris[i + 2]].includes(a) && [tris[i], tris[i + 1], tris[i + 2]].includes(b) && [tris[i], tris[i + 1], tris[i + 2]].includes(o));
+      if (t0 < 0) continue;
+      const [q0, q1, q2] = [points[tris[t0]], points[tris[t0 + 1]], points[tris[t0 + 2]]];
+      const u = [0, 1, 2].map((c) => q1[c] - q0[c]), v = [0, 1, 2].map((c) => q2[c] - q0[c]);
+      const nrm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const side = [nrm[1] * ab[2] - nrm[2] * ab[1], nrm[2] * ab[0] - nrm[0] * ab[2], nrm[0] * ab[1] - nrm[1] * ab[0]];
+      return side[0] * ao[0] + side[1] * ao[1] + side[2] * ao[2] >= 0 ? 1 : -1;
+    }
+    return 1;
+  };
   for (const trim of trims) {
-    for (const { run } of chainLineRuns(lines, trim.along)) {
-      if (trim.kind === 'zipper') { for (const i of run) out.push({ trim, point: i }); continue; }
-      const spacing = trim.spacing ?? TRIM_DEFAULTS[trim.kind].spacing;
+    const spacing = trim.spacing ?? TRIM_DEFAULTS[trim.kind].spacing;
+    const offsets = Array.isArray(trim.offset) ? trim.offset : [trim.offset ?? 0];
+    chainLineRuns(lines, trim.along).forEach(({ run }, side) => {
       const at = [0];
       for (let k = 1; k < run.length; k++) { const a = points[run[k - 1]], b = points[run[k]]; at.push(at[k - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2])); }
       const total = at[at.length - 1];
       const count = total > 0 ? Math.max(1, Math.floor(total / spacing)) : 0;
-      const used = new Set<number>();
-      for (let j = 0; j < count; j++) {
-        const want = (total - (count - 1) * spacing) / 2 + j * spacing;
-        let best = 0;
-        for (let k = 1; k < run.length; k++) if (Math.abs(at[k] - want) < Math.abs(at[best] - want)) best = k;
-        if (!used.has(run[best])) { used.add(run[best]); out.push({ trim, point: run[best] }); }
+      // Its slider at the top of the run.
+      const topLast = points[run[run.length - 1]][2] >= points[run[0]][2], into = intoCloth(run);
+      for (const offset0 of offsets) {
+        const offset = offset0 * into;
+        const id = trimRuns++;
+        for (let j = 0; j < count; j++) {
+          // A zip's two sides interlock: the second's teeth half a tooth along from the first's.
+          const want = (total - (count - 1) * spacing) / 2 + j * spacing + (trim.kind === 'zipper' && side % 2 ? spacing / 2 : 0);
+          let k = 1;
+          while (k < run.length - 1 && at[k] < want) k++;
+          const seg = at[k] - at[k - 1], t = seg > 0 ? Math.max(0, Math.min(1, (want - at[k - 1]) / seg)) : 0;
+          const end = trim.kind === 'zipper' && trim.fastened !== false && (topLast ? j === count - 1 : j === 0);
+          out.push({ trim, point: run[k - 1], toward: run[k], t, offset, run: id, end });
+        }
       }
-    }
+    });
   }
   return out;
+}
+
+/** A placed trim as drawn, its points by `localOf` (null where one of them is not on the piece). */
+function placedTrim(pl: TrimPlace, localOf: (g: number) => number | undefined, kind = pl.trim.kind, size = pl.trim.size ?? TRIM_DEFAULTS[pl.trim.kind].size, rgba = pl.trim.rgba ?? TRIM_DEFAULTS[pl.trim.kind].rgba): ClothTrim | null {
+  const particle = localOf(pl.point);
+  if (particle === undefined) return null;
+  const toward = pl.toward === undefined ? undefined : localOf(pl.toward);
+  return { kind, particle, size, rgba, ...(toward !== undefined && pl.t ? { toward, t: pl.t } : {}), ...(pl.offset ? { offset: pl.offset } : {}), run: pl.run, ...(pl.end ? { end: true } : {}) };
 }
 
 
@@ -170,6 +226,8 @@ export interface ClothModel {
   name: string;
   /** Particles that start lifted off what they hang on, let fall into place before the cloth is first drawn. */
   drop?: number[];
+  /** Particles drawn to places (world) before the cloth is first drawn, then let go: its arrangement (ClothSpec.arrange). */
+  pulls?: { particle: number; to: number[]; via?: number[][] }[];
   material: ClothMaterial;
   /** Worn over every cloth of a lower layer (clothLayers). */
   layer: number;
@@ -506,8 +564,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     for (const sm of shell.seams) if (sm.open) for (const i of sm.path) openPoints.add(i);
     const claimed = new Map<number, number>();
     const openFirst = new Map<number, number>(), openSecond = new Map<number, number>();
-    const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams], settings.trims ?? []);
-    const trimAt = new Map<number, { trim: GarmentTrim; point: number }[]>();
+    const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams, ...(shell.marks ?? [])], settings.trims ?? [], shell.tris);
+    const trimAt = new Map<number, TrimPlace[]>();
     for (const t of trimList) (trimAt.get(t.point) ?? trimAt.set(t.point, []).get(t.point)!).push(t);
     // Negative ease: the pattern cut narrower than the form, by the ease
     // over the girth under each point (a band's own ease at its top edge,
@@ -626,16 +684,20 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       // The wearer's side this panel is on (+x their left), for which front laps over at an opening.
       const side = piece.points.reduce((acc, g) => acc + (shell.points[g]?.[0] ?? 0), 0) > 0 ? 'left' : 'right';
       panelSide.push(side);
-      piece.points.forEach((g, local) => {
-        for (const { trim } of trimAt.get(g) ?? []) {
+      const localOfG = new Map(piece.points.map((g, local) => [g, local]));
+      piece.points.forEach((g) => {
+        for (const pl of trimAt.get(g) ?? []) {
+          const { trim } = pl;
           // A button on an opening: its hole on the front that laps over, the button on the other;
           // with a stand, both go on the stand (sewn on below).
           const buttoned = trim.kind === 'button' && openPoints.has(g);
           if (buttoned && !asPieces && standWidth(trim) > 0) continue;
           if (buttoned && side === (trim.lap ?? 'right')) {
-            trims.push({ kind: 'buttonhole', particle: local, size: (trim.size ?? TRIM_DEFAULTS.button.size) * 1.15, rgba: TRIM_DEFAULTS.buttonhole.rgba });
+            const tr = placedTrim(pl, (q) => localOfG.get(q), 'buttonhole', (trim.size ?? TRIM_DEFAULTS.button.size) * 1.15, TRIM_DEFAULTS.buttonhole.rgba);
+            if (tr) trims.push(tr);
           } else {
-            trims.push({ kind: trim.kind, particle: local, size: trim.size ?? TRIM_DEFAULTS[trim.kind].size, rgba: trim.rgba ?? TRIM_DEFAULTS[trim.kind].rgba });
+            const tr = placedTrim(pl, (q) => localOfG.get(q));
+            if (tr) trims.push(tr);
           }
         }
       });
@@ -686,7 +748,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // Boning along its lines, resting as modelled; drawn on the pieces as channels.
     const rodRuns: number[][] = [];
     for (const rod of settings.rods ?? []) {
-      for (const line of chainLineRuns([...shell.edges, ...shell.seams], rod.along)) {
+      for (const line of chainLineRuns([...shell.edges, ...shell.seams, ...(shell.marks ?? [])], rod.along)) {
         // Cut to its heights: the stretches of the line between them.
         const inside = (p: number) => !rod.z || (shell.points[p][2] >= rod.z[0] && shell.points[p][2] <= rod.z[1]);
         const pieces: { run: number[]; closed: boolean }[] = [];
@@ -714,7 +776,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       addSeamBends(x0, tris, bends, bends);
     }
     // Fastened buttons, buckles or a zip along an open seam hold the two sides together.
-    for (const { trim, point: g } of trimList) {
+    // Each point a fastening sits at or between (a zip's teeth fall between the line's points).
+    const fastenAt = new Map<number, GarmentTrim>();
+    for (const pl of trimList) { fastenAt.set(pl.point, pl.trim); if (pl.toward !== undefined && pl.trim.kind === 'zipper') fastenAt.set(pl.toward, pl.trim); }
+    for (const [g, trim] of fastenAt) {
       if ((trim.kind !== 'button' && trim.kind !== 'buckle' && trim.kind !== 'zipper') || !openPoints.has(g) || trim.fastened === false) continue;
       if (asPieces) {
         const list = copies.get(g);
@@ -725,7 +790,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       }
     }
     // Elastic in its casings along the garment's lines.
-    for (const el of settings.elastics ?? []) for (const { run, closed } of chainLineRuns([...shell.edges, ...shell.seams], el.along)) addElasticRun(run, closed, el);
+    for (const el of settings.elastics ?? []) for (const { run, closed } of chainLineRuns([...shell.edges, ...shell.seams, ...(shell.marks ?? [])], el.along)) addElasticRun(run, closed, el);
     // Sewn on: pockets on their panels; a belt round it and its loops.
     const spacing = spec.spacing ?? DEFAULT_CLOTH_SPACING;
     const addOns = pocketPieces(settings.pockets ?? [], hostPanels, x0, spacing, colour);
@@ -738,7 +803,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       const at = b.at ?? (along ? undefined : L.waistZ);
       const wornX = shell.points.map(toWorld);
       const wornNormal = (i: number) => shellNormals[i];
-      const lines = along ? chainLineRuns([...shell.edges, ...shell.seams], along) : [];
+      const lines = along ? chainLineRuns([...shell.edges, ...shell.seams, ...(shell.marks ?? [])], along) : [];
       const paths = beltPaths({ ...b, at: at === undefined ? undefined : toWorld([0, 0, at])[2] }, b.width ?? 0.032, lines, shell.tris, (i) => shell.part?.[i] ?? 'skin', wornX, wornNormal);
       addOns.push(...beltPieces(b, loopCount, paths, shell.tris, wornPanels, hostPanels, x0, wornX, wornNormal, spacing, colour, !!beltSpec && !asPieces, addOns));
     }
@@ -804,8 +869,9 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         for (const f of g.faces) formTris.push(base + f);
       }
       const formNormals = vertexNormals(formPts, formTris, new THREE.Matrix4());
-      addOns.push(...attachedPieces(settings.attached, (along) => chainLineRuns([...shell.edges, ...shell.seams], along), x0, shell.tris, (i) => shellNormals[i], spacing, colour, addOns,
-        [{ x: formPts, tris: formTris, normalOf: (i) => formNormals[i] }]));
+      const turns = new Map((spec.arrange ?? []).flatMap((a) => ('turn' in a ? [[a.piece, a.turn] as [string, number]] : [])));
+      addOns.push(...attachedPieces(settings.attached, (along) => chainLineRuns([...shell.edges, ...shell.seams, ...(shell.marks ?? [])], along), x0, shell.tris, (i) => shellNormals[i], spacing, colour, addOns,
+        [{ x: formPts, tris: formTris, normalOf: (i) => formNormals[i] }], turns, materialName));
     }
     overlayTrisStart = tris.length;
     const placed = new Map<string, (local: number) => number>();
@@ -819,7 +885,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       const particleOf = (local: number) => sharedAt.get(local) ?? own.get(local)!;
       placed.set(piece.name, particleOf);
       if (sharedAt.size) anyShared = true;
-      const pm = CLOTH_MATERIALS[piece.material ?? materialName] ?? material;
+      const pm = { ...(CLOTH_MATERIALS[piece.material ?? materialName] ?? material), ...(piece.materialOverrides ?? {}) };
       const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bend = (pm.young * pm.thickness ** 3) / (material.young * material.thickness ** 3);
       // Cut short of where it starts, if drawn in: its flat length is its rest.
       const uv = piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]);
@@ -840,6 +906,24 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         mass[pi] += m; mass[pj] += m; mass[pl] += m;
       }
       if (material.bending) addBends(piece.tris, uv, particleOf, bends, bend, piece.pressed ? piece.start.map((q, i) => (sharedAt.has(i) ? x0[particleOf(i)] : q)) : undefined);
+      // Across the seam where it is tacked on: bending from its first row of
+      // triangles into the cloth under it, at its own stiffness, resting at
+      // the angle it starts at. Tacked points alone hinge freely, and a stiff
+      // piece (a cap's peak) folded down at its seam however stiff it was.
+      if (material.bending && piece.tacks.length) {
+        for (let t = 0; t < piece.tris.length; t += 3) for (let e = 0; e < 3; e++) {
+          const a = piece.tris[t + e], b = piece.tris[t + ((e + 1) % 3)], o = piece.tris[t + ((e + 2) % 3)];
+          const ta = tackOf.get(a), tb = tackOf.get(b);
+          if (!ta || !tb || ta.lift || tb.lift || tackOf.has(o)) continue;
+          // The host's point under the seam furthest from it, on the far side from the piece.
+          const pa = piece.start[a], pb = piece.start[b], ab = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]], l2 = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2;
+          if (l2 < 1e-12) continue;
+          const offLine = (q: number[]) => { const r = [q[0] - pa[0], q[1] - pa[1], q[2] - pa[2]], k = (r[0] * ab[0] + r[1] * ab[1] + r[2] * ab[2]) / l2; return Math.hypot(r[0] - k * ab[0], r[1] - k * ab[1], r[2] - k * ab[2]); };
+          const host = [...ta.tri, ...tb.tri].reduce((best, h) => (offLine(x0[h]) > offLine(x0[best]) ? h : best), ta.tri[0]);
+          if (offLine(x0[host]) < 1e-4) continue;
+          addStencil([particleOf(a), particleOf(b), particleOf(o), host], [pa, pb, piece.start[o], x0[host]], bends, bend);
+        }
+      }
       addLimits(piece.tris, uv, particleOf, limits);
       for (const tk of piece.tacks) tacks.push({ particle: particleOf(tk.local), tri: tk.tri, bary: tk.bary, offset: tk.offset, lift: tk.lift });
       // Drawn in, it gathers the cloth under it, which bunches rather than squeezes (as under an elastic).
@@ -858,6 +942,11 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // Where an add-on runs on from the garment through shared points (a lapel
     // off its roll line, a collar off the neckline), the cloth bends there as
     // it starts: pressed.
+    // Pieces sewn to each other, now all are placed.
+    for (const piece of addOns) for (const j of piece.joinTo ?? []) {
+      const a = placed.get(piece.name), b = placed.get(j.piece);
+      if (a && b) addStitch(a(j.local), b(j.at), sewTime);
+    }
     if (anyShared && material.bending) addSeamBends(x0, tris, bends, bends);
   }
 
@@ -882,7 +971,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       addLimits(m.tris, m.uv, particleOf, limits);
       const edgeLines = Object.entries(m.edgeVerts).map(([ename, path]) => ({ name: ename, path }));
       const trims: ClothTrim[] = p.trims?.length
-        ? trimPoints(m.start, edgeLines, p.trims).map(({ trim, point }) => ({ kind: trim.kind, particle: point, size: trim.size ?? TRIM_DEFAULTS[trim.kind].size, rgba: trim.rgba ?? TRIM_DEFAULTS[trim.kind].rgba }))
+        ? trimPoints(m.start, edgeLines, p.trims, m.tris).flatMap((pl) => placedTrim(pl, (q) => q) ?? [])
         : [];
       groups.push({
         name: `${name}__${p.name}`, rgba: p.rgba ?? [0.25, 0.5, 0.85, 1], material: p.material ?? materialName,
@@ -916,8 +1005,30 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
   const [limitPairs, limitRest] = limits.flat();
   const x = new Float64Array(x0.length * 3);
   x0.forEach((p, i) => { x[3 * i] = p[0]; x[3 * i + 1] = p[1]; x[3 * i + 2] = p[2]; });
+  // A point of it by its piece and where on the piece's flat pattern: the group, its point there.
+  const pointOf = (pt: { piece: string; at: [number, number] }): { group: ClothRenderGroup; local: number } | null => {
+    const grp = groups.find((g) => g.name === `${name}__${pt.piece}`);
+    if (!grp?.flat) return null;
+    let best = -1, bd = Infinity;
+    grp.flat.uv.forEach((q, k) => { const d = (q[0] - pt.at[0]) ** 2 + (q[1] - pt.at[1]) ** 2; if (d < bd) { bd = d; best = k; } });
+    return best >= 0 ? { group: grp, local: best } : null;
+  };
+  // Fastened: each pair held together, drawn closed over the sew time; what fastens them drawn on the first.
+  for (const fa of spec.fasten ?? []) {
+    const a = pointOf(fa.a), b = pointOf(fa.b);
+    if (!a || !b) continue;
+    addStitch(a.group.particles[a.local], b.group.particles[b.local], sewTime);
+    if (fa.trim) (a.group.trims ??= []).push({ kind: fa.trim.kind, particle: a.local, size: fa.trim.size ?? TRIM_DEFAULTS[fa.trim.kind].size, rgba: fa.trim.rgba ?? TRIM_DEFAULTS[fa.trim.kind].rgba });
+  }
+  // Its arrangement: each pull's point found on its piece's flat pattern.
+  const pulls: { particle: number; to: number[]; via?: number[][] }[] = [];
+  for (const pl of spec.arrange ?? []) {
+    if (!('at' in pl)) continue;
+    const pt = pointOf(pl);
+    if (pt) pulls.push({ particle: pt.group.particles[pt.local], to: toWorld(pl.to), ...(pl.via?.length ? { via: pl.via.map(toWorld) } : {}) });
+  }
   return {
-    name, ...(drop.length ? { drop } : {}), material, layer: spec.layer ?? 0, outward: !!spec.garment, selfCollide: spec.selfCollide !== false, sewTime,
+    name, ...(drop.length ? { drop } : {}), ...(pulls.length ? { pulls } : {}), material, layer: spec.layer ?? 0, outward: !!spec.garment, selfCollide: spec.selfCollide !== false, sewTime,
     x0: x, invMass: Float64Array.from(mass, (m) => (m > 0 ? 1 / m : 0)),
     tris, overlayTrisStart, edges: edgePairs, edgeRest, edgeMin, edgeStiffness: edges.scales(),
     elastics, elasticRest, elasticFlat, elasticAlpha,

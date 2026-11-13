@@ -7,8 +7,8 @@
  * it, and left free to fall as the cloth does.
  */
 
-import type { GarmentAttachment } from '../../types/cloth';
-import { meshOutline } from './clothMesh';
+import type { ClothMaterialName, GarmentAttachment } from '../../types/cloth';
+import { CLOTH_MATERIALS, meshOutline } from './clothMesh';
 import { heightOver, nearestTack, SEWN_OFF, type AddOnPiece, type AddOnTack } from './garmentAddOns';
 
 type V3 = number[];
@@ -16,15 +16,22 @@ const sub = (a: V3, b: V3) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const unit = (a: V3) => { const l = Math.hypot(a[0], a[1], a[2]); return l > 1e-12 ? [a[0] / l, a[1] / l, a[2] / l] : null; };
 
+/** Passes relaxing a start toward its cut lengths. */
+const RELAX_PASSES = 40;
+
 /** Clear of the garment where it starts lying over it, past the sewn edge. */
 const LIE_OFF = 0.006;
-const DOWN = [0, 0, -1], UP = [0, 0, 1];
-/** How far out of upright a piece turned up starts, as a slope (about 15 degrees). */
-const UP_LEAN = 0.27;
+const DOWN = [0, 0, -1];
 /** The finest a piece sewn on is meshed, metres. */
 const MIN_STEP = 0.008;
 /** The most a piece is lifted, point by point, to lie over what it hangs on; more, and it is moved clear and sewn on. */
 const LIFT_MAX = 0.06;
+/**
+ * Whether a piece may start laid on the garment, lifted point by point: off,
+ * as measured on a hem ruffle and a cape (3 and 28 crossings moved clear and
+ * sewn on; 50 and 150 laid on).
+ */
+const LAY_ON = false;
 /** The share of its points that may start not quite clear, for it to start laid on all the same. */
 const STRAY = 0.03;
 
@@ -142,10 +149,14 @@ function hostSurface(x: number[][], tris: number[], normalOf: (p: number) => num
  * runs of particles a line name picks (both of a pair), `x` the particles,
  * `hostTris` and `normalOf` the garment's surface, `below` what is sewn on
  * already (stacked over, not through), `clearOf` other surfaces to start
- * clear of (the body the garment is on).
+ * clear of (the body the garment is on), `turns` how far a piece (by name)
+ * is turned about its line as it is arranged (ClothTurn), degrees.
  */
-export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string) => { run: number[]; closed: boolean }[], x: number[][], hostTris: number[], normalOf: (p: number) => number[], spacing: number, colour: number[], below: AddOnPiece[] = [], clearOf: { x: number[][]; tris: number[]; normalOf: (p: number) => number[] }[] = []): AddOnPiece[] {
+export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string) => { run: number[]; closed: boolean }[], x: number[][], hostTris: number[], normalOf: (p: number) => number[], spacing: number, colour: number[], below: AddOnPiece[] = [], clearOf: { x: number[][]; tris: number[]; normalOf: (p: number) => number[] }[] = [], turns: Map<string, number> = new Map(), hostMaterial: ClothMaterialName = 'jersey'): AddOnPiece[] {
   const out: AddOnPiece[] = [];
+  // Each piece's stretches by point, for joins between pieces, made once both are.
+  const built = new Map<string, { stretch: (i: number, j: number) => number[]; n: number }>();
+  const later: { from: string; jn: NonNullable<GarmentAttachment['joins']>[number] }[] = [];
   for (const a of list) {
     if (a.outline.length < 3) continue;
     const n = a.outline.length;
@@ -168,25 +179,28 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
     const mesh = meshOutline(a.outline.map((q, k) => ({ id: `s${k}`, pts: [q, a.outline[(k + 1) % n]] })), step);
     const stretch = (i: number, j: number) => { const out: number[] = []; for (let k = i; k !== j; k = (k + 1) % n) out.push(...(out.length ? mesh.edgeVerts[`s${k}`].slice(1) : mesh.edgeVerts[`s${k}`])); return out; };
     const onSewn = new Set(stretch(i0, i1));
-    const up = a.turn === 'up', outward0 = a.turn === 'out';
+    const pm = { ...(CLOTH_MATERIALS[a.material ?? hostMaterial] ?? CLOTH_MATERIALS.jersey), ...(a.materialOverrides ?? {}) };
     // Its own stretches sewn together (a hood's crown, anything folded and sewn): paired by fraction along each.
     const selfStitches: [number, number][] = [];
+    built.set(a.name, { stretch, n });
     for (const jn of a.joins ?? []) {
+      if (jn.with) { later.push({ from: a.name, jn }); continue; }
       const ix = (v: number) => ((Math.round(v) % n) + n) % n;
-      const A = stretch(ix(jn.a[0]), ix(jn.a[1])), B0 = stretch(ix(jn.b[0]), ix(jn.b[1])), B = jn.reversed ? [...B0].reverse() : B0;
-      if (A.length < 2 || B.length < 2) continue;
-      const [long, short, flip] = A.length >= B.length ? [A, B, false] : [B, A, true];
-      const seen = new Set<string>();
-      long.forEach((v, k) => {
-        const w = short[Math.round((k / (long.length - 1)) * (short.length - 1))];
-        const key = `${v},${w}`;
-        if (v !== w && !seen.has(key)) { seen.add(key); selfStitches.push(flip ? [w, v] : [v, w]); }
-      });
+      const B0 = stretch(ix(jn.b[0]), ix(jn.b[1]));
+      for (const [v, w] of pairByFraction(stretch(ix(jn.a[0]), ix(jn.a[1])), jn.reversed ? [...B0].reverse() : B0)) if (v !== w) selfStitches.push([v, w]);
     }
-    // Which side of the sewn side the piece is on: toward the middle of its outline.
-    const mid = a.outline.reduce((acc, q) => [acc[0] + q[0] / n, acc[1] + q[1] / n], [0, 0]);
-    const probe = fromEdge(mid, sewnEdge, 1);
-    const flat = mesh.uv.map((q) => fromEdge(q, sewnEdge, probe.away >= 0 ? 1 : -1));
+    // Which side of the sewn side the piece is on: the side a step off it,
+    // along it, falls inside the outline (by most of its length). Toward the
+    // outline's middle instead, a deep crescent (a peak curved to a head) was
+    // laid out on the wrong side, into the head.
+    let votes = 0;
+    for (let k = 1; k < sewnEdge.length; k++) {
+      const p0 = sewnEdge[k - 1], p1 = sewnEdge[k], dx = p1[0] - p0[0], dy = p1[1] - p0[1], l = Math.hypot(dx, dy);
+      if (l < 1e-9) continue;
+      const m = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2], step = Math.min(1e-3, l / 4);
+      if (insideOutline([m[0] - (dy / l) * step, m[1] + (dx / l) * step], a.outline)) votes += l; else votes -= l;
+    }
+    const flat = mesh.uv.map((q) => fromEdge(q, sewnEdge, votes >= 0 ? 1 : -1));
     const surface = hostSurface(x, hostTris, normalOf);
     const others = clearOf.map((o) => hostSurface(o.x, o.tris, o.normalOf));
     runs.forEach(({ run, closed }, r) => {
@@ -218,10 +232,8 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           // off a flared hem: it starts lying near where it hangs); straight
           // down where the face is near level (a shoulder's top, where down
           // the face runs off along the shoulder).
-          // Turned up, leant out a little off the line: stood straight up it
-          // balanced there and never fell (unless what it is sewn into holds it up: a hood's crown round a head).
-          const lean = unit([L.n[0], L.n[1], 0]);
-          const down = outward0 ? L.n : up ? unit(UP.map((v, c) => v + UP_LEAN * (lean?.[c] ?? 0))) ?? UP : hang[2] < -0.45 ? hang : DOWN;
+          // Straight down; across the surface where the line itself runs more down than across.
+          const down = Math.abs(L.t[2]) < 0.7 ? DOWN : hang;
           const aside = whole ? L.t : chordDir;
           base.push([0, 1, 2].map((c) => L.p[c] + L.n[c] * SEWN_OFF + aside[c] * along + down[c] * away));
           lineAt.push(L);
@@ -244,8 +256,7 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
         // Out its own way, level, round the whole of a closed line (a ruffle
         // round a hem); the stretch's way on a stretch of one, so it moves as
         // one piece, undistorted.
-        // Turned up, each its own way too: it rises round what is above the line (a hood round a head).
-        const outward = lineAt.map((L) => (whole || up ? horizontal(L.n) : unit(mean)) ?? unit(mean) ?? L.n);
+        const outward = lineAt.map((L) => (whole ? horizontal(L.n) : unit(mean)) ?? unit(mean) ?? L.n);
         const lie = (q: number[]) => LIE_OFF + heightOver(q, [0, 0, 1], [...below, ...out]);
         // Far enough round to see a point deep inside (from a neck's side straight down is inside the chest, a long way from any surface).
         const clearAt = (q: number[]) => { const hit = surface(q, 0.4); if (hit && hit.h <= lie(hit.p)) return false; return others.every((o) => { const h = o(q, 0.4); return !h || h.h > LIE_OFF; }); };
@@ -266,10 +277,12 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           for (let d = 0; d <= LIFT_MAX + 1e-9; d += 0.004) if (clearAt(b.map((v, c) => v + radial[i][c] * d))) return d;
           return Infinity;
         });
+        // Arranged turned about its line (ClothTurn): started so, let settle.
+        const turned = turns.get(name) ?? turns.get(a.name);
         let lifted: number[][] | null = null;
         // A stray few that cannot be cleared so (by the garment's edge) do not stop it; the settle sees to them.
         const stray = need.filter((v) => !Number.isFinite(v)).length, few = Math.floor(STRAY * need.length);
-        if (!up && !outward0 && stray <= few) {
+        if (turned === undefined && stray <= few && LAY_ON) {
           for (let i = 0; i < need.length; i++) if (!Number.isFinite(need[i])) need[i] = LIFT_MAX;
           const nbr: number[][] = base.map(() => []);
           for (let t = 0; t < mesh.tris.length; t += 3) for (let e = 0; e < 3; e++) nbr[mesh.tris[t + e]].push(mesh.tris[t + ((e + 1) % 3)]);
@@ -278,10 +291,30 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           const at = onFace.map((b, i) => b.map((v, c) => v + radial[i][c] * lift[i]));
           if (at.filter((q, i) => !onSewn.has(i) && !clearAt(q)).length <= few) lifted = at;
         }
-        let swing = lifted ? 0 : -1;
-        if (!up && !outward0 && !lifted) for (let th = 0; th <= Math.PI / 2 + 1e-9; th += Math.PI / 30) if (base.every((_, i) => onSewn.has(i) || clearAt(swung(i, th)))) { swing = th; break; }
+        let swing = turned !== undefined ? (turned * Math.PI) / 180 : lifted ? 0 : -1;
+        if (!lifted && turned === undefined) for (let th = 0; th <= Math.PI / 2 + 1e-9; th += Math.PI / 30) if (base.every((_, i) => onSewn.has(i) || clearAt(swung(i, th)))) { swing = th; break; }
+        // Started as it would rest: of hanging and swung out about its line,
+        // whichever takes least energy to hold (bent, by its own stiffness;
+        // raised, by its weight). A soft piece hangs; a stiff one cut to stand
+        // (a cap's peak, a brim, an interfaced collar) starts standing, and
+        // the settle keeps it there. Started hanging, a peak sat jammed down
+        // over the eyes, too stiff to bend back up and nothing to make it.
+        if (turned === undefined && (lifted || swing >= 0)) {
+          // Each relaxed to its cut lengths first (its sewn side held): laid out
+          // from its line, a curved piece's corners came out folded, and every
+          // start read as bent.
+          const hangs = relaxed(lifted ?? base.map((_, i) => swung(i, swing)), mesh, onSewn);
+          let bestE = restEnergy(hangs, mesh.tris, pm), bestTh = -1, bestAt: number[][] | null = null;
+          for (let th = Math.max(swing, 0) + Math.PI / 12; th <= Math.PI / 2 + 1e-9; th += Math.PI / 12) {
+            const at = relaxed(base.map((_, i) => swung(i, th)), mesh, onSewn);
+            if (!at.every((q, i) => onSewn.has(i) || clearAt(q))) continue;
+            const e = restEnergy(at, mesh.tris, pm);
+            if (e < bestE) { bestE = e; bestTh = th; bestAt = at; }
+          }
+          if (bestTh >= 0 && bestAt) { lifted = bestAt; swing = bestTh; }
+        }
         let clear = 0;
-        if (swing < 0 && !outward0) while (clear < 0.6 && !base.every((b, i) => onSewn.has(i) || clearAt(b.map((v, c) => v + outward[i][c] * clear)))) clear += 0.01;
+        if (swing < 0) while (clear < 0.6 && !base.every((b, i) => onSewn.has(i) || clearAt(b.map((v, c) => v + outward[i][c] * clear)))) clear += 0.01;
         const start = lifted ?? (swing >= 0 ? base.map((_, i) => swung(i, swing)) : base.map((b, i) => b.map((v, c) => v + outward[i][c] * clear)));
         // Its sewn side on the line where it starts there; else stitched to the line's points and sewn on over the sew time.
         const tacks: AddOnTack[] = [], stitches: { local: number; particle: number; sew: boolean }[] = [];
@@ -289,10 +322,31 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           if (swing >= 0 || clear < 0.005) { const tk = nearestTack(lineAt[i].p, hostTris, x, normalOf, SEWN_OFF, false, i); tacks.push(tk.tack); start[i] = tk.at; }
           else stitches.push({ local: i, particle: lineAt[i].particle, sew: true });
         }
-        out.push({ name, rgba: a.rgba ?? colour, ...(a.material ? { material: a.material } : {}), ...(a.pattern ? { pattern: a.pattern } : {}), ...(a.pressed ? { pressed: true } : {}), uv: mesh.uv, tris: mesh.tris, outline: a.outline.flatMap((_, k) => mesh.edgeVerts[`s${k}`].slice(0, -1)), start, tacks, ...(stitches.length ? { stitches } : {}), ...(swing > 1e-6 || up ? { drop: true } : {}), ...(selfStitches.length ? { selfStitches } : {}) });
+        out.push({ name, rgba: a.rgba ?? colour, ...(a.material ? { material: a.material } : {}), ...(a.pattern ? { pattern: a.pattern } : {}), ...(a.materialOverrides ? { materialOverrides: a.materialOverrides } : {}), uv: mesh.uv, tris: mesh.tris, outline: a.outline.flatMap((_, k) => mesh.edgeVerts[`s${k}`].slice(0, -1)), start, tacks, ...(stitches.length ? { stitches } : {}), ...(swing > 1e-6 ? { drop: true } : {}), ...(selfStitches.length ? { selfStitches } : {}) });
       }
     });
   }
+  // Pieces sewn to each other.
+  for (const { from, jn } of later) {
+    const A = built.get(from), B = built.get(jn.with!), pa = out.find((p) => p.name === from), pb = out.find((p) => p.name === jn.with);
+    if (!A || !B || !pa || !pb) continue;
+    const ia = (v: number) => ((Math.round(v) % A.n) + A.n) % A.n, ib = (v: number) => ((Math.round(v) % B.n) + B.n) % B.n;
+    const sb = B.stretch(ib(jn.b[0]), ib(jn.b[1]));
+    for (const [v, w] of pairByFraction(A.stretch(ia(jn.a[0]), ia(jn.a[1])), jn.reversed ? [...sb].reverse() : sb)) (pa.joinTo ??= []).push({ local: v, piece: pb.name, at: w });
+  }
+  return out;
+}
+
+/** Two runs of points paired by fraction along each, every point of the longer to the nearest of the shorter: as a seam sews them. */
+function pairByFraction(A: number[], B: number[]): [number, number][] {
+  if (A.length < 2 || B.length < 2) return [];
+  const [long, short, flip] = A.length >= B.length ? [A, B, false] : [B, A, true];
+  const out: [number, number][] = [], seen = new Set<string>();
+  long.forEach((v, k) => {
+    const w = short[Math.round((k / (long.length - 1)) * (short.length - 1))];
+    const key = `${v},${w}`;
+    if (!seen.has(key)) { seen.add(key); out.push(flip ? [w, v] : [v, w]); }
+  });
   return out;
 }
 
@@ -314,4 +368,62 @@ export function topStretch(outline: [number, number][]): [number, number] {
   }
   // Round the whole outline near the top (every point): its first side.
   return bestLen < 0 ? [0, 1] : best;
+}
+
+/**
+ * Roughly the energy a piece holds in a shape: bending, by its stiffness
+ * (E t^3 / 12(1 - nu^2)) and the angle between each pair of its triangles,
+ * and its weight's height. Only to tell one start from another.
+ */
+function restEnergy(x: number[][], tris: number[], m: { young: number; thickness: number; poisson: number; arealDensity: number }): number {
+  const kb = (m.young * m.thickness ** 3) / (12 * (1 - m.poisson * m.poisson));
+  const normal: number[][] = [], area: number[] = [], edge = new Map<string, number[]>();
+  let weight = 0;
+  for (let t = 0; t < tris.length; t += 3) {
+    const [a, b, c] = [tris[t], tris[t + 1], tris[t + 2]];
+    const n = [0, 0, 0], u = sub(x[b], x[a]), v = sub(x[c], x[a]);
+    n[0] = u[1] * v[2] - u[2] * v[1]; n[1] = u[2] * v[0] - u[0] * v[2]; n[2] = u[0] * v[1] - u[1] * v[0];
+    const A = Math.hypot(n[0], n[1], n[2]) / 2;
+    normal.push(unit(n) ?? [0, 0, 1]); area.push(A);
+    weight += m.arealDensity * A * 9.81 * (x[a][2] + x[b][2] + x[c][2]) / 3;
+    for (const [p, q] of [[a, b], [b, c], [c, a]]) { const k = p < q ? `${p},${q}` : `${q},${p}`; (edge.get(k) ?? edge.set(k, []).get(k)!).push(t / 3); }
+  }
+  let bend = 0;
+  for (const [k, ts] of edge) {
+    if (ts.length !== 2) continue;
+    const [p, q] = k.split(',').map(Number), l2 = (x[p][0] - x[q][0]) ** 2 + (x[p][1] - x[q][1]) ** 2 + (x[p][2] - x[q][2]) ** 2;
+    const phi = Math.acos(Math.max(-1, Math.min(1, dot(normal[ts[0]], normal[ts[1]]))));
+    bend += (3 * l2 * phi * phi) / Math.max(1e-12, area[ts[0]] + area[ts[1]]);
+  }
+  return 0.5 * kb * bend + weight;
+}
+
+/** Positions drawn toward the piece's cut lengths (its flat edges), a few passes, `fixed` points held. */
+function relaxed(x: number[][], mesh: { uv: number[][]; tris: number[] }, fixed: Set<number>): number[][] {
+  const p = x.map((q) => q.slice()), edges: [number, number, number][] = [], seen = new Set<string>();
+  for (let t = 0; t < mesh.tris.length; t += 3) for (let e = 0; e < 3; e++) {
+    const a = mesh.tris[t + e], b = mesh.tris[t + ((e + 1) % 3)], k = a < b ? `${a},${b}` : `${b},${a}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    edges.push([a, b, Math.hypot(mesh.uv[a][0] - mesh.uv[b][0], mesh.uv[a][1] - mesh.uv[b][1])]);
+  }
+  for (let it = 0; it < RELAX_PASSES; it++) for (const [a, b, l] of edges) {
+    const wa = fixed.has(a) ? 0 : 1, wb = fixed.has(b) ? 0 : 1;
+    if (!wa && !wb) continue;
+    const d = sub(p[b], p[a]), len = Math.hypot(d[0], d[1], d[2]);
+    if (len < 1e-12) continue;
+    const c = (len - l) / len / (wa + wb);
+    for (let k = 0; k < 3; k++) { p[a][k] += wa * c * d[k]; p[b][k] -= wb * c * d[k]; }
+  }
+  return p;
+}
+
+/** Whether a flat point is inside an outline (even-odd). */
+function insideOutline(q: number[], poly: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > q[1]) !== (yj > q[1]) && q[0] < ((xj - xi) * (q[1] - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
 }

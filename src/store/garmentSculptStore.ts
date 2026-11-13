@@ -1,12 +1,12 @@
-// The tools that work on a garment in the viewport: the sculpting brush and
-// the pen that draws curves on it. Which garment, which tool, and their
+// The tools that work on a garment in the viewport: the sculpting brush, the
+// pen that draws curves on it, and the hand that arranges it. Which garment, which tool, and their
 // settings. View state, not part of a scene: what they do is saved in the
 // draft (`sculpt` dabs, `curves`).
 
 import { create } from 'zustand';
 import type { GarmentCurve } from '../types/cloth';
 
-export type GarmentTool = 'sculpt' | 'draw';
+export type GarmentTool = 'sculpt' | 'draw' | 'arrange';
 
 interface GarmentSculptState {
   /** Id of the garment node being worked on, or null when no tool is on. */

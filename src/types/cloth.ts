@@ -135,6 +135,44 @@ export interface ClothSeam {
  * `sewTime` — how a sail corner is tensioned. Without it the point is held
  * where it starts.
  */
+/**
+ * A point of a cloth drawn to a place before the scene starts (ClothSpec.arrange):
+ * the point of piece `piece` (a panel's or a piece's name: `hood`, `frontL`)
+ * at `at` on its flat pattern, metres; `to` in the cloth's own frame (a
+ * garment's, its form's), metres, Z up.
+ */
+export interface ClothPull {
+  piece: string;
+  at: [number, number];
+  to: [number, number, number];
+  /** Places it is drawn through on the way, in order (as a hand takes a hood up over the back of the head, not through it). */
+  via?: [number, number, number][];
+}
+
+/** A point of a cloth, by its piece and where it is on the piece's flat pattern, metres. */
+export interface ClothPoint {
+  piece: string;
+  at: [number, number];
+}
+
+/** Two points of a cloth held together (ClothSpec.fasten), drawn closed over the sew time; `trim` drawn where it fastens, at `a`. */
+export interface ClothFastening {
+  a: ClothPoint;
+  b: ClothPoint;
+  trim?: { kind: GarmentTrim['kind']; size?: number; rgba?: number[] };
+}
+
+/**
+ * A piece sewn on along a line turned about that line before the scene starts
+ * (ClothSpec.arrange): `turn` degrees from hanging down, 90 stood straight
+ * out off the garment, about 165 turned up and over (a hood put up, a collar
+ * turned up, a cap's peak set out at 90, a cuff turned back).
+ */
+export interface ClothTurn {
+  piece: string;
+  turn: number;
+}
+
 export interface ClothTie {
   name?: string;
   piece: string;
@@ -211,6 +249,19 @@ export interface ClothSpec {
   pieces?: ClothPiece[];
   seams?: ClothSeam[];
   ties?: ClothTie[];
+  /**
+   * The cloth arranged by hand before the scene starts, as a wearer arranges
+   * what they wear: each a point of it drawn to a place, held a moment and
+   * let go to settle. A hood pulled up over a head, a collar turned up, a
+   * sleeve pushed up, a peak set straight.
+   */
+  arrange?: (ClothPull | ClothTurn)[];
+  /**
+   * Points held together, as a clasp, a snap, a button through its hole or a
+   * hook holds them: a bag's flap to its front, a wrap dress's corner to its
+   * side, a cuff's tab to its sleeve.
+   */
+  fasten?: ClothFastening[];
   /** Elastic bands embedded along piece edges. */
   elastics?: ClothElastic[];
   /** Printed SVG pattern across the cloth's pieces. */
@@ -263,7 +314,7 @@ export type GarmentLine = string;
  * a zipper, whose teeth run the whole line.
  */
 export interface GarmentTrim {
-  kind: 'stud' | 'button' | 'buttonhole' | 'bead' | 'zipper' | 'buckle';
+  kind: 'stud' | 'button' | 'buttonhole' | 'bead' | 'zipper' | 'buckle' | 'stitch';
   along: GarmentLine;
   /** Between one and the next, metres; a zipper's teeth set their own. */
   spacing?: number;
@@ -280,6 +331,11 @@ export interface GarmentTrim {
   lap?: 'left' | 'right';
   /** For buttons on an opening: how far the lapping front runs on over the other, metres (default 2.2 buttons; 0 for edge to edge). */
   stand?: number;
+  /**
+   * Set off across the line, metres: into the cloth from an edge (from a seam, into one side of it, the same all
+   * along; negative, the other); several, a row at each (topstitching in a double row: [0.003, 0.009]).
+   */
+  offset?: number | number[];
 }
 
 /**
@@ -579,10 +635,12 @@ export interface GarmentSculpt {
  * - `cut`: cut, and the smaller part it cuts off taken away: a closed one a
  *   cut-out, an open one from an edge back to an edge a new line for it (a
  *   neckline, a hem, an armhole drawn by hand). Its edge is named `name`.
+ * - `line`: only marked, nothing cut: a named line on the garment for trims,
+ *   topstitching or a piece sewn on to follow (a jeans fly's curve, a yoke's).
  */
 export interface GarmentCurve {
   name: string;
-  kind: 'seam' | 'open' | 'cut';
+  kind: 'seam' | 'open' | 'cut' | 'line';
   points: [number, number, number][];
   /** Round to its first point again. */
   closed?: boolean;
@@ -617,16 +675,11 @@ export interface GarmentAttachment {
    * Stretches of its own outline sewn together, each from one point round the way the outline runs to another, paired
    * by fraction along each (`reversed`: the second's end to the first's start): a hood's crown folded and sewn, a tube, a pouch.
    */
-  joins?: { a: [number, number]; b: [number, number]; reversed?: boolean }[];
+  joins?: { a: [number, number]; b: [number, number]; reversed?: boolean; /** `b` is a stretch of this other piece sewn on (by its name): two halves of a hood sewn along their curved back seam. */ with?: string }[];
   material?: ClothMaterialName;
   rgba?: number[];
-  /**
-   * Which way it starts from its line before it settles: hanging `down` (default), turned `up` over it (a hood up over a head),
-   * or stood straight `out` off the garment's face (a cap's peak, a shelf of ruffle).
-   */
-  turn?: 'down' | 'up' | 'out';
-  /** Keeps the shape it starts in, as an interfaced or stiffened piece does (a cap's peak), rather than resting flat. */
-  pressed?: boolean;
+  /** Its fabric's properties changed from `material`'s (a cap's peak: a stiff board, thick and hard to bend), as a cloth's own `materialOverrides`. */
+  materialOverrides?: Partial<ClothMaterial>;
   /** Printed on it (a bandana's paisley, a scarf's check). */
   pattern?: ClothPatternPrint;
 }

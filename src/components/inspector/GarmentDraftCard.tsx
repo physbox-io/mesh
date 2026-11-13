@@ -7,6 +7,7 @@ import { garmentSettings } from '../../utils/cloth/garments';
 import { GarmentDetails } from './GarmentDetails';
 import { GarmentSculptPanel } from './GarmentSculptPanel';
 import { GarmentCurvesPanel } from './GarmentCurvesPanel';
+import { ClothArrangePanel } from './ClothArrangePanel';
 import { DRAFT_SLIDERS, DRAFT_SWITCHES, FABRICS, GARMENT_KINDS, LIMBS, type DraftUnit } from './garmentFields';
 
 const SCALE: Record<DraftUnit, number> = { mm: 1000, '%': 100, '×': 1, '': 1 };
@@ -93,6 +94,7 @@ export function GarmentDraftCard({ node }: { node: SceneNode }) {
       <GarmentDetails draft={draft} s={s} setDraft={setDraft} />
       <GarmentSculptPanel nodeId={node.id} draft={draft} setDraft={setDraft} />
       <GarmentCurvesPanel nodeId={node.id} draft={draft} setDraft={setDraft} />
+      <ClothArrangePanel nodeId={node.id} cloth={cloth} setCloth={(c) => updateNode(node.id, { cloth: c } as Partial<SceneNode>)} />
     </div>
   );
 }

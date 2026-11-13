@@ -40,7 +40,8 @@ export function layoutPattern(pieces: PatternPiece[]): PatternLayout {
     const X = (u: number) => x + (u - u0) * MM, Y = (v: number) => MARGIN + (v1 - v) * MM;
     const loop = (ids: number[]) => ids.map((i, k) => `${k ? 'L' : 'M'}${X(p.uv[i][0]).toFixed(1)} ${Y(p.uv[i][1]).toFixed(1)}`).join(' ') + ' Z';
     const path = [p.outline, ...(p.darts ?? [])].map(loop).join(' ');
-    const marks = (p.marks ?? []).map((m) => ({ kind: m.kind, x: X(p.uv[m.particle][0]), y: Y(p.uv[m.particle][1]), r: (m.size * MM) / 2 }));
+    // Placement marks for what is sewn on at a point; topstitching is sewn after, not marked.
+    const marks = (p.marks ?? []).filter((m) => m.kind !== 'stitch').map((m) => ({ kind: m.kind, x: X(p.uv[m.particle][0]), y: Y(p.uv[m.particle][1]), r: (m.size * MM) / 2 }));
     const channels = (p.lines ?? []).map((run) => run.map((i, k) => `${k ? 'L' : 'M'}${X(p.uv[i][0]).toFixed(1)} ${Y(p.uv[i][1]).toFixed(1)}`).join(' '));
     out.push({ name: p.name, strain95: p.strain95, x, y: MARGIN, w, h, path, marks, channels });
     x += w + GAP;

@@ -37,6 +37,8 @@ const PRESEW_REST = 0.5;
 const PRESEW_STEP = 1 / 200;
 /** How long cloth that starts lifted is let fall, seconds, more. */
 const DROP_TIME = 0.6;
+/** An arrangement: after sewing, how long until points are pulled, how long the pull takes, how long they are held, seconds. */
+const PULL_WAIT = 0.2, PULL_TIME = 1.2, PULL_HOLD = 0.4;
 /** How far cloth keeps its middle from what it lies on: half its thickness and a little air. */
 export const CLOTH_THICKNESS = 0.004;
 
@@ -337,9 +339,10 @@ export class ClothSim {
     // then the clock starts with every stitch closed.
     let sewing = 0;
     for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002) sewing = Math.max(sewing, this.stitchSew[k]);
-    const dropped: number[] = [];
+    const dropped: number[] = [], pulls: { p: number; route: number[][]; started: boolean }[] = [];
     for (const pc of this.pieces) for (const i of pc.model.drop ?? []) dropped.push(pc.base + i);
-    if (sewing > 0 || dropped.length) {
+    for (const pc of this.pieces) for (const pl of pc.model.pulls ?? []) pulls.push({ p: pc.base + pl.particle, route: [...(pl.via ?? []), pl.to], started: false });
+    if (sewing > 0 || dropped.length || pulls.length) {
       // Only what is being sewn on moves meanwhile: of the two pieces each
       // open stitch joins, the smaller (a piece onto a garment's panel, a
       // bag's side onto its other side); the rest is held still, so the
@@ -358,6 +361,7 @@ export class ClothSim {
         moving.add((size.get(a) ?? 0) <= (size.get(b) ?? 0) ? a : b);
       }
       for (const i of dropped) moving.add(find(i));
+      for (const pl of pulls) moving.add(find(pl.p));
       const held = this.w.slice(), floats = this.floatUntil.slice();
       for (let i = 0; i < n; i++) if (!moving.has(find(i))) this.w[i] = 0;
       // In longer steps than a running scene's: only drawn together and let hang here.
@@ -371,13 +375,44 @@ export class ClothSim {
       // falls into place in these long steps cannot pass through cloth (a
       // neckerchief dropped onto a puffer fell in behind its front).
       const vMax = (0.8 * CLOTH_THICKNESS) / PRESEW_STEP, v = this.v;
-      for (let t = 0; t < sewing + PRESEW_REST + (dropped.length ? DROP_TIME : 0); t += PRESEW_STEP) {
-        this.substep(PRESEW_STEP, env);
-        for (let i = 0; i < n; i++) {
+      // Arranged once it is sewn: each pulled point drawn to its place, held,
+      // let go, and the cloth left to settle.
+      const pullFrom = sewing + PULL_WAIT, pullTo = pullFrom + PULL_TIME, letGo = pullTo + PULL_HOLD;
+      const end = pulls.length ? letGo + PRESEW_REST : sewing + PRESEW_REST + (dropped.length ? DROP_TIME : 0);
+      // Its last rest in the running scene's own steps: in long ones a stiff
+      // piece is held softer (a cap's peak sagged, and rose again once the
+      // scene ran), so it settles here where the scene will hold it.
+      const fineFrom = end - PRESEW_REST;
+      for (let t = 0; t < end;) {
+        const h = t >= fineFrom ? CLOTH_SUBSTEP : PRESEW_STEP;
+        this.substep(h, env);
+        if (pulls.length && t >= letGo && t < letGo + h) for (const pl of pulls) this.w[pl.p] = held[pl.p];
+        if (pulls.length && t >= pullFrom && t < letGo) {
+          const f = Math.min(1, (t - pullFrom) / PULL_TIME), e = f * f * (3 - 2 * f);
+          for (const pl of pulls) {
+            const k = 3 * pl.p;
+            // Held as a hand holds it: the cloth gives, not the hand (moved
+            // with its own mass, the cloth pulled it most of the way back).
+            this.w[pl.p] = 0;
+            // From where it is, through its route, by length.
+            if (!pl.started) { pl.route.unshift([this.x[k], this.x[k + 1], this.x[k + 2]]); pl.started = true; }
+            const R = pl.route, cum = [0];
+            for (let q = 1; q < R.length; q++) cum.push(cum[q - 1] + Math.hypot(R[q][0] - R[q - 1][0], R[q][1] - R[q - 1][1], R[q][2] - R[q - 1][2]));
+            const want = e * cum[cum.length - 1];
+            let q = 1;
+            while (q < R.length - 1 && cum[q] < want) q++;
+            const u = cum[q] > cum[q - 1] ? (want - cum[q - 1]) / (cum[q] - cum[q - 1]) : 1;
+            for (let c = 0; c < 3; c++) this.x[k + c] = R[q - 1][c] + (R[q][c] - R[q - 1][c]) * u;
+          }
+        }
+        // Only in the long steps (in the scene's own, as it settles, held back so it was still falling when the scene began).
+        if (h === PRESEW_STEP) for (let i = 0; i < n; i++) {
           const k = 3 * i, sp = Math.hypot(v[k], v[k + 1], v[k + 2]);
           if (sp > vMax) { const f = vMax / sp; v[k] *= f; v[k + 1] *= f; v[k + 2] *= f; }
         }
+        t += h;
       }
+      // Let go: what was held weighs again.
       this.w.set(held);
       this.time = 0; this.accumulator = 0;
       // Sewn now: what moved. What was held still (a zip that closes as the
@@ -505,9 +540,9 @@ export class ClothSim {
       this.solveElastics(h2);
       this.solveLimits(h2);
       this.solveRods(h2);
-      if (pass === 0) {
-        this.solveBends(h2);
-      }
+      // Every pass: once a substep, a stiff piece (a board, heavy leather)
+      // bent however stiff its material, held to what one pass could do.
+      this.solveBends(h2);
       // Stitches close from their starting gap to nothing over the sew time.
       for (let k = 0; k < this.stitchGap.length; k++) {
         const sew = this.stitchSew[k];

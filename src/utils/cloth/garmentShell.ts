@@ -44,6 +44,8 @@ export interface GarmentShell {
   tris: number[];
   /** Seams: chains of point indices, each run along the edges between them. `open`: cut and left open (a jacket's front), not sewn. */
   seams: { name: string; path: number[]; open?: boolean }[];
+  /** Lines only marked on it (a drawn curve of kind `line`): named runs of its points, nothing cut along them. */
+  marks?: { name: string; path: number[] }[];
   /** The surface split along its seams: each panel's triangles (indices into tris / 3) and the 3D direction that runs up (+v) its flat piece. */
   panels: { name: string; tris: number[]; upAxis?: number[] }[];
   /** Its open edges, each run named for the cut that made it: neckline, hem, waist, cuffL, armholeL, opening, top, end. */
@@ -583,6 +585,10 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     seams = remapped(seams);
     edges = remapped(edges);
   }
+  // Lines drawn only to mark (GarmentCurve kind 'line'): kept by name, not seams to part the panels at.
+  const markNames = new Set(draftLines(draft.curves).filter((l) => l.kind === 'line').map((l) => l.name));
+  const marks = seams.filter((sm) => markNames.has(sm.name)).map(({ name, path }) => ({ name, path }));
+  seams = seams.filter((sm) => !markNames.has(sm.name));
 
   // ---- Panels, named for where they are, as the part they cover says:
   // front and back (and which side), a sleeve (upper and lower past a ring), gores.
@@ -709,7 +715,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     const cy = centreY(L.hipZ), dx = p[0], dy = p[1] - cy, l = Math.hypot(dx, dy) || 1;
     p[0] += (dx / l) * (FLOOR - p[2]); p[1] += (dy / l) * (FLOOR - p[2]); p[2] = FLOOR;
   }
-  const shell: GarmentShell = compact({ points, cut, tris, seams, panels, edges });
+  const shell: GarmentShell = compact({ points, cut, tris, seams, panels, edges, ...(marks.length ? { marks } : {}) });
   // Round the form under each point, where it is cut from: what an ease of
   // circumference is measured against.
   const perimeter = (radii: number[]) => radii.reduce((acc, r, i) => {

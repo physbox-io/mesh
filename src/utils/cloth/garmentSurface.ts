@@ -71,13 +71,13 @@ export function boundaryLoops(nPoints: number, tris: number[]): number[][] {
  * cut from), indices renumbered. Left in, they were particles that took no
  * part, held fixed where the neckline had been.
  */
-export function compact<T extends { points: number[][]; cut?: number[][]; tris: number[]; seams: { path: number[] }[]; edges?: { path: number[] }[] }>(shell: T): T {
+export function compact<T extends { points: number[][]; cut?: number[][]; tris: number[]; seams: { path: number[] }[]; edges?: { path: number[] }[]; marks?: { path: number[] }[] }>(shell: T): T {
   const map = new Int32Array(shell.points.length).fill(-1);
   const points: number[][] = [], cut: number[][] = [];
   for (const i of shell.tris) if (map[i] < 0) { map[i] = points.length; points.push(shell.points[i]); cut.push((shell.cut ?? shell.points)[i]); }
   if (shell.cut) shell.cut = cut;
   for (let k = 0; k < shell.tris.length; k++) shell.tris[k] = map[shell.tris[k]];
-  for (const sm of [...shell.seams, ...(shell.edges ?? [])]) sm.path = sm.path.map((i) => map[i]).filter((i) => i >= 0);
+  for (const sm of [...shell.seams, ...(shell.edges ?? []), ...(shell.marks ?? [])]) sm.path = sm.path.map((i) => map[i]).filter((i) => i >= 0);
   shell.points = points;
   return shell;
 }

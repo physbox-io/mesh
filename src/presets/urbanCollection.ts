@@ -2,21 +2,23 @@
  * An urban collection, two looks side by side, every part of it from the
  * general garment parts (no garment of its own kind):
  *
- * - A puffer jacket over shorts, a neckerchief at the neck. The puffer is a
- *   jacket quilted round with drawn seams (GarmentDraft.curves), its
- *   channels sculpted out between them (`sculpt`), in a light shiny shell
- *   fabric; the neckerchief a triangle sewn round the neckline, its point at
- *   the front (`attached`).
+ * - A puffer jacket over knee-length shorts with a belt, a neckerchief under
+ *   the jacket, a baseball cap. The puffer is a jacket quilted round with
+ *   drawn seams (GarmentDraft.curves), its channels sculpted out between them
+ *   (`sculpt`), in a ripstop shell; the neckerchief its own cloth tied round
+ *   the neck; the cap a hat whose peak is a stiff crescent sewn round the
+ *   front of its band (`attached` with `materialOverrides`).
  * - A hoodie over cut-off jeans, a handbag on the arm. The hood is a piece
- *   sewn on round the back of the neckline, its crown folded and sewn
- *   (`attached` with `joins`), worn up over the head (`turn: 'up'`); its drawstrings two narrow strips; the
- *   pocket a patch across the front. The cut-offs are short jeans with a
- *   ragged hem (`edges`), cut off just above the ankle. The bag is plain cloth: a pouch of two pieces
- *   seamed round, its handles over the forearm.
+ *   sewn on round the neckline, folded at the nape and seamed over the crown
+ *   (`attached` with `joins`), pulled up over the head as it is worn
+ *   (ClothSpec.arrange); its drawstrings two narrow strips; the pocket a patch
+ *   across the front. The cut-offs are jeans cut off above the ankle, the hem
+ *   ragged (`edges`). The bag is plain cloth: two leather faces and a gusset
+ *   seamed round, a clasp, handles over the forearm.
  */
 
 import type { SceneGraph, SceneNode } from '../types/scene';
-import type { ClothPiece, ClothSeam, GarmentCurve, GarmentSculpt, UV } from '../types/cloth';
+import type { ClothFastening, ClothPiece, ClothSeam, GarmentCurve, GarmentSculpt, UV } from '../types/cloth';
 import { bodyFormNode, garmentNode } from '../utils/cloth/clothNodes';
 import { bodyFormSection, bodyLandmarks } from '../utils/cloth/bodyForm';
 import { formLimbs } from '../utils/cloth/formLimbs';
@@ -94,32 +96,87 @@ function pufferLook(x: number): SceneNode[] {
   const m = form.bodyForm!, L = bodyLandmarks(m);
   const quilt = quilting(m, [L.waistZ - 0.1, L.waistZ - 0.01, L.waistZ + 0.08, L.waistZ + 0.17, L.waistZ + 0.26, L.waistZ + 0.35], [0.3, 0.45, 0.6, 0.75, 0.9], 0.04, 0.02);
   const shorts = wearing('shorts', {
-    garment: 'trousers', material: 'canvas', length: 0.4, flare: 1.12, ease: 0.1, rgba: [0.62, 0.55, 0.4, 1],
+    garment: 'trousers', material: 'canvas', length: 0.4, flare: 1.12, ease: 0.1, rgba: [0.3, 0.33, 0.19, 1],
     pockets: [{ panel: 'front', at: [0.62, 0.86] }, { panel: 'back', at: [0.5, 0.8] }], beltLoops: 5,
+    trims: [{ kind: 'stitch', along: 'hem', offset: [0.008, 0.014], rgba: [0.2, 0.22, 0.12, 1] }, { kind: 'stitch', along: 'side', offset: 0.004, rgba: [0.2, 0.22, 0.12, 1] }],
     belt: { width: 0.032, material: 'leather', rgba: [0.13, 0.08, 0.05, 1] },
   }, form, 0);
   const puffer = wearing('puffer', {
     garment: 'jacket', material: 'taffeta', rgba: [0.93, 0.4, 0.08, 1],
     ease: 0.24, length: 0.14, sleeve: 0.6, cuff: 0.2, neckline: 0.08,
     collar: { stand: 0.06, fall: 0 },
-    trims: [{ kind: 'zipper', along: 'opening', fastened: true, size: 0.012, rgba: [0.78, 0.78, 0.8, 1] }],
     elastics: [{ along: 'cuff', ratio: 0.72 }, { along: 'hem', ratio: 0.88 }],
     curves: quilt.curves, sculpt: quilt.sculpt,
-    attached: [{
-      // A bandana folded to a triangle and tied: a band all round the neck, its point down the front.
-      name: 'neckerchief', outline: NECKERCHIEF, sewn: [0, 1], along: 'neckline', span: [0.5, 1.5],
-      material: 'jersey', rgba: [0.72, 0.07, 0.09, 1], pattern: { svg: BANDANA_SVG, scale: 0.09, tile: true },
-    }, {
-      // Its ends, knotted at the back of the neck and hanging.
-      name: 'kerchiefTie', outline: [[0, 0], [0.05, 0], [0.032, -0.12], [0.018, -0.12]], sewn: [0, 1], along: 'neckline', span: [0.44, 0.56], repeat: 2,
-      material: 'jersey', rgba: [0.72, 0.07, 0.09, 1], pattern: { svg: BANDANA_SVG, scale: 0.09, tile: true },
-    }],
+    // Its channels stitched through, and its hem bound in a double row.
+    trims: [
+      { kind: 'zipper', along: 'opening', fastened: true, size: 0.004, rgba: [0.78, 0.78, 0.8, 1] },
+      ...quilt.curves.map((c) => ({ kind: 'stitch' as const, along: c.name, rgba: [0.62, 0.24, 0.04, 1] })),
+      { kind: 'stitch', along: 'hem', offset: [0.008, 0.016], rgba: [0.62, 0.24, 0.04, 1] },
+    ],
   }, form, 1);
-  return [form, shorts, puffer];
+  // A baseball cap: a close crown of six panels, its peak a stiffened crescent sewn on round the front of its band, stood out.
+  // The band's curve at the front: the head's oval there (radius of curvature
+  // side^2 / front-to-back at the front), stood off by the band's ease.
+  const headL = formLimbs(m).head, bandSec = headL.section(0.68 * headL.length);
+  const across = [bandSec.side, bandSec.up].reduce((a, b) => (Math.abs(b[0]) > Math.abs(a[0]) ? b : a));
+  const half = across === bandSec.side ? bandSec.w : bandSec.h, deep = across === bandSec.side ? bandSec.h : bandSec.w;
+  const bandR = (half * half) / deep + 0.006, bandC = Math.PI * (3 * (half + deep) - Math.sqrt((3 * half + deep) * (half + 3 * deep))) + 0.015;
+  const PEAK = peakOutline(bandR, 0.36 * bandC, 0.072);
+  const cap = wearing('cap', {
+    garment: 'hat', material: 'canvas', ease: 0.015, from: 0.68, gores: 6, rgba: [0.09, 0.13, 0.3, 1],
+    attached: [{
+      name: 'peak', outline: PEAK, sewn: [0, PEAK_ARC], along: 'top', span: [0.82, 0.18], rgba: [0.09, 0.13, 0.3, 1],
+      // A plastic board inside it (polyethylene, about a gigapascal): it holds itself out.
+      material: 'canvas', materialOverrides: { thickness: 0.0015, young: 1e9, arealDensity: 0.9 },
+    }],
+  }, form, 0);
+  // A structured cap: its crown stiffened (buckram behind the canvas), so it holds its shape and the peak on it.
+  cap.cloth!.materialOverrides = { thickness: 0.0016, young: 4e7 };
+  return [form, neckerchief(form), shorts, puffer, cap];
 }
 
-/** A neckerchief: a band round the neck (its top sewn round the neckline, the middle at the front), a point hanging from it. */
-const NECKERCHIEF: [number, number][] = [[0, 0], [1, 0], [1, -0.045], [0.64, -0.045], [0.5, -0.21], [0.36, -0.045], [0, -0.045]];
+/**
+ * A cap's peak: a crescent, its inner edge as curved as the front of the band
+ * it is sewn to (`R`), so the only way it lies flat is standing out level, as
+ * a peak does; its outer edge a wider arc. Drafted rounder than the band (a
+ * circle the band's average size, where the head's oval curves tighter at the
+ * front), it can only lie on it tilted down, as a cone: it hung over the eyes.
+ */
+const PEAK_ARC = 12;
+function peakOutline(R: number, arcLen: number, depth: number): [number, number][] {
+  const A = arcLen / R, Ro = R + depth, out: [number, number][] = [];
+  for (let k = 0; k <= PEAK_ARC; k++) { const t = -A / 2 + (A * k) / PEAK_ARC; out.push([r4(R * Math.sin(t)), r4(R * Math.cos(t) - R)]); }
+  for (let k = PEAK_ARC - 1; k >= 1; k--) { const t = -A / 2 + (A * k) / PEAK_ARC; out.push([r4(Ro * Math.sin(t) * 0.92), r4(Ro * Math.cos(t) - R)]); }
+  return out;
+}
+
+/**
+ * A neckerchief: a bandana folded and tied round the neck, its own cloth
+ * (not sewn to anything), worn under the jacket: a band round the neck, its
+ * ends sewn at the back as a knot holds them, a point at the front tucked in
+ * under the jacket's front.
+ */
+function neckerchief(form: SceneNode): SceneNode {
+  const fm = form.bodyForm!, L = bodyLandmarks(fm);
+  const z = L.hpsZ - 0.035, r = fm.neck / (2 * Math.PI) + 0.012, C = 2 * Math.PI * r, band = 0.045;
+  const cy = bodyFormSection(fm, z).centreY, pos = form.pos ?? [0, 0, 0];
+  const pts = (q: number[][]) => q as UV[];
+  const piece: ClothPiece = {
+    name: 'bandana', rgba: [0.72, 0.07, 0.09, 1], pattern: { svg: BANDANA_SVG, scale: 0.09, tile: true },
+    edges: [
+      { id: 'top', pts: pts([[C, 0], [0, 0]]) },
+      { id: 'endA', pts: pts([[0, 0], [0, -band]]) },
+      { id: 'lowA', pts: pts([[0, -band], [C / 2 - 0.13, -band]]) },
+      { id: 'point', pts: pts([[C / 2 - 0.13, -band], [C / 2, -0.2], [C / 2 + 0.13, -band]]) },
+      { id: 'lowB', pts: pts([[C / 2 + 0.13, -band], [C, -band]]) },
+      { id: 'endB', pts: pts([[C, -band], [C, 0]]) },
+    ],
+    // Round the neck from the back, the point at the front; flaring a little below, over the collarbones.
+    placement: { kind: 'wrap', origin: [pos[0], pos[1] + cy, z], axis: [0, 0, 1], ref: [0, 1, 0], radius: r, taper: -0.35 },
+  };
+  const seams: ClothSeam[] = [{ name: 'knot', a: [{ piece: 'bandana', edge: 'endA' }], b: [{ piece: 'bandana', edge: 'endB', reversed: true }] }];
+  return { id: 'neckerchief', name: 'neckerchief', pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces: [piece], seams, material: 'jersey', spacing: 0.012, sewTime: 0.5, layer: 0 } } as unknown as SceneNode;
+}
 
 /** A cut-off hem: longer and shorter all round, irregularly (a regular one read as lace). */
 const FRAY: [number, number][] = Array.from({ length: 73 }, (_, k) => {
@@ -127,9 +184,32 @@ const FRAY: [number, number][] = Array.from({ length: 73 }, (_, k) => {
   return [r4(k / 72), k === 0 || k === 72 ? 0 : r4(0.004 + 0.03 * u * u)] as [number, number];
 });
 
-/** The hood: one piece sewn round the back of the neckline, its crown (the far side, halved) folded and sewn. */
-// Its face edges long enough to reach the forehead from the neck (short, they pulled the hood down over the face); its crown rounds over the head and back down to the fold at the back (a straight one folded into a point).
-const HOOD: [number, number][] = [[0.0, 0], [0.46, 0], [0.46, -0.32], [0.433, -0.37], [0.38, -0.4], [0.318, -0.4], [0.265, -0.37], [0.23, -0.33], [0.195, -0.37], [0.142, -0.4], [0.08, -0.4], [0.027, -0.37], [0.0, -0.32]];
+/**
+ * The hood, drafted as a hood is: two side pieces, each sewn round its half
+ * of the neckline from the front to the nape, joined along their back edges
+ * (a seam rounding up the back of the head and over the crown to the
+ * forehead). One piece folded at the back cannot round the back of the head
+ * (its back would have to cross its own middle), and stood in a point.
+ */
+const HOOD_SIDE: [number, number][] = [
+  [0, 0], [0.22, 0],
+  // Fullest at the back of the head, then sweeping forward over the crown, with no corner to stand up in a point.
+  [0.265, -0.055], [0.295, -0.13], [0.305, -0.21], [0.285, -0.285], [0.235, -0.34], [0.165, -0.372], [0.095, -0.38], [0.035, -0.367], [0, -0.345],
+];
+const HOOD_TOP = HOOD_SIDE.length - 1;
+/** The other side: mirrored, run the other way round, so its neck edge runs from the nape to the front as the neckline does there. */
+const HOOD_OTHER: [number, number][] = HOOD_SIDE.map(([u, v]) => [-u, v] as [number, number]).reverse();
+
+const GOLD_THREAD = [0.86, 0.62, 0.26, 1];
+
+/** A jeans fly's J on the front, from the waist down the wearer's left of the middle and curving in to it: points on the body. */
+function flyJ(fm: BodyFormMeasurements): [number, number, number][] {
+  const L = bodyLandmarks(fm), out: [number, number, number][] = [];
+  const front = (z: number, x: number) => { const q = bodyFormSection(fm, z), r = q.radii[Math.round((3 * q.radii.length) / 4) % q.radii.length]; return round(fm, z, -Math.PI / 2 + x / r, 0.012); };
+  for (let k = 0; k <= 8; k++) out.push(front(L.waistZ - 0.03 - 0.16 * (k / 8), 0.035));
+  for (let k = 1; k <= 4; k++) { const a = (k / 4) * (Math.PI / 2); out.push(front(L.waistZ - 0.19 - 0.025 * Math.sin(a), 0.035 * Math.cos(a))); }
+  return out;
+}
 
 /** A hoodie over cut-off jeans. */
 function hoodieLook(x: number): SceneNode[] {
@@ -139,17 +219,29 @@ function hoodieLook(x: number): SceneNode[] {
     pockets: [{ panel: 'front', at: [0.62, 0.86] }, { panel: 'back', at: [0.5, 0.8] }], beltLoops: 5,
     // Cut off: a ragged hem, longer and shorter all round.
     edges: [{ along: 'hem', profile: { points: FRAY } }],
+    // A fly's J, marked on the front and topstitched, with the side seams and the waistband, in gold thread.
+    curves: [{ name: 'fly', kind: 'line', points: flyJ(form.bodyForm!) }],
+    trims: [
+      { kind: 'stitch', along: 'fly', offset: [0, 0.006], rgba: GOLD_THREAD },
+      { kind: 'stitch', along: 'side', offset: [0.004, 0.01], rgba: GOLD_THREAD },
+      { kind: 'stitch', along: 'top', offset: [0.012, 0.03], rgba: GOLD_THREAD },
+    ],
   }, form, 0);
   const hoodie = wearing('hoodie', {
     garment: 'tshirt', material: 'jersey', rgba: [0.55, 0.5, 0.68, 1],
     ease: 0.18, length: 0.16, sleeve: 0.55, cuff: 0.17, neckline: 0.07,
     elastics: [{ along: 'cuff', ratio: 0.8 }, { along: 'hem', ratio: 0.88 }],
+    trims: [{ kind: 'stitch', along: 'hem', offset: [0.02, 0.026], rgba: [0.42, 0.37, 0.53, 1] }, { kind: 'stitch', along: 'cuff', offset: [0.018, 0.024], rgba: [0.42, 0.37, 0.53, 1] }],
     pockets: [{ panel: 'front', at: [0.5, 0.22], width: 0.3, height: 0.17 }],
     attached: [
-      { name: 'hood', outline: HOOD, sewn: [0, 1], along: 'neckline', span: [0.04, 0.96], turn: 'up', joins: [{ a: [2, 7], b: [7, 12], reversed: true }] },
+      // Its left side from the front to the nape, its right from the nape to the front, sewn up the back and over the crown.
+      { name: 'hoodL', outline: HOOD_SIDE, sewn: [0, 1], along: 'neckline', span: [0.04, 0.5], joins: [{ a: [1, HOOD_TOP], b: [0, HOOD_TOP - 1], reversed: true, with: 'hoodR' }] },
+      { name: 'hoodR', outline: HOOD_OTHER, sewn: [HOOD_TOP - 1, HOOD_TOP], along: 'neckline', span: [0.5, 0.96] },
       { name: 'drawstring', outline: [[0, 0], [0.012, 0], [0.012, -0.3], [0, -0.3]], sewn: [0, 1], along: 'neckline', span: [0.94, 0.06], repeat: 2, rgba: [0.95, 0.95, 0.93, 1] },
     ],
   }, form, 1);
+  // Worn with the hood up: turned up over the head about the neckline it is sewn to, and let settle.
+  hoodie.cloth!.arrange = [{ piece: 'hoodL', turn: 165 }, { piece: 'hoodR', turn: 165 }];
   return [form, cutoffs, hoodie, handbag('handbag', m(form), x, 2)];
 }
 
@@ -162,7 +254,8 @@ const m = (form: SceneNode) => form.bodyForm!;
  */
 function handbag(id: string, fm: BodyFormMeasurements, x: number, layer: number): SceneNode {
   const arm = formLimbs(fm).armL;
-  const s = arm.path.jointAt + 0.45 * (arm.length - arm.path.jointAt);
+  // In the crook of the arm, a little below the elbow.
+  const s = arm.path.jointAt + 0.18 * (arm.length - arm.path.jointAt);
   const sec = arm.section(s), T = arm.path.tangent(s);
   const flatT = [T[0], T[1], 0], lt = Math.hypot(flatT[0], flatT[1]) || 1;
   const along = [flatT[0] / lt, flatT[1] / lt, 0];
@@ -170,7 +263,7 @@ function handbag(id: string, fm: BodyFormMeasurements, x: number, layer: number)
   const U = [-along[1], along[0], 0], Z = [0, 0, 1];
   const armR = Math.max(sec.w, sec.h) + 0.03; // over the sleeve
   // A gusset of `gap` * 2 between its faces, round the sides and bottom: a bag with depth.
-  const W = 0.26, H = 0.19, drop = 0.07, gap = 0.03;
+  const W = 0.21, H = 0.15, drop = 0.07, gap = 0.025;
   const top = sec.c[2] - armR - drop;
   const centre = [sec.c[0] + x, sec.c[1], top - H / 2];
   const at = (side: number, u: number, v: number) => [0, 1, 2].map((k) => r4(centre[k] + along[k] * side * gap + U[k] * u + Z[k] * v));
@@ -188,8 +281,6 @@ function handbag(id: string, fm: BodyFormMeasurements, x: number, layer: number)
       { id: 'left', pts: [[-W / 2, H / 2], [-W / 2, -H / 2]] },
     ],
     placement: { kind: 'plane', origin: at(side, 0, 0), uAxis: U, vAxis: Z },
-    // A clasp at the middle of the front's top.
-    ...(side > 0 ? { trims: [{ kind: 'buckle', along: 'topMid', spacing: 1, size: 0.03, rgba: [0.83, 0.68, 0.32, 1] }] } : {}),
   });
   // The gusset: down one side, across the bottom and up the other, between the faces.
   const gusset = (): ClothPiece => {
@@ -231,7 +322,19 @@ function handbag(id: string, fm: BodyFormMeasurements, x: number, layer: number)
       placement: { kind: 'path', stations },
     };
   };
-  const pieces = [panel('front', 1), panel('back', -1), gusset(), handle('handleF', 1), handle('handleB', -1)];
+  // A flap from the back's top over the front, fastened to it by a clasp.
+  const F = 0.1;
+  const flap: ClothPiece = {
+    name: 'flap', rgba: leather,
+    edges: [
+      { id: 'top', pts: [[W / 2, 0], [-W / 2, 0]] as UV[] },
+      { id: 'sideL', pts: [[-W / 2, 0], [-W / 2, -F + 0.02]] as UV[] },
+      { id: 'bottom', pts: [[-W / 2, -F + 0.02], [-W / 2 + 0.02, -F], [W / 2 - 0.02, -F], [W / 2, -F + 0.02]] as UV[] },
+      { id: 'sideR', pts: [[W / 2, -F + 0.02], [W / 2, 0]] as UV[] },
+    ],
+    placement: { kind: 'plane', origin: at(1.6, 0, H / 2), uAxis: U, vAxis: Z },
+  };
+  const pieces = [panel('front', 1), panel('back', -1), gusset(), flap, handle('handleF', 1), handle('handleB', -1)];
   const round = (p: string) => [{ piece: p, edge: 'left' }, { piece: p, edge: 'bottom' }, { piece: p, edge: 'right' }];
   const seams: ClothSeam[] = [
     // The gusset's first long side lies on the back's face (across runs the way the forearm does, the front the other).
@@ -241,8 +344,10 @@ function handbag(id: string, fm: BodyFormMeasurements, x: number, layer: number)
     { name: 'fB', a: [{ piece: 'handleF', edge: 'endB' }], b: [{ piece: 'front', edge: 'handleR', reversed: true }] },
     { name: 'bA', a: [{ piece: 'handleB', edge: 'endA' }], b: [{ piece: 'back', edge: 'handleL', reversed: true }] },
     { name: 'bB', a: [{ piece: 'handleB', edge: 'endB' }], b: [{ piece: 'back', edge: 'handleR', reversed: true }] },
+    { name: 'flap', a: [{ piece: 'flap', edge: 'top' }], b: ['topR', 'handleR', 'topMid', 'handleL', 'topL'].map((edge) => ({ piece: 'back', edge })) },
   ];
-  return { id, name: id, pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces, seams, material: 'leather', spacing: 0.018, sewTime: 1, layer } } as unknown as SceneNode;
+  const fasten: ClothFastening[] = [{ a: { piece: 'flap', at: [0, -F + 0.012] }, b: { piece: 'front', at: [0, H / 2 - F + 0.012] }, trim: { kind: 'buckle', size: 0.028, rgba: [0.83, 0.68, 0.32, 1] } }];
+  return { id, name: id, pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces, seams, fasten, material: 'leather', spacing: 0.018, sewTime: 1, layer } } as unknown as SceneNode;
 }
 
 function urbanCollection(): SceneGraph {

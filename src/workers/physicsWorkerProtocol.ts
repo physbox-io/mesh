@@ -89,11 +89,20 @@ export interface FlexInfo {
 }
 
 export interface ClothTrimInfo {
-  kind: 'stud' | 'button' | 'buttonhole' | 'bead' | 'zipper' | 'buckle';
+  kind: 'stud' | 'button' | 'buttonhole' | 'bead' | 'zipper' | 'buckle' | 'stitch';
   /** Local vertex index. */
   particle: number;
   size: number;
   rgba: number[];
+  /** Between `particle` and this one (local), `t` of the way: placed finer than the cloth's points. */
+  toward?: number;
+  t?: number;
+  /** Set off across its line, metres (left going along it). */
+  offset?: number;
+  /** Which run along a line it is in, in order: a zip's tape is drawn through its run. */
+  run?: number;
+  /** The end of its run where a zip's slider sits. */
+  end?: boolean;
 }
 
 export interface FrameSnapshot extends Partial<SimBuffers> {

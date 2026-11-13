@@ -8,7 +8,7 @@
  * and go into the garment's own frame, where its shell is modelled.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ThreeEvent } from '@react-three/fiber';
+import { useThree, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { useGarmentSculpt } from '../../store/garmentSculptStore';
@@ -16,6 +16,8 @@ import { walkBodiesWorld } from '../../utils/bodyWorld';
 import { STROKE_SPACING, strokeDabs } from '../../utils/cloth/garmentSculpt';
 import { PEN_STEP, penCurve } from '../../utils/cloth/garmentCurves';
 import type { SceneNode } from '../../types/scene';
+import type { ClothPull } from '../../types/cloth';
+import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
 
 const Z = new THREE.Vector3(0, 0, 1);
 const PEN_RING = 0.008;
@@ -27,9 +29,17 @@ function worldOf(id: string): THREE.Matrix4 | null {
 }
 
 
-export function useClothSculpt(node: SceneNode | undefined, rebuiltWith: unknown) {
+/** A drag's path as a pull's route: its interior points this far apart at least, metres. */
+const ROUTE_STEP = 0.06;
+
+export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
+  const rebuiltWith = flex;
+  const { camera, gl } = useThree();
+  // Arranging: the point grabbed (by its place on its piece's pattern), the plane it is dragged in, the path so far.
+  const grab = useRef<{ piece: string; at: [number, number]; plane: THREE.Plane; obj: THREE.Object3D; path: THREE.Vector3[] } | null>(null);
   const active = useGarmentSculpt((s) => !!node && s.target === node.id);
   const pen = useGarmentSculpt((s) => s.tool === 'draw');
+  const hand = useGarmentSculpt((s) => s.tool === 'arrange');
   const brushRadius = useGarmentSculpt((s) => s.radius);
   const radius = pen ? PEN_RING : brushRadius;
   const spacing = pen ? PEN_STEP : STROKE_SPACING * brushRadius;
@@ -52,7 +62,51 @@ export function useClothSculpt(node: SceneNode | undefined, rebuiltWith: unknown
     r.visible = true;
   };
 
+  // A pull from a drag: the grabbed point to where it was let go, through the way it went (ClothPull).
+  const commitPull = () => {
+    const g = grab.current;
+    grab.current = null;
+    if (!g || !node || g.path.length < 2) return;
+    const world = worldOf(node.id);
+    let cur: SceneNode | undefined;
+    walkBodiesWorld(useStore.getState().sceneGraph?.nodes, (n) => { if (n.id === node.id) cur = n; });
+    const cloth = cur?.cloth;
+    if (!world || !cloth) return;
+    const inv = world.clone().invert(), round = (v: number) => Math.round(v * 1e4) / 1e4;
+    const inNode = (p: THREE.Vector3) => p.clone().applyMatrix4(inv).toArray().map(round) as [number, number, number];
+    const via: [number, number, number][] = [];
+    let last = g.path[0];
+    for (const p of g.path.slice(1, -1)) if (p.distanceTo(last) >= ROUTE_STEP) { via.push(inNode(p)); last = p; }
+    const pull: ClothPull = { piece: g.piece, at: g.at, to: inNode(g.path[g.path.length - 1]), ...(via.length ? { via } : {}) };
+    setMarks((m) => [...m, ...g.path]);
+    useStore.getState().updateNode(node.id, { cloth: { ...cloth, arrange: [...(cloth.arrange ?? []), pull] } } as Partial<SceneNode>);
+  };
+  // Where the pointer is on the plane the grabbed point is dragged in (the cloth's frame).
+  const onPlane = (ev: PointerEvent): THREE.Vector3 | null => {
+    const g = grab.current;
+    if (!g) return null;
+    const r = gl.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, camera);
+    const hit = ray.ray.intersectPlane(g.plane, new THREE.Vector3());
+    return hit ? g.obj.worldToLocal(hit) : null;
+  };
+  useEffect(() => {
+    if (!active || !hand) return;
+    const move = (ev: PointerEvent) => {
+      const g = grab.current, p = onPlane(ev);
+      if (!g || !p) return;
+      if (p.distanceTo(g.path[g.path.length - 1]) > 0.01) g.path.push(p);
+    };
+    const up = () => commitPull();
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+  });
+
   const commit = () => {
+    if (hand) return;
     const s = stroke.current;
     stroke.current = null;
     if (!s || !node?.cloth?.garment || !s.points.length) return;
@@ -90,6 +144,18 @@ export function useClothSculpt(node: SceneNode | undefined, rebuiltWith: unknown
     onPointerDown: (e: ThreeEvent<PointerEvent>) => {
       if (e.button !== 0) return;
       e.stopPropagation();
+      if (hand) {
+        // Grabbed by the nearest corner of the triangle under the pointer (either face of the slab).
+        const at = local(e), N = flex.vertnum, pos = (e.object as THREE.Mesh).geometry.attributes.position as THREE.BufferAttribute;
+        const corners = e.face ? [e.face.a, e.face.b, e.face.c] : [];
+        let best = -1, bd = Infinity;
+        for (const c of corners) { const d = at.distanceToSquared(new THREE.Vector3(pos.getX(c), pos.getY(c), pos.getZ(c))); if (d < bd) { bd = d; best = c % N; } }
+        const uv = best >= 0 ? flex.flat?.uv?.[best] : undefined;
+        if (!uv) return;
+        const facing = camera.getWorldDirection(new THREE.Vector3());
+        grab.current = { piece: flex.name.split('__').slice(1).join('__'), at: [uv[0], uv[1]], plane: new THREE.Plane().setFromNormalAndCoplanarPoint(facing, e.point.clone()), obj: e.object, path: [at] };
+        return;
+      }
       const at = local(e);
       stroke.current = { points: [at], pull: useGarmentSculpt.getState().pull !== e.shiftKey };
       place(e, at);
