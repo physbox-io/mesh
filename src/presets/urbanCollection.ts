@@ -3,7 +3,7 @@
  * general garment parts (no garment of its own kind):
  *
  * - A puffer jacket over knee-length shorts with a belt, a neckerchief under
- *   the jacket, a baseball cap. The puffer is a jacket quilted round with
+ *   the jacket (undone at the neck, its point showing), a baseball cap. The puffer is a jacket quilted round with
  *   drawn seams (GarmentDraft.curves), its channels sculpted out between them
  *   (`sculpt`), in a ripstop shell; the neckerchief its own cloth tied round
  *   the neck; the cap a hat whose peak is a stiff crescent sewn round the
@@ -109,7 +109,8 @@ function pufferLook(x: number): SceneNode[] {
     curves: quilt.curves, sculpt: quilt.sculpt,
     // Its channels stitched through, and its hem bound in a double row.
     trims: [
-      { kind: 'zipper', along: 'opening', fastened: true, size: 0.004, rgba: [0.78, 0.78, 0.8, 1] },
+      // Worn undone at the neck, the neckerchief's knot showing.
+      { kind: 'zipper', along: 'opening', fastened: 0.85, size: 0.004, rgba: [0.78, 0.78, 0.8, 1] },
       ...quilt.curves.map((c) => ({ kind: 'stitch' as const, along: c.name, rgba: [0.62, 0.24, 0.04, 1] })),
       { kind: 'stitch', along: 'hem', offset: [0.008, 0.016], rgba: [0.62, 0.24, 0.04, 1] },
     ],
@@ -132,6 +133,12 @@ function pufferLook(x: number): SceneNode[] {
   }, form, 0);
   // A structured cap: its crown stiffened (buckram behind the canvas), so it holds its shape and the peak on it.
   cap.cloth!.materialOverrides = { thickness: 0.0016, young: 4e7 };
+  // Undone at the neck, the collar's ends folded back by the wearer (pulled,
+  // then let go), the neckerchief showing between them.
+  puffer.cloth!.arrange = [
+    { piece: 'collar', at: [-0.428, 0.099], to: [-0.065, -0.15, 1.44] },
+    { piece: 'collar', at: [0.425, 0.099], to: [0.065, -0.15, 1.44] },
+  ];
   return [form, neckerchief(form), shorts, puffer, cap];
 }
 
@@ -153,8 +160,8 @@ function peakOutline(R: number, arcLen: number, depth: number): [number, number]
 /**
  * A neckerchief: a bandana folded and tied round the neck, its own cloth
  * (not sewn to anything), worn under the jacket: a band round the neck, its
- * ends sewn at the back as a knot holds them, a point at the front tucked in
- * under the jacket's front.
+ * ends sewn at the back as a knot holds them, its point hanging at the
+ * front, showing where the jacket is worn undone at the neck.
  */
 function neckerchief(form: SceneNode): SceneNode {
   const fm = form.bodyForm!, L = bodyLandmarks(fm);
