@@ -274,7 +274,7 @@ export function finishSurface(
    * and where the roughing bit does not reach, the finishing pass is what
    * cuts the part free.
    */
-  const scrapWall = (pt: PathPoint, level: number) =>
+  const scrapWall = (pt: { x: number; y: number }, level: number) =>
     job.scrap !== undefined && job.scrap(pt.x, pt.y) &&
     level > Math.min(0, sampleHeightmap(surface, pt.x, pt.y)) + Math.max(0, opts.roughingAllowanceMm) + 0.05;
   // Where each pass point stands and how high, worked out once: it is the
@@ -283,7 +283,7 @@ export function finishSurface(
   // Whole waterlines, not points: cut into pieces where it crosses onto the
   // part's ground, a waterline needs a ramp into every piece, and a bowl's
   // finishing went from 10 lifts to 181.
-  const onScrapWall = (plan: PathPoint[]) => {
+  const onScrapWall = (plan: { x: number; y: number }[]) => {
     const level = plan.length > 0 ? waterlineLevel(plan[0]) : undefined;
     if (level === undefined || job.scrap === undefined) return false;
     let n = 0;
