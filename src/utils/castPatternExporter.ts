@@ -629,7 +629,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     let trapped = 0;
     label.fill(0);
     // 1 = above the plane, 2 = below it; a run sealed by columns that cross the plane is a core.
-    const side = (k: number) => (!hit[k] || thickness[k] <= 0 ? 0 : bottom[k] > p + COLUMN_TOL_MM ? 1 : top[k] < p - COLUMN_TOL_MM ? 2 : 0);
+    const side = (k: number): number => (!hit[k] || thickness[k] <= 0 ? 0 : bottom[k] > p + COLUMN_TOL_MM ? 1 : top[k] < p - COLUMN_TOL_MM ? 2 : 0);
     const sealed = new Map<number, boolean>();
     let next = 1;
     for (let k0 = 0; k0 < hit.length; k0++) {
@@ -647,7 +647,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
           const n = rr * cols + cc;
           if (!hit[n]) { closed = false; continue; }
           // A grazed column (one face hit, no metal) is passed through, whichever side it is.
-          const sn = thickness[n] <= 0 ? s0 : side(n);
+          const sn: number = thickness[n] <= 0 ? s0 : side(n);
           if (sn === s0) {
             if (!label[n]) { label[n] = id; stack.push(n); }
           } else if (sn !== 0) closed = false;
