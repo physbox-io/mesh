@@ -99,6 +99,20 @@ describe('EXPORT_PRINT', () => {
     expect(reply.files[0].bytes).toBe(84 + 12 * 50);
   });
 
+  it('sends split sections as a file each unless told otherwise, as the dialog offers first', async () => {
+    const section = (id: string, x: number): SceneNode => ({
+      id, name: id, type: 'body', pos: [x, 0, 0.005], joints: [], children: [],
+      geoms: [{ name: 'g', type: 'box', size: [0.005, 0.005, 0.005] }],
+      printPose: { up: [0, 0, 1], spin: 0 },
+    } as SceneNode);
+    const split = { ...store, sceneGraph: { nodes: [section('beam_part1', 0), section('beam_part2', 0.01)] } } as unknown as PhysicsState;
+    const splitCtx = { store: split, toId: (v: unknown) => v };
+    const asked = await castCommands.EXPORT_PRINT({ format: 'stl', includeFiles: false }, splitCtx) as { files: unknown[] };
+    expect(asked.files.length).toBe(2);
+    const one = await castCommands.EXPORT_PRINT({ format: 'stl', separate: false, includeFiles: false }, splitCtx) as { files: unknown[] };
+    expect(one.files.length).toBe(1);
+  });
+
   it('refuses an unknown format or body, and sends no bytes when they will not be kept', async () => {
     expect(await castCommands.EXPORT_PRINT({ format: 'obj' }, ctx)).toMatchObject({ ok: false });
     expect(await castCommands.EXPORT_PRINT({ ids: ['ghost'] }, ctx)).toMatchObject({ ok: false, error: 'No body called ghost.' });

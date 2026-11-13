@@ -17,6 +17,7 @@ import { filamentSpec } from '../../utils/filaments';
 import { exportPrintFiles } from '../../utils/printExport';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import type { McpCommands } from './types';
+import type { SceneNode } from '../../types/scene';
 
 /**
  * What an export is called: the scene's name, else the one body exported,
@@ -298,10 +299,19 @@ export const castCommands: McpCommands = {
     const exportBed = bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
       ? { widthMm: bedArr[0], depthMm: bedArr[1], heightMm: bedArr[2] }
       : store.printBed;
+    /*
+     * An STL is one soup: split sections in it stand assembled, as big as the
+     * part that would not fit the bed - a 478 mm beam for a 256 mm bed, every
+     * cut face touching the next. Unless told otherwise, sections go out a
+     * file each, stood as they print, as the editor's dialog offers first.
+     */
+    const exported = ids.length ? ids.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!) : store.sceneGraph.nodes;
+    const posed = (nodes: SceneNode[]): boolean => nodes.some((n) => !!n.printPose || posed(n.children ?? []));
+    const separate = typeof msg.separate === 'boolean' ? msg.separate : format === 'stl' && posed(exported);
     const result = exportPrintFiles(store.sceneGraph, {
       format,
       ids,
-      separate: msg.separate === true,
+      separate,
       ...(typeof msg.plate === 'boolean' ? { plate: msg.plate } : {}),
       ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
       bed: exportBed,
