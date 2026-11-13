@@ -1431,10 +1431,12 @@ export function generateMoldMeshes(
   // pocket this deep, the mold has to bend to give the casting up.
   const flexibleMoldAdvised = cavityDepthMm >= 8 && minDraftDeg < 3;
 
-  // Registration pins sit in the flange, with one corner keyed along the bottom
-  // flange (shifted in X only, not diagonally into the cavity corner) so the
-  // halves cannot be closed 180 degrees around while keeping full Y clearance
-  // from the cavity.
+  // Registration pins sit in the flange, with one corner's pin moved along the
+  // bottom flange (in X only: it stays in the wall's band, clear of the cavity)
+  // so the lid cannot be closed turned round. It was moved by 0.25 mm, the
+  // socket's own clearance, and a lid turned 180° seated on all four. Now far
+  // enough that a turned lid's pin lands on the flat face a millimetre past
+  // the socket's rim, and stands off by the pin's height.
   const pinInsetX = opts.wallMarginMm / 2;
   const pinInsetY = opts.wallMarginMm / 2;
   const pinBaseR = opts.pinDiameterMm / 2;
@@ -1442,8 +1444,9 @@ export function generateMoldMeshes(
   const socketRimR = pinBaseR + opts.pinToleranceMm;
   const socketBotR = pinTopR + opts.pinToleranceMm;
   const socketDepth = opts.pinHeightMm + 0.5;
-  const maxKeyOffsetX = Math.max(0, pinInsetX - socketRimR - 1.5);
-  const keyOffsetX = Math.min(maxKeyOffsetX, Math.min(4, Math.max(2, partHalfW * 0.4)));
+  // As far as the next pin along leaves room for: both sockets and a millimetre between.
+  const maxKeyOffsetX = Math.max(0, mw2 * 2 - 2 * pinInsetX - 2 * socketRimR - 1);
+  const keyOffsetX = Math.min(maxKeyOffsetX, socketRimR + pinTopR + 1);
 
   // A block that follows the part: its plan, with the pins on a ring halfway
   // out into the wall (or clear of the cavity by a socket and a millimetre).

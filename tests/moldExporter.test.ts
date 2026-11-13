@@ -782,3 +782,28 @@ describe('One-part open mold and parting overhang checks', () => {
   });
 });
 
+
+describe('registration pins', () => {
+  // The keyed pin was moved 0.25 mm, the socket's clearance: a lid turned
+  // round seated on all four pins and closed over a mismatched cavity.
+  const turned = (pts: Array<[number, number]>, deg: number) => {
+    const a = (deg * Math.PI) / 180;
+    return pts.map(([x, y]) => [x * Math.cos(a) - y * Math.sin(a), x * Math.sin(a) + y * Math.cos(a)] as [number, number]);
+  };
+  for (const [name, scene] of [['box', box], ['dome', dome], ['square', bodyWith({ type: 'cylinder', size: [0.02, 0.01] }, [0, 0, 0.01])]] as const) {
+    it(`keep a lid turned round off its sockets: ${name}`, () => {
+      const r = generateMoldMeshes(scene, { moldType: 'clamshell' });
+      expect(r.success, r.error).toBe(true);
+      const f = r.features!;
+      const sockets = f.sockets.map((k) => k.atMm);
+      const rimR = f.sockets[0].diaMm / 2;
+      const tipR = f.pins[0].narrowDiaMm! / 2;
+      const square = Math.abs(r.moldWidthMm - r.moldDepthMm) < 0.5;
+      for (const deg of square ? [90, 180, 270] : [180]) {
+        // Some pin of the turned lid lands on the flat face, clear of every socket.
+        const miss = Math.max(...turned(sockets, deg).map(([x, y]) => Math.min(...sockets.map(([sx, sy]) => Math.hypot(x - sx, y - sy)))));
+        expect(miss, `${deg}°`).toBeGreaterThan(rimR + tipR);
+      }
+    });
+  }
+});
