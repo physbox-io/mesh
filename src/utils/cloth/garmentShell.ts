@@ -114,7 +114,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     if (!limb) continue;
     let s0 = 0, s1 = limb.length, zMin = -Infinity;
     for (const ct of plan.cuts) {
-      if (ct.kind === 'limbStart' && ct.limb === limb.name) s0 = Math.max(s0, ct.s);
+      if (ct.kind === 'limbStart' && ct.limb === limb.name) s0 = Math.max(s0, ct.s - profileMax(ct.profile));
       if (ct.kind === 'limbEnd' && ct.limb === limb.name) s1 = Math.min(s1, ct.s);
       if (ct.kind === 'hem' && ct.on.includes(c.part)) zMin = Math.max(zMin, ct.z - ct.train - profileMax(ct.profile));
     }
@@ -306,7 +306,11 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     const path = limbs[limb].path, cl = path.closest(p, limbs[limb].length + 0.2), T = path.tangent(cl.s);
     const flat = (v: number[]) => { const k = v[0] * T[0] + v[1] * T[1] + v[2] * T[2]; return [v[0] - k * T[0], v[1] - k * T[1], v[2] - k * T[2]]; };
     const unitV = (v: number[]) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
-    const down = unitV(flat([0, 0, -1]));
+    // A limb near upright (the head) has no underside to start from: round
+    // it from the front toward the wearer's left, as round the body.
+    const fd = flat([0, 0, -1]);
+    if (Math.hypot(fd[0], fd[1], fd[2]) < 0.5) return turnRound(p[0] - cl.p[0], p[1] - cl.p[1], p[2] - cl.p[2], unitV(flat([0, -1, 0])), unitV(flat([1, 0, 0])));
+    const down = unitV(fd);
     const fwd = unitV([T[1] * down[2] - T[2] * down[1], T[2] * down[0] - T[0] * down[2], T[0] * down[1] - T[1] * down[0]]);
     // Toward the front (-y) whichever way the limb runs.
     const f = fwd[1] > 0 ? fwd.map((v) => -v) : fwd;
@@ -350,7 +354,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       }
       case 'waist': return on(c.on, p) ? c.z + (c.profile ? profileAt(c.profile, bodyTurn(x, y - centreY(z))) : 0) - z : 1;
       case 'limbEnd': return on(c.on, p) ? c.s + (c.profile ? profileAt(c.profile, limbTurn(c.limb, p)) : 0) - alongLimb(c.limb, p) : 1;
-      case 'limbStart': return on(c.on, p) ? alongLimb(c.limb, p) - c.s : 1;
+      case 'limbStart': return on(c.on, p) ? alongLimb(c.limb, p) - c.s + (c.profile ? profileAt(c.profile, limbTurn(c.limb, p)) : 0) : 1;
       case 'plane': return inPlaneMask(c, p, y < centreY(z)) ? -planeDist(c, p) : 1;
     }
   };

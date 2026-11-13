@@ -36,7 +36,7 @@ const unit = (a: V3) => { const l = len(a) || 1; return [a[0] / l, a[1] / l, a[2
 const given = <T extends object>(o: T | undefined): Partial<T> => Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
 
 export const LAPEL_DEFAULTS: Required<GarmentLapels> = { break: 0.22, width: 0.075, peak: 0.01, rollAt: 0.8, notch: 0.035, shawl: false };
-export const COLLAR_DEFAULTS: Required<Omit<GarmentCollar, 'standFront' | 'material' | 'rgba'>> = { stand: 0.03, fall: 0.045, point: 0, round: 0, separateStand: false };
+export const COLLAR_DEFAULTS: Required<Omit<GarmentCollar, 'standFront' | 'material' | 'materialOverrides' | 'rgba'>> = { stand: 0.03, fall: 0.045, point: 0, round: 0, separateStand: false };
 
 /** How far a turned-back or overlying layer stands off the cloth under it: the cloth's thickness and a little. */
 const LAYER_OFF = 0.0045;
@@ -541,7 +541,7 @@ export function collarPieces(collar: GarmentCollar, run0: number[], closed: bool
       ...Array.from({ length: m - 1 }, (_, k) => loc(i1 - 1 - k, j1)),
       ...Array.from({ length: cols - 2 }, (_, k) => loc(i0, j1 - 1 - k)),
     ];
-    return { name, rgba: colour, ...(collar.material ? { material: collar.material } : {}), uv, tris, outline, start, tacks, shared, pressed: true, strain95: flat.strain95, loc };
+    return { name, rgba: colour, ...(collar.material ? { material: collar.material } : {}), ...(collar.materialOverrides ? { materialOverrides: collar.materialOverrides } : {}), uv, tris, outline, start, tacks, shared, pressed: true, strain95: flat.strain95, loc };
   };
   const onNeck = (i: number, j: number) => (j === 0 ? neckPts[i].ref : undefined);
   if (shawl) {

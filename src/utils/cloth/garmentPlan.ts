@@ -53,7 +53,7 @@ export type GarmentCut =
   | { kind: 'waist'; z: number; on: Part[]; profile?: EdgeProfile }
   /** Keep within `s` of a limb's root (a sleeve's end), or beyond it; further by `profile` round the limb. */
   | { kind: 'limbEnd'; limb: LimbName; s: number; on: Part[]; profile?: EdgeProfile }
-  | { kind: 'limbStart'; limb: LimbName; s: number; on: Part[] }
+  | { kind: 'limbStart'; limb: LimbName; s: number; on: Part[]; profile?: EdgeProfile }
   /** Round where a limb leaves the body, as deep as asked past its section. */
   | { kind: 'armhole'; limb: LimbName; extra: number }
   /** Away on the normal's side of a plane, within its mask. */
@@ -112,7 +112,7 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
     const limb = limbs[d.over];
     const from = d.from ?? 0, to = d.to ?? 1;
     covers.push({ part: d.over, off, names: 'gore' });
-    cuts.push({ kind: 'limbStart', limb: d.over, s: from * limb.length, on: [d.over] });
+    cuts.push({ kind: 'limbStart', limb: d.over, s: from * limb.length, on: [d.over], profile: edgeOf(draft, 'top')?.profile });
     if (!d.cap) cuts.push({ kind: 'limbEnd', limb: d.over, s: to * limb.length, on: [d.over], profile: edgeOf(draft, 'end')?.profile });
     seams.push({ kind: 'roundLimb', limb: d.over, n: Math.max(2, Math.round(d.gores ?? 2)) });
     if (d.opening) seams.push({ kind: 'frontOpening', on: [d.over] });

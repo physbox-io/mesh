@@ -430,6 +430,8 @@ export interface GarmentCollar {
   /** The stand cut as a piece of its own, sewn to the fall along the roll line (a shirt's collar band). Default false: one piece, folded. */
   separateStand?: boolean;
   material?: ClothMaterialName;
+  /** Its fabric changed from `material`'s: interfaced or padded, so it stands (a puffer's stand collar, a shirt collar's band). */
+  materialOverrides?: Partial<ClothMaterial>;
   rgba?: number[];
 }
 
@@ -598,9 +600,9 @@ export interface EdgeProfile {
  * - `neckline`: t across from the centre (0) to the side (1); value = how far
  *   it drops there, as a fraction of its depth (round is sqrt(1 - t^2), a V
  *   1 - t). `side` front (default) or back; `width` widens it, metres each side.
- * - `hem`, `top` (a band's top edge), `cuff` (both sleeves' ends), `end` (a
+ * - `hem`, `top` (a band's top edge; a tube's or hat's start, its band), `cuff` (both sleeves' ends), `end` (a
  *   tube's): t round the part from the centre front (a limb: from its
- *   underside) toward the wearer's left, back at 0.5; value = metres longer
+ *   underside; an upright one, the head, from its front) toward the wearer's left, back at 0.5; value = metres longer
  *   there (lower for a hem, higher for a top, further along for a cuff).
  */
 export interface GarmentEdge {
