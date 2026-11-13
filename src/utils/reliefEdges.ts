@@ -201,6 +201,12 @@ export function bridgeOuterEdgeBevel(
  * on: a groove's floor, a step. A dome's flank meets its footprint's edge at a
  * single deep sample with the surface climbing steeply away from it, and
  * carrying that out would cut a slot across the margin.
+ *
+ * And only a stretch of an edge with higher ground at both ends of it along
+ * the edge: an opening. Where a side is low from corner to corner it is not a
+ * groove running off but the model's own base, and a plaque whose base stands
+ * below its lettering had all four carried out to the stock: the whole board
+ * surfaced, 89% of the finishing pass, round a part asked to be left in it.
  */
 export function extendOpenEdges(
   hm: Heightmap,
@@ -212,6 +218,23 @@ export function extendOpenEdges(
   const z = hm.z;
   /** Whether the surface at an edge sample runs on level from the sample inward of it. */
   const level = (k: number, inward: number, step: number) => Math.abs(z[k] - z[inward]) <= step;
+  /** For one side's samples, in order along it, which lie in an opening: low, with high ground beyond both ends. */
+  const openings = (samples: number[]) => {
+    const low = samples.map((k) => z[k] < -OPEN_EDGE_MM);
+    const open = new Uint8Array(samples.length);
+    for (let a = 0; a < samples.length; ) {
+      if (!low[a]) { a++; continue; }
+      let b = a;
+      while (b + 1 < samples.length && low[b + 1]) b++;
+      if (a > 0 && b < samples.length - 1) open.fill(1, a, b + 1);
+      a = b + 1;
+    }
+    return open;
+  };
+  const rowsOf = (c: number) => Array.from({ length: j1 - j0 + 1 }, (_, t) => (j0 + t) * hm.cols + c);
+  const colsOf = (r: number) => Array.from({ length: i1 - i0 + 1 }, (_, t) => r * hm.cols + i0 + t);
+  const openMinX = openings(rowsOf(i0)), openMaxX = openings(rowsOf(i1));
+  const openMinY = openings(colsOf(j0)), openMaxY = openings(colsOf(j1));
   let changed = false;
   for (let r = 0; r < hm.rows; r++) {
     const rj = Math.min(j1, Math.max(j0, r));
@@ -225,6 +248,10 @@ export function extendOpenEdges(
       if (dy > 0 ? !faces.minY : dy < 0 ? !faces.maxY : false) continue;
       if (dx !== 0 && !level(src, src + dx, hm.stepX)) continue;
       if (dy !== 0 && !level(src, src + dy * hm.cols, hm.stepY)) continue;
+      if (dx > 0 && !openMinX[rj - j0]) continue;
+      if (dx < 0 && !openMaxX[rj - j0]) continue;
+      if (dy > 0 && !openMinY[ci - i0]) continue;
+      if (dy < 0 && !openMaxY[ci - i0]) continue;
       const from = z[src];
       const k = r * hm.cols + c;
       if (from < -OPEN_EDGE_MM && from < z[k]) {
