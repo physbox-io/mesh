@@ -656,3 +656,37 @@ The trim tests in garments.test pass. Run garments.test (long) before merging.
 - remove the MEASURE-ONLY env switches (CLOTH_NOGAP in clothSelf, CLOTH_UNTANGLE in xpbd);
 - delete the scratch `tests/_*.test.ts`;
 - rebase on main.
+
+### Session 11 (2026-11-12): the critique list worked through
+
+Render script now at `scratchpad/renderv.mjs` of session 9de75c9f (same as before, plus an optional JSON views
+argument: `node renderv.mjs <outdir> '{"name":{"position":[..],"target":[..]}}'`). Copy it if the scratchpad is gone.
+
+- **Quilting sawtooth (1348167).** Two faults in drawn-curve cutting, both engine-wide:
+  - `curveSlit` searched only the 3 cm buckets round a point; a big triangle's corner beyond them read as the
+    positive side and the puffer's rings doubled into a second row 5 cm up at the front and back. Now a ring-by-ring
+    search with a box reject.
+  - A line drawn off the surface landed facet to facet (+-3 mm teeth). Its move onto the surface is averaged along it
+    (`OFFSET_WINDOW`), the drawn corners kept.
+  - `splitAlong` now evaluates `f` lazily (only the corners of triangles the cut is in). Regression test in
+    garmentCurves.test ("smooth closed seam").
+- **Grain (0617964).** `flattenPanel` turned pieces by regressing height on flat position; a short wrapped band
+  (a quilt channel) came out 5-33 deg off grain. Now the area-weighted per-triangle climb: torso panels 0-4 deg.
+  Affects every garment's uv orientation (rigid rotation only; prints and weave follow).
+- **Taffeta (55d1892):** 6 mm ripstop, softer.
+- **Hood (95bc94a):** its neck edge was 0.22 m against a 0.337 m share of the hoodie's 0.734 m neckline; sewn in the
+  middle of its share it stood open 128 mm at the nape. Drafted to the neckline; nape stitch closes to 1 mm.
+- **Bag flap (c0c718f, 6ba9583):** drafted to cross the mouth and come down to the clasp. Rigid trims wider than the
+  cloth spacing (`RESTS_ON`: buckle) are raised onto the highest cloth under them; a fastening's trim goes on the
+  face away from what it fastens (`ClothTrim.flip`, set from the start geometry; not yet exercised by a preset).
+- **Zips (423fcf3):** `GarmentTrim.fastened` takes a fraction (done up from the bottom); Arrange panel slider.
+  One slider per opening (both panels drew one), pull tab along the line hanging down, tape on the cloth's inner
+  face into its own cloth (no slivers).
+- **Neckerchief (b85f258):** the puffer is worn 85% zipped with the collar ends pulled open; the bandana's point shows.
+  A front knot with fastened tails was tried and read as a necktie.
+- **Cap peak (cc113ed), the user's complaint ("a very silly brim"):** a circular inner edge as curved as the front of
+  the oval left the sides hanging in a wall beside the face. The inner edge is now the band's oval laid flat.
+  Lesson: a stiff piece sewn to a curve must be drafted to that curve exactly; any mismatch cones or walls it.
+- **Not done:** jeans side-seam topstitch looks speckled (dash orientation per segment); the fly J is mostly under
+  the hoodie. MCP docs for `fastened` as a number (with the rest of the held docs).
+- Scratch probes added this session: `tests/_quiltprobe`, `_hoodprobe`, `_bagprobe`, `_collarprobe`, `_peakprobe`.
