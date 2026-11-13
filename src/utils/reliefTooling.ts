@@ -292,7 +292,7 @@ export function deriveReliefFeeds(
     | 'roughingToolDiaMm'
     | 'roughingFlutes'
     | 'carveDepthMm'
-  >,
+  > & Partial<Pick<ReliefCarveOptions, 'finishingToolType'>>,
   spindle?: SpindleRange | null,
   /** Fastest the gantry tracks while cutting, mm/min — `$110`/`$111`. */
   maxFeedMmMin?: number
@@ -335,9 +335,11 @@ export function deriveReliefFeeds(
     finishingFeedrate: finish.feedMmMin,
     finishingPlungeRate: finish.plungeMmMin,
     // A ball nose leaves a scallop of about 3% of its radius at this spacing,
-    // which sands out; a V-bit's ridge is set by its angle instead, and a flat
-    // mill leaves none at all so it can stride out.
-    finishingStepoverPercent: 25,
+    // which sands out; a V-bit's ridge is set by its angle instead. A flat mill
+    // leaves none on a flat, so it strides further - as far as the solid
+    // dialog has always set, and no further: on the slopes a hybrid still
+    // rasters, its steps grow with the stride.
+    finishingStepoverPercent: opts.finishingToolType === 'flat' ? 30 : 25,
     // 0 means "one bite as deep as the cutter is wide", which is what a
     // finishing pass over already-roughed stock can take.
     finishingStepdownMm: 0,

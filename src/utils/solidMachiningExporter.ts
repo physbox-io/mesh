@@ -664,6 +664,7 @@ export function deriveSolidOptions(
         roughingToolDiaMm: opts.roughingToolDiaMm,
         roughingFlutes: opts.roughingFlutes,
         carveDepthMm: part?.z ?? 10,
+        finishingToolType: opts.finishingToolType,
       },
       spindle,
       maxFeedMmMin

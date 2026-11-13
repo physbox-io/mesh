@@ -245,15 +245,15 @@ export function useCarveTooling<T extends CarveTooling>(
 
   // Deliberately narrow: naming `options` entire would recompute the recipe on
   // every keystroke in an unrelated box and restart the 250 ms settle behind it.
-  const { material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes } = options;
+  const { material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes, finishingToolType } = options;
   const derived: DerivedReliefSettings = useMemo(
     () =>
       deriveReliefFeeds(
-        { material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes, carveDepthMm: depthMm },
+        { material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes, carveDepthMm: depthMm, finishingToolType },
         machineState.motion.spindle,
         cuttingRateLimit
       ),
-    [cuttingRateLimit, material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes, depthMm, machineState.motion.spindle]
+    [cuttingRateLimit, material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes, finishingToolType, depthMm, machineState.motion.spindle]
   );
 
   // What the job is actually cut with: the chosen tooling, the derived recipe
