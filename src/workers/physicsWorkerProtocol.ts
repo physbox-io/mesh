@@ -297,6 +297,8 @@ export type MainToWorkerMessage =
   | { type: 'TICK'; delta: number; /** Date.now() when posted, so a backlog can be told apart. */ sentAt?: number }
   | { type: 'RESUME' }
   | { type: 'SET_DRAG'; nodeId: string | null; target: DragTarget | null }
+  /** The point of cloth the drag holds, by its index as drawn (flex vertadr + vertex); null for none. */
+  | { type: 'SET_CLOTH_GRAB'; vertex: number | null }
   | { type: 'SET_KEYS'; keys: string[] }
   | { type: 'SET_QPOS'; jointName: string; axis: number; value: number | readonly number[] }
   | { type: 'SET_CTRL'; actuatorName: string; value: number }

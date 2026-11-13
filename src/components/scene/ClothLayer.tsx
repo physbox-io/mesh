@@ -18,6 +18,7 @@ import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
 import { CLOTH_THICKNESS } from '../../utils/cloth/xpbd';
 import { acquirePrintTexture } from './clothPrintTexture';
 import { useClothSculpt } from './useClothSculpt';
+import { useClothGrab } from './useClothGrab';
 import { weaveTexture } from './clothWeaveTexture';
 import { useClothTrims } from './clothTrims';
 
@@ -214,6 +215,7 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   });
 
   const sculpt = useClothSculpt(node, flex);
+  const grab = useClothGrab(node?.id, flex);
   const onClick = (e: ThreeEvent<MouseEvent>) => {
     if (!node) return;
     e.stopPropagation();
@@ -222,7 +224,7 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   };
   return (
     <>
-      <mesh geometry={geometry} material={material} frustumCulled={false} castShadow receiveShadow onClick={onClick} {...sculpt.handlers} />
+      <mesh geometry={geometry} material={material} frustumCulled={false} castShadow receiveShadow onClick={onClick} onPointerDown={grab.onPointerDown} {...sculpt.handlers} />
       {sculpt.overlay}
       {trims.objects.map((o, i) => <primitive key={i} object={o} />)}
     </>

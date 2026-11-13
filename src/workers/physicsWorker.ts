@@ -942,6 +942,9 @@ const joinedMass = (bId: number): number => {
   return mass;
 };
 
+/** The point of cloth the current drag holds, by its index as drawn, if it holds cloth. */
+let clothGrabVertex: number | null = null;
+
 const applyDragForce = () => {
   const mdl = model!;
   const dat = data!;
@@ -4910,6 +4913,16 @@ const handleMessage = async (evt: MessageEvent) => {
       case 'SET_DRAG': {
         draggedNodeId = msg.nodeId ?? null;
         dragTarget = msg.target ?? null;
+        // A drag that holds cloth: its point drawn to the target; let go with the drag.
+        if (clothGrabVertex !== null && cloth) {
+          if (draggedNodeId && dragTarget) cloth.sim.grab(clothGrabVertex, [dragTarget.x, dragTarget.y, dragTarget.z]);
+          else if (!draggedNodeId) { cloth.sim.grab(null, null); clothGrabVertex = null; }
+        }
+        break;
+      }
+      case 'SET_CLOTH_GRAB': {
+        clothGrabVertex = msg.vertex;
+        if (msg.vertex === null) cloth?.sim.grab(null, null);
         break;
       }
       case 'SET_KEYS': {

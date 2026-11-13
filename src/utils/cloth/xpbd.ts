@@ -32,6 +32,14 @@ import { colliderContact, type Collider } from './clothColliders';
  * for about a second of compute per second simulated.
  */
 export const CLOTH_SUBSTEP = 1 / 600;
+/** How fast a held point of cloth follows the hand pulling it, m/s. */
+const GRAB_SPEED = 1.5;
+/**
+ * How much heavier a held point is than it was: it leads, and is still pushed
+ * by what it meets. Pulling a hood down over the head: 20x could not move it;
+ * fixed (no weight), 57 crossings; 200x, 10 over the cloth's own 4.
+ */
+const GRAB_HEAVY = 200;
 /** After its sew time, how long cloth sewn at the start is let hang before it is first drawn, seconds. */
 const PRESEW_REST = 0.5;
 /** Its step meanwhile, seconds. */
@@ -93,6 +101,7 @@ export class ClothSim {
   private edges: Int32Array; private edgeRest: Float64Array; private edgeMin: Float64Array; private edgeAlpha: Float64Array;
   private elastics: Int32Array; private elasticFlat: Float64Array; private elasticRest: Float64Array; private elasticAlpha: Float64Array;
   private boards: BoardShapes;
+  private grabbed = -1; private grabW = 0; private grabTo: number[] | null = null;
   private bends: Int32Array; private bendWeights: Float64Array; private bendAlpha: Float64Array; private bendRest: Float64Array;
   private limits: Int32Array; private limitRest: Float64Array;
   private stitches: Int32Array; private stitchGap: Float64Array; private stitchSew: Float64Array;
@@ -522,6 +531,16 @@ export class ClothSim {
     const [gx, gy, gz] = env.gravity;
     this.time += h;
     const t = this.time;
+    // Held by a hand: drawn toward where it is pulled, no faster than a hand
+    // pulls cloth, and made heavy rather than fixed, so what it meets still
+    // pushes it (fixed, it went through the head and dragged a hood's folds
+    // through each other; on a spring, friction on the head held it still).
+    if (this.grabbed >= 0 && this.grabTo) {
+      const k = 3 * this.grabbed, dx = this.grabTo[0] - x[k], dy = this.grabTo[1] - x[k + 1], dz = this.grabTo[2] - x[k + 2];
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz), step = Math.min(1, (GRAB_SPEED * h) / Math.max(d, 1e-12));
+      x[k] += dx * step; x[k + 1] += dy * step; x[k + 2] += dz * step;
+      v[k] = v[k + 1] = v[k + 2] = 0;
+    }
     // Predict.
     for (let i = 0; i < n; i++) {
       if (!w[i]) continue;
@@ -876,6 +895,33 @@ export class ClothSim {
       adr += g.particles.length;
     }
     return out;
+  }
+
+  /**
+   * A point of the cloth held and drawn toward `to` (world, metres), as a hand
+   * pulls it while the scene runs (a hood pulled down), by its index as drawn
+   * (writeRender's order); null lets it go, still.
+   */
+  grab(renderIndex: number | null, to: number[] | null) {
+    let particle = -1;
+    if (renderIndex !== null) {
+      let o = 0;
+      for (const { model, base } of this.pieces) for (const g of model.groups) {
+        if (particle < 0 && renderIndex < o + g.particles.length) particle = base + g.particles[renderIndex - o];
+        o += g.particles.length;
+      }
+    }
+    if (particle !== this.grabbed) {
+      if (this.grabbed >= 0) {
+        // Let go where it is, not flung by the last pull.
+        const k = 3 * this.grabbed;
+        this.w[this.grabbed] = this.grabW;
+        this.v[k] = this.v[k + 1] = this.v[k + 2] = 0;
+      }
+      this.grabbed = particle;
+      if (particle >= 0) { this.grabW = this.w[particle]; this.w[particle] = this.grabW / GRAB_HEAVY; }
+    }
+    this.grabTo = particle >= 0 && to ? to.slice(0, 3) : null;
   }
 
   renderSize(): number {

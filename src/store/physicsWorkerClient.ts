@@ -530,6 +530,8 @@ export class PhysicsWorkerClient {
     this.worker.postMessage({ type: 'SET_SOUND', enabled });
   }
   setDrag(nodeId: string | null, target: { x: number; y: number; z: number } | null) { this.worker.postMessage({ type: 'SET_DRAG', nodeId, target }); }
+  /** Hold this point of the cloth with the drag that follows (its index as drawn); null for none. */
+  setClothGrab(vertex: number | null) { this.worker.postMessage({ type: 'SET_CLOTH_GRAB', vertex }); }
   setKeys(keys: string[]) { this.worker.postMessage({ type: 'SET_KEYS', keys }); }
   setQpos(jointName: string, axis: number, value: number | readonly number[]) { this.worker.postMessage({ type: 'SET_QPOS', jointName, axis, value }); }
   setCtrl(actuatorName: string, value: number) { this.worker.postMessage({ type: 'SET_CTRL', actuatorName, value }); }
