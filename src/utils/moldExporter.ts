@@ -19,6 +19,8 @@
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import type { ManifoldToplevel, Manifold } from 'manifold-3d';
+import { treatThinGaps, thinGapWarning, type ThinGapMode } from './thinGaps';
+import type { PrintLimits } from './printLimits';
 import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, sameFloat32, unsolidPartRefusal, type Mat4Tuple, type Triangle3D } from './moldManifold';
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
@@ -110,6 +112,13 @@ export interface MoldOptions {
   linerConstruction?: LinerConstruction;
   /** A tongue and groove round a lined clamshell's cavity, so the seam needs no tape (default on). */
   sealRidge?: boolean;
+  /** The printer's thinnest skin and wall (printerSettings.ts); gaps in the casting are held to them. */
+  printLimits?: PrintLimits;
+  /**
+   * Gaps in the casting thinner than the printer can line: 'leave' (default,
+   * named in a warning), 'close' (filled with casting) or 'fix' (opened up).
+   */
+  thinGaps?: ThinGapMode;
   /** Base diameter of alignment pins in mm. */
   pinDiameterMm: number;
   /** Height of alignment pins in mm. */
@@ -1262,12 +1271,34 @@ export function generateMoldMeshes(
   const cy = (mnY + mxY) / 2;
   const cz = (mnZ + mxZ) / 2;
 
-  const triCount = partTris.length / 9;
-  const tris = new Float64Array(partTris.length);
+  let triCount = partTris.length / 9;
+  let tris = new Float64Array(partTris.length);
   for (let i = 0; i < partTris.length; i += 3) {
     tris[i] = partTris[i] * 1000 - cx;
     tris[i + 1] = partTris[i + 1] * 1000 - cy;
     tris[i + 2] = (partTris[i + 2] * 1000 - cz) * zScale;
+  }
+
+  // Gaps in the casting thinner than the printer can line: named, filled or
+  // opened before anything is built round them.
+  let partSolidIds = sceneSolidIds;
+  if (activeWasm && opts.printLimits) {
+    const { part: whole } = buildPartManifold(activeWasm, tris, sceneSolidIds);
+    if (whole) {
+      const mode = opts.thinGaps ?? 'leave';
+      const { part: treated, report } = treatThinGaps(activeWasm, whole, opts.printLimits, mode);
+      const line = thinGapWarning(report, opts.printLimits, mode);
+      if (line) warnings.push(line);
+      if (treated !== whole) {
+        const out = manifoldToTriangles(treated);
+        tris = new Float64Array(out.length * 9);
+        out.forEach((t, k) => tris.set([...t.a, ...t.b, ...t.c], k * 9));
+        triCount = out.length;
+        partSolidIds = [];
+        treated.delete();
+      }
+      whole.delete();
+    }
   }
 
   const partHalfW = partWidthMm / 2;
@@ -1454,7 +1485,7 @@ export function generateMoldMeshes(
   // A block that follows the part: its plan, with the pins on a ring halfway
   // out into the wall (or clear of the cavity by a socket and a millimetre).
   const outlines: MoldOutlines | null = opts.blockShape === 'fit' && activeWasm
-    ? moldOutlines(activeWasm, tris, sceneSolidIds, {
+    ? moldOutlines(activeWasm, tris, partSolidIds, {
         wallMm: opts.wallMarginMm,
         pinRingMm: Math.max(opts.wallMarginMm / 2, socketRimR + 1),
         baseMirrored: detailIsAbove,
@@ -1729,7 +1760,7 @@ export function generateMoldMeshes(
     setup: setupFields,
     outlines,
     tris,
-    solidIds: sceneSolidIds ?? [],
+    solidIds: partSolidIds ?? [],
     solidNames: sceneSolidNames ?? [],
     partingZ,
     detailIsAbove,

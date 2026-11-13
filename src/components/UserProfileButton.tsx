@@ -3,6 +3,8 @@ import { AccountMenu, useAccountSession, type AccountSignIn } from '@physbox-io/
 import { getStoredUser, getStoredAuthToken, clearStoredAuth, fetchCurrentUser } from '../utils/apiClient';
 import { signInWithGooglePopup, disableGoogleAutoSelect } from '../utils/googleAuth';
 import { pullCloudState } from '../utils/cloudSync';
+import { loadPrinter } from '../utils/printerSettings';
+import { useStore } from '../store/useStore';
 import { webSerialManager } from '../utils/webSerialManager';
 import { RemoteMachiningModal } from './RemoteMachiningModal';
 import { JobHistoryModal } from './JobHistoryModal';
@@ -27,6 +29,8 @@ async function pullAccount() {
   // The machine state holds the spindle override already applied, so a
   // value just restored from the account has to be pushed into it.
   webSerialManager.reapplySpindleOverride();
+  // And the printer restored from the account, without sending it straight back.
+  useStore.setState({ printer: loadPrinter() });
   return { parameters, items: presets.received + presets.sent };
 }
 

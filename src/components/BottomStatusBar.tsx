@@ -10,6 +10,7 @@ import {
 import { DEFAULT_PRINT_BED, MAX_PRINT_BED_MM, MIN_PRINT_BED_MM } from '../utils/printBedSettings';
 import { FILAMENTS, filamentSpec, type FilamentId } from '../utils/filaments';
 import { FdmNotice } from './FdmNotice';
+import { PrinterSettingsModal } from './PrinterSettingsModal';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { stopControl } from '../utils/machineGates';
 import { MATERIALS, type MaterialId } from '../utils/feedsAndSpeeds';
@@ -373,6 +374,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // user here. Time-limited so a bar that is glanced at later is not still
   // glowing at them.
   const [exportsHighlighted, setExportsHighlighted] = useState(false);
+  const [printerOpen, setPrinterOpen] = useState(false);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const onShow = () => {
@@ -555,7 +557,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             title="What is on the bench. A laser has no Z depth; a router does; a printer is not driven from here at all."
             className={selectClass}
           >
-            <option value="fdm">3D Printer (FDM)</option>
+            <option value="fdm">3D Printer</option>
             <option value="cnc">CNC Router</option>
             <option value="laser">Laser</option>
           </select>
@@ -735,6 +737,16 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             <>
               <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
               <FdmNotice compact />
+              {/* The printer's nozzle and layer, as the wrench sets up a router or a laser. */}
+              <button
+                type="button"
+                onClick={() => setPrinterOpen(true)}
+                className="p-1 rounded text-emerald-600 dark:text-emerald-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                title="Set the printer: filament or resin, nozzle and layer height"
+              >
+                <Wrench className="w-3.5 h-3.5" />
+              </button>
+              {printerOpen && <PrinterSettingsModal onClose={() => setPrinterOpen(false)} />}
             </>
           ) : (
             <>

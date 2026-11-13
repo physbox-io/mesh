@@ -51,6 +51,7 @@ import { getNodeWorldTransform } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimulation';
 import { useStore } from '../store/useStore';
+import { printLimits } from './printerSettings';
 import { workerStoppedError } from './staleBuild';
 import { isSiliconeMold, pourBoxIn, pourSelection } from './pourTarget';
 import { pourBoxOptionsFor } from './pourBoxScene';
@@ -144,8 +145,10 @@ export class MoldWorkerClient {
     this.spawn();
   }
 
-  async generate(scene: SceneGraph, options: Partial<MoldOptions>): Promise<MoldPreview> {
+  async generate(scene: SceneGraph, asked: Partial<MoldOptions>): Promise<MoldPreview> {
     this.revive();
+    // Every mold is held to the printer on the bench, whoever asked for it.
+    const options: Partial<MoldOptions> = { printLimits: printLimits(useStore.getState().printer), ...asked };
     if (!this.worker) {
       const wasm = await loadManifold().catch(() => null);
       const result = generateMoldMeshes(scene, options, wasm);
@@ -333,6 +336,9 @@ export function moldOptionsFor(
     ...(msg.linerConstruction !== undefined && msg.linerConstruction !== 'combined' && msg.linerConstruction !== 'insert'
       ? { error: "liner_construction is 'combined' or 'insert'." }
       : {}),
+    ...(msg.thinGaps !== undefined && msg.thinGaps !== 'leave' && msg.thinGaps !== 'close' && msg.thinGaps !== 'fix'
+      ? { error: "thin_gaps is 'leave', 'close' or 'fix'." }
+      : {}),
     ...(badMaterial
       ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast).` }
       : {}),
@@ -373,6 +379,7 @@ export function moldOptionsFor(
       ...(linerPairId ? { linerPair: linerPairId } : {}),
       ...(msg.linerConstruction === 'combined' || msg.linerConstruction === 'insert' ? { linerConstruction: msg.linerConstruction } : {}),
       ...(typeof msg.sealRidge === 'boolean' ? { sealRidge: msg.sealRidge } : {}),
+      ...(msg.thinGaps === 'leave' || msg.thinGaps === 'close' || msg.thinGaps === 'fix' ? { thinGaps: msg.thinGaps } : {}),
       highFidelity: typeof msg.highFidelity === 'boolean'
         ? msg.highFidelity
         : (scene ?? useStore.getState().sceneGraph).simFidelity === 'print',

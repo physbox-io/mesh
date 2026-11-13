@@ -20,6 +20,7 @@ import {
   clampCncBed,
   type CncBed,
 } from '../utils/printBedSettings';
+import { loadPrinter, savePrinter, type PrinterSettings } from '../utils/printerSettings';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
 import { withFreshDenseColliders } from './denseColliders';
@@ -297,6 +298,9 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
    */
   cncBed: CncBed;
   setCncBed: (patch: Partial<CncBed>) => void;
+  /** The printer on the bench: FDM or resin, and the nozzle and layer that set the thinnest wall and skin. */
+  printer: PrinterSettings;
+  setPrinter: (patch: Partial<PrinterSettings>) => void;
   /**
    * Carve settings a preset or a generator wants the relief export to open
    * with, or null for the exporter's own defaults.
@@ -510,6 +514,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setPrintBed: (patch) => set((state) => ({ printBed: savePrintBed(clampPrintBed({ ...state.printBed, ...patch })) })),
   cncBed: loadCncBed(),
   setCncBed: (patch) => set((state) => ({ cncBed: saveCncBed(clampCncBed({ ...state.cncBed, ...patch })) })),
+  printer: loadPrinter(),
+  setPrinter: (patch) => set((state) => ({ printer: savePrinter({ ...state.printer, ...patch }) })),
   carveSettings: null,
   patternGeneratorId: null,
   facePatternTarget: null,

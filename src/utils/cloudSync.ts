@@ -18,6 +18,7 @@ import type { UserPreset } from './userPresets';
 import { packMeshArrays } from './meshPacking';
 import { externalizeMeshes, forgetUploadedBlobs, hasBlobRefs, resolveMeshBlobs } from './meshBlobs';
 import { SPINDLE_MAX_OVERRIDE_KEY } from './spindleOverride';
+import { PRINTER_STORAGE_KEY } from './printerSettings';
 import { CNC_BED_PARAMETER, TOOL_RACK_PARAMETER } from '@physbox-io/machining';
 import { adoptSuiteParameters } from '@physbox-io/ui/suite';
 import { settleToolRack } from './toolRack';
@@ -27,7 +28,7 @@ import { PresetSync, type PresetSyncResult } from './presetSync';
 export const presetSync = new PresetSync('physics', 'physics_cloud_preset_ids');
 
 /** UI preferences that follow the account, under this app's own id. */
-export const SYNCED_APP_PARAMETER_KEYS: readonly string[] = [SPINDLE_MAX_OVERRIDE_KEY];
+export const SYNCED_APP_PARAMETER_KEYS: readonly string[] = [SPINDLE_MAX_OVERRIDE_KEY, PRINTER_STORAGE_KEY];
 
 /**
  * Mirrors one app-scoped preference to the account.

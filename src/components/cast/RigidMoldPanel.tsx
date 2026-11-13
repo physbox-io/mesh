@@ -409,6 +409,20 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             </div>
           )}
 
+          {/* Shown once the casting has gaps the printer cannot line, or a choice was made. */}
+          {((options.thinGaps ?? 'leave') !== 'leave' || result.warnings.some((w) => w.startsWith('The casting has '))) && (
+            <Field
+              label="Thin Gaps"
+              hint="Gaps in the casting thinner than the printer (wrench, bottom bar) can line. Close fills them with casting; Fix model trims the part back until they print."
+            >
+              <Segmented
+                value={options.thinGaps ?? 'leave'}
+                onChange={(v) => set('thinGaps', v)}
+                options={[['leave', 'Leave'], ['close', 'Close gaps'], ['fix', 'Fix model']] as const}
+              />
+            </Field>
+          )}
+
           {result.warnings.length > 0 && (
             <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
               {result.warnings.map((w, i) => (
