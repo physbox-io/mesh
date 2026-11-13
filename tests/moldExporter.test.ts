@@ -621,7 +621,8 @@ describe('One-part open mold and parting overhang checks', () => {
     expect(unpairedEdges(res.topHalf!.triangles)).toBe(0);
 
     // Every pin protrusion vertex on the lid (above its 5 mm backing plate parting face)
-    // must remain at least 1.5 mm outside the 40 x 40 mm cavity footprint in both X and Y.
+    // must remain at least 1.5 mm outside the 40 x 40 mm cavity footprint: in the
+    // wall's band, which the keyed pin runs along.
     const lidCx = (res.topHalf!.bounds.minX + res.topHalf!.bounds.maxX) / 2;
     const lidPartingFaceZ = res.topHalf!.heightMm - DEFAULT_MOLD_OPTIONS.pinHeightMm;
     let pinVertexCount = 0;
@@ -631,8 +632,7 @@ describe('One-part open mold and parting overhang checks', () => {
           pinVertexCount++;
           const lx = Math.abs(v[0] - lidCx);
           const ly = Math.abs(v[1]);
-          expect(lx).toBeGreaterThan(21);
-          expect(ly).toBeGreaterThan(21);
+          expect(Math.max(lx, ly)).toBeGreaterThan(21);
         }
       }
     }
@@ -662,6 +662,8 @@ describe('One-part open mold and parting overhang checks', () => {
     );
     const tallRes = generateMoldMeshes(statueBox, {
       ...DEFAULT_MOLD_OPTIONS,
+      // Standing, as a statue is molded; auto lays a plain box on its back.
+      pullDirection: '+z',
       wallMarginMm: 4,
       baseThicknessMm: 3,
       sprueFeed: 'top',
@@ -806,4 +808,21 @@ describe('registration pins', () => {
       }
     });
   }
+});
+
+describe('auto pull direction between equal losses', () => {
+  const pin = bodyWith({ type: 'cylinder', size: [0.006, 0.06] }, [0, 0, 0.06]);
+
+  it('lays a standing pin on its side: two shallow halves, not a 120 mm blind bore', () => {
+    const r = generateMoldMeshes(pin, { moldType: 'auto' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.moldType).toBe('clamshell');
+    expect(['+x', '+y']).toContain(r.pullDirection);
+    const clam = generateMoldMeshes(pin, { moldType: 'clamshell' });
+    expect(['+x', '+y']).toContain(clam.pullDirection);
+  });
+
+  it('keeps a part as placed when turning it gains no clearly shallower cavity', () => {
+    expect(generateMoldMeshes(box, { moldType: 'clamshell' }).pullDirection).toBe('+z');
+  });
 });

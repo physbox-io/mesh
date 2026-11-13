@@ -22,7 +22,7 @@ import type { ManifoldToplevel, Manifold } from 'manifold-3d';
 import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, sameFloat32, unsolidPartRefusal, type Mat4Tuple, type Triangle3D } from './moldManifold';
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
-import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
+import { choosePullDirection, rotateTrianglesForPull, SHALLOWER_PULL, type PullChoice, type PullDirection } from './moldPullDirection';
 import { linerPartingChoice, linerPullChoice } from './moldRoofScore';
 import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, INSERT_CLEARANCE_MM, SEAL_RING_ROOM_MM, NO_MANIFOLD_REFUSAL, type LinerConstruction, type MoldLinerInfo } from './moldLiner';
 import { castMaterial, type CastMaterialId } from './castMaterials';
@@ -1166,11 +1166,11 @@ function resolveMoldSetup(
 
   const lossOf = (type: 'open' | 'clamshell') => {
     const choice = pullChoiceFor(scene, sceneTris, type);
-    if (!fixedDirection) return { direction: choice.direction, lost: choice.lostFraction };
+    if (!fixedDirection) return { direction: choice.direction, lost: choice.lostFraction, depth: choice.depthMm };
     // A clamshell opens both ways at once, so it was only measured on +axes.
     const measured = type === 'open' ? fixedDirection : (`+${fixedDirection[1]}` as PullDirection);
     const c = choice.candidates.find((k) => k.direction === measured);
-    return { direction: fixedDirection, lost: c ? c.lostFraction : choice.lostFraction };
+    return { direction: fixedDirection, lost: c ? c.lostFraction : choice.lostFraction, depth: c ? c.depthMm : choice.depthMm };
   };
 
   let moldType: 'clamshell' | 'open';
@@ -1178,7 +1178,9 @@ function resolveMoldSetup(
   if (opts.moldType === 'auto') {
     const open = lossOf('open');
     const clam = lossOf('clamshell');
-    moldType = open.lost <= clam.lost + OPEN_MOLD_ALLOWANCE ? 'open' : 'clamshell';
+    // Open unless a clamshell keeps clearly more of the part, or is clearly
+    // shallower: a pin standing in an open mold is a 120 mm blind bore.
+    moldType = open.lost <= clam.lost + OPEN_MOLD_ALLOWANCE && !(clam.depth < open.depth * SHALLOWER_PULL) ? 'open' : 'clamshell';
     direction = moldType === 'open' ? open.direction : clam.direction;
   } else {
     moldType = opts.moldType;

@@ -22,11 +22,18 @@ export interface PullCandidate {
   direction: PullDirection;
   /** Volume the mold fills in that the part does not have, as a share of the part's volume. */
   lostFraction: number;
+  /** How deep the deeper half's cavity goes from the parting face, mm (the open mold's whole cavity). */
+  depthMm: number;
 }
+
+/** A pull loses as little and turns the part when its cavity is under this share of the depth. */
+export const SHALLOWER_PULL = 0.5;
 
 export interface PullChoice {
   direction: PullDirection;
   lostFraction: number;
+  /** The chosen pull's deeper half, mm. */
+  depthMm: number;
   /** The part's own orientation, for comparison. */
   asPlacedLostFraction: number;
   candidates: PullCandidate[];
@@ -78,8 +85,13 @@ export function rotateTrianglesForPull(tris: ArrayLike<number>, direction: PullD
  * footprint, as the exporter does; clamshells part where the exporter would.
  */
 export function measurePullLoss(tris: Float64Array, open: boolean, targetCells = 80): number {
+  return measurePull(tris, open, targetCells).lost;
+}
+
+/** measurePullLoss, and how deep the deeper half's cavity goes from the parting face. */
+export function measurePull(tris: Float64Array, open: boolean, targetCells = 80): { lost: number; depthMm: number } {
   const triCount = Math.floor(tris.length / 9);
-  if (triCount === 0) return 0;
+  if (triCount === 0) return { lost: 0, depthMm: 0 };
 
   let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity, mnZ = Infinity, mxZ = -Infinity;
   for (let i = 0; i < tris.length; i += 3) {
@@ -133,14 +145,16 @@ export function measurePullLoss(tris: Float64Array, open: boolean, targetCells =
 
   let partLen = 0;
   let castLen = 0;
+  let depthMm = 0;
   for (let i = 0; i < field.hit.length; i++) {
     if (!field.hit[i]) continue;
     const s = field.spans[i];
     for (let k = 0; k + 1 < s.length; k += 2) partLen += s[k + 1] - s[k];
     castLen += Math.max(field.maxZ[i], partingZ) - Math.min(field.minZ[i], partingZ);
+    depthMm = Math.max(depthMm, field.maxZ[i] - partingZ, partingZ - field.minZ[i]);
   }
-  if (!(partLen > 0)) return 0;
-  return Math.max(0, castLen - partLen) / partLen;
+  if (!(partLen > 0)) return { lost: 0, depthMm };
+  return { lost: Math.max(0, castLen - partLen) / partLen, depthMm };
 }
 
 /**
@@ -148,14 +162,15 @@ export function measurePullLoss(tris: Float64Array, open: boolean, targetCells =
  * through, so both ends of each axis are tried; a clamshell opens both ways at
  * once, so each axis is tried once. The part keeps its own orientation unless
  * another loses clearly less of it -- a fifth less, and half a percent of its
- * volume -- so a part that molds fine as placed is not turned for nothing.
+ * volume -- or loses as little with a clearly shallower cavity, so a part that
+ * molds fine as placed is not turned for nothing.
  */
 export function choosePullDirection(tris: ArrayLike<number>, open: boolean): PullChoice {
   const directions: PullDirection[] = open ? ['+z', '-z', '+y', '-y', '+x', '-x'] : ['+z', '+y', '+x'];
-  const candidates: PullCandidate[] = directions.map((direction) => ({
-    direction,
-    lostFraction: measurePullLoss(rotateTrianglesForPull(tris, direction), open),
-  }));
+  const candidates: PullCandidate[] = directions.map((direction) => {
+    const m = measurePull(rotateTrianglesForPull(tris, direction), open);
+    return { direction, lostFraction: m.lost, depthMm: m.depthMm };
+  });
 
   // An open mold's own search already picks the better end of Z, so "as
   // placed" is whichever end of Z is better, not +Z alone.
@@ -169,11 +184,19 @@ export function choosePullDirection(tris: ArrayLike<number>, open: boolean): Pul
   }
   const clearlyBetter =
     best.lostFraction < asPlaced.lostFraction * 0.8 && asPlaced.lostFraction - best.lostFraction > 0.005;
-  const chosen = clearlyBetter ? best : asPlaced;
+  let chosen = clearlyBetter ? best : asPlaced;
+  // Between axes that lose as little, the shallower pull: a standing 12 x 120 mm
+  // pin kept as placed was a 120 mm blind bore, where on its side it is two
+  // 6 mm halves that any draft frees. Turned only for a clearly shallower
+  // cavity, under half the depth, as a loss is only turned for a clear gain.
+  const tied = candidates.filter((c) => c.lostFraction <= chosen.lostFraction + 0.005);
+  const shallowest = tied.reduce((a, b) => (b.depthMm < a.depthMm ? b : a), chosen);
+  if (shallowest.depthMm < chosen.depthMm * SHALLOWER_PULL) chosen = shallowest;
 
   return {
     direction: chosen.direction,
     lostFraction: chosen.lostFraction,
+    depthMm: chosen.depthMm,
     asPlacedLostFraction: asPlaced.lostFraction,
     candidates,
   };
