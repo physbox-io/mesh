@@ -103,6 +103,8 @@ export interface ClothTrimInfo {
   run?: number;
   /** The end of its run where a zip's slider sits. */
   end?: boolean;
+  /** Drawn on the cloth's back face (its normal is not its outside there: a clasp on a plain piece's flap). */
+  flip?: boolean;
 }
 
 export interface FrameSnapshot extends Partial<SimBuffers> {

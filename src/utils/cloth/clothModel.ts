@@ -55,6 +55,8 @@ export interface ClothTrim {
   /** Its run along a line, in order (a zip's tape is drawn through one), and whether it ends one (where a zip's slider sits). */
   run?: number;
   end?: boolean;
+  /** Drawn on the cloth's back face (the way its normal points is not its outside here). */
+  flip?: boolean;
 }
 
 const TRIM_DEFAULTS: Record<GarmentTrim['kind'], { size: number; spacing: number; rgba: number[] }> = {
@@ -1017,8 +1019,21 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
   for (const fa of spec.fasten ?? []) {
     const a = pointOf(fa.a), b = pointOf(fa.b);
     if (!a || !b) continue;
-    addStitch(a.group.particles[a.local], b.group.particles[b.local], sewTime);
-    if (fa.trim) (a.group.trims ??= []).push({ kind: fa.trim.kind, particle: a.local, size: fa.trim.size ?? TRIM_DEFAULTS[fa.trim.kind].size, rgba: fa.trim.rgba ?? TRIM_DEFAULTS[fa.trim.kind].rgba });
+    const pa = a.group.particles[a.local], pb = b.group.particles[b.local];
+    addStitch(pa, pb, sewTime);
+    if (!fa.trim) continue;
+    // On the face away from what it fastens to (a clasp on the outside of a
+    // flap): where that is as they start, against the way the first point's
+    // cloth faces as drawn (a plain piece's winding says nothing of outside).
+    const nrm = [0, 0, 0];
+    for (let t = 0; t < tris.length; t += 3) {
+      if (tris[t] !== pa && tris[t + 1] !== pa && tris[t + 2] !== pa) continue;
+      const [i, j, k] = [tris[t], tris[t + 1], tris[t + 2]].map((q) => 3 * q);
+      const u = [x[j] - x[i], x[j + 1] - x[i + 1], x[j + 2] - x[i + 2]], v = [x[k] - x[i], x[k + 1] - x[i + 1], x[k + 2] - x[i + 2]];
+      nrm[0] += u[1] * v[2] - u[2] * v[1]; nrm[1] += u[2] * v[0] - u[0] * v[2]; nrm[2] += u[0] * v[1] - u[1] * v[0];
+    }
+    const toward = (x[3 * pb] - x[3 * pa]) * nrm[0] + (x[3 * pb + 1] - x[3 * pa + 1]) * nrm[1] + (x[3 * pb + 2] - x[3 * pa + 2]) * nrm[2];
+    (a.group.trims ??= []).push({ kind: fa.trim.kind, particle: a.local, size: fa.trim.size ?? TRIM_DEFAULTS[fa.trim.kind].size, rgba: fa.trim.rgba ?? TRIM_DEFAULTS[fa.trim.kind].rgba, ...(toward > 0 ? { flip: true } : {}) });
   }
   // Its arrangement: each pull's point found on its piece's flat pattern.
   const pulls: { particle: number; to: number[]; via?: number[][] }[] = [];

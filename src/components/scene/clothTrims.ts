@@ -41,6 +41,8 @@ const TRIM_GEOMETRY: Record<string, () => THREE.BufferGeometry> = {
 };
 /** Turned along its line rather than up the body. */
 const ALONG = new Set(['zipper', 'stitch', 'slider']);
+/** Rigid and wider than the cloth's spacing: raised onto the highest cloth under it. */
+const RESTS_ON = new Set(['buckle']);
 /** A slider is this many teeth across. */
 const SLIDER_SCALE = 3;
 /** A zip's tape, each side of the line, in teeth. */
@@ -103,6 +105,7 @@ export function useClothTrims(flex: FlexInfo) {
       nv.set(n[a] + (n[b] - n[a]) * u, n[a + 1] + (n[b + 1] - n[a + 1]) * u, n[a + 2] + (n[b + 2] - n[a + 2]) * u);
       if (nv.lengthSq() < 1e-12) nv.set(0, 0, 1);
       nv.normalize();
+      if (t.flip) nv.negate();
       tan.set(p[b] - p[a], p[b + 1] - p[a + 1], p[b + 2] - p[a + 2]);
       tan.addScaledVector(nv, -tan.dot(nv));
       if (tan.lengthSq() < 1e-14) tan.set(0, 0, 1).addScaledVector(nv, -nv.z);
@@ -127,6 +130,18 @@ export function useClothTrims(flex: FlexInfo) {
           tx.crossVectors(nv, tz).normalize();
         }
         basis.makeBasis(tx, nv, tz);
+        // Rigid hardware wider than the cloth's spacing rests on the highest
+        // cloth under it, not at its one point (the cloth round a clasp stood
+        // over it and hid it).
+        if (RESTS_ON.has(kind)) {
+          const reach2 = (t.size * 0.7) ** 2;
+          let lift = 0;
+          for (let i = 0; i < p.length; i += 3) {
+            const dx = p[i] - at.x, dy = p[i + 1] - at.y, dz = p[i + 2] - at.z, up = dx * nv.x + dy * nv.y + dz * nv.z;
+            if (dx * dx + dy * dy + dz * dz - up * up < reach2 && up + h > lift) lift = up + h;
+          }
+          at.addScaledVector(nv, lift);
+        }
         dummy.position.copy(at);
         dummy.quaternion.setFromRotationMatrix(basis);
         dummy.scale.setScalar(kind === 'slider' ? t.size * SLIDER_SCALE : t.size);
