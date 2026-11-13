@@ -204,6 +204,11 @@ export function finishSurface(
     surface: finishMap,
     floorZ,
     steepAngleDeg: opts.finishingSteepAngleDeg,
+    // A flat bit's side finishes a straight wall in one pass, two diameters at
+    // a time and no more than its flutes are long.
+    ...(opts.finishingToolType === 'flat'
+      ? { flatWallMm: Math.min(2 * opts.finishingToolDiaMm, opts.finishingFluteLengthMm > 0 ? opts.finishingFluteLengthMm : Infinity) }
+      : {}),
   });
 
   if (planGroups.every((g) => g.length === 0)) {

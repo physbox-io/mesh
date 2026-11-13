@@ -95,6 +95,12 @@ export interface FinishingPathInput {
   /** Deepest the job cuts, mm (negative). Bounds the waterline levels. */
   floorZ: number;
   /**
+   * For a flat end mill: the most wall one waterline may take in one pass, mm.
+   * Its side finishes everything above its end, so where only straight walls
+   * cross the levels between two waterlines, the upper one is left out.
+   */
+  flatWallMm?: number;
+  /**
    * Slope, in degrees from horizontal, at which 'hybrid' switches from raster to
    * waterline. 30-45 is the usual band; lower sends more of the model to the
    * waterline pass.
@@ -442,10 +448,44 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
     p.y >= bounds.minY - 1e-6 &&
     p.y <= bounds.maxY + 1e-6;
 
+  /*
+   * With a flat end mill, a level is left out where nothing of the surface
+   * lies between it and the next one down: only straight walls cross there,
+   * and the next waterline's side finishes them as well, up to `flatWallMm`
+   * above its end. Spaced by the stepover like a ball nose, a flat bit went
+   * round a bracket's walls fifteen times to take 0.4 mm off them.
+   */
+  const levels: number[] = [];
+  for (let level = -step; level > floorZ - step; level -= step) {
+    levels.push(Math.max(level, floorZ + 1e-6));
+    if (level <= floorZ + 1e-6) break;
+  }
+  let keep = levels.map(() => true);
+  if (input.flatWallMm && input.flatWallMm > step) {
+    const z = surface.z;
+    const between = (hi: number, lo: number) => {
+      for (let i = 0; i < z.length; i++) if (z[i] < hi - 1e-6 && z[i] > lo + 1e-6) return true;
+      return false;
+    };
+    keep = levels.map(() => false);
+    let lastKept = Infinity;
+    for (let i = levels.length - 1; i >= 0; i--) {
+      // Bottom up: a level is kept at the floor, where any of the surface lies
+      // between it and the next level down (the two trace different walls),
+      // or where the wall since the last one kept would be too tall for one.
+      const below = i + 1 < levels.length ? levels[i + 1] : -Infinity;
+      if (i === levels.length - 1 || between(levels[i], below) || levels[i] - lastKept > input.flatWallMm - 1e-6) {
+        keep[i] = true;
+        lastKept = levels[i];
+      }
+    }
+  }
+
   // Skip level 0 itself: the top face is not a feature, and a contour exactly on
   // it is the outline of every uncarved patch on the board.
-  for (let level = -step; level > floorZ - step; level -= step) {
-    const clamped = Math.max(level, floorZ + 1e-6);
+  for (let li = 0; li < levels.length; li++) {
+    if (!keep[li]) continue;
+    const clamped = levels[li];
     const loops = isoContours(padded, pCols, pRows, clamped, wallRise);
     for (const loop of loops) {
       const mm = loop.map(toMm);
@@ -475,7 +515,6 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
       }
       flush();
     }
-    if (clamped <= floorZ + 1e-6) break;
   }
 
   return passes;
