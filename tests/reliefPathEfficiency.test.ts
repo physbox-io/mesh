@@ -195,7 +195,10 @@ describe('adaptive roughing entries', () => {
     });
     const e = entries(res.gcode, DEFAULT_RELIEF_OPTIONS.roughingPlungeRate);
     expect(e.lifts).toBeLessThan(25);
-    expect(e.reversals).toBeLessThan(10);
+    // A ring deep in one stretch takes its later bites back and forth along
+    // that stretch instead of round the whole ring each time: 12 turns where
+    // there were under 10, and roughing 10.96 -> 10.54 minutes.
+    expect(e.reversals).toBeLessThan(15);
     expect(e.plungeMm).toBeLessThan(400);
   });
 

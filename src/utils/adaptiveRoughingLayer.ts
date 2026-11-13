@@ -235,6 +235,98 @@ export function emitAdaptiveLayer(w: ToolpathWriter, layout: RoughingLayout, lay
       const above = ringTop - (span * (bite - 1)) / bites;
       let loop = plan.map((p) => ({ ...p, z: Math.max(biteFloor, p.z) }));
       /*
+       * After the first bite, only where the ring goes deeper than the first
+       * bite took it. Where the rest of the ring already stands at its
+       * surface, going round it all again is a lap in the air: a 1.2 mm ring
+       * in an aluminium bracket's channel, at its surface but for one corner,
+       * went round four times to deepen that corner.
+       */
+      if (bite === 2) {
+        const deeper = loop.map((p) => p.z < above - 1e-6);
+        let ringLen = 0, deepLen = 0;
+        for (let i = 1; i < loop.length; i++) {
+          const d = Math.hypot(loop[i].x - loop[i - 1].x, loop[i].y - loop[i - 1].y);
+          ringLen += d;
+          if (deeper[i] || deeper[i - 1]) deepLen += d;
+        }
+        // The stretches that go below the first bite, each with the point
+        // either side of it, at the ring's own heights.
+        const n = loop.length - 1; // loop[n] is loop[0] again
+        const runs: PathPoint[][] = [];
+        if (deepLen < ringLen * 0.6) {
+          const start = deeper.findIndex((d, i) => i < n && !d);
+          if (start >= 0) {
+            let run: PathPoint[] = [];
+            for (let t = 1; t <= n; t++) {
+              const i = (start + t) % n;
+              if (deeper[i]) {
+                if (run.length === 0) run.push(plan[(i + n - 1) % n]);
+                run.push(plan[i]);
+              } else if (run.length > 0) {
+                run.push(plan[i]);
+                runs.push(run);
+                run = [];
+              }
+            }
+            if (run.length > 0) runs.push(run);
+          }
+        }
+        /*
+         * Only where it clearly saves: each stretch costs a way in - a ramp
+         * down a bite at the lead-in angle and out again, a lift and a hop,
+         * taken as 20 mm - which on
+         * a ring deep along much of its length, in several pieces, came to
+         * more than going round. Going round again costs the ring's length a
+         * bite.
+         */
+        const lengthOf = (r: PathPoint[]) => {
+          let l = 0;
+          for (let i = 1; i < r.length; i++) l += Math.hypot(r[i].x - r[i - 1].x, r[i].y - r[i - 1].y);
+          return l;
+        };
+        const entryMm = 2 * (span / bites) / Math.max(0.02, w.leadInTan) + 20;
+        const stretchMm = runs.reduce((t, r) => t + (bites - 1) * lengthOf(r) + entryMm, 0);
+        // One stretch only: in several, the ways in and the turns at their ends
+        // cost more than they saved (four stripes: 26 lifts, 42 turns, 549 mm
+        // at the plunge rate, against 17, under 10 and 290 going round).
+        if (runs.length === 1 && stretchMm < 0.7 * (bites - 1) * ringLen) {
+          // Each stretch takes all the bites left, back and forth along
+          // itself, stepping down at each turn: one way in, not one a bite.
+          for (const raw of runs) {
+            if (raw.length < 2) continue;
+            let forward = true;
+            for (let b = 2; b <= bites; b++) {
+              const floor = b === bites ? layerZ : ringTop - (span * b) / bites;
+              const top = ringTop - (span * (b - 1)) / bites;
+              const leg = raw.map((p) => ({ ...p, z: Math.max(floor, p.z) }));
+              const ordered = forward ? leg : [...leg].reverse();
+              forward = !forward;
+              let path: PathPoint[];
+              if (b === 2) {
+                path = w.leadIn(ordered, top, opts.roughingPlungeRate, feed);
+              } else {
+                // Down at the turn, at the plunge rate: no deeper than a bite.
+                const head = ordered[0];
+                w.cutTo(head.x, head.y, head.z);
+                w.gcode.push(`G1 X${f(head.x)} Y${f(head.y)} Z${f(head.z)} F${Math.round(opts.roughingPlungeRate)}`);
+                path = ordered;
+              }
+              let lastZ = w.atZ;
+              let stated = false;
+              for (let i = 1; i < path.length; i++) {
+                w.cutTo(path[i].x, path[i].y, path[i].z);
+                const z = Math.abs(path[i].z - lastZ) > 1e-6 ? ` Z${f(path[i].z)}` : '';
+                lastZ = path[i].z;
+                w.gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)}${z}${stated ? '' : ` F${Math.round(feed)}`}`);
+                stated = true;
+              }
+              w.segments.push({ type: 'roughing', points: path, traverseZ: w.lastTraverseZ });
+            }
+          }
+          break;
+        }
+      }
+      /*
        * Every bite after the first starts where the one before it ended,
        * which is on this same ring, in the slot it has just cut: the ring
        * is turned to start there and the tool ramps on down. It used to
