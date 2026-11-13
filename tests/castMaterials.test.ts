@@ -48,8 +48,18 @@ describe('the material list', () => {
     const tin = mixGrams('tin', 110)!;
     expect(tin.a).toBeCloseTo(100, 9);
     expect(tin.b).toBeCloseTo(10, 9);
-    expect(mixGrams('plaster', 170)).toMatchObject({ a: 100, b: 70, aLabel: 'powder', bLabel: 'water' });
+    const plaster = mixGrams('plaster', 170)!;
+    expect(plaster).toMatchObject({ aLabel: 'powder', bLabel: 'water' });
+    expect(plaster.a / plaster.b).toBeCloseTo(100 / 70, 9);
     expect(mixGrams('epoxy', 100)).toBeNull();
+  });
+
+  it('weighs out plaster as the slurry that fills the mold, not the lighter piece it dries to', () => {
+    // 100 cm³ of mold: split from the cured 120 g, the mix came out a quarter short.
+    const mix = mixGrams('plaster', castWeightG('plaster', 100_000))!;
+    // Powder (2.63 g/cm³) and water together fill the 100 cm³.
+    expect(mix.a / 2.63 + mix.b).toBeCloseTo(100, 0);
+    expect(mix.a + mix.b).toBeGreaterThan(150);
   });
 
   it('reads the old name for silicone', () => {

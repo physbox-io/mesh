@@ -30,7 +30,17 @@ export type CastMaterialId =
 /** How it is mixed, by weight: two parts A:B, or a powder into water. */
 export type CastMix =
   | { kind: 'ab'; a: number; b: number }
-  | { kind: 'powder'; powder: number; water: number };
+  | {
+      kind: 'powder';
+      powder: number;
+      water: number;
+      /**
+       * The wet mix's density, g/cm³, where it is not the cured piece's: what
+       * fills the mold is slurry, and plaster dries out of it lighter. Split
+       * from the cured weight, a plaster pour was weighed out a quarter short.
+       */
+      wetDensityGcm3?: number;
+    };
 
 /**
  * A note that applies when its conditions hold. `{ml}` in the text is
@@ -95,6 +105,12 @@ export interface CastMaterial {
   warnings: CastMaterialWarning[];
 }
 
+/**
+ * Plaster at 100:70, g/cm³: 100 g of powder is 38 cm³ (its particles are
+ * 2.63 g/cm³), with 70 cm³ of water, 170 g in 108 cm³.
+ */
+const PLASTER_SLURRY_GCM3 = 170 / (100 / 2.63 + 70);
+
 /** PLA starts to soften about here, °C: the hottest pour a printed mold takes. */
 export const PLA_SOFTEN_C = 60;
 
@@ -125,7 +141,7 @@ export const CAST_MATERIALS: CastMaterial[] = [
     id: 'water', label: 'Water (ice)', minSectionMm: 2.0, sprueNeckMm: 5, bubbleRiseMm: 5.3, densityGcm3: 0.92, meltsInBath: true, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
     warnings: [],
   },
-  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
+  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70, wetDensityGcm3: PLASTER_SLURRY_GCM3 }, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
   { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, sprueNeckMm: 15, bubbleRiseMm: 10, densityGcm3: 2.4, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
   { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
   { id: 'aluminium', label: 'Aluminium', minSectionMm: 3.0, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 2.7, shrinkPercent: 1.3, pourC: 720, waterBased: false, metal: true, silicone: false, rgba: [0.78, 0.8, 0.83, 1], warnings: [] },
@@ -178,11 +194,17 @@ export function castWeightG(id: CastMaterialId, volumeMm3: number): number {
   return (volumeMm3 / 1000) * castMaterial(id).densityGcm3;
 }
 
-/** The weighed-out parts of a mix for this many grams of it, or null when it is not mixed. */
-export function mixGrams(id: CastMaterialId, grams: number): { a: number; b: number; aLabel: string; bLabel: string } | null {
-  const mix = castMaterial(id).mix;
+/**
+ * The weighed-out parts of a mix for a piece weighing this many grams cured
+ * (castWeightG), or null when it is not mixed. A slurry that dries lighter is
+ * weighed out as the wet mix that fills the same volume.
+ */
+export function mixGrams(id: CastMaterialId, curedGrams: number): { a: number; b: number; aLabel: string; bLabel: string } | null {
+  const m = castMaterial(id);
+  const mix = m.mix;
   if (!mix) return null;
   const [a, b] = mix.kind === 'ab' ? [mix.a, mix.b] : [mix.powder, mix.water];
+  const grams = mix.kind === 'powder' && mix.wetDensityGcm3 ? (curedGrams * mix.wetDensityGcm3) / m.densityGcm3 : curedGrams;
   return {
     a: (grams * a) / (a + b),
     b: (grams * b) / (a + b),
