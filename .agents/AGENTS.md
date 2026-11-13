@@ -16,4 +16,12 @@
 ## 3. Task boundaries in multi-agent runs
 - **Do Not Touch Unrelated Broken Code**: If a build command (e.g. `npm run build` or `tsc`) fails on type or syntax errors in files outside your assigned task, do not fix, modify, or patch those files.
 - **Immediate Reversion**: If unrelated files are modified by accident, revert them with `git checkout <file>`.
-- **Scoped Verification**: Use targeted type checking and tests on your assigned files rather than editing out-of-scope files to satisfy global build scripts.
+- **Scoped Verification**: Use targeted type checking (`./node_modules/.bin/tsc -b --noEmit` — never bare `tsc --noEmit`, because the root `tsconfig.json` uses project `references` with `"files": []`) and tests on your assigned files rather than editing out-of-scope files to satisfy global build scripts. Stage explicit paths/hunks only (never `git add -A`), as other agents may have concurrent uncommitted changes.
+
+## 4. Companion MCP server (`~/physbox_mcp`) & repo conventions
+- **Read `CLAUDE.md` and `GUIDE.md`**: Consult `CLAUDE.md` at the repo root for repo-wide traps and multi-file sync checklists.
+- **Keep `~/physbox_mcp` Aligned**: The companion MCP server lives at `~/physbox_mcp` (`/home/boab/physbox_mcp`, **not** `~/physics`). Whenever you add or modify MCP commands, tool arguments, or `mcp-docs.json` in `~/mesh`:
+  1. Update `~/physbox_mcp/physbox_mcp/mcp-docs/physics.json` to stay aligned with `mcp-docs.json`.
+  2. Update `~/physbox_mcp/physbox_mcp/server.py` if tool signatures, docstrings, or payload mappings changed, and run `~/physbox_mcp/venv/bin/pytest ~/physbox_mcp/tests`.
+  3. Check `src/components/systemInstructions.txt` so the in-app copilot prompt stays consistent with MCP docs.
+  4. Restart the running `server.py` process if live MCP tool schemas/docs need to reload.
