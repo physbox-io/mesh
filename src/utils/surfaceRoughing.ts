@@ -235,6 +235,10 @@ export function roughSurface(w: ToolpathWriter, job: SurfaceJob, opts: ReliefCar
     opts, res, allowance, roughRad, roughStepover, baseStepdown, minRoughCut, layerRegion, slabZ, safeX, safeY,
   };
 
+  // No faster than the machine tracks, as adaptive holds its feed: asked for
+  // more, a raster wrote F3900 for a gantry that does 3000.
+  const rasterFeed = Math.min(opts.roughingFeedrate, opts.motionProfile.maxRate.x, opts.motionProfile.maxRate.y);
+
   // Regular layers, top down, each one a slab from the layer above.
   let layerTop = 0;
   for (const layerZ of layers) {
@@ -246,6 +250,9 @@ export function roughSurface(w: ToolpathWriter, job: SurfaceJob, opts: ReliefCar
     }
 
     let forward = true;
+    // Whether the tool is down in this slab at the end of a run, from where
+    // the next may be reached across at depth.
+    let down = false;
 
     for (const y of ys) {
       const lineXs = forward ? xs : [...xs].reverse();
@@ -260,15 +267,38 @@ export function roughSurface(w: ToolpathWriter, job: SurfaceJob, opts: ReliefCar
           const plan = simplifyPass(run, roughSimplifyMm(allowance, res));
           // The layer above is what the tool is dropping through, so that is
           // where the ramp starts — one layer, not the whole depth so far.
-          const pass = w.leadIn(plan, top, opts.roughingPlungeRate, opts.roughingFeedrate);
+          /*
+           * Across to the next row at depth, where it starts a stepover or so
+           * from where the last one ended and the move takes no more than the
+           * slab - the cut every row makes sideways anyway. It used to lift
+           * out and ramp back in at the head of every run: 430 lifts on a
+           * dome, and 42% of the roughing path at the plunge rate.
+           */
+          const head = plan[0];
+          const across = Math.hypot(head.x - w.atX, head.y - w.atY);
+          const linked =
+            down &&
+            across <= roughStepover * 1.5 + 1e-6 &&
+            Math.abs(head.z - w.atZ) <= 1e-6 &&
+            w.stock.deepestCut(w.atX, w.atY, w.atZ, head.x, head.y, head.z, roughRad) <= top - layerZ + 1e-3;
+          let pass: PathPoint[];
+          let passFeedStated = false;
+          if (linked) {
+            w.cutTo(head.x, head.y, head.z);
+            w.gcode.push(`G1 X${f(head.x)} Y${f(head.y)} F${Math.round(rasterFeed)}`);
+            passFeedStated = true;
+            pass = plan;
+          } else {
+            pass = w.leadIn(plan, top, opts.roughingPlungeRate, rasterFeed);
+          }
+          down = true;
 
           let lastZ = pass[0].z;
-          let passFeedStated = false;
           for (let i = 1; i < pass.length; i++) {
             w.cutTo(pass[i].x, pass[i].y, pass[i].z);
             const z = Math.abs(pass[i].z - lastZ) > 1e-6 ? ` Z${f(pass[i].z)}` : '';
             lastZ = pass[i].z;
-            w.gcode.push(`G1 X${f(pass[i].x)} Y${f(pass[i].y)}${z}${passFeedStated ? '' : ` F${Math.round(opts.roughingFeedrate)}`}`);
+            w.gcode.push(`G1 X${f(pass[i].x)} Y${f(pass[i].y)}${z}${passFeedStated ? '' : ` F${Math.round(rasterFeed)}`}`);
             passFeedStated = true;
           }
 
