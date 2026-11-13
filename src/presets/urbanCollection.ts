@@ -116,13 +116,12 @@ function pufferLook(x: number): SceneNode[] {
     ],
   }, form, 1);
   // A baseball cap: a close crown of six panels, its peak a stiffened crescent sewn on round the front of its band, stood out.
-  // The band's curve at the front: the head's oval there (radius of curvature
-  // side^2 / front-to-back at the front), stood off by the band's ease.
   const headL = formLimbs(m).head, bandSec = headL.section(0.68 * headL.length);
   const across = [bandSec.side, bandSec.up].reduce((a, b) => (Math.abs(b[0]) > Math.abs(a[0]) ? b : a));
   const half = across === bandSec.side ? bandSec.w : bandSec.h, deep = across === bandSec.side ? bandSec.h : bandSec.w;
-  const bandR = (half * half) / deep + 0.006, bandC = Math.PI * (3 * (half + deep) - Math.sqrt((3 * half + deep) * (half + 3 * deep))) + 0.015;
-  const PEAK = peakOutline(bandR, 0.36 * bandC, 0.072);
+  // The band: the head's oval there stood off by its ease.
+  const bh = half + 0.006, bd = deep + 0.006, bandC = Math.PI * (3 * (bh + bd) - Math.sqrt((3 * bh + bd) * (bh + 3 * bd)));
+  const PEAK = peakOutline(bh, bd, 0.36 * bandC, 0.072);
   const cap = wearing('cap', {
     garment: 'hat', material: 'canvas', ease: 0.015, from: 0.68, gores: 6, rgba: [0.09, 0.13, 0.3, 1],
     attached: [{
@@ -143,18 +142,39 @@ function pufferLook(x: number): SceneNode[] {
 }
 
 /**
- * A cap's peak: a crescent, its inner edge as curved as the front of the band
- * it is sewn to (`R`), so the only way it lies flat is standing out level, as
- * a peak does; its outer edge a wider arc. Drafted rounder than the band (a
- * circle the band's average size, where the head's oval curves tighter at the
- * front), it can only lie on it tilted down, as a cone: it hung over the eyes.
+ * A cap's peak: its inner edge the band's own curve laid flat (the band is
+ * level round the head, an oval: `half` across, `deep` front to back), so
+ * the only way it can be sewn on without stretching or buckling is standing
+ * out level, as a peak does; its outer edge the inner one stood off by the
+ * peak's depth, tapering toward the temples. Drafted as a circle, it matched
+ * the band at the front only: rounder than the band, it lay on it as a cone
+ * tilted down over the eyes; as curved as the front, its sides (where the
+ * oval is straighter) hung down in a wall either side of the face.
  */
 const PEAK_ARC = 12;
-function peakOutline(R: number, arcLen: number, depth: number): [number, number][] {
-  const A = arcLen / R, Ro = R + depth, out: [number, number][] = [];
-  for (let k = 0; k <= PEAK_ARC; k++) { const t = -A / 2 + (A * k) / PEAK_ARC; out.push([r4(R * Math.sin(t)), r4(R * Math.cos(t) - R)]); }
-  for (let k = PEAK_ARC - 1; k >= 1; k--) { const t = -A / 2 + (A * k) / PEAK_ARC; out.push([r4(Ro * Math.sin(t) * 0.92), r4(Ro * Math.cos(t) - R)]); }
-  return out;
+function peakOutline(half: number, deep: number, arcLen: number, depth: number): [number, number][] {
+  // The oval from its front, finely, both ways, by arc length.
+  const at = (th: number) => [half * Math.cos(th), deep * Math.sin(th)];
+  const fine: { s: number; th: number }[] = [{ s: 0, th: -Math.PI / 2 }];
+  for (let k = 1, prev = at(-Math.PI / 2); k <= 2000; k++) {
+    const th = -Math.PI / 2 + (Math.PI * k) / 2000, q = at(th);
+    fine.push({ s: fine[k - 1].s + Math.hypot(q[0] - prev[0], q[1] - prev[1]), th });
+    prev = q;
+  }
+  const thAt = (s: number) => { const i = fine.findIndex((f) => f.s >= s); if (i <= 0) return fine[Math.max(0, i)].th; const f0 = fine[i - 1], f1 = fine[i]; return f0.th + ((f1.th - f0.th) * (s - f0.s)) / (f1.s - f0.s); };
+  // Flat: across x, out from the head +y, the band's front at the origin.
+  const point = (u: number) => {
+    const th = thAt(Math.abs(u)), sg = Math.sign(u) || 1, [x, y] = at(th);
+    const n = [Math.cos(th) / half, Math.sin(th) / deep], l = Math.hypot(n[0], n[1]);
+    return { p: [sg * x, -(deep + y)], n: [(sg * n[0]) / l, -n[1] / l] };
+  };
+  const inner: [number, number][] = [], outer: [number, number][] = [];
+  for (let k = 0; k <= PEAK_ARC; k++) { const u = -arcLen / 2 + (arcLen * k) / PEAK_ARC, { p } = point(u); inner.push([r4(p[0]), r4(p[1])]); }
+  for (let k = PEAK_ARC - 1; k >= 1; k--) {
+    const u = -arcLen / 2 + (arcLen * k) / PEAK_ARC, f = (2 * u) / arcLen, d = depth * (1 - 0.75 * f * f), { p, n } = point(u);
+    outer.push([r4(p[0] + n[0] * d), r4(p[1] + n[1] * d)]);
+  }
+  return [...inner, ...outer];
 }
 
 /**
