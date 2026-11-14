@@ -69,7 +69,23 @@ describe('the Etch button', () => {
     const params = new URLSearchParams(url.split('#')[1]);
     expect(params.get('thickness')).toBe('6');
     expect(params.get('material')).toBe('mdf');
+    expect(params.get('machine')).toBe('cnc');
     expect(params.get('name')).toBe('lid');
     expect(params.get('data')?.length).toBeGreaterThan(100);
+  });
+
+  it('passes multi-sheet stock dimensions when panels pack across multiple sheets', async () => {
+    const smallStock = { widthMm: 100, depthMm: 90, thicknessMm: 6 };
+    const url = await etchUrlForScene({
+      scene: moldSubject(scene, []).scene,
+      name: 'two boxes',
+      machine: 'laser',
+      material: 'plywood',
+      stock: smallStock,
+      baseUrl: 'https://etch.physbox.io/',
+    });
+    const params = new URLSearchParams(url.split('#')[1]);
+    expect(params.get('machine')).toBe('laser');
+    expect(params.get('sheets')?.split(',').length).toBeGreaterThanOrEqual(2);
   });
 });

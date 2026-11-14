@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { derivedFingerWidthMm, type LaserCutOptions, type LaserCutResult, type StockItem } from '../utils/laserCutExporter';
-import { canStartSheetJob, defaultCornerRelief, layoutKerf, layoutMargin, routerStepdownMm } from '../utils/sheetCutRecipe';
+import { canStartSheetJob, defaultCornerRelief, layoutCutOutset, layoutKerf, layoutMargin, routerStepdownMm } from '../utils/sheetCutRecipe';
 import { useLaserPowers } from '../hooks/useLaserPowers';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { buildEtchHandoffUrl, openInEtch } from '../utils/etchHandoff';
@@ -306,13 +306,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   // Only a laser is sent a kerf (sheetCutRecipe), as the MCP simulation is.
   const layoutKerfMm = layoutKerf(machineMode, kerfMm);
   const marginM = layoutMargin(machineMode, bitDiameterMm / 1000);
+  const cutOutsetM = layoutCutOutset(machineMode, bitDiameterMm / 1000);
   const liveLayoutFields = useMemo(() => ({
     jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm: layoutKerfMm, cornerRelief,
     bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
-    allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations, marginM,
+    allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations, marginM, cutOutsetM,
   }), [jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, layoutKerfMm, cornerRelief,
       bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
-      allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations, marginM]);
+      allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations, marginM, cutOutsetM]);
   const layoutFields = useSettled(liveLayoutFields, 250);
   // Nesting a big model takes long enough to freeze the tab, so it runs on the
   // export worker; the drawing on screen stays up, dimmed, until the new one lands.
@@ -342,6 +343,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       sheetWidth: Math.max(0.05, f.sheetWidthMm / 1000),
       sheetHeight: Math.max(0.05, f.sheetHeightMm / 1000),
       margin: f.marginM,
+      cutOutset: f.cutOutsetM,
       scaleFactor: f.customScalePct / 100,
       autoScale: f.autoScale,
       maxSheets: f.autoScale ? f.maxSheets : 0,
@@ -420,13 +422,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged
   // around behind a scrollbar, and its hairlines thickened to stay visible.
-  const previewSvg = useMemo(
-    () =>
-      (exportResult?.svg || '')
-        .replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"')
-        .replace(/stroke-width="0.2"/g, 'stroke-width="0.6"'),
-    [exportResult]
-  );
+  const previewSvg = useMemo(() => {
+    const thickened = (exportResult?.svg || '').replace(/stroke-width="0.2"/g, 'stroke-width="0.6"');
+    return previewActualSize
+      ? thickened
+      : thickened.replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"');
+  }, [exportResult, previewActualSize]);
 
   if (!isOpen) return null;
 
@@ -483,6 +484,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
           name: `${jointMode} cut`,
           thicknessMm: materialThicknessMm,
           material,
+          machine: machineMode,
+          sheets: exportResult.sheets,
         })
       );
     } catch (err) {
@@ -1253,7 +1256,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 <div
                   className={`transition-opacity ${layoutPending ? 'opacity-40 ' : ''}${
                     previewActualSize
-                      ? '[&>svg]:w-auto [&>svg]:h-auto [&>svg]:max-w-none'
+                      ? '[&>svg]:max-w-none'
                       : 'w-full [&>svg]:w-full [&>svg]:h-auto'
                   }`}
                   dangerouslySetInnerHTML={{ __html: previewSvg }}

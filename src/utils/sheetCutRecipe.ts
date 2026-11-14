@@ -32,11 +32,22 @@ export function routerStepdownMm(thicknessMm: number, bitDiameterMm: number): nu
 export const SHEET_MARGIN = 0.008;
 
 /**
- * The gap for this machine, in metres. A router's slots are a bit wide, so two
- * neighbours need that much and a little more to stay apart.
+ * The gap for this machine, in metres. A router stands half a bit outside each
+ * part's outline so its cut slot reaches one full bit diameter into the gap on
+ * BOTH neighbours; two bit diameters plus a 1 mm web keeps neighbouring cuts
+ * from overlapping and severing each other's holding tabs.
  */
 export function layoutMargin(machine: SheetMachine, bitDiameter: number): number {
-  return machine === 'cnc' ? Math.max(SHEET_MARGIN, bitDiameter + 0.001) : SHEET_MARGIN;
+  return machine === 'cnc' ? Math.max(SHEET_MARGIN, 2 * bitDiameter + 0.001) : SHEET_MARGIN;
+}
+
+/**
+ * How far past a part's drawn outline the cutter's outer edge reaches, in
+ * metres: one bit diameter on a router (tool centre at +R, cut edge at +2R),
+ * zero on a laser (whose kerf is already in the outline).
+ */
+export function layoutCutOutset(machine: SheetMachine, bitDiameter: number): number {
+  return machine === 'cnc' ? bitDiameter : 0;
 }
 
 /** Whether a sheet job may start: its program is good and every part is on its sheet. */

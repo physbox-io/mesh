@@ -62,6 +62,8 @@ export interface LaserCutOptions {
   sheetWidth: number;        // in meters (default 0.600 = 600mm)
   sheetHeight: number;       // in meters (default 0.400 = 400mm)
   margin: number;            // in meters (default 0.008 = 8mm)
+  /** Distance the cutter's outer edge stands outside each part's outline, in meters (bitDiameter on CNC, 0 on laser). */
+  cutOutset?: number;
   scaleFactor?: number;      // scale factor (default 1.0 = 100%)
   autoScale?: boolean;        // automatically scale down cuts to fit sheet/sheet limit
   maxSheets?: number;        // maximum allowed sheets (0 = unlimited)
@@ -2911,7 +2913,8 @@ function packPanels(
   panels: LaserPanel[],
   stock: StockItem[],
   marginMm: number,
-  thicknessOf: (panel: LaserPanel) => number
+  thicknessOf: (panel: LaserPanel) => number,
+  outsetMm = 0
 ): { sheetCount: number; oversized: string[]; offSheet: string[]; unplaced: string[]; sheets: SheetSpec[]; rotated: string[] } {
   const oversized: string[] = [];
   const offSheet: string[] = [];
@@ -3001,7 +3004,7 @@ function packPanels(
 
       if (!fits) {
         oversized.push(`${panel.name} (${pw.toFixed(0)} x ${ph.toFixed(0)} mm, ${thicknessMm.toFixed(1)} mm)`);
-        if (!bins.some((b) => pw + marginMm <= b.item.widthMm && ph + marginMm <= b.item.heightMm)) offSheet.push(panel.name);
+        if (!bins.some((b) => pw + marginMm + outsetMm <= b.item.widthMm && ph + marginMm + outsetMm <= b.item.heightMm)) offSheet.push(panel.name);
       }
 
       if (openSheet < 0 && !openNext(pw, ph)) {
@@ -3123,7 +3126,7 @@ export function exportLaserCutSvg(
     }
     const warnings = applyJointsToPanels(working, options, thicknessOf, singleThicknessMm);
     normalizePanelBounds(working);
-    const packed = packPanels(working, stock, marginMm, thicknessOf);
+    const packed = packPanels(working, stock, marginMm, thicknessOf, (options.cutOutset ?? 0) * 1000);
     return { panels: working, warnings: [...assignment.warnings, ...splitNotes, ...warnings], ...packed };
   };
 

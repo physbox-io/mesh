@@ -7,6 +7,7 @@ import type { SceneGeom, SceneNode } from '../src/types/scene';
 import { getNodeWorldTransform } from '../src/utils/laserCutExporter';
 import { printableParts } from '../src/utils/printExport';
 import { partSoups } from '../src/utils/partSoups';
+import { moldSubject } from '../src/utils/moldSubject';
 import * as THREE from 'three';
 import { useStore } from '../src/store/useStore';
 
@@ -76,5 +77,24 @@ describe('a baked rotation is not applied twice', () => {
     const node = useStore.getState().sceneGraph.nodes.find((n) => n.id === 'base')!;
     const mesh = node.geoms.find((g) => g.type === 'mesh')!;
     expect(extent(mesh.renderVertices!)).toEqual([20, 100, 10]);
+  });
+
+  it('lifting a baked child out of a rotated parent keeps its parent world rotation', () => {
+    // `bakedBar` has its own local 90° Z turn baked in (20 × 100 × 10 mm, running along Y).
+    // Turning its parent another +90° around Z puts the bar along X (100 × 20 × 10 mm) in world space.
+    const qParent = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
+    const parent: SceneNode = {
+      id: 'parent',
+      name: 'parent',
+      type: 'body',
+      pos: [0.1, 0.2, 0],
+      quat: [qParent.w, qParent.x, qParent.y, qParent.z],
+      joints: [],
+      geoms: [],
+      children: [bakedBar('child')],
+    } as SceneNode;
+    const sub = moldSubject({ nodes: [parent] }, ['child']);
+    const { parts } = printableParts(sub.scene);
+    expect(extent(parts[0].tris)).toEqual([100, 20, 10]);
   });
 });

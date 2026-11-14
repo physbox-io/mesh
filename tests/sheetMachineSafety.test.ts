@@ -291,14 +291,14 @@ describe('the gap round a part on a router', () => {
     expect(layoutMargin('laser', 0.012)).toBe(0.008);
   });
 
-  it('grows past 8 mm with the bit, on the panel packer', () => {
+  it('grows past 8 mm with the bit, on the panel packer, leaving a 1 mm web between kerf slots', () => {
     const margin = layoutMargin('cnc', 0.012);
     const r = exportLaserCutSvg(scene(box('a', 100, 100, 6), box('b', 100, 100, 6)), {
       ...DEFAULT_LASER_OPTIONS, materialThickness: 0.006, kerf: 0, bitDiameter: 0.012, margin,
     });
     const [a, b] = r.panels!;
-    expect(a.placedPos2D!.x).toBeCloseTo(13, 6);
-    expect(b.placedPos2D!.x - (a.placedPos2D!.x + a.width2D!)).toBeCloseTo(13, 6);
+    expect(a.placedPos2D!.x).toBeCloseTo(25, 6);
+    expect(b.placedPos2D!.x - (a.placedPos2D!.x + a.width2D!)).toBeCloseTo(25, 6);
   });
 
   it('and on the contour packer', () => {
@@ -306,8 +306,8 @@ describe('the gap round a part on a router', () => {
       ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.02, kerf: 0, pinHoles: false, margin: layoutMargin('cnc', 0.012),
     });
     const [a, b] = r.layers!;
-    expect(a.placedPos2D!.x).toBeCloseTo(13, 6);
-    expect(b.placedPos2D!.x - (a.placedPos2D!.x + a.width2D!)).toBeCloseTo(13, 6);
+    expect(a.placedPos2D!.x).toBeCloseTo(25, 6);
+    expect(b.placedPos2D!.x - (a.placedPos2D!.x + a.width2D!)).toBeCloseTo(25, 6);
   });
 });
 
@@ -332,6 +332,19 @@ describe('Start with a part off its sheet', () => {
     const r = exportContourSliceSvg(tower(), { ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.02, sheetWidth: 0.05, sheetHeight: 0.05 });
     expect(r.warnings!.join()).toMatch(/Too big/);
     expect(canStartSheetJob(r, good)).toBe(false);
+  });
+
+  it('is off when a router bit’s outer kerf overhangs the far edge of the sheet', () => {
+    // 290 mm part at x = 8 mm reaches x = 298 mm on a 300 mm sheet: fine on a
+    // laser, off-sheet with a 3.175 mm router bit whose kerf reaches 301.175 mm.
+    const onLaser = exportLaserCutSvg(scene(box('a', 290, 100, 6)), {
+      ...DEFAULT_LASER_OPTIONS, materialThickness: 0.006, kerf: 0, sheetWidth: 0.3, sheetHeight: 0.3, cutOutset: 0,
+    });
+    const onRouter = exportLaserCutSvg(scene(box('a', 290, 100, 6)), {
+      ...DEFAULT_LASER_OPTIONS, materialThickness: 0.006, kerf: 0, sheetWidth: 0.3, sheetHeight: 0.3, cutOutset: 0.003175,
+    });
+    expect(canStartSheetJob(onLaser, good)).toBe(true);
+    expect(canStartSheetJob(onRouter, good)).toBe(false);
   });
 
   it('is on when everything fits and the program is good', () => {

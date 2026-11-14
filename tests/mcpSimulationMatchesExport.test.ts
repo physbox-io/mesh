@@ -25,6 +25,7 @@ const { machiningOptionsFor } = await import('../src/hooks/mcp/exportOptions');
 const { machiningCommands } = await import('../src/hooks/mcp/machiningCommands');
 const { DEFAULT_LASER_OPTIONS } = await import('../src/utils/laserCutExporter');
 const { DEFAULT_CONTOUR_OPTIONS } = await import('../src/utils/contourSliceExporter');
+const { useStore } = await import('../src/store/useStore');
 
 const block: SceneGraph = {
   nodes: [{ id: 'b', name: 'p', type: 'body', pos: [0, 0, 0], geoms: [{ name: 'g', type: 'box', size: [0.02, 0.02, 0.005] } as never], joints: [], children: [] }],
@@ -83,5 +84,39 @@ describe('an MCP sheet simulation on a router', () => {
     expect(runs[0].options.kerf).toBe(DEFAULT_LASER_OPTIONS.kerf);
     expect(runs[0].options.cornerRelief).toBe('none');
     expect(runs[1].options.kerf).toBe(DEFAULT_CONTOUR_OPTIONS.kerf);
+  });
+
+  it('treats machine="cnc" and bench machineTarget="cnc" as router cuts, and forwards jointMode, scaleFactor and bench stock size', async () => {
+    runs.length = 0;
+    useStore.getState().setStock({ widthMm: 500, depthMm: 350, thicknessMm: 6 });
+    await machiningCommands.ADD_SIMULATION(
+      { kind: 'laser', machine: 'cnc', bitDiaMm: 6, jointMode: 'slot', scaleFactor: 0.75 },
+      ctx,
+    );
+    expect(runs[0].options.kerf).toBe(0);
+    expect(runs[0].options.cornerRelief).toBe('dogbone');
+    expect(runs[0].options.jointMode).toBe('slot');
+    expect(runs[0].options.scaleFactor).toBe(0.75);
+    expect(runs[0].options.cutOutset).toBeCloseTo(0.006);
+    expect(runs[0].options.sheetWidth).toBeCloseTo(0.5);
+    expect(runs[0].options.sheetHeight).toBeCloseTo(0.35);
+
+    const prevTarget = useStore.getState().machineTarget;
+    useStore.setState({ machineTarget: 'cnc' });
+    try {
+      await machiningCommands.ADD_SIMULATION({ kind: 'contour', scaleFactor: 0.5 }, ctx);
+      expect(runs[1].options.kerf).toBe(0);
+      expect(runs[1].options.sheetWidth).toBeCloseTo(0.5);
+      expect(runs[1].options.sheetHeight).toBeCloseTo(0.35);
+      expect(runs[1].options.scaleFactor).toBe(0.5);
+    } finally {
+      useStore.setState({ machineTarget: prevTarget });
+    }
+  });
+
+  it('respects masterId on sheet unfold simulations', async () => {
+    const res = await machiningCommands.ADD_SIMULATION({ kind: 'sheet', masterId: 'missing' }, ctx);
+    expect((res as { ok: boolean; error?: string }).ok).toBe(false);
+    expect((res as { error?: string }).error).toMatch(/No body called missing/);
   });
 });

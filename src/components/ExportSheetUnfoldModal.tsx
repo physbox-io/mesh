@@ -224,15 +224,15 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
     return exportSheetUnfold(scene, options);
   }, [isOpen, scene, options]);
 
-  const previewSvg = useMemo(
-    () =>
-      (exportResult?.svg || '')
-        .replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"')
-        .replace(/stroke-width="0.25"/g, 'stroke-width="0.55"')
-        .replace(/stroke-width="0.3"/g, 'stroke-width="0.65"')
-        .replace(/stroke-width="0.35"/g, 'stroke-width="0.75"'),
-    [exportResult]
-  );
+  const previewSvg = useMemo(() => {
+    const thickened = (exportResult?.svg || '')
+      .replace(/stroke-width="0.25"/g, 'stroke-width="0.55"')
+      .replace(/stroke-width="0.3"/g, 'stroke-width="0.65"')
+      .replace(/stroke-width="0.35"/g, 'stroke-width="0.75"');
+    return previewActualSize
+      ? thickened
+      : thickened.replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"');
+  }, [exportResult, previewActualSize]);
 
   if (!isOpen) return null;
 
@@ -259,10 +259,12 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
     if (!exportResult || !exportResult.success || !exportResult.svg) return;
     setEtchError(null);
     try {
+      const state = useStore.getState();
       await openInEtch(() =>
         buildSheetUnfoldEtchUrl(exportResult, {
           ...options,
-          material: useStore.getState().material,
+          material: state.material,
+          machine: state.machineTarget === 'laser' ? 'laser' : 'cnc',
         })
       );
     } catch (err) {
@@ -674,7 +676,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
                 <div
                   className={
                     previewActualSize
-                      ? '[&>svg]:w-auto [&>svg]:h-auto [&>svg]:max-w-none'
+                      ? '[&>svg]:max-w-none'
                       : 'w-full [&>svg]:w-full [&>svg]:h-auto'
                   }
                   dangerouslySetInnerHTML={{ __html: previewSvg }}

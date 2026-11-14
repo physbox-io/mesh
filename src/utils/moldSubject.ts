@@ -15,6 +15,7 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { isPourTooling, withoutTooling } from './pourTooling';
+import { isNodeRotationBaked } from './sceneTree';
 
 export interface MoldSubject {
   /** The scene the engines mold. */
@@ -39,7 +40,14 @@ function lifted(node: SceneNode, world: THREE.Matrix4): SceneNode {
   const q = new THREE.Quaternion();
   world.decompose(pos, q, new THREE.Vector3());
   const { euler: _euler, ...rest } = node;
-  return { ...rest, pos: [pos.x, pos.y, pos.z], quat: [q.w, q.x, q.y, q.z] };
+  // A child whose own local rotation was baked into its vertices received only
+  // its parent's world rotation in `world`. Drop the bake marker on the lifted
+  // copy so `getNodeWorldTransform` applies that parent rotation instead of
+  // mistaking `quat` for the already-baked local rotation.
+  const geoms = isNodeRotationBaked(node)
+    ? node.geoms.map(({ baseVertices: _bv, baseRenderVertices: _brv, ...g }) => g)
+    : node.geoms;
+  return { ...rest, geoms, pos: [pos.x, pos.y, pos.z], quat: [q.w, q.x, q.y, q.z] };
 }
 
 export function moldSubject(scene: SceneGraph, selection: readonly string[]): MoldSubject {

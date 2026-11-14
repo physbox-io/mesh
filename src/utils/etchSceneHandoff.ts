@@ -10,7 +10,7 @@
 
 import { ExportWorkerClient } from './exportWorkerClient';
 import { DEFAULT_LASER_OPTIONS, type LaserCutOptions } from './laserCutExporter';
-import { defaultCornerRelief, layoutKerf } from './sheetCutRecipe';
+import { defaultCornerRelief, layoutCutOutset, layoutKerf, layoutMargin } from './sheetCutRecipe';
 import { buildEtchHandoffUrl, openInEtch } from './etchHandoff';
 import type { MaterialId } from './feedsAndSpeeds';
 import type { SceneGraph } from '../types/scene';
@@ -32,12 +32,15 @@ export interface EtchSceneRequest {
 
 /** The panel layout options for one machine and board. */
 export function etchLayoutOptions(req: Pick<EtchSceneRequest, 'machine' | 'stock'>): LaserCutOptions {
+  const bitDiameter = ROUTER_BIT_MM / 1000;
   return {
     ...DEFAULT_LASER_OPTIONS,
     materialThickness: req.stock.thicknessMm / 1000,
     kerf: layoutKerf(req.machine, DEFAULT_LASER_OPTIONS.kerf),
     cornerRelief: defaultCornerRelief(req.machine),
-    bitDiameter: ROUTER_BIT_MM / 1000,
+    bitDiameter,
+    margin: layoutMargin(req.machine, bitDiameter),
+    cutOutset: layoutCutOutset(req.machine, bitDiameter),
     sheetWidth: req.stock.widthMm / 1000,
     sheetHeight: req.stock.depthMm / 1000,
   };
@@ -67,6 +70,8 @@ export async function etchUrlForScene(req: EtchSceneRequest): Promise<string> {
       name: req.name,
       thicknessMm: req.stock.thicknessMm,
       material: req.material,
+      machine: req.machine,
+      sheets: result.sheets,
     };
     return await (req.baseUrl ? buildEtchHandoffUrl(handoff, req.baseUrl) : buildEtchHandoffUrl(handoff));
   } finally {

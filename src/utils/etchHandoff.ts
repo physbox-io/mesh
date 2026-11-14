@@ -106,6 +106,12 @@ export class HandoffTooLargeError extends Error {
   }
 }
 
+export interface EtchSheetSpec {
+  widthMm: number;
+  heightMm: number;
+  thicknessMm?: number;
+}
+
 export interface EtchHandoff {
   svg: string;
   /** What to call the document at the far end. */
@@ -114,6 +120,10 @@ export interface EtchHandoff {
   thicknessMm?: number;
   /** What the bench is set to, by the id Mesh and Etch share. */
   material?: MaterialId;
+  /** Which machine the layout was prepared for ('laser' | 'cnc'). */
+  machine?: 'laser' | 'cnc';
+  /** Per-sheet stock dimensions when the SVG stacks multiple sheets. */
+  sheets?: EtchSheetSpec[];
 }
 
 /**
@@ -140,6 +150,19 @@ export async function buildEtchHandoffUrl(
     params.set('thickness', String(handoff.thicknessMm));
   }
   if (handoff.material) params.set('material', handoff.material);
+  if (handoff.machine) params.set('machine', handoff.machine);
+  if (handoff.sheets && handoff.sheets.length > 1) {
+    params.set(
+      'sheets',
+      handoff.sheets
+        .map((s) =>
+          s.thicknessMm && s.thicknessMm > 0
+            ? `${s.widthMm}x${s.heightMm}x${s.thicknessMm}`
+            : `${s.widthMm}x${s.heightMm}`
+        )
+        .join(',')
+    );
+  }
 
   const fragment = params.toString();
   if (fragment.length > HANDOFF_SOFT_LIMIT) throw new HandoffTooLargeError(fragment.length);

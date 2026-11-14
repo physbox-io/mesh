@@ -55,6 +55,8 @@ export interface ContourSliceOptions {
   sheetWidth: number;  // meters
   sheetHeight: number; // meters
   margin: number;      // meters
+  /** Distance the cutter's outer edge stands outside each slice outline, in meters (bitDiameter on CNC, 0 on laser). */
+  cutOutset?: number;
   scaleFactor?: number; // scale factor (default 1.0 = 100%)
   autoScale?: boolean;  // auto-scale down cuts to fit sheet/sheet limit
   maxSheets?: number;  // max allowed sheets (0 = unlimited)
@@ -1229,12 +1231,13 @@ export function exportContourSliceSvg(
 
   const oversized: string[] = [];
   const offSheet: string[] = [];
+  const outsetMm = (options.cutOutset ?? 0) * 1000;
   const sizes = layers.map((layer) => {
     const w = layer.width2D || 1;
     const h = layer.height2D || 1;
     if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
       oversized.push(`layer ${layer.index + 1}`);
-      if (w + marginMm > sheetWidthMm || h + marginMm > sheetHeightMm) offSheet.push(`layer ${layer.index + 1}`);
+      if (w + marginMm + outsetMm > sheetWidthMm || h + marginMm + outsetMm > sheetHeightMm) offSheet.push(`layer ${layer.index + 1}`);
     }
     return { w, h };
   });

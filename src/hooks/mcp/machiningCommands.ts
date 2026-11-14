@@ -20,7 +20,7 @@ import { reliefSimulationTools } from '../../utils/simulatedPart';
 import { simulationSetups } from '../../utils/solidSetups';
 import { FACE_NAME } from '../../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../../utils/sheetSimulation';
-import { defaultCornerRelief, layoutKerf, layoutMargin } from '../../utils/sheetCutRecipe';
+import { defaultCornerRelief, layoutCutOutset, layoutKerf, layoutMargin } from '../../utils/sheetCutRecipe';
 import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from '../useAddSimulation';
 import { addMcpSimulationSteps } from '../useSimulationSteps';
 import { breakdownFrameToWorld, timberSimulationRequest } from '../../utils/timberSimulation';
@@ -194,11 +194,19 @@ export const machiningCommands: McpCommands = {
     if (!scene.nodes?.some((n) => !n.simulation)) {
       return { ok: false, error: 'The scene has nothing to cut but earlier simulations.' };
     }
-    // Relief, machining, laser, contour and tube cut master_id, else every
-    // body; sheet and timber name their parts with body_id.
+    // Relief, machining, laser, contour, sheet and tube cut master_id (or
+    // body_id on sheet), else every body; timber names its parts with body_id.
     let subjectScene = scene;
-    if (msg.kind === 'relief' || msg.kind === 'machining' || msg.kind === 'laser' || msg.kind === 'contour' || msg.kind === 'tube') {
-      const subject = exportSubject(msg, scene, 'cut', (s) => toId(s) as string);
+    if (
+      msg.kind === 'relief' ||
+      msg.kind === 'machining' ||
+      msg.kind === 'laser' ||
+      msg.kind === 'contour' ||
+      msg.kind === 'sheet' ||
+      msg.kind === 'tube'
+    ) {
+      const subjectMsg = msg.kind === 'sheet' ? { ...msg, masterId: msg.masterId ?? msg.bodyId } : msg;
+      const subject = exportSubject(subjectMsg, scene, 'cut', (s) => toId(s) as string);
       if ('error' in subject) return { ok: false, error: subject.error };
       subjectScene = subject.scene;
     }
@@ -290,24 +298,39 @@ export const machiningCommands: McpCommands = {
     }
 
     if (msg.kind === 'laser' || msg.kind === 'contour') {
-      const router = msg.machine === 'router';
+      const state = useStore.getState();
+      const router =
+        msg.machine === 'cnc' ||
+        msg.machine === 'router' ||
+        (msg.machine == null && state.machineTarget === 'cnc');
       // Laid out as the dialog lays it out for that machine (sheetCutRecipe):
       // a router gets no kerf, and dogbones in the corners its bit leaves round.
       const machine = router ? 'cnc' : 'laser';
       const bitDiaMm = num(msg.bitDiaMm) ?? 3.175;
       const routerRadiusMm = router ? bitDiaMm / 2 : 0;
+      const stock = state.stock;
       // A contour layer is one sheet of the bench's stock, as in its dialog.
       const thicknessMm = num(msg.materialThicknessMm)
-        ?? (msg.kind === 'contour' ? useStore.getState().stock.thicknessMm : 3);
+        ?? (msg.kind === 'contour' ? stock.thicknessMm : 3);
+      const scaleFactor = num(msg.scaleFactor);
       if (msg.kind === 'laser') {
+        const jointMode =
+          msg.jointMode === 'finger' || msg.jointMode === 'slot' || msg.jointMode === 'glue'
+            ? msg.jointMode
+            : DEFAULT_LASER_OPTIONS.jointMode;
         const result: LaserCutResult = await runJob((c) =>
           c.run('laser', subjectScene, {
           ...DEFAULT_LASER_OPTIONS,
+          jointMode,
           materialThickness: thicknessMm / 1000,
           kerf: layoutKerf(machine, DEFAULT_LASER_OPTIONS.kerf),
           margin: layoutMargin(machine, bitDiaMm / 1000),
+          cutOutset: layoutCutOutset(machine, bitDiaMm / 1000),
           cornerRelief: defaultCornerRelief(machine),
           bitDiameter: bitDiaMm / 1000,
+          sheetWidth: stock.widthMm / 1000,
+          sheetHeight: stock.depthMm / 1000,
+          ...(scaleFactor ? { scaleFactor } : {}),
         }));
         if (!result.success || !result.panels?.length) {
           return { ok: false, error: result.error || 'The panels could not be laid out.', warnings: result.warnings ?? [] };
@@ -333,6 +356,10 @@ export const machiningCommands: McpCommands = {
           materialThickness: thicknessMm / 1000,
           kerf: layoutKerf(machine, DEFAULT_CONTOUR_OPTIONS.kerf),
           margin: layoutMargin(machine, bitDiaMm / 1000),
+          cutOutset: layoutCutOutset(machine, bitDiaMm / 1000),
+          sheetWidth: stock.widthMm / 1000,
+          sheetHeight: stock.depthMm / 1000,
+          ...(scaleFactor ? { scaleFactor } : {}),
         }));
       if (!result.success || !result.layers?.length || !result.stockTransform) {
         return { ok: false, error: result.error || 'The model could not be sliced.', warnings: result.warnings ?? [] };
@@ -379,9 +406,9 @@ export const machiningCommands: McpCommands = {
         ...(num(msg.scaleFactor) ? { scaleFactor: num(msg.scaleFactor) } : {}),
       };
       const targetIds = Array.isArray(msg.targetIds)
-        ? msg.targetIds.filter((x): x is string => typeof x === 'string')
-        : typeof msg.targetId === 'string' ? [msg.targetId] : undefined;
-      const res = exportSheetUnfold(scene, options, targetIds);
+        ? msg.targetIds.filter((x): x is string => typeof x === 'string').map((id) => toId(id) as string)
+        : typeof msg.targetId === 'string' ? [toId(msg.targetId) as string] : undefined;
+      const res = exportSheetUnfold(subjectScene, options, targetIds);
       if (!res.success) return { ok: false, error: res.error || 'Nothing in the scene unfolds.', warnings: res.warnings };
       const { fold, request } = sheetFoldSimulationRequest(res, options);
       const added = await addSimulationToScene({ ...request, placement });

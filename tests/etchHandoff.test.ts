@@ -85,4 +85,31 @@ describe('the Etch handoff link', () => {
     expect(etchBaseUrl({ hostname: 'localhost', protocol: 'http:' })).toBe('http://localhost:5176/');
     expect(etchBaseUrl({ hostname: 'mesh.physbox.io', protocol: 'https:' })).toBe('https://etch.physbox.io/');
   });
+
+  it('carries the machine and multi-sheet stock specs when there is more than one sheet', async () => {
+    const single = fragment(
+      await buildEtchHandoffUrl(
+        { svg: '<svg/>', machine: 'cnc', sheets: [{ widthMm: 600, heightMm: 400, thicknessMm: 6 }] },
+        'http://x/'
+      )
+    );
+    expect(single.get('machine')).toBe('cnc');
+    expect(single.get('sheets')).toBeNull();
+
+    const multi = fragment(
+      await buildEtchHandoffUrl(
+        {
+          svg: '<svg/>',
+          machine: 'laser',
+          sheets: [
+            { widthMm: 600, heightMm: 400, thicknessMm: 18 },
+            { widthMm: 300, heightMm: 200, thicknessMm: 6 },
+          ],
+        },
+        'http://x/'
+      )
+    );
+    expect(multi.get('machine')).toBe('laser');
+    expect(multi.get('sheets')).toBe('600x400x18,300x200x6');
+  });
 });

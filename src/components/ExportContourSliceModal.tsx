@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { type ContourSliceOptions, type ContourSliceResult } from '../utils/contourSliceExporter';
-import { canStartSheetJob, layoutKerf, layoutMargin, routerStepdownMm } from '../utils/sheetCutRecipe';
+import { canStartSheetJob, layoutCutOutset, layoutKerf, layoutMargin, routerStepdownMm } from '../utils/sheetCutRecipe';
 import { useLaserPowers } from '../hooks/useLaserPowers';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
@@ -268,11 +268,12 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   // Only a laser is sent a kerf (sheetCutRecipe), as the MCP simulation is.
   const slicedKerfMm = layoutKerf(machineMode, kerfMm);
   const marginM = layoutMargin(machineMode, bitDiameterMm / 1000);
+  const cutOutsetM = layoutCutOutset(machineMode, bitDiameterMm / 1000);
   const liveSliceFields = useMemo(() => ({
     materialThicknessMm, layerOverride, slicePosition, kerfMm: slicedKerfMm, pinCount, pinDiameterMm,
-    sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM,
+    sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM, cutOutsetM,
   }), [materialThicknessMm, layerOverride, slicePosition, slicedKerfMm, pinCount, pinDiameterMm,
-      sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM]);
+      sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM, cutOutsetM]);
   const sliceFields = useSettled(liveSliceFields, 250);
   // Slicing a big model takes long enough to freeze the tab, so it runs on the
   // export worker; the drawing on screen stays up, dimmed, until the new one lands.
@@ -290,6 +291,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       sheetWidth: Math.max(0.05, f.sheetWidthMm / 1000),
       sheetHeight: Math.max(0.05, f.sheetHeightMm / 1000),
       margin: f.marginM,
+      cutOutset: f.cutOutsetM,
       scaleFactor: f.customScalePct / 100,
       autoScale: f.autoScale,
       maxSheets: f.autoScale ? f.maxSheets : 0,
@@ -355,7 +357,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     if (preview === 'map') return exportResult.mapSvg || '';
     return (exportResult.svg || '')
       .replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"')
-      .replace(/stroke-width="0.2"/, 'stroke-width="0.9"');
+      .replace(/stroke-width="0.2"/g, 'stroke-width="0.9"');
   }, [exportResult, preview]);
 
   // Why the last hand-over to Etch did not happen (handleOpenInEtch), before the early return.
@@ -387,12 +389,19 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     setEtchError(null);
     const svg = exportResult.svg;
     try {
+      const sheetCount = Math.max(1, exportResult.sheetCount ?? 1);
       await openInEtch(() =>
         buildEtchHandoffUrl({
           svg,
           name: `${subjectLabel ?? 'Contour'} slices`,
           thicknessMm: materialThicknessMm,
           material,
+          machine: machineMode,
+          sheets: Array.from({ length: sheetCount }, () => ({
+            widthMm: sliceFields.sheetWidthMm,
+            heightMm: sliceFields.sheetHeightMm,
+            thicknessMm: materialThicknessMm,
+          })),
         })
       );
     } catch (err) {
