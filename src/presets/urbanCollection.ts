@@ -118,13 +118,13 @@ function pufferLook(x: number): SceneNode[] {
   }, form, 1);
   // A baseball cap: a close crown of six panels, its peak a stiffened crescent sewn on round the front of its band, stood out.
   // Its band round the forehead a couple of centimetres above the brow and under the back of the skull.
-  const FROM = 0.62, headL = formLimbs(m).head, bandSec = headL.section(FROM * headL.length);
+  const FROM = 0.58, CAP_LEVEL = 0.17, CAP_BACK = 0.04, headL = formLimbs(m).head, bandSec = headL.section(FROM * headL.length);
   const across = [bandSec.side, bandSec.up].reduce((a, b) => (Math.abs(b[0]) > Math.abs(a[0]) ? b : a));
   const half = across === bandSec.side ? bandSec.w : bandSec.h, deep = across === bandSec.side ? bandSec.h : bandSec.w;
   // The band: the head's oval there stood off by its ease.
   const bh = half + 0.004, bd = deep + 0.004, bandC = Math.PI * (3 * (bh + bd) - Math.sqrt((3 * bh + bd) * (bh + 3 * bd)));
-  // The peak round the front third of the band, ending short of the ears.
-  const PEAK = peakOutline(bh, bd, 0.26 * bandC, 0.075);
+  // The peak round the front third of the band, to the temples (round the front quarter, it stuck out as a duck's bill).
+  const PEAK = peakOutline(bh, bd, 0.36 * bandC, 0.07);
   // Its front panels stiffened to stand up off the forehead in a tall front, as a structured cap's do
   // (left to follow the head, the crown read as a swimming cap).
   const lowSec = headL.section((FROM + 0.2) * headL.length), lowDeep = Math.abs(lowSec.side[1]) > Math.abs(lowSec.up[1]) ? lowSec.w : lowSec.h;
@@ -142,12 +142,15 @@ function pufferLook(x: number): SceneNode[] {
   ];
   const cap = wearing('cap', {
     garment: 'hat', material: 'canvas', ease: 0.01, from: FROM, gores: 6, rgba: [0.09, 0.13, 0.3, 1], sculpt: capFront,
-    // Its band lower at the back, under the skull, than at the brow, as a cap sits: square to the head's
-    // line, it pitched down at the front and the peak with it, over the eyes.
-    // Dipping a little over the ears, and at the back an arch cut up from the band for its strap.
-    edges: [{ along: 'top', profile: { points: Array.from({ length: 49 }, (_, k) => { const t = k / 48, arch = Math.max(0, 1 - ((t - 0.5) / 0.05) ** 2); return [r4(t), r4(0.015 * (1 - Math.cos(2 * Math.PI * t)) + 0.004 * (1 - Math.cos(4 * Math.PI * t)) - 0.035 * Math.sqrt(arch))]; }) } }],
+    // Its band level under the peak (a board sewn to a band that dipped
+    // either side of it tilted up with it), then lower round the back, down
+    // under the skull, as a cap sits: square to the head's line, it pitched
+    // down at the front and the peak with it, over the eyes. A fitted cap,
+    // closed at the back (an arch cut for a strap, with no strap, read as a
+    // bite out of it).
+    edges: [{ along: 'top', profile: { points: Array.from({ length: 49 }, (_, k) => { const t = k / 48, from = Math.max(0, (Math.min(t, 1 - t) - CAP_LEVEL) / (0.5 - CAP_LEVEL)); return [r4(t), r4((CAP_BACK * (1 - Math.cos(Math.PI * from))) / 2)]; }) } }],
     attached: [{
-      name: 'peak', outline: PEAK, sewn: [0, PEAK_ARC], along: 'top', span: [0.87, 0.13], rgba: [0.09, 0.13, 0.3, 1],
+      name: 'peak', outline: PEAK, sewn: [0, PEAK_ARC], along: 'top', span: [0.82, 0.18], rgba: [0.09, 0.13, 0.3, 1],
       // A plastic board inside it (polyethylene, about a gigapascal): it holds itself out.
       material: 'canvas', materialOverrides: { thickness: 0.0015, young: 1e9, arealDensity: 0.9 },
     }],
@@ -194,12 +197,16 @@ function peakOutline(half: number, deep: number, arcLen: number, depth: number):
   };
   const inner: [number, number][] = [];
   for (let k = 0; k <= PEAK_ARC; k++) { const u = -arcLen / 2 + (arcLen * k) / PEAK_ARC, { p } = point(u); inner.push([r4(p[0]), r4(p[1])]); }
-  // Its outer edge one half ellipse from one end of the sewn edge to the
-  // other, `depth` out at the front: a D, running into the band at the
-  // sides (stood off the band all along, it wrapped round like a brim).
-  const a = (inner[PEAK_ARC][0] - inner[0][0]) / 2, mid = [(inner[PEAK_ARC][0] + inner[0][0]) / 2, (inner[PEAK_ARC][1] + inner[0][1]) / 2], b = -mid[1] + depth;
+  // Its outer edge the sewn one stood forward (not out round the head) by
+  // `depth`, less toward the ends and then quickly none: its sides run
+  // forward from the temples, its corners rounded into the band. A half
+  // ellipse from end to end met the band tangent, in slivers; stood off the
+  // band square to it all along, it wrapped round like a brim.
   const outer: [number, number][] = [];
-  for (let k = PEAK_OUTER - 1; k >= 1; k--) { const th = (Math.PI * k) / PEAK_OUTER; outer.push([r4(mid[0] - a * Math.cos(th)), r4(mid[1] + b * Math.sin(th))]); }
+  for (let k = PEAK_OUTER - 1; k >= 1; k--) {
+    const f = -1 + (2 * k) / PEAK_OUTER, { p } = point((f * arcLen) / 2);
+    outer.push([r4(p[0]), r4(p[1] + depth * Math.sqrt(1 - f ** 4))]);
+  }
   return [...inner, ...outer];
 }
 

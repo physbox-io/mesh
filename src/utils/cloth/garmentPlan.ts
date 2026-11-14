@@ -147,7 +147,10 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
 
   covers.push({
     part: 'skin', off, flare, names: 'frontBack',
-    snug: { z: topZ, r: fromWaist ? undefined : L.neckRadius + topOff, off: topOff, over: 0.06 },
+    // Easing to its own stand-off over more the further that is: a puffer's,
+    // standing well off, came in to the neck so late that its neckline at the
+    // back was cut low down the shell, a hand's breadth off the neck.
+    snug: { z: topZ, r: fromWaist ? undefined : L.neckRadius + topOff, off: topOff, over: 0.06 + 2 * Math.max(0, off - topOff) },
     skin: { hangFrom: !fromWaist && !d.fitted ? L.bustZ : undefined, downTo: hangsFromHips ? Math.min(hem, 0) - d.train - 0.1 : undefined },
   });
   if (d.legs) for (const leg of ['legL', 'legR'] as const) covers.push({ part: leg, off, names: 'frontBackSide' });

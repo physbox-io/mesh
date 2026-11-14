@@ -156,6 +156,7 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
   const out: AddOnPiece[] = [];
   // Each piece's stretches by point, for joins between pieces, made once both are.
   const built = new Map<string, { stretch: (i: number, j: number) => number[]; n: number }>();
+  let freeEdges: Map<string, number> | null = null;
   const later: { from: string; jn: NonNullable<GarmentAttachment['joins']>[number] }[] = [];
   for (const a of list) {
     if (a.outline.length < 3) continue;
@@ -202,8 +203,18 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
     }
     const flat = mesh.uv.map((q) => fromEdge(q, sewnEdge, votes >= 0 ? 1 : -1));
     const surface = hostSurface(x, hostTris, normalOf);
+    // The garment's free edges (an edge of one triangle only).
+    if (!freeEdges) { freeEdges = new Map(); for (let t = 0; t < hostTris.length; t += 3) for (let e = 0; e < 3; e++) { const i = hostTris[t + e], j = hostTris[t + ((e + 1) % 3)], key = i < j ? `${i},${j}` : `${j},${i}`; freeEdges.set(key, (freeEdges.get(key) ?? 0) + 1); } }
+    const free = freeEdges;
     const others = clearOf.map((o) => hostSurface(o.x, o.tris, o.normalOf));
     runs.forEach(({ run, closed }, r) => {
+      // Sewn to a garment's edge, its sewn side on the edge itself, as a seam
+      // turned in holds it: stood off the edge's face as on a line drawn
+      // across the cloth, a slit of what is under showed between them all
+      // along (a cap's band and its peak).
+      let onEdge = true;
+      for (let k = 1; k < run.length && onEdge; k++) { const i = run[k - 1], j = run[k]; onEdge = free.get(i < j ? `${i},${j}` : `${j},${i}`) === 1; }
+      const off = onEdge ? 0 : SEWN_OFF;
       // Round a closed line, a span may run on across its start (from 0.9 to 0.1: across the front).
       const s1 = closed && sTo < s0 ? sTo + 1 : sTo;
       const line = lineAlong(orientRun(run, closed, x), closed, x, normalOf);
@@ -235,14 +246,14 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           // Straight down; across the surface where the line itself runs more down than across.
           const down = Math.abs(L.t[2]) < 0.7 ? DOWN : hang;
           const aside = whole ? L.t : chordDir;
-          base.push([0, 1, 2].map((c) => L.p[c] + L.n[c] * SEWN_OFF + aside[c] * along + down[c] * away));
+          base.push([0, 1, 2].map((c) => L.p[c] + L.n[c] * off + aside[c] * along + down[c] * away));
           lineAt.push(L);
           // Swung out about the line: off the face, square to how it hangs.
           const dn = dot(L.n, down), out = unit(L.n.map((v, c) => v - down[c] * dn)) ?? L.n;
-          hangs.push({ root: [0, 1, 2].map((c) => L.p[c] + L.n[c] * SEWN_OFF + aside[c] * along), down, out, away });
+          hangs.push({ root: [0, 1, 2].map((c) => L.p[c] + L.n[c] * off + aside[c] * along), down, out, away });
           // Laid on the garment instead: down its face from the line, however gently it slopes.
           const face = hang[2] < -1e-3 ? hang : DOWN;
-          onFace.push([0, 1, 2].map((c) => L.p[c] + L.n[c] * SEWN_OFF + aside[c] * along + face[c] * away));
+          onFace.push([0, 1, 2].map((c) => L.p[c] + L.n[c] * off + aside[c] * along + face[c] * away));
         });
         // Then out from the garment, all of it together, as far as it takes
         // to start clear of it, of the body, and of what is sewn on already,
@@ -271,9 +282,13 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
         // distort it, and it starts where it hangs, nothing to draw in (drawn
         // in from a hand's breadth off, a neckerchief swung up over itself).
         // Off the garment's face where it is sewn (up off a shoulder, out off a chest).
+        // On an edge, a point a step off its sewn side cannot be clear of the
+        // cloth it is sewn to: judged so, no start cleared and the piece was
+        // pulled in from afar, its seam ragged.
+        const atSeam = (i: number) => onSewn.has(i) || (off === 0 && flat[i].away < 1.5 * LIE_OFF);
         const radial = lineAt.map((L) => L.n);
         const need = onFace.map((b, i) => {
-          if (onSewn.has(i)) return 0;
+          if (atSeam(i)) return 0;
           for (let d = 0; d <= LIFT_MAX + 1e-9; d += 0.004) if (clearAt(b.map((v, c) => v + radial[i][c] * d))) return d;
           return Infinity;
         });
@@ -289,10 +304,10 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           let lift = need.slice();
           for (let it = 0; it < 30; it++) lift = lift.map((_, i) => (onSewn.has(i) ? 0 : Math.max(need[i], nbr[i].reduce((acc, j) => acc + lift[j], 0) / Math.max(1, nbr[i].length))));
           const at = onFace.map((b, i) => b.map((v, c) => v + radial[i][c] * lift[i]));
-          if (at.filter((q, i) => !onSewn.has(i) && !clearAt(q)).length <= few) lifted = at;
+          if (at.filter((q, i) => !atSeam(i) && !clearAt(q)).length <= few) lifted = at;
         }
         let swing = turned !== undefined ? (turned * Math.PI) / 180 : lifted ? 0 : -1;
-        if (!lifted && turned === undefined) for (let th = 0; th <= Math.PI / 2 + 1e-9; th += Math.PI / 30) if (base.every((_, i) => onSewn.has(i) || clearAt(swung(i, th)))) { swing = th; break; }
+        if (!lifted && turned === undefined) for (let th = 0; th <= Math.PI / 2 + 1e-9; th += Math.PI / 30) if (base.every((_, i) => atSeam(i) || clearAt(swung(i, th)))) { swing = th; break; }
         // Started as it would rest: of hanging and swung out about its line,
         // whichever takes least energy to hold (bent, by its own stiffness;
         // raised, by its weight). A soft piece hangs; a stiff one cut to stand
@@ -311,19 +326,19 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           // seam rested) pitched down over the eyes.
           for (let th = Math.max(swing, 0) + Math.PI / 24; th <= (3 * Math.PI) / 4 + 1e-9; th += Math.PI / 24) {
             const at = relaxed(base.map((_, i) => swung(i, th)), mesh, onSewn);
-            if (!at.every((q, i) => onSewn.has(i) || clearAt(q))) continue;
+            if (!at.every((q, i) => atSeam(i) || clearAt(q))) continue;
             const e = restEnergy(at, mesh.tris, pm);
             if (e < bestE) { bestE = e; bestTh = th; bestAt = at; }
           }
           if (bestTh >= 0 && bestAt) { lifted = bestAt; swing = bestTh; }
         }
         let clear = 0;
-        if (swing < 0) while (clear < 0.6 && !base.every((b, i) => onSewn.has(i) || clearAt(b.map((v, c) => v + outward[i][c] * clear)))) clear += 0.01;
+        if (swing < 0) while (clear < 0.6 && !base.every((b, i) => atSeam(i) || clearAt(b.map((v, c) => v + outward[i][c] * clear)))) clear += 0.01;
         const start = lifted ?? (swing >= 0 ? base.map((_, i) => swung(i, swing)) : base.map((b, i) => b.map((v, c) => v + outward[i][c] * clear)));
         // Its sewn side on the line where it starts there; else stitched to the line's points and sewn on over the sew time.
         const tacks: AddOnTack[] = [], stitches: { local: number; particle: number; sew: boolean }[] = [];
         for (const i of onSewn) {
-          if (swing >= 0 || clear < 0.005) { const tk = nearestTack(lineAt[i].p, hostTris, x, normalOf, SEWN_OFF, false, i); tacks.push(tk.tack); start[i] = tk.at; }
+          if (swing >= 0 || clear < 0.005) { const tk = nearestTack(lineAt[i].p, hostTris, x, normalOf, off, false, i); tacks.push(tk.tack); start[i] = tk.at; }
           else stitches.push({ local: i, particle: lineAt[i].particle, sew: true });
         }
         out.push({ name, rgba: a.rgba ?? colour, ...(a.material ? { material: a.material } : {}), ...(a.pattern ? { pattern: a.pattern } : {}), ...(a.materialOverrides ? { materialOverrides: a.materialOverrides } : {}), uv: mesh.uv, tris: mesh.tris, outline: a.outline.flatMap((_, k) => mesh.edgeVerts[`s${k}`].slice(0, -1)), start, tacks, ...(stitches.length ? { stitches } : {}), ...(swing > 1e-6 ? { drop: true } : {}), ...(selfStitches.length ? { selfStitches } : {}) });
