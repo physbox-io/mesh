@@ -5,10 +5,14 @@ import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { WebGLPathTracer, ShapedAreaLight, DenoiseMaterial } from 'three-gpu-pathtracer';
 import { useStore } from '../../store/useStore';
 import { useViewQuality, usePathTraceStatus, type PathTracePhase } from '../../store/viewQualityStore';
+import type { BackgroundId } from '../../types/scene';
+import { BACKGROUND_LIGHTING } from '../../utils/backgroundScenery';
+import { buildTracedEquirectTexture } from '../../utils/backgroundTextures';
 import { preToneMappedColor } from '../../utils/neutralToneMapping';
 import { MeshBvhWorkerClient } from '../../utils/meshBvhWorkerClient';
+import { TracedDespeckle } from '../../utils/tracedDespeckle';
 import { TracedGlow } from '../../utils/tracedGlow';
-import { withRgbaColors } from '../../utils/tracerGeometry';
+import { withRgbaColors, withSceneryColorTrim } from '../../utils/tracerGeometry';
 
 /** How long the view has to hold still before tracing starts. */
 const SETTLE_MS = 350;
@@ -54,9 +58,11 @@ const KEY_LIGHT_ANGULAR_RADIUS = 0.01;
 
 interface Engine {
   pathTracer: WebGLPathTracer;
+  despeckle: TracedDespeckle;
   denoise: DenoiseMaterial;
   denoiseQuad: FullScreenQuad;
   glow: TracedGlow;
+  glowScale: number;
   floor: THREE.Mesh;
   bvhWorker: MeshBvhWorkerClient;
 }
@@ -78,29 +84,16 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
     pt.tiles.set(TILE_STEPS[0], TILE_STEPS[0]);
     // Softens the fireflies a glossy surface throws off at low sample counts.
     pt.filterGlossyFactor = 0.5;
-    // Copied to the canvas through an edge-preserving blur rather than
-    // straight. Path-tracing grain falls only as 1/sqrt(samples), so halving
-    // it by brute force costs four times the samples; a bilateral filter
-    // smooths it out of the flat and gently curved surfaces that make up
-    // most of a part, and stops at any step in colour, which is where its
-    // edges and shadow lines are. The tracer's own quad still carries the
-    // fade-in, so its opacity and blending are copied across each frame.
+    // Copied to the canvas through an outlier despeckle pass + edge-preserving
+    // bilateral blur rather than straight. A bilateral filter stops at big steps
+    // in luminance, which preserves real edges and shadow lines — and would
+    // otherwise preserve isolated 1 px fireflies or black/NaN pits even at 512
+    // samples. `despeckle` clamps isolated 3x3 impulses first (ramping to full
+    // strength at MAX_SAMPLES) while leaving 1 px lines and edges intact.
+    const despeckle = new TracedDespeckle();
     const denoise = new DenoiseMaterial({ sigma: DENOISE_SIGMA, kSigma: 1, threshold: DENOISE_THRESHOLD });
     const denoiseQuad = new FullScreenQuad(denoise);
     const glow = new TracedGlow();
-    pt.renderToCanvasCallback = (target, renderer, quad) => {
-      const fade = quad.material as THREE.ShaderMaterial & { opacity: number };
-      denoise.map = target.texture;
-      denoise.opacity = fade.opacity;
-      denoise.blending = fade.blending;
-      denoise.transparent = fade.opacity < 1;
-      const autoClear = renderer.autoClear;
-      renderer.autoClear = false;
-      denoiseQuad.render(renderer);
-      glow.render(renderer, target.texture, target.width, target.height, fade.opacity);
-      renderer.autoClear = autoClear;
-    };
-
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(40, 40),
       new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0 }),
@@ -109,7 +102,35 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
     floor.updateMatrix();
     floor.matrixAutoUpdate = false;
 
-    return { pathTracer: pt, denoise, denoiseQuad, glow, floor, bvhWorker };
+    const engine: Engine = {
+      pathTracer: pt,
+      despeckle,
+      denoise,
+      denoiseQuad,
+      glow,
+      glowScale: 0,
+      floor,
+      bvhWorker,
+    };
+
+    pt.renderToCanvasCallback = (target, renderer, quad) => {
+      const fade = quad.material as THREE.ShaderMaterial & { opacity: number };
+      const despeckleStrength = Math.min(1, 0.45 + 0.55 * (pt.samples / MAX_SAMPLES));
+      const cleaned = despeckle.filter(renderer, target.texture, target.width, target.height, despeckleStrength);
+      denoise.map = cleaned;
+      denoise.opacity = fade.opacity;
+      denoise.blending = fade.blending;
+      denoise.transparent = fade.opacity < 1;
+      const autoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      denoiseQuad.render(renderer);
+      if (engine.glowScale > 0) {
+        glow.render(renderer, cleaned, target.width, target.height, fade.opacity * engine.glowScale);
+      }
+      renderer.autoClear = autoClear;
+    };
+
+    return engine;
   } catch (e) {
     console.error('[PathTracedView] could not start the path tracer', e);
     return null;
@@ -139,6 +160,7 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
 export function PathTracedView({ background }: { background: string }) {
   const gl = useThree((s) => s.gl);
   const invalidate = useThree((s) => s.invalidate);
+  const backgroundPreset = useStore((s) => s.background);
 
   const state = useRef({
     sceneSig: [] as number[],
@@ -159,6 +181,7 @@ export function PathTracedView({ background }: { background: string }) {
     /** A BVH is building in the worker; the tracer has nothing to draw yet. */
     building: false,
     instanceMaterials: [] as THREE.Material[],
+    ownedTextures: [] as THREE.Texture[],
     /** Index into TILE_STEPS; it only ever goes up, for as long as Render mode is on. */
     tileStep: 0,
     /** When the last sample was drawn, if it was drawn in the frame before this one. */
@@ -184,6 +207,7 @@ export function PathTracedView({ background }: { background: string }) {
       engineRef.current = null;
       engine.bvhWorker.dispose();
       engine.pathTracer.dispose();
+      engine.despeckle.dispose();
       engine.denoiseQuad.dispose();
       engine.denoise.dispose();
       engine.glow.dispose();
@@ -191,18 +215,22 @@ export function PathTracedView({ background }: { background: string }) {
       (engine.floor.material as THREE.Material).dispose();
       for (const m of s.instanceMaterials) m.dispose();
       s.instanceMaterials = [];
+      for (const t of s.ownedTextures) t.dispose();
+      s.ownedTextures = [];
       s.sceneDirty = true;
       s.buildArmed = false;
       s.building = false;
     };
   }, [gl]);
 
-  // A new backdrop colour is a new scene to trace.
+  // A new backdrop colour, realistic background preset, or Render-mode tuning update is a new scene to trace.
+  const tuningKey =
+    backgroundPreset !== 'studio' ? JSON.stringify(BACKGROUND_LIGHTING[backgroundPreset].traced ?? null) : '';
   useEffect(() => {
     state.current.sceneDirty = true;
     state.current.lastChange = performance.now();
     invalidate();
-  }, [background, invalidate]);
+  }, [background, backgroundPreset, tuningKey, invalidate]);
 
   // gl, scene and camera from the frame's own state rather than from render,
   // the same way GridFadeFollowsCamera reads them: this writes to the renderer.
@@ -275,8 +303,12 @@ export function PathTracedView({ background }: { background: string }) {
         return;
       }
       s.buildArmed = false;
-      for (const m of s.instanceMaterials) m.dispose();
-      s.instanceMaterials = [];
+      const nextMaterials: THREE.Material[] = [];
+      const nextTextures: THREE.Texture[] = [];
+      const disposeBatch = (materials: THREE.Material[], textures: THREE.Texture[]) => {
+        for (const m of materials) m.dispose();
+        for (const t of textures) t.dispose();
+      };
       const fail = (e: unknown) => {
         // A geometry the tracer cannot take would otherwise throw on every
         // frame from here on.
@@ -284,21 +316,47 @@ export function PathTracedView({ background }: { background: string }) {
         useViewQuality.getState().setPathTrace(false);
       };
       try {
-        s.traced = buildTracedScene(scene, bodies, floor, background, s.instanceMaterials);
+        const activePreset = useStore.getState().background;
+        const presetGlowScale =
+          activePreset !== 'studio' ? (BACKGROUND_LIGHTING[activePreset].traced?.glowScale ?? 0) : 0;
+        const nextHasGlow = bodies.some(
+          (m) => ((m.material as THREE.MeshStandardMaterial).userData?.glow ?? 0) > 0,
+        );
+        const nextGlowScale = Math.max(nextHasGlow ? 1 : 0, presetGlowScale);
+        s.traced = buildTracedScene(
+          scene,
+          bodies,
+          floor,
+          background,
+          activePreset,
+          nextMaterials,
+          nextTextures,
+        );
         const started = performance.now();
         s.building = true;
         pathTracer.setSceneAsync(s.traced, camera).then(
           () => {
-            if (engineRef.current !== engine) return;
+            if (engineRef.current !== engine) {
+              disposeBatch(nextMaterials, nextTextures);
+              return;
+            }
+            // Only dispose the previous scene's materials & equirect textures AFTER
+            // setSceneAsync has bound the new backgroundMap / envMapInfo on the GPU.
+            disposeBatch(s.instanceMaterials, s.ownedTextures);
+            s.instanceMaterials = nextMaterials;
+            s.ownedTextures = nextTextures;
+            engine.glowScale = nextGlowScale;
             console.info(`[PathTracedView] scene built in ${Math.round(performance.now() - started)} ms`);
             s.building = false;
             invalidate();
           },
           (e) => {
+            disposeBatch(nextMaterials, nextTextures);
             if (engineRef.current === engine) fail(e);
           },
         );
       } catch (e) {
+        disposeBatch(nextMaterials, nextTextures);
         s.building = false;
         fail(e);
         return;
@@ -412,12 +470,12 @@ function tracedMaterial(live: THREE.MeshStandardMaterial, owned: THREE.Material[
   return material;
 }
 
-/** The bodies: visible meshes that cast shadows and draw with a standard material. */
+/** The bodies and realistic background scenery: visible standard-material meshes that cast shadows or mark `tracedScenery`. */
 function collectBodies(scene: THREE.Scene): THREE.Mesh[] {
   const bodies: THREE.Mesh[] = [];
   scene.traverseVisible((o) => {
     const mesh = o as THREE.Mesh;
-    if (!mesh.isMesh || !mesh.castShadow) return;
+    if (!mesh.isMesh || (!mesh.castShadow && !mesh.userData?.tracedScenery)) return;
     const material = mesh.material as THREE.MeshStandardMaterial;
     if (Array.isArray(mesh.material) || !material.isMeshStandardMaterial) return;
     if (material.wireframe || material.opacity <= 0) return;
@@ -500,14 +558,45 @@ function buildTracedScene(
   bodies: THREE.Mesh[],
   floor: THREE.Mesh,
   background: string,
+  backgroundPreset: BackgroundId,
   instanceMaterials: THREE.Material[],
+  ownedTextures: THREE.Texture[],
 ): THREE.Scene {
   const traced = new THREE.Scene();
-  // The sky is only ever seen directly, never composited over, so it can be
-  // drawn bright enough to come out of the tone mapping as the page colour.
-  traced.background = preToneMappedColor(background);
-  traced.environment = live.environment;
-  traced.environmentIntensity = live.environmentIntensity;
+  const realisticBackdrop = backgroundPreset !== 'studio';
+  const tuning = realisticBackdrop ? BACKGROUND_LIGHTING[backgroundPreset].traced : undefined;
+  // Studio mode uses the pre-tone-mapped flat backdrop colour + synthetic floor;
+  // realistic background presets already carry an equirectangular skybox on
+  // `live.background` and their own 3D ground/tabletop in `bodies`.
+  if (realisticBackdrop && live.background) {
+    const liveDataBg = live.background as THREE.DataTexture;
+    if (tuning && liveDataBg.isDataTexture && liveDataBg.image?.data instanceof Uint16Array) {
+      const trimmedBg = buildTracedEquirectTexture(liveDataBg, {
+        desaturate: tuning.skyboxDesaturate,
+        scale: tuning.skyboxScale,
+      });
+      ownedTextures.push(trimmedBg);
+      traced.background = trimmedBg;
+    } else {
+      traced.background = live.background;
+    }
+  } else {
+    traced.background = preToneMappedColor(background);
+  }
+
+  const liveDataEnv = live.environment as THREE.DataTexture | null;
+  if (tuning && liveDataEnv?.isDataTexture && liveDataEnv.image?.data instanceof Uint16Array) {
+    const trimmedEnv = buildTracedEquirectTexture(liveDataEnv, {
+      desaturate: tuning.envDesaturate,
+      scale: 1,
+      hotspotClamp: tuning.envHotspotClamp,
+    });
+    ownedTextures.push(trimmedEnv);
+    traced.environment = trimmedEnv;
+  } else {
+    traced.environment = live.environment;
+  }
+  traced.environmentIntensity = live.environmentIntensity * (tuning?.envScale ?? 1);
   traced.environmentRotation.copy(live.environmentRotation);
 
   const place = (geometry: THREE.BufferGeometry, material: THREE.Material, matrix: THREE.Matrix4) => {
@@ -518,10 +607,28 @@ function buildTracedScene(
   };
 
   for (const mesh of bodies) {
-    const material = tracedMaterial(mesh.material as THREE.MeshStandardMaterial, instanceMaterials);
+    let material = tracedMaterial(mesh.material as THREE.MeshStandardMaterial, instanceMaterials);
+    const isScenery = Boolean(mesh.userData?.tracedScenery);
+    if (isScenery && tuning) {
+      const own = material.clone();
+      own.color.multiplyScalar(tuning.sceneryAlbedoScale);
+      if (backgroundPreset === 'meadow' && own.map) {
+        // Counter-trim the green bias baked into the Meadow turf detail map slightly in Render mode.
+        own.color.r *= 1.05;
+        own.color.g *= 0.93;
+        own.color.b *= 1.08;
+      }
+      instanceMaterials.push(own);
+      material = own;
+    }
+    const tracedGeo =
+      isScenery && tuning
+        ? withSceneryColorTrim(mesh.geometry, tuning.sceneryDesaturate)
+        : withRgbaColors(mesh.geometry);
+
     const instanced = mesh as THREE.InstancedMesh;
     if (!instanced.isInstancedMesh) {
-      place(withRgbaColors(mesh.geometry), material, mesh.matrixWorld);
+      place(tracedGeo, material, mesh.matrixWorld);
       continue;
     }
     // The tracer reads plain meshes only, so each instance becomes one, with
@@ -537,24 +644,32 @@ function buildTracedScene(
         instanceMaterials.push(own);
         instanceMaterial = own;
       }
-      place(withRgbaColors(mesh.geometry), instanceMaterial, _instanceMatrix);
+      place(tracedGeo, instanceMaterial, _instanceMatrix);
     }
   }
 
-  (floor.material as THREE.MeshStandardMaterial).color.set(background);
-  traced.add(floor);
+  if (!realisticBackdrop) {
+    (floor.material as THREE.MeshStandardMaterial).color.set(background);
+    traced.add(floor);
+  }
 
   // The key light, as a disc that subtends the same irradiance: a directional
   // light of intensity E lights a face like a source of radiance E / Ω, where Ω
-  // is the solid angle the disc covers.
+  // is the solid angle the disc covers. Indoor presets use a wider angular
+  // radius (overhead LED strip / sunlit living-room window) for soft penumbras.
   const k = findKeyLight(live);
   if (k) {
     k.getWorldPosition(_keyPosition);
     k.target.getWorldPosition(_keyTarget);
     const distance = _keyPosition.distanceTo(_keyTarget);
-    const radius = distance * Math.tan(KEY_LIGHT_ANGULAR_RADIUS);
+    const angularRadius =
+      backgroundPreset !== 'studio'
+        ? BACKGROUND_LIGHTING[backgroundPreset].keyLightAngularRadius
+        : KEY_LIGHT_ANGULAR_RADIUS;
+    const radius = distance * Math.tan(angularRadius);
     const solidAngle = (Math.PI * radius * radius) / (distance * distance);
-    const disc = new ShapedAreaLight(k.color, k.intensity / solidAngle, radius * 2, radius * 2);
+    const keyIntensity = k.intensity * (tuning?.keyScale ?? 1);
+    const disc = new ShapedAreaLight(k.color, keyIntensity / solidAngle, radius * 2, radius * 2);
     disc.isCircular = true;
     disc.position.copy(_keyPosition);
     disc.lookAt(_keyTarget);

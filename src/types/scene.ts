@@ -1097,6 +1097,15 @@ export interface SceneGraph {
   brickwork?: Partial<BrickworkOptions>;
 }
 
+/** Realistic-scale visual background environment for the 3D viewport and renders. */
+export type BackgroundId =
+  | 'studio'
+  | 'meadow'
+  | 'mountains'
+  | 'urban'
+  | 'workbench'
+  | 'coffee_table';
+
 /** The world a scene runs in. Metres, seconds, kg/m³. */
 export interface SceneEnvironment {
   gravityZ: number;
@@ -1105,6 +1114,7 @@ export interface SceneEnvironment {
   density: number;
   floorFriction: number;
   floorBounce: number;
+  background: BackgroundId;
 }
 
 /** Which drawing view a reference image faces, and so which plane it lies in. */

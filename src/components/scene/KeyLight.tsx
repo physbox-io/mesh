@@ -1,7 +1,8 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import type { SceneNode } from '../../types/scene';
+import type { BackgroundId, SceneNode } from '../../types/scene';
+import { BACKGROUND_LIGHTING } from '../../utils/backgroundScenery';
 import { sceneContentBounds } from '../../utils/frameScene';
 import { KEY_LIGHT_OFFSET, shadowFrame } from '../../utils/shadowFrame';
 
@@ -10,12 +11,27 @@ import { KEY_LIGHT_OFFSET, shadowFrame } from '../../utils/shadowFrame';
  * Both follow the scene's extent (utils/shadowFrame.ts): at bench scale that
  * is the ±0.8 m box on the origin they always were.
  */
-export function KeyLight({ darkMode, hiRes, nodes }: { darkMode: boolean; hiRes: boolean; nodes: SceneNode[] }) {
+export function KeyLight({
+  darkMode,
+  hiRes,
+  nodes,
+  background = 'studio',
+}: {
+  darkMode: boolean;
+  hiRes: boolean;
+  nodes: SceneNode[];
+  background?: BackgroundId;
+}) {
   const lightRef = useRef<THREE.DirectionalLight>(null);
   const invalidate = useThree((s) => s.invalidate);
   const frame = useMemo(() => shadowFrame(sceneContentBounds(nodes)), [nodes]);
   const [cx, cz] = frame.center;
-  const { half, far } = frame;
+  const presetLight = background !== 'studio' ? BACKGROUND_LIGHTING[background] : null;
+  const offset = presetLight ? presetLight.keyOffset : KEY_LIGHT_OFFSET;
+  const half = presetLight ? Math.max(frame.half, presetLight.minShadowHalf) : frame.half;
+  const far = presetLight ? Math.hypot(...offset) + 2 * half + 1.5 : frame.far;
+  const lightColor = presetLight ? presetLight.keyColor : '#ffffff';
+  const lightIntensity = presetLight ? presetLight.keyIntensity : (darkMode ? 1.4 : 1.2);
 
   // three allocates a shadow map once and never resizes it, so a new mapSize
   // only takes once the old map is gone. Layout effect: the frame the switch
@@ -42,7 +58,7 @@ export function KeyLight({ darkMode, hiRes, nodes }: { darkMode: boolean; hiRes:
     cam.far = far;
     cam.updateProjectionMatrix();
     invalidate();
-  }, [cx, cz, half, far, invalidate]);
+  }, [cx, cz, half, far, background, invalidate]);
 
   return (
     <>
@@ -69,37 +85,32 @@ export function KeyLight({ darkMode, hiRes, nodes }: { darkMode: boolean; hiRes:
           grainy rather than softer. */}
       <directionalLight
         ref={lightRef}
-        position={[cx + KEY_LIGHT_OFFSET[0], KEY_LIGHT_OFFSET[1], cz + KEY_LIGHT_OFFSET[2]]}
-        intensity={darkMode ? 1.4 : 1.2}
+        position={[cx + offset[0], offset[1], cz + offset[2]]}
+        color={lightColor}
+        intensity={lightIntensity}
         castShadow
         shadow-mapSize={hiRes ? [4096, 4096] : [2048, 2048]}
         shadow-radius={hiRes ? 4 : 1}
         shadow-camera-near={0.1}
         shadow-normalBias={0.03}
       />
-      {/* Every geom already casts and receives, but until now nothing on
+      {/* Every geom already casts and receives, but in Studio mode nothing on
           the ground caught any of it: drei's Grid is a custom shader that
           doesn't receive shadows, so bodies only shadowed each other and
-          the floor stayed clean. That's the one place the eye reads
-          contact and height from, so a part hovering 20mm up looked
-          identical to one sitting down.
-          ShadowMaterial draws nothing but the shadow itself, so the grid
-          still shows through underneath. Sized to match the shadow
-          camera's footprint exactly — a larger plane would sample
-          outside the depth texture and smear its edge texels outward.
-          raycast is stubbed off deliberately: a plane across the
-          viewport floor would otherwise swallow every background click,
-          and onPointerMissed — the only thing that clears the selection —
-          would never fire again. */}
-      <mesh
-        rotation={[-Math.PI / 2, 0, 0]}
-        position={[cx, 0, cz]}
-        receiveShadow
-        raycast={() => null}
-      >
-        <planeGeometry args={[2 * half, 2 * half]} />
-        <shadowMaterial transparent opacity={darkMode ? 0.5 : 0.32} depthWrite={false} />
-      </mesh>
+          the floor stayed clean. Realistic backgrounds carry their own lit,
+          shadow-receiving terrain/tabletop/benchtop at y = 0, so only Studio
+          needs the transparent ShadowMaterial catcher. */}
+      {background === 'studio' && (
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[cx, 0, cz]}
+          receiveShadow
+          raycast={() => null}
+        >
+          <planeGeometry args={[2 * half, 2 * half]} />
+          <shadowMaterial transparent opacity={darkMode ? 0.5 : 0.32} depthWrite={false} />
+        </mesh>
+      )}
     </>
   );
 }

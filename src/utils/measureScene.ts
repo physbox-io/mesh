@@ -144,6 +144,7 @@ function analyticCentres(mesh: THREE.Mesh, nodeId: string | null): SnapCandidate
 function instancedCandidates(
   mesh: THREE.InstancedMesh, near: THREE.Vector3, radius: number, exclude?: string,
 ): SnapCandidate[] {
+  if (mesh.userData?.isBackground) return [];
   const parameters = (mesh.geometry as unknown as { parameters?: Record<string, number> }).parameters;
   if (mesh.geometry.type !== 'BoxGeometry' || !parameters) return [];
   const ids = (mesh.userData?.nodeIds ?? []) as string[];

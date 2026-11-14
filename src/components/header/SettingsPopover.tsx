@@ -1,5 +1,7 @@
 import { Settings, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
+import type { BackgroundId } from '../../types/scene';
+import { BACKGROUND_OPTIONS } from '../../store/sceneEnvironment';
 import { useStore } from '../../store/useStore';
 import { useViewQuality } from '../../store/viewQualityStore';
 import { SliderValue } from '../SliderValue';
@@ -23,10 +25,10 @@ export function SettingsPopover() {
   const highFidelity = simFidelity === 'print';
   const {
     isSettingsOpen, setSettingsOpen,
-    gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
+    gravityZ, windX, windY, density, floorFriction, floorBounce, background, setEnvironment,
   } = useStore(useShallow((s) => ({
     isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
-    gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, setEnvironment: s.setEnvironment,
+    gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, background: s.background, setEnvironment: s.setEnvironment,
   })));
   const llm = useLlmSettings(isSettingsOpen);
   if (!isSettingsOpen) return null;
@@ -54,6 +56,28 @@ export function SettingsPopover() {
           >
             <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${hiRes ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
           </button>
+        </div>
+        <div className="flex flex-col gap-1">
+          <label
+            htmlFor="envBackground"
+            className="text-xs font-medium text-slate-500 dark:text-slate-400"
+            title="Visual skybox and realistic-scale backdrop scenery for renders (non-interactive; does not affect physics or exports)."
+          >
+            Background
+          </label>
+          <select
+            id="envBackground"
+            value={background}
+            onChange={(e) => setEnvironment({ background: e.target.value as BackgroundId })}
+            title={BACKGROUND_OPTIONS.find((o) => o.id === background)?.description}
+            className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+          >
+            {BACKGROUND_OPTIONS.map((opt) => (
+              <option key={opt.id} value={opt.id}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Gravity Z <SliderValue value={gravityZ} onChange={(v) => setEnvironment({gravityZ: v})} decimals={1} unit="m/s²" min={-20} max={20} /></label>

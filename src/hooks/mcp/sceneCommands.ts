@@ -27,7 +27,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { bboxOf, stockReport } from '../../utils/sceneSummary';
 import { framingPatch } from '../../store/sceneFraming';
-import { withEnvironment } from '../../store/sceneEnvironment';
+import { BACKGROUND_OPTIONS, isBackgroundId, withEnvironment } from '../../store/sceneEnvironment';
 import type { HeadlessResult } from '../../workers/physicsWorkerProtocol';
 import {
   type PhysicsWindow, workerStatusNow, countBodies, type Msg, HEADLESS_WAIT_FOR_COLLIDERS_MS,
@@ -533,8 +533,8 @@ export const sceneCommands: McpCommands = {
     return withRenamedIds(withScriptWarnings(result, nodes), renamed);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
-    const { gravityZ, windX, windY, density, floorFriction, floorBounce, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
-      msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
+    const { gravityZ, windX, windY, density, floorFriction, floorBounce, background, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
+      msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; background?: string; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
     // The board on the bench: what every carve, export and fit check uses.
     const stockPatch = {
       ...(typeof stockWidthMm === 'number' && stockWidthMm > 0 ? { widthMm: stockWidthMm } : {}),
@@ -548,14 +548,21 @@ export const sceneCommands: McpCommands = {
       }
       store.setSimFidelity(fidelity === 'standard' ? 'standard' : 'print');
     }
-    const env: Record<string, number> = {};
+    if (background !== undefined && !isBackgroundId(background)) {
+      return {
+        ok: false,
+        error: `background must be one of ${BACKGROUND_OPTIONS.map((o) => `'${o.id}'`).join(', ')}, not '${background}'.`,
+      };
+    }
+    const env: Parameters<typeof store.setEnvironment>[0] = {};
     if (gravityZ !== undefined) env.gravityZ = gravityZ;
     if (windX !== undefined) env.windX = windX;
     if (windY !== undefined) env.windY = windY;
     if (density !== undefined) env.density = density;
     if (floorFriction !== undefined) env.floorFriction = floorFriction;
     if (floorBounce !== undefined) env.floorBounce = floorBounce;
-    store.setEnvironment(env);
+    if (background !== undefined) env.background = background;
+    if (Object.keys(env).length > 0) store.setEnvironment(env);
     return {
       ok: true,
       ...(Object.keys(stockPatch).length > 0

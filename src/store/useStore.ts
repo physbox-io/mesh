@@ -1,6 +1,6 @@
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
-import type { SceneGraph, SceneNode, ReferenceImage } from '../types/scene';
+import type { BackgroundId, SceneEnvironment, SceneGraph, SceneNode, ReferenceImage } from '../types/scene';
 import { hardwarePartActions, type HardwarePartActions } from './hardwarePartActions';
 import { extrusionActions, type ExtrusionActions } from './extrusionActions';
 import { clipboardActions, type ClipboardActions } from './clipboardActions';
@@ -229,6 +229,7 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
   density: number;
   floorFriction: number;
   floorBounce: number;
+  background: BackgroundId;
   
   // Scene
   sceneGraph: SceneGraph;
@@ -333,7 +334,7 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
   setDfmCastOpen: (open: boolean) => void;
   setDfmPanel: (patch: Partial<{ x: number | null; y: number | null; minimized: boolean }>) => void;
   setCameraOverride: (override: { position: [number, number, number]; target: [number, number, number] } | null) => void;
-  setEnvironment: (env: Partial<{gravityZ: number, windX: number, windY: number, density: number, floorFriction: number, floorBounce: number}>) => void;
+  setEnvironment: (env: Partial<SceneEnvironment>) => void;
   
   setSelectedNodeId: (id: string | null) => void;
   /**
@@ -597,7 +598,16 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setEnvironment: (env) => {
     get().recordInteraction('environment');
     set(env);
-    get().recompile(get().sceneGraph);
+    const physicsChanged =
+      'gravityZ' in env ||
+      'windX' in env ||
+      'windY' in env ||
+      'density' in env ||
+      'floorFriction' in env ||
+      'floorBounce' in env;
+    if (physicsChanged) {
+      get().recompile(get().sceneGraph);
+    }
   },
   
   setSelectedNodeId: (id) => set((state) => ({

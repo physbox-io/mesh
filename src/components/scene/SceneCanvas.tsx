@@ -22,6 +22,7 @@ import { OriginGlow } from './OriginGlow';
 import { KeyLight } from './KeyLight';
 import { BodyToneMapping } from './BodyToneMapping';
 import { StudioBackdrop } from './StudioBackdrop';
+import { EnvironmentBackground } from './EnvironmentBackground';
 import { SelectionOutline } from './SelectionOutline';
 import { PathTracedView } from './PathTracedView';
 import { MarqueeSelect } from './MarqueeSelect';
@@ -77,11 +78,13 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
   const {
     model, data, mujoco, recompileId, isPlaying, paintMode, gridCellSizeMm,
     sceneGraph, selectedNodeId, setSelectedNodeId, addComponent,
+    background, cameraView,
   } = useStore(useShallow((s) => ({
     model: s.model, data: s.data, mujoco: s.mujoco, recompileId: s.recompileId,
     isPlaying: s.isPlaying, paintMode: s.paintMode, gridCellSizeMm: s.gridCellSizeMm,
     sceneGraph: s.sceneGraph, selectedNodeId: s.selectedNodeId, setSelectedNodeId: s.setSelectedNodeId,
     addComponent: s.addComponent,
+    background: s.background, cameraView: s.cameraView,
   })));
   // While anything is in pieces the scene on screen is the document with the
   // broken bodies swapped for their shards. See `shatterPieces` in the store.
@@ -163,63 +166,50 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       <SceneCapture sceneRef={threeSceneRef} />
       <RenderOnChange />
       <DropHandler addComponent={addComponentUnderSelection} onImportFile={openStlImport} onImportImageFile={openImageImport} onImportProfileFile={openProfileImport} onImportSceneJson={onImportSceneJson} onUnsupportedDrop={(msg) => showNotice('Unsupported file', msg, 'amber')} />
-      <StudioBackdrop darkMode={darkMode} />
-      {/* A photo studio, built here rather than loaded: a broad softbox
-          overhead, two strip lights either side and a dim grey room. It
-          is where the shading comes from now — the diffuse light that
-          wraps a body and the highlights that show a curved face is
-          curved — so it runs well above the 0.12 the apartment HDR was
-          held at. That HDR was also fetched from a CDN on every load.
-          The ambient light under it was most of what the scene used to
-          be lit by, and ambient lights every face the same, which is why
-          a box read as three flat tints. It is kept only as a floor so
-          nothing in a crevice goes fully black.
-          background={false}: the room lights the bodies but is never
-          drawn; the flat <color> above stays the backdrop. frames={1}
-          (the default) renders the cube map once, not every frame. */}
-      <Environment background={false} resolution={256} environmentIntensity={darkMode ? 0.7 : 0.8}>
-        <color attach="background" args={['#3a3d42']} />
-        <Lightformer form="rect" intensity={2.5} position={[0, 5, 0]} rotation-x={Math.PI / 2} scale={[8, 8, 1]} />
-        <Lightformer form="rect" intensity={1.6} position={[-5, 1.5, 1]} rotation-y={Math.PI / 2} scale={[8, 2.5, 1]} />
-        <Lightformer form="rect" intensity={1.0} position={[5, 1, -1]} rotation-y={-Math.PI / 2} scale={[8, 2.5, 1]} />
-        <Lightformer form="rect" intensity={0.6} position={[0, 1, -5]} scale={[8, 2, 1]} />
-      </Environment>
+      {background === 'studio' ? (
+        <>
+          <StudioBackdrop darkMode={darkMode} />
+          {/* A photo studio, built here rather than loaded: a broad softbox
+              overhead, two strip lights either side and a dim grey room. It
+              is where the shading comes from now — the diffuse light that
+              wraps a body and the highlights that show a curved face is
+              curved — so it runs well above the 0.12 the apartment HDR was
+              held at. That HDR was also fetched from a CDN on every load.
+              The ambient light under it was most of what the scene used to
+              be lit by, and ambient lights every face the same, which is why
+              a box read as three flat tints. It is kept only as a floor so
+              nothing in a crevice goes fully black.
+              background={false}: the room lights the bodies but is never
+              drawn; the flat <color> above stays the backdrop. frames={1}
+              (the default) renders the cube map once, not every frame. */}
+          <Environment background={false} resolution={256} environmentIntensity={darkMode ? 0.7 : 0.8}>
+            <color attach="background" args={['#3a3d42']} />
+            <Lightformer form="rect" intensity={2.5} position={[0, 5, 0]} rotation-x={Math.PI / 2} scale={[8, 8, 1]} />
+            <Lightformer form="rect" intensity={1.6} position={[-5, 1.5, 1]} rotation-y={Math.PI / 2} scale={[8, 2.5, 1]} />
+            <Lightformer form="rect" intensity={1.0} position={[5, 1, -1]} rotation-y={-Math.PI / 2} scale={[8, 2.5, 1]} />
+            <Lightformer form="rect" intensity={0.6} position={[0, 1, -5]} scale={[8, 2, 1]} />
+          </Environment>
+        </>
+      ) : (
+        <EnvironmentBackground preset={background} />
+      )}
       <ambientLight intensity={0.08} />
-      <KeyLight darkMode={darkMode} hiRes={hiRes} nodes={sceneGraph.nodes} />
+      <KeyLight darkMode={darkMode} hiRes={hiRes} nodes={sceneGraph.nodes} background={background} />
       {/* Double-sided: drei's Grid defaults to BackSide, so the graph
           paper vanished the moment the camera dropped below the floor —
           which it does whenever you orbit under a part to look at its
           underside, and losing the ground is losing the only reference
-          for where the part is. */}
-      {/* Fades at 1.6 m, which is where the rest of this scene already
-          stops at bench scale: the shadow camera is +/-0.8 m and the catcher a
-          1.6 m plane, so past that there is ground drawn but nothing
-          grounded on it. The floor is also the main thing the eye judges
-          a part's size against — a horizon six windows away is what made
-          a 35 mm part read as a dot on an airfield — so it ends a few
-          part-widths out and no further.
-
-          Still `infiniteGrid`: it is the fade that is pulled in, not the
-          plane, so there is no visible edge to the world.
-
-          fadeDistance here is only the value the first frame is drawn
-          with: GridFadeFollowsCamera takes it over and keeps it at a
-          fixed multiple of the orbit distance, so the fade is the same
-          at every zoom instead of being absent on a 40mm part and heavy
-          on a half-metre one.
-
-          fadeStrength is the shape of that falloff, not its reach: drei
-          draws the grid at pow(1 - dist/fadeDistance, fadeStrength). At 1
-          the fade starts at the camera and the graph paper is already
-          half washed out where the part is standing, which reads as haze
-          over the model rather than as ground running out. 0.8 keeps the
-          grid mostly solid around the part and spends the rest of the
-          fade further out, where it is doing the job of hiding the
-          horizon — see GRID_FADE_RATIO for the pair of them. */}
-      {/* Stands up behind the part in the Front and Side views. See GroundGrid. */}
-      <GroundGrid cellSizeMm={gridCellSizeMm} darkMode={darkMode} />
-      <GridFadeFollowsCamera />
-      <OriginGlow darkMode={darkMode} cellSizeMm={gridCellSizeMm} />
+          for where the part is.
+          Hidden in perspective view when a realistic render background is
+          active (which provides its own true-scale ground/tabletop), while
+          still drawn in the orthographic Top / Front / Side drawing views. */}
+      {(background === 'studio' || cameraView !== 'perspective') && (
+        <>
+          <GroundGrid cellSizeMm={gridCellSizeMm} darkMode={darkMode} />
+          <GridFadeFollowsCamera />
+        </>
+      )}
+      {background === 'studio' && <OriginGlow darkMode={darkMode} cellSizeMm={gridCellSizeMm} />}
 
   
       {model && data && mujoco && (

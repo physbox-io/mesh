@@ -278,8 +278,15 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       }
     };
     collectBought(useStore.getState().sceneGraph.nodes);
+    const isBackgroundObj = (obj: THREE.Object3D): boolean => {
+      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+        if (cur.userData?.isBackground) return true;
+      }
+      return false;
+    };
     scene.traverse((obj) => {
       if (!(obj as THREE.Mesh).isMesh) return;
+      if (isBackgroundObj(obj)) return;
       // An instanced mesh is owned instance by instance; see below.
       if (only && !(obj as THREE.InstancedMesh).isInstancedMesh && !ownedByOnly(obj)) return;
       const owner = findNodeId(obj);
