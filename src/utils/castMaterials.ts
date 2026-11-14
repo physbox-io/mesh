@@ -22,6 +22,9 @@ export type CastMaterialId =
   | 'plaster'
   | 'concrete'
   | 'jesmonite'
+  | 'porcelain-slip'
+  | 'stoneware-slip'
+  | 'earthenware-slip'
   | 'aluminium'
   | 'brass'
   | 'bronze'
@@ -104,6 +107,12 @@ export interface CastMaterial {
   /** It can make a silicone mold itself, and it sticks to one. */
   silicone: boolean;
   /**
+   * Clay slip: poured into a plaster mold, which drinks its water so a wall
+   * builds on the cavity, and the rest poured out. Only the Slip Cast tab
+   * takes it. `shrinkPercent` is then wet to fired, which the mold grows by.
+   */
+  slip?: true;
+  /**
    * What the piece looks like when it is simulated, rgba 0..1: a clear resin
    * or ice is drawn see-through. Drawing only; alpha takes nothing from the physics.
    */
@@ -150,6 +159,10 @@ export const CAST_MATERIALS: CastMaterial[] = [
   { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70, wetDensityGcm3: PLASTER_SLURRY_GCM3 }, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
   { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, sprueNeckMm: 15, bubbleRiseMm: 10, densityGcm3: 2.4, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
   { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
+  // Densities are of the fired body; shrink is linear, wet to fired, typical of each.
+  { id: 'porcelain-slip', label: 'Porcelain slip', minSectionMm: 2.0, sprueNeckMm: 20, bubbleRiseMm: 6, densityGcm3: 2.4, shrinkPercent: 13, waterBased: true, metal: false, silicone: false, slip: true, rgba: [0.97, 0.96, 0.94, 1], warnings: [] },
+  { id: 'stoneware-slip', label: 'Stoneware slip', minSectionMm: 2.5, sprueNeckMm: 20, bubbleRiseMm: 6, densityGcm3: 2.3, shrinkPercent: 12, waterBased: true, metal: false, silicone: false, slip: true, rgba: [0.78, 0.74, 0.68, 1], warnings: [] },
+  { id: 'earthenware-slip', label: 'Earthenware slip', minSectionMm: 2.5, sprueNeckMm: 20, bubbleRiseMm: 6, densityGcm3: 2.0, shrinkPercent: 7, waterBased: true, metal: false, silicone: false, slip: true, rgba: [0.76, 0.45, 0.3, 1], warnings: [] },
   { id: 'aluminium', label: 'Aluminium', minSectionMm: 3.0, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 2.7, shrinkPercent: 1.3, pourC: 720, waterBased: false, metal: true, silicone: false, rgba: [0.78, 0.8, 0.83, 1], warnings: [] },
   { id: 'brass', label: 'Brass', minSectionMm: 2.5, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 8.5, shrinkPercent: 1.5, pourC: 1000, waterBased: false, metal: true, silicone: false, rgba: [0.8, 0.66, 0.3, 1], warnings: [] },
   { id: 'bronze', label: 'Bronze', minSectionMm: 2.5, sprueNeckMm: 10, bubbleRiseMm: 8, densityGcm3: 8.8, shrinkPercent: 1.5, pourC: 1150, waterBased: false, metal: true, silicone: false, rgba: [0.72, 0.48, 0.25, 1], warnings: [] },
@@ -190,6 +203,13 @@ export function castMetal(id: string): CastMetal {
 export type SiliconeId = Extract<CastMaterialId, 'platinum' | 'tin'>;
 
 export const SILICONES: CastMaterial[] = CAST_MATERIALS.filter((m) => m.silicone);
+
+/** The clay slips a plaster mold is cast in. */
+export const SLIPS: CastMaterial[] = CAST_MATERIALS.filter((m) => m.slip);
+
+export function isSlipId(value: unknown): value is CastMaterialId {
+  return isCastMaterialId(value) && Boolean(castMaterial(value).slip);
+}
 
 export function isSiliconeId(value: unknown): value is SiliconeId {
   return isCastMaterialId(value) && castMaterial(value).silicone;

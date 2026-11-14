@@ -9,13 +9,16 @@
 
 import { CAST_MATERIALS, castMaterial, type CastMaterial, type CastMaterialId } from './castMaterials';
 
-export type MoldTab = 'rigid' | 'silicone' | 'sand' | 'lost-pla';
+export type MoldTab = 'rigid' | 'silicone' | 'slip' | 'sand' | 'lost-pla' | 'draft';
 
 export const MOLD_TABS: { id: MoldTab; label: string }[] = [
   { id: 'rigid', label: 'Rigid' },
   { id: 'silicone', label: 'Silicone' },
+  { id: 'slip', label: 'Slip Cast' },
   { id: 'sand', label: 'Sand' },
   { id: 'lost-pla', label: 'Lost PLA' },
+  // Not a mold: draft put into the part itself, before any of them.
+  { id: 'draft', label: 'Draft' },
 ];
 
 export function isMoldTab(value: unknown): value is MoldTab {
@@ -26,11 +29,14 @@ export function isMoldTab(value: unknown): value is MoldTab {
  * What each tab can be cast in: metal goes in a pattern's sand or investment,
  * everything else in a mold, and silicone sticks to a silicone mold.
  */
-const TAB_TAKES: Record<MoldTab, { metal: boolean; silicone: boolean }> = {
-  rigid: { metal: false, silicone: true },
-  silicone: { metal: false, silicone: false },
-  sand: { metal: true, silicone: false },
-  'lost-pla': { metal: true, silicone: false },
+const TAB_TAKES: Record<MoldTab, { metal: boolean; silicone: boolean; slip: boolean }> = {
+  rigid: { metal: false, silicone: true, slip: false },
+  silicone: { metal: false, silicone: false, slip: false },
+  slip: { metal: false, silicone: false, slip: true },
+  sand: { metal: true, silicone: false, slip: false },
+  'lost-pla': { metal: true, silicone: false, slip: false },
+  // Casts nothing; its material is never shown.
+  draft: { metal: false, silicone: false, slip: false },
 };
 
 /** Metal patterns, rather than a mold poured into. */
@@ -40,26 +46,31 @@ export const isPatternTab = (tab: MoldTab) => TAB_TAKES[tab].metal;
 export const DEFAULT_TAB_MATERIAL: Record<MoldTab, CastMaterialId> = {
   rigid: 'epoxy',
   silicone: 'epoxy',
+  slip: 'porcelain-slip',
   sand: 'aluminium',
   'lost-pla': 'aluminium',
+  draft: 'epoxy',
 };
 
 /**
  * Draft each tab starts with, degrees. Sand needs it to draw the pattern; a
  * rigid mold trades detail for it, so it starts at none; silicone stretches
- * off and a lost-PLA pattern burns out, so neither needs any.
+ * off and a lost-PLA pattern burns out, so neither needs any. A slip mold
+ * takes the part as modelled (Draft puts it there); the Draft tab offers 2°.
  */
 export const DEFAULT_TAB_DRAFT: Record<MoldTab, number> = {
   rigid: 0,
   silicone: 0,
+  slip: 0,
   sand: 2,
   'lost-pla': 0,
+  draft: 2,
 };
 
 /** The materials a tab offers. */
 export function tabMaterials(tab: MoldTab): CastMaterial[] {
   const takes = TAB_TAKES[tab];
-  return CAST_MATERIALS.filter((m) => m.metal === takes.metal && (takes.silicone || !m.silicone));
+  return CAST_MATERIALS.filter((m) => m.metal === takes.metal && (takes.silicone || !m.silicone) && Boolean(m.slip) === takes.slip);
 }
 
 export function materialFitsTab(tab: MoldTab, id: CastMaterialId): boolean {

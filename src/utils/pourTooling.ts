@@ -1,11 +1,12 @@
 // What a silicone pour box adds round a master is tooling, not part of it:
 // the base, the sleeve, and the pin that leaves a hole through the silicone.
 // They are tagged (`pourBox`); a pin from before the tag is known by its id.
+// A slip-cast mold's plaster pieces and printed cases (`slipMold`) are too.
 
 import type { SceneNode } from '../types/scene';
 
 export function isPourTooling(node: SceneNode): boolean {
-  return Boolean(node.pourBox) || /^(holepin|wickpin)_/.test(node.id);
+  return Boolean(node.pourBox || node.slipMold) || /^(holepin|wickpin)_/.test(node.id);
 }
 
 /** The node without any pour box tooling under it. */

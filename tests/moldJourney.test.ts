@@ -48,6 +48,10 @@ describe('which tab, which material, which draft', () => {
     expect(tabDefaults({ tab: 'sand', rememberedMaterials: { sand: 'epoxy' } }).material).toBe('aluminium');
     expect(tabDefaults({ tab: 'silicone', rememberedMaterials: { silicone: 'platinum' } }).material).toBe('epoxy');
     expect(tabMaterials('sand').every((m) => m.metal)).toBe(true);
+    // Clay slip goes only in a plaster mold, and only slip does.
+    expect(tabMaterials('slip').length).toBeGreaterThan(0);
+    expect(tabMaterials('slip').every((m) => m.slip)).toBe(true);
+    expect(tabMaterials('rigid').some((m) => m.slip)).toBe(false);
     expect(tabMaterials('rigid').some((m) => m.metal)).toBe(false);
   });
 
@@ -55,7 +59,7 @@ describe('which tab, which material, which draft', () => {
     for (const tab of ['rigid', 'silicone', 'sand', 'lost-pla'] as const) {
       expect(tabDefaults({ tab, bakedDraftDeg: 3 })).toMatchObject({ draftDeg: 3, draftLocked: true });
     }
-    expect(DEFAULT_TAB_DRAFT).toEqual({ rigid: 0, silicone: 0, sand: 2, 'lost-pla': 0 });
+    expect(DEFAULT_TAB_DRAFT).toEqual({ rigid: 0, silicone: 0, slip: 0, sand: 2, 'lost-pla': 0, draft: 2 });
   });
 });
 

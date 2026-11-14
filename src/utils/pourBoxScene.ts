@@ -43,7 +43,7 @@ export async function planPourBox(scene: SceneGraph, ids: string[], options: Par
 }
 
 /** A static mesh body from a mesh in world mm, its origin on the middle of its footprint. */
-function meshBody(id: string, name: string, m: PourBoxMesh, rgba: number[]): SceneNode {
+export function meshBody(id: string, name: string, m: PourBoxMesh, rgba: number[]): SceneNode {
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < m.positions.length; i++) {
     lo[i % 3] = Math.min(lo[i % 3], m.positions[i]);

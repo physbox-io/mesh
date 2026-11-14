@@ -984,6 +984,12 @@ export interface SceneNode {
     masterIds?: string[];
   };
   /**
+   * Set on what the Slip Cast tab adds: a plaster piece of the mold, in place
+   * round the part, or the printed case that casts it. Tooling, never molded
+   * or exported as part of the design.
+   */
+  slipMold?: { piece: string; role: 'plaster' | 'case'; slip: string };
+  /**
    * Set on a body Add Simulation made: the part a machining program will leave,
    * cut back out of the stock, not part of the design. The exporters leave it
    * out of what they plan, so simulating a job does not change the next one.

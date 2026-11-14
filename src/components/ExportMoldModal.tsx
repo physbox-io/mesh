@@ -11,6 +11,8 @@ import { CastDialogFrame } from './cast/CastDialogFrame';
 import { RigidMoldPanel } from './cast/RigidMoldPanel';
 import { SiliconeBoxPanel } from './cast/SiliconeBoxPanel';
 import { PatternPanel } from './cast/PatternPanel';
+import { SlipCastPanel } from './cast/SlipCastPanel';
+import { DraftPanel } from './cast/DraftPanel';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -99,6 +101,20 @@ const OpenMoldModal: React.FC<ExportMoldModalProps> = ({ onClose, scene }) => {
         />
       );
     }
+    if (t === 'slip') {
+      return (
+        <SlipCastPanel
+          ids={subject.ids}
+          name={subject.label}
+          material={materialOf('slip')}
+          onMaterial={onMaterial('slip')}
+          bakedDraftDeg={bakedDraftDeg}
+          active={tab === 'slip'}
+          onClose={onClose}
+        />
+      );
+    }
+    if (t === 'draft') return <DraftPanel ids={subject.ids} bakedDraftDeg={bakedDraftDeg} onClose={onClose} />;
     return (
       <PatternPanel
         scene={subject.scene}

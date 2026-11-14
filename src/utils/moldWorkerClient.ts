@@ -325,7 +325,7 @@ export function moldOptionsFor(
   const fromDialog = lastMoldOptions();
   const pos = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
   const castMaterial = resolveCastMaterial(msg.castMaterial);
-  const badMaterial = msg.castMaterial !== undefined && (!castMaterial || castMaterialSpec(castMaterial).metal);
+  const badMaterial = msg.castMaterial !== undefined && (!castMaterial || castMaterialSpec(castMaterial).metal || Boolean(castMaterialSpec(castMaterial).slip));
   const asked = msg.linerMaterial ?? msg.linerPair;
   const linerPairId = resolveLinerPair(asked);
   const badLiner = asked !== undefined && !linerPairId;
@@ -340,7 +340,7 @@ export function moldOptionsFor(
       ? { error: "thin_gaps is 'leave', 'close' or 'fix'." }
       : {}),
     ...(badMaterial
-      ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast).` }
+      ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal && !m.slip).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast), clay slip in a plaster mold (physics_make_slip_mold).` }
       : {}),
     fromDialog: Boolean(fromDialog),
     options: {

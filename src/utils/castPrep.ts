@@ -570,19 +570,70 @@ export function bakeDraftInto(scene: SceneGraph, prep: CastPrep, p: DraftParams)
   for (const { node, world } of eachBody(scene)) {
     const entry = prep.originals[node.id];
     if (!entry) continue;
-    const geoms = draftBodyGeoms(node, world, p);
-    if (!geoms) continue;
-    // Visual-only geoms (labels, trim) are not cast and are carried over as they are.
-    const decor = resolveCsgGeoms(node, 'render').filter(isDecor);
-    // Off with everything that would rebuild the body from its old recipe —
-    // its roundings, its boolean, its generator — and on with the mesh.
-    const rec = node as unknown as Record<string, unknown>;
-    for (const k of SHAPE_KEYS) delete rec[k];
-    node.geoms = [...geoms, ...decor];
+    if (!draftBodyInPlace(node, world, p)) continue;
     entry.signature = shapeSignature(node);
     drafted.push(node.id);
   }
   return drafted;
+}
+
+/** Bakes draft into one body, in place: its solid geoms become tapered meshes. False when it has nothing solid. */
+function draftBodyInPlace(node: SceneNode, world: THREE.Matrix4, p: DraftParams): boolean {
+  const geoms = draftBodyGeoms(node, world, p);
+  if (!geoms) return false;
+  // Visual-only geoms (labels, trim) are not cast and are carried over as they are.
+  const decor = resolveCsgGeoms(node, 'render').filter(isDecor);
+  // Off with everything that would rebuild the body from its old recipe —
+  // its roundings, its boolean, its generator — and on with the mesh.
+  const rec = node as unknown as Record<string, unknown>;
+  for (const k of SHAPE_KEYS) delete rec[k];
+  node.geoms = [...geoms, ...decor];
+  return true;
+}
+
+export interface AddDraftResult {
+  drafted: { id: string; name: string }[];
+  skipped: { name: string; reason: string }[];
+  /** World Z of the plane the walls lean from: the lowest point of what was drafted, metres. */
+  partingZ: number;
+}
+
+/**
+ * Add Draft: tapers the given bodies (children included) in place, to pull
+ * straight up along the scene's Z as they stand, from a plane through their
+ * lowest point. 'add' keeps the tops as modelled and grows the walls toward
+ * the base; 'remove' keeps the base and shrinks the walls toward the top.
+ * The bodies are drafted together, so a part made of several stays one shape.
+ */
+export function addDraftToBodies(scene: SceneGraph, ids: readonly string[], deg: number, mode: 'add' | 'remove'): AddDraftResult {
+  const wanted = new Set(ids);
+  const targets: { node: SceneNode; world: THREE.Matrix4 }[] = [];
+  const skipped: AddDraftResult['skipped'] = [];
+  const walk = (list: SceneNode[], parent: THREE.Matrix4 | undefined, inside: boolean) => {
+    for (const node of list || []) {
+      const world = getNodeWorldTransform(node, parent);
+      const take = inside || wanted.has(node.id);
+      if (take) {
+        const why = whyNotPrepped(node, world);
+        if (!why) targets.push({ node, world });
+        else if (bodySolids(node, world).length > 0) skipped.push({ name: node.name, reason: why });
+      }
+      walk(node.children || [], world, take);
+    }
+  };
+  walk(scene.nodes, undefined, false);
+  let partingZ = Infinity;
+  for (const { node, world } of targets) {
+    for (const s of bodySolids(node, world)) for (let i = 2; i < s.tris.length; i += 3) partingZ = Math.min(partingZ, s.tris[i]);
+  }
+  const drafted: AddDraftResult['drafted'] = [];
+  if (!Number.isFinite(partingZ) || !(deg > 0)) return { drafted, skipped, partingZ: Number.isFinite(partingZ) ? partingZ : 0 };
+  // Children are drafted in their own frames, so a parent's new geoms do not
+  // move them; worlds were taken before anything changed.
+  for (const { node, world } of targets) {
+    if (draftBodyInPlace(node, world, { deg, mode, partingZ })) drafted.push({ id: node.id, name: node.name });
+  }
+  return { drafted, skipped, partingZ };
 }
 
 /**

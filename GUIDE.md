@@ -525,7 +525,8 @@ opens the pattern editor on it.
 ### Mold and Cast
 
 **Mold** is one dialog with a tab per kind of mold: Rigid (the printed mold designer, with the PVA
-liner), Silicone (the pour box), Sand and Lost PLA (the metal pattern). Every tab molds the selected
+liner), Silicone (the pour box), Slip Cast (a plaster mold for clay slip), Sand and Lost PLA (the
+metal pattern), and Draft, which is not a mold but tapers the part itself. Every tab molds the selected
 part, children included, where it stands, or every non-simulated body when nothing is selected
 (`utils/moldSubject.ts`, which hands the engines a SceneGraph of just that). The tab opens on the one
 last used for the scene, else Rigid, and the material per tab is remembered (`store/castDialogStore.ts`).
@@ -535,6 +536,58 @@ only (`CastOptions.draftDeg`); if Prepare for Casting has drafted the model, the
 angle, locked, and nothing is added. **Cast** pours into the selection (a mold, or a master with its
 pour box) and says why when the selection holds nothing. Every material is one entry in
 `utils/castMaterials.ts`, data only: density, shrink, pour temperature, mix and warnings.
+
+### Slip Cast and Draft
+
+**Slip Cast** (`utils/slipCastMold.ts`, pure Manifold, mm, Z up; run on `workers/slipMoldWorker.ts`
+through `utils/slipMoldClient.ts`; `MAKE_SLIP_MOLD`) makes a plaster mold for clay slip in n pieces,
+and a printed case per piece to cast it in plaster. The part is taken as it stands, its opening up.
+
+* **Cavity.** The part grown by the clay's wet-to-fired shrink (`shrinkPercent` on the slip materials
+  in `castMaterials.ts`, which only this tab offers), plus whatever it encloses in plan, slice by
+  slice (`insideFill`: the inside of a vessel is slip, never a plaster core), plus a spare from the
+  top outline to the block's top, widened to `spareDiaMm`.
+* **Split.** k side wedges (2-6) split by half-planes through the spare's centre, each pulled along
+  its bisector, and an optional frustum base plug pulled down, which also takes any recess in the foot
+  walled in by the part. `base: 'auto'` (the default) adds the plug only when the part stands on a foot
+  (covering a tenth of its plan and over 30 mm across). `'auto'` takes the fewest sides, and the turn every 2°, whose surface facing
+  away from its piece's pull stays under 0.2% of the area (`chooseSplit`).
+* **Draft** (the tab's Draft field, `draftDeg`) goes on once the split is known, each piece its own way
+  (`draftForPieces`). First every triangle crossing a parting plane is split at points shared along
+  each edge (`splitByVerticalPlanes`), so the part has vertices on the parting lines. A boolean cut
+  won't do this: when the cut pieces are fused again, Manifold merges the cut back into the faces it
+  came from. Each vertex then moves inward, square to its side's pull, by h·tanθ,
+  where h is its distance from the nearer parting half-plane. The parting lines keep their size, so
+  neighbouring pieces still meet. The rim (upward faces within 2 mm of the top) and the underside over
+  the plug have no say, because drafting the rim folds its edge. The undercut is measured again after the draft.
+* **Natches** are cones on the side joints, with a half-angle of at least (90 - 180/k)° + 10°, so each
+  releases along either piece's pull. Their sites are found in 2D on the joint half-plane (`natchSites`).
+* **Cases** are the piece's hull grown by the wall (Minkowski with a cube), squared off flat underneath,
+  less the piece, open past its back face, standing `freeboardMm` proud. `casePrint` is the case
+  turned open face up on Z = 0. `tests/slipCastMold.test.ts` slides every piece out of its case and
+  off the cavity along its pull and checks nothing collides.
+* **Exact shared edges.** Each wedge's edges come from their index mod k (`wedgePolygon`), because
+  theta and theta + 2π are different floats, and an edge a hair off leaves a membrane between pieces.
+  The inside fill and the cast slices take a whole number of steps over the height: a fill that stops
+  short of the rim leaves a dish that locks the sides on, and a cast slice above the spare comes out
+  empty and seals the drain.
+* **Lazy booleans.** Manifold evaluates booleans and transforms lazily, so a result holds on to its
+  operands. Freeing one before the result is read crashes the WASM ("null function or function
+  signature mismatch"), so the module bins its objects and frees them when the mold is done.
+* **Preview and Simulate Cast.** The tab draws the pieces pulled apart, the cases as they print, or the
+  casting (`SlipMoldPreview.tsx`). `utils/slipCastSimulation.ts` casts on the same worker. A wall of
+  `wallMm` builds on the cavity: the slip left liquid is the cavity eroded by a ball, built slice by
+  slice from inset outlines. Only liquid connected to the spare drains out, the spare's clay is trimmed
+  at the rim, and the piece is shrunk back by the firing shrink. It goes into the scene as a `cast`
+  simulation.
+* **In the scene** (`slipMoldScene.ts`): the plaster pieces assembled round the part, see-through, and
+  the cases beside it in a row as they print. All are tagged `slipMold`, which `isPourTooling` treats as tooling.
+
+**Draft** (`addDraftToBodies` in `castPrep.ts`, `utils/addDraftAction.ts`, `ADD_DRAFT`) tapers the
+selected bodies to pull straight up along scene +Z as they stand, from their lowest point, with
+`draftTriangles`, the same taper Prepare for Casting uses. Keep the top (add material) or the base
+(remove it). It is baked in as mesh geoms, as one ordinary undo step with no originals kept, and refused
+while Prepare for Casting has draft in.
 
 ### Prepare for Casting (draft and edge breaks)
 
