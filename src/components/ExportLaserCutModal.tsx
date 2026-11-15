@@ -402,8 +402,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
         engraveFeedrate: f.engraveFeedrate,
         cutDepthZ: f.materialThicknessMm,
         faceToThickness,
-        // Each sheet's own thickness, for a rack of mixed stock.
+        // Each sheet's own thickness and stepdown, for a rack of mixed stock.
         sheetStockThicknessMm,
+        sheetZStepdownMm: exportResult.sheets?.map((s) => routerStepdownMm(s.thicknessMm, f.bitDiameterMm)),
         // And their sizes, so a surfacing bit's edge is kept on the sheet.
         sheetSizeMm: exportResult.sheets?.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm })),
         zStepdown: routerStepdownMm(f.materialThicknessMm, f.bitDiameterMm),
@@ -438,14 +439,27 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const handleSimulate = (placement: 'beside' | 'overlay') => {
     if (!exportResult?.success || !exportResult.panels?.length) return;
     const routerRadiusMm = machineMode === 'cnc' ? (gcodeResult?.compensationMm ?? bitDiameterMm / 2) : 0;
+    const faceToThickness =
+      machineMode === 'cnc' &&
+      !!exportResult.sheets &&
+      exportResult.panels.some((p) => {
+        const stockMm = exportResult.sheets?.[p.sheetIndex ?? 0]?.thicknessMm;
+        return stockMm !== undefined && stockMm - p.thickness * 1000 > 0.1;
+      });
+    const distinctStockMm = exportResult.sheets
+      ? Array.from(new Set(exportResult.sheets.map((s) => s.thicknessMm)))
+      : [materialThicknessMm];
+    const stockSummary = distinctStockMm.length > 1
+      ? `${exportResult.sheetCount ?? 1} sheets (${distinctStockMm.join(' / ')} mm stock)`
+      : `${exportResult.sheetCount ?? 1} sheet${(exportResult.sheetCount ?? 1) === 1 ? '' : 's'} of ${distinctStockMm[0] ?? materialThicknessMm} mm stock`;
     void simulation.add({
-      sheets: { parts: laserSheetParts(exportResult.panels, exportResult.sheets), routerRadiusMm },
+      sheets: { parts: laserSheetParts(exportResult.panels, exportResult.sheets, { faceToThickness }), routerRadiusMm },
       transform: laserStockTransform(exportResult.panels, exportResult.scaleFactor ?? 1),
       kind: 'laser',
       label: machineMode === 'cnc' ? 'Router cut' : 'Laser cut',
       placement,
       details: [
-        `${exportResult.sheetCount ?? 1} sheet${(exportResult.sheetCount ?? 1) === 1 ? '' : 's'} of ${materialThicknessMm} mm stock`,
+        stockSummary,
         machineMode === 'cnc' ? `${bitDiameterMm} mm bit` : null,
         (exportResult.scaleFactor ?? 1) !== 1 ? `At ${Math.round((exportResult.scaleFactor ?? 1) * 100)}% of the model` : null,
       ].filter((d): d is string => !!d),

@@ -173,9 +173,14 @@ export function runSheetJob(o: SheetJobOptions, onProgress?: (fraction: number) 
 
 /**
  * Laser or router panels, each back in its place in the assembly, at the
- * thickness of the sheet it is nested on.
+ * thickness of the sheet it is nested on (or faced down to its drawn thickness
+ * when CNC `faceToThickness` machines off thicker rack stock).
  */
-export function laserSheetParts(panels: LaserPanel[], sheets?: SheetSpec[]): SheetPart[] {
+export function laserSheetParts(
+  panels: LaserPanel[],
+  sheets?: SheetSpec[],
+  options?: { faceToThickness?: boolean }
+): SheetPart[] {
   return panels.map((panel) => {
     const off = panel.modelOffset2D ?? { x: 0, y: 0 };
     // The loops as cut are normalised to the sheet, and maybe turned a
@@ -186,7 +191,9 @@ export function laserSheetParts(panels: LaserPanel[], sheets?: SheetSpec[]): She
       const y = panel.turnedOnSheet ? w - pt.x : pt.y;
       return { x: x + off.x, y: y + off.y };
     };
-    const t = sheets?.[panel.sheetIndex ?? 0]?.thicknessMm ?? panel.thickness * 1000;
+    const drawnMm = panel.thickness * 1000;
+    const stockMm = sheets?.[panel.sheetIndex ?? 0]?.thicknessMm ?? drawnMm;
+    const t = options?.faceToThickness && stockMm - drawnMm > 0.1 ? drawnMm : stockMm;
     const o = panel.origin3D, u = panel.uAxis3D, v = panel.vAxis3D;
     return {
       loops: [panel.outerPolygon2D, ...panel.innerCutouts2D].map((l) => l.map(back)),
@@ -201,21 +208,51 @@ export function laserSheetParts(panels: LaserPanel[], sheets?: SheetSpec[]): She
 
 /** Where a laser assembly at `scale` came from: the model, `scale` times smaller. */
 export function laserStockTransform(panels: LaserPanel[], scale: number): StockTransform {
+  const safeScale = scale > 0 ? scale : 1;
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const include3D = (x: number, y: number, z: number, n: { x: number; y: number; z: number }, halfThickM: number) => {
+    for (const sign of [-1, 1]) {
+      const px = ((x + sign * halfThickM * n.x) * 1000) / safeScale;
+      const py = ((y + sign * halfThickM * n.y) * 1000) / safeScale;
+      const pz = ((z + sign * halfThickM * n.z) * 1000) / safeScale;
+      lo[0] = Math.min(lo[0], px); hi[0] = Math.max(hi[0], px);
+      lo[1] = Math.min(lo[1], py); hi[1] = Math.max(hi[1], py);
+      lo[2] = Math.min(lo[2], pz); hi[2] = Math.max(hi[2], pz);
+    }
+  };
   for (const p of panels) {
-    for (const e of p.edges3D) {
-      for (const q of [e.p1, e.p2]) {
-        [q.x, q.y, q.z].forEach((c, a) => {
-          lo[a] = Math.min(lo[a], (c * 1000) / scale);
-          hi[a] = Math.max(hi[a], (c * 1000) / scale);
-        });
+    const nl = Math.hypot(p.normal3D.x, p.normal3D.y, p.normal3D.z) || 1;
+    const n = { x: p.normal3D.x / nl, y: p.normal3D.y / nl, z: p.normal3D.z / nl };
+    const halfThickM = Math.max(0, p.thickness / 2);
+    if (p.edges3D.length > 0) {
+      for (const e of p.edges3D) {
+        include3D(e.p1.x, e.p1.y, e.p1.z, n, halfThickM);
+        include3D(e.p2.x, e.p2.y, e.p2.z, n, halfThickM);
+      }
+    } else {
+      const off = p.modelOffset2D ?? { x: 0, y: 0 };
+      const w = p.width2D ?? 0;
+      for (const pt of p.outerPolygon2D) {
+        const uMm = (p.turnedOnSheet ? pt.y : pt.x) + off.x;
+        const vMm = (p.turnedOnSheet ? w - pt.x : pt.y) + off.y;
+        include3D(
+          p.origin3D.x + (uMm / 1000) * p.uAxis3D.x + (vMm / 1000) * p.vAxis3D.x,
+          p.origin3D.y + (uMm / 1000) * p.uAxis3D.y + (vMm / 1000) * p.vAxis3D.y,
+          p.origin3D.z + (uMm / 1000) * p.uAxis3D.z + (vMm / 1000) * p.vAxis3D.z,
+          n,
+          halfThickM
+        );
       }
     }
+  }
+  if (!Number.isFinite(lo[0])) {
+    lo[0] = lo[1] = lo[2] = 0;
+    hi[0] = hi[1] = hi[2] = 0;
   }
   return {
     modelOriginMm: [0, 0, 0],
     workOriginMm: [0, 0, 0],
-    scale: [scale, scale, scale],
+    scale: [safeScale, safeScale, safeScale],
     modelMinMm: lo as [number, number, number],
     modelMaxMm: hi as [number, number, number],
   };

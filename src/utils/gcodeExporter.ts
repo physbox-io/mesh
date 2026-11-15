@@ -2,14 +2,15 @@
 // G-Code Generator Engine for Laser Cutters & CNC Routers
 // ---------------------------------------------------------------------------
 
-import type { LaserPanel, Point2D } from './laserCutExporter';
+import type { BlindPocket2D, LaserPanel, Point2D } from './laserCutExporter';
 import type { ContourSliceResult } from './contourSliceExporter';
 import { estimateGcodeTime } from './timeEstimate';
 import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
-import { offsetRegion, offsetNestedLoops, nestingDepths } from './polygonOffset';
+import { offsetRegion, offsetNestedLoops, offsetRings, orientForClimb, nestingDepths } from './polygonOffset';
 import { clearingRings } from './adaptiveClearing';
 import { commentText } from './gcodeComments';
 import { measureGcodeBounds } from './workEnvelope';
+import { routerStepdownMm } from './sheetCutRecipe';
 
 export interface GcodeExportOptions {
   machineMode: 'laser' | 'cnc';
@@ -83,6 +84,8 @@ export interface GcodeExportOptions {
   facingDepthPerPassMm: number;
   /** Depth per pass for CNC in mm (default 3.0). */
   zStepdown: number;
+  /** Per-sheet stepdown override for mixed-thickness CNC stock, in mm. */
+  sheetZStepdownMm?: number[];
   /** Spindle speed in RPM for CNC (default 12000). */
   spindleRpm: number;
   /**
@@ -172,7 +175,7 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
 export interface GcodeOperation {
   id: string;
   name: string;
-  type: 'framing' | 'cut' | 'engrave' | 'pause_sheet' | 'pause_tool' | 'facing';
+  type: 'framing' | 'cut' | 'engrave' | 'pause_sheet' | 'pause_tool' | 'facing' | 'pocket';
   sheetIndex: number;
   toolNumber?: number;
 }
@@ -541,13 +544,179 @@ function facingLines(
     lines.push(`G0 Z${f(options.safeZ)}`);
   }
 
-  return {
+    return {
     lines,
     distanceMm,
     lastPoint,
     reach: { minX: x0 - r, minY: y0 - r, maxX: x1 + r, maxY: y1 + r },
     marginShort,
   };
+}
+
+function pointInLoop2D(pt: Point2D, loop: Point2D[]): boolean {
+  let inside = false;
+  for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+    const a = loop[i], b = loop[j];
+    if ((a.y > pt.y) !== (b.y > pt.y) && pt.x < ((b.x - a.x) * (pt.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/**
+ * Concentric clearing toolpath for one flat-bottom blind pocket in CNC mode,
+ * staying inside `pocket.outer` and outside any raised boss islands in
+ * `pocket.holes`, stepping down from `fromDepthMm` to `fromDepthMm + pocket.depthMm`
+ * (clamped to `options.cutDepthZ` so a blind pocket never cuts into the spoilboard).
+ */
+function blindPocketLines(
+  pocket: BlindPocket2D,
+  offset: Point2D,
+  fromDepthMm: number,
+  options: GcodeExportOptions,
+  head: Point2D
+): {
+  lines: string[];
+  distanceMm: number;
+  lastPoint: Point2D;
+  tooNarrow: boolean;
+} {
+  const lines: string[] = [];
+  if (pocket.outer.length < 3 || !(pocket.depthMm > 1e-6)) {
+    return { lines, distanceMm: 0, lastPoint: head, tooNarrow: false };
+  }
+  const dia = Math.max(0.2, options.bitDiameterMm);
+  const radius = compensationRadius(options);
+  const step = Math.max(0.2, dia * 0.5);
+  const holes = (pocket.holes ?? []).filter((h) => h.length >= 3);
+
+  let loops: Point2D[][];
+  let canStepDirect: (a: Point2D, b: Point2D) => boolean;
+
+  if (holes.length === 0) {
+    if (radius > 0) {
+      loops = offsetRings(pocket.outer, radius, step);
+      if (loops.length === 0) {
+        return { lines, distanceMm: 0, lastPoint: head, tooNarrow: true };
+      }
+    } else {
+      loops = [orientForClimb(pocket.outer, 'inside'), ...offsetRings(pocket.outer, step, step)];
+    }
+    const boundary = loops[0];
+    canStepDirect = (a, b) => {
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      if (dist > step * 1.35) return false;
+      for (let s = 1; s < 5; s++) {
+        const t = s / 5;
+        if (!pointInLoop2D({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }, boundary)) return false;
+      }
+      return true;
+    };
+  } else {
+    const raw = [pocket.outer, ...holes];
+    const wall = radius > 0
+      ? offsetNestedLoops(raw, -radius)
+      : {
+          paths: raw.map((l, idx) => orientForClimb(l, idx === 0 ? 'inside' : 'outside')),
+          dropped: [] as number[],
+          depths: nestingDepths(raw),
+        };
+    if (wall.dropped.includes(0) || wall.paths.length === 0) {
+      return { lines, distanceMm: 0, lastPoint: head, tooNarrow: true };
+    }
+    const cell = Math.min(0.5, Math.max(0.15, dia / 8));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const l of wall.paths) {
+      for (const p of l) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      }
+    }
+    const origin = { x: minX - cell, y: minY - cell };
+    const cols = Math.ceil((maxX - minX) / cell) + 3;
+    const rows = Math.ceil((maxY - minY) / cell) + 3;
+    const mask = new Uint8Array(cols * rows);
+    for (let j = 0; j < rows; j++) {
+      const y = origin.y + j * cell;
+      const xs: number[] = [];
+      for (const l of wall.paths) {
+        for (let i = 0; i < l.length; i++) {
+          const a = l[i], b = l[(i + 1) % l.length];
+          if ((a.y <= y) !== (b.y <= y)) xs.push(a.x + ((y - a.y) / (b.y - a.y)) * (b.x - a.x));
+        }
+      }
+      xs.sort((p, q) => p - q);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const i0 = Math.max(0, Math.ceil((xs[k] - origin.x) / cell));
+        const i1 = Math.min(cols - 1, Math.floor((xs[k + 1] - origin.x) / cell));
+        for (let i = i0; i <= i1; i++) mask[j * cols + i] = 1;
+      }
+    }
+    const interiorRings = clearingRings({ mask, cols, rows, mmPerCell: cell, originMm: origin }, step, dia)
+      .slice(1)
+      .flatMap((r) => r.loops)
+      .map((l) => dropCollinear(l, cell * 0.05))
+      .filter((l) => l.length >= 3);
+    loops = [...wall.paths, ...interiorRings];
+    canStepDirect = (a, b) => {
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      if (dist > step * 1.35) return false;
+      const steps = Math.max(2, Math.ceil(dist / (cell * 0.5)));
+      for (let s = 1; s < steps; s++) {
+        const t = s / steps;
+        const i = Math.round((a.x + (b.x - a.x) * t - origin.x) / cell);
+        const j = Math.round((a.y + (b.y - a.y) * t - origin.y) / cell);
+        if (i < 0 || i >= cols || j < 0 || j >= rows || mask[j * cols + i] !== 1) return false;
+      }
+      return true;
+    };
+  }
+
+  const totalDepth = Math.abs(options.cutDepthZ);
+  const startDepth = Math.min(Math.max(0, fromDepthMm), totalDepth);
+  const targetDepth = Math.min(totalDepth, startDepth + pocket.depthMm);
+  if (targetDepth - startDepth <= 1e-6) {
+    return { lines, distanceMm: 0, lastPoint: head, tooNarrow: false };
+  }
+
+  const stepdown = Math.max(0.1, Math.abs(options.zStepdown));
+  const passes = Math.max(1, Math.ceil((targetDepth - startDepth) / stepdown - 1e-9));
+  let distanceMm = 0;
+  let lastPoint = head;
+
+  for (let pass = 1; pass <= passes; pass++) {
+    const prevFloorZ = -Math.min(targetDepth, startDepth + (pass - 1) * stepdown);
+    const currentZ = -Math.min(targetDepth, startDepth + pass * stepdown);
+    lines.push(`; Blind pocket pass ${pass}/${passes} (Z = ${f(currentZ)}mm)`);
+    let atLocal: Point2D | null = null;
+    for (const rawLoop of loops) {
+      if (rawLoop.length < 3) continue;
+      const refHead = atLocal ? { x: offset.x + atLocal.x, y: offset.y + atLocal.y } : lastPoint;
+      const ordered = startNear(rawLoop, refHead, offset);
+      const start = ordered[0];
+      if (atLocal && canStepDirect && canStepDirect(atLocal, start)) {
+        lines.push(`G1 X${f(offset.x + start.x)} Y${f(offset.y + start.y)} F${Math.round(options.cutFeedrate)}`);
+        distanceMm += Math.hypot(start.x - atLocal.x, start.y - atLocal.y);
+      } else {
+        lines.push(`G0 Z${f(options.safeZ)}`);
+        lines.push(`G0 X${f(offset.x + start.x)} Y${f(offset.y + start.y)} F${options.travelFeedrate}`);
+        if (prevFloorZ < -0.5) lines.push(`G0 Z${f(prevFloorZ + 0.5)}`);
+        lines.push(`G1 Z${f(currentZ)} F${Math.round(options.plungeFeedrate)}`);
+      }
+      for (let i = 1; i < ordered.length; i++) {
+        const prev = ordered[i - 1];
+        const cur = ordered[i];
+        lines.push(`G1 X${f(offset.x + cur.x)} Y${f(offset.y + cur.y)} F${Math.round(options.cutFeedrate)}`);
+        distanceMm += Math.hypot(cur.x - prev.x, cur.y - prev.y);
+      }
+      atLocal = ordered[ordered.length - 1];
+      lastPoint = { x: offset.x + atLocal.x, y: offset.y + atLocal.y };
+    }
+    lines.push(`G0 Z${f(options.safeZ)}`);
+  }
+
+  return { lines, distanceMm, lastPoint, tooNarrow: false };
 }
 
 export function generateLaserCutGcode(
@@ -591,6 +760,7 @@ export function generateLaserCutGcode(
   // the cut length that the passes multiply.
   let engravedMm = 0;
   const skippedEngraving: string[] = [];
+  const skippedBlindPockets: string[] = [];
 
   const lines: string[] = [];
   lines.push(`; --------------------------------------------------`);
@@ -727,10 +897,19 @@ export function generateLaserCutGcode(
     lines.push(`; ==================================================`);
 
     // A mixed rack has sheets of different thicknesses, and a router has to go
-    // through each one: the single cut depth is only right for the first row.
+    // through each one with a stepdown appropriate for that sheet's stock: the
+    // scalar cut depth and stepdown are only right for the first row.
     const sheetStockMm = options.sheetStockThicknessMm?.[sKey];
-    const sheetOptions: GcodeExportOptions = options.machineMode === 'cnc' && sheetStockMm !== undefined
-      ? { ...options, cutDepthZ: sheetStockMm }
+    const sheetStepdownMm = options.sheetZStepdownMm?.[sKey]
+      ?? (sheetStockMm !== undefined && userOptions?.zStepdown === undefined
+        ? routerStepdownMm(sheetStockMm, options.bitDiameterMm)
+        : undefined);
+    const sheetOptions: GcodeExportOptions = options.machineMode === 'cnc' && (sheetStockMm !== undefined || sheetStepdownMm !== undefined)
+      ? {
+          ...options,
+          ...(sheetStockMm !== undefined ? { cutDepthZ: sheetStockMm } : {}),
+          ...(sheetStepdownMm !== undefined ? { zStepdown: sheetStepdownMm } : {}),
+        }
       : options;
 
     /*
@@ -831,6 +1010,46 @@ export function generateLaserCutGcode(
         skippedEngraving.push(panel.name);
       }
 
+      // 0b. Mill flat-bottom blind pockets while the panel is still anchored in the sheet.
+      const blindPockets = (panel.blindPockets2D ?? []).filter((bp) => bp.outer.length >= 3 && bp.depthMm > 1e-6);
+      if (blindPockets.length > 0) {
+        if (options.machineMode === 'cnc') {
+          let undersideCount = 0;
+          blindPockets.forEach((bp, bpIdx) => {
+            if (bp.under) {
+              undersideCount++;
+              return;
+            }
+            const pocketed = blindPocketLines(bp, pos, fromDepthMm, sheetOptions, head);
+            if (pocketed.tooNarrow) {
+              warnings.push(
+                `${panel.name}: a blind pocket ${f(featureWidth(bp.outer))}mm across is narrower than the ` +
+                  `${f(options.bitDiameterMm)}mm cutter and has been left out of the program.`
+              );
+              return;
+            }
+            if (pocketed.lines.length === 0) return;
+            operations.push({
+              id: `${panel.id}_pocket_${bpIdx}`,
+              name: `${panel.name} Blind Pocket #${bpIdx + 1} (${f(bp.depthMm)}mm)`,
+              type: 'pocket',
+              sheetIndex: sIdx,
+            });
+            lines.push(`; Blind pocket #${bpIdx + 1} (${f(bp.depthMm)}mm deep)`);
+            lines.push(...pocketed.lines);
+            totalCutDistanceMm += pocketed.distanceMm;
+            head = pocketed.lastPoint;
+          });
+          if (undersideCount > 0) {
+            warnings.push(
+              `${panel.name}: ${undersideCount} underside blind pocket(s) require flipping the part for a second-side setup and were left out of this program.`
+            );
+          }
+        } else if (!skippedBlindPockets.includes(panel.name)) {
+          skippedBlindPockets.push(panel.name);
+        }
+      }
+
       // 1. Cut inner cutouts/mortises FIRST so material doesn't shift, nearest first
       for (const cIdx of nearestFirst(holePaths, head, pos)) {
         if (holePaths[cIdx].length < 3) continue;
@@ -896,8 +1115,13 @@ export function generateLaserCutGcode(
         `Carve it with Relief carve instead.`
     );
   }
+  if (skippedBlindPockets.length) {
+    warnings.push(
+      `${skippedBlindPockets.join(', ')}: blind pockets require CNC routing (or raster fill in Etch) and are left out of laser through-cut G-code.`
+    );
+  }
 
-  if (!operations.some((op) => op.type === 'cut' || op.type === 'engrave')) {
+  if (!operations.some((op) => op.type === 'cut' || op.type === 'engrave' || op.type === 'pocket')) {
     return refusedResult(warnings[0] ?? 'Nothing here for the machine to cut.');
   }
 

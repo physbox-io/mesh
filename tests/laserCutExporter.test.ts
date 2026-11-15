@@ -883,17 +883,26 @@ describe('Subtractive CSG cutout projection', () => {
     ])).toHaveLength(0);
   });
 
-  it('keeps a cutout that straddles the panel edge', () => {
-    const cutouts = sheetCutouts([
-      { name: 'notch', type: 'cylinder', size: [0.02, 0.01], pos: [0.1, 0, 0], csg: 'difference' },
-    ]);
+  it('clips a cutout that straddles the panel edge into a clean perimeter notch', () => {
+    const { panels } = extractPanelsFromScene(
+      sheetWithCutters([
+        { name: 'notch', type: 'cylinder', size: [0.02, 0.01], pos: [0.1, 0, 0], csg: 'difference' },
+      ]),
+      DEFAULT_LASER_OPTIONS
+    );
 
-    expect(cutouts).toHaveLength(1);
+    expect(panels).toHaveLength(1);
+    expect(panels[0].innerCutouts2D).toHaveLength(0);
+    expect(panels[0].outerPolygon2D.length).toBeGreaterThan(10);
+    const xs = panels[0].outerPolygon2D.map((p) => p.x);
+    expect(Math.max(...xs)).toBeLessThanOrEqual(100.01);
+    expect(xs.some((x) => Math.abs(x - 80) < 0.5)).toBe(true);
   });
 
   it('treats subtractive geoms as cutters rather than stock', () => {
     // A difference box used to be shelled into six panels of its own, and a
     // difference capsule used to fail the export as unsupported curved geometry.
+    // Overlapping cutters at the origin union into one clean cross-shaped hole.
     const { panels, invalidGeoms } = extractPanelsFromScene(
       sheetWithCutters([
         { name: 'shaft', type: 'box', size: [0.02, 0.02, 0.05], csg: 'difference' },
@@ -904,7 +913,20 @@ describe('Subtractive CSG cutout projection', () => {
 
     expect(invalidGeoms).toHaveLength(0);
     expect(panels).toHaveLength(1);
-    expect(panels[0].innerCutouts2D).toHaveLength(2);
+    expect(panels[0].innerCutouts2D).toHaveLength(1);
+    const hole = panels[0].innerCutouts2D[0];
+    expect(Math.max(...hole.map((p) => p.x)) - Math.min(...hole.map((p) => p.x))).toBeCloseTo(40, 0);
+    expect(Math.max(...hole.map((p) => p.y)) - Math.min(...hole.map((p) => p.y))).toBeCloseTo(52, 0);
+
+    // Non-overlapping cutters remain distinct interior holes.
+    const { panels: sepPanels } = extractPanelsFromScene(
+      sheetWithCutters([
+        { name: 'shaft', type: 'box', size: [0.01, 0.01, 0.05], pos: [-0.04, 0, 0], csg: 'difference' },
+        { name: 'pin', type: 'capsule', size: [0.006, 0.02], pos: [0.04, 0, 0], euler: [90, 0, 0], csg: 'difference' },
+      ]),
+      DEFAULT_LASER_OPTIONS
+    );
+    expect(sepPanels[0].innerCutouts2D).toHaveLength(2);
   });
 });
 

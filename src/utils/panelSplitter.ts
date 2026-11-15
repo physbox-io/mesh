@@ -218,13 +218,14 @@ function fitLength(
   stock: StockItem[],
   thicknessMm: number,
   marginMm: number,
-  kerfMm: number
+  kerfMm: number,
+  clearanceMm = 0
 ): Point2D[][] | null {
   const longest = stock
     .filter((s) => Math.abs(s.thicknessMm - thicknessMm) < 1e-6)
     .reduce((best, s) => Math.max(best, s.widthMm, s.heightMm), 0);
   if (!(longest > 0)) return null;
-  return splitLengthwise(strip, longest - 2 * marginMm, { kerfMm });
+  return splitLengthwise(strip, longest - 2 * marginMm, { kerfMm, clearanceMm });
 }
 
 export interface SplitReport {
@@ -245,7 +246,8 @@ export function splitPanelsToFit(
   stock: StockItem[],
   thicknessOf: (panel: LaserPanel) => number,
   marginMm: number,
-  kerfMm = 0
+  kerfMm = 0,
+  clearanceMm = 0
 ): SplitReport {
   const out: LaserPanel[] = [];
   const notes: string[] = [];
@@ -279,11 +281,24 @@ export function splitPanelsToFit(
      * anything still too long is spliced end to end — which is the case where
      * the offcuts are short rather than merely narrow.
      */
+    const o3 = panel.origin3D;
+    const u3 = panel.uAxis3D;
+    const v3 = panel.vAxis3D;
+    const to3D = (pt: Point2D) => ({
+      x: o3.x + (pt.x / 1000) * u3.x + (pt.y / 1000) * v3.x,
+      y: o3.y + (pt.x / 1000) * u3.y + (pt.y / 1000) * v3.y,
+      z: o3.z + (pt.x / 1000) * u3.z + (pt.y / 1000) * v3.z,
+    });
+
     let spliced = 0;
     split.strips.forEach((strip, i) => {
-      const pieces = fitLength(strip, stock, thicknessOf(panel), marginMm, kerfMm) ?? [strip];
+      const pieces = fitLength(strip, stock, thicknessOf(panel), marginMm, kerfMm, clearanceMm) ?? [strip];
       if (pieces.length > 1) spliced += pieces.length;
       pieces.forEach((piece, j) => {
+        const edges3D = piece.map((pt, k) => ({
+          p1: to3D(pt),
+          p2: to3D(piece[(k + 1) % piece.length]),
+        }));
         out.push({
           ...panel,
           id: `${panel.id}_s${i + 1}${pieces.length > 1 ? `_${j + 1}` : ''}`,
@@ -294,9 +309,7 @@ export function splitPanelsToFit(
           // A pattern drawn across the whole ring does not follow it into the
           // lengths; see the note below.
           engrave2D: undefined,
-          // The lengths are coplanar with one another and joined by glue, so
-          // there is no 3D adjacency for the joint engine to find.
-          edges3D: [],
+          edges3D,
         } as LaserPanel);
       });
     });
@@ -384,7 +397,8 @@ function fingerSeam(
   fingers: number,
   depthMm: number,
   kerfMm: number,
-  male: boolean
+  male: boolean,
+  clearanceMm = 0
 ): Point2D[] | null {
   const u = (p: Point2D) => p.x * axis.ux + p.y * axis.uy;
   const v = (p: Point2D) => -p.x * axis.uy + p.y * axis.ux;
@@ -414,6 +428,9 @@ function fingerSeam(
   const step = span / fingers;
   const vdir = Math.sign(span) || 1;
   const half = kerfMm / 2;
+  const widthHalf = half + clearanceMm / 2;
+  // Need room left on each finger and socket after kerf + clearance adjustment.
+  if (Math.abs(step) - Math.abs(widthHalf) * 2 < 0.25) return null;
   // Material lies on the low side of the seam for one half and the high side
   // for the other, so "pull back" is a different direction for each.
   const pull = male ? -half : half;
@@ -430,11 +447,11 @@ function fingerSeam(
   const uOf = (k: number) => c + dir * (owns(k) ? depthMm : -depthMm) + pull;
 
   /*
-   * Where one cell gives way to the next, nudged toward whichever of the two
-   * this half owns — narrowing its own finger by half a kerf on each side, and
-   * widening the socket beside it by the same, so the pair still closes.
+   * Where one cell gives way to the next, nudged across finger width by kerf +
+   * joint clearance — narrowing each owned tab when clearance > 0 and widening
+   * the mating socket by the same amount without altering overall strip length.
    */
-  const breakAt = (k: number) => v0 + step * k + (owns(k) ? half : -half) * vdir;
+  const breakAt = (k: number) => v0 + step * k + (owns(k) ? widthHalf : -widthHalf) * vdir;
 
   const wave: Point2D[] = [];
   for (let k = 0; k < fingers; k++) {
@@ -475,7 +492,7 @@ function fingerSeam(
 export function splitLengthwise(
   poly: Point2D[],
   maxLengthMm: number,
-  opts: { fingers?: number; depthMm?: number; kerfMm?: number } = {}
+  opts: { fingers?: number; depthMm?: number; kerfMm?: number; clearanceMm?: number } = {}
 ): Point2D[][] | null {
   const axis = longestAxis(poly);
   const u = (p: Point2D) => p.x * axis.ux + p.y * axis.uy;
@@ -487,6 +504,7 @@ export function splitLengthwise(
 
   const fingers = Math.max(3, Math.round(opts.fingers ?? 5));
   const kerfMm = opts.kerfMm ?? 0;
+  const clearanceMm = opts.clearanceMm ?? 0;
 
   /*
    * Fingers reach *past* the line they are cut on, so a piece is longer than
@@ -515,8 +533,8 @@ export function splitLengthwise(
     const left = clipHalfPlane(remaining, axis, c, true);
     const right = clipHalfPlane(remaining, axis, c, false);
     if (left.length < 3 || right.length < 3) return null;
-    const maleHalf = fingerSeam(left, axis, c, fingers, depthMm, kerfMm, true);
-    const femaleHalf = fingerSeam(right, axis, c, fingers, depthMm, kerfMm, false);
+    const maleHalf = fingerSeam(left, axis, c, fingers, depthMm, kerfMm, true, clearanceMm);
+    const femaleHalf = fingerSeam(right, axis, c, fingers, depthMm, kerfMm, false, clearanceMm);
     if (!maleHalf || !femaleHalf) return null;
     out.push(maleHalf);
     remaining = femaleHalf;

@@ -201,16 +201,112 @@ function distSqToSegment(p: Point2D, a: Point2D, b: Point2D): number {
   return (p.x - qx) ** 2 + (p.y - qy) ** 2;
 }
 
-/** Shortest distance from a point to the boundary of any of the given loops. */
-function distToLoops(p: Point2D, loops: Point2D[][]): number {
-  let best = Infinity;
-  for (const loop of loops) {
-    for (let i = 0; i < loop.length; i++) {
-      const d = distSqToSegment(p, loop[i], loop[(i + 1) % loop.length]);
-      if (d < best) best = d;
+/** Spatial grid over a loop's segments for fast bounded-distance queries. */
+interface SegmentGrid {
+  withinDist(p: Point2D, limit: number): boolean;
+  nearest(p: Point2D, radiusHint: number): { x: number; y: number; d: number };
+}
+
+function buildSegmentGrid(loop: Point2D[], cellHint: number): SegmentGrid {
+  const n = loop.length;
+  const h = Math.max(1e-3, cellHint);
+  const invH = 1 / h;
+  const buckets = new Map<number, number[]>();
+  // Pack signed 16-bit-ish cell coords safely using 21-bit offset integers in 53-bit float.
+  const BIAS = 1048576;
+  const STRIDE = 2097152;
+  const keyOf = (cx: number, cy: number) => (cx + BIAS) * STRIDE + (cy + BIAS);
+
+  for (let i = 0; i < n; i++) {
+    const a = loop[i];
+    const b = loop[(i + 1) % n];
+    const x0 = Math.floor(Math.min(a.x, b.x) * invH);
+    const x1 = Math.floor(Math.max(a.x, b.x) * invH);
+    const y0 = Math.floor(Math.min(a.y, b.y) * invH);
+    const y1 = Math.floor(Math.max(a.y, b.y) * invH);
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cy = y0; cy <= y1; cy++) {
+        const k = keyOf(cx, cy);
+        let arr = buckets.get(k);
+        if (!arr) {
+          arr = [];
+          buckets.set(k, arr);
+        }
+        arr.push(i);
+      }
     }
   }
-  return Math.sqrt(best);
+
+  let stamp = 1;
+  const seen = new Int32Array(n);
+
+  return {
+    withinDist(p: Point2D, limit: number): boolean {
+      if (limit <= 0) return false;
+      const limSq = limit * limit;
+      const x0 = Math.floor((p.x - limit) * invH);
+      const x1 = Math.floor((p.x + limit) * invH);
+      const y0 = Math.floor((p.y - limit) * invH);
+      const y1 = Math.floor((p.y + limit) * invH);
+      const cur = ++stamp;
+      for (let cx = x0; cx <= x1; cx++) {
+        for (let cy = y0; cy <= y1; cy++) {
+          const arr = buckets.get(keyOf(cx, cy));
+          if (!arr) continue;
+          for (let k = 0; k < arr.length; k++) {
+            const idx = arr[k];
+            if (seen[idx] === cur) continue;
+            seen[idx] = cur;
+            if (distSqToSegment(p, loop[idx], loop[(idx + 1) % n]) < limSq) return true;
+          }
+        }
+      }
+      return false;
+    },
+
+    nearest(p: Point2D, radiusHint: number): { x: number; y: number; d: number } {
+      const r = Math.max(h, radiusHint);
+      const rSq = r * r;
+      const x0 = Math.floor((p.x - r) * invH);
+      const x1 = Math.floor((p.x + r) * invH);
+      const y0 = Math.floor((p.y - r) * invH);
+      const y1 = Math.floor((p.y + r) * invH);
+      const cur = ++stamp;
+      let best = Infinity, bx = p.x, by = p.y;
+      for (let cx = x0; cx <= x1; cx++) {
+        for (let cy = y0; cy <= y1; cy++) {
+          const arr = buckets.get(keyOf(cx, cy));
+          if (!arr) continue;
+          for (let k = 0; k < arr.length; k++) {
+            const idx = arr[k];
+            if (seen[idx] === cur) continue;
+            seen[idx] = cur;
+            const a = loop[idx], b = loop[(idx + 1) % n];
+            const ex = b.x - a.x, ey = b.y - a.y;
+            const len2 = ex * ex + ey * ey;
+            let t = len2 > 0 ? ((p.x - a.x) * ex + (p.y - a.y) * ey) / len2 : 0;
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            const qx = a.x + ex * t, qy = a.y + ey * t;
+            const d = (p.x - qx) ** 2 + (p.y - qy) ** 2;
+            if (d < best) { best = d; bx = qx; by = qy; }
+          }
+        }
+      }
+      if (best <= rSq) return { x: bx, y: by, d: Math.sqrt(best) };
+      // Fallback full scan when nearest segment lies beyond radiusHint.
+      for (let i = 0; i < n; i++) {
+        const a = loop[i], b = loop[(i + 1) % n];
+        const ex = b.x - a.x, ey = b.y - a.y;
+        const len2 = ex * ex + ey * ey;
+        let t = len2 > 0 ? ((p.x - a.x) * ex + (p.y - a.y) * ey) / len2 : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const qx = a.x + ex * t, qy = a.y + ey * t;
+        const d = (p.x - qx) ** 2 + (p.y - qy) ** 2;
+        if (d < best) { best = d; bx = qx; by = qy; }
+      }
+      return { x: bx, y: by, d: Math.sqrt(best) };
+    },
+  };
 }
 
 /**
@@ -363,20 +459,60 @@ export function insertCrossings(curve: Point2D[]): TaggedPoint[] {
   const hits: { t: number; point: Point2D; id: number }[][] = Array.from({ length: n }, () => []);
   let nextId = 0;
 
-  for (let i = 0; i < n; i++) {
-    const a1 = curve[i];
-    const a2 = curve[(i + 1) % n];
-    // j starts at i+2 because neighbouring segments share an endpoint by
-    // construction; the last segment's neighbour is the first, hence the guard.
-    for (let j = i + 2; j < n; j++) {
-      if (i === 0 && j === n - 1) continue;
-      const b1 = curve[j];
-      const b2 = curve[(j + 1) % n];
-      const hit = segmentIntersection(a1, a2, b1, b2);
-      if (!hit) continue;
+  if (n < 64) {
+    for (let i = 0; i < n; i++) {
+      const a1 = curve[i];
+      const a2 = curve[(i + 1) % n];
+      for (let j = i + 2; j < n; j++) {
+        if (i === 0 && j === n - 1) continue;
+        const b1 = curve[j];
+        const b2 = curve[(j + 1) % n];
+        const hit = segmentIntersection(a1, a2, b1, b2);
+        if (!hit) continue;
+        const id = nextId++;
+        hits[i].push({ t: hit.ta, point: hit.point, id });
+        hits[j].push({ t: hit.tb, point: hit.point, id });
+      }
+    }
+  } else {
+    const minX = new Float64Array(n);
+    const maxX = new Float64Array(n);
+    const minY = new Float64Array(n);
+    const maxY = new Float64Array(n);
+    const order = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = curve[i];
+      const b = curve[(i + 1) % n];
+      minX[i] = a.x < b.x ? a.x : b.x;
+      maxX[i] = a.x > b.x ? a.x : b.x;
+      minY[i] = a.y < b.y ? a.y : b.y;
+      maxY[i] = a.y > b.y ? a.y : b.y;
+      order[i] = i;
+    }
+    order.sort((u, v) => minX[u] - minX[v]);
+    const pairs: { i: number; j: number; ta: number; tb: number; point: Point2D }[] = [];
+    for (let ii = 0; ii < n; ii++) {
+      const u = order[ii];
+      const ux1 = maxX[u];
+      const uy0 = minY[u];
+      const uy1 = maxY[u];
+      for (let jj = ii + 1; jj < n; jj++) {
+        const v = order[jj];
+        if (minX[v] > ux1) break;
+        if (maxY[v] < uy0 || minY[v] > uy1) continue;
+        const i = u < v ? u : v;
+        const j = u < v ? v : u;
+        if (j - i <= 1 || (i === 0 && j === n - 1)) continue;
+        const hit = segmentIntersection(curve[i], curve[(i + 1) % n], curve[j], curve[(j + 1) % n]);
+        if (!hit) continue;
+        pairs.push({ i, j, ta: hit.ta, tb: hit.tb, point: hit.point });
+      }
+    }
+    pairs.sort((p, q) => (p.i - q.i) || (p.j - q.j));
+    for (const p of pairs) {
       const id = nextId++;
-      hits[i].push({ t: hit.ta, point: hit.point, id });
-      hits[j].push({ t: hit.tb, point: hit.point, id });
+      hits[p.i].push({ t: p.ta, point: p.point, id });
+      hits[p.j].push({ t: p.tb, point: p.point, id });
     }
   }
 
@@ -486,6 +622,7 @@ export function offsetLoop(
   // that they run closer to the original outline than the offset distance,
   // which no point of a true offset ever does.
   const keepDist = Math.abs(delta) - opt.arcTolerance - eps;
+  const grid = buildSegmentGrid(ccw, Math.max(Math.abs(delta), opt.arcTolerance * 4));
   const result: Point2D[][] = [];
 
   for (const cand of candidates) {
@@ -500,12 +637,12 @@ export function offsetLoop(
       const a = c[i];
       const b = c[(i + 1) % c.length];
       const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      if (distToLoops(a, [ccw]) < keepDist || distToLoops(mid, [ccw]) < keepDist) {
+      if (grid.withinDist(a, keepDist) || grid.withinDist(mid, keepDist)) {
         valid = false;
         break;
       }
     }
-    if (!valid && !repairNearMiss(c, ccw, Math.abs(delta), keepDist, opt.arcTolerance)) continue;
+    if (!valid && !repairNearMiss(c, grid, Math.abs(delta), keepDist, opt.arcTolerance)) continue;
 
     const tidy = dropCollinear(c);
     result.push(wasClockwise ? tidy.reverse() : tidy);
@@ -555,32 +692,18 @@ export function offsetLoop(
  */
 function repairNearMiss(
   loop: Point2D[],
-  outline: Point2D[],
+  grid: SegmentGrid,
   dist: number,
   keepDist: number,
   tolerance: number
 ): boolean {
   if (loopSpan(loop) <= 4 * tolerance) return false;
   const floor = dist - Math.max(4 * tolerance, 0.1 * dist);
-  const nearest = (p: Point2D) => {
-    let best = Infinity, bx = p.x, by = p.y;
-    for (let i = 0; i < outline.length; i++) {
-      const a = outline[i], b = outline[(i + 1) % outline.length];
-      const ex = b.x - a.x, ey = b.y - a.y;
-      const len2 = ex * ex + ey * ey;
-      let t = len2 > 0 ? ((p.x - a.x) * ex + (p.y - a.y) * ey) / len2 : 0;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      const qx = a.x + ex * t, qy = a.y + ey * t;
-      const d = (p.x - qx) ** 2 + (p.y - qy) ** 2;
-      if (d < best) { best = d; bx = qx; by = qy; }
-    }
-    return { x: bx, y: by, d: Math.sqrt(best) };
-  };
   const moved: Point2D[] = [];
   for (let i = 0; i < loop.length; i++) {
     const a = loop[i], b = loop[(i + 1) % loop.length];
-    const q = nearest(a);
-    if (q.d < floor || nearest({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }).d < floor) return false;
+    const q = grid.nearest(a, dist * 1.1);
+    if (q.d < floor || grid.nearest({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, dist * 1.1).d < floor) return false;
     moved.push(q.d < keepDist && q.d > 1e-12
       ? { x: q.x + ((a.x - q.x) * dist) / q.d, y: q.y + ((a.y - q.y) * dist) / q.d }
       : a);

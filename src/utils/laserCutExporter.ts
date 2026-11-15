@@ -156,6 +156,17 @@ export interface LaserPanelEdge {
   isMaleTab?: boolean;
 }
 
+export interface BlindPocket2D {
+  /** Outer perimeter of the pocket in the panel's local 2D mm frame. */
+  outer: Point2D[];
+  /** Solid raised islands inside the pocket that the cutter must avoid. */
+  holes?: Point2D[][];
+  /** Depth of the pocket floor measured from the panel face (mm, < thickness * 1000). */
+  depthMm: number;
+  /** True when the pocket sits on the underside face (-normal3D) of a double-pocketed panel. */
+  under?: boolean;
+}
+
 export interface LaserPanel {
   id: string;
   name: string;
@@ -168,6 +179,13 @@ export interface LaserPanel {
   outerPolygon2D: Point2D[];
   // 2D interior cutout loops (holes, e.g. entrance hole, interior mortise slots)
   innerCutouts2D: Point2D[][];
+  /**
+   * Partial-depth blind pockets/steps recovered from mesh geometry, machined to
+   * `depthMm` in CNC mode and emitted on `data-operation="fill"` in SVG.
+   */
+  blindPockets2D?: BlindPocket2D[];
+  /** True when the panel carries blind pockets on both faces so underside ones need a flip. */
+  blindPocketsUnderside?: boolean;
   /**
    * Lines to engrave rather than cut: the outlines of a surface pattern laid
    * on this panel's face (see utils/patternEngrave), open polylines in the
@@ -546,14 +564,442 @@ function convexHull2D(pts: Point2D[]): Point2D[] {
   return hull.length >= 3 ? hull : pts.slice();
 }
 
+function ensureCW(pts: Point2D[]): Point2D[] {
+  return polygonSignedArea(pts) > 0 ? [...pts].reverse() : pts;
+}
+
+/** Drops strictly collinear intermediate split points without altering curved facets. */
+function dropCollinearVertices2D(loop: Point2D[]): Point2D[] {
+  let pts = loop.slice();
+  let changed = true;
+  while (changed && pts.length >= 3) {
+    changed = false;
+    const nextPts: Point2D[] = [];
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const a = pts[(i - 1 + n) % n];
+      const b = pts[i];
+      const c = pts[(i + 1) % n];
+      const ux = b.x - a.x, uy = b.y - a.y;
+      const vx = c.x - b.x, vy = c.y - b.y;
+      const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+      if (lu < 1e-5) { changed = true; continue; }
+      if (lv < 1e-5) continue;
+      const sinTurn = Math.abs(ux * vy - uy * vx) / (lu * lv);
+      const dot = (ux * vx + uy * vy) / (lu * lv);
+      // Drop pure collinear splits (dot > 0, sin < 1e-5) and zero-area hairpins (dot < -0.99999).
+      if ((dot > 0 && sinTurn < 1e-5) || dot < -0.99999) {
+        changed = true;
+        continue;
+      }
+      nextPts.push(b);
+    }
+    pts = nextPts;
+  }
+  return pts;
+}
+
+/** Odd-even membership in a planar region represented by non-crossing loops. */
+function pointInRegion2D(pt: Point2D, loops: Point2D[][]): boolean {
+  let inside = false;
+  for (const l of loops) {
+    if (l.length >= 3 && pointInPolygon2D(l, pt)) inside = !inside;
+  }
+  return inside;
+}
+
+/** True if two closed loops cross, touch, or share boundary segments within `epsMm`. */
+function loopsTouchOrCross2D(a: Point2D[], b: Point2D[], epsMm = 1e-3): boolean {
+  for (let i = 0; i < a.length; i++) {
+    const a0 = a[i], a1 = a[(i + 1) % a.length];
+    for (let j = 0; j < b.length; j++) {
+      const b0 = b[j], b1 = b[(j + 1) % b.length];
+      if (segmentSegmentDist(a0, a1, b0, b1) <= epsMm) return true;
+    }
+  }
+  return false;
+}
+
 /**
- * Sample points on the hull of a subtractive geom, in the geom's own frame.
+ * Exact 2D planar region boolean arrangement: splits all input segments at
+ * mutual crossings and collinear overlaps, filters sub-segments by `inTarget`
+ * on left vs right, and chains surviving directed boundary edges into loops.
+ */
+function booleanArrangeLoops2D(
+  seedLoops: Point2D[][],
+  inTarget: (pt: Point2D) => boolean
+): { outers: Point2D[][]; holes: Point2D[][] } {
+  const segs: { a: Point2D; b: Point2D }[] = [];
+  for (const loop of seedLoops) {
+    if (loop.length < 3) continue;
+    for (let i = 0; i < loop.length; i++) {
+      const a = loop[i];
+      const b = loop[(i + 1) % loop.length];
+      if (Math.hypot(b.x - a.x, b.y - a.y) > 1e-6) segs.push({ a, b });
+    }
+  }
+  if (segs.length === 0) return { outers: [], holes: [] };
+
+  const PARAM_EPS = 1e-8;
+  const COLLINEAR_TOL = 1e-4;
+  const cuts: number[][] = segs.map(() => []);
+
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const sx = s.b.x - s.a.x, sy = s.b.y - s.a.y;
+    const sMinX = Math.min(s.a.x, s.b.x) - COLLINEAR_TOL;
+    const sMaxX = Math.max(s.a.x, s.b.x) + COLLINEAR_TOL;
+    const sMinY = Math.min(s.a.y, s.b.y) - COLLINEAR_TOL;
+    const sMaxY = Math.max(s.a.y, s.b.y) + COLLINEAR_TOL;
+    const sLen2 = sx * sx + sy * sy;
+    if (sLen2 < 1e-12) continue;
+
+    for (let j = 0; j < segs.length; j++) {
+      if (j === i) continue;
+      const o = segs[j];
+      if (
+        Math.max(o.a.x, o.b.x) < sMinX ||
+        Math.min(o.a.x, o.b.x) > sMaxX ||
+        Math.max(o.a.y, o.b.y) < sMinY ||
+        Math.min(o.a.y, o.b.y) > sMaxY
+      ) {
+        continue;
+      }
+      const ox = o.b.x - o.a.x, oy = o.b.y - o.a.y;
+      const den = sx * oy - sy * ox;
+      if (Math.abs(den) < 1e-10 * Math.sqrt(sLen2 * (ox * ox + oy * oy))) {
+        const perp = Math.abs((o.a.x - s.a.x) * sy - (o.a.y - s.a.y) * sx) / Math.sqrt(sLen2);
+        if (perp <= COLLINEAR_TOL) {
+          for (const end of [o.a, o.b]) {
+            const t = ((end.x - s.a.x) * sx + (end.y - s.a.y) * sy) / sLen2;
+            if (t > PARAM_EPS && t < 1 - PARAM_EPS) cuts[i].push(t);
+          }
+        }
+        continue;
+      }
+      const dx = o.a.x - s.a.x, dy = o.a.y - s.a.y;
+      const t = (dx * oy - dy * ox) / den;
+      const u = (dx * sy - dy * sx) / den;
+      if (t > PARAM_EPS && t < 1 - PARAM_EPS && u >= -1e-6 && u <= 1 + 1e-6) {
+        cuts[i].push(t);
+      }
+    }
+  }
+
+  // Weld split vertices within 1e-4 mm so intersection endpoints match identically.
+  const WELD_MM = 1e-4;
+  const CELL_MM = 1e-3;
+  const verts: Point2D[] = [];
+  const buckets = new Map<string, number[]>();
+  const weldVertex = (p: Point2D): number => {
+    const gx = Math.floor(p.x / CELL_MM);
+    const gy = Math.floor(p.y / CELL_MM);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const list = buckets.get(`${gx + dx},${gy + dy}`);
+        if (!list) continue;
+        for (const id of list) {
+          if (Math.hypot(verts[id].x - p.x, verts[id].y - p.y) <= WELD_MM) return id;
+        }
+      }
+    }
+    const id = verts.length;
+    verts.push({ x: p.x, y: p.y });
+    const k = `${gx},${gy}`;
+    const list = buckets.get(k);
+    if (list) list.push(id);
+    else buckets.set(k, [id]);
+    return id;
+  };
+
+  const edgeSet = new Set<string>();
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const ts = cuts[i];
+    ts.sort((a, b) => a - b);
+    let prevT = 0;
+    const ptAt = (t: number): Point2D => ({
+      x: s.a.x + (s.b.x - s.a.x) * t,
+      y: s.a.y + (s.b.y - s.a.y) * t,
+    });
+    const stops = ts.length ? [...ts, 1] : [1];
+    for (const t of stops) {
+      if (t - prevT <= PARAM_EPS) continue;
+      const uId = weldVertex(ptAt(prevT));
+      const vId = weldVertex(ptAt(t));
+      prevT = t;
+      if (uId === vId) continue;
+      const u = verts[uId], v = verts[vId];
+      const dx = v.x - u.x, dy = v.y - u.y;
+      const len = Math.hypot(dx, dy);
+      if (len < WELD_MM) continue;
+      const mx = (u.x + v.x) / 2, my = (u.y + v.y) / 2;
+      const nx = -dy / len, ny = dx / len;
+      const eps = Math.min(2e-3, len * 0.25);
+      const leftIn = inTarget({ x: mx + nx * eps, y: my + ny * eps });
+      const rightIn = inTarget({ x: mx - nx * eps, y: my - ny * eps });
+      if (leftIn === rightIn) continue;
+      const from = leftIn ? uId : vId;
+      const to = leftIn ? vId : uId;
+      const revKey = `${to}->${from}`;
+      if (edgeSet.has(revKey)) {
+        edgeSet.delete(revKey);
+      } else {
+        edgeSet.add(`${from}->${to}`);
+      }
+    }
+  }
+
+  const dirEdges: { from: number; to: number }[] = [];
+  const outgoing = new Map<number, number[]>();
+  for (const key of edgeSet) {
+    const sep = key.indexOf('->');
+    const from = Number(key.slice(0, sep));
+    const to = Number(key.slice(sep + 2));
+    const idx = dirEdges.length;
+    dirEdges.push({ from, to });
+    const list = outgoing.get(from);
+    if (list) list.push(idx);
+    else outgoing.set(from, [idx]);
+  }
+
+  const used = new Uint8Array(dirEdges.length);
+  const rawLoops: Point2D[][] = [];
+  for (let start = 0; start < dirEdges.length; start++) {
+    if (used[start]) continue;
+    used[start] = 1;
+    const startVert = dirEdges[start].from;
+    let prevVert = startVert;
+    let curVert = dirEdges[start].to;
+    const pts: Point2D[] = [{ ...verts[startVert] }];
+
+    for (let guard = 0; guard <= dirEdges.length; guard++) {
+      if (curVert === startVert) break;
+      pts.push({ ...verts[curVert] });
+      const candidates = (outgoing.get(curVert) ?? []).filter((ei) => !used[ei]);
+      if (candidates.length === 0) { pts.length = 0; break; }
+      let chosen = candidates[0];
+      if (candidates.length > 1) {
+        const backAng = Math.atan2(
+          verts[prevVert].y - verts[curVert].y,
+          verts[prevVert].x - verts[curVert].x
+        );
+        let bestDelta = Infinity;
+        for (const ei of candidates) {
+          const nxt = dirEdges[ei].to;
+          const outAng = Math.atan2(
+            verts[nxt].y - verts[curVert].y,
+            verts[nxt].x - verts[curVert].x
+          );
+          let delta = (outAng - backAng) % (Math.PI * 2);
+          if (delta < 0) delta += Math.PI * 2;
+          if (delta < 1e-9) delta = Math.PI * 2;
+          if (delta < bestDelta) {
+            bestDelta = delta;
+            chosen = ei;
+          }
+        }
+      }
+      used[chosen] = 1;
+      prevVert = curVert;
+      curVert = dirEdges[chosen].to;
+    }
+
+    const cleaned = dropCollinearVertices2D(pts);
+    if (cleaned.length >= 3 && polygonArea(cleaned) > 1e-4) {
+      rawLoops.push(cleaned);
+    }
+  }
+
+  // Classify loops by nesting depth using an interior sample point on the left of edge 0.
+  const interiorSample = (loop: Point2D[]): Point2D => {
+    const a = loop[0], b = loop[1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const eps = Math.min(1e-3, len * 0.2);
+    const sign = polygonSignedArea(loop) >= 0 ? 1 : -1;
+    return {
+      x: (a.x + b.x) / 2 + sign * (-dy / len) * eps,
+      y: (a.y + b.y) / 2 + sign * (dx / len) * eps,
+    };
+  };
+
+  const outers: Point2D[][] = [];
+  const holes: Point2D[][] = [];
+  for (let i = 0; i < rawLoops.length; i++) {
+    // Signed area immediately distinguishes outer boundaries (CCW > 0, material on left)
+    // from holes (CW < 0, material on left outside the hole).
+    if (polygonSignedArea(rawLoops[i]) > 0) {
+      outers.push(ensureCCW(rawLoops[i]));
+    } else {
+      // Confirm it sits inside at least one outer loop.
+      const sample = interiorSample(rawLoops[i]);
+      let depth = 0;
+      for (let j = 0; j < rawLoops.length; j++) {
+        if (j !== i && polygonSignedArea(rawLoops[j]) > 0 && pointInPolygon2D(rawLoops[j], sample)) {
+          depth++;
+        }
+      }
+      if (depth > 0) holes.push(ensureCW(rawLoops[i]));
+    }
+  }
+  outers.sort((a, b) => polygonArea(b) - polygonArea(a));
+  return { outers, holes };
+}
+
+/** Boolean union of multiple 2D regions, returning `[outerCCW, ...holesCW][]`. */
+function unionRegions2D(regions: Point2D[][][]): Point2D[][][] {
+  const valid = regions.filter((r) => r.length > 0);
+  if (valid.length === 0) return [];
+  const orientRegion = (loops: Point2D[][]): Point2D[][] => {
+    if (loops.length === 0) return [];
+    const sorted = [...loops].sort((a, b) => polygonArea(b) - polygonArea(a));
+    return sorted.map((l, idx) => (idx === 0 ? ensureCCW(l) : ensureCW(l)));
+  };
+  const oriented = valid.map(orientRegion);
+  const res = booleanArrangeLoops2D(
+    oriented.flat(),
+    (pt) => oriented.some((reg) => pointInRegion2D(pt, reg))
+  );
+  if (res.outers.length === 0) return [];
+  const grouped: Point2D[][][] = res.outers.map((o) => [o]);
+  for (const h of res.holes) {
+    // Attach each hole to the smallest outer loop that contains it.
+    let bestIdx = -1;
+    let bestArea = Infinity;
+    for (let i = 0; i < res.outers.length; i++) {
+      if (pointInPolygon2D(res.outers[i], h[0])) {
+        const a = polygonArea(res.outers[i]);
+        if (a < bestArea) {
+          bestArea = a;
+          bestIdx = i;
+        }
+      }
+    }
+    if (bestIdx >= 0) grouped[bestIdx].push(h);
+  }
+  return grouped;
+}
+
+/**
+ * Subtracts 2D cutout regions from `(outerPolygon2D, existingHoles)`.
+ *
+ * - Isolated interior cutouts that do not touch the outer boundary, existing holes,
+ *   or one another keep their exact unperturbed vertex loops (fast path).
+ * - Cutouts that straddle `outerPolygon2D` become clean perimeter notches on
+ *   `outerPolygon2D`, and overlapping interior cutouts union into non-overlapping holes.
+ */
+function subtractCutoutsFromPanel2D(
+  outerPolygon2D: Point2D[],
+  existingHoles: Point2D[][],
+  cutoutRegions: Point2D[][][]
+): { outer: Point2D[]; holes: Point2D[][] } {
+  if (cutoutRegions.length === 0 || outerPolygon2D.length < 3) {
+    return { outer: outerPolygon2D, holes: existingHoles };
+  }
+
+  const baseOuter = ensureCCW(outerPolygon2D);
+  const baseHoles = existingHoles.filter((h) => h.length >= 3).map(ensureCW);
+  const baseRegion = [baseOuter, ...baseHoles];
+
+  // Partition cutouts into:
+  // 1) pure isolated single-loop interior holes (fast path, preserves exact vertex count)
+  // 2) cutouts that overlap/cross outer boundary, existing holes, or another cutout
+  const activeCutouts = cutoutRegions.filter((reg) => {
+    if (reg.length === 0) return false;
+    // Does this cutout interact with the panel region at all?
+    for (const loop of reg) {
+      if (loop.some((p) => pointInRegion2D(p, baseRegion))) return true;
+      if (loopsTouchOrCross2D(loop, baseOuter)) return true;
+      for (const h of baseHoles) if (loopsTouchOrCross2D(loop, h)) return true;
+    }
+    // Check if the entire panel sits inside the cutout!
+    return pointInRegion2D(baseOuter[0], reg);
+  });
+
+  if (activeCutouts.length === 0) {
+    return { outer: outerPolygon2D, holes: existingHoles };
+  }
+
+  const isolatedHoles: Point2D[][] = [];
+  const complexCutouts: Point2D[][][] = [];
+
+  for (let i = 0; i < activeCutouts.length; i++) {
+    const reg = activeCutouts[i];
+    let isolated = reg.length === 1;
+    if (isolated) {
+      const loop = reg[0];
+      if (!loop.every((p) => pointInRegion2D(p, baseRegion))) isolated = false;
+      if (isolated && loopsTouchOrCross2D(loop, baseOuter)) isolated = false;
+      if (isolated) {
+        for (const h of baseHoles) {
+          if (loopsTouchOrCross2D(loop, h) || pointInPolygon2D(loop, h[0])) {
+            isolated = false;
+            break;
+          }
+        }
+      }
+      if (isolated) {
+        for (let j = 0; j < activeCutouts.length; j++) {
+          if (j === i) continue;
+          for (const other of activeCutouts[j]) {
+            if (
+              loopsTouchOrCross2D(loop, other) ||
+              pointInPolygon2D(loop, other[0]) ||
+              pointInPolygon2D(other, loop[0])
+            ) {
+              isolated = false;
+              break;
+            }
+          }
+          if (!isolated) break;
+        }
+      }
+    }
+    if (isolated) isolatedHoles.push(ensureCW(reg[0]));
+    else complexCutouts.push(reg);
+  }
+
+  if (complexCutouts.length === 0) {
+    return { outer: outerPolygon2D, holes: [...existingHoles, ...isolatedHoles] };
+  }
+
+  const orientedCutouts = complexCutouts.map((reg) => {
+    const sorted = [...reg].sort((a, b) => polygonArea(b) - polygonArea(a));
+    return sorted.map((l, idx) => (idx === 0 ? ensureCCW(l) : ensureCW(l)));
+  });
+
+  const seedLoops: Point2D[][] = [
+    baseOuter,
+    ...baseHoles,
+    // Reverse cutout orientations so remaining panel material stays on the left.
+    ...orientedCutouts.flatMap((reg) => reg.map((l) => [...l].reverse())),
+  ];
+
+  const arranged = booleanArrangeLoops2D(
+    seedLoops,
+    (pt) =>
+      pointInRegion2D(pt, baseRegion) &&
+      !orientedCutouts.some((cut) => pointInRegion2D(pt, cut))
+  );
+
+  if (arranged.outers.length === 0) {
+    return { outer: [], holes: [] };
+  }
+  const mainOuter = arranged.outers[0];
+  const mainHoles = [
+    ...arranged.holes.filter((h) => pointInPolygon2D(mainOuter, h[0])),
+    ...isolatedHoles.filter((h) => pointInPolygon2D(mainOuter, h[0])),
+  ];
+  return { outer: mainOuter, holes: mainHoles };
+}
+
+/**
+ * Sample points on the hull of a convex primitive cutter, in the geom's own frame.
  *
  * `pad` is an isotropic radius to be added around every sample — it carries the
  * part of a shape whose silhouette is direction-independent (a sphere, or a
  * capsule's end caps), which no finite set of surface samples can capture.
- * Together the two describe the solid as `hull(samples) ⊕ ball(pad)`, whose
- * projection onto any plane is exactly `hull(projected samples) ⊕ disc(pad)`.
  */
 function cutoutHullSamples(geom: SceneGeom): { local: THREE.Vector3[]; pad: number } | null {
   const s = geom.size || [];
@@ -595,88 +1041,249 @@ function cutoutHullSamples(geom: SceneGeom): { local: THREE.Vector3[]; pad: numb
     case 'sphere':
       return { local: [new THREE.Vector3(0, 0, 0)], pad: r };
     default:
-      return null; // ellipsoids and meshes are not projected
+      return null;
   }
 }
 
 /**
- * Projects a body's subtractive geoms onto a panel's own (u, v) frame. Works for
- * any panel orientation — the panel may be thin in X, Y or Z, or be an
- * arbitrarily oriented plane recovered from a mesh — and for any cutter
- * orientation, including geoms rotated by quat/euler or placed by fromto.
- *
- * `sheet` is where the panel's material stands along its normal, measured from
- * `worldOrigin`. A cutter clear of it is nothing to do with this panel: a pocket
- * in one face of a shelled solid must not be cut out of the opposite face, whose
- * 2D bounds contain the same projected point. A cutter that enters it and stops
- * is a blind cut, which no sheet cut can make, so it goes on `blind` instead of
- * becoming a hole: a counterbore's head would come out as a hole the screw falls
- * through, and an O-ring groove as a disc taken out of the seal face.
+ * Extracts one subtractive cutter's normal interval `[cutLo, cutHi]` along `worldN`
+ * and its 2D cutout region loops in `(worldU, worldV)` mm, supporting convex
+ * primitives (`box`, `cylinder`, `capsule`, `sphere`), `ellipsoid`, and arbitrary
+ * (including concave) `mesh` cutters.
  */
-function projectCutouts2D(
+function extractSingleCutout2D(
+  diffGeom: SceneGeom,
+  bodyMatrix: THREE.Matrix4,
+  worldOrigin: THREE.Vector3,
+  worldU: THREE.Vector3,
+  worldV: THREE.Vector3,
+  worldN: THREE.Vector3,
+  sheet: { lo: number; hi: number }
+): { cutLo: number; cutHi: number; loops: Point2D[][] } | null {
+  const m = getGeomTransform(diffGeom, bodyMatrix);
+
+  if (diffGeom.type === 'ellipsoid') {
+    const s = diffGeom.size || [];
+    const rx = s[0] || 0.01;
+    const ry = s[1] ?? rx;
+    const rz = s[2] ?? rx;
+    const cWorld = new THREE.Vector3(0, 0, 0).applyMatrix4(m).sub(worldOrigin);
+    const ax = new THREE.Vector3(rx, 0, 0).applyMatrix4(m).sub(worldOrigin).sub(cWorld);
+    const ay = new THREE.Vector3(0, ry, 0).applyMatrix4(m).sub(worldOrigin).sub(cWorld);
+    const az = new THREE.Vector3(0, 0, rz).applyMatrix4(m).sub(worldOrigin).sub(cWorld);
+
+    const nc = cWorld.dot(worldN);
+    const nx = ax.dot(worldN), ny = ay.dot(worldN), nz = az.dot(worldN);
+    const dn = Math.hypot(nx, ny, nz);
+    if (dn < 1e-9) return null;
+    const cutLo = nc - dn;
+    const cutHi = nc + dn;
+
+    // Evaluate at the widest plane inside [sheet.lo, sheet.hi] (the full silhouette
+    // when the ellipsoid's centre sits inside the slab, or the entry cross-section
+    // when its centre sits outside).
+    const nPlane = Math.max(sheet.lo, Math.min(sheet.hi, nc));
+    const q = Math.max(-1, Math.min(1, (nPlane - nc) / dn));
+    // Unit vector along normal in unit-sphere parameter space: s_n = (nx, ny, nz) / dn
+    const snx = nx / dn, sny = ny / dn, snz = nz / dn;
+    const shiftS = q;
+    const radScale = Math.sqrt(Math.max(0, 1 - q * q));
+
+    // Orthonormal tangent basis (t1, t2) orthogonal to s_n in R^3:
+    const ref = Math.abs(snx) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const snVec = new THREE.Vector3(snx, sny, snz);
+    const t1 = new THREE.Vector3().crossVectors(snVec, ref).normalize();
+    const t2 = new THREE.Vector3().crossVectors(snVec, t1).normalize();
+
+    const mapSphereVec = (sv: THREE.Vector3): Point2D => {
+      const p3 = new THREE.Vector3()
+        .addScaledVector(ax, sv.x)
+        .addScaledVector(ay, sv.y)
+        .addScaledVector(az, sv.z);
+      return { x: p3.dot(worldU) * 1000, y: p3.dot(worldV) * 1000 };
+    };
+    const center2D = {
+      x: (cWorld.dot(worldU) + shiftS * (ax.dot(worldU) * snx + ay.dot(worldU) * sny + az.dot(worldU) * snz)) * 1000,
+      y: (cWorld.dot(worldV) + shiftS * (ax.dot(worldV) * snx + ay.dot(worldV) * sny + az.dot(worldV) * snz)) * 1000,
+    };
+    const e1 = mapSphereVec(t1);
+    const e2 = mapSphereVec(t2);
+    if (radScale < 1e-6) return null;
+
+    const loop: Point2D[] = [];
+    for (let k = 0; k < CUTOUT_ARC_STEPS; k++) {
+      const ang = (k / CUTOUT_ARC_STEPS) * Math.PI * 2;
+      const ca = Math.cos(ang) * radScale;
+      const sa = Math.sin(ang) * radScale;
+      loop.push({
+        x: center2D.x + ca * e1.x + sa * e2.x,
+        y: center2D.y + ca * e1.y + sa * e2.y,
+      });
+    }
+    return polygonArea(loop) > 1e-4 ? { cutLo, cutHi, loops: [ensureCCW(loop)] } : null;
+  }
+
+  if (diffGeom.type === 'mesh') {
+    const rawVerts = diffGeom.renderVertices ?? yupVertsToZup(diffGeom.vertices || []);
+    if (rawVerts.length < 9) return null;
+    const pts2D: Point2D[] = [];
+    const ns: number[] = [];
+    let cutLo = Infinity;
+    let cutHi = -Infinity;
+    for (let i = 0; i < rawVerts.length; i += 3) {
+      const d = new THREE.Vector3(rawVerts[i], rawVerts[i + 1], rawVerts[i + 2])
+        .applyMatrix4(m)
+        .sub(worldOrigin);
+      const n = d.dot(worldN);
+      if (n < cutLo) cutLo = n;
+      if (n > cutHi) cutHi = n;
+      ns.push(n);
+      pts2D.push({ x: d.dot(worldU) * 1000, y: d.dot(worldV) * 1000 });
+    }
+
+    const rawFaces = diffGeom.faces || [];
+    if (rawFaces.length >= 3) {
+      // Slice mesh triangles at the mid-plane (or widest interior plane) to preserve
+      // concave cutouts, slots, stars, and interior islands accurately.
+      const nPlane = Math.max(sheet.lo, Math.min(sheet.hi, (sheet.lo + sheet.hi) / 2));
+      const sliceEdges: { p1: Point2D; p2: Point2D }[] = [];
+      for (let i = 0; i + 2 < rawFaces.length; i += 3) {
+        const ia = rawFaces[i], ib = rawFaces[i + 1], ic = rawFaces[i + 2];
+        if (ia >= pts2D.length || ib >= pts2D.length || ic >= pts2D.length) continue;
+        const idx = [ia, ib, ic];
+        const hits: Point2D[] = [];
+        for (let e = 0; e < 3; e++) {
+          const u = idx[e], v = idx[(e + 1) % 3];
+          const nu = ns[u] - nPlane;
+          const nv = ns[v] - nPlane;
+          if ((nu <= 0 && nv > 0) || (nu > 0 && nv <= 0)) {
+            const t = nu / (nu - nv);
+            hits.push({
+              x: pts2D[u].x + (pts2D[v].x - pts2D[u].x) * t,
+              y: pts2D[u].y + (pts2D[v].y - pts2D[u].y) * t,
+            });
+          }
+        }
+        if (hits.length === 2 && Math.hypot(hits[1].x - hits[0].x, hits[1].y - hits[0].y) > 1e-5) {
+          sliceEdges.push({ p1: hits[0], p2: hits[1] });
+        }
+      }
+      const chained = chainBoundaryLoops2D(sliceEdges)
+        .map((l) => simplifyPolyline2D(simplifyPolygon2D(l), 0.05))
+        .filter((l) => l.length >= 3 && polygonArea(l) > 1e-4);
+      if (chained.length > 0) {
+        return { cutLo, cutHi, loops: chained };
+      }
+    }
+
+    const hull = convexHull2D(pts2D);
+    return hull.length >= 3 && polygonArea(hull) > 1e-4 ? { cutLo, cutHi, loops: [hull] } : null;
+  }
+
+  const samples = cutoutHullSamples(diffGeom);
+  if (!samples) return null;
+
+  const padMm = samples.pad * 1000;
+  const projected: Point2D[] = [];
+  let nLo = Infinity;
+  let nHi = -Infinity;
+
+  for (const lp of samples.local) {
+    const d = lp.clone().applyMatrix4(m).sub(worldOrigin);
+    const n = d.dot(worldN);
+    if (n < nLo) nLo = n;
+    if (n > nHi) nHi = n;
+
+    const p = { x: d.dot(worldU) * 1000, y: d.dot(worldV) * 1000 };
+    if (padMm > 0) {
+      for (let k = 0; k < CUTOUT_ARC_STEPS; k++) {
+        const ang = (k / CUTOUT_ARC_STEPS) * Math.PI * 2;
+        projected.push({ x: p.x + Math.cos(ang) * padMm, y: p.y + Math.sin(ang) * padMm });
+      }
+    } else {
+      projected.push(p);
+    }
+  }
+
+  const cutLo = nLo - samples.pad;
+  const cutHi = nHi + samples.pad;
+  const loop = convexHull2D(projected);
+  return loop.length >= 3 ? { cutLo, cutHi, loops: [loop] } : null;
+}
+
+/**
+ * Projects and clips a body's subtractive geoms against a panel's 2D region
+ * `(outerPolygon2D, existingHoles)`.
+ *
+ * - Cutters clear of `sheet` along `worldN` are ignored.
+ * - Cutters entering `sheet` and stopping inside it are recorded on `blind`.
+ * - Through-cutters are boolean-subtracted from `(outerPolygon2D, existingHoles)`:
+ *   edge-straddling cutters notch `outerPolygon2D`, and overlapping interior
+ *   cutters union cleanly into valid non-overlapping `innerCutouts2D` loops.
+ */
+function applySubtractiveCutouts2D(
+  outerPolygon2D: Point2D[],
+  existingHoles: Point2D[][],
   diffGeoms: SceneGeom[],
   bodyMatrix: THREE.Matrix4,
   worldOrigin: THREE.Vector3,
   worldU: THREE.Vector3,
   worldV: THREE.Vector3,
-  contains: (pt: Point2D) => boolean,
   sheet: { lo: number; hi: number },
   blind: SceneGeom[]
-): Point2D[][] {
+): { outer: Point2D[]; holes: Point2D[][] } {
+  if (diffGeoms.length === 0 || outerPolygon2D.length < 3) {
+    return { outer: outerPolygon2D, holes: existingHoles };
+  }
+
   const worldN = new THREE.Vector3().crossVectors(worldU, worldV).normalize();
-  const cutouts: Point2D[][] = [];
+  const baseOuter = ensureCCW(outerPolygon2D);
+  const baseHoles = existingHoles.filter((h) => h.length >= 3).map(ensureCW);
+  const baseRegion = [baseOuter, ...baseHoles];
+  const throughCutouts: Point2D[][][] = [];
 
   for (const diffGeom of diffGeoms) {
-    const samples = cutoutHullSamples(diffGeom);
-    if (!samples) continue;
-
-    const m = getGeomTransform(diffGeom, bodyMatrix);
-    const padMm = samples.pad * 1000;
-
-    const projected: Point2D[] = [];
-    let nLo = Infinity;
-    let nHi = -Infinity;
-
-    for (const lp of samples.local) {
-      const d = lp.clone().applyMatrix4(m).sub(worldOrigin);
-      const n = d.dot(worldN);
-      if (n < nLo) nLo = n;
-      if (n > nHi) nHi = n;
-
-      const p = { x: d.dot(worldU) * 1000, y: d.dot(worldV) * 1000 };
-      if (padMm > 0) {
-        for (let k = 0; k < CUTOUT_ARC_STEPS; k++) {
-          const ang = (k / CUTOUT_ARC_STEPS) * Math.PI * 2;
-          projected.push({ x: p.x + Math.cos(ang) * padMm, y: p.y + Math.sin(ang) * padMm });
-        }
-      } else {
-        projected.push(p);
-      }
-    }
-
-    const cutLo = nLo - samples.pad;
-    const cutHi = nHi + samples.pad;
+    const extracted = extractSingleCutout2D(
+      diffGeom,
+      bodyMatrix,
+      worldOrigin,
+      worldU,
+      worldV,
+      worldN,
+      sheet
+    );
+    if (!extracted) continue;
+    const { cutLo, cutHi, loops } = extracted;
     if (Math.min(cutHi, sheet.hi) - Math.max(cutLo, sheet.lo) <= SHEET_TOUCH_M) continue;
 
-    const loop = convexHull2D(projected);
-    if (loop.length < 3) continue;
-
-    // Ignore cutouts that miss this panel's outline. Testing the silhouette and
-    // not just its centre keeps a hole that straddles a panel edge.
-    let cx = 0;
-    let cy = 0;
-    for (const p of loop) { cx += p.x; cy += p.y; }
-    const centre = { x: cx / loop.length, y: cy / loop.length };
-    if (!contains(centre) && !loop.some(contains)) continue;
+    // Does the cutter's 2D silhouette intersect this panel's material region?
+    let touchesPanel = pointInRegion2D(baseOuter[0], loops);
+    if (!touchesPanel) {
+      for (const loop of loops) {
+        let cx = 0, cy = 0;
+        for (const p of loop) { cx += p.x; cy += p.y; }
+        const centre = { x: cx / loop.length, y: cy / loop.length };
+        if (
+          pointInRegion2D(centre, baseRegion) ||
+          loop.some((p) => pointInRegion2D(p, baseRegion)) ||
+          loopsTouchOrCross2D(loop, baseOuter) ||
+          baseHoles.some((h) => loopsTouchOrCross2D(loop, h))
+        ) {
+          touchesPanel = true;
+          break;
+        }
+      }
+    }
+    if (!touchesPanel) continue;
 
     if (cutLo > sheet.lo + SHEET_TOUCH_M || cutHi < sheet.hi - SHEET_TOUCH_M) {
       blind.push(diffGeom);
       continue;
     }
-    cutouts.push(loop);
+    throughCutouts.push(loops);
   }
 
-  return cutouts;
+  return subtractCutoutsFromPanel2D(outerPolygon2D, existingHoles, throughCutouts);
 }
 
 // ---------------------------------------------------------------------------
@@ -733,7 +1340,7 @@ function attachPatternEngraving(panel: LaserPanel, geom: SceneGeom, geomMatrix: 
    * assembly exactly as cut. Engraving it on the top and turning the panel
    * over afterwards put every off-centre hole and joint on the wrong side.
    */
-  if (found.every((r) => r.under)) {
+  if (found.every((r) => r.under) && !panel.blindPockets2D?.some((bp) => !bp.under)) {
     mirrorPanelFrame(panel);
     panel.cutFaceDown = true;
   } else if (found.some((r) => r.under)) {
@@ -755,6 +1362,14 @@ function mirrorPanelFrame(panel: LaserPanel): void {
   panel.outerPolygon2D = flip(panel.outerPolygon2D);
   panel.innerCutouts2D = panel.innerCutouts2D.map(flip);
   if (panel.engrave2D) panel.engrave2D = panel.engrave2D.map((l) => l.map((p) => ({ x: -p.x, y: p.y })));
+  if (panel.blindPockets2D) {
+    panel.blindPockets2D = panel.blindPockets2D.map((bp) => ({
+      ...bp,
+      outer: flip(bp.outer),
+      holes: bp.holes?.map(flip),
+      under: !bp.under,
+    }));
+  }
 }
 
 /**
@@ -889,45 +1504,50 @@ export function extractPanelsFromScene(
 
           const hw = w / 2;
           const hh = h / 2;
-          const outerPolygon2D: Point2D[] = [
+          const rawOuterPolygon2D: Point2D[] = [
             { x: -hw * 1000, y: -hh * 1000 },
             { x:  hw * 1000, y: -hh * 1000 },
             { x:  hw * 1000, y:  hh * 1000 },
             { x: -hw * 1000, y:  hh * 1000 },
           ];
 
-          const innerCutouts2D = projectCutouts2D(
-            diffGeoms, bodyMatrix, worldOrigin, worldU, worldV,
-            (pt) => Math.abs(pt.x) <= hw * 1000 && Math.abs(pt.y) <= hh * 1000,
+          const cutRes = applySubtractiveCutouts2D(
+            rawOuterPolygon2D,
+            [],
+            diffGeoms,
+            bodyMatrix,
+            worldOrigin,
+            worldU,
+            worldV,
             { lo: -th / 2, hi: th / 2 },
             blind
           );
+          const outerPolygon2D = cutRes.outer;
+          const innerCutouts2D = cutRes.holes;
 
-          const p1_3d = worldOrigin.clone().addScaledVector(worldU, -hw).addScaledVector(worldV, -hh);
-          const p2_3d = worldOrigin.clone().addScaledVector(worldU,  hw).addScaledVector(worldV, -hh);
-          const p3_3d = worldOrigin.clone().addScaledVector(worldU,  hw).addScaledVector(worldV,  hh);
-          const p4_3d = worldOrigin.clone().addScaledVector(worldU, -hw).addScaledVector(worldV,  hh);
+          if (outerPolygon2D.length >= 3) {
+            const edges3D: LaserPanelEdge[] = outerPolygon2D.map((pt, idx) => {
+              const nxt = outerPolygon2D[(idx + 1) % outerPolygon2D.length];
+              return {
+                p1: worldOrigin.clone().addScaledVector(worldU, pt.x / 1000).addScaledVector(worldV, pt.y / 1000),
+                p2: worldOrigin.clone().addScaledVector(worldU, nxt.x / 1000).addScaledVector(worldV, nxt.y / 1000),
+              };
+            });
 
-          const edges3D: LaserPanelEdge[] = [
-            { p1: p1_3d, p2: p2_3d },
-            { p1: p2_3d, p2: p3_3d },
-            { p1: p3_3d, p2: p4_3d },
-            { p1: p4_3d, p2: p1_3d },
-          ];
-
-          panels.push({
-            id: `panel_${panelIdCounter++}`,
-            name: geom.name || node.name,
-            thickness: th,
-            origin3D: worldOrigin,
-            normal3D: worldN,
-            uAxis3D: worldU,
-            vAxis3D: worldV,
-            outerPolygon2D,
-            innerCutouts2D,
-            edges3D,
-          });
-          attachPatternEngraving(panels[panels.length - 1], geom, geomMatrix);
+            panels.push({
+              id: `panel_${panelIdCounter++}`,
+              name: geom.name || node.name,
+              thickness: th,
+              origin3D: worldOrigin,
+              normal3D: worldN,
+              uAxis3D: worldU,
+              vAxis3D: worldV,
+              outerPolygon2D,
+              innerCutouts2D,
+              edges3D,
+            });
+            attachPatternEngraving(panels[panels.length - 1], geom, geomMatrix);
+          }
         } else {
           const facesSpec = [
             { name: 'front',  u: new THREE.Vector3(1, 0, 0),  v: new THREE.Vector3(0, 0, 1), n: new THREE.Vector3(0, 1, 0),  pos: new THREE.Vector3(0, fullY/2, 0),  w: fullX, h: fullZ },
@@ -952,24 +1572,37 @@ export function extractPanelsFromScene(
             const hw = f.w / 2;
             const hh = f.h / 2;
 
-            const outerPolygon2D: Point2D[] = [
+            const rawOuterPolygon2D: Point2D[] = [
               { x: -hw * 1000, y: -hh * 1000 },
               { x:  hw * 1000, y: -hh * 1000 },
               { x:  hw * 1000, y:  hh * 1000 },
               { x: -hw * 1000, y:  hh * 1000 },
             ];
 
-            const p1_3d = worldOrigin.clone().addScaledVector(worldU, -hw).addScaledVector(worldV, -hh);
-            const p2_3d = worldOrigin.clone().addScaledVector(worldU,  hw).addScaledVector(worldV, -hh);
-            const p3_3d = worldOrigin.clone().addScaledVector(worldU,  hw).addScaledVector(worldV,  hh);
-            const p4_3d = worldOrigin.clone().addScaledVector(worldU, -hw).addScaledVector(worldV,  hh);
+            // The sheet's thickness, not the solid's: a hole through this
+            // wall has only the wall to get through.
+            const cutRes = applySubtractiveCutouts2D(
+              rawOuterPolygon2D,
+              [],
+              diffGeoms,
+              bodyMatrix,
+              worldOrigin,
+              worldU,
+              worldV,
+              { lo: -options.materialThickness / 2, hi: options.materialThickness / 2 },
+              blind
+            );
+            const outerPolygon2D = cutRes.outer;
+            if (outerPolygon2D.length < 3) continue;
+            const innerCutouts2D = cutRes.holes;
 
-            const edges3D: LaserPanelEdge[] = [
-              { p1: p1_3d, p2: p2_3d },
-              { p1: p2_3d, p2: p3_3d },
-              { p1: p3_3d, p2: p4_3d },
-              { p1: p4_3d, p2: p1_3d },
-            ];
+            const edges3D: LaserPanelEdge[] = outerPolygon2D.map((pt, idx) => {
+              const nxt = outerPolygon2D[(idx + 1) % outerPolygon2D.length];
+              return {
+                p1: worldOrigin.clone().addScaledVector(worldU, pt.x / 1000).addScaledVector(worldV, pt.y / 1000),
+                p2: worldOrigin.clone().addScaledVector(worldU, nxt.x / 1000).addScaledVector(worldV, nxt.y / 1000),
+              };
+            });
 
             panels.push({
               id: `panel_${panelIdCounter++}`,
@@ -980,14 +1613,7 @@ export function extractPanelsFromScene(
               uAxis3D: worldU,
               vAxis3D: worldV,
               outerPolygon2D,
-              // The sheet's thickness, not the solid's: a hole through this
-              // wall has only the wall to get through.
-              innerCutouts2D: projectCutouts2D(
-                diffGeoms, bodyMatrix, worldOrigin, worldU, worldV,
-                (pt) => Math.abs(pt.x) <= hw * 1000 && Math.abs(pt.y) <= hh * 1000,
-                { lo: -options.materialThickness / 2, hi: options.materialThickness / 2 },
-                blind
-              ),
+              innerCutouts2D,
               edges3D,
             });
             attachPatternEngraving(panels[panels.length - 1], geom, geomMatrix);
@@ -1032,6 +1658,189 @@ export function extractPanelsFromScene(
   }
 
   return { panels, invalidGeoms, blindCuts: [...blindCuts] };
+}
+
+function samplePointInLoop2D(loop: Point2D[]): Point2D {
+  if (loop.length === 0) return { x: 0, y: 0 };
+  let cx = 0, cy = 0;
+  for (const p of loop) { cx += p.x; cy += p.y; }
+  const avg = { x: cx / loop.length, y: cy / loop.length };
+  if (pointInPolygon2D(loop, avg)) return avg;
+
+  const ccw = ensureCCW(loop);
+  for (let i = 0; i < ccw.length; i++) {
+    const a = ccw[i];
+    const b = ccw[(i + 1) % ccw.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    const mx = 0.5 * (a.x + b.x);
+    const my = 0.5 * (a.y + b.y);
+    const nx = -dy / len;
+    const ny = dx / len;
+    for (const eps of [Math.min(0.2, len * 0.2), 0.02, 1e-3]) {
+      const cand = { x: mx + nx * eps, y: my + ny * eps };
+      if (pointInPolygon2D(loop, cand)) return cand;
+    }
+  }
+  return loop[0];
+}
+
+function samplePointInRegion2D(region: Point2D[][]): Point2D {
+  if (region.length === 0) return { x: 0, y: 0 };
+  const outer = ensureCCW(region[0]);
+  const avg = samplePointInLoop2D(outer);
+  if (pointInRegion2D(avg, region)) return avg;
+  for (let i = 0; i < outer.length; i++) {
+    const a = outer[i];
+    const b = outer[(i + 1) % outer.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    const mx = 0.5 * (a.x + b.x);
+    const my = 0.5 * (a.y + b.y);
+    const nx = -dy / len;
+    const ny = dx / len;
+    for (const eps of [Math.min(0.2, len * 0.15), 0.02, 1e-3]) {
+      const cand = { x: mx + nx * eps, y: my + ny * eps };
+      if (pointInRegion2D(cand, region)) return cand;
+    }
+  }
+  return outer[0] ?? { x: 0, y: 0 };
+}
+
+function extractGroupRegions2D(
+  group: CoplanarGroup,
+  origin3D: THREE.Vector3,
+  uAxis: THREE.Vector3,
+  vAxis: THREE.Vector3
+): Point2D[][][] {
+  const edgeMap = new Map<string, { p1: THREE.Vector3; p2: THREE.Vector3; count: number }>();
+  const edgeKey = (p1: THREE.Vector3, p2: THREE.Vector3): string => {
+    const k1 = `${p1.x.toFixed(4)},${p1.y.toFixed(4)},${p1.z.toFixed(4)}`;
+    const k2 = `${p2.x.toFixed(4)},${p2.y.toFixed(4)},${p2.z.toFixed(4)}`;
+    return k1 < k2 ? `${k1}_${k2}` : `${k2}_${k1}`;
+  };
+
+  for (const tri of group.tris) {
+    for (const e of [
+      { p1: tri.a, p2: tri.b },
+      { p1: tri.b, p2: tri.c },
+      { p1: tri.c, p2: tri.a },
+    ]) {
+      const key = edgeKey(e.p1, e.p2);
+      const existing = edgeMap.get(key);
+      if (existing) existing.count++;
+      else edgeMap.set(key, { p1: e.p1, p2: e.p2, count: 1 });
+    }
+  }
+
+  const edges2D: { p1: Point2D; p2: Point2D }[] = [];
+  for (const entry of edgeMap.values()) {
+    if (entry.count !== 1) continue;
+    const d1 = new THREE.Vector3().subVectors(entry.p1, origin3D);
+    const d2 = new THREE.Vector3().subVectors(entry.p2, origin3D);
+    edges2D.push({
+      p1: { x: d1.dot(uAxis) * 1000, y: d1.dot(vAxis) * 1000 },
+      p2: { x: d2.dot(uAxis) * 1000, y: d2.dot(vAxis) * 1000 },
+    });
+  }
+  if (edges2D.length < 3) return [];
+
+  // Triangulated boundaries arrive as long runs of nearly-colinear points and,
+  // where a CSG result was quantised, as sub-millimetre staircases. Both are
+  // below any cutter's resolution, so flatten them before joints are cut.
+  // 0.05 mm: under any kerf, and an arc stays an arc rather than facets.
+  const clean = (l: Point2D[]) => simplifyPolyline2D(simplifyPolygon2D(l), 0.05);
+  const rawLoops = chainBoundaryLoops2D(edges2D).map(clean).filter((l) => l.length >= 3);
+  if (rawLoops.length === 0) return [];
+  if (rawLoops.length === 1) return [[ensureCCW(rawLoops[0])]];
+
+  // Classify loops into [ccwOuter, ...cwHoles] regions by nesting depth so a
+  // blind groove/dado that splits a top skin into two islands keeps both islands
+  // as outer regions rather than misclassifying the second island as a hole.
+  const samples = rawLoops.map(samplePointInLoop2D);
+  const depths = rawLoops.map((_, i) => {
+    let d = 0;
+    for (let j = 0; j < i; j++) {
+      if (pointInPolygon2D(rawLoops[j], samples[i])) d++;
+    }
+    return d;
+  });
+
+  const regions: Point2D[][][] = [];
+  const outerIndices: number[] = [];
+  for (let i = 0; i < rawLoops.length; i++) {
+    if (depths[i] % 2 === 0) {
+      regions.push([ensureCCW(rawLoops[i])]);
+      outerIndices.push(i);
+    }
+  }
+  for (let i = 0; i < rawLoops.length; i++) {
+    if (depths[i] % 2 !== 1) continue;
+    let ownerRegion = -1;
+    for (let r = outerIndices.length - 1; r >= 0; r--) {
+      const oi = outerIndices[r];
+      if (oi < i && depths[oi] === depths[i] - 1 && pointInPolygon2D(rawLoops[oi], samples[i])) {
+        ownerRegion = r;
+        break;
+      }
+    }
+    if (ownerRegion >= 0) regions[ownerRegion].push(ensureCW(rawLoops[i]));
+  }
+  return regions;
+}
+
+function regionsInteriorOverlap2D(regsA: Point2D[][][], regsB: Point2D[][][]): boolean {
+  const distToLoop = (pt: Point2D, loop: Point2D[]): number => {
+    let best = Infinity;
+    for (let i = 0; i < loop.length; i++) {
+      best = Math.min(best, pointSegmentDist(pt, loop[i], loop[(i + 1) % loop.length]));
+    }
+    return best;
+  };
+  const strictlyIn = (pt: Point2D, reg: Point2D[][]): boolean =>
+    pointInRegion2D(pt, reg) && reg.every((l) => distToLoop(pt, l) > 0.05);
+
+  for (const ra of regsA) {
+    const sa = samplePointInRegion2D(ra);
+    if (regsB.some((rb) => strictlyIn(sa, rb))) return true;
+  }
+  for (const rb of regsB) {
+    const sb = samplePointInRegion2D(rb);
+    if (regsA.some((ra) => strictlyIn(sb, ra))) return true;
+  }
+
+  // Fallback for crossing strips where neither sample lands inside the other:
+  // check bbox overlap, then compare union area against sum of areas.
+  const bboxOf = (regs: Point2D[][][]) => {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const r of regs) for (const p of r[0]) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, maxX, minY, maxY };
+  };
+  const ba = bboxOf(regsA);
+  const bb = bboxOf(regsB);
+  if (ba.maxX <= bb.minX + 0.05 || bb.maxX <= ba.minX + 0.05 || ba.maxY <= bb.minY + 0.05 || bb.maxY <= ba.minY + 0.05) {
+    return false;
+  }
+  const areaOf = (regs: Point2D[][][]) =>
+    regs.reduce(
+      (sum, r) =>
+        sum +
+        Math.abs(polygonSignedArea(r[0])) -
+        r.slice(1).reduce((hs, h) => hs + Math.abs(polygonSignedArea(h)), 0),
+      0
+    );
+  const sumArea = areaOf(regsA) + areaOf(regsB);
+  const unionArea = areaOf(unionRegions2D([...regsA, ...regsB]));
+  return sumArea - unionArea > 0.5;
 }
 
 function extractPanelsFromMeshGeom(
@@ -1134,58 +1943,333 @@ function extractPanelsFromMeshGeom(
     return { group, area, centroid };
   });
 
-  // Pair each outer skin with the parallel skin behind it so one sheet yields one
-  // panel, positioned on its mid-plane with its measured thickness. The joint
-  // engine works from mid-planes, so getting this right is what lets meshed
-  // geometry interlock with the same accuracy as box primitives.
-  const consumed = new Set<number>();
-  const slabs: { info: GroupInfo; thickness: number; offset: number; paired: boolean }[] = [];
+  // Group parallel/antiparallel planes into canonical axis families so outer-skin
+  // pairing and blind-pocket floor extraction are completely independent of the
+  // order triangles appear in `geom.faces`.
+  interface FamilyMember {
+    idx: number;
+    info: GroupInfo;
+    facing: 1 | -1;
+    h: number;
+    regions: Point2D[][][];
+    bbox: { minX: number; maxX: number; minY: number; maxY: number };
+  }
+  interface AxisFamily {
+    axis: THREE.Vector3;
+    uAxis: THREE.Vector3;
+    vAxis: THREE.Vector3;
+    members: FamilyMember[];
+  }
 
+  const canonicalAxis = (n: THREE.Vector3): THREE.Vector3 => {
+    const comps = [n.x, n.y, n.z];
+    let dom = 2;
+    if (Math.abs(comps[0]) > Math.abs(comps[dom]) + 1e-4) dom = 0;
+    if (Math.abs(comps[1]) > Math.abs(comps[dom]) + 1e-4) dom = 1;
+    return comps[dom] >= 0 ? n.clone().normalize() : n.clone().multiplyScalar(-1).normalize();
+  };
+
+  const families: AxisFamily[] = [];
+  const zeroOrigin = new THREE.Vector3(0, 0, 0);
+  infos.forEach((info, idx) => {
+    const canon = canonicalAxis(info.group.normal);
+    let fam = families.find((f) => f.axis.dot(canon) > 0.999);
+    if (!fam) {
+      const axis = canon;
+      let uAxis: THREE.Vector3;
+      let vAxis: THREE.Vector3;
+      if (Math.abs(axis.z) < 0.9) {
+        vAxis = new THREE.Vector3(0, 0, 1).addScaledVector(axis, -axis.z).normalize();
+        uAxis = new THREE.Vector3().crossVectors(vAxis, axis).normalize();
+      } else {
+        uAxis = new THREE.Vector3(1, 0, 0);
+        vAxis = new THREE.Vector3().crossVectors(axis, uAxis).normalize();
+        uAxis = new THREE.Vector3().crossVectors(vAxis, axis).normalize();
+      }
+      fam = { axis, uAxis, vAxis, members: [] };
+      families.push(fam);
+    }
+    const facing: 1 | -1 = info.group.normal.dot(fam.axis) >= 0 ? 1 : -1;
+    const h = facing * info.group.planeDist;
+    const regions = extractGroupRegions2D(info.group, zeroOrigin, fam.uAxis, fam.vAxis);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const r of regions) for (const pt of r[0]) {
+      if (pt.x < minX) minX = pt.x;
+      if (pt.x > maxX) maxX = pt.x;
+      if (pt.y < minY) minY = pt.y;
+      if (pt.y > maxY) maxY = pt.y;
+    }
+    fam.members.push({ idx, info, facing, h, regions, bbox: { minX, maxX, minY, maxY } });
+  });
+
+  interface ExtractedSlab {
+    paired: boolean;
+    thickness: number;
+    normalN: THREE.Vector3;
+    uAxis: THREE.Vector3;
+    vAxis: THREE.Vector3;
+    origin3D: THREE.Vector3;
+    outerPolygon2D: Point2D[];
+    innerCutouts2D: Point2D[][];
+    blindPockets2D?: BlindPocket2D[];
+    rawSkinArea: number;
+  }
+
+  const stockMaxM = Math.max(
+    options.materialThickness,
+    ...(options.stock ?? []).map((s) => s.thicknessMm / 1000)
+  );
+  const maxPairTh = Math.max(0.03, 1.5 * stockMaxM);
+  const consumed = new Set<number>();
+  const slabs: ExtractedSlab[] = [];
+
+  for (const fam of families) {
+    const bots = fam.members.filter((m) => m.facing === -1 && m.regions.length > 0 && m.info.area >= 0.00005);
+    const tops = fam.members.filter((m) => m.facing === 1 && m.regions.length > 0 && m.info.area >= 0.00005);
+
+    interface PairCandidate {
+      bot: FamilyMember;
+      top: FamilyMember;
+      floors: FamilyMember[];
+      th: number;
+      withinStock: boolean;
+      lateral: number;
+      combinedArea: number;
+    }
+    const candidates: PairCandidate[] = [];
+
+    for (const bot of bots) {
+      for (const top of tops) {
+        if (Math.max(bot.info.area, top.info.area) < 0.0004) continue;
+        const th = top.h - bot.h;
+        if (th < 0.0002 || th > maxPairTh) continue;
+
+        const envMinX = Math.min(bot.bbox.minX, top.bbox.minX) - 0.5;
+        const envMaxX = Math.max(bot.bbox.maxX, top.bbox.maxX) + 0.5;
+        const envMinY = Math.min(bot.bbox.minY, top.bbox.minY) - 0.5;
+        const envMaxY = Math.max(bot.bbox.maxY, top.bbox.maxY) + 0.5;
+        if (
+          Math.min(bot.bbox.maxX, top.bbox.maxX) <= Math.max(bot.bbox.minX, top.bbox.minX) ||
+          Math.min(bot.bbox.maxY, top.bbox.maxY) <= Math.max(bot.bbox.minY, top.bbox.minY)
+        ) {
+          // Even a half-lap step has touching or overlapping XY bounds across bot/top;
+          // completely separated coplanar islands are distinct parts, not one slab.
+          if (
+            Math.max(bot.bbox.minX - top.bbox.maxX, top.bbox.minX - bot.bbox.maxX) > 0.5 ||
+            Math.max(bot.bbox.minY - top.bbox.maxY, top.bbox.minY - bot.bbox.maxY) > 0.5
+          ) {
+            continue;
+          }
+        }
+
+        // Reject if an intermediate parallel skin overlaps `top` or `bot` in 2D
+        // interior (e.g. two separate parallel shelves or a closed hollow box).
+        let blocked = false;
+        const floors: FamilyMember[] = [];
+        for (const mid of fam.members) {
+          if (mid === bot || mid === top || mid.regions.length === 0) continue;
+          if (mid.h <= bot.h + 0.0003 || mid.h >= top.h - 0.0003) continue;
+          if (
+            mid.bbox.maxX < envMinX || mid.bbox.minX > envMaxX ||
+            mid.bbox.maxY < envMinY || mid.bbox.minY > envMaxY
+          ) {
+            continue;
+          }
+          const sameSkin = mid.facing > 0 ? top : bot;
+          if (regionsInteriorOverlap2D(mid.regions, sameSkin.regions)) {
+            blocked = true;
+            break;
+          }
+          floors.push(mid);
+        }
+        if (blocked) continue;
+
+        const withinStock = th <= 1.5 * stockMaxM + 1e-6;
+        if (!withinStock) {
+          if (top.info.area < bot.info.area * 0.25 || bot.info.area < top.info.area * 0.25) continue;
+        }
+
+        let posArea = top.info.area;
+        const posCentroid = top.info.centroid.clone().multiplyScalar(top.info.area);
+        let negArea = bot.info.area;
+        const negCentroid = bot.info.centroid.clone().multiplyScalar(bot.info.area);
+        for (const f of floors) {
+          if (f.facing > 0) {
+            posArea += f.info.area;
+            posCentroid.addScaledVector(f.info.centroid, f.info.area);
+          } else {
+            negArea += f.info.area;
+            negCentroid.addScaledVector(f.info.centroid, f.info.area);
+          }
+        }
+        if (posArea < negArea * 0.25 || negArea < posArea * 0.25) continue;
+        posCentroid.divideScalar(posArea);
+        negCentroid.divideScalar(negArea);
+
+        const delta = new THREE.Vector3().subVectors(posCentroid, negCentroid);
+        delta.addScaledVector(fam.axis, -delta.dot(fam.axis));
+        const lateral = delta.length();
+        if (lateral > 0.25 * Math.sqrt(Math.max(posArea, negArea))) continue;
+
+        candidates.push({
+          bot,
+          top,
+          floors,
+          th,
+          withinStock,
+          lateral,
+          combinedArea: posArea + negArea,
+        });
+      }
+    }
+
+    candidates.sort((a, b) => {
+      if (a.withinStock !== b.withinStock) return a.withinStock ? -1 : 1;
+      if (Math.abs(b.th - a.th) > 0.0004) return b.th - a.th;
+      if (Math.abs(a.lateral - b.lateral) > 1e-4) return a.lateral - b.lateral;
+      return b.combinedArea - a.combinedArea;
+    });
+
+    for (const cand of candidates) {
+      if (consumed.has(cand.bot.idx) || consumed.has(cand.top.idx)) continue;
+      consumed.add(cand.bot.idx);
+      consumed.add(cand.top.idx);
+
+      const activeFloors = cand.floors.filter((f) => !consumed.has(f.idx));
+      const fastSingle =
+        activeFloors.length === 0 &&
+        cand.bot.regions.length === 1 &&
+        cand.top.regions.length === 1 &&
+        cand.bot.regions[0].length === cand.top.regions[0].length &&
+        Math.abs(cand.bot.info.area - cand.top.info.area) <= 1e-3 * Math.max(cand.bot.info.area, cand.top.info.area);
+
+      const slabRegions = fastSingle
+        ? cand.top.regions
+        : unionRegions2D([
+            ...cand.bot.regions,
+            ...cand.top.regions,
+            ...activeFloors.flatMap((f) => f.regions),
+          ]);
+
+      for (const f of activeFloors) {
+        const fs = samplePointInRegion2D(f.regions[0]);
+        if (slabRegions.some((sr) => pointInPolygon2D(sr[0], fs))) {
+          consumed.add(f.idx);
+        }
+      }
+
+      const midH = 0.5 * (cand.bot.h + cand.top.h);
+      for (const reg of slabRegions) {
+        const outerFam = reg[0];
+        const holesFam = reg.slice(1);
+        let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+        for (const pt of outerFam) {
+          if (pt.x < minU) minU = pt.x;
+          if (pt.x > maxU) maxU = pt.x;
+          if (pt.y < minV) minV = pt.y;
+          if (pt.y > maxV) maxV = pt.y;
+        }
+        const cu = 0.5 * (minU + maxU);
+        const cv = 0.5 * (minV + maxV);
+        const shiftPt = (p: Point2D): Point2D => ({ x: p.x - cu, y: p.y - cv });
+
+        const pockets: BlindPocket2D[] = [];
+        for (const f of activeFloors) {
+          const under = f.facing < 0;
+          const depthMm = (under ? f.h - cand.bot.h : cand.top.h - f.h) * 1000;
+          if (depthMm < 0.1 || depthMm >= cand.th * 1000 - 0.1) continue;
+
+          const raisedRegions: Point2D[][][] = under
+            ? [
+                ...cand.bot.regions,
+                ...activeFloors.filter((o) => o.facing < 0 && o.h < f.h - 0.0003).flatMap((o) => o.regions),
+              ]
+            : [
+                ...cand.top.regions,
+                ...activeFloors.filter((o) => o.facing > 0 && o.h > f.h + 0.0003).flatMap((o) => o.regions),
+              ];
+
+          for (const fReg of f.regions) {
+            const sample = samplePointInRegion2D(fReg);
+            if (!pointInPolygon2D(outerFam, sample)) continue;
+            const keptHoles = fReg.slice(1).filter((hLoop) => {
+              const hs = samplePointInLoop2D(hLoop);
+              return raisedRegions.some((rr) => pointInRegion2D(hs, rr));
+            });
+            pockets.push({
+              outer: ensureCCW(fReg[0].map(shiftPt)),
+              holes: keptHoles.length > 0 ? keptHoles.map((h) => ensureCW(h.map(shiftPt))) : undefined,
+              depthMm,
+              under,
+            });
+          }
+        }
+
+        const origin3D = new THREE.Vector3()
+          .addScaledVector(fam.axis, midH)
+          .addScaledVector(fam.uAxis, cu / 1000)
+          .addScaledVector(fam.vAxis, cv / 1000);
+        const outerPolygon2D = ensureCCW(outerFam.map(shiftPt));
+        const innerCutouts2D = holesFam.map((h) => ensureCW(h.map(shiftPt)));
+        const footprintAreaM2 =
+          (Math.abs(polygonSignedArea(outerPolygon2D)) -
+            innerCutouts2D.reduce((s, h) => s + Math.abs(polygonSignedArea(h)), 0)) *
+          1e-6;
+
+        slabs.push({
+          paired: true,
+          thickness: cand.th,
+          normalN: fam.axis.clone(),
+          uAxis: fam.uAxis.clone(),
+          vAxis: fam.vAxis.clone(),
+          origin3D,
+          outerPolygon2D,
+          innerCutouts2D,
+          blindPockets2D: pockets.length > 0 ? pockets : undefined,
+          rawSkinArea: Math.max(footprintAreaM2, cand.bot.info.area, cand.top.info.area),
+        });
+      }
+    }
+  }
+
+  // Remaining unpaired faces (e.g. a solid mesh shelled into flat panels).
   for (let i = 0; i < infos.length; i++) {
     if (consumed.has(i)) continue;
     const gi = infos[i];
     if (gi.area < 0.0004) continue;
-
-    let bestJ = -1;
-    let bestSep = 0;
-    let bestLateral = Infinity;
-
-    for (let j = 0; j < infos.length; j++) {
-      if (j === i || consumed.has(j)) continue;
-      const gj = infos[j];
-      if (gi.group.normal.dot(gj.group.normal) > -0.999) continue;
-
-      // Signed distance from plane i to plane j along plane i's normal.
-      const sep = -(gi.group.planeDist + gj.group.planeDist);
-      const th = Math.abs(sep);
-      // Up to half again the stock: thick foam and slab stock are sheets too,
-      // and a fixed 30 mm left an 80 mm board's parts unpaired.
-      if (th < 0.0002 || th > Math.max(0.03, 1.5 * options.materialThickness)) continue;
-      if (gj.area < gi.area * 0.25 || gj.area > gi.area * 4) continue;
-
-      // The two skins must sit on top of each other, not merely be parallel.
-      const delta = new THREE.Vector3().subVectors(gj.centroid, gi.centroid);
-      delta.addScaledVector(gi.group.normal, -delta.dot(gi.group.normal));
-      const lateral = delta.length();
-      if (lateral > 0.25 * Math.sqrt(gi.area)) continue;
-
-      if (lateral < bestLateral) {
-        bestLateral = lateral;
-        bestJ = j;
-        bestSep = sep;
-      }
-    }
-
-    consumed.add(i);
-    if (bestJ >= 0) {
-      consumed.add(bestJ);
-      slabs.push({ info: gi, thickness: Math.abs(bestSep), offset: bestSep / 2, paired: true });
+    const normalN = gi.group.normal.clone().normalize();
+    let uAxis: THREE.Vector3;
+    let vAxis: THREE.Vector3;
+    if (Math.abs(normalN.z) < 0.9) {
+      vAxis = new THREE.Vector3(0, 0, 1).addScaledVector(normalN, -normalN.z).normalize();
+      uAxis = new THREE.Vector3().crossVectors(vAxis, normalN).normalize();
     } else {
-      slabs.push({ info: gi, thickness: options.materialThickness, offset: 0, paired: false });
+      uAxis = new THREE.Vector3(1, 0, 0);
+      vAxis = new THREE.Vector3().crossVectors(normalN, uAxis).normalize();
+      uAxis = new THREE.Vector3().crossVectors(vAxis, normalN).normalize();
+    }
+    const origin3D = gi.centroid.clone();
+    const regs = extractGroupRegions2D(gi.group, origin3D, uAxis, vAxis);
+    for (const reg of regs) {
+      slabs.push({
+        paired: false,
+        thickness: options.materialThickness,
+        normalN: normalN.clone(),
+        uAxis: uAxis.clone(),
+        vAxis: vAxis.clone(),
+        origin3D: origin3D.clone(),
+        outerPolygon2D: ensureCCW(reg[0]),
+        innerCutouts2D: reg.slice(1).map(ensureCW),
+        rawSkinArea: gi.area,
+      });
     }
   }
 
-  const totalArea = tris.reduce((sum, t) => sum + new THREE.Vector3().subVectors(t.b, t.a).cross(new THREE.Vector3().subVectors(t.c, t.a)).length() * 0.5, 0);
+  const totalArea = tris.reduce(
+    (sum, t) =>
+      sum + new THREE.Vector3().subVectors(t.b, t.a).cross(new THREE.Vector3().subVectors(t.c, t.a)).length() * 0.5,
+    0
+  );
   const totalAreaMm2 = totalArea * 1e6;
   let idCounter = startId;
   // A solid shelled into panels (each face cut from stock, as a box is)
@@ -1194,105 +2278,34 @@ function extractPanelsFromMeshGeom(
   let shelledArea = 0;
   const pairedPanels = new Set<number>();
   const stoppedBy = new Map<number, SceneGeom[]>();
+
   for (const slab of slabs) {
-    const group = slab.info.group;
-
-    const normalN = group.normal.clone().normalize();
-    let uAxis = new THREE.Vector3(1, 0, 0);
-    if (Math.abs(normalN.dot(uAxis)) > 0.9) {
-      uAxis = new THREE.Vector3(0, 1, 0);
-    }
-    const vAxis = new THREE.Vector3().crossVectors(normalN, uAxis).normalize();
-    uAxis = new THREE.Vector3().crossVectors(vAxis, normalN).normalize();
-
-    // Sits on the sheet's mid-plane; the in-plane coordinates are unaffected.
-    const origin3D = slab.info.centroid.clone().addScaledVector(normalN, slab.offset);
-
-    const edgeMap = new Map<string, { p1: THREE.Vector3; p2: THREE.Vector3; count: number }>();
-
-    function edgeKey(p1: THREE.Vector3, p2: THREE.Vector3): string {
-      const k1 = `${p1.x.toFixed(4)},${p1.y.toFixed(4)},${p1.z.toFixed(4)}`;
-      const k2 = `${p2.x.toFixed(4)},${p2.y.toFixed(4)},${p2.z.toFixed(4)}`;
-      return k1 < k2 ? `${k1}_${k2}` : `${k2}_${k1}`;
-    }
-
-    for (const tri of group.tris) {
-      const edges = [
-        { p1: tri.a, p2: tri.b },
-        { p1: tri.b, p2: tri.c },
-        { p1: tri.c, p2: tri.a },
-      ];
-      for (const e of edges) {
-        const key = edgeKey(e.p1, e.p2);
-        const existing = edgeMap.get(key);
-        if (existing) {
-          existing.count++;
-        } else {
-          edgeMap.set(key, { p1: e.p1, p2: e.p2, count: 1 });
-        }
-      }
-    }
-
-    const boundaryEdges: { p1: THREE.Vector3; p2: THREE.Vector3 }[] = [];
-    for (const entry of edgeMap.values()) {
-      if (entry.count === 1) {
-        boundaryEdges.push(entry);
-      }
-    }
-
-    if (boundaryEdges.length < 3) continue;
-
-    const edges2D: { p1: Point2D; p2: Point2D }[] = [];
-    const edges3D: LaserPanelEdge[] = [];
-
-    for (const e of boundaryEdges) {
-      edges3D.push({ p1: e.p1, p2: e.p2 });
-
-      const d1 = new THREE.Vector3().subVectors(e.p1, origin3D);
-      const u1 = d1.dot(uAxis) * 1000;
-      const v1 = d1.dot(vAxis) * 1000;
-
-      const d2 = new THREE.Vector3().subVectors(e.p2, origin3D);
-      const u2 = d2.dot(uAxis) * 1000;
-      const v2 = d2.dot(vAxis) * 1000;
-
-      edges2D.push({ p1: { x: u1, y: v1 }, p2: { x: u2, y: v2 } });
-    }
-
-    const loops = chainBoundaryLoops2D(edges2D);
-    if (loops.length === 0) continue;
-
-    // Triangulated boundaries arrive as long runs of nearly-colinear points and,
-    // where a CSG result was quantised, as sub-millimetre staircases. Both are
-    // below any cutter's resolution, so flatten them before joints are cut.
-    // 0.05 mm: under any kerf, and an arc stays an arc rather than facets.
-    const clean = (l: Point2D[]) => simplifyPolyline2D(simplifyPolygon2D(l), 0.05);
-    const outerPolygon2D = clean(loops[0]);
-    const innerCutouts2D = loops.slice(1).map(clean).filter(l => l.length >= 3);
+    const { normalN, uAxis, vAxis, origin3D } = slab;
 
     // Holes modelled as CSG subtractions live on the body, not in the mesh, so
     // they have to be projected on separately — otherwise a laser-cut panel
     // comes out solid where the model has an opening.
     const stoppedIn: SceneGeom[] = [];
-    innerCutouts2D.push(
-      ...projectCutouts2D(diffGeoms, bodyMatrix, origin3D, uAxis, vAxis,
-                          pt => pointInPolygon2D(outerPolygon2D, pt),
-                          // A paired slab stands either side of its mid-plane; a
-                          // lone face is a solid's skin, the sheet behind it.
-                          slab.paired
-                            ? { lo: -slab.thickness / 2, hi: slab.thickness / 2 }
-                            : { lo: -slab.thickness, hi: 0 },
-                          stoppedIn)
+    const cutRes = applySubtractiveCutouts2D(
+      slab.outerPolygon2D,
+      slab.innerCutouts2D,
+      diffGeoms,
+      bodyMatrix,
+      origin3D,
+      uAxis,
+      vAxis,
+      // A paired slab stands either side of its mid-plane; a
+      // lone face is a solid's skin, the sheet behind it.
+      slab.paired
+        ? { lo: -slab.thickness / 2, hi: slab.thickness / 2 }
+        : { lo: -slab.thickness, hi: 0 },
+      stoppedIn
     );
-
+    const outerPolygon2D = cutRes.outer;
+    const innerCutouts2D = cutRes.holes;
     if (outerPolygon2D.length < 3) continue;
 
-    // Reject the edge bands of a sheet rather than cutting them as panels. A
-    // band that runs around a sheet's rim has an area of roughly its perimeter
-    // times the material thickness, however large its bounding box is (the
-    // bottom rim of a hollow shell is a full-size square annulus). A real face's
-    // area outruns that by a wide margin. Both tests are needed: this one
-    // catches rings, the extent test catches long straight strips.
+    // Reject the edge bands of a sheet rather than cutting them as panels.
     const loopPerimeter = (l: Point2D[]) => {
       let sum = 0;
       for (let i = 0; i < l.length; i++) {
@@ -1302,13 +2315,12 @@ function extractPanelsFromMeshGeom(
       }
       return sum;
     };
-    const perimeterMm = loopPerimeter(outerPolygon2D) +
+    const perimeterMm =
+      loopPerimeter(outerPolygon2D) +
       innerCutouts2D.reduce((acc, l) => acc + loopPerimeter(l), 0);
-    const areaMm2 = slab.info.area * 1e6;
-    // A paired slab that is the whole part, its outline straight through
-    // (two skins and the walls between, nothing else), is a profile cut
-    // however thick: a puck cut through 80 mm stock is not a rim band.
-    const wholePrism = slab.paired &&
+    const areaMm2 = slab.rawSkinArea * 1e6;
+    const wholePrism =
+      slab.paired &&
       Math.abs(totalAreaMm2 - (2 * areaMm2 + perimeterMm * slab.thickness * 1000)) <= 0.03 * totalAreaMm2;
     if (!wholePrism) {
       if (areaMm2 < 1.5 * perimeterMm * slab.thickness * 1000) continue;
@@ -1320,11 +2332,20 @@ function extractPanelsFromMeshGeom(
       if (Math.min(maxX - minX, maxY - minY) < 2 * slab.thickness * 1000) continue;
     }
 
+    const edges3D: LaserPanelEdge[] = outerPolygon2D.map((pt, idx) => {
+      const nxt = outerPolygon2D[(idx + 1) % outerPolygon2D.length];
+      return {
+        p1: origin3D.clone().addScaledVector(uAxis, pt.x / 1000).addScaledVector(vAxis, pt.y / 1000),
+        p2: origin3D.clone().addScaledVector(uAxis, nxt.x / 1000).addScaledVector(vAxis, nxt.y / 1000),
+      };
+    });
+
     // Only now: an edge band dropped above is no panel to stop inside.
     stoppedBy.set(idCounter, stoppedIn);
-    if (!slab.paired) shelledArea += slab.info.area;
+    if (!slab.paired) shelledArea += slab.rawSkinArea;
     else pairedPanels.add(idCounter);
-    meshPanels.push({
+
+    const panel: LaserPanel = {
       id: `panel_${idCounter++}`,
       name: `${geom.name || nodeName}_poly_${meshPanels.length + 1}`,
       thickness: slab.thickness,
@@ -1334,8 +2355,22 @@ function extractPanelsFromMeshGeom(
       vAxis3D: vAxis,
       outerPolygon2D,
       innerCutouts2D,
+      blindPockets2D: slab.blindPockets2D,
       edges3D,
-    });
+    };
+
+    if (panel.blindPockets2D?.length) {
+      const hasTop = panel.blindPockets2D.some((bp) => !bp.under);
+      const hasUnder = panel.blindPockets2D.some((bp) => bp.under);
+      if (hasUnder && !hasTop) {
+        mirrorPanelFrame(panel);
+        panel.cutFaceDown = true;
+      } else if (hasUnder && hasTop) {
+        panel.blindPocketsUnderside = true;
+      }
+    }
+
+    meshPanels.push(panel);
   }
 
   const kept = shelledArea > 0 && shelledArea < 0.95 * totalArea
@@ -1381,6 +2416,7 @@ interface EdgeFeature {
 interface PanelJointWork {
   features: EdgeFeature[];
   mortises: Point2D[][];
+  crossLaps: Point2D[][];
 }
 
 /**
@@ -2060,19 +3096,115 @@ function resolveCornerOwners(
   });
 }
 
+function lineIntervalInPanel2D(
+  panel: LaserPanel,
+  linePoint: THREE.Vector3,
+  lineDir: THREE.Vector3
+): {
+  q: Point2D;
+  w: Point2D;
+  intervals: [number, number][];
+  perpClearanceAt: (s: number) => { pos: number; neg: number } | null;
+} | null {
+  const poly = panel.outerPolygon2D;
+  if (poly.length < 3) return null;
+
+  const q = toPanel2D(panel, linePoint);
+  const uAxis = v3(panel.uAxis3D);
+  const vAxis = v3(panel.vAxis3D);
+  let wx = lineDir.dot(uAxis);
+  let wy = lineDir.dot(vAxis);
+  const wLen = Math.hypot(wx, wy);
+  if (wLen < 0.9) return null;
+  wx /= wLen;
+  wy /= wLen;
+  const nx = -wy;
+  const ny = wx;
+
+  const sHits: number[] = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const d0 = (a.x - q.x) * nx + (a.y - q.y) * ny;
+    const d1 = (b.x - q.x) * nx + (b.y - q.y) * ny;
+    if ((d0 <= 0 && d1 > 0) || (d1 <= 0 && d0 > 0)) {
+      const t = d0 / (d0 - d1);
+      const px = a.x + t * (b.x - a.x);
+      const py = a.y + t * (b.y - a.y);
+      sHits.push((px - q.x) * wx + (py - q.y) * wy);
+    }
+  }
+  sHits.sort((a, b) => a - b);
+  const intervals: [number, number][] = [];
+  for (let k = 0; k + 1 < sHits.length; k += 2) {
+    if (sHits[k + 1] - sHits[k] > 1e-3) intervals.push([sHits[k], sHits[k + 1]]);
+  }
+  if (intervals.length === 0) return null;
+
+  const region = [ensureCCW(poly), ...panel.innerCutouts2D.map(ensureCW)];
+  const perpClearanceAt = (s: number): { pos: number; neg: number } | null => {
+    const px = q.x + wx * s;
+    const py = q.y + wy * s;
+    if (!pointInRegion2D({ x: px, y: py }, region)) return null;
+    let pos = Infinity;
+    let neg = Infinity;
+    for (const loop of region) {
+      for (let i = 0; i < loop.length; i++) {
+        const a = loop[i];
+        const b = loop[(i + 1) % loop.length];
+        const u0 = (a.x - px) * wx + (a.y - py) * wy;
+        const u1 = (b.x - px) * wx + (b.y - py) * wy;
+        if ((u0 <= 0 && u1 > 0) || (u1 <= 0 && u0 > 0)) {
+          const t = u0 / (u0 - u1);
+          const hx = a.x + t * (b.x - a.x);
+          const hy = a.y + t * (b.y - a.y);
+          const d = (hx - px) * nx + (hy - py) * ny;
+          if (d >= 0) pos = Math.min(pos, d);
+          if (d <= 0) neg = Math.min(neg, -d);
+        }
+      }
+    }
+    if (!Number.isFinite(pos) || !Number.isFinite(neg)) return null;
+    return { pos, neg };
+  };
+
+  return { q, w: { x: wx, y: wy }, intervals, perpClearanceAt };
+}
+
+function rectAlongLine2D(
+  q: Point2D,
+  w: Point2D,
+  sa: number,
+  sb: number,
+  widthMm: number
+): Point2D[] {
+  const s0 = Math.min(sa, sb);
+  const s1 = Math.max(sa, sb);
+  const hw = widthMm / 2;
+  const nx = -w.y;
+  const ny = w.x;
+  const at = (s: number, d: number): Point2D => ({
+    x: q.x + w.x * s + nx * d,
+    y: q.y + w.y * s + ny * d,
+  });
+  return [at(s0, -hw), at(s1, -hw), at(s1, hw), at(s0, hw)];
+}
+
 function buildJointWork(
   panels: LaserPanel[],
   options: LaserCutOptions,
   fallbacks: string[],
   thicknessOf: (panel: LaserPanel) => number
 ): PanelJointWork[] {
-  const work: PanelJointWork[] = panels.map(() => ({ features: [], mortises: [] }));
+  const work: PanelJointWork[] = panels.map(() => ({ features: [], mortises: [], crossLaps: [] }));
   const fingerWidthMm = effectiveFingerWidthMm(options);
   const kerfMm = options.kerf * 1000;
+  const clearanceMm = options.jointClearance * 1000;
+  const overhangMm = Math.max(0, options.tabOverhang * 1000);
   // Across a finger's width, the fit is whatever the user asked for on top of
   // the kerf. Along its depth only the kerf matters — that governs whether a tab
   // bottoms out, not how tightly it grips.
-  const widthHalf = (kerfMm - options.jointClearance * 1000) / 2;
+  const widthHalf = (kerfMm - clearanceMm) / 2;
   const depthHalf = kerfMm / 2;
 
   // Cut profiles are computed against a CCW outline so "inward" is unambiguous.
@@ -2082,6 +3214,18 @@ function buildJointWork(
 
   const joints = detectJoints(panels, options, thicknessOf);
   const owners = resolveCornerOwners(panels, joints);
+
+  const pushFeature = (panelIdx: number, m: EdgeMatch, sa: number, sb: number, depth: number) => {
+    if (Math.abs(depth) < 1e-6) return;
+    const t0 = sToEdgeT(m, sa);
+    const t1 = sToEdgeT(m, sb);
+    work[panelIdx].features.push({
+      edgeIdx: m.edgeIdx,
+      ta: Math.min(t0, t1),
+      tb: Math.max(t0, t1),
+      depth,
+    });
+  };
 
   joints.forEach((j, jointIdx) => {
     const { ia, ib, mA, mB, offA, offB, onA, onB, tA, tB } = j;
@@ -2127,25 +3271,8 @@ function buildJointWork(
     // is that panel's stock — not the female's, and not a single job figure.
     const tenonThickness = maleIdx === ia ? j.stockA : j.stockB;
 
-    const push = (panelIdx: number, m: EdgeMatch, sa: number, sb: number, depth: number) => {
-      // A tab that stops flush still has half a kerf to grow, which is less than
-      // any feature: that is the compensation, not a sliver.
-      if (Math.abs(depth) < 1e-6) return;
-      const t0 = sToEdgeT(m, sa);
-      const t1 = sToEdgeT(m, sb);
-      work[panelIdx].features.push({
-        edgeIdx: m.edgeIdx,
-        ta: Math.min(t0, t1),
-        tb: Math.max(t0, t1),
-        depth,
-      });
-    };
+    const push = pushFeature;
 
-    // Pare back the bands the joint pulled away from its corners, so the outline
-    // runs straight from the corner into the first cell rather than stepping out
-    // over a block that mates with nothing. In Tab & Slot the female's edge is
-    // straight anyway — there is no recess beside its band to strand it, and
-    // notching it here would cut into the panel for no reason.
     /** Whether `side`'s panel keeps the material in cell `k` rather than receding. */
     const sideOwnsCell = (side: 0 | 1, k: number): boolean => {
       const even = k % 2 === 0;
@@ -2162,18 +3289,9 @@ function buildJointWork(
       const k = end === 'lo' ? 0 : cells - 1;
       for (const side of [0, 1] as const) {
         if (!trim[side]) continue;
-        // Only the panel that recedes in the end cell gives up its band. Doing
-        // it to both would cut the corner away twice over; doing it to the one
-        // that keeps the cell would strand its tab on a pared-back edge. This
-        // way exactly one panel holds the contested corner, and its band is
-        // simply part of the tab beside it.
         if (sideOwnsCell(side, k)) continue;
         const p = jointPanel(j, side);
         if (useSlot && p.idx === femaleIdx) continue;
-        // Runs from the panel's own corner — not merely from where the two
-        // edges stop overlapping — to where the receding cell starts, half a
-        // kerf inboard of the nominal boundary. Stopping anywhere short leaves
-        // a tooth of the old block behind.
         push(
           p.idx, p.m,
           end === 'lo' ? p.m.s0 : hi - widthHalf,
@@ -2189,12 +3307,6 @@ function buildJointWork(
       const aOwns = (k % 2 === 0) === aOwnsEvenCells;
 
       if (useSlot) {
-        // The male panel's edge alternates exactly as it would for a finger
-        // joint: tenons reach through to the far face, and between them it draws
-        // back to the female's near face. Skipping that draw-back would leave
-        // the male's full edge buried inside the female panel. What differs from
-        // a finger joint is only the female side — its edge stays straight and
-        // the tenons pass through interior mortises instead.
         const maleOwns = (k % 2 === 0) === maleOwnsCell;
         push(maleIdx, maleMatch,
              maleOwns ? s0 - widthHalf : s0 + widthHalf,
@@ -2204,7 +3316,7 @@ function buildJointWork(
           work[femaleIdx].mortises.push(
             buildMortise(panels[femaleIdx], femaleMatch, s0 + widthHalf, s1 - widthHalf,
                          j.mortiseInner + depthHalf,
-                         tenonThickness - kerfMm + options.jointClearance * 1000)
+                         tenonThickness - kerfMm + clearanceMm)
           );
         }
         continue;
@@ -2223,6 +3335,169 @@ function buildJointWork(
            (aOwns ? offB : onB) - depthHalf);
     }
   });
+
+  // Interior crossings:
+  // 1) Cross-lap joints (`!mA && !mB`): two non-parallel sheets crossing through
+  //    each other's interiors receive complementary half-length open slots so they
+  //    slide together flush (egg-crate grids, X-stands, slotted partitions).
+  // 2) T-joints (`Boolean(mA) !== Boolean(mB)`): a divider or shelf whose boundary
+  //    edge butts into the middle of another panel receives tenons along its edge
+  //    and matching interior mortises in the crossed panel.
+  const edgeButtPairs = new Set(joints.map((j) => `${Math.min(j.ia, j.ib)}:${Math.max(j.ia, j.ib)}`));
+  for (let ia = 0; ia < panels.length; ia++) {
+    for (let ib = ia + 1; ib < panels.length; ib++) {
+      if (edgeButtPairs.has(`${ia}:${ib}`)) continue;
+      const A = panels[ia];
+      const B = panels[ib];
+      const nA = v3(A.normal3D).clone().normalize();
+      const nB = v3(B.normal3D).clone().normalize();
+      if (Math.abs(nA.dot(nB)) > JOINT_PARALLEL_COS) continue;
+
+      const dir = new THREE.Vector3().crossVectors(nA, nB);
+      const dir2 = dir.lengthSq();
+      if (dir2 < 1e-9) continue;
+      const dA = nA.dot(v3(A.origin3D));
+      const dB = nB.dot(v3(B.origin3D));
+      const p0 = new THREE.Vector3()
+        .addScaledVector(nB, dA)
+        .addScaledVector(nA, -dB)
+        .cross(dir)
+        .divideScalar(dir2);
+      const dirN = dir.clone().normalize();
+      const invSin = 1 / Math.sqrt(dir2);
+
+      const tA = A.thickness * 1000;
+      const tB = B.thickness * 1000;
+      const stockA = thicknessOf(A);
+      const stockB = thicknessOf(B);
+      const modelT = Math.max(tA, tB);
+      const tol = (modelT / 2) * invSin + modelT + 0.6;
+      const mA = matchPanelEdgeToLine(A, p0, dirN, tol);
+      const mB = matchPanelEdgeToLine(B, p0, dirN, tol);
+      if (mA && mB) continue;
+
+      if (!mA && !mB) {
+        const lineA = lineIntervalInPanel2D(A, p0, dirN);
+        const lineB = lineIntervalInPanel2D(B, p0, dirN);
+        if (!lineA || !lineB) continue;
+
+        const halfNeedA = (stockB * invSin) / 2 + 1.5;
+        const halfNeedB = (stockA * invSin) / 2 + 1.5;
+        const slotWidthOnA = stockB * invSin - kerfMm + clearanceMm;
+        const slotWidthOnB = stockA * invSin - kerfMm + clearanceMm;
+        if (slotWidthOnA < MIN_FEATURE_MM || slotWidthOnB < MIN_FEATURE_MM) continue;
+
+        for (const [sA0, sA1] of lineA.intervals) {
+          for (const [sB0, sB1] of lineB.intervals) {
+            const lo = Math.max(sA0, sB0);
+            const hi = Math.min(sA1, sB1);
+            const span = hi - lo;
+            if (span < Math.max(6, 2 * Math.max(stockA, stockB))) continue;
+
+            const samples = [lo + 0.15 * span, 0.5 * (lo + hi), hi - 0.15 * span];
+            const clearBoth = samples.every((s) => {
+              const cA = lineA.perpClearanceAt(s);
+              const cB = lineB.perpClearanceAt(s);
+              return (
+                cA !== null &&
+                cB !== null &&
+                cA.pos >= halfNeedA &&
+                cA.neg >= halfNeedA &&
+                cB.pos >= halfNeedB &&
+                cB.neg >= halfNeedB
+              );
+            });
+            if (!clearBoth) continue;
+
+            const sMid = 0.5 * (lo + hi);
+            const endExtra = -depthHalf + clearanceMm / 2;
+            const aOpensLo = (lo - sA0) + (sB1 - hi) <= (sA1 - hi) + (lo - sB0);
+            const [openA0, openA1] = aOpensLo
+              ? [sA0 - 1, sMid + endExtra]
+              : [sMid - endExtra, sA1 + 1];
+            const [openB0, openB1] = aOpensLo
+              ? [sMid - endExtra, sB1 + 1]
+              : [sB0 - 1, sMid + endExtra];
+
+            work[ia].crossLaps.push(rectAlongLine2D(lineA.q, lineA.w, openA0, openA1, slotWidthOnA));
+            work[ib].crossLaps.push(rectAlongLine2D(lineB.q, lineB.w, openB0, openB1, slotWidthOnB));
+          }
+        }
+        continue;
+      }
+
+      // T-joint: one panel's boundary edge meets the interior of the other panel.
+      const maleIdx = mA ? ia : ib;
+      const femaleIdx = mA ? ib : ia;
+      const mMale = (mA ?? mB)!;
+      const male = panels[maleIdx];
+      const female = panels[femaleIdx];
+      const tMale = male.thickness * 1000;
+      const tFemale = female.thickness * 1000;
+      const stockMale = thicknessOf(male);
+      const stockFemale = thicknessOf(female);
+
+      const dNear = mMale.dEdge + (tFemale / 2) * invSin;
+      const dFar = mMale.dEdge - (tFemale / 2) * invSin;
+      if (dNear < -0.02 * Math.min(tMale, tFemale)) continue;
+      if (dFar > 0.5 * tFemale * invSin + 0.2) continue;
+
+      const fLine = lineIntervalInPanel2D(female, p0, dirN);
+      if (!fLine) continue;
+      const halfNeedF = (stockMale * invSin) / 2 + 1.5;
+      const mortiseWidth = stockMale * invSin - kerfMm + clearanceMm;
+      if (mortiseWidth < MIN_FEATURE_MM) continue;
+
+      for (const [sF0, sF1] of fLine.intervals) {
+        const edgeInset = Math.max(stockMale, stockFemale);
+        const lo = Math.max(mMale.s0, sF0 + edgeInset);
+        const hi = Math.min(mMale.s1, sF1 - edgeInset);
+        const span = hi - lo;
+        if (span < Math.max(6, 2 * Math.max(tMale, tFemale))) continue;
+
+        const samples = [lo + 0.15 * span, 0.5 * (lo + hi), hi - 0.15 * span];
+        const clearF = samples.every((s) => {
+          const cF = fLine.perpClearanceAt(s);
+          return cF !== null && cF.pos >= halfNeedF && cF.neg >= halfNeedF;
+        });
+        if (!clearF) continue;
+
+        let cells = Math.max(3, Math.round(span / Math.max(fingerWidthMm, 1)));
+        if (cells % 2 === 0) cells += 1;
+        const step = span / cells;
+        if (step - Math.abs(widthHalf) * 2 < MIN_FEATURE_MM) continue;
+
+        const proud = overhangMm * invSin;
+        const maleOff = mMale.dEdge + (stockFemale / 2) * invSin;
+        const maleOn = mMale.dEdge - (stockFemale / 2) * invSin - proud;
+
+        if (lo > mMale.s0 + 1e-6) {
+          pushFeature(maleIdx, mMale, mMale.s0, lo + widthHalf, maleOff - depthHalf);
+        }
+        if (hi < mMale.s1 - 1e-6) {
+          pushFeature(maleIdx, mMale, hi - widthHalf, mMale.s1, maleOff - depthHalf);
+        }
+
+        for (let k = 0; k < cells; k++) {
+          const s0 = lo + k * step;
+          const s1 = lo + (k + 1) * step;
+          const maleOwns = k % 2 === 1;
+          pushFeature(
+            maleIdx,
+            mMale,
+            maleOwns ? s0 - widthHalf : s0 + widthHalf,
+            maleOwns ? s1 + widthHalf : s1 - widthHalf,
+            (maleOwns ? maleOn : maleOff) - depthHalf
+          );
+          if (maleOwns) {
+            work[femaleIdx].mortises.push(
+              rectAlongLine2D(fLine.q, fLine.w, s0 + widthHalf, s1 - widthHalf, mortiseWidth)
+            );
+          }
+        }
+      }
+    }
+  }
 
   return work;
 }
@@ -2476,10 +3751,15 @@ function applyCornerRelief(
     i: number;
     /** The bit centre's travel, start and end, widened by `slack`. */
     travel: Point2D[];
+    /** Full convex sweep polygon of the relief cut. */
+    sweep: Point2D[];
     /** Where the bit centre stops, the deepest into the material it goes. */
     end: Point2D;
     qA: Point2D;     // crossing on the outgoing edge
     qB: Point2D;     // crossing on the incoming edge
+    xAT: number;
+    xBT: number;
+    aLen: number;
     /** The sweep's outline from qB to qA through the material, both excluded. */
     chain: Point2D[];
   }
@@ -2603,30 +3883,105 @@ function applyCornerRelief(
     };
     const chain = inMaterial(fwd) ? fwd : back;
 
-    candidates.push({ i, travel, end, qA, qB, chain });
+    candidates.push({ i, travel, sweep, end, qA, qB, xAT: xA.t, xBT: xB.t, aLen, chain });
   }
 
   // A relief is only usable if it stays clear of the rest of the outline. Two
   // of them can also collide with each other without either touching a far
-  // edge — a mortise shallower than the bit puts one at each end of its short
-  // wall, and the two bites merge into a figure of eight. Both checks have to
-  // run, and a rejected corner is a corner this bit cannot cut.
+  // edge — except at the two concave corners of the *same* slot/mortise end
+  // wall, where the bit centres overlap inside the slot channel that is already
+  // being milled out (`slotWidth > bitDiameter`).
   const travelDist = (t: Point2D[], a: Point2D, b: Point2D) =>
     Math.min(...t.map((q, k) => segmentSegmentDist(q, t[(k + 1) % t.length], a, b)));
+  const polylinesCross = (c1: Point2D[], c2: Point2D[]): boolean => {
+    for (let a = 0; a + 1 < c1.length; a++) {
+      for (let b = 0; b + 1 < c2.length; b++) {
+        if (segmentSegmentDist(c1[a], c1[a + 1], c2[b], c2[b + 1]) <= 1e-5) return true;
+      }
+    }
+    return false;
+  };
+  const spliceChains = (c1: Point2D[], c2: Point2D[]): Point2D[] | null => {
+    const hits: { posA: number; posB: number; a: number; b: number; pt: Point2D }[] = [];
+    for (let a = 0; a + 1 < c1.length; a++) {
+      const p1 = c1[a], p2 = c1[a + 1];
+      const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+      for (let b = 0; b + 1 < c2.length; b++) {
+        const q1 = c2[b], q2 = c2[b + 1];
+        const d2x = q2.x - q1.x, d2y = q2.y - q1.y;
+        const den = d1x * d2y - d1y * d2x;
+        if (Math.abs(den) < 1e-12) continue;
+        const dx = q1.x - p1.x, dy = q1.y - p1.y;
+        const ta = (dx * d2y - dy * d2x) / den;
+        const tb = (dx * d1y - dy * d1x) / den;
+        if (ta >= -1e-6 && ta <= 1 + 1e-6 && tb >= -1e-6 && tb <= 1 + 1e-6) {
+          const tcA = Math.max(0, Math.min(1, ta));
+          const tcB = Math.max(0, Math.min(1, tb));
+          hits.push({
+            posA: a + tcA,
+            posB: b + tcB,
+            a,
+            b,
+            pt: { x: p1.x + d1x * tcA, y: p1.y + d1y * tcA },
+          });
+        }
+      }
+    }
+    if (hits.length === 0) return null;
+    hits.sort((u, v) => u.posA - v.posA);
+    const first = hits[0];
+    let last = first;
+    for (const h of hits) {
+      if (h.posB > last.posB) last = h;
+    }
+    const merged: Point2D[] = c1.slice(0, first.a + 1);
+    const pushDedup = (pt: Point2D) => {
+      const prev = merged[merged.length - 1];
+      if (!prev || Math.hypot(pt.x - prev.x, pt.y - prev.y) > 1e-6) merged.push(pt);
+    };
+    pushDedup(first.pt);
+    pushDedup(last.pt);
+    for (let k = last.b + 1; k < c2.length; k++) pushDedup(c2[k]);
+    return merged;
+  };
+
   const accepted: Relief[] = [];
   for (const r of candidates) {
     let clear = true;
+    const rChain = [r.qB, ...r.chain, r.qA];
 
+    const rMaxReach = radiusMm / Math.cos(Math.PI / RELIEF_ARC_STEPS) + 0.05;
     for (let e = 0; e < n && clear; e++) {
       // The corner's own two edges are what the sweep is meant to cross.
       if (e === r.i || e === (r.i - 1 + n) % n) continue;
-      if (travelDist(r.travel, loop[e], loop[(e + 1) % n]) < radiusMm - 1e-6) clear = false;
+      const td = travelDist(r.travel, loop[e], loop[(e + 1) % n]);
+      if (td < radiusMm - 1e-6) {
+        clear = false;
+        break;
+      }
+      if (td <= rMaxReach) {
+        for (let k = 0; k + 1 < rChain.length; k++) {
+          if (segmentSegmentDist(rChain[k], rChain[k + 1], loop[e], loop[(e + 1) % n]) <= 1e-5) {
+            clear = false;
+            break;
+          }
+        }
+      }
     }
 
-    // Only the bites into the material can collide: two sweeps overlapping
-    // in the void the bit is already clearing cost nothing.
-    for (const o of accepted) {
-      if (Math.hypot(r.end.x - o.end.x, r.end.y - o.end.y) < radiusMm * 2 - 1e-6) { clear = false; break; }
+    if (clear) {
+      for (const o of accepted) {
+        const sameSlotEnd =
+          ((o.i + 1) % n === r.i && o.aLen >= radiusMm * 2 - 1e-6) ||
+          ((r.i + 1) % n === o.i && r.aLen >= radiusMm * 2 - 1e-6);
+        if (!sameSlotEnd) {
+          const oChain = [o.qB, ...o.chain, o.qA];
+          if (Math.hypot(r.end.x - o.end.x, r.end.y - o.end.y) < radiusMm * 2 - 1e-6 || polylinesCross(rChain, oChain)) {
+            clear = false;
+            break;
+          }
+        }
+      }
     }
 
     if (clear) accepted.push(r);
@@ -2636,12 +3991,43 @@ function applyCornerRelief(
   if (accepted.length === 0) return { loop, skipped };
 
   const byIndex = new Map(accepted.map(r => [r.i, r]));
-  const out: Point2D[] = [];
-
+  let startIdx = 0;
   for (let i = 0; i < n; i++) {
-    const r = byIndex.get(i);
-    if (!r) { out.push(loop[i]); continue; }
-    out.push(r.qB, ...r.chain, r.qA);
+    if (!byIndex.has(i)) {
+      startIdx = i;
+      break;
+    }
+  }
+
+  const out: Point2D[] = [];
+  for (let step = 0; step < n; step++) {
+    const idx = (startIdx + step) % n;
+    let curR = byIndex.get(idx);
+    if (!curR) {
+      out.push(loop[idx]);
+      continue;
+    }
+    let curChain: Point2D[] = [curR.qB, ...curR.chain, curR.qA];
+    while (step + 1 < n) {
+      const nxtIdx = (startIdx + step + 1) % n;
+      const nxtR = byIndex.get(nxtIdx);
+      if (!nxtR) break;
+      const nxtChain = [nxtR.qB, ...nxtR.chain, nxtR.qA];
+      const spliced = spliceChains(curChain, nxtChain);
+      if (spliced) {
+        curChain = spliced;
+        curR = nxtR;
+        step++;
+      } else if (curR.xAT + nxtR.xBT >= curR.aLen - 1e-5) {
+        const mid = { x: 0.5 * (curR.qA.x + nxtR.qB.x), y: 0.5 * (curR.qA.y + nxtR.qB.y) };
+        curChain = [...curChain.slice(0, -1), mid, ...nxtChain.slice(1)];
+        curR = nxtR;
+        step++;
+      } else {
+        break;
+      }
+    }
+    out.push(...curChain);
   }
 
   return { loop: out, skipped };
@@ -2751,10 +4137,24 @@ function applyJointsToPanels(
   const unjointed: string[] = [];
   for (let i = 0; i < panels.length; i++) {
     const panel = panels[i];
-    if (work[i].features.length === 0 && work[i].mortises.length === 0) {
+    if (
+      work[i].features.length === 0 &&
+      work[i].mortises.length === 0 &&
+      work[i].crossLaps.length === 0 &&
+      !panel.splitFrom
+    ) {
       unjointed.push(panel.name);
     }
     panel.outerPolygon2D = applyEdgeFeatures(panel.outerPolygon2D, work[i].features, options.kerf * 1000);
+    if (work[i].crossLaps.length > 0) {
+      const cut = subtractCutoutsFromPanel2D(
+        panel.outerPolygon2D,
+        panel.innerCutouts2D,
+        work[i].crossLaps.map((rect) => [ensureCCW(rect)])
+      );
+      panel.outerPolygon2D = cut.outer;
+      panel.innerCutouts2D = cut.holes;
+    }
     for (const mortise of work[i].mortises) {
       panel.innerCutouts2D.push(mortise);
     }
@@ -2814,6 +4214,11 @@ function clonePanels(panels: LaserPanel[]): LaserPanel[] {
     vAxis3D: { ...p.vAxis3D },
     outerPolygon2D: p.outerPolygon2D.map(pt => ({ ...pt })),
     innerCutouts2D: p.innerCutouts2D.map(loop => loop.map(pt => ({ ...pt }))),
+    blindPockets2D: p.blindPockets2D?.map(bp => ({
+      ...bp,
+      outer: bp.outer.map(pt => ({ ...pt })),
+      holes: bp.holes?.map(h => h.map(pt => ({ ...pt }))),
+    })),
     engrave2D: p.engrave2D?.map(line => line.map(pt => ({ ...pt }))),
     edges3D: p.edges3D.map(e => ({ ...e, p1: { ...e.p1 }, p2: { ...e.p2 } })),
   }));
@@ -2834,6 +4239,19 @@ function scalePanels(panels: LaserPanel[], s: number): void {
       for (const pt of loop) {
         pt.x *= s;
         pt.y *= s;
+      }
+    }
+    for (const bp of panel.blindPockets2D ?? []) {
+      bp.depthMm *= s;
+      for (const pt of bp.outer) {
+        pt.x *= s;
+        pt.y *= s;
+      }
+      for (const h of bp.holes ?? []) {
+        for (const pt of h) {
+          pt.x *= s;
+          pt.y *= s;
+        }
       }
     }
     for (const edge of panel.edges3D) {
@@ -2867,11 +4285,23 @@ function normalizePanelBounds(panels: LaserPanel[]): void {
       pt.x -= minX;
       pt.y -= minY;
     }
-    // The engrave lines move with the panel but never size it: they lie on it.
+    // Engrave lines and blind pockets move with the panel but never size it.
     for (const loop of [...panel.innerCutouts2D, ...(panel.engrave2D ?? [])]) {
       for (const pt of loop) {
         pt.x -= minX;
         pt.y -= minY;
+      }
+    }
+    for (const bp of panel.blindPockets2D ?? []) {
+      for (const pt of bp.outer) {
+        pt.x -= minX;
+        pt.y -= minY;
+      }
+      for (const h of bp.holes ?? []) {
+        for (const pt of h) {
+          pt.x -= minX;
+          pt.y -= minY;
+        }
       }
     }
   }
@@ -2902,6 +4332,10 @@ function rotatePanel90(panel: LaserPanel): void {
   };
   panel.outerPolygon2D.forEach(turn);
   for (const cutout of panel.innerCutouts2D) cutout.forEach(turn);
+  for (const bp of panel.blindPockets2D ?? []) {
+    bp.outer.forEach(turn);
+    for (const hole of bp.holes ?? []) hole.forEach(turn);
+  }
   for (const line of panel.engrave2D ?? []) line.forEach(turn);
   const w = panel.width2D || 0;
   panel.width2D = h;
@@ -3110,7 +4544,6 @@ export function exportLaserCutSvg(
    * mortises widen an outline, and none of that shrinks with S. Sizing the sheet
    * off the raw faces is what let a "fits in 1 sheet" answer spill onto 2.
    */
-  const splitNotes: string[] = [];
   const buildAtScale = (s: number) => {
     let working = clonePanels(panels);
     if (Math.abs(s - 1.0) > 1e-4) scalePanels(working, s);
@@ -3119,15 +4552,23 @@ export function exportLaserCutSvg(
      * outline, and cutting a ring into four *after* its edges had been profiled
      * would slice through whatever the joint engine had put there.
      */
+    const localSplitNotes: string[] = [];
     if (options.splitOversized) {
-      const divided = splitPanelsToFit(working, stock, thicknessOf, marginMm, options.kerf * 1000);
+      const divided = splitPanelsToFit(
+        working,
+        stock,
+        thicknessOf,
+        marginMm,
+        options.kerf * 1000,
+        options.jointClearance * 1000
+      );
       working = divided.panels;
-      if (Math.abs(s - 1.0) <= 1e-4) splitNotes.push(...divided.notes);
+      localSplitNotes.push(...divided.notes);
     }
     const warnings = applyJointsToPanels(working, options, thicknessOf, singleThicknessMm);
     normalizePanelBounds(working);
     const packed = packPanels(working, stock, marginMm, thicknessOf, (options.cutOutset ?? 0) * 1000);
-    return { panels: working, warnings: [...assignment.warnings, ...splitNotes, ...warnings], ...packed };
+    return { panels: working, warnings: [...assignment.warnings, ...localSplitNotes, ...warnings], ...packed };
   };
 
   const fits = (b: { sheetCount: number; oversized: string[]; unplaced: string[] }) =>
@@ -3204,6 +4645,21 @@ export function exportLaserCutSvg(
       `${faceDown.join(', ')}: the pattern is on the face that would lie on the bed, so ` +
         `${faceDown.length === 1 ? 'that panel is' : 'those panels are'} laid out face down, pattern up. ` +
         `It goes into the assembly as cut, no turning over.`
+    );
+  }
+  const pocketUnderside = panels.filter((p) => p.blindPocketsUnderside).map((p) => p.name);
+  if (pocketUnderside.length) {
+    warnings.push(
+      `${pocketUnderside.join(', ')}: blind pockets sit on both faces; only the upper-face pockets are emitted in a single-sided setup.`
+    );
+  }
+  const pocketFaceDown = panels
+    .filter((p) => p.cutFaceDown && p.blindPockets2D?.length && !p.engrave2D?.length)
+    .map((p) => p.name);
+  if (pocketFaceDown.length) {
+    warnings.push(
+      `${pocketFaceDown.join(', ')}: blind pockets sit on the underside face in the model, so ` +
+        `${pocketFaceDown.length === 1 ? 'that panel is' : 'those panels are'} laid out pocket-side up for machining.`
     );
   }
 
@@ -3292,39 +4748,62 @@ export function exportLaserCutSvg(
     }
   }
 
+  // Flip each panel's local Y into top-down SVG coordinates while keeping its
+  // nested placement `(pos.x, pos.y)` aligned with `exportContourSliceSvg` and
+  // preserving part chirality relative to CNC/laser G-code (`pos.y + pt.y`).
+  const sheetTopOf = (panel: LaserPanel): number =>
+    sheetTop[panel.sheetIndex || 0] ?? 0;
+  const drawPoint = (panel: LaserPanel, pt: Point2D) => {
+    const pos = panel.placedPos2D || { x: 0, y: 0 };
+    const xSvg = pos.x + pt.x;
+    const ySvg = sheetTopOf(panel) + pos.y + (panel.height2D || 0) - pt.y;
+    return `${xSvg.toFixed(2)} ${ySvg.toFixed(2)}`;
+  };
+
+  if (panels.some((p) => p.blindPockets2D?.some((bp) => !bp.under))) {
+    svg += `  <g id="blind-pockets" data-operation="fill" stroke="#D97706" stroke-width="0.2" fill="#D97706" fill-opacity="0.18" fill-rule="evenodd" stroke-linejoin="round" stroke-linecap="round">\n`;
+    for (const panel of panels) {
+      for (const bp of panel.blindPockets2D ?? []) {
+        if (bp.under || bp.outer.length < 3) continue;
+        let d = `M ${drawPoint(panel, bp.outer[0])}`;
+        for (let i = 1; i < bp.outer.length; i++) d += ` L ${drawPoint(panel, bp.outer[i])}`;
+        d += ` Z`;
+        for (const hole of bp.holes ?? []) {
+          if (hole.length < 3) continue;
+          d += ` M ${drawPoint(panel, hole[0])}`;
+          for (let i = 1; i < hole.length; i++) d += ` L ${drawPoint(panel, hole[i])}`;
+          d += ` Z`;
+        }
+        svg += `    <path d="${d}" data-depth-mm="${bp.depthMm.toFixed(2)}" />\n`;
+      }
+    }
+    svg += `  </g>\n\n`;
+  }
+
   svg += `  <g id="cut-paths" data-operation="cut" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
 
-  // Panels are packed in the coordinates of their own sheet. The drawing stacks
-  // the sheets one below the next, so that is where the offset goes back in.
-  const drawPos = (panel: LaserPanel): Point2D => {
-    const pos = panel.placedPos2D || { x: 0, y: 0 };
-    return { x: pos.x, y: pos.y + (sheetTop[panel.sheetIndex || 0] ?? 0) };
-  };
-  // Panel y runs up and SVG y runs down, so each panel turns over in its own box.
-  const drawPoint = (panel: LaserPanel, pos: Point2D, pt: Point2D) =>
-    `${(pos.x + pt.x).toFixed(2)} ${(pos.y + (panel.height2D || 0) - pt.y).toFixed(2)}`;
-
   for (const panel of panels) {
-    const pos = drawPos(panel);
-
+    const subpaths: string[] = [];
     if (panel.outerPolygon2D.length > 0) {
-      let pathData = `M ${drawPoint(panel, pos, panel.outerPolygon2D[0])}`;
+      let outerD = `M ${drawPoint(panel, panel.outerPolygon2D[0])}`;
       for (let i = 1; i < panel.outerPolygon2D.length; i++) {
-        pathData += ` L ${drawPoint(panel, pos, panel.outerPolygon2D[i])}`;
+        outerD += ` L ${drawPoint(panel, panel.outerPolygon2D[i])}`;
       }
-      pathData += ` Z`;
-      svg += `    <path d="${pathData}" />\n`;
+      outerD += ` Z`;
+      subpaths.push(outerD);
     }
-
     for (const cutout of panel.innerCutouts2D) {
       if (cutout.length === 0) continue;
-      let cData = `M ${drawPoint(panel, pos, cutout[0])}`;
+      let cutoutD = `M ${drawPoint(panel, cutout[0])}`;
       for (let i = 1; i < cutout.length; i++) {
-        cData += ` L ${drawPoint(panel, pos, cutout[i])}`;
+        cutoutD += ` L ${drawPoint(panel, cutout[i])}`;
       }
-      cData += ` Z`;
-      svg += `    <path d="${cData}" />\n`;
+      cutoutD += ` Z`;
+      subpaths.push(cutoutD);
     }
+    if (subpaths.length === 0) continue;
+    const fillRule = subpaths.length > 1 ? ` fill-rule="evenodd"` : '';
+    svg += `    <path d="${subpaths.join(' ')}"${fillRule} data-panel-id="${escapeXml(panel.id)}" data-panel="${escapeXml(panel.name)}" />\n`;
   }
   svg += `  </g>\n\n`;
 
@@ -3334,11 +4813,10 @@ export function exportLaserCutSvg(
   if (panels.some((p) => p.engrave2D?.length)) {
     svg += `  <g id="engrave-patterns" data-operation="etch" stroke="#0000FF" stroke-width="0.1" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
     for (const panel of panels) {
-      const pos = drawPos(panel);
       for (const line of panel.engrave2D ?? []) {
         if (line.length < 2) continue;
-        let d = `M ${drawPoint(panel, pos, line[0])}`;
-        for (let i = 1; i < line.length; i++) d += ` L ${drawPoint(panel, pos, line[i])}`;
+        let d = `M ${drawPoint(panel, line[0])}`;
+        for (let i = 1; i < line.length; i++) d += ` L ${drawPoint(panel, line[i])}`;
         svg += `    <path d="${d}" />\n`;
       }
     }
@@ -3348,9 +4826,9 @@ export function exportLaserCutSvg(
   if (options.includeLabels) {
     svg += `  <g id="engrave-labels" data-operation="etch" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
     for (const panel of panels) {
-      const pos = drawPos(panel);
+      const pos = panel.placedPos2D || { x: 0, y: 0 };
       const cx = pos.x + (panel.width2D || 50) / 2;
-      const cy = pos.y + (panel.height2D || 50) / 2;
+      const cy = sheetTopOf(panel) + pos.y + (panel.height2D || 50) / 2;
       svg += `    <text x="${cx.toFixed(2)}" y="${cy.toFixed(2)}">${escapeXml(panel.name)}</text>\n`;
     }
     svg += `  </g>\n`;
