@@ -5,12 +5,8 @@
 
 import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
-<<<<<<< HEAD
 import type { HydroBodyModel, WaterBasinWorld } from '../utils/hydrostatics';
-import type { ClothMaterialName } from '../types/cloth';
-=======
 import type { ClothMaterialName, ClothPatternPrint } from '../types/cloth';
->>>>>>> Fabrics: plain cloth sheets, garments on no form, and a form deleted from under its garment
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';

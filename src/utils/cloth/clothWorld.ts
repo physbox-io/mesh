@@ -78,6 +78,9 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
   // form added without geoms (built in a worker) gets them a moment later with
   // the same measurements, and cloth carried over from the world without them
   // had fallen through where the form now is.
+  // Its own geoms only: the convex pieces it is broken into for contact come
+  // a moment after it loads, and counted, every garment on it was modelled and
+  // settled over again, a minute before the scene would run.
   const formNode = (n: SceneNode) => {
     const fit = n.cloth?.garment?.fitTo;
     let found: SceneNode | undefined;
@@ -91,7 +94,7 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
     const spec = draft ? { ...node.cloth, garment: { ...draft, fitTo: undefined, form: undefined } } : node.cloth;
     const key = JSON.stringify([node.name || node.id, spec, Array.from(world.elements), cut]);
     keys.push(key);
-    formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.length ?? 0]) : null);
+    formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.filter((g) => g.csgDerived !== 'collider' && !g.colliderOf).length ?? 0]) : null);
     let m = modelCache.get(key);
     if (!m) {
       m = clothModel(node, world, scene.nodes);

@@ -28,6 +28,7 @@ import type {
 } from '../workers/physicsWorkerProtocol';
 import { noteScriptStatus } from './scriptStatus';
 import { noteWorkerFrame } from './modelProvenance';
+import { fabricBuildEnded, fabricBuildStarted, sceneHasCloth } from './fabricBuildStore';
 import type { CoSimChannel } from '../utils/coSimLink';
 import { noteWorkerStopped } from '../utils/staleBuild';
 import { wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
@@ -481,7 +482,10 @@ export class PhysicsWorkerClient {
     // file. An XML compiled without the ledger names no files, and `take` then
     // hands back nothing to send.
     const { add, drop } = this.meshFiles.take();
-    return new Promise((resolve, reject) => {
+    // Cloth is modelled and settled in the build: the viewport says so meanwhile.
+    const fabric = sceneHasCloth(sceneGraph);
+    if (fabric) fabricBuildStarted();
+    return new Promise<BuiltResult>((resolve, reject) => {
       this.noteRequest();
       this.pendingBuilds.set(id, { resolve, reject });
       this.worker.postMessage(
@@ -491,7 +495,7 @@ export class PhysicsWorkerClient {
       if (this.soundEnabled) {
         this.worker.postMessage({ type: 'SET_SOUND', enabled: true });
       }
-    });
+    }).finally(() => { if (fabric) fabricBuildEnded(); });
   }
 
   setPlaying(isPlaying: boolean) { this.worker.postMessage({ type: 'SET_PLAYING', isPlaying }); }
