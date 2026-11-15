@@ -1423,6 +1423,9 @@ export function generateContourSliceGcode(
       }
     }
 
+    const rawLoops = loops.filter((l) => l.length >= 3);
+    if (rawLoops.length === 0) continue;
+
     lines.push(``);
     lines.push(`; ==================================================`);
     lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${layers.length} on sheet ${sheet + 1} (Z = ${f(layer.z * 1000)}mm)`);
@@ -1430,30 +1433,103 @@ export function generateContourSliceGcode(
 
     // On a router the tool has to stand off each contour by its own radius, and
     // which side to stand off on depends on whether the contour bounds material
-    // or a void — which is what the nesting says. A layer's holes are genuine
-    // holes in the slice, so the tool goes inside them and outside everything
-    // else.
-    let cutPaths: Point2D[][] = loops.filter((l) => l.length >= 3);
+    // or a void — which is what the nesting says. Circular dowel / bolt holes
+    // whose diameter matches or slightly exceeds the bit are bored analytically
+    // (peck plunge when holeDia ≈ bitDia, true circle orbit when holeDia > bitDia)
+    // so polygonal apothem shrinkage never drops valid alignment holes.
+    const rawDepths = nestingDepths(rawLoops);
+    const plungeBores: { cx: number; cy: number; depth: number }[] = [];
+    let cutPaths: Point2D[][];
     let depths: number[];
+
     if (radius > 0) {
-      const comp = offsetNestedLoops(cutPaths, radius);
+      const bitDia = options.bitDiameterMm;
+      const polyLoops: Point2D[][] = [];
+      const circleBores: { loop: Point2D[]; depth: number }[] = [];
+
+      for (let i = 0; i < rawLoops.length; i++) {
+        const d = rawDepths[i];
+        const isLeafHole =
+          d % 2 === 1 &&
+          !rawLoops.some((other, j) => rawDepths[j] === d + 1 && contourPointInPolygon(other[0], rawLoops[i]));
+        const circle = isLeafHole ? contourDetectCircularHole(rawLoops[i]) : null;
+
+        if (circle && circle.radiusMm <= radius * 3) {
+          const holeDia = circle.radiusMm * 2;
+          if (holeDia < bitDia - 1e-3) {
+            warnings.push(
+              `Layer ${lIdx + 1}: circular hole ⌀${f(holeDia)}mm is smaller than the ` +
+                `${f(bitDia)}mm cutter and has been left out of the program ` +
+                `(fit a ≤${f(holeDia)}mm bit or set Dowel ⌀ ≥ ${f(bitDia)}mm).`
+            );
+          } else if (circle.radiusMm - radius <= 0.005) {
+            plungeBores.push({ cx: circle.cx, cy: circle.cy, depth: d });
+          } else {
+            circleBores.push({
+              loop: contourClimbCircle(circle.cx, circle.cy, circle.radiusMm - radius, 32),
+              depth: d,
+            });
+          }
+        } else {
+          polyLoops.push(rawLoops[i]);
+        }
+      }
+
+      const comp = offsetNestedLoops(polyLoops, radius);
       for (const i of comp.dropped) {
         warnings.push(
-          `Layer ${lIdx + 1}: a contour ${f(featureWidth(cutPaths[i]))}mm across is smaller than ` +
+          `Layer ${lIdx + 1}: a contour ${f(featureWidth(polyLoops[i]))}mm across is smaller than ` +
             `the ${f(options.bitDiameterMm)}mm cutter and has been left out of the program.`
         );
       }
-      cutPaths = comp.paths;
-      depths = comp.depths;
+      cutPaths = [...comp.paths, ...circleBores.map((c) => c.loop)];
+      depths = [...comp.depths, ...circleBores.map((c) => c.depth)];
     } else {
-      depths = nestingDepths(cutPaths);
+      cutPaths = rawLoops;
+      depths = rawDepths;
     }
-    const offset: Point2D = layer.placedPos2D && layer.modelOffset2D
-      ? {
-          x: layer.placedPos2D.x - layer.modelOffset2D.x,
-          y: layer.placedPos2D.y - (layer.modelOffset2D.y - (layer.height2D ?? 0)),
-        }
+
+    const rawBounds = contourLoopsBounds(rawLoops);
+    const lminX = layer.modelOffset2D ? layer.modelOffset2D.x : rawBounds.minX;
+    const lminY =
+      layer.modelOffset2D && layer.height2D !== undefined
+        ? layer.modelOffset2D.y - layer.height2D
+        : rawBounds.minY;
+    const offset: Point2D = layer.placedPos2D
+      ? { x: layer.placedPos2D.x - lminX, y: layer.placedPos2D.y - lminY }
       : { x: 0, y: 0 };
+
+    // Guard against negative X / Y machine coordinates when cutter compensation
+    // or tight margins push a placed (or first-quadrant) layer past work origin.
+    if (layer.placedPos2D || (rawBounds.minX >= -1e-6 && rawBounds.minY >= -1e-6)) {
+      let reachMinX = Infinity;
+      let reachMinY = Infinity;
+      for (const path of cutPaths) {
+        for (const pt of path) {
+          reachMinX = Math.min(reachMinX, offset.x + pt.x);
+          reachMinY = Math.min(reachMinY, offset.y + pt.y);
+        }
+      }
+      for (const b of plungeBores) {
+        reachMinX = Math.min(reachMinX, offset.x + b.cx);
+        reachMinY = Math.min(reachMinY, offset.y + b.cy);
+      }
+      if (isFinite(reachMinX) && (reachMinX < 0 || reachMinY < 0)) {
+        const shiftX = reachMinX < 0 ? -reachMinX : 0;
+        const shiftY = reachMinY < 0 ? -reachMinY : 0;
+        offset.x += shiftX;
+        offset.y += shiftY;
+        if (shiftX > 1e-3 || shiftY > 1e-3) {
+          warnings.push(
+            `Layer ${lIdx + 1}: shifted toolpath by (${f(shiftX)}, ${f(shiftY)})mm so all moves stay at X >= 0, Y >= 0.`
+          );
+        }
+      }
+    } else if (rawBounds.minX < -1e-6 || rawBounds.minY < -1e-6) {
+      warnings.push(
+        `Layer ${lIdx + 1}: unplaced contour extends into negative coordinates (X${f(rawBounds.minX)}, Y${f(rawBounds.minY)}); zero work origin at model centre.`
+      );
+    }
 
     /*
      * The top layer of a stack that is not a whole number of sheets finishes
@@ -1463,9 +1539,13 @@ export function generateContourSliceGcode(
      * A laser cannot, and the slice's warning says to use thinner stock.
      */
     const sheetMm = Math.abs(options.cutDepthZ);
-    const removal = options.machineMode === 'cnc' && layer.facedToMm !== undefined
-      ? sheetMm - layer.facedToMm
-      : 0;
+    const removal =
+      options.machineMode === 'cnc' &&
+      layer.facedToMm !== undefined &&
+      layer.facedToMm > 0 &&
+      layer.facedToMm < sheetMm
+        ? sheetMm - layer.facedToMm
+        : 0;
     if (removal > 0.1) {
       operations.push({
         id: `layer_${lIdx + 1}_facing`,
@@ -1481,50 +1561,89 @@ export function generateContourSliceGcode(
     }
     const fromDepthMm = removal > 0.1 ? removal : 0;
 
-    // Innermost first: a hole, dowel hole or island is cut while the layer is
-    // still held by the sheet, and the outline that frees it goes last. Within
-    // one depth, nearest first, each loop started near where the head is.
-    const levels = [...new Set(depths)].sort((a, b) => b - a);
-    const ordered: Point2D[][] = [];
-    const cutDepths: number[] = [];
-    for (const level of levels) {
-      const group = cutPaths.filter((_, i) => depths[i] === level);
-      for (const i of nearestFirst(group, head, offset)) {
-        const loop = startNear(group[i], head, offset);
-        head = { x: offset.x + loop[0].x, y: offset.y + loop[0].y };
-        ordered.push(loop);
-        cutDepths.push(level);
-      }
+    if (options.machineMode === 'cnc' && !options.attachmentsEnabled && depths.some((d) => d >= 2)) {
+      warnings.push(
+        `Layer ${lIdx + 1}: nested concentric islands cut on a CNC router without Attachments enabled may break loose into the cutter.`
+      );
     }
-    cutPaths = ordered;
 
-    for (let cIdx = 0; cIdx < cutPaths.length; cIdx++) {
-      const contour = cutPaths[cIdx];
-      if (contour.length < 3) continue;
+    // Innermost first: nested islands (depth >= 2) and inner bores are cut and
+    // tabbed while the surrounding ring is still anchored, then enclosing holes
+    // (depth = 1), and finally the outer boundary (depth = 0).
+    const levels = [...new Set([...depths, ...plungeBores.map((b) => b.depth)])].sort((a, b) => b - a);
+    let cCounter = 0;
+    let bCounter = 0;
 
-      operations.push({
-        id: `layer_${lIdx + 1}_contour_${cIdx}`,
-        name: `Layer ${lIdx + 1} Contour #${cIdx + 1}`,
-        type: 'cut',
-        sheetIndex: sheet,
-      });
+    for (const level of levels) {
+      const levelBores = plungeBores.filter((b) => b.depth === level);
+      if (levelBores.length > 0) {
+        const borePts = levelBores.map((b) => [{ x: b.cx, y: b.cy }]);
+        for (const bi of nearestFirst(borePts, head, offset)) {
+          const bore = levelBores[bi];
+          const px = offset.x + bore.cx;
+          const py = offset.y + bore.cy;
+          head = { x: px, y: py };
+          minX = Math.min(minX, px);
+          minY = Math.min(minY, py);
+          maxX = Math.max(maxX, px);
+          maxY = Math.max(maxY, py);
 
-      for (const pt of contour) {
-        const px = offset.x + pt.x;
-        const py = offset.y + pt.y;
-        minX = Math.min(minX, px);
-        minY = Math.min(minY, py);
-        maxX = Math.max(maxX, px);
-        maxY = Math.max(maxY, py);
+          operations.push({
+            id: `layer_${lIdx + 1}_bore_${bCounter}`,
+            name: `Layer ${lIdx + 1} Pin Bore #${bCounter + 1}`,
+            type: 'cut',
+            sheetIndex: sheet,
+          });
+          bCounter++;
+
+          const drilled = contourPlungeBoreGcode(px, py, options, fromDepthMm);
+          totalCutDistanceMm += drilled.distanceMm;
+          lines.push(...drilled.lines);
+        }
       }
 
-      // Only the material's outer edges are held. Tabs in a hole would tie the
-      // slug to the part, to be broken out and pared off inside the hole, and
-      // the holes are cut before the outline, while the layer is still held.
-      const spans = cutDepths[cIdx] % 2 === 0 ? planAttachments(polygonPerimeter(contour), options) : [];
-      attachmentCount += spans.length;
-      totalCutDistanceMm += polygonPerimeter(contour) * loopPassCount(options, fromDepthMm);
-      lines.push(...generateLoopGcode(contour, offset, options, spans, fromDepthMm));
+      const groupIndices: number[] = [];
+      for (let i = 0; i < cutPaths.length; i++) {
+        if (depths[i] === level && cutPaths[i].length >= 3) groupIndices.push(i);
+      }
+      const group = groupIndices.map((i) => cutPaths[i]);
+      for (const gi of nearestFirst(group, head, offset)) {
+        const origIdx = groupIndices[gi];
+        const contour = startNear(group[gi], head, offset);
+        head = { x: offset.x + contour[0].x, y: offset.y + contour[0].y };
+
+        operations.push({
+          id: `layer_${lIdx + 1}_contour_${cCounter}`,
+          name: `Layer ${lIdx + 1} Contour #${cCounter + 1}`,
+          type: 'cut',
+          sheetIndex: sheet,
+        });
+        cCounter++;
+
+        for (const pt of contour) {
+          const px = offset.x + pt.x;
+          const py = offset.y + pt.y;
+          minX = Math.min(minX, px);
+          minY = Math.min(minY, py);
+          maxX = Math.max(maxX, px);
+          maxY = Math.max(maxY, py);
+        }
+
+        // Even-depth outlines bound solid islands and are held with tabs. Odd-depth
+        // holes are cut free *unless* they enclose an inner solid island (depth + 1),
+        // in which case the moat ring must also be tabbed to the outer wall so the
+        // waste ring + inner island cannot break free into a spinning router bit.
+        const enclosesIsland =
+          level % 2 === 1 &&
+          cutPaths.some(
+            (other, j) => depths[j] === level + 1 && other.length >= 3 && contourPointInPolygon(other[0], cutPaths[origIdx]),
+          );
+        const holdContour = level % 2 === 0 || (options.machineMode === 'cnc' && enclosesIsland);
+        const spans = holdContour ? planAttachments(polygonPerimeter(contour), options) : [];
+        attachmentCount += spans.length;
+        totalCutDistanceMm += polygonPerimeter(contour) * loopPassCount(options, fromDepthMm);
+        lines.push(...generateLoopGcode(contour, offset, options, spans, fromDepthMm));
+      }
     }
   }
 
@@ -1560,4 +1679,114 @@ export function generateContourSliceGcode(
     compensationMm: radius,
     warnings: warnings.length > 0 ? warnings : undefined,
   };
+}
+
+function contourPointInPolygon(p: Point2D, loop: Point2D[]): boolean {
+  let inside = false;
+  for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+    const a = loop[i];
+    const b = loop[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function contourLoopsBounds(loops: Point2D[][]): { minX: number; minY: number; maxX: number; maxY: number } {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const loop of loops) {
+    for (const p of loop) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+  }
+  return isFinite(minX) ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+}
+
+/** Recognises discretized circular holes (`>= 12` vertices) and returns their true circumscribed radius. */
+function contourDetectCircularHole(loop: Point2D[]): { cx: number; cy: number; radiusMm: number } | null {
+  if (loop.length < 12) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of loop) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  if (w <= 1e-6 || h <= 1e-6) return null;
+  if (Math.abs(w - h) > Math.max(0.12, Math.max(w, h) * 0.06)) return null;
+
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  let rMin = Infinity;
+  let rMax = -Infinity;
+  for (const p of loop) {
+    const r = Math.hypot(p.x - cx, p.y - cy);
+    if (r < rMin) rMin = r;
+    if (r > rMax) rMax = r;
+  }
+  if (rMax <= 1e-6 || rMax - rMin > Math.max(0.08, rMax * 0.05)) return null;
+
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i];
+    const b = loop[(i + 1) % loop.length];
+    const mr = Math.hypot((a.x + b.x) / 2 - cx, (a.y + b.y) / 2 - cy);
+    if (mr < rMax * 0.94 - 0.05) return null;
+  }
+  return { cx, cy, radiusMm: rMax };
+}
+
+/** Exact CCW tool-centre orbit for climb-milling a circular bore on a CW spindle. */
+function contourClimbCircle(cx: number, cy: number, radiusMm: number, segments: number): Point2D[] {
+  const pts: Point2D[] = [];
+  for (let k = 0; k < segments; k++) {
+    const ang = (k / segments) * Math.PI * 2;
+    pts.push({ x: cx + Math.cos(ang) * radiusMm, y: cy + Math.sin(ang) * radiusMm });
+  }
+  return pts;
+}
+
+/** Multi-peck CNC plunge bore for holes whose diameter matches the fitted end mill (`holeDia ≈ bitDia`). */
+function contourPlungeBoreGcode(
+  px: number,
+  py: number,
+  options: GcodeExportOptions,
+  fromDepthMm = 0,
+): { lines: string[]; distanceMm: number } {
+  const lines: string[] = [];
+  const totalDepth = Math.abs(options.cutDepthZ);
+  const stepdown = Math.max(0.1, Math.abs(options.zStepdown));
+  const from = Math.min(Math.max(0, fromDepthMm), totalDepth);
+  const passes = Math.max(1, Math.ceil((totalDepth - from) / stepdown - 1e-9));
+  const clearZ = Math.min(options.safeZ, 0.5);
+
+  lines.push(`G0 Z${f(options.safeZ)}`);
+  lines.push(`G0 X${f(px)} Y${f(py)} F${options.travelFeedrate}`);
+
+  let prevBottom = -from;
+  let distanceMm = 0;
+  for (let pass = 1; pass <= passes; pass++) {
+    const targetZ =
+      pass === passes
+        ? -(totalDepth + SHEET_THROUGH_CUT_MM)
+        : -Math.min(totalDepth, from + pass * stepdown);
+    lines.push(`; Bore peck ${pass}/${passes} (Z = ${f(targetZ)}mm)`);
+    if (pass > 1) {
+      lines.push(`G0 Z${f(clearZ)}`);
+      if (prevBottom < -0.5) lines.push(`G0 Z${f(prevBottom + 0.5)}`);
+    } else if (from > 0.5) {
+      lines.push(`G0 Z${f(-from + 0.5)}`);
+    }
+    lines.push(`G1 Z${f(targetZ)} F${options.plungeFeedrate}`);
+    distanceMm += Math.max(0, prevBottom - targetZ);
+    prevBottom = targetZ;
+  }
+
+  lines.push(`G0 Z${f(options.safeZ)}`);
+  return { lines, distanceMm };
 }

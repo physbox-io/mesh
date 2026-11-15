@@ -228,14 +228,23 @@ export function laserStockTransform(panels: LaserPanel[], scale: number): StockT
  */
 export function contourSheetParts(layers: ContourLayer[], thicknessMm: number): SheetPart[] {
   const seamMm = Math.min(1, thicknessMm * 0.05);
-  return layers.map((layer) => ({
-    seamMm: layer.index > 0 ? seamMm : 0,
-    loops: layer.loops,
-    origin: [0, 0, layer.index * thicknessMm],
-    u: [1, 0, 0],
-    v: [0, 1, 0],
-    zFrom: 0,
-    // The top layer as faced down to the model's top.
-    zTo: layer.facedToMm ?? thicknessMm,
-  }));
+  const parts: SheetPart[] = [];
+  let zMm = 0;
+  for (const layer of layers) {
+    const loops = (layer.nominalLoops ?? layer.loops).filter((l) => l.length >= 3);
+    if (loops.length === 0) continue;
+    const slabMm = layer.facedToMm !== undefined && layer.facedToMm > 0 ? layer.facedToMm : thicknessMm;
+    parts.push({
+      seamMm: parts.length > 0 ? seamMm : 0,
+      loops,
+      origin: [0, 0, zMm],
+      u: [1, 0, 0],
+      v: [0, 1, 0],
+      zFrom: 0,
+      // The top layer as faced down to the model's top.
+      zTo: slabMm,
+    });
+    zMm += slabMm;
+  }
+  return parts;
 }

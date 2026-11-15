@@ -90,6 +90,8 @@ export interface ContourLayer {
   z: number;
   /** Closed cut contours in millimetres. Outer loops are CCW, holes CW. */
   loops: Point2D[][];
+  /** Uncompensated closed contours in millimetres (before laser kerf offset), for true-size simulation. */
+  nominalLoops?: Point2D[][];
   /** How many separate pieces this layer falls into. */
   pieceCount: number;
   /** Cut area in mm², holes excluded. */
@@ -101,8 +103,10 @@ export interface ContourLayer {
    * model's height. Absent for a full sheet.
    */
   facedToMm?: number;
-  /** Where the engraved layer number goes, in the same frame as `loops`. */
+  /** Where the engraved layer number goes on the primary island, in the same frame as `loops`. */
   labelPos2D?: Point2D;
+  /** Engraved layer number anchors for every solid island large enough to hold one, primary island first. */
+  labelPositions2D?: Point2D[];
   /**
    * The layer's model-space corner that lands on `placedPos2D`: its minimum x,
    * and its *maximum* y, because plan-view y runs up and SVG y runs down.
@@ -259,10 +263,20 @@ export function collectSceneTriangles(scene: SceneGraph): {
         skipped.push(`${node.name} (${geom.name || geom.type})`);
         continue;
       }
-      const added = (tris.length - before) / 9;
-      for (let i = 0; i < added; i++) solidIds.push(solid);
-      solidNames.push(node.name);
-      solid++;
+      if (geom.type === 'mesh') {
+        // An imported or boolean-merged mesh often packs several overlapping
+        // shells into one geom; giving each vertex-connected shell its own
+        // solid id lets `unionSegments` dissolve internal overlap seams.
+        const { shellIds, shellCount } = splitMeshShells(tris, before, tris.length);
+        for (let i = 0; i < shellIds.length; i++) solidIds.push(solid + shellIds[i]);
+        for (let s = 0; s < shellCount; s++) solidNames.push(node.name);
+        solid += shellCount;
+      } else {
+        const added = (tris.length - before) / 9;
+        for (let i = 0; i < added; i++) solidIds.push(solid);
+        solidNames.push(node.name);
+        solid++;
+      }
     }
 
     for (const child of node.children || []) traverse(child, bodyMatrix);
@@ -299,6 +313,58 @@ export function appendSolidTriangles(geom: SceneGeom, bodyMatrix: THREE.Matrix4,
   // solid that encloses negative volume rather than losing it.
   if (signedVolume(out, before, out.length) < 0) flipWinding(out, before, out.length);
   return true;
+}
+
+/**
+ * Splits a run of triangles into 3D vertex-connected shells (welded to 1 µm) so
+ * multi-shell meshes carried inside a single `SceneGeom` get distinct solid IDs.
+ */
+function splitMeshShells(tris: number[], from: number, to: number): { shellIds: number[]; shellCount: number } {
+  const count = (to - from) / 9;
+  if (count <= 1) return { shellIds: count === 1 ? [0] : [], shellCount: count };
+
+  const parent = new Int32Array(count);
+  for (let i = 0; i < count; i++) parent[i] = i;
+  const find = (x: number): number => {
+    let r = x;
+    while (parent[r] !== r) r = parent[r];
+    while (parent[x] !== r) {
+      const next = parent[x];
+      parent[x] = r;
+      x = next;
+    }
+    return r;
+  };
+
+  const vertOwner = new Map<string, number>();
+  for (let t = 0; t < count; t++) {
+    const base = from + t * 9;
+    for (let k = 0; k < 3; k++) {
+      const key = `${Math.round(tris[base + k * 3] * 1e6)}|${Math.round(tris[base + k * 3 + 1] * 1e6)}|${Math.round(tris[base + k * 3 + 2] * 1e6)}`;
+      const prev = vertOwner.get(key);
+      if (prev === undefined) {
+        vertOwner.set(key, t);
+      } else {
+        const ra = find(t);
+        const rb = find(prev);
+        if (ra !== rb) parent[ra] = rb;
+      }
+    }
+  }
+
+  const rootToShell = new Map<number, number>();
+  const shellIds = new Array<number>(count);
+  let shellCount = 0;
+  for (let t = 0; t < count; t++) {
+    const r = find(t);
+    let s = rootToShell.get(r);
+    if (s === undefined) {
+      s = shellCount++;
+      rootToShell.set(r, s);
+    }
+    shellIds[t] = s;
+  }
+  return { shellIds, shellCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -431,12 +497,48 @@ function windingAt(
   return w;
 }
 
+function sharesSegmentEndpoint(s: Segment, o: Segment, tolMm: number): boolean {
+  return (
+    Math.hypot(s.a.x - o.a.x, s.a.y - o.a.y) <= tolMm ||
+    Math.hypot(s.a.x - o.b.x, s.a.y - o.b.y) <= tolMm ||
+    Math.hypot(s.b.x - o.a.x, s.b.y - o.a.y) <= tolMm ||
+    Math.hypot(s.b.x - o.b.x, s.b.y - o.b.y) <= tolMm
+  );
+}
+
+function hasOpenEndpoints(segs: Segment[], weldMm: number): boolean {
+  const cellOf = (v: number) => Math.floor(v / weldMm);
+  const starts = new Map<string, number[]>();
+  for (let i = 0; i < segs.length; i++) {
+    const k = `${cellOf(segs[i].a.x)}|${cellOf(segs[i].a.y)}`;
+    const list = starts.get(k);
+    if (list) list.push(i);
+    else starts.set(k, [i]);
+  }
+  for (let i = 0; i < segs.length; i++) {
+    const p = segs[i].b;
+    const ci = cellOf(p.x);
+    const cj = cellOf(p.y);
+    let matched = false;
+    for (let dj = -1; dj <= 1 && !matched; dj++) {
+      for (let di = -1; di <= 1 && !matched; di++) {
+        for (const si of starts.get(`${ci + di}|${cj + dj}`) || []) {
+          if (si === i) continue;
+          if (Math.hypot(segs[si].a.x - p.x, segs[si].a.y - p.y) <= weldMm) {
+            matched = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!matched) return true;
+  }
+  return false;
+}
+
 /**
- * Replaces overlapping cross-sections with the boundary of their union.
- *
- * Returns the segments unchanged when only one solid reaches this height — a
- * single closed solid never overlaps itself, and the split-and-test pass is the
- * expensive part of slicing.
+ * Replaces overlapping cross-sections with the boundary of their union,
+ * including self-overlapping or multi-shell contours carried under one solid id.
  */
 export function unionSegments(segs: Segment[]): Segment[] {
   if (segs.length === 0) return segs;
@@ -450,7 +552,6 @@ export function unionSegments(segs: Segment[]): Segment[] {
     minY = Math.min(minY, s.a.y, s.b.y);
     maxY = Math.max(maxY, s.a.y, s.b.y);
   }
-  if (solids.size < 2) return segs;
 
   // Cell size from the model's own scale: big enough that a segment touches only
   // a couple of cells, small enough that a cell holds only a few segments.
@@ -482,6 +583,7 @@ export function unionSegments(segs: Segment[]): Segment[] {
   // ---- split every segment where another one crosses it ----
   const PARAM_EPS = 1e-9;
   const cuts: number[][] = segs.map(() => []);
+  let totalCuts = 0;
 
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i];
@@ -496,8 +598,9 @@ export function unionSegments(segs: Segment[]): Segment[] {
           if (oi === i || seen.has(oi)) continue;
           seen.add(oi);
           const o = segs[oi];
-          // Two pieces of the same solid meet only end to end, never across.
-          if (o.solid === s.solid) continue;
+          // Adjacent edges of the same contour meet at a shared vertex; non-adjacent
+          // edges of the same solid are still checked so self-overlapping shells union.
+          if (o.solid === s.solid && sharesSegmentEndpoint(s, o, WELD_MM)) continue;
 
           const ox = o.b.x - o.a.x;
           const oy = o.b.y - o.a.y;
@@ -515,7 +618,10 @@ export function unionSegments(segs: Segment[]): Segment[] {
             if (off > WELD_MM / 2) continue;
             for (const end of [o.a, o.b]) {
               const t = ((end.x - s.a.x) * sx + (end.y - s.a.y) * sy) / sLen2;
-              if (t > PARAM_EPS && t < 1 - PARAM_EPS) cuts[i].push(t);
+              if (t > PARAM_EPS && t < 1 - PARAM_EPS) {
+                cuts[i].push(t);
+                totalCuts++;
+              }
             }
             continue;
           }
@@ -529,9 +635,16 @@ export function unionSegments(segs: Segment[]): Segment[] {
           if (t <= PARAM_EPS || t >= 1 - PARAM_EPS) continue;
           if (u < -PARAM_EPS || u > 1 + PARAM_EPS) continue;
           cuts[i].push(t);
+          totalCuts++;
         }
       }
     }
+  }
+
+  // Leave uncrossed open chains of a single solid intact so `chainSegments`
+  // can bridge the non-manifold crack instead of ray-casting through an open gap.
+  if (solids.size < 2 && totalCuts === 0 && hasOpenEndpoints(segs, WELD_MM)) {
+    return segs;
   }
 
   const pieces: Segment[] = [];
@@ -601,28 +714,38 @@ export function unionSegments(segs: Segment[]): Segment[] {
   return kept;
 }
 
+export interface ChainStats {
+  openChainsClosed: number;
+  maxGapMm: number;
+}
+
 /**
  * Chains directed segments into closed contours.
  *
  * Endpoints of neighbouring triangles are computed from the same edge but not
  * always in the same order, so they agree only to rounding, and a split point
- * shared by two pieces agrees only to floating-point noise. Successors are
- * therefore looked up in a bucket grid *and its neighbours*, then accepted on
- * real distance — bucketing alone drops any join that straddles a bucket edge,
- * however close the two points actually are. A chain that runs out of
- * successors is closed anyway: a cut path has to be closed, and the alternative
- * is dropping the contour.
+ * shared by two pieces agrees only to floating-point noise. Successors and
+ * predecessors are looked up in a bucket grid *and its neighbours*, then
+ * accepted on real distance. A chain that still has a gap at its ends is closed
+ * across that gap and recorded in `stats` so the caller can warn about
+ * non-manifold / open mesh geometry.
  */
-export function chainSegments(segs: Segment[], weldMm: number = WELD_MM): Point2D[][] {
+export function chainSegments(segs: Segment[], weldMm: number = WELD_MM, stats?: ChainStats): Point2D[][] {
   const cellOf = (v: number) => Math.floor(v / weldMm);
   const key = (i: number, j: number) => `${i}|${j}`;
 
   const starts = new Map<string, number[]>();
+  const ends = new Map<string, number[]>();
   for (let i = 0; i < segs.length; i++) {
-    const k = key(cellOf(segs[i].a.x), cellOf(segs[i].a.y));
-    const list = starts.get(k);
-    if (list) list.push(i);
-    else starts.set(k, [i]);
+    const ks = key(cellOf(segs[i].a.x), cellOf(segs[i].a.y));
+    const sList = starts.get(ks);
+    if (sList) sList.push(i);
+    else starts.set(ks, [i]);
+
+    const ke = key(cellOf(segs[i].b.x), cellOf(segs[i].b.y));
+    const eList = ends.get(ke);
+    if (eList) eList.push(i);
+    else ends.set(ke, [i]);
   }
 
   const used = new Array<boolean>(segs.length).fill(false);
@@ -646,27 +769,77 @@ export function chainSegments(segs: Segment[], weldMm: number = WELD_MM): Point2
     return best;
   };
 
+  /** The nearest unused segment ending at `p`, or -1. */
+  const predecessorOf = (p: Point2D): number => {
+    const ci = cellOf(p.x);
+    const cj = cellOf(p.y);
+    let best = -1;
+    let bestDist = Infinity;
+    for (let dj = -1; dj <= 1; dj++) {
+      for (let di = -1; di <= 1; di++) {
+        for (const si of ends.get(key(ci + di, cj + dj)) || []) {
+          if (used[si]) continue;
+          const d = Math.hypot(segs[si].b.x - p.x, segs[si].b.y - p.y);
+          if (d <= weldMm && d < bestDist) { bestDist = d; best = si; }
+        }
+      }
+    }
+    return best;
+  };
+
   const loops: Point2D[][] = [];
+  const gapWarnThreshold = Math.max(weldMm * 2, 0.05);
 
   for (let i = 0; i < segs.length; i++) {
     if (used[i]) continue;
     used[i] = true;
 
-    const start = segs[i].a;
-    const loop: Point2D[] = [start];
-    let cur = segs[i].b;
+    let headPt = segs[i].a;
+    const loop: Point2D[] = [headPt];
+    let tailPt = segs[i].b;
 
     for (let guard = 0; guard <= segs.length; guard++) {
-      if (near(cur, start)) break;
-      loop.push(cur);
+      if (near(tailPt, headPt)) break;
+      loop.push(tailPt);
 
-      const next = successorOf(cur);
+      const next = successorOf(tailPt);
       if (next < 0) break;
       used[next] = true;
-      cur = segs[next].b;
+      tailPt = segs[next].b;
     }
 
-    if (loop.length >= 3) loops.push(loop);
+    if (!near(tailPt, headPt)) {
+      const prefix: Point2D[] = [];
+      for (let guard = 0; guard <= segs.length; guard++) {
+        const prev = predecessorOf(headPt);
+        if (prev < 0) break;
+        used[prev] = true;
+        headPt = segs[prev].a;
+        if (near(tailPt, headPt)) {
+          // Closed from behind: `tailPt` is already at the end of `loop` and matches `headPt`.
+          break;
+        }
+        prefix.push(headPt);
+      }
+      if (prefix.length > 0) {
+        prefix.reverse();
+        loop.unshift(...prefix);
+      }
+      if (near(tailPt, headPt) && loop.length > 1) {
+        // Avoid duplicating the closing vertex when backward walk closed onto `tailPt`.
+        loop.unshift(headPt);
+        loop.pop();
+      }
+    }
+
+    const gapMm = Math.hypot(tailPt.x - headPt.x, tailPt.y - headPt.y);
+    if (loop.length >= 3) {
+      if (stats && gapMm > gapWarnThreshold && Math.abs(signedArea(loop)) >= MIN_LOOP_AREA_MM2) {
+        stats.openChainsClosed++;
+        if (gapMm > stats.maxGapMm) stats.maxGapMm = gapMm;
+      }
+      loops.push(loop);
+    }
   }
 
   return loops;
@@ -683,14 +856,22 @@ function signedArea(pts: Point2D[]): number {
 }
 
 /** All closed contours of the scene at one height, cleaned up (mm, model frame). */
-export function contoursAtZ(tris: number[], z: number, solidIds: number[]): Point2D[][] {
-  const loops = chainSegments(unionSegments(sliceTrianglesAtZ(tris, z, solidIds)));
+export function contoursAtZ(tris: number[], z: number, solidIds: number[], stats?: ChainStats): Point2D[][] {
+  const loops = chainSegments(unionSegments(sliceTrianglesAtZ(tris, z, solidIds)), WELD_MM, stats);
   const out: Point2D[][] = [];
   for (const loop of loops) {
     const simplified = dropCollinear(simplifyLoop(loop, SIMPLIFY_MM), SIMPLIFY_MM);
     if (simplified.length < 3) continue;
     if (Math.abs(signedArea(simplified)) < MIN_LOOP_AREA_MM2) continue;
     out.push(simplified);
+  }
+  if (out.length > 0) {
+    const depths = nestingDepths(out);
+    for (let i = 0; i < out.length; i++) {
+      const wantCcw = depths[i] % 2 === 0;
+      const isCcw = signedArea(out[i]) > 0;
+      if (wantCcw !== isCcw) out[i].reverse();
+    }
   }
   return out;
 }
@@ -706,21 +887,21 @@ export function contoursAtZ(tris: number[], z: number, solidIds: number[]): Poin
 // rasterised once, the rasters are intersected, and pins are placed at the
 // deepest points of what survives.
 
-interface Raster {
+interface RasterGrid {
   cols: number;
   rows: number;
   step: number;   // mm per cell
   minX: number;
   minY: number;
-  cells: Uint8Array;
 }
 
-const MAX_RASTER_CELLS = 160;
+const MAX_RASTER_CELLS = 320;
+const MAX_ISLAND_LABEL_CELLS = 160;
 
-function makeRasterGrid(minX: number, minY: number, maxX: number, maxY: number): Omit<Raster, 'cells'> {
+function makeRasterGrid(minX: number, minY: number, maxX: number, maxY: number, maxCells = MAX_RASTER_CELLS): RasterGrid {
   const w = Math.max(maxX - minX, 1e-3);
   const h = Math.max(maxY - minY, 1e-3);
-  const step = Math.max(w, h) / MAX_RASTER_CELLS;
+  const step = Math.max(w, h) / maxCells;
   return {
     cols: Math.max(1, Math.ceil(w / step)),
     rows: Math.max(1, Math.ceil(h / step)),
@@ -730,8 +911,48 @@ function makeRasterGrid(minX: number, minY: number, maxX: number, maxY: number):
   };
 }
 
+function pointToSegmentDist(p: Point2D, a: Point2D, b: Point2D): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-18) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+function minDistToLoops(p: Point2D, loops: Point2D[][]): number {
+  let best = Infinity;
+  for (const loop of loops) {
+    for (let i = 0; i < loop.length; i++) {
+      const d = pointToSegmentDist(p, loop[i], loop[(i + 1) % loop.length]);
+      if (d < best) best = d;
+    }
+  }
+  return best;
+}
+
+function pointInLoop(p: Point2D, loop: Point2D[]): boolean {
+  let inside = false;
+  for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+    const a = loop[i];
+    const b = loop[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function isInsideLayer(p: Point2D, loops: Point2D[][]): boolean {
+  let count = 0;
+  for (const loop of loops) {
+    if (pointInLoop(p, loop)) count++;
+  }
+  return count % 2 === 1;
+}
+
 /** Even-odd scanline fill, so nested contours punch holes whatever their winding. */
-function rasterizeLoops(loops: Point2D[][], grid: Omit<Raster, 'cells'>): Uint8Array {
+function rasterizeLoops(loops: Point2D[][], grid: RasterGrid): Uint8Array {
   const cells = new Uint8Array(grid.cols * grid.rows);
   const xs: number[] = [];
 
@@ -759,15 +980,68 @@ function rasterizeLoops(loops: Point2D[][], grid: Omit<Raster, 'cells'>): Uint8A
   return cells;
 }
 
+function cellCentre(grid: RasterGrid, idx: number): Point2D {
+  const i = idx % grid.cols;
+  const j = Math.floor(idx / grid.cols);
+  return { x: grid.minX + (i + 0.5) * grid.step, y: grid.minY + (j + 0.5) * grid.step };
+}
+
 /**
- * Distance from each filled cell to the nearest empty one, in millimetres.
- * Two-pass chamfer; anything off the grid counts as empty.
+ * Distance from each interior cell centre to the nearest contour or hole edge,
+ * in millimetres. Every boundary segment (including sub-cell bolt holes and
+ * slits that fall between scanlines) is stamped with exact point-to-segment
+ * distance before the two-pass chamfer sweep propagates it across the grid.
  */
-function distanceTransform(raster: Raster): Float32Array {
-  const { cols, rows, cells, step } = raster;
+function clearanceField(loops: Point2D[][], grid: RasterGrid): Float32Array {
+  const { cols, rows, step } = grid;
+  const cells = rasterizeLoops(loops, grid);
   const d = new Float32Array(cols * rows);
   const BIG = 1e9;
   for (let i = 0; i < d.length; i++) d[i] = cells[i] ? BIG : 0;
+
+  // Clear any cell centre sitting inside a sub-cell loop that fell between
+  // scanlines, and stamp exact point-to-segment distances along every edge.
+  for (const loop of loops) {
+    let lMinX = Infinity, lMaxX = -Infinity, lMinY = Infinity, lMaxY = -Infinity;
+    for (const p of loop) {
+      if (p.x < lMinX) lMinX = p.x;
+      if (p.x > lMaxX) lMaxX = p.x;
+      if (p.y < lMinY) lMinY = p.y;
+      if (p.y > lMaxY) lMaxY = p.y;
+    }
+    if (lMaxY - lMinY < step * 1.5) {
+      const ci0 = Math.max(0, Math.floor((lMinX - grid.minX) / step));
+      const ci1 = Math.min(cols - 1, Math.ceil((lMaxX - grid.minX) / step));
+      const cj0 = Math.max(0, Math.floor((lMinY - grid.minY) / step));
+      const cj1 = Math.min(rows - 1, Math.ceil((lMaxY - grid.minY) / step));
+      for (let j = cj0; j <= cj1; j++) {
+        for (let i = ci0; i <= ci1; i++) {
+          const idx = j * cols + i;
+          if (d[idx] === 0) continue;
+          const centre = { x: grid.minX + (i + 0.5) * step, y: grid.minY + (j + 0.5) * step };
+          if (!isInsideLayer(centre, loops)) d[idx] = 0;
+        }
+      }
+    }
+
+    for (let k = 0; k < loop.length; k++) {
+      const a = loop[k];
+      const b = loop[(k + 1) % loop.length];
+      const i0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - grid.minX) / step) - 1);
+      const i1 = Math.min(cols - 1, Math.ceil((Math.max(a.x, b.x) - grid.minX) / step) + 1);
+      const j0 = Math.max(0, Math.floor((Math.min(a.y, b.y) - grid.minY) / step) - 1);
+      const j1 = Math.min(rows - 1, Math.ceil((Math.max(a.y, b.y) - grid.minY) / step) + 1);
+      for (let j = j0; j <= j1; j++) {
+        const y = grid.minY + (j + 0.5) * step;
+        for (let i = i0; i <= i1; i++) {
+          const idx = j * cols + i;
+          if (d[idx] === 0) continue;
+          const exactCells = pointToSegmentDist({ x: grid.minX + (i + 0.5) * step, y }, a, b) / step;
+          if (exactCells < d[idx]) d[idx] = exactCells;
+        }
+      }
+    }
+  }
 
   const at = (i: number, j: number) => (i < 0 || j < 0 || i >= cols || j >= rows ? 0 : d[j * cols + i]);
   const DIAG = Math.SQRT2;
@@ -795,61 +1069,114 @@ function distanceTransform(raster: Raster): Float32Array {
     }
   }
 
-  // The cell's own half-width is not proven clear, so keep it out of the answer.
-  for (let i = 0; i < d.length; i++) d[i] = Math.max(0, (d[i] - 0.5) * step);
+  for (let i = 0; i < d.length; i++) d[i] = Math.max(0, d[i] * step);
   return d;
 }
 
-function cellCentre(raster: Omit<Raster, 'cells'>, idx: number): Point2D {
-  const i = idx % raster.cols;
-  const j = Math.floor(idx / raster.cols);
-  return { x: raster.minX + (i + 0.5) * raster.step, y: raster.minY + (j + 0.5) * raster.step };
+/** Decomposes a layer's loops into independent solid islands (even-depth outer + direct odd-depth holes), largest first. */
+function extractSolidIslands(loops: Point2D[][]): { loops: Point2D[][]; areaMm2: number }[] {
+  const valid = loops.filter((l) => l.length >= 3);
+  if (valid.length === 0) return [];
+  const depths = nestingDepths(valid);
+  const islands: { loops: Point2D[][]; areaMm2: number }[] = [];
+
+  for (let i = 0; i < valid.length; i++) {
+    if (depths[i] % 2 !== 0) continue;
+    const outer = valid[i];
+    const islandLoops: Point2D[][] = [outer];
+    let area = Math.abs(signedArea(outer));
+    for (let j = 0; j < valid.length; j++) {
+      if (depths[j] !== depths[i] + 1) continue;
+      if (pointInLoop(valid[j][0], outer)) {
+        islandLoops.push(valid[j]);
+        area -= Math.abs(signedArea(valid[j]));
+      }
+    }
+    islands.push({ loops: islandLoops, areaMm2: Math.max(0, area) });
+  }
+
+  islands.sort((a, b) => b.areaMm2 - a.areaMm2);
+  return islands;
 }
 
-/** The deepest point inside a rasterised layer, for putting an engraved label. */
-function deepestPoint(raster: Raster): { pt: Point2D; clearanceMm: number } | null {
-  const d = distanceTransform(raster);
+/** The deepest point inside one solid island (including its dowel holes), verified analytically. */
+function deepestIslandPoint(islandLoops: Point2D[][]): { pt: Point2D; clearanceMm: number } | null {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of islandLoops[0]) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  if (!isFinite(minX)) return null;
+  const grid = makeRasterGrid(minX, minY, maxX, maxY, MAX_ISLAND_LABEL_CELLS);
+  const d = clearanceField(islandLoops, grid);
+
   let best = -1;
   let bestIdx = -1;
   for (let i = 0; i < d.length; i++) {
     if (d[i] > best) { best = d[i]; bestIdx = i; }
   }
-  return bestIdx < 0 || best <= 0 ? null : { pt: cellCentre(raster, bestIdx), clearanceMm: best };
+  if (bestIdx < 0 || best <= 0) return null;
+  const pt = cellCentre(grid, bestIdx);
+  if (!isInsideLayer(pt, islandLoops)) return null;
+  const exactClearance = minDistToLoops(pt, islandLoops);
+  return exactClearance > 0 ? { pt, clearanceMm: exactClearance } : null;
 }
 
 /**
- * Picks up to `count` pin positions that clear every layer's edge by
- * `requiredMm`, spread as far apart as the common region allows — two pins in a
- * line through the middle of a part constrain it far better than two that end up
- * next to each other.
+ * Picks up to `count` pin positions that clear every layer's outer boundary and
+ * internal holes by `requiredMm`, verified analytically against exact segment
+ * geometry so sub-cell holes or thin walls are never grazed.
  */
-function choosePins(common: Raster, count: number, requiredMm: number): Point2D[] {
-  const d = distanceTransform(common);
+function choosePins(
+  grid: RasterGrid,
+  commonClearance: Float32Array,
+  layers: ContourLayer[],
+  count: number,
+  requiredMm: number,
+): Point2D[] {
   const candidates: number[] = [];
-  for (let i = 0; i < d.length; i++) if (d[i] >= requiredMm) candidates.push(i);
+  for (let i = 0; i < commonClearance.length; i++) {
+    if (commonClearance[i] >= requiredMm - grid.step) candidates.push(i);
+  }
   if (candidates.length === 0) return [];
 
+  const analyticallyValid = (p: Point2D): boolean => {
+    for (const layer of layers) {
+      if (!isInsideLayer(p, layer.loops)) return false;
+      if (minDistToLoops(p, layer.loops) < requiredMm - 1e-6) return false;
+    }
+    return true;
+  };
+
+  candidates.sort((a, b) => commonClearance[b] - commonClearance[a]);
   const pins: Point2D[] = [];
-  // The first pin goes at the deepest point; each one after it as far from the
-  // pins already placed as clearance permits.
-  let firstIdx = candidates[0];
-  for (const i of candidates) if (d[i] > d[firstIdx]) firstIdx = i;
-  pins.push(cellCentre(common, firstIdx));
+  for (const idx of candidates) {
+    const p = cellCentre(grid, idx);
+    if (analyticallyValid(p)) {
+      pins.push(p);
+      break;
+    }
+  }
+  if (pins.length === 0) return [];
 
   while (pins.length < count) {
-    let bestIdx = -1;
+    let bestPt: Point2D | null = null;
     let bestScore = -1;
     for (const i of candidates) {
-      const p = cellCentre(common, i);
+      const p = cellCentre(grid, i);
       let nearest = Infinity;
       for (const q of pins) nearest = Math.min(nearest, Math.hypot(p.x - q.x, p.y - q.y));
       // Pins closer together than their own clearance would tear the material
       // between them, and they register no better than one pin would.
-      if (nearest < 3 * requiredMm) continue;
-      if (nearest > bestScore) { bestScore = nearest; bestIdx = i; }
+      if (nearest < 3 * requiredMm || nearest <= bestScore) continue;
+      if (!analyticallyValid(p)) continue;
+      bestScore = nearest;
+      bestPt = p;
     }
-    if (bestIdx < 0) break;
-    pins.push(cellCentre(common, bestIdx));
+    if (!bestPt) break;
+    pins.push(bestPt);
   }
 
   return pins;
@@ -863,6 +1190,42 @@ function circleLoop(centre: Point2D, radiusMm: number): Point2D[] {
     pts.push({ x: centre.x + Math.cos(ang) * radiusMm, y: centre.y + Math.sin(ang) * radiusMm });
   }
   return pts;
+}
+
+/** Fast XY bounding box of a triangle soup's intersection with plane `z` (in metres). */
+function sliceBoundsAtZ(tris: number[], z: number): { minX: number; maxX: number; minY: number; maxY: number } | null {
+  const EPS = 1e-9;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let hit = false;
+  const d = [0, 0, 0];
+  const px = [0, 0, 0];
+  const py = [0, 0, 0];
+
+  for (let t = 0; t + 8 < tris.length; t += 9) {
+    let pos = 0;
+    for (let k = 0; k < 3; k++) {
+      px[k] = tris[t + k * 3];
+      py[k] = tris[t + k * 3 + 1];
+      let dk = tris[t + k * 3 + 2] - z;
+      if (dk > -EPS && dk < EPS) dk = EPS;
+      d[k] = dk;
+      if (dk > 0) pos++;
+    }
+    if (pos === 0 || pos === 3) continue;
+    for (let k = 0; k < 3; k++) {
+      const j = (k + 1) % 3;
+      if ((d[k] > 0) === (d[j] > 0)) continue;
+      const f = d[k] / (d[k] - d[j]);
+      const x = px[k] + (px[j] - px[k]) * f;
+      const y = py[k] + (py[j] - py[k]) * f;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      hit = true;
+    }
+  }
+  return hit ? { minX, maxX, minY, maxY } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -947,13 +1310,13 @@ export function exportContourSliceSvg(
     return { success: false, error: 'No solid geometry found in the scene to slice.' };
   }
 
-  let zMin = Infinity;
-  let zMax = -Infinity;
+  let unscaledZMin = Infinity;
+  let unscaledZMax = -Infinity;
   for (let i = 2; i < tris.length; i += 3) {
-    if (tris[i] < zMin) zMin = tris[i];
-    if (tris[i] > zMax) zMax = tris[i];
+    if (tris[i] < unscaledZMin) unscaledZMin = tris[i];
+    if (tris[i] > unscaledZMax) unscaledZMax = tris[i];
   }
-  const modelHeight = zMax - zMin;
+  const modelHeight = unscaledZMax - unscaledZMin;
   const thickness = options.materialThickness;
 
   if (!(thickness > 0)) {
@@ -963,11 +1326,96 @@ export function exportContourSliceSvg(
     return { success: false, error: 'The scene is flat along Z, so there is nothing to slice into layers.' };
   }
 
+  // ---- uniform 3D scale ----
+  // Settled before computing layerCount and slicing Z planes so scaling is
+  // uniform in X, Y, and Z (preserving 3D aspect ratio and reducing sheet count
+  // along Z as well as XY when autoScale is enabled).
+  const sheetWidthMm = options.sheetWidth * 1000;
+  const sheetHeightMm = options.sheetHeight * 1000;
+  const marginMm = options.margin * 1000;
+  const outsetMm = (options.cutOutset ?? 0) * 1000;
+  const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
+  const sampleAt = options.slicePosition === 'bottom'
+    ? 0.02
+    : options.slicePosition === 'top'
+      ? 0.98
+      : 0.5;
+
+  let scaleFactor = Math.max(0.05, Math.min(2.0, options.scaleFactor ?? 1.0));
+
+  if (options.autoScale || maxSheets > 0) {
+    const kerfGrowMm = Math.max(0, options.kerf * 1000);
+    const reqBorderMm = Math.max(2 * marginMm, marginMm + outsetMm);
+    const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
+      const scaledH = modelHeight * s;
+      const countS = options.sliceCount != null
+        ? Math.max(1, Math.floor(options.sliceCount))
+        : Math.max(1, Math.ceil(scaledH / thickness - 0.1));
+      if (countS > MAX_LAYERS) return { sheetCount: Infinity, fitSingleSheet: false };
+
+      const stepS = options.sliceCount == null ? thickness : scaledH / countS;
+      const sizes: { w: number; h: number }[] = [];
+      let fitSingleSheet = true;
+
+      for (let i = 0; i < countS; i++) {
+        const bandLo = i * stepS;
+        const band = Math.min(stepS, scaledH - bandLo);
+        const z0 = unscaledZMin + (bandLo + sampleAt * band) / s;
+        let b = sliceBoundsAtZ(tris, z0);
+        if (!b) {
+          const tries = [0.5, 0.25, 0.75, 0.1, 0.9, 0.02, 0.98]
+            .map((f) => unscaledZMin + (bandLo + f * band) / s)
+            .sort((p, q) => Math.abs(p - z0) - Math.abs(q - z0));
+          for (const alt of tries) {
+            b = sliceBoundsAtZ(tris, alt);
+            if (b) break;
+          }
+        }
+        if (!b) continue;
+        const w = Math.max(1, (b.maxX - b.minX) * 1000 * s + kerfGrowMm);
+        const h = Math.max(1, (b.maxY - b.minY) * 1000 * s + kerfGrowMm);
+        if (w + reqBorderMm > sheetWidthMm || h + reqBorderMm > sheetHeightMm) {
+          fitSingleSheet = false;
+        }
+        sizes.push({ w, h });
+      }
+      if (sizes.length === 0) return { sheetCount: 1, fitSingleSheet };
+      return { sheetCount: shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm).sheetCount, fitSingleSheet };
+    };
+
+    let bestScale = scaleFactor;
+    const startScale = options.autoScale ? 1.0 : scaleFactor;
+    for (let s = startScale; s >= 0.05 - 1e-9; s = Math.round((s - 0.01) * 100) / 100) {
+      const res = evaluateScale(s);
+      bestScale = s;
+      if (res.fitSingleSheet && (maxSheets === 0 || res.sheetCount <= maxSheets)) {
+        break;
+      }
+    }
+    scaleFactor = bestScale;
+  }
+
+  // Uniformly scale triangles into as-cut 3D model space (keeping the base at `unscaledZMin`).
+  const scaledTris = Math.abs(scaleFactor - 1.0) > 1e-6
+    ? (() => {
+        const out = new Array<number>(tris.length);
+        for (let i = 0; i < tris.length; i += 3) {
+          out[i] = tris[i] * scaleFactor;
+          out[i + 1] = tris[i + 1] * scaleFactor;
+          out[i + 2] = unscaledZMin + (tris[i + 2] - unscaledZMin) * scaleFactor;
+        }
+        return out;
+      })()
+    : tris;
+  const zMin = unscaledZMin;
+  const scaledModelHeight = modelHeight * scaleFactor;
+  const zMax = zMin + scaledModelHeight;
+
   // Rounded up, never to the nearest: a stack can be planed down to height but
   // not built up to it, and rounding 121 mm over 50 mm stock gave two sheets,
   // a stack 21 mm short. The slack forgives a model a hair over a whole number
   // of sheets (a flask's 1 mm clearance) rather than adding a sheet for it.
-  const autoCount = Math.max(1, Math.ceil(modelHeight / thickness - 0.1));
+  const autoCount = Math.max(1, Math.ceil(scaledModelHeight / thickness - 0.1));
   const layerCount = Math.max(1, Math.floor(options.sliceCount ?? autoCount));
 
   if (layerCount > MAX_LAYERS) {
@@ -978,21 +1426,18 @@ export function exportContourSliceSvg(
     };
   }
 
-  // Each layer owns a band of the model's height and is sampled at one spot
+  // Each layer owns a band of the scaled model's height and is sampled at one spot
   // inside it. On auto the band is one sheet thick from the bottom up, so the
   // stack is the model at true height, and the top band stops at the model's
-  // top: that layer is faced down to match. An override shares the height out
-  // equally, stretching or squeezing it, which is why the assembled stack is
-  // reported separately below.
-  const step = options.sliceCount == null ? thickness : modelHeight / layerCount;
-  const sampleAt = options.slicePosition === 'bottom'
-    ? 0.02
-    : options.slicePosition === 'top'
-      ? 0.98
-      : 0.5;
+  // top: that layer is faced down to match. An explicit `sliceCount` override
+  // cuts `sliceCount` full-thickness sheets without facing every sheet down.
+  const step = options.sliceCount == null ? thickness : scaledModelHeight / layerCount;
 
   const layers: ContourLayer[] = [];
   let emptyLayers = 0;
+  let openLayerCount = 0;
+  let totalOpenChains = 0;
+  let worstOpenGapMm = 0;
 
   for (let i = 0; i < layerCount; i++) {
     // The chosen spot can land in a gap the layer spans — the clearance
@@ -1002,17 +1447,30 @@ export function exportContourSliceSvg(
     const bandLo = zMin + i * step;
     const band = Math.min(step, zMax - bandLo);
     let z = bandLo + sampleAt * band;
-    let loops = contoursAtZ(tris, z, solidIds);
+    let layerStats: ChainStats = { openChainsClosed: 0, maxGapMm: 0 };
+    let loops = contoursAtZ(scaledTris, z, solidIds, layerStats);
     if (loops.length === 0) {
       const tries = [0.5, 0.25, 0.75, 0.1, 0.9, 0.02, 0.98]
         .map((f) => bandLo + f * band)
         .sort((a, b) => Math.abs(a - z) - Math.abs(b - z));
       for (const alt of tries) {
-        const found = contoursAtZ(tris, alt, solidIds);
-        if (found.length > 0) { z = alt; loops = found; break; }
+        const altStats: ChainStats = { openChainsClosed: 0, maxGapMm: 0 };
+        const found = contoursAtZ(scaledTris, alt, solidIds, altStats);
+        if (found.length > 0) {
+          z = alt;
+          loops = found;
+          layerStats = altStats;
+          break;
+        }
       }
     }
     if (loops.length === 0) { emptyLayers++; continue; }
+
+    if (layerStats.openChainsClosed > 0) {
+      openLayerCount++;
+      totalOpenChains += layerStats.openChainsClosed;
+      if (layerStats.maxGapMm > worstOpenGapMm) worstOpenGapMm = layerStats.maxGapMm;
+    }
 
     let area = 0;
     let pieces = 0;
@@ -1027,13 +1485,24 @@ export function exportContourSliceSvg(
       loops,
       pieceCount: Math.max(1, pieces),
       areaMm2: Math.abs(area),
-      // Under a tenth of a millimetre is not worth a facing pass.
-      ...(band < thickness - 1e-4 ? { facedToMm: +(band * 1000).toFixed(1) } : {}),
+      // Only face the top remainder layer when deriving layer count automatically;
+      // an explicit `sliceCount` override means `sliceCount` full-thickness sheets.
+      ...(options.sliceCount == null && band < thickness - 1e-4
+        ? { facedToMm: +(band * 1000).toFixed(1) }
+        : {}),
     });
   }
 
   if (layers.length === 0) {
     return { success: false, error: 'Slicing produced no closed contours. The geometry may not be a closed solid.' };
+  }
+
+  if (openLayerCount > 0) {
+    warnings.push(
+      `Non-manifold or open mesh edges detected on ${openLayerCount} layer${openLayerCount === 1 ? '' : 's'} ` +
+      `(${totalOpenChains} open contour${totalOpenChains === 1 ? '' : 's'} closed across gaps up to ` +
+      `${worstOpenGapMm.toFixed(2)} mm); check the slice preview before cutting.`
+    );
   }
 
   if (emptyLayers > 0) {
@@ -1076,68 +1545,7 @@ export function exportContourSliceSvg(
     );
   }
 
-  // ---- scale ----
-  // Settled before the dowels and labels are placed, because those are real
-  // sizes: a 3 mm dowel needs a 3 mm hole however small the stack is cut.
-  const sheetWidthMm = options.sheetWidth * 1000;
-  const sheetHeightMm = options.sheetHeight * 1000;
-  const marginMm = options.margin * 1000;
-  const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
-
-  let scaleFactor = Math.max(0.05, Math.min(2.0, options.scaleFactor ?? 1.0));
-
-  if (options.autoScale || maxSheets > 0) {
-    const kerfGrowMm = Math.max(0, options.kerf * 1000);
-    const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
-      const sizes: { w: number; h: number }[] = [];
-      let fitSingleSheet = true;
-
-      for (const layer of layers) {
-        let lminX = Infinity, lminY = Infinity, lmaxX = -Infinity, lmaxY = -Infinity;
-        for (const loop of layer.loops) {
-          for (const p of loop) {
-            const sx = p.x * s, sy = p.y * s;
-            if (sx < lminX) lminX = sx; if (sx > lmaxX) lmaxX = sx;
-            if (sy < lminY) lminY = sy; if (sy > lmaxY) lmaxY = sy;
-          }
-        }
-        const w = Math.max(1, lmaxX - lminX + kerfGrowMm);
-        const h = Math.max(1, lmaxY - lminY + kerfGrowMm);
-        if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
-          fitSingleSheet = false;
-        }
-        sizes.push({ w, h });
-      }
-      return { sheetCount: shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm).sheetCount, fitSingleSheet };
-    };
-
-    let bestScale = scaleFactor;
-    const startScale = options.autoScale ? 1.0 : scaleFactor;
-    for (let s = startScale; s >= 0.05; s = Math.round((s - 0.01) * 100) / 100) {
-      const res = evaluateScale(s);
-      if (res.fitSingleSheet && (maxSheets === 0 || res.sheetCount <= maxSheets)) {
-        bestScale = s;
-        break;
-      }
-      bestScale = s;
-    }
-    scaleFactor = bestScale;
-  }
-
-  // Apply scaleFactor to layer loops
-  if (Math.abs(scaleFactor - 1.0) > 1e-4) {
-    for (const layer of layers) {
-      for (const loop of layer.loops) {
-        for (const p of loop) {
-          p.x *= scaleFactor;
-          p.y *= scaleFactor;
-        }
-      }
-      layer.areaMm2 *= scaleFactor * scaleFactor;
-    }
-  }
-
-  // ---- bounds (as cut, after scaling), shared by the pin search and the map preview ----
+  // ---- bounds (as cut, after 3D scaling), shared by the pin search and the map preview ----
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const layer of layers) {
     for (const loop of layer.loops) {
@@ -1150,25 +1558,26 @@ export function exportContourSliceSvg(
     }
   }
 
-  const grid = makeRasterGrid(minX, minY, maxX, maxY);
-  const rasters = layers.map(l => ({ ...grid, cells: rasterizeLoops(l.loops, grid) } as Raster));
-
   // ---- alignment pins ----
   const pins: { x: number; y: number; radiusMm: number }[] = [];
   if (options.pinHoles && options.pinCount > 0) {
+    const grid = makeRasterGrid(minX, minY, maxX, maxY);
     const pinRadiusMm = (options.pinDiameter * 1000) / 2;
     // Enough material has to survive around a dowel for the layer not to break
-    // out at the hole; one dowel diameter of wall is the usual rule of thumb.
-    const requiredMm = pinRadiusMm * 2 + 0.5;
+    // out at the hole: pin radius + one full dowel diameter of surviving wall.
+    const requiredMm = pinRadiusMm * 3;
 
-    const commonCells = new Uint8Array(grid.cols * grid.rows).fill(1);
-    for (const r of rasters) {
-      for (let i = 0; i < commonCells.length; i++) if (!r.cells[i]) commonCells[i] = 0;
+    const commonClearance = new Float32Array(grid.cols * grid.rows).fill(Infinity);
+    for (const layer of layers) {
+      const d = clearanceField(layer.loops, grid);
+      for (let i = 0; i < commonClearance.length; i++) {
+        if (d[i] < commonClearance[i]) commonClearance[i] = d[i];
+      }
     }
 
     // A hole cut on its nominal line comes out a kerf wider than the dowel.
     const cutRadiusMm = Math.max(0.1, pinRadiusMm - (options.kerf * 1000) / 2);
-    const placed = choosePins({ ...grid, cells: commonCells }, options.pinCount, requiredMm);
+    const placed = choosePins(grid, commonClearance, layers, options.pinCount, requiredMm);
     for (const p of placed) pins.push({ x: p.x, y: p.y, radiusMm: cutRadiusMm });
 
     if (placed.length === 0) {
@@ -1185,8 +1594,58 @@ export function exportContourSliceSvg(
       );
     }
 
+    // Check per-island registration on multi-island / concentric-ring layers so
+    // unpinned or single-pin islands are flagged even when `placed.length === options.pinCount`.
+    if (placed.length > 0 && multiPiece.length > 0) {
+      let zeroPinIslands = 0;
+      let singlePinIslands = 0;
+      for (const layer of multiPiece) {
+        for (const island of extractSolidIslands(layer.loops)) {
+          let count = 0;
+          for (const pin of placed) {
+            if (isInsideLayer(pin, island.loops)) count++;
+          }
+          if (count === 0) zeroPinIslands++;
+          else if (count === 1) singlePinIslands++;
+        }
+      }
+      if (zeroPinIslands > 0 || (singlePinIslands > 0 && options.pinCount >= 2)) {
+        const parts: string[] = [];
+        if (zeroPinIslands > 0) {
+          parts.push(`${zeroPinIslands} island${zeroPinIslands === 1 ? ' has' : 's have'} 0 alignment pins (align visually with the relief map)`);
+        }
+        if (singlePinIslands > 0 && options.pinCount >= 2) {
+          parts.push(`${singlePinIslands} island${singlePinIslands === 1 ? ' has' : 's have'} only 1 pin and can rotate around it`);
+        }
+        warnings.push(`Disconnected island registration: ${parts.join('; ')}.`);
+      }
+    }
+
     for (const layer of layers) {
       for (const pin of pins) layer.loops.push(circleLoop({ x: pin.x, y: pin.y }, pinRadiusMm));
+    }
+  }
+
+  // Snapshot uncompensated geometry (including dowel holes) before applying
+  // laser kerf compensation, so 3D stack simulation builds true nominal dimensions.
+  for (const layer of layers) {
+    layer.nominalLoops = layer.loops.map((loop) => loop.map((p) => ({ x: p.x, y: p.y })));
+  }
+
+  // ---- label anchors (computed AFTER dowel holes are punched, per solid island) ----
+  if (options.includeLabels) {
+    for (const layer of layers) {
+      const islands = extractSolidIslands(layer.nominalLoops ?? layer.loops);
+      const anchors: Point2D[] = [];
+      for (const island of islands) {
+        const deep = deepestIslandPoint(island.loops);
+        // Below this the number is bigger than the material it is engraved on.
+        if (deep && deep.clearanceMm >= 3) anchors.push(deep.pt);
+      }
+      if (anchors.length > 0) {
+        layer.labelPositions2D = anchors;
+        layer.labelPos2D = anchors[0];
+      }
     }
   }
 
@@ -1201,15 +1660,6 @@ export function exportContourSliceSvg(
       const depths = nestingDepths(layer.loops);
       layer.loops = layer.loops.flatMap((loop, i) =>
         loop.length < 3 ? [loop] : offsetLoop(loop, depths[i] % 2 === 1 ? -kerfHalfMm : kerfHalfMm, { joinStyle: 'miter' }));
-    }
-  }
-
-  // ---- label anchors ----
-  if (options.includeLabels) {
-    for (let i = 0; i < layers.length; i++) {
-      const deep = deepestPoint(rasters[i]);
-      // Below this the number is bigger than the material it is engraved on.
-      if (deep && deep.clearanceMm >= 3) layers[i].labelPos2D = deep.pt;
     }
   }
 
@@ -1231,7 +1681,6 @@ export function exportContourSliceSvg(
 
   const oversized: string[] = [];
   const offSheet: string[] = [];
-  const outsetMm = (options.cutOutset ?? 0) * 1000;
   const sizes = layers.map((layer) => {
     const w = layer.width2D || 1;
     const h = layer.height2D || 1;
@@ -1261,20 +1710,21 @@ export function exportContourSliceSvg(
   }
 
   const lastLayer = layers[layers.length - 1];
-  const stackHeight = options.sliceCount == null
-    ? lastLayer.index * thickness + (lastLayer.facedToMm ?? thickness * 1000) / 1000
-    : layers.length * thickness;
+  const stackHeight = layers.reduce(
+    (sum, l) => sum + (l.facedToMm !== undefined ? l.facedToMm / 1000 : thickness),
+    0,
+  );
   if (lastLayer.facedToMm !== undefined) {
     warnings.push(
-      `The model is ${(modelHeight * 1000).toFixed(0)} mm tall, not a whole number of ` +
+      `The${Math.abs(scaleFactor - 1.0) > 1e-3 ? ' scaled' : ''} model is ${(scaledModelHeight * 1000).toFixed(0)} mm tall, not a whole number of ` +
       `${(thickness * 1000).toFixed(1)} mm sheets, so the top layer is faced down to ` +
       `${lastLayer.facedToMm} mm before its profile is cut. A laser cannot face: cut that ` +
       `layer from ${lastLayer.facedToMm} mm stock instead.`
     );
-  } else if (Math.abs(stackHeight - modelHeight) > Math.max(thickness, modelHeight * 0.02)) {
+  } else if (Math.abs(stackHeight - scaledModelHeight) > Math.max(thickness, scaledModelHeight * 0.02)) {
     warnings.push(
       `${layers.length} layers of ${(thickness * 1000).toFixed(1)} mm stack up to ` +
-      `${(stackHeight * 1000).toFixed(0)} mm, but the model is ${(modelHeight * 1000).toFixed(0)} mm tall. ` +
+      `${(stackHeight * 1000).toFixed(0)} mm, but the${Math.abs(scaleFactor - 1.0) > 1e-3 ? ' scaled' : ''} model is ${(scaledModelHeight * 1000).toFixed(0)} mm tall. ` +
       `Leave the layer count on auto to build it at true height.`
     );
   }
@@ -1312,15 +1762,17 @@ export function exportContourSliceSvg(
   svg += `  </g>\n\n`;
 
   if (options.includeLabels) {
-    svg += `  <g id="engrave-labels" data-operation="etch" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
+    svg += `  <g id="engrave-labels" data-operation="etch" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle" dominant-baseline="central">\n`;
     for (const layer of layers) {
-      const anchor = layer.labelPos2D;
-      if (!anchor) continue;
+      const anchors = layer.labelPositions2D ?? (layer.labelPos2D ? [layer.labelPos2D] : []);
+      if (anchors.length === 0) continue;
       const pos = layer.placedPos2D!;
       const off = layer.modelOffset2D!;
-      const x = pos.x - off.x + anchor.x;
-      const y = sheetTop(layer) + pos.y + off.y - anchor.y;
-      svg += `    <text x="${x.toFixed(2)}" y="${y.toFixed(2)}">${escapeXml(String(layer.index + 1))}</text>\n`;
+      for (const anchor of anchors) {
+        const x = pos.x - off.x + anchor.x;
+        const y = sheetTop(layer) + pos.y + off.y - anchor.y;
+        svg += `    <text x="${x.toFixed(2)}" y="${y.toFixed(2)}">${escapeXml(String(layer.index + 1))}</text>\n`;
+      }
     }
     svg += `  </g>\n`;
   }
@@ -1347,6 +1799,8 @@ export function exportContourSliceSvg(
     warnings.unshift(`Skipped geometry with no volume to slice: ${skipped.join(', ')}.`);
   }
 
+  const zScale = options.sliceCount == null ? scaleFactor : stackHeight / modelHeight;
+
   return {
     success: true,
     svg,
@@ -1366,9 +1820,9 @@ export function exportContourSliceSvg(
         hi[i % 3] = Math.max(hi[i % 3], tris[i] * 1000);
       }
       return {
-        modelOriginMm: [0, 0, zMin * 1000] as [number, number, number],
+        modelOriginMm: [0, 0, unscaledZMin * 1000] as [number, number, number],
         workOriginMm: [0, 0, 0] as [number, number, number],
-        scale: [scaleFactor, scaleFactor, thickness / step] as [number, number, number],
+        scale: [scaleFactor, scaleFactor, zScale] as [number, number, number],
         modelMinMm: lo as [number, number, number],
         modelMaxMm: hi as [number, number, number],
       };

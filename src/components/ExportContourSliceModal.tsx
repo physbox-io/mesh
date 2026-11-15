@@ -170,8 +170,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [slicePosition, setSlicePosition] = useState<ContourSliceOptions['slicePosition']>('middle');
   const [kerfMm, setKerfMm] = useState(0.15);
   const [pinCount, setPinCount] = useState(2);
-  const [pinDiameterMm, setPinDiameterMm] = useState(3.0);
-  const [probedGrid, setProbedGrid] = useState<ProbeGrid | null>(null);
+  const [pinDiameterOverrideMm, setPinDiameterOverrideMm] = useState<number | null>(null);
+  const [probeState, setProbeState] = useState<{ scene: SceneGraph; key: string; grid: ProbeGrid } | null>(null);
   const [isProbing, setIsProbing] = useState(false);
   const [autoScale, setAutoScale] = useState<boolean>(false);
   const [maxSheets, setMaxSheets] = useState<number>(2);
@@ -219,6 +219,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [cutFeedrateOverride, setCutFeedrateOverride] = useState<number | null>(null);
   /** Cutter diameter, for the feeds-and-speeds arithmetic in routing mode. */
   const [bitDiameterMm, setBitDiameterMm] = useState<number>(3.175);
+  // On a CNC router, default the alignment dowel to at least the fitted end mill
+  // diameter (e.g. 3.175 mm = 1/8") unless the user explicitly overrides it, so
+  // dowel bores are never dropped out of the box for being narrower than the bit.
+  const pinDiameterMm =
+    pinDiameterOverrideMm ?? (machineMode === 'cnc' ? Math.max(3.0, bitDiameterMm) : 3.0);
   const [laserPasses, setLaserPasses] = useState<number>(1);
   const [attachments, setAttachments] = useState<boolean>(DEFAULT_GCODE_OPTIONS.attachmentsEnabled);
   const [attachmentWidthMm, setAttachmentWidthMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentWidthMm);
@@ -274,6 +279,14 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM, cutOutsetM,
   }), [materialThicknessMm, layerOverride, slicePosition, slicedKerfMm, pinCount, pinDiameterMm,
       sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations, marginM, cutOutsetM]);
+  const probeParamsKey = useMemo(
+    () => JSON.stringify([liveSliceFields, machineMode, bitDiameterMm]),
+    [liveSliceFields, machineMode, bitDiameterMm],
+  );
+  const probedGrid =
+    probeState && probeState.scene === scene && probeState.key === probeParamsKey
+      ? probeState.grid
+      : null;
   const sliceFields = useSettled(liveSliceFields, 250);
   // Slicing a big model takes long enough to freeze the tab, so it runs on the
   // export worker; the drawing on screen stays up, dimmed, until the new one lands.
@@ -454,7 +467,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     if (!gcodeResult?.bounds) return;
     setIsProbing(true);
     try {
-      setProbedGrid(await webSerialManager.probeGrid(gcodeResult.bounds, 3, 3));
+      const grid = await webSerialManager.probeGrid(gcodeResult.bounds, 3, 3);
+      setProbeState({ scene, key: probeParamsKey, grid });
     } finally {
       setIsProbing(false);
     }
@@ -776,17 +790,25 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 className="lg:col-span-2"
                 hintAlign="end"
                 label="Dowel ⌀ (mm)"
-                hint="Diameter of the rod you will thread the stack onto. Holes are cut a kerf undersize so the dowel is a push fit. A dowel only fits where every layer has material to spare around it."
+                hint="Diameter of the rod you will thread the stack onto. Holes are cut a kerf undersize on a laser so the dowel is a push fit; on a CNC router Dowel ⌀ must be at least Bit Ø."
               >
                 <NumberInput
-                  step={0.5} min={0.5} max={20}
+                  step={0.1} min={0.5} max={20}
                   disabled={pinCount === 0}
                   value={pinDiameterMm}
-                  onChange={(v) => v !== undefined && setPinDiameterMm(v)}
+                  onChange={(v) => v != null && setPinDiameterOverrideMm(v)}
                   className={inputClass}
                 />
               </Field>
             </div>
+            {machineMode === 'cnc' && pinCount > 0 && pinDiameterMm < bitDiameterMm - 1e-3 && (
+              <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/40 flex items-start gap-2 text-xs text-amber-800 dark:text-amber-300">
+                <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                <span className="leading-snug">
+                  Dowel ⌀ ({pinDiameterMm} mm) is narrower than the {bitDiameterMm} mm router bit, so alignment holes cannot be milled. Increase Dowel ⌀ to at least {bitDiameterMm} mm or fit a smaller bit.
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Sheet & nesting */}
