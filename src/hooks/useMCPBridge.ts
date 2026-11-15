@@ -47,6 +47,9 @@ export {
 const SERIAL_SCULPT_COMMANDS = new Set(['SCULPT', 'SCULPT_CUT', 'SCULPT_CARVE', 'UNDO_SCULPT', 'RESIZE_SCULPT', 'SET_SCULPT_BASE']);
 let sculptQueue: Promise<unknown> = Promise.resolve();
 
+/** How often a running command tells the hub it is still at work (the hub gives up after 10 s without word). */
+const WORKING_EVERY_MS = 2000;
+
 function tabIdentity(): { sessionId: string; label: string; href: string; startedAt: number } {
   const { id, startedAt } = tabSession();
   const href = typeof location !== 'undefined' ? location.href : '';
@@ -141,10 +144,16 @@ export function useMCPBridge() {
           done();
           return;
         }
+        // Still on it: the hub waits as long as these keep coming, so a long
+        // command (a scene of cloth loading, an export) is not reported as
+        // timed out while it runs, and a tab that has died still is, quickly.
+        const working = result instanceof Promise
+          ? setInterval(() => ws?.send(JSON.stringify({ event: 'WORKING', cmd, id })), WORKING_EVERY_MS)
+          : undefined;
         Promise.resolve(result)
           .then(data => ws?.send(encodeReply(cmd, id, data)))
           .catch(e  => ws?.send(JSON.stringify({ event: 'ERROR', cmd, id, error: String(e) })))
-          .finally(done);
+          .finally(() => { clearInterval(working); done(); });
       };
 
       ws.onclose = () => { if (!dead) retryTimer = setTimeout(connect, 2000); };
