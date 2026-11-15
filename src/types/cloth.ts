@@ -686,6 +686,13 @@ export interface GarmentAttachment {
   materialOverrides?: Partial<ClothMaterial>;
   /** Printed on it (a bandana's paisley, a scarf's check). */
   pattern?: ClothPatternPrint;
+  /**
+   * Set in a curve, metres: bent round an axis running out from the middle
+   * of its sewn side, this radius, its sides turned down toward the garment
+   * it is sewn to (negative: up). It rests so; a board holds it (a cap's
+   * pre-curved peak, a curved brim). Unset, it rests flat.
+   */
+  bend?: number;
 }
 
 export interface GarmentDraft {

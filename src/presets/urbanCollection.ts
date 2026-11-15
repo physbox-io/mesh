@@ -118,13 +118,22 @@ function pufferLook(x: number): SceneNode[] {
   }, form, 1);
   // A baseball cap: a close crown of six panels, its peak a stiffened crescent sewn on round the front of its band, stood out.
   // Its band round the forehead a couple of centimetres above the brow and under the back of the skull.
-  const FROM = 0.58, CAP_LEVEL = 0.17, CAP_BACK = 0.04, headL = formLimbs(m).head, bandSec = headL.section(FROM * headL.length);
+  const FROM = 0.58, CAP_PEAK = 0.18, CAP_BACK = 0.04, CAP_CURVE = 0.16, headL = formLimbs(m).head, bandSec = headL.section(FROM * headL.length);
   const across = [bandSec.side, bandSec.up].reduce((a, b) => (Math.abs(b[0]) > Math.abs(a[0]) ? b : a));
   const half = across === bandSec.side ? bandSec.w : bandSec.h, deep = across === bandSec.side ? bandSec.h : bandSec.w;
   // The band: the head's oval there stood off by its ease.
   const bh = half + 0.004, bd = deep + 0.004, bandC = Math.PI * (3 * (bh + bd) - Math.sqrt((3 * bh + bd) * (bh + 3 * bd)));
   // The peak round the front third of the band, to the temples (round the front quarter, it stuck out as a duck's bill).
-  const PEAK = peakOutline(bh, bd, 0.36 * bandC, 0.07);
+  const PEAK = peakOutline(bh, bd, 2 * CAP_PEAK * bandC, 0.07);
+  // How far the band drops round from the front (tau, of the way round): under the peak as its seam
+  // curves (across its chord, round CAP_CURVE), behind it on down to CAP_BACK more at the back.
+  const peakDrop = (x: number) => CAP_CURVE - Math.sqrt(Math.max(0, CAP_CURVE ** 2 - x * x));
+  const capDrop = (tau: number) => {
+    const k = Math.min(1, tau / CAP_PEAK) * (PEAK_ARC / 2), k0 = Math.floor(k), k1 = Math.min(PEAK_ARC / 2, k0 + 1);
+    const x = PEAK[PEAK_ARC / 2 + k0][0] + (PEAK[PEAK_ARC / 2 + k1][0] - PEAK[PEAK_ARC / 2 + k0][0]) * (k - k0);
+    const f = Math.max(0, (tau - CAP_PEAK) / (0.5 - CAP_PEAK));
+    return peakDrop(x) + (CAP_BACK * (1 - Math.cos(Math.PI * f))) / 2;
+  };
   // Its front panels stiffened to stand up off the forehead in a tall front, as a structured cap's do
   // (left to follow the head, the crown read as a swimming cap).
   const lowSec = headL.section((FROM + 0.2) * headL.length), lowDeep = Math.abs(lowSec.side[1]) > Math.abs(lowSec.up[1]) ? lowSec.w : lowSec.h;
@@ -140,17 +149,37 @@ function pufferLook(x: number): SceneNode[] {
     // And no taller than a cap: drawn in at the top, to the head's own fit there.
     { at: [r4(topSec.c[0]), r4(topSec.c[1] + 0.01), r4(headL.path.at(headL.length)[2] + 0.01)], radius: 0.05, amount: -0.014, mirror: false },
   ];
+  // At the back an opening arched up from a strap: the strap the band below
+  // it, a strap's width, the opening cut out above (an arch cut from the
+  // band's edge, with no strap across it, read as a bite out of the cap).
+  // And a button where the panels meet on top.
+  const axis = (() => { const v = [0, 1, 2].map((k) => bandSec.side[(k + 1) % 3] * bandSec.up[(k + 2) % 3] - bandSec.side[(k + 2) % 3] * bandSec.up[(k + 1) % 3]); const l = Math.hypot(...v) * Math.sign(v[2] || 1); return v.map((q) => q / l); })();
+  const backDir = (across === bandSec.side ? bandSec.up : bandSec.side).map((q, _, v) => q * Math.sign(v[1] || 1));
+  const onBand = (x: number, up: number): [number, number, number] => {
+    const sn = Math.max(-1, Math.min(1, x / bh)), cs = Math.sqrt(1 - sn * sn), dropAt = capDrop(0.5) - up;
+    return [0, 1, 2].map((k) => r4(bandSec.c[k] + across[k] * bh * sn + backDir[k] * bd * cs - axis[k] * dropAt)) as [number, number, number];
+  };
+  const STRAP = 0.016, OPEN_W = 0.032, OPEN_H = 0.05;
+  const closure: [number, number, number][] = [
+    ...Array.from({ length: 5 }, (_, k) => onBand(-OPEN_W + (2 * OPEN_W * k) / 4, STRAP)),
+    ...Array.from({ length: 11 }, (_, k) => { const ph = (Math.PI * (k + 1)) / 12; return onBand(OPEN_W * Math.cos(ph), STRAP + (OPEN_H - STRAP) * Math.sin(ph)); }),
+  ];
+  const apex = headL.path.at(headL.length), crownTop = (dx: number): [number, number, number] => [r4(apex[0] + dx), r4(apex[1]), r4(apex[2] + 0.01)];
   const cap = wearing('cap', {
     garment: 'hat', material: 'canvas', ease: 0.01, from: FROM, gores: 6, rgba: [0.09, 0.13, 0.3, 1], sculpt: capFront,
-    // Its band level under the peak (a board sewn to a band that dipped
-    // either side of it tilted up with it), then lower round the back, down
-    // under the skull, as a cap sits: square to the head's line, it pitched
-    // down at the front and the peak with it, over the eyes. A fitted cap,
-    // closed at the back (an arch cut for a strap, with no strap, read as a
-    // bite out of it).
-    edges: [{ along: 'top', profile: { points: Array.from({ length: 49 }, (_, k) => { const t = k / 48, from = Math.max(0, (Math.min(t, 1 - t) - CAP_LEVEL) / (0.5 - CAP_LEVEL)); return [r4(t), r4((CAP_BACK * (1 - Math.cos(Math.PI * from))) / 2)]; }) } }],
+    curves: [{ name: 'closure', kind: 'cut', closed: true, points: closure }, { name: 'button', kind: 'line', points: [crownTop(-0.006), crownTop(0.006)] }],
+    trims: [
+      { kind: 'stitch', along: 'closure', offset: 0.003, rgba: [0.05, 0.08, 0.2, 1] },
+      { kind: 'button', along: 'button', size: 0.02, spacing: 1, rgba: [0.09, 0.13, 0.3, 1] },
+    ],
+    // Under the peak its band drops at the sides as the peak curves down
+    // (sewn to a level band, the curved peak's seam pulled it straight), then
+    // lower still round the back, down under the skull, as a cap sits: square
+    // to the head's line, it pitched down at the front and the peak with it,
+    // over the eyes. A strap across the opening at the back (curves).
+    edges: [{ along: 'top', profile: { points: Array.from({ length: 49 }, (_, k) => { const t = k / 48, tau = Math.min(t, 1 - t); return [r4(t), r4(capDrop(tau))]; }) } }],
     attached: [{
-      name: 'peak', outline: PEAK, sewn: [0, PEAK_ARC], along: 'top', span: [0.82, 0.18], rgba: [0.09, 0.13, 0.3, 1],
+      name: 'peak', outline: PEAK, sewn: [0, PEAK_ARC], along: 'top', span: [r4(1 - CAP_PEAK), CAP_PEAK], bend: CAP_CURVE, rgba: [0.09, 0.13, 0.3, 1],
       // A plastic board inside it (polyethylene, about a gigapascal): it holds itself out.
       material: 'canvas', materialOverrides: { thickness: 0.0015, young: 1e9, arealDensity: 0.9 },
     }],
@@ -160,8 +189,8 @@ function pufferLook(x: number): SceneNode[] {
   // Undone at the neck, the collar's ends folded back by the wearer (pulled,
   // then let go), the neckerchief showing between them.
   puffer.cloth!.arrange = [
-    { piece: 'collar', at: [-0.428, 0.099], to: [-0.065, -0.15, 1.44] },
-    { piece: 'collar', at: [0.425, 0.099], to: [0.065, -0.15, 1.44] },
+    { piece: 'collar', at: [-0.428, 0.099], to: [-0.08, -0.15, 1.41] },
+    { piece: 'collar', at: [0.425, 0.099], to: [0.08, -0.15, 1.41] },
   ];
   return [form, neckerchief(form), shorts, puffer, cap];
 }
@@ -219,6 +248,8 @@ function peakOutline(half: number, deep: number, arcLen: number, depth: number):
 function neckerchief(form: SceneNode): SceneNode {
   const fm = form.bodyForm!, L = bodyLandmarks(fm);
   const z = L.hpsZ - 0.035, r = fm.neck / (2 * Math.PI) + 0.012, C = 2 * Math.PI * r, band = 0.045;
+  /** Each end of the knot, across. */
+  const TAIL = 0.03;
   const cy = bodyFormSection(fm, z).centreY, pos = form.pos ?? [0, 0, 0];
   const pts = (q: number[][]) => q as UV[];
   const piece: ClothPiece = {
@@ -226,16 +257,36 @@ function neckerchief(form: SceneNode): SceneNode {
     edges: [
       { id: 'top', pts: pts([[C, 0], [0, 0]]) },
       { id: 'endA', pts: pts([[0, 0], [0, -band]]) },
-      { id: 'lowA', pts: pts([[0, -band], [C / 2 - 0.13, -band]]) },
+      { id: 'knotA', pts: pts([[0, -band], [TAIL, -band]]) },
+      { id: 'lowA', pts: pts([[TAIL, -band], [C / 2 - 0.13, -band]]) },
       { id: 'point', pts: pts([[C / 2 - 0.13, -band], [C / 2, -0.2], [C / 2 + 0.13, -band]]) },
-      { id: 'lowB', pts: pts([[C / 2 + 0.13, -band], [C, -band]]) },
+      { id: 'lowB', pts: pts([[C / 2 + 0.13, -band], [C - TAIL, -band]]) },
+      { id: 'knotB', pts: pts([[C - TAIL, -band], [C, -band]]) },
       { id: 'endB', pts: pts([[C, -band], [C, 0]]) },
     ],
     // Round the neck from the back, the point at the front; flaring a little below, over the collarbones.
     placement: { kind: 'wrap', origin: [pos[0], pos[1] + cy, z], axis: [0, 0, 1], ref: [0, 1, 0], radius: r, taper: -0.35 },
   };
-  const seams: ClothSeam[] = [{ name: 'knot', a: [{ piece: 'bandana', edge: 'endA' }], b: [{ piece: 'bandana', edge: 'endB', reversed: true }] }];
-  return { id: 'neckerchief', name: 'neckerchief', pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces: [piece], seams, material: 'jersey', spacing: 0.012, sewTime: 0.5, layer: 0 } } as unknown as SceneNode;
+  // The knot's two ends hanging below it, out of the band at the back (sewn
+  // on under it; left as a seam alone, the back read as a tube split down it).
+  const back = [pos[0], pos[1] + cy + r + 0.012, z - band], down = [0, 0.25, -0.97];
+  const tail = (name: string, x0: number, lean: number): ClothPiece => ({
+    name, rgba: piece.rgba, pattern: piece.pattern,
+    edges: [
+      { id: 'top', pts: pts([[0, 0], [-TAIL, 0]]) },
+      { id: 'side1', pts: pts([[-TAIL, 0], [-TAIL / 2 - lean - 0.008, -0.075]]) },
+      { id: 'tip', pts: pts([[-TAIL / 2 - lean - 0.008, -0.075], [-TAIL / 2 - lean + 0.008, -0.07]]) },
+      { id: 'side2', pts: pts([[-TAIL / 2 - lean + 0.008, -0.07], [0, 0]]) },
+    ],
+    placement: { kind: 'plane', origin: [back[0] + x0, back[1], back[2]], uAxis: [1, 0, 0], vAxis: down },
+  });
+  const tails = [tail('tailA', 0, 0.006), tail('tailB', TAIL, -0.006)];
+  const seams: ClothSeam[] = [
+    { name: 'knot', a: [{ piece: 'bandana', edge: 'endA' }], b: [{ piece: 'bandana', edge: 'endB', reversed: true }] },
+    { name: 'tailA', a: [{ piece: 'tailA', edge: 'top' }], b: [{ piece: 'bandana', edge: 'knotA' }] },
+    { name: 'tailB', a: [{ piece: 'tailB', edge: 'top' }], b: [{ piece: 'bandana', edge: 'knotB' }] },
+  ];
+  return { id: 'neckerchief', name: 'neckerchief', pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces: [piece, ...tails], seams, material: 'jersey', spacing: 0.012, sewTime: 0.5, layer: 0 } } as unknown as SceneNode;
 }
 
 /** A cut-off hem: longer and shorter all round, irregularly (a regular one read as lace). */

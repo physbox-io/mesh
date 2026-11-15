@@ -906,7 +906,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (sharedAt.size) anyShared = true;
       const pm = { ...(CLOTH_MATERIALS[piece.material ?? materialName] ?? material), ...(piece.materialOverrides ?? {}) };
       const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bend = (pm.young * pm.thickness ** 3) / (material.young * material.thickness ** 3);
-      if ((pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS) boards.push({ particles: piece.uv.map((_, i) => particleOf(i)), rest: piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]), tris: piece.tris, held: [...piece.tacks.map((tk) => tk.local), ...(piece.shared ?? []).map((sh) => sh.local)] });
+      if ((pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS) boards.push({ particles: piece.uv.map((_, i) => particleOf(i)), rest: piece.rest3 ?? piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]), tris: piece.tris, held: [...piece.tacks.map((tk) => tk.local), ...(piece.shared ?? []).map((sh) => sh.local)] });
       // Cut short of where it starts, if drawn in: its flat length is its rest.
       const uv = piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]);
       piece.start.forEach((q, i) => { if (own.has(i)) { x0.push(q); mass.push(0); } });
@@ -925,7 +925,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         const m = (pm.arealDensity * flatArea(uv[i], uv[j], uv[l])) / 3;
         mass[pi] += m; mass[pj] += m; mass[pl] += m;
       }
-      if (material.bending) addBends(piece.tris, uv, particleOf, bends, bend, piece.pressed ? piece.start.map((q, i) => (sharedAt.has(i) ? x0[particleOf(i)] : q)) : undefined);
+      if (material.bending) addBends(piece.tris, uv, particleOf, bends, bend, piece.pressed ? piece.start.map((q, i) => (sharedAt.has(i) ? x0[particleOf(i)] : q)) : piece.rest3);
       // Across the seam where it is tacked on: bending from its first row of
       // triangles into the cloth under it, at its own stiffness, resting at
       // the angle it starts at. Tacked points alone hinge freely, and a stiff

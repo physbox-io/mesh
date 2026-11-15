@@ -69,6 +69,8 @@ export interface AddOnPiece {
   shared?: { local: number; particle?: number; piece?: string; at?: number }[];
   /** Bends rest as it starts, not flat: pressed, or interfaced (a collar's roll, a lapel turned back). */
   pressed?: boolean;
+  /** Its rest shape where not flat (GarmentAttachment.bend): a point per uv, metres, in its own frame. */
+  rest3?: number[][];
   /**
    * Cut in one with this panel: `uv` is in the panel's flat frame, and
    * `joinPath` (from its first shared point round its own edges to its last)

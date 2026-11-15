@@ -13,12 +13,12 @@
  * stiff its material was set (a hundred times stiffer changed nothing): each
  * pass undid only a row's worth of what its weight did. Matched as a whole
  * and in small neighbourhoods each substep, it keeps its flat shape: a board
- * here is flat, as cut (one set in a curve is not modelled yet).
+ * here rests flat as cut, or as it is set in a curve (a pre-curved peak).
  *
  * Pure: positions in, positions out.
  */
 
-/** A board as the model hands it over: its particles, its flat pattern (metres), its triangles (local). */
+/** A board as the model hands it over: its particles, its shape at rest (metres: its flat pattern, or 3D where it is set in a curve), its triangles (local). */
 export interface Board {
   particles: number[];
   rest: number[][];
@@ -33,7 +33,7 @@ export const BOARD_STIFFNESS = 0.05;
 /** Each point's neighbourhood: this many rings of triangles round it. */
 const RINGS = 1;
 
-interface Cluster { ids: Int32Array; rest: Float64Array; weight?: Float64Array; /** Its last rotation, a unit quaternion (w, x, y, z): where the next fit starts. */ q: Float64Array }
+interface Cluster { ids: Int32Array; /** Rest offsets from its centre, 3 per point. */ rest: Float64Array; /** Its rest shape is flat (z 0 throughout): its third axis made square to the other two. */ flat: boolean; weight?: Float64Array; /** Its last rotation, a unit quaternion (w, x, y, z): where the next fit starts. */ q: Float64Array }
 
 export class BoardShapes {
   private clusters: Cluster[] = [];
@@ -54,20 +54,19 @@ export class BoardShapes {
       // The whole board as one, too: rigid across it at once (by small
       // neighbourhoods alone its weight still swung it down, a little each
       // pass; by the whole alone, as much as with nothing).
-      if (m >= 3) {
-        const cu = b.rest.reduce((acc, q) => acc + q[0], 0) / m, cv = b.rest.reduce((acc, q) => acc + q[1], 0) / m, rest = new Float64Array(2 * m);
-        b.rest.forEach((q, k) => { rest[2 * k] = q[0] - cu; rest[2 * k + 1] = q[1] - cv; });
-        this.clusters.push({ ids: Int32Array.from(b.particles), rest, q: Float64Array.of(1, 0, 0, 0) });
-      }
+      const flat = b.rest.every((q) => !q[2]);
+      const restOf = (ids: number[]) => {
+        const c = [0, 1, 2].map((k) => ids.reduce((acc, j) => acc + (b.rest[j][k] ?? 0), 0) / ids.length), rest = new Float64Array(3 * ids.length);
+        ids.forEach((j, k) => { for (let d = 0; d < 3; d++) rest[3 * k + d] = (b.rest[j][d] ?? 0) - c[d]; });
+        return rest;
+      };
+      if (m >= 3) this.clusters.push({ ids: Int32Array.from(b.particles), rest: restOf(b.particles.map((_, k) => k)), flat, q: Float64Array.of(1, 0, 0, 0) });
       for (let i = 0; i < m; i++) {
         let ring = new Set<number>([i]);
         for (let r = 0; r < RINGS; r++) { const next = new Set(ring); for (const j of ring) for (const k of nbr[j]) next.add(k); ring = next; }
         const ids = [...ring];
         if (ids.length < 3) continue;
-        const cu = ids.reduce((s, j) => s + b.rest[j][0], 0) / ids.length, cv = ids.reduce((s, j) => s + b.rest[j][1], 0) / ids.length;
-        const rest = new Float64Array(2 * ids.length);
-        ids.forEach((j, k) => { rest[2 * k] = b.rest[j][0] - cu; rest[2 * k + 1] = b.rest[j][1] - cv; });
-        this.clusters.push({ ids: Int32Array.from(ids, (j) => b.particles[j]), rest, q: Float64Array.of(1, 0, 0, 0) });
+        this.clusters.push({ ids: Int32Array.from(ids, (j) => b.particles[j]), rest: restOf(ids), flat, q: Float64Array.of(1, 0, 0, 0) });
         for (const j of ids) members.add(b.particles[j]);
       }
     }
@@ -85,32 +84,34 @@ export class BoardShapes {
     const members = this.members, A = this.A, R = this.R;
     for (let k = 0; k < members.length; k++) { const i = members[k]; goal[3 * i] = goal[3 * i + 1] = goal[3 * i + 2] = 0; count[i] = 0; }
     for (let ci = 0; ci < this.clusters.length; ci++) {
-      const { ids, rest, weight, q } = this.clusters[ci];
+      const { ids, rest, weight, q, flat } = this.clusters[ci];
       const m = ids.length;
       let cx = 0, cy = 0, cz = 0, ws = 0;
       for (let k = 0; k < m; k++) { const i = 3 * ids[k], wk = weight ? weight[k] : 1; cx += wk * x[i]; cy += wk * x[i + 1]; cz += wk * x[i + 2]; ws += wk; }
       cx /= ws; cy /= ws; cz /= ws;
       // The flat pattern's centre the same way.
-      let ru = 0, rv = 0;
-      if (weight) { for (let k = 0; k < m; k++) { ru += weight[k] * rest[2 * k]; rv += weight[k] * rest[2 * k + 1]; } ru /= ws; rv /= ws; }
-      // A = sum (x - c) r^T, its two columns from the flat pattern's u and v.
+      let ru = 0, rv = 0, rw = 0;
+      if (weight) { for (let k = 0; k < m; k++) { ru += weight[k] * rest[3 * k]; rv += weight[k] * rest[3 * k + 1]; rw += weight[k] * rest[3 * k + 2]; } ru /= ws; rv /= ws; rw /= ws; }
+      // A = sum (x - c) r^T.
       A.fill(0);
       for (let k = 0; k < m; k++) {
-        const wk = weight ? weight[k] : 1, i = 3 * ids[k], dx = wk * (x[i] - cx), dy = wk * (x[i + 1] - cy), dz = wk * (x[i + 2] - cz), u = rest[2 * k] - ru, v = rest[2 * k + 1] - rv;
-        A[0] += dx * u; A[1] += dx * v; A[3] += dy * u; A[4] += dy * v; A[6] += dz * u; A[7] += dz * v;
+        const wk = weight ? weight[k] : 1, i = 3 * ids[k], dx = wk * (x[i] - cx), dy = wk * (x[i + 1] - cy), dz = wk * (x[i + 2] - cz), u = rest[3 * k] - ru, v = rest[3 * k + 1] - rv, t = rest[3 * k + 2] - rw;
+        A[0] += dx * u; A[1] += dx * v; A[2] += dx * t; A[3] += dy * u; A[4] += dy * v; A[5] += dy * t; A[6] += dz * u; A[7] += dz * v; A[8] += dz * t;
       }
-      // The third column square to both, so the fit is a rotation, not a reflection.
-      A[2] = A[3] * A[7] - A[6] * A[4]; A[5] = A[6] * A[1] - A[0] * A[7]; A[8] = A[0] * A[4] - A[3] * A[1];
-      const s3 = Math.sqrt(Math.sqrt((A[0] * A[0] + A[3] * A[3] + A[6] * A[6]) * (A[1] * A[1] + A[4] * A[4] + A[7] * A[7])));
-      const l3 = Math.sqrt(A[2] * A[2] + A[5] * A[5] + A[8] * A[8]);
-      if (l3 < 1e-18 || s3 < 1e-12) continue;
-      A[2] *= s3 / l3; A[5] *= s3 / l3; A[8] *= s3 / l3;
+      if (flat) {
+        // Flat at rest: the third column square to the other two, so the fit is a rotation, not a reflection.
+        A[2] = A[3] * A[7] - A[6] * A[4]; A[5] = A[6] * A[1] - A[0] * A[7]; A[8] = A[0] * A[4] - A[3] * A[1];
+        const s3 = Math.sqrt(Math.sqrt((A[0] * A[0] + A[3] * A[3] + A[6] * A[6]) * (A[1] * A[1] + A[4] * A[4] + A[7] * A[7])));
+        const l3 = Math.sqrt(A[2] * A[2] + A[5] * A[5] + A[8] * A[8]);
+        if (l3 < 1e-18 || s3 < 1e-12) continue;
+        A[2] *= s3 / l3; A[5] *= s3 / l3; A[8] *= s3 / l3;
+      }
       rotationOf(A, q, R);
       for (let k = 0; k < m; k++) {
-        const i = ids[k], u = rest[2 * k] - ru, v = rest[2 * k + 1] - rv;
-        goal[3 * i] += cx + R[0] * u + R[1] * v;
-        goal[3 * i + 1] += cy + R[3] * u + R[4] * v;
-        goal[3 * i + 2] += cz + R[6] * u + R[7] * v;
+        const i = ids[k], u = rest[3 * k] - ru, v = rest[3 * k + 1] - rv, t = rest[3 * k + 2] - rw;
+        goal[3 * i] += cx + R[0] * u + R[1] * v + R[2] * t;
+        goal[3 * i + 1] += cy + R[3] * u + R[4] * v + R[5] * t;
+        goal[3 * i + 2] += cz + R[6] * u + R[7] * v + R[8] * t;
         count[i]++;
       }
     }
