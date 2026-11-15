@@ -183,12 +183,11 @@ function vertexNormals(mesh: PolyMesh, faces: number[][]): number[] {
       dy += coeff * ey;
       dz += coeff * ez;
     }
-    let dLen = Math.hypot(dx, dy, dz);
+    const dLen = Math.hypot(dx, dy, dz);
     if (dLen < 1e-9) {
       dx = gx / gLen;
       dy = gy / gLen;
       dz = gz / gLen;
-      dLen = 1;
     } else if (dLen > MAX_MITER) {
       const scale = MAX_MITER / dLen;
       dx *= scale;

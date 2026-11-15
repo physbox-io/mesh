@@ -9,7 +9,7 @@ import {
 import { simulateMilling } from '../src/utils/cutSimulation';
 import { reliefSimulationTools, runSimulationJob, simulateStock } from '../src/utils/simulatedPart';
 import { cutSetups } from '../src/utils/multiSetupMesh';
-import { describeTurn, parseSetups, setupFrame } from '../src/utils/orient';
+import { describeTurn, setupFrame } from '../src/utils/orient';
 import { setupDiagramSvg } from '../src/utils/setupDiagram';
 import { mergeConvexTiers } from '../src/utils/solidDecomposition';
 import { solidify, isClosed } from '../src/utils/solidify';

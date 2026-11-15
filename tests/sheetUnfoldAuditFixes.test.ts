@@ -467,26 +467,6 @@ describe('Sheet Unfold Outputter Audit Regression Suite (U-C1 .. U-L1)', () => {
     //   Attach a 4th face to Front Wall along x=50, z=0..40 going in +X (x in [50..90], y=0, z in [0..40], i.e. coplanar extension? No, bent 90 deg from Front Wall so in 3D it lies at x=50, y in [0..40], z in [0..40] — wait that's Right Wall itself!).
     //   Instead: bend Face 3 by -90 deg (valley) from Front Wall along x=50, z=0..40 so in 3D Face 3 goes to x=50, y in [-40..0], z in [0..40]!
     //   Look where Face 3 unfolds in 2D: off Front Wall's right edge x=50, y in [-40..0] -> Face 3 lands at [50..90, -40..0], whose top edge y=0, x in [50..90] COINCIDES AT ZERO WIDTH in 2D with Right Wall's bottom edge [50..90, 0]!!
-    const lat = createLattice(0.001);
-    const p00 = vertexAt(lat, 0, 0, 0);
-    const p50 = vertexAt(lat, 50, 0, 0);
-    const p55 = vertexAt(lat, 50, 50, 0);
-    const p05 = vertexAt(lat, 0, 50, 0);
-
-    const f0 = vertexAt(lat, 0, 0, 40);
-    const f5 = vertexAt(lat, 50, 0, 40);
-    const r5 = vertexAt(lat, 50, 50, 40);
-    const wing0 = vertexAt(lat, 50, -40, 0);
-    const wing4 = vertexAt(lat, 50, -40, 40);
-
-    // Floor (-Z normal): (0,0,0)->(0,50,0)->(50,50,0)->(50,0,0)
-    addFace(lat, [p00, p05, p55, p50]);
-    // Front wall (-Y normal): (0,0,0)->(50,0,0)->(50,0,40)->(0,0,40)
-    addFace(lat, [p00, p50, f5, f0]);
-    // Right wall (+X normal): (50,0,0)->(50,50,0)->(50,50,40)->(50,0,40)
-    addFace(lat, [p50, p55, r5, f5]);
-    // Outward wing from Front wall at x=50 going to y=-40 (+X normal): (50,-40,0)->(50,0,0)?? Wait: shares edge (p50, f5) with BOTH Front wall and Right wall? Avoid non-manifold 3-face edge: start wing at x=49? No, start Right wall on Floor edge y=50 (Back wall)!
-    // Wait: if Floor has Front wall (y=0, length 50) and Right wall (x=50, y in [1..50]), let's make Floor a 5-gon or L-step so every edge is 2-manifold!
     const lat2 = createLattice(0.001);
     // Step along zero-width relief slit:
     //   Face A (Floor): [0..50] x [0..50], z=0 (-Z)
