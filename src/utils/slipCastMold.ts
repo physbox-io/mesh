@@ -47,6 +47,12 @@ export interface SlipMoldOptions {
   spareHeightMm: number;
   /** The spare's narrowest mouth, mm: a part narrower at the top than this gets a funnel. */
   spareDiaMm: number;
+  /**
+   * Where the spare goes, in plan, mm, world frame: the inside whose mouth
+   * holds the point, else the part's top there. Null: over the largest
+   * inside's mouth, or the part's top when nothing is filled.
+   */
+  spareAtMm?: [number, number] | null;
   /** Whatever is enclosed in plan (the inside of a vessel) is cavity, so no plaster core is left in it. */
   fillInside: boolean;
   /** Linear shrink of the clay from wet to fired, %; null for the clay's own. */
@@ -127,6 +133,8 @@ export interface SlipMoldReport {
   footMm: [number, number, number];
   /** The top of the part (grown) in the mold, mm: the spare above it is trimmed off a casting. */
   partTopMm: number;
+  /** Where the spare stands: its axis in plan and the height of the mouth it feeds, mm. */
+  spareAtMm: [number, number, number];
   /** Draft on the part's walls, each piece's own way, degrees. */
   draftDeg: number;
   shrinkPercent: number;
@@ -149,6 +157,8 @@ export interface SlipMold {
   slip: CastMaterialId;
   /** The cavity, spare included, grown for shrink: what the slip fills. */
   cavity: SlipMesh;
+  /** The spare less the part standing in it: what is trimmed off a casting. */
+  spare: SlipMesh;
   report: SlipMoldReport;
 }
 
@@ -317,24 +327,98 @@ function insideFill(wasm: ManifoldToplevel, part: Manifold, zMin: number, zTop: 
   return fill;
 }
 
+const fmtMm = (p: readonly number[]) => `(${p.map((v) => v.toFixed(0)).join(', ')} mm)`;
+
+interface SpareChoice {
+  spare: Manifold;
+  centre: [number, number];
+  /** The height the spare stands on: the mouth it feeds, mm. */
+  footZ: number;
+  warnings: string[];
+}
+
 /**
- * The spare: from the part's top outline at the top up to the mold's top
- * face, widening to at least `diaMm` across, so the slip always has a mouth
- * to go in by and enough above the part to keep the level up.
+ * The spare: from the outline of the opening it feeds up to the mold's top
+ * face, widening to at least `diaMm` across, so the slip has a mouth to go in
+ * by and enough above the part to keep the level up.
+ *
+ * It feeds an opening, not the highest point. The slip has to drain back out
+ * of the inside through the spare, so with an inside filled (`inside`, the
+ * reachable inside of a vessel, less the part) it stands on the mouth of the largest inside;
+ * any other inside is warned of, since plaster roofs it over and it casts
+ * solid. With nothing filled it stands on the part's top. `at` (plan, mm)
+ * picks the inside whose mouth holds that point, or else the part's top
+ * surface there.
  */
-function spare(wasm: ManifoldToplevel, cavity: Manifold, zTop: number, zBlockTop: number, diaMm: number): { spare: Manifold; centre: [number, number] } {
+function spare(
+  wasm: ManifoldToplevel, filled: Manifold, inside: Manifold | null, zTop: number, zBlockTop: number, diaMm: number, at: [number, number] | null,
+): SpareChoice {
   const e = 0.5;
-  const top = cavity.slice(zTop - e);
-  let foot = top.hull();
-  free(top);
+  const warnings: string[] = [];
+  const insides = inside ? inside.decompose().filter((c) => c.volume() > 1) : [];
+  const mouthOf = (c: Manifold) => {
+    const z = c.boundingBox().max[2];
+    const cs = c.slice(z - e);
+    return { z, cs, polys: cs.toPolygons() };
+  };
+  const mouths = insides.map(mouthOf);
+
+  let chosen = -1;
+  let footZ = zTop;
+  let foot: CrossSection;
+  if (at) {
+    chosen = mouths.findIndex((m) => insideContours(m.polys, at[0], at[1]));
+  } else if (insides.length) {
+    insides.forEach((c, i) => { if (chosen < 0 || c.volume() > insides[chosen].volume()) chosen = i; });
+  }
+  /** The part's outline pieces at a height that a test keeps, hulled. */
+  const outlineAt = (z: number, keep: (piece: CrossSection) => boolean): CrossSection | null => {
+    const cs = filled.slice(z);
+    const kept = cs.decompose().filter(keep);
+    free(cs);
+    if (!kept.length) return null;
+    const u = wasm.CrossSection.union(kept);
+    const h = u.hull();
+    free(u, ...kept);
+    return h;
+  };
+  if (chosen >= 0) {
+    const m = mouths[chosen];
+    footZ = m.z;
+    // The rim round the mouth: the outline pieces at the mouth that hold it.
+    foot = outlineAt(footZ - e, (piece) => {
+      const meet = piece.intersect(m.cs);
+      const a = meet.area();
+      free(meet);
+      return a > 1e-3;
+    }) ?? m.cs.hull();
+  } else if (at) {
+    const b = filled.boundingBox();
+    const col = wasm.Manifold.cylinder(b.max[2] - b.min[2] + 2, 0.5, 0.5, 12).translate([at[0], at[1], b.min[2] - 1]);
+    const hit = filled.intersect(col);
+    free(col);
+    if (hit.isEmpty()) {
+      free(hit);
+      throw new Error(`The spare position ${fmtMm(at)} is not over the part.`);
+    }
+    footZ = hit.boundingBox().max[2];
+    free(hit);
+    foot = outlineAt(footZ - e, (piece) => insideContours(piece.toPolygons(), at[0], at[1]))
+      ?? wasm.CrossSection.circle(0.5, 16).translate(at);
+  } else {
+    const top = filled.slice(zTop - e);
+    foot = top.hull();
+    free(top);
+  }
+
   let cx: number, cy: number;
   if (foot.area() < 0.5) {
-    const b = cavity.boundingBox();
-    cx = (b.min[0] + b.max[0]) / 2; cy = (b.min[1] + b.max[1]) / 2;
+    const fb = foot.bounds();
+    cx = (fb.min[0] + fb.max[0]) / 2; cy = (fb.min[1] + fb.max[1]) / 2;
     free(foot);
     foot = wasm.CrossSection.circle(0.5, 16).translate([cx, cy]);
   } else {
-    // The area-weighted middle of the top's outline.
+    // The area-weighted middle of the foot's outline.
     let ax = 0, ay = 0, aa = 0;
     for (const c of foot.toPolygons()) {
       for (let i = 0; i < c.length; i++) {
@@ -347,11 +431,31 @@ function spare(wasm: ManifoldToplevel, cavity: Manifold, zTop: number, zBlockTop
   }
   const mouthCircle = wasm.CrossSection.circle(diaMm / 2, 64).translate([cx, cy]);
   const mouth = wasm.CrossSection.hull([foot, mouthCircle]);
-  const bottomSlab = foot.extrude(0.01).translate([0, 0, zTop - e]);
+  const bottomSlab = foot.extrude(0.01).translate([0, 0, footZ - e]);
   const topSlab = mouth.extrude(1).translate([0, 0, zBlockTop]);
   const s = wasm.Manifold.hull([bottomSlab, topSlab]);
   free(foot, mouthCircle, mouth, bottomSlab, topSlab);
-  return { spare: s, centre: [cx, cy] };
+
+  // Every inside the spare does not reach is roofed in plaster: the slip in
+  // it cannot pour out, and it casts solid.
+  mouths.forEach((m, i) => {
+    if (i === chosen) return;
+    const meet = s.intersect(insides[i]);
+    const reached = meet.volume() > 1;
+    free(meet);
+    if (reached) return;
+    const mb = m.cs.bounds();
+    warnings.push(`The opening at ${fmtMm([(mb.min[0] + mb.max[0]) / 2, (mb.min[1] + mb.max[1]) / 2, m.z])} has no way out to the spare, so the slip in it cannot drain and it casts solid: put the spare over it, or turn the part.`);
+  });
+  // Part standing up inside the spare is cut off with it.
+  const above = wasm.Manifold.cube([1e5, 1e5, zBlockTop - footZ + 2]).translate([-5e4, -5e4, footZ + 1]);
+  const rising = filled.intersect(s).intersect(above);
+  if (rising.volume() > 1) {
+    const rb = rising.boundingBox();
+    warnings.push(`The part rises into the spare at ${fmtMm([(rb.min[0] + rb.max[0]) / 2, (rb.min[1] + rb.max[1]) / 2, rb.max[2]])}: it is trimmed off with the spare and does not cast there. Lower it, or move the spare.`);
+  }
+  free(above, rising, ...insides, ...mouths.map((m) => m.cs));
+  return { spare: s, centre: [cx, cy], footZ, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -851,15 +955,16 @@ function build(
 
   // --- The cavity -------------------------------------------------------------
   let filled = part;
-  if (o.fillInside) {
-    const fill = insideFill(wasm, part, zMin, zTop);
-    if (fill) {
-      filled = part.add(fill);
-      free(fill, part);
-    }
-  }
+  const fill = o.fillInside ? insideFill(wasm, part, zMin, zTop) : null;
+  if (fill) filled = part.add(fill);
   const zBlockTop = zTop + Math.max(5, o.spareHeightMm);
-  const sp = spare(wasm, filled, zTop, zBlockTop, Math.max(5, o.spareDiaMm));
+  const spareAt = o.spareAtMm && o.spareAtMm.every(Number.isFinite) ? o.spareAtMm : null;
+  // The inside itself: the fill less the part (a fill slab borrows the part's
+  // outlines next to a filled slice, so it holds lumps of wall too).
+  const inside = fill ? fill.subtract(part) : null;
+  const sp = spare(wasm, filled, inside, zTop, zBlockTop, Math.max(5, o.spareDiaMm), spareAt);
+  free(fill, inside, filled !== part ? part : null);
+  warnings.push(...sp.warnings);
   const axis = sp.centre;
 
   // --- The base plug ----------------------------------------------------------
@@ -912,6 +1017,8 @@ function build(
     split.total = again.total;
   }
   const cavity = filled.add(sp.spare);
+  // What a casting is trimmed of: the spare, less the part standing in it.
+  const spareOnly = sp.spare.subtract(filled);
   free(sp.spare);
 
   // --- The block --------------------------------------------------------------
@@ -1095,6 +1202,7 @@ function build(
     scale: +scale.toFixed(4),
     footMm: [+foot[0].toFixed(3), +foot[1].toFixed(3), +foot[2].toFixed(3)],
     partTopMm: +zTop.toFixed(3),
+    spareAtMm: [+axis[0].toFixed(2), +axis[1].toFixed(2), +sp.footZ.toFixed(2)],
     draftDeg,
     shrinkPercent: shrink,
     blockMm,
@@ -1106,7 +1214,7 @@ function build(
     slipName: slip.label,
     warnings,
   };
-  const out: SlipMold = { pieces, slip: o.slip, cavity: meshOf(cavity), report };
-  free(filled, cavity, plasterAll, block, outline, plugTop, plugBottom, baseRegion);
+  const out: SlipMold = { pieces, slip: o.slip, cavity: meshOf(cavity), spare: meshOf(spareOnly), report };
+  free(filled, cavity, spareOnly, plasterAll, block, outline, plugTop, plugBottom, baseRegion);
   return out;
 }

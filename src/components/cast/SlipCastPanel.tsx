@@ -175,6 +175,12 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
             Fired: {castNow.sizeMm[0]} × {castNow.sizeMm[1]} × {castNow.sizeMm[2]} mm, {castNow.weightG} g. {castNow.notes.join('. ')}.
           </p>
         )}
+        {view === 'cast' && castNow?.warnings.map((w) => (
+          <p key={w} className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{w}</span>
+          </p>
+        ))}
 
         {failure || addError ? (
           <p className="text-red-600 dark:text-red-400">{failure ?? addError}</p>
@@ -226,6 +232,23 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
                 <option value="no">No</option>
               </select>
             </Field>
+            {([0, 1] as const).map((axis) => (
+              <Field key={axis} label={`Spare ${axis ? 'Y' : 'X'} (mm)`} hint="Where the spare stands, in plan. Empty: over the opening into the inside, so the slip drains out of it.">
+                <NumberInput
+                  step={1}
+                  allowEmpty
+                  placeholder={r ? String(Math.round(r.spareAtMm[axis])) : 'auto'}
+                  value={options.spareAtMm?.[axis] ?? undefined}
+                  onChange={(v) => setOptions((prev) => {
+                    const cur: [number, number] = prev.spareAtMm ? [...prev.spareAtMm] : [r?.spareAtMm[0] ?? 0, r?.spareAtMm[1] ?? 0];
+                    if (v === undefined) return { ...prev, spareAtMm: null };
+                    cur[axis] = v;
+                    return { ...prev, spareAtMm: cur };
+                  })}
+                  className={inputClass}
+                />
+              </Field>
+            ))}
             {NUMBER_FIELDS.map((f) => (
               <Field key={f.key} label={f.label} hint={f.hint}>
                 <NumberInput min={f.min} step={f.step} value={options[f.key]} onChange={(v) => set(f.key, v)} className={inputClass} />

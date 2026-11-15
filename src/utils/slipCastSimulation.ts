@@ -25,6 +25,8 @@ import type { SlipMesh } from './slipCastMold';
 export interface SlipCastInput {
   /** The mold's cavity, spare included (SlipMold.cavity). */
   cavity: SlipMesh;
+  /** The spare less the part in it (SlipMold.spare): trimmed off the casting. Absent: trimmed at partTopMm. */
+  spare?: SlipMesh;
   /** SlipMoldReport fields: the part's top, its foot and how much it was grown. */
   partTopMm: number;
   footMm: [number, number, number];
@@ -42,6 +44,8 @@ export interface SlipCastResult {
   firedWallMm: number;
   sizeMm: [number, number, number];
   notes: string[];
+  /** What goes wrong in this casting, each where it is (mold frame, mm). */
+  warnings: string[];
 }
 
 /** A usual porcelain cast builds 3-5 mm in 15-25 minutes. */
@@ -66,6 +70,7 @@ export function simulateSlipCast(wasm: ManifoldToplevel, input: SlipCastInput, w
     for (let k = 0; k < n; k++) outlines.push(keep(keep(cavity.slice(zMin + (k + 0.5) * dz)).simplify(0.02)));
     const reachSteps = Math.floor(t / dz);
     const slabs: Manifold[] = [];
+    const unbuilt: number[] = [];
     for (let k = 0; k < n; k++) {
       let liquid: CrossSection | null = null;
       for (let j = -reachSteps; j <= reachSteps && (liquid === null || !liquid.isEmpty()); j++) {
@@ -75,26 +80,68 @@ export function simulateSlipCast(wasm: ManifoldToplevel, input: SlipCastInput, w
         const here = at < 0 ? keep(wasm.CrossSection.square(0)) : keep(outlines[at].offset(-inset, 'Round', 2, 24));
         liquid = liquid ? keep(liquid.intersect(here)) : here;
       }
-      if (liquid && !liquid.isEmpty()) slabs.push(keep(keep(liquid.simplify(0.05)).extrude(dz + 0.02).translate([0, 0, zMin + k * dz - 0.01])));
+      if (!liquid || liquid.isEmpty()) continue;
+      // A degenerate outline extrudes to an invalid solid, and one invalid
+      // slab turns the whole union empty, which read as a solid casting.
+      const z0 = zMin + k * dz - 0.01;
+      let slab: Manifold | null = null;
+      for (const tol of [0.05, 0.2, 0.5]) {
+        const m = keep(keep(keep(liquid.simplify(tol)).extrude(dz + 0.02)).translate([0, 0, z0]));
+        if (m.status() === 'NoError') { slab = m; break; }
+      }
+      if (slab) slabs.push(slab);
+      else unbuilt.push(z0);
     }
-    const notes: string[] = [];
+    const warnings: string[] = [];
+    const at = (m: Manifold) => {
+      const mb = m.boundingBox();
+      return `(${[(mb.min[0] + mb.max[0]) / 2, (mb.min[1] + mb.max[1]) / 2, (mb.min[2] + mb.max[2]) / 2].map((v) => v.toFixed(0)).join(', ')} mm)`;
+    };
+    if (unbuilt.length) warnings.push(`The slip at ${unbuilt.length === 1 ? `z = ${unbuilt[0].toFixed(0)} mm` : `${unbuilt.length} heights from z = ${unbuilt[0].toFixed(0)} mm`} could not be modelled, so what drains is unsure there.`);
     let drained: Manifold | null = null;
     if (slabs.length) {
       // Only the slip that reaches the spare pours out; a pocket sealed off
       // by the wall stays in and sets solid.
       const liquid = keep(wasm.Manifold.union(slabs));
+      if (liquid.status() !== 'NoError') throw new Error(`The slip could not be modelled (${liquid.status()}).`);
       const parts = liquid.decompose().map(keep);
       const out = parts.filter((p) => p.boundingBox().max[2] >= zMax - 2 * dz);
-      if (out.length < parts.length) notes.push('Some slip is sealed off from the spare by the wall and sets solid there.');
+      // A sliver sealed in a corner is clay a hair thicker there; a pocket is
+      // a lump of solid clay.
+      // a lump of solid clay that cracks in the firing. A solid handle or
+      // knob is usual and is not warned of.
+      const sealed = parts.filter((p) => !out.includes(p) && p.volume() > 1000);
+      sealed.sort((a, b) => b.volume() - a.volume());
+      for (const p of sealed.slice(0, 5)) {
+        const ml = p.volume() / 1000;
+        warnings.push(`${ml < 10 ? ml.toFixed(1) : Math.round(ml).toLocaleString()} ml of slip at ${at(p)} is sealed off from the spare by the wall and sets solid there.`);
+      }
+      if (sealed.length > 5) warnings.push(`${sealed.length - 5} more pockets of slip are sealed off and set solid.`);
       drained = out.length ? keep(wasm.Manifold.union(out)) : null;
     }
-    if (!drained) notes.push(`The cavity is no wider than two walls (${t * 2} mm) anywhere: it casts solid.`);
+    if (!drained) warnings.push(`The cavity is no wider than two walls (${t * 2} mm) anywhere, or none of it reaches the spare: it casts solid.`);
     const cast = keep(drained ? cavity.subtract(drained) : cavity);
-    // The spare's clay is cut off at the rim.
-    const trimmed = keep(cast.trimByPlane([0, 0, -1], -input.partTopMm));
+    // The spare's clay is cut off: the spare itself, or at the rim.
+    let trimmed: Manifold;
+    if (input.spare && input.spare.faces.length) {
+      const sm = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(input.spare.positions), triVerts: Uint32Array.from(input.spare.faces) });
+      sm.merge();
+      const spareSolid = keep(new wasm.Manifold(sm));
+      trimmed = keep(spareSolid.status() === 'NoError' && !spareSolid.isEmpty()
+        ? cast.subtract(spareSolid)
+        : cast.trimByPlane([0, 0, -1], -input.partTopMm));
+    } else {
+      trimmed = keep(cast.trimByPlane([0, 0, -1], -input.partTopMm));
+    }
     const lumps = trimmed.decompose().map(keep);
     if (!lumps.length) throw new Error('Nothing is left once the spare is trimmed off.');
     let piece = lumps.reduce((a, c) => (c.volume() > a.volume() ? c : a));
+    // The casting comes out in pieces: the rest falls away when it is trimmed.
+    const loose = lumps.filter((l) => l !== piece && l.volume() > Math.max(20, t * t * t));
+    if (loose.length) warnings.push(`The casting comes out in ${loose.length + 1} pieces: ${loose.slice(0, 3).map((l) => `${Math.round(l.volume()).toLocaleString()} mm³ at ${at(l)}`).join(', ')} ${loose.length === 1 ? 'is' : 'are'} not joined to the rest.`);
+    // Nearly all the cavity set solid: whatever the reason, it is not a hollow casting.
+    const cavityBelow = keep(cavity.trimByPlane([0, 0, -1], -input.partTopMm)).volume();
+    if (drained && piece.volume() > 0.8 * cavityBelow) warnings.push(`The casting is ${Math.round((100 * piece.volume()) / Math.max(1, cavityBelow))}% of the cavity: it casts nearly solid, not hollow.`);
     const [fx, fy, fz] = input.footMm;
     const s = 1 / Math.max(1e-6, input.scale);
     piece = keep(piece.translate([-fx, -fy, -fz]).scale(s));
@@ -113,7 +160,8 @@ export function simulateSlipCast(wasm: ManifoldToplevel, input: SlipCastInput, w
       wallMm: t,
       firedWallMm: +(t * s).toFixed(2),
       sizeMm: [+(fb.max[0] - fb.min[0]).toFixed(1), +(fb.max[1] - fb.min[1]).toFixed(1), +(fb.max[2] - fb.min[2]).toFixed(1)],
-      notes: [`${slip.label}, ${t} mm wall as cast, fired ${(t * s).toFixed(1)} mm after ${slip.shrinkPercent ?? 0}% shrink`, ...notes],
+      notes: [`${slip.label}, ${t} mm wall as cast, fired ${(t * s).toFixed(1)} mm after ${slip.shrinkPercent ?? 0}% shrink`],
+      warnings,
     };
   } finally {
     for (const o of new Set(bin)) {

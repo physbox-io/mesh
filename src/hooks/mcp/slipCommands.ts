@@ -38,6 +38,11 @@ export const slipCommands: McpCommands = {
       const v = num(msg[key]);
       if (v !== undefined) options[key] = v;
     }
+    if (msg.spareAtMm !== undefined && msg.spareAtMm !== null) {
+      const a = msg.spareAtMm;
+      if (!Array.isArray(a) || a.length < 2 || !a.slice(0, 2).every((v: unknown) => num(v) !== undefined)) return { ok: false, error: 'spare_at_mm is [x, y] in scene mm.' };
+      options.spareAtMm = [a[0], a[1]];
+    }
     const shrink = num(msg.shrinkPercent);
     if (shrink !== undefined) options.shrinkPercent = shrink;
     const slipName = msg.slip ?? msg.castMaterial;
@@ -55,11 +60,13 @@ export const slipCommands: McpCommands = {
     const added = msg.apply === true ? await addSlipMoldToScene(subject.ids, options, mold) : null;
     // The casting it makes: the clay wall built, drained, trimmed and fired.
     let cast: Record<string, unknown> | undefined;
+    const castWarnings: string[] = [];
     if (msg.simulateCast === true) {
       const wall = num(msg.castWallMm) ?? DEFAULT_SLIP_WALL_MM;
       try {
         const result = await simulateSlipCastOffThread(slipCastInput(mold), wall);
         const sim = msg.apply === true ? await addSlipCastToScene(result, mold) : null;
+        castWarnings.push(...result.warnings.map((w) => `Cast: ${w}`));
         cast = { wallMm: result.wallMm, firedWallMm: result.firedWallMm, sizeMm: result.sizeMm, volumeMm3: result.volumeMm3, weightG: result.weightG, notes: result.notes, ...(sim ? { addedId: sim.id } : {}) };
       } catch (e) {
         cast = { error: (e as Error).message };
@@ -82,7 +89,7 @@ export const slipCommands: McpCommands = {
         ...(added ? { added: { plasterIds: added.plasterIds, caseIds: added.caseIds } } : {}),
         ...(cast ? { cast } : {}),
       },
-      warnings,
+      warnings: [...warnings, ...castWarnings],
       files: describeFiles(
         slipCaseStls(subject.label.replace(/[^A-Za-z0-9_-]+/g, '_'), mold).map((f) => ({ name: `${f.file}.stl`, bytes: f.bytes })),
         msg.includeFiles !== false,

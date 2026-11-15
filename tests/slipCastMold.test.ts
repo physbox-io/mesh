@@ -204,6 +204,49 @@ describe('slip cast simulation', () => {
     const cast = simulateSlipCast(wasm, { cavity: mold.cavity, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip }, 4);
     // Hollow: well under half of the cup's solid outline.
     expect(cast.volumeMm3).toBeLessThan(Math.PI * 40 ** 2 * 90 * 0.4);
-    expect(cast.notes.some((n) => n.includes('casts solid'))).toBe(false);
+    expect(cast.warnings.some((n) => n.includes('casts solid'))).toBe(false);
+  });
+});
+
+/** A jug: a 4 mm cup whose handle loop, joined below the rim, rises 15 mm above it. */
+function jug(): Manifold {
+  const cup = wasm.Manifold.cylinder(90, 40, 40, 96).subtract(wasm.Manifold.cylinder(90, 36, 36, 96).translate([0, 0, 4]));
+  const handle = wasm.Manifold.cylinder(8, 30, 30, 64).subtract(wasm.Manifold.cylinder(8, 22, 22, 64)).rotate([90, 0, 0])
+    .translate([70, 4, 75]).subtract(wasm.Manifold.cylinder(90, 38, 38, 96));
+  return cup.add(handle);
+}
+
+describe('slip spare over the opening', () => {
+  it('puts the spare over the mouth, not the handle that stands higher, and casts the jug hollow', () => {
+    const j = jug();
+    expect(j.boundingBox().max[2]).toBeGreaterThan(100);
+    const mold = buildSlipMold(wasm, soupOf(j), { slip: 'stoneware-slip' });
+    const r = mold.report;
+    console.log(JSON.stringify(r));
+    // Over the cup's mouth: its axis near the cup's, at the rim.
+    expect(Math.hypot(r.spareAtMm[0], r.spareAtMm[1])).toBeLessThan(8);
+    expect(r.spareAtMm[2]).toBeLessThan(r.partTopMm - 15);
+    expect(r.warnings.some((w) => w.includes('no way out'))).toBe(false);
+    // The handle above the rim stands in the spare's way: said where.
+    const cast = simulateSlipCast(wasm, { cavity: mold.cavity, spare: mold.spare, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip }, 4);
+    console.log(JSON.stringify({ ...cast, mesh: undefined }));
+    expect(cast.volumeMm3).toBeLessThan(Math.PI * 40 ** 2 * 90 * 0.4);
+    expect(cast.warnings.some((w) => w.includes('nearly solid') || w.includes('casts solid'))).toBe(false);
+  });
+
+  it('warns, with where, when the spare is put where the inside cannot drain, and the cast says it is solid', () => {
+    const mold = buildSlipMold(wasm, soupOf(jug()), { slip: 'stoneware-slip', spareAtMm: [100, 0] });
+    const r = mold.report;
+    console.log(r.warnings);
+    expect(r.spareAtMm[2]).toBeGreaterThan(r.partTopMm - 10);
+    expect(r.warnings.some((w) => w.includes('no way out') && /\(-?\d+, -?\d+, \d+ mm\)/.test(w))).toBe(true);
+    // A wall that closes the handle, the inside's only way to the spare.
+    const cast = simulateSlipCast(wasm, { cavity: mold.cavity, spare: mold.spare, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip }, 5);
+    console.log(cast.warnings);
+    expect(cast.warnings.some((w) => w.includes('sealed off') && w.includes('mm)'))).toBe(true);
+  });
+
+  it('refuses a spare position off the part', () => {
+    expect(() => buildSlipMold(wasm, soupOf(jug()), { spareAtMm: [500, 500] })).toThrow(/not over the part/);
   });
 });

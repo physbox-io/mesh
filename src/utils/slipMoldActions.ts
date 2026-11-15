@@ -43,7 +43,7 @@ export function slipCaseStls(name: string, mold: SlipMold): { file: string; byte
 /** The input a cast simulation takes from a planned mold. */
 export function slipCastInput(mold: SlipMold) {
   const r = mold.report;
-  return { cavity: mold.cavity, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip };
+  return { cavity: mold.cavity, spare: mold.spare, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip };
 }
 
 /** The simulated casting beside the part, as it stands; selected. */
@@ -57,6 +57,7 @@ export async function addSlipCastToScene(cast: SlipCastResult, mold: SlipMold) {
     details: [
       `${cast.weightG} g fired, ${cast.sizeMm[0]} × ${cast.sizeMm[1]} × ${cast.sizeMm[2]} mm`,
       ...cast.notes,
+      ...cast.warnings,
     ],
     material: mold.slip,
     select: true,
