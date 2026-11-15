@@ -149,6 +149,15 @@ function trimPoints(points: number[][], lines: { name: string; path: number[] }[
     return 1;
   };
   for (const trim of trims) {
+    // One at a point: on the garment's point nearest it (a line drawn there
+    // for it crossed a seam, and each side of the seam had one).
+    if (trim.at) {
+      let best = -1, bd = Infinity;
+      points.forEach((q, i) => { const d = (q[0] - trim.at![0]) ** 2 + (q[1] - trim.at![1]) ** 2 + (q[2] - trim.at![2]) ** 2; if (d < bd) { bd = d; best = i; } });
+      if (best >= 0) out.push({ trim, point: best, toward: best, t: 0, offset: 0, run: trimRuns++, end: false, closed: true });
+      continue;
+    }
+    if (!trim.along) continue;
     const spacing = trim.spacing ?? TRIM_DEFAULTS[trim.kind].spacing;
     const offsets = Array.isArray(trim.offset) ? trim.offset : [trim.offset ?? 0];
     chainLineRuns(lines, trim.along).forEach(({ run }, side) => {
@@ -829,7 +838,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // Button stands: the lapping front run on over the other along a buttoned opening.
     if (!asPieces) {
       for (const trim of settings.trims ?? []) {
-        if (trim.kind !== 'button' || standWidth(trim) <= 0) continue;
+        if (trim.kind !== 'button' || !trim.along || standWidth(trim) <= 0) continue;
         const buttons = new Set(trimList.filter((t) => t.trim === trim).map((t) => t.point));
         for (const { run } of chainLineRuns(shell.seams.filter((sm) => sm.open), trim.along)) {
           const holders = hostPanels.map((_, k) => k).filter((k) => wornPanels[k].particles.includes(run[Math.floor(run.length / 2)]));

@@ -315,7 +315,10 @@ export type GarmentLine = string;
  */
 export interface GarmentTrim {
   kind: 'stud' | 'button' | 'buttonhole' | 'bead' | 'zipper' | 'buckle' | 'stitch';
-  along: GarmentLine;
+  /** The line they go along. */
+  along?: GarmentLine;
+  /** Instead of along a line, one at this point on the garment, metres, as the curves' points are given (a cap's button where its panels meet). */
+  at?: [number, number, number];
   /** Between one and the next, metres; a zipper's teeth set their own. */
   spacing?: number;
   /** Across one, metres. */

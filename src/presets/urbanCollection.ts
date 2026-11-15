@@ -168,10 +168,10 @@ function pufferLook(x: number): SceneNode[] {
   const apex = headL.path.at(headL.length), crownTop = (dx: number): [number, number, number] => [r4(apex[0] + dx), r4(apex[1]), r4(apex[2] + 0.01)];
   const cap = wearing('cap', {
     garment: 'hat', material: 'canvas', ease: 0.01, from: FROM, gores: 6, rgba: [0.09, 0.13, 0.3, 1], sculpt: capFront,
-    curves: [{ name: 'closure', kind: 'cut', closed: true, points: closure }, { name: 'button', kind: 'line', points: [crownTop(-0.006), crownTop(0.006)] }],
+    curves: [{ name: 'closure', kind: 'cut', closed: true, points: closure }],
     trims: [
       { kind: 'stitch', along: 'closure', offset: 0.003, rgba: [0.05, 0.08, 0.2, 1] },
-      { kind: 'button', along: 'button', size: 0.02, spacing: 1, rgba: [0.09, 0.13, 0.3, 1] },
+      { kind: 'button', at: crownTop(0), size: 0.02, rgba: [0.09, 0.13, 0.3, 1] },
     ],
     // Under the peak its band drops at the sides as the peak curves down
     // (sewn to a level band, the curved peak's seam pulled it straight), then
@@ -251,9 +251,9 @@ function neckerchief(form: SceneNode): SceneNode {
   // Low on the neck and a narrow fold, of thin cotton: close, tall and of
   // jersey, it stood up the neck as a stiff tube, a gaiter (looser, it stood
   // out as a ring on the jacket's collar).
-  const z = L.hpsZ - 0.045, r = fm.neck / (2 * Math.PI) + 0.02, C = 2 * Math.PI * r, band = 0.03;
+  const z = L.hpsZ - 0.045, r = fm.neck / (2 * Math.PI) + 0.012, C = 2 * Math.PI * r, band = 0.03;
   /** The front's span of the band, and the wider top of the triangle gathered onto it. */
-  const FRONT = 0.15, BIB = 0.24;
+  const FRONT = 0.15, BIB = 0.2;
   /** Each end of the knot, across. */
   const TAIL = 0.03;
   const cy = bodyFormSection(fm, z).centreY, pos = form.pos ?? [0, 0, 0];
@@ -275,15 +275,19 @@ function neckerchief(form: SceneNode): SceneNode {
   };
   // Its point hanging at the front: a triangle wider across its top than the
   // band it hangs from, gathered onto it, so it falls in folds (cut as part of
-  // the band, it was a flat bib).
+  // the band, it was a flat bib). Started round the neck below the band, on a
+  // wider round so it spans the same front (started as a flat sheet out in
+  // front, it began inside the jacket and was pushed through it, dragging the
+  // whole neckerchief down through the body to the floor).
+  const rb = (r * BIB) / FRONT, mid = Math.PI * rb;
   const bib: ClothPiece = {
     name: 'bib', rgba: piece.rgba, pattern: piece.pattern,
     edges: [
-      { id: 'top', pts: pts([[0, 0], [2 * BIB, 0]]) },
-      { id: 'sideB', pts: pts([[2 * BIB, 0], [BIB, -0.22]]) },
-      { id: 'sideA', pts: pts([[BIB, -0.22], [0, 0]]) },
+      { id: 'top', pts: pts([[mid + BIB, -band], [mid - BIB, -band]]) },
+      { id: 'sideA', pts: pts([[mid - BIB, -band], [mid, -band - 0.2]]) },
+      { id: 'sideB', pts: pts([[mid, -band - 0.2], [mid + BIB, -band]]) },
     ],
-    placement: { kind: 'plane', origin: [pos[0] + BIB, pos[1] + cy - r * 1.15 - 0.01, z - band], uAxis: [-1, 0, 0], vAxis: [0, -0.3, -0.95] },
+    placement: { kind: 'wrap', origin: [pos[0], pos[1] + cy, z], axis: [0, 0, 1], ref: [0, 1, 0], radius: rb, taper: -0.35 },
   };
   // The knot's two ends hanging below it, out of the band at the back (sewn
   // on under it; left as a seam alone, the back read as a tube split down it).
@@ -328,8 +332,9 @@ const HOOD_SIDE: [number, number][] = [
   [0, 0], [0.34, 0],
   // Up the back from the nape, leaning in to the back of the head, fullest
   // there, then sweeping forward over the crown a couple of centimetres
-  // above the head (taller, the spare cloth stood up in a point).
-  [0.335, -0.06], [0.32, -0.13], [0.305, -0.2], [0.282, -0.268], [0.235, -0.32], [0.168, -0.35], [0.1, -0.358], [0.04, -0.348], [0, -0.328],
+  // above the head (taller, the spare cloth stood up in a point; an eighth
+  // taller again, it stood 5 cm over the head and sagged into one on Run).
+  [0.335, -0.053], [0.32, -0.114], [0.305, -0.176], [0.282, -0.236], [0.235, -0.282], [0.168, -0.308], [0.1, -0.315], [0.04, -0.306], [0, -0.289],
 ];
 const HOOD_TOP = HOOD_SIDE.length - 1;
 /** The other side: mirrored, run the other way round, so its neck edge runs from the nape to the front as the neckline does there. */
