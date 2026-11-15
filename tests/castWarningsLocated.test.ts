@@ -84,3 +84,27 @@ describe('pouring into an open mold', () => {
     expect(cast.warnings.some((x) => x.includes('not joined to it'))).toBe(true);
   });
 });
+
+describe('slip DFM: sharp inside corners', () => {
+  it('finds the inside corner of an L block and none on a plain box', async () => {
+    const { sharpInsideCorners } = await import('../src/utils/dfm');
+    const soup = (m: { getMesh(): { triVerts: Uint32Array; vertProperties: Float32Array; numProp: number } }) => {
+      const mesh = m.getMesh();
+      const out = new Float64Array(mesh.triVerts.length * 3);
+      for (let i = 0; i < mesh.triVerts.length; i++) {
+        const v = mesh.triVerts[i] * mesh.numProp;
+        out[i * 3] = mesh.vertProperties[v]; out[i * 3 + 1] = mesh.vertProperties[v + 1]; out[i * 3 + 2] = mesh.vertProperties[v + 2];
+      }
+      return out;
+    };
+    const L = wasm.Manifold.cube([40, 20, 10]).add(wasm.Manifold.cube([10, 20, 30]));
+    const found = sharpInsideCorners(soup(L));
+    expect(found).not.toBeNull();
+    // The one inside edge: 20 mm long, along y at x = 10, z = 10.
+    expect(found!.length).toBeCloseTo(20, 0);
+    expect(found!.at[0]).toBeCloseTo(10, 3);
+    expect(found!.at[2]).toBeCloseTo(10, 3);
+    expect(sharpInsideCorners(soup(wasm.Manifold.cube([40, 20, 10])))).toBeNull();
+    expect(sharpInsideCorners(soup(wasm.Manifold.sphere(20, 64)))).toBeNull();
+  });
+});

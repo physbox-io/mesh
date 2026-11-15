@@ -263,3 +263,19 @@ describe('slip mold made again', () => {
     expect(second.scene.nodes.filter((n) => n.slipMold).length).toBe(first.plasterIds.length + first.caseIds.length);
   });
 });
+
+describe('plaster to hand', () => {
+  it('makes the plaster as thick as a powder budget allows', () => {
+    const full = buildSlipMold(wasm, soupOf(vase()), {});
+    const budget = Math.round(full.report.plasterPowderG * 0.6);
+    const lean = buildSlipMold(wasm, soupOf(vase()), { plasterBudgetG: budget });
+    console.log(full.report.plasterMm, full.report.plasterPowderG, lean.report.plasterMm, lean.report.plasterPowderG, budget);
+    expect(lean.report.plasterMm).toBeLessThan(full.report.plasterMm);
+    expect(lean.report.plasterPowderG).toBeLessThanOrEqual(budget * 1.03);
+    expect(lean.report.plasterPowderG).toBeGreaterThan(budget * 0.8);
+    const tiny = buildSlipMold(wasm, soupOf(vase()), { plasterBudgetG: 100 });
+    expect(tiny.report.plasterMm).toBe(10);
+    expect(tiny.report.warnings.some((w) => w.includes('over the 100 g budget'))).toBe(true);
+  });
+});
+

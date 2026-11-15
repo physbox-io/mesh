@@ -45,7 +45,7 @@ export const castCommands: McpCommands = {
     const ids = subject.ids;
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
     const options: Partial<PourBoxOptions> = {};
-    for (const key of ['coverMm', 'wallMm', 'clearanceMm', 'baseMm', 'grooveMm', 'freeboardMm'] as const) {
+    for (const key of ['coverMm', 'wallMm', 'clearanceMm', 'baseMm', 'grooveMm', 'freeboardMm', 'siliconeBudgetG'] as const) {
       const v = num(msg[key]);
       if (v !== undefined) options[key] = v;
     }

@@ -12,6 +12,7 @@ import { applyAddDraft, MAX_ADD_DRAFT_DEG } from '../../utils/addDraftAction';
 import { DEFAULT_TAB_DRAFT } from '../../utils/moldTabs';
 import { mcpMoldSubject } from '../../utils/moldSubject';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
+import { dfmReportFor } from '../../utils/dfmWorkerClient';
 import type { McpCommands } from './types';
 
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -34,6 +35,8 @@ export const slipCommands: McpCommands = {
     }
     if (typeof msg.base === 'boolean' || msg.base === 'auto') options.base = msg.base;
     if (typeof msg.fillInside === 'boolean') options.fillInside = msg.fillInside;
+    const budget = num(msg.plasterBudgetG);
+    if (budget !== undefined) options.plasterBudgetG = budget;
     for (const key of ['plasterMm', 'spareHeightMm', 'spareDiaMm', 'caseWallMm', 'freeboardMm', 'natchDiaMm', 'baseTaperDeg', 'draftDeg'] as const) {
       const v = num(msg[key]);
       if (v !== undefined) options[key] = v;
@@ -73,6 +76,12 @@ export const slipCommands: McpCommands = {
       }
     }
     const { warnings, ...summary } = mold.report;
+    // What the part itself asks of a slip casting: sections too thin to keep,
+    // inside corners that crack (the DFM cast check, for this slip).
+    const dfm = await dfmReportFor(subject.scene, 'cast', { castMaterial: mold.slip }).catch(() => null);
+    const partWarnings = (dfm?.findings ?? [])
+      .filter((f) => !f.passed && (f.id === 'cast_thin_section' || f.id === 'cast_sharp_inside_corner'))
+      .map((f) => `${f.title} at (${f.position.map((v) => Math.round(v * 1000)).join(', ')} mm): ${f.detail} ${f.fix}`);
     return {
       ok: true,
       summary: {
@@ -90,7 +99,7 @@ export const slipCommands: McpCommands = {
         ...(added?.replaced.length ? { replaced: added.replaced } : {}),
         ...(cast ? { cast } : {}),
       },
-      warnings: [...warnings, ...castWarnings],
+      warnings: [...warnings, ...partWarnings, ...castWarnings],
       files: describeFiles(
         slipCaseStls(subject.label.replace(/[^A-Za-z0-9_-]+/g, '_'), mold).map((f) => ({ name: `${f.file}.stl`, bytes: f.bytes })),
         msg.includeFiles !== false,

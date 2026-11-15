@@ -44,6 +44,8 @@ export interface SlipMoldOptions {
   base: boolean | 'auto';
   /** Plaster round the cavity at its thinnest, mm. Thicker plaster drinks more slip before it is saturated. */
   plasterMm: number;
+  /** Plaster powder to hand, g: the plaster is made as thick as this allows (overrides plasterMm). */
+  plasterBudgetG?: number | null;
   /** Spare (reservoir) height above the part, mm. */
   spareHeightMm: number;
   /** The spare's narrowest mouth, mm: a part narrower at the top than this gets a funnel. */
@@ -95,6 +97,11 @@ export const DEFAULT_SLIP_MOLD_OPTIONS: SlipMoldOptions = {
 /** The largest number of side pieces 'auto' tries, and the field takes. */
 export const MAX_SLIP_SIDES = 6;
 
+/** Plaster thickness: the least the planner takes, the least a budget thins it to, and the most, mm. */
+export const MIN_PLASTER_MM = 5;
+export const BUDGET_FLOOR_MM = 10;
+export const MAX_PLASTER_MM = 60;
+
 /** An indexed mesh, millimetres, Z up. */
 export interface SlipMesh {
   positions: number[];
@@ -143,6 +150,8 @@ export interface SlipMoldReport {
   /** Slip to fill the cavity and spare, ml. */
   slipMl: number;
   plasterMm3: number;
+  /** The plaster round the cavity at its thinnest, as planned, mm (a budget sets it). */
+  plasterMm: number;
   /** Mixed plaster for all the pieces, grams of powder and of water (100:70). */
   plasterPowderG: number;
   plasterWaterG: number;
@@ -927,7 +936,7 @@ function build(
   const slip = castMaterial(o.slip);
   const shrink = Math.max(0, Math.min(30, o.shrinkPercent ?? slip.shrinkPercent ?? 0));
   const scale = 1 / (1 - shrink / 100);
-  const plaster = Math.max(5, o.plasterMm);
+  let plaster = Math.max(MIN_PLASTER_MM, o.plasterMm);
   const wall = Math.max(0.8, o.caseWallMm);
   const warnings: string[] = [];
 
@@ -985,9 +994,6 @@ function build(
     free(minFoot);
   }
   free(footSlice);
-  const zBlockBottom = (withBase ? zPlug : zMin) - plaster;
-  const plugSpread = withBase ? (zPlug - zBlockBottom) * Math.tan(Math.max(3, Math.min(30, o.baseTaperDeg)) * DEG) : 0;
-  const plugBottom = plugTop ? plugTop.offset(plugSpread, 'Round', 2, 64) : null;
 
   // --- The split --------------------------------------------------------------
   const samples = surfaceSamples(filled);
@@ -1024,29 +1030,57 @@ function build(
     const m = cavity.getMesh();
     for (let i = 0; i < m.numVert; i++) cavityPts.push([m.vertProperties[i * m.numProp], m.vertProperties[i * m.numProp + 1]]);
   }
-  const plugPts: Vec2[] = plugBottom ? plugBottom.toPolygons().flat() : [];
   const reachAlong = (d: [number, number], pad: number, pts: Vec2[]) =>
     pts.reduce((a, p) => Math.max(a, (p[0] - axis[0]) * d[0] + (p[1] - axis[1]) * d[1]), -Infinity) + pad;
-  const along = (d: [number, number]) => Math.max(reachAlong(d, plaster, cavityPts), plugPts.length ? reachAlong(d, plaster / 2, plugPts) : -Infinity);
-  let planes: { d: [number, number]; a: number }[];
-  const backs: number[] = [];
-  if (k === 2) {
-    const u: [number, number] = [Math.cos(split.theta), Math.sin(split.theta)];
-    planes = [];
-    for (let j = 0; j < 2; j++) {
-      const d: [number, number] = [pulls[j][0], pulls[j][1]];
-      const a = along(d);
-      planes.push({ d, a });
-      backs.push(a);
+  const taper = Math.tan(Math.max(3, Math.min(30, o.baseTaperDeg)) * DEG);
+  /** The block for plaster `t` thick: its outline, back faces, floor and the plug's foot. */
+  const blockAt = (t: number) => {
+    const zBottom = (withBase ? zPlug : zMin) - t;
+    const plugBot = plugTop ? plugTop.offset(withBase ? (zPlug - zBottom) * taper : 0, 'Round', 2, 64) : null;
+    const plugPts: Vec2[] = plugBot ? plugBot.toPolygons().flat() : [];
+    const along = (d: [number, number]) => Math.max(reachAlong(d, t, cavityPts), plugPts.length ? reachAlong(d, t / 2, plugPts) : -Infinity);
+    let planes: { d: [number, number]; a: number }[];
+    const backs: number[] = [];
+    if (k === 2) {
+      const u: [number, number] = [Math.cos(split.theta), Math.sin(split.theta)];
+      planes = [];
+      for (let j = 0; j < 2; j++) {
+        const d: [number, number] = [pulls[j][0], pulls[j][1]];
+        const a = along(d);
+        planes.push({ d, a });
+        backs.push(a);
+      }
+      planes.push({ d: u, a: along(u) }, { d: [-u[0], -u[1]], a: along([-u[0], -u[1]]) });
+    } else {
+      const a = Math.max(...pulls.map((p) => along([p[0], p[1]])));
+      planes = pulls.map((p) => ({ d: [p[0], p[1]] as [number, number], a }));
+      for (let j = 0; j < k; j++) backs.push(a);
     }
-    planes.push({ d: u, a: along(u) }, { d: [-u[0], -u[1]], a: along([-u[0], -u[1]]) });
-  } else {
-    const a = Math.max(...pulls.map((p) => along([p[0], p[1]])));
-    planes = pulls.map((p) => ({ d: [p[0], p[1]] as [number, number], a }));
-    for (let j = 0; j < k; j++) backs.push(a);
+    const big = 10 * Math.max(...planes.map((p) => p.a)) + 1000;
+    return { planes, backs, big, outline: halfPlanePolygon(wasm, axis, planes, big), zBottom, plugBot };
+  };
+  // Given a budget of plaster powder, the plaster is as thick as it allows:
+  // the block's volume less the cavity's, solved for the thickness.
+  const cavityInBlock = cavity.volume();
+  const powderFor = (t: number) => {
+    const b = blockAt(t);
+    const mm3 = Math.max(0, b.outline.area() * (zBlockTop - b.zBottom) - cavityInBlock);
+    free(b.outline, b.plugBot);
+    return mixGrams('plaster', castWeightG('plaster', mm3))?.a ?? castWeightG('plaster', mm3);
+  };
+  if (o.plasterBudgetG && o.plasterBudgetG > 0) {
+    const budget = o.plasterBudgetG;
+    if (powderFor(BUDGET_FLOOR_MM) > budget) {
+      plaster = BUDGET_FLOOR_MM;
+      warnings.push(`Even ${BUDGET_FLOOR_MM} mm of plaster, the thinnest that stays thirsty for a cast or two, takes about ${Math.round(powderFor(BUDGET_FLOOR_MM))} g of powder, over the ${Math.round(budget)} g budget: the mold is planned at ${BUDGET_FLOOR_MM} mm.`);
+    } else {
+      let lo = BUDGET_FLOOR_MM, hi = MAX_PLASTER_MM;
+      if (powderFor(hi) <= budget) lo = hi;
+      else for (let i = 0; i < 12; i++) { const mid = (lo + hi) / 2; if (powderFor(mid) <= budget) lo = mid; else hi = mid; }
+      plaster = Math.floor(lo * 2) / 2;
+    }
   }
-  const big = 10 * Math.max(...planes.map((p) => p.a)) + 1000;
-  const outline = halfPlanePolygon(wasm, axis, planes, big);
+  const { planes, backs, big, outline, zBottom: zBlockBottom, plugBot: plugBottom } = blockAt(plaster);
   const blockHeight = zBlockTop - zBlockBottom;
   const block = outline.extrude(blockHeight).translate([0, 0, zBlockBottom]);
   const ob = outline.bounds();
@@ -1203,6 +1237,7 @@ function build(
     blockMm,
     slipMl: Math.round(cavityMm3 / 1000),
     plasterMm3: Math.round(plasterMm3),
+    plasterMm: plaster,
     plasterPowderG: Math.round(mix?.a ?? plasterG),
     plasterWaterG: Math.round(mix?.b ?? 0),
     undercutMm2,

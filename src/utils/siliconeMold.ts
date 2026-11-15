@@ -34,6 +34,9 @@ export type HolePurpose = 'wick' | 'pour' | 'fixing';
 
 /** Narrower than this, mm, and a pour will not go in through a hole. */
 export const MIN_POUR_HOLE_MM = 6;
+/** Silicone cover a budget may thin the box to, and thicken it to, mm. */
+export const MIN_COVER_MM = 4;
+export const MAX_COVER_MM = 30;
 /** The largest hole a pour through the foot takes as plugged, mm² (pourCast's limit). */
 const MAX_PLUGGED_MM2 = 20;
 const MAX_PLUGGED_DIA_MM = Math.floor(2 * Math.sqrt(MAX_PLUGGED_MM2 / Math.PI) * 10) / 10;
@@ -44,6 +47,8 @@ export const HOLE_DIA_MM: Record<HolePurpose, number> = { wick: 2.5, pour: 8, fi
 export interface PourBoxOptions {
   /** Silicone round the sides and over the top of the master. */
   coverMm: number;
+  /** Silicone to hand, g (A + B): the cover is made as thick as this allows (overrides coverMm). */
+  siliconeBudgetG?: number | null;
   /** Sleeve wall. */
   wallMm: number;
   /** Gap each side between the sleeve and its groove. */
@@ -93,6 +98,8 @@ export interface PourBoxMesh {
 }
 
 export interface PourBoxReport {
+  /** Silicone round the master and over its top, as planned, mm (a budget sets it). */
+  coverMm: number;
   /** Fill line, as a height above the base plate's top (where the master stands). */
   fillHeightMm: number;
   /** World Z of the fill line. */
@@ -226,7 +233,7 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
   const o = { ...DEFAULT_POUR_BOX_OPTIONS, ...partial };
   if (masterSoup.length < 9) throw new Error('The master has no geometry to build a pour box round.');
   const warnings: string[] = [];
-  const cover = Math.max(1, o.coverMm);
+  let cover = Math.max(1, o.coverMm);
   const wall = Math.max(0.8, o.wallMm);
   const clear = Math.max(0, o.clearanceMm);
   const groove = Math.max(0.5, Math.min(o.grooveMm, o.baseMm - 1));
@@ -275,6 +282,28 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
     plan = wasm.CrossSection.hull([points]);
   }
 
+  // Given the silicone to hand, the cover is as thick as it allows: the bore
+  // to the fill line less the master, solved for the cover.
+  const siliconeId = isSiliconeId(o.silicone) ? o.silicone : 'platinum';
+  if (o.siliconeBudgetG && o.siliconeBudgetG > 0) {
+    const budget = o.siliconeBudgetG;
+    const masterAll = soupVolumeBelow(wasm, masterSoup, zTop + 1) ?? 0;
+    const gramsFor = (t: number) => {
+      const ring = plan.offset(t, 'Round', 2, segs);
+      const mm3 = Math.max(0, ring.area() * (zTop + t - zMin) - masterAll);
+      ring.delete();
+      return castWeightG(siliconeId, mm3);
+    };
+    if (gramsFor(MIN_COVER_MM) > budget) {
+      cover = MIN_COVER_MM;
+      warnings.push(`Even ${MIN_COVER_MM} mm of silicone round the master takes about ${Math.round(gramsFor(MIN_COVER_MM))} g, over the ${Math.round(budget)} g budget: the box is planned at ${MIN_COVER_MM} mm.`);
+    } else {
+      let lo = MIN_COVER_MM, hi = MAX_COVER_MM;
+      if (gramsFor(hi) <= budget) lo = hi;
+      else for (let i = 0; i < 14; i++) { const mid = (lo + hi) / 2; if (gramsFor(mid) <= budget) lo = mid; else hi = mid; }
+      cover = Math.floor(lo * 2) / 2;
+    }
+  }
   const inner = plan.offset(cover, 'Round', 2, segs);
   const outer = inner.offset(wall, 'Round', 2, segs);
   const grooveOuter = outer.offset(clear, 'Round', 2, segs);
@@ -337,7 +366,7 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
   if (masterVol === null) warnings.push('The master is not a closed solid, so its volume is not known and the silicone figure counts it as empty space. Repair it first (physics_repair_mesh) for a true figure.');
   const pinVol = hole ? Math.PI * (hole.diaMm / 2) ** 2 * (fillZ - hole.footMm[2] - 0.5) : 0;
   const siliconeMm3 = Math.max(0, bore - (masterVol ?? 0) - pinVol);
-  const silicone = isSiliconeId(o.silicone) ? o.silicone : 'platinum';
+  const silicone = siliconeId;
   const grams = castWeightG(silicone, siliconeMm3);
   const parts = mixGrams(silicone, grams);
 
@@ -348,6 +377,7 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
     sleeve: meshOf(sleeveM),
     ...(hole ? { hole } : {}),
     report: {
+      coverMm: cover,
       fillHeightMm: +(fillZ - zMin).toFixed(2),
       fillZMm: +fillZ.toFixed(3),
       pourDepthMm: +(fillZ - (clear > 0 ? sleeveBottom : zMin)).toFixed(2),

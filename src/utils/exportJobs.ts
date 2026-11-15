@@ -15,6 +15,7 @@
 // free — no second worker, no second client.
 
 import type { SceneGraph } from '../types/scene';
+import { sectionOfSoup, type SectionAxis, type SectionResult } from './sectionQuery';
 import {
   generateReliefCarveGcode,
   type ReliefCarveOptions,
@@ -32,6 +33,7 @@ import {
   type LaserPanel,
 } from './laserCutExporter';
 import {
+  collectSceneTriangles,
   exportContourSliceSvg,
   type ContourSliceOptions,
   type ContourSliceResult,
@@ -116,7 +118,8 @@ export type ExportJobKind =
   | 'simulate'
   | 'simulateSheets'
   | 'simulateTimber'
-  | 'timber';
+  | 'timber'
+  | 'section';
 
 /** The options and result each job takes and returns. */
 export interface ExportJobMap {
@@ -136,6 +139,14 @@ export interface ExportJobMap {
   simulateTimber: { options: TimberSimJobOptions; result: TimberSimJobResult };
   /** Timber joinery synthesis (Manifold 3D CSG) and CNC/bandsaw cut-list planning. */
   timber: { options: TimberJobOptions; result: TimberJobResult };
+  /** A cross-section through the scene's parts, as outlines and numbers. */
+  section: { options: SectionJobOptions; result: SectionResult };
+}
+
+export interface SectionJobOptions {
+  axis: SectionAxis;
+  /** Along the axis, world mm; absent cuts half way through the parts. */
+  atMm?: number;
 }
 
 export type ExportJobOptions<K extends ExportJobKind> = Partial<ExportJobMap[K]['options']>;
@@ -145,13 +156,13 @@ export type ExportJobResult<K extends ExportJobKind> = ExportJobMap[K]['result']
  * Runs one export job, by name. The only place that knows every job's exporter.
  * `onProgress`, from 0 to 1, is called by the jobs long enough to need it.
  */
-export function runExportJob<K extends 'timber' | 'simulateTimber'>(
+export function runExportJob<K extends 'timber' | 'simulateTimber' | 'section'>(
   kind: K,
   scene: SceneGraph,
   options: ExportJobOptions<K>,
   onProgress?: (fraction: number) => void
 ): Promise<ExportJobResult<K>>;
-export function runExportJob<K extends Exclude<ExportJobKind, 'timber' | 'simulateTimber'>>(
+export function runExportJob<K extends Exclude<ExportJobKind, 'timber' | 'simulateTimber' | 'section'>>(
   kind: K,
   scene: SceneGraph,
   options: ExportJobOptions<K>,
@@ -200,6 +211,12 @@ export function runExportJob<K extends ExportJobKind>(
       return runSimulationJob(options as SimulationJobOptions, onProgress) as ExportJobResult<K>;
     case 'simulateSheets':
       return runSheetJob(options as SheetJobOptions, onProgress) as ExportJobResult<K>;
+    case 'section': {
+      const { axis = 'z', atMm } = options as ExportJobOptions<'section'>;
+      const { tris, solidIds } = collectSceneTriangles(scene);
+      const mm = Float64Array.from(tris, (v) => v * 1000);
+      return loadManifold().then((wasm) => sectionOfSoup(wasm, mm, axis, atMm, 2000, solidIds) as ExportJobResult<K>);
+    }
     case 'simulateTimber':
       return loadManifold().then((wasm) =>
         runTimberSimulation(wasm, options as TimberSimJobOptions, onProgress) as ExportJobResult<K>);

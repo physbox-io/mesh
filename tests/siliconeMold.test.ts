@@ -367,3 +367,24 @@ describe('the pour box as printed files', () => {
     }
   });
 });
+
+describe('silicone to hand', () => {
+  it('makes the cover as thick as a silicone budget allows', () => {
+    const candle: number[] = [];
+    const c = (i: number, j: number, z: number) => [20 * Math.cos((2 * Math.PI * i) / 48), 20 * Math.sin((2 * Math.PI * i) / 48), z];
+    for (let i = 0; i < 48; i++) {
+      candle.push(0, 0, 60, ...c(i, 0, 60), ...c(i + 1, 0, 60), 0, 0, 0, ...c(i + 1, 0, 0), ...c(i, 0, 0));
+      candle.push(...c(i, 0, 0), ...c(i + 1, 0, 0), ...c(i + 1, 0, 60), ...c(i, 0, 0), ...c(i + 1, 0, 60), ...c(i, 0, 60));
+    }
+    const full = buildPourBox(wasm, candle, {});
+    const budget = Math.round(full.report.siliconeG * 0.6);
+    const lean = buildPourBox(wasm, candle, { siliconeBudgetG: budget });
+    expect(lean.report.coverMm).toBeLessThan(full.report.coverMm);
+    expect(lean.report.siliconeG).toBeLessThanOrEqual(budget * 1.03);
+    expect(lean.report.siliconeG).toBeGreaterThan(budget * 0.8);
+    const tiny = buildPourBox(wasm, candle, { siliconeBudgetG: 5 });
+    expect(tiny.report.coverMm).toBe(4);
+    expect(tiny.report.warnings.some((w) => w.includes('over the 5 g budget'))).toBe(true);
+  });
+});
+

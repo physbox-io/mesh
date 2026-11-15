@@ -194,7 +194,7 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
               <dt className="text-slate-500 dark:text-slate-400">Plaster block</dt>
               <dd className="font-mono">{r.blockMm[0]} × {r.blockMm[1]} × {r.blockMm[2]} mm</dd>
               <dt className="text-slate-500 dark:text-slate-400">Plaster</dt>
-              <dd className="font-mono">{r.plasterPowderG} g powder + {r.plasterWaterG} g water</dd>
+              <dd className="font-mono">{r.plasterPowderG} g powder + {r.plasterWaterG} g water, {r.plasterMm} mm</dd>
               <dt className="text-slate-500 dark:text-slate-400">Slip to fill</dt>
               <dd className="font-mono">~{r.slipMl} ml</dd>
               <dt className="text-slate-500 dark:text-slate-400">Shrink</dt>
@@ -231,6 +231,10 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
                 <option value="yes">Yes</option>
                 <option value="no">No</option>
               </select>
+            </Field>
+            <Field label="Plaster to hand (g)" hint="Powder you have. The plaster is made as thick as it allows, in place of Plaster (mm). Empty: Plaster (mm) as set.">
+              <NumberInput min={100} step={100} allowEmpty placeholder="any" value={options.plasterBudgetG ?? null}
+                onChange={(v) => setOptions((prev) => ({ ...prev, plasterBudgetG: v ?? null }))} className={inputClass} />
             </Field>
             {([0, 1] as const).map((axis) => (
               <Field key={axis} label={`Spare ${axis ? 'Y' : 'X'} (mm)`} hint="Where the spare stands, in plan. Empty: over the opening into the inside, so the slip drains out of it.">

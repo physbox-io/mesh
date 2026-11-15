@@ -165,6 +165,11 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
               <NumberInput min={f.min} step={f.step} value={options[f.key]} onChange={(v) => set(f.key, v)} className={inputClass} />
             </label>
           ))}
+          <label className="space-y-1 text-xs" title="Silicone you have (A + B). The cover is made as thick as it allows, in place of Silicone cover. Empty: the cover as set.">
+            <span className={labelClass}>Silicone to hand (g)</span>
+            <NumberInput min={20} step={50} allowEmpty placeholder="any" value={options.siliconeBudgetG ?? null}
+              onChange={(v) => setOptions((prev) => ({ ...prev, siliconeBudgetG: v ?? null }))} className={inputClass} />
+          </label>
           <label className="space-y-1 text-xs" title="Fit follows the master's outline and uses the least silicone">
             <span className={labelClass}>Sleeve shape</span>
             <select value={options.shape} onChange={(e) => set('shape', e.target.value as PourBoxShape)} className={inputClass}>

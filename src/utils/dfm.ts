@@ -82,6 +82,8 @@ export interface DfmLimits {
    * pattern reproduces (PRINTED_DETAIL_MM).
    */
   castMinSectionMm: number;
+  /** The casting is clay slip in plaster: sharp inside corners crack as it dries and fires. */
+  castSlip?: boolean;
 }
 
 /**
@@ -191,7 +193,62 @@ export function dfmLimitsFor(bench: DfmBench): DfmLimits {
     bedMm: bench.printBed ?? null,
     cncMinWallMm: mat.minWallMm,
     castMinSectionMm: Math.max(PRINTED_DETAIL_MM, castMaterial(bench.castMaterial ?? 'epoxy').minSectionMm),
+    castSlip: Boolean(castMaterial(bench.castMaterial ?? 'epoxy').slip),
   };
+}
+
+/** Inside corners turning more than this at one edge are sharp, degrees. */
+const SHARP_INSIDE_DEG = 60;
+
+/**
+ * Edges where the surface turns inward sharply in one step (an inside corner
+ * with no radius): their total length and the middle of the longest, in the
+ * soup's units. Vertices are matched by position, so a soup of separate
+ * triangles reads as the surface it is.
+ */
+export function sharpInsideCorners(tris: Float64Array): { length: number; at: [number, number, number] } | null {
+  const count = tris.length / 9;
+  const ids = new Map<string, number>();
+  const id = (o: number) => {
+    const key = `${Math.round(tris[o] * 1e7)},${Math.round(tris[o + 1] * 1e7)},${Math.round(tris[o + 2] * 1e7)}`;
+    let v = ids.get(key);
+    if (v === undefined) { v = ids.size; ids.set(key, v); }
+    return v;
+  };
+  /** Per edge (a < b): the triangles on it and the offset of each one's third corner. */
+  const edges = new Map<number, { t: number; far: number; a: number; b: number }[]>();
+  const n = count * 3 + 1;
+  for (let t = 0; t < count; t++) {
+    const o = t * 9;
+    const v = [id(o), id(o + 3), id(o + 6)];
+    for (let k = 0; k < 3; k++) {
+      const a = v[k], b = v[(k + 1) % 3];
+      const key = a < b ? a * n + b : b * n + a;
+      const list = edges.get(key) ?? [];
+      list.push({ t, far: o + ((k + 2) % 3) * 3, a: o + k * 3, b: o + ((k + 1) % 3) * 3 });
+      edges.set(key, list);
+    }
+  }
+  const cosLimit = Math.cos((SHARP_INSIDE_DEG * Math.PI) / 180);
+  let length = 0, longest = 0;
+  let at: [number, number, number] = [0, 0, 0];
+  for (const list of edges.values()) {
+    if (list.length !== 2) continue;
+    const [e1, e2] = list;
+    const n1 = triNormal(tris, e1.t), n2 = triNormal(tris, e2.t);
+    if (!n1 || !n2) continue;
+    if (n1.n[0] * n2.n[0] + n1.n[1] * n2.n[1] + n1.n[2] * n2.n[2] > cosLimit) continue;
+    // Inside: the second triangle's far corner stands out past the first's face.
+    const dx = tris[e2.far] - tris[e1.a], dy = tris[e2.far + 1] - tris[e1.a + 1], dz = tris[e2.far + 2] - tris[e1.a + 2];
+    if (dx * n1.n[0] + dy * n1.n[1] + dz * n1.n[2] <= 0) continue;
+    const len = Math.hypot(tris[e1.b] - tris[e1.a], tris[e1.b + 1] - tris[e1.a + 1], tris[e1.b + 2] - tris[e1.a + 2]);
+    length += len;
+    if (len > longest) {
+      longest = len;
+      at = [(tris[e1.a] + tris[e1.b]) / 2, (tris[e1.a + 1] + tris[e1.b + 1]) / 2, (tris[e1.a + 2] + tris[e1.b + 2]) / 2];
+    }
+  }
+  return length > 0 ? { length, at } : null;
 }
 
 export const DFM_DEFAULTS: DfmLimits = dfmLimitsFor({
@@ -972,6 +1029,24 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       position: thin.at,
       metric: thin.mm,
     });
+  }
+
+  // Clay slip: an inside corner with no radius is where the wall cracks as it
+  // dries and fires, and where a join (a handle on a body) is weakest.
+  if (limits.castSlip) {
+    const sharp = sharpInsideCorners(tris);
+    if (sharp && sharp.length > 0.002) {
+      findings.push({
+        id: 'cast_sharp_inside_corner',
+        process: 'cast',
+        severity: 'warning',
+        title: 'Sharp inside corners',
+        detail: `${(sharp.length * 1000).toFixed(0)} mm of inside corner turns more than ${SHARP_INSIDE_DEG}° with no radius; a slip casting cracks there as it dries and fires, and a join there is its weakest point.`,
+        fix: 'Round inside corners to at least the cast wall (about 3 mm), and blend joins such as a handle into the body.',
+        position: sharp.at,
+        metric: sharp.length,
+      });
+    }
   }
 
   return {
