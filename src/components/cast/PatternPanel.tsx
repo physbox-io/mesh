@@ -238,6 +238,23 @@ export const PatternPanel: React.FC<{
                   className={inputClass}
                 />
               </Field>
+              {lostPla && ([0, 1] as const).map((axis) => (
+                <Field key={axis} label={`Sprue ${axis ? 'Y' : 'X'} (mm)`} hint="Where the sprue is fused on, in plan, snapped to the part. Empty: over the heaviest section, which freezes last.">
+                  <NumberInput
+                    step={1}
+                    allowEmpty
+                    placeholder="auto"
+                    value={options.sprueAtMm?.[axis] ?? null}
+                    onChange={(v) => setOptions((prev) => {
+                      if (v === undefined) return { ...prev, sprueAtMm: null };
+                      const cur: [number, number] = prev.sprueAtMm ? [...prev.sprueAtMm] : [0, 0];
+                      cur[axis] = v;
+                      return { ...prev, sprueAtMm: cur };
+                    })}
+                    className={inputClass}
+                  />
+                </Field>
+              ))}
               {!lostPla && (
                 <>
                   <Field

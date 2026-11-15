@@ -98,6 +98,11 @@ export interface CastOptions {
   draftDeg: number;
   /** Shrink allowance to grow the pattern by, %, in place of the metal's own. */
   shrinkPercent?: number;
+  /**
+   * Lost PLA: where the sprue is fused on, in plan, scene mm (world frame),
+   * snapped to the nearest metal. Null: over the heaviest section.
+   */
+  sprueAtMm?: [number, number] | null;
 }
 
 export const DEFAULT_CAST_OPTIONS: CastOptions = {
@@ -1071,7 +1076,8 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     // sprue has to land on something. In part coordinates, grown to the pattern
     // when it is drawn.
     let attX = 0, attY = 0, attTop = partH;
-    const aimAt = heavy ?? { x: 0, y: 0 };
+    const asked = opts.sprueAtMm && opts.sprueAtMm.every(Number.isFinite) ? { x: opts.sprueAtMm[0] - cx, y: opts.sprueAtMm[1] - cy } : null;
+    const aimAt = asked ?? heavy ?? { x: 0, y: 0 };
     let bestScore = -Infinity;
     for (let j = 0; j < rows; j++) {
       for (let i = 0; i < cols; i++) {
@@ -1085,6 +1091,9 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
         const score = -Math.hypot(x - aimAt.x, y - aimAt.y) + 0.1 * thickness[k];
         if (score > bestScore) { bestScore = score; attX = x; attY = y; attTop = top[k]; }
       }
+    }
+    if (asked && Math.hypot(attX - asked.x, attY - asked.y) > Math.max(3, 2 * res)) {
+      warnings.push(`The sprue position is ${Math.hypot(attX - asked.x, attY - asked.y).toFixed(0)} mm off the part; it is fused on at the nearest metal, (${(attX + cx).toFixed(0)}, ${(attY + cy).toFixed(0)} mm).`);
     }
     // A sprue widened to feed stops short of anything standing taller beside
     // where it lands, by room for that feature's vent (as `fits` below needs

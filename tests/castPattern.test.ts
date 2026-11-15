@@ -459,6 +459,17 @@ describe('where the feeder goes', () => {
     expect(Math.abs(burn.summary.gateAtMm.y)).toBeLessThan(8);
   });
 
+  it('fuses the burnout sprue where sprueAtMm says, snapped to the part, and warns when that is off it', () => {
+    // The scene spans x -100..130 mm, so pattern x is scene x - 15, grown by the shrink.
+    const burn = generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium', sprueAtMm: [-50, 0] });
+    expect(burn.summary.gateAtMm.x).toBeLessThan(-55);
+    expect(burn.summary.gateAtMm.x).toBeGreaterThan(-75);
+    expect(burn.warnings.some((w) => w.includes('off the part'))).toBe(false);
+    const off = generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium', sprueAtMm: [-50, 40] });
+    expect(Math.abs(off.summary.gateAtMm.y)).toBeLessThan(8);
+    expect(off.warnings.some((w) => w.includes('off the part'))).toBe(true);
+  });
+
   it('stands the sand riser by the ball and gates from the far end of the bar', () => {
     const r = generateCastPattern(scene, { method: 'sand', metalId: 'aluminium' });
     // Feeder at the heavy end, gate at the other, so the metal runs the length

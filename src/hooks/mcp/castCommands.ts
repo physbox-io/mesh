@@ -129,6 +129,8 @@ export const castCommands: McpCommands = {
       ...(msg.method === 'sand' || msg.method === 'lost-pla' ? { method: msg.method as CastMethod } : {}),
       ...(typeof msg.addGating === 'boolean' ? { addGating: msg.addGating } : {}),
       ...(typeof msg.sprueDiaMm === 'number' ? { sprueDiaMm: msg.sprueDiaMm } : {}),
+      ...(Array.isArray(msg.sprueAtMm) && msg.sprueAtMm.length >= 2 && msg.sprueAtMm.slice(0, 2).every((v: unknown) => typeof v === 'number' && Number.isFinite(v))
+        ? { sprueAtMm: [msg.sprueAtMm[0], msg.sprueAtMm[1]] as [number, number] } : {}),
       ...(typeof msg.riserDiaMm === 'number' ? { riserDiaMm: msg.riserDiaMm } : {}),
       ...(typeof msg.addRiser === 'boolean' ? { addRiser: msg.addRiser } : {}),
       // The Sand tab starts with 2° on the pattern; Lost PLA with none.
