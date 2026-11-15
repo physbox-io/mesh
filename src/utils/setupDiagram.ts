@@ -24,6 +24,12 @@ export interface SetupDiagramInput {
   pins?: { x: number; y: number }[];
   /** Where this setup cuts, in its own frame: shown on the top. */
   window?: { minX: number; minY: number; maxX: number; maxY: number };
+  /**
+   * Explicit X/Y datum coordinates on the top face (e.g. `{ x: w, y: w }` inside
+   * a datum notch, or `{ x: W, y: 0 }` when referencing the right sawn face).
+   * Defaults to `{ x: 0, y: 0 }` (the near-left corner).
+   */
+  datumXY?: { x: number; y: number };
   /** Pixel width of the drawing. */
   widthPx?: number;
 }
@@ -112,11 +118,15 @@ export function setupDiagramSvg(input: SetupDiagramInput): string {
     const [x, y] = P(input.pins[0].x, input.pins[0].y, T);
     parts.push(leader(x - 4, y, padL - 4, y), text(padL - 6, y + 4, 'on the pins', 'end', true));
   } else {
-    // The near-left corner of the top, where X0 Y0 Z0 goes.
-    const [x, y] = P(0, 0, T);
+    // The datum corner/spot on the top face (near-left X0 Y0 by default, or
+    // inside a datum notch / surviving reference face when datumXY is given).
+    const zx = input.datumXY?.x ?? 0;
+    const zy = input.datumXY?.y ?? 0;
+    const [x, y] = P(zx, zy, T);
+    const onRight = zx > W * 0.5;
     parts.push(
       `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" fill="var(--setup-datum, #f59e0b)" stroke="currentColor" stroke-width="1"/>`,
-      text(x - 8, y + 4, 'zero here', 'end', true)
+      text(onRight ? x + 8 : x - 8, y + 4, 'zero here', onRight ? 'start' : 'end', true)
     );
   }
   parts.push('</svg>');

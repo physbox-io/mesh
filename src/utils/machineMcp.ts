@@ -14,6 +14,7 @@ import { webSerialManager, ZERO_SEARCH_MM } from './webSerialManager';
 import type { ResumeOptions } from '@physbox-io/machining';
 import { fetchMachineDevices } from './apiClient';
 import { generateSolidMachining, measurePart, deriveSolidOptions, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
+import { FACE_NAME, parseSetups } from './orient';
 import { MATERIALS } from './feedsAndSpeeds';
 import { runSettings } from './runSettings';
 import { readTouchPlateMm } from '@physbox-io/ui/suite';
@@ -53,31 +54,52 @@ export function subscribeToArming(listener: (state: ArmingState) => void): () =>
  * is answering about, so a carve is always of the scene on screen.
  */
 let currentScene: SceneGraph | null = null;
+/** Full bench stock dimensions (`widthMm × depthMm × thicknessMm`) as the bridge last saw them. */
+let benchStock: { widthMm: number; depthMm: number; thicknessMm: number } | null = null;
 /** The bench stock's thickness as the bridge last saw it, in mm. */
 let benchThicknessMm: number | null = null;
 /** What the last carve was asked for, so a framing lap frames that job. */
 let lastCarveArgs: Record<string, unknown> = {};
 
-export function setCurrentScene(scene: SceneGraph | null, stock?: { thicknessMm: number }): void {
+export function setCurrentScene(
+  scene: SceneGraph | null,
+  stock?: { widthMm?: number; depthMm?: number; thicknessMm: number }
+): void {
   currentScene = scene;
+  if (!scene) lastCarveArgs = {};
   benchThicknessMm = stock?.thicknessMm ?? null;
+  benchStock =
+    stock && typeof stock.widthMm === 'number' && stock.widthMm > 0 && typeof stock.depthMm === 'number' && stock.depthMm > 0
+      ? { widthMm: stock.widthMm, depthMm: stock.depthMm, thicknessMm: stock.thicknessMm }
+      : null;
 }
 
 /**
  * The options a carve is cut with: the defaults, what was asked, and the
- * bench stock's thickness when nothing was asked and the part fits in it —
- * the board described once on the bench, not re-guessed from the part. A part
- * taller than the bench stock falls back to stock sized from the part.
+ * bench stock (`board: benchStock`) when nothing was asked and the part fits
+ * in it — matching `ExportSolidMachiningModal` and `physics_export_machining`
+ * so the WCS part origin on the machine matches the preview and export.
  */
 export function carveOptions(args: Record<string, unknown>) {
   const dia = requireNumber(args, 'toolDiaMm', { default: 3, min: 0.01, max: MAX_TOOL_DIA_MM })!;
+  const roughDia = requireNumber(args, 'roughingToolDiaMm', { min: 0.01, max: MAX_TOOL_DIA_MM }) ?? dia;
+  const finishDia = requireNumber(args, 'finishingToolDiaMm', { min: 0.01, max: MAX_TOOL_DIA_MM }) ?? dia;
   const sides = requireNumber(args, 'sides', { min: 1, max: 2 });
   const askedThickness = requireNumber(args, 'stockThicknessMm', { min: 0.01, max: MAX_STOCK_THICKNESS_MM });
+  const clearanceMm = requireNumber(args, 'clearanceMm', { min: 0, max: UNKNOWN_TRAVEL_MM });
+  const toolStickoutMm = requireNumber(args, 'toolStickoutMm', { min: 0, max: 500 });
+  const setups = parseSetups(args.setups);
   let stockThicknessMm: number | undefined;
+  let board: { widthMm: number; depthMm: number; thicknessMm: number } | undefined;
   let stockFrom: 'asked' | 'bench' | 'part' = 'part';
   if (askedThickness !== undefined) {
     stockThicknessMm = askedThickness;
+    if (benchStock) board = { ...benchStock, thicknessMm: askedThickness };
     stockFrom = 'asked';
+  } else if (benchStock && currentScene) {
+    board = benchStock;
+    const part = measurePart(currentScene, '+z', 100);
+    stockFrom = part && part.z <= benchStock.thicknessMm + 1e-6 ? 'bench' : 'part';
   } else if (benchThicknessMm && currentScene) {
     const part = measurePart(currentScene, '+z', 100);
     if (part && part.z <= benchThicknessMm + 1e-6) {
@@ -85,25 +107,25 @@ export function carveOptions(args: Record<string, unknown>) {
       stockFrom = 'bench';
     }
   }
-  // Feeds, speeds and stepdowns worked out for the bit, the material and the
-  // connected machine, as the export dialog does. Spreading
-  // DEFAULT_SOLID_OPTIONS alone cut every carve with the defaults' wood recipe
-  // — M3 S12000 at F1500 whatever bit or material was named — which is about
-  // seven times the feed a 1 mm bit can take in aluminium.
   const motion = webSerialManager.getState().motion;
   const asked = {
     ...(sides !== undefined ? { sides } : {}),
-    // Planned from any face; only setup 1 is ever run from here.
-    ...(args.setups === 'auto' ? { setups: 'auto' as const } : {}),
+    ...(setups !== undefined ? { setups } : {}),
+    ...(board !== undefined ? { board, stockWidthMm: 0, stockDepthMm: 0, stockThicknessMm: 0 } : {}),
     ...(stockThicknessMm !== undefined ? { stockThicknessMm } : {}),
+    ...(clearanceMm !== undefined ? { clearanceMm } : {}),
+    ...(toolStickoutMm !== undefined ? { toolStickoutMm } : {}),
     ...(typeof args.material === 'string' ? { material: args.material } : {}),
-    roughingToolDiaMm: dia,
-    finishingToolDiaMm: dia,
+    ...(args.finishingToolType === 'flat' || args.finishingToolType === 'ball_nose' || args.finishingToolType === 'v_bit'
+      ? { finishingToolType: args.finishingToolType }
+      : {}),
+    roughingToolDiaMm: roughDia,
+    finishingToolDiaMm: finishDia,
   } as Parameters<typeof deriveSolidOptions>[1];
   const options = currentScene
     ? deriveSolidOptions(currentScene, asked, motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y))
     : { ...DEFAULT_SOLID_OPTIONS, ...asked };
-  return { options, dia, stockFrom };
+  return { options, dia: finishDia, stockFrom };
 }
 
 /**
@@ -113,11 +135,17 @@ export function carveOptions(args: Record<string, unknown>) {
  * stock is what is clamped to the bed, and it is bigger than the part by
  * whatever the exporter decided it needed.
  */
-function jobBounds(): { minX: number; minY: number; maxX: number; maxY: number } | null {
+export function jobBounds(): { minX: number; minY: number; maxX: number; maxY: number } | null {
   if (!currentScene?.nodes?.length) return null;
   const result = generateSolidMachining(currentScene, carveOptions(lastCarveArgs).options);
   if (!result.success || !result.stock) return null;
-  const { widthMm, depthMm } = result.stock as { widthMm: number; depthMm: number };
+  const planned = (result.plan || lastCarveArgs.setups !== undefined) && result.setups ? result.setups : null;
+  const { side } = pickCarveTarget(lastCarveArgs, planned, result.sides);
+  const targetStock = (planned && side && 'stock' in side ? side.stock : result.stock) as {
+    widthMm: number;
+    depthMm: number;
+  };
+  const { widthMm, depthMm } = targetStock;
   if (!Number.isFinite(widthMm) || !Number.isFinite(depthMm)) return null;
   return { minX: 0, minY: 0, maxX: widthMm, maxY: depthMm };
 }
@@ -165,8 +193,9 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     throw new Error(result.error || 'The machining program could not be generated.');
   }
 
-  // A planned job is run by setup number; a one- or two-sided one by side, as before.
-  const planned = result.plan && result.setups ? result.setups : null;
+  // A planned job (or any job with explicit `setups`) is run by setup number;
+  // a legacy one- or two-sided job by side, as before.
+  const planned = (result.plan || args.setups !== undefined) && result.setups ? result.setups : null;
   const { wanted, side } = pickCarveTarget(args, planned, result.sides);
   if (!side?.gcode) {
     throw new Error(
@@ -190,24 +219,32 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
   const state = webSerialManager.getState();
   if (!state.connected) throw new Error('No machine is connected. Connect one first.');
 
+  const locate = 'locate' in side
+    ? side.locate
+    : result.pins.length > 0 && side.side === 'B'
+      ? 'pins'
+      : 'knownSpot';
+  const setupSeconds = side.estimatedTimeSeconds ?? result.estimatedTimeSeconds;
+  const resolvedThicknessMm = result.stock.thicknessMm;
+
   const run = await webSerialManager.runJob(side.gcode, {
     name: planned ? `carve setup ${wanted}` : `carve side ${side.side}`,
     // Every setup after the first needs the block turned by hand, so the runner refuses it here.
     origin: 'mcp',
     machine: 'cnc',
     setup: {
-      sequenceId: `mcp-solid-${result.sides[0].gcode.length}`,
+      sequenceId: `mcp-solid-${(planned?.[0]?.gcode ?? result.sides[0]?.gcode ?? side.gcode).length}`,
       index: planned ? Number(wanted) : side.side === 'B' ? 2 : 1,
       of: planned ? planned.length : result.sides.length,
-      locate: result.pins.length > 0 ? 'pins' : 'knownSpot',
+      locate,
     },
-    estimatedSeconds: result.estimatedTimeSeconds,
+    estimatedSeconds: setupSeconds,
     // An agent never opens a dialog, so this is the only place the run archive
     // can be told what the program it is about to stream actually cuts.
     settings: runSettings({
       material: MATERIALS.find(m => m.id === options.material)?.label ?? String(options.material),
       machine: 'cnc',
-      stockThicknessMm: options.stockThicknessMm,
+      stockThicknessMm: resolvedThicknessMm,
       tool: `${dia}mm end mill`,
       spindleRpm: options.spindleRpm,
       cutFeedrate: options.finishingFeedrate,
@@ -225,19 +262,28 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     throw new Error(webSerialManager.getState().lastError ?? 'The job did not start.');
   }
 
-  const minutes = Math.round((result.estimatedTimeSeconds ?? 0) / 60);
+  const minutes = Math.round((setupSeconds ?? 0) / 60);
+  const headLabel =
+    planned && 'upFace' in side
+      ? `Cutting setup ${side.index} of ${side.of} (${FACE_NAME[side.upFace]} up)`
+      : `Cutting side ${side.side} of ${result.sides.length}`;
+  const remainingNote = planned
+    ? planned.length > 1
+      ? `The block has to be re-fixtured for the remaining ${planned.length - 1} setup${planned.length === 2 ? '' : 's'}.`
+      : ''
+    : result.sides.length > 1
+      ? `The part has to be re-fixtured and side ${result.sides.find(s => s.side !== side.side)?.side} run separately.`
+      : '';
   return {
     summary:
-      `Cutting side ${side.side} of ${result.sides.length} at depth ${side.depthMm}mm, ` +
+      `${headLabel} at depth ${side.depthMm}mm, ` +
       `${dia}mm tool, roughly ${minutes} minutes, ` +
       (stockFrom === 'bench'
-        ? `in the ${options.stockThicknessMm} mm bench stock. `
+        ? `in the ${resolvedThicknessMm} mm bench stock. `
         : stockFrom === 'asked'
-          ? `in ${options.stockThicknessMm} mm stock. `
+          ? `in ${resolvedThicknessMm} mm stock. `
           : `in stock sized from the part${benchThicknessMm ? ` (the ${benchThicknessMm} mm bench stock is thinner than it)` : ''}. `) +
-      (result.sides.length > 1
-        ? `The part has to be re-fixtured and side ${result.sides.find(s => s.side !== side.side)?.side} run separately.`
-        : ''),
+      remainingNote,
   };
 }
 

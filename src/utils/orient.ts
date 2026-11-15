@@ -176,14 +176,43 @@ export function setupFrame(face: BlockFace, stock: StockSize): SetupFrame {
  * cannot be put down mirrored: which face goes down on the bed, and which
  * one faces the operator.
  */
-export function describeTurn(frame: SetupFrame): string {
+export function describeTurn(frame: SetupFrame, prevUp?: BlockFace): string {
   const { up, down, near } = frame.faceAt;
-  if (up === '+z') return 'Block as it started: top up, front towards you.';
+  if (up === '+z') {
+    if (prevUp && prevUp !== '+z') {
+      return (
+        `Lay the block flat on its ${FACE_NAME[down]}, ${FACE_NAME[up]} up, ` +
+        `with the ${FACE_NAME[near]} towards you.`
+      );
+    }
+    return 'Block as it started: top up, front towards you.';
+  }
   if (up === '-z') {
+    if (prevUp && prevUp !== '+z') {
+      return (
+        `Lay the block flat on its ${FACE_NAME[down]}, ${FACE_NAME[up]} up, ` +
+        `with the ${FACE_NAME[near]} towards you.`
+      );
+    }
     return 'Flip the block over left to right (about the Y axis): underside up, front still towards you.';
   }
   return (
     `Stand the block on its ${FACE_NAME[down]}, ${FACE_NAME[up]} up, ` +
     `with the ${FACE_NAME[near]} towards you.`
   );
+}
+
+/**
+ * `setups` as an agent or caller may send it: 'auto', 1 or 2, or the faces to
+ * cut from as a list or a comma-separated string ('+z,+x,-x'), named as the
+ * block stands for setup 1. Anything else returns undefined.
+ */
+export function parseSetups(v: unknown): 'auto' | 1 | 2 | BlockFace[] | undefined {
+  if (v === 'auto') return 'auto';
+  if (v === 1 || v === '1') return 1;
+  if (v === 2 || v === '2') return 2;
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : null;
+  if (!list) return undefined;
+  const faces = list.map((f) => String(f).trim().toLowerCase()).filter((f): f is BlockFace => (BLOCK_FACES as string[]).includes(f));
+  return faces.length > 0 ? faces : undefined;
 }

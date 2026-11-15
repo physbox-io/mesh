@@ -141,14 +141,16 @@ export const machiningCommands: McpCommands = {
         estimatedTimeSeconds: result.estimatedTimeSeconds,
         totalCutDistanceMm: result.totalCutDistanceMm,
         sides: result.sides.map(s => ({ side: s.side, depthMm: s.depthMm })),
-        // Planned setups (setups: 'auto' or a list of faces), in the order they run.
+        // Setups in the order they run (present whenever `setups` was requested or planned).
         ...(result.plan ? {
           plan: result.plan.text,
           upChosen: result.upChosen,
           remaining: result.plan.remaining,
           redesignHint: result.plan.redesignHint ?? null,
           dropped: result.plan.dropped,
-          setups: (result.setups ?? []).map((st) => ({
+        } : {}),
+        ...(result.setups ? {
+          setups: result.setups.map((st) => ({
             index: st.index,
             face: st.upFace,
             faceUp: FACE_NAME[st.upFace],

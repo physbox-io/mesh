@@ -15,6 +15,7 @@
 import type { SceneGraph } from '../types/scene';
 import type {
   DatumNotch,
+  PlacedTabPrism,
   SolidMachiningOptions,
   SolidMachiningResult,
   SolidSideResult,
@@ -234,13 +235,190 @@ function place(sceneTris: ArrayLike<number>, opts: SolidMachiningOptions, up: Up
 
 /** The cutter a side setup reaches in with, and how far it can. */
 function sideTool(opts: SolidMachiningOptions): { dia: number; reach: number; reachZ: number } {
-  const dia = Math.max(0.1, opts.finishingToolDiaMm);
+  const activeDia = opts.finishingEnabled ? opts.finishingToolDiaMm : opts.roughingToolDiaMm;
+  const dia = Math.max(0.1, activeDia);
   const byDiameters = dia * MAX_AVAILABLE_REACH_DIAMETERS;
   // A declared stickout is the bit actually fitted: past 8 D it is a long-reach
   // bit, and the operator has said so by fitting it.
   const declared = opts.toolStickoutMm > 0;
   const reach = declared ? Math.max(byDiameters, opts.toolStickoutMm - 1) : byDiameters;
   return { dia, reach, reachZ: declared ? reach : Math.max(byDiameters, ASSUMED_STICKOUT_MM) };
+}
+
+/** Largest cutter active in the setup, used to size datum notches so roughing fits safely. */
+function maxActiveToolDia(opts: Pick<SolidMachiningOptions, 'roughingEnabled' | 'roughingToolDiaMm' | 'finishingEnabled' | 'finishingToolDiaMm'>): number {
+  return Math.max(
+    0.1,
+    opts.roughingEnabled ? opts.roughingToolDiaMm : 0,
+    opts.finishingEnabled ? opts.finishingToolDiaMm : 0
+  );
+}
+
+/** Tool fitted at the start of a setup when the operator touches off X/Y/Z. */
+function touchToolDia(opts: Pick<SolidMachiningOptions, 'roughingEnabled' | 'roughingToolDiaMm' | 'finishingToolDiaMm'>): number {
+  return Math.max(0.1, opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm);
+}
+
+/**
+ * Plans a through-thickness corner notch cut by setup 1 (`+z`) in the near-right
+ * corner `[W - w, W] × [0, w] × [-T, 0]`, which flips left-to-right into the
+ * near-left corner `[0, w] × [0, w]` of `-z` when dowel pins cannot be used.
+ */
+function planFlipDatumNotch(
+  p: { tris: Float64Array; stock: { widthMm: number; depthMm: number; thicknessMm: number } },
+  toolDiaMm: number,
+  reachZMm: number
+): { box: NotchBox; sizeMm: number } | { why: string } {
+  const w = Math.max(6, toolDiaMm + 2);
+  const { widthMm: W, depthMm: D, thicknessMm: T } = p.stock;
+  if (w + 1 > Math.min(W, D)) return { why: 'the block is too narrow in plan for a through datum notch' };
+  if (T > reachZMm + 1e-6) return { why: `the bit's ${reachZMm.toFixed(0)} mm reach cannot cut a datum notch through the ${T.toFixed(0)} mm block` };
+  const b: NotchBox = { x0: W - w, x1: W, y0: 0, y1: w, z0: -T, z1: 0 };
+  const pad = 1;
+  const x0 = Math.max(0, b.x0 - pad), x1 = W;
+  const y0 = 0, y1 = Math.min(D, b.y1 + pad);
+  const step = Math.max(0.25, Math.min(1, w / 12));
+  const cols = Math.ceil((x1 - x0) / step) + 1, rows = Math.ceil((y1 - y0) / step) + 1;
+  const spans = castColumnSpans(p.tris, {
+    minX: x0, minY: y0, stepX: (x1 - x0) / Math.max(1, cols - 1), stepY: (y1 - y0) / Math.max(1, rows - 1), cols, rows,
+  });
+  for (let k = 0; k < cols * rows; k++) {
+    if (spans.offset[k + 1] > spans.offset[k]) {
+      return { why: `the part comes within ${(w + pad).toFixed(0)} mm of the near-right corner` };
+    }
+  }
+  return { box: b, sizeMm: w };
+}
+
+/**
+ * Fallback datum for `-z` when neither pins nor a through datum notch fit and
+ * earlier flush setups milled away `-z`'s default left (`+x`) or near (`-y`) face.
+ */
+function flipFallbackDatum(
+  stock: { widthMm: number; depthMm: number; thicknessMm: number },
+  flushed: ReadonlySet<BlockFace>,
+  touchRadiusMm: number
+): SolidSetupResult['datum'] | undefined {
+  if (!flushed.has('+x') && !flushed.has('-y')) return undefined;
+  const W = stock.widthMm, D = stock.depthMm;
+  const xTouch = !flushed.has('+x')
+    ? { axis: 'x' as const, face: FACE_NAME['+x'], valueMm: -touchRadiusMm, wallMm: 0, desc: `X on the ${FACE_NAME['+x']} (left)` }
+    : !flushed.has('-x')
+      ? { axis: 'x' as const, face: `${FACE_NAME['-x']} (right)`, valueMm: W + touchRadiusMm, wallMm: W, desc: `X on the un-cut ${FACE_NAME['-x']} (right)` }
+      : { axis: 'x' as const, face: `machined ${FACE_NAME['+x']} part wall (left)`, valueMm: -touchRadiusMm, wallMm: 0, desc: `X on the machined ${FACE_NAME['+x']} part wall (left)` };
+  const yTouch = !flushed.has('-y')
+    ? { axis: 'y' as const, face: FACE_NAME['-y'], valueMm: -touchRadiusMm, wallMm: 0, desc: `Y on the ${FACE_NAME['-y']} (near)` }
+    : !flushed.has('+y')
+      ? { axis: 'y' as const, face: `${FACE_NAME['+y']} (far)`, valueMm: D + touchRadiusMm, wallMm: D, desc: `Y on the un-cut ${FACE_NAME['+y']} (far)` }
+      : { axis: 'y' as const, face: `machined ${FACE_NAME['-y']} part wall (near)`, valueMm: -touchRadiusMm, wallMm: 0, desc: `Y on the machined ${FACE_NAME['-y']} part wall (near)` };
+  return {
+    description: `${xTouch.desc}, ${yTouch.desc}, Z on the ${FACE_NAME['-z']} (top).`,
+    touches: [
+      { axis: xTouch.axis, face: xTouch.face, valueMm: xTouch.valueMm, wallMm: xTouch.wallMm },
+      { axis: yTouch.axis, face: yTouch.face, valueMm: yTouch.valueMm, wallMm: yTouch.wallMm },
+      { axis: 'z', face: FACE_NAME['-z'], valueMm: 0 },
+    ],
+  };
+}
+
+/** Converts placed 3D holding-tab bridges (setup 1 frame) into closed mesh triangles. */
+function tabPrismTriangles(prisms: PlacedTabPrism[]): Float64Array {
+  const valid = prisms.filter((t) => Math.hypot(t.x1 - t.x0, t.y1 - t.y0) > 1e-6 && t.topZ > t.bottomZ + 1e-6);
+  if (valid.length === 0) return new Float64Array(0);
+  const out = new Float64Array(valid.length * 12 * 9);
+  let off = 0;
+  const pushTri = (a: [number, number, number], b: [number, number, number], c: [number, number, number]) => {
+    out[off++] = a[0]; out[off++] = a[1]; out[off++] = a[2];
+    out[off++] = b[0]; out[off++] = b[1]; out[off++] = b[2];
+    out[off++] = c[0]; out[off++] = c[1]; out[off++] = c[2];
+  };
+  for (const t of valid) {
+    const dx = t.x1 - t.x0, dy = t.y1 - t.y0;
+    const len = Math.hypot(dx, dy);
+    const ux = dx / len, uy = dy / len;
+    const hw = t.widthMm / 2;
+    const xy: [number, number][] = [
+      [t.x0 - uy * hw, t.y0 + ux * hw],
+      [t.x0 + uy * hw, t.y0 - ux * hw],
+      [t.x1 + uy * hw, t.y1 - ux * hw],
+      [t.x1 - uy * hw, t.y1 + ux * hw],
+    ];
+    const b = xy.map(([x, y]): [number, number, number] => [x, y, t.bottomZ]);
+    const u = xy.map(([x, y]): [number, number, number] => [x, y, t.topZ]);
+    pushTri(u[0], u[1], u[2]); pushTri(u[0], u[2], u[3]);
+    pushTri(b[0], b[2], b[1]); pushTri(b[0], b[3], b[2]);
+    for (let i = 0; i < 4; i++) {
+      const j = (i + 1) % 4;
+      pushTri(b[i], b[j], u[j]);
+      pushTri(b[i], u[j], u[i]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Predicts a side setup's cut envelope and undercut entry footprint in setup 1's
+ * frame before `generateSides` runs, so `placeTabs` stays clear of undercut
+ * mouths and `+z`/`-z` `chooseTouchSpot` knows where earlier side setups cut.
+ */
+function previewSideCutInFirst(
+  face: BlockFace,
+  p: Placement,
+  plan: SetupPlan,
+  opts: SolidMachiningOptions
+): { cutBox: NotchBox; mouthXY: { minX: number; maxX: number; minY: number; maxY: number } | null } | null {
+  const frame = setupFrame(face, p.stock);
+  const s = frame.stock;
+  const tool = sideTool(opts);
+  const r = tool.dia / 2;
+  const axes = { '+z': [0, 1], '-z': [0, 1], '+x': [1, 2], '-x': [1, 2], '+y': [0, 2], '-y': [0, 2] }[face];
+  const needWide = neededDepth(plan, face, p.stock, p.partBox, tool.dia + 2);
+  const needExact = neededDepth(plan, face, p.stock, p.partBox, 0);
+  const tabT = Math.max(0.5, opts.tabThicknessMm);
+  const tabZ0 = p.twoSided ? -p.stock.thicknessMm / 2 - tabT / 2 : -p.stock.thicknessMm;
+  const tabZ1 = p.twoSided ? -p.stock.thicknessMm / 2 + tabT / 2 : -p.stock.thicknessMm + tabT;
+  const probe = Math.max(0.5, Math.min(2, r / 2));
+  let wx0 = Infinity, wy0 = Infinity, wx1 = -Infinity, wy1 = -Infinity, deepest = 0;
+  let cx0 = Infinity, cy0 = Infinity, cx1 = -Infinity, cy1 = -Infinity, coreDeep = 0;
+  for (let y = probe / 2; y < s.depthMm; y += probe) {
+    for (let x = probe / 2; x < s.widthMm; x += probe) {
+      const q = frame.toFirst([x, y, 0]);
+      const d = needWide(q[axes[0]], q[axes[1]]);
+      if (d > 0) {
+        wx0 = Math.min(wx0, x); wx1 = Math.max(wx1, x);
+        wy0 = Math.min(wy0, y); wy1 = Math.max(wy1, y);
+        deepest = Math.max(deepest, d);
+      }
+      const dc = needExact(q[axes[0]], q[axes[1]]);
+      if (dc > 0 && q[2] >= tabZ0 && q[2] <= tabZ1) {
+        cx0 = Math.min(cx0, x); cx1 = Math.max(cx1, x);
+        cy0 = Math.min(cy0, y); cy1 = Math.max(cy1, y);
+        coreDeep = Math.max(coreDeep, dc);
+      }
+    }
+  }
+  if (!(deepest > 0)) return null;
+  const pad = r + 2;
+  const win = {
+    minX: Math.max(0, wx0 - pad), minY: Math.max(0, wy0 - pad),
+    maxX: Math.min(s.widthMm, wx1 + pad), maxY: Math.min(s.depthMm, wy1 + pad),
+  };
+  const boxFromSetup = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): NotchBox => {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const x of [x0, x1]) for (const y of [y0, y1]) for (const z of [z0, z1]) {
+      const q = frame.toFirst([x, y, z]);
+      for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], q[a]); hi[a] = Math.max(hi[a], q[a]); }
+    }
+    return { x0: lo[0], x1: hi[0], y0: lo[1], y1: hi[1], z0: lo[2], z1: hi[2] };
+  };
+  const cutBox = boxFromSetup(win.minX, win.maxX, win.minY, win.maxY, -deepest, 0);
+  const mBox = coreDeep > 0
+    ? boxFromSetup(Math.max(0, cx0 - r), Math.min(s.widthMm, cx1 + r), Math.max(0, cy0 - r), Math.min(s.depthMm, cy1 + r), -coreDeep, 0)
+    : null;
+  return {
+    cutBox,
+    mouthXY: mBox ? { minX: mBox.x0, maxX: mBox.x1, minY: mBox.y0, maxY: mBox.y1 } : null,
+  };
 }
 
 function plannerInput(p: Placement, opts: SolidMachiningOptions, only?: BlockFace[], cellMm?: number) {
@@ -396,6 +574,8 @@ function stoodAfter(
   opts: SolidMachiningOptions
 ): (x: number, y: number) => boolean {
   let cut: { frame: ReturnType<typeof setupFrame>; at: (x: number, y: number) => number }[] | null = null;
+  const finishShape: 'flat' | 'ball' | 'v_bit' =
+    opts.finishingToolType === 'ball_nose' ? 'ball' : opts.finishingToolType === 'v_bit' ? 'v_bit' : 'flat';
   return (x, y) => {
     cut ??= earlier.map((e) => ({
       frame: setupFrame(e.upFace, block),
@@ -405,7 +585,7 @@ function stoodAfter(
         cellMm: STOOD_CELL_MM,
         tools: {
           1: { shape: 'flat', diameterMm: opts.roughingToolDiaMm },
-          2: { shape: 'flat', diameterMm: opts.finishingToolDiaMm },
+          2: { shape: finishShape, diameterMm: opts.finishingToolDiaMm, vAngleDeg: opts.finishingVBitAngleDeg },
         },
         initialTool: opts.roughingEnabled ? 1 : 2,
       }).at,
@@ -433,18 +613,20 @@ function sideSetup(
   /** Datum notches this setup cuts for the ones after it, in the block's first frame. */
   cutsNotches: NotchBox[] = [],
   /** The setups that run before this one. */
-  earlier: { upFace: BlockFace; gcode: string; stock: SolidSetupResult['stock'] }[] = []
+  earlier: { upFace: BlockFace; gcode: string; stock: SolidSetupResult['stock'] }[] = [],
+  prevUp?: BlockFace
 ): Omit<SolidSetupResult, 'index' | 'of' | 'instructions'> | { error: string } {
   const frame = setupFrame(face, p.stock);
   const s = frame.stock;
   const tool = sideTool(opts);
   const r = tool.dia / 2;
+  const touchR = touchToolDia(opts) / 2;
   // Wide enough round what the face has to clear for the whole cutter to get
   // down beside it with the turn's skin on the walls (under 2 mm on any part a
   // router takes).
   const need = neededDepth(plan, face, p.stock, p.partBox, tool.dia + 2);
 
-  // The part in this setup's frame.
+  // The part (plus any holding tabs placed by +z/-z) in this setup's frame.
   const tris = toSetupTris(p.tris, face, frame);
 
   // Where this setup has anything to do, from a coarse look at what it needs.
@@ -544,9 +726,11 @@ function sideSetup(
 
   const header = [
     `; Solid part machining — ${FACE_NAME[face].toUpperCase()} UP`,
-    `; Stand the block: ${describeTurn(frame)}`,
+    `; Stand the block: ${describeTurn(frame, prevUp)}`,
     `; Stock as it stands: ${s.widthMm.toFixed(1)} x ${s.depthMm.toFixed(1)} x ${s.thicknessMm.toFixed(1)} mm`,
-    '; Origin      : near-left corner of the block as it stands now, top face, Z0',
+    notchMm
+      ? `; Origin      : X0 Y0 found from the ${notchMm.toFixed(1)} mm near-left datum notch walls; Z0 on top face`
+      : '; Origin      : near-left corner of the block as it stands now, top face, Z0',
     `; Skin left   : ${allowance.toFixed(2)} mm on what this setup finishes, for the turn`,
     ...(notchMm
       ? [`; Zero X, Y   : on the far walls of the ${notchMm.toFixed(1)} mm datum notch setup 1 cut in the near-left corner, not on the sawn faces`]
@@ -555,6 +739,13 @@ function sideSetup(
       (n) => `; Datum notch : ${(n.x1 - n.x0).toFixed(1)} mm cube out of the corner at X${n.x0.toFixed(1)}-${n.x1.toFixed(1)} Y${n.y0.toFixed(1)}-${n.y1.toFixed(1)}, the zero for a later turned setup`
     ),
   ];
+  const runOff = {
+    minX: window.minX <= 1e-6 && notches.some((n) => n.x0 <= 1e-6),
+    maxX: window.maxX >= s.widthMm - 1e-6 && notches.some((n) => n.x1 >= s.widthMm - 1e-6),
+    minY: window.minY <= 1e-6 && notches.some((n) => n.y0 <= 1e-6),
+    maxY: window.maxY >= s.depthMm - 1e-6 && notches.some((n) => n.y1 >= s.depthMm - 1e-6),
+  };
+  const hasRunOff = runOff.minX || runOff.maxX || runOff.minY || runOff.maxY;
   const cut = machineSurface(
     {
       surface,
@@ -567,6 +758,7 @@ function sideSetup(
         area: { minX: 0, minY: 0, maxX: s.widthMm, maxY: s.depthMm },
         standsAt: stoodAfter(frame, p.stock, earlier, opts),
       },
+      ...(hasRunOff ? { runOff } : {}),
     },
     {
       ...carveOpts,
@@ -599,8 +791,8 @@ function sideSetup(
           description:
             `X on the left datum notch wall, Y on the near datum notch wall, Z on the ${FACE_NAME[face]} (top).`,
           touches: [
-            { axis: 'x', face: 'datum notch, wall facing left', valueMm: notchMm - r, wallMm: notchMm },
-            { axis: 'y', face: 'datum notch, wall facing you', valueMm: notchMm - r, wallMm: notchMm },
+            { axis: 'x', face: 'datum notch, wall facing left', valueMm: notchMm - touchR, wallMm: notchMm },
+            { axis: 'y', face: 'datum notch, wall facing you', valueMm: notchMm - touchR, wallMm: notchMm },
             { axis: 'z', face: FACE_NAME[face], valueMm: 0 },
           ],
         }
@@ -608,8 +800,8 @@ function sideSetup(
           description:
             `X on the ${FACE_NAME[left]} (left), Y on the ${FACE_NAME[near]} (near), Z on the ${FACE_NAME[face]} (top).`,
           touches: [
-            { axis: 'x', face: FACE_NAME[left], valueMm: -r, wallMm: 0 },
-            { axis: 'y', face: FACE_NAME[near], valueMm: -r, wallMm: 0 },
+            { axis: 'x', face: FACE_NAME[left], valueMm: -touchR, wallMm: 0 },
+            { axis: 'y', face: FACE_NAME[near], valueMm: -touchR, wallMm: 0 },
             { axis: 'z', face: FACE_NAME[face], valueMm: 0 },
           ],
         },
@@ -626,31 +818,44 @@ function asSetup(
   side: SolidSideResult,
   result: SolidMachiningResult,
   plan: SetupPlan | null,
-  dia: number,
+  reachDia: number,
+  touchDia: number,
   /** The datum notch an earlier setup cut for this one, as in `sideSetup`. */
-  notchMm?: number
+  notchMm?: number,
+  customDatum?: SolidSetupResult['datum']
 ): Omit<SolidSetupResult, 'index' | 'of' | 'instructions'> {
   const face: BlockFace = side.side === 'A' ? '+z' : '-z';
   const frame = setupFrame(face, result.stock);
   const pins = result.pins.length > 0 && side.side === 'B';
-  const r = dia / 2;
+  const touchR = touchDia / 2;
+  const patchedGcode = notchMm
+    ? `; Zero X, Y   : on the far walls of the ${notchMm.toFixed(1)} mm datum notch setup 1 cut in the near-left corner, not on the sawn faces\n` +
+      side.gcode.replace(
+        /^; Origin\s*:.*$/m,
+        `; Origin      : X0 Y0 found from the ${notchMm.toFixed(1)} mm near-left datum notch walls; Z0 on top face`
+      )
+    : customDatum
+      ? `; Zero X, Y   : ${customDatum.description}\n${side.gcode}`
+      : side.gcode;
   return {
     ...side,
+    gcode: patchedGcode,
     ...(notchMm
       ? {
-          gcode: `; Zero X, Y   : on the far walls of the ${notchMm.toFixed(1)} mm datum notch setup 1 cut in the near-left corner, not on the sawn faces\n${side.gcode}`,
           datum: {
             description:
               'X on the datum notch\'s wall facing your left, Y on its wall facing you (the notch is the cut-out in ' +
               'the near-left corner), Z on the top face.',
             touches: [
-              { axis: 'x' as const, face: 'datum notch, wall facing left', valueMm: notchMm - r, wallMm: notchMm },
-              { axis: 'y' as const, face: 'datum notch, wall facing you', valueMm: notchMm - r, wallMm: notchMm },
+              { axis: 'x' as const, face: 'datum notch, wall facing left', valueMm: notchMm - touchR, wallMm: notchMm },
+              { axis: 'y' as const, face: 'datum notch, wall facing you', valueMm: notchMm - touchR, wallMm: notchMm },
               { axis: 'z' as const, face: FACE_NAME[face], valueMm: 0 },
             ],
           },
         }
-      : {}),
+      : !pins && customDatum
+        ? { datum: customDatum }
+        : {}),
     upFace: face,
     rotation: frame.rotation,
     translation: frame.translation,
@@ -660,16 +865,20 @@ function asSetup(
     windowBounds: { minX: 0, minY: 0, maxX: result.stock.widthMm, maxY: result.stock.depthMm },
     clearedMm3: plan?.faces[face]?.clearedMm3 ?? 0,
     depthMm: side.depthMm,
-    lengthOverDia: side.depthMm / Math.max(0.1, dia),
+    lengthOverDia: side.depthMm / Math.max(0.1, reachDia),
     allowanceMm: 0,
     side: side.side,
   };
 }
 
 /** What the operator does before a setup, in order. */
-function instructionsFor(s: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>, index: number): string[] {
+function instructionsFor(
+  s: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>,
+  index: number,
+  prevUp?: BlockFace
+): string[] {
   // describeTurn reads only the rotation, so the stock as it stands now will do.
-  const turn = describeTurn(setupFrame(s.upFace, s.stock));
+  const turn = describeTurn(setupFrame(s.upFace, s.stock), prevUp);
   const zero = s.datum
     ? `Zero ${s.datum.description}`
     : 'Zero X and Y on the near-left corner of the top, and Z on the top face.';
@@ -707,8 +916,8 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
    */
   const autoStock = !(asked.stockWidthMm > 0) && !(asked.stockDepthMm > 0);
   const SIDES: BlockFace[] = ['+x', '-x', '+y', '-y'];
-  const withFlush = (faces: BlockFace[]): SolidMachiningOptions =>
-    autoStock ? { ...asked, flushFaces: faces } : asked;
+  const withFlush = (faces: BlockFace[], extra?: Partial<SolidMachiningOptions>): SolidMachiningOptions =>
+    autoStock ? { ...asked, ...extra, flushFaces: faces } : { ...asked, ...extra };
   type Candidate = { opts: SolidMachiningOptions; chosen: UpCandidate; exact: Placement; plan: SetupPlan; failure: string | null; cost: number };
   const only = Array.isArray(asked.setups) ? (asked.setups as BlockFace[]) : undefined;
   let best: Candidate | null = null;
@@ -716,14 +925,43 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   const searchOpts = withFlush(SIDES);
   for (const c of choose(sceneTris, searchOpts, steps)) {
     const first = planSetups(plannerInput(place(sceneTris, searchOpts, c.p.up, c.plan.order.includes('-z'), steps)!, searchOpts, only));
-    // The block as it will be: flush only where it is stood on a side.
-    const o = withFlush(first.order.filter((f) => f !== '+z' && f !== '-z'));
-    const ex = place(sceneTris, o, c.p.up, first.order.includes('-z'), steps)!;
-    const pl = planSetups(plannerInput(ex, o, first.order));
-    const g = pl.grid;
-    let solid = 0;
-    for (let k = 0; k < g.solid.length; k++) solid += g.solid[k];
-    const fail = planFailure(pl, solid * g.cell ** 3);
+    const chosenSides = first.order.filter((f) => f !== '+z' && f !== '-z');
+    // Never flush all 4 sides if we can keep frame + holding tabs on at least
+    // one pair of opposing sides within cutter reach; otherwise the final
+    // through-cut has 0 holding tabs and cuts the part completely loose.
+    let o = withFlush(chosenSides);
+    let ex = place(sceneTris, o, c.p.up, first.order.includes('-z'), steps)!;
+    let pl = planSetups(plannerInput(ex, o, first.order));
+    const countSolidMm3 = (planToMeasure: SetupPlan) => {
+      let sCount = 0;
+      for (let k = 0; k < planToMeasure.grid.solid.length; k++) sCount += planToMeasure.grid.solid[k];
+      return sCount * planToMeasure.grid.cell ** 3;
+    };
+    let fail = planFailure(pl, countSolidMm3(pl));
+    if (autoStock && asked.tabCount > 0 && chosenSides.length === 4 && !fail) {
+      const compactFrame = Math.min(asked.frameWidthMm, Math.max(6, sideTool(asked).dia));
+      let bestTabCand: { o: SolidMachiningOptions; ex: Placement; pl: SetupPlan } | null = null;
+      for (const extra of [undefined, { frameWidthMm: compactFrame }] as const) {
+        if (bestTabCand) break;
+        for (const keepFlush of [['+y', '-y'], ['+x', '-x']] as BlockFace[][]) {
+          const oTry = withFlush(keepFlush, extra);
+          const exTry = place(sceneTris, oTry, c.p.up, first.order.includes('-z'), steps);
+          if (!exTry) continue;
+          const plTry = planSetups(plannerInput(exTry, oTry, first.order));
+          if (!planFailure(plTry, countSolidMm3(plTry))) {
+            if (!bestTabCand || plTry.cost < bestTabCand.pl.cost) {
+              bestTabCand = { o: oTry, ex: exTry, pl: plTry };
+            }
+          }
+        }
+      }
+      if (bestTabCand) {
+        o = bestTabCand.o;
+        ex = bestTabCand.ex;
+        pl = bestTabCand.pl;
+        fail = null;
+      }
+    }
     // The way up asked for unless another is clearly cheaper.
     const cost = pl.cost + (c.p.up === asked.up ? 0 : ORIENTATION_MARGIN);
     const cand: Candidate = { opts: o, chosen: c, exact: ex, plan: pl, failure: fail, cost };
@@ -741,8 +979,10 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
 
   const twoSided = plan.order.includes('-z');
   // A notch for each turned setup that can have one, cut by the setup that
-  // runs first, from its own face. See planDatumNotch.
+  // runs first, from its own face. Sized for the largest active cutter so
+  // roughing can enter safely in Z layers before finishing cleans the walls.
   const first = plan.order[0];
+  const notchToolDia = maxActiveToolDia(opts);
   const notchFor = new Map<BlockFace, number>();
   const notchBoxes: NotchBox[] = [];
   const notchWarnings: string[] = [];
@@ -750,7 +990,7 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   // cuts the part free, and it has to meet what the turned setups cut.
   for (const face of first === '-z' ? [] : plan.order.slice(1)) {
     if (face === '-z') continue;
-    const n = planDatumNotch(face, first, exact, sideTool(opts).dia);
+    const n = planDatumNotch(face, first, exact, notchToolDia);
     if ('why' in n) {
       notchWarnings.push(`The ${FACE_NAME[face]} setup is zeroed on the block's sawn corner (no datum notch: ${n.why}), so it lines up only as well as the block is square.`);
       continue;
@@ -758,16 +998,55 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
     notchFor.set(face, n.sizeMm);
     if (!notchBoxes.some((m) => m.x0 === n.box.x0 && m.y0 === n.box.y0 && m.z0 === n.box.z0)) notchBoxes.push(n.box);
   }
+  // When a two-sided job has flush ends or pins disabled so dowel pins cannot
+  // locate `-z`, try cutting a through-thickness datum notch on setup 1 (`+z`)
+  // that flips into `-z`'s near-left corner.
+  const flushedSet = new Set<BlockFace>(opts.flushFaces ?? []);
+  const pinsImpossible = !opts.registrationPins || flushedSet.has('-x') || flushedSet.has('+x');
+  if (twoSided && first === '+z' && pinsImpossible) {
+    const flipNotch = planFlipDatumNotch(exact, notchToolDia, sideTool(opts).reachZ);
+    if (!('why' in flipNotch)) {
+      notchFor.set('-z', flipNotch.sizeMm);
+      if (!notchBoxes.some((m) => m.x0 === flipNotch.box.x0 && m.y0 === flipNotch.box.y0 && m.z0 === flipNotch.box.z0)) {
+        notchBoxes.push(flipNotch.box);
+      }
+    }
+  }
+
+  // Predict side-setup cut envelopes so (a) holding tabs stay out of undercut
+  // mouths and (b) +z/-z T2 M6 touch-off avoids pockets milled by earlier setups.
+  const idxPlusZ = plan.order.indexOf('+z');
+  const idxMinusZ = plan.order.indexOf('-z');
+  const earlierCutsA: NotchBox[] = [...notchBoxes];
+  const earlierCutsB: NotchBox[] = [...notchBoxes];
+  const tabKeepOut: { minX: number; maxX: number; minY: number; maxY: number }[] = [];
+  for (let i = 0; i < plan.order.length; i++) {
+    const f = plan.order[i];
+    if (f === '+z' || f === '-z') continue;
+    const prev = previewSideCutInFirst(f, exact, plan, opts);
+    if (!prev) continue;
+    if (prev.mouthXY) tabKeepOut.push(prev.mouthXY);
+    if (idxPlusZ >= 0 && i < idxPlusZ) earlierCutsA.push(prev.cutBox);
+    if (idxMinusZ >= 0 && i < idxMinusZ) earlierCutsB.push(prev.cutBox);
+  }
+
+  // Guard bed levelling if the probed grid is smaller than the +z stock face
+  // (e.g. probed on a narrow side-setup face before turning flat).
+  const gridTooSmallForTop =
+    !!opts.applyMeshLeveling &&
+    !!opts.meshLevelGrid &&
+    (opts.meshLevelGrid.maxX < exact.stock.widthMm - 1e-3 || opts.meshLevelGrid.maxY < exact.stock.depthMm - 1e-3);
+
   const notches = first === '+z' ? notchBoxes.map(asTopNotch) : [];
   const sidesOpts: SolidMachiningOptions = {
     ...opts,
+    ...(gridTooSmallForTop ? { applyMeshLeveling: false, meshLevelGrid: null } : {}),
     ...(notches.length > 0 ? { datumNotches: notches } : {}),
-    ...(notchBoxes.length > 0 ? { earlierCuts: notchBoxes } : {}),
+    ...(earlierCutsA.length > 0 ? { earlierCuts: earlierCutsA } : {}),
+    ...(earlierCutsB.length > 0 ? { earlierCutsB } : {}),
+    ...(tabKeepOut.length > 0 ? { tabKeepOut } : {}),
     up: chosen.p.up,
     sides: twoSided ? 2 : 1,
-    // Pins go in the frame at the ends; with an end flush there is none, and
-    // the flip is found by touching off, which the turn dialog walks through.
-    // generateSides leaves them out then, and says so.
   };
   const result = steps.generateSides(scene, sidesOpts);
   if (!result.success) return result;
@@ -781,33 +1060,75 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
     invertRelief: false,
   };
 
+  // Include placed holding tabs in the solid geometry sideSetup protects so
+  // side-pocket widening (`tool.dia + 2`) never severs +z/-z holding tabs.
+  const tabTris = tabPrismTriangles(result.tabPrisms ?? []);
+  const exactWithTabs: Placement = tabTris.length > 0
+    ? {
+        ...exact,
+        tris: (() => {
+          const merged = new Float64Array(exact.tris.length + tabTris.length);
+          merged.set(exact.tris, 0);
+          merged.set(tabTris, exact.tris.length);
+          return merged;
+        })(),
+      }
+    : exact;
+
   // The two-sided job's own "neither side can see" figure is the old question;
   // what the plan leaves is said in its summary instead.
   // The probed grid describes the top. A turned setup cuts another face and
   // is levelled by nothing (see asSetup), so it is said for all of them at
   // once, in place of the flip's own side-B sentence.
   const turned = plan.order.some((f) => f !== '+z' && f !== '-z');
-  const levelledTopOnly = turned && !!opts.applyMeshLeveling && !!opts.meshLevelGrid;
+  const levelledTopOnly = turned && !!sidesOpts.applyMeshLeveling && !!sidesOpts.meshLevelGrid;
   const warnings = [
     ...result.warnings.filter((w) => !/occluded from both \+Z and -Z|lies beneath overhangs/.test(w)),
     ...notchWarnings,
+    ...(gridTooSmallForTop
+      ? ['Bed levelling grid is smaller than the top-up setup footprint; all setups are cut without levelling until the top face is probed.']
+      : []),
     ...(levelledTopOnly
       ? ['Bed levelling is applied to the top-up setup only. The other setups cut faces the probed grid does not describe, so they are cut without levelling.']
       : []),
   ].filter((w) => !(levelledTopOnly && /^Bed levelling is applied to side A only/.test(w)));
+
+  const reachDia = sideTool(sidesOpts).dia;
+  const firstToolDia = touchToolDia(sidesOpts);
+  const minusZFallbackDatum =
+    twoSided && result.pins.length === 0 && !notchFor.has('-z')
+      ? flipFallbackDatum(result.stock, flushedSet, firstToolDia / 2)
+      : undefined;
+
   const built: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>[] = [];
-  for (const face of plan.order) {
+  for (let idx = 0; idx < plan.order.length; idx++) {
+    const face = plan.order[idx];
+    const prevUp = idx > 0 ? plan.order[idx - 1] : undefined;
     if (face === '+z') {
       built.push({
-        ...asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm, notchFor.get('+z')),
+        ...asSetup(result.sides[0], result, plan, reachDia, firstToolDia, notchFor.get('+z')),
         ...(notches.length > 0
           ? { notchCorners: [...new Set(notches.map((n) => `${n.y0 <= 0 ? 'near' : 'far'}-${n.x0 <= 0 ? 'left' : 'right'}`))] }
           : {}),
       });
       continue;
     }
-    if (face === '-z') { built.push(asSetup(result.sides[1], result, plan, sidesOpts.finishingToolDiaMm)); continue; }
-    const s = sideSetup(face, exact, plan, sidesOpts, carveOpts, warnings, notchFor.get(face), face === first ? notchBoxes : [], built);
+    if (face === '-z') {
+      built.push(asSetup(result.sides[1], result, plan, reachDia, firstToolDia, notchFor.get('-z'), minusZFallbackDatum));
+      continue;
+    }
+    const s = sideSetup(
+      face,
+      exactWithTabs,
+      plan,
+      sidesOpts,
+      carveOpts,
+      warnings,
+      notchFor.get(face),
+      face === first ? notchBoxes : [],
+      built,
+      prevUp
+    );
     // A setup the plan needs and cannot have is a part that comes out wrong.
     if ('error' in s) {
       return {
@@ -818,7 +1139,12 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
     built.push(s);
   }
   const of = built.length;
-  const setups: SolidSetupResult[] = built.map((s, i) => ({ ...s, index: i + 1, of, instructions: instructionsFor(s, i + 1) }));
+  const setups: SolidSetupResult[] = built.map((s, i) => ({
+    ...s,
+    index: i + 1,
+    of,
+    instructions: instructionsFor(s, i + 1, i > 0 ? built[i - 1].upFace : undefined),
+  }));
   const summary = summarise(plan);
   const flushed = opts.flushFaces ?? [];
   if (flushed.length > 0) {
@@ -849,12 +1175,23 @@ export function simulationSetups(
  * A one- or two-sided job's sides as setups, so a caller can treat every
  * solid job alike. The programs are the sides' own, unchanged.
  */
-export function sidesAsSetups(result: SolidMachiningResult, opts: Pick<SolidMachiningOptions, 'finishingToolDiaMm'>): SolidMachiningResult {
+export function sidesAsSetups(
+  result: SolidMachiningResult,
+  opts: Pick<SolidMachiningOptions, 'finishingToolDiaMm'> &
+    Partial<Pick<SolidMachiningOptions, 'roughingEnabled' | 'roughingToolDiaMm' | 'finishingEnabled'>>
+): SolidMachiningResult {
   if (!result.success) return result;
-  const built = result.sides.map((side) => asSetup(side, result, null, opts.finishingToolDiaMm));
+  const reachDia = opts.finishingEnabled === false && opts.roughingToolDiaMm ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
+  const firstToolDia = opts.roughingEnabled && opts.roughingToolDiaMm ? opts.roughingToolDiaMm : reachDia;
+  const built = result.sides.map((side) => asSetup(side, result, null, reachDia, firstToolDia));
   const of = built.length;
   return {
     ...result,
-    setups: built.map((s, i) => ({ ...s, index: i + 1, of, instructions: instructionsFor(s, i + 1) })),
+    setups: built.map((s, i) => ({
+      ...s,
+      index: i + 1,
+      of,
+      instructions: instructionsFor(s, i + 1, i > 0 ? built[i - 1].upFace : undefined),
+    })),
   };
 }

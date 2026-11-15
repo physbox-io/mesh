@@ -171,9 +171,9 @@ async function sectorPieces(verts: number[], faces: number[], opts: SolidOptions
  * 64 wedges meeting at a point, an 8 mm ball dropped onto the middle of a
  * cup's floor touched all of them at once and was thrown out of the cup.
  */
-function mergeConvexTiers(hulls: Hull[], rev: { origin: number[]; axis: number[] }, hullOf: (p: number[][]) => Hull | null): Hull[] {
+export function mergeConvexTiers(hulls: Hull[], rev: { origin: number[]; axis: number[] }, hullOf: (p: number[][]) => Hull | null): Hull[] {
   const a = rev.axis, o = rev.origin;
-  const groups = new Map<string, Hull[]>();
+  const groups: { tLo: number; tHi: number; hulls: Hull[] }[] = [];
   const rest: Hull[] = [];
   let reach = 0;
   for (const h of hulls) {
@@ -182,6 +182,7 @@ function mergeConvexTiers(hulls: Hull[], rev: { origin: number[]; axis: number[]
       reach = Math.max(reach, Math.hypot(d[0], d[1], d[2]));
     }
   }
+  const eps = Math.max(1e-9, reach * 1e-4);
   for (const h of hulls) {
     let rMin = Infinity, tLo = Infinity, tHi = -Infinity;
     for (let i = 0; i < h.verts.length; i += 3) {
@@ -192,10 +193,11 @@ function mergeConvexTiers(hulls: Hull[], rev: { origin: number[]; axis: number[]
     }
     // Within a fiftieth of the part of the axis: on it, or round a lathe's pinhole.
     if (rMin > reach * 0.02) { rest.push(h); continue; }
-    const key = `${Math.round(tLo / (reach * 1e-4))},${Math.round(tHi / (reach * 1e-4))}`;
-    groups.set(key, [...(groups.get(key) ?? []), h]);
+    const found = groups.find((g) => Math.abs(tLo - g.tLo) <= eps && Math.abs(tHi - g.tHi) <= eps);
+    if (found) found.hulls.push(h);
+    else groups.push({ tLo, tHi, hulls: [h] });
   }
-  for (const group of groups.values()) {
+  for (const { hulls: group } of groups) {
     const whole = group.length > 1 ? hullOf(group.flatMap(h => {
       const pts: number[][] = [];
       for (let i = 0; i < h.verts.length; i += 3) pts.push([h.verts[i], h.verts[i + 1], h.verts[i + 2]]);

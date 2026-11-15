@@ -129,6 +129,7 @@ export function machineSurface(
   // Where the finishing block starts, and what Z0 means from there on.
   let afterChange = -1;
   let touchZ = 0;
+  let changeSpot: { x: number; y: number } | null = null;
   if (toolChange) {
     // Clear of everything standing, the levelling grid's crown included, and
     // no higher: an un-homed machine lifts no further than this at the M6, and
@@ -143,6 +144,7 @@ export function machineSurface(
     if (!spot) {
       return fail('Roughing leaves nothing flat to zero the finishing bit on: finish with the roughing bit, or raise the allowance.');
     }
+    changeSpot = { x: spot.x, y: spot.y };
     // Out of the cut before the spindle stops, and in the air before it
     // starts again: a spindle stopped in the work drags its bit, and one
     // started at touch-off height spins the new bit up on the stock. Mesh's
@@ -159,10 +161,9 @@ export function machineSurface(
      * there takes the grid's height with it, which the warp below would then
      * add a second time.
      *
-     * The path planner is not told. The finishing order is still planned from
-     * the work origin - planned from the spot, a 100 mm dome on a 140 mm board
-     * took 5473 s against 5383 - and the flight from the spot to its first run
-     * is at the change height, over everything.
+     * The path planner still picks its first finishing run from the work origin
+     * (planned from the spot, a 100 mm dome on a 140 mm board took 5473 s
+     * against 5383), while `leadIn` sweeps the actual flight from `(spot.x, spot.y)`.
      */
     w.gcode.push(`G0 X${f(spot.x)} Y${f(spot.y)}`);
     w.gcode.push(
@@ -197,6 +198,16 @@ export function machineSurface(
   // --- Finishing -------------------------------------------------------------
   let finishingRasterLines = 0;
   if (opts.finishingEnabled) {
+    if (changeSpot) {
+      const origLeadIn = w.leadIn.bind(w);
+      const fromSpot = changeSpot;
+      w.leadIn = (path, expectedEntryZ, rate, returnRate, fromHere) => {
+        w.leadIn = origLeadIn;
+        w.atX = fromSpot.x;
+        w.atY = fromSpot.y;
+        return origLeadIn(path, expectedEntryZ, rate, returnRate, fromHere);
+      };
+    }
     const finished = finishSurface(w, job, opts, materialLevelAt, warnings);
     if (finished.error !== undefined) return fail(finished.error);
     finishingRasterLines = finished.finishingRasterLines;
@@ -217,17 +228,27 @@ export function machineSurface(
     );
   }
 
-  // Finishing is planned against the stock's top face throughout, as the stock
-  // model is: only the words on the wire move to the Z0 the new bit was set to.
-  if (afterChange >= 0 && Math.abs(touchZ) >= 5e-4) {
-    for (let i = afterChange; i < w.gcode.length; i++) {
-      w.gcode[i] = w.gcode[i].replace(/\bZ(-?\d+(?:\.\d+)?)/g, (_, z) => `Z${f(parseFloat(z) - touchZ)}`);
-    }
-  }
-
+  // Warp in nominal stock coordinates first (before shifting post-M6 Z words
+  // relative to the touch-off shelf), then shift only post-M6 G-code Z words
+  // (never comments) so Z0 at `(spot.x, spot.y)` matches both the shelf height
+  // and the bed-levelling grid height there.
   let text = w.gcode.join('\n');
   if (opts.applyMeshLeveling && opts.meshLevelGrid) {
     text = warpGcode(text, opts.meshLevelGrid);
+  }
+  if (afterChange >= 0 && Math.abs(touchZ) >= 5e-4) {
+    const lines = text.split('\n');
+    const m6Idx = lines.findIndex((l) => /^\s*T2\s+M6\b/.test(l));
+    if (m6Idx >= 0) {
+      for (let i = m6Idx + 1; i < lines.length; i++) {
+        const semi = lines[i].indexOf(';');
+        const code = semi >= 0 ? lines[i].slice(0, semi) : lines[i];
+        const comment = semi >= 0 ? lines[i].slice(semi) : '';
+        lines[i] =
+          code.replace(/\bZ(-?\d+(?:\.\d+)?)/g, (_, z) => `Z${f(parseFloat(z) - touchZ)}`) + comment;
+      }
+      text = lines.join('\n');
+    }
   }
   // Where the finishing pass starts, after any levelling warp, so the
   // roughing share is timed off the same program the machine will run.

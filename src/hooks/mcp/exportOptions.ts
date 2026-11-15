@@ -4,11 +4,11 @@
 // ---------------------------------------------------------------------------
 
 import { useStore } from '../../store/useStore';
-import { deriveSolidOptions, type SolidMachiningOptions } from '../../utils/solidMachiningExporter';
+import { deriveSolidOptions, type SolidMachiningOptions, type UpAxis } from '../../utils/solidMachiningExporter';
 import {
   APP_RELIEF_DEFAULTS, DEFAULT_RELIEF_OPTIONS, deriveReliefFeeds, type ReliefCarveOptions,
 } from '../../utils/reliefCarveExporter';
-import { BLOCK_FACES, type BlockFace } from '../../utils/orient';
+import { parseSetups } from '../../utils/orient';
 import { lastReliefOptions } from '../../utils/lastReliefOptions';
 import { webSerialManager } from '../../utils/webSerialManager';
 import type { SceneGraph } from '../../types/scene';
@@ -102,20 +102,7 @@ export function reliefOptionsFor(msg: Record<string, unknown>): { options: Relie
   return { options, fromDialog: !!dialog };
 }
 
-/**
- * `setups` as an agent may send it: 'auto', 1 or 2, or the faces to cut from
- * as a list or a comma-separated string ('+z,+x,-x'), named as the block
- * stands for setup 1. Anything else is left out, which keeps `sides`.
- */
-export function parseSetups(v: unknown): SolidMachiningOptions['setups'] | undefined {
-  if (v === 'auto') return 'auto';
-  if (v === 1 || v === '1') return 1;
-  if (v === 2 || v === '2') return 2;
-  const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : null;
-  if (!list) return undefined;
-  const faces = list.map((f) => String(f).trim().toLowerCase()).filter((f): f is BlockFace => (BLOCK_FACES as string[]).includes(f));
-  return faces.length > 0 ? faces : undefined;
-}
+export { parseSetups };
 
 /**
  * What a solid-machining job over MCP is planned with when the command does
@@ -131,9 +118,14 @@ export const MCP_MACHINING_DEFAULTS = {
   finishingToolType: 'flat',
 } as const;
 
+const UP_AXES_SET = new Set<string>(['+z', '-z', '+x', '-x', '+y', '-y']);
+const FINISHING_STRATEGIES = new Set<string>(['raster', 'waterline', 'hybrid', 'spiral', 'radial']);
+
 /** The solid-machining job an MCP command plans. Shared by EXPORT_MACHINING and ADD_SIMULATION. */
 export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGraph) {
   const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : MCP_MACHINING_DEFAULTS.toolDiaMm;
+  const roughDia = typeof msg.roughingToolDiaMm === 'number' && msg.roughingToolDiaMm > 0 ? msg.roughingToolDiaMm : dia;
+  const finishDia = typeof msg.finishingToolDiaMm === 'number' && msg.finishingToolDiaMm > 0 ? msg.finishingToolDiaMm : dia;
   // Feeds, speeds and stepdowns worked out for the material and the
   // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
   // a wood recipe whatever material is named.
@@ -154,15 +146,34 @@ export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGr
     stockThicknessMm: 0,
     sides: typeof msg.sides === 'number' ? msg.sides : MCP_MACHINING_DEFAULTS.sides,
     ...(setups !== undefined ? { setups } : {}),
+    ...(typeof msg.up === 'string' && UP_AXES_SET.has(msg.up) ? { up: msg.up as UpAxis } : {}),
+    ...(typeof msg.autoOrient === 'boolean' ? { autoOrient: msg.autoOrient } : {}),
+    ...(typeof msg.maxSetups === 'number' && msg.maxSetups >= 1 ? { maxSetups: msg.maxSetups } : {}),
     ...(typeof msg.clearanceMm === 'number' ? { clearanceMm: msg.clearanceMm } : {}),
     ...(typeof msg.toolStickoutMm === 'number' ? { toolStickoutMm: msg.toolStickoutMm } : {}),
+    ...(typeof msg.roughingEnabled === 'boolean' ? { roughingEnabled: msg.roughingEnabled } : {}),
+    ...(typeof msg.finishingEnabled === 'boolean' ? { finishingEnabled: msg.finishingEnabled } : {}),
+    ...(typeof msg.finishingStrategy === 'string' && FINISHING_STRATEGIES.has(msg.finishingStrategy)
+      ? { finishingStrategy: msg.finishingStrategy as SolidMachiningOptions['finishingStrategy'] }
+      : {}),
+    ...(typeof msg.finishingVBitAngleDeg === 'number' && msg.finishingVBitAngleDeg > 0
+      ? { finishingVBitAngleDeg: msg.finishingVBitAngleDeg }
+      : {}),
+    ...(typeof msg.tabCount === 'number' && msg.tabCount >= 0 ? { tabCount: msg.tabCount } : {}),
+    ...(typeof msg.tabWidthMm === 'number' && msg.tabWidthMm > 0 ? { tabWidthMm: msg.tabWidthMm } : {}),
+    ...(typeof msg.tabThicknessMm === 'number' && msg.tabThicknessMm > 0 ? { tabThicknessMm: msg.tabThicknessMm } : {}),
+    ...(typeof msg.registrationPins === 'boolean' ? { registrationPins: msg.registrationPins } : {}),
+    ...(typeof msg.pinDiaMm === 'number' && msg.pinDiaMm > 0 ? { pinDiaMm: msg.pinDiaMm } : {}),
+    ...(typeof msg.pinDepthMm === 'number' && msg.pinDepthMm > 0 ? { pinDepthMm: msg.pinDepthMm } : {}),
+    ...(typeof msg.topSkinMm === 'number' && msg.topSkinMm >= 0 ? { topSkinMm: msg.topSkinMm } : {}),
+    ...(typeof msg.throughCutMm === 'number' && msg.throughCutMm >= 0 ? { throughCutMm: msg.throughCutMm } : {}),
     material: typeof msg.material === 'string' ? msg.material : MCP_MACHINING_DEFAULTS.material,
     finishingToolType:
       msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
         ? msg.finishingToolType
         : MCP_MACHINING_DEFAULTS.finishingToolType,
-    roughingToolDiaMm: dia,
-    finishingToolDiaMm: dia,
+    roughingToolDiaMm: roughDia,
+    finishingToolDiaMm: finishDia,
   } as Parameters<typeof deriveSolidOptions>[1], motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y));
   return options;
 }

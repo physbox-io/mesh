@@ -29,6 +29,7 @@ import {
   deriveReliefFeeds,
   machineSurface,
   MAX_AVAILABLE_REACH_DIAMETERS,
+  vBitConeHeight,
   type Heightmap,
   type ReliefCarveOptions,
   type StockTransform,
@@ -166,6 +167,16 @@ export interface SolidMachiningOptions extends Omit<ReliefCarveOptions, ReliefOn
    * new bit at a tool change is not sent to zero on a face that is not there.
    */
   earlierCuts?: { x0: number; x1: number; y0: number; y1: number; z0: number; z1: number }[];
+  /**
+   * Optional separate list of boxes already cut before side B (`-z`) runs, in
+   * setup 1's frame. Falls back to `earlierCuts` when omitted.
+   */
+  earlierCutsB?: { x0: number; x1: number; y0: number; y1: number; z0: number; z1: number }[];
+  /**
+   * Plan-view regions (in setup 1's frame) where side setups enter undercuts,
+   * so holding tabs avoid blocking side-setup pockets or getting severed.
+   */
+  tabKeepOut?: { minX: number; maxX: number; minY: number; maxY: number }[];
 }
 
 /** A cube of waste cut out of one corner of the block from the top. mm, setup 1's frame. */
@@ -175,6 +186,17 @@ export interface DatumNotch {
   y0: number;
   y1: number;
   depthMm: number;
+}
+
+/** Full 3D bridge geometry of a placed holding tab in setup 1's frame (mm). */
+export interface PlacedTabPrism {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  widthMm: number;
+  topZ: number;
+  bottomZ: number;
 }
 
 export const DEFAULT_SOLID_OPTIONS: SolidMachiningOptions = {
@@ -275,6 +297,8 @@ export interface SolidMachiningResult {
    * it spans in side A's coordinates (stock top 0, negative down).
    */
   tabs: { x: number; y: number; topZ: number; bottomZ: number }[];
+  /** Full 3D bridge spans of placed holding tabs in side A's frame. */
+  tabPrisms?: PlacedTabPrism[];
   /** Registration pin centres in work coordinates, if bored. */
   pins: { x: number; y: number }[];
   /**
@@ -392,12 +416,14 @@ function placeTabs(
   cellMm: number,
   count: number,
   tabWidthMm: number,
-  moatWidthMm: number
-): { mask: Int32Array; anchors: number[] } {
+  moatWidthMm: number,
+  keepOutMask?: Uint8Array
+): { mask: Int32Array; anchors: number[]; targets: { c: number; r: number }[] } {
   // Which tab each channel cell belongs to, 1-based; 0 for none.
   const mask = new Int32Array(cols * rows);
   const anchors: number[] = [];
-  if (count <= 0) return { mask, anchors };
+  const targets: { c: number; r: number }[] = [];
+  if (count <= 0) return { mask, anchors, targets };
 
   // The outline: part cells with a channel cell beside them.
   let cxSum = 0, cySum = 0, n = 0;
@@ -413,7 +439,7 @@ function placeTabs(
       ) outline.push(k);
     }
   }
-  if (n === 0 || outline.length === 0) return { mask, anchors };
+  if (n === 0 || outline.length === 0) return { mask, anchors, targets };
   const cx = cxSum / n;
   const cy = cySum / n;
 
@@ -447,10 +473,11 @@ function placeTabs(
       if (byAngle[mid].a < want) lo = mid + 1; else hi = mid;
     }
     let done = false;
-    for (let step = 0; step < TAB_SEARCH_STEPS && !done; step++) {
+    for (let step = 0; step < Math.max(TAB_SEARCH_STEPS, byAngle.length) && !done; step++) {
       // A small part's outline is shorter than the search, so this wraps both ways.
       const idx = (((lo + (step % 2 === 0 ? step / 2 : -(step + 1) / 2)) % byAngle.length) + byAngle.length) % byAngle.length;
       const p = byAngle[idx];
+      if (keepOutMask && keepOutMask[p.k]) continue;
       if (anchors.some((k) => {
         const r = Math.floor(k / cols);
         return Math.hypot(k - r * cols - p.c, r - p.r) < spacing;
@@ -476,6 +503,26 @@ function placeTabs(
       const ny = (br - p.r) / len;
       // Every channel cell in the strip from the outline to the frame.
       const box = Math.ceil(len + halfW) + 1;
+      if (keepOutMask) {
+        let overlapsKeepOut = false;
+        for (let dr = -box; dr <= box && !overlapsKeepOut; dr++) {
+          const r = p.r + dr;
+          if (r < 0 || r >= rows) continue;
+          for (let dc = -box; dc <= box; dc++) {
+            const c = p.c + dc;
+            if (c < 0 || c >= cols) continue;
+            const k = r * cols + c;
+            if (!moat[k] || !keepOutMask[k]) continue;
+            const along = dc * nx + dr * ny;
+            const across = -dc * ny + dr * nx;
+            if (along >= -1 && along <= len + 1 && Math.abs(across) <= halfW) {
+              overlapsKeepOut = true;
+              break;
+            }
+          }
+        }
+        if (overlapsKeepOut) continue;
+      }
       for (let dr = -box; dr <= box; dr++) {
         const r = p.r + dr;
         if (r < 0 || r >= rows) continue;
@@ -492,11 +539,12 @@ function placeTabs(
         }
       }
       anchors.push(p.k);
+      targets.push({ c: bc, r: br });
       done = true;
     }
   }
 
-  return { mask, anchors };
+  return { mask, anchors, targets };
 }
 
 /**
@@ -673,6 +721,21 @@ export function deriveSolidOptions(
 }
 
 /**
+ * Vertical distance from the finishing cutter's tip up to where its cutting
+ * profile reaches full diameter (ball equator or V-cone shoulder). A vertical
+ * wall is only machined down to `(tipZ + tipSideContactOffsetMm)`.
+ */
+export function tipSideContactOffsetMm(
+  opts: Pick<SolidMachiningOptions, 'finishingEnabled' | 'finishingToolType' | 'finishingToolDiaMm' | 'finishingVBitAngleDeg'>
+): number {
+  if (!opts.finishingEnabled) return 0;
+  const dia = Math.max(0.1, opts.finishingToolDiaMm);
+  if (opts.finishingToolType === 'ball_nose') return dia / 2;
+  if (opts.finishingToolType === 'v_bit') return vBitConeHeight(dia, opts.finishingVBitAngleDeg);
+  return 0;
+}
+
+/**
  * How deep each side of the job cuts, from the part and the options, without
  * running the job. The same arithmetic the exporter uses.
  */
@@ -685,7 +748,20 @@ export function sideDepthMm(partHeightMm: number, opts: SolidMachiningOptions): 
     : opts.board && opts.board.thicknessMm >= partHeightMm && opts.board.thicknessMm <= wantT + BOARD_SLACK_THICK_MM
       ? opts.board.thicknessMm
       : wantT;
-  return twoSided ? stockT / 2 + SIDE_OVERLAP_MM : stockT + Math.max(0, opts.throughCutMm);
+  if (!twoSided) return stockT + Math.max(0, opts.throughCutMm);
+  const baseTwoSide = stockT / 2 + SIDE_OVERLAP_MM;
+  const tipOffset = tipSideContactOffsetMm(opts);
+  if (tipOffset <= 0) return baseTwoSide;
+  const maxSafe = Math.max(baseTwoSide, stockT - 0.5);
+  const reachCap = opts.toolStickoutMm >= baseTwoSide ? Math.min(maxSafe, opts.toolStickoutMm) : maxSafe;
+  return Math.min(reachCap, baseTwoSide + tipOffset);
+}
+
+function moatFor(opts: SolidMachiningOptions): number {
+  if (opts.moatWidthMm > 0) return opts.moatWidthMm;
+  const roughDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
+  const minClearance = opts.sides === 2 && opts.roughingEnabled && tipSideContactOffsetMm(opts) > 0 ? roughDia + 2.5 : 0;
+  return Math.max(3, roughDia * 1.5, minClearance);
 }
 
 type OrientedPart = {
@@ -738,8 +814,7 @@ export function orientPart(sceneTris: ArrayLike<number>, up: UpAxis, scale: numb
 
 /** The block a part needs: as given, or the part plus channel and frame, and its skins. */
 function blockFor(partW: number, partD: number, partH: number, opts: SolidMachiningOptions) {
-  const roughDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
-  const moat = opts.moatWidthMm > 0 ? opts.moatWidthMm : Math.max(3, roughDia * 1.5);
+  const moat = moatFor(opts);
   const frame = Math.max(0, opts.frameWidthMm);
   const twoSided = opts.sides === 2;
   const skin = Math.max(0, opts.topSkinMm);
@@ -778,8 +853,7 @@ export function stockFor(partW: number, partD: number, partH: number, opts: Soli
   const board = opts.board;
   if (!board) return { ...want, prep: null as string | null, tooSmall: null as string | null };
 
-  const roughDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
-  const moat = opts.moatWidthMm > 0 ? opts.moatWidthMm : Math.max(3, roughDia * 1.5);
+  const moat = moatFor(opts);
   const flush = new Set(opts.flushFaces ?? []);
   const lo = (face: BlockFace) => (flush.has(face) ? 0 : moat);
   // Sizes said to the operator are ones a saw can be set to: whole
@@ -931,8 +1005,7 @@ function generateSolidSides(
   }
 
   // --- Stock, channel and frame ----------------------------------------------
-  const roughDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
-  const moat = opts.moatWidthMm > 0 ? opts.moatWidthMm : Math.max(3, roughDia * 1.5);
+  const moat = moatFor(opts);
   const frame = Math.max(0, opts.frameWidthMm);
   const twoSided = opts.sides === 2;
 
@@ -1018,9 +1091,25 @@ function generateSolidSides(
     else frameMask[k] = 1;
   }
 
+  let tabKeepOutMask: Uint8Array | undefined;
+  if (opts.tabKeepOut && opts.tabKeepOut.length > 0) {
+    tabKeepOutMask = new Uint8Array(cols * rows);
+    for (const box of opts.tabKeepOut) {
+      const c0 = Math.max(0, Math.floor(box.minX / stepX));
+      const c1 = Math.min(cols - 1, Math.ceil(box.maxX / stepX));
+      const r0 = Math.max(0, Math.floor(box.minY / stepY));
+      const r1 = Math.min(rows - 1, Math.ceil(box.maxY / stepY));
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) {
+          tabKeepOutMask[r * cols + c] = 1;
+        }
+      }
+    }
+  }
+
   const tabs = placeTabs(
     hit, moatMask, frameMask, cols, rows, res,
-    Math.max(0, Math.round(opts.tabCount)), opts.tabWidthMm, moat
+    Math.max(0, Math.round(opts.tabCount)), opts.tabWidthMm, moat, tabKeepOutMask
   );
   const tabsPlaced = tabs.anchors.length;
   if (tabsPlaced < Math.round(opts.tabCount)) {
@@ -1169,6 +1258,8 @@ function generateSolidSides(
   const material = materialSpec(opts.material);
   const finishRad = Math.max(0.05, opts.finishingToolDiaMm / 2);
   const toolClearRad = Math.max(finishRad, opts.roughingEnabled ? opts.roughingToolDiaMm / 2 : 0);
+  const tipOffset = tipSideContactOffsetMm(opts);
+  const deepMoatRad = tipOffset > 0 ? Math.max(toolClearRad, 2 * finishRad) : toolClearRad;
   const distToMoat = distanceTransform(moatMask, cols, rows);
 
   const surfaceFor = (side: 'A' | 'B'): Heightmap => {
@@ -1182,20 +1273,14 @@ function generateSolidSides(
         const src = side === 'A' ? r * cols + c : r * cols + (cols - 1 - c);
         const k = r * cols + c;
         if (hit[src]) {
-          // The part's own surface, however deep it is. Held to the floor,
-          // which is half way through on a two-sided job, anything below the
-          // half that faces this side was cut by neither: the floor of a
-          // pocket deeper than half the part, the lower half of a cone. A
-          // 50 mm cup came out with 16 mm of its pocket left in. Only the
-          // channel round the part is split between the sides.
-          let h = side === 'A' ? top[src] : -stockT - bottom[src];
-          if (twoSided && h < floorZ && distToMoat[src] * res <= finishRad) {
-            const oppH = side === 'A' ? -stockT - bottom[src] : top[src];
-            if (oppH >= floorZ) {
-              h = Math.max(floorZ, h);
-            } else {
-              deepSources.push(k);
-            }
+          // The part's own surface, however deep it is. When a stepped flange
+          // or foot sits below the midplane floor near the moat, the part's
+          // own underside blocks the opposite setup from reaching up to clear
+          // above it, so this side must machine all the way down to `h` and
+          // clear the adjacent moat down to match (`deepSources`).
+          const h = side === 'A' ? top[src] : -stockT - bottom[src];
+          if (twoSided && h < floorZ && distToMoat[src] * res <= toolClearRad) {
+            deepSources.push(k);
           }
           z[k] = Math.min(0, Math.max(-stockT, h));
         } else if (frameMask[src]) {
@@ -1213,16 +1298,20 @@ function generateSolidSides(
       }
     }
     if (deepSources.length > 0) {
-      const clearCells = Math.ceil(toolClearRad / res) + 1;
+      const clearCells = Math.ceil(deepMoatRad / res) + 1;
+      const safeBottomZ = twoSided ? -Math.max(stockT / 2 + SIDE_OVERLAP_MM, stockT - 0.5) : floorZ;
       for (const k0 of deepSources) {
         const r0 = Math.floor(k0 / cols);
         const c0 = k0 - r0 * cols;
-        const targetZ = z[k0];
+        const src0 = side === 'A' ? r0 * cols + c0 : r0 * cols + (cols - 1 - c0);
+        const targetZ = twoSided && tipOffset > 0 && hit[src0]
+          ? Math.max(safeBottomZ, z[k0] - tipOffset)
+          : z[k0];
         for (let dr = -clearCells; dr <= clearCells; dr++) {
           const r = r0 + dr;
           if (r < 0 || r >= rows) continue;
           for (let dc = -clearCells; dc <= clearCells; dc++) {
-            if (Math.hypot(dc * stepX, dr * stepY) > toolClearRad + res) continue;
+            if (Math.hypot(dc * stepX, dr * stepY) > deepMoatRad + res) continue;
             const c = c0 + dc;
             if (c < 0 || c >= cols) continue;
             const src = side === 'A' ? r * cols + c : r * cols + (cols - 1 - c);
@@ -1327,11 +1416,12 @@ function generateSolidSides(
     // Past the half only by more than the surface's own float rounding.
     const depth = deepest > depthA + 1e-3 ? deepest : depthA;
     // Side B stands turned left to right, so what is gone from its face is mirrored.
+    const cutsBeforeSide = side === 'A' ? (opts.earlierCuts ?? []) : (opts.earlierCutsB ?? opts.earlierCuts ?? []);
     const touchOff = {
       standsAt: (px: number, py: number) => {
         const x = side === 'A' ? px : stockW - px;
         return !pins.some((p) => Math.hypot(p.x - x, p.y - py) <= opts.pinDiaMm / 2) &&
-          !(opts.earlierCuts ?? []).some((b) =>
+          !cutsBeforeSide.some((b) =>
             x >= b.x0 && x <= b.x1 && py >= b.y0 && py <= b.y1 && (side === 'A' ? b.z1 > -1e-6 : b.z0 < -stockT + 1e-6));
       },
     };
@@ -1346,23 +1436,21 @@ function generateSolidSides(
       const src = side === 'A' ? r * cols + c : r * cols + (cols - 1 - c);
       return (moatMask[src] === 1 || frameMask[src] === 1) && !tabs.mask[src] && dist[src] > scrapBeyond;
     };
+    const sideNotches = side === 'A' ? (opts.datumNotches ?? []) : [];
+    const runOff = {
+      minX: flush.has(side === 'A' ? '-x' : '+x') || sideNotches.some((n) => n.x0 <= 1e-6),
+      maxX: flush.has(side === 'A' ? '+x' : '-x') || sideNotches.some((n) => n.x1 >= stockW - 1e-6),
+      minY: flush.has('-y') || sideNotches.some((n) => n.y0 <= 1e-6),
+      maxY: flush.has('+y') || sideNotches.some((n) => n.y1 >= stockD - 1e-6),
+    };
+    const hasRunOff = runOff.minX || runOff.maxX || runOff.minY || runOff.maxY;
     const cut = machineSurface(
       {
         surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut', touchOff, scrap,
         // Until the channel is down to its floor, the part is not free of the block.
         ...(channel ? { mustReachMm: depthA } : {}),
-        // Off a flush side, as the relief runs off an open edge. Side B is
-        // turned left to right, so its ends are the other way round.
-        ...(flush.size > 0
-          ? {
-              runOff: {
-                minX: flush.has(side === 'A' ? '-x' : '+x'),
-                maxX: flush.has(side === 'A' ? '+x' : '-x'),
-                minY: flush.has('-y'),
-                maxY: flush.has('+y'),
-              },
-            }
-          : {}),
+        // Off a flush side or datum notch corner, as the relief runs off an open edge.
+        ...(hasRunOff ? { runOff } : {}),
       },
       {
         ...carveOpts,
@@ -1401,6 +1489,11 @@ function generateSolidSides(
       `Through-cut extends ${opts.throughCutMm} mm below the stock bottom; use a spoilboard.`
     );
   }
+  if (!twoSided && tipOffset > Math.max(0, opts.throughCutMm) + 0.05) {
+    warnings.push(
+      `The ${f(opts.finishingToolDiaMm)} mm ${opts.finishingToolType === 'ball_nose' ? 'ball-nose' : 'V-bit'} reaches full diameter ${f(tipOffset)} mm above its tip, so steep walls will keep a small bottom skirt unless Through Cut is raised or a flat end mill is used.`
+    );
+  }
 
   // Both sides raise the same tooling warnings, because they are the same
   // tooling at the same depth. Said once.
@@ -1423,6 +1516,23 @@ function generateSolidSides(
     tabs: tabs.anchors.map((k, i) => {
       const r = Math.floor(k / cols);
       return { x: (k - r * cols) * stepX, y: r * stepY, ...tabZ[i] };
+    }),
+    tabPrisms: tabs.anchors.map((k, i) => {
+      const r0 = Math.floor(k / cols);
+      const c0 = k - r0 * cols;
+      const tgt = tabs.targets[i];
+      const dx = (tgt.c - c0) * stepX;
+      const dy = (tgt.r - r0) * stepY;
+      const len = Math.hypot(dx, dy) || 1;
+      const pad = res * 1.5;
+      return {
+        x0: c0 * stepX - (dx / len) * pad,
+        y0: r0 * stepY - (dy / len) * pad,
+        x1: tgt.c * stepX + (dx / len) * pad,
+        y1: tgt.r * stepY + (dy / len) * pad,
+        widthMm: opts.tabWidthMm,
+        ...tabZ[i],
+      };
     }),
     pins,
     stockTransform: (() => {

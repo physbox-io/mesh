@@ -59,10 +59,19 @@ export function SetupChangeDialog({
    */
   const touch = (axis: 'x' | 'y') => {
     const t = setup.datum?.touches.find((d) => d.axis === axis);
-    return { at: (t?.wallMm ?? 0) - r, face: t?.face };
+    const wallMm = t?.wallMm ?? 0;
+    const fromPositiveSide =
+      (t?.face ?? '').includes('(right)') || (t?.face ?? '').includes('(far)');
+    return {
+      at: fromPositiveSide ? wallMm + r : wallMm - r,
+      wallMm,
+      face: t?.face,
+    };
   };
   const tx = touch('x'), ty = touch('y');
   const onNotch = (tx.face ?? '').startsWith('datum notch');
+  const prevUp = carved.length > 0 ? carved[carved.length - 1] : undefined;
+  const datumXY = tx.wallMm > 0 || ty.wallMm > 0 ? { x: tx.wallMm, y: ty.wallMm } : undefined;
   const connected = machineState.connected && machineState.status === 'IDLE';
 
   const act = async (key: string, run: () => Promise<{ success: boolean; message: string } | void>) => {
@@ -124,11 +133,12 @@ export function SetupChangeDialog({
                 upFace: setup.upFace, firstStock, carved, locate: setup.locate, widthPx: 260,
                 pins: onPins && setup.upFace === '-z' ? pins.map((p) => ({ x: firstStock.widthMm - p.x, y: p.y })) : undefined,
                 window: setup.upFace === '+z' || setup.upFace === '-z' ? undefined : setup.windowBounds,
+                datumXY,
               }),
             }}
           />
           <div className="flex-1 min-w-[180px] space-y-1.5">
-            <p className="font-semibold">{describeTurn(frame)}</p>
+            <p className="font-semibold">{describeTurn(frame, prevUp)}</p>
             <p className="text-slate-500 dark:text-slate-400">{hiddenFaces(setup.upFace, firstStock)}</p>
             <p>Clamp it on the two faces either side, not on the top or on anything already cut.</p>
             <Tick k="stand" label="It is standing like that, and clamped" done={done} mark={mark} />
@@ -161,17 +171,19 @@ export function SetupChangeDialog({
               <p>
                 {onNotch
                   ? <>Touch off X and Y on the inner walls of the near-left corner notch ({toolDiaMm} mm bit, {r.toFixed(2)} mm radius offset).</>
-                  : <>Without dowel pins, re-zero X and Y on the flipped stock corner ({toolDiaMm} mm bit, {r.toFixed(2)} mm radius offset).</>}
+                  : setup.datum
+                    ? <>Zero {setup.datum.description} ({toolDiaMm} mm bit, {r.toFixed(2)} mm radius offset).</>
+                    : <>Without dowel pins, re-zero X and Y on the flipped stock corner ({toolDiaMm} mm bit, {r.toFixed(2)} mm radius offset).</>}
               </p>
               <JogPad disabled={!connected} />
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" disabled={!connected} className={btn}
                   onClick={() => act('x', () => webSerialManager.setWorkPosition({ x: tx.at }, paperMm))}>
-                  <Crosshair className="w-3.5 h-3.5" /> Set X on the {onNotch ? 'notch wall facing left' : `${FACE_NAME[frame.faceAt.left]} (left)`} {done.x && <Check className="w-3.5 h-3.5 text-emerald-500" />}
+                  <Crosshair className="w-3.5 h-3.5" /> Set X on the {onNotch ? 'notch wall facing left' : (tx.face ?? `${FACE_NAME[frame.faceAt.left]} (left)`)} {done.x && <Check className="w-3.5 h-3.5 text-emerald-500" />}
                 </button>
                 <button type="button" disabled={!connected} className={btn}
                   onClick={() => act('y', () => webSerialManager.setWorkPosition({ y: ty.at }, paperMm))}>
-                  <Crosshair className="w-3.5 h-3.5" /> Set Y on the {onNotch ? 'notch wall facing you' : `${FACE_NAME[frame.faceAt.near]} (towards you)`} {done.y && <Check className="w-3.5 h-3.5 text-emerald-500" />}
+                  <Crosshair className="w-3.5 h-3.5" /> Set Y on the {onNotch ? 'notch wall facing you' : (ty.face ?? `${FACE_NAME[frame.faceAt.near]} (towards you)`)} {done.y && <Check className="w-3.5 h-3.5 text-emerald-500" />}
                 </button>
               </div>
               <ZTouch paperMm={paperMm} setPaperMm={setPaperMm} connected={connected}

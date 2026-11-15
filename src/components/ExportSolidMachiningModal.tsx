@@ -106,12 +106,14 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
   // measured first. The part is always cut at its modelled size, millimetre
   // for millimetre: to cut it bigger or smaller, resize it in the scene.
   const [up, setUp] = useState<UpAxis>(DEFAULT_SOLID_OPTIONS.up);
+  const [chosenUp, setChosenUp] = useState<UpAxis | null>(null);
   const settledUp = useSettled(up, 250);
   const settledPlacement = useMemo(() => ({ up: settledUp, scalePercent: 100 }), [settledUp]);
   const placementSettled = settledUp === up;
+  const effectiveUp = autoOrient && chosenUp ? chosenUp : up;
   const part = useMemo(
-    () => (isOpen ? measurePart(scene, up, 100) : null),
-    [isOpen, scene, up]
+    () => (isOpen ? measurePart(scene, effectiveUp, 100) : null),
+    [isOpen, scene, effectiveUp]
   );
   const partHeight = part?.z ?? 10;
 
@@ -167,6 +169,10 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       }),
     [scene, settled, settledPlacement, probedGrid, machineState.motion, autoOrient]
   );
+  const nextChosenUp = options.setups === 'auto' && autoOrient && result?.upChosen ? result.upChosen : null;
+  if (chosenUp !== nextChosenUp) {
+    setChosenUp(nextChosenUp);
+  }
   // Watch it being made: the stock, then the block after each setup.
   const steps = useSimulationSteps(result, settled);
 
@@ -319,8 +325,10 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     await webSerialManager.frameJob(turned && current ? current.windowBounds : result.bounds, 0, { laserMode: false, safeZMm: options.safeZ });
   };
 
+  const firstIsTop = setups.length === 0 || setups[0].upFace === '+z';
+  const canProbeTop = !!result?.success && firstIsTop && (!current || current.upFace === '+z');
   const handleProbeBed = () => {
-    if (!result?.success) return;
+    if (!result?.success || !canProbeTop) return;
     void bed.probe(result.bounds);
   };
 
@@ -432,7 +440,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               </Field>
               <Field
                 label="Top Skin (mm)"
-                hint="Sets default feeds, speeds, and step-down for the selected stock material."
+                hint="Extra stock thickness left above the part's top face (and below it on a two-sided job), skimmed flat first so a sawn or uneven blank still cleans up."
               >
                 <NumberInput
                   step={0.5} min={0} max={20}
@@ -631,7 +639,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
           <BedLevellingFields
             {...bed}
             onProbe={handleProbeBed}
-            canProbe={!!result?.success}
+            canProbe={canProbeTop}
             connected={machineState.connected}
             applyMeshLeveling={options.applyMeshLeveling}
             setApplyMeshLeveling={(on) => set('applyMeshLeveling', on)}
@@ -772,7 +780,15 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               secondTool={preflight.secondTool}
               rpm={settled.spindleRpm}
               material={preflight.material}
-              origin="the near-left corner of the stock's top face"
+              origin={
+                current?.locate === 'pins'
+                  ? 'the registration pins, with Z0 on the flipped top face'
+                  : current?.datum
+                    ? current.datum.description
+                    : current && current.upFace !== '+z'
+                      ? 'the near-left corner of the block as stood for this setup'
+                      : "the near-left corner of the stock's top face"
+              }
               caveat={preflight.caveat}
               extent={result?.success ? (turned && current ? { ...current.windowBounds, minZ: -current.stock.thicknessMm, maxZ: 0 } : result.bounds) : undefined}
             />
@@ -782,7 +798,11 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
         {/* Footer */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="hidden lg:block text-xs text-slate-500 dark:text-slate-400">
-            Zero the machine on the near-left corner of the stock's top face, then cut setup 1.
+            {current && current.index > 1
+              ? `Press Cut Setup ${current.index} to walk through turning and re-zeroing the block.`
+              : current && current.upFace !== '+z'
+                ? 'Press Cut Setup 1 to stand and zero the block for its first side cut.'
+                : "Zero the machine on the near-left corner of the stock's top face, then cut setup 1."}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 sm:ml-auto">
             <button
