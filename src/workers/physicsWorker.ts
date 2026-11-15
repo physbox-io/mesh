@@ -36,7 +36,9 @@ import {
   applyCtrlInputs, applyJointForces, channelCatalogue, readOutputs, resolveInputs, setJointParams, stepsFor, substepsFor,
   type ResolvedInput,
 } from '../utils/coSimLink';
-import type { SceneGraph, SceneJoint, SceneNode } from '../types/scene';
+import type { FlexureSpec, SceneGraph, SceneJoint, SceneNode } from '../types/scene';
+import { buildHydroBodyModel, computeBuoyancyWrench, type HydroBodyModel } from '../utils/hydrostatics';
+import { bistableForce } from '../utils/flexure';
 // Pure loop control for the headless run, kept in a module that can be
 // imported outside a Worker realm so it is testable (this file cannot be:
 // it assigns self.onmessage at module scope). See tests/headlessRun.test.ts.
@@ -787,11 +789,16 @@ const WAKE_NUDGE_N = 1e-12;
  * it was read on every tick; the values cannot change under a built model.
  * Keyed on the model object because headless runs swap it out and back.
  */
-let optCache: { model: MjModel; timestep: number; enableflags: number } | null = null;
+let optCache: { model: MjModel; timestep: number; enableflags: number; gravityZ: number } | null = null;
 const modelOpt = (mdl: MjModel) => {
   if (optCache?.model !== mdl) {
     const opt = mdl.opt;
-    optCache = { model: mdl, timestep: opt.timestep, enableflags: opt.enableflags };
+    optCache = {
+      model: mdl,
+      timestep: opt.timestep,
+      enableflags: opt.enableflags,
+      gravityZ: opt.gravity?.[2] ?? -9.81,
+    };
   }
   return optCache;
 };
@@ -987,6 +994,189 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>, opts
 let envWindX = 0;
 let envWindY = 0;
 let envDensity = 0;
+let envWaterLevel: number | null = null;
+let soundEnabled = false;
+
+interface BistableJointEntry {
+  dofAdr: number;
+  qposAdr: number;
+  bodyId: number;
+  spec: FlexureSpec;
+}
+
+let cachedHydroByNodeId = new Map<string, HydroBodyModel>();
+let hydroByBodyId = new Map<number, HydroBodyModel>();
+let bistableJoints: BistableJointEntry[] = [];
+let prevConstraintDof: Float64Array | null = null;
+const pendingAudioImpacts = new Map<string, number>();
+const lastAudioEmitMs = new Map<string, number>();
+
+const rebuildHydroAndFlexureCaches = (
+  explicitHydroModels?: HydroBodyModel[],
+  activeWaterLevel: number | null = envWaterLevel,
+) => {
+  if (explicitHydroModels) {
+    cachedHydroByNodeId = new Map(explicitHydroModels.map((h) => [h.nodeId, h]));
+  }
+  hydroByBodyId = new Map();
+  bistableJoints = [];
+  prevConstraintDof = null;
+  const mdl = model;
+  if (!mdl) return;
+
+  const walk = (nodes: SceneNode[]) => {
+    for (const node of nodes || []) {
+      const bId = bodyIdCache[node.id];
+      if (bId !== undefined && bId > 0) {
+        // Movable body (has own joints or rides on a jointed ancestor)
+        if (activeWaterLevel !== null && (node.joints?.length ?? 0) > 0) {
+          const h = cachedHydroByNodeId.get(node.id) ?? buildHydroBodyModel(node);
+          if (h) {
+            hydroByBodyId.set(bId, h);
+            pendingWake.add(bId);
+          }
+        }
+        if (node.flexure?.kind === 'bistable') {
+          const slide = (node.joints || []).find((j) => j.type === 'slide');
+          const jId = slide ? jointIdCache[slide.name] : undefined;
+          if (jId !== undefined) {
+            bistableJoints.push({
+              dofAdr: mdl.jnt_dofadr[jId],
+              qposAdr: mdl.jnt_qposadr[jId],
+              bodyId: bId,
+              spec: node.flexure,
+            });
+          }
+        }
+      }
+      if (node.children?.length) walk(node.children);
+    }
+  };
+  walk(sceneGraph.nodes);
+};
+
+const applyHydroAndFlexureForces = (stepSize: number, activeWaterLevel: number | null = envWaterLevel) => {
+  const mdl = model;
+  const dat = data;
+  if (!mdl || !dat) return;
+
+  if (bistableJoints.length > 0) {
+    const qpos = dat.qpos;
+    const qfrc = dat.qfrc_applied;
+    for (const bj of bistableJoints) {
+      const f = bistableForce(qpos[bj.qposAdr], bj.spec);
+      if (Math.abs(f) > 1e-6) {
+        qfrc[bj.dofAdr] += f;
+        pendingWake.add(bj.bodyId);
+      }
+    }
+  }
+
+  if (activeWaterLevel !== null && hydroByBodyId.size > 0) {
+    const xpos = dat.xpos;
+    const xmat = dat.xmat;
+    const xipos = dat.xipos;
+    const xfrc = dat.xfrc_applied;
+    const bodyMass = mdl.body_mass;
+    const bodySubtreeMass = (mdl as unknown as { body_subtreemass?: ArrayLike<number> }).body_subtreemass;
+    const bodyInertia = mdl.body_inertia;
+    const views = velocityViews(mdl, dat);
+    const gravityZ = modelOpt(mdl).gravityZ;
+
+    for (const [bId, hydro] of hydroByBodyId) {
+      const pOff = bId * 3;
+      const mOff = bId * 9;
+      const pos = [xpos[pOff], xpos[pOff + 1], xpos[pOff + 2]];
+      const mat = [
+        xmat[mOff], xmat[mOff + 1], xmat[mOff + 2],
+        xmat[mOff + 3], xmat[mOff + 4], xmat[mOff + 5],
+        xmat[mOff + 6], xmat[mOff + 7], xmat[mOff + 8],
+      ];
+      const ipos = [xipos[pOff], xipos[pOff + 1], xipos[pOff + 2]];
+      const velAtCom = bodyPointVelocity(views, bId, ipos);
+      const angVel = bodyAngularVelocity(views, bId);
+      const massKg = Math.max(bodyMass[bId] || 0, bodySubtreeMass?.[bId] || 0, 1e-4);
+      const inertia = [bodyInertia[pOff], bodyInertia[pOff + 1], bodyInertia[pOff + 2]];
+      const wrench = computeBuoyancyWrench(
+        hydro,
+        pos,
+        mat,
+        ipos,
+        velAtCom,
+        angVel,
+        massKg,
+        inertia,
+        activeWaterLevel,
+        gravityZ,
+        stepSize,
+      );
+      if (wrench.submergedVolume > 1e-12) {
+        const fOff = bId * 6;
+        xfrc[fOff + 0] += wrench.force[0];
+        xfrc[fOff + 1] += wrench.force[1];
+        xfrc[fOff + 2] += wrench.force[2];
+        xfrc[fOff + 3] += wrench.torque[0];
+        xfrc[fOff + 4] += wrench.torque[1];
+        xfrc[fOff + 5] += wrench.torque[2];
+        pendingWake.add(bId);
+      }
+    }
+  }
+};
+
+/**
+ * Zero-copy modal audio impulse detector: reads `dat.qfrc_constraint` (never
+ * `dat.contact`, which copies onto the WASM heap!) only when `soundEnabled` is on.
+ */
+const sampleAudioImpacts = (stepSize: number) => {
+  if (!soundEnabled || !model || !data) return;
+  const nv = model.nv;
+  if (nv === 0) return;
+  const qfrcC = data.qfrc_constraint;
+  if (!prevConstraintDof || prevConstraintDof.length !== nv) {
+    prevConstraintDof = Float64Array.from(qfrcC);
+    return;
+  }
+  const dofBody = model.dof_bodyid;
+  // Accumulate translational constraint force jump per body over this step
+  const bodyJumpSq = new Map<number, number>();
+  for (let d = 0; d < nv; d++) {
+    const df = qfrcC[d] - prevConstraintDof[d];
+    prevConstraintDof[d] = qfrcC[d];
+    if (Math.abs(df) < 0.8) continue;
+    const bId = dofBody[d];
+    if (bId <= 0) continue;
+    bodyJumpSq.set(bId, (bodyJumpSq.get(bId) ?? 0) + df * df);
+  }
+  for (const [bId, sumSq] of bodyJumpSq) {
+    const impulseNs = Math.sqrt(sumSq) * stepSize;
+    if (impulseNs < 0.004) continue;
+    const nodeId = bodyNodeById[bId];
+    if (!nodeId || nodeId === 'world') continue;
+    const prev = pendingAudioImpacts.get(nodeId) ?? 0;
+    if (impulseNs > prev) pendingAudioImpacts.set(nodeId, impulseNs);
+  }
+};
+
+const flushAudioImpacts = () => {
+  if (!soundEnabled || pendingAudioImpacts.size === 0) {
+    pendingAudioImpacts.clear();
+    return;
+  }
+  const now = performance.now();
+  const candidates: { nodeId: string; impulseNs: number }[] = [];
+  for (const [nodeId, impulseNs] of pendingAudioImpacts) {
+    const lastAt = lastAudioEmitMs.get(nodeId) ?? 0;
+    if (now - lastAt < 75) continue;
+    candidates.push({ nodeId, impulseNs });
+  }
+  pendingAudioImpacts.clear();
+  if (candidates.length === 0) return;
+  candidates.sort((a, b) => b.impulseNs - a.impulseNs);
+  const top = candidates.slice(0, 4);
+  for (const ev of top) lastAudioEmitMs.set(ev.nodeId, now);
+  post({ type: 'AUDIO_IMPACTS', events: top });
+};
 
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
 const snapshot = () => {
@@ -1417,6 +1607,7 @@ const stepOnce = (stepSize: number): boolean => {
 
     applyDragForce();
     applyJointForces(data, linkForces);
+    applyHydroAndFlexureForces(stepSize);
 
     const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
     const scriptStart = performance.now();
@@ -1443,6 +1634,7 @@ const stepOnce = (stepSize: number): boolean => {
     syncKinematics(mujoco, model, data);
     checkConstraintBreaks();
     checkImpacts(stepSize);
+    sampleAudioImpacts(stepSize);
     stepCount++;
 
     if (stepCount % 10 === 0) {
@@ -1593,6 +1785,7 @@ const postFrame = () => {
   framePending = false;
   lastFramePost = performance.now();
   postScriptStatus();
+  flushAudioImpacts();
   const snap = snapshot();
   if (isSharedSupported) {
     post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
@@ -1838,6 +2031,7 @@ const doBuild = (
   rebuildBreakableWelds();
   rebuildImpactWatches();
   pendingWake.clear(); // body ids from the old model mean nothing in this one
+  rebuildHydroAndFlexureCaches();
   scriptCache = {};
 
   // Explicit seed state (from the main thread's live mirror) takes priority
@@ -2028,11 +2222,16 @@ const runHeadless = async (
   stride = 1,
   askImpact?: AskImpact,
   frameContacts = true,
+  headlessWaterLevel: number | null = envWaterLevel,
+  headlessHydroModels?: HydroBodyModel[],
 ): Promise<HeadlessRunResult> => {
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
   const mj = mujoco;
 
   const savedModel = model, savedData = data, savedSceneGraph = sceneGraph;
+  const savedCachedHydro = cachedHydroByNodeId;
+  const savedHydroByBodyId = hydroByBodyId;
+  const savedBistableJoints = bistableJoints;
   // A headless run starts its scripts from nothing and must not leave its
   // state or compiled closures in the live scene's.
   const savedScriptState = scriptState;
@@ -2083,6 +2282,7 @@ const runHeadless = async (
     brokenWeldKeys = new Set();
     rebuildBreakableWelds();
     watchImpacts();
+    rebuildHydroAndFlexureCaches(headlessHydroModels, headlessWaterLevel);
 
     seedActuatorCtrl(sceneGraph.nodes, data);
     mujoco.mj_forward(model, data);
@@ -2153,6 +2353,7 @@ const runHeadless = async (
       rebuildBreakableWelds();
       watchImpacts();
       pendingWake.clear();
+      rebuildHydroAndFlexureCaches(undefined, headlessWaterLevel);
       scriptCache = {};
       if (carried) carryByJointName(carried, nextModel, nextData);
       else mj.mj_forward(nextModel, nextData);
@@ -2169,6 +2370,7 @@ const runHeadless = async (
       step: () => {
         data!.xfrc_applied.fill(0);
         data!.qfrc_applied.fill(0);
+        applyHydroAndFlexureForces(timestep, headlessWaterLevel);
         lastAero = {};
         const t0 = performance.now();
         executeScripts(sceneGraph.nodes, lastAero);
@@ -2256,6 +2458,9 @@ const runHeadless = async (
     for (const id of savedPendingWake) pendingWake.add(id);
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
+    cachedHydroByNodeId = savedCachedHydro;
+    hydroByBodyId = savedHydroByBodyId;
+    bistableJoints = savedBistableJoints;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
     headlessBreaks = null;
     impactWatches = savedImpactWatches;
@@ -2314,6 +2519,9 @@ const handleMessage = async (evt: MessageEvent) => {
         try {
           if (!mujoco) await loadMujoco();
           applyMeshFiles(msg.meshFiles, msg.dropMeshes);
+          if (msg.hydroModels) {
+            cachedHydroByNodeId = new Map(msg.hydroModels.map((h: HydroBodyModel) => [h.nodeId, h]));
+          }
           const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState, msg.brokenConstraints);
           if (msg.holdForInstall) holdUntil = performance.now() + HOLD_FOR_INSTALL_MS;
           post({ type: 'BUILT', id: msg.id, ok: true, ...result });
@@ -2332,6 +2540,20 @@ const handleMessage = async (evt: MessageEvent) => {
         envWindX = msg.windX ?? envWindX;
         envWindY = msg.windY ?? envWindY;
         envDensity = msg.density ?? envDensity;
+        if ('waterLevel' in msg) {
+          envWaterLevel = typeof msg.waterLevel === 'number' && Number.isFinite(msg.waterLevel) ? msg.waterLevel : null;
+          rebuildHydroAndFlexureCaches(msg.hydroModels, envWaterLevel);
+        } else if (msg.hydroModels) {
+          rebuildHydroAndFlexureCaches(msg.hydroModels, envWaterLevel);
+        }
+        break;
+      }
+      case 'SET_SOUND': {
+        soundEnabled = !!msg.enabled;
+        if (!soundEnabled) {
+          prevConstraintDof = null;
+          pendingAudioImpacts.clear();
+        }
         break;
       }
       case 'SET_PLAYING': {
@@ -2429,6 +2651,8 @@ const handleMessage = async (evt: MessageEvent) => {
             msg.xml, msg.sceneGraph, msg.ticks, msg.stride,
             judged ? (event) => askMainAboutImpact(id, event) : undefined,
             msg.contacts !== false,
+            'waterLevel' in msg ? (msg.waterLevel ?? null) : envWaterLevel,
+            msg.hydroModels,
           );
           post({ type: 'HEADLESS_RESULT', id, ...result });
         } finally {

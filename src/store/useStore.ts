@@ -41,7 +41,7 @@ export type { AddPlacement } from './addComponentActions';
 import { userEditPending, castPrepBypass, refusedGraphs, keptGraphs, castPrepArmed, bodiesChanged } from './editGuard';
 import type { DeformedGeometry } from './breakage';
 import { shapeParamActions, type ShapeParamActions } from './shapeParamActions';
-import { getPhysicsWorkerClient } from './physicsEngine';
+import { getPhysicsWorkerClient, liveModelGraph } from './physicsEngine';
 import { initialPreset, initialScene, initialFraming, snapForGridMm } from './sceneFraming';
 import { latticeActions, type LatticeActions } from './latticeActions';
 import { sculptActions, type SculptActions } from './sculptActions';
@@ -230,6 +230,7 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
   floorFriction: number;
   floorBounce: number;
   background: BackgroundId;
+  waterLevel: number | null;
   
   // Scene
   sceneGraph: SceneGraph;
@@ -607,6 +608,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       'floorBounce' in env;
     if (physicsChanged) {
       get().recompile(get().sceneGraph);
+    } else if ('waterLevel' in env) {
+      const s = get();
+      getPhysicsWorkerClient().setEnv(
+        s.windX,
+        s.windY,
+        s.density,
+        s.waterLevel,
+        liveModelGraph(s).graph,
+      );
     }
   },
   

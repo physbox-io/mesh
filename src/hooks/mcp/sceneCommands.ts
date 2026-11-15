@@ -85,7 +85,7 @@ export const sceneCommands: McpCommands = {
     // Nothing to run: an empty scene used to come back ok and settled.
     const empty = emptySceneRefusal(useStore.getState().sceneGraph);
     if (empty) return empty;
-    const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce } = useStore.getState();
+    const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, waterLevel } = useStore.getState();
     // Runs inside the same physics worker that owns the live simulation
     // (see src/workers/physicsWorker.ts's runHeadless) — its own isolated
     // model/data built from the one already-loaded mujoco module, so a
@@ -120,6 +120,7 @@ export const sceneCommands: McpCommands = {
     const sections = frameSections(msg.include);
     const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride, impacts.judge, {
       contacts: !sections || sections.has('contacts'),
+      waterLevel,
     });
     if (stillPending.length > 0) {
       result.warnings = [
@@ -562,8 +563,8 @@ export const sceneCommands: McpCommands = {
     return withRenamedIds(withScriptWarnings(result, nodes), renamed);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
-    const { gravityZ, windX, windY, density, floorFriction, floorBounce, background, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
-      msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; background?: string; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
+    const { gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
+      msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; background?: string; waterLevel?: number | null | false; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
     // The board on the bench: what every carve, export and fit check uses.
     const stockPatch = {
       ...(typeof stockWidthMm === 'number' && stockWidthMm > 0 ? { widthMm: stockWidthMm } : {}),
@@ -591,6 +592,9 @@ export const sceneCommands: McpCommands = {
     if (floorFriction !== undefined) env.floorFriction = floorFriction;
     if (floorBounce !== undefined) env.floorBounce = floorBounce;
     if (background !== undefined) env.background = background;
+    if (waterLevel !== undefined) {
+      env.waterLevel = typeof waterLevel === 'number' && Number.isFinite(waterLevel) ? waterLevel : null;
+    }
     if (Object.keys(env).length > 0) store.setEnvironment(env);
     return {
       ok: true,

@@ -38,6 +38,7 @@ export const DEFAULT_ENVIRONMENT: SceneEnvironment = {
   floorFriction: 1.0,
   floorBounce: 0.0,
   background: 'studio',
+  waterLevel: null,
 };
 
 const NUMERIC_KEYS = ['gravityZ', 'windX', 'windY', 'density', 'floorFriction', 'floorBounce'] as const;
@@ -52,6 +53,7 @@ export function readEnvironment(state: SceneEnvironment): SceneEnvironment {
     floorFriction: state.floorFriction,
     floorBounce: state.floorBounce,
     background: isBackgroundId(state.background) ? state.background : 'studio',
+    waterLevel: typeof state.waterLevel === 'number' && Number.isFinite(state.waterLevel) ? state.waterLevel : null,
   };
 }
 
@@ -73,6 +75,11 @@ export function environmentOf(saved: Partial<SceneEnvironment> | null | undefine
   }
   if (isBackgroundId(saved?.background)) {
     env.background = saved.background;
+  }
+  if (typeof saved?.waterLevel === 'number' && Number.isFinite(saved.waterLevel)) {
+    env.waterLevel = saved.waterLevel;
+  } else if (saved?.waterLevel === null) {
+    env.waterLevel = null;
   }
   return env;
 }

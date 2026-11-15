@@ -5,6 +5,7 @@
 
 import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
+import type { HydroBodyModel } from '../utils/hydrostatics';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
@@ -230,8 +231,18 @@ export type MainToWorkerMessage =
        * simulated off screen and shows up as a jump. See `holdUntil`.
        */
       holdForInstall?: boolean;
+      hydroModels?: HydroBodyModel[];
     }
-  | { type: 'SET_ENV'; windX?: number; windY?: number; density?: number }
+  | {
+      type: 'SET_ENV';
+      windX?: number;
+      windY?: number;
+      density?: number;
+      waterLevel?: number | null;
+      gravityZ?: number;
+      hydroModels?: HydroBodyModel[];
+    }
+  | { type: 'SET_SOUND'; enabled: boolean }
   | { type: 'SET_PLAYING'; isPlaying: boolean }
   | { type: 'TICK'; delta: number; /** Date.now() when posted, so a backlog can be told apart. */ sentAt?: number }
   | { type: 'RESUME' }
@@ -252,6 +263,9 @@ export type MainToWorkerMessage =
        * run asks the store. Without it a headless run never shatters.
        */
       judgeImpacts?: boolean;
+      waterLevel?: number | null;
+      gravityZ?: number;
+      hydroModels?: HydroBodyModel[];
     }
   /** The answer to a HEADLESS_IMPACT: the model to go on with, or nothing to change. */
   | { type: 'HEADLESS_IMPACT_REPLY'; id: string; rebuild?: HeadlessRebuild }
@@ -343,6 +357,7 @@ export type WorkerToMainMessage =
   | { type: 'ERROR'; message: string; fatal: boolean; lastState?: SeedState }
   | ({ type: 'CONSTRAINT_BROKEN' } & ConstraintBrokenEvent)
   | ({ type: 'IMPACT' } & ImpactEvent)
+  | { type: 'AUDIO_IMPACTS'; events: { nodeId: string; impulseNs: number }[] }
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   /** A headless run (`judgeImpacts`) has stopped at a blow and waits for HEADLESS_IMPACT_REPLY. */
   | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }

@@ -16,6 +16,28 @@ import { applyShatterPieces } from './breakage';
 import type { PhysicsState } from './useStore';
 import { store } from './storeRef';
 import { noteWorkerFrame } from './modelProvenance';
+import { useSoundStore } from './soundStore';
+import { estimateBodyModes, playModalImpact, type BodyModalProfile } from '../utils/modalAudio';
+import type { SceneNode } from '../types/scene';
+
+const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
+  for (const n of nodes || []) {
+    if (n.id === id || n.name === id) return n;
+    const sub = findNode(n.children || [], id);
+    if (sub) return sub;
+  }
+  return null;
+};
+
+const modalCache = new WeakMap<SceneNode, BodyModalProfile>();
+const cachedModesFor = (node: SceneNode): BodyModalProfile => {
+  let m = modalCache.get(node);
+  if (!m) {
+    m = estimateBodyModes(node);
+    modalCache.set(node, m);
+  }
+  return m;
+};
 
 /** Name<->id lookup tables the worker builds; `${type}Rev` maps ids back to names. */
 export type IdMaps = Record<string, Record<string, number> | Record<number, string> | undefined>;
@@ -231,10 +253,25 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
         brokenConstraints: [...prev, event.key],
         lastBreak: event,
       });
+      if (useSoundStore.getState().soundEnabled) {
+        const s = store().getState();
+        const node = findNode(liveModelGraph(s).graph.nodes, event.nodeId);
+        if (node) playModalImpact(cachedModesFor(node), Math.max(0.2, event.forceN * 0.015));
+      }
     };
     client.onImpact = (event) => {
       store().getState().handleImpact(event);
     };
+    client.onAudioImpacts = (events) => {
+      if (!useSoundStore.getState().soundEnabled) return;
+      const s = store().getState();
+      const nodes = liveModelGraph(s).graph.nodes;
+      for (const ev of events) {
+        const node = findNode(nodes, ev.nodeId);
+        if (node) playModalImpact(cachedModesFor(node), ev.impulseNs);
+      }
+    };
+    client.setSound(useSoundStore.getState().soundEnabled);
     client.onError = (message, fatal, lastState) => {
       console.error('[PhysicsWorker]', message);
       if (fatal) {
@@ -264,3 +301,7 @@ export const endVoltLink = () => {
   // Take off what Volt added to the joints; see setJointParams.
   void getPhysicsWorkerClient().stepFor(0, {}, []).catch(() => {});
 };
+
+useSoundStore.subscribe((state) => {
+  physicsWorkerClientSingleton?.setSound(state.soundEnabled);
+});

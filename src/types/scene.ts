@@ -546,6 +546,35 @@ export interface LoadStrength {
   ductile?: boolean;
 }
 
+/** Monolithic compliant mechanism family replacing a rigid hinge or slide joint. */
+export type FlexureKind = 'blade' | 'cross_pivot' | 'serpentine' | 'bistable';
+
+/**
+ * Authoring parameters & derived pseudo-rigid-body mechanics for a monolithic
+ * compliant flexure joint (see utils/flexure.ts).
+ */
+export interface FlexureSpec {
+  kind: FlexureKind;
+  /** Filament id ('pla' | 'petg' | 'abs' | 'asa' | 'tpu'). */
+  filament: string;
+  /** Compliant leaf thickness, mm. */
+  thicknessMm: number;
+  /** Active leaf span, mm. */
+  lengthMm: number;
+  /** Out-of-plane leaf width, mm. */
+  widthMm: number;
+  /** Meander count for serpentine slide springs (2..8). */
+  folds?: number;
+  /** Initial arch apex rise (mm) for a Von Mises bistable snap toggle; full stroke is ~2 * archRiseMm. */
+  archRiseMm?: number;
+  /** Calibrated pseudo-rigid-body stiffness (N·m/rad on hinge, N/m initial slope on slide). */
+  stiffness: number;
+  /** Maximum safe deflection before material yield (deg on hinge, mm on slide). */
+  maxTravel: number;
+  /** Generated visual/printable bridge node id connecting parent/anchor to the moving body. */
+  bridgeNodeId?: string;
+}
+
 export interface SceneNode {
   id: string;
   name: string;
@@ -771,6 +800,10 @@ export interface SceneNode {
   hardwareType?: string;
   hardwareSpec?: Record<string, number | string>;
   hardwarePart?: HardwarePart;
+  /** Monolithic compliant flexure replacing a rigid pin or slider; see utils/flexure.ts. */
+  flexure?: FlexureSpec;
+  /** Concert fundamental frequency (Hz) when tuned by utils/acousticTuning.ts. */
+  tunedPitchHz?: number;
   script?: string;
   scad?: string;
   /**
@@ -1130,6 +1163,8 @@ export interface SceneEnvironment {
   floorFriction: number;
   floorBounce: number;
   background: BackgroundId;
+  /** World Z height (m) of the free water surface, or null when dry (default). */
+  waterLevel: number | null;
 }
 
 /** Which drawing view a reference image faces, and so which plane it lies in. */

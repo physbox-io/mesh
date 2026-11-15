@@ -213,7 +213,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       if (typeof window !== 'undefined') {
         (window as PhysicsWindow).DISABLE_USEFRAME = false;
       }
-      const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+      const { gravityZ, windX, windY, density, floorFriction, floorBounce, waterLevel } = get();
       /*
        * The RUNTIME graph wins, when there is one.
        *
@@ -355,7 +355,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
             }
           : undefined;
 
-        client.setEnv(windX, windY, density);
+        client.setEnv(windX, windY, density, waterLevel, sceneGraph);
         // Something has just broken mid-flight: have the worker wait for this
         // model to be on screen before stepping it. See `holdUntil` in the worker.
         const hold = !!immediate && isRuntimeBuild && !forceReset;
@@ -396,7 +396,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
               : undefined;
             recycleWorker();
             const freshClient = getPhysicsWorkerClient();
-            freshClient.setEnv(windX, windY, density);
+            freshClient.setEnv(windX, windY, density, waterLevel, sceneGraph);
             const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
               // As the ordinary build above decides it.
               sleep: Object.keys(pieces).length > 0 && !overrideScene,
@@ -462,7 +462,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       const wasPlaying = get().isPlaying;
       recycleWorker();
       set({ isPlaying: false });
-      const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+      const { gravityZ, windX, windY, density, floorFriction, floorBounce, waterLevel } = get();
       const docGraph = get().sceneGraph;
       const { graph: sceneGraph, sleep } = liveModelGraph(get());
       try {
@@ -471,7 +471,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           sleep,
           meshFiles: client.meshFiles,
         });
-        client.setEnv(windX, windY, density);
+        client.setEnv(windX, windY, density, waterLevel, sceneGraph);
         const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
         set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
@@ -498,7 +498,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       // below this store definition, which is what calls this.
       // isPlaying is deliberately read later via get(), not destructured here: the
       // await below means the snapshot could be stale by the time it's used.
-      const { data, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+      const { data, gravityZ, windX, windY, density, floorFriction, floorBounce, waterLevel } = get();
       const docGraph = get().sceneGraph;
       const { graph: sceneGraph, sleep } = liveModelGraph(get());
       if (!data) return;
@@ -527,7 +527,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           sleep,
           meshFiles: client.meshFiles,
         });
-        client.setEnv(windX, windY, density);
+        client.setEnv(windX, windY, density, waterLevel, sceneGraph);
         const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);

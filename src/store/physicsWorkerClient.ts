@@ -7,6 +7,7 @@
 
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { MeshFileLedger } from '../utils/meshVfs';
+import { buildHydroBodyModel, type HydroBodyModel } from '../utils/hydrostatics';
 import type {
   BuiltResult,
   ConstraintBrokenEvent,
@@ -262,6 +263,17 @@ const stripNodes = (nodes: SceneNode[]): SceneNode[] => (nodes || []).map((n) =>
 export const withoutMeshData = (sceneGraph: SceneGraph): SceneGraph =>
   sceneGraph ? { ...sceneGraph, nodes: stripNodes(sceneGraph.nodes) } : sceneGraph;
 
+export const collectHydroModels = (nodes: SceneNode[], out: HydroBodyModel[] = []): HydroBodyModel[] => {
+  for (const n of nodes || []) {
+    if ((n.joints?.length ?? 0) > 0) {
+      const h = buildHydroBodyModel(n);
+      if (h) out.push(h);
+    }
+    if (n.children?.length) collectHydroModels(n.children, out);
+  }
+  return out;
+};
+
 /**
  * How long the worker may owe an answer without sending anything at all
  * before it is taken for dead. Longer than any legitimate build or headless
@@ -295,6 +307,8 @@ export class PhysicsWorkerClient {
   onBreak: ((event: ConstraintBrokenEvent) => void) | null = null;
   /** A body has been hit hard enough to shatter or to dent. */
   onImpact: ((event: ImpactEvent) => void) | null = null;
+  /** Throttled modal impact events when audio synthesis is unmuted. */
+  onAudioImpacts: ((events: { nodeId: string; impulseNs: number }[]) => void) | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });
@@ -332,6 +346,9 @@ export class PhysicsWorkerClient {
           break;
         case 'IMPACT':
           this.onImpact?.(msg);
+          break;
+        case 'AUDIO_IMPACTS':
+          this.onAudioImpacts?.(msg.events);
           break;
         case 'HEADLESS_RESULT': {
           this.headlessJudges.delete(msg.id);
@@ -453,7 +470,27 @@ export class PhysicsWorkerClient {
   tick(delta: number) { this.worker.postMessage({ type: 'TICK', delta, sentAt: Date.now() }); }
   /** The model a `holdForInstall` build made is on screen; the worker may step it. */
   resume() { this.worker.postMessage({ type: 'RESUME' }); }
-  setEnv(windX: number, windY: number, density?: number) { this.worker.postMessage({ type: 'SET_ENV', windX, windY, density }); }
+  setEnv(
+    windX: number,
+    windY: number,
+    density?: number,
+    waterLevel?: number | null,
+    sceneGraphForHydro?: SceneGraph,
+  ) {
+    const hasWater = typeof waterLevel === 'number' && Number.isFinite(waterLevel);
+    const hydroModels = hasWater && sceneGraphForHydro
+      ? collectHydroModels(sceneGraphForHydro.nodes)
+      : undefined;
+    this.worker.postMessage({
+      type: 'SET_ENV',
+      windX,
+      windY,
+      density,
+      ...(waterLevel !== undefined ? { waterLevel } : {}),
+      ...(hydroModels ? { hydroModels } : {}),
+    });
+  }
+  setSound(enabled: boolean) { this.worker.postMessage({ type: 'SET_SOUND', enabled }); }
   setDrag(nodeId: string | null, target: { x: number; y: number; z: number } | null) { this.worker.postMessage({ type: 'SET_DRAG', nodeId, target }); }
   setKeys(keys: string[]) { this.worker.postMessage({ type: 'SET_KEYS', keys }); }
   setQpos(jointName: string, axis: number, value: number | readonly number[]) { this.worker.postMessage({ type: 'SET_QPOS', jointName, axis, value }); }
@@ -473,7 +510,7 @@ export class PhysicsWorkerClient {
   // on a scene with a few bodies it is most of each frame.
   runHeadless(
     xml: string, sceneGraph: SceneGraph, ticks: number, stride = 1, judge?: HeadlessImpactJudge,
-    frames: { contacts?: boolean } = {},
+    frames: { contacts?: boolean; waterLevel?: number | null } = {},
   ): Promise<HeadlessRunResult> {
     const id = Math.random().toString(36).slice(2);
     if (judge) this.headlessJudges.set(id, judge);
@@ -481,11 +518,26 @@ export class PhysicsWorkerClient {
     // file the last live build only sent as text (a SCAD body just updated),
     // and without these the worker fails with "Error opening file m_….msh".
     const { add, drop } = this.meshFiles.take();
+    const hasWater = typeof frames.waterLevel === 'number' && Number.isFinite(frames.waterLevel);
+    const hydroModels = hasWater ? collectHydroModels(sceneGraph.nodes) : undefined;
     return new Promise((resolve, reject) => {
       this.noteRequest();
       this.pendingHeadless.set(id, { resolve, reject });
       this.worker.postMessage(
-        { type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride, contacts: frames.contacts !== false, meshFiles: add, dropMeshes: drop, judgeImpacts: !!judge },
+        {
+          type: 'RUN_HEADLESS',
+          id,
+          xml,
+          sceneGraph: withoutMeshData(sceneGraph),
+          ticks,
+          stride,
+          contacts: frames.contacts !== false,
+          meshFiles: add,
+          dropMeshes: drop,
+          judgeImpacts: !!judge,
+          ...(frames.waterLevel !== undefined ? { waterLevel: frames.waterLevel } : {}),
+          ...(hydroModels ? { hydroModels } : {}),
+        },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
     });
