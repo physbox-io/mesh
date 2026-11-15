@@ -73,7 +73,10 @@ const mulM = (a: number[], b: number[]) => {
 const apply = (f: Frame, p: V3): V3 => add(mulV(f.r, p), f.t);
 const compose = (a: Frame, b: Frame): Frame => ({ r: mulM(a.r, b.r), t: apply(a, b.t) });
 const IDENTITY: Frame = { r: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [0, 0, 0] };
-const on = (p: Point2D, z = 0): V3 => [p.x, p.y, z];
+// SVG sheet coordinates have +X right and +Y down; on a physical sheet with the
+// etched outside facing +Z (up), plan-view Y runs up (-p.y).
+const plan = (p: Point2D): Point2D => ({ x: p.x, y: -p.y });
+const on = (p: Point2D, z = 0): V3 => [p.x, -p.y, z];
 
 /** Turn by `angle` about the line through `at` along unit `axis` (right hand). */
 function turnAbout(at: V3, axis: V3, angle: number): Frame {
@@ -225,15 +228,30 @@ export function foldSheetUnfold(
     frames.set(root, IDENTITY);
 
     // Every hinge of the net: the folds the file draws, and faces lying flat
-    // against each other along a shared edge, which it does not.
+    // against each other along a shared tree edge (never across a cut seam or
+    // zero-width relief slit).
+    const isCutSeamEdge = (faceIndex: number, p: Point2D, q: Point2D) =>
+      island.cutSeams.some(
+        (s) =>
+          s.faceIndex === faceIndex &&
+          ((nearly(s.p1, p) && nearly(s.p2, q)) || (nearly(s.p1, q) && nearly(s.p2, p)))
+      );
+    const hasFoldBetween = (a: number, b: number) =>
+      island.foldEdges.some((fe) => (fe.faceA === a && fe.faceB === b) || (fe.faceA === b && fe.faceB === a));
+
     type Hinge = { a: number; b: number; fold?: UnfoldIsland['foldEdges'][number] };
     const hinges: Hinge[] = island.foldEdges.map((fe) => ({ a: fe.faceA, b: fe.faceB, fold: fe }));
     for (let i = 0; i < island.faces.length; i++) {
       for (let j = i + 1; j < island.faces.length; j++) {
         const fa = island.faces[i], fb = island.faces[j];
+        if (hasFoldBetween(fa.faceIndex, fb.faceIndex)) continue;
         const shares = fa.polygon2D.some((p, k) => {
           const q = fa.polygon2D[(k + 1) % fa.polygon2D.length];
-          return fb.polygon2D.some((r, m) => nearly(r, q) && nearly(fb.polygon2D[(m + 1) % fb.polygon2D.length], p));
+          if (isCutSeamEdge(fa.faceIndex, p, q)) return false;
+          return fb.polygon2D.some((r, m) => {
+            const next = fb.polygon2D[(m + 1) % fb.polygon2D.length];
+            return nearly(r, q) && nearly(next, p) && !isCutSeamEdge(fb.faceIndex, r, next);
+          });
         });
         if (shares) hinges.push({ a: fa.faceIndex, b: fb.faceIndex });
       }
@@ -256,9 +274,10 @@ export function foldSheetUnfold(
         const fe = h.fold;
         const c = on(fe.p1);
         const e = norm(sub(on(fe.p2), c));
-        // Across the line towards the child.
-        let o: V3 = [-e[1], e[0], 0];
-        if (dot(sub(on(byIndex.get(child)!.centroid2D), c), o) < 0) o = scale(o, -1);
+        // Across the line from parent towards child: fe.p1 -> fe.p2 runs CCW along
+        // fe.faceA's edge, so [e[1], -e[0], 0] points outward from faceA to faceB
+        // even when a non-convex face's centroid overhangs the hinge.
+        const o: V3 = parent === fe.faceA ? [e[1], -e[0], 0] : [-e[1], e[0], 0];
         const alpha = Math.abs(fe.angleDeg) * Math.PI / 180;
         const mountain = fe.angleDeg >= 0;
         // The arc's length on the neutral layer, centred on the bend line.
@@ -277,13 +296,13 @@ export function foldSheetUnfold(
       }
     }
 
-    // The faces, each a slab behind the model side.
+    // The faces (including any interior cutouts/holes), each a slab behind the model side.
     const parts: SheetPart[] = [];
     for (const f of island.faces) {
       const fr = frames.get(f.faceIndex);
       if (!fr || f.polygon2D.length < 3) continue;
       parts.push({
-        loops: [f.polygon2D],
+        loops: [f.polygon2D, ...(f.holes2D ?? [])].map((l) => l.map(plan)),
         origin: fr.t,
         u: mulV(fr.r, [1, 0, 0]),
         v: mulV(fr.r, [0, 1, 0]),
@@ -397,11 +416,16 @@ export function foldSheetUnfold(
     measured.forEach((m, k) => {
       const folded = turned[k].map((p) => add(p, shift));
       const n = polygonNormal(folded);
+      const modelN = polygonNormal(m.model);
+      const inverted = dot(n, modelN) < 0;
       const record = (d: number) => {
         devs.push(d);
         if (d > worst.d) worst = { d, island: island.id, faceIndex: m.f.faceIndex };
       };
-      for (const p of m.model) record(Math.abs(dot(sub(p, folded[0]), n)));
+      m.model.forEach((p, idx) => {
+        const planeDist = Math.abs(dot(sub(p, folded[0]), n));
+        record(inverted ? Math.max(planeDist, Math.hypot(...sub(p, folded[idx]))) : planeDist);
+      });
       m.cut.forEach((isCut, i) => {
         if (!isCut) return;
         const a = folded[i], b = folded[(i + 1) % folded.length];
@@ -477,7 +501,7 @@ export function sheetFoldSimulationRequest(
         `${fold.folds} fold${fold.folds === 1 ? '' : 's'} in ${fold.islands} piece${fold.islands === 1 ? '' : 's'}`,
         metal
           ? `Bent at R${options.bendRadiusMm} in ${options.thicknessMm} mm sheet, K ${options.kFactor}`
-          : `Drawn ${fold.drawnThicknessMm} mm thick; folded on a hinge, glue tabs left off`,
+          : `Drawn ${fold.drawnThicknessMm} mm thick; folded on a hinge, ${result.mode === 'soft_goods' ? 'seam allowances' : 'glue tabs'} left off`,
         s !== 1 ? `At ${Math.round(s * 100)}% of the model` : null,
         fold.deviation.maxMm < 0.05
           ? `Folds onto the model to within ${Math.max(0.01, fold.deviation.maxMm).toFixed(2)} mm`

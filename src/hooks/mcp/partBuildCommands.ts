@@ -304,17 +304,25 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store }) => {
   };
 };
 
-const exportSheetUnfoldCommand: McpHandler = async (msg, { store }) => {
+const exportSheetUnfoldCommand: McpHandler = async (msg, { store, toId }) => {
+  const resolveId = (id: string) => (toId ? String(toId(id)) : id);
   const targetIds = Array.isArray(msg.targetIds)
-    ? msg.targetIds.filter((x): x is string => typeof x === 'string')
+    ? msg.targetIds.filter((x): x is string => typeof x === 'string').map(resolveId)
     : typeof msg.targetId === 'string'
-      ? [msg.targetId]
+      ? [resolveId(msg.targetId)]
       : undefined;
   const res = exportSheetUnfold(
     store.sceneGraph,
     msg as Partial<SheetUnfoldOptions>,
     targetIds,
   );
+  if (!res.success) {
+    return {
+      ok: false,
+      error: res.error || 'No unfoldable 3D faces found in the scene.',
+      warnings: res.warnings,
+    };
+  }
   return {
     ok: true,
     mode: res.mode,

@@ -22,6 +22,7 @@ import { isNodeRotationBaked } from './sceneTree';
 import { buildEtchHandoffUrl, etchBaseUrl } from './etchHandoff';
 import type { MaterialId } from './feedsAndSpeeds';
 import { toBase64Url } from './shareLink';
+import { nestingDepths, offsetNestedLoops, pointInPolygon } from './polygonOffset';
 
 export type SheetUnfoldMode = 'papercraft' | 'sheet_metal' | 'soft_goods';
 
@@ -95,6 +96,8 @@ export interface Point2D {
 export interface UnfoldedFace2D {
   faceIndex: number;
   polygon2D: Point2D[];
+  /** Interior cutout loops on this face in placed sheet coordinates (mm). */
+  holes2D?: Point2D[][];
   centroid2D: Point2D;
   areaMm2: number;
   /**
@@ -250,6 +253,24 @@ function getNodeWorldTransform(node: SceneNode, parentMatrix?: THREE.Matrix4): T
   return m;
 }
 
+/**
+ * World transform for `node.latticeCage`, whose `coords` are NEVER baked by
+ * `updateNodeRotation` even when `node.geoms` has `baseVertices` set.
+ */
+function getCageWorldTransform(node: SceneNode, parentMatrix?: THREE.Matrix4): THREE.Matrix4 {
+  const m = node.quat
+    ? quatToMatrix4(node.quat)
+    : node.euler
+      ? eulerToMatrix4(node.euler)
+      : new THREE.Matrix4();
+  const p = node.pos || [0, 0, 0];
+  m.setPosition(p[0] || 0, p[1] || 0, p[2] || 0);
+  if (parentMatrix) {
+    return new THREE.Matrix4().multiplyMatrices(parentMatrix, m);
+  }
+  return m;
+}
+
 function getGeomFrame(geom: SceneGeom): { matrix: THREE.Matrix4; halfLen?: number } {
   if (geom.fromto && geom.fromto.length >= 6 && (geom.type === 'cylinder' || geom.type === 'capsule')) {
     const f = fromtoFrame(geom.fromto);
@@ -373,9 +394,52 @@ function segmentsProperlyIntersect2D(
   return t > marginT && t < 1 - marginT && u > marginU && u < 1 - marginU;
 }
 
+function samplePolygonInteriorPoints2D(poly: Point2D[]): Point2D[] {
+  const clean: Point2D[] = [];
+  for (const p of poly) {
+    const prev = clean[clean.length - 1];
+    if (!prev || Math.hypot(p.x - prev.x, p.y - prev.y) > 1e-5) {
+      clean.push(p);
+    }
+  }
+  if (
+    clean.length > 2 &&
+    Math.hypot(clean[0].x - clean[clean.length - 1].x, clean[0].y - clean[clean.length - 1].y) <= 1e-5
+  ) {
+    clean.pop();
+  }
+  if (clean.length < 3) return [];
+
+  const pts: Point2D[] = [];
+  for (let i = 0; i < clean.length; i++) {
+    const a = clean[i];
+    const b = clean[(i + 1) % clean.length];
+    pts.push({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 });
+  }
+
+  const ccw = polygonSignedArea2D(clean) < 0 ? [...clean].reverse() : clean;
+  const contour = ccw.map((p) => new THREE.Vector2(p.x, p.y));
+  const tris = THREE.ShapeUtils.triangulateShape(contour, []);
+  for (const [i0, i1, i2] of tris) {
+    const p0 = ccw[i0];
+    const p1 = ccw[i1];
+    const p2 = ccw[i2];
+    if (!p0 || !p1 || !p2) continue;
+    const area2 = Math.abs((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x));
+    if (area2 > 1e-6) {
+      pts.push({
+        x: (p0.x + p1.x + p2.x) / 3,
+        y: (p0.y + p1.y + p2.y) / 3,
+      });
+    }
+  }
+  return pts;
+}
+
 /**
  * Checks whether two 2D polygons have a positive-area interior overlap.
  * Polygons that merely share a hinge edge or touch at a corner return false.
+ * Handles both convex and non-convex (L/U/frame) polygons regardless of winding.
  */
 export function polygonsOverlap2D(polyA: Point2D[], polyB: Point2D[], epsMm: number = 0.08): boolean {
   if (polyA.length < 3 || polyB.length < 3) return false;
@@ -410,18 +474,11 @@ export function polygonsOverlap2D(polyA: Point2D[], polyB: Point2D[], epsMm: num
     }
   }
 
-  const cA = polygonCentroid2D(polyA);
-  if (pointStrictlyInPolygon2D(polyB, cA, epsMm)) return true;
-  const cB = polygonCentroid2D(polyB);
-  if (pointStrictlyInPolygon2D(polyA, cB, epsMm)) return true;
-
-  for (const p of polyA) {
-    const inset = { x: p.x + (cA.x - p.x) * 0.15, y: p.y + (cA.y - p.y) * 0.15 };
-    if (pointStrictlyInPolygon2D(polyB, inset, epsMm)) return true;
+  for (const pt of samplePolygonInteriorPoints2D(polyA)) {
+    if (pointStrictlyInPolygon2D(polyB, pt, epsMm)) return true;
   }
-  for (const p of polyB) {
-    const inset = { x: p.x + (cB.x - p.x) * 0.15, y: p.y + (cB.y - p.y) * 0.15 };
-    if (pointStrictlyInPolygon2D(polyA, inset, epsMm)) return true;
+  for (const pt of samplePolygonInteriorPoints2D(polyB)) {
+    if (pointStrictlyInPolygon2D(polyA, pt, epsMm)) return true;
   }
 
   return false;
@@ -435,11 +492,15 @@ export interface PolyFace3D {
   index: number;
   /** Vertex indices into `PolySurface3D.vertices`, wound CCW around `normal`. */
   verts: number[];
+  /** Optional interior hole loops into `PolySurface3D.vertices`, wound CW around `normal`. */
+  holesVerts?: number[][];
   normal: THREE.Vector3;
   centroid: THREE.Vector3;
   areaM2: number;
   /** Local 2D coordinates in mm (isometric to 3D face, wound CCW). */
   local2D: Point2D[];
+  /** Optional interior hole loops in local 2D coordinates in mm (wound CW). */
+  holesLocal2D?: Point2D[][];
 }
 
 interface PolySurface3D {
@@ -470,75 +531,294 @@ function weldVertices3D(rawVerts: THREE.Vector3[]): { vertices: THREE.Vector3[];
   return { vertices, remap };
 }
 
-function buildPolyFace3D(index: number, verts: number[], vertices: THREE.Vector3[]): PolyFace3D | null {
-  if (verts.length < 3) return null;
-
-  // Compute Newell normal and area-weighted centroid
-  const normal = new THREE.Vector3();
-  const centroid = new THREE.Vector3();
-  let areaM2 = 0;
-
-  const v0 = vertices[verts[0]];
-  for (let i = 1; i + 1 < verts.length; i++) {
-    const a = v0;
-    const b = vertices[verts[i]];
-    const c = vertices[verts[i + 1]];
-    const ab = new THREE.Vector3().subVectors(b, a);
-    const ac = new THREE.Vector3().subVectors(c, a);
-    const cross = new THREE.Vector3().crossVectors(ab, ac);
-    const triArea = cross.length() * 0.5;
-    normal.add(cross);
-    areaM2 += triArea;
-    centroid.addScaledVector(a, triArea / 3);
-    centroid.addScaledVector(b, triArea / 3);
-    centroid.addScaledVector(c, triArea / 3);
+function buildFaceBasis3D(
+  normal: THREE.Vector3,
+  refOrigin: THREE.Vector3,
+  nextHint?: THREE.Vector3
+): { uAxis: THREE.Vector3; vAxis: THREE.Vector3 } {
+  const uAxis = new THREE.Vector3();
+  if (nextHint) {
+    uAxis.subVectors(nextHint, refOrigin);
+    uAxis.addScaledVector(normal, -uAxis.dot(normal));
   }
-
-  if (areaM2 < 1e-9 || normal.lengthSq() < 1e-18) return null;
-  normal.normalize();
-  centroid.divideScalar(areaM2);
-
-  // Build local orthonormal right-handed 2D basis (u, v) in face plane
-  let uAxis = new THREE.Vector3().subVectors(vertices[verts[1]], v0);
-  uAxis.addScaledVector(normal, -uAxis.dot(normal));
   if (uAxis.lengthSq() < 1e-12) {
-    uAxis = Math.abs(normal.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    uAxis.set(Math.abs(normal.x) < 0.9 ? 1 : 0, Math.abs(normal.x) < 0.9 ? 0 : 1, 0);
     uAxis.addScaledVector(normal, -uAxis.dot(normal));
   }
   uAxis.normalize();
   const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+  return { uAxis, vAxis };
+}
 
-  const local2D: Point2D[] = verts.map((vi) => {
+function buildPolyFace3D(
+  index: number,
+  vertsIn: number[],
+  vertices: THREE.Vector3[],
+  hintNormal?: THREE.Vector3,
+  holesVertsIn?: number[][]
+): PolyFace3D | null {
+  if (vertsIn.length < 3) return null;
+  const verts = [...vertsIn];
+
+  // Exact Newell vector (2 * vector area, handles concave polygons properly)
+  const newell = new THREE.Vector3();
+  for (let i = 0; i < verts.length; i++) {
+    const curr = vertices[verts[i]];
+    const next = vertices[verts[(i + 1) % verts.length]];
+    if (!curr || !next) return null;
+    newell.x += (curr.y - next.y) * (curr.z + next.z);
+    newell.y += (curr.z - next.z) * (curr.x + next.x);
+    newell.z += (curr.x - next.x) * (curr.y + next.y);
+  }
+
+  let normal: THREE.Vector3;
+  if (newell.lengthSq() > 1e-18) {
+    normal = newell.clone().normalize();
+    if (hintNormal && hintNormal.lengthSq() > 1e-12 && normal.dot(hintNormal) < 0) {
+      normal.negate();
+    }
+  } else if (hintNormal && hintNormal.lengthSq() > 1e-12) {
+    normal = hintNormal.clone().normalize();
+  } else {
+    return null;
+  }
+
+  const v0 = vertices[verts[0]];
+  let secondPt = vertices[verts[1]];
+  for (let i = 1; i < verts.length; i++) {
+    if (vertices[verts[i]].distanceToSquared(v0) > 1e-12) {
+      secondPt = vertices[verts[i]];
+      break;
+    }
+  }
+  const { uAxis, vAxis } = buildFaceBasis3D(normal, v0, secondPt);
+
+  const projectMm = (vi: number): Point2D => {
     const d = new THREE.Vector3().subVectors(vertices[vi], v0);
     return {
       x: d.dot(uAxis) * 1000,
       y: d.dot(vAxis) * 1000,
     };
-  });
+  };
 
-  if (polygonSignedArea2D(local2D) < 0) {
+  const local2D: Point2D[] = verts.map(projectMm);
+  let outerSignedMm2 = polygonSignedArea2D(local2D);
+  if (Math.abs(outerSignedMm2) < 1e-3) return null;
+
+  if (outerSignedMm2 < 0) {
     verts.reverse();
     local2D.reverse();
+    outerSignedMm2 = -outerSignedMm2;
   }
+
+  const outerC = polygonCentroid2D(local2D);
+  let netAreaMm2 = outerSignedMm2;
+  let momentX = outerC.x * outerSignedMm2;
+  let momentY = outerC.y * outerSignedMm2;
+
+  const holesVerts: number[][] = [];
+  const holesLocal2D: Point2D[][] = [];
+
+  if (holesVertsIn && holesVertsIn.length > 0) {
+    for (const rawHole of holesVertsIn) {
+      if (rawHole.length < 3) continue;
+      const hv = [...rawHole];
+      const hl2d = hv.map(projectMm);
+      let hSigned = polygonSignedArea2D(hl2d);
+      if (Math.abs(hSigned) < 1e-3) continue;
+      // Interior holes wind CW (negative signed area) around `normal`
+      if (hSigned > 0) {
+        hv.reverse();
+        hl2d.reverse();
+        hSigned = -hSigned;
+      }
+      const hArea = Math.abs(hSigned);
+      const hC = polygonCentroid2D(hl2d);
+      netAreaMm2 -= hArea;
+      momentX -= hC.x * hArea;
+      momentY -= hC.y * hArea;
+      holesVerts.push(hv);
+      holesLocal2D.push(hl2d);
+    }
+  }
+
+  if (netAreaMm2 < 1e-3) return null;
+
+  const cxMm = momentX / netAreaMm2;
+  const cyMm = momentY / netAreaMm2;
+  const centroid = v0
+    .clone()
+    .addScaledVector(uAxis, cxMm / 1000)
+    .addScaledVector(vAxis, cyMm / 1000);
 
   return {
     index,
     verts,
+    holesVerts: holesVerts.length > 0 ? holesVerts : undefined,
     normal,
     centroid,
-    areaM2,
+    areaM2: netAreaMm2 * 1e-6,
     local2D,
+    holesLocal2D: holesLocal2D.length > 0 ? holesLocal2D : undefined,
   };
 }
 
 /**
- * Clusters coplanar adjacent triangles into polygonal faces within `coplanarToleranceDeg`.
+ * Ensures consistent manifold triangle winding per connected component and
+ * flips closed inside-out shells (`signedVolume < 0`) so outward normals point out.
+ */
+function normalizeTriangleMeshWinding(vertices: THREE.Vector3[], triIndices: number[]): number[] {
+  const nTris = Math.floor(triIndices.length / 3);
+  if (nTris === 0) return triIndices;
+
+  const tris: [number, number, number][] = [];
+  const areas: number[] = [];
+  const validIdxMap: number[] = [];
+
+  for (let t = 0; t < nTris; t++) {
+    const a = triIndices[t * 3];
+    const b = triIndices[t * 3 + 1];
+    const c = triIndices[t * 3 + 2];
+    if (a === b || b === c || c === a) continue;
+    const va = vertices[a], vb = vertices[b], vc = vertices[c];
+    if (!va || !vb || !vc) continue;
+    const ab = new THREE.Vector3().subVectors(vb, va);
+    const ac = new THREE.Vector3().subVectors(vc, va);
+    const area = new THREE.Vector3().crossVectors(ab, ac).length() * 0.5;
+    if (area < 1e-10) continue;
+    validIdxMap.push(tris.length);
+    tris.push([a, b, c]);
+    areas.push(area);
+  }
+
+  if (tris.length === 0) return [];
+
+  const undirKey = (u: number, v: number) => (u < v ? `${u}:${v}` : `${v}:${u}`);
+  const edgeToTris = new Map<string, number[]>();
+  for (let ti = 0; ti < tris.length; ti++) {
+    const v = tris[ti];
+    for (let e = 0; e < 3; e++) {
+      const k = undirKey(v[e], v[(e + 1) % 3]);
+      let list = edgeToTris.get(k);
+      if (!list) {
+        list = [];
+        edgeToTris.set(k, list);
+      }
+      list.push(ti);
+    }
+  }
+
+  const visited = new Uint8Array(tris.length);
+  for (let start = 0; start < tris.length; start++) {
+    if (visited[start]) continue;
+    visited[start] = 1;
+    const comp: number[] = [start];
+    const queue: number[] = [start];
+    let keptArea = areas[start];
+    let flippedArea = 0;
+
+    while (queue.length > 0) {
+      const currId = queue.shift()!;
+      const cv = tris[currId];
+      for (let e = 0; e < 3; e++) {
+        const u = cv[e];
+        const v = cv[(e + 1) % 3];
+        const shared = edgeToTris.get(undirKey(u, v));
+        // Only propagate orientation across manifold 2-triangle edges
+        if (!shared || shared.length !== 2) continue;
+        const nbId = shared[0] === currId ? shared[1] : shared[0];
+        if (visited[nbId]) continue;
+        visited[nbId] = 1;
+
+        const nv = tris[nbId];
+        // Consistent manifold neighbor traverses shared edge as v -> u.
+        // If it traverses u -> v instead, flip neighbor triangle.
+        let sameDir = false;
+        for (let ne = 0; ne < 3; ne++) {
+          if (nv[ne] === u && nv[(ne + 1) % 3] === v) {
+            sameDir = true;
+            break;
+          }
+        }
+        if (sameDir) {
+          const tmp = nv[1];
+          nv[1] = nv[2];
+          nv[2] = tmp;
+          flippedArea += areas[nbId];
+        } else {
+          keptArea += areas[nbId];
+        }
+        comp.push(nbId);
+        queue.push(nbId);
+      }
+    }
+
+    // Check if this component is closed (every edge in comp is shared by 2 tris in comp)
+    const compEdgeCounts = new Map<string, number>();
+    for (const ti of comp) {
+      const v = tris[ti];
+      for (let e = 0; e < 3; e++) {
+        const k = undirKey(v[e], v[(e + 1) % 3]);
+        compEdgeCounts.set(k, (compEdgeCounts.get(k) ?? 0) + 1);
+      }
+    }
+    let isClosed = comp.length >= 4;
+    for (const cnt of compEdgeCounts.values()) {
+      if (cnt !== 2) {
+        isClosed = false;
+        break;
+      }
+    }
+
+    let flipAll = false;
+    if (isClosed) {
+      const ref = vertices[tris[comp[0]][0]];
+      let vol6 = 0;
+      const d1 = new THREE.Vector3();
+      const d2 = new THREE.Vector3();
+      const d3 = new THREE.Vector3();
+      const cr = new THREE.Vector3();
+      for (const ti of comp) {
+        const [a, b, c] = tris[ti];
+        d1.subVectors(vertices[a], ref);
+        d2.subVectors(vertices[b], ref);
+        d3.subVectors(vertices[c], ref);
+        cr.crossVectors(d2, d3);
+        vol6 += d1.dot(cr);
+      }
+      if (vol6 < -1e-15) flipAll = true;
+    } else if (flippedArea > keptArea + 1e-12) {
+      flipAll = true;
+    }
+
+    if (flipAll) {
+      for (const ti of comp) {
+        const nv = tris[ti];
+        const tmp = nv[1];
+        nv[1] = nv[2];
+        nv[2] = tmp;
+      }
+    }
+  }
+
+  const out: number[] = [];
+  for (const [a, b, c] of tris) {
+    out.push(a, b, c);
+  }
+  return out;
+}
+
+/**
+ * Clusters coplanar adjacent triangles into polygonal faces within `coplanarToleranceDeg`,
+ * preserving interior hole boundary loops (`holesVerts` / `holesLocal2D`).
  */
 export function clusterTrianglesToPolyFaces(
   vertices: THREE.Vector3[],
   triIndices: number[],
   coplanarToleranceDeg: number
 ): PolyFace3D[] {
+  const orientedIndices = normalizeTriangleMeshWinding(vertices, triIndices);
+
   interface TriInfo {
     id: number;
     v: [number, number, number];
@@ -547,10 +827,10 @@ export function clusterTrianglesToPolyFaces(
   }
 
   const tris: TriInfo[] = [];
-  for (let i = 0; i + 2 < triIndices.length; i += 3) {
-    const a = triIndices[i];
-    const b = triIndices[i + 1];
-    const c = triIndices[i + 2];
+  for (let i = 0; i + 2 < orientedIndices.length; i += 3) {
+    const a = orientedIndices[i];
+    const b = orientedIndices[i + 1];
+    const c = orientedIndices[i + 2];
     if (a === b || b === c || c === a) continue;
     const va = vertices[a];
     const vb = vertices[b];
@@ -610,7 +890,6 @@ export function clusterTrianglesToPolyFaces(
         for (const nbId of neighbors) {
           if (visited[nbId]) continue;
           const nb = tris[nbId];
-          // Check consistent winding across shared edge (curr has u->v, nb should have v->u)
           let consistent = false;
           for (let ne = 0; ne < 3; ne++) {
             if (nb.v[ne] === v && nb.v[(ne + 1) % 3] === u) {
@@ -631,41 +910,122 @@ export function clusterTrianglesToPolyFaces(
     clusters.push(cluster);
   }
 
-  // Count how many distinct clusters touch each vertex so we can safely collapse
-  // collinear intermediate vertices along straight shared edges.
+  // Track which clusters touch each vertex and each undirected edge so we only collapse
+  // collinear intermediate vertices when both incident edges and the vertex itself belong
+  // to the exact same set of clusters (preserving partial-flange T-junctions like b0-b1-b2).
   const vertexClusters = new Map<number, Set<number>>();
+  const edgeClusters = new Map<string, Set<number>>();
   for (let tId = 0; tId < tris.length; tId++) {
     const cid = triClusterId[tId];
-    for (const v of tris[tId].v) {
-      let set = vertexClusters.get(v);
-      if (!set) {
-        set = new Set();
-        vertexClusters.set(v, set);
+    const tv = tris[tId].v;
+    for (let e = 0; e < 3; e++) {
+      const u = tv[e];
+      const v = tv[(e + 1) % 3];
+      let vSet = vertexClusters.get(u);
+      if (!vSet) {
+        vSet = new Set();
+        vertexClusters.set(u, vSet);
       }
-      set.add(cid);
+      vSet.add(cid);
+
+      const ek = undirectedKey(u, v);
+      let eSet = edgeClusters.get(ek);
+      if (!eSet) {
+        eSet = new Set();
+        edgeClusters.set(ek, eSet);
+      }
+      eSet.add(cid);
     }
   }
+
+  const sameClusterSet = (a?: Set<number>, b?: Set<number>): boolean => {
+    if (!a || !b || a.size !== b.size) return false;
+    for (const x of a) {
+      if (!b.has(x)) return false;
+    }
+    return true;
+  };
+
+  const simplifyLoop = (loop: number[]): number[] => {
+    let curr = loop.slice();
+    let changed = true;
+    while (changed && curr.length > 3) {
+      changed = false;
+      const next: number[] = [];
+      const n = curr.length;
+      for (let i = 0; i < n; i++) {
+        const prevV = curr[(i - 1 + n) % n];
+        const currV = curr[i];
+        const nextV = curr[(i + 1) % n];
+        const vSet = vertexClusters.get(currV);
+        const ePrev = edgeClusters.get(undirectedKey(prevV, currV));
+        const eNext = edgeClusters.get(undirectedKey(currV, nextV));
+        if (
+          curr.length - (i - next.length) > 3 &&
+          vSet &&
+          vSet.size <= 2 &&
+          sameClusterSet(ePrev, eNext) &&
+          sameClusterSet(vSet, ePrev)
+        ) {
+          const d1 = new THREE.Vector3().subVectors(vertices[currV], vertices[prevV]).normalize();
+          const d2 = new THREE.Vector3().subVectors(vertices[nextV], vertices[currV]).normalize();
+          if (d1.dot(d2) > 0.9995) {
+            changed = true;
+            continue;
+          }
+        }
+        next.push(currV);
+      }
+      curr = next;
+    }
+    return curr.length >= 3 ? curr : loop;
+  };
 
   const polyFaces: PolyFace3D[] = [];
 
   for (const cluster of clusters) {
-    // Collect directed half-edges in this cluster; cancel interior opposite pairs
-    const directedSet = new Set<string>();
+    const clusterNormal = new THREE.Vector3();
+    for (const tId of cluster) {
+      clusterNormal.addScaledVector(tris[tId].normal, tris[tId].area);
+    }
+    if (clusterNormal.lengthSq() < 1e-18) continue;
+    clusterNormal.normalize();
+
+    // Collect directed half-edges and cancel interior opposite pairs by count
+    const dirCount = new Map<string, number>();
     const halfEdges: [number, number][] = [];
     for (const tId of cluster) {
       const v = tris[tId].v;
       for (let e = 0; e < 3; e++) {
         const a = v[e];
         const b = v[(e + 1) % 3];
-        directedSet.add(`${a}:${b}`);
+        const k = `${a}:${b}`;
+        dirCount.set(k, (dirCount.get(k) ?? 0) + 1);
         halfEdges.push([a, b]);
       }
     }
 
-    const boundaryEdges = halfEdges.filter(([a, b]) => !directedSet.has(`${b}:${a}`));
+    const canceled = new Map<string, number>();
+    const boundaryEdges: [number, number][] = [];
+    for (const [a, b] of halfEdges) {
+      const revKey = `${b}:${a}`;
+      const oppAvail = (dirCount.get(revKey) ?? 0) - (canceled.get(revKey) ?? 0);
+      if (oppAvail > 0) {
+        canceled.set(revKey, (canceled.get(revKey) ?? 0) + 1);
+      } else {
+        boundaryEdges.push([a, b]);
+      }
+    }
     if (boundaryEdges.length < 3) continue;
 
-    // Chain directed boundary edges into closed loop(s)
+    const refOrigin = vertices[boundaryEdges[0][0]];
+    const { uAxis, vAxis } = buildFaceBasis3D(clusterNormal, refOrigin, vertices[boundaryEdges[0][1]]);
+    const proj2D = (vi: number): Point2D => {
+      const d = new THREE.Vector3().subVectors(vertices[vi], refOrigin);
+      return { x: d.dot(uAxis) * 1000, y: d.dot(vAxis) * 1000 };
+    };
+
+    // Chain directed boundary edges into closed loop(s), resolving pinch vertices cleanly
     const nextMap = new Map<number, number[]>();
     for (let idx = 0; idx < boundaryEdges.length; idx++) {
       const a = boundaryEdges[idx][0];
@@ -685,66 +1045,79 @@ export function clusterTrianglesToPolyFaces(
       usedEdge[s] = 1;
       const startV = boundaryEdges[s][0];
       const loop: number[] = [startV];
+      let prevV = startV;
       let currV = boundaryEdges[s][1];
 
       for (let guard = 0; guard <= boundaryEdges.length; guard++) {
         if (currV === startV) break;
         loop.push(currV);
-        const candidates = nextMap.get(currV) || [];
-        let chosen = -1;
-        for (const cIdx of candidates) {
-          if (!usedEdge[cIdx]) {
-            chosen = cIdx;
-            break;
+        const candidates = (nextMap.get(currV) || []).filter((cIdx) => !usedEdge[cIdx]);
+        if (candidates.length === 0) break;
+
+        let chosen = candidates[0];
+        if (candidates.length > 1) {
+          // Turn maximally clockwise relative to incoming reverse vector to keep loops uncrossed
+          const pPrev = proj2D(prevV);
+          const pCurr = proj2D(currV);
+          const inAngle = Math.atan2(pPrev.y - pCurr.y, pPrev.x - pCurr.x);
+          let bestSweep = Infinity;
+          for (const cIdx of candidates) {
+            const pNext = proj2D(boundaryEdges[cIdx][1]);
+            const outAngle = Math.atan2(pNext.y - pCurr.y, pNext.x - pCurr.x);
+            let cwSweep = inAngle - outAngle;
+            while (cwSweep <= 0) cwSweep += Math.PI * 2;
+            if (cwSweep < bestSweep) {
+              bestSweep = cwSweep;
+              chosen = cIdx;
+            }
           }
         }
-        if (chosen < 0) break;
         usedEdge[chosen] = 1;
+        prevV = currV;
         currV = boundaryEdges[chosen][1];
       }
 
       if (loop.length >= 3) {
-        loops.push(loop);
+        loops.push(simplifyLoop(loop));
       }
     }
 
     if (loops.length === 0) continue;
 
-    // Pick outer boundary loop (largest area)
-    let bestLoop = loops[0];
-    let bestFace = buildPolyFace3D(polyFaces.length, [...bestLoop], vertices);
-    for (let l = 1; l < loops.length; l++) {
-      const candidate = buildPolyFace3D(polyFaces.length, [...loops[l]], vertices);
-      if (candidate && (!bestFace || candidate.areaM2 > bestFace.areaM2)) {
-        bestLoop = loops[l];
-        bestFace = candidate;
+    if (loops.length === 1) {
+      const pf = buildPolyFace3D(polyFaces.length, loops[0], vertices, clusterNormal);
+      if (pf) polyFaces.push(pf);
+      continue;
+    }
+
+    const validLoops: number[][] = [];
+    const loops2D: Point2D[][] = [];
+    for (const lp of loops) {
+      const l2 = lp.map(proj2D);
+      if (polygonArea2D(l2) >= 1e-3) {
+        validLoops.push(lp);
+        loops2D.push(l2);
       }
     }
 
-    if (!bestFace) continue;
+    if (validLoops.length === 0) continue;
+    if (validLoops.length === 1) {
+      const pf = buildPolyFace3D(polyFaces.length, validLoops[0], vertices, clusterNormal);
+      if (pf) polyFaces.push(pf);
+      continue;
+    }
 
-    // Simplify collinear vertices that only belong to at most 2 clusters
-    // so both adjacent faces simplify the same intermediate point identically.
-    const simplified: number[] = [];
-    const n = bestLoop.length;
-    for (let i = 0; i < n; i++) {
-      const prevV = bestLoop[(i - 1 + n) % n];
-      const currV = bestLoop[i];
-      const nextV = bestLoop[(i + 1) % n];
-      const cSet = vertexClusters.get(currV);
-      if (cSet && cSet.size <= 2 && n > 3) {
-        const d1 = new THREE.Vector3().subVectors(vertices[currV], vertices[prevV]).normalize();
-        const d2 = new THREE.Vector3().subVectors(vertices[nextV], vertices[currV]).normalize();
-        if (d1.dot(d2) > 0.9995) {
-          continue;
+    const depths = nestingDepths(loops2D);
+    for (let oi = 0; oi < validLoops.length; oi++) {
+      if (depths[oi] % 2 !== 0) continue;
+      const holeLoops: number[][] = [];
+      for (let hi = 0; hi < validLoops.length; hi++) {
+        if (depths[hi] === depths[oi] + 1 && pointInPolygon(loops2D[hi][0], loops2D[oi])) {
+          holeLoops.push(validLoops[hi]);
         }
       }
-      simplified.push(currV);
-    }
-
-    const finalFace = buildPolyFace3D(polyFaces.length, simplified.length >= 3 ? simplified : bestLoop, vertices);
-    if (finalFace) {
-      polyFaces.push(finalFace);
+      const pf = buildPolyFace3D(polyFaces.length, validLoops[oi], vertices, clusterNormal, holeLoops);
+      if (pf) polyFaces.push(pf);
     }
   }
 
@@ -752,11 +1125,420 @@ export function clusterTrianglesToPolyFaces(
 }
 
 /**
+ * Removes recessed internal hole/bore wall facet strips that attach to the body
+ * solely along `holesVerts` rims and extend inward behind the host face(s),
+ * leaving clean planar cutout loops (`holesVerts`) on the host faces.
+ */
+function filterInternalBoreFacets(vertices: THREE.Vector3[], faces: PolyFace3D[]): PolyFace3D[] {
+  if (faces.length < 2) return faces;
+
+  const undirKey = (u: number, v: number) => (u < v ? `${u}:${v}` : `${v}:${u}`);
+  const holeRimEdges = new Set<string>();
+  const holeEdgeHosts = new Map<string, PolyFace3D[]>();
+  const hostFaceSet = new Set<number>();
+
+  for (let fi = 0; fi < faces.length; fi++) {
+    const f = faces[fi];
+    if (!f.holesVerts || f.holesVerts.length === 0) continue;
+    hostFaceSet.add(fi);
+    for (const hLoop of f.holesVerts) {
+      for (let i = 0; i < hLoop.length; i++) {
+        const k = undirKey(hLoop[i], hLoop[(i + 1) % hLoop.length]);
+        holeRimEdges.add(k);
+        let list = holeEdgeHosts.get(k);
+        if (!list) {
+          list = [];
+          holeEdgeHosts.set(k, list);
+        }
+        list.push(f);
+      }
+    }
+  }
+
+  if (holeRimEdges.size === 0) return faces;
+
+  // Build face adjacency excluding `holeRimEdges`
+  const nonHoleEdgeToFaces = new Map<string, number[]>();
+  const faceAllLoops = (f: PolyFace3D): number[][] => [f.verts, ...(f.holesVerts ?? [])];
+
+  for (let fi = 0; fi < faces.length; fi++) {
+    for (const lp of faceAllLoops(faces[fi])) {
+      for (let i = 0; i < lp.length; i++) {
+        const k = undirKey(lp[i], lp[(i + 1) % lp.length]);
+        if (holeRimEdges.has(k)) continue;
+        let list = nonHoleEdgeToFaces.get(k);
+        if (!list) {
+          list = [];
+          nonHoleEdgeToFaces.set(k, list);
+        }
+        list.push(fi);
+      }
+    }
+  }
+
+  const visited = new Uint8Array(faces.length);
+  const dropFace = new Uint8Array(faces.length);
+
+  for (let s = 0; s < faces.length; s++) {
+    if (visited[s]) continue;
+    visited[s] = 1;
+    const comp: number[] = [s];
+    const queue: number[] = [s];
+
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      for (const lp of faceAllLoops(faces[curr])) {
+        for (let i = 0; i < lp.length; i++) {
+          const k = undirKey(lp[i], lp[(i + 1) % lp.length]);
+          if (holeRimEdges.has(k)) continue;
+          for (const nb of nonHoleEdgeToFaces.get(k) || []) {
+            if (!visited[nb]) {
+              visited[nb] = 1;
+              comp.push(nb);
+              queue.push(nb);
+            }
+          }
+        }
+      }
+    }
+
+    if (comp.some((fi) => hostFaceSet.has(fi))) continue;
+
+    // Check if this severed component attaches to host faces via holeRimEdges and sits recessed behind them
+    const touchedHosts = new Set<PolyFace3D>();
+    const compVerts = new Set<number>();
+    for (const fi of comp) {
+      const f = faces[fi];
+      for (let i = 0; i < f.verts.length; i++) {
+        const u = f.verts[i];
+        const v = f.verts[(i + 1) % f.verts.length];
+        compVerts.add(u);
+        const hosts = holeEdgeHosts.get(undirKey(u, v));
+        if (hosts) {
+          for (const h of hosts) touchedHosts.add(h);
+        }
+      }
+    }
+
+    if (touchedHosts.size === 0) continue;
+
+    let recessedBehindAll = true;
+    let strictlyInsideSome = false;
+    const diff = new THREE.Vector3();
+    for (const host of touchedHosts) {
+      const ref = vertices[host.verts[0]];
+      for (const vi of compVerts) {
+        const d = diff.subVectors(vertices[vi], ref).dot(host.normal);
+        if (d > 2e-4) {
+          recessedBehindAll = false;
+          break;
+        }
+        if (d < -1e-4) {
+          strictlyInsideSome = true;
+        }
+      }
+      if (!recessedBehindAll) break;
+    }
+
+    if (recessedBehindAll && strictlyInsideSome && comp.length < faces.length) {
+      for (const fi of comp) dropFace[fi] = 1;
+    }
+  }
+
+  const kept = faces.filter((_, idx) => !dropFace[idx]);
+  if (kept.length === 0 || kept.length === faces.length) return faces;
+  return kept.map((f, idx) => ({ ...f, index: idx }));
+}
+
+/**
+ * Detects thin-walled 3D solid shells (two antiparallel offset skins separated by
+ * uniform wall thickness `~W` bounded by thin rim strips, such as thickened brackets,
+ * hollow open-top trays, or sheet plates with cutouts) and extracts a single outer
+ * reference skin, leaving thick closed polyhedra (cubes, prisms, pyramids) intact.
+ */
+function extractSingleSkinIfThinShell(
+  vertices: THREE.Vector3[],
+  faces: PolyFace3D[],
+  options: SheetUnfoldOptions
+): PolyFace3D[] {
+  if (faces.length < 4) return faces;
+
+  const undirKey = (u: number, v: number) => (u < v ? `${u}:${v}` : `${v}:${u}`);
+  const faceAllLoops = (f: PolyFace3D): number[][] => [f.verts, ...(f.holesVerts ?? [])];
+
+  // Split into 3D edge-connected solid components (including hole rim connections)
+  const edgeToFaces = new Map<string, number[]>();
+  for (let fi = 0; fi < faces.length; fi++) {
+    for (const lp of faceAllLoops(faces[fi])) {
+      for (let i = 0; i < lp.length; i++) {
+        const k = undirKey(lp[i], lp[(i + 1) % lp.length]);
+        let list = edgeToFaces.get(k);
+        if (!list) {
+          list = [];
+          edgeToFaces.set(k, list);
+        }
+        list.push(fi);
+      }
+    }
+  }
+
+  const visitedComp = new Uint8Array(faces.length);
+  const keptFaces: PolyFace3D[] = [];
+
+  for (let s = 0; s < faces.length; s++) {
+    if (visitedComp[s]) continue;
+    visitedComp[s] = 1;
+    const compIndices: number[] = [s];
+    const qComp: number[] = [s];
+    while (qComp.length > 0) {
+      const curr = qComp.shift()!;
+      for (const lp of faceAllLoops(faces[curr])) {
+        for (let i = 0; i < lp.length; i++) {
+          const k = undirKey(lp[i], lp[(i + 1) % lp.length]);
+          for (const nb of edgeToFaces.get(k) || []) {
+            if (!visitedComp[nb]) {
+              visitedComp[nb] = 1;
+              compIndices.push(nb);
+              qComp.push(nb);
+            }
+          }
+        }
+      }
+    }
+
+    const comp = compIndices.map((idx) => faces[idx]);
+    if (comp.length < 4) {
+      keptFaces.push(...comp);
+      continue;
+    }
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    for (const f of comp) {
+      for (const vi of f.verts) {
+        const p = vertices[vi];
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+        if (p.z < minZ) minZ = p.z;
+        if (p.z > maxZ) maxZ = p.z;
+      }
+    }
+    const bboxDiagMm = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) * 1000;
+    if (bboxDiagMm < 1e-3) {
+      keptFaces.push(...comp);
+      continue;
+    }
+
+    const maxWallMm = Math.min(
+      0.22 * bboxDiagMm,
+      Math.max(3.5 * Math.max(0.5, options.thicknessMm), Math.min(8.0, 0.15 * bboxDiagMm))
+    );
+
+    const grossAreasMm2 = comp.map((f) => polygonArea2D(f.local2D));
+    const netAreasMm2 = comp.map((f) => f.areaM2 * 1e6);
+    const compNetAreaMm2 = netAreasMm2.reduce((acc, a) => acc + a, 0);
+
+    interface WallPair {
+      a: number;
+      b: number;
+      sepMm: number;
+      weight: number;
+    }
+    const candidatePairs: WallPair[] = [];
+    const diff = new THREE.Vector3();
+
+    for (let i = 0; i < comp.length; i++) {
+      const fa = comp[i];
+      for (let j = i + 1; j < comp.length; j++) {
+        const fb = comp[j];
+        if (fa.normal.dot(fb.normal) > -0.95) continue;
+
+        // Solid wall lies behind fa (`-fa.normal`), so `(fa.centroid - fb.centroid) . fa.normal > 0`
+        const sepMm = diff.subVectors(fa.centroid, fb.centroid).dot(fa.normal) * 1000;
+        if (sepMm <= 0.05 || sepMm > maxWallMm) continue;
+
+        const minFaceArea = Math.min(netAreasMm2[i], netAreasMm2[j]);
+        if (minFaceArea < 1.5 * sepMm * sepMm) continue;
+
+        // Reject pairing a thin open-mouth picture-frame rim (>60% hole) against a solid floor panel
+        const fillRatioA = grossAreasMm2[i] > 1e-6 ? netAreasMm2[i] / grossAreasMm2[i] : 1;
+        const fillRatioB = grossAreasMm2[j] > 1e-6 ? netAreasMm2[j] / grossAreasMm2[j] : 1;
+        if ((fillRatioA < 0.4 && fillRatioB > 0.8) || (fillRatioB < 0.4 && fillRatioA > 0.8)) continue;
+
+        // Project both faces onto fa's tangent plane and check 2D overlap
+        const ref = vertices[fa.verts[0]];
+        const { uAxis, vAxis } = buildFaceBasis3D(fa.normal, ref, vertices[fa.verts[1]]);
+        const proj = (vi: number): Point2D => {
+          diff.subVectors(vertices[vi], ref);
+          return { x: diff.dot(uAxis) * 1000, y: diff.dot(vAxis) * 1000 };
+        };
+        const polyA = fa.verts.map(proj);
+        const polyB = fb.verts.map(proj);
+
+        let aMinX = Infinity, aMaxX = -Infinity, aMinY = Infinity, aMaxY = -Infinity;
+        for (const p of polyA) {
+          if (p.x < aMinX) aMinX = p.x;
+          if (p.x > aMaxX) aMaxX = p.x;
+          if (p.y < aMinY) aMinY = p.y;
+          if (p.y > aMaxY) aMaxY = p.y;
+        }
+        let bMinX = Infinity, bMaxX = -Infinity, bMinY = Infinity, bMaxY = -Infinity;
+        for (const p of polyB) {
+          if (p.x < bMinX) bMinX = p.x;
+          if (p.x > bMaxX) bMaxX = p.x;
+          if (p.y < bMinY) bMinY = p.y;
+          if (p.y > bMaxY) bMaxY = p.y;
+        }
+        const ovX = Math.max(0, Math.min(aMaxX, bMaxX) - Math.max(aMinX, bMinX));
+        const ovY = Math.max(0, Math.min(aMaxY, bMaxY) - Math.max(aMinY, bMinY));
+        if (ovX * ovY < 0.25 * minFaceArea) continue;
+        if (!polygonsOverlap2D(polyA, polyB, 0.05)) continue;
+
+        candidatePairs.push({ a: i, b: j, sepMm, weight: minFaceArea });
+      }
+    }
+
+    if (candidatePairs.length === 0) {
+      keptFaces.push(...comp);
+      continue;
+    }
+
+    // Find dominant wall thickness W across candidate pairs
+    let dominantW = candidatePairs[0].sepMm;
+    let bestWeight = -1;
+    for (const p of candidatePairs) {
+      const tol = Math.max(0.5, 0.30 * p.sepMm);
+      let wSum = 0;
+      for (const q of candidatePairs) {
+        if (Math.abs(q.sepMm - p.sepMm) <= tol) wSum += q.weight;
+      }
+      if (wSum > bestWeight) {
+        bestWeight = wSum;
+        dominantW = p.sepMm;
+      }
+    }
+
+    const wTol = Math.max(0.5, 0.30 * dominantW);
+    const validPairs = candidatePairs.filter((p) => Math.abs(p.sepMm - dominantW) <= wTol);
+    const pairedSet = new Set<number>();
+    for (const p of validPairs) {
+      pairedSet.add(p.a);
+      pairedSet.add(p.b);
+    }
+
+    let pairedNetAreaMm2 = 0;
+    for (const idx of pairedSet) pairedNetAreaMm2 += netAreasMm2[idx];
+    if (pairedNetAreaMm2 < 0.55 * compNetAreaMm2) {
+      keptFaces.push(...comp);
+      continue;
+    }
+
+    // Build 2-coloring graph on pairedSet:
+    //   same-color across shared outer edges (`n1 . n2 > -0.85`)
+    //   opposite-color across antiparallel `validPairs`
+    const sameAdj = new Map<number, Set<number>>();
+    const oppAdj = new Map<number, Set<number>>();
+    for (const idx of pairedSet) {
+      sameAdj.set(idx, new Set());
+      oppAdj.set(idx, new Set());
+    }
+    for (const p of validPairs) {
+      oppAdj.get(p.a)!.add(p.b);
+      oppAdj.get(p.b)!.add(p.a);
+    }
+
+    const outerEdgeToPaired = new Map<string, number[]>();
+    for (const idx of pairedSet) {
+      const v = comp[idx].verts;
+      for (let e = 0; e < v.length; e++) {
+        const k = undirKey(v[e], v[(e + 1) % v.length]);
+        let list = outerEdgeToPaired.get(k);
+        if (!list) {
+          list = [];
+          outerEdgeToPaired.set(k, list);
+        }
+        list.push(idx);
+      }
+    }
+    for (const list of outerEdgeToPaired.values()) {
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = list[i], b = list[j];
+          if (comp[a].normal.dot(comp[b].normal) > -0.85) {
+            sameAdj.get(a)!.add(b);
+            sameAdj.get(b)!.add(a);
+          }
+        }
+      }
+    }
+
+    const color = new Int8Array(comp.length).fill(-1);
+    let hasConflict = false;
+    const selectedSkin = new Set<number>();
+
+    for (const seed of pairedSet) {
+      if (color[seed] !== -1) continue;
+      color[seed] = 0;
+      const group0: number[] = [seed];
+      const group1: number[] = [];
+      const bfs: number[] = [seed];
+
+      while (bfs.length > 0 && !hasConflict) {
+        const u = bfs.shift()!;
+        const cu = color[u];
+        for (const v of sameAdj.get(u) || []) {
+          if (color[v] === -1) {
+            color[v] = cu;
+            (cu === 0 ? group0 : group1).push(v);
+            bfs.push(v);
+          } else if (color[v] !== cu) {
+            hasConflict = true;
+            break;
+          }
+        }
+        if (hasConflict) break;
+        const oppColor = cu === 0 ? 1 : 0;
+        for (const v of oppAdj.get(u) || []) {
+          if (color[v] === -1) {
+            color[v] = oppColor;
+            (oppColor === 0 ? group0 : group1).push(v);
+            bfs.push(v);
+          } else if (color[v] !== oppColor) {
+            hasConflict = true;
+            break;
+          }
+        }
+      }
+
+      if (hasConflict) break;
+
+      const area0 = group0.reduce((sum, idx) => sum + netAreasMm2[idx], 0);
+      const area1 = group1.reduce((sum, idx) => sum + netAreasMm2[idx], 0);
+      const winners = area0 >= area1 ? group0 : group1;
+      for (const idx of winners) selectedSkin.add(idx);
+    }
+
+    if (hasConflict || selectedSkin.size === 0) {
+      keptFaces.push(...comp);
+    } else {
+      for (let i = 0; i < comp.length; i++) {
+        if (selectedSkin.has(i)) keptFaces.push(comp[i]);
+      }
+    }
+  }
+
+  return keptFaces.map((f, idx) => ({ ...f, index: idx }));
+}
+
+/**
  * Extracts 3D polygonal surfaces from a scene graph.
  * Supports:
- *   1. `node.latticeCage` polygonal faces directly when present (and unsubdivided)
- *   2. Box, cylinder, wedge, pyramid, and cone primitives
- *   3. Compiled CSG or triangle meshes (`geom.type === 'mesh'`)
+ *   1. `node.latticeCage` polygonal faces directly when present, unsubdivided, unbaked, and without CSG modifiers
+ *   2. Box and cylinder primitives
+ *   3. Compiled CSG or triangle meshes (`geom.type === 'mesh'`), with internal bore filtering and thin-shell single-skin extraction
  */
 function extractSurfacesFromScene(
   scene: SceneGraph,
@@ -791,6 +1573,7 @@ function extractSurfacesFromScene(
       new THREE.Vector3(-hx,  hy,  hz), // 7
     ].map((p) => applyTransformAndScale(p, matrix));
 
+    const flip = matrix.determinant() < 0;
     // Six quad faces wound CCW seen from outside
     const quadIndices = [
       [0, 3, 2, 1], // bottom (-Z)
@@ -803,7 +1586,8 @@ function extractSurfacesFromScene(
 
     const faces: PolyFace3D[] = [];
     for (const q of quadIndices) {
-      const f = buildPolyFace3D(faces.length, [...q], rawCorners);
+      const loop = flip ? [...q].reverse() : [...q];
+      const f = buildPolyFace3D(faces.length, loop, rawCorners);
       if (f) faces.push(f);
     }
     return faces.length > 0 ? { nodeId, nodeName, vertices: rawCorners, faces } : null;
@@ -832,21 +1616,21 @@ function extractSurfacesFromScene(
       vertices.push(applyTransformAndScale(new THREE.Vector3(x, y, halfLen), matrix));
     }
 
+    const flip = matrix.determinant() < 0;
+    const maybeFlip = (lp: number[]) => (flip ? [...lp].reverse() : lp);
+
     const faces: PolyFace3D[] = [];
-    // Bottom cap (-Z): reversed so normal points -Z
-    const bottomLoop = Array.from({ length: n }, (_, i) => n - 1 - i);
+    const bottomLoop = maybeFlip(Array.from({ length: n }, (_, i) => n - 1 - i));
     const bottomFace = buildPolyFace3D(faces.length, bottomLoop, vertices);
     if (bottomFace) faces.push(bottomFace);
 
-    // Top cap (+Z)
-    const topLoop = Array.from({ length: n }, (_, i) => n + i);
+    const topLoop = maybeFlip(Array.from({ length: n }, (_, i) => n + i));
     const topFace = buildPolyFace3D(faces.length, topLoop, vertices);
     if (topFace) faces.push(topFace);
 
-    // Side quads
     for (let i = 0; i < n; i++) {
       const next = (i + 1) % n;
-      const side = buildPolyFace3D(faces.length, [i, next, n + next, n + i], vertices);
+      const side = buildPolyFace3D(faces.length, maybeFlip([i, next, n + next, n + i]), vertices);
       if (side) faces.push(side);
     }
 
@@ -860,6 +1644,7 @@ function extractSurfacesFromScene(
       return;
     }
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
+    const cageMatrix = getCageWorldTransform(node, parentMatrix);
     if (isBoughtIn(node)) {
       for (const child of node.children || []) traverse(child, bodyMatrix);
       return;
@@ -869,9 +1654,20 @@ function extractSurfacesFromScene(
 
     if (includeNode) {
       let extractedForNode = false;
+      const geoms = node.geoms || [];
+      const compiledVisual = geoms.find(
+        (g) => g.type === 'mesh' && g.csgDerived === 'visual' && (g.renderVertices || g.vertices) && g.faces
+      );
+      const hasCsgModifiers =
+        Boolean(compiledVisual) ||
+        Boolean(node.csgEnabled && geoms.some((g) => Boolean(g.csg))) ||
+        Boolean(node.edgeRounds && node.edgeRounds.length > 0);
 
-      // 1. Direct latticeCage polygonal faces when present and unsubdivided
+      // 1. Direct latticeCage polygonal faces when present, unsubdivided, unbaked, and without CSG modifiers
       if (
+        !hasCsgModifiers &&
+        !node.latticeBaked &&
+        node.isLattice !== false &&
         node.latticeCage &&
         node.latticeCage.coords.length >= 9 &&
         node.latticeCage.faces.length >= 3 &&
@@ -888,26 +1684,43 @@ function extractSurfacesFromScene(
             cage.coords[i + 1] * unit - (origin[1] || 0),
             cage.coords[i + 2] * unit - (origin[2] || 0)
           );
-          rawVerts.push(applyTransformAndScale(local, bodyMatrix));
+          rawVerts.push(applyTransformAndScale(local, cageMatrix));
         }
 
-        const faces: PolyFace3D[] = [];
+        const { vertices, remap } = weldVertices3D(rawVerts);
+        const flip = cageMatrix.determinant() < 0;
+        const triIndices: number[] = [];
         let cursor = 0;
         for (const sz of cage.faceSizes) {
           if (sz >= 3 && cursor + sz <= cage.faces.length) {
-            const loop = cage.faces.slice(cursor, cursor + sz);
-            const pf = buildPolyFace3D(faces.length, loop, rawVerts);
-            if (pf) faces.push(pf);
+            const rawLoop = cage.faces.slice(cursor, cursor + sz).map((vi) => remap[vi] ?? 0);
+            const loop = flip ? [...rawLoop].reverse() : rawLoop;
+            if (loop.length === 3) {
+              triIndices.push(loop[0], loop[1], loop[2]);
+            } else {
+              const pf = buildPolyFace3D(0, loop, vertices);
+              if (pf) {
+                const contour = pf.local2D.map((p) => new THREE.Vector2(p.x, p.y));
+                const localTris = THREE.ShapeUtils.triangulateShape(contour, []);
+                for (const [a, b, c] of localTris) {
+                  triIndices.push(pf.verts[a], pf.verts[b], pf.verts[c]);
+                }
+              }
+            }
           }
           cursor += sz;
         }
 
-        if (faces.length > 0) {
+        let polyFaces = clusterTrianglesToPolyFaces(vertices, triIndices, options.coplanarToleranceDeg);
+        polyFaces = extractSingleSkinIfThinShell(vertices, polyFaces, options);
+        polyFaces = filterInternalBoreFacets(vertices, polyFaces);
+
+        if (polyFaces.length > 0) {
           surfaces.push({
             nodeId: node.id,
             nodeName: node.name || node.id,
-            vertices: rawVerts,
-            faces,
+            vertices,
+            faces: polyFaces,
           });
           extractedForNode = true;
         }
@@ -915,11 +1728,6 @@ function extractSurfacesFromScene(
 
       // 2. Compiled CSG visual mesh or node geoms
       if (!extractedForNode) {
-        const geoms = node.geoms || [];
-        const compiledVisual = geoms.find(
-          (g) => g.type === 'mesh' && g.csgDerived === 'visual' && (g.renderVertices || g.vertices) && g.faces
-        );
-
         const geomsToProcess = compiledVisual
           ? [compiledVisual]
           : csgSourceGeoms(node).filter((g) => g.role !== 'collision' && g.csg !== 'difference');
@@ -961,12 +1769,23 @@ function extractSurfacesFromScene(
               );
             }
             const { vertices, remap } = weldVertices3D(rawPts);
-            const remappedTris = geom.faces.map((idx) => remap[idx] ?? 0);
-            const polyFaces = clusterTrianglesToPolyFaces(
+            const flip = geomMatrix.determinant() < 0;
+            const remappedTris: number[] = [];
+            for (let i = 0; i + 2 < geom.faces.length; i += 3) {
+              const a = remap[geom.faces[i]] ?? 0;
+              const b = remap[geom.faces[i + 1]] ?? 0;
+              const c = remap[geom.faces[i + 2]] ?? 0;
+              if (flip) remappedTris.push(a, c, b);
+              else remappedTris.push(a, b, c);
+            }
+            let polyFaces = clusterTrianglesToPolyFaces(
               vertices,
               remappedTris,
               options.coplanarToleranceDeg
             );
+            polyFaces = extractSingleSkinIfThinShell(vertices, polyFaces, options);
+            polyFaces = filterInternalBoreFacets(vertices, polyFaces);
+
             if (polyFaces.length > 0) {
               surfaces.push({
                 nodeId: node.id,
@@ -1018,7 +1837,9 @@ interface SharedMeshEdge {
 
 interface PlacedFaceState {
   faceIndex: number;
+  /** Placed 2D vertices corresponding to `face.verts` (or stepped vertices after trimming). */
   polygon2D: Point2D[];
+  holes2D: Point2D[][];
   /** Maps local 2D point of this face into island 2D space. */
   transformPoint: (localPt: Point2D) => Point2D;
   /**
@@ -1026,6 +1847,11 @@ interface PlacedFaceState {
    * face is drawn to the model's outside; the flat stops this short of it.
    */
   setbacks: number[];
+  /** Trimmed start/end points indexed by original `face.verts` edge index. */
+  edgeStarts?: Point2D[];
+  edgeEnds?: Point2D[];
+  /** Maps each vertex of `polygon2D` back to its index in `face.verts`. */
+  vertexMap?: number[];
 }
 
 /**
@@ -1035,18 +1861,34 @@ interface PlacedFaceState {
  * Either way the flat ends where the arc starts, r·tan(θ/2) from the corner.
  */
 export function bendSetbackMm(angleDeg: number, bendRadiusMm: number, thicknessMm: number): number {
-  const half = (Math.min(170, Math.abs(angleDeg)) * Math.PI) / 360;
+  const half = (Math.min(179.5, Math.abs(angleDeg)) * Math.PI) / 360;
   const r = Math.max(0, bendRadiusMm) + (angleDeg >= 0 ? Math.max(0, thicknessMm) : 0);
   return r * Math.tan(half);
 }
 
+interface TrimmedFace2D {
+  polygon2D: Point2D[];
+  edgeStarts: Point2D[];
+  edgeEnds: Point2D[];
+  vertexMap: number[];
+}
+
 /**
- * A face's polygon with each edge moved in by its setback, the corners where
- * the moved lines meet. Vertex i stays vertex i.
+ * Trims each edge of `poly` inward by its setback, inserting a crisp perpendicular
+ * setback step at collinear partial-flange vertices where `setbacks[prev] !== setbacks[i]`
+ * so adjacent free edges remain straight rather than shearing diagonally.
  */
-function trimPolygon2D(poly: Point2D[], setbacks: number[]): Point2D[] {
+function trimPolygonEdges2D(poly: Point2D[], setbacks: number[]): TrimmedFace2D {
   const n = poly.length;
-  if (!setbacks.some((d) => d > 0)) return poly.map((p) => ({ ...p }));
+  if (!setbacks.some((d) => d > 0)) {
+    return {
+      polygon2D: poly.map((p) => ({ ...p })),
+      edgeStarts: poly.map((p) => ({ ...p })),
+      edgeEnds: poly.map((_, i) => ({ ...poly[(i + 1) % n] })),
+      vertexMap: poly.map((_, i) => i),
+    };
+  }
+
   // Each edge as a point and direction, moved left (inward: the face is CCW).
   const lines = poly.map((p, i) => {
     const q = poly[(i + 1) % n];
@@ -1055,17 +1897,122 @@ function trimPolygon2D(poly: Point2D[], setbacks: number[]): Point2D[] {
     const d = setbacks[i] || 0;
     return { x: p.x - uy * d, y: p.y + ux * d, ux, uy };
   });
-  return poly.map((p, i) => {
-    const a = lines[(i - 1 + n) % n], b = lines[i];
+
+  const edgeStarts: Point2D[] = new Array(n);
+  const edgeEnds: Point2D[] = new Array(n);
+  const polygon2D: Point2D[] = [];
+  const vertexMap: number[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const p = poly[i];
+    const prevIdx = (i - 1 + n) % n;
+    const a = lines[prevIdx], b = lines[i];
+    const dPrev = setbacks[prevIdx] || 0;
+    const dCurr = setbacks[i] || 0;
+    const dMax = Math.max(dPrev, dCurr);
     const det = a.ux * b.uy - a.uy * b.ux;
-    if (Math.abs(det) < 1e-9) {
-      // Straight on: the vertex moves in by the larger of the two.
-      const d = Math.max(setbacks[(i - 1 + n) % n] || 0, setbacks[i] || 0);
-      return { x: p.x - b.uy * d, y: p.y + b.ux * d };
+
+    if (Math.abs(det) < 1e-6) {
+      const pIn = { x: p.x - a.uy * dPrev, y: p.y + a.ux * dPrev };
+      const pOut = { x: p.x - b.uy * dCurr, y: p.y + b.ux * dCurr };
+      edgeEnds[prevIdx] = pIn;
+      edgeStarts[i] = pOut;
+      polygon2D.push(pIn);
+      vertexMap.push(i);
+      if (Math.hypot(pOut.x - pIn.x, pOut.y - pIn.y) > 1e-4) {
+        polygon2D.push(pOut);
+        vertexMap.push(i);
+      }
+      continue;
     }
+
     const s = ((b.x - a.x) * b.uy - (b.y - a.y) * b.ux) / det;
-    return { x: a.x + a.ux * s, y: a.y + a.uy * s };
-  });
+    let hit = { x: a.x + a.ux * s, y: a.y + a.uy * s };
+    // Miter guard on acute corners so setbacks cannot shoot spikes far out of bounds
+    const dist = Math.hypot(hit.x - p.x, hit.y - p.y);
+    if (dMax > 0 && dist > 4 * dMax) {
+      const scale = (4 * dMax) / dist;
+      hit = { x: p.x + (hit.x - p.x) * scale, y: p.y + (hit.y - p.y) * scale };
+    }
+    edgeEnds[prevIdx] = hit;
+    edgeStarts[i] = { ...hit };
+    polygon2D.push(hit);
+    vertexMap.push(i);
+  }
+
+  return { polygon2D, edgeStarts, edgeEnds, vertexMap };
+}
+
+function trimPolygon2D(poly: Point2D[], setbacks: number[]): Point2D[] {
+  return trimPolygonEdges2D(poly, setbacks).polygon2D;
+}
+
+function isTrimmedPolygonValid2D(origPoly: Point2D[], tr: TrimmedFace2D): boolean {
+  const n = origPoly.length;
+  const trimmed = tr.polygon2D;
+  const m = trimmed.length;
+  if (n < 3 || m < 3) return false;
+  const origArea = polygonSignedArea2D(origPoly);
+  const trimArea = polygonSignedArea2D(trimmed);
+  if (origArea <= 1e-6) return true;
+  // Prevent inside-out polygon inversion or complete area collapse
+  if (trimArea < Math.min(0.2, 0.04 * origArea)) return false;
+
+  // Ensure no boundary edge reverses direction relative to original edge
+  for (let i = 0; i < n; i++) {
+    const o1 = origPoly[i];
+    const o2 = origPoly[(i + 1) % n];
+    const oDx = o2.x - o1.x;
+    const oDy = o2.y - o1.y;
+    const oLen = Math.hypot(oDx, oDy);
+    if (oLen < 1e-3) continue;
+    const t1 = tr.edgeStarts[i];
+    const t2 = tr.edgeEnds[i];
+    const projLen = ((t2.x - t1.x) * oDx + (t2.y - t1.y) * oDy) / oLen;
+    if (projLen < Math.min(0.15, 0.05 * oLen)) return false;
+  }
+
+  // Ensure no non-adjacent edges cross each other
+  for (let i = 0; i < m; i++) {
+    const a1 = trimmed[i];
+    const a2 = trimmed[(i + 1) % m];
+    for (let j = i + 2; j < m; j++) {
+      if (i === 0 && j === m - 1) continue;
+      const b1 = trimmed[j];
+      const b2 = trimmed[(j + 1) % m];
+      if (segmentsProperlyIntersect2D(a1, a2, b1, b2, 1e-3)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Clamps a candidate setback `desiredSetback` on edge `edgeIdx` (keeping other
+ * already-committed `baseSetbacks` fixed) so `trimPolygonEdges2D` never inverts a
+ * narrow web or flange inside-out.
+ */
+function clampEdgeSetbackForPolygon2D(
+  poly: Point2D[],
+  baseSetbacks: number[],
+  edgeIdx: number,
+  desiredSetback: number
+): { setback: number; clamped: boolean } {
+  if (desiredSetback <= 0) return { setback: 0, clamped: false };
+  const testWith = (val: number) => {
+    const sb = baseSetbacks.map((d, i) => (i === edgeIdx ? val : d));
+    return isTrimmedPolygonValid2D(poly, trimPolygonEdges2D(poly, sb));
+  };
+  if (testWith(desiredSetback)) {
+    return { setback: desiredSetback, clamped: false };
+  }
+  let lo = 0;
+  let hi = desiredSetback;
+  for (let iter = 0; iter < 18; iter++) {
+    const mid = (lo + hi) * 0.5;
+    if (testWith(mid)) lo = mid;
+    else hi = mid;
+  }
+  return { setback: lo, clamped: true };
 }
 
 /**
@@ -1131,6 +2078,28 @@ function buildUnfoldTransform2D(
   };
 }
 
+function rayHitExpandedLoops2D(origin: Point2D, dir: Point2D, loops: Point2D[][]): number | null {
+  let bestT = Infinity;
+  for (const lp of loops) {
+    for (let i = 0; i < lp.length; i++) {
+      const a = lp[i];
+      const b = lp[(i + 1) % lp.length];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const denom = dir.x * dy - dir.y * dx;
+      if (Math.abs(denom) < 1e-8) continue;
+      const rx = a.x - origin.x;
+      const ry = a.y - origin.y;
+      const t = (rx * dy - ry * dx) / denom;
+      const u = (rx * dir.y - ry * dir.x) / denom;
+      if (t > 1e-3 && u >= -1e-4 && u <= 1 + 1e-4 && t < bestT) {
+        bestT = t;
+      }
+    }
+  }
+  return Number.isFinite(bestT) ? bestT : null;
+}
+
 /**
  * Unfolds a single 3D polygonal surface into one or more non-overlapping 2D islands.
  */
@@ -1138,7 +2107,8 @@ function unfoldSurfaceToIslands(
   surface: PolySurface3D,
   options: SheetUnfoldOptions,
   startPairId: number,
-  startIslandIndex: number
+  startIslandIndex: number,
+  warnings: string[]
 ): {
   islands: UnfoldIsland[];
   nextPairId: number;
@@ -1231,6 +2201,7 @@ function unfoldSurfaceToIslands(
 
   const rawIslands: RawIsland[] = [];
   let totalBendAllowanceMm = 0;
+  let setbackClampedCount = 0;
 
   while (true) {
     // Pick unvisited seed face with largest area
@@ -1249,6 +2220,7 @@ function unfoldSurfaceToIslands(
     placedFaces.set(seedFace, {
       faceIndex: seedFace,
       polygon2D: faces[seedFace].local2D.map((p) => ({ ...p })),
+      holes2D: (faces[seedFace].holesLocal2D ?? []).map((h) => h.map((p) => ({ ...p }))),
       transformPoint: (pt) => ({ ...pt }),
       setbacks: faces[seedFace].verts.map(() => 0),
     });
@@ -1285,21 +2257,36 @@ function unfoldSurfaceToIslands(
         const baMm = bent
           ? computeBendAllowanceMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm, options.kFactor)
           : 0;
-        // Both flats stop short of the model's corner by the setback, and the
-        // bend's own length goes between them.
-        const setbackMm = bent ? bendSetbackMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm) : 0;
+        const rawSetbackMm = bent ? bendSetbackMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm) : 0;
+
+        const parentClamp = clampEdgeSetbackForPolygon2D(
+          parentState.polygon2D,
+          parentState.setbacks,
+          parentEdgeIdx,
+          rawSetbackMm
+        );
+        const zeroChildSetbacks = childFace.verts.map(() => 0);
+        const childClamp = clampEdgeSetbackForPolygon2D(
+          childFace.local2D,
+          zeroChildSetbacks,
+          childEdgeIdx,
+          rawSetbackMm
+        );
+
+        const effParentSetback = parentClamp.setback;
+        const effChildSetback = childClamp.setback;
 
         const { transform, targetV1, targetV2 } = buildUnfoldTransform2D(
           placedA_v1,
           placedA_v2,
           localB_v1,
           localB_v2,
-          baMm - 2 * setbackMm
+          baMm - effParentSetback - effChildSetback
         );
 
         const candidatePoly2D = childFace.local2D.map(transform);
-        const childSetbacks = childFace.verts.map((_, i) => (i === childEdgeIdx ? setbackMm : 0));
-        const parentSetbacks = parentState.setbacks.map((d, i) => (i === parentEdgeIdx ? setbackMm : d));
+        const childSetbacks = childFace.verts.map((_, i) => (i === childEdgeIdx ? effChildSetback : 0));
+        const parentSetbacks = parentState.setbacks.map((d, i) => (i === parentEdgeIdx ? effParentSetback : d));
 
         // Check if the candidate overlaps any already-placed face in this island,
         // each as its flat will be cut: the full faces overlap by the setbacks.
@@ -1317,6 +2304,10 @@ function unfoldSurfaceToIslands(
           continue;
         }
 
+        if (parentClamp.clamped || childClamp.clamped) {
+          setbackClampedCount++;
+        }
+
         // Commit child face to this island
         faceVisited[childIdx] = 1;
         usedTreeEdgeIds.add(se.id);
@@ -1326,6 +2317,7 @@ function unfoldSurfaceToIslands(
         placedFaces.set(childIdx, {
           faceIndex: childIdx,
           polygon2D: candidatePoly2D,
+          holes2D: (childFace.holesLocal2D ?? []).map((h) => h.map(transform)),
           transformPoint: transform,
           setbacks: childSetbacks,
         });
@@ -1349,24 +2341,40 @@ function unfoldSurfaceToIslands(
 
     // The flats as cut: every bent edge in by its setback, and each bend's
     // zone between the two trimmed edges.
-    for (const st of placedFaces.values()) st.polygon2D = trimPolygon2D(st.polygon2D, st.setbacks);
+    for (const st of placedFaces.values()) {
+      const tr = trimPolygonEdges2D(st.polygon2D, st.setbacks);
+      st.polygon2D = tr.polygon2D;
+      st.edgeStarts = tr.edgeStarts;
+      st.edgeEnds = tr.edgeEnds;
+      st.vertexMap = tr.vertexMap;
+    }
     for (const te of treeEdges) {
-      const parent = placedFaces.get(te.parentFace)!.polygon2D;
-      const child = placedFaces.get(te.childFace)!.polygon2D;
-      te.p1 = parent[te.parentEnds[0]];
-      te.p2 = parent[te.parentEnds[1]];
-      te.childP1 = child[te.childEnds[0]];
-      te.childP2 = child[te.childEnds[1]];
+      const parent = placedFaces.get(te.parentFace)!;
+      const child = placedFaces.get(te.childFace)!;
+      const pEdge = te.parentEnds[0];
+      const cEdge = te.childEnds[1];
+      te.p1 = parent.edgeStarts![pEdge];
+      te.p2 = parent.edgeEnds![pEdge];
+      te.childP1 = child.edgeEnds![cEdge];
+      te.childP2 = child.edgeStarts![cEdge];
     }
 
     rawIslands.push({ placedFaces, treeEdges });
   }
 
+  if (setbackClampedCount > 0) {
+    warnings.push(
+      `Bend setback (R=${options.bendRadiusMm}mm, T=${options.thicknessMm}mm) exceeds flange/web width on ${setbackClampedCount} bend(s) in "${surface.nodeName}"; clamped setback to prevent flat-pattern inversion.`
+    );
+  }
+
   // 3. Assign edge-pair IDs to all split shared edges (non-tree edges)
   let nextPairId = startPairId;
   const splitEdgePairId = new Map<number, number>();
-  // Decide which side (faceA or faceB) of each split edge gets the glue tab
+  // Decide which side (faceA or faceB) of each split edge gets the glue tab (and its effective width)
   const glueTabOwnerFace = new Map<number, number>();
+  const glueTabEffectiveWidth = new Map<number, number>();
+  const omittedGlueTabPairs: number[] = [];
 
   // Map faceIndex -> its RawIsland
   const faceToIsland = new Map<number, RawIsland>();
@@ -1411,16 +2419,13 @@ function unfoldSurfaceToIslands(
     if (options.mode === 'papercraft' && options.tabWidthMm > 0) {
       const islA = faceToIsland.get(se.faceA)!;
       const islB = faceToIsland.get(se.faceB)!;
-      const polyA = islA.placedFaces.get(se.faceA)!.polygon2D;
-      const polyB = islB.placedFaces.get(se.faceB)!.polygon2D;
+      const stA = islA.placedFaces.get(se.faceA)!;
+      const stB = islB.placedFaces.get(se.faceB)!;
 
-      const a1 = polyA[se.edgeIdxInA];
-      const a2 = polyA[(se.edgeIdxInA + 1) % polyA.length];
-      const b1 = polyB[se.edgeIdxInB];
-      const b2 = polyB[(se.edgeIdxInB + 1) % polyB.length];
-
-      const tabA = buildGlueTabPolygon(a1, a2, options.tabWidthMm, options.tabAngleDeg);
-      const tabB = buildGlueTabPolygon(b1, b2, options.tabWidthMm, options.tabAngleDeg);
+      const a1 = stA.edgeStarts ? stA.edgeStarts[se.edgeIdxInA] : stA.polygon2D[se.edgeIdxInA];
+      const a2 = stA.edgeEnds ? stA.edgeEnds[se.edgeIdxInA] : stA.polygon2D[(se.edgeIdxInA + 1) % stA.polygon2D.length];
+      const b1 = stB.edgeStarts ? stB.edgeStarts[se.edgeIdxInB] : stB.polygon2D[se.edgeIdxInB];
+      const b2 = stB.edgeEnds ? stB.edgeEnds[se.edgeIdxInB] : stB.polygon2D[(se.edgeIdxInB + 1) % stB.polygon2D.length];
 
       const clearanceScore = (tab: Point2D[], isl: RawIsland, ownFace: number): number => {
         if (tab.length < 4) return -Infinity;
@@ -1445,17 +2450,45 @@ function unfoldSurfaceToIslands(
         return minDist;
       };
 
-      const scoreA = clearanceScore(tabA, islA, se.faceA);
-      const scoreB = clearanceScore(tabB, islB, se.faceB);
+      let chosenFace: number | null = null;
+      let chosenTab: Point2D[] | null = null;
+      let chosenIsl: RawIsland | null = null;
 
-      if (scoreA >= scoreB) {
-        glueTabOwnerFace.set(se.id, se.faceA);
-        placedTabPolysByIsland.get(islA)!.push(tabA);
+      for (const factor of [1, 0.75, 0.55, 0.4, 0.25]) {
+        const w = options.tabWidthMm * factor;
+        if (w < 1.0 && factor < 1) break;
+        const tabA = buildGlueTabPolygon(a1, a2, w, options.tabAngleDeg);
+        const tabB = buildGlueTabPolygon(b1, b2, w, options.tabAngleDeg);
+        const scoreA = clearanceScore(tabA, islA, se.faceA);
+        const scoreB = clearanceScore(tabB, islB, se.faceB);
+        if (scoreA >= 0 || scoreB >= 0) {
+          if (scoreA >= scoreB) {
+            chosenFace = se.faceA;
+            chosenTab = tabA;
+            chosenIsl = islA;
+          } else {
+            chosenFace = se.faceB;
+            chosenTab = tabB;
+            chosenIsl = islB;
+          }
+          glueTabEffectiveWidth.set(se.id, w);
+          break;
+        }
+      }
+
+      if (chosenFace !== null && chosenTab && chosenIsl) {
+        glueTabOwnerFace.set(se.id, chosenFace);
+        placedTabPolysByIsland.get(chosenIsl)!.push(chosenTab);
       } else {
-        glueTabOwnerFace.set(se.id, se.faceB);
-        placedTabPolysByIsland.get(islB)!.push(tabB);
+        omittedGlueTabPairs.push(pairId);
       }
     }
+  }
+
+  if (omittedGlueTabPairs.length > 0) {
+    warnings.push(
+      `Omitted ${omittedGlueTabPairs.length} colliding glue tab(s) on "${surface.nodeName}" (seam pair ${omittedGlueTabPairs.join(', ')}) where adjacent unfolded faces leave insufficient clearance.`
+    );
   }
 
   // 4. Construct final UnfoldIsland objects with fold edges, cut seams, glue tabs,
@@ -1468,12 +2501,19 @@ function unfoldSurfaceToIslands(
 
     const unfoldedFaces: UnfoldedFace2D[] = [];
     for (const st of raw.placedFaces.values()) {
+      const holeAreaSum = st.holes2D.reduce((acc, h) => acc + polygonArea2D(h), 0);
+      const rawVerts3D = faces[st.faceIndex].verts;
+      const vMap = st.vertexMap ?? rawVerts3D.map((_, idx) => idx);
       unfoldedFaces.push({
         faceIndex: st.faceIndex,
         polygon2D: st.polygon2D,
+        holes2D: st.holes2D.length > 0 ? st.holes2D.map((h) => h.map((p) => ({ ...p }))) : undefined,
         centroid2D: polygonCentroid2D(st.polygon2D),
-        areaMm2: polygonArea2D(st.polygon2D),
-        model3DMm: faces[st.faceIndex].verts.map((v) => [vertices[v].x * 1000, vertices[v].y * 1000, vertices[v].z * 1000]),
+        areaMm2: Math.max(0, polygonArea2D(st.polygon2D) - holeAreaSum),
+        model3DMm: vMap.map((vi) => {
+          const v = rawVerts3D[vi];
+          return [vertices[v].x * 1000, vertices[v].y * 1000, vertices[v].z * 1000];
+        }),
       });
     }
 
@@ -1485,11 +2525,11 @@ function unfoldSurfaceToIslands(
         twinEdge: number;
         bridgeStart?: Point2D;
         bridgeEnd?: Point2D;
+        foldEdge?: UnfoldFoldEdge;
       }
     >();
 
     const foldEdges: UnfoldFoldEdge[] = [];
-    const bendCornerPoints: Point2D[] = [];
 
     for (let ti = 0; ti < raw.treeEdges.length; ti++) {
       const te = raw.treeEdges[ti];
@@ -1497,55 +2537,57 @@ function unfoldSurfaceToIslands(
       const parentEdge = se.faceA === te.parentFace ? se.edgeIdxInA : se.edgeIdxInB;
       const childEdge = se.faceA === te.parentFace ? se.edgeIdxInB : se.edgeIdxInA;
 
+      let foldObj: UnfoldFoldEdge | undefined;
+      if (Math.abs(se.angleDeg) >= options.coplanarToleranceDeg) {
+        const centerP1 = {
+          x: (te.p1.x + te.childP1.x) * 0.5,
+          y: (te.p1.y + te.childP1.y) * 0.5,
+        };
+        const centerP2 = {
+          x: (te.p2.x + te.childP2.x) * 0.5,
+          y: (te.p2.y + te.childP2.y) * 0.5,
+        };
+
+        const roundedDeg = Math.round(Math.abs(se.angleDeg) * 10) / 10;
+        const rLabel = Number(options.bendRadiusMm.toFixed(2));
+        const dirPrefix = se.angleDeg >= 0 ? 'UP' : 'DN';
+        const callout =
+          options.mode === 'sheet_metal' ? `${dirPrefix} ${roundedDeg}° R${rLabel}` : undefined;
+
+        const bendZonePolygon2D =
+          te.bendAllowanceMm > 1e-4
+            ? [te.p1, te.p2, te.childP2, te.childP1]
+            : undefined;
+
+        foldObj = {
+          id: `${islandId}_fold_${ti + 1}`,
+          faceA: te.parentFace,
+          faceB: te.childFace,
+          p1: centerP1,
+          p2: centerP2,
+          kind: se.kind,
+          angleDeg: se.angleDeg,
+          bendAllowanceMm: te.bendAllowanceMm,
+          bendZonePolygon2D,
+          callout,
+        };
+        foldEdges.push(foldObj);
+      }
+
       treeTwinMap.set(`${te.parentFace}:${parentEdge}`, {
         twinFace: te.childFace,
         twinEdge: childEdge,
         bridgeStart: te.p2,
         bridgeEnd: te.childP2,
+        foldEdge: foldObj,
       });
       treeTwinMap.set(`${te.childFace}:${childEdge}`, {
         twinFace: te.parentFace,
         twinEdge: parentEdge,
         bridgeStart: te.childP1,
         bridgeEnd: te.p1,
+        foldEdge: foldObj,
       });
-
-      if (Math.abs(se.angleDeg) < options.coplanarToleranceDeg) continue;
-
-      const centerP1 = {
-        x: (te.p1.x + te.childP1.x) * 0.5,
-        y: (te.p1.y + te.childP1.y) * 0.5,
-      };
-      const centerP2 = {
-        x: (te.p2.x + te.childP2.x) * 0.5,
-        y: (te.p2.y + te.childP2.y) * 0.5,
-      };
-
-      const roundedDeg = Math.round(Math.abs(se.angleDeg) * 10) / 10;
-      const rLabel = Number(options.bendRadiusMm.toFixed(2));
-      const dirPrefix = se.angleDeg >= 0 ? 'UP' : 'DN';
-      const callout =
-        options.mode === 'sheet_metal' ? `${dirPrefix} ${roundedDeg}° R${rLabel}` : undefined;
-
-      const bendZonePolygon2D =
-        te.bendAllowanceMm > 1e-4
-          ? [te.p1, te.p2, te.childP2, te.childP1]
-          : undefined;
-
-      foldEdges.push({
-        id: `${islandId}_fold_${ti + 1}`,
-        faceA: te.parentFace,
-        faceB: te.childFace,
-        p1: centerP1,
-        p2: centerP2,
-        kind: se.kind,
-        angleDeg: se.angleDeg,
-        bendAllowanceMm: te.bendAllowanceMm,
-        bendZonePolygon2D,
-        callout,
-      });
-
-      bendCornerPoints.push(centerP1, centerP2);
     }
 
     // Collect exterior boundary half-edges and chain them in topological CCW order
@@ -1556,18 +2598,18 @@ function unfoldSurfaceToIslands(
       p2: Point2D;
       outwardNormal: Point2D;
       sharedEdge?: SharedMeshEdge;
+      crossedBentHinges: UnfoldFoldEdge[];
     }
 
     const extHalfEdges: ExtHalfEdge[] = [];
     const extKeyToIndex = new Map<string, number>();
 
     for (const [fi, st] of raw.placedFaces.entries()) {
-      const poly = st.polygon2D;
-      const m = poly.length;
+      const m = faces[fi].verts.length;
       for (let ei = 0; ei < m; ei++) {
         if (treeTwinMap.has(`${fi}:${ei}`)) continue;
-        const p1 = poly[ei];
-        const p2 = poly[(ei + 1) % m];
+        const p1 = st.edgeStarts ? st.edgeStarts[ei] : st.polygon2D[ei];
+        const p2 = st.edgeEnds ? st.edgeEnds[ei] : st.polygon2D[(ei + 1) % st.polygon2D.length];
         const dx = p2.x - p1.x;
         const dy = p2.y - p1.y;
         const len = Math.hypot(dx, dy) || 1;
@@ -1581,6 +2623,7 @@ function unfoldSurfaceToIslands(
           p2,
           outwardNormal,
           sharedEdge: se,
+          crossedBentHinges: [],
         });
       }
     }
@@ -1600,15 +2643,18 @@ function unfoldSurfaceToIslands(
         const curr = extHalfEdges[currIdx];
         cycle.push(curr);
 
-        // Advance around planar tree
+        // Advance around planar tree, recording any bent hinges crossed at this corner
         let f = curr.faceIndex;
         let e = (curr.edgeIndex + 1) % faces[f].verts.length;
+        const crossed: UnfoldFoldEdge[] = [];
         for (let hop = 0; hop <= raw.placedFaces.size * 2; hop++) {
           const twin = treeTwinMap.get(`${f}:${e}`);
           if (!twin) break;
+          if (twin.foldEdge) crossed.push(twin.foldEdge);
           f = twin.twinFace;
           e = (twin.twinEdge + 1) % faces[f].verts.length;
         }
+        curr.crossedBentHinges = crossed;
         const nextExt = extKeyToIndex.get(`${f}:${e}`);
         if (nextExt === undefined) break;
         currIdx = nextExt;
@@ -1626,13 +2672,123 @@ function unfoldSurfaceToIslands(
     const stitchHoles: Point2D[] = [];
     const reliefNotches: UnfoldReliefNotch[] = [];
 
+    const cleanSeamLoopsForOffset: Point2D[][] = [];
+    const pendingNotchSeamEntries: { seam: UnfoldCutSeam; bases: Point2D[] }[] = [];
+
     for (const cycle of orderedCycles) {
       const seamLoop: Point2D[] = [];
       const cutLoop: Point2D[] = [];
+      const nCyc = cycle.length;
 
-      for (let ci = 0; ci < cycle.length; ci++) {
+      // Precompute any corner trims needed when splicing sheet-metal bend relief notches
+      const startOverrides: (Point2D | null)[] = new Array(nCyc).fill(null);
+      const endOverrides: (Point2D | null)[] = new Array(nCyc).fill(null);
+      const cornerSlotPoints: (Point2D[] | null)[] = new Array(nCyc).fill(null);
+
+      if (
+        options.mode === 'sheet_metal' &&
+        options.bendReliefWidthMm > 0 &&
+        options.bendReliefDepthMm > 0 &&
+        nCyc >= 2
+      ) {
+        for (let ci = 0; ci < nCyc; ci++) {
+          const curr = cycle[ci];
+          if (curr.crossedBentHinges.length < 2) continue;
+          const next = cycle[(ci + 1) % nCyc];
+
+          const d1x = curr.p2.x - curr.p1.x;
+          const d1y = curr.p2.y - curr.p1.y;
+          const len1 = Math.hypot(d1x, d1y);
+          const d2x = next.p2.x - next.p1.x;
+          const d2y = next.p2.y - next.p1.y;
+          const len2 = Math.hypot(d2x, d2y);
+          if (len1 < 0.5 || len2 < 0.5) continue;
+
+          const u1 = { x: d1x / len1, y: d1y / len1 };
+          const u2 = { x: d2x / len2, y: d2y / len2 };
+          // Inward normals (left of CCW exterior edges)
+          let bisX = -u1.y + -u2.y;
+          let bisY = u1.x + u2.x;
+          let bisLen = Math.hypot(bisX, bisY);
+          if (bisLen < 1e-4) {
+            const bx = next.p1.x - curr.p2.x;
+            const by = next.p1.y - curr.p2.y;
+            const bl = Math.hypot(bx, by) || 1;
+            bisX = -by / bl;
+            bisY = bx / bl;
+            bisLen = 1;
+          }
+          const inwardDir = { x: bisX / bisLen, y: bisY / bisLen };
+          const tPerp = { x: inwardDir.y, y: -inwardDir.x };
+
+          const mid = {
+            x: (curr.p2.x + next.p1.x) * 0.5,
+            y: (curr.p2.y + next.p1.y) * 0.5,
+          };
+
+          let cornerProj = 0;
+          for (const fh of curr.crossedBentHinges) {
+            for (const fp of [fh.p1, fh.p2]) {
+              if (Math.hypot(fp.x - mid.x, fp.y - mid.y) < 25) {
+                const proj = (fp.x - mid.x) * inwardDir.x + (fp.y - mid.y) * inwardDir.y;
+                if (proj > cornerProj) cornerProj = proj;
+              }
+            }
+          }
+
+          const hw = Math.min(options.bendReliefWidthMm * 0.5, Math.min(len1, len2) * 0.25);
+          const slotDepth = Math.min(
+            Math.max(options.bendReliefDepthMm, cornerProj + options.bendReliefDepthMm * 0.5),
+            Math.min(len1, len2) * 0.35
+          );
+          if (hw <= 0.1 || slotDepth <= 0.15) continue;
+
+          const chordSpan = (next.p1.x - curr.p2.x) * tPerp.x + (next.p1.y - curr.p2.y) * tPerp.y;
+          let s1: Point2D;
+          let s4: Point2D;
+          if (chordSpan >= 2 * hw - 1e-3) {
+            const fHalf = chordSpan > 1e-6 ? hw / chordSpan : 0.5;
+            const tA = 0.5 - fHalf;
+            const tB = 0.5 + fHalf;
+            s1 = {
+              x: curr.p2.x + (next.p1.x - curr.p2.x) * tA,
+              y: curr.p2.y + (next.p1.y - curr.p2.y) * tA,
+            };
+            s4 = {
+              x: curr.p2.x + (next.p1.x - curr.p2.x) * tB,
+              y: curr.p2.y + (next.p1.y - curr.p2.y) * tB,
+            };
+          } else {
+            const need = hw - 0.5 * Math.max(0, chordSpan);
+            const trim1 = Math.min(len1 * 0.35, need / Math.max(0.25, Math.abs(u1.x * tPerp.x + u1.y * tPerp.y)));
+            const trim2 = Math.min(len2 * 0.35, need / Math.max(0.25, Math.abs(u2.x * tPerp.x + u2.y * tPerp.y)));
+            s1 = { x: curr.p2.x - u1.x * trim1, y: curr.p2.y - u1.y * trim1 };
+            s4 = { x: next.p1.x + u2.x * trim2, y: next.p1.y + u2.y * trim2 };
+            endOverrides[ci] = s1;
+            startOverrides[(ci + 1) % nCyc] = s4;
+          }
+
+          const s2 = { x: s1.x + inwardDir.x * slotDepth, y: s1.y + inwardDir.y * slotDepth };
+          const s3 = { x: s4.x + inwardDir.x * slotDepth, y: s4.y + inwardDir.y * slotDepth };
+          cornerSlotPoints[ci] = [s1, s2, s3, s4];
+          reliefNotches.push({
+            center2D: {
+              x: (s1.x + s2.x + s3.x + s4.x) * 0.25,
+              y: (s1.y + s2.y + s3.y + s4.y) * 0.25,
+            },
+            widthMm: options.bendReliefWidthMm,
+            depthMm: options.bendReliefDepthMm,
+            polygon2D: [s1, s2, s3, s4],
+          });
+        }
+      }
+
+      for (let ci = 0; ci < nCyc; ci++) {
         const ext = cycle[ci];
         seamLoop.push(ext.p1);
+        if (Math.hypot(ext.p2.x - cycle[(ci + 1) % nCyc].p1.x, ext.p2.y - cycle[(ci + 1) % nCyc].p1.y) > 1e-3) {
+          seamLoop.push(ext.p2);
+        }
 
         const se = ext.sharedEdge;
         const pairId = se ? (splitEdgePairId.get(se.id) ?? 0) : 0;
@@ -1647,30 +2803,32 @@ function unfoldSurfaceToIslands(
           se !== undefined &&
           glueTabOwnerFace.get(se.id) === ext.faceIndex;
 
-        let alignmentNotches: [Point2D, Point2D][] | undefined;
+        const seamObj: UnfoldCutSeam = {
+          pairId,
+          faceIndex: ext.faceIndex,
+          matingFaceIndex,
+          p1: ext.p1,
+          p2: ext.p2,
+          outwardNormal2D: ext.outwardNormal,
+          hasGlueTab,
+        };
+        cutSeams.push(seamObj);
 
-        if (options.mode === 'soft_goods') {
+        // Soft goods: emit stitch holes & alignment notches ONLY on mated split seam edges (`se !== undefined`)
+        if (options.mode === 'soft_goods' && se !== undefined) {
           const dx = ext.p2.x - ext.p1.x;
           const dy = ext.p2.y - ext.p1.y;
           const len = Math.hypot(dx, dy);
 
-          // Perpendicular alignment notches along mating seam edges
-          if (len >= 6 && options.notchLengthMm > 0) {
+          if (len >= 6 && options.notchLengthMm > 0 && options.seamAllowanceMm > 0.5) {
             const notchFractions = len > 80 ? [1 / 3, 2 / 3] : [0.5];
-            alignmentNotches = notchFractions.map((frac) => {
-              const bx = ext.p1.x + dx * frac;
-              const by = ext.p1.y + dy * frac;
-              return [
-                { x: bx, y: by },
-                {
-                  x: bx + ext.outwardNormal.x * options.notchLengthMm,
-                  y: by + ext.outwardNormal.y * options.notchLengthMm,
-                },
-              ];
-            });
+            const bases = notchFractions.map((frac) => ({
+              x: ext.p1.x + dx * frac,
+              y: ext.p1.y + dy * frac,
+            }));
+            pendingNotchSeamEntries.push({ seam: seamObj, bases });
           }
 
-          // Equidistant stitch-hole punch points along the original seam line
           if (options.stitchPitchMm > 0 && len >= options.stitchPitchMm) {
             const pitch = options.stitchPitchMm;
             const intervals = Math.max(0, Math.floor((len - pitch * 0.5) / pitch));
@@ -1691,88 +2849,52 @@ function unfoldSurfaceToIslands(
           }
         }
 
-        cutSeams.push({
-          pairId,
-          faceIndex: ext.faceIndex,
-          matingFaceIndex,
-          p1: ext.p1,
-          p2: ext.p2,
-          outwardNormal2D: ext.outwardNormal,
-          hasGlueTab,
-          alignmentNotches,
-        });
+        const effP1 = startOverrides[ci] ?? ext.p1;
+        const effP2 = endOverrides[ci] ?? ext.p2;
 
-        if (hasGlueTab) {
-          const tabPoly = buildGlueTabPolygon(ext.p1, ext.p2, options.tabWidthMm, options.tabAngleDeg);
+        if (hasGlueTab && se !== undefined) {
+          const effW = glueTabEffectiveWidth.get(se.id) ?? options.tabWidthMm;
+          const tabPoly = buildGlueTabPolygon(effP1, effP2, effW, options.tabAngleDeg);
           if (tabPoly.length === 4) {
             glueTabs.push({
               pairId,
               faceIndex: ext.faceIndex,
               polygon2D: tabPoly,
-              baseEdge: [ext.p1, ext.p2],
+              baseEdge: [effP1, effP2],
             });
             cutLoop.push(tabPoly[0], tabPoly[1], tabPoly[2], tabPoly[3]);
           } else {
-            cutLoop.push(ext.p1, ext.p2);
+            cutLoop.push(effP1, effP2);
           }
-        } else if (options.mode !== 'soft_goods') {
-          cutLoop.push(ext.p1, ext.p2);
+        } else if (options.mode !== 'soft_goods' || options.seamAllowanceMm <= 0) {
+          cutLoop.push(effP1, effP2);
+        }
+
+        const slotPts = cornerSlotPoints[ci];
+        if (slotPts) {
+          cutLoop.push(...slotPts);
         }
       }
 
-      if (seamLoop.length >= 3) {
-        seamPolylines2D.push([...seamLoop, seamLoop[0]]);
+      const dedupSeam: Point2D[] = [];
+      for (const pt of seamLoop) {
+        const prev = dedupSeam[dedupSeam.length - 1];
+        if (!prev || Math.hypot(pt.x - prev.x, pt.y - prev.y) > 1e-3) {
+          dedupSeam.push(pt);
+        }
+      }
+      if (
+        dedupSeam.length > 2 &&
+        Math.hypot(dedupSeam[0].x - dedupSeam[dedupSeam.length - 1].x, dedupSeam[0].y - dedupSeam[dedupSeam.length - 1].y) <= 1e-3
+      ) {
+        dedupSeam.pop();
+      }
+      if (dedupSeam.length >= 3) {
+        seamPolylines2D.push([...dedupSeam, { ...dedupSeam[0] }]);
+        cleanSeamLoopsForOffset.push(dedupSeam);
       }
 
-      if (options.mode === 'soft_goods' && options.seamAllowanceMm > 0) {
-        // Offset each exterior edge outward by seamAllowanceMm and miter/bevel corners
-        const d = options.seamAllowanceMm;
-        const expandedLoop: Point2D[] = [];
-        const m = cycle.length;
-        for (let i = 0; i < m; i++) {
-          const prev = cycle[(i - 1 + m) % m];
-          const curr = cycle[i];
-
-          const d1x = prev.p2.x - prev.p1.x;
-          const d1y = prev.p2.y - prev.p1.y;
-          const l1 = Math.hypot(d1x, d1y) || 1;
-          const u1x = d1x / l1;
-          const u1y = d1y / l1;
-
-          const d2x = curr.p2.x - curr.p1.x;
-          const d2y = curr.p2.y - curr.p1.y;
-          const l2 = Math.hypot(d2x, d2y) || 1;
-          const u2x = d2x / l2;
-          const u2y = d2y / l2;
-
-          const p1Off = {
-            x: prev.p2.x + prev.outwardNormal.x * d,
-            y: prev.p2.y + prev.outwardNormal.y * d,
-          };
-          const p2Off = {
-            x: curr.p1.x + curr.outwardNormal.x * d,
-            y: curr.p1.y + curr.outwardNormal.y * d,
-          };
-
-          const det = u1x * u2y - u1y * u2x;
-          if (Math.abs(det) > 0.15) {
-            const dx = p2Off.x - p1Off.x;
-            const dy = p2Off.y - p1Off.y;
-            const s = (dx * u2y - dy * u2x) / det;
-            const miter = { x: p1Off.x + u1x * s, y: p1Off.y + u1y * s };
-            if (Math.hypot(miter.x - curr.p1.x, miter.y - curr.p1.y) <= 2.2 * d) {
-              expandedLoop.push(miter);
-            } else {
-              expandedLoop.push(p1Off, p2Off);
-            }
-          } else {
-            expandedLoop.push(p1Off, p2Off);
-          }
-        }
-        if (expandedLoop.length >= 3) {
-          cutPolylines2D.push([...expandedLoop, expandedLoop[0]]);
-        }
-      } else if (cutLoop.length >= 3) {
+      if (!(options.mode === 'soft_goods' && options.seamAllowanceMm > 0) && cutLoop.length >= 3) {
         const deduped: Point2D[] = [];
         for (const pt of cutLoop) {
           const prev = deduped[deduped.length - 1];
@@ -1791,47 +2913,49 @@ function unfoldSurfaceToIslands(
       }
     }
 
-    // Sheet-metal bend relief notches at vertices where 2+ fold edges meet
-    if (
-      options.mode === 'sheet_metal' &&
-      options.bendReliefWidthMm > 0 &&
-      options.bendReliefDepthMm > 0 &&
-      foldEdges.length >= 2
-    ) {
-      const rw = options.bendReliefWidthMm;
-      const rd = options.bendReliefDepthMm;
-      for (let i = 0; i < bendCornerPoints.length; i++) {
-        const pt = bendCornerPoints[i];
-        let meetCount = 1;
-        for (let j = 0; j < bendCornerPoints.length; j++) {
-          if (i !== j && Math.hypot(pt.x - bendCornerPoints[j].x, pt.y - bendCornerPoints[j].y) < 5 + rw * 2) {
-            meetCount++;
+    // Soft goods outward seam allowance via polygon boolean offset (eliminates concave bowties)
+    if (options.mode === 'soft_goods' && options.seamAllowanceMm > 0 && cleanSeamLoopsForOffset.length > 0) {
+      const { paths: expandedLoops } = offsetNestedLoops(
+        cleanSeamLoopsForOffset,
+        options.seamAllowanceMm,
+        { joinStyle: 'miter', miterLimit: 2.2, arcTolerance: 0.05 }
+      );
+      for (const expLoop of expandedLoops) {
+        if (expLoop.length >= 3) {
+          cutPolylines2D.push([...expLoop, { ...expLoop[0] }]);
+        }
+      }
+
+      // Place alignment notches inward from the outer cut perimeter, stopping short of the stitch line
+      for (const { seam, bases } of pendingNotchSeamEntries) {
+        const notches: [Point2D, Point2D][] = [];
+        const dir = seam.outwardNormal2D;
+        for (const base of bases) {
+          const tHit = rayHitExpandedLoops2D(base, dir, expandedLoops);
+          if (tHit !== null && tHit > 0.6 && tHit <= options.seamAllowanceMm * 2.5) {
+            const outerPt = { x: base.x + dir.x * tHit, y: base.y + dir.y * tHit };
+            const effLen = Math.min(options.notchLengthMm, tHit * 0.65);
+            const innerPt = { x: outerPt.x - dir.x * effLen, y: outerPt.y - dir.y * effLen };
+            notches.push([outerPt, innerPt]);
           }
         }
-        if (meetCount >= 2) {
-          const alreadyAdded = reliefNotches.some(
-            (n) => Math.hypot(n.center2D.x - pt.x, n.center2D.y - pt.y) < rw * 2
-          );
-          if (!alreadyAdded) {
-            const hw = rw * 0.5;
-            const hd = rd * 0.5;
-            reliefNotches.push({
-              center2D: { ...pt },
-              widthMm: rw,
-              depthMm: rd,
-              polygon2D: [
-                { x: pt.x - hw, y: pt.y - hd },
-                { x: pt.x + hw, y: pt.y - hd },
-                { x: pt.x + hw, y: pt.y + hd },
-                { x: pt.x - hw, y: pt.y + hd },
-              ],
-            });
-          }
+        if (notches.length > 0) {
+          seam.alignmentNotches = notches;
         }
       }
     }
 
-    // Compute island bounding box and normalize to (0, 0)
+    // Append interior planar face cutout loops (`holes2D`) to `cutPolylines2D`
+    for (const f of unfoldedFaces) {
+      for (const hole of f.holes2D ?? []) {
+        if (hole.length >= 3) {
+          cutPolylines2D.push([...hole, { ...hole[0] }]);
+        }
+      }
+    }
+
+    // Compute island bounding box and map right-handed `(x_right, y_up)` into SVG `(x_right, y_down)`
+    // so that folding on the laser bed with etched lines facing UP reproduces the true 3D chirality!
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     const includePt = (p: Point2D) => {
       if (p.x < minX) minX = p.x;
@@ -1843,46 +2967,53 @@ function unfoldSurfaceToIslands(
     for (const f of unfoldedFaces) for (const p of f.polygon2D) includePt(p);
     for (const loop of cutPolylines2D) for (const p of loop) includePt(p);
     for (const gt of glueTabs) for (const p of gt.polygon2D) includePt(p);
+    for (const rn of reliefNotches) for (const p of rn.polygon2D) includePt(p);
 
     if (!Number.isFinite(minX)) {
       minX = 0; maxX = 0; minY = 0; maxY = 0;
     }
 
-    const shiftPt = (p: Point2D): Point2D => ({ x: p.x - minX, y: p.y - minY });
+    const toSvgPt = (p: Point2D): Point2D => ({ x: p.x - minX, y: maxY - p.y });
+    const toSvgVec = (v: Point2D): Point2D => ({ x: v.x, y: -v.y });
+
     for (const f of unfoldedFaces) {
-      f.polygon2D = f.polygon2D.map(shiftPt);
-      f.centroid2D = shiftPt(f.centroid2D);
+      f.polygon2D = f.polygon2D.map(toSvgPt);
+      if (f.holes2D) {
+        f.holes2D = f.holes2D.map((h) => h.map(toSvgPt));
+      }
+      f.centroid2D = toSvgPt(f.centroid2D);
     }
     for (let k = 0; k < cutPolylines2D.length; k++) {
-      cutPolylines2D[k] = cutPolylines2D[k].map(shiftPt);
+      cutPolylines2D[k] = cutPolylines2D[k].map(toSvgPt);
     }
     for (let k = 0; k < seamPolylines2D.length; k++) {
-      seamPolylines2D[k] = seamPolylines2D[k].map(shiftPt);
+      seamPolylines2D[k] = seamPolylines2D[k].map(toSvgPt);
     }
     for (const fe of foldEdges) {
-      fe.p1 = shiftPt(fe.p1);
-      fe.p2 = shiftPt(fe.p2);
+      fe.p1 = toSvgPt(fe.p1);
+      fe.p2 = toSvgPt(fe.p2);
       if (fe.bendZonePolygon2D) {
-        fe.bendZonePolygon2D = fe.bendZonePolygon2D.map(shiftPt);
+        fe.bendZonePolygon2D = fe.bendZonePolygon2D.map(toSvgPt);
       }
     }
     for (const cs of cutSeams) {
-      cs.p1 = shiftPt(cs.p1);
-      cs.p2 = shiftPt(cs.p2);
+      cs.p1 = toSvgPt(cs.p1);
+      cs.p2 = toSvgPt(cs.p2);
+      cs.outwardNormal2D = toSvgVec(cs.outwardNormal2D);
       if (cs.alignmentNotches) {
-        cs.alignmentNotches = cs.alignmentNotches.map(([a, b]) => [shiftPt(a), shiftPt(b)]);
+        cs.alignmentNotches = cs.alignmentNotches.map(([a, b]) => [toSvgPt(a), toSvgPt(b)]);
       }
     }
     for (const gt of glueTabs) {
-      gt.polygon2D = gt.polygon2D.map(shiftPt);
-      gt.baseEdge = [shiftPt(gt.baseEdge[0]), shiftPt(gt.baseEdge[1])];
+      gt.polygon2D = gt.polygon2D.map(toSvgPt);
+      gt.baseEdge = [toSvgPt(gt.baseEdge[0]), toSvgPt(gt.baseEdge[1])];
     }
     for (const rn of reliefNotches) {
-      rn.center2D = shiftPt(rn.center2D);
-      rn.polygon2D = rn.polygon2D.map(shiftPt);
+      rn.center2D = toSvgPt(rn.center2D);
+      rn.polygon2D = rn.polygon2D.map(toSvgPt);
     }
     for (let k = 0; k < stitchHoles.length; k++) {
-      stitchHoles[k] = shiftPt(stitchHoles[k]);
+      stitchHoles[k] = toSvgPt(stitchHoles[k]);
     }
 
     islands.push({
@@ -1920,6 +3051,9 @@ function translateIslandInPlace(island: UnfoldIsland, dx: number, dy: number): v
   island.placedOffsetMm = { x: dx, y: dy };
   for (const f of island.faces) {
     f.polygon2D = f.polygon2D.map(shift);
+    if (f.holes2D) {
+      f.holes2D = f.holes2D.map((h) => h.map(shift));
+    }
     f.centroid2D = shift(f.centroid2D);
   }
   island.cutPolylines2D = island.cutPolylines2D.map((l) => l.map(shift));
@@ -1956,6 +3090,9 @@ function rotateIsland90InPlace(island: UnfoldIsland): void {
 
   for (const f of island.faces) {
     f.polygon2D = f.polygon2D.map(rotPt);
+    if (f.holes2D) {
+      f.holes2D = f.holes2D.map((hole) => hole.map(rotPt));
+    }
     f.centroid2D = rotPt(f.centroid2D);
   }
   island.cutPolylines2D = island.cutPolylines2D.map((l) => l.map(rotPt));
@@ -2107,28 +3244,29 @@ function renderSheetUnfoldSvg(
 
   for (const isl of islands) {
     const yOff = sheetYOffset(isl.sheetIndex);
-    const ptsToPath = (pts: Point2D[], close = false): string => {
+    const loopToPath = (pts: Point2D[]): string => {
       if (pts.length === 0) return '';
-      const segs = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${fmt(p.x)} ${fmt(p.y + yOff)}`);
-      if (close) segs.push('Z');
+      const isClosed =
+        pts.length >= 3 &&
+        Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) <= 1e-3;
+      const body = isClosed ? pts.slice(0, -1) : pts;
+      const segs = body.map((p, i) => `${i === 0 ? 'M' : 'L'} ${fmt(p.x)} ${fmt(p.y + yOff)}`);
+      if (isClosed) segs.push('Z');
       return segs.join(' ');
     };
 
-    // 1. Outer cut outlines
+    // 1. Outer & interior hole cut outlines (includes spliced corner bend reliefs)
     for (const loop of isl.cutPolylines2D) {
       if (loop.length < 2) continue;
-      cutParts.push(`    <path d="${ptsToPath(loop, false)}" />`);
-    }
-
-    // Sheet-metal corner relief notches (also on cut layer)
-    for (const rn of isl.reliefNotches) {
-      cutParts.push(`    <path d="${ptsToPath(rn.polygon2D, true)}" />`);
+      cutParts.push(`    <path d="${loopToPath(loop)}" />`);
     }
 
     // 2. Original seam lines & alignment notches (soft_goods) or glue tab fold bases (papercraft)
     if (options.mode === 'soft_goods') {
-      for (const seamLoop of isl.seamPolylines2D) {
-        seamTabParts.push(`    <path d="${ptsToPath(seamLoop, false)}" stroke-dasharray="2.5,1.5" />`);
+      if (options.seamAllowanceMm > 0) {
+        for (const seamLoop of isl.seamPolylines2D) {
+          seamTabParts.push(`    <path d="${loopToPath(seamLoop)}" stroke-dasharray="2.5,1.5" />`);
+        }
       }
       for (const cs of isl.cutSeams) {
         for (const [n1, n2] of cs.alignmentNotches || []) {
@@ -2146,18 +3284,13 @@ function renderSheetUnfoldSvg(
       );
     }
 
-    // 3. Mountain & Valley fold lines (plus bend zones and callouts in sheet_metal mode)
+    // 3. Mountain & Valley fold lines (plus ghost bend zone tangent lines and callouts in sheet_metal mode)
     for (const fe of isl.foldEdges) {
       if (fe.bendZonePolygon2D && fe.bendZonePolygon2D.length === 4) {
         const bz = fe.bendZonePolygon2D;
         seamTabParts.push(
           `    <line x1="${fmt(bz[0].x)}" y1="${fmt(bz[0].y + yOff)}" x2="${fmt(bz[1].x)}" y2="${fmt(bz[1].y + yOff)}" stroke-dasharray="1.5,1.5" data-operation="ghost" />`,
           `    <line x1="${fmt(bz[3].x)}" y1="${fmt(bz[3].y + yOff)}" x2="${fmt(bz[2].x)}" y2="${fmt(bz[2].y + yOff)}" stroke-dasharray="1.5,1.5" data-operation="ghost" />`
-        );
-        // Side bridges connecting bend zone to outer cut contour
-        cutParts.push(
-          `    <line x1="${fmt(bz[0].x)}" y1="${fmt(bz[0].y + yOff)}" x2="${fmt(bz[3].x)}" y2="${fmt(bz[3].y + yOff)}" />`,
-          `    <line x1="${fmt(bz[1].x)}" y1="${fmt(bz[1].y + yOff)}" x2="${fmt(bz[2].x)}" y2="${fmt(bz[2].y + yOff)}" />`
         );
       }
 
@@ -2222,7 +3355,7 @@ function renderSheetUnfoldSvg(
       ? `  <g id="layer-valley-folds" data-operation="etch" fill="none" stroke="#16a34a" stroke-width="0.3" stroke-dasharray="5,2,1.2,2">\n${valleyParts.join('\n')}\n  </g>`
       : '',
     stitchHoleParts.length > 0
-      ? `  <g id="layer-stitch-holes" data-operation="cut" fill="none" stroke="#9333ea" stroke-width="0.25">\n${stitchHoleParts.join('\n')}\n  </g>`
+      ? `  <g id="layer-stitch-holes" data-operation="cut" fill="none" stroke="#d97706" stroke-width="0.25">\n${stitchHoleParts.join('\n')}\n  </g>`
       : '',
     cutParts.length > 0
       ? `  <g id="layer-cut" data-operation="cut" fill="none" stroke="#e11d48" stroke-width="0.35">\n${cutParts.join('\n')}\n  </g>`
@@ -2274,7 +3407,7 @@ export function exportSheetUnfold(
   let totalBendAllowanceMm = 0;
 
   for (const surface of surfaces) {
-    const res = unfoldSurfaceToIslands(surface, opts, nextPairId, allIslands.length);
+    const res = unfoldSurfaceToIslands(surface, opts, nextPairId, allIslands.length, warnings);
     allIslands.push(...res.islands);
     nextPairId = res.nextPairId;
     totalBendAllowanceMm += res.totalBendAllowanceMm;

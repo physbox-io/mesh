@@ -140,6 +140,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
 }) => {
   useEscapeToClose(isOpen, onClose);
   const storeScene = useStore((s) => s.sceneGraph);
+  const stock = useStore((s) => s.stock);
   const scene = sceneProp ?? storeScene;
 
   const [mode, setMode] = useState<SheetUnfoldMode>(DEFAULT_SHEET_UNFOLD_OPTIONS.mode);
@@ -162,8 +163,18 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
   );
   const [stitchPitchMm, setStitchPitchMm] = useState<number>(DEFAULT_SHEET_UNFOLD_OPTIONS.stitchPitchMm);
   const [notchLengthMm, setNotchLengthMm] = useState<number>(DEFAULT_SHEET_UNFOLD_OPTIONS.notchLengthMm);
-  const [sheetWidthMm, setSheetWidthMm] = useState<number>(DEFAULT_SHEET_UNFOLD_OPTIONS.sheetWidthMm);
-  const [sheetHeightMm, setSheetHeightMm] = useState<number>(DEFAULT_SHEET_UNFOLD_OPTIONS.sheetHeightMm);
+  const [sheetWidthMm, setSheetWidthMm] = useState<number>(
+    () => stock?.widthMm ?? DEFAULT_SHEET_UNFOLD_OPTIONS.sheetWidthMm
+  );
+  const [sheetHeightMm, setSheetHeightMm] = useState<number>(
+    () => stock?.depthMm ?? DEFAULT_SHEET_UNFOLD_OPTIONS.sheetHeightMm
+  );
+  const [syncedStock, setSyncedStock] = useState(stock);
+  if (syncedStock !== stock) {
+    setSyncedStock(stock);
+    if (stock?.widthMm) setSheetWidthMm(stock.widthMm);
+    if (stock?.depthMm) setSheetHeightMm(stock.depthMm);
+  }
   const [marginMm, setMarginMm] = useState<number>(DEFAULT_SHEET_UNFOLD_OPTIONS.marginMm);
   const [partSpacingMm, setPartSpacingMm] = useState<number>(DEFAULT_SHEET_UNFOLD_OPTIONS.partSpacingMm);
   const [scalePct, setScalePct] = useState<number>(100);
@@ -231,7 +242,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
       .replace(/stroke-width="0.35"/g, 'stroke-width="0.75"');
     return previewActualSize
       ? thickened
-      : thickened.replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"');
+      : thickened.replace(/<svg\b([^>]*?)\swidth="[^"]*"\sheight="[^"]*"/, '<svg$1 width="100%"');
   }, [exportResult, previewActualSize]);
 
   if (!isOpen) return null;
@@ -604,6 +615,24 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
                   className={inputClass}
                 />
               </Field>
+
+              {mode !== 'papercraft' && (
+                <Field
+                  className="lg:col-span-2"
+                  hintAlign="end"
+                  label="Coplanar Merge (°)"
+                  hint="Adjacent triangles whose normals differ by less than this angle are merged into a single polygon face before unfolding."
+                >
+                  <NumberInput
+                    step={0.5}
+                    min={0.1}
+                    max={30}
+                    value={coplanarToleranceDeg}
+                    onChange={(v) => v !== undefined && setCoplanarToleranceDeg(v)}
+                    className={inputClass}
+                  />
+                </Field>
+              )}
             </Advanced>
           </div>
 
@@ -661,6 +690,11 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
                     <span className="inline-block w-2.5 h-0.5 bg-blue-600" /> Mountain
                     <span className="inline-block w-2.5 h-0.5 bg-green-600" /> Valley
                     <span className="inline-block w-2.5 h-0.5 bg-purple-600" /> Tab/Seam
+                    {mode === 'soft_goods' && (
+                      <>
+                        <span className="inline-block w-2.5 h-0.5 bg-amber-600" /> Stitch
+                      </>
+                    )}
                   </span>
                   <button
                     type="button"
