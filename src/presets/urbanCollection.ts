@@ -105,7 +105,7 @@ function pufferLook(x: number): SceneNode[] {
     garment: 'jacket', material: 'taffeta', rgba: [0.93, 0.4, 0.08, 1],
     ease: 0.24, length: 0.14, sleeve: 0.6, cuff: 0.2, neckline: 0.08,
     // Padded and interfaced, as a puffer's is: it stands round the neck on its own, done up or not.
-    collar: { stand: 0.06, fall: 0, materialOverrides: { thickness: 0.003, young: 2e7 } },
+    collar: { stand: 0.06, standFront: 0.035, fall: 0, materialOverrides: { thickness: 0.003, young: 2e7 } },
     elastics: [{ along: 'cuff', ratio: 0.72 }, { along: 'hem', ratio: 0.88 }],
     curves: quilt.curves, sculpt: quilt.sculpt,
     // Its channels stitched through, and its hem bound in a double row.
@@ -247,7 +247,9 @@ function peakOutline(half: number, deep: number, arcLen: number, depth: number):
  */
 function neckerchief(form: SceneNode): SceneNode {
   const fm = form.bodyForm!, L = bodyLandmarks(fm);
-  const z = L.hpsZ - 0.035, r = fm.neck / (2 * Math.PI) + 0.012, C = 2 * Math.PI * r, band = 0.045;
+  // Loose, low on the neck and a narrow fold, of thin cotton: close, tall
+  // and of jersey, it stood up the neck as a stiff tube, a gaiter.
+  const z = L.hpsZ - 0.045, r = fm.neck / (2 * Math.PI) + 0.02, C = 2 * Math.PI * r, band = 0.03;
   /** Each end of the knot, across. */
   const TAIL = 0.03;
   const cy = bodyFormSection(fm, z).centreY, pos = form.pos ?? [0, 0, 0];
@@ -286,7 +288,7 @@ function neckerchief(form: SceneNode): SceneNode {
     { name: 'tailA', a: [{ piece: 'tailA', edge: 'top' }], b: [{ piece: 'bandana', edge: 'knotA' }] },
     { name: 'tailB', a: [{ piece: 'tailB', edge: 'top' }], b: [{ piece: 'bandana', edge: 'knotB' }] },
   ];
-  return { id: 'neckerchief', name: 'neckerchief', pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces: [piece, ...tails], seams, material: 'jersey', spacing: 0.012, sewTime: 0.5, layer: 0 } } as unknown as SceneNode;
+  return { id: 'neckerchief', name: 'neckerchief', pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces: [piece, ...tails], seams, material: 'woven', materialOverrides: { thickness: 0.0005, arealDensity: 0.1 }, spacing: 0.012, sewTime: 0.5, layer: 0 } } as unknown as SceneNode;
 }
 
 /** A cut-off hem: longer and shorter all round, irregularly (a regular one read as lace). */
