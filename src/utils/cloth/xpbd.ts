@@ -933,11 +933,15 @@ export class ClothSim {
     return this.ties.map((t) => ({ name: t.name, newtons: t.lambda }));
   }
 
-  /** Positions and velocities, to carry the cloth across a rebuild. */
-  state() { return { x: Float64Array.from(this.x), v: Float64Array.from(this.v), time: this.time }; }
-  restore(s: { x: Float64Array; v: Float64Array; time: number }) {
+  /** Positions and velocities, and how far each stitch is sewn, to carry the cloth across a rebuild. */
+  state() { return { x: Float64Array.from(this.x), v: Float64Array.from(this.v), time: this.time, stitchSew: Float64Array.from(this.stitchSew), stitchGap: Float64Array.from(this.stitchGap) }; }
+  restore(s: { x: Float64Array; v: Float64Array; time: number; stitchSew?: Float64Array; stitchGap?: Float64Array }) {
     if (s.x.length !== this.x.length) return false;
     this.x.set(s.x); this.v.set(s.v); this.prev.set(s.x); this.time = s.time; this.settled = true;
+    // Its seams as sewn as they were: carried without, every stitch the
+    // settle had sewn shut was held at the gap it started at, and on Run a
+    // hood split open over the crown and a neckerchief tore off its band.
+    if (s.stitchSew && s.stitchGap && s.stitchSew.length === this.stitchSew.length) { this.stitchSew.set(s.stitchSew); this.stitchGap.set(s.stitchGap); }
     this.clearBudget.fill(0);
     return true;
   }
