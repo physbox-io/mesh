@@ -4,7 +4,8 @@ import { NumberInput } from '@physbox-io/ui';
 import { useSettled } from '../../hooks/useSettled';
 import { useStore } from '../../store/useStore';
 import { planSlipMold, simulateSlipCastOffThread } from '../../utils/slipMoldClient';
-import { addSlipCastToScene, addSlipMoldToScene, slipCaseStls, slipCastInput } from '../../utils/slipMoldActions';
+import { addSlipCastToScene, addSlipMoldToScene, slipCaseStls, slipCastInput, slipPartWarnings } from '../../utils/slipMoldActions';
+import { moldSubject } from '../../utils/moldSubject';
 import { DEFAULT_SLIP_WALL_MM, type SlipCastResult } from '../../utils/slipCastSimulation';
 import { SlipMoldPreview, type SlipPreviewMode } from './SlipMoldPreview';
 import { AddSimulationButton } from '../MachineJobControls';
@@ -74,6 +75,17 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
     return () => { live = false; };
   }, [ids, key, active]);
 
+  // What the part itself asks of a slip casting, as the MCP reply says it.
+  const [partWarnings, setPartWarnings] = useState<string[]>([]);
+  useEffect(() => {
+    if (!active) return;
+    let live = true;
+    slipPartWarnings(moldSubject(useStore.getState().sceneGraph, ids).scene, material)
+      .then((w) => { if (live) setPartWarnings(w); })
+      .catch(() => { if (live) setPartWarnings([]); });
+    return () => { live = false; };
+  }, [ids, material, active]);
+
   const planning = planned?.key !== key;
   const mold = planned?.mold ?? null;
   const failure = planning ? null : planned?.failure ?? null;
@@ -90,7 +102,7 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
       const result = await simulateSlipCastOffThread(slipCastInput(mold), wallMm);
       setCast({ result, of: mold, wallMm });
       setView('cast');
-      await addSlipCastToScene(result, mold);
+      await addSlipCastToScene(result, mold, ids);
     } catch (e) {
       setCastError((e as Error).message);
     } finally {
@@ -209,7 +221,7 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
               ))}
             </ul>
             <p className="text-xs text-slate-500 dark:text-slate-400">Print each case open side up and fill it to the brim with pottery plaster.</p>
-            {r.warnings.map((w) => (
+            {[...r.warnings, ...partWarnings].map((w) => (
               <p key={w} className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>{w}</span>

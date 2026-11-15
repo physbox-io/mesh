@@ -10,6 +10,9 @@ import { pieceKey, sceneWithSlipMold, slipMoldNotes } from './slipMoldScene';
 import type { SlipMold, SlipMoldOptions } from './slipCastMold';
 import type { SlipCastResult } from './slipCastSimulation';
 import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimulation';
+import { dfmReportFor } from './dfmWorkerClient';
+import type { SceneGraph } from '../types/scene';
+import type { CastMaterialId } from './castMaterials';
 
 export interface AddedSlipMold {
   mold: SlipMold;
@@ -45,8 +48,10 @@ export function slipCastInput(mold: SlipMold) {
 }
 
 /** The simulated casting beside the part, as it stands; selected. */
-export async function addSlipCastToScene(cast: SlipCastResult, mold: SlipMold) {
+export async function addSlipCastToScene(cast: SlipCastResult, mold: SlipMold, partIds: readonly string[]) {
   return addSimulationToScene({
+    // Cast again from the same part's mold, it replaces the casting before.
+    source: `slip:${[...partIds].sort().join(',')}:cast`,
     mesh: cast.mesh,
     transform: sceneStockTransform(),
     kind: 'cast',
@@ -60,4 +65,16 @@ export async function addSlipCastToScene(cast: SlipCastResult, mold: SlipMold) {
     material: mold.slip,
     select: true,
   });
+}
+
+/**
+ * What the part itself asks of a slip casting, in words with where (scene
+ * mm): sections too thin to keep and inside corners that crack (the DFM cast
+ * check, for this slip). `scene` holds the part alone.
+ */
+export async function slipPartWarnings(scene: SceneGraph, slip: CastMaterialId): Promise<string[]> {
+  const dfm = await dfmReportFor(scene, 'cast', { castMaterial: slip }).catch(() => null);
+  return (dfm?.findings ?? [])
+    .filter((f) => !f.passed && (f.id === 'cast_thin_section' || f.id === 'cast_sharp_inside_corner'))
+    .map((f) => `${f.title} at (${f.position.map((v) => Math.round(v * 1000)).join(', ')} mm): ${f.detail} ${f.fix}`);
 }

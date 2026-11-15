@@ -243,11 +243,12 @@ export const PatternPanel: React.FC<{
                   <NumberInput
                     step={1}
                     allowEmpty
-                    placeholder="auto"
+                    placeholder={summary?.sprueAtSceneMm ? String(Math.round(summary.sprueAtSceneMm[axis])) : 'auto'}
                     value={options.sprueAtMm?.[axis] ?? null}
                     onChange={(v) => setOptions((prev) => {
                       if (v === undefined) return { ...prev, sprueAtMm: null };
-                      const cur: [number, number] = prev.sprueAtMm ? [...prev.sprueAtMm] : [0, 0];
+                      // The other coordinate starts where the sprue is now, not at the origin.
+                      const cur: [number, number] = prev.sprueAtMm ? [...prev.sprueAtMm] : [summary?.sprueAtSceneMm?.[0] ?? 0, summary?.sprueAtSceneMm?.[1] ?? 0];
                       cur[axis] = v;
                       return { ...prev, sprueAtMm: cur };
                     })}

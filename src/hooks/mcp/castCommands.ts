@@ -118,6 +118,10 @@ export const castCommands: McpCommands = {
     if (metal !== undefined && !CAST_METALS.some((m) => m.id === metal)) {
       return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
     }
+    if (msg.sprueAtMm !== undefined && msg.sprueAtMm !== null
+      && !(Array.isArray(msg.sprueAtMm) && msg.sprueAtMm.length >= 2 && msg.sprueAtMm.slice(0, 2).every((v: unknown) => typeof v === 'number' && Number.isFinite(v)))) {
+      return { ok: false, error: 'sprue_at_mm is [x, y] in scene mm.' };
+    }
     const options = {
       ...DEFAULT_CAST_OPTIONS,
       // `metal` is what the MCP tool calls it; `metalId` is what the

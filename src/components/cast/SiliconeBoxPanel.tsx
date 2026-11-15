@@ -138,7 +138,7 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
               <dt className="text-slate-500 dark:text-slate-400">Fill to</dt>
               <dd className="font-mono">{r.fillHeightMm} mm above the base</dd>
               <dt className="text-slate-500 dark:text-slate-400">Silicone</dt>
-              <dd className="font-mono">{r.siliconeG} g ({r.partAG} A + {r.partBG} B)</dd>
+              <dd className="font-mono">{r.siliconeG} g ({r.partAG} A + {r.partBG} B), {r.coverMm} mm cover</dd>
               <dt className="text-slate-500 dark:text-slate-400">Volume</dt>
               <dd className="font-mono">{r.siliconeMm3.toLocaleString()} mm³</dd>
               <dt className="text-slate-500 dark:text-slate-400">Sleeve</dt>
@@ -167,7 +167,7 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
           ))}
           <label className="space-y-1 text-xs" title="Silicone you have (A + B). The cover is made as thick as it allows, in place of Silicone cover. Empty: the cover as set.">
             <span className={labelClass}>Silicone to hand (g)</span>
-            <NumberInput min={20} step={50} allowEmpty placeholder="any" value={options.siliconeBudgetG ?? null}
+            <NumberInput min={1} step={50} allowEmpty placeholder="any" value={options.siliconeBudgetG ?? null}
               onChange={(v) => setOptions((prev) => ({ ...prev, siliconeBudgetG: v ?? null }))} className={inputClass} />
           </label>
           <label className="space-y-1 text-xs" title="Fit follows the master's outline and uses the least silicone">

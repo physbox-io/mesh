@@ -322,6 +322,8 @@ export const sceneCommands: McpCommands = {
     }
 
     const baseName = name || replacing?.name || 'imported_stl';
+    // Replacing a body keeps it static or moving, as it was, unless told otherwise.
+    const dynamicNow = dynamic ?? (replacing ? replacing.geoms?.[0]?.dynamic !== false && (replacing.joints?.length ?? 0) > 0 : undefined);
     let parsed: ReturnType<typeof parseSTL>;
     try {
       parsed = parseSTL(data, { name: baseName, scale });
@@ -344,7 +346,7 @@ export const sceneCommands: McpCommands = {
     const collider = mode === 'mesh' ? await colliderCopyOf(parsed.renderVertices, parsed.faces) : null;
     if (collider) {
       warnings.push(denseImportNote(collider));
-      if (dynamic === false) {
+      if (dynamicNow === false) {
         warnings.push('It was imported static (dynamic: false), and a static mesh is found by the renderer in the physics model, so its full mesh stays in the model. Import it dynamic unless it has to be fixed in place.');
       }
     }
@@ -358,7 +360,7 @@ export const sceneCommands: McpCommands = {
         name: baseName,
         pos: nodePos,
         scad: parsed.scadParametric,
-        geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false } as SceneGeom],
+        geoms: [{ type: 'mesh', size: [1], dynamic: dynamicNow !== false } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],
       };
@@ -368,7 +370,7 @@ export const sceneCommands: McpCommands = {
         name: baseName,
         pos: nodePos,
         scad: parsed.scadRaw,
-        geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false } as SceneGeom],
+        geoms: [{ type: 'mesh', size: [1], dynamic: dynamicNow !== false } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],
       };
@@ -384,7 +386,7 @@ export const sceneCommands: McpCommands = {
           faces: parsed.faces,
           renderVertices: parsed.renderVertices,
           ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces } : {}),
-          dynamic: dynamic !== false,
+          dynamic: dynamicNow !== false,
         } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],

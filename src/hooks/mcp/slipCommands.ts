@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { planSlipMold, simulateSlipCastOffThread } from '../../utils/slipMoldClient';
-import { addSlipCastToScene, addSlipMoldToScene, slipCaseStls, slipCastInput } from '../../utils/slipMoldActions';
+import { addSlipCastToScene, addSlipMoldToScene, slipCaseStls, slipCastInput, slipPartWarnings } from '../../utils/slipMoldActions';
 import { DEFAULT_SLIP_WALL_MM } from '../../utils/slipCastSimulation';
 import { MAX_SLIP_SIDES, type SlipMoldOptions } from '../../utils/slipCastMold';
 import { SLIPS, isSlipId, resolveCastMaterial } from '../../utils/castMaterials';
@@ -12,7 +12,6 @@ import { applyAddDraft, MAX_ADD_DRAFT_DEG } from '../../utils/addDraftAction';
 import { DEFAULT_TAB_DRAFT } from '../../utils/moldTabs';
 import { mcpMoldSubject } from '../../utils/moldSubject';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
-import { dfmReportFor } from '../../utils/dfmWorkerClient';
 import type { McpCommands } from './types';
 
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -68,7 +67,7 @@ export const slipCommands: McpCommands = {
       const wall = num(msg.castWallMm) ?? DEFAULT_SLIP_WALL_MM;
       try {
         const result = await simulateSlipCastOffThread(slipCastInput(mold), wall);
-        const sim = msg.apply === true ? await addSlipCastToScene(result, mold) : null;
+        const sim = msg.apply === true ? await addSlipCastToScene(result, mold, subject.ids) : null;
         castWarnings.push(...result.warnings.map((w) => `Cast: ${w}`));
         cast = { wallMm: result.wallMm, firedWallMm: result.firedWallMm, sizeMm: result.sizeMm, volumeMm3: result.volumeMm3, weightG: result.weightG, notes: result.notes, ...(sim ? { addedId: sim.id } : {}) };
       } catch (e) {
@@ -76,12 +75,7 @@ export const slipCommands: McpCommands = {
       }
     }
     const { warnings, ...summary } = mold.report;
-    // What the part itself asks of a slip casting: sections too thin to keep,
-    // inside corners that crack (the DFM cast check, for this slip).
-    const dfm = await dfmReportFor(subject.scene, 'cast', { castMaterial: mold.slip }).catch(() => null);
-    const partWarnings = (dfm?.findings ?? [])
-      .filter((f) => !f.passed && (f.id === 'cast_thin_section' || f.id === 'cast_sharp_inside_corner'))
-      .map((f) => `${f.title} at (${f.position.map((v) => Math.round(v * 1000)).join(', ')} mm): ${f.detail} ${f.fix}`);
+    const partWarnings = await slipPartWarnings(subject.scene, mold.slip);
     return {
       ok: true,
       summary: {

@@ -160,6 +160,8 @@ export interface CastSummary {
    * this went looking for.
    */
   gateAtMm: { x: number; y: number };
+  /** Lost PLA: where the sprue is fused on, in plan, scene mm (what sprueAtMm takes). */
+  sprueAtSceneMm?: [number, number];
   /**
    * Lost PLA: where each vent rod leaves the casting (pattern coordinates, mm,
    * Z from the base): one per pocket that would hold air, and one at the far
@@ -1393,6 +1395,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       sprueDiaMm: opts.addGating ? sprueDia : 0,
       riserDiaMm: opts.addGating && riserWanted ? riserDia : 0,
       gateAtMm: opts.addGating ? { x: gateAt.x, y: gateAt.y } : { x: 0, y: 0 },
+      ...(lostPla && opts.addGating ? { sprueAtSceneMm: [+(gateAt.x / grow + cx).toFixed(1), +(gateAt.y / grow + cy).toFixed(1)] as [number, number] } : {}),
       ventsMm,
       unventedPockets,
       partingFromBaseMm: lostPla ? 0 : parting,

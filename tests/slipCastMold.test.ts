@@ -228,7 +228,7 @@ describe('slip spare over the opening', () => {
     // Over the cup's mouth: its axis near the cup's, at the rim.
     expect(Math.hypot(r.spareAtMm[0], r.spareAtMm[1])).toBeLessThan(8);
     expect(r.spareAtMm[2]).toBeLessThan(r.partTopMm - 15);
-    expect(r.warnings.some((w) => w.includes('no way out'))).toBe(false);
+    expect(r.warnings.some((w) => w.includes('roofed in plaster'))).toBe(false);
     // The handle above the rim stands in the spare's way: said where.
     const cast = simulateSlipCast(wasm, { cavity: mold.cavity, spare: mold.spare, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip }, 4);
     console.log(JSON.stringify({ ...cast, mesh: undefined }));
@@ -241,11 +241,36 @@ describe('slip spare over the opening', () => {
     const r = mold.report;
     console.log(r.warnings);
     expect(r.spareAtMm[2]).toBeGreaterThan(r.partTopMm - 10);
-    expect(r.warnings.some((w) => w.includes('no way out') && /\(-?\d+, -?\d+, \d+ mm\)/.test(w))).toBe(true);
+    expect(r.warnings.some((w) => w.includes('roofed in plaster') && /\(-?\d+, -?\d+, \d+ mm\)/.test(w))).toBe(true);
     // A wall that closes the handle, the inside's only way to the spare.
     const cast = simulateSlipCast(wasm, { cavity: mold.cavity, spare: mold.spare, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip }, 5);
     console.log(cast.warnings);
     expect(cast.warnings.some((w) => w.includes('sealed off') && w.includes('mm)'))).toBe(true);
+  });
+
+  it('stands the spare on a mouth whose rim rises on one side, and keeps the high side out of it', () => {
+    // A cup whose rim slants from 80 mm up on one side to 95 mm on the other.
+    const cup = wasm.Manifold.cylinder(100, 40, 40, 96).subtract(wasm.Manifold.cylinder(100, 36, 36, 96).translate([0, 0, 4]));
+    const slant = wasm.Manifold.cube([200, 200, 100], true).rotate([0, 8.5, 0]).translate([0, 0, 87.5 + 50]);
+    const r = buildSlipMold(wasm, soupOf(cup.subtract(slant)), {}).report;
+    expect(Math.hypot(r.spareAtMm[0], r.spareAtMm[1])).toBeLessThan(8);
+    expect(r.warnings.some((w) => w.includes('rises into the spare'))).toBe(false);
+  });
+
+  it('keeps the spare on top of a solid part with a small gap open from above', () => {
+    // A solid post with a thin loop standing beside it: the gap between them is not an inside.
+    const post = wasm.Manifold.cylinder(80, 15, 15, 64);
+    const loop = wasm.Manifold.cube([4, 10, 40], true).translate([22, 0, 40]).add(wasm.Manifold.cube([10, 10, 4], true).translate([18, 0, 22]));
+    const part = post.add(loop);
+    const r = buildSlipMold(wasm, soupOf(part), {}).report;
+    expect(r.spareAtMm[2]).toBeGreaterThan(r.partTopMm - 2);
+  });
+
+  it('centres the spare on the point asked for on a wide top', () => {
+    const block = wasm.Manifold.cube([120, 60, 40], true).translate([0, 0, 20]);
+    const r = buildSlipMold(wasm, soupOf(block), { spareAtMm: [40, 0] }).report;
+    expect(r.spareAtMm[0]).toBeCloseTo(40, 3);
+    expect(r.spareAtMm[1]).toBeCloseTo(0, 3);
   });
 
   it('refuses a spare position off the part', () => {

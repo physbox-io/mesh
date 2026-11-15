@@ -94,6 +94,9 @@ export const DEFAULT_SLIP_MOLD_OPTIONS: SlipMoldOptions = {
   slip: 'porcelain-slip',
 };
 
+/** The least share of the part's volume an inside must hold to take the spare and be warned of. */
+const INSIDE_SHARE = 0.1;
+
 /** The largest number of side pieces 'auto' tries, and the field takes. */
 export const MAX_SLIP_SIDES = 6;
 
@@ -356,12 +359,27 @@ interface SpareChoice {
  */
 function spare(
   wasm: ManifoldToplevel, filled: Manifold, inside: Manifold | null, zTop: number, zBlockTop: number, diaMm: number, at: [number, number] | null,
+  partMm3: number,
 ): SpareChoice {
   const e = 0.5;
   const warnings: string[] = [];
-  const insides = inside ? inside.decompose().filter((c) => c.volume() > 1) : [];
+  // An inside worth draining holds a real share of the part: a gap between
+  // an arm and a body is open from above too, and is cast as clay.
+  const all = inside ? inside.decompose() : [];
+  const insides = all.filter((c) => c.volume() > Math.max(1, INSIDE_SHARE * partMm3));
+  free(...all.filter((c) => !insides.includes(c)));
+  // The mouth: the highest height where the inside is whole, not where the
+  // fill's step leaves slivers above a rim that opens on one side - a slice
+  // there is most of the one 3 mm below it.
   const mouthOf = (c: Manifold) => {
-    const z = c.boundingBox().max[2];
+    const cb = c.boundingBox();
+    let z = cb.max[2];
+    for (; z > cb.min[2] + 3; z -= 0.5) {
+      const here = c.slice(z - e), below = c.slice(z - e - 3);
+      const ok = here.area() >= 0.6 * below.area();
+      free(here, below);
+      if (ok) break;
+    }
     const cs = c.slice(z - e);
     return { z, cs, polys: cs.toPolygons() };
   };
@@ -378,24 +396,23 @@ function spare(
   /** The part's outline pieces at a height that a test keeps, hulled. */
   const outlineAt = (z: number, keep: (piece: CrossSection) => boolean): CrossSection | null => {
     const cs = filled.slice(z);
-    const kept = cs.decompose().filter(keep);
-    free(cs);
+    const pieces = cs.decompose();
+    const kept = pieces.filter(keep);
+    free(cs, ...pieces.filter((p) => !kept.includes(p)));
     if (!kept.length) return null;
     const u = wasm.CrossSection.union(kept);
     const h = u.hull();
     free(u, ...kept);
     return h;
   };
+  let centredAt: [number, number] | null = null;
   if (chosen >= 0) {
     const m = mouths[chosen];
     footZ = m.z;
-    // The rim round the mouth: the outline pieces at the mouth that hold it.
-    foot = outlineAt(footZ - e, (piece) => {
-      const meet = piece.intersect(m.cs);
-      const a = meet.area();
-      free(meet);
-      return a > 1e-3;
-    }) ?? m.cs.hull();
+    // On the mouth itself, where the rim first closes round the inside: a
+    // rim that rises higher on one side (a spout, a slanted lip) keeps its
+    // plaster outside, and casts against it.
+    foot = m.cs.hull();
   } else if (at) {
     const b = filled.boundingBox();
     const col = wasm.Manifold.cylinder(b.max[2] - b.min[2] + 2, 0.5, 0.5, 12).translate([at[0], at[1], b.min[2] - 1]);
@@ -407,8 +424,12 @@ function spare(
     }
     footZ = hit.boundingBox().max[2];
     free(hit);
-    foot = outlineAt(footZ - e, (piece) => insideContours(piece.toPolygons(), at[0], at[1]))
-      ?? wasm.CrossSection.circle(0.5, 16).translate(at);
+    // Centred on the point asked for, as wide as the spare's mouth where the part allows.
+    const piece = outlineAt(footZ - e, (pc) => insideContours(pc.toPolygons(), at[0], at[1]));
+    const disc = wasm.CrossSection.circle(diaMm / 2, 64).translate(at);
+    foot = piece ? piece.intersect(disc) : wasm.CrossSection.circle(0.5, 16).translate(at);
+    free(piece, disc);
+    centredAt = at;
   } else {
     const top = filled.slice(zTop - e);
     foot = top.hull();
@@ -416,7 +437,9 @@ function spare(
   }
 
   let cx: number, cy: number;
-  if (foot.area() < 0.5) {
+  if (centredAt) {
+    [cx, cy] = centredAt;
+  } else if (foot.area() < 0.5) {
     const fb = foot.bounds();
     cx = (fb.min[0] + fb.max[0]) / 2; cy = (fb.min[1] + fb.max[1]) / 2;
     free(foot);
@@ -449,7 +472,7 @@ function spare(
     free(meet);
     if (reached) return;
     const mb = m.cs.bounds();
-    warnings.push(`The opening at ${fmtMm([(mb.min[0] + mb.max[0]) / 2, (mb.min[1] + mb.max[1]) / 2, m.z])} has no way out to the spare, so the slip in it cannot drain and it casts solid: put the spare over it, or turn the part.`);
+    warnings.push(`The opening at ${fmtMm([(mb.min[0] + mb.max[0]) / 2, (mb.min[1] + mb.max[1]) / 2, m.z])} is roofed in plaster away from the spare: its slip can only leave through the part, and it casts solid if that way closes. Put the spare over it, or turn the part.`);
   });
   // Part standing up inside the spare is cut off with it.
   const above = wasm.Manifold.cube([1e5, 1e5, zBlockTop - footZ + 2]).translate([-5e4, -5e4, footZ + 1]);
@@ -966,7 +989,7 @@ function build(
   // The inside itself: the fill less the part (a fill slab borrows the part's
   // outlines next to a filled slice, so it holds lumps of wall too).
   const inside = fill ? fill.subtract(part) : null;
-  const sp = spare(wasm, filled, inside, zTop, zBlockTop, Math.max(5, o.spareDiaMm), spareAt);
+  const sp = spare(wasm, filled, inside, zTop, zBlockTop, Math.max(5, o.spareDiaMm), spareAt, part.volume());
   free(fill, inside, filled !== part ? part : null);
   warnings.push(...sp.warnings);
   const axis = sp.centre;
