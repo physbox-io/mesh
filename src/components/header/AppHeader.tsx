@@ -1,6 +1,7 @@
-import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Hammer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu, Shapes } from 'lucide-react';
+import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Hammer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu, Shapes, Volume2, VolumeX } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
+import { useSoundStore } from '../../store/soundStore';
 import { usePanels } from '../../store/panelsStore';
 import { useSelectedNode } from '../../hooks/useSelectedNode';
 import type { PresetActions } from '../../hooks/usePresetActions';
@@ -47,6 +48,8 @@ export function AppHeader({
     canUndo: s.undoStack.length > 0, canRedo: s.redoStack.length > 0,
   })));
   const selectedNode = useSelectedNode();
+  const soundEnabled = useSoundStore((s) => s.soundEnabled);
+  const toggleSound = useSoundStore((s) => s.toggleSound);
   return (
     <>
       {/*
@@ -108,6 +111,21 @@ export function AppHeader({
             >
               <RotateCcw className="w-3 h-3" />
               <span className="hidden md:inline">Reset</span>
+            </button>
+
+            {/* Modal Collision Audio (muted by default) */}
+            <button
+              type="button"
+              onClick={toggleSound}
+              aria-pressed={soundEnabled}
+              className={`flex items-center justify-center p-1.5 rounded-md transition-colors flex-shrink-0 cursor-pointer ${
+                soundEnabled
+                  ? 'text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-950/50 hover:bg-violet-100 dark:hover:bg-violet-900/60'
+                  : 'text-slate-400 dark:text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-600 dark:hover:text-slate-300'
+              }`}
+              title={soundEnabled ? 'Mute physical impact audio' : 'Unmute physical modal impact audio (steel, wood, glass, tuned bars)'}
+            >
+              {soundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
             </button>
           </div>
 

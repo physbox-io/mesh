@@ -679,6 +679,15 @@ A 300 mm cube of **20 × 20 T-slot extrusion**, held together by **16 corner bra
 ## Try it
 - Press **Play**: the carriage rides up and down its post
 - **Make → Parts list** in the bottom bar packs the twelve profiles onto the bar lengths extrusion is sold in`,
+
+  marimba_cascade: `# 🎶 Pentatonic Marimba & Chime
+
+Five **hardwood bars** tuned to **C4 – D4 – E4 – G4 – A4** by carving an underside luthier arch, plus a **C5 steel chime rod** on the right.
+
+## Hear it
+1. Click the **speaker icon** beside **Reset** in the top bar to unmute physical modal audio
+2. Press **Run** — the staggered mallets play an ascending pentatonic arpeggio ending on the bright steel chime
+3. Select any bar and open **Shape → Concert Pitch** to **Tap** it or re-tune it to another note`,
 };
 
 

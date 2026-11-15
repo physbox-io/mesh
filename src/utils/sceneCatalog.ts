@@ -39,6 +39,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   pipe_geodesic_dome: 'Make it',
   boolean_shapes: 'Make it',
   openscad_demo: 'Make it',
+  marimba_cascade: 'Make it',
 
   pendulum: 'Mechanisms',
   stepper_turntable: 'Mechanisms',

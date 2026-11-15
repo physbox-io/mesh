@@ -390,7 +390,60 @@ function buildVesselEnvelope(solidTris: Float64Array, solidVol: number): HydroBo
 
   // Verify the cavity actually opens near the top (not a sealed hollow sphere):
   // find the convex-hull cap face(s) spanning empty air — hull triangles whose
-  // centroid lies far from any solid vertex are the open mouth of the vessel!
+  // centroid lies far from ANY solid surface triangle are the open mouth of the vessel!
+  const pointToTriSq = (
+    px: number, py: number, pz: number,
+    x1: number, y1: number, z1: number,
+    x2: number, y2: number, z2: number,
+    x3: number, y3: number, z3: number,
+  ): number => {
+    const abx = x2 - x1, aby = y2 - y1, abz = z2 - z1;
+    const acx = x3 - x1, acy = y3 - y1, acz = z3 - z1;
+    const apx = px - x1, apy = py - y1, apz = pz - z1;
+    const d1 = abx * apx + aby * apy + abz * apz;
+    const d2 = acx * apx + acy * apy + acz * apz;
+    if (d1 <= 0 && d2 <= 0) return apx * apx + apy * apy + apz * apz;
+
+    const bpx = px - x2, bpy = py - y2, bpz = pz - z2;
+    const d3 = abx * bpx + aby * bpy + abz * bpz;
+    const d4 = acx * bpx + acy * bpy + acz * bpz;
+    if (d3 >= 0 && d4 <= d3) return bpx * bpx + bpy * bpy + bpz * bpz;
+
+    const vc = d1 * d4 - d3 * d2;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+      const v = d1 / (d1 - d3);
+      const qx = x1 + v * abx - px, qy = y1 + v * aby - py, qz = z1 + v * abz - pz;
+      return qx * qx + qy * qy + qz * qz;
+    }
+
+    const cpx = px - x3, cpy = py - y3, cpz = pz - z3;
+    const d5 = abx * cpx + aby * cpy + abz * cpz;
+    const d6 = acx * cpx + acy * cpy + acz * cpz;
+    if (d6 >= 0 && d5 <= d6) return cpx * cpx + cpy * cpy + cpz * cpz;
+
+    const vb = d5 * d2 - d1 * d6;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+      const w = d2 / (d2 - d6);
+      const qx = x1 + w * acx - px, qy = y1 + w * acy - py, qz = z1 + w * acz - pz;
+      return qx * qx + qy * qy + qz * qz;
+    }
+
+    const va = d3 * d6 - d5 * d4;
+    if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+      const w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+      const qx = x2 + w * (x3 - x2) - px, qy = y2 + w * (y3 - y2) - py, qz = z2 + w * (z3 - z2) - pz;
+      return qx * qx + qy * qy + qz * qz;
+    }
+
+    const denom = 1 / (va + vb + vc);
+    const v = vb * denom;
+    const w = vc * denom;
+    const qx = x1 + abx * v + acx * w - px;
+    const qy = y1 + aby * v + acy * w - py;
+    const qz = z1 + abz * v + acz * w - pz;
+    return qx * qx + qy * qy + qz * qz;
+  };
+
   const rimCoords: number[] = [];
   const height = maxZ - minZ;
   const airGapSq = Math.pow(Math.max(0.002, height * 0.08), 2);
@@ -405,9 +458,13 @@ function buildVesselEnvelope(solidTris: Float64Array, solidVol: number): HydroBo
     const mz = (az + bz + cz) / 3;
 
     let nearestSq = Infinity;
-    for (let j = 0; j < pts.length; j++) {
-      const dx = pts[j].x - mx, dy = pts[j].y - my, dz = pts[j].z - mz;
-      const d2 = dx * dx + dy * dy + dz * dz;
+    for (let j = 0; j + 8 < solidTris.length; j += 9) {
+      const d2 = pointToTriSq(
+        mx, my, mz,
+        solidTris[j], solidTris[j + 1], solidTris[j + 2],
+        solidTris[j + 3], solidTris[j + 4], solidTris[j + 5],
+        solidTris[j + 6], solidTris[j + 7], solidTris[j + 8],
+      );
       if (d2 < nearestSq) {
         nearestSq = d2;
         if (d2 < airGapSq) break;

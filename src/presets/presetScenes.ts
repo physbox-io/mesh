@@ -20,6 +20,7 @@ import { oakTreePreset } from './oakTree';
 import { soapDishPreset } from './soapDish';
 import { smokerPreset, toyCastlePreset } from './brickPresets';
 import { shatterPreset } from './shatter';
+import { marimbaCascadePreset } from './marimbaCascade';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
@@ -643,47 +644,70 @@ export const newtonsCradlePreset: SceneGraph = {
   nodes: [
     {
       id: 'support_bar',
-      name: 'support_bar',
+      name: 'support_frame',
       type: 'body',
-      pos: [0, 0, 0.45],
+      pos: [0, 0, 0],
+      deformMaterial: 'hardwood',
       joints: [],
       geoms: [
-        { name: 'bar_geom', type: 'cylinder', size: [0.01, 0.12], pos: [0, 0, 0], euler: [0, 90, 0], rgba: [0.3, 0.3, 0.3, 1], contype: 0, conaffinity: 0 }
+        // Hardwood base plinth + brushed steel bifilar V-frame rails
+        { name: 'plinth', type: 'box', size: [0.15, 0.085, 0.012], pos: [0, 0, 0.012], rgba: [0.34, 0.22, 0.14, 1] },
+        { name: 'rail_front', type: 'cylinder', size: [0.005, 0.125], pos: [0, -0.06, 0.30], euler: [0, 90, 0], rgba: [0.72, 0.74, 0.78, 1], contype: 0, conaffinity: 0 },
+        { name: 'rail_back', type: 'cylinder', size: [0.005, 0.125], pos: [0, 0.06, 0.30], euler: [0, 90, 0], rgba: [0.72, 0.74, 0.78, 1], contype: 0, conaffinity: 0 },
+        { name: 'leg_fl', type: 'capsule', fromto: [-0.125, -0.06, 0.024, -0.125, -0.06, 0.30], size: [0.005], rgba: [0.72, 0.74, 0.78, 1], contype: 0, conaffinity: 0 },
+        { name: 'leg_fr', type: 'capsule', fromto: [0.125, -0.06, 0.024, 0.125, -0.06, 0.30], size: [0.005], rgba: [0.72, 0.74, 0.78, 1], contype: 0, conaffinity: 0 },
+        { name: 'leg_bl', type: 'capsule', fromto: [-0.125, 0.06, 0.024, -0.125, 0.06, 0.30], size: [0.005], rgba: [0.72, 0.74, 0.78, 1], contype: 0, conaffinity: 0 },
+        { name: 'leg_br', type: 'capsule', fromto: [0.125, 0.06, 0.024, 0.125, 0.06, 0.30], size: [0.005], rgba: [0.72, 0.74, 0.78, 1], contype: 0, conaffinity: 0 },
       ],
-      children: []
+      children: [],
     },
     ...Array.from({ length: 5 }).map((_, idx): SceneNode => {
       const x = -0.08 + idx * 0.04;
       const isFirst = idx === 0;
-      
+
       return {
         id: `cradle_${idx}`,
         name: `cradle_${idx}`,
         type: 'body',
-        pos: [x, 0, 0.45],
+        pos: [x, 0, 0.30],
         euler: isFirst ? [0, 35, 0] : [0, 0, 0],
+        deformMaterial: 'steel',
         joints: [
-          { name: `cradle_joint_${idx}`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.02, limited: true, range: [-90, 90] }
+          { name: `cradle_joint_${idx}`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.001, limited: true, range: [-90, 90] },
         ],
+        // Ultralight bifilar V-strings (0.4 g total << 255 g ball) so the centre of percussion stays at the ball centre
         geoms: [
-          { name: `cradle_rod_${idx}`, type: 'capsule', fromto: [0, 0, 0, 0, 0, -0.25], size: [0.004], mass: 0.05, rgba: [0.7, 0.7, 0.7, 1], contype: 0, conaffinity: 0 }
+          { name: `wire_f_${idx}`, type: 'capsule', fromto: [0, -0.06, 0, 0, 0, -0.20], size: [0.0008], mass: 0.0002, rgba: [0.82, 0.84, 0.88, 0.9], contype: 0, conaffinity: 0 },
+          { name: `wire_b_${idx}`, type: 'capsule', fromto: [0, 0.06, 0, 0, 0, -0.20], size: [0.0008], mass: 0.0002, rgba: [0.82, 0.84, 0.88, 0.9], contype: 0, conaffinity: 0 },
         ],
         children: [
           {
             id: `cradle_bob_body_${idx}`,
             name: `cradle_bob_body_${idx}`,
             type: 'body',
-            pos: [0, 0, -0.25],
+            pos: [0, 0, -0.20],
+            deformMaterial: 'steel',
             joints: [],
             geoms: [
-              { name: `cradle_ball_${idx}`, type: 'sphere', size: [0.0198], pos: [0, 0, 0], mass: 1, rgba: [0.8, 0.8, 0.8, 1], solref: [-5000, -50.0], solimp: [0.98, 0.99, 0.001, 0.5, 2] }
+              // Bearing steel (7850 kg/m³ -> ~255 g for Ø39.6 mm); solref [0.012, 0.12] satisfies
+              // 4*tau*zeta = 0.0058 > dt = 0.002 so MuJoCo's Euler integrator is strictly passive (~82% restitution)
+              {
+                name: `cradle_ball_${idx}`,
+                type: 'sphere',
+                size: [0.0198],
+                pos: [0, 0, 0],
+                density: 7850,
+                rgba: [0.86, 0.88, 0.92, 1],
+                solref: [0.012, 0.12],
+                solimp: [0.95, 0.99, 0.001, 0.5, 2],
+              },
             ],
-            children: []
-          }
-        ]
+            children: [],
+          },
+        ],
       };
-    })
-  ]
+    }),
+  ],
 };
 
 const generateBridgePlanks = (): SceneNode[] => {
@@ -3648,6 +3672,12 @@ export const PRESETS = {
     emoji: '🔺',
     scene: { nodes: pipeStructureScene('geodesic_dome') },
     camera: { position: [2.8, -3.4, 2.4], target: [0, 0, 0.6] } satisfies PresetCamera,
+  },
+  marimba_cascade: {
+    name: 'Pentatonic Marimba & Chime',
+    emoji: '🎶',
+    scene: marimbaCascadePreset,
+    camera: { position: [0.34, -0.48, 0.32], target: [0.02, 0, 0.08] } satisfies PresetCamera,
   },
 };
 

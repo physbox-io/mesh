@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SceneGeom, SceneNode } from '../types/scene';
-import { deformMaterial } from './deformMaterials';
+import { deformMaterial, geomVolume } from './deformMaterials';
 import { geomHydroTriangles } from './hydrostatics';
 
 export interface AcousticMaterialProps {
@@ -36,7 +36,43 @@ export interface BodyModalProfile {
   overtoneRatio: number;
   regime: 'bar' | 'arched_bar' | 'tube' | 'plate' | 'block';
   material: AcousticMaterialProps;
+  /** Physical Hertz elastic contact duration τ_c (s) at 1 m/s reference impact speed: τ_c = 2.87 (ρ(1-ν²)/E)^0.4 R_eff. */
+  contactDurationSec: number;
+  /** Audible structural modes (only modes below the ~18 kHz human hearing ceiling, weighted by the Hertz contact pulse spectrum). */
   modes: ModalVoice[];
+}
+
+/**
+ * Collects the solid geoms that actually participate in impacts on `node`,
+ * including jointless welded child bodies (e.g. `cradle_bob_body_*` under
+ * `cradle_*` in Newton's Cradle) while skipping non-colliding `contype: 0`
+ * suspension strings/rods whenever colliding geoms exist.
+ */
+function collectAcousticSubtree(node: SceneNode): { geoms: SceneGeom[]; materialHost: SceneNode } {
+  const colliding: { geom: SceneGeom; host: SceneNode }[] = [];
+  const allSolid: { geom: SceneGeom; host: SceneNode }[] = [];
+
+  const visit = (n: SceneNode, isRoot: boolean) => {
+    if (!isRoot && ((n.joints?.length ?? 0) > 0 || n.simulation)) return;
+    for (const g of n.geoms ?? []) {
+      if (g.csgDerived || g.csg === 'difference' || g.role === 'visual' || g.type === 'plane') continue;
+      allSolid.push({ geom: g, host: n });
+      const disabled = g.contype === 0 && g.conaffinity === 0;
+      if (!disabled) colliding.push({ geom: g, host: n });
+    }
+    for (const ch of n.children ?? []) visit(ch, false);
+  };
+  visit(node, true);
+
+  const chosen = colliding.length > 0 ? colliding : allSolid;
+  const materialHost =
+    chosen.find((c) => c.host.deformMaterial || c.host.density !== undefined)?.host ??
+    chosen[0]?.host ??
+    node;
+  return {
+    geoms: chosen.map((c) => c.geom),
+    materialHost,
+  };
 }
 
 const MATERIAL_Q_BY_ID: Record<string, { q: number; brightness: number }> = {
@@ -52,33 +88,43 @@ const MATERIAL_Q_BY_ID: Record<string, { q: number; brightness: number }> = {
 };
 
 export function inferAcousticMaterial(node: SceneNode): AcousticMaterialProps {
-  const dm = deformMaterial(node.deformMaterial);
+  const { geoms, materialHost } = collectAcousticSubtree(node);
+  const dm = deformMaterial(node.deformMaterial ?? materialHost.deformMaterial);
   if (dm) {
     const qInfo = MATERIAL_Q_BY_ID[dm.id] ?? { q: 80, brightness: 0.5 };
     return {
       label: dm.label,
-      density: node.density ?? dm.density,
+      density: node.density ?? materialHost.density ?? dm.density,
       modulusGPa: dm.strength.modulusGPa,
       qualityQ: qInfo.q,
       brightness: qInfo.brightness,
     };
   }
-  const firstSolid = (node.geoms ?? []).find((g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual');
-  const rho = node.density ?? firstSolid?.density ?? 1150;
-  if (node.hardwarePart || rho >= 7000) {
-    return { label: 'Steel', density: rho, modulusGPa: 200, qualityQ: 920, brightness: 0.9 };
+  const firstSolid = geoms[0];
+  let impliedRho: number | undefined;
+  if (firstSolid && typeof firstSolid.mass === 'number' && firstSolid.mass > 0) {
+    const vol = geomVolume(firstSolid);
+    if (vol > 1e-9) impliedRho = Math.min(20000, firstSolid.mass / vol);
+  }
+  const stiffContact = (firstSolid?.solref?.[0] ?? 0) <= -3500;
+  const rho = node.density ?? materialHost.density ?? firstSolid?.density ?? impliedRho ?? (stiffContact ? 7800 : 1150);
+  if (node.hardwarePart || materialHost.hardwarePart || rho >= 5500) {
+    return { label: 'Steel', density: Math.min(8050, Math.max(7500, rho)), modulusGPa: 200, qualityQ: 920, brightness: 0.94 };
   }
   if (rho >= 2550) {
-    return { label: 'Aluminium / Alloy', density: rho, modulusGPa: 69, qualityQ: 760, brightness: 0.82 };
+    return { label: 'Aluminium / Alloy', density: rho, modulusGPa: 69, qualityQ: 760, brightness: 0.84 };
   }
   if (rho >= 2100) {
-    return { label: 'Glass / Ceramic', density: rho, modulusGPa: 70, qualityQ: 540, brightness: 0.9 };
+    return { label: 'Glass / Ceramic', density: rho, modulusGPa: 70, qualityQ: 540, brightness: 0.92 };
   }
   if (rho >= 550 && rho <= 920) {
     return { label: 'Hardwood', density: rho, modulusGPa: 12.5, qualityQ: 145, brightness: 0.58 };
   }
   if (rho < 550) {
     return { label: 'Softwood', density: rho, modulusGPa: 9.0, qualityQ: 95, brightness: 0.48 };
+  }
+  if (stiffContact) {
+    return { label: 'Hard Acrylic / Phenolic', density: rho, modulusGPa: 6.5, qualityQ: 120, brightness: 0.78 };
   }
   return { label: 'Polymer', density: rho, modulusGPa: 2.8, qualityQ: 45, brightness: 0.42 };
 }
@@ -248,9 +294,7 @@ function measureLocalExtents(node: SceneNode): {
   axisOrderAsc: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2];
   primaryGeom: SceneGeom | undefined;
 } {
-  const solidGeoms = (node.geoms ?? []).filter(
-    (g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual',
-  );
+  const { geoms: solidGeoms } = collectAcousticSubtree(node);
   const primaryGeom = solidGeoms[0];
   const tris: number[] = [];
   for (const g of solidGeoms) geomHydroTriangles(g, tris);
@@ -351,51 +395,87 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
       freqs = [f1, f1 * 1.52, f1 * 2.38, f1 * 3.41];
       gains = [1.0, 0.65, 0.38, 0.22];
     } else {
-      // Compact 3D block / sphere / shard: lowest shear-extensional Lamb/cube modes scale as c / L
+      // Compact 3D block / part / sphere:
+      // - Solid stiff metal/glass spheres (< 80 mm) have ultrasonic spheroidal Lamb modes (0.42 * c / d > 20 kHz),
+      //   so they radiate a pure rigid-body contact clack without sustained tonal ringing.
+      // - Everyday 3D parts, cubes, sculptures, and printed shells vibrate in flexural wall / table-coupled
+      //   modes (~90–950 Hz) rather than multi-kHz bulk longitudinal P-waves!
       regime = 'block';
-      const f1 = (0.38 * cLong) / Math.max(0.004, lMax);
-      const aspectA = lMax / Math.max(1e-4, bMid);
-      const aspectB = bMid / Math.max(1e-4, hMin);
-      freqs = [
-        f1,
-        f1 * (1.28 + 0.18 * Math.min(2, aspectA)),
-        f1 * (1.76 + 0.22 * Math.min(2, aspectB)),
-        f1 * 2.49,
-      ];
-      gains = [1.0, 0.48, 0.26, 0.14];
+      const isSolidHardSphere =
+        primaryGeom?.type === 'sphere' && mat.modulusGPa >= 50 && lMax <= 0.085;
+      if (isSolidHardSphere) {
+        const f1 = (0.42 * cLong) / Math.max(0.004, lMax);
+        freqs = [f1, f1 * 1.45, f1 * 1.92];
+        gains = [1.0, 0.45, 0.22];
+      } else {
+        const hEff = Math.min(0.14 * hMin, 0.0022 + 0.028 * hMin);
+        const rawFlexHz = (0.22 * hEff * cLong) / Math.max(0.0025, lMax * lMax);
+        const f1 = Math.max(65, Math.min(980, rawFlexHz));
+        const aspectA = lMax / Math.max(1e-4, bMid);
+        const aspectB = bMid / Math.max(1e-4, hMin);
+        freqs = [
+          f1,
+          f1 * (1.34 + 0.16 * Math.min(2, aspectA)),
+          f1 * (1.82 + 0.2 * Math.min(2, aspectB)),
+          f1 * 2.46,
+        ];
+        gains = [1.0, 0.46, 0.22, 0.1];
+      }
     }
   }
 
   // If user explicitly calibrated tunedPitchHz (and no contradictory geometry override), anchor f1 if needed
   if (typeof node.tunedPitchHz === 'number' && node.tunedPitchHz > 15 && regime !== 'arched_bar') {
     const scale = node.tunedPitchHz / Math.max(1e-6, freqs[0]);
-    if (Math.abs(scale - 1) < 0.08) {
+    if (Math.abs(scale - 1) < 0.08 || regime === 'block') {
       freqs = freqs.map((f) => f * scale);
     }
   }
 
-  // Clamp audible synthesis band cleanly to [32 Hz, 14500 Hz] while reporting true physical fundamentalHz
+  // Macroscopic elastic contact duration (Hertzian scaling widened by real surface asperity & air/frame coupling):
+  //   - 40 mm steel sphere: τ_c ≈ 0.48 ms -> warm, crisp ~1.0 kHz billiard/cradle "clack" (not an 8 kHz tick)
+  //   - 40 mm polymer ball: τ_c ≈ 1.25 ms -> ~400 Hz knock
+  //   - 160 mm block:       τ_c ≈ 2.6 ms  -> ~200 Hz thud
+  const nu = 0.3;
+  const rEff = 0.5 * Math.cbrt(hMin * bMid * lMax);
+  const idealHertzTau = 2.87 * Math.pow((rho * (1 - nu * nu)) / E, 0.4) * rEff;
+  const contactDurationSec = Math.max(
+    0.00038,
+    Math.min(0.0055, 7.5 * idealHertzTau),
+  );
+
   const fundamentalHz = +freqs[0].toFixed(2);
   const overtoneRatio = +(freqs[1] / Math.max(1e-6, freqs[0])).toFixed(3);
 
-  const modes: ModalVoice[] = freqs.map((rawHz, idx) => {
-    // Audible mapping: ultrasonic tiny pebbles fold gently into top crystalline register instead of aliasing
-    const audibleHz = Math.max(35, Math.min(13500, rawHz));
-    // Higher modes damp faster due to thermoelastic & air radiation losses
+  // Only modes within human hearing (< 18 kHz) ring as sinusoidal voices, weighted by
+  // the Fourier spectrum of the half-sine Hertz force pulse |F(f)| = |cos(π f τ_c) / (1 - (2 f τ_c)²)|.
+  // Ultrasonic modes (e.g. 48 kHz Lamb mode of a 40 mm steel ball) naturally drop out instead
+  // of being folded down into an artificial whistle, leaving the pure Koss-Alfredson contact pulse!
+  const modes: ModalVoice[] = [];
+  for (let idx = 0; idx < freqs.length; idx++) {
+    const rawHz = freqs[idx];
+    if (rawHz < 24 || rawHz > 18000) continue;
+    const x = rawHz * contactDurationSec;
+    const pulseExcitation = Math.abs(x - 0.5) < 1e-3
+      ? Math.PI / 4
+      : Math.abs(Math.cos(Math.PI * x) / (1 - 4 * x * x));
+    const weightedGain = (gains[idx] ?? 0.12) * Math.min(1.15, 0.35 + 0.85 * pulseExcitation);
+    if (weightedGain < 0.008) continue;
     const modeQ = mat.qualityQ / (1 + 0.42 * idx);
-    const decaySec = Math.max(0.018, Math.min(4.2, modeQ / (Math.PI * audibleHz) * 2.8));
-    return {
-      freqHz: +audibleHz.toFixed(2),
-      gain: +(gains[idx] ?? 0.12).toFixed(3),
+    const decaySec = Math.max(0.014, Math.min(4.2, (modeQ / (Math.PI * rawHz)) * 2.8));
+    modes.push({
+      freqHz: +rawHz.toFixed(2),
+      gain: +weightedGain.toFixed(3),
       decaySec: +decaySec.toFixed(4),
-    };
-  });
+    });
+  }
 
   return {
     fundamentalHz,
     overtoneRatio,
     regime,
     material: mat,
+    contactDurationSec: +contactDurationSec.toExponential(4),
     modes,
   };
 }
@@ -462,30 +542,42 @@ export function playModalImpact(profile: BodyModalProfile, impulseNs: number): v
     };
   }
 
-  // Short mallet/contact transient burst filtered by material brightness
-  const clickDur = 0.012;
-  const sampleCount = Math.max(32, Math.floor(ctx.sampleRate * clickDur));
-  const noiseBuf = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
-  const data = noiseBuf.getChannelData(0);
+  // Universal Koss–Alfredson Hertzian rigid-body acceleration pressure pulse:
+  // During elastic contact t ∈ [0, τ_c], F(t) = sin(π t / τ_c)^(3/2), so the radiated
+  // acoustic pressure p(t) ∝ dF/dt is a clean bipolar wavelet of duration τ_c (scaled
+  // weakly by impact impulse v^(-0.2)), filtered through a natural air-radiation rolloff.
+  const vScale = Math.pow(Math.max(0.08, Math.min(6, impulseNs * 1.8)), -0.15);
+  const tauC = Math.max(0.00038, Math.min(0.006, profile.contactDurationSec * vScale));
+  const totalPulseDur = Math.max(0.012, tauC * 9);
+  const sampleCount = Math.max(64, Math.ceil(ctx.sampleRate * totalPulseDur));
+  const pulseBuf = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
+  const data = pulseBuf.getChannelData(0);
   for (let i = 0; i < sampleCount; i++) {
-    const decay = Math.exp((-i / sampleCount) * 6);
-    data[i] = (Math.random() * 2 - 1) * decay;
+    const t = i / ctx.sampleRate;
+    let sample: number;
+    if (t < tauC) {
+      const u = (Math.PI * t) / tauC;
+      sample = 1.25 * Math.sqrt(Math.max(0, Math.sin(u))) * Math.cos(u);
+    } else {
+      const dt = (t - tauC) / tauC;
+      sample = -0.34 * Math.exp(-dt * 1.15) * Math.cos(1.6 * dt);
+    }
+    const texEnv = Math.exp(-t / (tauC * 2.2));
+    data[i] = sample + 0.08 * profile.material.brightness * (Math.random() * 2 - 1) * texEnv;
   }
-  const noise = ctx.createBufferSource();
-  noise.buffer = noiseBuf;
-  const bp = ctx.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.setValueAtTime(
-    Math.min(9000, Math.max(350, profile.fundamentalHz * (1.2 + 3.0 * profile.material.brightness))),
-    now,
-  );
-  bp.Q.setValueAtTime(1.8, now);
+  const pulseSrc = ctx.createBufferSource();
+  pulseSrc.buffer = pulseBuf;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(1100 + 2400 * profile.material.brightness, now);
+  lp.Q.setValueAtTime(0.85, now);
   const clickGain = ctx.createGain();
-  clickGain.gain.setValueAtTime(level * (0.25 + 0.55 * profile.material.brightness), now);
-  noise.connect(bp);
-  bp.connect(clickGain);
+  const pulseWeight = profile.modes.length === 0 ? 1.45 : 0.4 + 0.4 * profile.material.brightness;
+  clickGain.gain.setValueAtTime(level * pulseWeight, now);
+  pulseSrc.connect(lp);
+  lp.connect(clickGain);
   clickGain.connect(ctx.destination);
-  noise.start(now);
+  pulseSrc.start(now);
 
   setTimeout(() => {
     master.disconnect();

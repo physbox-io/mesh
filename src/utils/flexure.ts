@@ -128,10 +128,10 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
   const b = widthMm / 1000;
   const I = (b * t * t * t) / 12;
 
-  let stiffness = 0;
-  let maxTravel = 0;
+  let stiffness: number;
+  let maxTravel: number;
   let snapForceN = 0;
-  let peakStressMPa = 0;
+  let peakStressMPa: number;
   const warnings: string[] = [];
 
   if (thicknessMm + 1e-6 < fSpec.minWallMm) {

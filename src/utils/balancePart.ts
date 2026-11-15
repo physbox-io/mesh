@@ -526,16 +526,18 @@ function nutMassKg(size: string): number {
   return tmp.geoms[0]?.mass ?? 0.005;
 }
 
-/** Chooses the largest standard hex nut whose outer across-corners fits comfortably inside the body. */
-function chooseBallastNutSize(spanMinM: number, desiredTotalMassKg: number): string {
-  const maxFlatsMm = Math.max(4.5, spanMinM * 1000 * 0.55);
+/** Chooses the largest standard hex nut whose thickness & across-flats fit comfortably inside the body. */
+function chooseBallastNutSize(spansM: [number, number, number], desiredTotalMassKg: number): string {
+  const sortedMm = spansM.map((s) => s * 1000).sort((a, b) => a - b);
+  const maxHeightMm = Math.max(3.2, sortedMm[0] * 0.72);
+  const maxFlatsMm = Math.max(4.5, sortedMm[1] * 0.65);
   let best: string = 'M4';
   for (const sz of BALLAST_NUT_CANDIDATES) {
     const [flats, height] = HEX_NUTS[sz];
-    if (flats <= maxFlatsMm && height <= spanMinM * 1000 * 0.65) {
+    if (flats <= maxFlatsMm && height <= maxHeightMm) {
       best = sz;
       const single = nutMassKg(sz);
-      // Prefer a size where 1..6 nuts cover the needed ballast cleanly
+      // Prefer a size where 1..4 nuts cover the needed ballast cleanly
       if (single * 3 >= desiredTotalMassKg) break;
     }
   }
@@ -581,7 +583,7 @@ export function balanceBody(
   const invWorldMat = worldMat.clone().invert();
 
   // Determine target local CoM based on mode
-  let targetComLocal = new THREE.Vector3(...baseReport.comLocal);
+  let targetComLocal: THREE.Vector3;
 
   if (mode === 'stand') {
     const [cx, cy] = baseReport.stand.supportCentroid;
@@ -743,9 +745,9 @@ export function balanceBody(
           }
         }
         if (requiredBallastKg > 0.0004) {
-          const szNut = chooseBallastNutSize(minSpan, requiredBallastKg);
+          const szNut = chooseBallastNutSize([sx, sy, sz], requiredBallastKg);
           const mOne = nutMassKg(szNut);
-          const count = Math.max(1, Math.min(12, Math.round(requiredBallastKg / mOne)));
+          const count = Math.max(1, Math.min(16, Math.round(requiredBallastKg / mOne)));
           // Fine-tune exact seat position between targetComLocal and anchorVec so integer `count` nuts
           // land the composite CoM directly on `targetComLocal`!
           const exactLever = (liveMass * distToTarget) / (count * mOne);

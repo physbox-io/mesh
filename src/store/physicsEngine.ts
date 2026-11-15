@@ -266,9 +266,18 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       if (!useSoundStore.getState().soundEnabled) return;
       const s = store().getState();
       const nodes = liveModelGraph(s).graph.nodes;
-      for (const ev of events) {
-        const node = findNode(nodes, ev.nodeId);
-        if (node) playModalImpact(cachedModesFor(node), ev.impulseNs);
+      const resolved = events
+        .map((ev) => ({ node: findNode(nodes, ev.nodeId), impulseNs: ev.impulseNs }))
+        .filter((r): r is { node: SceneNode; impulseNs: number } => r.node !== null);
+      const hasTunedBar = resolved.some((r) => typeof r.node.tunedPitchHz === 'number');
+      for (const { node, impulseNs } of resolved) {
+        // When a mallet hits a tuned bar/chime in the same step, let the tuned resonator sing cleanly
+        const effImpulse = hasTunedBar && typeof node.tunedPitchHz !== 'number'
+          ? impulseNs * 0.04
+          : impulseNs;
+        if (effImpulse >= 0.005) {
+          playModalImpact(cachedModesFor(node), effImpulse);
+        }
       }
     };
     client.setSound(useSoundStore.getState().soundEnabled);

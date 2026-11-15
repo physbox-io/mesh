@@ -36,6 +36,7 @@ import { DimensionOverlay } from './DimensionOverlay';
 import { SectionCut } from './SectionCut';
 import { EdgeRoundTool } from './EdgeRoundTool';
 import { ReferenceImages } from './ReferenceImages';
+import { WaterSurface } from './WaterSurface';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
   SceneCapture, SceneVisuals,
@@ -252,6 +253,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       />
   
       <ReferenceImages />
+      <WaterSurface darkMode={darkMode} />
 
       <AxisLegendDrawer externalRef={axisCanvasRef} />
       <CameraController />
