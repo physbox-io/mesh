@@ -144,10 +144,10 @@ function pufferLook(x: number): SceneNode[] {
     { at: [r4(frontSec.c[0]), r4(frontSec.c[1] - frontDeep), r4(frontSec.c[2])], radius: 0.045, amount: 0.014, mirror: false },
     // Standing up off the band before it turns back: the front's lower part out, short of the band.
     { at: [r4(lowSec.c[0]), r4(lowSec.c[1] - lowDeep), r4(lowSec.c[2])], radius: 0.03, amount: 0.01, mirror: false },
-    // Its top broad and flattish, not a dome to a point: filled out at the shoulders of the crown.
-    { at: [r4(topSec.c[0] + 0.8 * topW), r4(topSec.c[1] - 0.015), r4(topSec.c[2])], radius: 0.055, amount: 0.02 },
+    // Its top broad and flattish, not a dome to a point: filled out a little at the shoulders of the crown (more, it read as a helmet).
+    { at: [r4(topSec.c[0] + 0.8 * topW), r4(topSec.c[1] - 0.015), r4(topSec.c[2])], radius: 0.055, amount: 0.01 },
     // And no taller than a cap: drawn in at the top, to the head's own fit there.
-    { at: [r4(topSec.c[0]), r4(topSec.c[1] + 0.01), r4(headL.path.at(headL.length)[2] + 0.01)], radius: 0.05, amount: -0.014, mirror: false },
+    { at: [r4(topSec.c[0]), r4(topSec.c[1] + 0.01), r4(headL.path.at(headL.length)[2] + 0.01)], radius: 0.05, amount: -0.02, mirror: false },
   ];
   // At the back an opening arched up from a strap: the strap the band below
   // it, a strap's width, the opening cut out above (an arch cut from the
@@ -159,7 +159,8 @@ function pufferLook(x: number): SceneNode[] {
     const sn = Math.max(-1, Math.min(1, x / bh)), cs = Math.sqrt(1 - sn * sn), dropAt = capDrop(0.5) - up;
     return [0, 1, 2].map((k) => r4(bandSec.c[k] + across[k] * bh * sn + backDir[k] * bd * cs - axis[k] * dropAt)) as [number, number, number];
   };
-  const STRAP = 0.016, OPEN_W = 0.032, OPEN_H = 0.05;
+  // A strap's width below the opening (narrower, it read as an empty hole).
+  const STRAP = 0.024, OPEN_W = 0.034, OPEN_H = 0.06;
   const closure: [number, number, number][] = [
     ...Array.from({ length: 5 }, (_, k) => onBand(-OPEN_W + (2 * OPEN_W * k) / 4, STRAP)),
     ...Array.from({ length: 11 }, (_, k) => { const ph = (Math.PI * (k + 1)) / 12; return onBand(OPEN_W * Math.cos(ph), STRAP + (OPEN_H - STRAP) * Math.sin(ph)); }),
@@ -247,9 +248,12 @@ function peakOutline(half: number, deep: number, arcLen: number, depth: number):
  */
 function neckerchief(form: SceneNode): SceneNode {
   const fm = form.bodyForm!, L = bodyLandmarks(fm);
-  // Loose, low on the neck and a narrow fold, of thin cotton: close, tall
-  // and of jersey, it stood up the neck as a stiff tube, a gaiter.
+  // Low on the neck and a narrow fold, of thin cotton: close, tall and of
+  // jersey, it stood up the neck as a stiff tube, a gaiter (looser, it stood
+  // out as a ring on the jacket's collar).
   const z = L.hpsZ - 0.045, r = fm.neck / (2 * Math.PI) + 0.02, C = 2 * Math.PI * r, band = 0.03;
+  /** The front's span of the band, and the wider top of the triangle gathered onto it. */
+  const FRONT = 0.15, BIB = 0.24;
   /** Each end of the knot, across. */
   const TAIL = 0.03;
   const cy = bodyFormSection(fm, z).centreY, pos = form.pos ?? [0, 0, 0];
@@ -260,14 +264,26 @@ function neckerchief(form: SceneNode): SceneNode {
       { id: 'top', pts: pts([[C, 0], [0, 0]]) },
       { id: 'endA', pts: pts([[0, 0], [0, -band]]) },
       { id: 'knotA', pts: pts([[0, -band], [TAIL, -band]]) },
-      { id: 'lowA', pts: pts([[TAIL, -band], [C / 2 - 0.13, -band]]) },
-      { id: 'point', pts: pts([[C / 2 - 0.13, -band], [C / 2, -0.2], [C / 2 + 0.13, -band]]) },
-      { id: 'lowB', pts: pts([[C / 2 + 0.13, -band], [C - TAIL, -band]]) },
+      { id: 'lowA', pts: pts([[TAIL, -band], [C / 2 - FRONT, -band]]) },
+      { id: 'front', pts: pts([[C / 2 - FRONT, -band], [C / 2 + FRONT, -band]]) },
+      { id: 'lowB', pts: pts([[C / 2 + FRONT, -band], [C - TAIL, -band]]) },
       { id: 'knotB', pts: pts([[C - TAIL, -band], [C, -band]]) },
       { id: 'endB', pts: pts([[C, -band], [C, 0]]) },
     ],
-    // Round the neck from the back, the point at the front; flaring a little below, over the collarbones.
+    // Round the neck from the back; flaring a little below, over the collarbones.
     placement: { kind: 'wrap', origin: [pos[0], pos[1] + cy, z], axis: [0, 0, 1], ref: [0, 1, 0], radius: r, taper: -0.35 },
+  };
+  // Its point hanging at the front: a triangle wider across its top than the
+  // band it hangs from, gathered onto it, so it falls in folds (cut as part of
+  // the band, it was a flat bib).
+  const bib: ClothPiece = {
+    name: 'bib', rgba: piece.rgba, pattern: piece.pattern,
+    edges: [
+      { id: 'top', pts: pts([[0, 0], [2 * BIB, 0]]) },
+      { id: 'sideB', pts: pts([[2 * BIB, 0], [BIB, -0.22]]) },
+      { id: 'sideA', pts: pts([[BIB, -0.22], [0, 0]]) },
+    ],
+    placement: { kind: 'plane', origin: [pos[0] + BIB, pos[1] + cy - r * 1.15 - 0.01, z - band], uAxis: [-1, 0, 0], vAxis: [0, -0.3, -0.95] },
   };
   // The knot's two ends hanging below it, out of the band at the back (sewn
   // on under it; left as a seam alone, the back read as a tube split down it).
@@ -287,8 +303,9 @@ function neckerchief(form: SceneNode): SceneNode {
     { name: 'knot', a: [{ piece: 'bandana', edge: 'endA' }], b: [{ piece: 'bandana', edge: 'endB', reversed: true }] },
     { name: 'tailA', a: [{ piece: 'tailA', edge: 'top' }], b: [{ piece: 'bandana', edge: 'knotA' }] },
     { name: 'tailB', a: [{ piece: 'tailB', edge: 'top' }], b: [{ piece: 'bandana', edge: 'knotB' }] },
+    { name: 'bib', a: [{ piece: 'bib', edge: 'top' }], b: [{ piece: 'bandana', edge: 'front', reversed: true }] },
   ];
-  return { id: 'neckerchief', name: 'neckerchief', pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces: [piece, ...tails], seams, material: 'woven', materialOverrides: { thickness: 0.0005, arealDensity: 0.1 }, spacing: 0.012, sewTime: 0.5, layer: 0 } } as unknown as SceneNode;
+  return { id: 'neckerchief', name: 'neckerchief', pos: [0, 0, 0], geoms: [], joints: [], children: [], cloth: { pieces: [piece, bib, ...tails], seams, material: 'woven', materialOverrides: { thickness: 0.0005, arealDensity: 0.1 }, spacing: 0.012, sewTime: 0.5, layer: 0 } } as unknown as SceneNode;
 }
 
 /** A cut-off hem: longer and shorter all round, irregularly (a regular one read as lace). */
