@@ -2,6 +2,7 @@
 // sleeve beside the master, where they would stand round it on the bench, and
 // a hole's pin fixed to the master as a rigid child. One undo step.
 
+import { sameIds, withoutNodes } from './toolingReplace';
 import * as THREE from 'three';
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { getNodeWorldTransform } from './laserCutExporter';
@@ -94,7 +95,11 @@ export function sceneWithPourBox(
   ids: string[],
   box: PourBox,
   options?: Partial<PourBoxOptions>,
-): { scene: SceneGraph; baseId: string; sleeveId: string; holePinId?: string } {
+): { scene: SceneGraph; baseId: string; sleeveId: string; holePinId?: string; replaced: { id: string; name: string }[] } {
+  // A box made again round the same masters replaces the one made before.
+  const cleared = withoutNodes(scene, (n) => Boolean(n.pourBox && sameIds(n.pourBox.masterIds, ids)));
+  const replaced = cleared.removed;
+  scene = cleared.scene;
   const tag = Math.random().toString(36).slice(2, 7);
   const masterName = (() => {
     const find = (nodes: SceneNode[]): SceneNode | null => {
@@ -110,7 +115,9 @@ export function sceneWithPourBox(
   const pourBox = {
     pourDepthMm: box.report.pourDepthMm,
     silicone: box.report.silicone,
-    ...(options ? { options: { ...options }, masterIds: [...ids] } : {}),
+    siliconeMm3: box.report.siliconeMm3,
+    masterIds: [...ids],
+    ...(options ? { options: { ...options } } : {}),
   };
   const base: SceneNode = { ...meshBody(`pourbase_${tag}`, `${masterName}_pour_base`, box.base, [0.62, 0.64, 0.68, 1]), pourBox };
   // Translucent so the master shows through it; it still collides.
@@ -155,7 +162,7 @@ export function sceneWithPourBox(
       nodes.splice(0, scene.nodes.length, ...attach(scene.nodes));
     }
   }
-  return { scene: { ...scene, nodes }, baseId: base.id, sleeveId: sleeve.id, ...(holePinId ? { holePinId } : {}) };
+  return { scene: { ...scene, nodes }, baseId: base.id, sleeveId: sleeve.id, ...(holePinId ? { holePinId } : {}), replaced };
 }
 
 /** What each hole is for, in the note card's words. */

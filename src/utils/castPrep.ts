@@ -207,6 +207,8 @@ export interface EdgePlan {
   broken: number;
   /** Edges left sharp because nothing over MIN_EDGE_BREAK fits on them. */
   sharp: number;
+  /** A point on each of the first few sharp edges, body frame. */
+  sharpAt: number[][];
   /** The largest chamfer and fillet actually used, metres. */
   chamfer: number;
   fillet: number;
@@ -244,6 +246,7 @@ export function planEdgeRounds(
   const target = edgeTargets(smallestDimension, sizeMm);
   const groups = new Map<string, EdgeRoundFeature>();
   let broken = 0, sharp = 0, chamfer = 0, fillet = 0;
+  const sharpAt: number[][] = [];
 
   for (const e of edges) {
     if (existing.some((f) => f.edges.some((x) => sameEdge(x, e.edge)))) continue;
@@ -252,7 +255,16 @@ export function planEdgeRounds(
     const want = mode === 'chamfer' ? target.chamfer : target.fillet;
     const fits = maxSizeFor([e], mode);
     const size = Math.floor(Math.min(want, fits) * 1e4 + 1e-6) / 1e4;
-    if (!(size >= MIN_EDGE_BREAK)) { sharp++; continue; }
+    if (!(size >= MIN_EDGE_BREAK)) {
+      sharp++;
+      if (sharpAt.length < 5) {
+        const g = e.edge;
+        sharpAt.push(g.kind === 'line'
+          ? g.a.map((v, i) => (v + g.b[i]) / 2)
+          : g.centre.map((v, i) => v + g.ref[i] * g.radius));
+      }
+      continue;
+    }
     const key = `${mode}:${size}`;
     let f = groups.get(key);
     if (!f) { f = { mode, size, edges: [] }; groups.set(key, f); }
@@ -261,7 +273,7 @@ export function planEdgeRounds(
     if (mode === 'chamfer') chamfer = Math.max(chamfer, size); else fillet = Math.max(fillet, size);
   }
 
-  return { features: [...existing, ...groups.values()], broken, sharp, chamfer, fillet };
+  return { features: [...existing, ...groups.values()], broken, sharp, sharpAt, chamfer, fillet };
 }
 
 /**

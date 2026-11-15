@@ -24,6 +24,7 @@ import {
 } from '../../utils/userPresets';
 import { unpackMeshArrays } from '../../utils/meshPacking';
 import type { SceneGraph, SceneNode, SceneGeom } from '../../types/scene';
+import { restingPos } from '../../utils/spawnPlacement';
 import type { RawNode } from '../../utils/sceneNodes';
 import { bboxOf, stockReport } from '../../utils/sceneSummary';
 import { framingPatch } from '../../store/sceneFraming';
@@ -31,7 +32,7 @@ import { BACKGROUND_OPTIONS, isBackgroundId, withEnvironment } from '../../store
 import type { HeadlessResult } from '../../workers/physicsWorkerProtocol';
 import {
   type PhysicsWindow, workerStatusNow, countBodies, type Msg, HEADLESS_WAIT_FOR_COLLIDERS_MS,
-  SUSPICIOUSLY_LARGE_DIAGONAL_M,
+  SUSPICIOUSLY_LARGE_DIAGONAL_M, findNodeInScene,
 } from './bridgeUtils';
 import { fillBodyDefaults } from './bodyDefaults';
 import { settleScene } from './settleScene';
@@ -287,8 +288,11 @@ export const sceneCommands: McpCommands = {
     return [...Object.keys(PRESETS), ...userKeys];
   },
   IMPORT_STL: async (msg, { store }) => {
-    const { stlData, name, importMode, pos, scale, dynamic } =
-      msg as Msg<{ stlData?: string; name?: string; importMode?: string; scale?: number | [number, number, number]; dynamic?: boolean }>;
+    const { stlData, name, importMode, pos, scale, dynamic, replaceId } =
+      msg as Msg<{ stlData?: string; name?: string; importMode?: string; scale?: number | [number, number, number]; dynamic?: boolean; replaceId?: string }>;
+    // A body imported before, to take the new file's shape in its place.
+    const replacing = replaceId ? findNodeInScene(store.sceneGraph.nodes, replaceId) : null;
+    if (replaceId && !replacing) return { ok: false, error: `No body called ${replaceId} to replace.` };
     if (!stlData) return { ok: false, error: 'Missing stlData (Base64 string or ASCII text)' };
 
     let data: ArrayBuffer | string;
@@ -317,7 +321,7 @@ export const sceneCommands: McpCommands = {
       return { ok: false, error: `Failed to decode STL payload: ${String(e)}` };
     }
 
-    const baseName = name || 'imported_stl';
+    const baseName = name || replacing?.name || 'imported_stl';
     let parsed: ReturnType<typeof parseSTL>;
     try {
       parsed = parseSTL(data, { name: baseName, scale });
@@ -344,8 +348,8 @@ export const sceneCommands: McpCommands = {
         warnings.push('It was imported static (dynamic: false), and a static mesh is found by the renderer in the physics model, so its full mesh stays in the model. Import it dynamic unless it has to be fixed in place.');
       }
     }
-    const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 1];
-    const id = `stl_${Math.random().toString(36).slice(2, 7)}`;
+    const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0];
+    const id = replacing?.id ?? `stl_${Math.random().toString(36).slice(2, 7)}`;
     let newNode: SceneNode;
 
     if (mode === 'scad_parametric') {
@@ -404,7 +408,28 @@ export const sceneCommands: McpCommands = {
     // it by (store/denseColliders): renderVertices if it moves, else vertices.
     if (collider) newNode.geoms[0].denseColliderOf = denseFingerprintOf(newNode.geoms[0]) ?? collider.source;
     const currentNodes = store.sceneGraph.nodes || [];
-    const updatedNodes = [...currentNodes, newNode];
+    let updatedNodes: SceneNode[];
+    if (replacing) {
+      // The new shape in the old body: where it stands, how it is jointed,
+      // what hangs off it and its colour stay; only the shape changes.
+      const colour = replacing.geoms?.[0]?.rgba;
+      const swapped: SceneNode = {
+        ...newNode,
+        pos: Array.isArray(pos) && pos.length === 3 ? pos : replacing.pos,
+        ...(replacing.quat ? { quat: replacing.quat } : {}),
+        ...(replacing.euler ? { euler: replacing.euler } : {}),
+        joints: replacing.joints ?? newNode.joints,
+        children: replacing.children ?? [],
+        geoms: newNode.geoms.map((g, i) => (i === 0 && colour ? { ...g, rgba: colour } : g)),
+      };
+      const put = (list: SceneNode[]): SceneNode[] => list.map((n) => (n.id === replacing.id ? swapped : { ...n, children: put(n.children || []) }));
+      updatedNodes = put(currentNodes);
+    } else {
+      // Given no pos, it stands on the floor at the origin, stepped aside
+      // past anything already there.
+      if (!(Array.isArray(pos) && pos.length === 3)) newNode.pos = restingPos({ ...newNode, pos: [0, 0, 0] }, currentNodes, [0, 0]);
+      updatedNodes = [...currentNodes, newNode];
+    }
     const res = await settleScene(updatedNodes, { replacesScene: false });
 
     return {
@@ -412,6 +437,8 @@ export const sceneCommands: McpCommands = {
       ...(res.error ? { error: res.error } : {}),
       nodeId: id,
       name: baseName,
+      ...(replacing ? { replaced: true } : {}),
+      posM: (updatedNodes.length && findNodeInScene(updatedNodes, id)?.pos) || nodePos,
       importMode: mode,
       vertCount: parsed.vertices.length / 3,
       faceCount: parsed.faces.length / 3,

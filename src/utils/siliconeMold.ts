@@ -22,6 +22,11 @@
 
 import type { ManifoldToplevel, CrossSection, Manifold } from 'manifold-3d';
 import { castMaterial, castWeightG, isSiliconeId, mixGrams, type SiliconeId } from './castMaterials';
+import { trappedAirInSoup } from './trappedAir';
+import { printedMeshOf } from './printedMesh';
+
+/** Starts the pour box's warning of air held at other high points; the Silicone chain vents them and drops it. */
+export const OTHER_PEAKS_PREFIX = 'A pour through the hole traps air at';
 
 export type PourBoxShape = 'fit' | 'round' | 'box';
 
@@ -204,12 +209,8 @@ function soupVolumeBelow(wasm: ManifoldToplevel, soup: ArrayLike<number>, zCut: 
 }
 
 function meshOf(m: Manifold): PourBoxMesh {
-  const mesh = m.getMesh();
-  const positions: number[] = [];
-  for (let i = 0; i < mesh.numVert; i++) {
-    positions.push(mesh.vertProperties[i * mesh.numProp], mesh.vertProperties[i * mesh.numProp + 1], mesh.vertProperties[i * mesh.numProp + 2]);
-  }
-  return { positions, faces: Array.from(mesh.triVerts) };
+  // Without the slivers booleans leave along their seams (see printedMesh.ts).
+  return printedMeshOf(m);
 }
 
 function extent(cs: CrossSection): [number, number] {
@@ -314,6 +315,14 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
     };
     if (o.hole === 'pour' && diaMm < MIN_POUR_HOLE_MM) {
       warnings.push(`Pour hole diameter (${diaMm} mm) is below the ${MIN_POUR_HOLE_MM} mm minimum.`);
+    }
+    if (o.hole === 'pour') {
+      // Resin poured through the hole fills the master's shape from the
+      // bottom; every other high point holds its air unless vented.
+      const others = trappedAirInSoup(Float64Array.from(masterSoup), fillZ + 1, undefined, [{ x: hx, y: hy, r: diaMm / 2 + 1 }]);
+      if (others.length) {
+        warnings.push(`${OTHER_PEAKS_PREFIX} ${others.length} other high point${others.length === 1 ? '' : 's'} of the master (${others.slice(0, 3).map((p) => `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)} mm)`).join(', ')}${others.length > 3 ? ' and more' : ''}): each needs a vent through the silicone, or the hole moved over it (hole_at_mm).`);
+      }
     }
     if (o.hole !== 'pour' && Math.PI * (diaMm / 2) ** 2 > MAX_PLUGGED_MM2) {
       warnings.push(`${o.hole} hole diameter (${diaMm} mm) exceeds ${MAX_PLUGGED_DIA_MM} mm max for a plugged hole; reduce diameter or switch to a pour hole.`);

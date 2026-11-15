@@ -30,6 +30,7 @@
 
 import type { CrossSection, Manifold, ManifoldToplevel } from 'manifold-3d';
 import { buildPartManifold } from './moldManifold';
+import { printedMeshOf } from './printedMesh';
 import { castMaterial, castWeightG, mixGrams, type CastMaterialId } from './castMaterials';
 
 export interface SlipMoldOptions {
@@ -171,14 +172,8 @@ const DEG = Math.PI / 180;
 type Vec2 = [number, number];
 
 function meshOf(m: Manifold): SlipMesh {
-  const mesh = m.getMesh();
-  const positions: number[] = new Array(mesh.numVert * 3);
-  for (let i = 0; i < mesh.numVert; i++) {
-    positions[i * 3] = mesh.vertProperties[i * mesh.numProp];
-    positions[i * 3 + 1] = mesh.vertProperties[i * mesh.numProp + 1];
-    positions[i * 3 + 2] = mesh.vertProperties[i * mesh.numProp + 2];
-  }
-  return { positions, faces: Array.from(mesh.triVerts) };
+  // Without the slivers booleans leave along their seams (see printedMesh.ts).
+  return printedMeshOf(m);
 }
 
 /** Signed area of a 2D contour. */

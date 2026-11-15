@@ -40,6 +40,29 @@ export interface MeshIntegrity {
  */
 export const MAX_CHECKED_TRIANGLES = 2_000_000;
 
+/**
+ * The mesh with vertices that sit at the same point, as an STL stores it (32-bit
+ * floats), made one, the way a slicer reads it. A sliver whose corners are
+ * distinct vertices a hair apart is closed by index and broken by position;
+ * checked welded, "watertight" means what the slicer will find.
+ */
+export function weldByPosition(positions: ArrayLike<number>, faces: ArrayLike<number>): { positions: Float32Array; faces: Uint32Array } {
+  const f = Math.fround;
+  const ids = new Map<string, number>();
+  const remap = new Uint32Array(positions.length / 3);
+  const out: number[] = [];
+  for (let v = 0; v < remap.length; v++) {
+    const x = f(positions[v * 3]), y = f(positions[v * 3 + 1]), z = f(positions[v * 3 + 2]);
+    const key = `${x},${y},${z}`;
+    let id = ids.get(key);
+    if (id === undefined) { id = ids.size; ids.set(key, id); out.push(x, y, z); }
+    remap[v] = id;
+  }
+  const welded = new Uint32Array(faces.length);
+  for (let i = 0; i < faces.length; i++) welded[i] = remap[faces[i]];
+  return { positions: Float32Array.from(out), faces: welded };
+}
+
 /** `null` when the mesh is empty or too large to check. */
 export function analyzeMesh(positions: ArrayLike<number>, faces: ArrayLike<number>): MeshIntegrity | null {
   const triangles = faces.length / 3;

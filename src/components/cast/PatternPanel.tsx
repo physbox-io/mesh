@@ -113,7 +113,7 @@ export const PatternPanel: React.FC<{
   const simulate = () => chain.run(async (client) => {
     const r = await client.metalChain(scene, settled);
     if (!r.ok) return { error: r.error };
-    await addMetalChain(r, method);
+    await addMetalChain(r, method, scene.nodes.map((n) => n.id));
     const [w, d, h] = r.flask.sizeMm;
     return {
       piece: r.piece,

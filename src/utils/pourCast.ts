@@ -109,17 +109,34 @@ export function spillLevel(m: ManifoldT, b: Box, step = 0.25): number {
   return -Infinity;
 }
 
-/** The largest piece of `m` at or below `level` that stays clear of the sides; null when none. */
-function filledBelow(m: ManifoldT, level: number, b: Box): ManifoldT | null {
+/** A filled piece left out of the casting: its volume and middle, in the frame poured in. */
+export interface DroppedPocket { volumeMm3: number; atMm: [number, number, number] }
+
+const middleOf = (m: ManifoldT): [number, number, number] => {
+  const { min, max } = m.boundingBox();
+  return [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+};
+
+/**
+ * The largest piece of `m` at or below `level` that stays clear of the sides
+ * (null when none), and the other pieces that fill too but are not joined to it.
+ */
+function filledBelow(m: ManifoldT, level: number, b: Box): { best: ManifoldT | null; others: DroppedPocket[] } {
   const below = m.trimByPlane([0, 0, -1], -level);
   const parts = below.decompose();
   below.delete();
   let best: ManifoldT | null = null;
   let bestVol = 0;
+  const clear: DroppedPocket[] = [];
+  let bestEntry: DroppedPocket | null = null;
   for (const p of parts) {
     const { min, max } = p.boundingBox();
     const v = p.volume();
-    if (clearOfSides(min, max, b) && v > bestVol) {
+    if (!clearOfSides(min, max, b)) { p.delete(); continue; }
+    const entry = { volumeMm3: Math.round(v), atMm: middleOf(p) };
+    clear.push(entry);
+    if (v > bestVol) {
+      bestEntry = entry;
       best?.delete();
       best = p;
       bestVol = v;
@@ -127,7 +144,8 @@ function filledBelow(m: ManifoldT, level: number, b: Box): ManifoldT | null {
       p.delete();
     }
   }
-  return best;
+  const others = clear.filter((d) => d !== bestEntry && d.volumeMm3 > Math.max(1, bestVol * 0.01));
+  return { best, others };
 }
 
 /**
@@ -175,12 +193,15 @@ export function pourIntoCavity(
   cavity: ManifoldT,
   box: Box,
   options: PourOptions = {},
-): { casting: ManifoldT; info: PourInfo; pieces: number } | null {
+): { casting: ManifoldT; info: PourInfo; pieces: number; dropped: DroppedPocket[] } | null {
   const parts = cavity.decompose();
   const pieces = parts.length;
   const dirs = !options.direction || options.direction === 'auto' ? POUR_DIRECTIONS : [options.direction];
 
-  let best: { casting: ManifoldT; info: PourInfo; volume: number } | null = null;
+  type Held = { dir: PourDirection; volumeMm3: number; atMm: [number, number, number] };
+  let best: { casting: ManifoldT; info: PourInfo; volume: number; others: DroppedPocket[]; held: Held } | null = null;
+  /** Every pocket that holds a pour, by side: the ones not chosen are left out of the casting. */
+  const held: Held[] = [];
   for (const dir of dirs) {
     const b = turnBox(wasm, box, dir);
     for (const part of parts) {
@@ -214,14 +235,16 @@ export function pourIntoCavity(
       }
       const depthMm = level - min[2];
       const filledMm = options.fillMm && options.fillMm > 0 ? Math.min(options.fillMm, depthMm) : depthMm;
-      const casting = filledBelow(turned, min[2] + filledMm, b);
+      const { best: casting, others } = filledBelow(turned, min[2] + filledMm, b);
       turned.delete();
       if (!casting) continue;
       const volume = casting.volume();
+      const h: Held = { dir, volumeMm3: Math.round(volume), atMm: middleOf(casting) };
+      held.push(h);
       // The way the mold stands wins unless another side holds a good deal more.
       if (!best || volume > best.volume * 1.05) {
         best?.casting.delete();
-        best = { casting, info: { direction: dir, depthMm, filledMm, undercutMm2: 0, ...(plugMm2 > 0 ? { plugMm2: Math.round(plugMm2 * 10) / 10 } : {}) }, volume };
+        best = { casting, info: { direction: dir, depthMm, filledMm, undercutMm2: 0, ...(plugMm2 > 0 ? { plugMm2: Math.round(plugMm2 * 10) / 10 } : {}) }, volume, others, held: h };
       } else {
         casting.delete();
       }
@@ -232,5 +255,11 @@ export function pourIntoCavity(
   best.info.undercutMm2 = Math.round(undercutArea(best.casting));
   best.info.depthMm = Math.round(best.info.depthMm * 100) / 100;
   best.info.filledMm = Math.round(best.info.filledMm * 100) / 100;
-  return { casting: best.casting, info: best.info, pieces };
+  const chosen = best;
+  const dropped = [
+    ...chosen.others,
+    ...held.filter((h) => h !== chosen.held && h.dir === chosen.info.direction && h.volumeMm3 > Math.max(1, chosen.volume * 0.01))
+      .map(({ volumeMm3, atMm }) => ({ volumeMm3, atMm })),
+  ].sort((a, b) => b.volumeMm3 - a.volumeMm3);
+  return { casting: chosen.casting, info: chosen.info, pieces, dropped };
 }

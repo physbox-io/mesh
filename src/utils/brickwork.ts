@@ -843,6 +843,7 @@ export function brickworkSourceGeoms(source: BrickworkSource, prefix = 'brick'):
  */
 export function brickworkNodes(
   result: Pick<BrickworkResult, 'bricks' | 'standard'>, idPrefix: string, shift: [number, number, number] = [0, 0, 0], colour?: BrickColour,
+  laidFrom?: string,
 ): SceneNode[] {
   const paint = colour ?? (result.standard.toy ? toyColour : clayColour);
   const H = result.standard.heightMm;
@@ -860,6 +861,7 @@ export function brickworkNodes(
     pos: [0, 0, 0],
     joints: [],
     children: [],
+    ...(laidFrom ? { laidFrom } : {}),
     geoms: list.map((b) => {
       i++;
       return {
@@ -925,9 +927,11 @@ export function brickworkInScene(
   const prefix = `brick_${Math.random().toString(36).slice(2, 7)}`;
   // Toy bricks come in every colour: they take the model's, so a grey castle
   // builds grey. Real bricks are the colour bricks are.
-  const laid = brickworkNodes(result, prefix, shift, result.standard.toy ? colourOf(subject) : undefined);
+  const from = bodyId ?? '*';
+  const laid = brickworkNodes(result, prefix, shift, result.standard.toy ? colourOf(subject) : undefined, opts.placement === 'beside' ? from : undefined);
   const without = (list: SceneNode[]): SceneNode[] =>
     list.filter((n) => (bodyId ? n.id !== bodyId : !laidWithScene(n))).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
-  const kept = opts.placement === 'beside' ? scene.nodes : without(scene.nodes);
+  // Laid beside again from the same model: the courses laid before go.
+  const kept = opts.placement === 'beside' ? scene.nodes.filter((n) => n.laidFrom !== from) : without(scene.nodes);
   return { nodes: [...kept, ...laid], result };
 }

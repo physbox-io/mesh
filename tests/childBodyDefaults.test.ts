@@ -8,14 +8,20 @@ import { useStore } from '../src/store/useStore';
 import type { SceneNode } from '../src/types';
 
 describe('fillBodyDefaults pos', () => {
-  it('drops a top-level body from a metre up but sits a child at its parent', () => {
+  it('stands a top-level body on the floor and sits a child at its parent', () => {
     const node = fillBodyDefaults({
       name: 'frame',
       geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }],
-      children: [{ name: 'arm', geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }],
+      children: [{ name: 'arm', pos: [0, 0, -0.08], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }],
     });
+    // The arm hangs lowest: 0.09 m under the body's origin.
+    expect(node.pos[2]).toBeCloseTo(0.09, 6);
+    expect(node.children[0].pos).toEqual([0, 0, -0.08]);
+  });
+
+  it('keeps a metre up for a body whose extent is not known yet', () => {
+    const node = fillBodyDefaults({ name: 'scad', scad: 'cube(10);', geoms: [{ type: 'mesh', size: [1] }] } as never);
     expect(node.pos).toEqual([0, 0, 1]);
-    expect(node.children[0].pos).toEqual([0, 0, 0]);
   });
 
   it('sits a fixed top-level body where it is drawn, not a metre up', () => {

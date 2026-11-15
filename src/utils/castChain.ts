@@ -32,7 +32,7 @@ import { simulateCastFromMoldNode } from './moldCastSimulation';
 import { generateCastPattern, type CastOptions } from './castPatternExporter';
 import { collectSceneTriangles } from './contourSliceExporter';
 import { castMaterial, castMaterialWarnings, castWeightG, mixGrams, type CastMaterialId, type SiliconeId } from './castMaterials';
-import type { PourBoxOptions } from './siliconeMold';
+import { OTHER_PEAKS_PREFIX, soupVolume, type PourBoxOptions } from './siliconeMold';
 
 /** Narrower than this, mm across, and a pour will not go in through the opening. */
 export { MIN_POUR_HOLE_MM as MIN_POUR_OPENING_MM } from './siliconeMold';
@@ -389,7 +389,8 @@ export async function siliconeChain(
   }
   // Poured from the top to the fill line, and handed back turned onto the face
   // the pour left: the silicone mold the right way up to pour into.
-  const silicone = await simulateCastFromMoldNode(mold, { pour: { direction: '+z', fillMm: box.report.pourDepthMm } });
+  // The resin pour after it is the one that holds air, and is vented below.
+  const silicone = await simulateCastFromMoldNode(mold, { pour: { direction: '+z', fillMm: box.report.pourDepthMm }, airAware: false });
   if (!silicone.success) return { ok: false, error: `The silicone would not pour round the master: ${silicone.error}` };
   const master = masterSoup(wasm, scene, ids);
 
@@ -444,12 +445,11 @@ export async function siliconeChain(
       }
     }
 
-    const warnings: string[] = [];
+    // What the silicone pour itself left, air under the master among it.
+    const warnings: string[] = silicone.warnings.filter((w) => !w.startsWith('Falling back')).map((w) => `Silicone pour: ${w}`);
     let points = trappedAirPoints(casting, level);
-    if (points.length > MAX_VENTS) {
-      warnings.push(`Air is trapped in ${points.length} places; the ${MAX_VENTS} highest are vented. Turning the master to stand another way may trap less.`);
-      points = points.slice(0, MAX_VENTS);
-    }
+    const unvented = points.slice(MAX_VENTS);
+    if (unvented.length) points = points.slice(0, MAX_VENTS);
     const sb = S.boundingBox();
     let vented = S;
     for (const p of points) {
@@ -460,6 +460,13 @@ export async function siliconeChain(
     // Settled as added to the scene; the vents are reported in that frame.
     const vb = vented.boundingBox();
     const vcx = (vb.min[0] + vb.max[0]) / 2, vcy = (vb.min[1] + vb.max[1]) / 2;
+    if (unvented.length) {
+      const at = unvented.slice(0, 3).map((p) => `(${Math.round(p.x - vcx)}, ${Math.round(p.y - vcy)} mm)`).join(', ');
+      warnings.push(`Air is trapped in ${points.length + unvented.length} places; the ${MAX_VENTS} highest are vented and the rest, at ${at}${unvented.length > 3 ? ' and more' : ''} (plan, as vents are given), are not. Turning the master to stand another way may trap less.`);
+    }
+    if (poured.dropped.length) {
+      warnings.push(`${poured.dropped.length === 1 ? 'Another pocket' : `${poured.dropped.length} other pockets`} of the mold (${poured.dropped.slice(0, 3).map((d) => `${d.volumeMm3} mm³`).join(', ')}) fill${poured.dropped.length === 1 ? 's' : ''} but ${poured.dropped.length === 1 ? 'is' : 'are'} not joined to the casting, so ${poured.dropped.length === 1 ? 'it is' : 'they are'} left out of it.`);
+    }
     settle(siliconeMold.positions);
 
     // Poured through a hole, the casting stands as the master does already, with
@@ -490,6 +497,10 @@ export async function siliconeChain(
       finished = turnedOver(raw);
     }
     const r = box.report;
+    const masterMm3 = Math.abs(soupVolume(master));
+    if (masterMm3 > 0 && volume < 0.9 * masterMm3) {
+      warnings.push(`The casting came to ${Math.round((100 * volume) / masterMm3)}% of the master's volume: the pour does not fill the mold.`);
+    }
     return {
       ok: true,
       piece: piece(finished, volume, material, master, false),
@@ -497,7 +508,8 @@ export async function siliconeChain(
       vents: points.map((p) => ({ x: Math.round((p.x - vcx) * 10) / 10, y: Math.round((p.y - vcy) * 10) / 10 })),
       silicone: { id: r.silicone, grams: r.siliconeG, aG: r.partAG, bG: r.partBG, name: r.siliconeName },
       pouredThrough: pourHole ? 'pour hole' : 'foot',
-      warnings: [...r.warnings, ...warnings],
+      // The chain vents the other high points itself.
+      warnings: [...r.warnings.filter((w) => !w.startsWith(OTHER_PEAKS_PREFIX)), ...warnings],
     };
   } finally {
     own.free();

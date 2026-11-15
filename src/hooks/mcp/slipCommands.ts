@@ -87,6 +87,7 @@ export const slipCommands: McpCommands = {
           natches: p.natches,
         })),
         ...(added ? { added: { plasterIds: added.plasterIds, caseIds: added.caseIds } } : {}),
+        ...(added?.replaced.length ? { replaced: added.replaced } : {}),
         ...(cast ? { cast } : {}),
       },
       warnings: [...warnings, ...castWarnings],

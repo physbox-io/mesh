@@ -103,7 +103,7 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
   const simulate = () => chain.run(async (client) => {
     const r = await client.siliconeChain(useStore.getState().sceneGraph, ids, settled, material);
     if (!r.ok) return { error: r.error };
-    await addSiliconeChain(r);
+    await addSiliconeChain(r, ids);
     return {
       piece: r.piece,
       extra: [r.vents.length ? `${r.vents.length} vent${r.vents.length === 1 ? '' : 's'} cut in the silicone mold` : 'No vents needed', ...r.warnings],

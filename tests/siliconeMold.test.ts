@@ -4,7 +4,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
 import { buildPourBox, holePinMesh, soupVolume, topZAt, type PourBoxMesh } from '../src/utils/siliconeMold';
-import { analyzeMesh } from '../src/utils/meshIntegrity';
+import { analyzeMesh, weldByPosition } from '../src/utils/meshIntegrity';
+import { pourBoxStl } from '../src/utils/pourBoxActions';
 import { simulateCastFromMoldNode } from '../src/utils/moldCastSimulation';
 import { planPourBox, sceneWithPourBox } from '../src/utils/pourBoxScene';
 import { pourBoxIn, pourNodeFor } from '../src/utils/pourTarget';
@@ -266,12 +267,24 @@ describe('after the pour box is added', () => {
   const cubeGeom = { name: 'cube', type: 'box', size: [0.01, 0.01, 0.01] } as SceneGeom;
   const master = { id: 'm', name: 'cube', type: 'body', pos: [0, 0, 0.01], joints: [], geoms: [cubeGeom], children: [] } as unknown as SceneNode;
 
+  it('replaces the box made before round the same master, and keeps one round another', async () => {
+    const other = { ...master, id: 'o', name: 'other', pos: [0.1, 0, 0.01] } as unknown as SceneNode;
+    const scene = { nodes: [master, other] } as unknown as SceneGraph;
+    const first = sceneWithPourBox(scene, ['m'], await planPourBox(scene, ['m'], {}));
+    const besideOther = sceneWithPourBox(first.scene, ['o'], await planPourBox(first.scene, ['o'], {}));
+    const again = sceneWithPourBox(besideOther.scene, ['m'], await planPourBox(besideOther.scene, ['m'], { coverMm: 10 }));
+    expect(again.replaced.map((r) => r.id).sort()).toEqual([first.baseId, first.sleeveId].sort());
+    const boxes = again.scene.nodes.filter((n) => n.pourBox);
+    expect(boxes.length).toBe(4);
+    expect(boxes.some((n) => n.id === besideOther.baseId)).toBe(true);
+  });
+
   it('marks the sleeve with its fill line, which a pour into the box picks up', async () => {
     const scene = { nodes: [master] } as unknown as SceneGraph;
     const box = await planPourBox(scene, ['m'], {});
     const out = sceneWithPourBox(scene, ['m'], box);
     const sleeve = out.scene.nodes.find((n) => n.id === out.sleeveId)!;
-    expect(sleeve.pourBox).toEqual({ pourDepthMm: box.report.pourDepthMm, silicone: 'platinum' });
+    expect(sleeve.pourBox).toEqual({ pourDepthMm: box.report.pourDepthMm, silicone: 'platinum', siliconeMm3: box.report.siliconeMm3, masterIds: ['m'] });
     expect(out.scene.nodes.find((n) => n.id === out.baseId)!.pourBox).toEqual(sleeve.pourBox);
     expect(pourBoxIn(pourNodeFor(out.scene.nodes, ['m', out.baseId, out.sleeveId])!)).toEqual(sleeve.pourBox);
     expect(pourBoxIn(master)).toBeNull();
@@ -319,5 +332,38 @@ describe('a groove deeper than the base allows', () => {
     const asked = buildPourBox(wasm, cylinderSoup(10, 20), { baseMm: 6, grooveMm: 4 });
     expect(asked.report.grooveMm).toBe(4);
     expect(asked.report.warnings.some((w) => /groove/i.test(w))).toBe(false);
+  });
+});
+
+describe('the pour box as printed files', () => {
+  /** An STL's triangles as positions and faces, three vertices each. */
+  function readStl(bytes: Uint8Array) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const n = dv.getUint32(80, true);
+    const positions: number[] = [];
+    for (let t = 0; t < n; t++) for (let k = 0; k < 3; k++) {
+      const o = 84 + t * 50 + 12 + k * 12;
+      positions.push(dv.getFloat32(o, true), dv.getFloat32(o + 4, true), dv.getFloat32(o + 8, true));
+    }
+    return { positions, faces: positions.map((_, i) => i).filter((i) => i < positions.length / 3) };
+  }
+
+  it('comes out closed as a slicer welds it, standing on z = 0, wherever the master stood', () => {
+    // A ball a metre up: a round box leaves seams that used to weld into slivers.
+    const ball: number[] = [];
+    const P = (u: number, v: number) => { const th = (2 * Math.PI * u) / 48, ph = (Math.PI * v) / 24; return [25 * Math.sin(ph) * Math.cos(th), 25 * Math.sin(ph) * Math.sin(th), 1000 + 25 - 25 * Math.cos(ph)]; };
+    for (let u = 0; u < 48; u++) for (let v = 0; v < 24; v++) {
+      const a = P(u, v), b = P(u + 1, v), c = P(u + 1, v + 1), d = P(u, v + 1);
+      if (v > 0) ball.push(...a, ...c, ...b);
+      if (v < 23) ball.push(...a, ...d, ...c);
+    }
+    const box = buildPourBox(wasm, ball, { shape: 'round' });
+    for (const piece of [box.base, box.sleeve]) {
+      const stl = readStl(pourBoxStl(piece, 'piece'));
+      expect(Math.min(...stl.positions.filter((_, i) => i % 3 === 2))).toBeCloseTo(0, 4);
+      const w = weldByPosition(stl.positions, stl.faces);
+      const a = analyzeMesh(w.positions, w.faces)!;
+      expect({ boundary: a.boundaryEdges, nonManifold: a.nonManifoldEdges, degenerate: a.degenerateTriangles }).toEqual({ boundary: 0, nonManifold: 0, degenerate: 0 });
+    }
   });
 });

@@ -25,6 +25,7 @@ import { generatedMeshMass } from '../../utils/generatedMeshMass';
 import { pointList, toRenderVertices } from './bridgeUtils';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 import { latticeBodyPos } from '../../utils/latticeFrame';
+import { sceneContentBounds } from '../../utils/frameScene';
 import { checkIncomingBody } from '../../utils/incomingBodyCheck';
 import { geomSizeProblem } from '../../utils/geomSize';
 import { withoutNulls } from '../../utils/withoutNulls';
@@ -647,6 +648,13 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
       curveBank:      b.curveBank      ?? 0,
     } : {}),
   };
+  // A body free to move, given no pos, stands on the floor where it is drawn
+  // instead of falling from a metre up; a metre up only while its extent is
+  // not known (an OpenSCAD body not compiled yet).
+  if (b.pos === undefined && !nested && moves && !latticeFields) {
+    const own = sceneContentBounds([{ ...node, pos: [0, 0, 0] }]);
+    if (own && Number.isFinite(own.min[2]) && own.max[2] > own.min[2]) node.pos = [0, 0, Math.round(-own.min[2] * 1e6) / 1e6];
+  }
   checkIncomingBody(node, resolvedJoints.length > 0);
   return node;
 };

@@ -67,7 +67,21 @@ export interface CastFillReport {
   trappedMm3: number;
   pockets: number;
   largestPocketMm3: number;
+  /** The largest pockets' tops, on the casting as returned (mm, base centre at the origin). */
+  pocketsAtMm?: { atMm: [number, number, number]; volumeMm3: number }[];
 }
+
+/**
+ * A warning that names a place, given in the mold's frame, written once the
+ * casting's own frame is known: positions are reported on the casting as it is
+ * returned, base centre at the origin, so they can be found on the body added.
+ */
+interface PlacedWarning {
+  at: [number, number, number][];
+  text: (at: string[]) => string;
+}
+
+const fmtAt = (p: readonly number[]) => `(${p.map((v) => (Math.abs(v) < 0.5 ? 0 : v).toFixed(0)).join(', ')} mm)`;
 
 export interface MoldCastSimulationResult {
   success: boolean;
@@ -444,7 +458,7 @@ function pourWithAir(
   wasm: ManifoldToplevel,
   cavity: ManifoldT,
   material: CastMaterialId,
-): { casting: ManifoldT; report: CastFillReport; warning?: string } | null {
+): { casting: ManifoldT; report: CastFillReport; warning?: PlacedWarning; pocketTops: { at: [number, number, number]; volumeMm3: number }[] } | null {
   const raw = manifoldToMeshMm(cavity);
   const flat = new Float64Array(raw.faces.length * 3);
   for (let i = 0; i < raw.faces.length; i++) {
@@ -464,22 +478,27 @@ function pourWithAir(
     pockets: res.pockets.length,
     largestPocketMm3: Math.round(res.pockets[0]?.volumeMm3 ?? 0),
   };
+  const pocketTops = res.pockets.slice(0, 5).map((p) => ({ at: p.topMm, volumeMm3: Math.round(p.volumeMm3) }));
   const volume = cavity.volume();
   // A cell's worth here and there is the voxels, not air.
-  if (res.trappedMm3 < Math.max(2, volume * 0.003)) return { casting: cavity, report };
+  if (res.trappedMm3 < Math.max(2, volume * 0.003)) return { casting: cavity, report, pocketTops };
   const air = airSolid(wasm, dom, res);
-  if (!air) return { casting: cavity, report };
+  if (!air) return { casting: cavity, report, pocketTops };
   const casting = cavity.subtract(air);
   air.delete();
   const share = 1 - casting.volume() / volume;
   // A bubble a few millimetres across here and there is reported, not warned about.
   const matters = share >= 0.01 || report.largestPocketMm3 >= 30;
-  const warning = matters
-    ? `Air stays in ${res.pockets.length === 1 ? 'one pocket' : `${res.pockets.length} pockets`} (${report.trappedMm3} mm³, ${Math.round(share * 1000) / 10}% of the casting, ` +
-      `the largest ${report.largestPocketMm3} mm³): the ${castMaterial(material).label.toLowerCase()} cannot get in where its air cannot get out. ` +
-      'Each needs a vent from its top, or the mold filled from the bottom.'
+  const named = pocketTops.filter((p) => p.volumeMm3 >= 1).slice(0, 3);
+  const warning: PlacedWarning | undefined = matters
+    ? {
+      at: named.map((p) => p.at),
+      text: (at) => `Air stays in ${res.pockets.length === 1 ? 'one pocket' : `${res.pockets.length} pockets`} (${report.trappedMm3} mm³, ${Math.round(share * 1000) / 10}% of the casting), ` +
+        `topped at ${named.map((p, i) => `${at[i]}${named.length > 1 ? ` (${p.volumeMm3} mm³)` : ''}`).join(', ')}${res.pockets.length > named.length ? ' and more' : ''} on the casting: ` +
+        `the ${castMaterial(material).label.toLowerCase()} cannot get in where its air cannot get out. Each needs a vent from its top, or the mold filled from the bottom.`,
+    }
     : undefined;
-  return { casting, report, warning };
+  return { casting, report, warning, pocketTops };
 }
 
 /** The trapped air as a solid: its cells and the mold cells round them, so the cut follows the mold's walls. */
@@ -1058,12 +1077,43 @@ export async function simulateCastFromMoldTriangles(
           };
         }
         // The casting comes turned with the side poured from up, where a sprue stands.
-        const casting = options.trimChannels ? trimRunnerChannels(wasm, poured.casting) : poured.casting;
+        let casting = poured.casting;
+        const placed: PlacedWarning[] = [];
+        if (poured.dropped.length) {
+          const d = poured.dropped.slice(0, 3);
+          placed.push({
+            at: d.map((p) => p.atMm),
+            text: (at) => `${poured.dropped.length === 1 ? 'Another pocket' : `${poured.dropped.length} other pockets`} (${d.map((p, i) => `${p.volumeMm3} mm³ at ${at[i]}`).join(', ')}, beside the casting) ${poured.dropped.length === 1 ? 'fills' : 'fill'} too but ${poured.dropped.length === 1 ? 'is' : 'are'} not joined to it, so ${poured.dropped.length === 1 ? 'it is' : 'they are'} not in this casting.`,
+          });
+        }
+        // Air under an overhang the pour reaches from above stays there; with
+        // nothing over the casting there is no ceiling to hold any.
+        let fill: CastFillReport | undefined;
+        let pocketTops: { at: [number, number, number]; volumeMm3: number }[] = [];
+        if (options.airAware !== false && poured.info.undercutMm2 > 0) {
+          const aired = pourWithAir(wasm, casting, options.castMaterial ?? 'epoxy');
+          if (aired) {
+            fill = aired.report;
+            pocketTops = aired.pocketTops;
+            if (aired.casting !== casting) {
+              casting.delete();
+              casting = aired.casting;
+            }
+            if (aired.warning) placed.push(aired.warning);
+          }
+        }
+        if (options.trimChannels) {
+          const trimmed = trimRunnerChannels(wasm, casting);
+          if (trimmed !== casting) casting = trimmed;
+        }
         const raw = manifoldToMeshMm(casting);
         casting.delete();
         // Turned out of the mold onto the face the pour left, unless kept as poured.
-        const res = finalizeCastMesh(raw.positionsMm, raw.faces, poured.pieces, { ...options, flipUpright: options.orientUpright !== false }, warnings);
-        return { ...res, pour: poured.info };
+        const res = finalizeCastMesh(raw.positionsMm, raw.faces, poured.pieces, { ...options, flipUpright: options.orientUpright !== false }, warnings,
+          [...placed, { at: pocketTops.map((p) => p.at), text: () => '' }]);
+        if (fill && pocketTops.length) fill.pocketsAtMm = pocketTops.map((p, i) => ({ atMm: res.placedAt![placed.length][i], volumeMm3: p.volumeMm3 }));
+        delete res.placedAt;
+        return { ...res, pour: poured.info, ...(fill ? { fill } : {}) };
       }
 
       if (!cavity.isEmpty()) {
@@ -1084,19 +1134,36 @@ export async function simulateCastFromMoldTriangles(
               best = p;
             }
           }
+          // Another cavity that would pour, left out: it gets no casting.
+          const placed: PlacedWarning[] = [];
+          const bestVol = best.volume();
+          const others = parts.filter((p) => p !== best && probeFacesTouched(p, probe) <= 1 && p.volume() > Math.max(1, bestVol * 0.01));
+          if (others.length) {
+            const centres = others.slice(0, 3).map((p) => {
+              const ob = p.boundingBox();
+              return [(ob.min[0] + ob.max[0]) / 2, (ob.min[1] + ob.max[1]) / 2, (ob.min[2] + ob.max[2]) / 2] as [number, number, number];
+            });
+            const vols = others.slice(0, 3).map((p) => Math.round(p.volume()));
+            placed.push({
+              at: centres,
+              text: (at) => `${others.length === 1 ? 'Another cavity' : `${others.length} other cavities`} (${vols.map((v, i) => `${v} mm³ at ${at[i]}`).join(', ')}, beside the casting) ${others.length === 1 ? 'is' : 'are'} not joined to the one poured and cast${others.length === 1 ? 's' : ''} nothing: join ${others.length === 1 ? 'it' : 'them'} with a runner, or mold separately.`,
+            });
+          }
           for (const p of parts) {
             if (p !== best) p.delete();
           }
           let fill: CastFillReport | undefined;
+          let pocketTops: { at: [number, number, number]; volumeMm3: number }[] = [];
           if (options?.isClamshell && options.airAware !== false) {
             const poured = pourWithAir(wasm, best, options.castMaterial ?? 'epoxy');
             if (poured) {
               fill = poured.report;
+              pocketTops = poured.pocketTops;
               if (poured.casting !== best) {
                 best.delete();
                 best = poured.casting;
               }
-              if (poured.warning) warnings.push(poured.warning);
+              if (poured.warning) placed.push(poured.warning);
             }
           }
           // Trimmed, the bottom fill's down-sprue, runner and gate come off along
@@ -1110,7 +1177,10 @@ export async function simulateCastFromMoldTriangles(
           const raw = manifoldToMeshMm(best);
           best.delete();
 
-          const res = finalizeCastMesh(raw.positionsMm, raw.faces, cavityComponents, options, warnings);
+          const marks: PlacedWarning[] = [...placed, { at: pocketTops.map((p) => p.at), text: () => '' }];
+          const res = finalizeCastMesh(raw.positionsMm, raw.faces, cavityComponents, options, warnings, marks);
+          if (fill && pocketTops.length) fill.pocketsAtMm = pocketTops.map((p, i) => ({ atMm: res.placedAt![placed.length][i], volumeMm3: p.volumeMm3 }));
+          delete res.placedAt;
           return fill ? { ...res, fill } : res;
         }
       } else {
@@ -1138,7 +1208,7 @@ export async function simulateCastFromMoldTriangles(
   }
 
   // 4. Fallback Path: Exact Column Spans + meshField
-  warnings.push('Falling back to column spans and surface nets for mold cavity simulation.');
+  warnings.push('Falling back to column spans and surface nets for mold cavity simulation: trapped air was not checked.');
   return fallbackColumnSpansCast(trisMm, boxMinX, boxMaxX, boxMinY, boxMaxY, minZ, maxZ, options, warnings);
 }
 
@@ -1205,7 +1275,8 @@ function finalizeCastMesh(
   cavityComponents: number,
   options?: InternalCastOptions,
   warnings: string[] = [],
-): MoldCastSimulationResult {
+  placed: PlacedWarning[] = [],
+): MoldCastSimulationResult & { placedAt?: [number, number, number][][] } {
   const pos = new Float32Array(positionsMm);
 
   let mnZ = Infinity, mxZ = -Infinity;
@@ -1260,6 +1331,12 @@ function finalizeCastMesh(
     pos[i + 1] -= cy;
     pos[i + 2] -= cz;
   }
+  // Places named in warnings, moved as the casting was.
+  const placedAt = placed.map((w) => w.at.map((p) => [p[0] - cx, (shouldFlip ? -p[1] : p[1]) - cy, (shouldFlip ? -p[2] : p[2]) - cz] as [number, number, number]));
+  placed.forEach((w, i) => {
+    const text = w.text(placedAt[i].map(fmtAt));
+    if (text) warnings.push(text);
+  });
 
   const castVolumeMm3 = computeMeshVolume(pos, faces);
   const sizeMm = {
@@ -1325,6 +1402,7 @@ function finalizeCastMesh(
     sizeMm,
     cavityComponents,
     ...(textures && textures.length > 0 ? { textures } : {}),
+    ...(placed.length ? { placedAt } : {}),
   };
 }
 

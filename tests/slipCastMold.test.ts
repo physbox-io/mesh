@@ -6,6 +6,8 @@ import { loadManifold } from '../src/utils/sculptCut';
 import { buildSlipMold, type SlipMesh } from '../src/utils/slipCastMold';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { simulateSlipCast } from '../src/utils/slipCastSimulation';
+import { sceneWithSlipMold } from '../src/utils/slipMoldScene';
+import type { SceneGraph } from '../src/types/scene';
 
 let wasm: ManifoldToplevel;
 beforeAll(async () => { wasm = await loadManifold(); });
@@ -248,5 +250,16 @@ describe('slip spare over the opening', () => {
 
   it('refuses a spare position off the part', () => {
     expect(() => buildSlipMold(wasm, soupOf(jug()), { spareAtMm: [500, 500] })).toThrow(/not over the part/);
+  });
+});
+
+describe('slip mold made again', () => {
+  it('replaces the plaster and cases made before round the same part', () => {
+    const mold = buildSlipMold(wasm, soupOf(vase()), {});
+    const scene = { nodes: [{ id: 'v', name: 'vase', type: 'body', geoms: [], children: [] }] } as unknown as SceneGraph;
+    const first = sceneWithSlipMold(scene, 'vase', mold, ['v']);
+    const second = sceneWithSlipMold(first.scene, 'vase', mold, ['v']);
+    expect(second.replaced.map((r) => r.id).sort()).toEqual([...first.plasterIds, ...first.caseIds].sort());
+    expect(second.scene.nodes.filter((n) => n.slipMold).length).toBe(first.plasterIds.length + first.caseIds.length);
   });
 });

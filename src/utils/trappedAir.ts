@@ -294,7 +294,13 @@ function components(g: SpanGraph, member: (n: number) => boolean): number[][] {
  * too. Highest first. This is the silicone mold's rule: rubber does not
  * breathe, so every patch gets its vent.
  */
-export function trappedAirInSoup(tris: Float64Array, level: number, solidIds?: ArrayLike<number>): { x: number; y: number; z: number }[] {
+export function trappedAirInSoup(
+  tris: Float64Array,
+  level: number,
+  solidIds?: ArrayLike<number>,
+  /** Openings already there (plan, mm): a patch touching one is vented by it. */
+  openings: { x: number; y: number; r: number }[] = [],
+): { x: number; y: number; z: number }[] {
   const g = buildGraph(tris, solidIds, SILICONE_GRAPH);
   if (!g) return [];
   const tol = Math.max(0.5, g.cell);
@@ -305,7 +311,9 @@ export function trappedAirInSoup(tris: Float64Array, level: number, solidIds?: A
     for (let j = g.adjStart[n]; j < g.adjStart[n + 1]; j++) if (g.top[g.adj[j]] > g.top[n] + 1e-4) { escapes = true; break; }
     if (!escapes) trapped[n] = 1;
   }
+  const opened = (n: number) => openings.some((o) => Math.hypot(xOf(g, n) - o.x, yOf(g, n) - o.y) <= o.r);
   return components(g, (n) => trapped[n] === 1)
+    .filter((comp) => !comp.some(opened))
     .map((comp) => {
       const best = comp.reduce((b, n) => (g.top[n] > g.top[b] ? n : b), comp[0]);
       return { x: xOf(g, best), y: yOf(g, best), z: g.top[best] };
@@ -332,6 +340,8 @@ export interface BurnoutVentPlan {
   vents: BurnoutVent[];
   /** Pockets still holding air when the vent limit was reached. */
   leftOver: number;
+  /** The highest point of each of those, deepest first. */
+  leftOverAt: { x: number; y: number; z: number }[];
   /** Pockets with no place a vent fits clear of the sprue: highest point of each. */
   unventable: { x: number; y: number; z: number }[];
   /** Pockets too fine anywhere for a rod worth printing, left to the investment: highest point and air depth of each. */
@@ -380,7 +390,7 @@ export function planBurnoutVents(
   opts: BurnoutVentOptions,
   solidIds?: ArrayLike<number>,
 ): BurnoutVentPlan {
-  const plan: BurnoutVentPlan = { vents: [], leftOver: 0, unventable: [], tooFine: [], unreached: [] };
+  const plan: BurnoutVentPlan = { vents: [], leftOver: 0, leftOverAt: [], unventable: [], tooFine: [], unreached: [] };
   const g = buildGraph(tris, solidIds, BURNOUT_GRAPH);
   if (!g) return plan;
   const n = g.top.length;
@@ -485,7 +495,11 @@ export function planBurnoutVents(
       .filter((p) => p.deepest >= opts.minDepthMm || p.air >= opts.minAirMm3)
       .sort((a, b) => b.deepest - a.deepest || b.air - a.air);
     if (pockets.length === 0) break;
-    if (plan.vents.length >= opts.maxVents) { plan.leftOver = pockets.length; break; }
+    if (plan.vents.length >= opts.maxVents) {
+      plan.leftOver = pockets.length;
+      plan.leftOverAt = pockets.map((q) => pointOf(highest(q.comp)));
+      break;
+    }
     const p = pockets[0];
     const spot = placeIn(p.comp, cavityDistance(g, [...outlets, ...ventNodes]));
     if (typeof spot === 'string') {

@@ -781,6 +781,11 @@ export interface SceneNode {
    * Box geoms in the body's frame; see utils/brickwork.ts.
    */
   brickwork?: BrickworkSource;
+  /**
+   * On a course Make > Brick laid beside its model: the body it was laid from
+   * ('*' for the whole scene). Laying the same again replaces these courses.
+   */
+  laidFrom?: string;
   // --- CSG (boolean modifiers) ---------------------------------------------
   // When true, the body's geoms are treated as a CSG program rather than as a
   // set of independent solids: positives are unioned, geoms marked
@@ -979,6 +984,8 @@ export interface SceneNode {
     pourDepthMm: number;
     /** The silicone it was planned for: what a pour into the box pours. */
     silicone?: 'platinum' | 'tin';
+    /** The silicone a full pour takes, mm³: a pour well under it stopped short. */
+    siliconeMm3?: number;
     /** What it was planned with, and round which bodies, so the Silicone chain plans this box again. */
     options?: Partial<PourBoxOptions>;
     masterIds?: string[];
@@ -988,7 +995,7 @@ export interface SceneNode {
    * round the part, or the printed case that casts it. Tooling, never molded
    * or exported as part of the design.
    */
-  slipMold?: { piece: string; role: 'plaster' | 'case'; slip: string };
+  slipMold?: { piece: string; role: 'plaster' | 'case'; slip: string; /** The bodies it was made round: making it again replaces it. */ partIds?: string[] };
   /**
    * Set on a body Add Simulation made: the part a machining program will leave,
    * cut back out of the stock, not part of the design. The exporters leave it
@@ -1012,6 +1019,8 @@ export interface SceneNode {
     stages?: number;
     /** The plan the step was simulated from, so a re-plan starts the steps over. */
     planKey?: string;
+    /** What made it (a chain and its part): made again, it replaces this body. */
+    source?: string;
     /**
      * A generated mold's master, so a pour into it can say when it came up
      * short: the master's volume, and whether the mold lies open as it prints

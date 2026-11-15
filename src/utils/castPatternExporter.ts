@@ -1223,11 +1223,15 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       cavityIds,
     );
     unventedPockets = plan.unventable.length + plan.tooFine.length;
+    const placeOf = (p: { x: number; y: number; z: number }) => `${(p.z * grow).toFixed(0)} mm up at (${(p.x * grow).toFixed(0)}, ${(p.y * grow).toFixed(0)})`;
+    const listed = (ps: { x: number; y: number; z: number }[]) => ps.slice(0, 3).map(placeOf).join('; ') + (ps.length > 3 ? '; and more' : '');
     if (plan.leftOver > 0) {
+      const where = plan.leftOverAt.length ? ` Unvented: ${listed(plan.leftOverAt)}.` : '';
       warnings.push(
-        plan.vents.length >= MAX_BURNOUT_VENTS
-          ? `Air is trapped in ${plan.vents.length + plan.leftOver} places; the ${MAX_BURNOUT_VENTS} deepest are vented. Turning the part to stand another way may trap less.`
-          : `Air is trapped in more places than could be vented (${plan.vents.length} vented). Turning the part to stand another way may trap less.`
+        (plan.vents.length >= MAX_BURNOUT_VENTS
+          ? `Air is trapped in ${plan.vents.length + plan.leftOver} places; the ${MAX_BURNOUT_VENTS} deepest are vented.`
+          : `Air is trapped in more places than could be vented (${plan.vents.length} vented).`) +
+        `${where} Turning the part to stand another way may trap less.`
       );
     }
     for (const u of plan.unventable) {
@@ -1238,13 +1242,13 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     if (plan.tooFine.length > 0) {
       const deepest = Math.max(...plan.tooFine.map((f) => f.depthMm)) * grow;
       warnings.push(
-        `${plan.tooFine.length === 1 ? 'A pocket is' : `${plan.tooFine.length} pockets are`} too fine for a vent rod (up to ${deepest.toFixed(1)} mm of air), so the investment has to breathe ${plan.tooFine.length === 1 ? 'it' : 'them'}; a vacuum-assisted pour helps.`
+        `${plan.tooFine.length === 1 ? 'A pocket is' : `${plan.tooFine.length} pockets are`} too fine for a vent rod (up to ${deepest.toFixed(1)} mm of air; ${listed(plan.tooFine)}), so the investment has to breathe ${plan.tooFine.length === 1 ? 'it' : 'them'}; a vacuum-assisted pour helps.`
       );
     }
     if (plan.unreached.length > 0) {
       const one = plan.unreached.length === 1;
       warnings.push(
-        `${one ? 'A piece' : `${plan.unreached.length} pieces`} of the part ${one ? 'is' : 'are'} not joined to the rest, so the metal from the sprue never reaches ${one ? 'it' : 'them'}. Join ${one ? 'it' : 'them'} on, or cast ${one ? 'it' : 'them'} separately.`
+        `${one ? 'A piece' : `${plan.unreached.length} pieces`} of the part (${listed(plan.unreached)}) ${one ? 'is' : 'are'} not joined to the rest, so the metal from the sprue never reaches ${one ? 'it' : 'them'}. Join ${one ? 'it' : 'them'} on, or cast ${one ? 'it' : 'them'} separately.`
       );
     }
     for (const pv of plan.vents) {

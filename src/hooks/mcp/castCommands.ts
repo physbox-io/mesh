@@ -83,6 +83,7 @@ export const castCommands: McpCommands = {
         master: ids,
         ...(box.hole ? { hole: { purpose: box.hole.purpose, diaMm: box.hole.diaMm } } : {}),
         ...(added ? { added: { baseId: added.baseId, sleeveId: added.sleeveId, ...(added.holePinId ? { holePinId: added.holePinId } : {}) }, selected: added.selected } : {}),
+        ...(added?.replaced.length ? { replaced: added.replaced } : {}),
       },
       warnings,
       files: describeFiles(

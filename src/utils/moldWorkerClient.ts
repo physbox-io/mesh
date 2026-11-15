@@ -291,11 +291,19 @@ const SHORT_POUR_SHARE = 0.9;
  */
 export function pourShortfallWarning(node: SceneNode, castVolumeMm3: number): string | null {
   const mold = node.simulation?.mold;
-  if (!mold || !(mold.masterVolumeMm3 > 0)) return null;
-  const share = castVolumeMm3 / mold.masterVolumeMm3;
-  const pct = Math.round(share * 100);
+  if (mold && mold.masterVolumeMm3 > 0) return shortfallWarning(castVolumeMm3, mold.masterVolumeMm3, "the master's volume");
+  // A master in its pour box: the silicone the box was planned to take.
+  const box = pourBoxIn(node);
+  if (box?.siliconeMm3 && box.siliconeMm3 > 0) return shortfallWarning(castVolumeMm3, box.siliconeMm3, 'the silicone the pour box takes');
+  return null;
+}
+
+/** A casting well under what it should come to, in words; null when it is not. */
+export function shortfallWarning(castVolumeMm3: number, expectedMm3: number, of: string): string | null {
+  if (!(expectedMm3 > 0)) return null;
+  const share = castVolumeMm3 / expectedMm3;
   return share < SHORT_POUR_SHARE
-    ? `The pour came to ${pct}% of the master's volume: it stopped short of filling the cavity (a fill depth below the rim, the side poured from, or trapped air). Check the pour direction and fill.`
+    ? `The pour came to ${Math.round(share * 100)}% of ${of}: it stopped short of filling the cavity (a fill depth below the rim, the side poured from, or trapped air). Check the pour direction and fill.`
     : null;
 }
 
@@ -537,7 +545,7 @@ async function runMcpChain(
       if (silicone && castMaterialSpec(silicone).silicone) boxOptions.silicone = silicone as PourBoxOptions['silicone'];
       const r = await client.siliconeChain(scene, subject.ids, boxOptions, material);
       if (!r.ok) return { ok: false, error: r.error };
-      const added = await addSiliconeChain(r);
+      const added = await addSiliconeChain(r, subject.ids);
       return {
         ok: true, kind: 'mold_cast', method,
         molded: { label: subject.label, ids: subject.ids },
@@ -546,6 +554,7 @@ async function runMcpChain(
         pouredThrough: r.pouredThrough,
         pourBoxFrom: madeBox ? 'the pour box in the scene' : 'the defaults',
         ...pieceReply(r.piece),
+        ...(added.replaced.length ? { replaced: added.replaced } : {}),
         warnings: r.warnings,
       };
     }
@@ -561,7 +570,7 @@ async function runMcpChain(
     };
     const r = await client.metalChain(subject.scene, options);
     if (!r.ok) return { ok: false, error: r.error };
-    const added = await addMetalChain(r, method);
+    const added = await addMetalChain(r, method, subject.ids);
     return {
       ok: true, kind: 'mold_cast', method,
       molded: { label: subject.label, ids: subject.ids },
@@ -571,6 +580,7 @@ async function runMcpChain(
       ...(method === 'sand' ? { sandG: r.fillG } : { investmentPowderG: r.fillG }),
       filledShare: r.filledShare,
       ...pieceReply(r.piece),
+      ...(added.replaced.length ? { replaced: added.replaced } : {}),
       warnings: r.warnings,
     };
   } finally {
@@ -667,6 +677,9 @@ export async function runMcpMoldSimulation(params: {
           trimChannels: msg.trimChannels === true,
           orientUpright: msg.orientUpright !== false,
           ...(moldOpts.castMaterial ? { castMaterial: moldOpts.castMaterial } : {}),
+          // Silicone poured round a master in its box is degassed and poured
+          // slowly; the air that matters is in what is later poured into it.
+          ...(box ? { airAware: false } : {}),
           pour: {
             direction: POUR_DIRECTIONS.includes(msg.pourDirection as PourDirection) ? (msg.pourDirection as PourDirection) : box ? '+z' : 'auto',
             ...(fillMm ? { fillMm } : {}),
@@ -704,7 +717,13 @@ export async function runMcpMoldSimulation(params: {
           : {}),
         ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
         cavityComponents: castRes.cavityComponents,
-        warnings: castRes.warnings,
+        // What the pour asks of whoever pours it: a hole to plug, and an
+        // undercut a rigid mold cannot let go of (silicone, either side, bends).
+        warnings: [
+          ...castRes.warnings,
+          ...(castRes.pour ? [pourPlugNote(castRes.pour)] : []),
+          ...(castRes.pour && !box && !isSiliconeMold(moldNode) && !(moldOpts.castMaterial && castMaterialSpec(moldOpts.castMaterial).silicone) ? [pourUndercutWarning(castRes.pour)] : []),
+        ].filter((w): w is string => Boolean(w)),
       };
     }
 
@@ -773,7 +792,12 @@ export async function runMcpMoldSimulation(params: {
       ...(castRes.deviation ? { deviationMm: castRes.deviation } : {}),
       ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
       cavityComponents: castRes.cavityComponents,
-      warnings: [...moldRes.warnings, ...castRes.warnings, ...(await thinSectionWarnings(scene, moldOpts.castMaterial))],
+      warnings: [
+        ...moldRes.warnings,
+        ...castRes.warnings,
+        ...[shortfallWarning(castRes.castVolumeMm3, moldMasterRecord(scene, moldRes).masterVolumeMm3, "the master's volume")].filter((w): w is string => Boolean(w)),
+        ...(await thinSectionWarnings(scene, moldOpts.castMaterial)),
+      ],
     };
   }
 

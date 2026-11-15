@@ -9,7 +9,7 @@
  */
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
-import { analyzeMesh, meshShells } from './meshIntegrity';
+import { analyzeMesh, meshShells, weldByPosition, MAX_CHECKED_TRIANGLES } from './meshIntegrity';
 import { checkMeshInertia } from './meshInertiaCheck';
 import { cageOriginInBodyMm } from './latticeFrame';
 import { csgFrameOffset, csgHashOf, collisionModeOf, hasBooleanOps, meshChecksum } from './csg';
@@ -64,9 +64,12 @@ export function meshIntegrity(g: SceneGeom): Record<string, unknown> {
   const pos = g.renderVertices || g.vertices || [];
   const triangles = faces.length / 3;
   if (!triangles || !pos.length) return {};
-  const m = analyzeMesh(pos, faces);
+  if (triangles > MAX_CHECKED_TRIANGLES) return { watertight: 'not checked — too many triangles' };
+  // As a slicer reads it: vertices at the same point are one vertex.
+  const welded = weldByPosition(pos, faces);
+  const m = analyzeMesh(welded.positions, welded.faces);
   if (!m) return { watertight: 'not checked — too many triangles' };
-  const counted = meshShells(pos, faces);
+  const counted = meshShells(welded.positions, welded.faces);
   // An inside-out mesh (windingInverted) has its pieces and hollows the other way round.
   const shells = counted && m.volume < 0 ? { ...counted, pieces: counted.voids, voids: counted.pieces } : counted;
   return {

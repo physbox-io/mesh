@@ -6,6 +6,7 @@
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { meshBody } from './pourBoxScene';
 import type { SlipMesh, SlipMold } from './slipCastMold';
+import { sameIds, withoutNodes } from './toolingReplace';
 
 const PLASTER_RGBA = [0.96, 0.95, 0.9, 0.45];
 const CASE_RGBA = [0.92, 0.55, 0.22, 1];
@@ -30,7 +31,12 @@ export const pieceKey = (name: string) => name.replace(/\s+/g, '');
  * The scene with the mold added: plaster pieces in place, cases in a row past
  * the mold's +X side, gaps of 20 mm, standing on the mold's floor.
  */
-export function sceneWithSlipMold(scene: SceneGraph, partName: string, mold: SlipMold): { scene: SceneGraph; plasterIds: string[]; caseIds: string[] } {
+export function sceneWithSlipMold(
+  scene: SceneGraph, partName: string, mold: SlipMold, partIds: string[] = [],
+): { scene: SceneGraph; plasterIds: string[]; caseIds: string[]; replaced: { id: string; name: string }[] } {
+  // A mold made again round the same part replaces the one made before.
+  const cleared = partIds.length ? withoutNodes(scene, (n) => Boolean(n.slipMold && sameIds(n.slipMold.partIds, partIds))) : { scene, removed: [] };
+  scene = cleared.scene;
   const tag = Math.random().toString(36).slice(2, 7);
   const slip = mold.report.slipName;
   const added: SceneNode[] = [];
@@ -44,7 +50,7 @@ export function sceneWithSlipMold(scene: SceneGraph, partName: string, mold: Sli
   }
   for (const p of mold.pieces) {
     const id = `slipplaster_${pieceKey(p.name)}_${tag}`;
-    added.push({ ...meshBody(id, `${partName}_plaster_${pieceKey(p.name)}`, p.plaster, PLASTER_RGBA), slipMold: { piece: p.name, role: 'plaster', slip } });
+    added.push({ ...meshBody(id, `${partName}_plaster_${pieceKey(p.name)}`, p.plaster, PLASTER_RGBA), slipMold: { piece: p.name, role: 'plaster', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
     plasterIds.push(id);
   }
   let x = maxX + 20;
@@ -53,10 +59,10 @@ export function sceneWithSlipMold(scene: SceneGraph, partName: string, mold: Sli
     const placed = shifted(p.casePrint, [x - b.lo[0], midY - (b.lo[1] + b.hi[1]) / 2, floor - b.lo[2]]);
     x += b.hi[0] - b.lo[0] + 20;
     const id = `slipcase_${pieceKey(p.name)}_${tag}`;
-    added.push({ ...meshBody(id, `${partName}_case_${pieceKey(p.name)}`, placed, CASE_RGBA), slipMold: { piece: p.name, role: 'case', slip } });
+    added.push({ ...meshBody(id, `${partName}_case_${pieceKey(p.name)}`, placed, CASE_RGBA), slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
     caseIds.push(id);
   }
-  return { scene: { ...scene, nodes: [...scene.nodes, ...added] }, plasterIds, caseIds };
+  return { scene: { ...scene, nodes: [...scene.nodes, ...added] }, plasterIds, caseIds, replaced: cleared.removed };
 }
 
 /** Lines for the scene's note card. */

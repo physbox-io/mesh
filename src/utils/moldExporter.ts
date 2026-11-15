@@ -298,6 +298,8 @@ export interface HalfFeatures {
 }
 
 const NO_FEATURES: HalfFeatures = { sockets: [], pins: [], channels: [] };
+/** The most peak vents a rigid mold is given, deepest first; the rest are warned of. */
+const MAX_PEAK_VENTS = 24;
 
 /**
  * Where the pour sprue and the vents go: on the part's own footprint, so they
@@ -1602,7 +1604,17 @@ export function generateMoldMeshes(
   const ventPeaks: Array<{ x: number; y: number }> = [];
   const baseBores: BoreCut[] = [];
   if (pourSpans && opts.includeVents) {
-    const peaks = fineness > 1 ? planPeakVents(...everyOtherColumn(pourSpans, grid)) : planPeakVents(pourSpans, grid);
+    const [vs, vg] = fineness > 1 ? everyOtherColumn(pourSpans, grid) : [pourSpans, grid];
+    const allPeaks = planPeakVents(vs, vg, 0.5, Infinity);
+    const peaks = allPeaks.slice(0, MAX_PEAK_VENTS);
+    if (allPeaks.length > peaks.length) {
+      const rest = allPeaks.slice(peaks.length);
+      warnings.push(
+        `Air would be trapped in ${allPeaks.length} places; the ${peaks.length} deepest are vented and ${rest.length} are not, ` +
+        `up to ${rest[0].prominenceMm.toFixed(1)} mm deep, at ${rest.slice(0, 3).map((v) => `(${v.x.toFixed(0)}, ${v.y.toFixed(0)} mm from the part's centre)`).join(', ')}` +
+        `${rest.length > 3 ? ' and more' : ''}. Turning the part, or filling from the bottom, may trap less.`,
+      );
+    }
     const bubbleR = castMaterial(opts.castMaterial ?? 'epoxy').bubbleRiseMm / 2;
     for (const v of peaks) {
       // From the top of its pocket out, not on through to the parting face: a

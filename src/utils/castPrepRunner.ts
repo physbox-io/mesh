@@ -12,6 +12,7 @@
  *   4. Draft (sand only): bake the taper into every body.
  *   5. finishCastPrep: fingerprint each body as prep left it.
  */
+import * as THREE from 'three';
 import { useStore } from '../store/useStore';
 import { compileCsgNodes } from '../hooks/useCsgCompile';
 import { generateCastPattern } from './castPatternExporter';
@@ -51,7 +52,11 @@ export interface CastPrepReport {
   /** Largest breaks used, mm; null when edges were off. */
   edges: { chamferMm: number; filletMm: number } | null;
   sharpEdges: number;
+  /** A point on each of the first few edges left sharp, world mm. */
+  sharpEdgesAtMm?: [number, number, number][];
   skipped: { name: string; reason: string }[];
+  /** Bodies left unprepared, in words. */
+  warnings?: string[];
 }
 
 function findNode(nodes: SceneNode[], id: string): SceneNode | null {
@@ -132,6 +137,8 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
 
     // --- Edges -----------------------------------------------------------
     let sharpEdges = 0, chamfer = 0, fillet = 0;
+    /** Where the first few sharp edges are, world mm. */
+    const sharpAtMm: [number, number, number][] = [];
     if (opts.edges) {
       const features: Record<string, EdgeRoundFeature[]> = {};
       const failed: { id: string; reason: string }[] = [];
@@ -154,6 +161,13 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
             sand && world ? (e) => e.edge.convex && edgeOnPlane(e, world, partingZ) : undefined,
           );
           sharpEdges += plan.sharp;
+          if (world) {
+            for (const p of plan.sharpAt) {
+              if (sharpAtMm.length >= 5) break;
+              const v = new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(world);
+              sharpAtMm.push([Math.round(v.x * 1000), Math.round(v.y * 1000), Math.round(v.z * 1000)]);
+            }
+          }
           chamfer = Math.max(chamfer, plan.chamfer);
           fillet = Math.max(fillet, plan.fillet);
           if (plan.broken > 0) features[id] = plan.features;
@@ -186,13 +200,17 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
     await store().recompile(store().sceneGraph, undefined, false, true);
 
     const prep = store().sceneGraph.castPrep;
+    const skippedOut = (prep?.skipped ?? []).map(({ name, reason }) => ({ name, reason }));
     return {
       ok: true,
       treated: ids.length,
       draftDeg,
       edges,
       sharpEdges,
-      skipped: (prep?.skipped ?? []).map(({ name, reason }) => ({ name, reason })),
+      ...(sharpAtMm.length ? { sharpEdgesAtMm: sharpAtMm } : {}),
+      skipped: skippedOut,
+      // A body left as it was is a part the pattern takes unprepared.
+      warnings: skippedOut.map(({ name, reason }) => `${name} was not prepared: ${reason}`),
     };
   } catch (err) {
     // Half a prep is worse than none: take whatever landed back off.

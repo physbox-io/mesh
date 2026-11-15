@@ -5,6 +5,7 @@
 // dialog's own worker is not held up by it. The body then goes into the scene
 // as one undo step, with a section on the scene's note card saying what it is.
 
+import { dropNoteSections } from '../utils/noteSection';
 import { useCallback, useState } from 'react';
 import { ExportWorkerClient } from '../utils/exportWorkerClient';
 import {
@@ -56,6 +57,11 @@ export interface AddSimulationRequest {
    * that step's setup (`machineFrame`), and named and described as a step.
    */
   step?: { index: number; of: number; planKey: string; machineFrame: number[]; title: string };
+  /**
+   * What made it, as a key: a body added with the same key before (the same
+   * chain run again for the same part) is replaced, not stacked beside it.
+   */
+  source?: string;
 }
 
 export interface AddedSimulation {
@@ -65,6 +71,8 @@ export interface AddedSimulation {
   volumeMm3: number;
   /** A milling job's own figures; absent for sheet parts. */
   milled?: SimulationJobResult;
+  /** Bodies the same `source` added before, which this replaced. */
+  replaced?: { id: string; name: string }[];
 }
 
 const stamp = (d: Date) => {
@@ -98,6 +106,14 @@ export async function addSimulationToScene(
     client.dispose();
   }
 
+  // The same thing made again replaces what it made before.
+  const replaced = req.source
+    ? useStore.getState().sceneGraph.nodes.filter((n) => n.simulation?.source === req.source).map((n) => ({ id: n.id, name: n.name }))
+    : [];
+  if (replaced.length) {
+    useStore.getState().deleteNodes(replaced.map((r) => r.id));
+    dropNoteSections(replaced.map((r) => r.name));
+  }
   const store = useStore.getState();
   const now = new Date();
   const id = `sim_${Math.random().toString(36).substring(2, 10)}`;
@@ -120,6 +136,7 @@ export async function addSimulationToScene(
   // the caller have the name it ends up with.
   if (req.material && node.simulation) node.simulation = { ...node.simulation, material: req.material };
   if (req.mold && node.simulation) node.simulation = { ...node.simulation, mold: req.mold };
+  if (req.source && node.simulation) node.simulation = { ...node.simulation, source: req.source };
   // Drawn in what it was poured in: a clear epoxy see-through, bronze bronze.
   const poured = resolveCastMaterial(req.material);
   if (poured) node.geoms = node.geoms?.map((g) => ({ ...g, rgba: [...castMaterial(poured).rgba] }));
@@ -192,7 +209,7 @@ export async function addSimulationToScene(
     ? [{ ...card, markdown: `${card.markdown.trimEnd()}\n\n${section}` }, ...rest]
     : [{ id: `note_card_${id}`, markdown: section, minimized: true, x: 16, y: 16 }]);
 
-  return { id, name, volumeMm3: mesh.volumeMm3, milled };
+  return { id, name, volumeMm3: mesh.volumeMm3, milled, ...(replaced.length ? { replaced } : {}) };
 }
 
 /**
