@@ -104,6 +104,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           breathKPa: Math.max(3.5, node.windInstrument.breathKPa || 3.8),
           embouchureHz: node.windInstrument.embouchureHz,
           cellCount: windBore.cellCount,
+          exactCells: windBore.exactCells,
           junctionK: windBore.junctionK,
           bellCutoffHz: windBore.bellCutoffHz,
           shunts: windBore.toneholes

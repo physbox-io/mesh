@@ -175,9 +175,10 @@ function generateClarinetBellMesh() {
   for (let i = 0; i <= n; i++) {
     const u = i / n;
     spine.push([0.135 + u * 0.080, 0, 0]);
-    const flare = Math.pow(u, 2.35);
+    const flare = Math.pow(u, 2.25);
     rOut.push(0.0145 + 0.0185 * flare);
-    rIn.push(0.0076 + 0.0225 * flare);
+    // Seamless 12.3 mm inner airway matching the 14.5 mm barrel (`14.5 - 2.2 = 12.3 mm`), flaring to 30.5 mm!
+    rIn.push(0.0123 + 0.0182 * flare);
   }
   return buildSweptHollowTubeMesh(spine, rOut, rIn, 24);
 }
@@ -370,14 +371,11 @@ export const windInstrumentsPreset: SceneGraph = (() => {
       exciter: 'reed',
       breathKPa: 0,
       embouchureHz: 330,
-      boreLengthM: 0.42,
-      mouthRadiusM: 0.0074,
-      bellRadiusM: 0.029,
       toneholeJoints: [
-        { jointName: 'clarinet_key_1', axialFraction: 0.54, diameterMm: 8.5 },
-        { jointName: 'clarinet_key_2', axialFraction: 0.65, diameterMm: 8.5 },
-        { jointName: 'clarinet_key_3', axialFraction: 0.76, diameterMm: 9.0 },
-        { jointName: 'clarinet_key_4', axialFraction: 0.86, diameterMm: 9.5 },
+        { jointName: 'clarinet_key_1', axialFraction: 0.56, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_2', axialFraction: 0.65, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_3', axialFraction: 0.74, diameterMm: 11.0 },
+        { jointName: 'clarinet_key_4', axialFraction: 0.84, diameterMm: 11.5 },
       ],
     },
     script: `// Seconds 0.0 .. 4.4 of each 9s duet cycle: warm woody clarinet melody with real keywork fingerings!
@@ -472,29 +470,34 @@ if (tCycle < 4.4) {
     windInstrument: {
       exciter: 'brass_lip',
       breathKPa: 0,
-      embouchureHz: 349.23,
-      boreLengthM: 0.72,
-      mouthRadiusM: 0.0054,
+      embouchureHz: 430,
+      boreLengthM: 0.855,
+      mouthRadiusM: 0.0055,
       bellRadiusM: 0.054,
+      flareExponent: 2.75,
       valveJoints: [
         { jointName: 'cornet_valve_1', semitones: 2, strokeM: 0.013 },
         { jointName: 'cornet_valve_2', semitones: 1, strokeM: 0.013 },
         { jointName: 'cornet_valve_3', semitones: 3, strokeM: 0.013 },
       ],
     },
-    script: `// Seconds 4.5 .. 8.9 of each 9s duet cycle: noble brass fanfare with real 3-piston valve fingerings!
+    script: `// Seconds 4.5 .. 8.9 of each 9s duet cycle: G-major brass fanfare matching the clarinet's G-major pentatonic key!
 const tCycle = api.getTime() % 9.0;
 if (tCycle >= 4.5 && tCycle < 8.9) {
   const dt = tCycle - 4.5;
-  // [durSec, targetHz, valveMask (bit0=V1(-2st), bit1=V2(-1st), bit2=V3(-3st)), breathKPa]
+  // Natural harmonics of the 0.855 m G3 horn + real 3-piston semitone valve combinations:
+  //   G4 (392 Hz): Open (0-0-0), mode n=2 -> lip ~430 Hz
+  //   A4 (440 Hz): Valves 1+3 (-5 st), mode n=3 -> lip ~480 Hz
+  //   B4 (494 Hz): Valves 1+2 (-3 st), mode n=3 -> lip ~540 Hz
+  //   D5 (587 Hz): Open (0-0-0), mode n=3 -> lip ~640 Hz
   const fanfare = [
-    [0.58, 349.23, 0b001, 3.6], // F4  (Valve 1)
-    [0.58, 440.00, 0b011, 3.8], // A4  (Valves 1+2)
-    [0.62, 523.25, 0b000, 4.0], // C5  (Open 0-0-0)
-    [0.55, 587.33, 0b001, 4.1], // D5  (Valve 1)
-    [0.55, 523.25, 0b000, 3.9], // C5  (Open)
-    [0.55, 440.00, 0b011, 3.7], // A4  (Valves 1+2)
-    [0.97, 349.23, 0b001, 3.5], // F4  (Warm sustained brass resolve)
+    [0.58, 430, 0b000, 3.6], // G4  (Open)
+    [0.58, 540, 0b011, 3.8], // B4  (Valves 1+2)
+    [0.62, 640, 0b000, 4.0], // D5  (Open)
+    [0.55, 540, 0b011, 3.8], // B4  (Valves 1+2)
+    [0.55, 480, 0b101, 3.7], // A4  (Valves 1+3)
+    [0.55, 540, 0b011, 3.8], // B4  (Valves 1+2)
+    [0.97, 430, 0b000, 3.5], // G4  (Warm sustained resolve)
   ];
   let cursor = 0;
   let vMask = 0;

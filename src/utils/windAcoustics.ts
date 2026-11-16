@@ -39,8 +39,10 @@ export interface BoreWaveguideModel {
   mouthRadiusM: number;
   /** Bell / open-end inner radius (m). */
   bellRadiusM: number;
-  /** Number of Kelly–Lochbaum spatial delay cells at 48 kHz. */
+  /** Number of integer Kelly–Lochbaum spatial delay cells at 48 kHz. */
   cellCount: number;
+  /** Continuous exact waveguide length in cells (integer `cellCount` + fractional Thiran boundary). */
+  exactCells: number;
   /** Junction reflection coefficients k_i = (A_i - A_{i+1}) / (A_i + A_{i+1}), length = cellCount - 1. */
   junctionK: number[];
   /** Bell open-end radiation cutoff frequency (Hz): f_rad = c / (2 * π * r_bell). */
@@ -268,19 +270,14 @@ export function extractBoreWaveguide(
   const baseBoreLengthM = (spec.boreLengthM && spec.boreLengthM > 0.05 ? spec.boreLengthM : slice.lengthM) * valveLengthRatio;
   const acousticLengthM = baseBoreLengthM + 0.61 * bellRadiusM;
 
-  const cellCount = Math.max(8, Math.min(180, Math.round(acousticLengthM / dxCell)));
+  const exactCells = Math.max(8, Math.min(178, acousticLengthM / dxCell));
+  const cellCount = Math.max(8, Math.min(178, Math.floor(exactCells)));
+  const flareExp = Math.max(0.5, Math.min(6, spec.flareExponent ?? 2.5));
   const radii: number[] = (spec.mouthRadiusM !== undefined && spec.bellRadiusM !== undefined)
     ? Array.from({ length: cellCount }, (_, k) => {
         const u = cellCount <= 1 ? 0 : k / (cellCount - 1);
-        if (spec.exciter === 'reed') {
-          // Cylindrical woodwind bore over 82% of its length, flaring only at the terminal bell!
-          const bellFlare = Math.pow(Math.max(0, (u - 0.82) / 0.18), 2.3);
-          return mouthRadiusM + (bellRadiusM - mouthRadiusM) * bellFlare;
-        }
-        // True Bessel-horn brass profile: conical leadpipe taper + rapid bell flare!
-        const leadTaper = mouthRadiusM + (mouthRadiusM * 0.55) * u;
-        const flare = Math.pow(Math.max(0, (u - 0.38) / 0.62), 2.65);
-        return leadTaper + (bellRadiusM - leadTaper) * flare;
+        const leadTaper = mouthRadiusM + (bellRadiusM - mouthRadiusM) * 0.08 * u;
+        return leadTaper + (bellRadiusM - leadTaper) * Math.pow(u, flareExp);
       })
     : slice.radiiAtStations(cellCount);
 
@@ -293,9 +290,10 @@ export function extractBoreWaveguide(
     junctionK.push(+Math.max(-0.92, Math.min(0.92, k)).toFixed(5));
   }
 
-  const midRadiusM = radii[Math.floor((cellCount - 1) * 0.72)] ?? mouthRadiusM;
-  const bodyTaper = midRadiusM / Math.max(1e-4, mouthRadiusM);
-  const flareRatio = bellRadiusM / Math.max(1e-4, mouthRadiusM);
+  const neckRadiusM = radii[Math.floor((cellCount - 1) * 0.20)] ?? mouthRadiusM;
+  const midRadiusM = radii[Math.floor((cellCount - 1) * 0.72)] ?? neckRadiusM;
+  const bodyTaper = midRadiusM / Math.max(1e-4, neckRadiusM);
+  const flareRatio = bellRadiusM / Math.max(1e-4, neckRadiusM);
   const boreShape: BoreWaveguideModel['boreShape'] =
     bodyTaper < 1.22
       ? 'cylindrical'
@@ -393,6 +391,7 @@ export function extractBoreWaveguide(
     mouthRadiusM: +mouthRadiusM.toFixed(5),
     bellRadiusM: +bellRadiusM.toFixed(5),
     cellCount,
+    exactCells: +exactCells.toFixed(4),
     junctionK,
     bellCutoffHz,
     boreShape,

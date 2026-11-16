@@ -359,7 +359,7 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
       return Math.max(hMin * 0.08, hMin - cutDepth * Math.sqrt(1 - u * u));
     });
     freqs = [f1, f2, f3, f3 * 1.65];
-    gains = [1.0, 0.58, 0.24, 0.12];
+    gains = typeof node.tunedPitchHz === 'number' ? [1.0, 0.24, 0.09, 0.03] : [1.0, 0.52, 0.22, 0.10];
   } else if (
     node.isTube ||
     primaryGeom?.type === 'cylinder' ||
@@ -430,8 +430,8 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
     }
   }
 
-  // If user explicitly calibrated tunedPitchHz (and no contradictory geometry override), anchor f1 if needed
-  if (typeof node.tunedPitchHz === 'number' && node.tunedPitchHz > 15 && regime !== 'arched_bar') {
+  // If user explicitly calibrated tunedPitchHz, anchor f1 cleanly to exact concert pitch
+  if (typeof node.tunedPitchHz === 'number' && node.tunedPitchHz > 15) {
     const scale = node.tunedPitchHz / Math.max(1e-6, freqs[0]);
     if (Math.abs(scale - 1) < 0.08 || regime === 'block') {
       freqs = freqs.map((f) => f * scale);
@@ -497,7 +497,7 @@ type WindowWithAudioCtx = Window & {
 
 let sharedAudioCtx: AudioContext | null = null;
 let activeVoices = 0;
-const MAX_ACTIVE_VOICES = 28;
+const MAX_ACTIVE_VOICES = 96;
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -567,8 +567,8 @@ export function playModalImpact(profile: BodyModalProfile, impulseNs: number, _i
   const ctx = getAudioContext();
   if (!ctx) return;
 
-  // Compress dynamic range smoothly from tiny taps (0.005 N*s) to heavy blows (10 N*s)
-  const level = Math.min(0.45, 0.14 * Math.log10(1 + Math.max(0.01, impulseNs) * 45));
+  // Compress dynamic range smoothly from tiny taps (0.002 N*s) to heavy blows (10 N*s)
+  const level = Math.min(0.45, 0.14 * Math.log10(1 + Math.max(0.0005, impulseNs) * 45));
   if (level < 0.004) return;
   if (activeVoices >= MAX_ACTIVE_VOICES) return;
 

@@ -328,29 +328,55 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const clarinetOpenBore = extractBoreWaveguide(clarinetNode, { clarinet_key_1: 0.25 })!;
     expect(clarinetOpenBore.resonantModesHz[0]).toBeGreaterThan(clarinetBore.resonantModesHz[0] * 1.25);
 
-    const measureSteadyState = (bank: KellyLochbaumSynthBank): { rms: number; zcHz: number } => {
+    const measureSteadyState = (bank: KellyLochbaumSynthBank): { rms: number; pitchHz: number; periodicity: number } => {
       const buf = new Float32Array(1024);
       // 0.45 s warmup (past any attack transient!)
       for (let b = 0; b < 22; b++) bank.render(buf);
+      const samples = new Float32Array(8 * 1024);
       let sumSq = 0;
-      let zc = 0;
-      let prev = buf[buf.length - 1];
-      const nBlocks = 22; // another 0.47 s of pure steady-state tone
-      for (let b = 0; b < nBlocks; b++) {
+      for (let b = 0; b < 8; b++) {
         bank.render(buf);
+        samples.set(buf, b * 1024);
         for (let i = 0; i < buf.length; i++) {
-          const s = buf[i];
-          expect(Number.isFinite(s)).toBe(true);
-          sumSq += s * s;
-          if ((prev <= 0 && s > 0) || (prev >= 0 && s < 0)) zc++;
-          prev = s;
+          expect(Number.isFinite(buf[i])).toBe(true);
+          sumSq += buf[i] * buf[i];
         }
       }
-      const totalSamples = nBlocks * buf.length;
-      return {
-        rms: Math.sqrt(sumSq / totalSamples),
-        zcHz: (zc * 0.5 * 48000) / totalSamples,
-      };
+      const rms = Math.sqrt(sumSq / samples.length);
+      // Normalized autocorrelation pitch detector over [70 Hz .. 1100 Hz]
+      const minLag = Math.floor(48000 / 1100);
+      const maxLag = Math.ceil(48000 / 70);
+      const winN = 4096;
+      let e0 = 0;
+      for (let i = 0; i < winN; i++) e0 += samples[i] * samples[i];
+      let bestCorr = -1;
+      let bestLag = minLag;
+      let passedFirstDip = false;
+      for (let lag = minLag; lag <= maxLag; lag++) {
+        let c = 0;
+        let eLag = 0;
+        for (let i = 0; i < winN; i++) {
+          c += samples[i] * samples[i + lag];
+          eLag += samples[i + lag] * samples[i + lag];
+        }
+        const norm = c / Math.max(1e-18, Math.sqrt(e0 * eLag));
+        if (norm < 0.2) passedFirstDip = true;
+        if (passedFirstDip && norm > bestCorr) {
+          bestCorr = norm;
+          bestLag = lag;
+          // Take the FIRST strong fundamental period peak (>= 0.90) rather than 2*T0 subharmonic!
+          if (norm >= 0.92 && lag > minLag + 4) {
+            let nextC = 0, nextE = 0;
+            for (let i = 0; i < winN; i++) {
+              nextC += samples[i] * samples[i + lag + 1];
+              nextE += samples[i + lag + 1] * samples[i + lag + 1];
+            }
+            const nextNorm = nextC / Math.max(1e-18, Math.sqrt(e0 * nextE));
+            if (nextNorm <= norm) break;
+          }
+        }
+      }
+      return { rms, pitchHz: 48000 / bestLag, periodicity: bestCorr };
     };
 
     const reedBankClosed = new KellyLochbaumSynthBank(48000);
@@ -361,6 +387,7 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
         breathKPa: 3.4,
         embouchureHz: 330,
         cellCount: clarinetBore.cellCount,
+        exactCells: clarinetBore.exactCells,
         junctionK: clarinetBore.junctionK,
         bellCutoffHz: clarinetBore.bellCutoffHz,
         shunts: [],
@@ -369,29 +396,40 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const closedStats = measureSteadyState(reedBankClosed);
     expect(closedStats.rms).toBeGreaterThan(0.015);
     expect(closedStats.rms).toBeLessThan(0.85);
-    expect(closedStats.zcHz).toBeGreaterThan(140);
+    expect(closedStats.periodicity).toBeGreaterThan(0.92);
+    // Must oscillate in the warm fundamental chalumeau register (~175..260 Hz), NOT squeaking at >900 Hz!
+    expect(closedStats.pitchHz).toBeGreaterThan(165);
+    expect(closedStats.pitchHz).toBeLessThan(280);
 
-    // Opening tonehole shunts raises the steady-state Clarinet waveform pitch!
+    // Opening tonehole shunts raises the steady-state Clarinet fundamental pitch cleanly!
+    const clarinetAllOpenBore = extractBoreWaveguide(clarinetNode, {
+      clarinet_key_1: 0.25,
+      clarinet_key_2: 0.25,
+      clarinet_key_3: 0.25,
+      clarinet_key_4: 0.25,
+    })!;
     const reedBankOpen = new KellyLochbaumSynthBank(48000);
     reedBankOpen.updateVoices([
       {
         id: 'clar_open',
         exciter: 'reed',
         breathKPa: 3.4,
-        embouchureHz: 330,
-        cellCount: clarinetOpenBore.cellCount,
-        junctionK: clarinetOpenBore.junctionK,
-        bellCutoffHz: clarinetOpenBore.bellCutoffHz,
-        shunts: clarinetOpenBore.toneholes
+        embouchureHz: 420,
+        cellCount: clarinetAllOpenBore.cellCount,
+        exactCells: clarinetAllOpenBore.exactCells,
+        junctionK: clarinetAllOpenBore.junctionK,
+        bellCutoffHz: clarinetAllOpenBore.bellCutoffHz,
+        shunts: clarinetAllOpenBore.toneholes
           .filter((t) => t.openAmount > 0.05)
           .map((t) => ({ cell: t.cellIndex, coeff: t.shuntCoeff * t.openAmount })),
       },
     ]);
     const openStats = measureSteadyState(reedBankOpen);
     expect(openStats.rms).toBeGreaterThan(0.015);
-    expect(openStats.zcHz).toBeGreaterThan(closedStats.zcHz * 1.15);
+    expect(openStats.periodicity).toBeGreaterThan(0.92);
+    expect(openStats.pitchHz).toBeGreaterThan(closedStats.pitchHz * 1.30);
 
-    // 3. Flared 3-Valve Brass Cornet Lip-Reed waveguide sustains steady-state tone & tracks lip/valves!
+    // 3. Flared 3-Valve Brass Cornet Lip-Reed waveguide sustains pure periodic tone (zero wolf-tone growl!) & tracks lip/valves!
     const bugleNode = windInstrumentsPreset.nodes.find((n) => n.id === 'brass_bugle_horn')!;
     const bugleBoreOpen = extractBoreWaveguide(bugleNode)!;
     const bugleBoreValved = extractBoreWaveguide(bugleNode, { cornet_valve_1: 0.012, cornet_valve_3: 0.012 })!;
@@ -401,11 +439,12 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const brassLow = new KellyLochbaumSynthBank(48000);
     brassLow.updateVoices([
       {
-        id: 'cornet_f4',
+        id: 'cornet_low',
         exciter: 'brass_lip',
-        breathKPa: 3.7,
-        embouchureHz: 349.23,
+        breathKPa: 3.8,
+        embouchureHz: 430,
         cellCount: bugleBoreValved.cellCount,
+        exactCells: bugleBoreValved.exactCells,
         junctionK: bugleBoreValved.junctionK,
         bellCutoffHz: bugleBoreValved.bellCutoffHz,
         shunts: [],
@@ -414,15 +453,17 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const brassLowStats = measureSteadyState(brassLow);
     expect(brassLowStats.rms).toBeGreaterThan(0.015);
     expect(brassLowStats.rms).toBeLessThan(0.85);
+    expect(brassLowStats.periodicity).toBeGreaterThan(0.92);
 
     const brassHigh = new KellyLochbaumSynthBank(48000);
     brassHigh.updateVoices([
       {
-        id: 'cornet_c5',
+        id: 'cornet_high',
         exciter: 'brass_lip',
-        breathKPa: 4.0,
-        embouchureHz: 523.25,
+        breathKPa: 4.1,
+        embouchureHz: 640,
         cellCount: bugleBoreOpen.cellCount,
+        exactCells: bugleBoreOpen.exactCells,
         junctionK: bugleBoreOpen.junctionK,
         bellCutoffHz: bugleBoreOpen.bellCutoffHz,
         shunts: [],
@@ -430,7 +471,8 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     ]);
     const brassHighStats = measureSteadyState(brassHigh);
     expect(brassHighStats.rms).toBeGreaterThan(0.015);
-    expect(brassHighStats.zcHz).toBeGreaterThan(brassLowStats.zcHz * 1.2);
+    expect(brassHighStats.periodicity).toBeGreaterThan(0.92);
+    expect(brassHighStats.pitchHz).toBeGreaterThan(brassLowStats.pitchHz * 1.25);
   });
 
   it('compiles and steps windInstrumentsPreset and metallophoneCarillonPreset stably with distinct glockenspiel pitches and outward-wound meshes', async () => {

@@ -344,6 +344,7 @@ function syncLiveWindAudio() {
       breathKPa: Math.max(0, Math.min(8, breathKPa)),
       embouchureHz: Math.max(80, Math.min(1800, embouchureHz)),
       cellCount: bore?.cellCount ?? 32,
+      exactCells: bore?.exactCells,
       junctionK: bore?.junctionK ?? [],
       bellCutoffHz: bore?.bellCutoffHz ?? 1500,
       shunts: (bore?.toneholes ?? [])
@@ -420,12 +421,11 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       );
       for (const { node, impulseNs } of resolved) {
         const isResonator = typeof node.tunedPitchHz === 'number' || !!node.acousticString;
-        // When a mallet/plectrum hits a tuned bar, chime, or taut string, let the resonator sing cleanly
-        const effImpulse = hasTunedResonator && !isResonator
-          ? impulseNs * 0.04
-          : impulseNs;
-        if (effImpulse >= 0.0015) {
-          playModalImpact(cachedModesFor(node, nodes), effImpulse, !!node.acousticString);
+        // When a mallet/plectrum strikes a tuned bar, chime, or string, let the tuned resonator sing
+        // cleanly without layering an untuned mallet-stick modal tone on top of the note!
+        if (hasTunedResonator && !isResonator) continue;
+        if (impulseNs >= 0.0015) {
+          playModalImpact(cachedModesFor(node, nodes), impulseNs, !!node.acousticString);
         }
       }
     };

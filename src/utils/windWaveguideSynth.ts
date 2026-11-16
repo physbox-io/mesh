@@ -1,9 +1,16 @@
 // ---------------------------------------------------------------------------
-// Zero-Allocation 1D Kelly–Lochbaum Bore + Reed / Brass Lip-Reed Synthesizer
+// Generic 1D Kelly–Lochbaum Bore + Thiran Fractional-Boundary Waveguide Synth
 // ---------------------------------------------------------------------------
 //
-// Runs at audio rate (48 kHz) in ~0.14% CPU for 2 simultaneous wind/brass bores
-// with zero per-sample heap allocations (all Float64Arrays pre-allocated).
+// Pure 1D acoustic waveguide sliced directly from 3D CAD geometry:
+//   - M spatial scattering junctions `k[c] = (A_c - A_{c+1}) / (A_c + A_{c+1})`
+//   - 3-port open-tonehole shunts `shunt[c]`
+//   - 1st-order Thiran allpass fractional boundary termination at `x = L` so
+//     continuous millimeter geometry edits vary pitch smoothly without 48 kHz
+//     7.3 mm grid quantization jumps!
+//   - Passive pressure-controlled exciters (`reed`, `brass_lip`, `flute_jet`)
+//     that lock phase-coherently onto the bore's own standing-wave modes
+//     (zero autonomous free-air oscillators -> zero wolf-tone intermodulation!).
 // ---------------------------------------------------------------------------
 
 import type { WindExciterKind } from '../types/scene';
@@ -14,6 +21,7 @@ export interface WindVoiceConfig {
   breathKPa: number;
   embouchureHz: number;
   cellCount: number;
+  exactCells?: number;
   junctionK: number[];
   bellCutoffHz: number;
   shunts: { cell: number; coeff: number }[];
@@ -31,19 +39,23 @@ interface WindSlot {
   embouchureHz: number;
   smoothEmbHz: number;
   cellCount: number;
+  thiranEta: number;
+  apX1: number;
+  apY1: number;
   pPlus: Float64Array;
   pMinus: Float64Array;
   nextPlus: Float64Array;
   nextMinus: Float64Array;
   k: Float64Array;
   shunt: Float64Array;
+  holeState: Float64Array;
   bellAlpha: number;
   bellLp: number;
   reedLp: number;
-  cupLp: number;
+  outLp1: number;
+  outLp2: number;
   lipY: number;
   lipV: number;
-  prevBack: number;
   vibPhase: number;
   dcX1: number;
   dcY1: number;
@@ -60,23 +72,27 @@ function createWindSlot(): WindSlot {
     embouchureHz: 320,
     smoothEmbHz: 320,
     cellCount: 32,
+    thiranEta: 0,
+    apX1: 0,
+    apY1: 0,
     pPlus: new Float64Array(MAX_BORE_CELLS),
     pMinus: new Float64Array(MAX_BORE_CELLS),
     nextPlus: new Float64Array(MAX_BORE_CELLS),
     nextMinus: new Float64Array(MAX_BORE_CELLS),
     k: new Float64Array(MAX_BORE_CELLS),
     shunt: new Float64Array(MAX_BORE_CELLS),
+    holeState: new Float64Array(MAX_BORE_CELLS),
     bellAlpha: 0.25,
     bellLp: 0,
     reedLp: 0,
-    cupLp: 0,
+    outLp1: 0,
+    outLp2: 0,
     lipY: 0,
     lipV: 0,
-    prevBack: 0,
     vibPhase: 0,
     dcX1: 0,
     dcY1: 0,
-    gain: 0.28,
+    gain: 0.75,
   };
 }
 
@@ -131,59 +147,91 @@ export class KellyLochbaumSynthBank {
             slot.id = cfg.id;
             slot.pPlus.fill(0);
             slot.pMinus.fill(0);
+            slot.holeState.fill(0);
+            slot.apX1 = 0;
+            slot.apY1 = 0;
             slot.bellLp = 0;
             slot.reedLp = 0;
-            slot.cupLp = 0;
+            slot.outLp1 = 0;
+            slot.outLp2 = 0;
             slot.lipY = 0;
             slot.lipV = 0;
-            slot.prevBack = 0;
-            slot.smoothEmbHz = Math.max(80, Math.min(1800, cfg.embouchureHz || 320));
+            slot.smoothEmbHz = Math.max(60, Math.min(2000, cfg.embouchureHz || 320));
             break;
           }
         }
       }
       if (!slot) continue;
 
-      const M = Math.max(8, Math.min(MAX_BORE_CELLS - 1, cfg.cellCount | 0));
-      if (slot.cellCount !== M) {
-        if (M > slot.cellCount) {
-          for (let c = slot.cellCount; c < M; c++) {
-            slot.pPlus[c] = slot.pPlus[Math.max(0, slot.cellCount - 1)] * 0.5;
-            slot.pMinus[c] = slot.pMinus[Math.max(0, slot.cellCount - 1)] * 0.5;
-          }
-        }
-        slot.cellCount = M;
-      }
+      const fBell = Math.max(420, Math.min(sr * 0.42, cfg.bellCutoffHz || 1500));
+      const rc = 1 / (2 * Math.PI * fBell);
+      const dt = 1 / sr;
+      slot.bellAlpha = dt / (rc + dt);
 
       slot.exciter = cfg.exciter === 'brass_lip' ? 1 : cfg.exciter === 'flute_jet' ? 2 : 0;
       const rawKPa = Math.max(0, cfg.breathKPa || 0);
       slot.targetBreath = rawKPa < 0.08
         ? 0
         : slot.exciter === 0
-          ? 0.42 + 0.36 * Math.tanh((rawKPa - 0.5) / 3.2)
-          : Math.max(0, Math.min(0.88, rawKPa / 5.5));
-      slot.embouchureHz = Math.max(80, Math.min(1800, cfg.embouchureHz || 320));
-      slot.gain = cfg.gain ?? (slot.exciter === 1 ? 0.65 : 0.95);
+          ? 0.42 + 0.34 * Math.tanh((rawKPa - 0.5) / 3.2)
+          : Math.max(0, Math.min(0.90, rawKPa / 5.2));
+      slot.embouchureHz = Math.max(60, Math.min(2000, cfg.embouchureHz || 320));
+      slot.gain = cfg.gain ?? (slot.exciter === 1 ? 0.78 : 0.90);
+
+      // Exact analytical 1-pole phase delay compensation `atan2((1-a)*sin(w), 1-(1-a)*cos(w)) / w`
+      // for both in-loop filters (`bellLp` + `reedLp`) so discrete cells + Thiran `thiranEta`
+      // resonate at the exact physical acoustic frequency without flat dispersion drift!
+      const rawExact = cfg.exactCells ?? cfg.cellCount;
+      const loopCutHz = slot.exciter === 0
+        ? Math.min(sr * 0.35, Math.max(280, slot.embouchureHz * 1.75))
+        : Math.min(sr * 0.4, Math.max(450, slot.embouchureHz * 2.6));
+      const alphaLoop = dt / (1 / (2 * Math.PI * loopCutHz) + dt);
+      const fRef = slot.exciter === 0
+        ? sr / Math.max(16, 4 * rawExact)
+        : Math.max(120, Math.min(1200, slot.embouchureHz * 0.92));
+      const wRef = (2 * Math.PI * fRef) / sr;
+      const onePolePhaseDelay = (a: number): number => {
+        const b = 1 - a;
+        return Math.atan2(b * Math.sin(wRef), 1 - b * Math.cos(wRef)) / Math.max(1e-6, wRef);
+      };
+      const loopLagSamples = onePolePhaseDelay(slot.bellAlpha) + onePolePhaseDelay(alphaLoop);
+      // 1 spatial waveguide cell = 2 round-trip samples
+      const compensatedExact = Math.max(6.2, Math.min(MAX_BORE_CELLS - 2, rawExact - 0.5 * loopLagSamples));
+      const M = Math.max(6, Math.min(MAX_BORE_CELLS - 2, Math.floor(compensatedExact)));
+      const remRoundTrip = Math.max(0.15, Math.min(1.85, 2 * (compensatedExact - M)));
+      slot.thiranEta = (1 - remRoundTrip) / (1 + remRoundTrip);
+
+      if (slot.cellCount !== M) {
+        if (M > slot.cellCount) {
+          const tailP = slot.pPlus[Math.max(0, slot.cellCount - 1)];
+          const tailM = slot.pMinus[Math.max(0, slot.cellCount - 1)];
+          for (let c = slot.cellCount; c < M; c++) {
+            slot.pPlus[c] = tailP;
+            slot.pMinus[c] = tailM;
+          }
+        }
+        slot.cellCount = M;
+      }
 
       const jk = cfg.junctionK || [];
       slot.k.fill(0);
-      for (let i = 0; i < M - 1 && i < jk.length; i++) {
-        slot.k[i] = Math.max(-0.92, Math.min(0.92, jk[i]));
+      if (jk.length > 0 && M >= 2) {
+        for (let i = 0; i < M - 1; i++) {
+          const srcIdx = Math.min(jk.length - 1, Math.round((i * (jk.length - 1)) / Math.max(1, M - 2)));
+          slot.k[i] = Math.max(-0.92, Math.min(0.92, jk[srcIdx]));
+        }
       }
 
       slot.shunt.fill(0);
       const shunts = cfg.shunts || [];
+      const cellScale = (M - 1) / Math.max(1, (cfg.cellCount || M) - 1);
       for (let s = 0; s < shunts.length; s++) {
-        const ci = shunts[s].cell | 0;
+        const ci = Math.round(shunts[s].cell * cellScale);
         if (ci >= 1 && ci < M - 1) {
-          slot.shunt[ci] = Math.max(-0.85, Math.min(0, shunts[s].coeff || 0));
+          slot.shunt[ci] = Math.max(-0.92, Math.min(0, shunts[s].coeff || 0));
         }
       }
 
-      const fBell = Math.max(380, Math.min(sr * 0.42, cfg.bellCutoffHz || 1500));
-      const rc = 1 / (2 * Math.PI * fBell);
-      const dt = 1 / sr;
-      slot.bellAlpha = dt / (rc + dt);
       slot.active = true;
     }
 
@@ -220,7 +268,7 @@ export class KellyLochbaumSynthBank {
 
     const sr = this.sampleRate;
     const dt = 1 / sr;
-    const vibInc = (2 * Math.PI * 4.9) / sr;
+    const vibInc = (2 * Math.PI * 4.8) / sr;
 
     for (let w = 0; w < this.slots.length; w++) {
       const ws = this.slots[w];
@@ -234,90 +282,91 @@ export class KellyLochbaumSynthBank {
       const M = ws.cellCount;
       const kArr = ws.k;
       const shArr = ws.shunt;
+      const hState = ws.holeState;
       const bellAlpha = ws.bellAlpha;
+      const eta = ws.thiranEta;
       const exc = ws.exciter;
 
-      // One-pole woodwind bore reflection lowpass (~1950 Hz -> dark, warm Grenadilla clarinet tone)
-      const reedCut = exc === 0 ? 1950 : Math.min(sr * 0.4, ws.embouchureHz * 4.2);
-      const alphaReed = dt / (1 / (2 * Math.PI * reedCut) + dt);
+      // Reed/lip mechanical compliance lowpass (~1.75 * embouchureHz):
+      // Guarantees the fundamental bore mode wins cleanly over 3*f1 / 5*f1 squeak modes,
+      // while the nonlinear valve still injects rich upper harmonics into the forward wave!
+      const loopCutHz = exc === 0
+        ? Math.min(sr * 0.35, Math.max(280, ws.embouchureHz * 1.75))
+        : Math.min(sr * 0.4, Math.max(450, ws.embouchureHz * 2.6));
+      const alphaLoop = dt / (1 / (2 * Math.PI * loopCutHz) + dt);
+      // Universal spherical radiation smoothing filter (~1800–2800 Hz depending on breath)
+      const radCutHz = Math.min(sr * 0.4, 1300 + 1800 * Math.max(0.2, ws.targetBreath));
+      const alphaRad = dt / (1 / (2 * Math.PI * radCutHz) + dt);
 
       for (let i = 0; i < nFrames; i++) {
-        // Smooth 28 ms breath tonguing attack/release + natural 4.9 Hz player vibrato
-        ws.breathEnv += 0.00095 * (ws.targetBreath - ws.breathEnv);
-        ws.smoothEmbHz += 0.0015 * (ws.embouchureHz - ws.smoothEmbHz);
+        ws.breathEnv += 0.0011 * (ws.targetBreath - ws.breathEnv);
+        ws.smoothEmbHz += 0.0020 * (ws.embouchureHz - ws.smoothEmbHz);
         ws.vibPhase += vibInc;
         if (ws.vibPhase > Math.PI * 2) ws.vibPhase -= Math.PI * 2;
 
-        const vib = 1 + 0.016 * Math.sin(ws.vibPhase);
-        const breathNoise = exc === 2 ? 0.06 : 0.012;
-        const pMouth = ws.breathEnv * vib * (1 + breathNoise * this.nextNoise());
+        const vib = 1 + 0.011 * Math.sin(ws.vibPhase);
+        const turb = exc === 2 ? 0.05 : 0.007;
+        const pMouth = ws.breathEnv * vib * (1 + turb * this.nextNoise());
 
-        // Bell open-end reflection (inverting lowpass) + radiation
-        const pEnd = ws.pPlus[M - 1];
+        // Open-end Thiran fractional boundary cell + spherical radiation reflection/transmission
+        const pIncEnd = ws.pPlus[M - 1];
+        const pEnd = eta * pIncEnd + ws.apX1 - eta * ws.apY1;
+        ws.apX1 = pIncEnd;
+        ws.apY1 = pEnd;
+
         ws.bellLp += bellAlpha * (pEnd - ws.bellLp);
-        const pReflBell = -0.962 * ws.bellLp;
-        let radiated = (pEnd - ws.bellLp) * 0.85 + 0.42 * ws.bellLp;
+        const pReflBell = -0.968 * ws.bellLp;
+        let radiated = (pEnd - ws.bellLp) * 0.88 + 0.44 * ws.bellLp;
 
-        // Nonlinear mouthpiece exciter coupled to returning bore wave pBack0
+        // Passive pressure-controlled valve exciters coupled strictly to returning bore wave pBack0
         let pIn0: number;
         const pBack0 = ws.pMinus[0];
+        ws.reedLp += alphaLoop * (pBack0 - ws.reedLp);
 
         if (exc === 0) {
-          // Inward-beating single reed (Smith STK Clarinet):
-          // Higher mouth pressure closes the cane reed toward the lay (r -> +1.0),
-          // creating active negative resistance (|dp+/dp-| > 1) and warm odd-harmonic oscillation!
-          ws.reedLp += alphaReed * (pBack0 - ws.reedLp);
+          // Inward-striking compliant reed valve (smooth C^2 cubic pressure-reflection curve):
           const dp = pMouth - ws.reedLp;
-          let rReed = 0.24 + 0.92 * dp;
-          if (rReed < -0.92) rReed = -0.92;
-          else if (rReed > 0.995) rReed = 0.995;
+          const dc = Math.max(-1.1, Math.min(1.1, dp));
+          let rReed = 0.24 + 0.88 * dc - 0.16 * dc * dc * dc;
+          if (rReed < -0.90) rReed = -0.90;
+          else if (rReed > 0.97) rReed = 0.97;
           pIn0 = pMouth - rReed * dp;
         } else if (exc === 1) {
-          // Regenerative brass lip-reed + mouthpiece cup:
-          // 2nd-order mechanical lip resonator at `smoothEmbHz` coupled to bore standing waves,
-          // modulating nonlinear Bernoulli jet flow into the conical/flared brass horn!
+          // Passive bandpass-coupled 1-DOF lip-reed valve:
+          // `vBp = lipV / (omegaLip * Q)` has exact +1.0 gain and 0° phase at `smoothEmbHz`,
+          // rolling off both lower pedal modes and upper squeaks while remaining 100% passive
+          // in free air (`reedLp == 0` -> zero free-air buzz, zero dual-oscillator growl)!
+          const qLip = 3.6;
           const omegaLip = 2 * Math.PI * ws.smoothEmbHz;
           const omegaLipSq = omegaLip * omegaLip;
-          const dampLip = omegaLip / 6.8;
+          const dampLip = omegaLip / qLip;
 
-          ws.reedLp += alphaReed * (pBack0 - ws.reedLp);
-          const dBackRate = (ws.reedLp - ws.prevBack) / Math.max(1e-5, omegaLip * dt);
-          ws.prevBack = ws.reedLp;
-
-          // Velocity + pressure coupling guarantees zero-dead-spot self-oscillation & clean bore slotting!
-          const drive = 0.28 * pMouth + 0.42 * ws.reedLp + 0.55 * ws.lipV / Math.max(50, omegaLip) * pMouth + 0.18 * dBackRate;
-          const acc = omegaLipSq * (drive - ws.lipY) - dampLip * ws.lipV - omegaLipSq * 0.45 * ws.lipY * ws.lipY * ws.lipY;
+          const acc = omegaLipSq * (ws.reedLp - ws.lipY - 0.35 * ws.lipY * ws.lipY * ws.lipY) - dampLip * ws.lipV;
           ws.lipV += dt * acc;
           ws.lipY += dt * ws.lipV;
-          if (ws.lipY < -0.8) {
-            ws.lipY = -0.8;
-            ws.lipV *= -0.2;
-          } else if (ws.lipY > 1.1) {
-            ws.lipY = 1.1;
-            ws.lipV *= -0.2;
+          if (ws.lipY < -1.2) {
+            ws.lipY = -1.2;
+            ws.lipV *= -0.15;
+          } else if (ws.lipY > 1.2) {
+            ws.lipY = 1.2;
+            ws.lipV *= -0.15;
           }
 
-          // Half-wave lip aperture creates rich brass harmonic series (f0, 2f0, 3f0, 4f0, 5f0)
-          const lipOpen = Math.max(0, 0.22 + 0.92 * ws.lipY);
-          const dp = pMouth - 0.65 * ws.reedLp;
-          const flow = lipOpen * Math.tanh(dp * 1.65) * 0.78;
-          pIn0 = 0.88 * ws.reedLp + flow;
-
-          // Warm brass bell/cup body resonance filter so upper harmonics sing smoothly without harshness
-          const alphaCup = Math.min(0.45, dt * 2 * Math.PI * (ws.smoothEmbHz * 4.5));
-          ws.cupLp += alphaCup * ((radiated + 0.35 * flow) - ws.cupLp);
-          radiated = ws.cupLp;
+          const vBp = ws.lipV / Math.max(20, omegaLip * qLip);
+          const lipOpen = Math.max(0, 0.24 + 2.85 * vBp);
+          const dp = pMouth - 0.55 * ws.reedLp;
+          const flow = lipOpen * Math.tanh(dp * 1.6) * 0.72;
+          pIn0 = 0.94 * ws.reedLp + flow;
         } else {
-          // Air-jet flute edge excitation
-          ws.reedLp += alphaReed * (pBack0 - ws.reedLp);
-          const jet = Math.tanh((pMouth * 1.4 - 0.85 * ws.reedLp) * 2.8) * pMouth * 0.52;
-          pIn0 = 0.86 * ws.reedLp + jet;
+          // Air-jet edge excitation
+          const jet = Math.tanh((pMouth * 1.4 - 0.85 * ws.reedLp) * 2.6) * pMouth * 0.50;
+          pIn0 = 0.88 * ws.reedLp + jet;
         }
 
-        if (pIn0 > 1.6) pIn0 = 1.6;
-        else if (pIn0 < -1.6) pIn0 = -1.6;
+        if (pIn0 > 1.5) pIn0 = 1.5;
+        else if (pIn0 < -1.5) pIn0 = -1.5;
 
-        // 1-multiply Kelly–Lochbaum scattering ladder + open tonehole shunts
+        // 1-multiply Kelly–Lochbaum spatial scattering ladder + open tonehole shunts
         const nPlus = ws.nextPlus;
         const nMinus = ws.nextMinus;
         nPlus[0] = pIn0;
@@ -327,14 +376,20 @@ export class KellyLochbaumSynthBank {
           let bm = ws.pMinus[c + 1];
           const sh = shArr[c];
           if (sh < -0.001) {
-            const w = sh * (fp + bm);
+            // Scavone–Smith 1-pole lossless acoustic inertance tonehole shunt:
+            const aHole = Math.min(0.96, Math.sqrt(-sh) * 1.04);
+            const targetW = -0.985 * (fp + bm);
+            hState[c] += aHole * (targetW - hState[c]);
+            const w = hState[c];
             fp += w;
             bm += w;
-            radiated -= w * 0.52;
+            radiated -= w * 0.62;
+          } else {
+            hState[c] *= 0.85;
           }
           const d = kArr[c] * (fp - bm);
-          nPlus[c + 1] = (fp + d) * 0.9994;
-          nMinus[c] = (bm + d) * 0.9994;
+          nPlus[c + 1] = (fp + d) * 0.9995;
+          nMinus[c] = (bm + d) * 0.9995;
         }
 
         const tmpP = ws.pPlus;
@@ -344,9 +399,11 @@ export class KellyLochbaumSynthBank {
         ws.pMinus = nMinus;
         ws.nextMinus = tmpM;
 
-        // DC blocker
-        const dcOut = radiated - ws.dcX1 + 0.995 * ws.dcY1;
-        ws.dcX1 = radiated;
+        // Universal 2-pole radiation smoothing + DC blocker
+        ws.outLp1 += alphaRad * (radiated - ws.outLp1);
+        ws.outLp2 += alphaRad * (ws.outLp1 - ws.outLp2);
+        const dcOut = ws.outLp2 - ws.dcX1 + 0.995 * ws.dcY1;
+        ws.dcX1 = ws.outLp2;
         ws.dcY1 = dcOut;
         outL[i] += dcOut * ws.gain;
       }

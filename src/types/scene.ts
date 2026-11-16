@@ -586,6 +586,8 @@ export interface WindInstrumentSpec {
   mouthRadiusM?: number;
   /** Optional bell inner radius (m) for coiled/folded horns. */
   bellRadiusM?: number;
+  /** Optional radial flare exponent p in r(u) = r0 + (r1 - r0) * u^p (1 = linear cone, ~2.7 = Bessel horn flare). */
+  flareExponent?: number;
   /** Optional MuJoCo joint names of hinged/sliding key pads covering toneholes along the bore. */
   toneholeJoints?: { jointName: string; axialFraction: number; diameterMm: number }[];
   /** Optional MuJoCo piston/rotary brass valve joints that switch in extra semitone tubing loops when depressed. */

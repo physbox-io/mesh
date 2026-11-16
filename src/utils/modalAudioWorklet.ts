@@ -31,22 +31,32 @@ interface AttachedWindGraphState {
 type AudioContextWithWindBank = AudioContext & {
   __physboxWindWaveguideV5?: AttachedWindGraphState;
   __physboxWindWaveguideV6?: AttachedWindGraphState;
+  __physboxWindWaveguideV7?: AttachedWindGraphState;
+  __physboxWindWaveguideV8?: AttachedWindGraphState;
+  __physboxWindWaveguideV9?: AttachedWindGraphState;
 };
 
 function ensureWindGraph(ctx: AudioContext): AttachedWindGraphState {
   const c = ctx as AudioContextWithWindBank;
-  if (c.__physboxWindWaveguideV5) {
-    try { c.__physboxWindWaveguideV5.outGain?.disconnect(); } catch { /* ignore */ }
-    delete c.__physboxWindWaveguideV5;
+  for (const oldKey of [
+    '__physboxWindWaveguideV5',
+    '__physboxWindWaveguideV6',
+    '__physboxWindWaveguideV7',
+    '__physboxWindWaveguideV8',
+  ] as const) {
+    if (c[oldKey]) {
+      try { c[oldKey]!.outGain?.disconnect(); } catch { /* ignore */ }
+      delete c[oldKey];
+    }
   }
-  if (c.__physboxWindWaveguideV6) {
-    c.__physboxWindWaveguideV6.bank.setSampleRate(ctx.sampleRate || 48000);
-    return c.__physboxWindWaveguideV6;
+  if (c.__physboxWindWaveguideV9) {
+    c.__physboxWindWaveguideV9.bank.setSampleRate(ctx.sampleRate || 48000);
+    return c.__physboxWindWaveguideV9;
   }
 
   const bank = new KellyLochbaumSynthBank(ctx.sampleRate || 48000, 4);
   const st: AttachedWindGraphState = { bank, processor: null };
-  c.__physboxWindWaveguideV6 = st;
+  c.__physboxWindWaveguideV9 = st;
 
   if (typeof ctx.createScriptProcessor === 'function') {
     const proc = ctx.createScriptProcessor(1024, 1, 2);
@@ -94,6 +104,6 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
 
 export function postWorkletWindSilence(ctx: AudioContext | null): void {
   if (!ctx) return;
-  const st = (ctx as AudioContextWithWindBank).__physboxWindWaveguideV6;
+  const st = (ctx as AudioContextWithWindBank).__physboxWindWaveguideV9;
   st?.bank.silenceAll();
 }

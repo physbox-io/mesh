@@ -124,8 +124,8 @@ for (let i = 0; i < score.length; i++) {
           springref: 0,
           damping: 0.016,
           limited: true,
-          // Hard stop at -13° prevents dragging the beater head through the 17 mm bar!
-          range: [-13, 24],
+          // Hard stop at -13° prevents dragging the beater head through the 17 mm bar; 55° upper headroom avoids rebound stop-slams!
+          range: [-13, 55],
           hardStop: true,
         },
       ],

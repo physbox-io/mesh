@@ -107,13 +107,13 @@ for (let i = 0; i < score.length; i++) {
     ],
   });
 
-  // Solid brass bell mallets with colliding spring-steel shafts & hard stops
+  // Rattan-handled brass bell mallets (wide upper range so rebound never slams an upper joint stop!)
   const makeBrassMallet = (idx: number, label: string, x: number): SceneNode => ({
     id: `glock_mallet_${idx + 1}`,
     name: `Brass Mallet (${label})`,
     type: 'body',
     pos: [x, -0.142, 0.066],
-    deformMaterial: 'softMetal',
+    deformMaterial: 'plastic',
     joints: [
       {
         name: `glock_hammer_${idx}`,
@@ -122,9 +122,9 @@ for (let i = 0; i < score.length; i++) {
         pos: [0, 0, 0],
         stiffness: 0.72,
         springref: 0,
-        damping: 0.015,
+        damping: 0.018,
         limited: true,
-        range: [-12, 24],
+        range: [-12, 55],
         hardStop: true,
       },
     ],
