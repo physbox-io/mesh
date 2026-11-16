@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import type { ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentTrim } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import { chain, CLOTH_MATERIALS, clothMaterial, DEFAULT_CLOTH_SPACING, DEFAULT_SEW_TIME, meshCloth } from './clothMesh';
+import { restOff } from './garmentPlan';
 import { garmentShell } from './garmentShell';
 import { doneUp } from './fastening';
 import { flattenPanel, type FlatPiece } from './garmentFlatten';
@@ -882,7 +883,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         const ctx = {
           points: shellUp, tris: shell.tris, normals: vertexNormals(shellUp, shell.tris, new THREE.Matrix4()), form: form.bodyForm!,
           toWorld, fromWorld: (p: number[]) => { w.set(p[0], p[1], p[2]).applyMatrix4(inverse); return [w.x, w.y, w.z]; },
-          x: xUp, worldNormal: (i: number) => shellNormals[i], spacing, lapels, colour,
+          x: xUp, worldNormal: (i: number) => shellNormals[i], spacing, lapels, colour, room: restOff(spec.layer ?? 0),
           panelPoints: (nm: string) => new Set(wornPanels.find((pn) => pn.name === nm)?.particles ?? []),
           panelUv: (nm: string, g: number) => { const pn = wornPanels.find((q) => q.name === nm), l = pn ? pn.particles.indexOf(g) : -1; return l >= 0 ? pn!.uv[l] : undefined; },
         };

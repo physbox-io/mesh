@@ -40,8 +40,8 @@ export const COLLAR_DEFAULTS: Required<Omit<GarmentCollar, 'standFront' | 'mater
 
 /** How far a turned-back or overlying layer stands off the cloth under it: the cloth's thickness and a little. */
 const LAYER_OFF = 0.0045;
-/** A collar's stand leans in toward the neck at most this much (tan 15 degrees), and stays this far off it, metres. */
-const STAND_LEAN = 0.27, STAND_CLEAR = 0.007;
+/** A collar's stand leans in toward the neck at most this much (tan 15 degrees), and stays this far off it past its garment's own room off the body (restOff), metres. */
+const STAND_LEAN = 0.27, STAND_CLEAR = 0.003;
 
 /**
  * The cuts that make lapels: each front cut along its roll line, a plane
@@ -238,6 +238,8 @@ export interface CollarContext {
   x: number[][];
   worldNormal: (i: number) => number[];
   spacing: number;
+  /** The garment's own room off the body for the layer it is worn as (garmentPlan's restOff): its stand keeps it off the neck too, for what is worn under it. */
+  room?: number;
   /** Lapels the collar meets: its end is sewn along each one's gorge, and its fall over them stands a layer further off. */
   lapels: LapelBuilt[];
   /** A panel's shell points, by name (which neckline points a shawl's half shares with its front), and where one lies in its flat piece. */
@@ -426,11 +428,15 @@ export function collarPieces(collar: GarmentCollar, run0: number[], closed: bool
     // shorter than its neck edge, and the fall, folded over it, would then
     // have to be shorter still where it comes down: no flat piece does that.
     // (An outer layer's collar stays outside an inner one's: its neckline is.)
+    // Kept off the neck by the room its layer leaves, as the rest of the
+    // garment is: 7 mm off whatever its layer, a puffer's (worn over a
+    // neckerchief, 12 mm off the neck) was modelled inside it and crushed.
+    const clear = (ctx.room ?? 0.004) + STAND_CLEAR;
     let top = p.slice();
     if (h > 0) {
       let z1 = p[2] + h;
       for (let it = 0; it < 4; it++) {
-        const r1 = Math.max(neck.radius(z1, th) + STAND_CLEAR, rP - STAND_LEAN * h), cy = neck.centreY(z1);
+        const r1 = Math.max(neck.radius(z1, th) + clear, rP - STAND_LEAN * h), cy = neck.centreY(z1);
         top = [r1 * Math.cos(th), cy + r1 * Math.sin(th), z1];
         const across = Math.hypot(top[0] - p[0], top[1] - p[1]);
         z1 = p[2] + Math.sqrt(Math.max(0.25 * h * h, h * h - across * across));
