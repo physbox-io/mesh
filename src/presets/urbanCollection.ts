@@ -96,7 +96,8 @@ function pufferLook(x: number): SceneNode[] {
   const m = form.bodyForm!, L = bodyLandmarks(m);
   const quilt = quilting(m, [L.waistZ - 0.1, L.waistZ - 0.01, L.waistZ + 0.08, L.waistZ + 0.17, L.waistZ + 0.26, L.waistZ + 0.35], [0.3, 0.45, 0.6, 0.75, 0.9], 0.04, 0.02);
   const shorts = wearing('shorts', {
-    garment: 'trousers', material: 'canvas', length: 0.4, flare: 1.12, ease: 0.1, rgba: [0.3, 0.33, 0.19, 1],
+    // Ease 5 cm round the thigh: at 10 the two legs hung pressed together to near the hem, and slid 4 cm down on Run.
+    garment: 'trousers', material: 'canvas', length: 0.4, flare: 1.12, ease: 0.05, rgba: [0.3, 0.33, 0.19, 1],
     pockets: [{ panel: 'front', at: [0.62, 0.86] }, { panel: 'back', at: [0.5, 0.8] }], beltLoops: 5,
     trims: [{ kind: 'stitch', along: 'hem', offset: [0.008, 0.014], rgba: [0.2, 0.22, 0.12, 1] }, { kind: 'stitch', along: 'side', offset: 0.004, rgba: [0.2, 0.22, 0.12, 1] }],
     belt: { width: 0.032, material: 'leather', rgba: [0.13, 0.08, 0.05, 1] },

@@ -7,6 +7,7 @@
  * it, and left free to fall as the cloth does.
  */
 
+import { BOARD_STIFFNESS } from './clothBoards';
 import type { ClothMaterialName, GarmentAttachment } from '../../types/cloth';
 import { CLOTH_MATERIALS, meshOutline } from './clothMesh';
 import { heightOver, nearestTack, SEWN_OFF, type AddOnPiece, type AddOnTack } from './garmentAddOns';
@@ -43,6 +44,24 @@ function chain(outline: [number, number][], i: number, j: number): [number, numb
 }
 
 /**
+ * The angle round a closed line from straight ahead (its front middle),
+ * toward the wearer's left, about its middle: the middle by length along it,
+ * not by its points, which bunch where its mesh is finer (by its points, a
+ * cap's band read its front 2 mm to one side, and its peak sat off centre).
+ */
+function turnRound(run: number[], x: number[][]): (i: number) => number {
+  const c = [0, 0, 0];
+  let total = 0;
+  for (let k = 0; k < run.length; k++) {
+    const a = x[run[k]], b = x[run[(k + 1) % run.length]], l = Math.hypot(...sub(b, a) as [number, number, number]);
+    for (let q = 0; q < 3; q++) c[q] += ((a[q] + b[q]) / 2) * l;
+    total += l;
+  }
+  for (let q = 0; q < 3; q++) c[q] /= total || 1;
+  return (i: number) => Math.atan2(x[i][0] - c[0], -(x[i][1] - c[1]));
+}
+
+/**
  * A line's points in the order its fractions run: round a closed one from
  * its front middle toward the wearer's left (+x), as an edge profile runs;
  * along an open one toward the wearer's left, or down if it runs more down
@@ -50,8 +69,7 @@ function chain(outline: [number, number][], i: number, j: number): [number, numb
  */
 export function orientRun(run: number[], closed: boolean, x: number[][]): number[] {
   if (closed) {
-    const c = [0, 1, 2].map((q) => run.reduce((acc, i) => acc + x[i][q], 0) / run.length);
-    const turn = (i: number) => Math.atan2(x[i][0] - c[0], -(x[i][1] - c[1]));
+    const turn = turnRound(run, x);
     let k0 = 0;
     for (let k = 1; k < run.length; k++) if (Math.abs(turn(run[k])) < Math.abs(turn(run[k0]))) k0 = k;
     const r = [...run.slice(k0), ...run.slice(0, k0)];
@@ -71,8 +89,17 @@ function lineAlong(run: number[], closed: boolean, x: number[][], normalOf: (p: 
   const cum = [0];
   for (let k = 1; k < ids.length; k++) cum.push(cum[k - 1] + Math.hypot(...sub(x[ids[k]], x[ids[k - 1]])));
   const length = cum[cum.length - 1];
+  // Round a closed line, 0 exactly straight ahead, between its points: at the
+  // point nearest it, a stretch sewn on was up to half a point's spacing to
+  // one side (a cap's peak, one end reaching 4 mm further than the other).
+  let s0 = 0;
+  if (closed && run.length > 2) {
+    const turn = turnRound(run, x), t0 = turn(run[0]);
+    if (t0 < 0) { const t1 = turn(run[1]); if (t1 > t0) s0 = Math.min(1, -t0 / (t1 - t0)) * cum[1]; }
+    else if (t0 > 0) { const tl = turn(run[run.length - 1]); if (tl < t0) s0 = -Math.min(1, t0 / (t0 - tl)) * (length - cum[cum.length - 2]); }
+  }
   const at = (f: number) => {
-    const s = (closed ? ((f % 1) + 1) % 1 : Math.max(0, Math.min(1, f))) * length;
+    const s = closed ? ((((f * length + s0) % length) + length) % length) : Math.max(0, Math.min(1, f)) * length;
     let k = 1;
     while (k < cum.length - 1 && cum[k] < s) k++;
     const a = ids[k - 1], b = ids[k], u = cum[k] > cum[k - 1] ? (s - cum[k - 1]) / (cum[k] - cum[k - 1]) : 0;
@@ -181,6 +208,7 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
     const stretch = (i: number, j: number) => { const out: number[] = []; for (let k = i; k !== j; k = (k + 1) % n) out.push(...(out.length ? mesh.edgeVerts[`s${k}`].slice(1) : mesh.edgeVerts[`s${k}`])); return out; };
     const onSewn = new Set(stretch(i0, i1));
     const pm = { ...(CLOTH_MATERIALS[a.material ?? hostMaterial] ?? CLOTH_MATERIALS.jersey), ...(a.materialOverrides ?? {}) };
+    const board = (pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS;
     // Its own stretches sewn together (a hood's crown, anything folded and sewn): paired by fraction along each.
     const selfStitches: [number, number][] = [];
     built.set(a.name, { stretch, n });
@@ -239,7 +267,11 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
         // gathered into it; a shorter one is sewn at its own length in the
         // middle of it (cloth gathers onto a shorter line, it does not stretch onto a longer one).
         const g0 = s0 + ((s1 - s0) * k) / copies, g1 = s0 + ((s1 - s0) * (k + 1)) / copies - (k === copies - 1 ? gap : 0);
-        const own = sewnLen / Math.max(1e-6, line.length), half = Math.min(g1 - g0, own) / 2, mid = (g0 + g1) / 2;
+        // A board is not gathered either: it takes as much of the line as its
+        // own sewn side, about the middle of its share, and the line eases onto
+        // it (a cap's peak, 7% longer than the band it was given, crinkled the
+        // band all along its seam).
+        const own = sewnLen / Math.max(1e-6, line.length), half = (board ? own : Math.min(g1 - g0, own)) / 2, mid = (g0 + g1) / 2;
         const f0 = mid - half, f1 = mid + half;
         const name = `${a.name}${runs.length > 1 ? `_${r + 1}` : ''}${copies > 1 ? `_${k + 1}` : ''}`;
         const whole = closed && f1 - f0 + gap >= 0.999;
