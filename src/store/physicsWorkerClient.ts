@@ -294,6 +294,7 @@ export class PhysicsWorkerClient {
   private pendingTelemetry = new Map<string, Pending<TelemetryReply | null>>();
   private pendingSteps = new Map<string, Pending<StepForResult>>();
   private pendingChannels = new Map<string, Pending<{ channels: CoSimChannel[]; timestepMs: number }>>();
+  private soundEnabled = false;
   /**
    * Which meshes this worker already holds as VFS files. Pass it to
    * `compileToMJCF` and then `build` the result on THIS client: a recycled
@@ -460,6 +461,9 @@ export class PhysicsWorkerClient {
         { type: 'BUILD', id, xml, sceneGraph: withoutMeshData(sceneGraph), preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
+      if (this.soundEnabled) {
+        this.worker.postMessage({ type: 'SET_SOUND', enabled: true });
+      }
     });
   }
 
@@ -490,7 +494,10 @@ export class PhysicsWorkerClient {
       ...(hydroModels ? { hydroModels } : {}),
     });
   }
-  setSound(enabled: boolean) { this.worker.postMessage({ type: 'SET_SOUND', enabled }); }
+  setSound(enabled: boolean) {
+    this.soundEnabled = enabled;
+    this.worker.postMessage({ type: 'SET_SOUND', enabled });
+  }
   setDrag(nodeId: string | null, target: { x: number; y: number; z: number } | null) { this.worker.postMessage({ type: 'SET_DRAG', nodeId, target }); }
   setKeys(keys: string[]) { this.worker.postMessage({ type: 'SET_KEYS', keys }); }
   setQpos(jointName: string, axis: number, value: number | readonly number[]) { this.worker.postMessage({ type: 'SET_QPOS', jointName, axis, value }); }

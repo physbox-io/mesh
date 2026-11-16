@@ -40,6 +40,9 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   boolean_shapes: 'Make it',
   openscad_demo: 'Make it',
   marimba_cascade: 'Make it',
+  metallophone_carillon: 'Make it',
+  soundbox_lyre: 'Make it',
+  wind_instruments: 'Make it',
 
   pendulum: 'Mechanisms',
   stepper_turntable: 'Mechanisms',
@@ -59,6 +62,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   mesh_collision: 'Mechanisms',
   shatter: 'Mechanisms',
   spaghetti_towers: 'Mechanisms',
+  compliant_flexures: 'Mechanisms',
 
   cartpole: 'Machines & robots',
   xy_plotter: 'Machines & robots',

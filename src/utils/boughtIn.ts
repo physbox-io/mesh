@@ -6,5 +6,5 @@ import type { SceneNode } from '../types/scene';
 
 /** Bought, not made: drawn and simulated, never exported for making or analysed as made. */
 export function isBoughtIn(node: SceneNode): boolean {
-  return !!node.hardwarePart;
+  return !!node.hardwarePart || !!node.acousticString;
 }

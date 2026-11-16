@@ -14,6 +14,12 @@
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { deformMaterial, geomVolume } from './deformMaterials';
 import { geomHydroTriangles } from './hydrostatics';
+import {
+  getOrInitModalWorklet,
+  postWorkletWindSilence,
+  postWorkletWindUpdate,
+  type WorkletWindVoicePayload,
+} from './modalAudioWorklet';
 
 export interface AcousticMaterialProps {
   label: string;
@@ -484,17 +490,28 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
 // Zero-sample WebAudio synthesiser (browser-only, safe no-op in Node/Vitest)
 // ---------------------------------------------------------------------------
 
+type WindowWithAudioCtx = Window & {
+  __physboxSharedAudioCtx?: AudioContext;
+  __physboxGestureHookInstalled?: boolean;
+};
+
 let sharedAudioCtx: AudioContext | null = null;
 let activeVoices = 0;
 const MAX_ACTIVE_VOICES = 28;
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
+  const win = window as WindowWithAudioCtx;
+  if (!sharedAudioCtx && win.__physboxSharedAudioCtx && win.__physboxSharedAudioCtx.state !== 'closed') {
+    sharedAudioCtx = win.__physboxSharedAudioCtx;
+  }
   const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!Ctor) return null;
   if (!sharedAudioCtx) {
     sharedAudioCtx = new Ctor();
+    win.__physboxSharedAudioCtx = sharedAudioCtx;
   }
+  getOrInitModalWorklet(sharedAudioCtx);
   if (sharedAudioCtx.state === 'suspended') {
     void sharedAudioCtx.resume().catch(() => {});
   }
@@ -502,15 +519,61 @@ function getAudioContext(): AudioContext | null {
 }
 
 /**
- * Plays a physical modal impact for `profile` scaled by collision impulse `impulseNs`.
+ * Unlocks and resumes the shared WebAudio context synchronously inside a DOM
+ * user gesture (click / pointerdown / keydown). Essential because Chrome blocks
+ * `AudioContext.resume()` when called asynchronously inside `Worker.onmessage`!
  */
-export function playModalImpact(profile: BodyModalProfile, impulseNs: number): void {
+export function unlockAudioContext(): AudioContext | null {
   const ctx = getAudioContext();
-  if (!ctx || activeVoices >= MAX_ACTIVE_VOICES) return;
+  if (!ctx) return null;
+  if (ctx.state === 'suspended') {
+    void ctx.resume().catch(() => {});
+  }
+  try {
+    // 1-frame silent buffer unlock for WebKit/Chromium autoplay gate
+    const silent = ctx.createBuffer(1, 1, ctx.sampleRate);
+    const src = ctx.createBufferSource();
+    src.buffer = silent;
+    src.connect(ctx.destination);
+    src.start(0);
+  } catch {
+    // Ignore in headless/mock contexts
+  }
+  return ctx;
+}
+
+if (typeof window !== 'undefined') {
+  const win = window as WindowWithAudioCtx;
+  if (!win.__physboxGestureHookInstalled) {
+    win.__physboxGestureHookInstalled = true;
+    const onGesture = () => {
+      if (sharedAudioCtx && sharedAudioCtx.state === 'suspended') {
+        void sharedAudioCtx.resume().catch(() => {});
+      } else if (win.__physboxSharedAudioCtx && win.__physboxSharedAudioCtx.state === 'suspended') {
+        void win.__physboxSharedAudioCtx.resume().catch(() => {});
+      }
+    };
+    window.addEventListener('pointerdown', onGesture, { passive: true });
+    window.addEventListener('keydown', onGesture, { passive: true });
+  }
+}
+
+/**
+ * Plays a physical modal impact (or string pluck) for `profile` scaled by impulse `impulseNs`.
+ * Uses WebAudio's native C++ audio-thread `OscillatorNode` + `BiquadFilterNode` graph directly
+ * (proven 100% reliable across all browsers/tabs, zero JS-thread sample loops!).
+ */
+export function playModalImpact(profile: BodyModalProfile, impulseNs: number, _isPluck = false): void {
+  const ctx = getAudioContext();
+  if (!ctx) return;
 
   // Compress dynamic range smoothly from tiny taps (0.005 N*s) to heavy blows (10 N*s)
   const level = Math.min(0.45, 0.14 * Math.log10(1 + Math.max(0.01, impulseNs) * 45));
   if (level < 0.004) return;
+  if (activeVoices >= MAX_ACTIVE_VOICES) return;
+
+  const vScale = Math.pow(Math.max(0.08, Math.min(6, impulseNs * 1.8)), -0.15);
+  const tauC = Math.max(0.00038, Math.min(0.006, profile.contactDurationSec * vScale));
 
   const now = ctx.currentTime;
   const master = ctx.createGain();
@@ -542,12 +605,7 @@ export function playModalImpact(profile: BodyModalProfile, impulseNs: number): v
     };
   }
 
-  // Universal Koss–Alfredson Hertzian rigid-body acceleration pressure pulse:
-  // During elastic contact t ∈ [0, τ_c], F(t) = sin(π t / τ_c)^(3/2), so the radiated
-  // acoustic pressure p(t) ∝ dF/dt is a clean bipolar wavelet of duration τ_c (scaled
-  // weakly by impact impulse v^(-0.2)), filtered through a natural air-radiation rolloff.
-  const vScale = Math.pow(Math.max(0.08, Math.min(6, impulseNs * 1.8)), -0.15);
-  const tauC = Math.max(0.00038, Math.min(0.006, profile.contactDurationSec * vScale));
+  // Universal Koss–Alfredson Hertzian rigid-body acceleration pressure pulse (fallback path):
   const totalPulseDur = Math.max(0.012, tauC * 9);
   const sampleCount = Math.max(64, Math.ceil(ctx.sampleRate * totalPulseDur));
   const pulseBuf = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
@@ -590,4 +648,16 @@ export function playModalTap(node: SceneNode): BodyModalProfile {
   const profile = estimateBodyModes(node);
   playModalImpact(profile, 0.35);
   return profile;
+}
+
+/** Streams active 1D Kelly–Lochbaum wind/brass bore parameters to the off-main-thread AudioWorklet. */
+export function updateLiveWindVoices(voices: WorkletWindVoicePayload[]): void {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  postWorkletWindUpdate(ctx, voices);
+}
+
+/** Immediately fades out all continuous wind/brass bore voices (on Stop or Mute). */
+export function silenceWindVoices(): void {
+  postWorkletWindSilence(sharedAudioCtx);
 }

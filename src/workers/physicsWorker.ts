@@ -1143,14 +1143,14 @@ const sampleAudioImpacts = (stepSize: number) => {
   for (let d = 0; d < nv; d++) {
     const df = qfrcC[d] - prevConstraintDof[d];
     prevConstraintDof[d] = qfrcC[d];
-    if (Math.abs(df) < 0.8) continue;
+    if (Math.abs(df) < 0.25) continue;
     const bId = dofBody[d];
     if (bId <= 0) continue;
     bodyJumpSq.set(bId, (bodyJumpSq.get(bId) ?? 0) + df * df);
   }
   for (const [bId, sumSq] of bodyJumpSq) {
     const impulseNs = Math.sqrt(sumSq) * stepSize;
-    if (impulseNs < 0.004) continue;
+    if (impulseNs < 0.0015) continue;
     const nodeId = bodyNodeById[bId];
     if (!nodeId || nodeId === 'world') continue;
     const prev = pendingAudioImpacts.get(nodeId) ?? 0;

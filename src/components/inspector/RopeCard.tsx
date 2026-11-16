@@ -1,9 +1,16 @@
 import { useMemo } from 'react';
+import { Volume2 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
-import type { SceneNode } from '../../types/scene';
+import type { SceneNode, StringMaterialId } from '../../types/scene';
+import { RangeInput } from '../RangeInput';
+import { hzToNoteInfo } from '../../utils/acousticTuning';
+import { playModalImpact } from '../../utils/modalAudio';
+import { findNodeById } from '../../utils/sceneTree';
+import { analyzeSoundboxResonance, STRING_MATERIALS } from '../../utils/stringAcoustics';
 
 export function RopeCard({ node }: { node: SceneNode }) {
   const updateRopeParams = useStore((s) => s.updateRopeParams);
+  const updateNode = useStore((s) => s.updateNode);
   const sceneGraph = useStore((s) => s.sceneGraph);
 
   const allPulleyWheels = useMemo(() => {
@@ -109,6 +116,111 @@ export function RopeCard({ node }: { node: SceneNode }) {
           </label>
         ))}
       </div>
+
+      {/* Musical String Tensioning on any direct 2-body Rope (no pulley wheel) */}
+      {!node.pulleyWheelId && node.leftTargetId && node.rightTargetId && (() => {
+        const bodyA = findNodeById(sceneGraph.nodes, node.leftTargetId);
+        const bodyB = findNodeById(sceneGraph.nodes, node.rightTargetId);
+        const spanM = bodyA && bodyB
+          ? Math.max(0.03, Math.hypot(
+              (bodyB.pos[0] ?? 0) - (bodyA.pos[0] ?? 0),
+              (bodyB.pos[1] ?? 0) - (bodyA.pos[1] ?? 0),
+              (bodyB.pos[2] ?? 0) - (bodyA.pos[2] ?? 0),
+            ))
+          : 0.32;
+        const spec = node.acousticString;
+        const mat = STRING_MATERIALS[spec?.material ?? 'bronze'];
+        const r = (spec?.diameterMm ?? 0.65) / 2000;
+        const mu = mat.densityKgM3 * Math.PI * r * r;
+        const tension = spec?.tensionN ?? 55;
+        const f0 = Math.sqrt(tension / mu) / (2 * spanM);
+        const noteInfo = hzToNoteInfo(f0);
+        const boxA = bodyA ? analyzeSoundboxResonance(bodyA) : null;
+        const boxB = bodyB ? analyzeSoundboxResonance(bodyB) : null;
+        const bestBox = boxA?.hasHollowCavity ? boxA : boxB?.hasHollowCavity ? boxB : null;
+
+        return (
+          <div className="pt-2 border-t border-slate-100 flex flex-col gap-2">
+            <label className="flex items-center justify-between text-xs font-semibold text-slate-600 cursor-pointer">
+              <span>🎸 Tension as Musical String</span>
+              <input
+                type="checkbox"
+                checked={!!spec}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    updateNode(node.id, {
+                      acousticString: { material: 'bronze', diameterMm: 0.65, tensionN: 55 },
+                    });
+                  } else {
+                    updateNode(node.id, { acousticString: undefined });
+                  }
+                }}
+              />
+            </label>
+            {spec && (
+              <>
+                <div className="flex items-center justify-between bg-slate-50 rounded px-2 py-1 text-xs">
+                  <span>
+                    <b>{noteInfo.note}</b> ({f0.toFixed(1)} Hz · {(spanM * 1000).toFixed(0)} mm)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const voices = Array.from({ length: 8 }, (_, k) => ({
+                        freqHz: +(f0 * (k + 1)).toFixed(2),
+                        gain: +(0.8 / Math.pow(k + 1, 1.3)).toFixed(3),
+                        decaySec: +(1.6 / (1 + 0.35 * k)).toFixed(3),
+                      }));
+                      playModalImpact(
+                        {
+                          fundamentalHz: f0,
+                          overtoneRatio: 2,
+                          regime: 'tube',
+                          material: { label: mat.label, density: mat.densityKgM3, modulusGPa: mat.modulusGPa, qualityQ: mat.intrinsicQ, brightness: mat.brightness },
+                          contactDurationSec: 0.00075,
+                          modes: voices,
+                        },
+                        0.35,
+                        true,
+                      );
+                    }}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-violet-50 hover:bg-violet-100 border border-violet-200 text-[10px] font-semibold text-violet-700 cursor-pointer"
+                  >
+                    <Volume2 className="w-3 h-3" /> Pluck
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <select
+                    value={spec.material}
+                    onChange={(e) => updateNode(node.id, { acousticString: { ...spec, material: e.target.value as StringMaterialId } })}
+                    className="text-xs border border-slate-200 rounded p-1 bg-white text-slate-700"
+                  >
+                    {Object.values(STRING_MATERIALS).map((m) => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </select>
+                  <div className="flex flex-col justify-center">
+                    <span className="text-[10px] text-slate-500">Tension {tension.toFixed(0)} N</span>
+                    <RangeInput
+                      min="10"
+                      max="150"
+                      step="1"
+                      value={tension}
+                      onChange={(v) => updateNode(node.id, { acousticString: { ...spec, tensionN: v } })}
+                      className="w-full accent-violet-500 cursor-pointer"
+                    />
+                  </div>
+                </div>
+                {bestBox && (
+                  <div className="text-[10px] text-amber-700 bg-amber-50/70 rounded px-2 py-1">
+                    Coupled to <b>{bestBox.hostName}</b> ({bestBox.cavityVolumeLitres} L{bestBox.helmholtzHz ? ` · Helmholtz ${bestBox.helmholtzHz} Hz` : ''})
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

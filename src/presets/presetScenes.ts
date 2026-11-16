@@ -21,6 +21,10 @@ import { soapDishPreset } from './soapDish';
 import { smokerPreset, toyCastlePreset } from './brickPresets';
 import { shatterPreset } from './shatter';
 import { marimbaCascadePreset } from './marimbaCascade';
+import { metallophoneCarillonPreset } from './metallophoneCarillon';
+import { soundboxLyrePreset } from './soundboxLyre';
+import { compliantFlexuresPreset } from './compliantFlexures';
+import { windInstrumentsPreset } from './windInstruments';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
@@ -3677,7 +3681,31 @@ export const PRESETS = {
     name: 'Pentatonic Marimba & Chime',
     emoji: '🎶',
     scene: marimbaCascadePreset,
-    camera: { position: [0.34, -0.48, 0.32], target: [0.02, 0, 0.08] } satisfies PresetCamera,
+    camera: { position: [0.32, -0.44, 0.28], target: [0.02, -0.04, 0.05] } satisfies PresetCamera,
+  },
+  metallophone_carillon: {
+    name: 'Steel Glockenspiel Carillon',
+    emoji: '🔔',
+    scene: metallophoneCarillonPreset,
+    camera: { position: [0.32, -0.44, 0.28], target: [0, -0.04, 0.05] } satisfies PresetCamera,
+  },
+  soundbox_lyre: {
+    name: 'Acoustic Soundbox Lyre',
+    emoji: '🎸',
+    scene: soundboxLyrePreset,
+    camera: { position: [0.24, -0.32, 0.24], target: [0, 0, 0.04] } satisfies PresetCamera,
+  },
+  compliant_flexures: {
+    name: 'Compliant Flexures & Snap Toggle',
+    emoji: '🧬',
+    scene: compliantFlexuresPreset,
+    camera: { position: [0.24, -0.34, 0.22], target: [0, 0, 0.045] } satisfies PresetCamera,
+  },
+  wind_instruments: {
+    name: 'Brass Cornet & Clarinet Duet',
+    emoji: '🎺',
+    scene: windInstrumentsPreset,
+    camera: { position: [0.32, -0.42, 0.25], target: [0.0, 0, 0.068] } satisfies PresetCamera,
   },
 };
 

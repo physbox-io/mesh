@@ -1,7 +1,9 @@
 import { Play, Square, Settings, X, RotateCcw, Trash2, CopyPlus, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Hammer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces, Cpu, Shapes, Volume2, VolumeX } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
+import { getPhysicsWorkerClient } from '../../store/physicsEngine';
 import { useSoundStore } from '../../store/soundStore';
+import { playModalImpact, unlockAudioContext } from '../../utils/modalAudio';
 import { usePanels } from '../../store/panelsStore';
 import { useSelectedNode } from '../../hooks/useSelectedNode';
 import type { PresetActions } from '../../hooks/usePresetActions';
@@ -89,7 +91,13 @@ export function AppHeader({
           }`}>
             {/* Simulate / Stop */}
             <button 
-              onClick={togglePlay}
+              onClick={() => {
+                if (!isPlaying && soundEnabled) {
+                  unlockAudioContext();
+                  getPhysicsWorkerClient().setSound(true);
+                }
+                togglePlay();
+              }}
               disabled={!isLoaded}
               className={`flex items-center justify-center gap-1.5 px-3 py-1 rounded-md font-semibold text-xs transition-all disabled:opacity-50 flex-shrink-0 cursor-pointer ${
                 isPlaying
@@ -116,7 +124,29 @@ export function AppHeader({
             {/* Modal Collision Audio (muted by default) */}
             <button
               type="button"
-              onClick={toggleSound}
+              onClick={() => {
+                const next = !soundEnabled;
+                if (next) {
+                  unlockAudioContext();
+                  // Gentle woody-chime confirmation note so you immediately know WebAudio is unlocked
+                  playModalImpact(
+                    {
+                      fundamentalHz: 523.25,
+                      overtoneRatio: 2.76,
+                      regime: 'bar',
+                      material: { label: 'Hardwood', density: 720, modulusGPa: 12.5, qualityQ: 145, brightness: 0.55 },
+                      contactDurationSec: 0.0009,
+                      modes: [
+                        { freqHz: 523.25, gain: 0.65, decaySec: 0.22 },
+                        { freqHz: 1442, gain: 0.28, decaySec: 0.12 },
+                      ],
+                    },
+                    0.08,
+                  );
+                }
+                toggleSound();
+                getPhysicsWorkerClient().setSound(next);
+              }}
               aria-pressed={soundEnabled}
               className={`flex items-center justify-center p-1.5 rounded-md transition-colors flex-shrink-0 cursor-pointer ${
                 soundEnabled

@@ -569,6 +569,42 @@ export interface FlexureBend {
 /** Monolithic compliant mechanism family replacing a rigid hinge or slide joint. */
 export type FlexureKind = 'blade' | 'cross_pivot' | 'serpentine' | 'bistable';
 
+export type StringMaterialId = 'steel' | 'bronze' | 'nylon' | 'gut';
+
+export type WindExciterKind = 'reed' | 'brass_lip' | 'flute_jet';
+
+/** 1D Kelly–Lochbaum bore waveguide + reed / lip-reed wind instrument spec; see utils/windAcoustics.ts. */
+export interface WindInstrumentSpec {
+  exciter: WindExciterKind;
+  /** Mouth / bellows blowing pressure in kPa (typical playing range 1.5–7.0 kPa; 0 = silent). */
+  breathKPa: number;
+  /** Reed natural frequency or brass player lip tension frequency (Hz, e.g. 180–850 Hz). */
+  embouchureHz: number;
+  /** Optional unwrapped acoustic bore length (m) for coiled/folded brass horns (inferred from 3D span when omitted). */
+  boreLengthM?: number;
+  /** Optional mouthpiece inner radius (m) for coiled/folded horns. */
+  mouthRadiusM?: number;
+  /** Optional bell inner radius (m) for coiled/folded horns. */
+  bellRadiusM?: number;
+  /** Optional MuJoCo joint names of hinged/sliding key pads covering toneholes along the bore. */
+  toneholeJoints?: { jointName: string; axialFraction: number; diameterMm: number }[];
+  /** Optional MuJoCo piston/rotary brass valve joints that switch in extra semitone tubing loops when depressed. */
+  valveJoints?: { jointName: string; semitones: number; strokeM?: number }[];
+}
+
+/** Taut musical string mounted across a body or frame; see utils/stringAcoustics.ts. */
+export interface AcousticStringSpec {
+  material: StringMaterialId;
+  /** Wire / monofilament diameter in mm (e.g. 0.28–1.30 mm). */
+  diameterMm: number;
+  /** Axial tension T in Newtons (Mersenne's law: f0 = sqrt(T / mu) / (2 * L)). */
+  tensionN: number;
+  /** Normalised pluck point x/L in [0.05, 0.5] (0.12 = bright ponticello, 0.45 = warm sul tasto). */
+  pluckPos?: number;
+  /** Optional explicit soundbox body id for bridge -> Helmholtz/plate resonance coupling. */
+  resonatorNodeId?: string;
+}
+
 /**
  * Authoring parameters & derived pseudo-rigid-body mechanics for a monolithic
  * compliant flexure joint (see utils/flexure.ts).
@@ -824,6 +860,10 @@ export interface SceneNode {
   flexure?: FlexureSpec;
   /** Concert fundamental frequency (Hz) when tuned by utils/acousticTuning.ts. */
   tunedPitchHz?: number;
+  /** Taut musical string specification (Mersenne tension + soundbox coupling); see utils/stringAcoustics.ts. */
+  acousticString?: AcousticStringSpec;
+  /** Continuous bore waveguide wind/brass/reed instrument specification; see utils/windAcoustics.ts. */
+  windInstrument?: WindInstrumentSpec;
   script?: string;
   scad?: string;
   /**

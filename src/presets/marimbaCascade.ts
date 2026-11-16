@@ -2,30 +2,158 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { tuneBodyToPitch, noteToHz } from '../utils/acousticTuning';
 
 /**
- * Pentatonic Marimba & Chime Cascade:
- * Five rosewood marimba bars tuned via underside luthier arches to C4–D4–E4–G4–A4
- * plus a C5 steel chime rod, struck in an ascending arpeggio by rolling brass mallets.
+ * Animated Pentatonic Marimba & Chime Automaton:
+ * A rotating brass music-box cylinder and 6 spring-returned hinged mallets play
+ * Edvard Grieg's "Morning Mood" (Peer Gynt) on 5 arch-tuned rosewood marimba bars
+ * (C4, D4, E4, G4, A4) and a C5 tubular steel chime!
+ *
+ * Every note is produced by a genuine MuJoCo rigid-body hammer-on-bar collision,
+ * and both mallet heads and wooden shafts have real collision + stop limits so
+ * dragging a beater cannot push it through the marimba wood.
  */
 export const marimbaCascadePreset: SceneGraph = (() => {
   const notes = ['C4', 'D4', 'E4', 'G4', 'A4'] as const;
   const nodes: SceneNode[] = [];
 
-  // Frame rails supporting the marimba bars near their 0.224·L nodal lines
+  // Indices: 0=C4, 1=D4, 2=E4, 3=G4, 4=A4, 5=C5(chime)
+  const controllerScript = `// Music-box cam escapement driving the 6 hinged mallets (Grieg — Morning Mood)
+const score = [
+  [3, 1.0], [2, 1.0], [1, 1.0], [0, 1.0], [1, 1.0], [2, 1.0],
+  [3, 1.0], [2, 1.0], [1, 1.0], [0, 1.0], [1, 0.5], [2, 0.5], [1, 0.5], [2, 0.5],
+  [3, 1.0], [2, 1.0], [3, 1.0], [4, 1.0], [2, 1.0], [4, 1.0],
+  [3, 1.0], [2, 1.0], [1, 1.0], [0, 2.2], [5, 1.8],
+];
+const joints = ['hammer_0', 'hammer_1', 'hammer_2', 'hammer_3', 'hammer_4', 'hammer_5'];
+const unitSec = 0.28;
+let totalDur = 0;
+for (let i = 0; i < score.length; i++) totalDur += score[i][1] * unitSec;
+
+const tLoop = api.getTime() % totalDur;
+let cursor = 0;
+for (let i = 0; i < score.length; i++) {
+  const dur = score[i][1] * unitSec;
+  const dt = tLoop - cursor;
+  if (dt >= 0 && dt < 0.044) {
+    api.applyJointForce(joints[score[i][0]], -1.85);
+  }
+  cursor += dur;
+}
+`;
+
+  const pinGeoms = Array.from({ length: 14 }).map((_, k) => {
+    const angle = (k / 14) * Math.PI * 2;
+    const xPin = -0.11 + ((k * 3) % 6) * 0.052;
+    const rDrum = 0.022;
+    return {
+      name: `drum_pin_${k}`,
+      type: 'sphere' as const,
+      size: [0.0028],
+      pos: [xPin, Math.cos(angle) * rDrum, Math.sin(angle) * rDrum],
+      rgba: [0.95, 0.82, 0.32, 1],
+      contype: 0,
+      conaffinity: 0,
+    };
+  });
+
   nodes.push({
     id: 'marimba_frame',
-    name: 'Marimba Frame',
+    name: 'Marimba & Cam Frame',
     type: 'body',
     pos: [0, 0, 0],
     deformMaterial: 'softwood',
+    script: controllerScript,
     joints: [],
     geoms: [
-      { name: 'rail_front', type: 'box', size: [0.16, 0.008, 0.014], pos: [0, -0.052, 0.014], rgba: [0.36, 0.24, 0.15, 1] },
-      { name: 'rail_back', type: 'box', size: [0.16, 0.008, 0.014], pos: [0, 0.052, 0.014], rgba: [0.36, 0.24, 0.15, 1] },
+      // Frame rails sit at z_top = 0.022 m (5.5 mm clear below z_bottom = 0.0275 m of the sprung bars!)
+      { name: 'rail_front', type: 'box', size: [0.175, 0.008, 0.011], pos: [0.02, -0.052, 0.011], rgba: [0.36, 0.24, 0.15, 1] },
+      { name: 'rail_back', type: 'box', size: [0.175, 0.008, 0.011], pos: [0.02, 0.052, 0.011], rgba: [0.36, 0.24, 0.15, 1] },
+      { name: 'side_tie_l', type: 'box', size: [0.008, 0.095, 0.009], pos: [-0.155, -0.035, 0.009], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'side_tie_r', type: 'box', size: [0.008, 0.095, 0.009], pos: [0.195, -0.035, 0.009], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'mallet_rail', type: 'box', size: [0.175, 0.009, 0.032], pos: [0.02, -0.125, 0.032], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'drum_post_l', type: 'box', size: [0.008, 0.012, 0.048], pos: [-0.155, -0.165, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'drum_post_r', type: 'box', size: [0.008, 0.012, 0.048], pos: [0.195, -0.165, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
     ],
-    children: [],
+    children: [
+      {
+        id: 'music_drum',
+        name: 'Pinned Music Cylinder',
+        type: 'body',
+        pos: [0.02, -0.165, 0.082],
+        deformMaterial: 'softMetal',
+        joints: [
+          {
+            name: 'drum_spin',
+            type: 'hinge',
+            axis: [1, 0, 0],
+            damping: 0.04,
+            actuator: { type: 'velocity', kv: 0.8, ctrlValue: 1.35 },
+          },
+        ],
+        geoms: [
+          {
+            name: 'brass_cylinder',
+            type: 'cylinder',
+            size: [0.02, 0.168],
+            euler: [0, 90, 0],
+            rgba: [0.85, 0.68, 0.24, 1],
+            contype: 0,
+            conaffinity: 0,
+          },
+          ...pinGeoms,
+        ],
+        children: [],
+      },
+    ],
   });
 
-  // Five tuned hardwood marimba bars (length along Y, stepped along X)
+  const makeHingedMallet = (idx: number, label: string, x: number, headMat: 'plastic' | 'steel'): SceneNode => {
+    const isSteel = headMat === 'steel';
+    return {
+      id: `mallet_${idx + 1}`,
+      name: `Mallet ${label}`,
+      type: 'body',
+      pos: [x, -0.12, 0.070],
+      deformMaterial: headMat,
+      joints: [
+        {
+          name: `hammer_${idx}`,
+          type: 'hinge',
+          axis: [1, 0, 0],
+          pos: [0, 0, 0],
+          stiffness: 0.65,
+          springref: 0,
+          damping: 0.016,
+          limited: true,
+          // Hard stop at -13° prevents dragging the beater head through the 17 mm bar!
+          range: [-13, 24],
+          hardStop: true,
+        },
+      ],
+      geoms: [
+        // Colliding shaft starting 18 mm forward of the pivot rail so dragging the stick hits solid wood!
+        {
+          name: `shaft_${idx}`,
+          type: 'capsule',
+          fromto: [0, 0.018, 0, 0, 0.118, 0],
+          size: [0.0025],
+          density: 650,
+          solref: [0.004, 0.5],
+          rgba: [0.72, 0.56, 0.36, 1],
+        },
+        {
+          name: `mallet_head_${idx}`,
+          type: 'sphere',
+          pos: [0, 0.12, -0.003],
+          size: [isSteel ? 0.010 : 0.0115],
+          density: isSteel ? 7800 : 1850,
+          solref: [0.004, 0.25],
+          rgba: isSteel ? [0.85, 0.88, 0.94, 1] : [0.92, 0.70, 0.22, 1],
+        },
+      ],
+      children: [],
+    };
+  };
+
   notes.forEach((note, i) => {
     const x = -0.11 + i * 0.052;
     const halfLen = 0.118 - i * 0.008;
@@ -40,10 +168,10 @@ export const marimbaCascadePreset: SceneGraph = (() => {
           name: `bar_${note.toLowerCase()}_pad`,
           type: 'slide',
           axis: [0, 0, 1],
-          stiffness: 5200,
-          damping: 1.4,
+          stiffness: 1400,
+          damping: 1.2,
           limited: true,
-          range: [-0.002, 0.002],
+          range: [-0.004, 0.002],
         },
       ],
       geoms: [
@@ -56,38 +184,15 @@ export const marimbaCascadePreset: SceneGraph = (() => {
       ],
       children: [],
     };
-    const tuned = tuneBodyToPitch(rawBar, noteToHz(note) ?? 261.63).node;
-    nodes.push(tuned);
-
-    // Staggered striker drops for a crisp pentatonic arpeggio on Play
-    const dropZ = 0.085 + i * 0.055;
-    nodes.push({
-      id: `mallet_${i + 1}`,
-      name: `Mallet ${note}`,
-      type: 'body',
-      pos: [x, 0, dropZ],
-      deformMaterial: 'plastic',
-      joints: [{ name: `mallet_${i + 1}_free`, type: 'free' }],
-      geoms: [
-        {
-          name: 'mallet_ball',
-          type: 'sphere',
-          size: [0.011],
-          density: 1350,
-          solref: [0.004, 0.32],
-          rgba: [0.92, 0.72, 0.22, 1],
-        },
-      ],
-      children: [],
-    });
+    nodes.push(tuneBodyToPitch(rawBar, noteToHz(note) ?? 261.63).node);
+    nodes.push(makeHingedMallet(i, note, x, 'plastic'));
   });
 
-  // Final C5 tubular steel chime at the right end for bright metallic contrast
   const rawChime: SceneNode = {
     id: 'steel_chime_c5',
     name: 'Steel Chime (C5)',
     type: 'body',
-    pos: [0.16, 0, 0.038],
+    pos: [0.155, 0, 0.038],
     euler: [90, 0, 0],
     deformMaterial: 'steel',
     joints: [
@@ -95,10 +200,10 @@ export const marimbaCascadePreset: SceneGraph = (() => {
         name: 'chime_c5_cord',
         type: 'slide',
         axis: [0, 1, 0],
-        stiffness: 6000,
+        stiffness: 1800,
         damping: 1.0,
         limited: true,
-        range: [-0.002, 0.002],
+        range: [-0.004, 0.002],
       },
     ],
     geoms: [
@@ -112,26 +217,7 @@ export const marimbaCascadePreset: SceneGraph = (() => {
     children: [],
   };
   nodes.push(tuneBodyToPitch(rawChime, noteToHz('C5') ?? 523.25).node);
-
-  nodes.push({
-    id: 'mallet_chime',
-    name: 'Chime Striker',
-    type: 'body',
-    pos: [0.16, 0, 0.39],
-    deformMaterial: 'steel',
-    joints: [{ name: 'mallet_chime_free', type: 'free' }],
-    geoms: [
-      {
-        name: 'striker_ball',
-        type: 'sphere',
-        size: [0.0095],
-        density: 7800,
-        solref: [0.004, 0.25],
-        rgba: [0.85, 0.88, 0.94, 1],
-      },
-    ],
-    children: [],
-  });
+  nodes.push(makeHingedMallet(5, 'C5', 0.155, 'steel'));
 
   return { nodes };
 })();

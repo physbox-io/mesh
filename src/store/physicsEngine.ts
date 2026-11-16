@@ -17,7 +17,15 @@ import type { PhysicsState } from './useStore';
 import { store } from './storeRef';
 import { noteWorkerFrame } from './modelProvenance';
 import { useSoundStore } from './soundStore';
-import { estimateBodyModes, playModalImpact, type BodyModalProfile } from '../utils/modalAudio';
+import {
+  estimateBodyModes,
+  playModalImpact,
+  silenceWindVoices,
+  updateLiveWindVoices,
+  type BodyModalProfile,
+} from '../utils/modalAudio';
+import { evaluateTautString } from '../utils/stringAcoustics';
+import { extractBoreWaveguide } from '../utils/windAcoustics';
 import type { SceneNode } from '../types/scene';
 
 const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
@@ -30,7 +38,11 @@ const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
 };
 
 const modalCache = new WeakMap<SceneNode, BodyModalProfile>();
-const cachedModesFor = (node: SceneNode): BodyModalProfile => {
+const cachedModesFor = (node: SceneNode, sceneNodes?: SceneNode[]): BodyModalProfile => {
+  if (node.acousticString) {
+    const strEval = evaluateTautString(node, sceneNodes);
+    if (strEval) return strEval.profile;
+  }
   let m = modalCache.get(node);
   if (!m) {
     m = estimateBodyModes(node);
@@ -214,6 +226,136 @@ export const recycleWorker = () => {
  * draws on demand would otherwise miss one that arrives while the simulation
  * is stopped — a joint slider's SET_QPOS, say. See RenderOnChange in App.
  */
+let lastWindAudioSyncMs = 0;
+let hadActiveWindVoices = false;
+
+function isWindSubtreeOrNonColliding(node: SceneNode, roots: SceneNode[]): boolean {
+  if (node.windInstrument) return true;
+  const checkWindAncestor = (list: SceneNode[], insideWind: boolean): boolean => {
+    for (const n of list) {
+      const nextWind = insideWind || !!n.windInstrument;
+      if (n.id === node.id) return nextWind;
+      if (n.children?.length && checkWindAncestor(n.children, nextWind)) return true;
+    }
+    return false;
+  };
+  if (checkWindAncestor(roots, false)) return true;
+
+  // Non-colliding mechanism bodies (e.g.contype=0 music drums, cams) only hit internal joint stops
+  if (typeof node.tunedPitchHz !== 'number' && !node.acousticString) {
+    const solids = (node.geoms ?? []).filter(
+      (g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane',
+    );
+    if (solids.length > 0 && solids.every((g) => g.contype === 0 && g.conaffinity === 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectWindNodes(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
+  for (const n of nodes) {
+    if (n.windInstrument) out.push(n);
+    if (n.children?.length) collectWindNodes(n.children, out);
+  }
+  return out;
+}
+
+function syncLiveWindAudio() {
+  if (!useSoundStore.getState().soundEnabled) {
+    if (hadActiveWindVoices) {
+      hadActiveWindVoices = false;
+      silenceWindVoices();
+    }
+    return;
+  }
+  const s = store().getState();
+  if (!s.isPlaying || !s.model || !s.data) {
+    if (hadActiveWindVoices) {
+      hadActiveWindVoices = false;
+      silenceWindVoices();
+    }
+    return;
+  }
+
+  const now = performance.now();
+  if (now - lastWindAudioSyncMs < 42) return;
+  lastWindAudioSyncMs = now;
+
+  const windNodes = collectWindNodes(s.sceneGraph.nodes);
+  if (windNodes.length === 0) {
+    if (hadActiveWindVoices) {
+      hadActiveWindVoices = false;
+      silenceWindVoices();
+    }
+    return;
+  }
+
+  const jMap = ((s.model._idMaps as IdMaps | undefined)?.joint as Record<string, number> | undefined) ?? {};
+  const qpos = s.data.qpos;
+  const qvel = s.data.qvel;
+  const jposAddr = s.model.jnt_qposadr;
+  const jdofAddr = s.model.jnt_dofadr;
+
+  const jointPositions: Record<string, number> = {};
+  const readJointPos = (name: string): number => {
+    const jid = jMap[name];
+    if (jid === undefined || !jposAddr) return 0;
+    return qpos[jposAddr[jid]] ?? 0;
+  };
+  const readJointVel = (name: string): number => {
+    const jid = jMap[name];
+    if (jid === undefined || !jdofAddr) return 0;
+    return qvel[jdofAddr[jid]] ?? 0;
+  };
+
+  for (const jName of Object.keys(jMap)) {
+    jointPositions[jName] = readJointPos(jName);
+  }
+
+  const envWindSpeed = Math.hypot(s.windX || 0, s.windY || 0);
+  const payloads = windNodes.map((wn) => {
+    const spec = wn.windInstrument!;
+    const bore = extractBoreWaveguide(wn, jointPositions);
+    const scriptSt = lastScriptState?.[wn.id] as Record<string, unknown> | undefined;
+    // Base breath from spec + ambient wind, overridden smoothly if script sets `api.state.breathKPa` or child bellows
+    let breathKPa =
+      typeof scriptSt?.breathKPa === 'number'
+        ? scriptSt.breathKPa
+        : spec.breathKPa + envWindSpeed * 0.45;
+    let embouchureHz =
+      typeof scriptSt?.embouchureHz === 'number'
+        ? scriptSt.embouchureHz
+        : spec.embouchureHz;
+    for (const ch of wn.children ?? []) {
+      for (const cj of ch.joints ?? []) {
+        if (cj.name.endsWith('_bellows')) {
+          const vStroke = readJointVel(cj.name);
+          breathKPa = Math.max(0, vStroke * 52);
+        } else if (cj.name.endsWith('_embouchure')) {
+          const qDial = readJointPos(cj.name);
+          embouchureHz = spec.embouchureHz * Math.pow(2, qDial);
+        }
+      }
+    }
+    return {
+      id: wn.id,
+      exciter: spec.exciter,
+      breathKPa: Math.max(0, Math.min(8, breathKPa)),
+      embouchureHz: Math.max(80, Math.min(1800, embouchureHz)),
+      cellCount: bore?.cellCount ?? 32,
+      junctionK: bore?.junctionK ?? [],
+      bellCutoffHz: bore?.bellCutoffHz ?? 1500,
+      shunts: (bore?.toneholes ?? [])
+        .filter((th) => th.openAmount > 0.05)
+        .map((th) => ({ cell: th.cellIndex, coeff: th.shuntCoeff * th.openAmount })),
+    };
+  });
+
+  hadActiveWindVoices = payloads.some((p) => p.breathKPa > 0.05);
+  updateLiveWindVoices(payloads);
+}
+
 let physicsFrameListener: (() => void) | null = null;
 
 export const setPhysicsFrameListener = (listener: (() => void) | null) => {
@@ -242,6 +384,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
         }
       }
       physicsFrameListener?.();
+      syncLiveWindAudio();
     };
     client.onBreak = (event) => {
       // Append rather than replace: several welds can go in the same step, and
@@ -268,15 +411,21 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       const nodes = liveModelGraph(s).graph.nodes;
       const resolved = events
         .map((ev) => ({ node: findNode(nodes, ev.nodeId), impulseNs: ev.impulseNs }))
-        .filter((r): r is { node: SceneNode; impulseNs: number } => r.node !== null);
-      const hasTunedBar = resolved.some((r) => typeof r.node.tunedPitchHz === 'number');
+        .filter(
+          (r): r is { node: SceneNode; impulseNs: number } =>
+            r.node !== null && !isWindSubtreeOrNonColliding(r.node, nodes),
+        );
+      const hasTunedResonator = resolved.some(
+        (r) => typeof r.node.tunedPitchHz === 'number' || !!r.node.acousticString,
+      );
       for (const { node, impulseNs } of resolved) {
-        // When a mallet hits a tuned bar/chime in the same step, let the tuned resonator sing cleanly
-        const effImpulse = hasTunedBar && typeof node.tunedPitchHz !== 'number'
+        const isResonator = typeof node.tunedPitchHz === 'number' || !!node.acousticString;
+        // When a mallet/plectrum hits a tuned bar, chime, or taut string, let the resonator sing cleanly
+        const effImpulse = hasTunedResonator && !isResonator
           ? impulseNs * 0.04
           : impulseNs;
-        if (effImpulse >= 0.005) {
-          playModalImpact(cachedModesFor(node), effImpulse);
+        if (effImpulse >= 0.0015) {
+          playModalImpact(cachedModesFor(node, nodes), effImpulse, !!node.acousticString);
         }
       }
     };
@@ -313,4 +462,19 @@ export const endVoltLink = () => {
 
 useSoundStore.subscribe((state) => {
   physicsWorkerClientSingleton?.setSound(state.soundEnabled);
+  if (!state.soundEnabled) silenceWindVoices();
 });
+
+// Silence continuous wind waveguides whenever simulation stops
+setTimeout(() => {
+  try {
+    store().subscribe((state, prev) => {
+      if (prev.isPlaying && !state.isPlaying) {
+        hadActiveWindVoices = false;
+        silenceWindVoices();
+      }
+    });
+  } catch {
+    // Store not initialized in pure unit-test imports
+  }
+}, 0);

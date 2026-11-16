@@ -682,12 +682,54 @@ A 300 mm cube of **20 × 20 T-slot extrusion**, held together by **16 corner bra
 
   marimba_cascade: `# 🎶 Pentatonic Marimba & Chime
 
-Five **hardwood bars** tuned to **C4 – D4 – E4 – G4 – A4** by carving an underside luthier arch, plus a **C5 steel chime rod** on the right.
+A mechanical music-box cylinder and six spring-returned hinged mallets play Edvard Grieg's **Morning Mood** (*Peer Gynt*) on five arch-tuned **rosewood marimba bars** (**C4–D4–E4–G4–A4**) and a **C5 steel chime**.
 
-## Hear it
+## Hear & interact
 1. Click the **speaker icon** beside **Reset** in the top bar to unmute physical modal audio
-2. Press **Run** — the staggered mallets play an ascending pentatonic arpeggio ending on the bright steel chime
-3. Select any bar and open **Shape → Concert Pitch** to **Tap** it or re-tune it to another note`,
+2. Press **Run** — every note is a real rigid-body mallet-on-bar impact (grab and hold a mallet in the viewport and its note goes silent!)
+3. Select any bar and open **Shape → Concert Pitch** to **Tap** or re-tune it`,
+
+  metallophone_carillon: `# 🔔 Steel Glockenspiel Carillon
+
+The metallic sister to the rosewood marimba: six **high-carbon steel glockenspiel bars** (**G4–A4–C5–D5–E5–G5**, $Q \\approx 950$ for long, shimmering bell sustain) struck by solid **brass mallets** to play **Amazing Grace**.
+
+## Wood vs Steel in Modal Synthesis
+- **Rosewood Marimba** ($E \\approx 12.5\\text{ GPa}, Q \\approx 145$): warm, woody attack that decays in ~0.25 s
+- **Steel Glockenspiel** ($E \\approx 200\\text{ GPa}, Q \\approx 950$): bright metallic transient and ~2 s crystalline sustain where consecutive notes ring together into chords!`,
+
+  soundbox_lyre: `# 🎸 Acoustic Soundbox Lyre
+
+Five **80/20 bronze strings** (**C4–D4–E4–G4–A4**) stretched across a hollowed **2.5 L spruce soundbox** with a **Ø52 mm soundhole** ($f_H \\approx 122\\text{ Hz}$ Helmholtz air resonance), strummed by an oscillating plectrum.
+
+## What is physical here
+- **Mersenne's Law + Fletcher Inharmonicity**: pitch comes from wire tension $T$, gauge, density, and vibrating span $L$, with transverse MuJoCo stiffness $k_\\perp = 4T/L$
+- **Bridge → Soundbox Coupling**: string harmonics drive the soundbox's **Helmholtz air mode** and **top-plate mode**
+
+## Try it
+- Unmute the **speaker icon** and press **Run** to hear the plectrum strum back and forth
+- Select **Spruce Soundbox** → resize \`soundhole\` or \`air_chamber\` in **Shape** and watch the Helmholtz air resonance shift`,
+
+  compliant_flexures: `# 🧬 Compliant Flexures & Snap Toggle
+
+Three **monolithic 3D-printed PETG mechanisms** on one frame — no pins, bearings, or metal springs:
+1. **Cross-Strip Flexure Pivot** (left): ±45° crossed leaves giving a frictionless, zero-backlash pendulum hinge
+2. **Bistable Von Mises Snap Toggle** (middle): inclined double-arch leaves with **two stable equilibria** ($q = 0$ and $q = 2h_0 \\approx 6.4\\text{ mm}$), flipped back and forth across its snap-through barrier
+3. **Serpentine Linear Stage** (right): folded-beam parallel guided stage
+
+## Try it
+- Press **Run** and watch the center toggle snap and hold each latched position unassisted between pushes
+- Select any of the three moving stages → **Physics → Compliant Flexure** to change leaf thickness, span, or polymer (switching to **PLA** warns about sustained-load creep)`,
+
+  wind_instruments: `# 🎺 Brass Cornet & Keyed Clarinet Duet
+
+Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed synthesis** running at 48 kHz (~0.15% CPU):
+
+1. **Grenadilla & Silver Clarinet** (front, seconds 0–4.4): cylindrical bore ($\\lambda = 4L$, warm woody odd harmonics $f, 3f, 5f$) with four articulated silver pad keys uncovering tonehole shunts along the bore.
+2. **Folded 3-Valve Spun-Brass Cornet** (back, seconds 4.5–8.9): continuous folded brass tubing flaring into a Ø112 mm Bessel bell, with three mother-of-pearl piston valves switching semitone tubing loops ($-2, -1, -3$ st) for a noble brass fanfare!
+
+## Try it
+- Unmute the **speaker icon** beside **Reset** and press **Run**
+- Hold down a **Silver Key** or **Piston Valve** with your mouse while it plays — the waveguide length and pitch respond live!`,
 };
 
 
