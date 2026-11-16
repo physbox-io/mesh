@@ -44,6 +44,9 @@ import {
   LatticeEditorLayer,
 } from './SceneLayer';
 import { installMeshBvh } from '../../utils/meshBvh';
+import { EagerResizeObserver } from '../../utils/eagerResizeObserver';
+
+const RESIZE = { scroll: true, debounce: { scroll: 50, resize: 0 }, polyfill: EagerResizeObserver as never };
 
 installMeshBvh();
 
@@ -145,6 +148,10 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       // preserveDrawingBuffer either: its one reader, the MCP screenshot,
       // draws a frame immediately before reading the canvas.
       gl={{ antialias: false, logarithmicDepthBuffer: true }}
+      // Measured as soon as it mounts, not when the browser next reports a
+      // size: a background tab gets no reports, and its canvas (and renderer)
+      // was never made, so an MCP screenshot of it could not be taken.
+      resize={RESIZE}
       onCreated={(state) => {
         physicsGlobals._physics_gl = state.gl;
         // The scene and camera as well as the renderer, so a screenshot
