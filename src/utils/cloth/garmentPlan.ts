@@ -72,7 +72,8 @@ export type GarmentSeam =
   /** A line along a limb, under it; `over` the top as well (a two-piece sleeve). */
   | { kind: 'alongLimb'; name: string; limb: LimbName; over: boolean }
   /** Lines evenly round a limb, along it. */
-  | { kind: 'roundLimb'; limb: LimbName; n: number }
+  /** `n` lines along a limb, evenly round its section at `at` along it (by length round it). */
+  | { kind: 'roundLimb'; limb: LimbName; n: number; at?: number }
   /** A ring round a limb, `s` along it: a tube past a bent joint cut in two there, each half straight enough to lie flat. */
   | { kind: 'limbRing'; name: string; limb: LimbName; s: number }
   /** Along a plane, within its mask; `open`: cut and left open. */
@@ -114,7 +115,7 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
     covers.push({ part: d.over, off, names: 'gore' });
     cuts.push({ kind: 'limbStart', limb: d.over, s: from * limb.length, on: [d.over], profile: edgeOf(draft, 'top')?.profile });
     if (!d.cap) cuts.push({ kind: 'limbEnd', limb: d.over, s: to * limb.length, on: [d.over], profile: edgeOf(draft, 'end')?.profile });
-    seams.push({ kind: 'roundLimb', limb: d.over, n: Math.max(2, Math.round(d.gores ?? 2)) });
+    seams.push({ kind: 'roundLimb', limb: d.over, n: Math.max(2, Math.round(d.gores ?? 2)), at: from * limb.length });
     if (d.opening) seams.push({ kind: 'frontOpening', on: [d.over] });
     const joint = limb.path.jointAt + 0.006 * s;
     if (limb.path.bend > RING_BEND && from * limb.length < joint && (d.cap || to * limb.length > joint)) seams.push({ kind: 'limbRing', name: 'joint', limb: d.over, s: joint });

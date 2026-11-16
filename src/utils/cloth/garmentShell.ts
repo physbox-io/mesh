@@ -16,13 +16,13 @@
 
 import type { BodyFormMeasurements, GarmentDraft, GarmentPlane } from '../../types/cloth';
 import { bodyFormGeoms, bodyFormSection, bodyLandmarks, formSkin } from './bodyForm';
-import { formLimbs, type FormLimb, type LimbName } from './formLimbs';
+import { formLimbs, type FormLimb, type LimbName, type LimbSectionAt } from './formLimbs';
 import { gridOver, meshSdfWithin, sampleGrid } from './formSdf';
 import { CLOTH_MATERIALS } from './clothMesh';
 import { garmentSettings } from './garments';
 import { ontoField, surfaceNet } from './surfaceNets';
 import { coarsenSurface, curvatureSize } from './surfaceCoarsen';
-import { clipSurface, refineNear, collapseShortBoundaryEdges, compact, healFlatTriangles, splitAlong, splitPanels } from './garmentSurface';
+import { boundaryLoops, clipSurface, refineNear, collapseShortBoundaryEdges, compact, healFlatTriangles, splitAlong, splitPanels } from './garmentSurface';
 import { dartSlit } from './garmentDarts';
 import { profileAt, turnRound } from './edgeProfile';
 import { sculptDabs, sculptField } from './garmentSculpt';
@@ -469,12 +469,13 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     return fs / ws;
   };
   // Darts for what the sculpting made that cannot lie flat (sculptDarts), after the plan's own.
+  const sculpted = new Map<string, number>();
   if (sculpt.most > 0) {
     const reach = Math.max(...sculptDabs(draft.sculpt).map((d) => d.radius));
     const taken = plan.seams.flatMap((sm) => (sm.kind === 'dart' ? [sm.apex.point] : []));
     const live = (p: number[]) => sculpt.at([p[0], p[1], p[2] - sinkAt(p)]) > 0.25 * sculpt.most;
     const symmetric = (draft.sculpt ?? []).every((d) => d.mirror !== false);
-    for (const line of sculptDarts(points, tris, live, reach, taken, symmetric)) plan.seams.push({ kind: 'dart', ...line });
+    for (const line of sculptDarts(points, tris, live, reach, taken, symmetric)) { plan.seams.push({ kind: 'dart', ...line }); sculpted.set(line.name, reach); }
   }
   let seams: GarmentShell['seams'] = slits.map((e) => ({ ...e, open: true }));
   for (const sm of plan.seams) {
@@ -542,10 +543,46 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
         break;
       }
       case 'roundLimb': {
+        // Evenly round the garment's opening (a hat's band), by length along
+        // it, not by angle: a head reaches further in front of its axis than
+        // behind, and by angle the front gores were half as wide again as the
+        // back ones at the band. Each seam is a half plane out from the axis,
+        // all meeting there: points evenly along an edge that is not round are
+        // not opposite each other.
         const limb = limbs[sm.limb];
-        for (let k = 0; k < sm.n / 2; k++) {
-          const ang = (Math.PI * k) / (sm.n / 2);
-          runSeam(`seam${k + 1}`, (p) => { const sec = limb.section(Math.min(limb.length, Math.max(0, alongLimb(sm.limb, p)))); return [0, 1, 2].reduce((acc, q) => acc + (p[q] - sec.c[q]) * (-Math.sin(ang) * sec.side[q] + Math.cos(ang) * sec.up[q]), 0); }, () => true);
+        const at = (p: number[]) => limb.section(Math.min(limb.length, Math.max(0, alongLimb(sm.limb, p))));
+        const comp = (p: number[], sec: LimbSectionAt, a: number, b: number) => [0, 1, 2].reduce((acc, q) => acc + (p[q] - sec.c[q]) * (a * sec.side[q] + b * sec.up[q]), 0);
+        const angOf = (p: number[]) => { const sec = at(p), a = Math.atan2(comp(p, sec, 0, 1), comp(p, sec, 1, 0)); return a < 0 ? a + 2 * Math.PI : a; };
+        // The opening: the longest edge round it (a hole cut in it, a strap's, is shorter).
+        let ring: number[][] = [];
+        for (const loop of boundaryLoops(points.length, tris)) {
+          const pts = loop.map((i) => points[i]);
+          const len = pts.reduce((acc, q, k) => acc + Math.hypot(...[0, 1, 2].map((c) => q[c] - pts[(k + 1) % pts.length][c]) as [number, number, number]), 0);
+          const best = ring.reduce((acc, q, k) => acc + Math.hypot(...[0, 1, 2].map((c) => q[c] - ring[(k + 1) % ring.length][c]) as [number, number, number]), 0);
+          if (len > best) ring = pts;
+        }
+        // Without one (a closed tube), a section of the limb halfway along.
+        if (ring.length < 8) {
+          const sec = limb.section(limb.length / 2);
+          ring = Array.from({ length: 96 }, (_, i) => { const a = (2 * Math.PI * i) / 96, q = sec.shape ? sec.shape(a) : [Math.cos(a) * sec.w, Math.sin(a) * sec.h]; return [0, 1, 2].map((c) => sec.c[c] + q[0] * sec.side[c] + q[1] * sec.up[c]); });
+        }
+        // Run it the way the angle grows, from where it crosses angle 0 (the limb's side).
+        const angs = ring.map(angOf);
+        let turn = 0;
+        for (let k = 0; k < angs.length; k++) { let d = angs[(k + 1) % angs.length] - angs[k]; if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI; turn += d; }
+        if (turn < 0) { ring.reverse(); angs.reverse(); }
+        let start = 0;
+        for (let k = 0; k < angs.length; k++) if (angs[k] - angs[(k + 1) % angs.length] > Math.PI) { start = (k + 1) % angs.length; break; }
+        const m = ring.length, order = Array.from({ length: m + 1 }, (_, k) => ring[(start + k) % m]);
+        const arc = [0];
+        for (let k = 1; k <= m; k++) arc.push(arc[k - 1] + Math.hypot(...[0, 1, 2].map((c) => order[k][c] - order[k - 1][c]) as [number, number, number]));
+        for (let k = 0; k < sm.n; k++) {
+          const want = (arc[m] * k) / sm.n;
+          let i = 1;
+          while (i < m && arc[i] < want) i++;
+          const f = (want - arc[i - 1]) / Math.max(1e-12, arc[i] - arc[i - 1]);
+          const ang = angOf([0, 1, 2].map((c) => order[i - 1][c] + f * (order[i][c] - order[i - 1][c])));
+          runSeam(`seam${k + 1}`, (p) => comp(p, at(p), -Math.sin(ang), Math.cos(ang)), (c) => comp(c, at(c), Math.cos(ang), Math.sin(ang)) > 0);
         }
         break;
       }
@@ -570,6 +607,14 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
         break;
       }
       case 'dart': {
+        // A sculpted dome's dart, not where a seam already runs within its
+        // reach: the seam takes the shaping up, as a hat's gores do (a cap's
+        // front cut each front gore in three for 1% less strain).
+        const reachOf = sculpted.get(sm.name);
+        if (reachOf !== undefined) {
+          const a = sm.apex.point, r2 = reachOf * reachOf;
+          if (seams.some((x) => x.path.some((i) => { const q = points[i]; return (q[0] - a[0]) ** 2 + (q[1] - a[1]) ** 2 + (q[2] - a[2]) ** 2 < r2; }))) break;
+        }
         // Slit from its apex along its line, through the panel it lies in.
         const slit = dartSlit(sm, points, tris, curPanels, [...seams, ...edges].map((x) => x.path));
         if (slit) runSeam(sm.name, slit.f, (_, __, t) => slit.tris.has(t));

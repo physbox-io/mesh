@@ -330,11 +330,12 @@ const HOOD_SIDE: [number, number][] = [
   // 46% of it); shorter, it was sewn in the middle of its share and the hood
   // stood open at the nape.
   [0, 0], [0.34, 0],
-  // Up the back from the nape, leaning in to the back of the head, fullest
-  // there, then sweeping forward over the crown a couple of centimetres
-  // above the head (taller, the spare cloth stood up in a point; an eighth
-  // taller again, it stood 5 cm over the head and sagged into one on Run).
-  [0.335, -0.053], [0.32, -0.114], [0.305, -0.176], [0.282, -0.236], [0.235, -0.282], [0.168, -0.308], [0.1, -0.315], [0.04, -0.306], [0, -0.289],
+  // Up the back from the nape, leaning in to the back of the head, then
+  // rounding over the crown to the front edge, which leans back as it rises:
+  // from the front of the neckline, a hand ahead of the throat, to the
+  // forehead. Square to the neck edge, it rose straight up from there and the
+  // hood stood out over the face, its two front edges meeting in front of it.
+  [0.335, -0.053], [0.32, -0.114], [0.305, -0.176], [0.282, -0.236], [0.277, -0.268], [0.263, -0.298], [0.24, -0.324], [0.211, -0.343], [0.177, -0.356], [0.14, -0.36],
 ];
 const HOOD_TOP = HOOD_SIDE.length - 1;
 /** The other side: mirrored, run the other way round, so its neck edge runs from the nape to the front as the neckline does there. */
