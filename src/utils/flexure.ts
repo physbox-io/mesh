@@ -12,12 +12,13 @@
 //                            with two true equilibria at q = 0 and q = 2 * archRise
 //
 // Printable flexure leaves (`flexure_*`, `role: 'visual'`) render in the 3D
-// viewport and export into STL/3MF prints while staying out of MuJoCo's contact
-// solver so they never jam the joint.
+// viewport bent by their joint's live position (each carries `bend`; see
+// components/scene/FlexureLeaves.tsx), export into STL/3MF prints at rest, and
+// stay out of MuJoCo's contact solver so they never jam the joint.
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
-import type { FlexureKind, FlexureSpec, SceneGeom, SceneJoint, SceneNode } from '../types/scene';
+import type { FlexureBend, FlexureKind, FlexureSpec, SceneGeom, SceneJoint, SceneNode } from '../types/scene';
 import { filamentSpec, type FilamentId } from './filaments';
 
 export interface FilamentMechanics {
@@ -151,8 +152,9 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
     }
   } else if (kind === 'serpentine') {
     const N = folds ?? 4;
-    // N guided cantilevers in series: k_seg = 12 E I / L^3, k_total = k_seg / N
-    stiffness = (12 * E * I) / (N * L * L * L);
+    // N guided cantilevers in series per side (k_seg = 12 E I / L^3, k_side = k_seg / N),
+    // and a folded spring on each side of the body in parallel
+    stiffness = (2 * 12 * E * I) / (N * L * L * L);
     const deltaSegMax = (sigmaAllow * L * L) / (3 * E * t);
     const xMaxM = Math.min(L * 0.65, N * deltaSegMax);
     maxTravel = +(xMaxM * 1000).toFixed(2);
@@ -246,26 +248,111 @@ function boxGeomInBasis(
   bz: THREE.Vector3,
   halfSizes: [number, number, number],
   rgba: [number, number, number, number],
+  bend?: FlexureBend,
 ): SceneGeom {
   const m = new THREE.Matrix4().makeBasis(bx, by, bz);
   const q = new THREE.Quaternion().setFromRotationMatrix(m).normalize();
+  const r6 = (v: THREE.Vector3) => [+v.x.toFixed(6), +v.y.toFixed(6), +v.z.toFixed(6)];
   return {
     name,
     type: 'box',
     size: halfSizes.map((v) => +Math.max(0.00015, v).toFixed(6)),
-    pos: [+origin.x.toFixed(6), +origin.y.toFixed(6), +origin.z.toFixed(6)],
+    pos: r6(origin),
     quat: [+q.w.toFixed(6), +q.x.toFixed(6), +q.y.toFixed(6), +q.z.toFixed(6)],
     role: 'visual',
     rgba: [...rgba],
+    ...(bend ? { bend } : {}),
   };
+}
+
+/** A box leaf spanning `a` → `b`, its thin side along `thin`, carrying `w0` at `a` and `w1` at `b` of the joint's travel. */
+function leafBetween(
+  name: string,
+  a: THREE.Vector3,
+  b: THREE.Vector3,
+  thin: THREE.Vector3,
+  halfThick: number,
+  halfWidth: number,
+  rgba: [number, number, number, number],
+  w0: number,
+  w1: number,
+  ease: 'smooth' | 'linear' = 'smooth',
+): SceneGeom {
+  const span = b.clone().sub(a);
+  const len = span.length();
+  const lx = span.normalize();
+  const ly = thin.clone().addScaledVector(lx, -thin.dot(lx)).normalize();
+  const lz = new THREE.Vector3().crossVectors(lx, ly).normalize();
+  const mid = a.clone().add(b).multiplyScalar(0.5);
+  const r6 = (v: THREE.Vector3) => [+v.x.toFixed(6), +v.y.toFixed(6), +v.z.toFixed(6)];
+  return boxGeomInBasis(name, mid, lx, ly, lz, [len * 0.5, halfThick, halfWidth], rgba, {
+    from: r6(a), to: r6(b), w0, w1, ease,
+  });
+}
+
+/** Rotation of a box/cylinder/sphere geom, or null when it has none. */
+function geomRotation(g: SceneGeom): THREE.Quaternion | null {
+  if (g.quat && g.quat.length === 4) return new THREE.Quaternion(g.quat[1], g.quat[2], g.quat[3], g.quat[0]).normalize();
+  if (g.euler && g.euler.length === 3) {
+    const d = Math.PI / 180;
+    return new THREE.Quaternion().setFromEuler(new THREE.Euler(g.euler[0] * d, g.euler[1] * d, g.euler[2] * d, 'XYZ'));
+  }
+  return null;
+}
+
+/**
+ * How far the body's own geoms reach from `origin` along `dir` (body frame): where a
+ * slide flexure's leaves meet the body. Rotated geoms count by their bounding sphere.
+ */
+export function bodyReach(geoms: SceneGeom[], origin: THREE.Vector3, dir: THREE.Vector3): number {
+  let reach = 0;
+  for (const g of geoms) {
+    if (g.name.startsWith('flexure_') || g.csg === 'difference' || g.role === 'collision') continue;
+    const s = g.size ?? [];
+    const c = new THREE.Vector3(g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0).sub(origin);
+    const rot = geomRotation(g);
+    let extent: number;
+    if (g.type === 'sphere') extent = s[0] ?? 0;
+    else if (rot || (g.type !== 'box' && g.type !== 'cylinder')) {
+      extent = g.type === 'cylinder' || g.type === 'capsule'
+        ? Math.hypot(s[0] ?? 0, s[1] ?? 0) + (g.type === 'capsule' ? s[0] ?? 0 : 0)
+        : Math.hypot(s[0] ?? 0, s[1] ?? 0, s[2] ?? 0);
+    } else if (g.type === 'box') {
+      extent = Math.abs(dir.x) * (s[0] ?? 0) + Math.abs(dir.y) * (s[1] ?? 0) + Math.abs(dir.z) * (s[2] ?? 0);
+    } else {
+      extent = Math.abs(dir.z) * (s[1] ?? 0) + Math.hypot(dir.x, dir.y) * (s[0] ?? 0);
+    }
+    reach = Math.max(reach, c.dot(dir) + extent);
+  }
+  return reach;
+}
+
+/**
+ * The direction, square to a hinge's axis, in which the body hangs from it: the
+ * centroid of its own geoms. A hinge flexure anchors on the opposite side.
+ */
+function hangDirection(geoms: SceneGeom[], pivot: THREE.Vector3, axis: THREE.Vector3): THREE.Vector3 | null {
+  const c = new THREE.Vector3();
+  let n = 0;
+  for (const g of geoms) {
+    if (g.name.startsWith('flexure_') || g.csg === 'difference') continue;
+    c.add(new THREE.Vector3(g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0));
+    n++;
+  }
+  if (!n) return null;
+  c.multiplyScalar(1 / n).sub(pivot);
+  c.addScaledVector(axis, -c.dot(axis));
+  return c.lengthSq() > 1e-12 ? c.normalize() : null;
 }
 
 /**
  * Generates printable `role: 'visual'` compliant leaf geometry in `node`'s frame
- * centred on `joint.pos`. Exported into STL/3MF prints and rendered in the 3D
- * viewport while excluded from MuJoCo contact pairs.
+ * around `joint.pos`. Each leaf carries `bend`, so the viewport draws it flexing
+ * between the parent (frame) and the body as the joint moves. `bodyGeoms` (the
+ * body's own geoms) place the leaves: a hinge flexure anchors on the side away
+ * from where the body hangs, a slide flexure's leaves start at the body's faces.
  */
-export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec): SceneGeom[] {
+export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec, bodyGeoms: SceneGeom[] = []): SceneGeom[] {
   const filId = resolveFilamentId(spec.filament);
   const rgba = FLEXURE_FILAMENT_PROPS[filId].rgba;
   const pivot = new THREE.Vector3(joint.pos?.[0] ?? 0, joint.pos?.[1] ?? 0, joint.pos?.[2] ?? 0);
@@ -275,92 +362,133 @@ export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec): SceneGe
   const L = spec.lengthMm / 1000;
   const b = spec.widthMm / 1000;
   const geoms: SceneGeom[] = [];
+  const at = (...terms: [THREE.Vector3, number][]) => {
+    const p = pivot.clone();
+    for (const [v, k] of terms) p.addScaledVector(v, k);
+    return p;
+  };
 
-  if (spec.kind === 'blade') {
-    // Thin blade spanning L along ex, thickness t along ey, width b along hinge axis ez
-    geoms.push(
-      boxGeomInBasis('flexure_blade', pivot, ex, ey, ez, [L * 0.5, t * 0.5, b * 0.5], rgba),
-    );
-    // Root fillet/anchor pads at both ends
-    const padThick = Math.max(t * 2.2, 0.0018);
-    const padLen = Math.max(0.0015, L * 0.14);
-    for (const [idx, sign] of [[-1, 0], [1, 1]] as const) {
-      const p = pivot.clone().addScaledVector(ex, idx * (L * 0.5 + padLen * 0.4));
-      geoms.push(
-        boxGeomInBasis(`flexure_pad_${sign}`, p, ex, ey, ez, [padLen * 0.5, padThick * 0.5, b * 0.5], rgba),
-      );
-    }
-  } else if (spec.kind === 'cross_pivot') {
-    // Two ±45° crossed leaves separated slightly along hinge axis ez so they print cleanly without fusing at centre!
-    const halfB = Math.max(0.001, b * 0.44);
-    const gapZ = b * 0.26;
-    for (const [i, ang, zShift] of [[0, Math.PI / 4, -gapZ], [1, -Math.PI / 4, gapZ]] as const) {
-      const lx = ex.clone().multiplyScalar(Math.cos(ang)).addScaledVector(ey, Math.sin(ang)).normalize();
-      const ly = new THREE.Vector3().crossVectors(ez, lx).normalize();
-      const c = pivot.clone().addScaledVector(ez, zShift);
-      geoms.push(
-        boxGeomInBasis(`flexure_cross_${i}`, c, lx, ly, ez, [L * 0.5, t * 0.5, halfB * 0.5], rgba),
-      );
+  if (spec.kind === 'blade' || spec.kind === 'cross_pivot') {
+    // `up` points from the body to the frame across the pivot; `side` is square to it.
+    const up = hangDirection(bodyGeoms, pivot, ez)?.negate() ?? ey.clone();
+    const side = new THREE.Vector3().crossVectors(ez, up).normalize();
+    if (spec.kind === 'blade') {
+      // One leaf through the pivot, anchored above it and holding the body below.
+      const top = at([up, L * 0.5]);
+      const bottom = at([up, -L * 0.5]);
+      geoms.push(leafBetween('flexure_blade', top, bottom, side, t * 0.5, b * 0.5, rgba, 0, 1));
+      const padThick = Math.max(t * 2.2, 0.0018);
+      const padLen = Math.max(0.0015, L * 0.14);
+      for (const [k, end, w] of [[0, 1, 0], [1, -1, 1]] as const) {
+        const a = at([up, end * L * 0.5]);
+        const c = at([up, end * (L * 0.5 + padLen)]);
+        geoms.push(leafBetween(`flexure_pad_${k}`, a, c, side, padThick * 0.5, b * 0.5, rgba, w, w));
+      }
+    } else {
+      // Two leaves crossing at the pivot at ±45°, set apart along the axis so they
+      // print without fusing; each runs from the frame above to the body below.
+      const halfB = Math.max(0.001, b * 0.44);
+      const gap = b * 0.26;
+      for (const [i, sign, shift] of [[0, 1, -gap], [1, -1, gap]] as const) {
+        const dir = up.clone().multiplyScalar(Math.SQRT1_2).addScaledVector(side, sign * Math.SQRT1_2);
+        const top = at([dir, L * 0.5], [ez, shift]);
+        const bottom = at([dir, -L * 0.5], [ez, shift]);
+        const thin = new THREE.Vector3().crossVectors(ez, dir);
+        geoms.push(leafBetween(`flexure_cross_${i}`, top, bottom, thin, t * 0.5, halfB * 0.5, rgba, 0, 1));
+      }
     }
   } else if (spec.kind === 'serpentine') {
-    // Slide axis is ez! Build N meanders stacked along ez, spanning L laterally along ex, out-of-plane width b along ey
+    // A folded spring on each side (±ex) of the body: N legs across the slide
+    // axis, stacked along it, joined alternately at their outer and inner ends.
+    // Leg i carries 1 - i/N of the travel at its entry and 1 - (i+1)/N at its exit.
     const N = Math.max(2, spec.folds ?? 4);
-    const pitchZ = Math.max(t * 2.8, (L * 0.45) / N);
-    const startZ = -((N - 1) * pitchZ) / 2;
-    for (let i = 0; i < N; i++) {
-      const zOff = startZ + i * pitchZ;
-      const c = pivot.clone().addScaledVector(ez, zOff);
-      // Leaf thin along slide axis ez (thickness t), long along ex (span L), wide along ey (width b)
-      geoms.push(
-        boxGeomInBasis(`flexure_meander_${i}`, c, ex, ey, ez, [L * 0.5, b * 0.5, t * 0.5], rgba),
-      );
-      if (i < N - 1) {
-        const side = i % 2 === 0 ? 1 : -1;
-        const turnCenter = pivot
-          .clone()
-          .addScaledVector(ez, zOff + pitchZ * 0.5)
-          .addScaledVector(ex, side * (L * 0.5 - t));
-        geoms.push(
-          boxGeomInBasis(
-            `flexure_turn_${i}`,
-            turnCenter,
-            ex,
-            ey,
-            ez,
-            [t, b * 0.5, (pitchZ + t) * 0.5],
-            rgba,
-          ),
-        );
+    // Neighbouring legs close on each other by 2/N of the travel at their shared
+    // side, so they are spaced to clear that at the joint's full rated travel.
+    const pitch = Math.max(t * 3.2, (L * 0.45) / N, (2.2 * spec.maxTravel) / 1000 / N + t);
+    const z0 = -((N - 1) * pitch) / 2;
+    const gap = Math.max(0.0015, t * 2);
+    for (const sideSign of [1, -1] as const) {
+      const dir = ex.clone().multiplyScalar(sideSign);
+      const face = Math.max(0, bodyReach(bodyGeoms, pivot, dir));
+      const xin = face + gap;
+      const xout = xin + L;
+      const tag = sideSign > 0 ? 'a' : 'b';
+      geoms.push(leafBetween(`flexure_tab_${tag}`, at([dir, face], [ez, z0]), at([dir, xin + t], [ez, z0]), ez, t, b * 0.5, rgba, 1, 1));
+      for (let i = 0; i < N; i++) {
+        const z = z0 + i * pitch;
+        const entry = i % 2 === 0 ? xin : xout;
+        const exit = i % 2 === 0 ? xout : xin;
+        const wIn = 1 - i / N;
+        const wOut = 1 - (i + 1) / N;
+        geoms.push(leafBetween(`flexure_meander_${tag}${i}`, at([dir, entry], [ez, z]), at([dir, exit], [ez, z]), ez, t * 0.5, b * 0.5, rgba, wIn, wOut));
+        if (i < N - 1) {
+          geoms.push(leafBetween(`flexure_turn_${tag}${i}`, at([dir, exit], [ez, z - t * 0.5]), at([dir, exit], [ez, z + pitch + t * 0.5]), dir, t, b * 0.5, rgba, wOut, wOut, 'linear'));
+        } else {
+          // The anchor pad, where the frame holds the spring.
+          const padLen = Math.max(0.002, t * 3);
+          const out = exit === xout ? 1 : -1;
+          geoms.push(leafBetween(`flexure_anchor_${tag}`, at([dir, exit], [ez, z]), at([dir, exit + out * padLen], [ez, z]), ez, Math.max(t * 1.5, 0.0012), b * 0.5, rgba, 0, 0));
+        }
       }
     }
   } else {
-    // Bistable Von Mises inclined arches: slide axis is ez, symmetric pair on ±ex inclined by archRise h0 along -ez
+    // Bistable Von Mises arches: a pair on ±ex, each from the body's face out to
+    // the frame, the frame end set h0 *ahead* along the slide axis so the arch
+    // flattens at q = h0 and inverts into its second rest at q = 2·h0.
     const h0 = (spec.archRiseMm ?? 2.4) / 1000;
-    const beamLen = Math.hypot(L, h0);
-    const shuttleR = Math.max(0.0018, t * 2.2);
-    // Central shuttle boss
-    geoms.push(
-      boxGeomInBasis('flexure_shuttle', pivot, ex, ey, ez, [shuttleR, b * 0.5, Math.max(shuttleR, h0 * 0.6)], rgba),
-    );
-    // Paired double-arch leaves (two parallel rows for rotational anti-buckling, just like real printed bistable switches)
-    const rowOffsets = [-Math.max(t * 2.4, h0 * 0.7), Math.max(t * 2.4, h0 * 0.7)];
+    const rows = [-Math.max(t * 2.4, h0 * 0.7), Math.max(t * 2.4, h0 * 0.7)];
     let idx = 0;
-    for (const zRow of rowOffsets) {
-      for (const side of [-1, 1] as const) {
-        // From outer frame anchor (side * (L + shuttleR), -h0) up to shuttle (side * shuttleR, 0)
-        const pOuter = pivot.clone().addScaledVector(ex, side * (L + shuttleR)).addScaledVector(ez, zRow - h0);
-        const pInner = pivot.clone().addScaledVector(ex, side * shuttleR).addScaledVector(ez, zRow);
-        const mid = pOuter.clone().add(pInner).multiplyScalar(0.5);
-        const lx = pInner.clone().sub(pOuter).normalize();
-        const lz = new THREE.Vector3().crossVectors(lx, ey).normalize();
-        geoms.push(
-          boxGeomInBasis(`flexure_arch_${idx++}`, mid, lx, ey, lz, [beamLen * 0.5, b * 0.5, t * 0.5], rgba),
-        );
+    for (const zRow of rows) {
+      for (const sideSign of [-1, 1] as const) {
+        const dir = ex.clone().multiplyScalar(sideSign);
+        const face = Math.max(Math.max(0.0018, t * 2.2), bodyReach(bodyGeoms, pivot, dir));
+        const inner = at([dir, face], [ez, zRow]);
+        const outer = at([dir, face + L], [ez, zRow + h0]);
+        geoms.push(leafBetween(`flexure_arch_${idx++}`, outer, inner, ez, t * 0.5, b * 0.5, rgba, 0, 1));
       }
     }
   }
 
   return geoms;
+}
+
+/**
+ * Where a point of a flexure leaf is drawn, in its body's frame, when the joint
+ * stands at `q` (rad for a hinge, m for a slide). The body frame already carries
+ * the whole of `q`; a point that should carry only its share `w` is taken back
+ * by (1 - w) of it, about the joint's pivot or along its axis.
+ */
+export function bendLeafPoint(
+  p: [number, number, number],
+  bend: FlexureBend,
+  joint: { type: string; pos?: number[]; axis?: number[] },
+  q: number,
+  out: [number, number, number] = [0, 0, 0],
+): [number, number, number] {
+  const fx = bend.from[0], fy = bend.from[1], fz = bend.from[2];
+  const dx = bend.to[0] - fx, dy = bend.to[1] - fy, dz = bend.to[2] - fz;
+  const len2 = dx * dx + dy * dy + dz * dz;
+  let s = len2 > 0 ? ((p[0] - fx) * dx + (p[1] - fy) * dy + (p[2] - fz) * dz) / len2 : 0;
+  s = Math.max(0, Math.min(1, s));
+  const e = bend.ease === 'linear' ? s : s * s * (3 - 2 * s);
+  const back = -(1 - (bend.w0 + (bend.w1 - bend.w0) * e)) * q;
+  let ax = joint.axis?.[0] ?? 0, ay = joint.axis?.[1] ?? 0, az = joint.axis?.[2] ?? 1;
+  const n = Math.hypot(ax, ay, az) || 1;
+  ax /= n; ay /= n; az /= n;
+  if (joint.type === 'slide') {
+    out[0] = p[0] + ax * back; out[1] = p[1] + ay * back; out[2] = p[2] + az * back;
+    return out;
+  }
+  // Rodrigues rotation by `back` about the axis through the joint's pivot.
+  const ox = joint.pos?.[0] ?? 0, oy = joint.pos?.[1] ?? 0, oz = joint.pos?.[2] ?? 0;
+  const vx = p[0] - ox, vy = p[1] - oy, vz = p[2] - oz;
+  const c = Math.cos(back), sn = Math.sin(back);
+  const dot = ax * vx + ay * vy + az * vz;
+  const cx = ay * vz - az * vy, cy = az * vx - ax * vz, cz = ax * vy - ay * vx;
+  out[0] = ox + vx * c + cx * sn + ax * dot * (1 - c);
+  out[1] = oy + vy * c + cy * sn + ay * dot * (1 - c);
+  out[2] = oz + vz * c + cz * sn + az * dot * (1 - c);
+  return out;
 }
 
 /** Removes generated flexure geoms and resets the joint to a clean rigid pin/slider. */
@@ -445,7 +573,7 @@ export function applyFlexureToNode(
   }
 
   const cleanGeoms = (node.geoms ?? []).filter((g) => !g.name.startsWith('flexure_'));
-  const flexureGeoms = buildFlexureGeoms(updatedJoint, spec);
+  const flexureGeoms = buildFlexureGeoms(updatedJoint, spec, cleanGeoms);
   const nextJoints = node.joints.map((j, i) => (i === jointIdx ? updatedJoint : { ...j }));
 
   return {

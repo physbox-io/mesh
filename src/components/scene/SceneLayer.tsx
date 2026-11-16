@@ -26,6 +26,7 @@ import { EDGE_THRESHOLD_MESH, EDGE_THRESHOLD_PRIMITIVE, wedgeGeometry } from './
 import { dentKey, useDentStore } from '../../store/dentStore';
 import { useViewQuality } from '../../store/viewQualityStore';
 import { PulleyRopesRenderer } from './PulleyRopes';
+import { FlexureLeaves } from './FlexureLeaves';
 import SculptSurface from '../SculptSurface';
 import LatticeSurface from '../LatticeSurface';
 import { PrintAnalysisOverlay } from '../PrintAnalysisOverlay';
@@ -1744,6 +1745,8 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
           // Boolean bodies draw their generated mesh instead of the primitives it
           // was cut from, and never draw the negatives (those are ghosts, below).
           for (const geom of resolveCsgGeoms(node, 'render')) {
+            // A flexure leaf is drawn bending by FlexureLeaves, not riding on the body.
+            if (geom.bend) continue;
             // isWedge bodies draw a bespoke triangular prism via WedgeGeometry.
             // Their MJCF geom is only a thin slab along the slanted face, so they
             // must never fall through to a generic box renderer.
@@ -1906,6 +1909,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             geom is still kept out of the dynamic meshes above, so the shape is
             not drawn twice while it is being edited. */}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
+        <FlexureLeaves model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
         {showColliders && <ColliderOverlay model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />}
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />

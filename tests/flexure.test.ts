@@ -3,6 +3,7 @@ import type { SceneNode } from '../src/types/scene';
 import {
   allowedFlexureKindsForJoint,
   applyFlexureToNode,
+  bendLeafPoint,
   bistableForce,
   evaluateFlexureSpec,
   revertFlexure,
@@ -78,5 +79,59 @@ describe('Monolithic Compliant Mechanisms (Flexures)', () => {
     expect(reverted.flexure).toBeUndefined();
     expect(reverted.geoms.some((g) => g.name.startsWith('flexure_'))).toBe(false);
     expect(reverted.joints[0].stiffness).toBe(0);
+  });
+
+  it('draws each leaf held by the frame at one end and following the joint at the other', () => {
+    const slider: SceneNode = {
+      id: 'stage', name: 'Stage', pos: [0, 0, 0],
+      geoms: [{ name: 'table', type: 'box', size: [0.01, 0.015, 0.008] }],
+      joints: [{ name: 'slide', type: 'slide', axis: [0, 1, 0], pos: [0, 0, 0] }],
+      children: [],
+    };
+    const q = 0.004;
+    for (const kind of ['serpentine', 'bistable'] as const) {
+      const node = applyFlexureToNode(slider, { kind, folds: 3 })!.node;
+      const joint = node.joints[0];
+      const leaves = node.geoms.filter((g) => g.bend);
+      expect(leaves.length).toBeGreaterThan(0);
+      for (const g of leaves) {
+        const bend = g.bend!;
+        const from = bend.from as [number, number, number];
+        const to = bend.to as [number, number, number];
+        // In the body frame, which carries all of q: share 1 stays, share 0 is taken back by q.
+        const a = bendLeafPoint(from, bend, joint, q);
+        const b = bendLeafPoint(to, bend, joint, q);
+        expect(a[1]).toBeCloseTo(from[1] - (1 - bend.w0) * q, 9);
+        expect(b[1]).toBeCloseTo(to[1] - (1 - bend.w1) * q, 9);
+      }
+      // Leaves start at the body's faces (10 mm out along x), not inside it.
+      const reach = Math.min(...leaves.map((g) => Math.min(Math.abs(g.bend!.from[0]), Math.abs(g.bend!.to[0]))));
+      expect(reach).toBeGreaterThanOrEqual(0.01 - 1e-9);
+    }
+    // Bistable: the frame end sits h0 ahead along the slide, so q = 2·h0 mirrors the arch.
+    const bi = applyFlexureToNode(slider, { kind: 'bistable', archRiseMm: 3 })!.node;
+    for (const g of bi.geoms.filter((x) => x.bend)) {
+      expect(g.bend!.from[1] - g.bend!.to[1]).toBeCloseTo(0.003, 9);
+    }
+
+    // Hinge: the frame end comes back to where it was at rest in the parent's frame.
+    const arm: SceneNode = {
+      id: 'arm', name: 'Arm', pos: [0, 0, 0.1],
+      geoms: [{ name: 'stem', type: 'box', size: [0.004, 0.004, 0.03], pos: [0, 0, -0.035] }],
+      joints: [{ name: 'pivot', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0] }],
+      children: [],
+    };
+    const cross = applyFlexureToNode(arm, { kind: 'cross_pivot' })!.node;
+    for (const g of cross.geoms.filter((x) => x.bend)) {
+      // Anchored above the pivot, away from the arm that hangs below it.
+      expect(g.bend!.from[2]).toBeGreaterThan(0);
+      expect(g.bend!.to[2]).toBeLessThan(0);
+      const theta = 0.3;
+      const p = bendLeafPoint(g.bend!.from as [number, number, number], g.bend!, cross.joints[0], theta);
+      // Rotating the body frame by +theta about y puts it back at rest.
+      const c = Math.cos(theta), s = Math.sin(theta);
+      expect(c * p[0] + s * p[2]).toBeCloseTo(g.bend!.from[0], 9);
+      expect(-s * p[0] + c * p[2]).toBeCloseTo(g.bend!.from[2], 9);
+    }
   });
 });

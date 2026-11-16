@@ -102,6 +102,12 @@ export interface SceneGeom {
   // union of the body's positive geoms; they are never emitted to MJCF.
   csg?: CsgOp;
   role?: GeomRole;
+  /**
+   * A compliant flexure leaf (utils/flexure.ts): drawn bent between an end that
+   * stays with the parent body and one that follows this body's joint, instead
+   * of riding rigidly on the body. Physics never sees it; the joint's spring does.
+   */
+  bend?: FlexureBend;
   // Set on geoms *generated* by evaluating the body's CSG program — or, for a
   // body that is not a boolean at all, by decomposing its mesh into convex
   // colliders — so a recompile can replace them wholesale and tell them from
@@ -544,6 +550,20 @@ export interface LoadStrength {
   modulusGPa: number;
   /** True: bends and stays bent (metals, most plastics). False: snaps. */
   ductile?: boolean;
+}
+
+/**
+ * How a flexure leaf deforms with its body's first hinge/slide joint. Points are
+ * in the body frame at rest; a point's share of the joint's travel runs from
+ * `w0` at `from` to `w1` at `to` (eased when `ease` is 'smooth', the S of a
+ * guided beam). Share 0 stays with the parent, 1 moves with the body.
+ */
+export interface FlexureBend {
+  from: number[];
+  to: number[];
+  w0: number;
+  w1: number;
+  ease?: 'smooth' | 'linear';
 }
 
 /** Monolithic compliant mechanism family replacing a rigid hinge or slide joint. */
