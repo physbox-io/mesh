@@ -586,6 +586,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams, ...(shell.marks ?? [])], settings.trims ?? [], shell.tris);
     const trimAt = new Map<number, TrimPlace[]>();
     const sliderDrawn = new Set<TrimPlace>();
+    const pointDrawn = new Set<TrimPlace>();
     for (const t of trimList) (trimAt.get(t.point) ?? trimAt.set(t.point, []).get(t.point)!).push(t);
     // Negative ease: the pattern cut narrower than the form, by the ease
     // over the girth under each point (a band's own ease at its top edge,
@@ -716,6 +717,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
             const tr = placedTrim(pl, (q) => localOfG.get(q), 'buttonhole', (trim.size ?? TRIM_DEFAULTS.button.size) * 1.15, TRIM_DEFAULTS.buttonhole.rgba);
             if (tr) trims.push(tr);
           } else {
+            // One at a point once, on the first panel it is on: a point where
+            // panels meet is on each of them (a cap's crown, on its six gores),
+            // and each drew one, six buttons stacked askew.
+            if (trim.at) { if (pointDrawn.has(pl)) continue; pointDrawn.add(pl); }
             const tr = placedTrim(pl, (q) => localOfG.get(q));
             // A zip's slider once, on the first panel its tooth is on: an
             // opening's points are on both its sides, and each drew one.

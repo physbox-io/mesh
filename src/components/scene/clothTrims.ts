@@ -15,10 +15,12 @@ type Trim = NonNullable<FlexInfo['trims']>[number];
 /** A unit trim of each kind, its base on the cloth and its height up +y (turned to the surface normal), its length along +x (along its line), scaled by the trim's size. */
 const TRIM_GEOMETRY: Record<string, () => THREE.BufferGeometry> = {
   stud: () => new THREE.ConeGeometry(0.5, 0.55, 10).translate(0, 0.27, 0),
-  // A low dome on a thin rim, as a button is: flat, a cap's button stood on
-  // the point its gores meet in, and they poked up through it.
+  // A low dome on a thin rim, as a button is, its rim reaching a little down
+  // into the cloth: flat on its base, a cap's button stood on top of the
+  // point its gores meet in, and their tips showed under it all round. Below
+  // the cloth on a shirt, its rim is out of sight.
   button: () => {
-    const prof = [new THREE.Vector2(0, 0), new THREE.Vector2(0.5, 0), new THREE.Vector2(0.5, 0.07)];
+    const prof = [new THREE.Vector2(0, -0.25), new THREE.Vector2(0.5, -0.25), new THREE.Vector2(0.5, 0.07)];
     for (let k = 1; k <= 6; k++) { const a = (k / 6) * (Math.PI / 2); prof.push(new THREE.Vector2(0.5 * Math.cos(a), 0.07 + 0.25 * Math.sin(a))); }
     return new THREE.LatheGeometry(prof, 16);
   },
@@ -49,8 +51,8 @@ const TRIM_GEOMETRY: Record<string, () => THREE.BufferGeometry> = {
 };
 /** Turned along its line rather than up the body. */
 const ALONG = new Set(['zipper', 'stitch', 'slider']);
-/** Rigid and wider than the cloth's spacing: raised onto the highest cloth under it. */
-const RESTS_ON = new Set(['buckle']);
+/** Rigid and wider than the cloth's spacing: raised onto the highest cloth under it (a cap's button onto the tips of its gores, not among them). */
+const RESTS_ON = new Set(['buckle', 'button']);
 /** A slider is this many teeth across. */
 const SLIDER_SCALE = 3;
 /** A zip's tape, each side of the line, in teeth. */

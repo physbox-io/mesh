@@ -580,7 +580,11 @@ export class ClothSim {
       }
       this.solveTacks();
       this.collide(CLOTH_THICKNESS, false);
-      if (doLayers && (pass === 0 || this.layerTick === 0)) this.layers.collide(x, prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, pass === 0 && this.layerTick === 0);
+      // And on the last pass of every substep: skipped there every other
+      // substep, the passes after the first pulled a stiff collar back into
+      // the neckerchief under it, and the next substep pushed it out again
+      // in one go, back and forth, the collar flickering as it ran.
+      if (doLayers && (pass === 0 || pass === STRETCH_PASSES - 1 || this.layerTick === 0)) this.layers.collide(x, prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, pass === 0 && this.layerTick === 0);
       // Once a substep, on the last pass: the constraints have moved the cloth
       // by then, and friction after it holds what this sets.
       if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true);
