@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SceneNode } from '../src/types/scene';
 import { newtonsCradlePreset } from '../src/presets/presetScenes';
+import { marimbaCascadePreset } from '../src/presets/marimbaCascade';
 import { simulate } from './helpers/simulate';
 import {
   estimateBodyModes,
@@ -151,6 +152,20 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       // Ball 0 dropped from dx = -115 mm (z ≈ 0.1362 m): far ball 4 swings out > 75 mm, and NO ball ever rises above initial z!
       expect(peakBall4SwingDx).toBeGreaterThan(0.075);
       expect(maxAnyBallZ).toBeLessThanOrEqual(initialBall0Z + 0.002);
+    } finally {
+      sim.dispose();
+    }
+  });
+
+  it('prevents mallets from tunneling through the 17 mm marimba bars in marimbaCascadePreset', async () => {
+    const sim = await simulate(marimbaCascadePreset);
+    try {
+      sim.run(1.5);
+      for (let i = 1; i <= 5; i++) {
+        const z = sim.bodyPos(`Mallet ${['C4', 'D4', 'E4', 'G4', 'A4'][i - 1]}`)[2];
+        // Every mallet rests or bounces ON TOP of its bar (z >= 0.045 m), never tunneling to the floor (z ≈ 0.011 m)
+        expect(z).toBeGreaterThan(0.042);
+      }
     } finally {
       sim.dispose();
     }
