@@ -112,7 +112,7 @@ function chainLineRuns(lines: { name: string; path: number[] }[], along: string)
 }
 
 /** A trim placed on a line: at `point`, or `t` of the way on to `toward`; its row's offset, its run, and whether it ends it. */
-interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean; /** Done up (a fastening's part of the run below how far it is fastened). */ closed: boolean }
+interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean; /** Done up (a fastening's part of the run below how far it is fastened). */ closed: boolean; /** A point of the cloth on its side of its line (a seam's two panels both hold the line): drawn on the panel that holds it. */ sideOf?: number }
 
 let trimRuns = 0;
 
@@ -128,11 +128,28 @@ function trimPoints(points: number[][], lines: { name: string; path: number[] }[
   // Which side of a run the cloth is on (an edge's one side; a seam's, one of
   // them, the same all along): an offset is into it. Left going along the
   // line instead, a hem's topstitching came out in the air past its edge.
-  const n = points.length, opposite = new Map<number, number>();
+  const n = points.length, opposite = new Map<number, number>(), across = new Map<number, [number, number][]>();
   for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) {
     const a = tris[t + e], b = tris[t + ((e + 1) % 3)], o = tris[t + ((e + 2) % 3)];
     opposite.set(a * n + b, o); opposite.set(b * n + a, o);
+    const key = Math.min(a, b) * n + Math.max(a, b);
+    (across.get(key) ?? across.set(key, []).get(key)!).push([o, t]);
   }
+  // The cloth's point across edge a-b on the side `sign` (left going a to b, by the cloth's normal, as intoCloth reads it).
+  const sideAt = (a: number, b: number, sign: number) => {
+    const os = across.get(Math.min(a, b) * n + Math.max(a, b)) ?? [];
+    if (os.length < 2) return os[0]?.[0];
+    const pa = points[a], ab = [0, 1, 2].map((c) => points[b][c] - pa[c]);
+    for (const [o, t0] of os) {
+      const ao = [0, 1, 2].map((c) => points[o][c] - pa[c]);
+      const [q0, q1, q2] = [points[tris[t0]], points[tris[t0 + 1]], points[tris[t0 + 2]]];
+      const u = [0, 1, 2].map((c) => q1[c] - q0[c]), v = [0, 1, 2].map((c) => q2[c] - q0[c]);
+      const nrm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const sd = [nrm[1] * ab[2] - nrm[2] * ab[1], nrm[2] * ab[0] - nrm[0] * ab[2], nrm[0] * ab[1] - nrm[1] * ab[0]];
+      if ((sd[0] * ao[0] + sd[1] * ao[1] + sd[2] * ao[2] >= 0 ? 1 : -1) === sign) return o;
+    }
+    return os[0][0];
+  };
   const intoCloth = (run: number[]) => {
     for (let k = 1; k < run.length; k++) {
       const a = run[k - 1], b = run[k], o = opposite.get(a * n + b);
@@ -181,7 +198,10 @@ function trimPoints(points: number[][], lines: { name: string; path: number[] }[
           let k = 1;
           while (k < run.length - 1 && at[k] < want) k++;
           const seg = at[k] - at[k - 1], t = seg > 0 ? Math.max(0, Math.min(1, (want - at[k - 1]) / seg)) : 0;
-          out.push({ trim, point: run[k - 1], toward: run[k], t, offset, run: id, end: j === slider, closed: closed[j] });
+          // Topstitching on the panel it is stitched through: along a seam,
+          // drawn on both panels, each run showed twice, a little out of line (speckled).
+          const sideOf = trim.kind === 'stitch' ? sideAt(run[k - 1], run[k], (offset0 ? Math.sign(offset0) : 1) * into) : undefined;
+          out.push({ trim, point: run[k - 1], toward: run[k], t, offset, run: id, end: j === slider, closed: closed[j], ...(sideOf !== undefined ? { sideOf } : {}) });
         });
       }
     });
@@ -722,6 +742,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
             // panels meet is on each of them (a cap's crown, on its six gores),
             // and each drew one, six buttons stacked askew.
             if (trim.at) { if (pointDrawn.has(pl)) continue; pointDrawn.add(pl); }
+            if (pl.sideOf !== undefined && !localOfG.has(pl.sideOf)) continue;
             const tr = placedTrim(pl, (q) => localOfG.get(q));
             // A zip's slider once, on the first panel its tooth is on: an
             // opening's points are on both its sides, and each drew one.
