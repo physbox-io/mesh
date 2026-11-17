@@ -3,6 +3,9 @@ import { useShallow } from 'zustand/react/shallow';
 import type { BackgroundId } from '../../types/scene';
 import { BACKGROUND_OPTIONS } from '../../store/sceneEnvironment';
 import { useStore } from '../../store/useStore';
+import { getPhysicsWorkerClient } from '../../store/physicsEngine';
+import { useSoundStore } from '../../store/soundStore';
+import { playModalImpact, unlockAudioContext } from '../../utils/modalAudio';
 import { useViewQuality } from '../../store/viewQualityStore';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
@@ -20,6 +23,8 @@ import { useLlmSettings } from '../../hooks/useLlmSettings';
 export function SettingsPopover() {
   const hiRes = useViewQuality(s => s.hiRes);
   const setHiRes = useViewQuality(s => s.setHiRes);
+  const soundEnabled = useSoundStore((s) => s.soundEnabled);
+  const toggleSound = useSoundStore((s) => s.toggleSound);
   const simFidelity = useStore((s) => s.sceneGraph.simFidelity ?? 'standard');
   const setSimFidelity = useStore((s) => s.setSimFidelity);
   const highFidelity = simFidelity === 'print';
@@ -37,7 +42,7 @@ export function SettingsPopover() {
        nothing reliable to anchor to — the header wraps, so the button
        moves — and a 16rem popover in the corner of a phone is mostly
        off-screen anyway, so it becomes a centred sheet instead. */
-    <div className="absolute top-4 right-6 w-64 max-lg:inset-x-2 max-lg:right-auto max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[80dvh] max-lg:overflow-y-auto glass-panel rounded-lg p-4 z-30 max-lg:z-50 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
+    <div className="absolute top-4 right-6 w-64 max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain max-lg:inset-x-2 max-lg:right-auto max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[80dvh] glass-panel rounded-lg p-4 z-30 max-lg:z-50 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
       <h3 className="font-semibold text-sm mb-4 flex items-center justify-between text-slate-800 dark:text-slate-100">
         <span className="flex items-center gap-2"><Settings className="w-4 h-4 text-slate-500 dark:text-slate-400" /> Environment</span>
         <button aria-label="Close" title="Close" onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer" /></button>
@@ -55,6 +60,41 @@ export function SettingsPopover() {
             className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${hiRes ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
           >
             <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${hiRes ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span id="soundEnabledLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Physical modal impact audio, taut strings, and 1D wind/brass bore synthesis (muted by default).">Sound</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={soundEnabled}
+            aria-labelledby="soundEnabledLabel"
+            title={soundEnabled ? 'Mute physical simulation audio' : 'Enable physical modal impact, string, and wind audio'}
+            onClick={() => {
+              const next = !soundEnabled;
+              if (next) {
+                unlockAudioContext();
+                playModalImpact(
+                  {
+                    fundamentalHz: 523.25,
+                    overtoneRatio: 2.76,
+                    regime: 'bar',
+                    material: { label: 'Hardwood', density: 720, modulusGPa: 12.5, qualityQ: 145, brightness: 0.55 },
+                    contactDurationSec: 0.0009,
+                    modes: [
+                      { freqHz: 523.25, gain: 0.65, decaySec: 0.22 },
+                      { freqHz: 1442, gain: 0.28, decaySec: 0.12 },
+                    ],
+                  },
+                  0.08,
+                );
+              }
+              toggleSound();
+              getPhysicsWorkerClient().setSound(next);
+            }}
+            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${soundEnabled ? 'bg-violet-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+          >
+            <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${soundEnabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
           </button>
         </div>
         <div className="flex flex-col gap-1">

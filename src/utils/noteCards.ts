@@ -685,7 +685,7 @@ A 300 mm cube of **20 × 20 T-slot extrusion**, held together by **16 corner bra
 A mechanical music-box cylinder and six spring-returned hinged mallets play Edvard Grieg's **Morning Mood** (*Peer Gynt*) on five arch-tuned **rosewood marimba bars** (**C4–D4–E4–G4–A4**) and a **C5 steel chime**.
 
 ## Hear & interact
-1. Click the **speaker icon** beside **Reset** in the top bar to unmute physical modal audio
+1. Open **⚙️ Environment** (top right) and turn on **Sound**
 2. Press **Run** — every note is a real rigid-body mallet-on-bar impact (grab and hold a mallet in the viewport and its note goes silent!)
 3. Select any bar and open **Shape → Concert Pitch** to **Tap** or re-tune it`,
 
@@ -706,7 +706,7 @@ Five **80/20 bronze strings** (**C4–D4–E4–G4–A4**) stretched across a ho
 - **Bridge → Soundbox Coupling**: string harmonics drive the soundbox's **Helmholtz air mode** and **top-plate mode**
 
 ## Try it
-- Unmute the **speaker icon** and press **Run** to hear the plectrum strum back and forth
+- Turn on **Sound** in **⚙️ Environment** (top right) and press **Run** to hear the plectrum strum back and forth
 - Select **Spruce Soundbox** → resize \`soundhole\` or \`air_chamber\` in **Shape** and watch the Helmholtz air resonance shift`,
 
   compliant_flexures: `# 🧬 Compliant Flexures & Snap Toggle
@@ -741,8 +741,21 @@ Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed s
 2. **Folded 3-Valve Spun-Brass Cornet** (back, seconds 4.5–8.9): continuous folded brass tubing flaring into a Ø112 mm Bessel bell, with three mother-of-pearl piston valves switching semitone tubing loops ($-2, -1, -3$ st) for a noble brass fanfare!
 
 ## Try it
-- Unmute the **speaker icon** beside **Reset** and press **Run**
+- Turn on **Sound** in **⚙️ Environment** (top right) and press **Run**
 - Hold down a **Silver Key** or **Piston Valve** with your mouse while it plays — the waveguide length and pitch respond live!`,
+
+  hydrostatic_flotation: `# ⛵ Self-Righting Buoy, Skiff & Flooding Cup
+
+Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **inverse auto-balance (\`Stand / Spin / Float\`)** in a 135 mm water tank:
+
+1. **Unbalanced Red Buoy** (left): top-heavy polymer + heavy lantern ($\\text{CoM}$ above $\\text{CoB}$) — capsizes upside-down on **Run**!
+2. **Auto-Balanced Green Buoy** (center-left): identical outer silhouette processed by **Float → Balance Part** (carves an upper internal void + seats bought-in steel hex nuts in the keel) — snaps upright from a **42° knockdown**!
+3. **Open-Hull Cedar Skiff** (center-right): floats high on displaced interior hull air with hydrostatic roll righting torque.
+4. **Porcelain Cup + Brass Rim Weight** (right): dense $2350\\text{ kg/m}^3$ ceramic floats upright on its trapped air pocket until the falling brass pebble dips its rim underwater, flooding and sinking it!
+
+## Try it
+- Press **Run** to watch the green buoy self-right, the red buoy capsize, and the porcelain cup flood and sink
+- Click **Reset**, select **Unbalanced Red Buoy** → **Physics → Stand / Spin / Float → Float → Balance Part**, then press **Run** again: it now self-rights too!`,
 };
 
 

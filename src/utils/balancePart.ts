@@ -740,7 +740,17 @@ export function balanceBody(
         if (mode === 'float') {
           const hydro = buildHydroBodyModel(working);
           if (hydro) {
-            const maxSafeTotalMass = hydro.solidVolume * FRESHWATER_DENSITY * (hydro.vessel ? 1.8 : 0.85);
+            // Measure true peak displacement across immersion depths so ballast never sinks the part!
+            let peakDispVol = hydro.solidVolume;
+            if (hydro.vessel) {
+              const idXmat = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+              for (let k = 1; k <= 20; k++) {
+                const zTest = boundsLocal.min[2] + (k / 20) * (boundsLocal.max[2] - boundsLocal.min[2]);
+                const sub = evaluateSubmerged(hydro, [0, 0, -zTest], idXmat, 0);
+                if (sub.volume > peakDispVol) peakDispVol = sub.volume;
+              }
+            }
+            const maxSafeTotalMass = peakDispVol * FRESHWATER_DENSITY * 0.78;
             requiredBallastKg = Math.min(requiredBallastKg, Math.max(0, maxSafeTotalMass - liveMass));
           }
         }

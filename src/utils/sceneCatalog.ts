@@ -43,6 +43,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   metallophone_carillon: 'Make it',
   soundbox_lyre: 'Make it',
   wind_instruments: 'Make it',
+  hydrostatic_flotation: 'Make it',
 
   pendulum: 'Mechanisms',
   stepper_turntable: 'Mechanisms',

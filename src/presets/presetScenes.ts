@@ -26,6 +26,7 @@ import { soundboxLyrePreset } from './soundboxLyre';
 import { compliantFlexuresPreset } from './compliantFlexures';
 import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
+import { hydrostaticFlotationPreset } from './hydrostaticFlotation';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
 import {
@@ -3713,6 +3714,13 @@ export const PRESETS = {
     emoji: '🎺',
     scene: windInstrumentsPreset,
     camera: { position: [0.32, -0.42, 0.25], target: [0.0, 0, 0.068] } satisfies PresetCamera,
+  },
+  hydrostatic_flotation: {
+    name: 'Self-Righting Buoy, Skiff & Flooding Cup',
+    emoji: '⛵',
+    scene: hydrostaticFlotationPreset,
+    camera: { position: [0.02, -0.46, 0.30], target: [0.01, 0, 0.12] } satisfies PresetCamera,
+    environment: { waterLevel: 0.135 },
   },
 };
 

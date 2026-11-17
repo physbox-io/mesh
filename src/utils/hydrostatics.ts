@@ -448,6 +448,7 @@ function buildVesselEnvelope(solidTris: Float64Array, solidVol: number): HydroBo
   const height = maxZ - minZ;
   const airGapSq = Math.pow(Math.max(0.002, height * 0.08), 2);
   let openMouthArea = 0;
+  let upwardMouthArea = 0;
 
   for (let i = 0; i + 8 < hullTris.length; i += 9) {
     const ax = hullTris[i], ay = hullTris[i + 1], az = hullTris[i + 2];
@@ -474,14 +475,19 @@ function buildVesselEnvelope(solidTris: Float64Array, solidVol: number): HydroBo
       const ux = bx - ax, uy = by - ay, uz = bz - az;
       const vx = cx - ax, vy = cy - ay, vz = cz - az;
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      openMouthArea += 0.5 * Math.hypot(nx, ny, nz);
-      rimCoords.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+      const lenN = Math.hypot(nx, ny, nz);
+      const triArea = 0.5 * lenN;
+      openMouthArea += triArea;
+      if (lenN > 1e-12 && nz / lenN > 0.55) {
+        upwardMouthArea += triArea;
+        rimCoords.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+      }
     }
   }
 
-  // Sealed hollow drum has openMouthArea === 0: its solidTris already enclose the
-  // sealed void (inward inner shell), so solidTris alone already displaces the whole drum!
-  if (!(openMouthArea > 1e-6) || rimCoords.length === 0) return undefined;
+  // Only open-top cavities (boats, cups, bowls — upward mouth normal > 0.55) trap air below
+  // a gunwale rim; sideways neck concavities around masts/spools do not hold air pockets!
+  if (!(openMouthArea > 1e-6) || upwardMouthArea < openMouthArea * 0.40 || rimCoords.length === 0) return undefined;
 
   // Deduplicate rim points
   const seen = new Set<string>();

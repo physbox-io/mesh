@@ -12,6 +12,7 @@ import {
   balanceBody,
   clearBalanceAdjustments,
 } from '../src/utils/balancePart';
+import { hydrostaticFlotationPreset } from '../src/presets/hydrostaticFlotation';
 
 const IDENTITY_XMAT = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
@@ -209,5 +210,39 @@ describe('Inverse Balance & Ballast (Stand / Spin / Float)', () => {
     const res = balanceBody(hull, 'float', { waterLevel: 0 });
     expect(res.after.float.floats).toBe(true);
     expect(res.after.float.trimOffsetMm).toBeLessThan(res.before.float.trimOffsetMm);
+  });
+
+  it('validates hydrostaticFlotationPreset self-righting buoy, open-hull skiff, and flooding porcelain cup', () => {
+    const unbalanced = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'unbalanced_buoy')!;
+    const balanced = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'balanced_spar_buoy')!;
+    const skiff = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'open_hull_skiff')!;
+    const cup = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'flooding_porcelain_cup')!;
+
+    // Balanced buoy carries internal balance adjustments (void and/or keel nuts) and positive upright margin
+    const uprightUnbal = analyzeStability({ ...unbalanced, euler: [0, 0, 0] }, 0.135);
+    const uprightBal = analyzeStability({ ...balanced, euler: [0, 0, 0] }, 0.135);
+    expect(uprightBal.float.floats).toBe(true);
+    expect(uprightBal.float.metacentricMarginMm).toBeGreaterThan(uprightUnbal.float.metacentricMarginMm);
+    expect(
+      balanced.geoms.some((g) => g.name === 'balance_void') ||
+      balanced.children.some((c) => c.hardwarePart?.kind === 'nut'),
+    ).toBe(true);
+
+    // Both skiff and porcelain cup register as open-top vessels with gunwale rim flooding detection
+    const skiffHydro = buildHydroBodyModel(skiff)!;
+    const cupHydro = buildHydroBodyModel(cup)!;
+    expect(skiffHydro.vessel).toBeDefined();
+    expect(cupHydro.vessel).toBeDefined();
+
+    // Upright porcelain cup floats dry; heeled 45° so its rim dips below waterLevel = 0.135 -> floods!
+    const cupUpright = evaluateSubmerged(cupHydro, [0.195, 0, 0.130], IDENTITY_XMAT, 0.135);
+    expect(cupUpright.floodedFraction).toBe(0);
+    const cupHeeled = evaluateSubmerged(
+      cupHydro,
+      [0.195, 0, 0.130],
+      xmatFromAxisAngle([1, 0, 0], (48 * Math.PI) / 180),
+      0.135,
+    );
+    expect(cupHeeled.floodedFraction).toBeGreaterThan(0.5);
   });
 });
