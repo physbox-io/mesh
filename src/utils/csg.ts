@@ -2708,6 +2708,12 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     renderVertices: centeredZup,
     csgDerived: 'visual',
   };
+  // One mesh, one rgba: a body of several colours keeps them as paint.
+  if (positives.length > 1) {
+    const { csgSourcePaint } = await import('./csgSourceColors');
+    const sourcePaint = csgSourcePaint(positives, centeredZup, compiled.faces, rgba);
+    if (sourcePaint) visual.paint = sourcePaint;
+  }
 
   const computeHullVolume = async (): Promise<number> => {
     if (zup.length > 3000) {
