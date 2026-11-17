@@ -26,12 +26,15 @@ export interface FilamentMechanics {
   modulusGPa: number;
   yieldMPa: number;
   creepsUnderSustainedLoad: boolean;
+  /** Viscoelastic loss of a printed leaf, as a fraction of critical damping. */
+  lossRatio: number;
   rgba: [number, number, number, number];
 }
 
 export const FLEXURE_FILAMENT_PROPS: Record<FilamentId, FilamentMechanics> = {
   pla: {
     id: 'pla',
+    lossRatio: 0.03,
     modulusGPa: 2.8,
     yieldMPa: 50,
     creepsUnderSustainedLoad: true,
@@ -39,6 +42,7 @@ export const FLEXURE_FILAMENT_PROPS: Record<FilamentId, FilamentMechanics> = {
   },
   petg: {
     id: 'petg',
+    lossRatio: 0.03,
     modulusGPa: 2.1,
     yieldMPa: 48,
     creepsUnderSustainedLoad: false,
@@ -46,6 +50,7 @@ export const FLEXURE_FILAMENT_PROPS: Record<FilamentId, FilamentMechanics> = {
   },
   abs: {
     id: 'abs',
+    lossRatio: 0.03,
     modulusGPa: 2.0,
     yieldMPa: 40,
     creepsUnderSustainedLoad: false,
@@ -53,6 +58,7 @@ export const FLEXURE_FILAMENT_PROPS: Record<FilamentId, FilamentMechanics> = {
   },
   asa: {
     id: 'asa',
+    lossRatio: 0.03,
     modulusGPa: 2.05,
     yieldMPa: 42,
     creepsUnderSustainedLoad: false,
@@ -60,6 +66,7 @@ export const FLEXURE_FILAMENT_PROPS: Record<FilamentId, FilamentMechanics> = {
   },
   tpu: {
     id: 'tpu',
+    lossRatio: 0.15,
     modulusGPa: 0.045,
     yieldMPa: 18,
     creepsUnderSustainedLoad: false,
@@ -514,6 +521,68 @@ export function revertFlexure(node: SceneNode): SceneNode {
   return out;
 }
 
+function geomVolume(g: SceneGeom): number {
+  const s = g.size ?? [];
+  const a = s[0] ?? 0, b = s[1] ?? 0, c = s[2] ?? 0;
+  switch (g.type) {
+    case 'box': return 8 * a * b * c;
+    case 'sphere': return (4 / 3) * Math.PI * a * a * a;
+    case 'cylinder': return Math.PI * a * a * 2 * b;
+    case 'capsule': return Math.PI * a * a * 2 * b + (4 / 3) * Math.PI * a * a * a;
+    case 'ellipsoid': return (4 / 3) * Math.PI * a * b * c;
+    default: return 0;
+  }
+}
+
+/**
+ * What the joint has to move: the mass (slide, kg) or the moment of inertia about
+ * the joint's axis (hinge, kg·m²) of the body and everything it carries, from its
+ * primitive geoms at their density (MuJoCo's default 1000 kg/m³). Rough on
+ * purpose: it only sets how much a leaf's material loss damps the joint.
+ */
+export function movingInertia(node: SceneNode, joint: SceneJoint): number {
+  const pivot = new THREE.Vector3(joint.pos?.[0] ?? 0, joint.pos?.[1] ?? 0, joint.pos?.[2] ?? 0);
+  const axis = new THREE.Vector3(joint.axis?.[0] ?? 0, joint.axis?.[1] ?? 0, joint.axis?.[2] ?? 1);
+  if (axis.lengthSq() < 1e-12) axis.set(0, 0, 1);
+  axis.normalize();
+  let total = 0;
+  const add = (n: SceneNode, offset: THREE.Vector3) => {
+    for (const g of n.geoms ?? []) {
+      if (g.role === 'visual' || g.csg === 'difference' || g.name.startsWith('flexure_')) continue;
+      const m = g.mass ?? (g.density ?? 1000) * geomVolume(g);
+      if (!(m > 0)) continue;
+      if (joint.type === 'slide') { total += m; continue; }
+      const d = new THREE.Vector3(g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0).add(offset).sub(pivot);
+      d.addScaledVector(axis, -d.dot(axis));
+      const s = g.size ?? [];
+      const own = (m * ((s[0] ?? 0) ** 2 + (s[1] ?? 0) ** 2 + (s[2] ?? 0) ** 2)) / 5;
+      total += m * d.lengthSq() + own;
+    }
+    for (const c of n.children ?? []) {
+      add(c, offset.clone().add(new THREE.Vector3(c.pos?.[0] ?? 0, c.pos?.[1] ?? 0, c.pos?.[2] ?? 0)));
+    }
+  };
+  add(node, new THREE.Vector3());
+  return total;
+}
+
+/**
+ * The physics step the worker integrates at. A leaf's spring force is applied
+ * explicitly, so a stiff leaf on a light body (ω·dt near 1) needs damping of at
+ * least k·dt to stay stable; less than that and it rings up and flies apart.
+ */
+const SIM_STEP_S = 0.001;
+
+/**
+ * Joint damping for a leaf of `stiffness` moving `inertia`: the filament's loss
+ * ratio of critical, 2·ζ·√(k·m), and never under the k·dt the step needs.
+ */
+function polymerDamping(stiffness: number, inertia: number, lossRatio: number): number {
+  const k = Math.max(0, stiffness);
+  const c = Math.max(2 * lossRatio * Math.sqrt(k * Math.max(inertia, 1e-9)), k * SIM_STEP_S);
+  return +Math.max(1e-7, c).toPrecision(4);
+}
+
 /**
  * Converts `node`'s primary `hinge` or `slide` joint into a calibrated compliant
  * flexure (or updates an existing flexure in-place), returning the updated node
@@ -547,14 +616,14 @@ export function applyFlexureToNode(
     updatedJoint.stiffness = spec.stiffness;
     updatedJoint.springref = 0;
     // Polymer viscoelastic loss ~3% of critical for typical body inertia
-    updatedJoint.damping = +Math.max(1e-4, spec.stiffness * 0.015).toPrecision(4);
+    updatedJoint.damping = polymerDamping(spec.stiffness, movingInertia(node, baseJoint), FLEXURE_FILAMENT_PROPS[resolveFilamentId(spec.filament)].lossRatio);
     updatedJoint.limited = true;
     const limDeg = Math.max(5, Math.min(135, spec.maxTravel));
     updatedJoint.range = [-limDeg, limDeg];
   } else if (spec.kind === 'serpentine') {
     updatedJoint.stiffness = spec.stiffness;
     updatedJoint.springref = 0;
-    updatedJoint.damping = +Math.max(0.02, spec.stiffness * 0.012).toPrecision(4);
+    updatedJoint.damping = polymerDamping(spec.stiffness, movingInertia(node, baseJoint), FLEXURE_FILAMENT_PROPS[resolveFilamentId(spec.filament)].lossRatio);
     updatedJoint.limited = true;
     const limM = +(Math.max(0.001, spec.maxTravel / 1000)).toFixed(5);
     updatedJoint.range = [-limM, limM];
@@ -564,7 +633,8 @@ export function applyFlexureToNode(
     const strokeM = (2 * (spec.archRiseMm ?? 2.4)) / 1000;
     updatedJoint.stiffness = 0;
     updatedJoint.springref = 0;
-    updatedJoint.damping = +Math.max(0.08, spec.stiffness * 0.006).toPrecision(4);
+    // The wells are as stiff as the arch's initial slope, so the same loss applies there.
+    updatedJoint.damping = polymerDamping(spec.stiffness, movingInertia(node, baseJoint), FLEXURE_FILAMENT_PROPS[resolveFilamentId(spec.filament)].lossRatio);
     updatedJoint.limited = true;
     updatedJoint.range = [
       +(-0.35 * strokeM).toFixed(5),

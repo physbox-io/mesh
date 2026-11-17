@@ -163,7 +163,7 @@ api.applyJointForce('serpentine_slide', 4 * Math.sin(t * 2.8));
 // Escapement-style drive: a small torque with the swing replaces what the
 // polymer's damping takes each cycle, so the pendulum keeps a steady amplitude.
 const w = api.getJointVelocity('cross_pivot_hinge');
-api.applyJointForce('cross_pivot_hinge', 0.006 * Math.sign(w));
+api.applyJointForce('cross_pivot_hinge', 0.0015 * Math.sign(w));
 `,
     joints: [],
     geoms: [

@@ -720,6 +720,19 @@ Three **monolithic 3D-printed PETG mechanisms** on one frame — no pins, bearin
 - Press **Run** and watch the center toggle snap and hold each latched position unassisted between pushes
 - Select any of the three moving stages → **Physics → Compliant Flexure** to change leaf thickness, span, or polymer (switching to **PLA** warns about sustained-load creep)`,
 
+  flexures_at_work: `# 🛠️ Flexures at Work
+
+Four printable compliant joints doing real jobs on one bench, each run by real actuators (lead-screw feeders, a lift screw, a servo clamp, a cam motor):
+
+1. **Letter scale — cross-strip pivot**: a frictionless pivot whose spring rate is the calibration. The tray hangs from a stirrup, so a weight reads the same wherever it lands; the dial is marked from the flexure's own stiffness and the needle steps 10 → 20 → 30 g as the feeder adds weights.
+2. **Non-return flap — TPU blade hinge**: balls push the flap open and pass; it springs shut against its stop bar and holds the balls that roll back.
+3. **Keyswitch — serpentine springs**: an eccentric cam presses the key 5.5 mm, the folded springs return it; the script counts strokes past the 2 mm actuation point.
+4. **Shock indicator — bistable arches**: on a drop tester, 10 and 20 mm drops leave it alone; the 50 mm landing snaps the proof mass over and the red flag drops into view. A clamp holds the carriage down while a plunger resets it.
+
+## Try it
+- Press **Run**; the log reports when the indicator trips, and the script state counts keystrokes
+- Select the **Scale Beam**, **Keycap** or **Shock Indicator** → **Physics → Compliant Flexure** to change a leaf: the scale then reads off its dial, the key's force changes, the trip threshold moves`,
+
   wind_instruments: `# 🎺 Brass Cornet & Keyed Clarinet Duet
 
 Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed synthesis** running at 48 kHz (~0.15% CPU):

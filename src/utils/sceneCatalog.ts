@@ -63,6 +63,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   shatter: 'Mechanisms',
   spaghetti_towers: 'Mechanisms',
   compliant_flexures: 'Mechanisms',
+  flexures_at_work: 'Mechanisms',
 
   cartpole: 'Machines & robots',
   xy_plotter: 'Machines & robots',

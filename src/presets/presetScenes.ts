@@ -24,6 +24,7 @@ import { marimbaCascadePreset } from './marimbaCascade';
 import { metallophoneCarillonPreset } from './metallophoneCarillon';
 import { soundboxLyrePreset } from './soundboxLyre';
 import { compliantFlexuresPreset } from './compliantFlexures';
+import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
@@ -3700,6 +3701,12 @@ export const PRESETS = {
     emoji: '🧬',
     scene: compliantFlexuresPreset,
     camera: { position: [0.24, -0.34, 0.22], target: [0, 0, 0.045] } satisfies PresetCamera,
+  },
+  flexures_at_work: {
+    name: 'Flexures at Work',
+    emoji: '🛠️',
+    scene: flexuresAtWorkPreset,
+    camera: { position: [0.02, -0.36, 0.22], target: [0, 0.01, 0.05] } satisfies PresetCamera,
   },
   wind_instruments: {
     name: 'Brass Cornet & Clarinet Duet',
