@@ -10,6 +10,7 @@ import { DEFAULT_SLIP_WALL_MM, type SlipCastResult } from '../../utils/slipCastS
 import { SlipMoldPreview, type SlipPreviewMode } from './SlipMoldPreview';
 import { AddSimulationButton } from '../MachineJobControls';
 import { downloadBlob } from '../../utils/downloadBlob';
+import { zipStore } from '../../utils/zipStore';
 import { stlFileName } from '../../utils/meshStlExport';
 import { DEFAULT_SLIP_MOLD_OPTIONS, MAX_SLIP_SIDES, type SlipMold, type SlipMoldOptions } from '../../utils/slipCastMold';
 import { castMaterial, type CastMaterialId } from '../../utils/castMaterials';
@@ -125,7 +126,14 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
 
   const handleDownload = () => {
     if (!mold) return;
-    for (const { file, bytes } of slipCaseStls(name, mold)) {
+    const files = slipCaseStls(name, mold);
+    if (files.length > 3) {
+      const zip = zipStore(files.map((f) => ({ path: stlFileName(f.file), data: f.bytes })));
+      const stem = stlFileName(name).replace(/\.stl$/i, '');
+      downloadBlob(new Blob([zip.buffer as ArrayBuffer], { type: 'application/zip' }), `${stem}_slip_cases.zip`);
+      return;
+    }
+    for (const { file, bytes } of files) {
       downloadBlob(new Blob([bytes.slice().buffer], { type: 'model/stl' }), stlFileName(file));
     }
   };
@@ -171,6 +179,21 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
               <option value="no">No</option>
             </select>
           </Field>
+          <div className="col-span-2">
+            <Field
+              label="Printed cases"
+              hint="Split walls separates each side case into a seamless pattern base, two U-shaped wall halves split at the middle of the long edges, and two sliding dovetail clips — unclip and slide the walls off sideways instead of prying set plaster out of a rigid box."
+            >
+              <select
+                value={options.splitCase ? 'split' : 'solid'}
+                onChange={(e) => set('splitCase', e.target.value === 'split')}
+                className={inputClass}
+              >
+                <option value="split">Separable (base + split walls + sliding clips)</option>
+                <option value="solid">One-piece box</option>
+              </select>
+            </Field>
+          </div>
         </div>
 
         <div role="tablist" className="flex gap-1 text-[11px] font-semibold">
@@ -215,12 +238,21 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
             <ul className={`text-xs space-y-0.5 ${stale ? 'opacity-50' : ''}`}>
               {mold.pieces.map((p) => (
                 <li key={p.name} className="flex justify-between gap-2">
-                  <span className="capitalize">{p.name} case</span>
+                  <span>
+                    <span className="capitalize">{p.name} case</span>
+                    {p.caseParts.length > 1 && (
+                      <span className="text-slate-400 dark:text-slate-500"> (base + 2 walls + 2 clips)</span>
+                    )}
+                  </span>
                   <span className="font-mono text-slate-500 dark:text-slate-400">{p.caseSizeMm[0]} × {p.caseSizeMm[1]} × {p.caseSizeMm[2]} mm</span>
                 </li>
               ))}
             </ul>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Print each case open side up and fill it to the brim with pottery plaster.</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {r.splitCase
+                ? 'Print all parts flat on the bed. Slide the two wall halves onto each base, push the sliding clips down over the middle of the long edges, coat with mold release, and fill to the brim with pottery plaster. Once set, tap the clips up and slide the walls off.'
+                : 'Print each case open side up and fill it to the brim with pottery plaster.'}
+            </p>
             {[...r.warnings, ...partWarnings].map((w) => (
               <p key={w} className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
                 <AlertTriangle className="w-4 h-4 shrink-0" />

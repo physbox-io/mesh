@@ -74,6 +74,42 @@ export function meshBody(id: string, name: string, m: PourBoxMesh, rgba: number[
   return { id, name, type: 'body', pos: origin.map((v) => v / 1000) as [number, number, number], geoms: [geom], joints: [], children: [] } as SceneNode;
 }
 
+/** A static mesh body from multiple meshes in world mm, sharing one origin on the middle of their footprint. */
+function multiMeshBody(id: string, name: string, parts: { name: string; mesh: PourBoxMesh; rgba: number[] }[]): SceneNode {
+  if (parts.length === 1) return meshBody(id, name, parts[0].mesh, parts[0].rgba);
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of parts) {
+    for (let i = 0; i < p.mesh.positions.length; i++) {
+      lo[i % 3] = Math.min(lo[i % 3], p.mesh.positions[i]);
+      hi[i % 3] = Math.max(hi[i % 3], p.mesh.positions[i]);
+    }
+  }
+  const origin = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
+  const geoms: SceneGeom[] = parts.map((p) => {
+    const pos = p.mesh.positions;
+    const renderVertices: number[] = new Array(pos.length);
+    const vertices: number[] = new Array(pos.length);
+    for (let i = 0; i < pos.length; i += 3) {
+      const x = (pos[i] - origin[0]) / 1000;
+      const y = (pos[i + 1] - origin[1]) / 1000;
+      const z = (pos[i + 2] - origin[2]) / 1000;
+      renderVertices[i] = x; renderVertices[i + 1] = y; renderVertices[i + 2] = z;
+      vertices[i] = x; vertices[i + 1] = z; vertices[i + 2] = -y;
+    }
+    return {
+      name: p.name,
+      type: 'mesh',
+      size: [1],
+      rgba: p.rgba,
+      dynamic: true,
+      vertices,
+      renderVertices,
+      faces: p.mesh.faces,
+    };
+  });
+  return { id, name, type: 'body', pos: origin.map((v) => v / 1000) as [number, number, number], geoms, joints: [], children: [] } as SceneNode;
+}
+
 /** Where a body is in the world, found by walking down to it. */
 function worldOf(nodes: SceneNode[], id: string, parent?: THREE.Matrix4): THREE.Matrix4 | null {
   for (const n of nodes) {
@@ -120,9 +156,17 @@ export function sceneWithPourBox(
     ...(options ? { options: { ...options } } : {}),
   };
   const base: SceneNode = { ...meshBody(`pourbase_${tag}`, `${masterName}_pour_base`, box.base, [0.62, 0.64, 0.68, 1]), pourBox };
-  // Translucent so the master shows through it; it still collides.
+  // Translucent so the master shows through it; clips in slate so the seams read.
+  const sleeveName = `${masterName}_pour_sleeve`;
+  const sleeveGeoms = box.sleeveParts && box.sleeveParts.length > 1
+    ? box.sleeveParts.map((sp) => ({
+        name: `${sleeveName}_${sp.key}`,
+        mesh: sp.assembled,
+        rgba: sp.role === 'clip' ? [0.30, 0.36, 0.44, 1] : [0.55, 0.75, 0.95, 0.35],
+      }))
+    : [{ name: `${sleeveName}_mesh`, mesh: box.sleeve, rgba: [0.55, 0.75, 0.95, 0.35] }];
   const sleeve: SceneNode = {
-    ...meshBody(`poursleeve_${tag}`, `${masterName}_pour_sleeve`, box.sleeve, [0.55, 0.75, 0.95, 0.35]),
+    ...multiMeshBody(`poursleeve_${tag}`, sleeveName, sleeveGeoms),
     pourBox,
   };
   const nodes = [...scene.nodes, base, sleeve];
@@ -175,10 +219,14 @@ const HOLE_USE: Record<HolePurpose, string> = {
 /** Lines for the scene's note card; the hole only when its pin went in. */
 export function pourBoxNotes(name: string, box: PourBox, pinAdded = Boolean(box.hole)): string[] {
   const r = box.report;
+  const sleeveDesc = r.splitSleeve
+    ? `split sleeve (2 halves + 2 sliding clips): ${r.sleeveFootprintMm[0]} × ${r.sleeveFootprintMm[1]} × ${r.sleeveHeightMm} mm`
+    : `sleeve: ${r.sleeveFootprintMm[0]} × ${r.sleeveFootprintMm[1]} × ${r.sleeveHeightMm} mm`;
   return [
     `## Silicone pour box for ${name}`,
     '',
-    `- Base: ${r.baseFootprintMm[0]} × ${r.baseFootprintMm[1]} mm; sleeve: ${r.sleeveFootprintMm[0]} × ${r.sleeveFootprintMm[1]} × ${r.sleeveHeightMm} mm.`,
+    `- Base: ${r.baseFootprintMm[0]} × ${r.baseFootprintMm[1]} mm; ${sleeveDesc}.`,
+    ...(r.splitSleeve ? ['- Seat both sleeve halves in the base groove and push the sliding clips down over the side rails before pouring; tap the clips up to peel the sleeve off once cured.'] : []),
     `- Fill to ${r.fillHeightMm} mm: ${r.siliconeMm3.toLocaleString()} mm³, ${r.siliconeG} g ${r.siliconeName.toLowerCase()} (${r.partAG} g A + ${r.partBG} g B; mix +10% margin).`,
     ...(box.hole && pinAdded ? [`- ${box.hole.purpose} pin: ⌀${box.hole.diaMm} × ${box.hole.lengthMm.toFixed(1)} mm (${HOLE_USE[box.hole.purpose]})`] : []),
     ...r.warnings.map((w) => `- ${w}`),

@@ -6,7 +6,7 @@ import { useStore } from '../store/useStore';
 import { putNoteSection } from './noteSection';
 import { exportBinarySTL, type Triangle3D } from './moldExporter';
 import { planPourBox, pourBoxNotes, sceneWithPourBox } from './pourBoxScene';
-import type { PourBox, PourBoxMesh, PourBoxOptions } from './siliconeMold';
+import { holePinMesh, type PourBox, type PourBoxMesh, type PourBoxOptions } from './siliconeMold';
 import { findNodeById } from './sceneTree';
 
 export interface AddedPourBox {
@@ -51,4 +51,21 @@ export function pourBoxStl(mesh: PourBoxMesh, label: string): Uint8Array {
     tris.push({ a: at(mesh.faces[f]), b: at(mesh.faces[f + 1]), c: at(mesh.faces[f + 2]) });
   }
   return exportBinarySTL(tris, `PhysBox pour box ${label}`.slice(0, 78));
+}
+
+/** Every printable piece of a pour box as binary STLs, stood on z = 0. */
+export function pourBoxStlFiles(box: PourBox, sep: '_' | '-' = '-'): { piece: string; bytes: Uint8Array }[] {
+  const out: { piece: string; bytes: Uint8Array }[] = [{ piece: 'base', bytes: pourBoxStl(box.base, 'base') }];
+  if (box.sleeveParts && box.sleeveParts.length > 1) {
+    for (const sp of box.sleeveParts) {
+      const k = sp.key.replace(/(\d+)$/, `${sep}$1`);
+      out.push({ piece: k, bytes: pourBoxStl(sp.mesh, sp.label) });
+    }
+  } else {
+    out.push({ piece: 'sleeve', bytes: pourBoxStl(box.sleeve, 'sleeve') });
+  }
+  if (box.hole) {
+    out.push({ piece: `${box.hole.purpose}${sep}pin`, bytes: pourBoxStl(holePinMesh(box.hole), 'pin') });
+  }
+  return out;
 }

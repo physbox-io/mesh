@@ -34,6 +34,7 @@ export const slipCommands: McpCommands = {
     }
     if (typeof msg.base === 'boolean' || msg.base === 'auto') options.base = msg.base;
     if (typeof msg.fillInside === 'boolean') options.fillInside = msg.fillInside;
+    if (typeof msg.splitCase === 'boolean') options.splitCase = msg.splitCase;
     const budget = num(msg.plasterBudgetG);
     if (budget !== undefined) options.plasterBudgetG = budget;
     for (const key of ['plasterMm', 'spareHeightMm', 'spareDiaMm', 'caseWallMm', 'freeboardMm', 'natchDiaMm', 'baseTaperDeg', 'draftDeg'] as const) {
@@ -86,6 +87,7 @@ export const slipCommands: McpCommands = {
           pull: p.pull.map((v) => +v.toFixed(3)),
           plasterMm3: p.plasterMm3,
           caseSizeMm: p.caseSizeMm,
+          caseParts: p.caseParts.map((cp) => ({ key: cp.key, role: cp.role, sizeMm: cp.sizeMm })),
           undercutMm2: p.undercutMm2,
           natches: p.natches,
         })),

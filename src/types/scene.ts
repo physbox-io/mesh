@@ -1130,6 +1130,8 @@ export interface SceneNode {
       masterVolumeMm3: number;
       laidOpen: boolean;
       partingZMm?: { cavity: number; lid: number };
+      /** For a separable open mold spaced apart on the plate: shift (mm) closing Half 1 (+shift) and Half 2 (-shift) before pouring. */
+      splitOpenShiftMm?: [number, number];
       pullDirection?: '+z' | '-z' | '+y' | '-y' | '+x' | '-x';
       cavityHoldsTop?: boolean;
       /** A bottom-filled mold's route, mm in the cavity half's frame (parting face at 0), so trimming takes it off the casting. */

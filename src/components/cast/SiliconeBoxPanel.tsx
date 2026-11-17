@@ -4,10 +4,11 @@ import { NumberInput } from '@physbox-io/ui';
 import { useSettled } from '../../hooks/useSettled';
 import { useStore } from '../../store/useStore';
 import { planPourBox } from '../../utils/pourBoxScene';
-import { addPourBoxToScene, pourBoxStl } from '../../utils/pourBoxActions';
+import { addPourBoxToScene, pourBoxStlFiles } from '../../utils/pourBoxActions';
 import { downloadBlob } from '../../utils/downloadBlob';
+import { zipStore } from '../../utils/zipStore';
 import { stlFileName } from '../../utils/meshStlExport';
-import { DEFAULT_POUR_BOX_OPTIONS, HOLE_DIA_MM, holePinMesh, type HolePurpose, type PourBox, type PourBoxMesh, type PourBoxOptions, type PourBoxShape } from '../../utils/siliconeMold';
+import { DEFAULT_POUR_BOX_OPTIONS, HOLE_DIA_MM, type HolePurpose, type PourBox, type PourBoxOptions, type PourBoxShape } from '../../utils/siliconeMold';
 import { SILICONES, castMaterialWarnings, type CastMaterialId, type SiliconeId } from '../../utils/castMaterials';
 import { AdvancedBlock, CastTopFields, MaterialNotes } from './CastTopFields';
 import { PanelBody, PanelFooter } from './CastDialogFrame';
@@ -89,10 +90,14 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
 
   const handleDownload = () => {
     if (!box) return;
-    const pieces: [string, PourBoxMesh][] = [['base', box.base], ['sleeve', box.sleeve]];
-    if (box.hole) pieces.push([`${box.hole.purpose}_pin`, holePinMesh(box.hole)]);
-    for (const [piece, mesh] of pieces) {
-      const bytes = pourBoxStl(mesh, piece);
+    const files = pourBoxStlFiles(box, '_');
+    if (files.length > 3) {
+      const zip = zipStore(files.map((f) => ({ path: stlFileName(`${name}_pour_${f.piece}`), data: f.bytes })));
+      const stem = stlFileName(name).replace(/\.stl$/i, '');
+      downloadBlob(new Blob([zip.buffer as ArrayBuffer], { type: 'application/zip' }), `${stem}_pour_box.zip`);
+      return;
+    }
+    for (const { piece, bytes } of files) {
       downloadBlob(new Blob([bytes.slice().buffer], { type: 'model/stl' }), stlFileName(`${name}_pour_${piece}`));
     }
   };
@@ -128,6 +133,21 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
         />
         <MaterialNotes notes={castMaterialWarnings(material, 0, { pla: false })} />
 
+        <label
+          className="block space-y-1 text-xs"
+          title="Splits the sleeve across the middle of its long edges with a labyrinth seam seal and two sliding dovetail C-clips, so cured silicone peels out sideways without tearing."
+        >
+          <span className={labelClass}>Printed sleeve</span>
+          <select
+            value={options.splitSleeve ? 'split' : 'solid'}
+            onChange={(e) => set('splitSleeve', e.target.value === 'split')}
+            className={inputClass}
+          >
+            <option value="split">Separable (2 halves + sliding clips)</option>
+            <option value="solid">One-piece sleeve</option>
+          </select>
+        </label>
+
         {failure ? (
           <p className="text-red-600 dark:text-red-400">{failure}</p>
         ) : !r ? (
@@ -142,7 +162,9 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
               <dt className="text-slate-500 dark:text-slate-400">Volume</dt>
               <dd className="font-mono">{r.siliconeMm3.toLocaleString()} mm³</dd>
               <dt className="text-slate-500 dark:text-slate-400">Sleeve</dt>
-              <dd className="font-mono">{r.sleeveFootprintMm[0]} × {r.sleeveFootprintMm[1]} × {r.sleeveHeightMm} mm</dd>
+              <dd className="font-mono">
+                {r.sleeveFootprintMm[0]} × {r.sleeveFootprintMm[1]} × {r.sleeveHeightMm} mm{r.splitSleeve ? ' (split + 2 clips)' : ''}
+              </dd>
               <dt className="text-slate-500 dark:text-slate-400">Base</dt>
               <dd className="font-mono">{r.baseFootprintMm[0]} × {r.baseFootprintMm[1]} mm</dd>
             </dl>

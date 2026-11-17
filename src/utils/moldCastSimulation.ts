@@ -350,6 +350,48 @@ export async function simulateCastFromMoldNode(
     };
   }
 
+  // Separate sliding clips laid out beside the mold on the plate are clamping
+  // hardware, not cavity walls: exclude them so they do not shift half centring.
+  for (let i = geomNames.length - 1; i >= 0; i--) {
+    if (/sliding[ _]clip/i.test(geomNames[i])) {
+      geomShellsMm.splice(i, 1);
+      geomNames.splice(i, 1);
+    }
+  }
+
+  // Close a separable 2-half open mold spaced on the plate before pouring.
+  const splitShift = node.simulation?.mold?.splitOpenShiftMm;
+  if (splitShift && geomShellsMm.length === 2) {
+    const len = Math.hypot(splitShift[0], splitShift[1]) || 1;
+    const kx = splitShift[0] + (splitShift[0] / len) * 0.02;
+    const ky = splitShift[1] + (splitShift[1] / len) * 0.02;
+    const toBody = getNodeWorldTransform(node);
+    const bodyRot = new THREE.Matrix4().extractRotation(toBody);
+    const dWorld = new THREE.Vector3(kx, ky, 0).applyMatrix4(bodyRot);
+    for (let s = 0; s < 2; s++) {
+      const sgn = s === 0 ? 1 : -1;
+      const arr = geomShellsMm[s];
+      for (let j = 0; j < arr.length; j += 3) {
+        arr[j] += sgn * dWorld.x;
+        arr[j + 1] += sgn * dWorld.y;
+        arr[j + 2] += sgn * dWorld.z;
+      }
+    }
+    const mergedLen = geomShellsMm[0].length + geomShellsMm[1].length;
+    const mergedMm = new Float64Array(mergedLen);
+    mergedMm.set(geomShellsMm[0], 0);
+    mergedMm.set(geomShellsMm[1], geomShellsMm[0].length);
+    const res = await simulateCastFromMoldTriangles(mergedMm, {
+      ...options,
+      halves: geomShellsMm,
+      negativeHalves: negativeShellsMm.length > 0 ? negativeShellsMm : undefined,
+      rawTextures: rawTextures.length > 0 ? rawTextures : undefined,
+      moldName: node.name,
+    });
+    if (warnings.length > 0) res.warnings.push(...warnings);
+    return res;
+  }
+
   const closed = await castLaidOpenClamshell(node, geomShellsMm, geomNames, options);
   if (closed) return closed;
 
@@ -435,7 +477,32 @@ export async function simulateCastFromMoldResult(
       options,
     );
   } else {
-    // 1-part open mold
+    // 1-part open mold (or 2-half separable open mold spaced on the plate)
+    const splitOpen = mold.bottomHalf.splitOpen;
+    if (splitOpen && splitOpen.pieceTriangles[0] + splitOpen.pieceTriangles[1] === mold.bottomHalf.triangles.length) {
+      const [n1] = splitOpen.pieceTriangles;
+      const [sx, sy] = splitOpen.closeShiftMm;
+      const len = Math.hypot(sx, sy) || 1;
+      const kx = sx + (sx / len) * 0.02;
+      const ky = sy + (sy / len) * 0.02;
+      const h1 = botTrisMm.slice(0, n1 * 9);
+      const h2 = botTrisMm.slice(n1 * 9);
+      for (let i = 0; i < h1.length; i += 3) { h1[i] += kx; h1[i + 1] += ky; }
+      for (let i = 0; i < h2.length; i += 3) { h2[i] -= kx; h2[i + 1] -= ky; }
+      const closedMm = new Float64Array(h1.length + h2.length);
+      closedMm.set(h1, 0);
+      closedMm.set(h2, h1.length);
+      return restorePartFrame(
+        await simulateCastFromMoldTriangles(closedMm, {
+          ...options,
+          isClamshell: false,
+          flipUpright: options?.orientUpright ?? true,
+          halves: [h1, h2],
+        }),
+        mold,
+        options,
+      );
+    }
     return restorePartFrame(
       await simulateCastFromMoldTriangles(botTrisMm, {
         ...options,

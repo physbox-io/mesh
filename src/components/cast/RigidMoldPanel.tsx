@@ -499,6 +499,12 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                     Add 3° draft
                   </button>
                 )}
+                {moldType === 'open' && !options.separable && (
+                  <button type="button" onClick={() => set('separable', true)}
+                    className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
+                    Split + sliding clips
+                  </button>
+                )}
                 <button type="button" onClick={() => {
                     if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
                     set('dissolvableLiner', true);
@@ -550,12 +556,33 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                 </Field>
               </div>
             )}
+            {!options.dissolvableLiner && (
+              <div className="flex flex-wrap items-center gap-2">
+                <HintAnchor
+                  hint={
+                    moldType === 'open'
+                      ? 'Splits the open mold across the middle of its long edges with a labyrinth floor seal and two tapered sliding C-clips, so expanding plaster, concrete, Jesmonite, or steep resin castings release sideways without breaking the print.'
+                      : 'Adds 45°-printable T-slot clamping brackets and two horizontal-sliding wedge C-clips that lock the lid down during the pour without external binder clips or weights.'
+                  }
+                >
+                  <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(options.separable)}
+                      onChange={(e) => set('separable', e.target.checked)}
+                      className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                    />
+                    {moldType === 'open' ? 'Separable + Sliding Clips' : 'Printed Sliding Clips'}
+                  </label>
+                </HintAnchor>
+              </div>
+            )}
             {!result.liner && moldType === 'clamshell' && (
               <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">
                 <span className="font-semibold text-slate-600 dark:text-slate-300">Before pouring: </span>
-                wipe mold release or petroleum jelly over the parting faces, pins and cavity, then clamp the halves
-                (binder clips, or at least {clampGrams(material, result.moldWidthMm, result.moldDepthMm, result.topHalf?.partingZMm ?? 0)} g on the lid).
-                Tape alone lets the lid float once the pour reaches the funnel.
+                {options.separable
+                  ? 'wipe mold release or petroleum jelly over the parting faces, pins and cavity, then slide both printed C-clips onto the side rails to lock the halves shut.'
+                  : `wipe mold release or petroleum jelly over the parting faces, pins and cavity, then clamp the halves (binder clips, or at least ${clampGrams(material, result.moldWidthMm, result.moldDepthMm, result.topHalf?.partingZMm ?? 0)} g on the lid). Tape alone lets the lid float once the pour reaches the funnel.`}
               </p>
             )}
             {result.liner && (

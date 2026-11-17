@@ -74,6 +74,13 @@ export interface SlipMoldOptions {
    * pull. The parting lines keep their size, so the pieces still meet.
    */
   draftDeg: number;
+  /**
+   * Split each side piece's printed case into a seamless pattern base, two
+   * U-shaped wall halves split at the middle of the long edges, and two
+   * sliding dovetail clips, so the walls unclip and slide off sideways rather
+   * than locking onto set plaster.
+   */
+  splitCase: boolean;
   /** The clay body. */
   slip: CastMaterialId;
 }
@@ -91,6 +98,7 @@ export const DEFAULT_SLIP_MOLD_OPTIONS: SlipMoldOptions = {
   natchDiaMm: 14,
   baseTaperDeg: 10,
   draftDeg: 0,
+  splitCase: true,
   slip: 'porcelain-slip',
 };
 
@@ -111,6 +119,24 @@ export interface SlipMesh {
   faces: number[];
 }
 
+export type SlipCasePartRole = 'case' | 'base' | 'wall' | 'clip';
+
+/** One printable part of a piece's plaster-casting case, stood on Z = 0. */
+export interface SlipCasePart {
+  /** File-safe suffix: 'case' (one-piece), or 'base', 'wall1', 'wall2', 'clip1', 'clip2'. */
+  key: string;
+  /** Human-readable part label. */
+  label: string;
+  role: SlipCasePartRole;
+  /** Centred in plan on Z = 0, ready to print on its own. */
+  mesh: SlipMesh;
+  /** In its assembled pose on Z = 0 round the pattern base. */
+  assembled: SlipMesh;
+  /** Unit vector this part moves along to disassemble ([0,0,1] for clips, ±slide for walls, [0,0,0] for base). */
+  release: [number, number, number];
+  sizeMm: [number, number, number];
+}
+
 export interface SlipPiece {
   /** 'side 1' … or 'base'. */
   name: string;
@@ -118,12 +144,14 @@ export interface SlipPiece {
   plaster: SlipMesh;
   /** Its printed case, in place: overlapping its neighbours' cases, as they never stand together. */
   caseInPlace: SlipMesh;
-  /** The case stood as it prints: open face up, on Z = 0, centred on the origin in plan. */
+  /** The one-piece case stood as it prints: open face up, on Z = 0, centred on the origin in plan. */
   casePrint: SlipMesh;
+  /** The printable parts of the case: [base, wall1, wall2, clip1, clip2] when split, [case] otherwise. */
+  caseParts: SlipCasePart[];
   /** Which way the piece pulls off the casting, a unit vector. */
   pull: [number, number, number];
   plasterMm3: number;
-  /** Case footprint and height as it prints, mm. */
+  /** Assembled case footprint and height as it stands on the bench, mm. */
   caseSizeMm: [number, number, number];
   /** Part surface facing away from this piece's pull, mm²: it would lock the piece on. */
   undercutMm2: number;
@@ -134,6 +162,8 @@ export interface SlipPiece {
 export interface SlipMoldReport {
   sides: number;
   base: boolean;
+  /** Whether side cases are split into a pattern base, two wall halves, and sliding clips. */
+  splitCase: boolean;
   /** The split's turn about Z, degrees: the first parting half-plane's direction. */
   splitDeg: number;
   /** Where the pour axis is, in plan, mm. */
@@ -386,7 +416,7 @@ function spare(
   const mouths = insides.map(mouthOf);
 
   let chosen = -1;
-  let footZ = zTop;
+  let footZ: number;
   let foot: CrossSection;
   if (at) {
     chosen = mouths.findIndex((m) => insideContours(m.polys, at[0], at[1]));
@@ -431,7 +461,25 @@ function spare(
     free(piece, disc);
     centredAt = at;
   } else {
-    const top = filled.slice(zTop - e);
+    // On a pointed or domed top (a pyramid, cone, sphere), a slice 0.5 mm below
+    // the apex is a 1 mm pinhole that barely touches the part and seals shut as
+    // soon as clay builds on it. Walk down until the slice is wide enough to
+    // pour and drain slip through (up to 40 % down the part).
+    const b = filled.boundingBox();
+    const minThroat = Math.min(diaMm, 20);
+    const floorLimit = b.min[2] + 0.6 * (zTop - b.min[2]);
+    let bestZ = zTop - e;
+    for (let z = zTop - e; z >= floorLimit; z -= 1) {
+      const cs = filled.slice(z);
+      const h = cs.hull();
+      const hb = h.bounds();
+      const span = Math.min(hb.max[0] - hb.min[0], hb.max[1] - hb.min[1]);
+      free(cs, h);
+      bestZ = z;
+      if (span >= minThroat) break;
+    }
+    footZ = bestZ + e;
+    const top = filled.slice(bestZ);
     foot = top.hull();
     free(top);
   }
@@ -865,6 +913,341 @@ function standUp(m: Manifold, up: [number, number, number]): Manifold {
   return placed;
 }
 
+/** Counter-clockwise 2D polygon section. */
+function polySection(wasm: ManifoldToplevel, pts: Vec2[]): CrossSection {
+  const ccw = contourArea(pts) >= 0 ? pts : [...pts].reverse();
+  return wasm.CrossSection.ofPolygons([ccw], 'Positive');
+}
+
+/** Extrudes an (X, Z) profile along Y in [y0, y1] with outward winding. */
+function extrudeAlongY(wasm: ManifoldToplevel, xz: Vec2[], y0: number, y1: number): Manifold {
+  const cs = polySection(wasm, xz);
+  const slab = cs.extrude(y1 - y0);
+  const rot = slab.rotate([90, 0, 0]);
+  const out = rot.translate([0, y1, 0]);
+  free(cs, slab, rot);
+  return out;
+}
+
+/** Extrudes a (Y, Z) profile along X in [x0, x1] with outward winding. */
+function extrudeAlongX(wasm: ManifoldToplevel, yz: Vec2[], x0: number, x1: number): Manifold {
+  const cs = polySection(wasm, yz);
+  const slab = cs.extrude(x1 - x0);
+  const r1 = slab.rotate([90, 0, 0]);
+  const r2 = r1.rotate([0, 0, 90]);
+  const out = r2.translate([x0, 0, 0]);
+  free(cs, slab, r1, r2);
+  return out;
+}
+
+function centredOnBed(m: Manifold): { mesh: SlipMesh; sizeMm: [number, number, number] } {
+  const b = m.boundingBox();
+  const c = m.translate([-(b.min[0] + b.max[0]) / 2, -(b.min[1] + b.max[1]) / 2, -b.min[2]]);
+  const out = meshOf(c);
+  free(c);
+  return {
+    mesh: out,
+    sizeMm: [+(b.max[0] - b.min[0]).toFixed(1), +(b.max[1] - b.min[1]).toFixed(1), +(b.max[2] - b.min[2]).toFixed(1)],
+  };
+}
+
+/**
+ * A separable case for a side plaster piece:
+ *   - `base`: seamless pattern floor + positive pot/spare + 45° captive V-rails + pry notches;
+ *   - `wall1`, `wall2`: U-shaped wall halves split at the middle of the long edges (Y = 0),
+ *     with 45° V-grooves that slide onto the base along ±Y, a tongue-and-groove seam seal,
+ *     and tapered dovetail flanges;
+ *   - `clip1`, `clip2`: vertical C-clips that slide down over the dovetail flanges to wedge
+ *     the seam shut during the pour, and tap upward to release set plaster without prying.
+ */
+function buildSplitSideCase(
+  wasm: ManifoldToplevel, piece: Manifold, pull: [number, number, number],
+  wall: number, freeboard: number,
+): { parts: SlipCasePart[]; sizeMm: [number, number, number]; lumpInCase: Manifold } {
+  // Rotate so pull -> +Z, world +Z -> +Y, [-pull_y, pull_x, 0] -> +X (det = +1).
+  const pl = Math.hypot(pull[0], pull[1]) || 1;
+  const px = pull[0] / pl, py = pull[1] / pl;
+  let turned = piece.transform([-py, 0, px, 0, px, 0, py, 0, 0, 1, 0, 0, 0, 0, 0, 1]);
+  const b0 = turned.boundingBox();
+  if ((b0.max[0] - b0.min[0]) > (b0.max[1] - b0.min[1]) + 1e-6) {
+    const r90 = turned.rotate([0, 0, 90]);
+    free(turned);
+    turned = r90;
+  }
+  const bb = turned.boundingBox();
+  const cx = (bb.min[0] + bb.max[0]) / 2;
+  const cy = (bb.min[1] + bb.max[1]) / 2;
+  const hx = (bb.max[0] - bb.min[0]) / 2;
+  const hy = (bb.max[1] - bb.min[1]) / 2;
+  const zMinAll = bb.min[2];
+
+  // Ensure at least `wall` under the deepest natch bump, and at least DAM_Z
+  // around the perimeter so the trapezoidal tongue and dam sit below the plaster.
+  const DAM_Z = 6.8;
+  const rm = turned.getMesh();
+  let zPerimMin = Infinity;
+  for (let i = 0; i < rm.numVert; i++) {
+    const o = i * rm.numProp;
+    if (Math.abs(rm.vertProperties[o] - cx) >= hx - 2 || Math.abs(rm.vertProperties[o + 1] - cy) >= hy - 2) {
+      zPerimMin = Math.min(zPerimMin, rm.vertProperties[o + 2]);
+    }
+  }
+  if (!Number.isFinite(zPerimMin)) zPerimMin = zMinAll;
+  const zShift = Math.max(wall - zMinAll, DAM_Z - zPerimMin);
+  const lumpP = turned.translate([-cx, -cy, zShift]);
+  free(turned);
+
+  const lbb = lumpP.boundingBox();
+  const zBack = lbb.max[2];
+  const zRim = zBack + Math.max(0, freeboard);
+
+  const rectSlab = (wx: number, wy: number, z0: number, h: number) =>
+    wasm.Manifold.cube([2 * wx, 2 * wy, h]).translate([-wx, -wy, z0]);
+
+  // --- 1. Seamless pattern base -----------------------------------------------
+  // Full 4-sided mitered trapezoidal perimeter tongue (45° ramps + 1.2 mm flat
+  // vertical crest so FDM layers print a crisp blunt land with no 90° overhang
+  // droop and no fragile knife-edge apex) around all four edges of the floor.
+  const RIB_OUT = 1.6;
+  const zDam = Math.max(DAM_Z, zPerimMin + zShift) - 0.02;
+  const damBox = wasm.Manifold.cube([2 * hx, 2 * hy, zDam]).translate([-hx, -hy, 0]);
+  const coreHx = Math.max(0.1, hx - 0.01), coreHy = Math.max(0.1, hy - 0.01);
+  const coreBox = wasm.Manifold.cube([2 * coreHx, 2 * coreHy, Math.max(0.1, zBack - 0.01)]).translate([-coreHx, -coreHy, 0]);
+  const tBot = rectSlab(hx, hy, 1.2, 0.02);
+  const tMid = rectSlab(hx + RIB_OUT, hy + RIB_OUT, 2.8, 1.2);
+  const tTop = rectSlab(hx, hy, 5.58, 0.02);
+  const perimeterTongue = wasm.Manifold.hull([tBot, tMid, tTop]);
+  const baseBlank = wasm.Manifold.union([damBox, coreBox, perimeterTongue]);
+  let baseSolid = baseBlank.subtract(lumpP);
+  free(damBox, coreBox, tBot, tMid, tTop, perimeterTongue, baseBlank);
+
+  // Starter pry slots under the short ends (below Z = 1.2 so the 4-sided tongue stays unbroken).
+  const pryW = Math.min(16, hx);
+  if (pryW >= 4) {
+    const pryNeg = extrudeAlongX(wasm, [[-hy - 1, -0.5], [-hy + 1.15, -0.5], [-hy + 1.15, 0.01], [-hy, 1.16], [-hy - 1, 1.16]], -pryW / 2, pryW / 2);
+    const pryPos = extrudeAlongX(wasm, [[hy + 1, -0.5], [hy - 1.15, -0.5], [hy - 1.15, 0.01], [hy, 1.16], [hy + 1, 1.16]], -pryW / 2, pryW / 2);
+    const notched = baseSolid.subtract(pryNeg).subtract(pryPos);
+    free(pryNeg, pryPos, baseSolid);
+    baseSolid = notched;
+  }
+  baseSolid = largestLump(baseSolid).lump;
+
+  // --- 2. Two U-shaped wall halves (split at Y = 0, middle of long edges) ------
+  const CLEAR = 0.2;
+  const CLIP_CLEAR = 0.25;
+  const SEAM_HALF = 0.05;
+  const ix = hx + CLEAR;
+  const iy = hy + CLEAR;
+  const wUpper = Math.max(1.6, wall);
+  const wSkirt = Math.max(wUpper, RIB_OUT + 2.4); // >= 4.0 mm around groove & rim
+  const dw = wSkirt - wUpper;
+
+  const outerParts: Manifold[] = [rectSlab(ix + wUpper, iy + wUpper, 0, zRim)];
+  if (dw > 1e-3 && zRim > 9) {
+    const zSkirt = Math.min(6.0, zRim * 0.48);
+    const botWide = rectSlab(ix + wSkirt, iy + wSkirt, 0, zSkirt);
+    const botTop = rectSlab(ix + wUpper, iy + wUpper, Math.min(zRim - 0.02, zSkirt + dw), 0.02);
+    outerParts.push(wasm.Manifold.hull([botWide, botTop]));
+    free(botWide, botTop);
+    if (zRim > zSkirt + dw + 6) {
+      const topH = Math.min(3.0, zRim * 0.2);
+      const topWide = rectSlab(ix + wSkirt, iy + wSkirt, zRim - topH, topH);
+      const topBot = rectSlab(ix + wUpper, iy + wUpper, zRim - topH - dw, 0.02);
+      outerParts.push(wasm.Manifold.hull([topBot, topWide]));
+      free(topWide, topBot);
+    }
+  }
+
+  // Dovetail seam pads & tapered vertical rails at Y = 0 on both long edges (X = ±xPad).
+  const DOVE_H = 3.8;
+  const flare = 2.0;
+  const taper = Math.min(0.5, Math.max(0.25, zRim * 0.007));
+  const neckTop = Math.min(5.2, Math.max(3.2, hy * 0.18));
+  const neckBot = neckTop + taper;
+  const xPad = ix + wSkirt;
+  const padHalfY = neckBot + 1.0;
+
+  for (const sx of [-1, 1] as const) {
+    // Flush vertical pad from ix to xPad across |Y| <= padHalfY, chamfered at 45° along Y.
+    if (dw > 1e-3) {
+      const xIn = sx > 0 ? ix + 0.2 : -xPad;
+      const xOut = sx > 0 ? xPad : -(ix + 0.2);
+      const padCore = wasm.Manifold.cube([xOut - xIn, 2 * padHalfY, zRim]).translate([xIn, -padHalfY, 0]);
+      const xNarrowIn = sx > 0 ? ix + 0.2 : -(ix + wUpper);
+      const xNarrowOut = sx > 0 ? ix + wUpper : -(ix + 0.2);
+      const padWide = wasm.Manifold.cube([xNarrowOut - xNarrowIn, 2 * (padHalfY + dw), zRim]).translate([xNarrowIn, -(padHalfY + dw), 0]);
+      outerParts.push(wasm.Manifold.hull([padCore, padWide]));
+      free(padCore, padWide);
+    }
+    // Tapered dovetail rail from Z = 0 (wider) to Z = zRim (narrower).
+    const railTrap = (neck: number, z0: number) => {
+      const x0 = sx * (xPad - 0.5), x1 = sx * (xPad + DOVE_H);
+      const cs = polySection(wasm, [[x0, -neck], [x1, -(neck + flare)], [x1, neck + flare], [x0, neck]]);
+      const s = cs.extrude(0.02).translate([0, 0, z0]);
+      free(cs);
+      return s;
+    };
+    const rBot = railTrap(neckBot, 0);
+    const rTop = railTrap(neckTop, zRim - 0.02);
+    outerParts.push(wasm.Manifold.hull([rBot, rTop]));
+    free(rBot, rTop);
+  }
+
+  // Finger pull handles on the two short ends (Y = ±(iy + wSkirt)).
+  if (zRim >= 14) {
+    const pullW = Math.min(28, ix * 1.2);
+    const pullOut = 3.0;
+    const yOut = iy + wSkirt;
+    outerParts.push(extrudeAlongX(wasm, [
+      [-yOut + 0.5, zRim - 3.0 - pullOut - dw],
+      [-(yOut + pullOut), zRim - 3.0],
+      [-(yOut + pullOut), zRim],
+      [-yOut + 0.5, zRim],
+    ], -pullW / 2, pullW / 2));
+    outerParts.push(extrudeAlongX(wasm, [
+      [yOut - 0.5, zRim - 3.0 - pullOut - dw],
+      [yOut + pullOut, zRim - 3.0],
+      [yOut + pullOut, zRim],
+      [yOut - 0.5, zRim],
+    ], -pullW / 2, pullW / 2));
+  }
+
+  const outerUnion = wasm.Manifold.union(outerParts);
+  const innerCut = wasm.Manifold.cube([2 * ix, 2 * iy, zRim + 2]).translate([-ix, -iy, -1]);
+  let collar = outerUnion.subtract(innerCut);
+  free(...outerParts, outerUnion, innerCut);
+
+  // Subtract a continuous 4-sided flat-bottomed trapezoidal groove (45° ramps)
+  // around the entire inner perimeter so each U-wall half gets all 3 mitered
+  // grooves: both side arms AND its longer end wall.
+  const CLEAR_V = 0.28;
+  const gPeak = RIB_OUT + CLEAR_V; // 1.88 mm past (hx, hy)
+  const gBot = rectSlab(hx - 0.5, hy - 0.5, 2.65 - gPeak - 0.5, 0.02);
+  const gMid = rectSlab(hx + gPeak, hy + gPeak, 2.65, 1.5);
+  const gTop = rectSlab(hx - 0.5, hy - 0.5, 4.15 + gPeak + 0.48, 0.02);
+  const grooveAll = wasm.Manifold.hull([gBot, gMid, gTop]);
+  const grooved = collar.subtract(grooveAll);
+  free(gBot, gMid, gTop, grooveAll, collar);
+  collar = grooved;
+
+  let wall1 = collar.trimByPlane([0, -1, 0], SEAM_HALF);
+  let wall2 = collar.trimByPlane([0, 1, 0], SEAM_HALF);
+  free(collar);
+
+  // Vertical labyrinth tongue-and-groove across Y = 0 inside the seam pads.
+  if (zRim >= 11) {
+    const tongues: Manifold[] = [];
+    const grooves: Manifold[] = [];
+    for (const sx of [-1, 1] as const) {
+      const tx0 = sx > 0 ? ix + 1.3 : -(ix + 2.7);
+      const tx1 = sx > 0 ? ix + 2.7 : -(ix + 1.3);
+      tongues.push(extrudeAlongX(wasm, [[-0.4, 6.3], [1.4, 8.1], [1.4, zRim], [-0.4, zRim]], tx0, tx1));
+      const gx0 = sx > 0 ? ix + 1.05 : -(ix + 2.95);
+      const gx1 = sx > 0 ? ix + 2.95 : -(ix + 1.05);
+      grooves.push(extrudeAlongX(wasm, [[-0.1, 5.9], [1.75, 5.9], [1.75, zRim + 1], [-0.1, zRim + 1]], gx0, gx1));
+    }
+    const tUnion = wasm.Manifold.union(tongues);
+    const gUnion = wasm.Manifold.union(grooves);
+    const w1Next = wall1.add(tUnion);
+    const w2Next = wall2.subtract(gUnion);
+    free(...tongues, ...grooves, tUnion, gUnion, wall1, wall2);
+    wall1 = w1Next;
+    wall2 = w2Next;
+  }
+  wall1 = largestLump(wall1).lump;
+  wall2 = largestLump(wall2).lump;
+
+  // --- 3. Sliding C-clips (one on +X seam, one on -X seam) --------------------
+  const cFlank = CLIP_CLEAR / Math.cos(Math.atan2(flare, DOVE_H));
+  const xClipFront = xPad + 0.4;
+  const uPocketBack = DOVE_H + 0.35;
+  const xPocketBack = xPad + uPocketBack;
+  const clipJaw = 3.4;
+  const xSpineOut = xPocketBack + 3.6;
+  const wNeckAt = (z: number) => neckBot - (taper / zRim) * z;
+  const yPocketAt = (z: number, u: number) => wNeckAt(z) + cFlank + u * (flare / DOVE_H);
+
+  const clipOuterSlab = (z: number, z0: number) => {
+    const yOut = yPocketAt(z, uPocketBack) + clipJaw;
+    const cs = polySection(wasm, [[xClipFront, -yOut], [xSpineOut, -yOut], [xSpineOut, yOut], [xClipFront, yOut]]);
+    const s = cs.extrude(0.02).translate([0, 0, z0]);
+    free(cs);
+    return s;
+  };
+  const coBot = clipOuterSlab(0, 0);
+  const coTop = clipOuterSlab(zRim, zRim - 0.02);
+  let clipOuter = wasm.Manifold.hull([coBot, coTop]);
+  free(coBot, coTop);
+
+  if (zRim >= 12) {
+    const yTop = yPocketAt(zRim, uPocketBack) + clipJaw;
+    const tab = extrudeAlongY(wasm, [
+      [xSpineOut - 0.5, zRim - 5.6],
+      [xSpineOut + 2.6, zRim - 2.5],
+      [xSpineOut + 2.6, zRim],
+      [xSpineOut - 0.5, zRim],
+    ], -yTop, yTop);
+    const withTab = clipOuter.add(tab);
+    free(tab, clipOuter);
+    clipOuter = withTab;
+  }
+
+  const clipPocketSlab = (z: number, z0: number) => {
+    const u0 = -0.5;
+    const y0 = yPocketAt(z, u0), y1 = yPocketAt(z, uPocketBack);
+    const cs = polySection(wasm, [[xPad + u0, -y0], [xPad + uPocketBack, -y1], [xPad + uPocketBack, y1], [xPad + u0, y0]]);
+    const s = cs.extrude(0.02).translate([0, 0, z0]);
+    free(cs);
+    return s;
+  };
+  const cpBot = clipPocketSlab(-0.5, -0.5);
+  const cpTop = clipPocketSlab(zRim + 0.5, zRim + 0.48);
+  const clipPocket = wasm.Manifold.hull([cpBot, cpTop]);
+  const clip1 = largestLump(clipOuter.subtract(clipPocket)).lump;
+  free(cpBot, cpTop, clipPocket, clipOuter);
+  const clip2 = clip1.rotate([0, 0, 180]);
+
+  // Measure assembled envelope across all 5 parts.
+  const asmSolids = [baseSolid, wall1, wall2, clip1, clip2];
+  let ax0 = Infinity, ay0 = Infinity, az0 = Infinity, ax1 = -Infinity, ay1 = -Infinity, az1 = -Infinity;
+  for (const s of asmSolids) {
+    const sb = s.boundingBox();
+    ax0 = Math.min(ax0, sb.min[0]); ay0 = Math.min(ay0, sb.min[1]); az0 = Math.min(az0, sb.min[2]);
+    ax1 = Math.max(ax1, sb.max[0]); ay1 = Math.max(ay1, sb.max[1]); az1 = Math.max(az1, sb.max[2]);
+  }
+  // Centre the whole assembled cluster on (0, 0) in plan so it lines up with casePrint.
+  const acx = (ax0 + ax1) / 2, acy = (ay0 + ay1) / 2;
+  const shiftAsm = (m: Manifold) => {
+    const s = m.translate([-acx, -acy, -az0]);
+    free(m);
+    return s;
+  };
+  const baseA = shiftAsm(baseSolid);
+  const wall1A = shiftAsm(wall1);
+  const wall2A = shiftAsm(wall2);
+  const clip1A = shiftAsm(clip1);
+  const clip2A = shiftAsm(clip2);
+  const lumpA = shiftAsm(lumpP);
+
+  const mkPart = (key: string, label: string, role: SlipCasePartRole, m: Manifold, release: [number, number, number]): SlipCasePart => {
+    const { mesh, sizeMm } = centredOnBed(m);
+    return { key, label, role, mesh, assembled: meshOf(m), release, sizeMm };
+  };
+  const parts: SlipCasePart[] = [
+    mkPart('base', 'base', 'base', baseA, [0, 0, 0]),
+    mkPart('wall1', 'wall 1', 'wall', wall1A, [0, -1, 0]),
+    mkPart('wall2', 'wall 2', 'wall', wall2A, [0, 1, 0]),
+    mkPart('clip1', 'clip 1', 'clip', clip1A, [0, 0, 1]),
+    mkPart('clip2', 'clip 2', 'clip', clip2A, [0, 0, 1]),
+  ];
+  free(baseA, wall1A, wall2A, clip1A, clip2A);
+  return {
+    parts,
+    sizeMm: [+(ax1 - ax0).toFixed(1), +(ay1 - ay0).toFixed(1), +(az1 - az0).toFixed(1)],
+    lumpInCase: lumpA,
+  };
+}
+
 /**
  * Natch centres on one parting half-plane: where a natch and a clear margin
  * round it sit in plaster on both sides, spread as far apart as they go.
@@ -1218,14 +1601,28 @@ function build(
     const c = largestLump(caseFor(wasm, lump, r.pull, r.back, wall, Math.max(0, o.freeboardMm))).lump;
     const print = standUp(c, r.pull);
     const pbb = print.boundingBox();
+    const onePieceMesh = meshOf(print);
+    const onePieceSize: [number, number, number] = [+(pbb.max[0] - pbb.min[0]).toFixed(1), +(pbb.max[1] - pbb.min[1]).toFixed(1), +(pbb.max[2] - pbb.min[2]).toFixed(1)];
+    let caseParts: SlipCasePart[];
+    let caseSizeMm: [number, number, number];
+    if (o.splitCase && r.name !== 'base') {
+      const splitOut = buildSplitSideCase(wasm, lump, r.pull, wall, Math.max(0, o.freeboardMm));
+      free(splitOut.lumpInCase);
+      caseParts = splitOut.parts;
+      caseSizeMm = splitOut.sizeMm;
+    } else {
+      caseParts = [{ key: 'case', label: 'case', role: 'case', mesh: onePieceMesh, assembled: onePieceMesh, release: [0, 0, 0], sizeMm: onePieceSize }];
+      caseSizeMm = onePieceSize;
+    }
     pieces.push({
       name: r.name,
       plaster: meshOf(lump),
       caseInPlace: meshOf(c),
-      casePrint: meshOf(print),
+      casePrint: onePieceMesh,
+      caseParts,
       pull: r.pull,
       plasterMm3: Math.round(vol),
-      caseSizeMm: [+(pbb.max[0] - pbb.min[0]).toFixed(1), +(pbb.max[1] - pbb.min[1]).toFixed(1), +(pbb.max[2] - pbb.min[2]).toFixed(1)],
+      caseSizeMm,
       undercutMm2: Math.round(r.undercut),
       natches: natchCount[i],
     });
@@ -1249,6 +1646,7 @@ function build(
   const report: SlipMoldReport = {
     sides: k,
     base: Boolean(baseRegion),
+    splitCase: Boolean(o.splitCase),
     splitDeg: +((split.theta / DEG) % 360).toFixed(1),
     axisMm: [+axis[0].toFixed(2), +axis[1].toFixed(2)],
     scale: +scale.toFixed(4),

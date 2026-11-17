@@ -188,3 +188,45 @@ describe('export names', () => {
     expect(exportBaseName([{ id: 'n', markdown: '# Gear housing', minimized: false, x: 0, y: 0 } as never], 'empty')).toBe('gear_housing');
   });
 });
+
+describe('separable and clip-clamped rigid molds', () => {
+  it('splits an open mold into 2 closed halves + 2 sliding clips, and closes them before pouring', async () => {
+    const slab: SceneGraph = {
+      nodes: [{ id: 'b', name: 'brick', type: 'body', pos: [0, 0, 0.015], geoms: [{ name: 'g', type: 'box', size: [0.02, 0.03, 0.015] }], children: [] }],
+    };
+    const res = generateMoldMeshes(slab, { ...DEFAULT_MOLD_OPTIONS, moldType: 'open', separable: true }, wasm);
+    const s = moldSummary(res);
+    expect(s.parts.map((p) => p.name)).toEqual(['Cavity Half 1', 'Cavity Half 2', 'Sliding Clip 1', 'Sliding Clip 2']);
+    const mesh = stlToMesh(res.binarySTL);
+    const node = simulatedBody({ ...mesh, cellMm: 0, toleranceMm: 0 }, {
+      modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [1, 1, 1], modelMinMm: [-20, -30, 0], modelMaxMm: [20, 30, 30],
+    }, { id: 'sim_open', name: 'Open Mold', kind: 'mold', placement: 'beside', parts: moldSceneParts(s) });
+    node.simulation = { ...node.simulation!, mold: moldMasterRecord(slab, s) };
+    expect(node.geoms).toHaveLength(4);
+    for (const g of node.geoms!) expect(meshIntegrity(g).watertight).toBe(true);
+
+    const cast = await simulateCastFromMoldNode(node);
+    expect(cast.success, cast.error).toBe(true);
+    const expectedVol = 40 * 60 * 30;
+    expect(Math.abs(cast.castVolumeMm3 - expectedVol) / expectedVol).toBeLessThan(0.05);
+  });
+
+  it('adds 45°-printable clamping rails and 2 sliding clips to a clamshell without disturbing the pour', async () => {
+    const res = generateMoldMeshes(ball, { ...CLAMSHELL, separable: true, castMaterial: 'epoxy' }, wasm);
+    const s = moldSummary(res);
+    expect(s.parts.map((p) => p.role)).toEqual(['shell', 'shell', 'clip', 'clip']);
+    const mesh = stlToMesh(res.binarySTL);
+    const node = simulatedBody({ ...mesh, cellMm: 0, toleranceMm: 0 }, {
+      modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [1, 1, 1], modelMinMm: [-20, -20, 0], modelMaxMm: [20, 20, 40],
+    }, { id: 'sim_clam', name: 'Clam Mold', kind: 'mold', placement: 'beside', parts: moldSceneParts(s) });
+    const record = moldMasterRecord(ball, s);
+    node.simulation = { ...node.simulation!, mold: record };
+    expect(node.geoms).toHaveLength(4);
+    for (const g of node.geoms!) expect(meshIntegrity(g).watertight).toBe(true);
+
+    const cast = await simulateCastFromMoldNode(node, { trimChannels: true });
+    expect(cast.success, cast.error).toBe(true);
+    expect(cast.castVolumeMm3).toBeGreaterThan(record.masterVolumeMm3 * 0.96);
+    expect(cast.castVolumeMm3).toBeLessThan(record.masterVolumeMm3 * 1.09);
+  });
+});

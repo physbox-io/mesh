@@ -7,8 +7,8 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, rememberCastOptions, type Ca
 import { ExportWorkerClient } from '../../utils/exportWorkerClient';
 import { runCastPrep } from '../../utils/castPrepRunner';
 import { planPourBox } from '../../utils/pourBoxScene';
-import { addPourBoxToScene, pourBoxStl } from '../../utils/pourBoxActions';
-import { holePinMesh, type PourBoxOptions } from '../../utils/siliconeMold';
+import { addPourBoxToScene, pourBoxStlFiles } from '../../utils/pourBoxActions';
+import { type PourBoxOptions } from '../../utils/siliconeMold';
 import { CAST_METALS, SILICONES, isSiliconeId, resolveCastMaterial } from '../../utils/castMaterials';
 import { mcpMoldSubject } from '../../utils/moldSubject';
 import { DEFAULT_TAB_DRAFT } from '../../utils/moldTabs';
@@ -54,6 +54,7 @@ export const castCommands: McpCommands = {
       if (v !== undefined) options[key] = v;
     }
     if (msg.shape === 'fit' || msg.shape === 'round' || msg.shape === 'box') options.shape = msg.shape;
+    if (typeof msg.splitSleeve === 'boolean') options.splitSleeve = msg.splitSleeve;
     // A hole through the silicone and what it is for; `pin` is the older
     // name for a wick hole, and still means one.
     if (msg.hole !== undefined && msg.hole !== null && msg.hole !== 'none') {
@@ -91,11 +92,7 @@ export const castCommands: McpCommands = {
       },
       warnings,
       files: describeFiles(
-        [
-          { name: 'pour-base.stl', bytes: pourBoxStl(box.base, 'base') },
-          { name: 'pour-sleeve.stl', bytes: pourBoxStl(box.sleeve, 'sleeve') },
-          ...(box.hole ? [{ name: `pour-${box.hole.purpose}-pin.stl`, bytes: pourBoxStl(holePinMesh(box.hole), 'pin') }] : []),
-        ],
+        pourBoxStlFiles(box, '-').map((f) => ({ name: `pour-${f.piece}.stl`, bytes: f.bytes })),
         msg.includeFiles !== false
       ),
     };

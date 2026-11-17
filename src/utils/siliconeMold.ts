@@ -73,6 +73,12 @@ export interface PourBoxOptions {
   holeDiaMm: number | null;
   /** Where on the master, in plan (world mm); null for its highest point. */
   holeAtMm: [number, number] | null;
+  /**
+   * Split the sleeve across the middle of its long edges into two halves with
+   * a labyrinth seam seal and two sliding dovetail C-clips, so cured silicone
+   * releases sideways instead of being pushed out of a closed layer-lined tube.
+   */
+  splitSleeve: boolean;
   silicone: SiliconeId;
 }
 
@@ -88,6 +94,7 @@ export const DEFAULT_POUR_BOX_OPTIONS: PourBoxOptions = {
   hole: null,
   holeDiaMm: null,
   holeAtMm: null,
+  splitSleeve: true,
   silicone: 'platinum',
 };
 
@@ -97,9 +104,25 @@ export interface PourBoxMesh {
   faces: number[];
 }
 
+export interface PourSleevePart {
+  /** 'sleeve' (one-piece), or 'sleeve1', 'sleeve2', 'clip1', 'clip2'. */
+  key: string;
+  label: string;
+  role: 'sleeve' | 'clip';
+  /** Centred in plan on Z = 0, ready to print on its own. */
+  mesh: PourBoxMesh;
+  /** In world mm around the master, as placed in the scene. */
+  assembled: PourBoxMesh;
+  /** Unit vector this part moves along to release ([0,0,1] for clips, ±slide for sleeve halves). */
+  release: [number, number, number];
+  sizeMm: [number, number, number];
+}
+
 export interface PourBoxReport {
   /** Silicone round the master and over its top, as planned, mm (a budget sets it). */
   coverMm: number;
+  /** Whether the sleeve is split into two halves with sliding clips. */
+  splitSleeve: boolean;
   /** Fill line, as a height above the base plate's top (where the master stands). */
   fillHeightMm: number;
   /** World Z of the fill line. */
@@ -130,6 +153,8 @@ export interface PourBoxReport {
 export interface PourBox {
   base: PourBoxMesh;
   sleeve: PourBoxMesh;
+  /** Printable sleeve parts: [sleeve1, sleeve2, clip1, clip2] when split, [sleeve] otherwise. */
+  sleeveParts: PourSleevePart[];
   /** The hole's pin as a cylinder: centre of its foot, length and diameter (mm), and what it is for. */
   hole?: { footMm: [number, number, number]; lengthMm: number; diaMm: number; purpose: HolePurpose };
   report: PourBoxReport;
@@ -223,6 +248,245 @@ function meshOf(m: Manifold): PourBoxMesh {
 function extent(cs: CrossSection): [number, number] {
   const b = cs.bounds();
   return [+(b.max[0] - b.min[0]).toFixed(1), +(b.max[1] - b.min[1]).toFixed(1)];
+}
+
+type Vec2 = [number, number];
+
+function signedArea2D(pts: readonly Vec2[]): number {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a / 2;
+}
+
+function poly2D(wasm: ManifoldToplevel, pts: Vec2[]): CrossSection {
+  const ccw = signedArea2D(pts) >= 0 ? pts : [...pts].reverse();
+  return wasm.CrossSection.ofPolygons([ccw], 'Positive');
+}
+
+function centredBedMesh(m: Manifold): { mesh: PourBoxMesh; sizeMm: [number, number, number] } {
+  const b = m.boundingBox();
+  const c = m.translate([-(b.min[0] + b.max[0]) / 2, -(b.min[1] + b.max[1]) / 2, -b.min[2]]);
+  const mesh = meshOf(c);
+  c.delete();
+  return {
+    mesh,
+    sizeMm: [+(b.max[0] - b.min[0]).toFixed(1), +(b.max[1] - b.min[1]).toFixed(1), +(b.max[2] - b.min[2]).toFixed(1)],
+  };
+}
+
+function largestSolid(m: Manifold): Manifold {
+  const parts = m.decompose();
+  if (parts.length <= 1) {
+    for (const p of parts) p.delete();
+    return m;
+  }
+  let best = 0, bestVol = -Infinity;
+  parts.forEach((p, i) => {
+    const v = p.volume();
+    if (v > bestVol) { bestVol = v; best = i; }
+  });
+  parts.forEach((p, i) => { if (i !== best) p.delete(); });
+  m.delete();
+  return parts[best];
+}
+
+/**
+ * Splits the pour sleeve across the middle of its long edges into two halves
+ * (`sleeve1`, `sleeve2`) with 45°-supported tapered dovetail rails above the
+ * base groove, a vertical tongue-and-groove seam seal, and two sliding C-clips
+ * (`clip1`, `clip2`) so cured silicone peels out sideways without tearing.
+ */
+function buildSplitPourSleeve(
+  wasm: ManifoldToplevel,
+  inner: CrossSection,
+  outer: CrossSection,
+  wall: number,
+  clear: number,
+  zMin: number,
+  sleeveBottom: number,
+  sleeveTop: number,
+): PourSleevePart[] {
+  const trash: (Manifold | CrossSection)[] = [];
+  const keep = <T extends Manifold | CrossSection>(x: T) => (trash.push(x), x);
+  try {
+    const ob = outer.bounds();
+    const scx = (ob.min[0] + ob.max[0]) / 2, scy = (ob.min[1] + ob.max[1]) / 2;
+    const turn90 = (ob.max[0] - ob.min[0]) > (ob.max[1] - ob.min[1]) + 1e-6;
+    const toLocal2D = (cs: CrossSection) => {
+      const s = keep(cs.translate([-scx, -scy]));
+      return turn90 ? keep(s.rotate(90)) : s;
+    };
+    const fromLocal3D = (m: Manifold) => {
+      const r = turn90 ? keep(m.rotate([0, 0, -90])) : m;
+      return keep(r.translate([scx, scy, 0]));
+    };
+
+    const innerL = toLocal2D(inner);
+    const outerL = toLocal2D(outer);
+    const outerPts = outerL.toPolygons().flat();
+    let uMin = Infinity, vAtMin = 0, uMax = -Infinity, vAtMax = 0;
+    for (const [u, v] of outerPts) {
+      if (u < uMin) { uMin = u; vAtMin = v; }
+      if (u > uMax) { uMax = u; vAtMax = v; }
+    }
+    const lb = outerL.bounds();
+    const spanV = lb.max[1] - lb.min[1];
+
+    // Split chord connecting the two u-extrema on the long edges: guarantees
+    // zero undercut when the two halves pull along -v and +v for any convex hull.
+    const dx = uMax - uMin, dy = vAtMax - vAtMin;
+    const dLen = Math.hypot(dx, dy) || 1;
+    const nx = -dy / dLen, ny = dx / dLen; // points toward +v
+    const cLine = uMin * nx + vAtMin * ny;
+
+    const ringL = keep(outerL.subtract(innerL));
+    const fullH = sleeveTop - sleeveBottom;
+    const baseSleeve = keep(keep(ringL.extrude(fullH)).translate([0, 0, sleeveBottom]));
+
+    const DOVE_H = 3.6;
+    const flare = 1.8;
+    const CLIP_CLEAR = 0.25;
+    const padExtra = Math.max(1.0, 3.8 - wall);
+    const zPadStart = Math.min(zMin + Math.max(0.5, clear + 0.3), sleeveTop - 3);
+    const rampH = Math.min(padExtra + DOVE_H, Math.max(0.5, (sleeveTop - zPadStart) * 0.35));
+    const zClipSeat = zPadStart + rampH;
+    const clipH = Math.max(2, sleeveTop - zClipSeat);
+    const taper = Math.min(0.45, Math.max(0.2, clipH * 0.007));
+    const neckTop = Math.min(4.8, Math.max(3.0, spanV * 0.14));
+    const neckBot = neckTop + taper;
+    const padHalfV = neckBot + 1.0;
+
+    const innerCut = keep(keep(innerL.extrude(fullH + 4)).translate([0, 0, sleeveBottom - 2]));
+    const padAndRails: Manifold[] = [baseSleeve];
+    const clipsLocal: Manifold[] = [];
+    const tongues: Manifold[] = [];
+    const grooves: Manifold[] = [];
+
+    for (const sx of [-1, 1] as const) {
+      const uOut = sx > 0 ? uMax : uMin;
+      const vAt = sx > 0 ? vAtMax : vAtMin;
+      const uPad = uOut + sx * padExtra;
+      const uReachIn = uOut - sx * Math.max(wall + 4, (uMax - uMin) * 0.35);
+
+      // Seam pad: flush inside outerL at zPadStart, 45° ramp out to uPad at zClipSeat, vertical to sleeveTop.
+      const padBox2D = keep(poly2D(wasm, [
+        [uReachIn, vAt - padHalfV],
+        [uPad, vAt - padHalfV],
+        [uPad, vAt + padHalfV],
+        [uReachIn, vAt + padHalfV],
+      ]));
+      const padFoot2D = keep(padBox2D.intersect(outerL));
+      const padFoot = keep(keep(padFoot2D.extrude(0.02)).translate([0, 0, zPadStart]));
+      const padBody = keep(keep(padBox2D.extrude(clipH)).translate([0, 0, zClipSeat]));
+      padAndRails.push(keep(wasm.Manifold.hull([padFoot, padBody])));
+
+      // Tapered dovetail rail: 45° ramp from outerL at zPadStart to full dovetail at zClipSeat..sleeveTop.
+      const railTrap2D = (neck: number) => keep(poly2D(wasm, [
+        [uPad - sx * 0.5, vAt - neck],
+        [uPad + sx * DOVE_H, vAt - (neck + flare)],
+        [uPad + sx * DOVE_H, vAt + (neck + flare)],
+        [uPad - sx * 0.5, vAt + neck],
+      ]));
+      const rFoot2D = keep(padFoot2D.intersect(keep(poly2D(wasm, [
+        [uReachIn, vAt - neckBot],
+        [uOut, vAt - neckBot],
+        [uOut, vAt + neckBot],
+        [uReachIn, vAt + neckBot],
+      ]))));
+      const rBot = keep(keep(railTrap2D(neckBot).extrude(0.02)).translate([0, 0, zClipSeat]));
+      const rTop = keep(keep(railTrap2D(neckTop).extrude(0.02)).translate([0, 0, sleeveTop - 0.02]));
+      padAndRails.push(keep(wasm.Manifold.hull([rBot, rTop])));
+      if (!rFoot2D.isEmpty() && rampH > 0.2) {
+        const rFoot = keep(keep(rFoot2D.extrude(0.02)).translate([0, 0, zPadStart]));
+        padAndRails.push(keep(wasm.Manifold.hull([rFoot, rBot])));
+      }
+
+      // Vertical labyrinth tongue & groove inside the thickened pad above zClipSeat.
+      if (clipH >= 6) {
+        const uMid = uPad - sx * 1.8;
+        const t2d = keep(poly2D(wasm, [[uMid - 0.6, vAt - 0.4], [uMid + 0.6, vAt - 0.4], [uMid + 0.6, vAt + 1.3], [uMid - 0.6, vAt + 1.3]]));
+        const tBase2d = keep(poly2D(wasm, [[uMid - 0.6, vAt - 0.4], [uMid + 0.6, vAt - 0.4], [uMid + 0.6, vAt - 0.1], [uMid - 0.6, vAt - 0.1]]));
+        const t0 = keep(keep(tBase2d.extrude(0.02)).translate([0, 0, zClipSeat + 0.2]));
+        const t1 = keep(keep(t2d.extrude(clipH - 2.0)).translate([0, 0, zClipSeat + 2.0]));
+        tongues.push(keep(wasm.Manifold.hull([t0, t1])));
+
+        const g2d = keep(poly2D(wasm, [[uMid - 0.85, vAt - 0.2], [uMid + 0.85, vAt - 0.2], [uMid + 0.85, vAt + 1.65], [uMid - 0.85, vAt + 1.65]]));
+        grooves.push(keep(keep(g2d.extrude(clipH + 1)).translate([0, 0, zClipSeat - 0.1])));
+      }
+
+      // Matching sliding C-clip for this long edge (z in [zClipSeat, sleeveTop]).
+      const cFlank = CLIP_CLEAR / Math.cos(Math.atan2(flare, DOVE_H));
+      const uFront = uPad + sx * 0.4;
+      const dPocketBack = DOVE_H + 0.35;
+      const uPocketBack = uPad + sx * dPocketBack;
+      const clipJaw = 3.2;
+      const uSpine = uPocketBack + sx * 3.4;
+      const wNeckAt = (zRel: number) => neckBot - (taper / clipH) * zRel;
+      const vPocketAt = (zRel: number, d: number) => wNeckAt(zRel) + cFlank + d * (flare / DOVE_H);
+
+      const outerClipAt = (zRel: number, zWorld: number) => {
+        const vOut = vPocketAt(zRel, dPocketBack) + clipJaw;
+        const cs = keep(poly2D(wasm, [[uFront, vAt - vOut], [uSpine, vAt - vOut], [uSpine, vAt + vOut], [uFront, vAt + vOut]]));
+        return keep(keep(cs.extrude(0.02)).translate([0, 0, zWorld]));
+      };
+      let clipBody = keep(wasm.Manifold.hull([outerClipAt(0, zClipSeat), outerClipAt(clipH, sleeveTop - 0.02)]));
+      if (clipH >= 10) {
+        const vTop = vPocketAt(clipH, dPocketBack) + clipJaw;
+        const tabFoot = keep(keep(poly2D(wasm, [[uSpine - sx * 0.4, vAt - vTop], [uSpine, vAt - vTop], [uSpine, vAt + vTop], [uSpine - sx * 0.4, vAt + vTop]]).extrude(0.02)).translate([0, 0, sleeveTop - 5.2]));
+        const tabTop = keep(keep(poly2D(wasm, [[uSpine - sx * 0.4, vAt - vTop], [uSpine + sx * 2.4, vAt - vTop], [uSpine + sx * 2.4, vAt + vTop], [uSpine - sx * 0.4, vAt + vTop]]).extrude(2.4)).translate([0, 0, sleeveTop - 2.4]));
+        clipBody = keep(clipBody.add(keep(wasm.Manifold.hull([tabFoot, tabTop]))));
+      }
+      const pocketAt = (zRel: number, zWorld: number) => {
+        const d0 = -0.5;
+        const v0 = vPocketAt(zRel, d0), v1 = vPocketAt(zRel, dPocketBack);
+        const cs = keep(poly2D(wasm, [[uPad + sx * d0, vAt - v0], [uPocketBack, vAt - v1], [uPocketBack, vAt + v1], [uPad + sx * d0, vAt + v0]]));
+        return keep(keep(cs.extrude(0.02)).translate([0, 0, zWorld]));
+      };
+      const pocket = keep(wasm.Manifold.hull([pocketAt(-0.5, zClipSeat - 0.5), pocketAt(clipH + 0.5, sleeveTop + 0.48)]));
+      clipsLocal.push(keep(largestSolid(clipBody.subtract(pocket))));
+    }
+
+    const fullCollar = keep(keep(wasm.Manifold.union(padAndRails)).subtract(innerCut));
+
+    // Print halves: 0.02 mm clearance off the split plane so standalone STLs never touch;
+    // Assembled halves: 0.02 mm press-fit overlap so pour simulations see a sealed sleeve.
+    const makeHalf = (sign: -1 | 1, offsetDelta: number) => {
+      let h = keep(fullCollar.trimByPlane([sign * nx, sign * ny, 0], sign * cLine + offsetDelta));
+      if (tongues.length) {
+        if (sign < 0) h = keep(h.add(keep(wasm.Manifold.union(tongues))));
+        else h = keep(h.subtract(keep(wasm.Manifold.union(grooves))));
+      }
+      return keep(largestSolid(h));
+    };
+
+    const s1Print = fromLocal3D(makeHalf(-1, 0.02));
+    const s2Print = fromLocal3D(makeHalf(1, 0.02));
+    const s1Asm = fromLocal3D(makeHalf(-1, -0.02));
+    const s2Asm = fromLocal3D(makeHalf(1, -0.02));
+    const c1World = fromLocal3D(clipsLocal[0]);
+    const c2World = fromLocal3D(clipsLocal[1]);
+
+    const relNeg: [number, number, number] = turn90 ? [-1, 0, 0] : [0, -1, 0];
+    const relPos: [number, number, number] = turn90 ? [1, 0, 0] : [0, 1, 0];
+    const s1Bed = centredBedMesh(s1Print);
+    const s2Bed = centredBedMesh(s2Print);
+    const c1Bed = centredBedMesh(c1World);
+    const c2Bed = centredBedMesh(c2World);
+
+    return [
+      { key: 'sleeve1', label: 'sleeve 1', role: 'sleeve', mesh: s1Bed.mesh, assembled: meshOf(s1Asm), release: relNeg, sizeMm: s1Bed.sizeMm },
+      { key: 'sleeve2', label: 'sleeve 2', role: 'sleeve', mesh: s2Bed.mesh, assembled: meshOf(s2Asm), release: relPos, sizeMm: s2Bed.sizeMm },
+      { key: 'clip1', label: 'clip 1', role: 'clip', mesh: c1Bed.mesh, assembled: meshOf(c1World), release: [0, 0, 1], sizeMm: c1Bed.sizeMm },
+      { key: 'clip2', label: 'clip 2', role: 'clip', mesh: c2Bed.mesh, assembled: meshOf(c2World), release: [0, 0, 1], sizeMm: c2Bed.sizeMm },
+    ];
+  } finally {
+    for (const x of new Set(trash)) {
+      try { x.delete(); } catch { /* already freed */ }
+    }
+  }
 }
 
 /**
@@ -372,12 +636,20 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
 
   if (zTop - zMin < 1) warnings.push('The master is less than 1 mm tall.');
 
+  const sleeveMesh = meshOf(sleeveM);
+  const oneSleeveBed = centredBedMesh(sleeveM);
+  const sleeveParts: PourSleevePart[] = o.splitSleeve
+    ? buildSplitPourSleeve(wasm, inner, outer, wall, clear, zMin, sleeveBottom, sleeveTop)
+    : [{ key: 'sleeve', label: 'sleeve', role: 'sleeve', mesh: oneSleeveBed.mesh, assembled: sleeveMesh, release: [0, 0, 0], sizeMm: oneSleeveBed.sizeMm }];
+
   const result: PourBox = {
     base: meshOf(baseM),
-    sleeve: meshOf(sleeveM),
+    sleeve: sleeveMesh,
+    sleeveParts,
     ...(hole ? { hole } : {}),
     report: {
       coverMm: cover,
+      splitSleeve: Boolean(o.splitSleeve),
       fillHeightMm: +(fillZ - zMin).toFixed(2),
       fillZMm: +fillZ.toFixed(3),
       pourDepthMm: +(fillZ - (clear > 0 ? sleeveBottom : zMin)).toFixed(2),

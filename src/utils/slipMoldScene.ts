@@ -10,6 +10,14 @@ import { sameIds, withoutNodes } from './toolingReplace';
 
 const PLASTER_RGBA = [0.96, 0.95, 0.9, 0.45];
 const CASE_RGBA = [0.92, 0.55, 0.22, 1];
+const CASE_WALL_RGBA = [0.84, 0.46, 0.16, 1];
+const CASE_CLIP_RGBA = [0.30, 0.36, 0.44, 1];
+
+function partRgba(role: 'case' | 'base' | 'wall' | 'clip'): number[] {
+  if (role === 'wall') return CASE_WALL_RGBA;
+  if (role === 'clip') return CASE_CLIP_RGBA;
+  return CASE_RGBA;
+}
 
 function bounds(m: SlipMesh): { lo: number[]; hi: number[] } {
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -55,12 +63,29 @@ export function sceneWithSlipMold(
   }
   let x = maxX + 20;
   for (const p of mold.pieces) {
-    const b = bounds(p.casePrint);
-    const placed = shifted(p.casePrint, [x - b.lo[0], midY - (b.lo[1] + b.hi[1]) / 2, floor - b.lo[2]]);
-    x += b.hi[0] - b.lo[0] + 20;
-    const id = `slipcase_${pieceKey(p.name)}_${tag}`;
-    added.push({ ...meshBody(id, `${partName}_case_${pieceKey(p.name)}`, placed, CASE_RGBA), slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
-    caseIds.push(id);
+    const key = pieceKey(p.name);
+    if (p.caseParts.length <= 1) {
+      const b = bounds(p.casePrint);
+      const placed = shifted(p.casePrint, [x - b.lo[0], midY - (b.lo[1] + b.hi[1]) / 2, floor - b.lo[2]]);
+      x += b.hi[0] - b.lo[0] + 20;
+      const id = `slipcase_${key}_${tag}`;
+      added.push({ ...meshBody(id, `${partName}_case_${key}`, placed, CASE_RGBA), slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
+      caseIds.push(id);
+    } else {
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (const cp of p.caseParts) {
+        const cb = bounds(cp.assembled);
+        for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], cb.lo[a]); hi[a] = Math.max(hi[a], cb.hi[a]); }
+      }
+      const shift: [number, number, number] = [x - lo[0], midY - (lo[1] + hi[1]) / 2, floor - lo[2]];
+      x += hi[0] - lo[0] + 20;
+      for (const cp of p.caseParts) {
+        const placed = shifted(cp.assembled, shift);
+        const id = `slipcase_${key}_${cp.key}_${tag}`;
+        added.push({ ...meshBody(id, `${partName}_case_${key}_${cp.key}`, placed, partRgba(cp.role)), slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
+        caseIds.push(id);
+      }
+    }
   }
   return { scene: { ...scene, nodes: [...scene.nodes, ...added] }, plasterIds, caseIds, replaced: cleared.removed };
 }
@@ -69,13 +94,19 @@ export function sceneWithSlipMold(
 export function slipMoldNotes(partName: string, mold: SlipMold): string[] {
   const r = mold.report;
   const pieces = mold.pieces.map((p) => p.name).join(', ');
+  const splitInstructions = r.splitCase
+    ? `- Print each side case's seamless base, 2 U-wall halves, and 2 sliding clips${r.base ? ' (plus the base plug cup)' : ''} open side up. Slide the two wall halves onto each base and push the sliding clips down over the middle of the long edges to lock the seam, coat with mold release, then fill to the brim with pottery plaster: ${r.plasterPowderG} g powder into ${r.plasterWaterG} g water for all of them (100:70; mix ~10% extra).`
+    : `- Print the ${mold.pieces.length} cases open side up. Coat them with mold release, then fill each to the brim with pottery plaster: ${r.plasterPowderG} g powder into ${r.plasterWaterG} g water for all of them (100:70; mix ~10% extra).`;
+  const demoldInstructions = r.splitCase
+    ? '- Once the plaster sets, tap the sliding clips upward off the rails, slide both wall halves outward, and lift the plaster off the flat base; dry the pieces for several days before the first cast.'
+    : '- Demold once the plaster sets, then dry the pieces for several days before the first cast.';
   return [
     `## Slip-cast mold for ${partName}`,
     '',
     `- ${mold.pieces.length} plaster pieces (${pieces}); block ${r.blockMm[0]} × ${r.blockMm[1]} × ${r.blockMm[2]} mm.`,
     `- Grown ${((r.scale - 1) * 100).toFixed(1)}% for ${r.slipName.toLowerCase()}'s ${r.shrinkPercent}% shrink, so the fired piece comes out as modelled.`,
-    `- Print the ${mold.pieces.length} cases open side up. Coat them with mold release, then fill each to the brim with pottery plaster: ${r.plasterPowderG} g powder into ${r.plasterWaterG} g water for all of them (100:70; mix ~10% extra).`,
-    '- Demold once the plaster sets, then dry the pieces for several days before the first cast.',
+    splitInstructions,
+    demoldInstructions,
     `- Assemble with the natches engaged${r.base ? ', the base plug seated in the sides' : ''}, strap tight, and fill through the spare: about ${r.slipMl} ml of slip.`,
     ...r.warnings.map((w) => `- ${w}`),
   ];

@@ -5,7 +5,7 @@ import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
 import { buildPourBox, holePinMesh, soupVolume, topZAt, type PourBoxMesh } from '../src/utils/siliconeMold';
 import { analyzeMesh, weldByPosition } from '../src/utils/meshIntegrity';
-import { pourBoxStl } from '../src/utils/pourBoxActions';
+import { pourBoxStl, pourBoxStlFiles } from '../src/utils/pourBoxActions';
 import { simulateCastFromMoldNode } from '../src/utils/moldCastSimulation';
 import { planPourBox, sceneWithPourBox } from '../src/utils/pourBoxScene';
 import { pourBoxIn, pourNodeFor } from '../src/utils/pourTarget';
@@ -385,6 +385,52 @@ describe('silicone to hand', () => {
     const tiny = buildPourBox(wasm, candle, { siliconeBudgetG: 5 });
     expect(tiny.report.coverMm).toBe(4);
     expect(tiny.report.warnings.some((w) => w.includes('over the 5 g budget'))).toBe(true);
+  });
+});
+
+describe('separable split sleeve with sliding clips', () => {
+  it('splits fit, round and box sleeves into closed printable halves and clips that release cleanly and seal the pour', async () => {
+    const brick = boxSoup([-35, -18, 0], [35, 18, 45]);
+    for (const shape of ['fit', 'round', 'box'] as const) {
+      const box = buildPourBox(wasm, brick, { shape });
+      expect(box.report.splitSleeve).toBe(true);
+      expect(box.sleeveParts.map((p) => p.key)).toEqual(['sleeve1', 'sleeve2', 'clip1', 'clip2']);
+      for (const sp of box.sleeveParts) {
+        closedOutward(sp.mesh);
+        closedOutward(sp.assembled);
+      }
+      const solidOf = (m: PourBoxMesh) => {
+        const mesh = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(m.positions), triVerts: Uint32Array.from(m.faces) });
+        mesh.merge();
+        return new wasm.Manifold(mesh);
+      };
+      const base = solidOf(box.base);
+      const s1 = solidOf(box.sleeveParts[0].assembled);
+      const s2 = solidOf(box.sleeveParts[1].assembled);
+      const c1 = solidOf(box.sleeveParts[2].assembled);
+      const c2 = solidOf(box.sleeveParts[3].assembled);
+      // Clips slide straight up (+Z) off both sleeve halves and base with zero interference.
+      for (const clip of [c1, c2]) {
+        for (const step of [0, 1, 5, 20, 60]) {
+          const moved = clip.translate([0, 0, step]);
+          expect(moved.intersect(s1).volume()).toBeLessThan(1e-3);
+          expect(moved.intersect(s2).volume()).toBeLessThan(1e-3);
+          expect(moved.intersect(base).volume()).toBeLessThan(1e-3);
+        }
+      }
+    }
+
+    // Scene pour box with split sleeve still holds the full silicone pour without leaking.
+    const masterNode = node('master', [meshGeom('master', soupMesh(brick))]);
+    const scene = { nodes: [masterNode] } as unknown as SceneGraph;
+    const box = await planPourBox(scene, ['master'], { shape: 'box' });
+    const out = sceneWithPourBox(scene, ['master'], box);
+    const mold = pourNodeFor(out.scene.nodes, ['master', out.baseId, out.sleeveId])!;
+    const poured = await simulateCastFromMoldNode(mold, { pour: { fillMm: box.report.pourDepthMm } });
+    expect(poured.success).toBe(true);
+    expect(Math.abs(poured.castVolumeMm3 - box.report.siliconeMm3) / box.report.siliconeMm3).toBeLessThan(0.03);
+    expect(pourBoxStlFiles(box, '-').map((f) => f.piece)).toEqual(['base', 'sleeve-1', 'sleeve-2', 'clip-1', 'clip-2']);
+    expect(pourBoxStlFiles(buildPourBox(wasm, brick, { splitSleeve: false }), '-').map((f) => f.piece)).toEqual(['base', 'sleeve']);
   });
 });
 

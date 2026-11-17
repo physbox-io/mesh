@@ -36,9 +36,18 @@ export async function addSlipMoldToScene(ids: string[], options: Partial<SlipMol
   return { mold, plasterIds: out.plasterIds, caseIds: out.caseIds, replaced: out.replaced };
 }
 
-/** Each case as a binary STL, stood as it prints, with its file name stem. */
+/** Each printable case part as a binary STL, stood on Z = 0, with its file name stem. */
 export function slipCaseStls(name: string, mold: SlipMold): { file: string; bytes: Uint8Array }[] {
-  return mold.pieces.map((p) => ({ file: `${name}_slip_case_${pieceKey(p.name)}`, bytes: pourBoxStl(p.casePrint, `slip case ${p.name}`) }));
+  return mold.pieces.flatMap((p) => {
+    const key = pieceKey(p.name);
+    if (p.caseParts.length <= 1) {
+      return [{ file: `${name}_slip_case_${key}`, bytes: pourBoxStl(p.casePrint, `slip case ${p.name}`) }];
+    }
+    return p.caseParts.map((cp) => ({
+      file: `${name}_slip_case_${key}_${cp.key}`,
+      bytes: pourBoxStl(cp.mesh, `slip case ${p.name} ${cp.label}`),
+    }));
+  });
 }
 
 /** The input a cast simulation takes from a planned mold. */

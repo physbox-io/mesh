@@ -14,6 +14,8 @@ export type SlipPreviewMode = 'mold' | 'cases' | 'cast';
 /** One colour per piece, so the joints read. */
 const PIECE_COLOURS = [0xf5f0e6, 0xd9e6f2, 0xe8dcef, 0xdcefe0, 0xf2e2d2, 0xe0e0e0, 0xefe8c8];
 const CASE_COLOUR = 0xeb8c38;
+const WALL_COLOUR = 0xd97724;
+const CLIP_COLOUR = 0x475569;
 
 function geometryOf(m: SlipMesh | { positions: Float32Array; faces: Uint32Array }): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
@@ -45,6 +47,7 @@ export function SlipMoldPreview({ mold, cast, mode, busy }: {
   const groupRef = useRef<THREE.Group | null>(null);
   const frameRef = useRef<((box: THREE.Box3) => void) | null>(null);
   const [gap, setGap] = useState(30);
+  const [caseGap, setCaseGap] = useState(18);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -116,7 +119,8 @@ export function SlipMoldPreview({ mold, cast, mode, busy }: {
   }, []);
 
   // Reframed when what is shown changes, not when the gap slides.
-  const shown = `${mode}|${mold ? mold.report.blockMm.join(',') : ''}|${cast ? cast.volumeMm3 : ''}`;
+  const hasSplitCases = Boolean(mold?.pieces.some((p) => p.caseParts.length > 1));
+  const shown = `${mode}|${mold ? `${mold.report.blockMm.join(',')}:${mold.report.splitCase}` : ''}|${cast ? cast.volumeMm3 : ''}`;
   const lastShown = useRef('');
 
   useEffect(() => {
@@ -138,20 +142,38 @@ export function SlipMoldPreview({ mold, cast, mode, busy }: {
     } else if (mold && mode === 'cases') {
       let x = 0;
       for (const p of mold.pieces) {
-        const geo = geometryOf(p.casePrint);
-        geo.computeBoundingBox();
-        const bb = geo.boundingBox!;
-        const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: CASE_COLOUR, roughness: 0.6, side: THREE.DoubleSide }));
-        mesh.position.set(x - bb.min.x, 0, 0);
-        x += bb.max.x - bb.min.x + 15;
-        group.add(mesh);
+        if (p.caseParts.length <= 1) {
+          const geo = geometryOf(p.casePrint);
+          geo.computeBoundingBox();
+          const bb = geo.boundingBox!;
+          const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: CASE_COLOUR, roughness: 0.6, side: THREE.DoubleSide }));
+          mesh.position.set(x - bb.min.x, 0, 0);
+          x += bb.max.x - bb.min.x + 15;
+          group.add(mesh);
+        } else {
+          let minX = Infinity, maxX = -Infinity;
+          const built = p.caseParts.map((cp) => {
+            const geo = geometryOf(cp.assembled);
+            geo.computeBoundingBox();
+            minX = Math.min(minX, geo.boundingBox!.min.x);
+            maxX = Math.max(maxX, geo.boundingBox!.max.x);
+            const color = cp.role === 'clip' ? CLIP_COLOUR : cp.role === 'wall' ? WALL_COLOUR : CASE_COLOUR;
+            return { cp, geo, color };
+          });
+          for (const { cp, geo, color } of built) {
+            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, roughness: 0.55, side: THREE.DoubleSide }));
+            mesh.position.set(x - minX + cp.release[0] * caseGap, cp.release[1] * caseGap, cp.release[2] * caseGap);
+            group.add(mesh);
+          }
+          x += maxX - minX + 20;
+        }
       }
     }
     if (lastShown.current !== shown) {
       lastShown.current = shown;
       frameRef.current?.(new THREE.Box3().setFromObject(group));
     }
-  }, [mold, cast, mode, gap, shown]);
+  }, [mold, cast, mode, gap, caseGap, shown]);
 
   const empty = mode === 'cast' ? !cast : !mold;
   return (
@@ -168,6 +190,12 @@ export function SlipMoldPreview({ mold, cast, mode, busy }: {
         <label className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
           <span>Pull apart</span>
           <input type="range" min={0} max={100} value={gap} onChange={(e) => setGap(Number(e.target.value))} className="flex-1 accent-purple-500" />
+        </label>
+      )}
+      {mode === 'cases' && hasSplitCases && (
+        <label className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+          <span>Unclip &amp; slide walls</span>
+          <input type="range" min={0} max={60} value={caseGap} onChange={(e) => setCaseGap(Number(e.target.value))} className="flex-1 accent-purple-500" />
         </label>
       )}
     </div>

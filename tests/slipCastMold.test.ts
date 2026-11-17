@@ -7,6 +7,7 @@ import { buildSlipMold, type SlipMesh } from '../src/utils/slipCastMold';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { simulateSlipCast } from '../src/utils/slipCastSimulation';
 import { sceneWithSlipMold } from '../src/utils/slipMoldScene';
+import { slipCaseStls } from '../src/utils/slipMoldActions';
 import type { SceneGraph } from '../src/types/scene';
 
 let wasm: ManifoldToplevel;
@@ -276,6 +277,21 @@ describe('slip spare over the opening', () => {
   it('refuses a spare position off the part', () => {
     expect(() => buildSlipMold(wasm, soupOf(jug()), { spareAtMm: [500, 500] })).toThrow(/not over the part/);
   });
+
+  it('sinks the spare into a pointed pyramid until the throat is wide enough to join solidly and drain hollow', () => {
+    const pyrBase = wasm.Manifold.cube([80, 80, 0.1]).translate([-40, -40, 0]);
+    const pyrApex = wasm.Manifold.cube([0.2, 0.2, 0.1]).translate([-0.1, -0.1, 80]);
+    const pyramid = wasm.Manifold.hull([pyrBase, pyrApex]);
+    const mold = buildSlipMold(wasm, soupOf(pyramid), { shrinkPercent: 0 });
+    // Instead of barely touching 0.5 mm below the sharp tip, the spare seats down where the pyramid is ~20 mm wide.
+    expect(mold.report.spareAtMm[2]).toBeLessThan(65);
+    const neckSlice = solidOf(mold.cavity).slice(mold.report.spareAtMm[2]);
+    const nb = neckSlice.bounds();
+    expect(Math.min(nb.max[0] - nb.min[0], nb.max[1] - nb.min[1])).toBeGreaterThanOrEqual(19);
+    // And slip drains out through that wide throat, casting the pyramid hollow instead of solid.
+    const cast = simulateSlipCast(wasm, { cavity: mold.cavity, spare: mold.spare, partTopMm: mold.report.partTopMm, footMm: mold.report.footMm, scale: mold.report.scale, slip: mold.slip }, 4);
+    expect(cast.warnings.some((w) => w.includes('casts solid') || w.includes('nearly solid'))).toBe(false);
+  });
 });
 
 describe('slip mold made again', () => {
@@ -301,6 +317,111 @@ describe('plaster to hand', () => {
     const tiny = buildSlipMold(wasm, soupOf(vase()), { plasterBudgetG: 100 });
     expect(tiny.report.plasterMm).toBe(10);
     expect(tiny.report.warnings.some((w) => w.includes('over the 100 g budget'))).toBe(true);
+  });
+});
+
+describe('separable split cases with sliding clips', () => {
+  it('splits each side case at the middle of its long edges into closed, zero-interference parts that unclip and slide off', () => {
+    const mold = buildSlipMold(wasm, soupOf(jug()), { slip: 'earthenware-slip', base: false, plasterMm: 15 });
+    expect(mold.report.splitCase).toBe(true);
+    expect(mold.pieces.length).toBe(2);
+
+    for (const p of mold.pieces) {
+      expect(p.caseParts.map((cp) => cp.key)).toEqual(['base', 'wall1', 'wall2', 'clip1', 'clip2']);
+      const solids = new Map<string, Manifold>();
+      for (const cp of p.caseParts) {
+        for (const m of [cp.mesh, cp.assembled]) {
+          const a = analyzeMesh(m.positions, m.faces)!;
+          expect(a.closed && a.consistentlyWound).toBe(true);
+          expect(a.volume).toBeGreaterThan(0);
+          const s = solidOf(m);
+          expect(s.status()).toBe('NoError');
+          expect(s.decompose().length).toBe(1);
+        }
+        // Every standalone STL sits flat on Z = 0.
+        let minZ = Infinity;
+        for (let i = 2; i < cp.mesh.positions.length; i += 3) minZ = Math.min(minZ, cp.mesh.positions[i]);
+        expect(minZ).toBeCloseTo(0, 3);
+        solids.set(cp.key, solidOf(cp.assembled));
+      }
+
+      const base = solids.get('base')!;
+      const wall1 = solids.get('wall1')!;
+      const wall2 = solids.get('wall2')!;
+      const clip1 = solids.get('clip1')!;
+      const clip2 = solids.get('clip2')!;
+      const all = [base, wall1, wall2, clip1, clip2];
+
+      // Zero pairwise overlap in the assembled pose.
+      for (let i = 0; i < all.length; i++) {
+        for (let j = i + 1; j < all.length; j++) {
+          expect(all[i].intersect(all[j]).volume()).toBeLessThan(1e-3);
+        }
+      }
+
+      // Split is at the middle of the long edges: assembled Y span >= X span
+      // (excluding the clip protrusion on ±X, base's Y >= base's X), and wall1/wall2 split at Y = 0.
+      const bbb = base.boundingBox();
+      expect(bbb.max[1] - bbb.min[1]).toBeGreaterThanOrEqual(bbb.max[0] - bbb.min[0] - 0.1);
+      expect(wall1.boundingBox().max[1]).toBeLessThan(2); // only the 1.4 mm sealing tongue crosses Y = 0
+      expect(wall2.boundingBox().min[1]).toBeGreaterThan(0);
+
+      // Each U-wall half has all 3 flat-bottomed trapezoidal grooves (both side walls + its longer end wall):
+      // probing the inner face across the flat groove band (Z = 2.9 and Z = 3.9) vs Z = 0.4 recedes ~1.68 mm on -X, +X, AND ±Y.
+      const innerSpanAt = (wall: Manifold, z: number, endSign: -1 | 1) => {
+        const yProbe = wall.intersect(wasm.Manifold.cube([2, 400, 0.1]).translate([-1, -200, z - 0.05])).boundingBox();
+        const xPosProbe = wall.intersect(wasm.Manifold.cube([200, 2, 0.1]).translate([0, endSign * 20 - 1, z - 0.05])).boundingBox();
+        const xNegProbe = wall.intersect(wasm.Manifold.cube([200, 2, 0.1]).translate([-200, endSign * 20 - 1, z - 0.05])).boundingBox();
+        return {
+          endIn: endSign < 0 ? -yProbe.max[1] : yProbe.min[1],
+          posIn: xPosProbe.min[0],
+          negIn: -xNegProbe.max[0],
+        };
+      };
+      for (const [wall, sign] of [[wall1, -1], [wall2, 1]] as const) {
+        const foot = innerSpanAt(wall, 0.4, sign);
+        for (const zBand of [2.9, 3.9]) {
+          const band = innerSpanAt(wall, zBand, sign);
+          expect(band.endIn - foot.endIn).toBeGreaterThan(1.55);
+          expect(band.posIn - foot.posIn).toBeGreaterThan(1.55);
+          expect(band.negIn - foot.negIn).toBeGreaterThan(1.55);
+        }
+      }
+
+      // Step 1: Clips slide straight up (+Z) off both walls and base with zero interference.
+      for (const clip of [clip1, clip2]) {
+        expect(worstOverlap(clip, wall1, [0, 0, 1])).toBeLessThan(1e-3);
+        expect(worstOverlap(clip, wall2, [0, 0, 1])).toBeLessThan(1e-3);
+        expect(worstOverlap(clip, base, [0, 0, 1])).toBeLessThan(1e-3);
+      }
+
+      // Step 2: Once unclipped, wall1 slides along -Y and wall2 along +Y with zero interference.
+      expect(worstOverlap(wall1, base, [0, -1, 0])).toBeLessThan(1e-3);
+      expect(worstOverlap(wall1, wall2, [0, -1, 0])).toBeLessThan(1e-3);
+      expect(worstOverlap(wall2, base, [0, 1, 0])).toBeLessThan(1e-3);
+      expect(worstOverlap(wall2, wall1, [0, 1, 0])).toBeLessThan(1e-3);
+    }
+
+    // Exports 5 print-ready STLs per side case; splitCase: false exports 1 per case.
+    expect(slipCaseStls('jug', mold).map((f) => f.file)).toEqual([
+      'jug_slip_case_side1_base', 'jug_slip_case_side1_wall1', 'jug_slip_case_side1_wall2', 'jug_slip_case_side1_clip1', 'jug_slip_case_side1_clip2',
+      'jug_slip_case_side2_base', 'jug_slip_case_side2_wall1', 'jug_slip_case_side2_wall2', 'jug_slip_case_side2_clip1', 'jug_slip_case_side2_clip2',
+    ]);
+    const solidCases = buildSlipMold(wasm, soupOf(jug()), { slip: 'earthenware-slip', base: false, splitCase: false });
+    expect(solidCases.report.splitCase).toBe(false);
+    expect(slipCaseStls('jug', solidCases).map((f) => f.file)).toEqual(['jug_slip_case_side1', 'jug_slip_case_side2']);
+  });
+
+  it('turns a wide shallow dish case so the split still falls at the middle of its long edges', () => {
+    // A wide, shallow platter (180 mm across, 25 mm tall): wider than the mold is tall.
+    const dish = wasm.Manifold.cylinder(25, 90, 80, 64).subtract(wasm.Manifold.cylinder(22, 85, 75, 64).translate([0, 0, 4]));
+    const mold = buildSlipMold(wasm, soupOf(dish), { base: false, shrinkPercent: 0 });
+    const side1 = mold.pieces[0];
+    const base = solidOf(side1.caseParts[0].assembled);
+    const b = base.boundingBox();
+    expect(b.max[1] - b.min[1]).toBeGreaterThan(b.max[0] - b.min[0]);
+    expect(worstOverlap(solidOf(side1.caseParts[1].assembled), base, [0, -1, 0])).toBeLessThan(1e-3);
+    expect(worstOverlap(solidOf(side1.caseParts[2].assembled), base, [0, 1, 0])).toBeLessThan(1e-3);
   });
 });
 

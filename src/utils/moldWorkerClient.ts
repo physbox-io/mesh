@@ -267,6 +267,7 @@ export function moldMasterRecord(
     masterVolumeMm3: Math.round(volumeMm3),
     laidOpen,
     ...(laidOpen ? { partingZMm: { cavity: summary.bottomHalf.partingZMm, lid: summary.topHalf!.partingZMm } } : {}),
+    ...(summary.bottomHalf.splitOpen ? { splitOpenShiftMm: summary.bottomHalf.splitOpen.closeShiftMm } : {}),
     ...(summary.pullDirection ? { pullDirection: summary.pullDirection } : {}),
     cavityHoldsTop: Boolean(summary.cavityHoldsTop),
     ...(feedRouteOf(summary.features) ? { feed: feedRouteOf(summary.features) } : {}),
@@ -307,15 +308,16 @@ export function shortfallWarning(castVolumeMm3: number, expectedMm3: number, of:
     : null;
 }
 
-/** A soluble liner's natural, a pale cream, beside the simulation's wood for the shell. */
+/** A soluble liner's natural, a pale cream, beside the simulation's wood for the shell; clips in slate. */
 const LINER_RGBA = [0.95, 0.93, 0.82, 1];
+const CLIP_RGBA = [0.30, 0.36, 0.44, 1];
 
 /** A mold's printed pieces as the scene body's geoms (see simulatedBody's `parts`). */
 export function moldSceneParts(summary: Pick<MoldSummary, 'parts'>): SimulationPart[] {
   return (summary.parts ?? []).map((p) => ({
     name: p.name,
     triangles: p.triangles,
-    ...(p.role === 'liner' ? { rgba: LINER_RGBA } : {}),
+    ...(p.role === 'liner' ? { rgba: LINER_RGBA } : p.role === 'clip' ? { rgba: CLIP_RGBA } : {}),
   }));
 }
 
@@ -381,6 +383,7 @@ export function moldOptionsFor(
       ...(typeof msg.includeVents === 'boolean' ? { includeVents: msg.includeVents } : {}),
       ...(pos(msg.ventDiaMm) !== undefined ? { ventDiaMm: pos(msg.ventDiaMm) } : {}),
       ...(typeof msg.includePryNotches === 'boolean' ? { includePryNotches: msg.includePryNotches } : {}),
+      ...(typeof msg.separable === 'boolean' ? { separable: msg.separable } : {}),
       ...(typeof msg.dissolvableLiner === 'boolean' ? { dissolvableLiner: msg.dissolvableLiner } : {}),
       ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
       ...(castMaterial ? { castMaterial } : {}),

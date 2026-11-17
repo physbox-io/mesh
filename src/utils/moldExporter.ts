@@ -32,6 +32,7 @@ import { linerPair, type LinerPairId } from './linerMaterials';
 import { funnelClearDepths, gateDiaMm, planSprue, sprueNeckDiaMm, ventBoreDiaMm, withPourMouth, VENT_TAPER_MM } from './moldSprue';
 import { bottomFillFloorMm, feedEdgeMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
 import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
+import { addClamshellSlidingClips, splitOpenRigidMold } from './moldSeparable';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
 export type { Triangle3D } from './moldManifold';
@@ -147,6 +148,11 @@ export interface MoldOptions {
   /** Whether to include corner pry notches on the parting seam. */
   includePryNotches: boolean;
   /**
+   * Separable open mold (2 halves + floor/wall seal + 2 sliding C-clips) or
+   * self-clamping clamshell (45°-printable clamping brackets + 2 sliding C-clips).
+   */
+  separable?: boolean;
+  /**
    * Sample the cavity twice as fine, for a fine nozzle. A rigid mold's walls lie
    * half a grid cell off the part, and this halves that; it is four times the
    * triangles. A lined mold's cavity is exact already, so it changes nothing there.
@@ -180,6 +186,8 @@ export interface MoldMeshHalf {
    * first, `pieceTriangles` long each.
    */
   liner?: { shell: Triangle3D[]; liner: Triangle3D[]; pieceTriangles?: number[] };
+  /** When an open mold is split into two halves spaced on the plate. */
+  splitOpen?: { pieceTriangles: [number, number]; closeShiftMm: [number, number] };
   name: string;
   triangles: Triangle3D[];
   bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
@@ -233,6 +241,8 @@ export interface MoldExportResult {
   lidIsBackingPlate: boolean;
   bottomHalf: MoldMeshHalf;
   topHalf?: MoldMeshHalf;
+  /** Printable sliding C-clips laid out on Z = 0 beside the mold halves. */
+  clips?: Triangle3D[][];
   combinedTriangles: Triangle3D[];
   warnings: string[];
   error?: string;
@@ -1521,7 +1531,11 @@ export function generateMoldMeshes(
   const notchRimR = Math.min(3, Math.max(1.5, opts.wallMarginMm * 0.35));
   const notchPositions: Array<[number, number]> =
     opts.moldType === 'clamshell' && opts.includePryNotches
-      ? outlines ? notchesOnOutline(outlines.base) : [[mw2 - 1, 0], [-mw2 + 1, 0]]
+      ? outlines
+        ? notchesOnOutline(outlines.base)
+        : opts.separable && moldDepthMm >= moldWidthMm
+          ? [[0, md2 - 1], [0, -md2 + 1]]
+          : [[mw2 - 1, 0], [-mw2 + 1, 0]]
       : [];
 
   const baseFeatures: HalfFeatures = {
@@ -1571,10 +1585,14 @@ export function generateMoldMeshes(
   const linerSkinMm = opts.dissolvableLiner
     ? (opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM)
     : 0;
-  const baseFloorMm = feed === 'bottom'
-    ? Math.max(opts.baseThicknessMm, bottomFillFloorMm(neckR, linerSkinMm))
-    : Math.max(opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0);
-  const lidFloorMm = Math.max(opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0);
+  const minBracketFloor = opts.separable && opts.moldType === 'clamshell' && !opts.dissolvableLiner ? 8 : 0;
+  const baseFloorMm = Math.max(
+    minBracketFloor,
+    feed === 'bottom'
+      ? Math.max(opts.baseThicknessMm, bottomFillFloorMm(neckR, linerSkinMm))
+      : Math.max(opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0),
+  );
+  const lidFloorMm = Math.max(minBracketFloor, opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0);
   const baseBlockHeight = baseTrueDepth + baseFloorMm;
   const lidBlockHeight = lidTrueDepth + lidFloorMm;
   // Whatever cuts the lid deepest in each column, drafted or not: the funnel stays clear of all of it.
@@ -1826,7 +1844,7 @@ export function generateMoldMeshes(
       warnings: [...warnings],
     });
     // Not the depth-field mold instead: it fills in the undercuts that were asked to be kept.
-    return 'error' in csgRes ? { ...emptyMoldResult(csgRes.error), ...setupFields } : csgRes;
+    return 'error' in csgRes ? { ...emptyMoldResult(csgRes.error), ...setupFields } : applySeparableMold(activeWasm, csgRes, opts, baseFloorMm);
   }
 
   // Pins, sockets, sprue and vents are exact, whatever the grid. Without the
@@ -1872,7 +1890,7 @@ export function generateMoldMeshes(
     lid ? lid.blockHeightMm + lid.pinRiseMm : 0
   );
 
-  return {
+  const rawResult: MoldExportResult = {
     success: true,
     ...setupFields,
     get binarySTL() {
@@ -1924,6 +1942,78 @@ export function generateMoldMeshes(
     combinedTriangles,
     warnings,
   };
+  return activeWasm ? applySeparableMold(activeWasm, rawResult, opts, baseFloorMm) : rawResult;
+}
+
+function applySeparableMold(
+  wasm: ManifoldToplevel,
+  res: MoldExportResult,
+  opts: MoldOptions,
+  baseFloorMm: number,
+): MoldExportResult {
+  if (!opts.separable || opts.dissolvableLiner || !res.success) return res;
+  if (res.moldType === 'open') {
+    const split = splitOpenRigidMold(wasm, res.bottomHalf.triangles, baseFloorMm, opts.wallMarginMm);
+    if (!split) return res;
+    const combined = [...split.bottomTris, ...split.clips[0], ...split.clips[1]];
+    let stl: Uint8Array | null = null;
+    const allBounds = boundsOf(combined);
+    const botBounds = boundsOf(split.bottomTris);
+    return {
+      ...res,
+      get binarySTL() {
+        if (!stl) stl = exportBinarySTL(combined, 'PhysBox 3D Separable Mold Plate');
+        return stl;
+      },
+      moldBounds: allBounds,
+      totalTriangles: combined.length,
+      bottomHalf: {
+        ...res.bottomHalf,
+        triangles: split.bottomTris,
+        bounds: botBounds,
+        triangleCount: split.bottomTris.length,
+        splitOpen: { pieceTriangles: split.pieceTriangles, closeShiftMm: split.closeShiftMm },
+      },
+      clips: split.clips,
+      combinedTriangles: combined,
+    };
+  }
+  if (res.moldType === 'clamshell' && res.topHalf) {
+    const clipped = addClamshellSlidingClips(
+      wasm,
+      res.bottomHalf.triangles,
+      res.topHalf.triangles,
+      res.bottomHalf.partingZMm,
+      res.topHalf.partingZMm,
+    );
+    if (!clipped) return res;
+    const combined = [...clipped.bottomTris, ...clipped.topTris, ...clipped.clips[0], ...clipped.clips[1]];
+    let stl: Uint8Array | null = null;
+    return {
+      ...res,
+      get binarySTL() {
+        if (!stl) stl = exportBinarySTL(combined, 'PhysBox 3D Clamped Mold Plate');
+        return stl;
+      },
+      moldBounds: boundsOf(combined),
+      totalTriangles: combined.length,
+      bottomHalf: {
+        ...res.bottomHalf,
+        triangles: clipped.bottomTris,
+        bounds: boundsOf(clipped.bottomTris),
+        triangleCount: clipped.bottomTris.length,
+      },
+      topHalf: {
+        ...res.topHalf,
+        triangles: clipped.topTris,
+        bounds: boundsOf(clipped.topTris),
+        triangleCount: clipped.topTris.length,
+      },
+      clips: clipped.clips,
+      combinedTriangles: combined,
+    };
+  }
+  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -1940,7 +2030,7 @@ export type MoldHalfSummary = Omit<MoldMeshHalf, 'triangles' | 'liner'>;
 
 export type MoldSummary = Omit<
   MoldExportResult,
-  'binarySTL' | 'threeMf' | 'combinedTriangles' | 'bottomHalf' | 'topHalf'
+  'binarySTL' | 'threeMf' | 'combinedTriangles' | 'bottomHalf' | 'topHalf' | 'clips'
 > & {
   bottomHalf: MoldHalfSummary;
   topHalf?: MoldHalfSummary;
@@ -1952,22 +2042,26 @@ export type MoldSummary = Omit<
 export interface MoldStlPart {
   name: string;
   triangles: number;
-  /** The rigid shell (or an unlined half), or the soluble liner. */
-  role: 'shell' | 'liner';
+  /** The rigid shell (or an unlined half), the soluble liner, or a sliding clip. */
+  role: 'shell' | 'liner' | 'clip';
   /** What it prints in: 'PLA', 'HIPS'. */
   material: string;
 }
 
 /**
- * The STL's triangles cut into the pieces that print: a half, or a lined
- * half's shell and liner. The STL holds them all, and a shell and its liner
- * share every face where they meet, so one mesh of both reads as thousands of
- * non-manifold edges though each piece is closed.
+ * The STL's triangles cut into the pieces that print: a half, a split open
+ * mold's two halves, a lined half's shell and liner, and any sliding clips.
  */
-export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf' | 'liner'>): MoldStlPart[] {
+export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf' | 'liner' | 'clips'>): MoldStlPart[] {
   const pair = linerPair(r.liner?.pair);
   const insert = r.liner?.construction === 'insert';
   const of = (h: MoldMeshHalf): MoldStlPart[] => {
+    if (h.splitOpen) {
+      return [
+        { name: `${h.name} 1`, triangles: h.splitOpen.pieceTriangles[0], role: 'shell', material: 'PLA' },
+        { name: `${h.name} 2`, triangles: h.splitOpen.pieceTriangles[1], role: 'shell', material: 'PLA' },
+      ];
+    }
     if (!h.liner) return [{ name: h.name, triangles: h.triangles.length, role: 'shell', material: 'PLA' }];
     const pieces = h.liner.pieceTriangles;
     return [
@@ -1982,7 +2076,13 @@ export function moldStlParts(r: Pick<MoldExportResult, 'bottomHalf' | 'topHalf' 
         : [{ name: `${h.name} ${insert ? 'insert' : 'liner'}`, triangles: h.liner.liner.length, role: 'liner' as const, material: pair.liner.name }]),
     ];
   };
-  return [...of(r.bottomHalf), ...(r.topHalf ? of(r.topHalf) : [])].filter((p) => p.triangles > 0);
+  const clipParts: MoldStlPart[] = (r.clips ?? []).map((c, i) => ({
+    name: `Sliding Clip ${i + 1}`,
+    triangles: c.length,
+    role: 'clip',
+    material: 'PLA',
+  }));
+  return [...of(r.bottomHalf), ...(r.topHalf ? of(r.topHalf) : []), ...clipParts].filter((p) => p.triangles > 0);
 }
 
 /** Positions and per-vertex normals, ready for a BufferGeometry. */
@@ -2022,10 +2122,12 @@ export function moldPreviewBuffers(r: MoldExportResult): {
   top: MoldHalfBuffers | null;
   liner: { bottom: MoldHalfBuffers; top: MoldHalfBuffers | null } | null;
 } {
-  const shellOf = (h: MoldMeshHalf) => trianglesToBuffers(h.liner ? h.liner.shell : h.triangles);
+  const shellOf = (h: MoldMeshHalf, extra?: Triangle3D[]) =>
+    trianglesToBuffers([...(h.liner ? h.liner.shell : h.triangles), ...(extra ?? [])]);
+  const clipTris = r.clips ? r.clips.flat() : undefined;
   return {
-    bottom: shellOf(r.bottomHalf),
-    top: r.topHalf ? shellOf(r.topHalf) : null,
+    bottom: shellOf(r.bottomHalf, r.topHalf ? undefined : clipTris),
+    top: r.topHalf ? shellOf(r.topHalf, clipTris) : null,
     liner: r.bottomHalf.liner
       ? {
           bottom: trianglesToBuffers(r.bottomHalf.liner.liner),
@@ -2045,6 +2147,7 @@ export function moldSummary(r: MoldExportResult): MoldSummary {
     heightMm: h.heightMm,
     partingZMm: h.partingZMm,
     triangleCount: h.triangleCount,
+    ...(h.splitOpen ? { splitOpen: h.splitOpen } : {}),
   });
 
   return {
