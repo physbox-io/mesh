@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type RefObject } from 'react';
 import type * as THREE from 'three';
-import { SlidersHorizontal, Trash2, X } from 'lucide-react';
+import { SlidersHorizontal, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
 import { useSelectedNode } from '../../hooks/useSelectedNode';
@@ -8,14 +8,13 @@ import { InspectorCards } from './InspectorCards';
 
 /**
  * The properties inspector on the right: the drawer, its resize handle and its
- * header, the cards and the Delete button. `threeSceneRef` is the viewport's
+ * header and the cards. `threeSceneRef` is the viewport's
  * three.js scene, which the per-part STL export reads.
  */
 export function InspectorPanel({ threeSceneRef }: { threeSceneRef: RefObject<THREE.Scene | null> }) {
   const selectedNode = useSelectedNode();
   const isPlaying = useStore((s) => s.isPlaying);
   const setSelectedNodeId = useStore((s) => s.setSelectedNodeId);
-  const deleteNode = useStore((s) => s.deleteNode);
   const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
   const setIsPropertiesOpen = usePanels((s) => s.setPropertiesOpen);
   const [propertiesWidth, setPropertiesWidth] = useState(380);
@@ -117,13 +116,6 @@ export function InspectorPanel({ threeSceneRef }: { threeSceneRef: RefObject<THR
           <div className="flex flex-col gap-4">
             <InspectorCards node={selectedNode} threeSceneRef={threeSceneRef} />
 
-            {/* Delete Component Button */}
-            <button
-              onClick={() => deleteNode(selectedNode.id)}
-              className="mt-2 flex items-center justify-center gap-2 w-full py-2 border border-red-200 rounded-lg text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 hover:border-red-300 transition-colors shadow-sm cursor-pointer"
-            >
-              <Trash2 className="w-4 h-4" /> Delete Component
-            </button>
           </div>
         </aside>
       )}

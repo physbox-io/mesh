@@ -15,7 +15,7 @@ import { ConstraintsCard } from './ConstraintsCard';
 import { CsgCard } from './CsgCard';
 import { DeformationCard } from './DeformationCard';
 import { JoinCard } from './JoinCard';
-import { ExportStlCard } from './ExportStlCard';
+import { PartActions } from './ExportStlCard';
 import { GearCard } from './GearCard';
 import { HardwarePartCard } from './HardwarePartCard';
 import { GeomPropertiesCard, SubGeomSelector } from './GeomPropertiesCard';
@@ -82,6 +82,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
       {tab === 'main' && (
         <>
           <BodyBasicsCard node={node} />
+          <PartActions node={node} threeSceneRef={threeSceneRef} />
           <MoldCard node={node} />
           <JoinCard node={node} />
           <HardwarePartCard node={node} />
@@ -89,7 +90,6 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
           <SubGeomSelector node={node} />
           <ResizeCard node={node} />
           <GeomPropertiesCard node={node} part="main" />
-          <ExportStlCard node={node} threeSceneRef={threeSceneRef} />
         </>
       )}
 

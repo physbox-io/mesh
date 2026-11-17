@@ -1,6 +1,7 @@
 import type { RefObject } from 'react';
 import type * as THREE from 'three';
-import { Printer } from 'lucide-react';
+import { Printer, Trash2 } from 'lucide-react';
+import { useStore } from '../../store/useStore';
 import { useNodeStlExport } from '../../hooks/useMeshExport';
 import type { SceneNode } from '../../types/scene';
 
@@ -19,5 +20,21 @@ export function ExportStlCard({ node, threeSceneRef }: { node: SceneNode; threeS
     >
       <Printer className="w-4 h-4" /> Export STL
     </button>
+  );
+}
+
+/** Export STL and Delete Component, together under the part's name. */
+export function PartActions({ node, threeSceneRef }: { node: SceneNode; threeSceneRef: RefObject<THREE.Scene | null> }) {
+  const deleteNode = useStore((s) => s.deleteNode);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <ExportStlCard node={node} threeSceneRef={threeSceneRef} />
+      <button
+        onClick={() => deleteNode(node.id)}
+        className="flex items-center justify-center gap-2 w-full py-2 border border-red-200 rounded-lg text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 hover:border-red-300 transition-colors shadow-sm cursor-pointer"
+      >
+        <Trash2 className="w-4 h-4" /> Delete Component
+      </button>
+    </div>
   );
 }
