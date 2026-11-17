@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { useViewQuality } from '../../store/viewQualityStore';
+import { useCapture } from '../../store/captureStore';
 import { renderViewportNow } from '../../utils/viewportCapture';
 import { authoredQuat, orientationOf } from '../../utils/bodyOrientation';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
@@ -471,16 +472,22 @@ export const viewCommands: McpCommands = {
     };
     const overridden = wanted.colliders !== before.colliders
       || wanted.edges !== before.edges || wanted.wireframe !== before.wireframe;
-    if (overridden) {
-      apply(wanted);
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    // clean: the model alone, without the gizmo, dimension arrows, tool
+    // handles or selection tint of whatever the user has picked. The
+    // selection is left alone; only this frame draws without it.
+    const clean = msg.clean === true;
+    if (overridden) apply(wanted);
+    if (clean) useCapture.setState({ clean: true });
+    let dataUrl: string;
+    try {
+      if (overridden || clean) await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // Through the composer when there is one; see renderViewportNow.
+      renderViewportNow();
+      dataUrl = gl.domElement.toDataURL('image/png');
+    } finally {
+      if (overridden) apply(before);
+      if (clean) useCapture.setState({ clean: false });
     }
-
-    // Through the composer when there is one; see renderViewportNow.
-    renderViewportNow();
-
-    const dataUrl = gl.domElement.toDataURL('image/png');
-    if (overridden) apply(before);
 
     const ink = document.documentElement.classList.contains('dark') ? 'white' : 'black';
     const notes: string[] = [];
@@ -501,7 +508,7 @@ export const viewCommands: McpCommands = {
       // Says whether the frame was drawn to order or is whatever the
       // canvas happened to be holding.
       rendered: Boolean(win._physics_scene && win._physics_camera),
-      view: wanted,
+      view: { ...wanted, clean },
       ...(notes.length ? { note: notes.join(' ') } : {}),
     };
   },

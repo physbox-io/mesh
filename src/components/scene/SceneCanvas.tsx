@@ -8,6 +8,7 @@ import { useStore, applyShatterPieces } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
 import { useDialogs } from '../../store/dialogStore';
 import { useViewQuality } from '../../store/viewQualityStore';
+import { useCapture } from '../../store/captureStore';
 import { physicsGlobals } from '../../physicsGlobals';
 import type { WeakSpot } from '../../utils/printAnalysis';
 import { DEFAULT_EYE } from '../../utils/frameScene';
@@ -65,6 +66,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
   onImportSceneJson: (text: string, fileName: string, dropped: boolean) => void;
 }) {
   const hiRes = useViewQuality(s => s.hiRes);
+  const cleanCapture = useCapture((s) => s.clean);
   const pathTrace = useViewQuality(s => s.pathTrace);
   // The EffectComposer instance, so a screenshot can render through the same
   // post-processing pipeline the viewport uses (AO included) instead of a raw
@@ -256,11 +258,12 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       <DragInteractionController />
       <PaintStrokeController />
       <ObjectGestureController />
-      <TransformGizmo />
-      <MeasureTool />
-      <DimensionOverlay />
+      {/* A clean screenshot (see captureStore) draws none of the editor's handles. */}
+      {!cleanCapture && <TransformGizmo />}
+      {!cleanCapture && <MeasureTool />}
+      {!cleanCapture && <DimensionOverlay />}
       <SectionCut />
-      <EdgeRoundTool />
+      {!cleanCapture && <EdgeRoundTool />}
 
       {/* Subtle contact-shadow AO — reads as "more depth", not a style
           change. The composer takes over the render loop from r3f, so a
@@ -303,7 +306,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
             AO's output in linear light. Hi-Res only. */}
         {hiRes && <BodyToneMapping />}
         {/* After the tone mapping, so the outline is the blue asked for. */}
-        {hiRes && <SelectionOutline />}
+        {hiRes && !cleanCapture && <SelectionOutline />}
       </EffectComposer>
       {/* Draws over the composer's frame, so it comes after it. */}
       {pathTrace && <PathTracedView background={darkMode ? '#0b0f19' : '#f8fafc'} />}

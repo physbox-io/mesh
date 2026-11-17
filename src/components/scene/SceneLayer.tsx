@@ -15,6 +15,7 @@ import { glowIntensity } from '../../utils/geomGlow';
 import { registerLiveCamera } from '../../utils/liveCamera';
 import { DEFAULT_EYE, DEFAULT_TARGET_Y, drawnContentBounds, sceneContentBounds } from '../../utils/frameScene';
 import { isDrawingView, orthoFraming, ORTHO_STANDOFF, SQUARE_TO_VIEW, VIEW_AXES } from '../../utils/cameraViews';
+import { useCapture } from '../../store/captureStore';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
 import { isGizmoBusy } from './gizmoBusy';
@@ -1717,8 +1718,10 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
     if (!state.geomFocused || !state.selectedNodeId) return null;
     return nodeById.get(state.selectedNodeId)?.geoms?.[state.activeGeomIndex]?.name ?? null;
   });
+  // A clean screenshot (captureStore) tints nothing.
+  const cleanCapture = useCapture((state) => state.clean);
   const picked = (id?: string, geomName?: string) => {
-    if (!id || !selectedIds.has(id)) return false;
+    if (cleanCapture || !id || !selectedIds.has(id)) return false;
     if (!focusedGeomName || id !== selectedNodeId || !geomName) return true;
     return !focusedDrawn || geomName === focusedGeomName;
   };
