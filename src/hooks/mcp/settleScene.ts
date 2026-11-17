@@ -21,7 +21,16 @@ import { couplingWarnings } from '../../utils/sceneCouplings';
  */
 const SETTLE_WAIT_FOR_COLLIDERS_MS = 3_000;
 
-export const autoCompileScad = async (nodes: SceneNode[]) => {
+/** A body whose OpenSCAD source did not compile, and what OpenSCAD said. */
+export interface ScadFailure { id: string; name: string; error: string }
+
+/** The line a reply carries for bodies whose SCAD did not compile. */
+export const scadFailureError = (failures: ScadFailure[]) =>
+  `SCAD did not compile for ${failures.map((f) => `'${f.name}' (${f.error})`).join('; ')}. Those bodies have no geometry; fix the source and send it again.`;
+
+/** Compiles every body's SCAD; answers with the bodies that did not compile. */
+export const autoCompileScad = async (nodes: SceneNode[]): Promise<ScadFailure[]> => {
+  const failures: ScadFailure[] = [];
   const scadNodes: SceneNode[] = [];
   const collect = (nodesList: SceneNode[]) => {
     if (!nodesList) return;
@@ -72,9 +81,13 @@ export const autoCompileScad = async (nodes: SceneNode[]) => {
       // finish last silently corrupts lastCompileError even when the scene is fine.
       useStore.getState().updateNodeScad(node.id, node.scad!, compiled, true);
     } else {
+      // A broken source used to go only to the console: the build said ok
+      // and the body sat there with no mesh and a fallback mass.
       console.error(`Failed to auto-compile SCAD for node ${node.id} after 3 attempts:`, lastErr);
+      failures.push({ id: node.id, name: node.name || node.id, error: lastErr instanceof Error ? lastErr.message : String(lastErr) });
     }
   }));
+  return failures;
 };
 
 // Loads a scene and waits for it to fully settle before responding: SCAD bodies
@@ -93,7 +106,7 @@ export const settleScene = async (
     /** false: reply once the body is built; its convex pieces follow in the background. */
     waitForColliders?: boolean;
   } = {},
-): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[]; couplingWarnings?: string[] }> => {
+): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[]; couplingWarnings?: string[]; scadErrors?: ScadFailure[] }> => {
   const store = useStore.getState();
   // Read before the store drops them: a typo in a target id did nothing, ok:true.
   const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes));
@@ -110,7 +123,7 @@ export const settleScene = async (
   // A caller that only adds a body keeps what the scene says about itself:
   // print fidelity, cast prep, reference pictures, its name.
   store.updateScene(replacesScene ? { ...sceneFields, nodes } : { ...store.sceneGraph, ...sceneFields, nodes }, true);
-  await autoCompileScad(nodes);
+  const scadErrors = await autoCompileScad(nodes);
   await applyDeclarativePreCsgFeatures(nodes);
   // Boolean bodies compile through the same OpenSCAD pool, and just as
   // asynchronously — a caller that got ok:true before they finished would be
@@ -131,7 +144,8 @@ export const settleScene = async (
   // A new scene altogether (freshStart) starts its clock at zero instead of
   // carrying the old scene's time into its telemetry.
   await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, freshStart, true);
-  const error = useStore.getState().lastCompileError;
+  const compileError = useStore.getState().lastCompileError;
+  const error = [compileError, scadErrors.length ? scadFailureError(scadErrors) : null].filter(Boolean).join(' ') || null;
   // nodeCount is every body, nested ones included: a ten-body ride built as
   // one tower with everything hung off it used to report nodeCount 1.
   const pending = pendingColliderBodies();
@@ -140,6 +154,7 @@ export const settleScene = async (
   const coupling = couplingWarnings(useStore.getState().sceneGraph.nodes);
   return {
     ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length,
+    ...(scadErrors.length ? { scadErrors } : {}),
     ...(referenceWarnings.length ? { referenceWarnings } : {}),
     ...(coupling.length ? { couplingWarnings: coupling } : {}),
     ...(pending.length ? {

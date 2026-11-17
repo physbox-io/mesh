@@ -34,7 +34,7 @@ import {
   applySinglePatternToBody, applyPaintStrokeToBody, applyDeclarativePreCsgFeatures,
   applyDeclarativePostCsgFeatures,
 } from './bodyFeatures';
-import { autoCompileScad } from './settleScene';
+import { autoCompileScad, scadFailureError } from './settleScene';
 import type { McpCommands } from './types';
 import { unresolvedReferences, unresolvedReferenceWarnings } from '../../utils/unresolvedReferences';
 
@@ -95,12 +95,13 @@ export const objectCommands: McpCommands = {
     // Read before the store drops them: a typo in a target id did nothing, ok:true.
     const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes, new Set([node.id])));
     store.updateScene({ ...store.sceneGraph, nodes }, true);
-    await autoCompileScad([node]);
+    const scadErrors = await autoCompileScad([node]);
     await applyDeclarativePreCsgFeatures([node]);
     await compileCsgNodes(true);
     await applyDeclarativePostCsgFeatures([node]);
     await useStore.getState().recompile(useStore.getState().sceneGraph, node.id, false, true);
-    const addError = useStore.getState().lastCompileError;
+    const compileError = useStore.getState().lastCompileError;
+    const addError = [compileError, scadErrors.length ? scadFailureError(scadErrors) : null].filter(Boolean).join(' ') || null;
     const landed = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
     if (landed?.csgError) {
       return { ok: false, error: `Boolean failed: ${landed.csgError}`, id: node.id };
