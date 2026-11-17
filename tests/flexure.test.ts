@@ -134,4 +134,34 @@ describe('Monolithic Compliant Mechanisms (Flexures)', () => {
       expect(-s * p[0] + c * p[2]).toBeCloseTo(g.bend!.from[2], 9);
     }
   });
+
+  it('anchors a hinge flexure opposite the mass-weighted centre, children included', () => {
+    // A balance beam: a heavy counterweight one side, a pan hung from a child body the other.
+    const beam: SceneNode = {
+      id: 'beam', name: 'Beam', pos: [0, 0, 0.1],
+      geoms: [
+        { name: 'hub', type: 'box', size: [0.007, 0.006, 0.0025], pos: [0, 0, -0.0065], mass: 0.001 },
+        { name: 'bar', type: 'box', size: [0.05, 0.003, 0.0025], pos: [0, 0, -0.0115], mass: 0.003 },
+        { name: 'counterweight', type: 'box', size: [0.006, 0.006, 0.006], pos: [-0.045, 0, -0.0115], mass: (0.006 * 0.05) / 0.045 },
+      ],
+      joints: [{ name: 'pivot', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0] }],
+      children: [{
+        id: 'pan', name: 'Pan', pos: [0.05, 0, -0.0115],
+        geoms: [{ name: 'dish', type: 'box', size: [0.017, 0.017, 0.0015], pos: [0, 0, -0.04], mass: 0.006 }],
+        joints: [{ name: 'stirrup', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0] }],
+        children: [],
+      }],
+    };
+    const leaves = applyFlexureToNode(beam, { kind: 'cross_pivot' })!.node.geoms.filter((g) => g.bend);
+    expect(leaves.length).toBe(2);
+    for (const g of leaves) {
+      const [fx, , fz] = g.bend!.from;
+      const [tx, , tz] = g.bend!.to;
+      // Frame end straight above, body end straight below, each leaf at 45°.
+      expect(fz).toBeGreaterThan(0);
+      expect(tz).toBeLessThan(0);
+      expect(Math.abs(fx)).toBeCloseTo(Math.abs(fz), 6);
+      expect(Math.abs(tx)).toBeCloseTo(Math.abs(tz), 6);
+    }
+  });
 });

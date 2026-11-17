@@ -335,19 +335,29 @@ export function bodyReach(geoms: SceneGeom[], origin: THREE.Vector3, dir: THREE.
 }
 
 /**
- * The direction, square to a hinge's axis, in which the body hangs from it: the
- * centroid of its own geoms. A hinge flexure anchors on the opposite side.
+ * The direction, square to a hinge's axis, in which the body hangs from it: its
+ * centre of mass, with everything it carries. A hinge flexure anchors on the
+ * opposite side. Mass-weighted, so a counterweight or a pan hanging from a child
+ * body counts for what it weighs, not for how many geoms it has.
  */
-function hangDirection(geoms: SceneGeom[], pivot: THREE.Vector3, axis: THREE.Vector3): THREE.Vector3 | null {
+function hangDirection(geoms: SceneGeom[], children: SceneNode[], pivot: THREE.Vector3, axis: THREE.Vector3): THREE.Vector3 | null {
   const c = new THREE.Vector3();
-  let n = 0;
-  for (const g of geoms) {
-    if (g.name.startsWith('flexure_') || g.csg === 'difference') continue;
-    c.add(new THREE.Vector3(g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0));
-    n++;
-  }
-  if (!n) return null;
-  c.multiplyScalar(1 / n).sub(pivot);
+  let total = 0;
+  const add = (list: SceneGeom[], kids: SceneNode[], offset: THREE.Vector3) => {
+    for (const g of list) {
+      if (g.name.startsWith('flexure_') || g.csg === 'difference' || g.role === 'visual') continue;
+      const m = g.mass ?? (g.density ?? 1000) * geomVolume(g);
+      if (!(m > 0)) continue;
+      c.addScaledVector(new THREE.Vector3(g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0).add(offset), m);
+      total += m;
+    }
+    for (const k of kids) {
+      add(k.geoms ?? [], k.children ?? [], offset.clone().add(new THREE.Vector3(k.pos?.[0] ?? 0, k.pos?.[1] ?? 0, k.pos?.[2] ?? 0)));
+    }
+  };
+  add(geoms, children, new THREE.Vector3());
+  if (!(total > 0)) return null;
+  c.multiplyScalar(1 / total).sub(pivot);
   c.addScaledVector(axis, -c.dot(axis));
   return c.lengthSq() > 1e-12 ? c.normalize() : null;
 }
@@ -359,7 +369,7 @@ function hangDirection(geoms: SceneGeom[], pivot: THREE.Vector3, axis: THREE.Vec
  * body's own geoms) place the leaves: a hinge flexure anchors on the side away
  * from where the body hangs, a slide flexure's leaves start at the body's faces.
  */
-export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec, bodyGeoms: SceneGeom[] = []): SceneGeom[] {
+export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec, bodyGeoms: SceneGeom[] = [], bodyChildren: SceneNode[] = []): SceneGeom[] {
   const filId = resolveFilamentId(spec.filament);
   const rgba = FLEXURE_FILAMENT_PROPS[filId].rgba;
   const pivot = new THREE.Vector3(joint.pos?.[0] ?? 0, joint.pos?.[1] ?? 0, joint.pos?.[2] ?? 0);
@@ -377,7 +387,7 @@ export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec, bodyGeom
 
   if (spec.kind === 'blade' || spec.kind === 'cross_pivot') {
     // `up` points from the body to the frame across the pivot; `side` is square to it.
-    const up = hangDirection(bodyGeoms, pivot, ez)?.negate() ?? ey.clone();
+    const up = hangDirection(bodyGeoms, bodyChildren, pivot, ez)?.negate() ?? ey.clone();
     const side = new THREE.Vector3().crossVectors(ez, up).normalize();
     if (spec.kind === 'blade') {
       // One leaf through the pivot, anchored above it and holding the body below.
@@ -643,7 +653,7 @@ export function applyFlexureToNode(
   }
 
   const cleanGeoms = (node.geoms ?? []).filter((g) => !g.name.startsWith('flexure_'));
-  const flexureGeoms = buildFlexureGeoms(updatedJoint, spec, cleanGeoms);
+  const flexureGeoms = buildFlexureGeoms(updatedJoint, spec, cleanGeoms, node.children ?? []);
   const nextJoints = node.joints.map((j, i) => (i === jointIdx ? updatedJoint : { ...j }));
 
   return {
