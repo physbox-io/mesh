@@ -20,11 +20,15 @@ import type { McpCommands } from './types';
 import type { SceneNode } from '../../types/scene';
 
 /**
- * What an export is called: the scene's name, else the one body exported,
- * else the preset it came from. Never 'empty', the blank scene's preset id,
- * which named every file built from scratch empty.stl.
+ * What an export is called: the one body asked for by id, else the scene's
+ * name, else the one body in the scene, else the preset it came from. A
+ * single body exported out of a named scene used to be named for the scene.
+ * Never 'empty', the blank scene's preset id, which named every file built
+ * from scratch empty.stl.
  */
-function exportFileBase(store: { sceneGraph: { name?: string; nodes: { id: string; name: string; simulation?: unknown }[] }; activePreset?: string }, ids: string[]): string {
+function exportFileBase(store: { sceneGraph: { name?: string; nodes: SceneNode[] }; activePreset?: string }, ids: string[]): string {
+  const asked = ids.length === 1 ? findNodeInScene(store.sceneGraph.nodes, ids[0]) : undefined;
+  if (asked) return asked.name || asked.id;
   const bodies = ids.length ? ids : store.sceneGraph.nodes.filter((n) => !n.simulation).map((n) => n.id);
   const only = bodies.length === 1 ? store.sceneGraph.nodes.find((n) => n.id === bodies[0])?.name : undefined;
   const preset = store.activePreset && store.activePreset !== 'empty' ? store.activePreset.replace(/^user:/, '') : undefined;
