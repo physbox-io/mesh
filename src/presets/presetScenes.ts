@@ -3719,8 +3719,8 @@ export const PRESETS = {
     name: 'Self-Righting Buoy, Skiff & Flooding Cup',
     emoji: '⛵',
     scene: hydrostaticFlotationPreset,
-    camera: { position: [0.02, -0.46, 0.30], target: [0.01, 0, 0.12] } satisfies PresetCamera,
-    environment: { waterLevel: 0.135 },
+    camera: { position: [0.02, -0.54, 0.22], target: [0.01, 0, 0.11] } satisfies PresetCamera,
+    environment: { waterLevel: 0.145 },
   },
 };
 

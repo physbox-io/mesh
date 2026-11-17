@@ -13,6 +13,7 @@ import {
   clearBalanceAdjustments,
 } from '../src/utils/balancePart';
 import { hydrostaticFlotationPreset } from '../src/presets/hydrostaticFlotation';
+import { simulate } from './helpers/simulate';
 
 const IDENTITY_XMAT = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
@@ -212,37 +213,77 @@ describe('Inverse Balance & Ballast (Stand / Spin / Float)', () => {
     expect(res.after.float.trimOffsetMm).toBeLessThan(res.before.float.trimOffsetMm);
   });
 
-  it('validates hydrostaticFlotationPreset self-righting buoy, open-hull skiff, and flooding porcelain cup', () => {
+  it('simulates hydrostaticFlotationPreset in MuJoCo: balanced buoy self-rights from 45°, red buoy capsizes, skiff floats, and cup floods & sinks', async () => {
+    const WATER_Z = 0.145;
     const unbalanced = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'unbalanced_buoy')!;
     const balanced = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'balanced_spar_buoy')!;
     const skiff = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'open_hull_skiff')!;
     const cup = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'flooding_porcelain_cup')!;
 
-    // Balanced buoy carries internal balance adjustments (void and/or keel nuts) and positive upright margin
-    const uprightUnbal = analyzeStability({ ...unbalanced, euler: [0, 0, 0] }, 0.135);
-    const uprightBal = analyzeStability({ ...balanced, euler: [0, 0, 0] }, 0.135);
+    const uprightUnbal = analyzeStability({ ...unbalanced, euler: [0, 0, 0] }, WATER_Z);
+    const uprightBal = analyzeStability({ ...balanced, euler: [0, 0, 0] }, WATER_Z);
     expect(uprightBal.float.floats).toBe(true);
+    expect(uprightBal.float.metacentricMarginMm).toBeGreaterThan(10);
     expect(uprightBal.float.metacentricMarginMm).toBeGreaterThan(uprightUnbal.float.metacentricMarginMm);
-    expect(
-      balanced.geoms.some((g) => g.name === 'balance_void') ||
-      balanced.children.some((c) => c.hardwarePart?.kind === 'nut'),
-    ).toBe(true);
+    expect(balanced.children.some((c) => c.hardwarePart?.kind === 'nut')).toBe(true);
 
-    // Both skiff and porcelain cup register as open-top vessels with gunwale rim flooding detection
-    const skiffHydro = buildHydroBodyModel(skiff)!;
-    const cupHydro = buildHydroBodyModel(cup)!;
-    expect(skiffHydro.vessel).toBeDefined();
-    expect(cupHydro.vessel).toBeDefined();
+    // Step 3.5s in real MuJoCo WASM with live Archimedes buoyancy + hydrodynamic drag wrenches!
+    const sim = await simulate(hydrostaticFlotationPreset);
+    try {
+      const bidOf = (n: SceneNode) => {
+        const byId = sim.bodyId(n.id);
+        return byId !== -1 ? byId : sim.bodyId(n.name);
+      };
+      const floatBodies = [unbalanced, balanced, skiff, cup].map((node) => ({
+        id: node.id,
+        bId: bidOf(node),
+        hydro: buildHydroBodyModel(node)!,
+      }));
+      const dt = sim.model.opt.timestep;
+      for (let step = 0; step < 3500; step++) {
+        sim.data.xfrc_applied.fill(0);
+        for (const fb of floatBodies) {
+          const pOff = fb.bId * 3;
+          const mOff = fb.bId * 9;
+          const pos = [sim.data.xpos[pOff], sim.data.xpos[pOff + 1], sim.data.xpos[pOff + 2]];
+          const xmat = Array.from({ length: 9 }, (_, k) => sim.data.xmat[mOff + k]);
+          const ipos = [sim.data.xipos[pOff], sim.data.xipos[pOff + 1], sim.data.xipos[pOff + 2]];
+          const cOff = fb.bId * 6;
+          const angVel: [number, number, number] = [sim.data.cvel[cOff], sim.data.cvel[cOff + 1], sim.data.cvel[cOff + 2]];
+          const linVel: [number, number, number] = [sim.data.cvel[cOff + 3], sim.data.cvel[cOff + 4], sim.data.cvel[cOff + 5]];
+          const massKg = Math.max(1e-4, sim.model.body_subtreemass[fb.bId]);
+          const inertia = [sim.model.body_inertia[pOff], sim.model.body_inertia[pOff + 1], sim.model.body_inertia[pOff + 2]];
+          const w = computeBuoyancyWrench(fb.hydro, pos, xmat, ipos, linVel, angVel, massKg, inertia, WATER_Z, -9.81, dt);
+          if (w.submergedVolume > 1e-12) {
+            const fOff = fb.bId * 6;
+            sim.data.xfrc_applied[fOff + 0] += w.force[0];
+            sim.data.xfrc_applied[fOff + 1] += w.force[1];
+            sim.data.xfrc_applied[fOff + 2] += w.force[2];
+            sim.data.xfrc_applied[fOff + 3] += w.torque[0];
+            sim.data.xfrc_applied[fOff + 4] += w.torque[1];
+            sim.data.xfrc_applied[fOff + 5] += w.torque[2];
+          }
+        }
+        sim.step(1);
+      }
 
-    // Upright porcelain cup floats dry; heeled 45° so its rim dips below waterLevel = 0.135 -> floods!
-    const cupUpright = evaluateSubmerged(cupHydro, [0.195, 0, 0.130], IDENTITY_XMAT, 0.135);
-    expect(cupUpright.floodedFraction).toBe(0);
-    const cupHeeled = evaluateSubmerged(
-      cupHydro,
-      [0.195, 0, 0.130],
-      xmatFromAxisAngle([1, 0, 0], (48 * Math.PI) / 180),
-      0.135,
-    );
-    expect(cupHeeled.floodedFraction).toBeGreaterThan(0.5);
+      const upAxisZ = (n: SceneNode) => sim.data.xmat[bidOf(n) * 9 + 8];
+      const zOf = (n: SceneNode) => sim.data.xpos[bidOf(n) * 3 + 2];
+      // 1. Auto-balanced green buoy snapped upright from 45° (`upAxisZ > 0.97` => tilt < 14°)!
+      expect(upAxisZ(balanced)).toBeGreaterThan(0.97);
+      expect(zOf(balanced)).toBeGreaterThan(WATER_Z - 0.04);
+
+      // 2. Unbalanced red buoy capsized (`upAxisZ < 0.25` => tipped > 75°)!
+      expect(upAxisZ(unbalanced)).toBeLessThan(0.25);
+
+      // 3. Open-hull cedar skiff floats upright & dry at the waterline!
+      expect(upAxisZ(skiff)).toBeGreaterThan(0.96);
+      expect(zOf(skiff)).toBeGreaterThan(WATER_Z - 0.02);
+
+      // 4. Porcelain cup flooded under the dropped brass weight and sank to the tank floor!
+      expect(zOf(cup)).toBeLessThan(0.055);
+    } finally {
+      sim.dispose();
+    }
   });
 });

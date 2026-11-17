@@ -611,83 +611,144 @@ export function balanceBody(
     // Project CoM directly onto the hinge axis so radial eccentricity = 0
     targetComLocal = pivot.clone().addScaledVector(axis, rel.dot(axis));
   } else {
-    // Float upright: align horizontal CoM with hull centroid & pull CoM into lower 28% of hull
-    const midX = 0.5 * (boundsLocal.min[0] + boundsLocal.max[0]);
-    const midY = 0.5 * (boundsLocal.min[1] + boundsLocal.max[1]);
-    const keelZ = boundsLocal.min[2] + 0.26 * sz;
-    targetComLocal = new THREE.Vector3(midX, midY, Math.min(baseReport.comLocal[2], keelZ));
+    // Float upright: align horizontal CoM with true submerged CoB & pull CoM strictly below CoB
+    // so even tall-masted buoys and vessels self-right from steep knockdown angles!
+    let targetX = 0.5 * (boundsLocal.min[0] + boundsLocal.max[0]);
+    let targetY = 0.5 * (boundsLocal.min[1] + boundsLocal.max[1]);
+    let keelZ = boundsLocal.min[2] + 0.18 * sz;
+
+    const hydroInit = buildHydroBodyModel(working);
+    if (hydroInit) {
+      const idXmat = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+      let loS = -boundsLocal.max[2] - 0.01;
+      let hiS = -boundsLocal.min[2] + 0.001;
+      const goalVol = Math.min(hydroInit.solidVolume * 0.72, baseReport.massKg / FRESHWATER_DENSITY);
+      for (let it = 0; it < 24; it++) {
+        const mid = 0.5 * (loS + hiS);
+        const sub = evaluateSubmerged(hydroInit, [0, 0, mid], idXmat, 0);
+        if (sub.volume < goalVol) hiS = mid;
+        else loS = mid;
+      }
+      const eqS = 0.5 * (loS + hiS);
+      const eqSub = evaluateSubmerged(hydroInit, [0, 0, eqS], idXmat, 0);
+      if (eqSub.volume > 1e-9) {
+        targetX = eqSub.cob[0];
+        targetY = eqSub.cob[1];
+        const cobLocalZ = eqSub.cob[2] - eqS;
+        keelZ = Math.max(
+          boundsLocal.min[2] + 0.010,
+          Math.min(keelZ, cobLocalZ - Math.max(0.014, 0.09 * sz)),
+        );
+      }
+    }
+    targetComLocal = new THREE.Vector3(targetX, targetY, Math.min(baseReport.comLocal[2], keelZ));
   }
 
   let voidAdded = false;
-  const hasPrimitiveSource = (working.geoms ?? []).some(
-    (g) => !g.csgDerived && g.csg !== 'difference' && g.type !== 'mesh' && g.type !== 'plane',
+  const candidatePrims = (working.geoms ?? []).filter(
+    (g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'mesh' && g.type !== 'plane',
   );
 
-  // Step 1: Cut an internal `balance_void` ellipsoid on the heavy/high side if geometry permits
-  if (allowVoid && hasPrimitiveSource && sx > 3 * minWallM && sy > 3 * minWallM && sz > 3 * minWallM) {
+  // Check whether a floating body already has ample reserve buoyancy (>32%) so keel ballast alone suffices
+  const { effectiveDensity } = computeCompositeMassAndCom(working);
+  const needsVoidInFloat =
+    mode !== 'float' ||
+    !baseReport.float.floats ||
+    effectiveDensity > FRESHWATER_DENSITY * 0.68;
+
+  // Step 1: Cut an internal `balance_void` ellipsoid strictly inside a single host primitive on the heavy side
+  if (allowVoid && needsVoidInFloat && candidatePrims.length > 0) {
     const curCom = new THREE.Vector3(...baseReport.comLocal);
     const shiftNeeded = targetComLocal.clone().sub(curCom);
-    // Void goes on the OPPOSITE side of targetComLocal (the side we want to lighten)
     const heavyDir = shiftNeeded.length() > 1e-5
       ? shiftNeeded.clone().negate().normalize()
       : new THREE.Vector3(0, 0, 1);
 
-    // For floating dense parts, ensure void also removes enough mass to float cleanly
-    const { effectiveDensity } = computeCompositeMassAndCom(working);
-    const maxVoidRx = Math.max(0.002, 0.36 * (sx * 0.5 - minWallM));
-    const maxVoidRy = Math.max(0.002, 0.36 * (sy * 0.5 - minWallM));
-    const maxVoidRz = Math.max(0.002, 0.34 * (sz * 0.5 - minWallM));
-
-    const centerBounds = new THREE.Vector3(
-      0.5 * (boundsLocal.min[0] + boundsLocal.max[0]),
-      0.5 * (boundsLocal.min[1] + boundsLocal.max[1]),
-      0.5 * (boundsLocal.min[2] + boundsLocal.max[2]),
-    );
-    const halfSpan = new THREE.Vector3(
-      Math.max(0, sx * 0.5 - minWallM - maxVoidRx),
-      Math.max(0, sy * 0.5 - minWallM - maxVoidRy),
-      Math.max(0, sz * 0.5 - minWallM - maxVoidRz),
-    );
-    const voidPosVec = new THREE.Vector3(
-      centerBounds.x + heavyDir.x * halfSpan.x * 0.85,
-      centerBounds.y + heavyDir.y * halfSpan.y * 0.85,
-      centerBounds.z + heavyDir.z * halfSpan.z * 0.85,
-    );
-
-    const maxVoidVol = (4 / 3) * Math.PI * maxVoidRx * maxVoidRy * maxVoidRz;
-    const lever = voidPosVec.distanceTo(targetComLocal);
-    let scale = 0.85;
-    if (lever > 1e-4 && effectiveDensity > 0) {
-      // Exact void mass to reach targetComLocal if void alone could do it:
-      // m_void * |p_void - target| = m_body * |curCom - target|
-      const idealVoidMass = (baseReport.massKg * curCom.distanceTo(targetComLocal)) / lever;
-      const idealVol = idealVoidMass / effectiveDensity;
-      scale = Math.min(1, Math.max(0.25, Math.cbrt(idealVol / Math.max(1e-12, maxVoidVol))));
-    }
-    if (mode === 'float' && !baseReport.float.floats && effectiveDensity > FRESHWATER_DENSITY * 0.85) {
-      scale = 1;
+    // Pick the primitive geom with the best combination of interior volume & alignment toward `heavyDir`
+    let bestBox: { min: [number, number, number]; max: [number, number, number] } | null = null;
+    let bestScore = -Infinity;
+    for (const g of candidatePrims) {
+      const tris: number[] = [];
+      geomHydroTriangles(g, tris);
+      if (tris.length < 9) continue;
+      let gx0 = Infinity, gy0 = Infinity, gz0 = Infinity;
+      let gx1 = -Infinity, gy1 = -Infinity, gz1 = -Infinity;
+      for (let i = 0; i + 2 < tris.length; i += 3) {
+        if (tris[i] < gx0) gx0 = tris[i];
+        if (tris[i + 1] < gy0) gy0 = tris[i + 1];
+        if (tris[i + 2] < gz0) gz0 = tris[i + 2];
+        if (tris[i] > gx1) gx1 = tris[i];
+        if (tris[i + 1] > gy1) gy1 = tris[i + 1];
+        if (tris[i + 2] > gz1) gz1 = tris[i + 2];
+      }
+      const gsx = gx1 - gx0, gsy = gy1 - gy0, gsz = gz1 - gz0;
+      if (gsx <= 3 * minWallM || gsy <= 3 * minWallM || gsz <= 3 * minWallM) continue;
+      const gCenter = new THREE.Vector3(0.5 * (gx0 + gx1), 0.5 * (gy0 + gy1), 0.5 * (gz0 + gz1));
+      const gRho = g.density ?? working.density ?? 1000;
+      const score = gRho * gsx * gsy * gsz * (1 + Math.max(-0.5, gCenter.clone().sub(targetComLocal).dot(heavyDir) * 10));
+      if (score > bestScore) {
+        bestScore = score;
+        bestBox = { min: [gx0, gy0, gz0], max: [gx1, gy1, gz1] };
+      }
     }
 
-    const rx = +(maxVoidRx * scale).toFixed(5);
-    const ry = +(maxVoidRy * scale).toFixed(5);
-    const rz = +(maxVoidRz * scale).toFixed(5);
-    if (rx >= 0.002 && ry >= 0.002 && rz >= 0.002) {
-      const voidGeom: SceneGeom = {
-        name: 'balance_void',
-        type: 'ellipsoid',
-        size: [rx, ry, rz],
-        pos: [
-          +voidPosVec.x.toFixed(6),
-          +voidPosVec.y.toFixed(6),
-          +voidPosVec.z.toFixed(6),
-        ],
-        csg: 'difference',
-        rgba: [0.95, 0.55, 0.25, 0.35],
-      };
-      working.geoms = [...(working.geoms ?? []), voidGeom];
-      working.csgEnabled = true;
-      if (!working.collision) working.collision = 'hull';
-      voidAdded = true;
+    if (bestBox) {
+      const gsx = bestBox.max[0] - bestBox.min[0];
+      const gsy = bestBox.max[1] - bestBox.min[1];
+      const gsz = bestBox.max[2] - bestBox.min[2];
+      const maxVoidRx = Math.max(0.002, 0.36 * (gsx * 0.5 - minWallM));
+      const maxVoidRy = Math.max(0.002, 0.36 * (gsy * 0.5 - minWallM));
+      const maxVoidRz = Math.max(0.002, 0.34 * (gsz * 0.5 - minWallM));
+
+      const centerBounds = new THREE.Vector3(
+        0.5 * (bestBox.min[0] + bestBox.max[0]),
+        0.5 * (bestBox.min[1] + bestBox.max[1]),
+        0.5 * (bestBox.min[2] + bestBox.max[2]),
+      );
+      const halfSpan = new THREE.Vector3(
+        Math.max(0, gsx * 0.5 - minWallM - maxVoidRx),
+        Math.max(0, gsy * 0.5 - minWallM - maxVoidRy),
+        Math.max(0, gsz * 0.5 - minWallM - maxVoidRz),
+      );
+      const voidPosVec = new THREE.Vector3(
+        centerBounds.x + heavyDir.x * halfSpan.x * 0.85,
+        centerBounds.y + heavyDir.y * halfSpan.y * 0.85,
+        centerBounds.z + heavyDir.z * halfSpan.z * 0.85,
+      );
+
+      const maxVoidVol = (4 / 3) * Math.PI * maxVoidRx * maxVoidRy * maxVoidRz;
+      const lever = voidPosVec.distanceTo(targetComLocal);
+      let scale = 0.85;
+      if (lever > 1e-4 && effectiveDensity > 0) {
+        const idealVoidMass = (baseReport.massKg * curCom.distanceTo(targetComLocal)) / lever;
+        const idealVol = idealVoidMass / effectiveDensity;
+        scale = Math.min(1, Math.max(0.25, Math.cbrt(idealVol / Math.max(1e-12, maxVoidVol))));
+      }
+      if (mode === 'float' && !baseReport.float.floats && effectiveDensity > FRESHWATER_DENSITY * 0.85) {
+        scale = 1;
+      }
+
+      const rx = +(maxVoidRx * scale).toFixed(5);
+      const ry = +(maxVoidRy * scale).toFixed(5);
+      const rz = +(maxVoidRz * scale).toFixed(5);
+      if (rx >= 0.002 && ry >= 0.002 && rz >= 0.002) {
+        const voidGeom: SceneGeom = {
+          name: 'balance_void',
+          type: 'ellipsoid',
+          size: [rx, ry, rz],
+          pos: [
+            +voidPosVec.x.toFixed(6),
+            +voidPosVec.y.toFixed(6),
+            +voidPosVec.z.toFixed(6),
+          ],
+          csg: 'difference',
+          rgba: [0.95, 0.55, 0.25, 0.35],
+        };
+        working.geoms = [...(working.geoms ?? []), voidGeom];
+        working.csgEnabled = true;
+        if (!working.collision) working.collision = 'hull';
+        voidAdded = true;
+      }
     }
   }
 

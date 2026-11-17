@@ -42,12 +42,12 @@ export function SettingsPopover() {
        nothing reliable to anchor to — the header wraps, so the button
        moves — and a 16rem popover in the corner of a phone is mostly
        off-screen anyway, so it becomes a centred sheet instead. */
-    <div className="absolute top-4 right-6 w-64 max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain max-lg:inset-x-2 max-lg:right-auto max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[80dvh] glass-panel rounded-lg p-4 z-30 max-lg:z-50 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
-      <h3 className="font-semibold text-sm mb-4 flex items-center justify-between text-slate-800 dark:text-slate-100">
+    <div className="absolute top-4 right-6 w-[17rem] max-h-[calc(100dvh-5rem)] flex flex-col max-lg:inset-x-2 max-lg:right-auto max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[80dvh] glass-panel rounded-lg py-4 pl-4 pr-2 z-30 max-lg:z-50 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
+      <h3 className="font-semibold text-sm mb-3 pr-2 shrink-0 flex items-center justify-between text-slate-800 dark:text-slate-100">
         <span className="flex items-center gap-2"><Settings className="w-4 h-4 text-slate-500 dark:text-slate-400" /> Environment</span>
         <button aria-label="Close" title="Close" onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer" /></button>
       </h3>
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4 overflow-y-auto overscroll-contain [scrollbar-gutter:stable] pr-2 min-h-0">
         <div className="flex items-center justify-between gap-2">
           <span id="hiResLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Antialiasing, tone mapping and smoother curves. Turn off if the viewport is slow.">Hi-Res</span>
           <button
