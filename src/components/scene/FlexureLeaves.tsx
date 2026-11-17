@@ -8,7 +8,7 @@
  * position: the end held by the frame stays put, the end on the body follows it,
  * and the leaf flexes between (bendLeafPoint).
  */
-import { useEffect, useMemo, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
@@ -28,9 +28,10 @@ interface Leaf {
   nodeId: string;
   joint: SceneJoint;
   geom: SceneGeom & { bend: NonNullable<SceneGeom['bend']> };
-  geometry: THREE.BufferGeometry;
-  /** Vertex positions in the body frame at rest. */
+  /** Vertex positions in the body frame at rest; read-only. */
   rest: Float32Array;
+  /** Triangle indices of the subdivided box. */
+  index: number[];
   color: THREE.Color;
   opacity: number;
 }
@@ -38,7 +39,7 @@ interface Leaf {
 /** Segments along a leaf's length: enough for the S of a bent beam to read smooth. */
 const SEGMENTS = 16;
 
-/** Every bendable leaf in the scene, with its geometry built at rest in its body's frame. */
+/** Every bendable leaf in the scene, with its rest shape in its body's frame. */
 function collectLeaves(sceneGraph: SceneGraph | null, hidden: Set<string>): Leaf[] {
   const leaves: Leaf[] = [];
   const walk = (nodes: SceneNode[], ancestorHidden: boolean) => {
@@ -49,9 +50,9 @@ function collectLeaves(sceneGraph: SceneGraph | null, hidden: Set<string>): Leaf
         for (const g of node.geoms || []) {
           if (!g.bend || g.type !== 'box') continue;
           const [hx, hy, hz] = g.size;
-          const geometry = new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2, SEGMENTS, 1, 1);
+          const box = new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2, SEGMENTS, 1, 1);
           const q = g.quat ? new THREE.Quaternion(g.quat[1], g.quat[2], g.quat[3], g.quat[0]) : new THREE.Quaternion();
-          geometry.applyMatrix4(new THREE.Matrix4().compose(
+          box.applyMatrix4(new THREE.Matrix4().compose(
             new THREE.Vector3(g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0), q, new THREE.Vector3(1, 1, 1),
           ));
           const rgba = g.rgba ?? [0.8, 0.8, 0.8, 1];
@@ -60,11 +61,12 @@ function collectLeaves(sceneGraph: SceneGraph | null, hidden: Set<string>): Leaf
             nodeId: node.id,
             joint,
             geom: g as Leaf['geom'],
-            geometry,
-            rest: Float32Array.from(geometry.attributes.position.array as ArrayLike<number>),
+            rest: Float32Array.from(box.attributes.position.array as ArrayLike<number>),
+            index: Array.from(box.index!.array as ArrayLike<number>),
             color: new THREE.Color(rgba[0], rgba[1], rgba[2]),
             opacity: rgba[3] ?? 1,
           });
+          box.dispose();
         }
       }
       walk(node.children, isHidden);
@@ -77,7 +79,9 @@ function collectLeaves(sceneGraph: SceneGraph | null, hidden: Set<string>): Leaf
 export const FlexureLeaves = ({ model, data, mujoco, sceneGraph }: FlexureLeavesProps) => {
   const hiddenNodeIds = useStore((state) => state.hiddenNodeIds);
   const leaves = useMemo(() => collectLeaves(sceneGraph, new Set(hiddenNodeIds)), [sceneGraph, hiddenNodeIds]);
-  useEffect(() => () => { for (const l of leaves) l.geometry.dispose(); }, [leaves]);
+  // Each mesh owns its geometry (R3F disposes it on unmount); the frame loop
+  // writes the bent shape into it, reaching it through these refs.
+  const meshes = useRef<Record<string, THREE.Mesh | null>>({});
 
   // Body and joint-position addresses of each leaf in the compiled model.
   const addresses = useMemo(() => {
@@ -94,7 +98,6 @@ export const FlexureLeaves = ({ model, data, mujoco, sceneGraph }: FlexureLeaves
 
   const point = useRef<[number, number, number]>([0, 0, 0]);
   const bent = useRef<[number, number, number]>([0, 0, 0]);
-
   useFrame(() => {
     const st = useStore.getState();
     if (model !== st.model || data !== st.data) return;
@@ -102,11 +105,17 @@ export const FlexureLeaves = ({ model, data, mujoco, sceneGraph }: FlexureLeaves
     if (!model || !data) return;
     for (const l of leaves) {
       const a = addresses.get(l.key);
-      if (!a) continue;
+      const mesh = meshes.current[l.key];
+      if (!a || !mesh) continue;
+      const geometry = mesh.geometry;
+      if (!geometry.getAttribute('position') || geometry.getAttribute('position').array.length !== l.rest.length) {
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(l.rest.length), 3));
+        geometry.setIndex(l.index);
+      }
       const q = a.qadr >= 0 ? data.qpos[a.qadr] : 0;
       const o = a.body * 3, m = data.xmat, r = a.body * 9;
       const px = data.xpos[o], py = data.xpos[o + 1], pz = data.xpos[o + 2];
-      const pos = l.geometry.attributes.position as THREE.BufferAttribute;
+      const pos = geometry.getAttribute('position') as THREE.BufferAttribute;
       const arr = pos.array as Float32Array;
       const p = point.current, b = bent.current;
       for (let i = 0; i < arr.length; i += 3) {
@@ -118,8 +127,8 @@ export const FlexureLeaves = ({ model, data, mujoco, sceneGraph }: FlexureLeaves
         arr[i + 2] = pz + m[r + 6] * b[0] + m[r + 7] * b[1] + m[r + 8] * b[2];
       }
       pos.needsUpdate = true;
-      l.geometry.computeVertexNormals();
-      l.geometry.computeBoundingSphere();
+      geometry.computeVertexNormals();
+      geometry.computeBoundingSphere();
     }
   });
 
@@ -127,7 +136,8 @@ export const FlexureLeaves = ({ model, data, mujoco, sceneGraph }: FlexureLeaves
   return (
     <>
       {leaves.map((l) => (
-        <mesh key={l.key} geometry={l.geometry} castShadow receiveShadow frustumCulled={false} matrixAutoUpdate={false}>
+        <mesh key={l.key} ref={(el: THREE.Mesh | null) => { meshes.current[l.key] = el; }} castShadow receiveShadow frustumCulled={false} matrixAutoUpdate={false}>
+          <bufferGeometry />
           <meshStandardMaterial color={l.color} roughness={0.55} transparent={l.opacity < 1} opacity={l.opacity} />
         </mesh>
       ))}
