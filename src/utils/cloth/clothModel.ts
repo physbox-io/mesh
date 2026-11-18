@@ -130,6 +130,9 @@ function chainLineRuns(lines: { name: string; path: number[] }[], along: string)
 }
 
 /** A trim placed on a line: at `point`, or `t` of the way on to `toward`; its row's offset, its run, and whether it ends it. */
+/** How far apart the two sides of an opening start where it is not done up, metres. */
+const OPEN_GAP = 0.001;
+
 interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean; /** Done up (a fastening's part of the run below how far it is fastened). */ closed: boolean; /** How far up its run, 0 to 1 from the bottom (a fastening's). */ along?: number; /** A point of the cloth on its side of its line (a seam's two panels both hold the line): drawn on the panel that holds it. */ sideOf?: number }
 
 let trimRuns = 0;
@@ -922,6 +925,27 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         const over = panelSide[claimed.get(g)!] === lap ? g : panelSide[secondPanel.get(g)!] === lap ? dup : -1, n = shellNormals[g];
         if (over < 0 || !n) continue;
         for (let c = 0; c < 3; c++) x0[over][c] += LAP_OFF * n[c];
+      }
+    }
+    // Where an opening is not done up, its two sides start a hair apart, each
+    // drawn into its own panel: copies of one point on top of each other met
+    // at every look of continuous collision (clothCcd), which could not part
+    // them and held the cloth round them still (a puffer's front, undone at
+    // the neck).
+    if (!asPieces) {
+      const into = new Map<number, number[]>();
+      for (const [g, p2] of openSecond) if (!fastenAt.has(g) && openFirst.has(g)) { into.set(g, [0, 0, 0]); into.set(p2, [0, 0, 0]); }
+      if (into.size) {
+        for (let t = 0; t < tris.length; t += 3) for (let q = 0; q < 3; q++) {
+          const acc = into.get(tris[t + q]);
+          if (!acc) continue;
+          const p = x0[tris[t + q]];
+          for (let c = 0; c < 3; c++) acc[c] += (x0[tris[t]][c] + x0[tris[t + 1]][c] + x0[tris[t + 2]][c]) / 3 - p[c];
+        }
+        for (const [p, acc] of into) {
+          const l = Math.hypot(acc[0], acc[1], acc[2]);
+          if (l > 1e-12) for (let c = 0; c < 3; c++) x0[p][c] += (acc[c] / l) * (OPEN_GAP / 2);
+        }
       }
     }
     // Elastic in its casings along the garment's lines.

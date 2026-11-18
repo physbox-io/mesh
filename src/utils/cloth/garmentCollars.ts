@@ -44,6 +44,8 @@ const LAYER_OFF = 0.0045;
 const STAND_LEAN = 0.27, STAND_CLEAR = 0.003;
 /** A lapel's gorge follows the neckline into its roll line, turned at most this far from square to the roll line, radians. */
 const GORGE_TURN = Math.PI / 6;
+/** How far apart a collar's two ends start where they meet round a closed neckline, metres. */
+const END_GAP = 0.001;
 
 /**
  * The cuts that make lapels: each front cut along its roll line, a plane
@@ -555,6 +557,17 @@ export function collarPieces(collar: GarmentCollar, run0: number[], closed: bool
     const ang = Math.PI / 2 - Math.atan2(up[1], up[0]), ca = Math.cos(ang), sa = Math.sin(ang);
     for (let l = 0; l < uv.length; l++) { const [u, v] = uv[l]; uv[l] = [ca * u - sa * v, sa * u + ca * v]; }
     const start = pts.map((q) => ctx.toWorld(q));
+    // Round a closed neckline its two ends meet: they start a hair apart
+    // (each drawn toward its own next column), not on top of each other,
+    // where continuous collision (clothCcd) found them meeting at every look
+    // and held the collar round them still. Its neck point stays shared.
+    if (closed) for (const [a, b] of [[0, 1], [n - 1, n - 2]]) {
+      if (a < i0 || a > i1 || b < i0 || b > i1) continue;
+      for (let j = Math.max(j0, 1); j <= j1; j++) {
+        const d = sub(start[loc(b, j)], start[loc(a, j)]), l = len(d);
+        if (l > 1e-9) start[loc(a, j)] = add(start[loc(a, j)], d, END_GAP / 2 / l);
+      }
+    }
     const shared: AddOnPiece['shared'] = [];
     for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) { const r = sharedOf(i, j); if (r) shared.push({ local: loc(i, j), ...r }); }
     const isShared = new Set(shared.map((q) => q.local));
