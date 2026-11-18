@@ -317,9 +317,9 @@ export const windInstrumentsPreset: SceneGraph = (() => {
         type: 'slide',
         axis: [0, 0, -1],
         pos: [0, 0, 0],
-        stiffness: 38,
-        springref: 0,
-        damping: 1.8,
+        stiffness: 110,
+        springref: -0.003,
+        damping: 1.1,
         limited: true,
         range: [0, 0.013],
       },
@@ -529,9 +529,9 @@ if (tCycle >= 6.50 && tCycle < 12.90) {
   const st = api.state || (api.state = {});
   st.breathKPa = breath;
   st.embouchureHz = lipHz;
-  if (vMask & 1) api.applyJointForce('cornet_valve_1', 0.90);
-  if (vMask & 2) api.applyJointForce('cornet_valve_2', 0.90);
-  if (vMask & 4) api.applyJointForce('cornet_valve_3', 0.90);
+  if (vMask & 1) api.applyJointForce('cornet_valve_1', 2.4);
+  if (vMask & 2) api.applyJointForce('cornet_valve_2', 2.4);
+  if (vMask & 4) api.applyJointForce('cornet_valve_3', 2.4);
 } else {
   const st = api.state || (api.state = {});
   st.breathKPa = 0;

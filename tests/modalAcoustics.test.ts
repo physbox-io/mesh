@@ -513,19 +513,51 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       return box.size[1];
     }
 
-    // 3. Step windInstrumentsPreset across both Clarinet (0..6.4s) and 3-Valve Cornet (6.5..7.5s) "Ode to Joy" phrases!
+    // 3. Step windInstrumentsPreset across BOTH Clarinet (0..6.4s) and 3-Valve Cornet (6.5..12.9s) "Ode to Joy" phrases,
+    //    verifying every single Cornet note is in tune (<= 4 cents) at its live MuJoCo valve positions!
     const simWind = await simulate(windInstrumentsPreset);
     try {
       let maxClarKey = 0;
       let maxCornetValve = 0;
-      for (let step = 0; step < 7200; step++) {
+      const cornetSchedule: [number, number, string][] = [
+        [6.70, 494, 'B4'],
+        [7.10, 494, 'B4'],
+        [7.50, 523, 'C5'],
+        [7.90, 587, 'D5'],
+        [8.30, 587, 'D5'],
+        [8.70, 523, 'C5'],
+        [9.10, 494, 'B4'],
+        [9.50, 440, 'A4'],
+        [9.90, 392, 'G4'],
+        [10.30, 392, 'G4'],
+        [10.70, 440, 'A4'],
+        [11.10, 494, 'B4'],
+        [11.60, 440, 'A4'],
+        [12.02, 392, 'G4'],
+        [12.45, 392, 'G4'],
+      ];
+      let nextCheckIdx = 0;
+      for (let step = 0; step < 12600; step++) {
         simWind.step(1);
         maxClarKey = Math.max(maxClarKey, simWind.jointPos('clarinet_key_4'));
         maxCornetValve = Math.max(maxCornetValve, simWind.jointPos('cornet_valve_1'));
+        if (nextCheckIdx < cornetSchedule.length && simWind.time() >= cornetSchedule[nextCheckIdx][0]) {
+          const [, lipHz, expectedNote] = cornetSchedule[nextCheckIdx++];
+          const liveValves = {
+            cornet_valve_1: simWind.jointPos('cornet_valve_1'),
+            cornet_valve_2: simWind.jointPos('cornet_valve_2'),
+            cornet_valve_3: simWind.jointPos('cornet_valve_3'),
+          };
+          const liveBore = extractBoreWaveguide(bugleNode, liveValves)!;
+          const liveSolved = solvePlayableWindVoice(liveBore, 3.0, lipHz);
+          const info = hzToNoteInfo(liveSolved.pitchHz);
+          expect(info.note).toBe(expectedNote);
+          expect(Math.abs(info.cents)).toBeLessThanOrEqual(4);
+        }
       }
-      expect(simWind.time()).toBeGreaterThan(7.0);
+      expect(nextCheckIdx).toBe(cornetSchedule.length);
       expect(maxClarKey).toBeGreaterThan(0.08);
-      expect(maxCornetValve).toBeGreaterThan(0.005);
+      expect(maxCornetValve).toBeGreaterThan(0.011);
     } finally {
       simWind.dispose();
     }

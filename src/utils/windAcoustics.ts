@@ -261,7 +261,8 @@ export function extractBoreWaveguide(
     for (const vj of spec.valveJoints) {
       const qVal = Math.abs(jointPositions[vj.jointName] ?? 0);
       const fullStroke = Math.max(0.003, vj.strokeM ?? 0.012);
-      const engage = Math.max(0, Math.min(1, (qVal - 0.0015) / (fullStroke * 0.65)));
+      // Real piston valve ports switch tubing knuckles cleanly across the middle 35%..75% of stroke
+      const engage = Math.max(0, Math.min(1, (qVal - fullStroke * 0.35) / (fullStroke * 0.40)));
       totalSemitones += vj.semitones * engage;
     }
     valveLengthRatio = Math.pow(2, totalSemitones / 12);
@@ -509,13 +510,14 @@ export function solvePlayableWindVoice(
       active: true,
       pitchHz: +pitchHz.toFixed(2),
       modeIndex: modeIdx,
-      amplitude: +amp.toFixed(4),
-      drive: +(0.46 + 0.38 * bNorm).toFixed(4),
-      formantHz: +Math.max(460, Math.min(1280, pitchHz * 2.0)).toFixed(1),
-      formantGainDb: 4.5,
-      bellLowpassHz: +Math.max(540, Math.min(2900, Math.min(bellCut * 2.1, pitchHz * (1.85 + 3.35 * bNorm)))).toFixed(1),
-      bellQ: 1.25,
-      noiseGain: +(amp * 0.018).toFixed(5),
+      amplitude: +(amp * 1.08).toFixed(4),
+      drive: +(0.58 + 0.36 * bNorm).toFixed(4),
+      // Classic Benade brass bell formant (~950–1280 Hz) gives warm, noble horn body
+      formantHz: +Math.max(720, Math.min(1280, 520 + pitchHz * 1.35)).toFixed(1),
+      formantGainDb: 5.0,
+      bellLowpassHz: +Math.max(620, Math.min(2350, Math.min(bellCut * 1.9, pitchHz * (1.7 + 2.75 * bNorm)))).toFixed(1),
+      bellQ: 1.05,
+      noiseGain: +(amp * 0.016).toFixed(5),
     };
   }
 
