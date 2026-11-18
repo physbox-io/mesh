@@ -38,7 +38,6 @@ const THROUGH = 2e-4;
 const STARTS_CROSSED: Record<string, number> = {
   urban_collection: 12,
   shirt_and_jacket_on_form: 6,
-  gathers_and_pleats_on_form: 16,
 };
 
 describe('cloth never passes through cloth', () => {
