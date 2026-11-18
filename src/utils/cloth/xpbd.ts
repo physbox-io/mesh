@@ -429,14 +429,15 @@ export class ClothSim {
     const tangle = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches));
     const builtCrossed = findCrossings(this.x, tangle);
     this.ccdOf().setTangled(builtCrossed);
-    // And while it is sewn into place, the pieces a builder made through each
+    // And while it is sewn into place, two pieces a builder made through each
     // other free of each other wholly: being sewn on is what carries a piece
     // out (a bow modelled through a gown's back).
     {
       const piece = new Int32Array(this.n);
       let k = 0;
       for (const pc of this.pieces) for (const g of pc.model.groups) { for (const i of g.particles) piece[pc.base + i] = k; k++; }
-      this.ccdOf().setFreePieces(piece, builtCrossed.map((c) => [piece[c.a], piece[this.tris[3 * c.t]]] as [number, number]));
+      // Two pieces, not a piece and itself: a pleat folded through itself is held at its crossings, as running.
+      this.ccdOf().setFreePieces(piece, builtCrossed.map((c) => [piece[c.a], piece[this.tris[3 * c.t]]] as [number, number]).filter(([a, b]) => a !== b));
     }
     const built = Float64Array.from(this.x);
     this.settle(CLOTH_SUBSTEP);
