@@ -58,8 +58,26 @@ export interface ClothTrim {
   /** Its run along a line, in order (a zip's tape is drawn through one), and whether it ends one (where a zip's slider sits). */
   run?: number;
   end?: boolean;
+  /** A zip's tooth: which of the garment's trims it is (ClothModel.zips) and how far up its run, 0 to 1 from the bottom; the slider rides to the top tooth done up. */
+  zip?: { trim: number; at: number };
   /** Drawn on the cloth's back face (the way its normal points is not its outside here). */
   flip?: boolean;
+}
+
+/**
+ * A zip along an opening, done up and undone as the scene runs: the two
+ * sides' particles at each point of its run (`pairs`, two a pair), how far up
+ * the run each is (0 to 1 from the bottom, rising), each pair's sew time as
+ * built, and how far it is done up. A pair is held shut where its place is at
+ * or below `fastened`; the slider sits there.
+ */
+export interface ClothZip {
+  /** Its index in the garment's trims. */
+  trim: number;
+  pairs: number[];
+  at: number[];
+  sew: number[];
+  fastened: number;
 }
 
 const TRIM_DEFAULTS: Record<GarmentTrim['kind'], { size: number; spacing: number; rgba: number[] }> = {
@@ -112,7 +130,7 @@ function chainLineRuns(lines: { name: string; path: number[] }[], along: string)
 }
 
 /** A trim placed on a line: at `point`, or `t` of the way on to `toward`; its row's offset, its run, and whether it ends it. */
-interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean; /** Done up (a fastening's part of the run below how far it is fastened). */ closed: boolean; /** A point of the cloth on its side of its line (a seam's two panels both hold the line): drawn on the panel that holds it. */ sideOf?: number }
+interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean; /** Done up (a fastening's part of the run below how far it is fastened). */ closed: boolean; /** How far up its run, 0 to 1 from the bottom (a fastening's). */ along?: number; /** A point of the cloth on its side of its line (a seam's two panels both hold the line): drawn on the panel that holds it. */ sideOf?: number }
 
 let trimRuns = 0;
 
@@ -190,10 +208,12 @@ function trimPoints(points: number[][], lines: { name: string; path: number[] }[
         const id = trimRuns++;
         // A zip's two sides interlock: the second's teeth half a tooth along from the first's.
         const wants = Array.from({ length: count }, (_, j) => (total - (count - 1) * spacing) / 2 + j * spacing + (trim.kind === 'zipper' && side % 2 ? spacing / 2 : 0));
-        // Done up from the bottom as far as it is fastened; a zip's slider at the top of that.
-        const up = doneUp(trim), closed = wants.map((w) => (topLast ? w / total : 1 - w / total) <= up + 1e-9);
+        // Done up from the bottom as far as it is fastened; a zip's slider at
+        // the top of that, or at its bottom when it is all undone (where it is
+        // taken hold of to do it up).
+        const up = doneUp(trim), along = wants.map((w) => (topLast ? w / total : 1 - w / total)), closed = along.map((a) => a <= up + 1e-9);
         const shut = closed.flatMap((c, j) => (c ? [j] : []));
-        const slider = trim.kind === 'zipper' && shut.length ? (topLast ? shut[shut.length - 1] : shut[0]) : -1;
+        const slider = trim.kind !== 'zipper' || !count ? -1 : shut.length ? (topLast ? shut[shut.length - 1] : shut[0]) : topLast ? 0 : count - 1;
         wants.forEach((want, j) => {
           let k = 1;
           while (k < run.length - 1 && at[k] < want) k++;
@@ -201,7 +221,7 @@ function trimPoints(points: number[][], lines: { name: string; path: number[] }[
           // Topstitching on the panel it is stitched through: along a seam,
           // drawn on both panels, each run showed twice, a little out of line (speckled).
           const sideOf = trim.kind === 'stitch' ? sideAt(run[k - 1], run[k], (offset0 ? Math.sign(offset0) : 1) * into) : undefined;
-          out.push({ trim, point: run[k - 1], toward: run[k], t, offset, run: id, end: j === slider, closed: closed[j], ...(sideOf !== undefined ? { sideOf } : {}) });
+          out.push({ trim, point: run[k - 1], toward: run[k], t, offset, run: id, end: j === slider, closed: closed[j], along: along[j], ...(sideOf !== undefined ? { sideOf } : {}) });
         });
       }
     });
@@ -310,6 +330,8 @@ export interface ClothModel {
   /** Pairs of particles sewn together, closing over the sew time. */
   stitches: number[];
   stitchSew?: number[];
+  /** Zips, held shut below their sliders (their pairs are not among the stitches). */
+  zips?: ClothZip[];
   /** Boning (clothRods). */
   rods?: RodConstraints;
   /** Pieces stiff enough to keep their shape, held rigid in their plane (clothBoards): particles, flat pattern, local triangles. */
@@ -517,6 +539,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
   let x0: number[][] = [];
   let mass: number[] = [];
   const stitches: number[] = [], stitchSew: number[] = [];
+  const zips: ClothZip[] = [];
   const addStitch = (a: number, b: number, sew = sewTime) => {
     if (a === b) return;
     stitches.push(a, b);
@@ -744,6 +767,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
             if (trim.at) { if (pointDrawn.has(pl)) continue; pointDrawn.add(pl); }
             if (pl.sideOf !== undefined && !localOfG.has(pl.sideOf)) continue;
             const tr = placedTrim(pl, (q) => localOfG.get(q));
+            if (tr && trim.kind === 'zipper' && pl.along !== undefined) tr.zip = { trim: (settings.trims ?? []).indexOf(trim), at: pl.along };
             // A zip's slider once, on the first panel its tooth is on: an
             // opening's points are on both its sides, and each drew one.
             if (tr?.end) { if (sliderDrawn.has(pl)) delete tr.end; else sliderDrawn.add(pl); }
@@ -828,21 +852,36 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // Fastened buttons, buckles or a zip along an open seam hold the two sides together.
     // Each point a fastening sits at or between (a zip's teeth fall between the line's points).
     // Only where it is done up (a zip undone at the neck stands open there).
-    const fastenAt = new Map<number, GarmentTrim>();
+    // A zip's pairs, all along it, done up or not: shut and opened as the
+    // scene runs, by its slider (ClothModel.zips); each point as far up as
+    // the lowest tooth on it.
+    const fastenAt = new Map<number, GarmentTrim>(), zipAt = new Map<GarmentTrim, Map<number, number>>();
     for (const pl of trimList) {
-      if (!pl.closed || (pl.trim.kind !== 'button' && pl.trim.kind !== 'buckle' && pl.trim.kind !== 'zipper')) continue;
+      if (pl.trim.kind === 'zipper') {
+        const at = zipAt.get(pl.trim) ?? zipAt.set(pl.trim, new Map()).get(pl.trim)!, up = pl.along ?? 0;
+        for (const g of pl.toward !== undefined ? [pl.point, pl.toward] : [pl.point]) at.set(g, Math.min(up, at.get(g) ?? Infinity));
+        continue;
+      }
+      if (!pl.closed || (pl.trim.kind !== 'button' && pl.trim.kind !== 'buckle')) continue;
       fastenAt.set(pl.point, pl.trim);
-      if (pl.toward !== undefined && pl.trim.kind === 'zipper') fastenAt.set(pl.toward, pl.trim);
     }
-    for (const [g] of fastenAt) {
-      if (!openPoints.has(g)) continue;
+    const pairOf = (g: number): [number, number, number] | null => {
+      if (!openPoints.has(g)) return null;
       if (asPieces) {
         const list = copies.get(g);
-        if (list && list.length >= 2) addStitch(list[0], list[1], sewTime);
-      } else {
-        const p1 = openFirst.get(g), p2 = openSecond.get(g);
-        if (p1 !== undefined && p2 !== undefined) addStitch(p1, p2, 0);
+        return list && list.length >= 2 ? [list[0], list[1], sewTime] : null;
       }
+      const p1 = openFirst.get(g), p2 = openSecond.get(g);
+      return p1 !== undefined && p2 !== undefined && p1 !== p2 ? [p1, p2, 0] : null;
+    };
+    for (const [g] of fastenAt) { const pr = pairOf(g); if (pr) addStitch(pr[0], pr[1], pr[2]); }
+    for (const [trim, at] of zipAt) {
+      const z: ClothZip = { trim: (settings.trims ?? []).indexOf(trim), pairs: [], at: [], sew: [], fastened: doneUp(trim) };
+      for (const [g, up] of [...at].sort((p, q) => p[1] - q[1])) {
+        const pr = pairOf(g);
+        if (pr) { z.pairs.push(pr[0], pr[1]); z.at.push(up); z.sew.push(pr[2]); }
+      }
+      if (z.at.length) zips.push(z);
     }
     // Elastic in its casings along the garment's lines.
     for (const el of settings.elastics ?? []) for (const { run, closed } of chainLineRuns([...shell.edges, ...shell.seams, ...(shell.marks ?? [])], el.along)) addElasticRun(run, closed, el);
@@ -1103,7 +1142,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     elastics, elasticRest, elasticFlat, elasticAlpha,
     bends: bends.quads, bendWeights: bends.weights, bendArea: bends.area, bendRest: bends.rest, bendStiffness: bends.scale,
     limits: limitPairs, limitRest,
-    stitches, stitchSew, tacks, ties, groups, ...(boards.length ? { boards } : {}),
+    stitches, stitchSew, ...(zips.length ? { zips } : {}), tacks, ties, groups, ...(boards.length ? { boards } : {}),
     ...(rods.links.length ? { rods } : {}),
   };
 }

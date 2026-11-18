@@ -14,6 +14,7 @@ import {
 } from '../utils/hydrostatics';
 import type {
   BuiltResult,
+  ClothZipState,
   ConstraintBrokenEvent,
   FrameSnapshot,
   ImpactEvent,
@@ -326,6 +327,8 @@ export class PhysicsWorkerClient {
     voices: import('../workers/physicsWorkerProtocol').AeroVoiceTelemetry[],
     snaps: import('../workers/physicsWorkerProtocol').AeroSnapEvent[],
   ) => void) | null = null;
+  /** A zip's slider let go in the viewport, done up this far. */
+  onClothZip: ((zip: ClothZipState) => void) | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });
@@ -378,6 +381,9 @@ export class PhysicsWorkerClient {
           break;
         case 'AERO_AUDIO':
           this.onAeroAudio?.(msg.voices, msg.snaps);
+          break;
+        case 'CLOTH_ZIP':
+          this.onClothZip?.({ cloth: msg.cloth, trim: msg.trim, fastened: msg.fastened });
           break;
         case 'HEADLESS_RESULT': {
           this.headlessJudges.delete(msg.id);
@@ -535,7 +541,7 @@ export class PhysicsWorkerClient {
   }
   setDrag(nodeId: string | null, target: { x: number; y: number; z: number } | null) { this.worker.postMessage({ type: 'SET_DRAG', nodeId, target }); }
   /** Hold this point of the cloth with the drag that follows (its index as drawn); null for none. */
-  setClothGrab(vertex: number | null) { this.worker.postMessage({ type: 'SET_CLOTH_GRAB', vertex }); }
+  setClothGrab(vertex: number | null, point?: number[]) { this.worker.postMessage({ type: 'SET_CLOTH_GRAB', vertex, ...(point ? { point } : {}) }); }
   setKeys(keys: string[]) { this.worker.postMessage({ type: 'SET_KEYS', keys }); }
   setQpos(jointName: string, axis: number, value: number | readonly number[]) { this.worker.postMessage({ type: 'SET_QPOS', jointName, axis, value }); }
   setCtrl(actuatorName: string, value: number) { this.worker.postMessage({ type: 'SET_CTRL', actuatorName, value }); }

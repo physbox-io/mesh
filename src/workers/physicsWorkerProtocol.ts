@@ -99,6 +99,8 @@ export interface ClothTrimInfo {
   run?: number;
   /** The end of its run where a zip's slider sits. */
   end?: boolean;
+  /** A zip's tooth: its index in the garment's trims and how far up its run (0-1 from the bottom); the slider rides to the top tooth done up (FrameSnapshot.clothZips). */
+  zip?: { trim: number; at: number };
   /** Drawn on the cloth's back face (its normal is not its outside there: a clasp on a plain piece's flap). */
   flip?: boolean;
 }
@@ -123,7 +125,11 @@ export interface FrameSnapshot extends Partial<SimBuffers> {
   scriptState?: ScriptStateMap;
   /** The pull on each cloth tie this frame, newtons (absent without any). */
   clothTies?: { name: string; newtons: number }[];
+  /** How far each zip is done up this frame, 0-1 from the bottom: its cloth (body name), its index in the garment's trims (absent without any). */
+  clothZips?: ClothZipState[];
 }
+
+export interface ClothZipState { cloth: string; trim: number; fastened: number }
 
 export interface BuiltResult extends Partial<SimBuffers> {
   ok: boolean;
@@ -294,7 +300,7 @@ export type MainToWorkerMessage =
   | { type: 'RESUME' }
   | { type: 'SET_DRAG'; nodeId: string | null; target: DragTarget | null }
   /** The point of cloth the drag holds, by its index as drawn (flex vertadr + vertex); null for none. */
-  | { type: 'SET_CLOTH_GRAB'; vertex: number | null }
+  | { type: 'SET_CLOTH_GRAB'; vertex: number | null; /** Where it was pressed (world, m): a zip's slider or pull there is taken instead, and moved along its zip. */ point?: number[] }
   | { type: 'SET_KEYS'; keys: string[] }
   | { type: 'SET_QPOS'; jointName: string; axis: number; value: number | readonly number[] }
   | { type: 'SET_CTRL'; actuatorName: string; value: number }
@@ -512,6 +518,8 @@ export type WorkerToMainMessage =
   | { type: 'CONTACT_FRICTION'; contacts: ContinuousContactEvent[] }
   | { type: 'AUDIO_DAMPING'; contacts: AudioDampingEvent[] }
   | { type: 'AERO_AUDIO'; voices: AeroVoiceTelemetry[]; snaps: AeroSnapEvent[] }
+  /** A zip's slider let go: how far it is now done up, for the graph. */
+  | ({ type: 'CLOTH_ZIP' } & ClothZipState)
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   /** A headless run (`judgeImpacts`) has stopped at a blow and waits for HEADLESS_IMPACT_REPLY. */
   | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }

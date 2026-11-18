@@ -11,6 +11,8 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import { walkBodiesWorld } from '../bodyWorld';
 import { clothModel, type ClothModel } from './clothModel';
+import { garmentSettings } from './garments';
+import { doneUp } from './fastening';
 import { meshShape, sceneColliders, sceneMeshGeoms, type Collider } from './clothColliders';
 import { ClothSim, type ClothEnv } from './xpbd';
 
@@ -23,8 +25,12 @@ const modelCache = new Map<string, ClothModel>();
 
 export interface ClothWorld {
   sim: ClothSim;
-  /** What each cloth was built from, to tell whether a rebuild is the same cloth. */
+  /** What each cloth was built from, to tell whether a rebuild is the same cloth (how far its zips are done up aside: that is done to it as it runs). */
   keys: string[];
+  /** Each cloth's model, to carry over to a rebuild that only did a zip up or down. */
+  models: ClothModel[];
+  /** How far the graph had each zip done up (`<cloth>#<trim>`), to tell whether a rebuild asks for it to move. */
+  zipsAsked: Map<string, number>;
   /** Per cloth, which build of its form's geoms it was carried against (null: on no form). */
   formBuilds: (string | null)[];
   /** Pose the colliders from where MuJoCo has every body now. */
@@ -88,18 +94,26 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
     return found;
   };
   const keys: string[] = [], formBuilds: (string | null)[] = [];
-  const models = cloths.map(({ node, world }) => {
+  // How far each zip is done up, as the graph asks: done to the cloth as it
+  // runs (its slider moved), not built into it.
+  const zipsAsked = new Map<string, number>();
+  const models = cloths.map(({ node, world }, i) => {
     const draft = node.cloth?.garment, form = formNode(node);
     const cut = draft ? (form?.bodyForm ?? draft.form ?? null) : null;
+    const trims = draft ? garmentSettings(draft).trims : undefined;
+    trims?.forEach((t, k) => { if (t.kind === 'zipper') zipsAsked.set(`${node.name || node.id}#${k}`, doneUp(t)); });
     const spec = draft ? { ...node.cloth, garment: { ...draft, fitTo: undefined, form: undefined } } : node.cloth;
-    const key = JSON.stringify([node.name || node.id, spec, Array.from(world.elements), cut]);
+    const loose = draft ? { ...spec, garment: { ...spec!.garment!, trims: trims?.map((t) => (t.kind === 'zipper' ? { ...t, fastened: undefined } : t)) } } : spec;
+    const exact = JSON.stringify([node.name || node.id, spec, Array.from(world.elements), cut]);
+    const key = JSON.stringify([node.name || node.id, loose, Array.from(world.elements), cut]);
     keys.push(key);
     formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.filter((g) => g.csgDerived !== 'collider' && !g.colliderOf).length ?? 0]) : null);
-    let m = modelCache.get(key);
+    // The same cloth with only a zip moved: the model it runs as now.
+    let m = modelCache.get(exact) ?? (carry && previous?.keys[i] === key ? previous.models?.[i] : undefined);
     if (!m) {
       m = clothModel(node, world, scene.nodes);
       if (modelCache.size > 8) modelCache.clear();
-      modelCache.set(key, m);
+      modelCache.set(exact, m);
     }
     return m;
   });
@@ -112,9 +126,15 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
   const sim = new ClothSim(models, [...sceneColliders(scene.nodes), ...mujocoMeshColliders(mujoco, model, scene.nodes)]);
   sim.setPoses(bodyPose, geomPose);
   const sameForm = (i: number) => formBuilds[i] === null || previous!.formBuilds?.[i] === formBuilds[i];
-  if (carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i] && sameForm(i))) sim.restore(previous.sim.state());
+  const carried = carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i] && sameForm(i)) && sim.restore(previous.sim.state());
+  // A zip the graph now asks to be done up further or less, done so as it
+  // runs; otherwise each as it was carried (moved by its slider since).
+  for (const [k, f] of zipsAsked) {
+    const cut = k.lastIndexOf('#');
+    if (!carried || previous!.zipsAsked?.get(k) !== f) sim.setZip(k.slice(0, cut), Number(k.slice(cut + 1)), f);
+  }
   // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
   sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
-  return { sim, keys, formBuilds, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
+  return { sim, keys, models, zipsAsked, formBuilds, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
 }

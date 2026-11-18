@@ -58,6 +58,8 @@ export interface DataMirror {
   flexvert_xpos?: Float64Array;
   /** The pull on each cloth tie as of the latest frame. */
   clothTies?: { name: string; newtons: number }[];
+  /** How far each zip is done up as it runs (FrameSnapshot.clothZips). */
+  clothZips?: { cloth: string; trim: number; fastened: number }[];
 }
 
 /** The test hook that freezes per-frame updates. */

@@ -41,6 +41,14 @@ const GRAB_SPEED = 1.5;
  * fixed (no weight), 57 crossings; 200x, 10 over the cloth's own 4.
  */
 const GRAB_HEAVY = 200;
+/**
+ * A zip's slider (ClothModel.zips): how far it reaches up its run from where
+ * the teeth meet, holding the two sides apart to its throat at the top, m;
+ * how fast teeth it has run together close, m/s; and how near its slider or
+ * the pull hanging below it a press takes hold of it, and how far down the
+ * pull hangs, m (clothTrims draws the slider about 3 cm long, its pull 5 cm).
+ */
+const SLIDER_LONG = 0.03, SLIDER_THROAT = 0.01, ZIP_CLOSE_SPEED = 0.5, ZIP_REACH = 0.015, PULL_HANGS = 0.055;
 /** After its sew time, how long cloth sewn at the start is let hang before it is first drawn, seconds. */
 const PRESEW_REST = 0.5;
 /** Its step meanwhile, seconds. */
@@ -112,6 +120,11 @@ export class ClothSim {
   private bends: Int32Array; private bendWeights: Float64Array; private bendAlpha: Float64Array; private bendRest: Float64Array;
   private limits: Int32Array; private limitRest: Float64Array;
   private stitches: Int32Array; private stitchGap: Float64Array; private stitchSew: Float64Array;
+  /** Whether each stitch holds (a zip's pair, only where it is done up), and the gap a zip's pair is closing from (m, down to 0 at ZIP_CLOSE_SPEED). */
+  private stitchOn: Uint8Array; private stitchClose: Float64Array;
+  /** Each zip: its cloth, its trim, its pairs' stitches and places up the run (0-1), its length (m), how far it is done up and where its slider is being moved to. */
+  private zips: { cloth: string; trim: number; stitch: Int32Array; at: Float64Array; length: number; fastened: number; want: number }[] = [];
+  private zipGrabbed = -1;
   private rodLinks: Int32Array; private rodLinkRest: Float64Array; private rodBends: Int32Array; private rodBendRest: Float64Array; private rodBendAlpha: Float64Array;
   private tacks: { p: number; a: number; b: number; c: number; w0: number; w1: number; w2: number; offset: number; lift: boolean }[];
   private ties: { name: string; p: number; body: string | null; anchor: number[] | null; anchorWorld: number[] | null; from: number[]; sew: number; lambda: number }[];
@@ -235,12 +248,27 @@ export class ClothSim {
         if (best >= 0) { S.push(base + t.particle, target.base + best); SS.push(m.sewTime); }
       }
     }
+    // Zips: every pair along each, held only where it is done up.
+    for (const { model: m, base } of this.pieces) for (const z of m.zips ?? []) {
+      const first = S.length / 2, count = z.at.length;
+      let length = 0;
+      for (let k = 0; k < count; k++) {
+        S.push(base + z.pairs[2 * k], base + z.pairs[2 * k + 1]); SS.push(z.sew[k]);
+        if (k) {
+          const a = 3 * (base + z.pairs[2 * k]), b = 3 * (base + z.pairs[2 * k - 2]);
+          length += Math.hypot(this.x[a] - this.x[b], this.x[a + 1] - this.x[b + 1], this.x[a + 2] - this.x[b + 2]);
+        }
+      }
+      this.zips.push({ cloth: m.name, trim: z.trim, stitch: Int32Array.from({ length: count }, (_, k) => first + k), at: Float64Array.from(z.at), length, fastened: z.fastened, want: z.fastened });
+    }
     this.edges = Int32Array.from(E); this.edgeRest = Float64Array.from(ER); this.edgeMin = Float64Array.from(EM); this.edgeAlpha = Float64Array.from(EA);
     this.rodLinks = Int32Array.from(RL); this.rodLinkRest = Float64Array.from(RLR); this.rodBends = Int32Array.from(RB); this.rodBendRest = Float64Array.from(RBR); this.rodBendAlpha = Float64Array.from(RBA);
     this.elastics = Int32Array.from(EL); this.elasticFlat = Float64Array.from(ELF); this.elasticRest = Float64Array.from(ELR); this.elasticAlpha = Float64Array.from(ELA);
     this.bends = Int32Array.from(B); this.bendWeights = Float64Array.from(BR); this.bendAlpha = Float64Array.from(BA); this.bendRest = Float64Array.from(BC);
     this.limits = Int32Array.from(LP); this.limitRest = Float64Array.from(LR);
     this.stitches = Int32Array.from(S); this.stitchSew = Float64Array.from(SS); this.stitchGap = new Float64Array(S.length / 2);
+    this.stitchOn = new Uint8Array(S.length / 2).fill(1); this.stitchClose = new Float64Array(S.length / 2);
+    for (const z of this.zips) z.stitch.forEach((k, j) => { this.stitchOn[k] = z.at[j] <= z.fastened + 1e-9 ? 1 : 0; });
     this.tris = Int32Array.from(T); this.triCd = Float64Array.from(TC);
     this.colliders = colliders;
     this.contactN = new Float64Array(3 * n); this.contactPush = new Float64Array(n); this.contactMu = new Float64Array(n); this.contactHeld = new Float64Array(n);
@@ -399,7 +427,7 @@ export class ClothSim {
     // shows its cloth at rest: run through its sew time and a moment more,
     // then the clock starts with every stitch closed.
     let sewing = 0;
-    for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002) sewing = Math.max(sewing, this.stitchSew[k]);
+    for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchOn[k] && this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002) sewing = Math.max(sewing, this.stitchSew[k]);
     const dropped: number[] = [], pulls: { p: number; route: number[][]; started: boolean }[] = [];
     for (const pc of this.pieces) for (const i of pc.model.drop ?? []) dropped.push(pc.base + i);
     for (const pc of this.pieces) for (const pl of pc.model.pulls ?? []) pulls.push({ p: pc.base + pl.particle, route: [...(pl.via ?? []), pl.to], started: false });
@@ -417,7 +445,7 @@ export class ClothSim {
       for (let i = 0; i < n; i++) { const r = find(i); size.set(r, (size.get(r) ?? 0) + 1); }
       const moving = new Set<number>();
       for (let k = 0; k < this.stitchGap.length; k++) {
-        if (!(this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002)) continue;
+        if (!(this.stitchOn[k] && this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002)) continue;
         const a = find(this.stitches[2 * k]), b = find(this.stitches[2 * k + 1]);
         moving.add((size.get(a) ?? 0) <= (size.get(b) ?? 0) ? a : b);
       }
@@ -553,7 +581,7 @@ export class ClothSim {
       // had to be checked for collision (most of a step's cost).
       for (let sp = 0; sp < 2; sp++) {
         for (let k = 0; k < held.length; k++) if (region[E[2 * k]] || region[E[2 * k + 1]]) this.project(E[2 * k], E[2 * k + 1], held[k], 0);
-        for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchSew[k] <= 0 && (region[this.stitches[2 * k]] || region[this.stitches[2 * k + 1]])) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
+        for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchOn[k] && this.stitchSew[k] <= 0 && (region[this.stitches[2 * k]] || region[this.stitches[2 * k + 1]])) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
         this.solveTacks(region);
       }
       // What the holding nudged by no more than rounding, put back: else all of it reads as moved, and the collision check below looked over the whole scene each step.
@@ -592,7 +620,7 @@ export class ClothSim {
         }
         this.boards.solve(this.x, this.w);
         for (let k = 0; k < this.stitchGap.length; k++) {
-          if (this.stitchSew[k] <= 0) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
+          if (this.stitchOn[k] && this.stitchSew[k] <= 0) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
         }
         this.solveTacks();
         this.collide(CLOTH_THICKNESS, false);
@@ -625,6 +653,7 @@ export class ClothSim {
       x[k] += dx * step; x[k + 1] += dy * step; x[k + 2] += dz * step;
       v[k] = v[k + 1] = v[k + 2] = 0;
     }
+    if (this.zips.length) this.runZips(h);
     // Predict.
     for (let i = 0; i < n; i++) {
       if (!w[i]) continue;
@@ -657,11 +686,14 @@ export class ClothSim {
       // a sixth of a second a simulated second and held it no better).
       if (pass === STRETCH_PASSES - 1) this.boards.solve(x, w);
       // Stitches close from their starting gap to nothing over the sew time.
+      // A zip's pairs only where it is done up, those its slider has just
+      // run together closing from where they were.
       for (let k = 0; k < this.stitchGap.length; k++) {
+        if (!this.stitchOn[k]) continue;
         const sew = this.stitchSew[k];
-        const s = sew <= 0 ? 1 : Math.min(1, t / sew);
-        this.project(this.stitches[2 * k], this.stitches[2 * k + 1], this.stitchGap[k] * (1 - s), 0);
+        this.project(this.stitches[2 * k], this.stitches[2 * k + 1], sew <= 0 ? this.stitchClose[k] : this.stitchGap[k] * (1 - Math.min(1, t / sew)), 0);
       }
+      if (this.zips.length) this.sliderThroats();
       this.solveTacks();
       this.collide(CLOTH_THICKNESS, false);
       // And on the last pass of every substep: skipped there every other
@@ -1014,6 +1046,115 @@ export class ClothSim {
     this.grabTo = particle >= 0 && to ? to.slice(0, 3) : null;
   }
 
+  /**
+   * Zips (ClothModel.zips). Each substep: a slider being moved goes on along
+   * its zip toward where it is wanted, no faster than a hand pulls cloth, the
+   * teeth it passes shutting under it and opening over it; and the pairs it
+   * has run together close.
+   */
+  private runZips(h: number) {
+    for (const z of this.zips) {
+      if (z.want !== z.fastened) {
+        const step = (GRAB_SPEED * h) / Math.max(z.length, 1e-3);
+        z.fastened = z.want > z.fastened ? Math.min(z.want, z.fastened + step) : Math.max(z.want, z.fastened - step);
+        this.shutZip(z);
+      }
+      for (const k of z.stitch) if (this.stitchClose[k] > 0) this.stitchClose[k] = Math.max(0, this.stitchClose[k] - ZIP_CLOSE_SPEED * h);
+    }
+  }
+
+  /** A zip's pairs held where it is done up and let go above: those newly shut close from where they are. */
+  private shutZip(z: ClothSim['zips'][number]) {
+    const x = this.x;
+    z.stitch.forEach((k, j) => {
+      const on = z.at[j] <= z.fastened + 1e-9;
+      if (on === !!this.stitchOn[k]) return;
+      this.stitchOn[k] = on ? 1 : 0;
+      if (!on) { this.stitchClose[k] = 0; return; }
+      const a = 3 * this.stitches[2 * k], b = 3 * this.stitches[2 * k + 1];
+      this.stitchSew[k] = 0;
+      this.stitchClose[k] = Math.hypot(x[a] - x[b], x[a + 1] - x[b + 1], x[a + 2] - x[b + 2]);
+    });
+  }
+
+  /**
+   * The slider's throat: in it, just over where the teeth meet, the two sides
+   * held apart, wider toward its top, as a slider's wedge parts them. Above
+   * it they hang as they will.
+   */
+  private sliderThroats() {
+    const x = this.x;
+    for (const z of this.zips) {
+      const reach = SLIDER_LONG / Math.max(z.length, 1e-3);
+      z.stitch.forEach((k, j) => {
+        const above = z.at[j] - z.fastened;
+        if (above <= 1e-9 || above > reach) return;
+        const a = this.stitches[2 * k], b = this.stitches[2 * k + 1], ia = 3 * a, ib = 3 * b;
+        const apart = SLIDER_THROAT * (above / reach), d = Math.hypot(x[ia] - x[ib], x[ia + 1] - x[ib + 1], x[ia + 2] - x[ib + 2]);
+        if (d < apart && d > 1e-9) this.project(a, b, apart, 0);
+      });
+    }
+  }
+
+  /** Where along zip `z` (0-1 up its run) the cloth's line now comes nearest `p`, and how near (m). */
+  private alongZip(z: ClothSim['zips'][number], p: number[], from = 0, to = 1): { at: number; d: number } {
+    const x = this.x, mid = (j: number, c: number) => (x[3 * this.stitches[2 * z.stitch[j]] + c] + x[3 * this.stitches[2 * z.stitch[j] + 1] + c]) / 2;
+    let best = { at: z.fastened, d: Infinity };
+    for (let j = 0; j + 1 < z.stitch.length; j++) {
+      if (z.at[j + 1] < from || z.at[j] > to) continue;
+      const ax = mid(j, 0), ay = mid(j, 1), az = mid(j, 2), ux = mid(j + 1, 0) - ax, uy = mid(j + 1, 1) - ay, uz = mid(j + 1, 2) - az;
+      const uu = ux * ux + uy * uy + uz * uz;
+      // Not across a gap (two runs of one trim, each its own opening).
+      if (uu > 0.05 * 0.05) continue;
+      const u = uu > 0 ? Math.max(0, Math.min(1, ((p[0] - ax) * ux + (p[1] - ay) * uy + (p[2] - az) * uz) / uu)) : 0;
+      const d = Math.hypot(ax + ux * u - p[0], ay + uy * u - p[1], az + uz * u - p[2]);
+      if (d < best.d) best = { at: z.at[j] + (z.at[j + 1] - z.at[j]) * u, d };
+    }
+    return best;
+  }
+
+  /**
+   * The zip whose slider, or the pull hanging below it, is at `point`
+   * (world, m): within ZIP_REACH of its line from the pull's end to the
+   * slider's top. -1 if none.
+   */
+  zipAt(point: number[]): number {
+    let best = -1, bd = ZIP_REACH;
+    this.zips.forEach((z, i) => {
+      const L = Math.max(z.length, 1e-3), { d } = this.alongZip(z, point, z.fastened - PULL_HANGS / L, z.fastened + (0.5 * SLIDER_LONG) / L);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+  }
+
+  /**
+   * Zip `zip`'s slider held and drawn toward `to` (world, m), as a hand pulls
+   * it: it moves along the zip to where the cloth's line now comes nearest,
+   * not off it; the cloth is not pulled. Null lets it go where it is.
+   */
+  grabZip(zip: number | null, to: number[] | null) {
+    const was = this.zips[this.zipGrabbed];
+    if (was && zip !== this.zipGrabbed) was.want = was.fastened;
+    this.zipGrabbed = zip ?? -1;
+    const z = this.zips[this.zipGrabbed];
+    if (!z) return;
+    z.want = to ? Math.max(0, Math.min(1, this.alongZip(z, to).at)) : z.fastened;
+  }
+
+  /** How far each zip is done up (0-1 from the bottom), by its cloth and its index in the garment's trims. */
+  zipState(): { cloth: string; trim: number; fastened: number }[] {
+    return this.zips.map((z) => ({ cloth: z.cloth, trim: z.trim, fastened: z.fastened }));
+  }
+
+  /** Does a zip up as far as `fastened` (0-1) at once, as it runs; false if the cloth has no such zip. */
+  setZip(cloth: string, trim: number, fastened: number): boolean {
+    const z = this.zips.find((q) => q.cloth === cloth && q.trim === trim);
+    if (!z) return false;
+    z.fastened = z.want = Math.max(0, Math.min(1, fastened));
+    this.shutZip(z);
+    return true;
+  }
+
   renderSize(): number {
     return this.pieces.reduce((s, { model }) => s + model.groups.reduce((t, g) => t + g.particles.length, 0), 0);
   }
@@ -1024,14 +1165,19 @@ export class ClothSim {
   }
 
   /** Positions and velocities, and how far each stitch is sewn, to carry the cloth across a rebuild. */
-  state() { return { x: Float64Array.from(this.x), v: Float64Array.from(this.v), time: this.time, stitchSew: Float64Array.from(this.stitchSew), stitchGap: Float64Array.from(this.stitchGap) }; }
-  restore(s: { x: Float64Array; v: Float64Array; time: number; stitchSew?: Float64Array; stitchGap?: Float64Array }) {
+  state() { return { x: Float64Array.from(this.x), v: Float64Array.from(this.v), time: this.time, stitchSew: Float64Array.from(this.stitchSew), stitchGap: Float64Array.from(this.stitchGap), stitchOn: Uint8Array.from(this.stitchOn), stitchClose: Float64Array.from(this.stitchClose), zips: this.zips.map((z) => z.fastened) }; }
+  restore(s: { x: Float64Array; v: Float64Array; time: number; stitchSew?: Float64Array; stitchGap?: Float64Array; stitchOn?: Uint8Array; stitchClose?: Float64Array; zips?: number[] }) {
     if (s.x.length !== this.x.length) return false;
     this.x.set(s.x); this.v.set(s.v); this.prev.set(s.x); this.time = s.time; this.settled = true;
     // Its seams as sewn as they were: carried without, every stitch the
     // settle had sewn shut was held at the gap it started at, and on Run a
     // hood split open over the crown and a neckerchief tore off its band.
     if (s.stitchSew && s.stitchGap && s.stitchSew.length === this.stitchSew.length) { this.stitchSew.set(s.stitchSew); this.stitchGap.set(s.stitchGap); }
+    // Its zips as far done up as they were.
+    if (s.stitchOn && s.stitchClose && s.zips && s.stitchOn.length === this.stitchOn.length && s.zips.length === this.zips.length) {
+      this.stitchOn.set(s.stitchOn); this.stitchClose.set(s.stitchClose);
+      this.zips.forEach((z, i) => { z.fastened = z.want = s.zips![i]; });
+    }
     this.clearBudget.fill(0);
     // Carried as it was: what it carries crossed (none, once built so) left free to come apart.
     const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches)), crossings = findCrossings(this.x, m);

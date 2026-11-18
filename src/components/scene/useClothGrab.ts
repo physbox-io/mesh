@@ -3,7 +3,9 @@
  * point under the pointer follows (a hood pulled down, a hem lifted, a
  * scarf thrown back), let go where it is when released. The drag itself is
  * the body drag's (DragInteractionController moves the target and lets go);
- * this only tells the worker which point of the cloth it holds.
+ * this only tells the worker which point of the cloth it holds. Pressed on a
+ * zip's slider or the pull below it, the drag runs the slider along the zip
+ * instead (ClothSim.grabZip), doing it up or undoing it as it goes.
  */
 import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
@@ -28,7 +30,9 @@ export function useClothGrab(nodeId: string | undefined, flex: FlexInfo) {
       if (d < bd) { bd = d; best = c; }
     }
     const local = best % flex.vertnum;
-    getPhysicsWorkerClient().setClothGrab(flex.vertadr + local);
+    // Where it was pressed too: on a zip's slider or its pull, the worker takes
+    // the slider instead, and the drag moves it along the zip.
+    getPhysicsWorkerClient().setClothGrab(flex.vertadr + local, [e.point.x, -e.point.z, e.point.y]);
     setOrbitEnabled(false);
     st.setDraggedNodeId(nodeId);
     st.setDragDistance(e.distance);

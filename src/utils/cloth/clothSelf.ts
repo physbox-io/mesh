@@ -279,6 +279,8 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
       join(base + model.edges[e], base + model.edges[e + 1], model.edgeRest[e / 2]);
     }
     for (let s = 0; s < model.stitches.length; s += 2) join(base + model.stitches[s], base + model.stitches[s + 1], 0);
+    // A zip's two sides at each tooth, done up or not: they meet where it is shut, and the slider runs them together.
+    for (const z of model.zips ?? []) for (let s = 0; s < z.pairs.length; s += 2) join(base + z.pairs[s], base + z.pairs[s + 1], 0);
     for (const tk of model.tacks ?? []) for (const q of tk.tri) join(base + tk.particle, base + q, 0);
     const half = Math.max(MIN_SEP, model.material.thickness) / 2;
     for (let t = 0; t < model.tris.length; t += 3) { tris.push(base + model.tris[t], base + model.tris[t + 1], base + model.tris[t + 2]); triHalf.push(half); }

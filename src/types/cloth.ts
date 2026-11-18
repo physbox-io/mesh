@@ -330,6 +330,10 @@ export interface GarmentTrim {
    * zip done up, holding the two sides together (default true). A number is
    * how much of it is done up from the bottom, 0 to 1 (a zip undone at the
    * neck: 0.85; the top button open). Buttons on a stand are all or none.
+   * A zip's is done to it as the scene runs, not built in: changed while it
+   * runs, its slider moves there and its teeth shut or open without the
+   * garment being remade; dragging its slider (or the pull below it) in the
+   * viewport moves it along the zip and writes the result back here.
    */
   fastened?: boolean | number;
   /** For buttons on an opening: the wearer's side whose front laps over and carries the holes (default 'right'). */

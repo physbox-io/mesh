@@ -944,6 +944,8 @@ const joinedMass = (bId: number): number => {
 
 /** The point of cloth the current drag holds, by its index as drawn, if it holds cloth. */
 let clothGrabVertex: number | null = null;
+/** The zip whose slider the current drag holds (ClothSim.zipAt), if it holds one: moved along its zip, not the cloth. */
+let clothGrabZip = -1;
 
 const applyDragForce = () => {
   const mdl = model!;
@@ -3338,6 +3340,16 @@ const flushAeroAudio = () => {
   }
 };
 
+/** Lets go of the zip slider the drag held, and tells the main thread how far it is done up, for the graph. */
+const releaseClothZip = () => {
+  const zip = clothGrabZip;
+  clothGrabZip = -1;
+  if (!cloth) return;
+  cloth.sim.grabZip(null, null);
+  const z = cloth.sim.zipState()[zip];
+  if (z) post({ type: 'CLOTH_ZIP', ...z });
+};
+
 /** Moves the cloth on by a step, after MuJoCo's: it reads where every body has just got to. */
 const stepCloth = (dt: number) => {
   if (!cloth || !model) return;
@@ -3963,8 +3975,8 @@ const postScriptStatus = (force = false) => {
 
 /** The loads on the cloth's ties, for the inspector. Absent without any. */
 const clothFrame = () => {
-  const ties = cloth?.sim?.tieLoads();
-  return ties?.length ? { clothTies: ties } : {};
+  const ties = cloth?.sim?.tieLoads(), zips = cloth?.sim?.zipState();
+  return { ...(ties?.length ? { clothTies: ties } : {}), ...(zips?.length ? { clothZips: zips } : {}) };
 };
 
 const postFrame = () => {
@@ -4914,14 +4926,21 @@ const handleMessage = async (evt: MessageEvent) => {
         draggedNodeId = msg.nodeId ?? null;
         dragTarget = msg.target ?? null;
         // A drag that holds cloth: its point drawn to the target; let go with the drag.
-        if (clothGrabVertex !== null && cloth) {
+        // One that holds a zip's slider: the slider drawn along its zip.
+        if (clothGrabZip >= 0 && cloth) {
+          if (draggedNodeId && dragTarget) cloth.sim.grabZip(clothGrabZip, [dragTarget.x, dragTarget.y, dragTarget.z]);
+          else if (!draggedNodeId) releaseClothZip();
+        } else if (clothGrabVertex !== null && cloth) {
           if (draggedNodeId && dragTarget) cloth.sim.grab(clothGrabVertex, [dragTarget.x, dragTarget.y, dragTarget.z]);
           else if (!draggedNodeId) { cloth.sim.grab(null, null); clothGrabVertex = null; }
         }
         break;
       }
       case 'SET_CLOTH_GRAB': {
+        if (clothGrabZip >= 0) releaseClothZip();
         clothGrabVertex = msg.vertex;
+        clothGrabZip = msg.vertex !== null && msg.point && cloth ? cloth.sim.zipAt(msg.point) : -1;
+        if (clothGrabZip >= 0) { clothGrabVertex = null; cloth?.sim.grab(null, null); }
         if (msg.vertex === null) cloth?.sim.grab(null, null);
         break;
       }

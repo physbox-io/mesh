@@ -83,6 +83,8 @@ const cachedModesFor = (
   }
   return m;
 };
+import { garmentSettings } from '../utils/cloth/garments';
+import { doneUp } from '../utils/cloth/fastening';
 
 /**
  * Pre-computes and caches all 3D Vibro-Acoustic FIRs (`simulate3DVibroAcousticIR`)
@@ -472,6 +474,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           if (snap.flexvert_xpos && data.flexvert_xpos?.length === snap.flexvert_xpos.length) data.flexvert_xpos.set(snap.flexvert_xpos);
         }
         data.clothTies = snap.clothTies;
+        data.clothZips = snap.clothZips;
       }
       physicsFrameListener?.();
       syncLiveWindAudio();
@@ -599,6 +602,23 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       }
     };
     client.setSound(useSoundStore.getState().soundEnabled);
+    // A zip's slider let go in the viewport: the garment's trim done up as far,
+    // as the inspector's slider or MCP would set it. Not rebuilt: the cloth
+    // is done up so already.
+    client.onClothZip = ({ cloth, trim, fastened }) => {
+      const st = store().getState();
+      let node: SceneNode | undefined;
+      const find = (list: SceneNode[]) => { for (const n of list) { if (node) return; if (n.cloth && (n.name || n.id) === cloth) node = n; else find(n.children ?? []); } };
+      find(st.sceneGraph.nodes);
+      const draft = node?.cloth?.garment;
+      if (!node || !draft) return;
+      const trims = garmentSettings(draft).trims ?? [];
+      if (!trims[trim] || trims[trim].kind !== 'zipper') return;
+      const f = Math.round(fastened * 1000) / 1000;
+      if (Math.abs(doneUp(trims[trim]) - f) < 1e-3) return;
+      const next = trims.map((t, k) => (k === trim ? { ...t, fastened: f >= 1 ? true : f <= 0 ? false : f } : t));
+      st.updateNode(node.id, { cloth: { ...node.cloth!, garment: { ...draft, trims: next } } }, true);
+    };
     client.onError = (message, fatal, lastState) => {
       console.error('[PhysicsWorker]', message);
       if (fatal) {

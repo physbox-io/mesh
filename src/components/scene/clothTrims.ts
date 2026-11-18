@@ -9,6 +9,8 @@ import { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
+import { useStore } from '../../store/useStore';
+import type { DataMirror } from '../../types/sceneLayer';
 
 type Trim = NonNullable<FlexInfo['trims']>[number];
 
@@ -97,7 +99,12 @@ export function useClothTrims(flex: FlexInfo) {
       mesh.frustumCulled = false; mesh.visible = false;
       tapes.push({ items, mesh, geometry });
     }
-    return { groups, tapes };
+    // A zip's slider rides its run as it is done up and undone (the frame's
+    // clothZips): to the top tooth done up, or the bottom one when undone.
+    const runTeeth = new Map<number, Trim[]>();
+    for (const t of flex.trims ?? []) if (t.kind === 'zipper' && t.zip && t.run !== undefined) (runTeeth.get(t.run) ?? runTeeth.set(t.run, []).get(t.run)!).push(t);
+    for (const list of runTeeth.values()) list.sort((a, b) => a.zip!.at - b.zip!.at);
+    return { groups, tapes, runTeeth };
   }, [flex]);
   useEffect(() => () => {
     for (const { mesh } of built.groups) { mesh.geometry.dispose(); (mesh.material as THREE.Material).dispose(); }
@@ -125,8 +132,17 @@ export function useClothTrims(flex: FlexInfo) {
       at.addScaledVector(nv, h).addScaledVector(side, t.offset ?? 0);
     };
     const dummy = new THREE.Object3D(), tx = new THREE.Vector3(), tz = new THREE.Vector3(), basis = new THREE.Matrix4();
+    const zips = (useStore.getState().data as DataMirror | null)?.clothZips, cloth = flex.name.slice(0, flex.name.lastIndexOf('__'));
+    const sliderAt = (t: Trim): Trim => {
+      const teeth = t.run !== undefined ? built.runTeeth.get(t.run) : undefined, z = t.zip && zips?.find((q) => q.cloth === cloth && q.trim === t.zip!.trim);
+      if (!teeth?.length || !z) return t;
+      let at = teeth[0];
+      for (const q of teeth) if (q.zip!.at <= z.fastened + 1e-9) at = q;
+      return at;
+    };
     for (const { kind, items, mesh } of built.groups) {
-      items.forEach((t, i) => {
+      items.forEach((t0, i) => {
+        const t = kind === 'slider' ? sliderAt(t0) : t0;
         frame(t);
         if (ALONG.has(kind)) {
           // Local +x along the line; a slider's pull (its -x) hangs down it,
