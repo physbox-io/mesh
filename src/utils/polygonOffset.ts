@@ -324,8 +324,29 @@ function segmentIntersection(
   const ry = a2.y - a1.y;
   const sx = b2.x - b1.x;
   const sy = b2.y - b1.y;
+  const rLenSq = rx * rx + ry * ry;
+  const sLenSq = sx * sx + sy * sy;
+  if (rLenSq <= 1e-18 || sLenSq <= 1e-18) return null;
   const denom = rx * sy - ry * sx;
-  if (Math.abs(denom) < 1e-12) return null; // parallel, including collinear overlap
+  if (Math.abs(denom) <= 1e-11 * Math.sqrt(rLenSq * sLenSq)) {
+    // Collinear same-direction overlap (e.g. mitered edges meeting across a narrow U-slot):
+    // split at the midpoint of their shared overlap so splitLoops reconnects the outer span.
+    if (rx * sx + ry * sy <= 0) return null;
+    const qpx = b1.x - a1.x;
+    const qpy = b1.y - a1.y;
+    const perp = Math.abs(qpx * ry - qpy * rx) / Math.sqrt(rLenSq);
+    if (perp > 1e-7) return null;
+    const t0 = (qpx * rx + qpy * ry) / rLenSq;
+    const t1 = ((b2.x - a1.x) * rx + (b2.y - a1.y) * ry) / rLenSq;
+    const lo = Math.max(0, Math.min(t0, t1));
+    const hi = Math.min(1, Math.max(t0, t1));
+    if (hi - lo <= 1e-7) return null;
+    const ta = 0.5 * (lo + hi);
+    const pt = { x: a1.x + ta * rx, y: a1.y + ta * ry };
+    const tb = ((pt.x - b1.x) * sx + (pt.y - b1.y) * sy) / sLenSq;
+    if (ta <= 1e-9 || ta >= 1 - 1e-9 || tb <= 1e-9 || tb >= 1 - 1e-9) return null;
+    return { point: pt, ta, tb };
+  }
   const qpx = b1.x - a1.x;
   const qpy = b1.y - a1.y;
   const ta = (qpx * sy - qpy * sx) / denom;
@@ -405,7 +426,8 @@ function rawOffset(loop: Point2D[], delta: number, opt: Required<OffsetOptions>)
       // intersection sits — the quantity the miter limit caps.
       const half = Math.abs(sweep) / 2;
       const cosHalf = Math.cos(half);
-      if (cosHalf > 1e-6 && 1 / cosHalf <= opt.miterLimit) {
+      const limit = Math.max(1, opt.miterLimit);
+      if (cosHalf > 1e-6 && 1 / cosHalf <= limit) {
         const bisAng = startAng + sweep / 2;
         const reach = Math.abs(delta) / cosHalf;
         out.push({
@@ -414,8 +436,24 @@ function rawOffset(loop: Point2D[], delta: number, opt: Required<OffsetOptions>)
         });
         continue;
       }
-      // Past the limit the corner is bevelled, which is the straight line the
-      // two already-emitted offset endpoints make on their own.
+      // Past the limit the corner is bevelled perpendicular to the bisector at
+      // `limit * |delta|` so the bevel never cuts closer than |delta| to `b`.
+      const sinHalf = Math.sin(half);
+      if (sinHalf > 1e-6) {
+        const r = Math.abs(delta);
+        const bisAng = startAng + sweep / 2;
+        const ux = Math.cos(bisAng);
+        const uy = Math.sin(bisAng);
+        const sgnSweep = sweep >= 0 ? 1 : -1;
+        const vx = -sgnSweep * uy;
+        const vy = sgnSweep * ux;
+        const along = limit * r;
+        const halfChord = (r * (1 - limit * cosHalf)) / sinHalf;
+        out.push(
+          { x: b.x + ux * along - vx * halfChord, y: b.y + uy * along - vy * halfChord },
+          { x: b.x + ux * along + vx * halfChord, y: b.y + uy * along + vy * halfChord }
+        );
+      }
       continue;
     }
 
@@ -521,6 +559,26 @@ export function insertCrossings(curve: Point2D[]): TaggedPoint[] {
     out.push({ x: curve[i].x, y: curve[i].y, crossId: null });
     hits[i].sort((p, q) => p.t - q.t);
     for (const h of hits[i]) out.push({ x: h.point.x, y: h.point.y, crossId: h.id });
+  }
+  // Pair exact pinch points where two non-adjacent vertices touch without segment interior crossing.
+  const m = out.length;
+  for (let u = 0; u < m; u++) {
+    if (out[u].crossId !== null) continue;
+    let match = -1;
+    let count = 0;
+    for (let v = u + 2; v < m; v++) {
+      if (u === 0 && v === m - 1) continue;
+      if (out[v].crossId !== null) continue;
+      if (Math.hypot(out[u].x - out[v].x, out[u].y - out[v].y) <= 1e-7) {
+        match = v;
+        count++;
+      }
+    }
+    if (count === 1 && match >= 0) {
+      const id = nextId++;
+      out[u].crossId = id;
+      out[match].crossId = id;
+    }
   }
   return out;
 }

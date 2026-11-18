@@ -26,7 +26,13 @@
 
 import { runSheetJob, type SheetPart } from './sheetSimulation';
 import { enclosedVolume } from './simulationMesh';
-import type { Point2D, SheetUnfoldOptions, SheetUnfoldResult, UnfoldIsland } from './sheetUnfoldExporter';
+import {
+  clipFaceHolesToPolygon2D,
+  type Point2D,
+  type SheetUnfoldOptions,
+  type SheetUnfoldResult,
+  type UnfoldIsland,
+} from './sheetUnfoldExporter';
 import type { StockTransform } from './reliefCarveExporter';
 import type { AddSimulationRequest } from '../hooks/useAddSimulation';
 
@@ -296,13 +302,23 @@ export function foldSheetUnfold(
       }
     }
 
-    // The faces (including any interior cutouts/holes), each a slab behind the model side.
+    // The faces (including any interior cutouts/holes, clipped inside the face outline
+    // if a hole entered a bend setback zone), each a slab behind the model side.
     const parts: SheetPart[] = [];
     for (const f of island.faces) {
       const fr = frames.get(f.faceIndex);
       if (!fr || f.polygon2D.length < 3) continue;
+      const planOuter = f.polygon2D.map(plan);
+      const planHoles =
+        f.holes2D && f.holes2D.length > 0
+          ? clipFaceHolesToPolygon2D(
+              planOuter,
+              f.holes2D.map((h) => h.map(plan)),
+              0.04
+            ).holes
+          : [];
       parts.push({
-        loops: [f.polygon2D, ...(f.holes2D ?? [])].map((l) => l.map(plan)),
+        loops: [planOuter, ...planHoles],
         origin: fr.t,
         u: mulV(fr.r, [1, 0, 0]),
         v: mulV(fr.r, [0, 1, 0]),

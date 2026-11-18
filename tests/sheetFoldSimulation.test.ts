@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
 import { exportSheetUnfold, type SheetUnfoldOptions } from '../src/utils/sheetUnfoldExporter';
 import { foldSheetUnfold } from '../src/utils/sheetFoldSimulation';
@@ -105,5 +106,68 @@ describe('sheet fold simulation', () => {
     const f = fold(box(0.03, 0.02, 0.025), METAL, { kFactor: 0.3 });
     expect(f.deviation.maxMm).toBeGreaterThan(0.2);
     expect(f.deviation.maxMm).toBeLessThan(2);
+  });
+
+  it('folds 24- and 36-sided sheet-metal cylinders without premature setback clamping (< 0.05 mm deviation)', () => {
+    for (const facets of [24, 36]) {
+      const cylScene = scene({
+        id: `cyl_${facets}`,
+        name: `Cyl_${facets}`,
+        pos: [0, 0, 0],
+        geoms: [{ name: 'c', type: 'cylinder', size: [0.025, 0.04], facets }],
+        joints: [],
+        children: [],
+      } as SceneNode);
+      const opts = { mode: 'sheet_metal' as const, thicknessMm: 1.5, bendRadiusMm: 1.5, kFactor: 0.44 };
+      const res = exportSheetUnfold(cylScene, opts);
+      expect(res.success).toBe(true);
+      expect(res.warnings).toEqual([]);
+      const f = foldSheetUnfold(res, opts);
+      expect(f.deviation.maxMm).toBeLessThan(0.05);
+      closed(f);
+    }
+  });
+
+  it('warns and clips holes entering a bend setback zone so folded mesh stays closed and manifold', () => {
+    // Build a 40x40 mm base with a r=3 mm circular hole centered at (36, 20) (x in [33, 39])
+    // plus a 90° valley flange at x=40 (R=2, T=2 -> setback = 2.0 mm, trimmed edge at x=38).
+    const contour = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(40, 0),
+      new THREE.Vector2(40, 40),
+      new THREE.Vector2(0, 40),
+    ];
+    const hole = Array.from({ length: 16 }, (_, k) => {
+      const a = -(k / 16) * Math.PI * 2;
+      return new THREE.Vector2(36 + 3 * Math.cos(a), 20 + 3 * Math.sin(a));
+    });
+    const tris2D = THREE.ShapeUtils.triangulateShape(contour, [hole]);
+    const all2D = [...contour, ...hole];
+    const vertsM: number[] = [
+      ...all2D.flatMap((p) => [p.x / 1000, p.y / 1000, 0]),
+      0.04, 0, 0.025, 0.04, 0.04, 0.025,
+    ];
+    const f0 = all2D.length;
+    const f1 = all2D.length + 1;
+    const baseTris = tris2D.flatMap(([a, b, c]) => [a, b, c]);
+    // Flange at x=0.04: base traverses 1->2 ((40,0,0)->(40,40,0)), so valley flange (+Z, normal -X) traverses 2->1->f0->f1
+    const flangeTris = [2, 1, f0, 2, f0, f1];
+    const s = scene({
+      id: 'hole_bend',
+      name: 'HoleInBendZone',
+      pos: [0, 0, 0],
+      geoms: [{ name: 'm', type: 'mesh', size: [0.02, 0.02, 0.0125], renderVertices: vertsM, faces: [...baseTris, ...flangeTris] }],
+      joints: [],
+      children: [],
+    } as SceneNode);
+
+    const opts = { mode: 'sheet_metal' as const, thicknessMm: 2, bendRadiusMm: 2, kFactor: 0.44 };
+    const res = exportSheetUnfold(s, opts);
+    expect(res.success).toBe(true);
+    expect(res.warnings.some((w) => /enters .* bend setback zone/i.test(w))).toBe(true);
+
+    const f = foldSheetUnfold(res, opts);
+    closed(f);
+    expect(f.deviation.maxMm).toBeLessThan(0.05);
   });
 });

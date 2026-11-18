@@ -70,7 +70,7 @@ export const cutCommands: McpCommands = {
         : typeof msg.materialThicknessMm === 'number' && msg.materialThicknessMm > 0
           ? msg.materialThicknessMm
           : DEFAULT_SHEET_UNFOLD_OPTIONS.thicknessMm;
-      const options: SheetUnfoldOptions = {
+      const options: SheetUnfoldOptions & { material?: typeof state.material; machine?: 'laser' | 'cnc' } = {
         ...DEFAULT_SHEET_UNFOLD_OPTIONS,
         ...(mode === 'papercraft' || mode === 'sheet_metal' || mode === 'soft_goods' ? { mode } : {}),
         thicknessMm: thick,
@@ -79,6 +79,11 @@ export const cutCommands: McpCommands = {
         ...(typeof msg.bendRadiusMm === 'number' && msg.bendRadiusMm >= 0 ? { bendRadiusMm: msg.bendRadiusMm } : {}),
         ...(typeof msg.kFactor === 'number' && msg.kFactor >= 0 && msg.kFactor <= 1 ? { kFactor: msg.kFactor } : {}),
         ...(typeof msg.scaleFactor === 'number' && msg.scaleFactor > 0 ? { scaleFactor: msg.scaleFactor } : {}),
+        ...(typeof msg.tabWidthMm === 'number' && msg.tabWidthMm >= 0 ? { tabWidthMm: msg.tabWidthMm } : {}),
+        ...(typeof msg.seamAllowanceMm === 'number' && msg.seamAllowanceMm >= 0 ? { seamAllowanceMm: msg.seamAllowanceMm } : {}),
+        ...(typeof msg.stitchPitchMm === 'number' && msg.stitchPitchMm >= 0 ? { stitchPitchMm: msg.stitchPitchMm } : {}),
+        material: state.material,
+        machine,
       };
       const res = exportSheetUnfold(subject.scene, options);
       if (!res.success || !res.svg) return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };

@@ -3,11 +3,16 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
 import {
   exportSheetUnfold,
+  buildSheetUnfoldEtchUrl,
   clusterTrianglesToPolyFaces,
   polygonsOverlap2D,
   type Point2D,
   type UnfoldIsland,
 } from '../src/utils/sheetUnfoldExporter';
+import { offsetNestedLoops } from '../src/utils/polygonOffset';
+import { analyzeMesh } from '../src/utils/meshIntegrity';
+import { cutCommands } from '../src/hooks/mcp/cutCommands';
+import { useStore } from '../src/store/useStore';
 import { foldSheetUnfold, sheetFoldSimulationRequest } from '../src/utils/sheetFoldSimulation';
 import { createLattice, vertexAt, addFace, serializeCage } from '../src/utils/latticeMesh';
 import { latticeBracketPreset } from '../src/presets/latticeBracket';
@@ -952,5 +957,384 @@ describe('Sheet Unfold Outputter Audit Regression Suite (U-C1 .. U-L1)', () => {
     expect(res.svg).toContain('<rect x="0" y="240" width="220" height="240" data-operation="ghost"');
     expect(res.svg).toContain('Sheet 1 (220mm x 240mm, soft_goods)');
     expect(res.svg).toContain('Sheet 2 (220mm x 240mm, soft_goods)');
+  });
+
+  it('Audit #20-1: soft_goods preserves outer cut outlines on acute corners (<54°), tetrahedra (tet_soft), and U-slotted hairline-slit islands', () => {
+    // 1a. Standalone acute right triangle (37.6° corner < 54.1° miter limit threshold)
+    const tri: Point2D[] = [{ x: 0, y: 0 }, { x: 52, y: 0 }, { x: 52, y: 40 }];
+    const offRes = offsetNestedLoops([tri], 6, { joinStyle: 'miter', miterLimit: 2.2, arcTolerance: 0.05 });
+    expect(offRes.dropped).toEqual([]);
+    expect(offRes.paths).toHaveLength(1);
+    expect(offRes.paths[0].length).toBeGreaterThanOrEqual(4);
+    for (const pt of offRes.paths[0]) {
+      const minDist = Math.min(
+        pointToSegDist(pt, tri[0], tri[1]),
+        pointToSegDist(pt, tri[1], tri[2]),
+        pointToSegDist(pt, tri[2], tri[0])
+      );
+      expect(minDist).toBeGreaterThanOrEqual(6 - 0.06);
+    }
+
+    // 1b. Regular 4-face tetrahedron (`tet_soft`, seamAllowanceMm: 6)
+    const a = 0.06;
+    const hTet = a * Math.sqrt(2 / 3);
+    const rCirc = a / Math.sqrt(3);
+    const tetVerts = [
+      rCirc, 0, 0,
+      -rCirc * 0.5, (a * 0.5), 0,
+      -rCirc * 0.5, -(a * 0.5), 0,
+      0, 0, hTet,
+    ];
+    const tetFaces = [
+      0, 2, 1,
+      0, 1, 3,
+      1, 2, 3,
+      2, 0, 3,
+    ];
+    const tetNode: SceneNode = {
+      id: 'tet_soft',
+      name: 'TetraSoft',
+      pos: [0, 0, 0],
+      geoms: [{ name: 't', type: 'mesh', size: [a, a, hTet], renderVertices: tetVerts, faces: tetFaces }],
+      joints: [],
+      children: [],
+    };
+    const tetRes = exportSheetUnfold(makeScene([tetNode]), {
+      mode: 'soft_goods',
+      seamAllowanceMm: 6,
+      stitchPitchMm: 4,
+    });
+    expect(tetRes.success).toBe(true);
+    expect(tetRes.warnings).toEqual([]);
+    expect(tetRes.islands).toHaveLength(1);
+    expect(tetRes.islands[0].cutPolylines2D.length).toBeGreaterThanOrEqual(1);
+    expect(tetRes.svg).toMatch(/<g id="layer-cut"[\s\S]*?<path d="M [^"]+Z" \/>/);
+
+    // 1c. U-slotted box (100x80x20 mm with 8 mm slot x=[46,54], y=[30,80], seamAllowanceMm: 6)
+    const lat = createLattice(0.001);
+    const uCoords: [number, number][] = [
+      [0, 0], [100, 0], [100, 80], [54, 80], [54, 30], [46, 30], [46, 80], [0, 80],
+    ];
+    const bot = uCoords.map(([x, y]) => vertexAt(lat, x, y, 0));
+    const top = uCoords.map(([x, y]) => vertexAt(lat, x, y, 20));
+    // Bottom face (-Z outward: reverse of CCW +Z) and Top face (+Z outward: CCW)
+    addFace(lat, [...bot].reverse());
+    addFace(lat, top);
+    for (let i = 0; i < uCoords.length; i++) {
+      const ni = (i + 1) % uCoords.length;
+      addFace(lat, [bot[i], bot[ni], top[ni], top[i]]);
+    }
+    const uBoxNode: SceneNode = {
+      id: 'u_slot_soft',
+      name: 'USlotSoftBox',
+      pos: [0, 0, 0],
+      isLattice: true,
+      latticeCage: serializeCage(lat),
+      geoms: [],
+      joints: [],
+      children: [],
+    };
+    const uSoftRes = exportSheetUnfold(makeScene([uBoxNode]), {
+      mode: 'soft_goods',
+      seamAllowanceMm: 6,
+      stitchPitchMm: 4,
+    });
+    expect(uSoftRes.success).toBe(true);
+    expect(uSoftRes.warnings).toEqual([]);
+    for (const isl of uSoftRes.islands) {
+      expect(isl.cutPolylines2D.length).toBeGreaterThanOrEqual(1);
+      expect(isl.cutPolylines2D[0].length).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  it('Audit #20-2: warns and clips holes entering mountain/valley bend setback zones and keeps folded 3D mesh closed', () => {
+    const buildBracketWithHole = (opts: {
+      wMm: number;
+      dMm: number;
+      holeXMm: number;
+      holeRMm: number;
+      mountain: boolean;
+    }) => {
+      const { wMm, dMm, holeXMm, holeRMm, mountain } = opts;
+      const contour = [
+        new THREE.Vector2(0, 0),
+        new THREE.Vector2(wMm, 0),
+        new THREE.Vector2(wMm, dMm),
+        new THREE.Vector2(0, dMm),
+      ];
+      const hole = Array.from({ length: 20 }, (_, k) => {
+        const ang = -(k / 20) * Math.PI * 2;
+        return new THREE.Vector2(holeXMm + holeRMm * Math.cos(ang), dMm * 0.5 + holeRMm * Math.sin(ang));
+      });
+      const tris2D = THREE.ShapeUtils.triangulateShape(contour, [hole]);
+      const all2D = [...contour, ...hole];
+      const vertsM = all2D.flatMap((p) => [p.x / 1000, p.y / 1000, 0]);
+      const fZ = mountain ? -0.03 : 0.03;
+      const f0 = all2D.length;
+      const f1 = all2D.length + 1;
+      vertsM.push(wMm / 1000, 0, fZ, wMm / 1000, dMm / 1000, fZ);
+
+      const faces: number[] = [];
+      for (const [a, b, c] of tris2D) faces.push(a, b, c);
+      if (mountain) {
+        // Outward normal +X on x=wMm, z in [-30, 0]: (w,0,0)[1] -> (w,0,-30)[f0] -> (w,d,-30)[f1] -> (w,d,0)[2]
+        faces.push(1, f0, f1, 1, f1, 2);
+      } else {
+        // Valley fold (+Z): (w,d,0)[2] -> (w,0,0)[1] -> (w,0,+30)[f0] -> (w,d,+30)[f1]
+        faces.push(2, 1, f0, 2, f0, f1);
+      }
+      return makeScene([
+        {
+          id: mountain ? 'mtn_hole' : 'val_hole',
+          name: mountain ? 'MountainHoleBracket' : 'ValleyHoleBracket',
+          pos: [0, 0, 0],
+          geoms: [{ name: 'm', type: 'mesh', size: [0.025, 0.02, 0.015], renderVertices: vertsM, faces }],
+          joints: [],
+          children: [],
+        },
+      ]);
+    };
+
+    // Valley L-bracket (R=2, T=2 -> setback=2.0mm) with r=3mm hole at x=36 on 40x40 base
+    const valScene = buildBracketWithHole({ wMm: 40, dMm: 40, holeXMm: 36, holeRMm: 3, mountain: false });
+    const valRes = exportSheetUnfold(valScene, { mode: 'sheet_metal', bendRadiusMm: 2, thicknessMm: 2, kFactor: 0.44 });
+    expect(valRes.success).toBe(true);
+    expect(valRes.warnings.some((w) => /Hole 1.*90° valley bend setback zone/.test(w))).toBe(true);
+    const valFold = foldSheetUnfold(valRes, { bendRadiusMm: 2, thicknessMm: 2, kFactor: 0.44 });
+    const valIntegrity = analyzeMesh(Array.from(valFold.positions), Array.from(valFold.faces))!;
+    expect(valIntegrity.closed).toBe(true);
+    expect(valIntegrity.consistentlyWound).toBe(true);
+
+    // Mountain L-bracket (R=4, T=2 -> setback=6.0mm) with r=2.5mm hole at x=36 on 40x40 base
+    const mtnScene = buildBracketWithHole({ wMm: 40, dMm: 40, holeXMm: 36, holeRMm: 2.5, mountain: true });
+    const mtnRes = exportSheetUnfold(mtnScene, { mode: 'sheet_metal', bendRadiusMm: 4, thicknessMm: 2, kFactor: 0.44 });
+    expect(mtnRes.success).toBe(true);
+    expect(mtnRes.warnings.some((w) => /Hole 1.*90° mountain bend setback zone/.test(w))).toBe(true);
+    const mtnFold = foldSheetUnfold(mtnRes, { bendRadiusMm: 4, thicknessMm: 2, kFactor: 0.44 });
+    const mtnIntegrity = analyzeMesh(Array.from(mtnFold.positions), Array.from(mtnFold.faces))!;
+    expect(mtnIntegrity.closed).toBe(true);
+    expect(mtnIntegrity.consistentlyWound).toBe(true);
+
+    // 50x40x2 mm solid L-bracket shell (outer bottom z=0, x=[0,50]; outer right wall x=50, z=[0,40];
+    // inner top z=2, x=[0,48]; inner left wall x=48, z=[2,40]) with cylindrical through-bore at x=45, y=20, r=3 (R=2, T=2)
+    const boreN = 16;
+    const holeRingCW = Array.from({ length: boreN }, (_, k) => {
+      const a = -(k / boreN) * Math.PI * 2;
+      return new THREE.Vector2(45 + 3 * Math.cos(a), 20 + 3 * Math.sin(a));
+    });
+    const botOuter = [new THREE.Vector2(0, 0), new THREE.Vector2(50, 0), new THREE.Vector2(50, 40), new THREE.Vector2(0, 40)];
+    const topInner = [new THREE.Vector2(0, 0), new THREE.Vector2(48, 0), new THREE.Vector2(48, 40), new THREE.Vector2(0, 40)];
+    const botTris = THREE.ShapeUtils.triangulateShape(botOuter, [holeRingCW]);
+    const topTris = THREE.ShapeUtils.triangulateShape(topInner, [holeRingCW]);
+
+    const solidVerts: number[] = [];
+    const pushPt = (x: number, y: number, z: number) => {
+      solidVerts.push(x / 1000, y / 1000, z / 1000);
+      return solidVerts.length / 3 - 1;
+    };
+    const bIdx = [...botOuter, ...holeRingCW].map((p) => pushPt(p.x, p.y, 0));
+    const tIdx = [...topInner, ...holeRingCW].map((p) => pushPt(p.x, p.y, 2));
+    const wOut0 = pushPt(50, 0, 40), wOut1 = pushPt(50, 40, 40);
+    const wIn0 = pushPt(48, 0, 40), wIn1 = pushPt(48, 40, 40);
+
+    const solidFaces: number[] = [];
+    // Bottom (-Z outward -> reverse CCW)
+    for (const [a, b, c] of botTris) solidFaces.push(bIdx[a], bIdx[c], bIdx[b]);
+    // Inner horizontal (+Z outward -> CCW)
+    for (const [a, b, c] of topTris) solidFaces.push(tIdx[a], tIdx[b], tIdx[c]);
+    // Bore walls connecting bIdx[4..4+boreN-1] and tIdx[4..4+boreN-1]
+    for (let k = 0; k < boreN; k++) {
+      const kn = (k + 1) % boreN;
+      // holeRingCW is CW in XY, so k -> kn has inward normal toward center!
+      solidFaces.push(bIdx[4 + k], bIdx[4 + kn], tIdx[4 + kn], bIdx[4 + k], tIdx[4 + kn], tIdx[4 + k]);
+    }
+    // Outer vertical flange x=50 (+X outward): bIdx[1]=(50,0,0), bIdx[2]=(50,40,0), wOut1=(50,40,40), wOut0=(50,0,40)
+    solidFaces.push(bIdx[1], bIdx[2], wOut1, bIdx[1], wOut1, wOut0);
+    // Inner vertical flange x=48 (-X outward): tIdx[1]=(48,0,2), wIn0=(48,0,40), wIn1=(48,40,40), tIdx[2]=(48,40,2)
+    solidFaces.push(tIdx[1], wIn0, wIn1, tIdx[1], wIn1, tIdx[2]);
+    // Rim & side caps to close the 2mm thick L-shell
+    solidFaces.push(
+      // Left end x=0 (-X): bIdx[0], tIdx[0], tIdx[3], bIdx[3]
+      bIdx[0], tIdx[0], tIdx[3], bIdx[0], tIdx[3], bIdx[3],
+      // Top end z=40 (+Z): wIn0, wOut0, wOut1, wIn1
+      wIn0, wOut0, wOut1, wIn0, wOut1, wIn1,
+      // Front L-profile y=0 (-Y)
+      bIdx[0], bIdx[1], tIdx[1], bIdx[0], tIdx[1], tIdx[0],
+      bIdx[1], wOut0, wIn0, bIdx[1], wIn0, tIdx[1],
+      // Back L-profile y=40 (+Y)
+      bIdx[3], tIdx[3], tIdx[2], bIdx[3], tIdx[2], bIdx[2],
+      bIdx[2], tIdx[2], wIn1, bIdx[2], wIn1, wOut1
+    );
+
+    const solidLScene = makeScene([
+      {
+        id: 'solid_l_bore',
+        name: 'SolidLBore',
+        pos: [0, 0, 0],
+        geoms: [{ name: 'm', type: 'mesh', size: [0.025, 0.02, 0.02], renderVertices: solidVerts, faces: solidFaces }],
+        joints: [],
+        children: [],
+      },
+    ]);
+    const solidRes = exportSheetUnfold(solidLScene, {
+      mode: 'sheet_metal',
+      thicknessMm: 2,
+      bendRadiusMm: 2,
+      kFactor: 0.44,
+    });
+    expect(solidRes.success).toBe(true);
+    expect(solidRes.warnings.some((w) => /enters .* bend setback zone/i.test(w))).toBe(true);
+    const solidFold = foldSheetUnfold(solidRes, { thicknessMm: 2, bendRadiusMm: 2, kFactor: 0.44 });
+    const solidIntegrity = analyzeMesh(Array.from(solidFold.positions), Array.from(solidFold.faces))!;
+    expect(solidIntegrity.closed).toBe(true);
+    expect(solidIntegrity.consistentlyWound).toBe(true);
+  });
+
+  it('Audit #20-4: papercraft glue tabs never collide with their own concave U-pocket face', () => {
+    // 100x80 mm U-base with 8 mm pocket (x=[46,54], y=[30,80]) and boxed walls on the right pocket arm
+    // so `(54,80)->(54,30)` becomes a split seam with tabWidthMm = 12 (> 8 mm pocket width!).
+    const lat = createLattice(0.001);
+    const uPts: [number, number][] = [
+      [0, 0], [100, 0], [100, 80], [54, 80], [54, 30], [46, 30], [46, 80], [0, 80],
+    ];
+    const b = uPts.map(([x, y]) => vertexAt(lat, x, y, 0));
+    addFace(lat, b); // U-base (+Z normal)
+
+    // Boxed walls on right arm:
+    // Top-right wall on b[2]=(100,80) -> b[3]=(54,80) folding up into -Z (mountain)
+    const tr0 = vertexAt(lat, 100, 80, -25);
+    const tr1 = vertexAt(lat, 54, 80, -25);
+    addFace(lat, [b[2], tr0, tr1, b[3]]);
+    // Pocket-right wall on b[3]=(54,80) -> b[4]=(54,30), connected to top-right wall along vertical corner (54,80,0)->(54,80,-25)
+    const pr1 = vertexAt(lat, 54, 30, -25);
+    addFace(lat, [b[3], tr1, pr1, b[4]]);
+
+    const uTabNode: SceneNode = {
+      id: 'u_tab',
+      name: 'UTabConcave',
+      pos: [0, 0, 0],
+      isLattice: true,
+      latticeCage: serializeCage(lat),
+      geoms: [],
+      joints: [],
+      children: [],
+    };
+    const res = exportSheetUnfold(makeScene([uTabNode]), {
+      mode: 'papercraft',
+      tabWidthMm: 12,
+    });
+    expect(res.success).toBe(true);
+    expect(res.glueTabCount).toBeGreaterThanOrEqual(1);
+
+    // Every glue tab's interior (shrunk slightly off its own hinge base) must be disjoint from EVERY face (including ownFace!)
+    for (const isl of res.islands) {
+      for (const gt of isl.glueTabs) {
+        const t = gt.polygon2D;
+        const shrunk: Point2D[] = [
+          { x: t[0].x + (t[1].x - t[0].x) * 0.08, y: t[0].y + (t[1].y - t[0].y) * 0.08 },
+          t[1],
+          t[2],
+          { x: t[3].x + (t[2].x - t[3].x) * 0.08, y: t[3].y + (t[2].y - t[3].y) * 0.08 },
+        ];
+        for (const f of isl.faces) {
+          expect(polygonsOverlap2D(shrunk, f.polygon2D, 0.03)).toBe(false);
+        }
+      }
+    }
+
+    // No crossing cut segments in SVG
+    const cutSegs = parseSvgGroupSegments(res.svg, 'layer-cut');
+    for (let i = 0; i < cutSegs.length; i++) {
+      for (let j = i + 1; j < cutSegs.length; j++) {
+        expect(segmentsProperlyCross(cutSegs[i], cutSegs[j], 0.02)).toBe(false);
+      }
+    }
+  });
+
+  it('Audit #20-5: exportSheetUnfold etchUrl parity & EXPORT_CUT unfold parameter forwarding', async () => {
+    const b1: SceneNode = {
+      id: 'eb1',
+      name: 'EtchPart1',
+      pos: [0, 0, 0],
+      geoms: [{ name: 'g1', type: 'box', size: [0.03, 0.03, 0.03] }],
+      joints: [],
+      children: [],
+    };
+    const b2: SceneNode = {
+      id: 'eb2',
+      name: 'EtchPart2',
+      pos: [0.12, 0, 0],
+      geoms: [{ name: 'g2', type: 'box', size: [0.03, 0.03, 0.03] }],
+      joints: [],
+      children: [],
+    };
+    const twoPartScene = makeScene([b1, b2]);
+    const res = exportSheetUnfold(twoPartScene, {
+      mode: 'sheet_metal',
+      thicknessMm: 2.0,
+      bendRadiusMm: 3.0,
+      kFactor: 0.42,
+      sheetWidthMm: 250,
+      sheetHeightMm: 260,
+      material: 'aluminium' as never,
+      machine: 'laser',
+    });
+    expect(res.success).toBe(true);
+    expect(res.sheets.length).toBeGreaterThanOrEqual(2);
+    expect(res.etchUrl).toBeDefined();
+    expect(res.etchUrl).toContain('material=aluminium');
+    expect(res.etchUrl).toContain('machine=laser');
+    expect(res.etchUrl).toContain('sheets=250x260x2%2C250x260x2');
+
+    const asyncUrl = await buildSheetUnfoldEtchUrl(
+      res,
+      { thicknessMm: 2.0, material: 'aluminium' as never, machine: 'laser' },
+      'https://etch.physbox.io/'
+    );
+    expect(asyncUrl).toContain('material=aluminium');
+    expect(asyncUrl).toContain('machine=laser');
+    expect(asyncUrl).toContain('sheets=250x260x2%2C250x260x2');
+
+    // Verify EXPORT_CUT forwards bendRadiusMm, kFactor, scaleFactor, tabWidthMm, seamAllowanceMm, stitchPitchMm
+    useStore.getState().setStock({ widthMm: 500, depthMm: 400, thicknessMm: 2 });
+    const store = { ...useStore.getState(), sceneGraph: makeScene([b1]) };
+    const metalCut = (await cutCommands.EXPORT_CUT(
+      {
+        kind: 'unfold',
+        sheetMode: 'sheet_metal',
+        thicknessMm: 2.0,
+        bendRadiusMm: 3.5,
+        kFactor: 0.38,
+        scaleFactor: 1.5,
+      },
+      { store, toId: (v: unknown) => v } as never
+    )) as Record<string, unknown>;
+    expect(metalCut.ok).toBe(true);
+    const metalSvg = Buffer.from((metalCut.files as { base64: string }[])[0].base64, 'base64').toString('utf8');
+    expect(metalSvg).toContain('Scale=150%');
+    expect(metalSvg).toContain('UP 90° R3.5');
+
+    const softCut = (await cutCommands.EXPORT_CUT(
+      {
+        kind: 'unfold',
+        sheetMode: 'soft_goods',
+        seamAllowanceMm: 10,
+        stitchPitchMm: 8,
+      },
+      { store, toId: (v: unknown) => v } as never
+    )) as Record<string, unknown>;
+    expect(softCut.ok).toBe(true);
+
+    const paperNoTabs = (await cutCommands.EXPORT_CUT(
+      {
+        kind: 'unfold',
+        sheetMode: 'papercraft',
+        tabWidthMm: 0,
+      },
+      { store, toId: (v: unknown) => v } as never
+    )) as Record<string, unknown>;
+    expect(paperNoTabs.ok).toBe(true);
+    const paperSvg = Buffer.from((paperNoTabs.files as { base64: string }[])[0].base64, 'base64').toString('utf8');
+    expect(paperSvg).not.toContain('id="layer-seams-tabs"');
   });
 });

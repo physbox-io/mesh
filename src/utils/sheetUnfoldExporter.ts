@@ -19,10 +19,10 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { csgSourceGeoms, fromtoFrame } from './csg';
 import { isBoughtIn } from './boughtIn';
 import { isNodeRotationBaked } from './sceneTree';
-import { buildEtchHandoffUrl, etchBaseUrl } from './etchHandoff';
+import { buildEtchHandoffUrl, etchBaseUrl, HANDOFF_SOFT_LIMIT } from './etchHandoff';
 import type { MaterialId } from './feedsAndSpeeds';
 import { toBase64Url } from './shareLink';
-import { nestingDepths, offsetNestedLoops, pointInPolygon } from './polygonOffset';
+import { nestingDepths, offsetLoop, offsetNestedLoops, pointInPolygon } from './polygonOffset';
 
 export type SheetUnfoldMode = 'papercraft' | 'sheet_metal' | 'soft_goods';
 
@@ -346,6 +346,473 @@ function pointToSegmentDist2D(pt: Point2D, a: Point2D, b: Point2D): number {
   if (lenSq < 1e-12) return Math.hypot(pt.x - a.x, pt.y - a.y);
   const t = Math.max(0, Math.min(1, ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / lenSq));
   return Math.hypot(pt.x - (a.x + t * dx), pt.y - (a.y + t * dy));
+}
+
+function segmentToSegmentDist2D(a1: Point2D, a2: Point2D, b1: Point2D, b2: Point2D): number {
+  const d1x = a2.x - a1.x;
+  const d1y = a2.y - a1.y;
+  const d2x = b2.x - b1.x;
+  const d2y = b2.y - b1.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) > 1e-12) {
+    const dx = b1.x - a1.x;
+    const dy = b1.y - a1.y;
+    const t = (dx * d2y - dy * d2x) / denom;
+    const u = (dx * d1y - dy * d1x) / denom;
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return 0;
+  }
+  return Math.min(
+    pointToSegmentDist2D(a1, b1, b2),
+    pointToSegmentDist2D(a2, b1, b2),
+    pointToSegmentDist2D(b1, a1, a2),
+    pointToSegmentDist2D(b2, a1, a2)
+  );
+}
+
+/**
+ * Unzips consecutive 180-degree zero-width backtrack spikes (`a -> b -> c` where
+ * `b` folds right back along `a -> b`) so hairline slits between adjacent unfolded
+ * flaps do not break outward offsetting.
+ */
+function unzipBacktrackSlits2D(loop: Point2D[], tol: number = 1e-3): Point2D[] {
+  let pts = loop.map((p) => ({ ...p }));
+  let changed = true;
+  while (changed && pts.length >= 3) {
+    changed = false;
+    const deduped: Point2D[] = [];
+    for (const p of pts) {
+      const prev = deduped[deduped.length - 1];
+      if (!prev || Math.hypot(p.x - prev.x, p.y - prev.y) > tol) {
+        deduped.push(p);
+      } else {
+        changed = true;
+      }
+    }
+    while (
+      deduped.length > 2 &&
+      Math.hypot(deduped[0].x - deduped[deduped.length - 1].x, deduped[0].y - deduped[deduped.length - 1].y) <= tol
+    ) {
+      deduped.pop();
+      changed = true;
+    }
+    pts = deduped;
+    if (pts.length < 3) break;
+
+    const m = pts.length;
+    for (let i = 0; i < m; i++) {
+      const prev = pts[(i - 1 + m) % m];
+      const curr = pts[i];
+      const next = pts[(i + 1) % m];
+      const ux = curr.x - prev.x;
+      const uy = curr.y - prev.y;
+      const vx = next.x - curr.x;
+      const vy = next.y - curr.y;
+      const lu = Math.hypot(ux, uy);
+      const lv = Math.hypot(vx, vy);
+      if (lu <= tol || lv <= tol) {
+        pts.splice(i, 1);
+        changed = true;
+        break;
+      }
+      const dot = ux * vx + uy * vy;
+      const cross = ux * vy - uy * vx;
+      if (dot < 0 && Math.abs(cross) <= Math.min(lu, lv) * 2e-3) {
+        pts.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return pts.length >= 3 ? pts : [];
+}
+
+/**
+ * Heals both consecutive 180-degree backtrack slits and non-consecutive anti-parallel
+ * zero-width touching seam segments (splitting self-kissing C-frame loops into clean
+ * outer + inner loops).
+ */
+function healHairlineSlits2D(inputLoops: Point2D[][]): Point2D[][] {
+  const queue = inputLoops.map((l) => unzipBacktrackSlits2D(l, 1e-3)).filter((l) => l.length >= 3);
+  const out: Point2D[][] = [];
+  let splits = 0;
+
+  while (queue.length > 0) {
+    const lp = unzipBacktrackSlits2D(queue.shift()!, 1e-3);
+    if (lp.length < 3) continue;
+    if (splits >= 16) {
+      out.push(lp);
+      continue;
+    }
+
+    const n = lp.length;
+    let splitFound = false;
+    for (let i = 0; i < n && !splitFound; i++) {
+      const a1 = lp[i];
+      const a2 = lp[(i + 1) % n];
+      const ax = a2.x - a1.x;
+      const ay = a2.y - a1.y;
+      const aLen = Math.hypot(ax, ay);
+      if (aLen < 1e-2) continue;
+      const aux = ax / aLen;
+      const auy = ay / aLen;
+
+      for (let j = i + 2; j < n; j++) {
+        if (i === 0 && j === n - 1) continue;
+        const b1 = lp[j];
+        const b2 = lp[(j + 1) % n];
+        const bx = b2.x - b1.x;
+        const by = b2.y - b1.y;
+        const bLen = Math.hypot(bx, by);
+        if (bLen < 1e-2) continue;
+        // Must be anti-parallel along the same line
+        if (ax * bx + ay * by >= -0.999 * aLen * bLen) continue;
+        const perp1 = Math.abs((b1.x - a1.x) * auy - (b1.y - a1.y) * aux);
+        const perp2 = Math.abs((b2.x - a1.x) * auy - (b2.y - a1.y) * aux);
+        if (perp1 > 2e-3 || perp2 > 2e-3) continue;
+
+        const tB1 = (b1.x - a1.x) * aux + (b1.y - a1.y) * auy;
+        const tB2 = (b2.x - a1.x) * aux + (b2.y - a1.y) * auy;
+        const lo = Math.max(0, Math.min(tB1, tB2));
+        const hi = Math.min(aLen, Math.max(tB1, tB2));
+        if (hi - lo <= 1e-2) continue;
+
+        const pLo = { x: a1.x + aux * lo, y: a1.y + auy * lo };
+        const pHi = { x: a1.x + aux * hi, y: a1.y + auy * hi };
+
+        // Loop 1: pLo -> b2 -> ... -> a1 -> pLo
+        const loop1: Point2D[] = [pLo];
+        for (let k = (j + 1) % n; ; k = (k + 1) % n) {
+          loop1.push(lp[k]);
+          if (k === i) break;
+        }
+        // Loop 2: pHi -> a2 -> ... -> b1 -> pHi
+        const loop2: Point2D[] = [pHi];
+        for (let k = (i + 1) % n; ; k = (k + 1) % n) {
+          loop2.push(lp[k]);
+          if (k === j) break;
+        }
+
+        splits++;
+        const clean1 = unzipBacktrackSlits2D(loop1, 1e-3);
+        const clean2 = unzipBacktrackSlits2D(loop2, 1e-3);
+        if (clean1.length >= 3) queue.push(clean1);
+        if (clean2.length >= 3) queue.push(clean2);
+        splitFound = true;
+        break;
+      }
+    }
+
+    if (!splitFound) {
+      out.push(lp);
+    }
+  }
+
+  return out;
+}
+
+function isConvexPolygonCCW(poly: Point2D[]): boolean {
+  const n = poly.length;
+  if (n < 3) return false;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % n];
+    const c = poly[(i + 2) % n];
+    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (cross < -1e-6) return false;
+  }
+  return true;
+}
+
+function clipPolygonByConvexCCW2D(subject: Point2D[], convexClipCCW: Point2D[]): Point2D[] {
+  let poly = subject.map((p) => ({ ...p }));
+  const m = convexClipCCW.length;
+  for (let ci = 0; ci < m && poly.length >= 3; ci++) {
+    const c1 = convexClipCCW[ci];
+    const c2 = convexClipCCW[(ci + 1) % m];
+    const ex = c2.x - c1.x;
+    const ey = c2.y - c1.y;
+    const next: Point2D[] = [];
+    const kLen = poly.length;
+    for (let i = 0; i < kLen; i++) {
+      const prev = poly[(i - 1 + kLen) % kLen];
+      const curr = poly[i];
+      const sPrev = ex * (prev.y - c1.y) - ey * (prev.x - c1.x);
+      const sCurr = ex * (curr.y - c1.y) - ey * (curr.x - c1.x);
+      const inPrev = sPrev >= -1e-9;
+      const inCurr = sCurr >= -1e-9;
+      if (inPrev !== inCurr) {
+        const denom = sPrev - sCurr;
+        const t = Math.abs(denom) > 1e-18 ? Math.max(0, Math.min(1, sPrev / denom)) : 0.5;
+        next.push({
+          x: prev.x + (curr.x - prev.x) * t,
+          y: prev.y + (curr.y - prev.y) * t,
+        });
+      }
+      if (inCurr) {
+        next.push(curr);
+      }
+    }
+    poly = next;
+  }
+  return poly;
+}
+
+function dropCollinear2D(pts: Point2D[], tol: number = 1e-5): Point2D[] {
+  if (pts.length <= 3) return pts;
+  const out: Point2D[] = [];
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const a = pts[(i - 1 + n) % n];
+    const b = pts[i];
+    const c = pts[(i + 1) % n];
+    const span = Math.hypot(c.x - a.x, c.y - a.y);
+    const cross = Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+    if (span > 1e-8 && cross / span < tol) continue;
+    out.push(b);
+  }
+  return out.length >= 3 ? out : pts;
+}
+
+/**
+ * Intersects an arbitrary 2D polygon `subjectPoly` with `clipPoly` (supporting both
+ * convex and non-convex polygons, including cases where clipping splits a hole into
+ * multiple disjoint regions). Returns CCW loops.
+ */
+function intersectPolygons2D(subjectPoly: Point2D[], clipPoly: Point2D[]): Point2D[][] {
+  const sClean = unzipBacktrackSlits2D(subjectPoly, 1e-5);
+  const cClean = unzipBacktrackSlits2D(clipPoly, 1e-5);
+  if (sClean.length < 3 || cClean.length < 3) return [];
+
+  const sCCW = polygonSignedArea2D(sClean) < 0 ? [...sClean].reverse() : sClean;
+  const cCCW = polygonSignedArea2D(cClean) < 0 ? [...cClean].reverse() : cClean;
+
+  if (isConvexPolygonCCW(sCCW) && isConvexPolygonCCW(cCCW)) {
+    const clipped = dropCollinear2D(unzipBacktrackSlits2D(clipPolygonByConvexCCW2D(sCCW, cCCW), 1e-4));
+    return clipped.length >= 3 && polygonSignedArea2D(clipped) > 1e-3 ? [clipped] : [];
+  }
+
+  const trisS = isConvexPolygonCCW(sCCW)
+    ? Array.from({ length: sCCW.length - 2 }, (_, i) => [0, i + 1, i + 2] as [number, number, number])
+    : THREE.ShapeUtils.triangulateShape(sCCW.map((p) => new THREE.Vector2(p.x, p.y)), []);
+  const trisC = isConvexPolygonCCW(cCCW)
+    ? Array.from({ length: cCCW.length - 2 }, (_, i) => [0, i + 1, i + 2] as [number, number, number])
+    : THREE.ShapeUtils.triangulateShape(cCCW.map((p) => new THREE.Vector2(p.x, p.y)), []);
+
+  const toCCWTri = (pts: Point2D[], [i0, i1, i2]: number[]): Point2D[] => {
+    const a = pts[i0], b = pts[i1], c = pts[i2];
+    const area2 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    return area2 >= 0 ? [a, b, c] : [a, c, b];
+  };
+
+  const weldTol = 1e-4;
+  const welded: Point2D[] = [];
+  const weldIdx = (pt: Point2D): number => {
+    for (let i = 0; i < welded.length; i++) {
+      if (Math.hypot(welded[i].x - pt.x, welded[i].y - pt.y) <= weldTol) return i;
+    }
+    welded.push({ x: pt.x, y: pt.y });
+    return welded.length - 1;
+  };
+
+  const subTris: [number, number, number][] = [];
+  for (const ts of trisS) {
+    const polyS = toCCWTri(sCCW, ts);
+    if (polygonSignedArea2D(polyS) <= 1e-6) continue;
+    for (const tc of trisC) {
+      const polyC = toCCWTri(cCCW, tc);
+      if (polygonSignedArea2D(polyC) <= 1e-6) continue;
+      const piece = unzipBacktrackSlits2D(clipPolygonByConvexCCW2D(polyS, polyC), 1e-5);
+      if (piece.length < 3 || polygonSignedArea2D(piece) <= 1e-5) continue;
+      const idxs = piece.map(weldIdx);
+      for (let k = 1; k + 1 < idxs.length; k++) {
+        const u = idxs[0], v = idxs[k], w = idxs[k + 1];
+        if (u !== v && v !== w && w !== u) {
+          const pu = welded[u], pv = welded[v], pw = welded[w];
+          const area2 = (pv.x - pu.x) * (pw.y - pu.y) - (pv.y - pu.y) * (pw.x - pu.x);
+          if (area2 > 1e-6) subTris.push([u, v, w]);
+          else if (area2 < -1e-6) subTris.push([u, w, v]);
+        }
+      }
+    }
+  }
+
+  if (subTris.length === 0) return [];
+
+  // Split any half-edge (u -> v) at intermediate welded T-vertices so shared diagonals cancel cleanly
+  const edgeCounts = new Map<string, number>();
+  const addDirected = (u: number, v: number) => {
+    if (u === v) return;
+    const revKey = `${v}:${u}`;
+    const revCount = edgeCounts.get(revKey) ?? 0;
+    if (revCount > 0) {
+      if (revCount === 1) edgeCounts.delete(revKey);
+      else edgeCounts.set(revKey, revCount - 1);
+    } else {
+      const key = `${u}:${v}`;
+      edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
+    }
+  };
+
+  for (const [i0, i1, i2] of subTris) {
+    for (const [u, v] of [[i0, i1], [i1, i2], [i2, i0]] as [number, number][]) {
+      const pu = welded[u], pv = welded[v];
+      const dx = pv.x - pu.x, dy = pv.y - pu.y;
+      const len = Math.hypot(dx, dy);
+      if (len <= weldTol) continue;
+      const mids: { idx: number; t: number }[] = [];
+      for (let w = 0; w < welded.length; w++) {
+        if (w === u || w === v) continue;
+        const pw = welded[w];
+        const t = ((pw.x - pu.x) * dx + (pw.y - pu.y) * dy) / (len * len);
+        if (t <= 1e-4 || t >= 1 - 1e-4) continue;
+        const perp = Math.abs((pw.x - pu.x) * dy - (pw.y - pu.y) * dx) / len;
+        if (perp <= weldTol * 2) mids.push({ idx: w, t });
+      }
+      if (mids.length === 0) {
+        addDirected(u, v);
+      } else {
+        mids.sort((a, b) => a.t - b.t);
+        let prev = u;
+        for (const m of mids) {
+          addDirected(prev, m.idx);
+          prev = m.idx;
+        }
+        addDirected(prev, v);
+      }
+    }
+  }
+
+  const outgoing = new Map<number, number[]>();
+  for (const [key, count] of edgeCounts.entries()) {
+    const [uStr, vStr] = key.split(':');
+    const u = Number(uStr), v = Number(vStr);
+    for (let c = 0; c < count; c++) {
+      let arr = outgoing.get(u);
+      if (!arr) {
+        arr = [];
+        outgoing.set(u, arr);
+      }
+      arr.push(v);
+    }
+  }
+
+  const loops: Point2D[][] = [];
+  for (const [startU, list] of outgoing.entries()) {
+    while (list.length > 0) {
+      const nextV = list.pop()!;
+      const idxs = [startU];
+      let prev = startU;
+      let curr = nextV;
+      for (let guard = 0; guard <= welded.length * 4; guard++) {
+        if (curr === startU) break;
+        idxs.push(curr);
+        const nextList = outgoing.get(curr);
+        if (!nextList || nextList.length === 0) break;
+        let pickIdx = nextList.length - 1;
+        if (nextList.length > 1) {
+          // At a pinch vertex, turn right-most (CW) to keep simple minimal CCW cycles separate
+          const inAng = Math.atan2(welded[prev].y - welded[curr].y, welded[prev].x - welded[curr].x);
+          let bestTurn = Infinity;
+          for (let k = 0; k < nextList.length; k++) {
+            const cand = nextList[k];
+            const outAng = Math.atan2(welded[cand].y - welded[curr].y, welded[cand].x - welded[curr].x);
+            let turn = outAng - inAng;
+            while (turn <= 0) turn += Math.PI * 2;
+            if (turn < bestTurn) {
+              bestTurn = turn;
+              pickIdx = k;
+            }
+          }
+        }
+        const nxt = nextList.splice(pickIdx, 1)[0];
+        prev = curr;
+        curr = nxt;
+      }
+      if (curr === startU && idxs.length >= 3) {
+        const pts = dropCollinear2D(unzipBacktrackSlits2D(idxs.map((id) => welded[id]), 1e-3));
+        if (pts.length >= 3 && polygonSignedArea2D(pts) > 1e-3) {
+          loops.push(pts);
+        }
+      }
+    }
+  }
+
+  return loops;
+}
+
+/**
+ * Validates and clips interior face hole cutouts against `outerPoly` (inset by
+ * `clearanceMm`) so holes that enter a sheet-metal bend setback zone never cross
+ * the trimmed face boundary or break 3D slab triangulation (`closed: false`).
+ */
+export function clipFaceHolesToPolygon2D(
+  outerPoly: Point2D[],
+  holes: Point2D[][],
+  clearanceMm: number = 0.08
+): { holes: Point2D[][]; encroachedIndices: number[] } {
+  if (holes.length === 0) return { holes: [], encroachedIndices: [] };
+  if (outerPoly.length < 3) {
+    return { holes: [], encroachedIndices: holes.map((_, i) => i) };
+  }
+
+  const outerSigned = polygonSignedArea2D(outerPoly);
+  const outerCCW = outerSigned < 0 ? [...outerPoly].reverse() : outerPoly;
+  const wantHoleSignedNegative = outerSigned >= 0;
+
+  const orientHole = (lp: Point2D[]): Point2D[] => {
+    const s = polygonSignedArea2D(lp);
+    if ((s < 0) === wantHoleSignedNegative) return lp;
+    return [...lp].reverse();
+  };
+
+  const isStrictlyInsideWithClearance = (h: Point2D[], tol: number): boolean => {
+    if (h.length < 3) return false;
+    if (!pointInPolygon(h[0], outerCCW)) return false;
+    if (pointInPolygon(outerCCW[0], h)) return false;
+    for (let i = 0; i < h.length; i++) {
+      const a1 = h[i];
+      const a2 = h[(i + 1) % h.length];
+      for (let j = 0; j < outerCCW.length; j++) {
+        const b1 = outerCCW[j];
+        const b2 = outerCCW[(j + 1) % outerCCW.length];
+        if (segmentToSegmentDist2D(a1, a2, b1, b2) < tol) return false;
+      }
+    }
+    return true;
+  };
+
+  let safeOuterLoops: Point2D[][] | null = null;
+  const kept: Point2D[][] = [];
+  const encroachedIndices: number[] = [];
+
+  for (let hi = 0; hi < holes.length; hi++) {
+    const h = holes[hi];
+    if (isStrictlyInsideWithClearance(h, clearanceMm)) {
+      kept.push(orientHole(h.map((p) => ({ ...p }))));
+      continue;
+    }
+
+    encroachedIndices.push(hi);
+    if (safeOuterLoops === null) {
+      safeOuterLoops = offsetLoop(outerCCW, -clearanceMm, {
+        joinStyle: 'miter',
+        miterLimit: 3,
+        arcTolerance: 0.02,
+      });
+    }
+    if (safeOuterLoops.length === 0) continue;
+
+    for (const safeLoop of safeOuterLoops) {
+      const pieces = intersectPolygons2D(h, safeLoop);
+      for (const piece of pieces) {
+        if (piece.length < 3 || polygonArea2D(piece) < 0.25) continue;
+        if (!isStrictlyInsideWithClearance(piece, clearanceMm * 0.25)) continue;
+        kept.push(orientHole(piece));
+      }
+    }
+  }
+
+  return { holes: kept, encroachedIndices };
 }
 
 function pointStrictlyInPolygon2D(poly: Point2D[], pt: Point2D, epsMm: number = 0.08): boolean {
@@ -1889,19 +2356,40 @@ function trimPolygonEdges2D(poly: Point2D[], setbacks: number[]): TrimmedFace2D 
     };
   }
 
-  // Each edge as a point and direction, moved left (inward: the face is CCW).
+  // Each edge as a point, direction, and length, moved left (inward: the face is CCW).
   const lines = poly.map((p, i) => {
     const q = poly[(i + 1) % n];
     const len = Math.hypot(q.x - p.x, q.y - p.y) || 1;
     const ux = (q.x - p.x) / len, uy = (q.y - p.y) / len;
     const d = setbacks[i] || 0;
-    return { x: p.x - uy * d, y: p.y + ux * d, ux, uy };
+    return { x: p.x - uy * d, y: p.y + ux * d, ux, uy, len };
   });
 
   const edgeStarts: Point2D[] = new Array(n);
   const edgeEnds: Point2D[] = new Array(n);
   const polygon2D: Point2D[] = [];
   const vertexMap: number[] = [];
+
+  const emitPerpStep = (
+    i: number,
+    prevIdx: number,
+    p: Point2D,
+    a: (typeof lines)[number],
+    b: (typeof lines)[number],
+    dPrev: number,
+    dCurr: number
+  ) => {
+    const pIn = { x: p.x - a.uy * dPrev, y: p.y + a.ux * dPrev };
+    const pOut = { x: p.x - b.uy * dCurr, y: p.y + b.ux * dCurr };
+    edgeEnds[prevIdx] = pIn;
+    edgeStarts[i] = pOut;
+    polygon2D.push(pIn);
+    vertexMap.push(i);
+    if (Math.hypot(pOut.x - pIn.x, pOut.y - pIn.y) > 1e-4) {
+      polygon2D.push(pOut);
+      vertexMap.push(i);
+    }
+  };
 
   for (let i = 0; i < n; i++) {
     const p = poly[i];
@@ -1913,23 +2401,32 @@ function trimPolygonEdges2D(poly: Point2D[], setbacks: number[]): TrimmedFace2D 
     const det = a.ux * b.uy - a.uy * b.ux;
 
     if (Math.abs(det) < 1e-6) {
-      const pIn = { x: p.x - a.uy * dPrev, y: p.y + a.ux * dPrev };
-      const pOut = { x: p.x - b.uy * dCurr, y: p.y + b.ux * dCurr };
-      edgeEnds[prevIdx] = pIn;
-      edgeStarts[i] = pOut;
-      polygon2D.push(pIn);
-      vertexMap.push(i);
-      if (Math.hypot(pOut.x - pIn.x, pOut.y - pIn.y) > 1e-4) {
-        polygon2D.push(pOut);
-        vertexMap.push(i);
-      }
+      emitPerpStep(i, prevIdx, p, a, b, dPrev, dCurr);
       continue;
     }
 
     const s = ((b.x - a.x) * b.uy - (b.y - a.y) * b.ux) / det;
     let hit = { x: a.x + a.ux * s, y: a.y + a.uy * s };
-    // Miter guard on acute corners so setbacks cannot shoot spikes far out of bounds
     const dist = Math.hypot(hit.x - p.x, hit.y - p.y);
+
+    // When unequal setbacks meet at a shallow corner (e.g. a single bent tab on a
+    // 24- or 36-gon cylinder cap where adjacent cap edges are free cut seams with
+    // setback 0), mitering shifts the vertex by d / sin(theta) >> edge length.
+    // Insert a perpendicular setback step instead so the hinge keeps its true width.
+    if (Math.abs(dPrev - dCurr) > 1e-4) {
+      const dot = a.ux * b.ux + a.uy * b.uy;
+      const trimPrev = (p.x - hit.x) * a.ux + (p.y - hit.y) * a.uy;
+      const trimCurr = (hit.x - p.x) * b.ux + (hit.y - p.y) * b.uy;
+      if (
+        dot > 0.9 ||
+        (dot > 0.5 && (trimPrev > 0.85 * a.len || trimCurr > 0.85 * b.len))
+      ) {
+        emitPerpStep(i, prevIdx, p, a, b, dPrev, dCurr);
+        continue;
+      }
+    }
+
+    // Miter guard on acute corners so setbacks cannot shoot spikes far out of bounds
     if (dMax > 0 && dist > 4 * dMax) {
       const scale = (4 * dMax) / dist;
       hit = { x: p.x + (hit.x - p.x) * scale, y: p.y + (hit.y - p.y) * scale };
@@ -1984,6 +2481,61 @@ function isTrimmedPolygonValid2D(origPoly: Point2D[], tr: TrimmedFace2D): boolea
     }
   }
   return true;
+}
+
+/**
+ * Evaluates all prospective bend setbacks on a face simultaneously (so multi-bend
+ * faceted caps like 24- and 36-sided cylinders shrink cleanly as a whole without
+ * premature single-edge clamping), relaxing uniformly and then per-edge only when
+ * simultaneous trimming genuinely self-intersects or collapses a narrow web.
+ */
+function solveSimultaneousSetbacks2D(
+  poly: Point2D[],
+  desiredSetbacks: number[]
+): { setbacks: number[]; clamped: boolean[] } {
+  if (!desiredSetbacks.some((d) => d > 0)) {
+    return {
+      setbacks: desiredSetbacks.map(() => 0),
+      clamped: desiredSetbacks.map(() => false),
+    };
+  }
+
+  const valid = (sb: number[]) => isTrimmedPolygonValid2D(poly, trimPolygonEdges2D(poly, sb));
+  if (valid(desiredSetbacks)) {
+    return {
+      setbacks: [...desiredSetbacks],
+      clamped: desiredSetbacks.map(() => false),
+    };
+  }
+
+  // Uniform relaxation across all bends on the face first so opposing bends share space symmetrically
+  let lo = 0;
+  let hi = 1;
+  for (let iter = 0; iter < 20; iter++) {
+    const mid = (lo + hi) * 0.5;
+    if (valid(desiredSetbacks.map((d) => d * mid))) lo = mid;
+    else hi = mid;
+  }
+
+  const best = desiredSetbacks.map((d) => d * lo);
+  // Allow individual non-bottleneck edges on a wider portion of the face to recover toward desiredSetbacks
+  for (let i = 0; i < desiredSetbacks.length; i++) {
+    if (desiredSetbacks[i] <= best[i] + 1e-4) continue;
+    let eLo = best[i];
+    let eHi = desiredSetbacks[i];
+    for (let iter = 0; iter < 14; iter++) {
+      const mid = (eLo + eHi) * 0.5;
+      const cand = best.map((d, idx) => (idx === i ? mid : d));
+      if (valid(cand)) eLo = mid;
+      else eHi = mid;
+    }
+    best[i] = eLo;
+  }
+
+  return {
+    setbacks: best,
+    clamped: best.map((v, i) => v < desiredSetbacks[i] - 1e-3),
+  };
 }
 
 /**
@@ -2203,6 +2755,20 @@ function unfoldSurfaceToIslands(
   let totalBendAllowanceMm = 0;
   let setbackClampedCount = 0;
 
+  // Precompute simultaneous feasible setbacks per face across all of its bent shared edges
+  // so multi-bend polygons (e.g. 24- and 36-sided cylinder caps) never clamp prematurely
+  // from evaluating a single edge against zeroed neighbors.
+  const faceSimultSetbacks = faces.map((f, fi) => {
+    const desired = f.verts.map((_, ei) => {
+      const se = faceEdgeToShared.get(`${fi}:${ei}`);
+      if (!se || options.mode !== 'sheet_metal' || Math.abs(se.angleDeg) < options.coplanarToleranceDeg) {
+        return 0;
+      }
+      return bendSetbackMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm);
+    });
+    return solveSimultaneousSetbacks2D(f.local2D, desired);
+  });
+
   while (true) {
     // Pick unvisited seed face with largest area
     let seedFace = -1;
@@ -2259,22 +2825,39 @@ function unfoldSurfaceToIslands(
           : 0;
         const rawSetbackMm = bent ? bendSetbackMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm) : 0;
 
-        const parentClamp = clampEdgeSetbackForPolygon2D(
+        const parentSimult = faceSimultSetbacks[parentIdx];
+        const childSimult = faceSimultSetbacks[childIdx];
+        const parentTarget = parentSimult.clamped[parentEdgeIdx]
+          ? parentSimult.setbacks[parentEdgeIdx]
+          : rawSetbackMm;
+        const childTarget = childSimult.clamped[childEdgeIdx]
+          ? childSimult.setbacks[childEdgeIdx]
+          : rawSetbackMm;
+
+        // Verify partial trim validity on committed edges; if all bends simultaneously succeed
+        // (`!clamped`), keep full `rawSetbackMm` even if neighbors are not yet visited.
+        const parentPartial = clampEdgeSetbackForPolygon2D(
           parentState.polygon2D,
           parentState.setbacks,
           parentEdgeIdx,
-          rawSetbackMm
+          parentTarget
         );
+        const effParentSetback = !parentSimult.clamped[parentEdgeIdx]
+          ? rawSetbackMm
+          : parentPartial.setback;
+        const parentWasClamped = effParentSetback < rawSetbackMm - 1e-3;
+
         const zeroChildSetbacks = childFace.verts.map(() => 0);
-        const childClamp = clampEdgeSetbackForPolygon2D(
+        const childPartial = clampEdgeSetbackForPolygon2D(
           childFace.local2D,
           zeroChildSetbacks,
           childEdgeIdx,
-          rawSetbackMm
+          childTarget
         );
-
-        const effParentSetback = parentClamp.setback;
-        const effChildSetback = childClamp.setback;
+        const effChildSetback = !childSimult.clamped[childEdgeIdx]
+          ? rawSetbackMm
+          : childPartial.setback;
+        const childWasClamped = effChildSetback < rawSetbackMm - 1e-3;
 
         const { transform, targetV1, targetV2 } = buildUnfoldTransform2D(
           placedA_v1,
@@ -2304,7 +2887,7 @@ function unfoldSurfaceToIslands(
           continue;
         }
 
-        if (parentClamp.clamped || childClamp.clamped) {
+        if (parentWasClamped || childWasClamped) {
           setbackClampedCount++;
         }
 
@@ -2340,9 +2923,16 @@ function unfoldSurfaceToIslands(
     }
 
     // The flats as cut: every bent edge in by its setback, and each bend's
-    // zone between the two trimmed edges.
+    // zone between the two trimmed edges. If a subset of bends on a face ended
+    // up invalid when combined with unvisited free edges, relax that face safely.
     for (const st of placedFaces.values()) {
-      const tr = trimPolygonEdges2D(st.polygon2D, st.setbacks);
+      let tr = trimPolygonEdges2D(st.polygon2D, st.setbacks);
+      if (st.setbacks.some((d) => d > 0) && !isTrimmedPolygonValid2D(st.polygon2D, tr)) {
+        const relaxed = solveSimultaneousSetbacks2D(st.polygon2D, st.setbacks);
+        st.setbacks = relaxed.setbacks;
+        tr = trimPolygonEdges2D(st.polygon2D, st.setbacks);
+        if (relaxed.clamped.some(Boolean)) setbackClampedCount++;
+      }
       st.polygon2D = tr.polygon2D;
       st.edgeStarts = tr.edgeStarts;
       st.edgeEnds = tr.edgeEnds;
@@ -2357,6 +2947,44 @@ function unfoldSurfaceToIslands(
       te.p2 = parent.edgeEnds![pEdge];
       te.childP1 = child.edgeEnds![cEdge];
       te.childP2 = child.edgeStarts![cEdge];
+    }
+
+    // Detect and clip any interior face holes that enter a bend setback / forming zone
+    for (const st of placedFaces.values()) {
+      if (st.holes2D.length === 0) continue;
+      const incidentBentEdges = treeEdges.filter(
+        (te) =>
+          (te.parentFace === st.faceIndex || te.childFace === st.faceIndex) &&
+          Math.abs(te.shared.angleDeg) >= options.coplanarToleranceDeg
+      );
+      const holeClips = clipFaceHolesToPolygon2D(st.polygon2D, st.holes2D, 0.08);
+      for (const hi of holeClips.encroachedIndices) {
+        const rawHole = st.holes2D[hi];
+        const hc = polygonCentroid2D(rawHole);
+        let bestBend: (typeof incidentBentEdges)[number] | null = null;
+        let bestDist = Infinity;
+        for (const te of incidentBentEdges) {
+          const d = Math.min(
+            pointToSegmentDist2D(hc, te.p1, te.p2),
+            pointToSegmentDist2D(hc, te.childP1, te.childP2)
+          );
+          if (d < bestDist) {
+            bestDist = d;
+            bestBend = te;
+          }
+        }
+        if (bestBend) {
+          const deg = Math.round(Math.abs(bestBend.shared.angleDeg) * 10) / 10;
+          warnings.push(
+            `Hole ${hi + 1} on face ${st.faceIndex} of "${surface.nodeName}" enters ${deg}° ${bestBend.shared.kind} bend setback zone; clipped cutout to flat face boundary.`
+          );
+        } else {
+          warnings.push(
+            `Hole ${hi + 1} on face ${st.faceIndex} of "${surface.nodeName}" crosses trimmed face boundary; clipped cutout to face interior.`
+          );
+        }
+      }
+      st.holes2D = holeClips.holes;
     }
 
     rawIslands.push({ placedFaces, treeEdges });
@@ -2429,17 +3057,43 @@ function unfoldSurfaceToIslands(
 
       const clearanceScore = (tab: Point2D[], isl: RawIsland, ownFace: number): number => {
         if (tab.length < 4) return -Infinity;
+        // Shrink tab base slightly off the shared hinge edge [tab[0], tab[3]] when testing
+        // against ownFace so touching the hinge edge itself never false-triggers, while any
+        // protrusion across a concave pocket/slot into ownFace is caught.
+        const shrunkOwnTab: Point2D[] = [
+          { x: tab[0].x + (tab[1].x - tab[0].x) * 0.08, y: tab[0].y + (tab[1].y - tab[0].y) * 0.08 },
+          tab[1],
+          tab[2],
+          { x: tab[3].x + (tab[2].x - tab[3].x) * 0.08, y: tab[3].y + (tab[2].y - tab[3].y) * 0.08 },
+        ];
+        const tipMid = {
+          x: (tab[1].x + tab[2].x) * 0.5,
+          y: (tab[1].y + tab[2].y) * 0.5,
+        };
         for (const [fi, st] of isl.placedFaces.entries()) {
-          if (fi === ownFace) continue;
+          if (fi === ownFace) {
+            if (polygonsOverlap2D(shrunkOwnTab, st.polygon2D, 0.03)) return -1e6;
+            const m = st.polygon2D.length;
+            for (let ei = 0; ei < m; ei++) {
+              const pA = st.polygon2D[ei];
+              const pB = st.polygon2D[(ei + 1) % m];
+              if (
+                Math.hypot(pA.x - tab[0].x, pA.y - tab[0].y) < 0.05 ||
+                Math.hypot(pB.x - tab[0].x, pB.y - tab[0].y) < 0.05 ||
+                Math.hypot(pA.x - tab[3].x, pA.y - tab[3].y) < 0.05 ||
+                Math.hypot(pB.x - tab[3].x, pB.y - tab[3].y) < 0.05
+              ) {
+                continue;
+              }
+              if (segmentToSegmentDist2D(tab[1], tab[2], pA, pB) < 0.15) return -1e6;
+            }
+            continue;
+          }
           if (polygonsOverlap2D(tab, st.polygon2D, 0.05)) return -1e6;
         }
         for (const existingTab of placedTabPolysByIsland.get(isl) || []) {
           if (polygonsOverlap2D(tab, existingTab, 0.05)) return -5e5;
         }
-        const tipMid = {
-          x: (tab[1].x + tab[2].x) * 0.5,
-          y: (tab[1].y + tab[2].y) * 0.5,
-        };
         let minDist = 1e6;
         for (const [fi, st] of isl.placedFaces.entries()) {
           if (fi === ownFace) continue;
@@ -2913,13 +3567,39 @@ function unfoldSurfaceToIslands(
       }
     }
 
-    // Soft goods outward seam allowance via polygon boolean offset (eliminates concave bowties)
+    // Soft goods outward seam allowance via polygon boolean offset (eliminates concave bowties,
+    // heals hairline slits between adjacent flaps, and falls back with warning only on degeneracy)
     if (options.mode === 'soft_goods' && options.seamAllowanceMm > 0 && cleanSeamLoopsForOffset.length > 0) {
-      const { paths: expandedLoops } = offsetNestedLoops(
-        cleanSeamLoopsForOffset,
+      const healedSeamLoops = healHairlineSlits2D(cleanSeamLoopsForOffset);
+      const loopsForOffset = healedSeamLoops.length > 0 ? healedSeamLoops : cleanSeamLoopsForOffset;
+      const rawDepths = nestingDepths(loopsForOffset);
+      const { paths: miterLoops, dropped } = offsetNestedLoops(
+        loopsForOffset,
         options.seamAllowanceMm,
         { joinStyle: 'miter', miterLimit: 2.2, arcTolerance: 0.05 }
       );
+
+      const expandedLoops: Point2D[][] = [...miterLoops];
+      // Inner void loops (odd depth) smaller than 2 * seamAllowanceMm legitimately close up;
+      // outer material loops (even depth) must never vanish silently.
+      for (const droppedIdx of dropped) {
+        if (rawDepths[droppedIdx] % 2 === 1) continue;
+        const srcLoop = loopsForOffset[droppedIdx];
+        if (!srcLoop || srcLoop.length < 3) continue;
+        const roundFallback = offsetLoop(srcLoop, options.seamAllowanceMm, {
+          joinStyle: 'round',
+          arcTolerance: 0.05,
+        });
+        if (roundFallback.length > 0) {
+          expandedLoops.push(...roundFallback);
+        } else {
+          warnings.push(
+            `Seam allowance offset (${options.seamAllowanceMm}mm) failed on degenerate outline of "${surface.nodeName}"; fell back to un-offset seam boundary.`
+          );
+          expandedLoops.push(srcLoop);
+        }
+      }
+
       for (const expLoop of expandedLoops) {
         if (expLoop.length >= 3) {
           cutPolylines2D.push([...expLoop, { ...expLoop[0] }]);
@@ -3373,7 +4053,7 @@ function renderSheetUnfoldSvg(
 
 export function exportSheetUnfold(
   scene: SceneGraph,
-  options?: Partial<SheetUnfoldOptions>,
+  options?: Partial<SheetUnfoldOptions> & { material?: MaterialId; machine?: 'laser' | 'cnc' },
   targetNodeIds?: string[]
 ): SheetUnfoldResult {
   const opts: SheetUnfoldOptions = {
@@ -3445,9 +4125,35 @@ export function exportSheetUnfold(
     gz: '0',
     data: toBase64Url(new TextEncoder().encode(svg)),
     name: `unfold_${opts.mode}`,
-    thickness: String(opts.thicknessMm),
   });
-  const etchUrl = `${base}#${syncParams.toString()}`;
+  if (opts.thicknessMm > 0) {
+    syncParams.set('thickness', String(opts.thicknessMm));
+  }
+  if (options?.material) {
+    syncParams.set('material', options.material);
+  }
+  if (options?.machine) {
+    syncParams.set('machine', options.machine);
+  }
+  if (sheets.length > 1) {
+    syncParams.set(
+      'sheets',
+      sheets
+        .map((s) =>
+          opts.thicknessMm > 0
+            ? `${s.widthMm}x${s.heightMm}x${opts.thicknessMm}`
+            : `${s.widthMm}x${s.heightMm}`
+        )
+        .join(',')
+    );
+  }
+  const fragment = syncParams.toString();
+  const etchUrl = fragment.length <= HANDOFF_SOFT_LIMIT ? `${base}#${fragment}` : undefined;
+  if (!etchUrl) {
+    warnings.push(
+      `Unfolded SVG encodes to ${Math.round(fragment.length / 1024)} KB uncompressed; use buildSheetUnfoldEtchUrl (gzip) or save the .svg file.`
+    );
+  }
 
   return {
     success: true,
