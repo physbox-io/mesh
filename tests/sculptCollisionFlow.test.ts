@@ -27,7 +27,7 @@ vi.mock('../src/store/physicsWorkerClient', () => {
       builds.push(call);
       return buildBehaviour(call);
     }
-    setEnv() {} setPlaying() {} resume() {} tick() {} terminate() {}
+    setEnv() {} setSound() {} setPlaying() {} resume() {} tick() {} terminate() {}
     hasPendingWork() { return false; }
   }
   return { PhysicsWorkerClient };

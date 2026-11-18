@@ -21,7 +21,7 @@ vi.mock('../src/store/physicsWorkerClient', () => {
     meshFiles = undefined;
     onFrame = null; onBreak = null; onImpact = null; onError = null;
     build() { return new Promise((r) => setTimeout(() => r(outcomes.shift() ?? { ok: true }), 20)); }
-    setEnv() {} setPlaying() {} resume() {} tick() {} terminate() {}
+    setEnv() {} setSound() {} setPlaying() {} resume() {} tick() {} terminate() {}
     hasPendingWork() { return false; }
   }
   return { PhysicsWorkerClient };

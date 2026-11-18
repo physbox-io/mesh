@@ -542,7 +542,8 @@ export function unlockAudioContext(): AudioContext | null {
   return ctx;
 }
 
-if (typeof window !== 'undefined') {
+// Only where `window` takes listeners: a test's stub `window` (or a worker shim) may not.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
   const win = window as WindowWithAudioCtx;
   if (!win.__physboxGestureHookInstalled) {
     win.__physboxGestureHookInstalled = true;

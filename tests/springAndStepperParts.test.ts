@@ -20,7 +20,7 @@ vi.mock('../src/store/physicsWorkerClient', () => {
     meshFiles = undefined;
     onFrame = null; onBreak = null; onImpact = null; onError = null;
     build() { return Promise.resolve({ ok: true }); }
-    setEnv() {} setPlaying() {} resume() {} tick() {} terminate() {}
+    setEnv() {} setSound() {} setPlaying() {} resume() {} tick() {} terminate() {}
     hasPendingWork() { return false; }
   }
   return { PhysicsWorkerClient };
