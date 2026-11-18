@@ -471,16 +471,18 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             {locksOn && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-900 text-purple-800 dark:text-purple-200">
                 <span className="basis-full">
-                  Undercut area detected. Rigid molds may lock; consider a Silicone Pour Box or a dissolvable liner.
+                  Undercut area detected. Rigid molds may lock; consider a Silicone Pour Box{!castMaterial(material).meltsInBath ? ' or a dissolvable liner' : ''}.
                 </span>
-                {/* A water-based cast dissolves a water-soluble liner, so it is offered HIPS, which limonene takes. */}
-                <button type="button" onClick={() => {
-                    if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
-                    set('dissolvableLiner', true);
-                  }}
-                  className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
-                  {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
-                </button>
+                {/* A water-based cast dissolves a water-soluble liner, so it is offered HIPS, which limonene takes; ice and chocolate melt in any bath. */}
+                {!castMaterial(material).meltsInBath && (
+                  <button type="button" onClick={() => {
+                      if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
+                      set('dissolvableLiner', true);
+                    }}
+                    className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
+                    {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
+                  </button>
+                )}
                 <button type="button" onClick={onSilicone}
                   className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
                   Silicone
@@ -491,7 +493,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             {steepWallsGrip && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200">
                 <span className="basis-full">
-                  Steep cavity walls ({result.minDraftDeg.toFixed(1)}° min draft over {result.cavityDepthMm.toFixed(1)} mm depth) can lock rigid castings onto print layer lines. Add 3° draft, a dissolvable liner, or use Silicone.
+                  Steep cavity walls ({result.minDraftDeg.toFixed(1)}° min draft over {result.cavityDepthMm.toFixed(1)} mm depth) can lock rigid castings onto print layer lines. Add 3° draft,{!castMaterial(material).meltsInBath ? ' a dissolvable liner,' : ''} or use Silicone.
                 </span>
                 {!draftLocked && (
                   <button type="button" onClick={() => set('draftAngleDeg', 3)}
@@ -505,13 +507,15 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                     Split + sliding clips
                   </button>
                 )}
-                <button type="button" onClick={() => {
-                    if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
-                    set('dissolvableLiner', true);
-                  }}
-                  className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
-                  {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
-                </button>
+                {!castMaterial(material).meltsInBath && (
+                  <button type="button" onClick={() => {
+                      if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
+                      set('dissolvableLiner', true);
+                    }}
+                    className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
+                    {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
+                  </button>
+                )}
                 <button type="button" onClick={onSilicone}
                   className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
                   Silicone

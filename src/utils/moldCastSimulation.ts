@@ -129,6 +129,8 @@ export type InternalCastOptions = MoldCastSimulationOptions & {
    * union.
    */
   halfPieceTriangles?: (number[] | undefined)[];
+  /** True when each half's pieces are a reusable rigid holder plus soluble insert(s) separated by INSERT_CLEARANCE_MM. */
+  isInsertLiner?: boolean;
   negativeHalves?: (Float64Array | number[])[];
   rawTextures?: RawMoldTexture[];
   /** The mold body's name, for a refusal. */
@@ -395,6 +397,38 @@ export async function simulateCastFromMoldNode(
   const closed = await castLaidOpenClamshell(node, geomShellsMm, geomNames, options);
   if (closed) return closed;
 
+  // Open lined mold with separate holder + soluble insert(s): group holder first
+  // and inserts after as one multi-piece half so the 0.25 mm seating gap is sealed.
+  const isHolderName = (n: string) => /(?:^|[ _])holder(?:$|[ _])/i.test(n);
+  const isInsertName = (n: string) => /(?:^|[ _])insert(?:$|[ _])/i.test(n);
+  const isOpenInsert =
+    geomShellsMm.length >= 2 &&
+    geomNames.some(isHolderName) &&
+    geomNames.some(isInsertName);
+  if (isOpenInsert) {
+    const holders = geomShellsMm.filter((_, i) => isHolderName(geomNames[i]));
+    const inserts = geomShellsMm.filter((_, i) => !isHolderName(geomNames[i]));
+    const ordered = [...holders, ...inserts];
+    const joined = new Float64Array(ordered.reduce((s, a) => s + a.length, 0));
+    let off = 0;
+    for (const a of ordered) {
+      joined.set(a, off);
+      off += a.length;
+    }
+    const counts = ordered.map((a) => a.length / 9);
+    const res = await simulateCastFromMoldTriangles(joined, {
+      ...options,
+      halves: [joined],
+      halfPieceTriangles: [counts],
+      isInsertLiner: true,
+      negativeHalves: negativeShellsMm.length > 0 ? negativeShellsMm : undefined,
+      rawTextures: rawTextures.length > 0 ? rawTextures : undefined,
+      moldName: node.name,
+    });
+    if (warnings.length > 0) res.warnings.push(...warnings);
+    return res;
+  }
+
   const allTrisMm = new Float64Array(allTrisMetres.length);
   for (let i = 0; i < allTrisMetres.length; i++) {
     allTrisMm[i] = allTrisMetres[i] * 1000;
@@ -452,6 +486,10 @@ export async function simulateCastFromMoldResult(
     botTrisMm[bi++] = t.c[2];
   }
 
+  const piecesOf = (h?: MoldMeshHalf) =>
+    h?.liner ? [h.liner.shell.length, ...(h.liner.pieceTriangles ?? [h.liner.liner.length])] : undefined;
+  const isInsertLiner = mold.liner?.construction === 'insert';
+
   if (mold.topHalf && mold.topHalf.triangles.length > 0) {
     // Clamshell mold: assemble top half (lid) mated directly onto bottom half
     const topCenterX = (mold.topHalf.bounds.minX + mold.topHalf.bounds.maxX) / 2;
@@ -466,13 +504,18 @@ export async function simulateCastFromMoldResult(
         topTrisMm[ti++] = v[2];
       }
     }
-    const piecesOf = (h?: MoldMeshHalf) =>
-      h?.liner ? [h.liner.shell.length, ...(h.liner.pieceTriangles ?? [h.liner.liner.length])] : undefined;
     return restorePartFrame(
-      await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(mold.features), ventStubsOf(mold.features), [
-        piecesOf(mold.bottomHalf),
-        piecesOf(mold.topHalf),
-      ]),
+      await castClosedClamshell(
+        botTrisMm,
+        topTrisMm,
+        botPartingZ,
+        lidPartingZ,
+        options,
+        feedRouteOf(mold.features),
+        ventStubsOf(mold.features),
+        [piecesOf(mold.bottomHalf), piecesOf(mold.topHalf)],
+        isInsertLiner,
+      ),
       mold,
       options,
     );
@@ -503,12 +546,16 @@ export async function simulateCastFromMoldResult(
         options,
       );
     }
+    const openPieces = piecesOf(mold.bottomHalf);
     return restorePartFrame(
       await simulateCastFromMoldTriangles(botTrisMm, {
         ...options,
         isClamshell: false,
+        partingZ: botPartingZ,
         flipUpright: options?.orientUpright ?? true,
         halves: [botTrisMm],
+        ...(openPieces ? { halfPieceTriangles: [openPieces] } : {}),
+        isInsertLiner,
       }),
       mold,
       options,
@@ -629,6 +676,7 @@ async function castClosedClamshell(
   feed?: FeedRoute,
   ventStubs?: VentStub[],
   pieceTriangles?: [number[] | undefined, number[] | undefined],
+  isInsertLiner?: boolean,
 ): Promise<MoldCastSimulationResult> {
   const seamZ = Math.fround(botPartingZ);
   for (let i = 2; i < bot.length; i += 3) {
@@ -660,6 +708,7 @@ async function castClosedClamshell(
     partingZ: botPartingZ,
     halves: [bot, turned],
     ...(pieceTriangles ? { halfPieceTriangles: pieceTriangles } : {}),
+    isInsertLiner,
     feedTrim,
     hasSprueTrim: Boolean(feed),
   });
@@ -698,8 +747,21 @@ async function castLaidOpenClamshell(
   const isLid = names.map((n) => /lid[ _]half/i.test(n));
   if (!isLid.some(Boolean) || isLid.every(Boolean)) return null;
 
-  const join = (lid: boolean) => {
-    const parts = shells.filter((_, i) => isLid[i] === lid);
+  const isHolderName = (n: string) => /(?:^|[ _])holder(?:$|[ _])/i.test(n);
+  const isInsertName = (n: string) => /(?:^|[ _])insert(?:$|[ _])/i.test(n);
+  const isInsertLiner =
+    names.some(isHolderName) && names.some(isInsertName);
+  const orderedFor = (lid: boolean) => {
+    const sub = shells.map((s, i) => ({ s, name: names[i] })).filter((_, i) => isLid[i] === lid);
+    if (!isInsertLiner) return sub.map((x) => x.s);
+    return [
+      ...sub.filter((x) => isHolderName(x.name)).map((x) => x.s),
+      ...sub.filter((x) => !isHolderName(x.name)).map((x) => x.s),
+    ];
+  };
+  const botParts = orderedFor(false);
+  const topParts = orderedFor(true);
+  const join = (parts: Float64Array[]) => {
     const out = new Float64Array(parts.reduce((s, p) => s + p.length, 0));
     let o = 0;
     for (const p of parts) {
@@ -708,13 +770,10 @@ async function castLaidOpenClamshell(
     }
     return out;
   };
-  const bot = join(false);
-  const top = join(true);
+  const bot = join(botParts);
+  const top = join(topParts);
   // A half of more than a shell and a liner is an insert in pieces (castClosedClamshell).
-  const counts = (lid: boolean) => {
-    const n = shells.filter((_, i) => isLid[i] === lid).map((p) => p.length / 9);
-    return n.length >= 2 ? n : undefined;
-  };
+  const counts = (parts: Float64Array[]) => (parts.length >= 2 ? parts.map((p) => p.length / 9) : undefined);
   // Back into the body's own frame, wherever it has been moved to: there the
   // plate's centreline is y = 0, the footprint of a half and its mirror.
   const toBody = getNodeWorldTransform(node).invert();
@@ -754,7 +813,17 @@ async function castLaidOpenClamshell(
   // A closed mold is poured through its sprue: the side and level of an open pour do not apply.
   const rest: MoldCastSimulationOptions = { ...options };
   delete rest.pour;
-  const res = await castClosedClamshell(bot, top, botPartingZ, lidPartingZ, rest, rec.feed, rec.ventStubs, [counts(false), counts(true)]);
+  const res = await castClosedClamshell(
+    bot,
+    top,
+    botPartingZ,
+    lidPartingZ,
+    rest,
+    rec.feed,
+    rec.ventStubs,
+    [counts(botParts), counts(topParts)],
+    isInsertLiner,
+  );
   return restorePartFrame(
     res,
     { moldType: 'clamshell', pullDirection: rec.pullDirection ?? '+z', cavityHoldsTop: Boolean(rec.cavityHoldsTop), topHalf: {} as MoldSummary['topHalf'] },
@@ -1019,6 +1088,75 @@ export async function simulateCastFromMoldTriangles(
       return null;
     };
 
+    const sealInsertHalf = (subSolids: ManifoldT[], halfIndex: number): ManifoldT => {
+      const holder = subSolids[0];
+      const ins = subSolids.length === 2 ? subSolids[1] : wasm.Manifold.union(subSolids.slice(1));
+      ins.numTri();
+      const hb = holder.boundingBox();
+      const flippedLid = Boolean(options?.isClamshell && halfIndex === 1);
+      const zFace = options?.partingZ !== undefined
+        ? Math.fround(options.partingZ)
+        : flippedLid ? hb.min[2] : hb.max[2];
+      const zBed = flippedLid ? hb.max[2] : hb.min[2];
+
+      let merged = wasm.Manifold.union([holder, ins]);
+      merged.numTri();
+
+      const zLo = Math.min(zFace, zBed);
+      const zHi = Math.max(zFace, zBed);
+      const inXY = 0.5;
+      const touchesSolid = (v: ManifoldT, target: ManifoldT): boolean => {
+        for (const d of [[0, 0, -0.05], [0, 0, 0.05], [0.05, 0, 0], [-0.05, 0, 0], [0, 0.05, 0], [0, -0.05, 0]] as [number, number, number][]) {
+          const shifted = v.translate(d);
+          const hit = shifted.intersect(target);
+          const hits = !hit.isEmpty();
+          shifted.delete();
+          hit.delete();
+          if (hits) return true;
+        }
+        return false;
+      };
+
+      if (hb.max[0] - hb.min[0] > 2 * inXY && hb.max[1] - hb.min[1] > 2 * inXY && zHi - zLo > 0.1) {
+        const boxW = hb.max[0] - hb.min[0] - 2 * inXY;
+        const boxD = hb.max[1] - hb.min[1] - 2 * inXY;
+        const innerBox = wasm.Manifold.cube([boxW, boxD, zHi - zLo - 0.02], false)
+          .translate([hb.min[0] + inXY, hb.min[1] + inXY, zLo + 0.01]);
+        const comp = innerBox.subtract(merged);
+        comp.numTri();
+        innerBox.delete();
+        const voids = comp.decompose();
+        comp.delete();
+        const fillVoids: ManifoldT[] = [];
+        for (const v of voids) {
+          const vol = v.volume();
+          if (!(vol > 0)) {
+            v.delete();
+            continue;
+          }
+          const vb = v.boundingBox();
+          const enclosedPegVoid = vol < 10 && vb.min[2] > zLo + 0.05 && vb.max[2] < zHi - 0.05;
+          const isSeatingGap = enclosedPegVoid || (touchesSolid(v, holder) && touchesSolid(v, ins));
+          if (isSeatingGap) {
+            fillVoids.push(v);
+            if (vb.min[2] <= zLo + 0.02) fillVoids.push(v.translate([0, 0, -0.01]));
+            if (vb.max[2] >= zHi - 0.02) fillVoids.push(v.translate([0, 0, 0.01]));
+          } else {
+            v.delete();
+          }
+        }
+        if (fillVoids.length > 0) {
+          const next = wasm.Manifold.union([merged, ...fillVoids]);
+          next.numTri();
+          for (const v of fillVoids) v.delete();
+          merged.delete();
+          merged = next;
+        }
+      }
+      if (ins !== subSolids[1]) ins.delete();
+      return merged;
+    };
+
     const shells: ManifoldT[] = [];
 
     if (options?.halves && options.halves.length > 0) {
@@ -1036,7 +1174,10 @@ export async function simulateCastFromMoldTriangles(
             if (sub) subSolids.push(sub);
           }
           if (subSolids.length === counts.length) {
-            const m = wasm.Manifold.union(subSolids);
+            const m = options.isInsertLiner
+              ? sealInsertHalf(subSolids, k)
+              : wasm.Manifold.union(subSolids);
+            m.numTri();
             for (const p of subSolids) p.delete();
             shells.push(m);
             return;

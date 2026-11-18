@@ -1483,26 +1483,42 @@ export function generateMoldMeshes(
   // socket's own clearance, and a lid turned 180° seated on all four. Now far
   // enough that a turned lid's pin lands on the flat face a millimetre past
   // the socket's rim, and stands off by the pin's height.
-  const pinInsetX = opts.wallMarginMm / 2;
-  const pinInsetY = opts.wallMarginMm / 2;
   const pinBaseR = opts.pinDiameterMm / 2;
   const pinTopR = Math.max(0.8, pinBaseR * 0.65);
   const socketRimR = pinBaseR + opts.pinToleranceMm;
   const socketBotR = pinTopR + opts.pinToleranceMm;
   const socketDepth = opts.pinHeightMm + 0.5;
+  const linerSkinMm = opts.dissolvableLiner
+    ? (opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM)
+    : 0;
+  const extraDraftMm = opts.draftMode === 'add' && opts.draftAngleDeg > 0
+    ? rawCavityDepthMm * Math.tan((opts.draftAngleDeg * Math.PI) / 180)
+    : 0;
+  const cavityGrowMm = extraDraftMm + (linerSkinMm > 0
+    ? linerSkinMm + Math.hypot(grid.stepX, grid.stepY) + (opts.linerConstruction === 'insert' ? INSERT_CLEARANCE_MM : 0)
+    : 0);
+  const pinInset = cavityGrowMm > 0
+    ? Math.min(opts.wallMarginMm / 2, Math.max(socketRimR + 0.6, (opts.wallMarginMm - cavityGrowMm) / 2))
+    : opts.wallMarginMm / 2;
+  const pinInsetX = pinInset;
+  const pinInsetY = pinInset;
   // As far as the next pin along leaves room for: both sockets and a millimetre between.
   const maxKeyOffsetX = Math.max(0, mw2 * 2 - 2 * pinInsetX - 2 * socketRimR - 1);
   const keyOffsetX = Math.min(maxKeyOffsetX, socketRimR + pinTopR + 1);
 
   // A block that follows the part: its plan, with the pins on a ring halfway
-  // out into the wall (or clear of the cavity by a socket and a millimetre).
+  // out into the wall (or clear of the cavity/pocket by a socket and a margin).
+  const fitPinRingMm = Math.min(
+    Math.max(opts.wallMarginMm / 2, cavityGrowMm + socketRimR + 0.8),
+    Math.max(socketRimR + 0.6, opts.wallMarginMm + extraDraftMm - socketRimR - 0.6),
+  );
   const outlines: MoldOutlines | null = opts.blockShape === 'fit' && activeWasm
     ? moldOutlines(activeWasm, tris, partSolidIds, {
         wallMm: opts.wallMarginMm,
-        pinRingMm: Math.max(opts.wallMarginMm / 2, socketRimR + 1),
+        pinRingMm: fitPinRingMm,
         baseMirrored: detailIsAbove,
         // Draft added at the cavity's foot widens it by depth x tan(angle).
-        extraMm: opts.draftMode === 'add' ? rawCavityDepthMm * Math.tan((opts.draftAngleDeg * Math.PI) / 180) : 0,
+        extraMm: extraDraftMm,
       })
     : null;
   if (opts.blockShape === 'fit' && !outlines) {
@@ -1518,7 +1534,7 @@ export function generateMoldMeshes(
         [-mw2 + pinInsetX, md2 - pinInsetY],
       ];
 
-  const minWallMarginForPins = Math.ceil((opts.pinDiameterMm + 2 * opts.pinToleranceMm + 2) * 10) / 10;
+  const minWallMarginForPins = Math.ceil((opts.pinDiameterMm + 2 * opts.pinToleranceMm + 2 + cavityGrowMm) * 10) / 10;
   if (opts.moldType === 'clamshell' && opts.wallMarginMm < minWallMarginForPins) {
     warnings.push(
       `A ${opts.wallMarginMm} mm wall margin is narrower than the ${opts.pinDiameterMm} mm pins and sockets need ` +
@@ -1533,7 +1549,7 @@ export function generateMoldMeshes(
     opts.moldType === 'clamshell' && opts.includePryNotches
       ? outlines
         ? notchesOnOutline(outlines.base)
-        : opts.separable && moldDepthMm >= moldWidthMm
+        : opts.separable && !opts.dissolvableLiner && moldDepthMm >= moldWidthMm
           ? [[0, md2 - 1], [0, -md2 + 1]]
           : [[mw2 - 1, 0], [-mw2 + 1, 0]]
       : [];
@@ -1582,9 +1598,6 @@ export function generateMoldMeshes(
   // lined, it holds the runner's own sleeve of liner too, with shell under that.
   const feed = opts.moldType === 'clamshell' && opts.includeSprue ? (opts.sprueFeed ?? defaultSprueFeed(opts.castMaterial ?? 'epoxy')) : 'top';
   const neckR = sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial) / 2;
-  const linerSkinMm = opts.dissolvableLiner
-    ? (opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM)
-    : 0;
   const minBracketFloor = opts.separable && opts.moldType === 'clamshell' && !opts.dissolvableLiner ? 10 : 0;
   const baseFloorMm = Math.max(
     minBracketFloor,

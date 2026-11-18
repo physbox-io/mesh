@@ -10,6 +10,7 @@ import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { loadManifold } from '../src/utils/sculptCut';
 import type { Grid } from '../src/utils/moldColumns';
 import { moldOptionsFor } from '../src/utils/moldWorkerClient';
+import { simulateCastFromMoldResult, weldTriangles } from '../src/utils/moldCastSimulation';
 
 const box = (name: string, half: number[], z: number): SceneGeom =>
   ({ name, type: 'box', size: half, pos: [0, 0, z] }) as SceneGeom;
@@ -280,5 +281,127 @@ describe('MCP mold options', () => {
     expect(moldOptionsFor({ castMaterial: 'bronze' }).error).toMatch(/metals go in sand/);
     expect(moldOptionsFor({ castMaterial: 'silicone' }).options.castMaterial).toBe('platinum');
     expect(moldOptionsFor({ linerSkinMm: -1 }).options).not.toHaveProperty('linerSkinMm');
+  });
+});
+
+describe('large >128 mm insert mold clearance, solid lid floor, pin sockets & cast simulation', () => {
+  it('preserves >= 0.20 mm lateral pocket clearance below the rim, keeps a solid lid holder floor, protects pin sockets, and casts cleanly', async () => {
+    const MM = 0.001;
+    const plate = wasm.Manifold.cube([150, 110, 6], false).translate([-75, -55, 4]);
+    const feet = wasm.Manifold.union([
+      wasm.Manifold.cube([14, 14, 4], false).translate([-70, -50, 0]),
+      wasm.Manifold.cube([14, 14, 4], false).translate([56, -50, 0]),
+      wasm.Manifold.cube([14, 14, 4], false).translate([-70, 36, 0]),
+      wasm.Manifold.cube([14, 14, 4], false).translate([56, 36, 0]),
+    ]);
+    const boss = wasm.Manifold.cylinder(10, 18, 18, 48, false).translate([0, 0, 10]);
+    const largePart = wasm.Manifold.union([plate, feet, boss]);
+    const partVol = largePart.volume();
+    const pm = largePart.getMesh();
+    const verts: number[] = [];
+    for (let i = 0; i < pm.vertProperties.length; i += pm.numProp) {
+      verts.push(pm.vertProperties[i] * MM, pm.vertProperties[i + 1] * MM, pm.vertProperties[i + 2] * MM);
+    }
+    for (const m of [plate, feet, boss, largePart]) m.delete();
+
+    const largeScene: SceneGraph = {
+      nodes: [{
+        id: 'lg',
+        name: 'large_150mm',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: verts, vertices: verts, faces: Array.from(pm.triVerts) } as unknown as SceneGeom],
+        joints: [],
+        children: [],
+      }],
+    };
+
+    const res = generateMoldMeshes(largeScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      pullDirection: '+z',
+      sprueFeed: 'top',
+      dissolvableLiner: true,
+      linerConstruction: 'insert',
+      castMaterial: 'epoxy',
+    }, wasm);
+    expect(res.success, res.error).toBe(true);
+
+    const toM = (tris: Triangle3D[]) => {
+      const arr = new Float64Array(tris.length * 9);
+      tris.forEach((t, i) => arr.set([...t.a, ...t.b, ...t.c], i * 9));
+      const w = weldTriangles(arr, 0);
+      return new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: w.positions, triVerts: w.faces }));
+    };
+    const bH = toM(res.bottomHalf.liner!.shell);
+    const bI = toM(res.bottomHalf.liner!.liner);
+    const tH = toM(res.topHalf!.liner!.shell);
+    const tI = toM(res.topHalf!.liner!.liner);
+
+    // Zero overlap between holder and insert on both halves.
+    expect(bH.intersect(bI).volume()).toBeLessThan(1e-5);
+    expect(tH.intersect(tI).volume()).toBeLessThan(1e-5);
+
+    // Lateral clearance >= 0.20 mm at mid-depth (below the 3 mm rim) on both halves.
+    for (const [h, ins, zMid] of [
+      [bH, bI, res.bottomHalf.partingZMm - 5],
+      [tH, tI, res.topHalf!.partingZMm - 5],
+    ] as const) {
+      const sH = h.slice(zMid);
+      const sI = ins.slice(zMid).offset(0.20, 'Round');
+      expect(sH.intersect(sI).area()).toBeLessThan(1e-4);
+      sH.delete();
+      sI.delete();
+    }
+
+    // Lid holder retains its solid structural back floor (>90% of block area, 1 lump) and avoids soluble block waste.
+    expect(tH.decompose()).toHaveLength(1);
+    expect(tH.slice(0.5).area()).toBeGreaterThan(res.moldWidthMm * res.moldDepthMm * 0.9);
+    expect(tI.volume()).toBeLessThan(partVol);
+
+    // Pin sockets in bottomHalf holder stay completely outside the pocket (4 distinct socket cavities near parting face).
+    const bCx = (res.bottomHalf.bounds.minX + res.bottomHalf.bounds.maxX) / 2;
+    const hSlice = bH.translate([-bCx, 0, 0]).slice(res.bottomHalf.partingZMm - 2);
+    for (const sock of res.features!.sockets) {
+      // Closed ring of solid holder wall around every socket rim.
+      const ring = new wasm.CrossSection(
+        [Array.from({ length: 24 }, (_, k) => [sock.atMm[0] + (sock.diaMm / 2 + 0.35) * Math.cos((k * Math.PI) / 12), sock.atMm[1] + (sock.diaMm / 2 + 0.35) * Math.sin((k * Math.PI) / 12)] as [number, number])],
+        'Positive',
+      );
+      const hole = new wasm.CrossSection(
+        [Array.from({ length: 24 }, (_, k) => [sock.atMm[0] + (sock.diaMm / 2 + 0.1) * Math.cos((k * Math.PI) / 12), sock.atMm[1] + (sock.diaMm / 2 + 0.1) * Math.sin((k * Math.PI) / 12)] as [number, number])],
+        'Positive',
+      );
+      const collar = ring.subtract(hole);
+      expect(collar.subtract(hSlice).area()).toBeLessThan(1e-2);
+      ring.delete();
+      hole.delete();
+      collar.delete();
+    }
+    hSlice.delete();
+    for (const m of [bH, bI, tH, tI]) m.delete();
+
+    const cast = await simulateCastFromMoldResult(res, { trimChannels: true });
+    expect(cast.success, cast.error).toBe(true);
+    expect(Math.abs(cast.castVolumeMm3 - partVol) / partVol).toBeLessThan(0.015);
+    expect(cast.warnings.some((w) => /another cavity|another pocket|air stays/i.test(w))).toBe(false);
+  }, 120_000);
+
+  it('keeps pry notches on ±X when dissolvableLiner is enabled even if separable is true', () => {
+    const deepBar: SceneGraph = {
+      nodes: [{ id: 'db', name: 'deep', type: 'body', pos: [0, 0, 0.01], geoms: [{ name: 'g', type: 'box', size: [0.01, 0.025, 0.008] } as SceneGeom], joints: [], children: [] }],
+    };
+    const res = generateMoldMeshes(deepBar, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      pullDirection: '+z',
+      includeSprue: false,
+      includeVents: false,
+      dissolvableLiner: true,
+      separable: true,
+      castMaterial: 'epoxy',
+    }, wasm);
+    expect(res.success, res.error).toBe(true);
+    expect(res.features!.pryNotches.every((n) => n.atMm[1] === 0 && Math.abs(n.atMm[0]) > 0)).toBe(true);
   });
 });

@@ -3,10 +3,12 @@ import { unzipSync, strFromU8 } from 'three/examples/jsm/libs/fflate.module.js';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { generateMoldMeshes, exportBinarySTL, moldSummary, DEFAULT_MOLD_OPTIONS, type MoldOptions, type MoldExportResult, type MoldMeshHalf, type Triangle3D } from '../src/utils/moldExporter';
 import { sealRing, SEAL_GROOVE_CLEAR_MM, SEAL_GROOVE_D_MM, SEAL_TONGUE_H_MM, SEAL_TONGUE_W_MM, DEFAULT_LINER_SKIN_MM } from '../src/utils/moldLiner';
-import { moldOptionsFor, moldStepLines } from '../src/utils/moldWorkerClient';
+import { moldOptionsFor, moldStepLines, moldMasterRecord, moldSceneParts } from '../src/utils/moldWorkerClient';
 import { loadManifold } from '../src/utils/sculptCut';
 import { stlToMesh } from '../src/utils/stlMesh';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
+import { simulatedBody } from '../src/utils/simulatedPart';
+import { simulateCastFromMoldNode, simulateCastFromMoldResult, weldTriangles } from '../src/utils/moldCastSimulation';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 
 // A real ASA + HIPS gear mold came out of four hours in limonene with the lid
@@ -97,7 +99,17 @@ describe('a lined mold sleeves everything the pour touches', () => {
   it('keeps every piece closed and wound outward', () => {
     for (const r of [combined, insert]) {
       for (const h of [r.bottomHalf, r.topHalf!]) {
-        for (const tris of [h.liner!.shell, h.liner!.liner]) {
+        const linerPieces: Triangle3D[][] = [];
+        if (h.liner!.pieceTriangles) {
+          let off = 0;
+          for (const count of h.liner!.pieceTriangles) {
+            linerPieces.push(h.liner!.liner.slice(off, off + count));
+            off += count;
+          }
+        } else {
+          linerPieces.push(h.liner!.liner);
+        }
+        for (const tris of [h.liner!.shell, ...linerPieces]) {
           const mesh = stlToMesh(exportBinarySTL(tris));
           const a = analyzeMesh(Array.from(mesh.positions), Array.from(mesh.faces))!;
           expect(a.closed).toBe(true);
@@ -163,15 +175,30 @@ describe('sealing ridge', () => {
 });
 
 describe('holder and insert', () => {
-  it('prints as four bodies: two holders and two inserts', () => {
+  it('prints as support-free holders and inserts (splitting lid sleeve stems from solid holder floor)', () => {
     expect(insert.success, insert.error).toBe(true);
     expect(insert.liner!.construction).toBe('insert');
     expect(moldSummary(insert).parts.map((p) => p.name)).toEqual([
-      'Cavity Half holder', 'Cavity Half insert', 'Lid Half (Pins, Sprue & Vents) holder', 'Lid Half (Pins, Sprue & Vents) insert',
+      'Cavity Half holder',
+      'Cavity Half insert',
+      'Lid Half (Pins, Sprue & Vents) holder',
+      'Lid Half (Pins, Sprue & Vents) insert, piece 1 of 2 (bottom)',
+      'Lid Half (Pins, Sprue & Vents) insert, piece 2 of 2 (top)',
     ]);
     const model = strFromU8(unzipSync(insert.threeMf!)['3D/3dmodel.model']);
     expect(model.match(/holder \(ASA\)/g)).toHaveLength(2);
-    expect(model.match(/insert \(HIPS\)/g)).toHaveLength(2);
+    expect(model.match(/insert(?:, piece \d of \d(?: \((?:bottom|top)\))?)? \(HIPS\)/g)).toHaveLength(3);
+
+    // Without through-floor channels, each half prints as one holder + one insert (4 bodies total).
+    const unchannelled = generateMoldMeshes(
+      ball,
+      { ...OPTS, linerConstruction: 'insert', includeSprue: false, includeVents: false },
+      wasm,
+    );
+    expect(unchannelled.success, unchannelled.error).toBe(true);
+    expect(moldSummary(unchannelled).parts.map((p) => p.name)).toEqual([
+      'Cavity Half holder', 'Cavity Half insert', 'Lid Half (Pins, Sprue & Vents) holder', 'Lid Half (Pins, Sprue & Vents) insert',
+    ]);
   });
 
   it('lifts the holder straight off, clear of the insert', () => {
@@ -208,4 +235,110 @@ describe('holder and insert', () => {
     expect(moldOptionsFor({ linerConstruction: 'insert', sealRidge: false }).options).toMatchObject({ linerConstruction: 'insert', sealRidge: false });
     expect(moldOptionsFor({ linerConstruction: 'bucket' }).error).toMatch(/liner_construction/);
   });
+
+  it('keeps fit bottom-fed mug holders as 1 lump with >= 0.20 mm sleeve clearance, exact combined interface, and warning-free open/clamshell insert cast simulation', async () => {
+    const MM = 0.001;
+    const cupOuter = wasm.Manifold.cylinder(36, 20, 20, 48, false);
+    const cupInner = wasm.Manifold.cylinder(32, 16, 16, 48, false).translate([0, 0, 4]);
+    const cup = cupOuter.subtract(cupInner);
+    const torusCs = new wasm.CrossSection(
+      [Array.from({ length: 24 }, (_, k) => [10 + 3 * Math.cos((k * Math.PI) / 12), 3 * Math.sin((k * Math.PI) / 12)] as [number, number])],
+      'Positive',
+    );
+    const handle = wasm.Manifold.revolve(torusCs, 36).rotate([90, 0, 0]).translate([20, 0, 18]);
+    torusCs.delete();
+    const mugSolid = cup.add(handle.subtract(cupInner));
+    const mugVol = mugSolid.volume();
+    const pm = mugSolid.getMesh();
+    const verts: number[] = [];
+    for (let i = 0; i < pm.vertProperties.length; i += pm.numProp) {
+      verts.push(pm.vertProperties[i] * MM, pm.vertProperties[i + 1] * MM, pm.vertProperties[i + 2] * MM);
+    }
+    for (const m of [cupOuter, cupInner, cup, handle, mugSolid]) m.delete();
+
+    const mugScene: SceneGraph = {
+      nodes: [{
+        id: 'mug',
+        name: 'mug',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: verts, vertices: verts, faces: Array.from(pm.triVerts) } as unknown as SceneGeom],
+        joints: [],
+        children: [],
+      }],
+    };
+
+    const toM = (tris: Triangle3D[]) => {
+      const arr = new Float64Array(tris.length * 9);
+      tris.forEach((t, i) => arr.set([...t.a, ...t.b, ...t.c], i * 9));
+      const w = weldTriangles(arr, 0);
+      return new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: w.positions, triVerts: w.faces }));
+    };
+
+    const mugFitInsert = generateMoldMeshes(mugScene, {
+      ...OPTS,
+      blockShape: 'fit',
+      sprueFeed: 'bottom',
+      linerConstruction: 'insert',
+    }, wasm);
+    expect(mugFitInsert.success, mugFitInsert.error).toBe(true);
+    const bH = toM(mugFitInsert.bottomHalf.liner!.shell);
+    const bI = toM(mugFitInsert.bottomHalf.liner!.liner);
+    const tH = toM(mugFitInsert.topHalf!.liner!.shell);
+    const tI = toM(mugFitInsert.topHalf!.liner!.liner);
+    expect(bH.decompose()).toHaveLength(1);
+    expect(tH.decompose()).toHaveLength(1);
+    expect(bH.intersect(bI).volume()).toBeLessThan(1e-5);
+    expect(tH.intersect(tI).volume()).toBeLessThan(1e-5);
+    for (const [h, ins, z] of [[bH, bI, mugFitInsert.bottomHalf.partingZMm - 6], [tH, tI, mugFitInsert.topHalf!.partingZMm - 6]] as const) {
+      const sH = h.slice(z);
+      const sI = ins.slice(z).offset(0.20, 'Round');
+      expect(sH.intersect(sI).area()).toBeLessThan(1e-4);
+      sH.delete();
+      sI.delete();
+    }
+    for (const m of [bH, bI, tH, tI]) m.delete();
+
+    // Combined fit mug: exact shared mating interface (shell ∩ liner === 0).
+    const mugFitCombined = generateMoldMeshes(mugScene, {
+      ...OPTS,
+      blockShape: 'fit',
+      sprueFeed: 'bottom',
+      linerConstruction: 'combined',
+    }, wasm);
+    expect(mugFitCombined.success, mugFitCombined.error).toBe(true);
+    const cBS = toM(mugFitCombined.bottomHalf.liner!.shell);
+    const cBL = toM(mugFitCombined.bottomHalf.liner!.liner);
+    const cTS = toM(mugFitCombined.topHalf!.liner!.shell);
+    const cTL = toM(mugFitCombined.topHalf!.liner!.liner);
+    expect(cBS.intersect(cBL).volume()).toBeLessThan(1e-5);
+    expect(cTS.intersect(cTL).volume()).toBeLessThan(1e-5);
+    for (const m of [cBS, cBL, cTS, cTL]) m.delete();
+
+    // Open mug insert: zero bogus "Another cavity" / "Another pocket" warnings on both Result and SceneNode.
+    const openMug = generateMoldMeshes(mugScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'open',
+      pullDirection: '+z',
+      dissolvableLiner: true,
+      linerConstruction: 'insert',
+      castMaterial: 'epoxy',
+    }, wasm);
+    expect(openMug.success, openMug.error).toBe(true);
+    const castRes = await simulateCastFromMoldResult(openMug, { trimChannels: true });
+    expect(castRes.success, castRes.error).toBe(true);
+    expect(Math.abs(castRes.castVolumeMm3 - mugVol) / mugVol).toBeLessThan(0.02);
+    expect(castRes.warnings.some((w) => /another cavity|another pocket/i.test(w))).toBe(false);
+
+    const openSummary = moldSummary(openMug);
+    const openMesh = stlToMesh(openMug.binarySTL);
+    const openNode = simulatedBody({ ...openMesh, cellMm: 0, toleranceMm: 0 }, {
+      modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [1, 1, 1], modelMinMm: [-40, -40, 0], modelMaxMm: [40, 40, 45],
+    }, { id: 'open_mug_node', name: 'Open Mug Mold', kind: 'mold', placement: 'beside', parts: moldSceneParts(openSummary) });
+    openNode.simulation = { ...openNode.simulation!, mold: moldMasterRecord(mugScene, openSummary) };
+    const castNode = await simulateCastFromMoldNode(openNode, { pour: { direction: 'auto' } });
+    expect(castNode.success, castNode.error).toBe(true);
+    expect(Math.abs(castNode.castVolumeMm3 - mugVol) / mugVol).toBeLessThan(0.02);
+    expect(castNode.warnings.some((w) => /another cavity|another pocket/i.test(w))).toBe(false);
+  }, 120_000);
 });

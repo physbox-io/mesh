@@ -119,7 +119,7 @@ describe('nothing a lined mold prints hangs over the casting', () => {
     expect(insert.warnings.join(' ')).not.toMatch(/hanging over/);
     expect(insert.liner!.steps.join(' ')).toMatch(/cavity half's insert comes in 2 pieces, cut 0\.6 mm below the parting face/);
     const objs = objects(insert.threeMf!);
-    const pieces = [...objs.keys()].filter((n) => /insert, piece \d of 2/.test(n));
+    const pieces = [...objs.keys()].filter((n) => /Cavity half insert, piece \d of 2/.test(n));
     expect(pieces).toHaveLength(2);
     for (const name of pieces) {
       const a = analyzeMesh(objs.get(name)!.positions, objs.get(name)!.faces)!;
@@ -324,7 +324,7 @@ describe('an insert a printer can bridge', () => {
     } as unknown as SceneGraph;
     const fdmGears = generateMoldMeshes(stackedOnShaft, { ...OPTS, pullDirection: '+z', linerConstruction: 'insert', printLimits: { minSkinMm: 0.2, minWallMm: 0.4, bridgeMm: 5 } }, wasm);
     expect(fdmGears.success, fdmGears.error).toBe(true);
-    expect(fdmGears.liner!.steps.join(' ')).toMatch(/comes in 3 pieces/);
+    expect(fdmGears.liner!.steps.join(' ')).toMatch(/lid's insert comes in 4 pieces/);
     // Every scene part is closed and manifold too.
     const allTris = [...fdmGears.bottomHalf.triangles, ...(fdmGears.topHalf?.triangles ?? [])];
     let off = 0;
@@ -476,4 +476,30 @@ describe('a curved roof', () => {
     }
     expect(linerPartingChoice(tris, 0, 15, 2.47).z).toBeCloseTo(2.9, 1);
   });
+
+  it('does not emit a false sloped-or-curved warning when a flat roof within 0.4 mm of the parting plane is skipped by the wafer guard', () => {
+    const waferScene = {
+      nodes: [{
+        id: 'w',
+        name: 'wafer',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [
+          box('lower', -14, -14, 2, 14, 14, 9.8),
+          box('neck', -4, -4, 2, 4, 4, 15),
+          box('upper', -14, -14, 10.6, 14, 14, 15),
+        ],
+        joints: [],
+        children: [],
+      }],
+      castPrep: { draftDeg: 0, draftMode: 'remove', partingZ: 10 * MM, edges: null, originals: {} },
+    } as unknown as SceneGraph;
+    const res = generateMoldMeshes(waferScene, {
+      ...OPTS,
+      wallMarginMm: 14,
+      linerConstruction: 'insert',
+    }, wasm);
+    expect(res.success, res.error).toBe(true);
+    expect(res.warnings.join(' ')).not.toMatch(/sloped or curved/);
+  }, 120_000);
 });

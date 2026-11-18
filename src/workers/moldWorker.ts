@@ -87,7 +87,7 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
       return;
     }
     const copy = new Uint8Array(bytes);
-    self.postMessage({ type: 'STL', id: msg.id, bytes: copy }, [copy.buffer]);
+    self.postMessage({ type: 'THREEMF', id: msg.id, bytes: copy }, [copy.buffer]);
     return;
   }
 

@@ -102,7 +102,7 @@ export class MoldWorkerClient {
         if (msg.type === 'FAILED') settle.reject(new Error(msg.message));
         else if (msg.type === 'GENERATED') {
           settle.resolve({ summary: msg.summary, bottom: msg.bottom, top: msg.top, liner: msg.liner ?? null } as never);
-        } else if (msg.type === 'STL') settle.resolve(msg.bytes as never);
+        } else if (msg.type === 'STL' || msg.type === 'THREEMF') settle.resolve(msg.bytes as never);
         else if (msg.type === 'CAST' || msg.type === 'CHAIN') settle.resolve(msg.result as never);
       };
       // A worker that dies leaves every caller awaiting forever otherwise. It
