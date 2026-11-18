@@ -73,8 +73,16 @@ const UNTANGLE_REACH = 0.05;
 const UNTANGLE_MAX = 1500, UNTANGLE_CHECK = 25;
 /** And for no longer than this at the build, ms: what is left stays free of continuous collision, to come apart as it runs. */
 const UNTANGLE_BUDGET = 3000;
-/** Continuous collision over this many substeps at a time (each stretch's end is what is kept): every 4, it cost half as much again as the rest of a step; the guarantee is the same at any. */
-const CCD_EVERY = 8;
+/**
+ * Continuous collision over this many substeps at a time (each stretch's end
+ * is what is kept). Every substep: over longer stretches what contact let
+ * through went centimetres deep before it was looked at, putting it back
+ * jerked the cloth round it, and that fed the next look. An unpressed pleated
+ * skirt reached 20 m/s and 73 crossings within half a second at 8 and at 4;
+ * at 2 it stayed clear but did not settle; at 1 it stays clear and settles.
+ * It costs the urban scene's run about 60% more than at 8.
+ */
+const CCD_EVERY = 1;
 
 const SKIN_FRICTION = 0.02;
 const STALL = (15 * Math.PI) / 180, POST_STALL = (30 * Math.PI) / 180;
