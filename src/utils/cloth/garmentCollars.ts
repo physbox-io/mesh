@@ -42,6 +42,8 @@ export const COLLAR_DEFAULTS: Required<Omit<GarmentCollar, 'standFront' | 'mater
 const LAYER_OFF = 0.0045;
 /** A collar's stand leans in toward the neck at most this much (tan 15 degrees), and stays this far off it past its garment's own room off the body (restOff), metres. */
 const STAND_LEAN = 0.27, STAND_CLEAR = 0.003;
+/** A lapel's gorge follows the neckline into its roll line, turned at most this far from square to the roll line, radians. */
+const GORGE_TURN = Math.PI / 6;
 
 /**
  * The cuts that make lapels: each front cut along its roll line, a plane
@@ -112,22 +114,45 @@ export function lapelPieces(lapels: GarmentLapels, runs: number[][], hostPanels:
     // edge goes on from the neckline along the gorge without a corner (at a
     // corner, the fall walked off either side into itself). Out to `width`
     // from the roll line, raised by `peak`. Square to the roll line if the
-    // neckline does not run on outward.
+    // neckline does not come into it from the front's side.
     const rLocal = local[local.length - 1];
     const edgeUse = new Map<string, number>();
     for (let t = 0; t < worn.tris.length; t += 3) for (let e = 0; e < 3; e++) {
       const a = worn.tris[t + e], b = worn.tris[t + ((e + 1) % 3)], key = a < b ? `${a},${b}` : `${b},${a}`;
       edgeUse.set(key, (edgeUse.get(key) ?? 0) + 1);
     }
-    let gorgeDir = ew;
+    // The neckline's way into the top of the roll line, taken over a span of
+    // it (a third of the lapel's width, along its outline) rather than from
+    // its last edge, and turned no further than GORGE_TURN from square to the
+    // roll line: a lowered neckline comes into it nearly along it, and run on
+    // that way one gorge went 12 cm down the front (its reach out the width
+    // over a third of its length) while the other, just under the old
+    // threshold, went square; the collar's end down the long one folded
+    // through itself.
+    const boundary = new Map<number, number[]>();
     for (const [key, count] of edgeUse) {
       if (count !== 1) continue;
       const [a, b] = key.split(',').map(Number);
-      const other = a === rLocal ? b : b === rLocal ? a : -1;
-      if (other < 0 || onRun.has(other)) continue;
-      const d = [qe[0] - worn.uv[other][0], qe[1] - worn.uv[other][1]], dl = Math.hypot(d[0], d[1]) || 1;
-      const dn = [d[0] / dl, d[1] / dl], out = dn[0] * ew[0] + dn[1] * ew[1];
-      if (out > 0.3) gorgeDir = dn;
+      boundary.set(a, [...(boundary.get(a) ?? []), b]);
+      boundary.set(b, [...(boundary.get(b) ?? []), a]);
+    }
+    const span = o.width / 3;
+    let gorgeDir = ew, bestOut = 0;
+    for (const first of boundary.get(rLocal) ?? []) {
+      if (onRun.has(first)) continue;
+      let prev = rLocal, cur = first, walked = Math.hypot(worn.uv[cur][0] - qe[0], worn.uv[cur][1] - qe[1]);
+      while (walked < span) {
+        const next = (boundary.get(cur) ?? []).find((c) => c !== prev && !onRun.has(c));
+        if (next === undefined) break;
+        walked += Math.hypot(worn.uv[next][0] - worn.uv[cur][0], worn.uv[next][1] - worn.uv[cur][1]);
+        prev = cur; cur = next;
+      }
+      const d = [qe[0] - worn.uv[cur][0], qe[1] - worn.uv[cur][1]];
+      const out = d[0] * ew[0] + d[1] * ew[1], up = d[0] * ea[0] + d[1] * ea[1], cos = out / (Math.hypot(out, up) || 1);
+      if (out <= 0 || cos <= bestOut) continue;
+      bestOut = cos;
+      const turn = Math.max(-GORGE_TURN, Math.min(GORGE_TURN, Math.atan2(up, out)));
+      gorgeDir = [ew[0] * Math.cos(turn) + ea[0] * Math.sin(turn), ew[1] * Math.cos(turn) + ea[1] * Math.sin(turn)];
     }
     const reachOut = o.width / (gorgeDir[0] * ew[0] + gorgeDir[1] * ew[1]);
     // Outline round the piece: up the roll line (the front's own points, a
