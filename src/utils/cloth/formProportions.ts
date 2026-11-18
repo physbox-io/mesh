@@ -106,22 +106,110 @@ export function formHeightMeasurements(m: BodyFormMeasurements) {
   };
 }
 
+/** Room under a foot for cloth (twice its thickness, and a little), metres. */
+export const FOOT_ROOM = 0.012;
+
+/** Posture: how far each level's centre sits toward the back (+y). A chest carried forward, the small of the back drawn in, the seat behind. */
+const centres = (female: boolean) => (female ? { upper: 0, bust: -0.004, waist: 0.012, hip: 0.022, seat: 0.018 } : { upper: 0.004, bust: -0.006, waist: 0.006, hip: 0.012, seat: 0.012 });
+
+/** A pose angle in degrees, 0 when unset (a form saved before it had one). */
+const angle = (v: number | undefined) => (Number.isFinite(v) ? Number(v) : 0);
+
+export interface LegPose {
+  /** How far the hips sit below where straight legs under them would hold them. */
+  drop: number;
+  /** The +x leg's root in the hip and its ankle, as posed (the -x leg is the mirror). */
+  top: number[];
+  ankle: number[];
+  /**
+   * Where it turns at the hip, as posed, `hipAt` along it from the root: down
+   * to there it runs as it stands, so it leaves the body as it does
+   * standing; from there it swings out and forward.
+   */
+  hip: number[];
+  hipAt: number;
+  /** Its knee as posed; null with the knee locked. */
+  knee: number[] | null;
+  /** Its root and ankle standing straight, the hips not dropped. */
+  rest: { top: number[]; ankle: number[] };
+  /** Root to knee and knee to ankle, along the leg. */
+  thigh: number;
+  shin: number;
+  /** Heights as the straight leg has them, standing: the ankle, the knee, and the knee's height from the usual one with the crotch moved. */
+  footZ: number;
+  kneeZ: number;
+  lz: (z: number) => number;
+}
+
+/**
+ * Where the +x leg runs, from its root in the hip through the knee to the
+ * ankle: standing straight (the usual proportions) and as posed. The stance
+ * swings the leg out at the hip, the knee bends it forward; the foot stays
+ * on the floor and the thigh and shin keep their lengths, so the hips come
+ * down (`drop`) and the torso with them, upright.
+ */
+export function legPose(m: BodyFormMeasurements): LegPose {
+  const female = m.figure === 'female', H = m.height, S = H / 1.75, z = resolveHeights(m);
+  const hipHalf = ellipseHalfWidth(m.hip, female ? 0.74 : 0.72);
+  // The foot stands a sock's thickness clear of the floor: with its sole on
+  // the floor there was no room under it, and cloth there was crushed.
+  // The leg's root sits up in the hip.
+  const footZ = 0.035 * S + FOOT_ROOM, topZ = z.hipZ - 0.015 * S;
+  // Heights down the leg, at the usual proportions, stretched between the
+  // ankle and the crotch where an inseam moves the crotch.
+  const k = (z.crotchZ - footZ) / (0.47 * H - footZ);
+  const lz = (h: number) => (z.crotchZ === 0.47 * H ? h : footZ + (h - footZ) * k);
+  const kneeZ = lz(0.285 * H);
+  const top = [hipHalf * 0.5, centres(female).hip, topZ], ankle = [hipHalf * 0.56, 0.01 * S, footZ];
+  const upper = Math.hypot(ankle[0] - top[0], ankle[1] - top[1], ankle[2] - top[2]);
+  const thigh = upper * (topZ - kneeZ) / (topZ - footZ), shin = upper - thigh;
+  const bend = (Math.min(KNEE_MAX, Math.max(0, angle(m.kneeBend))) * Math.PI) / 180, stance = (angle(m.stance) * Math.PI) / 180;
+  // The hip turns where the leg leaves the body, level with the crotch.
+  const down = ankle.map((v, i) => (v - top[i]) / upper), hipAt = (topZ - z.crotchZ) / -down[2];
+  const hip = top.map((v, i) => v + down[i] * hipAt);
+  if (bend === 0 && stance === 0) return { drop: 0, top, ankle, hip, hipAt, knee: null, rest: { top, ankle }, thigh, shin, footZ, kneeZ, lz };
+  // Hip to ankle across the bent knee; then that swung out by the stance, front view, the foot on the floor.
+  const t = thigh - hipAt, D = Math.sqrt(t * t + shin * shin + 2 * t * shin * Math.cos(bend));
+  const dy = ankle[1] - hip[1], R = Math.sqrt(Math.max(0, D * D - dy * dy));
+  const out = Math.atan2(ankle[0] - hip[0], hip[2] - footZ) + stance;
+  const posedHip = [hip[0], hip[1], footZ + Math.cos(out) * R], posedAnkle = [hip[0] + Math.sin(out) * R, ankle[1], footZ];
+  const drop = hip[2] - posedHip[2];
+  let knee: number[] | null = null;
+  if (bend > 0) {
+    // The knee forward of the line hip to ankle, the thigh and shin their lengths.
+    const u = posedAnkle.map((v, i) => (v - posedHip[i]) / D);
+    // Forward (-y), square to that line.
+    const f = [u[0] * u[1], u[1] * u[1] - 1, u[2] * u[1]];
+    const fl = Math.hypot(f[0], f[1], f[2]) || 1;
+    const along = (t * t - shin * shin + D * D) / (2 * D), h = Math.sqrt(Math.max(0, t * t - along * along));
+    knee = posedHip.map((v, i) => v + u[i] * along + (f[i] / fl) * h);
+  }
+  return { drop, top: [top[0], top[1], topZ - drop], ankle: posedAnkle, hip: posedHip, hipAt, knee, rest: { top, ankle }, thigh, shin, footZ, kneeZ, lz };
+}
+
+/** The deepest the knee bends, degrees: a crouch, the thighs near level. */
+export const KNEE_MAX = 110;
+
 export function proportions(m: BodyFormMeasurements) {
   const female = m.figure === 'female';
   const s = m.height / 1.75;
   const z = resolveHeights(m);
+  // Bent knees and a wide stance bring the hips down, and everything above them.
+  const drop = legPose(m).drop;
   return {
     s,
-    shoulderZ: z.shoulderZ,
+    drop,
+    shoulderZ: z.shoulderZ - drop,
     shoulderDrop: (female ? 0.066 : 0.058) * s,
     shoulderR: shoulderRadius(s),
-    bustZ: z.bustZ,
-    waistZ: z.waistZ,
-    hipZ: z.hipZ,
-    crotchZ: z.crotchZ,
+    bustZ: z.bustZ - drop,
+    waistZ: z.waistZ - drop,
+    hipZ: z.hipZ - drop,
+    crotchZ: z.crotchZ - drop,
+    /** Where the skin ends up the neck, and the crown of the head. */
+    neckTop: NECK_TOP * m.height - drop,
+    crown: m.height - drop,
     bustSpan: m.bustSpan ?? 0.19 * s,
-    // Posture: how far each level's centre sits toward the back (+y). A
-    // chest carried forward, the small of the back drawn in, the seat behind.
-    centre: female ? { upper: 0, bust: -0.004, waist: 0.012, hip: 0.022, seat: 0.018 } : { upper: 0.004, bust: -0.006, waist: 0.006, hip: 0.012, seat: 0.012 },
+    centre: centres(female),
   };
 }

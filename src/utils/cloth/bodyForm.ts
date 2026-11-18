@@ -13,7 +13,7 @@
  */
 
 import { limbLoft } from './limbLoft';
-import { ellipseHalfWidth, formHeightMeasurements, legTuck, NECK_TOP, proportions } from './formProportions';
+import { ellipseHalfWidth, formHeightMeasurements, KNEE_MAX, legTuck, proportions } from './formProportions';
 import { neckAxisY } from './formHead';
 
 export { ellipseHalfWidth } from './formProportions';
@@ -27,11 +27,11 @@ import type { SceneGeom } from '../../types/scene';
 export const FIGURE_DEFAULTS: Record<BodyFigure, BodyFormMeasurements> = {
   male: {
     figure: 'male', height: 1.78, chest: 1.0, underbust: 0.92, waist: 0.86, hip: 0.98, neck: 0.39,
-    shoulderWidth: 0.46, armLength: 0.55, upperArm: 0.31, armAngle: 45, elbowBend: 80, legs: true,
+    shoulderWidth: 0.46, armLength: 0.55, upperArm: 0.31, armAngle: 45, elbowBend: 80, stance: 0, kneeBend: 0,
   },
   female: {
     figure: 'female', height: 1.68, chest: 0.92, underbust: 0.78, waist: 0.72, hip: 0.98, neck: 0.33,
-    shoulderWidth: 0.39, armLength: 0.505, upperArm: 0.27, armAngle: 45, elbowBend: 80, legs: true,
+    shoulderWidth: 0.39, armLength: 0.505, upperArm: 0.27, armAngle: 45, elbowBend: 80, stance: 0, kneeBend: 0,
   },
 };
 
@@ -44,11 +44,11 @@ const OPTIONAL_MEASUREMENTS: OptionalBodyMeasurement[] = ['inseam', 'rise', 'wai
 const HEIGHT_MEASUREMENTS = ['inseam', 'rise', 'waistToHip', 'backLength', 'shoulderToBust'] as const;
 
 /**
- * Limits the inspector and MCP clamp to, metres (degrees for the arm). The
+ * Limits the inspector and MCP clamp to, metres (degrees for the pose). The
  * heights are also kept in order against each other and the form's height
  * (formProportions resolveHeights), which can narrow these.
  */
-export const BODY_FORM_LIMITS: Record<Exclude<keyof BodyFormMeasurements, 'legs' | 'figure'>, [number, number]> = {
+export const BODY_FORM_LIMITS: Record<Exclude<keyof BodyFormMeasurements, 'figure'>, [number, number]> = {
   height: [0.9, 2.2],
   chest: [0.5, 1.6],
   underbust: [0.45, 1.5],
@@ -60,6 +60,8 @@ export const BODY_FORM_LIMITS: Record<Exclude<keyof BodyFormMeasurements, 'legs'
   upperArm: [0.15, 0.5],
   armAngle: [10, 90],
   elbowBend: [0, 150],
+  stance: [-2, 30],
+  kneeBend: [0, KNEE_MAX],
   inseam: [0.4, 1.05],
   rise: [0.15, 0.4],
   waistToHip: [0.1, 0.3],
@@ -92,7 +94,8 @@ export function clampBodyForm(m: Partial<BodyFormMeasurements>): BodyFormMeasure
     (out as unknown as Record<string, number>)[k] = Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : base[k] as number;
   }
   out.underbust = Math.min(out.underbust, out.chest);
-  out.legs = out.legs !== false;
+  // A form always has legs: one saved with them off gets them.
+  delete (out as { legs?: unknown }).legs;
   // The heights set, as resolveHeights placed them in order: a set one it had
   // to move is stored where it went, so the form says what it is.
   const placed = formHeightMeasurements(out);
@@ -116,6 +119,12 @@ export interface BodyLandmarks {
   waistZ: number;
   hipZ: number;
   crotchZ: number;
+  /**
+   * How far bent knees and the stance bring the hips down: every height
+   * here is as posed, and a leg hung straight from its root (what a trouser
+   * leg is cut on) reaches this far below the floor.
+   */
+  drop: number;
   /** Half-depth of the chest, front to back. */
   chestDepth: number;
   /** Half-width of the hips. */
@@ -186,7 +195,7 @@ function formTapes(m: BodyFormMeasurements): Tapes {
   t = { chest: m.chest, waist: m.waist, hip: m.hip };
   const P = proportions(m);
   for (let it = 0; it < 5; it++) {
-    const rows = torsoRows(m, torsoParts(bodyFormGeomsRaw(m, 'form', t)), P.crotchZ - 0.005 * P.s, NECK_TOP * m.height, torsoProfile(m, t));
+    const rows = torsoRows(m, torsoParts(bodyFormGeomsRaw(m, 'form', t)), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, t));
     const read = { chest: sectionGirth(sectionAt(rows, P.bustZ)), waist: sectionGirth(sectionAt(rows, P.waistZ)), hip: sectionGirth(sectionAt(rows, P.hipZ)) };
     if ((Object.keys(read) as (keyof Tapes)[]).every((k) => Math.abs(read[k] / m[k] - 1) < 0.003)) break;
     t = { chest: t.chest * m.chest / read.chest, waist: t.waist * m.waist / read.waist, hip: t.hip * m.hip / read.hip };
@@ -258,6 +267,7 @@ function computeLandmarks(m: BodyFormMeasurements): BodyLandmarks {
     waistZ: P.waistZ,
     hipZ: P.hipZ,
     crotchZ: P.crotchZ,
+    drop: P.drop,
     chestDepth: 0.7 * chestHalf,
     hipHalf,
     hipDepth: 0.74 * hipHalf,
@@ -320,7 +330,7 @@ export function bodyFormGeoms(m: BodyFormMeasurements, prefix: string): SceneGeo
   // rings; colliding as slices it had grooves between them that cloth sank
   // into, below the surface you could see.
   const isTorsoPart = (g: SceneGeom) => /_(bust\w*|shoulder\w*|deltoid\w*|neck)$/.test(g.name);
-  const rows = prefix === 'form' ? formRows(m) : torsoRows(m, geoms.filter(isTorsoPart), P.crotchZ - 0.005 * P.s, NECK_TOP * m.height, torsoProfile(m, formTapes(m)));
+  const rows = prefix === 'form' ? formRows(m) : torsoRows(m, geoms.filter(isTorsoPart), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, formTapes(m)));
   const rgba = geoms[0]?.rgba ?? [0.93, 0.89, 0.82, 1];
   return [...geoms.filter((g) => !isTorsoPart(g)), torsoSkin(rows, `${prefix}_skin`, rgba), ...torsoSlabs(rows, `${prefix}_torso`)];
 }
@@ -383,7 +393,7 @@ function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string, tune: Tapes =
   const P = proportions(m);
   const T = tune;
   const L = limbLandmarks(m);
-  const H = m.height, s = P.s;
+  const s = P.s;
   const rgba = [0.93, 0.89, 0.82, 1];
   const geoms: SceneGeom[] = [];
   const add = (name: string, g: Omit<SceneGeom, 'name' | 'rgba'>) => geoms.push({ name: `${prefix}_${name}`, rgba, ...g } as SceneGeom);
@@ -407,8 +417,8 @@ function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string, tune: Tapes =
     add(`deltoid${tag}`, { type: 'sphere', size: [r4(P.shoulderR * 1.05)], pos: [r4(side * (sx - 0.01 * s)), 0, r4(spZ - 0.015 * s)] });
   }
   // The neck, carried a little forward of the shoulders.
-  add('neck', { type: 'capsule', size: [r4(L.neckRadius)], fromto: [0, 0, r4(P.shoulderZ - 0.02 * s), 0, r4(-0.012 * s), r4(NECK_TOP * H)] });
-  add('head', { type: 'ellipsoid', role: 'collision', size: [r4(0.075 * s), r4(0.095 * s), r4(0.115 * s)], pos: [0, r4(-0.015 * s), r4(H - 0.115 * s)] });
+  add('neck', { type: 'capsule', size: [r4(L.neckRadius)], fromto: [0, 0, r4(P.shoulderZ - 0.02 * s), 0, r4(-0.012 * s), r4(P.neckTop)] });
+  add('head', { type: 'ellipsoid', role: 'collision', size: [r4(0.075 * s), r4(0.095 * s), r4(0.115 * s)], pos: [0, r4(-0.015 * s), r4(P.crown - 0.115 * s)] });
 
   // Arms: one smooth limb each, tapering from the shoulder through the elbow
   // to the wrist and on into a mitten hand, palm to the body, with a thumb.
@@ -435,20 +445,16 @@ function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string, tune: Tapes =
     add('headSkin', { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(head, 0.004), [1, 0, 0], { start: head.startCap, end: head.endCap, angles: 96 }) });
   }
 
-  if (m.legs) {
-    for (const side of [1, -1] as const) {
-      const tag = side > 0 ? 'L' : 'R';
-      const limb = limbs[side > 0 ? 'legL' : 'legR'], path = limb.path;
-      add(`leg${tag}`, { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(limb), [1, 0, 0]) });
-      const hip = path.at(0), knee = path.at(path.jointAt * 0.55), ankle = path.at(path.jointAt), toe = path.at(limb.length - 0.02 * s);
-      add(`thigh${tag}`, { type: 'capsule', role: 'collision', size: [r4(limb.section(0).w * 0.8)], fromto: [...hip, ...knee].map(r4) });
-      add(`calf${tag}`, { type: 'capsule', role: 'collision', size: [r4(limb.section(path.jointAt * 0.7).w * 0.7)], fromto: [...knee, ...ankle].map(r4) });
-      add(`sole${tag}`, { type: 'capsule', role: 'collision', size: [r4(0.025 * s)], fromto: [...ankle, ...toe].map(r4) });
-    }
-  } else {
-    // A dress form's stand.
-    add('pole', { type: 'cylinder', size: [0.015, r4((P.crotchZ + 0.03 * s) / 2)], pos: [0, 0, r4((P.crotchZ + 0.03 * s) / 2)] });
-    add('base', { type: 'cylinder', size: [0.22, 0.015], pos: [0, 0, 0.015] });
+  for (const side of [1, -1] as const) {
+    const tag = side > 0 ? 'L' : 'R';
+    const limb = limbs[side > 0 ? 'legL' : 'legR'], path = limb.path;
+    add(`leg${tag}`, { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(limb), [1, 0, 0]) });
+    // Thigh and calf meet at a bent knee (hip, knee, ankle); with the knee straight, a little below it.
+    const kneeAt = path.joints.length > 2 ? path.joints[path.joints.length - 2].at : path.jointAt * 0.55;
+    const hip = path.at(0), knee = path.at(kneeAt), ankle = path.at(path.jointAt), toe = path.at(limb.length - 0.02 * s);
+    add(`thigh${tag}`, { type: 'capsule', role: 'collision', size: [r4(limb.section(0).w * 0.8)], fromto: [...hip, ...knee].map(r4) });
+    add(`calf${tag}`, { type: 'capsule', role: 'collision', size: [r4(limb.section(path.jointAt * 0.7).w * 0.7)], fromto: [...knee, ...ankle].map(r4) });
+    add(`sole${tag}`, { type: 'capsule', role: 'collision', size: [r4(0.025 * s)], fromto: [...ankle, ...toe].map(r4) });
   }
   return geoms;
 }
@@ -543,9 +549,9 @@ function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: 
   const neckR = m.neck / (2 * Math.PI);
   for (const row of rows) {
     const t = Math.min(1, Math.max(0, (row.z - (P.shoulderZ - 0.012 * S)) / (0.075 * S))), k = t * t * (3 - 2 * t);
-    const up = Math.min(1, Math.max(0, (row.z - (P.shoulderZ + 0.02 * S)) / (NECK_TOP * m.height - (P.shoulderZ + 0.02 * S))));
+    const up = Math.min(1, Math.max(0, (row.z - (P.shoulderZ + 0.02 * S)) / (P.neckTop - (P.shoulderZ + 0.02 * S))));
     if (k > 0) row.radii = row.radii.map((r) => r + (Math.min(r, neckR * (1.03 - 0.12 * up)) - r) * k);
-    if (k > 0) row.centreY += (neckAxisY(row.z, m.height, S) - row.centreY) * k;
+    if (k > 0) row.centreY += (neckAxisY(row.z, P.crown, S) - row.centreY) * k;
   }
   if (rows.length >= 2) rows[rows.length - 1].radii = rows[rows.length - 1].radii.map((r) => r * 0.9);
   return rows;
@@ -566,7 +572,7 @@ function rayEllipse(th: number, cx: number, cy: number, a: number, b: number): n
 function blendLimbRoots(m: BodyFormMeasurements, rows: TorsoRow[], P: ReturnType<typeof proportions>) {
   const limbs = formLimbs(m), S = P.s, N = rows[0].radii.length;
   const ease = (t: number) => { const u = Math.min(1, Math.max(0, t)); return u * u * (3 - 2 * u); };
-  if (m.legs) {
+  {
     // From the section at the top of the legs to one round the thighs at the
     // crotch, wherever a thigh is on that ray: what would be a loft from hip to thigh.
     // (From the hips, the widest section: below them the evened-out torso is already drawing in.)
@@ -694,7 +700,7 @@ function formRows(m: BodyFormMeasurements): TorsoRow[] {
   let rows = rowsCache.get(key);
   if (!rows) {
     const P = proportions(m);
-    rows = torsoRows(m, torsoParts(bodyFormGeomsRaw(m, 'form')), P.crotchZ - 0.005 * P.s, NECK_TOP * m.height, torsoProfile(m, formTapes(m)));
+    rows = torsoRows(m, torsoParts(bodyFormGeomsRaw(m, 'form')), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, formTapes(m)));
     if (rowsCache.size > 16) rowsCache.clear();
     rowsCache.set(key, rows);
   }

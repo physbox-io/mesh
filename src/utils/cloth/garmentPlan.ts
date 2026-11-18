@@ -131,8 +131,10 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
   const waistTop = (typeof d.top === 'number' ? d.top : L.waistZ) - (d.legs ? 0.02 * s : 0);
   const topZ = fromWaist ? waistTop : L.hpsZ;
   const topOff = standOff(d.waistEase ?? 0.02, layer);
+  // A trouser hem is down the leg hung straight (garmentShell, straightened):
+  // on a form with bent knees or a wide stance that reaches L.drop below the floor.
   const hem = d.legs
-    ? Math.max(0.06 * form.height, waistTop - d.length)
+    ? Math.max(0.06 * form.height - L.drop, waistTop - d.length)
     : fromWaist
       ? Math.max(0.06 * form.height, waistTop - Math.max(0.03, d.length))
       : L.waistZ - Math.max(0.02, d.length);

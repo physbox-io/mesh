@@ -841,8 +841,10 @@ export interface BodyFormMeasurements {
   armAngle: number;
   /** How far the forearm turns forward from the upper arm at the elbow, degrees: 0 is straight. */
   elbowBend: number;
-  /** Whether the form has legs below the hip, or stands on a pole. */
-  legs: boolean;
+  /** Each leg swung out from the hip, degrees, front view, the feet on the floor: 0 stands with the feet under the hips, more is wider. */
+  stance: number;
+  /** How far the knees bend, degrees: 0 is locked straight; the hips come down, the feet stay planted and the torso upright. */
+  kneeBend: number;
   /*
    * The rest are optional: unset, each is the usual proportion for the
    * figure at its height (formProportions.ts), and the form is exactly the

@@ -16,8 +16,6 @@ export interface FormFieldSpec {
   tip: string;
   /** Shown only for this figure. */
   figure?: 'male' | 'female';
-  /** Shown only on a form with legs. */
-  legs?: boolean;
 }
 
 export const FORM_SECTIONS: { title: string; unit: 'mm' | '°'; fields: FormFieldSpec[] }[] = [
@@ -30,10 +28,10 @@ export const FORM_SECTIONS: { title: string; unit: 'mm' | '°'; fields: FormFiel
       { field: 'hip', label: 'Hip', tip: 'Round the fullest part of the hips and seat' },
       { field: 'upperArm', label: 'Upper arm', tip: 'Round the fullest part of the upper arm' },
       { field: 'wrist', label: 'Wrist', tip: 'Round the wrist bone' },
-      { field: 'thigh', label: 'Thigh', tip: 'Round the thigh, about halfway from crotch to knee', legs: true },
-      { field: 'knee', label: 'Knee', tip: 'Round the knee', legs: true },
-      { field: 'calf', label: 'Calf', tip: 'Round the fullest part of the calf', legs: true },
-      { field: 'ankle', label: 'Ankle', tip: 'Round the narrowest part above the ankle bone', legs: true },
+      { field: 'thigh', label: 'Thigh', tip: 'Round the thigh, about halfway from crotch to knee' },
+      { field: 'knee', label: 'Knee', tip: 'Round the knee' },
+      { field: 'calf', label: 'Calf', tip: 'Round the fullest part of the calf' },
+      { field: 'ankle', label: 'Ankle', tip: 'Round the narrowest part above the ankle bone' },
     ],
   },
   {
@@ -57,6 +55,8 @@ export const FORM_SECTIONS: { title: string; unit: 'mm' | '°'; fields: FormFiel
     title: 'Pose', unit: '°', fields: [
       { field: 'armAngle', label: 'Arms down', tip: 'From horizontal: 90° hangs straight, 45° is an A-pose' },
       { field: 'elbowBend', label: 'Elbow bend', tip: 'Forearm turned forward at the elbow: 0° is straight' },
+      { field: 'stance', label: 'Feet placement', tip: 'Narrow to wide: each leg out from the hip, feet on the floor; 0° stands feet under the hips' },
+      { field: 'kneeBend', label: 'Knee bend', tip: 'Locked to a crouch: the hips come down, feet planted, torso upright; 0° is locked' },
     ],
   },
 ];

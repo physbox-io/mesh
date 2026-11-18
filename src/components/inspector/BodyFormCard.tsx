@@ -39,7 +39,7 @@ export function BodyFormCard({ node }: { node: SceneNode }) {
         <div key={section.title} className="flex flex-col gap-2">
           <label className="mt-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{section.title}</label>
           {section.fields
-            .filter((f) => (!f.figure || f.figure === m.figure) && (!f.legs || m.legs))
+            .filter((f) => !f.figure || f.figure === m.figure)
             .map(({ field, label, tip }) => (
               <BodyFormSlider key={field}
                 label={typeof label === 'string' ? label : label[female ? 1 : 0]} tip={tip}
@@ -54,10 +54,6 @@ export function BodyFormCard({ node }: { node: SceneNode }) {
           )}
         </div>
       ))}
-      <label className="flex items-center gap-2 text-xs text-slate-500 font-medium cursor-pointer" title="Off: the form ends at the hips on a stand">
-        <input type="checkbox" checked={m.legs} onChange={(e) => set({ legs: e.target.checked })} className="accent-purple-600" />
-        Legs
-      </label>
     </div>
   );
 }

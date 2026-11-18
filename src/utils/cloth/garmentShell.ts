@@ -17,6 +17,7 @@
 import type { BodyFormMeasurements, GarmentDraft, GarmentPlane } from '../../types/cloth';
 import { bodyFormGeoms, bodyFormSection, bodyLandmarks, formSkin } from './bodyForm';
 import { formLimbs, type FormLimb, type LimbName, type LimbSectionAt } from './formLimbs';
+import type { LimbPath } from './limbPath';
 import { gridOver, meshSdfWithin, sampleGrid } from './formSdf';
 import { CLOTH_MATERIALS } from './clothMesh';
 import { garmentSettings } from './garments';
@@ -88,9 +89,8 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   for (const c of plan.covers) {
     if (c.part === 'skin' || c.part === 'webL' || c.part === 'webR') continue;
     const l = rawLimbs[c.part];
-    if (l.path.bend > 0) {
-      const sec = l.section(l.path.jointAt);
-      limbs[c.part] = { ...l, path: l.path.refillet(Math.max(sec.w, sec.h) + c.off + H_MAX) };
+    if (l.path.joints.some((j) => j.bend > 0)) {
+      limbs[c.part] = { ...l, path: l.path.refillet(l.path.joints.map((j) => { const sec = l.section(j.at); return Math.max(sec.w, sec.h) + c.off + H_MAX; })) };
     }
   }
   // The plan measures along the form's own limbs; carry its distances onto
@@ -213,6 +213,26 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   };
   const on = (list: Part[] | undefined, p: number[]) => !list || list.includes(nearest(p));
 
+  // ---- Where a point over a posed leg would be with that leg hung straight
+  // from the hip (FormLimb.straight): the same distance along it, the same
+  // offset round it. The plan's heights and planes (a hem, the side seams'
+  // front and back) are drawn on the form standing, so a trouser leg is cut
+  // as it hangs and worn as the leg is posed; anywhere else, the point itself.
+  const posedLegs = new Map<Part, FormLimb>();
+  for (const part of parts) { const l = part === 'skin' || part === 'webL' || part === 'webR' ? undefined : rawLimbs[part]; if (l?.straight && l.straight !== l.path) posedLegs.set(part, l); }
+  const frameAt = (path: LimbPath, s: number) => {
+    const t = path.tangent(s), k = t[0], side = [1 - k * t[0], -k * t[1], -k * t[2]], l = Math.hypot(side[0], side[1], side[2]) || 1;
+    const sd = side.map((v) => v / l);
+    return { t, sd, up: [t[1] * sd[2] - t[2] * sd[1], t[2] * sd[0] - t[0] * sd[2], t[0] * sd[1] - t[1] * sd[0]] };
+  };
+  const straightOn = (l: FormLimb, p: number[]) => {
+    const cl = l.path.closest(p, l.length + 0.2), a = frameAt(l.path, cl.s), b = frameAt(l.straight!, cl.s), c = l.straight!.at(cl.s);
+    const v = [p[0] - cl.p[0], p[1] - cl.p[1], p[2] - cl.p[2]];
+    const u = [a.sd, a.up, a.t].map((e) => e[0] * v[0] + e[1] * v[1] + e[2] * v[2]);
+    return [0, 1, 2].map((q) => c[q] + b.sd[q] * u[0] + b.up[q] * u[1] + b.t[q] * u[2]);
+  };
+  const straightened = (p: number[]) => { if (!posedLegs.size) return p; const l = posedLegs.get(nearest(p)); return l ? straightOn(l, p) : p; };
+
   // ---- The garment's surface: where the distance to what it covers is its ease.
   const rest = restOff(layer);
   const field = new Float32Array(grid.dims[0] * grid.dims[1] * grid.dims[2]);
@@ -294,7 +314,8 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   // ---- Openings.
   // A draft's plane, and where on the garment it applies.
   const planeDist = (pl: GarmentPlane, p: number[]) => ((p[0] - pl.point[0]) * pl.normal[0] + (p[1] - pl.point[1]) * pl.normal[1] + (p[2] - pl.point[2]) * pl.normal[2]) / (Math.hypot(pl.normal[0], pl.normal[1], pl.normal[2]) || 1);
-  const inPlaneMask = (pl: GarmentPlane, p: number[], isFront: boolean) => (!pl.on || (pl.on as Part[]).includes(nearest(p)))
+  // `p` as the plan draws it (straightened), `at` where it is (whose part it is on).
+  const inPlaneMask = (pl: GarmentPlane, p: number[], isFront: boolean, at = p) => (!pl.on || (pl.on as Part[]).includes(nearest(at)))
     && (pl.front === undefined || isFront === pl.front)
     && (!pl.z || (p[2] >= pl.z[0] && p[2] <= pl.z[1]))
     && (!pl.x || (p[0] >= pl.x[0] && p[0] <= pl.x[1]));
@@ -349,13 +370,14 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       }
       case 'hem': {
         if (!on(c.on, p)) return 1;
-        const cy = centreY(z), back = Math.max(0, (y - cy) / Math.max(1e-6, Math.hypot(x, y - cy)));
-        return z - (c.z - c.train * back * back - (c.profile ? profileAt(c.profile, bodyTurn(x, y - cy)) : 0));
+        const [hx, hy, hz] = straightened(p);
+        const cy = centreY(hz), back = Math.max(0, (hy - cy) / Math.max(1e-6, Math.hypot(hx, hy - cy)));
+        return hz - (c.z - c.train * back * back - (c.profile ? profileAt(c.profile, bodyTurn(hx, hy - cy)) : 0));
       }
       case 'waist': return on(c.on, p) ? c.z + (c.profile ? profileAt(c.profile, bodyTurn(x, y - centreY(z))) : 0) - z : 1;
       case 'limbEnd': return on(c.on, p) ? c.s + (c.profile ? profileAt(c.profile, limbTurn(c.limb, p)) : 0) - alongLimb(c.limb, p) : 1;
       case 'limbStart': return on(c.on, p) ? alongLimb(c.limb, p) - c.s + (c.profile ? profileAt(c.profile, limbTurn(c.limb, p)) : 0) : 1;
-      case 'plane': return inPlaneMask(c, p, y < centreY(z)) ? -planeDist(c, p) : 1;
+      case 'plane': { const q = straightened(p); return inPlaneMask(c, q, q[1] < centreY(q[2]), p) ? -planeDist(c, q) : 1; }
     }
   };
   // A shaped edge (GarmentEdge) cut across triangles a quarter the size, so
@@ -460,7 +482,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   // arm's own side (left as the tangent gave it, the right arm's was the
   // left's reversed, and the blend closed a loop round that sleeve).
   const limbPlane = (limb: FormLimb, p: number[]) => { const c = limb.path.closest(p, limb.length + 0.2), t = limb.path.tangent(c.s), l = Math.hypot(t[0], t[1]), side = Math.sign(limb.path.at(0)[0]) || 1; return l < 0.2 ? front(p) : (side * ((p[0] - c.p[0]) * -t[1] + (p[1] - c.p[1]) * t[0])) / l; };
-  const frontOf = (c: PartCover, p: number[]) => { const limb = limbOf(c.part); return limb && limb.name.startsWith('arm') ? limbPlane(limb, p) : front(p); };
+  const frontOf = (c: PartCover, p: number[]) => { const limb = limbOf(c.part), leg = posedLegs.get(c.part); return limb && limb.name.startsWith('arm') ? limbPlane(limb, p) : front(leg ? straightOn(leg, p) : p); };
   const frontBlend = (p: number[]) => {
     let dmin = Infinity;
     const ds = plan.covers.map((c) => { const v = sampleGrid(grid, sdf.get(c.part)!, p); dmin = Math.min(dmin, v); return v; });
@@ -498,7 +520,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
         votes.set(part, (votes.get(part) ?? 0) + 1);
       }
       const part = [...votes].sort((a, b) => b[1] - a[1])[0]?.[0] ?? parts[0];
-      const isFront = c[1] < centreY(c[2]);
+      const leg = posedLegs.get(part), sc = leg ? straightOn(leg, c) : c, isFront = sc[1] < centreY(sc[2]);
       for (const t of p) { triPart[t] = part; triFront[t] = isFront; }
     }
     const inParts = (list: Part[], t: number) => list.includes(triPart[t]);
@@ -590,7 +612,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
         runSeam(sm.name, (p) => alongLimb(sm.limb, p) - sm.s, (_, __, t) => triPart[t] === sm.limb);
         break;
       case 'plane':
-        runSeam(sm.name, (p) => planeDist(sm, p), (c, _, t) => inPlaneMask(sm, c, triFront[t]), sm.open);
+        runSeam(sm.name, (p) => planeDist(sm, straightened(p)), (c, _, t) => inPlaneMask(sm, straightened(c), triFront[t], c), sm.open);
         break;
       case 'curve': {
         const lines = [...seams, ...edges];
@@ -727,7 +749,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     for (let i = 0; i < p.length; i += Math.max(1, Math.floor(p.length / 40))) { const part = nearest(points[tris[3 * p[i]]]); votes.set(part, (votes.get(part) ?? 0) + 1); }
     const part = [...votes].sort((a, b) => b[1] - a[1])[0][0];
     const cover = covers.get(part)!, tag = part.slice(-1);
-    const fb = c[1] < centreY(c[2]) ? 'front' : 'back';
+    const leg = posedLegs.get(part), sc = leg ? straightOn(leg, c) : c, fb = sc[1] < centreY(sc[2]) ? 'front' : 'back';
     const ring = rings.get(part);
     const base = cover.names === 'gore' ? 'gore'
       : cover.names === 'sleeve' ? `sleeve${tag}${ring !== undefined ? (alongLimb(part, c) < ring ? 'Upper' : 'Lower') : ''}`

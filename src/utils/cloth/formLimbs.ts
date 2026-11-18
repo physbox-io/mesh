@@ -1,8 +1,9 @@
 /**
- * A body form's limbs, each a line from its root through one joint to its
+ * A body form's limbs, each a line from its root through its joints to its
  * end (limbPath) with a cross-section along it: the arms from the shoulder,
  * turning forward at the elbow, through the wrist into the hand; the legs
- * from the seat, turning forward at the ankle into the foot; the head from
+ * from the seat, turning forward at the ankle into the foot (posed, out and
+ * forward at the hip and back at a bent knee first: legPose); the head from
  * the neck up to the crown.
  *
  * What the form draws each limb as (lofted through its sections) and what
@@ -13,10 +14,10 @@
  */
 
 import type { BodyFormMeasurements } from '../../types/cloth';
-import { ellipseHalfWidth, legTuck, NECK_TOP, proportions } from './formProportions';
+import { ellipseHalfWidth, FOOT_ROOM, legPose, legTuck, proportions } from './formProportions';
 import { headField, headRadius } from './formHead';
 import { armRelief, legRelief } from './formMuscles';
-import { makeLimbPath, type LimbPath } from './limbPath';
+import { makeJointedPath, makeLimbPath, type LimbPath } from './limbPath';
 
 export type LimbName = 'armL' | 'armR' | 'legL' | 'legR' | 'head';
 export const LIMB_NAMES: LimbName[] = ['armL', 'armR', 'legL', 'legR', 'head'];
@@ -36,6 +37,12 @@ export interface LimbSectionAt {
 export interface FormLimb {
   name: LimbName;
   path: LimbPath;
+  /**
+   * A leg's line hung straight from its root, as it stands with the knee
+   * locked and the feet under the hips: what a garment over it is cut on
+   * (garmentShell). The same object as `path` when it stands so.
+   */
+  straight?: LimbPath;
   /** Root to end, along the line. */
   length: number;
   /** How far the rounded start reaches before `0`, if not the start section's own size. */
@@ -50,8 +57,10 @@ const ELBOW_AT = 0.55;
 /** A hand's length past the wrist, at a 1.75 m figure. */
 export const HAND_LENGTH = 0.168;
 
-/** Room under a foot for cloth (twice its thickness, and a little), metres. */
-const FOOT_ROOM = 0.012;
+/** The radius a bent knee turns on, at a 1.75 m figure: about the knee's own depth, so the back of it does not fold through itself. */
+const KNEE_FILLET = 0.09;
+/** The radius the leg turns on at the hip, at a 1.75 m figure: the thigh's root rounds over it into the seat. */
+const HIP_FILLET = 0.12;
 
 const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -183,19 +192,18 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const { thighR, calfR } = legRadii(m), g = girthScales(m);
   const hipHalf = ellipseHalfWidth(m.hip, female ? 0.74 : 0.72);
   const hipDepth = hipHalf * (female ? 0.74 : 0.72);
-  // The foot stands a sock's thickness clear of the floor: with its sole on
-  // the floor there was no room under it, and cloth there was crushed.
   // The leg's root sits up in the hip, its top section matching the hip's
   // outer contour and front-to-back depth there so the hip flows continuously
-  // into the thigh with no cylinder step at the crotch.
-  const footZ = 0.035 * S + FOOT_ROOM, topZ = P.hipZ - 0.015 * S;
-  // Heights down the leg, at the usual proportions, stretched between the
-  // ankle and the crotch where an inseam moves the crotch.
-  const k = (P.crotchZ - footZ) / (0.47 * H - footZ);
-  const lz = (z: number) => (P.crotchZ === 0.47 * H ? z : footZ + (z - footZ) * k);
-  const kneeZ = lz(0.285 * H);
-  const xTop = side * hipHalf * 0.5, xAnkle = side * hipHalf * 0.56;
-  const top = [xTop, P.centre.hip, topZ], ankle = [xAnkle, 0.01 * S, footZ];
+  // into the thigh with no cylinder step at the crotch; the foot a sock's
+  // thickness clear of the floor (legPose). The leg's rows are by height
+  // standing straight, the hips not dropped.
+  const pose = legPose(m), hipDrop = P.drop, { kneeZ, lz } = pose;
+  const mirror = (p: number[]) => [side * p[0], p[1], p[2]];
+  const crotchZ = P.crotchZ + hipDrop, topZ = pose.rest.top[2];
+  // The leg hung straight from its root where the hips are: what its rows
+  // are measured along, and what a garment over it is cut on.
+  const top = mirror(pose.rest.top), ankle = mirror(pose.rest.ankle);
+  top[2] -= hipDrop; ankle[2] -= hipDrop;
   const down = unit(ankle.map((v, k) => v - top[k]));
   const fwd = unit([0, -1, 0].map((v, k) => v - down[k] * -down[1]));
   const bend = (Math.acos(Math.max(-1, Math.min(1, -down[1]))) * 180) / Math.PI;
@@ -203,7 +211,30 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const foot = 0.15 * S;
   // Rounded well at the ankle: sharp, the crease over the instep wedged a
   // hem or a sock's top and crushed it.
-  const path = makeLimbPath(top, down, fwd, upper, upper + foot, bend, 0.08 * S);
+  const straight = makeLimbPath(top, down, fwd, upper, upper + foot, bend, 0.08 * S);
+  // As posed: from the root through the knee, if bent, to the ankle, and
+  // forward into the foot, flat on the floor.
+  let path = straight;
+  if (pose.drop !== 0 || pose.knee) {
+    const pTop = mirror(pose.top), pAnkle = mirror(pose.ankle), knee = pose.knee ? mirror(pose.knee) : null;
+    const toward = (d: number[], f: number[]) => { const c = dot(d, f); return { forward: unit(f.map((v, k) => v - d[k] * c)), bend: (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI }; };
+    // The ankle turns from the shin into the foot, pointing forward. Past a
+    // right angle (a shin leaning over the foot) its arc is drawn in so the
+    // turn reaches no further than a right angle's would: at the same radius
+    // it ran on past the toes, and the foot never came down flat.
+    const ankleJoint = (shin: number[]) => {
+      const t = toward(shin, [0, -1, 0]);
+      return { at: upper, ...t, fillet: 0.08 * S * Math.min(1, 1 / Math.tan((t.bend * Math.PI) / 360)) };
+    };
+    // Down from the root as it stands, turning at the hip toward the knee (or the ankle).
+    const hip = mirror(pose.hip), next = knee ?? pAnkle, d0 = unit(next.map((v, k) => v - hip[k]));
+    const joints = [{ at: pose.hipAt, ...toward(down, d0), fillet: HIP_FILLET * S }];
+    if (knee) {
+      const d1 = unit(pAnkle.map((v, k) => v - knee[k]));
+      joints.push({ at: pose.thigh, ...toward(d0, d1), fillet: KNEE_FILLET * S }, ankleJoint(d1));
+    } else joints.push(ankleJoint(d0));
+    path = makeJointedPath(pTop, down, joints, upper + foot);
+  }
   // Down the leg by height: [height, half width (across), half depth].
   // Each girth measurement scales its own row, and the rows between take the mean.
   const mid = (a: number, b: number) => (a === b ? a : (a + b) / 2);
@@ -214,8 +245,8 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
     [lz(0.285 * H - 0.12 * S), calfR * 0.86 * g.calf, calfR * 0.94 * g.calf],
     [lz(0.285 * H - 0.035 * S), thighR * 0.6 * g.knee, thighR * 0.6 * g.knee],
     [lz(0.285 * H + 0.03 * S), thighR * 0.62 * g.knee, thighR * 0.64 * g.knee],
-    [P.crotchZ - (P.crotchZ - kneeZ) * 0.45, thighR * 0.78 * g.thigh, thighR * 0.92 * g.thigh],
-    [P.crotchZ, hipHalf * 0.5, hipDepth * 0.86],
+    [crotchZ - (crotchZ - kneeZ) * 0.45, thighR * 0.78 * g.thigh, thighR * 0.92 * g.thigh],
+    [crotchZ, hipHalf * 0.5, hipDepth * 0.86],
     [topZ, hipHalf * 0.47, hipDepth * 0.72],
   ];
   // Along the foot past the ankle: [distance, half width, half height, how far its centre drops].
@@ -223,17 +254,21 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const soleZ = FOOT_ROOM + 0.004 * S;
   const yHeel = ankle[1] + calfR * 0.54;
   return {
-    name: side > 0 ? 'legL' : 'legR', path, length: upper + foot, startCap: 0.045 * S,
+    name: side > 0 ? 'legL' : 'legR', path, straight, length: upper + foot, startCap: 0.045 * S,
     section(s) {
       const along = s - upper;
-      const [w0, h0, drop] = along < -0.02 * S ? [...table(legRows, path.at(s)[2]), 0] : table(footRows, along);
+      // Its height standing straight: what the rows and the muscles are placed by.
+      const zr = straight.at(s)[2] + hipDrop;
+      const [w0, h0, drop] = along < -0.02 * S ? [...table(legRows, zr), 0] : table(footRows, along);
       const p = path.at(s), c = [p[0], p[1], p[2] - drop];
       const tuck = legTuck(p[2], P.crotchZ, S), w = w0 - tuck, h = h0 - tuck;
-      // Round the leg: `out` is away from the other leg, `fwd` to the front. Gone by the instep.
+      // Round the leg: `out` is away from the other leg, `fwd` to the front
+      // (as it stands straight, turning with it as posed). Gone by the instep.
+      const straightSec = straight === path ? null : frame(straight, s, [1, 0, 0], c, w, h);
       const relief = (ang: number, sec: LimbSectionAt) => {
-        const ca = Math.cos(ang), sa = Math.sin(ang);
-        const d = sec.side.map((v, k) => v * ca + sec.up[k] * sa);
-        return legRelief(m.figure, (p[2] - kneeZ) / S, -d[1], d[0] * side) * S * (1 - smooth(-0.06 * S, -0.02 * S, along));
+        const ca = Math.cos(ang), sa = Math.sin(ang), rest = straightSec ?? sec;
+        const d = rest.side.map((v, k) => v * ca + rest.up[k] * sa);
+        return legRelief(m.figure, (zr - kneeZ) / S, -d[1], d[0] * side) * S * (1 - smooth(-0.06 * S, -0.02 * S, along));
       };
       if (along < -0.08 * S) {
         const sec = frame(path, s, [1, 0, 0], c, w, h);
@@ -241,15 +276,20 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
         return { ...sec, shape };
       }
       const base = frame(path, s, [1, 0, 0], c, w, h);
-      const uy = base.up[1], uz = base.up[2];
+      // The heel as the leg has it standing straight (posed, it turns with the
+      // shin), and never through the floor.
+      const ref = straightSec ?? base, floorZ = straightSec ? soleZ - hipDrop : soleZ;
+      const rc = straightSec ? (([x, y, z]) => [x, y, z - drop])(straight.at(s)) : c;
+      const uy = ref.up[1], uz = ref.up[2];
       // The 0.08 S ankle fillet rounds the instep (+up), pulling the path
       // inward from the heel corner; on the heel/sole side (-up), reach back
       // to the Achilles line yHeel and down flat to soleZ from heel to toe.
-      const toFloor = uz > 0.15 ? (c[2] - soleZ) / uz : Infinity;
-      const toAchilles = -uy > 0.15 ? (yHeel - c[1]) / -uy : Infinity;
+      const toFloor = uz > 0.15 ? (rc[2] - floorZ) / uz : Infinity;
+      const toAchilles = -uy > 0.15 ? (yHeel - rc[1]) / -uy : Infinity;
       // Smooth min (smin) at the back of the heel so the heel pad rounds onto the floor.
       const k = 0.018 * S, d = Math.max(0, k - Math.abs(toFloor - toAchilles)) / k;
-      const hBot = Math.max(h, Math.min(toFloor, toAchilles) - 0.25 * k * d * d);
+      let hBot = Math.max(h, Math.min(toFloor, toAchilles) - 0.25 * k * d * d);
+      if (straightSec && base.up[2] > 0.15) hBot = Math.max(h, Math.min(hBot, (c[2] - soleZ) / base.up[2]));
       const shape = (ang: number): [number, number] => {
         const ca = Math.cos(ang), sa = Math.sin(ang), r = relief(ang, base);
         return [ca * (w + r), sa * ((sa < 0 ? hBot : h) + r)];
@@ -260,9 +300,9 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
 }
 
 function head(m: BodyFormMeasurements): FormLimb {
-  const P = proportions(m), S = P.s, H = m.height;
+  const P = proportions(m), S = P.s, H = P.crown;
   const cTop = 0.076 * S, zc = H - cTop;
-  const z0 = NECK_TOP * H - 0.03 * S;
+  const z0 = P.neckTop - 0.03 * S;
   const length = zc + 0.8 * cTop - z0;
   const axisY = -0.012 * S;
   const field = headField(m.figure, m.neck / (2 * Math.PI) / S);
@@ -292,7 +332,7 @@ function head(m: BodyFormMeasurements): FormLimb {
 
 const cache = new Map<string, Record<LimbName, FormLimb>>();
 
-/** The form's limbs (cached on its measurements); legs only if it has them. */
+/** The form's limbs (cached on its measurements); both legs always. */
 export function formLimbs(m: BodyFormMeasurements): Record<LimbName, FormLimb> {
   const key = JSON.stringify(m);
   let hit = cache.get(key);
