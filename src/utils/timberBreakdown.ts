@@ -83,7 +83,7 @@ export interface TimberMember {
 export interface ExtractMembersOptions {
   /**
    * Maximum single-board width available in the shop before edge-gluing is
-   * needed for a tabletop or chair seat, in mm. Default 180 mm.
+   * needed for a tabletop or chair seat, in mm. Default 200 mm.
    */
   maxBoardWidthMm?: number;
   /**
@@ -669,15 +669,15 @@ function decomposeSingleSolidIntoManifolds(wasm: ManifoldToplevel, solid: Manifo
 /**
  * Classify a member's woodworking role from its dimensions and orientation:
  * - 'panel': broad along two axes, thin along the third (width >= 2.6 * thickness and width > 110 mm)
- * - 'leg': long axis predominantly vertical (|axis0.z| >= 0.65) and bar/post section
- * - 'rail': horizontal or angled bar/stretcher/apron
+ * - 'leg': long axis predominantly vertical (|axis0.z| >= 0.85, i.e. <= ~32° splay) and bar/post section
+ * - 'rail': horizontal or angled bar/stretcher/apron/brace (including 45° knee braces)
  */
 function classifyRole(axes: [Vec3, Vec3, Vec3], dimsMm: [number, number, number]): MemberRole {
   const [L, W, T] = dimsMm;
   if (W >= 2.6 * T && W >= 110 && L >= 110) {
     return 'panel';
   }
-  if (Math.abs(axes[0][2]) >= 0.65) {
+  if (Math.abs(axes[0][2]) >= 0.85) {
     return 'leg';
   }
   return 'rail';
@@ -709,6 +709,24 @@ function chooseReferenceFaces(
   const [, wAxis, tAxis] = axes;
 
   if (role === 'panel') {
+    if (Math.abs(tAxis[2]) < 0.5) {
+      // Vertical side/divider/back panel: Face 1 is the outward show face, Face 2 is the front/top jointed edge.
+      const outDot = dot3(tAxis, outward);
+      const showNormal: Vec3 =
+        Math.abs(outDot) > 1e-3
+          ? outDot >= 0
+            ? tAxis
+            : scale3(tAxis, -1)
+          : dot3(tAxis, [1, 1, 0]) >= 0
+            ? tAxis
+            : scale3(tAxis, -1);
+      const refDir: Vec3 = Math.abs(wAxis[2]) > 0.7 ? [0, 0, 1] : [0, -1, 0];
+      const frontEdge: Vec3 = dot3(wAxis, refDir) >= 0 ? wAxis : scale3(wAxis, -1);
+      return {
+        face1: { normal: showNormal, label: `${directionPhrase(showNormal)} Show Face` },
+        face2: { normal: frontEdge, label: `${directionPhrase(frontEdge)} Jointed Edge` },
+      };
+    }
     const topNormal: Vec3 = dot3(tAxis, [0, 0, 1]) >= 0 ? tAxis : scale3(tAxis, -1);
     const frontEdge: Vec3 = dot3(wAxis, [0, -1, 0]) >= 0 ? wAxis : scale3(wAxis, -1);
     return {
@@ -966,19 +984,27 @@ export function extractTimberMembers(
     return { mesh, obb, plankInfo: sp.plankInfo };
   });
 
-  // Group coplanar side-by-side panels (including pre-split planks like
-  // Top_Plank_1 & Top_Plank_2 in `flowerStandPreset`, or a wide tabletop
+  // Group coplanar side-by-side horizontal panels (including pre-split planks
+  // like Top_Plank_1 & Top_Plank_2 in `flowerStandPreset`, or a wide tabletop
   // re-split across multiple planks) into ordered plank sets so they receive
   // sequential `Top_Plank_1..N` IDs and edge-glue alignment dowels.
   const panelIndices = prelim
     .map((item, idx) => ({ item, idx }))
-    .filter(({ item }) => item.plankInfo || classifyRole(item.obb.axes, item.obb.dimsMm) === 'panel');
+    .filter(
+      ({ item }) =>
+        (item.plankInfo || classifyRole(item.obb.axes, item.obb.dimsMm) === 'panel') &&
+        Math.abs(item.obb.axes[2][2]) >= 0.7,
+    );
   if (panelIndices.length >= 2) {
-    // Group by approximate Z height (within 15 mm)
+    // Group by approximate Z height (within 15 mm) and matching grain axis
     const zGroups: typeof panelIndices[] = [];
     for (const entry of panelIndices) {
       const z = entry.item.obb.centerMm[2];
-      const g = zGroups.find((grp) => Math.abs(grp[0].item.obb.centerMm[2] - z) < 15);
+      const g = zGroups.find(
+        (grp) =>
+          Math.abs(grp[0].item.obb.centerMm[2] - z) < 15 &&
+          Math.abs(dot3(grp[0].item.obb.axes[0], entry.item.obb.axes[0])) > 0.9,
+      );
       if (g) g.push(entry);
       else zGroups.push([entry]);
     }
@@ -986,6 +1012,19 @@ export function extractTimberMembers(
       if (grp.length < 2) continue;
       const wAxis = grp[0].item.obb.axes[1];
       grp.sort((a, b) => dot3(a.item.obb.centerMm, wAxis) - dot3(b.item.obb.centerMm, wAxis));
+      // Verify adjacent panels actually abut edge-to-edge along wAxis (within 15 mm)
+      let allAbut = true;
+      for (let k = 0; k + 1 < grp.length; k++) {
+        const a = grp[k].item.obb;
+        const b = grp[k + 1].item.obb;
+        const centerDist = Math.abs(dot3(b.centerMm, wAxis) - dot3(a.centerMm, wAxis));
+        const expectedDist = 0.5 * (a.dimsMm[1] + b.dimsMm[1]);
+        if (Math.abs(centerDist - expectedDist) > 15) {
+          allAbut = false;
+          break;
+        }
+      }
+      if (!allAbut) continue;
       grp.forEach((entry, pIdx) => {
         entry.item.plankInfo = {
           index: pIdx + 1,
@@ -1022,7 +1061,16 @@ export function extractTimberMembers(
 
   const members: TimberMember[] = prelim.map((item, index) => {
     const { mesh, obb, plankInfo } = item;
-    const role = plankInfo ? 'panel' : classifyRole(obb.axes, obb.dimsMm);
+    let role = plankInfo ? 'panel' : classifyRole(obb.axes, obb.dimsMm);
+    // An elevated angled member (>20° from vertical, lifted >25% off the floor) is a brace/rail, not a floor leg
+    if (
+      role === 'leg' &&
+      Math.abs(obb.axes[0][2]) < 0.94 &&
+      obb.bboxMm.min[2] > minAll[2] + assemblyHeightMm * 0.25 &&
+      obb.dimsMm[0] < assemblyHeightMm * 0.75
+    ) {
+      role = 'rail';
+    }
     const { face1, face2 } = chooseReferenceFaces(role, obb.centerMm, obb.axes, assemblyCenterMm);
 
     let id: string;
@@ -1050,8 +1098,9 @@ export function extractTimberMembers(
       legCounter++;
       void legCounter;
     } else if (role === 'rail') {
+      const isAngledBrace = Math.abs(obb.axes[0][2]) >= 0.25;
       const relZ = (obb.centerMm[2] - minAll[2]) / assemblyHeightMm;
-      const tierPrefix = relZ >= 0.62 ? 'Apron' : 'Stretcher';
+      const tierPrefix = isAngledBrace ? 'Brace' : relZ >= 0.62 ? 'Apron' : 'Stretcher';
       const dx = obb.centerMm[0] - assemblyCenterMm[0];
       const dy = obb.centerMm[1] - assemblyCenterMm[1];
       // Check whether the rail runs along X (Front/Back) or along Y (Left/Right)
@@ -1063,13 +1112,38 @@ export function extractTimberMembers(
         sideSuffix = Math.abs(dx) < (maxAll[0] - minAll[0]) * 0.15 ? 'Center' : dx < 0 ? 'Left' : 'Right';
       }
       id = uniqueId(`${tierPrefix}_${sideSuffix}`);
-      title = `${sideSuffix} ${tierPrefix} Rail (${id})`;
+      title = isAngledBrace
+        ? `${sideSuffix} Angled Brace (${id})`
+        : `${sideSuffix} ${tierPrefix} Rail (${id})`;
       railCounter++;
       void railCounter;
     } else {
       if (plankInfo) {
         id = uniqueId(`Top_Plank_${plankInfo.index}`);
         title = `Tabletop Plank ${plankInfo.index} of ${plankInfo.total} (${id})`;
+      } else if (Math.abs(obb.axes[2][2]) < 0.5) {
+        // Vertical cabinet/bookcase side or divider panel
+        const dx = obb.centerMm[0] - assemblyCenterMm[0];
+        const dy = obb.centerMm[1] - assemblyCenterMm[1];
+        let baseName: string;
+        let pretty: string;
+        if (Math.abs(obb.axes[2][0]) >= Math.abs(obb.axes[2][1])) {
+          if (Math.abs(dx) < (maxAll[0] - minAll[0]) * 0.15) {
+            baseName = 'Divider_Center';
+            pretty = 'Center Divider Panel';
+          } else if (dx < 0) {
+            baseName = 'Side_Left';
+            pretty = 'Left Side Panel';
+          } else {
+            baseName = 'Side_Right';
+            pretty = 'Right Side Panel';
+          }
+        } else {
+          baseName = dy < 0 ? 'Panel_Front' : 'Panel_Back';
+          pretty = dy < 0 ? 'Front Panel' : 'Back Panel';
+        }
+        id = uniqueId(baseName);
+        title = `${pretty} (${id})`;
       } else {
         const relZ = (obb.centerMm[2] - minAll[2]) / assemblyHeightMm;
         const kind = relZ >= 0.7 ? 'Tabletop' : 'Shelf';

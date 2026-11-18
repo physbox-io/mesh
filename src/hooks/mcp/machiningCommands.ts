@@ -30,6 +30,7 @@ import { mcpMoldSubject } from '../../utils/moldSubject';
 import { ExportWorkerClient } from '../../utils/exportWorkerClient';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import { reliefOptionsFor, machiningOptionsFor } from './exportOptions';
+import { webSerialManager } from '../../utils/webSerialManager';
 import type { McpCommands } from './types';
 import type { SceneGraph } from '../../types/scene';
 
@@ -445,30 +446,55 @@ export const machiningCommands: McpCommands = {
     if (msg.kind === 'timber') {
       // The frame physics_timber_breakdown plans, made from its cut list
       // and its window programs, the tenons fitted into what they leave.
-      const others = Array.isArray(msg.withIds) ? msg.withIds.filter((v): v is string => typeof v === 'string') : [];
-      const targetIds = typeof msg.bodyId === 'string'
-        ? [msg.bodyId, ...others]
+      const resolveId = (id: string) => (toId ? String(toId(id)) : id);
+      const rawBodyId =
+        typeof msg.bodyId === 'string'
+          ? msg.bodyId
+          : typeof msg.body_id === 'string'
+            ? msg.body_id
+            : null;
+      const rawWithIds = Array.isArray(msg.withIds)
+        ? msg.withIds
+        : Array.isArray(msg.with_ids)
+          ? msg.with_ids
+          : [];
+      const others = rawWithIds.filter((v): v is string => typeof v === 'string').map(resolveId);
+      const targetIds = rawBodyId
+        ? [resolveId(rawBodyId), ...others]
         : resolveTimberTargetIds(scene.nodes, store.selectedNodeId, others);
       if (!targetIds.length) return { ok: false, error: 'Give body_id, or add a body to the scene first.' };
-      const { items } = collectIndividualPartSoups(scene, targetIds);
-      if (!items.length) return { ok: false, error: `${targetIds[0]} has no solid geometry to break down.` };
       const world = breakdownFrameToWorld(scene.nodes, targetIds[0]);
-      if (!world) return { ok: false, error: `No body called ${targetIds[0]}.` };
+      if (!world) return { ok: false, error: `No body called ${rawBodyId ?? targetIds[0]}.` };
+      const { items } = collectIndividualPartSoups(scene, targetIds);
+      if (!items.length) return { ok: false, error: `${rawBodyId ?? targetIds[0]} has no solid geometry to break down.` };
       const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+      const rawJointMode = msg.jointMode ?? msg.joint_mode;
+      const rawCornerFit = msg.tenonCornerFit ?? msg.tenon_corner_fit;
+      const rawClips = msg.tabletopClips ?? msg.tabletop_clips;
+      const rawBed = msg.cncBedMm ?? msg.cnc_bed_mm;
+      const bedArr = Array.isArray(rawBed) ? (rawBed as number[]) : null;
+      const cncBedMm: [number, number, number] =
+        bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
+          ? [bedArr[0], bedArr[1], bedArr[2]]
+          : [store.cncBed.widthMm, store.cncBed.depthMm, store.cncBed.heightMm];
+      const motion = webSerialManager.getState().motion;
       const planned = await runJob((c) => c.run('timber', scene, {
         mode: 'frame',
         soups: items.map((it) => it.soup),
         joineryOptions: {
-          jointMode: msg.jointMode === 'dado' ? 'dado' : 'mortise_tenon',
-          tenonCornerFit: msg.tenonCornerFit === 'round_tenon' || msg.tenonCornerFit === 'chisel_square' ? msg.tenonCornerFit : 'dogbone',
-          cutterDiaMm: n(msg.cutterDiaMm),
-          shoulderMm: n(msg.shoulderMm),
-          tenonLengthMm: n(msg.tenonLengthMm),
-          clearanceMm: n(msg.clearanceMm),
-          maxBoardWidthMm: n(msg.maxBoardWidthMm),
+          jointMode: rawJointMode === 'dado' ? 'dado' : 'mortise_tenon',
+          tenonCornerFit: rawCornerFit === 'round_tenon' || rawCornerFit === 'chisel_square' ? rawCornerFit : 'dogbone',
+          cutterDiaMm: n(msg.cutterDiaMm ?? msg.cutter_dia_mm),
+          shoulderMm: n(msg.shoulderMm ?? msg.shoulder_mm),
+          tenonLengthMm: n(msg.tenonLengthMm ?? msg.tenon_length_mm),
+          clearanceMm: n(msg.clearanceMm ?? msg.clearance_mm),
+          maxBoardWidthMm: n(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
+          ...(typeof rawClips === 'boolean' ? { tabletopClips: rawClips } : {}),
         },
-        cncBedMm: [store.cncBed.widthMm, store.cncBed.depthMm, store.cncBed.heightMm],
-        defaultStockLengthMm: n(msg.stockLengthMm) ?? 1800,
+        cncBedMm,
+        defaultStockLengthMm: n(msg.stockLengthMm ?? msg.stock_length_mm) ?? 1800,
+        spindle: motion.spindle,
+        maxFeedMmMin: Math.min(motion.maxRate.x, motion.maxRate.y),
       }));
       if (!planned.outcome.ok) return { ok: false, error: planned.outcome.error };
       if (!planned.cutPlan) return { ok: false, error: 'The frame has no cut plan.' };

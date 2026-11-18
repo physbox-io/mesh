@@ -3,11 +3,13 @@
 // Setups, G-Code Generation & Novice-Proof Per-Part Build Guide
 // ---------------------------------------------------------------------------
 
-import type {
-  MemberJoineryPart,
-  MortiseSpec,
-  TimberBreakdownResult,
-  ZClipSlotSpec,
+import {
+  endAllowanceAlongAxisMm,
+  roundTenonCornerRadiusMm,
+  type MemberJoineryPart,
+  type MortiseSpec,
+  type TimberBreakdownResult,
+  type ZClipSlotSpec,
 } from './timberJoinery';
 import type { Vec3 } from './printPlate';
 import { DEFAULT_MATERIAL, recommendSpeeds, type MaterialId, type SpindleRange } from './feedsAndSpeeds';
@@ -175,6 +177,44 @@ export function mortisingFeeds(cutterDiaMm: number, o: CutPlanOptions) {
 const dot = (a: ArrayLike<number>, b: ArrayLike<number>) =>
   a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
+/**
+ * Physical shoulder bounds `[sLo, sHi]` and finished `+axes[0]` top-end tip
+ * coordinate (`topTipCoord`) of a part along `part.member.axes[0]`.
+ * Shared across CNC setup planning, Z-clip placement, and `timberSimulation.ts`
+ * so the Y0 stop datum is identical everywhere.
+ */
+export function partShoulderBoundsAlongAxis(part: MemberJoineryPart): {
+  sLo: number;
+  sHi: number;
+  topTipCoord: number;
+} {
+  const m = part.member;
+  const a0 = m.axes[0];
+  const tStart = part.tenons.find((t) => t.railEnd === 'start');
+  const tEnd = part.tenons.find((t) => t.railEnd === 'end');
+  let sLo: number;
+  let sHi: number;
+  if (tStart && tEnd) {
+    sLo = dot(tStart.shoulderCenterMm, a0);
+    sHi = dot(tEnd.shoulderCenterMm, a0);
+  } else if (tEnd) {
+    sHi = dot(tEnd.shoulderCenterMm, a0);
+    sLo = sHi - part.shoulderToShoulderMm;
+  } else if (tStart) {
+    sLo = dot(tStart.shoulderCenterMm, a0);
+    sHi = sLo + part.shoulderToShoulderMm;
+  } else {
+    const mid = dot(m.centerMm, a0);
+    sLo = mid - part.shoulderToShoulderMm * 0.5;
+    sHi = mid + part.shoulderToShoulderMm * 0.5;
+  }
+  return {
+    sLo,
+    sHi,
+    topTipCoord: sHi + endAllowanceAlongAxisMm(m, tEnd),
+  };
+}
+
 function fmt(n: number, d = 3): string {
   return (+n.toFixed(d)).toString();
 }
@@ -205,10 +245,14 @@ export function generateWindowGcode(params: {
     id: string;
     centerXMm: number;
     centerYMm: number;
+    /** Mortise span along `uDirXY` (defaults to CNC +Y when `uDirXY` is `[0, 1]`), mm. */
     widthYMm: number;
+    /** Mortise span along `vDirXY = [uDirXY[1], -uDirXY[0]]` (defaults to CNC +X), mm. */
     thicknessXMm: number;
     depthMm: number;
     dogbone: boolean;
+    /** Unit 2D direction `[ux, uy]` of the mortise's `uAxis` on the CNC `(X, Y)` bed. Default `[0, 1]`. */
+    uDirXY?: [number, number];
   }[];
   zClips: {
     id: string;
@@ -237,6 +281,7 @@ export function generateWindowGcode(params: {
   const safeZ = 6.0;
   const rBit = cutterDiaMm * 0.5;
   const stepover = Math.max(1.0, cutterDiaMm * 0.42);
+  const ringStep = stepover * Math.SQRT1_2;
   const lines: string[] = [
     `; Setup: ${commentText(setupId)} — Part ${commentText(partId)}`,
     `; Face UP: ${commentText(faceUpLabel)}`,
@@ -254,9 +299,20 @@ export function generateWindowGcode(params: {
   let cuttingDistMm = 0;
 
   for (const m of mortises) {
+    const [rawUx, rawUy] = m.uDirXY ?? [0, 1];
+    const uNorm = Math.hypot(rawUx, rawUy) || 1;
+    const ux = rawUx / uNorm;
+    const uy = rawUy / uNorm;
+    const vx = uy;
+    const vy = -ux;
+    const toXY = (sv: number, su: number): [number, number] => [
+      m.centerXMm + sv * vx + su * ux,
+      m.centerYMm + sv * vy + su * uy,
+    ];
+
     lines.push(`; Mortise ${commentText(m.id)}: ${m.thicknessXMm} × ${m.widthYMm} × ${m.depthMm} mm`);
-    const halfX = Math.max(0, m.thicknessXMm * 0.5 - rBit);
-    const halfY = Math.max(0, m.widthYMm * 0.5 - rBit);
+    const halfV = Math.max(0, m.thicknessXMm * 0.5 - rBit);
+    const halfU = Math.max(0, m.widthYMm * 0.5 - rBit);
     const passes = Math.max(1, Math.ceil(m.depthMm / stepdownMm));
 
     // Rapid over center of mortise
@@ -264,35 +320,86 @@ export function generateWindowGcode(params: {
 
     for (let p = 1; p <= passes; p++) {
       const z = -Math.min(m.depthMm, p * stepdownMm);
-      // Ramp plunge along centerline Y
-      const rampHalfY = Math.min(halfY, Math.max(1.5, rBit));
-      lines.push(`G1 X${fmt(m.centerXMm)} Y${fmt(m.centerYMm - rampHalfY)} Z${fmt(z)} F${Math.round(plungeRate)}`);
-      lines.push(`G1 X${fmt(m.centerXMm)} Y${fmt(m.centerYMm + rampHalfY)} F${Math.round(feedRate)}`);
-      cuttingDistMm += rampHalfY * 4;
+      // Ramp plunge along the longer pocket axis, then clear via medial-axis constant-offset rings
+      if (halfU >= halfV) {
+        const rampHalfU = Math.min(halfU, Math.max(1.5, rBit));
+        const [rx0, ry0] = toXY(0, -rampHalfU);
+        const [rx1, ry1] = toXY(0, rampHalfU);
+        lines.push(`G1 X${fmt(rx0)} Y${fmt(ry0)} Z${fmt(z)} F${Math.round(plungeRate)}`);
+        lines.push(`G1 X${fmt(rx1)} Y${fmt(ry1)} F${Math.round(feedRate)}`);
+        cuttingDistMm += rampHalfU * 4;
 
-      // Offset spiral rings outward to clear the mortise pocket
-      const rings = Math.max(1, Math.ceil(Math.max(halfX, halfY) / stepover));
-      for (let r = 1; r <= rings; r++) {
-        const frac = r / rings;
-        const rx = halfX * frac;
-        const ry = halfY * frac;
-        lines.push(`G1 X${fmt(m.centerXMm - rx)} Y${fmt(m.centerYMm - ry)} F${Math.round(feedRate)}`);
-        lines.push(`G1 X${fmt(m.centerXMm + rx)} Y${fmt(m.centerYMm - ry)}`);
-        lines.push(`G1 X${fmt(m.centerXMm + rx)} Y${fmt(m.centerYMm + ry)}`);
-        lines.push(`G1 X${fmt(m.centerXMm - rx)} Y${fmt(m.centerYMm + ry)}`);
-        lines.push(`G1 X${fmt(m.centerXMm - rx)} Y${fmt(m.centerYMm - ry)}`);
-        cuttingDistMm += 4 * (rx + ry);
+        const spineU = Math.max(0, halfU - halfV);
+        if (spineU > rampHalfU + 1e-3) {
+          const [sx0, sy0] = toXY(0, -spineU);
+          const [sx1, sy1] = toXY(0, spineU);
+          lines.push(`G1 X${fmt(sx0)} Y${fmt(sy0)} F${Math.round(feedRate)}`);
+          lines.push(`G1 X${fmt(sx1)} Y${fmt(sy1)}`);
+          cuttingDistMm += spineU * 3;
+        }
+
+        const rings = Math.max(1, Math.ceil(halfV / ringStep));
+        for (let r = 1; r <= rings; r++) {
+          const frac = r / rings;
+          const rv = halfV * frac;
+          const ru = spineU + rv;
+          const [x0, y0] = toXY(-rv, -ru);
+          const [x1, y1] = toXY(rv, -ru);
+          const [x2, y2] = toXY(rv, ru);
+          const [x3, y3] = toXY(-rv, ru);
+          lines.push(`G1 X${fmt(x0)} Y${fmt(y0)} F${Math.round(feedRate)}`);
+          lines.push(`G1 X${fmt(x1)} Y${fmt(y1)}`);
+          lines.push(`G1 X${fmt(x2)} Y${fmt(y2)}`);
+          lines.push(`G1 X${fmt(x3)} Y${fmt(y3)}`);
+          lines.push(`G1 X${fmt(x0)} Y${fmt(y0)}`);
+          cuttingDistMm += 4 * (rv + ru);
+        }
+      } else {
+        const rampHalfV = Math.min(halfV, Math.max(1.5, rBit));
+        const [rx0, ry0] = toXY(-rampHalfV, 0);
+        const [rx1, ry1] = toXY(rampHalfV, 0);
+        lines.push(`G1 X${fmt(rx0)} Y${fmt(ry0)} Z${fmt(z)} F${Math.round(plungeRate)}`);
+        lines.push(`G1 X${fmt(rx1)} Y${fmt(ry1)} F${Math.round(feedRate)}`);
+        cuttingDistMm += rampHalfV * 4;
+
+        const spineV = Math.max(0, halfV - halfU);
+        if (spineV > rampHalfV + 1e-3) {
+          const [sx0, sy0] = toXY(-spineV, 0);
+          const [sx1, sy1] = toXY(spineV, 0);
+          lines.push(`G1 X${fmt(sx0)} Y${fmt(sy0)} F${Math.round(feedRate)}`);
+          lines.push(`G1 X${fmt(sx1)} Y${fmt(sy1)}`);
+          cuttingDistMm += spineV * 3;
+        }
+
+        const rings = Math.max(1, Math.ceil(halfU / ringStep));
+        for (let r = 1; r <= rings; r++) {
+          const frac = r / rings;
+          const ru = halfU * frac;
+          const rv = spineV + ru;
+          const [x0, y0] = toXY(-rv, -ru);
+          const [x1, y1] = toXY(rv, -ru);
+          const [x2, y2] = toXY(rv, ru);
+          const [x3, y3] = toXY(-rv, ru);
+          lines.push(`G1 X${fmt(x0)} Y${fmt(y0)} F${Math.round(feedRate)}`);
+          lines.push(`G1 X${fmt(x1)} Y${fmt(y1)}`);
+          lines.push(`G1 X${fmt(x2)} Y${fmt(y2)}`);
+          lines.push(`G1 X${fmt(x3)} Y${fmt(y3)}`);
+          lines.push(`G1 X${fmt(x0)} Y${fmt(y0)}`);
+          cuttingDistMm += 4 * (rv + ru);
+        }
       }
 
       // 4 Dogbone corner relief overcuts so a square bandsawn tenon drops right in
       if (m.dogbone && m.thicknessXMm >= cutterDiaMm && m.widthYMm >= cutterDiaMm) {
         const inset = rBit * Math.SQRT1_2;
-        const dx = Math.max(0, m.thicknessXMm * 0.5 - inset);
-        const dy = Math.max(0, m.widthYMm * 0.5 - inset);
-        for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
-          lines.push(`G1 X${fmt(m.centerXMm + sx * halfX)} Y${fmt(m.centerYMm + sy * halfY)} F${Math.round(feedRate)}`);
-          lines.push(`G1 X${fmt(m.centerXMm + sx * dx)} Y${fmt(m.centerYMm + sy * dy)} F${Math.round(feedRate * 0.75)}`);
-          lines.push(`G1 X${fmt(m.centerXMm + sx * halfX)} Y${fmt(m.centerYMm + sy * halfY)}`);
+        const dv = Math.max(0, m.thicknessXMm * 0.5 - inset);
+        const du = Math.max(0, m.widthYMm * 0.5 - inset);
+        for (const [sv, su] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
+          const [cx0, cy0] = toXY(sv * halfV, su * halfU);
+          const [dx0, dy0] = toXY(sv * dv, su * du);
+          lines.push(`G1 X${fmt(cx0)} Y${fmt(cy0)} F${Math.round(feedRate)}`);
+          lines.push(`G1 X${fmt(dx0)} Y${fmt(dy0)} F${Math.round(feedRate * 0.75)}`);
+          lines.push(`G1 X${fmt(cx0)} Y${fmt(cy0)}`);
           cuttingDistMm += rBit * 2;
         }
       }
@@ -304,21 +411,24 @@ export function generateWindowGcode(params: {
     lines.push(`; Tabletop Z-Clip Expansion Slot ${commentText(zc.id)}: ${zc.lengthYMm} × ${zc.widthXMm} × ${zc.depthMm} mm`);
     const halfX = Math.max(0, zc.widthXMm * 0.5 - rBit);
     const halfY = Math.max(0.5, zc.lengthYMm * 0.5 - rBit);
+    const rampHalfY = Math.min(halfY, Math.max(2.0, rBit));
     const passes = Math.max(1, Math.ceil(zc.depthMm / stepdownMm));
-    lines.push(`G0 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm - halfY)}`);
+    lines.push(`G0 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm - rampHalfY)}`);
     for (let p = 1; p <= passes; p++) {
       const z = -Math.min(zc.depthMm, p * stepdownMm);
-      lines.push(`G1 Z${fmt(z)} F${Math.round(plungeRate)}`);
+      // Linear ramp plunge along slot length (no vertical plunge into solid wood)
+      lines.push(`G1 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm + rampHalfY)} Z${fmt(z)} F${Math.round(plungeRate)}`);
+      lines.push(`G1 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm - halfY)} F${Math.round(feedRate)}`);
       if (halfX > 1e-3) {
-        lines.push(`G1 X${fmt(zc.centerXMm + halfX)} Y${fmt(zc.centerYMm - halfY)} F${Math.round(feedRate)}`);
+        lines.push(`G1 X${fmt(zc.centerXMm + halfX)} Y${fmt(zc.centerYMm - halfY)}`);
         lines.push(`G1 X${fmt(zc.centerXMm + halfX)} Y${fmt(zc.centerYMm + halfY)}`);
         lines.push(`G1 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm + halfY)}`);
         lines.push(`G1 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm - halfY)}`);
-        cuttingDistMm += (halfX + halfY) * 4;
+        cuttingDistMm += (halfX + halfY) * 4 + rampHalfY * 2;
       } else {
-        lines.push(`G1 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm + halfY)} F${Math.round(feedRate)}`);
+        lines.push(`G1 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm + halfY)}`);
         lines.push(`G1 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm - halfY)}`);
-        cuttingDistMm += halfY * 4;
+        cuttingDistMm += halfY * 4 + rampHalfY * 2;
       }
     }
     lines.push(`G0 Z${fmt(safeZ)}`);
@@ -505,41 +615,9 @@ function buildCncSetupsForPart(
     };
   }
 
+  const { topTipCoord } = partShoulderBoundsAlongAxis(part);
+
   for (const [, group] of faceGroups) {
-    const sortedMortises = [...group.mortises].sort((a, b) => a.distFromTopEndMm - b.distFromTopEndMm);
-    // Partition mortises along the member's length into windows of span <= maxWindowLenMm
-    const windows: { startOffsetMm: number; mortises: MortiseSpec[]; zClips: ZClipSlotSpec[] }[] = [];
-
-    for (const m of sortedMortises) {
-      const mTop = Math.max(0, m.distFromTopEndMm - m.widthMm * 0.5 - 15);
-      const mBot = m.distFromTopEndMm + m.widthMm * 0.5 + 15;
-      const last = windows[windows.length - 1];
-      if (!last) {
-        const startOffset = mBot <= maxWindowLenMm ? 0 : Math.floor(mTop / 10) * 10;
-        windows.push({ startOffsetMm: startOffset, mortises: [m], zClips: [] });
-      } else if (mBot - last.startOffsetMm <= maxWindowLenMm) {
-        last.mortises.push(m);
-      } else {
-        const startOffset = Math.floor(mTop / 10) * 10;
-        windows.push({ startOffsetMm: startOffset, mortises: [m], zClips: [] });
-      }
-    }
-
-    if (group.zClips.length) {
-      const maxSlotLen = Math.max(...group.zClips.map((zc) => zc.slotLengthMm));
-      const zcTop = Math.max(0, partLenMm * 0.5 - maxSlotLen * 0.5 - 15);
-      const zcBot = partLenMm * 0.5 + maxSlotLen * 0.5 + 15;
-      const zcOffset = zcBot <= maxWindowLenMm ? 0 : Math.floor(zcTop / 10) * 10;
-      const hostWin = windows.find(
-        (w) => zcTop >= w.startOffsetMm && zcBot - w.startOffsetMm <= maxWindowLenMm,
-      );
-      if (hostWin) {
-        hostWin.zClips.push(...group.zClips);
-      } else {
-        windows.push({ startOffsetMm: zcOffset, mortises: [], zClips: [...group.zClips] });
-      }
-    }
-
     // Determine which numbered face sits UP and which adjacent face sits against the Y-axis fence.
     // With that face up and the top end against the Y0 stop, the part can only
     // lie one way, so the face at X0 is fixed: machine Y runs down the part
@@ -560,10 +638,81 @@ function buildCncSetupsForPart(
     const faceUpLabel = `Face F${faceUpNum}`;
     // Across the face from the fence, mm.
     const acrossMm = part.member.axes.reduce((sum, a, i) => sum + Math.abs(dot(a, xDir)) * part.member.dimsMm[i], 0);
-    const fromFence = (p: Vec3, halfFeatureMm: number) => {
+    const fromFence = (p: Vec3) => {
       const x = dot([p[0] - part.member.centerMm[0], p[1] - part.member.centerMm[1], p[2] - part.member.centerMm[2]], xDir) + acrossMm / 2;
-      return +Math.max(halfFeatureMm, Math.min(acrossMm - halfFeatureMm, x)).toFixed(2);
+      return +x.toFixed(3);
     };
+
+    // Project each mortise's local (uAxis, vAxis) onto the CNC setup's actual (xDir, yDir) bed axes
+    // so T-junctions (90°), bookcase dadoes, and compound-splayed legs (arbitrary angle θ) mill aligned!
+    const projectMortise = (m: MortiseSpec) => {
+      let ux = dot(m.uAxis, xDir);
+      let uy = dot(m.uAxis, yDir);
+      const len = Math.hypot(ux, uy) || 1;
+      ux /= len;
+      uy /= len;
+      if (uy < -1e-4 || (Math.abs(uy) <= 1e-4 && ux < 0)) {
+        ux = -ux;
+        uy = -uy;
+      }
+      if (Math.abs(ux) <= 1e-4) {
+        ux = 0;
+        uy = 1;
+      } else if (Math.abs(uy) <= 1e-4) {
+        ux = 1;
+        uy = 0;
+      }
+      const vy = -ux;
+      const halfSpanY = 0.5 * (Math.abs(uy) * m.widthMm + Math.abs(vy) * m.thicknessMm);
+      const distY = +(topTipCoord - dot(m.centerMm, a0)).toFixed(3);
+      return { uDirXY: [ux, uy] as [number, number], halfSpanY, distY };
+    };
+
+    const sortedMortises = [...group.mortises]
+      .map((m) => ({ m, proj: projectMortise(m) }))
+      .sort((a, b) => a.proj.distY - b.proj.distY);
+
+    // Partition mortises along the member's length into windows of span <= maxWindowLenMm
+    const windows: {
+      startOffsetMm: number;
+      mortises: { m: MortiseSpec; proj: ReturnType<typeof projectMortise> }[];
+      zClips: { zc: ZClipSlotSpec; distY: number }[];
+    }[] = [];
+
+    for (const item of sortedMortises) {
+      const mTop = Math.max(0, item.proj.distY - item.proj.halfSpanY - 15);
+      const mBot = item.proj.distY + item.proj.halfSpanY + 15;
+      const last = windows[windows.length - 1];
+      if (!last) {
+        const startOffset = mBot <= maxWindowLenMm ? 0 : Math.floor(mTop / 10) * 10;
+        windows.push({ startOffsetMm: startOffset, mortises: [item], zClips: [] });
+      } else if (mBot - last.startOffsetMm <= maxWindowLenMm) {
+        last.mortises.push(item);
+      } else {
+        const startOffset = Math.floor(mTop / 10) * 10;
+        windows.push({ startOffsetMm: startOffset, mortises: [item], zClips: [] });
+      }
+    }
+
+    if (group.zClips.length) {
+      const zClipItems = group.zClips.map((zc) => ({
+        zc,
+        distY: +(topTipCoord - dot(zc.centerMm, a0)).toFixed(3),
+      }));
+      for (const zItem of zClipItems) {
+        const zcTop = Math.max(0, zItem.distY - zItem.zc.slotLengthMm * 0.5 - 15);
+        const zcBot = zItem.distY + zItem.zc.slotLengthMm * 0.5 + 15;
+        const zcOffset = zcBot <= maxWindowLenMm ? 0 : Math.floor(zcTop / 10) * 10;
+        const hostWin = windows.find(
+          (w) => zcTop >= w.startOffsetMm && zcBot - w.startOffsetMm <= maxWindowLenMm,
+        );
+        if (hostWin) {
+          hostWin.zClips.push(zItem);
+        } else {
+          windows.push({ startOffsetMm: zcOffset, mortises: [], zClips: [zItem] });
+        }
+      }
+    }
 
     windows.forEach((win, wIdx) => {
       const winNum = wIdx + 1;
@@ -571,12 +720,19 @@ function buildCncSetupsForPart(
       const overhangMm = Math.max(0, Math.round(partLenMm - maxWindowLenMm));
 
       const opsSummary: string[] = [];
-      for (const m of win.mortises) {
+      for (const { m } of win.mortises) {
+        const cornerNote = m.dogboneDiaMm
+          ? `, Ø${m.dogboneDiaMm} mm dogbone`
+          : m.cornerFit === 'chisel_square'
+            ? `, chisel corners square after CNC`
+            : m.cornerFit === 'round_tenon'
+              ? `, R${+roundTenonCornerRadiusMm(m.widthMm, m.thicknessMm, cutterDiaMm).toFixed(2)} mm rounded corners`
+              : '';
         opsSummary.push(
-          `Mortise for ${m.matingMemberId}: ${m.thicknessMm} × ${m.widthMm} × ${m.depthMm} mm (${m.distFromTopEndMm} mm from top end${m.dogboneDiaMm ? `, Ø${m.dogboneDiaMm} mm dogbone` : ''})`,
+          `Mortise for ${m.matingMemberId}: ${m.thicknessMm} × ${m.widthMm} × ${m.depthMm} mm (${m.distFromTopEndMm} mm from top end${cornerNote})`,
         );
       }
-      for (const zc of win.zClips) {
+      for (const { zc } of win.zClips) {
         opsSummary.push(
           `Tabletop Z-Clip slot: ${zc.slotLengthMm} × ${zc.slotWidthMm} × ${zc.slotDepthMm} mm (${zc.distFromTopEdgeMm} mm from top edge)`,
         );
@@ -600,19 +756,20 @@ function buildCncSetupsForPart(
         feedRate,
         plungeRate,
         stepdownMm,
-        mortises: win.mortises.map((m) => ({
+        mortises: win.mortises.map(({ m, proj }) => ({
           id: m.id,
-          centerXMm: fromFence(m.centerMm, m.thicknessMm * 0.5),
-          centerYMm: Math.max(m.widthMm * 0.5, m.distFromTopEndMm - win.startOffsetMm),
+          centerXMm: fromFence(m.centerMm),
+          centerYMm: +(proj.distY - win.startOffsetMm).toFixed(3),
           widthYMm: m.widthMm,
           thicknessXMm: m.thicknessMm,
           depthMm: m.depthMm,
           dogbone: m.cornerFit === 'dogbone',
+          uDirXY: proj.uDirXY,
         })),
-        zClips: win.zClips.map((zc) => ({
+        zClips: win.zClips.map(({ zc, distY }) => ({
           id: zc.id,
-          centerXMm: fromFence(zc.centerMm, zc.slotWidthMm * 0.5),
-          centerYMm: partLenMm * 0.5 - win.startOffsetMm,
+          centerXMm: fromFence(zc.centerMm),
+          centerYMm: +(distY - win.startOffsetMm).toFixed(3),
           lengthYMm: zc.slotLengthMm,
           widthXMm: zc.slotWidthMm,
           depthMm: zc.slotDepthMm,
@@ -717,13 +874,16 @@ export function buildTimberCutPlan(
     },
   ];
   const totalZClips = breakdown.parts.reduce((acc, p) => acc + p.zClipSlots.length, 0);
+  const zClipWidthMm =
+    breakdown.parts.find((p) => p.zClipSlots.length > 0)?.zClipSlots[0]?.slotWidthMm ??
+    Math.max(4, breakdown.options.cutterDiaMm);
   if (totalZClips > 0) {
     hardwareBom.push({
       item: 'Tabletop Figure-8 / Z-Clip Expansion Fasteners + Wood Screws',
       quantity: totalZClips,
-      note: 'Hooks into the 4 mm apron kerf slots so the solid tabletop can expand/contract across the grain without cracking.',
+      note: `Hooks into the ${zClipWidthMm} mm apron kerf slots so the solid tabletop can expand/contract across the grain without cracking.`,
     });
-  } else if (breakdown.parts.some((p) => p.member.role === 'panel')) {
+  } else if (breakdown.parts.some((p) => p.member.role === 'panel' && Math.abs(p.member.axes[2][2]) >= 0.7)) {
     hardwareBom.push({
       item: 'Figure-8 Desktop Expansion Washers + Wood Screws',
       quantity: 4,
@@ -782,19 +942,29 @@ export function buildTimberCutPlan(
 
     // Step 1: Saw cuts (dimensions first; no CNC needed for straight cuts)
     const bandsawSteps: string[] = [
-      `Cut to ${part.totalFinishedLengthMm} × ${part.crossSectionMm[0]} × ${part.crossSectionMm[1]} mm${m.role === 'rail' && part.tenons.length > 0 ? ` (${part.shoulderToShoulderMm} mm between shoulders)` : ''}.`,
+      `Cut to ${part.totalFinishedLengthMm} × ${part.crossSectionMm[0]} × ${part.crossSectionMm[1]} mm${part.tenons.length > 0 ? ` (${part.shoulderToShoulderMm} mm between shoulders)` : ''}.`,
     ];
 
     for (const t of part.tenons) {
-      const miterNote = t.miteredTip ? `, 45° miter on tip` : '';
+      const miterCount = t.miterPlanes?.length ?? (t.miteredTip ? 1 : 0);
+      const miterNote =
+        miterCount > 1
+          ? `, ${miterCount}× 45° mitered tip cheeks`
+          : t.miteredTip
+            ? `, 45° miter on tip`
+            : '';
+      const roundNote =
+        breakdown.options.tenonCornerFit === 'round_tenon'
+          ? `, round corners to R${+roundTenonCornerRadiusMm(t.widthMm, t.thicknessMm, breakdown.options.cutterDiaMm).toFixed(2)} mm`
+          : '';
       const featureWord = isDadoMode ? 'Dado tongue' : 'Tenon';
       if (t.cutMethod === 'bandsaw') {
         bandsawSteps.push(
-          `${featureWord} on ${t.railEnd} end (into ${t.matingMemberId}): ${t.lengthMm} × ${t.widthMm} × ${t.thicknessMm} mm (${t.shoulderCheekMm} mm shoulder${miterNote}).`,
+          `${featureWord} on ${t.railEnd} end (into ${t.matingMemberId}): ${t.lengthMm} × ${t.widthMm} × ${t.thicknessMm} mm (${t.shoulderCheekMm} mm shoulder${miterNote}${roundNote}).`,
         );
       } else {
         bandsawSteps.push(
-          `Angled ${featureWord.toLowerCase()} on ${t.railEnd} end (${t.shoulderAngleDeg}° into ${t.matingMemberId}): ${t.lengthMm} × ${t.widthMm} × ${t.thicknessMm} mm${miterNote}.`,
+          `Angled ${featureWord.toLowerCase()} on ${t.railEnd} end (${t.shoulderAngleDeg}° into ${t.matingMemberId}): ${t.lengthMm} × ${t.widthMm} × ${t.thicknessMm} mm${miterNote}${roundNote}.`,
         );
       }
     }
@@ -802,8 +972,9 @@ export function buildTimberCutPlan(
     for (const mort of part.mortises) {
       const faceNum = memberFaceNumber(m, mort.faceNormal);
       const featureWord = isDadoMode ? 'Dado slot' : 'Mortise';
+      const chiselNote = mort.cornerFit === 'chisel_square' ? ' (square corners with chisel after CNC)' : '';
       bandsawSteps.push(
-        `${featureWord} on Face F${faceNum} (for ${mort.matingMemberId}, ${mort.distFromTopEndMm} mm from top end): ${mort.thicknessMm} × ${mort.widthMm} × ${mort.depthMm} mm.`,
+        `${featureWord} on Face F${faceNum} (for ${mort.matingMemberId}, ${mort.distFromTopEndMm} mm from top end): ${mort.thicknessMm} × ${mort.widthMm} × ${mort.depthMm} mm${chiselNote}.`,
       );
     }
 
@@ -816,6 +987,7 @@ export function buildTimberCutPlan(
     }
 
     // Dowel hole drilling steps (for frame dowel joints and plank seam dowels)
+    const { topTipCoord: partTopCoord } = partShoulderBoundsAlongAxis(part);
     for (const j of breakdown.joints) {
       if (!j.dowelCentersMm?.length) continue;
       const count = j.dowelCentersMm.length;
@@ -829,8 +1001,7 @@ export function buildTimberCutPlan(
         } else if (j.memberBId === m.id) {
           const faceNormal: Vec3 = [-j.normalAToB[0], -j.normalAToB[1], -j.normalAToB[2]];
           const faceNum = memberFaceNumber(m, faceNormal);
-          const hostTopCoord = dot(m.centerMm, m.axes[0]) + m.dimsMm[0] * 0.5;
-          const distFromTopMm = Math.round((hostTopCoord - dot(j.centerMm, m.axes[0])) * 10) / 10;
+          const distFromTopMm = Math.round((partTopCoord - dot(j.centerMm, m.axes[0])) * 10) / 10;
           bandsawSteps.push(
             `Drill ${count}× Ø${dia} × ${holeDepth} mm dowel hole${count > 1 ? 's' : ''} on Face F${faceNum} (${distFromTopMm} mm from top end, for ${j.memberAId}).`,
           );
@@ -885,7 +1056,7 @@ export function buildTimberCutPlan(
 
     const cardMdLines: string[] = [
       `### Part ${part.member.index + 1}: ${m.title}`,
-      `- **Cut Dimensions:** \`${finishedDims[0]} × ${finishedDims[1]} × ${finishedDims[2]} mm\`${m.role === 'rail' && part.tenons.length > 0 ? ` *(Shoulder-to-Shoulder: \`${part.shoulderToShoulderMm} mm\`)*` : ''}`,
+      `- **Cut Dimensions:** \`${finishedDims[0]} × ${finishedDims[1]} × ${finishedDims[2]} mm\`${part.tenons.length > 0 ? ` *(Shoulder-to-Shoulder: \`${part.shoulderToShoulderMm} mm\`)*` : ''}`,
       `- **Reference Datum Faces:** **Face 1** = ${m.face1.label} · **Face 2** = ${m.face2.label}`,
       ``,
       `#### 1. Cut & Joinery Dimensions`,

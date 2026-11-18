@@ -17,6 +17,7 @@
 
 import type { Manifold, ManifoldToplevel, Mat4 } from 'manifold-3d';
 import {
+  directionPhrase,
   extractTimberMembers,
   manifoldToMeshMm,
   meshMmToManifold,
@@ -52,7 +53,7 @@ export interface TimberJoineryOptions {
   edgeRadiusMm?: number;
   /** Distance from any mortise or joint shoulder where edge roundovers stop, mm. Default 12 mm. */
   stopMarginMm?: number;
-  /** Maximum single-board width before splitting wide panels into edge-glued planks, mm. Default 180 mm. */
+  /** Maximum single-board width before splitting wide panels into edge-glued planks, mm. Default 200 mm. */
   maxBoardWidthMm?: number;
   /** Whether straight tenons are cut on the bandsaw ('bandsaw') or milled on the CNC ('cnc'). Default 'bandsaw'. */
   tenonCutMethod?: 'bandsaw' | 'cnc';
@@ -101,6 +102,13 @@ export interface MortiseSpec {
   distFromRefEdgeMm: number;
   cornerFit: TenonCornerFit;
   dogboneDiaMm?: number;
+  /** Corner fillet radius for 'round_tenon' (and CNC bit corner radius before chiseling for 'chisel_square'), mm. */
+  cornerRadiusMm?: number;
+}
+
+export interface TenonMiterPlane {
+  normal: Vec3;
+  pivotMm: Vec3;
 }
 
 export interface TenonSpec {
@@ -129,12 +137,14 @@ export interface TenonSpec {
   shoulderCheekMm: number;
   /** Shoulder angle relative to square (0° for 90° joints; >0° for angled chair/splayed legs). */
   shoulderAngleDeg: number;
-  /** True if the tip is mitred at 45° inside the leg to clear a perpendicular corner tenon. */
+  /** True if the tip is mitred at 45° inside the leg to clear perpendicular corner/center-post tenons. */
   miteredTip: boolean;
-  /** Direction the 45° miter cuts across if `miteredTip` is true. */
+  /** Direction the primary 45° miter cuts across if `miteredTip` is true. */
   miterNormal?: Vec3;
-  /** 3D intersection of the two perpendicular mortise axes inside the leg if `miteredTip` is true. */
+  /** 3D intersection of the perpendicular mortise axes inside the leg if `miteredTip` is true. */
   miterPivotMm?: Vec3;
+  /** All miter clip planes on this tenon tip (supports 2-way corner, 3-way T-leg, and 4-way center post). */
+  miterPlanes?: TenonMiterPlane[];
   cutMethod: 'bandsaw' | 'cnc';
 }
 
@@ -328,11 +338,71 @@ function planeBasis(n: Vec3): { u: Vec3; v: Vec3 } {
   return { u, v };
 }
 
+/** Unified corner fillet radius for `round_tenon` across 3D joinery, CNC G-code, and simulation. */
+export function roundTenonCornerRadiusMm(widthMm: number, thicknessMm: number, cutterDiaMm: number): number {
+  return Math.min(widthMm * 0.5, thicknessMm * 0.5, Math.max(2, cutterDiaMm * 0.5));
+}
+
+/** How far an end's angled shoulder toe or tenon tip extends past `shoulderCenterMm` along `member.axes[0]`. */
+export function endAllowanceAlongAxisMm(m: TimberMember, t: TenonSpec | undefined): number {
+  if (!t) return 0;
+  const a0 = m.axes[0];
+  const cosA = Math.max(0.25, Math.abs(dot(a0, t.outwardDir)));
+  const bevelToe =
+    (0.5 * m.dimsMm[1] * Math.abs(dot(m.axes[1], t.outwardDir)) +
+      0.5 * m.dimsMm[2] * Math.abs(dot(m.axes[2], t.outwardDir))) /
+    cosA;
+  const tenonReach =
+    t.lengthMm * Math.abs(dot(t.outwardDir, a0)) +
+    0.5 * t.widthMm * Math.abs(dot(t.uAxis, a0)) +
+    0.5 * t.thicknessMm * Math.abs(dot(t.vAxis, a0));
+  return Math.max(bevelToe, tenonReach);
+}
+
+/** Build an exact 4-corner rounded-rectangle prism Manifold of outer size `[w, t, depth]` and corner radius `r`. */
+export function roundedRectPrismManifold(
+  wasm: ManifoldToplevel,
+  center: Vec3,
+  u: Vec3,
+  v: Vec3,
+  n: Vec3,
+  w: number,
+  t: number,
+  depth: number,
+  rawRadiusMm: number,
+): Manifold {
+  const r = Math.max(0, Math.min(w * 0.5, t * 0.5, rawRadiusMm));
+  if (r <= 1e-3) {
+    return orientedBoxManifold(wasm, center, u, v, n, [w, t, depth]);
+  }
+  const su = Math.max(0, w - 2 * r);
+  const sv = Math.max(0, t - 2 * r);
+  const pieces: Manifold[] = [];
+  if (sv > 1e-4) {
+    pieces.push(orientedBoxManifold(wasm, center, u, v, n, [w, sv, depth]));
+  }
+  if (su > 1e-4) {
+    pieces.push(orientedBoxManifold(wasm, center, u, v, n, [su, t, depth]));
+  }
+  const duList = su > 1e-4 ? [-1, 1] : [0];
+  const dvList = sv > 1e-4 ? [-1, 1] : [0];
+  for (const du of duList) {
+    for (const dv of dvList) {
+      const cPos = add3(center, add3(scale3(u, du * su * 0.5), scale3(v, dv * sv * 0.5)));
+      pieces.push(orientedCylinderManifold(wasm, cPos, u, v, n, depth, r, 24));
+    }
+  }
+  if (pieces.length === 1) return pieces[0];
+  const out = wasm.Manifold.union(pieces);
+  for (const p of pieces) p.delete();
+  return out;
+}
+
 /**
  * Build a mortise cutter Manifold (including optional 4-corner dogbones or
- * rounded ends) centered at `spec.centerMm` and plunging along `spec.inwardNormal`.
+ * 4-corner rounded fillets) centered at `spec.centerMm` and plunging along `spec.inwardNormal`.
  */
-function buildMortiseCutter(wasm: ManifoldToplevel, spec: MortiseSpec): Manifold {
+function buildMortiseCutter(wasm: ManifoldToplevel, spec: MortiseSpec, cutterDiaMm: number): Manifold {
   const SINK_OUTWARD_MM = 0.8;
   const totalDepth = spec.depthMm + SINK_OUTWARD_MM;
   const center = add3(
@@ -344,20 +414,8 @@ function buildMortiseCutter(wasm: ManifoldToplevel, spec: MortiseSpec): Manifold
   const { uAxis: u, vAxis: v, inwardNormal: n } = spec;
 
   if (spec.cornerFit === 'round_tenon') {
-    // Rounded-end slot: central box + two end cylinders
-    const r = Math.min(w, t) * 0.5;
-    const straight = Math.max(0, w - 2 * r);
-    const parts: Manifold[] = [];
-    if (straight > 0.2) {
-      parts.push(orientedBoxManifold(wasm, center, u, v, n, [straight, t, totalDepth]));
-    }
-    for (const s of [-1, 1]) {
-      const cPos = add3(center, scale3(u, s * straight * 0.5));
-      parts.push(orientedCylinderManifold(wasm, cPos, u, v, n, totalDepth, r, 24));
-    }
-    const out = parts.length === 1 ? parts[0] : wasm.Manifold.union(parts);
-    if (parts.length > 1) for (const p of parts) p.delete();
-    return out;
+    const r = spec.cornerRadiusMm ?? roundTenonCornerRadiusMm(w, t, cutterDiaMm);
+    return roundedRectPrismManifold(wasm, center, u, v, n, w, t, totalDepth, r);
   }
 
   const baseBox = orientedBoxManifold(wasm, center, u, v, n, [w, t, totalDepth]);
@@ -388,15 +446,21 @@ function buildMortiseCutter(wasm: ManifoldToplevel, spec: MortiseSpec): Manifold
 
 /**
  * Build a tenon boss Manifold protruding from `spec.shoulderCenterMm` along `spec.outwardDir`.
- * Sunk 1.5 mm back into the rail's end so the boolean union is watertight, and
- * optionally mitred at 45° at its tip if two rails meet in a corner leg.
+ * Sunk `sinkMm` back into the rail's end so the boolean union is watertight, and
+ * optionally mitred along all `miterPlanes` at its tip when rails meet in a corner or center leg.
  */
-function buildTenonBoss(wasm: ManifoldToplevel, spec: TenonSpec, cornerFit: TenonCornerFit, cutterDiaMm: number): Manifold {
-  const SINK_MM = 1.5;
-  const totalLen = spec.lengthMm + SINK_MM;
+export function buildTenonBoss(
+  wasm: ManifoldToplevel,
+  spec: TenonSpec,
+  cornerFit: TenonCornerFit,
+  cutterDiaMm: number,
+  clearanceMm = 0.15,
+  sinkMm = 1.5,
+): Manifold {
+  const totalLen = spec.lengthMm + sinkMm;
   const center = add3(
     spec.shoulderCenterMm,
-    scale3(spec.outwardDir, (spec.lengthMm - SINK_MM) * 0.5),
+    scale3(spec.outwardDir, (spec.lengthMm - sinkMm) * 0.5),
   );
   const w = spec.widthMm;
   const t = spec.thicknessMm;
@@ -404,34 +468,34 @@ function buildTenonBoss(wasm: ManifoldToplevel, spec: TenonSpec, cornerFit: Teno
 
   let boss: Manifold;
   if (cornerFit === 'round_tenon') {
-    const r = Math.min(w * 0.5, t * 0.5, Math.max(2, cutterDiaMm * 0.5));
-    const su = Math.max(0.2, w - 2 * r);
-    const sv = Math.max(0.2, t - 2 * r);
-    const pieces: Manifold[] = [
-      orientedBoxManifold(wasm, center, u, v, n, [w, sv, totalLen]),
-      orientedBoxManifold(wasm, center, u, v, n, [su, t, totalLen]),
-    ];
-    for (const du of [-1, 1]) {
-      for (const dv of [-1, 1]) {
-        const cPos = add3(center, add3(scale3(u, du * su * 0.5), scale3(v, dv * sv * 0.5)));
-        pieces.push(orientedCylinderManifold(wasm, cPos, u, v, n, totalLen, r, 20));
-      }
-    }
-    boss = wasm.Manifold.union(pieces);
-    for (const p of pieces) p.delete();
+    const r = roundTenonCornerRadiusMm(w, t, cutterDiaMm);
+    boss = roundedRectPrismManifold(wasm, center, u, v, n, w, t, totalLen, r);
   } else {
     boss = orientedBoxManifold(wasm, center, u, v, n, [w, t, totalLen]);
   }
 
-  // If two rails meet at 90° at the same height in a corner leg, slice a 45°
-  // miter off the tip of the tenon so the two tenons never collide inside the leg!
-  if (spec.miteredTip && spec.miterNormal) {
-    const pivot =
-      spec.miterPivotMm ??
-      add3(spec.shoulderCenterMm, scale3(spec.outwardDir, spec.lengthMm - spec.thicknessMm * 0.35 * Math.SQRT2));
-    // Cut plane passes through the 3D intersection of the mortise axes at 45° with 0.15 mm clearance
-    const planeOffset = dot(spec.miterNormal, pivot) - 0.15;
-    const [, kept] = boss.splitByPlane(spec.miterNormal, planeOffset);
+  // Slice miter clip planes off the tip of the tenon when 2, 3, or 4 rails meet
+  // inside the same leg/post so the tenons never collide in 3D!
+  const planes: TenonMiterPlane[] =
+    spec.miterPlanes && spec.miterPlanes.length > 0
+      ? spec.miterPlanes
+      : spec.miteredTip && spec.miterNormal
+        ? [
+            {
+              normal: spec.miterNormal,
+              pivotMm:
+                spec.miterPivotMm ??
+                add3(
+                  spec.shoulderCenterMm,
+                  scale3(spec.outwardDir, spec.lengthMm - spec.thicknessMm * 0.35 * Math.SQRT2),
+                ),
+            },
+          ]
+        : [];
+  const halfGap = Math.max(0.15, clearanceMm);
+  for (const mp of planes) {
+    const planeOffset = dot(mp.normal, mp.pivotMm) - halfGap;
+    const [, kept] = boss.splitByPlane(mp.normal, planeOffset);
     boss.delete();
     boss = kept;
   }
@@ -633,6 +697,7 @@ export function synthesizeTimberJoinery(
   const joints: SynthesizedJoint[] = [];
 
   // Track shoulder-to-shoulder adjustments when overlapping members are trimmed flush
+  // (positive = trimmed back; negative = bridged across a small end-gap).
   const lengthTrimMm: [number, number][] = members.map(() => [0, 0]);
 
   try {
@@ -642,9 +707,31 @@ export function synthesizeTimberJoinery(
     // -------------------------------------------------------------------------
     for (let pIdx = 0; pIdx < members.length; pIdx++) {
       if (members[pIdx].role !== 'panel') continue;
+      const pIsHoriz = Math.abs(members[pIdx].axes[2][2]) >= 0.5;
       for (let mIdx = 0; mIdx < members.length; mIdx++) {
         if (mIdx === pIdx) continue;
-        if (members[mIdx].role === 'panel' && mIdx < pIdx) continue;
+        if (members[mIdx].role === 'panel') {
+          const mIsVert = Math.abs(members[mIdx].axes[2][2]) < 0.5;
+          // If `pIdx` is an interior horizontal shelf and `mIdx` is a taller vertical side wall
+          // extending past `pIdx` both above and below, let the vertical side wall trim the shelf
+          // (not the shelf slicing through the side wall!).
+          if (
+            pIsHoriz &&
+            mIsVert &&
+            members[mIdx].bboxMm.max[2] > members[pIdx].bboxMm.max[2] + 5 &&
+            members[mIdx].bboxMm.min[2] < members[pIdx].bboxMm.min[2] - 5
+          ) {
+            continue;
+          }
+          const pIsVert = !pIsHoriz;
+          const mIsHoriz = Math.abs(members[mIdx].axes[2][2]) >= 0.5;
+          const pWallsM =
+            pIsVert &&
+            mIsHoriz &&
+            members[pIdx].bboxMm.max[2] > members[mIdx].bboxMm.max[2] + 5 &&
+            members[pIdx].bboxMm.min[2] < members[mIdx].bboxMm.min[2] - 5;
+          if (!pWallsM && mIdx < pIdx) continue;
+        }
         const inter = solids[mIdx].intersect(plainSolids[pIdx]);
         const vol = inter.volume();
         inter.delete();
@@ -661,23 +748,26 @@ export function synthesizeTimberJoinery(
             const p = mesh.numProp;
             const nVerts = mesh.vertProperties.length / p;
             if (nVerts > 0) {
-              const trimAxisIdx = members[mIdx].role === 'panel' ? 1 : 0;
-              const aTrim = members[mIdx].axes[trimAxisIdx];
               const cOld = members[mIdx].centerMm;
-              let minProj = Infinity;
-              let maxProj = -Infinity;
-              for (let v = 0; v < nVerts; v++) {
-                const vx = mesh.vertProperties[v * p] - cOld[0];
-                const vy = mesh.vertProperties[v * p + 1] - cOld[1];
-                const vz = mesh.vertProperties[v * p + 2] - cOld[2];
-                const proj = vx * aTrim[0] + vy * aTrim[1] + vz * aTrim[2];
-                if (proj < minProj) minProj = proj;
-                if (proj > maxProj) maxProj = proj;
+              let nextCenter: Vec3 = [cOld[0], cOld[1], cOld[2]];
+              for (const axisIdx of [0, 1, 2] as const) {
+                const aTrim = members[mIdx].axes[axisIdx];
+                let minProj = Infinity;
+                let maxProj = -Infinity;
+                for (let v = 0; v < nVerts; v++) {
+                  const vx = mesh.vertProperties[v * p] - cOld[0];
+                  const vy = mesh.vertProperties[v * p + 1] - cOld[1];
+                  const vz = mesh.vertProperties[v * p + 2] - cOld[2];
+                  const proj = vx * aTrim[0] + vy * aTrim[1] + vz * aTrim[2];
+                  if (proj < minProj) minProj = proj;
+                  if (proj > maxProj) maxProj = proj;
+                }
+                const newSpan = maxProj - minProj;
+                const midShift = 0.5 * (minProj + maxProj);
+                members[mIdx].dimsMm[axisIdx] = +newSpan.toFixed(2);
+                nextCenter = add3(nextCenter, scale3(aTrim, midShift));
               }
-              const newSpan = maxProj - minProj;
-              const midShift = 0.5 * (minProj + maxProj);
-              members[mIdx].dimsMm[trimAxisIdx] = +newSpan.toFixed(2);
-              members[mIdx].centerMm = add3(cOld, scale3(aTrim, midShift));
+              members[mIdx].centerMm = nextCenter;
             }
           } else {
             trimmed.delete();
@@ -687,61 +777,173 @@ export function synthesizeTimberJoinery(
     }
 
     // -------------------------------------------------------------------------
-    // 1. Detect Rail-to-Leg and Rail-to-Rail / Shelf-to-Side Contacts
+    // 1. Detect Rail-to-Leg, Rail-to-Rail, Brace, and Panel Dado/Dowel Contacts
     // -------------------------------------------------------------------------
     const PROBE_EXPAND_MM = 2.5;
+    const MAX_END_GAP_MM = 5.0;
     let jointCounter = 1;
+
+    const probeHostForEnd = (
+      selfIdx: number,
+      endCenter: Vec3,
+      endOutward: Vec3,
+      wid: number,
+      thk: number,
+      axW: Vec3,
+      axT: Vec3,
+      selfRole: TimberMember['role'],
+      selfAxes0Z: number,
+    ): { bestHostIdx: number; bestOverlapVol: number } => {
+      const probeCenter = add3(endCenter, scale3(endOutward, PROBE_EXPAND_MM * 0.5));
+      const probeBox = orientedBoxManifold(
+        wasm,
+        probeCenter,
+        axW,
+        axT,
+        endOutward,
+        [Math.max(2, wid - 0.5), Math.max(2, thk - 0.5), PROBE_EXPAND_MM * 2 + 4],
+      );
+      let bestHostIdx = -1;
+      let bestOverlapVol = 0;
+      for (let j = 0; j < members.length; j++) {
+        if (selfIdx === j) continue;
+        const mB = members[j];
+        // A horizontal rail does not end-frame into a horizontal tabletop panel
+        if (selfRole === 'rail' && Math.abs(selfAxes0Z) < 0.25 && mB.role === 'panel' && Math.abs(mB.axes[2][2]) > 0.7) {
+          continue;
+        }
+        const inter = probeBox.intersect(plainSolids[j]);
+        const vol = inter.volume();
+        inter.delete();
+        if (vol > bestOverlapVol && vol > 15) {
+          bestOverlapVol = vol;
+          bestHostIdx = j;
+        }
+      }
+      probeBox.delete();
+      return { bestHostIdx, bestOverlapVol };
+    };
 
     for (let i = 0; i < members.length; i++) {
       const mA = members[i];
-      if (mA.role !== 'rail') continue;
+      const canPanelFrame =
+        mA.role === 'panel' &&
+        !mA.plankInfo &&
+        (options.jointMode === 'dado' || options.jointMode === 'dowel');
+      if (mA.role !== 'rail' && !canPanelFrame) continue;
+
+      // For a panel (e.g. a bookcase shelf deeper than it is wide), check if its
+      // housing contacts lie on ±axes[1] instead of ±axes[0]; if so, align axes[0]
+      // with the spanning axis between the side panels.
+      if (canPanelFrame) {
+        const [l0, w0, t0] = mA.dimsMm;
+        const [a0, a1, a2] = mA.axes;
+        const hitsAxis0 = ([-1, 1] as const).filter((s) => {
+          const out = scale3(a0, s);
+          const ec = add3(mA.centerMm, scale3(a0, s * l0 * 0.5));
+          const { bestHostIdx } = probeHostForEnd(i, ec, out, w0, t0, a1, a2, mA.role, a0[2]);
+          if (bestHostIdx < 0) return false;
+          const mB = members[bestHostIdx];
+          return mB.role === 'panel' && Math.abs(dot(mB.axes[2], out)) > 0.85;
+        }).length;
+        if (hitsAxis0 === 0) {
+          const hitsAxis1 = ([-1, 1] as const).filter((s) => {
+            const out = scale3(a1, s);
+            const ec = add3(mA.centerMm, scale3(a1, s * w0 * 0.5));
+            const { bestHostIdx } = probeHostForEnd(i, ec, out, l0, t0, a0, a2, mA.role, a1[2]);
+            if (bestHostIdx < 0) return false;
+            const mB = members[bestHostIdx];
+            return mB.role === 'panel' && Math.abs(dot(mB.axes[2], out)) > 0.85;
+          }).length;
+          if (hitsAxis1 > 0) {
+            const nextA0 = a1;
+            const nextA1 = a0;
+            const nextA2 = unit(cross(nextA0, nextA1));
+            mA.axes = [nextA0, nextA1, nextA2];
+            mA.dimsMm = [w0, l0, t0];
+            const refDir: Vec3 = Math.abs(nextA1[2]) > 0.7 ? [0, 0, 1] : [0, -1, 0];
+            const f2Normal: Vec3 = dot(nextA1, refDir) >= 0 ? nextA1 : neg3(nextA1);
+            mA.face2 = { normal: f2Normal, label: `${directionPhrase(f2Normal)} Jointed Edge` };
+          }
+        }
+      }
 
       const [lenA, widA, thkA] = mA.dimsMm;
       const [axisLA, axisWA, axisTA] = mA.axes;
 
-      // Test both ends of rail `mA` ('start' at -axisLA, 'end' at +axisLA)
+      // Test both ends of `mA` ('start' at -axisLA, 'end' at +axisLA)
       for (const endKind of ['start', 'end'] as const) {
         const endSign = endKind === 'end' ? 1 : -1;
         const endOutward: Vec3 = scale3(axisLA, endSign);
         const endCenter: Vec3 = add3(mA.centerMm, scale3(axisLA, endSign * (lenA * 0.5)));
 
-        // Build a small probe slab at this end of rail `mA` to find which leg/post/panel it meets
-        const probeCenter = add3(endCenter, scale3(endOutward, PROBE_EXPAND_MM * 0.5));
-        const probeBox = orientedBoxManifold(
-          wasm,
-          probeCenter,
+        const { bestHostIdx } = probeHostForEnd(
+          i,
+          endCenter,
+          endOutward,
+          widA,
+          thkA,
           axisWA,
           axisTA,
-          endOutward,
-          [widA - 0.5, thkA - 0.5, PROBE_EXPAND_MM * 2 + 4],
+          mA.role,
+          axisLA[2],
         );
-
-        let bestHostIdx = -1;
-        let bestOverlapVol = 0;
-        for (let j = 0; j < members.length; j++) {
-          if (i === j) continue;
-          const mB = members[j];
-          // A horizontal rail frames into legs or vertical side panels (or perpendicular rails)
-          if (mB.role === 'panel' && Math.abs(mB.axes[2][2]) > 0.7) continue; // skip tabletop for end-joinery
-          const inter = probeBox.intersect(plainSolids[j]);
-          const vol = inter.volume();
-          inter.delete();
-          if (vol > bestOverlapVol && vol > 15) {
-            bestOverlapVol = vol;
-            bestHostIdx = j;
-          }
-        }
-        probeBox.delete();
 
         if (bestHostIdx < 0) continue;
         const mB = members[bestHostIdx];
 
-        // If rail `mA` already overlapped inside `mB`, subtract `mB` from `mA`
-        // first so the rail's shoulder seats cleanly on `mB`'s outer face!
+        // Determine the host face normal on `mB` that faces `mA`
+        const [, widB, thkB] = mB.dimsMm;
+        const [, axisWB, axisTB] = mB.axes;
+        const candNormals: { n: Vec3; depthAvail: number; faceSpread: number; spreadAxis: Vec3 }[] = [
+          { n: axisWB, depthAvail: widB, faceSpread: thkB, spreadAxis: axisTB },
+          { n: neg3(axisWB), depthAvail: widB, faceSpread: thkB, spreadAxis: axisTB },
+          { n: axisTB, depthAvail: thkB, faceSpread: widB, spreadAxis: axisWB },
+          { n: neg3(axisTB), depthAvail: thkB, faceSpread: widB, spreadAxis: axisWB },
+        ];
+        candNormals.sort((a, b) => dot(b.n, endOutward) - dot(a.n, endOutward));
+        // `inwardNormal` points from the rail end INTO the host `mB`
+        const chosenHost = candNormals[0];
+        const inwardNormal = chosenHost.n;
+        const hostFaceNormal = neg3(inwardNormal);
+
+        // Compute the shoulder plane offset where `mB`'s face sits
+        const distCenterBToFace = chosenHost.depthAvail * 0.5;
+        const facePlaneOffset = dot(mB.centerMm, hostFaceNormal) + distCenterBToFace;
+        const endDotFace = dot(endCenter, hostFaceNormal);
+        const denom = dot(endOutward, hostFaceNormal);
+        if (Math.abs(denom) < 0.35) continue;
+        const tAlong = (facePlaneOffset - endDotFace) / denom;
+        if (tAlong > MAX_END_GAP_MM) {
+          warnings.push(
+            `${mA.id} (${endKind} end) stands ${tAlong.toFixed(1)} mm short of ${mB.id} (> ${MAX_END_GAP_MM} mm gap tolerance); joint skipped.`,
+          );
+          continue;
+        }
+        const shoulderCenterMm: Vec3 = add3(endCenter, scale3(endOutward, tAlong));
+
+        // Local mortise/tenon axes on the joint face:
+        //   uAxis = along rail/shelf width
+        //   vAxis = across rail/shelf thickness
+        const uAxis = unit(
+          sub3(axisWA, scale3(inwardNormal, dot(axisWA, inwardNormal))),
+        );
+        const vAxis = unit(cross(inwardNormal, uAxis));
+
+        // Host face available spans along uAxis and vAxis
+        const hostSpanU = mB.axes.reduce((s, a, idx) => s + Math.abs(dot(a, uAxis)) * mB.dimsMm[idx], 0);
+        const hostSpanV = mB.axes.reduce((s, a, idx) => s + Math.abs(dot(a, vAxis)) * mB.dimsMm[idx], 0);
+
+        // Panel-to-panel dadoes/dowels only form when the host face is broad enough to house the panel
+        if (mA.role === 'panel' && (hostSpanU < widA * 0.75 || hostSpanV < thkA + 4)) {
+          continue;
+        }
+
+        // Trim any overlap of `mA` inside `mB` so the shoulder seats cleanly on `mB`'s outer face
         const rawOverlap = solids[i].intersect(plainSolids[bestHostIdx]);
         const overlapVol = rawOverlap.volume();
         rawOverlap.delete();
-        if (overlapVol > 5) {
+        if (overlapVol > 1) {
           const trimmed = solids[i].subtract(plainSolids[bestHostIdx]);
           if (trimmed.volume() > solids[i].volume() * 0.4) {
             solids[i].delete();
@@ -754,62 +956,94 @@ export function synthesizeTimberJoinery(
           }
         }
 
-        // Determine the host face normal on `mB` that faces `mA`
-        const [, widB, thkB] = mB.dimsMm;
-        const [, axisWB, axisTB] = mB.axes;
-        const candNormals: { n: Vec3; depthAvail: number; faceSpread: number; spreadAxis: Vec3 }[] = [
-          { n: axisWB, depthAvail: widB, faceSpread: thkB, spreadAxis: axisTB },
-          { n: neg3(axisWB), depthAvail: widB, faceSpread: thkB, spreadAxis: axisTB },
-          { n: axisTB, depthAvail: thkB, faceSpread: widB, spreadAxis: axisWB },
-          { n: neg3(axisTB), depthAvail: thkB, faceSpread: widB, spreadAxis: axisWB },
-        ];
-        candNormals.sort((a, b) => dot(b.n, endOutward) - dot(a.n, endOutward));
-        // `inwardNormal` points from the rail end INTO the leg `mB`
-        const chosenHost = candNormals[0];
-        const inwardNormal = chosenHost.n;
-        const hostFaceNormal = neg3(inwardNormal);
+        // Bridge small positive end-gaps (0 < tAlong <= MAX_END_GAP_MM) or angled-shoulder
+        // bevel wedges so the rail/brace body meets the shoulder plane cleanly as 1 solid
+        const bevelExtra =
+          (0.5 * widA * Math.abs(dot(axisWA, hostFaceNormal)) +
+            0.5 * thkA * Math.abs(dot(axisTA, hostFaceNormal))) /
+          Math.abs(denom);
+        if (tAlong > 0.05 || bevelExtra > 0.15) {
+          const backReach = Math.max(2.5, bevelExtra + 2.0);
+          const fwdReach = Math.max(0, tAlong) + bevelExtra + 1.0;
+          const extLen = backReach + fwdReach;
+          const extCenter = add3(endCenter, scale3(endOutward, (fwdReach - backReach) * 0.5));
+          const extRaw = orientedBoxManifold(wasm, extCenter, axisWA, axisTA, endOutward, [widA, thkA, extLen]);
+          const [frontDiscard, clipped] = extRaw.splitByPlane(
+            inwardNormal,
+            dot(inwardNormal, shoulderCenterMm),
+          );
+          frontDiscard.delete();
+          extRaw.delete();
+          let cleanExt = clipped;
+          for (let k = 0; k < members.length; k++) {
+            if (k === i) continue;
+            const testInter = cleanExt.intersect(plainSolids[k]);
+            const iv = testInter.volume();
+            testInter.delete();
+            if (iv > 1e-2) {
+              const subbed = cleanExt.subtract(plainSolids[k]);
+              cleanExt.delete();
+              cleanExt = subbed;
+            }
+          }
+          if (cleanExt.volume() > 1e-2) {
+            const nextSolid = solids[i].add(cleanExt);
+            solids[i].delete();
+            solids[i] = nextSolid;
+            const nextPlain = plainSolids[i].add(cleanExt);
+            plainSolids[i].delete();
+            plainSolids[i] = nextPlain;
+          }
+          cleanExt.delete();
+        }
 
-        // Compute the shoulder plane offset where `mB`'s face sits
-        const distCenterBToFace = chosenHost.depthAvail * 0.5;
-        const facePlaneOffset = dot(mB.centerMm, hostFaceNormal) + distCenterBToFace;
-        const endDotFace = dot(endCenter, hostFaceNormal);
-        const denom = dot(endOutward, hostFaceNormal);
-        const tAlong = Math.abs(denom) > 1e-6 ? (facePlaneOffset - endDotFace) / denom : 0;
-        const shoulderCenterMm: Vec3 = add3(endCenter, scale3(endOutward, tAlong));
-        const trimDepth = Math.max(0, dot(sub3(endCenter, shoulderCenterMm), endOutward));
-        if (trimDepth > 0.2) {
-          lengthTrimMm[i][endKind === 'start' ? 0 : 1] = trimDepth;
+        // Signed length adjustment along endOutward (+ when trimmed back, - when bridged forward)
+        const signedTrim = dot(sub3(endCenter, shoulderCenterMm), endOutward);
+        if (Math.abs(signedTrim) > 0.05) {
+          lengthTrimMm[i][endKind === 'start' ? 0 : 1] = signedTrim;
         }
 
         // Shoulder angle between the rail's axis and the leg's face normal
         const cosAngle = Math.min(1, Math.max(-1, Math.abs(dot(endOutward, inwardNormal))));
         const shoulderAngleDeg = +(Math.acos(cosAngle) * (180 / Math.PI)).toFixed(1);
 
-        // Local mortise/tenon axes on the joint face:
-        //   uAxis = along rail width (usually vertical +Z on an apron/stretcher)
-        //   vAxis = across rail thickness
-        const uAxis = unit(
-          sub3(axisWA, scale3(inwardNormal, dot(axisWA, inwardNormal))),
-        );
-        const vAxis = unit(cross(inwardNormal, uAxis));
-
-        // Size the tenon and mortise according to classical furniture proportions:
-        //   - Tenon thickness: ~1/3 to 1/2 of rail thickness, at least cutterDiaMm
-        //   - Tenon width: rail width minus 2 * shoulderMm
-        //   - Tenon length: target tenonLengthMm, clamped to 65% of host leg thickness
+        // Size the tenon / dado tongue and mortise / dado housing:
         const minCutter = Math.max(4, options.cutterDiaMm);
-        const nominalTenonThk = Math.max(
-          minCutter,
-          Math.min(
-            thkA - 2 * Math.max(2, options.shoulderMm * 0.6),
-            Math.round((thkA * 0.4) * 2) / 2,
-          ),
-        );
-        const nominalTenonWid = Math.max(
-          minCutter + 2,
-          widA - 2 * options.shoulderMm,
-        );
-        const maxSafeDepth = Math.max(10, chosenHost.depthAvail * 0.68 - 3);
+        let nominalTenonThk: number;
+        let nominalTenonWid: number;
+        let maxSafeDepth: number;
+
+        if (options.jointMode === 'dado') {
+          const dadoStopMm = mA.role === 'panel' ? Math.max(8, options.shoulderMm) : options.shoulderMm;
+          const cheekShoulderMm = Math.max(2, Math.min(options.shoulderMm * 0.5, thkA * 0.15));
+          nominalTenonThk = Math.max(
+            Math.min(minCutter, thkA - 2),
+            Math.min(thkA - 2 * cheekShoulderMm, hostSpanV - 6),
+          );
+          nominalTenonWid = Math.max(
+            minCutter + 2,
+            Math.min(widA - 2 * dadoStopMm, hostSpanU - 2 * dadoStopMm),
+          );
+          maxSafeDepth =
+            chosenHost.depthAvail <= 26
+              ? Math.max(5, +(chosenHost.depthAvail * 0.5 - options.glueReliefMm).toFixed(2))
+              : Math.max(8, chosenHost.depthAvail * 0.68 - 3);
+        } else {
+          const rawThk = Math.max(
+            minCutter,
+            Math.min(
+              thkA - 2 * Math.max(2, options.shoulderMm * 0.6),
+              Math.round((thkA * 0.4) * 2) / 2,
+            ),
+          );
+          const rawWid = Math.max(minCutter + 2, widA - 2 * options.shoulderMm);
+          nominalTenonThk = Math.min(rawThk, Math.max(minCutter, hostSpanV - 2 * Math.max(2.5, options.shoulderMm * 0.5)));
+          nominalTenonWid = Math.min(rawWid, Math.max(minCutter, hostSpanU - 2 * Math.max(3, options.shoulderMm)));
+          maxSafeDepth =
+            chosenHost.depthAvail <= 24
+              ? Math.max(5, +(chosenHost.depthAvail * 0.5 - options.glueReliefMm).toFixed(2))
+              : Math.max(10, chosenHost.depthAvail * 0.68 - 3);
+        }
         const nominalTenonLen = Math.min(options.tenonLengthMm, maxSafeDepth);
 
         const jointId = `J${jointCounter++}`;
@@ -881,9 +1115,10 @@ export function synthesizeTimberJoinery(
           continue;
         }
 
-        // Compute distance of mortise center from the top end of the host leg
+        // Preliminary distance from host's plain top end (recomputed against finalized totalFinishedLengthMm tip in Step 2c)
         const hostTopCoord = dot(mB.centerMm, mB.axes[0]) + mB.dimsMm[0] * 0.5;
-        const distFromTopEndMm = +(hostTopCoord - dot(shoulderCenterMm, mB.axes[0])).toFixed(1);
+        const distFromTopEndMm = +(hostTopCoord - dot(shoulderCenterMm, mB.axes[0])).toFixed(2);
+        const mWidth = +(nominalTenonWid + options.clearanceMm).toFixed(2);
         const mThick = +(nominalTenonThk + options.clearanceMm).toFixed(2);
         const lateralOffset = dot(sub3(shoulderCenterMm, mB.centerMm), chosenHost.spreadAxis);
         const distFromRefEdgeMm = +Math.max(
@@ -902,13 +1137,19 @@ export function synthesizeTimberJoinery(
           faceNormal: hostFaceNormal,
           uAxis,
           vAxis,
-          widthMm: +(nominalTenonWid + options.clearanceMm).toFixed(2),
+          widthMm: mWidth,
           thicknessMm: mThick,
           depthMm: +(nominalTenonLen + options.glueReliefMm).toFixed(2),
           distFromTopEndMm,
           distFromRefEdgeMm,
           cornerFit: options.tenonCornerFit,
           dogboneDiaMm: options.tenonCornerFit === 'dogbone' ? options.cutterDiaMm : undefined,
+          cornerRadiusMm:
+            options.tenonCornerFit === 'round_tenon'
+              ? +roundTenonCornerRadiusMm(mWidth, mThick, options.cutterDiaMm).toFixed(3)
+              : options.tenonCornerFit === 'chisel_square'
+                ? +(options.cutterDiaMm * 0.5).toFixed(3)
+                : undefined,
         };
 
         const tenonSpec: TenonSpec = {
@@ -929,6 +1170,7 @@ export function synthesizeTimberJoinery(
           shoulderCheekMm: +((thkA - nominalTenonThk) * 0.5).toFixed(2),
           shoulderAngleDeg,
           miteredTip: false,
+          miterPlanes: [],
           cutMethod: shoulderAngleDeg > 1.5 ? 'cnc' : options.tenonCutMethod,
         };
 
@@ -947,62 +1189,168 @@ export function synthesizeTimberJoinery(
           normalAToB: inwardNormal,
           mortise: mortiseSpec,
           tenon: tenonSpec,
-          notes: [],
+          notes:
+            options.tenonCornerFit === 'chisel_square'
+              ? [`Square the 4 mortise corners in ${mB.id} with a bench chisel after CNC milling.`]
+              : [],
         });
         void groupIdx;
       }
     }
 
     // -------------------------------------------------------------------------
-    // 2. Detect Corner Tenon Collisions inside Legs (Mitred Corner Tenons!)
+    // 2. Resolve Opposite-Face & Multi-Way Corner Tenon Collisions inside Hosts
     // -------------------------------------------------------------------------
-    // When two rails enter adjacent faces (90° apart) of the same leg at
-    // overlapping heights (like the front and side aprons or stretchers in the
-    // user's anti-racking diagram), check if their tenons meet inside the leg.
     for (let legIdx = 0; legIdx < members.length; legIdx++) {
       const legMortises = mortisesByMember[legIdx];
       if (legMortises.length < 2) continue;
+      const aHost = members[legIdx].axes[0];
 
+      // 2a. Opposite-face coaxial tenons (`dot < -0.85`): shorten both depths so
+      //     opposite tenons (and blind mortise floors) never collide inside a center post/panel!
       for (let a = 0; a < legMortises.length; a++) {
         for (let b = a + 1; b < legMortises.length; b++) {
           const m1 = legMortises[a];
           const m2 = legMortises[b];
-          // Are they on perpendicular faces of the same leg?
-          if (Math.abs(dot(m1.inwardNormal, m2.inwardNormal)) > 0.35) continue;
-          // Do their vertical spans overlap?
-          const zDiff = Math.abs(m1.distFromTopEndMm - m2.distFromTopEndMm);
-          if (zDiff > (m1.widthMm + m2.widthMm) * 0.5) continue;
+          if (dot(m1.inwardNormal, m2.inwardNormal) >= -0.85) continue;
 
-          // Check if the two perpendicular mortises actually intersect in 2D inside the leg
-          const s1 = dot(sub3(m2.centerMm, m1.centerMm), m1.inwardNormal);
-          const s2 = dot(sub3(m1.centerMm, m2.centerMm), m2.inwardNormal);
-          if (!(s1 > 0 && s2 > 0 && m1.depthMm > s1 - m2.thicknessMm * 0.5 && m2.depthMm > s2 - m1.thicknessMm * 0.5)) {
+          const diff = sub3(m2.centerMm, m1.centerMm);
+          const half2U =
+            0.5 *
+            (Math.abs(dot(m2.uAxis, m1.uAxis)) * m2.widthMm +
+              Math.abs(dot(m2.vAxis, m1.uAxis)) * m2.thicknessMm);
+          const half2V =
+            0.5 *
+            (Math.abs(dot(m2.uAxis, m1.vAxis)) * m2.widthMm +
+              Math.abs(dot(m2.vAxis, m1.vAxis)) * m2.thicknessMm);
+          if (
+            Math.abs(dot(diff, m1.uAxis)) >= 0.5 * m1.widthMm + half2U ||
+            Math.abs(dot(diff, m1.vAxis)) >= 0.5 * m1.thicknessMm + half2V
+          ) {
             continue;
           }
 
-          // Find their paired TenonSpecs
+          const faceToFaceDist = Math.abs(dot(diff, m1.inwardNormal));
+          if (faceToFaceDist <= 4) continue;
+
           const j1 = joints.find((j) => j.id === m1.jointId);
           const j2 = joints.find((j) => j.id === m2.jointId);
           if (!j1?.tenon || !j2?.tenon) continue;
 
-          const miterPivotMm = add3(m1.centerMm, scale3(m1.inwardNormal, s1));
+          const minClearBetweenTenons = Math.max(1.0, 2 * options.clearanceMm);
+          if (
+            j1.tenon.lengthMm + j2.tenon.lengthMm > faceToFaceDist - minClearBetweenTenons ||
+            m1.depthMm + m2.depthMm > faceToFaceDist - 0.6
+          ) {
+            const reliefEach = Math.min(options.glueReliefMm, Math.max(0.4, faceToFaceDist * 0.08));
+            const maxHalfTenon = Math.max(
+              4,
+              +((faceToFaceDist - minClearBetweenTenons) * 0.5 - reliefEach).toFixed(2),
+            );
+            j1.tenon.lengthMm = Math.min(j1.tenon.lengthMm, maxHalfTenon);
+            j2.tenon.lengthMm = Math.min(j2.tenon.lengthMm, maxHalfTenon);
+            m1.depthMm = +(j1.tenon.lengthMm + reliefEach).toFixed(2);
+            m2.depthMm = +(j2.tenon.lengthMm + reliefEach).toFixed(2);
+            j1.notes.push(
+              `Shortened tenon to ${j1.tenon.lengthMm} mm inside ${members[legIdx].id} to clear opposite ${j2.memberAId}.`,
+            );
+            j2.notes.push(
+              `Shortened tenon to ${j2.tenon.lengthMm} mm inside ${members[legIdx].id} to clear opposite ${j1.memberAId}.`,
+            );
+          }
+        }
+      }
 
-          // Mark both tenons as 45° mitered at their tips so they nest together
-          // inside the corner of the leg without colliding!
+      // 2b. Adjacent / perpendicular tenons (`|dot| <= 0.85`): slice 45° separating
+      //     miter planes on all meeting pairs (supports 2-way corner, 3-way T-leg, and 4-way center post!).
+      for (let a = 0; a < legMortises.length; a++) {
+        for (let b = a + 1; b < legMortises.length; b++) {
+          const m1 = legMortises[a];
+          const m2 = legMortises[b];
+          const d = dot(m1.inwardNormal, m2.inwardNormal);
+          if (Math.abs(d) > 0.85) continue;
+
+          // Check whether their spans along the host's primary axis overlap
+          const span1 =
+            Math.abs(dot(m1.uAxis, aHost)) * m1.widthMm +
+            Math.abs(dot(m1.vAxis, aHost)) * m1.thicknessMm;
+          const span2 =
+            Math.abs(dot(m2.uAxis, aHost)) * m2.widthMm +
+            Math.abs(dot(m2.vAxis, aHost)) * m2.thicknessMm;
+          if (Math.abs(dot(sub3(m1.centerMm, m2.centerMm), aHost)) > 0.5 * (span1 + span2)) {
+            continue;
+          }
+
+          const denom = 1 - d * d;
+          if (denom < 1e-4) continue;
+          const w0 = sub3(m1.centerMm, m2.centerMm);
+          const s1 = (d * dot(w0, m2.inwardNormal) - dot(w0, m1.inwardNormal)) / denom;
+          const s2 = (dot(w0, m2.inwardNormal) - d * dot(w0, m1.inwardNormal)) / denom;
+
+          const j1 = joints.find((j) => j.id === m1.jointId);
+          const j2 = joints.find((j) => j.id === m2.jointId);
+          if (!j1?.tenon || !j2?.tenon) continue;
+
+          const half2Along1 =
+            0.5 *
+            (Math.abs(dot(m2.uAxis, m1.inwardNormal)) * m2.widthMm +
+              Math.abs(dot(m2.vAxis, m1.inwardNormal)) * m2.thicknessMm);
+          const half1Along2 =
+            0.5 *
+            (Math.abs(dot(m1.uAxis, m2.inwardNormal)) * m1.widthMm +
+              Math.abs(dot(m1.vAxis, m2.inwardNormal)) * m1.thicknessMm);
+          if (
+            !(
+              s1 > 0 &&
+              s2 > 0 &&
+              m1.depthMm > s1 - half2Along1 &&
+              m2.depthMm > s2 - half1Along2
+            )
+          ) {
+            continue;
+          }
+
+          const miterPivotMm = scale3(
+            add3(
+              add3(m1.centerMm, scale3(m1.inwardNormal, s1)),
+              add3(m2.centerMm, scale3(m2.inwardNormal, s2)),
+            ),
+            0.5,
+          );
+          const nSep1 = unit(sub3(m1.inwardNormal, m2.inwardNormal));
+          const nSep2 = neg3(nSep1);
+
           j1.tenon.miteredTip = true;
-          j1.tenon.miterNormal = unit(add3(m1.inwardNormal, neg3(m2.inwardNormal)));
+          j1.tenon.miterNormal = nSep1;
           j1.tenon.miterPivotMm = miterPivotMm;
+          j1.tenon.miterPlanes = [...(j1.tenon.miterPlanes ?? []), { normal: nSep1, pivotMm: miterPivotMm }];
+
           j2.tenon.miteredTip = true;
-          j2.tenon.miterNormal = unit(add3(m2.inwardNormal, neg3(m1.inwardNormal)));
+          j2.tenon.miterNormal = nSep2;
           j2.tenon.miterPivotMm = miterPivotMm;
+          j2.tenon.miterPlanes = [...(j2.tenon.miterPlanes ?? []), { normal: nSep2, pivotMm: miterPivotMm }];
 
           j1.notes.push(
-            `45° mitered tenon tip inside ${members[legIdx].id} so ${j1.memberAId} and ${j2.memberAId} meet at full depth without colliding.`,
+            `45° mitered tenon tip inside ${members[legIdx].id} so ${j1.memberAId} and ${j2.memberAId} meet without colliding.`,
           );
           j2.notes.push(
-            `45° mitered tenon tip inside ${members[legIdx].id} so ${j2.memberAId} and ${j1.memberAId} meet at full depth without colliding.`,
+            `45° mitered tenon tip inside ${members[legIdx].id} so ${j2.memberAId} and ${j1.memberAId} meet without colliding.`,
           );
         }
+      }
+    }
+
+    // 2c. Finalize `distFromTopEndMm` on every mortise using the host's physical
+    //     +axes[0] finished blank tip (including any 'end' tenon/tongue and trim),
+    //     so setup sheets, Z-clip slots, G-code Y0 stops, and simulation share one datum!
+    for (let hostIdx = 0; hostIdx < members.length; hostIdx++) {
+      const mHost = members[hostIdx];
+      const a0 = mHost.axes[0];
+      const posShoulder = dot(mHost.centerMm, a0) + mHost.dimsMm[0] * 0.5 - lengthTrimMm[hostIdx][1];
+      const endTenon = tenonsByMember[hostIdx].find((t) => t.railEnd === 'end');
+      const topTipCoord = posShoulder + endAllowanceAlongAxisMm(mHost, endTenon);
+      for (const mSpec of mortisesByMember[hostIdx]) {
+        mSpec.distFromTopEndMm = +(topTipCoord - dot(mSpec.centerMm, a0)).toFixed(2);
       }
     }
 
@@ -1015,14 +1363,14 @@ export function synthesizeTimberJoinery(
       const tSpec = joint.tenon;
 
       // Subtract mortise from host leg
-      const mCutter = buildMortiseCutter(wasm, mSpec);
+      const mCutter = buildMortiseCutter(wasm, mSpec, options.cutterDiaMm);
       const nextHost = solids[mSpec.hostMemberIndex].subtract(mCutter);
       mCutter.delete();
       solids[mSpec.hostMemberIndex].delete();
       solids[mSpec.hostMemberIndex] = nextHost;
 
       // Add tenon boss to rail end
-      const tBoss = buildTenonBoss(wasm, tSpec, options.tenonCornerFit, options.cutterDiaMm);
+      const tBoss = buildTenonBoss(wasm, tSpec, options.tenonCornerFit, options.cutterDiaMm, options.clearanceMm);
       const nextRail = solids[tSpec.railMemberIndex].add(tBoss);
       tBoss.delete();
       solids[tSpec.railMemberIndex].delete();
@@ -1159,22 +1507,27 @@ export function synthesizeTimberJoinery(
     // -------------------------------------------------------------------------
     // 5. Tabletop Z-Clip Expansion Slots on Inside of Apron Rails
     // -------------------------------------------------------------------------
-    const hasTopPanel = members.some((m) => m.role === 'panel');
+    const hasTopPanel = members.some((m) => m.role === 'panel' && Math.abs(m.axes[2][2]) >= 0.7);
     if (options.tabletopClips && hasTopPanel && options.jointMode !== 'dowel' && options.jointMode !== 'butt') {
       for (let i = 0; i < members.length; i++) {
         const m = members[i];
-        if (m.role !== 'rail' || !m.id.startsWith('Apron_')) continue;
+        if (m.role !== 'rail' || !m.id.startsWith('Apron_') || Math.abs(m.axes[0][2]) >= 0.15) continue;
         // Inside face is opposite to Face 1 (Outer Show Face)
         const inwardToTable = m.face1.normal; // plunging from inner face toward outer face
         const innerFaceNormal = neg3(m.face1.normal);
         const topDir: Vec3 = [0, 0, 1];
-        const distFromTopEdgeMm = 10;
-        const slotWidthMm = 4;
+        const slotWidthMm = +Math.max(4, options.cutterDiaMm).toFixed(2);
+        const distFromTopEdgeMm = Math.max(10, Math.ceil(slotWidthMm * 0.5 + 7));
         const slotDepthMm = Math.min(8, m.dimsMm[2] * 0.45);
-        const slotLengthMm = Math.min(50, Math.max(28, m.dimsMm[0] * 0.25));
+        const effSpanMm = Math.max(30, m.dimsMm[0] - lengthTrimMm[i][0] - lengthTrimMm[i][1]);
+        const slotLengthMm = Math.min(50, Math.max(28, effSpanMm * 0.25));
+        const shoulderMidMm = add3(
+          m.centerMm,
+          scale3(m.axes[0], 0.5 * (lengthTrimMm[i][0] - lengthTrimMm[i][1])),
+        );
 
         const slotCenter = add3(
-          m.centerMm,
+          shoulderMidMm,
           add3(
             scale3(innerFaceNormal, m.dimsMm[2] * 0.5 - slotDepthMm * 0.5),
             scale3(topDir, m.dimsMm[1] * 0.5 - distFromTopEdgeMm),
@@ -1253,8 +1606,12 @@ export function synthesizeTimberJoinery(
       //   - Rails push outward along their face normal
       let explodeVec: Vec3 = explodeByMember[i];
       if (m.role === 'panel') {
-        const pIdx = m.plankInfo ? m.plankInfo.index - 0.5 * (m.plankInfo.total + 1) : 0;
-        explodeVec = [pIdx * 0.25, 0, 1.2];
+        if (Math.abs(m.axes[2][2]) < 0.5) {
+          explodeVec = m.face1.normal;
+        } else {
+          const pIdx = m.plankInfo ? m.plankInfo.index - 0.5 * (m.plankInfo.total + 1) : 0;
+          explodeVec = [pIdx * 0.25, 0, 1.2];
+        }
       } else if (m.role === 'leg') {
         explodeVec = unit([
           m.face1.normal[0] + m.face2.normal[0],
@@ -1268,9 +1625,12 @@ export function synthesizeTimberJoinery(
       }
 
       const tenons = tenonsByMember[i];
-      const extraTenonLen = tenons.reduce((acc, t) => acc + t.lengthMm, 0);
-      const shoulderToShoulderMm = +(m.dimsMm[0] - lengthTrimMm[i][0] - lengthTrimMm[i][1]).toFixed(1);
-      const totalFinishedLengthMm = +(shoulderToShoulderMm + extraTenonLen).toFixed(1);
+      const startTenon = tenons.find((t) => t.railEnd === 'start');
+      const endTenon = tenons.find((t) => t.railEnd === 'end');
+      const extraTenonLen =
+        endAllowanceAlongAxisMm(m, startTenon) + endAllowanceAlongAxisMm(m, endTenon);
+      const shoulderToShoulderMm = +(m.dimsMm[0] - lengthTrimMm[i][0] - lengthTrimMm[i][1]).toFixed(2);
+      const totalFinishedLengthMm = +(shoulderToShoulderMm + extraTenonLen).toFixed(2);
 
       const hull = plainSolids[i].hull();
       const solidity = Math.min(1, plainMesh.volumeMm3 / Math.max(1e-6, hull.volume()));

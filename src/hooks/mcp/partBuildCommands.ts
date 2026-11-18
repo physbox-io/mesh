@@ -12,6 +12,7 @@ import {
   synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode,
 } from '../../utils/timberJoinery';
 import { buildTimberCutPlan } from '../../utils/timberCutList';
+import { webSerialManager } from '../../utils/webSerialManager';
 import { exportSheetUnfold, type SheetUnfoldOptions } from '../../utils/sheetUnfoldExporter';
 import {
   PCB_PRESETS, buildPcbNode, decodePcbHandoff, exportPcbFaceplateSvg, generatePcbEnclosure,
@@ -39,25 +40,27 @@ import type { McpCommands, McpHandler } from './types';
    *   (b) Framed furniture (table, chair, flower stand) into mortise-and-tenon
    *       legs & rails, stopped edge roundovers, 1D stock bars, and CNC windows.
    */
-const breakdownJoineryCommand: McpHandler = async (msg, { store }) => {
-  const explicitBodyId =
+const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
+  const resolveId = (id: string) => (toId ? String(toId(id)) : id);
+  const rawBodyId =
     typeof msg.bodyId === 'string'
       ? msg.bodyId
       : typeof msg.body_id === 'string'
         ? msg.body_id
         : null;
+  const explicitBodyId = rawBodyId ? resolveId(rawBodyId) : null;
   const rawWithIds = Array.isArray(msg.withIds)
     ? msg.withIds
     : Array.isArray(msg.with_ids)
       ? msg.with_ids
       : [];
-  const others = rawWithIds.filter((v): v is string => typeof v === 'string');
+  const others = rawWithIds.filter((v): v is string => typeof v === 'string').map(resolveId);
   const targetIds = explicitBodyId
     ? [explicitBodyId, ...others]
     : resolveTimberTargetIds(store.sceneGraph.nodes, store.selectedNodeId, others);
   if (!targetIds.length) return { ok: false, error: 'Give bodyId, or add a body to the scene first.' };
   const primary = findNodeInScene(store.sceneGraph.nodes, targetIds[0]);
-  if (!primary) return { ok: false, error: `No body called ${targetIds[0]}.` };
+  if (!primary) return { ok: false, error: `No body called ${rawBodyId ?? targetIds[0]}.` };
 
   const { items, absorbed } = collectIndividualPartSoups(store.sceneGraph, targetIds);
   if (!items.length) return { ok: false, error: `${primary.name} has no solid geometry to break down.` };
@@ -155,16 +158,21 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store }) => {
     };
   }
 
+  const rawJointMode = msg.jointMode ?? msg.joint_mode;
   const jointMode: TimberJointMode =
-    msg.jointMode === 'dowel' || msg.jointMode === 'dado' || msg.jointMode === 'butt'
-      ? msg.jointMode
-      : msg.jointMode === 'glue'
+    rawJointMode === 'dowel' || rawJointMode === 'dado' || rawJointMode === 'butt'
+      ? rawJointMode
+      : rawJointMode === 'glue'
         ? 'butt'
         : 'mortise_tenon';
+  const rawCornerFit = msg.tenonCornerFit ?? msg.tenon_corner_fit;
   const tenonCornerFit: TenonCornerFit =
-    msg.tenonCornerFit === 'round_tenon' || msg.tenonCornerFit === 'chisel_square' ? msg.tenonCornerFit : 'dogbone';
+    rawCornerFit === 'round_tenon' || rawCornerFit === 'chisel_square' ? rawCornerFit : 'dogbone';
+  const rawEdgeProfile = msg.edgeProfile ?? msg.edge_profile;
   const edgeProfile: TimberEdgeProfile =
-    msg.edgeProfile === 'chamfer' || msg.edgeProfile === 'square' ? msg.edgeProfile : 'roundover';
+    rawEdgeProfile === 'chamfer' || rawEdgeProfile === 'square' ? rawEdgeProfile : 'roundover';
+  const rawCutMethod = msg.tenonCutMethod ?? msg.tenon_cut_method;
+  const rawClips = msg.tabletopClips ?? msg.tabletop_clips;
 
   const outcome = synthesizeTimberJoinery(
     wasm,
@@ -173,22 +181,22 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store }) => {
       jointMode,
       tenonCornerFit,
       edgeProfile,
-      cutterDiaMm: num(msg.cutterDiaMm),
-      shoulderMm: num(msg.shoulderMm),
-      tenonLengthMm: num(msg.tenonLengthMm),
-      clearanceMm: num(msg.clearanceMm),
-      edgeRadiusMm: num(msg.edgeRadiusMm),
-      stopMarginMm: num(msg.stopMarginMm),
-      maxBoardWidthMm: num(msg.maxBoardWidthMm),
-      tabletopClips: typeof msg.tabletopClips === 'boolean' ? msg.tabletopClips : undefined,
-      tenonCutMethod: msg.tenonCutMethod === 'cnc' ? 'cnc' : 'bandsaw',
+      cutterDiaMm: num(msg.cutterDiaMm ?? msg.cutter_dia_mm),
+      shoulderMm: num(msg.shoulderMm ?? msg.shoulder_mm),
+      tenonLengthMm: num(msg.tenonLengthMm ?? msg.tenon_length_mm),
+      clearanceMm: num(msg.clearanceMm ?? msg.clearance_mm),
+      edgeRadiusMm: num(msg.edgeRadiusMm ?? msg.edge_radius_mm),
+      stopMarginMm: num(msg.stopMarginMm ?? msg.stop_margin_mm),
+      maxBoardWidthMm: num(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
+      tabletopClips: typeof rawClips === 'boolean' ? rawClips : undefined,
+      tenonCutMethod: rawCutMethod === 'cnc' ? 'cnc' : 'bandsaw',
     },
   );
   if (!outcome.ok) return outcome;
 
   // If auto-mode was called on a single unframed solid block (1 part, 0 joints)
   // and msg.mode !== 'frame', fall back to hollow-shell / plank breakdown!
-  if (msg.mode !== 'frame' && outcome.parts.length <= 1 && outcome.joints.length === 0 && msg.jointMode === undefined) {
+  if (msg.mode !== 'frame' && outcome.parts.length <= 1 && outcome.joints.length === 0 && rawJointMode === undefined) {
     const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
       maxBoardWidthMm: num(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
       clearanceMm: num(msg.clearanceMm ?? msg.clearance_mm),
@@ -236,15 +244,19 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store }) => {
     }
   }
 
-  const bedArr = Array.isArray(msg.cncBedMm) ? (msg.cncBedMm as number[]) : null;
+  const rawBed = msg.cncBedMm ?? msg.cnc_bed_mm;
+  const bedArr = Array.isArray(rawBed) ? (rawBed as number[]) : null;
   const cncBedMm: [number, number, number] =
     bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
       ? [bedArr[0], bedArr[1], bedArr[2]]
       : [store.cncBed.widthMm, store.cncBed.depthMm, store.cncBed.heightMm];
+  const motion = webSerialManager.getState().motion;
 
   const cutPlan = buildTimberCutPlan(outcome, {
     cncBedMm,
-    defaultStockLengthMm: num(msg.stockLengthMm) ?? 1800,
+    defaultStockLengthMm: num(msg.stockLengthMm ?? msg.stock_length_mm) ?? 1800,
+    spindle: motion.spindle,
+    maxFeedMmMin: Math.min(motion.maxRate.x, motion.maxRate.y),
   });
 
   const names = outcome.parts.map((p) => p.member.id);

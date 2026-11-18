@@ -27,8 +27,18 @@ import type { Manifold, ManifoldToplevel, Mat4 } from 'manifold-3d';
 import { simulateMilling, type CutResult } from './cutSimulation';
 import { buildSimulationMesh } from './simulationMesh';
 import { manifoldToMeshMm, meshMmToManifold, type TimberMember } from './timberBreakdown';
-import { memberFaceNumber, type CncWindowSetup, type TimberCutPlan } from './timberCutList';
-import type { TimberBreakdownResult } from './timberJoinery';
+import {
+  memberFaceNumber,
+  partShoulderBoundsAlongAxis,
+  type CncWindowSetup,
+  type TimberCutPlan,
+} from './timberCutList';
+import {
+  buildTenonBoss,
+  roundTenonCornerRadiusMm,
+  type MemberJoineryPart,
+  type TimberBreakdownResult,
+} from './timberJoinery';
 import type { AddSimulationRequest } from '../hooks/useAddSimulation';
 import type { StockTransform } from './reliefCarveExporter';
 import type { SceneNode } from '../types/scene';
@@ -75,6 +85,8 @@ export interface TimberSimJobResult {
   setupFaults: string[];
   /** Mortises with no program, cut by hand, so not simulated. */
   byHand: number;
+  /** Mortises whose corners require hand-chiseling square after CNC milling (`chisel_square`). */
+  chiseledCorners?: number;
   cellMm: number;
 }
 
@@ -102,7 +114,8 @@ interface WindowFrame {
   cut?: CutResult;
 }
 
-function windowFrame(m: TimberMember, setup: CncWindowSetup, faults: string[]): WindowFrame | null {
+function windowFrame(part: MemberJoineryPart, setup: CncWindowSetup, faults: string[]): WindowFrame | null {
+  const m = part.member;
   const up = faceNormal(m, setup.faceUpLabel);
   if (!up) return null;
   const a0: V3 = [m.axes[0][0], m.axes[0][1], m.axes[0][2]];
@@ -118,10 +131,12 @@ function windowFrame(m: TimberMember, setup: CncWindowSetup, faults: string[]): 
       `${setup.id}: with ${setup.faceUpLabel} up and the top end at the stop, Face F${atFence} is against the fence, not ${setup.fenceFaceLabel}`
     );
   }
+  const { topTipCoord } = partShoulderBoundsAlongAxis(part);
   const c: V3 = [m.centerMm[0], m.centerMm[1], m.centerMm[2]];
   const widthMm = 2 * halfAlong(m, x);
-  const origin = add(add(add(c, scale(x, -widthMm / 2)), scale(a0, m.dimsMm[0] / 2 - setup.indexOffsetFromTopMm)), scale(z, halfAlong(m, z)));
-  return { setup, origin, x, y, z, widthMm, lengthMm: m.dimsMm[0] - setup.indexOffsetFromTopMm };
+  const topShift = topTipCoord - dot(c, a0) - setup.indexOffsetFromTopMm;
+  const origin = add(add(add(c, scale(x, -widthMm / 2)), scale(a0, topShift)), scale(z, halfAlong(m, z)));
+  return { setup, origin, x, y, z, widthMm, lengthMm: part.totalFinishedLengthMm - setup.indexOffsetFromTopMm };
 }
 
 /** A point in the breakdown's frame in a window's machine coordinates. */
@@ -196,7 +211,7 @@ export function runTimberSimulation(
     onProgress?.((k / Math.max(1, setups.length)) * 0.7);
     const part = breakdown.parts.find((p) => p.member.id === setup.partId);
     if (!part) return;
-    const w = windowFrame(part.member, setup, faults);
+    const w = windowFrame(part, setup, faults);
     if (!w || w.lengthMm <= 0) return;
     w.cut = simulateMilling(setup.gcode, {
       widthMm: w.widthMm,
@@ -224,6 +239,7 @@ export function runTimberSimulation(
 
   const joints: TimberJointFit[] = [];
   let byHand = 0;
+  let chiseledCorners = 0;
   for (const j of breakdown.joints) {
     const t = j.tenon, m = j.mortise;
     if (!t || !m) continue;
@@ -233,18 +249,42 @@ export function runTimberSimulation(
       byHand++;
       continue;
     }
+    if (m.cornerFit === 'chisel_square') {
+      chiseledCorners++;
+    }
     const u = t.uAxis as V3, v = t.vAxis as V3, c = t.shoulderCenterMm as V3;
     const at = (s: number, r: number) => depthAt(m.hostMemberId, add(add(c, scale(u, s)), scale(v, r)), faceN);
     // Pushed in until some part of its end meets the floor, or the face.
     const step = Math.max(0.1, cellMm);
     // Its faces in half a cell: a cheek flush with the wall is a fit, not a miss.
     const hw = Math.max(0, t.widthMm / 2 - step / 2), ht = Math.max(0, t.thicknessMm / 2 - step / 2);
+    // For `round_tenon`, the tenon corners are rounded to `rTenon`; for `chisel_square`,
+    // the CNC bit's inside corner fillets (`rBit`) are squared with a bench chisel after milling.
+    const rCorner =
+      m.cornerFit === 'round_tenon'
+        ? roundTenonCornerRadiusMm(t.widthMm, t.thicknessMm, breakdown.options.cutterDiaMm)
+        : m.cornerFit === 'chisel_square'
+           ? Math.min(t.widthMm * 0.5, t.thicknessMm * 0.5, breakdown.options.cutterDiaMm * 0.5)
+           : 0;
+    const su = Math.max(0, hw - rCorner);
+    const sv = Math.max(0, ht - rCorner);
     let reach = Infinity;
     for (let s = -hw; s <= hw + 1e-9; s += step) {
+      const ps = Math.min(s, hw);
       for (let r = -ht; r <= ht + 1e-9; r += step) {
-        reach = Math.min(reach, at(Math.min(s, hw), Math.min(r, ht)));
+        const pr = Math.min(r, ht);
+        if (
+          rCorner > 1e-6 &&
+          Math.abs(ps) > su &&
+          Math.abs(pr) > sv &&
+          Math.hypot(Math.abs(ps) - su, Math.abs(pr) - sv) > rCorner + 1e-6
+        ) {
+          continue;
+        }
+        reach = Math.min(reach, at(ps, pr));
       }
     }
+    if (!Number.isFinite(reach)) reach = at(0, 0);
     const shoulderGapMm = Math.max(0, t.lengthMm - reach);
     // The pocket's walls, out from the tenon's middle along each axis: where
     // it is less than half as deep as the tenon is long.
@@ -267,7 +307,8 @@ export function runTimberSimulation(
     });
   }
 
-  // The parts: blanks, tenons sawn on, pockets milled out.
+  // The parts: blanks sawn to shoulder-to-shoulder span (with angled shoulders if any),
+  // tenons sawn/rounded/mitered on, and CNC pockets milled out.
   const positions: number[] = [];
   const faces: number[] = [];
   let volumeMm3 = 0;
@@ -275,15 +316,46 @@ export function runTimberSimulation(
     onProgress?.(0.7 + (k / Math.max(1, breakdown.parts.length)) * 0.3);
     const mem = part.member;
     const a0 = mem.axes[0] as V3, a1 = mem.axes[1] as V3;
-    const blank = wasm.Manifold.cube(mem.dimsMm as [number, number, number], true);
-    let solid = blank.transform(frameMat4(a0, a1, mem.centerMm as V3));
+    const { sLo, sHi } = partShoulderBoundsAlongAxis(part);
+    const tStart = part.tenons.find((t) => t.railEnd === 'start');
+    const tEnd = part.tenons.find((t) => t.railEnd === 'end');
+    const bevelPadFor = (t: typeof tStart) => {
+      if (!t || t.shoulderAngleDeg <= 0.1) return 0;
+      const cosA = Math.max(0.25, Math.abs(dot(a0, t.outwardDir)));
+      return (
+        (0.5 * mem.dimsMm[1] * Math.abs(dot(mem.axes[1], t.outwardDir)) +
+          0.5 * mem.dimsMm[2] * Math.abs(dot(mem.axes[2], t.outwardDir))) /
+          cosA +
+        0.5
+      );
+    };
+    const padLo = bevelPadFor(tStart);
+    const padHi = bevelPadFor(tEnd);
+    const effLo = sLo - padLo;
+    const effHi = sHi + padHi;
+    const blankLen = Math.max(1, effHi - effLo);
+    const midShift = 0.5 * (effLo + effHi) - dot(mem.centerMm, a0);
+    const blankCenter = add(mem.centerMm as V3, scale(a0, midShift));
+    const blank = wasm.Manifold.cube([blankLen, mem.dimsMm[1], mem.dimsMm[2]], true);
+    let solid = blank.transform(frameMat4(a0, a1, blankCenter));
     blank.delete();
+    for (const [t, pad] of [[tStart, padLo], [tEnd, padHi]] as const) {
+      if (t && pad > 0) {
+        const [discard, kept] = solid.splitByPlane(t.outwardDir, dot(t.outwardDir, t.shoulderCenterMm));
+        discard.delete();
+        solid.delete();
+        solid = kept;
+      }
+    }
     for (const t of part.tenons) {
-      const box = wasm.Manifold.cube([t.widthMm, t.thicknessMm, t.lengthMm], true);
-      const out = t.outwardDir as V3;
-      // Its third axis along `out`, from the shoulder.
-      const placed = box.transform(frameMat4(t.uAxis as V3, cross(out, t.uAxis as V3), add(t.shoulderCenterMm as V3, scale(out, t.lengthMm / 2))));
-      box.delete();
+      const placed = buildTenonBoss(
+        wasm,
+        t,
+        breakdown.options.tenonCornerFit,
+        breakdown.options.cutterDiaMm,
+        breakdown.options.clearanceMm,
+        1.0,
+      );
       const next = solid.add(placed);
       placed.delete(); solid.delete();
       solid = next;
@@ -313,6 +385,7 @@ export function runTimberSimulation(
     joints,
     setupFaults: faults,
     byHand,
+    ...(chiseledCorners > 0 ? { chiseledCorners } : {}),
     cellMm,
   };
 }
@@ -355,6 +428,7 @@ export function timberSimulationRequest(
       mostOffCentreMm: r2(offCentre),
       setupFaults: sim.setupFaults,
       mortisesByHand: sim.byHand,
+      ...(sim.chiseledCorners ? { chiseledCorners: sim.chiseledCorners } : {}),
       cellMm: sim.cellMm,
     },
     request: {
@@ -371,7 +445,7 @@ export function timberSimulationRequest(
         ...(offCentre > 0.25 ? [`A mortise is up to ${offCentre.toFixed(2)} mm off its tenon's centre`] : []),
         ...sim.setupFaults.map((f) => `**Setup sheet:** ${f}`),
         ...(sim.byHand ? [`${sim.byHand} mortise${sim.byHand === 1 ? '' : 's'} cut by hand, not simulated: too big for the CNC`] : []),
-        'Mitred tenon tips are sawn square here',
+        ...(sim.chiseledCorners ? [`${sim.chiseledCorners} mortise${sim.chiseledCorners === 1 ? '' : 's'} require squaring the 4 corners with a bench chisel after CNC milling`] : []),
       ],
     },
   };

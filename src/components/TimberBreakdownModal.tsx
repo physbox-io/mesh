@@ -292,7 +292,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
             joineryOptions: settledJoineryOpts,
             plankOptions: settledPlankOpts,
             cncBedMm,
-            defaultStockLengthMm: 2400,
+            defaultStockLengthMm: 1800,
             // The machine's own limits, so the mortising feeds are derived for
             // it rather than a fixed S12000 F900.
             spindle: machineLimits.spindle,
@@ -317,7 +317,8 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
     if (
       frameOutcome?.ok &&
       frameOutcome.parts.length > 1 &&
-      frameOutcome.parts.some((p) => p.member.role === 'rail')
+      (frameOutcome.parts.some((p) => p.member.role === 'rail') ||
+        frameOutcome.joints.some((j) => j.kind !== 'plank_dowel'))
     ) {
       return 'frame';
     }
@@ -675,7 +676,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                           >
                             <NumberInput
                               step={1}
-                              min={10}
+                              min={5}
                               max={50}
                               value={joineryOpts.tenonLengthMm}
                               onChange={(v) => setOpt('tenonLengthMm', v)}

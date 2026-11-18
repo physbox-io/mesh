@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { loadManifold } from '../src/utils/sculptCut';
 import {
   buildSinglePlankScene,
   decomposeSolidIntoPlanks,
+  extractTimberMembers,
   meshMmToManifold,
   meshToBinaryStl,
   packPartsLayFlatMetres,
@@ -435,6 +436,106 @@ describe('Timber Plank & Hollow-Shell Breakdown Engine', () => {
     expect(packed.layFlatPositionsM.length).toBe(res.planks.length);
     expect(packed.sheetSizeMm[0]).toBeGreaterThan(100);
     expect(packed.sheetSizeMm[1]).toBeGreaterThan(100);
+  });
+
+  it('17. classifies 45° knee braces as rails (Brace_*) and vertical bookcase side walls as Side_Left/Side_Right', async () => {
+    const wasm = await loadManifold();
+    // 1. 45° knee brace alongside two legs and an apron
+    const legL = wasm.Manifold.cube([45, 45, 600], true).translate([-177.5, 0, 300]);
+    const legR = wasm.Manifold.cube([45, 45, 600], true).translate([177.5, 0, 300]);
+    const apron = wasm.Manifold.cube([310, 22, 60], true).translate([0, 0, 560]);
+    const braceRaw = wasm.Manifold.cube([160, 22, 35], true).rotate([0, -45, 0]);
+    const brace = braceRaw.translate([-105, 0, 480]);
+    braceRaw.delete();
+
+    const frameSoups = [legL, legR, apron, brace].map(manifoldMmToSoupMetres);
+    legL.delete(); legR.delete(); apron.delete(); brace.delete();
+
+    const extracted = extractTimberMembers(wasm, frameSoups, { splitWidePanels: false });
+    expect(extracted.ok).toBe(true);
+    if (!extracted.ok) return;
+    expect(extracted.members.filter((m) => m.role === 'leg').length).toBe(2);
+    expect(extracted.members.filter((m) => m.role === 'rail').length).toBe(2);
+    expect(extracted.members.some((m) => m.id.startsWith('Brace_'))).toBe(true);
+
+    // 2. Vertical bookcase side walls (20 x 300 x 800) + horizontal shelf (380 x 300 x 20)
+    const sideL = wasm.Manifold.cube([20, 300, 800], true).translate([-200, 0, 400]);
+    const sideR = wasm.Manifold.cube([20, 300, 800], true).translate([200, 0, 400]);
+    const shelf = wasm.Manifold.cube([380, 300, 20], true).translate([0, 0, 400]);
+    const caseSoups = [sideL, sideR, shelf].map(manifoldMmToSoupMetres);
+    sideL.delete(); sideR.delete(); shelf.delete();
+
+    const caseRes = extractTimberMembers(wasm, caseSoups, { maxBoardWidthMm: 350, splitWidePanels: true });
+    expect(caseRes.ok).toBe(true);
+    if (!caseRes.ok) return;
+    const ids = caseRes.members.map((m) => m.id).sort();
+    expect(ids).toEqual(['Shelf_1', 'Side_Left', 'Side_Right']);
+    // Neither vertical side wall should be misclassified as a coplanar tabletop plank
+    for (const m of caseRes.members) {
+      expect(m.plankInfo).toBeUndefined();
+    }
+    const left = caseRes.members.find((m) => m.id === 'Side_Left')!;
+    const right = caseRes.members.find((m) => m.id === 'Side_Right')!;
+    expect(left.face1.normal[0]).toBeLessThan(-0.9);
+    expect(right.face1.normal[0]).toBeGreaterThan(0.9);
+  });
+
+  it('18. resolves bodyId and withIds by human-readable body name via toId in BREAKDOWN_JOINERY', async () => {
+    if (typeof globalThis.navigator === 'undefined') {
+      vi.stubGlobal('navigator', { hardwareConcurrency: 2 });
+    }
+    const { partBuildCommands } = await import('../src/hooks/mcp/partBuildCommands');
+    const scene: SceneGraph = {
+      nodes: [
+        {
+          id: 'node_uuid_leg_1',
+          name: 'MyLeftLeg',
+          pos: [-0.1775, 0, 0.3],
+          geoms: [{ name: 'g', type: 'box', size: [0.0225, 0.0225, 0.3] }],
+          joints: [],
+          children: [],
+        },
+        {
+          id: 'node_uuid_leg_2',
+          name: 'MyRightLeg',
+          pos: [0.1775, 0, 0.3],
+          geoms: [{ name: 'g', type: 'box', size: [0.0225, 0.0225, 0.3] }],
+          joints: [],
+          children: [],
+        },
+        {
+          id: 'node_uuid_rail',
+          name: 'MyFrontApron',
+          pos: [0, 0, 0.56],
+          geoms: [{ name: 'g', type: 'box', size: [0.155, 0.011, 0.03] }],
+          joints: [],
+          children: [],
+        },
+      ],
+    };
+    const toId = (v: unknown) => {
+      const hit = scene.nodes.find((n) => n.id === v || n.name === v);
+      return hit ? hit.id : v;
+    };
+    const res = (await partBuildCommands.BREAKDOWN_JOINERY(
+      {
+        body_id: 'MyLeftLeg',
+        with_ids: ['MyRightLeg', 'MyFrontApron'],
+        mode: 'frame',
+        joint_mode: 'mortise_tenon',
+      },
+      {
+        store: {
+          sceneGraph: scene,
+          selectedNodeId: null,
+          cncBed: { widthMm: 300, depthMm: 300, heightMm: 60 },
+        } as never,
+        toId,
+      },
+    )) as { ok: boolean; parts?: unknown[]; joints?: unknown[] };
+    expect(res.ok).toBe(true);
+    expect(res.parts?.length).toBe(3);
+    expect(res.joints?.length).toBe(2);
   });
 });
 
