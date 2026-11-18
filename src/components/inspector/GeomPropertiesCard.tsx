@@ -194,6 +194,8 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
         })()}
       </div>
 
+      <MaterialCard node={selectedNode} geom={geom} activeIndex={activeIndex} />
+
       <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
         <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
           <span className="flex items-center gap-1">💥 Collision Physics</span>
@@ -215,8 +217,6 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
           Enable Collisions
         </label>
       </div>
-
-      <MaterialCard node={selectedNode} geom={geom} activeIndex={activeIndex} />
 
       <CouplingCard node={selectedNode} />
       </>

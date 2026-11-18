@@ -718,9 +718,10 @@ export interface SceneNode {
    */
   shatterImpulseNs?: number;
   /**
-   * The material last picked in the sidebar's Deformation card, or 'custom'
-   * once a number has been changed by hand. A label only: the shatter and
-   * dent fields it wrote are what the physics reads. See utils/deformMaterials.ts.
+   * The material preset chosen in the Physical Material card (e.g. 'steel',
+   * 'softMetal', 'hardwood', 'plastic', 'ceramic', 'glass'), or 'custom'.
+   * Drives modal sound synthesis (Young's modulus E, Q, brightness) and
+   * fills in default density, contact, and deformation numbers. See utils/deformMaterials.ts.
    */
   deformMaterial?: string;
   /**

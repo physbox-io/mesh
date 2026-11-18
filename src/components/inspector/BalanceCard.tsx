@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
-import { Scale, RotateCcw } from 'lucide-react';
+import { Scale, RotateCcw, Crosshair } from 'lucide-react';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import { useStore } from '../../store/useStore';
+import { useViewQuality } from '../../store/viewQualityStore';
 import {
   analyzeStability,
   balanceBody,
@@ -9,6 +10,7 @@ import {
   type BalanceMode,
 } from '../../utils/balancePart';
 import { resolveWaterSurfaceAt } from '../../utils/hydrostatics';
+import { DocsInfoButton } from '../docs/DocsInfoButton';
 
 function replaceNodeInTree(nodes: SceneNode[], targetId: string, next: SceneNode): SceneNode[] {
   return nodes.map((n) => {
@@ -39,6 +41,8 @@ function applyDiscreteNodeReplacement(nodeId: string, nextNode: SceneNode) {
 export function BalanceCard({ node }: { node: SceneNode }) {
   const sceneGraph = useStore((s) => s.sceneGraph);
   const waterLevel = useStore((s) => s.waterLevel);
+  const showCog = useViewQuality((s) => s.showCenterOfGravity);
+  const setShowCog = useViewQuality((s) => s.setShowCenterOfGravity);
   const [lastSummary, setLastSummary] = useState<string | null>(null);
 
   const effectiveWaterZ = useMemo(
@@ -82,17 +86,52 @@ export function BalanceCard({ node }: { node: SceneNode }) {
       <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-1.5">
         <h3 className="text-sm font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
           <Scale className="w-3.5 h-3.5 text-indigo-500" /> Balance &amp; Ballast
+          <DocsInfoButton tab="balance" />
         </h3>
-        {hasAdjustments && (
+        <div className="flex items-center gap-1.5">
+          {hasAdjustments && (
+            <button
+              type="button"
+              onClick={handleReset}
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              title="Remove internal balance cavity and seated ballast nuts"
+            >
+              <RotateCcw className="w-2.5 h-2.5" /> Reset
+            </button>
+          )}
           <button
             type="button"
-            onClick={handleReset}
-            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-            title="Remove internal balance cavity and seated ballast nuts"
+            role="switch"
+            aria-checked={showCog}
+            onClick={() => setShowCog(!showCog)}
+            className={`flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-semibold cursor-pointer transition-colors ${
+              showCog
+                ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300'
+                : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+            }`}
+            title="Toggle 3D Centre of Gravity marker, plumb line, and support polygon in the viewport"
           >
-            <RotateCcw className="w-2.5 h-2.5" /> Reset
+            <Crosshair className="w-2.5 h-2.5" /> Show CoG
           </button>
-        )}
+        </div>
+      </div>
+
+      {/* Always-on Centre of Gravity readout */}
+      <div className="flex flex-col gap-0.5 bg-slate-50 dark:bg-slate-800/60 rounded px-2 py-1.5 text-[10px] font-mono text-slate-600 dark:text-slate-300">
+        <div className="flex justify-between items-center">
+          <span className="font-sans font-semibold text-slate-500 dark:text-slate-400">Centre of Gravity</span>
+          <span className="font-bold text-slate-700 dark:text-slate-100">
+            X {(report.comWorld[0] * 1000).toFixed(1)} · Y {(report.comWorld[1] * 1000).toFixed(1)} · Z {(report.comWorld[2] * 1000).toFixed(1)} mm
+          </span>
+        </div>
+        <div className="flex justify-between items-center text-slate-500 dark:text-slate-400">
+          <span className="font-sans">Above base: {Math.max(0, (report.comWorld[2] - report.stand.baseZ) * 1000).toFixed(1)} mm</span>
+          <span>
+            {report.stand.edgeMarginMm >= 0
+              ? `${report.stand.edgeMarginMm.toFixed(1)} mm inside base`
+              : `${Math.abs(report.stand.edgeMarginMm).toFixed(1)} mm past edge`}
+          </span>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-1.5 text-[10px]">

@@ -42,6 +42,8 @@ export interface StabilityReport {
     edgeMarginMm: number;
     /** Static tilt angle required to tip over the nearest base edge (deg). */
     tipAngleDeg: number;
+    /** World Z of the base contact plane (m). */
+    baseZ: number;
     supportPolygon: [number, number][];
     supportCentroid: [number, number];
   };
@@ -471,6 +473,7 @@ export function analyzeStability(node: SceneNode, waterLevel: number | null = 0)
       stands: edgeMarginM > 0.0015 && tipAngleDeg >= 4,
       edgeMarginMm: +(edgeMarginM * 1000).toFixed(2),
       tipAngleDeg: +tipAngleDeg.toFixed(1),
+      baseZ: +(Number.isFinite(minWz) ? minWz : 0).toFixed(6),
       supportPolygon,
       supportCentroid: [+supportCentroid[0].toFixed(6), +supportCentroid[1].toFixed(6)],
     },

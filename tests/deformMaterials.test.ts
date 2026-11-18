@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SceneNode } from '../src/types/scene';
 import {
-  DEFORM_MATERIALS, deformMaterial, estimateBodyMass, geomVolume, materialUpdates, shatterFields,
+  DEFORM_MATERIALS, deformMaterial, estimateBodyMass, geomVolume, materialUpdates, physicalMaterialUpdates, shatterFields,
 } from '../src/utils/deformMaterials';
 
 const cube = (half: number, extra: Partial<SceneNode['geoms'][number]> = {}): SceneNode => ({
@@ -69,5 +69,27 @@ describe('deformMaterials', () => {
       expect((m.natural.shatter && m.shatter) || (m.natural.dent && m.dent) || m.natural.load).toBeTruthy();
       if (m.dent?.pierceNs) expect(m.dent.pierceNs).toBeGreaterThan(m.dent.yieldNs * 1.5);
     }
+  });
+
+  it('physicalMaterialUpdates sets density and contact physics without forcing shatter/dent on plain bodies', () => {
+    const glass = deformMaterial('glass')!;
+    const plain = physicalMaterialUpdates(cube(0.05), glass, 0);
+    expect(plain.node.deformMaterial).toBe('glass');
+    expect(plain.node.shatterImpulseNs).toBeUndefined();
+    expect(plain.geoms[0]).toMatchObject({
+      density: 2500,
+      solref: glass.contact.solref,
+      solimp: glass.contact.solimp,
+      friction: glass.contact.friction,
+    });
+    expect(plain.geoms[0]?.dentYieldNs).toBeUndefined();
+
+    // If shattering was already enabled, switching material updates threshold (or clears it for steel)
+    const shatteringGlass = { ...cube(0.05), shatterImpulseNs: 5 };
+    const updatedCeramic = physicalMaterialUpdates(shatteringGlass, deformMaterial('ceramic')!, 0);
+    expect(updatedCeramic.node.shatterImpulseNs).toBeGreaterThan(0);
+
+    const updatedSteel = physicalMaterialUpdates(shatteringGlass, deformMaterial('steel')!, 0);
+    expect('shatterImpulseNs' in updatedSteel.node && updatedSteel.node.shatterImpulseNs === undefined).toBe(true);
   });
 });

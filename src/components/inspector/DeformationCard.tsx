@@ -4,15 +4,16 @@ import { useDentStore } from '../../store/dentStore';
 import { useStore } from '../../store/useStore';
 import { isDentable, needsConversionForDenting } from '../../utils/dentMesh';
 import type { SceneGeom, SceneNode } from '../../types/scene';
-import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFields, estimateBodyMass, materialUpdates, shatterFields } from '../../utils/deformMaterials';
+import { CUSTOM_DENT, CUSTOM_SHATTER, deformMaterial, dentFields, estimateBodyMass, shatterFields } from '../../utils/deformMaterials';
 import { SettledNumberInput } from '../SettledInputs';
 import { LoadBreakSection, LoadOnlyCard } from './LoadBreakSection';
 import { memberShape } from '../../utils/memberStrength';
+import { DocsInfoButton } from '../docs/DocsInfoButton';
 
 /*
  * Deformation — what this body does when it is hit hard: break
- * into pieces, take a dent, both or neither. A material fills in
- * numbers that belong together; see utils/deformMaterials.ts.
+ * into pieces, take a dent, both or neither. Defaults come from
+ * the body's Physical Material (`deformMaterial`); see utils/deformMaterials.ts.
  * Shattering is per body and denting per geom, so the card
  * works on the one geom a dent would be made in.
  */
@@ -47,8 +48,6 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
   const nodeId = selectedNode.id;
 
   const shatterOn = typeof selectedNode.shatterImpulseNs === 'number' && selectedNode.shatterImpulseNs > 0;
-  const loadOn = !!selectedNode.loadStrength;
-  const canBreakUnderLoad = !!memberShape(selectedNode) && (selectedNode.joints || []).some((j) => j.type === 'free');
   const dentOn = typeof geom.dentYieldNs === 'number' && geom.dentYieldNs > 0;
   const material = deformMaterial(selectedNode.deformMaterial);
   const movable = (selectedNode.joints || []).length > 0;
@@ -57,19 +56,11 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
   const marks = dents[`${nodeId}/${geom.name}`];
   const massKg = estimateBodyMass(selectedNode);
 
-  // Any number changed by hand means the body is no longer the
-  // material the dropdown names.
-  const markCustom = () => {
-    if (selectedNode.deformMaterial && selectedNode.deformMaterial !== 'custom') {
-      updateNode(nodeId, { deformMaterial: 'custom' });
-    }
-  };
   const tuneNode = (u: Partial<SceneNode>) => {
-    updateNode(nodeId, selectedNode.deformMaterial ? { ...u, deformMaterial: 'custom' } : u);
+    updateNode(nodeId, u);
   };
   const tuneGeom = (u: Partial<SceneGeom>) => {
     updateNodeGeom(nodeId, u, gi);
-    markCustom();
   };
 
   const setShatter = (on: boolean) => {
@@ -81,20 +72,8 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
     if (on) makeDentable(nodeId, gi, dentFields(material?.dent ?? CUSTOM_DENT));
     else updateNodeGeom(nodeId, { dentYieldNs: undefined }, gi);
   };
-  const pickMaterial = (id: string) => {
-    const m = deformMaterial(id);
-    if (!m) { updateNode(nodeId, { deformMaterial: id === 'custom' ? 'custom' : undefined }); return; }
-    const r = materialUpdates(selectedNode, m, { shatter: shatterOn, dent: dentOn, load: loadOn }, canBreakUnderLoad);
-    for (const [i, u] of Object.entries(r.geoms)) updateNodeGeom(nodeId, u, Number(i));
-    if (r.dent) makeDentable(nodeId, gi, dentFields(m.dent!));
-    else {
-      if (dentOn) updateNodeGeom(nodeId, { dentYieldNs: undefined }, gi);
-      if (r.shatter && willConvert) makeDentable(nodeId, gi, {});
-    }
-    updateNode(nodeId, r.node);
-  };
 
-  // The material's strength, or hardwood's when the material is Custom.
+  // The material's strength, or hardwood's when no material is set.
   const setLoad = (on: boolean) => {
     if (!on) { updateNode(nodeId, { loadStrength: undefined }); return; }
     updateNode(nodeId, { loadStrength: { ...(material ?? deformMaterial('hardwood')!).strength } });
@@ -106,6 +85,7 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
       <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
         <Hammer className="w-3.5 h-3.5 text-amber-600" /> Deformation
+        <DocsInfoButton tab="breaking" />
         {(inPieces || marks) && (
           <span className="ml-auto text-[10px] font-semibold text-rose-600">
             {inPieces
@@ -115,31 +95,13 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
         )}
       </h3>
 
-      <div className="flex items-center gap-2">
-        <label className="text-[10px] text-slate-500 w-20 shrink-0">Material</label>
-        <select
-          value={material?.id ?? 'custom'}
-          onChange={(e) => pickMaterial(e.target.value)}
-          className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
-          title="Fills in the numbers below, and the density, so the body weighs what it is made of."
-        >
-          <option value="custom">Custom</option>
-          {DEFORM_MATERIALS.map((m) => (
-            <option key={m.id} value={m.id}>{m.label}</option>
-          ))}
-        </select>
-      </div>
-      {material && (
-        <p className="text-[10px] text-slate-400 leading-snug">{material.note}</p>
-      )}
-
       {/* ---- Under load ---- */}
       <LoadBreakSection node={selectedNode} onToggle={setLoad} />
 
       {/* ---- Shattering ---- */}
       <label
         className={`flex items-center gap-2 text-xs cursor-pointer ${material && !material.shatter ? 'text-slate-400' : 'text-slate-700'}`}
-        title={material && !material.shatter ? `${material.label} does not shatter. Choose Custom to make it.` : undefined}
+        title={material && !material.shatter ? `${material.label} does not shatter. Choose Custom in Physical Material to make it.` : undefined}
       >
         <input
           type="checkbox"
@@ -246,7 +208,7 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
       {/* ---- Denting ---- */}
       <label
         className={`flex items-center gap-2 text-xs cursor-pointer ${material && !material.dent ? 'text-slate-400' : 'text-slate-700'}`}
-        title={material && !material.dent ? `${material.label} does not dent. Choose Custom to make it.` : undefined}
+        title={material && !material.dent ? `${material.label} does not dent. Choose Custom in Physical Material to make it.` : undefined}
       >
         <input
           type="checkbox"

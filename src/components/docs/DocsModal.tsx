@@ -106,6 +106,35 @@ export function DocsModal({ tab, onTab, onClose }: {
               </div>
             )}
 
+            {tab === 'constraints' && (
+              <div className="flex flex-col gap-4">
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🔗 Constraints &amp; Welds</h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  MuJoCo organizes bodies in a parent-child tree, so joints alone cannot close a kinematic loop (like a four-bar linkage or a bridge truss). Equality constraints tie two independent branches together.
+                </p>
+                <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                  <div className="text-xs">
+                    <strong className="text-slate-700">🔩 Welded To (Rigid 6-DOF Lock)</strong>
+                    <p className="text-slate-500 mt-1">
+                      Locks both position and orientation between this body and another body at their initial relative pose — useful for gluing a handle onto a mug, closing a rigid frame, or holding parts together until overloaded.
+                    </p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">📍 Pinned To (3-DOF Ball Joint)</strong>
+                    <p className="text-slate-500 mt-1">
+                      Holds one shared anchor point fixed between the two bodies while letting them swivel freely about it — ideal for four-bar linkages, pushrods, and suspension arms.
+                    </p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">💔 Shearable Welds</strong>
+                    <p className="text-slate-500 mt-1">
+                      Tick <strong>This weld can shear off</strong> to set a pull limit (N) and optional twist limit (N·m). When solver constraint forces exceed the limit for ~3 ms, the weld releases cleanly during simulation and restores on <strong>Reset</strong> (or via <strong>Restore</strong>).
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {tab === 'collision' && (
               <div className="flex flex-col gap-4">
                 <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">💥 Solid and Ephemeral Bodies</h3>
@@ -156,16 +185,14 @@ export function DocsModal({ tab, onTab, onClose }: {
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">🧱 Materials</strong>
                     <p className="text-slate-500 mt-1">
-                      The <strong>Deformation</strong> card sets shattering and denting
-                      together. Pick a material and it fills in numbers that belong
-                      together, plus the density, so the body weighs what it is made of.
-                      Glass shatters and never dents; steel dents and never shatters;
-                      plastic and wood can do both. A material's breaking point is a
-                      speed, so a glass marble and a glass tabletop both break from the
-                      same drop. Glass, ceramic and stone also care how thick they are
-                      where they are hit, so a wine glass breaks on its thin bowl from a
-                      knock its foot would shrug off. Change any number and the material
-                      becomes Custom.
+                      Picking a material in <strong>Physical Material</strong> sets density,
+                      contact stiffness, acoustic resonance, and the default thresholds for
+                      <strong> Deformation</strong>. Glass shatters and never dents; steel
+                      dents and never shatters; plastic and wood can do both. A material's
+                      breaking point is a speed, so a glass marble and a glass tabletop both
+                      break from the same drop. Glass, ceramic and stone also care how thick
+                      they are where they are hit, so a wine glass breaks on its thin bowl
+                      from a knock its foot would shrug off.
                     </p>
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
@@ -240,6 +267,64 @@ export function DocsModal({ tab, onTab, onClose }: {
                       resolves the overlap. A limit read one step at a time would snap
                       welds that were never really loaded, so the overload has to last a
                       few steps — about 3 ms — before it counts.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {tab === 'water' && (
+              <div className="flex flex-col gap-4">
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">💧 Container Water &amp; Buoyancy</h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Any open-top tank, tub, bowl, or cup can hold its own bounded freshwater without flooding the rest of the scene floor.
+                </p>
+                <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                  <div className="text-xs">
+                    <strong className="text-slate-700">🥣 Bounded Basin Detection</strong>
+                    <p className="text-slate-500 mt-1">When a body has an upward-opening interior cavity, <strong>Container Water</strong> appears automatically. Flipping the switch fills that interior from 5% to 100% of its rim height, and objects inside the horizontal footprint experience Archimedes buoyancy and water drag while objects outside stay dry.</p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">⚓ True 3D Archimedes Buoyancy</strong>
+                    <p className="text-slate-500 mt-1">Submerged volume and the exact 3D <strong>Centre of Buoyancy</strong> are integrated across the waterline every step, producing real righting and capsizing torques — not just an upward force at the centre of mass.</p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">⛵ Open Hulls &amp; Swamping</strong>
+                    <p className="text-slate-500 mt-1">Hollow open-top boats and cups displace the air inside their hull until water tops the gunwale rim; heel past the rim and the vessel swamps and loses its trapped-air buoyancy.</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {tab === 'balance' && (
+              <div className="flex flex-col gap-4">
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⚖️ Balance &amp; Ballast</h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Fixes top-heavy sculptures, wobbling rotors, and capsizing boats internally — without altering their outer silhouette.
+                </p>
+                <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                  <div className="text-xs">
+                    <strong className="text-slate-700">🎯 Centre of Gravity Readout &amp; 3D Marker</strong>
+                    <p className="text-slate-500 mt-1">
+                      The card always shows the part's 3D Centre of Gravity (CoG), height above its base, and margin inside or past the support edge. Toggle <strong>Show CoG</strong> to project a 3D target crosshair, vertical gravity plumb line, and floor support polygon directly onto the part in the viewport.
+                    </p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🧍 Stand, 🔄 Spin, &amp; ⛵ Float</strong>
+                    <p className="text-slate-500 mt-1">
+                      <strong>Stand</strong> shifts the centre of mass inside the floor support polygon so a top-heavy part stands upright. <strong>Spin</strong> aligns the centre of mass onto a hinge axis to eliminate centrifugal wobble. <strong>Float</strong> trims internal buoyancy and keel weight so the part floats upright with positive freeboard.
+                    </p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🕳️ Internal Void + Steel Hex-Nut Ballast</strong>
+                    <p className="text-slate-500 mt-1">
+                      First hollows an internal boolean cavity on the heavy/high side (respecting printable wall thickness), and if needed seats standard metric steel hex nuts (<code className="font-mono">M4–M16</code>) in the base or keel.
+                    </p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🖨️ Print-Ready Hardware</strong>
+                    <p className="text-slate-500 mt-1">
+                      Seated ballast nuts carry their real steel mass in the physics solver and are tallied in <strong>Make → Parts List</strong>, while being omitted from exported STL/3MF meshes so you can pause or press-fit real nuts into the print. Click <strong>Reset</strong> on the card to remove all balance edits.
                     </p>
                   </div>
                 </div>
@@ -419,11 +504,14 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
               <div className="flex flex-col gap-4">
                 <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🧪 Physical Material</h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Every contact is modelled as a stiff <strong>spring-damper</strong>.
-                  These six numbers shape that contact, and together they decide whether a body feels like steel, rubber or ice.
+                  Pick a material preset (Steel, Soft metal, Wood, Plastic, Ceramic, Glass, Stone) to set density, contact physics, and sound resonance together, or fine-tune the six contact spring-damper numbers below.
                 </p>
                 <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                   <div className="text-xs">
+                    <strong className="text-slate-700">🪵 Material Preset &amp; Sound</strong>
+                    <p className="text-slate-500 mt-1">Sets the body's density, contact stiffness/friction, Young's modulus <em>E</em>, and mechanical quality factor <em>Q</em> — so steel rings high and long, wood gives a warm marimba knock, ceramic/glass chime crisply, and plastic lands with a short, muted thud. If shattering, denting or load-breaking are ticked in <strong>Deformation</strong>, their thresholds follow the chosen material.</p>
+                  </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">⏱️ Contact Stiffness (<code className="font-mono">solref[0]</code>)</strong>
                     <p className="text-slate-500 mt-1">The contact spring's <em>time constant</em> in seconds: how long it takes to correct a penetration. <strong>Lower is stiffer.</strong> Keep it at or above 5× the timestep (≈ 0.005 s); going lower makes contacts explosive and jittery.</p>
                   </div>

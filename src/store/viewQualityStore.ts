@@ -34,6 +34,9 @@ interface ViewQualityState {
   /** Draw what the contact solver collides: convex pieces and proxy geoms. Never remembered. */
   showColliders: boolean;
   setShowColliders: (show: boolean) => void;
+  /** Draw the selected body's 3D Centre of Gravity marker, plumb line, and support polygon. Never remembered. */
+  showCenterOfGravity: boolean;
+  setShowCenterOfGravity: (show: boolean) => void;
 }
 
 export const useViewQuality = create<ViewQualityState>((set) => ({
@@ -50,6 +53,8 @@ export const useViewQuality = create<ViewQualityState>((set) => ({
   setPathTrace: (pathTrace) => set({ pathTrace }),
   showColliders: false,
   setShowColliders: (showColliders) => set({ showColliders }),
+  showCenterOfGravity: false,
+  setShowCenterOfGravity: (showCenterOfGravity) => set({ showCenterOfGravity }),
 }));
 
 /**

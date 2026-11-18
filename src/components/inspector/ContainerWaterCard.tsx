@@ -5,6 +5,7 @@ import { useStore } from '../../store/useStore';
 import { measureContainerBasin } from '../../utils/hydrostatics';
 import { RangeInput } from '../RangeInput';
 import { SliderValue } from '../SliderValue';
+import { DocsInfoButton } from '../docs/DocsInfoButton';
 
 /**
  * Container Water card (Physics tab):
@@ -36,6 +37,7 @@ export function ContainerWaterCard({ node }: { node: SceneNode }) {
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
           <Droplets className="w-3.5 h-3.5 text-cyan-500" /> Container Water
+          <DocsInfoButton tab="water" />
         </span>
         <button
           type="button"

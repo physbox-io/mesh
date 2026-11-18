@@ -55,11 +55,19 @@ export interface DentProfile {
   pierceNs?: number;
 }
 
+export interface ContactProfile {
+  solref: [number, number];
+  solimp: [number, number, number, number, number];
+  friction: [number, number, number];
+}
+
 export interface DeformMaterial {
   id: DeformMaterialId;
   label: string;
   /** kg/m3, given to every geom that does not state a mass outright. */
   density: number;
+  /** Contact solver parameters (stiffness, damping/bounciness, impedance, friction). */
+  contact: ContactProfile;
   /** Null: it does not do this. Glass does not dent; steel does not shatter. */
   shatter: ShatterProfile | null;
   dent: DentProfile | null;
@@ -75,6 +83,8 @@ export interface DeformMaterial {
   note: string;
 }
 
+const DEFAULT_SOLIMP = (d0: number): [number, number, number, number, number] => [d0, 0.9999, 0.0001, 0.5, 2];
+
 // Break speeds are a drop onto something hard: glass at 3 m/s is a fall of
 // about half a metre, which is roughly where a tumbler stops surviving the
 // kitchen floor. For the brittle ones that speed is for a wall of
@@ -83,79 +93,88 @@ export interface DeformMaterial {
 // four times the blow soft aluminium does to mark.
 export const DEFORM_MATERIALS: DeformMaterial[] = [
   {
-    id: 'glass', label: 'Glass', density: 2500,
-    shatter: { breakSpeedMs: 3, pieces: 14, pattern: 'radial', depth: 1, spread: 0.4, thicknessRef: 0.006 },
-    dent: null,
-    strength: { flexuralMPa: 50, tensileMPa: 40, modulusGPa: 70 },
-    natural: { shatter: true, dent: false },
-    note: 'A 6 mm wall breaks from a half-metre drop; thinner breaks sooner. Never dents.',
-  },
-  {
-    id: 'ceramic', label: 'Ceramic', density: 2400,
-    shatter: { breakSpeedMs: 3.5, pieces: 8, pattern: 'radial', depth: 1, spread: 0.2, thicknessRef: 0.006 },
-    dent: null,
-    strength: { flexuralMPa: 80, tensileMPa: 40, modulusGPa: 100 },
-    natural: { shatter: true, dent: false },
-    note: 'A little tougher than glass, and breaks into fewer, larger pieces.',
-  },
-  {
-    id: 'stone', label: 'Stone / concrete', density: 2400,
-    shatter: { breakSpeedMs: 8, pieces: 5, pattern: 'uniform', depth: 0, spread: 0, thicknessRef: 0.03 },
-    dent: null,
-    strength: { flexuralMPa: 5, tensileMPa: 3, modulusGPa: 30 },
-    natural: { shatter: true, dent: false },
-    note: 'Takes a real blow, then breaks into a few heavy chunks.',
-  },
-  {
-    id: 'plastic', label: 'Plastic', density: 1100,
-    shatter: { breakSpeedMs: 15, pieces: 4, pattern: 'radial', depth: 0, spread: 0 },
-    dent: { yieldNs: 2, depthPerNs: 0.004, maxDepth: 0.006, pierceNs: 20 },
-    strength: { flexuralMPa: 70, tensileMPa: 45, modulusGPa: 3, ductile: true },
-    natural: { shatter: false, dent: true },
-    note: 'Dents and scuffs. Cracks only when thrown very hard.',
-  },
-  {
-    id: 'softwood', label: 'Softwood', density: 450,
-    shatter: { breakSpeedMs: 9, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
-    dent: { yieldNs: 1, depthPerNs: 0.004, maxDepth: 0.008, pierceNs: 40 },
-    strength: { flexuralMPa: 65, tensileMPa: 40, modulusGPa: 9 },
-    natural: { shatter: false, dent: true },
-    note: 'Pine and the like: marks easily, splits into a few pieces.',
-  },
-  {
-    id: 'hardwood', label: 'Hardwood', density: 750,
-    shatter: { breakSpeedMs: 12, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
-    dent: { yieldNs: 3, depthPerNs: 0.0025, maxDepth: 0.005, pierceNs: 60 },
-    strength: { flexuralMPa: 100, tensileMPa: 60, modulusGPa: 12 },
-    natural: { shatter: false, dent: true },
-    note: 'Oak and the like: three times the blow to mark, and shallower when it does.',
-  },
-  {
-    id: 'softMetal', label: 'Soft metal', density: 2700,
-    shatter: null,
-    dent: { yieldNs: 1.5, depthPerNs: 0.008, maxDepth: 0.015, pierceNs: 25 },
-    strength: { flexuralMPa: 150, tensileMPa: 150, modulusGPa: 69, ductile: true },
-    natural: { shatter: false, dent: true },
-    note: 'Aluminium, copper: dents deep and easily, and can be holed.',
-  },
-  {
     id: 'steel', label: 'Steel', density: 7850,
+    contact: { solref: [0.006, 0.25], solimp: DEFAULT_SOLIMP(0.995), friction: [0.35, 0.003, 0.0001] },
     shatter: null,
     dent: { yieldNs: 6, depthPerNs: 0.002, maxDepth: 0.006, pierceNs: 80 },
     strength: { flexuralMPa: 250, tensileMPa: 250, modulusGPa: 200, ductile: true },
     natural: { shatter: false, dent: true },
-    note: 'Unmarked by anything light. A dropped weight leaves a shallow crater.',
+    note: 'Stiff, heavy, bright ringing sustain. Unmarked by anything light.',
+  },
+  {
+    id: 'softMetal', label: 'Soft metal (Aluminium / Brass)', density: 2700,
+    contact: { solref: [0.008, 0.35], solimp: DEFAULT_SOLIMP(0.992), friction: [0.45, 0.004, 0.0001] },
+    shatter: null,
+    dent: { yieldNs: 1.5, depthPerNs: 0.008, maxDepth: 0.015, pierceNs: 25 },
+    strength: { flexuralMPa: 150, tensileMPa: 150, modulusGPa: 69, ductile: true },
+    natural: { shatter: false, dent: true },
+    note: 'Aluminium, copper, brass: resonant chime, lighter than steel, dents more easily.',
+  },
+  {
+    id: 'hardwood', label: 'Hardwood', density: 750,
+    contact: { solref: [0.014, 0.55], solimp: DEFAULT_SOLIMP(0.99), friction: [0.5, 0.005, 0.0002] },
+    shatter: { breakSpeedMs: 12, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
+    dent: { yieldNs: 3, depthPerNs: 0.0025, maxDepth: 0.005, pierceNs: 60 },
+    strength: { flexuralMPa: 100, tensileMPa: 60, modulusGPa: 12 },
+    natural: { shatter: false, dent: true },
+    note: 'Oak, rosewood, maple: warm marimba-like tone, floats in water, tough.',
+  },
+  {
+    id: 'softwood', label: 'Softwood', density: 450,
+    contact: { solref: [0.018, 0.7], solimp: DEFAULT_SOLIMP(0.985), friction: [0.55, 0.005, 0.0003] },
+    shatter: { breakSpeedMs: 9, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
+    dent: { yieldNs: 1, depthPerNs: 0.004, maxDepth: 0.008, pierceNs: 40 },
+    strength: { flexuralMPa: 65, tensileMPa: 40, modulusGPa: 9 },
+    natural: { shatter: false, dent: true },
+    note: 'Pine, spruce: light soundboard wood with quick, mellow decay.',
+  },
+  {
+    id: 'plastic', label: 'Plastic', density: 1100,
+    contact: { solref: [0.016, 0.45], solimp: DEFAULT_SOLIMP(0.985), friction: [0.4, 0.004, 0.0002] },
+    shatter: { breakSpeedMs: 15, pieces: 4, pattern: 'radial', depth: 0, spread: 0 },
+    dent: { yieldNs: 2, depthPerNs: 0.004, maxDepth: 0.006, pierceNs: 20 },
+    strength: { flexuralMPa: 70, tensileMPa: 45, modulusGPa: 3, ductile: true },
+    natural: { shatter: false, dent: true },
+    note: 'ABS / nylon polymer: muted, short-decay knock and lower pitch.',
+  },
+  {
+    id: 'ceramic', label: 'Ceramic', density: 2400,
+    contact: { solref: [0.007, 0.3], solimp: DEFAULT_SOLIMP(0.995), friction: [0.4, 0.003, 0.0001] },
+    shatter: { breakSpeedMs: 3.5, pieces: 8, pattern: 'radial', depth: 1, spread: 0.2, thicknessRef: 0.006 },
+    dent: null,
+    strength: { flexuralMPa: 80, tensileMPa: 40, modulusGPa: 100 },
+    natural: { shatter: true, dent: false },
+    note: 'Porcelain, terracotta: crisp, bright ring; brittle if shattering is enabled.',
+  },
+  {
+    id: 'glass', label: 'Glass', density: 2500,
+    contact: { solref: [0.006, 0.22], solimp: DEFAULT_SOLIMP(0.995), friction: [0.25, 0.002, 0.0001] },
+    shatter: { breakSpeedMs: 3, pieces: 14, pattern: 'radial', depth: 1, spread: 0.4, thicknessRef: 0.006 },
+    dent: null,
+    strength: { flexuralMPa: 50, tensileMPa: 40, modulusGPa: 70 },
+    natural: { shatter: true, dent: false },
+    note: 'Clear, glassy chime and smooth surface; shatters easily if shattering is enabled.',
+  },
+  {
+    id: 'stone', label: 'Stone / concrete', density: 2400,
+    contact: { solref: [0.008, 0.75], solimp: DEFAULT_SOLIMP(0.994), friction: [0.75, 0.006, 0.0003] },
+    shatter: { breakSpeedMs: 8, pieces: 5, pattern: 'uniform', depth: 0, spread: 0, thicknessRef: 0.03 },
+    dent: null,
+    strength: { flexuralMPa: 5, tensileMPa: 3, modulusGPa: 30 },
+    natural: { shatter: true, dent: false },
+    note: 'Dense, rough, low-bounce stony clack.',
   },
   {
     // Dry spaghetti: the classroom tower-and-bridge material. Strength and
     // stiffness are for a 1.8 mm strand, which a 100 mm length buckles under
     // about 2 N and a 6 g weight at the middle of a 200 mm span snaps.
     id: 'pasta', label: 'Dry pasta', density: 1450,
+    contact: { solref: [0.015, 0.65], solimp: DEFAULT_SOLIMP(0.985), friction: [0.45, 0.004, 0.0002] },
     shatter: { breakSpeedMs: 5, pieces: 3, pattern: 'uniform', depth: 0, spread: 0 },
     dent: null,
     strength: { flexuralMPa: 20, tensileMPa: 15, modulusGPa: 4 },
     natural: { shatter: false, dent: false, load: true },
-    note: 'Dry spaghetti: snaps when bent and buckles when pushed end-on, long before it pulls apart.',
+    note: 'Dry spaghetti: crisp snap when bent and buckles when pushed end-on.',
   },
 ];
 
@@ -301,6 +320,66 @@ export function materialUpdates(
   nodeUpdates.loadStrength = load ? { ...material.strength } : undefined;
 
   return { node: nodeUpdates, geoms, shatter, dent, load };
+}
+
+/**
+ * Applies a physical material preset from the Physical Material card:
+ * sets `deformMaterial` (used by modal sound synthesis for Young's modulus E,
+ * density, quality factor Q, and brightness), updates density on un-weighed
+ * geoms, sets contact solver properties (`solref`, `solimp`, `friction`) on
+ * the active geom, and syncs any *already-enabled* deformation behaviours
+ * without forcing shattering or dent mesh conversion on plain bodies.
+ */
+export function physicalMaterialUpdates(
+  node: SceneNode,
+  material: DeformMaterial,
+  activeGeomIndex: number,
+): {
+  node: Partial<SceneNode>;
+  geoms: Record<number, Partial<SceneGeom>>;
+} {
+  const geoms: Record<number, Partial<SceneGeom>> = {};
+  (node.geoms || []).forEach((g, i) => {
+    if (massive(g) && typeof g.mass !== 'number') {
+      geoms[i] = { density: material.density };
+    }
+    if (typeof g.dentYieldNs === 'number' && g.dentYieldNs > 0) {
+      geoms[i] = {
+        ...geoms[i],
+        ...(material.dent ? dentFields(material.dent) : { dentYieldNs: undefined }),
+      };
+    }
+  });
+
+  const activeGeom = (node.geoms || [])[activeGeomIndex];
+  if (activeGeom && activeGeom.role !== 'visual' && activeGeom.csg !== 'difference') {
+    geoms[activeGeomIndex] = {
+      ...geoms[activeGeomIndex],
+      solref: [...material.contact.solref] as [number, number],
+      solimp: [...material.contact.solimp] as [number, number, number, number, number],
+      friction: [...material.contact.friction] as [number, number, number],
+    };
+  }
+
+  const weighed: SceneNode = {
+    ...node,
+    geoms: (node.geoms || []).map((g, i) => (geoms[i] ? { ...g, ...geoms[i] } : g)),
+  };
+
+  const nodeUpdates: Partial<SceneNode> = { deformMaterial: material.id };
+  const shatterOn = typeof node.shatterImpulseNs === 'number' && node.shatterImpulseNs > 0;
+  if (shatterOn) {
+    if (material.shatter) {
+      Object.assign(nodeUpdates, shatterFields(material.shatter, estimateBodyMass(weighed)));
+    } else {
+      nodeUpdates.shatterImpulseNs = undefined;
+    }
+  }
+  if (node.loadStrength !== undefined) {
+    nodeUpdates.loadStrength = { ...material.strength };
+  }
+
+  return { node: nodeUpdates, geoms };
 }
 
 /**

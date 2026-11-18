@@ -10,12 +10,15 @@ export const DOCS_TABS = [
     { id: 'material', label: '🧪 Physical Material' },
     { id: 'friction', label: '🛷 Friction Controls' },
     { id: 'breaking', label: '💔 Breaking & Denting' },
+    { id: 'water', label: '💧 Container Water' },
+    { id: 'balance', label: '⚖️ Balance & Ballast' },
   ]},
   { group: 'Bodies & Joints', items: [
     { id: 'launch', label: '🚀 Launch Velocity' },
     { id: 'damping', label: '🔗 Joint Damping' },
     { id: 'springs', label: '🌸 Springs & Limits' },
     { id: 'coupling', label: '⚙️ Joint Coupling' },
+    { id: 'constraints', label: '🔗 Constraints & Welds' },
   ]},
   { group: 'Geometry', items: [
     { id: 'resize', label: '📏 Resize Component' },

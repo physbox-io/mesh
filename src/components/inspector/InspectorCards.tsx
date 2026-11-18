@@ -120,7 +120,6 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
 
       {tab === 'physics' && (
         <>
-          <ContainerWaterCard node={node} />
           <AerodynamicsCard node={node} />
           <GeomPropertiesCard node={node} part="physics" />
           <JointTypeCard node={node} />
@@ -133,6 +132,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
           <CollisionCard node={node} />
           <PulleyWheelCard node={node} />
           <RopeCard node={node} />
+          <ContainerWaterCard node={node} />
           <BalanceCard node={node} />
         </>
       )}

@@ -1,11 +1,27 @@
 import { useStore } from '../../store/useStore';
 import type { SceneGeom, SceneNode } from '../../types/scene';
+import { DEFORM_MATERIALS, deformMaterial, physicalMaterialUpdates } from '../../utils/deformMaterials';
 import { RangeInput } from '../RangeInput';
 import { DocsInfoButton } from '../docs/DocsInfoButton';
 
 /** Material Properties Card */
 export function MaterialCard({ node, geom, activeIndex }: { node: SceneNode; geom: SceneGeom; activeIndex: number }) {
+  const updateNode = useStore((s) => s.updateNode);
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
+  const material = deformMaterial(node.deformMaterial);
+
+  const pickMaterial = (id: string) => {
+    const m = deformMaterial(id);
+    if (!m) {
+      updateNode(node.id, { deformMaterial: id === 'custom' ? 'custom' : undefined });
+      return;
+    }
+    const r = physicalMaterialUpdates(node, m, activeIndex);
+    for (const [i, u] of Object.entries(r.geoms)) {
+      updateNodeGeom(node.id, u, Number(i));
+    }
+    updateNode(node.id, r.node);
+  };
 
   return (
     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
@@ -14,11 +30,34 @@ export function MaterialCard({ node, geom, activeIndex }: { node: SceneNode; geo
         <DocsInfoButton tab="material" />
       </h3>
 
+      {/* Material Preset Selector (density, contact, sound resonance, deformation defaults) */}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <label className="text-xs font-semibold text-slate-500 w-16 shrink-0">Material</label>
+          <select
+            value={material?.id ?? 'custom'}
+            onChange={(e) => pickMaterial(e.target.value)}
+            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
+            title="Sets density, contact stiffness/friction, and acoustic resonance (pitch & sustain)."
+          >
+            <option value="custom">Custom</option>
+            {DEFORM_MATERIALS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        </div>
+        {material && (
+          <span className="text-[10px] text-slate-400 leading-snug">
+            {material.note} ({material.density} kg/m³ · E = {material.strength.modulusGPa} GPa)
+          </span>
+        )}
+      </div>
+
       {/* Contact spring timeconst — solref[0] */}
       {(() => {
         const val = geom.solref ? Math.max(0.001, geom.solref[0]) : 0.02;
         return (
-          <div className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5 mt-1 border-t border-slate-100 pt-2">
             <label className="text-xs font-semibold text-slate-500 flex justify-between">
               Contact Stiffness <span className="text-[10px] font-normal text-slate-400">solref[0]</span>
               <span className="text-blue-600 font-bold">{val.toFixed(3)}s</span>

@@ -3,6 +3,7 @@ import { useStore } from '../../store/useStore';
 import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from '../../utils/breakThresholds';
 import type { SceneNode } from '../../types/scene';
 import { SettledNumberInput } from '../SettledInputs';
+import { DocsInfoButton } from '../docs/DocsInfoButton';
 
 /*
  * Constraints — welding one body to another, and what it takes to
@@ -47,6 +48,7 @@ export function ConstraintsCard({ node }: { node: SceneNode }) {
     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
       <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
         <Link2 className="w-3.5 h-3.5 text-indigo-500" /> Constraints
+        <DocsInfoButton tab="constraints" />
         {isBroken && <span className="ml-auto text-[10px] font-semibold text-amber-600">broken</span>}
       </h3>
 

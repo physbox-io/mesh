@@ -37,6 +37,7 @@ import { SectionCut } from './SectionCut';
 import { EdgeRoundTool } from './EdgeRoundTool';
 import { ReferenceImages } from './ReferenceImages';
 import { WaterSurface } from './WaterSurface';
+import { CenterOfGravityOverlay } from './CenterOfGravityOverlay';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
   SceneCapture, SceneVisuals,
@@ -264,6 +265,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       {!cleanCapture && <TransformGizmo />}
       {!cleanCapture && <MeasureTool />}
       {!cleanCapture && <DimensionOverlay />}
+      {!cleanCapture && <CenterOfGravityOverlay />}
       <SectionCut />
       {!cleanCapture && <EdgeRoundTool />}
 
