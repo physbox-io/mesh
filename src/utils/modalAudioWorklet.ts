@@ -91,7 +91,8 @@ type AudioContextWithWindGraph = AudioContext & {
   __physboxWindWaveguideV9?: LegacyWindGraphState;
   __physboxNativeWindV10?: LegacyWindGraphState;
   __physboxNativeWindV11?: LegacyWindGraphState;
-  __physboxNativeWindV12?: NativeWindBankState;
+  __physboxNativeWindV12?: LegacyWindGraphState;
+  __physboxNativeWindV13?: NativeWindBankState;
 };
 
 function buildExciterCurves(): Record<ShaperKind, Float32Array<ArrayBuffer>> {
@@ -140,27 +141,27 @@ function buildExciterCurves(): Record<ShaperKind, Float32Array<ArrayBuffer>> {
   };
 }
 
-/** Synthesizes a natural, warm 1.05s stereo studio-chamber / recital-stage impulse response. */
+/** Synthesizes a tight, natural 0.68s stereo studio-room impulse response (subtle presence, non-cathedral). */
 function buildStudioChamberIR(ctx: AudioContext): AudioBuffer {
   const sr = ctx.sampleRate || 48000;
-  const dur = 1.05;
+  const dur = 0.68;
   const len = Math.floor(sr * dur);
   const ir = ctx.createBuffer(2, len, sr);
   const left = ir.getChannelData(0);
   const right = ir.getChannelData(1);
 
-  // Decorrelated early stage reflections (12..54 ms) for realistic 3D instrument presence
+  // Decorrelated early stage reflections (11..44 ms) for realistic 3D instrument presence
   const earlyL: [number, number][] = [
-    [0.011, 0.34],
-    [0.019, -0.24],
-    [0.031, 0.19],
-    [0.047, 0.14],
+    [0.011, 0.30],
+    [0.019, -0.20],
+    [0.029, 0.14],
+    [0.042, 0.10],
   ];
   const earlyR: [number, number][] = [
-    [0.014, 0.32],
-    [0.023, -0.25],
-    [0.036, 0.18],
-    [0.053, 0.13],
+    [0.014, 0.28],
+    [0.022, -0.21],
+    [0.033, 0.14],
+    [0.046, 0.09],
   ];
   for (const [tSec, amp] of earlyL) {
     const idx = Math.floor(tSec * sr);
@@ -171,27 +172,27 @@ function buildStudioChamberIR(ctx: AudioContext): AudioBuffer {
     if (idx < len) right[idx] += amp;
   }
 
-  // Smoothly damped diffuse wooden recital-room tail (air absorption lowpass + low-mud cut)
+  // Tightly damped wooden studio-room tail (air absorption lowpass + low-mud cut)
   let seedL = 0x2468ace1;
   let seedR = 0x9e3779b9;
   let lpL = 0, lpR = 0;
   let hpL = 0, hpR = 0;
   for (let i = Math.floor(0.010 * sr); i < len; i++) {
     const t = i / sr;
-    const env = Math.exp(-t / 0.28) * (1 - Math.exp(-t / 0.018));
+    const env = Math.exp(-t / 0.18) * (1 - Math.exp(-t / 0.015));
     seedL = (Math.imul(seedL, 1664525) + 1013904223) | 0;
     seedR = (Math.imul(seedR, 22695477) + 1) | 0;
     const wL = seedL / 2147483648;
     const wR = seedR / 2147483648;
     // Progressive high-frequency wall absorption
-    const damp = 0.34 * Math.exp(-t * 1.4) + 0.08;
+    const damp = 0.34 * Math.exp(-t * 1.8) + 0.08;
     lpL += damp * (wL - lpL);
     lpR += damp * (wR - lpR);
     // Gentle 130 Hz highpass so room tail stays airy and clear
     hpL += 0.018 * (lpL - hpL);
     hpR += 0.018 * (lpR - hpR);
-    left[i] += (lpL - hpL) * env * 0.26;
-    right[i] += (lpR - hpR) * env * 0.26;
+    left[i] += (lpL - hpL) * env * 0.22;
+    right[i] += (lpR - hpR) * env * 0.22;
   }
 
   return ir;
@@ -213,6 +214,7 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
     '__physboxWindWaveguideV9',
     '__physboxNativeWindV10',
     '__physboxNativeWindV11',
+    '__physboxNativeWindV12',
   ] as const) {
     const prev = c[oldKey];
     if (prev) {
@@ -234,7 +236,7 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
 function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  if (c.__physboxNativeWindV12) return c.__physboxNativeWindV12;
+  if (c.__physboxNativeWindV13) return c.__physboxNativeWindV13;
   if (typeof ctx.createOscillator !== 'function' || typeof ctx.createWaveShaper !== 'function') {
     return null;
   }
@@ -253,9 +255,9 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
   presenceShelf.gain.setValueAtTime(2.6, now);
 
   const dryGain = ctx.createGain();
-  dryGain.gain.setValueAtTime(0.86, now);
+  dryGain.gain.setValueAtTime(0.90, now);
   const wetGain = ctx.createGain();
-  wetGain.gain.setValueAtTime(0.28, now);
+  wetGain.gain.setValueAtTime(0.13, now);
 
   masterGain.connect(presenceShelf);
   presenceShelf.connect(dryGain);
@@ -388,7 +390,7 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
     slots,
     curves,
   };
-  c.__physboxNativeWindV12 = bank;
+  c.__physboxNativeWindV13 = bank;
   return bank;
 }
 
@@ -499,7 +501,7 @@ export function postWorkletWindSilence(ctx: AudioContext | null): void {
   if (!ctx) return;
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  const bank = c.__physboxNativeWindV12;
+  const bank = c.__physboxNativeWindV13;
   if (!bank) return;
   const now = ctx.currentTime;
   for (const slot of bank.slots) {
