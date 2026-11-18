@@ -986,7 +986,7 @@ function upwardFlats(wasm: ManifoldToplevel, m: Manifold, minAreaMm2 = 1): Array
     const len = Math.hypot(nx, ny, nz);
     if (len < 1e-12 || nz / len < 0.999) continue;
     const z = Math.round(((p[a + 2] + p[b + 2] + p[c + 2]) / 3) * 100) / 100;
-    if (z >= -ROOF_LAYER_MM) continue;
+    if (z >= -0.05) continue;
     let entry = byZ.get(z);
     if (!entry) {
       entry = { area: 0, polys: [] };

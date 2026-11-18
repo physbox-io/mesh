@@ -197,7 +197,7 @@ describe('PVA-lined mold', () => {
     expect(model.match(/<mesh>/g)).toHaveLength(4);
     expect(bambu.match(/<part id="\d+" subtype="normal_part">/g)).toHaveLength(4);
     expect(bambu.match(/key="extruder" value="2"/g)).toHaveLength(2);
-    expect(prusa.match(/<object id="\d+"/g)).toHaveLength(4);
+    expect(prusa.match(/<object id="\d+"/g)).toHaveLength(2);
     expect(prusa.match(/type="volume" key="extruder" value="2"/g)).toHaveLength(2);
   });
 
@@ -266,7 +266,9 @@ describe('3MF assemblies', () => {
     expect(bambu).toContain('<object id="3">');
     expect(bambu).toMatch(/<part id="2" subtype="normal_part">\s*<metadata key="name" value="liner"\/>\s*<metadata key="extruder" value="2"\/>/);
     const prusa = strFromU8(files['Metadata/Slic3r_PE_model.config']);
-    expect(prusa).toMatch(/<object id="2" instances_count="1">[\s\S]*?<volume firstid="0" lastid="3">/);
+    expect(prusa).toMatch(
+      /<object id="3" instances_count="1">[\s\S]*?<volume firstid="0" lastid="3">[\s\S]*?key="extruder" value="1"[\s\S]*?<volume firstid="4" lastid="7">[\s\S]*?key="extruder" value="2"/,
+    );
     expect(strFromU8(files['[Content_Types].xml'])).toContain('Extension="config"');
   });
 });
