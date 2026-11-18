@@ -468,11 +468,15 @@ export function collarPieces(collar: GarmentCollar, run0: number[], closed: bool
       }
     }
     const S = sub(top, p);
-    let out = h > 0 ? unit(cross(t, S)) : rhat;
-    if (dot(out, rhat) < 0) out = out.map((v) => -v);
     const nP = onSurface(p).n;
     let away = unit(cross(nP, t));
     if (dot(away, offNeck(i) ?? sub(rhat, [0, 0, 1])) < 0) away = away.map((v) => -v);
+    // The stand's outside: the side the fall comes down on, toward where it
+    // then lies over the garment. (Taken as away from the neck's axis, it was
+    // a guess along a gorge, which runs out from the neck: the stand there
+    // faces round the neck, and the fall was folded down its inside, through it.)
+    let out = h > 0 ? unit(cross(t, S)) : rhat;
+    if (dot(out, h > 0 ? away : rhat) < 0) out = out.map((v) => -v);
     // Toward the nearer end; how much of the corner shaping reaches here.
     const fromEnd = Math.min(arc[i], total - arc[i]), endward = arc[i] < total / 2 ? -1 : 1;
     const reach = Math.max(0, 1 - fromEnd / Lb);
