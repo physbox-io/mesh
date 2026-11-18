@@ -737,8 +737,8 @@ Four printable compliant joints doing real jobs on one bench, each run by real a
 
 Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed synthesis** running at 48 kHz (~0.15% CPU):
 
-1. **Grenadilla & Silver Clarinet** (front, seconds 0–4.4): cylindrical bore ($\\lambda = 4L$, warm woody odd harmonics $f, 3f, 5f$) with four articulated silver pad keys uncovering tonehole shunts along the bore.
-2. **Folded 3-Valve Spun-Brass Cornet** (back, seconds 4.5–8.9): continuous folded brass tubing flaring into a Ø112 mm Bessel bell, with three mother-of-pearl piston valves switching semitone tubing loops ($-2, -1, -3$ st) for a noble brass fanfare!
+1. **Grenadilla & Silver Clarinet** (front, bars 1–4): cylindrical bore ($\\lambda = 4L$, warm woody odd harmonics $f, 3f, 5f$) with four articulated silver pad keys playing the opening phrase of Beethoven's ***Ode to Joy*** ($G_3$–$D_4$).
+2. **Folded 3-Valve Spun-Brass Cornet** (back, bars 5–8): continuous folded brass tubing flaring into a Ø112 mm Bessel bell, with three mother-of-pearl piston valves ($-2, -1, -3$ st) answering ***Ode to Joy*** an octave higher ($G_4$–$D_5$)!
 
 ## Try it
 - Turn on **Sound** in **⚙️ Environment** (top right) and press **Run**

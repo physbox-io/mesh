@@ -372,37 +372,39 @@ export const windInstrumentsPreset: SceneGraph = (() => {
       breathKPa: 0,
       embouchureHz: 260,
       toneholeJoints: [
-        { jointName: 'clarinet_key_1', axialFraction: 0.578, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_2', axialFraction: 0.652, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_3', axialFraction: 0.781, diameterMm: 11.0 },
-        { jointName: 'clarinet_key_4', axialFraction: 0.880, diameterMm: 11.5 },
+        { jointName: 'clarinet_key_1', axialFraction: 0.6522, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_2', axialFraction: 0.7354, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_3', axialFraction: 0.7808, diameterMm: 11.0 },
+        { jointName: 'clarinet_key_4', axialFraction: 0.8798, diameterMm: 11.5 },
       ],
     },
-    script: `// Seconds 0.0 .. 4.4 of each 9s duet cycle: warm woody G-major chalumeau melody with real keywork fingerings!
-const tCycle = api.getTime() % 9.0;
-if (tCycle < 4.4) {
-  // 7 lyrical notes in G major pentatonic (G3, A3, B3, D4, E4, B3, G3):
-  const phrases = [
-    // [durSec, openKeysMask (bit0=key1..bit3=key4), breathKPa]
-    [0.62, 0b0000, 2.9], // G3 (196.0 Hz — all pads sealed)
-    [0.60, 0b1000, 3.0], // A3 (220.0 Hz — key 4 open)
-    [0.60, 0b1100, 3.1], // B3 (246.9 Hz — keys 3,4 open)
-    [0.62, 0b1110, 3.2], // D4 (293.7 Hz — keys 2,3,4 open)
-    [0.64, 0b1111, 3.3], // E4 (329.6 Hz — all 4 keys open)
-    [0.56, 0b1100, 3.0], // B3 (246.9 Hz — keys 3,4 open)
-    [0.76, 0b0000, 2.8], // G3 (196.0 Hz — warm tonic cadence)
+    script: `// Beethoven — "Ode to Joy" (Phrase 1 on Clarinet in G major, plus low G3 octave pedal on final cadence!)
+// 5 chalumeau fingerings: 0b0000=G3, 0b1000=A3, 0b1100=B3, 0b1110=C4, 0b1111=D4
+const beatSec = 0.40;
+const tCycle = api.getTime() % 13.0;
+if (tCycle < 6.40) {
+  const score = [
+    // Bar 1: B3 - B3 - C4 - D4
+    [1.0, 0b1100, 3.0], [1.0, 0b1100, 3.0], [1.0, 0b1110, 3.1], [1.0, 0b1111, 3.2],
+    // Bar 2: D4 - C4 - B3 - A3
+    [1.0, 0b1111, 3.2], [1.0, 0b1110, 3.1], [1.0, 0b1100, 3.0], [1.0, 0b1000, 2.9],
+    // Bar 3: G3 - G3 - A3 - B3
+    [1.0, 0b0000, 2.9], [1.0, 0b0000, 2.9], [1.0, 0b1000, 3.0], [1.0, 0b1100, 3.1],
+    // Bar 4: B3. - A3 - A3 (half)
+    [1.5, 0b1100, 3.1], [0.5, 0b1000, 2.9], [2.0, 0b1000, 2.9],
   ];
   let cursor = 0;
   let mask = 0;
   let env = 0;
-  for (let i = 0; i < phrases.length; i++) {
-    const dur = phrases[i][0];
+  for (let i = 0; i < score.length; i++) {
+    const dur = score[i][0] * beatSec;
     if (tCycle >= cursor && tCycle < cursor + dur) {
-      const u = (tCycle - cursor) / dur;
-      // Keys move during the brief 4% tongued break so pads are seated cleanly before breath rises!
-      const tongue = u < 0.045 ? 0 : u < 0.12 ? (u - 0.045) / 0.075 : u > 0.90 ? (1 - u) / 0.10 : 1.0;
-      env = phrases[i][2] * tongue;
-      mask = phrases[i][1];
+      const dt = tCycle - cursor;
+      const gapEnd = dur - 0.068;
+      // Pads seat in first 22 ms; crisp 68 ms tongued silence at end of each note separates repeated pitches ("B-B", "D-D", "G-G")!
+      const tongue = dt < 0.022 ? 0 : dt < 0.055 ? (dt - 0.022) / 0.033 : dt > gapEnd ? Math.max(0, (dur - dt) / 0.025 - 1.7) : 1.0;
+      env = score[i][2] * Math.max(0, Math.min(1, tongue));
+      mask = score[i][1];
       break;
     }
     cursor += dur;
@@ -413,6 +415,12 @@ if (tCycle < 4.4) {
   if (mask & 2) api.applyJointForce('clarinet_key_2', 0.65);
   if (mask & 4) api.applyJointForce('clarinet_key_3', 0.65);
   if (mask & 8) api.applyJointForce('clarinet_key_4', 0.65);
+} else if (tCycle >= 12.10 && tCycle < 12.82) {
+  // Warm low G3 tonic harmony under the cornet's final G4 cadence!
+  const u = (tCycle - 12.10) / 0.72;
+  const tongue = u < 0.08 ? u / 0.08 : u > 0.85 ? (1 - u) / 0.15 : 1.0;
+  const st = api.state || (api.state = {});
+  st.breathKPa = 2.4 * tongue;
 } else {
   const st = api.state || (api.state = {});
   st.breathKPa = 0;
@@ -481,35 +489,37 @@ if (tCycle < 4.4) {
         { jointName: 'cornet_valve_3', semitones: 3, strokeM: 0.013 },
       ],
     },
-    script: `// Seconds 4.5 .. 8.9 of each 9s duet cycle: G-major brass fanfare answering the clarinet an octave higher!
-const tCycle = api.getTime() % 9.0;
-if (tCycle >= 4.5 && tCycle < 8.9) {
-  const dt = tCycle - 4.5;
-  // Exact natural harmonics of the 0.8573 m G3 horn + real 3-piston semitone valve combinations:
-  //   G4 (392.0 Hz): Open (0-0-0), mode n=2
-  //   A4 (440.0 Hz): Valves 1+3 (-5 st), mode n=3
-  //   B4 (493.9 Hz): Valves 1+2 (-3 st), mode n=3
-  //   D5 (587.3 Hz): Open (0-0-0), mode n=3
+    script: `// Beethoven — "Ode to Joy" (Phrase 2 answered an octave higher on 3-Valve Brass Cornet!)
+// Authentic 3-piston brass fingerings on G3 horn:
+//   G4 (392 Hz): Open (0b000), n=2   | A4 (440 Hz): Valves 1+3 (0b101), n=3
+//   B4 (494 Hz): Valves 1+2 (0b011)  | C5 (523 Hz): Valve 1 (0b001), n=3
+//   D5 (587 Hz): Open (0b000), n=3
+const beatSec = 0.40;
+const tCycle = api.getTime() % 13.0;
+if (tCycle >= 6.50 && tCycle < 12.90) {
+  const tLocal = tCycle - 6.50;
   const fanfare = [
-    [0.58, 392, 0b000, 2.9], // G4  (Open)
-    [0.58, 494, 0b011, 3.1], // B4  (Valves 1+2)
-    [0.62, 587, 0b000, 3.3], // D5  (Open)
-    [0.55, 494, 0b011, 3.0], // B4  (Valves 1+2)
-    [0.55, 440, 0b101, 2.9], // A4  (Valves 1+3)
-    [0.55, 494, 0b011, 3.0], // B4  (Valves 1+2)
-    [0.97, 392, 0b000, 2.8], // G4  (Warm sustained resolve)
+    // Bar 5: B4 - B4 - C5 - D5
+    [1.0, 494, 0b011, 3.0], [1.0, 494, 0b011, 3.0], [1.0, 523, 0b001, 3.1], [1.0, 587, 0b000, 3.3],
+    // Bar 6: D5 - C5 - B4 - A4
+    [1.0, 587, 0b000, 3.3], [1.0, 523, 0b001, 3.1], [1.0, 494, 0b011, 3.0], [1.0, 440, 0b101, 2.9],
+    // Bar 7: G4 - G4 - A4 - B4
+    [1.0, 392, 0b000, 2.9], [1.0, 392, 0b000, 2.9], [1.0, 440, 0b101, 3.0], [1.0, 494, 0b011, 3.1],
+    // Bar 8: A4. - G4 - G4 (resolved tonic!)
+    [1.5, 440, 0b101, 3.0], [0.5, 392, 0b000, 2.9], [2.0, 392, 0b000, 3.0],
   ];
   let cursor = 0;
   let vMask = 0;
   let breath = 0;
   let lipHz = 392;
   for (let i = 0; i < fanfare.length; i++) {
-    const dur = fanfare[i][0];
-    if (dt >= cursor && dt < cursor + dur) {
-      const u = (dt - cursor) / dur;
-      // Pistons seat during the brief 4.5% tongued gap before breath rises so valved notes never scoop!
-      const tongue = u < 0.045 ? 0 : u < 0.13 ? (u - 0.045) / 0.085 : u > 0.88 ? (1 - u) / 0.12 : 1.0;
-      breath = fanfare[i][3] * tongue;
+    const dur = fanfare[i][0] * beatSec;
+    if (tLocal >= cursor && tLocal < cursor + dur) {
+      const dt = tLocal - cursor;
+      const gapEnd = dur - 0.068;
+      // Pistons seat in first 22 ms; crisp 68 ms tonguing break cleanly articulates repeated notes ("B-B", "D-D", "G-G")!
+      const tongue = dt < 0.022 ? 0 : dt < 0.055 ? (dt - 0.022) / 0.033 : dt > gapEnd ? Math.max(0, (dur - dt) / 0.025 - 1.7) : 1.0;
+      breath = fanfare[i][3] * Math.max(0, Math.min(1, tongue));
       lipHz = fanfare[i][1];
       vMask = fanfare[i][2];
       break;

@@ -513,17 +513,17 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       return box.size[1];
     }
 
-    // 3. Step windInstrumentsPreset across both Clarinet (0..4.4s) and 3-Valve Cornet (4.5..5.6s) phrases!
+    // 3. Step windInstrumentsPreset across both Clarinet (0..6.4s) and 3-Valve Cornet (6.5..7.5s) "Ode to Joy" phrases!
     const simWind = await simulate(windInstrumentsPreset);
     try {
       let maxClarKey = 0;
       let maxCornetValve = 0;
-      for (let step = 0; step < 5600; step++) {
+      for (let step = 0; step < 7200; step++) {
         simWind.step(1);
         maxClarKey = Math.max(maxClarKey, simWind.jointPos('clarinet_key_4'));
         maxCornetValve = Math.max(maxCornetValve, simWind.jointPos('cornet_valve_1'));
       }
-      expect(simWind.time()).toBeGreaterThan(5.5);
+      expect(simWind.time()).toBeGreaterThan(7.0);
       expect(maxClarKey).toBeGreaterThan(0.08);
       expect(maxCornetValve).toBeGreaterThan(0.005);
     } finally {
@@ -578,13 +578,13 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       simGlock.dispose();
     }
 
-    // 5. Verify generic bore mode-slotting produces exact concert G-major pitches (<= 5 cents) on Clarinet & Cornet!
+    // 5. Verify generic bore mode-slotting produces exact concert "Ode to Joy" G-major pitches (<= 5 cents) on Clarinet & Cornet!
     const clarCases: [Record<string, number>, string][] = [
       [{}, 'G3'],
       [{ clarinet_key_4: 0.25 }, 'A3'],
       [{ clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'B3'],
-      [{ clarinet_key_2: 0.25, clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'D4'],
-      [{ clarinet_key_1: 0.25, clarinet_key_2: 0.25, clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'E4'],
+      [{ clarinet_key_2: 0.25, clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'C4'],
+      [{ clarinet_key_1: 0.25, clarinet_key_2: 0.25, clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'D4'],
     ];
     for (const [jPos, expectedNote] of clarCases) {
       const bore = extractBoreWaveguide(clarinetNode, jPos)!;
@@ -599,6 +599,7 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       [{}, 392, 'G4'],
       [{ cornet_valve_1: 0.013, cornet_valve_3: 0.013 }, 440, 'A4'],
       [{ cornet_valve_1: 0.013, cornet_valve_2: 0.013 }, 494, 'B4'],
+      [{ cornet_valve_1: 0.013 }, 523, 'C5'],
       [{}, 587, 'D5'],
     ];
     for (const [jPos, lipHz, expectedNote] of cornetCases) {
