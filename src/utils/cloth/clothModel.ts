@@ -1030,6 +1030,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       const particleOf = (local: number) => sharedAt.get(local) ?? own.get(local)!;
       placed.set(piece.name, particleOf);
       if (sharedAt.size) anyShared = true;
+      // Tacked onto an earlier add-on (a belt over a pocket): its points, as particles now.
+      piece.tacks = piece.tacks.map((tk) => { const on = tk.onPiece ? placed.get(tk.onPiece) : undefined; return on ? { ...tk, tri: [on(tk.tri[0]), on(tk.tri[1]), on(tk.tri[2])], onPiece: undefined } : tk; });
       const pm = { ...(CLOTH_MATERIALS[piece.material ?? materialName] ?? material), ...(piece.materialOverrides ?? {}) };
       const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bend = (pm.young * pm.thickness ** 3) / (material.young * material.thickness ** 3);
       if ((pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS) boards.push({ particles: piece.uv.map((_, i) => particleOf(i)), rest: piece.rest3 ?? piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]), tris: piece.tris, held: [...piece.tacks.map((tk) => tk.local), ...(piece.shared ?? []).map((sh) => sh.local)] });

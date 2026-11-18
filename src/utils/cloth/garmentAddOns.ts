@@ -33,6 +33,12 @@ export interface AddOnTack {
   offset: number;
   /** Free to lift further off (held from sliding, and from sinking under `offset`). */
   lift: boolean;
+  /**
+   * On an add-on made before this one (by name), not on the garment: `tri`
+   * is then that piece's local points (a belt over a pocket rests on the
+   * pocket, and draws it in with the cloth under it).
+   */
+  onPiece?: string;
 }
 
 export interface AddOnPiece {
@@ -159,12 +165,12 @@ function hostEdge(panel: HostPanel, u0: number, v0: number, u1: number, v1: numb
 }
 
 /**
- * How far out from the garment, along `n` from `pos`, the add-ons already on
- * it lie there (0 where none does): one sewn on over another (a belt loop
- * over a pocket's top) stacks on it rather than being sewn through it.
+ * The add-on already on the garment lying furthest out along `n` from `pos`
+ * (within 3 cm), if any: which piece, its triangle (local points, wound to
+ * face along `n`), where on it, and how far out.
  */
-export function heightOver(pos: V3, n: V3, below: AddOnPiece[]): number {
-  let top = 0;
+export function topOver(pos: V3, n: V3, below: AddOnPiece[]): { height: number; piece: AddOnPiece; tri: [number, number, number]; bary: [number, number, number] } | null {
+  let top: { height: number; piece: AddOnPiece; tri: [number, number, number]; bary: [number, number, number] } | null = null;
   for (const pc of below) {
     const P = pc.start, T = pc.tris;
     for (let t = 0; t < T.length; t += 3) {
@@ -176,10 +182,25 @@ export function heightOver(pos: V3, n: V3, below: AddOnPiece[]): number {
       const q = cross(sv, e1), v = dot(n, q) / det;
       if (v < -0.02 || u + v > 1.02) continue;
       const along = dot(e2, q) / det;
-      if (along > top && along < 0.03) top = along;
+      if (along > (top?.height ?? 0) && along < 0.03) {
+        const cu = Math.max(0, Math.min(1, u)), cv = Math.max(0, Math.min(1 - cu, v));
+        const bary: [number, number, number] = [1 - cu - cv, cu, cv];
+        // Wound so the triangle's own normal faces along n, as the solver reads it.
+        const flip = dot(cross(e1, e2), n) < 0;
+        top = { height: along, piece: pc, tri: flip ? [T[t], T[t + 2], T[t + 1]] : [T[t], T[t + 1], T[t + 2]], bary: flip ? [bary[0], bary[2], bary[1]] : bary };
+      }
     }
   }
   return top;
+}
+
+/**
+ * How far out from the garment, along `n` from `pos`, the add-ons already on
+ * it lie there (0 where none does): one sewn on over another (a belt loop
+ * over a pocket's top) stacks on it rather than being sewn through it.
+ */
+export function heightOver(pos: V3, n: V3, below: AddOnPiece[]): number {
+  return topOver(pos, n, below)?.height ?? 0;
 }
 
 /** Clear of the garment as sewn on, and as a loop's middle stands off for a belt to pass under it. */
@@ -376,14 +397,8 @@ export function beltPieces(belt: GarmentBelt, loops: number, paths: V3[][], host
     const loopPts = [...path.slice(i0), ...path.slice(0, i0)];
     const curve = closedCurve(loopPts);
     const suffix = paths.length > 1 ? `${k + 1}` : '';
+    let beltPiece: AddOnPiece | null = null;
     if (withBelt) {
-      const len = curve.total;
-      const edges = [
-        { id: 'bottom', pts: [[0, -width / 2], [len, -width / 2]] },
-        { id: 'right', pts: [[len, -width / 2], [len, width / 2]] },
-        { id: 'top', pts: [[len, width / 2], [0, width / 2]] },
-        { id: 'left', pts: [[0, width / 2], [0, -width / 2]] },
-      ] as { id: string; pts: [number, number][] }[];
       // No coarser than the garment along its line (hostEdge): the median worn
       // edge of the garment's triangles with a corner within a belt's width of it.
       const lens: number[] = [];
@@ -393,7 +408,16 @@ export function beltPieces(belt: GarmentBelt, loops: number, paths: V3[][], host
         for (let e = 0; e < 3; e++) { const a = c[e], b = c[(e + 1) % 3]; lens.push(Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])); }
       }
       lens.sort((a, b) => a - b);
-      const m = meshOutline(edges, Math.min(spacing, width / 2.5, lens[lens.length >> 1] ?? Infinity));
+      const step = Math.min(spacing, width / 2.5, lens[lens.length >> 1] ?? Infinity);
+      // Round the whole of its line, its two ends a step apart, not on top of each other (each through the other).
+      const len = curve.total - step;
+      const edges = [
+        { id: 'bottom', pts: [[0, -width / 2], [len, -width / 2]] },
+        { id: 'right', pts: [[len, -width / 2], [len, width / 2]] },
+        { id: 'top', pts: [[len, width / 2], [0, width / 2]] },
+        { id: 'left', pts: [[0, width / 2], [0, -width / 2]] },
+      ] as { id: string; pts: [number, number][] }[];
+      const m = meshOutline(edges, step);
       const tacks: AddOnTack[] = [], start: number[][] = [];
       // Its two ends meet at the front: the end laps over the start, risen to
       // it over the last two widths, not cut to meet it in its own surface.
@@ -406,27 +430,43 @@ export function beltPieces(belt: GarmentBelt, loops: number, paths: V3[][], host
         const q = [p[0] + up[0] * v, p[1] + up[1] * v, p[2] + up[2] * v];
         const lap = u > lapFrom ? LAP_OFF * Math.min(1, (u - lapFrom) / (len - lapFrom)) : 0;
         const { tack, at } = nearestTack(q, hostTris, wornX, normalOf, BELT_OFF + lap, true, i);
+        // Where it lies over what is sewn on already (a pocket's top at the
+        // waist), it rests on that, its own offset off it, and draws it in
+        // with the cloth under it. Tacked to the garment through it, the
+        // belt drawn in squeezed the pocket under it and it buckled up
+        // through the belt.
+        const surf = nearestTack(q, hostTris, wornX, normalOf, 0, true, i).at, dir = unit(sub(at, surf));
+        const over = below.length ? topOver(surf, dir, below) : null;
+        if (over) {
+          const P = over.piece.start, pos = [0, 1, 2].map((k) => over.bary[0] * P[over.tri[0]][k] + over.bary[1] * P[over.tri[1]][k] + over.bary[2] * P[over.tri[2]][k]);
+          tacks.push({ local: i, tri: over.tri, bary: over.bary, offset: BELT_OFF + lap, lift: true, onPiece: over.piece.name });
+          start.push([pos[0] + dir[0] * (BELT_OFF + lap), pos[1] + dir[1] * (BELT_OFF + lap), pos[2] + dir[2] * (BELT_OFF + lap)]);
+          return;
+        }
         tacks.push(tack);
         start.push(at);
       });
       const outline = edges.flatMap((e) => m.edgeVerts[e.id].slice(0, -1));
       const buckle: GarmentTrim = { kind: 'buckle', along: 'left', size: width * 1.15 };
-      out.push({
+      out.push(beltPiece = {
         name: `belt${suffix}`, rgba: belt.rgba ?? [0.18, 0.12, 0.08, 1], material: belt.material ?? 'leather',
         uv: m.uv, tris: m.tris, outline, start, tacks, shrink: Math.max(0.8, Math.min(1, belt.ratio ?? 0.97)),
         ...(belt.buckle !== false ? { trims: m.edgeVerts.left.map((local, j, arr) => (j === Math.floor(arr.length / 2) ? { trim: buckle, local } : null)).filter((q): q is { trim: GarmentTrim; local: number } => q !== null) } : {}),
       });
     }
-    // Loops, evenly round from the back, each on the panel under it.
+    // Loops, evenly round from the back, each on the panel under it: one at
+    // the centre back if there are an odd number, and so never one at the
+    // front, over the fly and the belt's ends at its buckle (half a spacing
+    // round from the back whatever the count, five put one there).
     for (let j = 0; j < loops; j++) {
-      const { p } = curve.at(curve.total * (0.5 + j) / loops + curve.total / 2);
+      const { p } = curve.at(curve.total * (j + (loops % 2 ? 0 : 0.5)) / loops + curve.total / 2);
       const hit = nearestTack(p, hostTris, wornX, normalOf, 0, false, 0).tack;
       const worn = wornPanels.find((pn) => hit.tri.every((q) => pn.particles.includes(q)));
       const panel = worn && panels.find((pn) => pn.name === worn.name);
       if (!worn || !panel) continue;
       const local = hit.tri.map((q) => worn.particles.indexOf(q));
       const uv = [0, 1].map((c) => local.reduce((acc, l, i) => acc + hit.bary[i] * worn.uv[l][c], 0));
-      const piece = patch(`beltLoop${suffix}_${j + 1}`, panel, uv, 0.013, width * 1.4, 0, new Set(['top', 'bottom']), LOOP_OFF, x, spacing, below);
+      const piece = patch(`beltLoop${suffix}_${j + 1}`, panel, uv, 0.013, width * 1.4, 0, new Set(['top', 'bottom']), LOOP_OFF, x, spacing, beltPiece ? [...below, beltPiece] : below);
       piece.rgba = [colour[0] * 0.78, colour[1] * 0.78, colour[2] * 0.78, colour[3] ?? 1];
       out.push(piece);
     }
