@@ -427,7 +427,17 @@ export class ClothSim {
     // pulled open by the wearer was dragged through the neckerchief under
     // it, and a knot's ends falling into place through the collar over them.
     const tangle = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches));
-    this.ccdOf().setTangled(findCrossings(this.x, tangle));
+    const builtCrossed = findCrossings(this.x, tangle);
+    this.ccdOf().setTangled(builtCrossed);
+    // And while it is sewn into place, the pieces a builder made through each
+    // other free of each other wholly: being sewn on is what carries a piece
+    // out (a bow modelled through a gown's back).
+    {
+      const piece = new Int32Array(this.n);
+      let k = 0;
+      for (const pc of this.pieces) for (const g of pc.model.groups) { for (const i of g.particles) piece[pc.base + i] = k; k++; }
+      this.ccdOf().setFreePieces(piece, builtCrossed.map((c) => [piece[c.a], piece[this.tris[3 * c.t]]] as [number, number]));
+    }
     const built = Float64Array.from(this.x);
     this.settle(CLOTH_SUBSTEP);
     this.ccdOf().resolve(built, this.x, this.w);
@@ -534,6 +544,7 @@ export class ClothSim {
       for (let i = 0; i < n; i++) this.floatUntil[i] = moving.has(find(i)) ? 0 : floats[i];
       this.v.fill(0); this.prev.set(this.x);
     }
+    this.ccdOf().setFreePieces(null);
     // Then nothing through cloth before it is first drawn: whatever its
     // builders modelled crossed, untangled, and from here kept so.
     this.untangle();

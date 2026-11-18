@@ -113,6 +113,28 @@ export class ClothCcd {
 
   private joined(a: number, b: number) { return this.root[a] === this.root[b]; }
 
+  /** Pieces (by `piece`, per point) left free of each other: pairs `a * count + b`, both ways. */
+  private freePiece: Int32Array | null = null;
+  private freePairs: Set<number> | null = null;
+  private freeCount = 0;
+
+  /**
+   * Leaves whole pieces free of each other (none for null): the cloth a
+   * builder made crossed, while it is still being sewn into place, before
+   * it is first drawn. Held to the crossings' own points alone there, a bow
+   * modelled through a gown could not be carried out through it by being
+   * sewn on. Not for a running scene.
+   */
+  setFreePieces(piece: Int32Array | null, pairs: [number, number][] = []) {
+    if (!piece || !pairs.length) { this.freePiece = null; this.freePairs = null; return; }
+    let count = 0;
+    for (let i = 0; i < piece.length; i++) count = Math.max(count, piece[i] + 1);
+    this.freePiece = piece; this.freeCount = count; this.freePairs = new Set();
+    for (const [a, b] of pairs) { this.freePairs.add(a * count + b); this.freePairs.add(b * count + a); }
+  }
+
+  private freeOf(a: number, b: number) { return !!this.freePairs && this.freePairs.has(this.freePiece![a] * this.freeCount + this.freePiece![b]); }
+
   /**
    * The step from `x0` (where it began, not crossed) to `x1` (where the
    * solver left it), made so nothing crosses: `x1` is changed in place.
@@ -266,6 +288,7 @@ export class ClothCcd {
           const q = 6 * t;
           if (pB[o + 3] < tB[q] || pB[o + 4] < tB[q + 1] || pB[o + 5] < tB[q + 2] || pB[o] > tB[q + 3] || pB[o + 1] > tB[q + 4] || pB[o + 2] > tB[q + 5]) continue;
           if (this.joined(p, i0) || this.joined(p, i1) || this.joined(p, i2)) continue;
+          if (this.freeOf(p, i0)) continue;
           // Free only where both are in a crossing and at it (flagged both, but
           // apart, a point of the jacket's collar passed through the shirt's
           // where each was crossed somewhere else).
@@ -294,6 +317,7 @@ export class ClothCcd {
           const q = 6 * f;
           if (eB[o + 3] < eB[q] || eB[o + 4] < eB[q + 1] || eB[o + 5] < eB[q + 2] || eB[o] > eB[q + 3] || eB[o + 1] > eB[q + 4] || eB[o + 2] > eB[q + 5]) continue;
           if (this.joined(a0, b0) || this.joined(a0, b1) || this.joined(a1, b0) || this.joined(a1, b1)) continue;
+          if (this.freeOf(a0, b0)) continue;
           if (this.anyTangled && (this.tangledPoint[a0] || this.tangledPoint[a1]) && (this.tangledPoint[b0] || this.tangledPoint[b1]) && segDist(x0, a0, a1, b0, b1) < AT_CROSSING) continue;
           const h = edgeEdge(x0, x1, a0, a1, b0, b1);
           if (h) hits.push(h);
