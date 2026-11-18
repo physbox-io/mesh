@@ -13,19 +13,19 @@ export const metallophoneCarillonPreset: SceneGraph = (() => {
   const nodes: SceneNode[] = [];
 
   // "Amazing Grace" in C major — 100% pure 6-bar pentatonic {0:G4, 1:A4, 2:C5, 3:D5, 4:E5, 5:G5}!
-  const controllerScript = `// Silver carillon cam cylinder driving 6 brass mallets ("Amazing Grace" in 3/4)
+  const controllerScript = `// Silver carillon cam cylinder driving 6 brass mallets ("Amazing Grace" in strict 3/4)
 const score = [
   // "A - ma - zing Grace, how sweet the sound"
   [0, 1.0], [2, 2.0], [4, 0.5], [2, 0.5], [4, 2.0], [3, 1.0], [2, 2.0], [1, 1.0], [0, 2.0],
   // "That saved a wretch like me"
-  [0, 1.0], [2, 2.0], [4, 0.5], [2, 0.5], [4, 2.0], [3, 1.0], [5, 3.0],
+  [0, 1.0], [2, 2.0], [4, 0.5], [2, 0.5], [4, 2.0], [3, 1.0], [5, 2.0],
   // "I once was lost, but now am found"
-  [4, 1.0], [5, 1.5], [4, 0.5], [5, 0.5], [4, 0.5], [2, 2.0], [0, 1.0], [1, 1.5], [2, 0.5], [2, 0.5], [1, 0.5], [0, 2.0],
+  [4, 1.0], [5, 2.0], [4, 0.5], [2, 0.5], [4, 2.0], [3, 1.0], [2, 2.0], [1, 1.0], [0, 2.0],
   // "Was blind, but now I see"
-  [0, 1.0], [2, 2.0], [4, 0.5], [2, 0.5], [4, 2.0], [3, 1.0], [2, 3.5],
+  [0, 1.0], [2, 2.0], [4, 0.5], [2, 0.5], [4, 2.0], [3, 1.0], [2, 5.0],
 ];
 const joints = ['glock_hammer_0', 'glock_hammer_1', 'glock_hammer_2', 'glock_hammer_3', 'glock_hammer_4', 'glock_hammer_5'];
-const beatSec = 0.44;
+const beatSec = 0.46;
 let totalDur = 0;
 for (let i = 0; i < score.length; i++) totalDur += score[i][1] * beatSec;
 
@@ -35,7 +35,7 @@ for (let i = 0; i < score.length; i++) {
   const dur = score[i][1] * beatSec;
   const dt = tLoop - cursor;
   if (dt >= 0 && dt < 0.042) {
-    api.applyJointForce(joints[score[i][0]], -1.95);
+    api.applyJointForce(joints[score[i][0]], -2.65);
   }
   cursor += dur;
 }
@@ -120,12 +120,12 @@ for (let i = 0; i < score.length; i++) {
         type: 'hinge',
         axis: [1, 0, 0],
         pos: [0, 0, 0],
-        stiffness: 0.72,
-        springref: 0,
-        damping: 0.018,
+        stiffness: 0.76,
+        springref: 0.02,
+        damping: 0.036,
         limited: true,
-        range: [-12, 55],
-        hardStop: true,
+        range: [-14, 55],
+        hardStop: false,
       },
     ],
     geoms: [
@@ -167,9 +167,9 @@ for (let i = 0; i < score.length; i++) {
           type: 'slide',
           axis: [0, 0, 1],
           stiffness: 2200,
-          damping: 0.9,
+          damping: 12,
           limited: true,
-          range: [-0.0035, 0.002],
+          range: [-0.012, 0.012],
         },
       ],
       geoms: [

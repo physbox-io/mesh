@@ -715,3 +715,260 @@ export function computeBuoyancyWrench(
 
 /** Quick helper used by static stability readouts: exact mesh volume & centroid. */
 export { meshVolumeAndCentroid };
+
+// ---------------------------------------------------------------------------
+// Bounded Open-Top Container Water Basins (`SceneNode.waterFill`)
+// ---------------------------------------------------------------------------
+
+export interface ContainerBasinLocal {
+  shape: 'box' | 'cylinder';
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  floorZ: number;
+  rimZ: number;
+}
+
+export interface WaterBasinWorld extends ContainerBasinLocal {
+  containerNodeId: string;
+  fillFraction: number;
+  surfaceZ: number;
+}
+
+/**
+ * Inspects `node` in its local Z-up frame and returns its interior open-top
+ * liquid basin bounds if `node` is a hollowable/open container (multi-wall tank,
+ * boolean-cut tub/bowl/cup, hollow vertical tube, or sculpted open vessel).
+ */
+export function measureContainerBasin(node: SceneNode): ContainerBasinLocal | null {
+  if (node.hardwarePart || node.simulation || node.acousticString || node.windInstrument) return null;
+  const geoms = node.geoms ?? [];
+  if (geoms.length === 0) return null;
+
+  // Compute outer solid AABB
+  const solidGeoms = geoms.filter(
+    (g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'collision' && g.type !== 'plane',
+  );
+  const tris: number[] = [];
+  for (const g of solidGeoms) geomHydroTriangles(g, tris);
+  if (tris.length < 9) return null;
+
+  let outMinX = Infinity, outMaxX = -Infinity;
+  let outMinY = Infinity, outMaxY = -Infinity;
+  let outMinZ = Infinity, outMaxZ = -Infinity;
+  for (let i = 0; i + 2 < tris.length; i += 3) {
+    const x = tris[i], y = tris[i + 1], z = tris[i + 2];
+    if (x < outMinX) outMinX = x;
+    if (x > outMaxX) outMaxX = x;
+    if (y < outMinY) outMinY = y;
+    if (y > outMaxY) outMaxY = y;
+    if (z < outMinZ) outMinZ = z;
+    if (z > outMaxZ) outMaxZ = z;
+  }
+  const height = outMaxZ - outMinZ;
+  if (!(height > 0.012 && outMaxX - outMinX > 0.016 && outMaxY - outMinY > 0.016)) return null;
+
+  // 1. Boolean-subtracted open-top cavity (`csg: 'difference'` reaching the top rim)
+  const negatives = geoms.filter((g) => g.csg === 'difference');
+  for (const neg of negatives) {
+    const c = neg.pos ?? [0, 0, 0];
+    const s = neg.size ?? [];
+    if (neg.type === 'cylinder') {
+      const eul = neg.euler ?? [0, 0, 0];
+      const isVertical = Math.abs(eul[0] ?? 0) < 20 && Math.abs(eul[1] ?? 0) < 20;
+      const r = s[0] ?? 0;
+      const hz = s[1] ?? 0;
+      if (isVertical && r > 0.006 && c[2] + hz >= outMaxZ - 0.004) {
+        const floorZ = Math.max(outMinZ + 0.002, c[2] - hz);
+        if (outMaxZ - floorZ > 0.008) {
+          return {
+            shape: 'cylinder',
+            minX: c[0] - r,
+            maxX: c[0] + r,
+            minY: c[1] - r,
+            maxY: c[1] + r,
+            floorZ,
+            rimZ: outMaxZ,
+          };
+        }
+      }
+    } else if (neg.type === 'box' || neg.type === 'ellipsoid') {
+      const hx = s[0] ?? 0, hy = s[1] ?? 0, hz = s[2] ?? 0;
+      if (hx > 0.006 && hy > 0.006 && c[2] + hz >= outMaxZ - 0.004) {
+        const floorZ = Math.max(outMinZ + 0.002, c[2] - hz);
+        if (outMaxZ - floorZ > 0.008) {
+          return {
+            shape: neg.type === 'ellipsoid' && Math.abs(hx - hy) < 0.003 ? 'cylinder' : 'box',
+            minX: Math.max(outMinX + 0.001, c[0] - hx),
+            maxX: Math.min(outMaxX - 0.001, c[0] + hx),
+            minY: Math.max(outMinY + 0.001, c[1] - hy),
+            maxY: Math.min(outMaxY - 0.001, c[1] + hy),
+            floorZ,
+            rimZ: outMaxZ,
+          };
+        }
+      }
+    }
+  }
+
+  // 2. Hollow tube body (`isTube`)
+  if (node.isTube && typeof node.innerRadius === 'number' && node.innerRadius > 0.006) {
+    const r = node.innerRadius;
+    return {
+      shape: 'cylinder',
+      minX: -r,
+      maxX: r,
+      minY: -r,
+      maxY: r,
+      floorZ: outMinZ + 0.002,
+      rimZ: outMaxZ,
+    };
+  }
+
+  // 3. Multi-wall box tank / trough (bottom slab + 4 perimeter walls)
+  const boxes = solidGeoms.filter((g) => g.type === 'box' && g.role !== 'visual');
+  if (boxes.length >= 4) {
+    const spanX = outMaxX - outMinX;
+    const spanY = outMaxY - outMinY;
+    let innerMinX = outMinX + 0.002;
+    let innerMaxX = outMaxX - 0.002;
+    let innerMinY = outMinY + 0.002;
+    let innerMaxY = outMaxY - 0.002;
+    let floorZ = outMinZ + 0.002;
+    let wallRimZ = Infinity;
+    let wallCount = 0;
+
+    for (const b of boxes) {
+      const cx = b.pos?.[0] ?? 0, cy = b.pos?.[1] ?? 0, cz = b.pos?.[2] ?? 0;
+      const hx = b.size[0] ?? 0, hy = b.size[1] ?? 0, hz = b.size[2] ?? 0;
+      // Flat bottom slab near outMinZ
+      if (hz < height * 0.25 && hx > spanX * 0.32 && hy > spanY * 0.32 && cz - outMinZ < height * 0.35) {
+        floorZ = Math.max(floorZ, cz + hz);
+        continue;
+      }
+      // Tall perimeter wall
+      if (hz > height * 0.28) {
+        if (hx < spanX * 0.22 && hy > spanY * 0.28) {
+          wallCount++;
+          wallRimZ = Math.min(wallRimZ, cz + hz);
+          if (cx < 0.5 * (outMinX + outMaxX)) innerMinX = Math.max(innerMinX, cx + hx);
+          else innerMaxX = Math.min(innerMaxX, cx - hx);
+        } else if (hy < spanY * 0.22 && hx > spanX * 0.28) {
+          wallCount++;
+          wallRimZ = Math.min(wallRimZ, cz + hz);
+          if (cy < 0.5 * (outMinY + outMaxY)) innerMinY = Math.max(innerMinY, cy + hy);
+          else innerMaxY = Math.min(innerMaxY, cy - hy);
+        }
+      }
+    }
+    const rimZ = Number.isFinite(wallRimZ) ? wallRimZ : outMaxZ;
+    if (wallCount >= 3 && innerMaxX - innerMinX > 0.012 && innerMaxY - innerMinY > 0.012 && rimZ - floorZ > 0.008) {
+      return {
+        shape: 'box',
+        minX: innerMinX,
+        maxX: innerMaxX,
+        minY: innerMinY,
+        maxY: innerMaxY,
+        floorZ,
+        rimZ,
+      };
+    }
+  }
+
+  // 4. Generic sculpted/mesh open-top vessel detected by convex-hull mouth check
+  const hydro = buildHydroBodyModel(node);
+  if (hydro?.vessel) {
+    const rp = hydro.vessel.rimPoints;
+    let rMinX = Infinity, rMaxX = -Infinity, rMinY = Infinity, rMaxY = -Infinity, rMinZ = Infinity;
+    for (let i = 0; i + 2 < rp.length; i += 3) {
+      if (rp[i] < rMinX) rMinX = rp[i];
+      if (rp[i] > rMaxX) rMaxX = rp[i];
+      if (rp[i + 1] < rMinY) rMinY = rp[i + 1];
+      if (rp[i + 1] > rMaxY) rMaxY = rp[i + 1];
+      if (rp[i + 2] < rMinZ) rMinZ = rp[i + 2];
+    }
+    const insetX = (rMaxX - rMinX) * 0.05;
+    const insetY = (rMaxY - rMinY) * 0.05;
+    const floorZ = outMinZ + Math.max(0.003, (rMinZ - outMinZ) * 0.12);
+    if (rMaxX - rMinX > 0.014 && rMaxY - rMinY > 0.014 && rMinZ - floorZ > 0.008) {
+      return {
+        shape: 'box',
+        minX: rMinX + insetX,
+        maxX: rMaxX - insetX,
+        minY: rMinY + insetY,
+        maxY: rMaxY - insetY,
+        floorZ,
+        rimZ: rMinZ,
+      };
+    }
+  }
+
+  return null;
+}
+
+/** Collects world-space water basins for all nodes in `nodes` with `waterFill > 0`. */
+export function collectWaterBasins(nodes: SceneNode[]): WaterBasinWorld[] {
+  const out: WaterBasinWorld[] = [];
+  const walk = (list: SceneNode[], offX: number, offY: number, offZ: number) => {
+    for (const n of list || []) {
+      const wx = offX + (n.pos?.[0] ?? 0);
+      const wy = offY + (n.pos?.[1] ?? 0);
+      const wz = offZ + (n.pos?.[2] ?? 0);
+      if (typeof n.waterFill === 'number' && n.waterFill > 0.005) {
+        const local = measureContainerBasin(n);
+        if (local) {
+          const fill = Math.max(0.02, Math.min(1, n.waterFill));
+          const floorZ = wz + local.floorZ;
+          const rimZ = wz + local.rimZ;
+          out.push({
+            containerNodeId: n.id,
+            shape: local.shape,
+            minX: wx + local.minX,
+            maxX: wx + local.maxX,
+            minY: wy + local.minY,
+            maxY: wy + local.maxY,
+            floorZ,
+            rimZ,
+            fillFraction: fill,
+            surfaceZ: floorZ + fill * (rimZ - floorZ),
+          });
+        }
+      }
+      if (n.children?.length) walk(n.children, wx, wy, wz);
+    }
+  };
+  walk(nodes, 0, 0, 0);
+  return out;
+}
+
+/** Returns true if world XY `(x, y)` lies inside `basin`'s horizontal interior footprint. */
+export function pointInsideWaterBasin(basin: WaterBasinWorld, x: number, y: number): boolean {
+  if (x < basin.minX || x > basin.maxX || y < basin.minY || y > basin.maxY) return false;
+  if (basin.shape === 'cylinder') {
+    const cx = 0.5 * (basin.minX + basin.maxX);
+    const cy = 0.5 * (basin.minY + basin.maxY);
+    const rx = Math.max(1e-4, 0.5 * (basin.maxX - basin.minX));
+    const ry = Math.max(1e-4, 0.5 * (basin.maxY - basin.minY));
+    const dx = (x - cx) / rx;
+    const dy = (y - cy) / ry;
+    return dx * dx + dy * dy <= 1.04;
+  }
+  return true;
+}
+
+/** Finds the active water surface Z for `targetNode` (preferring an enclosing container basin, else any scene basin, else `fallbackWaterLevel`). */
+export function resolveWaterSurfaceAt(
+  nodes: SceneNode[],
+  targetNode: SceneNode,
+  fallbackWaterLevel: number | null = null,
+): number | null {
+  const basins = collectWaterBasins(nodes).filter((b) => b.containerNodeId !== targetNode.id);
+  if (basins.length > 0) {
+    const tx = targetNode.pos?.[0] ?? 0;
+    const ty = targetNode.pos?.[1] ?? 0;
+    const enclosing = basins.find((b) => pointInsideWaterBasin(b, tx, ty));
+    return (enclosing ?? basins[0]).surfaceZ;
+  }
+  return fallbackWaterLevel;
+}

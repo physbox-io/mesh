@@ -21,10 +21,10 @@ const score = [
   [3, 1.0], [2, 1.0], [1, 1.0], [0, 1.0], [1, 1.0], [2, 1.0],
   [3, 1.0], [2, 1.0], [1, 1.0], [0, 1.0], [1, 0.5], [2, 0.5], [1, 0.5], [2, 0.5],
   [3, 1.0], [2, 1.0], [3, 1.0], [4, 1.0], [2, 1.0], [4, 1.0],
-  [3, 1.0], [2, 1.0], [1, 1.0], [0, 2.2], [5, 1.8],
+  [3, 1.0], [2, 1.0], [1, 1.0], [0, 3.0], [5, 3.0],
 ];
 const joints = ['hammer_0', 'hammer_1', 'hammer_2', 'hammer_3', 'hammer_4', 'hammer_5'];
-const unitSec = 0.28;
+const unitSec = 0.30;
 let totalDur = 0;
 for (let i = 0; i < score.length; i++) totalDur += score[i][1] * unitSec;
 
@@ -33,8 +33,8 @@ let cursor = 0;
 for (let i = 0; i < score.length; i++) {
   const dur = score[i][1] * unitSec;
   const dt = tLoop - cursor;
-  if (dt >= 0 && dt < 0.044) {
-    api.applyJointForce(joints[score[i][0]], -1.85);
+  if (dt >= 0 && dt < 0.042) {
+    api.applyJointForce(joints[score[i][0]], -2.35);
   }
   cursor += dur;
 }
@@ -120,13 +120,13 @@ for (let i = 0; i < score.length; i++) {
           type: 'hinge',
           axis: [1, 0, 0],
           pos: [0, 0, 0],
-          stiffness: 0.65,
-          springref: 0,
-          damping: 0.016,
+          stiffness: 0.72,
+          springref: 0.02,
+          damping: 0.032,
           limited: true,
-          // Hard stop at -13° prevents dragging the beater head through the 17 mm bar; 55° upper headroom avoids rebound stop-slams!
-          range: [-13, 55],
-          hardStop: true,
+          // Stop at -14° prevents dragging the beater head through the 17 mm bar; 55° upper headroom avoids rebound stop-slams!
+          range: [-14, 55],
+          hardStop: false,
         },
       ],
       geoms: [
@@ -169,9 +169,9 @@ for (let i = 0; i < score.length; i++) {
           type: 'slide',
           axis: [0, 0, 1],
           stiffness: 1400,
-          damping: 1.2,
+          damping: 10,
           limited: true,
-          range: [-0.004, 0.002],
+          range: [-0.012, 0.012],
         },
       ],
       geoms: [
@@ -201,9 +201,9 @@ for (let i = 0; i < score.length; i++) {
         type: 'slide',
         axis: [0, 1, 0],
         stiffness: 1800,
-        damping: 1.0,
+        damping: 11,
         limited: true,
-        range: [-0.004, 0.002],
+        range: [-0.012, 0.012],
       },
     ],
     geoms: [

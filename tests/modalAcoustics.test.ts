@@ -19,7 +19,7 @@ import {
   analyzeSoundboxResonance,
   evaluateTautString,
 } from '../src/utils/stringAcoustics';
-import { extractBoreWaveguide } from '../src/utils/windAcoustics';
+import { extractBoreWaveguide, solvePlayableWindVoice } from '../src/utils/windAcoustics';
 import { KellyLochbaumSynthBank } from '../src/utils/windWaveguideSynth';
 import {
   buildTunedScaleNodes,
@@ -539,11 +539,21 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       expect(Math.abs(simGlock.jointPos('glock_a4_pad'))).toBeLessThan(0.0005);
       expect(Math.abs(simGlock.jointPos('glock_c5_pad'))).toBeLessThan(0.0005);
 
+      const padNames = ['glock_g4_pad', 'glock_a4_pad', 'glock_c5_pad', 'glock_d5_pad', 'glock_e5_pad', 'glock_g5_pad'];
       const struckLongBars = new Set<string>();
-      for (let step = 0; step < 2600; step++) {
+      const strikeSequence: string[] = [];
+      const lastStrikeStep = new Map<string, number>();
+      for (let step = 0; step < 4800; step++) {
         simGlock.step(1);
-        for (const p of ['glock_g4_pad', 'glock_a4_pad', 'glock_c5_pad', 'glock_d5_pad', 'glock_e5_pad']) {
-          if (simGlock.jointPos(p) < -0.00025) struckLongBars.add(p);
+        for (const p of padNames) {
+          if (simGlock.jointPos(p) < -0.00025) {
+            struckLongBars.add(p);
+            const prevStep = lastStrikeStep.get(p) ?? -999;
+            if (step - prevStep > 45) {
+              strikeSequence.push(p);
+            }
+            lastStrikeStep.set(p, step);
+          }
         }
       }
       expect(Math.abs(simGlock.jointPos('carillon_drum_spin'))).toBeGreaterThan(1.0);
@@ -551,8 +561,53 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       expect(struckLongBars.has('glock_a4_pad')).toBe(true);
       expect(struckLongBars.has('glock_c5_pad')).toBe(true);
       expect(struckLongBars.size).toBeGreaterThanOrEqual(4);
+      // First 9 strikes of "Amazing Grace" ("A-ma-zing Grace, how sweet the sound"):
+      // G4 -> C5 -> E5 -> C5 -> E5 -> D5 -> C5 -> A4 -> G4 with zero double-bounce phantom hits!
+      expect(strikeSequence.slice(0, 9)).toEqual([
+        'glock_g4_pad',
+        'glock_c5_pad',
+        'glock_e5_pad',
+        'glock_c5_pad',
+        'glock_e5_pad',
+        'glock_d5_pad',
+        'glock_c5_pad',
+        'glock_a4_pad',
+        'glock_g4_pad',
+      ]);
     } finally {
       simGlock.dispose();
+    }
+
+    // 5. Verify generic bore mode-slotting produces exact concert G-major pitches (<= 5 cents) on Clarinet & Cornet!
+    const clarCases: [Record<string, number>, string][] = [
+      [{}, 'G3'],
+      [{ clarinet_key_4: 0.25 }, 'A3'],
+      [{ clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'B3'],
+      [{ clarinet_key_2: 0.25, clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'D4'],
+      [{ clarinet_key_1: 0.25, clarinet_key_2: 0.25, clarinet_key_3: 0.25, clarinet_key_4: 0.25 }, 'E4'],
+    ];
+    for (const [jPos, expectedNote] of clarCases) {
+      const bore = extractBoreWaveguide(clarinetNode, jPos)!;
+      const solved = solvePlayableWindVoice(bore, 3.0, 260);
+      expect(solved.active).toBe(true);
+      const info = hzToNoteInfo(solved.pitchHz);
+      expect(info.note).toBe(expectedNote);
+      expect(Math.abs(info.cents)).toBeLessThanOrEqual(5);
+    }
+
+    const cornetCases: [Record<string, number>, number, string][] = [
+      [{}, 392, 'G4'],
+      [{ cornet_valve_1: 0.013, cornet_valve_3: 0.013 }, 440, 'A4'],
+      [{ cornet_valve_1: 0.013, cornet_valve_2: 0.013 }, 494, 'B4'],
+      [{}, 587, 'D5'],
+    ];
+    for (const [jPos, lipHz, expectedNote] of cornetCases) {
+      const bore = extractBoreWaveguide(bugleNode, jPos)!;
+      const solved = solvePlayableWindVoice(bore, 3.0, lipHz);
+      expect(solved.active).toBe(true);
+      const info = hzToNoteInfo(solved.pitchHz);
+      expect(info.note).toBe(expectedNote);
+      expect(Math.abs(info.cents)).toBeLessThanOrEqual(5);
     }
   });
 });

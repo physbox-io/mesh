@@ -2,19 +2,21 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { balanceBody } from '../utils/balancePart';
 
 /**
- * True Waterline Hydrostatics & Inverse Auto-Float ("Make It Float") Showcase:
- * Set in a 145 mm freshwater test tank (`environment.waterLevel = 0.145`):
+ * True Waterline Hydrostatics & Bounded Container Water (`waterFill`) Showcase:
+ * A clear tempered-glass aquarium filled 80% full with freshwater (`waterFill: 0.80`,
+ * `floorZ = 0.010 m`, `rimZ = 0.190 m` -> `surfaceZ = 0.154 m`), dry floor outside:
  *   1. Unbalanced Red Buoy (left): top-heavy mast + lantern (`CoM` above `CoB`) -> capsizes!
- *      (Select it -> Physics -> Stand / Spin / Float -> Float -> Balance Part to fix it!)
+ *      (Select it -> Physics -> Balance & Ballast -> Float to fix it!)
  *   2. Auto-Balanced Green Channel Buoy (center-left): identical outer silhouette processed
- *      through `balanceBody(..., 'float')` (seats bought-in steel hex-nut ballast deep in the
- *      keel) -> snaps upright from a 45° knockdown heel and holds its beacon dry above water!
+ *      through `balanceBody(..., 'float')` (bought-in steel hex-nut keel ballast) -> snaps
+ *      upright from a 45° knockdown heel!
  *   3. Open-Hull Cedar Skiff (center-right): floats high on displaced interior hull air.
  *   4. Porcelain Cup + Brass Rim Weight (right): 2350 kg/m³ ceramic floats upright on its
  *      trapped air pocket until the brass weight tips its rim underwater, flooding & sinking it!
  */
 export const hydrostaticFlotationPreset: SceneGraph = (() => {
-  const WATER_Z = 0.145;
+  // Tank interior: floor top z = 0.010 m, glass wall rim z = 0.190 m, 80% waterFill -> surfaceZ = 0.154 m
+  const WATER_Z = 0.154;
 
   const makeRawChannelBuoy = (
     id: string,
@@ -46,7 +48,6 @@ export const hydrostaticFlotationPreset: SceneGraph = (() => {
         density: 380,
         rgba: [0.22, 0.25, 0.30, 1],
       },
-      // Crisp white daymark band
       {
         name: `${id}_collar`,
         type: 'cylinder',
@@ -55,7 +56,6 @@ export const hydrostaticFlotationPreset: SceneGraph = (() => {
         rgba: [0.95, 0.96, 0.98, 1],
         role: 'visual',
       },
-      // Tall mast + heavy top lantern head (pulls CoM high above CoB so raw buoy capsizes!)
       {
         name: `${id}_mast`,
         type: 'cylinder',
@@ -116,7 +116,7 @@ export const hydrostaticFlotationPreset: SceneGraph = (() => {
   };
 
   // 4. Open Glazed Porcelain Cup (`rho = 2350 kg/m³` > freshwater! Floats upright on trapped air,
-  //    then floods over the rim & sinks when the brass weight drops into its front corner!)
+  //    then floods over the rim & sinks when the brass weight drops into its front edge!)
   const floodingCup: SceneNode = {
     id: 'flooding_porcelain_cup',
     name: 'Porcelain Cup (Floods When Rim Dips)',
@@ -136,7 +136,6 @@ export const hydrostaticFlotationPreset: SceneGraph = (() => {
     children: [],
   };
 
-  // Off-center brass weight dropped into the inside front edge of the cup so it heels the rim underwater & rides down with it!
   const rimWeight: SceneNode = {
     id: 'rim_brass_pebble',
     name: 'Brass Rim Weight',
@@ -156,33 +155,28 @@ export const hydrostaticFlotationPreset: SceneGraph = (() => {
     children: [],
   };
 
-  // Clear glass & slate hydrostatics test-tank frame with cyan waterline markers at z = WATER_Z
-  const tankFrame: SceneNode = {
+  // Colliding 5-panel clear tempered-glass aquarium with `waterFill: 0.80` (select it -> Physics -> Container Water!)
+  const glassAquarium: SceneNode = {
     id: 'hydro_test_tank',
-    name: 'Glass Hydrostatics Tank',
+    name: 'Glass Aquarium Tank',
     type: 'body',
     pos: [0, 0, 0],
     deformMaterial: 'glass',
+    waterFill: 0.80,
     joints: [],
     geoms: [
-      // Four slim slate corner posts + cyan waterline rings at z = 0.145 m so water depth is unmistakable!
-      { name: 'post_fl', type: 'box', size: [0.005, 0.005, 0.090], pos: [-0.285, -0.135, 0.090], rgba: [0.22, 0.26, 0.32, 1], contype: 0, conaffinity: 0 },
-      { name: 'post_fr', type: 'box', size: [0.005, 0.005, 0.090], pos: [0.285, -0.135, 0.090], rgba: [0.22, 0.26, 0.32, 1], contype: 0, conaffinity: 0 },
-      { name: 'post_bl', type: 'box', size: [0.005, 0.005, 0.090], pos: [-0.285, 0.135, 0.090], rgba: [0.22, 0.26, 0.32, 1], contype: 0, conaffinity: 0 },
-      { name: 'post_br', type: 'box', size: [0.005, 0.005, 0.090], pos: [0.285, 0.135, 0.090], rgba: [0.22, 0.26, 0.32, 1], contype: 0, conaffinity: 0 },
-      // Cyan waterline reference rails right at z = WATER_Z
-      { name: 'wl_front', type: 'box', size: [0.285, 0.002, 0.002], pos: [0, -0.135, WATER_Z], rgba: [0.06, 0.68, 0.92, 0.85], contype: 0, conaffinity: 0 },
-      { name: 'wl_back', type: 'box', size: [0.285, 0.002, 0.002], pos: [0, 0.135, WATER_Z], rgba: [0.06, 0.68, 0.92, 0.85], contype: 0, conaffinity: 0 },
-      { name: 'wl_left', type: 'box', size: [0.002, 0.135, 0.002], pos: [-0.285, 0, WATER_Z], rgba: [0.06, 0.68, 0.92, 0.85], contype: 0, conaffinity: 0 },
-      { name: 'wl_right', type: 'box', size: [0.002, 0.135, 0.002], pos: [0.285, 0, WATER_Z], rgba: [0.06, 0.68, 0.92, 0.85], contype: 0, conaffinity: 0 },
-      // Bottom perimeter curbing
-      { name: 'base_front', type: 'box', size: [0.285, 0.004, 0.004], pos: [0, -0.135, 0.004], rgba: [0.22, 0.26, 0.32, 1], contype: 0, conaffinity: 0 },
-      { name: 'base_back', type: 'box', size: [0.285, 0.004, 0.004], pos: [0, 0.135, 0.004], rgba: [0.22, 0.26, 0.32, 1], contype: 0, conaffinity: 0 },
+      // Dark slate tank base (z = 0..0.010 m)
+      { name: 'tank_floor', type: 'box', size: [0.295, 0.145, 0.005], pos: [0, 0, 0.005], rgba: [0.18, 0.22, 0.28, 1] },
+      // Four clear glass aquarium walls (z = 0.010..0.190 m -> 180 mm interior depth, 80% full = 144 mm water!)
+      { name: 'tank_wall_front', type: 'box', size: [0.295, 0.004, 0.090], pos: [0, -0.141, 0.100], rgba: [0.76, 0.90, 0.97, 0.22] },
+      { name: 'tank_wall_back', type: 'box', size: [0.295, 0.004, 0.090], pos: [0, 0.141, 0.100], rgba: [0.76, 0.90, 0.97, 0.22] },
+      { name: 'tank_wall_left', type: 'box', size: [0.004, 0.137, 0.090], pos: [-0.291, 0, 0.100], rgba: [0.76, 0.90, 0.97, 0.26] },
+      { name: 'tank_wall_right', type: 'box', size: [0.004, 0.137, 0.090], pos: [0.291, 0, 0.100], rgba: [0.76, 0.90, 0.97, 0.26] },
     ],
     children: [],
   };
 
   return {
-    nodes: [tankFrame, unbalancedBuoy, balancedBuoy, openHullSkiff, floodingCup, rimWeight],
+    nodes: [glassAquarium, unbalancedBuoy, balancedBuoy, openHullSkiff, floodingCup, rimWeight],
   };
 })();

@@ -746,7 +746,7 @@ Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed s
 
   hydrostatic_flotation: `# ⛵ Self-Righting Buoy, Skiff & Flooding Cup
 
-Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **inverse auto-balance (\`Stand / Spin / Float\`)** in a 135 mm water tank:
+Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **inverse auto-balance (\`Stand / Spin / Float\`)** inside a bounded **Glass Aquarium Tank** (80% water fill):
 
 1. **Unbalanced Red Buoy** (left): top-heavy polymer + heavy lantern ($\\text{CoM}$ above $\\text{CoB}$) — capsizes upside-down on **Run**!
 2. **Auto-Balanced Green Buoy** (center-left): identical outer silhouette processed by **Float → Balance Part** (carves an upper internal void + seats bought-in steel hex nuts in the keel) — snaps upright from a **42° knockdown**!
@@ -755,7 +755,8 @@ Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **
 
 ## Try it
 - Press **Run** to watch the green buoy self-right, the red buoy capsize, and the porcelain cup flood and sink
-- Click **Reset**, select **Unbalanced Red Buoy** → **Physics → Stand / Spin / Float → Float → Balance Part**, then press **Run** again: it now self-rights too!`,
+- Select **Glass Aquarium Tank** → **Physics → Container Water** to raise or lower the tank's water level
+- Click **Reset**, select **Unbalanced Red Buoy** → **Physics (bottom) → Stand / Spin / Float → Float → Balance Part**, then press **Run** again: it now self-rights too!`,
 };
 
 

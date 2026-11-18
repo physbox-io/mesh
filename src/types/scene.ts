@@ -866,6 +866,8 @@ export interface SceneNode {
   acousticString?: AcousticStringSpec;
   /** Continuous bore waveguide wind/brass/reed instrument specification; see utils/windAcoustics.ts. */
   windInstrument?: WindInstrumentSpec;
+  /** Fraction (0..1) of an open-top container's interior basin filled with freshwater; see utils/hydrostatics.ts. */
+  waterFill?: number;
   script?: string;
   scad?: string;
   /**

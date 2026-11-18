@@ -5,7 +5,7 @@
 
 import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
-import type { HydroBodyModel } from '../utils/hydrostatics';
+import type { HydroBodyModel, WaterBasinWorld } from '../utils/hydrostatics';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
@@ -241,6 +241,7 @@ export type MainToWorkerMessage =
       waterLevel?: number | null;
       gravityZ?: number;
       hydroModels?: HydroBodyModel[];
+      waterBasins?: WaterBasinWorld[];
     }
   | { type: 'SET_SOUND'; enabled: boolean }
   | { type: 'SET_PLAYING'; isPlaying: boolean }
@@ -266,6 +267,7 @@ export type MainToWorkerMessage =
       waterLevel?: number | null;
       gravityZ?: number;
       hydroModels?: HydroBodyModel[];
+      waterBasins?: WaterBasinWorld[];
     }
   /** The answer to a HEADLESS_IMPACT: the model to go on with, or nothing to change. */
   | { type: 'HEADLESS_IMPACT_REPLY'; id: string; rebuild?: HeadlessRebuild }

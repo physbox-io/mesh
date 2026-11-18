@@ -8,6 +8,7 @@ import {
   clearBalanceAdjustments,
   type BalanceMode,
 } from '../../utils/balancePart';
+import { resolveWaterSurfaceAt } from '../../utils/hydrostatics';
 
 function replaceNodeInTree(nodes: SceneNode[], targetId: string, next: SceneNode): SceneNode[] {
   return nodes.map((n) => {
@@ -36,9 +37,14 @@ function applyDiscreteNodeReplacement(nodeId: string, nextNode: SceneNode) {
  * and boats float upright without changing their outer silhouette.
  */
 export function BalanceCard({ node }: { node: SceneNode }) {
+  const sceneGraph = useStore((s) => s.sceneGraph);
   const waterLevel = useStore((s) => s.waterLevel);
-  const setEnvironment = useStore((s) => s.setEnvironment);
   const [lastSummary, setLastSummary] = useState<string | null>(null);
+
+  const effectiveWaterZ = useMemo(
+    () => resolveWaterSurfaceAt(sceneGraph.nodes, node, waterLevel),
+    [sceneGraph.nodes, node, waterLevel],
+  );
 
   const isEligible = useMemo(() => {
     if (node.hardwarePart || node.simulation) return false;
@@ -49,8 +55,8 @@ export function BalanceCard({ node }: { node: SceneNode }) {
   }, [node]);
 
   const report = useMemo(
-    () => (isEligible ? analyzeStability(node, waterLevel ?? 0) : null),
-    [isEligible, node, waterLevel],
+    () => (isEligible ? analyzeStability(node, effectiveWaterZ ?? 0) : null),
+    [isEligible, node, effectiveWaterZ],
   );
 
   if (!isEligible || !report) return null;
@@ -60,10 +66,7 @@ export function BalanceCard({ node }: { node: SceneNode }) {
     (node.children ?? []).some((c) => c.id.includes('_ballast_'));
 
   const runBalance = (mode: BalanceMode) => {
-    if (mode === 'float' && waterLevel === null) {
-      setEnvironment({ waterLevel: 0 });
-    }
-    const res = balanceBody(node, mode, { waterLevel: waterLevel ?? 0 });
+    const res = balanceBody(node, mode, { waterLevel: effectiveWaterZ ?? 0 });
     applyDiscreteNodeReplacement(node.id, res.node);
     setLastSummary(res.summary);
   };
@@ -115,7 +118,7 @@ export function BalanceCard({ node }: { node: SceneNode }) {
             Spin Δ {report.spin.eccentricityMm.toFixed(1)} mm
           </span>
         )}
-        {waterLevel !== null && (
+        {effectiveWaterZ !== null && (
           <span
             className={`px-1.5 py-0.5 rounded font-medium ${
               report.float.floats && !report.float.flooded

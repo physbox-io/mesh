@@ -267,8 +267,10 @@ export function extractBoreWaveguide(
     valveLengthRatio = Math.pow(2, totalSemitones / 12);
   }
 
-  const baseBoreLengthM = (spec.boreLengthM && spec.boreLengthM > 0.05 ? spec.boreLengthM : slice.lengthM) * valveLengthRatio;
-  const acousticLengthM = baseBoreLengthM + 0.61 * bellRadiusM;
+  const rawBoreLengthM = spec.boreLengthM && spec.boreLengthM > 0.05 ? spec.boreLengthM : slice.lengthM;
+  const baseBoreLengthM = rawBoreLengthM * valveLengthRatio;
+  // Valve tuning slides lengthen the full effective acoustic column (including bell radiation end-correction) by 2^(semitones/12)
+  const acousticLengthM = (rawBoreLengthM + 0.61 * bellRadiusM) * valveLengthRatio;
 
   const exactCells = Math.max(8, Math.min(178, acousticLengthM / dxCell));
   const cellCount = Math.max(8, Math.min(178, Math.floor(exactCells)));
@@ -367,15 +369,15 @@ export function extractBoreWaveguide(
     for (let n = 1; n <= 6; n++) {
       // Flared brass bells pull the n=1 pedal tone slightly flat while aligning n=2..6 harmonically
       const pedalFactor = boreShape === 'flared_horn' && n === 1 ? 0.88 : 1.0;
-      resonantModesHz.push(+(n * fBase * pedalFactor).toFixed(1));
+      resonantModesHz.push(+(n * fBase * pedalFactor).toFixed(2));
     }
   } else {
     const f1 = SPEED_OF_SOUND_WARM_AIR / (4 * effectiveLengthM);
     resonantModesHz.push(
-      +f1.toFixed(1),
-      +(3 * f1).toFixed(1),
-      +(5 * f1).toFixed(1),
-      +(7 * f1).toFixed(1),
+      +f1.toFixed(2),
+      +(3 * f1).toFixed(2),
+      +(5 * f1).toFixed(2),
+      +(7 * f1).toFixed(2),
     );
   }
 
@@ -397,5 +399,152 @@ export function extractBoreWaveguide(
     boreShape,
     toneholes,
     resonantModesHz,
+  };
+}
+
+export interface PlayableWindVoiceInput {
+  exciter: WindExciterKind;
+  boreShape?: 'cylindrical' | 'conical' | 'flared_horn';
+  resonantModesHz?: number[];
+  bellCutoffHz: number;
+  exactCells?: number;
+  cellCount?: number;
+}
+
+export interface SolvedPlayableWindVoice {
+  active: boolean;
+  pitchHz: number;
+  modeIndex: number;
+  amplitude: number;
+  drive: number;
+  formantHz: number;
+  formantGainDb: number;
+  bellLowpassHz: number;
+  bellQ: number;
+  noiseGain: number;
+}
+
+/**
+ * Pure, 100% generic physical acoustics solver mapping ANY bore's impedance
+ * peaks (`resonantModesHz`), `boreShape`, `bellCutoffHz`, and nonlinear `exciter`
+ * + `breathKPa` + `embouchureHz` to its sounding self-oscillation frequency and
+ * radiated acoustic filter parameters.
+ */
+export function solvePlayableWindVoice(
+  bore: PlayableWindVoiceInput,
+  breathKPa: number,
+  embouchureHz: number,
+): SolvedPlayableWindVoice {
+  const bShape = bore.boreShape ?? (bore.exciter === 'brass_lip' ? 'flared_horn' : 'cylindrical');
+
+  // Fallback analytical modes from spatial waveguide length if caller only supplied cellCount/exactCells
+  let modes = bore.resonantModesHz && bore.resonantModesHz.length > 0 ? bore.resonantModesHz : [];
+  if (modes.length === 0) {
+    const cells = Math.max(8, bore.exactCells ?? bore.cellCount ?? 32);
+    const effLenM = (cells * SPEED_OF_SOUND_WARM_AIR) / DEFAULT_SAMPLE_RATE;
+    if (bore.exciter === 'flute_jet' || bShape !== 'cylindrical') {
+      const fBase = SPEED_OF_SOUND_WARM_AIR / (2 * effLenM);
+      modes = [1, 2, 3, 4, 5, 6].map((n) => n * fBase * (bShape === 'flared_horn' && n === 1 ? 0.88 : 1));
+    } else {
+      const f1 = SPEED_OF_SOUND_WARM_AIR / (4 * effLenM);
+      modes = [f1, 3 * f1, 5 * f1, 7 * f1];
+    }
+  }
+
+  if (!(breathKPa > 0.22) || modes.length === 0) {
+    return {
+      active: false,
+      pitchHz: modes[0] ?? 261.63,
+      modeIndex: 0,
+      amplitude: 0,
+      drive: 0.4,
+      formantHz: 800,
+      formantGainDb: 2,
+      bellLowpassHz: 900,
+      bellQ: 0.8,
+      noiseGain: 0,
+    };
+  }
+
+  const bNorm = Math.max(0, Math.min(1.35, (breathKPa - 0.22) / 3.8));
+  const embHz = Math.max(60, Math.min(2400, embouchureHz || 330));
+
+  let modeIdx = 0;
+  let pitchHz: number;
+
+  if (bore.exciter === 'brass_lip') {
+    // Outward-striking lip-reed locks onto whichever natural bore impedance harmonic is closest in log-frequency
+    let bestDist = Infinity;
+    for (let i = 0; i < modes.length; i++) {
+      const dist = Math.abs(Math.log2(modes[i] / embHz));
+      if (dist < bestDist) {
+        bestDist = dist;
+        modeIdx = i;
+      }
+    }
+    const baseModeHz = modes[modeIdx];
+    // Finite lip-mass compliance allows gentle "lipping" up/down within ±16 cents when embouchure pulls off-center
+    const pullOct = Math.max(-0.013, Math.min(0.013, 0.08 * Math.log2(embHz / baseModeHz)));
+    pitchHz = baseModeHz * Math.pow(2, pullOct);
+  } else if (bore.exciter === 'flute_jet') {
+    // Air-jet overblows to upper half-wave harmonics as jet speed (breath + embouchure) increases
+    const jetTargetHz = embHz * (0.82 + 0.32 * bNorm);
+    if (modes.length > 2 && jetTargetHz > modes[1] * 1.38) modeIdx = 2;
+    else if (modes.length > 1 && jetTargetHz > modes[0] * 1.55) modeIdx = 1;
+    pitchHz = modes[modeIdx];
+  } else {
+    // Light cane/polymer reed slaves tightly to fundamental bore mode f_1, overblowing to modes[1] (3*f_1 on cylinder, 2*f_1 on cone) when pinched high
+    if (modes.length > 1 && embHz > modes[0] * 2.35) {
+      modeIdx = 1;
+    }
+    pitchHz = modes[modeIdx];
+  }
+
+  pitchHz = Math.max(45, Math.min(3500, pitchHz));
+  const amp = 0.24 * Math.tanh(bNorm * 1.35);
+  const bellCut = Math.max(450, Math.min(8000, bore.bellCutoffHz || 1500));
+
+  if (bore.exciter === 'brass_lip') {
+    return {
+      active: true,
+      pitchHz: +pitchHz.toFixed(2),
+      modeIndex: modeIdx,
+      amplitude: +amp.toFixed(4),
+      drive: +(0.46 + 0.38 * bNorm).toFixed(4),
+      formantHz: +Math.max(460, Math.min(1280, pitchHz * 2.0)).toFixed(1),
+      formantGainDb: 4.5,
+      bellLowpassHz: +Math.max(540, Math.min(2900, Math.min(bellCut * 2.1, pitchHz * (1.85 + 3.35 * bNorm)))).toFixed(1),
+      bellQ: 1.25,
+      noiseGain: +(amp * 0.018).toFixed(5),
+    };
+  }
+
+  if (bore.exciter === 'flute_jet') {
+    return {
+      active: true,
+      pitchHz: +pitchHz.toFixed(2),
+      modeIndex: modeIdx,
+      amplitude: +(amp * 0.92).toFixed(4),
+      drive: +(0.38 + 0.22 * bNorm).toFixed(4),
+      formantHz: +Math.max(360, Math.min(1200, pitchHz * 1.5)).toFixed(1),
+      formantGainDb: 2.0,
+      bellLowpassHz: +Math.max(520, Math.min(2800, pitchHz * (2.1 + 2.2 * bNorm))).toFixed(1),
+      bellQ: 0.72,
+      noiseGain: +(amp * 0.11).toFixed(5),
+    };
+  }
+
+  // Single / double reed on cylindrical (odd-harmonic) or conical (complete-harmonic) bore
+  return {
+    active: true,
+    pitchHz: +pitchHz.toFixed(2),
+    modeIndex: modeIdx,
+    amplitude: +(amp * 0.96).toFixed(4),
+    drive: +(0.52 + 0.34 * bNorm).toFixed(4),
+    formantHz: +Math.max(480, Math.min(1420, pitchHz * (bShape === 'cylindrical' ? 3.0 : 2.2))).toFixed(1),
+    formantGainDb: 3.6,
+    bellLowpassHz: +Math.max(620, Math.min(2350, Math.min(bellCut * 1.35, pitchHz * (2.5 + 2.9 * bNorm)))).toFixed(1),
+    bellQ: 0.88,
+    noiseGain: +(amp * 0.032).toFixed(5),
   };
 }

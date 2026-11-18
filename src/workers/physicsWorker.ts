@@ -37,7 +37,14 @@ import {
   type ResolvedInput,
 } from '../utils/coSimLink';
 import type { FlexureSpec, SceneGraph, SceneJoint, SceneNode } from '../types/scene';
-import { buildHydroBodyModel, computeBuoyancyWrench, type HydroBodyModel } from '../utils/hydrostatics';
+import {
+  buildHydroBodyModel,
+  collectWaterBasins,
+  computeBuoyancyWrench,
+  pointInsideWaterBasin,
+  type HydroBodyModel,
+  type WaterBasinWorld,
+} from '../utils/hydrostatics';
 import { bistableForce } from '../utils/flexure';
 // Pure loop control for the headless run, kept in a module that can be
 // imported outside a Worker realm so it is testable (this file cannot be:
@@ -995,6 +1002,7 @@ let envWindX = 0;
 let envWindY = 0;
 let envDensity = 0;
 let envWaterLevel: number | null = null;
+let envWaterBasins: WaterBasinWorld[] = [];
 let soundEnabled = false;
 
 interface BistableJointEntry {
@@ -1014,6 +1022,7 @@ const lastAudioEmitMs = new Map<string, number>();
 const rebuildHydroAndFlexureCaches = (
   explicitHydroModels?: HydroBodyModel[],
   activeWaterLevel: number | null = envWaterLevel,
+  activeWaterBasins: WaterBasinWorld[] = envWaterBasins,
 ) => {
   if (explicitHydroModels) {
     cachedHydroByNodeId = new Map(explicitHydroModels.map((h) => [h.nodeId, h]));
@@ -1024,12 +1033,14 @@ const rebuildHydroAndFlexureCaches = (
   const mdl = model;
   if (!mdl) return;
 
+  const anyWater = activeWaterLevel !== null || activeWaterBasins.length > 0;
+
   const walk = (nodes: SceneNode[]) => {
     for (const node of nodes || []) {
       const bId = bodyIdCache[node.id];
       if (bId !== undefined && bId > 0) {
         // Movable body (has own joints or rides on a jointed ancestor)
-        if (activeWaterLevel !== null && (node.joints?.length ?? 0) > 0) {
+        if (anyWater && (node.joints?.length ?? 0) > 0) {
           const h = cachedHydroByNodeId.get(node.id) ?? buildHydroBodyModel(node);
           if (h) {
             hydroByBodyId.set(bId, h);
@@ -1055,7 +1066,11 @@ const rebuildHydroAndFlexureCaches = (
   walk(sceneGraph.nodes);
 };
 
-const applyHydroAndFlexureForces = (stepSize: number, activeWaterLevel: number | null = envWaterLevel) => {
+const applyHydroAndFlexureForces = (
+  stepSize: number,
+  activeWaterLevel: number | null = envWaterLevel,
+  activeWaterBasins: WaterBasinWorld[] = envWaterBasins,
+) => {
   const mdl = model;
   const dat = data;
   if (!mdl || !dat) return;
@@ -1072,7 +1087,7 @@ const applyHydroAndFlexureForces = (stepSize: number, activeWaterLevel: number |
     }
   }
 
-  if (activeWaterLevel !== null && hydroByBodyId.size > 0) {
+  if ((activeWaterLevel !== null || activeWaterBasins.length > 0) && hydroByBodyId.size > 0) {
     const xpos = dat.xpos;
     const xmat = dat.xmat;
     const xipos = dat.xipos;
@@ -1085,8 +1100,22 @@ const applyHydroAndFlexureForces = (stepSize: number, activeWaterLevel: number |
 
     for (const [bId, hydro] of hydroByBodyId) {
       const pOff = bId * 3;
-      const mOff = bId * 9;
       const pos = [xpos[pOff], xpos[pOff + 1], xpos[pOff + 2]];
+
+      // Resolve enclosing container basin water surface Z (or fallback global waterLevel)
+      let localWaterZ: number | null = activeWaterLevel;
+      for (const basin of activeWaterBasins) {
+        if (basin.containerNodeId === hydro.nodeId) continue;
+        if (
+          pointInsideWaterBasin(basin, pos[0], pos[1]) &&
+          pos[2] >= basin.floorZ - 0.12
+        ) {
+          localWaterZ = localWaterZ === null ? basin.surfaceZ : Math.max(localWaterZ, basin.surfaceZ);
+        }
+      }
+      if (localWaterZ === null) continue;
+
+      const mOff = bId * 9;
       const mat = [
         xmat[mOff], xmat[mOff + 1], xmat[mOff + 2],
         xmat[mOff + 3], xmat[mOff + 4], xmat[mOff + 5],
@@ -1106,7 +1135,7 @@ const applyHydroAndFlexureForces = (stepSize: number, activeWaterLevel: number |
         angVel,
         massKg,
         inertia,
-        activeWaterLevel,
+        localWaterZ,
         gravityZ,
         stepSize,
       );
@@ -1141,8 +1170,13 @@ const sampleAudioImpacts = (stepSize: number) => {
   // Accumulate translational constraint force jump per body over this step
   const bodyJumpSq = new Map<number, number>();
   for (let d = 0; d < nv; d++) {
-    const df = qfrcC[d] - prevConstraintDof[d];
-    prevConstraintDof[d] = qfrcC[d];
+    const cur = qfrcC[d];
+    const prev = prevConstraintDof[d];
+    prevConstraintDof[d] = cur;
+    // Only trigger on rising contact/constraint loading (or sign reversal), never when a contact unloads to zero!
+    const isLoading = Math.abs(cur) > Math.abs(prev) + 0.25 || cur * prev < -0.25;
+    if (!isLoading) continue;
+    const df = cur - prev;
     if (Math.abs(df) < 0.25) continue;
     const bId = dofBody[d];
     if (bId <= 0) continue;
@@ -2031,6 +2065,7 @@ const doBuild = (
   rebuildBreakableWelds();
   rebuildImpactWatches();
   pendingWake.clear(); // body ids from the old model mean nothing in this one
+  envWaterBasins = collectWaterBasins(sceneGraph.nodes);
   rebuildHydroAndFlexureCaches();
   scriptCache = {};
 
@@ -2224,6 +2259,7 @@ const runHeadless = async (
   frameContacts = true,
   headlessWaterLevel: number | null = envWaterLevel,
   headlessHydroModels?: HydroBodyModel[],
+  headlessWaterBasins: WaterBasinWorld[] = envWaterBasins,
 ): Promise<HeadlessRunResult> => {
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
   const mj = mujoco;
@@ -2282,7 +2318,7 @@ const runHeadless = async (
     brokenWeldKeys = new Set();
     rebuildBreakableWelds();
     watchImpacts();
-    rebuildHydroAndFlexureCaches(headlessHydroModels, headlessWaterLevel);
+    rebuildHydroAndFlexureCaches(headlessHydroModels, headlessWaterLevel, headlessWaterBasins);
 
     seedActuatorCtrl(sceneGraph.nodes, data);
     mujoco.mj_forward(model, data);
@@ -2353,7 +2389,7 @@ const runHeadless = async (
       rebuildBreakableWelds();
       watchImpacts();
       pendingWake.clear();
-      rebuildHydroAndFlexureCaches(undefined, headlessWaterLevel);
+      rebuildHydroAndFlexureCaches(undefined, headlessWaterLevel, headlessWaterBasins);
       scriptCache = {};
       if (carried) carryByJointName(carried, nextModel, nextData);
       else mj.mj_forward(nextModel, nextData);
@@ -2370,7 +2406,7 @@ const runHeadless = async (
       step: () => {
         data!.xfrc_applied.fill(0);
         data!.qfrc_applied.fill(0);
-        applyHydroAndFlexureForces(timestep, headlessWaterLevel);
+        applyHydroAndFlexureForces(timestep, headlessWaterLevel, headlessWaterBasins);
         lastAero = {};
         const t0 = performance.now();
         executeScripts(sceneGraph.nodes, lastAero);
@@ -2540,11 +2576,14 @@ const handleMessage = async (evt: MessageEvent) => {
         envWindX = msg.windX ?? envWindX;
         envWindY = msg.windY ?? envWindY;
         envDensity = msg.density ?? envDensity;
+        if ('waterBasins' in msg) {
+          envWaterBasins = msg.waterBasins ?? [];
+        }
         if ('waterLevel' in msg) {
           envWaterLevel = typeof msg.waterLevel === 'number' && Number.isFinite(msg.waterLevel) ? msg.waterLevel : null;
-          rebuildHydroAndFlexureCaches(msg.hydroModels, envWaterLevel);
-        } else if (msg.hydroModels) {
-          rebuildHydroAndFlexureCaches(msg.hydroModels, envWaterLevel);
+        }
+        if ('waterLevel' in msg || 'waterBasins' in msg || msg.hydroModels) {
+          rebuildHydroAndFlexureCaches(msg.hydroModels, envWaterLevel, envWaterBasins);
         }
         break;
       }
@@ -2653,6 +2692,7 @@ const handleMessage = async (evt: MessageEvent) => {
             msg.contacts !== false,
             'waterLevel' in msg ? (msg.waterLevel ?? null) : envWaterLevel,
             msg.hydroModels,
+            msg.waterBasins ?? collectWaterBasins(msg.sceneGraph.nodes),
           );
           post({ type: 'HEADLESS_RESULT', id, ...result });
         } finally {

@@ -3,9 +3,12 @@ import * as THREE from 'three';
 import type { SceneNode } from '../src/types/scene';
 import {
   buildHydroBodyModel,
+  collectWaterBasins,
   computeBuoyancyWrench,
   evaluateSubmerged,
   FRESHWATER_DENSITY,
+  measureContainerBasin,
+  pointInsideWaterBasin,
 } from '../src/utils/hydrostatics';
 import {
   analyzeStability,
@@ -213,8 +216,23 @@ describe('Inverse Balance & Ballast (Stand / Spin / Float)', () => {
     expect(res.after.float.trimOffsetMm).toBeLessThan(res.before.float.trimOffsetMm);
   });
 
-  it('simulates hydrostaticFlotationPreset in MuJoCo: balanced buoy self-rights from 45°, red buoy capsizes, skiff floats, and cup floods & sinks', async () => {
-    const WATER_Z = 0.145;
+  it('simulates hydrostaticFlotationPreset in MuJoCo: container-bounded water floats balanced buoy from 42°, red buoy capsizes, skiff floats, and cup floods & sinks', async () => {
+    const tank = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'hydro_test_tank')!;
+    expect(tank.waterFill).toBeCloseTo(0.8, 3);
+    const localBasin = measureContainerBasin(tank);
+    expect(localBasin).not.toBeNull();
+    expect(localBasin!.shape).toBe('box');
+
+    const basins = collectWaterBasins(hydrostaticFlotationPreset.nodes);
+    expect(basins.length).toBe(1);
+    const tankBasin = basins[0];
+    const WATER_Z = tankBasin.surfaceZ;
+    expect(WATER_Z).toBeCloseTo(0.154, 3);
+    // Bounded strictly inside the aquarium walls — points outside the tank stay dry!
+    expect(pointInsideWaterBasin(tankBasin, 0, 0)).toBe(true);
+    expect(pointInsideWaterBasin(tankBasin, 0.55, 0)).toBe(false);
+    expect(pointInsideWaterBasin(tankBasin, 0, 0.30)).toBe(false);
+
     const unbalanced = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'unbalanced_buoy')!;
     const balanced = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'balanced_spar_buoy')!;
     const skiff = hydrostaticFlotationPreset.nodes.find((n) => n.id === 'open_hull_skiff')!;
@@ -227,7 +245,7 @@ describe('Inverse Balance & Ballast (Stand / Spin / Float)', () => {
     expect(uprightBal.float.metacentricMarginMm).toBeGreaterThan(uprightUnbal.float.metacentricMarginMm);
     expect(balanced.children.some((c) => c.hardwarePart?.kind === 'nut')).toBe(true);
 
-    // Step 3.5s in real MuJoCo WASM with live Archimedes buoyancy + hydrodynamic drag wrenches!
+    // Step 3.5s in real MuJoCo WASM with container-bounded Archimedes buoyancy + hydrodynamic drag wrenches!
     const sim = await simulate(hydrostaticFlotationPreset);
     try {
       const bidOf = (n: SceneNode) => {
@@ -246,6 +264,7 @@ describe('Inverse Balance & Ballast (Stand / Spin / Float)', () => {
           const pOff = fb.bId * 3;
           const mOff = fb.bId * 9;
           const pos = [sim.data.xpos[pOff], sim.data.xpos[pOff + 1], sim.data.xpos[pOff + 2]];
+          if (!pointInsideWaterBasin(tankBasin, pos[0], pos[1])) continue;
           const xmat = Array.from({ length: 9 }, (_, k) => sim.data.xmat[mOff + k]);
           const ipos = [sim.data.xipos[pOff], sim.data.xipos[pOff + 1], sim.data.xipos[pOff + 2]];
           const cOff = fb.bId * 6;

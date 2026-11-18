@@ -7,7 +7,11 @@
 
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { MeshFileLedger } from '../utils/meshVfs';
-import { buildHydroBodyModel, type HydroBodyModel } from '../utils/hydrostatics';
+import {
+  buildHydroBodyModel,
+  collectWaterBasins,
+  type HydroBodyModel,
+} from '../utils/hydrostatics';
 import type {
   BuiltResult,
   ConstraintBrokenEvent,
@@ -481,7 +485,10 @@ export class PhysicsWorkerClient {
     waterLevel?: number | null,
     sceneGraphForHydro?: SceneGraph,
   ) {
-    const hasWater = typeof waterLevel === 'number' && Number.isFinite(waterLevel);
+    const waterBasins = sceneGraphForHydro ? collectWaterBasins(sceneGraphForHydro.nodes) : undefined;
+    const hasWater =
+      (typeof waterLevel === 'number' && Number.isFinite(waterLevel)) ||
+      (waterBasins !== undefined && waterBasins.length > 0);
     const hydroModels = hasWater && sceneGraphForHydro
       ? collectHydroModels(sceneGraphForHydro.nodes)
       : undefined;
@@ -492,6 +499,7 @@ export class PhysicsWorkerClient {
       density,
       ...(waterLevel !== undefined ? { waterLevel } : {}),
       ...(hydroModels ? { hydroModels } : {}),
+      ...(waterBasins ? { waterBasins } : {}),
     });
   }
   setSound(enabled: boolean) {
@@ -525,7 +533,10 @@ export class PhysicsWorkerClient {
     // file the last live build only sent as text (a SCAD body just updated),
     // and without these the worker fails with "Error opening file m_….msh".
     const { add, drop } = this.meshFiles.take();
-    const hasWater = typeof frames.waterLevel === 'number' && Number.isFinite(frames.waterLevel);
+    const waterBasins = collectWaterBasins(sceneGraph.nodes);
+    const hasWater =
+      (typeof frames.waterLevel === 'number' && Number.isFinite(frames.waterLevel)) ||
+      waterBasins.length > 0;
     const hydroModels = hasWater ? collectHydroModels(sceneGraph.nodes) : undefined;
     return new Promise((resolve, reject) => {
       this.noteRequest();
@@ -544,6 +555,7 @@ export class PhysicsWorkerClient {
           judgeImpacts: !!judge,
           ...(frames.waterLevel !== undefined ? { waterLevel: frames.waterLevel } : {}),
           ...(hydroModels ? { hydroModels } : {}),
+          ...(waterBasins.length > 0 ? { waterBasins } : {}),
         },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );

@@ -30,10 +30,10 @@ export function SettingsPopover() {
   const highFidelity = simFidelity === 'print';
   const {
     isSettingsOpen, setSettingsOpen,
-    gravityZ, windX, windY, density, floorFriction, floorBounce, waterLevel, background, setEnvironment,
+    gravityZ, windX, windY, density, floorFriction, floorBounce, background, setEnvironment,
   } = useStore(useShallow((s) => ({
     isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
-    gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, waterLevel: s.waterLevel, background: s.background, setEnvironment: s.setEnvironment,
+    gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, background: s.background, setEnvironment: s.setEnvironment,
   })));
   const llm = useLlmSettings(isSettingsOpen);
   if (!isSettingsOpen) return null;
@@ -143,26 +143,6 @@ export function SettingsPopover() {
           <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <SliderValue value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} decimals={2} min={0} max={1} /></label>
           <RangeInput min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} className="w-full accent-blue-500 cursor-pointer" />
         </div>
-        <div className="flex items-center justify-between gap-2">
-          <span id="waterSurfaceLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Free-surface waterline with true Archimedes submerged mesh buoyancy, righting moment, and open-hull flooding.">Water Surface</span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={waterLevel !== null}
-            aria-labelledby="waterSurfaceLabel"
-            title="Enable free-surface water plane and 6-DOF Archimedes buoyancy"
-            onClick={() => setEnvironment({ waterLevel: waterLevel === null ? 0.05 : null })}
-            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${waterLevel !== null ? 'bg-cyan-500' : 'bg-slate-300 dark:bg-slate-700'}`}
-          >
-            <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${waterLevel !== null ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-          </button>
-        </div>
-        {waterLevel !== null && (
-          <div className="flex flex-col gap-1 -mt-2">
-            <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Water Level Z <SliderValue value={waterLevel} onChange={(v) => setEnvironment({ waterLevel: v })} decimals={2} unit="m" min={-0.5} max={1} /></label>
-            <RangeInput min="-0.5" max="1" step="0.01" value={waterLevel} onChange={(v) => setEnvironment({ waterLevel: v })} className="w-full accent-cyan-500 cursor-pointer" />
-          </div>
-        )}
         {/* High fidelity: stiff contact and exact pin-and-hole collision for
             millimetre clearances, plus rigid molds sampled twice as fine. A
             property of the scene, so it is undone and saved with it. */}

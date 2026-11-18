@@ -359,7 +359,7 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
       return Math.max(hMin * 0.08, hMin - cutDepth * Math.sqrt(1 - u * u));
     });
     freqs = [f1, f2, f3, f3 * 1.65];
-    gains = typeof node.tunedPitchHz === 'number' ? [1.0, 0.24, 0.09, 0.03] : [1.0, 0.52, 0.22, 0.10];
+    gains = typeof node.tunedPitchHz === 'number' ? [1.0, 0.10, 0.035, 0.012] : [1.0, 0.42, 0.16, 0.07];
   } else if (
     node.isTube ||
     primaryGeom?.type === 'cylinder' ||
@@ -430,11 +430,19 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
     }
   }
 
-  // If user explicitly calibrated tunedPitchHz, anchor f1 cleanly to exact concert pitch
-  if (typeof node.tunedPitchHz === 'number' && node.tunedPitchHz > 15) {
-    const scale = node.tunedPitchHz / Math.max(1e-6, freqs[0]);
-    if (Math.abs(scale - 1) < 0.08 || regime === 'block') {
+  // Measure physical overtone ratio from un-snapped beam eigenvalues before anchoring f1
+  const rawOvertoneRatio = +(freqs[1] / Math.max(1e-6, freqs[0])).toFixed(3);
+
+  // If user or luthier tuner explicitly calibrated tunedPitchHz, anchor f1 cleanly to exact concert pitch
+  const isExplicitlyTuned = typeof node.tunedPitchHz === 'number' && node.tunedPitchHz > 15;
+  if (isExplicitlyTuned) {
+    const scale = node.tunedPitchHz! / Math.max(1e-6, freqs[0]);
+    if (Math.abs(scale - 1) < 0.35 || regime === 'block') {
       freqs = freqs.map((f) => f * scale);
+    }
+    // Real double-arched orchestral marimba/glockenspiel bars tune the 2nd mode to a consonant 4:1 double-octave
+    if (regime === 'arched_bar' && freqs.length >= 2) {
+      freqs = [freqs[0], freqs[0] * 4.0, freqs[0] * 9.2, freqs[0] * 14.8];
     }
   }
 
@@ -451,7 +459,7 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
   );
 
   const fundamentalHz = +freqs[0].toFixed(2);
-  const overtoneRatio = +(freqs[1] / Math.max(1e-6, freqs[0])).toFixed(3);
+  const overtoneRatio = rawOvertoneRatio;
 
   // Only modes within human hearing (< 18 kHz) ring as sinusoidal voices, weighted by
   // the Fourier spectrum of the half-sine Hertz force pulse |F(f)| = |cos(π f τ_c) / (1 - (2 f τ_c)²)|.
@@ -467,8 +475,11 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
       : Math.abs(Math.cos(Math.PI * x) / (1 - 4 * x * x));
     const weightedGain = (gains[idx] ?? 0.12) * Math.min(1.15, 0.35 + 0.85 * pulseExcitation);
     if (weightedGain < 0.008) continue;
-    const modeQ = mat.qualityQ / (1 + 0.42 * idx);
-    const decaySec = Math.max(0.014, Math.min(4.2, (modeQ / (Math.PI * rawHz)) * 2.8));
+    // Zener thermoelastic + nodal cord radiation damping increases quadratically with mode index
+    const modeQ = mat.qualityQ / (1 + 4.5 * idx * idx);
+    const rawDecay = (modeQ / (Math.PI * rawHz)) * 2.8;
+    const maxModeDecay = idx > 0 && isExplicitlyTuned ? 0.11 / idx : 4.2;
+    const decaySec = Math.max(0.014, Math.min(maxModeDecay, rawDecay));
     modes.push({
       freqHz: +rawHz.toFixed(2),
       gain: +weightedGain.toFixed(3),
@@ -631,7 +642,7 @@ export function playModalImpact(profile: BodyModalProfile, impulseNs: number, _i
   lp.frequency.setValueAtTime(1100 + 2400 * profile.material.brightness, now);
   lp.Q.setValueAtTime(0.85, now);
   const clickGain = ctx.createGain();
-  const pulseWeight = profile.modes.length === 0 ? 1.45 : 0.4 + 0.4 * profile.material.brightness;
+  const pulseWeight = profile.modes.length === 0 ? 1.45 : 0.16 + 0.22 * profile.material.brightness;
   clickGain.gain.setValueAtTime(level * pulseWeight, now);
   pulseSrc.connect(lp);
   lp.connect(clickGain);

@@ -10,6 +10,7 @@ import { SurfacePatternsCard } from '../SurfacePatternsCard';
 import { AerodynamicsCard, BodyBasicsCard } from './BodyBasicsCard';
 import { AcousticTuningCard } from './AcousticTuningCard';
 import { BalanceCard } from './BalanceCard';
+import { ContainerWaterCard } from './ContainerWaterCard';
 import { FlexureCard } from './FlexureCard';
 import { MoldCard } from './MoldCard';
 import { CollisionCard } from './CollisionCard';
@@ -119,7 +120,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
 
       {tab === 'physics' && (
         <>
-          <BalanceCard node={node} />
+          <ContainerWaterCard node={node} />
           <AerodynamicsCard node={node} />
           <GeomPropertiesCard node={node} part="physics" />
           <JointTypeCard node={node} />
@@ -132,6 +133,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
           <CollisionCard node={node} />
           <PulleyWheelCard node={node} />
           <RopeCard node={node} />
+          <BalanceCard node={node} />
         </>
       )}
 

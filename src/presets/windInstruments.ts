@@ -272,9 +272,9 @@ export const windInstrumentsPreset: SceneGraph = (() => {
         type: 'hinge',
         axis: [1, 0, 0],
         pos: [0, 0, 0],
-        stiffness: 0.85,
+        stiffness: 1.8,
         springref: 0,
-        damping: 0.05,
+        damping: 0.08,
         limited: true,
         range: [0, 22],
       },
@@ -317,9 +317,9 @@ export const windInstrumentsPreset: SceneGraph = (() => {
         type: 'slide',
         axis: [0, 0, -1],
         pos: [0, 0, 0],
-        stiffness: 28,
+        stiffness: 38,
         springref: 0,
-        damping: 1.4,
+        damping: 1.8,
         limited: true,
         range: [0, 0.013],
       },
@@ -370,27 +370,27 @@ export const windInstrumentsPreset: SceneGraph = (() => {
     windInstrument: {
       exciter: 'reed',
       breathKPa: 0,
-      embouchureHz: 330,
+      embouchureHz: 260,
       toneholeJoints: [
-        { jointName: 'clarinet_key_1', axialFraction: 0.56, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_2', axialFraction: 0.65, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_3', axialFraction: 0.74, diameterMm: 11.0 },
-        { jointName: 'clarinet_key_4', axialFraction: 0.84, diameterMm: 11.5 },
+        { jointName: 'clarinet_key_1', axialFraction: 0.578, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_2', axialFraction: 0.652, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_3', axialFraction: 0.781, diameterMm: 11.0 },
+        { jointName: 'clarinet_key_4', axialFraction: 0.880, diameterMm: 11.5 },
       ],
     },
-    script: `// Seconds 0.0 .. 4.4 of each 9s duet cycle: warm woody clarinet melody with real keywork fingerings!
+    script: `// Seconds 0.0 .. 4.4 of each 9s duet cycle: warm woody G-major chalumeau melody with real keywork fingerings!
 const tCycle = api.getTime() % 9.0;
 if (tCycle < 4.4) {
-  // 7 lyrical notes: low chalumeau -> throat register -> gentle cadence
+  // 7 lyrical notes in G major pentatonic (G3, A3, B3, D4, E4, B3, G3):
   const phrases = [
     // [durSec, openKeysMask (bit0=key1..bit3=key4), breathKPa]
-    [0.62, 0b0000, 3.1], // Low C#4 / D4 (all pads sealed)
-    [0.62, 0b1000, 3.2], // E4 (key 4 open)
-    [0.62, 0b1100, 3.3], // F#4 (keys 3,4 open)
-    [0.62, 0b1110, 3.4], // G#4 (keys 2,3,4 open)
-    [0.62, 0b1111, 3.5], // A4 (all 4 keys open)
-    [0.55, 0b1100, 3.2], // F#4
-    [0.75, 0b1000, 3.0], // E4 long warm taper
+    [0.62, 0b0000, 2.9], // G3 (196.0 Hz — all pads sealed)
+    [0.60, 0b1000, 3.0], // A3 (220.0 Hz — key 4 open)
+    [0.60, 0b1100, 3.1], // B3 (246.9 Hz — keys 3,4 open)
+    [0.62, 0b1110, 3.2], // D4 (293.7 Hz — keys 2,3,4 open)
+    [0.64, 0b1111, 3.3], // E4 (329.6 Hz — all 4 keys open)
+    [0.56, 0b1100, 3.0], // B3 (246.9 Hz — keys 3,4 open)
+    [0.76, 0b0000, 2.8], // G3 (196.0 Hz — warm tonic cadence)
   ];
   let cursor = 0;
   let mask = 0;
@@ -399,8 +399,8 @@ if (tCycle < 4.4) {
     const dur = phrases[i][0];
     if (tCycle >= cursor && tCycle < cursor + dur) {
       const u = (tCycle - cursor) / dur;
-      // Gentle tongued articulation between notes ("du - du - du")
-      const tongue = u < 0.07 ? u / 0.07 : (u > 0.90 ? (1 - u) / 0.10 : 1.0);
+      // Keys move during the brief 4% tongued break so pads are seated cleanly before breath rises!
+      const tongue = u < 0.045 ? 0 : u < 0.12 ? (u - 0.045) / 0.075 : u > 0.90 ? (1 - u) / 0.10 : 1.0;
       env = phrases[i][2] * tongue;
       mask = phrases[i][1];
       break;
@@ -409,10 +409,10 @@ if (tCycle < 4.4) {
   }
   const st = api.state || (api.state = {});
   st.breathKPa = env;
-  if (mask & 1) api.applyJointForce('clarinet_key_1', 0.28);
-  if (mask & 2) api.applyJointForce('clarinet_key_2', 0.28);
-  if (mask & 4) api.applyJointForce('clarinet_key_3', 0.28);
-  if (mask & 8) api.applyJointForce('clarinet_key_4', 0.28);
+  if (mask & 1) api.applyJointForce('clarinet_key_1', 0.65);
+  if (mask & 2) api.applyJointForce('clarinet_key_2', 0.65);
+  if (mask & 4) api.applyJointForce('clarinet_key_3', 0.65);
+  if (mask & 8) api.applyJointForce('clarinet_key_4', 0.65);
 } else {
   const st = api.state || (api.state = {});
   st.breathKPa = 0;
@@ -421,7 +421,7 @@ if (tCycle < 4.4) {
     joints: [],
     geoms: [
       // Tapered ebonite mouthpiece + blonde cane reed + twin silver ligature rings
-      { name: 'clar_mouthpiece', type: 'capsule', fromto: [-0.212, 0, 0.002, -0.168, 0, 0], size: [0.0115], rgba: [0.10, 0.09, 0.10, 1] },
+      { name: 'clar_mouthpiece', type: 'capsule', fromto: [-0.2106, 0, 0.002, -0.168, 0, 0], size: [0.0115], rgba: [0.10, 0.09, 0.10, 1] },
       { name: 'cane_reed', type: 'box', size: [0.024, 0.0055, 0.0012], pos: [-0.192, 0, -0.0115], rgba: [0.87, 0.73, 0.40, 1], role: 'visual' },
       { name: 'silver_ligature_1', type: 'cylinder', size: [0.0128, 0.0022], pos: [-0.184, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
       { name: 'silver_ligature_2', type: 'cylinder', size: [0.0128, 0.0022], pos: [-0.175, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
@@ -470,8 +470,8 @@ if (tCycle < 4.4) {
     windInstrument: {
       exciter: 'brass_lip',
       breathKPa: 0,
-      embouchureHz: 430,
-      boreLengthM: 0.855,
+      embouchureHz: 392,
+      boreLengthM: 0.8573,
       mouthRadiusM: 0.0055,
       bellRadiusM: 0.054,
       flareExponent: 2.75,
@@ -481,33 +481,34 @@ if (tCycle < 4.4) {
         { jointName: 'cornet_valve_3', semitones: 3, strokeM: 0.013 },
       ],
     },
-    script: `// Seconds 4.5 .. 8.9 of each 9s duet cycle: G-major brass fanfare matching the clarinet's G-major pentatonic key!
+    script: `// Seconds 4.5 .. 8.9 of each 9s duet cycle: G-major brass fanfare answering the clarinet an octave higher!
 const tCycle = api.getTime() % 9.0;
 if (tCycle >= 4.5 && tCycle < 8.9) {
   const dt = tCycle - 4.5;
-  // Natural harmonics of the 0.855 m G3 horn + real 3-piston semitone valve combinations:
-  //   G4 (392 Hz): Open (0-0-0), mode n=2 -> lip ~430 Hz
-  //   A4 (440 Hz): Valves 1+3 (-5 st), mode n=3 -> lip ~480 Hz
-  //   B4 (494 Hz): Valves 1+2 (-3 st), mode n=3 -> lip ~540 Hz
-  //   D5 (587 Hz): Open (0-0-0), mode n=3 -> lip ~640 Hz
+  // Exact natural harmonics of the 0.8573 m G3 horn + real 3-piston semitone valve combinations:
+  //   G4 (392.0 Hz): Open (0-0-0), mode n=2
+  //   A4 (440.0 Hz): Valves 1+3 (-5 st), mode n=3
+  //   B4 (493.9 Hz): Valves 1+2 (-3 st), mode n=3
+  //   D5 (587.3 Hz): Open (0-0-0), mode n=3
   const fanfare = [
-    [0.58, 430, 0b000, 3.6], // G4  (Open)
-    [0.58, 540, 0b011, 3.8], // B4  (Valves 1+2)
-    [0.62, 640, 0b000, 4.0], // D5  (Open)
-    [0.55, 540, 0b011, 3.8], // B4  (Valves 1+2)
-    [0.55, 480, 0b101, 3.7], // A4  (Valves 1+3)
-    [0.55, 540, 0b011, 3.8], // B4  (Valves 1+2)
-    [0.97, 430, 0b000, 3.5], // G4  (Warm sustained resolve)
+    [0.58, 392, 0b000, 2.9], // G4  (Open)
+    [0.58, 494, 0b011, 3.1], // B4  (Valves 1+2)
+    [0.62, 587, 0b000, 3.3], // D5  (Open)
+    [0.55, 494, 0b011, 3.0], // B4  (Valves 1+2)
+    [0.55, 440, 0b101, 2.9], // A4  (Valves 1+3)
+    [0.55, 494, 0b011, 3.0], // B4  (Valves 1+2)
+    [0.97, 392, 0b000, 2.8], // G4  (Warm sustained resolve)
   ];
   let cursor = 0;
   let vMask = 0;
   let breath = 0;
-  let lipHz = 349.23;
+  let lipHz = 392;
   for (let i = 0; i < fanfare.length; i++) {
     const dur = fanfare[i][0];
     if (dt >= cursor && dt < cursor + dur) {
       const u = (dt - cursor) / dur;
-      const tongue = u < 0.08 ? u / 0.08 : (u > 0.88 ? (1 - u) / 0.12 : 1.0);
+      // Pistons seat during the brief 4.5% tongued gap before breath rises so valved notes never scoop!
+      const tongue = u < 0.045 ? 0 : u < 0.13 ? (u - 0.045) / 0.085 : u > 0.88 ? (1 - u) / 0.12 : 1.0;
       breath = fanfare[i][3] * tongue;
       lipHz = fanfare[i][1];
       vMask = fanfare[i][2];
@@ -518,9 +519,9 @@ if (tCycle >= 4.5 && tCycle < 8.9) {
   const st = api.state || (api.state = {});
   st.breathKPa = breath;
   st.embouchureHz = lipHz;
-  if (vMask & 1) api.applyJointForce('cornet_valve_1', 0.48);
-  if (vMask & 2) api.applyJointForce('cornet_valve_2', 0.48);
-  if (vMask & 4) api.applyJointForce('cornet_valve_3', 0.48);
+  if (vMask & 1) api.applyJointForce('cornet_valve_1', 0.90);
+  if (vMask & 2) api.applyJointForce('cornet_valve_2', 0.90);
+  if (vMask & 4) api.applyJointForce('cornet_valve_3', 0.90);
 } else {
   const st = api.state || (api.state = {});
   st.breathKPa = 0;
