@@ -193,8 +193,13 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
     cuts.push(neck);
     // Lapels: the fronts cut along their roll lines, to be turned back there (garmentCollars).
     if (d.lapels && d.opening) cuts.push(...lapelCuts(d.lapels, L, neck));
-    if (!sleeved) for (const arm of ['armL', 'armR'] as const) cuts.push({ kind: 'armhole', limb: arm, extra: 0.01 * s + d.armhole * s });
   }
+  // Round each arm it does not sleeve, from a band too: a strapless bodice
+  // cut at a height above the armpit, not cut round the arm hanging against
+  // it, ran 12 mm into it there, was pushed out as the scene began, and its
+  // top folded through itself and through the sleeve of a jacket over it.
+  // Where a band is lower (a waist) the cut meets no cloth.
+  if (!sleeved) for (const arm of ['armL', 'armR'] as const) cuts.push({ kind: 'armhole', limb: arm, extra: 0.01 * s + d.armhole * s });
   cuts.push({ kind: 'hem', z: hem, train: d.legs ? 0 : d.train, on: [...bodyParts, 'webL', 'webR'], profile: edgeOf(draft, 'hem')?.profile });
 
 
