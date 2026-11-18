@@ -22,7 +22,7 @@ import { restOff } from './garmentPlan';
 import { garmentShell } from './garmentShell';
 import { doneUp } from './fastening';
 import { flattenPanel, type FlatPiece } from './garmentFlatten';
-import { spreadPanel } from './garmentSpread';
+import { meshSpacing, spreadOver, spreadPanel } from './garmentSpread';
 import { addRod, rodLines, type RodConstraints } from './clothRods';
 import { BOARD_STIFFNESS, type Board } from './clothBoards';
 import { garmentForm, garmentSettings } from './garments';
@@ -679,14 +679,36 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const spreadStitches: [number, number][] = [];
     const seamTackAt: { particle: number; group: number; a: number; b: number; t: number; offset: number; across: number }[] = [];
     const spreadRows = new Map<number, { ratio: number; row: [number, number][] }>();
-    shell.panels.forEach((panel, k) => {
+    const flats = shell.panels.map((panel, k) => {
       const flat = flattenPanel(panel.name, shell.cut ?? shell.points, shell.tris, panel.tris, seamPaths, 15, panel.upAxis, panelEdgeEase(shell, sides, k));
       if (ease < 0 || bandEase < 0) {
         const girths = panelGirths(flat.points);
         for (let i = 0; i < flat.uv.length; i++) flat.uv[i] = [flat.uv[i][0] * uScale(flat.points[i], girths[i]), flat.uv[i][1]];
       }
-      // Gathered or pleated: spread along its seam and meshed afresh (garmentSpread), its new points new particles.
-      const spread = spreadPanel(shell, k, flat, sides, material.thickness);
+      return flat;
+    });
+    // Gathered or pleated: spread along its seam and meshed afresh (garmentSpread), its new points new particles.
+    // Where both sides of a seam are spread, the side laid over the other
+    // (spreadOver) after it, clear of its layers along the seam (a gathered
+    // skirt over the release tucks of its bodice).
+    const spreads: (ReturnType<typeof spreadPanel>)[] = new Array(shell.panels.length).fill(null);
+    const overs = shell.panels.map((_, k) => spreadOver(sides, k));
+    shell.panels.forEach((_, k) => { if (!overs[k]) spreads[k] = spreadPanel(shell, k, flats[k], sides, material.thickness); });
+    shell.panels.forEach((_, k) => {
+      if (!overs[k]) return;
+      const across = new Set(sides.find((sd) => sd.panel === k && sd.kind !== 'ease')!.across.values());
+      const layers = [...across].flatMap((p) => spreads[p]?.seamLayers ?? []);
+      // The panel across's layers within a couple of mesh steps along the seam: its folds' top layers and their turns.
+      const reach = 2 * meshSpacing(flats[k]);
+      const under = (q: number[]) => {
+        let y = 0;
+        for (const l of layers) if (l.y > y && Math.hypot(l.at[0] - q[0], l.at[1] - q[1], l.at[2] - q[2]) < reach) y = l.y;
+        return y;
+      };
+      spreads[k] = spreadPanel(shell, k, flats[k], sides, material.thickness, under);
+    });
+    shell.panels.forEach((panel, k) => {
+      const flat = flats[k], spread = spreads[k];
       let piece: FlatPiece = flat;
       if (spread) {
         const turn = new THREE.Vector3();
@@ -842,7 +864,17 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         }
       }
       if (!tri || !bary) continue;
-      const tk = { particle: st.particle, tri, bary, offset: st.offset }, moved = mass[tk.particle] / 2;
+      // Held as far off it as it starts: the edge nearest may be any of the
+      // other's layers there (a tuck's, one of them turned back under), and an
+      // offset from the seam held it through the layers over that one.
+      let offset = st.offset;
+      if (other) {
+        const [A, B, C] = tri.map((q) => x0[q]), P = x0[st.particle];
+        const u = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], v = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
+        const nn = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]], nl = Math.hypot(nn[0], nn[1], nn[2]);
+        if (nl > 1e-18) offset = [0, 1, 2].reduce((acc, c) => acc + (P[c] - (bary![0] * A[c] + bary![1] * B[c] + bary![2] * C[c])) * nn[c], 0) / nl;
+      }
+      const tk = { particle: st.particle, tri, bary, offset }, moved = mass[tk.particle] / 2;
       tacks.push(tk);
       mass[tk.particle] -= moved;
       for (let c = 0; c < 3; c++) mass[tk.tri[c]] += moved * tk.bary[c];

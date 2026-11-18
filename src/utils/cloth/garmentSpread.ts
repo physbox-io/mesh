@@ -56,6 +56,8 @@ export interface SpreadPanel {
   seamRow: [number, number][];
   /** Its cloth over the seam's length. */
   ratio: number;
+  /** Its points along the seam: on the seam where they are sewn (the shell's frame), and how far out from it they start. */
+  seamLayers: { at: number[]; y: number }[];
   /** Pressed pleats: a point held to its own triangle under it (local points). */
   pressTacks: { local: number; tri: [number, number, number]; bary: [number, number, number]; offset: number }[];
   /**
@@ -253,7 +255,39 @@ function knifeCurve(k: Knife, tau: number): V2 {
 }
 
 /** `thickness`: the fabric's, metres: how far apart a pleat's layers lie. */
-export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, sides: FullSide[], thickness = CLOTH_THICKNESS): SpreadPanel | null {
+/** A piece's mesh spacing: its median edge, flat. */
+export function meshSpacing({ uv, tris }: { uv: number[][]; tris: number[] }): number {
+  const lens: number[] = [];
+  for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) { const a = uv[tris[t + e]], b = uv[tris[t + ((e + 1) % 3)]]; lens.push(Math.hypot(a[0] - b[0], a[1] - b[1])); }
+  lens.sort((a, b) => a - b);
+  return lens[Math.floor(lens.length / 2)];
+}
+
+/**
+ * Where both sides of a seam are spread, whether panel `k`'s is the one held
+ * to the other's (clothModel tacks the fuller, else the first) and so laid
+ * over it: false where it is not spread, or nothing across is.
+ */
+export function spreadOver(sides: FullSide[], k: number): boolean {
+  const side = sides.find((s) => s.panel === k && s.kind !== 'ease');
+  if (!side) return false;
+  let across = false;
+  for (const p of new Set(side.across.values())) {
+    const o = sides.find((q) => q.panel === p && q.kind !== 'ease');
+    if (!o) continue;
+    across = true;
+    if (!(side.ratio > o.ratio || (side.ratio === o.ratio && k < p))) return false;
+  }
+  return across;
+}
+
+/**
+ * `under`: where the panel across a seam is spread too and this one is laid
+ * over it (spreadOver), how far out that panel's own layers lie at a point of
+ * the seam (the shell's frame), so this one's seam row clears them (a
+ * gathered skirt over the release tucks of the bodice it is sewn to).
+ */
+export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, sides: FullSide[], thickness = CLOTH_THICKNESS, under?: (p: number[]) => number): SpreadPanel | null {
   const side = sides.find((s) => s.panel === k && s.kind !== 'ease');
   if (!side) return null;
   const n0 = shell.points.length, key = (a: number, b: number) => (a < b ? a * n0 + b : b * n0 + a);
@@ -277,11 +311,7 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
   const s: number[] = [0];
   for (let i = 1; i < W.length; i++) s.push(s[i - 1] + Math.hypot(W[i][0] - W[i - 1][0], W[i][1] - W[i - 1][1]));
   const S = s[s.length - 1];
-  // Mesh spacing: the piece's own (median edge, flat).
-  const lens: number[] = [];
-  for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) { const a = uv[tris[t + e]], b = uv[tris[t + ((e + 1) % 3)]]; lens.push(Math.hypot(a[0] - b[0], a[1] - b[1])); }
-  lens.sort((a, b) => a - b);
-  const spacing = lens[Math.floor(lens.length / 2)];
+  const spacing = meshSpacing(piece);
 
   // ---- The spread: sigma as a function of s, and the seam as spread.
   // Only between the panel's other seams where they leave this one: a side
@@ -486,11 +516,14 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
   // of its own along the seam, only the side that is tacked to the other
   // (clothModel: the fuller, else the first), its seam held a layer off the
   // other's: both raised, each was held up off the other, and pushed through it.
+  // Over a spread panel, clear of its layers there too (`under`): a layer
+  // out from the base of them only, it was laid through the tucks' upper
+  // layers it was held over.
   const over = [...new Set(side.across.values())].every((p) => {
     const o = sides.find((q) => q.panel === p && q.kind !== 'ease');
     return !o || ratio > o.ratio || (ratio === o.ratio && k < p);
   });
-  const seamLift = over ? thickness : 0;
+  const seamLift = (at: number[]) => (over ? thickness + (under ? under(at) : 0) : 0);
   const start: number[][] = [], normal: number[][] = [], foldAt: { sigma: number; off: V2; y: number; x: number; knife?: Knife; depth: number }[] = [];
   // Where each new point came from: found in the piece's own triangles as
   // spread, its sigma and offset from the seam between theirs (a pleat's strip
@@ -512,12 +545,12 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
     const atSeam = gather || !folds.length ? 0 : Math.min(1, thickness / (2 * folds[0].r));
     // Faded, folded only that much: along the seam between where it was cut and where the fold puts it.
     // Raised off the seam (seamLift), easing in below it.
-    const y = k * f.y * (atSeam + (1 - atSeam) * ramp) + seamLift * (1 - ramp);
     // (Not sFlat plus the fold's shift from sOf(sigma): across a pleat's strip
     // sFlat runs on between its neighbours either side, where every point of
     // the strip was cut at the one s, and the layers came out up to half a
     // mesh step out of place, stretched by up to 45%.)
     const base = pointAt(W, s, (1 - k) * sFlat + k * f.x);
+    const y = k * f.y * (atSeam + (1 - atSeam) * ramp) + (ramp < 1 ? seamLift(at3(base).x) * (1 - ramp) : 0);
     const { x, n } = at3([base[0] + off[0], base[1] + off[1]]);
     start.push([x[0] + n[0] * y, x[1] + n[1] * y, x[2] + n[2] * y]);
     normal.push(n);
@@ -621,7 +654,8 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
     return 1 - (1 - UNPRESSED_SET) * u * u * (3 - 2 * u);
   });
   const outlineOut = edges.flatMap((e) => mesh.edgeVerts[e.id].slice(0, -1));
-  return { points, uv: mesh.uv.map(([u, v]) => [u, v] as V2), tris: mesh.tris, outline: outlineOut, start, normal, own, seamTacks, seamRow, ratio, pressTacks, crushed, seamStitches, set };
+  const seamLayers = seamVerts.map((i) => ({ at: [0, 1, 2].map((c) => start[i][c] - normal[i][c] * foldAt[i].y), y: foldAt[i].y }));
+  return { points, uv: mesh.uv.map(([u, v]) => [u, v] as V2), tris: mesh.tris, outline: outlineOut, start, normal, own, seamTacks, seamRow, ratio, seamLayers, pressTacks, crushed, seamStitches, set };
 }
 
 /** The point of triangle abc nearest p, and its barycentric weights. */
