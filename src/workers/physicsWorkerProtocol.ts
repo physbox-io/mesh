@@ -362,6 +362,17 @@ export interface AudioImpactEvent {
   localPoint?: [number, number, number];
 }
 
+export interface BowedStringContactEvent {
+  stringNodeId: string;
+  bowNodeId: string;
+  bowGeomName?: string;
+  bowVelocityMps: number;
+  bowForceN: number;
+  localPoint: [number, number, number];
+  contactDurationSec: number;
+  stoppedLengthFraction?: number;
+}
+
 export type WorkerToMainMessage =
   | ({ type: 'BUILT'; id: string } & BuiltResult)
   | ({ type: 'FRAME' } & FrameSnapshot)
@@ -369,6 +380,7 @@ export type WorkerToMainMessage =
   | ({ type: 'CONSTRAINT_BROKEN' } & ConstraintBrokenEvent)
   | ({ type: 'IMPACT' } & ImpactEvent)
   | { type: 'AUDIO_IMPACTS'; events: AudioImpactEvent[] }
+  | { type: 'BOWED_STRINGS'; contacts: BowedStringContactEvent[] }
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   /** A headless run (`judgeImpacts`) has stopped at a blow and waits for HEADLESS_IMPACT_REPLY. */
   | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }

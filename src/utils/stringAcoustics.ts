@@ -133,6 +133,58 @@ export interface StringEvaluation {
   profile: BodyModalProfile;
 }
 
+export interface BowedStringContactInput {
+  node: SceneNode;
+  sceneNodes?: SceneNode[];
+  /** Tangential sliding speed of the bow across the string (m/s). */
+  bowVelocityMps: number;
+  /** Normal contact force pressing the bow onto the string (N). */
+  bowForceN: number;
+  /** Normalized distance from nearest termination x_bow / L in [0.03, 0.5]. */
+  bowBeta: number;
+  /** Optional stopped length fraction in (0.25, 1.0] raising f0 = f0_open / stoppedLengthFraction. */
+  stoppedLengthFraction?: number;
+  /** Optional bow-hair ribbon width along the string axis (m), default 0.009 m. */
+  bowRibbonWidthM?: number;
+}
+
+export interface BowedStringVoice {
+  active: boolean;
+  pitchHz: number;
+  amplitude: number;
+  harmonicWeights: number[];
+  bodyFormantHz: number;
+  bodyFormantGainDb: number;
+  bodyFormantQ: number;
+  secondaryFormantHz: number;
+  lowpassHz: number;
+  rosinNoiseGain: number;
+  rosinCenterHz: number;
+  /** Schelleng minimum bow force for Helmholtz stick-slip lock (N), scaling with Z0 * |v_bow| / beta^2. */
+  fMin: number;
+  /** Schelleng maximum bow force before raucous rosin crunch (N), scaling with Z0 * |v_bow| / beta. */
+  fMax: number;
+  /** Mechanical wave impedance Z0 = sqrt(T * mu) (kg/s). */
+  waveImpedanceZ0: number;
+  /** Active Schelleng bowing regime. */
+  regime: 'silent' | 'flautando' | 'helmholtz' | 'raucous';
+}
+
+const soundboxCache = new WeakMap<
+  SceneNode,
+  { geomsRef: SceneNode['geoms']; sculptVersion: number | undefined; res: SoundboxResonance }
+>();
+
+function getCachedSoundboxResonance(host: SceneNode): SoundboxResonance {
+  const hit = soundboxCache.get(host);
+  if (hit && hit.geomsRef === host.geoms && hit.sculptVersion === host.sculptVersion) {
+    return hit.res;
+  }
+  const res = analyzeSoundboxResonance(host);
+  soundboxCache.set(host, { geomsRef: host.geoms, sculptVersion: host.sculptVersion, res });
+  return res;
+}
+
 /** Measures the vibrating span L (m) of a string node from its post-CSG/Sculpt 3D geometry. */
 export function measureStringLengthM(node: SceneNode): number {
   const g = (node.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
@@ -296,6 +348,230 @@ function resolvePluckFractionFromPoint(node: SceneNode, localPoint: [number, num
   return Math.min(t, 1 - t);
 }
 
+/** Maps a body-local contact point on `node` to normalized bow/pluck distance β = x / L in [0.03, 0.5]. */
+export function resolveStringBetaFromPoint(node: SceneNode, localPoint?: [number, number, number]): number {
+  const frac = localPoint ? resolvePluckFractionFromPoint(node, localPoint) : null;
+  return Math.max(0.03, Math.min(0.5, frac ?? node.acousticString?.pluckPos ?? 0.12));
+}
+
+function resolveCoupledSoundbox(node: SceneNode, sceneNodes?: SceneNode[]): SoundboxResonance | null {
+  const spec = node.acousticString;
+  if (!spec || !sceneNodes?.length) return null;
+  let resonatorNode: SceneNode | null = null;
+  if (spec.resonatorNodeId) {
+    resonatorNode = findById(sceneNodes, spec.resonatorNodeId);
+  }
+  if (!resonatorNode) {
+    resonatorNode = findParentOf(sceneNodes, node.id);
+  }
+  return resonatorNode && !resonatorNode.acousticString
+    ? getCachedSoundboxResonance(resonatorNode)
+    : null;
+}
+
+/**
+ * 100% Generic Helmholtz / Schelleng Continuous Bowed-String Solver:
+ * - Computes exact Mersenne mechanical wave impedance Z0 = sqrt(T * mu)
+ * - Evaluates Schelleng's minimum (∝ Z0 |v_bow| / β²) and maximum (∝ Z0 |v_bow| / β)
+ *   bow-force limits for Helmholtz stick-slip lock vs airy flautando vs raucous crunch
+ * - Shapes harmonics H_1..H_20 with Cremer corner-rounding, bow-position node comb
+ *   (*sul ponticello* vs *sul tasto*), finite horsehair ribbon width, and the exact
+ *   3D Soundbox Transfer Function H_box(n * f0) (`analyzeSoundboxResonance`).
+ */
+export function solveBowedStringVoice(input: BowedStringContactInput): BowedStringVoice {
+  const { node, sceneNodes } = input;
+  const spec = node.acousticString;
+  if (!spec) {
+    return {
+      active: false,
+      pitchHz: 220,
+      amplitude: 0,
+      harmonicWeights: new Array<number>(20).fill(0),
+      bodyFormantHz: 220,
+      bodyFormantGainDb: 0,
+      bodyFormantQ: 1.4,
+      secondaryFormantHz: 480,
+      lowpassHz: 1800,
+      rosinNoiseGain: 0,
+      rosinCenterHz: 1400,
+      fMin: 0.02,
+      fMax: 1.0,
+      waveImpedanceZ0: 0.2,
+      regime: 'silent',
+    };
+  }
+
+  const mat = STRING_MATERIALS[spec.material] ?? STRING_MATERIALS.steel;
+  const openLengthM = measureStringLengthM(node);
+  const stopFrac =
+    input.stoppedLengthFraction !== undefined && Number.isFinite(input.stoppedLengthFraction)
+      ? Math.max(0.25, Math.min(1.0, input.stoppedLengthFraction))
+      : 1.0;
+  const effectiveLengthM = Math.max(0.02, openLengthM * stopFrac);
+
+  const radiusM = Math.max(0.00006, (spec.diameterMm || 0.5) / 2000);
+  const areaM2 = Math.PI * radiusM * radiusM;
+  const mu = mat.densityKgM3 * areaM2;
+  const tensionN = Math.max(0.5, spec.tensionN || 45);
+
+  // Exact mechanical wave impedance Z0 = sqrt(T * mu) and Mersenne fundamental f0
+  const waveImpedanceZ0 = Math.sqrt(tensionN * mu);
+  const waveSpeed = Math.sqrt(tensionN / mu);
+  const f0Open = waveSpeed / (2 * openLengthM);
+  const pitchHz = +(f0Open / stopFrac).toFixed(2);
+
+  const vBow = Math.abs(input.bowVelocityMps);
+  const forceN = Math.max(0, input.bowForceN);
+  const beta = Math.max(0.03, Math.min(0.5, Number.isFinite(input.bowBeta) ? input.bowBeta : 0.12));
+
+  // Schelleng (1973) bow-force wedge limits:
+  //   F_min ∝ Z0 * |v_bow| / beta^2   (minimum force to sustain single-slip Helmholtz lock)
+  //   F_max ∝ Z0 * |v_bow| / beta     (maximum force before raucous rosin crunch)
+  const fMin = +((0.042 * waveImpedanceZ0 * vBow) / (beta * beta)).toFixed(6);
+  const fMax = +((4.6 * waveImpedanceZ0 * vBow) / beta).toFixed(6);
+
+  const soundbox = resolveCoupledSoundbox(node, sceneNodes);
+  const bodyFormantHz = soundbox
+    ? +(soundbox.helmholtzHz ?? soundbox.topPlateHz).toFixed(1)
+    : +Math.max(160, pitchHz * 1.75).toFixed(1);
+  const bodyFormantGainDb = soundbox
+    ? +(soundbox.helmholtzHz !== null ? 6.4 : soundbox.hasHollowCavity ? 4.2 : 2.2).toFixed(2)
+    : 2.0;
+  const bodyFormantQ = soundbox
+    ? +Math.max(1.3, Math.min(5.8, (soundbox.helmholtzHz !== null ? soundbox.helmholtzQ : 6.0) * 0.42)).toFixed(2)
+    : 1.5;
+  const secondaryFormantHz = soundbox
+    ? +(soundbox.helmholtzHz !== null ? soundbox.topPlateHz : soundbox.bodyModeHz).toFixed(1)
+    : +Math.max(380, pitchHz * 3.1).toFixed(1);
+
+  if (vBow < 0.008 || forceN < 0.015) {
+    return {
+      active: false,
+      pitchHz,
+      amplitude: 0,
+      harmonicWeights: new Array<number>(20).fill(0),
+      bodyFormantHz,
+      bodyFormantGainDb,
+      bodyFormantQ,
+      secondaryFormantHz,
+      lowpassHz: 1500,
+      rosinNoiseGain: 0,
+      rosinCenterHz: 1400,
+      fMin,
+      fMax,
+      waveImpedanceZ0: +waveImpedanceZ0.toFixed(5),
+      regime: 'silent',
+    };
+  }
+
+  const regime: BowedStringVoice['regime'] =
+    forceN < fMin ? 'flautando' : forceN > fMax ? 'raucous' : 'helmholtz';
+
+  const fCenter = Math.max(1e-4, Math.sqrt(Math.max(1e-8, fMin * fMax)));
+  const pressureRatio = Math.max(0.06, Math.min(5.5, forceN / fCenter));
+  // Cremer physical rosin contact pressure relative to Z0 * |v_bow| (independent of 1/beta^1.5)
+  const contactPressure = Math.max(0.06, Math.min(6.0, forceN / Math.max(0.012, 6.5 * waveImpedanceZ0 * vBow)));
+  const overPress = forceN > fMax ? Math.min(1.6, (forceN - fMax) / Math.max(0.02, fMax)) : 0;
+  const underPress = forceN < fMin ? Math.max(0, Math.min(1, 1 - forceN / Math.max(1e-5, fMin))) : 0;
+
+  // Cremer corner-rounding decay: lighter bow pressure rounds the stick-slip corner (warmer, softer upper partials);
+  // firmer bow pressure sharpens the release into a richer, brighter harmonic core.
+  const cornerDecay = (0.165 / Math.pow(contactPressure, 0.62)) * (1.18 - 0.30 * mat.brightness);
+  const ribbonWidthM = Math.max(0.0015, Math.min(effectiveLengthM * 0.20, input.bowRibbonWidthM ?? 0.009));
+  const ponticelloExp = Math.max(-0.46, Math.min(0.42, (0.38 * (0.13 - beta)) / 0.10));
+
+  const nHarmonics = 20;
+  const harmonicWeights: number[] = new Array<number>(nHarmonics);
+  for (let n = 1; n <= nHarmonics; n++) {
+    const fn = n * pitchHz;
+    if (fn > 18500) {
+      harmonicWeights[n - 1] = 0;
+      continue;
+    }
+
+    // 1. Ideal Helmholtz sawtooth 1/n * Cremer bow-force corner rounding
+    const cornerRoll = Math.exp(-cornerDecay * (n - 1));
+
+    // 2. Bow-position node comb + sul ponticello / sul tasto spectral tilt
+    const nodePhase = n * beta - Math.round(n * beta);
+    const bowComb = 1 - 0.85 * Math.exp(-Math.pow(nodePhase / 0.08, 2));
+    const ponticelloTilt = Math.pow(n, ponticelloExp);
+
+    // 3. Finite horsehair ribbon width sinc roll-off
+    const uRibbon = (n * Math.PI * ribbonWidthM) / Math.max(0.025, effectiveLengthM);
+    const ribbonSinc = uRibbon < 1e-3 ? 1.0 : Math.max(0.05, Math.abs(Math.sin(uRibbon) / uRibbon));
+
+    // 4. Exact 3D Soundbox Transfer Function H_box(n * f0)
+    let boxGain = 0.44;
+    if (soundbox) {
+      let boxH = resonatorTransferGain(fn, soundbox.topPlateHz, 8.5, 4.6);
+      boxH *= resonatorTransferGain(fn, soundbox.bodyModeHz, 10.0, 2.8);
+      if (soundbox.helmholtzHz !== null) {
+        boxH *= resonatorTransferGain(fn, soundbox.helmholtzHz, soundbox.helmholtzQ, 6.2);
+        // Below Helmholtz air resonance f_H, ported soundboxes cancel as an acoustic dipole (~f^2 high-pass)
+        if (fn < soundbox.helmholtzHz * 0.82) {
+          const ratio = fn / (soundbox.helmholtzHz * 0.82);
+          boxH *= 0.24 + 0.76 * ratio * ratio;
+        }
+      } else if (soundbox.hasHollowCavity && fn < soundbox.topPlateHz * 0.85) {
+        const ratio = fn / (soundbox.topPlateHz * 0.85);
+        boxH *= 0.42 + 0.58 * ratio * ratio;
+      }
+      boxGain = Math.min(2.6, boxH * 0.52 * soundbox.radiationGain);
+    }
+
+    // Raucous over-pressing adds gritty odd/upper partial crunch
+    const raucousBoost = overPress > 0 && n >= 3 ? 1 + 0.35 * overPress * (n % 2 === 1 ? 1.0 : 0.6) : 1.0;
+    const rawW = (1 / n) * cornerRoll * bowComb * ponticelloTilt * ribbonSinc * boxGain * raucousBoost;
+    harmonicWeights[n - 1] = +Math.min(1.6, rawW).toFixed(4);
+  }
+
+  const radGain = soundbox ? soundbox.radiationGain : 0.42;
+  // Transverse Helmholtz string velocity scales with v_bow / beta; saturates musically at fortissimo
+  const effVelocityDrive = Math.tanh((vBow / Math.max(0.055, Math.sqrt(beta * 0.12))) * 0.95);
+  const lockEfficiency =
+    regime === 'flautando'
+      ? 0.38 + 0.62 * (1 - underPress)
+      : regime === 'raucous'
+        ? Math.max(0.65, 1.05 - 0.18 * overPress)
+        : 0.92 + 0.14 * Math.min(1, Math.log10(1 + pressureRatio));
+  const amplitude = +Math.min(0.40, 0.28 * effVelocityDrive * lockEfficiency * Math.min(1.45, radGain)).toFixed(4);
+
+  // Bow-pressure and beta-dependent lowpass cutoff
+  const baseCutoff = pitchHz * (4.8 + 4.2 * Math.min(2.2, pressureRatio) + (0.20 - Math.min(0.20, beta)) * 18);
+  const lowpassHz = +Math.max(850, Math.min(7200, baseCutoff * (0.72 + 0.36 * mat.brightness))).toFixed(1);
+
+  // Horsehair rosin stick-slip friction noise: silky sheen in Helmholtz lock, airy skate in flautando, gritty crunch in raucous!
+  const speedSheen = Math.min(1, vBow / 0.32);
+  const rosinRaw =
+    0.0045 * speedSheen +
+    0.011 * underPress * speedSheen +
+    0.048 * overPress * (0.4 + 0.6 * speedSheen);
+  const rosinNoiseGain = +Math.min(0.085, rosinRaw).toFixed(4);
+  const rosinCenterHz = +Math.max(
+    880,
+    Math.min(4400, pitchHz * (4.0 + 3.0 * ((0.22 - Math.min(0.22, beta)) / 0.22)) + 450 * overPress),
+  ).toFixed(1);
+
+  return {
+    active: amplitude >= 0.002,
+    pitchHz,
+    amplitude,
+    harmonicWeights,
+    bodyFormantHz,
+    bodyFormantGainDb,
+    bodyFormantQ,
+    secondaryFormantHz,
+    lowpassHz,
+    rosinNoiseGain,
+    rosinCenterHz,
+    fMin,
+    fMax,
+    waveImpedanceZ0: +waveImpedanceZ0.toFixed(5),
+    regime,
+  };
+}
+
 /**
  * Evaluates a taut string's Mersenne fundamental, Fletcher stiff-string harmonics,
  * breaking-stress safety, coupled 3D soundbox resonance, and live plectrum/strike-point shaping!
@@ -343,18 +619,7 @@ export function evaluateTautString(
   }
 
   // 4. Resolve coupled soundbox body (explicit resonatorNodeId, or parent body in scene tree)
-  let resonatorNode: SceneNode | null = null;
-  if (sceneNodes?.length) {
-    if (spec.resonatorNodeId) {
-      resonatorNode = findById(sceneNodes, spec.resonatorNodeId);
-    }
-    if (!resonatorNode) {
-      resonatorNode = findParentOf(sceneNodes, node.id);
-    }
-  }
-  const soundbox = resonatorNode && !resonatorNode.acousticString
-    ? analyzeSoundboxResonance(resonatorNode)
-    : null;
+  const soundbox = resolveCoupledSoundbox(node, sceneNodes);
 
   // 5. Determine actual pluck position & plectrum contact width/stiffness!
   const dynamicPluck = impactCtx?.localPoint

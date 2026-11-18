@@ -23,6 +23,7 @@ import { shatterPreset } from './shatter';
 import { marimbaCascadePreset } from './marimbaCascade';
 import { metallophoneCarillonPreset } from './metallophoneCarillon';
 import { soundboxLyrePreset } from './soundboxLyre';
+import { bowedCelloPreset } from './bowedCello';
 import { compliantFlexuresPreset } from './compliantFlexures';
 import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
@@ -3697,6 +3698,12 @@ export const PRESETS = {
     emoji: '🎸',
     scene: soundboxLyrePreset,
     camera: { position: [0.24, -0.32, 0.24], target: [0, 0, 0.04] } satisfies PresetCamera,
+  },
+  bowed_cello: {
+    name: 'Bowed Cello Automaton (Bach Suite No. 1)',
+    emoji: '🎻',
+    scene: bowedCelloPreset,
+    camera: { position: [0.34, -0.44, 0.30], target: [0, -0.02, 0.08] } satisfies PresetCamera,
   },
   compliant_flexures: {
     name: 'Compliant Flexures & Snap Toggle',

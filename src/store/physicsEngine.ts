@@ -21,11 +21,18 @@ import {
   estimateBodyModes,
   playModalImpact,
   resolveTwoBodyImpact,
+  silenceBowedVoices,
   silenceWindVoices,
+  updateLiveBowedVoices,
   updateLiveWindVoices,
   type BodyModalProfile,
 } from '../utils/modalAudio';
-import { evaluateTautString, type StringPluckImpactContext } from '../utils/stringAcoustics';
+import {
+  evaluateTautString,
+  resolveStringBetaFromPoint,
+  solveBowedStringVoice,
+  type StringPluckImpactContext,
+} from '../utils/stringAcoustics';
 import { extractBoreWaveguide } from '../utils/windAcoustics';
 import type { SceneNode } from '../types/scene';
 
@@ -452,6 +459,57 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
         playModalImpact(profile, ev.impulseNs, isPluck, twoBody);
       }
     };
+    client.onBowedStrings = (contacts) => {
+      if (!useSoundStore.getState().soundEnabled || !store().getState().isPlaying) {
+        silenceBowedVoices();
+        return;
+      }
+      if (contacts.length === 0) {
+        updateLiveBowedVoices([]);
+        return;
+      }
+      const s = store().getState();
+      const nodes = liveModelGraph(s).graph.nodes;
+      const bowedPayloads = [];
+      for (const ev of contacts) {
+        const strNode = findNode(nodes, ev.stringNodeId);
+        if (!strNode || !strNode.acousticString) continue;
+        const bowNode = findNode(nodes, ev.bowNodeId);
+        const bowGeom = bowNode?.geoms?.find((g) => g.name === ev.bowGeomName) ?? bowNode?.geoms?.[0];
+        let bowRibbonWidthM = 0.009;
+        if (bowGeom?.type === 'box' && bowGeom.size.length >= 3) {
+          const sorted = [...bowGeom.size.slice(0, 3)].sort((a, b) => a - b);
+          bowRibbonWidthM = Math.max(0.003, Math.min(0.024, sorted[1] * 2));
+        } else if (bowGeom && (bowGeom.type === 'capsule' || bowGeom.type === 'cylinder')) {
+          bowRibbonWidthM = Math.max(0.003, Math.min(0.020, (bowGeom.size[0] ?? 0.004) * 2));
+        }
+        const bowBeta = resolveStringBetaFromPoint(strNode, ev.localPoint);
+        const solved = solveBowedStringVoice({
+          node: strNode,
+          sceneNodes: nodes,
+          bowVelocityMps: ev.bowVelocityMps,
+          bowForceN: ev.bowForceN,
+          bowBeta,
+          stoppedLengthFraction: ev.stoppedLengthFraction,
+          bowRibbonWidthM,
+        });
+        bowedPayloads.push({
+          id: ev.stringNodeId,
+          active: solved.active,
+          pitchHz: solved.pitchHz,
+          amplitude: solved.amplitude,
+          harmonicWeights: solved.harmonicWeights,
+          bodyFormantHz: solved.bodyFormantHz,
+          bodyFormantGainDb: solved.bodyFormantGainDb,
+          bodyFormantQ: solved.bodyFormantQ,
+          secondaryFormantHz: solved.secondaryFormantHz,
+          lowpassHz: solved.lowpassHz,
+          rosinNoiseGain: solved.rosinNoiseGain,
+          rosinCenterHz: solved.rosinCenterHz,
+        });
+      }
+      updateLiveBowedVoices(bowedPayloads);
+    };
     client.setSound(useSoundStore.getState().soundEnabled);
     client.onError = (message, fatal, lastState) => {
       console.error('[PhysicsWorker]', message);
@@ -485,16 +543,20 @@ export const endVoltLink = () => {
 
 useSoundStore.subscribe((state) => {
   physicsWorkerClientSingleton?.setSound(state.soundEnabled);
-  if (!state.soundEnabled) silenceWindVoices();
+  if (!state.soundEnabled) {
+    silenceWindVoices();
+    silenceBowedVoices();
+  }
 });
 
-// Silence continuous wind waveguides whenever simulation stops
+// Silence continuous wind waveguides and bowed strings whenever simulation stops
 setTimeout(() => {
   try {
     store().subscribe((state, prev) => {
       if (prev.isPlaying && !state.isPlaying) {
         hadActiveWindVoices = false;
         silenceWindVoices();
+        silenceBowedVoices();
       }
     });
   } catch {

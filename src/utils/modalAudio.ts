@@ -24,8 +24,11 @@ import {
 import {
   getOrInitModalWorklet,
   getSharedAcousticOutputBus,
+  postWorkletBowedSilence,
+  postWorkletBowedUpdate,
   postWorkletWindSilence,
   postWorkletWindUpdate,
+  type WorkletBowedVoicePayload,
   type WorkletWindVoicePayload,
 } from './modalAudioWorklet';
 
@@ -920,3 +923,17 @@ export function updateLiveWindVoices(voices: WorkletWindVoicePayload[]): void {
 export function silenceWindVoices(): void {
   postWorkletWindSilence(sharedAudioCtx);
 }
+
+/** Streams active bowed-string Helmholtz voices to the native WebAudio engine. */
+export function updateLiveBowedVoices(voices: WorkletBowedVoicePayload[]): void {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  postWorkletBowedUpdate(ctx, voices);
+}
+
+/** Immediately fades out all continuous bowed-string voices (on Stop or Mute). */
+export function silenceBowedVoices(): void {
+  postWorkletBowedSilence(sharedAudioCtx);
+}
+
+export type { WorkletBowedVoicePayload };

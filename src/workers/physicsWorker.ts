@@ -55,6 +55,7 @@ import { autoResetCount, wipedInitialVelocityNote } from '../utils/mujocoAutoRes
 import type {
   AeroDiagnostic,
   BodyHistory,
+  BowedStringContactEvent,
   ConstraintBrokenEvent,
   ContactHistory,
   AudioImpactEvent,
@@ -1016,9 +1017,31 @@ interface BistableJointEntry {
 let cachedHydroByNodeId = new Map<string, HydroBodyModel>();
 let hydroByBodyId = new Map<number, HydroBodyModel>();
 let bistableJoints: BistableJointEntry[] = [];
+let acousticStringBodyIds = new Set<number>();
+let acousticStringAxisByBodyId = new Map<number, [number, number, number]>();
+const bowContactStartSimTime = new Map<string, number>();
+let lastBowEmitMs = 0;
+let hadActiveBowedStrings = false;
 let prevConstraintDof: Float64Array | null = null;
 const pendingAudioImpacts = new Map<string, AudioImpactEvent>();
 const lastAudioEmitMs = new Map<string, number>();
+
+const inferStringLocalAxis = (node: SceneNode): [number, number, number] => {
+  const g = (node.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
+  if (g?.fromto && g.fromto.length >= 6) {
+    const dx = g.fromto[3] - g.fromto[0];
+    const dy = g.fromto[4] - g.fromto[1];
+    const dz = g.fromto[5] - g.fromto[2];
+    const len = Math.hypot(dx, dy, dz);
+    if (len > 1e-6) return [dx / len, dy / len, dz / len];
+  }
+  if (g?.type === 'box' && g.size.length >= 3) {
+    const [sx, sy, sz] = g.size;
+    if (sx >= sy && sx >= sz) return [1, 0, 0];
+    if (sz >= sx && sz >= sy) return [0, 0, 1];
+  }
+  return [0, 1, 0];
+};
 
 const rebuildHydroAndFlexureCaches = (
   explicitHydroModels?: HydroBodyModel[],
@@ -1030,6 +1053,9 @@ const rebuildHydroAndFlexureCaches = (
   }
   hydroByBodyId = new Map();
   bistableJoints = [];
+  acousticStringBodyIds = new Set();
+  acousticStringAxisByBodyId = new Map();
+  bowContactStartSimTime.clear();
   prevConstraintDof = null;
   const mdl = model;
   if (!mdl) return;
@@ -1040,6 +1066,10 @@ const rebuildHydroAndFlexureCaches = (
     for (const node of nodes || []) {
       const bId = bodyIdCache[node.id];
       if (bId !== undefined && bId > 0) {
+        if (node.acousticString) {
+          acousticStringBodyIds.add(bId);
+          acousticStringAxisByBodyId.set(bId, inferStringLocalAxis(node));
+        }
         // Movable body (has own joints or rides on a jointed ancestor)
         if (anyWater && (node.joints?.length ?? 0) > 0) {
           const h = cachedHydroByNodeId.get(node.id) ?? buildHydroBodyModel(node);
@@ -1204,10 +1234,12 @@ const sampleAudioImpacts = (stepSize: number) => {
     number,
     { otherBodyId: number; selfGeom: number; otherGeom: number; worldPos: [number, number, number] }
   >();
+  const suppressedBowImpactBodies = new Set<number>();
   const contactVec = data.contact;
   try {
     const ncon = contactVec.size();
     const geomBody = ncon > 0 ? model.geom_bodyid : null;
+    const geomSolref = ncon > 0 && acousticStringBodyIds.size > 0 ? model.geom_solref : null;
     if (geomBody) {
       const wanted = new Set(newTriggers.map((t) => t.bId));
       for (let c = 0; c < ncon; c++) {
@@ -1217,6 +1249,25 @@ const sampleAudioImpacts = (stepSize: number) => {
           const b1 = geomBody[ct.geom1];
           const b2 = geomBody[ct.geom2];
           if (!wanted.has(b1) && !wanted.has(b2)) continue;
+          // Suppress percussive AUDIO_IMPACTS clicks on smooth compliant bow-on-string sliding contacts!
+          if (geomSolref) {
+            const isStr1 = acousticStringBodyIds.has(b1);
+            const isStr2 = acousticStringBodyIds.has(b2);
+            if (isStr1 !== isStr2) {
+              const bStr = isStr1 ? b1 : b2;
+              const bBow = isStr1 ? b2 : b1;
+              const gBow = isStr1 ? ct.geom2 : ct.geom1;
+              const bowSolTime = geomSolref[gBow * 2] ?? 0.02;
+              const bowSolDamp = geomSolref[gBow * 2 + 1] ?? 1.0;
+              const isDampedBow =
+                (bowSolTime >= 0.012 && bowSolDamp >= 0.90) || (bowSolTime < 0 && bowSolTime > -3000);
+              if (isDampedBow || bowContactStartSimTime.has(`${bStr}:${bBow}`)) {
+                suppressedBowImpactBodies.add(b1);
+                suppressedBowImpactBodies.add(b2);
+                continue;
+              }
+            }
+          }
           const pos = ct.pos;
           const wp: [number, number, number] = [pos[0], pos[1], pos[2]];
           if (wanted.has(b1)) {
@@ -1243,6 +1294,7 @@ const sampleAudioImpacts = (stepSize: number) => {
 
   for (const { bId, nodeId, impulseNs } of newTriggers) {
     const site = hitByBody.get(bId);
+    if (!site && suppressedBowImpactBodies.has(bId)) continue;
     let localPoint: [number, number, number] | undefined;
     let otherNodeId: string | undefined;
     let selfGeomName: string | undefined;
@@ -1290,6 +1342,214 @@ const flushAudioImpacts = () => {
   const top = candidates.slice(0, 6);
   for (const ev of top) lastAudioEmitMs.set(ev.nodeId, now);
   post({ type: 'AUDIO_IMPACTS', events: top });
+};
+
+/**
+ * Throttled (~20 ms) continuous bowed-string contact detector:
+ * - Zero overhead when `soundEnabled` is false or the scene has zero `acousticString` bodies!
+ * - Measures exact solver normal force `mj_contactForce` and transverse tangential sliding speed
+ *   across the string wire while freeing all `ct` / `contactVec` / `wrench` handles in `finally`.
+ */
+const flushBowedStrings = () => {
+  if (!soundEnabled || acousticStringBodyIds.size === 0 || !model || !data || !mujoco) {
+    if (hadActiveBowedStrings) {
+      hadActiveBowedStrings = false;
+      bowContactStartSimTime.clear();
+      post({ type: 'BOWED_STRINGS', contacts: [] });
+    }
+    return;
+  }
+  const now = performance.now();
+  if (now - lastBowEmitMs < 20) return;
+  lastBowEmitMs = now;
+
+  interface AggregatedBowPair {
+    bStr: number;
+    bBow: number;
+    gBow: number;
+    totalForceN: number;
+    weightedVelSum: number;
+    weightedPos: [number, number, number];
+    durSec: number;
+  }
+
+  const pairMap = new Map<string, AggregatedBowPair>();
+  const seenPairs = new Set<string>();
+  const contactVec = data.contact;
+  const wrench = new mujoco.DoubleBuffer(6);
+  try {
+    const ncon = contactVec.size();
+    if (ncon > 0) {
+      const geomBody = model.geom_bodyid;
+      const geomFriction = model.geom_friction;
+      const geomSolref = model.geom_solref;
+      const views = velocityViews(model, data);
+      const xmat = data.xmat;
+
+      for (let c = 0; c < ncon; c++) {
+        const ct = contactVec.get(c);
+        if (!ct) continue;
+        try {
+          const b1 = geomBody[ct.geom1];
+          const b2 = geomBody[ct.geom2];
+          const isStr1 = acousticStringBodyIds.has(b1);
+          const isStr2 = acousticStringBodyIds.has(b2);
+          if (isStr1 === isStr2) continue;
+
+          const bStr = isStr1 ? b1 : b2;
+          const bBow = isStr1 ? b2 : b1;
+          const gBow = isStr1 ? ct.geom2 : ct.geom1;
+          if (bBow <= 0) continue;
+
+          // Low-friction plectra (e.g. mu = 0.05 tortoiseshell pick) pluck cleanly without rosin stick-slip
+          const muSlide = geomFriction[gBow * 3] ?? 1.0;
+          if (muSlide < 0.15) continue;
+
+          let forceN = 0;
+          if (ct.efc_address >= 0) {
+            mujoco.mj_contactForce(model, data, c, wrench);
+            forceN = Math.max(0, wrench.GetView()[0]);
+          }
+          if (forceN < 0.005) continue;
+
+          const pairKey = `${bStr}:${bBow}`;
+          seenPairs.add(pairKey);
+          let startT = bowContactStartSimTime.get(pairKey);
+          if (startT === undefined) {
+            startT = data.time;
+            bowContactStartSimTime.set(pairKey, startT);
+          }
+          const durSec = Math.max(0, data.time - startT);
+          const bowSolTime = geomSolref[gBow * 2] ?? 0.02;
+          const bowSolDamp = geomSolref[gBow * 2 + 1] ?? 1.0;
+          const isDampedBow =
+            (bowSolTime >= 0.012 && bowSolDamp >= 0.90) || (bowSolTime < 0 && bowSolTime > -3000);
+          const minDurSec = isDampedBow ? 0.014 : 0.018;
+          if (durSec < minDurSec) continue;
+
+          const pos = ct.pos;
+          const wp: [number, number, number] = [pos[0], pos[1], pos[2]];
+          const vStr = bodyPointVelocity(views, bStr, wp);
+          const vBow = bodyPointVelocity(views, bBow, wp);
+          const vrx = vBow[0] - vStr[0];
+          const vry = vBow[1] - vStr[1];
+          const vrz = vBow[2] - vStr[2];
+
+          const localAxis = acousticStringAxisByBodyId.get(bStr) ?? [0, 1, 0];
+          const m = bStr * 9;
+          const ux = xmat[m] * localAxis[0] + xmat[m + 1] * localAxis[1] + xmat[m + 2] * localAxis[2];
+          const uy = xmat[m + 3] * localAxis[0] + xmat[m + 4] * localAxis[1] + xmat[m + 5] * localAxis[2];
+          const uz = xmat[m + 6] * localAxis[0] + xmat[m + 7] * localAxis[1] + xmat[m + 8] * localAxis[2];
+
+          // Project relative velocity onto the transverse bow-stroke direction (perpendicular to string wire & contact normal)
+          const vDotU = vrx * ux + vry * uy + vrz * uz;
+          let px = vrx - vDotU * ux;
+          let py = vry - vDotU * uy;
+          let pz = vrz - vDotU * uz;
+
+          const frame = ct.frame;
+          const nx = frame[0];
+          const ny = frame[1];
+          const nz = frame[2];
+          const nDotU = nx * ux + ny * uy + nz * uz;
+          let npx = nx - nDotU * ux;
+          let npy = ny - nDotU * uy;
+          let npz = nz - nDotU * uz;
+          const npLen = Math.hypot(npx, npy, npz);
+          if (npLen > 1e-5) {
+            npx /= npLen;
+            npy /= npLen;
+            npz /= npLen;
+            const pDotN = px * npx + py * npy + pz * npz;
+            px -= pDotN * npx;
+            py -= pDotN * npy;
+            pz -= pDotN * npz;
+          }
+          const slideSpeed = Math.hypot(px, py, pz);
+
+          const existing = pairMap.get(pairKey);
+          if (existing) {
+            existing.totalForceN += forceN;
+            existing.weightedVelSum += slideSpeed * forceN;
+            existing.weightedPos[0] += wp[0] * forceN;
+            existing.weightedPos[1] += wp[1] * forceN;
+            existing.weightedPos[2] += wp[2] * forceN;
+            if (durSec > existing.durSec) existing.durSec = durSec;
+          } else {
+            pairMap.set(pairKey, {
+              bStr,
+              bBow,
+              gBow,
+              totalForceN: forceN,
+              weightedVelSum: slideSpeed * forceN,
+              weightedPos: [wp[0] * forceN, wp[1] * forceN, wp[2] * forceN],
+              durSec,
+            });
+          }
+        } finally {
+          ct.delete();
+        }
+      }
+    }
+  } finally {
+    contactVec.delete();
+    wrench.delete();
+  }
+
+  for (const key of Array.from(bowContactStartSimTime.keys())) {
+    if (!seenPairs.has(key)) bowContactStartSimTime.delete(key);
+  }
+
+  const events: BowedStringContactEvent[] = [];
+  const stateSnap = pairMap.size > 0 ? scriptState.snapshot() : undefined;
+  const xpos = pairMap.size > 0 ? data.xpos : null;
+  const xmat = pairMap.size > 0 ? data.xmat : null;
+
+  for (const agg of pairMap.values()) {
+    const strNodeId = bodyNodeById[agg.bStr];
+    const bowNodeId = bodyNodeById[agg.bBow];
+    if (!strNodeId || !bowNodeId || strNodeId === 'world') continue;
+    const invF = 1 / Math.max(1e-6, agg.totalForceN);
+    const wx = agg.weightedPos[0] * invF;
+    const wy = agg.weightedPos[1] * invF;
+    const wz = agg.weightedPos[2] * invF;
+    const ox = xpos![agg.bStr * 3];
+    const oy = xpos![agg.bStr * 3 + 1];
+    const oz = xpos![agg.bStr * 3 + 2];
+    const localPoint = worldToBodyFrame(xmat!, agg.bStr, [wx - ox, wy - oy, wz - oz]);
+
+    // Optional scriptState stoppedLengthFraction coupling for fingered single-string passages
+    let stoppedLengthFraction: number | undefined;
+    if (stateSnap) {
+      const strSt = stateSnap[strNodeId] as Record<string, unknown> | undefined;
+      const bowSt = stateSnap[bowNodeId] as Record<string, unknown> | undefined;
+      const rawFrac =
+        typeof strSt?.stoppedLengthFraction === 'number'
+          ? strSt.stoppedLengthFraction
+          : typeof bowSt?.stoppedLengthFraction === 'number'
+            ? bowSt.stoppedLengthFraction
+            : undefined;
+      if (rawFrac !== undefined && Number.isFinite(rawFrac)) {
+        stoppedLengthFraction = Math.max(0.25, Math.min(1.0, rawFrac));
+      }
+    }
+
+    events.push({
+      stringNodeId: strNodeId,
+      bowNodeId,
+      bowGeomName: geomNameCache[agg.gBow],
+      bowVelocityMps: +(agg.weightedVelSum * invF).toFixed(5),
+      bowForceN: +agg.totalForceN.toFixed(5),
+      localPoint,
+      contactDurationSec: +agg.durSec.toFixed(4),
+      ...(stoppedLengthFraction !== undefined ? { stoppedLengthFraction } : {}),
+    });
+  }
+
+  if (events.length > 0 || hadActiveBowedStrings) {
+    hadActiveBowedStrings = events.length > 0;
+    post({ type: 'BOWED_STRINGS', contacts: events });
+  }
 };
 
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
@@ -1900,6 +2160,7 @@ const postFrame = () => {
   lastFramePost = performance.now();
   postScriptStatus();
   flushAudioImpacts();
+  flushBowedStrings();
   const snap = snapshot();
   if (isSharedSupported) {
     post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
@@ -2348,6 +2609,8 @@ const runHeadless = async (
   const savedCachedHydro = cachedHydroByNodeId;
   const savedHydroByBodyId = hydroByBodyId;
   const savedBistableJoints = bistableJoints;
+  const savedAcousticStringBodyIds = acousticStringBodyIds;
+  const savedAcousticStringAxis = acousticStringAxisByBodyId;
   // A headless run starts its scripts from nothing and must not leave its
   // state or compiled closures in the live scene's.
   const savedScriptState = scriptState;
@@ -2577,6 +2840,8 @@ const runHeadless = async (
     cachedHydroByNodeId = savedCachedHydro;
     hydroByBodyId = savedHydroByBodyId;
     bistableJoints = savedBistableJoints;
+    acousticStringBodyIds = savedAcousticStringBodyIds;
+    acousticStringAxisByBodyId = savedAcousticStringAxis;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
     headlessBreaks = null;
     impactWatches = savedImpactWatches;
@@ -2672,6 +2937,11 @@ const handleMessage = async (evt: MessageEvent) => {
         if (!soundEnabled) {
           prevConstraintDof = null;
           pendingAudioImpacts.clear();
+          bowContactStartSimTime.clear();
+          if (hadActiveBowedStrings) {
+            hadActiveBowedStrings = false;
+            post({ type: 'BOWED_STRINGS', contacts: [] });
+          }
         }
         break;
       }
@@ -2691,6 +2961,11 @@ const handleMessage = async (evt: MessageEvent) => {
           // The steps since the last frame, so what stops on screen is where
           // the simulation stopped. See FRAME_INTERVAL_MS.
           if (framePending && model && data) postFrame();
+          bowContactStartSimTime.clear();
+          if (hadActiveBowedStrings) {
+            hadActiveBowedStrings = false;
+            post({ type: 'BOWED_STRINGS', contacts: [] });
+          }
           postScriptStatus(true);
         }
         break;

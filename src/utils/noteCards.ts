@@ -709,6 +709,20 @@ Five **80/20 bronze strings** (**C4–D4–E4–G4–A4**) stretched across a ho
 - Turn on **Sound** in **⚙️ Environment** (top right) and press **Run** to hear the plectrum strum back and forth
 - Select **Spruce Soundbox** → resize \`soundhole\` or \`air_chamber\` in **Shape** and watch the Helmholtz air resonance shift`,
 
+  bowed_cello: `# 🎻 Bowed Cello Automaton (Bach Suite No. 1)
+
+An **80 g Pernambuco & horsehair bow** on a concentric arched-bridge gimbal plays the opening arpeggio of **J.S. Bach's Cello Suite No. 1 in G Major (BWV 1007)** (**G3–D4–B4–A4–B4–D4–B4–D4**) across four taut strings over a hollowed **~8.2 L spruce & maple cello body** with **twin CSG f-holes**.
+
+## What is physical here
+- **Arched Bridge Geometry ($R = 92\\text{ mm}$)**: the four strings sit at $[-24^\\circ, -8^\\circ, +8^\\circ, +24^\\circ]$ around the bridge crown, so rocking the straight horsehair ribbon (\`bow_rock\`) physically selects one string at a time with $>2.7\\text{ mm}$ clearance to its neighbours!
+- **Helmholtz Stick-Slip & Schelleng Bow Wedge**: continuous bow sliding velocity $v_{\\text{bow}}$, normal rosin force $F_{\\text{bow}}$, and normalized bridge distance $\\beta = x_{\\text{bow}}/L$ govern *flautando* surface skate ($F < F_{\\min}$), warm Helmholtz sawtooth lock, and *raucous* rosin crunch ($F > F_{\\max}$).
+- **3D Corpus Transfer Function**: all 20 bowed harmonics filter through the hollowed body's **multi-port f-hole Helmholtz air mode** ($f_H$) and **4.5 mm spruce Kirchhoff soundboard mode** ($f_{\\text{top}}$).
+
+## Try it
+- Turn on **Sound** in **⚙️ Environment** (top right) and press **Run**
+- Grab the **Pernambuco & Horsehair Bow** with your mouse while running to bow *sul ponticello* (near the bridge), *sul tasto* (over the fingerboard), or press harder into raucous rosin crunch
+- Select **Spruce & Maple Cello Body** and resize \`f_hole_left\` / \`f_hole_right\` or sculpt a new soundhole to hear the cello's woody formant shift live!`,
+
   compliant_flexures: `# 🧬 Compliant Flexures & Snap Toggle
 
 Three **monolithic 3D-printed PETG mechanisms** on one frame — no pins, bearings, or metal springs:

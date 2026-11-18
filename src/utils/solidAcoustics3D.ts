@@ -1461,7 +1461,28 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
           if (nState === 1) {
             totalSurfaceArea += fArea;
           } else if (nState === 0) {
+            // Check exact 1D ray intervals along nAxis so thin curved/end walls narrower than one voxel step
+            // are never mistaken for open ports!
+            const stepH = nAxis === 0 ? hx : nAxis === 1 ? hy : hz;
+            const cFrom = coords[nAxis];
+            const cTo = cFrom + (ddx + ddy + ddz) * stepH;
+            const segLo = Math.min(cFrom, cTo);
+            const segHi = Math.max(cFrom, cTo);
+            const axisRay =
+              nAxis === 0
+                ? xRays[iy * nz + iz]
+                : nAxis === 1
+                  ? yRays[ix * nz + iz]
+                  : zRays[ix * ny + iy];
+            let wallBetween = false;
+            for (let s = 0; s < axisRay.length; s++) {
+              if (axisRay[s][1] > segLo + 1e-7 && axisRay[s][0] < segHi - 1e-7) {
+                wallBetween = true;
+                break;
+              }
+            }
             totalSurfaceArea += fArea;
+            if (wallBetween) continue;
             totalOpenFaceArea += fArea;
             const uAxis = ((nAxis + 1) % 3) as 0 | 1 | 2;
             const vAxis = ((nAxis + 2) % 3) as 0 | 1 | 2;

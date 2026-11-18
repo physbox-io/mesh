@@ -6,6 +6,7 @@ import { newtonsCradlePreset } from '../src/presets/presetScenes';
 import { marimbaCascadePreset } from '../src/presets/marimbaCascade';
 import { metallophoneCarillonPreset } from '../src/presets/metallophoneCarillon';
 import { soundboxLyrePreset } from '../src/presets/soundboxLyre';
+import { bowedCelloPreset } from '../src/presets/bowedCello';
 import { windInstrumentsPreset } from '../src/presets/windInstruments';
 import { whoopeeStomperPreset } from '../src/presets/whoopeeStomper';
 import { compliantFlexuresPreset } from '../src/presets/compliantFlexures';
@@ -20,6 +21,7 @@ import {
 import {
   analyzeSoundboxResonance,
   evaluateTautString,
+  solveBowedStringVoice,
 } from '../src/utils/stringAcoustics';
 import { extractBoreWaveguide, solvePlayableWindVoice } from '../src/utils/windAcoustics';
 import { KellyLochbaumSynthBank } from '../src/utils/windWaveguideSynth';
@@ -919,5 +921,285 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     expect(lowRip.squelchSweepHz).toBeGreaterThan(200);
     expect(lowRip.formantQ).toBeGreaterThan(4.0);
     expect(lowRip.harmonicWeights.length).toBeGreaterThanOrEqual(20);
+  });
+
+  it('models Helmholtz stick-slip, Schelleng bow-force wedge, sul ponticello vs sul tasto, and 3D cello corpus holes in solveBowedStringVoice', () => {
+    const celloBody = bowedCelloPreset.nodes[0];
+    const celloRes = analyzeSoundboxResonance(celloBody);
+    expect(celloRes.hasHollowCavity).toBe(true);
+    expect(celloRes.cavityVolumeLitres).toBeGreaterThan(6.0);
+    expect(celloRes.cavityVolumeLitres).toBeLessThan(12.0);
+    expect(celloRes.portCount).toBe(2);
+    expect(celloRes.helmholtzHz).not.toBeNull();
+    expect(celloRes.helmholtzHz!).toBeGreaterThan(85);
+    expect(celloRes.helmholtzHz!).toBeLessThan(185);
+
+    const strings = celloBody.children.filter((c) => !!c.acousticString);
+    expect(strings.length).toBe(4);
+    const expectedOpenNotes = ['G3', 'D4', 'A4', 'B4'];
+    for (let i = 0; i < 4; i++) {
+      const ev = evaluateTautString(strings[i], bowedCelloPreset.nodes)!;
+      expect(ev.warnings).toEqual([]);
+      expect(hzToNoteInfo(ev.fundamentalHz).note).toBe(expectedOpenNotes[i]);
+      expect(Math.abs(hzToNoteInfo(ev.fundamentalHz).cents)).toBeLessThan(5);
+    }
+
+    const g3String = strings[0];
+
+    // 1. Sub-threshold speed (< 0.008 m/s) or force (< 0.015 N) stays inactive
+    expect(
+      solveBowedStringVoice({
+        node: g3String,
+        sceneNodes: bowedCelloPreset.nodes,
+        bowVelocityMps: 0.004,
+        bowForceN: 0.65,
+        bowBeta: 0.11,
+      }).active,
+    ).toBe(false);
+    expect(
+      solveBowedStringVoice({
+        node: g3String,
+        sceneNodes: bowedCelloPreset.nodes,
+        bowVelocityMps: 0.22,
+        bowForceN: 0.009,
+        bowBeta: 0.11,
+      }).active,
+    ).toBe(false);
+
+    // 2. Bow velocity scales amplitude & Schelleng fMin / fMax linearly; stoppedLengthFraction raises pitch!
+    const pianoVoice = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.07,
+      bowForceN: 0.35,
+      bowBeta: 0.12,
+    });
+    const forteVoice = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.28,
+      bowForceN: 0.85,
+      bowBeta: 0.12,
+    });
+    expect(pianoVoice.active).toBe(true);
+    expect(forteVoice.active).toBe(true);
+    expect(forteVoice.amplitude).toBeGreaterThan(pianoVoice.amplitude * 1.45);
+    expect(forteVoice.fMin / pianoVoice.fMin).toBeCloseTo(4.0, 2);
+    expect(forteVoice.fMax / pianoVoice.fMax).toBeCloseTo(4.0, 2);
+
+    const stoppedFourth = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.22,
+      bowForceN: 0.65,
+      bowBeta: 0.12,
+      stoppedLengthFraction: 0.75,
+    });
+    expect(stoppedFourth.pitchHz / forteVoice.pitchHz).toBeCloseTo(4 / 3, 2);
+
+    // 3. Schelleng beta scaling: fMin ∝ 1/beta^2 and fMax ∝ 1/beta, plus flautando vs helmholtz vs raucous regimes!
+    const nearBridge = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.20,
+      bowForceN: 0.90,
+      bowBeta: 0.06,
+    });
+    const overBoard = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.20,
+      bowForceN: 0.90,
+      bowBeta: 0.18,
+    });
+    expect(nearBridge.fMin / overBoard.fMin).toBeCloseTo(9.0, 1);
+    expect(nearBridge.fMax / overBoard.fMax).toBeCloseTo(3.0, 1);
+
+    const flautando = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.24,
+      bowForceN: 0.05,
+      bowBeta: 0.11,
+    });
+    const sweetHelmholtz = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.24,
+      bowForceN: 0.85,
+      bowBeta: 0.11,
+    });
+    const raucousCrunch = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.24,
+      bowForceN: 6.5,
+      bowBeta: 0.11,
+    });
+    expect(flautando.regime).toBe('flautando');
+    expect(sweetHelmholtz.regime).toBe('helmholtz');
+    expect(raucousCrunch.regime).toBe('raucous');
+    // Firmer bow pressure increases upper-harmonic core & brightness lowpass; raucous over-pressure spikes rosin grit!
+    expect(sweetHelmholtz.harmonicWeights[5] / sweetHelmholtz.harmonicWeights[0]).toBeGreaterThan(
+      (flautando.harmonicWeights[5] / flautando.harmonicWeights[0]) * 1.6,
+    );
+    expect(sweetHelmholtz.lowpassHz).toBeGreaterThan(flautando.lowpassHz * 1.3);
+    expect(raucousCrunch.rosinNoiseGain).toBeGreaterThan(sweetHelmholtz.rosinNoiseGain * 3.0);
+
+    // 4. Bow-position node comb & sul ponticello (beta = 0.05) vs sul tasto (beta = 0.25)
+    const sulPonticello = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.22,
+      bowForceN: 1.4,
+      bowBeta: 0.05,
+    });
+    const sulTastoQuarter = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.22,
+      bowForceN: 0.65,
+      bowBeta: 0.25,
+    });
+    // At beta = 0.25, harmonic n = 4 (index 3) has an exact node at the bow (4 * 0.25 = 1.0) and is notched!
+    expect(sulTastoQuarter.harmonicWeights[3]).toBeLessThan(sulTastoQuarter.harmonicWeights[2] * 0.35);
+    expect(sulTastoQuarter.harmonicWeights[3]).toBeLessThan(sulTastoQuarter.harmonicWeights[4] * 0.60);
+
+    const spectralCentroid = (w: number[]) => {
+      let num = 0;
+      let den = 0;
+      for (let i = 0; i < w.length; i++) {
+        num += (i + 1) * w[i];
+        den += w[i];
+      }
+      return num / Math.max(1e-9, den);
+    };
+    expect(spectralCentroid(sulPonticello.harmonicWeights)).toBeGreaterThan(
+      spectralCentroid(sulTastoQuarter.harmonicWeights) * 1.45,
+    );
+
+    // 5. Modifying 3D cello f-hole ports or spruce top-plate thickness measurably alters bowed voice spectrum!
+    const sealedCelloBody: SceneNode = {
+      ...celloBody,
+      geoms: celloBody.geoms.filter((g) => g.name !== 'f_hole_left' && g.name !== 'f_hole_right'),
+    };
+    const thickTopCelloBody: SceneNode = {
+      ...celloBody,
+      geoms: celloBody.geoms.map((g) =>
+        g.name.startsWith('cavity_')
+          ? { ...g, size: g.type === 'box' ? [g.size[0], g.size[1], 0.032] : [g.size[0], 0.032], pos: [g.pos![0], g.pos![1], -0.008] }
+          : g,
+      ),
+    };
+    const sealedVoice = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: [sealedCelloBody],
+      bowVelocityMps: 0.22,
+      bowForceN: 0.68,
+      bowBeta: 0.11,
+    });
+    const thickTopVoice = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: [thickTopCelloBody],
+      bowVelocityMps: 0.22,
+      bowForceN: 0.68,
+      bowBeta: 0.11,
+    });
+    expect(sealedVoice.bodyFormantHz).not.toBeCloseTo(sweetHelmholtz.bodyFormantHz, 0);
+    expect(sealedVoice.amplitude).toBeLessThan(sweetHelmholtz.amplitude);
+    expect(sealedVoice.harmonicWeights).not.toEqual(sweetHelmholtz.harmonicWeights);
+    // Thickening the spruce top plate from 4.5 mm -> 22 mm cuts Skudrzyk bridge admittance & raises plate resonance!
+    expect(thickTopVoice.amplitude).toBeLessThan(sweetHelmholtz.amplitude * 0.78);
+    expect(thickTopVoice.secondaryFormantHz).toBeGreaterThan(sweetHelmholtz.secondaryFormantHz * 1.35);
+  });
+
+  it('compiles and steps bowedCelloPreset in real MuJoCo WASM, physically bowing Bach Suite No. 1 across single arched-bridge strings', async () => {
+    const sim = await simulate(bowedCelloPreset);
+    try {
+      const stringIds = [
+        'cello_soundbox_string_1',
+        'cello_soundbox_string_2',
+        'cello_soundbox_string_3',
+        'cello_soundbox_string_4',
+      ];
+      const celloBody = bowedCelloPreset.nodes[0];
+      const stringNodes = stringIds.map((id) => celloBody.children.find((c) => c.id === id)!);
+      const stringBodyIds = stringNodes.map((n) => sim.bodyId(n.name));
+      const bowBodyId = sim.bodyId('Pernambuco & Horsehair Bow');
+      expect(bowBodyId).toBeGreaterThan(0);
+      for (const bid of stringBodyIds) expect(bid).toBeGreaterThan(0);
+
+      // Bach Prelude BWV 1007 opening 8-note pattern: G3 - D4 - B4 - A4 - B4 - D4 - B4 - D4
+      const expectedPattern = [0, 1, 3, 2, 3, 1, 3, 1];
+      const expectedNotes = ['G3', 'D4', 'B4', 'A4', 'B4', 'D4', 'B4', 'D4'];
+      const noteDur = 0.24;
+      const sampleTimes = expectedPattern.map((_, k) => (k + 0.55) * noteDur);
+      let nextSample = 0;
+
+      // Run 2.05 s (2050 steps at dt = 0.001 s) covering all 8 notes of the arpeggio
+      for (let step = 0; step < 2050; step++) {
+        sim.step(1);
+
+        if (nextSample < sampleTimes.length && sim.time() >= sampleTimes[nextSample]) {
+          const k = nextSample++;
+          const expectedStrIdx = expectedPattern[k];
+
+          // Inspect real MuJoCo contact pairs at this instant (freeing handles in finally!)
+          const contactedStrings = new Set<number>();
+          const contactVec = sim.data.contact;
+          try {
+            const ncon = contactVec.size();
+            const geomBody = sim.model.geom_bodyid;
+            for (let c = 0; c < ncon; c++) {
+              const ct = contactVec.get(c);
+              if (!ct) continue;
+              try {
+                const b1 = geomBody[ct.geom1];
+                const b2 = geomBody[ct.geom2];
+                if (b1 === bowBodyId || b2 === bowBodyId) {
+                  const other = b1 === bowBodyId ? b2 : b1;
+                  const sIdx = stringBodyIds.indexOf(other);
+                  if (sIdx !== -1) contactedStrings.add(sIdx);
+                }
+              } finally {
+                ct.delete();
+              }
+            }
+          } finally {
+            contactVec.delete();
+          }
+
+          const vBowStroke = sim.jointVel('bow_stroke');
+          const diag = `k=${k} t=${sim.time().toFixed(3)} qRock=${sim.jointPos('bow_rock').toFixed(3)} qPress=${sim.jointPos('bow_press').toFixed(4)} qStroke=${sim.jointPos('bow_stroke').toFixed(4)} vStroke=${vBowStroke.toFixed(4)}`;
+
+          // Arched R = 92 mm bridge isolates ONLY the single target string with zero contact on the other 3!
+          expect([...contactedStrings], diag).toEqual([expectedStrIdx]);
+
+          // Verify alternating tiré (+v) / poussé (-v) sliding bow velocity and transverse string drag
+          expect(Math.abs(vBowStroke), diag).toBeGreaterThan(0.16);
+          if (k % 2 === 0) expect(vBowStroke).toBeGreaterThan(0.16);
+          else expect(vBowStroke).toBeLessThan(-0.16);
+
+          const activePluckQ = Math.abs(sim.jointPos(`${stringIds[expectedStrIdx]}_pluck`));
+          expect(activePluckQ).toBeGreaterThan(0.00015);
+
+          // Verify live bowed acoustics solver locks Helmholtz voice at exact concert pitch!
+          const liveVoice = solveBowedStringVoice({
+            node: stringNodes[expectedStrIdx],
+            sceneNodes: bowedCelloPreset.nodes,
+            bowVelocityMps: Math.abs(vBowStroke),
+            bowForceN: 0.68,
+            bowBeta: 0.112,
+          });
+          expect(liveVoice.active).toBe(true);
+          expect(liveVoice.regime).toBe('helmholtz');
+          expect(hzToNoteInfo(liveVoice.pitchHz).note).toBe(expectedNotes[k]);
+        }
+      }
+
+      expect(nextSample).toBe(expectedPattern.length);
+    } finally {
+      sim.dispose();
+    }
   });
 });

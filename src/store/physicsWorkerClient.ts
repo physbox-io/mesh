@@ -314,6 +314,8 @@ export class PhysicsWorkerClient {
   onImpact: ((event: ImpactEvent) => void) | null = null;
   /** Throttled modal impact events when audio synthesis is unmuted. */
   onAudioImpacts: ((events: import('../workers/physicsWorkerProtocol').AudioImpactEvent[]) => void) | null = null;
+  /** Throttled continuous bowed-string contact events when audio synthesis is unmuted. */
+  onBowedStrings: ((contacts: import('../workers/physicsWorkerProtocol').BowedStringContactEvent[]) => void) | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });
@@ -354,6 +356,9 @@ export class PhysicsWorkerClient {
           break;
         case 'AUDIO_IMPACTS':
           this.onAudioImpacts?.(msg.events);
+          break;
+        case 'BOWED_STRINGS':
+          this.onBowedStrings?.(msg.contacts);
           break;
         case 'HEADLESS_RESULT': {
           this.headlessJudges.delete(msg.id);
