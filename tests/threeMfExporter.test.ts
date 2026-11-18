@@ -1,7 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { unzipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { zipStore, crc32, utf8 } from '../src/utils/zipStore';
-import { exportThreeMf, encodeTriangleState, linearToSrgbHex, type ThreeMfMesh } from '../src/utils/threeMfExporter';
+import {
+  exportThreeMf,
+  exportThreeMfAssemblies,
+  encodeTriangleState,
+  linearToSrgbHex,
+  type ThreeMfMesh,
+} from '../src/utils/threeMfExporter';
+import { filterVisibleScene, resolveExportMeshLabel } from '../src/hooks/useMeshExport';
+import type { SceneNode } from '../src/types/scene';
 
 /** Reads a stored-entry ZIP back out, which is all a 3MF reader has to do. */
 function unzip(data: Uint8Array): Map<string, string> {
@@ -158,9 +166,11 @@ describe('exportThreeMf', () => {
     // Three grey faces and one red one: grey is the body, red is the mark.
     const grey = [[0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]];
     const red = [[1, 0, 0], [1, 0, 0], [1, 0, 0]];
+    const quadTris = (n: number) =>
+      new Float32Array(Array.from({ length: n }, (_, t) => [t * 10, 0, 0, t * 10 + 5, 0, 0, t * 10, 5, 0]).flat());
     const mesh: ThreeMfMesh = {
       name: 'die',
-      positions: new Float32Array(4 * 3 * 3).map((_, i) => i % 7),
+      positions: quadTris(4),
       indices: new Uint32Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
       colors: new Float32Array([...grey, ...grey, ...grey, ...red].flat()),
       baseColor: [0.5, 0.5, 0.5],
@@ -179,9 +189,11 @@ describe('exportThreeMf', () => {
 
   it('snaps colours past the machine\'s filament count onto the ones that fit', () => {
     const face = (c: number[]) => [c, c, c];
+    const quadTris = (n: number) =>
+      new Float32Array(Array.from({ length: n }, (_, t) => [t * 10, 0, 0, t * 10 + 5, 0, 0, t * 10, 5, 0]).flat());
     const mesh: ThreeMfMesh = {
       name: 'many',
-      positions: new Float32Array(5 * 3 * 3).map((_, i) => i % 7),
+      positions: quadTris(5),
       indices: new Uint32Array(Array.from({ length: 15 }, (_, i) => i)),
       colors: new Float32Array([
         ...face([0.5, 0.5, 0.5]),
@@ -272,5 +284,181 @@ describe('what a slicer treats as one object', () => {
     expect(files.get('3D/3dmodel.model')!.match(/<item /g)).toHaveLength(3);
     // Nothing nested, so the commonest colour is filament 1 as ever.
     expect(objects(files.get('Metadata/model_settings.config')!)[1].parts).toEqual([['b', 1]]);
+  });
+});
+
+describe('shared-vertex welding, degenerate/empty guards, and slicer assembly metadata', () => {
+  /** Closed outward-wound cube as an unindexed 12-triangle soup (36 raw vertices). */
+  function cubeSoup([x0, y0, z0]: number[], [x1, y1, z1]: number[], jitter = 0): Float32Array {
+    const c = [
+      [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+      [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+    ];
+    const faces = [
+      [0, 2, 1], [0, 3, 2],
+      [4, 5, 6], [4, 6, 7],
+      [0, 1, 5], [0, 5, 4],
+      [1, 2, 6], [1, 6, 5],
+      [2, 3, 7], [2, 7, 6],
+      [3, 0, 4], [3, 4, 7],
+    ];
+    const out: number[] = [];
+    faces.forEach((f, fi) => {
+      for (const vi of f) {
+        // Tiny sub-0.01 µm noise that rounds to the same 1e-4 mm vertex.
+        const eps = jitter ? ((fi % 2 === 0 ? 1 : -1) * jitter) : 0;
+        out.push(c[vi][0] + eps, c[vi][1] - eps, c[vi][2] + eps);
+      }
+    });
+    return new Float32Array(out);
+  }
+
+  it('welds identical rounded vertices on a non-indexed closed cube into a shared-vertex manifold (vertices < triangles)', () => {
+    const soup = cubeSoup([0, 0, 0], [20, 20, 20], 1e-6);
+    const result = exportThreeMf([{
+      name: 'cube',
+      positions: soup,
+      indices: null,
+      colors: null,
+      baseColor: [0.6, 0.6, 0.6],
+    }]);
+    expect(result.triangles).toBe(12);
+    const model = unzip(result.data).get('3D/3dmodel.model')!;
+    const verts = [...model.matchAll(/<vertex /g)];
+    const tris = [...model.matchAll(/<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"/g)];
+    expect(verts).toHaveLength(8);
+    expect(tris).toHaveLength(12);
+    expect(verts.length).toBeLessThan(tris.length);
+
+    // Every directed edge (u -> v) on the closed cube has its twin (v -> u).
+    const directed = new Set<string>();
+    for (const m of tris) {
+      const [a, b, c] = [+m[1], +m[2], +m[3]];
+      expect(a).not.toBe(b);
+      expect(b).not.toBe(c);
+      expect(c).not.toBe(a);
+      directed.add(`${a}->${b}`);
+      directed.add(`${b}->${c}`);
+      directed.add(`${c}->${a}`);
+    }
+    expect(directed.size).toBe(36);
+    for (const edge of directed) {
+      const [u, v] = edge.split('->');
+      expect(directed.has(`${v}->${u}`)).toBe(true);
+    }
+  });
+
+  it('filters out duplicate-vertex and collinear zero-area triangles and guards empty meshes', () => {
+    const empty = exportThreeMf([
+      { name: 'empty', positions: new Float32Array(0), indices: null, colors: null, baseColor: [0.5, 0.5, 0.5] },
+      { name: 'collinear', positions: new Float32Array([0, 0, 0, 5, 0, 0, 10, 0, 0]), indices: null, colors: null, baseColor: [0.5, 0.5, 0.5] },
+      { name: 'collapsed', positions: new Float32Array([1, 1, 1, 1 + 1e-6, 1, 1, 2, 3, 4]), indices: null, colors: null, baseColor: [0.5, 0.5, 0.5] },
+    ]);
+    expect(empty.triangles).toBe(0);
+    expect(empty.palette).toEqual([]);
+    const emptyModel = unzip(empty.data).get('3D/3dmodel.model')!;
+    expect(emptyModel).not.toContain('<m:colorgroup');
+    expect(emptyModel).not.toContain('pindex="0"');
+    expect(emptyModel).toContain('<build></build>');
+
+    // Mixed degenerate + valid triangles inside one mesh keeps only the valid face.
+    const mixedPositions = new Float32Array([
+      0, 0, 0, 0, 0, 0, 5, 5, 0,         // duplicate vertex
+      0, 0, 0, 2, 2, 2, 4, 4, 4,         // collinear
+      0, 0, 0, 10, 0, 0, 0, 10, 0,       // valid triangle
+    ]);
+    const mixed = exportThreeMf([{ name: 'mixed', positions: mixedPositions, indices: null, colors: null, baseColor: [0.8, 0.2, 0.2] }]);
+    expect(mixed.triangles).toBe(1);
+    const mixedModel = unzip(mixed.data).get('3D/3dmodel.model')!;
+    expect(mixedModel.match(/<vertex /g)).toHaveLength(3);
+    expect(mixedModel.match(/<triangle /g)).toHaveLength(1);
+  });
+
+  it('emits BambuStudio:3mfVersion and aligns Slic3r_PE_model.config object IDs and volume ranges with build items', () => {
+    const shell = cubeSoup([0, 0, 0], [40, 40, 25]);
+    const liner = cubeSoup([5, 5, 7.3], [35, 35, 25]);
+    const res = exportThreeMf([
+      { name: 'Bottom shell', positions: shell, indices: null, colors: null, baseColor: [0.7, 0.45, 0.2], object: 'half_bottom', objectName: 'Bottom' },
+      { name: 'Bottom liner', positions: liner, indices: null, colors: null, baseColor: [0.9, 0.85, 0.65], object: 'half_bottom', objectName: 'Bottom' },
+    ]);
+    const files = unzip(res.data);
+    const model = files.get('3D/3dmodel.model')!;
+    const bambu = files.get('Metadata/model_settings.config')!;
+    const prusa = files.get('Metadata/Slic3r_PE_model.config')!;
+
+    expect(model).toContain('<metadata name="BambuStudio:3mfVersion">1</metadata>');
+
+    const buildIds = [...model.matchAll(/<item objectid="(\d+)"\/>/g)].map((m) => m[1]);
+    expect(buildIds).toHaveLength(1);
+    const assemblyId = buildIds[0];
+
+    // Both Bambu and PrusaSlicer configs key <object id="..."> by the <build><item> assemblyId.
+    expect([...bambu.matchAll(/<object id="(\d+)">/g)].map((m) => m[1])).toEqual([assemblyId]);
+    expect([...prusa.matchAll(/<object id="(\d+)" instances_count="1">/g)].map((m) => m[1])).toEqual([assemblyId]);
+    expect(prusa).toMatch(
+      new RegExp(
+        `<object id="${assemblyId}" instances_count="1">[\\s\\S]*?` +
+        `<volume firstid="0" lastid="11">[\\s\\S]*?key="extruder" value="1"[\\s\\S]*?` +
+        `<volume firstid="12" lastid="23">[\\s\\S]*?key="extruder" value="2"`,
+      ),
+    );
+
+    // exportThreeMfAssemblies follows the exact same contract.
+    const tetra = {
+      positions: new Float32Array([0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10]),
+      indices: new Uint32Array([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]),
+    };
+    const asmRes = exportThreeMfAssemblies([
+      { name: 'Cavity half', parts: [{ name: 'Cavity shell', extruder: 1, ...tetra }, { name: 'Cavity liner', extruder: 2, ...tetra }] },
+    ]);
+    const asmFiles = unzip(asmRes.data);
+    const asmModel = asmFiles.get('3D/3dmodel.model')!;
+    const asmPrusa = asmFiles.get('Metadata/Slic3r_PE_model.config')!;
+    expect(asmModel).toContain('<metadata name="BambuStudio:3mfVersion">1</metadata>');
+    expect(asmModel).toContain('<item objectid="3"/>');
+    expect([...asmPrusa.matchAll(/<object id="(\d+)" instances_count="1">/g)].map((m) => m[1])).toEqual(['3']);
+    expect(asmPrusa).toMatch(/<volume firstid="0" lastid="3">[\s\S]*?key="extruder" value="1"/);
+    expect(asmPrusa).toMatch(/<volume firstid="4" lastid="7">[\s\S]*?key="extruder" value="2"/);
+  });
+
+  it('names viewport-exported meshes after human-readable node.name (and geom.name when multi-geom)', () => {
+    const singleBody: SceneNode = {
+      id: 'body_9f81a2',
+      name: 'Mounting Bracket',
+      type: 'body',
+      pos: [0, 0, 0],
+      geoms: [
+        { name: 'box_1', type: 'box', size: [0.01, 0.01, 0.01] },
+        { name: 'hole_1', type: 'cylinder', size: [0.002, 0.01], csg: 'difference' },
+      ],
+      joints: [],
+      children: [],
+    };
+    expect(resolveExportMeshLabel(singleBody, singleBody.id, 'box_1', 'part_0')).toEqual({ name: 'Mounting Bracket' });
+
+    const multiBody: SceneNode = {
+      id: 'body_77c4e0',
+      name: 'Gear Housing',
+      type: 'body',
+      pos: [0, 0, 0],
+      geoms: [
+        { name: 'shell', type: 'box', size: [0.02, 0.02, 0.01] },
+        { name: 'bushing', type: 'cylinder', size: [0.005, 0.01] },
+      ],
+      joints: [],
+      children: [],
+    };
+    expect(resolveExportMeshLabel(multiBody, multiBody.id, 'shell', 'part_0')).toEqual({
+      name: 'Gear Housing (shell)',
+      objectName: 'Gear Housing',
+    });
+    expect(resolveExportMeshLabel(multiBody, multiBody.id, 'bushing', 'part_1')).toEqual({
+      name: 'Gear Housing (bushing)',
+      objectName: 'Gear Housing',
+    });
+
+    const filtered = filterVisibleScene({ name: 'Demo', nodes: [singleBody, multiBody] }, new Set(['body_9f81a2']));
+    expect(filtered.name).toBe('Demo');
+    expect(filtered.nodes.map((n) => n.id)).toEqual(['body_77c4e0']);
   });
 });

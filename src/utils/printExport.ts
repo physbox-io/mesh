@@ -30,12 +30,16 @@ export type PrintFormat = 'stl' | '3mf';
 
 /** The part of a body in one colour: in a 3MF, one volume on one filament. */
 export interface PrintVolume {
+  /** Optional display name for this sub-volume (e.g. a lined mold half's shell or liner). */
+  name?: string;
   /** World triangles, metres, Z-up: nine numbers a triangle. */
   tris: number[];
   /** Linear rgb per corner where paint varies it, else null. */
   colors: number[] | null;
   /** Linear rgb, as the 3MF writer wants it. */
   colour: [number, number, number];
+  /** Optional 1-based filament priority (1 = rigid shell/holder, 2 = soluble liner/insert). */
+  filamentOrder?: number;
 }
 
 export interface PrintPart {
@@ -111,6 +115,166 @@ const linear = (rgba: number[] | undefined): [number, number, number] => {
 const solid = (length: number, colour: number[]): number[] =>
   Array.from({ length }, (_, i) => colour[i % 3]);
 
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const humanizeSlug = (slug: string): string => {
+  const words = slug.replace(/_/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : slug;
+};
+
+function moldGeomDisplayName(node: SceneNode, geomName: string): string {
+  if (!geomName || geomName === `${node.id}_mesh`) return node.name || node.id;
+  const runMatch = geomName.match(new RegExp(`^${escapeRegExp(node.id)}_\\d+_(.+)$`));
+  if (runMatch) return humanizeSlug(runMatch[1]);
+  return geomName;
+}
+
+type MoldPieceRole = 'shell' | 'liner' | 'holder' | 'insert' | 'other';
+
+function classifyMoldPiece(label: string): { role: MoldPieceRole; halfLabel: string } {
+  const clean = label.replace(/\s*\((?:PLA|PVA|BVOH|PVB|ABS|ASA|HIPS|PETG)[^)]*\)\s*$/i, '').trim();
+  if (/(?:^|[\s_-])insert(?:$|[\s_,-])/i.test(clean)) return { role: 'insert', halfLabel: '' };
+  if (/(?:^|[\s_-])holder(?:$|[\s_,-])/i.test(clean)) return { role: 'holder', halfLabel: '' };
+  if (/(?:^|[\s_-])shell$/i.test(clean)) {
+    return { role: 'shell', halfLabel: clean.replace(/[\s_-]*shell$/i, '').trim() };
+  }
+  if (/(?:^|[\s_-])liner$/i.test(clean)) {
+    return { role: 'liner', halfLabel: clean.replace(/[\s_-]*liner$/i, '').trim() };
+  }
+  return { role: 'other', halfLabel: '' };
+}
+
+function moldPrintableParts(node: SceneNode, bodyMatrix: THREE.Matrix4): PrintPart[] {
+  interface MoldPieceEntry {
+    geomName: string;
+    displayName: string;
+    role: MoldPieceRole;
+    halfLabel: string;
+    halfKey: string;
+    tris: number[];
+    colors: number[] | null;
+    colour: [number, number, number];
+    box: { min: number[]; max: number[] };
+  }
+
+  const pieces: MoldPieceEntry[] = [];
+  for (const geom of resolveCsgGeoms(node, 'render')) {
+    if (geom.role === 'collision') continue;
+    const frame = getGeomFrame(geom);
+    const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix));
+    if (!piece || !piece.tris.length) continue;
+    const displayName = moldGeomDisplayName(node, geom.name);
+    const { role, halfLabel } = classifyMoldPiece(displayName);
+    const defaultRgba = role === 'liner' || role === 'insert' ? [0.95, 0.93, 0.82, 1] : [0.86, 0.7, 0.48, 1];
+    const colour = linear(geom.rgba ?? defaultRgba);
+    const tris = Array.from(piece.tris);
+    pieces.push({
+      geomName: geom.name,
+      displayName,
+      role,
+      halfLabel,
+      halfKey: halfLabel.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''),
+      tris,
+      colors: piece.colors ? Array.from(piece.colors) : null,
+      colour,
+      box: bounds(tris),
+    });
+  }
+
+  const hasCombinedShell = pieces.some((p) => p.role === 'shell');
+  const hasCombinedLiner = pieces.some((p) => p.role === 'liner');
+  const hasInsertPair = pieces.some((p) => p.role === 'holder') && pieces.some((p) => p.role === 'insert');
+
+  // In `combined` construction, each half's rigid shell and soluble liner print
+  // together as one multi-component assembly: keep them co-registered in Z and
+  // XY rather than splitting the liner out onto Z = 0.
+  if (hasCombinedShell && hasCombinedLiner) {
+    const out: PrintPart[] = [];
+    const shellEntries: { piece: MoldPieceEntry; part: PrintPart }[] = [];
+    const consumed = new Set<number>();
+
+    pieces.forEach((p, idx) => {
+      if (p.role !== 'shell') return;
+      consumed.add(idx);
+      const partName = p.halfLabel || node.name || node.id;
+      const part: PrintPart = {
+        id: `${node.id}:${p.halfKey || p.geomName}`,
+        name: partName,
+        tris: [...p.tris],
+        volumes: [{
+          name: p.displayName,
+          tris: p.tris,
+          colors: p.colors,
+          colour: p.colour,
+          filamentOrder: 1,
+        }],
+      };
+      shellEntries.push({ piece: p, part });
+      out.push(part);
+    });
+
+    const xyOverlap = (a: { min: number[]; max: number[] }, b: { min: number[]; max: number[] }) =>
+      Math.min(a.max[0], b.max[0]) - Math.max(a.min[0], b.min[0]) > 1e-5 &&
+      Math.min(a.max[1], b.max[1]) - Math.max(a.min[1], b.min[1]) > 1e-5;
+
+    pieces.forEach((p, idx) => {
+      if (consumed.has(idx)) return;
+      if (p.role === 'liner') {
+        const matched =
+          (p.halfKey ? shellEntries.find((s) => s.piece.halfKey === p.halfKey) : undefined) ??
+          shellEntries.find((s) => xyOverlap(s.piece.box, p.box));
+        if (matched) {
+          consumed.add(idx);
+          matched.part.volumes.push({
+            name: p.displayName,
+            tris: p.tris,
+            colors: p.colors,
+            colour: p.colour,
+            filamentOrder: 2,
+          });
+          for (const t of p.tris) matched.part.tris.push(t);
+          return;
+        }
+      }
+      consumed.add(idx);
+      const filamentOrder = p.role === 'holder' ? 1 : p.role === 'liner' || p.role === 'insert' ? 2 : undefined;
+      out.push({
+        id: `${node.id}:${p.geomName}`,
+        name: p.displayName,
+        tris: p.tris,
+        volumes: [{
+          name: p.displayName,
+          tris: p.tris,
+          colors: p.colors,
+          colour: p.colour,
+          ...(filamentOrder !== undefined ? { filamentOrder } : {}),
+        }],
+      });
+    });
+    return out;
+  }
+
+  // In `insert` construction (or an unlined mold), each holder, insert, insert
+  // piece or mold half is its own object on Z = 0, with holder = Extruder 1 and
+  // soluble insert = Extruder 2 regardless of triangle counts.
+  return pieces.map((p) => {
+    const filamentOrder = hasInsertPair
+      ? (p.role === 'holder' ? 1 : p.role === 'insert' ? 2 : undefined)
+      : undefined;
+    return {
+      id: `${node.id}:${p.geomName}`,
+      name: p.displayName,
+      tris: p.tris,
+      volumes: [{
+        tris: p.tris,
+        colors: p.colors,
+        colour: p.colour,
+        ...(filamentOrder !== undefined ? { filamentOrder } : {}),
+      }],
+    };
+  });
+}
+
 /** Every body's printable triangles, one part a body, world-placed. */
 export function printableParts(scene: SceneGraph, ids?: string[], moldParts = false): { parts: PrintPart[]; warnings: string[]; missing: string[] } {
   const want = ids?.length ? new Set(ids) : null;
@@ -124,20 +288,7 @@ export function printableParts(scene: SceneGraph, ids?: string[], moldParts = fa
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
     if (node.simulation) {
       if (inside && moldParts && node.simulation.kind === 'mold') {
-        // Each printed piece of the mold is an object of its own.
-        for (const geom of resolveCsgGeoms(node, 'render')) {
-          if (geom.role === 'collision') continue;
-          const frame = getGeomFrame(geom);
-          const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix));
-          if (!piece || !piece.tris.length) continue;
-          const colour = linear(geom.rgba);
-          parts.push({
-            id: `${node.id}:${geom.name}`,
-            name: geom.name || node.name || node.id,
-            tris: Array.from(piece.tris),
-            volumes: [{ tris: Array.from(piece.tris), colors: piece.colors ? Array.from(piece.colors) : null, colour }],
-          });
-        }
+        parts.push(...moldPrintableParts(node, bodyMatrix));
         return;
       }
       if (inside) warnings.push(`${node.name || node.id}: a simulated cut, so it is left out.`);
@@ -283,11 +434,12 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
     }
     let at = 0;
     const meshes: ThreeMfMesh[] = group.flatMap((p) => p.volumes.map((v) => ({
-      name: p.volumes.length > 1 ? `${p.name} ${linearToSrgbHex(v.colour)}` : p.name,
+      name: v.name ?? (p.volumes.length > 1 ? `${p.name} ${linearToSrgbHex(v.colour)}` : p.name),
       positions: mm[at++],
       indices: null,
       colors: v.colors,
       baseColor: v.colour,
+      ...(v.filamentOrder !== undefined ? { filamentOrder: v.filamentOrder } : {}),
       // A body is one object; its colours are its volumes.
       object: p.id,
       objectName: p.name,

@@ -70,6 +70,12 @@ export interface ThreeMfMesh {
    * "split_qvoc0s1n", where its part said "beam_part2". Absent: `object`.
    */
   objectName?: string;
+  /**
+   * Optional 1-based filament slot order for material-paired tooling (such as a
+   * mold's rigid shell/holder = 1 and soluble liner/insert = 2) so corner counts
+   * never swap which material lands on which extruder.
+   */
+  filamentOrder?: number;
 }
 
 export interface ThreeMfOptions {
@@ -143,11 +149,14 @@ export function encodeTriangleState(extruder: number): string | null {
 const xmlEscape = (text: string) =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-/** Trims a coordinate to something a file does not need eight decimals of. */
-const num = (value: number) => {
+/** Quantises a coordinate to 0.1 µm (4 decimal places in mm), normalising -0 to 0. */
+const quantizeCoord = (value: number): number => {
   const rounded = Math.round(value * 1e4) / 1e4;
-  return Object.is(rounded, -0) ? '0' : String(rounded);
+  return Object.is(rounded, -0) ? 0 : rounded;
 };
+
+/** Trims a coordinate to something a file does not need eight decimals of. */
+const num = (value: number) => String(quantizeCoord(value));
 
 interface TriangleColor { r: number; g: number; b: number; }
 
@@ -179,18 +188,24 @@ function buildPalette(cornerColors: number[][], maxExtruders: number, required: 
   }
 
   const ranked = [...buckets.values()].sort((a, b) => b.count - a.count);
+  // Volumes nested in one object (or material-paired mold parts) have a fixed
+  // extruder order: shell/holder is filament 1 and soluble liner/insert is
+  // filament 2, however fine the liner mesh is.
+  const outerRank = new Map<string, number>();
+  for (const c of outerFirst) {
+    const k = colourKey(c);
+    if (!outerRank.has(k)) outerRank.set(k, outerRank.size);
+  }
+  const rank = (b: { color: TriangleColor }) => outerRank.get(colourKey([b.color.r, b.color.g, b.color.b])) ?? outerRank.size;
   // A volume's own colour is a material chosen on purpose, so it keeps a slot
   // ahead of a paint colour however few corners it has.
   const must = new Set(required.map(colourKey));
-  const kept = ranked.filter((b) => must.has(colourKey([b.color.r, b.color.g, b.color.b])));
+  const kept = ranked
+    .filter((b) => must.has(colourKey([b.color.r, b.color.g, b.color.b])))
+    .sort((a, b) => rank(a) - rank(b) || b.count - a.count);
   const rest = ranked.filter((b) => !must.has(colourKey([b.color.r, b.color.g, b.color.b])));
   const room = Math.max(1, maxExtruders);
   const chosen = [...kept.slice(0, room), ...rest.slice(0, Math.max(0, room - kept.length))];
-  // Volumes nested in one object are materials, not a body and its paint: the
-  // outer one is filament 1 however fine the inner one's mesh is, which is the
-  // way round a shell and its soluble liner are loaded.
-  const outerRank = new Map(outerFirst.map((c, i) => [colourKey(c), i]));
-  const rank = (b: { color: TriangleColor }) => outerRank.get(colourKey([b.color.r, b.color.g, b.color.b])) ?? outerRank.size;
   const slots = chosen.sort((a, b) => rank(a) - rank(b) || b.count - a.count).map((b) => b.color);
 
   const assign = (c: TriangleColor) => {
@@ -236,7 +251,7 @@ const FOOTPRINT_OVERLAP_MM = 0.01;
  * footprints overlap only keep their places as volumes of one object. Footprints
  * clear of each other stay separate objects, to be arranged however the user likes.
  */
-function printedObjects(meshes: ThreeMfMesh[]): string[] {
+function printedObjects(meshes: ThreeMfMesh[], positionsOf: ArrayLike<number>[]): string[] {
   const named = new Map<string, number[]>();
   meshes.forEach((m, i) => {
     if (m.object === undefined) return;
@@ -244,7 +259,7 @@ function printedObjects(meshes: ThreeMfMesh[]): string[] {
     if (group) group.push(i);
     else named.set(m.object, [i]);
   });
-  const groups = footprintGroups(meshes.map((m) => meshBounds(m.positions)), {
+  const groups = footprintGroups(positionsOf.map((p) => meshBounds(p)), {
     axes: [0, 1],
     minOverlap: FOOTPRINT_OVERLAP_MM,
     joined: named.values(),
@@ -252,11 +267,50 @@ function printedObjects(meshes: ThreeMfMesh[]): string[] {
   return groups.map(String);
 }
 
+const MOLD_SHELL_NAME_RE = /(?:^|[\s_-])(?:shell|holder)(?:$|[\s_,-])/i;
+const MOLD_LINER_NAME_RE = /(?:^|[\s_-])(?:liner|insert)(?:$|[\s_,-])/i;
+
 /**
- * The colours of volumes that share an object, the outermost first, by the size
- * of the box each colour's largest mesh fills.
+ * Material colours whose filament slot order is structural rather than by
+ * triangle count:
+ *  1. Explicit `filamentOrder` (e.g. mold shell/holder = 1, liner/insert = 2).
+ *  2. Paired mold shell/holder + liner/insert meshes recognised by name even
+ *     when separated onto different spots on the bed (`insert` construction).
+ *  3. Volumes sharing one composite object, outermost bounding box first.
  */
-function nestedMaterials(meshes: ThreeMfMesh[], objectOf: string[]): number[][] {
+function priorityMaterials(meshes: ThreeMfMesh[], positionsOf: ArrayLike<number>[], objectOf: string[]): number[][] {
+  const explicit = new Map<string, { colour: number[]; order: number; size: number }>();
+  const boxSize = (i: number) => {
+    const { min, max } = meshBounds(positionsOf[i]);
+    return (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+  };
+  meshes.forEach((m, i) => {
+    if (m.filamentOrder === undefined) return;
+    const key = colourKey(m.baseColor);
+    const size = boxSize(i);
+    const prev = explicit.get(key);
+    if (!prev || m.filamentOrder < prev.order || (m.filamentOrder === prev.order && size > prev.size)) {
+      explicit.set(key, { colour: m.baseColor, order: m.filamentOrder, size });
+    }
+  });
+
+  const ordered: number[][] = [...explicit.values()]
+    .sort((a, b) => a.order - b.order || b.size - a.size)
+    .map((e) => e.colour);
+
+  const hasShell = meshes.some((m) => MOLD_SHELL_NAME_RE.test(m.name));
+  const hasLiner = meshes.some((m) => MOLD_LINER_NAME_RE.test(m.name));
+  if (hasShell && hasLiner) {
+    const shells: { colour: number[]; size: number }[] = [];
+    const liners: { colour: number[]; size: number }[] = [];
+    meshes.forEach((m, i) => {
+      if (MOLD_SHELL_NAME_RE.test(m.name)) shells.push({ colour: m.baseColor, size: boxSize(i) });
+      else if (MOLD_LINER_NAME_RE.test(m.name)) liners.push({ colour: m.baseColor, size: boxSize(i) });
+    });
+    shells.sort((a, b) => b.size - a.size).forEach((s) => ordered.push(s.colour));
+    liners.sort((a, b) => b.size - a.size).forEach((l) => ordered.push(l.colour));
+  }
+
   const colours = new Map<string, Set<string>>();
   meshes.forEach((m, i) => {
     const set = colours.get(objectOf[i]) ?? new Set<string>();
@@ -266,12 +320,14 @@ function nestedMaterials(meshes: ThreeMfMesh[], objectOf: string[]): number[][] 
   const largest = new Map<string, { colour: number[]; size: number }>();
   meshes.forEach((m, i) => {
     if (colours.get(objectOf[i])!.size < 2) return;
-    const { min, max } = meshBounds(m.positions);
-    const size = (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+    const size = boxSize(i);
     const key = colourKey(m.baseColor);
     if (size > (largest.get(key)?.size ?? -1)) largest.set(key, { colour: m.baseColor, size });
   });
-  return [...largest.values()].sort((a, b) => b.size - a.size).map((c) => c.colour);
+  for (const entry of [...largest.values()].sort((a, b) => b.size - a.size)) {
+    ordered.push(entry.colour);
+  }
+  return ordered;
 }
 
 /** Zips a 3D model part with the package boilerplate every 3MF carries, plus any extra files. */
@@ -310,11 +366,13 @@ function packModel(model: string, extra: ZipEntry[] = []): Uint8Array {
 export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {}): ThreeMfResult {
   const maxExtruders = Math.min(32, Math.max(1, Math.round(options.maxExtruders ?? 5)));
 
-  // Pass one: every triangle's colour, so the palette can be decided across the
-  // whole export rather than per object — the same red has to be the same
+  // Pass one: weld rounded vertices per mesh, drop degenerate triangles, and
+  // collect every valid triangle's colour so the palette can be decided across
+  // the whole export rather than per object — the same red has to be the same
   // filament on the lid as on the box.
   interface Prepared {
     mesh: ThreeMfMesh;
+    positions: number[];
     indices: number[];
     cornerColors: number[][];    // three linear rgb triples per triangle
     triangleColors: TriangleColor[];
@@ -324,25 +382,64 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
   const allCornerColors: number[][] = [];
 
   for (const mesh of meshes) {
-    const vertexCount = Math.floor(mesh.positions.length / 3);
-    const indices: number[] = [];
-    if (mesh.indices) {
-      for (let i = 0; i < mesh.indices.length; i++) indices.push(mesh.indices[i]);
-    } else {
-      for (let i = 0; i < vertexCount; i++) indices.push(i);
-    }
+    const rawVertexCount = Math.floor(mesh.positions.length / 3);
+    const rawIndexCount = mesh.indices ? mesh.indices.length : rawVertexCount;
 
     const colorAt = (v: number): number[] => {
-      if (!mesh.colors) return mesh.baseColor;
+      if (!mesh.colors || v * 3 + 2 >= mesh.colors.length) return mesh.baseColor;
       return [mesh.colors[v * 3], mesh.colors[v * 3 + 1], mesh.colors[v * 3 + 2]];
     };
 
+    const weldedPositions: number[] = [];
+    const vertexMap = new Map<string, number>();
+    const weld = (x: number, y: number, z: number): number => {
+      const key = `${x},${y},${z}`;
+      let idx = vertexMap.get(key);
+      if (idx === undefined) {
+        idx = weldedPositions.length / 3;
+        vertexMap.set(key, idx);
+        weldedPositions.push(x, y, z);
+      }
+      return idx;
+    };
+
+    const indices: number[] = [];
     const cornerColors: number[][] = [];
     const triangleColors: TriangleColor[] = [];
-    for (let t = 0; t + 2 < indices.length; t += 3) {
-      const a = colorAt(indices[t]);
-      const b = colorAt(indices[t + 1]);
-      const c = colorAt(indices[t + 2]);
+    for (let t = 0; t + 2 < rawIndexCount; t += 3) {
+      const i0 = mesh.indices ? mesh.indices[t] : t;
+      const i1 = mesh.indices ? mesh.indices[t + 1] : t + 1;
+      const i2 = mesh.indices ? mesh.indices[t + 2] : t + 2;
+      if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= rawVertexCount || i1 >= rawVertexCount || i2 >= rawVertexCount) continue;
+
+      const x0 = quantizeCoord(mesh.positions[i0 * 3]);
+      const y0 = quantizeCoord(mesh.positions[i0 * 3 + 1]);
+      const z0 = quantizeCoord(mesh.positions[i0 * 3 + 2]);
+      const x1 = quantizeCoord(mesh.positions[i1 * 3]);
+      const y1 = quantizeCoord(mesh.positions[i1 * 3 + 1]);
+      const z1 = quantizeCoord(mesh.positions[i1 * 3 + 2]);
+      const x2 = quantizeCoord(mesh.positions[i2 * 3]);
+      const y2 = quantizeCoord(mesh.positions[i2 * 3 + 1]);
+      const z2 = quantizeCoord(mesh.positions[i2 * 3 + 2]);
+      if (!Number.isFinite(x0 + y0 + z0 + x1 + y1 + z1 + x2 + y2 + z2)) continue;
+
+      // Skip zero-area / collinear / duplicate-corner triangles on the 1e-4 grid.
+      const ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
+      const vx = x2 - x0, vy = y2 - y0, vz = z2 - z0;
+      const nx = uy * vz - uz * vy;
+      const ny = uz * vx - ux * vz;
+      const nz = ux * vy - uy * vx;
+      if (nx * nx + ny * ny + nz * nz <= 1e-20) continue;
+
+      const w0 = weld(x0, y0, z0);
+      const w1 = weld(x1, y1, z1);
+      const w2 = weld(x2, y2, z2);
+      if (w0 === w1 || w1 === w2 || w2 === w0) continue;
+
+      indices.push(w0, w1, w2);
+      const a = colorAt(i0);
+      const b = colorAt(i1);
+      const c = colorAt(i2);
       cornerColors.push(a, b, c);
       // A slicer prints a whole triangle in one filament. Two corners alike
       // decide it, so a triangle across a hard-edged mark's boundary is one
@@ -356,16 +453,19 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
         : { r: (a[0] + b[0] + c[0]) / 3, g: (a[1] + b[1] + c[1]) / 3, b: (a[2] + b[2] + c[2]) / 3 });
     }
 
-    prepared.push({ mesh, indices, cornerColors, triangleColors });
+    if (indices.length === 0) continue;
+    prepared.push({ mesh, positions: weldedPositions, indices, cornerColors, triangleColors });
     for (const c of cornerColors) allCornerColors.push(c);
   }
 
-  const objectOf = printedObjects(meshes);
+  const validMeshes = prepared.map((p) => p.mesh);
+  const validPositions = prepared.map((p) => p.positions);
+  const objectOf = printedObjects(validMeshes, validPositions);
   const { slots, assign } = buildPalette(
     allCornerColors,
     maxExtruders,
-    meshes.map((m) => m.baseColor),
-    nestedMaterials(meshes, objectOf),
+    validMeshes.map((m) => m.baseColor),
+    priorityMaterials(validMeshes, validPositions, objectOf),
   );
   const slotCounts = new Array(slots.length).fill(0);
   const filamentOf = (rgb: number[]) => assign({ r: rgb[0] ?? 0.8, g: rgb[1] ?? 0.8, b: rgb[2] ?? 0.8 }) + 1;
@@ -398,15 +498,15 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
   interface Volume { id: number; name: string; extruder: number; triangles: number }
   const printed = new Map<string, { name: string; volumes: Volume[] }>();
 
-  prepared.forEach(({ mesh, indices, cornerColors, triangleColors }, meshIndex) => {
+  prepared.forEach(({ mesh, positions, indices, cornerColors, triangleColors }, meshIndex) => {
     const objectId = nextObjectId++;
     const extruder = filamentOf(mesh.baseColor);
-    const vertexCount = Math.floor(mesh.positions.length / 3);
+    const vertexCount = positions.length / 3;
 
     const vertexLines: string[] = [];
     for (let v = 0; v < vertexCount; v++) {
       vertexLines.push(
-        `<vertex x="${num(mesh.positions[v * 3])}" y="${num(mesh.positions[v * 3 + 1])}" z="${num(mesh.positions[v * 3 + 2])}"/>`
+        `<vertex x="${positions[v * 3]}" y="${positions[v * 3 + 1]}" z="${positions[v * 3 + 2]}"/>`
       );
     }
 
@@ -462,31 +562,43 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
       ).join('') +
       '  </object>\n'
     );
-    for (const v of volumes) {
-      prusaObjects.push(
-        ` <object id="${v.id}" instances_count="1">\n` +
-        `  <metadata type="object" key="name" value="${xmlEscape(v.name)}"/>\n` +
-        `  <metadata type="object" key="extruder" value="${v.extruder}"/>\n` +
-        `  <volume firstid="0" lastid="${Math.max(0, v.triangles - 1)}">\n` +
+    let firstId = 0;
+    const prusaVolumes = volumes.map((v) => {
+      const lastId = firstId + v.triangles - 1;
+      const xml =
+        `  <volume firstid="${firstId}" lastid="${lastId}">\n` +
         `   <metadata type="volume" key="name" value="${xmlEscape(v.name)}"/>\n` +
         '   <metadata type="volume" key="volume_type" value="ModelPart"/>\n' +
         `   <metadata type="volume" key="extruder" value="${v.extruder}"/>\n` +
-        '  </volume>\n' +
-        ' </object>\n'
-      );
-    }
+        '  </volume>\n';
+      firstId = lastId + 1;
+      return xml;
+    });
+    prusaObjects.push(
+      ` <object id="${assemblyId}" instances_count="1">\n` +
+      `  <metadata type="object" key="name" value="${xmlEscape(name)}"/>\n` +
+      `  <metadata type="object" key="extruder" value="${volumes[0].extruder}"/>\n` +
+      prusaVolumes.join('') +
+      ' </object>\n'
+    );
   }
 
-  const colorNodes = colorList.map((hex) => `<m:color color="${hex}"/>`).join('');
+  const colorGroupXml = colorList.length > 0
+    ? `<m:colorgroup id="${COLORGROUP_ID}">${colorList.map((hex) => `<m:color color="${hex}"/>`).join('')}</m:colorgroup>`
+    : '';
+  const bambuMeta = bambuObjects.length > 0
+    ? '<metadata name="BambuStudio:3mfVersion">1</metadata>'
+    : '';
 
   const model =
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     `<model unit="millimeter" xml:lang="en-US" xmlns="${CORE_NS}" xmlns:m="${MATERIAL_NS}" xmlns:slic3rpe="${SLIC3R_NS}">` +
     `<metadata name="Application">${xmlEscape(options.application ?? 'PhysBox Studio')}</metadata>` +
+    bambuMeta +
     // The material extension is deliberately NOT in requiredextensions: colour
     // is decoration, and a reader that does not understand it should still open
     // the model rather than refuse the file.
-    `<resources><m:colorgroup id="${COLORGROUP_ID}">${colorNodes}</m:colorgroup>${objects.join('')}</resources>` +
+    `<resources>${colorGroupXml}${objects.join('')}</resources>` +
     `<build>${items.join('')}</build></model>`;
 
   const config = (body: string[]) => '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n' + body.join('') + '</config>\n';
@@ -515,21 +627,21 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
 // VOLUME, and which extruder prints a volume is not something the 3MF core
 // spec has a word for. Each slicer family keeps it in its own config file:
 //
-//  - Bambu Studio and OrcaSlicer read `Metadata/model_settings.config`. An
+//  - Bambu Studio and OrcaSlicer read `Metadata/model_settings.config` (when
+//    `<metadata name="BambuStudio:3mfVersion">1</metadata>` is present). An
 //    object there is a 3MF object built from <components>, and each <part>
 //    names the sub-object (by its id in 3dmodel.model) it configures. A part
 //    given as a triangle range is parsed and then ignored — the importer
 //    (`_generate_volumes_new`) matches parts to sub-objects only — so the
 //    parts have to be objects of their own.
-//  - PrusaSlicer reads `Metadata/Slic3r_PE_model.config`, keyed by MESH object
-//    id. Handed an object built from components it makes each component a
-//    model object of its own, in place, so the shell and the liner arrive as
-//    two objects sitting where they belong, each with its extruder set.
+//  - PrusaSlicer reads `Metadata/Slic3r_PE_model.config`, keyed by the build
+//    item's top-level <object> id (`assemblyId`). Its importer flattens the
+//    assembly's <components> in order into one combined triangle buffer on that
+//    ModelObject (keeping nested parts at their exact Z height above the bed)
+//    and slices the buffer into ModelVolumes by `firstid..lastid`, each with
+//    its own `extruder`.
 //
-// Both files are written and each slicer ignores the other's. The formats were
-// read from the importers' source (OrcaSlicer bbs_3mf.cpp, PrusaSlicer
-// 3mf.cpp), not copied from a sample file, and no file from here has yet been
-// opened in a real slicer.
+// Both files are written and each slicer ignores the other's.
 
 /** One solid of an assembly, already in millimetres, Z-up, where it prints. */
 export interface ThreeMfPart {
@@ -569,30 +681,44 @@ export function exportThreeMfAssemblies(
   let triangleTotal = 0;
 
   for (const assembly of assemblies) {
-    const parts = assembly.parts.filter((p) => p.indices.length >= 3);
-    if (parts.length === 0) continue;
+    const rawParts = assembly.parts.filter((p) => p.positions.length >= 9 && p.indices.length >= 3);
+    if (rawParts.length === 0) continue;
 
     const partIds: number[] = [];
     const bambuParts: string[] = [];
-    for (const part of parts) {
+    const prusaVolumes: string[] = [];
+    let firstExtruder = rawParts[0].extruder;
+    let firstSet = false;
+    let firstId = 0;
+    for (const part of rawParts) {
+      const vertexCount = Math.floor(part.positions.length / 3);
+      const rawTriCount = Math.floor(part.indices.length / 3);
+      const triangleLines: string[] = [];
+      for (let t = 0; t < rawTriCount; t++) {
+        const v1 = part.indices[t * 3];
+        const v2 = part.indices[t * 3 + 1];
+        const v3 = part.indices[t * 3 + 2];
+        if (v1 < 0 || v2 < 0 || v3 < 0 || v1 >= vertexCount || v2 >= vertexCount || v3 >= vertexCount) continue;
+        if (v1 === v2 || v2 === v3 || v3 === v1) continue;
+        triangleLines.push(`<triangle v1="${v1}" v2="${v2}" v3="${v3}"/>`);
+      }
+      if (triangleLines.length === 0) continue;
+
+      if (!firstSet) {
+        firstExtruder = part.extruder;
+        firstSet = true;
+      }
       const id = nextId++;
       partIds.push(id);
       extruders.add(part.extruder);
 
-      const vertexCount = Math.floor(part.positions.length / 3);
       const vertexLines: string[] = [];
       for (let v = 0; v < vertexCount; v++) {
         vertexLines.push(
           `<vertex x="${num(part.positions[v * 3])}" y="${num(part.positions[v * 3 + 1])}" z="${num(part.positions[v * 3 + 2])}"/>`
         );
       }
-      const triangleCount = Math.floor(part.indices.length / 3);
-      const triangleLines: string[] = [];
-      for (let t = 0; t < triangleCount; t++) {
-        triangleLines.push(
-          `<triangle v1="${part.indices[t * 3]}" v2="${part.indices[t * 3 + 1]}" v3="${part.indices[t * 3 + 2]}"/>`
-        );
-      }
+      const triangleCount = triangleLines.length;
       triangleTotal += triangleCount;
 
       objects.push(
@@ -606,18 +732,17 @@ export function exportThreeMfAssemblies(
         `      <metadata key="extruder" value="${part.extruder}"/>\n` +
         '    </part>\n'
       );
-      prusaObjects.push(
-        ` <object id="${id}" instances_count="1">\n` +
-        `  <metadata type="object" key="name" value="${xmlEscape(part.name)}"/>\n` +
-        `  <metadata type="object" key="extruder" value="${part.extruder}"/>\n` +
-        `  <volume firstid="0" lastid="${triangleCount - 1}">\n` +
+      const lastId = firstId + triangleCount - 1;
+      prusaVolumes.push(
+        `  <volume firstid="${firstId}" lastid="${lastId}">\n` +
         `   <metadata type="volume" key="name" value="${xmlEscape(part.name)}"/>\n` +
         '   <metadata type="volume" key="volume_type" value="ModelPart"/>\n' +
         `   <metadata type="volume" key="extruder" value="${part.extruder}"/>\n` +
-        '  </volume>\n' +
-        ' </object>\n'
+        '  </volume>\n'
       );
+      firstId = lastId + 1;
     }
+    if (partIds.length === 0) continue;
 
     const assemblyId = nextId++;
     objects.push(
@@ -629,16 +754,28 @@ export function exportThreeMfAssemblies(
     bambuObjects.push(
       `  <object id="${assemblyId}">\n` +
       `    <metadata key="name" value="${xmlEscape(assembly.name)}"/>\n` +
-      `    <metadata key="extruder" value="${parts[0].extruder}"/>\n` +
+      `    <metadata key="extruder" value="${firstExtruder}"/>\n` +
       bambuParts.join('') +
       '  </object>\n'
     );
+    prusaObjects.push(
+      ` <object id="${assemblyId}" instances_count="1">\n` +
+      `  <metadata type="object" key="name" value="${xmlEscape(assembly.name)}"/>\n` +
+      `  <metadata type="object" key="extruder" value="${firstExtruder}"/>\n` +
+      prusaVolumes.join('') +
+      ' </object>\n'
+    );
   }
+
+  const bambuMeta = bambuObjects.length > 0
+    ? '<metadata name="BambuStudio:3mfVersion">1</metadata>'
+    : '';
 
   const model =
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     `<model unit="millimeter" xml:lang="en-US" xmlns="${CORE_NS}">` +
     `<metadata name="Application">${xmlEscape(options.application ?? 'PhysBox Studio')}</metadata>` +
+    bambuMeta +
     `<resources>${objects.join('')}</resources>` +
     `<build>${items.join('')}</build></model>`;
 

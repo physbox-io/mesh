@@ -4,14 +4,53 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { isBoughtIn } from '../utils/boughtIn';
 import { useStore } from '../store/useStore';
 import { useDialogs } from '../store/dialogStore';
-import type { SceneNode } from '../types/scene';
+import type { SceneGraph, SceneNode } from '../types/scene';
 import type { NoteCard } from '../utils/noteCards';
 import { exportThreeMf, type ThreeMfMesh } from '../utils/threeMfExporter';
-import { exportPrintFiles } from '../utils/printExport';
+import { exportPrintFiles, printableParts } from '../utils/printExport';
 import { zipStore } from '../utils/zipStore';
 import { downloadBlob } from '../utils/downloadBlob';
 import { exportBaseName } from '../utils/exportBaseName';
 import { footprintGroups } from '../utils/footprintGroups';
+
+/** Drops hidden bodies (and everything parented under them) from a scene graph copy. */
+export function filterVisibleScene(graph: SceneGraph, hidden: ReadonlySet<string>): SceneGraph {
+  if (hidden.size === 0) return graph;
+  const keep = (nodes: SceneNode[]): SceneNode[] =>
+    nodes
+      .filter((n) => !hidden.has(n.id))
+      .map((n) => (n.children?.length ? { ...n, children: keep(n.children) } : n));
+  return { ...graph, nodes: keep(graph.nodes) };
+}
+
+/**
+ * Human-readable mesh name for viewport exports (`node.name`, plus `geom.name`
+ * when a body has multiple visible geoms) rather than an opaque internal `node.id`.
+ */
+export function resolveExportMeshLabel(
+  node: SceneNode | undefined,
+  ownerId: string | null,
+  geomName: string | null,
+  fallbackName: string,
+): { name: string; objectName?: string } {
+  if (!node) return { name: ownerId || fallbackName };
+  const bodyLabel = node.name || node.id;
+  const renderGeoms = (node.geoms ?? []).filter(
+    (g) => g.role !== 'collision' && g.csg !== 'difference' && g.csg !== 'intersection' && g.csgDerived !== 'collider',
+  );
+  if (renderGeoms.length <= 1 || !geomName || geomName === `${node.id}_mesh`) {
+    return { name: bodyLabel };
+  }
+  const escapedId = node.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const runMatch = geomName.match(new RegExp(`^${escapedId}_\\d+_(.+)$`));
+  const rawGeom = runMatch
+    ? runMatch[1].replace(/_/g, ' ').trim().replace(/^./, (c) => c.toUpperCase())
+    : geomName;
+  if (!rawGeom || rawGeom.toLowerCase() === bodyLabel.toLowerCase()) {
+    return { name: bodyLabel, objectName: bodyLabel };
+  }
+  return { name: `${bodyLabel} (${rawGeom})`, objectName: bodyLabel };
+}
 
 /**
  * STL and 3MF, made from what the viewport draws. `threeSceneRef` is the
@@ -62,7 +101,7 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
       ),
       onConfirm: () => {
         closeDialog();
-        const result = exportPrintFiles(graph, { format: 'stl', separate: true });
+        const result = exportPrintFiles(filterVisibleScene(graph, hidden), { format: 'stl', separate: true });
         if (!result.files.length) {
           showNotice('Nothing to export', 'There are no printable parts in the scene to export.');
           return;
@@ -102,6 +141,7 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
           // white and holds the body's own colour in the attribute instead.
           colors: material.vertexColors && color ? (color.array as Float32Array) : null,
           baseColor: [material.color.r, material.color.g, material.color.b],
+          ...(typeof mesh.userData?.objectName === 'string' ? { objectName: mesh.userData.objectName } : {}),
         });
       });
 
@@ -147,28 +187,29 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
       }
     };
     walk(graph.nodes);
+    const visibleScene = filterVisibleScene(graph, hidden);
     if (molds.length) {
-      const pieces = molds.reduce((sum, n) => sum + (n.geoms?.length ?? 0), 0);
+      const moldCount = printableParts(visibleScene, molds.map((n) => n.id), true).parts.length || molds.length;
       openDialog({
-        title: `Lay out the mold's ${pieces} printed parts on the print bed?`,
+        title: posed
+          ? `Lay out the mold's ${moldCount} printed part${moldCount === 1 ? '' : 's'} and ${posed} split section${posed === 1 ? '' : 's'} on the print bed?`
+          : `Lay out the mold's ${moldCount} printed part${moldCount === 1 ? '' : 's'} on the print bed?`,
         confirmLabel: 'Lay out on bed',
         cancelLabel: 'Export scene as-is',
         body: (
           <>
             <p>
-              Each holder, insert and insert piece of {molds.length === 1 ? (molds[0].name || 'the mold') : `the ${molds.length} molds`} becomes
-              an object of its own, standing the way it prints, arranged across the <strong>{printBed.widthMm} × {printBed.depthMm} mm</strong> bed.
-              The part the mold was made from is left out.
+              Each printed part or multi-material assembly of {molds.length === 1 ? (molds[0].name || 'the mold') : `the ${molds.length} molds`}{posed ? `, ${posed === 1 ? 'the split section' : `the ${posed} split sections`} stood the way ${posed === 1 ? 'it prints' : 'they print'},` : ''} and any other visible parts in the scene are arranged across the <strong>{printBed.widthMm} × {printBed.depthMm} mm</strong> bed.
             </p>
             <p>Choose “Export scene as-is” to export the whole scene as it is placed instead.</p>
           </>
         ),
         onConfirm: () => {
           closeDialog();
-          const result = exportPrintFiles(graph, { format: '3mf', plate: true, bed: printBed, ids: molds.map((n) => n.id), moldParts: true });
+          const result = exportPrintFiles(visibleScene, { format: '3mf', plate: true, bed: printBed, moldParts: true });
           const file = result.files[0];
           if (!file) {
-            showNotice('Nothing to export', 'The mold has no printable parts to export.');
+            showNotice('Nothing to export', 'There are no printable parts in the scene to export.');
             return;
           }
           downloadBlob(new Blob([file.bytes.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${baseName()}_mold_plate.3mf`);
@@ -196,7 +237,7 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
         ),
         onConfirm: () => {
           closeDialog();
-          const result = exportPrintFiles(graph, { format: '3mf', plate: true, bed: printBed });
+          const result = exportPrintFiles(visibleScene, { format: '3mf', plate: true, bed: printBed });
           const file = result.files[0];
           if (!file) {
             showNotice('Nothing to export', 'There are no printable parts in the scene to export.');
@@ -271,13 +312,23 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     };
     // Bought, not made: a bearing or a screw in the part is drawn, but not printed.
     const bought = new Set<string>();
-    const collectBought = (nodes: SceneNode[]) => {
+    const nodesById = new Map<string, SceneNode>();
+    const hidden = new Set(useStore.getState().hiddenNodeIds);
+    const indexNodes = (nodes: SceneNode[]) => {
       for (const n of nodes) {
+        nodesById.set(n.id, n);
         if (isBoughtIn(n)) bought.add(n.id);
-        collectBought(n.children || []);
+        indexNodes(n.children || []);
       }
     };
-    collectBought(useStore.getState().sceneGraph.nodes);
+    indexNodes(useStore.getState().sceneGraph.nodes);
+    const findGeomName = (obj: THREE.Object3D): string | null => {
+      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+        if (typeof cur.userData?.geomName === 'string') return cur.userData.geomName;
+        if (typeof cur.userData?.bodyId === 'string') return obj.name || null;
+      }
+      return null;
+    };
     const isBackgroundObj = (obj: THREE.Object3D): boolean => {
       for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
         if (cur.userData?.isBackground) return true;
@@ -290,7 +341,7 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       // An instanced mesh is owned instance by instance; see below.
       if (only && !(obj as THREE.InstancedMesh).isInstancedMesh && !ownedByOnly(obj)) return;
       const owner = findNodeId(obj);
-      if (owner && bought.has(owner)) return;
+      if (owner && (bought.has(owner) || hidden.has(owner))) return;
       const mesh = obj as THREE.Mesh;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
@@ -313,19 +364,27 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       const instanced = mesh as THREE.InstancedMesh;
       if (instanced.isInstancedMesh) {
         const owners = (instanced.userData?.nodeIds ?? []) as (string | undefined)[];
+        const geomNames = (instanced.userData?.geomNames ?? []) as (string | undefined)[];
         const placed = new THREE.Matrix4();
         for (let i = 0; i < instanced.count; i++) {
           instanced.getMatrixAt(i, placed);
           if (Math.abs(placed.determinant()) < 1e-18) continue;
           const instanceOwner = owners[i];
-          if (instanceOwner && bought.has(instanceOwner)) continue;
+          if (instanceOwner && (bought.has(instanceOwner) || hidden.has(instanceOwner))) continue;
           if (only && !(instanceOwner && only.has(instanceOwner))) continue;
           const geo = instanced.geometry.clone().applyMatrix4(placed.premultiply(instanced.matrixWorld));
           const material = standard.clone();
           material.wireframe = false;
           if (instanced.instanceColor) instanced.getColorAt(i, material.color);
           const exported = new THREE.Mesh(geo, material);
-          exported.name = instanceOwner ?? `part_${ungroupedIdx++}`;
+          const label = resolveExportMeshLabel(
+            instanceOwner ? nodesById.get(instanceOwner) : undefined,
+            instanceOwner ?? null,
+            geomNames[i] ?? null,
+            `part_${ungroupedIdx++}`,
+          );
+          exported.name = label.name;
+          if (label.objectName) exported.userData = { objectName: label.objectName };
           exportGroup.add(exported);
           meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
         }
@@ -338,7 +397,14 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       const material = standard.clone();
       material.wireframe = false;
       const exported = new THREE.Mesh(geo, material);
-      exported.name = findNodeId(mesh) ?? mesh.name ?? `part_${ungroupedIdx++}`;
+      const label = resolveExportMeshLabel(
+        owner ? nodesById.get(owner) : undefined,
+        owner,
+        findGeomName(mesh),
+        mesh.name || `part_${ungroupedIdx++}`,
+      );
+      exported.name = label.name;
+      if (label.objectName) exported.userData = { objectName: label.objectName };
       exportGroup.add(exported);
       meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
     });

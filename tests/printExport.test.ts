@@ -313,4 +313,230 @@ describe("a generated mold's printed parts", () => {
     const result = exportPrintFiles(moldScene(), { format: '3mf' });
     expect(result.parts.map((p) => p.name)).toEqual(['master']);
   });
+
+  it('keeps combined lined mold shell + liner co-registered as 2 composite assemblies on the bed while preserving non-mold bodies', () => {
+    const SHELL_RGBA = [0.86, 0.7, 0.48, 1];
+    const LINER_RGBA = [0.95, 0.93, 0.82, 1];
+    const BRACKET_RGBA = [0.2, 0.45, 0.85, 1];
+
+    // Subdivided box helper (`sub` slices along X) so liners/inserts can carry >2x triangles of shells/holders.
+    const subdividedMeshBox = (name: string, [cx, cy, cz]: number[], [hx, hy, hz]: number[], rgba: number[], sub = 1) => {
+      const renderVertices: number[] = [];
+      const faces: number[] = [];
+      const dx = (2 * hx) / sub;
+      for (let i = 0; i < sub; i++) {
+        const x0 = cx - hx + i * dx;
+        const x1 = x0 + dx;
+        const base = renderVertices.length / 3;
+        renderVertices.push(
+          x0, cy - hy, cz - hz, x1, cy - hy, cz - hz, x1, cy + hy, cz - hz, x0, cy + hy, cz - hz,
+          x0, cy - hy, cz + hz, x1, cy - hy, cz + hz, x1, cy + hy, cz + hz, x0, cy + hy, cz + hz,
+        );
+        for (const t of [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7]) {
+          faces.push(base + t);
+        }
+      }
+      return { name, type: 'mesh' as const, rgba, renderVertices, faces };
+    };
+
+    // Simulated mold with `simulatedBody`-style geom names (`mold_0_cavity_half_shell`, etc.):
+    // Bottom liner sits at z = 7.3..26 mm inside Bottom shell (z = 0..26 mm),
+    // Top liner sits at z = 3.8..11.5 mm inside Top shell (z = 0..11.5 mm),
+    // alongside a non-mold printable body (`bracket`).
+    const combinedScene: SceneGraph = {
+      nodes: [
+        body('bracket', [-0.15, 0, 0.02], [0.015, 0.01, 0.008], {
+          geoms: [{ name: 'bracket_g', type: 'box', size: [0.015, 0.01, 0.008], rgba: BRACKET_RGBA }],
+        }),
+        {
+          id: 'mold', name: 'Simulated: Mold', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+          simulation: { kind: 'mold', createdAt: '2026-11-17T00:00:00Z' },
+          geoms: [
+            subdividedMeshBox('mold_0_cavity_half_shell', [-0.035, 0, 0.013], [0.03, 0.03, 0.013], SHELL_RGBA, 1),
+            subdividedMeshBox('mold_1_cavity_half_liner', [-0.035, 0, 0.01665], [0.02, 0.02, 0.00935], LINER_RGBA, 3),
+            subdividedMeshBox('mold_2_lid_half_shell', [0.035, 0, 0.00575], [0.03, 0.03, 0.00575], SHELL_RGBA, 1),
+            subdividedMeshBox('mold_3_lid_half_liner', [0.035, 0, 0.00765], [0.02, 0.02, 0.00385], LINER_RGBA, 3),
+          ],
+        } as unknown as SceneNode,
+      ],
+    };
+
+    const result = exportPrintFiles(combinedScene, {
+      format: '3mf',
+      plate: true,
+      bed: { widthMm: 256, depthMm: 256 },
+      moldParts: true,
+    });
+    expect(result.plated).toBe(true);
+    // 1 non-mold body + 2 composite mold half assemblies (NOT 4 split geoms!).
+    expect(result.parts.map((p) => p.name)).toEqual(['bracket', 'Cavity half', 'Lid half']);
+
+    const archive = unzipSync(result.files[0].bytes) as Record<string, Uint8Array>;
+    const text = (p: string) => new TextDecoder().decode(archive[p]);
+    const model = text('3D/3dmodel.model');
+    const bambu = text('Metadata/model_settings.config');
+    const prusa = text('Metadata/Slic3r_PE_model.config');
+
+    expect(model).toContain('<metadata name="BambuStudio:3mfVersion">1</metadata>');
+    const itemIds = [...model.matchAll(/<item objectid="(\d+)"\/>/g)].map((m) => m[1]);
+    expect(itemIds).toHaveLength(3);
+
+    // Parse mesh objects and composite assemblies from 3dmodel.model.
+    const meshObjs = new Map<string, { name: string; pts: number[][] }>();
+    for (const m of model.matchAll(/<object id="(\d+)" type="model" name="([^"]*)"[^>]*><mesh>([\s\S]*?)<\/mesh><\/object>/g)) {
+      const pts = [...m[3].matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)].map((v) => [+v[1], +v[2], +v[3]]);
+      meshObjs.set(m[1], { name: m[2], pts });
+    }
+    expect(meshObjs.size).toBe(5);
+
+    const assemblies = [...model.matchAll(/<object id="(\d+)" type="model" name="([^"]*)"><components>([\s\S]*?)<\/components><\/object>/g)]
+      .map((m) => ({
+        id: m[1],
+        name: m[2],
+        compIds: [...m[3].matchAll(/<component objectid="(\d+)"\/>/g)].map((c) => c[1]),
+      }));
+    expect(assemblies.map((a) => [a.name, a.compIds.length])).toEqual([
+      ['bracket', 1],
+      ['Cavity half', 2],
+      ['Lid half', 2],
+    ]);
+
+    // Verify liners remain nested at z = 7.3 mm and z = 3.8 mm inside their shells (never dropped to Z = 0).
+    const cavityAsm = assemblies.find((a) => a.name === 'Cavity half')!;
+    const cavityShellBox = extent(meshObjs.get(cavityAsm.compIds[0])!.pts);
+    const cavityLinerBox = extent(meshObjs.get(cavityAsm.compIds[1])!.pts);
+    expect(cavityShellBox.min[2]).toBeCloseTo(0, 3);
+    expect(cavityLinerBox.min[2]).toBeCloseTo(7.3, 3);
+    // Liner XY sits strictly inside its shell XY.
+    expect(cavityLinerBox.min[0]).toBeGreaterThan(cavityShellBox.min[0]);
+    expect(cavityLinerBox.max[0]).toBeLessThan(cavityShellBox.max[0]);
+    expect(cavityLinerBox.min[1]).toBeGreaterThan(cavityShellBox.min[1]);
+    expect(cavityLinerBox.max[1]).toBeLessThan(cavityShellBox.max[1]);
+
+    const lidAsm = assemblies.find((a) => a.name === 'Lid half')!;
+    const lidShellBox = extent(meshObjs.get(lidAsm.compIds[0])!.pts);
+    const lidLinerBox = extent(meshObjs.get(lidAsm.compIds[1])!.pts);
+    expect(lidShellBox.min[2]).toBeCloseTo(0, 3);
+    expect(lidLinerBox.min[2]).toBeCloseTo(3.8, 3);
+
+    // Shell = Extruder 1, Liner = Extruder 2 (even though liners have 3x the triangles of shells!).
+    for (const asm of [cavityAsm, lidAsm]) {
+      const bambuBlock = bambu.match(new RegExp(`<object id="${asm.id}">([\\s\\S]*?)<\\/object>`))![1];
+      const partExtruders = [...bambuBlock.matchAll(/<part id="(\d+)"[\s\S]*?key="extruder" value="(\d+)"/g)].map((m) => [m[1], +m[2]]);
+      expect(partExtruders).toEqual([[asm.compIds[0], 1], [asm.compIds[1], 2]]);
+    }
+
+    // Slic3r_PE_model.config object IDs match <build><item> IDs with contiguous volume triangle ranges.
+    expect([...prusa.matchAll(/<object id="(\d+)" instances_count="1">/g)].map((m) => m[1])).toEqual(itemIds);
+    expect(prusa).toMatch(
+      new RegExp(
+        `<object id="${cavityAsm.id}" instances_count="1">[\\s\\S]*?` +
+        `<volume firstid="0" lastid="11">[\\s\\S]*?key="extruder" value="1"[\\s\\S]*?` +
+        `<volume firstid="12" lastid="47">[\\s\\S]*?key="extruder" value="2"`,
+      ),
+    );
+  });
+
+  it('keeps holder = Extruder 1 and insert = Extruder 2 on insert molds even when insert has >2x triangles, while preserving non-mold bodies', () => {
+    const HOLDER_RGBA = [0.86, 0.7, 0.48, 1];
+    const INSERT_RGBA = [0.95, 0.93, 0.82, 1];
+    const STANDOFF_RGBA = [0.25, 0.65, 0.35, 1];
+
+    const subdividedMeshBox = (name: string, [cx, cy, cz]: number[], [hx, hy, hz]: number[], rgba: number[], sub = 1) => {
+      const renderVertices: number[] = [];
+      const faces: number[] = [];
+      const dx = (2 * hx) / sub;
+      for (let i = 0; i < sub; i++) {
+        const x0 = cx - hx + i * dx;
+        const x1 = x0 + dx;
+        const base = renderVertices.length / 3;
+        renderVertices.push(
+          x0, cy - hy, cz - hz, x1, cy - hy, cz - hz, x1, cy + hy, cz - hz, x0, cy + hy, cz - hz,
+          x0, cy - hy, cz + hz, x1, cy - hy, cz + hz, x1, cy + hy, cz + hz, x0, cy + hy, cz + hz,
+        );
+        for (const t of [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7]) {
+          faces.push(base + t);
+        }
+      }
+      return { name, type: 'mesh' as const, rgba, renderVertices, faces };
+    };
+
+    // Holder has 12 triangles; the two insert pieces have 24 + 24 = 48 triangles (4x holder!),
+    // and non-mold `standoff` has 60 triangles (5x holder!).
+    const insertScene: SceneGraph = {
+      nodes: [
+        {
+          id: 'standoff', name: 'Standoff', type: 'body', pos: [0.12, 0, 0.01], joints: [], children: [],
+          geoms: [subdividedMeshBox('standoff_g', [0, 0, 0], [0.01, 0.01, 0.01], STANDOFF_RGBA, 5)],
+        } as unknown as SceneNode,
+        {
+          id: 'mold', name: 'Simulated: Mold', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+          simulation: { kind: 'mold', createdAt: '2026-11-17T00:00:00Z' },
+          geoms: [
+            subdividedMeshBox('Cavity Half holder', [0, 0, 0.01], [0.03, 0.03, 0.01], HOLDER_RGBA, 1),
+            subdividedMeshBox('Cavity Half insert, piece 1 of 2 (bottom)', [0, 0, 0.012], [0.01, 0.01, 0.004], INSERT_RGBA, 2),
+            subdividedMeshBox('Cavity Half insert, piece 2 of 2 (top)', [0, 0, 0.018], [0.01, 0.01, 0.002], INSERT_RGBA, 2),
+          ],
+        } as unknown as SceneNode,
+      ],
+    };
+
+    const result = exportPrintFiles(insertScene, {
+      format: '3mf',
+      plate: true,
+      bed: { widthMm: 256, depthMm: 256 },
+      moldParts: true,
+    });
+    expect(result.parts.map((p) => p.name)).toEqual([
+      'Standoff',
+      'Cavity Half holder',
+      'Cavity Half insert, piece 1 of 2 (bottom)',
+      'Cavity Half insert, piece 2 of 2 (top)',
+    ]);
+
+    // Palette slot 1 = holder (12 tris), slot 2 = inserts (48 tris), slot 3 = standoff (60 tris).
+    expect(result.filaments?.[0].map((f) => [f.extruder, f.triangles])).toEqual([
+      [1, 12],
+      [2, 48],
+      [3, 60],
+    ]);
+
+    const archive = unzipSync(result.files[0].bytes) as Record<string, Uint8Array>;
+    const text = (p: string) => new TextDecoder().decode(archive[p]);
+    const model = text('3D/3dmodel.model');
+    const bambu = text('Metadata/model_settings.config');
+    const prusa = text('Metadata/Slic3r_PE_model.config');
+
+    expect(model.match(/<item /g)).toHaveLength(4);
+    // All 4 parts rest on Z = 0 without overlapping on the bed.
+    const boxes = [...model.matchAll(/<object id="\d+"[^>]*><mesh>([\s\S]*?)<\/mesh><\/object>/g)]
+      .map((m) => extent([...m[1].matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)].map((v) => [+v[1], +v[2], +v[3]])));
+    expect(boxes).toHaveLength(4);
+    for (const b of boxes) expect(b.min[2]).toBeCloseTo(0, 3);
+
+    const partExtruder = (cfg: string, name: string) => {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const m = cfg.match(new RegExp(`value="${escaped}"\\/>\\s*<metadata[^>]*key="extruder" value="(\\d+)"`));
+      return m ? +m[1] : -1;
+    };
+    expect(partExtruder(bambu, 'Cavity Half holder')).toBe(1);
+    expect(partExtruder(bambu, 'Cavity Half insert, piece 1 of 2 (bottom)')).toBe(2);
+    expect(partExtruder(bambu, 'Cavity Half insert, piece 2 of 2 (top)')).toBe(2);
+    expect(partExtruder(bambu, 'Standoff')).toBe(3);
+
+    expect(partExtruder(prusa, 'Cavity Half holder')).toBe(1);
+    expect(partExtruder(prusa, 'Cavity Half insert, piece 1 of 2 (bottom)')).toBe(2);
+    expect(partExtruder(prusa, 'Cavity Half insert, piece 2 of 2 (top)')).toBe(2);
+    expect(partExtruder(prusa, 'Standoff')).toBe(3);
+  });
+
+  it('welds non-indexed printExport meshes so a closed cube has 8 vertices and 12 triangles', () => {
+    const result = exportPrintFiles(scene, { format: '3mf', ids: ['cube'] });
+    const model = new TextDecoder().decode((unzipSync(result.files[0].bytes) as Record<string, Uint8Array>)['3D/3dmodel.model']);
+    const verts = model.match(/<vertex /g)?.length ?? 0;
+    const tris = model.match(/<triangle /g)?.length ?? 0;
+    expect(verts).toBe(8);
+    expect(tris).toBe(12);
+    expect(verts).toBeLessThan(tris);
+  });
 });
