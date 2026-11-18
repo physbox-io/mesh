@@ -313,7 +313,7 @@ export class PhysicsWorkerClient {
   /** A body has been hit hard enough to shatter or to dent. */
   onImpact: ((event: ImpactEvent) => void) | null = null;
   /** Throttled modal impact events when audio synthesis is unmuted. */
-  onAudioImpacts: ((events: { nodeId: string; impulseNs: number }[]) => void) | null = null;
+  onAudioImpacts: ((events: import('../workers/physicsWorkerProtocol').AudioImpactEvent[]) => void) | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });

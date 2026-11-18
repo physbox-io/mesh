@@ -98,7 +98,8 @@ type AudioContextWithWindGraph = AudioContext & {
   __physboxNativeWindV11?: LegacyWindGraphState;
   __physboxNativeWindV12?: LegacyWindGraphState;
   __physboxNativeWindV13?: LegacyWindGraphState;
-  __physboxNativeWindV14?: NativeWindBankState;
+  __physboxNativeWindV14?: LegacyWindGraphState;
+  __physboxNativeWindV15?: NativeWindBankState;
 };
 
 function buildSoftSatCurve(): Float32Array<ArrayBuffer> {
@@ -176,6 +177,7 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
     '__physboxNativeWindV11',
     '__physboxNativeWindV12',
     '__physboxNativeWindV13',
+    '__physboxNativeWindV14',
   ] as const) {
     const prev = c[oldKey];
     if (prev) {
@@ -197,7 +199,7 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
 function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  if (c.__physboxNativeWindV14) return c.__physboxNativeWindV14;
+  if (c.__physboxNativeWindV15) return c.__physboxNativeWindV15;
   if (typeof ctx.createOscillator !== 'function' || typeof ctx.createWaveShaper !== 'function') {
     return null;
   }
@@ -212,7 +214,20 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
   presenceShelf.type = 'peaking';
   presenceShelf.frequency.setValueAtTime(1850, now);
   presenceShelf.Q.setValueAtTime(0.85, now);
-  presenceShelf.gain.setValueAtTime(2.6, now);
+  presenceShelf.gain.setValueAtTime(2.4, now);
+
+  // Transparent safety limiter so rapid polyphonic marimba/glockenspiel/lyre strums never clip
+  let outputTarget: AudioNode = ctx.destination;
+  if (typeof ctx.createDynamicsCompressor === 'function') {
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.setValueAtTime(-3.0, now);
+    limiter.knee.setValueAtTime(6.0, now);
+    limiter.ratio.setValueAtTime(10.0, now);
+    limiter.attack.setValueAtTime(0.002, now);
+    limiter.release.setValueAtTime(0.12, now);
+    limiter.connect(ctx.destination);
+    outputTarget = limiter;
+  }
 
   const dryGain = ctx.createGain();
   dryGain.gain.setValueAtTime(0.90, now);
@@ -221,7 +236,7 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
 
   masterGain.connect(presenceShelf);
   presenceShelf.connect(dryGain);
-  dryGain.connect(ctx.destination);
+  dryGain.connect(outputTarget);
 
   let convolver: ConvolverNode | null = null;
   if (typeof ctx.createConvolver === 'function' && typeof ctx.createBuffer === 'function') {
@@ -230,7 +245,7 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
     convolver.buffer = buildStudioChamberIR(ctx);
     presenceShelf.connect(convolver);
     convolver.connect(wetGain);
-    wetGain.connect(ctx.destination);
+    wetGain.connect(outputTarget);
   }
 
   let noiseSource: AudioBufferSourceNode | null = null;
@@ -348,12 +363,17 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
     slots,
     softSatCurve,
   };
-  c.__physboxNativeWindV14 = bank;
+  c.__physboxNativeWindV15 = bank;
   return bank;
 }
 
 export function getOrInitModalWorklet(ctx: AudioContext): GainNode | null {
   return ensureNativeWindBank(ctx)?.masterGain ?? null;
+}
+
+/** Shared studio-chamber output bus (presence + 0.68 s room convolver + safety limiter) for ALL acoustic instruments. */
+export function getSharedAcousticOutputBus(ctx: AudioContext): AudioNode {
+  return ensureNativeWindBank(ctx)?.masterGain ?? ctx.destination;
 }
 
 export function postWorkletStrike(_ctx: AudioContext, _payload: WorkletStrikePayload): boolean {
@@ -469,7 +489,7 @@ export function postWorkletWindSilence(ctx: AudioContext | null): void {
   if (!ctx) return;
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  const bank = c.__physboxNativeWindV14;
+  const bank = c.__physboxNativeWindV15;
   if (!bank) return;
   const now = ctx.currentTime;
   for (const slot of bank.slots) {

@@ -353,13 +353,22 @@ export interface ImpactEvent {
 
 // ---- Worker -> main thread -----------------------------------------------
 
+export interface AudioImpactEvent {
+  nodeId: string;
+  impulseNs: number;
+  otherNodeId?: string;
+  selfGeomName?: string;
+  otherGeomName?: string;
+  localPoint?: [number, number, number];
+}
+
 export type WorkerToMainMessage =
   | ({ type: 'BUILT'; id: string } & BuiltResult)
   | ({ type: 'FRAME' } & FrameSnapshot)
   | { type: 'ERROR'; message: string; fatal: boolean; lastState?: SeedState }
   | ({ type: 'CONSTRAINT_BROKEN' } & ConstraintBrokenEvent)
   | ({ type: 'IMPACT' } & ImpactEvent)
-  | { type: 'AUDIO_IMPACTS'; events: { nodeId: string; impulseNs: number }[] }
+  | { type: 'AUDIO_IMPACTS'; events: AudioImpactEvent[] }
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   /** A headless run (`judgeImpacts`) has stopped at a blow and waits for HEADLESS_IMPACT_REPLY. */
   | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }

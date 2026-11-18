@@ -20,11 +20,12 @@ import { useSoundStore } from './soundStore';
 import {
   estimateBodyModes,
   playModalImpact,
+  resolveTwoBodyImpact,
   silenceWindVoices,
   updateLiveWindVoices,
   type BodyModalProfile,
 } from '../utils/modalAudio';
-import { evaluateTautString } from '../utils/stringAcoustics';
+import { evaluateTautString, type StringPluckImpactContext } from '../utils/stringAcoustics';
 import { extractBoreWaveguide } from '../utils/windAcoustics';
 import type { SceneNode } from '../types/scene';
 
@@ -38,9 +39,13 @@ const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
 };
 
 const modalCache = new WeakMap<SceneNode, BodyModalProfile>();
-const cachedModesFor = (node: SceneNode, sceneNodes?: SceneNode[]): BodyModalProfile => {
+const cachedModesFor = (
+  node: SceneNode,
+  sceneNodes?: SceneNode[],
+  pluckCtx?: StringPluckImpactContext,
+): BodyModalProfile => {
   if (node.acousticString) {
-    const strEval = evaluateTautString(node, sceneNodes);
+    const strEval = evaluateTautString(node, sceneNodes, pluckCtx);
     if (strEval) return strEval.profile;
   }
   let m = modalCache.get(node);
@@ -418,23 +423,33 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       if (!useSoundStore.getState().soundEnabled) return;
       const s = store().getState();
       const nodes = liveModelGraph(s).graph.nodes;
-      const resolved = events
-        .map((ev) => ({ node: findNode(nodes, ev.nodeId), impulseNs: ev.impulseNs }))
-        .filter(
-          (r): r is { node: SceneNode; impulseNs: number } =>
-            r.node !== null && !isWindSubtreeOrNonColliding(r.node, nodes),
+      for (const ev of events) {
+        if (ev.impulseNs < 0.0015) continue;
+        const node = findNode(nodes, ev.nodeId);
+        if (!node || isWindSubtreeOrNonColliding(node, nodes)) continue;
+        const strikerNode =
+          ev.otherNodeId && ev.otherNodeId !== 'world' ? findNode(nodes, ev.otherNodeId) : null;
+        const isPluck = !!node.acousticString;
+        const profile = cachedModesFor(
+          node,
+          nodes,
+          isPluck
+            ? {
+                localPoint: ev.localPoint,
+                strikerNode,
+                strikerGeomName: ev.otherGeomName,
+              }
+            : undefined,
         );
-      const hasTunedResonator = resolved.some(
-        (r) => typeof r.node.tunedPitchHz === 'number' || !!r.node.acousticString,
-      );
-      for (const { node, impulseNs } of resolved) {
-        const isResonator = typeof node.tunedPitchHz === 'number' || !!node.acousticString;
-        // When a mallet/plectrum strikes a tuned bar, chime, or string, let the tuned resonator sing
-        // cleanly without layering an untuned mallet-stick modal tone on top of the note!
-        if (hasTunedResonator && !isResonator) continue;
-        if (impulseNs >= 0.0015) {
-          playModalImpact(cachedModesFor(node, nodes), impulseNs, !!node.acousticString);
-        }
+        const twoBody = resolveTwoBodyImpact(profile, node, {
+          impulseNs: ev.impulseNs,
+          strikerNode,
+          selfGeomName: ev.selfGeomName,
+          strikerGeomName: ev.otherGeomName,
+          localPoint: ev.localPoint,
+          isPluck,
+        });
+        playModalImpact(profile, ev.impulseNs, isPluck, twoBody);
       }
     };
     client.setSound(useSoundStore.getState().soundEnabled);

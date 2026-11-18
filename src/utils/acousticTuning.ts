@@ -17,8 +17,6 @@ import type { SceneGeom, SceneNode } from '../types/scene';
 import { geomHydroTriangles } from './hydrostatics';
 import {
   estimateBodyModes,
-  inferAcousticMaterial,
-  solveVariableBeamModes,
   type BodyModalProfile,
 } from './modalAudio';
 
@@ -186,6 +184,40 @@ export function tuneBodyToPitch(
       working.csgEnabled = true;
     }
 
+    // 1-step Timoshenko & nodal-hole fine trim so pure 3D geometry lands within <0.2% of targetHz!
+    const preTrimHz = estimateBodyModes(working).fundamentalHz;
+    if (Math.abs(preTrimHz - targetHz) / targetHz > 0.002) {
+      const trimScale = Math.sqrt(preTrimHz / targetHz);
+      newLengthM = 0.1;
+      working.geoms = working.geoms.map((g) => {
+        if (g.name === 'nodal_hole' && g.pos) {
+          return { ...g, pos: [g.pos[0], g.pos[1], +(g.pos[2] * trimScale).toFixed(6)] };
+        }
+        if (g.type === 'cylinder' || g.type === 'capsule') {
+          if (g.fromto && g.fromto.length >= 6) {
+            const mx = 0.5 * (g.fromto[0] + g.fromto[3]);
+            const my = 0.5 * (g.fromto[1] + g.fromto[4]);
+            const mz = 0.5 * (g.fromto[2] + g.fromto[5]);
+            const dx = (g.fromto[3] - g.fromto[0]) * 0.5 * trimScale;
+            const dy = (g.fromto[4] - g.fromto[1]) * 0.5 * trimScale;
+            const dz = (g.fromto[5] - g.fromto[2]) * 0.5 * trimScale;
+            if (g.csg !== 'difference') newLengthM = 2 * Math.hypot(dx, dy, dz);
+            return {
+              ...g,
+              fromto: [mx - dx, my - dy, mz - dz, mx + dx, my + dy, mz + dz].map((v) => +v.toFixed(6)),
+            };
+          }
+          const nextHalfL = +((g.size[1] ?? 0.05) * trimScale).toFixed(6);
+          if (g.csg !== 'difference') {
+            newLengthM = 2 * nextHalfL + (g.type === 'capsule' ? 2 * (g.size[0] ?? 0) : 0);
+          }
+          return { ...g, size: [g.size[0], nextHalfL, ...g.size.slice(2)] };
+        }
+        return g;
+      });
+    }
+    const finalNodalOffsetM = 0.2242 * newLengthM;
+
     working.tunedPitchHz = +targetHz.toFixed(2);
     const after = estimateBodyModes(working);
     const noteInfo = hzToNoteInfo(after.fundamentalHz);
@@ -194,16 +226,13 @@ export function tuneBodyToPitch(
       before,
       after,
       method: 'tube_length',
-      nodalOffsetMm: +(nodalOffsetM * 1000).toFixed(1),
-      summary: `Tuned chime to ${noteInfo.note} (${after.fundamentalHz.toFixed(1)} Hz); nodal cord point ${+(nodalOffsetM * 1000).toFixed(1)} mm from top`,
+      nodalOffsetMm: +(finalNodalOffsetM * 1000).toFixed(1),
+      summary: `Tuned chime to ${noteInfo.note} (${after.fundamentalHz.toFixed(1)} Hz); nodal cord point ${+(finalNodalOffsetM * 1000).toFixed(1)} mm from top`,
     };
   }
 
   // Case 2: Rectangular bar / box body -> underside semi-elliptical luthier arch!
   if (primary?.type === 'box' && solidGeoms.length === 1) {
-    const mat = inferAcousticMaterial(working);
-    const E = mat.modulusGPa * 1e9;
-    const rho = Math.max(50, mat.density);
     const { thickAxis, widthAxis, lenAxis, fullDims } = measureBoxAxes(primary);
     const hMin = fullDims[thickAxis];
     const widthM = fullDims[widthAxis];
@@ -213,37 +242,74 @@ export function tuneBodyToPitch(
     const minSpineM = Math.max(0.0016, hMin * 0.18);
     const maxSafeCut = Math.max(0, hMin - minSpineM);
 
-    const evalForLenAndCut = (L: number, cut: number) => {
-      const halfSpan = L * 0.34;
-      return solveVariableBeamModes(L, E, rho, (x) => {
-        const u = x / halfSpan;
-        if (Math.abs(u) >= 1) return hMin;
-        return Math.max(hMin * 0.08, hMin - cut * Math.sqrt(1 - u * u));
-      })[0];
+    const buildArchCandidate = (L: number, cut: number): SceneNode => {
+      const nextPrimary: SceneGeom = {
+        ...primary,
+        size: primary.size.map((s, idx) => (idx === lenAxis ? +(L * 0.5).toFixed(6) : s)),
+      };
+      if (cut <= 0.00025) {
+        return { ...working, geoms: [nextPrimary], csgEnabled: undefined };
+      }
+      const archSize: [number, number, number] = [0.01, 0.01, 0.01];
+      archSize[lenAxis] = +(L * 0.34).toFixed(6);
+      archSize[widthAxis] = +(widthM * 2.5).toFixed(6);
+      archSize[thickAxis] = +cut.toFixed(6);
+      const archPos: [number, number, number] = [
+        primary.pos?.[0] ?? 0,
+        primary.pos?.[1] ?? 0,
+        primary.pos?.[2] ?? 0,
+      ];
+      archPos[thickAxis] = +((primary.pos?.[thickAxis] ?? 0) - hMin * 0.5).toFixed(6);
+      return {
+        ...working,
+        csgEnabled: true,
+        geoms: [
+          nextPrimary,
+          {
+            name: 'luthier_arch',
+            type: 'ellipsoid',
+            size: archSize,
+            pos: archPos,
+            csg: 'difference',
+            rgba: [0.85, 0.52, 0.22, 0.45],
+          },
+        ],
+      };
     };
 
-    const fUnnotched = evalForLenAndCut(lenM, 0);
-    const fDeepest = evalForLenAndCut(lenM, maxSafeCut);
+    const eval3DBarHz = (L: number, cut: number) => {
+      // Vary sculptVersion per probe so section cache distinguishes bisection steps on identical id
+      const cand = buildArchCandidate(L, cut);
+      cand.sculptVersion = Math.round(L * 1e6) * 1000 + Math.round(cut * 1e6);
+      return estimateBodyModes(cand).fundamentalHz;
+    };
+
+    const fUnnotched = eval3DBarHz(lenM, 0);
+    const fDeepest = eval3DBarHz(lenM, maxSafeCut);
 
     // If targetHz lies outside the pure-arch tuning window of the current blank,
     // first resize the bar's length so a harmonic marimba arch (cut = 0.62 * maxSafeCut) lands near targetHz!
     if (targetHz > fUnnotched * 0.992 || targetHz < fDeepest * 1.02 || lenM < widthM * 2.2) {
       method = 'length_and_arch';
       const nominalCut = maxSafeCut * 0.62;
-      const fAtCurLen = evalForLenAndCut(Math.max(lenM, widthM * 2.4), nominalCut);
       const baseLen = Math.max(lenM, widthM * 2.4);
+      const fAtCurLen = eval3DBarHz(baseLen, nominalCut);
       lenM = Math.max(widthM * 2.2, baseLen * Math.sqrt(fAtCurLen / targetHz));
-      const nextSize = [...primary.size];
-      nextSize[lenAxis] = +(lenM * 0.5).toFixed(6);
-      working.geoms[0] = { ...primary, size: nextSize };
+      // One more length pass if Timoshenko shear shifts stubby bars slightly
+      const fCheckLo = eval3DBarHz(lenM, maxSafeCut);
+      const fCheckHi = eval3DBarHz(lenM, 0);
+      if (targetHz > fCheckHi * 0.995 || targetHz < fCheckLo * 1.01) {
+        const fMidNom = eval3DBarHz(lenM, nominalCut);
+        lenM = Math.max(widthM * 2.2, lenM * Math.sqrt(fMidNom / targetHz));
+      }
     }
 
-    // Solve 28-step bisection for exact `cutDepth` so f1 == targetHz
+    // Solve 18-step bisection directly against the 3D cross-section Timoshenko solver (`estimateBodyModes`)!
     let loCut = 0;
     let hiCut = maxSafeCut;
-    for (let iter = 0; iter < 28; iter++) {
+    for (let iter = 0; iter < 18; iter++) {
       const mid = 0.5 * (loCut + hiCut);
-      const fMid = evalForLenAndCut(lenM, mid);
+      const fMid = eval3DBarHz(lenM, mid);
       // Deeper cut thins the spine and LOWERS f1
       if (fMid > targetHz) {
         loCut = mid;
@@ -252,31 +318,10 @@ export function tuneBodyToPitch(
       }
     }
     const cutDepth = +(0.5 * (loCut + hiCut)).toFixed(6);
-
-    if (cutDepth > 0.00025) {
-      const archSize: [number, number, number] = [0.01, 0.01, 0.01];
-      archSize[lenAxis] = +(lenM * 0.34).toFixed(6);
-      archSize[widthAxis] = +(widthM * 2.5).toFixed(6);
-      archSize[thickAxis] = cutDepth;
-
-      const archPos: [number, number, number] = [
-        primary.pos?.[0] ?? 0,
-        primary.pos?.[1] ?? 0,
-        primary.pos?.[2] ?? 0,
-      ];
-      archPos[thickAxis] = +((primary.pos?.[thickAxis] ?? 0) - hMin * 0.5).toFixed(6);
-
-      working.geoms.push({
-        name: 'luthier_arch',
-        type: 'ellipsoid',
-        size: archSize,
-        pos: archPos,
-        csg: 'difference',
-        rgba: [0.85, 0.52, 0.22, 0.45],
-      });
-      working.csgEnabled = true;
-      if (!working.collision) working.collision = 'hull';
-    }
+    const built = buildArchCandidate(lenM, cutDepth);
+    working.geoms = built.geoms;
+    working.csgEnabled = built.csgEnabled;
+    if (working.csgEnabled && !working.collision) working.collision = 'hull';
 
     working.tunedPitchHz = +targetHz.toFixed(2);
     const after = estimateBodyModes(working);

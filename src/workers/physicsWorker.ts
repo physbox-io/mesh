@@ -57,6 +57,7 @@ import type {
   BodyHistory,
   ConstraintBrokenEvent,
   ContactHistory,
+  AudioImpactEvent,
   HeadlessRebuild,
   HistoryEntry,
   ImpactEvent,
@@ -1016,7 +1017,7 @@ let cachedHydroByNodeId = new Map<string, HydroBodyModel>();
 let hydroByBodyId = new Map<number, HydroBodyModel>();
 let bistableJoints: BistableJointEntry[] = [];
 let prevConstraintDof: Float64Array | null = null;
-const pendingAudioImpacts = new Map<string, number>();
+const pendingAudioImpacts = new Map<string, AudioImpactEvent>();
 const lastAudioEmitMs = new Map<string, number>();
 
 const rebuildHydroAndFlexureCaches = (
@@ -1182,13 +1183,92 @@ const sampleAudioImpacts = (stepSize: number) => {
     if (bId <= 0) continue;
     bodyJumpSq.set(bId, (bodyJumpSq.get(bId) ?? 0) + df * df);
   }
+  const now = performance.now();
+  const newTriggers: { bId: number; nodeId: string; impulseNs: number }[] = [];
   for (const [bId, sumSq] of bodyJumpSq) {
     const impulseNs = Math.sqrt(sumSq) * stepSize;
     if (impulseNs < 0.0015) continue;
     const nodeId = bodyNodeById[bId];
     if (!nodeId || nodeId === 'world') continue;
-    const prev = pendingAudioImpacts.get(nodeId) ?? 0;
-    if (impulseNs > prev) pendingAudioImpacts.set(nodeId, impulseNs);
+    if (now - (lastAudioEmitMs.get(nodeId) ?? 0) < 75) continue;
+    const prev = pendingAudioImpacts.get(nodeId);
+    if (!prev || impulseNs > prev.impulseNs) {
+      newTriggers.push({ bId, nodeId, impulseNs });
+    }
+  }
+  if (newTriggers.length === 0) return;
+
+  // Read `dat.contact` once on this impact substep (and delete handles in `finally`)
+  // to identify the colliding partner geom/body and local hit point for two-body Hertzian synthesis!
+  const hitByBody = new Map<
+    number,
+    { otherBodyId: number; selfGeom: number; otherGeom: number; worldPos: [number, number, number] }
+  >();
+  const contactVec = data.contact;
+  try {
+    const ncon = contactVec.size();
+    const geomBody = ncon > 0 ? model.geom_bodyid : null;
+    if (geomBody) {
+      const wanted = new Set(newTriggers.map((t) => t.bId));
+      for (let c = 0; c < ncon; c++) {
+        const ct = contactVec.get(c);
+        if (!ct) continue;
+        try {
+          const b1 = geomBody[ct.geom1];
+          const b2 = geomBody[ct.geom2];
+          if (!wanted.has(b1) && !wanted.has(b2)) continue;
+          const pos = ct.pos;
+          const wp: [number, number, number] = [pos[0], pos[1], pos[2]];
+          if (wanted.has(b1)) {
+            const cur = hitByBody.get(b1);
+            // Prefer dynamic body-to-body strike over static world floor contact when both exist
+            if (!cur || (cur.otherBodyId === 0 && b2 > 0)) {
+              hitByBody.set(b1, { otherBodyId: b2, selfGeom: ct.geom1, otherGeom: ct.geom2, worldPos: wp });
+            }
+          }
+          if (wanted.has(b2)) {
+            const cur = hitByBody.get(b2);
+            if (!cur || (cur.otherBodyId === 0 && b1 > 0)) {
+              hitByBody.set(b2, { otherBodyId: b1, selfGeom: ct.geom2, otherGeom: ct.geom1, worldPos: wp });
+            }
+          }
+        } finally {
+          ct.delete();
+        }
+      }
+    }
+  } finally {
+    contactVec.delete();
+  }
+
+  for (const { bId, nodeId, impulseNs } of newTriggers) {
+    const site = hitByBody.get(bId);
+    let localPoint: [number, number, number] | undefined;
+    let otherNodeId: string | undefined;
+    let selfGeomName: string | undefined;
+    let otherGeomName: string | undefined;
+    if (site) {
+      otherNodeId = site.otherBodyId > 0 ? bodyNodeById[site.otherBodyId] : 'world';
+      selfGeomName = geomNameCache[site.selfGeom];
+      otherGeomName = geomNameCache[site.otherGeom];
+      const ox = data.xpos[bId * 3];
+      const oy = data.xpos[bId * 3 + 1];
+      const oz = data.xpos[bId * 3 + 2];
+      localPoint = worldToBodyFrame(data.xmat, bId, [
+        site.worldPos[0] - ox,
+        site.worldPos[1] - oy,
+        site.worldPos[2] - oz,
+      ]);
+    }
+    const prev = pendingAudioImpacts.get(nodeId);
+    pendingAudioImpacts.set(nodeId, {
+      nodeId,
+      impulseNs,
+      otherNodeId: otherNodeId ?? prev?.otherNodeId,
+      selfGeomName: selfGeomName ?? prev?.selfGeomName,
+      otherGeomName: otherGeomName ?? prev?.otherGeomName,
+      localPoint: localPoint ?? prev?.localPoint,
+    });
   }
 };
 
@@ -1198,16 +1278,16 @@ const flushAudioImpacts = () => {
     return;
   }
   const now = performance.now();
-  const candidates: { nodeId: string; impulseNs: number }[] = [];
-  for (const [nodeId, impulseNs] of pendingAudioImpacts) {
+  const candidates: AudioImpactEvent[] = [];
+  for (const [nodeId, ev] of pendingAudioImpacts) {
     const lastAt = lastAudioEmitMs.get(nodeId) ?? 0;
     if (now - lastAt < 75) continue;
-    candidates.push({ nodeId, impulseNs });
+    candidates.push(ev);
   }
   pendingAudioImpacts.clear();
   if (candidates.length === 0) return;
   candidates.sort((a, b) => b.impulseNs - a.impulseNs);
-  const top = candidates.slice(0, 4);
+  const top = candidates.slice(0, 6);
   for (const ev of top) lastAudioEmitMs.set(ev.nodeId, now);
   post({ type: 'AUDIO_IMPACTS', events: top });
 };

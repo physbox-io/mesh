@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Taut Musical Strings & Coupled Soundbox (Helmholtz + Soundboard) Acoustics
+// Taut Musical Strings & Coupled 3D Soundbox (Multi-Port Helmholtz + Kirchhoff Plate)
 // ---------------------------------------------------------------------------
 //
 // Physics implemented:
@@ -9,26 +9,33 @@
 //      f_n = n * f0 * sqrt(1 + B * n^2),    B = (pi^3 * E * r^4) / (8 * T * L^2)
 // 3. Tensile breaking-stress check:
 //      sigma = T / (pi * r^2) vs ultimate strength sigma_ult (MPa)
-// 4. Bridge -> Soundbox Acoustic Coupling:
-//    - Inspects the host/bridge body's internal air cavity V and soundhole port
-//      (via `measureBodyCavity` on watertight meshes AND analytic boolean/shell
-//      inspection before OpenSCAD runs).
-//    - Computes exact Helmholtz air-cavity frequency:
-//        f_H = (c_air / (2 * pi)) * sqrt(A_port / (V * (L_port + 1.7 * r_port)))
-//    - Computes soundboard top-plate flexural resonance f_top.
-//    - Filters string harmonics through the coupled soundbox transfer function
-//      H_box(f) AND excites sympathetic Helmholtz air-boom + soundboard modes!
+// 4. 3D Soundbox Multi-Port Cavity & Kirchhoff Soundboard Coupling:
+//    - Measures internal air cavity V, top soundboard thickness h_top, and ALL
+//      open holes/ports (CSG booleans, multi-plank gaps, OR freehand Sculpt cuts!)
+//      via `analyze3DCavityAndPorts`.
+//    - Multi-port Rayleigh Helmholtz air-cavity frequency:
+//        f_H = (c_air / (2 * pi)) * sqrt(G_total / V),
+//        G_total = Σ A_p / (L_p + 1.7 * r_p)
+//    - Kirchhoff soundboard flexural plate mode f_top from measured 3D h_top,
+//      lateral spans (a, b), and wood (E, rho) + Skudrzyk bridge admittance!
+// 5. Strike-position & plectrum-material coupling:
+//    - Live collision `localPoint` determines actual pluck comb sin(n π x_hit / L),
+//      and plectrum tip radius + Young's modulus shape harmonic roll-off!
 // ---------------------------------------------------------------------------
 
 import type {
-  SceneGeom,
   SceneNode,
   StringMaterialId,
 } from '../types/scene';
-import { measureBodyCavity } from './cavity';
-import { geomVolume } from './deformMaterials';
-import { buildHydroBodyModel, geomHydroTriangles } from './hydrostatics';
-import { estimateBodyModes, type BodyModalProfile, type ModalVoice } from './modalAudio';
+import { geomHydroTriangles } from './hydrostatics';
+import {
+  estimateBodyModes,
+  inferAcousticMaterial,
+  inferColliderContactProps,
+  type BodyModalProfile,
+  type ModalVoice,
+} from './modalAudio';
+import { analyze3DCavityAndPorts, analyze3DSolidCrossSections } from './solidAcoustics3D';
 
 const SPEED_OF_SOUND_AIR = 343; // m/s at 20 °C
 
@@ -91,16 +98,26 @@ export interface SoundboxResonance {
   hostName: string;
   hasHollowCavity: boolean;
   cavityVolumeLitres: number;
+  portCount: number;
   portRadiusMm: number | null;
   portLengthMm: number | null;
-  /** Helmholtz air-cavity resonance frequency f_H (Hz), when a hollow cavity opens through a soundhole/port. */
+  topPlateThicknessMm: number;
+  /** Multi-port Helmholtz air-cavity resonance frequency f_H (Hz), when cavity opens through >= 1 port. */
   helmholtzHz: number | null;
-  /** Primary soundboard / top-plate flexural resonance (Hz). */
+  /** Cavity quality factor Q_H (drops when oversized/multiple holes make the shell leaky). */
+  helmholtzQ: number;
+  /** Primary Kirchhoff soundboard / top-plate flexural resonance (Hz) from 3D wall thickness & material. */
   topPlateHz: number;
   /** Secondary body / back-plate resonance (Hz). */
   bodyModeHz: number;
-  /** Acoustic radiation efficiency multiplier (0.28 for solid block, up to 1.25 for ported hollow soundbox). */
+  /** Acoustic radiation efficiency multiplier (derived from Skudrzyk plate point-admittance & porting). */
   radiationGain: number;
+}
+
+export interface StringPluckImpactContext {
+  localPoint?: [number, number, number];
+  strikerNode?: SceneNode | null;
+  strikerGeomName?: string;
 }
 
 export interface StringEvaluation {
@@ -116,24 +133,19 @@ export interface StringEvaluation {
   profile: BodyModalProfile;
 }
 
-/** Measures the vibrating span L (m) of a string node from its primary capsule/cylinder/box geom. */
+/** Measures the vibrating span L (m) of a string node from its post-CSG/Sculpt 3D geometry. */
 export function measureStringLengthM(node: SceneNode): number {
   const g = (node.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
   if (!g) return 0.32;
-  if (g.fromto && g.fromto.length >= 6) {
+  if (g.fromto && g.fromto.length >= 6 && !node.sculptEdited && (node.geoms?.length ?? 0) === 1) {
     const dx = g.fromto[3] - g.fromto[0];
     const dy = g.fromto[4] - g.fromto[1];
     const dz = g.fromto[5] - g.fromto[2];
     const len = Math.hypot(dx, dy, dz);
     if (len > 1e-4) return len;
   }
-  if (g.type === 'cylinder' || g.type === 'capsule') {
-    return Math.max(0.02, 2 * (g.size[1] ?? 0.15));
-  }
-  if (g.type === 'box') {
-    return Math.max(0.02, 2 * Math.max(g.size[0] ?? 0, g.size[1] ?? 0, g.size[2] ?? 0));
-  }
-  return 0.32;
+  const sec = analyze3DSolidCrossSections(node);
+  return Math.max(0.02, sec.dimsSortedAsc[2]);
 }
 
 function findParentOf(nodes: SceneNode[], childId: string): SceneNode | null {
@@ -155,109 +167,99 @@ function findById(nodes: SceneNode[], id: string): SceneNode | null {
 }
 
 /**
- * Analyses a body as an acoustic soundbox: measures its internal air volume V and
- * soundhole port (via watertight `measureBodyCavity` when compiled, or directly
- * from boolean `difference` primitives / hollow plank assemblies when uncompiled)
- * to compute its Helmholtz air resonance f_H and soundboard plate modes.
+ * Analyses ANY 3D body as an acoustic soundbox: measures its internal air volume V,
+ * ALL open holes/ports (CSG boolean cuts, panel gaps, OR freehand Sculpt holes!),
+ * and top-plate thickness h_top to compute multi-port Helmholtz resonance f_H,
+ * Kirchhoff soundboard flexural modes, and Skudrzyk bridge radiation gain.
  */
 export function analyzeSoundboxResonance(host: SceneNode): SoundboxResonance {
-  let cavityVolumeM3 = 0;
-  let portRadiusM: number | null = null;
-  let portLengthM: number | null = null;
+  const cav = analyze3DCavityAndPorts(host);
+  const boxMat = inferAcousticMaterial(host);
+  const E = boxMat.modulusGPa * 1e9;
+  const rho = Math.max(80, boxMat.density);
+  const cLong = Math.sqrt(E / rho);
 
-  // 1. Try exact watertight mesh cavity + port measurement first
-  const measured = measureBodyCavity(host);
-  if (measured.ok && measured.cavity.volume > 1e-7) {
-    cavityVolumeM3 = measured.cavity.volume;
-    if (measured.cavity.port) {
-      portRadiusM = measured.cavity.port.radius;
-      portLengthM = measured.cavity.port.length;
-    }
-  }
+  const cavityVolumeM3 = cav.cavityVolumeM3;
+  const hasHollowCavity = cav.hasHollowCavity;
+  const portCount = cav.ports.length;
 
-  // 2. Fallback: inspect boolean `difference` cutters or hollow multi-plank shell directly!
-  if (cavityVolumeM3 <= 1e-7) {
-    const geoms = host.geoms ?? [];
-    const positives = geoms.filter((g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual');
-    const negatives = geoms.filter((g) => g.csg === 'difference');
+  // Equivalent combined port radius & weighted neck length for display/diagnostics
+  const totalPortArea = cav.ports.reduce((acc, p) => acc + p.areaM2, 0);
+  const eqPortRadiusM = portCount > 0 ? Math.sqrt(totalPortArea / Math.PI) : null;
+  const avgPortLenM = portCount > 0
+    ? cav.ports.reduce((acc, p) => acc + p.neckLengthM * p.areaM2, 0) / Math.max(1e-12, totalPortArea)
+    : null;
 
-    if (negatives.length > 0 && positives.length > 0) {
-      const outerVol = positives.reduce((acc, g) => acc + geomVolume(g), 0);
-      // Separate large interior hollowing cutters from narrower soundhole cylinder(s)
-      const cylNegs = negatives.filter((g) => g.type === 'cylinder');
-      let portGeom: SceneGeom | undefined;
-      if (cylNegs.length > 0 && negatives.length >= 2) {
-        // Smallest-volume cylinder cutter is the soundhole; larger cutter(s) form the air chamber
-        portGeom = [...cylNegs].sort((a, b) => geomVolume(a) - geomVolume(b))[0];
-      }
-      let voidVol = 0;
-      for (const neg of negatives) {
-        if (neg === portGeom) continue;
-        voidVol += geomVolume(neg);
-      }
-      if (voidVol > 1e-7) {
-        cavityVolumeM3 = Math.min(outerVol * 0.92, voidVol);
-      }
-      if (portGeom) {
-        portRadiusM = portGeom.size[0] ?? 0.02;
-        // Estimate wall thickness pierced by the soundhole
-        const posTris: number[] = [];
-        for (const p of positives) geomHydroTriangles(p, posTris);
-        let minZ = Infinity, maxZ = -Infinity;
-        for (let i = 2; i < posTris.length; i += 3) {
-          if (posTris[i] < minZ) minZ = posTris[i];
-          if (posTris[i] > maxZ) maxZ = posTris[i];
-        }
-        const outerDepth = Number.isFinite(minZ) ? maxZ - minZ : 0.06;
-        // Wall thickness ~ 3 mm typical top soundboard, bounded by cutter length
-        portLengthM = Math.min(2 * (portGeom.size[1] ?? 0.005), Math.max(0.002, outerDepth * 0.06));
-      }
-    } else if (positives.length >= 4) {
-      // Multi-plank hollow box (e.g. laser-cut / luthiery panel assembly)
-      const hydro = buildHydroBodyModel(host);
-      if (hydro?.vessel) {
-        cavityVolumeM3 = Math.max(0, hydro.vessel.hullVolume - hydro.solidVolume);
-        // Equivalent mouth radius from open area
-        portRadiusM = Math.cbrt(cavityVolumeM3) * 0.28;
-        portLengthM = 0.0035;
-      }
-    }
-  }
-
-  // Compute Helmholtz air resonance f_H = (c / 2π) * sqrt(A_port / (V * L_eff))
+  // 1. Multi-port Helmholtz air-cavity resonance:
+  //      f_H = (c_air / 2π) * sqrt(G_total / V),   G_total = Σ A_p / (L_p + 1.7 r_p)
   let helmholtzHz: number | null = null;
-  if (cavityVolumeM3 > 1e-6 && portRadiusM && portRadiusM > 0.002) {
-    const areaPort = Math.PI * portRadiusM * portRadiusM;
-    const neckLen = Math.max(0.0015, portLengthM ?? 0.003);
-    // Rayleigh flanged end correction on both sides of soundboard: +1.7 * r_port
-    const effectiveLen = neckLen + 1.7 * portRadiusM;
-    const rawFh = (SPEED_OF_SOUND_AIR / (2 * Math.PI)) * Math.sqrt(areaPort / (cavityVolumeM3 * effectiveLen));
-    helmholtzHz = +Math.max(35, Math.min(1200, rawFh)).toFixed(1);
+  let helmholtzQ = 11.0;
+  if (hasHollowCavity && !cav.isOpenCupOrShell && cav.totalConductanceM > 1e-6 && cavityVolumeM3 > 1e-6) {
+    const rawFh = (SPEED_OF_SOUND_AIR / (2 * Math.PI)) * Math.sqrt(cav.totalConductanceM / cavityVolumeM3);
+    helmholtzHz = +Math.max(35, Math.min(1800, rawFh)).toFixed(1);
+    // Radiation & viscous damping across larger / multiple openings lowers cavity Q naturally
+    helmholtzQ = +Math.max(2.6, Math.min(13.0, 11.8 * (1 - 2.6 * cav.openAreaFraction))).toFixed(2);
   }
 
-  // Soundboard top-plate & body modes
-  const hostModes = estimateBodyModes(host);
-  // Hollow soundboxes have thin plates (~2.5–3.5 mm spruce/wood top), placing T(1,1) around 170–320 Hz
-  const topPlateHz = cavityVolumeM3 > 1e-6
-    ? +Math.max(130, Math.min(520, (helmholtzHz ?? 120) * 1.82)).toFixed(1)
-    : +Math.max(140, Math.min(900, hostModes.fundamentalHz)).toFixed(1);
-  const bodyModeHz = +(topPlateHz * 1.54).toFixed(1);
+  // 2. Real Kirchhoff soundboard flexural plate resonance from measured 3D wall thickness & wood (E, rho)!
+  let topPlateHz: number;
+  let bodyModeHz: number;
+  if (hasHollowCavity) {
+    const nu = 0.30;
+    const hTop = Math.max(0.0012, cav.topPlateThicknessM);
+    // Inner free vibrating span of top soundboard (outer span minus two side-rib thicknesses)
+    const spanA = Math.max(0.04, cav.plateSpanAM - 2 * cav.meanWallThicknessM);
+    const spanB = Math.max(0.04, cav.plateSpanBM - 2 * cav.meanWallThicknessM);
+    const plateRigidityFactor = hTop / Math.sqrt(12 * (1 - nu * nu));
+    // Soundholes slightly reduce central plate stiffness while shedding mass; open-shell cuts lower edge restraint
+    const holeCompliance = Math.max(0.72, 1 - 0.55 * cav.openAreaFraction);
+    let rawTopHz = 0.54 * plateRigidityFactor * cLong * (1 / (spanA * spanA) + 1 / (spanB * spanB)) * holeCompliance;
 
-  const hasHollowCavity = cavityVolumeM3 > 1e-6;
-  const radiationGain = helmholtzHz !== null
-    ? 1.18 // Ported acoustic soundbox (strong air + top-plate coupling!)
+    // Sealed enclosure (0 holes!): trapped internal air spring K_air = ρ_air c² A_plate² / V raises soundboard f_top!
+    if (portCount === 0 && !cav.isOpenCupOrShell && cavityVolumeM3 > 1e-6) {
+      const rhoAir = 1.204;
+      const plateArea = spanA * spanB;
+      const plateMass = Math.max(1e-4, rho * hTop * plateArea * 0.45);
+      const kAir = (rhoAir * SPEED_OF_SOUND_AIR * SPEED_OF_SOUND_AIR * plateArea * plateArea * 0.25) / cavityVolumeM3;
+      const fAirSpringSq = kAir / (4 * Math.PI * Math.PI * plateMass);
+      rawTopHz = Math.sqrt(rawTopHz * rawTopHz + fAirSpringSq);
+    }
+
+    topPlateHz = +Math.max(75, Math.min(1600, rawTopHz)).toFixed(1);
+    bodyModeHz = +(topPlateHz * (1.46 + 0.14 * Math.min(2, spanB / spanA))).toFixed(1);
+  } else {
+    // Solid plank / unhollowed body: use actual 3D solid modal eigenfrequencies of the host!
+    const hostModes = estimateBodyModes(host);
+    topPlateHz = +Math.max(90, Math.min(2200, hostModes.fundamentalHz)).toFixed(1);
+    bodyModeHz = +(topPlateHz * hostModes.overtoneRatio).toFixed(1);
+  }
+
+  // 3. Skudrzyk driving-point bridge admittance Y_bridge = 1 / (8 * sqrt(D * rho * h_top)) ∝ 1 / (rho * c_L * h_top²):
+  //    Thin, low-density spruce soundboards move generously under string tension; thick/heavy slabs barely radiate!
+  const refImpedance = 450 * 4472 * 0.004 * 0.004; // Reference 4 mm spruce soundboard
+  const actualH = hasHollowCavity ? cav.topPlateThicknessM : cav.plateSpanAM * 0.35;
+  const actualImpedance = Math.max(refImpedance * 0.18, rho * cLong * actualH * actualH);
+  const admittanceScale = Math.max(0.32, Math.min(1.55, Math.pow(refImpedance / actualImpedance, 0.28)));
+
+  const baseEnclosureGain = helmholtzHz !== null
+    ? 1.22 // Ported Helmholtz soundbox
     : hasHollowCavity
-      ? 0.78 // Sealed hollow chamber (top-plate coupling, no air port)
-      : 0.30; // Solid-body / unmounted frame (quiet electric/monochord wire)
+      ? (cav.isOpenCupOrShell ? 0.94 : 0.78) // Open-back shell vs sealed chamber
+      : 0.30; // Solid-body / unmounted frame
+
+  const radiationGain = +(baseEnclosureGain * (hasHollowCavity ? admittanceScale : 1.0)).toFixed(3);
 
   return {
     hostNodeId: host.id,
     hostName: host.name || host.id,
     hasHollowCavity,
     cavityVolumeLitres: +(cavityVolumeM3 * 1000).toFixed(3),
-    portRadiusMm: portRadiusM !== null ? +(portRadiusM * 1000).toFixed(1) : null,
-    portLengthMm: portLengthM !== null ? +(portLengthM * 1000).toFixed(1) : null,
+    portCount,
+    portRadiusMm: eqPortRadiusM !== null ? +(eqPortRadiusM * 1000).toFixed(1) : null,
+    portLengthMm: avgPortLenM !== null ? +(avgPortLenM * 1000).toFixed(1) : null,
+    topPlateThicknessMm: +(cav.topPlateThicknessM * 1000).toFixed(2),
     helmholtzHz,
+    helmholtzQ,
     topPlateHz,
     bodyModeHz,
     radiationGain,
@@ -271,13 +273,37 @@ function resonatorTransferGain(freqHz: number, fRes: number, Q: number, boost: n
   return 1 + (boost / Math.max(1, Q)) * (1 / Math.max(0.06, denom));
 }
 
+function resolvePluckFractionFromPoint(node: SceneNode, localPoint: [number, number, number]): number | null {
+  const g = (node.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
+  if (!g) return null;
+  if (g.fromto && g.fromto.length >= 6) {
+    const ax = g.fromto[3] - g.fromto[0];
+    const ay = g.fromto[4] - g.fromto[1];
+    const az = g.fromto[5] - g.fromto[2];
+    const lenSq = ax * ax + ay * ay + az * az;
+    if (lenSq > 1e-8) {
+      const t = ((localPoint[0] - g.fromto[0]) * ax + (localPoint[1] - g.fromto[1]) * ay + (localPoint[2] - g.fromto[2]) * az) / lenSq;
+      const clamped = Math.max(0.03, Math.min(0.97, t));
+      // Fold symmetric [0..1] into [0..0.5] distance from nearest bridge/nut termination
+      return Math.min(clamped, 1 - clamped);
+    }
+  }
+  const sec = analyze3DSolidCrossSections(node);
+  const lenAxis = sec.axisOrderAsc[2];
+  const [lo, hi] = sec.lenBounds;
+  const span = Math.max(1e-4, hi - lo);
+  const t = Math.max(0.03, Math.min(0.97, (localPoint[lenAxis] - lo) / span));
+  return Math.min(t, 1 - t);
+}
+
 /**
  * Evaluates a taut string's Mersenne fundamental, Fletcher stiff-string harmonics,
- * breaking-stress safety, and coupled soundbox resonance profile.
+ * breaking-stress safety, coupled 3D soundbox resonance, and live plectrum/strike-point shaping!
  */
 export function evaluateTautString(
   node: SceneNode,
   sceneNodes?: SceneNode[],
+  impactCtx?: StringPluckImpactContext,
 ): StringEvaluation | null {
   const spec = node.acousticString;
   if (!spec) return null;
@@ -330,8 +356,23 @@ export function evaluateTautString(
     ? analyzeSoundboxResonance(resonatorNode)
     : null;
 
-  // 5. Build stiff-string harmonic partial bank shaped by pluck comb & soundbox transfer function!
-  const pluckPos = Math.max(0.05, Math.min(0.5, spec.pluckPos ?? 0.18));
+  // 5. Determine actual pluck position & plectrum contact width/stiffness!
+  const dynamicPluck = impactCtx?.localPoint
+    ? resolvePluckFractionFromPoint(node, impactCtx.localPoint)
+    : null;
+  const pluckPos = Math.max(0.04, Math.min(0.5, dynamicPluck ?? spec.pluckPos ?? 0.18));
+
+  let pickWidthM = 0.004;
+  let pickBrightness = mat.brightness;
+  let contactTauSec = 0.00072;
+  if (impactCtx?.strikerNode) {
+    const pickProps = inferColliderContactProps(impactCtx.strikerNode, impactCtx.strikerGeomName);
+    pickWidthM = Math.max(0.001, Math.min(lengthM * 0.25, 1.6 * pickProps.radiusM));
+    pickBrightness = 0.45 * mat.brightness + 0.55 * pickProps.brightness;
+    // Softer / heavier plectrum prolongs string release contact time τ_c
+    contactTauSec = Math.max(0.00035, Math.min(0.0028, 0.00095 * Math.pow(3e9 / pickProps.modulusPa, 0.18)));
+  }
+
   const radGain = soundbox ? soundbox.radiationGain : 0.65;
   const modes: ModalVoice[] = [];
   const nPartials = 12;
@@ -340,35 +381,41 @@ export function evaluateTautString(
     const fn = n * fundamentalHz * Math.sqrt(1 + inharmonicityB * n * n);
     if (fn < 24 || fn > 17500) continue;
 
-    // Pluck triangle-wave Fourier rolloff (1/n^1.35) * comb node sin(n * π * x_pluck / L)
+    // Pluck triangle-wave Fourier rolloff * spatial pluck comb sin(n * π * x_pluck / L)
     const comb = Math.abs(Math.sin(n * Math.PI * pluckPos));
-    if (comb < 0.04) continue;
-    let gain = (comb / Math.pow(n, 1.32)) * radGain;
+    if (comb < 0.035) continue;
 
-    // Couple through the soundbox's Helmholtz air cavity + top/body plate formants!
+    // Finite plectrum contact width sinc filter: sin(n π w_pick / L) / (n π w_pick / L)
+    const uPick = (n * Math.PI * pickWidthM) / Math.max(0.02, lengthM);
+    const pickSinc = uPick < 1e-3 ? 1.0 : Math.abs(Math.sin(uPick) / uPick);
+
+    // Plectrum stiffness spectral tilt (stiff metal pick boosts upper partials vs soft felt/wood)
+    const rolloffExp = 1.46 - 0.34 * pickBrightness;
+    let gain = (comb / Math.pow(n, rolloffExp)) * pickSinc * radGain;
+
+    // Couple through the 3D soundbox's Helmholtz air cavity + Kirchhoff top/body plate formants!
     if (soundbox) {
       let boxH = resonatorTransferGain(fn, soundbox.topPlateHz, 8.5, 4.2);
       boxH *= resonatorTransferGain(fn, soundbox.bodyModeHz, 10.0, 2.6);
       if (soundbox.helmholtzHz !== null) {
-        boxH *= resonatorTransferGain(fn, soundbox.helmholtzHz, 11.0, 5.5);
+        boxH *= resonatorTransferGain(fn, soundbox.helmholtzHz, soundbox.helmholtzQ, 5.8);
         // Below Helmholtz cutoff, ported soundboxes cancel as an acoustic dipole (~f^2 high-pass)
-        if (fn < soundbox.helmholtzHz * 0.72) {
-          const ratio = fn / (soundbox.helmholtzHz * 0.72);
-          boxH *= 0.35 + 0.65 * ratio * ratio;
+        if (fn < soundbox.helmholtzHz * 0.75) {
+          const ratio = fn / (soundbox.helmholtzHz * 0.75);
+          boxH *= 0.30 + 0.70 * ratio * ratio;
         }
       }
-      gain *= Math.min(2.4, boxH * 0.58);
+      gain *= Math.min(2.4, boxH * 0.60);
     }
 
-    // String damping: higher harmonics decay faster (viscoelastic + air drag + bridge radiation energy transfer!)
-    // Notice energy conservation: stronger soundbox radiation coupling slightly shortens sustain while making it louder!
-    const bridgeLoadFactor = soundbox?.helmholtzHz ? 0.78 : 1.0;
-    const partialQ = (mat.intrinsicQ * bridgeLoadFactor) / (1 + 0.28 * (n - 1) * (n - 1) * (1 - 0.5 * mat.brightness));
+    // Energy conservation: stronger bridge/soundbox radiation transfers energy faster!
+    const bridgeLoadFactor = soundbox ? Math.max(0.68, 1.0 - 0.18 * soundbox.radiationGain) : 1.0;
+    const partialQ = (mat.intrinsicQ * bridgeLoadFactor) / (1 + 0.28 * (n - 1) * (n - 1) * (1 - 0.5 * pickBrightness));
     const decaySec = Math.max(0.04, Math.min(5.5, (partialQ / (Math.PI * fn)) * 2.6));
 
     modes.push({
       freqHz: +fn.toFixed(2),
-      gain: +Math.min(1.2, gain).toFixed(3),
+      gain: +Math.min(1.25, gain).toFixed(3),
       decaySec: +decaySec.toFixed(4),
     });
   }
@@ -379,13 +426,13 @@ export function evaluateTautString(
       modes.push({
         freqHz: soundbox.helmholtzHz,
         gain: 0.24,
-        decaySec: +Math.max(0.06, 11 / (Math.PI * soundbox.helmholtzHz) * 2.2).toFixed(4),
+        decaySec: +Math.max(0.05, (soundbox.helmholtzQ / (Math.PI * soundbox.helmholtzHz)) * 2.2).toFixed(4),
       });
     }
     modes.push({
       freqHz: soundbox.topPlateHz,
       gain: soundbox.hasHollowCavity ? 0.18 : 0.08,
-      decaySec: +Math.max(0.04, 14 / (Math.PI * soundbox.topPlateHz) * 2.0).toFixed(4),
+      decaySec: +Math.max(0.04, (14 / (Math.PI * soundbox.topPlateHz)) * 2.0).toFixed(4),
     });
   }
 
@@ -399,10 +446,11 @@ export function evaluateTautString(
       density: mat.densityKgM3,
       modulusGPa: mat.modulusGPa,
       qualityQ: mat.intrinsicQ,
-      brightness: mat.brightness,
+      brightness: pickBrightness,
     },
-    contactDurationSec: 0.00075,
+    contactDurationSec: contactTauSec,
     modes,
+    radiatingWidthM: soundbox ? 0.12 : 0.016,
   };
 
   return {
@@ -421,7 +469,7 @@ export function evaluateTautString(
 
 /**
  * Tunes a taut string node to `targetHz` via Mersenne's law T = 4 * L^2 * f^2 * mu,
- * automatically adjusting wire diameter if needed to stay safely within [12 N .. 68% breaking stress],
+ * automatically adjusting wire diameter if needed to stay safely within [12 N .. 65% breaking stress],
  * and updates its MuJoCo transverse pluck stiffness `4 * T / L`.
  */
 export function tuneStringToPitch(node: SceneNode, targetHz: number): SceneNode {
@@ -440,9 +488,7 @@ export function tuneStringToPitch(node: SceneNode, targetHz: number): SceneNode 
   const areaOf = (dMm: number) => Math.PI * Math.pow(dMm / 2000, 2);
   const maxSafeStressPa = mat.ultimateStrengthMPa * 1e6 * 0.65;
 
-  // If tension would snap the wire or leave it floppy (< 12 N), pick an appropriate luthier gauge!
   if (tensionN / areaOf(diameterMm) > maxSafeStressPa || tensionN < 12 || tensionN > 140) {
-    // Target nominal musical tension ~48 N (acoustic guitar / harp sweet spot)
     const targetT = Math.min(85, Math.max(18, 48));
     const idealMu = targetT / (4 * lengthM * lengthM * targetHz * targetHz);
     const idealR = Math.sqrt(idealMu / (mat.densityKgM3 * Math.PI));
@@ -486,8 +532,7 @@ export function tuneStringToPitch(node: SceneNode, targetHz: number): SceneNode 
 }
 
 /**
- * Creates `count` taut musical strings mounted as children across the top face
- * of `hostNode`, tuned to a musical interval set (e.g. open harp/lyre/guitar tuning).
+ * Creates taut musical strings mounted as children across the top face of `hostNode`.
  */
 export function buildMountedStringsForBody(
   hostNode: SceneNode,
@@ -518,13 +563,12 @@ export function buildMountedStringsForBody(
   const dy = Number.isFinite(minY) ? maxY - minY : 0.28;
   const topZ = Number.isFinite(maxZ) ? maxZ : 0.03;
 
-  // Span strings along the longer horizontal axis (X or Y) of the soundbox top!
   const spanAlongY = dy >= dx;
   const scaleLen = Math.max(0.08, (spanAlongY ? dy : dx) * 0.82);
   const acrossSpan = Math.max(0.03, (spanAlongY ? dx : dy) * 0.56);
-  const zHeight = +(topZ + 0.008).toFixed(5); // 8 mm bridge action above soundboard
+  const zHeight = +(topZ + 0.008).toFixed(5);
 
-  const freqs = opts.notes ?? [261.63, 293.66, 329.63, 392.00]; // C4, D4, E4, G4
+  const freqs = opts.notes ?? [261.63, 293.66, 329.63, 392.00];
   const material = opts.material ?? 'bronze';
   const mat = STRING_MATERIALS[material];
   const existingCount = (hostNode.children ?? []).filter((c) => !!c.acousticString).length;
@@ -542,7 +586,6 @@ export function buildMountedStringsForBody(
     const fromto: number[] = spanAlongY
       ? [0, -halfL, 0, 0, halfL, 0]
       : [-halfL, 0, 0, halfL, 0, 0];
-    // Transverse pluck axis (horizontal across the soundboard so a passing plectrum plucks cleanly!)
     const slideAxis: [number, number, number] = spanAlongY ? [1, 0, 0] : [0, 1, 0];
 
     const rawString: SceneNode = {

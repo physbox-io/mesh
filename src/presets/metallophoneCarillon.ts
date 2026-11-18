@@ -34,8 +34,8 @@ let cursor = 0;
 for (let i = 0; i < score.length; i++) {
   const dur = score[i][1] * beatSec;
   const dt = tLoop - cursor;
-  if (dt >= 0 && dt < 0.042) {
-    api.applyJointForce(joints[score[i][0]], -2.65);
+  if (dt >= 0 && dt < 0.038) {
+    api.applyJointForce(joints[score[i][0]], -0.72);
   }
   cursor += dur;
 }
@@ -113,19 +113,20 @@ for (let i = 0; i < score.length; i++) {
     name: `Brass Mallet (${label})`,
     type: 'body',
     pos: [x, -0.142, 0.066],
-    deformMaterial: 'plastic',
+    deformMaterial: 'softMetal',
     joints: [
       {
         name: `glock_hammer_${idx}`,
         type: 'hinge',
         axis: [1, 0, 0],
         pos: [0, 0, 0],
-        stiffness: 0.76,
+        stiffness: 0.78,
         springref: 0.02,
-        damping: 0.036,
+        damping: 0.038,
         limited: true,
-        range: [-14, 55],
-        hardStop: false,
+        // Rigid steel stop at -8.5° keeps the Ø19 mm brass sphere center strictly above the bar's midplane so it can never fall through!
+        range: [-8.5, 55],
+        hardStop: true,
       },
     ],
     geoms: [
@@ -153,8 +154,8 @@ for (let i = 0; i < score.length; i++) {
 
   notes.forEach((note, i) => {
     const x = -0.13 + i * 0.052;
-    // 5.0 mm brushed glockenspiel flat steel stock -> compact 160–225 mm bars with generous rail clearance!
-    const halfLen = 0.112 - i * 0.0065;
+    // 5.6 mm brushed glockenspiel flat steel stock -> compact 165–230 mm bars with generous rail clearance & sturdy spine!
+    const halfLen = 0.115 - i * 0.0065;
     const rawBar: SceneNode = {
       id: `glock_bar_${note.toLowerCase()}`,
       name: `Steel Bar (${note})`,
@@ -166,17 +167,17 @@ for (let i = 0; i < score.length; i++) {
           name: `glock_${note.toLowerCase()}_pad`,
           type: 'slide',
           axis: [0, 0, 1],
-          stiffness: 2200,
-          damping: 12,
+          stiffness: 2600,
+          damping: 14,
           limited: true,
-          range: [-0.012, 0.012],
+          range: [-0.010, 0.010],
         },
       ],
       geoms: [
         {
           name: 'steel_bar_body',
           type: 'box',
-          size: [0.016, halfLen, 0.0025],
+          size: [0.016, halfLen, 0.0028],
           rgba: [0.80 + i * 0.02, 0.84 + i * 0.015, 0.91, 1],
         },
       ],

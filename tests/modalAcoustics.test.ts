@@ -13,6 +13,7 @@ import { simulate } from './helpers/simulate';
 import {
   estimateBodyModes,
   inferAcousticMaterial,
+  resolveTwoBodyImpact,
   solveVariableBeamModes,
 } from '../src/utils/modalAudio';
 import {
@@ -578,8 +579,11 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       const struckLongBars = new Set<string>();
       const strikeSequence: string[] = [];
       const lastStrikeStep = new Map<string, number>();
+      let minHammer0Rad = Infinity;
       for (let step = 0; step < 4800; step++) {
         simGlock.step(1);
+        const h0 = simGlock.jointPos('glock_hammer_0');
+        if (h0 < minHammer0Rad) minHammer0Rad = h0;
         for (const p of padNames) {
           if (simGlock.jointPos(p) < -0.00025) {
             struckLongBars.add(p);
@@ -592,6 +596,8 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
         }
       }
       expect(Math.abs(simGlock.jointPos('carillon_drum_spin'))).toBeGreaterThan(1.0);
+      // Lowest mallet (`glock_hammer_0` on G4) never tunnels or falls below its steel bar!
+      expect(minHammer0Rad).toBeGreaterThan(-0.19);
       expect(struckLongBars.has('glock_g4_pad')).toBe(true);
       expect(struckLongBars.has('glock_a4_pad')).toBe(true);
       expect(struckLongBars.has('glock_c5_pad')).toBe(true);
@@ -741,5 +747,162 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     expect(afterCornet!.geoms.some((g) => g.name === 'bell_brace_1')).toBe(false);
     expect(afterCornet!.geoms.some((g) => g.name === 'cornet_folded_horn')).toBe(true);
     expect(afterCornet!.geoms.length).toBe(cornetNode.geoms.length - 1);
+  });
+
+  it('models multi-port CSG & Sculpt soundbox holes, arbitrary 3D solid bumps/hollows, and two-body Hertzian mallet impacts', async () => {
+    // 1. Soundbox multi-port CSG & Manifold-3D Sculpt holes + top-plate thickness
+    const soundbox = soundboxLyrePreset.nodes[0];
+    const res1 = analyzeSoundboxResonance(soundbox);
+    expect(res1.portCount).toBe(1);
+    expect(res1.helmholtzHz).not.toBeNull();
+
+    // Adding a second soundhole via CSG sums parallel conductance -> raises f_H & portCount == 2!
+    const twoHoleBox: SceneNode = {
+      ...soundbox,
+      geoms: [
+        ...soundbox.geoms,
+        {
+          name: 'second_soundhole',
+          type: 'cylinder',
+          size: [0.024, 0.010],
+          pos: [0, 0.055, 0.030],
+          csg: 'difference',
+        },
+      ],
+    };
+    const res2 = analyzeSoundboxResonance(twoHoleBox);
+    expect(res2.portCount).toBe(2);
+    expect(res2.helmholtzHz!).toBeGreaterThan(res1.helmholtzHz! * 1.25);
+
+    // Build a pure Manifold-3D watertight hollow box mesh and punch 1 then 2 Sculpt holes into it!
+    const wasm = await loadManifold();
+    const outerM = wasm.Manifold.cube([0.16, 0.28, 0.06], true);
+    const innerM = wasm.Manifold.cube([0.148, 0.268, 0.050], true);
+    const sealedBoxM = outerM.subtract(innerM);
+    const sealedMesh = sealedBoxM.getMesh();
+    outerM.delete();
+    innerM.delete();
+    sealedBoxM.delete();
+
+    const sealedSculpt = fromSceneGeom(Array.from(sealedMesh.vertProperties), Array.from(sealedMesh.triVerts));
+    const sealedNode: SceneNode = {
+      id: 'sculpt_box',
+      name: 'Sculpted Soundbox',
+      deformMaterial: 'softwood',
+      sculptEdited: true,
+      geoms: [{ name: 'shell', type: 'mesh', size: [0.08, 0.14, 0.03], ...toSceneGeom(sealedSculpt) }],
+      children: [],
+    };
+    const resSealed = analyzeSoundboxResonance(sealedNode);
+    expect(resSealed.hasHollowCavity).toBe(true);
+    expect(resSealed.portCount).toBe(0);
+    expect(resSealed.helmholtzHz).toBeNull();
+
+    // Punch first Sculpt hole through the top plate (z > 0 only, piercing top wall into cavity)
+    // Using a side-rib Sculpt cut through x = +0.074..+0.080 at y = -0.02..+0.02, z = -0.015..+0.015:
+    const sideHole1 = cutSculptWith(wasm, sealedSculpt, {
+      kind: 'polygon',
+      polygon: [
+        [0.065, -0.020, -0.015],
+        [0.090, -0.020, -0.015],
+        [0.090, -0.020, 0.015],
+        [0.065, -0.020, 0.015],
+      ],
+      direction: [0, 1, 0],
+    });
+    expect(sideHole1.ok).toBe(true);
+    if (!sideHole1.ok) return;
+    // Wait: polygon cut extrudes infinitely along direction [0,1,0], cutting slots on BOTH -Y and +Y ends if unbounded;
+    // either 1 or 2 sculpted ports open the sealed cavity -> helmholtzHz turns ON from null!
+    const sculptPortedNode: SceneNode = {
+      ...sealedNode,
+      sculptVersion: 2,
+      geoms: [{ name: 'shell', type: 'mesh', size: [0.08, 0.14, 0.03], ...toSceneGeom(sideHole1.mesh) }],
+    };
+    const resSculptPorted = analyzeSoundboxResonance(sculptPortedNode);
+    expect(resSculptPorted.hasHollowCavity).toBe(true);
+    expect(resSculptPorted.portCount).toBeGreaterThanOrEqual(1);
+    expect(resSculptPorted.helmholtzHz).not.toBeNull();
+
+    // 2. All solids respond to 3D bumps, cuts, and hollowing (never masked by tunedPitchHz!)
+    const c4Bar = marimbaCascadePreset.nodes.find((n) => n.id === 'marimba_bar_c4')!;
+    const baseBarModes = estimateBodyModes(c4Bar);
+    expect(hzToNoteInfo(baseBarModes.fundamentalHz).note).toBe('C4');
+
+    // Adding heavy mass bumps near the free ends (antinodes of displacement, zero bending curvature) lowers f1!
+    const endWeightedBar: SceneNode = {
+      ...c4Bar,
+      sculptVersion: 10,
+      geoms: [
+        ...c4Bar.geoms,
+        { name: 'bump_lo', type: 'box', size: [0.018, 0.016, 0.007], pos: [0, -0.095, 0.012] },
+        { name: 'bump_hi', type: 'box', size: [0.018, 0.016, 0.007], pos: [0, 0.095, 0.012] },
+      ],
+    };
+    const endWeightedModes = estimateBodyModes(endWeightedBar);
+    expect(endWeightedModes.fundamentalHz).toBeLessThan(baseBarModes.fundamentalHz * 0.95);
+    expect(endWeightedModes.overtoneRatio).not.toBeCloseTo(baseBarModes.overtoneRatio, 2);
+
+    // Adding a central spine thickening (filling in the center arch -> cubic h^3 stiffness surge!) raises f1!
+    const centerStiffBar: SceneNode = {
+      ...c4Bar,
+      sculptVersion: 11,
+      geoms: [
+        ...c4Bar.geoms,
+        { name: 'center_ridge', type: 'box', size: [0.018, 0.035, 0.006], pos: [0, 0, 0.011] },
+      ],
+    };
+    expect(estimateBodyModes(centerStiffBar).fundamentalHz).toBeGreaterThan(baseBarModes.fundamentalHz * 1.12);
+
+    // Hollowing out a non-marimba solid steel sphere turns its ultrasonic clack into an audible sleigh-bell ring!
+    const solidBall: SceneNode = {
+      id: 'steel_ball',
+      name: 'Solid Ball',
+      deformMaterial: 'steel',
+      geoms: [{ name: 'ball', type: 'sphere', size: [0.025] }],
+      children: [],
+    };
+    const hollowBellBall: SceneNode = {
+      ...solidBall,
+      id: 'hollow_bell',
+      csgEnabled: true,
+      geoms: [
+        { name: 'ball', type: 'sphere', size: [0.025] },
+        { name: 'cavity', type: 'sphere', size: [0.022], csg: 'difference' },
+      ],
+    };
+    expect(estimateBodyModes(solidBall).modes.length).toBe(0);
+    expect(estimateBodyModes(hollowBellBall).modes.length).toBeGreaterThan(0);
+
+    // 3. Two-body Hertzian contact mechanics (soft polymer mallet vs steel mallet + center vs end hit!)
+    const softMallet = marimbaCascadePreset.nodes.find((n) => n.id === 'mallet_1')!;
+    const steelMallet = marimbaCascadePreset.nodes.find((n) => n.id === 'mallet_6')!;
+
+    const hitSoftCenter = resolveTwoBodyImpact(baseBarModes, c4Bar, {
+      impulseNs: 0.08,
+      strikerNode: softMallet,
+      strikerGeomName: 'mallet_head_0',
+      localPoint: [0, 0, 0.008],
+    });
+    const hitSteelCenter = resolveTwoBodyImpact(baseBarModes, c4Bar, {
+      impulseNs: 0.08,
+      strikerNode: steelMallet,
+      strikerGeomName: 'mallet_head_5',
+      localPoint: [0, 0, 0.008],
+    });
+    const hitSteelEnd = resolveTwoBodyImpact(baseBarModes, c4Bar, {
+      impulseNs: 0.08,
+      strikerNode: steelMallet,
+      strikerGeomName: 'mallet_head_5',
+      localPoint: [0, 0.105, 0.008],
+    });
+
+    // Soft mallet has > 2.2x longer Hertzian contact duration and warmer (lower) brightness than steel mallet!
+    expect(hitSoftCenter.tauC).toBeGreaterThan(hitSteelCenter.tauC * 2.2);
+    expect(hitSteelCenter.effectiveBrightness).toBeGreaterThan(hitSoftCenter.effectiveBrightness * 2.0);
+    // Steel strike near the bar end strongly excites antisymmetric Mode 2 compared to a soft center hit!
+    const m2SoftCenter = hitSoftCenter.voices[1]?.gain ?? 0;
+    const m2SteelEnd = hitSteelEnd.voices[1]?.gain ?? 0;
+    expect(m2SteelEnd).toBeGreaterThan(m2SoftCenter * 3.0);
   });
 });
