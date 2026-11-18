@@ -166,8 +166,12 @@ function locator(uv: number[][], tris: number[]) {
   };
 }
 
-/** The knife folds a pleated side asks for, on a seam `S` long (sorted along it). */
-function knives(spec: GarmentFullness, kind: FullSide['kind'], ratio: number, x0: number, x1: number, thickness: number): Omit<Knife, 'sigma0'>[] {
+/**
+ * The knife folds a pleated side asks for, on a seam `S` long (sorted along
+ * it). `spacing`: the mesh's, which the cloth over a fold needs room to climb
+ * in (foldRamp).
+ */
+function knives(spec: GarmentFullness, kind: FullSide['kind'], ratio: number, x0: number, x1: number, thickness: number, spacing: number): Omit<Knife, 'sigma0'>[] {
   const S = x1 - x0;
   const n = Math.max(1, Math.round(spec.at?.length ?? spec.count ?? Math.max(1, S / 0.08)));
   const at = spec.at?.length ? spec.at.slice() : Array.from({ length: n }, (_, i) => (i + 0.5) / n);
@@ -183,8 +187,7 @@ function knives(spec: GarmentFullness, kind: FullSide['kind'], ratio: number, x0
     // solver's contact thickness (4 mm) apart, the top layer, round a skirt
     // 20 cm in radius, was 4% longer round than it was cut, and pressed, held there.
     const r = Math.max(1e-4, Math.min(thickness / 2, (0.8 * d) / Math.PI));
-    const xc = dir > 0 ? Math.min(x1, Math.max(x0 + d, x)) : Math.min(x1 - d, Math.max(x0, x));
-    out.push({ x: xc, d, dir, r, L: d - Math.PI * r });
+    out.push({ x, d, dir, r, L: d - Math.PI * r });
   };
   const pitch = S / at.length;
   for (const f of at) {
@@ -194,8 +197,31 @@ function knives(spec: GarmentFullness, kind: FullSide['kind'], ratio: number, x0
     else if (kind === 'box') { fold(x - pitch / 4, extra / 4, -1); fold(x + pitch / 4, extra / 4, 1); }
     else { fold(x - 1e-4, extra / 4, 1); fold(x + 1e-4, extra / 4, -1); }
   }
+  // Each fold's under layers short of the seam's end they reach toward by
+  // room for the cloth over them to come down to it (the end is where the
+  // next panel's seam is): reaching it, the cloth came down from over them
+  // to it through them. Set in as evenly as they were, the stretch they lie
+  // in drawn in at that end (a: at x0, b: at x1) only as far as it must be.
+  // (Moved in on its own, the first fold was pushed onto the next.)
+  const room = (f: Omit<Knife, 'sigma0'>) => f.d + foldRamp(spacing, f.r);
+  let a = 0, b = 0;
+  for (let it = 0; it < 3; it++) {
+    for (const f of out) {
+      const u = Math.min(1 - 1e-6, Math.max(1e-6, (f.x - x0) / S));
+      if (f.dir > 0) a = Math.max(a, (room(f) - u * (S - b)) / (1 - u));
+      else b = Math.max(b, (room(f) - (1 - u) * (S - a)) / u);
+    }
+    a = Math.min(a, S / 2); b = Math.min(b, S / 2);
+  }
+  for (const f of out) {
+    const u = (f.x - x0) / S, x = x0 + a + u * (S - a - b);
+    f.x = f.dir > 0 ? Math.min(x1, x) : Math.max(x0, x);
+  }
   return out.sort((a, b) => a.x - b.x);
 }
+
+/** How far the cloth over a fold eases down past its under layers: over a few mesh steps, and no steeper than its turns. */
+const foldRamp = (spacing: number, r: number) => Math.max(2 * spacing, 6 * r);
 
 /**
  * One wave of a gathered start, `period` of cloth long: its point at tau as
@@ -294,7 +320,7 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
   const ratio = side.ratio;
   const gather = side.kind === 'gather';
   const ga = gather ? gL + Math.max(0, Math.min(1, side.spec.from ?? 0)) * (gR - gL) : 0, gb = gather ? gL + Math.max(0, Math.min(1, side.spec.to ?? 1)) * (gR - gL) : 0;
-  const folds: Knife[] = gather ? [] : knives(side.spec, side.kind, ratio, gL, gR, thickness).map((f) => ({ ...f, sigma0: 0 }));
+  const folds: Knife[] = gather ? [] : knives(side.spec, side.kind, ratio, gL, gR, thickness, spacing).map((f) => ({ ...f, sigma0: 0 }));
   // Breakpoints: the seam's own points, the gathered stretch's ends, the folds.
   const breaks = [...new Set([...s, ...(gather ? [ga, gb] : []), ...folds.map((f) => f.x)])].sort((a, b) => a - b);
   const tangent = (x: number): V2 => {
@@ -419,29 +445,52 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
     for (const f of folds) {
       if (sigma < f.sigma0 || sigma > f.sigma0 + 2 * f.d) continue;
       // Facing -s: the mirror image, its cloth run the other way.
-      if (f.dir > 0) { const [dx, dy] = knifeCurve(f, sigma - f.sigma0); return { x: f.x + dx, y: dy, knife: f }; }
-      const [dx, dy] = knifeCurve(f, f.sigma0 + 2 * f.d - sigma);
-      return { x: f.x - dx, y: dy, knife: f };
+      const [dx, dy] = knifeCurve(f, f.dir > 0 ? sigma - f.sigma0 : f.sigma0 + 2 * f.d - sigma), x = f.x + f.dir * dx;
+      return { x, y: dy + stacked(sigma, x, f), knife: f };
     }
-    // On top of a fold beside it: raised over its two layers, easing down past them.
     const x = sOf(sigma);
+    return { x, y: stacked(sigma, x, null) };
+  };
+  /**
+   * How far cloth at sigma (x along the seam) lies raised over the folds under
+   * it: over each fold whose open side it is on, that fold's two under layers,
+   * easing down past them. A fold's own layers too, where another fold's under
+   * layers reach in beneath it (pleats deeper than their spacing, or pushed
+   * together at the end of a seam): left where they were, the cloth coming
+   * out from under one fold rose through its crease to lie over the next.
+   * Two folds each on the other's open side (a box pleat's under layers
+   * meeting beneath it): the one earlier along the seam on top.
+   */
+  const openSide = (g: Knife, sigma: number) => (g.dir > 0 ? sigma < g.sigma0 : sigma > g.sigma0 + 2 * g.d);
+  const stacked = (sigma: number, x: number, own: Knife | null): number => {
     let y = 0;
-    for (const f of folds) {
-      const reach = f.L + f.r, ramp = Math.max(2 * spacing, 6 * f.r);
-      // How far short of the fold's under layers (negative: over them), for the cloth on its open side.
-      const onTop = f.dir > 0 ? sigma < f.sigma0 : sigma > f.sigma0 + 2 * f.d;
-      if (!onTop) continue;
-      const beyond = f.dir > 0 ? f.x - reach - x : x - f.x - reach;
+    for (const g of folds) {
+      if (g === own || !openSide(g, sigma)) continue;
+      if (own && openSide(own, g.sigma0) && own.sigma0 > g.sigma0) continue;
+      const reach = g.L + g.r, ramp = foldRamp(spacing, g.r);
+      // How far short of the fold's under layers (negative: over them).
+      const beyond = g.dir > 0 ? g.x - reach - x : x - g.x - reach;
       if (beyond < -reach - 1e-9 || beyond >= ramp) continue;
       const t = beyond <= 0 ? 1 : 1 - beyond / ramp;
-      y += 4 * f.r * t * t * (3 - 2 * t);
+      y += 4 * g.r * t * t * (3 - 2 * t);
     }
-    return { x, y };
+    return y;
   };
   let deepest = 0;
   if (gather) for (let i = 0; i <= 64; i++) deepest = Math.max(deepest, waveAt(0)((i / 64) * period)[1]);
   else for (const f of folds) deepest = Math.max(deepest, 4 * f.r);
   const rampDepth = Math.max(1.5 * spacing, 3 * deepest);
+  // At the seam a layer out, over the panel it is sewn to: laid on the seam,
+  // its new points lay on that panel's edge, their edges along its triangles,
+  // and read as through them. Where that panel is spread too, with new points
+  // of its own along the seam, only the side that is tacked to the other
+  // (clothModel: the fuller, else the first), its seam held a layer off the
+  // other's: both raised, each was held up off the other, and pushed through it.
+  const over = [...new Set(side.across.values())].every((p) => {
+    const o = sides.find((q) => q.panel === p && q.kind !== 'ease');
+    return !o || ratio > o.ratio || (ratio === o.ratio && k < p);
+  });
+  const seamLift = over ? thickness : 0;
   const start: number[][] = [], normal: number[][] = [], foldAt: { sigma: number; off: V2; y: number; x: number; knife?: Knife; depth: number }[] = [];
   // Where each new point came from: found in the piece's own triangles as
   // spread, its sigma and offset from the seam between theirs (a pleat's strip
@@ -462,7 +511,8 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
     const u = Math.min(1, depth / rampDepth), ramp = u * u * (3 - 2 * u);
     const atSeam = gather || !folds.length ? 0 : Math.min(1, thickness / (2 * folds[0].r));
     // Faded, folded only that much: along the seam between where it was cut and where the fold puts it.
-    const y = k * f.y * (atSeam + (1 - atSeam) * ramp);
+    // Raised off the seam (seamLift), easing in below it.
+    const y = k * f.y * (atSeam + (1 - atSeam) * ramp) + seamLift * (1 - ramp);
     // (Not sFlat plus the fold's shift from sOf(sigma): across a pleat's strip
     // sFlat runs on between its neighbours either side, where every point of
     // the strip was cut at the one s, and the layers came out up to half a
