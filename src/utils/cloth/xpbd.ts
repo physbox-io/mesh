@@ -22,6 +22,7 @@ import { LayerContacts } from './clothLayers';
 import { SelfContacts } from './clothSelf';
 import { BoardShapes, type Board } from './clothBoards';
 import { contourStep, findCrossings, trianglesNear, untangleMesh, type UntangleMesh } from './clothUntangle';
+import { ClothCcd } from './clothCcd';
 import { colliderContact, type Collider } from './clothColliders';
 
 /** Substep, seconds. */
@@ -60,6 +61,12 @@ const UNTANGLE_STEP = 0.0005;
 const UNTANGLE_STEPS = 300;
 const UNTANGLE_ROUNDS = 3;
 const UNTANGLE_REACH = 0.05;
+/** Untangling at the build: at most this many steps, the whole checked again every so many. */
+const UNTANGLE_MAX = 1500, UNTANGLE_CHECK = 25;
+/** And for no longer than this at the build, ms: what is left stays free of continuous collision, to come apart as it runs. */
+const UNTANGLE_BUDGET = 3000;
+/** Continuous collision over this many substeps at a time (each stretch's end is what is kept): every 4, it cost half as much again as the rest of a step; the guarantee is the same at any. */
+const CCD_EVERY = 8;
 
 const SKIN_FRICTION = 0.02;
 const STALL = (15 * Math.PI) / 180, POST_STALL = (30 * Math.PI) / 180;
@@ -126,6 +133,12 @@ export class ClothSim {
   private nearest: Float64Array;
   private skip: Uint8Array;
   private accumulator = 0;
+  /** Cloth against cloth along each stretch of substeps (clothCcd): where the stretch began, and how many substeps it is. */
+  private ccd: ClothCcd | null = null;
+  private ccdFrom: Float64Array | null = null;
+  private ccdSince = 0;
+  /** What continuous collision has done since the build: checks, pairs met, rounds of pushing, checks that needed impact zones, and that fell back to holding. */
+  ccdTotals = { calls: 0, met: 0, pushes: 0, zoneCalls: 0, zonePoints: 0, frozen: 0 };
   time = 0;
 
   constructor(models: ClothModel[], colliders: Collider[]) {
@@ -300,7 +313,42 @@ export class ClothSim {
     while (this.accumulator >= h) {
       this.substep(h, env);
       this.accumulator -= h;
+      if (++this.ccdSince >= CCD_EVERY) this.collideAlong(this.ccdSince * h);
     }
+  }
+
+  /** The continuous collision, built once: every cloth triangle, sewn points joined. */
+  private ccdOf(): ClothCcd {
+    if (!this.ccd) {
+      const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches));
+      // Tacked points get no exception: one tacked flat onto a triangle (no offset) and let pass it went through it by millimetres, and its edges with it.
+      this.ccd = new ClothCcd(this.n, this.tris, m.root);
+    }
+    return this.ccd;
+  }
+
+  /**
+   * Nothing through cloth over the substeps since the last look: what met is
+   * moved back (clothCcd), and what it moved goes on at the speed of where it
+   * ended up from where the stretch began.
+   */
+  private collideAlong(span: number) {
+    const x = this.x, from = this.ccdFrom;
+    this.ccdSince = 0;
+    if (!from) { this.ccdFrom = Float64Array.from(x); return; }
+    const before = Float64Array.from(x);
+    const st = this.ccdOf().resolve(from, x, this.w);
+    this.ccdTotals.calls++; this.ccdTotals.met += st.met; this.ccdTotals.pushes += st.pushes; this.ccdTotals.zoneCalls += st.zones ? 1 : 0; this.ccdTotals.frozen += st.frozen ? 1 : 0; this.ccdTotals.zonePoints += st.zonePoints;
+    if (st.met) {
+      const v = this.v;
+      for (let i = 0; i < this.n; i++) {
+        const k = 3 * i;
+        if (x[k] === before[k] && x[k + 1] === before[k + 1] && x[k + 2] === before[k + 2]) continue;
+        for (let c = 0; c < 3; c++) v[k + c] = (x[k + c] - from[k + c]) / span;
+        this.prev[k] = x[k]; this.prev[k + 1] = x[k + 1]; this.prev[k + 2] = x[k + 2];
+      }
+    }
+    from.set(x);
   }
 
   /** Wind on each triangle, as an acceleration of its corners. */
@@ -345,7 +393,6 @@ export class ClothSim {
     // hold layers a fabric's thickness apart, pull back what it parts, and the
     // crossings grew (gathers and pleats 129 -> 711 over 300 steps; with tacks
     // left out of the steps, 129 -> 22). See plans/cloth-garment-rebuild.md.
-    if ((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.CLOTH_UNTANGLE) this.untangle(); // MEASURE-ONLY, remove
     this.settle(CLOTH_SUBSTEP);
     // Cloth that starts apart and is sewn together (a piece sewn on, plain
     // cloth sewn up) is sewn before it is first drawn, as a paused scene
@@ -442,6 +489,11 @@ export class ClothSim {
       for (let i = 0; i < n; i++) this.floatUntil[i] = moving.has(find(i)) ? 0 : floats[i];
       this.v.fill(0); this.prev.set(this.x);
     }
+    // Then nothing through cloth before it is first drawn: whatever its
+    // builders modelled crossed, untangled, and from here kept so.
+    this.untangle();
+    this.ccdFrom = Float64Array.from(this.x);
+    this.ccdSince = 0;
   }
 
   /** What the last untangle found and left: crossings before, after, and steps taken. */
@@ -450,40 +502,72 @@ export class ClothSim {
 
   /**
    * Shrinks every contour where cloth crosses cloth until none is left
-   * (clothUntangle), the cloth's edges, tacks and closed stitches held between
-   * steps so it keeps its shape.
+   * (clothUntangle), each step guarded by continuous collision (clothCcd) so
+   * it makes no new crossing elsewhere: only what lies near a crossing is left
+   * free to come back through. Unguarded, a step that parted two sheets in one
+   * place pushed them through each other in the next (tailored 11 crossings
+   * to 874). The cloth's edges, tacks and closed stitches are held between
+   * steps so it keeps its shape (Baraff, Witkin and Kass, "Untangling Cloth", 2003).
    */
   untangle() {
+    const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches)), was = Float64Array.from(this.x);
+    const before = findCrossings(this.x, m).length;
+    const r = this.untangleFor(UNTANGLE_BUDGET);
+    // Kept only if it is better: on a pleated skirt and a boned gown's
+    // spencer it left more than it found (56 to 70, 196 to 212).
+    if (r.left > before) { this.x.set(was); const back = findCrossings(this.x, m); this.ccdOf().setTangled(back); r.left = back.length; }
+    this.prev.set(this.x);
+    this.v.fill(0);
+    this.untangled = { before, after: r.left, steps: r.steps };
+  }
+
+
+  /**
+   * Untangling steps for up to `budget` ms (see untangle): returns the
+   * crossings left and the steps taken, and leaves what is near those free of
+   * continuous collision.
+   */
+  private untangleFor(budget: number): { left: number; steps: number } {
     const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches));
+    const ccd = this.ccdOf();
     let crossings = findCrossings(this.x, m);
-    const before = crossings.length;
     let steps = 0;
-    const dx = new Float64Array(3 * this.n), count = new Float64Array(this.n);
+    const dx = new Float64Array(3 * this.n), count = new Float64Array(this.n), x0 = new Float64Array(3 * this.n);
     // Its shape is held as it is now, not drawn to its cut lengths: the
     // modelled shape is not at them (the settle relaxes that), and hundreds of
     // passes toward them with no contact moved cloth through cloth themselves.
     const E = this.edges, X = this.x, held = new Float64Array(E.length / 2);
-    const lengthNow = () => { for (let k = 0; k < held.length; k++) { const a = 3 * E[2 * k], b = 3 * E[2 * k + 1]; held[k] = Math.hypot(X[a] - X[b], X[a + 1] - X[b + 1], X[a + 2] - X[b + 2]); } };
-    lengthNow();
-    for (let round = 0; round < UNTANGLE_ROUNDS && crossings.length; round++) {
-      // Re-tested only near where it crossed; checked whole at the end of each round.
-      const near = trianglesNear(this.x, m, crossings, UNTANGLE_REACH);
-      for (let it = 0; it < UNTANGLE_STEPS; it++) {
-        crossings = findCrossings(this.x, m, near);
-        if (!crossings.length) break;
-        if (!contourStep(this.x, this.w, m, crossings, UNTANGLE_STEP, dx, count)) break;
-        for (let k = 0; k < dx.length; k++) this.x[k] += dx[k];
-        for (let sp = 0; sp < 2; sp++) {
-          for (let k = 0; k < held.length; k++) this.project(E[2 * k], E[2 * k + 1], held[k], 0);
-          for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchSew[k] <= 0) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
-          this.solveTacks();
-        }
-        steps++;
+    for (let k = 0; k < held.length; k++) { const a = 3 * E[2 * k], b = 3 * E[2 * k + 1]; held[k] = Math.hypot(X[a] - X[b], X[a + 1] - X[b + 1], X[a + 2] - X[b + 2]); }
+    let near = crossings.length ? trianglesNear(this.x, m, crossings, UNTANGLE_REACH) : null;
+    const region = new Uint8Array(this.n);
+    const markRegion = () => { region.fill(0); if (near) for (const t of near) for (let q = 0; q < 3; q++) region[this.tris[3 * t + q]] = 1; };
+    markRegion();
+    const until = performance.now() + budget;
+    for (let it = 0; it < UNTANGLE_MAX && crossings.length && performance.now() < until; it++) {
+      ccd.setTangled(crossings);
+      x0.set(this.x);
+      if (!contourStep(this.x, this.w, m, crossings, UNTANGLE_STEP, dx, count)) break;
+      for (let k = 0; k < dx.length; k++) this.x[k] += dx[k];
+      // Held where it is untangling only: held everywhere, tacks not quite at
+      // their places pulled thousands of points each step, all of which then
+      // had to be checked for collision (most of a step's cost).
+      for (let sp = 0; sp < 2; sp++) {
+        for (let k = 0; k < held.length; k++) if (region[E[2 * k]] || region[E[2 * k + 1]]) this.project(E[2 * k], E[2 * k + 1], held[k], 0);
+        for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchSew[k] <= 0 && (region[this.stitches[2 * k]] || region[this.stitches[2 * k + 1]])) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
+        this.solveTacks(region);
       }
-      crossings = findCrossings(this.x, m);
+      // What the holding nudged by no more than rounding, put back: else all of it reads as moved, and the collision check below looked over the whole scene each step.
+      for (let i = 0; i < this.n; i++) { const k = 3 * i; if (Math.abs(this.x[k] - x0[k]) + Math.abs(this.x[k + 1] - x0[k + 1]) + Math.abs(this.x[k + 2] - x0[k + 2]) < 1e-8) { this.x[k] = x0[k]; this.x[k + 1] = x0[k + 1]; this.x[k + 2] = x0[k + 2]; } }
+      ccd.resolve(x0, this.x, this.w);
+      steps++;
+      // Re-tested near where it crossed; the whole every so often, and the near ones found again.
+      if (steps % UNTANGLE_CHECK === 0) { crossings = findCrossings(this.x, m); near = crossings.length ? trianglesNear(this.x, m, crossings, UNTANGLE_REACH) : null; markRegion(); }
+      else crossings = findCrossings(this.x, m, near);
     }
-    this.prev.set(this.x);
-    this.untangled = { before, after: crossings.length, steps };
+    crossings = findCrossings(this.x, m);
+    // What could not be untangled stays free of continuous collision, to come apart as it runs.
+    ccd.setTangled(crossings);
+    return { left: crossings.length, steps };
   }
 
   /**
@@ -717,10 +801,12 @@ export class ClothSim {
    * tight takes the garment in, a pocket's weight hangs on it. A `lift` tack
    * holds only from sliding and from sinking under its offset.
    */
-  private solveTacks() {
+  /** Each tack drawn to its place (only those whose point is in `only`, if given). */
+  private solveTacks(only: Uint8Array | null = null) {
     const { x, w } = this, X = this.self.extra;
     for (let i = 0; i < this.tacks.length; i++) {
       const tk = this.tacks[i];
+      if (only && !only[tk.p]) continue;
       const ia = 3 * tk.a, ib = 3 * tk.b, ic = 3 * tk.c, ip = 3 * tk.p;
       const ux = x[ib] - x[ia], uy = x[ib + 1] - x[ia + 1], uz = x[ib + 2] - x[ia + 2];
       const vx = x[ic] - x[ia], vy = x[ic + 1] - x[ia + 1], vz = x[ic + 2] - x[ia + 2];
@@ -947,6 +1033,10 @@ export class ClothSim {
     // hood split open over the crown and a neckerchief tore off its band.
     if (s.stitchSew && s.stitchGap && s.stitchSew.length === this.stitchSew.length) { this.stitchSew.set(s.stitchSew); this.stitchGap.set(s.stitchGap); }
     this.clearBudget.fill(0);
+    // Carried as it was: what it carries crossed (none, once built so) left free to come apart.
+    const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches)), crossings = findCrossings(this.x, m);
+    this.ccdOf().setTangled(crossings);
+    this.ccdFrom = Float64Array.from(this.x); this.ccdSince = 0;
     return true;
   }
 }
