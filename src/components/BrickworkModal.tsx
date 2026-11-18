@@ -60,11 +60,6 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
     rememberedPlacement = placement;
   }, [placement]);
 
-  useEffect(() => {
-    const brickwork = { standardId, bond, jointMm, wastagePct, toyInventory, hollowStuds };
-    useStore.setState((s) => ({ sceneGraph: { ...s.sceneGraph, brickwork } }));
-  }, [standardId, bond, jointMm, wastagePct, toyInventory, hollowStuds]);
-
   const options = useMemo(
     () => ({ standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds }),
     [standardId, bond, jointMm, wastagePct, placement, toyInventory, hollowStuds],
@@ -104,7 +99,8 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
     const state = useStore.getState();
     // Laid from the scene as it was counted; if it has moved on, it is being counted again.
     if (state.sceneGraph.nodes !== scene.nodes) { setMessage('The scene changed: counting again.'); return; }
-    const next = { ...state.sceneGraph, nodes: outcome.nodes };
+    const brickwork = { standardId, bond, jointMm, wastagePct, toyInventory, hollowStuds };
+    const next = { ...state.sceneGraph, brickwork, nodes: outcome.nodes };
     laidOptionsRef.current = options;
     state.updateScene(next);
     laidNodesRef.current = useStore.getState().sceneGraph.nodes;
@@ -204,7 +200,7 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
                   ['Courses', String(r.courses), `${Math.round(r.builtHeightMm)} mm built, model ${Math.round(r.modelHeightMm)} mm`],
                   ['Holds together', r.bond.pieces === 1 ? 'One piece' : `${r.bond.pieces} pieces`, `${r.bond.straightJoints} seam${r.bond.straightJoints === 1 ? '' : 's'} on a seam below`],
                 ] : [
-                  ['Bricks to buy', r.toBuy.toLocaleString(), `${r.whole.toLocaleString()} whole, ${r.cutPieces} cut, ${wastagePct}% spare`],
+                  ['Bricks to buy', r.toBuy.toLocaleString(), `${r.whole.toLocaleString()} whole, ${r.cutPieces} cut, ${r.closers} closer${r.closers === 1 ? '' : 's'}, ${wastagePct}% spare`],
                   ['Courses', String(r.courses), `${Math.round(r.builtHeightMm)} mm built, model ${Math.round(r.modelHeightMm)} mm`],
                   ['Mortar', `${Math.round(r.mortarLitres)} L`, `${r.mortarBags} × 25 kg bags of premix`],
                   ['Lintels', String(r.lintels.reduce((n, l) => n + l.count, 0)), r.lintels.length ? r.lintels.map((l) => `${l.count}× ${l.lengthMm} mm`).join(', ') : 'No openings to span'],

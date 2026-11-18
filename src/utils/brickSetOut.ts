@@ -149,10 +149,11 @@ export function findWalls(loops: V2[][], outerFlags: boolean[], inside: (p: V2) 
       const past = (s: number) => inside(add(add(w.o, mul(w.u, s)), mul(w.n, w.thickness / 2)));
       if (!past(-dims.j) && !past(w.length + dims.j)) continue;
     }
+    const clashPad = -Math.min(1, dims.W * 0.05);
     const clash = walls.some((v) => {
       for (let a = 0.1; a < 1; a += 0.2) {
         for (const b of [0.1, 0.3, 0.5, 0.7, 0.9]) {
-          if (inWall(v, add(add(w.o, mul(w.u, w.length * a)), mul(w.n, w.thickness * b)), -1)) return true;
+          if (inWall(v, add(add(w.o, mul(w.u, w.length * a)), mul(w.n, w.thickness * b)), clashPad)) return true;
         }
       }
       return false;
@@ -162,6 +163,7 @@ export function findWalls(loops: V2[][], outerFlags: boolean[], inside: (p: V2) 
   // A wall that carries straight on along the same outside face at much the
   // same thickness (a side wall reaching a pier) is one wall: laid as one,
   // at the thinner thickness, with no joint where the two readings met.
+  const leavesOf = (t: number) => Math.max(1, Math.round((t + dims.j) / (dims.W + dims.j)));
   for (let merged = true; merged;) {
     merged = false;
     for (let i = 0; i < walls.length && !merged; i++) {
@@ -170,7 +172,8 @@ export function findWalls(loops: V2[][], outerFlags: boolean[], inside: (p: V2) 
         if (i === k || dot(A.u, B.u) < 0.9999) continue;
         if (Math.abs(dot(sub(B.o, A.o), A.n)) > 1) continue;
         const gap = dot(sub(B.o, A.o), A.u) - A.length;
-        if (gap < -1 || gap > dims.j + 1 || Math.abs(A.thickness - B.thickness) > dims.W) continue;
+        if (gap < -1 || gap > dims.j + 1) continue;
+        if (leavesOf(A.thickness) !== leavesOf(B.thickness) || Math.abs(A.thickness - B.thickness) > dims.W * 0.4) continue;
         walls[i] = { o: A.o, u: A.u, n: A.n, length: A.length + gap + B.length, thickness: Math.min(A.thickness, B.thickness) };
         walls.splice(k, 1);
         merged = true;
@@ -200,15 +203,15 @@ function findNodes(walls: Wall[], inside: (p: V2) => boolean, step: number): Nod
       const from = add(atStart ? w.o : add(w.o, mul(w.u, w.length)), mul(w.n, w.thickness / 2));
       const open = (d: number) => {
         const p = add(from, mul(dir, d));
-        return !inside(p) || walls.some((v, vi) => vi !== wi && inWall(v, p, -1));
+        return !inside(p) || walls.some((v, vi) => vi !== wi && inWall(v, p, -1e-3));
       };
       let depth = 0;
       while (depth < 3 * w.thickness + 50 && !open(depth + step / 2)) depth += step;
-      // To a tenth of a millimetre: a corner 102.5 deep read as 100 put every
-      // wall 2.5 mm out at each end, and an 88 mm cut in every course.
+      // To a hundredth of a millimetre: a corner 102.5 deep read as 100 put every
+      // wall 2.5 mm out at each end, and small scale joints (0.5–0.8 mm) leave no slack.
       if (depth > 0) {
         let lo = depth, hi = depth + step;
-        while (hi - lo > 0.1) { const mid = (lo + hi) / 2; if (open(mid)) hi = mid; else lo = mid; }
+        while (hi - lo > 0.01) { const mid = (lo + hi) / 2; if (open(mid)) hi = mid; else lo = mid; }
         depth = lo;
       }
       if (depth >= step) ends.push({ wall: wi, atStart, depth, centre: add(from, mul(dir, depth / 2)) });
@@ -255,7 +258,7 @@ function setOutStrip(
     // could not get back into step after one. A stretcher cut shorter than a
     // header (2 * lap - j) puts two perpends closer than 2 * lap, which the
     // next course cannot lap without a straight joint, so it costs more.
-    const every = Math.max(1, Math.round(dims.j / (4 * step)));
+    const every = Math.max(1, Math.round(Math.max(dims.j / 4, (opts.anyCut.max - opts.anyCut.min) / 64) / step));
     for (let c = Math.ceil(opts.anyCut.min / step); c <= Math.floor(opts.anyCut.max / step); c += every) {
       if (!all.some((p) => p.kind === opts.anyCut!.kind && p.len === c)) {
         const short = (opts.anyCut.kind === 'S' || opts.anyCut.kind === 'P') && c * step < dims.W - dims.j / 2 ? 1.5 : 0;
@@ -295,11 +298,12 @@ function setOutStrip(
       if (here === Infinity) continue;
       all.forEach((pc, i) => {
         const end = p + pc.len;
-        if (end > q + 1) return;
+        if (end > (p === 0 ? q : q + 1)) return;
         const lastKind = last ? kinds[last - 1] : null;
         if (pc.kind === 'Q' && lastKind === 'Q') return;
-        // A queen closer goes beside the corner, first in the strip, and nowhere else.
-        let c = here + pc.cost + (pc.kind === 'Q' && p !== 0 ? (opts.closerMidCost ?? 5) : 0);
+        // A queen closer goes beside a corner (first, or last when ending at a quoin).
+        const nearQuoin = p === 0 || (opts.endWith === 'Q' && Math.abs(q - end) <= slack);
+        let c = here + pc.cost + (pc.kind === 'Q' && !nearQuoin ? (opts.closerMidCost ?? 5) : 0);
         // A cut (not a standard bat or closer) at either end of the strip,
         // beside a corner or an opening, costs more: on site the quoin is a
         // whole brick and the cut goes in the middle, where the bond breaks.
@@ -353,8 +357,10 @@ function fillJoints<T extends { len: number }>(out: T[], length: number, j: numb
     gaps[i] += take;
     spare -= take;
   }
-  // More than they can take: the rest evenly, as before.
-  if (gaps.length && Math.abs(spare) > 1e-6) for (let i = 0; i < gaps.length; i++) gaps[i] += spare / gaps.length;
+  // More than they can take: the rest evenly, never closing a joint past 40% of j.
+  if (gaps.length && Math.abs(spare) > 1e-6) {
+    for (let i = 0; i < gaps.length; i++) gaps[i] = Math.max(-j * 0.6, gaps[i] + spare / gaps.length);
+  }
   return out.map((p, i) => ({ ...p, gapAfter: i < gaps.length ? gaps[i] : 0 }));
 }
 
@@ -390,16 +396,29 @@ export function layWalls(args: {
   const { L, W, j } = dims;
   const walls = findWalls(args.loops, args.outerFlags, args.inside, dims);
   const nodes = findNodes(walls, args.inside, args.step);
+  const leavesOf = (t: number) => Math.max(1, Math.round((t + j) / (W + j)));
   // English bond: a course is headers on one face and stretchers on the
   // return, so which it is goes by the wall's direction, and the wall in its
   // stretcher course is the one that runs through the corner.
   const parity = (w: Wall) => (Math.abs(w.u.x) >= Math.abs(w.u.y) ? 0 : 1);
   const headerCourseOf = (w: Wall) => bond === 'english' && (c + parity(w)) % 2 === 1;
+  const keyScale = Math.max(1, W / 8);
   const nodeKey = (node: NodeEnd[]) => {
     const c0 = (node[0] as NodeEnd & { centre?: V2 }).centre ?? { x: 0, y: 0 };
-    return `${Math.round(c0.x / 10)},${Math.round(c0.y / 10)}`;
+    return `${Math.round(c0.x / keyScale)},${Math.round(c0.y / keyScale)}`;
   };
-  const wallSig = (w: Wall) => `${Math.round(w.u.x)},${Math.round(w.u.y)}`;
+  const wallSig = (w: Wall) => {
+    const flip = w.u.x < -0.01 || (Math.abs(w.u.x) <= 0.01 && w.u.y < 0);
+    const ux = flip ? -w.u.x : w.u.x, uy = flip ? -w.u.y : w.u.y;
+    return `${Math.round(ux * 10)},${Math.round(uy * 10)}`;
+  };
+  const orientWall = (w: Wall, uRef: V2): { w: Wall; flipped: boolean } =>
+    dot(w.u, uRef) >= 0
+      ? { w, flipped: false }
+      : {
+        w: { o: add(add(w.o, mul(w.u, w.length)), mul(w.n, w.thickness)), u: mul(w.u, -1), n: mul(w.n, -1), length: w.length, thickness: w.thickness },
+        flipped: true,
+      };
   const attempt = (strategy: 'pinwheel' | 'pairs') => {
   const actions: (() => void)[] = [];
   const owned = new Map<string, string>();
@@ -411,8 +430,46 @@ export function layWalls(args: {
   // far short of a corner a running wall's inner leaves stop.
   const cornered = walls.map(() => ({ start: false, end: false }));
   const innerStop = walls.map(() => ({ start: 0, end: 0 }));
+  const splices: [NodeEnd, NodeEnd][] = [];
+  const brickThick = (e: NodeEnd) => leavesOf(walls[e.wall].thickness) === 2;
   for (const node of nodes) {
     const ordered = [...node].sort((a, b) => a.wall - b.wall || Number(a.atStart) - Number(b.atStart));
+    if (ordered.length >= 3) {
+      // A T-junction or cross-junction: two axes meet. One axis runs straight
+      // through (splicing collinear arms across the junction) and the other
+      // stops a joint short, alternating every course.
+      const ax0 = ordered.filter((e) => Math.abs(dot(walls[e.wall].u, walls[ordered[0].wall].u)) > 0.7);
+      const ax1 = ordered.filter((e) => !ax0.includes(e));
+      const axes = ax1.length ? [ax0, ax1].sort((a, b) => parity(walls[a[0].wall]) - parity(walls[b[0].wall])) : [ax0];
+      let winAxis = axes[0];
+      if (bond !== 'stack' && axes.length > 1) {
+        const stretchAxis = bond === 'english' && ordered.every(brickThick)
+          ? axes.find((ax) => !headerCourseOf(walls[ax[0].wall]))
+          : undefined;
+        winAxis = stretchAxis ?? axes[(c + (strategy === 'pinwheel' ? 1 : 0)) % axes.length];
+      }
+      const key = nodeKey(node), sig = wallSig(walls[winAxis[0].wall]);
+      owned.set(key, sig);
+      if (args.owners?.get(key) === sig) cost += 50;
+      const canSplice = winAxis.length === 2 &&
+        leavesOf(walls[winAxis[0].wall].thickness) === leavesOf(walls[winAxis[1].wall].thickness) &&
+        Math.abs(walls[winAxis[0].wall].thickness - walls[winAxis[1].wall].thickness) <= W * 0.4;
+      if (canSplice) {
+        splices.push([winAxis[0], winAxis[1]]);
+      } else {
+        winAxis.forEach((e, idx) => {
+          const amount = idx === 0 ? e.depth : -j;
+          if (e.atStart) { ext[e.wall].start = amount; cornered[e.wall].start = idx > 0; }
+          else { ext[e.wall].end = amount; cornered[e.wall].end = idx > 0; }
+        });
+      }
+      for (const e of ordered) {
+        if (winAxis.includes(e)) continue;
+        if (e.atStart) { ext[e.wall].start = -j; cornered[e.wall].start = false; }
+        else { ext[e.wall].end = -j; cornered[e.wall].end = false; }
+      }
+      continue;
+    }
     let owner = ordered.length > 1 ? ordered[(bond === 'stack' ? 0 : c) % ordered.length] : ordered[0];
     // A plain corner, one wall ending and the next starting: alternate courses
     // give it to the wall starting there and the one ending there, so round a
@@ -431,7 +488,6 @@ export function layWalls(args: {
     }
     // English, where the walls are a brick thick (headers need it): the wall
     // in its stretcher course runs through.
-    const brickThick = (e: NodeEnd) => Math.round((walls[e.wall].thickness + j) / (W + j)) === 2;
     if (bond === 'english' && ordered.every(brickThick)) {
       const stretching = ordered.filter((e) => !headerCourseOf(walls[e.wall]));
       if (stretching.length === 1) owner = stretching[0];
@@ -439,7 +495,7 @@ export function layWalls(args: {
     if (ordered.length > 1) {
       const key = nodeKey(node), sig = wallSig(walls[owner.wall]);
       owned.set(key, sig);
-      if (args.owners?.get(key) === sig) cost += 10;
+      if (args.owners?.get(key) === sig) cost += 50;
     }
     for (const e of ordered) {
       let amount = e === owner ? e.depth : -j;
@@ -452,16 +508,144 @@ export function layWalls(args: {
       if (e === owner && bond === 'english' && ordered.every(brickThick)) innerStop[e.wall][e.atStart ? 'start' : 'end'] = e.depth + j;
     }
   }
+
+  // Stepped collinear reveals: a short 1-leaf corner pier continuing the outer
+  // face of a 2-leaf wall shares its outer leaf on stretcher courses and stops
+  // a joint short on header/Flemish courses.
+  const skipWall = new Uint8Array(walls.length);
+  const revealStub = new Uint8Array(walls.length);
+  walls.forEach((stub, si) => {
+    if (leavesOf(stub.thickness) !== 1 || stub.length > L + W) return;
+    if (splices.some(([a, b]) => a.wall === si || b.wall === si)) return;
+    walls.forEach((main, mi) => {
+      if (mi === si || skipWall[si] || leavesOf(main.thickness) !== 2) return;
+      if (dot(stub.u, main.u) < 0.9999 || Math.abs(dot(sub(stub.o, main.o), main.n)) > 2) return;
+      const gapAfterMain = dot(sub(stub.o, main.o), main.u) - main.length;
+      const gapBeforeMain = dot(sub(main.o, stub.o), stub.u) - stub.length;
+      const mainStretching = !(bond === 'english' && headerCourseOf(main)) && bond !== 'flemish';
+      if (gapAfterMain >= -1 && gapAfterMain <= j + 1) {
+        revealStub[si] = 1;
+        if (mainStretching) {
+          const extra = gapAfterMain + stub.length + ext[si].end;
+          ext[mi].end = extra;
+          innerStop[mi].end += extra;
+          skipWall[si] = 1;
+        } else {
+          ext[si].start = -j - gapAfterMain;
+        }
+      } else if (gapBeforeMain >= -1 && gapBeforeMain <= j + 1) {
+        revealStub[si] = 1;
+        if (mainStretching) {
+          const extra = gapBeforeMain + stub.length + ext[si].start;
+          ext[mi].start = extra;
+          innerStop[mi].start += extra;
+          skipWall[si] = 1;
+        } else {
+          ext[si].end = -j - gapBeforeMain;
+        }
+      }
+    });
+  });
+
+  // Build effective strips, chaining collinear walls spliced across T/cross junctions.
+  interface StripSpec {
+    w: Wall;
+    extStart: number;
+    extEnd: number;
+    cornerStart: boolean;
+    cornerEnd: boolean;
+    innerStart: number;
+    innerEnd: number;
+    junctions: [number, number][];
+    reveal: boolean;
+  }
+  const strips: StripSpec[] = [];
+  const visited = new Uint8Array(walls.length);
+  const adj = walls.map(() => [] as number[]);
+  for (const [a, b] of splices) {
+    adj[a.wall].push(b.wall);
+    adj[b.wall].push(a.wall);
+  }
+  for (let wi = 0; wi < walls.length; wi++) {
+    if (visited[wi] || skipWall[wi]) continue;
+    if (!adj[wi].length) {
+      visited[wi] = 1;
+      strips.push({
+        w: walls[wi],
+        extStart: ext[wi].start, extEnd: ext[wi].end,
+        cornerStart: cornered[wi].start, cornerEnd: cornered[wi].end,
+        innerStart: innerStop[wi].start, innerEnd: innerStop[wi].end,
+        junctions: [],
+        reveal: revealStub[wi] === 1,
+      });
+      continue;
+    }
+    const comp: number[] = [];
+    const q = [wi];
+    visited[wi] = 1;
+    while (q.length) {
+      const cur = q.shift()!;
+      comp.push(cur);
+      for (const nx of adj[cur]) if (!visited[nx] && !skipWall[nx]) { visited[nx] = 1; q.push(nx); }
+    }
+    const uRef = walls[comp[0]].u;
+    const segs = comp.map((idx) => {
+      const { w: ow, flipped } = orientWall(walls[idx], uRef);
+      return {
+        idx, w: ow, flipped,
+        pos: dot(ow.o, uRef),
+        extStart: flipped ? ext[idx].end : ext[idx].start,
+        extEnd: flipped ? ext[idx].start : ext[idx].end,
+        cornerStart: flipped ? cornered[idx].end : cornered[idx].start,
+        cornerEnd: flipped ? cornered[idx].start : cornered[idx].end,
+        innerStart: flipped ? innerStop[idx].end : innerStop[idx].start,
+        innerEnd: flipped ? innerStop[idx].start : innerStop[idx].end,
+      };
+    }).sort((a, b) => a.pos - b.pos);
+    const first = segs[0], last = segs[segs.length - 1];
+    const aligned = segs.every((sg) => Math.abs(dot(sub(sg.w.o, first.w.o), first.w.n)) <= 2);
+    if (!aligned) {
+      for (const sg of segs) {
+        strips.push({
+          w: walls[sg.idx],
+          extStart: ext[sg.idx].start, extEnd: ext[sg.idx].end,
+          cornerStart: cornered[sg.idx].start, cornerEnd: cornered[sg.idx].end,
+          innerStart: innerStop[sg.idx].start, innerEnd: innerStop[sg.idx].end,
+          junctions: [],
+          reveal: revealStub[sg.idx] === 1,
+        });
+      }
+      continue;
+    }
+    const totalLen = dot(sub(last.w.o, first.w.o), uRef) + last.w.length;
+    const minThick = Math.min(...segs.map((sg) => sg.w.thickness));
+    const junctions: [number, number][] = [];
+    for (let m = 1; m < segs.length; m++) {
+      const s0 = dot(sub(segs[m - 1].w.o, first.w.o), uRef) + segs[m - 1].w.length;
+      const s1 = dot(sub(segs[m].w.o, first.w.o), uRef);
+      if (s1 > s0) junctions.push([s0, s1]);
+    }
+    strips.push({
+      w: { o: first.w.o, u: first.w.u, n: first.w.n, length: totalLen, thickness: minThick },
+      extStart: first.extStart, extEnd: last.extEnd,
+      cornerStart: first.cornerStart, cornerEnd: last.cornerEnd,
+      innerStart: first.innerStart, innerEnd: last.innerEnd,
+      junctions,
+      reveal: false,
+    });
+  }
+
+  // Set out on an eighth-joint grid (1.25 mm for a 10 mm joint), bounded so a
+  // tiny mortar joint (0.5 mm) on a multi-metre wall never blows up the DP.
+  const maxWallLen = Math.max(L, ...strips.map((st) => st.w.length + Math.max(0, st.extStart) + Math.max(0, st.extEnd)));
+  const setOutStep = Math.max(0.1, j / 8, L / 250, maxWallLen / 4000);
   const lap = L / 4;
-  // Set out on an eighth-joint grid (1.25 mm for a 10 mm joint): a UK header
-  // (102.5), three-quarter bat (158.75), closer (46.25) and joint (10) all
-  // fall on it exactly, so a course of headers does not drift off its lap.
-  const setOutStep = Math.max(0.1, j / 8);
   let headerless = 0;
-  walls.forEach((w, wi) => {
-    const leaves = Math.max(1, Math.round((w.thickness + j) / (W + j)));
-    const o = add(w.o, mul(w.u, -ext[wi].start));
-    const length = w.length + ext[wi].start + ext[wi].end;
+  strips.forEach((st) => {
+    const { w } = st;
+    const leaves = leavesOf(w.thickness);
+    const o = add(w.o, mul(w.u, -st.extStart));
+    const length = w.length + st.extStart + st.extEnd;
     if (length < L / 4) return;
     // Joints of the course below along this wall, per leaf (a header's on every leaf).
     const belowSeams: number[][] = Array.from({ length: leaves }, () => []);
@@ -470,19 +654,25 @@ export function layWalls(args: {
       // wall runs through now will be owned by the return wall on the next
       // course, putting a corner joint at ext + j / 2 (and, if two leaves
       // deep, a collar joint between the return's leaves at W + j / 2).
-      if (ext[wi].start > 0) {
-        if (innerStop[wi].start > 0) belowSeams[0].push(W + j / 2);
+      if (st.extStart > 0) {
+        if (st.innerStart > 0) belowSeams[0].push(W + j / 2);
         else {
-          belowSeams.forEach((list) => list.push(ext[wi].start + j / 2));
-          if (ext[wi].start > W + j) belowSeams.forEach((list) => list.push(W + j / 2));
+          belowSeams.forEach((list) => list.push(st.extStart + j / 2));
+          if (st.extStart > W + j) belowSeams.forEach((list) => list.push(W + j / 2));
         }
       }
-      if (ext[wi].end > 0) {
-        if (innerStop[wi].end > 0) belowSeams[0].push(length - W - j / 2);
+      if (st.extEnd > 0) {
+        if (st.innerEnd > 0) belowSeams[0].push(length - W - j / 2);
         else {
-          belowSeams.forEach((list) => list.push(length - ext[wi].end - j / 2));
-          if (ext[wi].end > W + j) belowSeams.forEach((list) => list.push(length - W - j / 2));
+          belowSeams.forEach((list) => list.push(length - st.extEnd - j / 2));
+          if (st.extEnd > W + j) belowSeams.forEach((list) => list.push(length - W - j / 2));
         }
+      }
+      for (const [j0, j1] of st.junctions) {
+        belowSeams.forEach((list) => {
+          list.push(st.extStart + j0 - j / 2, st.extStart + j1 + j / 2);
+          if (j1 - j0 > W + j) list.push(st.extStart + j0 + W + j / 2);
+        });
       }
     }
     for (const b of args.below) {
@@ -509,28 +699,32 @@ export function layWalls(args: {
         else belowSeams[Math.min(leaves - 1, Math.max(0, Math.floor(qn / (W + j))))].push(s);
       }
     }
+    const hDepth = Math.min(w.thickness, L);
+    const hPad = (w.thickness - hDepth) / 2;
     const lay = (kind: Kind, s: number, along: number, leaf: number) => {
       const at = add(add(o, mul(w.u, s)), mul(w.n, leaf * (W + j)));
       // Never over a brick already laid: what is left is the fallback's.
-      const depth = kind === 'S' ? W : kind === 'P' ? w.thickness : w.thickness;
+      const depth = kind === 'S' ? W : kind === 'P' ? w.thickness : hDepth;
+      const origin = kind === 'H' || kind === 'Q' ? add(at, mul(w.n, hPad)) : at;
       actions.push(() => {
-      if (!args.layer.free(at, w.u, w.n, along, depth)) return;
-      if (kind === 'S') args.layer.lay(at, w.u, w.n, along, W, { header: false, closer: false, cut: along < L - j / 2 });
-      else if (kind === 'H') args.layer.lay(at, w.u, w.n, along, w.thickness, { header: true, closer: false, cut: along < W - j / 2 });
-      else if (kind === 'Q') args.layer.lay(at, w.u, w.n, along, w.thickness, { header: true, closer: true, cut: false });
+      if (!args.layer.free(origin, w.u, w.n, along, depth)) return;
+      if (kind === 'S') args.layer.lay(origin, w.u, w.n, along, W, { header: false, closer: false, cut: along < L - j / 2 });
+      else if (kind === 'H') args.layer.lay(origin, w.u, w.n, along, hDepth, { header: true, closer: false, cut: along < W - j / 2 });
+      else if (kind === 'Q') args.layer.lay(origin, w.u, w.n, along, hDepth, { header: true, closer: true, cut: false });
       else { // a stretcher on each leaf
         for (let k = 0; k < leaves; k++) {
-          const p = add(add(o, mul(w.u, s)), mul(w.n, k * (W + j)));
+          const off = k === leaves - 1 && leaves > 1 ? Math.max(k * (W + j), w.thickness - W) : k * (W + j);
+          const p = add(add(o, mul(w.u, s)), mul(w.n, off));
           args.layer.lay(p, w.u, w.n, along, W, { header: false, closer: false, cut: along < L - j / 2 });
         }
       }
       });
     };
-    const placeAll = (plan: ({ kind: Kind; len: number; gapAfter?: number }[] & { cost?: number }) | null, leaf: number) => {
+    const placeAll = (plan: ({ kind: Kind; len: number; gapAfter?: number }[] & { cost?: number }) | null, leaf: number, joint = j) => {
       if (!plan) return;
       cost += plan.cost ?? 0;
       let s = 0;
-      for (const p of plan) { lay(p.kind, s, p.len, leaf); s += p.len + j + (p.gapAfter ?? 0); }
+      for (const p of plan) { lay(p.kind, s, p.len, leaf); s += p.len + joint + (p.gapAfter ?? 0); }
     };
     const stretchers: Piece[] = [
       { kind: 'S', len: L, cost: 0 },
@@ -541,18 +735,20 @@ export function layWalls(args: {
     const twoLeaves = leaves === 2;
     if ((bond === 'english' && headerCourse) || bond === 'flemish') {
       if (!twoLeaves) {
-        headerless++;
+        if (!st.reveal) headerless++;
       } else if (bond === 'english') {
         // A header course, set out like the rest: whole headers, a cut one,
-        // and a closer beside each corner the return runs through, or
-        // anywhere a broken bond needs one to get back into step.
+        // and a closer beside each corner the return runs through. Where a
+        // scale brick's 2W + j differs slightly from L (mini_6, mini_12),
+        // butter header perpends to keep gauge with the stretchers below.
+        const jH = Math.abs(L - 2 * W - j) <= 0.6 * j && L - 2 * W + j > 0 ? (L - 2 * W + j) / 2 : j;
         placeAll(setOutStrip(length, [
           { kind: 'H', len: W, cost: 0 },
-          { kind: 'Q', len: (W - j) / 2, cost: 0.6 },
-        ], belowSeams.flat(), dims, setOutStep, lap, {
-          anyCut: { kind: 'H', min: W / 2, max: W - j }, closerMidCost: 0.9,
-          ...(cornered[wi].start ? { startWith: 'Q' as Kind } : {}), ...(cornered[wi].end ? { endWith: 'Q' as Kind } : {}),
-        }), 0);
+          { kind: 'Q', len: (W - jH) / 2, cost: 0.6 },
+        ], belowSeams.flat(), { ...dims, j: jH }, setOutStep, lap, {
+          anyCut: { kind: 'H', min: W / 2, max: W - jH }, closerMidCost: 0.9,
+          ...(st.cornerStart ? { startWith: 'Q' as Kind } : {}), ...(st.cornerEnd ? { endWith: 'Q' as Kind } : {}),
+        }), 0, jH);
         return;
       } else {
         const merged = belowSeams.flat();
@@ -571,7 +767,7 @@ export function layWalls(args: {
     // inner leaf of a wall running through an English or stretcher corner
     // stops a joint short of it.
     for (let k = 0; k < leaves; k++) {
-      const s0 = k > 0 ? innerStop[wi].start : 0, s1 = k > 0 ? innerStop[wi].end : 0;
+      const s0 = k > 0 ? st.innerStart : 0, s1 = k > 0 ? st.innerEnd : 0;
       const leafLength = length - s0 - s1;
       if (leafLength < L / 4) continue;
       const plan = setOutStrip(leafLength, stretchers, bond === 'stack' ? [] : belowSeams[k].map((x) => x - s0), dims, setOutStep, lap,

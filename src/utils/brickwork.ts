@@ -285,8 +285,34 @@ const isLaidCourse = (n: SceneNode) =>
  */
 const laidWithScene = (n: SceneNode) => !n.simulation && !(n.joints?.length) && !isLaidCourse(n);
 
+function pruneFixed(nodes: SceneNode[]): SceneNode[] {
+  return nodes.filter(laidWithScene).map((n) => (n.children?.length ? { ...n, children: pruneFixed(n.children) } : n));
+}
+
+/** Whether two bricks in the same course intersect (or touch within `pad` mm). */
+function bricksOverlap2D(a: Pick<PlacedBrick, 'x' | 'y' | 'angle' | 'lengthMm' | 'depthMm'>, b: Pick<PlacedBrick, 'x' | 'y' | 'angle' | 'lengthMm' | 'depthMm'>, pad = 0.02): boolean {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const maxR = (Math.hypot(a.lengthMm, a.depthMm) + Math.hypot(b.lengthMm, b.depthMm)) / 2 + pad;
+  if (dx * dx + dy * dy >= maxR * maxR) return false;
+  const quad = (p: typeof a) => {
+    const u = { x: Math.cos(p.angle), y: Math.sin(p.angle) }, n = { x: -u.y, y: u.x };
+    const l = p.lengthMm / 2 + pad / 2, d = p.depthMm / 2 + pad / 2;
+    return [[-l, -d], [l, -d], [l, d], [-l, d]].map(([s, q]) => ({ x: p.x + u.x * s + n.x * q, y: p.y + u.y * s + n.y * q }));
+  };
+  const A = quad(a), B = quad(b);
+  for (const P of [A, B]) {
+    for (let i = 0; i < 2; i++) {
+      const ex = P[i + 1].x - P[i].x, ey = P[i + 1].y - P[i].y;
+      const ax = -ey, ay = ex;
+      const pa = A.map((p) => p.x * ax + p.y * ay), pb = B.map((p) => p.x * ax + p.y * ay);
+      if (Math.min(...pa) >= Math.max(...pb) || Math.min(...pb) >= Math.max(...pa)) return false;
+    }
+  }
+  return true;
+}
+
 export function subjectScene(scene: SceneGraph, bodyId: string | null): SceneGraph {
-  if (!bodyId) return { ...scene, nodes: scene.nodes.filter(laidWithScene) };
+  if (!bodyId) return { ...scene, nodes: pruneFixed(scene.nodes) };
   const path = (nodes: SceneNode[]): SceneNode[] | null => {
     for (const n of nodes) {
       if (n.id === bodyId) return [n];
@@ -297,7 +323,11 @@ export function subjectScene(scene: SceneGraph, bodyId: string | null): SceneGra
   };
   const chain = path(scene.nodes);
   if (!chain) throw new Error(`No body '${bodyId}'.`);
-  let wrapped = chain[chain.length - 1];
+  const target = chain[chain.length - 1];
+  if (chain.some((n) => (n.joints?.length ?? 0) > 0)) {
+    throw new Error(`'${target.name || target.id}' has a joint (a moving part) and cannot be laid in brick.`);
+  }
+  let wrapped: SceneNode = target.children?.length ? { ...target, children: pruneFixed(target.children) } : target;
   for (let i = chain.length - 2; i >= 0; i--) wrapped = { ...chain[i], geoms: [], children: [wrapped] };
   return { ...scene, nodes: [wrapped] };
 }
@@ -397,9 +427,10 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
 
   // A grid fine enough to keep a joint between bricks, coarse enough to fit.
   const pad = L * 2;
-  let cell = Math.max(j / 2, 0.25);
+  let cell = Math.max(j / 2, W / 50, 0.25);
   const w = hi[0] - lo[0] + 2 * pad, d = hi[1] - lo[1] + 2 * pad;
-  while ((w / cell) * (d / cell) > 16e6) cell *= 1.5;
+  while ((w / cell) * (d / cell) > 1e6) cell *= 1.4;
+  const markGrow = Math.max(0.05, j - cell / 2);
   const grid = () => new Occupancy(lo[0] - pad, lo[1] - pad, Math.ceil(w / cell), Math.ceil(d / cell), cell);
 
   const bricks: PlacedBrick[] = [];
@@ -426,6 +457,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     const z = lo[2] + c * gauge;
     const units = unitsFor(o.bond, c);
     const prevCourse = bricks.filter((b) => b.course === c - 1);
+    const courseBricks: PlacedBrick[] = [];
     let unitIx = 0;
     let thin = false;
 
@@ -443,20 +475,22 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
         step: cell,
         owners: cornerOwners,
         layer: {
-          // A safety net against another wall's bricks, tested a joint in
-          // from each end: the set-out's own joints close by a few millimetres
-          // to take up slack, nearer than the grid's margin round a brick.
+          // A safety net against another wall's bricks, tested inside the
+          // set-out's perpend slack on the grid plus an exact footprint check.
           free: (at, u, n, along, depth) => {
-            const inset = Math.min(along / 2 - cell / 2, j);
+            const inset = Math.max(0, Math.min(along / 2 - cell / 2, j * 0.35));
             for (let t = inset + cell / 2; t < along - inset; t += cell) for (let q = cell / 2; q < depth; q += cell) if (here.at({ x: at.x + u.x * t + n.x * q, y: at.y + u.y * t + n.y * q })) return false;
-            return true;
+            const cand = { x: at.x + u.x * along / 2 + n.x * depth / 2, y: at.y + u.y * along / 2 + n.y * depth / 2, angle: Math.atan2(u.y, u.x), lengthMm: along, depthMm: depth };
+            return !courseBricks.some((b) => bricksOverlap2D(cand, b));
           },
           lay: (at, u, n, along, depth, flags) => {
-            here.mark(at, u, n, along, depth, j - cell / 2);
-            bricks.push({
+            here.mark(at, u, n, along, depth, markGrow);
+            const placed: PlacedBrick = {
               course: c, x: at.x + u.x * along / 2 + n.x * depth / 2, y: at.y + u.y * along / 2 + n.y * depth / 2, z,
               angle: Math.atan2(u.y, u.x), lengthMm: along, depthMm: depth, ...flags,
-            });
+            };
+            courseBricks.push(placed);
+            bricks.push(placed);
             if (bricks.length > MAX_BRICKS) {
               throw new Error(`That is more than ${MAX_BRICKS.toLocaleString()} bricks. Lay one wall at a time (select it first), or scale the shape down.`);
             }
@@ -537,7 +571,9 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
           let room = 0;
           while (room < along && s + room < endAt && free(s + room, backClear(depth), step)) room += step;
           room = Math.min(room, endAt - s);
-          if (kind === 'H') headersTried++;
+          let triedHeader = false;
+          let fellBackHeader = false;
+          if (kind === 'H') triedHeader = true;
           if (kind === 'H' || closer) {
             // A header needs the wall a brick thick behind it.
             const a = runAt(run, s), b = runAt(run, s + W);
@@ -545,7 +581,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
             const back = { x: (a.x + b.x) / 2 - (u0.y / ul) * (L - W / 2), y: (a.y + b.y) / 2 + (u0.x / ul) * (L - W / 2) };
             if (closer && (!region.inside(back) || room < along)) continue;
             if (!closer && (!region.inside(back) || room < W)) {
-              if (!region.inside(back)) headerFallbacks++;
+              if (!region.inside(back)) fellBackHeader = true;
               along = L; depth = W;
               room = 0;
               while (room < along && s + room < endAt && free(s + room, backClear(depth), step)) room += step;
@@ -560,16 +596,25 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
           const centre = { x: a.x + u.x * (ul / 2) + n.x * (depth / 2), y: a.y + u.y * (ul / 2) + n.y * (depth / 2) };
           // Past the first leaf, bricks stay inside the shape.
           if (ring > 0 && !region.inside(centre)) { s += step; continue; }
+          const candAngle = Math.atan2(u.y, u.x);
+          if (courseBricks.some((prev) => bricksOverlap2D({ x: centre.x, y: centre.y, angle: candAngle, lengthMm: ul, depthMm: depth }, prev))) {
+            s += step;
+            continue;
+          }
+          if (triedHeader) headersTried++;
+          if (fellBackHeader) headerFallbacks++;
           // Thinner than a brick: the shape ends well short of the brick's back
           // (not the few millimetres a chord on a curve sags past it).
           const back = Math.min(depth, W) * 0.8;
           if (ring === 0 && !region.inside({ x: a.x + u.x * (ul / 2) + n.x * back, y: a.y + u.y * (ul / 2) + n.y * back })) thin = true;
-          here.mark(a, u, n, ul, depth, j - cell / 2);
-          bricks.push({
-            course: c, x: centre.x, y: centre.y, z, angle: Math.atan2(u.y, u.x),
+          here.mark(a, u, n, ul, depth, markGrow);
+          const placed: PlacedBrick = {
+            course: c, x: centre.x, y: centre.y, z, angle: candAngle,
             lengthMm: ul, depthMm: depth, header: depth > W + 1e-6, closer,
             cut: !closer && piece < (depth > W + 1e-6 ? W : L) - j / 2,
-          });
+          };
+          courseBricks.push(placed);
+          bricks.push(placed);
           laidThisRing++;
           laidInRun++;
           if (bricks.length > MAX_BRICKS) {
@@ -742,13 +787,23 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
       const c0 = { x: group.reduce((t, x) => t + x.x, 0) / group.length, y: group.reduce((t, x) => t + x.y, 0) / group.length };
       const ext = group.map((x) => (x.x - c0.x) * u.x + (x.y - c0.y) * u.y);
       const reachMm = Math.max(...group.map((x) => Math.max(x.lengthMm, x.depthMm)));
-      const lo = Math.min(...ext) - reachMm, hi = Math.max(...ext) + reachMm;
+      let lo = Math.min(...ext) - reachMm, hi = Math.max(...ext) + reachMm;
       // The course below along the wall's middle (and either side of a collar joint).
       const across = ref.depthMm / 4;
       const supportedAt = (t: number) => [-across, 0, across].some((w) =>
         solidBelow({ x: c0.x + u.x * t + n.x * w, y: c0.y + u.y * t + n.y * w }));
+      const solidHere = solidAt.get(courses[k]);
+      const solidHereAt = (t: number) => !!solidHere && [-across, 0, across].some((w) =>
+        solidHere({ x: c0.x + u.x * t + n.x * w, y: c0.y + u.y * t + n.y * w }));
       // The unsupported stretch nearest the middle of the group is the opening.
+      // Walk outward while this course continues over the opening so jamb bricks
+      // with >=50% solid bearing never hide the jamb beyond `reachMm`.
       const step = Math.max(1, j / 4);
+      const maxWalk = 12 * reachMm;
+      while (lo > Math.min(...ext) - maxWalk && !supportedAt(lo) && solidHereAt(lo)) lo -= step;
+      if (supportedAt(lo)) lo -= step;
+      while (hi < Math.max(...ext) + maxWalk && !supportedAt(hi) && solidHereAt(hi)) hi += step;
+      if (supportedAt(hi)) hi += step;
       const gaps: [number, number][] = [];
       let from: number | null = null;
       for (let t = lo; t <= hi + step; t += step) {
@@ -929,9 +984,20 @@ export function brickworkInScene(
   // builds grey. Real bricks are the colour bricks are.
   const from = bodyId ?? '*';
   const laid = brickworkNodes(result, prefix, shift, result.standard.toy ? colourOf(subject) : undefined, opts.placement === 'beside' ? from : undefined);
-  const without = (list: SceneNode[]): SceneNode[] =>
-    list.filter((n) => (bodyId ? n.id !== bodyId : !laidWithScene(n))).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
+  // Keep anything not laid in brick, including hinged/jointed subtrees hung off a replaced parent body.
+  const withoutWholeScene = (list: SceneNode[]): SceneNode[] => list.flatMap((n) => {
+    if (!laidWithScene(n)) return [n];
+    const keptChildren = withoutWholeScene(n.children ?? []);
+    return keptChildren.length ? [{ ...n, geoms: [], children: keptChildren }] : [];
+  });
+  const withoutBody = (list: SceneNode[]): SceneNode[] => list.flatMap((n) => {
+    if (n.id === bodyId) {
+      const keptChildren = withoutWholeScene(n.children ?? []);
+      return keptChildren.length ? [{ ...n, geoms: [], children: keptChildren }] : [];
+    }
+    return [n.children?.length ? { ...n, children: withoutBody(n.children) } : n];
+  });
   // Laid beside again from the same model: the courses laid before go.
-  const kept = opts.placement === 'beside' ? scene.nodes.filter((n) => n.laidFrom !== from) : without(scene.nodes);
+  const kept = opts.placement === 'beside' ? scene.nodes.filter((n) => n.laidFrom !== from) : (bodyId ? withoutBody(scene.nodes) : withoutWholeScene(scene.nodes));
   return { nodes: [...kept, ...laid], result };
 }

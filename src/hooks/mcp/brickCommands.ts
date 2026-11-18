@@ -8,18 +8,38 @@ import { findNodeInScene } from './bridgeUtils';
 import { settleScene } from './settleScene';
 
 const BONDS: BrickBond[] = ['stretcher', 'english', 'flemish', 'stack'];
+const PLACEMENTS = ['beside', 'replace', 'none'] as const;
 
 export const brickCommands: McpCommands = {
   BUILD_BRICKWORK: async (msg, { store }) => {
-    const bodyId = typeof msg.bodyId === 'string' && msg.bodyId ? msg.bodyId : null;
-    if (bodyId && !findNodeInScene(store.sceneGraph.nodes, bodyId)) return { ok: false, error: `No body '${bodyId}'.` };
+    const rawBody = typeof msg.bodyId === 'string' && msg.bodyId ? msg.bodyId : null;
+    const found = rawBody ? findNodeInScene(store.sceneGraph.nodes, rawBody) : null;
+    if (rawBody && !found) return { ok: false, error: `No body '${rawBody}'.` };
+    const bodyId = found ? found.id : null;
     if (msg.standardId !== undefined && !(String(msg.standardId) in BRICK_STANDARDS)) {
       return { ok: false, error: `standardId is one of ${Object.keys(BRICK_STANDARDS).join(', ')}.` };
     }
     if (msg.bond !== undefined && !BONDS.includes(msg.bond as BrickBond)) return { ok: false, error: `bond is one of ${BONDS.join(', ')}.` };
-    const toySizes = msg.toySizes;
-    if (toySizes !== undefined && (!Array.isArray(toySizes) || toySizes.some((t) => !(TOY_SIZES as readonly string[]).includes(t as string)))) {
-      return { ok: false, error: `toySizes is a list of ${TOY_SIZES.join(', ')}.` };
+    if (msg.jointMm !== undefined && (typeof msg.jointMm !== 'number' || !Number.isFinite(msg.jointMm) || msg.jointMm <= 0)) {
+      return { ok: false, error: 'jointMm must be a positive number (mortar joint width in mm).' };
+    }
+    if (msg.wastagePct !== undefined && (typeof msg.wastagePct !== 'number' || !Number.isFinite(msg.wastagePct) || msg.wastagePct < 0)) {
+      return { ok: false, error: 'wastagePct must be a non-negative number (extra bricks percent, e.g. 5).' };
+    }
+    if (msg.placement !== undefined && !PLACEMENTS.includes(msg.placement as (typeof PLACEMENTS)[number])) {
+      return { ok: false, error: `placement is one of ${PLACEMENTS.join(', ')}.` };
+    }
+    let toySizes: ToySize[] | undefined;
+    if (msg.toySizes !== undefined) {
+      if (!Array.isArray(msg.toySizes) || msg.toySizes.length === 0) {
+        return { ok: false, error: `toySizes is a non-empty list of brick sizes (AxB, e.g. ${TOY_SIZES.join(', ')}).` };
+      }
+      toySizes = [];
+      for (const t of msg.toySizes) {
+        const size = typeof t === 'string' ? normalToySize(t) : null;
+        if (!size) return { ok: false, error: `toySizes: '${String(t)}' is not a brick size (AxB, 1–32 studs).` };
+        if (!toySizes.includes(size)) toySizes.push(size);
+      }
     }
     // How many of each toy brick the builder has: { '2x4': 40, '2x2': null }.
     let toyInventory: ToyInventory | undefined;
@@ -30,14 +50,14 @@ export const brickCommands: McpCommands = {
       toyInventory = {};
       for (const [k, v] of Object.entries(msg.toyInventory as Record<string, unknown>)) {
         const size = normalToySize(k);
-        if (!size || (v !== null && (typeof v !== 'number' || v < 0))) return { ok: false, error: `toyInventory: '${k}' is not a size (AxB) with a count or null.` };
+        if (!size || (v !== null && (typeof v !== 'number' || !Number.isFinite(v) || v < 0))) return { ok: false, error: `toyInventory: '${k}' is not a size (AxB) with a count or null.` };
         toyInventory[size] = v as number | null;
       }
     }
-    if (msg.hollowStuds !== undefined && (typeof msg.hollowStuds !== 'number' || msg.hollowStuds < 0)) {
+    if (msg.hollowStuds !== undefined && (typeof msg.hollowStuds !== 'number' || !Number.isFinite(msg.hollowStuds) || msg.hollowStuds < 0)) {
       return { ok: false, error: 'hollowStuds is the wall thickness in studs for a hollow toy-brick build; 0 for solid.' };
     }
-    const placement = msg.placement === 'replace' ? 'replace' : msg.placement === 'none' ? 'none' : 'beside';
+    const placement = (msg.placement as (typeof PLACEMENTS)[number] | undefined) ?? 'beside';
     const saved = store.sceneGraph.brickwork;
     const standardId = (msg.standardId as BrickStandardId | undefined) ?? saved?.standardId ?? DEFAULT_BRICKWORK_OPTIONS.standardId;
     const sameStd = !saved?.standardId || standardId === saved.standardId;
@@ -46,7 +66,7 @@ export const brickCommands: McpCommands = {
       bond: (msg.bond as BrickBond | undefined) ?? saved?.bond ?? DEFAULT_BRICKWORK_OPTIONS.bond,
       ...(typeof msg.jointMm === 'number' ? { jointMm: msg.jointMm } : sameStd && saved?.jointMm !== undefined ? { jointMm: saved.jointMm } : {}),
       wastagePct: typeof msg.wastagePct === 'number' ? msg.wastagePct : (saved?.wastagePct ?? DEFAULT_BRICKWORK_OPTIONS.wastagePct),
-      ...(toySizes ? { toySizes: toySizes as ToySize[] } : !toyInventory && saved?.toySizes ? { toySizes: saved.toySizes } : {}),
+      ...(toySizes ? { toySizes } : !toyInventory && saved?.toySizes ? { toySizes: saved.toySizes } : {}),
       ...(toyInventory ? { toyInventory } : !toySizes && saved?.toyInventory ? { toyInventory: saved.toyInventory } : {}),
       ...(typeof msg.hollowStuds === 'number' ? { hollowStuds: Math.round(msg.hollowStuds) } : saved?.hollowStuds !== undefined ? { hollowStuds: saved.hollowStuds } : {}),
     };
@@ -78,6 +98,7 @@ export const brickCommands: McpCommands = {
       bricksLaid: r.bricks.length,
       whole: r.whole,
       cutPieces: r.cutPieces,
+      closers: r.closers,
       toBuy: r.toBuy,
       cuts: r.cuts,
       mortarLitres: Math.round(r.mortarLitres),

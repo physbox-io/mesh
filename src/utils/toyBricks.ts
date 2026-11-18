@@ -102,14 +102,20 @@ type ToyArgs = {
  * sizes back for where they bridge, and keeps the better.
  */
 export function layToyBricks(args: ToyArgs): ToyLayout {
-  const first = layToyBricksOnce(args, false);
+  const run = (hoard: boolean) => {
+    const res = layToyBricksOnce(args, hoard, false);
+    if (!res.sideBySide) return res;
+    const bridged = layToyBricksOnce(args, hoard, true);
+    return bridged.loose <= res.loose && !bridged.sideBySide ? bridged : res;
+  };
+  const first = run(false);
   const scarce = Object.values(args.inventory).some((n) => n !== null && n !== undefined);
   if (!scarce || first.loose === 0) return first;
-  const hoarded = layToyBricksOnce(args, true);
+  const hoarded = run(true);
   return hoarded.loose < first.loose || (hoarded.loose === first.loose && hoarded.bricks.length < first.bricks.length) ? hoarded : first;
 }
 
-function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: number } {
+function layToyBricksOnce(args: ToyArgs, hoard: boolean, bridgeComponents = false): ToyLayout & { loose: number; sideBySide: boolean } {
   const P = TOY_PITCH_MM;
   const nx = Math.max(1, Math.ceil((args.hi[0] - args.lo[0]) / P));
   const ny = Math.max(1, Math.ceil((args.hi[1] - args.lo[1]) / P));
@@ -209,13 +215,23 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
   const used = new Map<ToySize, number>();
   const short = new Map<ToySize, number>();
   let below: Int32Array | null = null;
+  const courseOwners: (Int32Array | null)[] = [];
+  const compParent: number[] = [0];
+  const compFind = (arr: number[], x: number): number => {
+    while (arr[x] !== x) { arr[x] = arr[arr[x]]; x = arr[x]; }
+    return x;
+  };
+  const compUnion = (arr: number[], a: number, b: number) => {
+    const ra = compFind(arr, a), rb = compFind(arr, b);
+    if (ra !== rb) arr[rb] = ra;
+  };
   let nextId = 1;
   let loose = 0;
   const random = rng(nx * 7919 + ny * 104729 + args.courses);
 
   for (let c = 0; c < args.courses; c++) {
     const want = masks[c];
-    if (!want) { below = null; continue; }
+    if (!want) { below = null; courseOwners.push(null); continue; }
     const original = solid[c] ?? want;
     const under = below;
     const anyBelow = !!under && under.some((v, k) => v > 0 && want[k] === 1);
@@ -257,46 +273,65 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
       return cost + (W_SEAM * seams) / 2;
     };
 
-    let best: { tiles: Brick[]; cost: number; missing: number } | null = null;
-    for (let attempt = 0; attempt < RESTARTS; attempt++) {
-      // Biggest brick first from each free cell in turn. Alternate courses
-      // scan the other way (rows, then columns), and each attempt from a
-      // different corner, so seams fall differently course to course.
-      const taken = new Uint8Array(N);
-      const inUse = new Map<ToySize, number>();
-      const room = (size: ToySize) => (left.get(size) ?? 0) - (inUse.get(size) ?? 0);
-      const flipI = (attempt & 1) === 1, flipJ = (attempt & 2) === 2;
-      const byColumns = (c + (attempt >> 2)) % 2 === 1;
-      const cells: number[] = [];
-      for (let a = 0; a < (byColumns ? nx : ny); a++) {
-        for (let b = 0; b < (byColumns ? ny : nx); b++) {
-          const i = byColumns ? (flipI ? nx - 1 - a : a) : (flipI ? nx - 1 - b : b);
-          const j = byColumns ? (flipJ ? ny - 1 - b : b) : (flipJ ? ny - 1 - a : a);
-          cells.push(j * nx + i);
+    const countTileLoose = (tiles: Brick[]) => {
+      if (!under || !anyBelow) return 0;
+      let n = 0;
+      for (const b of tiles) {
+        let grips = false;
+        for (let y = b.j; !grips && y < b.j + b.h; y++) for (let x = b.i; !grips && x < b.i + b.w; x++) if (under[y * nx + x] > 0) grips = true;
+        if (!grips) n++;
+      }
+      return n;
+    };
+
+    // Cells bordering a seam between two distinct components in `under`.
+    const compSeamSet = new Set<number>();
+    if (bridgeComponents && under && anyBelow) {
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          const k = j * nx + i;
+          if (!want[k] || !under[k]) continue;
+          const r0 = compFind(compParent, under[k]);
+          for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const ni = i + di, nj = j + dj;
+            if (ni < 0 || nj < 0 || ni >= nx || nj >= ny) continue;
+            const nk = nj * nx + ni;
+            if (want[nk] && under[nk] && compFind(compParent, under[nk]) !== r0) compSeamSet.add(k);
+          }
         }
       }
+    }
+
+    const runPass = (cells: number[], flipI: boolean, flipJ: boolean, shiftAt?: (k: number) => boolean, preferOverhang = false) => {
+      const taken = new Uint8Array(N);
+      const inUse = new Map<ToySize, number>();
+      const passComp = bridgeComponents && compSeamSet.size > 0 ? compParent.slice() : null;
+      const room = (size: ToySize) => (left.get(size) ?? 0) - (inUse.get(size) ?? 0);
       const tiles: Brick[] = [];
       let total = 0;
       const no1x1 = (left.get('1x1') ?? 0) - (inUse.get('1x1') ?? 0) < 1;
       for (const k of cells) {
         if (!want[k] || taken[k]) continue;
         const ai = k % nx, aj = (k - ai) / nx;
-        const evaluateCandidate = (size: ToySize, w: number, h: number): { b: Brick; size: ToySize; score: number } | null => {
-          // Grows away from where the scan came from.
-          const b: Brick = { i: flipI ? ai - w + 1 : ai, j: flipJ ? aj - h + 1 : aj, w, h };
-          if (b.i < 0 || b.j < 0 || b.i + w > nx || b.j + h > ny) return null;
-          let ok = true;
-          for (let j = b.j; ok && j < b.j + h; j++) for (let i = b.i; ok && i < b.i + w; i++) if (!want[j * nx + i] || taken[j * nx + i]) ok = false;
-          if (!ok) return null;
-          // Cells covered now are bricks not needed later: the count; less
-          // what it costs the bond, in cells at a 2×4's worth a brick, so that
-          // a bigger brick cannot simply buy its way onto a seam.
-          // With no 1×1s in hand, a brick that leaves a cell beside it no brick
-          // in hand can still cover (a one-stud strip, with only two-wide
-          // bricks) costs what a missing brick would.
+        const canShift = shiftAt ? shiftAt(k) : false;
+        const evaluatePlacement = (b: Brick, size: ToySize, requireGrip: boolean): { b: Brick; size: ToySize; score: number } | null => {
+          if (b.i < 0 || b.j < 0 || b.i + b.w > nx || b.j + b.h > ny) return null;
+          let gripped = 0, overhangCovered = 0;
+          const roots = passComp ? new Set<number>() : null;
+          for (let j = b.j; j < b.j + b.h; j++) {
+            for (let i = b.i; i < b.i + b.w; i++) {
+              const idx = j * nx + i;
+              if (!want[idx] || taken[idx]) return null;
+              if (under && anyBelow) {
+                if (under[idx] > 0) { gripped++; roots?.add(compFind(passComp!, under[idx])); }
+                else overhangCovered++;
+              }
+            }
+          }
+          if (requireGrip && under && anyBelow && gripped === 0) return null;
           let stranded = 0;
           if (no1x1) {
-            const covers = (x: number, y: number) => x >= b.i && x < b.i + w && y >= b.j && y < b.j + h;
+            const covers = (x: number, y: number) => x >= b.i && x < b.i + b.w && y >= b.j && y < b.j + b.h;
             const freeCell = (x: number, y: number) => x >= 0 && y >= 0 && x < nx && y < ny && want[y * nx + x] === 1 && !taken[y * nx + x] && !covers(x, y);
             const reachable = (x: number, y: number) => allowed.some((o) => {
               if (o.size === '1x1' || room(o.size) < 1) return false;
@@ -309,34 +344,55 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
               }
               return false;
             });
-            for (let x = b.i - 1; x <= b.i + w; x++) {
-              for (let y = b.j - 1; y <= b.j + h; y++) {
+            for (let x = b.i - 1; x <= b.i + b.w; x++) {
+              for (let y = b.j - 1; y <= b.j + b.h; y++) {
                 if (covers(x, y) || !freeCell(x, y)) continue;
                 if (!reachable(x, y)) stranded++;
               }
             }
           }
-          // Holding back sizes the builder has few of, for where only they will do.
           const hold = hoard && scarceSizes.has(size) ? 1 : 0;
-          const score = w * h - CELLS_PER_BRICK * (brickCost(b) - 1 + stranded + hold) + random() * 0.01;
+          const merged = roots && roots.size > 1 ? roots.size - 1 : 0;
+          const overhangBonus = preferOverhang ? overhangCovered * 0.25 : 0;
+          const score = b.w * b.h + overhangBonus - CELLS_PER_BRICK * (brickCost(b) - 1 + stranded + hold - merged * 4) + random() * 0.01;
           return { b, size, score };
         };
 
-        let pick: { b: Brick; size: ToySize; score: number } | null = null;
-        let anyInHandFit = false;
-        for (const { size, w, h } of [...allowed, { size: '1x1', w: 1, h: 1 }]) {
-          if (size !== '1x1' && room(size) < 1) continue;
-          const cand = evaluateCandidate(size, w, h);
-          if (cand && size !== '1x1') anyInHandFit = true;
-          if (cand && (!pick || cand.score > pick.score)) pick = cand;
-        }
-        if (!anyInHandFit) {
-          for (const { size, w, h } of allowed) {
-            if (room(size) >= 1) continue;
-            const cand = evaluateCandidate(size, w, h);
+        const evaluateCandidate = (size: ToySize, w: number, h: number, requireGrip = false): { b: Brick; size: ToySize; score: number } | null => {
+          if (!canShift) {
+            return evaluatePlacement({ i: flipI ? ai - w + 1 : ai, j: flipJ ? aj - h + 1 : aj, w, h }, size, requireGrip);
+          }
+          let bestCand: { b: Brick; size: ToySize; score: number } | null = null;
+          for (let ox = ai - w + 1; ox <= ai; ox++) {
+            for (let oy = aj - h + 1; oy <= aj; oy++) {
+              const cand = evaluatePlacement({ i: ox, j: oy, w, h }, size, requireGrip);
+              if (cand && (!bestCand || cand.score > bestCand.score)) bestCand = cand;
+            }
+          }
+          return bestCand;
+        };
+
+        const chooseFrom = (requireGrip: boolean) => {
+          let pick: { b: Brick; size: ToySize; score: number } | null = null;
+          let anyInHandFit = false;
+          for (const { size, w, h } of [...allowed, { size: '1x1', w: 1, h: 1 }]) {
+            if (size !== '1x1' && room(size) < 1) continue;
+            const cand = evaluateCandidate(size, w, h, requireGrip);
+            if (cand && size !== '1x1') anyInHandFit = true;
             if (cand && (!pick || cand.score > pick.score)) pick = cand;
           }
-        }
+          if (!anyInHandFit) {
+            for (const { size, w, h } of allowed) {
+              if (room(size) >= 1) continue;
+              const cand = evaluateCandidate(size, w, h, requireGrip);
+              if (cand && (!pick || cand.score > pick.score)) pick = cand;
+            }
+          }
+          return pick;
+        };
+
+        const needGrip = preferOverhang && !!under && anyBelow && under[k] === 0;
+        const pick = (needGrip ? chooseFrom(true) : null) ?? chooseFrom(false);
         if (!pick) continue;
         // Only a 1×1 fits here and the builder has none: inside the model a
         // gap does no harm, so leave it; on its outside it is counted short.
@@ -347,14 +403,89 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
           });
           if (!outside) continue;
         }
+        let merged = 0;
+        if (passComp && under) {
+          const roots = new Set<number>();
+          for (let j = pick.b.j; j < pick.b.j + pick.b.h; j++) {
+            for (let i = pick.b.i; i < pick.b.i + pick.b.w; i++) {
+              const v = under[j * nx + i];
+              if (v > 0) roots.add(compFind(passComp, v));
+            }
+          }
+          merged = Math.max(0, roots.size - 1);
+          const arr = [...roots];
+          for (let r = 1; r < arr.length; r++) compUnion(passComp, arr[0], arr[r]);
+        }
         for (let j = pick.b.j; j < pick.b.j + pick.b.h; j++) for (let i = pick.b.i; i < pick.b.i + pick.b.w; i++) taken[j * nx + i] = 1;
         inUse.set(pick.size, (inUse.get(pick.size) ?? 0) + 1);
         tiles.push(pick.b);
-        // A brick the builder does not have counts against the pass heavily:
-        // of the scans tried, the one that needs none of them wins.
-        total += brickCost(pick.b) + ((left.get(pick.size) ?? 0) - (inUse.get(pick.size) ?? 0) < 0 ? 5 : 0);
+        total += brickCost(pick.b) - merged * 4 + ((left.get(pick.size) ?? 0) - (inUse.get(pick.size) ?? 0) < 0 ? 5 : 0);
       }
-      if (!best || total < best.cost) best = { tiles, cost: total, missing: [...inUse].reduce((t, [sz, n]) => t + Math.max(0, n - (left.get(sz) ?? 0)), 0) };
+      return {
+        tiles,
+        cost: total,
+        missing: [...inUse].reduce((t, [sz, n]) => t + Math.max(0, n - (left.get(sz) ?? 0)), 0),
+        loose: countTileLoose(tiles),
+      };
+    };
+
+    const scanOrder = (flipI: boolean, flipJ: boolean, byColumns: boolean): number[] => {
+      const cells: number[] = [];
+      for (let a = 0; a < (byColumns ? nx : ny); a++) {
+        for (let b = 0; b < (byColumns ? ny : nx); b++) {
+          const i = byColumns ? (flipI ? nx - 1 - a : a) : (flipI ? nx - 1 - b : b);
+          const j = byColumns ? (flipJ ? ny - 1 - b : b) : (flipJ ? ny - 1 - a : a);
+          cells.push(j * nx + i);
+        }
+      }
+      return cells;
+    };
+
+    let best: { tiles: Brick[]; cost: number; missing: number; loose: number } | null = null;
+    for (let attempt = 0; attempt < RESTARTS; attempt++) {
+      const flipI = (attempt & 1) === 1, flipJ = (attempt & 2) === 2;
+      const byColumns = (c + (attempt >> 2)) % 2 === 1;
+      const cand = runPass(scanOrder(flipI, flipJ, byColumns), flipI, flipJ);
+      if (!best || cand.cost < best.cost) best = cand;
+    }
+
+    // Component-bridging scans when an earlier pass left side-by-side pieces untied.
+    if (compSeamSet.size > 0) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const flipI = (attempt & 1) === 1, flipJ = (attempt & 2) === 2;
+        const base = scanOrder(flipI, flipJ, (c + attempt) % 2 === 1);
+        const cells = [...base.filter((k) => compSeamSet.has(k)), ...base.filter((k) => !compSeamSet.has(k))];
+        const cand = runPass(cells, flipI, flipJ, (k) => compSeamSet.has(k));
+        if (!best || cand.cost < best.cost) best = cand;
+      }
+    }
+
+    // Corbel-first scans when greedy perimeter tiling stranded an overhanging roof/lintel cell over air.
+    if (under && anyBelow && best!.loose > 0) {
+      const voidDist = new Int32Array(N).fill(-1);
+      const q: number[] = [];
+      for (let k = 0; k < N; k++) {
+        if (want[k] && under[k] > 0) { voidDist[k] = 0; q.push(k); }
+      }
+      for (let p = 0; p < q.length; p++) {
+        const k = q[p], ki = k % nx, kj = (k - ki) / nx;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const ni = ki + di, nj = kj + dj;
+          if (ni < 0 || nj < 0 || ni >= nx || nj >= ny) continue;
+          const nk = nj * nx + ni;
+          if (want[nk] && voidDist[nk] < 0) { voidDist[nk] = voidDist[k] + 1; q.push(nk); }
+        }
+      }
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const flipI = (attempt & 1) === 1, flipJ = (attempt & 2) === 2;
+        const base = scanOrder(flipI, flipJ, attempt >= 2);
+        const rank = new Int32Array(N);
+        base.forEach((k, idx) => { rank[k] = idx; });
+        const overhang = base.filter((k) => want[k] && under[k] === 0).sort((a, b) => voidDist[b] - voidDist[a] || rank[a] - rank[b]);
+        const supported = base.filter((k) => !(want[k] && under[k] === 0));
+        const cand = runPass([...overhang, ...supported], flipI, flipJ, (k) => under[k] === 0, true);
+        if (cand.loose < best!.loose || (cand.loose === best!.loose && cand.cost < best!.cost)) best = cand;
+      }
     }
 
     // Still needing bricks the builder has none of (a 1×1 strip left where
@@ -363,14 +494,7 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
     // cover it, best first, backing out of dead ends, within a budget.
     if (best!.missing > 0) {
       for (const [flipI, flipJ, byColumns] of [[false, false, false], [false, false, true], [true, true, false], [true, true, true]] as const) {
-        const cells: number[] = [];
-        for (let a = 0; a < (byColumns ? nx : ny); a++) {
-          for (let b = 0; b < (byColumns ? ny : nx); b++) {
-            const i = byColumns ? (flipI ? nx - 1 - a : a) : (flipI ? nx - 1 - b : b);
-            const jj = byColumns ? (flipJ ? ny - 1 - b : b) : (flipJ ? ny - 1 - a : a);
-            cells.push(jj * nx + i);
-          }
-        }
+        const cells = scanOrder(flipI, flipJ, byColumns);
         const taken = new Uint8Array(N);
         const inUse = new Map<ToySize, number>();
         const out: Brick[] = [];
@@ -407,7 +531,7 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
           return !outside && rec(pos + 1);
         };
         if (rec(0)) {
-          best = { tiles: out, cost: out.reduce((t, b) => t + brickCost(b), 0), missing: 0 };
+          best = { tiles: out, cost: out.reduce((t, b) => t + brickCost(b), 0), missing: 0, loose: countTileLoose(out) };
           break;
         }
       }
@@ -415,12 +539,18 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
 
     const owner = new Int32Array(N);
     for (const b of best!.tiles) {
+      const id = nextId++;
+      compParent[id] = id;
       if (under && anyBelow) {
         let grips = false;
-        for (let y = b.j; !grips && y < b.j + b.h; y++) for (let x = b.i; !grips && x < b.i + b.w; x++) if (under[y * nx + x] > 0) grips = true;
+        for (let y = b.j; y < b.j + b.h; y++) {
+          for (let x = b.i; x < b.i + b.w; x++) {
+            const v = under[y * nx + x];
+            if (v > 0) { grips = true; compUnion(compParent, id, v); }
+          }
+        }
         if (!grips) loose++;
       }
-      const id = nextId++;
       for (let j = b.j; j < b.j + b.h; j++) for (let i = b.i; i < b.i + b.w; i++) owner[j * nx + i] = id;
       const size = sizeOf(b.w, b.h)!;
       used.set(size, (used.get(size) ?? 0) + 1);
@@ -443,12 +573,27 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean): ToyLayout & { loose: n
       }
     }
     below = owner;
+    courseOwners.push(owner);
+  }
+
+  let sideBySide = false;
+  for (const own of courseOwners) {
+    if (!own || sideBySide) continue;
+    for (let j = 0; j < ny && !sideBySide; j++) {
+      for (let i = 0; i < nx && !sideBySide; i++) {
+        const a = own[j * nx + i];
+        if (!a) continue;
+        if (i + 1 < nx && own[j * nx + i + 1] && compFind(compParent, a) !== compFind(compParent, own[j * nx + i + 1])) sideBySide = true;
+        if (j + 1 < ny && own[(j + 1) * nx + i] && compFind(compParent, a) !== compFind(compParent, own[(j + 1) * nx + i])) sideBySide = true;
+      }
+    }
   }
 
   const order = (s: ToySize) => { const [a, b] = dims(s); return -(a * b) * 100 - b; };
   return {
     bricks,
     loose,
+    sideBySide,
     parts: [...used.entries()].sort((a, b) => order(a[0]) - order(b[0])).map(([size, count]) => ({ size, count })),
     short: [...short.entries()].map(([size, count]) => ({ size, count })),
   };
