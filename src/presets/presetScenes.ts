@@ -26,6 +26,7 @@ import { soundboxLyrePreset } from './soundboxLyre';
 import { compliantFlexuresPreset } from './compliantFlexures';
 import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
+import { whoopeeStomperPreset } from './whoopeeStomper';
 import { hydrostaticFlotationPreset } from './hydrostaticFlotation';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
@@ -3714,6 +3715,12 @@ export const PRESETS = {
     emoji: '🎺',
     scene: windInstrumentsPreset,
     camera: { position: [0.32, -0.42, 0.25], target: [0.0, 0, 0.068] } satisfies PresetCamera,
+  },
+  whoopee_stomper: {
+    name: 'Whoopee Cushion Stomper',
+    emoji: '💨',
+    scene: whoopeeStomperPreset,
+    camera: { position: [0.02, -0.46, 0.28], target: [-0.02, 0, 0.10] } satisfies PresetCamera,
   },
   hydrostatic_flotation: {
     name: 'Self-Righting Buoy, Skiff & Flooding Cup',

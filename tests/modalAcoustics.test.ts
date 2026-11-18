@@ -7,6 +7,7 @@ import { marimbaCascadePreset } from '../src/presets/marimbaCascade';
 import { metallophoneCarillonPreset } from '../src/presets/metallophoneCarillon';
 import { soundboxLyrePreset } from '../src/presets/soundboxLyre';
 import { windInstrumentsPreset } from '../src/presets/windInstruments';
+import { whoopeeStomperPreset } from '../src/presets/whoopeeStomper';
 import { compliantFlexuresPreset } from '../src/presets/compliantFlexures';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { simulate } from './helpers/simulate';
@@ -904,5 +905,18 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const m2SoftCenter = hitSoftCenter.voices[1]?.gain ?? 0;
     const m2SteelEnd = hitSteelEnd.voices[1]?.gain ?? 0;
     expect(m2SteelEnd).toBeGreaterThan(m2SoftCenter * 3.0);
+
+    // 4. Fletcher sub-resonant autonomous slap-valve regime on short 110 mm Whoopee Spout (`whoopeeStomperPreset`):
+    const spoutNode = whoopeeStomperPreset.nodes.find((n) => n.id === 'whoopee_spout_nozzle')!;
+    const spoutBore = extractBoreWaveguide(spoutNode)!;
+    expect(spoutBore.resonantModesHz[0]).toBeGreaterThan(500);
+    const lowRip = solvePlayableWindVoice(spoutBore, 3.2, 36);
+    const highSqueak = solvePlayableWindVoice(spoutBore, 3.2, 185);
+    expect(lowRip.active).toBe(true);
+    expect(lowRip.pitchHz).toBeCloseTo(36, 0);
+    expect(highSqueak.pitchHz).toBeCloseTo(185, 0);
+    expect(lowRip.phaseCoherence).toBeGreaterThan(0.9);
+    expect(lowRip.puffGateDepth).toBeGreaterThan(0.04);
+    expect(lowRip.harmonicWeights.length).toBeGreaterThanOrEqual(24);
   });
 });

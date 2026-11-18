@@ -284,7 +284,7 @@ function syncLiveWindAudio() {
   }
 
   const now = performance.now();
-  if (now - lastWindAudioSyncMs < 24) return;
+  if (now - lastWindAudioSyncMs < 12) return;
   lastWindAudioSyncMs = now;
 
   const windNodes = collectWindNodes(s.sceneGraph.nodes);
@@ -347,7 +347,7 @@ function syncLiveWindAudio() {
       id: wn.id,
       exciter: spec.exciter,
       breathKPa: Math.max(0, Math.min(8, breathKPa)),
-      embouchureHz: Math.max(80, Math.min(1800, embouchureHz)),
+      embouchureHz: Math.max(16, Math.min(2200, embouchureHz)),
       boreShape: bore?.boreShape,
       resonantModesHz: bore?.resonantModesHz,
       modeImpedancePeaks: bore?.modeImpedancePeaks,

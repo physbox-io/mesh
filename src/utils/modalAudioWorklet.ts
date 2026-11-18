@@ -64,6 +64,7 @@ interface NativeWindVoiceSlot {
   voiceGain: GainNode;
   noiseFilter: BiquadFilterNode;
   noiseGain: GainNode;
+  puffDepth: GainNode;
 }
 
 interface NativeWindBankState {
@@ -99,8 +100,19 @@ type AudioContextWithWindGraph = AudioContext & {
   __physboxNativeWindV12?: LegacyWindGraphState;
   __physboxNativeWindV13?: LegacyWindGraphState;
   __physboxNativeWindV14?: LegacyWindGraphState;
-  __physboxNativeWindV15?: NativeWindBankState;
+  __physboxNativeWindV15?: LegacyWindGraphState;
+  __physboxNativeWindV16?: NativeWindBankState;
 };
+
+function buildPuffGateCurve(): Float32Array<ArrayBuffer> {
+  const N = 513;
+  const curve = new Float32Array(new ArrayBuffer(N * 4));
+  for (let i = 0; i < N; i++) {
+    const x = (i / (N - 1)) * 2 - 1;
+    curve[i] = x > 0.30 ? Math.pow((x - 0.30) / 0.70, 1.35) : 0;
+  }
+  return curve;
+}
 
 function buildSoftSatCurve(): Float32Array<ArrayBuffer> {
   const N = 1025;
@@ -178,6 +190,7 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
     '__physboxNativeWindV12',
     '__physboxNativeWindV13',
     '__physboxNativeWindV14',
+    '__physboxNativeWindV15',
   ] as const) {
     const prev = c[oldKey];
     if (prev) {
@@ -199,12 +212,13 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
 function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  if (c.__physboxNativeWindV15) return c.__physboxNativeWindV15;
+  if (c.__physboxNativeWindV16) return c.__physboxNativeWindV16;
   if (typeof ctx.createOscillator !== 'function' || typeof ctx.createWaveShaper !== 'function') {
     return null;
   }
 
   const softSatCurve = buildSoftSatCurve();
+  const puffGateCurve = buildPuffGateCurve();
   const now = ctx.currentTime;
 
   const masterGain = ctx.createGain();
@@ -317,6 +331,15 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
     const noiseGain = ctx.createGain();
     noiseGain.gain.setValueAtTime(0, now);
 
+    // Synchronized per-cycle air-puff modulator (half-wave pulse rectifier on osc -> noiseGain.gain)
+    const puffRectifier = ctx.createWaveShaper();
+    puffRectifier.curve = puffGateCurve;
+    const puffDepth = ctx.createGain();
+    puffDepth.gain.setValueAtTime(0, now);
+    osc.connect(puffRectifier);
+    puffRectifier.connect(puffDepth);
+    puffDepth.connect(noiseGain.gain);
+
     osc.connect(driveGain);
     driveGain.connect(shaper);
     shaper.connect(bodyFormant);
@@ -350,6 +373,7 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
       voiceGain,
       noiseFilter,
       noiseGain,
+      puffDepth,
     });
   }
 
@@ -363,7 +387,7 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
     slots,
     softSatCurve,
   };
-  c.__physboxNativeWindV15 = bank;
+  c.__physboxNativeWindV16 = bank;
   return bank;
 }
 
@@ -413,25 +437,27 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
       slot.driveGain.gain.setTargetAtTime(0.45, now, 0.010);
       slot.voiceGain.gain.setTargetAtTime(0, now, 0.010);
       slot.noiseGain.gain.setTargetAtTime(0, now, 0.008);
+      slot.puffDepth.gain.setTargetAtTime(0, now, 0.008);
       slot.vibDepth.gain.setTargetAtTime(0, now, 0.012);
       slot.wasActive = false;
       continue;
     }
 
-    // Update band-limited C++ PeriodicWave from TMM harmonic weights H_1..H_10 whenever bore spectrum changes!
+    // Update band-limited C++ PeriodicWave from TMM harmonic weights H_1..H_N whenever bore spectrum changes!
     const hw = solved.harmonicWeights;
-    const waveSig = hw.slice(0, 8).map((w) => Math.round(w * 25)).join(',');
+    const coh = Math.max(0, Math.min(1, solved.phaseCoherence ?? 0));
+    const waveSig = `${Math.round(coh * 20)}:${hw.length}:${hw.slice(0, 10).map((w) => Math.round(w * 25)).join(',')}`;
     const isFreshAttack = !slot.wasActive || isNewId;
     if ((isFreshAttack || slot.lastWaveSig !== waveSig) && typeof ctx.createPeriodicWave === 'function') {
       const nHarm = hw.length + 1;
       const real = new Float32Array(nHarm);
       const imag = new Float32Array(nHarm);
       for (let h = 0; h < hw.length; h++) {
-        // Cosine/sine quadrature phases avoid sharp crest-factor spikes while preserving exact power spectrum!
         const amp = hw[h];
-        const phase = (h + 1) * 0.35;
-        real[h + 1] = amp * Math.sin(phase);
-        imag[h + 1] = amp * Math.cos(phase);
+        const dispPhase = (h + 1) * 0.35;
+        // Blend from dispersed quadrature horn phase (coh=0) to coherent cosine slap impulse (coh=1)!
+        real[h + 1] = amp * ((1 - coh) * Math.sin(dispPhase) + coh);
+        imag[h + 1] = amp * ((1 - coh) * Math.cos(dispPhase));
       }
       slot.osc.setPeriodicWave(ctx.createPeriodicWave(real, imag, { disableNormalization: false }));
       slot.lastWaveSig = waveSig;
@@ -442,7 +468,7 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
     if (isFreshAttack) {
       slot.osc.frequency.cancelScheduledValues(now);
       slot.osc.frequency.setValueAtTime(solved.pitchHz, now);
-      const warmStartHz = Math.max(420, solved.pitchHz * 1.45);
+      const warmStartHz = coh > 0.2 ? solved.bellLowpassHz * 0.85 : Math.max(420, solved.pitchHz * 1.45);
       slot.bellLowpass1.frequency.cancelScheduledValues(now);
       slot.bellLowpass1.frequency.setValueAtTime(warmStartHz, now);
       slot.bellLowpass2.frequency.cancelScheduledValues(now);
@@ -460,8 +486,13 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
     slot.bellLowpass2.frequency.setTargetAtTime(solved.bellLowpassHz * 1.32, now, 0.022);
 
     slot.voiceGain.gain.setTargetAtTime(solved.amplitude, now, 0.011);
-    slot.noiseFilter.frequency.setTargetAtTime(Math.min(3200, solved.pitchHz * (2.3 + (v.breachFactor ?? 0) * 1.4)), now, 0.018);
-    slot.noiseFilter.Q.setTargetAtTime(1.1 + (v.breachFactor ?? 0) * 0.9, now, 0.018);
+    const noiseCenterHz = coh > 0.2
+      ? Math.max(580, Math.min(2200, solved.formantHz * (0.95 + 0.45 * (v.breachFactor ?? 0))))
+      : Math.min(3200, solved.pitchHz * (2.3 + (v.breachFactor ?? 0) * 1.4));
+    slot.noiseFilter.frequency.setTargetAtTime(noiseCenterHz, now, 0.016);
+    slot.noiseFilter.Q.setTargetAtTime((coh > 0.2 ? 0.9 : 1.1) + (v.breachFactor ?? 0) * 0.8, now, 0.016);
+    slot.puffDepth.gain.setTargetAtTime(solved.puffGateDepth ?? 0, now, 0.010);
+
     if (isFreshAttack && v.exciter === 'brass_lip') {
       slot.noiseGain.gain.cancelScheduledValues(now);
       slot.noiseGain.gain.setValueAtTime(Math.max(solved.noiseGain, solved.amplitude * 0.08), now);
@@ -469,7 +500,11 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
     } else {
       slot.noiseGain.gain.setTargetAtTime(solved.noiseGain, now, 0.012);
     }
-    slot.vibDepth.gain.setTargetAtTime(solved.pitchHz * 0.0024 * Math.min(1, solved.amplitude * 4), now, 0.06);
+
+    const vibRate = solved.flutterHz ?? (5.0 + idx * 0.2);
+    const vibFrac = solved.flutterFrac ?? (0.0024 * Math.min(1, solved.amplitude * 4));
+    slot.vibOsc.frequency.setTargetAtTime(vibRate, now, 0.025);
+    slot.vibDepth.gain.setTargetAtTime(solved.pitchHz * vibFrac, now, 0.025);
 
     slot.wasActive = true;
   }
@@ -479,6 +514,7 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
       const slot = bank.slots[i];
       slot.voiceGain.gain.setTargetAtTime(0, now, 0.010);
       slot.noiseGain.gain.setTargetAtTime(0, now, 0.008);
+      slot.puffDepth.gain.setTargetAtTime(0, now, 0.008);
       slot.vibDepth.gain.setTargetAtTime(0, now, 0.012);
       slot.wasActive = false;
     }
@@ -489,7 +525,7 @@ export function postWorkletWindSilence(ctx: AudioContext | null): void {
   if (!ctx) return;
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  const bank = c.__physboxNativeWindV15;
+  const bank = c.__physboxNativeWindV16;
   if (!bank) return;
   const now = ctx.currentTime;
   for (const slot of bank.slots) {
@@ -497,6 +533,8 @@ export function postWorkletWindSilence(ctx: AudioContext | null): void {
     slot.voiceGain.gain.setTargetAtTime(0, now, 0.010);
     slot.noiseGain.gain.cancelScheduledValues(now);
     slot.noiseGain.gain.setTargetAtTime(0, now, 0.009);
+    slot.puffDepth.gain.cancelScheduledValues(now);
+    slot.puffDepth.gain.setTargetAtTime(0, now, 0.009);
     slot.vibDepth.gain.cancelScheduledValues(now);
     slot.vibDepth.gain.setTargetAtTime(0, now, 0.010);
     slot.wasActive = false;

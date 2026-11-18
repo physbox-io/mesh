@@ -744,6 +744,18 @@ Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed s
 - Turn on **Sound** in **⚙️ Environment** (top right) and press **Run**
 - Hold down a **Silver Key** or **Piston Valve** with your mouse while it plays — the waveguide length and pitch respond live!`,
 
+  whoopee_stomper: `# 💨 Whoopee Cushion & Cam Stomper
+
+A **4-lobe brass escapement cam** lifts and drops a **1.5 kg brass stomper plunger** onto a spring-mounted **pink rubber whoopee cushion** coupled to a **110 mm hollow rubber spout**.
+
+## Why it sounds like a whoopee cushion (not a tuba)
+- **Sub-Resonant Flap-Valve Regime ($f_{\\text{lip}} \\ll f_{\\text{bore},1}$)**: the 110 mm spout's quarter-wave resonance sits up at **~740 Hz** (acting as a vocal-tract formant), so the compliant rubber lips oscillate autonomously at **25–220 Hz** as a **coherent slap-impulse train** with synchronized per-slap turbulent air-puff bursts!
+- **4 Cam Profiles**: cycles through *The Morning Ripper*, *The Wet Machine-Gun* (4 staccato bounces), *The Slow Cheek-Squeaker* (rising neck tension up to ~220 Hz), and *The Shy Toot*.
+
+## Try it
+- Turn on **Sound** and press **Run** — or **grab the red knob** with your mouse to stomp the pink cushion manually
+- Select **Ribbed Rubber Whoopee Spout** and lengthen \`spout_outer_neck\` to >0.6 m: once $f_{\\text{bore},1}$ drops to meet $f_{\\text{lip}}$, standing-wave entrainment locks it into a musical horn!`,
+
   hydrostatic_flotation: `# ⛵ Self-Righting Buoy, Skiff & Flooding Cup
 
 Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **inverse auto-balance (\`Stand / Spin / Float\`)** inside a bounded **Glass Aquarium Tank** (80% water fill):
