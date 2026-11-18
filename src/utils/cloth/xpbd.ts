@@ -421,7 +421,18 @@ export class ClothSim {
     // hold layers a fabric's thickness apart, pull back what it parts, and the
     // crossings grew (gathers and pleats 129 -> 711 over 300 steps; with tacks
     // left out of the steps, 129 -> 22). See plans/cloth-garment-rebuild.md.
+    // Nothing passes through cloth from here on, not while it settles and is
+    // sewn either (continuous collision, clothCcd): only where it was built
+    // crossed is it free to move back through. Unguarded, a collar's end
+    // pulled open by the wearer was dragged through the neckerchief under
+    // it, and a knot's ends falling into place through the collar over them.
+    const tangle = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches));
+    this.ccdOf().setTangled(findCrossings(this.x, tangle));
+    const built = Float64Array.from(this.x);
     this.settle(CLOTH_SUBSTEP);
+    this.ccdOf().resolve(built, this.x, this.w);
+    this.ccdFrom = Float64Array.from(this.x);
+    this.ccdSince = 0;
     // Cloth that starts apart and is sewn together (a piece sewn on, plain
     // cloth sewn up) is sewn before it is first drawn, as a paused scene
     // shows its cloth at rest: run through its sew time and a moment more,
@@ -472,6 +483,7 @@ export class ClothSim {
       // piece is held softer (a cap's peak sagged, and rose again once the
       // scene ran), so it settles here where the scene will hold it.
       const fineFrom = end - PRESEW_REST;
+      let span = 0;
       for (let t = 0; t < end;) {
         const h = t >= fineFrom ? CLOTH_SUBSTEP : PRESEW_STEP;
         this.substep(h, env);
@@ -499,8 +511,13 @@ export class ClothSim {
           const k = 3 * i, sp = Math.hypot(v[k], v[k + 1], v[k + 2]);
           if (sp > vMax) { const f = vMax / sp; v[k] *= f; v[k + 1] *= f; v[k + 2] *= f; }
         }
+        // Over several of these long steps at a time (CCD_EVERY of them, in
+        // the fine ones as long a while): the guarantee is the same at any.
+        span += h;
+        if (span >= CCD_EVERY * PRESEW_STEP - 1e-9) { this.collideAlong(span); span = 0; }
         t += h;
       }
+      if (span > 0) this.collideAlong(span);
       // Let go: what was held weighs again.
       this.w.set(held);
       this.time = 0; this.accumulator = 0;
