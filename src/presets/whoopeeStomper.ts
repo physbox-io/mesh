@@ -2,10 +2,10 @@ import type { SceneGraph } from '../types/scene';
 
 /**
  * Whoopee Cushion & 4-Lobe Cam Stomper ("The Flatulophone"):
- * Proves 100% generic aero-elastic & 3D bore physics on a short (110 mm) compliant
- * rubber spout whose quarter-wave formant (~740 Hz) sits far above the floppy rubber
- * lip's 24–220 Hz relaxation slap rate — producing authentic wet motorboat rips,
- * staccato machine-gun sputters, and rising-pitch squeakers!
+ * Models slow pneumatic air-reservoir bleed (0.8–1.5 s per squeeze, soft damped
+ * elastomer contact with zero rigid impact bang!) through a 110 mm compliant
+ * rubber spout in the Fletcher sub-resonant relaxation-slap regime (high-Q
+ * sweeping vowel-formant squelch + Rosenberg mucosal buzz!).
  */
 export const whoopeeStomperPreset: SceneGraph = {
   nodes: [
@@ -15,35 +15,38 @@ export const whoopeeStomperPreset: SceneGraph = {
       type: 'body',
       pos: [0, 0, 0],
       deformMaterial: 'softMetal',
-      script: `// 4-Lobe Cam Escapement: lifts the 1.5 kg Brass Stomper & drops/presses it onto the Whoopee Bladder!
-// Between cam lobes you can also grab the red knob with your mouse and stomp it manually.
+      script: `// 4-Lobe Cam Escapement: presses the Brass Stomper onto the Pneumatic Whoopee Bladder!
+// Soft pneumatic damping gives long 0.8..1.5 s squelchy air-bleed squeezes with zero collision bang.
 const theta = api.getJointPosition('cam_spin');
 const phase = ((theta % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-const sector = Math.floor((phase / (Math.PI * 2)) * 4); // 0..3: 4 distinct fart profiles
+const sector = Math.floor((phase / (Math.PI * 2)) * 4); // 0..3: 4 distinct comedic profiles
 const u = ((phase / (Math.PI * 2)) * 4) % 1;
 
 const qBoot = api.getJointPosition('boot_drop');
 const vBoot = api.getJointVelocity('boot_drop');
 
-if (u < 0.30) {
-  // Cam lift ramp: hoist the brass plunger up to this lobe's drop height
-  const targetH = sector === 0 ? 0.078 : sector === 1 ? 0.058 : sector === 2 ? 0.042 : 0.032;
-  const fLift = 420 * (targetH - qBoot) - 24 * vBoot;
+if (u < 0.24) {
+  // Smooth cam return lift so the rubber bladder re-inflates cleanly
+  const targetH = 0.028;
+  const fLift = 220 * (targetH - qBoot) - 22 * vBoot;
   if (fLift > 0) api.applyJointForce('boot_drop', fLift);
-} else if (sector === 0 && u >= 0.30 && u < 0.72) {
-  // Lobe 0 ("The Morning Ripper"): heavy sustained stomp follow-through!
-  api.applyJointForce('boot_drop', -34);
-} else if (sector === 1 && u >= 0.32 && u < 0.82) {
-  // Lobe 1 ("The Wet Machine-Gun"): 4 rapid staccato cam-ratchet bounces!
-  const pulse = Math.sin((u - 0.32) * Math.PI * 2 * 5.0);
-  api.applyJointForce('boot_drop', pulse > 0.05 ? -38 : 22);
-} else if (sector === 2 && u >= 0.32 && u < 0.90) {
-  // Lobe 2 ("The Slow Cheek-Squeaker"): relentless squeeze flattening the rubber neck tight!
-  const prog = (u - 0.32) / 0.58;
-  api.applyJointForce('boot_drop', -18 - 48 * prog);
-} else if (sector === 3 && u >= 0.32 && u < 0.52) {
-  // Lobe 3 ("The Shy Wet Toot"): quick crisp tap!
-  api.applyJointForce('boot_drop', -24);
+} else if (sector === 0 && u >= 0.24 && u < 0.80) {
+  // Lobe 0 ("The Juicy Wet Ripper", ~1.2 s): firm press with mid-stroke squelch surge!
+  const prog = (u - 0.24) / 0.56;
+  const wave = 1 + 0.35 * Math.sin(prog * Math.PI * 3);
+  api.applyJointForce('boot_drop', -28 * wave);
+} else if (sector === 1 && u >= 0.24 && u < 0.86) {
+  // Lobe 1 ("The Bubbly Sputter-Cluster", ~1.3 s): 4 distinct wet pulsing pushes!
+  const prog = (u - 0.24) / 0.62;
+  const pulse = Math.sin(prog * Math.PI * 2 * 3.5);
+  api.applyJointForce('boot_drop', pulse > -0.15 ? -34 * (0.5 + 0.5 * Math.max(0, pulse)) : 8);
+} else if (sector === 2 && u >= 0.24 && u < 0.90) {
+  // Lobe 2 ("The Church-Pew Squeaker", ~1.4 s): slow progressive pinch all the way flat!
+  const prog = (u - 0.24) / 0.66;
+  api.applyJointForce('boot_drop', -16 - 42 * prog * prog);
+} else if (sector === 3 && u >= 0.28 && u < 0.56) {
+  // Lobe 3 ("The Short Wet Blorp", ~0.55 s): quick squishy press!
+  api.applyJointForce('boot_drop', -26);
 }
 `,
       joints: [],
@@ -68,7 +71,7 @@ if (u < 0.30) {
               type: 'hinge',
               axis: [0, 1, 0],
               damping: 0.05,
-              actuator: { type: 'velocity', kv: 2.0, ctrlValue: 1.05 },
+              actuator: { type: 'velocity', kv: 2.0, ctrlValue: 0.72 },
             },
           ],
           geoms: [
@@ -93,15 +96,17 @@ if (u < 0.30) {
           name: 'cushion_squash',
           type: 'slide',
           axis: [0, 0, -1],
-          stiffness: 160,
-          damping: 8.5,
+          // High pneumatic orifice damping (110 N*s/m) -> slow, realistic 0.8..1.4 s air deflation!
+          stiffness: 72,
+          damping: 110,
           limited: true,
           hardStop: true,
           range: [-0.004, 0.042],
         },
       ],
       geoms: [
-        { name: 'cushion_upper_belly', type: 'ellipsoid', size: [0.085, 0.085, 0.028], pos: [0, 0, 0], solref: [0.016, 0.68], rgba: [0.96, 0.52, 0.60, 1] },
+        // Critically damped 75 ms soft pneumatic contact (`solref: [0.075, 1.0]`) -> zero rigid gunshot bang!
+        { name: 'cushion_upper_belly', type: 'ellipsoid', size: [0.085, 0.085, 0.028], pos: [0, 0, 0], solref: [0.075, 1.0], rgba: [0.96, 0.52, 0.60, 1] },
         { name: 'cushion_seam_flange', type: 'cylinder', size: [0.090, 0.005], pos: [0, 0, -0.006], rgba: [0.86, 0.34, 0.45, 1], contype: 0, conaffinity: 0 },
         { name: 'bladder_bellows_coupler', type: 'cylinder', fromto: [0.068, 0, -0.002, 0.112, 0, -0.002], size: [0.020], rgba: [0.92, 0.44, 0.53, 1], contype: 0, conaffinity: 0 },
       ],
@@ -111,22 +116,22 @@ if (u < 0.30) {
       id: 'stomper_boot',
       name: 'Brass Stomper Plunger',
       type: 'body',
-      pos: [-0.08, 0, 0.16],
+      pos: [-0.08, 0, 0.154],
       deformMaterial: 'softMetal',
       joints: [
         {
           name: 'boot_drop',
           type: 'slide',
           axis: [0, 0, 1],
-          damping: 1.2,
+          damping: 6.5,
           limited: true,
           hardStop: true,
-          range: [-0.08, 0.10],
+          range: [-0.075, 0.08],
         },
       ],
       geoms: [
-        { name: 'brass_stomper_sole', type: 'cylinder', size: [0.060, 0.016], pos: [0, 0, -0.020], density: 8400, solref: [0.016, 0.72], rgba: [0.85, 0.67, 0.24, 1] },
-        { name: 'plunger_shaft', type: 'cylinder', fromto: [0, 0, -0.004, 0, 0, 0.135], size: [0.010], density: 7800, rgba: [0.75, 0.79, 0.85, 1], contype: 0, conaffinity: 0 },
+        { name: 'brass_stomper_sole', type: 'cylinder', size: [0.060, 0.016], pos: [0, 0, -0.020], density: 4200, solref: [0.075, 1.0], rgba: [0.85, 0.67, 0.24, 1] },
+        { name: 'plunger_shaft', type: 'cylinder', fromto: [0, 0, -0.004, 0, 0, 0.135], size: [0.010], density: 4000, rgba: [0.75, 0.79, 0.85, 1], contype: 0, conaffinity: 0 },
         { name: 'red_stomp_knob', type: 'sphere', size: [0.024], pos: [0, 0, 0.148], rgba: [0.88, 0.22, 0.20, 1] },
       ],
       children: [],
@@ -143,44 +148,54 @@ if (u < 0.30) {
       windInstrument: {
         exciter: 'brass_lip',
         breathKPa: 0,
-        embouchureHz: 38,
+        embouchureHz: 46,
       },
-      script: `// Pure physical coupling: Bladder compression -> Bernoulli Flapper Lip -> 110 mm Rubber Spout!
+      script: `// Pneumatic RC Bladder Reservoir -> Wet Stick-Slip Bubble Gate -> 110 mm Rubber Spout!
 const t = api.getTime();
+const dt = api.getTimestep() || 0.001;
 const qSquash = Math.max(0, api.getJointPosition('cushion_squash')); // 0..0.042 m
-const vSquash = api.getJointVelocity('cushion_squash');              // + m/s when squashing!
-const flapRad = api.getJointPosition('sphincter_flap');              // rad (0 = shut, + = blown open)
+const vSquash = api.getJointVelocity('cushion_squash');              // + m/s when deflating!
+const flapRad = api.getJointPosition('sphincter_flap');
 
-// Air jet pressure comes from downward bladder velocity + residual bottom-of-stroke squeeze!
-const squeezeTail = qSquash > 0.025 && vSquash > -0.015 ? 0.65 * Math.min(1, (qSquash - 0.025) / 0.012) : 0;
-const rawFlow = Math.max(0, vSquash * 48) + squeezeTail;
+// Integrate internal trapped air pressure pBag (kPa): builds on compression, bleeds out over ~0.35 s!
+let pBag = typeof api.state.pBag === 'number' ? api.state.pBag : 0;
+if (vSquash > 0.002) {
+  pBag = Math.min(5.2, pBag + vSquash * dt * 210);
+}
+const pinchTightness = Math.min(1, Math.pow(qSquash / 0.033, 2.2));
+const bleedTau = 0.26 + 0.28 * pinchTightness; // pinched neck bleeds slower (longer squeak!)
+pBag *= Math.exp(-dt / bleedTau);
+if (vSquash < -0.01) pBag *= Math.exp(-dt / 0.06); // suction cutoff during re-inflation
+api.state.pBag = pBag;
 
-// Bernoulli jet flutter on the hinged rubber flapper lip at the spout mouth:
-if (rawFlow > 0.05) {
-  const jetPush = rawFlow * 0.24 * Math.max(-0.35, Math.cos(flapRad * 4.4));
+// Bernoulli jet flutter on the visible rubber lip flap at the spout exit:
+if (pBag > 0.25) {
+  const jetPush = pBag * 0.11 * Math.max(-0.35, Math.cos(flapRad * 4.4));
   api.applyJointForce('sphincter_flap', jetPush);
 }
 
-// Modulate spout air pressure with real flapper motion + irregular wet bubble-bursts!
-const sputterGate = 0.56 + 0.44 * Math.sin(flapRad * 9.5 + t * 27) * Math.cos(t * 11.3);
-const breathKPa = rawFlow > 0.04 ? Math.min(6.8, (0.55 + rawFlow * 1.75) * Math.max(0.24, sputterGate)) : 0;
+// Wet mucosal stick-slip bubble gating ("bwwwrr-owa-squelch-prrt"):
+const bubble1 = Math.sin(t * 19.3 + Math.sin(t * 6.7) * 2.1);
+const bubble2 = Math.cos(t * 31.1 + flapRad * 8.0);
+const wetGate = 0.62 + 0.38 * bubble1 * (0.6 + 0.4 * bubble2);
+const breathKPa = pBag > 0.22 ? Math.min(5.8, (0.35 + pBag * 1.15) * Math.max(0.22, wetGate)) : 0;
 
-// As the rubber bladder flattens, neck stretches from loose 26 Hz motorboat -> 60 Hz rip -> 215 Hz squeaker!
-const squashFrac = Math.min(1, qSquash / 0.034);
-const chaos = 1 + 0.13 * Math.sin(t * 31.7) + 0.08 * Math.sin(t * 53.1);
-const embouchureHz = (25 + 48 * squashFrac + 148 * Math.pow(squashFrac, 3.4)) * chaos;
+// Pitch contour:
+// - Mid-pressure wet surge droops pitch DOWN into juicy 34..55 Hz squelch ("blorrrp-wah"),
+// - High bottom-of-stroke compression stretches the rubber slit tight up to 160..240 Hz ("squeeeak!")!
+const pressureDroop = Math.max(0, Math.min(18, (pBag - 1.2) * 7.5)) * (1 - pinchTightness);
+const baseLipHz = 44 - pressureDroop + 38 * (qSquash / 0.034) + 155 * Math.pow(pinchTightness, 1.8);
+const wetWobble = 1 + 0.12 * bubble1 + 0.07 * Math.sin(t * 47.3);
 
 api.state.breathKPa = breathKPa;
-api.state.embouchureHz = embouchureHz;
+api.state.embouchureHz = Math.max(24, baseLipHz * wetWobble);
 `,
       joints: [],
       geoms: [
-        // Real 110 mm (halfH = 0.055) compliant rubber whoopee-cushion neck -> quarter-wave formant f_1 ≈ 730 Hz!
         { name: 'spout_outer_neck', type: 'cylinder', size: [0.025, 0.055], pos: [0, 0, 0], rgba: [0.92, 0.44, 0.53, 1] },
         { name: 'spout_flared_lips', type: 'cylinder', size: [0.035, 0.012], pos: [0, 0, 0.048], rgba: [0.85, 0.34, 0.45, 1] },
         { name: 'spout_hollow_bore', type: 'cylinder', size: [0.017, 0.068], pos: [0, 0, 0], csg: 'difference', rgba: [0.30, 0.12, 0.16, 0.4] },
-        // Unsealed side-seam air bleed -> 3D TMM detects wall breach for wet turbulent air-puff spray!
-        { name: 'seam_bleed_slit', type: 'cylinder', size: [0.0055, 0.032], pos: [0, 0, 0.022], quat: [0.707107, 0, 0.707107, 0], csg: 'difference', rgba: [0.25, 0.10, 0.14, 0.5] },
+        { name: 'seam_bleed_slit', type: 'cylinder', size: [0.0045, 0.032], pos: [0, 0, 0.022], quat: [0.707107, 0, 0.707107, 0], csg: 'difference', rgba: [0.25, 0.10, 0.14, 0.5] },
       ],
       children: [
         {
@@ -195,7 +210,7 @@ api.state.embouchureHz = embouchureHz;
               type: 'hinge',
               axis: [1, 0, 0],
               pos: [0, -0.014, 0],
-              stiffness: 0.62,
+              stiffness: 0.58,
               damping: 0.008,
               limited: true,
               hardStop: true,
@@ -203,7 +218,7 @@ api.state.embouchureHz = embouchureHz;
             },
           ],
           geoms: [
-            { name: 'flapper_lip_disc', type: 'ellipsoid', size: [0.028, 0.024, 0.004], pos: [0, 0.014, 0], density: 1150, solref: [0.016, 0.55], rgba: [0.95, 0.46, 0.56, 1] },
+            { name: 'flapper_lip_disc', type: 'ellipsoid', size: [0.028, 0.024, 0.004], pos: [0, 0.014, 0], density: 1150, solref: [0.04, 0.85], rgba: [0.95, 0.46, 0.56, 1] },
           ],
           children: [],
         },

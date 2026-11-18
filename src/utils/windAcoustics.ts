@@ -1414,6 +1414,9 @@ export interface SolvedPlayableWindVoice {
   /** Aero-elastic lip/flap flutter rate (Hz) and depth fraction. */
   flutterHz?: number;
   flutterFrac?: number;
+  /** Audio-rate liquid/compliant formant sweep rate (Hz) and excursion (Hz) for wet squelch resonances. */
+  squelchRateHz?: number;
+  squelchSweepHz?: number;
   /** Normalized harmonic amplitudes H_1..H_N computed directly from Z_in(n * f_0) & radiation! */
   harmonicWeights: number[];
 }
@@ -1512,9 +1515,9 @@ export function solvePlayableWindVoice(
   // Compute real harmonic regeneration weights H_1..H_N directly from the bore's TMM impedance curve Z_in(n * f_0)!
   // In the sub-resonant autonomous slap-valve regime (autonomousFlap > 0.2), sharp mucosal/rubber closure
   // excites up to 40 harmonics shaped by the short spout's vocal-tract formant resonance `modes[0]`!
-  const nMaxHarm = autonomousFlap > 0.2
-    ? Math.min(44, Math.max(16, Math.floor(2800 / Math.max(18, pitchHz))))
-    : 10;
+  // In the sub-resonant autonomous slap-valve regime (autonomousFlap > 0.2), Rosenberg asymmetric
+  // mucosal/rubber sawtooth-pulse closure excites 24..28 harmonics with low crest factor (loud, meaty buzz!)
+  const nMaxHarm = autonomousFlap > 0.2 ? 26 : 10;
   const harmonicWeights: number[] = [];
   const zFund = bore.impedanceGrid
     ? Math.max(1.5, sampleImpedanceAt(bore.impedanceGrid, pitchHz))
@@ -1523,26 +1526,24 @@ export function solvePlayableWindVoice(
   // Reduced impedance Q from a wall breach weakens nonlinear harmonic lock on entrained horns,
   // while autonomous relaxation valves are driven directly by upstream pressure!
   const hornQHealth = Math.max(0.35, Math.min(1.15, Math.log10(1 + zFund) / 1.15)) * (1 - 0.24 * breach);
-  const qHealth = (1 - autonomousFlap) * hornQHealth + autonomousFlap * (0.95 - 0.12 * breach);
-  const spoutFormantHz = Math.max(520, Math.min(1650, modes[0] ?? 820));
+  const qHealth = (1 - autonomousFlap) * hornQHealth + autonomousFlap * (0.98 - 0.10 * breach);
+  const spoutFormantHz = Math.max(420, Math.min(1350, (modes[0] ?? 760) * 0.78));
 
   for (let n = 1; n <= nMaxHarm; n++) {
     const fn = n * pitchHz;
     if (autonomousFlap > 0.2) {
-      // Narrow duty-cycle relaxation slap impulse shaped by the 3D spout's quarter-wave formant + TMM curve!
-      const sigma = 0.036 / Math.max(0.55, 0.65 + 0.55 * bNorm);
-      const pulseEnv = Math.exp(-0.5 * Math.pow((n - 1) * sigma, 2));
-      const df = (fn - spoutFormantHz) / (spoutFormantHz * (0.42 + 0.25 * breach));
-      const formantBoost = 1 + 2.4 * Math.exp(-0.5 * df * df);
+      // Rosenberg asymmetric mucosal relaxation sawtooth-pulse (1 / n^0.52) -> rich, fat low-mid buzz
+      // without the -15 dB WebAudio peak-normalization loss of a 44-term zero-phase spike!
+      const sawPulse = Math.pow(n, -0.50) * Math.exp(-0.0028 * (n - 1) * (n - 1));
+      const df = (fn - spoutFormantHz) / (spoutFormantHz * (0.48 + 0.25 * breach));
+      const formantBoost = 1 + 1.6 * Math.exp(-0.5 * df * df);
       const zn = bore.impedanceGrid ? sampleImpedanceAt(bore.impedanceGrid, Math.min(2290, fn)) : 2.5;
-      const tmmShape = 0.65 + 0.35 * Math.min(1.6, zn / 3.0);
+      const tmmShape = 0.72 + 0.28 * Math.min(1.5, zn / 3.0);
       const muteTilt = mute > 0.02
-        ? (n <= 2 ? 1 - 0.55 * mute : 1 + 0.9 * mute * Math.exp(-0.02 * (n - 8) * (n - 8)))
+        ? (n <= 2 ? 1 - 0.55 * mute : 1 + 0.9 * mute * Math.exp(-0.03 * (n - 7) * (n - 7)))
         : 1.0;
-      // Slight sub-bass roll-off on n=1..2 so raspy 350..1600 Hz slap transients dominate over pure sub-hum!
-      const raspyTilt = Math.min(1.25, 0.32 + 0.95 * (fn / Math.hypot(fn, 240)));
-      const w = pulseEnv * formantBoost * tmmShape * muteTilt * raspyTilt;
-      harmonicWeights.push(+Math.max(0.002, w).toFixed(4));
+      const w = sawPulse * formantBoost * tmmShape * muteTilt;
+      harmonicWeights.push(+Math.max(0.003, w).toFixed(4));
       continue;
     }
 
@@ -1585,24 +1586,30 @@ export function solvePlayableWindVoice(
 
   if (bore.exciter === 'brass_lip') {
     if (autonomousFlap > 0.2) {
-      // Autonomous compliant slap-valve + short spout formant:
-      const formantHz = spoutFormantHz * (1 - 0.35 * mute) + 1750 * (0.35 * mute);
+      // Autonomous compliant slap-valve + wet resonant formant squelch:
+      // Center formant tracks pressure & pitch across 340..1150 Hz ("bwww-ooww-wah-squelch"!) with high Q!
+      const dynamicVowelHz = Math.max(320, Math.min(1280, spoutFormantHz * (0.55 + 0.58 * bNorm) + pitchHz * 1.1));
+      const formantHz = dynamicVowelHz * (1 - 0.35 * mute) + 1650 * (0.35 * mute);
+      const squelchCutoffHz = Math.max(380, Math.min(1650, formantHz * (1.05 + 0.45 * bNorm + 0.25 * breach)));
       return {
         active: true,
         pitchHz: +pitchHz.toFixed(2),
         modeIndex: 0,
-        amplitude: +(rawBlowAmp * (1.25 - 0.18 * mute)).toFixed(4),
-        drive: +(0.88 + 0.52 * bNorm).toFixed(4),
+        amplitude: +(Math.min(0.42, rawBlowAmp * 1.65) * (1 - 0.15 * mute)).toFixed(4),
+        drive: +(1.25 + 0.75 * bNorm).toFixed(4),
         formantHz: +formantHz.toFixed(1),
-        formantGainDb: +(7.5 + 3.5 * mute).toFixed(2),
-        formantQ: +(1.65 + 1.8 * mute).toFixed(2),
-        bellLowpassHz: +Math.max(1450, Math.min(3400, spoutFormantHz * (1.9 + 0.9 * bNorm + 0.5 * breach))).toFixed(1),
-        bellQ: +(1.25 + 0.9 * mute).toFixed(2),
-        noiseGain: +(rawBlowAmp * (0.06 + 0.22 * breach)).toFixed(5),
+        formantGainDb: +(11.5 + 3.0 * mute).toFixed(2),
+        formantQ: +(4.8 + 2.2 * mute).toFixed(2),
+        bellLowpassHz: +squelchCutoffHz.toFixed(1),
+        bellQ: +(3.6 + 1.4 * mute).toFixed(2),
+        // Very low broadband wind hiss — real compliant flap-valves are dominated by wet resonant buzz & squelch!
+        noiseGain: +(rawBlowAmp * (0.004 + 0.018 * breach)).toFixed(5),
         phaseCoherence: +autonomousFlap.toFixed(3),
-        puffGateDepth: +(rawBlowAmp * (0.34 + 0.38 * breach) * autonomousFlap).toFixed(4),
-        flutterHz: +(14.5 + 9.5 * bNorm).toFixed(2),
-        flutterFrac: +(0.14 * autonomousFlap * (0.6 + 0.6 * bNorm)).toFixed(4),
+        puffGateDepth: +(rawBlowAmp * (0.022 + 0.035 * breach) * autonomousFlap).toFixed(4),
+        flutterHz: +(13.5 + 10.5 * bNorm).toFixed(2),
+        flutterFrac: +(0.11 * autonomousFlap * (0.55 + 0.65 * bNorm)).toFixed(4),
+        squelchRateHz: +(9.5 + 14.0 * bNorm).toFixed(2),
+        squelchSweepHz: +((220 + 340 * bNorm) * autonomousFlap).toFixed(1),
         harmonicWeights,
       };
     }

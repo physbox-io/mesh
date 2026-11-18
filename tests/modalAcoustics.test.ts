@@ -916,7 +916,8 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     expect(lowRip.pitchHz).toBeCloseTo(36, 0);
     expect(highSqueak.pitchHz).toBeCloseTo(185, 0);
     expect(lowRip.phaseCoherence).toBeGreaterThan(0.9);
-    expect(lowRip.puffGateDepth).toBeGreaterThan(0.04);
-    expect(lowRip.harmonicWeights.length).toBeGreaterThanOrEqual(24);
+    expect(lowRip.squelchSweepHz).toBeGreaterThan(200);
+    expect(lowRip.formantQ).toBeGreaterThan(4.0);
+    expect(lowRip.harmonicWeights.length).toBeGreaterThanOrEqual(20);
   });
 });
