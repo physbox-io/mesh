@@ -27,7 +27,7 @@ import { addRod, rodLines, type RodConstraints } from './clothRods';
 import { BOARD_STIFFNESS, type Board } from './clothBoards';
 import { garmentForm, garmentSettings } from './garments';
 import { bodyFormGeoms, bodyLandmarks } from './bodyForm';
-import { beltPaths, beltPieces, pocketPieces, standPiece, type AddOnPiece, type HostPanel } from './garmentAddOns';
+import { beltPaths, beltPieces, LAP_OFF, pocketPieces, standPiece, type AddOnPiece, type HostPanel } from './garmentAddOns';
 import { attachedPieces } from './garmentAttached';
 import { collarPieces, lapelPieces } from './garmentCollars';
 import { fullSides, panelEdgeEase } from './garmentFullness';
@@ -627,6 +627,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     for (const sm of shell.seams) if (sm.open) for (const i of sm.path) openPoints.add(i);
     const claimed = new Map<number, number>();
     const openFirst = new Map<number, number>(), openSecond = new Map<number, number>();
+    /** The panel each open point's second copy is on. */
+    const secondPanel = new Map<number, number>();
     const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams, ...(shell.marks ?? [])], settings.trims ?? [], shell.tris);
     const trimAt = new Map<number, TrimPlace[]>();
     const sliderDrawn = new Set<TrimPlace>();
@@ -639,11 +641,31 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const minScale = 1 / (1 + Math.max(0.02, material.give * 0.9));
     const cutPts = shell.cut ?? shell.points;
     const zTop = cutPts.reduce((m, p) => Math.max(m, p[2]), -Infinity);
-    const uScale = (i: number) => {
+    const uScale = (i: number, girth = shell.girth?.[i] ?? 0) => {
       const t = Math.min(1, Math.max(0, (zTop - cutPts[i][2]) / 0.08));
       const e = bandEase + (ease - bandEase) * t;
-      const girth = shell.girth?.[i] ?? 0;
       return e < 0 && girth > 0 ? Math.max(minScale, 1 + e / girth) : 1;
+    };
+    // Measured round the part a panel covers, all of it: a body panel's
+    // points by an armhole nearer the arm than the body, a sleeve's nearer
+    // the body, took that part's girth, three times the ease's share, and the
+    // panel scaled across from its middle jumped there (a stretch top's
+    // underarm cut 8x longer than it was built: set in, the sleeve went
+    // through the back). Each such point takes the girth of the nearest
+    // point of the panel's own part.
+    const panelGirths = (pts: number[]) => {
+      const part = shell.part, girth = shell.girth;
+      if (!part || !girth) return pts.map((g) => girth?.[g] ?? 0);
+      const votes = new Map<string, number>();
+      for (const g of pts) votes.set(part[g], (votes.get(part[g]) ?? 0) + 1);
+      const own = [...votes].sort((a, b) => b[1] - a[1])[0]?.[0];
+      const mine = pts.filter((g) => part[g] === own);
+      return pts.map((g) => {
+        if (part[g] === own || !mine.length) return girth[g];
+        let best = mine[0], bd = Infinity;
+        for (const q of mine) { const d = (cutPts[q][0] - cutPts[g][0]) ** 2 + (cutPts[q][1] - cutPts[g][1]) ** 2 + (cutPts[q][2] - cutPts[g][2]) ** 2; if (d < bd) { bd = d; best = q; } }
+        return girth[best];
+      });
     };
 
     const panelSide: ('left' | 'right')[] = [];
@@ -656,7 +678,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const spreadRows = new Map<number, { ratio: number; row: [number, number][] }>();
     shell.panels.forEach((panel, k) => {
       const flat = flattenPanel(panel.name, shell.cut ?? shell.points, shell.tris, panel.tris, seamPaths, 15, panel.upAxis, panelEdgeEase(shell, sides, k));
-      if (ease < 0 || bandEase < 0) for (let i = 0; i < flat.uv.length; i++) flat.uv[i] = [flat.uv[i][0] * uScale(flat.points[i]), flat.uv[i][1]];
+      if (ease < 0 || bandEase < 0) {
+        const girths = panelGirths(flat.points);
+        for (let i = 0; i < flat.uv.length; i++) flat.uv[i] = [flat.uv[i][0] * uScale(flat.points[i], girths[i]), flat.uv[i][1]];
+      }
       // Gathered or pleated: spread along its seam and meshed afresh (garmentSpread), its new points new particles.
       const spread = spreadPanel(shell, k, flat, sides, material.thickness);
       let piece: FlatPiece = flat;
@@ -680,7 +705,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           if (claimed.get(g) === undefined) { claimed.set(g, k); openFirst.set(g, g); return; }
           if (claimed.get(g) === k) return;
           const dup = openSecond.get(g) ?? x0.length;
-          if (!openSecond.has(g)) { openSecond.set(g, dup); x0.push(x0[g].slice()); mass.push(0); }
+          if (!openSecond.has(g)) { openSecond.set(g, dup); secondPanel.set(g, k); x0.push(x0[g].slice()); mass.push(0); }
           own.set(local, dup);
         });
         if (own.size) particleOf = (local: number) => own.get(local) ?? piece.points[local];
@@ -882,6 +907,22 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         if (pr) { z.pairs.push(pr[0], pr[1]); z.at.push(up); z.sew.push(pr[2]); }
       }
       if (z.at.length) zips.push(z);
+    }
+    // An opening left undone laps: the front that laps over (`lap`, default
+    // the right) is started a fabric's thickness outside the other along it,
+    // as the button stand's edge is. Both copies of a point started in one
+    // place, the two fronts' edges lay in each other's surface, and the
+    // first settle pushed each through the other wherever they met (28
+    // crossings down a leather jacket's open zip). Where it is done up the
+    // two are sewn shut edge to edge, and stay together.
+    if (!asPieces) {
+      const lap = (settings.trims ?? []).find((t) => t.lap)?.lap ?? 'right';
+      for (const [g, dup] of openSecond) {
+        if (fastenAt.has(g)) continue;
+        const over = panelSide[claimed.get(g)!] === lap ? g : panelSide[secondPanel.get(g)!] === lap ? dup : -1, n = shellNormals[g];
+        if (over < 0 || !n) continue;
+        for (let c = 0; c < 3; c++) x0[over][c] += LAP_OFF * n[c];
+      }
     }
     // Elastic in its casings along the garment's lines.
     for (const el of settings.elastics ?? []) for (const { run, closed } of chainLineRuns([...shell.edges, ...shell.seams, ...(shell.marks ?? [])], el.along)) addElasticRun(run, closed, el);

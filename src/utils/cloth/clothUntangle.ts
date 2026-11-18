@@ -105,6 +105,39 @@ export function findCrossings(x: ArrayLike<number>, m: UntangleMesh, only: Int32
   return out;
 }
 
+/**
+ * The points of a surface (`points`, triangles `tris`, any unused points
+ * among them) where it passes through itself: both ends of each edge through
+ * a triangle, and the triangle's corners. For the mesh operations that move
+ * a modelled surface's points, which keep it as uncrossed as it came.
+ */
+export function crossedPoints(points: number[][], tris: ArrayLike<number>): Set<number> {
+  const x = new Float64Array(3 * points.length);
+  points.forEach((p, i) => { x[3 * i] = p[0]; x[3 * i + 1] = p[1]; x[3 * i + 2] = p[2]; });
+  const T = Int32Array.from(tris), out = new Set<number>();
+  for (const c of findCrossings(x, untangleMesh(points.length, T, []))) {
+    out.add(c.a); out.add(c.b);
+    for (let k = 0; k < 3; k++) out.add(T[3 * c.t + k]);
+  }
+  return out;
+}
+
+/**
+ * Points moved from `was` to `points` (same triangles) put back where the
+ * move took the surface through itself, until it is through itself nowhere a
+ * point moved. Where a surface comes near itself (between the legs at the
+ * crotch, under an arm), evening its points out along it, each put back onto
+ * the surface it stands for, can take one across the gap: a surface net's
+ * points, uncrossed off the grid, came out of its relaxing through each other.
+ */
+export function undoCrossingMoves(points: number[][], was: number[][], tris: ArrayLike<number>): void {
+  for (let round = 0; round < 16; round++) {
+    let undone = 0;
+    for (const v of crossedPoints(points, tris)) if (points[v] !== was[v]) { points[v] = was[v]; undone++; }
+    if (!undone) return;
+  }
+}
+
 /** Segment (a, b) through triangle (i0, i1, i2), strictly inside both: [s along the segment, b1, b2] or null (Moller-Trumbore). */
 function segmentTriangle(x: ArrayLike<number>, a: number, b: number, i0: number, i1: number, i2: number): number[] | null {
   const v0x = x[3 * i0], v0y = x[3 * i0 + 1], v0z = x[3 * i0 + 2];

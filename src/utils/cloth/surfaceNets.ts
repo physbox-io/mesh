@@ -4,10 +4,12 @@
  * crossings; a quad across each grid edge it crosses, between the four cells
  * round it, wound so its normal points the way the field grows. Then evened
  * out along the surface a few times, each point put back on it, so the
- * triangles are near equal, about a cell across.
+ * triangles are near equal, about a cell across, and never so as to take
+ * it through itself.
  */
 
 import { sampleGrid, type Grid } from './formSdf';
+import { undoCrossingMoves } from './clothUntangle';
 
 export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: number[][]; tris: number[] } {
   const [nx, ny, nz] = g.dims, h = g.h;
@@ -71,7 +73,10 @@ export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: numbe
       project(q);
       return q;
     });
+    const was = points.slice();
     for (let i = 0; i < points.length; i++) points[i] = next[i];
+    // Never through itself: off the grid it is not, and a step that took it there is undone where it did.
+    undoCrossingMoves(points, was, tris);
   }
   return { points, tris };
 }

@@ -185,6 +185,14 @@ export function heightOver(pos: V3, n: V3, below: AddOnPiece[]): number {
 /** Clear of the garment as sewn on, and as a loop's middle stands off for a belt to pass under it. */
 export const SEWN_OFF = 0.0024;
 const LOOP_OFF = 0.0085, BELT_OFF = 0.0032;
+/**
+ * How far over what it laps a lapping end or edge starts, metres: a front
+ * over the other at an opening (clothModel), a belt's end over its start, as
+ * a button stand's edge over the under front (standPiece). Started in one
+ * place, the two lay in each other's surface and the first settle pushed
+ * each through the other.
+ */
+export const LAP_OFF = 0.0035;
 
 /**
  * A rectangle (with a slight point at the bottom, if `point`) laid on a
@@ -387,13 +395,17 @@ export function beltPieces(belt: GarmentBelt, loops: number, paths: V3[][], host
       lens.sort((a, b) => a - b);
       const m = meshOutline(edges, Math.min(spacing, width / 2.5, lens[lens.length >> 1] ?? Infinity));
       const tacks: AddOnTack[] = [], start: number[][] = [];
+      // Its two ends meet at the front: the end laps over the start, risen to
+      // it over the last two widths, not cut to meet it in its own surface.
+      const lapFrom = len - 2 * width;
       m.uv.forEach(([u, v], i) => {
         const { p, t } = curve.at(u);
         const n = normalOf(nearestTack(p, hostTris, wornX, normalOf, 0, false, 0).tack.tri[0]);
         let up = unit(cross(t, n));
         if (up[2] < 0) up = [-up[0], -up[1], -up[2]];
         const q = [p[0] + up[0] * v, p[1] + up[1] * v, p[2] + up[2] * v];
-        const { tack, at } = nearestTack(q, hostTris, wornX, normalOf, BELT_OFF, true, i);
+        const lap = u > lapFrom ? LAP_OFF * Math.min(1, (u - lapFrom) / (len - lapFrom)) : 0;
+        const { tack, at } = nearestTack(q, hostTris, wornX, normalOf, BELT_OFF + lap, true, i);
         tacks.push(tack);
         start.push(at);
       });

@@ -10,8 +10,11 @@
  * minutes. Here each part keeps triangles as small as its own curvature
  * asks (`target`), a cuff fine and a skirt at a garment's spacing.
  *
- * Open edges, and the points on them, stay where they are.
+ * Open edges, and the points on them, stay where they are; and it is taken
+ * through itself nowhere it was not.
  */
+
+import { crossedPoints } from './clothUntangle';
 
 const cross = (u: number[], v: number[]) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
 const sub = (a: number[], b: number[]) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -60,8 +63,30 @@ export function coarsenSurface(
     return (n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]) / (l0 * l1) > TURN;
   };
 
+  // Never through itself: what crosses as given may, nothing else. A pass
+  // (of collapses, or of flips and evening out) that takes it through itself
+  // is made again with the points there kept where they are. Between the
+  // legs at a crotch, merging two points and putting the middle back on the
+  // surface took it across the gap to the other leg's side.
+  const live = () => { const out: number[] = []; for (let t = 0; t < nT; t++) if (!dead[t]) out.push(T[3 * t], T[3 * t + 1], T[3 * t + 2]); return out; };
+  const crossedAtFirst = crossedPoints(P, T);
+  const uncrossed = (pass: () => number): number => {
+    for (let attempt = 0; ; attempt++) {
+      const saved = { P: P.slice(), T: T.slice(), dead: dead.slice(), gone: gone.slice(), vt: vt.map((l) => l.slice()), size: size.slice() };
+      const done = pass();
+      if (done <= 0) return done;
+      const fresh = [...crossedPoints(P, live())].filter((v) => !crossedAtFirst.has(v));
+      if (!fresh.length) return done;
+      for (let i = 0; i < P.length; i++) { P[i] = saved.P[i]; vt[i] = saved.vt[i]; size[i] = saved.size[i]; }
+      for (let i = 0; i < T.length; i++) T[i] = saved.T[i];
+      dead.set(saved.dead); gone.set(saved.gone);
+      if (attempt >= 20) return 0;
+      for (const v of fresh) fixed[v] = 1;
+    }
+  };
+
   // ---- Collapses, shortest first, until none is short.
-  for (let pass = 0; pass < 12; pass++) {
+  for (let pass = 0; pass < 12; pass++) if (uncrossed(() => {
     const cand: [number, number, number][] = [];
     const seen = new Set<number>(), n = P.length;
     for (let t = 0; t < nT; t++) {
@@ -75,7 +100,7 @@ export function coarsenSurface(
         if (l < SHORT) cand.push([l, a, b]);
       }
     }
-    if (!cand.length) break;
+    if (!cand.length) return 0;
     cand.sort((x, y) => x[0] - y[0]);
     let done = 0;
     for (const [, a, b] of cand) {
@@ -109,13 +134,13 @@ export function coarsenSurface(
       size[a] = want;
       done++;
     }
-    if (done === 0) break;
-  }
+    return done;
+  }) <= 0) break;
 
   // ---- Edges flipped toward six round each point, then the points evened out.
   const valence = new Int32Array(P.length);
   const countValence = () => { valence.fill(0); for (let v = 0; v < P.length; v++) if (!gone[v]) valence[v] = ring(v).size; };
-  for (let round = 0; round < 3; round++) {
+  for (let round = 0; round < 3; round++) uncrossed(() => {
     countValence();
     for (let t = 0; t < nT; t++) {
       if (dead[t]) continue;
@@ -158,7 +183,8 @@ export function coarsenSurface(
       project(q);
       if (around(v).every((t) => turnsOk(t, v, q))) P[v] = q;
     }
-  }
+    return 1;
+  });
 
   // ---- Only the points still used, in order.
   const remap = new Int32Array(P.length).fill(-1), outP: number[][] = [], outT: number[] = [];
