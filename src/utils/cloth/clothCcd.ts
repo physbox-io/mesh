@@ -67,6 +67,14 @@ export class ClothCcd {
   private tris: Int32Array;
   private root: Int32Array;
   private edges: Int32Array;
+  /**
+   * Points on a triangle: the cloth. A model may carry points on none (a
+   * gathered or pleated panel's shell points, left where the shell had them
+   * when it is meshed afresh, held still); taken for cloth, the folds were
+   * held off them, and the impact zones they joined held still, the cloth
+   * round them stretched where it caught (a pleated skirt to 12% at p99).
+   */
+  private onCloth: Uint8Array;
   /** Per point and per triangle, whether it is in a crossing (both flagged: the pair is left free). */
   tangledPoint: Uint8Array;
   tangledTri: Uint8Array;
@@ -91,6 +99,8 @@ export class ClothCcd {
       if (!seen.has(key)) { seen.add(key); E.push(a, b); }
     }
     this.edges = Int32Array.from(E);
+    this.onCloth = new Uint8Array(n);
+    for (let t = 0; t < tris.length; t++) this.onCloth[tris[t]] = 1;
     this.tangledPoint = new Uint8Array(n);
     this.tangledTri = new Uint8Array(tris.length / 3);
   }
@@ -273,6 +283,7 @@ export class ClothCcd {
     const stamp = this.tStamp;
     stamp.fill(-1);
     for (let p = 0; p < n; p++) {
+      if (!this.onCloth[p]) continue;
       const o = 6 * p;
       if (pB[o + 3] < r0 || pB[o + 4] < r1 || pB[o + 5] < r2 || pB[o] > r3 || pB[o + 1] > r4 || pB[o + 2] > r5) continue;
       if (!nearPt(p)) continue;

@@ -93,7 +93,10 @@ export class LayerContacts {
       if (outerTris.length) {
         const innerParticles: number[] = [], innerMu: number[] = [];
         for (const { model, base } of inner) {
-          for (let i = 0; i < model.invMass.length; i++) { innerParticles.push(base + i); innerMu.push(model.material.friction); }
+          // Its points on its triangles only: a gathered or pleated panel's shell points, on none, are no cloth (clothCcd).
+          const onCloth = new Uint8Array(model.invMass.length);
+          for (const q of model.tris) onCloth[q] = 1;
+          for (let i = 0; i < model.invMass.length; i++) if (onCloth[i]) { innerParticles.push(base + i); innerMu.push(model.material.friction); }
         }
         this.groups.push({ tris: Int32Array.from(outerTris), outward: Uint8Array.from(outerOutward), particles: Int32Array.from(innerParticles), mu: Float64Array.from(innerMu), pushTris: true, start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((outerTris.length / 3) * 6) });
       }
