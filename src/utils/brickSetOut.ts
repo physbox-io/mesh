@@ -244,6 +244,8 @@ function setOutStrip(
     startWith?: Kind; endWith?: Kind;
     /** What a closer costs away from the start (broken bond). Default: 5. */
     closerMidCost?: number;
+    /** Graduated lap penalty at T/cross junctions so an unavoidable short lap never picks a dead-on severing seam. */
+    graduatedLap?: boolean;
     /** Middle of the wall along this strip, mm (default: length / 2). */
     mid?: number;
   } = {},
@@ -268,17 +270,20 @@ function setOutStrip(
   }
   // Whether a joint at each grid position would sit on one below, worked out
   // once rather than at every step of the search. The nearer the seam below,
-  // the heavier the penalty, so when a full lap cannot be had it still picks
-  // the widest lap there is rather than a dead-on straight joint.
-  const nearAt = new Uint8Array(q + jq + 2);
+  // the heavier the penalty at junctions, so when a full lap cannot be had it
+  // still picks the widest lap there is rather than a dead-on straight joint.
+  const nearPenalty = new Float32Array(q + jq + 2);
   const lapQ = lap / step;
   for (const b of below) {
     const bq = b / step;
     for (let at = Math.max(0, Math.ceil(bq - lapQ)); at <= Math.min(q + jq + 1, Math.floor(bq + lapQ)); at++) {
-      if (Math.abs(bq - at) * step < lap) nearAt[at] = 1;
+      const d = Math.abs(bq - at) * step;
+      if (d < lap) {
+        const pen = opts.graduatedLap ? 10 + 15 * (1 - d / lap) : 10;
+        if (pen > nearPenalty[at]) nearPenalty[at] = pen;
+      }
     }
   }
-  const near = (at: number) => nearAt[Math.round(at)] === 1;
   const kinds: Kind[] = ['S', 'H', 'P', 'Q'];
   const K = kinds.length + 1;
   const ki = (k: Kind) => kinds.indexOf(k) + 1;
@@ -323,7 +328,7 @@ function setOutStrip(
         }
         const next = end + jq;
         if (next > q) return;
-        const total = c + (near(end + jq / 2) ? 10 : 0);
+        const total = c + (nearPenalty[Math.round(end + jq / 2)] ?? 0);
         const st = next * K + ki(pc.kind);
         if (total < cost[st]) { cost[st] = total; back[st] = p * K + last; how[st] = i; }
       });
@@ -639,6 +644,7 @@ export function layWalls(args: {
   // tiny mortar joint (0.5 mm) on a multi-metre wall never blows up the DP.
   const maxWallLen = Math.max(L, ...strips.map((st) => st.w.length + Math.max(0, st.extStart) + Math.max(0, st.extEnd)));
   const setOutStep = Math.max(0.1, j / 8, L / 250, maxWallLen / 4000);
+  const hasJunction = nodes.some((n) => n.length >= 3);
   const lap = L / 4;
   let headerless = 0;
   strips.forEach((st) => {
@@ -746,7 +752,7 @@ export function layWalls(args: {
           { kind: 'H', len: W, cost: 0 },
           { kind: 'Q', len: (W - jH) / 2, cost: 0.6 },
         ], belowSeams.flat(), { ...dims, j: jH }, setOutStep, lap, {
-          anyCut: { kind: 'H', min: W / 2, max: W - jH }, closerMidCost: 0.9,
+          anyCut: { kind: 'H', min: W / 2, max: W - jH }, closerMidCost: 0.9, graduatedLap: hasJunction,
           ...(st.cornerStart ? { startWith: 'Q' as Kind } : {}), ...(st.cornerEnd ? { endWith: 'Q' as Kind } : {}),
         }), 0, jH);
         return;
@@ -758,7 +764,7 @@ export function layWalls(args: {
           { kind: 'Q', len: (W - j) / 2, cost: 0.3 },
           { kind: 'P', len: (3 * L - j) / 4, cost: 0.6 },
           { kind: 'P', len: (L - j) / 2, cost: 0.6 },
-        ], merged, dims, setOutStep, lap, { alternate: true, first: c % 2 === 0 ? 'H' : 'P', anyCut: { kind: 'P', min: L / 4, max: L - j } });
+        ], merged, dims, setOutStep, lap, { alternate: true, first: c % 2 === 0 ? 'H' : 'P', anyCut: { kind: 'P', min: L / 4, max: L - j }, graduatedLap: hasJunction });
         placeAll(plan, 0);
         return;
       }
@@ -771,7 +777,7 @@ export function layWalls(args: {
       const leafLength = length - s0 - s1;
       if (leafLength < L / 4) continue;
       const plan = setOutStrip(leafLength, stretchers, bond === 'stack' ? [] : belowSeams[k].map((x) => x - s0), dims, setOutStep, lap,
-        { anyCut: { kind: 'S', min: L / 4, max: L - j }, mid: length / 2 - s0 });
+        { anyCut: { kind: 'S', min: L / 4, max: L - j }, mid: length / 2 - s0, graduatedLap: hasJunction });
       if (!plan) continue;
       cost += plan.cost ?? 0;
       let s = s0;

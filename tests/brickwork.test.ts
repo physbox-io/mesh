@@ -370,10 +370,22 @@ describe('regressions from the brickwork audit (#22)', () => {
       expect(tOne.bond).toMatchObject({ pieces: 1, straightJoints: 0 });
       expect(strictOverlaps(tOne.bricks)).toBe(0);
     }
-    const cross = scene([span('x', -1.125, 1.125, -0.1075, 0.1075, 0, 0.45), span('y', -0.1075, 0.1075, -1.125, 1.125, 0, 0.45)]);
-    for (const bond of ['stretcher', 'flemish'] as BrickBond[]) {
+    const cross = scene([span('x', -1.125, 1.125, -0.1075, 0.1075, 0, 0.6), span('y', -0.1075, 0.1075, -1.125, 1.125, 0, 0.6)]);
+    for (const bond of ['stretcher', 'english', 'flemish'] as BrickBond[]) {
       const r = layBricks(cross, { bond });
-      expect(r.bond).toMatchObject({ pieces: 1, straightJoints: 0 });
+      expect(r.bond).toMatchObject({ pieces: 1, sideBySide: 0, unsupported: 0 });
+      expect(r.bond.straightJoints).toBeLessThanOrEqual(bond === 'english' ? 3 : 0);
+      expect(strictOverlaps(r.bricks)).toBe(0);
+    }
+    const crossOffGauge = scene([
+      span('ew', -1, 1, -0.1075, 0.1075, 0, 0.6),
+      span('ns1', -0.1075, 0.1075, 0.1075, 1, 0, 0.6),
+      span('ns2', -0.1075, 0.1075, -1, -0.1075, 0, 0.6),
+    ]);
+    for (const bond of ['stretcher', 'english', 'flemish'] as BrickBond[]) {
+      const r = layBricks(crossOffGauge, { bond });
+      expect(r.bond).toMatchObject({ pieces: 1, sideBySide: 0, unsupported: 0 });
+      expect(r.bond.straightJoints).toBeLessThanOrEqual(10);
       expect(strictOverlaps(r.bricks)).toBe(0);
     }
   }, 60000);
