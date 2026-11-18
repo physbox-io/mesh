@@ -1009,6 +1009,16 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         [{ x: formPts, tris: formTris, normalOf: (i) => formNormals[i] }], turns, materialName));
     }
     overlayTrisStart = tris.length;
+    // Which way each particle's cloth faces out, from the triangles placed so
+    // far (the garment's, then each add-on's as it is placed): what a piece's
+    // triangles with no tack of their own face as, from the nearest point of
+    // it that is held to or shared with cloth already placed.
+    const facesOut: number[][] = x0.map(() => [0, 0, 0]);
+    const addFacing = (tri: number[]) => {
+      const f = triNormal(x0, tri);
+      for (const p of tri) { while (facesOut.length <= p) facesOut.push([0, 0, 0]); for (let c = 0; c < 3; c++) facesOut[p][c] += f[c]; }
+    };
+    for (let t = 0; t < tris.length; t += 3) addFacing([tris[t], tris[t + 1], tris[t + 2]]);
     const placed = new Map<string, (local: number) => number>();
     let anyShared = false;
     for (const piece of addOns) {
@@ -1030,13 +1040,31 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       for (const st of piece.stitches ?? []) addStitch(particleOf(st.local), st.particle, st.sew ? sewTime : 0);
       for (const [i, j] of piece.selfStitches ?? []) addStitch(particleOf(i), particleOf(j), sewTime);
       if (piece.drop) piece.uv.forEach((_, i) => drop.push(particleOf(i)));
+      // Where its cloth's outside is known: its tacks (the triangle each is
+      // held over) and its points that are cloth already placed (a collar's
+      // neck edge on the neckline, a fall's on its stand).
+      const facing: { at: number[]; n: number[] }[] = piece.tacks.map((tk) => ({ at: x0[particleOf(tk.local)], n: triNormal(x0, tk.tri) }));
+      for (const [, p] of sharedAt) { const f = facesOut[p], fl = f ? Math.hypot(f[0], f[1], f[2]) : 0; if (fl > 1e-9) facing.push({ at: x0[p], n: [f[0] / fl, f[1] / fl, f[2] / fl] }); }
       for (let t = 0; t < piece.tris.length; t += 3) {
         const [i, j, l] = [piece.tris[t], piece.tris[t + 1], piece.tris[t + 2]];
-        // Facing out, as the garment it is on.
-        const tk = tackOf.get(i) ?? tackOf.get(j) ?? tackOf.get(l) ?? piece.tacks[0];
         const [pi, pj, pl] = [particleOf(i), particleOf(j), particleOf(l)];
-        const n = tk ? triNormal(x0, tk.tri) : [0, 0, 0], face = triNormal(x0, [pi, pj, pl]);
+        // Facing out, as the garment it is on: as its own tack's triangle,
+        // else as the nearest point of it whose outside is known. (Taken from
+        // its first tack, a collar's fall over its stand at the back faced as
+        // the lapel at its far end, into the neck; a stand with no tack kept
+        // whichever way it was meshed. Layer contact reads a garment's
+        // outside by its triangles' facing, and pushed the cloth over them
+        // through them.)
+        const tk = tackOf.get(i) ?? tackOf.get(j) ?? tackOf.get(l);
+        let n = tk ? triNormal(x0, tk.tri) : [0, 0, 0];
+        if (!tk && facing.length) {
+          const c = [0, 1, 2].map((k) => (x0[pi][k] + x0[pj][k] + x0[pl][k]) / 3);
+          let bd = Infinity;
+          for (const f of facing) { const d = (f.at[0] - c[0]) ** 2 + (f.at[1] - c[1]) ** 2 + (f.at[2] - c[2]) ** 2; if (d < bd) { bd = d; n = f.n; } }
+        }
+        const face = triNormal(x0, [pi, pj, pl]);
         if (face[0] * n[0] + face[1] * n[1] + face[2] * n[2] < 0) tris.push(pi, pl, pj); else tris.push(pi, pj, pl);
+        addFacing(tris.slice(-3));
         for (const [a, c] of [[i, j], [j, l], [l, i]]) edges.add(particleOf(a), particleOf(c), Math.hypot(uv[a][0] - uv[c][0], uv[a][1] - uv[c][1]), stretch);
         const m = (pm.arealDensity * flatArea(uv[i], uv[j], uv[l])) / 3;
         mass[pi] += m; mass[pj] += m; mass[pl] += m;
