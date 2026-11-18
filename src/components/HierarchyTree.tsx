@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { ChevronRight, ChevronDown, Eye, EyeOff } from 'lucide-react';
+import { ChevronRight, ChevronDown, Eye, EyeOff, Trash2 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { usePanels } from '../store/panelsStore';
 import { HARDWARE_KINDS } from '../utils/hardwareCuts';
@@ -79,6 +79,8 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
   const activeGeomIndex = useStore((s) => (s.selectedNodeId === node.id && s.geomFocused ? s.activeGeomIndex : -1));
   const isHidden = useStore((s) => s.hiddenNodeIds.includes(node.id));
   const toggleNodeHidden = useStore((s) => s.toggleNodeHidden);
+  const deleteNodeGeom = useStore((s) => s.deleteNodeGeom);
+  const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const select = useSelectRow();
 
   const dimmed = isHidden || ancestorHidden;
@@ -143,17 +145,22 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
             // and edit — the primitives above it are the real controls.
             if (g.csgDerived || g.role === 'collision') return null;
 
+            const hwGroup = hw?.group;
+            const canDeleteSubGeom = node.geoms.filter(
+              (o, oIdx) => oIdx !== idx && !(hwGroup && o.hardware?.group === hwGroup) && !o.csgDerived && o.csg !== 'difference',
+            ).length >= 1;
+
             return (
               <div
                 key={`${node.id}-geom-${idx}`}
                 onClick={() => select(node.id, idx)}
-                className={`flex items-center px-2 py-1 rounded-md border cursor-pointer transition-colors shadow-sm text-xs ${
+                className={`group flex items-center px-2 py-1 rounded-md border cursor-pointer transition-colors shadow-sm text-xs ${
                   isGeomSelected
                     ? 'bg-indigo-50 border-indigo-200 text-indigo-600 dark:bg-indigo-950/40 dark:border-indigo-800 dark:text-indigo-400 font-semibold'
                     : 'bg-white/80 dark:bg-slate-900/50 border-transparent dark:border-slate-800/80 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-500 dark:text-slate-400'
                 }`}
               >
-                <span className="flex items-center gap-1.5 text-[11px] font-medium truncate">
+                <span className="flex items-center gap-1.5 text-[11px] font-medium truncate min-w-0">
                   <span>{geomEmoji(node, g)}</span>
                   <span
                     className={`truncate ${g.csg === 'difference' && !hw ? 'line-through decoration-rose-400/70' : ''}`}
@@ -162,6 +169,22 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
                     {hw ? `${HARDWARE_KINDS[hw.kind].label} ${hw.size}` : (g.name || `Geom ${idx + 1}`)}
                   </span>
                 </span>
+                {canDeleteSubGeom && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteNodeGeom(node.id, idx);
+                      setActiveGeomIndex(0, false);
+                    }}
+                    className={`ml-auto pl-1 p-0.5 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 cursor-pointer shrink-0 transition-opacity ${
+                      isGeomSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                    }`}
+                    title={`Delete shape "${hw ? `${HARDWARE_KINDS[hw.kind].label} ${hw.size}` : (g.name || `Geom ${idx + 1}`)}"`}
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
               </div>
             );
           })}

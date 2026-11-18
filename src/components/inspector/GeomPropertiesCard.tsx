@@ -1,3 +1,4 @@
+import { Trash2 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { sliderSpan } from '../../utils/sliderSpan';
 import type { SceneGeom, SceneNode } from '../../types/scene';
@@ -274,29 +275,50 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
 export function SubGeomSelector({ node: selectedNode }: { node: SceneNode }) {
   const activeGeomIndex = useStore((s) => s.activeGeomIndex);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
+  const deleteNodeGeom = useStore((s) => s.deleteNodeGeom);
   if (!selectedNode.geoms || selectedNode.geoms.length < 2) return null;
   const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
   const geom = selectedNode.geoms[activeIndex];
+  const hwGroup = geom?.hardware?.group;
+  const canDeleteActive = selectedNode.geoms.filter(
+    (g, idx) => idx !== activeIndex && !(hwGroup && g.hardware?.group === hwGroup) && !g.csgDerived && g.csg !== 'difference',
+  ).length >= 1;
+
   return (
-    <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-      <label className="text-xs font-semibold text-slate-600">Select Sub-Geometry</label>
-      <select
-        value={activeIndex}
-        onChange={(e) => setActiveGeomIndex(parseInt(e.target.value))}
-        className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
-      >
-        {selectedNode.geoms.map((g, idx) => (
-          // Generated boolean geoms aren't editable — a body with
-          // 16 sector colliders would otherwise bury its two real
-          // shapes at the bottom of this list. Values stay the
-          // real indices so activeGeomIndex still means one thing.
-          g.csgDerived ? null : (
-          <option key={idx} value={idx}>
-            {g.csg === 'difference' ? '\u2796 ' : g.csg === 'intersection' ? '\u2229 ' : ''}{g.name || `Geom ${idx + 1}`} ({g.type})
-          </option>
-          )
-        ))}
-      </select>
+    <div className="p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col gap-2">
+      <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">Select Sub-Geometry</label>
+      <div className="flex items-center gap-1.5">
+        <select
+          value={activeIndex}
+          onChange={(e) => setActiveGeomIndex(parseInt(e.target.value))}
+          className="flex-1 min-w-0 px-2.5 py-1.5 border border-slate-200 dark:border-slate-700 rounded text-xs bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 outline-none focus:border-blue-500 cursor-pointer font-medium"
+        >
+          {selectedNode.geoms.map((g, idx) => (
+            // Generated boolean geoms aren't editable — a body with
+            // 16 sector colliders would otherwise bury its two real
+            // shapes at the bottom of this list. Values stay the
+            // real indices so activeGeomIndex still means one thing.
+            g.csgDerived ? null : (
+            <option key={idx} value={idx}>
+              {g.csg === 'difference' ? '\u2796 ' : g.csg === 'intersection' ? '\u2229 ' : ''}{g.name || `Geom ${idx + 1}`} ({g.type})
+            </option>
+            )
+          ))}
+        </select>
+        {canDeleteActive && (
+          <button
+            type="button"
+            onClick={() => {
+              deleteNodeGeom(selectedNode.id, activeIndex);
+              setActiveGeomIndex(0, false);
+            }}
+            className="p-1.5 rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors cursor-pointer shrink-0"
+            title={`Delete shape "${geom.name || `Geom ${activeIndex + 1}`}"`}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
       <div className="text-[10px] text-slate-400 font-semibold px-0.5 flex justify-between uppercase tracking-wider">
         <span>Type: {geom.type}</span>
         {geom.name && <span>Name: {geom.name}</span>}

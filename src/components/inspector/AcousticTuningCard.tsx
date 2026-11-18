@@ -105,6 +105,10 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           embouchureHz: node.windInstrument.embouchureHz,
           boreShape: windBore.boreShape,
           resonantModesHz: windBore.resonantModesHz,
+          modeImpedancePeaks: windBore.modeImpedancePeaks,
+          impedanceGrid: windBore.impedanceGrid,
+          muteFactor: windBore.muteFactor,
+          breachFactor: windBore.breachFactor,
           mouthRadiusM: windBore.mouthRadiusM,
           bellRadiusM: windBore.bellRadiusM,
           cellCount: windBore.cellCount,
@@ -246,6 +250,20 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           <div>
             Impedance modes: <b>{windBore.resonantModesHz.slice(0, 4).map((f) => `${hzToNoteInfo(f).note} (${f.toFixed(0)})`).join(' · ')}</b>
           </div>
+          {((windBore.muteFactor ?? 0) > 0.04 || windBore.toneholes.some((t) => t.fromGeometry)) && (
+            <div className="flex flex-wrap gap-1.5 text-[10px] font-medium text-amber-800 dark:text-amber-300">
+              {windBore.toneholes.some((t) => t.fromGeometry) && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-100/80 dark:bg-amber-900/40">
+                  {windBore.toneholes.filter((t) => t.fromGeometry).length} open wall vent(s)
+                </span>
+              )}
+              {(windBore.muteFactor ?? 0) > 0.04 && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-100/80 dark:bg-amber-900/40">
+                  Bell muted {Math.round((windBore.muteFactor ?? 0) * 100)}%
+                </span>
+              )}
+            </div>
+          )}
           <label className="flex flex-col gap-0.5 text-slate-600 dark:text-slate-300">
             <span className="flex justify-between">
               <span>Embouchure / Lip Tension</span>

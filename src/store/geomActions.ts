@@ -20,6 +20,12 @@ export interface GeomActions {
   // --- CSG (boolean modifiers) ---
   deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
   /**
+   * Deletes only the focused sub-geom when a single sub-geom is selected on a
+   * multi-shape body (leaving at least one positive shape); otherwise deletes
+   * the selected body/bodies.
+   */
+  deleteSelectionOrFocusedGeom: () => void;
+  /**
    * Puts a scaled copy of a body's own shape inside it, marked as a hole.
    *
    * The shortest path from a solid to a hollow one. Factors are per-axis, and
@@ -221,6 +227,32 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
       }
       set({ sceneGraph: newScene });
       rebuildAfterGeomEdit(get, newScene, nodeId);
+    },
+
+    deleteSelectionOrFocusedGeom: () => {
+      const s = get();
+      if (s.selectedNodeId && s.extraSelectedIds.length === 0 && s.geomFocused) {
+        const node = findNode(s.sceneGraph.nodes, s.selectedNodeId);
+        const geoms = node?.geoms ?? [];
+        if (node && s.activeGeomIndex >= 0 && s.activeGeomIndex < geoms.length) {
+          const target = geoms[s.activeGeomIndex];
+          const group = target?.hardware?.group;
+          const remainingPositives = geoms.filter(
+            (g: SceneGeom, idx: number) =>
+              idx !== s.activeGeomIndex &&
+              !(group && g.hardware?.group === group) &&
+              !g.csgDerived &&
+              g.csg !== 'difference',
+          );
+          if (remainingPositives.length >= 1) {
+            s.deleteNodeGeom(node.id, s.activeGeomIndex);
+            s.setActiveGeomIndex(0, false);
+            return;
+          }
+        }
+      }
+      const ids = [...(s.selectedNodeId ? [s.selectedNodeId] : []), ...s.extraSelectedIds];
+      if (ids.length > 0) s.deleteNodes(ids);
     },
 
     insetNodeGeoms: (nodeId, factor, pocket) => {

@@ -23,12 +23,36 @@ export function ExportStlCard({ node, threeSceneRef }: { node: SceneNode; threeS
   );
 }
 
-/** Export STL and Delete Component, together under the part's name. */
+/** Export STL and Delete Shape / Delete Component, together under the part's name. */
 export function PartActions({ node, threeSceneRef }: { node: SceneNode; threeSceneRef: RefObject<THREE.Scene | null> }) {
   const deleteNode = useStore((s) => s.deleteNode);
+  const deleteNodeGeom = useStore((s) => s.deleteNodeGeom);
+  const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
+  const geomFocused = useStore((s) => s.geomFocused);
+  const activeGeomIndex = useStore((s) => s.activeGeomIndex);
+
+  const focusedGeom = geomFocused && node.geoms && activeGeomIndex >= 0 && activeGeomIndex < node.geoms.length
+    ? node.geoms[activeGeomIndex]
+    : null;
+  const hwGroup = focusedGeom?.hardware?.group;
+  const canDeleteFocusedGeom = !!focusedGeom && (node.geoms ?? []).filter(
+    (g, idx) => idx !== activeGeomIndex && !(hwGroup && g.hardware?.group === hwGroup) && !g.csgDerived && g.csg !== 'difference',
+  ).length >= 1;
+
   return (
     <div className="flex flex-col gap-1.5">
       <ExportStlCard node={node} threeSceneRef={threeSceneRef} />
+      {canDeleteFocusedGeom && focusedGeom && (
+        <button
+          onClick={() => {
+            deleteNodeGeom(node.id, activeGeomIndex);
+            setActiveGeomIndex(0, false);
+          }}
+          className="flex items-center justify-center gap-2 w-full py-2 border border-amber-300 dark:border-amber-800 rounded-lg text-xs font-semibold text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors shadow-sm cursor-pointer"
+        >
+          <Trash2 className="w-4 h-4" /> Delete Shape ({focusedGeom.name || `Geom ${activeGeomIndex + 1}`})
+        </button>
+      )}
       <button
         onClick={() => deleteNode(node.id)}
         className="flex items-center justify-center gap-2 w-full py-2 border border-red-200 rounded-lg text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 hover:border-red-300 transition-colors shadow-sm cursor-pointer"

@@ -40,12 +40,12 @@ export function AppHeader({
   const {
     isPlaying, togglePlay, isLoaded, resetSimulation,
     isSettingsOpen, setSettingsOpen,
-    selectedNodeId, extraSelectedIds, sculptNodeId, latticeNodeId,
+    selectedNodeId, extraSelectedIds, geomFocused, sculptNodeId, latticeNodeId,
     canUndo, canRedo,
   } = useStore(useShallow((s) => ({
     isPlaying: s.isPlaying, togglePlay: s.togglePlay, isLoaded: s.isLoaded, resetSimulation: s.resetSimulation,
     isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
-    selectedNodeId: s.selectedNodeId, extraSelectedIds: s.extraSelectedIds,
+    selectedNodeId: s.selectedNodeId, extraSelectedIds: s.extraSelectedIds, geomFocused: s.geomFocused,
     sculptNodeId: s.sculptNodeId, latticeNodeId: s.latticeNodeId,
     canUndo: s.undoStack.length > 0, canRedo: s.redoStack.length > 0,
   })));
@@ -156,11 +156,17 @@ export function AppHeader({
 
             <button
               onClick={() => {
-                if (selectedNodeId) useStore.getState().deleteNodes([selectedNodeId, ...extraSelectedIds]);
+                if (selectedNodeId) useStore.getState().deleteSelectionOrFocusedGeom();
               }}
               disabled={!selectedNodeId}
               className="flex items-center justify-center p-1 rounded-md hover:bg-red-50 dark:hover:bg-red-950/40 text-red-500 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
-              title={selectedNodeId ? "Delete selected item (Delete / Backspace)" : "No item selected"}
+              title={
+                selectedNodeId
+                  ? geomFocused && extraSelectedIds.length === 0
+                    ? "Delete selected sub-shape (Delete / Backspace)"
+                    : "Delete selected item (Delete / Backspace)"
+                  : "No item selected"
+              }
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>

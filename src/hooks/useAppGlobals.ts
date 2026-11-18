@@ -25,8 +25,7 @@ export function useEditShortcuts() {
         // overlay, and Backspace on one of its buttons deleted the selected
         // body hidden behind it.
         if ((e.target as HTMLElement).closest?.('.fixed.inset-0')) return;
-        const ids = [...(s.selectedNodeId ? [s.selectedNodeId] : []), ...s.extraSelectedIds];
-        if (ids.length > 0) s.deleteNodes(ids);
+        s.deleteSelectionOrFocusedGeom();
         return;
       }
 

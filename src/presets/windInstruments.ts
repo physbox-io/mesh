@@ -166,7 +166,7 @@ function buildSweptHollowTubeMesh(
   return { vertices: yUpVertices, renderVertices: vertices, faces };
 }
 
-/** Smoothly flared Grenadilla clarinet bell mesh (x = +0.135 .. +0.215 m). */
+/** Smoothly flared Grenadilla clarinet bell mesh (x = +0.168 .. +0.248 m). */
 function generateClarinetBellMesh() {
   const n = 18;
   const spine: [number, number, number][] = [];
@@ -174,7 +174,7 @@ function generateClarinetBellMesh() {
   const rIn: number[] = [];
   for (let i = 0; i <= n; i++) {
     const u = i / n;
-    spine.push([0.135 + u * 0.080, 0, 0]);
+    spine.push([0.168 + u * 0.080, 0, 0]);
     const flare = Math.pow(u, 2.25);
     rOut.push(0.0145 + 0.0185 * flare);
     // Seamless 12.3 mm inner airway matching the 14.5 mm barrel (`14.5 - 2.2 = 12.3 mm`), flaring to 30.5 mm!
@@ -183,51 +183,61 @@ function generateClarinetBellMesh() {
   return buildSweptHollowTubeMesh(spine, rOut, rIn, 24);
 }
 
+/** Hollow nickel-silver clarinet bell rim ferrule so the bell airway stays visibly open! */
+function generateBellFerruleRingMesh() {
+  return buildSweptHollowTubeMesh(
+    [[0.2445, 0, 0], [0.2485, 0, 0]],
+    [0.0338, 0.0338],
+    [0.0306, 0.0306],
+    24,
+  );
+}
+
 /**
- * Generates a continuous, smooth, folded 3-valve cornet / trumpet tubing & Bessel-bell mesh:
- *   1. Leadpipe (`x = -0.175 -> +0.105, y = -0.011, z = +0.012`)
- *   2. Smooth 180° front tuning-slide bow (`x = +0.105` around `z = -0.008`, `R = 0.020`)
- *   3. Lower valve-loop branch (`x = +0.105 -> -0.115, y = -0.004, z = -0.028`)
- *   4. Smooth 180° back bell-bow (`x = -0.115`, curving cleanly to `y = +0.012, z = +0.024`)
- *   5. Upper bell branch (`x = -0.115 -> +0.205, y = +0.012, z = +0.024`) flaring into a Ø112 mm Bessel bell!
+ * Generates a continuous, smooth, folded 3-valve conical cornet tubing & Bessel-bell mesh:
+ *   1. Tapered leadpipe (`x = -0.172 -> +0.102, y = -0.011, z = +0.012`)
+ *   2. Smooth 180° front tuning-slide bow (`x = +0.102` around `z = -0.008`, `R = 0.020`)
+ *   3. Conical valve-loop branch (`x = +0.102 -> -0.112, y = -0.004, z = -0.028`)
+ *   4. Smooth 180° back bell-bow (`x = -0.112`, curving cleanly to `y = +0.014, z = +0.024`)
+ *   5. Upper bell branch (`x = -0.112 -> +0.202, y = +0.014, z = +0.024`) flaring into a Ø106 mm Bessel bell!
  */
 function generateFoldedCornetMesh() {
   const spine: [number, number, number][] = [];
 
-  // 1. Leadpipe (14 pts)
+  // 1. Leadpipe (14 pts): z = +0.018
   for (let i = 0; i < 14; i++) {
     const u = i / 14;
-    spine.push([-0.175 + u * 0.280, -0.011, 0.012]);
+    spine.push([-0.144 + u * 0.225, -0.014, 0.018]);
   }
-  // 2. Front 180° bow (14 pts)
+  // 2. Front 180° bow (14 pts): center z = -0.004, R = 0.022 => z goes +0.018 -> -0.026 smoothly!
   for (let i = 0; i <= 14; i++) {
     const u = i / 14;
-    const ang = Math.PI * 0.5 - u * Math.PI; // +pi/2 -> -pi/2
+    const ang = Math.PI * 0.5 - u * Math.PI;
     spine.push([
-      0.105 + 0.020 * Math.cos(ang),
-      -0.011 + 0.007 * u,
-      -0.008 + 0.020 * Math.sin(ang),
+      0.081 + 0.022 * Math.cos(ang),
+      -0.014 + 0.008 * u,
+      -0.004 + 0.022 * Math.sin(ang),
     ]);
   }
-  // 3. Lower branch right-to-left (14 pts)
+  // 3. Lower branch right-to-left (14 pts): z = -0.026
   for (let i = 1; i < 14; i++) {
     const u = i / 14;
-    spine.push([0.105 - u * 0.220, -0.004, -0.028]);
+    spine.push([0.081 - u * 0.168, -0.006, -0.026]);
   }
-  // 4. Back 180° bell bow (16 pts)
+  // 4. Back 180° bell bow (16 pts): center z = +0.004, R = 0.030 => z goes -0.026 -> +0.034 smoothly!
   for (let i = 0; i <= 16; i++) {
     const u = i / 16;
-    const ang = -Math.PI * 0.5 - u * Math.PI; // -pi/2 -> -3pi/2
+    const ang = -Math.PI * 0.5 - u * Math.PI;
     spine.push([
-      -0.115 + 0.026 * Math.cos(ang),
-      -0.004 + 0.018 * u,
-      -0.002 + 0.026 * Math.sin(ang),
+      -0.087 + 0.030 * Math.cos(ang),
+      -0.006 + 0.024 * u,
+      0.004 + 0.030 * Math.sin(ang),
     ]);
   }
-  // 5. Upper bell branch & Bessel horn flare (26 pts)
+  // 5. Upper bell branch & Bessel horn flare (26 pts): z = +0.034
   for (let i = 1; i <= 26; i++) {
     const u = i / 26;
-    spine.push([-0.115 + u * 0.320, 0.014, 0.024]);
+    spine.push([-0.087 + u * 0.259, 0.018, 0.034]);
   }
 
   const nPts = spine.length;
@@ -235,11 +245,10 @@ function generateFoldedCornetMesh() {
   const rIn: number[] = [];
   for (let i = 0; i < nPts; i++) {
     const s = i / (nPts - 1);
-    // Gradual conical taper through leadpipe & bows, then dramatic Bessel flare on final bell branch!
-    const bellProgress = Math.max(0, (s - 0.72) / 0.28);
-    const besselFlare = Math.pow(bellProgress, 2.85);
-    const ri = 0.0052 + 0.0026 * s + 0.046 * besselFlare;
-    const wall = 0.0012 + 0.0005 * (1 - bellProgress);
+    const bellProgress = Math.max(0, (s - 0.70) / 0.30);
+    const besselFlare = Math.pow(bellProgress, 2.6);
+    const ri = 0.0043 + 0.0086 * s + 0.035 * besselFlare;
+    const wall = 0.0014 + 0.0004 * (1 - bellProgress);
     rIn.push(ri);
     rOut.push(ri + wall);
   }
@@ -257,6 +266,7 @@ function generateFoldedCornetMesh() {
  */
 export const windInstrumentsPreset: SceneGraph = (() => {
   const clarinetBellMesh = generateClarinetBellMesh();
+  const clarinetFerruleRingMesh = generateBellFerruleRingMesh();
   const cornetHornMesh = generateFoldedCornetMesh();
 
   // Articulated silver clarinet pad key along top keywork rod
@@ -372,10 +382,10 @@ export const windInstrumentsPreset: SceneGraph = (() => {
       breathKPa: 0,
       embouchureHz: 260,
       toneholeJoints: [
-        { jointName: 'clarinet_key_1', axialFraction: 0.6522, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_2', axialFraction: 0.7354, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_3', axialFraction: 0.7808, diameterMm: 11.0 },
-        { jointName: 'clarinet_key_4', axialFraction: 0.8798, diameterMm: 11.5 },
+        { jointName: 'clarinet_key_1', axialFraction: 0.609, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_2', axialFraction: 0.6856, diameterMm: 10.5 },
+        { jointName: 'clarinet_key_3', axialFraction: 0.724, diameterMm: 11.0 },
+        { jointName: 'clarinet_key_4', axialFraction: 0.810, diameterMm: 11.5 },
       ],
     },
     script: `// Beethoven — "Ode to Joy" (Phrase 1 on Clarinet in G major, plus low G3 octave pedal on final cadence!)
@@ -429,18 +439,28 @@ if (tCycle < 6.40) {
     joints: [],
     geoms: [
       // Tapered ebonite mouthpiece + blonde cane reed + twin silver ligature rings
-      { name: 'clar_mouthpiece', type: 'capsule', fromto: [-0.2106, 0, 0.002, -0.168, 0, 0], size: [0.0115], rgba: [0.10, 0.09, 0.10, 1] },
-      { name: 'cane_reed', type: 'box', size: [0.024, 0.0055, 0.0012], pos: [-0.192, 0, -0.0115], rgba: [0.87, 0.73, 0.40, 1], role: 'visual' },
-      { name: 'silver_ligature_1', type: 'cylinder', size: [0.0128, 0.0022], pos: [-0.184, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
-      { name: 'silver_ligature_2', type: 'cylinder', size: [0.0128, 0.0022], pos: [-0.175, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
+      { name: 'clar_mouthpiece', type: 'capsule', fromto: [-0.2302, 0, 0.002, -0.198, 0, 0], size: [0.0115], rgba: [0.10, 0.09, 0.10, 1] },
+      { name: 'cane_reed', type: 'box', size: [0.024, 0.0055, 0.0012], pos: [-0.222, 0, -0.0115], rgba: [0.87, 0.73, 0.40, 1], role: 'visual' },
+      { name: 'silver_ligature_1', type: 'cylinder', size: [0.0128, 0.0022], pos: [-0.214, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
+      { name: 'silver_ligature_2', type: 'cylinder', size: [0.0128, 0.0022], pos: [-0.205, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
       // Rich Grenadilla wood barrel + upper/lower body
-      { name: 'clar_barrel', type: 'cylinder', size: [0.0152, 0.026], pos: [-0.142, 0, 0], euler: [0, 90, 0], rgba: [0.15, 0.11, 0.10, 1] },
-      { name: 'clar_body_tube', type: 'cylinder', size: [0.0145, 0.126], pos: [0.010, 0, 0], euler: [0, 90, 0], rgba: [0.14, 0.10, 0.09, 1] },
-      // Gleaming nickel-silver tenon & bell ferrules
-      { name: 'ferrule_barrel', type: 'cylinder', size: [0.0158, 0.003], pos: [-0.116, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
-      { name: 'ferrule_center', type: 'cylinder', size: [0.0154, 0.0035], pos: [0.005, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
-      { name: 'ferrule_bell_top', type: 'cylinder', size: [0.0156, 0.0035], pos: [0.136, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
-      { name: 'ferrule_bell_rim', type: 'cylinder', size: [0.0335, 0.0025], pos: [0.214, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
+      { name: 'clar_barrel', type: 'cylinder', size: [0.0152, 0.028], pos: [-0.170, 0, 0], euler: [0, 90, 0], rgba: [0.15, 0.11, 0.10, 1] },
+      { name: 'clar_body_tube', type: 'cylinder', size: [0.0145, 0.155], pos: [0.013, 0, 0], euler: [0, 90, 0], rgba: [0.14, 0.10, 0.09, 1] },
+      // Gleaming nickel-silver tenon & hollow bell ferrules
+      { name: 'ferrule_barrel', type: 'cylinder', size: [0.0158, 0.003], pos: [-0.142, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
+      { name: 'ferrule_center', type: 'cylinder', size: [0.0154, 0.0035], pos: [0.012, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
+      { name: 'ferrule_bell_top', type: 'cylinder', size: [0.0156, 0.0035], pos: [0.169, 0, 0], euler: [0, 90, 0], rgba: [0.88, 0.90, 0.95, 1], role: 'visual' },
+      {
+        name: 'ferrule_bell_rim',
+        type: 'mesh',
+        dynamic: true,
+        size: [1, 1, 1],
+        vertices: clarinetFerruleRingMesh.vertices,
+        renderVertices: clarinetFerruleRingMesh.renderVertices,
+        faces: clarinetFerruleRingMesh.faces,
+        rgba: [0.88, 0.90, 0.95, 1],
+        role: 'visual',
+      },
       // Smoothly flared outward-wound Grenadilla clarinet bell (`dynamic: true` -> body-local Z-up rendering!)
       {
         name: 'clarinet_bell_mesh',
@@ -479,10 +499,6 @@ if (tCycle < 6.40) {
       exciter: 'brass_lip',
       breathKPa: 0,
       embouchureHz: 392,
-      boreLengthM: 0.8573,
-      mouthRadiusM: 0.0055,
-      bellRadiusM: 0.054,
-      flareExponent: 2.75,
       valveJoints: [
         { jointName: 'cornet_valve_1', semitones: 2, strokeM: 0.013 },
         { jointName: 'cornet_valve_2', semitones: 1, strokeM: 0.013 },
@@ -551,16 +567,16 @@ if (tCycle >= 6.50 && tCycle < 12.90) {
         rgba: [0.92, 0.74, 0.25, 1],
       },
       // Turned silver-plated brass cup mouthpiece & shank seated into the leadpipe
-      { name: 'silver_mp_shank', type: 'cylinder', size: [0.0056, 0.018], pos: [-0.190, -0.011, 0.012], euler: [0, 90, 0], rgba: [0.89, 0.91, 0.95, 1], role: 'visual' },
-      { name: 'silver_mp_cup', type: 'cylinder', size: [0.0112, 0.0085], pos: [-0.212, -0.011, 0.012], euler: [0, 90, 0], rgba: [0.91, 0.93, 0.97, 1], role: 'visual' },
-      { name: 'silver_mp_rim', type: 'cylinder', size: [0.0136, 0.0025], pos: [-0.221, -0.011, 0.012], euler: [0, 90, 0], rgba: [0.93, 0.95, 0.98, 1], role: 'visual' },
+      { name: 'silver_mp_shank', type: 'cylinder', size: [0.0056, 0.018], pos: [-0.160, -0.014, 0.018], euler: [0, 90, 0], rgba: [0.89, 0.91, 0.95, 1], role: 'visual' },
+      { name: 'silver_mp_cup', type: 'cylinder', size: [0.0112, 0.0085], pos: [-0.182, -0.014, 0.018], euler: [0, 90, 0], rgba: [0.91, 0.93, 0.97, 1], role: 'visual' },
+      { name: 'silver_mp_rim', type: 'cylinder', size: [0.0136, 0.0025], pos: [-0.191, -0.014, 0.018], euler: [0, 90, 0], rgba: [0.93, 0.95, 0.98, 1], role: 'visual' },
       // Three vertical brass piston valve casings + valve ports + cross-braces
-      { name: 'valve_casing_1', type: 'cylinder', size: [0.0092, 0.032], pos: [-0.026, -0.004, -0.002], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
-      { name: 'valve_casing_2', type: 'cylinder', size: [0.0092, 0.032], pos: [0.000, -0.004, -0.002], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
-      { name: 'valve_casing_3', type: 'cylinder', size: [0.0092, 0.032], pos: [0.026, -0.004, -0.002], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
-      { name: 'valve_bridge_pipe', type: 'capsule', fromto: [-0.030, -0.011, 0.012, 0.030, -0.004, 0.012], size: [0.0055], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
-      { name: 'bell_brace_1', type: 'capsule', fromto: [-0.026, -0.004, 0.022, -0.026, 0.014, 0.024], size: [0.0025], rgba: [0.85, 0.68, 0.22, 1], role: 'visual' },
-      { name: 'bell_brace_2', type: 'capsule', fromto: [0.065, -0.011, 0.012, 0.065, 0.014, 0.024], size: [0.0025], rgba: [0.85, 0.68, 0.22, 1], role: 'visual' },
+      { name: 'valve_casing_1', type: 'cylinder', size: [0.0092, 0.032], pos: [-0.026, -0.006, 0.000], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
+      { name: 'valve_casing_2', type: 'cylinder', size: [0.0092, 0.032], pos: [0.000, -0.006, 0.000], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
+      { name: 'valve_casing_3', type: 'cylinder', size: [0.0092, 0.032], pos: [0.026, -0.006, 0.000], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
+      { name: 'valve_bridge_pipe', type: 'capsule', fromto: [-0.030, -0.014, 0.018, 0.030, -0.006, 0.018], size: [0.0055], rgba: [0.88, 0.70, 0.22, 1], role: 'visual' },
+      { name: 'bell_brace_1', type: 'capsule', fromto: [-0.026, -0.006, 0.024, -0.026, 0.018, 0.034], size: [0.0025], rgba: [0.85, 0.68, 0.22, 1], role: 'visual' },
+      { name: 'bell_brace_2', type: 'capsule', fromto: [0.058, -0.014, 0.018, 0.058, 0.018, 0.034], size: [0.0025], rgba: [0.85, 0.68, 0.22, 1], role: 'visual' },
     ],
     children: [
       makeCornetPistonValve(1, -0.026),
