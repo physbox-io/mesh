@@ -301,7 +301,9 @@ function neckerchief(form: SceneNode): SceneNode {
       { id: 'tip', pts: pts([[-TAIL / 2 - lean - 0.008, -0.075], [-TAIL / 2 - lean + 0.008, -0.07]]) },
       { id: 'side2', pts: pts([[-TAIL / 2 - lean + 0.008, -0.07], [0, 0]]) },
     ],
-    placement: { kind: 'plane', origin: [back[0] + x0, back[1], back[2]], uAxis: [1, 0, 0], vAxis: down },
+    // Its outline runs down (v < 0) from its top: v along up, so it hangs from the knot (along `down` it started
+    // standing up the neck inside the collar, and fell through the collar as it was sewn).
+    placement: { kind: 'plane', origin: [back[0] + x0, back[1], back[2]], uAxis: [1, 0, 0], vAxis: down.map((c) => -c) },
   });
   const tails = [tail('tailA', 0, 0.006), tail('tailB', TAIL, -0.006)];
   const seams: ClothSeam[] = [
