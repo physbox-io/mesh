@@ -75,14 +75,14 @@ const UNTANGLE_MAX = 1500, UNTANGLE_CHECK = 25;
 const UNTANGLE_BUDGET = 3000;
 /**
  * Continuous collision over this many substeps at a time (each stretch's end
- * is what is kept). Every substep: over longer stretches what contact let
- * through went centimetres deep before it was looked at, putting it back
- * jerked the cloth round it, and that fed the next look. An unpressed pleated
- * skirt reached 20 m/s and 73 crossings within half a second at 8 and at 4;
- * at 2 it stayed clear but did not settle; at 1 it stays clear and settles.
- * It costs the urban scene's run about 60% more than at 8.
+ * is what is kept), and whatever is left before the cloth is drawn or read
+ * (collidePending), so no state is shown that it has not passed. Read between looks, a
+ * pleated skirt showed up to 16 crossings that the next look then undid.
+ * (An unpressed pleated skirt once blew up at 8: its panels' unused shell
+ * points, fixed and on no triangle, were taken for cloth and held impact
+ * zones still; clothCcd now looks at cloth points only.)
  */
-const CCD_EVERY = 1;
+const CCD_EVERY = 8;
 
 const SKIN_FRICTION = 0.02;
 const STALL = (15 * Math.PI) / 180, POST_STALL = (30 * Math.PI) / 180;
@@ -1036,7 +1036,11 @@ export class ClothSim {
   }
 
   /** Each render group's vertices, in order, into `out` (3 per vertex). */
+  /** Continuous collision over the substeps since it last looked: before the cloth is drawn or read. */
+  collidePending() { if (this.ccdSince) this.collideAlong(this.ccdSince * CLOTH_SUBSTEP); }
+
   writeRender(out: Float64Array) {
+    this.collidePending();
     let o = 0;
     for (const { model, base } of this.pieces) {
       for (const g of model.groups) {

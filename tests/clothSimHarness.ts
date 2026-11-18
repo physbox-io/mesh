@@ -53,6 +53,8 @@ export async function clothRun(scene: SceneNode[]): Promise<ClothRun> {
   const run = (seconds: number, e: Partial<ClothEnv> = {}) => {
     const end = sim.time + seconds;
     while (sim.time < end - 1e-9) { mj.mj_step(model, data); world.advance(dtMj, env(e)); }
+    // Read as it is drawn: collision over the substeps since it last looked.
+    sim.collidePending();
   };
   const moving = new Uint8Array(sim.n);
   let base = 0;
