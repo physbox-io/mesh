@@ -20,6 +20,8 @@ import type { SliceDeps } from './sliceDeps';
 import { takeEnvironment } from './sceneEnvironment';
 import { assertGeomSizes } from '../utils/geomSize';
 import { mergeBodyForm } from '../utils/cloth/bodyFormEdit';
+import { reposeGarments } from '../utils/cloth/garmentRepose';
+import type { BodyFormMeasurements } from '../types/cloth';
 
 /** A node's own transform, as MJCF would apply it under its parent. */
 const localMatrixOf = (node: SceneNode): THREE.Matrix4 => {
@@ -224,6 +226,7 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
       if (updates.geoms) assertGeomSizes(updates.geoms, updates.name ?? id);
       if (!skipRecompile) get().recordInteraction('node');
       const newScene = cloneSceneGraph(get().sceneGraph);
+      const reposed: { form: string; from: BodyFormMeasurements; to: BodyFormMeasurements }[] = [];
       const traverse = (nodes: SceneNode[]): boolean => {
         for (const node of nodes) {
           if (node.id === id) {
@@ -233,7 +236,11 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
             if (updates.geoms) promotePosedStaticMeshes(node);
             // A body form's measurements take a change of a few fields; its
             // geoms are rebuilt from them in a worker (useCsgCompile).
-            if (updates.bodyForm) node.bodyForm = mergeBodyForm(prevBodyForm, updates.bodyForm);
+            if (updates.bodyForm) {
+              node.bodyForm = mergeBodyForm(prevBodyForm, updates.bodyForm);
+              // Posed differently, what is drawn on its garments goes with it (garmentRepose).
+              if (prevBodyForm && prevBodyForm.figure === node.bodyForm.figure) reposed.push({ form: node.name || node.id, from: prevBodyForm, to: node.bodyForm });
+            }
             // Body-level rgba is a shorthand for colouring the body's geoms:
             // SceneNode has no colour of its own in MJCF or the renderer, so
             // storing it on the node alone left SCAD and primitive bodies lilac.
@@ -259,6 +266,7 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
         return false;
       };
       if (traverse(newScene.nodes)) {
+        for (const r of reposed) newScene.nodes = reposeGarments(newScene.nodes, r.form, r.from, r.to);
         set({ sceneGraph: newScene });
         // Recompile so aerodynamics flag propagates to physics loop
         if (!skipRecompile) get().recompile(newScene, undefined, false);

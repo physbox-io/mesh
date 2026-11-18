@@ -94,6 +94,7 @@ Every node in the "nodes" array represents a physical body and is defined as:
   isAerodynamic: boolean (enables aerodynamic lift/drag model)
   script: string (custom JavaScript controller script running at 1000Hz, once per physics step; see CONTROL SCRIPT API below)
   scad: string (OpenSCAD script to compile custom mesh geometry)
+  bodyForm: object (a dress form's measurements, metres; unset fields from the figure's defaults. Pose, degrees: armAngle 45 (10..90), elbowBend 80 (0..150), stance 0 (feet placement, each leg out from the hip: -2 narrow..30 wide), kneeBend 0 (0 locked..110 crouch: hips lower, feet planted, torso upright). Always has legs. Re-posing carries what is drawn on its fitted garments with the limbs.)
   collision: 'auto' | 'hull' | 'decompose' | 'primitives' (how a mesh or boolean body collides; default 'auto' decomposes a hollow body into convex pieces, see 9a. 'primitives': a boolean body's authored solids collide and its mesh is visual only)
   collisionResolution: number (V-HACD voxels per chunk, 10000..1000000; see 9a)
   collisionHulls: number (most convex pieces in all, up to 512; leave unset)
