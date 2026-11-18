@@ -22,6 +22,8 @@ const RELAX_PASSES = 40;
 
 /** Clear of the garment where it starts lying over it, past the sewn edge. */
 const LIE_OFF = 0.006;
+/** How far off the face of a garment's edge a piece sewn to that edge starts, metres: off it, not in it. */
+const EDGE_OFF = 0.0006;
 const DOWN = [0, 0, -1];
 /** The finest a piece sewn on is meshed, metres. */
 const MIN_STEP = 0.008;
@@ -256,7 +258,11 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
       // along (a cap's band and its peak).
       let onEdge = true;
       for (let k = 1; k < run.length && onEdge; k++) { const i = run[k - 1], j = run[k]; onEdge = free.get(i < j ? `${i},${j}` : `${j},${i}`) === 1; }
-      const off = onEdge ? 0 : SEWN_OFF;
+      // On the edge, a hair off its face rather than in it: started in it, the
+      // edge's own points lay in the piece's first triangles (its sewn side
+      // runs along the edge's chords at its own spacing), and every cloth
+      // edge from them up the garment counted through it (a cap's peak, 120).
+      const off = onEdge ? EDGE_OFF : SEWN_OFF;
       // Round a closed line, a span may run on across its start (from 0.9 to 0.1: across the front).
       const s1 = closed && sTo < s0 ? sTo + 1 : sTo;
       const line = lineAlong(orientRun(run, closed, x), closed, x, normalOf);
@@ -331,7 +337,7 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
         // On an edge, a point a step off its sewn side cannot be clear of the
         // cloth it is sewn to: judged so, no start cleared and the piece was
         // pulled in from afar, its seam ragged.
-        const atSeam = (i: number) => onSewn.has(i) || (off === 0 && flat[i].away < 1.5 * LIE_OFF);
+        const atSeam = (i: number) => onSewn.has(i) || (onEdge && flat[i].away < 1.5 * LIE_OFF);
         const radial = lineAt.map((L) => L.n);
         const need = onFace.map((b, i) => {
           if (atSeam(i)) return 0;
