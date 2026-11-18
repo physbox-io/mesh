@@ -389,39 +389,98 @@ describe('silicone to hand', () => {
 });
 
 describe('separable split sleeve with sliding clips', () => {
-  it('splits fit, round and box sleeves into closed printable halves and clips that release cleanly and seal the pour', async () => {
-    const brick = boxSoup([-35, -18, 0], [35, 18, 45]);
-    for (const shape of ['fit', 'round', 'box'] as const) {
-      const box = buildPourBox(wasm, brick, { shape });
-      expect(box.report.splitSleeve).toBe(true);
-      expect(box.sleeveParts.map((p) => p.key)).toEqual(['sleeve1', 'sleeve2', 'clip1', 'clip2']);
-      for (const sp of box.sleeveParts) {
-        closedOutward(sp.mesh);
-        closedOutward(sp.assembled);
-      }
-      const solidOf = (m: PourBoxMesh) => {
-        const mesh = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(m.positions), triVerts: Uint32Array.from(m.faces) });
-        mesh.merge();
-        return new wasm.Manifold(mesh);
-      };
-      const base = solidOf(box.base);
-      const s1 = solidOf(box.sleeveParts[0].assembled);
-      const s2 = solidOf(box.sleeveParts[1].assembled);
-      const c1 = solidOf(box.sleeveParts[2].assembled);
-      const c2 = solidOf(box.sleeveParts[3].assembled);
-      // Clips slide straight up (+Z) off both sleeve halves and base with zero interference.
-      for (const clip of [c1, c2]) {
-        for (const step of [0, 1, 5, 20, 60]) {
-          const moved = clip.translate([0, 0, step]);
-          expect(moved.intersect(s1).volume()).toBeLessThan(1e-3);
-          expect(moved.intersect(s2).volume()).toBeLessThan(1e-3);
-          expect(moved.intersect(base).volume()).toBeLessThan(1e-3);
+  const solidOfMesh = (m: PourBoxMesh) => {
+    const mesh = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(m.positions), triVerts: Uint32Array.from(m.faces) });
+    mesh.merge();
+    return new wasm.Manifold(mesh);
+  };
+
+  it('splits fit, round and box sleeves orthogonally across the long edges with 0 mm³ overlap assembled and along clip/release slides', async () => {
+    const brickWide = boxSoup([-35, -18, 0], [35, 18, 45]); // spanX > spanY (turn90 = true)
+    const brickTall = boxSoup([-18, -35, 0], [18, 35, 45]); // spanX <= spanY (turn90 = false)
+    // Asymmetric stepped/wedge master for asymmetric 'fit' testing:
+    const asymWedge = [
+      ...boxSoup([-26, -32, 0], [18, 32, 32]),
+      ...boxSoup([4, -18, 32], [24, 24, 44]),
+    ];
+
+    for (const [label, soup] of [
+      ['wide', brickWide],
+      ['tall', brickTall],
+      ['asym', asymWedge],
+    ] as const) {
+      for (const shape of ['fit', 'round', 'box'] as const) {
+        const box = buildPourBox(wasm, soup, { shape });
+        expect(box.report.splitSleeve, `${label}/${shape}`).toBe(true);
+        expect(box.sleeveParts.map((p) => p.key)).toEqual(['sleeve1', 'sleeve2', 'clip1', 'clip2']);
+        for (const sp of box.sleeveParts) {
+          closedOutward(sp.mesh);
+          closedOutward(sp.assembled);
+        }
+
+        const base = solidOfMesh(box.base);
+        const s1 = solidOfMesh(box.sleeveParts[0].assembled);
+        const s2 = solidOfMesh(box.sleeveParts[1].assembled);
+        const c1 = solidOfMesh(box.sleeveParts[2].assembled);
+        const c2 = solidOfMesh(box.sleeveParts[3].assembled);
+        const all = [base, s1, s2, c1, c2];
+
+        // 1. Zero pairwise overlap in assembled pose across all 5 parts.
+        for (let i = 0; i < all.length; i++) {
+          for (let j = i + 1; j < all.length; j++) {
+            expect(all[i].intersect(all[j]).volume(), `${label}/${shape} pair ${i}-${j}`).toBeLessThan(1e-3);
+          }
+        }
+
+        // 2. Orthogonal split across the long axis + clips centered on the middle of the long edges + mid-height rail protrusion.
+        const rel1 = box.sleeveParts[0].release;
+        const rel2 = box.sleeveParts[1].release;
+        expect(Math.abs(rel1[0]) + Math.abs(rel1[1])).toBeCloseTo(1, 5);
+        expect(Math.abs(rel1[0]) === 1 || Math.abs(rel1[1]) === 1).toBe(true);
+        expect(rel2.map((v) => v || 0)).toEqual([-rel1[0] || 0, -rel1[1] || 0, 0]);
+
+        const unsplitSleeve = solidOfMesh(box.sleeve);
+        const baseBounds = unsplitSleeve.boundingBox();
+        const midZ = (baseBounds.min[2] + baseBounds.max[2]) * 0.5 + 3;
+        const midSlice = s1.add(s2).slice(midZ).bounds();
+        const clampedAxis = Math.abs(rel1[0]) === 1 ? 1 : 0; // rails protrude perpendicular to release axis
+        const slideAxis = 1 - clampedAxis;
+        const baseClampedSpan = baseBounds.max[clampedAxis] - baseBounds.min[clampedAxis];
+        expect(midSlice.max[clampedAxis] - midSlice.min[clampedAxis], `${label}/${shape} rail protrusion`).toBeGreaterThan(baseClampedSpan + 6.0);
+
+        const splitMid = (baseBounds.min[slideAxis] + baseBounds.max[slideAxis]) * 0.5;
+        for (const clip of [c1, c2]) {
+          const cb = clip.boundingBox();
+          const clipSlideMid = (cb.min[slideAxis] + cb.max[slideAxis]) * 0.5;
+          expect(Math.abs(clipSlideMid - splitMid), `${label}/${shape} clip centered on long edge`).toBeLessThan(1.0);
+        }
+        // Orthogonal seam: sleeve1 stays on the -release side (except <= 1.4 mm sealing tongue) and sleeve2 stays on +release.
+        const s1B = s1.boundingBox(), s2B = s2.boundingBox();
+        expect(s1B.max[slideAxis] - splitMid).toBeLessThan(1.6);
+        expect(s2B.min[slideAxis] - splitMid).toBeGreaterThan(-0.1);
+
+        // 3. Clips slide straight up (+Z) off both sleeve halves and base with zero interference.
+        for (const clip of [c1, c2]) {
+          for (const step of [0, 1, 5, 20, 60]) {
+            const moved = clip.translate([0, 0, step]);
+            expect(moved.intersect(s1).volume()).toBeLessThan(1e-3);
+            expect(moved.intersect(s2).volume()).toBeLessThan(1e-3);
+            expect(moved.intersect(base).volume()).toBeLessThan(1e-3);
+          }
+        }
+
+        // 4. Sleeve halves slide apart along their respective ±release axes with 0 mm³ overlap.
+        for (const step of [0, 0.4, 1.0, 2.0, 8, 30, 80]) {
+          const m1 = s1.translate([rel1[0] * step, rel1[1] * step, 0]);
+          const m2 = s2.translate([rel2[0] * step, rel2[1] * step, 0]);
+          expect(m1.intersect(s2).volume(), `${label}/${shape} s1 release step=${step}`).toBeLessThan(1e-3);
+          expect(m2.intersect(s1).volume(), `${label}/${shape} s2 release step=${step}`).toBeLessThan(1e-3);
         }
       }
     }
 
     // Scene pour box with split sleeve still holds the full silicone pour without leaking.
-    const masterNode = node('master', [meshGeom('master', soupMesh(brick))]);
+    const masterNode = node('master', [meshGeom('master', soupMesh(brickWide))]);
     const scene = { nodes: [masterNode] } as unknown as SceneGraph;
     const box = await planPourBox(scene, ['master'], { shape: 'box' });
     const out = sceneWithPourBox(scene, ['master'], box);
@@ -430,7 +489,7 @@ describe('separable split sleeve with sliding clips', () => {
     expect(poured.success).toBe(true);
     expect(Math.abs(poured.castVolumeMm3 - box.report.siliconeMm3) / box.report.siliconeMm3).toBeLessThan(0.03);
     expect(pourBoxStlFiles(box, '-').map((f) => f.piece)).toEqual(['base', 'sleeve-1', 'sleeve-2', 'clip-1', 'clip-2']);
-    expect(pourBoxStlFiles(buildPourBox(wasm, brick, { splitSleeve: false }), '-').map((f) => f.piece)).toEqual(['base', 'sleeve']);
+    expect(pourBoxStlFiles(buildPourBox(wasm, brickWide, { splitSleeve: false }), '-').map((f) => f.piece)).toEqual(['base', 'sleeve']);
   });
 });
 

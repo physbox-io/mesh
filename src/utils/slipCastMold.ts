@@ -469,13 +469,22 @@ function spare(
     const minThroat = Math.min(diaMm, 20);
     const floorLimit = b.min[2] + 0.6 * (zTop - b.min[2]);
     let bestZ = zTop - e;
+    let bestSpan = -Infinity;
+    let initSpan = -Infinity;
     for (let z = zTop - e; z >= floorLimit; z -= 1) {
       const cs = filled.slice(z);
       const h = cs.hull();
       const hb = h.bounds();
       const span = Math.min(hb.max[0] - hb.min[0], hb.max[1] - hb.min[1]);
       free(cs, h);
-      bestZ = z;
+      if (bestSpan < 0) {
+        bestSpan = span;
+        initSpan = span;
+        bestZ = z;
+      } else if (span > bestSpan + 0.5 || (span >= minThroat && span > initSpan + 0.5)) {
+        bestSpan = span;
+        bestZ = z;
+      }
       if (span >= minThroat) break;
     }
     footZ = bestZ + e;

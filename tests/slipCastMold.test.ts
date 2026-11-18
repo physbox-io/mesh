@@ -292,6 +292,14 @@ describe('slip spare over the opening', () => {
     const cast = simulateSlipCast(wasm, { cavity: mold.cavity, spare: mold.spare, partTopMm: mold.report.partTopMm, footMm: mold.report.footMm, scale: mold.report.scale, slip: mold.slip }, 4);
     expect(cast.warnings.some((w) => w.includes('casts solid') || w.includes('nearly solid'))).toBe(false);
   });
+
+  it('keeps the spare at the top of a constant-thickness thin blade instead of walking down and trimming it off', () => {
+    const blade = wasm.Manifold.cube([4, 40, 80]).translate([-2, -20, 0]);
+    const mold = buildSlipMold(wasm, soupOf(blade), { shrinkPercent: 0, base: false });
+    expect(mold.report.partTopMm).toBeCloseTo(80, 2);
+    expect(mold.report.spareAtMm[2]).toBeGreaterThanOrEqual(79.5);
+    expect(mold.report.warnings.some((w) => w.includes('rises into the spare'))).toBe(false);
+  });
 });
 
 describe('slip mold made again', () => {

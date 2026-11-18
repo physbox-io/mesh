@@ -293,6 +293,50 @@ function largestSolid(m: Manifold): Manifold {
   return parts[best];
 }
 
+function uSpanAtV(cs: CrossSection, vTarget: number): [number, number] | null {
+  let uMin = Infinity, uMax = -Infinity;
+  for (const poly of cs.toPolygons()) {
+    const n = poly.length;
+    for (let i = 0; i < n; i++) {
+      const [u0, v0] = poly[i];
+      const [u1, v1] = poly[(i + 1) % n];
+      if (Math.abs(v0 - vTarget) <= 1e-6) {
+        uMin = Math.min(uMin, u0);
+        uMax = Math.max(uMax, u0);
+      }
+      if ((v0 < vTarget && v1 > vTarget) || (v1 < vTarget && v0 > vTarget)) {
+        const u = u0 + ((vTarget - v0) / (v1 - v0)) * (u1 - u0);
+        uMin = Math.min(uMin, u);
+        uMax = Math.max(uMax, u);
+      }
+    }
+  }
+  return uMin <= uMax ? [uMin, uMax] : null;
+}
+
+function uSpanInBand(cs: CrossSection, vLo: number, vHi: number): [number, number] | null {
+  let uMin = Infinity, uMax = -Infinity;
+  for (const poly of cs.toPolygons()) {
+    const n = poly.length;
+    for (let i = 0; i < n; i++) {
+      const [u0, v0] = poly[i];
+      const [u1, v1] = poly[(i + 1) % n];
+      if (v0 >= vLo - 1e-6 && v0 <= vHi + 1e-6) {
+        uMin = Math.min(uMin, u0);
+        uMax = Math.max(uMax, u0);
+      }
+      for (const vt of [vLo, vHi]) {
+        if ((v0 < vt && v1 > vt) || (v1 < vt && v0 > vt)) {
+          const u = u0 + ((vt - v0) / (v1 - v0)) * (u1 - u0);
+          uMin = Math.min(uMin, u);
+          uMax = Math.max(uMax, u);
+        }
+      }
+    }
+  }
+  return uMin <= uMax ? [uMin, uMax] : null;
+}
+
 /**
  * Splits the pour sleeve across the middle of its long edges into two halves
  * (`sleeve1`, `sleeve2`) with 45°-supported tapered dovetail rails above the
@@ -313,7 +357,9 @@ function buildSplitPourSleeve(
   const keep = <T extends Manifold | CrossSection>(x: T) => (trash.push(x), x);
   try {
     const ob = outer.bounds();
-    const scx = (ob.min[0] + ob.max[0]) / 2, scy = (ob.min[1] + ob.max[1]) / 2;
+    // Dyadic-quantized centre so the orthogonal split plane has exact float32 coordinates.
+    const scx = Math.round(((ob.min[0] + ob.max[0]) / 2) * 16) / 16;
+    const scy = Math.round(((ob.min[1] + ob.max[1]) / 2) * 16) / 16;
     const turn90 = (ob.max[0] - ob.min[0]) > (ob.max[1] - ob.min[1]) + 1e-6;
     const toLocal2D = (cs: CrossSection) => {
       const s = keep(cs.translate([-scx, -scy]));
@@ -326,21 +372,9 @@ function buildSplitPourSleeve(
 
     const innerL = toLocal2D(inner);
     const outerL = toLocal2D(outer);
-    const outerPts = outerL.toPolygons().flat();
-    let uMin = Infinity, vAtMin = 0, uMax = -Infinity, vAtMax = 0;
-    for (const [u, v] of outerPts) {
-      if (u < uMin) { uMin = u; vAtMin = v; }
-      if (u > uMax) { uMax = u; vAtMax = v; }
-    }
     const lb = outerL.bounds();
     const spanV = lb.max[1] - lb.min[1];
-
-    // Split chord connecting the two u-extrema on the long edges: guarantees
-    // zero undercut when the two halves pull along -v and +v for any convex hull.
-    const dx = uMax - uMin, dy = vAtMax - vAtMin;
-    const dLen = Math.hypot(dx, dy) || 1;
-    const nx = -dy / dLen, ny = dx / dLen; // points toward +v
-    const cLine = uMin * nx + vAtMin * ny;
+    const vMid = Math.round(((lb.min[1] + lb.max[1]) / 2) * 16) / 16;
 
     const ringL = keep(outerL.subtract(innerL));
     const fullH = sleeveTop - sleeveBottom;
@@ -359,6 +393,22 @@ function buildSplitPourSleeve(
     const neckBot = neckTop + taper;
     const padHalfV = neckBot + 1.0;
 
+    const cFlank = CLIP_CLEAR / Math.cos(Math.atan2(flare, DOVE_H));
+    const dPocketBack = DOVE_H + 0.35;
+    const clipJaw = 3.2;
+    const clipBandV = neckBot + cFlank + dPocketBack * (flare / DOVE_H) + clipJaw + 0.5;
+
+    // Intersect outerL and innerL orthogonally across the middle of the long edges (v = vMid),
+    // and check the clip band so slanted 'fit' hulls never collide with the C-clip jaws.
+    const outerAtMid = uSpanAtV(outerL, vMid) ?? [lb.min[0], lb.max[0]];
+    const outerInBand = uSpanInBand(outerL, vMid - clipBandV, vMid + clipBandV) ?? outerAtMid;
+    const innerB = innerL.bounds();
+    const innerAtMid = uSpanAtV(innerL, vMid) ?? [innerB.min[0], innerB.max[0]];
+    const uMinOuter = Math.min(outerAtMid[0], outerInBand[0]);
+    const uMaxOuter = Math.max(outerAtMid[1], outerInBand[1]);
+    const uMinInner = innerAtMid[0];
+    const uMaxInner = innerAtMid[1];
+
     const innerCut = keep(keep(innerL.extrude(fullH + 4)).translate([0, 0, sleeveBottom - 2]));
     const padAndRails: Manifold[] = [baseSleeve];
     const clipsLocal: Manifold[] = [];
@@ -366,10 +416,11 @@ function buildSplitPourSleeve(
     const grooves: Manifold[] = [];
 
     for (const sx of [-1, 1] as const) {
-      const uOut = sx > 0 ? uMax : uMin;
-      const vAt = sx > 0 ? vAtMax : vAtMin;
+      const uOut = sx > 0 ? uMaxOuter : uMinOuter;
+      const uIn = sx > 0 ? uMaxInner : uMinInner;
+      const vAt = vMid;
       const uPad = uOut + sx * padExtra;
-      const uReachIn = uOut - sx * Math.max(wall + 4, (uMax - uMin) * 0.35);
+      const uReachIn = uIn - sx * Math.max(2.0, (uMaxOuter - uMinOuter) * 0.15);
 
       // Seam pad: flush inside outerL at zPadStart, 45° ramp out to uPad at zClipSeat, vertical to sleeveTop.
       const padBox2D = keep(poly2D(wasm, [
@@ -384,11 +435,12 @@ function buildSplitPourSleeve(
       padAndRails.push(keep(wasm.Manifold.hull([padFoot, padBody])));
 
       // Tapered dovetail rail: 45° ramp from outerL at zPadStart to full dovetail at zClipSeat..sleeveTop.
+      const wInDelta = 0.5 * (flare / DOVE_H);
       const railTrap2D = (neck: number) => keep(poly2D(wasm, [
-        [uPad - sx * 0.5, vAt - neck],
+        [uPad - sx * 0.5, vAt - (neck - wInDelta)],
         [uPad + sx * DOVE_H, vAt - (neck + flare)],
         [uPad + sx * DOVE_H, vAt + (neck + flare)],
-        [uPad - sx * 0.5, vAt + neck],
+        [uPad - sx * 0.5, vAt + (neck - wInDelta)],
       ]));
       const rFoot2D = keep(padFoot2D.intersect(keep(poly2D(wasm, [
         [uReachIn, vAt - neckBot],
@@ -404,7 +456,7 @@ function buildSplitPourSleeve(
         padAndRails.push(keep(wasm.Manifold.hull([rFoot, rBot])));
       }
 
-      // Vertical labyrinth tongue & groove inside the thickened pad above zClipSeat.
+      // Vertical labyrinth tongue & groove on v = vMid inside the thickened pad above zClipSeat.
       if (clipH >= 6) {
         const uMid = uPad - sx * 1.8;
         const t2d = keep(poly2D(wasm, [[uMid - 0.6, vAt - 0.4], [uMid + 0.6, vAt - 0.4], [uMid + 0.6, vAt + 1.3], [uMid - 0.6, vAt + 1.3]]));
@@ -418,11 +470,8 @@ function buildSplitPourSleeve(
       }
 
       // Matching sliding C-clip for this long edge (z in [zClipSeat, sleeveTop]).
-      const cFlank = CLIP_CLEAR / Math.cos(Math.atan2(flare, DOVE_H));
       const uFront = uPad + sx * 0.4;
-      const dPocketBack = DOVE_H + 0.35;
       const uPocketBack = uPad + sx * dPocketBack;
-      const clipJaw = 3.2;
       const uSpine = uPocketBack + sx * 3.4;
       const wNeckAt = (zRel: number) => neckBot - (taper / clipH) * zRel;
       const vPocketAt = (zRel: number, d: number) => wNeckAt(zRel) + cFlank + d * (flare / DOVE_H);
@@ -451,10 +500,10 @@ function buildSplitPourSleeve(
 
     const fullCollar = keep(keep(wasm.Manifold.union(padAndRails)).subtract(innerCut));
 
-    // Print halves: 0.02 mm clearance off the split plane so standalone STLs never touch;
-    // Assembled halves: 0.02 mm press-fit overlap so pour simulations see a sealed sleeve.
+    // Orthogonal split at v = vMid (nSplit = [0, 1]):
+    // Print halves get 0.02 mm clearance; assembled halves meet flush on v = vMid (0 mm³ overlap).
     const makeHalf = (sign: -1 | 1, offsetDelta: number) => {
-      let h = keep(fullCollar.trimByPlane([sign * nx, sign * ny, 0], sign * cLine + offsetDelta));
+      let h = keep(fullCollar.trimByPlane([0, sign, 0], sign * vMid + offsetDelta));
       if (tongues.length) {
         if (sign < 0) h = keep(h.add(keep(wasm.Manifold.union(tongues))));
         else h = keep(h.subtract(keep(wasm.Manifold.union(grooves))));
@@ -464,8 +513,8 @@ function buildSplitPourSleeve(
 
     const s1Print = fromLocal3D(makeHalf(-1, 0.02));
     const s2Print = fromLocal3D(makeHalf(1, 0.02));
-    const s1Asm = fromLocal3D(makeHalf(-1, -0.02));
-    const s2Asm = fromLocal3D(makeHalf(1, -0.02));
+    const s1Asm = fromLocal3D(makeHalf(-1, 0));
+    const s2Asm = fromLocal3D(makeHalf(1, 0));
     const c1World = fromLocal3D(clipsLocal[0]);
     const c2World = fromLocal3D(clipsLocal[1]);
 

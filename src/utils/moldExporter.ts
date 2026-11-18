@@ -1585,7 +1585,7 @@ export function generateMoldMeshes(
   const linerSkinMm = opts.dissolvableLiner
     ? (opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM)
     : 0;
-  const minBracketFloor = opts.separable && opts.moldType === 'clamshell' && !opts.dissolvableLiner ? 8 : 0;
+  const minBracketFloor = opts.separable && opts.moldType === 'clamshell' && !opts.dissolvableLiner ? 10 : 0;
   const baseFloorMm = Math.max(
     minBracketFloor,
     feed === 'bottom'
