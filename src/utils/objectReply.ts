@@ -62,6 +62,22 @@ export const stripMeshArrays = (node: SceneNode): SceneNode => {
   return cloned;
 };
 
+const generatedCollider = (g: SceneGeom) => g.csgDerived === 'collider' || !!g.contactClass;
+
+/**
+ * A node for the scene-wide replies (physics_get_state, physics_get_objects):
+ * mesh arrays stripped, and the convex pieces and exact colliders generated
+ * for contact counted instead of listed (`colliderGeoms`). A dress form is
+ * broken into some 600 of them, and one form's alone made the state reply
+ * 140 KB, too big to read. physics_get_object full=true lists them.
+ */
+export const stateNode = (node: SceneNode): SceneNode => {
+  const geoms = node.geoms || [];
+  const pieces = geoms.filter(generatedCollider).length;
+  const out = stripMeshArrays({ ...node, geoms: pieces ? geoms.filter((g) => !generatedCollider(g)) : geoms, children: [] } as SceneNode);
+  return { ...out, ...(pieces ? { colliderGeoms: pieces } : {}), children: (node.children || []).map(stateNode) } as SceneNode;
+};
+
 export interface ObjectReplyOptions {
   /** List every convex piece and exact pin or socket collider, and the generated SCAD. */
   full?: boolean;
@@ -77,7 +93,6 @@ const withMeshChecks = (g: SceneGeom): SceneGeom => (g.type === 'mesh'
   : g);
 
 /** Generated geoms an author never wrote: convex pieces, and a split part's exact pin and socket colliders. */
-const generatedCollider = (g: SceneGeom) => g.csgDerived === 'collider' || !!g.contactClass;
 
 /** How it collides, without repeating the raw fields the node already carries. */
 function collisionVerdict(node: SceneNode): Record<string, unknown> {

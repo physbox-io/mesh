@@ -36,7 +36,8 @@ import { recompilesInFlight } from '../../store/simulationActions';
 import { modelBuiltFrom } from '../../store/modelProvenance';
 import { withEnvironment } from '../../store/sceneEnvironment';
 import type { HistoryQuery } from '../../workers/physicsWorkerProtocol';
-import { type PhysicsWindow, workerStatusNow, type Msg, findNodeInScene, stripMeshArrays } from './bridgeUtils';
+import { type PhysicsWindow, workerStatusNow, type Msg, findNodeInScene } from './bridgeUtils';
+import { stateNode } from '../../utils/objectReply';
 import { sealCheckFor } from './bodyFeatures';
 import { bodyNamer, jointTypes, resolveBodyFilter } from '../../utils/headlessReport';
 import { digestTelemetry } from '../../utils/telemetryDigest';
@@ -50,7 +51,7 @@ export const viewCommands: McpCommands = {
       // carved tray made this reply 2.8 MB. include_meshes asks for them.
       sceneGraph: msg.includeMeshes === true
         ? store.sceneGraph
-        : { ...store.sceneGraph, nodes: (store.sceneGraph.nodes || []).map(stripMeshArrays) },
+        : { ...store.sceneGraph, nodes: (store.sceneGraph.nodes || []).map(stateNode) },
       isPlaying:    store.isPlaying,
       // Loaded means the worker holds a model of THIS scene. The store's
       // flag goes true on the first build and stays true, so on its own
@@ -252,7 +253,7 @@ export const viewCommands: McpCommands = {
     };
   },
   GET_OBJECTS: async (_msg, { store }) => {
-    return (store.sceneGraph.nodes || []).map(stripMeshArrays);
+    return (store.sceneGraph.nodes || []).map(stateNode);
   },
   GET_OBJECT: async (msg, { store }) => {
     const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
