@@ -203,6 +203,46 @@ export function heightOver(pos: V3, n: V3, below: AddOnPiece[]): number {
   return topOver(pos, n, below)?.height ?? 0;
 }
 
+/**
+ * heightOver for many points against `below` as it stands now, its triangles
+ * filed once in cells: placing a long ruffle in many pieces asked it of every
+ * triangle sewn on so far for each point it tried, most of the build's time.
+ * Each cell keeps topOver's order, so it finds the same triangle.
+ */
+export function heightsOver(below: AddOnPiece[]): (pos: V3, n: V3) => number {
+  const cell = 0.04, key = (i: number, j: number, k: number) => ((i + 1024) * 2048 + (j + 1024)) * 2048 + (k + 1024);
+  const cells = new Map<number, [AddOnPiece, number][]>();
+  for (const pc of below) {
+    const P = pc.start, T = pc.tris;
+    for (let t = 0; t < T.length; t += 3) {
+      const a = P[T[t]], b = P[T[t + 1]], c = P[T[t + 2]];
+      // Anywhere topOver could take it from: on it (and 2% of its sides past) and up to 3 cm off it.
+      const m = 0.03 + 0.02 * Math.max(Math.hypot(...sub(b, a)), Math.hypot(...sub(c, a)), Math.hypot(...sub(c, b))) + 1e-6;
+      const lo = [0, 1, 2].map((q) => Math.floor((Math.min(a[q], b[q], c[q]) - m) / cell)), hi = [0, 1, 2].map((q) => Math.floor((Math.max(a[q], b[q], c[q]) + m) / cell));
+      for (let i = lo[0]; i <= hi[0]; i++) for (let j = lo[1]; j <= hi[1]; j++) for (let k = lo[2]; k <= hi[2]; k++) {
+        const kk = key(i, j, k);
+        (cells.get(kk) ?? cells.set(kk, []).get(kk)!).push([pc, t]);
+      }
+    }
+  }
+  return (pos, n) => {
+    const list = cells.get(key(Math.floor(pos[0] / cell), Math.floor(pos[1] / cell), Math.floor(pos[2] / cell)));
+    let top = 0;
+    for (const [pc, t] of list ?? []) {
+      const P = pc.start, T = pc.tris, a = P[T[t]], b = P[T[t + 1]], c = P[T[t + 2]];
+      const e1 = sub(b, a), e2 = sub(c, a), h = cross(n, e2), det = dot(e1, h);
+      if (Math.abs(det) < 1e-14) continue;
+      const sv = sub(pos, a), u = dot(sv, h) / det;
+      if (u < -0.02 || u > 1.02) continue;
+      const q = cross(sv, e1), v = dot(n, q) / det;
+      if (v < -0.02 || u + v > 1.02) continue;
+      const along = dot(e2, q) / det;
+      if (along > top && along < 0.03) top = along;
+    }
+    return top;
+  };
+}
+
 /** Clear of the garment as sewn on, and as a loop's middle stands off for a belt to pass under it. */
 export const SEWN_OFF = 0.0024;
 const LOOP_OFF = 0.0085, BELT_OFF = 0.0032;

@@ -10,7 +10,7 @@
 import { BOARD_STIFFNESS } from './clothBoards';
 import type { ClothMaterialName, GarmentAttachment } from '../../types/cloth';
 import { CLOTH_MATERIALS, meshOutline } from './clothMesh';
-import { heightOver, nearestTack, SEWN_OFF, type AddOnPiece, type AddOnTack } from './garmentAddOns';
+import { heightsOver, nearestTack, SEWN_OFF, type AddOnPiece, type AddOnTack } from './garmentAddOns';
 
 type V3 = number[];
 const sub = (a: V3, b: V3) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -137,11 +137,16 @@ function fromEdge(q: number[], edge: [number, number][], inward: number): { f: n
 
 /** The garment's surface, for the nearest point of it to a point, quickly: its triangles bucketed. */
 function hostSurface(x: number[][], tris: number[], normalOf: (p: number) => number[]) {
-  const cell = 0.03, key = (i: number, j: number, k: number) => `${i},${j},${k}`;
-  const buckets = new Map<string, number[]>();
+  // Numbered cells, and only those the surface spans looked in: a point far
+  // off (deep inside, out past a flare) searched every empty cell out to its
+  // reach by string key, most of the time a long ruffle took to place.
+  const cell = 0.03, key = (i: number, j: number, k: number) => ((i + 1024) * 2048 + (j + 1024)) * 2048 + (k + 1024);
+  const buckets = new Map<number, number[]>();
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   for (let t = 0; t < tris.length; t += 3) {
-    const c = [0, 1, 2].map((q) => (x[tris[t]][q] + x[tris[t + 1]][q] + x[tris[t + 2]][q]) / 3);
-    const kk = key(Math.floor(c[0] / cell), Math.floor(c[1] / cell), Math.floor(c[2] / cell));
+    const c = [0, 1, 2].map((q) => Math.floor((x[tris[t]][q] + x[tris[t + 1]][q] + x[tris[t + 2]][q]) / 3 / cell));
+    for (let q = 0; q < 3; q++) { lo[q] = Math.min(lo[q], c[q]); hi[q] = Math.max(hi[q], c[q]); }
+    const kk = key(c[0], c[1], c[2]);
     (buckets.get(kk) ?? buckets.set(kk, []).get(kk)!).push(t);
   }
   /** The nearest point within `reach` (or null), the way the surface faces there, and how far off it sideways `q` is. */
@@ -151,8 +156,12 @@ function hostSurface(x: number[][], tris: number[], normalOf: (p: number) => num
     // Shell by shell outward, done once nothing nearer can be further out.
     for (let r = 0; r <= R; r++) {
       if (best && best.d < (r - 1) * cell) break;
-      for (let i = -r; i <= r; i++) for (let j = -r; j <= r; j++) for (let k = -r; k <= r; k++) {
-      if (Math.max(Math.abs(i), Math.abs(j), Math.abs(k)) !== r) continue;
+      const k0 = Math.max(-r, lo[2] - ci[2]), k1 = Math.min(r, hi[2] - ci[2]);
+      for (let i = Math.max(-r, lo[0] - ci[0]); i <= Math.min(r, hi[0] - ci[0]); i++) for (let j = Math.max(-r, lo[1] - ci[1]); j <= Math.min(r, hi[1] - ci[1]); j++) {
+      // The shell's cells only: its two caps in k, unless this column is on its side.
+      const side = Math.abs(i) === r || Math.abs(j) === r;
+      for (let k = side ? k0 : -r; k <= (side ? k1 : r); k += side || r === 0 ? 1 : 2 * r) {
+      if (k < k0 || k > k1) continue;
       for (const t of buckets.get(key(ci[0] + i, ci[1] + j, ci[2] + k)) ?? []) {
         const a = x[tris[t]], b = x[tris[t + 1]], c = x[tris[t + 2]];
         const ab = sub(b, a), ac = sub(c, a), ap = sub(q, a);
@@ -162,6 +171,7 @@ function hostSurface(x: number[][], tris: number[], normalOf: (p: number) => num
         const p = [a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w];
         const d = Math.hypot(...sub(p, q));
         if (!best || d < best.d) best = { p, t, w: [1 - v - w, v, w], d };
+      }
       }
       }
     }
@@ -320,7 +330,7 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
         // round a hem); the stretch's way on a stretch of one, so it moves as
         // one piece, undistorted.
         const outward = lineAt.map((L) => (whole ? horizontal(L.n) : unit(mean)) ?? unit(mean) ?? L.n);
-        const lie = (q: number[]) => LIE_OFF + heightOver(q, [0, 0, 1], [...below, ...out]);
+        const over = heightsOver([...below, ...out]), lie = (q: number[]) => LIE_OFF + over(q, [0, 0, 1]);
         // Far enough round to see a point deep inside (from a neck's side straight down is inside the chest, a long way from any surface).
         const clearAt = (q: number[]) => { const hit = surface(q, 0.4); if (hit && hit.h <= lie(hit.p)) return false; return others.every((o) => { const h = o(q, 0.4); return !h || h.h > LIE_OFF; }); };
         // First swung out about its sewn line, as little as clears it, its
