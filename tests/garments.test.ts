@@ -14,7 +14,7 @@ import { CLOTH_THICKNESS } from '../src/utils/cloth/xpbd';
 import { CLOTH_MATERIALS } from '../src/utils/cloth/clothMesh';
 import { GARMENT_DEFAULTS, garmentSettings } from '../src/utils/cloth/garments';
 import { fullSides, panelEdgeEase } from '../src/utils/cloth/garmentFullness';
-import { ballgownPreset, bonedGownPreset, dartedSheathPreset, gathersAndPleatsPreset, menswearPreset, shirtAndJacketPreset, tailoredOutfitPreset } from '../src/presets/clothPresets';
+import { ballgownPreset, bonedGownPreset, dartedSheathPreset, gathersAndPleatsPreset, shirtAndJacketPreset, tailoredOutfitPreset } from '../src/presets/clothPresets';
 import { colliderContact, type Collider } from '../src/utils/cloth/clothColliders';
 import type { BodyFormMeasurements, GarmentDraft, GarmentKind, GarmentTrim } from '../src/types/cloth';
 import type { SceneNode } from '../src/types/scene';
@@ -198,7 +198,7 @@ describe('trims', () => {
     const names = new Set([...shell.edges.map((e) => e.name), ...shell.seams.filter((sm) => sm.open).map((sm) => sm.name)]);
     for (const n of ['opening', 'neckline', 'hem', 'cuffL', 'cuffR']) expect([...names], n).toContain(n);
     const m = clothModel(g, new THREE.Matrix4(), [form, g]);
-    const by = (kind: string) => m.groups.flatMap((gr) => (gr.trims ?? []).filter((t) => t.kind === kind).map((t) => gr.name.split('__')[1]));
+    const by = (kind: string) => m.groups.flatMap((gr) => (gr.trims ?? []).filter((t) => t.kind === kind).map(() => gr.name.split('__')[1]));
     const zipper = by('zipper'), studs = by('stud');
     expect(zipper.length).toBeGreaterThan(20);
     expect(new Set(zipper)).toEqual(new Set(['frontL', 'frontR']));

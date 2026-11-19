@@ -11,9 +11,10 @@ export function FabricBuildPill() {
   const [shown, setShown] = useState(false);
 
   useEffect(() => {
-    if (!busy) { setShown(false); return; }
+    if (!busy) return;
     const t = setTimeout(() => setShown(true), SHOW_AFTER_MS);
-    return () => clearTimeout(t);
+    // Hidden again once the build is over, ready to wait out the next one.
+    return () => { clearTimeout(t); setShown(false); };
   }, [busy]);
 
   if (!busy || !shown) return null;

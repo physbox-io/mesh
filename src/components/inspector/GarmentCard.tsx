@@ -30,7 +30,7 @@ export function GarmentCard({ node }: { node: SceneNode }) {
     if (raw.startsWith('data:')) return raw;
     const withNs = raw.includes('xmlns=') ? raw : raw.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
     return `data:image/svg+xml;utf8,${encodeURIComponent(withNs)}`;
-  }, [pattern?.svg]);
+  }, [pattern]);
   if (!node.cloth) return null;
   const kind = node.cloth.garment?.garment ?? 'cloth';
   const asPieces = node.cloth.layout === 'pieces';

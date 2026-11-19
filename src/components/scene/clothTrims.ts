@@ -5,7 +5,7 @@
  * across its line; a zip's tape a ribbon through each of its runs and its
  * slider at the run's top; stitches and teeth turned along the line.
  */
-import { useEffect, useMemo } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
@@ -60,6 +60,10 @@ const SLIDER_SCALE = 3;
 /** A zip's tape, each side of the line, in teeth. */
 const TAPE_HALF = 2.4;
 
+/** Marked for upload, and shown: the trims' meshes are built once and placed each frame, after render. */
+const changed = (a: { needsUpdate: boolean }) => { a.needsUpdate = true; };
+const shown = (o: THREE.Object3D) => { o.visible = true; };
+
 interface Group { kind: string; items: Trim[]; mesh: THREE.InstancedMesh }
 interface Tape { items: Trim[]; mesh: THREE.Mesh; geometry: THREE.BufferGeometry }
 
@@ -113,7 +117,15 @@ export function useClothTrims(flex: FlexInfo) {
 
   const objects = useMemo(() => [...built.groups.map((g) => g.mesh), ...built.tapes.map((t) => t.mesh)], [built]);
 
+  // The meshes as built, reached through a ref when placed (after render):
+  // what useMemo returns is not to be written to after render. Set in a
+  // layout effect, so a rebuild's are in place before the cloth's own layout
+  // effect places them.
+  const builtRef = useRef(built);
+  useLayoutEffect(() => { builtRef.current = built; }, [built]);
+
   const place = (p: ArrayLike<number>, n: ArrayLike<number>, h: number) => {
+    const cur = builtRef.current;
     const at = new THREE.Vector3(), nv = new THREE.Vector3(), tan = new THREE.Vector3(), side = new THREE.Vector3();
     // Where a trim is on the cloth, its normal and the way its line runs.
     const frame = (t: Trim) => {
@@ -134,13 +146,13 @@ export function useClothTrims(flex: FlexInfo) {
     const dummy = new THREE.Object3D(), tx = new THREE.Vector3(), tz = new THREE.Vector3(), basis = new THREE.Matrix4();
     const zips = (useStore.getState().data as DataMirror | null)?.clothZips, cloth = flex.name.slice(0, flex.name.lastIndexOf('__'));
     const sliderAt = (t: Trim): Trim => {
-      const teeth = t.run !== undefined ? built.runTeeth.get(t.run) : undefined, z = t.zip && zips?.find((q) => q.cloth === cloth && q.trim === t.zip!.trim);
+      const teeth = t.run !== undefined ? cur.runTeeth.get(t.run) : undefined, z = t.zip && zips?.find((q) => q.cloth === cloth && q.trim === t.zip!.trim);
       if (!teeth?.length || !z) return t;
       let at = teeth[0];
       for (const q of teeth) if (q.zip!.at <= z.fastened + 1e-9) at = q;
       return at;
     };
-    for (const { kind, items, mesh } of built.groups) {
+    for (const { kind, items, mesh } of cur.groups) {
       items.forEach((t0, i) => {
         const t = kind === 'slider' ? sliderAt(t0) : t0;
         frame(t);
@@ -176,15 +188,15 @@ export function useClothTrims(flex: FlexInfo) {
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);
       });
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.visible = true;
+      changed(mesh.instanceMatrix);
+      shown(mesh);
     }
     // The piece's middle, for which side of its edge its cloth is on.
     let cx = 0, cy = 0, cz = 0;
     for (let i = 0; i < p.length; i += 3) { cx += p[i]; cy += p[i + 1]; cz += p[i + 2]; }
     const np = Math.max(1, p.length / 3);
     cx /= np; cy /= np; cz /= np;
-    for (const { items, mesh, geometry } of built.tapes) {
+    for (const { items, mesh, geometry } of cur.tapes) {
       const pos = geometry.attributes.position as THREE.BufferAttribute;
       // Each side's tape under its own edge, on the cloth's inner face, from
       // just past the teeth into its cloth: laid both ways about the line,
@@ -200,10 +212,10 @@ export function useClothTrims(flex: FlexInfo) {
         pos.setXYZ(2 * k, at.x + side.x * inn, at.y + side.y * inn, at.z + side.z * inn);
         pos.setXYZ(2 * k + 1, at.x + side.x * out, at.y + side.y * out, at.z + side.z * out);
       });
-      pos.needsUpdate = true;
+      changed(pos);
       geometry.computeVertexNormals();
       geometry.computeBoundingSphere();
-      mesh.visible = true;
+      shown(mesh);
     }
   };
   return { objects, place };

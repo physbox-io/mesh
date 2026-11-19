@@ -112,7 +112,10 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
     g.setIndex(index);
     return g;
   }, [flex, N, pattern]);
-  const scratch = useMemo(() => ({ p: new Float32Array(3 * N), n: new Float32Array(3 * N) }), [N]);
+  // Mutable work buffers and the mesh as drawn, reached through refs: what
+  // useMemo returns is not to be written to after render.
+  const scratch = useRef<{ p: Float32Array; n: Float32Array } | null>(null);
+  const meshRef = useRef<THREE.Mesh>(null);
   // Trims ride on the cloth (clothTrims), placed from it each time it is drawn.
   const trims = useClothTrims(flex);
   useEffect(() => () => geometry.dispose(), [geometry]);
@@ -163,9 +166,12 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   const sync = () => {
     const src = (useStore.getState().data as DataMirror | null)?.flexvert_xpos ?? data.flexvert_xpos;
     if (!src || src.length < 3 * (flex.vertadr + N)) return;
+    const g = meshRef.current?.geometry;
+    if (!g) return;
     filled.current = true;
-    const pos = geometry.attributes.position as THREE.BufferAttribute;
-    const arr = pos.array as Float32Array, { p, n } = scratch;
+    if (scratch.current?.p.length !== 3 * N) scratch.current = { p: new Float32Array(3 * N), n: new Float32Array(3 * N) };
+    const pos = g.attributes.position as THREE.BufferAttribute;
+    const arr = pos.array as Float32Array, { p, n } = scratch.current;
     const o = 3 * flex.vertadr;
     for (let i = 0; i < 3 * N; i++) p[i] = src[o + i];
     // A stitched vertex is drawn where it and its partners meet, once they
@@ -194,8 +200,8 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
       for (let k = 0; k < 3; k++) { const d = (n[3 * i + k] / l) * h; arr[3 * i + k] = p[3 * i + k] + d; arr[3 * (i + N) + k] = p[3 * i + k] - d; }
     }
     pos.needsUpdate = true;
-    geometry.computeVertexNormals();
-    geometry.computeBoundingSphere();
+    g.computeVertexNormals();
+    g.computeBoundingSphere();
     trims.place(p, n, h);
   };
   // A layout effect, so the new geometry is filled in the commit that made it.
@@ -203,7 +209,8 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   // land first: the cloth gone and its trims a box round the legs.
   // And a frame asked for once filled: on demand, nothing else asks for one
   // (the cloth stayed vanished until the next pointer event).
-  useLayoutEffect(() => { sync(); if (filled.current) invalidate(); }); // eslint-disable-line react-hooks/exhaustive-deps -- every render, on purpose
+  // Every render, on purpose.
+  useLayoutEffect(() => { sync(); if (filled.current) invalidate(); });
   const lastTime = useRef(-1);
   useFrame(() => {
     if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
@@ -224,7 +231,7 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   };
   return (
     <>
-      <mesh geometry={geometry} material={material} frustumCulled={false} castShadow receiveShadow onClick={onClick} onPointerDown={grab.onPointerDown} {...sculpt.handlers} />
+      <mesh ref={meshRef} geometry={geometry} material={material} frustumCulled={false} castShadow receiveShadow onClick={onClick} onPointerDown={grab.onPointerDown} {...sculpt.handlers} />
       {sculpt.overlay}
       {trims.objects.map((o, i) => <primitive key={i} object={o} />)}
     </>

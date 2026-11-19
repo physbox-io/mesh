@@ -412,10 +412,11 @@ function cubicRoots(a: number, b: number, c: number, d: number): number[] {
   cuts.sort((u, v) => u - v);
   const out: number[] = [];
   for (let k = 1; k < cuts.length; k++) {
-    let lo = cuts[k - 1], hi = cuts[k], flo = f(lo), fhi = f(hi);
+    let lo = cuts[k - 1], hi = cuts[k], flo = f(lo);
+    const fhi = f(hi);
     if (flo === 0) { out.push(lo); continue; }
     if (flo * fhi > 0) continue;
-    for (let it = 0; it < 50; it++) { const m = 0.5 * (lo + hi), fm = f(m); if (fm === 0) { lo = hi = m; break; } if (flo * fm < 0) { hi = m; fhi = fm; } else { lo = m; flo = fm; } }
+    for (let it = 0; it < 50; it++) { const m = 0.5 * (lo + hi), fm = f(m); if (fm === 0) { lo = hi = m; break; } if (flo * fm < 0) hi = m; else { lo = m; flo = fm; } }
     out.push(0.5 * (lo + hi));
   }
   if (f(1) === 0 && out[out.length - 1] !== 1) out.push(1);
@@ -548,11 +549,10 @@ function edgeEdge(x0: Float64Array, x1: Float64Array, a0: number, a1: number, b0
   coplanar(x0, x1, a0, a1, b0, b1);
   const meet = mayMeet();
   // Ending within ETA: the determinant is the two edges' cross times their distance apart, at most.
-  let near = false;
   if (!meet) {
     const i = 3 * a0, j = 3 * a1, k = 3 * b0, l = 3 * b1;
     const ex = x1[j] - x1[i], ey = x1[j + 1] - x1[i + 1], ez = x1[j + 2] - x1[i + 2], fx = x1[l] - x1[k], fy = x1[l + 1] - x1[k + 1], fz = x1[l + 2] - x1[k + 2];
-    near = Math.abs(CO[0] + CO[1] + CO[2] + CO[3]) <= ETA * Math.hypot(ey * fz - ez * fy, ez * fx - ex * fz, ex * fy - ey * fx);
+    const near = Math.abs(CO[0] + CO[1] + CO[2] + CO[3]) <= ETA * Math.hypot(ey * fz - ez * fy, ez * fx - ex * fz, ex * fy - ey * fx);
     if (!near) return null;
   }
   const ts = meet ? cubicRoots(CO[0], CO[1], CO[2], CO[3]) : [];
