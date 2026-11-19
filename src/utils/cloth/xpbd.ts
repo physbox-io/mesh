@@ -53,6 +53,14 @@ const SLIDER_LONG = 0.03, SLIDER_THROAT = 0.01, ZIP_CLOSE_SPEED = 0.5, ZIP_REACH
 const PRESEW_REST = 0.5;
 /** Its step meanwhile, seconds. */
 const PRESEW_STEP = 1 / 200;
+/**
+ * The most wall-clock time the sewing and settling before the first frame may
+ * take, ms. A garment built badly through itself (a ruffle sewn in a spiral
+ * tighter than it is wide, every turn hanging through the next) kept
+ * continuous collision busy for 25 minutes and the worker answered nothing;
+ * past this, what is not yet sewn finishes sewing as the scene runs.
+ */
+const SETTLE_BUDGET_MS = 20000;
 /** How long cloth that starts lifted is let fall, seconds, more. */
 const DROP_TIME = 0.6;
 /** An arrangement: after sewing, how long until points are pulled, how long the pull takes, how long they are held, seconds. */
@@ -414,6 +422,8 @@ export class ClothSim {
   }
 
   private settled = false;
+  /** Set when the settle before the first frame ran out of time (SETTLE_BUDGET_MS): why, for the cloth's warnings. */
+  settleCut: string | null = null;
   /**
    * The settle, now: once the colliders are posed, so the cloth is first drawn
    * where it rests rather than where it was modelled (a bow's tails started
@@ -501,7 +511,12 @@ export class ClothSim {
       // scene ran), so it settles here where the scene will hold it.
       const fineFrom = end - PRESEW_REST;
       let span = 0;
+      const started = performance.now();
       for (let t = 0; t < end;) {
+        if (performance.now() - started > SETTLE_BUDGET_MS) {
+          this.settleCut = `sewing and settling stopped after ${SETTLE_BUDGET_MS / 1000} s, ${t.toFixed(2)} of ${end.toFixed(2)} s in; the rest is sewn as the scene runs. It starts through itself or other cloth in ${builtCrossed.length} places: pieces sewn on placed through each other, or layers drawn inside one another.`;
+          break;
+        }
         const h = t >= fineFrom ? CLOTH_SUBSTEP : PRESEW_STEP;
         this.substep(h, env);
         if (pulls.length && t >= letGo && t < letGo + h) for (const pl of pulls) this.w[pl.p] = held[pl.p];

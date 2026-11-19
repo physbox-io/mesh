@@ -141,5 +141,6 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
   sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
   const warnings = models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`));
+  if (sim.settleCut) warnings.push(sim.settleCut);
   return { sim, keys, models, zipsAsked, formBuilds, warnings, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
 }
