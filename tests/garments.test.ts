@@ -799,8 +799,10 @@ describe('collars and lapels', () => {
     expect(m.groups.some((gr) => /collar|shawl|lapel/.test(gr.name))).toBe(false);
     // A one-piece rolled collar needs more stretch to lie flat than a seamed one
     // (measured: a 3 cm one-piece stand 8.3% against 2.9/3.1% split); a shawl's
-    // under collar is eased into shape, so it is held to 7.5% here (measured 4.6/6.7%).
-    for (const gr of [fl, fr]) expect(gr.flat!.strain95).toBeLessThan(0.075);
+    // under collar is eased into shape. Held to 7.5% (measured 4.6/6.7%) until
+    // a stood-off garment's neckline was brought in to the neck (6c965a3): the
+    // fronts then turn in round it, 7.4/8.9% measured since; held to 9.5%.
+    for (const gr of [fl, fr]) expect(gr.flat!.strain95).toBeLessThan(0.095);
     // The centre-back seam: the halves share a column of points off the neckline, both on each half's edge.
     const seam = fl.particles.filter((p) => fr.particles.includes(p) && !back.particles.includes(p));
     expect(seam.length).toBeGreaterThanOrEqual(4);
