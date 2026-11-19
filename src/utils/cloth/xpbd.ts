@@ -64,10 +64,8 @@ export const CLOTH_THICKNESS = 0.004;
 const STRETCH_PASSES = 3;
 /** Position-only constraint passes before the first substep, so cut-vs-3D pre-strain does not become velocity. */
 const SETTLE_PASSES = 15;
-/** Untangling (clothUntangle): how far a contour moves a step, steps per round, rounds, and how near a crossing is re-tested. */
+/** Untangling (clothUntangle): how far a contour moves a step, and how near a crossing is re-tested. */
 const UNTANGLE_STEP = 0.0005;
-const UNTANGLE_STEPS = 300;
-const UNTANGLE_ROUNDS = 3;
 const UNTANGLE_REACH = 0.05;
 /** Untangling at the build: at most this many steps, the whole checked again every so many. */
 const UNTANGLE_MAX = 1500, UNTANGLE_CHECK = 25;
