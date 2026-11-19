@@ -132,6 +132,8 @@ export class ClothSim {
   private boards: BoardShapes;
   private grabbed = -1; private grabW = 0; private grabTo: number[] | null = null;
   private bends: Int32Array; private bendWeights: Float64Array; private bendAlpha: Float64Array; private bendRest: Float64Array;
+  /** Each bend's Lagrange multiplier over a substep's passes (XPBD), so passes converge on its compliance instead of each adding its own correction. */
+  private bendLambda: Float64Array;
   private limits: Int32Array; private limitRest: Float64Array;
   private stitches: Int32Array; private stitchGap: Float64Array; private stitchSew: Float64Array;
   /** Whether each stitch holds (a zip's pair, only where it is done up), and the gap a zip's pair is closing from (m, down to 0 at ZIP_CLOSE_SPEED). */
@@ -278,7 +280,7 @@ export class ClothSim {
     this.edges = Int32Array.from(E); this.edgeRest = Float64Array.from(ER); this.edgeMin = Float64Array.from(EM); this.edgeAlpha = Float64Array.from(EA);
     this.rodLinks = Int32Array.from(RL); this.rodLinkRest = Float64Array.from(RLR); this.rodBends = Int32Array.from(RB); this.rodBendRest = Float64Array.from(RBR); this.rodBendAlpha = Float64Array.from(RBA);
     this.elastics = Int32Array.from(EL); this.elasticFlat = Float64Array.from(ELF); this.elasticRest = Float64Array.from(ELR); this.elasticAlpha = Float64Array.from(ELA);
-    this.bends = Int32Array.from(B); this.bendWeights = Float64Array.from(BR); this.bendAlpha = Float64Array.from(BA); this.bendRest = Float64Array.from(BC);
+    this.bends = Int32Array.from(B); this.bendWeights = Float64Array.from(BR); this.bendAlpha = Float64Array.from(BA); this.bendRest = Float64Array.from(BC); this.bendLambda = new Float64Array(BA.length);
     this.limits = Int32Array.from(LP); this.limitRest = Float64Array.from(LR);
     this.stitches = Int32Array.from(S); this.stitchSew = Float64Array.from(SS); this.stitchGap = new Float64Array(S.length / 2);
     this.stitchOn = new Uint8Array(S.length / 2).fill(1); this.stitchClose = new Float64Array(S.length / 2);
@@ -658,6 +660,7 @@ export class ClothSim {
     const doLayers = this.layers.active;
     for (let pass = 0; pass < SETTLE_PASSES; pass++) {
       this.prev.set(this.x);
+      this.bendLambda.fill(0);
       this.contactPush.fill(0);
       this.contactHeld.fill(0);
       for (let i = 0; i < this.n; i++) this.skip[i] = !this.w[i] ? 1 : 0;
@@ -723,6 +726,7 @@ export class ClothSim {
     // contact and Coulomb friction each pass so points held by friction pull
     // their neighbours in subsequent passes rather than stretching the edges
     // between them at the end of the substep.
+    this.bendLambda.fill(0);
     for (let pass = 0; pass < STRETCH_PASSES; pass++) {
       this.solveDistances(this.edges, this.edgeRest, this.edgeMin, this.edgeAlpha, h2);
       this.solveElastics(h2);
@@ -959,7 +963,13 @@ export class ClothSim {
       }
       const c = Math.sqrt(vx * vx + vy * vy + vz * vz);
       if (c < 1e-12) continue;
-      const dl = -(c - this.bendRest[s]) / (den + A[s] / h2);
+      // XPBD: the multiplier carried over the passes. Each pass taking its
+      // own whole correction instead made a soft fabric's bending as many
+      // times stiffer as there are passes (a knit's flared skirt stood as a
+      // cone instead of falling into folds), while a stiff one still
+      // converges over them.
+      const at = A[s] / h2, dl = (-(c - this.bendRest[s]) - at * this.bendLambda[s]) / (den + at);
+      this.bendLambda[s] += dl;
       const nx = vx / c, ny = vy / c, nz = vz / c;
       for (let j = 0; j < 4; j++) {
         const i = Q[4 * s + j], f = w[i] * K[4 * s + j] * dl;
