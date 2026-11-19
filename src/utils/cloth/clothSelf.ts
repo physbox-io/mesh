@@ -46,7 +46,6 @@ const MAX_DEPTH = 0.006;
 /** Most a sheet's middle keeps off another's, counting its sagitta: half the slab cloth is drawn as. */
 const MAX_HALF = 0.004 / 2; // CLOTH_THICKNESS / 2 (xpbd imports this module, so not imported back)
 
-const NOGAP = Boolean((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.CLOTH_NOGAP); // MEASURE-ONLY, remove
 const hash = (ix: number, iy: number, iz: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & (BUCKETS - 1);
 
 interface Group {
@@ -137,10 +136,8 @@ export class SelfContacts {
         if (s > E[j]) E[j] = s;
       }
     }
-    const off = NOGAP; // MEASURE-ONLY, remove
     for (let q = 0; q < g.all.length; q++) {
       const i = g.all[q], h = g.allHalf[q];
-      if (off) { E[i] = 0; continue; }
       E[i] = Math.max(0, Math.min(MAX_HALF, h + E[i]) - h);
     }
   }
@@ -192,7 +189,7 @@ export class SelfContacts {
         if (sd >= sep || sd < -MAX_DEPTH) continue;
         // Only a triangle the point is over (to within the separation): one
         // beside it on its own flat sheet is no fold, however near.
-        if (!NOGAP && best * best - sd * sd > sep * sep) continue;
+        if (best * best - sd * sd > sep * sep) continue;
         const wp = w[i], wa = w[ia], wb = w[ib], wc = w[ic];
         const den = wp + b0 * b0 * wa + bb1 * bb1 * wb + bb2 * bb2 * wc;
         if (den <= 0) continue;
