@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { useGarmentSculpt } from '../../store/garmentSculptStore';
 import { walkBodiesWorld } from '../../utils/bodyWorld';
+import { clothFrame } from '../../utils/cloth/clothFrame';
 import { STROKE_SPACING, strokeDabs } from '../../utils/cloth/garmentSculpt';
 import { PEN_STEP, penCurve } from '../../utils/cloth/garmentCurves';
 import type { SceneNode } from '../../types/scene';
@@ -21,10 +22,11 @@ import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
 
 const Z = new THREE.Vector3(0, 0, 1);
 const PEN_RING = 0.008;
-/** The garment node's world transform, from the graph as it is now. */
+/** The frame the garment is modelled in (its form's, when fitted to one), from the graph as it is now. */
 function worldOf(id: string): THREE.Matrix4 | null {
+  const nodes = useStore.getState().sceneGraph?.nodes;
   let found: THREE.Matrix4 | null = null;
-  walkBodiesWorld(useStore.getState().sceneGraph?.nodes, (n, w) => { if (n.id === id) found = w.clone(); });
+  walkBodiesWorld(nodes, (n, w) => { if (n.id === id) found = clothFrame(nodes, n, w).clone(); });
   return found;
 }
 

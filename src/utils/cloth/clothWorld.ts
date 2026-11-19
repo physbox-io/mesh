@@ -12,6 +12,7 @@ import type { SceneGraph, SceneNode } from '../../types/scene';
 import { walkBodiesWorld } from '../bodyWorld';
 import { clothModel, type ClothModel } from './clothModel';
 import { garmentSettings } from './garments';
+import { clothFrame } from './clothFrame';
 import { doneUp } from './fastening';
 import { meshShape, sceneColliders, sceneMeshGeoms, type Collider } from './clothColliders';
 import { ClothSim, type ClothEnv } from './xpbd';
@@ -76,6 +77,7 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
     graphWorlds.set(n.name || n.id, world);
     if (n.cloth) cloths.push({ node: n, world });
   });
+  for (const c of cloths) c.world = clothFrame(scene.nodes, c.node, c.world);
   if (!cloths.length) return null;
   // What each cloth is built from (its spec, where it stands, and the
   // measurements it is cut to), and the build of its form's geoms. A garment
