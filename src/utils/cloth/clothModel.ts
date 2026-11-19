@@ -1104,6 +1104,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       // neck edge on the neckline, a fall's on its stand).
       const facing: { at: number[]; n: number[] }[] = piece.tacks.map((tk) => ({ at: x0[particleOf(tk.local)], n: triNormal(x0, tk.tri) }));
       for (const [, p] of sharedAt) { const f = facesOut[p], fl = f ? Math.hypot(f[0], f[1], f[2]) : 0; if (fl > 1e-9) facing.push({ at: x0[p], n: [f[0] / fl, f[1] / fl, f[2] / fl] }); }
+      // Its triangles as wound for the solver, in its own points, to draw it
+      // by: drawn as meshed, a button stand's faced the body, and its buttons,
+      // set out along its normals, were drawn on its inside.
+      const wound: number[] = [];
       for (let t = 0; t < piece.tris.length; t += 3) {
         const [i, j, l] = [piece.tris[t], piece.tris[t + 1], piece.tris[t + 2]];
         const [pi, pj, pl] = [particleOf(i), particleOf(j), particleOf(l)];
@@ -1122,7 +1126,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           for (const f of facing) { const d = (f.at[0] - c[0]) ** 2 + (f.at[1] - c[1]) ** 2 + (f.at[2] - c[2]) ** 2; if (d < bd) { bd = d; n = f.n; } }
         }
         const face = triNormal(x0, [pi, pj, pl]);
-        if (face[0] * n[0] + face[1] * n[1] + face[2] * n[2] < 0) tris.push(pi, pl, pj); else tris.push(pi, pj, pl);
+        if (face[0] * n[0] + face[1] * n[1] + face[2] * n[2] < 0) { tris.push(pi, pl, pj); wound.push(i, l, j); } else { tris.push(pi, pj, pl); wound.push(i, j, l); }
         addFacing(tris.slice(-3));
         for (const [a, c] of [[i, j], [j, l], [l, i]]) edges.add(particleOf(a), particleOf(c), Math.hypot(uv[a][0] - uv[c][0], uv[a][1] - uv[c][1]), stretch);
         const m = (pm.arealDensity * flatArea(uv[i], uv[j], uv[l])) / 3;
@@ -1153,10 +1157,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (piece.shrink && piece.shrink < 1) for (const tk of piece.tacks) for (let e = 0; e < 3; e++) edges.setMinRatio(tk.tri[e], tk.tri[(e + 1) % 3], piece.shrink);
       const trims: ClothTrim[] = (piece.trims ?? []).map(({ trim, local }) => ({ kind: trim.kind, particle: local, size: trim.size ?? TRIM_DEFAULTS[trim.kind].size, rgba: trim.rgba ?? TRIM_DEFAULTS[trim.kind].rgba }));
       const host = piece.joinPanel ? groups.find((gr) => gr.name === `${name}__${piece.joinPanel}`) : undefined;
-      if (host && joinGroup(host, piece, particleOf)) continue;
+      if (host && joinGroup(host, { ...piece, tris: wound }, particleOf)) continue;
       groups.push({
         name: `${name}__${piece.name}`, rgba: piece.rgba, material: piece.material ?? materialName,
-        particles: piece.uv.map((_, i) => particleOf(i)), tris: piece.tris.slice(),
+        particles: piece.uv.map((_, i) => particleOf(i)), tris: wound,
         flat: { uv: uv.map(([u, vv]) => [u, vv]), outline: piece.outline.slice(), strain95: piece.strain95 ?? 0, marks: trims },
         ...(trims.length ? { trims } : {}),
         ...(piece.pattern ? { pattern: piece.pattern } : {}),
