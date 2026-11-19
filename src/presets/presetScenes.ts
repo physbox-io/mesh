@@ -672,6 +672,13 @@ export const newtonsCradlePreset: SceneGraph = {
     ...Array.from({ length: 5 }).map((_, idx): SceneNode => {
       const x = -0.08 + idx * 0.04;
       const isFirst = idx === 0;
+      // Both strings meet at one eyelet on top of the ball, as on a real cradle.
+      // Run to the ball's centre they entered it as two rods 10 mm apart, with
+      // nothing between them, and read as not attached at all.
+      const ballR = 0.0198;
+      const eyeR = 0.003;
+      const eyeTop = ballR + 2 * eyeR - 0.001; // seated 1 mm into the ball
+      const knot = -0.20 + eyeTop;
 
       return {
         id: `cradle_${idx}`,
@@ -685,8 +692,8 @@ export const newtonsCradlePreset: SceneGraph = {
         ],
         // Ultralight bifilar V-strings (0.4 g total << 255 g ball) so the centre of percussion stays at the ball centre
         geoms: [
-          { name: `wire_f_${idx}`, type: 'capsule', fromto: [0, -0.06, 0, 0, 0, -0.20], size: [0.0008], mass: 0.0002, rgba: [0.82, 0.84, 0.88, 0.9], contype: 0, conaffinity: 0 },
-          { name: `wire_b_${idx}`, type: 'capsule', fromto: [0, 0.06, 0, 0, 0, -0.20], size: [0.0008], mass: 0.0002, rgba: [0.82, 0.84, 0.88, 0.9], contype: 0, conaffinity: 0 },
+          { name: `wire_f_${idx}`, type: 'capsule', fromto: [0, -0.06, 0, 0, 0, knot], size: [0.0008], mass: 0.0002, rgba: [0.82, 0.84, 0.88, 1], contype: 0, conaffinity: 0 },
+          { name: `wire_b_${idx}`, type: 'capsule', fromto: [0, 0.06, 0, 0, 0, knot], size: [0.0008], mass: 0.0002, rgba: [0.82, 0.84, 0.88, 1], contype: 0, conaffinity: 0 },
         ],
         children: [
           {
@@ -702,12 +709,24 @@ export const newtonsCradlePreset: SceneGraph = {
               {
                 name: `cradle_ball_${idx}`,
                 type: 'sphere',
-                size: [0.0198],
+                size: [ballR],
                 pos: [0, 0, 0],
                 density: 7850,
                 rgba: [0.86, 0.88, 0.92, 1],
                 solref: [0.012, 0.12],
                 solimp: [0.95, 0.99, 0.001, 0.5, 2],
+              },
+              // The eyelet the strings are tied to: on top, clear of the
+              // neighbouring balls, and too light to move the centre of percussion.
+              {
+                name: `cradle_eyelet_${idx}`,
+                type: 'cylinder',
+                size: [eyeR, eyeR],
+                pos: [0, 0, eyeTop - eyeR],
+                mass: 0.0002,
+                rgba: [0.62, 0.64, 0.68, 1],
+                contype: 0,
+                conaffinity: 0,
               },
             ],
             children: [],
