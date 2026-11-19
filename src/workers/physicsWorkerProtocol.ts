@@ -373,6 +373,61 @@ export interface BowedStringContactEvent {
   stoppedLengthFraction?: number;
 }
 
+export interface ContinuousContactEvent {
+  /** Stable pair key (e.g. `${minBody}:${maxBody}`) for voice-slot continuity across frames. */
+  pairId?: string;
+  /** Primary resonating scene node id receiving continuous friction excitation. */
+  nodeId: string;
+  /** Colliding partner scene node id, or 'world' when rolling/sliding on the floor plane. */
+  otherNodeId?: string;
+  selfGeomName?: string;
+  otherGeomName?: string;
+  /** Tangential slip/rolling patch speed at the contact point (m/s). */
+  tangentSpeed: number;
+  /** Pure rolling contact-patch traversal speed R * ||omega_perp|| (m/s), when applicable. */
+  rollSpeedMps?: number;
+  /** Summed normal contact force across the contact patch (N). */
+  normalForce: number;
+  /** Effective Coulomb tangential friction coefficient mu. */
+  muFriction: number;
+  /** Ratio in [0, 1] of rolling motion to total patch motion (1 = pure rolling marble/wheel, 0 = pure sliding/scraping). */
+  rollingRatio: number;
+  /** Effective surface roughness proxy in [0, 1] (0.06 = smooth glass, 0.85 = rough stone). */
+  roughness: number;
+  /** Local reduced Hertzian curvature radius R* (m) at the contact patch. */
+  contactRadiusM?: number;
+  /** Sustained continuous contact duration (s) for this body pair. */
+  contactDurationSec?: number;
+  /** Force-weighted contact point in MuJoCo Z-up world coordinates [x, y, z] (m), for spatial panning. */
+  contactPointWorld?: [number, number, number];
+  /** Contact point in `nodeId`'s local body frame [x, y, z] (m), for modal participation & rim radius. */
+  localPoint?: [number, number, number];
+  /** True (or [0..1] alignment) when tangential slip runs circumferentially around an axisymmetric rim (singing bowl / wineglass). */
+  circumferentialRub?: boolean | number;
+}
+
+export type ContinuousContactFrictionItem = ContinuousContactEvent;
+
+export interface AudioDampingEvent {
+  /** Ringing scene node id being damped by sustained contact. */
+  nodeId: string;
+  /** Touching / resting damper scene node id (or 'world'). */
+  dampingNodeId?: string;
+  dampingGeomName?: string;
+  /** Sustained normal contact force (N). */
+  normalForce: number;
+  /** Additional physical modal decay rate delta_alpha (1/s) induced by the contact. */
+  dampingRate: number;
+  /** Viscoelastic softness factor in [0, 1] of the damper surface (high for rubber/felt/flesh, low for hard metal). */
+  softness?: number;
+  /** Sustained contact duration (s). */
+  contactDurationSec?: number;
+  /** Contact point in `nodeId`'s local body frame [x, y, z] (m), for spatial nodal selectivity (e.g. natural harmonics). */
+  localPoint?: [number, number, number];
+}
+
+export type AudioDampingItem = AudioDampingEvent;
+
 export interface AeroVoiceTelemetry {
   hubOrBodyId: string;
   bladeCount: number;
@@ -407,6 +462,8 @@ export type WorkerToMainMessage =
   | ({ type: 'IMPACT' } & ImpactEvent)
   | { type: 'AUDIO_IMPACTS'; events: AudioImpactEvent[] }
   | { type: 'BOWED_STRINGS'; contacts: BowedStringContactEvent[] }
+  | { type: 'CONTACT_FRICTION'; contacts: ContinuousContactEvent[] }
+  | { type: 'AUDIO_DAMPING'; contacts: AudioDampingEvent[] }
   | { type: 'AERO_AUDIO'; voices: AeroVoiceTelemetry[]; snaps: AeroSnapEvent[] }
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   /** A headless run (`judgeImpacts`) has stopped at a blow and waits for HEADLESS_IMPACT_REPLY. */

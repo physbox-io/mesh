@@ -571,14 +571,20 @@ export type FlexureKind = 'blade' | 'cross_pivot' | 'serpentine' | 'bistable';
 
 export type StringMaterialId = 'steel' | 'bronze' | 'nylon' | 'gut';
 
-export type WindExciterKind = 'reed' | 'brass_lip' | 'flute_jet';
+export type WindExciterKind = 'reed' | 'brass_lip' | 'flute_jet' | 'flap_valve';
 
-/** 1D Kelly–Lochbaum bore waveguide + reed / lip-reed wind instrument spec; see utils/windAcoustics.ts. */
+export type MembraneMaterialId = 'mylar' | 'coated_film' | 'calfskin' | 'kevlar';
+
+export type MembraneShapeKind = 'circular' | 'rectangular';
+
+export type ResonatorTubeEndCondition = 'open_closed' | 'open_open';
+
+/** 1D Kelly–Lochbaum bore waveguide + reed / lip-reed / jet / flap-valve wind instrument spec; see utils/windAcoustics.ts. */
 export interface WindInstrumentSpec {
   exciter: WindExciterKind;
   /** Mouth / bellows blowing pressure in kPa (typical playing range 1.5–7.0 kPa; 0 = silent). */
   breathKPa: number;
-  /** Reed natural frequency or brass player lip tension frequency (Hz, e.g. 180–850 Hz). */
+  /** Reed natural frequency, brass player lip tension frequency, or compliant flap-valve frequency (Hz, e.g. 24–1100 Hz). */
   embouchureHz: number;
   /** Optional unwrapped acoustic bore length (m) for coiled/folded brass horns (inferred from 3D span when omitted). */
   boreLengthM?: number;
@@ -605,6 +611,73 @@ export interface AcousticStringSpec {
   pluckPos?: number;
   /** Optional explicit soundbox body id for bridge -> Helmholtz/plate resonance coupling. */
   resonatorNodeId?: string;
+  /** Optional Kirchhoff–Carrier nonlinear high-amplitude pluck pitch droop (false/0 = linear; true/1 = physical (A/L)^2 default; >1 = exaggerated). */
+  nonlinearPitchDroop?: boolean | number;
+}
+
+/** Tensioned 2D drumhead / membrane specification (Bessel circular or rectangular head + kettle/snare coupling); see utils/membraneAcoustics.ts. */
+export interface AcousticMembraneSpec {
+  material: MembraneMaterialId;
+  /** Isotropic membrane line tension T_s in N/m (e.g. 400–6500 N/m). */
+  tensionNPerM: number;
+  /** Film / hide thickness in mm (e.g. 0.12–0.50 mm -> areal density sigma = rho * h). */
+  thicknessMm: number;
+  /** Explicit head planform ('circular' | 'rectangular'); inferred from 3D geometry when omitted. */
+  shape?: MembraneShapeKind;
+  /** Optional kettle / drum shell body id for enclosed air-cavity or Helmholtz coupling (auto-detected when omitted). */
+  shellNodeId?: string;
+  /** Enclosed kettle / shell air-cavity coupling strength in [0, 1] (shifts circular modes toward 1 : 1.50 : 2.00 timpani harmonicity). */
+  kettleCoupling?: number;
+  /** Sympathetic bottom-head snare-wire rattle intensity in [0, 1] (0 = off). */
+  snareBuzz?: number;
+  /** Maximum hard-strike nonlinear tension-modulation upward pitch drop in semitones (derived from T(t) = T_0 + dT * A(t)^2 when omitted). */
+  pitchGlideSemitones?: number;
+  /** Decay time constant (ms) of the hard-strike nonlinear pitch drop (e.g. 35–160 ms). */
+  pitchGlideDecayMs?: number;
+  /** Optional dimensionless multiplier (0..2, default 1.0) scaling physical hard-strike tension modulation. */
+  nonlinearGlide?: number;
+}
+
+/** von Kármán geometric nonlinearity specification for thin metal plates, cymbals, and gongs; see utils/nonlinearPlateAcoustics.ts. */
+export interface NonlinearPlateSpec {
+  /** Explicitly enable or disable nonlinear plate energy cascade (default true when present, or auto-inferred on thin high-Q plates). */
+  enabled?: boolean;
+  /** Dimensionless von Kármán coupling sensitivity multiplier (0 = linear, 1.0 = physical default, >1 = dramatic tam-tam crash). */
+  crashSensitivity?: number;
+  /** Upward modal energy cascade bloom time in ms (typical 50–250 ms). */
+  bloomDelayMs?: number;
+  /** Peak high-energy strike pitch glide in cents (positive for flat-plate tension stiffening, negative-to-positive for arched gongs). */
+  pitchGlideCents?: number;
+  /** High-frequency wave-turbulence shimmer wash mix in [0, 1]. */
+  shimmerMix?: number;
+  /** Shallow dome / arch rise ratio h_dome / h_plate (models downward-then-upward opera-gong pitch glide when > 0.3). */
+  archRatio?: number;
+}
+
+/** External acoustic tube resonator + optional rotating vibraphone tremolo fan; see utils/resonatorAcoustics.ts. */
+export interface ResonatorTubeSpec {
+  /** Acoustic boundary condition: 'open_closed' (quarter-wave closed-bottom tube) or 'open_open' (half-wave open pipe); auto-detected when omitted. */
+  endCondition?: ResonatorTubeEndCondition;
+  /** Optional explicit suspended bar/plate SceneNode id coupled above this resonator's mouth (auto-discovered spatially when omitted). */
+  coupledBarNodeId?: string;
+  /** Optional MuJoCo hinge joint name of a motor-driven rotating vibraphone fan/vane disk inside the tube mouth. */
+  vaneJointName?: string;
+  /** Maximum mouth occlusion fraction in [0, 1] when the tremolo vane lies flat across the bore (default 0.88). */
+  vaneMaxOcclusion?: number;
+  /** Optional target fundamental air-column resonance frequency in Hz. */
+  tuningHz?: number;
+}
+
+/** Rosined horsehair bow / friction exciter specification; see utils/stringAcoustics.ts. */
+export interface AcousticBowSpec {
+  /** Rosin stick-slip grip multiplier (0.2–2.0, default 1.0). */
+  rosinGrip?: number;
+  /** Rosined horsehair sliding friction coefficient mu_s (0.20–0.65, default 0.38). */
+  rosinFriction?: number;
+  /** Effective horsehair ribbon contact width in mm (3–18 mm, default 9 mm). */
+  hairWidthMm?: number;
+  /** Optional normal-force scaling multiplier into the Schelleng bow-force wedge (default 1.0). */
+  forceScale?: number;
 }
 
 /**
@@ -865,8 +938,18 @@ export interface SceneNode {
   tunedPitchHz?: number;
   /** Taut musical string specification (Mersenne tension + soundbox coupling); see utils/stringAcoustics.ts. */
   acousticString?: AcousticStringSpec;
-  /** Continuous bore waveguide wind/brass/reed instrument specification; see utils/windAcoustics.ts. */
+  /** Continuous bore waveguide wind/brass/reed/flap-valve instrument specification; see utils/windAcoustics.ts. */
   windInstrument?: WindInstrumentSpec;
+  /** Tensioned 2D drumhead / membrane specification (Bessel / rectangular + kettle/snare); see utils/membraneAcoustics.ts. */
+  acousticMembrane?: AcousticMembraneSpec;
+  /** von Kármán geometric nonlinearity specification for thin metal plates, cymbals, and gongs; see utils/nonlinearPlateAcoustics.ts. */
+  nonlinearPlate?: NonlinearPlateSpec;
+  /** External acoustic tube resonator + optional rotating vibraphone tremolo fan; see utils/resonatorAcoustics.ts. */
+  resonatorTube?: ResonatorTubeSpec;
+  /** Rosined horsehair bow / friction exciter specification; see utils/stringAcoustics.ts. */
+  acousticBow?: AcousticBowSpec;
+  /** Optional explicit coupled resonator / tube / soundbox SceneNode id for suspended bars, plates, or membranes. */
+  resonatorNodeId?: string;
   /** Fraction (0..1) of an open-top container's interior basin filled with freshwater; see utils/hydrostatics.ts. */
   waterFill?: number;
   script?: string;
