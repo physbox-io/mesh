@@ -633,10 +633,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     /** The panel each open point's second copy is on. */
     const secondPanel = new Map<number, number>();
     const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams, ...(shell.marks ?? [])], settings.trims ?? [], shell.tris);
-    const trimAt = new Map<number, TrimPlace[]>();
     const sliderDrawn = new Set<TrimPlace>();
     const pointDrawn = new Set<TrimPlace>();
-    for (const t of trimList) (trimAt.get(t.point) ?? trimAt.set(t.point, []).get(t.point)!).push(t);
     // Negative ease: the pattern cut narrower than the form, by the ease
     // over the girth under each point (a band's own ease at its top edge,
     // easing to the garment's over 8 cm), as far as the fabric gives.
@@ -800,31 +798,34 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       const side = piece.points.reduce((acc, g) => acc + (shell.points[g]?.[0] ?? 0), 0) > 0 ? 'left' : 'right';
       panelSide.push(side);
       const localOfG = new Map(piece.points.map((g, local) => [g, local]));
-      piece.points.forEach((g) => {
-        for (const pl of trimAt.get(g) ?? []) {
-          const { trim } = pl;
-          // A button on an opening: its hole on the front that laps over, the button on the other;
-          // with a stand, both go on the stand (sewn on below).
-          const buttoned = trim.kind === 'button' && openPoints.has(g);
-          if (buttoned && !asPieces && standWidth(trim) > 0) continue;
-          if (buttoned && side === (trim.lap ?? 'right')) {
-            const tr = placedTrim(pl, (q) => localOfG.get(q), 'buttonhole', (trim.size ?? TRIM_DEFAULTS.button.size) * 1.15, TRIM_DEFAULTS.buttonhole.rgba);
-            if (tr) trims.push(tr);
-          } else {
-            // One at a point once, on the first panel it is on: a point where
-            // panels meet is on each of them (a cap's crown, on its six gores),
-            // and each drew one, six buttons stacked askew.
-            if (trim.at) { if (pointDrawn.has(pl)) continue; pointDrawn.add(pl); }
-            if (pl.sideOf !== undefined && !localOfG.has(pl.sideOf)) continue;
-            const tr = placedTrim(pl, (q) => localOfG.get(q));
-            if (tr && trim.kind === 'zipper' && pl.along !== undefined) tr.zip = { trim: (settings.trims ?? []).indexOf(trim), at: pl.along };
-            // A zip's slider once, on the first panel its tooth is on: an
-            // opening's points are on both its sides, and each drew one.
-            if (tr?.end) { if (sliderDrawn.has(pl)) delete tr.end; else sliderDrawn.add(pl); }
-            if (tr) trims.push(tr);
-          }
+      // In the order they run along their lines, not the piece's points: a
+      // zip's tape is drawn through its run's teeth in turn, and in point
+      // order it zigzagged across the front and hung loose once undone.
+      for (const pl of trimList) {
+        const g = pl.point;
+        if (!localOfG.has(g)) continue;
+        const { trim } = pl;
+        // A button on an opening: its hole on the front that laps over, the button on the other;
+        // with a stand, both go on the stand (sewn on below).
+        const buttoned = trim.kind === 'button' && openPoints.has(g);
+        if (buttoned && !asPieces && standWidth(trim) > 0) continue;
+        if (buttoned && side === (trim.lap ?? 'right')) {
+          const tr = placedTrim(pl, (q) => localOfG.get(q), 'buttonhole', (trim.size ?? TRIM_DEFAULTS.button.size) * 1.15, TRIM_DEFAULTS.buttonhole.rgba);
+          if (tr) trims.push(tr);
+        } else {
+          // One at a point once, on the first panel it is on: a point where
+          // panels meet is on each of them (a cap's crown, on its six gores),
+          // and each drew one, six buttons stacked askew.
+          if (trim.at) { if (pointDrawn.has(pl)) continue; pointDrawn.add(pl); }
+          if (pl.sideOf !== undefined && !localOfG.has(pl.sideOf)) continue;
+          const tr = placedTrim(pl, (q) => localOfG.get(q));
+          if (tr && trim.kind === 'zipper' && pl.along !== undefined) tr.zip = { trim: (settings.trims ?? []).indexOf(trim), at: pl.along };
+          // A zip's slider once, on the first panel its tooth is on: an
+          // opening's points are on both its sides, and each drew one.
+          if (tr?.end) { if (sliderDrawn.has(pl)) delete tr.end; else sliderDrawn.add(pl); }
+          if (tr) trims.push(tr);
         }
-      });
+      }
       groups.push({
         name: `${name}__${panel.name}`, rgba: panel.name.startsWith('back') ? shade(colour, 0.85) : colour, material: materialName,
         particles: piece.points.map((_, i) => particleOf(i)), tris: piece.tris.slice(),
