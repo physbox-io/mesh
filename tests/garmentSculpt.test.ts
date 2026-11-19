@@ -91,8 +91,11 @@ describe('sculpted silhouettes', () => {
     const sp = L.shoulderPoint;
     const plain = shell().seams.filter((sm) => sm.name.startsWith('shape'));
     expect(plain).toHaveLength(0);
-    // Over the shoulder into a short sleeve (sleeveless, the armhole takes most of the dome away).
-    const sh = shell([{ at: [sp[0] + 0.02, 0, sp[2] + 0.02], radius: 0.1, amount: 0.05 }], { sleeve: 0.25 });
+    // On the back below the shoulder blade of a garment with no darts of its
+    // own, where no seam shapes it: no dart is added where a seam already
+    // does (over the shoulder a set-in sleeve's armhole seam takes the dome;
+    // on a fitted dress, its back waist darts).
+    const sh = shell([{ at: [sp[0] * 0.5, 0.12, sp[2] - 0.12], radius: 0.08, amount: 0.05 }], { garment: 'tshirt', sleeve: 0.25 });
     const names = new Set(sh.seams.filter((sm) => sm.name.startsWith('shape')).map((sm) => sm.name));
     expect(names.size).toBeGreaterThan(0);
     for (const n of names) if (n.endsWith('L')) expect(names.has(`${n.slice(0, -1)}R`)).toBe(true);

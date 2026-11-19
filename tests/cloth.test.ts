@@ -89,8 +89,9 @@ describe('cloth', () => {
         sewTime: 1,
       },
     } as SceneNode];
+    // Sewn before the scene starts (the clock starts with every stitch
+    // closed), so it is read as built: run on, it has been falling since.
     const r = await clothRun(nodes);
-    r.run(1.05);
     const st = r.models[0].stitches;
     let worst = 0;
     for (let k = 0; k < st.length; k += 2) {
