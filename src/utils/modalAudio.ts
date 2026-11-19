@@ -27,6 +27,9 @@ import {
   createResampledConvolver,
   getOrInitModalWorklet,
   getSharedAcousticOutputBus,
+  postWorkletAeroSilence,
+  postWorkletAeroSnap,
+  postWorkletAeroUpdate,
   postWorkletBowedSilence,
   postWorkletBowedUpdate,
   postWorkletWindSilence,
@@ -35,6 +38,7 @@ import {
   type WorkletBowedVoicePayload,
   type WorkletWindVoicePayload,
 } from './modalAudioWorklet';
+import type { AeroSynthParams, SnapSynthParams } from './aeroAcoustics';
 
 export interface AcousticMaterialProps {
   label: string;
@@ -1028,6 +1032,25 @@ export function updateLiveBowedVoices(voices: WorkletBowedVoicePayload[]): void 
 /** Immediately fades out all continuous bowed-string voices (on Stop or Mute). */
 export function silenceBowedVoices(): void {
   postWorkletBowedSilence(sharedAudioCtx);
+}
+
+/** Streams active rotor, wing, windmill, and cloth aeroacoustic voices to the native WebAudio engine. */
+export function updateLiveAeroVoices(voices: AeroSynthParams[]): void {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  postWorkletAeroUpdate(ctx, voices);
+}
+
+/** Triggers an impulsive trailing-edge cloth / flag N-wave whip-snap through the shared acoustic bus. */
+export function playAeroSnapPulse(snap: SnapSynthParams): void {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  postWorkletAeroSnap(ctx, snap);
+}
+
+/** Immediately fades out all continuous aeroacoustic voices (on Stop or Mute). */
+export function silenceAeroVoices(): void {
+  postWorkletAeroSilence(sharedAudioCtx);
 }
 
 export type { WorkletBowedVoicePayload };

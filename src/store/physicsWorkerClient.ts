@@ -316,6 +316,11 @@ export class PhysicsWorkerClient {
   onAudioImpacts: ((events: import('../workers/physicsWorkerProtocol').AudioImpactEvent[]) => void) | null = null;
   /** Throttled continuous bowed-string contact events when audio synthesis is unmuted. */
   onBowedStrings: ((contacts: import('../workers/physicsWorkerProtocol').BowedStringContactEvent[]) => void) | null = null;
+  /** Throttled aerodynamic rotor, wing, and cloth voice + snap events when audio synthesis is unmuted. */
+  onAeroAudio: ((
+    voices: import('../workers/physicsWorkerProtocol').AeroVoiceTelemetry[],
+    snaps: import('../workers/physicsWorkerProtocol').AeroSnapEvent[],
+  ) => void) | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });
@@ -359,6 +364,9 @@ export class PhysicsWorkerClient {
           break;
         case 'BOWED_STRINGS':
           this.onBowedStrings?.(msg.contacts);
+          break;
+        case 'AERO_AUDIO':
+          this.onAeroAudio?.(msg.voices, msg.snaps);
           break;
         case 'HEADLESS_RESULT': {
           this.headlessJudges.delete(msg.id);

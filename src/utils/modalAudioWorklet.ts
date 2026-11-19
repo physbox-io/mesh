@@ -17,6 +17,7 @@
 
 import type { WindExciterKind } from '../types/scene';
 import { useSoundStore } from '../store/soundStore';
+import type { AeroSynthParams, SnapSynthParams } from './aeroAcoustics';
 import type { ModalVoice } from './modalAudio';
 import { resampleIrToContextRate } from './solidAcoustics3D';
 import { solvePlayableWindVoice } from './windAcoustics';
@@ -176,7 +177,27 @@ type AudioContextWithWindGraph = AudioContext & {
   __physboxNativeBowedV5?: { slots: { voiceGain: GainNode; rosinGain?: GainNode; osc?: OscillatorNode; osc2?: OscillatorNode; osc3?: OscillatorNode; vibOsc?: OscillatorNode }[] };
   __physboxNativeBowedV6?: NativeBowedBankState;
   __physboxNativeBowedV7?: NativeBowedBankState;
+  __physboxNativeAeroV1?: NativeAeroBankState;
 };
+
+interface NativeAeroVoiceSlot {
+  id: string;
+  wasActive: boolean;
+  lastWaveSig: string;
+  propOsc: OscillatorNode;
+  propLowpass: BiquadFilterNode;
+  tonalGain: GainNode;
+  strouhalFilter: BiquadFilterNode;
+  noiseGain: GainNode;
+  amOsc: OscillatorNode;
+  amDepth: GainNode;
+  rustleShelf: BiquadFilterNode;
+  rustleGain: GainNode;
+}
+
+interface NativeAeroBankState {
+  slots: NativeAeroVoiceSlot[];
+}
 
 /**
  * Instantiates a fresh write-once `ConvolverNode` whose `AudioBuffer` is resampled to
@@ -1056,6 +1077,293 @@ export function postWorkletBowedSilence(ctx: AudioContext | null): void {
     slot.rosinGain.gain.setTargetAtTime(0, now, 0.008);
     slot.vibDepth.gain.cancelScheduledValues(now);
     slot.vibDepth.gain.setTargetAtTime(0, now, 0.010);
+    slot.wasActive = false;
+  }
+}
+
+export function ensureNativeAeroBank(ctx: AudioContext): NativeAeroBankState | null {
+  const c = ctx as AudioContextWithWindGraph;
+  if (c.__physboxNativeAeroV1) return c.__physboxNativeAeroV1;
+  const windBank = ensureNativeWindBank(ctx);
+  if (!windBank) return null;
+
+  const sharedBus = getSharedAcousticOutputBus(ctx);
+  const now = ctx.currentTime;
+  const slots: NativeAeroVoiceSlot[] = [];
+
+  for (let i = 0; i < 8; i++) {
+    // 1. Gutin Propeller / Rotor Tonal PeriodicWave Oscillator
+    const propOsc = ctx.createOscillator();
+    propOsc.type = 'sawtooth';
+    propOsc.frequency.setValueAtTime(55.0 + i * 0.3, now);
+
+    const propLowpass = ctx.createBiquadFilter();
+    propLowpass.type = 'lowpass';
+    propLowpass.frequency.setValueAtTime(2800, now);
+    propLowpass.Q.setValueAtTime(0.65, now);
+
+    const tonalGain = ctx.createGain();
+    tonalGain.gain.setValueAtTime(0, now);
+
+    propOsc.connect(propLowpass);
+    propLowpass.connect(tonalGain);
+    tonalGain.connect(sharedBus);
+
+    // 2. Curle Strouhal Vortex-Shedding Bandpass + Raised-Cosine Blade-Pass / Flutter AM
+    const strouhalFilter = ctx.createBiquadFilter();
+    strouhalFilter.type = 'bandpass';
+    strouhalFilter.frequency.setValueAtTime(600, now);
+    strouhalFilter.Q.setValueAtTime(1.8, now);
+
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0, now);
+
+    const amOsc = ctx.createOscillator();
+    amOsc.type = 'sine';
+    amOsc.frequency.setValueAtTime(4.0 + i * 0.17, now);
+
+    const amDepth = ctx.createGain();
+    amDepth.gain.setValueAtTime(0, now);
+    amOsc.connect(amDepth);
+    amDepth.connect(noiseGain.gain);
+
+    // 3. Cloth / Sail Weave-Rubbing High-Shelf Rustle (2.2..5.5 kHz)
+    const rustleShelf = ctx.createBiquadFilter();
+    rustleShelf.type = 'highpass';
+    rustleShelf.frequency.setValueAtTime(2800, now);
+    rustleShelf.Q.setValueAtTime(0.8, now);
+
+    const rustleGain = ctx.createGain();
+    rustleGain.gain.setValueAtTime(0, now);
+
+    if (windBank.noiseSource) {
+      windBank.noiseSource.connect(strouhalFilter);
+      strouhalFilter.connect(noiseGain);
+      noiseGain.connect(sharedBus);
+
+      windBank.noiseSource.connect(rustleShelf);
+      rustleShelf.connect(rustleGain);
+      rustleGain.connect(sharedBus);
+    }
+
+    propOsc.start(now);
+    amOsc.start(now);
+
+    slots.push({
+      id: '',
+      wasActive: false,
+      lastWaveSig: '',
+      propOsc,
+      propLowpass,
+      tonalGain,
+      strouhalFilter,
+      noiseGain,
+      amOsc,
+      amDepth,
+      rustleShelf,
+      rustleGain,
+    });
+  }
+
+  const aeroBank: NativeAeroBankState = { slots };
+  c.__physboxNativeAeroV1 = aeroBank;
+  return aeroBank;
+}
+
+export function postWorkletAeroUpdate(ctx: AudioContext, voices: AeroSynthParams[]): void {
+  if (ctx.state === 'suspended') {
+    void ctx.resume().catch(() => {});
+  }
+  const bank = ensureNativeAeroBank(ctx);
+  if (!bank) return;
+
+  const now = ctx.currentTime;
+  const usedSlots = new Set<number>();
+
+  // Prioritize the 8 loudest / most active aero voices if a scene has > 8 rotors/wings
+  const sorted = voices.length > 8
+    ? [...voices].sort((a, b) => (b.tonalGain + b.noiseGain + b.rustleGain) - (a.tonalGain + a.noiseGain + a.rustleGain)).slice(0, 8)
+    : voices;
+
+  for (const v of sorted) {
+    let idx = bank.slots.findIndex((s) => s.id === v.id);
+    if (idx === -1) {
+      idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && !s.wasActive);
+    }
+    if (idx === -1) {
+      idx = bank.slots.findIndex((_s, i) => !usedSlots.has(i));
+    }
+    if (idx === -1) continue;
+    usedSlots.add(idx);
+
+    const slot = bank.slots[idx];
+    const isNewId = slot.id !== v.id;
+    slot.id = v.id;
+
+    if (!v.active) {
+      slot.tonalGain.gain.setTargetAtTime(0, now, 0.016);
+      slot.noiseGain.gain.setTargetAtTime(0, now, 0.016);
+      slot.amDepth.gain.setTargetAtTime(0, now, 0.016);
+      slot.rustleGain.gain.setTargetAtTime(0, now, 0.016);
+      slot.wasActive = false;
+      continue;
+    }
+
+    const isFresh = !slot.wasActive || isNewId;
+
+    // 1. Tonal Gutin Propeller Branch
+    if (v.tonalActive && v.bpfHz >= 22 && v.harmonicWeights.length > 0) {
+      const hw = v.harmonicWeights;
+      const waveSig = `${hw.length}:${hw.map((w) => Math.round(w * 30)).join(',')}`;
+      if ((isFresh || slot.lastWaveSig !== waveSig) && typeof ctx.createPeriodicWave === 'function') {
+        const nHarm = hw.length + 1;
+        const real = new Float32Array(nHarm);
+        const imag = new Float32Array(nHarm);
+        for (let h = 0; h < hw.length; h++) {
+          const n = h + 1;
+          // Dispersed Gutin dipole phase prevents unnatural buzzsaw peak-clipping
+          const phase = -0.75 + n * 0.23;
+          real[n] = hw[h] * Math.cos(phase);
+          imag[n] = hw[h] * Math.sin(phase);
+        }
+        slot.propOsc.setPeriodicWave(ctx.createPeriodicWave(real, imag, { disableNormalization: false }));
+        slot.lastWaveSig = waveSig;
+      }
+
+      const lpHz = Math.min(8500, Math.max(650, v.bpfHz * (5.5 + 8.0 * (1 - v.stallRoughness))));
+      if (isFresh) {
+        slot.propOsc.frequency.cancelScheduledValues(now);
+        slot.propOsc.frequency.setValueAtTime(v.bpfHz, now);
+        slot.propLowpass.frequency.setValueAtTime(lpHz, now);
+      } else {
+        slot.propOsc.frequency.setTargetAtTime(v.bpfHz, now, 0.018);
+        slot.propLowpass.frequency.setTargetAtTime(lpHz, now, 0.022);
+      }
+      slot.tonalGain.gain.setTargetAtTime(v.tonalGain, now, 0.018);
+    } else {
+      slot.tonalGain.gain.setTargetAtTime(0, now, 0.014);
+    }
+
+    // 2. Broadband Strouhal Vortex-Shedding + Blade-Pass / Stall Flutter AM Branch
+    if (isFresh) {
+      slot.strouhalFilter.frequency.setValueAtTime(v.noiseCenterHz, now);
+      slot.strouhalFilter.Q.setValueAtTime(v.noiseQ, now);
+    } else {
+      slot.strouhalFilter.frequency.setTargetAtTime(v.noiseCenterHz, now, 0.022);
+      slot.strouhalFilter.Q.setTargetAtTime(v.noiseQ, now, 0.022);
+    }
+    slot.noiseGain.gain.setTargetAtTime(v.noiseGain, now, 0.018);
+
+    if (v.amRateHz >= 0.4 && v.amDepth > 0.01 && v.noiseGain > 0.001) {
+      slot.amOsc.frequency.setTargetAtTime(v.amRateHz, now, 0.025);
+      // Modulate +/- (amDepth * 0.55 * noiseGain) around `noiseGain` so gain stays smoothly non-negative
+      slot.amDepth.gain.setTargetAtTime(v.noiseGain * v.amDepth * 0.55, now, 0.020);
+    } else {
+      slot.amDepth.gain.setTargetAtTime(0, now, 0.016);
+    }
+
+    // 3. Cloth Weave-Rubbing High-Shelf Branch
+    if (v.rustleGain > 0.001) {
+      slot.rustleShelf.frequency.setTargetAtTime(v.rustleFreqHz, now, 0.022);
+      slot.rustleGain.gain.setTargetAtTime(v.rustleGain, now, 0.018);
+    } else {
+      slot.rustleGain.gain.setTargetAtTime(0, now, 0.015);
+    }
+
+    slot.wasActive = true;
+  }
+
+  for (let i = 0; i < bank.slots.length; i++) {
+    if (!usedSlots.has(i)) {
+      const slot = bank.slots[i];
+      if (slot.wasActive) {
+        slot.tonalGain.gain.setTargetAtTime(0, now, 0.018);
+        slot.noiseGain.gain.setTargetAtTime(0, now, 0.018);
+        slot.amDepth.gain.setTargetAtTime(0, now, 0.016);
+        slot.rustleGain.gain.setTargetAtTime(0, now, 0.016);
+        slot.wasActive = false;
+      }
+    }
+  }
+}
+
+export function postWorkletAeroSnap(ctx: AudioContext, snap: SnapSynthParams): void {
+  if (!snap.active || snap.gain <= 0.002) return;
+  if (ctx.state === 'suspended') {
+    void ctx.resume().catch(() => {});
+  }
+  if (typeof ctx.createBuffer !== 'function' || typeof ctx.createBufferSource !== 'function') return;
+
+  const sharedBus = getSharedAcousticOutputBus(ctx);
+  const sr = ctx.sampleRate || 48000;
+  const now = ctx.currentTime;
+  const tau = snap.durationSec; // 0.7..2.6 ms asymmetric N-wave shock
+  const totalDur = Math.max(0.018, tau * 12);
+  const len = Math.max(64, Math.ceil(sr * totalDur));
+  const buf = ctx.createBuffer(1, len, sr);
+  const ch = buf.getChannelData(0);
+
+  let seed = 0x51a7c0de;
+  for (let i = 0; i < len; i++) {
+    const t = i / sr;
+    // Asymmetric Friedlander / N-wave shock pulse + decaying fabric whip tail
+    let nWave: number;
+    if (t < tau) {
+      const u = t / tau;
+      // Sharp shock rise followed by linear N-wave rarefaction sweep from +1 to -0.78
+      const rise = u < 0.14 ? u / 0.14 : 1.0 - 1.78 * ((u - 0.14) / 0.86);
+      nWave = rise;
+    } else {
+      const dt = (t - tau) / tau;
+      nWave = -0.45 * Math.exp(-dt * 1.45) * Math.cos(dt * 2.2);
+    }
+    seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
+    const white = seed / 2147483648;
+    const tailEnv = Math.exp(-t / (tau * 2.8));
+    ch[i] = nWave + 0.28 * white * tailEnv;
+  }
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(snap.centerHz, now);
+  bp.Q.setValueAtTime(snap.bandpassQ, now);
+
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(snap.lowpassHz, now);
+  lp.Q.setValueAtTime(0.8, now);
+
+  const outGain = ctx.createGain();
+  outGain.gain.setValueAtTime(snap.gain, now);
+
+  src.connect(bp);
+  bp.connect(lp);
+  lp.connect(outGain);
+  outGain.connect(sharedBus);
+  src.start(now);
+  src.onended = () => {
+    try { outGain.disconnect(); } catch { /* ignore */ }
+  };
+}
+
+export function postWorkletAeroSilence(ctx: AudioContext | null): void {
+  if (!ctx) return;
+  const c = ctx as AudioContextWithWindGraph;
+  const bank = c.__physboxNativeAeroV1;
+  if (!bank) return;
+  const now = ctx.currentTime;
+  for (const slot of bank.slots) {
+    slot.tonalGain.gain.cancelScheduledValues(now);
+    slot.tonalGain.gain.setTargetAtTime(0, now, 0.010);
+    slot.noiseGain.gain.cancelScheduledValues(now);
+    slot.noiseGain.gain.setTargetAtTime(0, now, 0.010);
+    slot.amDepth.gain.cancelScheduledValues(now);
+    slot.amDepth.gain.setTargetAtTime(0, now, 0.010);
+    slot.rustleGain.gain.cancelScheduledValues(now);
+    slot.rustleGain.gain.setTargetAtTime(0, now, 0.010);
     slot.wasActive = false;
   }
 }

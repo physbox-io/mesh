@@ -9,7 +9,6 @@ import { metallophoneCarillonPreset } from '../src/presets/metallophoneCarillon'
 import { soundboxLyrePreset } from '../src/presets/soundboxLyre';
 import { bowedCelloPreset } from '../src/presets/bowedCello';
 import { windInstrumentsPreset } from '../src/presets/windInstruments';
-import { whoopeeStomperPreset } from '../src/presets/whoopeeStomper';
 import { compliantFlexuresPreset } from '../src/presets/compliantFlexures';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { simulate } from './helpers/simulate';
@@ -954,8 +953,22 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const m2SteelEnd = hitSteelEnd.voices[1]?.gain ?? 0;
     expect(m2SteelEnd).toBeGreaterThan(m2SoftCenter * 3.0);
 
-    // 4. Fletcher sub-resonant autonomous slap-valve regime on short 110 mm Whoopee Spout (`whoopeeStomperPreset`):
-    const spoutNode = whoopeeStomperPreset.nodes.find((n) => n.id === 'whoopee_spout_nozzle')!;
+    // 4. Fletcher sub-resonant autonomous slap-valve regime on a short 110 mm hollow spout:
+    const spoutNode: SceneNode = {
+      id: 'short_flap_spout',
+      name: 'Short Flap-Valve Spout',
+      type: 'body',
+      pos: [0, 0, 0],
+      deformMaterial: 'plastic',
+      csgEnabled: true,
+      windInstrument: { exciter: 'brass_lip', breathKPa: 0, embouchureHz: 46 },
+      geoms: [
+        { name: 'spout_outer_neck', type: 'cylinder', size: [0.025, 0.055], pos: [0, 0, 0], rgba: [0.9, 0.4, 0.5, 1] },
+        { name: 'spout_flared_lips', type: 'cylinder', size: [0.035, 0.012], pos: [0, 0, 0.048], rgba: [0.85, 0.34, 0.45, 1] },
+        { name: 'spout_hollow_bore', type: 'cylinder', size: [0.017, 0.068], pos: [0, 0, 0], csg: 'difference', rgba: [0.3, 0.1, 0.15, 0.4] },
+      ],
+      children: [],
+    };
     const spoutBore = extractBoreWaveguide(spoutNode)!;
     expect(spoutBore.resonantModesHz[0]).toBeGreaterThan(500);
     const lowRip = solvePlayableWindVoice(spoutBore, 3.2, 36);

@@ -369,6 +369,16 @@ export function DocsModal({ tab, onTab, onClose }: {
                       Hollow bores are sliced along their 3D axis to build a <strong>1D Conical Transfer-Matrix (TMM) input-impedance waveguide</strong> <code className="font-mono">Z_in(f)</code> directly from cross-sectional bore profile <code className="font-mono">A(x)</code>, bell flare cutoff, open <strong>tonehole shunts</strong>, unpadded wall leaks, dynamic <strong>plunger/hand mutes</strong>, and liquid slosh — excited by nonlinear single-reed, air-jet, or brass lip-reed models and blended through the body’s 3D wall and bell FIR.
                     </p>
                   </div>
+
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🌪️ Rotors, Wings &amp; Cloth Aeroacoustics</strong>
+                    <p className="text-slate-500 mt-1">
+                      Aerodynamic bodies (<code className="font-mono">isAerodynamic</code>) and wind-driven membranes synthesize live 3D flow sound with zero pre-recorded loops. Multi-blade propellers and rotors compute their <strong>Gutin blade-passing frequency</strong> (<code className="font-mono">f_BPF = B|Ω| / 2π</code>): fast quadcopter props radiate pitched dipole loading and thickness harmonics (<code className="font-mono">n·f_BPF</code>) brightened by tip Mach number and thrust, while low-RPM windmills amplitude-modulate broadband wake noise into rhythmic blade-pass swooshes.
+                    </p>
+                    <p className="text-slate-500 mt-1.5">
+                      Free-flying gliders and wings drive a <strong>Curle / Strouhal vortex-shedding bandpass</strong> (<code className="font-mono">f_c ≈ 0.21 v_rel / d_eff</code>) that narrows to a sleek whistle at attached angles of attack and widens into rough flutter-modulated buffeting past stall (<code className="font-mono">|α| &gt; 15°</code>). Flexible cloth strips and flags add high-shelf weave rustle plus impulsive <strong>N-wave trailing-edge whip-snaps</strong> whose tone shifts from warm heavy canvas thwacks to crisp ripstop crackles with areal density <code className="font-mono">σ = m / A</code>.
+                    </p>
+                  </div>
                 </div>
 
                 <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex flex-col gap-2">

@@ -20,14 +20,18 @@ import { useSoundStore } from './soundStore';
 import {
   estimateBodyModes,
   inferAcousticMaterial,
+  playAeroSnapPulse,
   playModalImpact,
   resolveTwoBodyImpact,
+  silenceAeroVoices,
   silenceBowedVoices,
   silenceWindVoices,
+  updateLiveAeroVoices,
   updateLiveBowedVoices,
   updateLiveWindVoices,
   type BodyModalProfile,
 } from '../utils/modalAudio';
+import { solveAeroAcousticVoice, solveClothSnapPulse } from '../utils/aeroAcoustics';
 import { simulate3DVibroAcousticIR } from '../utils/solidAcoustics3D';
 import {
   evaluateTautString,
@@ -578,6 +582,17 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       }
       updateLiveBowedVoices(bowedPayloads);
     };
+    client.onAeroAudio = (voices, snaps) => {
+      if (!useSoundStore.getState().soundEnabled || !store().getState().isPlaying) {
+        silenceAeroVoices();
+        return;
+      }
+      const solvedVoices = voices.map(solveAeroAcousticVoice);
+      updateLiveAeroVoices(solvedVoices);
+      for (const sn of snaps) {
+        playAeroSnapPulse(solveClothSnapPulse(sn));
+      }
+    };
     client.setSound(useSoundStore.getState().soundEnabled);
     client.onError = (message, fatal, lastState) => {
       console.error('[PhysicsWorker]', message);
@@ -614,10 +629,11 @@ useSoundStore.subscribe((state) => {
   if (!state.soundEnabled) {
     silenceWindVoices();
     silenceBowedVoices();
+    silenceAeroVoices();
   }
 });
 
-// Silence continuous wind waveguides and bowed strings whenever simulation stops
+// Silence continuous wind waveguides, bowed strings, and aeroacoustic voices whenever simulation stops
 setTimeout(() => {
   try {
     store().subscribe((state, prev) => {
@@ -625,6 +641,7 @@ setTimeout(() => {
         hadActiveWindVoices = false;
         silenceWindVoices();
         silenceBowedVoices();
+        silenceAeroVoices();
       }
     });
   } catch {

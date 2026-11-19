@@ -54,6 +54,8 @@ import { createSolverWorkMonitor, solverEnergyWarning, type SolverEnergyGain } f
 import { autoResetCount, wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
 import type {
   AeroDiagnostic,
+  AeroSnapEvent,
+  AeroVoiceTelemetry,
   BodyHistory,
   BowedStringContactEvent,
   ConstraintBrokenEvent,
@@ -65,6 +67,7 @@ import type {
   JointHistory,
   WorkerToMainMessage,
 } from './physicsWorkerProtocol';
+import { evaluateGustWind } from '../utils/aeroAcoustics';
 import { HistoryRing } from './historyRing';
 import { buildImpactWatches, checkImpacts as detectImpacts, type ImpactWatches } from './impactWatch';
 import { JOINT_NV, applyEditedCtrl, captureState, copyCarriedActuators as copyCarriedActuatorsByName, copyJointsByName, documentCtrlValues, seedNewBodies, type CarriedState } from './carryState';
@@ -628,9 +631,24 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
           const spanX = xmat[o + 1], spanY = xmat[o + 4], spanZ = xmat[o + 7];
           const upX = xmat[o + 2], upY = xmat[o + 5], upZ = xmat[o + 8];
 
-          const relVx = vx - (envWindX || 0);
-          const relVy = vy - (envWindY || 0);
-          const relVz = vz;
+          const aeroRef = aeroBladeGroupByNodeId.get(node.id);
+          let localWindX = envWindX || 0;
+          let localWindY = envWindY || 0;
+          let localWindZ = 0;
+          if (aeroRef?.group.isCloth && (localWindX !== 0 || localWindY !== 0)) {
+            [localWindX, localWindY, localWindZ] = evaluateGustWind(
+              localWindX,
+              localWindY,
+              geomWorldX,
+              geomWorldY,
+              geomWorldZ,
+              dat.time,
+            );
+          }
+
+          const relVx = vx - localWindX;
+          const relVy = vy - localWindY;
+          const relVz = vz - localWindZ;
 
           const spanDotV = relVx * spanX + relVy * spanY + relVz * spanZ;
           const airfoilVx = relVx - spanDotV * spanX;
@@ -638,7 +656,7 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
           const airfoilVz = relVz - spanDotV * spanZ;
           const relSpeed = Math.sqrt(airfoilVx * airfoilVx + airfoilVy * airfoilVy + airfoilVz * airfoilVz);
 
-          if (relSpeed >= 0.05) {
+          if (relSpeed >= 0.05 && envDensity >= 0) {
             const s = geom.size || [];
             const halfX = s[0] || 0.3;
             const halfY = s[1] || 0.2;
@@ -683,17 +701,42 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
             const fz = (CL * ldz + CD * ddz) * q * wingArea;
 
             const pitchMoment = -0.05 * alpha * q * wingArea * chord;
-            const tx_aero = pitchMoment * spanX;
-            const ty_aero = pitchMoment * spanY;
-            const tz_aero = pitchMoment * spanZ;
+            let tx_aero = pitchMoment * spanX;
+            let ty_aero = pitchMoment * spanY;
+            let tz_aero = pitchMoment * spanZ;
 
-            const tx_lever = ry * fz - rz * fy;
-            const ty_lever = rz * fx - rx * fz;
-            const tz_lever = rx * fy - ry * fx;
+            let tx_lever = ry * fz - rz * fy;
+            let ty_lever = rz * fx - rx * fz;
+            let tz_lever = rx * fy - ry * fx;
 
-            xfrc[pId * 6 + 0] += fx;
-            xfrc[pId * 6 + 1] += fy;
-            xfrc[pId * 6 + 2] += fz;
+            // Explicit Euler integrator passive velocity clamp for lightweight (< 150 g) aerodynamic panels/wings:
+            // When a light panel whips through high relative speed (e.g. > 20 m/s), explicit step force
+            // `F * dt / m` could exceed `relSpeed` and reverse the relative flow within a single 1 ms step,
+            // creating exponential explicit-Euler amplification! Clamping `|Δv_step| <= 0.35 * relSpeed`
+            // guarantees strict passivity across ripstop nylon, cotton, and heavy canvas up to gale-force winds.
+            let scale = 1.0;
+            const bodyMassVal = mdl.body_mass[pId] || 0;
+            if (bodyMassVal > 0 && bodyMassVal < 0.15) {
+              const dtStep = modelOpt(mdl).timestep || 0.001;
+              const fMagRaw = Math.hypot(fx, fy, fz);
+              const maxPassiveForce = (0.35 * bodyMassVal * Math.max(1.0, relSpeed)) / dtStep;
+              if (fMagRaw > maxPassiveForce) {
+                scale = maxPassiveForce / fMagRaw;
+              }
+            }
+            const sFx = fx * scale;
+            const sFy = fy * scale;
+            const sFz = fz * scale;
+            tx_aero *= scale;
+            ty_aero *= scale;
+            tz_aero *= scale;
+            tx_lever *= scale;
+            ty_lever *= scale;
+            tz_lever *= scale;
+
+            xfrc[pId * 6 + 0] += sFx;
+            xfrc[pId * 6 + 1] += sFy;
+            xfrc[pId * 6 + 2] += sFz;
 
             xfrc[pId * 6 + 3] += tx_aero + tx_lever;
             xfrc[pId * 6 + 4] += ty_aero + ty_lever;
@@ -701,9 +744,19 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
 
             aeroDiagnostics[node.name || node.id] = {
               relSpeed, alpha: alpha * 180 / Math.PI, CL, CD,
-              force: [fx, fy, fz],
+              force: [sFx, sFy, sFz],
               torque: [tx_aero + tx_lever, ty_aero + ty_lever, tz_aero + tz_lever],
             };
+            if (soundEnabled && aeroRef) {
+              const fMag = Math.hypot(sFx, sFy, sFz);
+              const grp = aeroRef.group;
+              grp.accForceSum += fMag;
+              grp.accRelSpeedSum += relSpeed * wingArea;
+              grp.accAlphaWeightedSum += alphaDeg * wingArea;
+              grp.accAreaSum += wingArea;
+              grp.accActiveCount++;
+              if (relSpeed > grp.accTipSpeedMax) grp.accTipSpeedMax = relSpeed;
+            }
           } else {
             aeroDiagnostics[node.name || node.id] = { relSpeed, alpha: 0, CL: 0, CD: 0, force: [0, 0, 0], torque: [0, 0, 0] };
           }
@@ -1054,6 +1107,58 @@ let prevStringVelDof: Float64Array | null = null;
 const pendingAudioImpacts = new Map<string, AudioImpactEvent>();
 const lastAudioEmitMs = new Map<string, number>();
 
+interface AeroBladeEntry {
+  nodeId: string;
+  bodyId: number;
+  areaM2: number;
+  chordM: number;
+  thicknessM: number;
+  tipRadiusM: number;
+  arealDensityKgM2: number;
+  hingeDofAdr: number;
+}
+
+interface AeroVoiceGroup {
+  id: string;
+  hubBodyId: number;
+  hubJointDofAdr: number;
+  bladeCount: number;
+  isCloth: boolean;
+  blades: AeroBladeEntry[];
+  compositeBodyIds: number[];
+  compositeDofAdrs: number[];
+  compositeElementAreaM2: number;
+  compositeThicknessM: number;
+  compositeArealDensityKgM2: number;
+  // Preallocated per-step accumulators (zero GC churn inside executeScripts!)
+  accForceSum: number;
+  accRelSpeedSum: number;
+  accTipSpeedMax: number;
+  accAlphaWeightedSum: number;
+  accAreaSum: number;
+  accActiveCount: number;
+}
+
+interface ClothTrailingEdgeWatch {
+  nodeId: string;
+  bodyId: number;
+  normalLocal: [number, number, number];
+  arealDensityKgM2: number;
+  prevNormalVel: number;
+  prevSpeedSq: number;
+  prevConstraintMag: number;
+  constraintDofAdrs: number[];
+  initialized: boolean;
+  lastSnapSimTime: number;
+}
+
+let aeroVoiceGroups: AeroVoiceGroup[] = [];
+let aeroBladeGroupByNodeId = new Map<string, { group: AeroVoiceGroup; blade: AeroBladeEntry }>();
+let clothTrailingWatches: ClothTrailingEdgeWatch[] = [];
+const pendingAeroSnaps = new Map<string, AeroSnapEvent>();
+let lastAeroEmitMs = 0;
+let hadActiveAeroVoices = false;
+
 const inferStringLocalSpan = (
   node: SceneNode,
 ): { p0: [number, number, number]; ax: [number, number, number]; len: number } => {
@@ -1105,6 +1210,10 @@ const rebuildHydroAndFlexureCaches = (
   recentPluckTouchSite.clear();
   prevConstraintDof = null;
   prevStringVelDof = null;
+  aeroVoiceGroups = [];
+  aeroBladeGroupByNodeId = new Map();
+  clothTrailingWatches = [];
+  pendingAeroSnaps.clear();
   const mdl = model;
   if (!mdl) return;
 
@@ -1301,6 +1410,397 @@ const rebuildHydroAndFlexureCaches = (
       for (let k = 0; k < count && d0 + k < nv; k++) {
         dofForceScale[d0 + k] = invLever;
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Build Aeroacoustic Voice Groups & Cloth Trailing-Edge Snap Watches
+  // -------------------------------------------------------------------------
+  const mj = mujoco!;
+  const hubGroups = new Map<string, AeroVoiceGroup>();
+  const bodyMassArr = mdl.body_mass;
+  const geomSizeArr = mdl.geom_size;
+
+  const estimateBladeMetrics = (node: SceneNode, bId: number): {
+    areaM2: number;
+    chordM: number;
+    thicknessM: number;
+    tipRadiusM: number;
+    arealDensityKgM2: number;
+  } => {
+    const geom = node.geoms?.[0];
+    const s = geom?.size ?? [];
+    const halfX = s[0] || 0.05;
+    const halfY = s[1] || halfX;
+    const halfZ = s[2] || 0.002;
+    const dims = [halfX * 2, halfY * 2, halfZ * 2].sort((a, b) => a - b);
+    const thicknessM = Math.max(0.0005, dims[0]);
+    const chordM = Math.max(0.006, halfX * 2);
+    const spanM = Math.max(0.008, halfY * 2);
+    const areaM2 = Math.max(1e-5, chordM * spanM);
+    const gp = geom?.pos ?? [0, 0, 0];
+    const np = node.pos ?? [0, 0, 0];
+    const centerRad = Math.hypot(np[0] + (gp[0] || 0), np[1] + (gp[1] || 0), np[2] + (gp[2] || 0));
+    const tipRadiusM = Math.max(0.015, centerRad + Math.max(halfX, halfY));
+    const mKg = Math.max(0.0002, bodyMassArr[bId] || geom?.mass || areaM2 * thicknessM * (node.density ?? geom?.density ?? 650));
+    const arealDensityKgM2 = Math.max(0.02, Math.min(2.5, mKg / areaM2));
+    return { areaM2, chordM, thicknessM, tipRadiusM, arealDensityKgM2 };
+  };
+
+  interface AncestorChainItem {
+    node: SceneNode;
+    bodyId: number;
+    hingeDofAdr: number;
+    hasFreeOrSlide: boolean;
+  }
+
+  const aeroNodesWithChain: { node: SceneNode; bId: number; chain: AncestorChainItem[] }[] = [];
+  const compositeNodes: SceneNode[] = [];
+
+  const gatherAeroTree = (list: SceneNode[], chain: AncestorChainItem[]) => {
+    for (const n of list || []) {
+      if (n.isComposite) {
+        compositeNodes.push(n);
+      }
+      const bId = bodyIdCache[n.id] ?? bodyIdCache[n.name] ?? -1;
+      let hingeDofAdr = -1;
+      let hasFreeOrSlide = false;
+      for (const j of n.joints ?? []) {
+        if (j.type === 'free' || j.type === 'slide') hasFreeOrSlide = true;
+        if (j.type === 'hinge' && hingeDofAdr === -1) {
+          const jId = jointIdCache[j.name];
+          if (jId !== undefined) hingeDofAdr = mdl.jnt_dofadr[jId];
+        }
+      }
+      const nextChain = bId > 0 ? [...chain, { node: n, bodyId: bId, hingeDofAdr, hasFreeOrSlide }] : chain;
+      if (n.isAerodynamic && bId > 0) {
+        aeroNodesWithChain.push({ node: n, bId, chain: nextChain });
+      }
+      if (n.children?.length) gatherAeroTree(n.children, nextChain);
+    }
+  };
+  gatherAeroTree(sceneGraph.nodes, []);
+
+  // Identify articulated membrane/flag chains (parent AND child both `isAerodynamic` connected by hinges!)
+  const aeroNodeIdSet = new Set(aeroNodesWithChain.map((x) => x.node.id));
+  const membraneRootByNodeId = new Map<string, AncestorChainItem>();
+  for (const item of aeroNodesWithChain) {
+    // Check if an ancestor in the chain is ALSO `isAerodynamic` with hinged links (an articulated flag/ribbon!)
+    let topAero: AncestorChainItem | null = null;
+    let hingedCount = 0;
+    for (const anc of item.chain) {
+      if (aeroNodeIdSet.has(anc.node.id)) {
+        if (!topAero) topAero = anc;
+        if (anc.hingeDofAdr >= 0) hingedCount++;
+      }
+    }
+    if (topAero && topAero.node.id !== item.node.id && hingedCount >= 1) {
+      membraneRootByNodeId.set(item.node.id, topAero);
+      membraneRootByNodeId.set(topAero.node.id, topAero);
+    }
+  }
+
+  for (const { node, bId, chain } of aeroNodesWithChain) {
+    const selfItem = chain[chain.length - 1];
+    const metrics = estimateBladeMetrics(node, bId);
+
+    // Case 1: Articulated aerodynamic cloth/flag strip chain
+    const memRoot = membraneRootByNodeId.get(node.id);
+    if (memRoot) {
+      const gid = memRoot.node.id;
+      let grp = hubGroups.get(gid);
+      if (!grp) {
+        grp = {
+          id: gid,
+          hubBodyId: memRoot.bodyId,
+          hubJointDofAdr: -1,
+          bladeCount: 0,
+          isCloth: true,
+          blades: [],
+          compositeBodyIds: [],
+          compositeDofAdrs: [],
+          compositeElementAreaM2: 0,
+          compositeThicknessM: metrics.thicknessM,
+          compositeArealDensityKgM2: metrics.arealDensityKgM2,
+          accForceSum: 0,
+          accRelSpeedSum: 0,
+          accTipSpeedMax: 0,
+          accAlphaWeightedSum: 0,
+          accAreaSum: 0,
+          accActiveCount: 0,
+        };
+        hubGroups.set(gid, grp);
+        aeroVoiceGroups.push(grp);
+      }
+      const bladeEntry: AeroBladeEntry = {
+        nodeId: node.id,
+        bodyId: bId,
+        ...metrics,
+        hingeDofAdr: selfItem?.hingeDofAdr ?? -1,
+      };
+      grp.blades.push(bladeEntry);
+      aeroBladeGroupByNodeId.set(node.id, { group: grp, blade: bladeEntry });
+
+      // Free trailing edge of an articulated flag/strip: no aerodynamic children below this node!
+      const hasAeroChild = (node.children ?? []).some((ch) => aeroNodeIdSet.has(ch.id));
+      if (!hasAeroChild && selfItem && selfItem.hingeDofAdr >= 0) {
+        const dAdrs: number[] = [];
+        for (const anc of chain) {
+          if (anc.hingeDofAdr >= 0) dAdrs.push(anc.hingeDofAdr);
+        }
+        clothTrailingWatches.push({
+          nodeId: node.id,
+          bodyId: bId,
+          normalLocal: [0, 0, 1],
+          arealDensityKgM2: metrics.arealDensityKgM2,
+          prevNormalVel: 0,
+          prevSpeedSq: 0,
+          prevConstraintMag: 0,
+          constraintDofAdrs: dAdrs,
+          initialized: false,
+          lastSnapSimTime: -1,
+        });
+      }
+      continue;
+    }
+
+    // Case 2: Nearest rotating parent hinge hub (e.g. `rotor1..4` with B=2, `windmill` rotor with B=3)
+    // Walk strictly up ancestors (excluding self if self is a free-flying wing like `paper_plane_wing`!)
+    let hubAncestor: AncestorChainItem | null = null;
+    for (let k = chain.length - 2; k >= 0; k--) {
+      const anc = chain[k];
+      if (anc.hingeDofAdr >= 0 && !anc.hasFreeOrSlide) {
+        // Skip nacelle yaw hinges if there is no direct blade relationship: check that node itself has no joint of its own
+        // OR is directly mounted on the rotating hub (e.g. `rotor1 -> r1_b1`, `rotor -> blade1`)
+        if ((selfItem?.hingeDofAdr ?? -1) === -1) {
+          hubAncestor = anc;
+          break;
+        }
+      }
+      if (anc.hasFreeOrSlide) break;
+    }
+    // Note: `tail_vane` on `windmill` is mounted under `nacelle` (`yaw_hinge`), NOT `rotor` (`rotor_hinge`).
+    // A yaw vane has 1 fin (`B = 1` with slow/zero yaw), whereas a true rotor hub either has `B >= 2` blades
+    // OR an actuated/spinning shaft. We group by `hubAncestor` first and finalize `bladeCount` right after!
+    if (hubAncestor) {
+      // Compute radial tip distance relative to the hub body's frame
+      let rx = 0, ry = 0, rz = 0;
+      for (let k = chain.indexOf(hubAncestor) + 1; k < chain.length; k++) {
+        const np = chain[k].node.pos ?? [0, 0, 0];
+        rx += np[0] || 0;
+        ry += np[1] || 0;
+        rz += np[2] || 0;
+      }
+      const gp = node.geoms?.[0]?.pos ?? [0, 0, 0];
+      const gs = node.geoms?.[0]?.size ?? [0.03, 0.1];
+      const hubTipR = Math.max(
+        0.02,
+        Math.hypot(rx + (gp[0] || 0), ry + (gp[1] || 0), rz + (gp[2] || 0)) + Math.max(gs[0] || 0, gs[1] || 0),
+      );
+      const gid = hubAncestor.node.id;
+      let grp = hubGroups.get(gid);
+      if (!grp) {
+        grp = {
+          id: gid,
+          hubBodyId: hubAncestor.bodyId,
+          hubJointDofAdr: hubAncestor.hingeDofAdr,
+          bladeCount: 0,
+          isCloth: false,
+          blades: [],
+          compositeBodyIds: [],
+          compositeDofAdrs: [],
+          compositeElementAreaM2: 0,
+          compositeThicknessM: metrics.thicknessM,
+          compositeArealDensityKgM2: metrics.arealDensityKgM2,
+          accForceSum: 0,
+          accRelSpeedSum: 0,
+          accTipSpeedMax: 0,
+          accAlphaWeightedSum: 0,
+          accAreaSum: 0,
+          accActiveCount: 0,
+        };
+        hubGroups.set(gid, grp);
+        aeroVoiceGroups.push(grp);
+      }
+      const bladeEntry: AeroBladeEntry = {
+        nodeId: node.id,
+        bodyId: bId,
+        ...metrics,
+        tipRadiusM: hubTipR,
+        hingeDofAdr: -1,
+      };
+      grp.blades.push(bladeEntry);
+      aeroBladeGroupByNodeId.set(node.id, { group: grp, blade: bladeEntry });
+    } else {
+      // Case 3: Standalone wing / airframe surface (e.g. `paper_plane_wing` + welded elevons share root moving body `pId`!):
+      // Weight chord proportionally, or keep primary lifting wing's chord so Strouhal `c * |sin(alpha)|` matches the wing chord!
+      let pId = bId;
+      while (pId > 0 && mdl.body_dofnum[pId] === 0) {
+        pId = bodyParent[pId];
+      }
+      const ownerId = (pId > 0 ? bodyNodeById[pId] : undefined) ?? node.id;
+      let grp = hubGroups.get(ownerId);
+      if (!grp) {
+        grp = {
+          id: ownerId,
+          hubBodyId: pId > 0 ? pId : bId,
+          hubJointDofAdr: selfItem?.hingeDofAdr ?? -1,
+          bladeCount: 0,
+          isCloth: false,
+          blades: [],
+          compositeBodyIds: [],
+          compositeDofAdrs: [],
+          compositeElementAreaM2: 0,
+          compositeThicknessM: metrics.thicknessM,
+          compositeArealDensityKgM2: metrics.arealDensityKgM2,
+          accForceSum: 0,
+          accRelSpeedSum: 0,
+          accTipSpeedMax: 0,
+          accAlphaWeightedSum: 0,
+          accAreaSum: 0,
+          accActiveCount: 0,
+        };
+        hubGroups.set(ownerId, grp);
+        aeroVoiceGroups.push(grp);
+      }
+      const bladeEntry: AeroBladeEntry = {
+        nodeId: node.id,
+        bodyId: bId,
+        ...metrics,
+        hingeDofAdr: -1,
+      };
+      grp.blades.push(bladeEntry);
+      aeroBladeGroupByNodeId.set(node.id, { group: grp, blade: bladeEntry });
+    }
+  }
+
+  // Finalize `bladeCount` on hub groups:
+  // - Multi-blade hubs (`blades.length >= 2`, e.g. quadcopter B=2, windmill B=3) keep `bladeCount = blades.length`.
+  // - Single-fin bodies on a slow/unactuated yaw hinge (e.g. `tail_vane` on `nacelle`) have `blades.length === 1`:
+  //   treat as a translating/weathercocking vane (`bladeCount = 0`) unless that hinge has an actuator!
+  for (const grp of aeroVoiceGroups) {
+    if (grp.isCloth) {
+      grp.bladeCount = 0;
+    } else if (grp.hubJointDofAdr >= 0) {
+      if (grp.blades.length >= 2) {
+        grp.bladeCount = grp.blades.length;
+      } else {
+        const hasMotor = jointInfos.some((ji) => ji.dofadr === grp.hubJointDofAdr && ji.actuators.length > 0);
+        grp.bladeCount = hasMotor ? 1 : 0;
+      }
+    }
+  }
+
+  // Also detect physics-only scripted multi-blade rotors (`traditionalWindmillPreset` / `physicsOnlyWindmillPreset`)
+  // where `rotor` has a `rotor_hinge` and 3..4 `blade*` children whose sails aren't marked `isAerodynamic`:
+  const scanScriptedRotors = (list: SceneNode[]) => {
+    for (const n of list || []) {
+      if (!hubGroups.has(n.id) && (n.joints?.length ?? 0) > 0 && (n.children?.length ?? 0) >= 2) {
+        const hinge = n.joints.find((j) => j.type === 'hinge');
+        const jId = hinge ? jointIdCache[hinge.name] : undefined;
+        const hubBId = bodyIdCache[n.id] ?? bodyIdCache[n.name] ?? -1;
+        const bladeKids = (n.children ?? []).filter(
+          (ch) => (ch.joints?.length ?? 0) === 0 && (ch.geoms?.length ?? 0) > 0 && /blade|vane|prop|wing|sail/i.test(ch.name || ch.id),
+        );
+        if (jId !== undefined && hubBId > 0 && bladeKids.length >= 2) {
+          const grp: AeroVoiceGroup = {
+            id: n.id,
+            hubBodyId: hubBId,
+            hubJointDofAdr: mdl.jnt_dofadr[jId],
+            bladeCount: bladeKids.length,
+            isCloth: false,
+            blades: [],
+            compositeBodyIds: [],
+            compositeDofAdrs: [],
+            compositeElementAreaM2: 0,
+            compositeThicknessM: 0.008,
+            compositeArealDensityKgM2: 0.25,
+            accForceSum: 0,
+            accRelSpeedSum: 0,
+            accTipSpeedMax: 0,
+            accAlphaWeightedSum: 0,
+            accAreaSum: 0,
+            accActiveCount: 0,
+          };
+          for (const bk of bladeKids) {
+            const bkId = bodyIdCache[bk.id] ?? bodyIdCache[bk.name] ?? hubBId;
+            const m = estimateBladeMetrics(bk, bkId);
+            const entry: AeroBladeEntry = { nodeId: bk.id, bodyId: bkId, ...m, hingeDofAdr: -1 };
+            grp.blades.push(entry);
+          }
+          hubGroups.set(n.id, grp);
+          aeroVoiceGroups.push(grp);
+        }
+      }
+      if (n.children?.length) scanScriptedRotors(n.children);
+    }
+  };
+  scanScriptedRotors(sceneGraph.nodes);
+
+  // Case 4: MuJoCo `<composite>` (`grid` / `cloth` / unanchored aerodynamic `cable`)
+  for (const comp of compositeNodes) {
+    const cType = comp.compositeType || 'cable';
+    if (cType !== 'grid' && cType !== 'cloth' && !comp.isAerodynamic) continue;
+    const prefix = comp.compositePrefix || `${comp.name || comp.id}_`;
+    const compBodyIds: number[] = [];
+    const compDofAdrs: number[] = [];
+    for (let b = 1; b < mdl.nbody; b++) {
+      const bName = mj.mj_id2name(mdl, mj.mjtObj.mjOBJ_BODY.value, b) || '';
+      if (bName.startsWith(`${prefix}B`)) {
+        compBodyIds.push(b);
+        const dNum = mdl.body_dofnum[b];
+        const dAdr = mdl.body_dofadr[b];
+        for (let k = 0; k < dNum; k++) compDofAdrs.push(dAdr + k);
+      }
+    }
+    if (compBodyIds.length === 0) continue;
+    const counts = (comp.compositeCount || '6 6 1').trim().split(/\s+/).map(Number);
+    const ny = Math.max(1, counts[1] || 1);
+    const sizeParts = (comp.compositeSize || '0.4 0.3').trim().split(/\s+/).map(Number);
+    const spanX = Math.max(0.05, sizeParts[0] || 0.4);
+    const spanY = Math.max(0.02, sizeParts[1] || (ny > 1 ? spanX : 0.03));
+    const totalArea = spanX * spanY;
+    const elemArea = totalArea / Math.max(1, compBodyIds.length);
+    const rGeom = comp.geoms?.[0]?.size?.[0] ?? (geomSizeArr[0] || 0.004);
+    const totalMass = compBodyIds.reduce((s, id) => s + (bodyMassArr[id] || 0.005), 0);
+    const sigma = Math.max(0.02, Math.min(1.5, totalMass / Math.max(1e-4, totalArea)));
+
+    const grp: AeroVoiceGroup = {
+      id: comp.id,
+      hubBodyId: compBodyIds[0],
+      hubJointDofAdr: -1,
+      bladeCount: 0,
+      isCloth: true,
+      blades: [],
+      compositeBodyIds: compBodyIds,
+      compositeDofAdrs: compDofAdrs,
+      compositeElementAreaM2: elemArea,
+      compositeThicknessM: Math.max(0.001, rGeom * 2),
+      compositeArealDensityKgM2: sigma,
+      accForceSum: 0,
+      accRelSpeedSum: 0,
+      accTipSpeedMax: 0,
+      accAlphaWeightedSum: 0,
+      accAreaSum: 0,
+      accActiveCount: 0,
+    };
+    aeroVoiceGroups.push(grp);
+
+    // Watch trailing-edge / free corner body of the composite sheet/cable (unless welded at far end!)
+    if (!comp.weldLastToId) {
+      const tipBodyId = compBodyIds[compBodyIds.length - 1];
+      clothTrailingWatches.push({
+        nodeId: comp.id,
+        bodyId: tipBodyId,
+        normalLocal: [0, 0, 1],
+        arealDensityKgM2: sigma,
+        prevNormalVel: 0,
+        prevSpeedSq: 0,
+        prevConstraintMag: 0,
+        constraintDofAdrs: compDofAdrs.slice(-6),
+        initialized: false,
+        lastSnapSimTime: -1,
+      });
     }
   }
 };
@@ -1967,6 +2467,305 @@ const flushBowedStrings = () => {
   }
 };
 
+/**
+ * Applies physical wind drag & turbulent gust forces to MuJoCo `<composite>`
+ * (`grid` / `cloth` / `cable`) bodies so flexible banners and sheets billow
+ * and snap in `[envWindX, envWindY]`.
+ */
+const applyCompositeAeroForces = () => {
+  if (!model || !data || aeroVoiceGroups.length === 0 || envDensity < 0) return;
+  const hasWind = Math.abs(envWindX) > 1e-4 || Math.abs(envWindY) > 1e-4;
+  let hasCompositeGroup = false;
+  for (const g of aeroVoiceGroups) {
+    if (g.compositeBodyIds.length > 0) {
+      hasCompositeGroup = true;
+      break;
+    }
+  }
+  if (!hasCompositeGroup) return;
+
+  const views = velocityViews(model, data);
+  const xpos = data.xpos;
+  const xmat = data.xmat;
+  const xfrc = data.xfrc_applied;
+  const rho = envDensity > 0 ? envDensity : 1.225;
+
+  for (const grp of aeroVoiceGroups) {
+    if (grp.compositeBodyIds.length === 0) continue;
+    const area = grp.compositeElementAreaM2;
+    for (const bId of grp.compositeBodyIds) {
+      const px = xpos[bId * 3];
+      const py = xpos[bId * 3 + 1];
+      const pz = xpos[bId * 3 + 2];
+      const [vx, vy, vz] = bodyPointVelocity(views, bId, [px, py, pz]);
+      let wx = envWindX || 0;
+      let wy = envWindY || 0;
+      let wz = 0;
+      if (hasWind) {
+        [wx, wy, wz] = evaluateGustWind(wx, wy, px, py, pz, data.time);
+      }
+      const rvx = wx - vx;
+      const rvy = wy - vy;
+      const rvz = wz - vz;
+      const relSpeed = Math.hypot(rvx, rvy, rvz);
+      if (relSpeed < 0.04) continue;
+
+      const mOff = bId * 9;
+      // Local Z normal of the composite element frame
+      const nx = xmat[mOff + 2];
+      const ny = xmat[mOff + 5];
+      const nz = xmat[mOff + 8];
+      const vDotN = rvx * nx + rvy * ny + rvz * nz;
+      const sinAlpha = Math.min(1, Math.abs(vDotN) / relSpeed);
+      const q = 0.5 * rho * relSpeed * relSpeed;
+      // Normal pressure loading + tangential skin drag on cloth/membrane element
+      const fn = 1.65 * q * area * (vDotN / relSpeed) * (0.35 + 0.65 * sinAlpha);
+      const fd = 0.08 * q * area;
+      const fx = fn * nx + fd * (rvx / relSpeed);
+      const fy = fn * ny + fd * (rvy / relSpeed);
+      const fz = fn * nz + fd * (rvz / relSpeed);
+      xfrc[bId * 6 + 0] += fx;
+      xfrc[bId * 6 + 1] += fy;
+      xfrc[bId * 6 + 2] += fz;
+
+      if (soundEnabled) {
+        grp.accForceSum += Math.hypot(fx, fy, fz);
+        grp.accRelSpeedSum += relSpeed * area;
+        grp.accAlphaWeightedSum += (Math.asin(sinAlpha) * 180 / Math.PI) * area;
+        grp.accAreaSum += area;
+        grp.accActiveCount++;
+        if (relSpeed > grp.accTipSpeedMax) grp.accTipSpeedMax = relSpeed;
+      }
+    }
+  }
+};
+
+/**
+ * Per-substep zero-copy cloth trailing-edge whip-snap ("flag snap") detector:
+ * Tracks normal velocity reversal / jerk `|Δv_⊥| / Δt > a_snap` alongside rising
+ * membrane hinge/constraint tension (`90 ms` per-edge debounce, zero `dat.contact` copy!).
+ */
+const sampleAeroSnaps = (stepSize: number) => {
+  if (!soundEnabled || clothTrailingWatches.length === 0 || !model || !data || envDensity < 0) return;
+  const dt = Math.max(1e-4, stepSize);
+  const views = velocityViews(model, data);
+  const xpos = data.xpos;
+  const xmat = data.xmat;
+  const qfrcC = data.qfrc_constraint;
+  const qfrcPassive = data.qfrc_passive;
+
+  for (const w of clothTrailingWatches) {
+    const bId = w.bodyId;
+    if (bId <= 0 || bId >= model.nbody) continue;
+    const px = xpos[bId * 3];
+    const py = xpos[bId * 3 + 1];
+    const pz = xpos[bId * 3 + 2];
+    const [vx, vy, vz] = bodyPointVelocity(views, bId, [px, py, pz]);
+    const mOff = bId * 9;
+    const nx = xmat[mOff] * w.normalLocal[0] + xmat[mOff + 1] * w.normalLocal[1] + xmat[mOff + 2] * w.normalLocal[2];
+    const ny = xmat[mOff + 3] * w.normalLocal[0] + xmat[mOff + 4] * w.normalLocal[1] + xmat[mOff + 5] * w.normalLocal[2];
+    const nz = xmat[mOff + 6] * w.normalLocal[0] + xmat[mOff + 7] * w.normalLocal[1] + xmat[mOff + 8] * w.normalLocal[2];
+    const vNorm = vx * nx + vy * ny + vz * nz;
+    const speedSq = vx * vx + vy * vy + vz * vz;
+
+    let cMag = 0;
+    for (const dAdr of w.constraintDofAdrs) {
+      if (dAdr >= 0 && dAdr < model.nv) {
+        cMag += Math.abs(qfrcC[dAdr]) + Math.abs(qfrcPassive[dAdr]);
+      }
+    }
+
+    if (!w.initialized) {
+      w.prevNormalVel = vNorm;
+      w.prevSpeedSq = speedSq;
+      w.prevConstraintMag = cMag;
+      w.initialized = true;
+      continue;
+    }
+
+    const accelNorm = Math.abs(vNorm - w.prevNormalVel) / dt;
+    const isWhipReversal = vNorm * w.prevNormalVel <= 0.02 || speedSq < w.prevSpeedSq * 0.72;
+    const isTensionSpike = cMag > w.prevConstraintMag * 1.08 + 0.004 || accelNorm > 55.0;
+    w.prevNormalVel = vNorm;
+    w.prevSpeedSq = speedSq;
+    w.prevConstraintMag = cMag;
+
+    // Traveling flexural wave snaps the free trailing edge taut (a_snap = 26 m/s², 90 ms debounce)
+    const relSpeed = Math.hypot(vx - (envWindX || 0), vy - (envWindY || 0), vz);
+    if (
+      accelNorm > 26.0 &&
+      relSpeed >= 0.8 &&
+      isWhipReversal &&
+      isTensionSpike &&
+      data.time - w.lastSnapSimTime >= 0.090
+    ) {
+      w.lastSnapSimTime = data.time;
+      const bodyMass = Math.max(0.002, model.body_mass[bId] || 0.008);
+      const impulseNs = Math.min(0.45, bodyMass * Math.abs(accelNorm) * dt * 1.8);
+      if (impulseNs >= 0.0005) {
+        const prev = pendingAeroSnaps.get(w.nodeId);
+        if (!prev || impulseNs > prev.impulseNs) {
+          pendingAeroSnaps.set(w.nodeId, {
+            nodeId: w.nodeId,
+            impulseNs: +impulseNs.toFixed(5),
+            arealDensityKgM2: w.arealDensityKgM2,
+            relSpeedMps: +relSpeed.toFixed(3),
+          });
+        }
+      }
+    }
+  }
+};
+
+/**
+ * Throttled (20 ms / 50 Hz) aeroacoustic telemetry emitter:
+ * - Zero WASM `data.contact` copies!
+ * - Resets preallocated accumulators cleanly and sends a single `{ voices: [], snaps: [] }`
+ *   clear frame when all aero bodies go quiet (`hadActiveAeroVoices` guard).
+ */
+const flushAeroAudio = () => {
+  if (!soundEnabled || aeroVoiceGroups.length === 0 || !model || !data) {
+    pendingAeroSnaps.clear();
+    for (const grp of aeroVoiceGroups) {
+      grp.accForceSum = 0;
+      grp.accRelSpeedSum = 0;
+      grp.accTipSpeedMax = 0;
+      grp.accAlphaWeightedSum = 0;
+      grp.accAreaSum = 0;
+      grp.accActiveCount = 0;
+    }
+    if (hadActiveAeroVoices) {
+      hadActiveAeroVoices = false;
+      post({ type: 'AERO_AUDIO', voices: [], snaps: [] });
+    }
+    return;
+  }
+
+  const now = performance.now();
+  if (now - lastAeroEmitMs < 20) return;
+  lastAeroEmitMs = now;
+
+  const qvel = data.qvel;
+  const views = velocityViews(model, data);
+  const xpos = data.xpos;
+  const isVacuum = envDensity < 0;
+  const voices: AeroVoiceTelemetry[] = [];
+
+  for (const grp of aeroVoiceGroups) {
+    // Effective rotor angular rate relative to air: `|qvel[hubJoint] + ω_parent · axis_world|`
+    // so a pitching/yawing/tumbling quadcopter naturally shifts its 4 motors' BPFs apart (`inter-motor beating`)!
+    let omega = grp.hubJointDofAdr >= 0 && grp.hubJointDofAdr < model.nv ? qvel[grp.hubJointDofAdr] : 0;
+    if (grp.bladeCount >= 1 && grp.hubBodyId > 0 && grp.hubBodyId < model.nbody) {
+      const parentId = model.body_parentid[grp.hubBodyId];
+      if (parentId > 0) {
+        const [pwx, pwy, pwz] = bodyAngularVelocity(views, parentId);
+        // Project parent world angular velocity onto hub body's world Z/spin axis (or total world spin along hub):
+        const hubW = bodyAngularVelocity(views, grp.hubBodyId);
+        const relMag = Math.hypot(hubW[0], hubW[1], hubW[2]);
+        if (relMag > 0.1) {
+          omega = omega >= 0 ? relMag : -relMag;
+        } else {
+          omega += 0.35 * (pwx + pwy + pwz);
+        }
+      }
+    }
+    const absOmega = Math.abs(omega);
+
+    let totalArea = 0;
+    let avgChord = 0.05;
+    let avgThick = grp.compositeThicknessM || 0.003;
+    let maxTipR = 0.05;
+    let avgSigma = grp.compositeArealDensityKgM2 || 0.15;
+    let bendRateSum = 0;
+    let bendCount = 0;
+
+    if (grp.blades.length > 0) {
+      let chordSum = 0;
+      let thickSum = 0;
+      let sigmaSum = 0;
+      for (const bl of grp.blades) {
+        totalArea += bl.areaM2;
+        chordSum += bl.chordM * bl.areaM2;
+        thickSum += bl.thicknessM * bl.areaM2;
+        sigmaSum += bl.arealDensityKgM2 * bl.areaM2;
+        if (bl.tipRadiusM > maxTipR) maxTipR = bl.tipRadiusM;
+        if (bl.hingeDofAdr >= 0 && bl.hingeDofAdr < model.nv) {
+          bendRateSum += Math.abs(qvel[bl.hingeDofAdr]);
+          bendCount++;
+        }
+      }
+      if (totalArea > 1e-6) {
+        avgChord = chordSum / totalArea;
+        avgThick = thickSum / totalArea;
+        avgSigma = sigmaSum / totalArea;
+      }
+    } else if (grp.compositeBodyIds.length > 0) {
+      totalArea = grp.compositeElementAreaM2 * grp.compositeBodyIds.length;
+      avgChord = Math.sqrt(Math.max(1e-4, totalArea));
+      for (const dAdr of grp.compositeDofAdrs) {
+        if (dAdr >= 0 && dAdr < model.nv) {
+          bendRateSum += Math.abs(qvel[dAdr]);
+          bendCount++;
+        }
+      }
+    }
+
+    // Read instantaneous kinematics when accumulators had 0 aerodynamic force (e.g. physics-only scripted windmill!)
+    let relSpeedMps = grp.accAreaSum > 1e-6 ? grp.accRelSpeedSum / Math.max(1e-6, grp.accAreaSum) : 0;
+    let tipSpeedMps = Math.max(grp.accTipSpeedMax, absOmega * maxTipR);
+    let aeroForceN = grp.accActiveCount > 0 ? grp.accForceSum / Math.max(1, grp.accActiveCount / Math.max(1, grp.blades.length || grp.compositeBodyIds.length)) : 0;
+    const alphaDeg = grp.accAreaSum > 1e-6 ? grp.accAlphaWeightedSum / grp.accAreaSum : 12.0;
+
+    if (relSpeedMps < 0.05 && grp.hubBodyId > 0 && grp.hubBodyId < model.nbody) {
+      const hb = grp.hubBodyId;
+      const [vx, vy, vz] = bodyPointVelocity(views, hb, [xpos[hb * 3], xpos[hb * 3 + 1], xpos[hb * 3 + 2]]);
+      const hubRel = Math.hypot(vx - (envWindX || 0), vy - (envWindY || 0), vz);
+      relSpeedMps = Math.max(hubRel, absOmega * maxTipR * 0.7);
+      if (tipSpeedMps < relSpeedMps) tipSpeedMps = relSpeedMps;
+      if (aeroForceN === 0 && absOmega > 0.4 && !isVacuum) {
+        const rho = envDensity > 0 ? envDensity : 1.225;
+        aeroForceN = 0.35 * rho * totalArea * relSpeedMps * relSpeedMps;
+      }
+    }
+
+    const bendRateRadPerSec = bendCount > 0 ? bendRateSum / bendCount : 0;
+
+    // Reset accumulators for the next 20 ms window
+    grp.accForceSum = 0;
+    grp.accRelSpeedSum = 0;
+    grp.accTipSpeedMax = 0;
+    grp.accAlphaWeightedSum = 0;
+    grp.accAreaSum = 0;
+    grp.accActiveCount = 0;
+
+    if (!isVacuum && (relSpeedMps >= 0.25 || tipSpeedMps >= 0.25 || absOmega >= 0.35 || bendRateRadPerSec >= 0.5)) {
+      voices.push({
+        hubOrBodyId: grp.id,
+        bladeCount: grp.bladeCount,
+        omegaRadPerSec: +omega.toFixed(4),
+        tipSpeedMps: +tipSpeedMps.toFixed(4),
+        relSpeedMps: +relSpeedMps.toFixed(4),
+        alphaDeg: +alphaDeg.toFixed(3),
+        areaM2: +totalArea.toFixed(5),
+        chordM: +avgChord.toFixed(4),
+        thicknessM: +avgThick.toFixed(5),
+        aeroForceN: +aeroForceN.toFixed(4),
+        arealDensityKgM2: +avgSigma.toFixed(4),
+        bendRateRadPerSec: +bendRateRadPerSec.toFixed(4),
+        ...(grp.isCloth ? { isCloth: true } : {}),
+      });
+    }
+  }
+
+  const snaps = Array.from(pendingAeroSnaps.values());
+  pendingAeroSnaps.clear();
+
+  if (voices.length > 0 || snaps.length > 0 || hadActiveAeroVoices) {
+    hadActiveAeroVoices = voices.length > 0;
+    post({ type: 'AERO_AUDIO', voices, snaps });
+  }
+};
+
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
 const snapshot = () => {
   const dat = data!;
@@ -2402,6 +3201,7 @@ const stepOnce = (stepSize: number): boolean => {
     const scriptStart = performance.now();
     executeScripts(sceneGraph.nodes, aeroDiagnostics);
     scriptTiming.addStep(performance.now() - scriptStart);
+    applyCompositeAeroForces();
     applyFreeJointDamping(sceneGraph.nodes);
     wakeBodies();
 
@@ -2424,6 +3224,7 @@ const stepOnce = (stepSize: number): boolean => {
     checkConstraintBreaks();
     checkImpacts(stepSize);
     sampleAudioImpacts(stepSize);
+    sampleAeroSnaps(stepSize);
     stepCount++;
 
     if (stepCount % 10 === 0) {
@@ -2576,6 +3377,7 @@ const postFrame = () => {
   postScriptStatus();
   flushAudioImpacts();
   flushBowedStrings();
+  flushAeroAudio();
   const snap = snapshot();
   if (isSharedSupported) {
     post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
@@ -3026,6 +3828,9 @@ const runHeadless = async (
   const savedBistableJoints = bistableJoints;
   const savedAcousticStringBodyIds = acousticStringBodyIds;
   const savedAcousticStringAxis = acousticStringAxisByBodyId;
+  const savedAeroVoiceGroups = aeroVoiceGroups;
+  const savedAeroBladeGroupByNodeId = aeroBladeGroupByNodeId;
+  const savedClothTrailingWatches = clothTrailingWatches;
   // A headless run starts its scripts from nothing and must not leave its
   // state or compiled closures in the live scene's.
   const savedScriptState = scriptState;
@@ -3171,6 +3976,7 @@ const runHeadless = async (
         const dt = performance.now() - t0;
         scriptMs += dt;
         scriptTiming.addStep(dt);
+        applyCompositeAeroForces();
         applyFreeJointDamping(sceneGraph.nodes);
         wakeBodies();
         solverWork.before(data!);
@@ -3257,6 +4063,9 @@ const runHeadless = async (
     bistableJoints = savedBistableJoints;
     acousticStringBodyIds = savedAcousticStringBodyIds;
     acousticStringAxisByBodyId = savedAcousticStringAxis;
+    aeroVoiceGroups = savedAeroVoiceGroups;
+    aeroBladeGroupByNodeId = savedAeroBladeGroupByNodeId;
+    clothTrailingWatches = savedClothTrailingWatches;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
     headlessBreaks = null;
     impactWatches = savedImpactWatches;
@@ -3352,11 +4161,17 @@ const handleMessage = async (evt: MessageEvent) => {
         if (!soundEnabled) {
           prevConstraintDof = null;
           for (const w of jointStopWatches) w.initialized = false;
+          for (const w of clothTrailingWatches) w.initialized = false;
           pendingAudioImpacts.clear();
+          pendingAeroSnaps.clear();
           bowContactStartSimTime.clear();
           if (hadActiveBowedStrings) {
             hadActiveBowedStrings = false;
             post({ type: 'BOWED_STRINGS', contacts: [] });
+          }
+          if (hadActiveAeroVoices) {
+            hadActiveAeroVoices = false;
+            post({ type: 'AERO_AUDIO', voices: [], snaps: [] });
           }
         }
         break;
@@ -3378,9 +4193,14 @@ const handleMessage = async (evt: MessageEvent) => {
           // the simulation stopped. See FRAME_INTERVAL_MS.
           if (framePending && model && data) postFrame();
           bowContactStartSimTime.clear();
+          pendingAeroSnaps.clear();
           if (hadActiveBowedStrings) {
             hadActiveBowedStrings = false;
             post({ type: 'BOWED_STRINGS', contacts: [] });
+          }
+          if (hadActiveAeroVoices) {
+            hadActiveAeroVoices = false;
+            post({ type: 'AERO_AUDIO', voices: [], snaps: [] });
           }
           postScriptStatus(true);
         }

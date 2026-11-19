@@ -373,6 +373,32 @@ export interface BowedStringContactEvent {
   stoppedLengthFraction?: number;
 }
 
+export interface AeroVoiceTelemetry {
+  hubOrBodyId: string;
+  bladeCount: number;
+  omegaRadPerSec: number;
+  tipSpeedMps: number;
+  relSpeedMps: number;
+  alphaDeg: number;
+  areaM2: number;
+  chordM: number;
+  thicknessM: number;
+  aeroForceN: number;
+  arealDensityKgM2: number;
+  bendRateRadPerSec: number;
+  /** True when air density was explicitly set to vacuum (< 0 or explicit vacuum flag), otherwise false. */
+  isVacuum?: boolean;
+  /** True when this voice represents a flexible cloth/grid/membrane sheet. */
+  isCloth?: boolean;
+}
+
+export interface AeroSnapEvent {
+  nodeId: string;
+  impulseNs: number;
+  arealDensityKgM2: number;
+  relSpeedMps: number;
+}
+
 export type WorkerToMainMessage =
   | ({ type: 'BUILT'; id: string } & BuiltResult)
   | ({ type: 'FRAME' } & FrameSnapshot)
@@ -381,6 +407,7 @@ export type WorkerToMainMessage =
   | ({ type: 'IMPACT' } & ImpactEvent)
   | { type: 'AUDIO_IMPACTS'; events: AudioImpactEvent[] }
   | { type: 'BOWED_STRINGS'; contacts: BowedStringContactEvent[] }
+  | { type: 'AERO_AUDIO'; voices: AeroVoiceTelemetry[]; snaps: AeroSnapEvent[] }
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   /** A headless run (`judgeImpacts`) has stopped at a blow and waits for HEADLESS_IMPACT_REPLY. */
   | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }
