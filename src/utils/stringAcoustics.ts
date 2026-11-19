@@ -4,9 +4,9 @@
 //
 // Physics implemented:
 // 1. Mersenne's Law for stretched strings:
-//      f0 = (1 / (2 * L)) * sqrt(T / mu),   mu = rho * pi * r^2
-// 2. Fletcher's stiff-string dispersion (inharmonicity):
-//      f_n = n * f0 * sqrt(1 + B * n^2),    B = (pi^3 * E * r^4) / (8 * T * L^2)
+//      f0_Mersenne = (1 / (2 * L)) * sqrt(T / mu),   mu = rho * pi * r^2
+// 2. Fletcher's stiff-string dispersion (inharmonicity, Fletcher 1964 Eq. 3):
+//      f_n = n * f0_Mersenne * sqrt(1 + B * n^2),    B = (pi^3 * E * r^4) / (4 * T * L^2)
 // 3. Tensile breaking-stress check:
 //      sigma = T / (pi * r^2) vs ultimate strength sigma_ult (MPa)
 // 4. 3D Soundbox Multi-Port Cavity & Kirchhoff Soundboard Coupling:
@@ -18,15 +18,18 @@
 //        G_total = Σ A_p / (L_p + 1.7 * r_p)
 //    - Kirchhoff soundboard flexural plate mode f_top from measured 3D h_top,
 //      lateral spans (a, b), and wood (E, rho) + Skudrzyk bridge admittance!
-// 5. Strike-position & plectrum-material coupling:
-//    - Live collision `localPoint` determines actual pluck comb sin(n π x_hit / L),
-//      and plectrum tip radius + Young's modulus shape harmonic roll-off!
+// 5. Strike-position, plectrum-material, Kirchhoff-Carrier pitch droop, &
+//    Weinreich-Gough bridge-admittance sympathetic string coupling!
 // ---------------------------------------------------------------------------
 
+import * as THREE from 'three';
 import type {
+  SceneGeom,
+  SceneJoint,
   SceneNode,
   StringMaterialId,
 } from '../types/scene';
+import { geomMatrixOf } from './csg';
 import { geomHydroTriangles } from './hydrostatics';
 import {
   estimateBodyModes,
@@ -46,6 +49,7 @@ import {
 } from './solidAcoustics3D';
 
 const SPEED_OF_SOUND_AIR = 343; // m/s at 20 °C
+const LN_10000 = Math.log(10000); // -80 dB modal envelope decay factor (~9.21034)
 
 export interface StringMaterialProps {
   id: StringMaterialId;
@@ -101,6 +105,13 @@ export const STRING_MATERIALS: Record<StringMaterialId, StringMaterialProps> = {
   },
 };
 
+function resolveStringMaterial(id: unknown): StringMaterialProps {
+  if (typeof id === 'string' && Object.prototype.hasOwnProperty.call(STRING_MATERIALS, id)) {
+    return STRING_MATERIALS[id as StringMaterialId];
+  }
+  return STRING_MATERIALS.steel;
+}
+
 export interface SoundboxResonance {
   hostNodeId: string;
   hostName: string;
@@ -118,7 +129,7 @@ export interface SoundboxResonance {
   topPlateHz: number;
   /** Secondary body / back-plate resonance (Hz). */
   bodyModeHz: number;
-  /** Acoustic baffle/dipole interference frequency c_air / (2.1 * W_bout) from measured 3D bout width (Hz). */
+  /** Acoustic baffle/dipole interference frequency c_air / (1.85 * W_bout) from measured 3D bout width (Hz). */
   dipoleCancelHz: number;
   /** Dipole interference valley depth (dB; 0 for solid unhollowed blocks!). */
   dipoleCancelDb: number;
@@ -130,6 +141,30 @@ export interface StringPluckImpactContext {
   localPoint?: [number, number, number];
   strikerNode?: SceneNode | null;
   strikerGeomName?: string;
+  /** Optional normalized impact impulse (N·s) for nonlinear Kirchhoff-Carrier tension pitch droop. */
+  impulseNs?: number;
+  /** Optional active stopped length fraction in (0.25, 1.0]. */
+  stoppedLengthFraction?: number;
+}
+
+export interface PluckedModalVoice extends ModalVoice {
+  /** Initial fractional frequency shift Δf_0 / f_0 >= 0 for nonlinear tension-modulation pitch droop. */
+  pitchDroopFrac?: number;
+  /** Exponential 1/e relaxation time constant τ_droop (s), decaying at 2x the amplitude decay rate. */
+  pitchDroopTauSec?: number;
+}
+
+export interface PluckPitchDroopResult {
+  /** Initial fractional frequency shift Δf_0 / f_0 >= 0 (scales ∝ (A_0 / L)^2 before geometric saturation). */
+  pitchDroopFrac: number;
+  /** Initial upward pitch shift in cents: 1200 * log2(1 + pitchDroopFrac). */
+  pitchDroopCents: number;
+  /** Exponential 1/e relaxation time constant τ_droop (s) = 0.5 * τ_amp. */
+  pitchDroopTauSec: number;
+  /** Peak transverse pluck deflection A_0 (m). */
+  displacementM: number;
+  /** Dimensionless Kirchhoff-Carrier tension-modulation stiffness coefficient κ_TM. */
+  kappaTM: number;
 }
 
 export interface StringEvaluation {
@@ -140,9 +175,28 @@ export interface StringEvaluation {
   tensileStressMPa: number;
   stressRatio: number;
   transverseStiffnessNm: number;
+  waveImpedanceZ0: number;
+  bridgeCoupling: number;
+  speakingSpanBounds: [number, number];
+  bridgeDrivePoint: [number, number, number];
+  /** Un-colored string partials (without analytical boxH / air-mode injection) for feeding into 3D FIR ConvolverNode! */
+  rawStringModes: PluckedModalVoice[];
+  pitchDroop: PluckPitchDroopResult;
   warnings: string[];
   soundbox: SoundboxResonance | null;
-  profile: BodyModalProfile;
+  profile: BodyModalProfile & { rawStringModes?: PluckedModalVoice[] };
+}
+
+export interface SympatheticStringTarget {
+  targetNode: SceneNode;
+  targetNodeId: string;
+  fundamentalHz: number;
+  bridgeCoupling: number;
+  couplingGain: number;
+  modes: PluckedModalVoice[];
+  rawStringModes: PluckedModalVoice[];
+  bodyIr: Float32Array<ArrayBuffer> | null;
+  bodyIrSig: string;
 }
 
 export interface BowedStringContactInput {
@@ -152,7 +206,7 @@ export interface BowedStringContactInput {
   bowVelocityMps: number;
   /** Normal contact force pressing the bow onto the string (N). */
   bowForceN: number;
-  /** Normalized distance from nearest termination x_bow / L in [0.03, 0.5]. */
+  /** Normalized distance from nearest termination x_bow / L in [0, 1] (symmetric around 0.5). */
   bowBeta: number;
   /** Optional stopped length fraction in (0.25, 1.0] raising f0 = f0_open / stoppedLengthFraction. */
   stoppedLengthFraction?: number;
@@ -182,7 +236,7 @@ export interface BowedStringVoice {
   lowpassHz: number;
   rosinNoiseGain: number;
   rosinCenterHz: number;
-  /** Schelleng minimum bow force for Helmholtz stick-slip lock (N), scaling with Z0 * |v_bow| / beta^2. */
+  /** Schelleng minimum bow force for Helmholtz stick-slip lock (N), scaling with Z0 * |v_bow| / beta^2 and Re(Y_bridge). */
   fMin: number;
   /** Schelleng maximum bow force before raucous rosin crunch (N), scaling with Z0 * |v_bow| / beta. */
   fMax: number;
@@ -190,6 +244,10 @@ export interface BowedStringVoice {
   waveImpedanceZ0: number;
   /** Active Schelleng bowing regime. */
   regime: 'silent' | 'flautando' | 'helmholtz' | 'raucous';
+  /** Coupled string-body wolf-note cyclic beat rate (Hz) when pitchHz locks onto a strong high-admittance plate resonance. */
+  wolfBeatHz?: number;
+  /** Coupled string-body wolf-note amplitude modulation depth in [0, 0.65]. */
+  wolfBeatDepth?: number;
 }
 
 const soundboxCache = new WeakMap<
@@ -207,19 +265,128 @@ function getCachedSoundboxResonance(host: SceneNode): SoundboxResonance {
   return res;
 }
 
+function nodeLocalMatrix(n: Pick<SceneNode, 'pos' | 'quat' | 'euler'>): THREE.Matrix4 {
+  return geomMatrixOf({
+    name: '',
+    type: 'box',
+    size: [1, 1, 1],
+    pos: n.pos,
+    quat: n.quat,
+    euler: n.euler,
+  });
+}
+
+function resolveWorldMatrixWithOverride(
+  target: SceneNode,
+  roots: SceneNode[],
+  parentMat: THREE.Matrix4 = new THREE.Matrix4(),
+): THREE.Matrix4 | null {
+  for (const n of roots) {
+    const curLocal = n.id === target.id ? nodeLocalMatrix(target) : nodeLocalMatrix(n);
+    const curWorld = new THREE.Matrix4().multiplyMatrices(parentMat, curLocal);
+    if (n.id === target.id) return curWorld;
+    if (n.children?.length) {
+      const sub = resolveWorldMatrixWithOverride(target, n.children, curWorld);
+      if (sub) return sub;
+    }
+  }
+  return null;
+}
+
+interface StringLocalEndpoints {
+  p0: [number, number, number];
+  p1: [number, number, number];
+  wireR: number;
+}
+
+function findPrimaryWireGeom(node: SceneNode): SceneGeom | undefined {
+  return (node.geoms ?? []).find(
+    (x) => !x.csgDerived && x.csg !== 'difference' && x.role !== 'visual' && x.type !== 'plane',
+  );
+}
+
+/**
+ * Resolves exact 3D wire endpoints [p0, p1] in `node`'s local Z-up frame:
+ * - Honors `fromto` [x0, y0, z0, x1, y1, z1] directly.
+ * - Honors MuJoCo's local +Z axis (`[0, 0, ±halfH]`) and `g.pos`/`g.quat`/`g.euler`
+ *   for non-`fromto` cylinder/capsule geoms (fixing the old local-Y assumption).
+ * - Falls back to 3D solid principal-axis bounds for arbitrary mesh/sculpted wires.
+ */
+export function resolveStringLocalEndpoints(node: SceneNode): StringLocalEndpoints | null {
+  const solidGeoms = (node.geoms ?? []).filter(
+    (x) => !x.csgDerived && x.csg !== 'difference' && x.role !== 'visual' && x.type !== 'plane',
+  );
+  const g = solidGeoms[0];
+  if (!g) return null;
+
+  if (!node.sculptEdited && solidGeoms.length === 1) {
+    if (g.fromto && g.fromto.length >= 6) {
+      return {
+        p0: [g.fromto[0], g.fromto[1], g.fromto[2]],
+        p1: [g.fromto[3], g.fromto[4], g.fromto[5]],
+        wireR: Math.max(0.0004, g.size?.[0] ?? 0.001),
+      };
+    }
+    if (g.type === 'capsule' || g.type === 'cylinder') {
+      const wireR = Math.max(0.0004, g.size?.[0] ?? 0.001);
+      const halfL = Math.max(0.005, g.size?.[1] ?? 0.15);
+      const gm = geomMatrixOf(g);
+      const v0 = new THREE.Vector3(0, 0, -halfL).applyMatrix4(gm);
+      const v1 = new THREE.Vector3(0, 0, halfL).applyMatrix4(gm);
+      return {
+        p0: [v0.x, v0.y, v0.z],
+        p1: [v1.x, v1.y, v1.z],
+        wireR,
+      };
+    }
+    if (g.type === 'box' && g.size && g.size.length >= 3) {
+      const sx = Math.max(1e-5, g.size[0]);
+      const sy = Math.max(1e-5, g.size[1]);
+      const sz = Math.max(1e-5, g.size[2]);
+      let longAxis: 0 | 1 | 2 = 2;
+      let halfL = sz;
+      if (sx >= sy && sx >= sz) { longAxis = 0; halfL = sx; }
+      else if (sy >= sx && sy >= sz) { longAxis = 1; halfL = sy; }
+      const wireR = Math.max(0.0004, Math.min(sx, sy, sz));
+      const gm = geomMatrixOf(g);
+      const a0 = new THREE.Vector3(
+        longAxis === 0 ? -halfL : 0,
+        longAxis === 1 ? -halfL : 0,
+        longAxis === 2 ? -halfL : 0,
+      ).applyMatrix4(gm);
+      const a1 = new THREE.Vector3(
+        longAxis === 0 ? halfL : 0,
+        longAxis === 1 ? halfL : 0,
+        longAxis === 2 ? halfL : 0,
+      ).applyMatrix4(gm);
+      return {
+        p0: [a0.x, a0.y, a0.z],
+        p1: [a1.x, a1.y, a1.z],
+        wireR,
+      };
+    }
+  }
+
+  const sec = analyze3DSolidCrossSections(node);
+  const lenAxis = sec.axisOrderAsc[2];
+  const [lo, hi] = sec.lenBounds;
+  const p0: [number, number, number] = [0, 0, 0];
+  const p1: [number, number, number] = [0, 0, 0];
+  p0[lenAxis] = lo;
+  p1[lenAxis] = hi;
+  return {
+    p0,
+    p1,
+    wireR: Math.max(0.0004, 0.5 * sec.dimsSortedAsc[0]),
+  };
+}
+
 /** Measures the vibrating span L (m) of a string node from its post-CSG/Sculpt 3D geometry. */
 export function measureStringLengthM(node: SceneNode): number {
-  const g = (node.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
-  if (!g) return 0.32;
-  if (g.fromto && g.fromto.length >= 6 && !node.sculptEdited && (node.geoms?.length ?? 0) === 1) {
-    const dx = g.fromto[3] - g.fromto[0];
-    const dy = g.fromto[4] - g.fromto[1];
-    const dz = g.fromto[5] - g.fromto[2];
-    const len = Math.hypot(dx, dy, dz);
-    if (len > 1e-4) return len;
-  }
-  const sec = analyze3DSolidCrossSections(node);
-  return Math.max(0.02, sec.dimsSortedAsc[2]);
+  const ep = resolveStringLocalEndpoints(node);
+  if (!ep) return 0.32;
+  const len = Math.hypot(ep.p1[0] - ep.p0[0], ep.p1[1] - ep.p0[1], ep.p1[2] - ep.p0[2]);
+  return Math.max(0.02, len > 1e-4 ? len : 0.32);
 }
 
 function findParentOf(nodes: SceneNode[], childId: string): SceneNode | null {
@@ -355,33 +522,63 @@ function resonatorTransferGain(freqHz: number, fRes: number, Q: number, boost: n
   return 1 + (boost / Math.max(1, Q)) * (1 / Math.max(0.06, denom));
 }
 
-function resolvePluckFractionFromPoint(node: SceneNode, localPoint: [number, number, number]): number | null {
-  const g = (node.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
-  if (!g) return null;
-  if (g.fromto && g.fromto.length >= 6) {
-    const ax = g.fromto[3] - g.fromto[0];
-    const ay = g.fromto[4] - g.fromto[1];
-    const az = g.fromto[5] - g.fromto[2];
-    const lenSq = ax * ax + ay * ay + az * az;
-    if (lenSq > 1e-8) {
-      const t = ((localPoint[0] - g.fromto[0]) * ax + (localPoint[1] - g.fromto[1]) * ay + (localPoint[2] - g.fromto[2]) * az) / lenSq;
-      const clamped = Math.max(0.03, Math.min(0.97, t));
-      // Fold symmetric [0..1] into [0..0.5] distance from nearest bridge/nut termination
-      return Math.min(clamped, 1 - clamped);
-    }
-  }
-  const sec = analyze3DSolidCrossSections(node);
-  const lenAxis = sec.axisOrderAsc[2];
-  const [lo, hi] = sec.lenBounds;
-  const span = Math.max(1e-4, hi - lo);
-  const t = Math.max(0.03, Math.min(0.97, (localPoint[lenAxis] - lo) / span));
-  return Math.min(t, 1 - t);
+function lorentzianResonance(freqHz: number, fRes: number, Q: number): number {
+  const bw = Math.max(1.5, fRes / (2 * Math.max(1, Q)));
+  const df = freqHz - fRes;
+  return (bw * bw) / (df * df + bw * bw);
 }
 
-/** Maps a body-local contact point on `node` to normalized bow/pluck distance β = x / L in [0.03, 0.5]. */
-export function resolveStringBetaFromPoint(node: SceneNode, localPoint?: [number, number, number]): number {
-  const frac = localPoint ? resolvePluckFractionFromPoint(node, localPoint) : null;
-  return Math.max(0.03, Math.min(0.5, frac ?? node.acousticString?.pluckPos ?? 0.12));
+function resolveRawWireFractionFromPoint(
+  node: SceneNode,
+  localPoint: [number, number, number],
+  speakingBounds?: [number, number],
+): number | null {
+  const ep = resolveStringLocalEndpoints(node);
+  if (!ep) return null;
+  const ax = ep.p1[0] - ep.p0[0];
+  const ay = ep.p1[1] - ep.p0[1];
+  const az = ep.p1[2] - ep.p0[2];
+  const lenSq = ax * ax + ay * ay + az * az;
+  if (lenSq <= 1e-10) return null;
+  const rawT =
+    ((localPoint[0] - ep.p0[0]) * ax +
+      (localPoint[1] - ep.p0[1]) * ay +
+      (localPoint[2] - ep.p0[2]) * az) /
+    lenSq;
+  const [sLo, sHi] = speakingBounds ?? [0, 1];
+  const span = Math.max(0.05, sHi - sLo);
+  const mappedT = (rawT - sLo) / span;
+  return Math.max(0.002, Math.min(0.998, mappedT));
+}
+
+/**
+ * Maps a body-local contact point on `node` to normalized bow/pluck distance β = x / L_active in [0.005, 0.5],
+ * accounting for both interior bridge/nut speaking bounds `[sLo, sHi]` and left-hand `stoppedLengthFraction`!
+ */
+export function resolveStringBetaFromPoint(
+  node: SceneNode,
+  localPoint?: [number, number, number],
+  stoppedLengthFraction?: number,
+  sceneNodes?: SceneNode[],
+): number {
+  let speakingBounds: [number, number] | undefined;
+  if (sceneNodes?.length) {
+    const coupled = resolveCoupledSoundboxAndSpan(node, sceneNodes);
+    speakingBounds = coupled.speakingSpanBounds;
+  }
+  const tSpan = localPoint ? resolveRawWireFractionFromPoint(node, localPoint, speakingBounds) : null;
+  let beta = tSpan !== null ? Math.min(tSpan, 1 - tSpan) : (node.acousticString?.pluckPos ?? 0.12);
+  if (
+    stoppedLengthFraction !== undefined &&
+    Number.isFinite(stoppedLengthFraction) &&
+    stoppedLengthFraction > 0.2 &&
+    stoppedLengthFraction < 0.999
+  ) {
+    const scaled = beta / stoppedLengthFraction;
+    const clamped01 = Math.max(0.005, Math.min(0.995, scaled));
+    beta = Math.min(clamped01, 1 - clamped01);
+  }
+  return Math.max(0.005, Math.min(0.5, beta));
 }
 
 const hostRaySceneCache = new WeakMap<
@@ -414,32 +611,84 @@ interface PhysicalStringSupport {
   bridgeCoupling: number;
   /** Fraction (0.25..1.0] of the wire length between actual solid bearing points (bridge & nut/fret). */
   vibratingSpanFraction: number;
+  /** Normalized speaking span [sLo, sHi] along the string's local endpoints [p0, p1]. */
+  speakingSpanBounds: [number, number];
   /** Distinct structural 3D bridge child body bearing under the string, if any. */
   bridgeNode: SceneNode | null;
   /** Exact 3D bearing point [x, y, z] in hostNode-local frame where this string drives the bridge/body! */
   bridgeDrivePoint: [number, number, number];
 }
 
-function doesChildBearOnHost(child: SceneNode, hostScene: BodyRayScene): boolean {
+/**
+ * Checks whether a welded structural child (e.g. rotated bridge, angled neck, side harp pillar)
+ * physically bears on `hostScene` across all 3 orthogonal local ray directions under full 3D `pos`/`quat`/`euler`.
+ */
+function doesChildBearOnHost(
+  child: SceneNode,
+  childMat: THREE.Matrix4,
+  hostScene: BodyRayScene,
+): boolean {
   const childScene = getCachedHostRayScene(child);
   if (!childScene) return false;
-  const cx = child.pos?.[0] ?? 0;
-  const cy = child.pos?.[1] ?? 0;
-  const cz = child.pos?.[2] ?? 0;
-  const [bx0, bx1, by0, by1] = childScene.bounds;
-  for (let ix = 0; ix < 5; ix++) {
-    const lx = bx0 + ((bx1 - bx0) * (ix + 0.5)) / 5;
-    for (let iy = 0; iy < 5; iy++) {
-      const ly = by0 + ((by1 - by0) * (iy + 0.5)) / 5;
-      const cIvs = castSceneRay(childScene, lx, ly, 0, 0, 0, 1);
-      if (cIvs.length === 0) continue;
-      const hIvs = castSceneRay(hostScene, cx + lx, cy + ly, 0, 0, 0, 1);
-      for (const [ca, cb] of cIvs) {
-        const za = cz + ca;
-        const zb = cz + cb;
-        for (const [ha, hb] of hIvs) {
-          const gap = zb < ha ? ha - zb : za > hb ? za - hb : 0;
-          if (gap <= 0.006) return true;
+
+  const b = childScene.bounds;
+  const hostExtent = Math.max(
+    0.1,
+    hostScene.bounds[1] - hostScene.bounds[0],
+    hostScene.bounds[3] - hostScene.bounds[2],
+    hostScene.bounds[5] - hostScene.bounds[4],
+  );
+  const maxTouchGap = Math.max(0.006, 0.015 * hostExtent);
+
+  const oVec = new THREE.Vector3();
+  const dVec = new THREE.Vector3();
+  // Test Z first (fast 1-ray short-circuit on standard top-mounted bridges), then X and Y for vertical/rotated soundboxes
+  const axes: (0 | 1 | 2)[] = [2, 0, 1];
+  for (const axis of axes) {
+    const uAxis = ((axis + 1) % 3) as 0 | 1 | 2;
+    const vAxis = ((axis + 2) % 3) as 0 | 1 | 2;
+    const u0 = b[2 * uAxis], u1 = b[2 * uAxis + 1];
+    const v0 = b[2 * vAxis], v1 = b[2 * vAxis + 1];
+    if (!(u1 > u0 && v1 > v0)) continue;
+
+    const dxC = axis === 0 ? 1 : 0;
+    const dyC = axis === 1 ? 1 : 0;
+    const dzC = axis === 2 ? 1 : 0;
+    dVec.set(dxC, dyC, dzC).applyMatrix4(
+      new THREE.Matrix4().extractRotation(childMat),
+    );
+    // Account for any scale in childMat
+    const e = childMat.elements;
+    const sx = dxC * e[0] + dyC * e[4] + dzC * e[8];
+    const sy = dxC * e[1] + dyC * e[5] + dzC * e[9];
+    const sz = dxC * e[2] + dyC * e[6] + dzC * e[10];
+    const dirScale = Math.hypot(sx, sy, sz) || 1;
+    const dhx = sx / dirScale;
+    const dhy = sy / dirScale;
+    const dhz = sz / dirScale;
+
+    for (let iu = 0; iu < 5; iu++) {
+      const u = u0 + ((u1 - u0) * (iu + 0.5)) / 5;
+      for (let iv = 0; iv < 5; iv++) {
+        const v = v0 + ((v1 - v0) * (iv + 0.5)) / 5;
+        const oc: [number, number, number] = [0, 0, 0];
+        oc[uAxis] = u;
+        oc[vAxis] = v;
+        oc[axis] = 0;
+        const cIvs = castSceneRay(childScene, oc[0], oc[1], oc[2], dxC, dyC, dzC);
+        if (cIvs.length === 0) continue;
+
+        oVec.set(oc[0], oc[1], oc[2]).applyMatrix4(childMat);
+        const hIvs = castSceneRay(hostScene, oVec.x, oVec.y, oVec.z, dhx, dhy, dhz);
+        if (hIvs.length === 0) continue;
+
+        for (const [ca, cb] of cIvs) {
+          const za = Math.min(ca, cb) * dirScale;
+          const zb = Math.max(ca, cb) * dirScale;
+          for (const [ha, hb] of hIvs) {
+            const gap = zb < ha ? ha - zb : za > hb ? za - hb : 0;
+            if (gap <= maxTouchGap) return true;
+          }
         }
       }
     }
@@ -451,10 +700,10 @@ function doesChildBearOnHost(child: SceneNode, hostScene: BodyRayScene): boolean
  * Verifies 3D mechanical contact between a string's terminations and its host
  * resonator body (`buildBodyRayScene`, ignoring `role: 'visual'` props, plus any
  * welded static bridge/neck subassemblies that themselves physically bear on `hostNode`!):
- * - If a string floats disconnected in space (`gap > 18 mm` at either end), `bridgeCoupling`
- *   drops to `0` (an unbridged floating wire cannot drive a soundboard!).
- * - If solid bridge/nut saddles bear against the wire inside its span, `vibratingSpanFraction`
- *   measures the exact free vibrating scale between those solid bearing edges!
+ * - Full 3D `pos`/`quat`/`euler` support on `hostNode`, `stringNode`, welded bridge/nut children,
+ *   and primitive local-Z cylinders/capsules across all 3 orthogonal ray directions.
+ * - Symmetric bridge/nut resolution (works identically whether `fromto` is authored bridge->nut or nut->bridge).
+ * - Protects open strings with realistic 1.5–3.5 mm fingerboard action from false interior stopping.
  */
 function measurePhysicalStringSupport(
   stringNode: SceneNode,
@@ -463,84 +712,124 @@ function measurePhysicalStringSupport(
 ): PhysicalStringSupport {
   const hostScene = getCachedHostRayScene(hostNode);
   if (!hostScene) {
-    return { bridgeCoupling: 0, vibratingSpanFraction: 1.0, bridgeNode: null, bridgeDrivePoint: [0, 0, 0] };
+    return {
+      bridgeCoupling: 0,
+      vibratingSpanFraction: 1.0,
+      speakingSpanBounds: [0, 1],
+      bridgeNode: null,
+      bridgeDrivePoint: [0, 0, 0],
+    };
   }
 
-  const g = (stringNode.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
-  if (!g) {
-    return { bridgeCoupling: 0, vibratingSpanFraction: 1.0, bridgeNode: null, bridgeDrivePoint: [0, 0, 0] };
+  const ep = resolveStringLocalEndpoints(stringNode);
+  if (!ep) {
+    return {
+      bridgeCoupling: 0,
+      vibratingSpanFraction: 1.0,
+      speakingSpanBounds: [0, 1],
+      bridgeNode: null,
+      bridgeDrivePoint: [0, 0, 0],
+    };
   }
 
   // Include welded static structural attachments (e.g. Arched Maple Bridge, Mortised Neck & Nut)
   // ONLY if they physically bear on `hostNode` (lifting a bridge into mid-air breaks coupling!).
-  const supportScenes: { scene: BodyRayScene; ox: number; oy: number; oz: number; childNode: SceneNode | null }[] = [
-    { scene: hostScene, ox: 0, oy: 0, oz: 0, childNode: null },
+  const supportScenes: {
+    scene: BodyRayScene;
+    invMat: Float64Array;
+    detScale: number;
+    childNode: SceneNode | null;
+  }[] = [
+    {
+      scene: hostScene,
+      invMat: Float64Array.from(new THREE.Matrix4().elements),
+      detScale: 1,
+      childNode: null,
+    },
   ];
+
   for (const child of hostNode.children ?? []) {
     if (child.id === stringNode.id || child.acousticString) continue;
     if ((child.joints?.length ?? 0) > 0) continue;
     const cScene = getCachedHostRayScene(child);
-    if (cScene && doesChildBearOnHost(child, hostScene)) {
+    if (!cScene) continue;
+    const cMat = nodeLocalMatrix(child);
+    if (doesChildBearOnHost(child, cMat, hostScene)) {
+      const inv = cMat.clone().invert();
+      const det = Math.cbrt(Math.abs(cMat.determinant()) || 1);
       supportScenes.push({
         scene: cScene,
-        ox: child.pos?.[0] ?? 0,
-        oy: child.pos?.[1] ?? 0,
-        oz: child.pos?.[2] ?? 0,
+        invMat: Float64Array.from(inv.elements),
+        detScale: det,
         childNode: child,
       });
     }
   }
 
+  // Resolve exact 4x4 transform from `stringNode` local frame into `hostNode` local frame!
+  let strInHostMat: THREE.Matrix4;
   const isDirectChild = (hostNode.children ?? []).some((c) => c.id === stringNode.id);
-  const sx = isDirectChild ? (stringNode.pos?.[0] ?? 0) : (stringNode.pos?.[0] ?? 0) - (hostNode.pos?.[0] ?? 0);
-  const sy = isDirectChild ? (stringNode.pos?.[1] ?? 0) : (stringNode.pos?.[1] ?? 0) - (hostNode.pos?.[1] ?? 0);
-  const sz = isDirectChild ? (stringNode.pos?.[2] ?? 0) : (stringNode.pos?.[2] ?? 0) - (hostNode.pos?.[2] ?? 0);
-  void sceneNodes;
-
-  let p0: [number, number, number];
-  let p1: [number, number, number];
-  const wireR = Math.max(0.0005, g.size[0] ?? 0.001);
-  if (g.fromto && g.fromto.length >= 6) {
-    p0 = [sx + g.fromto[0], sy + g.fromto[1], sz + g.fromto[2]];
-    p1 = [sx + g.fromto[3], sy + g.fromto[4], sz + g.fromto[5]];
+  if (isDirectChild) {
+    strInHostMat = nodeLocalMatrix(stringNode);
+  } else if (sceneNodes?.length) {
+    const hostWorld = resolveWorldMatrixWithOverride(hostNode, sceneNodes) ?? nodeLocalMatrix(hostNode);
+    const strWorld = resolveWorldMatrixWithOverride(stringNode, sceneNodes) ?? nodeLocalMatrix(stringNode);
+    strInHostMat = hostWorld.clone().invert().multiply(strWorld);
   } else {
-    const halfL = g.size[1] ?? 0.15;
-    p0 = [sx + (g.pos?.[0] ?? 0), sy + (g.pos?.[1] ?? 0) - halfL, sz + (g.pos?.[2] ?? 0)];
-    p1 = [sx + (g.pos?.[0] ?? 0), sy + (g.pos?.[1] ?? 0) + halfL, sz + (g.pos?.[2] ?? 0)];
+    const hostWorld = nodeLocalMatrix(hostNode);
+    const strWorld = nodeLocalMatrix(stringNode);
+    strInHostMat = hostWorld.invert().multiply(strWorld);
   }
+
+  const strScale = Math.cbrt(Math.abs(strInHostMat.determinant()) || 1);
+  const v0 = new THREE.Vector3(ep.p0[0], ep.p0[1], ep.p0[2]).applyMatrix4(strInHostMat);
+  const v1 = new THREE.Vector3(ep.p1[0], ep.p1[1], ep.p1[2]).applyMatrix4(strInHostMat);
+  const p0: [number, number, number] = [v0.x, v0.y, v0.z];
+  const p1: [number, number, number] = [v1.x, v1.y, v1.z];
+  const wireR = Math.max(0.0004, ep.wireR * strScale);
 
   const spanLen = Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
   const nStations = Math.max(48, Math.min(200, Math.ceil(spanLen / 0.004)));
   const gaps = new Float64Array(nStations + 1);
-  let bridgeNode: SceneNode | null = null;
-  let bestBridgeGap = 0.004;
-  let bridgeDrivePoint: [number, number, number] = [...p0];
+  const hitChildren: (SceneNode | null)[] = new Array(nStations + 1).fill(null);
+
   for (let k = 0; k <= nStations; k++) {
     const s = k / nStations;
     const x = p0[0] + (p1[0] - p0[0]) * s;
     const y = p0[1] + (p1[1] - p0[1]) * s;
     const z = p0[2] + (p1[2] - p0[2]) * s;
 
-    // Measure vertical Z gap + lateral X gap to nearest solid geom across hostNode & welded bridges/nuts
+    // Measure orthogonal X, Y, Z ray gaps in each support scene's own rotated local frame
     let minDist = Infinity;
     let hitChild: SceneNode | null = null;
     for (let si = 0; si < supportScenes.length; si++) {
-      const { scene, ox, oy, oz, childNode } = supportScenes[si];
-      const lx = x - ox;
-      const ly = y - oy;
-      const lz = z - oz;
+      const { scene, invMat: m, detScale, childNode } = supportScenes[si];
+      const lx = m[0] * x + m[4] * y + m[8] * z + m[12];
+      const ly = m[1] * x + m[5] * y + m[9] * z + m[13];
+      const lz = m[2] * x + m[6] * y + m[10] * z + m[14];
+
       const zIvs = castSceneRay(scene, lx, ly, 0, 0, 0, 1);
       for (const [za, zb] of zIvs) {
-        const d = lz < za ? za - lz : lz > zb ? lz - zb : 0;
+        const d = (lz < za ? za - lz : lz > zb ? lz - zb : 0) * detScale;
         if (d < minDist) {
           minDist = d;
           hitChild = childNode;
         }
       }
-      if (minDist > 0.004) {
+      if (minDist > 0.002) {
         const xIvs = castSceneRay(scene, 0, ly, lz, 1, 0, 0);
         for (const [xa, xb] of xIvs) {
-          const d = lx < xa ? xa - lx : lx > xb ? lx - xb : 0;
+          const d = (lx < xa ? xa - lx : lx > xb ? lx - xb : 0) * detScale;
+          if (d < minDist) {
+            minDist = d;
+            hitChild = childNode;
+          }
+        }
+      }
+      if (minDist > 0.002) {
+        const yIvs = castSceneRay(scene, lx, 0, lz, 0, 1, 0);
+        for (const [ya, yb] of yIvs) {
+          const d = (ly < ya ? ya - ly : ly > yb ? ly - yb : 0) * detScale;
           if (d < minDist) {
             minDist = d;
             hitChild = childNode;
@@ -548,118 +837,181 @@ function measurePhysicalStringSupport(
         }
       }
     }
-    const gap = Math.max(0, minDist - wireR);
-    gaps[k] = gap;
-    if (s <= 0.45 && gap <= bestBridgeGap) {
-      bestBridgeGap = gap;
-      bridgeDrivePoint = [x, y, z];
-      if (hitChild) bridgeNode = hitChild;
-    }
+    gaps[k] = Math.max(0, minDist - wireR);
+    hitChildren[k] = hitChild;
   }
 
   let endGapLo = Infinity;
   let endGapHi = Infinity;
+  let maxMidGap = 0;
+  for (let k = 0; k <= nStations; k++) {
+    const s = k / nStations;
+    const gap = gaps[k];
+    if (s <= 0.08 && gap < endGapLo) endGapLo = gap;
+    if (s >= 0.92 && gap < endGapHi) endGapHi = gap;
+    if (s > 0.45 && s < 0.55 && gap > maxMidGap) maxMidGap = gap;
+  }
+
+  // Interior saddle/fret touch threshold:
+  // If the string already bears tightly at its outer end (`endGap <= 1.8 mm`, e.g. at a nut),
+  // require an interior stop to actually touch within `endGap + 1.0 mm` so a parallel fingerboard
+  // with 1.5–3.5 mm string action never false-stops the open string! When the end floats free
+  // (`endGap > 4 mm`, e.g. sliding bridge or silk afterlength), allow up to 3.8 mm saddle seating.
+  const touchCapLo = endGapLo <= 0.0018 ? endGapLo + 0.0010 : 0.0038;
+  const touchCapHi = endGapHi <= 0.0018 ? endGapHi + 0.0010 : 0.0038;
+
   let interiorTouchLo = Infinity;
   let interiorTouchHi = Infinity;
-  let maxMidGap = 0;
   let sLoTouch = -1;
   let sHiTouch = -1;
+  let kBridgeLo = 0;
+  let bestGapLo = Infinity;
+  let kBridgeHi = nStations;
+  let bestGapHi = Infinity;
 
   for (let k = 0; k <= nStations; k++) {
     const s = k / nStations;
     const gap = gaps[k];
-    if (s <= 0.08) {
-      if (gap < endGapLo) endGapLo = gap;
-    }
-    if (s >= 0.92) {
-      if (gap < endGapHi) endGapHi = gap;
-    }
     if (s <= 0.45) {
-      if (gap <= 0.0038) {
+      if (gap <= bestGapLo + 0.0004 && (gap < bestGapLo || hitChildren[k] !== null)) {
+        if (gap < bestGapLo) bestGapLo = gap;
+        kBridgeLo = k;
+      }
+      if (gap <= touchCapLo) {
         sLoTouch = s;
         if (gap < interiorTouchLo) interiorTouchLo = gap;
       }
     } else if (s >= 0.55) {
-      if (gap <= 0.0038) {
+      if (gap < bestGapHi || (gap <= bestGapHi + 0.0004 && hitChildren[kBridgeHi] === null && hitChildren[k] !== null)) {
+        if (gap < bestGapHi) bestGapHi = gap;
+        kBridgeHi = k;
+      }
+      if (gap <= touchCapHi) {
         if (sHiTouch < 0) sHiTouch = s;
         if (gap < interiorTouchHi) interiorTouchHi = gap;
       }
-    } else if (gap > maxMidGap) {
-      maxMidGap = gap;
     }
   }
 
-  // Each half of the string must either anchor near the body at its end (`s <= 0.08` / `s >= 0.92`,
-  // <= 9 mm full coupling, 0 beyond 18 mm) OR bear directly (`gap <= 3.8 mm`) on a movable interior bridge/nut!
+  // Scale-aware end-anchor coupling window so `buildMountedStringsForBody` strings stay 100% coupled
+  // when scaled up (e.g. 2x–5x), while unbridged cello strings floating 84 mm above the belly drop to 0!
+  const fullAnchorGap = Math.max(0.009, 0.038 * spanLen);
+  const zeroAnchorGap = Math.max(0.018, 0.065 * spanLen);
+  const denomGap = Math.max(1e-5, zeroAnchorGap - fullAnchorGap);
+
   const effGapLo = Math.min(endGapLo, interiorTouchLo);
   const effGapHi = Math.min(endGapHi, interiorTouchHi);
-  const cLo = Math.max(0, Math.min(1, (0.018 - effGapLo) / 0.009));
-  const cHi = Math.max(0, Math.min(1, (0.018 - effGapHi) / 0.009));
+  const cLo = Math.max(0, Math.min(1, (zeroAnchorGap - effGapLo) / denomGap));
+  const cHi = Math.max(0, Math.min(1, (zeroAnchorGap - effGapHi) / denomGap));
   const bridgeCoupling = +(cLo * cHi).toFixed(3);
 
   let vibratingSpanFraction = 1.0;
+  let speakingSpanBounds: [number, number] = [0, 1];
   if (maxMidGap > 0.0045 && (sLoTouch >= 0 || sHiTouch >= 0)) {
     const effLo = sLoTouch >= 0 ? sLoTouch : 0.0;
     const effHi = sHiTouch >= 0 ? sHiTouch : 1.0;
     if (effHi - effLo >= 0.35 && effHi - effLo < 0.985) {
       vibratingSpanFraction = +(effHi - effLo).toFixed(4);
+      speakingSpanBounds = [+effLo.toFixed(4), +effHi.toFixed(4)];
     }
   }
 
-  return { bridgeCoupling, vibratingSpanFraction, bridgeNode, bridgeDrivePoint };
+  // Symmetric bridge vs nut selection (works whether `fromto` is authored bridge->nut or nut->bridge):
+  // Prefer the bearing termination sitting closer to `hostScene`'s hollow corpus center (or explicitly named bridge).
+  const hb = hostScene.bounds;
+  const hostCenter: [number, number, number] = [
+    0.5 * (hb[0] + hb[1]),
+    0.5 * (hb[2] + hb[3]),
+    0.5 * (hb[4] + hb[5]),
+  ];
+  const pointAtK = (k: number): [number, number, number] => {
+    const s = k / nStations;
+    return [
+      p0[0] + (p1[0] - p0[0]) * s,
+      p0[1] + (p1[1] - p0[1]) * s,
+      p0[2] + (p1[2] - p0[2]) * s,
+    ];
+  };
+  const ptLo = pointAtK(kBridgeLo);
+  const ptHi = pointAtK(kBridgeHi);
+  const distLo = Math.hypot(ptLo[0] - hostCenter[0], ptLo[1] - hostCenter[1], ptLo[2] - hostCenter[2]);
+  const distHi = Math.hypot(ptHi[0] - hostCenter[0], ptHi[1] - hostCenter[1], ptHi[2] - hostCenter[2]);
+  const childLo = hitChildren[kBridgeLo];
+  const childHi = hitChildren[kBridgeHi];
+  const loIsBridgeName = !!childLo && /bridge/i.test(`${childLo.id} ${childLo.name}`);
+  const hiIsBridgeName = !!childHi && /bridge/i.test(`${childHi.id} ${childHi.name}`);
+
+  let useHiAsBridge = false;
+  if (hiIsBridgeName && !loIsBridgeName && bestGapHi <= 0.006) {
+    useHiAsBridge = true;
+  } else if (!loIsBridgeName && bestGapHi <= 0.006 && distHi + 0.035 < distLo) {
+    useHiAsBridge = true;
+  }
+
+  const chosenK = useHiAsBridge ? kBridgeHi : kBridgeLo;
+  const chosenGap = useHiAsBridge ? bestGapHi : bestGapLo;
+  const bridgeDrivePoint: [number, number, number] =
+    chosenGap <= zeroAnchorGap ? pointAtK(chosenK) : [p0[0], p0[1], p0[2]];
+  const bridgeNode = chosenGap <= zeroAnchorGap ? hitChildren[chosenK] : null;
+
+  return {
+    bridgeCoupling,
+    vibratingSpanFraction,
+    speakingSpanBounds,
+    bridgeNode,
+    bridgeDrivePoint,
+  };
+}
+
+function resolveResonatorHost(node: SceneNode, sceneNodes?: SceneNode[]): SceneNode | null {
+  if (!sceneNodes?.length) return null;
+  const explicitId = node.acousticString?.resonatorNodeId ?? node.resonatorNodeId;
+  let resonatorNode: SceneNode | null = null;
+  if (explicitId) {
+    resonatorNode = findById(sceneNodes, explicitId);
+  }
+  if (!resonatorNode) {
+    resonatorNode = findParentOf(sceneNodes, node.id);
+  }
+  if (!resonatorNode || resonatorNode.acousticString) return null;
+  return resonatorNode;
 }
 
 function resolveCoupledSoundboxAndSpan(
   node: SceneNode,
   sceneNodes?: SceneNode[],
 ): {
+  resonatorNode: SceneNode | null;
   soundbox: SoundboxResonance | null;
   bridgeCoupling: number;
   vibratingSpanFraction: number;
+  speakingSpanBounds: [number, number];
+  bridgeDrivePoint: [number, number, number];
   bridgeHillHz: number;
   bridgeHillGainDb: number;
   vibroIr: VibroAcousticIRResult | null;
 } {
   const spec = node.acousticString;
-  if (!spec || !sceneNodes?.length) {
-    return {
-      soundbox: null,
-      bridgeCoupling: 0,
-      vibratingSpanFraction: 1.0,
-      bridgeHillHz: 2000,
-      bridgeHillGainDb: 0,
-      vibroIr: null,
-    };
-  }
-  let resonatorNode: SceneNode | null = null;
-  if (spec.resonatorNodeId) {
-    resonatorNode = findById(sceneNodes, spec.resonatorNodeId);
-  }
-  if (!resonatorNode) {
-    resonatorNode = findParentOf(sceneNodes, node.id);
-  }
-  if (!resonatorNode || resonatorNode.acousticString) {
-    return {
-      soundbox: null,
-      bridgeCoupling: 0,
-      vibratingSpanFraction: 1.0,
-      bridgeHillHz: 2000,
-      bridgeHillGainDb: 0,
-      vibroIr: null,
-    };
-  }
+  const empty = {
+    resonatorNode: null,
+    soundbox: null,
+    bridgeCoupling: 0,
+    vibratingSpanFraction: 1.0,
+    speakingSpanBounds: [0, 1] as [number, number],
+    bridgeDrivePoint: [0, 0, 0] as [number, number, number],
+    bridgeHillHz: 2000,
+    bridgeHillGainDb: 0,
+    vibroIr: null,
+  };
+  if (!spec || !sceneNodes?.length) return empty;
+
+  const resonatorNode = resolveResonatorHost(node, sceneNodes);
+  if (!resonatorNode) return empty;
 
   const support = measurePhysicalStringSupport(node, resonatorNode, sceneNodes);
   if (support.bridgeCoupling <= 0.02) {
     // Floating string disconnected from bridge/nut: zero mechanical coupling to soundbox!
-    return {
-      soundbox: null,
-      bridgeCoupling: 0,
-      vibratingSpanFraction: 1.0,
-      bridgeHillHz: 2000,
-      bridgeHillGainDb: 0,
-      vibroIr: null,
-    };
+    return empty;
   }
 
   // Solve actual 3D solid eigenmodes of the standing bridge (`support.bridgeNode`) if present!
@@ -684,23 +1036,20 @@ function resolveCoupledSoundboxAndSpan(
   );
 
   const baseRes = getCachedSoundboxResonance(resonatorNode);
-  if (support.bridgeCoupling >= 0.98) {
-    return {
-      soundbox: baseRes,
-      bridgeCoupling: support.bridgeCoupling,
-      vibratingSpanFraction: support.vibratingSpanFraction,
-      bridgeHillHz,
-      bridgeHillGainDb,
-      vibroIr,
-    };
-  }
+  const scaledSoundbox = support.bridgeCoupling >= 0.98
+    ? baseRes
+    : {
+        ...baseRes,
+        radiationGain: +(0.22 + (baseRes.radiationGain - 0.22) * support.bridgeCoupling).toFixed(3),
+      };
+
   return {
-    soundbox: {
-      ...baseRes,
-      radiationGain: +(0.22 + (baseRes.radiationGain - 0.22) * support.bridgeCoupling).toFixed(3),
-    },
+    resonatorNode,
+    soundbox: scaledSoundbox,
     bridgeCoupling: support.bridgeCoupling,
     vibratingSpanFraction: support.vibratingSpanFraction,
+    speakingSpanBounds: support.speakingSpanBounds,
+    bridgeDrivePoint: support.bridgeDrivePoint,
     bridgeHillHz,
     bridgeHillGainDb,
     vibroIr,
@@ -709,12 +1058,11 @@ function resolveCoupledSoundboxAndSpan(
 
 /**
  * 100% Generic Helmholtz / Schelleng Continuous Bowed-String Solver:
- * - Computes exact Mersenne mechanical wave impedance Z0 = sqrt(T * mu)
- * - Evaluates Schelleng's minimum (∝ Z0 |v_bow| / β²) and maximum (∝ Z0 |v_bow| / β)
- *   bow-force limits for Helmholtz stick-slip lock vs airy flautando vs raucous crunch
- * - Shapes harmonics H_1..H_20 with Cremer corner-rounding, bow-position node comb
- *   (*sul ponticello* vs *sul tasto*), finite horsehair ribbon width, and the exact
- *   3D Soundbox Transfer Function H_box(n * f0) (`analyzeSoundboxResonance`).
+ * - Computes exact Mersenne + stiff-string fundamental & wave impedance Z0 = sqrt(T * mu)
+ * - Evaluates Schelleng's minimum (∝ Z0 |v_bow| / β² * Re(Y_bridge)) and maximum (∝ Z0 |v_bow| / β)
+ *   bow-force limits, torsional rolling compliance, and coupled string-body wolf-note beating!
+ * - Folds bowBeta in [0, 1] symmetrically around 0.5, chokes right at β -> 0 on the bridge saddle,
+ *   and suppresses ONLY true interior harmonic nodes (1 <= m < n) rather than notching n = 1 at m = 0!
  */
 export function solveBowedStringVoice(input: BowedStringContactInput): BowedStringVoice {
   const { node, sceneNodes } = input;
@@ -744,10 +1092,12 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
       fMax: 1.0,
       waveImpedanceZ0: 0.2,
       regime: 'silent',
+      wolfBeatHz: 0,
+      wolfBeatDepth: 0,
     };
   }
 
-  const mat = STRING_MATERIALS[spec.material] ?? STRING_MATERIALS.steel;
+  const mat = resolveStringMaterial(spec.material);
   const coupled = resolveCoupledSoundboxAndSpan(node, sceneNodes);
   const soundbox = coupled.soundbox;
   const openLengthM = measureStringLengthM(node) * coupled.vibratingSpanFraction;
@@ -757,26 +1107,57 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
       : 1.0;
   const effectiveLengthM = Math.max(0.02, openLengthM * stopFrac);
 
-  const radiusM = Math.max(0.00006, (spec.diameterMm || 0.5) / 2000);
+  const radiusM = Math.max(0.00006, (Number(spec.diameterMm) || 0.5) / 2000);
   const areaM2 = Math.PI * radiusM * radiusM;
   const mu = mat.densityKgM3 * areaM2;
-  const tensionN = Math.max(0.5, spec.tensionN || 45);
+  const tensionN = Math.max(0.5, Number(spec.tensionN) || 45);
+  const E = mat.modulusGPa * 1e9;
 
-  // Exact mechanical wave impedance Z0 = sqrt(T * mu) and Mersenne fundamental f0
+  // Exact mechanical wave impedance Z0 = sqrt(T * mu) and stiff-string fundamental f1
   const waveImpedanceZ0 = Math.sqrt(tensionN * mu);
   const waveSpeed = Math.sqrt(tensionN / mu);
+  const bActive = (Math.pow(Math.PI, 3) * E * Math.pow(radiusM, 4)) / (4 * tensionN * effectiveLengthM * effectiveLengthM);
   const f0Open = waveSpeed / (2 * openLengthM);
-  const pitchHz = +(f0Open / stopFrac).toFixed(2);
+  const pitchHz = +((f0Open / stopFrac) * Math.sqrt(1 + bActive)).toFixed(2);
 
-  const vBow = Math.abs(input.bowVelocityMps);
-  const forceN = Math.max(0, input.bowForceN);
-  const beta = Math.max(0.03, Math.min(0.5, Number.isFinite(input.bowBeta) ? input.bowBeta : 0.12));
+  const vBow = Number.isFinite(input.bowVelocityMps) ? Math.abs(input.bowVelocityMps) : 0;
+  const forceN = Number.isFinite(input.bowForceN) ? Math.max(0, input.bowForceN) : 0;
 
-  // Schelleng (1973) bow-force wedge limits:
-  //   F_min ∝ Z0 * |v_bow| / beta^2   (minimum force to sustain single-slip Helmholtz lock)
-  //   F_max ∝ Z0 * |v_bow| / beta     (maximum force before raucous rosin crunch)
-  const fMin = +((0.042 * waveImpedanceZ0 * vBow) / (beta * beta)).toFixed(6);
+  // Fold bowBeta in [0, 1] symmetrically into [0, 0.5]; attenuate smoothly when bowing right on top of the bridge saddle (beta -> 0)
+  const rawBeta = Number.isFinite(input.bowBeta) ? Math.max(0, Math.min(1, input.bowBeta)) : 0.12;
+  const foldedBeta = Math.min(rawBeta, 1 - rawBeta);
+  const bridgeSaddleChoke = foldedBeta >= 0.025 ? 1.0 : Math.max(0, (foldedBeta - 0.003) / 0.022);
+  const beta = Math.max(0.015, Math.min(0.5, foldedBeta));
+
+  // Schelleng (1973) bow-force wedge limits with Skudrzyk bridge-admittance & Cremer torsional rolling compliance:
+  //   F_min ∝ Z0 * |v_bow| / beta^2 * (intrinsicLoss + Z0 * Re(Y_bridge(f0)))
+  //   F_max ∝ Z0 * |v_bow| / beta
+  const torsionEase = 1 / (1 + 0.18 * (1 - mat.brightness));
+  let bridgeLossScale = 0.78;
+  let wolfCoupling = 0;
+  if (soundbox && coupled.bridgeCoupling > 0.02) {
+    const lTop = lorentzianResonance(pitchHz, soundbox.topPlateHz, 11.0);
+    const lBody = lorentzianResonance(pitchHz, soundbox.bodyModeHz, 12.0);
+    const lAir = soundbox.helmholtzHz !== null
+      ? lorentzianResonance(pitchHz, soundbox.helmholtzHz, soundbox.helmholtzQ)
+      : 0;
+    const yBridgeNorm = coupled.bridgeCoupling * soundbox.radiationGain * (0.28 + 1.35 * lTop + 0.45 * lBody + 0.65 * lAir);
+    bridgeLossScale = 0.80 + 0.42 * yBridgeNorm;
+    wolfCoupling = coupled.bridgeCoupling * (waveImpedanceZ0 / 0.22) * soundbox.radiationGain * Math.max(lTop, 0.75 * lAir);
+  }
+  const fMin = +((0.042 * waveImpedanceZ0 * vBow * torsionEase * bridgeLossScale) / (beta * beta)).toFixed(6);
   const fMax = +((4.6 * waveImpedanceZ0 * vBow) / beta).toFixed(6);
+
+  // Coupled string-body Wolf Note beating when Z0 * |Y_bridge(f0)| exceeds critical modal splitting threshold!
+  let wolfBeatHz = 0;
+  let wolfBeatDepth = 0;
+  if (wolfCoupling > 0.58 && vBow >= 0.008 && forceN >= 0.015) {
+    const excess = Math.min(1.5, wolfCoupling - 0.58);
+    // Pressing firmly toward fMax suppresses the wolf slightly; light/moderate bow pressure stutters strongly
+    const pressSuppress = forceN > fMin ? Math.max(0.35, 1 - 0.35 * Math.min(1.5, (forceN - fMin) / Math.max(0.05, fMax - fMin))) : 1.0;
+    wolfBeatHz = +Math.max(3.2, Math.min(14.5, pitchHz * 0.032 * (0.7 + excess))).toFixed(2);
+    wolfBeatDepth = +Math.min(0.62, 0.48 * excess * pressSuppress).toFixed(3);
+  }
 
   const bodyFormantHz = soundbox
     ? +(soundbox.helmholtzHz ?? soundbox.topPlateHz).toFixed(1)
@@ -797,12 +1178,11 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
   const dipoleCancelDb = soundbox ? soundbox.dipoleCancelDb : 0;
   const bridgeHillHz = coupled.bridgeHillHz;
   const bridgeHillGainDb = coupled.bridgeHillGainDb;
-
   const vibroIr = coupled.vibroIr;
   const bodyIr = vibroIr?.ir ?? null;
   const bodyIrSig = vibroIr?.signature ?? '';
 
-  if (vBow < 0.008 || forceN < 0.015) {
+  if (vBow < 0.008 || forceN < 0.015 || bridgeSaddleChoke <= 0.01) {
     return {
       active: false,
       pitchHz,
@@ -827,6 +1207,8 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
       fMax,
       waveImpedanceZ0: +waveImpedanceZ0.toFixed(5),
       regime: 'silent',
+      wolfBeatHz: 0,
+      wolfBeatDepth: 0,
     };
   }
 
@@ -860,9 +1242,17 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
     // 1. Ideal Helmholtz sawtooth 1/n * Cremer bow-force corner rounding
     const cornerRoll = Math.exp(-cornerDecay * (n - 1));
 
-    // 2. Bow-position node comb + sul ponticello / sul tasto spectral tilt
-    const nodePhase = n * beta - Math.round(n * beta);
-    const bowComb = 1 - 0.85 * Math.exp(-Math.pow(nodePhase / 0.08, 2));
+    // 2. Interior-only bow-position node comb (1 <= m < n) + sul ponticello / sul tasto spectral tilt
+    const mNode = Math.round(n * beta);
+    const isInteriorNode = mNode >= 1 && mNode < n;
+    const nodePhase = n * beta - mNode;
+    let bowComb = isInteriorNode
+      ? 1 - 0.85 * Math.exp(-Math.pow(nodePhase / 0.08, 2))
+      : 1.0;
+    // Glassy sul-ponticello fundamental dropout occurs ONLY when bow force drops below Schelleng F_min!
+    if (n === 1 && underPress > 0 && beta < 0.09) {
+      bowComb *= 1 - 0.72 * underPress * ((0.09 - beta) / 0.09);
+    }
     const ponticelloTilt = Math.pow(n, ponticelloExp);
 
     // 3. Finite horsehair ribbon width sinc roll-off
@@ -913,10 +1303,10 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
       : regime === 'raucous'
         ? Math.max(0.65, 1.05 - 0.18 * overPress)
         : 0.92 + 0.14 * Math.min(1, Math.log10(1 + pressureRatio));
-  const amplitude = +Math.min(0.44, 0.33 * effVelocityDrive * lockEfficiency * Math.min(1.45, radGain)).toFixed(4);
+  const amplitude = +(
+    Math.min(0.44, 0.33 * effVelocityDrive * lockEfficiency * Math.min(1.45, radGain)) * bridgeSaddleChoke
+  ).toFixed(4);
 
-  // Sub-linear frequency scaling (`1550 + 3.4 * pitchHz`) models viscoelastic gut/wood damping so higher
-  // strings (`D3, A3, B3`) stay round & velvety (~2.3-2.6 kHz) rather than turning thin or fizzy!
   const baseCutoff =
     1480 +
     pitchHz * (2.6 + 2.8 * mat.brightness) +
@@ -924,7 +1314,6 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
     (0.20 - Math.min(0.20, beta)) * 3400;
   const lowpassHz = +Math.max(1450, Math.min(5400, baseCutoff * (0.78 + 0.26 * mat.brightness))).toFixed(1);
 
-  // Clean horsehair rosin whisper (attenuated gently on higher strings so cantabile A-string stays pure)
   const speedSheen = Math.min(1, vBow / 0.28);
   const highStrTame = 1 / Math.sqrt(Math.max(1, pitchHz / 110));
   const rosinRaw =
@@ -960,12 +1349,90 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
     fMax,
     waveImpedanceZ0: +waveImpedanceZ0.toFixed(5),
     regime,
+    wolfBeatHz,
+    wolfBeatDepth,
   };
 }
 
 /**
- * Evaluates a taut string's Mersenne fundamental, Fletcher stiff-string harmonics,
- * breaking-stress safety, coupled 3D soundbox resonance, and live plectrum/strike-point shaping!
+ * Starter #4b — Kirchhoff-Carrier Nonlinear Plucked String Tension-Modulation Pitch Droop:
+ *   ΔT(t) = (π² L K_axial,eff / 8) * γ(β) * (A(t) / L)²
+ *   f(t) = f_0 * sqrt(1 + κ_TM * (A(t) / L)²),   Δf_0 / f_0 ∝ (A_0 / L)²
+ *   τ_droop = 0.5 * τ_1,amp   (since A(t)² decays at 2x the amplitude decay rate!)
+ */
+export function computePluckPitchDroop(
+  node: SceneNode,
+  lengthM: number,
+  impulseNs: number,
+  pluckPos = 0.18,
+  fundamentalDecaySec = 1.2,
+): PluckPitchDroopResult {
+  const spec = node.acousticString;
+  const tauAmp = Math.max(0.03, fundamentalDecaySec / LN_10000);
+  const pitchDroopTauSec = +Math.max(0.015, Math.min(0.32, 0.5 * tauAmp)).toFixed(4);
+
+  if (
+    !spec ||
+    spec.nonlinearPitchDroop === false ||
+    spec.nonlinearPitchDroop === 0 ||
+    !Number.isFinite(impulseNs) ||
+    impulseNs <= 0 ||
+    !Number.isFinite(lengthM) ||
+    lengthM <= 0.01
+  ) {
+    return {
+      pitchDroopFrac: 0,
+      pitchDroopCents: 0,
+      pitchDroopTauSec,
+      displacementM: 0,
+      kappaTM: 0,
+    };
+  }
+
+  const userScale =
+    typeof spec.nonlinearPitchDroop === 'number'
+      ? Math.max(0, Math.min(4.0, spec.nonlinearPitchDroop))
+      : 1.0;
+
+  const mat = resolveStringMaterial(spec.material);
+  const L = Math.max(0.02, lengthM);
+  const radiusM = Math.max(0.00006, (Number(spec.diameterMm) || 0.5) / 2000);
+  const areaM2 = Math.PI * radiusM * radiusM;
+  const tensionN = Math.max(0.5, Number(spec.tensionN) || 45);
+  const E = mat.modulusGPa * 1e9;
+
+  // Pluck-point triangular slope factor γ(β) (plucks near the bridge stretch initial slope more steeply)
+  const beta = Math.max(0.04, Math.min(0.5, Number.isFinite(pluckPos) ? pluckPos : 0.18));
+  const gammaBeta = Math.min(2.2, 0.65 + 0.12 / (beta * (1 - beta)));
+
+  // Series axial stiffness of wire (E*S / L) and wooden bridge/nut/peg termination compliance (C_term = 3e-6 m/N)
+  const cTermMPerN = 3.0e-6;
+  const kAxialEff = 1 / (L / (E * areaM2) + cTermMPerN);
+  const kappaTM = ((Math.PI * Math.PI * L * kAxialEff) / (8 * tensionN)) * gammaBeta * userScale;
+
+  // Transverse pluck deflection A_0 against mid-span stiffness k_mid = 4 * T_0 / L (linear for small/moderate J -> exact Δf ∝ (A/L)²!)
+  const kMid = (4 * tensionN) / L;
+  const aMax = Math.min(0.012, 0.035 * L);
+  const fTransverse = 4.0 * impulseNs;
+  const displacementM = aMax * Math.tanh(fTransverse / Math.max(1e-6, kMid * aMax));
+
+  const aOverL = displacementM / L;
+  const pitchDroopFrac = Math.min(0.25, Math.sqrt(1 + kappaTM * aOverL * aOverL) - 1);
+  const pitchDroopCents = +(1200 * Math.log2(1 + pitchDroopFrac)).toFixed(2);
+
+  return {
+    pitchDroopFrac: +pitchDroopFrac.toFixed(6),
+    pitchDroopCents,
+    pitchDroopTauSec,
+    displacementM: +displacementM.toFixed(6),
+    kappaTM: +kappaTM.toFixed(3),
+  };
+}
+
+/**
+ * Evaluates a taut string's Mersenne + Fletcher stiff-string modes, breaking-stress safety,
+ * coupled 3D soundbox resonance, un-colored `rawStringModes` (for double-filter-free 3D FIR convolution),
+ * and live plectrum/strike-point + nonlinear tension pitch droop shaping!
  */
 export function evaluateTautString(
   node: SceneNode,
@@ -975,22 +1442,27 @@ export function evaluateTautString(
   const spec = node.acousticString;
   if (!spec) return null;
 
-  const mat = STRING_MATERIALS[spec.material] ?? STRING_MATERIALS.steel;
+  const mat = resolveStringMaterial(spec.material);
   const coupled = resolveCoupledSoundboxAndSpan(node, sceneNodes);
   const soundbox = coupled.soundbox;
-  const lengthM = measureStringLengthM(node) * coupled.vibratingSpanFraction;
-  const radiusM = Math.max(0.00006, (spec.diameterMm || 0.5) / 2000);
+  const stopFrac =
+    impactCtx?.stoppedLengthFraction !== undefined && Number.isFinite(impactCtx.stoppedLengthFraction)
+      ? Math.max(0.25, Math.min(1.0, impactCtx.stoppedLengthFraction))
+      : 1.0;
+  const lengthM = Math.max(0.02, measureStringLengthM(node) * coupled.vibratingSpanFraction * stopFrac);
+  const radiusM = Math.max(0.00006, (Number(spec.diameterMm) || 0.5) / 2000);
   const areaM2 = Math.PI * radiusM * radiusM;
   const linearDensityKgM = mat.densityKgM3 * areaM2;
-  const tensionN = Math.max(0.5, spec.tensionN || 45);
+  const tensionN = Math.max(0.5, Number(spec.tensionN) || 45);
+  const waveImpedanceZ0 = Math.sqrt(tensionN * linearDensityKgM);
 
-  // 1. Mersenne's law: f0 = sqrt(T / mu) / (2 * L)
+  // 1. Mersenne's law + Fletcher (1964) stiff-string dispersion B = (π³ * E * r⁴) / (4 * T * L²)
   const waveSpeed = Math.sqrt(tensionN / linearDensityKgM);
-  const fundamentalHz = waveSpeed / (2 * lengthM);
-
-  // 2. Fletcher's stiff-string inharmonicity B = (π³ * E * r⁴) / (8 * T * L²)
+  const f0Mersenne = waveSpeed / (2 * lengthM);
   const E = mat.modulusGPa * 1e9;
-  const inharmonicityB = (Math.pow(Math.PI, 3) * E * Math.pow(radiusM, 4)) / (8 * tensionN * lengthM * lengthM);
+  const inharmonicityB = (Math.pow(Math.PI, 3) * E * Math.pow(radiusM, 4)) / (4 * tensionN * lengthM * lengthM);
+  const fundamentalHz = f0Mersenne * Math.sqrt(1 + inharmonicityB);
+  const overtoneRatio = +(2 * Math.sqrt((1 + 4 * inharmonicityB) / (1 + inharmonicityB))).toFixed(3);
 
   // 3. Tensile stress & safety factor
   const tensileStressMPa = (tensionN / areaM2) / 1e6;
@@ -1014,11 +1486,10 @@ export function evaluateTautString(
     warnings.push('Very low string tension (< 8 N) — string will buzz with weak bridge drive.');
   }
 
-  // 4. Determine actual pluck position & plectrum contact width/stiffness!
-  const dynamicPluck = impactCtx?.localPoint
-    ? resolvePluckFractionFromPoint(node, impactCtx.localPoint)
-    : null;
-  const pluckPos = Math.max(0.04, Math.min(0.5, dynamicPluck ?? spec.pluckPos ?? 0.18));
+  // 4. Determine actual pluck position (within active speaking/stopped span!) & plectrum contact width/stiffness
+  const pluckPos = impactCtx?.localPoint
+    ? Math.max(0.04, resolveStringBetaFromPoint(node, impactCtx.localPoint, stopFrac, sceneNodes))
+    : Math.max(0.04, Math.min(0.5, Number.isFinite(spec.pluckPos) ? spec.pluckPos! : 0.18));
 
   let pickWidthM = 0.004;
   let pickBrightness = mat.brightness;
@@ -1027,16 +1498,26 @@ export function evaluateTautString(
     const pickProps = inferColliderContactProps(impactCtx.strikerNode, impactCtx.strikerGeomName);
     pickWidthM = Math.max(0.001, Math.min(lengthM * 0.25, 1.6 * pickProps.radiusM));
     pickBrightness = 0.45 * mat.brightness + 0.55 * pickProps.brightness;
-    // Softer / heavier plectrum prolongs string release contact time τ_c
     contactTauSec = Math.max(0.00035, Math.min(0.0028, 0.00095 * Math.pow(3e9 / pickProps.modulusPa, 0.18)));
   }
 
   const radGain = soundbox ? soundbox.radiationGain : 0.65;
-  const modes: ModalVoice[] = [];
+  const bridgeLoadFactor = soundbox ? Math.max(0.68, 1.0 - 0.18 * soundbox.radiationGain) : 1.0;
+  const f1DecaySec = Math.max(0.04, Math.min(5.5, ((mat.intrinsicQ * bridgeLoadFactor) / (Math.PI * fundamentalHz)) * 2.6));
+  const pitchDroop = computePluckPitchDroop(
+    node,
+    lengthM,
+    impactCtx?.impulseNs ?? 0,
+    pluckPos,
+    f1DecaySec,
+  );
+
+  const modes: PluckedModalVoice[] = [];
+  const rawStringModes: PluckedModalVoice[] = [];
   const nPartials = 12;
 
   for (let n = 1; n <= nPartials; n++) {
-    const fn = n * fundamentalHz * Math.sqrt(1 + inharmonicityB * n * n);
+    const fn = n * f0Mersenne * Math.sqrt(1 + inharmonicityB * n * n);
     if (fn < 24 || fn > 17500) continue;
 
     // Pluck triangle-wave Fourier rolloff * spatial pluck comb sin(n * π * x_pluck / L)
@@ -1049,36 +1530,51 @@ export function evaluateTautString(
 
     // Plectrum stiffness spectral tilt (stiff metal pick boosts upper partials vs soft felt/wood)
     const rolloffExp = 1.46 - 0.34 * pickBrightness;
-    let gain = (comb / Math.pow(n, rolloffExp)) * pickSinc * radGain;
+    const pureGain = (comb / Math.pow(n, rolloffExp)) * pickSinc * radGain;
+    let coloredGain = pureGain;
 
-    // Couple through the 3D soundbox's Helmholtz air cavity + Kirchhoff top/body plate formants!
+    // Couple through the 3D soundbox's Helmholtz air cavity + Kirchhoff top/body plate formants (fallback when no IR)!
     if (soundbox) {
       let boxH = resonatorTransferGain(fn, soundbox.topPlateHz, 8.5, 4.2);
       boxH *= resonatorTransferGain(fn, soundbox.bodyModeHz, 10.0, 2.6);
       if (soundbox.helmholtzHz !== null) {
         boxH *= resonatorTransferGain(fn, soundbox.helmholtzHz, soundbox.helmholtzQ, 5.8);
-        // Below Helmholtz cutoff, ported soundboxes cancel as an acoustic dipole (~f^2 high-pass)
         if (fn < soundbox.helmholtzHz * 0.75) {
           const ratio = fn / (soundbox.helmholtzHz * 0.75);
           boxH *= 0.30 + 0.70 * ratio * ratio;
         }
       }
-      gain *= Math.min(2.4, boxH * 0.60);
+      coloredGain *= Math.min(2.4, boxH * 0.60);
     }
 
-    // Energy conservation: stronger bridge/soundbox radiation transfers energy faster!
-    const bridgeLoadFactor = soundbox ? Math.max(0.68, 1.0 - 0.18 * soundbox.radiationGain) : 1.0;
     const partialQ = (mat.intrinsicQ * bridgeLoadFactor) / (1 + 0.28 * (n - 1) * (n - 1) * (1 - 0.5 * pickBrightness));
     const decaySec = Math.max(0.04, Math.min(5.5, (partialQ / (Math.PI * fn)) * 2.6));
+    // Stiff-string tension modulation affects lower modes most strongly; higher stiff modes scale by 1 / (1 + B*n²)
+    const partialDroopFrac =
+      pitchDroop.pitchDroopFrac > 0
+        ? +(pitchDroop.pitchDroopFrac / (1 + inharmonicityB * n * n)).toFixed(6)
+        : undefined;
 
-    modes.push({
-      freqHz: +fn.toFixed(2),
-      gain: +Math.min(1.25, gain).toFixed(3),
-      decaySec: +decaySec.toFixed(4),
-    });
+    if (pureGain >= 0.0008) {
+      rawStringModes.push({
+        freqHz: +fn.toFixed(2),
+        gain: +Math.min(1.25, pureGain).toFixed(4),
+        decaySec: +decaySec.toFixed(4),
+        ...(partialDroopFrac ? { pitchDroopFrac: partialDroopFrac, pitchDroopTauSec: pitchDroop.pitchDroopTauSec } : {}),
+      });
+    }
+
+    if (coloredGain >= 0.0008) {
+      modes.push({
+        freqHz: +fn.toFixed(2),
+        gain: +Math.min(1.25, coloredGain).toFixed(4),
+        decaySec: +decaySec.toFixed(4),
+        ...(partialDroopFrac ? { pitchDroopFrac: partialDroopFrac, pitchDroopTauSec: pitchDroop.pitchDroopTauSec } : {}),
+      });
+    }
   }
 
-  // 6. Sympathetic transient excitation of the soundbox's own Helmholtz air-boom & top-plate knock via the bridge!
+  // Sympathetic transient excitation of the soundbox's own Helmholtz air-boom & top-plate knock (analytical fallback modes)
   if (soundbox) {
     if (soundbox.helmholtzHz !== null) {
       modes.push({
@@ -1094,10 +1590,9 @@ export function evaluateTautString(
     });
   }
 
-  const f2 = modes[1]?.freqHz ?? fundamentalHz * 2;
-  const profile: BodyModalProfile = {
+  const profile: BodyModalProfile & { rawStringModes?: PluckedModalVoice[] } = {
     fundamentalHz: +fundamentalHz.toFixed(2),
-    overtoneRatio: +(f2 / Math.max(1e-6, fundamentalHz)).toFixed(3),
+    overtoneRatio,
     regime: 'tube',
     material: {
       label: mat.label,
@@ -1108,6 +1603,7 @@ export function evaluateTautString(
     },
     contactDurationSec: contactTauSec,
     modes,
+    rawStringModes,
     radiatingWidthM: soundbox ? 0.12 : 0.016,
     bodyIr: coupled.vibroIr?.ir ?? null,
     bodyIrSig: coupled.vibroIr?.signature ?? '',
@@ -1121,52 +1617,328 @@ export function evaluateTautString(
     tensileStressMPa: +tensileStressMPa.toFixed(1),
     stressRatio: +stressRatio.toFixed(3),
     transverseStiffnessNm: +transverseStiffnessNm.toFixed(1),
+    waveImpedanceZ0: +waveImpedanceZ0.toFixed(5),
+    bridgeCoupling: coupled.bridgeCoupling,
+    speakingSpanBounds: coupled.speakingSpanBounds,
+    bridgeDrivePoint: coupled.bridgeDrivePoint,
+    rawStringModes,
+    pitchDroop,
     warnings,
     soundbox,
     profile,
   };
 }
 
-/**
- * Tunes a taut string node to `targetHz` via Mersenne's law T = 4 * L^2 * f^2 * mu,
- * automatically adjusting wire diameter if needed to stay safely within [12 N .. 65% breaking stress],
- * and updates its MuJoCo transverse pluck stiffness `4 * T / L`.
- */
-export function tuneStringToPitch(node: SceneNode, targetHz: number): SceneNode {
-  const cur = node.acousticString ?? { material: 'bronze', diameterMm: 0.65, tensionN: 55 };
-  const mat = STRING_MATERIALS[cur.material] ?? STRING_MATERIALS.bronze;
-  const lengthM = measureStringLengthM(node);
+function collectStringNodes(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
+  for (const n of nodes) {
+    if (n.acousticString) out.push(n);
+    if (n.children?.length) collectStringNodes(n.children, out);
+  }
+  return out;
+}
 
-  let diameterMm = cur.diameterMm || 0.65;
+/**
+ * Starter #3 — Weinreich-Gough Bridge-Admittance Sympathetic String Coupling:
+ * Computes cross-string modal excitation across all unplayed sibling strings sharing the same
+ * 3D resonator body (`resonatorNodeId` or parent) via Skudrzyk bridge admittance `Y_bridge(f)`,
+ * 3D bridge bearing proximity `exp(-|r_a - r_b| / λ_plate)`, and Lorentzian harmonic coincidence!
+ */
+export function solveSympatheticStringCoupling(
+  sourceNode: SceneNode,
+  sceneNodes: SceneNode[],
+  opts?: {
+    sourcePitchHz?: number;
+    sourcePartials?: { freqHz: number; gain: number }[];
+    excludedNodeIds?: ReadonlySet<string>;
+  },
+): SympatheticStringTarget[] {
+  if (!sourceNode.acousticString || !sceneNodes?.length) return [];
+
+  const srcCoupled = resolveCoupledSoundboxAndSpan(sourceNode, sceneNodes);
+  const host = srcCoupled.resonatorNode;
+  const soundbox = srcCoupled.soundbox;
+  if (!host || !soundbox || srcCoupled.bridgeCoupling <= 0.05) return [];
+
+  const srcEval = evaluateTautString(sourceNode, sceneNodes);
+  if (!srcEval) return [];
+
+  let sourcePartials: { freqHz: number; gain: number }[];
+  if (opts?.sourcePartials && opts.sourcePartials.length > 0) {
+    sourcePartials = opts.sourcePartials.filter((p) => p.gain > 0.001 && p.freqHz >= 20 && p.freqHz <= 18000);
+  } else {
+    const pitchRatio =
+      opts?.sourcePitchHz && opts.sourcePitchHz > 20 && srcEval.fundamentalHz > 1e-3
+        ? opts.sourcePitchHz / srcEval.fundamentalHz
+        : 1.0;
+    sourcePartials = srcEval.rawStringModes.map((m) => ({
+      freqHz: m.freqHz * pitchRatio,
+      gain: m.gain,
+    }));
+  }
+  if (sourcePartials.length === 0) return [];
+
+  // Normalized Skudrzyk driving-point bridge admittance scale (reference 4 mm spruce soundboard -> Y_ref ~ 0.012 m/(N·s))
+  const hostMat = inferAcousticMaterial(host);
+  const cLong = Math.sqrt((hostMat.modulusGPa * 1e9) / Math.max(80, hostMat.density));
+  const hTopM = Math.max(0.0015, soundbox.topPlateThicknessMm / 1000);
+  const y0Plate = soundbox.hasHollowCavity
+    ? Math.min(0.032, 1 / Math.max(25, 2.31 * hostMat.density * cLong * hTopM * hTopM))
+    : 0.0018;
+
+  const allStrings = collectStringNodes(sceneNodes);
+  const targets: SympatheticStringTarget[] = [];
+
+  for (const cand of allStrings) {
+    if (cand.id === sourceNode.id) continue;
+    if (opts?.excludedNodeIds?.has(cand.id)) continue;
+
+    const candHost = resolveResonatorHost(cand, sceneNodes);
+    if (!candHost || candHost.id !== host.id) continue;
+
+    const candEval = evaluateTautString(cand, sceneNodes);
+    if (!candEval || candEval.bridgeCoupling <= 0.05) continue;
+
+    const distBridgeM = Math.hypot(
+      srcCoupled.bridgeDrivePoint[0] - candEval.bridgeDrivePoint[0],
+      srcCoupled.bridgeDrivePoint[1] - candEval.bridgeDrivePoint[1],
+      srcCoupled.bridgeDrivePoint[2] - candEval.bridgeDrivePoint[2],
+    );
+    const spatialBridgeTransfer = Math.exp(-distBridgeM / 0.18);
+
+    const candMat = resolveStringMaterial(cand.acousticString!.material);
+    const candRadiusM = Math.max(0.00006, (Number(cand.acousticString!.diameterMm) || 0.5) / 2000);
+    const candTensionN = Math.max(0.5, Number(cand.acousticString!.tensionN) || 45);
+    const candMu = candMat.densityKgM3 * Math.PI * candRadiusM * candRadiusM;
+    const candF0Mersenne = Math.sqrt(candTensionN / candMu) / (2 * candEval.lengthM);
+    const candB =
+      (Math.pow(Math.PI, 3) * candMat.modulusGPa * 1e9 * Math.pow(candRadiusM, 4)) /
+      (4 * candTensionN * candEval.lengthM * candEval.lengthM);
+
+    const zGeomMean = Math.sqrt(srcEval.waveImpedanceZ0 * candEval.waveImpedanceZ0);
+    const bridgeLoadFactor = Math.max(0.68, 1.0 - 0.18 * soundbox.radiationGain);
+
+    const sympModes: PluckedModalVoice[] = [];
+    const sympRawModes: PluckedModalVoice[] = [];
+    let peakSympGain = 0;
+
+    for (let q = 1; q <= 12; q++) {
+      const fq = q * candF0Mersenne * Math.sqrt(1 + candB * q * q);
+      if (fq < 24 || fq > 16500) continue;
+
+      const partialQ = (candMat.intrinsicQ * bridgeLoadFactor) / (1 + 0.22 * (q - 1) * (q - 1));
+      // Lorentzian capture half-width combines intrinsic damping f/(2Q) and temperament/vibrato lock bandwidth (0.45% ≈ 7.8 cents)
+      const gammaHz = Math.hypot(fq / (2 * Math.max(20, partialQ)), 0.0045 * fq);
+      const gammaSq = gammaHz * gammaHz;
+
+      let energySum = 0;
+      for (const sp of sourcePartials) {
+        const df = sp.freqHz - fq;
+        const lorentz = gammaSq / (df * df + gammaSq);
+        if (lorentz < 0.015) continue;
+
+        let hBox = resonatorTransferGain(sp.freqHz, soundbox.topPlateHz, 8.0, 2.8);
+        hBox *= resonatorTransferGain(sp.freqHz, soundbox.bodyModeHz, 9.0, 1.8);
+        if (soundbox.helmholtzHz !== null) {
+          hBox *= resonatorTransferGain(sp.freqHz, soundbox.helmholtzHz, soundbox.helmholtzQ, 3.6);
+        }
+        if (srcCoupled.bridgeHillGainDb > 0.1) {
+          hBox *= resonatorTransferGain(sp.freqHz, srcCoupled.bridgeHillHz, 3.2, srcCoupled.bridgeHillGainDb * 0.4);
+        }
+
+        const kappa =
+          srcCoupled.bridgeCoupling *
+          candEval.bridgeCoupling *
+          ((zGeomMean * y0Plate * Math.min(3.6, hBox)) / Math.PI) *
+          spatialBridgeTransfer;
+
+        // Calibrated so a coincident cello partial (Z0 ~ 0.1 kg/s, 4 mm spruce top) transfers ~-26 dB sympathetic amplitude
+        const transferAmp = sp.gain * Math.min(0.26, 180.0 * kappa) * lorentz * Math.pow(q, -0.45);
+        energySum += transferAmp * transferAmp;
+      }
+
+      const rawSympGain = Math.sqrt(energySum);
+      if (rawSympGain < 0.0015) continue;
+
+      let coloredSympGain = rawSympGain;
+      let outBox = resonatorTransferGain(fq, soundbox.topPlateHz, 8.0, 2.4);
+      if (soundbox.helmholtzHz !== null) {
+        outBox *= resonatorTransferGain(fq, soundbox.helmholtzHz, soundbox.helmholtzQ, 3.0);
+      }
+      coloredSympGain *= Math.min(2.0, outBox * 0.65 * soundbox.radiationGain);
+
+      const decaySec = Math.max(0.08, Math.min(5.5, (partialQ / (Math.PI * fq)) * 2.6));
+      const cleanRaw = +Math.min(0.35, rawSympGain).toFixed(4);
+      const cleanCol = +Math.min(0.42, Math.max(rawSympGain * 0.75, coloredSympGain)).toFixed(4);
+      if (cleanCol > peakSympGain) peakSympGain = cleanCol;
+
+      sympRawModes.push({
+        freqHz: +fq.toFixed(2),
+        gain: cleanRaw,
+        decaySec: +decaySec.toFixed(4),
+      });
+      sympModes.push({
+        freqHz: +fq.toFixed(2),
+        gain: cleanCol,
+        decaySec: +decaySec.toFixed(4),
+      });
+    }
+
+    if (sympModes.length > 0 && peakSympGain >= 0.002) {
+      targets.push({
+        targetNode: cand,
+        targetNodeId: cand.id,
+        fundamentalHz: candEval.fundamentalHz,
+        bridgeCoupling: candEval.bridgeCoupling,
+        couplingGain: +peakSympGain.toFixed(4),
+        modes: sympModes,
+        rawStringModes: sympRawModes,
+        bodyIr: candEval.profile.bodyIr ?? null,
+        bodyIrSig: candEval.profile.bodyIrSig ?? '',
+      });
+    }
+  }
+
+  targets.sort((a, b) => b.couplingGain - a.couplingGain);
+  return targets;
+}
+
+/**
+ * Ensures a user-authored capsule/cylinder toggled into `acousticString` mode has:
+ * 1. A transverse `slide` pluck joint perpendicular to the wire axis (replacing `free` or empty `joints: []`
+ *    so the wire neither falls to the floor nor sits un-pluckable at 0-DOF), and
+ * 2. Collidable wire contact (`solref` + material density) so plectrums, mallets, and bows physically engage it.
+ */
+export function ensureTautStringJointAndContact(node: SceneNode): SceneNode {
+  const mat = resolveStringMaterial(node.acousticString?.material ?? 'bronze');
+  const ep = resolveStringLocalEndpoints(node);
+  const lengthM = measureStringLengthM(node);
+  const tensionN = Math.max(2, Number(node.acousticString?.tensionN) || 48);
+  const kTransverse = +(4 * tensionN / Math.max(0.02, lengthM)).toFixed(1);
+
+  let wireDir = new THREE.Vector3(0, 1, 0);
+  if (ep) {
+    const d = new THREE.Vector3(ep.p1[0] - ep.p0[0], ep.p1[1] - ep.p0[1], ep.p1[2] - ep.p0[2]);
+    if (d.lengthSq() > 1e-10) wireDir = d.normalize();
+  }
+
+  // Pick a horizontal-preferred unit transverse slide axis perpendicular to `wireDir`
+  const upRef = Math.abs(wireDir.z) < 0.85 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
+  const transVec = new THREE.Vector3().crossVectors(wireDir, upRef).normalize();
+  const slideAxis: [number, number, number] = [
+    +transVec.x.toFixed(5),
+    +transVec.y.toFixed(5),
+    +transVec.z.toFixed(5),
+  ];
+
+  const hasValidPluckSlide =
+    (node.joints?.length ?? 0) > 0 && !(node.joints!.length === 1 && node.joints![0].type === 'free');
+  const travelM = +Math.max(0.002, Math.min(0.008, lengthM * 0.025)).toFixed(5);
+  const nextJoints: SceneJoint[] = hasValidPluckSlide
+    ? node.joints.map((j) => ({ ...j }))
+    : [
+        {
+          name: `${node.id}_pluck`,
+          type: 'slide',
+          axis: slideAxis,
+          stiffness: kTransverse,
+          damping: +Math.max(0.04, kTransverse * 0.0008).toFixed(4),
+          limited: true,
+          range: [-travelM, travelM],
+        },
+      ];
+
+  const nextGeoms = (node.geoms ?? []).map((g, idx) => {
+    if (idx !== 0 || g.role === 'visual' || g.csg === 'difference' || g.csgDerived) {
+      return { ...g };
+    }
+    const clearDisabled = g.contype === 0 && g.conaffinity === 0;
+    return {
+      ...g,
+      ...(clearDisabled ? { contype: undefined, conaffinity: undefined } : {}),
+      solref: g.solref ?? [0.004, 0.25],
+      ...(g.mass === undefined && g.density === undefined ? { density: mat.densityKgM3 } : {}),
+    };
+  });
+
+  return {
+    ...node,
+    geoms: nextGeoms,
+    joints: nextJoints,
+  };
+}
+
+/**
+ * Tunes a taut string node to `targetHz` via Mersenne + Fletcher stiff-string law:
+ *   T = 4 * L_eff² * f_target² * μ - (π³ * E * r⁴) / (4 * L_eff²)
+ * accounting for coupled `vibratingSpanFraction` when `sceneNodes` is supplied, automatically
+ * adjusting wire gauge to stay within [12 N .. 65% breaking stress], and ensuring a valid
+ * MuJoCo transverse `slide` pluck joint (`4 * T / L_eff`).
+ */
+export function tuneStringToPitch(
+  node: SceneNode,
+  targetHz: number,
+  sceneNodes?: SceneNode[],
+): SceneNode {
+  const safeTargetHz = Number.isFinite(targetHz) && targetHz > 10 ? targetHz : 261.63;
+  const cur = node.acousticString ?? { material: 'bronze', diameterMm: 0.65, tensionN: 55 };
+  const mat = resolveStringMaterial(cur.material);
+  const seededNode: SceneNode = node.acousticString ? node : { ...node, acousticString: cur };
+
+  const coupled = sceneNodes?.length ? resolveCoupledSoundboxAndSpan(seededNode, sceneNodes) : null;
+  const spanFrac = coupled ? coupled.vibratingSpanFraction : 1.0;
+  const lengthM = Math.max(0.02, measureStringLengthM(seededNode) * spanFrac);
+  const E = mat.modulusGPa * 1e9;
+
+  let diameterMm = Number(cur.diameterMm) || 0.65;
   const computeTension = (dMm: number) => {
     const r = dMm / 2000;
     const mu = mat.densityKgM3 * Math.PI * r * r;
-    return 4 * lengthM * lengthM * targetHz * targetHz * mu;
+    const tMersenne = 4 * lengthM * lengthM * safeTargetHz * safeTargetHz * mu;
+    const tBendCorr = (Math.pow(Math.PI, 3) * E * Math.pow(r, 4)) / (4 * lengthM * lengthM);
+    return tMersenne - tBendCorr;
   };
 
   let tensionN = computeTension(diameterMm);
   const areaOf = (dMm: number) => Math.PI * Math.pow(dMm / 2000, 2);
   const maxSafeStressPa = mat.ultimateStrengthMPa * 1e6 * 0.65;
 
-  if (tensionN / areaOf(diameterMm) > maxSafeStressPa || tensionN < 12 || tensionN > 140) {
-    const targetT = Math.min(85, Math.max(18, 48));
-    const idealMu = targetT / (4 * lengthM * lengthM * targetHz * targetHz);
+  if (
+    tensionN <= 0 ||
+    tensionN / areaOf(diameterMm) > maxSafeStressPa ||
+    tensionN < 12 ||
+    tensionN > 140
+  ) {
+    const targetT = Math.min(85, Math.max(18, lengthM < 0.22 ? 220 * lengthM : 48));
+    const idealMu = targetT / (4 * lengthM * lengthM * safeTargetHz * safeTargetHz);
     const idealR = Math.sqrt(idealMu / (mat.densityKgM3 * Math.PI));
     diameterMm = +Math.max(0.20, Math.min(2.45, idealR * 2000)).toFixed(2);
     tensionN = computeTension(diameterMm);
+    if (tensionN < 2) {
+      diameterMm = +Math.max(0.14, diameterMm * 0.65).toFixed(2);
+      tensionN = Math.max(2, computeTension(diameterMm));
+    }
   }
 
   const cleanTension = +Math.max(2, Math.min(280, tensionN)).toFixed(2);
   const kTransverse = +(4 * cleanTension / lengthM).toFixed(1);
   const visRadiusM = +Math.max(0.0009, (diameterMm / 2000) * 1.8).toFixed(5);
 
-  const nextGeoms = (node.geoms ?? []).map((g, idx) =>
-    idx === 0 && (g.type === 'capsule' || g.type === 'cylinder')
+  const prepared =
+    !seededNode.joints?.length || (seededNode.joints.length === 1 && seededNode.joints[0].type === 'free')
+      ? ensureTautStringJointAndContact({
+          ...seededNode,
+          acousticString: { ...cur, material: mat.id, diameterMm, tensionN: cleanTension },
+        })
+      : seededNode;
+
+  const primaryWire = findPrimaryWireGeom(prepared);
+  const nextGeoms = (prepared.geoms ?? []).map((g) =>
+    g === primaryWire && (g.type === 'capsule' || g.type === 'cylinder')
       ? { ...g, size: [visRadiusM, ...g.size.slice(1)], rgba: [...mat.rgba] }
       : { ...g },
   );
 
-  const nextJoints = (node.joints ?? []).map((j, idx) =>
+  const nextJoints = (prepared.joints ?? []).map((j, idx) =>
     idx === 0 && j.type === 'slide'
       ? {
           ...j,
@@ -1179,12 +1951,13 @@ export function tuneStringToPitch(node: SceneNode, targetHz: number): SceneNode 
   );
 
   return {
-    ...node,
+    ...prepared,
     geoms: nextGeoms,
     joints: nextJoints,
-    tunedPitchHz: +targetHz.toFixed(2),
+    tunedPitchHz: +safeTargetHz.toFixed(2),
     acousticString: {
       ...cur,
+      material: mat.id,
       diameterMm,
       tensionN: cleanTension,
     },
@@ -1229,8 +2002,7 @@ export function buildMountedStringsForBody(
   const zHeight = +(topZ + 0.008).toFixed(5);
 
   const freqs = opts.notes ?? [261.63, 293.66, 329.63, 392.00];
-  const material = opts.material ?? 'bronze';
-  const mat = STRING_MATERIALS[material];
+  const mat = resolveStringMaterial(opts.material ?? 'bronze');
   const existingCount = (hostNode.children ?? []).filter((c) => !!c.acousticString).length;
 
   return freqs.map((hz, i) => {
@@ -1276,7 +2048,7 @@ export function buildMountedStringsForBody(
         },
       ],
       acousticString: {
-        material,
+        material: mat.id,
         diameterMm: 0.65,
         tensionN: 50,
         pluckPos: opts.pluckPos ?? 0.18,
