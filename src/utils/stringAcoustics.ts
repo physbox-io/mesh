@@ -35,7 +35,15 @@ import {
   type BodyModalProfile,
   type ModalVoice,
 } from './modalAudio';
-import { analyze3DCavityAndPorts, analyze3DSolidCrossSections } from './solidAcoustics3D';
+import {
+  analyze3DCavityAndPorts,
+  analyze3DSolidCrossSections,
+  buildBodyRayScene,
+  castSceneRay,
+  simulate3DVibroAcousticIR,
+  type BodyRayScene,
+  type VibroAcousticIRResult,
+} from './solidAcoustics3D';
 
 const SPEED_OF_SOUND_AIR = 343; // m/s at 20 °C
 
@@ -110,6 +118,10 @@ export interface SoundboxResonance {
   topPlateHz: number;
   /** Secondary body / back-plate resonance (Hz). */
   bodyModeHz: number;
+  /** Acoustic baffle/dipole interference frequency c_air / (2.1 * W_bout) from measured 3D bout width (Hz). */
+  dipoleCancelHz: number;
+  /** Dipole interference valley depth (dB; 0 for solid unhollowed blocks!). */
+  dipoleCancelDb: number;
   /** Acoustic radiation efficiency multiplier (derived from Skudrzyk plate point-admittance & porting). */
   radiationGain: number;
 }
@@ -153,10 +165,20 @@ export interface BowedStringVoice {
   pitchHz: number;
   amplitude: number;
   harmonicWeights: number[];
+  /** Pure Helmholtz/Cremer stick-slip string harmonics before body convolution! */
+  stringHarmonicWeights: number[];
+  /** Simulated 48 kHz 3D vibro-acoustic impulse response of the coupled body + cavity + bridge! */
+  bodyIr: Float32Array<ArrayBuffer> | null;
+  bodyIrSig: string;
   bodyFormantHz: number;
   bodyFormantGainDb: number;
   bodyFormantQ: number;
   secondaryFormantHz: number;
+  woodModeHz: number;
+  dipoleCancelHz: number;
+  dipoleCancelDb: number;
+  bridgeHillHz: number;
+  bridgeHillGainDb: number;
   lowpassHz: number;
   rosinNoiseGain: number;
   rosinCenterHz: number;
@@ -301,6 +323,12 @@ export function analyzeSoundboxResonance(host: SceneNode): SoundboxResonance {
 
   const radiationGain = +(baseEnclosureGain * (hasHollowCavity ? admittanceScale : 1.0)).toFixed(3);
 
+  // 4. Acoustic baffle/dipole interference across measured 3D bout width W_bout (`cav.plateSpanAM`):
+  //    Hollow boxes exhibit front/port/back phase cancellation around c_air / (1.85 * W_bout); solid blocks have 0 dB!
+  const boutWidthM = Math.max(0.05, cav.plateSpanAM);
+  const dipoleCancelHz = +Math.max(380, Math.min(1800, SPEED_OF_SOUND_AIR / (1.85 * boutWidthM))).toFixed(1);
+  const dipoleCancelDb = hasHollowCavity ? (helmholtzHz !== null ? -3.6 : -2.0) : 0;
+
   return {
     hostNodeId: host.id,
     hostName: host.name || host.id,
@@ -314,6 +342,8 @@ export function analyzeSoundboxResonance(host: SceneNode): SoundboxResonance {
     helmholtzQ,
     topPlateHz,
     bodyModeHz,
+    dipoleCancelHz,
+    dipoleCancelDb,
     radiationGain,
   };
 }
@@ -354,9 +384,253 @@ export function resolveStringBetaFromPoint(node: SceneNode, localPoint?: [number
   return Math.max(0.03, Math.min(0.5, frac ?? node.acousticString?.pluckPos ?? 0.12));
 }
 
-function resolveCoupledSoundbox(node: SceneNode, sceneNodes?: SceneNode[]): SoundboxResonance | null {
+const hostRaySceneCache = new WeakMap<
+  SceneNode,
+  { geomsRef: SceneNode['geoms']; childrenRef: SceneNode['children']; sculptVersion: number | undefined; scene: BodyRayScene | null }
+>();
+
+function getCachedHostRayScene(host: SceneNode): BodyRayScene | null {
+  const hit = hostRaySceneCache.get(host);
+  if (
+    hit &&
+    hit.geomsRef === host.geoms &&
+    hit.childrenRef === host.children &&
+    hit.sculptVersion === host.sculptVersion
+  ) {
+    return hit.scene;
+  }
+  const scene = buildBodyRayScene(host, true);
+  hostRaySceneCache.set(host, {
+    geomsRef: host.geoms,
+    childrenRef: host.children,
+    sculptVersion: host.sculptVersion,
+    scene,
+  });
+  return scene;
+}
+
+interface PhysicalStringSupport {
+  /** Mechanical bridge/nut force-transmission coupling in [0, 1] (0 when floating disconnected in mid-air!). */
+  bridgeCoupling: number;
+  /** Fraction (0.25..1.0] of the wire length between actual solid bearing points (bridge & nut/fret). */
+  vibratingSpanFraction: number;
+  /** Distinct structural 3D bridge child body bearing under the string, if any. */
+  bridgeNode: SceneNode | null;
+  /** Exact 3D bearing point [x, y, z] in hostNode-local frame where this string drives the bridge/body! */
+  bridgeDrivePoint: [number, number, number];
+}
+
+function doesChildBearOnHost(child: SceneNode, hostScene: BodyRayScene): boolean {
+  const childScene = getCachedHostRayScene(child);
+  if (!childScene) return false;
+  const cx = child.pos?.[0] ?? 0;
+  const cy = child.pos?.[1] ?? 0;
+  const cz = child.pos?.[2] ?? 0;
+  const [bx0, bx1, by0, by1] = childScene.bounds;
+  for (let ix = 0; ix < 5; ix++) {
+    const lx = bx0 + ((bx1 - bx0) * (ix + 0.5)) / 5;
+    for (let iy = 0; iy < 5; iy++) {
+      const ly = by0 + ((by1 - by0) * (iy + 0.5)) / 5;
+      const cIvs = castSceneRay(childScene, lx, ly, 0, 0, 0, 1);
+      if (cIvs.length === 0) continue;
+      const hIvs = castSceneRay(hostScene, cx + lx, cy + ly, 0, 0, 0, 1);
+      for (const [ca, cb] of cIvs) {
+        const za = cz + ca;
+        const zb = cz + cb;
+        for (const [ha, hb] of hIvs) {
+          const gap = zb < ha ? ha - zb : za > hb ? za - hb : 0;
+          if (gap <= 0.006) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Verifies 3D mechanical contact between a string's terminations and its host
+ * resonator body (`buildBodyRayScene`, ignoring `role: 'visual'` props, plus any
+ * welded static bridge/neck subassemblies that themselves physically bear on `hostNode`!):
+ * - If a string floats disconnected in space (`gap > 18 mm` at either end), `bridgeCoupling`
+ *   drops to `0` (an unbridged floating wire cannot drive a soundboard!).
+ * - If solid bridge/nut saddles bear against the wire inside its span, `vibratingSpanFraction`
+ *   measures the exact free vibrating scale between those solid bearing edges!
+ */
+function measurePhysicalStringSupport(
+  stringNode: SceneNode,
+  hostNode: SceneNode,
+  sceneNodes?: SceneNode[],
+): PhysicalStringSupport {
+  const hostScene = getCachedHostRayScene(hostNode);
+  if (!hostScene) {
+    return { bridgeCoupling: 0, vibratingSpanFraction: 1.0, bridgeNode: null, bridgeDrivePoint: [0, 0, 0] };
+  }
+
+  const g = (stringNode.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
+  if (!g) {
+    return { bridgeCoupling: 0, vibratingSpanFraction: 1.0, bridgeNode: null, bridgeDrivePoint: [0, 0, 0] };
+  }
+
+  // Include welded static structural attachments (e.g. Arched Maple Bridge, Mortised Neck & Nut)
+  // ONLY if they physically bear on `hostNode` (lifting a bridge into mid-air breaks coupling!).
+  const supportScenes: { scene: BodyRayScene; ox: number; oy: number; oz: number; childNode: SceneNode | null }[] = [
+    { scene: hostScene, ox: 0, oy: 0, oz: 0, childNode: null },
+  ];
+  for (const child of hostNode.children ?? []) {
+    if (child.id === stringNode.id || child.acousticString) continue;
+    if ((child.joints?.length ?? 0) > 0) continue;
+    const cScene = getCachedHostRayScene(child);
+    if (cScene && doesChildBearOnHost(child, hostScene)) {
+      supportScenes.push({
+        scene: cScene,
+        ox: child.pos?.[0] ?? 0,
+        oy: child.pos?.[1] ?? 0,
+        oz: child.pos?.[2] ?? 0,
+        childNode: child,
+      });
+    }
+  }
+
+  const isDirectChild = (hostNode.children ?? []).some((c) => c.id === stringNode.id);
+  const sx = isDirectChild ? (stringNode.pos?.[0] ?? 0) : (stringNode.pos?.[0] ?? 0) - (hostNode.pos?.[0] ?? 0);
+  const sy = isDirectChild ? (stringNode.pos?.[1] ?? 0) : (stringNode.pos?.[1] ?? 0) - (hostNode.pos?.[1] ?? 0);
+  const sz = isDirectChild ? (stringNode.pos?.[2] ?? 0) : (stringNode.pos?.[2] ?? 0) - (hostNode.pos?.[2] ?? 0);
+  void sceneNodes;
+
+  let p0: [number, number, number];
+  let p1: [number, number, number];
+  const wireR = Math.max(0.0005, g.size[0] ?? 0.001);
+  if (g.fromto && g.fromto.length >= 6) {
+    p0 = [sx + g.fromto[0], sy + g.fromto[1], sz + g.fromto[2]];
+    p1 = [sx + g.fromto[3], sy + g.fromto[4], sz + g.fromto[5]];
+  } else {
+    const halfL = g.size[1] ?? 0.15;
+    p0 = [sx + (g.pos?.[0] ?? 0), sy + (g.pos?.[1] ?? 0) - halfL, sz + (g.pos?.[2] ?? 0)];
+    p1 = [sx + (g.pos?.[0] ?? 0), sy + (g.pos?.[1] ?? 0) + halfL, sz + (g.pos?.[2] ?? 0)];
+  }
+
+  const spanLen = Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+  const nStations = Math.max(48, Math.min(200, Math.ceil(spanLen / 0.004)));
+  const gaps = new Float64Array(nStations + 1);
+  let bridgeNode: SceneNode | null = null;
+  let bestBridgeGap = 0.004;
+  let bridgeDrivePoint: [number, number, number] = [...p0];
+  for (let k = 0; k <= nStations; k++) {
+    const s = k / nStations;
+    const x = p0[0] + (p1[0] - p0[0]) * s;
+    const y = p0[1] + (p1[1] - p0[1]) * s;
+    const z = p0[2] + (p1[2] - p0[2]) * s;
+
+    // Measure vertical Z gap + lateral X gap to nearest solid geom across hostNode & welded bridges/nuts
+    let minDist = Infinity;
+    let hitChild: SceneNode | null = null;
+    for (let si = 0; si < supportScenes.length; si++) {
+      const { scene, ox, oy, oz, childNode } = supportScenes[si];
+      const lx = x - ox;
+      const ly = y - oy;
+      const lz = z - oz;
+      const zIvs = castSceneRay(scene, lx, ly, 0, 0, 0, 1);
+      for (const [za, zb] of zIvs) {
+        const d = lz < za ? za - lz : lz > zb ? lz - zb : 0;
+        if (d < minDist) {
+          minDist = d;
+          hitChild = childNode;
+        }
+      }
+      if (minDist > 0.004) {
+        const xIvs = castSceneRay(scene, 0, ly, lz, 1, 0, 0);
+        for (const [xa, xb] of xIvs) {
+          const d = lx < xa ? xa - lx : lx > xb ? lx - xb : 0;
+          if (d < minDist) {
+            minDist = d;
+            hitChild = childNode;
+          }
+        }
+      }
+    }
+    const gap = Math.max(0, minDist - wireR);
+    gaps[k] = gap;
+    if (s <= 0.45 && gap <= bestBridgeGap) {
+      bestBridgeGap = gap;
+      bridgeDrivePoint = [x, y, z];
+      if (hitChild) bridgeNode = hitChild;
+    }
+  }
+
+  let endGapLo = Infinity;
+  let endGapHi = Infinity;
+  let interiorTouchLo = Infinity;
+  let interiorTouchHi = Infinity;
+  let maxMidGap = 0;
+  let sLoTouch = -1;
+  let sHiTouch = -1;
+
+  for (let k = 0; k <= nStations; k++) {
+    const s = k / nStations;
+    const gap = gaps[k];
+    if (s <= 0.08) {
+      if (gap < endGapLo) endGapLo = gap;
+    }
+    if (s >= 0.92) {
+      if (gap < endGapHi) endGapHi = gap;
+    }
+    if (s <= 0.45) {
+      if (gap <= 0.0038) {
+        sLoTouch = s;
+        if (gap < interiorTouchLo) interiorTouchLo = gap;
+      }
+    } else if (s >= 0.55) {
+      if (gap <= 0.0038) {
+        if (sHiTouch < 0) sHiTouch = s;
+        if (gap < interiorTouchHi) interiorTouchHi = gap;
+      }
+    } else if (gap > maxMidGap) {
+      maxMidGap = gap;
+    }
+  }
+
+  // Each half of the string must either anchor near the body at its end (`s <= 0.08` / `s >= 0.92`,
+  // <= 9 mm full coupling, 0 beyond 18 mm) OR bear directly (`gap <= 3.8 mm`) on a movable interior bridge/nut!
+  const effGapLo = Math.min(endGapLo, interiorTouchLo);
+  const effGapHi = Math.min(endGapHi, interiorTouchHi);
+  const cLo = Math.max(0, Math.min(1, (0.018 - effGapLo) / 0.009));
+  const cHi = Math.max(0, Math.min(1, (0.018 - effGapHi) / 0.009));
+  const bridgeCoupling = +(cLo * cHi).toFixed(3);
+
+  let vibratingSpanFraction = 1.0;
+  if (maxMidGap > 0.0045 && (sLoTouch >= 0 || sHiTouch >= 0)) {
+    const effLo = sLoTouch >= 0 ? sLoTouch : 0.0;
+    const effHi = sHiTouch >= 0 ? sHiTouch : 1.0;
+    if (effHi - effLo >= 0.35 && effHi - effLo < 0.985) {
+      vibratingSpanFraction = +(effHi - effLo).toFixed(4);
+    }
+  }
+
+  return { bridgeCoupling, vibratingSpanFraction, bridgeNode, bridgeDrivePoint };
+}
+
+function resolveCoupledSoundboxAndSpan(
+  node: SceneNode,
+  sceneNodes?: SceneNode[],
+): {
+  soundbox: SoundboxResonance | null;
+  bridgeCoupling: number;
+  vibratingSpanFraction: number;
+  bridgeHillHz: number;
+  bridgeHillGainDb: number;
+  vibroIr: VibroAcousticIRResult | null;
+} {
   const spec = node.acousticString;
-  if (!spec || !sceneNodes?.length) return null;
+  if (!spec || !sceneNodes?.length) {
+    return {
+      soundbox: null,
+      bridgeCoupling: 0,
+      vibratingSpanFraction: 1.0,
+      bridgeHillHz: 2000,
+      bridgeHillGainDb: 0,
+      vibroIr: null,
+    };
+  }
   let resonatorNode: SceneNode | null = null;
   if (spec.resonatorNodeId) {
     resonatorNode = findById(sceneNodes, spec.resonatorNodeId);
@@ -364,9 +638,73 @@ function resolveCoupledSoundbox(node: SceneNode, sceneNodes?: SceneNode[]): Soun
   if (!resonatorNode) {
     resonatorNode = findParentOf(sceneNodes, node.id);
   }
-  return resonatorNode && !resonatorNode.acousticString
-    ? getCachedSoundboxResonance(resonatorNode)
-    : null;
+  if (!resonatorNode || resonatorNode.acousticString) {
+    return {
+      soundbox: null,
+      bridgeCoupling: 0,
+      vibratingSpanFraction: 1.0,
+      bridgeHillHz: 2000,
+      bridgeHillGainDb: 0,
+      vibroIr: null,
+    };
+  }
+
+  const support = measurePhysicalStringSupport(node, resonatorNode, sceneNodes);
+  if (support.bridgeCoupling <= 0.02) {
+    // Floating string disconnected from bridge/nut: zero mechanical coupling to soundbox!
+    return {
+      soundbox: null,
+      bridgeCoupling: 0,
+      vibratingSpanFraction: 1.0,
+      bridgeHillHz: 2000,
+      bridgeHillGainDb: 0,
+      vibroIr: null,
+    };
+  }
+
+  // Solve actual 3D solid eigenmodes of the standing bridge (`support.bridgeNode`) if present!
+  let bridgeHillHz = 2000;
+  let bridgeHillGainDb = 0;
+  if (support.bridgeNode) {
+    const bridgeModes = estimateBodyModes(support.bridgeNode);
+    bridgeHillHz = +Math.max(350, Math.min(5500, bridgeModes.fundamentalHz)).toFixed(1);
+    bridgeHillGainDb = +(Math.min(5.2, 1.2 + 7.5 * bridgeModes.material.brightness) * support.bridgeCoupling).toFixed(2);
+  }
+
+  // Run (cached ~4 ms) 3D coupled FDTD air-cavity + Kirchhoff shell impulse-response simulation
+  // injecting force right at this string's 3D bridge bearing point!
+  const hostMat = inferAcousticMaterial(resonatorNode);
+  const bMat = support.bridgeNode ? inferAcousticMaterial(support.bridgeNode) : null;
+  const vibroIr = simulate3DVibroAcousticIR(
+    resonatorNode,
+    hostMat,
+    support.bridgeNode,
+    bMat,
+    support.bridgeDrivePoint,
+  );
+
+  const baseRes = getCachedSoundboxResonance(resonatorNode);
+  if (support.bridgeCoupling >= 0.98) {
+    return {
+      soundbox: baseRes,
+      bridgeCoupling: support.bridgeCoupling,
+      vibratingSpanFraction: support.vibratingSpanFraction,
+      bridgeHillHz,
+      bridgeHillGainDb,
+      vibroIr,
+    };
+  }
+  return {
+    soundbox: {
+      ...baseRes,
+      radiationGain: +(0.22 + (baseRes.radiationGain - 0.22) * support.bridgeCoupling).toFixed(3),
+    },
+    bridgeCoupling: support.bridgeCoupling,
+    vibratingSpanFraction: support.vibratingSpanFraction,
+    bridgeHillHz,
+    bridgeHillGainDb,
+    vibroIr,
+  };
 }
 
 /**
@@ -386,11 +724,19 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
       active: false,
       pitchHz: 220,
       amplitude: 0,
-      harmonicWeights: new Array<number>(20).fill(0),
+      harmonicWeights: new Array<number>(24).fill(0),
+      stringHarmonicWeights: new Array<number>(24).fill(0),
+      bodyIr: null,
+      bodyIrSig: '',
       bodyFormantHz: 220,
       bodyFormantGainDb: 0,
       bodyFormantQ: 1.4,
       secondaryFormantHz: 480,
+      woodModeHz: 680,
+      dipoleCancelHz: 750,
+      dipoleCancelDb: 0,
+      bridgeHillHz: 2000,
+      bridgeHillGainDb: 0,
       lowpassHz: 1800,
       rosinNoiseGain: 0,
       rosinCenterHz: 1400,
@@ -402,7 +748,9 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
   }
 
   const mat = STRING_MATERIALS[spec.material] ?? STRING_MATERIALS.steel;
-  const openLengthM = measureStringLengthM(node);
+  const coupled = resolveCoupledSoundboxAndSpan(node, sceneNodes);
+  const soundbox = coupled.soundbox;
+  const openLengthM = measureStringLengthM(node) * coupled.vibratingSpanFraction;
   const stopFrac =
     input.stoppedLengthFraction !== undefined && Number.isFinite(input.stoppedLengthFraction)
       ? Math.max(0.25, Math.min(1.0, input.stoppedLengthFraction))
@@ -430,7 +778,6 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
   const fMin = +((0.042 * waveImpedanceZ0 * vBow) / (beta * beta)).toFixed(6);
   const fMax = +((4.6 * waveImpedanceZ0 * vBow) / beta).toFixed(6);
 
-  const soundbox = resolveCoupledSoundbox(node, sceneNodes);
   const bodyFormantHz = soundbox
     ? +(soundbox.helmholtzHz ?? soundbox.topPlateHz).toFixed(1)
     : +Math.max(160, pitchHz * 1.75).toFixed(1);
@@ -443,17 +790,36 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
   const secondaryFormantHz = soundbox
     ? +(soundbox.helmholtzHz !== null ? soundbox.topPlateHz : soundbox.bodyModeHz).toFixed(1)
     : +Math.max(380, pitchHz * 3.1).toFixed(1);
+  const woodModeHz = soundbox
+    ? +soundbox.bodyModeHz.toFixed(1)
+    : +Math.max(540, pitchHz * 4.5).toFixed(1);
+  const dipoleCancelHz = soundbox ? soundbox.dipoleCancelHz : 800;
+  const dipoleCancelDb = soundbox ? soundbox.dipoleCancelDb : 0;
+  const bridgeHillHz = coupled.bridgeHillHz;
+  const bridgeHillGainDb = coupled.bridgeHillGainDb;
+
+  const vibroIr = coupled.vibroIr;
+  const bodyIr = vibroIr?.ir ?? null;
+  const bodyIrSig = vibroIr?.signature ?? '';
 
   if (vBow < 0.008 || forceN < 0.015) {
     return {
       active: false,
       pitchHz,
       amplitude: 0,
-      harmonicWeights: new Array<number>(20).fill(0),
+      harmonicWeights: new Array<number>(24).fill(0),
+      stringHarmonicWeights: new Array<number>(24).fill(0),
+      bodyIr,
+      bodyIrSig,
       bodyFormantHz,
       bodyFormantGainDb,
       bodyFormantQ,
       secondaryFormantHz,
+      woodModeHz,
+      dipoleCancelHz,
+      dipoleCancelDb,
+      bridgeHillHz,
+      bridgeHillGainDb,
       lowpassHz: 1500,
       rosinNoiseGain: 0,
       rosinCenterHz: 1400,
@@ -474,18 +840,20 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
   const overPress = forceN > fMax ? Math.min(1.6, (forceN - fMax) / Math.max(0.02, fMax)) : 0;
   const underPress = forceN < fMin ? Math.max(0, Math.min(1, 1 - forceN / Math.max(1e-5, fMin))) : 0;
 
-  // Cremer corner-rounding decay: lighter bow pressure rounds the stick-slip corner (warmer, softer upper partials);
-  // firmer bow pressure sharpens the release into a richer, brighter harmonic core.
-  const cornerDecay = (0.165 / Math.pow(contactPressure, 0.62)) * (1.18 - 0.30 * mat.brightness);
+  // Cremer corner-rounding + viscoelastic internal damping (higher-frequency gut modes round slightly more!)
+  const freqVisco = 1 + Math.max(0, (pitchHz - 110) / 380) * (1.15 - 0.8 * mat.brightness);
+  const cornerDecay = (0.052 / Math.pow(contactPressure, 0.55)) * (1.12 - 0.24 * mat.brightness) * freqVisco;
   const ribbonWidthM = Math.max(0.0015, Math.min(effectiveLengthM * 0.20, input.bowRibbonWidthM ?? 0.009));
   const ponticelloExp = Math.max(-0.46, Math.min(0.42, (0.38 * (0.13 - beta)) / 0.10));
 
-  const nHarmonics = 20;
+  const nHarmonics = 24;
   const harmonicWeights: number[] = new Array<number>(nHarmonics);
+  const stringHarmonicWeights: number[] = new Array<number>(nHarmonics);
   for (let n = 1; n <= nHarmonics; n++) {
     const fn = n * pitchHz;
     if (fn > 18500) {
       harmonicWeights[n - 1] = 0;
+      stringHarmonicWeights[n - 1] = 0;
       continue;
     }
 
@@ -501,32 +869,42 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
     const uRibbon = (n * Math.PI * ribbonWidthM) / Math.max(0.025, effectiveLengthM);
     const ribbonSinc = uRibbon < 1e-3 ? 1.0 : Math.max(0.05, Math.abs(Math.sin(uRibbon) / uRibbon));
 
-    // 4. Exact 3D Soundbox Transfer Function H_box(n * f0)
-    let boxGain = 0.44;
+    // Raucous over-pressing adds gritty odd/upper partial crunch
+    const raucousBoost = overPress > 0 && n >= 3 ? 1 + 0.35 * overPress * (n % 2 === 1 ? 1.0 : 0.6) : 1.0;
+
+    // Pure string Helmholtz stick-slip harmonics (fed directly into the 3D Vibro-Acoustic ConvolverNode!)
+    const pureStrW = (1 / n) * cornerRoll * bowComb * ponticelloTilt * ribbonSinc * raucousBoost;
+    stringHarmonicWeights[n - 1] = +Math.min(1.6, pureStrW).toFixed(4);
+
+    // Diagnostic / fallback composite weights
+    let boxGain = 0.50;
     if (soundbox) {
-      let boxH = resonatorTransferGain(fn, soundbox.topPlateHz, 8.5, 4.6);
-      boxH *= resonatorTransferGain(fn, soundbox.bodyModeHz, 10.0, 2.8);
+      let boxH = resonatorTransferGain(fn, soundbox.topPlateHz, 7.5, 2.0);
+      boxH *= resonatorTransferGain(fn, soundbox.bodyModeHz, 8.5, 1.5);
+      if (bridgeHillGainDb > 0.1) {
+        boxH *= resonatorTransferGain(fn, bridgeHillHz, 3.0, bridgeHillGainDb * 0.45);
+      }
       if (soundbox.helmholtzHz !== null) {
-        boxH *= resonatorTransferGain(fn, soundbox.helmholtzHz, soundbox.helmholtzQ, 6.2);
-        // Below Helmholtz air resonance f_H, ported soundboxes cancel as an acoustic dipole (~f^2 high-pass)
-        if (fn < soundbox.helmholtzHz * 0.82) {
-          const ratio = fn / (soundbox.helmholtzHz * 0.82);
-          boxH *= 0.24 + 0.76 * ratio * ratio;
+        boxH *= resonatorTransferGain(fn, soundbox.helmholtzHz, soundbox.helmholtzQ, 3.2);
+        if (fn < soundbox.helmholtzHz * 0.80) {
+          const ratio = fn / (soundbox.helmholtzHz * 0.80);
+          boxH *= 0.45 + 0.55 * ratio * ratio;
         }
       } else if (soundbox.hasHollowCavity && fn < soundbox.topPlateHz * 0.85) {
         const ratio = fn / (soundbox.topPlateHz * 0.85);
-        boxH *= 0.42 + 0.58 * ratio * ratio;
+        boxH *= 0.52 + 0.48 * ratio * ratio;
       }
-      boxGain = Math.min(2.6, boxH * 0.52 * soundbox.radiationGain);
+      boxGain = Math.min(2.1, boxH * 0.62 * soundbox.radiationGain);
     }
-
-    // Raucous over-pressing adds gritty odd/upper partial crunch
-    const raucousBoost = overPress > 0 && n >= 3 ? 1 + 0.35 * overPress * (n % 2 === 1 ? 1.0 : 0.6) : 1.0;
-    const rawW = (1 / n) * cornerRoll * bowComb * ponticelloTilt * ribbonSinc * boxGain * raucousBoost;
-    harmonicWeights[n - 1] = +Math.min(1.6, rawW).toFixed(4);
+    harmonicWeights[n - 1] = +Math.min(1.6, pureStrW * boxGain).toFixed(4);
   }
 
-  const radGain = soundbox ? soundbox.radiationGain : 0.42;
+  // Blend analytical Skudrzyk radiation gain with measured 3D FDTD radiation RMS efficiency!
+  const radGain = soundbox
+    ? vibroIr
+      ? 0.55 * soundbox.radiationGain + 0.45 * vibroIr.radiationGain
+      : soundbox.radiationGain
+    : 0.34;
   // Transverse Helmholtz string velocity scales with v_bow / beta; saturates musically at fortissimo
   const effVelocityDrive = Math.tanh((vBow / Math.max(0.055, Math.sqrt(beta * 0.12))) * 0.95);
   const lockEfficiency =
@@ -535,22 +913,27 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
       : regime === 'raucous'
         ? Math.max(0.65, 1.05 - 0.18 * overPress)
         : 0.92 + 0.14 * Math.min(1, Math.log10(1 + pressureRatio));
-  const amplitude = +Math.min(0.40, 0.28 * effVelocityDrive * lockEfficiency * Math.min(1.45, radGain)).toFixed(4);
+  const amplitude = +Math.min(0.44, 0.33 * effVelocityDrive * lockEfficiency * Math.min(1.45, radGain)).toFixed(4);
 
-  // Bow-pressure and beta-dependent lowpass cutoff
-  const baseCutoff = pitchHz * (4.8 + 4.2 * Math.min(2.2, pressureRatio) + (0.20 - Math.min(0.20, beta)) * 18);
-  const lowpassHz = +Math.max(850, Math.min(7200, baseCutoff * (0.72 + 0.36 * mat.brightness))).toFixed(1);
+  // Sub-linear frequency scaling (`1550 + 3.4 * pitchHz`) models viscoelastic gut/wood damping so higher
+  // strings (`D3, A3, B3`) stay round & velvety (~2.3-2.6 kHz) rather than turning thin or fizzy!
+  const baseCutoff =
+    1480 +
+    pitchHz * (2.6 + 2.8 * mat.brightness) +
+    620 * Math.min(2.2, pressureRatio) +
+    (0.20 - Math.min(0.20, beta)) * 3400;
+  const lowpassHz = +Math.max(1450, Math.min(5400, baseCutoff * (0.78 + 0.26 * mat.brightness))).toFixed(1);
 
-  // Horsehair rosin stick-slip friction noise: silky sheen in Helmholtz lock, airy skate in flautando, gritty crunch in raucous!
-  const speedSheen = Math.min(1, vBow / 0.32);
+  // Clean horsehair rosin whisper (attenuated gently on higher strings so cantabile A-string stays pure)
+  const speedSheen = Math.min(1, vBow / 0.28);
+  const highStrTame = 1 / Math.sqrt(Math.max(1, pitchHz / 110));
   const rosinRaw =
-    0.0045 * speedSheen +
-    0.011 * underPress * speedSheen +
+    (0.0055 * speedSheen + 0.012 * underPress * speedSheen) * highStrTame +
     0.048 * overPress * (0.4 + 0.6 * speedSheen);
   const rosinNoiseGain = +Math.min(0.085, rosinRaw).toFixed(4);
   const rosinCenterHz = +Math.max(
-    880,
-    Math.min(4400, pitchHz * (4.0 + 3.0 * ((0.22 - Math.min(0.22, beta)) / 0.22)) + 450 * overPress),
+    1450,
+    Math.min(4000, (bridgeHillGainDb > 0 ? bridgeHillHz : 1900) + 650 * ((0.22 - Math.min(0.22, beta)) / 0.22) + 420 * overPress),
   ).toFixed(1);
 
   return {
@@ -558,10 +941,18 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
     pitchHz,
     amplitude,
     harmonicWeights,
+    stringHarmonicWeights,
+    bodyIr,
+    bodyIrSig,
     bodyFormantHz,
     bodyFormantGainDb,
     bodyFormantQ,
     secondaryFormantHz,
+    woodModeHz,
+    dipoleCancelHz,
+    dipoleCancelDb,
+    bridgeHillHz,
+    bridgeHillGainDb,
     lowpassHz,
     rosinNoiseGain,
     rosinCenterHz,
@@ -585,7 +976,9 @@ export function evaluateTautString(
   if (!spec) return null;
 
   const mat = STRING_MATERIALS[spec.material] ?? STRING_MATERIALS.steel;
-  const lengthM = measureStringLengthM(node);
+  const coupled = resolveCoupledSoundboxAndSpan(node, sceneNodes);
+  const soundbox = coupled.soundbox;
+  const lengthM = measureStringLengthM(node) * coupled.vibratingSpanFraction;
   const radiusM = Math.max(0.00006, (spec.diameterMm || 0.5) / 2000);
   const areaM2 = Math.PI * radiusM * radiusM;
   const linearDensityKgM = mat.densityKgM3 * areaM2;
@@ -605,6 +998,9 @@ export function evaluateTautString(
   const transverseStiffnessNm = (4 * tensionN) / lengthM;
 
   const warnings: string[] = [];
+  if (sceneNodes?.length && coupled.bridgeCoupling <= 0.02) {
+    warnings.push('String is floating without mechanical bridge/nut contact — uncoupled from soundbox.');
+  }
   if (stressRatio >= 0.95) {
     warnings.push(
       `String tension (${tensileStressMPa.toFixed(0)} MPa) exceeds ${mat.label} breaking strength (${mat.ultimateStrengthMPa} MPa) — use a thinner gauge or shorter scale length!`,
@@ -618,10 +1014,7 @@ export function evaluateTautString(
     warnings.push('Very low string tension (< 8 N) — string will buzz with weak bridge drive.');
   }
 
-  // 4. Resolve coupled soundbox body (explicit resonatorNodeId, or parent body in scene tree)
-  const soundbox = resolveCoupledSoundbox(node, sceneNodes);
-
-  // 5. Determine actual pluck position & plectrum contact width/stiffness!
+  // 4. Determine actual pluck position & plectrum contact width/stiffness!
   const dynamicPluck = impactCtx?.localPoint
     ? resolvePluckFractionFromPoint(node, impactCtx.localPoint)
     : null;
@@ -716,6 +1109,8 @@ export function evaluateTautString(
     contactDurationSec: contactTauSec,
     modes,
     radiatingWidthM: soundbox ? 0.12 : 0.016,
+    bodyIr: coupled.vibroIr?.ir ?? null,
+    bodyIrSig: coupled.vibroIr?.signature ?? '',
   };
 
   return {
@@ -757,7 +1152,7 @@ export function tuneStringToPitch(node: SceneNode, targetHz: number): SceneNode 
     const targetT = Math.min(85, Math.max(18, 48));
     const idealMu = targetT / (4 * lengthM * lengthM * targetHz * targetHz);
     const idealR = Math.sqrt(idealMu / (mat.densityKgM3 * Math.PI));
-    diameterMm = +Math.max(0.20, Math.min(1.65, idealR * 2000)).toFixed(2);
+    diameterMm = +Math.max(0.20, Math.min(2.45, idealR * 2000)).toFixed(2);
     tensionN = computeTension(diameterMm);
   }
 

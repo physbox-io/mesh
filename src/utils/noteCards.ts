@@ -711,17 +711,17 @@ Five **80/20 bronze strings** (**C4–D4–E4–G4–A4**) stretched across a ho
 
   bowed_cello: `# 🎻 Bowed Cello Automaton (Bach Suite No. 1)
 
-An **80 g Pernambuco & horsehair bow** on a concentric arched-bridge gimbal plays the opening arpeggio of **J.S. Bach's Cello Suite No. 1 in G Major (BWV 1007)** (**G3–D4–B4–A4–B4–D4–B4–D4**) across four taut strings over a hollowed **~8.2 L spruce & maple cello body** with **twin CSG f-holes**.
+An **80 g Pernambuco & horsehair bow** on a concentric arched-bridge gimbal plays the opening arpeggio of **J.S. Bach's Cello Suite No. 1 in G Major (BWV 1007)** (**G2–D3–B3–A3–B3–D3–B3–D3**) across four standard baritone cello strings (**C2–G2–D3–A3**) over a hollowed **~8.2 L spruce & maple cello body** with **twin CSG f-holes**, while a **3D left-hand finger** stops **B3** on the **A3** string.
 
 ## What is physical here
-- **Arched Bridge Geometry ($R = 92\\text{ mm}$)**: the four strings sit at $[-24^\\circ, -8^\\circ, +8^\\circ, +24^\\circ]$ around the bridge crown, so rocking the straight horsehair ribbon (\`bow_rock\`) physically selects one string at a time with $>2.7\\text{ mm}$ clearance to its neighbours!
-- **Helmholtz Stick-Slip & Schelleng Bow Wedge**: continuous bow sliding velocity $v_{\\text{bow}}$, normal rosin force $F_{\\text{bow}}$, and normalized bridge distance $\\beta = x_{\\text{bow}}/L$ govern *flautando* surface skate ($F < F_{\\min}$), warm Helmholtz sawtooth lock, and *raucous* rosin crunch ($F > F_{\\max}$).
-- **3D Corpus Transfer Function**: all 20 bowed harmonics filter through the hollowed body's **multi-port f-hole Helmholtz air mode** ($f_H$) and **4.5 mm spruce Kirchhoff soundboard mode** ($f_{\\text{top}}$).
+- **Complete 3D Load Path**: strings bear on the **arched ebony nut** ($y = +0.295\\text{ m}$) and the **standing arched maple bridge** ($R = 86\\text{ mm}$, $y = -0.045\\text{ m}$) planted on the **4.5 mm spruce belly**, while \`cello_finger_b3\` stops the **A3** wire at $8/9$ scale for **B3 (246.9 Hz)**.
+- **Helmholtz Stick-Slip & Schelleng Bow Wedge**: MuJoCo bow sliding speed $v_{\\text{bow}}$, normal rosin force $F_{\\text{bow}}$, and contact station $\\beta = x_{\\text{bow}}/L$ drive analytical Helmholtz/Cremer stick-slip harmonics.
+- **3D Vibro-Acoustic Impulse-Response Convolution**: Mesh runs a 48 kHz 3D coupled Kirchhoff-shell + FDTD air-cavity simulation directly on \`cello_soundbox\` + \`cello_bridge\` (including the CSG f-holes and 4.5 mm spruce belly) from each string's 3D bridge foot, loading the measured 85 ms impulse response into a WebAudio \`ConvolverNode\`.
 
 ## Try it
 - Turn on **Sound** in **⚙️ Environment** (top right) and press **Run**
-- Grab the **Pernambuco & Horsehair Bow** with your mouse while running to bow *sul ponticello* (near the bridge), *sul tasto* (over the fingerboard), or press harder into raucous rosin crunch
-- Select **Spruce & Maple Cello Body** and resize \`f_hole_left\` / \`f_hole_right\` or sculpt a new soundhole to hear the cello's woody formant shift live!`,
+- Grab **Left-Hand Stopping Finger (B3)** with your mouse and hold it off the A-string: all the **B3** notes drop to open **A3 (220 Hz)**!
+- Delete or slide **Arched Maple Bridge** (\`cello_bridge\`), or resize \`f_hole_left\` / \`f_hole_right\`, to hear bridge coupling and corpus formants respond live`,
 
   compliant_flexures: `# 🧬 Compliant Flexures & Snap Toggle
 

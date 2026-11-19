@@ -3722,7 +3722,7 @@ export const PRESETS = {
     name: 'Bowed Cello Automaton (Bach Suite No. 1)',
     emoji: '🎻',
     scene: bowedCelloPreset,
-    camera: { position: [0.34, -0.44, 0.30], target: [0, -0.02, 0.08] } satisfies PresetCamera,
+    camera: { position: [0.68, -0.76, 0.68], target: [0.02, 0.06, 0.22] } satisfies PresetCamera,
   },
   compliant_flexures: {
     name: 'Compliant Flexures & Snap Toggle',

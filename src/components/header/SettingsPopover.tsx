@@ -9,6 +9,7 @@ import { playModalImpact, unlockAudioContext } from '../../utils/modalAudio';
 import { useViewQuality } from '../../store/viewQualityStore';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
+import { DocsInfoButton } from '../docs/DocsInfoButton';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS } from '../../utils/llmSettings';
 import { useLlmSettings } from '../../hooks/useLlmSettings';
 
@@ -63,7 +64,10 @@ export function SettingsPopover() {
           </button>
         </div>
         <div className="flex items-center justify-between gap-2">
-          <span id="soundEnabledLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Physical modal impact audio, taut strings, and 1D wind/brass bore synthesis (muted by default).">Sound</span>
+          <span className="flex items-center gap-1.5">
+            <span id="soundEnabledLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="3D vibro-acoustic impulse responses, modal impacts, taut plucked/bowed strings, and wind/brass bore synthesis (muted by default).">Sound</span>
+            <DocsInfoButton tab="sound" />
+          </span>
           <button
             type="button"
             role="switch"
@@ -76,17 +80,21 @@ export function SettingsPopover() {
                 unlockAudioContext();
                 playModalImpact(
                   {
-                    fundamentalHz: 523.25,
-                    overtoneRatio: 2.76,
-                    regime: 'bar',
-                    material: { label: 'Hardwood', density: 720, modulusGPa: 12.5, qualityQ: 145, brightness: 0.55 },
-                    contactDurationSec: 0.0009,
+                    fundamentalHz: 1046.5,
+                    overtoneRatio: 2.32,
+                    regime: 'plate',
+                    material: { label: 'Crystal Glass', density: 2500, modulusGPa: 72, qualityQ: 1350, brightness: 0.80 },
+                    contactDurationSec: 0.00035,
                     modes: [
-                      { freqHz: 523.25, gain: 0.65, decaySec: 0.22 },
-                      { freqHz: 1442, gain: 0.28, decaySec: 0.12 },
+                      { freqHz: 1046.5, gain: 0.52, decaySec: 1.95 },
+                      { freqHz: 1048.1, gain: 0.24, decaySec: 1.80 },
+                      { freqHz: 2428.0, gain: 0.30, decaySec: 1.15 },
+                      { freqHz: 2430.6, gain: 0.12, decaySec: 1.05 },
+                      { freqHz: 4301.0, gain: 0.14, decaySec: 0.62 },
+                      { freqHz: 6551.0, gain: 0.06, decaySec: 0.34 },
                     ],
                   },
-                  0.08,
+                  0.22,
                 );
               }
               toggleSound();

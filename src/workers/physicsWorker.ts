@@ -1014,33 +1014,74 @@ interface BistableJointEntry {
   spec: FlexureSpec;
 }
 
+interface JointStopWatch {
+  qposAdrs: number[];
+  dofAdrs: number[];
+  isSlide: boolean;
+  lo: number;
+  hi: number;
+  movingNodeId: string;
+  movingBodyId: number;
+  jointNodeId: string;
+  hostNodeId: string;
+  state: 0 | 1 | 2;
+  initialized: boolean;
+  prevVel: number;
+}
+
 let cachedHydroByNodeId = new Map<string, HydroBodyModel>();
 let hydroByBodyId = new Map<number, HydroBodyModel>();
 let bistableJoints: BistableJointEntry[] = [];
+let jointStopWatches: JointStopWatch[] = [];
+let dofForceScale: Float64Array | null = null;
 let acousticStringBodyIds = new Set<number>();
 let acousticStringAxisByBodyId = new Map<number, [number, number, number]>();
+let acousticStringSpanByBodyId = new Map<
+  number,
+  { p0: [number, number, number]; ax: [number, number, number]; len: number }
+>();
 const bowContactStartSimTime = new Map<string, number>();
+const recentStopByStringBody = new Map<number, { frac: number; atSimTime: number }>();
+const recentBowEventByBowBody = new Map<string, { event: BowedStringContactEvent; atSimTime: number }>();
+const recentPluckTouchSite = new Map<
+  number,
+  { otherBodyId: number; selfGeom: number; otherGeom: number; worldPos: [number, number, number]; atSimTime: number }
+>();
 let lastBowEmitMs = 0;
 let hadActiveBowedStrings = false;
 let prevConstraintDof: Float64Array | null = null;
+let prevStringVelDof: Float64Array | null = null;
 const pendingAudioImpacts = new Map<string, AudioImpactEvent>();
 const lastAudioEmitMs = new Map<string, number>();
 
-const inferStringLocalAxis = (node: SceneNode): [number, number, number] => {
+const inferStringLocalSpan = (
+  node: SceneNode,
+): { p0: [number, number, number]; ax: [number, number, number]; len: number } => {
   const g = (node.geoms ?? []).find((x) => !x.csgDerived && x.csg !== 'difference');
   if (g?.fromto && g.fromto.length >= 6) {
     const dx = g.fromto[3] - g.fromto[0];
     const dy = g.fromto[4] - g.fromto[1];
     const dz = g.fromto[5] - g.fromto[2];
     const len = Math.hypot(dx, dy, dz);
-    if (len > 1e-6) return [dx / len, dy / len, dz / len];
+    if (len > 1e-6) {
+      return {
+        p0: [g.fromto[0], g.fromto[1], g.fromto[2]],
+        ax: [dx / len, dy / len, dz / len],
+        len,
+      };
+    }
   }
   if (g?.type === 'box' && g.size.length >= 3) {
     const [sx, sy, sz] = g.size;
-    if (sx >= sy && sx >= sz) return [1, 0, 0];
-    if (sz >= sx && sz >= sy) return [0, 0, 1];
+    const gx = g.pos?.[0] ?? 0;
+    const gy = g.pos?.[1] ?? 0;
+    const gz = g.pos?.[2] ?? 0;
+    if (sx >= sy && sx >= sz) return { p0: [gx - sx, gy, gz], ax: [1, 0, 0], len: Math.max(1e-4, 2 * sx) };
+    if (sz >= sx && sz >= sy) return { p0: [gx, gy, gz - sz], ax: [0, 0, 1], len: Math.max(1e-4, 2 * sz) };
+    return { p0: [gx, gy - sy, gz], ax: [0, 1, 0], len: Math.max(1e-4, 2 * sy) };
   }
-  return [0, 1, 0];
+  const halfL = Math.max(0.02, g?.size?.[1] ?? 0.15);
+  return { p0: [0, -halfL, 0], ax: [0, 1, 0], len: 2 * halfL };
 };
 
 const rebuildHydroAndFlexureCaches = (
@@ -1053,22 +1094,58 @@ const rebuildHydroAndFlexureCaches = (
   }
   hydroByBodyId = new Map();
   bistableJoints = [];
+  jointStopWatches = [];
+  dofForceScale = null;
   acousticStringBodyIds = new Set();
   acousticStringAxisByBodyId = new Map();
+  acousticStringSpanByBodyId = new Map();
   bowContactStartSimTime.clear();
+  recentStopByStringBody.clear();
+  recentBowEventByBowBody.clear();
+  recentPluckTouchSite.clear();
   prevConstraintDof = null;
+  prevStringVelDof = null;
   const mdl = model;
   if (!mdl) return;
 
   const anyWater = activeWaterLevel !== null || activeWaterBasins.length > 0;
 
-  const walk = (nodes: SceneNode[]) => {
+  const nodeHasCollidableSolid = (n: SceneNode): boolean => {
+    for (const g of n.geoms ?? []) {
+      if (!g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane') {
+        if (!(g.contype === 0 && g.conaffinity === 0)) return true;
+      }
+    }
+    for (const ch of n.children ?? []) {
+      if ((ch.joints?.length ?? 0) === 0 && !ch.acousticString && !ch.simulation && nodeHasCollidableSolid(ch)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const weldedRiderByTarget = new Map<string, SceneNode>();
+  const collectWelds = (nodes: SceneNode[]) => {
+    for (const n of nodes || []) {
+      if (n.weldTargetId && nodeHasCollidableSolid(n)) {
+        weldedRiderByTarget.set(n.weldTargetId, n);
+      }
+      if (n.children?.length) collectWelds(n.children);
+    }
+  };
+  collectWelds(sceneGraph.nodes);
+
+  const walk = (nodes: SceneNode[], insideWind = false, collidableHostId?: string) => {
     for (const node of nodes || []) {
+      const nextWind = insideWind || !!node.windInstrument;
+      const nodeIsCollidable = nodeHasCollidableSolid(node);
       const bId = bodyIdCache[node.id];
       if (bId !== undefined && bId > 0) {
         if (node.acousticString) {
           acousticStringBodyIds.add(bId);
-          acousticStringAxisByBodyId.set(bId, inferStringLocalAxis(node));
+          const span = inferStringLocalSpan(node);
+          acousticStringAxisByBodyId.set(bId, span.ax);
+          acousticStringSpanByBodyId.set(bId, span);
         }
         // Movable body (has own joints or rides on a jointed ancestor)
         if (anyWater && (node.joints?.length ?? 0) > 0) {
@@ -1091,10 +1168,141 @@ const rebuildHydroAndFlexureCaches = (
           }
         }
       }
-      if (node.children?.length) walk(node.children);
+
+      // Build mechanical end-stop audio watches for limited slide/hinge joints & telescopic drawer runners
+      if (!nextWind && !node.acousticString) {
+        if (node.hardwarePart?.kind === 'drawer_runner' && !node.hardwarePart.piece) {
+          const middle = node.children?.[0];
+          const carriage = middle?.children?.[0];
+          if (middle && carriage && !middle.coupleTargetId && !carriage.coupleTargetId) {
+            const j1 = middle.joints?.[0] ? jointIdCache[middle.joints[0].name] : undefined;
+            const j2 = carriage.joints?.[0] ? jointIdCache[carriage.joints[0].name] : undefined;
+            const rider = weldedRiderByTarget.get(carriage.id);
+            const movingBodyId = rider ? bodyIdCache[rider.id] : undefined;
+            if (
+              j1 !== undefined &&
+              j2 !== undefined &&
+              rider &&
+              movingBodyId !== undefined &&
+              movingBodyId > 0 &&
+              mdl.jnt_limited[j1] &&
+              mdl.jnt_limited[j2]
+            ) {
+              jointStopWatches.push({
+                qposAdrs: [mdl.jnt_qposadr[j1], mdl.jnt_qposadr[j2]],
+                dofAdrs: [mdl.jnt_dofadr[j1], mdl.jnt_dofadr[j2]],
+                isSlide: true,
+                lo: mdl.jnt_range[j1 * 2] + mdl.jnt_range[j2 * 2],
+                hi: mdl.jnt_range[j1 * 2 + 1] + mdl.jnt_range[j2 * 2 + 1],
+                movingNodeId: rider.id,
+                movingBodyId,
+                jointNodeId: carriage.id,
+                hostNodeId: collidableHostId ?? 'world',
+                state: 0,
+                initialized: false,
+                prevVel: 0,
+              });
+            }
+          }
+          continue;
+        }
+
+        if (!node.coupleTargetId) {
+          for (const j of node.joints ?? []) {
+            if (j.type !== 'slide' && j.type !== 'hinge') continue;
+            const jId = jointIdCache[j.name];
+            if (jId === undefined || !mdl.jnt_limited[jId]) continue;
+            const lo = mdl.jnt_range[jId * 2];
+            const hi = mdl.jnt_range[jId * 2 + 1];
+            const isSlide = j.type === 'slide';
+            if (hi - lo < (isSlide ? 0.012 : 0.15)) continue;
+            const rider = nodeIsCollidable ? node : weldedRiderByTarget.get(node.id);
+            const movingBodyId = rider ? bodyIdCache[rider.id] : undefined;
+            if (!rider || movingBodyId === undefined || movingBodyId <= 0) continue;
+            jointStopWatches.push({
+              qposAdrs: [mdl.jnt_qposadr[jId]],
+              dofAdrs: [mdl.jnt_dofadr[jId]],
+              isSlide,
+              lo,
+              hi,
+              movingNodeId: rider.id,
+              movingBodyId,
+              jointNodeId: node.id,
+              hostNodeId: collidableHostId ?? 'world',
+              state: 0,
+              initialized: false,
+              prevVel: 0,
+            });
+          }
+        }
+      }
+
+      const nextHostId = nodeIsCollidable ? node.id : collidableHostId;
+      if (node.children?.length) walk(node.children, nextWind, nextHostId);
     }
   };
   walk(sceneGraph.nodes);
+
+  // Convert rotational DOF torques (N·m on hinge/ball joints, e.g. Newton's Cradle pendulums)
+  // to equivalent linear contact force (N = τ / r_lever) so soft/hinged collisions scale accurately!
+  const nv = mdl.nv;
+  dofForceScale = new Float64Array(nv);
+  dofForceScale.fill(1.0);
+  const jntType = mdl.jnt_type;
+  const jntDofAdr = mdl.jnt_dofadr;
+  const jntBodyId = mdl.jnt_bodyid;
+  const jntPos = mdl.jnt_pos;
+  const bodyIpos = mdl.body_ipos;
+  const bodyParent = mdl.body_parentid;
+  const bodyJntNum = mdl.body_jntnum;
+  const bodyPos = mdl.body_pos;
+  const bodyMass = mdl.body_mass;
+  for (let j = 0; j < mdl.njnt; j++) {
+    const jt = jntType[j];
+    const d0 = jntDofAdr[j];
+    if (jt === 0) {
+      // mjJNT_FREE: DOFs 0..2 are linear forces (N), DOFs 3..5 are torques (avoid double-counting!)
+      if (d0 + 5 < nv) {
+        dofForceScale[d0 + 3] = 0;
+        dofForceScale[d0 + 4] = 0;
+        dofForceScale[d0 + 5] = 0;
+      }
+    } else if (jt === 1 || jt === 3) {
+      // mjJNT_BALL (3 DOFs) or mjJNT_HINGE (1 DOF): compute mass-weighted COM lever arm from joint anchor!
+      const bRoot = jntBodyId[j];
+      const jx = jntPos[j * 3], jy = jntPos[j * 3 + 1], jz = jntPos[j * 3 + 2];
+      let mSum = Math.max(0, bodyMass[bRoot] ?? 0);
+      let cx = mSum * (bodyIpos[bRoot * 3] ?? 0);
+      let cy = mSum * (bodyIpos[bRoot * 3 + 1] ?? 0);
+      let cz = mSum * (bodyIpos[bRoot * 3 + 2] ?? 0);
+      for (let b = bRoot + 1; b < mdl.nbody; b++) {
+        // Include welded jointless child bodies (e.g. `cradle_bob_body_0` at [0, 0, -0.20] under `cradle_0`!)
+        let cur = b;
+        let ox = 0, oy = 0, oz = 0;
+        while (cur > bRoot && bodyJntNum[cur] === 0) {
+          ox += bodyPos[cur * 3] ?? 0;
+          oy += bodyPos[cur * 3 + 1] ?? 0;
+          oz += bodyPos[cur * 3 + 2] ?? 0;
+          cur = bodyParent[cur];
+        }
+        if (cur === bRoot) {
+          const mb = Math.max(0, bodyMass[b] ?? 0);
+          mSum += mb;
+          cx += mb * (ox + (bodyIpos[b * 3] ?? 0));
+          cy += mb * (oy + (bodyIpos[b * 3 + 1] ?? 0));
+          cz += mb * (oz + (bodyIpos[b * 3 + 2] ?? 0));
+        }
+      }
+      const leverM = mSum > 1e-6
+        ? Math.max(0.05, Math.min(0.60, Math.hypot(cx / mSum - jx, cy / mSum - jy, cz / mSum - jz)))
+        : 0.15;
+      const invLever = 1 / leverM;
+      const count = jt === 1 ? 3 : 1;
+      for (let k = 0; k < count && d0 + k < nv; k++) {
+        dofForceScale[d0 + k] = invLever;
+      }
+    }
+  }
 };
 
 const applyHydroAndFlexureForces = (
@@ -1193,30 +1401,136 @@ const sampleAudioImpacts = (stepSize: number) => {
   const nv = model.nv;
   if (nv === 0) return;
   const qfrcC = data.qfrc_constraint;
-  if (!prevConstraintDof || prevConstraintDof.length !== nv) {
+  const qvel = data.qvel;
+  if (!prevConstraintDof || prevConstraintDof.length !== nv || !prevStringVelDof || prevStringVelDof.length !== nv) {
     prevConstraintDof = Float64Array.from(qfrcC);
+    prevStringVelDof = Float64Array.from(qvel);
+    const qposInit = data.qpos;
+    for (const w of jointStopWatches) {
+      let q = 0;
+      for (const qa of w.qposAdrs) q += qposInit[qa];
+      let v = 0;
+      for (const da of w.dofAdrs) v += qvel[da];
+      const eps = w.isSlide ? 0.0022 : 0.020;
+      w.state = q <= w.lo + eps ? 1 : q >= w.hi - eps ? 2 : 0;
+      w.prevVel = v;
+      w.initialized = true;
+    }
     return;
+  }
+
+  // Mechanical end-stop impact detector for limited slide/hinge joints & telescopic drawer runners
+  if (jointStopWatches.length > 0) {
+    const qpos = data.qpos;
+    const stopNow = performance.now();
+    const bodySubtreeMass = (model as unknown as { body_subtreemass?: ArrayLike<number> }).body_subtreemass;
+    for (const w of jointStopWatches) {
+      let q = 0;
+      for (const qa of w.qposAdrs) q += qpos[qa];
+      let v = 0;
+      for (const da of w.dofAdrs) v += qvel[da];
+      const eps = w.isSlide ? 0.0022 : 0.020;
+      const clearEps = w.isSlide ? 0.0060 : 0.045;
+      if (!w.initialized) {
+        w.state = q <= w.lo + eps ? 1 : q >= w.hi - eps ? 2 : 0;
+        w.prevVel = v;
+        w.initialized = true;
+        continue;
+      }
+      const approachVel = w.prevVel;
+      w.prevVel = v;
+      if (w.state === 1 && q > w.lo + clearEps) w.state = 0;
+      else if (w.state === 2 && q < w.hi - clearEps) w.state = 0;
+
+      if (w.state === 0) {
+        const minSpeed = w.isSlide ? 0.045 : 0.22;
+        let hitStop: 0 | 1 | 2 = 0;
+        if (q <= w.lo + eps && approachVel < -minSpeed) hitStop = 1;
+        else if (q >= w.hi - eps && approachVel > minSpeed) hitStop = 2;
+        if (hitStop !== 0) {
+          w.state = hitStop;
+          const mKg = Math.max(0.04, bodySubtreeMass?.[w.movingBodyId] ?? model.body_mass[w.movingBodyId] ?? 0.25);
+          const linSpeed = w.isSlide ? Math.abs(approachVel) : Math.abs(approachVel) * 0.14;
+          const stopScale = hitStop === 2 ? 0.15 : 0.20;
+          const stopImpulse = Math.min(0.28, stopScale * mKg * linSpeed);
+          if (stopImpulse >= 0.003 && stopNow - (lastAudioEmitMs.get(w.movingNodeId) ?? 0) >= 75) {
+            const otherId = hitStop === 2 ? w.jointNodeId : w.hostNodeId;
+            const prev = pendingAudioImpacts.get(w.movingNodeId);
+            if (!prev || stopImpulse > prev.impulseNs) {
+              pendingAudioImpacts.set(w.movingNodeId, {
+                nodeId: w.movingNodeId,
+                impulseNs: stopImpulse,
+                otherNodeId: otherId,
+              });
+            }
+            // Subtle carcass knock when closing home into a wooden/solid cabinet
+            if (hitStop === 1 && w.hostNodeId !== 'world' && stopNow - (lastAudioEmitMs.get(w.hostNodeId) ?? 0) >= 75) {
+              const hostImpulse = stopImpulse * 0.28;
+              const prevHost = pendingAudioImpacts.get(w.hostNodeId);
+              if (!prevHost || hostImpulse > prevHost.impulseNs) {
+                pendingAudioImpacts.set(w.hostNodeId, {
+                  nodeId: w.hostNodeId,
+                  impulseNs: hostImpulse,
+                  otherNodeId: w.movingNodeId,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
   }
   const dofBody = model.dof_bodyid;
   // Accumulate translational constraint force jump per body over this step
   const bodyJumpSq = new Map<number, number>();
+  const stringPluckImpulse = new Map<number, number>();
+  const newlyTouchedStrings: number[] = [];
   for (let d = 0; d < nv; d++) {
     const cur = qfrcC[d];
     const prev = prevConstraintDof[d];
     prevConstraintDof[d] = cur;
-    // Only trigger on rising contact/constraint loading (or sign reversal), never when a contact unloads to zero!
-    const isLoading = Math.abs(cur) > Math.abs(prev) + 0.25 || cur * prev < -0.25;
-    if (!isLoading) continue;
-    const df = cur - prev;
-    if (Math.abs(df) < 0.25) continue;
+    const vCur = qvel[d];
+    const vPrev = prevStringVelDof[d];
+    prevStringVelDof[d] = vCur;
     const bId = dofBody[d];
     if (bId <= 0) continue;
-    bodyJumpSq.set(bId, (bodyJumpSq.get(bId) ?? 0) + df * df);
+    const isStr = acousticStringBodyIds.has(bId);
+    if (isStr) {
+      if (Math.abs(cur) >= 0.0005) {
+        const cached = recentPluckTouchSite.get(bId);
+        if (!cached || data.time - cached.atSimTime > 0.025) newlyTouchedStrings.push(bId);
+      }
+      // Sub-gram taut strings (< 0.5 g) have tiny MuJoCo solver forces (~0.003 N) yet crisp transverse
+      // velocity jumps (0.4-1.5 m/s) when struck or snapped free by a plectrum!
+      const dv = Math.abs(vCur - vPrev);
+      const isVelKick = dv >= 0.028 && (Math.abs(vCur) > Math.abs(vPrev) + 0.015 || vCur * vPrev < -0.0004);
+      const df = Math.abs(cur - prev);
+      if (!isVelKick && df < 0.008) continue;
+      const estImpulse = Math.max(df * 0.18, Math.max(Math.abs(vCur), dv) * 0.065);
+      if (estImpulse > (stringPluckImpulse.get(bId) ?? 0)) {
+        stringPluckImpulse.set(bId, estImpulse);
+      }
+      bodyJumpSq.set(bId, (bodyJumpSq.get(bId) ?? 0) + df * df);
+    } else {
+      const fScale = dofForceScale ? dofForceScale[d] : 1.0;
+      if (fScale <= 0) continue;
+      const fCur = cur * fScale;
+      const fPrev = prev * fScale;
+      // Rigid bodies: only trigger on rising contact/constraint loading (or sign reversal), never unloading!
+      const isLoading = Math.abs(fCur) > Math.abs(fPrev) + 0.25 || fCur * fPrev < -0.25;
+      if (!isLoading) continue;
+      const df = fCur - fPrev;
+      if (Math.abs(df) < 0.25) continue;
+      bodyJumpSq.set(bId, (bodyJumpSq.get(bId) ?? 0) + df * df);
+    }
   }
   const now = performance.now();
   const newTriggers: { bId: number; nodeId: string; impulseNs: number }[] = [];
   for (const [bId, sumSq] of bodyJumpSq) {
-    const impulseNs = Math.sqrt(sumSq) * stepSize;
+    const rawImpulse = Math.sqrt(sumSq) * stepSize;
+    const impulseNs = acousticStringBodyIds.has(bId)
+      ? Math.max(rawImpulse, stringPluckImpulse.get(bId) ?? 0)
+      : rawImpulse;
     if (impulseNs < 0.0015) continue;
     const nodeId = bodyNodeById[bId];
     if (!nodeId || nodeId === 'world') continue;
@@ -1226,41 +1540,55 @@ const sampleAudioImpacts = (stepSize: number) => {
       newTriggers.push({ bId, nodeId, impulseNs });
     }
   }
-  if (newTriggers.length === 0) return;
+  if (newTriggers.length === 0 && newlyTouchedStrings.length === 0) return;
 
   // Read `dat.contact` once on this impact substep (and delete handles in `finally`)
   // to identify the colliding partner geom/body and local hit point for two-body Hertzian synthesis!
   const hitByBody = new Map<
     number,
-    { otherBodyId: number; selfGeom: number; otherGeom: number; worldPos: [number, number, number] }
+    { otherBodyId: number; selfGeom: number; otherGeom: number; worldPos: [number, number, number]; solTime: number }
   >();
   const suppressedBowImpactBodies = new Set<number>();
+  const bodyParent = model.body_parentid;
+  const bodyJntNum = model.body_jntnum;
+  // Map jointless welded child bodies (e.g. `cradle_bob_body_*` or `drawer_*_face`) up to their owning rigid body!
+  const resolveRigidOwnerBody = (rawB: number): number => {
+    let cur = rawB;
+    while (cur > 0 && bodyJntNum[cur] === 0 && bodyParent[cur] > 0) {
+      cur = bodyParent[cur];
+    }
+    return cur;
+  };
   const contactVec = data.contact;
   try {
     const ncon = contactVec.size();
     const geomBody = ncon > 0 ? model.geom_bodyid : null;
-    const geomSolref = ncon > 0 && acousticStringBodyIds.size > 0 ? model.geom_solref : null;
+    const geomSolref = ncon > 0 ? model.geom_solref : null;
+    const geomFriction = ncon > 0 && acousticStringBodyIds.size > 0 ? model.geom_friction : null;
     if (geomBody) {
-      const wanted = new Set(newTriggers.map((t) => t.bId));
+      const wanted = new Set([...newTriggers.map((t) => t.bId), ...newlyTouchedStrings]);
       for (let c = 0; c < ncon; c++) {
         const ct = contactVec.get(c);
         if (!ct) continue;
         try {
-          const b1 = geomBody[ct.geom1];
-          const b2 = geomBody[ct.geom2];
+          const b1 = resolveRigidOwnerBody(geomBody[ct.geom1]);
+          const b2 = resolveRigidOwnerBody(geomBody[ct.geom2]);
           if (!wanted.has(b1) && !wanted.has(b2)) continue;
-          // Suppress percussive AUDIO_IMPACTS clicks on smooth compliant bow-on-string sliding contacts!
-          if (geomSolref) {
+          // Suppress percussive AUDIO_IMPACTS clicks/plucks on rosined or damped bow-on-string contacts!
+          if (geomSolref && geomFriction) {
             const isStr1 = acousticStringBodyIds.has(b1);
             const isStr2 = acousticStringBodyIds.has(b2);
             if (isStr1 !== isStr2) {
               const bStr = isStr1 ? b1 : b2;
               const bBow = isStr1 ? b2 : b1;
               const gBow = isStr1 ? ct.geom2 : ct.geom1;
+              const muBow = geomFriction[gBow * 3] ?? 1.0;
               const bowSolTime = geomSolref[gBow * 2] ?? 0.02;
               const bowSolDamp = geomSolref[gBow * 2 + 1] ?? 1.0;
               const isDampedBow =
-                (bowSolTime >= 0.012 && bowSolDamp >= 0.90) || (bowSolTime < 0 && bowSolTime > -3000);
+                ct.dim === 1 ||
+                muBow < 0.02 ||
+                (muBow >= 0.22 && bowSolDamp >= 0.95 && bowSolTime > 0 && bowSolTime <= 0.010);
               if (isDampedBow || bowContactStartSimTime.has(`${bStr}:${bBow}`)) {
                 suppressedBowImpactBodies.add(b1);
                 suppressedBowImpactBodies.add(b2);
@@ -1268,19 +1596,22 @@ const sampleAudioImpacts = (stepSize: number) => {
               }
             }
           }
+          const st1 = geomSolref ? (geomSolref[ct.geom1 * 2] ?? 0.004) : 0.004;
+          const st2 = geomSolref ? (geomSolref[ct.geom2 * 2] ?? 0.004) : 0.004;
+          const solTime = Math.max(st1 > 0 ? st1 : 0.004, st2 > 0 ? st2 : 0.004);
           const pos = ct.pos;
           const wp: [number, number, number] = [pos[0], pos[1], pos[2]];
           if (wanted.has(b1)) {
             const cur = hitByBody.get(b1);
             // Prefer dynamic body-to-body strike over static world floor contact when both exist
             if (!cur || (cur.otherBodyId === 0 && b2 > 0)) {
-              hitByBody.set(b1, { otherBodyId: b2, selfGeom: ct.geom1, otherGeom: ct.geom2, worldPos: wp });
+              hitByBody.set(b1, { otherBodyId: b2, selfGeom: ct.geom1, otherGeom: ct.geom2, worldPos: wp, solTime });
             }
           }
           if (wanted.has(b2)) {
             const cur = hitByBody.get(b2);
             if (!cur || (cur.otherBodyId === 0 && b1 > 0)) {
-              hitByBody.set(b2, { otherBodyId: b1, selfGeom: ct.geom2, otherGeom: ct.geom1, worldPos: wp });
+              hitByBody.set(b2, { otherBodyId: b1, selfGeom: ct.geom2, otherGeom: ct.geom1, worldPos: wp, solTime });
             }
           }
         } finally {
@@ -1292,9 +1623,27 @@ const sampleAudioImpacts = (stepSize: number) => {
     contactVec.delete();
   }
 
+  for (const sbId of newlyTouchedStrings) {
+    const st = hitByBody.get(sbId);
+    if (st && !suppressedBowImpactBodies.has(sbId)) {
+      recentPluckTouchSite.set(sbId, { ...st, atSimTime: data.time });
+    }
+  }
+  if (newTriggers.length === 0) return;
+
   for (const { bId, nodeId, impulseNs } of newTriggers) {
-    const site = hitByBody.get(bId);
-    if (!site && suppressedBowImpactBodies.has(bId)) continue;
+    const cachedPluck = acousticStringBodyIds.has(bId) ? recentPluckTouchSite.get(bId) : undefined;
+    const site =
+      hitByBody.get(bId) ??
+      (cachedPluck && data.time - cachedPluck.atSimTime <= 0.060 ? cachedPluck : undefined);
+    // Skip internal joint-spring / joint-stop reversals with zero external geom contact (`!site`),
+    // which otherwise re-plucked taut bowed strings in mid-air whenever the bow rolled off!
+    if (!site || suppressedBowImpactBodies.has(bId)) continue;
+    // Compensate for softened solver `solref` (e.g. [0.012, 0.12] on Newton's Cradle spreading a crisp impact over ~10 steps)
+    const solSoftScale = !acousticStringBodyIds.has(bId) && 'solTime' in site && site.solTime > 2.5 * stepSize
+      ? Math.min(16, Math.pow(site.solTime / (2 * stepSize), 1.5))
+      : 1.0;
+    const effectiveImpulseNs = impulseNs * solSoftScale;
     let localPoint: [number, number, number] | undefined;
     let otherNodeId: string | undefined;
     let selfGeomName: string | undefined;
@@ -1313,14 +1662,16 @@ const sampleAudioImpacts = (stepSize: number) => {
       ]);
     }
     const prev = pendingAudioImpacts.get(nodeId);
-    pendingAudioImpacts.set(nodeId, {
-      nodeId,
-      impulseNs,
-      otherNodeId: otherNodeId ?? prev?.otherNodeId,
-      selfGeomName: selfGeomName ?? prev?.selfGeomName,
-      otherGeomName: otherGeomName ?? prev?.otherGeomName,
-      localPoint: localPoint ?? prev?.localPoint,
-    });
+    if (!prev || effectiveImpulseNs > prev.impulseNs) {
+      pendingAudioImpacts.set(nodeId, {
+        nodeId,
+        impulseNs: effectiveImpulseNs,
+        otherNodeId: otherNodeId ?? prev?.otherNodeId,
+        selfGeomName: selfGeomName ?? prev?.selfGeomName,
+        otherGeomName: otherGeomName ?? prev?.otherGeomName,
+        localPoint: localPoint ?? prev?.localPoint,
+      });
+    }
   }
 };
 
@@ -1355,12 +1706,13 @@ const flushBowedStrings = () => {
     if (hadActiveBowedStrings) {
       hadActiveBowedStrings = false;
       bowContactStartSimTime.clear();
+      recentBowEventByBowBody.clear();
       post({ type: 'BOWED_STRINGS', contacts: [] });
     }
     return;
   }
   const now = performance.now();
-  if (now - lastBowEmitMs < 20) return;
+  if (now - lastBowEmitMs < 14) return;
   lastBowEmitMs = now;
 
   interface AggregatedBowPair {
@@ -1374,6 +1726,7 @@ const flushBowedStrings = () => {
   }
 
   const pairMap = new Map<string, AggregatedBowPair>();
+  const stopWorldPosByStringBody = new Map<number, [number, number, number]>();
   const seenPairs = new Set<string>();
   const contactVec = data.contact;
   const wrench = new mujoco.DoubleBuffer(6);
@@ -1401,9 +1754,17 @@ const flushBowedStrings = () => {
           const gBow = isStr1 ? ct.geom2 : ct.geom1;
           if (bBow <= 0) continue;
 
-          // Low-friction plectra (e.g. mu = 0.05 tortoiseshell pick) pluck cleanly without rosin stick-slip
           const muSlide = geomFriction[gBow * 3] ?? 1.0;
-          if (muSlide < 0.15) continue;
+          // Smooth non-rosined fingertip / capo / slide bar (`condim === 1` or `mu < 0.12`):
+          // Check geometric proximity (`ct.dist <= 0.6 mm`) BEFORE `forceN < 0.005` so stick-slip force dips
+          // never cause pitch wobble while finger lifts release cleanly with zero artificial delay!
+          if (ct.dim === 1 || muSlide < 0.12) {
+            if (ct.dist <= 0.0006) {
+              const sp = ct.pos;
+              stopWorldPosByStringBody.set(bStr, [sp[0], sp[1], sp[2]]);
+            }
+            continue;
+          }
 
           let forceN = 0;
           if (ct.efc_address >= 0) {
@@ -1411,6 +1772,7 @@ const flushBowedStrings = () => {
             forceN = Math.max(0, wrench.GetView()[0]);
           }
           if (forceN < 0.005) continue;
+          if (muSlide < 0.15) continue;
 
           const pairKey = `${bStr}:${bBow}`;
           seenPairs.add(pairKey);
@@ -1423,8 +1785,9 @@ const flushBowedStrings = () => {
           const bowSolTime = geomSolref[gBow * 2] ?? 0.02;
           const bowSolDamp = geomSolref[gBow * 2 + 1] ?? 1.0;
           const isDampedBow =
-            (bowSolTime >= 0.012 && bowSolDamp >= 0.90) || (bowSolTime < 0 && bowSolTime > -3000);
-          const minDurSec = isDampedBow ? 0.014 : 0.018;
+            (bowSolTime > 0 && bowSolDamp >= 0.90) || (bowSolTime < 0 && bowSolTime > -3000);
+          // Rosined damped horsehair (`mu >= 0.22`) speaks seamlessly on slurred string crossings without a 14 ms gap!
+          const minDurSec = muSlide >= 0.22 && isDampedBow ? 0 : isDampedBow ? 0.012 : 0.018;
           if (durSec < minDurSec) continue;
 
           const pos = ct.pos;
@@ -1518,9 +1881,47 @@ const flushBowedStrings = () => {
     const oz = xpos![agg.bStr * 3 + 2];
     const localPoint = worldToBodyFrame(xmat!, agg.bStr, [wx - ox, wy - oy, wz - oz]);
 
-    // Optional scriptState stoppedLengthFraction coupling for fingered single-string passages
+    // 1. Live 3D physical fingerboard/slide-bar stopping contact on the string wire!
     let stoppedLengthFraction: number | undefined;
-    if (stateSnap) {
+    const stopWp = stopWorldPosByStringBody.get(agg.bStr);
+    const span = acousticStringSpanByBodyId.get(agg.bStr);
+    if (stopWp && span && span.len > 1e-4) {
+      const stopLocal = worldToBodyFrame(xmat!, agg.bStr, [stopWp[0] - ox, stopWp[1] - oy, stopWp[2] - oz]);
+      const sBow =
+        ((localPoint[0] - span.p0[0]) * span.ax[0] +
+          (localPoint[1] - span.p0[1]) * span.ax[1] +
+          (localPoint[2] - span.p0[2]) * span.ax[2]) /
+        span.len;
+      const sStop =
+        ((stopLocal[0] - span.p0[0]) * span.ax[0] +
+          (stopLocal[1] - span.p0[1]) * span.ax[1] +
+          (stopLocal[2] - span.p0[2]) * span.ax[2]) /
+        span.len;
+      let rawStop: number | undefined;
+      if (sBow < 0.5 && sStop > sBow + 0.18 && sStop < 0.985) {
+        rawStop = Math.max(0.25, Math.min(1.0, sStop));
+      } else if (sBow >= 0.5 && sStop < sBow - 0.18 && sStop > 0.015) {
+        rawStop = Math.max(0.25, Math.min(1.0, 1 - sStop));
+      }
+      if (rawStop !== undefined) {
+        const prev = recentStopByStringBody.get(agg.bStr);
+        const smoothed =
+          prev && Math.abs(prev.frac - rawStop) < 0.015 ? 0.82 * prev.frac + 0.18 * rawStop : rawStop;
+        stoppedLengthFraction = +smoothed.toFixed(5);
+        recentStopByStringBody.set(agg.bStr, { frac: stoppedLengthFraction, atSimTime: data.time });
+      }
+    } else {
+      // 1-frame (18 ms) anti-skip hold (> 16.7 ms 60 Hz postFrame period) prevents single-frame dropouts!
+      const prev = recentStopByStringBody.get(agg.bStr);
+      if (prev && data.time - prev.atSimTime <= 0.018) {
+        stoppedLengthFraction = prev.frac;
+      } else if (prev) {
+        recentStopByStringBody.delete(agg.bStr);
+      }
+    }
+
+    // 2. Optional scriptState fallback
+    if (stoppedLengthFraction === undefined && stateSnap) {
       const strSt = stateSnap[strNodeId] as Record<string, unknown> | undefined;
       const bowSt = stateSnap[bowNodeId] as Record<string, unknown> | undefined;
       const rawFrac =
@@ -1534,7 +1935,7 @@ const flushBowedStrings = () => {
       }
     }
 
-    events.push({
+    const ev: BowedStringContactEvent = {
       stringNodeId: strNodeId,
       bowNodeId,
       bowGeomName: geomNameCache[agg.gBow],
@@ -1543,7 +1944,21 @@ const flushBowedStrings = () => {
       localPoint,
       contactDurationSec: +agg.durSec.toFixed(4),
       ...(stoppedLengthFraction !== undefined ? { stoppedLengthFraction } : {}),
-    });
+    };
+    events.push(ev);
+    recentBowEventByBowBody.set(bowNodeId, { event: ev, atSimTime: data.time });
+  }
+
+  // 2-frame (32 ms) anti-micro-bounce hold per bow body (> 16.7 ms 60 Hz postFrame period) keeps sustained notes
+  // 100% continuous across stick-slip substeps while yielding in 0 ms whenever `activeBows` lands on a new string!
+  const activeBows = new Set(events.map((e) => e.bowNodeId));
+  for (const [bId, held] of Array.from(recentBowEventByBowBody.entries())) {
+    if (activeBows.has(bId)) continue;
+    if (data.time - held.atSimTime <= 0.032 && held.event.bowVelocityMps >= 0.035) {
+      events.push(held.event);
+    } else {
+      recentBowEventByBowBody.delete(bId);
+    }
   }
 
   if (events.length > 0 || hadActiveBowedStrings) {
@@ -2936,6 +3351,7 @@ const handleMessage = async (evt: MessageEvent) => {
         soundEnabled = !!msg.enabled;
         if (!soundEnabled) {
           prevConstraintDof = null;
+          for (const w of jointStopWatches) w.initialized = false;
           pendingAudioImpacts.clear();
           bowContactStartSimTime.clear();
           if (hadActiveBowedStrings) {

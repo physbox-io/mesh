@@ -3,7 +3,9 @@ import { Music, Volume2, AlertTriangle } from 'lucide-react';
 import type { SceneGraph, SceneNode, StringMaterialId } from '../../types/scene';
 import { useStore } from '../../store/useStore';
 import { RangeInput } from '../RangeInput';
-import { estimateBodyModes, playModalImpact, playModalTap, unlockAudioContext } from '../../utils/modalAudio';
+import { DocsInfoButton } from '../docs/DocsInfoButton';
+import { estimateBodyModes, inferAcousticMaterial, playModalImpact, playModalTap, unlockAudioContext } from '../../utils/modalAudio';
+import { simulate3DVibroAcousticIR } from '../../utils/solidAcoustics3D';
 import {
   buildTunedScaleNodes,
   CONCERT_NOTES,
@@ -97,12 +99,15 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
   const handleAudition = () => {
     unlockAudioContext();
     if (windBore && node.windInstrument) {
+      const windIr = simulate3DVibroAcousticIR(node, inferAcousticMaterial(node));
       updateLiveWindVoices([
         {
           id: node.id,
           exciter: node.windInstrument.exciter,
           breathKPa: Math.max(3.5, node.windInstrument.breathKPa || 3.8),
           embouchureHz: node.windInstrument.embouchureHz,
+          bodyIr: windIr?.ir ?? null,
+          bodyIrSig: windIr?.signature ?? '',
           boreShape: windBore.boreShape,
           resonantModesHz: windBore.resonantModesHz,
           modeImpedancePeaks: windBore.modeImpedancePeaks,
@@ -207,6 +212,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
         <h3 className="text-sm font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
           <Music className="w-3.5 h-3.5 text-violet-500" />
           {node.windInstrument ? 'Wind Bore & Reed' : node.acousticString ? 'Taut String Pitch' : 'Concert Pitch'}
+          <DocsInfoButton tab="sound" />
         </h3>
         <button
           type="button"

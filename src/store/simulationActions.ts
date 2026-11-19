@@ -21,7 +21,7 @@ import { clearBreakage, anyNode, applyShatterPieces } from './breakage';
 import {
   type PhysicsWindow, MUJOCO_SHIM, buildModelMirror, buildDataMirror, RECYCLE_HEAP_BYTES,
   lastHeapBytes, setLastHeapBytes, lastScriptState, onNextPaint, liveModelGraph, recycleWorker,
-  getPhysicsWorkerClient, endVoltLink,
+  getPhysicsWorkerClient, endVoltLink, prewarmSceneAcousticIRs,
 } from './physicsEngine';
 import type { PhysicsState } from './useStore';
 import type { SliceDeps } from './sliceDeps';
@@ -100,6 +100,8 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       // Playing hands the clock back from Volt: the two cannot both drive it.
       if (state.voltLink) endVoltLink();
       const isPlaying = !state.isPlaying;
+      // Hold simulation start until all 3D Vibro-Acoustic FIRs are ready so the first seconds never stutter.
+      if (isPlaying) prewarmSceneAcousticIRs(liveModelGraph(state).graph.nodes);
       getPhysicsWorkerClient().setPlaying(isPlaying);
       // Something in this scene can break: have the cutter loaded before it does.
       if (isPlaying && anyNode(state.sceneGraph.nodes, canShatter)) prewarmFractureWorker();
@@ -356,15 +358,16 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           : undefined;
 
         client.setEnv(windX, windY, density, waterLevel, sceneGraph);
-        // Something has just broken mid-flight: have the worker wait for this
-        // model to be on screen before stepping it. See `holdUntil` in the worker.
-        const hold = !!immediate && isRuntimeBuild && !forceReset;
+        // Something has just broken mid-flight, or we are rebuilding while playing:
+        // hold the worker until both 3D Vibro-Acoustic FIRs and the new model are ready on screen!
+        const hold = (!!immediate && isRuntimeBuild && !forceReset) || get().isPlaying;
         const built = await client.build(xml, sceneGraph, !forceReset, seedState, get().brokenConstraints, hold);
         if (hold && built.ok) heldClient = client;
         if (!built.ok) {
           // Said in the scene's names, not the line numbers of XML nobody sees.
           throw new Error(explainCompileError(built.error || 'Unknown physics worker build error', xml));
         }
+        if (get().isPlaying) prewarmSceneAcousticIRs(sceneGraph.nodes);
         applyBuilt(built);
         // A fresh worker starts paused. The other two recycles tell it to play;
         // this one didn't, so the simulation froze while the UI still said Play.

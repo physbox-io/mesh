@@ -19,6 +19,7 @@ import { noteWorkerFrame } from './modelProvenance';
 import { useSoundStore } from './soundStore';
 import {
   estimateBodyModes,
+  inferAcousticMaterial,
   playModalImpact,
   resolveTwoBodyImpact,
   silenceBowedVoices,
@@ -27,6 +28,7 @@ import {
   updateLiveWindVoices,
   type BodyModalProfile,
 } from '../utils/modalAudio';
+import { simulate3DVibroAcousticIR } from '../utils/solidAcoustics3D';
 import {
   evaluateTautString,
   resolveStringBetaFromPoint,
@@ -34,7 +36,22 @@ import {
   type StringPluckImpactContext,
 } from '../utils/stringAcoustics';
 import { extractBoreWaveguide } from '../utils/windAcoustics';
-import type { SceneNode } from '../types/scene';
+import type { SceneGeom, SceneNode } from '../types/scene';
+
+function collectWeldedSolids(node: SceneNode, isRoot = true, out: SceneGeom[] = []): SceneGeom[] {
+  if (!isRoot && ((node.joints?.length ?? 0) > 0 || node.acousticString || node.simulation)) {
+    return out;
+  }
+  for (const g of node.geoms ?? []) {
+    if (!g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane') {
+      out.push(g);
+    }
+  }
+  for (const ch of node.children ?? []) {
+    collectWeldedSolids(ch, false, out);
+  }
+  return out;
+}
 
 const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
   for (const n of nodes || []) {
@@ -57,11 +74,52 @@ const cachedModesFor = (
   }
   let m = modalCache.get(node);
   if (!m) {
-    m = estimateBodyModes(node);
+    m = estimateBodyModes(node, true);
     modalCache.set(node, m);
   }
   return m;
 };
+
+/**
+ * Pre-computes and caches all 3D Vibro-Acoustic FIRs (`simulate3DVibroAcousticIR`)
+ * for strings, wind bores, and collidable solid bodies BEFORE simulation starts stepping,
+ * preventing any main-thread FDTD computation glitches during playback.
+ */
+export function prewarmSceneAcousticIRs(nodes: SceneNode[]): void {
+  if (!useSoundStore.getState().soundEnabled || !nodes?.length) return;
+  let hasDynamicOrInstrument = false;
+  const checkActive = (list: SceneNode[]) => {
+    for (const n of list) {
+      if ((n.joints?.length ?? 0) > 0 || n.acousticString || n.windInstrument) {
+        hasDynamicOrInstrument = true;
+        return;
+      }
+      if (n.children?.length) checkActive(n.children);
+      if (hasDynamicOrInstrument) return;
+    }
+  };
+  checkActive(nodes);
+  if (!hasDynamicOrInstrument) return;
+
+  const visit = (list: SceneNode[]) => {
+    for (const n of list) {
+      if (n.acousticString) {
+        evaluateTautString(n, nodes);
+      } else if (n.windInstrument) {
+        simulate3DVibroAcousticIR(n, inferAcousticMaterial(n));
+      } else if (!isWindSubtreeOrNonColliding(n, nodes)) {
+        const hasCollidableSolid = collectWeldedSolids(n).some(
+          (g) => !(g.contype === 0 && g.conaffinity === 0),
+        );
+        if (hasCollidableSolid) {
+          cachedModesFor(n, nodes);
+        }
+      }
+      if (n.children?.length) visit(n.children);
+    }
+  };
+  visit(nodes);
+}
 
 /** Name<->id lookup tables the worker builds; `${type}Rev` maps ids back to names. */
 export type IdMaps = Record<string, Record<string, number> | Record<number, string> | undefined>;
@@ -253,11 +311,10 @@ function isWindSubtreeOrNonColliding(node: SceneNode, roots: SceneNode[]): boole
   };
   if (checkWindAncestor(roots, false)) return true;
 
-  // Non-colliding mechanism bodies (e.g.contype=0 music drums, cams) only hit internal joint stops
+  // Non-colliding mechanism bodies (e.g. contype=0 music drums, cams) only hit internal joint stops;
+  // include jointless welded child bodies (e.g. `cradle_bob_body_*` under `cradle_*` in Newton's Cradle!).
   if (typeof node.tunedPitchHz !== 'number' && !node.acousticString) {
-    const solids = (node.geoms ?? []).filter(
-      (g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane',
-    );
+    const solids = collectWeldedSolids(node);
     if (solids.length > 0 && solids.every((g) => g.contype === 0 && g.conaffinity === 0)) {
       return true;
     }
@@ -350,11 +407,14 @@ function syncLiveWindAudio() {
         }
       }
     }
+    const windIr = simulate3DVibroAcousticIR(wn, inferAcousticMaterial(wn));
     return {
       id: wn.id,
       exciter: spec.exciter,
       breathKPa: Math.max(0, Math.min(8, breathKPa)),
       embouchureHz: Math.max(16, Math.min(2200, embouchureHz)),
+      bodyIr: windIr?.ir ?? null,
+      bodyIrSig: windIr?.signature ?? '',
       boreShape: bore?.boreShape,
       resonantModesHz: bore?.resonantModesHz,
       modeImpedancePeaks: bore?.modeImpedancePeaks,
@@ -499,10 +559,18 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           pitchHz: solved.pitchHz,
           amplitude: solved.amplitude,
           harmonicWeights: solved.harmonicWeights,
+          stringHarmonicWeights: solved.stringHarmonicWeights,
+          bodyIr: solved.bodyIr,
+          bodyIrSig: solved.bodyIrSig,
           bodyFormantHz: solved.bodyFormantHz,
           bodyFormantGainDb: solved.bodyFormantGainDb,
           bodyFormantQ: solved.bodyFormantQ,
           secondaryFormantHz: solved.secondaryFormantHz,
+          woodModeHz: solved.woodModeHz,
+          dipoleCancelHz: solved.dipoleCancelHz,
+          dipoleCancelDb: solved.dipoleCancelDb,
+          bridgeHillHz: solved.bridgeHillHz,
+          bridgeHillGainDb: solved.bridgeHillGainDb,
           lowpassHz: solved.lowpassHz,
           rosinNoiseGain: solved.rosinNoiseGain,
           rosinCenterHz: solved.rosinCenterHz,

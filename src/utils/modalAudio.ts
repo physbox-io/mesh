@@ -14,20 +14,24 @@
 // ---------------------------------------------------------------------------
 
 import type { SceneGeom, SceneNode } from '../types/scene';
+import { useSoundStore } from '../store/soundStore';
 import { deformMaterial, geomVolume } from './deformMaterials';
 import {
   analyze3DCavityAndPorts,
   analyze3DSolidCrossSections,
   evaluateNormalizedModeShape,
+  simulate3DVibroAcousticIR,
   solveGeneralSectionBeamModes,
 } from './solidAcoustics3D';
 import {
+  createResampledConvolver,
   getOrInitModalWorklet,
   getSharedAcousticOutputBus,
   postWorkletBowedSilence,
   postWorkletBowedUpdate,
   postWorkletWindSilence,
   postWorkletWindUpdate,
+  setStudioReverbEnabled,
   type WorkletBowedVoicePayload,
   type WorkletWindVoicePayload,
 } from './modalAudioWorklet';
@@ -61,6 +65,8 @@ export interface BodyModalProfile {
   rawFreqsHz?: number[];
   /** Intrinsic base modal gains before Hertzian striker filtering. */
   rawBaseGains?: number[];
+  /** Optional per-mode mechanical/acoustic Q overrides (e.g. air Helmholtz Q vs solid shell Q, or joined panel seam damping). */
+  rawModeQs?: number[];
   /** Normalized Legendre polynomial mode-shape vectors ψ_m(ξ) along `lenAxis` in [-1, 1]. */
   modeVectors?: number[][];
   /** Principal longitudinal axis (0=X, 1=Y, 2=Z) and solid span [sMin, sMax] in body-local coordinates. */
@@ -69,6 +75,9 @@ export interface BodyModalProfile {
   /** Effective solid mass (kg) and radiating width (m) for two-body Hertzian & dipole radiation coupling. */
   massKg?: number;
   radiatingWidthM?: number;
+  /** Simulated 48 kHz 3D vibro-acoustic impulse response of this body (or coupled soundbox)! */
+  bodyIr?: Float32Array<ArrayBuffer> | null;
+  bodyIrSig?: string;
 }
 
 export interface ColliderContactProps {
@@ -417,7 +426,7 @@ export function solveVariableBeamModes(
  * 3D cross-sectional area A(s), bending inertia I(s), shell wall thickness,
  * internal Helmholtz cavity ports, and material properties — ZERO hardcoded pitch overrides!
  */
-export function estimateBodyModes(node: SceneNode): BodyModalProfile {
+export function estimateBodyModes(node: SceneNode, includeIr = false): BodyModalProfile {
   const mat = inferAcousticMaterial(node);
   const E = mat.modulusGPa * 1e9;
   const rho = Math.max(50, mat.density);
@@ -444,12 +453,22 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
   let regime: BodyModalProfile['regime'];
   let freqs: number[];
   let gains: number[];
+  let rawModeQs: number[] | undefined;
   let modeVectors: number[][] | undefined;
 
   const isCylOrTubeLike =
     node.isTube ||
     primaryGeom?.type === 'cylinder' ||
     primaryGeom?.type === 'capsule';
+
+  let collidingChildPanels = 0;
+  for (const ch of node.children ?? []) {
+    if ((ch.joints?.length ?? 0) > 0 || ch.acousticString || ch.simulation) continue;
+    if ((ch.geoms ?? []).some((g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && !(g.contype === 0 && g.conaffinity === 0))) {
+      collidingChildPanels++;
+    }
+  }
+  const isJoinedPanelBox = typeof node.tunedPitchHz !== 'number' && collidingChildPanels >= 2;
 
   if (lMax / bMid >= 1.85 && lMax / hMin >= 2.2) {
     // Slender / medium 3D beam, arched bar, rod, or chime tube:
@@ -475,6 +494,17 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
       regime = 'bar';
       gains = [1.0, 0.50, 0.25, 0.12];
     }
+  } else if (isJoinedPanelBox) {
+    // Clamped/joined rectangular box panels (shallow drawers, cabinets, crates): supported-edge plate bending
+    // (crisp 300–1100 Hz wood knock rather than low bell/plate booming) with fast seam-friction damping!
+    regime = 'plate';
+    const hWall = Math.max(0.004, section.meanWallThicknessM);
+    const sPanel = Math.max(0.055, Math.min(bMid * 0.72, lMax * 0.45));
+    const fPanel1 = Math.max(260, Math.min(4500, 0.48 * (hWall / Math.max(0.0025, sPanel * sPanel)) * cLong));
+    freqs = [fPanel1, fPanel1 * 1.58, fPanel1 * 2.34, fPanel1 * 3.25];
+    gains = [0.68, 1.0, 0.58, 0.30];
+    const seamQ = Math.min(mat.qualityQ, 18);
+    rawModeQs = [seamQ, seamQ * 0.9, seamQ * 0.8, seamQ * 0.7];
   } else if (bMid / hMin >= 3.0 && section.hollowFraction < 0.22) {
     // 2D Kirchhoff–Rayleigh plate / disk / cymbal: couple longitudinal & transverse 3D section modes!
     regime = 'plate';
@@ -495,6 +525,7 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
     // Vibrates via actual measured 3D wall thickness `meanWallThicknessM` AND any Helmholtz air cavity!
     regime = 'plate';
     const hWall = Math.max(0.001, section.meanWallThicknessM);
+    const cav = analyze3DCavityAndPorts(node);
     const rShell = 0.25 * (lMax + bMid);
     // Rayleigh flexural shell / bell ring fundamental: f ∝ (h_wall / R_shell²) * c_L
     const fShell1 = Math.max(55, Math.min(6500, 0.21 * (hWall / Math.max(0.0016, rShell * rShell)) * cLong));
@@ -507,13 +538,14 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
     ];
     gains = [1.0, 0.56, 0.30, 0.16];
 
-    // Check if the hollow shell encloses an acoustic Helmholtz cavity (e.g. woodblock, udu pot, cajón, soundbox)!
-    const cav = analyze3DCavityAndPorts(node);
-    if (cav.hasHollowCavity && cav.totalConductanceM > 0 && cav.cavityVolumeM3 > 1e-6) {
+    // Narrow-ported acoustic Helmholtz cavity (e.g. woodblock, udu pot, cajón, soundbox — NOT wide open-front cups/boxes)!
+    // Air Helmholtz modes radiate with low acoustic air Q (~11), never solid metal/wood bar Q!
+    if (cav.hasHollowCavity && !cav.isOpenCupOrShell && cav.totalConductanceM > 0 && cav.cavityVolumeM3 > 1e-6) {
       const fHelmholtz = (343 / (2 * Math.PI)) * Math.sqrt(cav.totalConductanceM / cav.cavityVolumeM3);
       if (fHelmholtz >= 35 && fHelmholtz <= 2400) {
         freqs = [fHelmholtz, ...shellModes.slice(0, 3)];
         gains = [0.88, 1.0, 0.52, 0.26];
+        rawModeQs = [11, mat.qualityQ, mat.qualityQ, mat.qualityQ];
       } else {
         freqs = shellModes;
       }
@@ -571,7 +603,8 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
   const meanWidthM = Math.min(bMid, Math.max(0.002, meanArea / Math.max(0.001, section.meanWallThicknessM * 0.85)));
   const radiatingWidthM = section.hollowFraction >= 0.18 ? bMid : meanWidthM;
 
-  const modes = buildWeightedModalVoices(freqs, gains, mat.qualityQ, contactDurationSec);
+  const modes = buildWeightedModalVoices(freqs, gains, mat.qualityQ, contactDurationSec, modeVectors, undefined, rawModeQs);
+  const vibroIr = includeIr ? simulate3DVibroAcousticIR(node, mat) : undefined;
 
   return {
     fundamentalHz: +f0.toFixed(2),
@@ -582,11 +615,13 @@ export function estimateBodyModes(node: SceneNode): BodyModalProfile {
     modes,
     rawFreqsHz: freqs,
     rawBaseGains: gains,
+    ...(rawModeQs ? { rawModeQs } : {}),
     modeVectors,
     lenAxis,
     lenBounds: section.lenBounds,
     massKg,
     radiatingWidthM,
+    ...(vibroIr !== undefined ? { bodyIr: vibroIr?.ir ?? null, bodyIrSig: vibroIr?.signature ?? '' } : {}),
   };
 }
 
@@ -597,6 +632,7 @@ function buildWeightedModalVoices(
   tauC: number,
   modeVectors?: number[][],
   strikeXi?: number,
+  modeQs?: number[],
 ): ModalVoice[] {
   const modes: ModalVoice[] = [];
   for (let idx = 0; idx < freqs.length; idx++) {
@@ -629,7 +665,8 @@ function buildWeightedModalVoices(
     if (weightedGain < 0.006) continue;
 
     // Zener thermoelastic + acoustic radiation damping increases with mode order
-    const modeQ = qualityQ / (1 + 3.8 * idx * idx);
+    const baseModeQ = modeQs?.[idx] ?? qualityQ;
+    const modeQ = baseModeQ / (1 + (modeQs ? 1.2 : 3.8) * idx * idx);
     const rawDecay = (modeQ / (Math.PI * rawHz)) * 2.8;
     const decaySec = Math.max(0.016, Math.min(4.2, rawDecay));
 
@@ -656,6 +693,7 @@ export function resolveTwoBodyImpact(
   effectiveBrightness: number;
   radiationScale: number;
   voices: ModalVoice[];
+  bodyIr?: Float32Array<ArrayBuffer> | null;
 } {
   const propsA = inferColliderContactProps(targetNode, opts.selfGeomName);
   const propsB = inferColliderContactProps(opts.strikerNode, opts.strikerGeomName);
@@ -714,14 +752,23 @@ export function resolveTwoBodyImpact(
         tauC,
         targetProfile.modeVectors,
         strikeXi,
+        targetProfile.rawModeQs,
       )
     : targetProfile.modes;
+
+  // Cached 3D Vibro-Acoustic FIR for rigid-body impacts (prewarmed once per unique 3D solid geometry + material)
+  const localIr = !opts.isPluck
+    ? targetProfile.bodyIr !== undefined
+      ? targetProfile.bodyIr
+      : (simulate3DVibroAcousticIR(targetNode, targetProfile.material)?.ir ?? null)
+    : targetProfile.bodyIr;
 
   return {
     tauC,
     effectiveBrightness,
     radiationScale,
     voices,
+    bodyIr: localIr ?? null,
   };
 }
 
@@ -732,6 +779,7 @@ export function resolveTwoBodyImpact(
 type WindowWithAudioCtx = Window & {
   __physboxSharedAudioCtx?: AudioContext;
   __physboxGestureHookInstalled?: boolean;
+  __physboxReverbSubUnsub?: () => void;
 };
 
 let sharedAudioCtx: AudioContext | null = null;
@@ -789,6 +837,15 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
     window.addEventListener('pointerdown', onGesture, { passive: true });
     window.addEventListener('keydown', onGesture, { passive: true });
   }
+  win.__physboxReverbSubUnsub?.();
+  let prevReverb = useSoundStore.getState().reverbEnabled;
+  win.__physboxReverbSubUnsub = useSoundStore.subscribe((state) => {
+    if (state.reverbEnabled !== prevReverb) {
+      prevReverb = state.reverbEnabled;
+      const ctx = sharedAudioCtx ?? win.__physboxSharedAudioCtx ?? null;
+      setStudioReverbEnabled(ctx, state.reverbEnabled);
+    }
+  });
 }
 
 /**
@@ -805,6 +862,7 @@ export function playModalImpact(
     effectiveBrightness: number;
     radiationScale: number;
     voices: ModalVoice[];
+    bodyIr?: Float32Array<ArrayBuffer> | null;
   },
 ): void {
   const ctx = getAudioContext();
@@ -825,12 +883,31 @@ export function playModalImpact(
     : Math.max(0.00035, Math.min(0.006, profile.contactDurationSec * vScale));
   const brightness = twoBodyOverride ? twoBodyOverride.effectiveBrightness : profile.material.brightness;
   const voices = twoBodyOverride ? twoBodyOverride.voices : profile.modes;
+  const activeIr = twoBodyOverride?.bodyIr !== undefined ? twoBodyOverride.bodyIr : profile.bodyIr;
 
   const outputBus = getSharedAcousticOutputBus(ctx);
   const now = ctx.currentTime;
   const master = ctx.createGain();
-  master.gain.setValueAtTime(level, now);
-  master.connect(outputBus);
+  const irConv = activeIr && activeIr.length > 0 ? createResampledConvolver(ctx, activeIr) : null;
+  let irWetGain: GainNode | null = null;
+  let dryPluckGain: GainNode | null = null;
+
+  if (irConv && isPluck) {
+    // Plucked string coupled to a 3D soundbox: route string modes through the simulated 3D soundbox FIR!
+    dryPluckGain = ctx.createGain();
+    dryPluckGain.gain.setValueAtTime(level * 0.48, now);
+    irWetGain = ctx.createGain();
+    irWetGain.gain.setValueAtTime(level * 2.15, now);
+    master.gain.setValueAtTime(1.0, now);
+    master.connect(dryPluckGain);
+    dryPluckGain.connect(outputBus);
+    master.connect(irConv);
+    irConv.connect(irWetGain);
+    irWetGain.connect(outputBus);
+  } else {
+    master.gain.setValueAtTime(level, now);
+    master.connect(outputBus);
+  }
 
   // Soft-beater strikes have slightly gentler attack rise (~tauC) vs crisp metal/pluck attacks (~1.2 ms)
   const attackTime = isPluck ? 0.0014 : Math.max(0.0012, Math.min(0.0038, tauC * 1.1));
@@ -897,17 +974,34 @@ export function playModalImpact(
   pulseSrc.connect(lp);
   lp.connect(clickGain);
   clickGain.connect(outputBus);
+
+  // For struck rigid/hollow 3D bodies (`!isPluck`), drive the Hertzian collision force pulse directly through
+  // the body's simulated 3D Vibro-Acoustic FIR (`irConv`) so hollow shells, birdhouses, wood blocks, and bars
+  // radiate their true 85 ms 3D shell + cavity + soundhole transient alongside Rayleigh-Ritz pitch sustain!
+  if (irConv && !isPluck) {
+    irWetGain = ctx.createGain();
+    const irWeight = 0.52 + 0.38 * (1 - Math.min(1, profile.material.qualityQ / 700));
+    irWetGain.gain.setValueAtTime(level * irWeight, now);
+    lp.connect(irConv);
+    irConv.connect(irWetGain);
+    irWetGain.connect(outputBus);
+    if (longest < 0.12) longest = 0.12;
+  }
+
   pulseSrc.start(now);
 
   setTimeout(() => {
     master.disconnect();
     clickGain.disconnect();
-  }, Math.ceil((longest + 0.1) * 1000));
+    try { dryPluckGain?.disconnect(); } catch { /* ignore */ }
+    try { irConv?.disconnect(); } catch { /* ignore */ }
+    try { irWetGain?.disconnect(); } catch { /* ignore */ }
+  }, Math.ceil((longest + 0.12) * 1000));
 }
 
 /** Auditions a clean medium mallet tap at the center of `node` in the Inspector. */
 export function playModalTap(node: SceneNode): BodyModalProfile {
-  const profile = estimateBodyModes(node);
+  const profile = estimateBodyModes(node, true);
   playModalImpact(profile, 0.35);
   return profile;
 }

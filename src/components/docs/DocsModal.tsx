@@ -1,4 +1,5 @@
 import { Info, X } from 'lucide-react';
+import { useSoundStore } from '../../store/soundStore';
 import { DOCS_TABS, type DocsTabId } from '../../utils/docsTabs';
 import { QuickReference } from './QuickReference';
 
@@ -16,6 +17,9 @@ export function DocsModal({ tab, onTab, onClose }: {
   onTab: (tab: DocsTabId) => void;
   onClose: () => void;
 }) {
+  const reverbEnabled = useSoundStore((s) => s.reverbEnabled);
+  const toggleReverb = useSoundStore((s) => s.toggleReverb);
+
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
       <div className="docs-modal bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-4xl w-full max-h-[85dvh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
@@ -292,6 +296,86 @@ export function DocsModal({ tab, onTab, onClose }: {
                     <strong className="text-slate-700">⛵ Open Hulls &amp; Swamping</strong>
                     <p className="text-slate-500 mt-1">Hollow open-top boats and cups displace the air inside their hull until water tops the gunwale rim; heel past the rim and the vessel swamps and loses its trapped-air buoyancy.</p>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {tab === 'sound' && (
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-150">
+                  <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">
+                    🔊 Sound &amp; 3D Vibro-Acoustics
+                  </h3>
+                  <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-200/60">
+                    <span
+                      id="docsReverbEnabledLabel"
+                      className="text-xs font-semibold text-slate-700"
+                      title="Toggles the subtle 0.68 s stereo studio-room ambience on the master bus. Individual 3D instrument body and cavity impulse responses remain active when turned off."
+                    >
+                      Reverb
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={reverbEnabled}
+                      aria-labelledby="docsReverbEnabledLabel"
+                      title={reverbEnabled ? 'Turn off studio room reverb (dry anechoic room)' : 'Turn on studio room reverb'}
+                      onClick={() => toggleReverb()}
+                      className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${reverbEnabled ? 'bg-violet-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+                    >
+                      <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${reverbEnabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  PhysBox contains <strong>zero pre-recorded audio samples</strong>. Every collision, chime strike, plucked string, bowed note, and blown bore is synthesized live from your actual 3D geometry, boolean cuts, material stiffness (<code className="font-mono">E</code>, <code className="font-mono">ρ</code>, <code className="font-mono">Q</code>), and contact forces. Carve an f-hole into a hollow box, thin a spruce top plate, fit a soundpost, drill a tonehole, or swap a soft rubber mallet for steel, and the sound changes because the 3D physics changed.
+                </p>
+
+                <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                  <div className="text-xs">
+                    <strong className="text-slate-700">📦 Coupled 3D Shell + Air-Cavity Impulse Responses (FIR Convolution)</strong>
+                    <p className="text-slate-500 mt-1">
+                      Resonant bodies are voxelized into a 3D grid — adapting down to sub-centimetre voxels on compact soundboxes and rasterizing internal welded braces such as <strong>bass bars</strong> and <strong>soundposts</strong>. Solid walls evolve under 4th-order <strong>Kirchhoff–Love plate bending</strong> (<code className="font-mono">ρh·ü + D∇⁴u</code>) coupled bi-directionally across every fluid–structure face to a staggered 3D <strong>acoustic pressure–velocity FDTD solver</strong> inside hollow cavities, soundholes, and ports, bounded by Sommerfeld radiation walls.
+                    </p>
+                    <p className="text-slate-500 mt-1.5">
+                      Driving a physical force impulse at the bridge or impact site yields an 85 ms 48 kHz <strong>vibro-acoustic impulse response (FIR)</strong> capturing wood plate modes, asymmetric soundpost coupling, Helmholtz air breathing, and port radiation. FIRs are pre-warmed automatically before simulation starts (briefly holding the first frame when needed so playback never stutters) and convolved in real time via WebAudio <code className="font-mono">ConvolverNode</code> across all four sound families below.
+                    </p>
+                  </div>
+
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🔨 Modal Collisions &amp; Two-Body Hertzian Strikes</strong>
+                    <p className="text-slate-500 mt-1">
+                      Every solid is sliced along 48 cross-sections to solve <strong>Rayleigh–Ritz / Timoshenko bending eigenmodes</strong> from its true area <code className="font-mono">A(s)</code> and moment of inertia <code className="font-mono">I(s)</code> — naturally capturing marimba underside arches (<code className="font-mono">1 : 4.0</code> octave-double harmonic tuning), tubular bells, plates, and hollow Helmholtz resonators.
+                    </p>
+                    <p className="text-slate-500 mt-1.5">
+                      When two bodies collide — or when a sliding drawer, rail carriage, or hinged door slams into a hard mechanical joint stop — <strong>Koss–Alfredson Hertzian contact mechanics</strong> computes the physical contact duration <code className="font-mono">τ_c</code> from both parts’ reduced modulus, curvature, mass, and impact speed: a soft rubber mallet lingers for milliseconds and blooms warm fundamentals, whereas a steel runner stop or glass sphere rebounds in fractions of a millisecond with bright upper partials. Each mode is weighted by <code className="font-mono">|ψ_m(ξ_hit)|</code> at the exact 3D strike point, so striking a bar right over its <code className="font-mono">0.224 L</code> nodal support silences the fundamental just as in hardware.
+                    </p>
+                  </div>
+
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🎸 Plucked &amp; Bowed Taut Strings</strong>
+                    <p className="text-slate-500 mt-1">
+                      Slender taut strings compute their pitch from <strong>Mersenne’s law</strong> (<code className="font-mono">f₀ = (1 / 2L_eff)√(T / μ)</code>) plus Euler–Bernoulli flexural dispersion from wire diameter and core material (steel, nylon, gut, or wound bronze). PhysBox traces the mechanical load path at both ends to verify the string bears on rigid 3D <strong>nut</strong> and <strong>bridge</strong> saddles before coupling string energy into the host soundbox’s 3D FIR; pressing a 3D finger onto a fingerboard shortens <code className="font-mono">L_eff</code> live.
+                    </p>
+                    <p className="text-slate-500 mt-1.5">
+                      <strong>Plucking</strong> detects plectrum release kicks and shapes harmonics by pluck position (<code className="font-mono">sin(nπx / L)</code>). <strong>Bowing</strong> tracks live horsehair velocity <code className="font-mono">v_b</code>, normal force <code className="font-mono">F_n</code>, and normalized bridge distance <code className="font-mono">β</code> inside <strong>Schelleng’s bow-force wedge</strong> (<code className="font-mono">F_min ∝ v_b / β²</code> to <code className="font-mono">F_max ∝ v_b / β</code>) — transitioning smoothly between airy <em>flautando</em> surface skate, locked <strong>Helmholtz stick-slip sawtooth</strong> oscillation (complete with <em>sul ponticello</em> / <em>sul tasto</em> spectral comb and Schumacher rosin micro-jitter), and over-pressed <em>raucous</em> crunch.
+                    </p>
+                  </div>
+
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🎺 3D Wind, Reed, Brass &amp; Flap-Valve Waveguides</strong>
+                    <p className="text-slate-500 mt-1">
+                      Hollow bores are sliced along their 3D axis to build a <strong>1D Conical Transfer-Matrix (TMM) input-impedance waveguide</strong> <code className="font-mono">Z_in(f)</code> directly from cross-sectional bore profile <code className="font-mono">A(x)</code>, bell flare cutoff, open <strong>tonehole shunts</strong>, unpadded wall leaks, dynamic <strong>plunger/hand mutes</strong>, and liquid slosh — excited by nonlinear single-reed, air-jet, or brass lip-reed models and blended through the body’s 3D wall and bell FIR.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex flex-col gap-2">
+                  <strong className="text-slate-800 font-semibold text-xs">🎼 Luthier Tuning &amp; Room Reverb</strong>
+                  <p className="text-slate-600 text-xs leading-relaxed">
+                    Select any part to open the <strong>Concert Pitch / Taut String / Wind Bore</strong> card in the right sidebar: click <strong>Tap</strong> to audition its 3D modes, <strong>Tune</strong> to carve an exact luthier underside arch, trim chime length, or set string tension to concert pitch (<code className="font-mono">C2–C7</code>), or spawn a 5-note pentatonic set. The <strong>Reverb</strong> switch at the top of this page toggles only the subtle 0.68 s stereo studio-room reflection bus — turn it off any time to inspect dry anechoic 3D instrument radiation.
+                  </p>
                 </div>
               </div>
             )}

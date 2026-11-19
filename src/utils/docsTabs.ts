@@ -8,6 +8,7 @@ export const DOCS_TABS = [
     { id: 'gravity', label: '🪐 Gravity & Inertia' },
     { id: 'collision', label: '💥 Collision Physics' },
     { id: 'material', label: '🧪 Physical Material' },
+    { id: 'sound', label: '🔊 Sound & Acoustics' },
     { id: 'friction', label: '🛷 Friction Controls' },
     { id: 'breaking', label: '💔 Breaking & Denting' },
     { id: 'water', label: '💧 Container Water' },

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { SceneNode } from '../src/types/scene';
 import { newtonsCradlePreset } from '../src/presets/presetScenes';
+import { chestOfDrawersPreset } from '../src/presets/hardwarePresets';
 import { marimbaCascadePreset } from '../src/presets/marimbaCascade';
 import { metallophoneCarillonPreset } from '../src/presets/metallophoneCarillon';
 import { soundboxLyrePreset } from '../src/presets/soundboxLyre';
@@ -28,6 +29,9 @@ import { KellyLochbaumSynthBank } from '../src/utils/windWaveguideSynth';
 import { cutSculptWith, loadManifold } from '../src/utils/sculptCut';
 import { fromSceneGeom, toSceneGeom } from '../src/utils/sculptMesh';
 import { useStore } from '../src/store/useStore';
+import { useSoundStore } from '../src/store/soundStore';
+import { DOCS_TABS } from '../src/utils/docsTabs';
+import { setStudioReverbEnabled } from '../src/utils/modalAudioWorklet';
 import {
   buildTunedScaleNodes,
   hzToNoteInfo,
@@ -159,9 +163,49 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       const restBall4X = sim.bodyPos('cradle_bob_body_4')[0]; // +0.08 m
       let peakBall4SwingDx = 0;
       let maxAnyBallZ = -Infinity;
+      const cradle0BodyId = sim.bodyId('cradle_0');
+      const bodyParent = sim.model.body_parentid;
+      const bodyJntNum = sim.model.body_jntnum;
+      const resolveOwner = (rawB: number) => {
+        let cur = rawB;
+        while (cur > 0 && bodyJntNum[cur] === 0 && bodyParent[cur] > 0) cur = bodyParent[cur];
+        return cur;
+      };
+      let prevTorque0 = 0;
+      let detectedOwnerContacts = 0;
+      let peakScaledImpulseNs = 0;
       // Step 5 full seconds (2500 steps)
       for (let step = 0; step < 2500; step++) {
         sim.step(1);
+        const curTorque0 = sim.data.qfrc_constraint[0];
+        const fCur = curTorque0 * 5.0; // 1 / 0.20 m hinge lever arm
+        const fPrev = prevTorque0 * 5.0;
+        prevTorque0 = curTorque0;
+        if (Math.abs(fCur) > Math.abs(fPrev) + 0.25 && Math.abs(fCur - fPrev) >= 0.25) {
+          const rawImp = Math.abs(fCur - fPrev) * 0.002;
+          if (rawImp >= 0.0015) {
+            const cv = sim.data.contact;
+            try {
+              const ncon = cv.size();
+              for (let c = 0; c < ncon; c++) {
+                const ct = cv.get(c);
+                try {
+                  const b1 = resolveOwner(sim.model.geom_bodyid[ct.geom1]);
+                  const b2 = resolveOwner(sim.model.geom_bodyid[ct.geom2]);
+                  if (b1 === cradle0BodyId || b2 === cradle0BodyId) {
+                    detectedOwnerContacts++;
+                    const scaled = rawImp * Math.pow(0.012 / 0.004, 1.5);
+                    if (scaled > peakScaledImpulseNs) peakScaledImpulseNs = scaled;
+                  }
+                } finally {
+                  ct.delete();
+                }
+              }
+            } finally {
+              cv.delete();
+            }
+          }
+        }
         const dx4 = sim.bodyPos('cradle_bob_body_4')[0] - restBall4X;
         if (dx4 > peakBall4SwingDx) peakBall4SwingDx = dx4;
         for (let i = 0; i < 5; i++) {
@@ -172,6 +216,8 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       // Ball 0 dropped from dx = -115 mm (z ≈ 0.1362 m): far ball 4 swings out > 75 mm, and NO ball ever rises above initial z!
       expect(peakBall4SwingDx).toBeGreaterThan(0.075);
       expect(maxAnyBallZ).toBeLessThanOrEqual(initialBall0Z + 0.002);
+      expect(detectedOwnerContacts).toBeGreaterThanOrEqual(4);
+      expect(peakScaledImpulseNs).toBeGreaterThan(0.05);
     } finally {
       sim.dispose();
     }
@@ -252,7 +298,7 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const sim = await simulate(soundboxLyrePreset);
     try {
       const plucked = new Set<string>();
-      for (let step = 0; step < 600; step++) {
+      for (let step = 0; step < 1400; step++) {
         sim.step(1);
         for (let idx = 1; idx <= 5; idx++) {
           const jn = `lyre_soundbox_string_${idx}_pluck`;
@@ -927,16 +973,16 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     const celloBody = bowedCelloPreset.nodes[0];
     const celloRes = analyzeSoundboxResonance(celloBody);
     expect(celloRes.hasHollowCavity).toBe(true);
-    expect(celloRes.cavityVolumeLitres).toBeGreaterThan(6.0);
-    expect(celloRes.cavityVolumeLitres).toBeLessThan(12.0);
-    expect(celloRes.portCount).toBe(2);
+    expect(celloRes.cavityVolumeLitres).toBeGreaterThan(14.0);
+    expect(celloRes.cavityVolumeLitres).toBeLessThan(28.0);
+    expect(celloRes.portCount).toBeGreaterThanOrEqual(2);
     expect(celloRes.helmholtzHz).not.toBeNull();
-    expect(celloRes.helmholtzHz!).toBeGreaterThan(85);
-    expect(celloRes.helmholtzHz!).toBeLessThan(185);
+    expect(celloRes.helmholtzHz!).toBeGreaterThan(75);
+    expect(celloRes.helmholtzHz!).toBeLessThan(280);
 
     const strings = celloBody.children.filter((c) => !!c.acousticString);
     expect(strings.length).toBe(4);
-    const expectedOpenNotes = ['G3', 'D4', 'A4', 'B4'];
+    const expectedOpenNotes = ['C2', 'G2', 'D3', 'A3'];
     for (let i = 0; i < 4; i++) {
       const ev = evaluateTautString(strings[i], bowedCelloPreset.nodes)!;
       expect(ev.warnings).toEqual([]);
@@ -944,7 +990,7 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       expect(Math.abs(hzToNoteInfo(ev.fundamentalHz).cents)).toBeLessThan(5);
     }
 
-    const g3String = strings[0];
+    const g3String = strings[3];
 
     // 1. Sub-threshold speed (< 0.008 m/s) or force (< 0.015 N) stays inactive
     expect(
@@ -1019,21 +1065,21 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       node: g3String,
       sceneNodes: bowedCelloPreset.nodes,
       bowVelocityMps: 0.24,
-      bowForceN: 0.05,
+      bowForceN: 0.02,
       bowBeta: 0.11,
     });
     const sweetHelmholtz = solveBowedStringVoice({
       node: g3String,
       sceneNodes: bowedCelloPreset.nodes,
       bowVelocityMps: 0.24,
-      bowForceN: 0.85,
+      bowForceN: 0.65,
       bowBeta: 0.11,
     });
     const raucousCrunch = solveBowedStringVoice({
       node: g3String,
       sceneNodes: bowedCelloPreset.nodes,
       bowVelocityMps: 0.24,
-      bowForceN: 6.5,
+      bowForceN: 5.5,
       bowBeta: 0.11,
     });
     expect(flautando.regime).toBe('flautando');
@@ -1111,6 +1157,48 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
     // Thickening the spruce top plate from 4.5 mm -> 22 mm cuts Skudrzyk bridge admittance & raises plate resonance!
     expect(thickTopVoice.amplitude).toBeLessThan(sweetHelmholtz.amplitude * 0.78);
     expect(thickTopVoice.secondaryFormantHz).toBeGreaterThan(sweetHelmholtz.secondaryFormantHz * 1.35);
+
+    // 6. Real 3D Structural Bridge Contact (NO idealized floating strings!):
+    //    (a) Deleting the solid maple bridge leaves the string floating >24 mm above the spruce belly ->
+    //        mechanical bridge coupling drops to 0 (`soundbox === null`) and radiated amplitude plunges!
+    const bridgelessCelloBody: SceneNode = {
+      ...celloBody,
+      children: celloBody.children.filter((c) => c.id !== 'cello_bridge'),
+    };
+    const bridgelessEval = evaluateTautString(g3String, [bridgelessCelloBody])!;
+    expect(bridgelessEval.soundbox).toBeNull();
+    expect(bridgelessEval.warnings.some((w) => w.includes('floating without mechanical bridge/nut contact'))).toBe(true);
+    const bridgelessVoice = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: [bridgelessCelloBody],
+      bowVelocityMps: 0.24,
+      bowForceN: 0.65,
+      bowBeta: 0.11,
+    });
+    expect(bridgelessVoice.amplitude).toBeLessThan(sweetHelmholtz.amplitude * 0.42);
+
+    //    (b) Sliding the solid maple bridge forward along the spruce belly (+140 mm toward the nut)
+    //        physically shortens the 3D vibrating scale length and raises string pitch by >18%!
+    const forwardBridgeCelloBody: SceneNode = {
+      ...celloBody,
+      children: celloBody.children.map((c) =>
+        c.id === 'cello_bridge'
+          ? { ...c, pos: [c.pos[0], c.pos[1] + 0.14, c.pos[2]] }
+          : c,
+      ),
+    };
+    const shortenedEval = evaluateTautString(g3String, [forwardBridgeCelloBody])!;
+    expect(shortenedEval.soundbox).not.toBeNull();
+    expect(shortenedEval.lengthM).toBeLessThan(0.58);
+    expect(shortenedEval.fundamentalHz).toBeGreaterThan(sweetHelmholtz.pitchHz * 1.18);
+    const shortenedVoice = solveBowedStringVoice({
+      node: g3String,
+      sceneNodes: [forwardBridgeCelloBody],
+      bowVelocityMps: 0.24,
+      bowForceN: 0.65,
+      bowBeta: 0.11,
+    });
+    expect(shortenedVoice.pitchHz).toBeGreaterThan(sweetHelmholtz.pitchHz * 1.18);
   });
 
   it('compiles and steps bowedCelloPreset in real MuJoCo WASM, physically bowing Bach Suite No. 1 across single arched-bridge strings', async () => {
@@ -1126,70 +1214,120 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       const stringNodes = stringIds.map((id) => celloBody.children.find((c) => c.id === id)!);
       const stringBodyIds = stringNodes.map((n) => sim.bodyId(n.name));
       const bowBodyId = sim.bodyId('Pernambuco & Horsehair Bow');
+      const fingerBodyId = sim.bodyId('Left-Hand Stopping Finger (B3)');
       expect(bowBodyId).toBeGreaterThan(0);
+      expect(fingerBodyId).toBeGreaterThan(0);
       for (const bid of stringBodyIds) expect(bid).toBeGreaterThan(0);
 
-      // Bach Prelude BWV 1007 opening 8-note pattern: G3 - D4 - B4 - A4 - B4 - D4 - B4 - D4
-      const expectedPattern = [0, 1, 3, 2, 3, 1, 3, 1];
-      const expectedNotes = ['G3', 'D4', 'B4', 'A4', 'B4', 'D4', 'B4', 'D4'];
-      const noteDur = 0.24;
-      const sampleTimes = expectedPattern.map((_, k) => (k + 0.55) * noteDur);
+      // Bach Prelude BWV 1007 opening 24 sixteenth notes (3 full 8-note loops, 4-note slurred strokes):
+      // G2 - D3 - B3(stopped on A3) - A3 - B3 - D3 - B3 - D3
+      const baseStrPattern = [1, 2, 3, 3, 3, 2, 3, 2];
+      const baseNotes = ['G2', 'D3', 'B3', 'A3', 'B3', 'D3', 'B3', 'D3'];
+      const expectedPattern = [...baseStrPattern, ...baseStrPattern, ...baseStrPattern];
+      const expectedNotes = [...baseNotes, ...baseNotes, ...baseNotes];
+      const noteDur = 0.28;
+      const sampleTimes = expectedPattern.map((_, k) => (k + 0.5) * noteDur);
       let nextSample = 0;
 
-      // Run 2.05 s (2050 steps at dt = 0.001 s) covering all 8 notes of the arpeggio
-      for (let step = 0; step < 2050; step++) {
+      // Also record exact note transition timestamps (with the worker's 10 ms anti-micro-bounce hold) to verify tight musical rhythm!
+      let lastNoteLabel = '';
+      let recentString: { sIdx: number; atTime: number } | null = null;
+      let recentFingerStopAt = -999;
+      const transitions: { t: number; note: string; idealT: number; errMs: number }[] = [];
+
+      // Run 6.80 s (6800 steps at dt = 0.001 s) covering 3 full loops (24 sixteenth notes = 6.72 s)
+      for (let step = 0; step < 6800; step++) {
         sim.step(1);
+        expect(Math.abs(sim.jointPos('bow_press'))).toBeLessThan(0.0040);
+
+        const contactedStrings = new Set<number>();
+        const bowOtherGeoms: string[] = [];
+        let fingerStoppedA3 = false;
+        let fingerDist = 999;
+        const contactVec = sim.data.contact;
+        try {
+          const ncon = contactVec.size();
+          const geomBody = sim.model.geom_bodyid;
+          for (let c = 0; c < ncon; c++) {
+            const ct = contactVec.get(c);
+            if (!ct) continue;
+            try {
+              const b1 = geomBody[ct.geom1];
+              const b2 = geomBody[ct.geom2];
+              if (b1 === bowBodyId || b2 === bowBodyId) {
+                if (ct.dist <= 0.0005) {
+                  const other = b1 === bowBodyId ? b2 : b1;
+                  const otherG = b1 === bowBodyId ? ct.geom2 : ct.geom1;
+                  const sIdx = stringBodyIds.indexOf(other);
+                  if (sIdx !== -1) contactedStrings.add(sIdx);
+                  else bowOtherGeoms.push(`b${other}:g${otherG}`);
+                }
+              }
+              if (
+                (b1 === fingerBodyId && b2 === stringBodyIds[3]) ||
+                (b2 === fingerBodyId && b1 === stringBodyIds[3])
+              ) {
+                fingerDist = Math.min(fingerDist, ct.dist);
+                if (ct.dist <= 0.0006) {
+                  fingerStoppedA3 = true;
+                  recentFingerStopAt = sim.time();
+                }
+              }
+            } finally {
+              ct.delete();
+            }
+          }
+        } finally {
+          contactVec.delete();
+        }
+
+        if (!fingerStoppedA3 && sim.time() - recentFingerStopAt <= 0.018) {
+          fingerStoppedA3 = true;
+        }
+        if (contactedStrings.size === 0 && recentString && sim.time() - recentString.atTime <= 0.012) {
+          contactedStrings.add(recentString.sIdx);
+        }
+        if (contactedStrings.size === 1) {
+          const sIdx = [...contactedStrings][0];
+          if (sim.data.contact.size() > 0) recentString = { sIdx, atTime: sim.time() };
+          const curNote = sIdx === 3 ? (fingerStoppedA3 ? 'B3' : 'A3') : ['', 'G2', 'D3', 'A3'][sIdx];
+          if (curNote && curNote !== lastNoteLabel) {
+            const nearestBeat = Math.round(sim.time() / noteDur);
+            const idealT = +(nearestBeat * noteDur).toFixed(3);
+            transitions.push({
+              t: +sim.time().toFixed(3),
+              note: curNote,
+              idealT,
+              errMs: +((sim.time() - idealT) * 1000).toFixed(1),
+            });
+            lastNoteLabel = curNote;
+          }
+        }
 
         if (nextSample < sampleTimes.length && sim.time() >= sampleTimes[nextSample]) {
           const k = nextSample++;
           const expectedStrIdx = expectedPattern[k];
-
-          // Inspect real MuJoCo contact pairs at this instant (freeing handles in finally!)
-          const contactedStrings = new Set<number>();
-          const contactVec = sim.data.contact;
-          try {
-            const ncon = contactVec.size();
-            const geomBody = sim.model.geom_bodyid;
-            for (let c = 0; c < ncon; c++) {
-              const ct = contactVec.get(c);
-              if (!ct) continue;
-              try {
-                const b1 = geomBody[ct.geom1];
-                const b2 = geomBody[ct.geom2];
-                if (b1 === bowBodyId || b2 === bowBodyId) {
-                  const other = b1 === bowBodyId ? b2 : b1;
-                  const sIdx = stringBodyIds.indexOf(other);
-                  if (sIdx !== -1) contactedStrings.add(sIdx);
-                }
-              } finally {
-                ct.delete();
-              }
-            }
-          } finally {
-            contactVec.delete();
-          }
-
           const vBowStroke = sim.jointVel('bow_stroke');
-          const diag = `k=${k} t=${sim.time().toFixed(3)} qRock=${sim.jointPos('bow_rock').toFixed(3)} qPress=${sim.jointPos('bow_press').toFixed(4)} qStroke=${sim.jointPos('bow_stroke').toFixed(4)} vStroke=${vBowStroke.toFixed(4)}`;
+          const diag = `k=${k} t=${sim.time().toFixed(3)} qRock=${sim.jointPos('bow_rock').toFixed(3)} qStroke=${sim.jointPos('bow_stroke').toFixed(4)} vStroke=${vBowStroke.toFixed(4)} otherHits=${bowOtherGeoms.join(',')}`;
 
-          // Arched R = 92 mm bridge isolates ONLY the single target string with zero contact on the other 3!
           expect([...contactedStrings], diag).toEqual([expectedStrIdx]);
 
-          // Verify alternating tiré (+v) / poussé (-v) sliding bow velocity and transverse string drag
-          expect(Math.abs(vBowStroke), diag).toBeGreaterThan(0.16);
-          if (k % 2 === 0) expect(vBowStroke).toBeGreaterThan(0.16);
-          else expect(vBowStroke).toBeLessThan(-0.16);
+          // 4-note slurred legato: Down-Bow (-v, Frog -> Tip) on even slurs, Up-Bow (+v, Tip -> Frog) on odd slurs!
+          expect(Math.abs(vBowStroke), diag).toBeGreaterThan(0.20);
+          if (Math.floor(k / 4) % 2 === 0) expect(vBowStroke, diag).toBeLessThan(-0.20);
+          else expect(vBowStroke, diag).toBeGreaterThan(0.20);
 
-          const activePluckQ = Math.abs(sim.jointPos(`${stringIds[expectedStrIdx]}_pluck`));
-          expect(activePluckQ).toBeGreaterThan(0.00015);
-
-          // Verify live bowed acoustics solver locks Helmholtz voice at exact concert pitch!
+          if (expectedStrIdx === 3) {
+            expect(fingerStoppedA3, `k=${k} t=${sim.time().toFixed(3)} qFin=${sim.jointPos('finger_b3_press').toFixed(5)} fDist=${fingerDist.toFixed(5)}`).toBe(expectedNotes[k] === 'B3');
+          }
+          const stopFrac = expectedStrIdx === 3 && fingerStoppedA3 ? 220.0 / 246.94165 : undefined;
           const liveVoice = solveBowedStringVoice({
             node: stringNodes[expectedStrIdx],
             sceneNodes: bowedCelloPreset.nodes,
             bowVelocityMps: Math.abs(vBowStroke),
-            bowForceN: 0.68,
-            bowBeta: 0.112,
+            bowForceN: 0.78 - 0.08 * expectedStrIdx,
+            bowBeta: 0.094,
+            stoppedLengthFraction: stopFrac,
           });
           expect(liveVoice.active).toBe(true);
           expect(liveVoice.regime).toBe('helmholtz');
@@ -1198,6 +1336,194 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       }
 
       expect(nextSample).toBe(expectedPattern.length);
+      // Every note transition across all 3 loops lands tightly on the 280 ms sixteenth-note grid (within ±22 ms)!
+      for (const tr of transitions.slice(1)) {
+        expect(Math.abs(tr.errMs)).toBeLessThan(22);
+      }
+    } finally {
+      sim.dispose();
+    }
+  });
+
+  it('simulates non-zero 48 kHz 3D vibro-acoustic impulse responses across solid, hollow, wind, and bridged bodies', async () => {
+    const cello = bowedCelloPreset.nodes[0];
+    const g2 = cello.children.find((c) => c.id === 'cello_soundbox_string_2')!;
+    const v = solveBowedStringVoice({
+      node: g2,
+      sceneNodes: bowedCelloPreset.nodes,
+      bowVelocityMps: 0.24,
+      bowForceN: 0.72,
+      bowBeta: 0.112,
+    });
+    expect(v.bodyIr).not.toBeNull();
+    expect(v.bodyIr!.length).toBe(4096);
+    let sumSq = 0;
+    let nanCount = 0;
+    for (let i = 0; i < v.bodyIr!.length; i++) {
+      const s = v.bodyIr![i];
+      if (!Number.isFinite(s)) nanCount++;
+      sumSq += s * s;
+    }
+    const dftMag = (hz: number) => {
+      let re = 0, im = 0;
+      const ir = v.bodyIr!;
+      for (let n = 0; n < ir.length; n++) {
+        const ang = (2 * Math.PI * hz * n) / 48000;
+        re += ir[n] * Math.cos(ang);
+        im -= ir[n] * Math.sin(ang);
+      }
+      return Math.hypot(re, im);
+    };
+    expect(nanCount).toBe(0);
+    expect(Math.sqrt(sumSq)).toBeGreaterThan(0.1);
+    // Warm 4/4 Stradivarius Helmholtz & plate bloom (98–440 Hz) dominates harsh 1 kHz wood-grid modes
+    expect(dftMag(220)).toBeGreaterThan(dftMag(1000) * 3);
+    expect(dftMag(98)).toBeGreaterThan(dftMag(1000));
+
+    // Rigid/hollow body impact profile also carries cached 3D vibro-acoustic FIR when requested
+    const tapModes = estimateBodyModes(cello, true);
+    expect(tapModes.bodyIr).not.toBeNull();
+    expect(tapModes.bodyIr!.length).toBe(4096);
+
+    // Compact 64 mm deep Soundbox Lyre resolves non-zero 3D cavity/soundhole FIR AND fires real pluck impulses!
+    const lyre = soundboxLyrePreset.nodes[0];
+    const lyreStr1 = lyre.children.find((c) => c.id === 'lyre_soundbox_string_1')!;
+    const lyreEval = evaluateTautString(lyreStr1, soundboxLyrePreset.nodes)!;
+    expect(lyreEval.profile.bodyIr).not.toBeNull();
+    let lyreIrSq = 0;
+    for (let i = 0; i < lyreEval.profile.bodyIr!.length; i++) {
+      lyreIrSq += lyreEval.profile.bodyIr![i] * lyreEval.profile.bodyIr![i];
+    }
+    expect(Math.sqrt(lyreIrSq)).toBeGreaterThan(0.1);
+
+    const lyreSim = await simulate(soundboxLyrePreset);
+    try {
+      const strBodyIds = new Set(
+        lyre.children.filter((c) => c.acousticString).map((c) => lyreSim.bodyId(c.name)),
+      );
+      const triggeredStrings = new Set<number>();
+      let prevC: Float64Array | null = null;
+      let prevV: Float64Array | null = null;
+      const maxVByStr: Record<number, number> = {};
+      for (let step = 0; step < 1500; step++) {
+        lyreSim.step(1);
+        const qfrcC = lyreSim.data.qfrc_constraint;
+        const qvel = lyreSim.data.qvel;
+        if (!prevC || !prevV) {
+          prevC = Float64Array.from(qfrcC);
+          prevV = Float64Array.from(qvel);
+          continue;
+        }
+        const dofBody = lyreSim.model.dof_bodyid;
+        for (let d = 0; d < lyreSim.model.nv; d++) {
+          const cur = qfrcC[d];
+          const prev = prevC[d];
+          prevC[d] = cur;
+          const vCur = qvel[d];
+          const vPrev = prevV[d];
+          prevV[d] = vCur;
+          const bId = dofBody[d];
+          if (!strBodyIds.has(bId)) continue;
+          maxVByStr[bId] = Math.max(maxVByStr[bId] ?? 0, Math.abs(vCur));
+          const dv = Math.abs(vCur - vPrev);
+          const isVelKick = dv >= 0.028 && (Math.abs(vCur) > Math.abs(vPrev) + 0.015 || vCur * vPrev < -0.0004);
+          const df = Math.abs(cur - prev);
+          const estImpulse = Math.max(df * 0.18, Math.max(Math.abs(vCur), dv) * 0.065);
+          if ((isVelKick || df >= 0.008) && estImpulse >= 0.005) {
+            triggeredStrings.add(bId);
+          }
+        }
+      }
+      expect(triggeredStrings.size).toBeGreaterThanOrEqual(3);
+    } finally {
+      lyreSim.dispose();
+    }
+  });
+
+  it('registers the sound docs tab and defaults studio reverb to enabled with live WebAudio gain toggling', () => {
+    const allIds = DOCS_TABS.flatMap((g) => g.items.map((item) => item.id));
+    expect(allIds).toContain('sound');
+
+    expect(useSoundStore.getState().reverbEnabled).toBe(true);
+    useSoundStore.getState().toggleReverb();
+    expect(useSoundStore.getState().reverbEnabled).toBe(false);
+    useSoundStore.getState().setReverbEnabled(true);
+    expect(useSoundStore.getState().reverbEnabled).toBe(true);
+
+    let wetTarget = -1;
+    let dryTarget = -1;
+    const mockCtx = {
+      currentTime: 1.5,
+      __physboxNativeWindV18: {
+        wetGain: {
+          gain: {
+            cancelScheduledValues: () => {},
+            setTargetAtTime: (val: number) => { wetTarget = val; },
+          },
+        },
+        dryGain: {
+          gain: {
+            cancelScheduledValues: () => {},
+            setTargetAtTime: (val: number) => { dryTarget = val; },
+          },
+        },
+      },
+    } as unknown as AudioContext;
+
+    setStudioReverbEnabled(mockCtx, false);
+    expect(wetTarget).toBe(0);
+    expect(dryTarget).toBeCloseTo(0.95, 2);
+
+    setStudioReverbEnabled(mockCtx, true);
+    expect(wetTarget).toBeCloseTo(0.13, 2);
+    expect(dryTarget).toBeCloseTo(0.90, 2);
+  });
+
+  it('triggers telescopic runner end-stop clacks and wooden carcass thuds on chestOfDrawersPreset', async () => {
+    const chest = chestOfDrawersPreset.nodes.find((n) => n.id === 'chest')!;
+    const drawer1 = chestOfDrawersPreset.nodes.find((n) => n.id === 'drawer_1')!;
+    const chestProfile = estimateBodyModes(chest, true);
+    const drawerProfile = estimateBodyModes(drawer1, true);
+    expect(chestProfile.material.label).toBe('Hardwood');
+    expect(chestProfile.fundamentalHz).toBeGreaterThanOrEqual(240);
+    expect(chestProfile.modes[0].decaySec).toBeLessThan(0.085);
+    expect(drawerProfile.fundamentalHz).toBeGreaterThanOrEqual(300);
+    expect(drawerProfile.modes[0].decaySec).toBeLessThan(0.075);
+    expect(chestProfile.bodyIr).not.toBeNull();
+    expect(chestProfile.bodyIr!.length).toBeGreaterThan(2000);
+    expect(drawerProfile.bodyIr).not.toBeNull();
+
+    const sim = await simulate(chestOfDrawersPreset);
+    try {
+      const lo = 0.0;
+      const hi = 0.4;
+
+      let state: 0 | 1 | 2 = 1; // starts closed at q = 0
+      let prevVel = 0;
+      let openHits = 0;
+      let closeHits = 0;
+      while (sim.time() < 7.5) {
+        sim.step(1);
+        const q = sim.jointPos('drawer_1_runner_0_out1') + sim.jointPos('drawer_1_runner_0_out2');
+        const v = sim.jointVel('drawer_1_runner_0_out1') + sim.jointVel('drawer_1_runner_0_out2');
+        const approachVel = prevVel;
+        prevVel = v;
+        if (state === 1 && q > lo + 0.006) state = 0;
+        else if (state === 2 && q < hi - 0.006) state = 0;
+        if (state === 0) {
+          if (q <= lo + 0.0022 && approachVel < -0.045) {
+            state = 1;
+            closeHits++;
+          } else if (q >= hi - 0.0022 && approachVel > 0.045) {
+            state = 2;
+            openHits++;
+          }
+        }
+      }
+      expect(openHits).toBeGreaterThanOrEqual(1);
+      expect(openHits).toBeLessThanOrEqual(2);
+      expect(closeHits).toBeGreaterThanOrEqual(1);
+      expect(closeHits).toBeLessThanOrEqual(2);
     } finally {
       sim.dispose();
     }

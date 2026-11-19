@@ -17,12 +17,11 @@ export const soundboxLyrePreset: SceneGraph = (() => {
     deformMaterial: 'softwood',
     csgEnabled: true,
     collision: 'hull',
-    script: `// Gentle pendulum strum sweeping the plectrum back and forth across all 5 strings
+    script: `// Gentle pendulum strum sweeping the plectrum cleanly across all 5 strings
 const t = api.getTime();
 const target = 0.068 + 0.068 * Math.sin(t * 2.1);
 const x = api.getJointPosition('plectrum_sweep');
-const v = api.getJointVelocity('plectrum_sweep');
-api.applyJointForce('plectrum_sweep', 140 * (target - x) - 3.5 * v);
+api.applyJointForce('plectrum_sweep', 145 * (target - x));
 `,
     joints: [],
     geoms: [
@@ -48,22 +47,6 @@ api.applyJointForce('plectrum_sweep', 140 * (target - x) - 3.5 * v);
         csg: 'difference',
         rgba: [0.15, 0.10, 0.08, 0.6],
       },
-      {
-        name: 'bridge_saddle',
-        type: 'box',
-        size: [0.056, 0.005, 0.0045],
-        pos: [0, -0.132, 0.0355],
-        rgba: [0.28, 0.15, 0.09, 1],
-        role: 'visual',
-      },
-      {
-        name: 'nut_saddle',
-        type: 'box',
-        size: [0.056, 0.005, 0.0045],
-        pos: [0, 0.132, 0.0355],
-        rgba: [0.92, 0.90, 0.84, 1],
-        role: 'visual',
-      },
     ],
     children: [],
   };
@@ -75,21 +58,74 @@ api.applyJointForce('plectrum_sweep', 140 * (target - x) - 3.5 * v);
     pluckPos: 0.2,
   });
 
+  // Real structural rosewood bridge & bone nut as welded child bodies planted on the spruce soundboard (z = 0.032..0.040)
+  // bearing directly underneath all 5 strings (y = ±0.1312, z = 0.040) without inflating soundbox's z = 0.032 convex hull!
+  const lyreBridge: SceneNode = {
+    id: 'lyre_bridge',
+    name: 'Rosewood Bridge Saddle',
+    type: 'body',
+    pos: [0, -0.131, 0],
+    deformMaterial: 'hardwood',
+    joints: [],
+    geoms: [
+      {
+        name: 'bridge_saddle',
+        type: 'box',
+        size: [0.056, 0.003, 0.004],
+        pos: [0, 0, 0.036],
+        rgba: [0.28, 0.15, 0.09, 1],
+        contype: 0,
+        conaffinity: 0,
+      },
+    ],
+    children: [],
+  };
+
+  const lyreNut: SceneNode = {
+    id: 'lyre_nut',
+    name: 'Bone Nut Saddle',
+    type: 'body',
+    pos: [0, 0.131, 0],
+    deformMaterial: 'hardwood',
+    joints: [],
+    geoms: [
+      {
+        name: 'nut_saddle',
+        type: 'box',
+        size: [0.056, 0.003, 0.004],
+        pos: [0, 0, 0.036],
+        rgba: [0.92, 0.90, 0.84, 1],
+        contype: 0,
+        conaffinity: 0,
+      },
+    ],
+    children: [],
+  };
+
   // Position plectrum tip so its rounded hemisphere grazes the top 1.1 mm crown of the strings!
   const plectrum: SceneNode = {
     id: 'lyre_plectrum',
     name: 'Tortoiseshell Plectrum',
     type: 'body',
-    pos: [-0.068, -0.065, 0.0428],
+    pos: [-0.068, -0.065, 0.04315],
     deformMaterial: 'plastic',
     joints: [
       {
         name: 'plectrum_sweep',
         type: 'slide',
         axis: [1, 0, 0],
-        damping: 0.25,
+        damping: 2.8,
         limited: true,
-        range: [-0.02, 0.145],
+        range: [-0.03, 0.16],
+      },
+      {
+        name: 'plectrum_flex',
+        type: 'slide',
+        axis: [0, 0, 1],
+        stiffness: 650,
+        damping: 2.4,
+        limited: true,
+        range: [-0.0005, 0.004],
       },
     ],
     geoms: [
@@ -98,9 +134,9 @@ api.applyJointForce('plectrum_sweep', 140 * (target - x) - 3.5 * v);
         type: 'capsule',
         fromto: [0, 0, 0.016, 0, 0, 0],
         size: [0.0028],
-        density: 1180,
-        friction: [0.05, 0.001, 0.0001],
-        solref: [0.004, 0.25],
+        mass: 0.006,
+        friction: [0.04, 0.001, 0.0001],
+        solref: [0.005, 0.75],
         rgba: [0.58, 0.26, 0.12, 1],
       },
       {
@@ -108,6 +144,7 @@ api.applyJointForce('plectrum_sweep', 140 * (target - x) - 3.5 * v);
         type: 'box',
         size: [0.006, 0.014, 0.003],
         pos: [0, 0, 0.020],
+        mass: 0.012,
         rgba: [0.35, 0.24, 0.16, 1],
         contype: 0,
         conaffinity: 0,
@@ -116,6 +153,6 @@ api.applyJointForce('plectrum_sweep', 140 * (target - x) - 3.5 * v);
     children: [],
   };
 
-  soundbox.children = [...strings, plectrum];
+  soundbox.children = [lyreBridge, lyreNut, ...strings, plectrum];
   return { nodes: [soundbox] };
 })();

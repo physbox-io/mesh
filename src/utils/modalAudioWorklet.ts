@@ -16,8 +16,14 @@
 // ---------------------------------------------------------------------------
 
 import type { WindExciterKind } from '../types/scene';
+import { useSoundStore } from '../store/soundStore';
 import type { ModalVoice } from './modalAudio';
+import { resampleIrToContextRate } from './solidAcoustics3D';
 import { solvePlayableWindVoice } from './windAcoustics';
+
+const STUDIO_REVERB_WET_GAIN = 0.13;
+const STUDIO_REVERB_DRY_ON = 0.90;
+const STUDIO_REVERB_DRY_OFF = 0.95;
 
 export interface WorkletWindVoicePayload {
   id: string;
@@ -37,6 +43,8 @@ export interface WorkletWindVoicePayload {
   exactCells?: number;
   junctionK?: number[];
   shunts?: { cell: number; coeff: number }[];
+  bodyIr?: Float32Array<ArrayBuffer> | null;
+  bodyIrSig?: string;
 }
 
 export interface WorkletStrikePayload {
@@ -54,10 +62,18 @@ export interface WorkletBowedVoicePayload {
   pitchHz: number;
   amplitude: number;
   harmonicWeights: number[];
+  stringHarmonicWeights?: number[];
+  bodyIr?: Float32Array<ArrayBuffer> | null;
+  bodyIrSig?: string;
   bodyFormantHz: number;
   bodyFormantGainDb: number;
   bodyFormantQ: number;
   secondaryFormantHz: number;
+  woodModeHz?: number;
+  dipoleCancelHz?: number;
+  dipoleCancelDb?: number;
+  bridgeHillHz?: number;
+  bridgeHillGainDb?: number;
   lowpassHz: number;
   rosinNoiseGain: number;
   rosinCenterHz: number;
@@ -69,11 +85,18 @@ interface NativeBowedVoiceSlot {
   activeSinceTime: number;
   lastPitchHz: number;
   lastWaveSig: string;
+  lastIrSig: string;
   osc: OscillatorNode;
+  osc2: OscillatorNode;
+  osc3: OscillatorNode;
+  mixGain: GainNode;
   vibOsc: OscillatorNode;
   vibDepth: GainNode;
-  bodyFormant: BiquadFilterNode;
-  secondaryFormant: BiquadFilterNode;
+  jitterDepth1: GainNode;
+  jitterDepth2: GainNode;
+  bodyConvolver: ConvolverNode | null;
+  wetBodyGain: GainNode;
+  dryWireGain: GainNode;
   bowLowpass: BiquadFilterNode;
   voiceGain: GainNode;
   rosinFilter: BiquadFilterNode;
@@ -89,6 +112,7 @@ interface NativeWindVoiceSlot {
   wasActive: boolean;
   lastPitchHz: number;
   lastWaveSig: string;
+  lastIrSig: string;
   osc: OscillatorNode;
   vibOsc: OscillatorNode;
   vibDepth: GainNode;
@@ -99,6 +123,9 @@ interface NativeWindVoiceSlot {
   bodyFormant: BiquadFilterNode;
   bellLowpass1: BiquadFilterNode;
   bellLowpass2: BiquadFilterNode;
+  bodyConvolver: ConvolverNode | null;
+  wetBodyIrGain: GainNode;
+  dryBoreGain: GainNode;
   voiceGain: GainNode;
   noiseFilter: BiquadFilterNode;
   noiseGain: GainNode;
@@ -140,9 +167,43 @@ type AudioContextWithWindGraph = AudioContext & {
   __physboxNativeWindV14?: LegacyWindGraphState;
   __physboxNativeWindV15?: LegacyWindGraphState;
   __physboxNativeWindV16?: LegacyWindGraphState;
-  __physboxNativeWindV17?: NativeWindBankState;
-  __physboxNativeBowedV1?: NativeBowedBankState;
+  __physboxNativeWindV17?: LegacyWindGraphState & { slots?: { osc?: OscillatorNode; vibOsc?: OscillatorNode; squelchOsc?: OscillatorNode }[] };
+  __physboxNativeWindV18?: NativeWindBankState;
+  __physboxNativeBowedV1?: { slots: { voiceGain: GainNode; rosinGain?: GainNode; osc?: OscillatorNode }[] };
+  __physboxNativeBowedV2?: { slots: { voiceGain: GainNode; rosinGain?: GainNode; osc?: OscillatorNode; osc2?: OscillatorNode; vibOsc?: OscillatorNode }[] };
+  __physboxNativeBowedV3?: { slots: { voiceGain: GainNode; rosinGain?: GainNode; osc?: OscillatorNode; osc2?: OscillatorNode; osc3?: OscillatorNode; vibOsc?: OscillatorNode }[] };
+  __physboxNativeBowedV4?: { slots: { voiceGain: GainNode; rosinGain?: GainNode; osc?: OscillatorNode; osc2?: OscillatorNode; osc3?: OscillatorNode; vibOsc?: OscillatorNode }[] };
+  __physboxNativeBowedV5?: { slots: { voiceGain: GainNode; rosinGain?: GainNode; osc?: OscillatorNode; osc2?: OscillatorNode; osc3?: OscillatorNode; vibOsc?: OscillatorNode }[] };
+  __physboxNativeBowedV6?: NativeBowedBankState;
+  __physboxNativeBowedV7?: NativeBowedBankState;
 };
+
+/**
+ * Instantiates a fresh write-once `ConvolverNode` whose `AudioBuffer` is resampled to
+ * `ctx.sampleRate` (e.g. 44.1 kHz on Windows WASAPI vs 48 kHz), preventing both
+ * `NotSupportedError` (sample-rate mismatch) and `InvalidStateError` (re-setting `.buffer`).
+ */
+export function createResampledConvolver(
+  ctx: AudioContext,
+  ir48k: Float32Array,
+  sourceSampleRate = 48000,
+): ConvolverNode | null {
+  if (typeof ctx.createConvolver !== 'function' || typeof ctx.createBuffer !== 'function') {
+    return null;
+  }
+  try {
+    const sr = ctx.sampleRate || 48000;
+    const samples = resampleIrToContextRate(ir48k, sr, sourceSampleRate);
+    const buf = ctx.createBuffer(1, samples.length, sr);
+    buf.getChannelData(0).set(samples);
+    const conv = ctx.createConvolver();
+    conv.normalize = false;
+    conv.buffer = buf;
+    return conv;
+  } catch {
+    return null;
+  }
+}
 
 function buildPuffGateCurve(): Float32Array<ArrayBuffer> {
   const N = 513;
@@ -232,9 +293,17 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
     '__physboxNativeWindV14',
     '__physboxNativeWindV15',
     '__physboxNativeWindV16',
+    '__physboxNativeWindV17',
   ] as const) {
     const prev = c[oldKey];
     if (prev) {
+      if ('slots' in prev && Array.isArray(prev.slots)) {
+        for (const sl of prev.slots) {
+          try { sl.osc?.stop(); } catch { /* ignore */ }
+          try { sl.vibOsc?.stop(); } catch { /* ignore */ }
+          try { sl.squelchOsc?.stop(); } catch { /* ignore */ }
+        }
+      }
       try { prev.keepAlive?.stop(); } catch { /* ignore */ }
       try { prev.keepAlive?.disconnect(); } catch { /* ignore */ }
       try { prev.noiseSource?.stop(); } catch { /* ignore */ }
@@ -253,7 +322,7 @@ function disconnectLegacyGraphs(c: AudioContextWithWindGraph): void {
 function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  if (c.__physboxNativeWindV17) return c.__physboxNativeWindV17;
+  if (c.__physboxNativeWindV18) return c.__physboxNativeWindV18;
   if (typeof ctx.createOscillator !== 'function' || typeof ctx.createWaveShaper !== 'function') {
     return null;
   }
@@ -284,10 +353,11 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
     outputTarget = limiter;
   }
 
+  const reverbOn = useSoundStore.getState().reverbEnabled;
   const dryGain = ctx.createGain();
-  dryGain.gain.setValueAtTime(0.90, now);
+  dryGain.gain.setValueAtTime(reverbOn ? STUDIO_REVERB_DRY_ON : STUDIO_REVERB_DRY_OFF, now);
   const wetGain = ctx.createGain();
-  wetGain.gain.setValueAtTime(0.13, now);
+  wetGain.gain.setValueAtTime(reverbOn ? STUDIO_REVERB_WET_GAIN : 0, now);
 
   masterGain.connect(presenceShelf);
   presenceShelf.connect(dryGain);
@@ -399,10 +469,18 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
 
     osc.connect(driveGain);
     driveGain.connect(shaper);
+    const dryBoreGain = ctx.createGain();
+    dryBoreGain.gain.setValueAtTime(1.0, now);
+
+    const wetBodyIrGain = ctx.createGain();
+    wetBodyIrGain.gain.setValueAtTime(0, now);
+
     shaper.connect(bodyFormant);
     bodyFormant.connect(bellLowpass1);
     bellLowpass1.connect(bellLowpass2);
-    bellLowpass2.connect(voiceGain);
+    bellLowpass2.connect(dryBoreGain);
+    dryBoreGain.connect(voiceGain);
+    wetBodyIrGain.connect(voiceGain);
     voiceGain.connect(masterGain);
 
     if (noiseSource) {
@@ -420,6 +498,7 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
       wasActive: false,
       lastPitchHz: 261.63,
       lastWaveSig: '',
+      lastIrSig: '',
       osc,
       vibOsc,
       vibDepth,
@@ -430,6 +509,9 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
       bodyFormant,
       bellLowpass1,
       bellLowpass2,
+      bodyConvolver: null,
+      wetBodyIrGain,
+      dryBoreGain,
       voiceGain,
       noiseFilter,
       noiseGain,
@@ -447,7 +529,7 @@ function ensureNativeWindBank(ctx: AudioContext): NativeWindBankState | null {
     slots,
     softSatCurve,
   };
-  c.__physboxNativeWindV17 = bank;
+  c.__physboxNativeWindV18 = bank;
   return bank;
 }
 
@@ -458,6 +540,19 @@ export function getOrInitModalWorklet(ctx: AudioContext): GainNode | null {
 /** Shared studio-chamber output bus (presence + 0.68 s room convolver + safety limiter) for ALL acoustic instruments. */
 export function getSharedAcousticOutputBus(ctx: AudioContext): AudioNode {
   return ensureNativeWindBank(ctx)?.masterGain ?? ctx.destination;
+}
+
+/** Smoothly toggles the 0.68 s stereo studio-room convolver wet send on the master bus without touching 3D body FIRs. */
+export function setStudioReverbEnabled(ctx: AudioContext | null, enabled: boolean): void {
+  if (!ctx) return;
+  const c = ctx as AudioContextWithWindGraph;
+  const bank = c.__physboxNativeWindV18;
+  if (!bank) return;
+  const now = ctx.currentTime;
+  bank.wetGain.gain.cancelScheduledValues(now);
+  bank.wetGain.gain.setTargetAtTime(enabled ? STUDIO_REVERB_WET_GAIN : 0, now, 0.018);
+  bank.dryGain.gain.cancelScheduledValues(now);
+  bank.dryGain.gain.setTargetAtTime(enabled ? STUDIO_REVERB_DRY_ON : STUDIO_REVERB_DRY_OFF, now, 0.018);
 }
 
 export function postWorkletStrike(_ctx: AudioContext, _payload: WorkletStrikePayload): boolean {
@@ -572,6 +667,28 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
     slot.squelchOsc.frequency.setTargetAtTime(solved.squelchRateHz ?? 12.0, now, 0.025);
     slot.squelchDepth.gain.setTargetAtTime(solved.squelchSweepHz ?? 0, now, 0.020);
 
+    // Hot-swap simulated 3D Vibro-Acoustic Impulse Response of the wind instrument's 3D wall/bell geometry!
+    if (v.bodyIr && v.bodyIr.length > 0 && v.bodyIrSig && slot.lastIrSig !== v.bodyIrSig) {
+      if (slot.bodyConvolver) {
+        try { slot.bellLowpass2.disconnect(slot.bodyConvolver); } catch { /* ignore */ }
+        try { slot.bodyConvolver.disconnect(); } catch { /* ignore */ }
+      }
+      const nextConv = createResampledConvolver(ctx, v.bodyIr);
+      slot.bodyConvolver = nextConv;
+      if (nextConv) {
+        slot.bellLowpass2.connect(nextConv);
+        nextConv.connect(slot.wetBodyIrGain);
+        slot.lastIrSig = v.bodyIrSig;
+      }
+    }
+    if (slot.bodyConvolver) {
+      slot.dryBoreGain.gain.setTargetAtTime(0.82, now, 0.015);
+      slot.wetBodyIrGain.gain.setTargetAtTime(0.55, now, 0.015);
+    } else {
+      slot.dryBoreGain.gain.setTargetAtTime(1.0, now, 0.015);
+      slot.wetBodyIrGain.gain.setTargetAtTime(0, now, 0.015);
+    }
+
     slot.wasActive = true;
   }
 
@@ -592,7 +709,7 @@ export function postWorkletWindSilence(ctx: AudioContext | null): void {
   if (!ctx) return;
   const c = ctx as AudioContextWithWindGraph;
   disconnectLegacyGraphs(c);
-  const bank = c.__physboxNativeWindV17;
+  const bank = c.__physboxNativeWindV18;
   if (!bank) return;
   const now = ctx.currentTime;
   for (const slot of bank.slots) {
@@ -612,7 +729,29 @@ export function postWorkletWindSilence(ctx: AudioContext | null): void {
 
 function ensureNativeBowedBank(ctx: AudioContext): NativeBowedBankState | null {
   const c = ctx as AudioContextWithWindGraph;
-  if (c.__physboxNativeBowedV1) return c.__physboxNativeBowedV1;
+  for (const oldBowedKey of [
+    '__physboxNativeBowedV1',
+    '__physboxNativeBowedV2',
+    '__physboxNativeBowedV3',
+    '__physboxNativeBowedV4',
+    '__physboxNativeBowedV5',
+    '__physboxNativeBowedV6',
+  ] as const) {
+    const prevBowed = c[oldBowedKey];
+    if (prevBowed) {
+      for (const oldSlot of prevBowed.slots) {
+        try { oldSlot.voiceGain.disconnect(); } catch { /* ignore */ }
+        try { oldSlot.rosinGain?.disconnect(); } catch { /* ignore */ }
+        try { (oldSlot as { bodyConvolver?: ConvolverNode | null }).bodyConvolver?.disconnect(); } catch { /* ignore */ }
+        try { oldSlot.osc?.stop(); } catch { /* ignore */ }
+        try { (oldSlot as { osc2?: OscillatorNode }).osc2?.stop(); } catch { /* ignore */ }
+        try { (oldSlot as { osc3?: OscillatorNode }).osc3?.stop(); } catch { /* ignore */ }
+        try { (oldSlot as { vibOsc?: OscillatorNode }).vibOsc?.stop(); } catch { /* ignore */ }
+      }
+      delete c[oldBowedKey];
+    }
+  }
+  if (c.__physboxNativeBowedV7) return c.__physboxNativeBowedV7;
   const windBank = ensureNativeWindBank(ctx);
   if (!windBank) return null;
 
@@ -621,78 +760,134 @@ function ensureNativeBowedBank(ctx: AudioContext): NativeBowedBankState | null {
   const slots: NativeBowedVoiceSlot[] = [];
 
   for (let i = 0; i < 4; i++) {
+    // 3-Ribbon Helmholtz stick-slip string source (pure linear string motion — ZERO hardcoded body biquads!)
     const osc = ctx.createOscillator();
     osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(196.0, now);
+    osc.frequency.setValueAtTime(98.0, now);
 
-    // Expressive left-hand vibrato (~5.4 Hz, slightly staggered across polyphonic strings)
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'sawtooth';
+    osc2.frequency.setValueAtTime(98.0, now);
+    osc2.detune.setValueAtTime(-3.6, now);
+
+    const osc3 = ctx.createOscillator();
+    osc3.type = 'sawtooth';
+    osc3.frequency.setValueAtTime(98.0, now);
+    osc3.detune.setValueAtTime(4.1, now);
+
+    const g1 = ctx.createGain();
+    g1.gain.setValueAtTime(0.68, now);
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.28, now);
+    const g3 = ctx.createGain();
+    g3.gain.setValueAtTime(0.26, now);
+
+    const mixGain = ctx.createGain();
+    mixGain.gain.setValueAtTime(0.88, now);
+
+    // Expressive left-hand vibrato (~5.15 Hz)
     const vibOsc = ctx.createOscillator();
     vibOsc.type = 'sine';
-    vibOsc.frequency.setValueAtTime(5.32 + i * 0.11, now);
+    vibOsc.frequency.setValueAtTime(5.12 + i * 0.13, now);
 
     const vibDepth = ctx.createGain();
     vibDepth.gain.setValueAtTime(0, now);
     vibOsc.connect(vibDepth);
     vibDepth.connect(osc.frequency);
+    vibDepth.connect(osc2.frequency);
+    vibDepth.connect(osc3.frequency);
 
-    // Primary Helmholtz air / corpus resonance filter
-    const bodyFormant = ctx.createBiquadFilter();
-    bodyFormant.type = 'peaking';
-    bodyFormant.frequency.setValueAtTime(135, now);
-    bodyFormant.Q.setValueAtTime(2.2, now);
-    bodyFormant.gain.setValueAtTime(5.5, now);
+    // Schumacher stochastic rosin stick-slip flyback jitter (~15-36 Hz band-limited noise -> ±4.5 cents)
+    const jitterLp1 = ctx.createBiquadFilter();
+    jitterLp1.type = 'lowpass';
+    jitterLp1.frequency.setValueAtTime(30 + i * 4, now);
+    jitterLp1.Q.setValueAtTime(0.85, now);
+    const jitterDepth1 = ctx.createGain();
+    jitterDepth1.gain.setValueAtTime(4.2, now);
 
-    // Secondary Kirchhoff spruce top-plate resonance filter
-    const secondaryFormant = ctx.createBiquadFilter();
-    secondaryFormant.type = 'peaking';
-    secondaryFormant.frequency.setValueAtTime(295, now);
-    secondaryFormant.Q.setValueAtTime(2.4, now);
-    secondaryFormant.gain.setValueAtTime(4.2, now);
+    const jitterLp2 = ctx.createBiquadFilter();
+    jitterLp2.type = 'bandpass';
+    jitterLp2.frequency.setValueAtTime(21 + i * 3, now);
+    jitterLp2.Q.setValueAtTime(1.1, now);
+    const jitterDepth2 = ctx.createGain();
+    jitterDepth2.gain.setValueAtTime(5.8, now);
 
-    // Bow-pressure brightness lowpass filter
+    if (windBank.noiseSource) {
+      windBank.noiseSource.connect(jitterLp1);
+      jitterLp1.connect(jitterDepth1);
+      jitterDepth1.connect(osc.detune);
+
+      windBank.noiseSource.connect(jitterLp2);
+      jitterLp2.connect(jitterDepth2);
+      jitterDepth2.connect(osc2.detune);
+    }
+
+    const wetBodyGain = ctx.createGain();
+    wetBodyGain.gain.setValueAtTime(0, now);
+
+    const dryWireGain = ctx.createGain();
+    dryWireGain.gain.setValueAtTime(1.0, now);
+
+    // Smooth Bessel viscoelastic string/radiation rolloff (Q = 0.52, zero resonant filter peak!)
     const bowLowpass = ctx.createBiquadFilter();
     bowLowpass.type = 'lowpass';
-    bowLowpass.frequency.setValueAtTime(2800, now);
-    bowLowpass.Q.setValueAtTime(0.85, now);
+    bowLowpass.frequency.setValueAtTime(2600, now);
+    bowLowpass.Q.setValueAtTime(0.52, now);
 
     const voiceGain = ctx.createGain();
     voiceGain.gain.setValueAtTime(0, now);
 
-    // Bandpass horsehair rosin friction whisper routed through the wooden corpus formants
     const rosinFilter = ctx.createBiquadFilter();
     rosinFilter.type = 'bandpass';
-    rosinFilter.frequency.setValueAtTime(1600, now);
-    rosinFilter.Q.setValueAtTime(1.6, now);
+    rosinFilter.frequency.setValueAtTime(2000, now);
+    rosinFilter.Q.setValueAtTime(1.3, now);
 
     const rosinGain = ctx.createGain();
     rosinGain.gain.setValueAtTime(0, now);
 
-    osc.connect(bodyFormant);
-    bodyFormant.connect(secondaryFormant);
-    secondaryFormant.connect(bowLowpass);
+    osc.connect(g1);
+    osc2.connect(g2);
+    osc3.connect(g3);
+    g1.connect(mixGain);
+    g2.connect(mixGain);
+    g3.connect(mixGain);
+
+    mixGain.connect(dryWireGain);
+    dryWireGain.connect(bowLowpass);
+    wetBodyGain.connect(bowLowpass);
+
     bowLowpass.connect(voiceGain);
     voiceGain.connect(sharedBus);
 
     if (windBank.noiseSource) {
       windBank.noiseSource.connect(rosinFilter);
       rosinFilter.connect(rosinGain);
-      rosinGain.connect(bodyFormant);
+      rosinGain.connect(bowLowpass);
     }
 
     osc.start(now);
+    osc2.start(now);
+    osc3.start(now);
     vibOsc.start(now);
 
     slots.push({
       id: '',
       wasActive: false,
       activeSinceTime: 0,
-      lastPitchHz: 196.0,
+      lastPitchHz: 98.0,
       lastWaveSig: '',
+      lastIrSig: '',
       osc,
+      osc2,
+      osc3,
+      mixGain,
       vibOsc,
       vibDepth,
-      bodyFormant,
-      secondaryFormant,
+      jitterDepth1,
+      jitterDepth2,
+      bodyConvolver: null,
+      wetBodyGain,
+      dryWireGain,
       bowLowpass,
       voiceGain,
       rosinFilter,
@@ -701,7 +896,7 @@ function ensureNativeBowedBank(ctx: AudioContext): NativeBowedBankState | null {
   }
 
   const bowedBank: NativeBowedBankState = { slots };
-  c.__physboxNativeBowedV1 = bowedBank;
+  c.__physboxNativeBowedV7 = bowedBank;
   return bowedBank;
 }
 
@@ -731,59 +926,106 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
     slot.id = v.id;
 
     if (!v.active || v.amplitude <= 0.001) {
-      slot.voiceGain.gain.setTargetAtTime(0, now, 0.032);
-      slot.rosinGain.gain.setTargetAtTime(0, now, 0.010);
-      slot.vibDepth.gain.setTargetAtTime(0, now, 0.016);
+      // Singing 115 ms open-string sympathetic ring connects legato crossings warmly without muddying 16th notes!
+      slot.voiceGain.gain.setTargetAtTime(0, now, 0.115);
+      slot.rosinGain.gain.setTargetAtTime(0, now, 0.015);
+      slot.vibDepth.gain.setTargetAtTime(0, now, 0.040);
       slot.wasActive = false;
       continue;
     }
 
-    const hw = v.harmonicWeights;
-    const waveSig = `${hw.length}:${hw.slice(0, 20).map((w) => Math.round(w * 40)).join(',')}`;
+    // Instantiate a fresh resampled ConvolverNode whenever the 3D body/bridge IR signature changes!
+    const wantIr = !!(v.bodyIr && v.bodyIr.length > 0 && v.bodyIrSig);
+    if (wantIr && v.bodyIr && v.bodyIrSig && slot.lastIrSig !== v.bodyIrSig) {
+      if (slot.bodyConvolver) {
+        try { slot.mixGain.disconnect(slot.bodyConvolver); } catch { /* ignore */ }
+        try { slot.rosinGain.disconnect(slot.bodyConvolver); } catch { /* ignore */ }
+        try { slot.bodyConvolver.disconnect(); } catch { /* ignore */ }
+      }
+      const nextConv = createResampledConvolver(ctx, v.bodyIr);
+      slot.bodyConvolver = nextConv;
+      if (nextConv) {
+        slot.mixGain.connect(nextConv);
+        slot.rosinGain.connect(nextConv);
+        nextConv.connect(slot.wetBodyGain);
+        slot.lastIrSig = v.bodyIrSig;
+      }
+    }
+
+    const hasIr = !!(wantIr && slot.bodyConvolver);
+    if (hasIr) {
+      slot.wetBodyGain.gain.setTargetAtTime(2.35, now, 0.015);
+      slot.dryWireGain.gain.setTargetAtTime(0.24, now, 0.015);
+    } else {
+      // Unbridged / floating wire in space: zero body convolution!
+      slot.wetBodyGain.gain.setTargetAtTime(0, now, 0.015);
+      slot.dryWireGain.gain.setTargetAtTime(0.88, now, 0.015);
+    }
+
+    // Feed pure Helmholtz/Cremer string harmonics into the 3D Body Convolver (avoiding double body filtering!)
+    const hw = hasIr && v.stringHarmonicWeights?.length ? v.stringHarmonicWeights : v.harmonicWeights;
+    const waveSig = `${hasIr ? 'ir' : 'dry'}:${hw.length}:${hw.slice(0, 24).map((w) => Math.round(w * 40)).join(',')}`;
     const isFreshAttack = !slot.wasActive || isNewId;
 
     if ((isFreshAttack || slot.lastWaveSig !== waveSig) && typeof ctx.createPeriodicWave === 'function') {
       const nHarm = hw.length + 1;
       const real = new Float32Array(nHarm);
       const imag = new Float32Array(nHarm);
+      const real2 = new Float32Array(nHarm);
+      const imag2 = new Float32Array(nHarm);
+      const real3 = new Float32Array(nHarm);
+      const imag3 = new Float32Array(nHarm);
       for (let h = 0; h < hw.length; h++) {
         const n = h + 1;
         const amp = hw[h];
-        // True asymmetric Helmholtz stick-slip sawtooth phase: imag[n] = (-1)^(n+1) * amp
-        imag[n] = (n % 2 === 1 ? 1 : -1) * amp;
+        const sign = n % 2 === 1 ? 1 : -1;
+        imag[n] = sign * amp;
+        const phi2 = n * 0.19;
+        real2[n] = sign * amp * Math.sin(phi2);
+        imag2[n] = sign * amp * Math.cos(phi2);
+        const phi3 = -n * 0.27;
+        real3[n] = sign * amp * Math.sin(phi3);
+        imag3[n] = sign * amp * Math.cos(phi3);
       }
       slot.osc.setPeriodicWave(ctx.createPeriodicWave(real, imag, { disableNormalization: false }));
+      slot.osc2.setPeriodicWave(ctx.createPeriodicWave(real2, imag2, { disableNormalization: false }));
+      slot.osc3.setPeriodicWave(ctx.createPeriodicWave(real3, imag3, { disableNormalization: false }));
       slot.lastWaveSig = waveSig;
     }
 
+    const prevPitchHz = slot.lastPitchHz;
     slot.lastPitchHz = v.pitchHz;
+    const isPitchStep = !isFreshAttack && Math.abs(v.pitchHz - prevPitchHz) > prevPitchHz * 0.025;
 
     if (isFreshAttack) {
       slot.activeSinceTime = now;
       slot.osc.frequency.cancelScheduledValues(now);
       slot.osc.frequency.setValueAtTime(v.pitchHz, now);
-      slot.vibDepth.gain.cancelScheduledValues(now);
-      slot.vibDepth.gain.setValueAtTime(0, now);
+      slot.osc2.frequency.cancelScheduledValues(now);
+      slot.osc2.frequency.setValueAtTime(v.pitchHz, now);
+      slot.osc3.frequency.cancelScheduledValues(now);
+      slot.osc3.frequency.setValueAtTime(v.pitchHz, now);
+      slot.bowLowpass.frequency.setValueAtTime(v.lowpassHz, now);
     } else {
-      slot.osc.frequency.setTargetAtTime(v.pitchHz, now, 0.008);
+      if (isPitchStep) slot.activeSinceTime = now;
+      const pitchTau = isPitchStep ? 0.0055 : 0.010;
+      slot.osc.frequency.setTargetAtTime(v.pitchHz, now, pitchTau);
+      slot.osc2.frequency.setTargetAtTime(v.pitchHz, now, pitchTau);
+      slot.osc3.frequency.setTargetAtTime(v.pitchHz, now, pitchTau);
+      slot.bowLowpass.frequency.setTargetAtTime(v.lowpassHz, now, 0.022);
     }
 
-    // Gentle expressive 5.4 Hz vibrato ramping in smoothly after ~0.18 s of sustained bowing
     const sustainedSec = now - slot.activeSinceTime;
-    const vibBloom = sustainedSec >= 0.18 ? Math.min(1, (sustainedSec - 0.18) / 0.22) : 0;
-    slot.vibOsc.frequency.setTargetAtTime(5.4 + idx * 0.08, now, 0.030);
-    slot.vibDepth.gain.setTargetAtTime(v.pitchHz * 0.0042 * vibBloom, now, 0.035);
+    const vibBloom = sustainedSec >= 0.05 ? Math.min(1, (sustainedSec - 0.05) / 0.18) : 0;
+    slot.vibOsc.frequency.setTargetAtTime(5.18 + idx * 0.11, now, 0.030);
+    slot.vibDepth.gain.setTargetAtTime(v.pitchHz * 0.0052 * vibBloom, now, 0.035);
 
-    slot.bodyFormant.frequency.setTargetAtTime(v.bodyFormantHz, now, 0.015);
-    slot.bodyFormant.gain.setTargetAtTime(v.bodyFormantGainDb, now, 0.015);
-    slot.bodyFormant.Q.setTargetAtTime(v.bodyFormantQ, now, 0.015);
-
-    slot.secondaryFormant.frequency.setTargetAtTime(v.secondaryFormantHz, now, 0.015);
-    slot.bowLowpass.frequency.setTargetAtTime(v.lowpassHz, now, 0.016);
-
-    slot.voiceGain.gain.setTargetAtTime(v.amplitude, now, 0.014);
-    slot.rosinFilter.frequency.setTargetAtTime(v.rosinCenterHz, now, 0.016);
-    slot.rosinGain.gain.setTargetAtTime(v.rosinNoiseGain, now, 0.012);
+    // Smooth 24 ms bow-attack bloom eliminates square-gate clicks while keeping sixteenth-note rhythm crisp!
+    const gainTau = isFreshAttack ? 0.024 : 0.016;
+    slot.voiceGain.gain.setTargetAtTime(v.amplitude, now, gainTau);
+    slot.rosinFilter.frequency.setTargetAtTime(v.rosinCenterHz, now, 0.018);
+    const attackChiff = isFreshAttack ? 1.25 : 1.0;
+    slot.rosinGain.gain.setTargetAtTime(v.rosinNoiseGain * 0.60 * attackChiff, now, 0.016);
 
     slot.wasActive = true;
   }
@@ -792,9 +1034,9 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
     if (!usedSlots.has(i)) {
       const slot = bank.slots[i];
       if (slot.wasActive) {
-        slot.voiceGain.gain.setTargetAtTime(0, now, 0.032);
-        slot.rosinGain.gain.setTargetAtTime(0, now, 0.010);
-        slot.vibDepth.gain.setTargetAtTime(0, now, 0.016);
+        slot.voiceGain.gain.setTargetAtTime(0, now, 0.115);
+        slot.rosinGain.gain.setTargetAtTime(0, now, 0.015);
+        slot.vibDepth.gain.setTargetAtTime(0, now, 0.040);
         slot.wasActive = false;
       }
     }
@@ -804,7 +1046,7 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
 export function postWorkletBowedSilence(ctx: AudioContext | null): void {
   if (!ctx) return;
   const c = ctx as AudioContextWithWindGraph;
-  const bank = c.__physboxNativeBowedV1;
+  const bank = c.__physboxNativeBowedV7;
   if (!bank) return;
   const now = ctx.currentTime;
   for (const slot of bank.slots) {
