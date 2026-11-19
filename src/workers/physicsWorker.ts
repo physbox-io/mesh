@@ -4305,6 +4305,7 @@ const doBuild = (
   // The cloth, built after the model so it can read where the bodies are; a
   // rebuild that carried the scene over carries the cloth with it.
   buildCloth(!freshRun);
+  post({ type: 'CLOTH_STATUS', warnings: cloth?.warnings ?? [] });
 
   // Last, so nothing above can put a broken weld back together. A rebuild is
   // the one moment a break can be silently undone — the model is new, every

@@ -526,6 +526,8 @@ export type WorkerToMainMessage =
   | { type: 'HISTORY_RESULT'; id: string; history: HistoryFrame[]; total: number; stride: number }
   | { type: 'TELEMETRY_RESULT'; id: string; telemetry: TelemetryReply | null }
   | ({ type: 'SCRIPT_STATUS' } & ScriptStatus)
+  /** After each build: what the cloth's specs name that is not in them (ClothWorld.warnings). */
+  | { type: 'CLOTH_STATUS'; warnings: string[] }
   | ({ type: 'STEPPED'; id: string } & StepForResult)
   | { type: 'CHANNELS'; id: string; channels: CoSimChannel[]; timestepMs: number };
 

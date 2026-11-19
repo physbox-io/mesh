@@ -10,6 +10,7 @@ import type { SceneNode } from '../../types/scene';
 import { recompilesInFlight } from '../../store/simulationActions';
 import { lastWorkerFrame, modelBuiltFrom } from '../../store/modelProvenance';
 import { lastScriptStatus } from '../../store/scriptStatus';
+import { lastClothWarnings } from '../../store/clothStatus';
 import { describeWorker } from '../../utils/workerStatus';
 
 export interface PhysicsWindow extends Window {
@@ -43,6 +44,7 @@ export function workerStatusNow(
     hidden: typeof document !== 'undefined' && document.hidden,
     now: Date.now(),
     scripts: lastScriptStatus(),
+    clothWarnings: lastClothWarnings(),
   });
 }
 

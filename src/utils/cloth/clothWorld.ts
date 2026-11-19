@@ -34,6 +34,8 @@ export interface ClothWorld {
   zipsAsked: Map<string, number>;
   /** Per cloth, which build of its form's geoms it was carried against (null: on no form). */
   formBuilds: (string | null)[];
+  /** What each cloth's spec names that is not in it, as `<cloth>: <warning>`. */
+  warnings: string[];
   /** Pose the colliders from where MuJoCo has every body now. */
   pose: () => void;
   advance: (dt: number, env: ClothEnv) => void;
@@ -138,5 +140,6 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
   // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
   sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
-  return { sim, keys, models, zipsAsked, formBuilds, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
+  const warnings = models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`));
+  return { sim, keys, models, zipsAsked, formBuilds, warnings, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
 }

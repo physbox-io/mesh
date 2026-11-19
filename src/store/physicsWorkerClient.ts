@@ -28,6 +28,7 @@ import type {
   TelemetryReply,
 } from '../workers/physicsWorkerProtocol';
 import { noteScriptStatus } from './scriptStatus';
+import { noteClothWarnings } from './clothStatus';
 import { noteWorkerFrame } from './modelProvenance';
 import { fabricBuildEnded, fabricBuildStarted, sceneHasCloth } from './fabricBuildStore';
 import type { CoSimChannel } from '../utils/coSimLink';
@@ -355,6 +356,9 @@ export class PhysicsWorkerClient {
           noteScriptStatus(status);
           break;
         }
+        case 'CLOTH_STATUS':
+          noteClothWarnings(msg.warnings);
+          break;
         case 'ERROR':
           // A fatal error means the engine is gone (a native abort, the heap
           // exhausted): whatever was still asked will never be answered.

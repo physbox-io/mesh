@@ -30,6 +30,8 @@ export interface WorkerStatusInput {
   now: number;
   /** What the live scripts last reported (store/scriptStatus.ts). */
   scripts?: ScriptStatus | null;
+  /** What the cloth's specs name that is not in them, as of the last build (store/clothStatus.ts). */
+  clothWarnings?: string[];
 }
 
 export interface WorkerStatus {
@@ -53,6 +55,8 @@ export interface WorkerStatus {
   scriptMsPerStep?: number;
   /** The most expensive script then. */
   slowestScript?: { body: string; msPerStep: number };
+  /** Names in a cloth's spec that match nothing in it (a line, a panel, a piece), each ignored. */
+  clothWarnings?: string[];
   note?: string;
 }
 
@@ -85,7 +89,9 @@ export function describeWorker(i: WorkerStatusInput): WorkerStatus {
         : 'The worker is not running the scene as it now stands: it was never built, or its last compile failed (see lastCompileError).'
       : slowNote(i) ?? (problemCount
         ? `The control scripts are failing: see scriptProblems (${problemCount}${scripts?.moreProblems ? '+' : ''}).`
-        : undefined);
+        : i.clothWarnings?.length
+          ? `A cloth names what it does not have: see clothWarnings (${i.clothWarnings.length}).`
+          : undefined);
   const timing = scripts?.timing;
   return {
     sceneBuilt,
@@ -100,6 +106,7 @@ export function describeWorker(i: WorkerStatusInput): WorkerStatus {
     ...(timing && timing.realtimeFactor !== null ? { realtimeFactor: round(timing.realtimeFactor, 3) } : {}),
     ...(timing ? { scriptMsPerStep: round(timing.scriptMsPerStep, 3) } : {}),
     ...(timing?.slowest ? { slowestScript: { body: timing.slowest.body, msPerStep: round(timing.slowest.msPerStep, 3) } } : {}),
+    ...(i.clothWarnings?.length ? { clothWarnings: i.clothWarnings } : {}),
     ...(note ? { note } : {}),
   };
 }

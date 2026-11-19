@@ -14,6 +14,7 @@
  * Positions in the world frame (the node's transform applied), Z-up, metres.
  */
 
+import { garmentNameWarnings, linePicks } from './clothNames';
 import * as THREE from 'three';
 import type { ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentTrim } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
@@ -102,11 +103,7 @@ const ELASTIC_RATIO = 0.75, ELASTIC_STIFFNESS = 12;
 function chainLineRuns(lines: { name: string; path: number[] }[], along: string): { run: number[]; closed: boolean }[] {
   const next = new Map<number, number[]>();
   for (const l of lines) {
-    const match = l.name === along
-      || (l.name.length === along.length + 1 && l.name.startsWith(along))
-      || (along === 'top' && (l.name === 'waist' || l.name === 'neckline'))
-      || (along === 'waist' && l.name === 'top');
-    if (!match) continue;
+    if (!linePicks(l.name, along)) continue;
     const [a, b] = l.path;
     (next.get(a) ?? next.set(a, []).get(a)!).push(b);
     (next.get(b) ?? next.set(b, []).get(b)!).push(a);
@@ -284,6 +281,8 @@ export interface ClothTack {
 
 export interface ClothModel {
   name: string;
+  /** What in its spec names nothing in it (a line, a panel, a piece): ignored, and said so. */
+  warnings?: string[];
   /** Particles that start lifted off what they hang on, let fall into place before the cloth is first drawn. */
   drop?: number[];
   /** Particles drawn to places (world) before the cloth is first drawn, then let go: its arrangement (ClothSpec.arrange). */
@@ -605,6 +604,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
   /** Where the triangles of what is sewn onto a garment begin (an outer layer is kept off them as off the garment). */
   let overlayTrisStart: number | undefined;
 
+  const warnings: string[] = [];
   if (spec.garment) {
     const form = { bodyForm: garmentForm(spec.garment, scene) };
     if (!form.bodyForm) throw new Error(`the garment '${name}' is fitted to '${spec.garment.fitTo}', which is not a body form here`);
@@ -1171,6 +1171,11 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (a && b) addStitch(a(j.local), b(j.at), sewTime);
     }
     if (anyShared && material.bending) addSeamBends(x0, tris, bends, bends);
+    warnings.push(...garmentNameWarnings(settings, spec,
+      [...shell.edges, ...shell.seams, ...(shell.marks ?? [])].map((l) => l.name),
+      shell.seams.filter((sm) => !sm.open).map((sm) => sm.name),
+      shell.panels.map((p) => p.name),
+      groups.map((g) => g.name.slice(name.length + 2))));
   }
 
   if (spec.pieces?.length) {
@@ -1272,5 +1277,6 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     limits: limitPairs, limitRest,
     stitches, stitchSew, ...(zips.length ? { zips } : {}), tacks, ties, groups, ...(boards.length ? { boards } : {}),
     ...(rods.links.length ? { rods } : {}),
+    ...(warnings.length ? { warnings } : {}),
   };
 }
