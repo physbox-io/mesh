@@ -14,7 +14,11 @@
 import type { ClothModel } from './clothModel';
 
 const CELL = 0.04;
-const BUCKETS = 1 << 17;
+const nextPow2 = (v: number) => {
+  let p = 1024;
+  while (p < v) p <<= 1;
+  return p;
+};
 /**
  * The hash is rebuilt every this many substeps, its triangles' boxes grown
  * by how far cloth can move meanwhile: rebuilt every substep it cost more
@@ -43,13 +47,17 @@ interface Group {
   mu: Float64Array;
   /** When true, `tris` belong to the outer garment and `particles` to the inner cloth (pushes the outer triangle's corners outward). */
   pushTris?: boolean;
+  buckets: number;
+  mask: number;
   start: Int32Array; // per bucket, into entries
+  fill: Int32Array; // scratch cursor per bucket
+  range: Int32Array; // scratch cell bounds per triangle (6 * nt)
   entries: Int32Array; // triangle numbers
   /** Each triangle's box as of the last build, grown by the reach: min x, y, z, max x, y, z. */
   box: Float64Array;
 }
 
-const hash = (ix: number, iy: number, iz: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & (BUCKETS - 1);
+const hash = (ix: number, iy: number, iz: number, mask: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & mask;
 
 export class LayerContacts {
   private groups: Group[] = [];
@@ -77,8 +85,10 @@ export class LayerContacts {
           if (t1 <= t0) continue;
           const tris: number[] = [], outward: number[] = [];
           for (let k = t0; k < t1; k++) tris.push(base + model.tris[k]);
-          for (let t = 0; t < (t1 - t0) / 3; t++) outward.push(model.outward ? 1 : 0);
-          this.groups.push({ tris: Int32Array.from(tris), outward: Uint8Array.from(outward), particles: Int32Array.from(particles), mu: Float64Array.from(mu), start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((tris.length / 3) * 6) });
+          const nt = (t1 - t0) / 3;
+          for (let t = 0; t < nt; t++) outward.push(model.outward ? 1 : 0);
+          const buckets = nextPow2(Math.max(1024, 2 * nt));
+          this.groups.push({ tris: Int32Array.from(tris), outward: Uint8Array.from(outward), particles: Int32Array.from(particles), mu: Float64Array.from(mu), buckets, mask: buckets - 1, start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6) });
         }
       }
       // Reciprocal pass: keep outer garment triangles clear of inner particles (such as raised pocket corners,
@@ -98,7 +108,9 @@ export class LayerContacts {
           for (const q of model.tris) onCloth[q] = 1;
           for (let i = 0; i < model.invMass.length; i++) if (onCloth[i]) { innerParticles.push(base + i); innerMu.push(model.material.friction); }
         }
-        this.groups.push({ tris: Int32Array.from(outerTris), outward: Uint8Array.from(outerOutward), particles: Int32Array.from(innerParticles), mu: Float64Array.from(innerMu), pushTris: true, start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((outerTris.length / 3) * 6) });
+        const nt = outerTris.length / 3;
+        const buckets = nextPow2(Math.max(1024, 2 * nt));
+        this.groups.push({ tris: Int32Array.from(outerTris), outward: Uint8Array.from(outerOutward), particles: Int32Array.from(innerParticles), mu: Float64Array.from(innerMu), pushTris: true, buckets, mask: buckets - 1, start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6) });
       }
     }
     // Cloth against itself and its own layer: clothSelf.
@@ -108,9 +120,19 @@ export class LayerContacts {
 
   /**
    * Keeps outer particles `thick` clear of inner cloth; records the contact
-   * (normal, push, friction) for the velocity update's friction.
+   * (weighted normal, push, weighted friction, relative inner displacement) for Coulomb friction.
    */
-  collide(x: Float64Array, prev: Float64Array, thick: number, contactN: Float64Array, contactPush: Float64Array, contactMu: Float64Array, step = true, settle = false) {
+  collide(
+    x: Float64Array,
+    prev: Float64Array,
+    thick: number,
+    contactN: Float64Array,
+    contactPush: Float64Array,
+    contactMu: Float64Array,
+    contactDisp: Float64Array,
+    step = true,
+    settle = false,
+  ) {
     const minSep = thick * 1.2;
     // Into and out of the settle the reach changes, so the hash is rebuilt for it.
     const switched = settle !== this.settling;
@@ -123,11 +145,11 @@ export class LayerContacts {
       const reach = deep ? SETTLE_DEPTH : g.pushTris || g.outward[0] ? thick * 2.5 : thick * 2;
       const maxDepth = deep ? SETTLE_DEPTH : MAX_DEPTH;
       if (rebuild) this.build(g, x, reach + MOVE_MARGIN);
-      const T = g.tris;
+      const T = g.tris, mask = g.mask;
       for (let pi = 0; pi < g.particles.length; pi++) {
         const i = g.particles[pi], k = 3 * i;
         const px = x[k], py = x[k + 1], pz = x[k + 2];
-        const b = hash(Math.floor(px / CELL), Math.floor(py / CELL), Math.floor(pz / CELL));
+        const b = hash(Math.floor(px / CELL), Math.floor(py / CELL), Math.floor(pz / CELL), mask);
         let best = reach, bq0 = 0, bq1 = 0, bq2 = 0, bt = -1;
         const B = g.box;
         for (let e = g.start[b]; e < g.start[b + 1]; e++) {
@@ -151,36 +173,33 @@ export class LayerContacts {
           if (sd >= minSep || sd < -MAX_DEPTH) continue;
           // Only push when the inner particle projects onto the outer triangle (not past an open hem/edge).
           if (best * best - sd * sd > 0.0035 * 0.0035) continue;
-          // The triangle moved out so the point on it under the inner particle
-          // moves `depth`, shared by its corners as that point weighs them
-          // (each corner the full depth over-pushed, three times over at a
-          // triangle's middle).
           const depth = minSep - sd;
           const wx = bq0 - x[a], wy = bq1 - x[a + 1], wz = bq2 - x[a + 2];
           const d00 = ux * ux + uy * uy + uz * uz, d01 = ux * vx + uy * vy + uz * vz, d11 = vx * vx + vy * vy + vz * vz;
           const d20 = wx * ux + wy * uy + wz * uz, d21 = wx * vx + wy * vy + wz * vz, den = d00 * d11 - d01 * d01;
           if (den < 1e-20) continue;
-          const b1 = (d11 * d20 - d01 * d21) / den, b2 = (d00 * d21 - d01 * d20) / den, bw = [1 - b1 - b2, b1, b2];
-          let sum = 0;
-          for (let q = 0; q < 3; q++) sum += bw[q] * bw[q] * w[T[3 * bt + q]];
+          const b1 = (d11 * d20 - d01 * d21) / den, b2 = (d00 * d21 - d01 * d20) / den, b0 = 1 - b1 - b2;
+          const v0 = T[3 * bt], v1 = T[3 * bt + 1], v2 = T[3 * bt + 2];
+          const sum = b0 * b0 * w[v0] + b1 * b1 * w[v1] + b2 * b2 * w[v2];
           if (sum <= 0) continue;
-          for (let q = 0; q < 3; q++) {
-            const vtx = T[3 * bt + q], push = (bw[q] * w[vtx] * depth) / sum;
-            if (push <= 0) continue;
+          const pdx = x[k] - prev[k], pdy = x[k + 1] - prev[k + 1], pdz = x[k + 2] - prev[k + 2];
+          const mu = g.mu[pi];
+          const pushCorner = (vtx: number, bwq: number) => {
+            const push = (bwq * w[vtx] * depth) / sum;
+            if (push <= 0) return;
             const vk = 3 * vtx;
             x[vk] += nx * push; x[vk + 1] += ny * push; x[vk + 2] += nz * push;
-            contactN[vk] = nx; contactN[vk + 1] = ny; contactN[vk + 2] = nz;
-            contactPush[vtx] += push; contactMu[vtx] = g.mu[pi];
-          }
+            contactN[vk] += nx * push; contactN[vk + 1] += ny * push; contactN[vk + 2] += nz * push;
+            contactDisp[vk] += pdx * push; contactDisp[vk + 1] += pdy * push; contactDisp[vk + 2] += pdz * push;
+            contactPush[vtx] += push; contactMu[vtx] += mu * push;
+          };
+          pushCorner(v0, b0); pushCorner(v1, b1); pushCorner(v2, b2);
           continue;
         }
-        // Outside a garment is its normal's side; of other cloth, the side
-        // the point was on when the substep began. (By that rule alone, a
-        // jacket's points that started inside a shirt were kept inside it.)
+        const dtx = ((x[a] - prev[a]) + (x[bb] - prev[bb]) + (x[c] - prev[c])) / 3;
+        const dty = ((x[a + 1] - prev[a + 1]) + (x[bb + 1] - prev[bb + 1]) + (x[c + 1] - prev[c + 1])) / 3;
+        const dtz = ((x[a + 2] - prev[a + 2]) + (x[bb + 2] - prev[bb + 2]) + (x[c + 2] - prev[c + 2])) / 3;
         if (!g.outward[bt]) {
-          const dtx = ((x[a] - prev[a]) + (x[bb] - prev[bb]) + (x[c] - prev[c])) / 3;
-          const dty = ((x[a + 1] - prev[a + 1]) + (x[bb + 1] - prev[bb + 1]) + (x[c + 1] - prev[c + 1])) / 3;
-          const dtz = ((x[a + 2] - prev[a + 2]) + (x[bb + 2] - prev[bb + 2]) + (x[c + 2] - prev[c + 2])) / 3;
           const was = (prev[k] - bq0 + dtx) * nx + (prev[k + 1] - bq1 + dty) * ny + (prev[k + 2] - bq2 + dtz) * nz;
           if (was < 0) { nx = -nx; ny = -ny; nz = -nz; }
         }
@@ -189,17 +208,17 @@ export class LayerContacts {
         if (sd >= target || sd < -maxDepth) continue;
         const depth = target - sd;
         x[k] += nx * depth; x[k + 1] += ny * depth; x[k + 2] += nz * depth;
-        contactN[k] = nx; contactN[k + 1] = ny; contactN[k + 2] = nz;
-        contactPush[i] += depth; contactMu[i] = g.mu[pi];
+        contactN[k] += nx * depth; contactN[k + 1] += ny * depth; contactN[k + 2] += nz * depth;
+        contactDisp[k] += dtx * depth; contactDisp[k + 1] += dty * depth; contactDisp[k + 2] += dtz * depth;
+        contactPush[i] += depth; contactMu[i] += g.mu[pi] * depth;
       }
     }
   }
 
   /** The hash of the group's triangles, by counting sort into buckets. */
   private build(g: Group, x: Float64Array, reach: number) {
-    const T = g.tris, nt = T.length / 3, start = g.start, B = g.box;
+    const T = g.tris, nt = T.length / 3, start = g.start, fill = g.fill, range = g.range, B = g.box, buckets = g.buckets, mask = g.mask;
     start.fill(0);
-    const range = new Int32Array(nt * 6);
     let total = 0;
     for (let t = 0; t < nt; t++) {
       const a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2], o = 6 * t;
@@ -210,16 +229,16 @@ export class LayerContacts {
         range[o + 3 + k] = Math.floor(B[o + 3 + k] / CELL);
       }
       for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
-        start[hash(ix, iy, iz) + 1]++; total++;
+        start[hash(ix, iy, iz, mask) + 1]++; total++;
       }
     }
-    for (let b = 0; b < BUCKETS; b++) start[b + 1] += start[b];
+    for (let b = 0; b < buckets; b++) start[b + 1] += start[b];
     if (g.entries.length < total) g.entries = new Int32Array(Math.ceil(total * 1.25));
-    const fill = start.slice(0, BUCKETS);
+    fill.set(start.subarray(0, buckets));
     for (let t = 0; t < nt; t++) {
       const o = 6 * t;
       for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
-        g.entries[fill[hash(ix, iy, iz)]++] = t;
+        g.entries[fill[hash(ix, iy, iz, mask)]++] = t;
       }
     }
   }

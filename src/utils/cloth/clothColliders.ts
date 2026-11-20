@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import type { SceneGeom, SceneNode } from '../../types/scene';
 import { resolveCsgGeoms } from '../csg';
 import { bodyLocalMatrix } from '../bodyWorld';
+import { generateWedgeMeshData } from '../geom';
 
 export type ColliderShape =
   | { kind: 'sphere'; r: number }
@@ -42,6 +43,7 @@ export interface Collider {
 
 /** Signed distance and outward normal at a point in the collider's own frame. */
 export interface Contact { d: number; n: [number, number, number] }
+export interface ContactOut { d: number; nx: number; ny: number; nz: number }
 
 // ---------------------------------------------------------------------------
 // Signed-distance grids for meshes.
@@ -71,11 +73,11 @@ export class SdfGrid {
     const c11 = this.at(i, j + 1, k + 1) * (1 - u) + this.at(i + 1, j + 1, k + 1) * u;
     return (c00 * (1 - v) + c10 * v) * (1 - w) + (c01 * (1 - v) + c11 * v) * w;
   }
-  /** Distance and outward normal from one read of the eight surrounding cells (trilinear and its gradient). */
-  query(x: number, y: number, z: number): Contact | null {
+  /** Zero-allocation distance and outward normal into `out`; false outside the grid or at an unresolved interior point. */
+  queryInto(x: number, y: number, z: number, out: ContactOut): boolean {
     const fx = (x - this.min[0]) / this.cell, fy = (y - this.min[1]) / this.cell, fz = (z - this.min[2]) / this.cell;
     const [nx, ny, nz] = this.dims;
-    if (fx < 0 || fy < 0 || fz < 0 || fx >= nx - 1 || fy >= ny - 1 || fz >= nz - 1) return null;
+    if (fx < 0 || fy < 0 || fz < 0 || fx >= nx - 1 || fy >= ny - 1 || fz >= nz - 1) return false;
     const i = Math.floor(fx), j = Math.floor(fy), k = Math.floor(fz), u = fx - i, v = fy - j, w = fz - k;
     const d = this.d, o = (k * ny + j) * nx + i, sy = nx, sz = nx * ny;
     const c000 = d[o], c100 = d[o + 1], c010 = d[o + sy], c110 = d[o + sy + 1];
@@ -88,9 +90,23 @@ export class SdfGrid {
     const gy = (x10 - x00) * (1 - w) + (x11 - x01) * w;
     const gz = y1 - y0;
     const l = Math.sqrt(gx * gx + gy * gy + gz * gz);
-    // Flat where it is all one fill, well clear of the surface (or deep in): no direction, but the distance stands.
-    if (!(l > 1e-12)) return dist > 0 ? { d: dist, n: [0, 0, 1] } : null;
-    return { d: dist, n: [gx / l, gy / l, gz / l] };
+    if (!(l > 1e-12)) {
+      if (dist > 0) { out.d = dist; out.nx = 0; out.ny = 0; out.nz = 1; return true; }
+      // Deep interior local minimum where 8 surrounding nodes share the maximum inward BFS depth: push outward from grid centre.
+      const cx = this.min[0] + 0.5 * (nx - 1) * this.cell, cy = this.min[1] + 0.5 * (ny - 1) * this.cell, cz = this.min[2] + 0.5 * (nz - 1) * this.cell;
+      const rx = x - cx, ry = y - cy, rz = z - cz, rl = Math.hypot(rx, ry, rz);
+      out.d = dist;
+      if (rl > 1e-12) { out.nx = rx / rl; out.ny = ry / rl; out.nz = rz / rl; }
+      else { out.nx = 0; out.ny = 0; out.nz = 1; }
+      return true;
+    }
+    out.d = dist; out.nx = gx / l; out.ny = gy / l; out.nz = gz / l;
+    return true;
+  }
+  /** Distance and outward normal from one read of the eight surrounding cells (trilinear and its gradient). */
+  query(x: number, y: number, z: number): Contact | null {
+    const tmp: ContactOut = { d: 0, nx: 0, ny: 0, nz: 0 };
+    return this.queryInto(x, y, z, tmp) ? { d: tmp.d, n: [tmp.nx, tmp.ny, tmp.nz] } : null;
   }
 }
 
@@ -181,12 +197,16 @@ export function buildSdf(points: number[][], tris: ArrayLike<number>): SdfGrid {
   // nearest cells keep the side their nearest face gave them. By that face
   // alone, a cell a centimetre off a foot's toe read inside it, and a sock
   // started there.
-  const SKIN = 0.5 * cell;
+  const SKIN = 0.6 * cell;
   const outside = new Uint8Array(nx * ny * nz);
   const queue: number[] = [];
-  const push = (i: number, j: number, k: number) => {
+  const push = (i: number, j: number, k: number, fromIdx = -1) => {
     const idx = (k * ny + j) * nx + i;
-    if (outside[idx] || (near[idx] && Math.abs(d[idx]) < SKIN)) return;
+    if (outside[idx]) return;
+    if (near[idx]) {
+      if (Math.abs(d[idx]) < SKIN) return;
+      if (fromIdx >= 0 && near[fromIdx] && d[fromIdx] * d[idx] <= 0) return;
+    }
     outside[idx] = 1; queue.push(idx);
   };
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
@@ -194,14 +214,40 @@ export function buildSdf(points: number[][], tris: ArrayLike<number>): SdfGrid {
   }
   while (queue.length) {
     const idx = queue.pop()!, i = idx % nx, j = Math.floor(idx / nx) % ny, k = Math.floor(idx / (nx * ny));
-    if (i > 0) push(i - 1, j, k); if (i < nx - 1) push(i + 1, j, k);
-    if (j > 0) push(i, j - 1, k); if (j < ny - 1) push(i, j + 1, k);
-    if (k > 0) push(i, j, k - 1); if (k < nz - 1) push(i, j, k + 1);
+    if (i > 0) push(i - 1, j, k, idx); if (i < nx - 1) push(i + 1, j, k, idx);
+    if (j > 0) push(i, j - 1, k, idx); if (j < ny - 1) push(i, j + 1, k, idx);
+    if (k > 0) push(i, j, k - 1, idx); if (k < nz - 1) push(i, j, k + 1, idx);
   }
   const far = cell * (BAND + 1);
+  const inVisited = new Uint8Array(nx * ny * nz);
+  const inQueue = new Int32Array(nx * ny * nz);
+  let inHead = 0, inTail = 0;
   for (let idx = 0; idx < d.length; idx++) {
-    if (!near[idx]) d[idx] = outside[idx] ? far : -far;
-    else if (Math.abs(d[idx]) >= SKIN) d[idx] = outside[idx] ? Math.abs(d[idx]) : -Math.abs(d[idx]);
+    if (!near[idx]) {
+      d[idx] = outside[idx] ? far : -far;
+    } else {
+      if (Math.abs(d[idx]) >= SKIN) d[idx] = outside[idx] ? Math.abs(d[idx]) : -Math.abs(d[idx]);
+      if (d[idx] <= 0) {
+        inVisited[idx] = 1;
+        inQueue[inTail++] = idx;
+      }
+    }
+  }
+  // Propagate signed distance inward (-cell per step) from the narrow band so
+  // deep interior cells (> 2 cells inside) still carry an outward gradient.
+  while (inHead < inTail) {
+    const idx = inQueue[inHead++], base = d[idx] - cell;
+    const i = idx % nx, j = Math.floor(idx / nx) % ny, k = Math.floor(idx / (nx * ny));
+    const step = (ni: number, nj: number, nk: number) => {
+      const nIdx = (nk * ny + nj) * nx + ni;
+      if (outside[nIdx] || near[nIdx] || inVisited[nIdx]) return;
+      inVisited[nIdx] = 1;
+      d[nIdx] = base;
+      inQueue[inTail++] = nIdx;
+    };
+    if (i > 0) step(i - 1, j, k); if (i < nx - 1) step(i + 1, j, k);
+    if (j > 0) step(i, j - 1, k); if (j < ny - 1) step(i, j + 1, k);
+    if (k > 0) step(i, j, k - 1); if (k < nz - 1) step(i, j, k + 1);
   }
   return new SdfGrid(min, cell, dims, d);
 }
@@ -209,55 +255,98 @@ export function buildSdf(points: number[][], tris: ArrayLike<number>): SdfGrid {
 // ---------------------------------------------------------------------------
 // Primitives, in their own frame.
 
-function primitive(shape: ColliderShape, x: number, y: number, z: number): Contact | null {
+function primitiveInto(shape: ColliderShape, x: number, y: number, z: number, out: ContactOut): boolean {
   switch (shape.kind) {
     case 'sphere': {
-      const l = Math.sqrt(x * x + y * y + z * z) || 1e-12;
-      return { d: l - shape.r, n: [x / l, y / l, z / l] };
+      const l = Math.sqrt(x * x + y * y + z * z);
+      if (l < 1e-12) { out.d = -shape.r; out.nx = 0; out.ny = 0; out.nz = 1; return true; }
+      out.d = l - shape.r; out.nx = x / l; out.ny = y / l; out.nz = z / l;
+      return true;
     }
     case 'plane':
-      return { d: z, n: [0, 0, 1] };
+      out.d = z; out.nx = 0; out.ny = 0; out.nz = 1;
+      return true;
     case 'capsule':
     case 'cylinder': {
       const { a, b, r } = shape;
-      const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], L2 = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2 || 1e-12;
-      const tRaw = ((x - a[0]) * ab[0] + (y - a[1]) * ab[1] + (z - a[2]) * ab[2]) / L2;
+      const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+      const L2 = abx * abx + aby * aby + abz * abz || 1e-12;
+      const tRaw = ((x - a[0]) * abx + (y - a[1]) * aby + (z - a[2]) * abz) / L2;
       const t = Math.min(1, Math.max(0, tRaw));
-      const c = [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
-      const v = [x - c[0], y - c[1], z - c[2]], l = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) || 1e-12;
-      if (shape.kind === 'capsule' || (tRaw > 0 && tRaw < 1)) return { d: l - r, n: [v[0] / l, v[1] / l, v[2] / l] };
+      const cx = a[0] + abx * t, cy = a[1] + aby * t, cz = a[2] + abz * t;
+      const vx = x - cx, vy = y - cy, vz = z - cz;
+      const l = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1e-12;
+      if (shape.kind === 'capsule' || (tRaw > 0 && tRaw < 1)) {
+        out.d = l - r; out.nx = vx / l; out.ny = vy / l; out.nz = vz / l;
+        return true;
+      }
       // A cylinder's flat end.
-      const L = Math.sqrt(L2), axis = ab.map((q) => q / L), sgn = tRaw <= 0 ? -1 : 1;
+      const L = Math.sqrt(L2), ax0 = abx / L, ax1 = aby / L, ax2 = abz / L, sgn = tRaw <= 0 ? -1 : 1;
       const along = (tRaw <= 0 ? -tRaw : tRaw - 1) * L;
-      const radial = [v[0] - axis[0] * along * sgn, v[1] - axis[1] * along * sgn, v[2] - axis[2] * along * sgn];
-      const rl = Math.sqrt(radial[0] * radial[0] + radial[1] * radial[1] + radial[2] * radial[2]);
-      if (rl <= r) return { d: along, n: axis.map((q) => q * sgn) as [number, number, number] };
-      return { d: Math.sqrt(along * along + (rl - r) * (rl - r)), n: [v[0] / l, v[1] / l, v[2] / l] };
+      const rdx = vx - ax0 * along * sgn, rdy = vy - ax1 * along * sgn, rdz = vz - ax2 * along * sgn;
+      const rl = Math.sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
+      if (rl <= r) { out.d = along; out.nx = ax0 * sgn; out.ny = ax1 * sgn; out.nz = ax2 * sgn; return true; }
+      out.d = Math.sqrt(along * along + (rl - r) * (rl - r));
+      out.nx = vx / l; out.ny = vy / l; out.nz = vz / l;
+      return true;
     }
     case 'box': {
-      const h = shape.half, q = [Math.abs(x) - h[0], Math.abs(y) - h[1], Math.abs(z) - h[2]];
-      const out = [Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0)], ol = Math.sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
-      if (ol > 0) return { d: ol, n: [Math.sign(x) * out[0] / ol, Math.sign(y) * out[1] / ol, Math.sign(z) * out[2] / ol] };
-      const m = Math.max(q[0], q[1], q[2]), ax = q.indexOf(m), n: [number, number, number] = [0, 0, 0];
-      n[ax] = Math.sign([x, y, z][ax]) || 1;
-      return { d: m, n };
+      const h = shape.half;
+      const q0 = Math.abs(x) - h[0], q1 = Math.abs(y) - h[1], q2 = Math.abs(z) - h[2];
+      const o0 = Math.max(q0, 0), o1 = Math.max(q1, 0), o2 = Math.max(q2, 0);
+      const ol = Math.sqrt(o0 * o0 + o1 * o1 + o2 * o2);
+      if (ol > 0) {
+        out.d = ol; out.nx = (Math.sign(x) * o0) / ol; out.ny = (Math.sign(y) * o1) / ol; out.nz = (Math.sign(z) * o2) / ol;
+        return true;
+      }
+      if (q0 >= q1 && q0 >= q2) { out.d = q0; out.nx = Math.sign(x) || 1; out.ny = 0; out.nz = 0; }
+      else if (q1 >= q2) { out.d = q1; out.nx = 0; out.ny = Math.sign(y) || 1; out.nz = 0; }
+      else { out.d = q2; out.nx = 0; out.ny = 0; out.nz = Math.sign(z) || 1; }
+      return true;
     }
     case 'ellipsoid': {
       // Inigo Quilez's bound, with the gradient of the scaled sphere.
-      const r = shape.r;
-      const k0 = Math.sqrt(x / r[0] * x / r[0] + y / r[1] * y / r[1] + z / r[2] * z / r[2]), k1 = Math.hypot(x / (r[0] * r[0]), y / (r[1] * r[1]), z / (r[2] * r[2])) || 1e-12;
-      const g = [x / (r[0] * r[0]), y / (r[1] * r[1]), z / (r[2] * r[2])], gl = Math.sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]) || 1e-12;
-      return { d: (k0 * (k0 - 1)) / k1, n: [g[0] / gl, g[1] / gl, g[2] / gl] };
+      const rx = Math.max(1e-9, shape.r[0]), ry = Math.max(1e-9, shape.r[1]), rz = Math.max(1e-9, shape.r[2]);
+      const ux = x / rx, uy = y / ry, uz = z / rz;
+      const k0 = Math.sqrt(ux * ux + uy * uy + uz * uz);
+      if (k0 < 1e-9) {
+        const minR = Math.min(rx, ry, rz);
+        out.d = -minR;
+        out.nx = rx === minR ? 1 : 0; out.ny = rx !== minR && ry === minR ? 1 : 0; out.nz = rx !== minR && ry !== minR ? 1 : 0;
+        return true;
+      }
+      const gx = x / (rx * rx), gy = y / (ry * ry), gz = z / (rz * rz);
+      const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1e-12;
+      out.d = (k0 * (k0 - 1)) / gl;
+      out.nx = gx / gl; out.ny = gy / gl; out.nz = gz / gl;
+      return true;
     }
     case 'sdf':
-      return shape.grid.query(x, y, z);
+      return shape.grid.queryInto(x, y, z, out);
   }
 }
 
-export function colliderContact(c: Collider, local: number[]): Contact | null {
+export function colliderContactInto(c: Collider, lx: number, ly: number, lz: number, out: ContactOut): boolean {
   const { min, max } = c.bounds;
-  if (local[0] < min[0] || local[1] < min[1] || local[2] < min[2] || local[0] > max[0] || local[1] > max[1] || local[2] > max[2]) return null;
-  return primitive(c.shape, local[0], local[1], local[2]);
+  if (lx < min[0] || ly < min[1] || lz < min[2] || lx > max[0] || ly > max[1] || lz > max[2]) return false;
+  return primitiveInto(c.shape, lx, ly, lz, out);
+}
+
+export function colliderContact(c: Collider, local: number[]): Contact | null {
+  const tmp: ContactOut = { d: 0, nx: 0, ny: 0, nz: 0 };
+  return colliderContactInto(c, local[0], local[1], local[2], tmp) ? { d: tmp.d, n: [tmp.nx, tmp.ny, tmp.nz] } : null;
+}
+
+const fnvBuf = new Float32Array(1);
+const fnvU32 = new Uint32Array(fnvBuf.buffer);
+function hashMeshArrays(yUp: boolean, v: ArrayLike<number>, f: ArrayLike<number>): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < v.length; i++) {
+    fnvBuf[0] = v[i];
+    h = Math.imul(h ^ fnvU32[0], 0x01000193) >>> 0;
+  }
+  for (let i = 0; i < f.length; i++) h = Math.imul(h ^ f[i], 0x01000193) >>> 0;
+  return `${yUp}:${v.length}:${f.length}:${h.toString(16)}`;
 }
 
 /**
@@ -265,13 +354,13 @@ export function colliderContact(c: Collider, local: number[]): Contact | null {
  * `yUp` for the scene graph's Three.js vertices; MuJoCo's are already Z-up.
  */
 export function meshShape(v: ArrayLike<number>, f: ArrayLike<number>, yUp: boolean): { shape: ColliderShape; bounds: { min: number[]; max: number[] } } {
-  const key = `${yUp}:${v.length}:${f.length}:${v[0]}:${v[v.length - 1]}:${v[Math.floor(v.length / 2)]}:${f[Math.floor(f.length / 3)]}`;
+  const key = hashMeshArrays(yUp, v, f);
   let grid = gridCache.get(key);
   if (!grid) {
     const pts: number[][] = [];
     for (let i = 0; i < v.length; i += 3) pts.push(yUp ? threeToZUp(v, i) : [v[i], v[i + 1], v[i + 2]]);
     grid = buildSdf(pts, f);
-    if (gridCache.size > 32) gridCache.clear();
+    if (gridCache.size > 64) gridCache.clear();
     gridCache.set(key, grid);
   }
   const max = [0, 1, 2].map((a) => grid!.min[a] + (grid!.dims[a] - 1) * grid!.cell);
@@ -284,8 +373,13 @@ export function sceneMeshGeoms(nodes: SceneNode[]): { name: string; friction: nu
   const visit = (list: SceneNode[]) => {
     for (const n of list) {
       if (!n.cloth && !n.isPulleyRope) {
-        for (const g of resolveCsgGeoms(n, 'render')) {
-          if (g.type === 'mesh' && g.role !== 'collision' && g.csg !== 'difference') out.push({ name: g.name, friction: g.friction?.[0] ?? 0.6 });
+        if (n.isWedge && n.geoms?.length) {
+          const g = n.geoms[0];
+          if (g.role !== 'collision' && g.csg !== 'difference') out.push({ name: g.name, friction: g.friction?.[0] ?? 0.6 });
+        } else {
+          for (const g of resolveCsgGeoms(n, 'render')) {
+            if (g.type === 'mesh' && g.role !== 'collision' && g.csg !== 'difference') out.push({ name: g.name, friction: g.friction?.[0] ?? 0.6 });
+          }
         }
       }
       if (n.children) visit(n.children);
@@ -331,17 +425,32 @@ function shapeOf(g: SceneGeom): { shape: ColliderShape; local: THREE.Matrix4; bo
 /**
  * Every collider in the scene: the floor, and each drawn geom of each body
  * that is not cloth. Bodies are named as MuJoCo names them (the graph's).
+ * Note: mesh geoms (and wedges, which compile to prism meshes in MJCF) are
+ * skipped when `skipMeshes` is true so `mujocoMeshColliders` provides them
+ * once from `MjModel` without duplicating when unstripped graphs are passed.
  */
-export function sceneColliders(nodes: SceneNode[], floor = true): Collider[] {
+export function sceneColliders(nodes: SceneNode[], floor = true, skipMeshes = false): Collider[] {
   const out: Collider[] = [];
   if (floor) out.push({ body: null, local: new THREE.Matrix4(), shape: { kind: 'plane' }, friction: 0.6, bounds: { min: [-1e9, -1e9, -1e9], max: [1e9, 1e9, 1e9] } });
   const visit = (list: SceneNode[]) => {
     for (const n of list) {
       if (!n.cloth && !n.isPulleyRope) {
-        for (const g of resolveCsgGeoms(n, 'render')) {
-          if (g.role === 'collision' || g.csg === 'difference') continue;
-          const s = shapeOf(g);
-          if (s) out.push({ body: n.name || n.id, friction: g.friction?.[0] ?? 0.6, ...s });
+        if (n.isWedge && n.geoms?.length) {
+          if (!skipMeshes) {
+            const g0 = n.geoms[0];
+            if (g0.role !== 'collision' && g0.csg !== 'difference') {
+              const { vertices, faces } = generateWedgeMeshData(n.width || 2.0, n.depth || 1.0, n.height || 0.5);
+              const s = shapeOf({ ...g0, type: 'mesh', vertices, faces });
+              if (s) out.push({ body: n.name || n.id, friction: g0.friction?.[0] ?? 0.6, ...s });
+            }
+          }
+        } else {
+          for (const g of resolveCsgGeoms(n, 'render')) {
+            if (g.role === 'collision' || g.csg === 'difference') continue;
+            if (skipMeshes && g.type === 'mesh') continue;
+            const s = shapeOf(g);
+            if (s) out.push({ body: n.name || n.id, friction: g.friction?.[0] ?? 0.6, ...s });
+          }
         }
       }
       if (n.children) visit(n.children);

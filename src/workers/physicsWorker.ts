@@ -59,6 +59,7 @@ import type {
   AudioDampingEvent,
   BodyHistory,
   BowedStringContactEvent,
+  ClothStateSnapshot,
   ConstraintBrokenEvent,
   ContactHistory,
   ContinuousContactEvent,
@@ -67,6 +68,7 @@ import type {
   HistoryEntry,
   ImpactEvent,
   JointHistory,
+  SeedState,
   WorkerToMainMessage,
 } from './physicsWorkerProtocol';
 import { evaluateGustWind } from '../utils/aeroAcoustics';
@@ -82,7 +84,7 @@ import {
 import { HistoryRing } from './historyRing';
 import { buildImpactWatches, checkImpacts as detectImpacts, type ImpactWatches } from './impactWatch';
 import { JOINT_NV, applyEditedCtrl, captureState, copyCarriedActuators as copyCarriedActuatorsByName, copyJointsByName, documentCtrlValues, seedNewBodies, type CarriedState } from './carryState';
-import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptStateMap } from '../utils/scriptState';
+import { ScriptStateStore, attachScriptState, scriptStateForBuild } from '../utils/scriptState';
 import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
 import { createConstraintMonitor, mergeConstraintReports, type ConstraintReport } from '../utils/constraintResiduals';
@@ -198,8 +200,8 @@ const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
 let cloth: ClothWorld | null = null;
 
 /** Builds the scene's cloth (utils/cloth/clothWorld); `carry` keeps it where it is if it is the same cloth. */
-const buildCloth = (carry: boolean) => {
-  cloth = model && data ? buildClothWorld(mujoco, model, data, sceneGraph, cloth, carry) : null;
+const buildCloth = (carry: boolean, seedClothState?: ClothStateSnapshot) => {
+  cloth = model && data ? buildClothWorld(mujoco, model, data, sceneGraph, cloth, carry, seedClothState) : null;
 };
 
 let sharedBuffers: {
@@ -948,6 +950,7 @@ let clothGrabVertex: number | null = null;
 let clothGrabZip = -1;
 
 const applyDragForce = () => {
+  if (clothGrabVertex !== null || clothGrabZip >= 0) return;
   const mdl = model!;
   const dat = data!;
   if (!draggedNodeId || !dragTarget) return;
@@ -3355,7 +3358,13 @@ const releaseClothZip = () => {
 const stepCloth = (dt: number) => {
   if (!cloth || !model) return;
   const g = modelOpt(model).gravity;
-  cloth.advance(dt, { gravity: [g[0], g[1], g[2]], wind: [envWindX || 0, envWindY || 0, 0], airDensity: envDensity > 0 ? envDensity : 1.225 });
+  const wx = envWindX || 0, wy = envWindY || 0;
+  cloth.advance(dt, {
+    gravity: [g[0], g[1], g[2]],
+    wind: [wx, wy, 0],
+    airDensity: envDensity < 0 ? 0 : envDensity > 0 ? envDensity : 1.225,
+    gustAt: wx !== 0 || wy !== 0 ? evaluateGustWind : undefined,
+  });
 };
 
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
@@ -3974,10 +3983,14 @@ const postScriptStatus = (force = false) => {
   });
 };
 
-/** The loads on the cloth's ties, for the inspector. Absent without any. */
+/** The loads on the cloth's ties, zip states, and state snapshot for worker recycles. */
 const clothFrame = () => {
-  const ties = cloth?.sim?.tieLoads(), zips = cloth?.sim?.zipState();
-  return { ...(ties?.length ? { clothTies: ties } : {}), ...(zips?.length ? { clothZips: zips } : {}) };
+  const ties = cloth?.sim?.tieLoads(), zips = cloth?.sim?.zipState(), clothState = cloth?.sim?.state();
+  return {
+    ...(ties?.length ? { clothTies: ties } : {}),
+    ...(zips?.length ? { clothZips: zips } : {}),
+    ...(clothState ? { clothState } : {}),
+  };
 };
 
 const postFrame = () => {
@@ -4151,7 +4164,7 @@ const doBuild = (
   xml: string,
   newSceneGraph: SceneGraph,
   preserveState: boolean,
-  seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number; scriptState?: ScriptStateMap; docCtrl?: Record<string, number> },
+  seedState?: SeedState,
   brokenConstraints?: string[],
 ) => {
   // The set speeds the running model was built with, so an edit of one can
@@ -4305,7 +4318,7 @@ const doBuild = (
 
   // The cloth, built after the model so it can read where the bodies are; a
   // rebuild that carried the scene over carries the cloth with it.
-  buildCloth(!freshRun);
+  buildCloth(!freshRun, !freshRun ? seedState?.clothState : undefined);
   post({ type: 'CLOTH_STATUS', warnings: cloth?.warnings ?? [] });
 
   // Last, so nothing above can put a broken weld back together. A rebuild is
@@ -4381,6 +4394,7 @@ const doBuild = (
     idMaps: buildIdMaps(),
     flexes: cloth?.sim?.renderLayout() ?? [],
     clothStitches: [],
+    ...(cloth ? { clothState: cloth.sim.state() } : {}),
     isShared: isSharedSupported,
     ...snapshot(),
   };
@@ -4603,6 +4617,7 @@ const runHeadless = async (
       scriptCache = {};
       if (carried) carryByJointName(carried, nextModel, nextData);
       else mj.mj_forward(nextModel, nextData);
+      buildCloth(true);
       applyBrokenWelds();
       constraints = createConstraintMonitor(mj, nextModel);
       energyGain ??= solverWork.result();
@@ -4878,6 +4893,11 @@ const handleMessage = async (evt: MessageEvent) => {
           if (isSharedSupported) {
             stopWorkerLoop();
           }
+          if (clothGrabZip >= 0) releaseClothZip();
+          if (clothGrabVertex !== null) {
+            cloth?.sim.grab(null, null);
+            clothGrabVertex = null;
+          }
           // The steps since the last frame, so what stops on screen is where
           // the simulation stopped. See FRAME_INTERVAL_MS.
           if (framePending && model && data) postFrame();
@@ -4967,6 +4987,7 @@ const handleMessage = async (evt: MessageEvent) => {
           const nv = JOINT_NV[model.jnt_type[jId]] ?? 1;
           for (let i = 0; i < nv; i++) data.qvel[vadr + i] = 0;
           mujoco.mj_forward(model, data);
+          cloth?.pose();
           postFrame();
         }
         break;

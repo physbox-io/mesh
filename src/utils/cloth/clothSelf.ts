@@ -35,7 +35,11 @@
 import type { ClothModel } from './clothModel';
 
 const CELL = 0.03;
-const BUCKETS = 1 << 17;
+const nextPow2 = (v: number) => {
+  let p = 1024;
+  while (p < v) p <<= 1;
+  return p;
+};
 const REBUILD = 4;
 /** How far cloth may move between rebuilds: 4 substeps at 1 m/s relative is under 7 mm. */
 const MOVE_MARGIN = 0.007;
@@ -46,7 +50,7 @@ const MAX_DEPTH = 0.006;
 /** Most a sheet's middle keeps off another's, counting its sagitta: half the slab cloth is drawn as. */
 const MAX_HALF = 0.004 / 2; // CLOTH_THICKNESS / 2 (xpbd imports this module, so not imported back)
 
-const hash = (ix: number, iy: number, iz: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & (BUCKETS - 1);
+const hash = (ix: number, iy: number, iz: number, mask: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & mask;
 
 interface Group {
   /** Triangles, by global particle. */
@@ -64,7 +68,11 @@ interface Group {
   /** Neighbours of each particle (sorted, global) in CSR: near[nearStart[pi]..nearStart[pi+1]). */
   nearStart: Int32Array;
   near: Int32Array;
+  buckets: number;
+  mask: number;
   start: Int32Array;
+  fill: Int32Array;
+  range: Int32Array;
   entries: Int32Array;
   box: Float64Array;
   /** Largest separation in the group: how far a triangle's box is grown. */
@@ -120,7 +128,9 @@ export class SelfContacts {
       const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2];
       const vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      for (const q of [a, b, c]) { N[q] += nx; N[q + 1] += ny; N[q + 2] += nz; }
+      N[a] += nx; N[a + 1] += ny; N[a + 2] += nz;
+      N[b] += nx; N[b + 1] += ny; N[b + 2] += nz;
+      N[c] += nx; N[c + 1] += ny; N[c + 2] += nz;
     }
     for (const i of g.all) {
       const k = 3 * i, l = Math.hypot(N[k], N[k + 1], N[k + 2]);
@@ -219,13 +229,13 @@ export class SelfContacts {
  * neighbours' on the cloth.
  */
 function candidates(g: Group, x: Float64Array) {
-  const T = g.tris, B = g.box, NS = g.nearStart, NR = g.near;
+  const T = g.tris, B = g.box, NS = g.nearStart, NR = g.near, mask = g.mask;
   let count = 0, total = 0;
   g.candStart[0] = 0;
   for (let pi = 0; pi < g.particles.length; pi++) {
     const i = g.particles[pi], k = 3 * i;
     const px = x[k], py = x[k + 1], pz = x[k + 2];
-    const b = hash(Math.floor(px / CELL), Math.floor(py / CELL), Math.floor(pz / CELL));
+    const b = hash(Math.floor(px / CELL), Math.floor(py / CELL), Math.floor(pz / CELL), mask);
     const n0 = NS[pi], n1 = NS[pi + 1], from = total;
     for (let e = g.start[b]; e < g.start[b + 1]; e++) {
       const t = g.entries[e], o = 6 * t;
@@ -324,10 +334,13 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
     nearStart.push(near.length);
   }
   if (!particles.length || !tris.length) return null;
+  const nt = tris.length / 3;
+  const buckets = nextPow2(Math.max(1024, 2 * nt));
   return {
     tris: Int32Array.from(tris), particles: Int32Array.from(particles), half: Float64Array.from(half), mu: Float64Array.from(mu),
     triHalf: Float64Array.from(triHalf), all: Int32Array.from(glob), allHalf: Float64Array.from(halfOf), nearStart: Int32Array.from(nearStart), near: Int32Array.from(near),
-    start: new Int32Array(BUCKETS + 1), entries: new Int32Array(0), box: new Float64Array((tris.length / 3) * 6),
+    buckets, mask: buckets - 1,
+    start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6),
     reach: 2 * maxHalf,
     active: new Int32Array(particles.length), activeCount: 0, candStart: new Int32Array(particles.length + 1), cand: new Int32Array(1024),
   };
@@ -335,9 +348,8 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
 
 /** The hash of the group's triangles, by counting sort into buckets. */
 function build(g: Group, x: Float64Array, reach: number) {
-  const T = g.tris, nt = T.length / 3, start = g.start, B = g.box;
+  const T = g.tris, nt = T.length / 3, start = g.start, fill = g.fill, range = g.range, B = g.box, buckets = g.buckets, mask = g.mask;
   start.fill(0);
-  const range = new Int32Array(nt * 6);
   let total = 0;
   for (let t = 0; t < nt; t++) {
     const a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2], o = 6 * t;
@@ -348,16 +360,16 @@ function build(g: Group, x: Float64Array, reach: number) {
       range[o + 3 + k] = Math.floor(B[o + 3 + k] / CELL);
     }
     for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
-      start[hash(ix, iy, iz) + 1]++; total++;
+      start[hash(ix, iy, iz, mask) + 1]++; total++;
     }
   }
-  for (let b = 0; b < BUCKETS; b++) start[b + 1] += start[b];
+  for (let b = 0; b < buckets; b++) start[b + 1] += start[b];
   if (g.entries.length < total) g.entries = new Int32Array(Math.ceil(total * 1.25));
-  const fill = start.slice(0, BUCKETS);
+  fill.set(start.subarray(0, buckets));
   for (let t = 0; t < nt; t++) {
     const o = 6 * t;
     for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
-      g.entries[fill[hash(ix, iy, iz)]++] = t;
+      g.entries[fill[hash(ix, iy, iz, mask)]++] = t;
     }
   }
 }

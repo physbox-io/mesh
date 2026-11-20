@@ -23,7 +23,7 @@ import { SelfContacts } from './clothSelf';
 import { BoardShapes, type Board } from './clothBoards';
 import { contourStep, findCrossings, trianglesNear, untangleMesh, type UntangleMesh } from './clothUntangle';
 import { ClothCcd } from './clothCcd';
-import { colliderContact, type Collider } from './clothColliders';
+import { colliderContactInto, type Collider, type ContactOut } from './clothColliders';
 
 /** Substep, seconds. */
 /**
@@ -91,27 +91,27 @@ const UNTANGLE_BUDGET = 3000;
 const CCD_EVERY = 8;
 
 const SKIN_FRICTION = 0.02;
-const STALL = (15 * Math.PI) / 180, POST_STALL = (30 * Math.PI) / 180;
 
 /**
  * Force square to a sheet, over dynamic pressure times area, with the flow at
- * `alpha` to its plane: a flat plate's, lift-like 5.7 per radian until it
- * stalls at 15 degrees, then easing by 30 onto a bluff plate's cd sin(alpha).
+ * `alpha` to its plane: smooth monotonic Kirchhoff/Hoerner normal force rising
+ * linearly like a thin membrane at small angles and saturating smoothly to the
+ * bluff-plate `cd * sin(alpha)` at 90 degrees without a negative-slope stall kink.
  * `cd` below a solid sheet's 1.2 is an open weave, and scales the whole curve.
  */
 export function clothNormalCoefficient(alpha: number, cd: number): number {
-  const k = cd / 1.2;
-  const bluff = cd * Math.sin(alpha);
-  if (alpha <= STALL) return k * 5.7 * alpha;
-  if (alpha >= POST_STALL) return bluff;
-  const t = (alpha - STALL) / (POST_STALL - STALL);
-  return (1 - t) * k * 5.7 * STALL + t * bluff;
+  const s = Math.sin(Math.max(0, Math.min(Math.PI / 2, alpha)));
+  // Smooth Hoerner/Rayleigh flat-plate normal coefficient: ~2*pi*alpha/(1 + ...)
+  // monotonically rising from 0 to cd at 90 deg with zero negative slope.
+  return cd * ((2.2 * s) / (1 + 1.2 * s));
 }
 
 export interface ClothEnv {
   gravity: [number, number, number];
   wind: [number, number, number];
   airDensity: number;
+  /** Optional spatially varying gust wind sampler `(wx, wy, x, y, z, t) => [gx, gy, gz]`. */
+  gustAt?: (wx: number, wy: number, x: number, y: number, z: number, timeSec: number) => [number, number, number];
 }
 
 interface Piece {
@@ -127,11 +127,11 @@ export class ClothSim {
   private w: Float64Array;
   private ext: Float64Array;
   private pieces: Piece[];
-  private edges: Int32Array; private edgeRest: Float64Array; private edgeMin: Float64Array; private edgeAlpha: Float64Array;
-  private elastics: Int32Array; private elasticFlat: Float64Array; private elasticRest: Float64Array; private elasticAlpha: Float64Array;
+  private edges: Int32Array; private edgeRest: Float64Array; private edgeMin: Float64Array; private edgeAlpha: Float64Array; private edgeLambda: Float64Array;
+  private elastics: Int32Array; private elasticFlat: Float64Array; private elasticRest: Float64Array; private elasticAlpha: Float64Array; private elasticLambda: Float64Array;
   private boards: BoardShapes;
   private grabbed = -1; private grabW = 0; private grabTo: number[] | null = null;
-  private bends: Int32Array; private bendWeights: Float64Array; private bendAlpha: Float64Array; private bendRest: Float64Array;
+  private bends: Int32Array; private bendWeights: Float64Array; private bendAlpha: Float64Array; private bendRest: Float64Array; private bendSign: Int8Array;
   /** Each bend's Lagrange multiplier over a substep's passes (XPBD), so passes converge on its compliance instead of each adding its own correction. */
   private bendLambda: Float64Array;
   private limits: Int32Array; private limitRest: Float64Array;
@@ -141,22 +141,28 @@ export class ClothSim {
   /** Each zip: its cloth, its trim, its pairs' stitches and places up the run (0-1), its length (m), how far it is done up and where its slider is being moved to. */
   private zips: { cloth: string; trim: number; stitch: Int32Array; at: Float64Array; length: number; fastened: number; want: number }[] = [];
   private zipGrabbed = -1;
-  private rodLinks: Int32Array; private rodLinkRest: Float64Array; private rodBends: Int32Array; private rodBendRest: Float64Array; private rodBendAlpha: Float64Array;
+  private rodLinks: Int32Array; private rodLinkRest: Float64Array; private rodBends: Int32Array; private rodBendRest: Float64Array; private rodBendAlpha: Float64Array; private rodBendLambda: Float64Array; private rodBendDir: Float64Array;
   private tacks: { p: number; a: number; b: number; c: number; w0: number; w1: number; w2: number; offset: number; lift: boolean }[];
   private ties: { name: string; p: number; body: string | null; anchor: number[] | null; anchorWorld: number[] | null; from: number[]; sew: number; lambda: number }[];
   private tris: Int32Array; private triCd: Float64Array;
   private floatUntil: Float64Array;
   private colliders: Collider[];
-  private contactN: Float64Array; private contactPush: Float64Array; private contactMu: Float64Array; private contactHeld: Float64Array;
+  private contactN: Float64Array; private contactPush: Float64Array; private contactMu: Float64Array; private contactHeld: Float64Array; private contactDisp: Float64Array;
   private world: THREE.Matrix4[]; private inv: THREE.Matrix4[];
+  private prevWorld: THREE.Matrix4[]; private worldInit: Uint8Array;
+  private substepMoveScale = 1;
+  private worldBox: Float64Array;
+  private poseCorner = new THREE.Vector3();
+  private posePoint = new THREE.Vector3();
+  private poseIdentity = new THREE.Matrix4();
+  private hitScratch: ContactOut = { d: 0, nx: 0, ny: 0, nz: 0 };
   private layers: LayerContacts;
   private self: SelfContacts;
   private layerTick = 0;
   /**
    * How far each particle can move before it could reach a body, from its
    * nearest at the last look; until it has, it is not looked at again. Most
-   * of a garment hangs clear of the form most of the time. Reset when any
-   * body moves.
+   * of a garment hangs clear of the form most of the time.
    */
   private clearBudget: Float64Array;
   private nearest: Float64Array;
@@ -165,6 +171,7 @@ export class ClothSim {
   /** Cloth against cloth along each stretch of substeps (clothCcd): where the stretch began, and how many substeps it is. */
   private ccd: ClothCcd | null = null;
   private ccdFrom: Float64Array | null = null;
+  private ccdBefore: Float64Array;
   private ccdSince = 0;
   /** What continuous collision has done since the build: checks, pairs met, rounds of pushing, checks that needed impact zones, and that fell back to holding. */
   ccdTotals = { calls: 0, met: 0, pushes: 0, zoneCalls: 0, zonePoints: 0, frozen: 0 };
@@ -277,19 +284,49 @@ export class ClothSim {
       }
       this.zips.push({ cloth: m.name, trim: z.trim, stitch: Int32Array.from({ length: count }, (_, k) => first + k), at: Float64Array.from(z.at), length, fastened: z.fastened, want: z.fastened });
     }
-    this.edges = Int32Array.from(E); this.edgeRest = Float64Array.from(ER); this.edgeMin = Float64Array.from(EM); this.edgeAlpha = Float64Array.from(EA);
-    this.rodLinks = Int32Array.from(RL); this.rodLinkRest = Float64Array.from(RLR); this.rodBends = Int32Array.from(RB); this.rodBendRest = Float64Array.from(RBR); this.rodBendAlpha = Float64Array.from(RBA);
-    this.elastics = Int32Array.from(EL); this.elasticFlat = Float64Array.from(ELF); this.elasticRest = Float64Array.from(ELR); this.elasticAlpha = Float64Array.from(ELA);
+    this.edges = Int32Array.from(E); this.edgeRest = Float64Array.from(ER); this.edgeMin = Float64Array.from(EM); this.edgeAlpha = Float64Array.from(EA); this.edgeLambda = new Float64Array(ER.length);
+    this.rodLinks = Int32Array.from(RL); this.rodLinkRest = Float64Array.from(RLR); this.rodBends = Int32Array.from(RB); this.rodBendRest = Float64Array.from(RBR); this.rodBendAlpha = Float64Array.from(RBA); this.rodBendLambda = new Float64Array(RBR.length);
+    this.rodBendDir = new Float64Array(3 * RBR.length);
+    for (let k = 0; k < RBR.length; k++) {
+      if (RBR[k] <= 1e-9) continue;
+      const ia = 3 * this.rodBends[3 * k], ib = 3 * this.rodBends[3 * k + 1], ic = 3 * this.rodBends[3 * k + 2];
+      const vx = this.x[ia] + this.x[ic] - 2 * this.x[ib], vy = this.x[ia + 1] + this.x[ic + 1] - 2 * this.x[ib + 1], vz = this.x[ia + 2] + this.x[ic + 2] - 2 * this.x[ib + 2];
+      const l = Math.hypot(vx, vy, vz);
+      if (l > 1e-12) { this.rodBendDir[3 * k] = vx / l; this.rodBendDir[3 * k + 1] = vy / l; this.rodBendDir[3 * k + 2] = vz / l; }
+    }
+    this.elastics = Int32Array.from(EL); this.elasticFlat = Float64Array.from(ELF); this.elasticRest = Float64Array.from(ELR); this.elasticAlpha = Float64Array.from(ELA); this.elasticLambda = new Float64Array(ELR.length);
     this.bends = Int32Array.from(B); this.bendWeights = Float64Array.from(BR); this.bendAlpha = Float64Array.from(BA); this.bendRest = Float64Array.from(BC); this.bendLambda = new Float64Array(BA.length);
+    this.bendSign = new Int8Array(BA.length);
+    for (let s = 0; s < BA.length; s++) {
+      if (this.bendRest[s] <= 1e-9) continue;
+      const i0 = 3 * this.bends[4 * s], i1 = 3 * this.bends[4 * s + 1], i2 = 3 * this.bends[4 * s + 2], i3 = 3 * this.bends[4 * s + 3];
+      const e0x = this.x[i1] - this.x[i0], e0y = this.x[i1 + 1] - this.x[i0 + 1], e0z = this.x[i1 + 2] - this.x[i0 + 2];
+      const e1x = this.x[i2] - this.x[i0], e1y = this.x[i2 + 1] - this.x[i0 + 1], e1z = this.x[i2 + 2] - this.x[i0 + 2];
+      const e2x = this.x[i3] - this.x[i0], e2y = this.x[i3 + 1] - this.x[i0 + 1], e2z = this.x[i3 + 2] - this.x[i0 + 2];
+      // Oriented hinge bisector: n_tri(0,1,2) + n_tri(0,3,1) = e0 x (e1 - e2).
+      const d12x = e1x - e2x, d12y = e1y - e2y, d12z = e1z - e2z;
+      const hx = e0y * d12z - e0z * d12y, hy = e0z * d12x - e0x * d12z, hz = e0x * d12y - e0y * d12x;
+      let vx = 0, vy = 0, vz = 0;
+      for (let j = 0; j < 4; j++) {
+        const idx = 3 * this.bends[4 * s + j], kw = this.bendWeights[4 * s + j];
+        vx += kw * this.x[idx]; vy += kw * this.x[idx + 1]; vz += kw * this.x[idx + 2];
+      }
+      const dot = vx * hx + vy * hy + vz * hz;
+      if (Math.abs(dot) > 1e-18) this.bendSign[s] = dot >= 0 ? 1 : -1;
+    }
     this.limits = Int32Array.from(LP); this.limitRest = Float64Array.from(LR);
     this.stitches = Int32Array.from(S); this.stitchSew = Float64Array.from(SS); this.stitchGap = new Float64Array(S.length / 2);
     this.stitchOn = new Uint8Array(S.length / 2).fill(1); this.stitchClose = new Float64Array(S.length / 2);
     for (const z of this.zips) z.stitch.forEach((k, j) => { this.stitchOn[k] = z.at[j] <= z.fastened + 1e-9 ? 1 : 0; });
     this.tris = Int32Array.from(T); this.triCd = Float64Array.from(TC);
     this.colliders = colliders;
-    this.contactN = new Float64Array(3 * n); this.contactPush = new Float64Array(n); this.contactMu = new Float64Array(n); this.contactHeld = new Float64Array(n);
+    this.contactN = new Float64Array(3 * n); this.contactPush = new Float64Array(n); this.contactMu = new Float64Array(n); this.contactHeld = new Float64Array(n); this.contactDisp = new Float64Array(3 * n);
     this.world = colliders.map(() => new THREE.Matrix4());
+    this.prevWorld = colliders.map(() => new THREE.Matrix4());
+    this.worldInit = new Uint8Array(colliders.length);
     this.inv = colliders.map(() => new THREE.Matrix4());
+    this.worldBox = new Float64Array(6 * colliders.length);
+    this.ccdBefore = new Float64Array(3 * n);
     this.layers = new LayerContacts(this.pieces, this.w);
     this.self = new SelfContacts(this.pieces, this.w, this.stitches, this.x);
     const boards: Board[] = [];
@@ -310,54 +347,106 @@ export class ClothSim {
     for (const t of this.ties) t.from = [x[3 * t.p], x[3 * t.p + 1], x[3 * t.p + 2]];
   }
 
+  /** Whether adding `dt` will trigger at least one substep in `advance(dt)`. */
+  willSubstep(dt: number): boolean {
+    return this.accumulator + dt >= CLOTH_SUBSTEP;
+  }
+
+  private static poseNext = new THREE.Matrix4();
+
   /**
    * Where each collider's body is, as a world matrix (null: where it was).
    * Call before advancing; static bodies need it only once.
    */
   setPoses(bodyWorld: (body: string) => THREE.Matrix4 | null, geomWorld: (geom: number) => THREE.Matrix4 | null = () => null) {
-    const corner = new THREE.Vector3();
-    this.colliders.forEach((c, i) => {
-      const bw = c.geom !== undefined ? geomWorld(c.geom) : c.body ? bodyWorld(c.body) : new THREE.Matrix4();
-      if (!bw) return;
-      const before = this.world[i].elements.slice();
-      this.world[i].multiplyMatrices(bw, c.local);
-      if (this.world[i].elements.some((v, k) => Math.abs(v - before[k]) > 1e-9)) this.clearBudget?.fill(0);
-      this.inv[i].copy(this.world[i]).invert();
+    const corner = this.poseCorner;
+    const nextMat = ClothSim.poseNext;
+    let maxStepDisp = 0;
+    for (let i = 0; i < this.colliders.length; i++) {
+      const c = this.colliders[i];
+      const bw = c.geom !== undefined ? geomWorld(c.geom) : c.body ? bodyWorld(c.body) : this.poseIdentity;
+      if (!bw) continue;
+      nextMat.multiplyMatrices(bw, c.local);
+      const ne = nextMat.elements, cur = this.world[i].elements;
+      if (this.worldInit[i]) {
+        let changed = false;
+        for (let k = 0; k < 16; k++) {
+          if (Math.abs(ne[k] - cur[k]) > 1e-9) { changed = true; break; }
+        }
+        if (!changed) continue;
+        // Upper bound on point displacement inside c.bounds from ΔM = next - cur.
+        const { min, max } = c.bounds;
+        const rx = Math.max(Math.abs(min[0]), Math.abs(max[0]));
+        const ry = Math.max(Math.abs(min[1]), Math.abs(max[1]));
+        const rz = Math.max(Math.abs(min[2]), Math.abs(max[2]));
+        if (rx < 1e6 && ry < 1e6 && rz < 1e6) {
+          const dtx = Math.hypot(ne[12] - cur[12], ne[13] - cur[13], ne[14] - cur[14]);
+          const drx = Math.hypot(ne[0] - cur[0], ne[1] - cur[1], ne[2] - cur[2]) * rx;
+          const dry = Math.hypot(ne[4] - cur[4], ne[5] - cur[5], ne[6] - cur[6]) * ry;
+          const drz = Math.hypot(ne[8] - cur[8], ne[9] - cur[9], ne[10] - cur[10]) * rz;
+          const disp = dtx + drx + dry + drz;
+          if (disp > maxStepDisp) maxStepDisp = disp;
+        } else {
+          maxStepDisp = 1;
+        }
+      } else {
+        this.worldInit[i] = 1;
+        this.prevWorld[i].copy(nextMat);
+      }
+      this.world[i].copy(nextMat);
+      this.inv[i].copy(nextMat).invert();
       // Its bounds in the world, grown by the cloth's thickness: most points
       // are turned away by six comparisons, not a transform and a distance.
-      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      let lo0 = Infinity, lo1 = Infinity, lo2 = Infinity, hi0 = -Infinity, hi1 = -Infinity, hi2 = -Infinity;
       const { min, max } = c.bounds;
-      const huge = min.some((v) => v < -1e8) || max.some((v) => v > 1e8);
+      const huge = min[0] < -1e8 || min[1] < -1e8 || min[2] < -1e8 || max[0] > 1e8 || max[1] > 1e8 || max[2] > 1e8;
       for (let k = 0; k < 8 && !huge; k++) {
-        corner.set(k & 1 ? max[0] : min[0], k & 2 ? max[1] : min[1], k & 4 ? max[2] : min[2]).applyMatrix4(this.world[i]);
-        lo[0] = Math.min(lo[0], corner.x); lo[1] = Math.min(lo[1], corner.y); lo[2] = Math.min(lo[2], corner.z);
-        hi[0] = Math.max(hi[0], corner.x); hi[1] = Math.max(hi[1], corner.y); hi[2] = Math.max(hi[2], corner.z);
+        corner.set(k & 1 ? max[0] : min[0], k & 2 ? max[1] : min[1], k & 4 ? max[2] : min[2]).applyMatrix4(nextMat);
+        if (corner.x < lo0) lo0 = corner.x; if (corner.y < lo1) lo1 = corner.y; if (corner.z < lo2) lo2 = corner.z;
+        if (corner.x > hi0) hi0 = corner.x; if (corner.y > hi1) hi1 = corner.y; if (corner.z > hi2) hi2 = corner.z;
       }
-      const t = CLOTH_THICKNESS;
-      this.worldBox[i] = huge ? [-1e9, -1e9, -1e9, 1e9, 1e9, 1e9] : [lo[0] - t, lo[1] - t, lo[2] - t, hi[0] + t, hi[1] + t, hi[2] + t];
-    });
+      const t = CLOTH_THICKNESS, bo = 6 * i, B = this.worldBox;
+      if (huge) {
+        B[bo] = -1e9; B[bo + 1] = -1e9; B[bo + 2] = -1e9; B[bo + 3] = 1e9; B[bo + 4] = 1e9; B[bo + 5] = 1e9;
+      } else {
+        B[bo] = lo0 - t; B[bo + 1] = lo1 - t; B[bo + 2] = lo2 - t; B[bo + 3] = hi0 + t; B[bo + 4] = hi1 + t; B[bo + 5] = hi2 + t;
+      }
+    }
+    if (maxStepDisp > 0) {
+      const cb = this.clearBudget;
+      for (let i = 0; i < this.n; i++) cb[i] -= maxStepDisp;
+    }
     // Where each tie is drawn to, for this pose.
-    const p = new THREE.Vector3();
-    for (const tie of this.ties) {
+    const p = this.posePoint;
+    for (let ti = 0; ti < this.ties.length; ti++) {
+      const tie = this.ties[ti];
       if (!tie.anchor) continue;
       const bw = tie.body ? bodyWorld(tie.body) : null;
       p.set(tie.anchor[0], tie.anchor[1], tie.anchor[2]);
       if (bw) p.applyMatrix4(bw);
-      tie.anchorWorld = [p.x, p.y, p.z];
+      if (tie.anchorWorld) { tie.anchorWorld[0] = p.x; tie.anchorWorld[1] = p.y; tie.anchorWorld[2] = p.z; }
+      else tie.anchorWorld = [p.x, p.y, p.z];
     }
   }
-  private worldBox: number[][] = [];
 
   /** Moves the cloth on by `dt`, in whole substeps (the remainder carries over). */
   advance(dt: number, env: ClothEnv) {
     this.accumulator += dt;
     if (this.accumulator < CLOTH_SUBSTEP) return;
-    this.externalForces(env);
     const h = CLOTH_SUBSTEP;
+    let steps = 0;
+    let total = this.accumulator;
+    while (total >= h) { steps++; total -= h; }
+    this.substepMoveScale = 1 / steps;
     while (this.accumulator >= h) {
+      this.externalForces(env);
       this.substep(h, env);
       this.accumulator -= h;
       if (++this.ccdSince >= CCD_EVERY) this.collideAlong(this.ccdSince * h);
+    }
+    this.substepMoveScale = 1;
+    for (let ci = 0; ci < this.colliders.length; ci++) {
+      if (this.worldInit[ci]) this.prevWorld[ci].copy(this.world[ci]);
     }
   }
 
@@ -380,7 +469,8 @@ export class ClothSim {
     const x = this.x, from = this.ccdFrom;
     this.ccdSince = 0;
     if (!from) { this.ccdFrom = Float64Array.from(x); return; }
-    const before = Float64Array.from(x);
+    const before = this.ccdBefore;
+    before.set(x);
     const st = this.ccdOf().resolve(from, x, this.w);
     this.ccdTotals.calls++; this.ccdTotals.met += st.met; this.ccdTotals.pushes += st.pushes; this.ccdTotals.zoneCalls += st.zones ? 1 : 0; this.ccdTotals.frozen += st.frozen ? 1 : 0; this.ccdTotals.zonePoints += st.zonePoints;
     if (st.met) {
@@ -388,38 +478,61 @@ export class ClothSim {
       for (let i = 0; i < this.n; i++) {
         const k = 3 * i;
         if (x[k] === before[k] && x[k + 1] === before[k + 1] && x[k + 2] === before[k + 2]) continue;
-        for (let c = 0; c < 3; c++) v[k + c] = (x[k + c] - from[k + c]) / span;
+        // Damp velocity derived from CCD pushbacks (0.5x) so post-contact/tack re-projections
+        // and CCD impact responses never pump energy into a permanent limit cycle.
+        for (let c = 0; c < 3; c++) v[k + c] = 0.5 * ((x[k + c] - from[k + c]) / span);
         this.prev[k] = x[k]; this.prev[k + 1] = x[k + 1]; this.prev[k + 2] = x[k + 2];
       }
     }
     from.set(x);
   }
 
-  /** Wind on each triangle, as an acceleration of its corners. */
+  /** Wind and still-air aerodynamic drag on each triangle, as an acceleration of its corners. */
   private externalForces(env: ClothEnv) {
     this.ext.fill(0);
-    const [wx, wy, wz] = env.wind;
-    if (!wx && !wy && !wz) return;
-    const x = this.x, v = this.v, T = this.tris;
+    if (env.airDensity <= 0) return;
+    const [wx0, wy0, wz0] = env.wind;
+    const hasMeanWind = wx0 !== 0 || wy0 !== 0 || wz0 !== 0;
+    const gustAt = hasMeanWind ? env.gustAt : undefined;
+    const x = this.x, v = this.v, T = this.tris, W = this.w, ext = this.ext;
+    // Passive explicit-Euler cap per substep: aerodynamic force cannot reverse
+    // relative air velocity within a single substep.
+    const maxAccelPerSpeed = 0.35 / CLOTH_SUBSTEP;
     for (let t = 0; t < T.length; t += 3) {
-      const a = 3 * T[t], b = 3 * T[t + 1], c = 3 * T[t + 2];
+      const i0 = T[t], i1 = T[t + 1], i2 = T[t + 2];
+      const a = 3 * i0, b = 3 * i1, c = 3 * i2;
+      const vtx = (v[a] + v[b] + v[c]) / 3, vty = (v[a + 1] + v[b + 1] + v[c + 1]) / 3, vtz = (v[a + 2] + v[b + 2] + v[c + 2]) / 3;
+      if (!hasMeanWind && vtx * vtx + vty * vty + vtz * vtz < 1e-8) continue;
       const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2];
       const vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2];
       let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
       if (len < 1e-12) continue;
       const area = len / 2; nx /= len; ny /= len; nz /= len;
-      const rx = wx - (v[a] + v[b] + v[c]) / 3, ry = wy - (v[a + 1] + v[b + 1] + v[c + 1]) / 3, rz = wz - (v[a + 2] + v[b + 2] + v[c + 2]) / 3;
+      let wx = wx0, wy = wy0, wz = wz0;
+      if (gustAt) {
+        const cx = (x[a] + x[b] + x[c]) / 3, cy = (x[a + 1] + x[b + 1] + x[c + 1]) / 3, cz = (x[a + 2] + x[b + 2] + x[c + 2]) / 3;
+        const g = gustAt(wx0, wy0, cx, cy, cz, this.time);
+        wx = g[0]; wy = g[1]; wz = g[2];
+      }
+      const rx = wx - vtx, ry = wy - vty, rz = wz - vtz;
       const s2 = rx * rx + ry * ry + rz * rz;
-      if (s2 < 1e-10) continue;
+      if (s2 < 1e-8) continue;
       const s = Math.sqrt(s2), vn = rx * nx + ry * ny + rz * nz;
       const qa = (0.5 * env.airDensity * s2 * area) / 3;
       const pn = Math.sign(vn) * qa * clothNormalCoefficient(Math.asin(Math.min(1, Math.abs(vn) / s)), this.triCd[t / 3]);
       const tx = rx - vn * nx, ty = ry - vn * ny, tz = rz - vn * nz, pt = (qa * SKIN_FRICTION) / s;
-      for (const i of [T[t], T[t + 1], T[t + 2]]) {
-        const w = this.w[i];
-        this.ext[3 * i] += w * (pn * nx + pt * tx); this.ext[3 * i + 1] += w * (pn * ny + pt * ty); this.ext[3 * i + 2] += w * (pn * nz + pt * tz);
-      }
+      const fx = pn * nx + pt * tx, fy = pn * ny + pt * ty, fz = pn * nz + pt * tz;
+      const fMag = Math.hypot(fx, fy, fz);
+      const maxAccel = maxAccelPerSpeed * s;
+      const applyCorner = (idx: number, k3: number) => {
+        const wi = W[idx];
+        if (!wi) return;
+        const aMag = wi * fMag;
+        const sc = aMag > maxAccel ? maxAccel / aMag : 1;
+        ext[k3] += wi * sc * fx; ext[k3 + 1] += wi * sc * fy; ext[k3 + 2] += wi * sc * fz;
+      };
+      applyCorner(i0, a); applyCorner(i1, b); applyCorner(i2, c);
     }
   }
 
@@ -660,17 +773,21 @@ export class ClothSim {
     const doLayers = this.layers.active;
     for (let pass = 0; pass < SETTLE_PASSES; pass++) {
       this.prev.set(this.x);
+      this.edgeLambda.fill(0);
+      this.elasticLambda.fill(0);
+      this.rodBendLambda.fill(0);
       this.bendLambda.fill(0);
       this.contactPush.fill(0);
+      this.contactMu.fill(0);
+      this.contactN.fill(0);
+      this.contactDisp.fill(0);
       this.contactHeld.fill(0);
       for (let i = 0; i < this.n; i++) this.skip[i] = !this.w[i] ? 1 : 0;
       for (let sp = 0; sp < STRETCH_PASSES; sp++) {
-        this.solveDistances(this.edges, this.edgeRest, this.edgeMin, this.edgeAlpha, h2);
+        this.solveDistances(this.edges, this.edgeRest, this.edgeMin, this.edgeAlpha, this.edgeLambda, h2);
         this.solveLimits(h2);
         this.solveRods(h2);
-        if (sp === 0) {
-          this.solveBends(h2);
-        }
+        this.solveBends(h2);
         this.boards.solve(this.x, this.w);
         for (let k = 0; k < this.stitchGap.length; k++) {
           if (this.stitchOn[k] && this.stitchSew[k] <= 0) this.project(this.stitches[2 * k], this.stitches[2 * k + 1], 0, 0);
@@ -680,14 +797,45 @@ export class ClothSim {
       }
       this.collide(CLOTH_THICKNESS, true);
       if (doLayers) {
-        this.layers.collide(this.x, this.prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, pass === 0, true);
+        this.layers.collide(this.x, this.prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, this.contactDisp, pass === 0, true);
       }
       if (this.self.active) this.self.collide(this.x, this.prev, pass === 0);
       this.solveTacks();
     }
     this.prev.set(this.x);
     this.v.fill(0);
+    for (let ci = 0; ci < this.colliders.length; ci++) {
+      if (this.worldInit[ci]) this.prevWorld[ci].copy(this.world[ci]);
+    }
     this.aim();
+  }
+
+  private applyFriction() {
+    const { x, prev, n, contactPush, contactN, contactMu, contactDisp, contactHeld } = this;
+    for (let i = 0; i < n; i++) {
+      const push = contactPush[i];
+      if (push <= 0) continue;
+      const k = 3 * i;
+      let nx = contactN[k], ny = contactN[k + 1], nz = contactN[k + 2];
+      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (nl < 1e-12) continue;
+      nx /= nl; ny /= nl; nz /= nl;
+      // Relative slip against impulse-weighted collider/layer surface displacement.
+      const invPush = 1 / push;
+      const dx = (x[k] - prev[k]) - contactDisp[k] * invPush;
+      const dy = (x[k + 1] - prev[k + 1]) - contactDisp[k + 1] * invPush;
+      const dz = (x[k + 2] - prev[k + 2]) - contactDisp[k + 2] * invPush;
+      const dn = dx * nx + dy * ny + dz * nz;
+      const tx = dx - dn * nx, ty = dy - dn * ny, tz = dz - dn * nz;
+      const tl = Math.sqrt(tx * tx + ty * ty + tz * tz);
+      // contactMu[i] holds sum(mu * depth), so total Coulomb tangential budget is contactMu[i].
+      const rem = contactMu[i] - contactHeld[i];
+      if (tl > 1e-12 && rem > 0) {
+        const take = Math.min(tl, rem), s = take / tl;
+        x[k] -= tx * s; x[k + 1] -= ty * s; x[k + 2] -= tz * s;
+        contactHeld[i] += take;
+      }
+    }
   }
 
   private substep(h: number, env: ClothEnv) {
@@ -718,6 +866,9 @@ export class ClothSim {
     }
     const h2 = h * h;
     this.contactPush.fill(0);
+    this.contactMu.fill(0);
+    this.contactN.fill(0);
+    this.contactDisp.fill(0);
     this.contactHeld.fill(0);
     for (let i = 0; i < n; i++) this.skip[i] = !w[i] ? 1 : this.clearBudget[i] <= 0 ? 0 : 1;
     const doLayers = this.layers.active;
@@ -726,9 +877,13 @@ export class ClothSim {
     // contact and Coulomb friction each pass so points held by friction pull
     // their neighbours in subsequent passes rather than stretching the edges
     // between them at the end of the substep.
+    this.edgeLambda.fill(0);
+    this.elasticLambda.fill(0);
+    this.rodBendLambda.fill(0);
     this.bendLambda.fill(0);
+    for (let ti = 0; ti < this.ties.length; ti++) this.ties[ti].lambda = 0;
     for (let pass = 0; pass < STRETCH_PASSES; pass++) {
-      this.solveDistances(this.edges, this.edgeRest, this.edgeMin, this.edgeAlpha, h2);
+      this.solveDistances(this.edges, this.edgeRest, this.edgeMin, this.edgeAlpha, this.edgeLambda, h2);
       this.solveElastics(h2);
       this.solveLimits(h2);
       this.solveRods(h2);
@@ -748,47 +903,36 @@ export class ClothSim {
         this.project(this.stitches[2 * k], this.stitches[2 * k + 1], sew <= 0 ? this.stitchClose[k] : this.stitchGap[k] * (1 - Math.min(1, t / sew)), 0);
       }
       if (this.zips.length) this.sliderThroats();
+      // Ties: project inside each pass so incident edges converge against the
+      // true anchored position without inflating tieLoads() by STRETCH_PASSES.
+      for (let ti = 0; ti < this.ties.length; ti++) {
+        const tie = this.ties[ti];
+        const i = tie.p, k = 3 * i, f = tie.from, aw = tie.anchorWorld;
+        const s = aw ? Math.min(1, t / Math.max(1e-6, tie.sew)) : 0;
+        const tx = aw ? f[0] + (aw[0] - f[0]) * s : f[0], ty = aw ? f[1] + (aw[1] - f[1]) * s : f[1], tz = aw ? f[2] + (aw[2] - f[2]) * s : f[2];
+        const dx = tx - x[k], dy = ty - x[k + 1], dz = tz - x[k + 2];
+        x[k] += dx; x[k + 1] += dy; x[k + 2] += dz;
+        tie.lambda += Math.sqrt(dx * dx + dy * dy + dz * dz) / (h2 * Math.max(1e-12, w[i]));
+      }
       this.solveTacks();
       this.collide(CLOTH_THICKNESS, false);
-      // And on the last pass of every substep: skipped there every other
-      // substep, the passes after the first pulled a stiff collar back into
-      // the neckerchief under it, and the next substep pushed it out again
-      // in one go, back and forth, the collar flickering as it ran.
-      if (doLayers && (pass === 0 || pass === STRETCH_PASSES - 1 || this.layerTick === 0)) this.layers.collide(x, prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, pass === 0 && this.layerTick === 0);
+      // And on the last pass of every substep: pass === 0 steps the rebuild
+      // counter once per substep so LayerContacts rebuilds every 4 substeps.
+      if (doLayers && (pass === 0 || pass === STRETCH_PASSES - 1 || this.layerTick === 0)) {
+        this.layers.collide(x, prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, this.contactDisp, pass === 0);
+      }
       // Once a substep, on the last pass: the constraints have moved the cloth
       // by then, and friction after it holds what this sets.
       if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true);
       this.solveTacks();
-      for (let i = 0; i < n; i++) {
-        if (this.contactPush[i] <= 0) continue;
-        const k = 3 * i;
-        const nx = this.contactN[k], ny = this.contactN[k + 1], nz = this.contactN[k + 2];
-        const dx = x[k] - prev[k], dy = x[k + 1] - prev[k + 1], dz = x[k + 2] - prev[k + 2];
-        const dn = dx * nx + dy * ny + dz * nz;
-        const tx = dx - dn * nx, ty = dy - dn * ny, tz = dz - dn * nz;
-        const tl = Math.sqrt(tx * tx + ty * ty + tz * tz);
-        const rem = this.contactMu[i] * this.contactPush[i] - this.contactHeld[i];
-        if (tl > 1e-12 && rem > 0) {
-          const take = Math.min(tl, rem), s = take / tl;
-          x[k] -= tx * s; x[k + 1] -= ty * s; x[k + 2] -= tz * s;
-          this.contactHeld[i] += take;
-        }
-      }
-    }
-    // Ties: each point drawn to its anchor (wound in over the sew time).
-    for (const tie of this.ties) {
-      const i = tie.p, k = 3 * i, f = tie.from, aw = tie.anchorWorld;
-      const s = aw ? Math.min(1, t / Math.max(1e-6, tie.sew)) : 0;
-      const tx = aw ? f[0] + (aw[0] - f[0]) * s : f[0], ty = aw ? f[1] + (aw[1] - f[1]) * s : f[1], tz = aw ? f[2] + (aw[2] - f[2]) * s : f[2];
-      const dx = tx - x[k], dy = ty - x[k + 1], dz = tz - x[k + 2];
-      x[k] += dx; x[k + 1] += dy; x[k + 2] += dz;
-      // The pull, by Newton: m a over the substep.
-      tie.lambda = Math.sqrt(dx * dx + dy * dy + dz * dz) / (h2 * Math.max(1e-12, w[i]));
+      this.applyFriction();
     }
     this.collide(CLOTH_THICKNESS, true);
     this.solveTacks();
+    this.applyFriction();
+    this.collide(CLOTH_THICKNESS, false);
     // Velocities from the post-contact, post-friction positions: strongly
-    // damped and bounded to terminal free-fall speed over the initial settle
+    // damped and bounded to terminal free-fall speed over the post-float release
     // window so 3D-vs-2D rest-length reconciliation does not turn into momentum.
     const gMag = Math.hypot(gx, gy, gz);
     const wMag = Math.hypot(env.wind[0], env.wind[1], env.wind[2]);
@@ -798,16 +942,19 @@ export class ClothSim {
       let vx = ((x[k] - prev[k]) / h) * baseDamp;
       let vy = ((x[k + 1] - prev[k + 1]) / h) * baseDamp;
       let vz = ((x[k + 2] - prev[k + 2]) / h) * baseDamp;
-      const tr = Math.max(0, t - this.floatUntil[i]);
-      if (tr < 0.35) {
-        const rate = 1 + 40 * Math.exp(-tr / 0.08);
-        const extra = Math.exp(-(rate - 1) * h);
-        vx *= extra; vy *= extra; vz *= extra;
-        const cap = gMag / rate + wMag + 0.25;
-        const s = Math.hypot(vx, vy, vz);
-        if (s > cap) {
-          const sc = cap / s;
-          vx *= sc; vy *= sc; vz *= sc;
+      // Apply post-float velocity cap only to particles that actually floated while sewing (`floatUntil[i] > 0`).
+      if (this.floatUntil[i] > 0) {
+        const tr = Math.max(0, t - this.floatUntil[i]);
+        if (tr < 0.35) {
+          const rate = 1 + 40 * Math.exp(-tr / 0.08);
+          const extra = Math.exp(-(rate - 1) * h);
+          vx *= extra; vy *= extra; vz *= extra;
+          const cap = gMag / rate + wMag + 0.25;
+          const s = Math.hypot(vx, vy, vz);
+          if (s > cap) {
+            const sc = cap / s;
+            vx *= sc; vy *= sc; vz *= sc;
+          }
         }
       }
       v[k] = vx;
@@ -816,7 +963,14 @@ export class ClothSim {
     }
   }
 
-  private solveDistances(pairs: Int32Array, rest: Float64Array, minRest: Float64Array, alpha: Float64Array, h2: number) {
+  private solveDistances(
+    pairs: Int32Array,
+    rest: Float64Array,
+    minRest: Float64Array,
+    alpha: Float64Array,
+    lambda: Float64Array,
+    h2: number,
+  ) {
     const { x, w } = this;
     for (let k = 0; k < rest.length; k++) {
       const a = pairs[2 * k], b = pairs[2 * k + 1];
@@ -825,32 +979,79 @@ export class ClothSim {
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (len < 1e-12) continue;
       const target = len > rest[k] ? rest[k] : len < minRest[k] ? minRest[k] : len;
-      if (target === len) continue;
-      const wa = w[a], wb = w[b], ws = wa + wb + alpha[k] / h2;
-      if (ws <= 0) continue;
-      const c = (len - target) / (ws * len);
-      x[ia] -= wa * c * dx; x[ia + 1] -= wa * c * dy; x[ia + 2] -= wa * c * dz;
-      x[ib] += wb * c * dx; x[ib + 1] += wb * c * dy; x[ib + 2] += wb * c * dz;
+      const wa = w[a], wb = w[b];
+      if (wa + wb <= 0) continue;
+      const at = alpha[k] / h2;
+      if (target === len && lambda[k] === 0) continue;
+      const C = len - target;
+      let dl = (-C - at * lambda[k]) / (wa + wb + at);
+      // Slack dead-band between minRest and rest: unilateral in each direction,
+      // so tension multiplier >= 0 (or <= 0 in XPBD sign convention) cannot push when slack.
+      if (minRest[k] < rest[k]) {
+        const nextLam = lambda[k] + dl;
+        if (len >= minRest[k] && len <= rest[k] && lambda[k] * nextLam <= 0) dl = -lambda[k];
+      }
+      lambda[k] += dl;
+      const invLen = 1 / len;
+      x[ia] += wa * dl * dx * invLen; x[ia + 1] += wa * dl * dy * invLen; x[ia + 2] += wa * dl * dz * invLen;
+      x[ib] -= wb * dl * dx * invLen; x[ib + 1] -= wb * dl * dy * invLen; x[ib + 2] -= wb * dl * dz * invLen;
     }
   }
 
   /**
-   * Boning (clothRods): its links held to length, and the length of its
-   * curvature vector a + c - 2b at each point toward its modelled one, with
-   * compliance h^3 / (E I).
+   * Boning (clothRods): its links held to length, and its curvature vector
+   * a + c - 2b at each point driven toward its modelled shape with XPBD
+   * compliance h^3 / (E I) and signed curvature preservation.
    */
   private solveRods(h2: number) {
     const { x, w } = this, L = this.rodLinks, LR = this.rodLinkRest;
     for (let k = 0; k < LR.length; k++) this.project(L[2 * k], L[2 * k + 1], LR[k], 0);
-    const B = this.rodBends, R = this.rodBendRest, A = this.rodBendAlpha;
+    const B = this.rodBends, R = this.rodBendRest, A = this.rodBendAlpha, lam = this.rodBendLambda, D = this.rodBendDir;
     for (let k = 0; k < R.length; k++) {
       const a = B[3 * k], b = B[3 * k + 1], c = B[3 * k + 2], ia = 3 * a, ib = 3 * b, ic = 3 * c;
+      const wSum = w[a] + w[c] + 4 * w[b];
+      if (wSum <= 0) continue;
       const vx = x[ia] + x[ic] - 2 * x[ib], vy = x[ia + 1] + x[ic + 1] - 2 * x[ib + 1], vz = x[ia + 2] + x[ic + 2] - 2 * x[ib + 2];
       const len = Math.sqrt(vx * vx + vy * vy + vz * vz);
-      if (len < 1e-12) continue;
-      const ws = w[a] + w[c] + 4 * w[b] + A[k] / h2;
-      if (ws <= 0) continue;
-      const dl = -(len - R[k]) / ws, nx = vx / len, ny = vy / len, nz = vz / len;
+      const rest = R[k];
+      let nx: number, ny: number, nz: number, cVal: number;
+      if (rest > 1e-9) {
+        // Parallel-transport / align initial rest bend direction into current chord plane (orthogonal to c - a).
+        const chx = x[ic] - x[ia], chy = x[ic + 1] - x[ia + 1], chz = x[ic + 2] - x[ia + 2];
+        const ch2 = chx * chx + chy * chy + chz * chz;
+        let dx = D[3 * k], dy = D[3 * k + 1], dz = D[3 * k + 2];
+        if (ch2 > 1e-12) {
+          const proj = (dx * chx + dy * chy + dz * chz) / ch2;
+          dx -= proj * chx; dy -= proj * chy; dz -= proj * chz;
+        }
+        const dlDir = Math.hypot(dx, dy, dz);
+        if (dlDir > 1e-9) {
+          dx /= dlDir; dy /= dlDir; dz /= dlDir;
+          // Update tracked bend normal smoothly when clearly bent on the positive side so rotating garments carry their rod frame!
+          if (len > 0.25 * rest && vx * dx + vy * dy + vz * dz > 0) {
+            D[3 * k] = vx / len; D[3 * k + 1] = vy / len; D[3 * k + 2] = vz / len;
+          }
+          if (len > 1e-9 && vx * dx + vy * dy + vz * dz >= 0) {
+            nx = vx / len; ny = vy / len; nz = vz / len;
+            cVal = len;
+          } else {
+            // Rod bent flat or inverted past flat: push back along +d with signed curvature cVal <= 0!
+            nx = dx; ny = dy; nz = dz;
+            cVal = vx * dx + vy * dy + vz * dz;
+          }
+        } else {
+          if (len < 1e-12) continue;
+          nx = vx / len; ny = vy / len; nz = vz / len;
+          cVal = len;
+        }
+      } else {
+        if (len < 1e-12) continue;
+        nx = vx / len; ny = vy / len; nz = vz / len;
+        cVal = len;
+      }
+      const at = A[k] / h2;
+      const dl = (-(cVal - rest) - at * lam[k]) / (wSum + at);
+      lam[k] += dl;
       x[ia] += w[a] * dl * nx; x[ia + 1] += w[a] * dl * ny; x[ia + 2] += w[a] * dl * nz;
       x[ic] += w[c] * dl * nx; x[ic + 1] += w[c] * dl * ny; x[ic + 2] += w[c] * dl * nz;
       x[ib] -= 2 * w[b] * dl * nx; x[ib + 1] -= 2 * w[b] * dl * ny; x[ib + 2] -= 2 * w[b] * dl * nz;
@@ -864,19 +1065,26 @@ export class ClothSim {
    * than snapping into 1-triangle sawtooth zig-zags on frame 0.
    */
   private solveElastics(h2: number) {
-    const { x, w } = this, P = this.elastics, F = this.elasticFlat, R = this.elasticRest, A = this.elasticAlpha;
+    const { x, w } = this, P = this.elastics, F = this.elasticFlat, R = this.elasticRest, A = this.elasticAlpha, lam = this.elasticLambda;
     const s = Math.min(1, this.time / 0.35);
     for (let k = 0; k < R.length; k++) {
       const a = P[2 * k], b = P[2 * k + 1], ia = 3 * a, ib = 3 * b;
+      const wa = w[a], wb = w[b];
+      if (wa + wb <= 0) continue;
       const dx = x[ia] - x[ib], dy = x[ia + 1] - x[ib + 1], dz = x[ia + 2] - x[ib + 2];
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (len < 1e-12) continue;
       const rest = F[k] + (R[k] - F[k]) * s;
-      if (len <= rest || len < 1e-12) continue;
-      const wa = w[a], wb = w[b], ws = wa + wb + A[k] / h2;
-      if (ws <= 0) continue;
-      const c = (len - rest) / (ws * len);
-      x[ia] -= wa * c * dx; x[ia + 1] -= wa * c * dy; x[ia + 2] -= wa * c * dz;
-      x[ib] += wb * c * dx; x[ib + 1] += wb * c * dy; x[ib + 2] += wb * c * dz;
+      if (len <= rest && lam[k] === 0) continue;
+      const at = A[k] / h2;
+      let dl = (-(len - rest) - at * lam[k]) / (wa + wb + at);
+      // One-sided tension only: elastic multiplier lam <= 0 cannot push apart.
+      if (lam[k] + dl > 0) dl = -lam[k];
+      if (dl === 0) continue;
+      lam[k] += dl;
+      const invLen = 1 / len;
+      x[ia] += wa * dl * dx * invLen; x[ia + 1] += wa * dl * dy * invLen; x[ia + 2] += wa * dl * dz * invLen;
+      x[ib] -= wb * dl * dx * invLen; x[ib + 1] -= wb * dl * dy * invLen; x[ib + 2] -= wb * dl * dz * invLen;
     }
   }
 
@@ -916,10 +1124,10 @@ export class ClothSim {
       if (ws <= 0) continue;
       const sp = w[tk.p] / ws;
       x[ip] -= sp * cx; x[ip + 1] -= sp * cy; x[ip + 2] -= sp * cz;
-      for (const [q, bw] of [[ia, tk.w0], [ib, tk.w1], [ic, tk.w2]] as const) {
-        const s = (bw * w[q / 3]) / ws;
-        x[q] += s * cx; x[q + 1] += s * cy; x[q + 2] += s * cz;
-      }
+      const s0 = (tk.w0 * w[tk.a]) / ws, s1 = (tk.w1 * w[tk.b]) / ws, s2 = (tk.w2 * w[tk.c]) / ws;
+      x[ia] += s0 * cx; x[ia + 1] += s0 * cy; x[ia + 2] += s0 * cz;
+      x[ib] += s1 * cx; x[ib + 1] += s1 * cy; x[ib + 2] += s1 * cz;
+      x[ic] += s2 * cx; x[ic + 1] += s2 * cy; x[ic + 2] += s2 * cz;
     }
   }
 
@@ -948,43 +1156,66 @@ export class ClothSim {
 
   /**
    * Isometric bending: each stencil's curvature, sum K_i x_i, driven to the
-   * size it rests at (none, for flat cloth). Unlike a distance across the hinge, which barely changes for a
-   * small fold, this resists a fold in proportion to its angle: with the
-   * distance, a draped shirt crumpled into facets a triangle across.
+   * size (and dihedral sign, when non-zero) it rests at. Unlike a distance
+   * across the hinge, which barely changes for a small fold, this resists a
+   * fold in proportion to its angle: with the distance, a draped shirt
+   * crumpled into facets a triangle across.
    */
   private solveBends(h2: number) {
-    const { x, w } = this, Q = this.bends, K = this.bendWeights, A = this.bendAlpha;
+    const { x, w } = this, Q = this.bends, K = this.bendWeights, A = this.bendAlpha, S = this.bendSign;
     for (let s = 0; s < A.length; s++) {
-      let vx = 0, vy = 0, vz = 0, den = 0;
-      for (let j = 0; j < 4; j++) {
-        const i = Q[4 * s + j], k = K[4 * s + j];
-        vx += k * x[3 * i]; vy += k * x[3 * i + 1]; vz += k * x[3 * i + 2];
-        den += w[i] * k * k;
+      const q0 = Q[4 * s], q1 = Q[4 * s + 1], q2 = Q[4 * s + 2], q3 = Q[4 * s + 3];
+      const k0 = K[4 * s], k1 = K[4 * s + 1], k2 = K[4 * s + 2], k3 = K[4 * s + 3];
+      const den = w[q0] * k0 * k0 + w[q1] * k1 * k1 + w[q2] * k2 * k2 + w[q3] * k3 * k3;
+      if (den <= 0) continue;
+      const vx = k0 * x[3 * q0] + k1 * x[3 * q1] + k2 * x[3 * q2] + k3 * x[3 * q3];
+      const vy = k0 * x[3 * q0 + 1] + k1 * x[3 * q1 + 1] + k2 * x[3 * q2 + 1] + k3 * x[3 * q3 + 1];
+      const vz = k0 * x[3 * q0 + 2] + k1 * x[3 * q1 + 2] + k2 * x[3 * q2 + 2] + k3 * x[3 * q3 + 2];
+      const cMag = Math.sqrt(vx * vx + vy * vy + vz * vz);
+      const sgn = S[s];
+      let nx: number, ny: number, nz: number, cVal: number;
+      if (sgn !== 0) {
+        // Intrinsic hinge normal from current triangle pair (0,1,2) and (0,3,1): h = e0 x (e1 - e2).
+        const i0 = 3 * q0, i1 = 3 * q1, i2 = 3 * q2, i3 = 3 * q3;
+        const e0x = x[i1] - x[i0], e0y = x[i1 + 1] - x[i0 + 1], e0z = x[i1 + 2] - x[i0 + 2];
+        const d12x = (x[i2] - x[i0]) - (x[i3] - x[i0]);
+        const d12y = (x[i2 + 1] - x[i0 + 1]) - (x[i3 + 1] - x[i0 + 1]);
+        const d12z = (x[i2 + 2] - x[i0 + 2]) - (x[i3 + 2] - x[i0 + 2]);
+        let hx = (e0y * d12z - e0z * d12y) * sgn;
+        let hy = (e0z * d12x - e0x * d12z) * sgn;
+        let hz = (e0x * d12y - e0y * d12x) * sgn;
+        const hl = Math.hypot(hx, hy, hz);
+        if (hl > 1e-12) {
+          hx /= hl; hy /= hl; hz /= hl;
+          const dot = vx * hx + vy * hy + vz * hz;
+          if (cMag > 1e-9 && dot >= 0) {
+            nx = vx / cMag; ny = vy / cMag; nz = vz / cMag;
+            cVal = cMag;
+          } else {
+            // Hinge flattened or snapped inside-out (-theta_0): restore along +h so it unfolds back through flat!
+            nx = hx; ny = hy; nz = hz;
+            cVal = dot;
+          }
+        } else {
+          if (cMag < 1e-12) continue;
+          nx = vx / cMag; ny = vy / cMag; nz = vz / cMag;
+          cVal = cMag;
+        }
+      } else {
+        if (cMag < 1e-12) continue;
+        nx = vx / cMag; ny = vy / cMag; nz = vz / cMag;
+        cVal = cMag;
       }
-      const c = Math.sqrt(vx * vx + vy * vy + vz * vz);
-      if (c < 1e-12) continue;
-      // XPBD: the multiplier carried over the passes. Each pass taking its
-      // own whole correction instead made a soft fabric's bending as many
-      // times stiffer as there are passes (a knit's flared skirt stood as a
-      // cone instead of falling into folds), while a stiff one still
-      // converges over them.
-      const at = A[s] / h2, dl = (-(c - this.bendRest[s]) - at * this.bendLambda[s]) / (den + at);
+      const at = A[s] / h2, dl = (-(cVal - this.bendRest[s]) - at * this.bendLambda[s]) / (den + at);
       this.bendLambda[s] += dl;
-      const nx = vx / c, ny = vy / c, nz = vz / c;
-      for (let j = 0; j < 4; j++) {
-        const i = Q[4 * s + j], f = w[i] * K[4 * s + j] * dl;
-        x[3 * i] += f * nx; x[3 * i + 1] += f * ny; x[3 * i + 2] += f * nz;
-      }
+      const f0 = w[q0] * k0 * dl, f1 = w[q1] * k1 * dl, f2 = w[q2] * k2 * dl, f3 = w[q3] * k3 * dl;
+      x[3 * q0] += f0 * nx; x[3 * q0 + 1] += f0 * ny; x[3 * q0 + 2] += f0 * nz;
+      x[3 * q1] += f1 * nx; x[3 * q1 + 1] += f1 * ny; x[3 * q1 + 2] += f1 * nz;
+      x[3 * q2] += f2 * nx; x[3 * q2 + 1] += f2 * ny; x[3 * q2 + 2] += f2 * nz;
+      x[3 * q3] += f3 * nx; x[3 * q3 + 1] += f3 * ny; x[3 * q3 + 2] += f3 * nz;
     }
   }
 
-  /**
-   * Strain limits: one-sided, between points two edges apart, at their
-   * distance on the flat cloth. They act only when the cloth is stretched
-   * past it, so it still bends, folds and gathers freely; but stretch now
-   * spreads two edges at a time, not one. One pass per substep left a
-   * draped shirt with a twentieth of its edges a quarter too long.
-   */
   /** One distance constraint, |xa - xb| = rest, with compliance alphaTilde (XPBD, one pass). */
   private project(a: number, b: number, rest: number, alphaTilde: number) {
     const { x, w } = this;
@@ -999,10 +1230,9 @@ export class ClothSim {
     x[ib] += wb * c * nx; x[ib + 1] += wb * c * ny; x[ib + 2] += wb * c * nz;
   }
 
-  /** Every particle kept `margin` clear of every collider, with friction. */
+  /** Every particle kept `margin` clear of every collider, recording impulse-weighted normals, friction, and surface displacement. */
   private collide(margin: number, updateBudget = true) {
-    const { x, w, n, prev, clearBudget, nearest, skip } = this;
-    const nrm = new THREE.Vector3();
+    const { x, w, n, prev, clearBudget, nearest, skip, worldBox, hitScratch } = this;
     for (let i = 0; i < n; i++) {
       if (!w[i]) continue;
       if (skip[i]) {
@@ -1012,10 +1242,18 @@ export class ClothSim {
       if (!skip[i]) nearest[i] = Infinity;
     }
     for (let ci = 0; ci < this.colliders.length; ci++) {
-      const c = this.colliders[ci], inv = this.inv[ci], world = this.world[ci];
-      const e = inv.elements, box = this.worldBox[ci];
-      if (!box) continue;
-      const [x0, y0, z0, x1, y1, z1] = box;
+      const c = this.colliders[ci], inv = this.inv[ci], world = this.world[ci], prevW = this.prevWorld[ci];
+      if (!this.worldInit[ci]) continue;
+      const e = inv.elements, we = world.elements, pe = prevW.elements;
+      const bo = 6 * ci;
+      const x0 = worldBox[bo], y0 = worldBox[bo + 1], z0 = worldBox[bo + 2];
+      const x1 = worldBox[bo + 3], y1 = worldBox[bo + 4], z1 = worldBox[bo + 5];
+      const ms = this.substepMoveScale;
+      const d0 = (we[0] - pe[0]) * ms, d1 = (we[1] - pe[1]) * ms, d2 = (we[2] - pe[2]) * ms;
+      const d4 = (we[4] - pe[4]) * ms, d5 = (we[5] - pe[5]) * ms, d6 = (we[6] - pe[6]) * ms;
+      const d8 = (we[8] - pe[8]) * ms, d9 = (we[9] - pe[9]) * ms, d10 = (we[10] - pe[10]) * ms;
+      const d12 = (we[12] - pe[12]) * ms, d13 = (we[13] - pe[13]) * ms, d14 = (we[14] - pe[14]) * ms;
+      const moved = Math.abs(d12) + Math.abs(d13) + Math.abs(d14) + Math.abs(d0) + Math.abs(d5) + Math.abs(d10) > 1e-12;
       for (let i = 0; i < n; i++) {
         if (!w[i] || skip[i]) continue;
         const k = 3 * i;
@@ -1031,16 +1269,28 @@ export class ClothSim {
         const lx = e[0] * px + e[4] * py + e[8] * pz + e[12];
         const ly = e[1] * px + e[5] * py + e[9] * pz + e[13];
         const lz = e[2] * px + e[6] * py + e[10] * pz + e[14];
-        const hit = colliderContact(c, [lx, ly, lz]);
+        const ok = colliderContactInto(c, lx, ly, lz, hitScratch);
         // No answer near a body (just outside its exact bounds, say): look again next substep.
-        const d = hit ? hit.d : CLOTH_THICKNESS;
+        const d = ok ? hitScratch.d : CLOTH_THICKNESS;
         if (d < nearest[i]) nearest[i] = d;
-        if (!hit || hit.d >= margin) continue;
-        nrm.set(hit.n[0], hit.n[1], hit.n[2]).transformDirection(world);
-        const depth = margin - hit.d;
-        x[k] += nrm.x * depth; x[k + 1] += nrm.y * depth; x[k + 2] += nrm.z * depth;
-        this.contactN[k] = nrm.x; this.contactN[k + 1] = nrm.y; this.contactN[k + 2] = nrm.z;
-        this.contactPush[i] += depth; this.contactMu[i] = c.friction;
+        if (!ok || hitScratch.d >= margin) continue;
+        let wx = we[0] * hitScratch.nx + we[4] * hitScratch.ny + we[8] * hitScratch.nz;
+        let wy = we[1] * hitScratch.nx + we[5] * hitScratch.ny + we[9] * hitScratch.nz;
+        let wz = we[2] * hitScratch.nx + we[6] * hitScratch.ny + we[10] * hitScratch.nz;
+        const wl = Math.sqrt(wx * wx + wy * wy + wz * wz);
+        if (wl < 1e-12) continue;
+        wx /= wl; wy /= wl; wz /= wl;
+        const depth = margin - hitScratch.d;
+        x[k] += wx * depth; x[k + 1] += wy * depth; x[k + 2] += wz * depth;
+        this.contactN[k] += wx * depth; this.contactN[k + 1] += wy * depth; this.contactN[k + 2] += wz * depth;
+        if (moved) {
+          const bdx = d0 * lx + d4 * ly + d8 * lz + d12;
+          const bdy = d1 * lx + d5 * ly + d9 * lz + d13;
+          const bdz = d2 * lx + d6 * ly + d10 * lz + d14;
+          this.contactDisp[k] += bdx * depth; this.contactDisp[k + 1] += bdy * depth; this.contactDisp[k + 2] += bdz * depth;
+        }
+        this.contactPush[i] += depth;
+        this.contactMu[i] += c.friction * depth;
       }
     }
     // At most a centimetre: a mesh's distance grid is exact only within a
@@ -1058,12 +1308,11 @@ export class ClothSim {
     }
   }
 
-  /** Each render group's vertices, in order, into `out` (3 per vertex). */
-  /** Continuous collision over the substeps since it last looked: before the cloth is drawn or read. */
+  /** Continuous collision over the substeps since it last looked (for deterministic test synchronization, never called by writeRender). */
   collidePending() { if (this.ccdSince) this.collideAlong(this.ccdSince * CLOTH_SUBSTEP); }
 
+  /** Strictly read-only render vertex copy: never mutates physics or CCD state! */
   writeRender(out: Float64Array) {
-    this.collidePending();
     let o = 0;
     for (const { model, base } of this.pieces) {
       for (const g of model.groups) {
@@ -1228,11 +1477,43 @@ export class ClothSim {
     return this.ties.map((t) => ({ name: t.name, newtons: t.lambda }));
   }
 
-  /** Positions and velocities, and how far each stitch is sewn, to carry the cloth across a rebuild. */
-  state() { return { x: Float64Array.from(this.x), v: Float64Array.from(this.v), time: this.time, stitchSew: Float64Array.from(this.stitchSew), stitchGap: Float64Array.from(this.stitchGap), stitchOn: Uint8Array.from(this.stitchOn), stitchClose: Float64Array.from(this.stitchClose), zips: this.zips.map((z) => z.fastened) }; }
-  restore(s: { x: Float64Array; v: Float64Array; time: number; stitchSew?: Float64Array; stitchGap?: Float64Array; stitchOn?: Uint8Array; stitchClose?: Float64Array; zips?: number[] }) {
+  /** Positions, velocities, accumulator, float timers, board quaternions, and zipper/stitch state to carry cloth across a rebuild or worker recycle. */
+  state() {
+    return {
+      x: Float64Array.from(this.x),
+      v: Float64Array.from(this.v),
+      time: this.time,
+      accumulator: this.accumulator,
+      floatUntil: Float64Array.from(this.floatUntil),
+      boardsQ: this.boards.quats(),
+      stitchSew: Float64Array.from(this.stitchSew),
+      stitchGap: Float64Array.from(this.stitchGap),
+      stitchOn: Uint8Array.from(this.stitchOn),
+      stitchClose: Float64Array.from(this.stitchClose),
+      zips: this.zips.map((z) => z.fastened),
+      zipWants: this.zips.map((z) => z.want),
+    };
+  }
+  restore(s: {
+    x: ArrayLike<number>;
+    v: ArrayLike<number>;
+    time: number;
+    accumulator?: number;
+    floatUntil?: ArrayLike<number>;
+    boardsQ?: ArrayLike<number>;
+    stitchSew?: ArrayLike<number>;
+    stitchGap?: ArrayLike<number>;
+    stitchOn?: ArrayLike<number>;
+    stitchClose?: ArrayLike<number>;
+    zips?: ArrayLike<number>;
+    zipWants?: ArrayLike<number>;
+  }) {
     if (s.x.length !== this.x.length) return false;
-    this.x.set(s.x); this.v.set(s.v); this.prev.set(s.x); this.time = s.time; this.settled = true;
+    this.x.set(s.x); this.v.set(s.v); this.prev.set(s.x); this.time = s.time;
+    this.accumulator = s.accumulator ?? 0;
+    if (s.floatUntil && s.floatUntil.length === this.floatUntil.length) this.floatUntil.set(s.floatUntil);
+    if (s.boardsQ) this.boards.restoreQuats(s.boardsQ);
+    this.settled = true;
     // Its seams as sewn as they were: carried without, every stitch the
     // settle had sewn shut was held at the gap it started at, and on Run a
     // hood split open over the crown and a neckerchief tore off its band.
@@ -1240,7 +1521,16 @@ export class ClothSim {
     // Its zips as far done up as they were.
     if (s.stitchOn && s.stitchClose && s.zips && s.stitchOn.length === this.stitchOn.length && s.zips.length === this.zips.length) {
       this.stitchOn.set(s.stitchOn); this.stitchClose.set(s.stitchClose);
-      this.zips.forEach((z, i) => { z.fastened = z.want = s.zips![i]; });
+      this.zips.forEach((z, i) => {
+        z.fastened = s.zips![i];
+        z.want = s.zipWants && s.zipWants.length === s.zips!.length ? s.zipWants[i] : s.zips![i];
+      });
+    } else if (s.zips && s.zips.length === this.zips.length) {
+      this.zips.forEach((z, i) => {
+        z.fastened = s.zips![i];
+        z.want = s.zipWants && s.zipWants.length === s.zips!.length ? s.zipWants[i] : s.zips![i];
+        this.shutZip(z);
+      });
     }
     this.clearBudget.fill(0);
     // Carried as it was: what it carries crossed (none, once built so) left free to come apart.

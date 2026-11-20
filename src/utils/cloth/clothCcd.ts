@@ -39,13 +39,15 @@ const PUSH_ROUNDS = 4;
 const ZONE_ROUNDS = 40;
 /** The hash's cell, metres: about a cloth triangle. */
 const CELL = 0.012;
-/** Cells round what moved, metres: larger than any cloth triangle. */
-const COARSE = 0.06;
-/** Larger than any cloth triangle's side, metres. */
-const REACH = 0.06;
-const BUCKETS = 1 << 18;
+const MIN_REACH = 0.06;
 
-const hash = (ix: number, iy: number, iz: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & (BUCKETS - 1);
+const nextPow2 = (v: number) => {
+  let p = 1024;
+  while (p < v) p <<= 1;
+  return p;
+};
+
+const hash = (ix: number, iy: number, iz: number, mask: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & mask;
 
 export interface CcdStats {
   /** Pairs that met in the first look. */
@@ -67,6 +69,8 @@ export class ClothCcd {
   private tris: Int32Array;
   private root: Int32Array;
   private edges: Int32Array;
+  private buckets: number;
+  private mask: number;
   /**
    * Points on a triangle: the cloth. A model may carry points on none (a
    * gathered or pleated panel's shell points, left where the shell had them
@@ -80,11 +84,15 @@ export class ClothCcd {
   tangledTri: Uint8Array;
   private anyTangled = false;
   // The hash, reused.
-  private start = new Int32Array(BUCKETS + 1);
-  private entries = new Int32Array(1 << 16);
-  private eStart = new Int32Array(BUCKETS + 1);
-  private eEntries = new Int32Array(1 << 16);
-  private cur = new Int32Array(0);
+  private start: Int32Array;
+  private entries = new Int32Array(1 << 14);
+  private eStart: Int32Array;
+  private eEntries = new Int32Array(1 << 14);
+  private cur: Int32Array;
+  private nearFlags: Uint8Array;
+  private nearTouched: Int32Array;
+  private wasBuf: Float64Array;
+  private changedBuf: Uint8Array;
   // Per point, triangle and edge: swept boxes and stamps, reused.
   private pB = new Float64Array(0); private moved = new Uint8Array(0);
   private tB = new Float64Array(0); private tStamp = new Int32Array(0);
@@ -99,10 +107,21 @@ export class ClothCcd {
       if (!seen.has(key)) { seen.add(key); E.push(a, b); }
     }
     this.edges = Int32Array.from(E);
+    const nt = tris.length / 3;
+    const buckets = nextPow2(Math.max(1024, 2 * Math.max(nt, this.edges.length / 2)));
+    this.buckets = buckets;
+    this.mask = buckets - 1;
+    this.start = new Int32Array(buckets + 1);
+    this.eStart = new Int32Array(buckets + 1);
+    this.cur = new Int32Array(buckets);
+    this.nearFlags = new Uint8Array(buckets);
+    this.nearTouched = new Int32Array(buckets);
+    this.wasBuf = new Float64Array(3 * n);
+    this.changedBuf = new Uint8Array(n);
     this.onCloth = new Uint8Array(n);
     for (let t = 0; t < tris.length; t++) this.onCloth[tris[t]] = 1;
     this.tangledPoint = new Uint8Array(n);
-    this.tangledTri = new Uint8Array(tris.length / 3);
+    this.tangledTri = new Uint8Array(nt);
   }
 
   /**
@@ -157,7 +176,8 @@ export class ClothCcd {
     if (!hits.length) return stats;
     // After the first look only pairs with a point the response moved can
     // meet anew (one that did not meet, its points where they were, still does not).
-    const was = Float64Array.from(x1), changed = new Uint8Array(this.n);
+    const was = this.wasBuf, changed = this.changedBuf;
+    was.set(x1);
     const redetect = () => {
       changed.fill(0);
       for (let i = 0; i < this.n; i++) { const k = 3 * i; if (x1[k] !== was[k] || x1[k + 1] !== was[k + 1] || x1[k + 2] !== was[k + 2]) changed[i] = 1; }
@@ -200,6 +220,7 @@ export class ClothCcd {
   /** Every pair that meets along the step. */
   private detect(x0: Float64Array, x1: Float64Array, only: Uint8Array | null): Hit[] {
     const T = this.tris, nt = T.length / 3, E = this.edges, ne = E.length / 2, n = this.n;
+    const buckets = this.buckets, mask = this.mask;
     const hits: Hit[] = [];
     // Each point's swept box, once; what moved; and the box round all that
     // moved (only what is near it can meet: an untangling step moves a patch
@@ -217,28 +238,49 @@ export class ClothCcd {
       if (mv) { anyMoved = true; if (lo0 < r0) r0 = lo0; if (lo1 < r1) r1 = lo1; if (lo2 < r2) r2 = lo2; if (hi0 > r3) r3 = hi0; if (hi1 > r4) r4 = hi1; if (hi2 > r5) r5 = hi2; }
     }
     if (!anyMoved) return hits;
+    // Dynamic reach and coarse cell size from actual max edge length (excluding
+    // synthetic far-off test triangles > 2 m that only attach lone points to cloth).
+    let maxEdge2 = 0;
+    for (let e = 0; e < ne; e++) {
+      const a = 3 * E[2 * e], b = 3 * E[2 * e + 1];
+      const dx0 = x0[a] - x0[b], dy0 = x0[a + 1] - x0[b + 1], dz0 = x0[a + 2] - x0[b + 2];
+      const d0 = dx0 * dx0 + dy0 * dy0 + dz0 * dz0;
+      if (d0 <= 4 && d0 > maxEdge2) maxEdge2 = d0;
+      const dx1 = x1[a] - x1[b], dy1 = x1[a + 1] - x1[b + 1], dz1 = x1[a + 2] - x1[b + 2];
+      const d1 = dx1 * dx1 + dy1 * dy1 + dz1 * dz1;
+      if (d1 <= 4 && d1 > maxEdge2) maxEdge2 = d1;
+    }
+    const maxEdge = Math.sqrt(maxEdge2);
+    const reach = Math.max(MIN_REACH, maxEdge + 2 * ETA);
+    const coarse = reach;
+    const cell = Math.max(CELL, maxEdge / 5);
     // Widened by a triangle: a point that did not move can be met by a
     // triangle that did, beside one of its corners that did not (the box
     // round only what moved left that point out, and a shirt's collar went
     // through a jacket's).
-    r0 -= REACH; r1 -= REACH; r2 -= REACH; r3 += REACH; r4 += REACH; r5 += REACH;
+    r0 -= reach; r1 -= reach; r2 -= reach; r3 += reach; r4 += reach; r5 += reach;
     // Where what moved is scattered (untangling several crossings over a
     // garment), the box round it all is most of the scene: only the coarse
     // cells round what moved, then. A primitive is in if any of its points is
     // in or next to one (a primitive is smaller than a coarse cell).
-    let near: Set<number> | null = null;
+    let useNear = false;
+    let nNearTouched = 0;
+    const nearFlags = this.nearFlags, nearTouched = this.nearTouched;
     let nMoved = 0;
     for (let i = 0; i < n; i++) nMoved += moved[i];
     if (nMoved < n / 4) {
-      near = new Set();
+      useNear = true;
       for (let i = 0; i < n; i++) {
         if (!moved[i]) continue;
         const o = 6 * i;
-        const ax = Math.floor(pB[o] / COARSE) - 1, bx = Math.floor(pB[o + 3] / COARSE) + 1, ay = Math.floor(pB[o + 1] / COARSE) - 1, by = Math.floor(pB[o + 4] / COARSE) + 1, az = Math.floor(pB[o + 2] / COARSE) - 1, bz = Math.floor(pB[o + 5] / COARSE) + 1;
-        for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) near.add(hash(a, b, c));
+        const ax = Math.floor(pB[o] / coarse) - 1, bx = Math.floor(pB[o + 3] / coarse) + 1, ay = Math.floor(pB[o + 1] / coarse) - 1, by = Math.floor(pB[o + 4] / coarse) + 1, az = Math.floor(pB[o + 2] / coarse) - 1, bz = Math.floor(pB[o + 5] / coarse) + 1;
+        for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) {
+          const hb = hash(a, b, c, mask);
+          if (!nearFlags[hb]) { nearFlags[hb] = 1; nearTouched[nNearTouched++] = hb; }
+        }
       }
     }
-    const nearPt = (i: number) => near === null || near.has(hash(Math.floor(pB[6 * i] / COARSE), Math.floor(pB[6 * i + 1] / COARSE), Math.floor(pB[6 * i + 2] / COARSE)));
+    const nearPt = (i: number) => !useNear || nearFlags[hash(Math.floor(pB[6 * i] / coarse), Math.floor(pB[6 * i + 1] / coarse), Math.floor(pB[6 * i + 2] / coarse), mask)] === 1;
     if (this.tB.length < 6 * nt) { this.tB = new Float64Array(6 * nt); this.tStamp = new Int32Array(nt); }
     if (this.eB.length < 6 * ne) { this.eB = new Float64Array(6 * ne); this.eStamp = new Int32Array(ne); }
     const tB = this.tB, eB = this.eB;
@@ -251,7 +293,7 @@ export class ClothCcd {
         if (pB[pp + 3] > h0) h0 = pB[pp + 3]; if (pB[pp + 4] > h1) h1 = pB[pp + 4]; if (pB[pp + 5] > h2) h2 = pB[pp + 5];
       }
       if (h0 < r0 || h1 < r1 || h2 < r2 || l0 > r3 || l1 > r4 || l2 > r5) { out[o] = Infinity; return; }
-      if (near) { let any = false; for (let q = 0; q < count && !any; q++) any = nearPt(ids[from + q]); if (!any) { out[o] = Infinity; return; } }
+      if (useNear) { let any = false; for (let q = 0; q < count && !any; q++) any = nearPt(ids[from + q]); if (!any) { out[o] = Infinity; return; } }
       out[o] = l0; out[o + 1] = l1; out[o + 2] = l2; out[o + 3] = h0; out[o + 4] = h1; out[o + 5] = h2;
     };
     const fill = (count: number, per: number, ids: Int32Array, box: Float64Array, start: Int32Array, which: 'tri' | 'edge') => {
@@ -261,20 +303,19 @@ export class ClothCcd {
         const o = 6 * i;
         boxOf(ids, per * i, per, box, o);
         if (box[o] === Infinity) continue;
-        const ax = Math.floor(box[o] / CELL), bx = Math.floor(box[o + 3] / CELL), ay = Math.floor(box[o + 1] / CELL), by = Math.floor(box[o + 4] / CELL), az = Math.floor(box[o + 2] / CELL), bz = Math.floor(box[o + 5] / CELL);
-        for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) { start[hash(a, b, c) + 1]++; total++; }
+        const ax = Math.floor(box[o] / cell), bx = Math.floor(box[o + 3] / cell), ay = Math.floor(box[o + 1] / cell), by = Math.floor(box[o + 4] / cell), az = Math.floor(box[o + 2] / cell), bz = Math.floor(box[o + 5] / cell);
+        for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) { start[hash(a, b, c, mask) + 1]++; total++; }
       }
-      for (let b = 0; b < BUCKETS; b++) start[b + 1] += start[b];
+      for (let b = 0; b < buckets; b++) start[b + 1] += start[b];
       let entries = which === 'tri' ? this.entries : this.eEntries;
       if (entries.length < total) { entries = new Int32Array(Math.ceil(total * 1.3)); if (which === 'tri') this.entries = entries; else this.eEntries = entries; }
-      if (this.cur.length < BUCKETS) this.cur = new Int32Array(BUCKETS);
       const cur = this.cur;
-      cur.set(start.subarray(0, BUCKETS));
+      cur.set(start.subarray(0, buckets));
       for (let i = 0; i < count; i++) {
         const o = 6 * i;
         if (box[o] === Infinity) continue;
-        const ax = Math.floor(box[o] / CELL), bx = Math.floor(box[o + 3] / CELL), ay = Math.floor(box[o + 1] / CELL), by = Math.floor(box[o + 4] / CELL), az = Math.floor(box[o + 2] / CELL), bz = Math.floor(box[o + 5] / CELL);
-        for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) entries[cur[hash(a, b, c)]++] = i;
+        const ax = Math.floor(box[o] / cell), bx = Math.floor(box[o + 3] / cell), ay = Math.floor(box[o + 1] / cell), by = Math.floor(box[o + 4] / cell), az = Math.floor(box[o + 2] / cell), bz = Math.floor(box[o + 5] / cell);
+        for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) entries[cur[hash(a, b, c, mask)]++] = i;
       }
       return entries;
     };
@@ -287,9 +328,9 @@ export class ClothCcd {
       const o = 6 * p;
       if (pB[o + 3] < r0 || pB[o + 4] < r1 || pB[o + 5] < r2 || pB[o] > r3 || pB[o + 1] > r4 || pB[o + 2] > r5) continue;
       if (!nearPt(p)) continue;
-      const ax = Math.floor(pB[o] / CELL), bx = Math.floor(pB[o + 3] / CELL), ay = Math.floor(pB[o + 1] / CELL), by = Math.floor(pB[o + 4] / CELL), az = Math.floor(pB[o + 2] / CELL), bz = Math.floor(pB[o + 5] / CELL);
+      const ax = Math.floor(pB[o] / cell), bx = Math.floor(pB[o + 3] / cell), ay = Math.floor(pB[o + 1] / cell), by = Math.floor(pB[o + 4] / cell), az = Math.floor(pB[o + 2] / cell), bz = Math.floor(pB[o + 5] / cell);
       for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) {
-        const hb = hash(a, b, c);
+        const hb = hash(a, b, c, mask);
         for (let e = this.start[hb]; e < this.start[hb + 1]; e++) {
           const t = triEntries[e];
           if (stamp[t] === p) continue;
@@ -316,9 +357,9 @@ export class ClothCcd {
     for (let e = 0; e < ne; e++) {
       const a0 = E[2 * e], a1 = E[2 * e + 1], o = 6 * e;
       if (eB[o] === Infinity) continue;
-      const ax = Math.floor(eB[o] / CELL), bx = Math.floor(eB[o + 3] / CELL), ay = Math.floor(eB[o + 1] / CELL), by = Math.floor(eB[o + 4] / CELL), az = Math.floor(eB[o + 2] / CELL), bz = Math.floor(eB[o + 5] / CELL);
+      const ax = Math.floor(eB[o] / cell), bx = Math.floor(eB[o + 3] / cell), ay = Math.floor(eB[o + 1] / cell), by = Math.floor(eB[o + 4] / cell), az = Math.floor(eB[o + 2] / cell), bz = Math.floor(eB[o + 5] / cell);
       for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) {
-        const hb = hash(a, b, c);
+        const hb = hash(a, b, c, mask);
         for (let qq = this.eStart[hb]; qq < this.eStart[hb + 1]; qq++) {
           const f = edgeEntries[qq];
           if (f <= e || eStamp[f] === e) continue;
@@ -335,6 +376,7 @@ export class ClothCcd {
         }
       }
     }
+    for (let k = 0; k < nNearTouched; k++) nearFlags[nearTouched[k]] = 0;
     return hits;
   }
 
@@ -466,11 +508,14 @@ const at = (x0: Float64Array, x1: Float64Array, q: number, t: number, out: numbe
 
 /** How far apart the points of a pair moved over the step, at most (the gap between them can close by no more). */
 function relMove(x0: Float64Array, x1: Float64Array, a: number, b: number, c: number, d: number) {
-  let lo0 = Infinity, lo1 = Infinity, lo2 = Infinity, hi0 = -Infinity, hi1 = -Infinity, hi2 = -Infinity;
-  for (const q of [a, b, c, d]) {
-    const k = 3 * q, m0 = x1[k] - x0[k], m1 = x1[k + 1] - x0[k + 1], m2 = x1[k + 2] - x0[k + 2];
-    if (m0 < lo0) lo0 = m0; if (m0 > hi0) hi0 = m0; if (m1 < lo1) lo1 = m1; if (m1 > hi1) hi1 = m1; if (m2 < lo2) lo2 = m2; if (m2 > hi2) hi2 = m2;
-  }
+  const ka = 3 * a, kb = 3 * b, kc = 3 * c, kd = 3 * d;
+  const ax = x1[ka] - x0[ka], ay = x1[ka + 1] - x0[ka + 1], az = x1[ka + 2] - x0[ka + 2];
+  const bx = x1[kb] - x0[kb], by = x1[kb + 1] - x0[kb + 1], bz = x1[kb + 2] - x0[kb + 2];
+  const cx = x1[kc] - x0[kc], cy = x1[kc + 1] - x0[kc + 1], cz = x1[kc + 2] - x0[kc + 2];
+  const dx = x1[kd] - x0[kd], dy = x1[kd + 1] - x0[kd + 1], dz = x1[kd + 2] - x0[kd + 2];
+  const lo0 = Math.min(ax, bx, cx, dx), hi0 = Math.max(ax, bx, cx, dx);
+  const lo1 = Math.min(ay, by, cy, dy), hi1 = Math.max(ay, by, cy, dy);
+  const lo2 = Math.min(az, bz, cz, dz), hi2 = Math.max(az, bz, cz, dz);
   return Math.hypot(hi0 - lo0, hi1 - lo1, hi2 - lo2);
 }
 
@@ -494,12 +539,18 @@ function pointTriDist(x: Float64Array, p: number, a: number, b: number, c: numbe
   return Math.hypot(x[P] - qx, x[P + 1] - qy, x[P + 2] - qz);
 }
 
+const sP0 = [0, 0, 0], sP1 = [0, 0, 0], sQ0 = [0, 0, 0], sQ1 = [0, 0, 0], sOut = [0, 0, 0, 0, 0];
+
 /** Distance between segments (a0, a1) and (b0, b1) at x. */
 function segDist(x: Float64Array, a0: number, a1: number, b0: number, b1: number) {
-  const P0 = [x[3 * a0], x[3 * a0 + 1], x[3 * a0 + 2]], P1 = [x[3 * a1], x[3 * a1 + 1], x[3 * a1 + 2]], Q0 = [x[3 * b0], x[3 * b0 + 1], x[3 * b0 + 2]], Q1 = [x[3 * b1], x[3 * b1 + 1], x[3 * b1 + 2]];
-  const cp = closestSegments(P0, P1, Q0, Q1);
-  return cp ? Math.hypot(cp[2], cp[3], cp[4]) : Infinity;
+  sP0[0] = x[3 * a0]; sP0[1] = x[3 * a0 + 1]; sP0[2] = x[3 * a0 + 2];
+  sP1[0] = x[3 * a1]; sP1[1] = x[3 * a1 + 1]; sP1[2] = x[3 * a1 + 2];
+  sQ0[0] = x[3 * b0]; sQ0[1] = x[3 * b0 + 1]; sQ0[2] = x[3 * b0 + 2];
+  sQ1[0] = x[3 * b1]; sQ1[1] = x[3 * b1 + 1]; sQ1[2] = x[3 * b1 + 2];
+  return closestSegmentsInto(sP0, sP1, sQ0, sQ1, sOut) ? Math.hypot(sOut[2], sOut[3], sOut[4]) : Infinity;
 }
+
+const ptP = [0, 0, 0], ptA = [0, 0, 0], ptB = [0, 0, 0], ptC = [0, 0, 0];
 
 /** Point p through triangle (i0, i1, i2) along the step, or ending within ETA of it: the first time it does, as a meeting. */
 function pointTriangle(x0: Float64Array, x1: Float64Array, p: number, i0: number, i1: number, i2: number): Hit | null {
@@ -512,36 +563,40 @@ function pointTriangle(x0: Float64Array, x1: Float64Array, p: number, i0: number
   if (!meet && !near) return null;
   const ts = meet ? cubicRoots(CO[0], CO[1], CO[2], CO[3]) : [];
   ts.push(1);
-  const P = [0, 0, 0], A = [0, 0, 0], B = [0, 0, 0], C = [0, 0, 0];
-  for (const t of ts) {
-    at(x0, x1, p, t, P); at(x0, x1, i0, t, A); at(x0, x1, i1, t, B); at(x0, x1, i2, t, C);
-    const u = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], v = [C[0] - A[0], C[1] - A[1], C[2] - A[2]], wv = [P[0] - A[0], P[1] - A[1], P[2] - A[2]];
-    let nx = u[1] * v[2] - u[2] * v[1], ny = u[2] * v[0] - u[0] * v[2], nz = u[0] * v[1] - u[1] * v[0];
+  for (let ti = 0; ti < ts.length; ti++) {
+    const t = ts[ti];
+    at(x0, x1, p, t, ptP); at(x0, x1, i0, t, ptA); at(x0, x1, i1, t, ptB); at(x0, x1, i2, t, ptC);
+    const ux = ptB[0] - ptA[0], uy = ptB[1] - ptA[1], uz = ptB[2] - ptA[2];
+    const vx = ptC[0] - ptA[0], vy = ptC[1] - ptA[1], vz = ptC[2] - ptA[2];
+    const wvx = ptP[0] - ptA[0], wvy = ptP[1] - ptA[1], wvz = ptP[2] - ptA[2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     const nl = Math.hypot(nx, ny, nz);
     if (nl < 1e-14) continue;
     nx /= nl; ny /= nl; nz /= nl;
-    const dist = wv[0] * nx + wv[1] * ny + wv[2] * nz;
+    const dist = wvx * nx + wvy * ny + wvz * nz;
     if (Math.abs(dist) > ETA) continue;
     // Over the triangle (barycentric, a hair's tolerance).
-    const d00 = u[0] * u[0] + u[1] * u[1] + u[2] * u[2], d01 = u[0] * v[0] + u[1] * v[1] + u[2] * v[2], d11 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-    const d20 = wv[0] * u[0] + wv[1] * u[1] + wv[2] * u[2], d21 = wv[0] * v[0] + wv[1] * v[1] + wv[2] * v[2], den = d00 * d11 - d01 * d01;
+    const d00 = ux * ux + uy * uy + uz * uz, d01 = ux * vx + uy * vy + uz * vz, d11 = vx * vx + vy * vy + vz * vz;
+    const d20 = wvx * ux + wvy * uy + wvz * uz, d21 = wvx * vx + wvy * vy + wvz * vz, den = d00 * d11 - d01 * d01;
     if (den <= 0) continue;
     const b1 = (d11 * d20 - d01 * d21) / den, b2 = (d00 * d21 - d01 * d20) / den, b0 = 1 - b1 - b2, tol = -1e-6;
     if (b0 < tol || b1 < tol || b2 < tol) continue;
     // The side it started on, by this normal (moving toward it, if it started on it).
-    const s0 = side(x0, p, [i0, i1, i2], [b0, b1, b2], nx, ny, nz);
-    const sg = Math.abs(s0) > 1e-12 ? Math.sign(s0) : -Math.sign(side(x1, p, [i0, i1, i2], [b0, b1, b2], nx, ny, nz) - s0) || 1;
+    const s0 = side3(x0, p, i0, i1, i2, b0, b1, b2, nx, ny, nz);
+    const sg = Math.abs(s0) > 1e-12 ? Math.sign(s0) : -Math.sign(side3(x1, p, i0, i1, i2, b0, b1, b2, nx, ny, nz) - s0) || 1;
     return { v: Int32Array.of(p, i0, i1, i2), c: Float64Array.of(1, -b0, -b1, -b2), k: 4, nx: sg * nx, ny: sg * ny, nz: sg * nz };
   }
   return null;
 }
 
 /** (p - sum b q) . n. */
-function side(x: Float64Array, p: number, q: number[], b: number[], nx: number, ny: number, nz: number) {
-  let s = x[3 * p] * nx + x[3 * p + 1] * ny + x[3 * p + 2] * nz;
-  for (let k = 0; k < q.length; k++) s -= b[k] * (x[3 * q[k]] * nx + x[3 * q[k] + 1] * ny + x[3 * q[k] + 2] * nz);
-  return s;
+function side3(x: Float64Array, p: number, q0: number, q1: number, q2: number, b0: number, b1: number, b2: number, nx: number, ny: number, nz: number) {
+  return (x[3 * p] - b0 * x[3 * q0] - b1 * x[3 * q1] - b2 * x[3 * q2]) * nx
+    + (x[3 * p + 1] - b0 * x[3 * q0 + 1] - b1 * x[3 * q1 + 1] - b2 * x[3 * q2 + 1]) * ny
+    + (x[3 * p + 2] - b0 * x[3 * q0 + 2] - b1 * x[3 * q1 + 2] - b2 * x[3 * q2 + 2]) * nz;
 }
+
+const eeP0 = [0, 0, 0], eeP1 = [0, 0, 0], eeQ0 = [0, 0, 0], eeQ1 = [0, 0, 0], eeOut = [0, 0, 0, 0, 0];
 
 /** Edge (a0, a1) through edge (b0, b1) along the step, or ending within ETA of it: the first time, as a meeting. */
 function edgeEdge(x0: Float64Array, x1: Float64Array, a0: number, a1: number, b0: number, b1: number): Hit | null {
@@ -557,40 +612,50 @@ function edgeEdge(x0: Float64Array, x1: Float64Array, a0: number, a1: number, b0
   }
   const ts = meet ? cubicRoots(CO[0], CO[1], CO[2], CO[3]) : [];
   ts.push(1);
-  const P0 = [0, 0, 0], P1 = [0, 0, 0], Q0 = [0, 0, 0], Q1 = [0, 0, 0];
-  for (const t of ts) {
-    at(x0, x1, a0, t, P0); at(x0, x1, a1, t, P1); at(x0, x1, b0, t, Q0); at(x0, x1, b1, t, Q1);
-    const cp = closestSegments(P0, P1, Q0, Q1);
-    if (!cp) continue;
-    const [s, u, dx, dy, dz] = cp;
+  for (let ti = 0; ti < ts.length; ti++) {
+    const t = ts[ti];
+    at(x0, x1, a0, t, eeP0); at(x0, x1, a1, t, eeP1); at(x0, x1, b0, t, eeQ0); at(x0, x1, b1, t, eeQ1);
+    if (!closestSegmentsInto(eeP0, eeP1, eeQ0, eeQ1, eeOut)) continue;
+    const s = eeOut[0], u = eeOut[1], dx = eeOut[2], dy = eeOut[3], dz = eeOut[4];
     const dist = Math.hypot(dx, dy, dz);
     if (dist > ETA) continue;
     // Strictly between the ends: at an end it is a point against a triangle, found there.
     if (s <= 1e-9 || s >= 1 - 1e-9 || u <= 1e-9 || u >= 1 - 1e-9) continue;
-    const ex = [P1[0] - P0[0], P1[1] - P0[1], P1[2] - P0[2]], fx = [Q1[0] - Q0[0], Q1[1] - Q0[1], Q1[2] - Q0[2]];
-    let nx = ex[1] * fx[2] - ex[2] * fx[1], ny = ex[2] * fx[0] - ex[0] * fx[2], nz = ex[0] * fx[1] - ex[1] * fx[0];
+    const ex0 = eeP1[0] - eeP0[0], ex1 = eeP1[1] - eeP0[1], ex2 = eeP1[2] - eeP0[2];
+    const fx0 = eeQ1[0] - eeQ0[0], fx1 = eeQ1[1] - eeQ0[1], fx2 = eeQ1[2] - eeQ0[2];
+    let nx = ex1 * fx2 - ex2 * fx1, ny = ex2 * fx0 - ex0 * fx2, nz = ex0 * fx1 - ex1 * fx0;
     let nl = Math.hypot(nx, ny, nz);
     if (nl < 1e-14) { nx = dx; ny = dy; nz = dz; nl = dist; }
     if (nl < 1e-14) continue;
     nx /= nl; ny /= nl; nz /= nl;
-    const coef = [1 - s, s, -(1 - u), -u], vs = [a0, a1, b0, b1];
-    const sideAt = (x: Float64Array) => { let g = 0; for (let k = 0; k < 4; k++) g += coef[k] * (x[3 * vs[k]] * nx + x[3 * vs[k] + 1] * ny + x[3 * vs[k] + 2] * nz); return g; };
+    const c0 = 1 - s, c1 = s, c2 = -(1 - u), c3 = -u;
+    const sideAt = (x: Float64Array) =>
+      c0 * (x[3 * a0] * nx + x[3 * a0 + 1] * ny + x[3 * a0 + 2] * nz)
+      + c1 * (x[3 * a1] * nx + x[3 * a1 + 1] * ny + x[3 * a1 + 2] * nz)
+      + c2 * (x[3 * b0] * nx + x[3 * b0 + 1] * ny + x[3 * b0 + 2] * nz)
+      + c3 * (x[3 * b1] * nx + x[3 * b1 + 1] * ny + x[3 * b1 + 2] * nz);
     const s0 = sideAt(x0);
     const sg = Math.abs(s0) > 1e-12 ? Math.sign(s0) : -Math.sign(sideAt(x1) - s0) || 1;
-    return { v: Int32Array.from(vs), c: Float64Array.from(coef), k: 4, nx: sg * nx, ny: sg * ny, nz: sg * nz };
+    return { v: Int32Array.of(a0, a1, b0, b1), c: Float64Array.of(c0, c1, c2, c3), k: 4, nx: sg * nx, ny: sg * ny, nz: sg * nz };
   }
   return null;
 }
 
-/** The nearest points of two segments: [s on the first, u on the second, and the gap from the second's to the first's]. */
-function closestSegments(P0: number[], P1: number[], Q0: number[], Q1: number[]): [number, number, number, number, number] | null {
-  const d1 = [P1[0] - P0[0], P1[1] - P0[1], P1[2] - P0[2]], d2 = [Q1[0] - Q0[0], Q1[1] - Q0[1], Q1[2] - Q0[2]], r = [P0[0] - Q0[0], P0[1] - Q0[1], P0[2] - Q0[2]];
-  const a = d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2], e = d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2], f = d2[0] * r[0] + d2[1] * r[1] + d2[2] * r[2];
-  if (a < 1e-20 || e < 1e-20) return null;
-  const c = d1[0] * r[0] + d1[1] * r[1] + d1[2] * r[2], b = d1[0] * d2[0] + d1[1] * d2[1] + d1[2] * d2[2], den = a * e - b * b;
+/** The nearest points of two segments into `out`: [s on the first, u on the second, and the gap from the second's to the first's]. */
+function closestSegmentsInto(P0: number[], P1: number[], Q0: number[], Q1: number[], out: number[]): boolean {
+  const d10 = P1[0] - P0[0], d11 = P1[1] - P0[1], d12 = P1[2] - P0[2];
+  const d20 = Q1[0] - Q0[0], d21 = Q1[1] - Q0[1], d22 = Q1[2] - Q0[2];
+  const r0 = P0[0] - Q0[0], r1 = P0[1] - Q0[1], r2 = P0[2] - Q0[2];
+  const a = d10 * d10 + d11 * d11 + d12 * d12, e = d20 * d20 + d21 * d21 + d22 * d22, f = d20 * r0 + d21 * r1 + d22 * r2;
+  if (a < 1e-20 || e < 1e-20) return false;
+  const c = d10 * r0 + d11 * r1 + d12 * r2, b = d10 * d20 + d11 * d21 + d12 * d22, den = a * e - b * b;
   let s = den > 1e-20 ? Math.min(1, Math.max(0, (b * f - c * e) / den)) : 0;
   let u = (b * s + f) / e;
   if (u < 0) { u = 0; s = Math.min(1, Math.max(0, -c / a)); } else if (u > 1) { u = 1; s = Math.min(1, Math.max(0, (b - c) / a)); }
-  const px = P0[0] + s * d1[0] - (Q0[0] + u * d2[0]), py = P0[1] + s * d1[1] - (Q0[1] + u * d2[1]), pz = P0[2] + s * d1[2] - (Q0[2] + u * d2[2]);
-  return [s, u, px, py, pz];
+  out[0] = s;
+  out[1] = u;
+  out[2] = P0[0] + s * d10 - (Q0[0] + u * d20);
+  out[3] = P0[1] + s * d11 - (Q0[1] + u * d21);
+  out[4] = P0[2] + s * d12 - (Q0[2] + u * d22);
+  return true;
 }

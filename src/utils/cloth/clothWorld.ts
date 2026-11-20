@@ -9,6 +9,7 @@
 
 import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../../types/scene';
+import type { ClothSpec } from '../../types/cloth';
 import { walkBodiesWorld } from '../bodyWorld';
 import { clothModel, type ClothModel } from './clothModel';
 import { garmentSettings } from './garments';
@@ -41,13 +42,49 @@ export interface ClothWorld {
   advance: (dt: number, env: ClothEnv) => void;
 }
 
-/** Row-major 3x3 and a position into a matrix. */
-function fromMujoco(r: ArrayLike<number>, o: number, p: ArrayLike<number>, i: number): THREE.Matrix4 {
-  return new THREE.Matrix4().set(
+/** Write row-major 3x3 and a position into `out` without allocating. */
+function writeFromMujoco(out: THREE.Matrix4, r: ArrayLike<number>, o: number, p: ArrayLike<number>, i: number): THREE.Matrix4 {
+  return out.set(
     r[o], r[o + 1], r[o + 2], p[3 * i],
     r[o + 3], r[o + 4], r[o + 5], p[3 * i + 1],
     r[o + 6], r[o + 7], r[o + 8], p[3 * i + 2],
     0, 0, 0, 1);
+}
+
+/** Strip visual-only colour/print fields from a ClothSpec so purely visual edits preserve `ClothSim` state and skip SDF/ARAP rebuilds. */
+function stripVisualClothSpec(spec: ClothSpec | undefined): ClothSpec | undefined {
+  if (!spec) return spec;
+  const raw = spec as ClothSpec & { rgba?: unknown };
+  const { pattern: _p, rgba: _r, ...rest } = raw;
+  void _p; void _r;
+  return {
+    ...rest,
+    ...(spec.pieces ? {
+      pieces: spec.pieces.map((pc) => {
+        const { rgba: _pr, pattern: _pp, trims, ...pcRest } = pc;
+        void _pr; void _pp;
+        return {
+          ...pcRest,
+          ...(trims ? { trims: trims.map(({ rgba: _tr, ...trRest }) => { void _tr; return trRest; }) } : {}),
+        };
+      }),
+    } : {}),
+    ...(spec.fasten ? {
+      fasten: spec.fasten.map((fa) => (fa.trim ? { ...fa, trim: { ...fa.trim, rgba: undefined } } : fa)),
+    } : {}),
+    ...(spec.garment ? {
+      garment: {
+        ...spec.garment,
+        rgba: undefined,
+        pattern: undefined,
+        ...(spec.garment.trims ? { trims: spec.garment.trims.map(({ rgba: _gr, ...trRest }) => { void _gr; return trRest; }) } : {}),
+        ...(spec.garment.pockets ? { pockets: spec.garment.pockets.map(({ rgba: _pkr, ...pkRest }) => { void _pkr; return pkRest; }) } : {}),
+        ...(typeof spec.garment.belt === 'object' && spec.garment.belt ? { belt: { ...spec.garment.belt, rgba: undefined } } : {}),
+        ...(spec.garment.collar ? { collar: { ...spec.garment.collar, rgba: undefined } } : {}),
+        ...(spec.garment.attached ? { attached: spec.garment.attached.map(({ rgba: _ar, pattern: _ap, ...atRest }) => { void _ar; void _ap; return atRest; }) } : {}),
+      },
+    } : {}),
+  };
 }
 
 /**
@@ -58,12 +95,14 @@ function mujocoMeshColliders(mujoco: Mj, model: Model, nodes: SceneNode[]): Coll
   const out: Collider[] = [];
   const vert = model.mesh_vert, face = model.mesh_face;
   for (const { name, friction } of sceneMeshGeoms(nodes)) {
-    const id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, name);
+    let id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, name);
+    // Dynamic dense imported STLs drop their high-poly visual geom in MJCF and emit `${name}_collider`.
+    if (id < 0) id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, `${name}_collider`);
     if (id < 0) continue;
     const mesh = model.geom_dataid[id];
     if (mesh < 0) continue;
     const va = model.mesh_vertadr[mesh], vn = model.mesh_vertnum[mesh], fa = model.mesh_faceadr[mesh], fn = model.mesh_facenum[mesh];
-    out.push({ body: null, geom: id, local: new THREE.Matrix4(), friction, ...meshShape(vert.slice(3 * va, 3 * (va + vn)), face.slice(3 * fa, 3 * (fa + fn)), false) });
+    out.push({ body: null, geom: id, local: new THREE.Matrix4(), friction, ...meshShape(vert.subarray(3 * va, 3 * (va + vn)), face.subarray(3 * fa, 3 * (fa + fn)), false) });
   }
   return out;
 }
@@ -72,7 +111,15 @@ function mujocoMeshColliders(mujoco: Mj, model: Model, nodes: SceneNode[]): Coll
  * The scene's cloth, or null if it has none. `previous` is carried over (its
  * particles kept where they are) when `carry` and it is the same cloth.
  */
-export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: SceneGraph, previous: ClothWorld | null, carry: boolean): ClothWorld | null {
+export function buildClothWorld(
+  mujoco: Mj,
+  model: Model,
+  data: Data,
+  scene: SceneGraph,
+  previous: ClothWorld | null,
+  carry: boolean,
+  seedClothState?: Parameters<ClothSim['restore']>[0],
+): ClothWorld | null {
   const graphWorlds = new Map<string, THREE.Matrix4>();
   const cloths: { node: SceneNode; world: THREE.Matrix4 }[] = [];
   walkBodiesWorld(scene.nodes, (n, world) => {
@@ -106,14 +153,54 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
     const cut = draft ? (form?.bodyForm ?? draft.form ?? null) : null;
     const trims = draft ? garmentSettings(draft).trims : undefined;
     trims?.forEach((t, k) => { if (t.kind === 'zipper') zipsAsked.set(`${node.name || node.id}#${k}`, doneUp(t)); });
-    const spec = draft ? { ...node.cloth, garment: { ...draft, fitTo: undefined, form: undefined } } : node.cloth;
-    const loose = draft ? { ...spec, garment: { ...spec!.garment!, trims: trims?.map((t) => (t.kind === 'zipper' ? { ...t, fastened: undefined } : t)) } } : spec;
-    const exact = JSON.stringify([node.name || node.id, spec, Array.from(world.elements), cut]);
+    const stripped = stripVisualClothSpec(node.cloth);
+    const spec = draft && stripped?.garment ? { ...stripped, garment: { ...stripped.garment, fitTo: undefined, form: undefined } } : stripped;
+    const cleanTrims = trims?.map(({ rgba: _tr, ...trRest }) => { void _tr; return trRest; });
+    const loose = draft && spec?.garment ? { ...spec, garment: { ...spec.garment, trims: cleanTrims?.map((t) => (t.kind === 'zipper' ? { ...t, fastened: undefined } : t)) } } : spec;
+    const exact = JSON.stringify([node.name || node.id, node.cloth, Array.from(world.elements), cut]);
     const key = JSON.stringify([node.name || node.id, loose, Array.from(world.elements), cut]);
     keys.push(key);
     formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.filter((g) => g.csgDerived !== 'collider' && !g.colliderOf).length ?? 0]) : null);
-    // The same cloth with only a zip moved: the model it runs as now.
-    let m = modelCache.get(exact) ?? (carry && previous?.keys[i] === key ? previous.models?.[i] : undefined);
+    // Exact cache includes visual colours/prints so group FlexInfo stays accurate;
+    // `key` strips visual fields and zipper state so carrying across a rebuild preserves ClothSim state!
+    let m = modelCache.get(exact);
+    if (!m && carry && previous?.keys[i] === key && previous.models?.[i]) {
+      const prevExact = JSON.stringify([node.name || node.id, previous.models[i].groups.map((g) => [g.rgba, g.pattern, g.trims?.map((t) => t.rgba)])]);
+      const wantVisualChanged = !node.cloth?.garment && !node.cloth?.pieces
+        ? false
+        : prevExact !== JSON.stringify([
+          node.name || node.id,
+          previous.models[i].groups.map((g) => {
+            const pName = g.name.slice((node.name || node.id).length + 2);
+            const pc = node.cloth?.pieces?.find((q) => q.name === pName);
+            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment?.rgba ?? g.rgba);
+            const pat = pc ? pc.pattern : g.pattern;
+            return [rgba, pat, g.trims?.map((t) => t.rgba)];
+          }),
+        ]);
+      if (!wantVisualChanged && !node.cloth?.garment?.trims?.some((t) => t.rgba) && !node.cloth?.garment?.pockets?.some((p) => p.rgba) && !(typeof node.cloth?.garment?.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth?.garment?.collar?.rgba && !node.cloth?.garment?.attached?.some((a) => a.rgba || a.pattern) && !node.cloth?.pieces?.some((p) => p.trims?.some((t) => t.rgba)) && !node.cloth?.fasten?.some((f) => f.trim?.rgba)) {
+        m = previous.models[i];
+      } else if (!node.cloth?.garment && node.cloth?.pieces) {
+        // Fast clone of plain-piece groups with updated piece rgba/pattern when no trim colours changed:
+        const hasTrimRgba = node.cloth.pieces.some((p) => p.trims?.some((t) => t.rgba)) || node.cloth.fasten?.some((f) => f.trim?.rgba);
+        if (!hasTrimRgba) {
+          const prefix = `${node.name || node.id}__`;
+          m = {
+            ...previous.models[i],
+            groups: previous.models[i].groups.map((g) => {
+              const pc = node.cloth!.pieces!.find((q) => `${prefix}${q.name}` === g.name);
+              return pc ? { ...g, rgba: pc.rgba ?? [0.25, 0.5, 0.85, 1], pattern: pc.pattern } : g;
+            }),
+          };
+        }
+      } else if (node.cloth?.garment && !node.cloth.garment.trims?.some((t) => t.rgba) && !node.cloth.garment.pockets?.some((p) => p.rgba) && !(typeof node.cloth.garment.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth.garment.collar?.rgba && !node.cloth.garment.attached?.some((a) => a.rgba || a.pattern)) {
+        const gRgba = garmentSettings(node.cloth.garment).rgba ?? [0.28, 0.36, 0.52, 1];
+        m = {
+          ...previous.models[i],
+          groups: previous.models[i].groups.map((g) => ({ ...g, rgba: gRgba })),
+        };
+      }
+    }
     if (!m) {
       m = clothModel(node, world, scene.nodes);
       if (modelCache.size > 8) modelCache.clear();
@@ -121,26 +208,46 @@ export function buildClothWorld(mujoco: Mj, model: Model, data: Data, scene: Sce
     }
     return m;
   });
+  const bodyIdMap = new Map<string, number>();
+  const lookupBodyId = (name: string): number => {
+    let id = bodyIdMap.get(name);
+    if (id === undefined) {
+      id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, name);
+      bodyIdMap.set(name, id!);
+    }
+    return id!;
+  };
+  const bodyScratch = new THREE.Matrix4();
+  const geomScratch = new THREE.Matrix4();
   const bodyPose = (name: string): THREE.Matrix4 | null => {
-    const id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, name);
-    if (id >= 0) return fromMujoco(data.xmat, 9 * id, data.xpos, id);
+    const id = lookupBodyId(name);
+    if (id >= 0) return writeFromMujoco(bodyScratch, data.xmat, 9 * id, data.xpos, id);
     return graphWorlds.get(name) ?? null;
   };
-  const geomPose = (id: number): THREE.Matrix4 | null => fromMujoco(data.geom_xmat, 9 * id, data.geom_xpos, id);
-  const sim = new ClothSim(models, [...sceneColliders(scene.nodes), ...mujocoMeshColliders(mujoco, model, scene.nodes)]);
+  const geomPose = (id: number): THREE.Matrix4 | null =>
+    id >= 0 && id < model.ngeom ? writeFromMujoco(geomScratch, data.geom_xmat, 9 * id, data.geom_xpos, id) : null;
+  const sim = new ClothSim(models, [...sceneColliders(scene.nodes, true, true), ...mujocoMeshColliders(mujoco, model, scene.nodes)]);
   sim.setPoses(bodyPose, geomPose);
   const sameForm = (i: number) => formBuilds[i] === null || previous!.formBuilds?.[i] === formBuilds[i];
-  const carried = carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i] && sameForm(i)) && sim.restore(previous.sim.state());
+  const carried = seedClothState
+    ? sim.restore(seedClothState)
+    : (carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i] && sameForm(i)) && sim.restore(previous.sim.state()));
   // A zip the graph now asks to be done up further or less, done so as it
   // runs; otherwise each as it was carried (moved by its slider since).
   for (const [k, f] of zipsAsked) {
     const cut = k.lastIndexOf('#');
-    if (!carried || previous!.zipsAsked?.get(k) !== f) sim.setZip(k.slice(0, cut), Number(k.slice(cut + 1)), f);
+    if (!carried || (!seedClothState && previous && previous.zipsAsked?.get(k) !== f)) sim.setZip(k.slice(0, cut), Number(k.slice(cut + 1)), f);
   }
   // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
   sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
   const warnings = models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`));
   if (sim.settleCut) warnings.push(sim.settleCut);
-  return { sim, keys, models, zipsAsked, formBuilds, warnings, pose, advance: (dt, env) => { pose(); sim.advance(dt, env); } };
+  return {
+    sim, keys, models, zipsAsked, formBuilds, warnings, pose,
+    advance: (dt, env) => {
+      if (sim.willSubstep(dt)) pose();
+      sim.advance(dt, env);
+    },
+  };
 }

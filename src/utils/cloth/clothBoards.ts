@@ -33,7 +33,7 @@ export const BOARD_STIFFNESS = 0.05;
 /** Each point's neighbourhood: this many rings of triangles round it. */
 const RINGS = 1;
 
-interface Cluster { ids: Int32Array; /** Rest offsets from its centre, 3 per point. */ rest: Float64Array; /** Its rest shape is flat (z 0 throughout): its third axis made square to the other two. */ flat: boolean; weight?: Float64Array; /** Its last rotation, a unit quaternion (w, x, y, z): where the next fit starts. */ q: Float64Array }
+interface Cluster { ids: Int32Array; /** Rest offsets from its centre, 3 per point. */ rest: Float64Array; /** Its rest shape is flat (z 0 throughout): its third axis made square to the other two. */ flat: boolean; /** Blend weight of this cluster when averaging goals (higher for the whole-board cluster). */ blend: number; weight?: Float64Array; /** Its last rotation, a unit quaternion (w, x, y, z): where the next fit starts. */ q: Float64Array }
 
 export class BoardShapes {
   private clusters: Cluster[] = [];
@@ -54,19 +54,21 @@ export class BoardShapes {
       // The whole board as one, too: rigid across it at once (by small
       // neighbourhoods alone its weight still swung it down, a little each
       // pass; by the whole alone, as much as with nothing).
+      // Given dominant blend weight (~75% vs ~25% across ~7 local 1-ring clusters)
+      // so board stiffness stays independent of mesh valence/refinement.
       const flat = b.rest.every((q) => !q[2]);
       const restOf = (ids: number[]) => {
         const c = [0, 1, 2].map((k) => ids.reduce((acc, j) => acc + (b.rest[j][k] ?? 0), 0) / ids.length), rest = new Float64Array(3 * ids.length);
         ids.forEach((j, k) => { for (let d = 0; d < 3; d++) rest[3 * k + d] = (b.rest[j][d] ?? 0) - c[d]; });
         return rest;
       };
-      if (m >= 3) this.clusters.push({ ids: Int32Array.from(b.particles), rest: restOf(b.particles.map((_, k) => k)), flat, q: Float64Array.of(1, 0, 0, 0) });
+      if (m >= 3) this.clusters.push({ ids: Int32Array.from(b.particles), rest: restOf(b.particles.map((_, k) => k)), flat, blend: 21, q: Float64Array.of(1, 0, 0, 0) });
       for (let i = 0; i < m; i++) {
         let ring = new Set<number>([i]);
         for (let r = 0; r < RINGS; r++) { const next = new Set(ring); for (const j of ring) for (const k of nbr[j]) next.add(k); ring = next; }
         const ids = [...ring];
         if (ids.length < 3) continue;
-        this.clusters.push({ ids: Int32Array.from(ids, (j) => b.particles[j]), rest: restOf(ids), flat, q: Float64Array.of(1, 0, 0, 0) });
+        this.clusters.push({ ids: Int32Array.from(ids, (j) => b.particles[j]), rest: restOf(ids), flat, blend: 1, q: Float64Array.of(1, 0, 0, 0) });
         for (const j of ids) members.add(b.particles[j]);
       }
     }
@@ -77,6 +79,22 @@ export class BoardShapes {
 
   get active() { return this.clusters.length > 0; }
 
+  /** Snapshot cluster quaternions for state preservation across worker rebuilds. */
+  quats(): Float64Array {
+    const out = new Float64Array(4 * this.clusters.length);
+    this.clusters.forEach((c, i) => out.set(c.q, 4 * i));
+    return out;
+  }
+
+  /** Restore cluster quaternions from a snapshot. */
+  restoreQuats(q: ArrayLike<number>) {
+    if (q.length !== 4 * this.clusters.length) return;
+    for (let i = 0; i < this.clusters.length; i++) {
+      const cq = this.clusters[i].q, o = 4 * i;
+      cq[0] = q[o]; cq[1] = q[o + 1]; cq[2] = q[o + 2]; cq[3] = q[o + 3];
+    }
+  }
+
   /** Each board's points moved to where their neighbourhoods, each turned rigidly to fit, put them (points with no weight stay). */
   solve(x: Float64Array, w: Float64Array) {
     if (!this.clusters.length) return;
@@ -84,18 +102,31 @@ export class BoardShapes {
     const members = this.members, A = this.A, R = this.R;
     for (let k = 0; k < members.length; k++) { const i = members[k]; goal[3 * i] = goal[3 * i + 1] = goal[3 * i + 2] = 0; count[i] = 0; }
     for (let ci = 0; ci < this.clusters.length; ci++) {
-      const { ids, rest, weight, q, flat } = this.clusters[ci];
+      const { ids, rest, weight, q, flat, blend } = this.clusters[ci];
       const m = ids.length;
       let cx = 0, cy = 0, cz = 0, ws = 0;
-      for (let k = 0; k < m; k++) { const i = 3 * ids[k], wk = weight ? weight[k] : 1; cx += wk * x[i]; cy += wk * x[i + 1]; cz += wk * x[i + 2]; ws += wk; }
+      for (let k = 0; k < m; k++) {
+        const pt = ids[k], i = 3 * pt;
+        const mw = w[pt] > 0 ? 1 / w[pt] : 1;
+        const wk = weight ? weight[k] * mw : mw;
+        cx += wk * x[i]; cy += wk * x[i + 1]; cz += wk * x[i + 2]; ws += wk;
+      }
+      if (ws <= 0) continue;
       cx /= ws; cy /= ws; cz /= ws;
-      // The flat pattern's centre the same way.
+      // The flat pattern's centre weighted by the same mass weights.
       let ru = 0, rv = 0, rw = 0;
-      if (weight) { for (let k = 0; k < m; k++) { ru += weight[k] * rest[3 * k]; rv += weight[k] * rest[3 * k + 1]; rw += weight[k] * rest[3 * k + 2]; } ru /= ws; rv /= ws; rw /= ws; }
-      // A = sum (x - c) r^T.
+      for (let k = 0; k < m; k++) {
+        const pt = ids[k], mw = w[pt] > 0 ? 1 / w[pt] : 1;
+        const wk = weight ? weight[k] * mw : mw;
+        ru += wk * rest[3 * k]; rv += wk * rest[3 * k + 1]; rw += wk * rest[3 * k + 2];
+      }
+      ru /= ws; rv /= ws; rw /= ws;
+      // A = sum w_k (x - c) r^T.
       A.fill(0);
       for (let k = 0; k < m; k++) {
-        const wk = weight ? weight[k] : 1, i = 3 * ids[k], dx = wk * (x[i] - cx), dy = wk * (x[i + 1] - cy), dz = wk * (x[i + 2] - cz), u = rest[3 * k] - ru, v = rest[3 * k + 1] - rv, t = rest[3 * k + 2] - rw;
+        const pt = ids[k], mw = w[pt] > 0 ? 1 / w[pt] : 1;
+        const wk = weight ? weight[k] * mw : mw;
+        const i = 3 * pt, dx = wk * (x[i] - cx), dy = wk * (x[i + 1] - cy), dz = wk * (x[i + 2] - cz), u = rest[3 * k] - ru, v = rest[3 * k + 1] - rv, t = rest[3 * k + 2] - rw;
         A[0] += dx * u; A[1] += dx * v; A[2] += dx * t; A[3] += dy * u; A[4] += dy * v; A[5] += dy * t; A[6] += dz * u; A[7] += dz * v; A[8] += dz * t;
       }
       if (flat) {
@@ -109,10 +140,10 @@ export class BoardShapes {
       rotationOf(A, q, R);
       for (let k = 0; k < m; k++) {
         const i = ids[k], u = rest[3 * k] - ru, v = rest[3 * k + 1] - rv, t = rest[3 * k + 2] - rw;
-        goal[3 * i] += cx + R[0] * u + R[1] * v + R[2] * t;
-        goal[3 * i + 1] += cy + R[3] * u + R[4] * v + R[5] * t;
-        goal[3 * i + 2] += cz + R[6] * u + R[7] * v + R[8] * t;
-        count[i]++;
+        goal[3 * i] += blend * (cx + R[0] * u + R[1] * v + R[2] * t);
+        goal[3 * i + 1] += blend * (cy + R[3] * u + R[4] * v + R[5] * t);
+        goal[3 * i + 2] += blend * (cz + R[6] * u + R[7] * v + R[8] * t);
+        count[i] += blend;
       }
     }
     for (let k = 0; k < members.length; k++) {

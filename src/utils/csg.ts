@@ -3073,7 +3073,7 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render', o
   // graph and never asks the model for it (see the mesh path in SceneLayer).
   // In 'hull' mode the mesh IS the collider, carries the mass and has no
   // role, so it stays.
-  out.push(...derived.filter(g => !(g.csgDerived === 'visual' && g.role === 'visual')), ...visualSource);
+  out.push(...derived.filter(g => !(g.csgDerived === 'visual' && g.role === 'visual' && !opts.keepDrawn)), ...visualSource);
   return out;
 }
 

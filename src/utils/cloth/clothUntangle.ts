@@ -56,11 +56,18 @@ const cellKey = (ix: number, iy: number, iz: number) => (Math.imul(ix, 73856093)
  */
 export function findCrossings(x: ArrayLike<number>, m: UntangleMesh, only: Int32Array | null = null): ClothCrossing[] {
   const T = m.tris, R = m.root, nt = T.length / 3;
-  const list = only ?? Int32Array.from({ length: nt }, (_, t) => t);
+  const nList = only ? only.length : nt;
+  if (nList === 0) return [];
+  const sparse = only !== null && nList * 4 < nt;
   const grid = new Map<number, number[]>();
-  const box = new Float64Array(6 * nt);
-  for (const t of list) {
-    const o = 6 * t;
+  // When testing a small local neighbourhood (`only`), pack AABBs into `6 * nList`
+  // instead of allocating `6 * nt` across the whole wardrobe on every untangle step.
+  const box = new Float64Array(6 * (sparse ? nList : nt));
+  const localIdx = sparse ? new Map<number, number>() : null;
+  for (let li = 0; li < nList; li++) {
+    const t = only ? only[li] : li;
+    if (localIdx) localIdx.set(t, li);
+    const o = 6 * (sparse ? li : t);
     for (let k = 0; k < 3; k++) {
       const v0 = x[3 * T[3 * t] + k], v1 = x[3 * T[3 * t + 1] + k], v2 = x[3 * T[3 * t + 2] + k];
       box[o + k] = Math.min(v0, v1, v2); box[o + 3 + k] = Math.max(v0, v1, v2);
@@ -73,14 +80,44 @@ export function findCrossings(x: ArrayLike<number>, m: UntangleMesh, only: Int32
           if (c) c.push(t); else grid.set(key, [t]);
         }
   }
-  // The edges of those triangles, once each.
-  const inList = new Uint8Array(nt);
-  for (const t of list) inList[t] = 1;
   const out: ClothCrossing[] = [];
+  if (sparse) {
+    const seenTri = new Map<number, number>();
+    for (let e = 0; e < m.edges.length / 2; e++) {
+      const t0 = m.edgeTris[2 * e], t1 = m.edgeTris[2 * e + 1];
+      if (!localIdx!.has(t0) && !(t1 >= 0 && localIdx!.has(t1))) continue;
+      const a = m.edges[2 * e], b = m.edges[2 * e + 1], ra = R[a], rb = R[b];
+      const lo0 = Math.min(x[3 * a], x[3 * b]), lo1 = Math.min(x[3 * a + 1], x[3 * b + 1]), lo2 = Math.min(x[3 * a + 2], x[3 * b + 2]);
+      const hi0 = Math.max(x[3 * a], x[3 * b]), hi1 = Math.max(x[3 * a + 1], x[3 * b + 1]), hi2 = Math.max(x[3 * a + 2], x[3 * b + 2]);
+      for (let ix = Math.floor(lo0 / CELL); ix <= Math.floor(hi0 / CELL); ix++)
+        for (let iy = Math.floor(lo1 / CELL); iy <= Math.floor(hi1 / CELL); iy++)
+          for (let iz = Math.floor(lo2 / CELL); iz <= Math.floor(hi2 / CELL); iz++) {
+            const c = grid.get(cellKey(ix, iy, iz));
+            if (!c) continue;
+            for (let ci = 0; ci < c.length; ci++) {
+              const t = c[ci];
+              if (seenTri.get(t) === e) continue;
+              seenTri.set(t, e);
+              const o = 6 * localIdx!.get(t)!;
+              if (hi0 < box[o] || hi1 < box[o + 1] || hi2 < box[o + 2] || lo0 > box[o + 3] || lo1 > box[o + 4] || lo2 > box[o + 5]) continue;
+              const i0 = T[3 * t], i1 = T[3 * t + 1], i2 = T[3 * t + 2];
+              const r0 = R[i0], r1 = R[i1], r2 = R[i2];
+              if (ra === r0 || ra === r1 || ra === r2 || rb === r0 || rb === r1 || rb === r2) continue;
+              const hit = segmentTriangle(x, a, b, i0, i1, i2);
+              if (hit) out.push({ a, b, e, t, s: hit[0], b1: hit[1], b2: hit[2], p: [x[3 * a] + hit[0] * (x[3 * b] - x[3 * a]), x[3 * a + 1] + hit[0] * (x[3 * b + 1] - x[3 * a + 1]), x[3 * a + 2] + hit[0] * (x[3 * b + 2] - x[3 * a + 2])] });
+            }
+          }
+    }
+    return out;
+  }
+  const inList = only ? new Uint8Array(nt) : null;
+  if (inList && only) for (let li = 0; li < only.length; li++) inList[only[li]] = 1;
   const stamp = new Int32Array(nt).fill(-1);
   for (let e = 0; e < m.edges.length / 2; e++) {
-    const t0 = m.edgeTris[2 * e], t1 = m.edgeTris[2 * e + 1];
-    if (!inList[t0] && !(t1 >= 0 && inList[t1])) continue;
+    if (inList) {
+      const t0 = m.edgeTris[2 * e], t1 = m.edgeTris[2 * e + 1];
+      if (!inList[t0] && !(t1 >= 0 && inList[t1])) continue;
+    }
     const a = m.edges[2 * e], b = m.edges[2 * e + 1], ra = R[a], rb = R[b];
     const lo0 = Math.min(x[3 * a], x[3 * b]), lo1 = Math.min(x[3 * a + 1], x[3 * b + 1]), lo2 = Math.min(x[3 * a + 2], x[3 * b + 2]);
     const hi0 = Math.max(x[3 * a], x[3 * b]), hi1 = Math.max(x[3 * a + 1], x[3 * b + 1]), hi2 = Math.max(x[3 * a + 2], x[3 * b + 2]);
@@ -89,7 +126,8 @@ export function findCrossings(x: ArrayLike<number>, m: UntangleMesh, only: Int32
         for (let iz = Math.floor(lo2 / CELL); iz <= Math.floor(hi2 / CELL); iz++) {
           const c = grid.get(cellKey(ix, iy, iz));
           if (!c) continue;
-          for (const t of c) {
+          for (let ci = 0; ci < c.length; ci++) {
+            const t = c[ci];
             if (stamp[t] === e) continue;
             stamp[t] = e;
             const o = 6 * t;

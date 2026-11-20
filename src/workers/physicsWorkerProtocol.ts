@@ -13,6 +13,22 @@ import type { ConstraintReport } from '../utils/constraintResiduals';
 import type { TrajectorySummary } from '../utils/trajectorySummary';
 import type { ScriptLogLine, ScriptProblem, ScriptTimingReport } from './scriptDiagnostics';
 
+/** Full XPBD cloth state snapshot to preserve cloth across proactive worker recycles. */
+export interface ClothStateSnapshot {
+  x: Float64Array;
+  v: Float64Array;
+  time: number;
+  accumulator?: number;
+  floatUntil?: Float64Array;
+  boardsQ?: Float64Array;
+  stitchSew?: Float64Array;
+  stitchGap?: Float64Array;
+  stitchOn?: Uint8Array;
+  stitchClose?: Float64Array;
+  zips?: number[];
+  zipWants?: number[];
+}
+
 /** Explicit state to seed a freshly built model with (a live mirror's copy). */
 export interface SeedState {
   qpos: number[];
@@ -26,6 +42,8 @@ export interface SeedState {
    * came from, so a set speed edited since wins over it. See applyEditedCtrl.
    */
   docCtrl?: Record<string, number>;
+  /** Optional XPBD cloth state so a recycled worker preserves cloth drape, velocities, and zips. */
+  clothState?: ClothStateSnapshot;
 }
 
 export interface DragTarget {
@@ -127,6 +145,8 @@ export interface FrameSnapshot extends Partial<SimBuffers> {
   clothTies?: { name: string; newtons: number }[];
   /** How far each zip is done up this frame, 0-1 from the bottom: its cloth (body name), its index in the garment's trims (absent without any). */
   clothZips?: ClothZipState[];
+  /** Latest XPBD cloth state snapshot so the main thread can seed proactive worker recycles. */
+  clothState?: ClothStateSnapshot;
 }
 
 export interface ClothZipState { cloth: string; trim: number; fastened: number }
@@ -147,6 +167,8 @@ export interface BuiltResult extends Partial<SimBuffers> {
   flexes?: FlexInfo[];
   /** Cloth stitches as pairs of flexvert_xpos indices, drawn as one point. */
   clothStitches?: number[];
+  /** Initial/carried XPBD cloth state snapshot after build. */
+  clothState?: ClothStateSnapshot;
   time?: number;
   isShared?: boolean;
   /** As on FrameSnapshot — a build spreads one in, so it carries the figure too. */
