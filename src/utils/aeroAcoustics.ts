@@ -87,10 +87,16 @@ export interface SnapSynthParams {
 }
 
 function clamp(v: number, lo: number, hi: number): number {
+  if (!Number.isFinite(v)) return lo;
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+function finiteNonNeg(v: number | undefined, fallback = 0): number {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, v) : fallback;
+}
+
 function smoothstep(edge0: number, edge1: number, x: number): number {
+  if (!Number.isFinite(x)) return 0;
   const t = clamp((x - edge0) / Math.max(1e-9, edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
 }
@@ -99,16 +105,22 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  * Pure, deterministic solver mapping a single hub/wing/cloth `AeroVoiceTelemetry`
  * snapshot to continuous native WebAudio synthesis parameters.
  */
-export function solveAeroAcousticVoice(telemetry: AeroVoiceTelemetry): AeroSynthParams {
+export function solveAeroAcousticVoice(
+  telemetry: AeroVoiceTelemetry & { airDensityKgM3?: number },
+): AeroSynthParams {
   const id = telemetry.hubOrBodyId;
-  const blades = Math.max(0, Math.floor(telemetry.bladeCount || 0));
-  const absOmega = Math.abs(telemetry.omegaRadPerSec || 0);
-  const tipSpeed = Math.max(0, telemetry.tipSpeedMps || 0);
-  const relSpeed = Math.max(0, telemetry.relSpeedMps || 0);
+  const blades = Math.max(0, Math.floor(finiteNonNeg(telemetry.bladeCount)));
+  const rawOmega = typeof telemetry.omegaRadPerSec === 'number' && Number.isFinite(telemetry.omegaRadPerSec)
+    ? telemetry.omegaRadPerSec
+    : 0;
+  const absOmega = Math.min(20000, Math.abs(rawOmega));
+  const tipSpeed = Math.min(1200, finiteNonNeg(telemetry.tipSpeedMps));
+  const relSpeed = Math.min(1200, finiteNonNeg(telemetry.relSpeedMps));
+  const bendRate = Math.min(5000, finiteNonNeg(telemetry.bendRateRadPerSec));
   const effSpeed = Math.max(relSpeed, tipSpeed * 0.72);
 
   // Vacuum or near-stationary guard -> 0 gain, 0 active voices
-  if (telemetry.isVacuum || (effSpeed < 0.25 && absOmega < 0.35 && (telemetry.bendRateRadPerSec || 0) < 0.5)) {
+  if (telemetry.isVacuum || (effSpeed < 0.25 && absOmega < 0.35 && bendRate < 0.5)) {
     return {
       id,
       active: false,
@@ -127,13 +139,15 @@ export function solveAeroAcousticVoice(telemetry: AeroVoiceTelemetry): AeroSynth
     };
   }
 
-  const area = clamp(telemetry.areaM2 || 0.01, 1e-5, 25.0);
-  const chord = clamp(telemetry.chordM || 0.05, 0.004, 4.0);
-  const thickness = clamp(telemetry.thicknessM || 0.003, 0.0005, 0.5);
-  const absAlphaDeg = clamp(Math.abs(telemetry.alphaDeg || 0), 0, 90);
+  const area = clamp(telemetry.areaM2 ?? 0.01, 1e-5, 25.0);
+  const chord = clamp(telemetry.chordM ?? 0.05, 0.004, 4.0);
+  const thickness = clamp(telemetry.thicknessM ?? 0.003, 0.0005, 0.5);
+  const rawAlpha = typeof telemetry.alphaDeg === 'number' && Number.isFinite(telemetry.alphaDeg) ? telemetry.alphaDeg : 0;
+  const absAlphaDeg = clamp(Math.abs(rawAlpha), 0, 90);
   const alphaRad = (absAlphaDeg * Math.PI) / 180;
-  const aeroForce = Math.max(0, telemetry.aeroForceN || 0);
-  const bendRate = Math.max(0, telemetry.bendRateRadPerSec || 0);
+  const aeroForce = Math.min(1e6, finiteNonNeg(telemetry.aeroForceN));
+  const rho = clamp(telemetry.airDensityKgM3 ?? 1.225, 0.005, 25.0);
+  const rhoScale = Math.pow(rho / 1.225, 0.85);
 
   // -------------------------------------------------------------------------
   // 1. Stall separation factor & Strouhal vortex-shedding bandpass
@@ -155,82 +169,98 @@ export function solveAeroAcousticVoice(telemetry: AeroVoiceTelemetry): AeroSynth
 
   // -------------------------------------------------------------------------
   // 2. Gutin Rotor BPF & Harmonic Spectrum vs Free-Stream Wing/Cloth
+  //    Smoothly crossfaded across bpfHz ∈ [0.30..0.80] and [22.0..34.0] Hz!
   // -------------------------------------------------------------------------
-  const bpfHz = blades >= 1 ? (blades * absOmega) / (2 * Math.PI) : 0;
+  const bpfHz = blades >= 1 ? Math.min(16000, (blades * absOmega) / (2 * Math.PI)) : 0;
   const machTip = clamp(tipSpeed / SPEED_OF_SOUND_AIR, 0, 0.88);
+
+  // Free-flying wing / glider / vane / cloth sheet (Curle dipole law with smooth saturation)
+  const speedRamp = smoothstep(0.25, 0.85, effSpeed);
+  const stallBoost = 1.0 + 0.85 * stallRoughness;
+  const curleDrive = rhoScale * Math.sqrt(area) * Math.pow(effSpeed, 2.0) * stallBoost;
+  const freeNoiseGain = clamp(0.32 * Math.tanh(0.042 * curleDrive) * speedRamp, 0, 0.32);
+
+  let freeAmRateHz = 0;
+  let freeAmDepth = 0;
+  if (telemetry.isCloth) {
+    // Cloth flutter modulation driven by emergent flapping rate (`bendRateRadPerSec`) or Strouhal wake
+    const flapHz = bendRate > 0.4 ? bendRate / (2 * Math.PI) : 3.5 + 0.65 * effSpeed;
+    freeAmRateHz = clamp(flapHz, 1.8, 20.0);
+    freeAmDepth = clamp(0.28 + 0.38 * Math.min(1, bendRate / 14.0) + 0.15 * stallRoughness, 0.20, 0.78);
+  } else if (stallRoughness > 0.05) {
+    // Separated stall buffeting flutter (8..18 Hz)
+    freeAmRateHz = clamp(8.0 + 0.55 * effSpeed + 4.0 * stallRoughness, 8.0, 18.0);
+    freeAmDepth = clamp(0.62 * stallRoughness, 0, 0.68);
+  }
 
   let tonalActive = false;
   const harmonicWeights: number[] = [];
   let tonalGain = 0;
-  let noiseGain: number;
-  let amRateHz = 0;
-  let amDepth = 0;
+  let noiseGain = freeNoiseGain;
+  let amRateHz = freeAmRateHz;
+  let amDepth = freeAmDepth;
 
-  if (blades >= 1 && bpfHz >= MIN_AUDIBLE_BPF_HZ) {
-    // High-speed propeller / quadcopter rotor (f_BPF >= 22 Hz):
-    // Gutin dipole loading + thickness harmonics H_1..H_16
-    tonalActive = true;
-    const thrustLoadingNorm = clamp(aeroForce / Math.max(0.08, area * 35), 0, 2.5);
-    // Brightness parameter: higher tip Mach and higher thrust loading lift upper harmonics n = 2..10
-    const decayBase = clamp(0.46 + 0.34 * Math.min(1, machTip * 6.5) + 0.14 * Math.min(1.5, thrustLoadingNorm), 0.42, 0.90);
-
-    for (let n = 1; n <= NUM_GUTIN_HARMONICS; n++) {
-      if (n * bpfHz > 18000) break;
-      // Bessel-like Gutin envelope: n=1 fundamental + strong n=2..6 buzz humped by loading/tip speed
-      const loadingHump = 1.0 + 0.55 * thrustLoadingNorm * Math.sin(Math.min(Math.PI, ((n - 1) / 6) * Math.PI));
-      const w = Math.pow(decayBase, n - 1) * loadingHump * (1 / Math.pow(n, 0.32));
-      harmonicWeights.push(+w.toFixed(4));
-    }
-
-    // Dipole acoustic power scaling: gain ∝ log10(1 + k_T * ||F_aero|| * v_tip)
-    const kT = 0.85;
-    const dipoleArg = Math.max(0, kT * Math.max(aeroForce, 0.015 * area * tipSpeed * tipSpeed) * tipSpeed);
-    const rawTonal = 0.115 * Math.log10(1 + dipoleArg);
-    const ramp = smoothstep(0.25, 1.2, tipSpeed);
-    tonalGain = +clamp(rawTonal * ramp, 0, 0.28).toFixed(4);
-
-    // Broadband trailing-edge + tip-vortex turbulent wake alongside the tonal prop buzz
-    const wakeGain = 0.045 * Math.log10(1 + 0.45 * dipoleArg) * (0.65 + 0.55 * stallRoughness) * ramp;
-    noiseGain = +clamp(wakeGain, 0, 0.18).toFixed(4);
-
-    if (stallRoughness > 0.15) {
-      amRateHz = +clamp(10 + 0.4 * effSpeed, 8, 18).toFixed(2);
-      amDepth = +(0.22 * stallRoughness).toFixed(3);
-    }
-  } else if (blades >= 1 && bpfHz >= MIN_SUB_BPF_HZ) {
-    // Sub-audible / Low-RPM rotor (0.5 <= f_BPF < 22 Hz, e.g. 3-blade or 4-blade Windmill):
-    // Zero sub-bass oscillator; modulate broadband Strouhal noise at f_BPF for rhythmic
-    // blade-pass "whoomp-whoomp-whoomp" swoosh!
-    tonalActive = false;
-    const kT = 1.35;
-    const dipoleArg = Math.max(
+  if (blades >= 1 && bpfHz > 0.30) {
+    // Sub-audible / Low-RPM rotor branch (e.g. 3-blade or 4-blade Windmill):
+    // Rhythmic blade-pass "whoomp-whoomp-whoomp" swoosh modulated at f_BPF
+    const subBlend = smoothstep(0.30, 0.80, bpfHz);
+    const kTSub = 1.35;
+    const subDipoleArg = Math.max(
       0,
-      kT * Math.max(aeroForce, 0.04 * area * effSpeed * effSpeed) * Math.max(tipSpeed, effSpeed),
+      kTSub * Math.max(aeroForce, 0.04 * rho * area * effSpeed * effSpeed) * Math.max(tipSpeed, effSpeed),
     );
     const swooshRamp = smoothstep(0.25, 0.95, Math.max(tipSpeed, effSpeed));
-    noiseGain = +clamp(0.145 * Math.log10(1 + dipoleArg) * swooshRamp, 0, 0.30).toFixed(4);
-    amRateHz = +bpfHz.toFixed(3);
-    // Deep rhythmic raised-cosine envelope depth as each sail sweeps past the tower mast
-    amDepth = +clamp(0.52 + 0.24 * Math.min(1, tipSpeed / 4.0), 0.35, 0.82).toFixed(3);
-  } else {
-    // Free-flying wing / glider / vane / cloth sheet (Curle dipole law: ∝ sqrt(A) * v_rel^2.2)
-    const speedRamp = smoothstep(0.25, 0.85, effSpeed);
-    const curlePower = Math.sqrt(area) * Math.pow(effSpeed, 2.2);
-    const stallBoost = 1.0 + 0.85 * stallRoughness;
-    const rawWhoosh = 0.026 * Math.log10(1 + 2.4 * curlePower * stallBoost) * speedRamp;
-    noiseGain = +clamp(rawWhoosh, 0, 0.32).toFixed(4);
+    const subNoise = clamp(0.145 * Math.log10(1 + subDipoleArg) * swooshRamp, 0, 0.30);
+    const subAmRate = Math.max(MIN_SUB_BPF_HZ, bpfHz);
+    const subAmDepth = clamp(0.52 + 0.24 * Math.min(1, tipSpeed / 4.0), 0.35, 0.82);
 
-    if (telemetry.isCloth) {
-      // Cloth flutter modulation driven by emergent flapping rate (`bendRateRadPerSec`) or Strouhal wake
-      const flapHz = bendRate > 0.4 ? bendRate / (2 * Math.PI) : 3.5 + 0.65 * effSpeed;
-      amRateHz = +clamp(flapHz, 1.8, 20.0).toFixed(2);
-      amDepth = +clamp(0.28 + 0.38 * Math.min(1, bendRate / 14.0) + 0.15 * stallRoughness, 0.20, 0.78).toFixed(3);
-    } else if (stallRoughness > 0.05) {
-      // Separated stall buffeting flutter (8..18 Hz)
-      amRateHz = +clamp(8.0 + 0.55 * effSpeed + 4.0 * stallRoughness, 8.0, 18.0).toFixed(2);
-      amDepth = +clamp(0.62 * stallRoughness, 0, 0.68).toFixed(3);
+    noiseGain = freeNoiseGain * (1 - subBlend) + subNoise * subBlend;
+    amRateHz = subBlend > 0.05 ? subAmRate : freeAmRateHz;
+    amDepth = freeAmDepth * (1 - subBlend) + subAmDepth * subBlend;
+
+    if (bpfHz >= MIN_AUDIBLE_BPF_HZ) {
+      // High-speed propeller / quadcopter rotor (f_BPF >= 22 Hz):
+      // Crossfade smoothly from blade-pass AM swoosh into Gutin dipole harmonics over 22..34 Hz!
+      const tonalBlend = smoothstep(MIN_AUDIBLE_BPF_HZ, 34.0, bpfHz);
+      const thrustLoadingNorm = clamp(aeroForce / Math.max(0.08, area * 35), 0, 2.5);
+      const decayBase = clamp(
+        0.46 + 0.34 * Math.min(1, machTip * 6.5) + 0.14 * Math.min(1.5, thrustLoadingNorm),
+        0.42,
+        0.90,
+      );
+
+      for (let n = 1; n <= NUM_GUTIN_HARMONICS; n++) {
+        if (n * bpfHz > 18000) break;
+        const loadingHump = 1.0 + 0.55 * thrustLoadingNorm * Math.sin(Math.min(Math.PI, ((n - 1) / 6) * Math.PI));
+        const w = Math.pow(decayBase, n - 1) * loadingHump * (1 / Math.pow(n, 0.32));
+        harmonicWeights.push(+w.toFixed(4));
+      }
+
+      const kT = 0.85;
+      const dipoleArg = Math.max(0, kT * Math.max(aeroForce, 0.015 * rho * area * tipSpeed * tipSpeed) * tipSpeed);
+      const rawTonal = 0.115 * Math.log10(1 + dipoleArg);
+      const ramp = smoothstep(0.25, 1.2, tipSpeed);
+      const propTonal = clamp(rawTonal * ramp, 0, 0.28);
+
+      const wakeGain = clamp(
+        0.045 * Math.log10(1 + 0.45 * dipoleArg) * (0.65 + 0.55 * stallRoughness) * ramp,
+        0,
+        0.18,
+      );
+      const propAmRate = stallRoughness > 0.15 ? clamp(10 + 0.4 * effSpeed, 8, 18) : bpfHz;
+      const propAmDepth = stallRoughness > 0.15 ? 0.22 * stallRoughness : 0;
+
+      tonalGain = +(propTonal * Math.max(0.08, tonalBlend)).toFixed(4);
+      tonalActive = harmonicWeights.length > 0 && tonalGain >= 0.0015;
+      noiseGain = noiseGain * (1 - tonalBlend) + wakeGain * tonalBlend;
+      amDepth = amDepth * (1 - tonalBlend) + propAmDepth * tonalBlend;
+      amRateHz = tonalBlend > 0.75 && stallRoughness > 0.15 ? propAmRate : amRateHz;
     }
   }
+
+  noiseGain = +clamp(noiseGain, 0, 0.32).toFixed(4);
+  amRateHz = +clamp(amRateHz, 0, 16000).toFixed(3);
+  amDepth = +clamp(amDepth, 0, 0.85).toFixed(3);
 
   // -------------------------------------------------------------------------
   // 3. Cloth / Sail Weave-Rubbing High-Shelf Rustle (2.2..5.5 kHz)
@@ -238,12 +268,16 @@ export function solveAeroAcousticVoice(telemetry: AeroVoiceTelemetry): AeroSynth
   let rustleGain = 0;
   let rustleFreqHz = 3200;
   if (telemetry.isCloth || bendRate > 0.25) {
-    const sigma = clamp(telemetry.arealDensityKgM2 || 0.15, 0.02, 1.2);
+    const sigma = clamp(telemetry.arealDensityKgM2 ?? 0.15, 0.02, 1.2);
     // Lighter ripstop crispness sits higher (4.5..5.5 kHz); heavier canvas sits warmer (2.2..3.0 kHz)
     const lightness = clamp((0.32 - sigma) / 0.28, 0, 1);
     rustleFreqHz = +clamp(2200 + 3300 * lightness, 2200, 5500).toFixed(1);
     const bendNorm = clamp(bendRate / 18.0, 0, 1.5);
-    rustleGain = +clamp(0.085 * bendNorm * (0.55 + 0.45 * smoothstep(0.2, 3.0, effSpeed)), 0, 0.16).toFixed(4);
+    rustleGain = +clamp(
+      0.085 * rhoScale * bendNorm * (0.55 + 0.45 * smoothstep(0.2, 3.0, effSpeed)),
+      0,
+      0.16,
+    ).toFixed(4);
   }
 
   const active = tonalGain >= 0.0015 || noiseGain >= 0.0015 || rustleGain >= 0.0015;
@@ -275,8 +309,8 @@ export function solveAeroAcousticVoice(telemetry: AeroVoiceTelemetry): AeroSynth
  *   - Ultralight ripstop nylon (σ <= 0.06 kg/m²): bright 1800..4800 Hz crackle
  */
 export function solveClothSnapPulse(snap: AeroSnapEvent): SnapSynthParams {
-  const impulse = Math.max(0, snap.impulseNs || 0);
-  const relSpeed = Math.max(0, snap.relSpeedMps || 0);
+  const impulse = Math.min(50, finiteNonNeg(snap.impulseNs));
+  const relSpeed = Math.min(1200, finiteNonNeg(snap.relSpeedMps));
   if (impulse < 0.0004) {
     return {
       nodeId: snap.nodeId,
@@ -289,7 +323,7 @@ export function solveClothSnapPulse(snap: AeroSnapEvent): SnapSynthParams {
     };
   }
 
-  const sigma = clamp(snap.arealDensityKgM2 || 0.15, 0.02, 1.20);
+  const sigma = clamp(snap.arealDensityKgM2 ?? 0.15, 0.02, 1.20);
 
   // Continuous physical mapping across σ:
   //   σ = 0.04 kg/m² (ripstop nylon) -> center ~3100 Hz, lowpass ~4800 Hz, τ ~0.75 ms
@@ -331,8 +365,11 @@ export function evaluateGustWind(
   z: number,
   timeSec: number,
 ): [number, number, number] {
+  if (!Number.isFinite(windX) || !Number.isFinite(windY) || !Number.isFinite(x + y + z + timeSec)) {
+    return [0, 0, 0];
+  }
   const meanSpeed = Math.hypot(windX, windY);
-  if (meanSpeed < 1e-4) return [0, 0, 0];
+  if (!(meanSpeed >= 1e-4)) return [0, 0, 0];
 
   // Advected Taylor frozen-turbulence phase u = k · (x - V_conv * t)
   const ux = windX / meanSpeed;

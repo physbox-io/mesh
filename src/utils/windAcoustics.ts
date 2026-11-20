@@ -18,11 +18,13 @@
 //    radiated harmonic spectrum H_1..H_10!
 // ---------------------------------------------------------------------------
 
-import type { SceneGeom, SceneNode, WindExciterKind, WindInstrumentSpec } from '../types/scene';
+import type { SceneGeom, SceneJoint, SceneNode, WindExciterKind, WindInstrumentSpec } from '../types/scene';
+import { PairMemo } from './arrayMemo';
 
 const SPEED_OF_SOUND_WARM_AIR = 349; // m/s at ~28 °C breath temperature
 const AIR_DENSITY = 1.18; // kg/m³
 const DEFAULT_SAMPLE_RATE = 48000;
+const MAX_WAVEGUIDE_CELLS = 1022;
 
 export interface ToneholeStation {
   /** Cell index along the waveguide [1 .. M-2]. */
@@ -50,10 +52,12 @@ export interface BoreWaveguideModel {
   mouthRadiusM: number;
   /** Effective unobstructed bell open-end radius (m). */
   bellRadiusM: number;
-  /** Number of integer Kelly–Lochbaum spatial delay cells at 48 kHz. */
+  /** Number of integer Kelly–Lochbaum spatial delay cells at `sampleRate`. */
   cellCount: number;
-  /** Continuous exact waveguide length in cells. */
+  /** Continuous exact waveguide length in cells at `sampleRate`. */
   exactCells: number;
+  /** Sample rate (Hz) used to discretize `cellCount` and `exactCells`. */
+  sampleRate?: number;
   /** Junction reflection coefficients k_i = (A_i - A_{i+1}) / (A_i + A_{i+1}). */
   junctionK: number[];
   /** Bell open-end radiation cutoff frequency (Hz): f_rad = c / (2 * π * r_bell). */
@@ -72,6 +76,102 @@ export interface BoreWaveguideModel {
   muteFactor?: number;
   /** Acoustic air-leak fraction from unpadded sculpted/cut side breaches [0..1]. */
   breachFactor?: number;
+}
+
+// ---------------------------------------------------------------------------
+// 3D Orientation Helpers & Y-up -> Z-up Static Mesh Conversion
+// ---------------------------------------------------------------------------
+
+type Mat3 = [number, number, number, number, number, number, number, number, number];
+const IDENTITY_MAT3: Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+
+function hasNonIdentityRot(g: SceneGeom): boolean {
+  if (g.quat && g.quat.length >= 4) {
+    const w = g.quat[0] ?? 1;
+    const x = g.quat[1] || 0;
+    const y = g.quat[2] || 0;
+    const z = g.quat[3] || 0;
+    return Math.abs(Math.abs(w) - 1) > 1e-5 || Math.hypot(x, y, z) > 1e-5;
+  }
+  if (g.euler && g.euler.length >= 3) {
+    return Math.abs(g.euler[0] || 0) > 1e-4 || Math.abs(g.euler[1] || 0) > 1e-4 || Math.abs(g.euler[2] || 0) > 1e-4;
+  }
+  return false;
+}
+
+/** MuJoCo rotation matrix: `quat = [w, x, y, z]` or intrinsic XYZ `euler = [rx, ry, rz]` (degrees). */
+function geomRot3(g: SceneGeom): Mat3 {
+  if (g.quat && g.quat.length >= 4) {
+    let w = g.quat[0] ?? 1;
+    let x = g.quat[1] || 0;
+    let y = g.quat[2] || 0;
+    let z = g.quat[3] || 0;
+    const n = Math.hypot(w, x, y, z);
+    if (!(n > 1e-12)) return IDENTITY_MAT3;
+    w /= n; x /= n; y /= n; z /= n;
+    return [
+      1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+      2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+      2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y),
+    ];
+  }
+  if (g.euler && g.euler.length >= 3) {
+    const d2r = Math.PI / 180;
+    const ax = (g.euler[0] || 0) * d2r;
+    const ay = (g.euler[1] || 0) * d2r;
+    const az = (g.euler[2] || 0) * d2r;
+    const cx = Math.cos(ax), sx = Math.sin(ax);
+    const cy = Math.cos(ay), sy = Math.sin(ay);
+    const cz = Math.cos(az), sz = Math.sin(az);
+    // R = Rx(ax) * Ry(ay) * Rz(az)
+    return [
+      cy * cz, -cy * sz, sy,
+      sx * sy * cz + cx * sz, -sx * sy * sz + cx * cz, -sx * cy,
+      -cx * sy * cz + sx * sz, cx * sy * sz + sx * cz, cx * cy,
+    ];
+  }
+  return IDENTITY_MAT3;
+}
+
+const yupToZupCache = new WeakMap<number[], number[]>();
+
+/** Returns Z-up mesh vertices (converting static Y-up `g.vertices` via `(x,y,z)->(x,-z,y)` when `renderVertices` is absent). */
+function getMeshBaseZupVertices(g: SceneGeom): number[] | null {
+  if (g.renderVertices && g.renderVertices.length >= 9) {
+    return g.renderVertices;
+  }
+  if (g.vertices && g.vertices.length >= 9) {
+    let zup = yupToZupCache.get(g.vertices);
+    if (!zup) {
+      const src = g.vertices;
+      zup = new Array<number>(src.length);
+      for (let i = 0; i + 2 < src.length; i += 3) {
+        zup[i] = src[i];
+        zup[i + 1] = -src[i + 2];
+        zup[i + 2] = src[i + 1];
+      }
+      yupToZupCache.set(src, zup);
+    }
+    return zup;
+  }
+  return null;
+}
+
+function getOrientedZupVertices(g: SceneGeom): { verts: number[]; cacheable: boolean } | null {
+  const base = getMeshBaseZupVertices(g);
+  if (!base) return null;
+  if (!hasNonIdentityRot(g)) {
+    return { verts: base, cacheable: true };
+  }
+  const R = geomRot3(g);
+  const out = new Array<number>(base.length);
+  for (let i = 0; i + 2 < base.length; i += 3) {
+    const x = base[i], y = base[i + 1], z = base[i + 2];
+    out[i] = R[0] * x + R[1] * y + R[2] * z;
+    out[i + 1] = R[3] * x + R[4] * y + R[5] * z;
+    out[i + 2] = R[6] * x + R[7] * y + R[8] * z;
+  }
+  return { verts: out, cacheable: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -109,21 +209,32 @@ interface MeshAirwayAnalysis {
   boundaryEdges: number;
 }
 
-const meshAnalysisCache = new WeakMap<number[], MeshAirwayAnalysis>();
+const meshAnalysisCache = new PairMemo<MeshAirwayAnalysis | null>();
 
-function computeMeshTopology(rv: number[], faces: number[]): { genus: number; boundaryEdges: number } {
+interface MeshTopologyInfo {
+  genus: number;
+  boundaryEdges: number;
+  hasSideBreach: boolean;
+  hasClosedTunnelBreach: boolean;
+}
+
+function computeMeshTopology(rv: number[], faces: number[]): MeshTopologyInfo {
   const nVerts = Math.floor(rv.length / 3);
   const nFaces = Math.floor(faces.length / 3);
-  if (nVerts < 4 || nFaces < 4) return { genus: 0, boundaryEdges: 0 };
+  if (nVerts < 4 || nFaces < 4) {
+    return { genus: 0, boundaryEdges: 0, hasSideBreach: false, hasClosedTunnelBreach: false };
+  }
 
   // Weld coincident vertices within 0.05 mm
   const weldMap = new Map<string, number>();
-  const vertToWeld = new Int32Array(nVerts);
+  const vertToWeld = new Int32Array(nVerts).fill(-1);
   let weldedCount = 0;
   for (let i = 0; i < nVerts; i++) {
-    const kx = Math.round(rv[i * 3] * 20000);
-    const ky = Math.round(rv[i * 3 + 1] * 20000);
-    const kz = Math.round(rv[i * 3 + 2] * 20000);
+    const vx = rv[i * 3], vy = rv[i * 3 + 1], vz = rv[i * 3 + 2];
+    if (!Number.isFinite(vx + vy + vz)) continue;
+    const kx = Math.round(vx * 20000);
+    const ky = Math.round(vy * 20000);
+    const kz = Math.round(vz * 20000);
     const key = `${kx}:${ky}:${kz}`;
     let wid = weldMap.get(key);
     if (wid === undefined) {
@@ -131,6 +242,9 @@ function computeMeshTopology(rv: number[], faces: number[]): { genus: number; bo
       weldMap.set(key, wid);
     }
     vertToWeld[i] = wid;
+  }
+  if (weldedCount < 4) {
+    return { genus: 0, boundaryEdges: 0, hasSideBreach: false, hasClosedTunnelBreach: false };
   }
 
   const parent = new Int32Array(weldedCount);
@@ -154,48 +268,107 @@ function computeMeshTopology(rv: number[], faces: number[]): { genus: number; bo
   };
 
   const edgeCounts = new Map<number, number>();
+  const edgeEndpoints = new Map<number, [number, number]>();
   const stride = weldedCount + 1;
-  let validFaces = 0;
+  const faceFirstVert: number[] = [];
 
   for (let f = 0; f < nFaces; f++) {
-    const a = vertToWeld[faces[f * 3]];
-    const b = vertToWeld[faces[f * 3 + 1]];
-    const c = vertToWeld[faces[f * 3 + 2]];
-    if (a === b || b === c || c === a) continue;
-    validFaces++;
+    const ia = faces[f * 3];
+    const ib = faces[f * 3 + 1];
+    const ic = faces[f * 3 + 2];
+    if (!(ia >= 0 && ia < nVerts && ib >= 0 && ib < nVerts && ic >= 0 && ic < nVerts)) continue;
+    const a = vertToWeld[ia];
+    const b = vertToWeld[ib];
+    const c = vertToWeld[ic];
+    if (a < 0 || b < 0 || c < 0 || a === b || b === c || c === a) continue;
+    faceFirstVert.push(a);
     used[a] = 1;
     used[b] = 1;
     used[c] = 1;
     unite(a, b);
     unite(b, c);
 
-    const e0 = a < b ? a * stride + b : b * stride + a;
-    const e1 = b < c ? b * stride + c : c * stride + b;
-    const e2 = c < a ? c * stride + a : a * stride + c;
-    edgeCounts.set(e0, (edgeCounts.get(e0) ?? 0) + 1);
-    edgeCounts.set(e1, (edgeCounts.get(e1) ?? 0) + 1);
-    edgeCounts.set(e2, (edgeCounts.get(e2) ?? 0) + 1);
-  }
-
-  let usedVerts = 0;
-  const roots = new Set<number>();
-  for (let i = 0; i < weldedCount; i++) {
-    if (used[i]) {
-      usedVerts++;
-      roots.add(find(i));
+    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) {
+      const ek = u < v ? u * stride + v : v * stride + u;
+      const prev = edgeCounts.get(ek) ?? 0;
+      edgeCounts.set(ek, prev + 1);
+      if (prev === 0) edgeEndpoints.set(ek, u < v ? [u, v] : [v, u]);
     }
   }
-  const components = Math.max(1, roots.size);
-  let boundaryEdges = 0;
-  for (const cnt of edgeCounts.values()) {
-    if (cnt === 1) boundaryEdges++;
+
+  // Per-component V, E, F and connected boundary-loop count B_loops:
+  // chi_c = V_c - E_c + F_c = 2 - 2*g_c - B_loops_c  =>  g_c = 1 - (chi_c + B_loops_c) / 2
+  const compStats = new Map<number, { v: number; e: number; f: number; bLoops: number }>();
+  const ensureComp = (root: number) => {
+    let st = compStats.get(root);
+    if (!st) {
+      st = { v: 0, e: 0, f: 0, bLoops: 0 };
+      compStats.set(root, st);
+    }
+    return st;
+  };
+
+  for (let i = 0; i < weldedCount; i++) {
+    if (used[i]) ensureComp(find(i)).v++;
+  }
+  for (const fv of faceFirstVert) {
+    ensureComp(find(fv)).f++;
   }
 
-  // Euler-Poincaré formula for orientable 2-manifolds with B boundary edges:
-  // If B === 0, chi = V - E + F = 2*C - 2*g  =>  g = C - (V - E + F)/2
-  const chi = usedVerts - edgeCounts.size + validFaces;
-  const genus = boundaryEdges === 0 ? Math.max(0, Math.round(components - chi / 2)) : 1;
-  return { genus, boundaryEdges };
+  const bndParent = new Int32Array(weldedCount);
+  const bndTouch = new Uint8Array(weldedCount);
+  for (let i = 0; i < weldedCount; i++) bndParent[i] = i;
+  const findBnd = (x: number): number => {
+    let r = x;
+    while (bndParent[r] !== r) r = bndParent[r];
+    let c = x;
+    while (c !== r) {
+      const nxt = bndParent[c];
+      bndParent[c] = r;
+      c = nxt;
+    }
+    return r;
+  };
+
+  let boundaryEdges = 0;
+  for (const [ek, cnt] of edgeCounts.entries()) {
+    const [u, v] = edgeEndpoints.get(ek)!;
+    ensureComp(find(u)).e++;
+    if (cnt === 1) {
+      boundaryEdges++;
+      bndTouch[u] = 1;
+      bndTouch[v] = 1;
+      const ru = findBnd(u), rv2 = findBnd(v);
+      if (ru !== rv2) bndParent[ru] = rv2;
+    }
+  }
+
+  const seenBndLoop = new Set<number>();
+  for (let i = 0; i < weldedCount; i++) {
+    if (!bndTouch[i]) continue;
+    const loopRoot = findBnd(i);
+    if (!seenBndLoop.has(loopRoot)) {
+      seenBndLoop.add(loopRoot);
+      ensureComp(find(i)).bLoops++;
+    }
+  }
+
+  let totalGenus = 0;
+  let hasSideBreach = false;
+  let hasClosedTunnelBreach = false;
+  for (const st of compStats.values()) {
+    const chiC = st.v - st.e + st.f;
+    const gC = Math.max(0, Math.round(1 - (chiC + st.bLoops) / 2));
+    totalGenus += gC;
+    if (st.bLoops === 0 && gC >= 2) {
+      hasSideBreach = true;
+      hasClosedTunnelBreach = true;
+    } else if ((gC >= 1 && st.bLoops >= 1) || st.bLoops >= 3) {
+      hasSideBreach = true;
+    }
+  }
+
+  return { genus: totalGenus, boundaryEdges, hasSideBreach, hasClosedTunnelBreach };
 }
 
 function analyzeBranchCluster(segs: Seg2D[], loopCount: number): BranchSliceInfo | null {
@@ -363,28 +536,21 @@ function analyzeBranchCluster(segs: Seg2D[], loopCount: number): BranchSliceInfo
   };
 }
 
-function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
-  const rv = g.renderVertices;
-  const faces = g.faces;
-  if (!rv || !faces || rv.length < 12 || faces.length < 12) return null;
-
-  const cached = meshAnalysisCache.get(rv);
-  if (cached) return cached;
-
-  const off0 = g.pos?.[0] ?? 0;
-  const off1 = g.pos?.[1] ?? 0;
-  const off2 = g.pos?.[2] ?? 0;
-  const offs = [off0, off1, off2];
+function analyzeHollowMeshAirwayLocal(rv: number[], faces: number[]): MeshAirwayAnalysis | null {
+  const nVerts = Math.floor(rv.length / 3);
+  if (nVerts < 4 || faces.length < 12) return null;
 
   const mins = [Infinity, Infinity, Infinity];
   const maxs = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i + 2 < rv.length; i += 3) {
     for (let a = 0; a < 3; a++) {
-      const v = rv[i + a] + offs[a];
+      const v = rv[i + a];
+      if (!Number.isFinite(v)) continue;
       if (v < mins[a]) mins[a] = v;
       if (v > maxs[a]) maxs[a] = v;
     }
   }
+  if (!Number.isFinite(mins[0])) return null;
   const spans = [maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]];
   let boreAxis: 0 | 1 | 2 = 0;
   if (spans[1] >= spans[0] && spans[1] >= spans[2]) boreAxis = 1;
@@ -405,21 +571,23 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
 
   const nFaces = Math.floor(faces.length / 3);
   for (let f = 0; f < nFaces; f++) {
-    const i0 = faces[f * 3] * 3;
-    const i1 = faces[f * 3 + 1] * 3;
-    const i2 = faces[f * 3 + 2] * 3;
+    const f0 = faces[f * 3], f1 = faces[f * 3 + 1], f2 = faces[f * 3 + 2];
+    if (!(f0 >= 0 && f0 < nVerts && f1 >= 0 && f1 < nVerts && f2 >= 0 && f2 < nVerts)) continue;
+    const i0 = f0 * 3;
+    const i1 = f1 * 3;
+    const i2 = f2 * 3;
 
-    const b0 = rv[i0 + boreAxis] + offs[boreAxis];
-    const b1 = rv[i1 + boreAxis] + offs[boreAxis];
-    const b2 = rv[i2 + boreAxis] + offs[boreAxis];
+    const b0 = rv[i0 + boreAxis];
+    const b1 = rv[i1 + boreAxis];
+    const b2 = rv[i2 + boreAxis];
 
     const loB = Math.min(b0, b1, b2);
     const hiB = Math.max(b0, b1, b2);
-    if (hiB - loB < 1e-7) continue;
+    if (!(hiB - loB >= 1e-7)) continue;
 
-    const u0 = rv[i0 + axU] + offs[axU], v0 = rv[i0 + axV] + offs[axV];
-    const u1 = rv[i1 + axU] + offs[axU], v1 = rv[i1 + axV] + offs[axV];
-    const u2 = rv[i2 + axU] + offs[axU], v2 = rv[i2 + axV] + offs[axV];
+    const u0 = rv[i0 + axU], v0 = rv[i0 + axV];
+    const u1 = rv[i1 + axU], v1 = rv[i1 + axV];
+    const u2 = rv[i2 + axU], v2 = rv[i2 + axV];
 
     // 3D triangle normal in (B, U, V) right-handed permutation up to sign: orient 2D normal using signed cross product
     const e1b = b1 - b0, e1u = u1 - u0, e1v = v1 - v0;
@@ -430,7 +598,7 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
     const nuRaw = handed * (e1v * e2b - e1b * e2v);
     const nvRaw = handed * (e1b * e2u - e1u * e2b);
     const n2Len = Math.hypot(nuRaw, nvRaw);
-    if (n2Len < 1e-9) continue;
+    if (!(n2Len >= 1e-9)) continue;
     const nu = nuRaw / n2Len;
     const nv = nvRaw / n2Len;
 
@@ -571,34 +739,60 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
     sliceBranches.push(branches);
   }
 
-  // Compute unfolded length via Cauchy branch-count integral + U-turn bow arcs
+  // Compute unfolded length via Cauchy branch-count integral + genuine multi-branch U-turn bow arcs
   const counts = sliceBranches.map((b) => b.length);
-  const maxBranches = Math.max(1, ...counts);
+  const maxBranches = Math.max(0, ...counts);
+  if (maxBranches === 0) return null;
+
+  let firstOpen = 0;
+  while (firstOpen < N_SLICES && counts[firstOpen] === 0) firstOpen++;
+  let lastOpen = N_SLICES - 1;
+  while (lastOpen > firstOpen && counts[lastOpen] === 0) lastOpen--;
+
   let unfoldedLengthM = 0;
-  for (let q = 0; q < N_SLICES; q++) {
+  for (let q = firstOpen; q <= lastOpen; q++) {
     const kq = counts[q];
     unfoldedLengthM += Math.max(1, kq) * dx;
-    if (q > 0 && counts[q] !== counts[q - 1]) {
-      // Semicircular U-bend arc excess (pi/2 - 1) * R_turn at each fold transition
+    if (
+      maxBranches >= 2 &&
+      q > firstOpen &&
+      counts[q] >= 1 &&
+      counts[q - 1] >= 1 &&
+      counts[q] !== counts[q - 1] &&
+      Math.max(counts[q], counts[q - 1]) >= 2
+    ) {
       unfoldedLengthM += 0.014 * Math.abs(counts[q] - counts[q - 1]);
     }
   }
+  unfoldedLengthM = Math.max(0.02, unfoldedLengthM);
 
   // Order all (slice q, pass p) samples sequentially from mouthpiece (s = 0) -> bell (s = 1)!
-  const orderedSamples: { s: number; q: number; passIdx: number; info: BranchSliceInfo }[] = [];
+  let orderedSamples: { s: number; q: number; passIdx: number; info: BranchSliceInfo }[] = [];
   if (maxBranches <= 1) {
-    for (let q = 0; q < N_SLICES; q++) {
+    const openSpan = Math.max(1, lastOpen - firstOpen + 1);
+    for (let q = firstOpen; q <= lastOpen; q++) {
       if (sliceBranches[q][0]) {
         orderedSamples.push({
-          s: (q + 0.5) / N_SLICES,
+          s: (q - firstOpen + 0.5) / openSpan,
           q,
           passIdx: 0,
           info: sliceBranches[q][0],
         });
       }
     }
+    if (orderedSamples.length >= 6) {
+      const rHead = (orderedSamples[0].info.rEff + orderedSamples[1].info.rEff + orderedSamples[2].info.rEff) / 3;
+      const nSmp = orderedSamples.length;
+      const rTail =
+        (orderedSamples[nSmp - 1].info.rEff + orderedSamples[nSmp - 2].info.rEff + orderedSamples[nSmp - 3].info.rEff) / 3;
+      if (rHead > rTail * 1.35) {
+        orderedSamples = orderedSamples
+          .slice()
+          .reverse()
+          .map((smp) => ({ ...smp, s: 1 - smp.s }));
+      }
+    }
   } else {
-    // Multi-branch folded horn (e.g. 3 passes: pass 0 forward +B, pass 1 backward -B, pass 2 forward +B)
     const nPasses = maxBranches;
     const rawChain: { q: number; passIdx: number; info: BranchSliceInfo }[] = [];
     for (let p = 0; p < nPasses; p++) {
@@ -607,7 +801,6 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
         const q = forward ? step : N_SLICES - 1 - step;
         const brs = sliceBranches[q];
         if (brs.length === 0) continue;
-        // Skip U-bend turn saddle slices where branch count changes
         if (q > 0 && q + 1 < N_SLICES && (counts[q] !== counts[q - 1] || counts[q] !== counts[q + 1])) {
           continue;
         }
@@ -629,7 +822,6 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
     }
   }
 
-  // Resample ordered airway radii cleanly onto 36 uniform stations
   const profileRadii = new Array<number>(36).fill(0.007);
   if (orderedSamples.length > 0) {
     for (let k = 0; k < 36; k++) {
@@ -645,7 +837,6 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
       }
       profileRadii[k] = best.info.rEff;
     }
-    // Gentle 3-point smoothing across discrete slice bins (preserving end radii)
     const sm = [...profileRadii];
     for (let k = 1; k + 1 < 36; k++) {
       sm[k] = 0.25 * profileRadii[k - 1] + 0.5 * profileRadii[k] + 0.25 * profileRadii[k + 1];
@@ -653,20 +844,28 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
     for (let k = 1; k + 1 < 36; k++) profileRadii[k] = sm[k];
   }
 
-  // Detect sculpted side-holes when topology confirms a wall breach (genus > 1 or open boundary edges > 0)!
   const sculptedHoles: { axialFraction: number; radiusM: number; wallM: number }[] = [];
-  const hasTopologicalBreach = topo.genus > 1 || topo.boundaryEdges > 0;
-  if (hasTopologicalBreach && orderedSamples.length >= 6) {
+  if (topo.hasSideBreach && orderedSamples.length >= 6) {
     const holeCandidates: { s: number; radiusM: number }[] = [];
+    for (let i = 1; i < orderedSamples.length; i++) {
+      const prev = orderedSamples[i - 1];
+      const cur = orderedSamples[i];
+      const qGap = Math.abs(cur.q - prev.q);
+      // Detect through-cut sculpted breaches that split or sever 1..6 interior slices on the same branch pass!
+      if (cur.passIdx === prev.passIdx && qGap >= 2 && counts[cur.q] === counts[prev.q]) {
+        const localR = 0.5 * (prev.info.rEff + cur.info.rEff);
+        const gapWidthM = Math.max(dx, (qGap - 1) * dx);
+        const holeR = Math.max(0.0035, Math.min(0.025, Math.min(localR * 0.85, 0.45 * gapWidthM)));
+        holeCandidates.push({ s: 0.5 * (prev.s + cur.s), radiusM: holeR });
+      }
+    }
     for (let i = 2; i + 2 < orderedSamples.length; i++) {
       const smp = orderedSamples[i];
       const q = smp.q;
       if (q <= 1 || q >= N_SLICES - 2) continue;
-      // Skip U-bend turn transition slices where branch count changes
       if (counts[q] !== counts[q - 1] || counts[q] !== counts[q + 1]) continue;
 
       const inf = smp.info;
-      // Either direct 2D ray escape (>= 20° opening) OR merged single C-loop wall breach!
       const rayEscaped = inf.escapeArcRad >= (20 * Math.PI) / 180;
       const mergedCLoop =
         inf.loopCount === 1 &&
@@ -679,8 +878,8 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
         holeCandidates.push({ s: smp.s, radiusM: holeR });
       }
     }
+    holeCandidates.sort((a, b) => a.s - b.s);
 
-    // Group contiguous slice detections into discrete physical holes
     let idx = 0;
     while (idx < holeCandidates.length) {
       let j = idx;
@@ -700,11 +899,9 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
       idx = j;
     }
 
-    // Fallback if an oblique pinhole increased genus > 1 strictly between two slice planes:
-    if (sculptedHoles.length === 0 && topo.genus > 1) {
-      // Find interior sample with minimum loopCount or minimum rEff/rOuter wall anomaly
+    if (sculptedHoles.length === 0 && topo.hasClosedTunnelBreach) {
       let bestS = 0.78;
-      let maxArc = -1;
+      let maxArc = 1e-3;
       for (let i = 3; i + 3 < orderedSamples.length; i++) {
         if (orderedSamples[i].info.escapeArcRad > maxArc) {
           maxArc = orderedSamples[i].info.escapeArcRad;
@@ -715,7 +912,6 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
     }
   }
 
-  // Measure bell mute / inward sculpted baffle constriction over the final 18% of the airway!
   let muteFactor = 0;
   const bellSamples = orderedSamples.filter((smp) => smp.s >= 0.82 && smp.s <= 0.98);
   if (bellSamples.length > 0) {
@@ -726,14 +922,12 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
       if (areaRatio < minAreaRatio) minAreaRatio = areaRatio;
       if (smp.info.minRatio < minStarRatio) minStarRatio = smp.info.minRatio;
     }
-    // Smooth open thin-walled bell has areaRatio ~ 0.85..0.94 and minStarRatio ~ 0.92..1.0.
-    // Sculpted inward baffles/mute plugs drop areaRatio < 0.72 and/or star circularity < 0.65!
     const areaConstriction = Math.max(0, (0.76 - minAreaRatio) / 0.45);
     const starConstriction = Math.max(0, (0.72 - minStarRatio) / 0.50);
     muteFactor = +Math.min(0.88, Math.max(areaConstriction, starConstriction * 0.85)).toFixed(3);
   }
 
-  const result: MeshAirwayAnalysis = {
+  return {
     boreAxis,
     minCoord: minB,
     maxCoord: maxB,
@@ -744,8 +938,26 @@ function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
     genus: topo.genus,
     boundaryEdges: topo.boundaryEdges,
   };
-  meshAnalysisCache.set(rv, result);
-  return result;
+}
+
+function analyzeHollowMeshAirway(g: SceneGeom): MeshAirwayAnalysis | null {
+  const faces = g.faces;
+  if (!faces || faces.length < 12) return null;
+  const oriented = getOrientedZupVertices(g);
+  if (!oriented || oriented.verts.length < 12) return null;
+
+  const base = oriented.cacheable
+    ? meshAnalysisCache.get(oriented.verts, faces, () => analyzeHollowMeshAirwayLocal(oriented.verts, faces))
+    : analyzeHollowMeshAirwayLocal(oriented.verts, faces);
+  if (!base) return null;
+
+  const offB = g.pos?.[base.boreAxis] ?? 0;
+  if (offB === 0) return base;
+  return {
+    ...base,
+    minCoord: base.minCoord + offB,
+    maxCoord: base.maxCoord + offB,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -763,11 +975,24 @@ interface AxialBoreSlice {
   transverseHoles: { axialFraction: number; radiusM: number; wallM: number }[];
 }
 
+function cylinderUnitAxis(g: SceneGeom): [number, number, number] {
+  if (g.fromto && g.fromto.length >= 6) {
+    const dx = g.fromto[3] - g.fromto[0];
+    const dy = g.fromto[4] - g.fromto[1];
+    const dz = g.fromto[5] - g.fromto[2];
+    const len = Math.hypot(dx, dy, dz);
+    if (len > 1e-8) return [dx / len, dy / len, dz / len];
+  }
+  const R = geomRot3(g);
+  return [R[2], R[5], R[8]];
+}
+
 function geomSpanOnAxis(g: SceneGeom, axis: 0 | 1 | 2): [number, number] {
   if (g.type === 'mesh') {
-    const rv = g.renderVertices;
+    const oriented = getOrientedZupVertices(g);
     const off = g.pos?.[axis] ?? 0;
-    if (rv && rv.length >= 3) {
+    if (oriented && oriented.verts.length >= 3) {
+      const rv = oriented.verts;
       let lo = Infinity, hi = -Infinity;
       for (let i = axis; i < rv.length; i += 3) {
         const v = rv[i] + off;
@@ -782,32 +1007,76 @@ function geomSpanOnAxis(g: SceneGeom, axis: 0 | 1 | 2): [number, number] {
     const a = g.fromto[axis];
     const b = g.fromto[axis + 3];
     const r = g.size[0] ?? 0.005;
+    if (g.type === 'cylinder') {
+      const u = cylinderUnitAxis(g);
+      const ua = Math.abs(u[axis]);
+      const radProj = r * Math.sqrt(Math.max(0, 1 - ua * ua));
+      return [Math.min(a, b) - radProj, Math.max(a, b) + radProj];
+    }
     return [Math.min(a, b) - r, Math.max(a, b) + r];
   }
   if (g.type === 'box') {
-    const h = g.size[axis] ?? 0.02;
-    return [c - h, c + h];
-  }
-  if (g.type === 'cylinder' || g.type === 'capsule') {
-    const eul = g.euler ?? [0, 0, 0];
-    let cylAxis: 0 | 1 | 2 = 2;
-    if (Math.abs(Math.abs(eul[1] ?? 0) - 90) < 20) cylAxis = 0;
-    else if (Math.abs(Math.abs(eul[0] ?? 0) - 90) < 20) cylAxis = 1;
-    const ext = cylAxis === axis ? (g.size[1] ?? 0.05) : (g.size[0] ?? 0.01);
+    const R = geomRot3(g);
+    const sx = Math.abs(g.size[0] ?? 0.02);
+    const sy = Math.abs(g.size[1] ?? sx);
+    const sz = Math.abs(g.size[2] ?? sx);
+    const row = axis * 3;
+    const ext = Math.abs(R[row]) * sx + Math.abs(R[row + 1]) * sy + Math.abs(R[row + 2]) * sz;
     return [c - ext, c + ext];
   }
-  const r = g.size[0] ?? 0.02;
+  if (g.type === 'cylinder' || g.type === 'capsule') {
+    const u = cylinderUnitAxis(g);
+    const ua = Math.abs(u[axis]);
+    const r = Math.abs(g.size[0] ?? 0.01);
+    const h = Math.abs(g.size[1] ?? 0.05);
+    const ext = g.type === 'capsule'
+      ? h * ua + r
+      : h * ua + r * Math.sqrt(Math.max(0, 1 - ua * ua));
+    return [c - ext, c + ext];
+  }
+  if (g.type === 'ellipsoid') {
+    const R = geomRot3(g);
+    const rx = Math.abs(g.size[0] ?? 0.02);
+    const ry = Math.abs(g.size[1] ?? rx);
+    const rz = Math.abs(g.size[2] ?? rx);
+    const row = axis * 3;
+    const ext = Math.hypot(R[row] * rx, R[row + 1] * ry, R[row + 2] * rz);
+    return [c - ext, c + ext];
+  }
+  const r = Math.abs(g.size[0] ?? 0.02);
   return [c - r, c + r];
+}
+
+function coaxialHydraulicRadius(g: SceneGeom, boreAxis: 0 | 1 | 2): number {
+  if (g.type === 'box') {
+    const perp = ([0, 1, 2] as const).filter((a) => a !== boreAxis);
+    const [a0, a1] = geomSpanOnAxis(g, perp[0]);
+    const [b0, b1] = geomSpanOnAxis(g, perp[1]);
+    return Math.sqrt(Math.max(1e-8, ((a1 - a0) * (b1 - b0)) / Math.PI));
+  }
+  if (g.type === 'ellipsoid') {
+    const perp = ([0, 1, 2] as const).filter((a) => a !== boreAxis);
+    const [a0, a1] = geomSpanOnAxis(g, perp[0]);
+    const [b0, b1] = geomSpanOnAxis(g, perp[1]);
+    return 0.5 * Math.sqrt(Math.max(1e-8, (a1 - a0) * (b1 - b0)));
+  }
+  return Math.max(0.001, g.size[0] ?? 0.007);
 }
 
 function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
   const geoms = node.geoms ?? [];
-  const positives = geoms.filter((g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual');
-  const negatives = geoms.filter((g) => g.csg === 'difference');
+  // Keep `!csgDerived` authored positives primary; fall back to `csgDerived === 'visual'` ONLY when `rawPositives.length === 0`!
+  const rawPositives = geoms.filter(
+    (g) => !g.csgDerived && g.csg !== 'difference' && g.csg !== 'intersection' && g.role !== 'visual' && g.type !== 'plane',
+  );
+  const positives = rawPositives.length > 0
+    ? rawPositives
+    : geoms.filter((g) => g.csgDerived === 'visual' && g.type === 'mesh');
+  const negatives = rawPositives.length > 0
+    ? geoms.filter((g) => !g.csgDerived && g.csg === 'difference')
+    : [];
 
-  // If the primary positive body is a single hollow folded/sculpted mesh (e.g. cornet/horn/ocarina),
-  // use full 2D cross-section & topological airway analysis directly!
-  const meshGeoms = positives.filter((g) => g.type === 'mesh' && g.renderVertices && g.faces);
+  const meshGeoms = positives.filter((g) => g.type === 'mesh' && g.faces && (g.renderVertices || g.vertices));
   const primaryMeshAnalysis = meshGeoms.length === 1 && positives.length === 1
     ? analyzeHollowMeshAirway(meshGeoms[0])
     : null;
@@ -828,30 +1097,62 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
 
   const [minCoord, maxCoord] = spans[boreAxis];
   const bboxLengthM = Math.max(0.06, maxCoord - minCoord);
+  const perpAxes = ([0, 1, 2] as const).filter((a) => a !== boreAxis);
 
-  // Separate coaxial bore cutters from transverse CSG tonehole cutters
+  // Separate coaxial bore cutters from transverse CSG tonehole/window cutters using full 3D orientation!
   const coaxialBores: SceneGeom[] = [];
-  const transverseHoles: { axialFraction: number; radiusM: number; wallM: number }[] = [];
+  let transverseHoles: { axialFraction: number; radiusM: number; wallM: number }[] = [];
 
   for (const neg of negatives) {
-    if (neg.type !== 'cylinder' && neg.type !== 'capsule' && neg.type !== 'ellipsoid') continue;
     const [n0, n1] = geomSpanOnAxis(neg, boreAxis);
     const axialSpan = n1 - n0;
-    const rNeg = neg.size[0] ?? 0.005;
-    if (axialSpan > bboxLengthM * 0.35) {
-      coaxialBores.push(neg);
-    } else if (rNeg >= 0.0015 && rNeg <= 0.035) {
-      const center = 0.5 * (n0 + n1);
-      const frac = Math.max(0.08, Math.min(0.94, (center - minCoord) / bboxLengthM));
-      transverseHoles.push({
-        axialFraction: +frac.toFixed(4),
-        radiusM: rNeg,
-        wallM: 0.0035,
-      });
+    const center = 0.5 * (n0 + n1);
+
+    if (neg.type === 'cylinder' || neg.type === 'capsule') {
+      const u = cylinderUnitAxis(neg);
+      const cosBore = Math.abs(u[boreAxis]);
+      const rNeg = Math.abs(neg.size[0] ?? 0.005);
+      if (cosBore > 0.72 && axialSpan > bboxLengthM * 0.35) {
+        coaxialBores.push(neg);
+      } else if (rNeg >= 0.0012 && rNeg <= 0.040) {
+        const frac = Math.max(0.08, Math.min(0.94, (center - minCoord) / bboxLengthM));
+        transverseHoles.push({
+          axialFraction: +frac.toFixed(4),
+          radiusM: rNeg,
+          wallM: 0.0035,
+        });
+      }
+    } else if (neg.type === 'box' || neg.type === 'ellipsoid' || neg.type === 'sphere' || neg.type === 'mesh') {
+      const [p0a, p0b] = geomSpanOnAxis(neg, perpAxes[0]);
+      const [p1a, p1b] = geomSpanOnAxis(neg, perpAxes[1]);
+      const spanP0 = p0b - p0a;
+      const spanP1 = p1b - p1a;
+      const outerP0 = Math.max(0.004, spans[perpAxes[0]][1] - spans[perpAxes[0]][0]);
+      const outerP1 = Math.max(0.004, spans[perpAxes[1]][1] - spans[perpAxes[1]][0]);
+      const isCoaxialBox =
+        axialSpan > bboxLengthM * 0.35 &&
+        spanP0 < outerP0 * 0.96 &&
+        spanP1 < outerP1 * 0.96;
+
+      if (isCoaxialBox) {
+        coaxialBores.push(neg);
+      } else {
+        const minPerpSpan = Math.min(spanP0, spanP1);
+        const rEq = neg.type === 'box'
+          ? Math.sqrt(Math.max(1e-8, (axialSpan * minPerpSpan) / Math.PI))
+          : 0.5 * Math.sqrt(Math.max(1e-8, axialSpan * minPerpSpan));
+        if (rEq >= 0.0012 && rEq <= 0.040 && axialSpan < bboxLengthM * 0.65) {
+          const frac = Math.max(0.08, Math.min(0.94, (center - minCoord) / bboxLengthM));
+          transverseHoles.push({
+            axialFraction: +frac.toFixed(4),
+            radiusM: +rEq.toFixed(4),
+            wallM: 0.0035,
+          });
+        }
+      }
     }
   }
 
-  // Also inspect any mesh geoms on compound instruments (e.g. clarinet_bell_mesh!) for sculpted holes or bell mutes!
   let muteFactor = primaryMeshAnalysis?.muteFactor ?? 0;
   if (primaryMeshAnalysis) {
     transverseHoles.push(...primaryMeshAnalysis.sculptedHoles);
@@ -897,21 +1198,22 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
     };
   }
 
-  const radiiAtStations = (nStations: number): number[] => {
+  const sampleRawStations = (nStations: number, reverseDir: boolean): number[] => {
     if (node.isTube && typeof node.innerRadius === 'number' && node.innerRadius > 0) {
       return new Array<number>(nStations).fill(node.innerRadius);
     }
 
     const out: number[] = [];
     for (let k = 0; k < nStations; k++) {
-      const u = nStations <= 1 ? 0 : k / (nStations - 1);
+      const rawU = nStations <= 1 ? 0 : k / (nStations - 1);
+      const u = reverseDir ? 1 - rawU : rawU;
       const coord = minCoord + u * bboxLengthM;
 
       let rInner = 0;
       for (const cb of coaxialBores) {
         const [c0, c1] = geomSpanOnAxis(cb, boreAxis);
         if (coord >= c0 - 1e-4 && coord <= c1 + 1e-4) {
-          rInner = Math.max(rInner, cb.size[0] ?? 0.007);
+          rInner = Math.max(rInner, coaxialHydraulicRadius(cb, boreAxis));
         }
       }
 
@@ -924,9 +1226,10 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
             if (p.type === 'cylinder' || p.type === 'capsule' || p.type === 'sphere') {
               rCand = p.size[0] ?? 0.01;
             } else if (p.type === 'box') {
-              const perpAxes = ([0, 1, 2] as const).filter((a) => a !== boreAxis);
-              rCand = Math.sqrt(((p.size[perpAxes[0]] ?? 0.01) * (p.size[perpAxes[1]] ?? 0.01) * 4) / Math.PI);
-            } else if (p.type === 'mesh' && p.renderVertices && p.renderVertices.length >= 9) {
+              const [a0, a1] = geomSpanOnAxis(p, perpAxes[0]);
+              const [b0, b1] = geomSpanOnAxis(p, perpAxes[1]);
+              rCand = Math.sqrt(Math.max(1e-8, ((a1 - a0) * (b1 - b0)) / Math.PI));
+            } else if (p.type === 'mesh' && p.faces && (p.renderVertices || p.vertices)) {
               const ma = analyzeHollowMeshAirway(p);
               if (ma) {
                 const localU = Math.max(0, Math.min(1, (coord - p0) / Math.max(1e-4, p1 - p0)));
@@ -960,6 +1263,20 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
     }
     return out;
   };
+
+  // Auto-detect horns built along -X/-Y/-Z (wide bell at minCoord, narrow mouthpiece at maxCoord)
+  const probe = sampleRawStations(16, false);
+  const rHead = (probe[0] + probe[1] + probe[2]) / 3;
+  const rTail = (probe[15] + probe[14] + probe[13]) / 3;
+  const reversePrimitiveAxis = rHead > rTail * 1.35;
+  if (reversePrimitiveAxis && transverseHoles.length > 0) {
+    transverseHoles = transverseHoles.map((h) => ({
+      ...h,
+      axialFraction: +Math.max(0.08, Math.min(0.96, 1 - h.axialFraction)).toFixed(4),
+    }));
+  }
+
+  const radiiAtStations = (nStations: number): number[] => sampleRawStations(nStations, reversePrimitiveAxis);
 
   return {
     boreAxis,
@@ -996,7 +1313,7 @@ function solveConicalBoreTMM(
 ): TmmSolution {
   const nNodes = radii.length;
   const nSegs = Math.max(1, nNodes - 1);
-  const segLen = totalBoreLengthM / nSegs;
+  const segLen = Math.max(1e-4, totalBoreLengthM) / nSegs;
 
   // Compact cache key on quantized geometry + open holes so steady sustain costs 0.000 ms!
   const rSig = [0, 6, 12, 18, 24, nNodes - 1]
@@ -1040,9 +1357,9 @@ function solveConicalBoreTMM(
   const rBell = Math.max(0.0025, radii[nNodes - 1]);
   const z0Bell = (AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR) / (Math.PI * rBell * rBell);
 
-  const fMin = 55;
+  const fMin = 28;
   const fStep = 4.0;
-  const nFreqs = 560; // 55 Hz .. 2295 Hz at 4 Hz resolution (parabolic peak interpolation -> < 0.2 Hz accuracy!)
+  const nFreqs = 1120; // 28 Hz .. 4504 Hz at 4 Hz resolution (captures bass pedals <63 Hz & short whistles >2.3 kHz!)
   const magNorm = new Array<number>(nFreqs);
 
   for (let m = 0; m < nFreqs; m++) {
@@ -1050,12 +1367,14 @@ function solveConicalBoreTMM(
     const omega = 2 * Math.PI * f;
     const k = omega / SPEED_OF_SOUND_WARM_AIR;
 
-    // Levine–Schwinger unflanged radiation impedance at open bell (+ reactive mute mass when bell is baffled!)
+    // Norris–Sheng rational unflanged pipe radiation impedance:
+    // Exact O((ka)^3) match to Levine–Schwinger at low ka, bounded smoothly (-> Z_0 + 0i) above bell cutoff!
     const ka = k * rBell;
+    const ka2 = ka * ka;
     const muteMassBoost = 1 + 2.4 * muteFactor;
     const muteResistBoost = 1 + 3.5 * muteFactor * muteFactor;
-    let pRe = z0Bell * 0.25 * ka * ka * muteResistBoost;
-    let pIm = z0Bell * 0.6133 * ka * muteMassBoost;
+    let pRe = z0Bell * ((0.25 * ka2) / (1 + 0.25 * ka2)) * muteResistBoost;
+    let pIm = z0Bell * ((0.6133 * ka) / (1 + 0.38 * ka2)) * muteMassBoost;
     let uRe = 1.0;
     let uIm = 0.0;
 
@@ -1086,39 +1405,70 @@ function solveConicalBoreTMM(
       let DRe: number, DIm: number;
 
       if (Math.abs(r1 - r0) < 1e-5) {
-        // Cylindrical limit
         ARe = cRe; AIm = cIm;
         DRe = cRe; DIm = cIm;
-        // B = i * zc01 * s = zc01 * (-sIm + i * sRe)
         BRe = -zc01 * sIm; BIm = zc01 * sRe;
-        // C = (i / zc01) * s
         CRe = -sIm / zc01; CIm = sRe / zc01;
       } else {
-        // Exact spherical-wave conical frustum (Caussé et al. 1984)
+        // Exact spherical-wave conical frustum (Caussé et al. 1984) using FULL complex `1 / k_tilde`
+        // so the O(1 / (k_tilde * x0)) singularity cancels identically without 1,300x imaginary loss blowup!
         const dr = r1 - r0;
         const x0 = (r0 * segLen) / dr;
         const x1 = x0 + segLen;
-        // Approximate 1 / k_tilde ≈ 1 / k (since alpha / k < 0.01) for spherical curvature terms
-        const invKx0 = 1 / (k * x0);
-        const invKx1 = 1 / (k * x1);
-        const invK2x01 = invKx0 * invKx1;
 
-        ARe = (x1 / x0) * cRe - invKx0 * sRe;
-        AIm = (x1 / x0) * cIm - invKx0 * sIm;
+        if (Math.abs(k * x0) < 1e-3 || Math.abs(k * x1) < 1e-3) {
+          const zRe = kL, zIm = -aL;
+          const z2Re = zRe * zRe - zIm * zIm;
+          const z2Im = 2 * zRe * zIm;
+          const aCoef = (3 * x1 - segLen) / (6 * x0);
+          const dCoef = (3 * x0 + segLen) / (6 * x1);
+          ARe = 1 - aCoef * z2Re;
+          AIm = -aCoef * z2Im;
+          DRe = 1 - dCoef * z2Re;
+          DIm = -dCoef * z2Im;
+          BRe = -zc01 * sIm;
+          BIm = zc01 * sRe;
+          const volFactor = 1 + (segLen * segLen) / (3 * x0 * x1);
+          const mRe = zRe * volFactor;
+          const mIm = zIm * volFactor;
+          CRe = -mIm / zc01;
+          CIm = mRe / zc01;
+        } else {
+          const kMagSq = k * k + alpha * alpha;
+          // 1 / k_tilde = (k + i * alpha) / (k^2 + alpha^2)
+          const invKx0Re = k / (kMagSq * x0);
+          const invKx0Im = alpha / (kMagSq * x0);
+          const invKx1Re = k / (kMagSq * x1);
+          const invKx1Im = alpha / (kMagSq * x1);
 
-        DRe = (x0 / x1) * cRe + invKx1 * sRe;
-        DIm = (x0 / x1) * cIm + invKx1 * sIm;
+          // invKx0 * s
+          const q0Re = invKx0Re * sRe - invKx0Im * sIm;
+          const q0Im = invKx0Re * sIm + invKx0Im * sRe;
+          ARe = (x1 / x0) * cRe - q0Re;
+          AIm = (x1 / x0) * cIm - q0Im;
 
-        BRe = -zc01 * sIm;
-        BIm = zc01 * sRe;
+          // invKx1 * s
+          const q1Re = invKx1Re * sRe - invKx1Im * sIm;
+          const q1Im = invKx1Re * sIm + invKx1Im * sRe;
+          DRe = (x0 / x1) * cRe + q1Re;
+          DIm = (x0 / x1) * cIm + q1Im;
 
-        // M = (1 + 1/(k² x0 x1)) * s - (L / (k x0 x1)) * c, then C = (i / zc01) * M
-        const k1 = 1 + invK2x01;
-        const k2 = segLen / (k * x0 * x1);
-        const mRe = k1 * sRe - k2 * cRe;
-        const mIm = k1 * sIm - k2 * cIm;
-        CRe = -mIm / zc01;
-        CIm = mRe / zc01;
+          BRe = -zc01 * sIm;
+          BIm = zc01 * sRe;
+
+          // M = (1 + invKx0 * invKx1) * s - (segLen / x1) * invKx0 * c
+          const invK2Re = invKx0Re * invKx1Re - invKx0Im * invKx1Im;
+          const invK2Im = invKx0Re * invKx1Im + invKx0Im * invKx1Re;
+          const k1Re = 1 + invK2Re;
+          const k1Im = invK2Im;
+          const k2Re = (segLen / x1) * invKx0Re;
+          const k2Im = (segLen / x1) * invKx0Im;
+
+          const mRe = (k1Re * sRe - k1Im * sIm) - (k2Re * cRe - k2Im * cIm);
+          const mIm = (k1Re * sIm + k1Im * sRe) - (k2Re * cIm + k2Im * cRe);
+          CRe = -mIm / zc01;
+          CIm = mRe / zc01;
+        }
       }
 
       const nextPRe = ARe * pRe - AIm * pIm + (BRe * uRe - BIm * uIm);
@@ -1137,8 +1487,8 @@ function solveConicalBoreTMM(
         for (const h of holes) {
           const z0Hole = (AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR) / (Math.PI * h.rHoleM * h.rHoleM);
           const kh = k * h.rHoleM;
-          // Radiation + vortex boundary resistance + acoustic inertance i * k * t_eff / open
-          const zHoleRe = z0Hole * (0.25 * kh * kh + 0.018 / Math.max(0.15, h.open));
+          const kh2 = kh * kh;
+          const zHoleRe = z0Hole * ((0.25 * kh2) / (1 + 0.25 * kh2) + 0.018 / Math.max(0.15, h.open));
           const zHoleIm = z0Hole * ((k * h.tEffM) / Math.max(0.08, h.open));
           const denom = zHoleRe * zHoleRe + zHoleIm * zHoleIm + 1e-18;
           const yRe = zHoleRe / denom;
@@ -1149,12 +1499,13 @@ function solveConicalBoreTMM(
       }
     }
 
-    // Input impedance Z_in = p / U (for reed/lip pressure-controlled valve) or admittance Y_in = U / p (for open flute!)
     if (isOpenInputFlute) {
-      // Open-open air-jet flute resonates at admittance peaks (impedance minima): add embouchure end-correction
       const km = k * rMouth;
-      pRe += (z0Mouth * 0.25 * km * km) * uRe - (z0Mouth * 0.85 * km) * uIm;
-      pIm += (z0Mouth * 0.25 * km * km) * uIm + (z0Mouth * 0.85 * km) * uRe;
+      const km2 = km * km;
+      const zEmbRe = z0Mouth * ((0.25 * km2) / (1 + 0.25 * km2));
+      const zEmbIm = z0Mouth * ((0.85 * km) / (1 + 0.45 * km2));
+      pRe += zEmbRe * uRe - zEmbIm * uIm;
+      pIm += zEmbRe * uIm + zEmbIm * uRe;
       const pMag = Math.hypot(pRe, pIm) + 1e-12;
       const uMag = Math.hypot(uRe, uIm);
       magNorm[m] = (uMag * z0Mouth) / pMag;
@@ -1177,8 +1528,8 @@ function solveConicalBoreTMM(
       const delta = Math.abs(denom) > 1e-9 ? Math.max(-0.5, Math.min(0.5, (0.5 * (y0 - y2)) / denom)) : 0;
       const fPeak = fMin + (m + delta) * fStep;
       const pkVal = y1 - 0.25 * (y0 - y2) * delta;
-      // Enforce minimum spacing between distinct longitudinal modes
-      if (peaksHz.length === 0 || fPeak - peaksHz[peaksHz.length - 1] > 38) {
+      const minSpacingHz = Math.max(18, Math.min(38, (peaksHz[0] ?? fPeak) * 0.55));
+      if (peaksHz.length === 0 || fPeak - peaksHz[peaksHz.length - 1] > minSpacingHz) {
         peaksHz.push(+fPeak.toFixed(2));
         peaksMag.push(+pkVal.toFixed(3));
       } else if (pkVal > peaksMag[peaksMag.length - 1]) {
@@ -1196,13 +1547,32 @@ function solveConicalBoreTMM(
 
 function sampleImpedanceAt(grid: { fMin: number; fStep: number; magNorm: number[] }, fHz: number): number {
   const arr = grid.magNorm;
-  if (arr.length === 0) return 1;
-  const pos = (fHz - grid.fMin) / grid.fStep;
+  if (arr.length === 0 || !Number.isFinite(fHz)) return 1;
+  const pos = (fHz - grid.fMin) / Math.max(1e-6, grid.fStep);
   if (pos <= 0) return arr[0];
-  if (pos >= arr.length - 1) return arr[arr.length - 1];
+  if (pos >= arr.length - 1) {
+    const fMax = grid.fMin + (arr.length - 1) * grid.fStep;
+    const decay = Math.exp(-Math.max(0, fHz - fMax) / 1800);
+    return 1 + (arr[arr.length - 1] - 1) * decay;
+  }
   const i0 = Math.floor(pos);
   const frac = pos - i0;
   return arr[i0] * (1 - frac) + arr[i0 + 1] * frac;
+}
+
+function collectSubtreeJoints(node: SceneNode, map = new Map<string, SceneJoint>()): Map<string, SceneJoint> {
+  for (const j of node.joints ?? []) {
+    if (j.name) map.set(j.name, j);
+  }
+  for (const ch of node.children ?? []) {
+    collectSubtreeJoints(ch, map);
+  }
+  return map;
+}
+
+function smoothBlend(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-9, edge1 - edge0)));
+  return t * t * (3 - 2 * t);
 }
 
 // ---------------------------------------------------------------------------
@@ -1222,15 +1592,29 @@ export function extractBoreWaveguide(
   const spec: WindInstrumentSpec | undefined = node.windInstrument;
   if (!spec) return null;
 
+  const sr = Number.isFinite(sampleRate) && sampleRate > 8000 ? sampleRate : DEFAULT_SAMPLE_RATE;
   const slice = inspectNodeBoreGeometry(node);
-  const dxCell = SPEED_OF_SOUND_WARM_AIR / sampleRate;
+  const dxCell = SPEED_OF_SOUND_WARM_AIR / sr;
+
+  const jointByName = (spec.valveJoints?.length || spec.toneholeJoints?.length) ? collectSubtreeJoints(node) : null;
+  const resolveJointTravel = (rawQ: number, jDef?: SceneJoint): number => {
+    if (!Number.isFinite(rawQ)) return 0;
+    if (jDef?.range) {
+      const r0 = jDef.range[0] ?? 0;
+      const r1 = jDef.range[1] ?? 0;
+      if (r0 >= -1e-4 && r1 > 0) return Math.max(0, rawQ);
+      if (r1 <= 1e-4 && r0 < 0) return Math.max(0, -rawQ);
+    }
+    return Math.abs(rawQ);
+  };
 
   // Compute extra tubing length switched in by depressed brass piston/rotary valves (2^(semitones/12))
   let valveLengthRatio = 1.0;
   if (spec.valveJoints?.length && jointPositions) {
     let totalSemitones = 0;
     for (const vj of spec.valveJoints) {
-      const qVal = Math.abs(jointPositions[vj.jointName] ?? 0);
+      const rawQ = jointPositions[vj.jointName] ?? 0;
+      const qVal = resolveJointTravel(rawQ, jointByName?.get(vj.jointName));
       const fullStroke = Math.max(0.003, vj.strokeM ?? 0.012);
       const engage = Math.max(0, Math.min(1, (qVal - fullStroke * 0.35) / (fullStroke * 0.40)));
       totalSemitones += vj.semitones * engage;
@@ -1257,11 +1641,11 @@ export function extractBoreWaveguide(
     ? Math.min(...rawRadii.slice(-5))
     : (rawRadii[rawRadii.length - 1] ?? mouthRadiusM);
 
-  // Valve tubing inserts cylindrical valve-slide loops in the narrow neck/body section
   const baseBoreLengthM = rawBoreLengthM * valveLengthRatio;
-  const acousticLengthM = baseBoreLengthM + 0.61 * bellRadiusM;
-  const exactCells = Math.max(8, Math.min(178, acousticLengthM / dxCell));
-  const cellCount = Math.max(8, Math.min(178, Math.floor(exactCells)));
+  const embEndCorrM = spec.exciter === 'flute_jet' ? 0.85 * mouthRadiusM : 0;
+  const acousticLengthM = baseBoreLengthM + 0.61 * bellRadiusM + embEndCorrM;
+  const exactCells = Math.max(8, Math.min(MAX_WAVEGUIDE_CELLS, acousticLengthM / dxCell));
+  const cellCount = Math.max(8, Math.min(MAX_WAVEGUIDE_CELLS, Math.floor(exactCells)));
 
   const cellRadii = (!node.sculptEdited && spec.mouthRadiusM !== undefined && spec.bellRadiusM !== undefined)
     ? Array.from({ length: cellCount }, (_, k) => {
@@ -1292,7 +1676,6 @@ export function extractBoreWaveguide(
         ? 'flared_horn'
         : 'conical';
 
-  // Combine BOTH articulated keywork toneholes AND 3D geometry holes (sculpted holes + boolean cuts)!
   const toneholes: ToneholeStation[] = [];
   if (spec.toneholeJoints?.length) {
     for (const th of spec.toneholeJoints) {
@@ -1304,10 +1687,21 @@ export function extractBoreWaveguide(
       const kRef = (2 * Math.PI * 300) / SPEED_OF_SOUND_WARM_AIR;
       const zRatio = (kRef * tEff * rBore * rBore) / (rHole * rHole);
       const shunt = -1 / (1 + 2 * zRatio);
-      const qVal = jointPositions && th.jointName ? Math.abs(jointPositions[th.jointName] ?? 0) : 0;
-      const openAmount = jointPositions
-        ? Math.max(0, Math.min(1, (qVal - 0.015) / 0.065))
-        : 0;
+      const jDef = th.jointName ? jointByName?.get(th.jointName) : undefined;
+      const rawQ = jointPositions && th.jointName ? jointPositions[th.jointName] ?? 0 : 0;
+      const qVal = resolveJointTravel(rawQ, jDef);
+      let openAmount = 0;
+      if (jointPositions) {
+        if (jDef?.type === 'slide') {
+          const maxRange = jDef.range
+            ? Math.max(Math.abs(jDef.range[0] ?? 0), Math.abs(jDef.range[1] ?? 0))
+            : 0.004;
+          const stroke = Math.max(0.0015, maxRange || 0.004);
+          openAmount = Math.max(0, Math.min(1, (qVal - stroke * 0.12) / (stroke * 0.53)));
+        } else {
+          openAmount = Math.max(0, Math.min(1, (qVal - 0.015) / 0.065));
+        }
+      }
       toneholes.push({
         cellIndex: cellIdx,
         axialFraction: frac,
@@ -1339,8 +1733,6 @@ export function extractBoreWaveguide(
   }
   toneholes.sort((a, b) => a.cellIndex - b.cellIndex);
 
-  // Solve the exact 1D conical acoustic transfer matrix across the 3D cross-sections + open holes!
-  // For valved horns, extra cylindrical valve tubing inserts before the bell flare (~first 55% of bore).
   const tmm = solveConicalBoreTMM(
     rawRadii,
     baseBoreLengthM,
@@ -1370,6 +1762,7 @@ export function extractBoreWaveguide(
     bellRadiusM: +bellRadiusM.toFixed(5),
     cellCount,
     exactCells: +exactCells.toFixed(4),
+    sampleRate: sr,
     junctionK,
     bellCutoffHz,
     boreShape,
@@ -1424,7 +1817,7 @@ export interface SolvedPlayableWindVoice {
 /**
  * Pure physical acoustics solver mapping a bore's TMM input-impedance curve
  * `Z_in(f)`, `resonantModesHz`, `muteFactor`, and `breachFactor` to its locked
- * playing frequency and radiated harmonic Fourier spectrum `H_1..H_10`.
+ * playing frequency and radiated harmonic Fourier spectrum `H_1..H_N`.
  */
 export function solvePlayableWindVoice(
   bore: PlayableWindVoiceInput,
@@ -1432,12 +1825,15 @@ export function solvePlayableWindVoice(
   embouchureHz: number,
 ): SolvedPlayableWindVoice {
   const bShape = bore.boreShape ?? (bore.exciter === 'brass_lip' ? 'flared_horn' : 'cylindrical');
-  const mute = Math.max(0, Math.min(1, bore.muteFactor ?? 0));
-  const breach = Math.max(0, Math.min(1, bore.breachFactor ?? 0));
+  const rawMute = bore.muteFactor ?? 0;
+  const rawBreach = bore.breachFactor ?? 0;
+  const mute = Number.isFinite(rawMute) ? Math.max(0, Math.min(1, rawMute)) : 0;
+  const breach = Number.isFinite(rawBreach) ? Math.max(0, Math.min(1, rawBreach)) : 0;
 
-  let modes = bore.resonantModesHz && bore.resonantModesHz.length > 0 ? bore.resonantModesHz : [];
+  let modes = (bore.resonantModesHz ?? []).filter((m) => Number.isFinite(m) && m > 16);
   if (modes.length === 0) {
-    const cells = Math.max(8, bore.exactCells ?? bore.cellCount ?? 32);
+    const rawCells = bore.exactCells ?? bore.cellCount ?? 32;
+    const cells = Number.isFinite(rawCells) && rawCells > 0 ? Math.max(8, rawCells) : 32;
     const effLenM = (cells * SPEED_OF_SOUND_WARM_AIR) / DEFAULT_SAMPLE_RATE;
     if (bore.exciter === 'flute_jet' || bShape !== 'cylindrical') {
       const fBase = SPEED_OF_SOUND_WARM_AIR / (2 * effLenM);
@@ -1448,9 +1844,9 @@ export function solvePlayableWindVoice(
     }
   }
 
-  // An unsealed breach/hole lowers |Z_in|, requiring slightly higher threshold breath pressure to speak
+  const safeBreath = Number.isFinite(breathKPa) ? breathKPa : 0;
   const thresholdKPa = 0.22 + 0.18 * breach;
-  if (!(breathKPa > thresholdKPa) || modes.length === 0) {
+  if (!(safeBreath > thresholdKPa) || modes.length === 0) {
     return {
       active: false,
       pitchHz: modes[0] ?? 261.63,
@@ -1467,26 +1863,29 @@ export function solvePlayableWindVoice(
     };
   }
 
-  const bNorm = Math.max(0, Math.min(1.35, (breathKPa - thresholdKPa) / 3.8));
-  const embHz = Math.max(16, Math.min(2400, embouchureHz || 330));
+  const bNorm = Math.max(0, Math.min(1.35, (safeBreath - thresholdKPa) / 3.8));
+  const defaultEmb = bore.exciter === 'flap_valve' ? 55 : 330;
+  const embHz = Math.max(
+    16,
+    Math.min(2400, Number.isFinite(embouchureHz) && embouchureHz > 0 ? embouchureHz : defaultEmb),
+  );
 
   let modeIdx = 0;
   let pitchHz: number;
   let autonomousFlap = 0;
 
-  if (bore.exciter === 'brass_lip') {
+  if (bore.exciter === 'flap_valve') {
+    autonomousFlap = 1.0;
+    pitchHz = embHz;
+  } else if (bore.exciter === 'brass_lip') {
     const fBore1 = modes[0] ?? 330;
-    // Fletcher / Cullen aero-elastic transition:
-    // When lip natural frequency f_lip << lowest bore acoustic resonance f_bore,1 (e.g. buzzing a short
-    // mouthpiece, rubber spout, or compliant flap valve whose tube is shorter than a quarter-wavelength!),
-    // standing-wave entrainment vanishes and the valve oscillates autonomously at f_lip as a relaxation slap-train!
     autonomousFlap = Math.max(0, Math.min(1, (0.68 * fBore1 - embHz) / Math.max(10, 0.32 * fBore1)));
 
     let bestScore = -Infinity;
     for (let i = 0; i < modes.length; i++) {
       const distOct = Math.abs(Math.log2(modes[i] / embHz));
-      // Weight proximity to lip frequency + TMM impedance peak strength (weak breached peaks are harder to slot!)
-      const peakStrength = bore.modeImpedancePeaks?.[i] ?? 8;
+      const rawPeak = bore.modeImpedancePeaks?.[i];
+      const peakStrength = Number.isFinite(rawPeak) ? rawPeak! : 8;
       const score = -distOct * 4.5 + 0.18 * Math.log2(Math.max(1.2, peakStrength));
       if (score > bestScore) {
         bestScore = score;
@@ -1509,73 +1908,73 @@ export function solvePlayableWindVoice(
     pitchHz = modes[modeIdx];
   }
 
-  pitchHz = Math.max(16, Math.min(3500, pitchHz));
-  const bellCut = Math.max(420, Math.min(8000, bore.bellCutoffHz || 1500));
+  pitchHz = Math.max(16, Math.min(3500, Number.isFinite(pitchHz) ? pitchHz : 261.63));
+  const rawBellCut = bore.bellCutoffHz;
+  const bellCut = Math.max(420, Math.min(8000, Number.isFinite(rawBellCut) && rawBellCut > 0 ? rawBellCut : 1500));
 
-  // Compute real harmonic regeneration weights H_1..H_N directly from the bore's TMM impedance curve Z_in(n * f_0)!
-  // In the sub-resonant autonomous slap-valve regime (autonomousFlap > 0.2), sharp mucosal/rubber closure
-  // excites up to 40 harmonics shaped by the short spout's vocal-tract formant resonance `modes[0]`!
-  // In the sub-resonant autonomous slap-valve regime (autonomousFlap > 0.2), Rosenberg asymmetric
-  // mucosal/rubber sawtooth-pulse closure excites 24..28 harmonics with low crest factor (loud, meaty buzz!)
-  const nMaxHarm = autonomousFlap > 0.2 ? 26 : 10;
+  const flapBlend = bore.exciter === 'flap_valve' ? 1.0 : smoothBlend(0.05, 0.45, autonomousFlap);
+  const nMaxHarm = flapBlend > 0.001 ? 26 : 10;
   const harmonicWeights: number[] = [];
+  const rawPeakFund = bore.modeImpedancePeaks?.[modeIdx];
   const zFund = bore.impedanceGrid
     ? Math.max(1.5, sampleImpedanceAt(bore.impedanceGrid, pitchHz))
-    : (bore.modeImpedancePeaks?.[modeIdx] ?? 10);
+    : (Number.isFinite(rawPeakFund) ? rawPeakFund! : 10);
 
-  // Reduced impedance Q from a wall breach weakens nonlinear harmonic lock on entrained horns,
-  // while autonomous relaxation valves are driven directly by upstream pressure!
   const hornQHealth = Math.max(0.35, Math.min(1.15, Math.log10(1 + zFund) / 1.15)) * (1 - 0.24 * breach);
-  const qHealth = (1 - autonomousFlap) * hornQHealth + autonomousFlap * (0.98 - 0.10 * breach);
+  const qHealth = (1 - flapBlend) * hornQHealth + flapBlend * (0.98 - 0.10 * breach);
   const spoutFormantHz = Math.max(420, Math.min(1350, (modes[0] ?? 760) * 0.78));
 
   for (let n = 1; n <= nMaxHarm; n++) {
     const fn = n * pitchHz;
-    if (autonomousFlap > 0.2) {
-      // Rosenberg asymmetric mucosal relaxation sawtooth-pulse (1 / n^0.52) -> rich, fat low-mid buzz
-      // without the -15 dB WebAudio peak-normalization loss of a 44-term zero-phase spike!
+    // Flap-valve Rosenberg sawtooth-pulse spectrum
+    let wFlap = 0;
+    if (flapBlend > 0.001) {
       const sawPulse = Math.pow(n, -0.50) * Math.exp(-0.0028 * (n - 1) * (n - 1));
       const df = (fn - spoutFormantHz) / (spoutFormantHz * (0.48 + 0.25 * breach));
       const formantBoost = 1 + 1.6 * Math.exp(-0.5 * df * df);
-      const zn = bore.impedanceGrid ? sampleImpedanceAt(bore.impedanceGrid, Math.min(2290, fn)) : 2.5;
+      const zn = bore.impedanceGrid ? sampleImpedanceAt(bore.impedanceGrid, fn) : 2.5;
       const tmmShape = 0.72 + 0.28 * Math.min(1.5, zn / 3.0);
-      const muteTilt = mute > 0.02
+      const muteTiltFlap = mute > 0.02
         ? (n <= 2 ? 1 - 0.55 * mute : 1 + 0.9 * mute * Math.exp(-0.03 * (n - 7) * (n - 7)))
         : 1.0;
-      const w = sawPulse * formantBoost * tmmShape * muteTilt;
-      harmonicWeights.push(+Math.max(0.003, w).toFixed(4));
-      continue;
+      wFlap = Math.max(0.003, sawPulse * formantBoost * tmmShape * muteTiltFlap);
     }
 
-    let zCoop: number;
-    if (bore.impedanceGrid) {
-      const zn = sampleImpedanceAt(bore.impedanceGrid, fn);
-      zCoop = Math.min(1.45, zn / Math.max(2.0, zFund));
-    } else if (bShape === 'cylindrical' && bore.exciter === 'reed') {
-      zCoop = n % 2 === 1 ? 1.0 / Math.sqrt(n) : 0.06;
-    } else {
-      zCoop = 1.0 / Math.pow(n, 0.45);
+    // Entrained bore-mode harmonic spectrum
+    let wBore = 0;
+    if (flapBlend < 0.999) {
+      let zCoop: number;
+      if (bore.impedanceGrid) {
+        const zn = sampleImpedanceAt(bore.impedanceGrid, fn);
+        zCoop = Math.min(1.45, zn / Math.max(2.0, zFund));
+      } else if (bShape === 'cylindrical' && bore.exciter === 'reed') {
+        zCoop = n % 2 === 1 ? 1.0 / Math.sqrt(n) : 0.06;
+      } else {
+        zCoop = 1.0 / Math.pow(n, 0.45);
+      }
+
+      const exciterFalloff =
+        bore.exciter === 'flute_jet'
+          ? Math.pow(n, -1.85)
+          : bore.exciter === 'brass_lip'
+            ? Math.exp((-0.085 * (n - 1) * (n - 1)) / Math.max(0.45, 0.55 + 0.65 * bNorm))
+            : Math.pow(n, -1.05);
+
+      const radHighpass = fn / Math.hypot(fn, bellCut * (0.48 - 0.15 * breach));
+      const muteTiltBore = mute > 0.02
+        ? (n === 1 ? 1 - 0.52 * mute : 1 + mute * 1.15 * Math.exp(-0.18 * (n - 3.5) * (n - 3.5)))
+        : 1.0;
+
+      const rawWBore = n === 1
+        ? Math.max(0.25, muteTiltBore)
+        : exciterFalloff * (0.16 + 0.95 * zCoop) * (0.55 + 0.65 * radHighpass) * muteTiltBore;
+      wBore = n <= 10 ? Math.max(0.001, rawWBore) : rawWBore * Math.exp(-0.4 * (n - 10));
     }
 
-    const exciterFalloff =
-      bore.exciter === 'flute_jet'
-        ? Math.pow(n, -1.85)
-        : bore.exciter === 'brass_lip'
-          ? Math.exp(-0.085 * (n - 1) * (n - 1) / Math.max(0.45, 0.55 + 0.65 * bNorm))
-          : Math.pow(n, -1.05);
-
-    const radHighpass = fn / Math.hypot(fn, bellCut * (0.48 - 0.15 * breach));
-    const muteTilt = mute > 0.02
-      ? (n === 1 ? 1 - 0.52 * mute : 1 + mute * 1.15 * Math.exp(-0.18 * (n - 3.5) * (n - 3.5)))
-      : 1.0;
-
-    const w = n === 1
-      ? Math.max(0.25, muteTilt)
-      : exciterFalloff * (0.16 + 0.95 * zCoop) * (0.55 + 0.65 * radHighpass) * muteTilt;
+    const w = (1 - flapBlend) * wBore + flapBlend * wFlap;
     harmonicWeights.push(+Math.max(0.001, w).toFixed(4));
   }
 
-  // Normalize harmonicWeights so max weight = 1.0
   const maxW = Math.max(1e-6, ...harmonicWeights);
   for (let i = 0; i < harmonicWeights.length; i++) {
     harmonicWeights[i] = +(harmonicWeights[i] / maxW).toFixed(4);
@@ -1584,53 +1983,79 @@ export function solvePlayableWindVoice(
   const rawBlowAmp = 0.24 * Math.tanh(bNorm * 1.35);
   const amp = rawBlowAmp * qHealth * (1 - 0.20 * mute);
 
-  if (bore.exciter === 'brass_lip') {
-    if (autonomousFlap > 0.2) {
-      // Autonomous compliant slap-valve + wet resonant formant squelch:
-      // Center formant tracks pressure & pitch across 340..1150 Hz ("bwww-ooww-wah-squelch"!) with high Q!
-      const dynamicVowelHz = Math.max(320, Math.min(1280, spoutFormantHz * (0.55 + 0.58 * bNorm) + pitchHz * 1.1));
-      const formantHz = dynamicVowelHz * (1 - 0.35 * mute) + 1650 * (0.35 * mute);
-      const squelchCutoffHz = Math.max(380, Math.min(1650, formantHz * (1.05 + 0.45 * bNorm + 0.25 * breach)));
+  if (bore.exciter === 'brass_lip' || bore.exciter === 'flap_valve') {
+    // Entrained brass parameters
+    const brassBaseFormant = Math.max(720, Math.min(1280, 520 + pitchHz * 1.35));
+    const brassFormantHz = brassBaseFormant * (1 - mute) + Math.min(2250, brassBaseFormant * 1.85) * mute;
+    const brassAmp = amp * 1.08;
+    const brassDrive = 0.54 + 0.34 * bNorm * qHealth;
+    const brassFormantDb = 5.0 + 4.5 * mute - 1.5 * breach;
+    const brassFormantQ = 1.2 + 2.2 * mute;
+    const brassBellLpHz = Math.max(
+      620,
+      Math.min(2850, Math.min(bellCut * (1.9 + 0.6 * mute + 0.4 * breach), pitchHz * (1.75 + 2.8 * bNorm))),
+    );
+    const brassBellQ = 1.05 + 1.1 * mute;
+    const brassNoise = rawBlowAmp * (0.016 + 0.16 * breach + 0.04 * mute);
+
+    if (flapBlend <= 0.001) {
       return {
         active: true,
         pitchHz: +pitchHz.toFixed(2),
-        modeIndex: 0,
-        amplitude: +(Math.min(0.42, rawBlowAmp * 1.65) * (1 - 0.15 * mute)).toFixed(4),
-        drive: +(1.25 + 0.75 * bNorm).toFixed(4),
-        formantHz: +formantHz.toFixed(1),
-        formantGainDb: +(11.5 + 3.0 * mute).toFixed(2),
-        formantQ: +(4.8 + 2.2 * mute).toFixed(2),
-        bellLowpassHz: +squelchCutoffHz.toFixed(1),
-        bellQ: +(3.6 + 1.4 * mute).toFixed(2),
-        // Very low broadband wind hiss — real compliant flap-valves are dominated by wet resonant buzz & squelch!
-        noiseGain: +(rawBlowAmp * (0.004 + 0.018 * breach)).toFixed(5),
-        phaseCoherence: +autonomousFlap.toFixed(3),
-        puffGateDepth: +(rawBlowAmp * (0.022 + 0.035 * breach) * autonomousFlap).toFixed(4),
-        flutterHz: +(13.5 + 10.5 * bNorm).toFixed(2),
-        flutterFrac: +(0.11 * autonomousFlap * (0.55 + 0.65 * bNorm)).toFixed(4),
-        squelchRateHz: +(9.5 + 14.0 * bNorm).toFixed(2),
-        squelchSweepHz: +((220 + 340 * bNorm) * autonomousFlap).toFixed(1),
+        modeIndex: modeIdx,
+        amplitude: +brassAmp.toFixed(4),
+        drive: +brassDrive.toFixed(4),
+        formantHz: +brassFormantHz.toFixed(1),
+        formantGainDb: +brassFormantDb.toFixed(2),
+        formantQ: +brassFormantQ.toFixed(2),
+        bellLowpassHz: +brassBellLpHz.toFixed(1),
+        bellQ: +brassBellQ.toFixed(2),
+        noiseGain: +brassNoise.toFixed(5),
+        phaseCoherence: 0,
+        puffGateDepth: 0,
         harmonicWeights,
       };
     }
 
-    // Muting shifts formant upward into nasal 1.6..2.2 kHz band with sharper Q; side breaches add airy leak turbulence!
-    const baseFormant = Math.max(720, Math.min(1280, 520 + pitchHz * 1.35));
-    const formantHz = baseFormant * (1 - mute) + Math.min(2250, baseFormant * 1.85) * mute;
+    // Autonomous compliant slap-valve + wet resonant formant squelch:
+    // Enforce >= 1.28x cutoff separation and bound squelchSweepHz so modulated biquad frequency stays >= 110 Hz!
+    const dynamicVowelHz = Math.max(360, Math.min(1280, spoutFormantHz * (0.55 + 0.58 * bNorm) + pitchHz * 1.1));
+    const flapFormantHz = dynamicVowelHz * (1 - 0.35 * mute) + 1650 * (0.35 * mute);
+    const flapCutoffHz = Math.max(
+      Math.max(480, flapFormantHz * 1.28),
+      Math.min(1850, flapFormantHz * (1.28 + 0.35 * bNorm + 0.22 * breach)),
+    );
+    const flapAmp = Math.min(0.42, rawBlowAmp * 1.65) * (1 - 0.15 * mute);
+    const flapDrive = 1.25 + 0.75 * bNorm;
+    const flapFormantDb = 11.5 + 3.0 * mute;
+    const flapFormantQ = 4.8 + 2.2 * mute;
+    const flapBellQ = 2.2 + 0.9 * mute;
+    const flapNoise = rawBlowAmp * (0.004 + 0.018 * breach);
+
+    const outFormantHz = (1 - flapBlend) * brassFormantHz + flapBlend * flapFormantHz;
+    const outBellLpHz = (1 - flapBlend) * brassBellLpHz + flapBlend * flapCutoffHz;
+    const rawSweepHz = (220 + 340 * bNorm) * flapBlend;
+    const safeMaxSweepHz = Math.max(0, Math.min(outFormantHz, outBellLpHz) - 110);
+    const outSquelchSweepHz = Math.min(rawSweepHz, safeMaxSweepHz);
+
     return {
       active: true,
       pitchHz: +pitchHz.toFixed(2),
-      modeIndex: modeIdx,
-      amplitude: +(amp * 1.08).toFixed(4),
-      drive: +(0.54 + 0.34 * bNorm * qHealth).toFixed(4),
-      formantHz: +formantHz.toFixed(1),
-      formantGainDb: +(5.0 + 4.5 * mute - 1.5 * breach).toFixed(2),
-      formantQ: +(1.2 + 2.2 * mute).toFixed(2),
-      bellLowpassHz: +Math.max(620, Math.min(2850, Math.min(bellCut * (1.9 + 0.6 * mute + 0.4 * breach), pitchHz * (1.75 + 2.8 * bNorm)))).toFixed(1),
-      bellQ: +(1.05 + 1.1 * mute).toFixed(2),
-      noiseGain: +(rawBlowAmp * (0.016 + 0.16 * breach + 0.04 * mute)).toFixed(5),
-      phaseCoherence: 0,
-      puffGateDepth: 0,
+      modeIndex: flapBlend > 0.5 ? 0 : modeIdx,
+      amplitude: +((1 - flapBlend) * brassAmp + flapBlend * flapAmp).toFixed(4),
+      drive: +((1 - flapBlend) * brassDrive + flapBlend * flapDrive).toFixed(4),
+      formantHz: +outFormantHz.toFixed(1),
+      formantGainDb: +((1 - flapBlend) * brassFormantDb + flapBlend * flapFormantDb).toFixed(2),
+      formantQ: +((1 - flapBlend) * brassFormantQ + flapBlend * flapFormantQ).toFixed(2),
+      bellLowpassHz: +outBellLpHz.toFixed(1),
+      bellQ: +((1 - flapBlend) * brassBellQ + flapBlend * flapBellQ).toFixed(2),
+      noiseGain: +((1 - flapBlend) * brassNoise + flapBlend * flapNoise).toFixed(5),
+      phaseCoherence: +flapBlend.toFixed(3),
+      puffGateDepth: +(rawBlowAmp * (0.022 + 0.035 * breach) * flapBlend).toFixed(4),
+      flutterHz: +((1 - flapBlend) * 5.0 + flapBlend * (13.5 + 10.5 * bNorm)).toFixed(2),
+      flutterFrac: +(0.11 * flapBlend * (0.55 + 0.65 * bNorm)).toFixed(4),
+      squelchRateHz: +(9.5 + 14.0 * bNorm).toFixed(2),
+      squelchSweepHz: +outSquelchSweepHz.toFixed(1),
       harmonicWeights,
     };
   }

@@ -282,9 +282,9 @@ export const windInstrumentsPreset: SceneGraph = (() => {
         type: 'hinge',
         axis: [1, 0, 0],
         pos: [0, 0, 0],
-        stiffness: 1.8,
+        stiffness: 4.5,
         springref: 0,
-        damping: 0.08,
+        damping: 0.018,
         limited: true,
         range: [0, 22],
       },
@@ -421,10 +421,10 @@ if (tCycle < 6.40) {
   }
   const st = api.state || (api.state = {});
   st.breathKPa = env;
-  if (mask & 1) api.applyJointForce('clarinet_key_1', 0.65);
-  if (mask & 2) api.applyJointForce('clarinet_key_2', 0.65);
-  if (mask & 4) api.applyJointForce('clarinet_key_3', 0.65);
-  if (mask & 8) api.applyJointForce('clarinet_key_4', 0.65);
+  if (mask & 1) api.applyJointForce('clarinet_key_1', 1.35);
+  if (mask & 2) api.applyJointForce('clarinet_key_2', 1.35);
+  if (mask & 4) api.applyJointForce('clarinet_key_3', 1.35);
+  if (mask & 8) api.applyJointForce('clarinet_key_4', 1.35);
 } else if (tCycle >= 12.10 && tCycle < 12.82) {
   // Warm low G3 tonic harmony under the cornet's final G4 cadence!
   const u = (tCycle - 12.10) / 0.72;
