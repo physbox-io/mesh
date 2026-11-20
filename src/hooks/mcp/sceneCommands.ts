@@ -327,7 +327,11 @@ export const sceneCommands: McpCommands = {
     const dynamicNow = dynamic ?? (replacing ? replacing.geoms?.[0]?.dynamic !== false && (replacing.joints?.length ?? 0) > 0 : undefined);
     let parsed: ReturnType<typeof parseSTL>;
     try {
-      parsed = parseSTL(data, { name: baseName, scale });
+      // Recentred as the import dialog does (footprint centre at the origin,
+      // underside at z = 0): an STL keeps whatever origin its CAD gave it, and
+      // a part modelled 1 m off its origin came in floating 1 m up. A
+      // replacement keeps the file's own frame, as the body it replaces did.
+      parsed = parseSTL(data, { name: baseName, scale, recentre: !replacing });
     } catch (e) {
       return { ok: false, error: `Could not read the STL: ${(e as Error)?.message || String(e)}` };
     }
@@ -430,7 +434,12 @@ export const sceneCommands: McpCommands = {
     } else {
       // Given no pos, it stands on the floor at the origin, stepped aside
       // past anything already there.
-      if (!(Array.isArray(pos) && pos.length === 3)) newNode.pos = restingPos({ ...newNode, pos: [0, 0, 0] }, currentNodes, [0, 0]);
+      // Measured on the parsed mesh: an OpenSCAD-mode body has no vertices
+      // until its compile lands, so it had no extent to step aside by.
+      if (!(Array.isArray(pos) && pos.length === 3)) {
+        const extent = { ...newNode, pos: [0, 0, 0], geoms: [{ type: 'mesh', renderVertices: parsed.renderVertices, faces: parsed.faces } as SceneGeom] };
+        newNode.pos = restingPos(extent, currentNodes, [0, 0]);
+      }
       updatedNodes = [...currentNodes, newNode];
     }
     const res = await settleScene(updatedNodes, { replacesScene: false });
