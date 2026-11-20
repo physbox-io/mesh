@@ -32,6 +32,8 @@ export const CLOTH_MATERIALS: Record<ClothMaterialName, ClothMaterial> = {
   woven: { arealDensity: 0.12, young: 4e6, poisson: 0.2, thickness: 0.0015, bending: true, damping: 0.2, friction: 0.5, windCd: 1.2, give: 0.02, easeIn: 0.06 },
   // Heavy cotton duck.
   canvas: { arealDensity: 0.4, young: 1e7, poisson: 0.25, thickness: 0.001, bending: true, damping: 0.2, friction: 0.7, windCd: 1.2, give: 0.01, easeIn: 0.03 },
+  // 55 g/m2 marine ripstop nylon: ultralight, tight plain weave with a reinforcing grid, crisp in the wind.
+  ripstop: { arealDensity: 0.055, young: 8e6, poisson: 0.22, thickness: 0.0002, bending: true, damping: 0.16, friction: 0.30, windCd: 1.25, give: 0.01, easeIn: 0.01 },
   // Knitted HDPE shade cloth. Open, so it takes less of the wind; a membrane
   // with no bending stiffness worth paying for.
   // 12 oz denim: heavy, stiff, barely gives.

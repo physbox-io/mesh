@@ -53,6 +53,12 @@ const WEAVES: Record<ClothMaterialName, Weave> = {
   spandex: { tile: 0.006, depth: 0.3, height: knit(8, 10) },
   woven: { tile: 0.008, depth: 0.45, height: plain(16) },
   canvas: { tile: 0.012, depth: 0.8, height: plain(12) },
+  // Marine ripstop nylon: tight 70D plain weave crossed every 5 mm by crisp reinforcing rip-arrest ribs.
+  ripstop: {
+    tile: 0.02,
+    depth: 0.55,
+    height: (x, y) => 0.45 * plain(32)(x, y) + 0.55 * Math.max(Math.pow(thread(x * 4), 10), Math.pow(thread(y * 4), 10)),
+  },
   shadeCloth: { tile: 0.02, depth: 0.9, height: plain(8) },
   denim: { tile: 0.012, depth: 0.8, height: twill(12) },
   leather: { tile: 0.04, depth: 0.5, height: (x, y) => 0.6 * noise(x, y, 24) + 0.4 * noise(x, y, 48) },

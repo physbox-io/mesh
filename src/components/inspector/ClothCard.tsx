@@ -1,8 +1,12 @@
+import { Volume2 } from 'lucide-react';
 import { SliderValue } from '../SliderValue';
 import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import type { ClothMaterialName, ClothSpec } from '../../types/cloth';
+import { CLOTH_MATERIALS } from '../../utils/cloth/clothMesh';
 import { cornerHold, holdCorner, pieceSize, resizePiece } from '../../utils/cloth/clothSheet';
+import { solveAeroAcousticVoice, solveClothSnapPulse } from '../../utils/aeroAcoustics';
+import { playAeroSnapPulse, unlockAudioContext } from '../../utils/modalAudio';
 import { FABRICS } from './garmentFields';
 
 const hex = (rgba: number[]) => `#${rgba.slice(0, 3).map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0')).join('')}`;
@@ -19,11 +23,43 @@ const DEFAULT_RGBA = [0.25, 0.5, 0.85, 1];
 export function ClothCard({ node }: { node: SceneNode }) {
   const updateNode = useStore((s) => s.updateNode);
   const nodes = useStore((s) => s.sceneGraph.nodes);
+  const windX = useStore((s) => s.windX);
+  const windY = useStore((s) => s.windY);
   const cloth = node.cloth;
   if (!cloth || cloth.garment || !cloth.pieces?.length) return null;
   const set = (next: Partial<ClothSpec>, settle = false) => updateNode(node.id, { cloth: { ...cloth, ...next } } as Partial<SceneNode>, false, settle);
   const pieces = cloth.pieces;
   const rgba = pieces[0].rgba ?? DEFAULT_RGBA;
+  const matName = (cloth.material && cloth.material in CLOTH_MATERIALS ? cloth.material : 'woven') as ClothMaterialName;
+  const mat = { ...CLOTH_MATERIALS[matName], ...(cloth.materialOverrides ?? {}) };
+  const arealGsm = Math.round(mat.arealDensity * 1000);
+  const liveWindMps = Math.hypot(windX || 0, windY || 0);
+  const refWindMps = liveWindMps >= 1 ? liveWindMps : 8.5;
+  const snapPreview = solveClothSnapPulse({
+    nodeId: node.id,
+    impulseNs: 0.08,
+    relSpeedMps: refWindMps,
+    arealDensityKgM2: mat.arealDensity,
+  });
+  const aeroVoicePreview = solveAeroAcousticVoice({
+    hubOrBodyId: node.id,
+    bladeCount: 0,
+    omegaRadPerSec: 0,
+    tipSpeedMps: refWindMps,
+    relSpeedMps: refWindMps,
+    alphaDeg: 18,
+    areaM2: 0.25,
+    chordM: 0.5,
+    thicknessM: mat.thickness,
+    aeroForceN: 2.0,
+    isCloth: true,
+    bendRateRadPerSec: 12,
+    arealDensityKgM2: mat.arealDensity,
+  });
+  const auditionWhipSnap = () => {
+    unlockAudioContext();
+    playAeroSnapPulse(snapPreview);
+  };
   const others: string[] = [];
   const walk = (list: SceneNode[]) => { for (const n of list) { if (n.id !== node.id && !n.cloth) others.push(n.name || n.id); walk(n.children ?? []); } };
   walk(nodes);
@@ -43,6 +79,34 @@ export function ClothCard({ node }: { node: SceneNode }) {
           <span className={label}>Colour</span>
           <input type="color" value={hex(rgba)} onChange={(e) => set({ pieces: pieces.map((p) => ({ ...p, rgba: rgbaOf(e.target.value, p.rgba?.[3] ?? 1) })) }, true)} className="w-8 h-6 border border-slate-200 dark:border-slate-700 rounded cursor-pointer bg-white dark:bg-slate-900" />
         </label>
+      </div>
+      <div className="flex flex-col gap-1.5 pt-2 border-t border-slate-200/70 dark:border-slate-800">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Acoustics</span>
+          <button
+            type="button"
+            onClick={auditionWhipSnap}
+            title="Audition trailing-edge N-wave whip-snap for this fabric's areal density"
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-violet-50 hover:bg-violet-100 dark:bg-violet-950/50 dark:hover:bg-violet-900/60 border border-violet-200 dark:border-violet-800 text-[10px] font-semibold text-violet-700 dark:text-violet-300 cursor-pointer transition-colors select-none"
+          >
+            <Volume2 className="w-3 h-3" />
+            Whip Snap
+          </button>
+        </div>
+        <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+          <div className="flex flex-col px-1.5 py-1 rounded bg-white/80 dark:bg-slate-900/80 border border-slate-200/70 dark:border-slate-800" title="Fabric areal density σ = mass / area">
+            <span className="text-[9px] uppercase tracking-wider text-slate-400 dark:text-slate-500">Weight</span>
+            <span className="font-mono text-slate-700 dark:text-slate-200">{arealGsm} g/m²</span>
+          </div>
+          <div className="flex flex-col px-1.5 py-1 rounded bg-white/80 dark:bg-slate-900/80 border border-slate-200/70 dark:border-slate-800" title="Trailing-edge N-wave whip-snap spectral peak">
+            <span className="text-[9px] uppercase tracking-wider text-slate-400 dark:text-slate-500">Snap peak</span>
+            <span className="font-mono text-slate-700 dark:text-slate-200">{Math.round(snapPreview.centerHz)} Hz</span>
+          </div>
+          <div className="flex flex-col px-1.5 py-1 rounded bg-white/80 dark:bg-slate-900/80 border border-slate-200/70 dark:border-slate-800" title="High-shelf weave-strain rustle corner frequency">
+            <span className="text-[9px] uppercase tracking-wider text-slate-400 dark:text-slate-500">Rustle</span>
+            <span className="font-mono text-slate-700 dark:text-slate-200">{(aeroVoicePreview.rustleFreqHz / 1000).toFixed(1)} kHz</span>
+          </div>
+        </div>
       </div>
       {pieces.map((p, k) => {
         const [w, l] = pieceSize(p);

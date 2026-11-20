@@ -819,6 +819,21 @@ Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **
 - Press **Run** to watch the green buoy self-right, the red buoy capsize, and the porcelain cup flood and sink
 - Select **Glass Aquarium Tank** → **Physics → Container Water** to raise or lower the tank's water level
 - Click **Reset**, select **Unbalanced Red Buoy** → **Physics (bottom) → Stand / Spin / Float → Float → Balance Part**, then press **Run** again: it now self-rights too!`,
+
+  flag_in_wind: `# 🚩 Coastal Flagpole in the Wind
+
+An ultralight **55 g/m² marine ripstop nylon** signal ensign ($920 \\times 560\\text{ mm}$) flying above a heavy **400 g/m² cotton duck canvas** regatta burgee ($460 \\times 260\\text{ mm}$) on a hollow $\\varnothing 54\\text{ mm}$ anodized aluminum mast in a fresh $8.8\\text{ m/s}$ coastal breeze.
+
+## Physics
+1. **Kármán Vortex Wake Flutter**: the cylindrical mast sheds an alternating leeward vortex street ($f_{\\text{wake}} \\approx 0.20\\,U / D$) that convects downstream across the cloth, sustaining travelling flutter waves instead of letting the sheet freeze flat in the wind.
+2. **Curle Trailing-Edge Whip-Snaps**: when a travelling fold reaches a free fly corner and reverses normal velocity against sudden XPBD membrane arrest tension, it radiates an asymmetric N-wave acoustic shock whose spectral peak shifts inversely with fabric areal density $\\sigma$ — crisp **~2.8 kHz crackle** on ripstop nylon (\`ensign_flag\`) vs warm **~500 Hz thwack** on heavy canvas (\`burgee_pennant\`).
+3. **Weave-Strain Rustle**: continuous inter-triangle hinge bending and tensile gust strain drive a high-shelf weave rustle ($2.2\\text{–}5.5\\text{ kHz}$), brighter on thin ripstop and warmer on heavy canvas.
+4. **Mast Modal Coupling & Strouhal Hum**: sharp halyard grommet tie jerks and the swinging brass **\`halyard_shackle\`** excite the 3D flexural/hollow-tube modes of the aluminum **\`flagpole\`**, while the taut $\\varnothing 6\\text{ mm}$ stainless halyard stay emits a subtle high-$Q$ Strouhal Aeolian wind hum ($f_c \\approx 0.21\\,U / d \\approx 309\\text{ Hz}$).
+
+## Try it
+- Turn on **Sound** in **⚙️ Environment** and press **Play** to hear the ripstop ensign crackle, the canvas burgee thwack, the brass shackle clink, and the halyard hum in 3D stereo
+- Adjust **Wind X / Wind Y** in **⚙️ Environment** — drop wind to \`0 m/s\` to watch both flags settle silently, or raise it to \`10 m/s\` for brisker whip-snaps
+- Select **\`ensign_flag\`** or **\`burgee_pennant\`** in the Inspector to press **Whip Snap** or swap **Fabric** between **Ripstop nylon**, **Taffeta** (silk), **Woven**, and **Canvas**!`,
 };
 
 

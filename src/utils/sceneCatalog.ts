@@ -51,6 +51,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   knitwear_on_form: 'Make it',
   skirt_on_form: 'Make it',
   shade_sail: 'Make it',
+  flag_in_wind: 'Make it',
   openscad_demo: 'Make it',
   marimba_cascade: 'Make it',
   metallophone_carillon: 'Make it',

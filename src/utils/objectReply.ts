@@ -20,6 +20,10 @@ import { extractBoreWaveguide, solvePlayableWindVoice } from './windAcoustics';
 import { evaluateTensionedMembrane } from './membraneAcoustics';
 import { extractTubeAirColumn } from './resonatorAcoustics';
 import { isNonlinearPlateCandidate } from './nonlinearPlateAcoustics';
+import type { ClothMaterialName } from '../types/cloth';
+import { CLOTH_MATERIALS } from './cloth/clothMesh';
+import { garmentSettings } from './cloth/garments';
+import { solveAeroAcousticVoice, solveClothSnapPulse } from './aeroAcoustics';
 
 /** A paint layer as its colours, each with the vertices it covers, most first. */
 function paintSummary(paint: PaintLayer): PaintLayer {
@@ -112,20 +116,57 @@ function collisionVerdict(node: SceneNode): Record<string, unknown> {
 const r1 = (v: number) => +v.toFixed(1);
 const r3 = (v: number) => +v.toFixed(3);
 
-/** Whether the body says anything acoustic: a spec, or a Physical Material. */
-const hasAcousticFields = (n: SceneNode) => !!(n.deformMaterial || n.acousticString || n.windInstrument
+/** Whether the body says anything acoustic: a spec, cloth, or a Physical Material. */
+const hasAcousticFields = (n: SceneNode) => !!(n.cloth || n.deformMaterial || n.acousticString || n.windInstrument
   || n.acousticMembrane || n.resonatorTube || n.nonlinearPlate || n.acousticBow);
 
 /**
  * What the body sounds like, from the same solvers the audio engine uses:
  * pitch (Hz, note, cents off it), overtone ratio, regime and material, and per
  * spec what its solver says: a soundbox's cavity and plate resonances, a
- * string's stress and bridge coupling, a bore's modes, a head's partials. Only
- * for a body with an acoustic field; null when nothing could be solved.
+ * string's stress and bridge coupling, a bore's modes, a head's partials, or a
+ * cloth sheet's whip-snap and weave-rustle frequencies. Only for a body with an
+ * acoustic field or cloth; null when nothing could be solved.
  */
 function acousticsOf(node: SceneNode, scene?: SceneNode[]): Record<string, unknown> | null {
   if (!hasAcousticFields(node)) return null;
   try {
+    if (node.cloth) {
+      const rawMat = node.cloth.material
+        ?? (node.cloth.garment ? garmentSettings(node.cloth.garment).material : node.cloth.pieces?.[0]?.material)
+        ?? 'woven';
+      const material = (rawMat in CLOTH_MATERIALS ? rawMat : 'woven') as ClothMaterialName;
+      const mat = { ...CLOTH_MATERIALS[material], ...(node.cloth.materialOverrides ?? {}) };
+      const snap = solveClothSnapPulse({
+        nodeId: node.id,
+        impulseNs: 0.08,
+        relSpeedMps: 8.5,
+        arealDensityKgM2: mat.arealDensity,
+      });
+      const voice = solveAeroAcousticVoice({
+        hubOrBodyId: node.id,
+        bladeCount: 0,
+        omegaRadPerSec: 0,
+        tipSpeedMps: 8.5,
+        relSpeedMps: 8.5,
+        alphaDeg: 18,
+        areaM2: 0.25,
+        chordM: 0.5,
+        thicknessM: mat.thickness,
+        aeroForceN: 2.0,
+        isCloth: true,
+        bendRateRadPerSec: 12,
+        arealDensityKgM2: mat.arealDensity,
+      });
+      return {
+        role: 'cloth_aero',
+        material,
+        arealDensityKgM2: r3(mat.arealDensity),
+        snapCenterHz: r1(snap.centerHz),
+        rustleFreqHz: r1(voice.rustleFreqHz),
+      };
+    }
+
     const out: Record<string, unknown> = {};
     let profile: BodyModalProfile | null = null;
     let pitchHz: number | null = null;

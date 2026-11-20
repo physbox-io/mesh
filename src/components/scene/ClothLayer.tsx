@@ -34,6 +34,7 @@ const FABRIC_LOOK: Record<ClothMaterialName, { roughness: number; clearcoat?: nu
   spandex: { roughness: 0.45, clearcoat: 0.15, sheen: 0.4 },
   woven: { roughness: 0.85 },
   canvas: { roughness: 1 },
+  ripstop: { roughness: 0.35, clearcoat: 0.12, sheen: 0.25 },
   shadeCloth: { roughness: 0.9 },
   denim: { roughness: 0.9 },
   leather: { roughness: 0.45, clearcoat: 0.5 },

@@ -55,8 +55,8 @@ export const GARMENT_KINDS: { id: GarmentKind; label: string }[] = [
 
 export const FABRICS: { id: ClothMaterialName; label: string }[] = [
   { id: 'jersey', label: 'Jersey' }, { id: 'rib', label: 'Rib knit' }, { id: 'spandex', label: 'Spandex' }, { id: 'woven', label: 'Woven' },
-  { id: 'denim', label: 'Denim' }, { id: 'canvas', label: 'Canvas' }, { id: 'leather', label: 'Leather' }, { id: 'taffeta', label: 'Taffeta' },
-  { id: 'velvet', label: 'Velvet' }, { id: 'shadeCloth', label: 'Shade cloth' },
+  { id: 'ripstop', label: 'Ripstop nylon' }, { id: 'denim', label: 'Denim' }, { id: 'canvas', label: 'Canvas' }, { id: 'leather', label: 'Leather' },
+  { id: 'taffeta', label: 'Taffeta' }, { id: 'velvet', label: 'Velvet' }, { id: 'shadeCloth', label: 'Shade cloth' },
 ];
 
 export const LIMBS: { id: FormLimbName; label: string }[] = [

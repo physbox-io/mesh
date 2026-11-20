@@ -31,6 +31,7 @@ import { percussionKitPreset } from './percussionKit';
 import { singingBowlFrictionPreset } from './singingBowlFriction';
 import { vibraphoneResonatorsPreset } from './vibraphoneResonators';
 import { hydrostaticFlotationPreset } from './hydrostaticFlotation';
+import { flagInWindPreset } from './flagInWind';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { urbanCollectionPreset } from './urbanCollection';
 import { ballgownPreset, bonedGownPreset, dartedSheathPreset, dressOnFormPreset, gathersAndPleatsPreset, knitwearPreset, menswearPreset, shadeSailPreset, shirtAndJacketPreset, skirtPreset, tailoredOutfitPreset, tshirtOnFormPreset } from './clothPresets';
@@ -3847,6 +3848,13 @@ export const PRESETS = {
     emoji: '⛵',
     scene: hydrostaticFlotationPreset,
     camera: { position: [0.02, -0.56, 0.24], target: [0.0, 0, 0.10] } satisfies PresetCamera,
+  },
+  flag_in_wind: {
+    name: 'Coastal Flagpole in the Wind',
+    emoji: '🚩',
+    scene: flagInWindPreset,
+    environment: { windX: 8.8, windY: 0.6 },
+    camera: { position: [1.45, -3.15, 2.05], target: [0.38, 0, 1.65] } satisfies PresetCamera,
   },
 };
 

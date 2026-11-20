@@ -188,7 +188,7 @@ export interface ClothTie {
   toCloth?: string;
 }
 
-export type ClothMaterialName = 'jersey' | 'rib' | 'spandex' | 'woven' | 'canvas' | 'shadeCloth' | 'denim' | 'leather' | 'taffeta' | 'velvet';
+export type ClothMaterialName = 'jersey' | 'rib' | 'spandex' | 'woven' | 'canvas' | 'ripstop' | 'shadeCloth' | 'denim' | 'leather' | 'taffeta' | 'velvet';
 
 /**
  * An elastic band embedded along a chain of piece edges. Gathers the fabric edge
