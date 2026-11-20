@@ -322,19 +322,21 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   for (const q of P) { xLo = Math.min(xLo, q[0]); xHi = Math.max(xHi, q[0]); }
   const across = xHi - xLo, mid = across > 0 && xLo < -0.25 * across && xHi > 0.25 * across;
   const onMid = mid ? P.map((_, i) => i).filter((i) => Math.abs(P[i][0]) < 0.02 * across) : [];
-  if (onMid.length >= 2) {
-    for (const i of onMid) for (const j of onMid) {
+  for (let i = 0; i < P.length; i += Math.max(1, Math.floor(P.length / 200))) {
+    for (let j = 0; j < P.length; j++) {
       const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
       if (dd > far) { far = dd; a = i; b = j; }
     }
-  } else {
-    for (let i = 0; i < P.length; i += Math.max(1, Math.floor(P.length / 200))) {
-      for (let j = 0; j < P.length; j++) {
-        const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
-        if (dd > far) { far = dd; a = i; b = j; }
-      }
-    }
   }
+  // Only where the centre line runs most of the piece: two pins close together
+  // (a one-shouldered front that crosses the middle for a hand's breadth) would
+  // leave the map's turn and scale to chance.
+  let midFar = -1, ma = 0, mb = 0;
+  for (const i of onMid) for (const j of onMid) {
+    const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
+    if (dd > midFar) { midFar = dd; ma = i; mb = j; }
+  }
+  if (midFar >= 0.5 * far) { far = midFar; a = ma; b = mb; }
   let uv = lscm(P.length, tris, frames, [[a, [0, 0]], [b, [far, 0]]]);
   const eased: EasedTri[] = [];
   if (edgeEase) {
