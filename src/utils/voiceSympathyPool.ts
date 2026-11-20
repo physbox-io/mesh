@@ -111,6 +111,10 @@ export interface TriggerModalImpactOptions {
   materialQ?: number;
   /** Normalized Legendre mode-shape vectors ψ_m(ξ) for spatial contact choking on solids. */
   modeVectors?: number[][];
+  lenAxis?: 0 | 1 | 2;
+  lenBounds?: [number, number];
+  principalLenDir?: [number, number, number];
+  principalOrigin?: [number, number, number];
   /** Normalized longitudinal hit coordinate ξ_hit in [-1, 1] on solids. */
   strikeXi?: number;
   /** Normalized string pluck/touch coordinate β in (0, 0.5]. */
@@ -127,6 +131,8 @@ export interface TriggerModalImpactOptions {
   crashShimmer?: CrashShimmerParams;
   /** Vibraphone rotating-vane tremolo modulation (Starter #5). */
   tremolo?: TremoloModulationParams;
+  /** Optional simulation timestamp (s) when this modal voice was struck/plucked. */
+  simTime?: number;
 }
 
 export interface ActiveModeState {
@@ -162,9 +168,13 @@ export interface ActiveModalVoiceGroup {
   modeVectors?: number[][];
   lenAxis?: 0 | 1 | 2;
   lenBounds?: [number, number];
+  principalLenDir?: [number, number, number];
+  principalOrigin?: [number, number, number];
   transientSources: Set<AudioScheduledSourceNode>;
   transientNodes: Set<AudioNode>;
   createdAtAudioTime: number;
+  lastTriggeredAtAudioTime: number;
+  lastTriggeredSimTime?: number;
   expiresAtAudioTime: number;
   pulsePeakGain: number;
   pulseDecayTauSec: number;
@@ -179,6 +189,12 @@ export interface ChokeVoiceOptions {
   normalForceN?: number;
   softness?: number;
   localPoint?: [number, number, number];
+  /** Sustained contact duration (s) of this pair — contacts starting before/within 60 ms of strike never choke! */
+  contactDurationSec?: number;
+  /** Explicit simulation timestamp (s) when this contact began, if known. */
+  contactStartedAtSimTime?: number;
+  /** Current simulation timestamp (s) for comparing `contactDurationSec` against `lastTriggeredSimTime`. */
+  currentSimTime?: number;
   targetNode?: SceneNode | null;
   sceneNodes?: SceneNode[];
 }
@@ -566,7 +582,7 @@ function scheduleModeEnvelopeAndPitch(
   const atkDur = Math.max(0.0008, spec.bloomAttackSec ?? defaultAttackSec);
   const tStart = now + bloomDelay;
   const tAtk = tStart + atkDur;
-  const rawDur = Math.min(3.8, Math.max(atkDur + 0.018, spec.decaySec));
+  const rawDur = Math.min(4.2, Math.max(atkDur + 0.018, spec.decaySec));
   const tEnd = tStart + rawDur;
   const tauSec = Math.max(0.005, (rawDur - atkDur) / LN_10000);
   const safePeak = Math.max(0.0002, Math.min(1.35, targetPeakGain));
@@ -651,7 +667,8 @@ function attachHertzianClickPulse(
     seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
     const white = seed / 2147483648;
     const texEnv = Math.exp(-t / (tauC * 1.8));
-    data[i] = sample + 0.04 * opts.brightness * white * texEnv;
+    const sampleScale = effectiveVoiceCount === 0 ? 1.0 : 0.72;
+    data[i] = sample * sampleScale + 0.025 * opts.brightness * white * texEnv;
   }
 
   const pulseSrc = ctx.createBufferSource();
@@ -671,8 +688,8 @@ function attachHertzianClickPulse(
     effectiveVoiceCount === 0
       ? 1.45
       : opts.isPluck
-        ? 0.05 + 0.10 * opts.brightness
-        : 0.06 + 0.16 * opts.brightness;
+        ? 0.04 + 0.08 * opts.brightness
+        : 0.018 + 0.052 * Math.pow(Math.max(0, opts.brightness), 1.35);
   const clickAmp = Math.min(0.85, opts.level * pulseWeight);
   clickGain.gain.setValueAtTime(clickAmp, now);
 
@@ -681,10 +698,11 @@ function attachHertzianClickPulse(
   lp.connect(clickGain);
   clickGain.connect(targetNode);
 
-  // For struck rigid/hollow 3D bodies (`!isPluck`), also excite the body's 3D Vibro-Acoustic FIR!
+  // For struck hollow 3D soundboxes/shells (`!isPluck` & `group.irConv`), route the level-scaled `clickGain`
+  // (NEVER raw unscaled `lp`!) into `group.irConv` so cavity excitation scales proportionally with `opts.level`!
   let irTailSec = 0;
   if (group.irConv && !opts.isPluck) {
-    lp.connect(group.irConv);
+    clickGain.connect(group.irConv);
     irTailSec = 0.095;
   }
 
@@ -905,9 +923,10 @@ export function triggerOrMutateModalVoice(opts: TriggerModalImpactOptions): Acti
     (opts.nodeId ? opts.nodeId : `__ephemeral_${++bank.ephemeralCounter}`);
   const existing = opts.nodeId || opts.voiceGroupKey ? bank.groups.get(groupKey) : undefined;
 
+  const minMalletAttack = opts.brightness <= 0.48 ? 0.0024 : 0.0016;
   const defaultAttackSec =
     opts.attackTimeSec ??
-    (opts.isPluck ? 0.0014 : Math.max(0.0012, Math.min(0.0038, opts.tauC * 1.1)));
+    (opts.isPluck ? 0.0014 : Math.max(minMalletAttack, Math.min(0.0040, opts.tauC * 1.45)));
   const distScale = opts.distanceGain !== undefined && Number.isFinite(opts.distanceGain)
     ? Math.max(0.02, Math.min(1.5, opts.distanceGain))
     : 1.0;
@@ -928,6 +947,16 @@ export function triggerOrMutateModalVoice(opts: TriggerModalImpactOptions): Acti
       existing.panner.pan.setTargetAtTime(Math.max(-1, Math.min(1, opts.pan)), now, 0.012);
     }
     if (opts.modeVectors) existing.modeVectors = opts.modeVectors;
+    if (opts.lenAxis !== undefined) existing.lenAxis = opts.lenAxis;
+    if (opts.lenBounds) existing.lenBounds = opts.lenBounds;
+    if (opts.principalLenDir) existing.principalLenDir = opts.principalLenDir;
+    if (opts.principalOrigin) existing.principalOrigin = opts.principalOrigin;
+    if (!opts.skipClickPulse) {
+      existing.lastTriggeredAtAudioTime = now;
+      if (opts.simTime !== undefined && Number.isFinite(opts.simTime)) {
+        existing.lastTriggeredSimTime = opts.simTime;
+      }
+    }
     configureTremoloStage(ctx, existing, opts.tremolo, now);
 
     // Hot-swap body IR only if geometry/sculpt signature actually changed
@@ -1174,9 +1203,17 @@ export function triggerOrMutateModalVoice(opts: TriggerModalImpactOptions): Acti
     irSig: opts.bodyIrSig ?? '',
     modes: [],
     modeVectors: opts.modeVectors,
+    lenAxis: opts.lenAxis,
+    lenBounds: opts.lenBounds,
+    principalLenDir: opts.principalLenDir,
+    principalOrigin: opts.principalOrigin,
     transientSources: new Set(),
     transientNodes: new Set(),
     createdAtAudioTime: now,
+    lastTriggeredAtAudioTime: now,
+    ...(opts.simTime !== undefined && Number.isFinite(opts.simTime)
+      ? { lastTriggeredSimTime: opts.simTime }
+      : {}),
     expiresAtAudioTime: now + 0.15,
     pulsePeakGain: 0,
     pulseDecayTauSec: 0.02,
@@ -1244,10 +1281,64 @@ export function triggerOrMutateModalVoice(opts: TriggerModalImpactOptions): Acti
   return group;
 }
 
+function resolveSolidTouchXi(
+  localPoint: [number, number, number] | undefined,
+  group: ActiveModalVoiceGroup,
+  tNode?: SceneNode | null,
+): number | undefined {
+  if (!localPoint) return undefined;
+  if (group.lenBounds) {
+    const [sLo, sHi] = group.lenBounds;
+    const mid = 0.5 * (sLo + sHi);
+    const half = Math.max(1e-4, 0.5 * (sHi - sLo));
+    if (group.principalLenDir) {
+      const dir = group.principalLenDir;
+      const orig = group.principalOrigin ?? [0, 0, 0];
+      const sProj =
+        (localPoint[0] - orig[0]) * dir[0] +
+        (localPoint[1] - orig[1]) * dir[1] +
+        (localPoint[2] - orig[2]) * dir[2];
+      return Math.max(-1, Math.min(1, (sProj - mid) / half));
+    }
+    if (group.lenAxis !== undefined) {
+      return Math.max(-1, Math.min(1, (localPoint[group.lenAxis] - mid) / half));
+    }
+  }
+  const g = tNode?.geoms?.find((gm) => !gm.csgDerived && gm.csg !== 'difference' && gm.role !== 'visual') ?? tNode?.geoms?.[0];
+  if (!g) return undefined;
+  if ((g.type === 'cylinder' || g.type === 'capsule') && g.fromto && g.fromto.length >= 6) {
+    const dx = g.fromto[3] - g.fromto[0];
+    const dy = g.fromto[4] - g.fromto[1];
+    const dz = g.fromto[5] - g.fromto[2];
+    const trunkLen = Math.hypot(dx, dy, dz);
+    if (trunkLen > 1e-4) {
+      const mx = 0.5 * (g.fromto[0] + g.fromto[3]);
+      const my = 0.5 * (g.fromto[1] + g.fromto[4]);
+      const mz = 0.5 * (g.fromto[2] + g.fromto[5]);
+      const halfTotal = 0.5 * trunkLen + (g.type === 'capsule' ? (g.size?.[0] ?? 0) : 0);
+      const proj = ((localPoint[0] - mx) * dx + (localPoint[1] - my) * dy + (localPoint[2] - mz) * dz) / trunkLen;
+      return Math.max(-1, Math.min(1, proj / Math.max(1e-4, halfTotal)));
+    }
+  }
+  if (g.type === 'cylinder' || g.type === 'capsule') {
+    const halfL = (g.size?.[1] ?? 0.05) + (g.type === 'capsule' ? (g.size?.[0] ?? 0) : 0);
+    const cz = g.pos?.[2] ?? 0;
+    return halfL > 1e-4 ? Math.max(-1, Math.min(1, (localPoint[2] - cz) / halfL)) : undefined;
+  }
+  const sx = g.size?.[0] ?? 0.02;
+  const sy = g.size?.[1] ?? sx;
+  const sz = g.size?.[2] ?? sx;
+  const axis: 0 | 1 | 2 = sx >= sy && sx >= sz ? 0 : sy >= sx && sy >= sz ? 1 : 2;
+  const half = axis === 0 ? sx : axis === 1 ? sy : sz;
+  const center = g.pos?.[axis] ?? 0;
+  return half > 1e-4 ? Math.max(-1, Math.min(1, (localPoint[axis] - center) / half)) : undefined;
+}
+
 /**
  * Physically damps/chokes active ringing modes on `nodeId` (and any `${nodeId}:symp` halo):
  * - `mode: 'grab'`: viscoelastic human-hand mute (~30–65 ms, damping upper partials fastest).
- * - `mode: 'contact'`: spatial contact damping (`sin²(nπβ)` on strings -> preserves flageolet harmonics at β = 1/2, 1/3, 1/4!).
+ * - `mode: 'contact'`: post-strike damper / nodal touch (`contactStartedAt > voiceTriggeredAt + 0.06s`),
+ *   weighted by modal shape `φ_n(ξ)²` (preserving beam Euler-Bernoulli nodes ξ_bar ≈ 0.224, 0.776 & string flageolets!).
  */
 export function chokeBodyVoice(
   ctx: AudioContext | null | undefined,
@@ -1264,32 +1355,44 @@ export function chokeBodyVoice(
   let chokedAny = false;
 
   const isGrab = (opts.mode ?? 'grab') === 'grab';
+  if (!isGrab && opts.softness !== undefined && opts.softness < 0.28) {
+    return false;
+  }
+
   let touchBeta: number | undefined;
-  let touchXi: number | undefined;
   const tNode = opts.targetNode;
-  if (!isGrab && opts.localPoint && tNode) {
-    if (tNode.acousticString) {
-      touchBeta = resolveStringBetaFromPoint(tNode, opts.localPoint, undefined, opts.sceneNodes);
-    } else if (tNode.geoms?.length) {
-      // Map localPoint onto [-1, 1] along largest geom span if available
-      const g = tNode.geoms[0];
-      const hs = Math.max(g.size?.[0] ?? 0.05, g.size?.[1] ?? 0.05, g.size?.[2] ?? 0.05);
-      if (hs > 1e-4) {
-        const maxCoord = Math.max(
-          Math.abs(opts.localPoint[0]),
-          Math.abs(opts.localPoint[1]),
-          Math.abs(opts.localPoint[2]),
-        );
-        touchXi = Math.max(-1, Math.min(1, maxCoord / hs));
-      }
-    }
+  if (!isGrab && opts.localPoint && tNode?.acousticString) {
+    touchBeta = resolveStringBetaFromPoint(tNode, opts.localPoint, undefined, opts.sceneNodes);
   }
 
   for (const key of keys) {
     const group = bank.groups.get(key);
     if (!group || now >= group.expiresAtAudioTime) continue;
 
+    // Pre-existing resting support / rail / cushion / striker guard (60 ms post-strike window):
+    // Any contact that began BEFORE or within 60 ms of when this voice was triggered MUST NEVER choke it!
+    if (!isGrab) {
+      if (opts.contactStartedAtSimTime !== undefined && group.lastTriggeredSimTime !== undefined) {
+        if (opts.contactStartedAtSimTime <= group.lastTriggeredSimTime + 0.060) continue;
+      } else if (
+        opts.contactDurationSec !== undefined &&
+        opts.currentSimTime !== undefined &&
+        group.lastTriggeredSimTime !== undefined
+      ) {
+        const startedSim = opts.currentSimTime - opts.contactDurationSec;
+        if (startedSim <= group.lastTriggeredSimTime + 0.060) continue;
+      } else if (opts.contactDurationSec !== undefined) {
+        const startedAudio = now - opts.contactDurationSec;
+        if (startedAudio <= group.lastTriggeredAtAudioTime + 0.060) continue;
+      }
+    }
+
+    const touchXi = !isGrab && !group.isPluck
+      ? resolveSolidTouchXi(opts.localPoint, group, tNode)
+      : undefined;
+
     let maxNewExpire = now + 0.05;
+    let groupChoked = false;
     for (let i = 0; i < group.modes.length; i++) {
       const m = group.modes[i];
       const curG = evaluateModeAmplitudeAt(m, now);
@@ -1309,12 +1412,12 @@ export function chokeBodyVoice(
         );
         const fN = Math.max(0, opts.normalForceN ?? 0.25);
         const softness = Math.max(0, Math.min(1, opts.softness ?? 0.5));
-        // Light touch (`fN <= 0.35 N`) has near-zero broad pad spillover -> clean natural harmonics!
-        const broadSpill = fN > 0.45 ? Math.min(0.45, 0.09 * (fN - 0.35) * (0.5 + softness)) : 0.008 * fN;
-        const effParticipation = Math.min(1, phiSq + broadSpill);
+        // Scale damping strictly with modal displacement squared φ_n(ξ)² so contacts at Euler-Bernoulli
+        // beam nodes (0.224·L, 0.776·L -> ξ ≈ ±0.5516) or string harmonic nodes preserve natural ring!
+        const effParticipation = Math.min(1, phiSq * (1 + 0.22 * softness * Math.min(2.5, fN)) + 0.0015);
         const baseRate = Math.max(0.5, opts.dampingRate ?? 14.0);
         const deltaAlpha = baseRate * effParticipation * (1 + 0.16 * i * softness);
-        if (deltaAlpha < 0.08) {
+        if (deltaAlpha < 0.12) {
           const keepExp = now + m.tauSec * LN_10000 + 0.04;
           if (keepExp > maxNewExpire) maxNewExpire = keepExp;
           continue;
@@ -1335,10 +1438,11 @@ export function chokeBodyVoice(
       m.tauSec = nextTau;
       const mExp = now + endDur + 0.025;
       if (mExp > maxNewExpire) maxNewExpire = mExp;
+      groupChoked = true;
       chokedAny = true;
     }
 
-    if (chokedAny) {
+    if (groupChoked) {
       group.expiresAtAudioTime = Math.min(group.expiresAtAudioTime, maxNewExpire + (group.irConv ? 0.09 : 0.02));
     }
   }
@@ -1361,6 +1465,7 @@ export function applyAudioDampingEvents(
   ctx: AudioContext | null | undefined,
   events: AudioDampingEvent[],
   sceneNodes?: SceneNode[],
+  currentSimTime?: number,
 ): void {
   const targetCtx = ctx ?? lastKnownAudioCtx;
   if (!targetCtx || !events?.length) return;
@@ -1369,6 +1474,7 @@ export function applyAudioDampingEvents(
 
   for (const ev of events) {
     if (!ev.nodeId || !(ev.dampingRate > 0) || !(ev.normalForce > 0)) continue;
+    if (ev.softness !== undefined && ev.softness < 0.28) continue;
     if (!bank.groups.has(ev.nodeId) && !bank.groups.has(`${ev.nodeId}:symp`)) continue;
     const targetNode = findNodeInTree(sceneNodes, ev.nodeId);
     chokeBodyVoice(targetCtx, ev.nodeId, {
@@ -1377,6 +1483,8 @@ export function applyAudioDampingEvents(
       normalForceN: ev.normalForce,
       softness: ev.softness,
       localPoint: ev.localPoint,
+      contactDurationSec: ev.contactDurationSec,
+      currentSimTime,
       targetNode,
       sceneNodes,
     });

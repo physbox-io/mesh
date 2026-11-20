@@ -33,8 +33,8 @@ let cursor = 0;
 for (let i = 0; i < score.length; i++) {
   const dur = score[i][1] * unitSec;
   const dt = tLoop - cursor;
-  if (dt >= 0 && dt < 0.042) {
-    api.applyJointForce(joints[score[i][0]], -3.85);
+  if (dt >= 0 && dt < 0.024) {
+    api.applyJointForce(joints[score[i][0]], -4.15);
   }
   cursor += dur;
 }
@@ -121,8 +121,8 @@ for (let i = 0; i < score.length; i++) {
           type: 'hinge',
           axis: [1, 0, 0],
           pos: [0, 0, 0],
-          stiffness: 1.45,
-          springref: 0.035,
+          stiffness: isSteel ? 2.35 : 1.45,
+          springref: isSteel ? 0.065 : 0.035,
           damping: 0.065,
           limited: true,
           // Stop at -7.8° prevents dragging the beater head through the 17 mm bar; 55° upper headroom avoids rebound stop-slams!
@@ -135,7 +135,7 @@ for (let i = 0; i < score.length; i++) {
         {
           name: `shaft_${idx}`,
           type: 'capsule',
-          fromto: [0, 0.018, 0, 0, 0.223, 0],
+          fromto: [0, 0.018, 0, 0, isSteel ? 0.223 : 0.208, 0],
           size: [0.0025],
           density: 650,
           solref: [0.004, 0.5],
@@ -144,7 +144,7 @@ for (let i = 0; i < score.length; i++) {
         {
           name: `mallet_head_${idx}`,
           type: 'sphere',
-          pos: [0, 0.225, -0.003],
+          pos: [0, isSteel ? 0.225 : 0.210, -0.003],
           size: [isSteel ? 0.010 : 0.0115],
           density: isSteel ? 7800 : 1850,
           solref: [0.004, 0.25],
@@ -169,8 +169,8 @@ for (let i = 0; i < score.length; i++) {
           name: `bar_${note.toLowerCase()}_pad`,
           type: 'slide',
           axis: [0, 0, 1],
-          stiffness: 1400,
-          damping: 10,
+          stiffness: 2200,
+          damping: 12,
           limited: true,
           range: [-0.012, 0.012],
         },

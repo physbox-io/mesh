@@ -765,12 +765,22 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
         if (ev.impulseNs >= 0.0015) pluckedBatchIds.add(ev.nodeId);
       }
 
+      const isDedicatedResonator = (n: SceneNode | null | undefined): boolean =>
+        !!n &&
+        (typeof n.tunedPitchHz === 'number' ||
+          !!n.acousticString ||
+          !!n.acousticMembrane ||
+          !!n.nonlinearPlate ||
+          !!n.resonatorTube);
+
       for (const ev of events) {
         if (ev.impulseNs < 0.0015) continue;
         const node = findNode(nodes, ev.nodeId);
         if (!node || isWindSubtreeOrNonColliding(node, nodes)) continue;
         const strikerNode =
           ev.otherNodeId && ev.otherNodeId !== 'world' ? findNode(nodes, ev.otherNodeId) : null;
+        // Suppress redundant beater/mallet stick self-thuds when striking a dedicated musical resonator
+        if (isDedicatedResonator(strikerNode) && !isDedicatedResonator(node)) continue;
         const isPluck = !!node.acousticString;
         const profile = cachedModesFor(
           node,
@@ -800,6 +810,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           nodeId: node.id,
           pan: spatial.pan,
           distanceGain: spatial.distanceGain,
+          simTime: s.data?.time,
         });
 
         // Starter #3: Weinreich bridge-admittance sympathetic string excitation across sibling strings!
@@ -1001,7 +1012,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       const ctx = peekSharedAudioContext();
       if (!ctx) return;
       const s = store().getState();
-      applyAudioDampingEvents(ctx, contacts, liveModelGraph(s).graph.nodes);
+      applyAudioDampingEvents(ctx, contacts, liveModelGraph(s).graph.nodes, s.data?.time);
     };
     client.setSound(useSoundStore.getState().soundEnabled);
     client.onError = (message, fatal, lastState) => {
