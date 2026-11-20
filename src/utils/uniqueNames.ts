@@ -249,7 +249,7 @@ function clothNameRewrites(
   const r = renames.get(node);
   const nextFormBuilt =
     node.bodyForm && node.bodyFormBuilt && (r?.name || r?.id) && node.bodyFormBuilt === bodyFormKey(node)
-      ? bodyFormKey({ bodyForm: node.bodyForm, id: r?.id ?? node.id, name: r?.name ?? node.name })
+      ? bodyFormKey({ bodyForm: node.bodyForm })
       : undefined;
   const formBuiltChanged = nextFormBuilt !== undefined && nextFormBuilt !== node.bodyFormBuilt;
   if (!clothChanged && !formBuiltChanged) return null;

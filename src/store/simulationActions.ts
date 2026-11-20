@@ -267,7 +267,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           console.info(`[PhysicsWorker] Shared memory (COOP/COEP) active: ${!!built.isShared}`);
         }
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);
-        setLastClothState((built as { clothState?: unknown }).clothState);
+        setLastClothState(built.clothState);
         // The error clears NOW, not with the rest on the next paint. The await
         // on recompile() resolves before that paint, and every MCP command
         // reads lastCompileError straight after it: deferred, a build that
@@ -481,7 +481,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         client.setEnv(windX, windY, density, waterLevel, sceneGraph);
         const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
-        setLastClothState((built as { clothState?: unknown }).clothState);
+        setLastClothState(built.clothState);
         set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
         noteModelBuilt(docGraph);
         if (wasPlaying) { client.setPlaying(true); set({ isPlaying: true }); }
@@ -540,7 +540,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);
-        setLastClothState((built as { clothState?: unknown }).clothState);
+        setLastClothState(built.clothState);
         set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
         noteModelBuilt(docGraph);
         if (get().isPlaying) client.setPlaying(true);

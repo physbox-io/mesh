@@ -208,9 +208,11 @@ function isExperimentBody(n: SceneNode): boolean {
 /** Cloth spec stripped of visual-only `rgba` and `pattern` so colour/print edits don't look stale. */
 function clothPhysicsSpec(cloth: SceneNode['cloth']): unknown {
   if (!cloth) return null;
-  const { pattern: _p, garment, pieces, ...rest } = cloth;
+  const raw = cloth as SceneNode['cloth'] & { rgba?: unknown };
+  const { pattern: _p, rgba: _r, garment, pieces, fasten, ...rest } = raw!;
   return {
     ...rest,
+    ...(fasten ? { fasten: fasten.map((fa) => (fa.trim ? { ...fa, trim: { ...fa.trim, rgba: undefined } } : fa)) } : {}),
     ...(garment
       ? {
           garment: {
@@ -218,6 +220,9 @@ function clothPhysicsSpec(cloth: SceneNode['cloth']): unknown {
             rgba: undefined,
             pattern: undefined,
             trims: garment.trims?.map((t) => ({ ...t, rgba: undefined })),
+            pockets: garment.pockets?.map((pk) => ({ ...pk, rgba: undefined })),
+            ...(typeof garment.belt === 'object' && garment.belt ? { belt: { ...garment.belt, rgba: undefined } } : {}),
+            ...(garment.collar ? { collar: { ...garment.collar, rgba: undefined } } : {}),
             attached: garment.attached?.map((a) => ({ ...a, rgba: undefined, pattern: undefined })),
           },
         }

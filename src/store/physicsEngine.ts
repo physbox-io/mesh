@@ -10,6 +10,7 @@
 import type { ScriptStateMap } from '../utils/scriptState';
 import * as THREE from 'three';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
+import type { ClothStateSnapshot } from '../workers/physicsWorkerProtocol';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 import { envelope } from '../utils/coSimLink';
 import { applyShatterPieces } from './breakage';
@@ -243,8 +244,8 @@ export const setLastHeapBytes = (bytes: number) => { lastHeapBytes = bytes; };
 export let lastScriptState: ScriptStateMap | undefined;
 // Latest serialisable ClothSim state snapshot from the worker, carried across
 // proactive WASM-heap recycles so cloth does not reset or re-settle mid-play.
-export let lastClothState: unknown;
-export const setLastClothState = (state: unknown) => { lastClothState = state; };
+export let lastClothState: ClothStateSnapshot | undefined;
+export const setLastClothState = (state: ClothStateSnapshot | undefined) => { lastClothState = state; };
 
 /**
  * Run something on the next paint, or straight away if there will not be one.
@@ -466,7 +467,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       // Kept beside the qpos mirror, from the same frame, so a recycle seeds
       // the new worker's scripts from the moment its bodies are seeded from.
       lastScriptState = snap.scriptState;
-      lastClothState = (snap as { clothState?: unknown }).clothState;
+      lastClothState = snap.clothState;
       noteWorkerFrame(snap.time);
       const data = store().getState().data;
       if (data) {

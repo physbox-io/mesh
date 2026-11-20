@@ -23,7 +23,7 @@ export const ROD_KINDS: Record<NonNullable<GarmentRod['kind']>, { ei: number; de
   flatSteel: { ei: 0.0064, density: 0.019 },
   spiralSteel: { ei: 0.004, density: 0.022 },
   plastic: { ei: 0.002, density: 0.011 },
-  hoopSteel: { ei: 0.02, density: 0.039 },
+  hoopSteel: { ei: 0.06, density: 0.039 },
 };
 
 export interface RodConstraints {

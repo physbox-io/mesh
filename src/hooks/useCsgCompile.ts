@@ -135,7 +135,7 @@ function runBodyFormBuild(nodeId: string): Promise<void> {
       if (failedBodyForms.has(job)) break;
       entry.key = key;
       try {
-        const geoms = await buildBodyFormOffThread(cur.bodyForm, cur.name || cur.id);
+        const geoms = await buildBodyFormOffThread(cur.bodyForm, cur.name || cur.id, nodeId);
         const now = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
         if (now && now.bodyForm && bodyFormKey(now) === key) {
           useStore.getState().applyBodyFormGeoms(nodeId, finishBodyFormGeoms(geoms), key);
