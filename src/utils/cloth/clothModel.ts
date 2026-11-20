@@ -1135,9 +1135,14 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (material.bending) addBends(piece.tris, uv, particleOf, bends, bend, piece.pressed ? piece.start.map((q, i) => (sharedAt.has(i) ? x0[particleOf(i)] : q)) : piece.rest3);
       // Across the seam where it is tacked on: bending from its first row of
       // triangles into the cloth under it, at its own stiffness, resting at
-      // the angle it starts at. Tacked points alone hinge freely, and a stiff
+      // the angle it starts at, for a piece whose shape is set (pressed, cut
+      // to a curve, or a board). Tacked points alone hinge freely, and a stiff
       // piece (a cap's peak) folded down at its seam however stiff it was.
-      if (material.bending && piece.tacks.length) {
+      // Soft cloth sewn on hinges at its seam as a seam does: held to the
+      // angle it started at, a hood pulled down off the head climbed back up
+      // over it once let go.
+      const setShape = piece.pressed || !!piece.rest3 || (pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS;
+      if (material.bending && piece.tacks.length && setShape) {
         for (let t = 0; t < piece.tris.length; t += 3) for (let e = 0; e < 3; e++) {
           const a = piece.tris[t + e], b = piece.tris[t + ((e + 1) % 3)], o = piece.tris[t + ((e + 2) % 3)];
           const ta = tackOf.get(a), tb = tackOf.get(b);
