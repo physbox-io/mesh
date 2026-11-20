@@ -1145,7 +1145,7 @@ export class ClothSim {
       // Boards held to their shape in their plane, once a substep (a few
       // passes of the rest hold a cloth, not a board; every pass cost a cap
       // a sixth of a second a simulated second and held it no better).
-      if (pass === STRETCH_PASSES - 1) this.boards.solve(x, w);
+      if (pass === STRETCH_PASSES - 1 && this.boards.active) { this.solveTacks(); this.boards.solve(x, w); }
       // Stitches close from their starting gap to nothing over the sew time.
       // A zip's pairs only where it is done up, those its slider has just
       // run together closing from where they were.
@@ -1171,7 +1171,7 @@ export class ClothSim {
       // And on the last pass of every substep: pass === 0 steps the rebuild
       // counter once per substep so LayerContacts rebuilds every 4 substeps.
       if (doLayers && (pass === 0 || pass === STRETCH_PASSES - 1 || this.layerTick === 0)) {
-        this.layers.collide(x, prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, this.contactDisp, pass === 0);
+        this.layers.collide(x, prev, CLOTH_THICKNESS, this.contactN, this.contactPush, this.contactMu, this.contactDisp, pass === 0, false, this.settled);
       }
       // Once a substep, on the last pass: the constraints have moved the cloth
       // by then, and friction after it holds what this sets.
@@ -2233,6 +2233,7 @@ export class ClothSim {
     this.accumulator = s.accumulator ?? 0;
     if (s.floatUntil && s.floatUntil.length === this.floatUntil.length) this.floatUntil.set(s.floatUntil);
     if (s.boardsQ) this.boards.restoreQuats(s.boardsQ);
+    else this.boards.resetWarm();
     this.settled = true;
     // Its seams as sewn as they were: carried without, every stitch the
     // settle had sewn shut was held at the gap it started at, and on Run a

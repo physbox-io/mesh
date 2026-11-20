@@ -100,6 +100,11 @@ export class BoardShapes {
     }
   }
 
+  /** Mark clusters cold so the next solve re-picks the best initial orientation from positions. */
+  resetWarm() {
+    for (let i = 0; i < this.clusters.length; i++) this.clusters[i].warm = false;
+  }
+
   /** Each board's points moved to where their neighbourhoods, each turned rigidly to fit, put them (points with no weight stay). */
   solve(x: Float64Array, w: Float64Array) {
     if (!this.clusters.length) return;
@@ -110,10 +115,11 @@ export class BoardShapes {
       const cluster = this.clusters[ci];
       const { ids, rest, weight, q, flat, blend, root } = cluster;
       const m = ids.length;
+      const held = this.held;
       let cx = 0, cy = 0, cz = 0, ws = 0;
       for (let k = 0; k < m; k++) {
         const pt = ids[k], i = 3 * pt;
-        const mw = w[pt] > 0 ? 1 / w[pt] : 1;
+        const mw = (w[pt] > 0 ? 1 / w[pt] : 1) * (held[pt] ? 4 : 1);
         const wk = weight ? weight[k] * mw : mw;
         cx += wk * x[i]; cy += wk * x[i + 1]; cz += wk * x[i + 2]; ws += wk;
       }
@@ -122,7 +128,7 @@ export class BoardShapes {
       // The flat pattern's centre weighted by the same mass weights.
       let ru = 0, rv = 0, rw = 0;
       for (let k = 0; k < m; k++) {
-        const pt = ids[k], mw = w[pt] > 0 ? 1 / w[pt] : 1;
+        const pt = ids[k], mw = (w[pt] > 0 ? 1 / w[pt] : 1) * (held[pt] ? 4 : 1);
         const wk = weight ? weight[k] * mw : mw;
         ru += wk * rest[3 * k]; rv += wk * rest[3 * k + 1]; rw += wk * rest[3 * k + 2];
       }
@@ -130,7 +136,7 @@ export class BoardShapes {
       // A = sum w_k (x - c) r^T.
       A.fill(0);
       for (let k = 0; k < m; k++) {
-        const pt = ids[k], mw = w[pt] > 0 ? 1 / w[pt] : 1;
+        const pt = ids[k], mw = (w[pt] > 0 ? 1 / w[pt] : 1) * (held[pt] ? 4 : 1);
         const wk = weight ? weight[k] * mw : mw;
         const i = 3 * pt, dx = wk * (x[i] - cx), dy = wk * (x[i + 1] - cy), dz = wk * (x[i + 2] - cz), u = rest[3 * k] - ru, v = rest[3 * k + 1] - rv, t = rest[3 * k + 2] - rw;
         A[0] += dx * u; A[1] += dx * v; A[2] += dx * t; A[3] += dy * u; A[4] += dy * v; A[5] += dy * t; A[6] += dz * u; A[7] += dz * v; A[8] += dz * t;

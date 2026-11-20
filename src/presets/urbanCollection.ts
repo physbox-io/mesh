@@ -168,7 +168,7 @@ function pufferLook(x: number): SceneNode[] {
   ];
   const apex = headL.path.at(headL.length), crownTop = (dx: number): [number, number, number] => [r4(apex[0] + dx), r4(apex[1]), r4(apex[2] + 0.01)];
   const cap = wearing('cap', {
-    garment: 'hat', material: 'canvas', ease: 0.01, from: FROM, gores: 6, rgba: [0.09, 0.13, 0.3, 1], sculpt: capFront,
+    garment: 'hat', material: 'canvas', ease: 0.01, from: FROM, gores: 6, pressed: true, rgba: [0.09, 0.13, 0.3, 1], sculpt: capFront,
     curves: [{ name: 'closure', kind: 'cut', closed: true, points: closure }],
     trims: [
       { kind: 'stitch', along: 'closure', offset: 0.003, rgba: [0.05, 0.08, 0.2, 1] },
@@ -183,11 +183,11 @@ function pufferLook(x: number): SceneNode[] {
     attached: [{
       name: 'peak', outline: PEAK, sewn: [0, PEAK_ARC], along: 'top', span: [r4(1 - CAP_PEAK), CAP_PEAK], bend: CAP_CURVE, rgba: [0.09, 0.13, 0.3, 1],
       // A plastic board inside it (polyethylene, about a gigapascal): it holds itself out.
-      material: 'canvas', materialOverrides: { thickness: 0.0015, young: 1e9, arealDensity: 0.9 },
+      material: 'canvas', materialOverrides: { thickness: 0.0015, young: 1e9, arealDensity: 0.9, give: 0, easeIn: 0 },
     }],
   }, form, 0);
-  // A structured cap: its crown stiffened (buckram behind the canvas), so it holds its shape and the peak on it.
-  cap.cloth!.materialOverrides = { thickness: 0.0016, young: 4e7 };
+  // A structured cap: its crown steam-blocked over heavy buckram with taped seams and a sweatband, so it stays crisp and inextensible.
+  cap.cloth!.materialOverrides = { thickness: 0.0018, young: 1.5e8, give: 0, easeIn: 0 };
   // Undone at the neck, the collar's ends folded back by the wearer (pulled,
   // then let go), the neckerchief showing between them.
   puffer.cloth!.arrange = [

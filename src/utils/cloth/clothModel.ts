@@ -288,8 +288,14 @@ export interface ClothModel {
   /** Particles drawn to places (world) before the cloth is first drawn, then let go: its arrangement (ClothSpec.arrange). */
   pulls?: { particle: number; to: number[]; via?: number[][] }[];
   material: ClothMaterial;
-  /** Worn over every cloth of a lower layer (clothLayers). */
+  /** Worn over every concentric cloth of a lower layer on the same form/part (clothLayers). */
   layer: number;
+  /** Body form this cloth is fitted to (or tied onto), if any, for concentric layer pairing. */
+  fitTo?: string;
+  /** True for an unfitted garment (`garment` with no `fitTo`), which falls loose rather than concentric on a form. */
+  loose?: boolean;
+  /** Body parts covered by a modelled garment (`skin`, `head`, `armL`, ...), so disjoint parts do not nest as layers. */
+  parts?: string[];
   /** Whether its triangles all face out (a garment modelled round a body), so its outside is known. */
   outward: boolean;
   /** Whether it is kept off itself and the other cloth of its layer (clothSelf); default true. */
@@ -648,12 +654,18 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
 
   /** Where the triangles of what is sewn onto a garment begin (an outer layer is kept off them as off the garment). */
   let overlayTrisStart: number | undefined;
+  let fitTo: string | undefined;
+  let loose = false;
+  let garmentParts: string[] | undefined;
 
   const warnings: string[] = [];
   if (spec.garment) {
     const form = { bodyForm: garmentForm(spec.garment, scene) };
     if (!form.bodyForm) throw new Error(`the garment '${name}' is fitted to '${spec.garment.fitTo}', which is not a body form here`);
+    fitTo = spec.garment.fitTo;
+    loose = !spec.garment.fitTo;
     const shell = garmentShell(spec.garment, form.bodyForm, spec.layer ?? 0);
+    if (shell.part?.length) garmentParts = [...new Set(shell.part)];
     x0 = shell.points.map(toWorld);
     mass = new Array(x0.length).fill(0);
     const settings = garmentSettings(spec.garment);
@@ -810,7 +822,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (piece.edgeEase) piece.edgeEase.forEach((e, c) => { if (e > 0) edges.setMinRatio(particleOf(piece.tris[c]), particleOf(piece.tris[c - (c % 3) + ((c + 1) % 3)]), 1 / (1 + e)); });
       if (material.bending) {
         const before = bends.quads.length / 4;
-        addBends(piece.tris, piece.uv, particleOf, bends);
+        const pressedRest = settings.pressed && !spread ? piece.points.map((g) => toWorld(shell.points[g])) : undefined;
+        addBends(piece.tris, piece.uv, particleOf, bends, 1, pressedRest);
         // Gathered or pleated cloth keeps the set of its folds as sewn, as a seam
         // keeps its modelled curve (addSeamBends): resting flat, a spread piece
         // never came to rest (a woven skirt gathered 2x still moved 120 mm/s
@@ -1370,8 +1383,23 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const pt = pointOf(pl);
     if (pt) pulls.push({ particle: pt.group.particles[pt.local], to: toWorld(pl.to), ...(pl.via?.length ? { via: pl.via.map(toWorld) } : {}) });
   }
+  if (!fitTo && ties.length) {
+    const findFitTo = (list: SceneNode[], target: string): string | undefined => {
+      for (const sn of list) {
+        if ((sn.name || sn.id) === target && sn.cloth?.garment?.fitTo) return sn.cloth.garment.fitTo;
+        const sub = sn.children?.length ? findFitTo(sn.children, target) : undefined;
+        if (sub) return sub;
+      }
+      return undefined;
+    };
+    for (const t of ties) {
+      if (t.cloth) { fitTo = findFitTo(scene, t.cloth); if (fitTo) break; }
+    }
+  }
   return {
-    name, ...(drop.length ? { drop } : {}), ...(pulls.length ? { pulls } : {}), material, layer: spec.layer ?? 0, outward: !!spec.garment, selfCollide: spec.selfCollide !== false, sewTime,
+    name, ...(drop.length ? { drop } : {}), ...(pulls.length ? { pulls } : {}), material, layer: spec.layer ?? 0,
+    ...(fitTo ? { fitTo } : {}), ...(loose ? { loose: true } : {}), ...(garmentParts?.length ? { parts: garmentParts } : {}),
+    outward: !!spec.garment, selfCollide: spec.selfCollide !== false, sewTime,
     x0: x, invMass: Float64Array.from(mass, (m) => (m > 0 ? 1 / m : 0)),
     tris, overlayTrisStart, edges: edgePairs, edgeRest, edgeMin, edgeStiffness: edges.scales(),
     elastics, elasticRest, elasticFlat, elasticAlpha,

@@ -787,6 +787,12 @@ export interface GarmentDraft {
    */
   fitted?: boolean;
   /**
+   * Steam-blocked or pressed in 3D as modelled (a structured cap's buckram
+   * crown, a moulded piece): its pattern pieces still cut flat, while its
+   * bending stencils rest at the modelled 3D curvature rather than flat.
+   */
+  pressed?: boolean;
+  /**
    * The darts it is shaped with. Unset or true: the bust and waist darts a
    * bodice gets where it needs them; false: none (the draft's own seams
    * shape it instead: princess lines). A list: these as well, anywhere (an

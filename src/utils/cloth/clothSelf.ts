@@ -33,6 +33,7 @@
  */
 
 import type { ClothModel } from './clothModel';
+import { isLayeredPair } from './clothLayers';
 
 const CELL = 0.03;
 const nextPow2 = (v: number) => {
@@ -60,8 +61,14 @@ interface Group {
   /** Each particle's separation (half its sheet and half the other's are added per contact: here its own half). */
   half: Float64Array;
   mu: Float64Array;
-  /** Each triangle's sheet half-thickness. */
+  /** Each triangle's sheet half-thickness and friction. */
   triHalf: Float64Array;
+  triMu: Float64Array;
+  /** Piece index per tested particle and per triangle, and symmetric exclusion table for concentric `LayerContacts` pairs. */
+  pPiece: Int32Array;
+  tPiece: Int32Array;
+  nPieces: number;
+  layered: Uint8Array;
   /** Every particle of the group (global) and its sheet's half-thickness, for the sagitta. */
   all: Int32Array;
   allHalf: Float64Array;
@@ -110,13 +117,10 @@ export class SelfContacts {
     this.w = w;
     this.extra = new Float64Array(w.length);
     this.normal = new Float64Array(3 * w.length);
-    const layers = [...new Set(pieces.filter((p) => p.model.selfCollide !== false).map((p) => p.model.layer))];
-    for (const layer of layers) {
-      const mine = pieces.filter((p) => p.model.layer === layer && p.model.selfCollide !== false);
-      const g = buildGroup(mine, w, links);
-      if (g) this.groups.push(g);
-    }
-    if (x) for (const g of this.groups) this.sagitta(g, x);
+    const mine = pieces.filter((p) => p.model.selfCollide !== false);
+    const g = buildGroup(mine, w, links);
+    if (g) this.groups.push(g);
+    if (x) for (const gr of this.groups) this.sagitta(gr, x);
   }
 
   /** Each particle's extra gap: its half thickness plus the sagitta of its edges, up to MAX_HALF. */
@@ -210,7 +214,7 @@ export class SelfContacts {
         const rz = (x[k + 2] - prev[k + 2]) - (b0 * (x[a + 2] - prev[a + 2]) + bb1 * (x[bq + 2] - prev[bq + 2]) + bb2 * (x[c + 2] - prev[c + 2]));
         const rn = rx * nx + ry * ny + rz * nz;
         let tx = rx - rn * nx, ty = ry - rn * ny, tz = rz - rn * nz;
-        const tl = Math.sqrt(tx * tx + ty * ty + tz * tz), hold = g.mu[pi] * (sep - sd);
+        const tl = Math.sqrt(tx * tx + ty * ty + tz * tz), hold = Math.min(g.mu[pi], g.triMu[bt]) * (sep - sd);
         if (tl > hold && tl > 0) { const s = hold / tl; tx *= s; ty *= s; tz *= s; }
         const fx = lam * nx - tx / den, fy = lam * ny - ty / den, fz = lam * nz - tz / den;
         x[k] += wp * fx; x[k + 1] += wp * fy; x[k + 2] += wp * fz;
@@ -230,15 +234,17 @@ export class SelfContacts {
  */
 function candidates(g: Group, x: Float64Array) {
   const T = g.tris, B = g.box, NS = g.nearStart, NR = g.near, mask = g.mask;
+  const PP = g.pPiece, TP = g.tPiece, LP = g.layered, np = g.nPieces;
   let count = 0, total = 0;
   g.candStart[0] = 0;
   for (let pi = 0; pi < g.particles.length; pi++) {
-    const i = g.particles[pi], k = 3 * i;
+    const i = g.particles[pi], k = 3 * i, pRow = PP[pi] * np;
     const px = x[k], py = x[k + 1], pz = x[k + 2];
     const b = hash(Math.floor(px / CELL), Math.floor(py / CELL), Math.floor(pz / CELL), mask);
     const n0 = NS[pi], n1 = NS[pi + 1], from = total;
     for (let e = g.start[b]; e < g.start[b + 1]; e++) {
       const t = g.entries[e], o = 6 * t;
+      if (LP[pRow + TP[t]]) continue;
       if (px < B[o] || py < B[o + 1] || pz < B[o + 2] || px > B[o + 3] || py > B[o + 4] || pz > B[o + 5]) continue;
       const ia = T[3 * t], ib = T[3 * t + 1], ic = T[3 * t + 2];
       if (has(NR, n0, n1, ia) || has(NR, n0, n1, ib) || has(NR, n0, n1, ic)) continue;
@@ -266,12 +272,24 @@ function has(a: Int32Array, lo: number, hi: number, v: number): boolean {
 
 function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<number>): Group | null {
   if (!pieces.length) return null;
-  // Global indices of the layer's particles, and a local numbering for the walk.
-  const local = new Map<number, number>(), glob: number[] = [], halfOf: number[] = [], muOf: number[] = [];
-  for (const { model, base } of pieces) {
-    const half = Math.max(MIN_SEP, model.material.thickness) / 2;
-    for (let i = 0; i < model.invMass.length; i++) { local.set(base + i, glob.length); glob.push(base + i); halfOf.push(half); muOf.push(model.material.friction); }
+  const nPieces = pieces.length;
+  const layered = new Uint8Array(nPieces * nPieces);
+  for (let a = 0; a < nPieces; a++) {
+    for (let b = a + 1; b < nPieces; b++) {
+      if (isLayeredPair(pieces[a].model, pieces[b].model) || isLayeredPair(pieces[b].model, pieces[a].model)) {
+        layered[a * nPieces + b] = 1;
+        layered[b * nPieces + a] = 1;
+      }
+    }
   }
+  // Global indices of the particles, and a local numbering for the walk.
+  const local = new Map<number, number>(), glob: number[] = [], halfOf: number[] = [], muOf: number[] = [], pieceOf: number[] = [];
+  pieces.forEach(({ model, base }, pIdx) => {
+    const half = Math.max(MIN_SEP, model.material.thickness) / 2;
+    for (let i = 0; i < model.invMass.length; i++) {
+      local.set(base + i, glob.length); glob.push(base + i); halfOf.push(half); muOf.push(model.material.friction); pieceOf.push(pIdx);
+    }
+  });
   const n = glob.length;
   // Adjacency: mesh edges at their cut lengths; stitches and tacks at none.
   const adj: [number, number][][] = Array.from({ length: n }, () => []);
@@ -280,8 +298,8 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
     if (a === undefined || b === undefined || a === b) return;
     adj[a].push([b, len]); adj[b].push([a, len]);
   };
-  const tris: number[] = [], triHalf: number[] = [];
-  for (const { model, base } of pieces) {
+  const tris: number[] = [], triHalf: number[] = [], triMu: number[] = [], tPiece: number[] = [];
+  pieces.forEach(({ model, base }, pIdx) => {
     for (let e = 0; e < model.edges.length; e += 2) {
       join(base + model.edges[e], base + model.edges[e + 1], model.edgeRest[e / 2]);
     }
@@ -290,26 +308,29 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
     for (const z of model.zips ?? []) for (let s = 0; s < z.pairs.length; s += 2) join(base + z.pairs[s], base + z.pairs[s + 1], 0);
     for (const tk of model.tacks ?? []) for (const q of tk.tri) join(base + tk.particle, base + q, 0);
     const half = Math.max(MIN_SEP, model.material.thickness) / 2;
-    for (let t = 0; t < model.tris.length; t += 3) { tris.push(base + model.tris[t], base + model.tris[t + 1], base + model.tris[t + 2]); triHalf.push(half); }
-  }
+    for (let t = 0; t < model.tris.length; t += 3) {
+      tris.push(base + model.tris[t], base + model.tris[t + 1], base + model.tris[t + 2]);
+      triHalf.push(half);
+      triMu.push(model.material.friction);
+      tPiece.push(pIdx);
+    }
+  });
   for (let s = 0; s + 1 < links.length; s += 2) join(links[s], links[s + 1], 0);
-  let maxHalf = 0;
+  let maxHalf = MAX_HALF;
   for (const h of halfOf) maxHalf = Math.max(maxHalf, h);
-  const thickHalf = maxHalf;
-  maxHalf = Math.max(maxHalf, MAX_HALF);
   // Each moving point's neighbours: itself and what is sewn or tacked to it
   // (joined at no length), and anything nearer along the cloth than 1.5 times
-  // the separation. Its own triangles are skipped; any other, on a flat sheet,
+  // its sheet separation. Its own triangles are skipped; any other, on a flat sheet,
   // is a triangle's height away (edges are millimetres to centimetres, the
   // separation about one), so nearer than the separation is a fold. A wider
   // radius (the separation plus the longest edge near, 2-3 cm) let the two
   // sides of a sharply folded seam (a crotch, a collar's roll, a gathered
   // waist) pass through each other: they were neighbours.
-  const particles: number[] = [], half: number[] = [], mu: number[] = [], nearStart: number[] = [0], near: number[] = [];
+  const particles: number[] = [], half: number[] = [], mu: number[] = [], pPiece: number[] = [], nearStart: number[] = [0], near: number[] = [];
   const dist = new Float64Array(n).fill(Infinity), seen: number[] = [];
   for (let s = 0; s < n; s++) {
     if (!(w[glob[s]] > 0)) continue;
-    const radius = 1.5 * 2 * thickHalf;
+    const radius = 1.5 * 2 * halfOf[s];
     // Dijkstra over a small ball: a plain array as the frontier is fast enough at this size.
     const frontier: number[] = [s];
     dist[s] = 0; seen.push(s);
@@ -329,7 +350,7 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
     const ball = seen.map((q) => glob[q]).sort((a, b) => a - b);
     for (const q of seen) dist[q] = Infinity;
     seen.length = 0;
-    particles.push(glob[s]); half.push(halfOf[s]); mu.push(muOf[s]);
+    particles.push(glob[s]); half.push(halfOf[s]); mu.push(muOf[s]); pPiece.push(pieceOf[s]);
     for (const q of ball) near.push(q);
     nearStart.push(near.length);
   }
@@ -338,7 +359,9 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
   const buckets = nextPow2(Math.max(1024, 2 * nt));
   return {
     tris: Int32Array.from(tris), particles: Int32Array.from(particles), half: Float64Array.from(half), mu: Float64Array.from(mu),
-    triHalf: Float64Array.from(triHalf), all: Int32Array.from(glob), allHalf: Float64Array.from(halfOf), nearStart: Int32Array.from(nearStart), near: Int32Array.from(near),
+    triHalf: Float64Array.from(triHalf), triMu: Float64Array.from(triMu),
+    pPiece: Int32Array.from(pPiece), tPiece: Int32Array.from(tPiece), nPieces, layered,
+    all: Int32Array.from(glob), allHalf: Float64Array.from(halfOf), nearStart: Int32Array.from(nearStart), near: Int32Array.from(near),
     buckets, mask: buckets - 1,
     start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6),
     reach: 2 * maxHalf,
