@@ -7,6 +7,9 @@ import type { ModelMirror } from '../../types/sceneLayer';
 import { layoutPattern, patternSvg, type PatternPiece } from '../../utils/cloth/patternSvg';
 import { downloadBlob } from '../../utils/downloadBlob';
 
+/** Overlay colours on the pattern preview. */
+const OVERLAY = { boning: '#d97706', zipper: '#2563eb', trim: '#334' };
+
 /**
  * A garment's pieces to cut and sew: the panels its modelled shell was cut
  * into at its seams, laid flat (the same pieces the cloth is sewn from, so
@@ -20,6 +23,17 @@ export function GarmentCard({ node }: { node: SceneNode }) {
     .filter((f) => f.flat && f.name.startsWith(`${name}__`))
     .map((f) => ({ name: f.name.slice(name.length + 2), ...f.flat! })), [model, name]);
   const layout = useMemo(() => layoutPattern(pieces), [pieces]);
+  // A stroke unit for the overlays, so they read at the card's size whatever the pieces' extent.
+  const u = layout.width / 250;
+  const legend = useMemo(() => {
+    const kinds = new Set(layout.pieces.flatMap((p) => p.marks.map((m) => m.kind)));
+    const out: [string, string, boolean][] = [];
+    if (layout.pieces.some((p) => p.channels.length)) out.push(['Boning', OVERLAY.boning, true]);
+    if (kinds.has('zipper')) out.push(['Zip', OVERLAY.zipper, false]);
+    const points = [...kinds].filter((k) => k !== 'zipper');
+    if (points.length) out.push([points.map((k) => k.charAt(0).toUpperCase() + k.slice(1) + 's').join(', '), OVERLAY.trim, false]);
+    return out;
+  }, [layout]);
   const updateNode = useStore((s) => s.updateNode);
   const fileRef = useRef<HTMLInputElement>(null);
   // A garment's print is on its draft; plain cloth's on the cloth. One place each.
@@ -112,12 +126,24 @@ export function GarmentCard({ node }: { node: SceneNode }) {
             {layout.pieces.map((p) => (
               <g key={p.name}>
                 <path d={p.path} fillRule="evenodd" fill={svgDataUri ? `url(#${patternDefId})` : '#e9eef7'} stroke="#334" strokeWidth={Math.max(0.5, layout.width / 400)} />
-                {p.channels.map((d, i) => <path key={`c${i}`} d={d} fill="none" stroke="#334" strokeWidth={layout.width / 500} strokeDasharray={`${layout.width / 150} ${layout.width / 300}`} />)}
-                {p.marks.map((m, i) => <circle key={i} cx={m.x} cy={m.y} r={Math.max(layout.width / 300, m.r)} fill={m.kind === 'zipper' ? '#667' : '#fff'} stroke="#334" strokeWidth={layout.width / 600} />)}
+                {/* Drawn to be seen at this size, in colour (the download keeps true-size lines). */}
+                {p.channels.map((d, i) => <path key={`c${i}`} d={d} fill="none" stroke={OVERLAY.boning} strokeWidth={1.6 * u} strokeDasharray={`${3 * u} ${1.5 * u}`} />)}
+                {p.marks.map((m, i) => (m.kind === 'zipper'
+                  ? <circle key={i} cx={m.x} cy={m.y} r={1.3 * u} fill={OVERLAY.zipper} />
+                  : <circle key={i} cx={m.x} cy={m.y} r={Math.max(2 * u, m.r)} fill="#fff" stroke={OVERLAY.trim} strokeWidth={0.7 * u} />))}
                 <text x={p.x + p.w / 2} y={p.y + p.h + 14} fontSize={Math.max(8, layout.width / 40)} textAnchor="middle" fill="#334">{p.name}</text>
               </g>
             ))}
           </svg>
+          {legend.length > 0 && (
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
+              {legend.map(([label, colour, dashed]) => (
+                <span key={label} className="flex items-center gap-1">
+                  <span className="inline-block w-3" style={{ borderTop: `2px ${dashed ? 'dashed' : 'solid'} ${colour}` }} />{label}
+                </span>
+              ))}
+            </div>
+          )}
           <ul className="text-[10px] text-slate-500 grid grid-cols-2 gap-x-2">
             {layout.pieces.map((p) => (
               <li key={p.name} title="The width and height of the piece, and how far 95% of it had to give to lie flat: under a few percent cuts as it is; more wants a dart or a stretch fabric.">
