@@ -73,7 +73,27 @@ export function topmostSelected(nodes: SceneNode[], ids: string[]): SceneNode[] 
 /** Gives every body in `roots` a new id, and points references within them at the new ids. */
 export function renumber(roots: SceneNode[]): void {
   const ids = new Map<string, string>();
-  for (const root of roots) walk(root, (n) => { ids.set(n.id, freshId(n.id)); });
+  const formIds = new Map<string, string>();
+  const clothIds = new Map<string, string>();
+  const bodyIds = new Map<string, string>();
+  for (const root of roots) {
+    walk(root, (n) => {
+      const nextId = freshId(n.id);
+      ids.set(n.id, nextId);
+      const key = n.name || n.id;
+      if (n.cloth) {
+        clothIds.set(n.id, nextId);
+        clothIds.set(key, nextId);
+      } else if (!n.isPulleyRope) {
+        bodyIds.set(n.id, nextId);
+        bodyIds.set(key, nextId);
+        if (n.bodyForm) {
+          formIds.set(n.id, nextId);
+          formIds.set(key, nextId);
+        }
+      }
+    });
+  }
   for (const root of roots) {
     walk(root, (n) => {
       n.id = ids.get(n.id)!;
@@ -86,6 +106,33 @@ export function renumber(roots: SceneNode[]): void {
           delete fields[f];
           for (const extra of REFERENCE_FIELDS[f]) delete fields[extra];
         }
+      }
+      // Cloth hosts inside the copy (its dress form, the posts its corners tie
+      // to, the garment an ornament is sewn onto) follow to the copied body's
+      // new id; uniqueNames then resolves that id to the copy's final name
+      // (`form_2`, `post1_2`, `gown_2`, or `form` when pasted into a clean scene).
+      if (n.cloth) {
+        let cloth = n.cloth;
+        const fit = cloth.garment?.fitTo;
+        if (typeof fit === 'string' && formIds.has(fit)) {
+          cloth = { ...cloth, garment: { ...cloth.garment!, fitTo: formIds.get(fit)! } };
+        }
+        if (cloth.ties?.length) {
+          let tiesChanged = false;
+          const ties = cloth.ties.map((t) => {
+            const nextTo = typeof t.to === 'string' && bodyIds.has(t.to) ? bodyIds.get(t.to)! : t.to;
+            const nextCloth = typeof t.toCloth === 'string' && clothIds.has(t.toCloth) ? clothIds.get(t.toCloth)! : t.toCloth;
+            if (nextTo === t.to && nextCloth === t.toCloth) return t;
+            tiesChanged = true;
+            return {
+              ...t,
+              ...(nextTo !== undefined ? { to: nextTo } : {}),
+              ...(nextCloth !== undefined ? { toCloth: nextCloth } : {}),
+            };
+          });
+          if (tiesChanged) cloth = { ...cloth, ties };
+        }
+        n.cloth = cloth;
       }
     });
   }

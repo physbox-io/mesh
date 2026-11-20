@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SceneGraph, SceneNode } from '../types/scene';
+import { clampBodyForm } from './cloth/bodyForm';
 
 /** Each field on a node that holds another node's id, and what goes with it. */
 export const REFERENCE_FIELDS = {
@@ -31,7 +32,7 @@ export const REFERENCE_FIELDS = {
 type ReferenceField = keyof typeof REFERENCE_FIELDS;
 const FIELDS = Object.keys(REFERENCE_FIELDS) as ReferenceField[];
 
-interface Present { names: Set<string>; prefixes: string[] }
+interface Present { names: Set<string>; prefixes: string[]; forms: Set<string>; cloths: Set<string> }
 
 /**
  * Every id and name a reference may resolve to. mjcf.ts looks an id up and
@@ -39,15 +40,27 @@ interface Present { names: Set<string>; prefixes: string[] }
  * so does any body a composite (a rope, a cable) generates under its prefix.
  */
 function present(nodes: SceneNode[]): Present {
-  const out: Present = { names: new Set(), prefixes: [] };
+  const out: Present = { names: new Set(), prefixes: [], forms: new Set(), cloths: new Set() };
   const walk = (list: SceneNode[]) => {
     for (const n of list || []) {
-      // A pulley rope is no body in the model, so nothing can be welded or
-      // pinned to it: MuJoCo refused the whole scene ("unknown element").
-      // What hangs under one still is.
-      if (n.isPulleyRope) { walk(n.children || []); continue; }
+      // Neither a pulley rope nor a cloth piece is a body in the MuJoCo model,
+      // so nothing rigid can be welded or pinned to it ("unknown element").
+      // Cloth pieces still resolve `toCloth` ties, and what hangs under either
+      // is still a body.
+      if (n.isPulleyRope || n.cloth) {
+        if (n.cloth) {
+          if (n.id) out.cloths.add(n.id);
+          out.cloths.add(n.name || n.id);
+        }
+        walk(n.children || []);
+        continue;
+      }
       if (n.id) out.names.add(n.id);
       if (n.name) out.names.add(n.name);
+      if (n.bodyForm) {
+        if (n.id) out.forms.add(n.id);
+        out.forms.add(n.name || n.id);
+      }
       // MuJoCo names a cable's bodies <prefix>B_first, B_1 … B_last.
       if (n.isComposite) out.prefixes.push(`${n.compositePrefix || `${n.name}_`}B_`);
       walk(n.children || []);
@@ -63,6 +76,45 @@ const isLive = (to: string, live: Present) =>
 const dangling = (node: SceneNode, live: Present): ReferenceField[] =>
   FIELDS.filter((f) => typeof node[f] === 'string' && !isLive(node[f] as string, live));
 
+const hasDanglingCloth = (node: SceneNode, live: Present): boolean => {
+  const fit = node.cloth?.garment?.fitTo;
+  if (typeof fit === 'string' && !live.forms.has(fit)) return true;
+  const ties = node.cloth?.ties;
+  return !!ties?.some(
+    (t) =>
+      (typeof t.to === 'string' && !isLive(t.to, live)) ||
+      (typeof t.toCloth === 'string' && !live.cloths.has(t.toCloth)),
+  );
+};
+
+/**
+ * Releases a garment whose form is missing (giving it default measurements if
+ * it carried none, so clothModel never throws), and drops ties whose target
+ * body or cloth is missing rather than pinning them to thin air in world space.
+ */
+function clearCloth(node: SceneNode, live: Present): void {
+  if (!node.cloth) return;
+  let cloth = node.cloth;
+  if (typeof cloth.garment?.fitTo === 'string' && !live.forms.has(cloth.garment.fitTo)) {
+    const { fitTo: _fitTo, ...rest } = cloth.garment;
+    cloth = { ...cloth, garment: { ...rest, form: rest.form ?? clampBodyForm({}) } };
+  }
+  if (cloth.ties?.length) {
+    const kept = cloth.ties.filter(
+      (t) =>
+        (typeof t.to !== 'string' || isLive(t.to, live)) &&
+        (typeof t.toCloth !== 'string' || live.cloths.has(t.toCloth)),
+    );
+    if (kept.length !== cloth.ties.length) {
+      const next = { ...cloth };
+      if (kept.length) next.ties = kept;
+      else delete next.ties;
+      cloth = next;
+    }
+  }
+  node.cloth = cloth;
+}
+
 function clear(node: SceneNode, fields: ReferenceField[]): void {
   for (const f of fields) {
     delete node[f];
@@ -76,6 +128,7 @@ export function dropDanglingReferencesInPlace(nodes: SceneNode[]): void {
   const walk = (list: SceneNode[]) => {
     for (const n of list || []) {
       clear(n, dangling(n, live));
+      if (hasDanglingCloth(n, live)) clearCloth(n, live);
       walk(n.children || []);
     }
   };
@@ -95,10 +148,12 @@ export function withoutDanglingReferences(scene: SceneGraph): SceneGraph {
     const out = list.map((node) => {
       const children = node.children ? rebuild(node.children) : node.children;
       const gone = dangling(node, live);
-      if (!gone.length && children === node.children) return node;
+      const goneCloth = hasDanglingCloth(node, live);
+      if (!gone.length && !goneCloth && children === node.children) return node;
       changed = true;
       const next: SceneNode = { ...node, ...(node.children ? { children } : {}) };
       clear(next, gone);
+      if (goneCloth) clearCloth(next, live);
       return next;
     });
     return changed ? out : list;

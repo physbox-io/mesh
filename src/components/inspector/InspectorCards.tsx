@@ -60,6 +60,23 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
   const setTab = usePanels((s) => s.setInspectorTab);
   const patterning = useStore((s) => s.facePatternTarget?.nodeId === node.id);
 
+  // Cloth bodies are simulated by the XPBD solver rather than MuJoCo rigid
+  // bodies, so rigid-body Shape/Texture/Physics/Script tabs do not apply;
+  // fitted garments also follow their form's pose rather than `node.pos`.
+  if (node.cloth) {
+    return (
+      <>
+        <CombineCard node={node} />
+        <BodyBasicsCard node={node} />
+        <PartActions node={node} threeSceneRef={threeSceneRef} />
+        <GarmentDraftCard node={node} />
+        <ClothCard node={node} />
+        <GarmentCard node={node} />
+        {!node.cloth.garment?.fitTo && <PositionCard node={node} />}
+      </>
+    );
+  }
+
   return (
     <>
       {/* Above the tabs: it acts on the whole selection, not this body. */}

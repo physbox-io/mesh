@@ -25,7 +25,8 @@ export function CollisionCard({ node }: { node: SceneNode }) {
 
   const meshes = solidMeshGeoms(node);
   const levels = collisionDetailLevels();
-  if (node.csgEnabled) return null;
+  if (node.csgEnabled || node.cloth) return null;
+  if (node.bodyForm && node.collision !== 'decompose') return null;
   if (meshes.length === 0) return null;
   const detail = detailOf(node, levels);
 
@@ -35,15 +36,15 @@ export function CollisionCard({ node }: { node: SceneNode }) {
   const solidity = node.collisionSolidity ?? null;
 
   return (
-    <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
+    <div className="p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col gap-2">
+      <h3 className="text-sm font-medium text-slate-700 dark:text-slate-200 border-b border-slate-100 dark:border-slate-800 pb-2 mb-1 flex items-center gap-1.5">
         <Donut className="w-3.5 h-3.5 text-rose-500" /> Collision
-        {stale && <span className="ml-auto text-[10px] font-semibold text-amber-600 animate-pulse">working…</span>}
+        {stale && <span className="ml-auto text-[10px] font-semibold text-amber-600 dark:text-amber-400 animate-pulse">working…</span>}
       </h3>
       <select
         value={mode}
         onChange={(e) => updateNode(node.id, { collision: e.target.value as SceneNode['collision'] })}
-        className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
+        className="w-full px-2.5 py-1.5 border border-slate-200 dark:border-slate-700 rounded text-xs bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 outline-none focus:border-blue-500 cursor-pointer font-medium"
         title="MuJoCo collides a mesh as its convex hull, which fills in any hollow. Auto breaks a hollow shape into convex pieces so it behaves like the shape it looks like."
       >
         <option value="auto">Auto</option>
@@ -51,7 +52,7 @@ export function CollisionCard({ node }: { node: SceneNode }) {
         <option value="hull">Convex hull</option>
       </select>
       {mode !== 'hull' && (
-        <label className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
+        <label className="flex items-center justify-between gap-2 text-[11px] text-slate-600 dark:text-slate-300">
           Detail
           <select
             value={detail}
@@ -59,7 +60,7 @@ export function CollisionCard({ node }: { node: SceneNode }) {
               const d = levels[e.target.value as DetailName];
               updateNode(node.id, { collisionResolution: d.collisionResolution, collisionHulls: d.collisionHulls });
             }}
-            className="px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
+            className="px-2 py-1 border border-slate-200 dark:border-slate-700 rounded text-xs bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 outline-none focus:border-blue-500 cursor-pointer"
             title="How finely the shape is broken up. Finer sees narrower slots and grooves, and takes longer to work out. It costs nothing while the simulation runs."
           >
             <option value="standard">Standard</option>
@@ -69,17 +70,17 @@ export function CollisionCard({ node }: { node: SceneNode }) {
           </select>
         </label>
       )}
-      <p className="text-[10px] text-slate-400 leading-snug">
+      <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-snug">
         {colliders.length > 0
           ? `Colliding as ${colliders.length} convex pieces, so anything hollow in this shape is really hollow — a ball dropped into it lands inside.`
           : 'Colliding as one convex hull, so any hollow in this shape is filled in for contact.'}
         {solidity !== null && ` Solidity ${(solidity * 100).toFixed(0)}% — how much of its own hull this shape actually fills.`}
       </p>
       {node.collisionWarning && (
-        <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">{node.collisionWarning}</p>
+        <p className="text-[10px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded px-2 py-1 leading-snug">{node.collisionWarning}</p>
       )}
       {node.collisionError && (
-        <p className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 leading-snug">Collision failed: {node.collisionError}</p>
+        <p className="text-[10px] text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded px-2 py-1 leading-snug">Collision failed: {node.collisionError}</p>
       )}
     </div>
   );

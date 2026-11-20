@@ -7,6 +7,8 @@ import { dropDanglingReferencesInPlace } from './danglingReferences';
 import { buildBreakModel } from './breakModel';
 import { withoutNulls } from './withoutNulls';
 import { applyContactClasses } from './contactClasses';
+import { bodyFormGeoms } from './cloth/bodyForm';
+import { finishBodyFormGeoms } from './cloth/bodyFormEdit';
 
 const wedgeMeshCache = new Map<string, ReturnType<typeof generateWedgeMeshData>>();
 
@@ -53,6 +55,14 @@ export function prepareScene(scene: SceneGraph): { nodes: SceneNode[]; breaks: R
   const nodes = cloneNodes(scene.nodes);
   // Before booleans are resolved, so names match what the store keeps.
   uniquifyNamesInPlace(nodes);
+  // A body form whose geoms have not been built yet (a lazy preset in a
+  // headless compile, export script or test where useCsgCompile is not mounted)
+  // gets them here on the compiler's copy so its MJCF still has all forty parts.
+  eachNode(nodes, (node) => {
+    if (node.bodyForm && (!node.geoms || node.geoms.length === 0)) {
+      node.geoms = finishBodyFormGeoms(bodyFormGeoms(node.bodyForm, node.name || node.id));
+    }
+  });
 
   // Resolve every body down to the geoms that actually simulate: a boolean's
   // negatives are dropped, and depending on the collision mode the colliders are

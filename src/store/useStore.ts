@@ -28,6 +28,7 @@ import { withoutDanglingReferences } from '../utils/danglingReferences';
 import { withConnectAnchorsFollowing } from '../utils/connectAnchors';
 import { cloneSceneGraph } from './sceneClone';
 import { bindStore } from './storeRef';
+import { findNodeById } from '../utils/sceneTree';
 
 // Moved out of this file into the modules above, and still imported from here.
 export { cloneSceneGraph } from './sceneClone';
@@ -681,7 +682,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
   setDraggedNodeId: (id) => {
     if (id !== null && get().draggedNodeId === null) {
-      get().recordInteraction('drag-node');
+      const dragged = findNodeById(get().sceneGraph.nodes, id);
+      if (!dragged?.cloth) get().recordInteraction('drag-node');
     }
     set({ draggedNodeId: id });
     getPhysicsWorkerClient().setDrag(id, get().dragTarget);

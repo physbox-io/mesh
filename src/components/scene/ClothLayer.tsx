@@ -11,11 +11,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
+import { useCapture } from '../../store/captureStore';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import type { ClothMaterialName } from '../../types/cloth';
 import type { DataMirror, FrameFlagWindow, ModelMirror } from '../../types/sceneLayer';
 import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
 import { CLOTH_THICKNESS } from '../../utils/cloth/xpbd';
+import { garmentSettings } from '../../utils/cloth/garments';
 import { acquirePrintTexture } from './clothPrintTexture';
 import { useClothSculpt } from './useClothSculpt';
 import { useClothGrab } from './useClothGrab';
@@ -45,16 +47,38 @@ interface Props {
   sceneGraph: SceneGraph | null;
 }
 
-/** Cloth bodies by name, so a flex `<body>__<piece>` finds the node it belongs to. */
-function clothNodes(nodes: SceneNode[] | undefined, out = new Map<string, SceneNode>()) {
+/** Cloth bodies by name, with ancestor visibility resolved. */
+function clothNodes(
+  nodes: SceneNode[] | undefined,
+  hidden: Set<string>,
+  ancestorHidden = false,
+  out = new Map<string, { node: SceneNode; hidden: boolean }>(),
+) {
   for (const n of nodes ?? []) {
-    if (n.cloth) out.set(n.name || n.id, n);
-    clothNodes(n.children, out);
+    const isHidden = ancestorHidden || hidden.has(n.id);
+    if (n.cloth) out.set(n.name || n.id, { node: n, hidden: isHidden });
+    clothNodes(n.children, hidden, isHidden, out);
   }
   return out;
 }
 
+/** Live visual rgba from `node.cloth` so colour edits never require a worker rebuild. */
+function livePieceRgba(node: SceneNode | undefined, flex: FlexInfo, pieceName: string): number[] {
+  if (node?.cloth?.garment) {
+    const att = node.cloth.garment.attached?.find((a) => a.name === pieceName);
+    if (att?.rgba) return att.rgba;
+    const c = garmentSettings(node.cloth.garment).rgba;
+    return pieceName.startsWith('back') ? [c[0] * 0.85, c[1] * 0.85, c[2] * 0.85, c[3] ?? 1] : c;
+  }
+  if (node?.cloth?.pieces?.length) {
+    return node.cloth.pieces.find((p) => p.name === pieceName)?.rgba ?? flex.rgba;
+  }
+  return flex.rgba;
+}
+
 function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; node: SceneNode | undefined; selected: boolean; data: DataMirror; partners: Map<number, number[]> }) {
+  const sep = flex.name.lastIndexOf('__');
+  const pieceName = sep >= 0 ? flex.name.slice(sep + 2) : flex.name;
   // This piece's stitched vertices: local index, and every vertex it is sewn to.
   const sewn = useMemo(() => {
     const out: [number, number[]][] = [];
@@ -68,7 +92,11 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   // particles, closed with walls along its open edges, so a hem or a cuff
   // shows an edge. As one surface, cloth read as paper.
   const N = flex.vertnum;
-  const pattern = flex.pattern ?? (node?.cloth?.garment ? node.cloth.garment.pattern : node?.cloth?.pattern);
+  const rgba = livePieceRgba(node, flex, pieceName);
+  const pieceSpec = node?.cloth?.pieces?.find((p) => p.name === pieceName);
+  const pattern = node?.cloth
+    ? (pieceSpec?.pattern ?? (node.cloth.garment ? node.cloth.garment.pattern : node.cloth.pattern))
+    : flex.pattern;
   const geometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6 * N), 3));
@@ -117,12 +145,14 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   const scratch = useRef<{ p: Float32Array; n: Float32Array } | null>(null);
   const meshRef = useRef<THREE.Mesh>(null);
   // Trims ride on the cloth (clothTrims), placed from it each time it is drawn.
-  const trims = useClothTrims(flex);
+  const trims = useClothTrims(flex, rgba);
   useEffect(() => () => geometry.dispose(), [geometry]);
+  const r = rgba[0], gCol = rgba[1], b = rgba[2], alpha = rgba[3] ?? 1;
   // The fabric's look: leather and taffeta take a shine, velvet and knits a
   // soft sheen; one matte shading for all made a leather jacket a sweater.
   const material = useMemo(() => {
     const look = FABRIC_LOOK[flex.material ?? 'jersey'] ?? FABRIC_LOOK.jersey;
+    const translucent = alpha < 1;
     return new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(flex.rgba[0], flex.rgba[1], flex.rgba[2]),
       roughness: look.roughness,
@@ -132,19 +162,30 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
       sheenRoughness: 0.8,
       sheenColor: new THREE.Color(1, 1, 1),
       side: THREE.DoubleSide,
+      transparent: translucent,
+      opacity: alpha,
+      depthWrite: !translucent,
       // Its weave, where the piece has a flat pattern to lay it by.
       ...(flex.flat?.uv ? { normalMap: weaveTexture(flex.material ?? 'jersey'), normalScale: new THREE.Vector2(0.6, 0.6) } : {}),
     });
-  }, [flex]);
+  }, [flex, alpha]);
   useEffect(() => () => material.dispose(), [material]);
   useEffect(() => {
     material.emissive.set(selected ? 0x223355 : 0x000000);
   }, [material, selected]);
   const invalidate = useThree((s) => s.invalidate);
+  // Live colour updates when no SVG print overrides `material.color`.
+  useEffect(() => {
+    if (!pattern?.svg) {
+      material.color.setRGB(r, gCol, b);
+      invalidate();
+    }
+  }, [material, r, gCol, b, pattern?.svg, invalidate]);
   // A print: one texture per print and colour, shared by every panel wearing it.
   useEffect(() => {
     if (!pattern?.svg || typeof document === 'undefined') return;
-    const release = acquirePrintTexture(pattern, flex.rgba, (tex) => {
+    const baseColor = [r, gCol, b, alpha];
+    const release = acquirePrintTexture(pattern, baseColor, (tex) => {
       material.map = tex;
       material.color.set(0xffffff);
       material.needsUpdate = true;
@@ -153,10 +194,11 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
     return () => {
       release();
       material.map = null;
-      material.color.setRGB(flex.rgba[0], flex.rgba[1], flex.rgba[2]);
+      material.color.setRGB(r, gCol, b);
       material.needsUpdate = true;
+      invalidate();
     };
-  }, [pattern, flex.rgba, material, invalidate]);
+  }, [pattern, r, gCol, b, alpha, material, invalidate]);
 
   // Positions before the first frame too, so a paused scene shows its cloth.
   // Read from the store, not the prop: after a rebuild this mounts with the
@@ -231,7 +273,19 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   };
   return (
     <>
-      <mesh ref={meshRef} geometry={geometry} material={material} frustumCulled={false} castShadow receiveShadow onClick={onClick} onPointerDown={grab.onPointerDown} {...sculpt.handlers} />
+      <mesh
+        ref={meshRef}
+        name={pieceName}
+        userData={{ geomName: pieceName, ...(node ? { bodyId: node.id } : {}) }}
+        geometry={geometry}
+        material={material}
+        frustumCulled={false}
+        castShadow
+        receiveShadow
+        onClick={onClick}
+        onPointerDown={grab.onPointerDown}
+        {...sculpt.handlers}
+      />
       {sculpt.overlay}
       {trims.objects.map((o, i) => <primitive key={i} object={o} />)}
     </>
@@ -240,8 +294,13 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
 
 export function ClothLayer({ model, data, sceneGraph }: Props) {
   const selectedNodeId = useStore((s) => s.selectedNodeId);
+  const extraSelectedIds = useStore((s) => s.extraSelectedIds);
   const hiddenNodeIds = useStore((s) => s.hiddenNodeIds);
-  const byName = useMemo(() => clothNodes(sceneGraph?.nodes), [sceneGraph]);
+  const cleanCapture = useCapture((s) => s.clean);
+  const byName = useMemo(
+    () => clothNodes(sceneGraph?.nodes, new Set(hiddenNodeIds)),
+    [sceneGraph, hiddenNodeIds],
+  );
   const stitches = model?.clothStitches;
   const partners = useMemo(() => {
     const m = new Map<number, number[]>();
@@ -251,13 +310,38 @@ export function ClothLayer({ model, data, sceneGraph }: Props) {
   }, [stitches]);
   const flexes = model?.flexes;
   if (!flexes?.length || !data) return null;
-  const hidden = new Set(hiddenNodeIds);
+  const selectedIds = new Set([
+    ...(selectedNodeId ? [selectedNodeId] : []),
+    ...extraSelectedIds,
+  ]);
+  // Group pieces under `<group name={node.id}>` so per-node STL export,
+  // Hi-Res SelectionOutline, and TransformGizmo find every cloth body cleanly.
+  const grouped = new Map<string, { node?: SceneNode; items: FlexInfo[] }>();
+  for (const flex of flexes) {
+    const entry = byName.get(flex.name.slice(0, flex.name.lastIndexOf('__')));
+    if (entry?.hidden) continue;
+    const key = entry?.node.id ?? `__loose__:${flex.name}`;
+    let g = grouped.get(key);
+    if (!g) {
+      g = { node: entry?.node, items: [] };
+      grouped.set(key, g);
+    }
+    g.items.push(flex);
+  }
   return (
     <>
-      {flexes.map((flex) => {
-        const node = byName.get(flex.name.slice(0, flex.name.lastIndexOf('__')));
-        if (node && hidden.has(node.id)) return null;
-        return <ClothPiece key={flex.name} flex={flex} node={node} selected={!!node && node.id === selectedNodeId} data={data} partners={partners} />;
+      {[...grouped.entries()].map(([key, { node, items }]) => {
+        const selected = !cleanCapture && !!node && selectedIds.has(node.id);
+        const children = items.map((flex) => (
+          <ClothPiece key={flex.name} flex={flex} node={node} selected={selected} data={data} partners={partners} />
+        ));
+        return node ? (
+          <group key={node.id} name={node.id} userData={{ bodyId: node.id }}>
+            {children}
+          </group>
+        ) : (
+          <group key={key}>{children}</group>
+        );
       })}
     </>
   );

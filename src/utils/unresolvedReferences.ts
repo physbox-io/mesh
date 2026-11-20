@@ -23,10 +23,10 @@ const NEEDS_JOINT = new Set<ReferenceField>(['coupleTargetId', 'leftTargetId', '
 export interface UnresolvedReference {
   bodyId: string;
   bodyName: string;
-  field: ReferenceField;
+  field: ReferenceField | string;
   target: string;
-  /** missing: no body by that id or name; byName: a name where an id is needed; noJoint: nothing to couple. */
-  reason: 'missing' | 'byName' | 'noJoint';
+  /** missing: no body by that id or name; byName: a name where an id is needed; noJoint: nothing to couple; notBodyForm / notCloth: wrong target kind for cloth. */
+  reason: 'missing' | 'byName' | 'noJoint' | 'notBodyForm' | 'notCloth';
 }
 
 const walk = (nodes: SceneNode[], fn: (n: SceneNode) => void) => {
@@ -41,21 +41,68 @@ const walk = (nodes: SceneNode[], fn: (n: SceneNode) => void) => {
 export function unresolvedReferences(nodes: SceneNode[], only?: Set<string>): UnresolvedReference[] {
   const byId = new Map<string, SceneNode>();
   const names = new Set<string>();
+  const rigidNames = new Set<string>();
+  const forms = new Set<string>();
+  const cloths = new Set<string>();
   const prefixes: string[] = [];
   walk(nodes, (n) => {
     if (n.id) byId.set(n.id, n);
     if (n.name) names.add(n.name);
-    if (n.isComposite) prefixes.push(`${n.compositePrefix || `${n.name}_`}B_`);
+    if (n.cloth) {
+      if (n.id) cloths.add(n.id);
+      cloths.add(n.name || n.id);
+    } else if (!n.isPulleyRope) {
+      if (n.id) rigidNames.add(n.id);
+      if (n.name) rigidNames.add(n.name);
+      if (n.bodyForm) {
+        if (n.id) forms.add(n.id);
+        forms.add(n.name || n.id);
+      }
+      if (n.isComposite) prefixes.push(`${n.compositePrefix || `${n.name}_`}B_`);
+    }
   });
+  const anyKnown = (s: string) => byId.has(s) || names.has(s);
   const out: UnresolvedReference[] = [];
   walk(nodes, (n) => {
     if (only && !only.has(n.id)) return;
+    if (n.cloth) {
+      const fit = n.cloth.garment?.fitTo;
+      if (typeof fit === 'string' && !forms.has(fit)) {
+        out.push({
+          bodyId: n.id,
+          bodyName: n.name ?? n.id,
+          field: 'cloth.garment.fitTo',
+          target: fit,
+          reason: anyKnown(fit) ? 'notBodyForm' : 'missing',
+        });
+      }
+      (n.cloth.ties || []).forEach((t, i) => {
+        if (typeof t.to === 'string' && !rigidNames.has(t.to) && !prefixes.some((p) => t.to!.startsWith(p))) {
+          out.push({
+            bodyId: n.id,
+            bodyName: n.name ?? n.id,
+            field: `cloth.ties[${i}].to`,
+            target: t.to,
+            reason: 'missing',
+          });
+        }
+        if (typeof t.toCloth === 'string' && !cloths.has(t.toCloth)) {
+          out.push({
+            bodyId: n.id,
+            bodyName: n.name ?? n.id,
+            field: `cloth.ties[${i}].toCloth`,
+            target: t.toCloth,
+            reason: anyKnown(t.toCloth) ? 'notCloth' : 'missing',
+          });
+        }
+      });
+    }
     for (const field of FIELDS) {
       const target = n[field];
       if (typeof target !== 'string') continue;
       const at = { bodyId: n.id, bodyName: n.name ?? n.id, field, target };
       const node = byId.get(target);
-      if (!node && !names.has(target) && !prefixes.some((p) => target.startsWith(p))) {
+      if ((!node || node.cloth) && !rigidNames.has(target) && !prefixes.some((p) => target.startsWith(p))) {
         out.push({ ...at, reason: 'missing' });
       } else if (NEEDS_JOINT.has(field) && !node) {
         out.push({ ...at, reason: 'byName' });
@@ -75,6 +122,8 @@ export function unresolvedReferences(nodes: SceneNode[], only?: Set<string>): Un
 export function unresolvedReferenceWarnings(refs: UnresolvedReference[]): string[] {
   return refs.map((r) => {
     const where = `${r.field} '${r.target}' on ${r.bodyName}`;
+    if (r.reason === 'notBodyForm') return `${where} names a body that is not a body form, so the garment was released from it.`;
+    if (r.reason === 'notCloth') return `${where} names a body that is not cloth, so the tie was dropped.`;
     if (r.reason === 'missing') return `${where} names no body in the scene, so it was dropped and does nothing. Check the id (physics_get_scene_summary lists them).`;
     if (r.reason === 'byName') return `${where} is a body's name; ${r.field} needs its id, so nothing is coupled.`;
     return `${where}: ${r.target === r.bodyId ? r.bodyName : `'${r.target}'`} has no joint, so nothing is coupled. Give it a hinge or slide.`;

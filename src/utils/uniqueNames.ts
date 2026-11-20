@@ -1,4 +1,5 @@
 import type { SceneGraph, SceneNode } from '../types/scene';
+import { bodyFormKey } from './cloth/bodyFormEdit';
 
 /*
  * Body and geom names must be unique in the compiled model, and the viewport
@@ -159,9 +160,120 @@ function planRenames(nodes: SceneNode[]): Renames {
   return renames;
 }
 
+interface ClothTargetMaps {
+  forms: Map<string, string>;
+  cloths: Map<string, string>;
+  bodies: Map<string, string>;
+}
+
+function buildClothTargetMaps(nodes: SceneNode[], renames: Renames): ClothTargetMaps {
+  const finalNames = new Set<string>();
+  const scan = (list: SceneNode[]) => {
+    for (const n of list || []) {
+      if (!n.isPulleyRope) {
+        const r = renames.get(n);
+        finalNames.add(r?.name ?? (n.name || r?.id || n.id || 'body'));
+      }
+      scan(n.children || []);
+    }
+  };
+  scan(nodes);
+  const forms = new Map<string, string>();
+  const cloths = new Map<string, string>();
+  const bodies = new Map<string, string>();
+  const register = (map: Map<string, string>, id: string | undefined, targetName: string) => {
+    if (!id) return;
+    if (id === targetName || !finalNames.has(id)) map.set(id, targetName);
+  };
+  const populate = (list: SceneNode[]) => {
+    for (const n of list || []) {
+      const r = renames.get(n);
+      const nextId = r?.id ?? n.id;
+      const finalName = r?.name ?? (n.name || nextId || 'body');
+      if (n.cloth) {
+        register(cloths, n.id, finalName);
+        register(cloths, nextId, finalName);
+      } else if (!n.isPulleyRope) {
+        register(bodies, n.id, finalName);
+        register(bodies, nextId, finalName);
+        if (n.bodyForm) {
+          register(forms, n.id, finalName);
+          register(forms, nextId, finalName);
+        }
+      }
+      populate(n.children || []);
+    }
+  };
+  populate(nodes);
+  return { forms, cloths, bodies };
+}
+
+/**
+ * Rewrites cloth target references (`fitTo`, `ties[].to`, `ties[].toCloth`)
+ * held by id (from duplicate/paste or MCP) to the target's final unique name,
+ * and keeps `bodyFormBuilt` aligned when a clean dress form is renamed so a
+ * duplicate does not re-run 40 SurfaceNets builds.
+ */
+function clothNameRewrites(
+  node: SceneNode,
+  renames: Renames,
+  maps: ClothTargetMaps,
+): Pick<SceneNode, 'cloth' | 'bodyFormBuilt'> | null {
+  let cloth = node.cloth;
+  let clothChanged = false;
+  if (cloth) {
+    const fit = cloth.garment?.fitTo;
+    if (typeof fit === 'string' && maps.forms.has(fit) && maps.forms.get(fit) !== fit) {
+      cloth = { ...cloth, garment: { ...cloth.garment!, fitTo: maps.forms.get(fit)! } };
+      clothChanged = true;
+    }
+    if (cloth.ties?.length) {
+      let tiesChanged = false;
+      const ties = cloth.ties.map((t) => {
+        const nextTo = typeof t.to === 'string' && maps.bodies.has(t.to) ? maps.bodies.get(t.to)! : t.to;
+        const nextCloth = typeof t.toCloth === 'string' && maps.cloths.has(t.toCloth) ? maps.cloths.get(t.toCloth)! : t.toCloth;
+        if (nextTo === t.to && nextCloth === t.toCloth) return t;
+        tiesChanged = true;
+        return {
+          ...t,
+          ...(nextTo !== undefined ? { to: nextTo } : {}),
+          ...(nextCloth !== undefined ? { toCloth: nextCloth } : {}),
+        };
+      });
+      if (tiesChanged) {
+        cloth = { ...cloth, ties };
+        clothChanged = true;
+      }
+    }
+  }
+  const r = renames.get(node);
+  const nextFormBuilt =
+    node.bodyForm && node.bodyFormBuilt && (r?.name || r?.id) && node.bodyFormBuilt === bodyFormKey(node)
+      ? bodyFormKey({ bodyForm: node.bodyForm, id: r?.id ?? node.id, name: r?.name ?? node.name })
+      : undefined;
+  const formBuiltChanged = nextFormBuilt !== undefined && nextFormBuilt !== node.bodyFormBuilt;
+  if (!clothChanged && !formBuiltChanged) return null;
+  return {
+    ...(clothChanged ? { cloth } : {}),
+    ...(formBuiltChanged ? { bodyFormBuilt: nextFormBuilt } : {}),
+  };
+}
+
 /** Renames clashing bodies and geoms in place. For a copy that is the caller's to change. */
 export function uniquifyNamesInPlace(nodes: SceneNode[]): void {
-  for (const [node, { id, name, geoms, joints, prefix }] of planRenames(nodes)) {
+  const renames = planRenames(nodes);
+  const maps = buildClothTargetMaps(nodes, renames);
+  const clothUpdates: [SceneNode, NonNullable<ReturnType<typeof clothNameRewrites>>][] = [];
+  const consider = (list: SceneNode[]) => {
+    for (const n of list || []) {
+      const cw = clothNameRewrites(n, renames, maps);
+      if (cw) clothUpdates.push([n, cw]);
+      consider(n.children || []);
+    }
+  };
+  consider(nodes);
+  for (const [node, cw] of clothUpdates) Object.assign(node, cw);
+  for (const [node, { id, name, geoms, joints, prefix }] of renames) {
     if (id) node.id = id;
     if (name) node.name = name;
     if (prefix) node.compositePrefix = prefix;
@@ -177,16 +289,18 @@ export function uniquifyNamesInPlace(nodes: SceneNode[]): void {
  */
 export function withUniqueNames(scene: SceneGraph): SceneGraph {
   const renames = planRenames(scene.nodes);
-  if (renames.size === 0) return scene;
+  const maps = buildClothTargetMaps(scene.nodes, renames);
   const rebuild = (list: SceneNode[]): SceneNode[] => {
     let changed = false;
     const out = list.map((node) => {
       const children = node.children ? rebuild(node.children) : node.children;
       const r = renames.get(node);
-      if (!r && children === node.children) return node;
+      const cw = clothNameRewrites(node, renames, maps);
+      if (!r && !cw && children === node.children) return node;
       changed = true;
       return {
         ...node,
+        ...cw,
         ...(r?.id ? { id: r.id } : {}),
         ...(r?.name ? { name: r.name } : {}),
         ...(r?.prefix ? { compositePrefix: r.prefix } : {}),
@@ -197,7 +311,8 @@ export function withUniqueNames(scene: SceneGraph): SceneGraph {
     });
     return changed ? out : list;
   };
-  return { ...scene, nodes: rebuild(scene.nodes) };
+  const nodes = rebuild(scene.nodes);
+  return nodes === scene.nodes ? scene : { ...scene, nodes };
 }
 
 /** A raw body descriptor's id, as fillBodyDefaults will decide it. */

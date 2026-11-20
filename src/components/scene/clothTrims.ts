@@ -34,11 +34,16 @@ const TRIM_GEOMETRY: Record<string, () => THREE.BufferGeometry> = {
   // A slider and its pull, hanging down the line: the pull's tab runs along
   // the line from the slider to its ring (across it, it read as a bar apart
   // from the slider).
-  slider: () => mergeGeometries([
-    new THREE.BoxGeometry(2.4, 0.5, 1.6).translate(0, 0.25, 0),
-    new THREE.BoxGeometry(3.0, 0.22, 0.8).translate(-2.4, 0.55, 0),
-    new THREE.TorusGeometry(0.42, 0.13, 6, 12).rotateX(Math.PI / 2).translate(-4.3, 0.55, 0),
-  ])!,
+  slider: () => {
+    const parts = [
+      new THREE.BoxGeometry(2.4, 0.5, 1.6).translate(0, 0.25, 0),
+      new THREE.BoxGeometry(3.0, 0.22, 0.8).translate(-2.4, 0.55, 0),
+      new THREE.TorusGeometry(0.42, 0.13, 6, 12).rotateX(Math.PI / 2).translate(-4.3, 0.55, 0),
+    ];
+    const merged = mergeGeometries(parts)!;
+    for (const p of parts) p.dispose();
+    return merged;
+  },
   // A dash of thread, its length along the line.
   stitch: () => new THREE.BoxGeometry(1, 0.22, 0.22).translate(0, 0.11, 0),
   buckle: () => {
@@ -68,7 +73,7 @@ interface Group { kind: string; items: Trim[]; mesh: THREE.InstancedMesh }
 interface Tape { items: Trim[]; mesh: THREE.Mesh; geometry: THREE.BufferGeometry }
 
 /** The cloth's trims as meshes, and how to place them from the cloth's points `p` and normals `n` (3 per point) at half-thickness `h`. */
-export function useClothTrims(flex: FlexInfo) {
+export function useClothTrims(flex: FlexInfo, liveRgba?: number[]) {
   const built = useMemo(() => {
     const groups: Group[] = [], tapes: Tape[] = [];
     const byKind = new Map<string, Trim[]>();
@@ -83,6 +88,9 @@ export function useClothTrims(flex: FlexInfo) {
       const mat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(c[0], c[1], c[2]), metalness: matte ? 0 : 0.9, roughness: matte ? 0.6 : 0.3 });
       const mesh = new THREE.InstancedMesh(geom, mat, items.length);
       mesh.frustumCulled = false; mesh.castShadow = kind !== 'stitch';
+      // Decorative stitches/teeth/buttons are skipped in STL/3MF exports so
+      // exporting a scene or garment doesn't emit hundreds of tiny `part_N` meshes.
+      mesh.userData = { skipExport: true };
       // Hidden until placed: a new InstancedMesh is all identity matrices, which
       // draws every trim at full unit size at the origin, a metre-wide box.
       mesh.visible = false;
@@ -101,6 +109,7 @@ export function useClothTrims(flex: FlexInfo) {
       const c = flex.rgba;
       const mesh = new THREE.Mesh(geometry, new THREE.MeshPhysicalMaterial({ color: new THREE.Color(c[0] * 0.45, c[1] * 0.45, c[2] * 0.45), roughness: 0.85, side: THREE.DoubleSide }));
       mesh.frustumCulled = false; mesh.visible = false;
+      mesh.userData = { skipExport: true };
       tapes.push({ items, mesh, geometry });
     }
     // A zip's slider rides its run as it is done up and undone (the frame's
@@ -110,6 +119,12 @@ export function useClothTrims(flex: FlexInfo) {
     for (const list of runTeeth.values()) list.sort((a, b) => a.zip!.at - b.zip!.at);
     return { groups, tapes, runTeeth };
   }, [flex]);
+  useEffect(() => {
+    const c = liveRgba ?? flex.rgba;
+    for (const { mesh } of built.tapes) {
+      (mesh.material as THREE.MeshPhysicalMaterial).color.setRGB(c[0] * 0.45, c[1] * 0.45, c[2] * 0.45);
+    }
+  }, [built, liveRgba, flex.rgba]);
   useEffect(() => () => {
     for (const { mesh } of built.groups) { mesh.geometry.dispose(); (mesh.material as THREE.Material).dispose(); }
     for (const { mesh, geometry } of built.tapes) { geometry.dispose(); (mesh.material as THREE.Material).dispose(); }

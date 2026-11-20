@@ -43,6 +43,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Line, TransformControls } from '@react-three/drei';
 import * as THREE from 'three';
+import { useGarmentSculpt } from '../../store/garmentSculptStore';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { positiveBounds } from '../../utils/csg';
@@ -481,8 +482,10 @@ export const TransformGizmo = () => {
    * each; it wants a batched store action, so for now the gizmo steps aside and
    * the sidebar still works.
    */
+  const garmentToolActive = useGarmentSculpt((s) => s.target !== null);
   const suppressed =
-    isPlaying || !node || extraSelectedIds.length > 0 || multiSelectMode ||
+    isPlaying || !node || Boolean(node.cloth?.garment?.fitTo) || garmentToolActive ||
+    extraSelectedIds.length > 0 || multiSelectMode ||
     paintMode || measureMode !== null || latticeNodeId !== null ||
     sculptNodeId !== null || draggedNodeId !== null;
 

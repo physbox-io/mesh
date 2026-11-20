@@ -17,6 +17,8 @@ import { collidersAreStale, intrusionSentence, solidMeshGeoms, uncoveredSentence
 import { measurePart } from './solidMachiningExporter';
 import { collidingGeomBoxes } from './collisionCheck';
 import type { BodyWorldPos } from './bodyWorld';
+import { garmentSettings } from './cloth/garments';
+import { needsBodyFormBuild } from './cloth/bodyFormEdit';
 
 export const bboxOf = (flatVerts: number[] | undefined) => {
   if (!flatVerts || flatVerts.length === 0) return undefined;
@@ -192,6 +194,7 @@ function dropsAnything(nodes: SceneNode[]): boolean {
 
 /** A body (not its children) set up for a physics experiment rather than to be made. */
 function isExperimentBody(n: SceneNode): boolean {
+  if (n.cloth || n.bodyForm) return true;
   if (n.shatterImpulseNs != null || n.loadStrength || n.joinMaterial || n.script?.trim()) return true;
   if ((n.geoms || []).some((g) => g.dentYieldNs != null)) return true;
   return (n.joints || []).some((j) => j.crumpleTorqueNm != null || !!j.actuator
@@ -201,6 +204,27 @@ function isExperimentBody(n: SceneNode): boolean {
 // ---------------------------------------------------------------------------
 // Has the model caught up with the graph?
 // ---------------------------------------------------------------------------
+
+/** Cloth spec stripped of visual-only `rgba` and `pattern` so colour/print edits don't look stale. */
+function clothPhysicsSpec(cloth: SceneNode['cloth']): unknown {
+  if (!cloth) return null;
+  const { pattern: _p, garment, pieces, ...rest } = cloth;
+  return {
+    ...rest,
+    ...(garment
+      ? {
+          garment: {
+            ...garment,
+            rgba: undefined,
+            pattern: undefined,
+            trims: garment.trims?.map((t) => ({ ...t, rgba: undefined })),
+            attached: garment.attached?.map((a) => ({ ...a, rgba: undefined, pattern: undefined })),
+          },
+        }
+      : {}),
+    ...(pieces ? { pieces: pieces.map((p) => ({ ...p, rgba: undefined, pattern: undefined, trims: p.trims?.map((t) => ({ ...t, rgba: undefined })) })) } : {}),
+  };
+}
 
 /**
  * Everything about one body (not its children) that changes what the compiled
@@ -213,6 +237,8 @@ export function bodyPhysicsKey(node: SceneNode): string {
     node.pos ?? null, node.quat ?? null, node.euler ?? null,
     (node.joints || []).map((j) => [j.type, j.axis ?? null, j.pos ?? null]),
     node.csgMass ?? null, node.collisionMass ?? null,
+    node.bodyForm ?? null,
+    clothPhysicsSpec(node.cloth),
     (node.geoms || []).map((g) => [
       g.type, g.size ?? null, g.pos ?? null, g.quat ?? null, g.euler ?? null, g.fromto ?? null,
       g.mass ?? null, g.density ?? null, g.role ?? null, g.contype ?? null, g.conaffinity ?? null,
@@ -270,6 +296,10 @@ const um = (v: number[] | undefined) => v?.map((x) => (typeof x === 'number' ? +
  * then read as the verdict; it is reported as pending instead.
  */
 export function collisionReport(node: SceneNode): Record<string, unknown> {
+  if (node.cloth) return {};
+  if (node.bodyForm && node.collision !== 'decompose') {
+    return { collidesAs: 'body form (exact cloth SDF; hull for rigid contact)' };
+  }
   const colliders = (node.geoms || []).filter(g => g.csgDerived === 'collider');
   if (collidersAreStale(node)) {
     return {
@@ -384,6 +414,19 @@ function geomListing(node: SceneNode, full: boolean): Record<string, unknown> {
     };
     return out;
   }
+  if (node.bodyForm) {
+    const parts = listed.filter((g) => g.csgDerived !== 'collider');
+    const colliders = listed.filter((g) => g.csgDerived === 'collider');
+    out.geoms = [];
+    out.bodyForm = {
+      figure: node.bodyForm.figure,
+      heightM: +node.bodyForm.height.toFixed(3),
+      partGeoms: parts.length,
+      ...(needsBodyFormBuild(node) ? { pending: true } : {}),
+    };
+    if (colliders.length) out.colliderGeoms = colliders.length;
+    return out;
+  }
   const colliders = listed.filter((g) => g.csgDerived === 'collider');
   out.geoms = listed.filter((g) => g.csgDerived !== 'collider').map(summarizeGeom);
   if (colliders.length) out.colliderGeoms = colliders.length;
@@ -413,10 +456,36 @@ function worldPosOf(node: SceneNode, world: Map<string, BodyWorldPos> | undefine
   return { worldPos: um(w.pos), worldPosSource: w.source };
 }
 
+function summarizeCloth(node: SceneNode, model: ModelMirror | null, stale: boolean): Record<string, unknown> | null {
+  const cloth = node.cloth;
+  if (!cloth) return null;
+  const name = node.name || node.id;
+  const matched = (model?.flexes ?? []).filter((f) => f.name.slice(0, f.name.lastIndexOf('__')) === name);
+  const draft = cloth.garment;
+  const settings = draft ? garmentSettings(draft) : null;
+  return {
+    kind: draft ? draft.garment : 'sheet',
+    material: settings ? settings.material : (cloth.material ?? 'woven'),
+    ...(draft?.fitTo ? { fitTo: draft.fitTo } : {}),
+    ...(cloth.layer !== undefined ? { layer: cloth.layer } : {}),
+    ...(cloth.ties?.length ? { ties: cloth.ties.length } : {}),
+    pieceCount: matched.length || (cloth.pieces?.length ?? 0),
+    ...(matched.length
+      ? {
+          pieces: matched.map((f) => f.name.slice(f.name.lastIndexOf('__') + 2)),
+          vertCount: matched.reduce((acc, f) => acc + f.vertnum, 0),
+          triCount: matched.reduce((acc, f) => acc + f.elems.length / 3, 0),
+        }
+      : {}),
+    ...(stale ? { stale: true } : {}),
+  };
+}
+
 export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<string, unknown> => {
   const inertial = inertialOf(ctx.model, node);
   const stale = ctx.stale?.has(node.id) ?? false;
   const csgPending = !!node.csgEnabled && hasBooleanOps(node) && csgHashOf(node) !== node.csgHash;
+  const clothSummary = summarizeCloth(node, ctx.model, stale);
   return {
     id: node.id,
     name: node.name,
@@ -426,6 +495,14 @@ export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<stri
     ...(node.quat ? { quat: um(node.quat) } : {}),
     ...(node.euler ? { euler: um(node.euler) } : {}),
     ...(node.scad ? { hasScad: true } : {}),
+    ...(clothSummary ? { cloth: clothSummary } : {}),
+    ...(ctx.full && node.bodyForm ? {
+      bodyForm: {
+        figure: node.bodyForm.figure,
+        heightM: +node.bodyForm.height.toFixed(3),
+        ...(needsBodyFormBuild(node) ? { pending: true } : {}),
+      },
+    } : {}),
     // Joint anchors and child bodies are in the body frame, whose origin is
     // the shape's centre of mass; this is where the cage's own origin is in
     // it, in mm (utils/latticeFrame.ts).

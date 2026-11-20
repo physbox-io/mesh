@@ -241,6 +241,10 @@ export const setLastHeapBytes = (bytes: number) => { lastHeapBytes = bytes; };
 // Every scripted body's api.state as of the latest frame; see onFrame and the
 // recycles that seed from it (utils/scriptState.ts).
 export let lastScriptState: ScriptStateMap | undefined;
+// Latest serialisable ClothSim state snapshot from the worker, carried across
+// proactive WASM-heap recycles so cloth does not reset or re-settle mid-play.
+export let lastClothState: unknown;
+export const setLastClothState = (state: unknown) => { lastClothState = state; };
 
 /**
  * Run something on the next paint, or straight away if there will not be one.
@@ -462,6 +466,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       // Kept beside the qpos mirror, from the same frame, so a recycle seeds
       // the new worker's scripts from the moment its bodies are seeded from.
       lastScriptState = snap.scriptState;
+      lastClothState = (snap as { clothState?: unknown }).clothState;
       noteWorkerFrame(snap.time);
       const data = store().getState().data;
       if (data) {
@@ -617,6 +622,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       const f = Math.round(fastened * 1000) / 1000;
       if (Math.abs(doneUp(trims[trim]) - f) < 1e-3) return;
       const next = trims.map((t, k) => (k === trim ? { ...t, fastened: f >= 1 ? true : f <= 0 ? false : f } : t));
+      st.prepareForDiscreteChange();
       st.updateNode(node.id, { cloth: { ...node.cloth!, garment: { ...draft, trims: next } } }, true);
     };
     client.onError = (message, fatal, lastState) => {

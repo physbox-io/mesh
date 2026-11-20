@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "preview": "vite preview",
-    "export:presets": "npx vite-node scripts/export-presets.ts",
+    "export:presets": "jiti scripts/export-presets.ts",
     "postinstall": "node scripts/optimize-mujoco-wasm.mjs"
   },
   "dependencies": {

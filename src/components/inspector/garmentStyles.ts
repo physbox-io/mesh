@@ -88,10 +88,10 @@ export const COLLARS: ChoiceStyle[] = [
   { id: 'shawl', label: 'Shawl', tip: 'Lapels and collar in one rolled piece. Opens the front.', apply: (d) => ({ ...d, opening: true, lapels: { break: 0.24, width: 0.07, peak: 0, shawl: true }, collar: { stand: 0.015, standFront: 0.005, fall: 0.06 } }), is: (d) => !!d.lapels?.shawl },
 ];
 
-const closes = (d: GarmentDraft) => (d.trims ?? []).filter((t) => t.along === 'opening' && (t.kind === 'button' || (t.kind === 'zipper' && t.fastened !== false && t.fastened !== 0)));
+const closes = (d: GarmentDraft) => (d.trims ?? []).filter((t) => t.along === 'opening' && (t.kind === 'button' || t.kind === 'zipper'));
 const withoutClosure = (d: GarmentDraft) => (d.trims ?? []).filter((t) => !(t.along === 'opening' && (t.kind === 'button' || t.kind === 'zipper')));
 export const FASTENINGS: ChoiceStyle[] = [
   { id: 'open', label: 'Open', tip: 'Left open.', apply: (d) => ({ ...d, trims: withoutClosure(d) }), is: (d) => closes(d).length === 0 },
   { id: 'buttons', label: 'Buttons', tip: 'Buttoned, on a stand lapping over the other front.', apply: (d) => ({ ...d, trims: [...withoutClosure(d), { kind: 'button', along: 'opening', spacing: 0.08 }] }), is: (d) => closes(d).some((t) => t.kind === 'button') },
-  { id: 'zip', label: 'Zip', tip: 'Zipped up the front.', apply: (d) => ({ ...d, trims: [...withoutClosure(d), { kind: 'zipper', along: 'opening', fastened: true }] }), is: (d) => closes(d).some((t) => t.kind === 'zipper' && t.fastened !== false && t.fastened !== 0) },
+  { id: 'zip', label: 'Zip', tip: 'Zipped up the front.', apply: (d) => ({ ...d, trims: [...withoutClosure(d), { kind: 'zipper', along: 'opening', fastened: true }] }), is: (d) => closes(d).some((t) => t.kind === 'zipper') },
 ];

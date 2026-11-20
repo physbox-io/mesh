@@ -181,20 +181,39 @@ export const buildNode = (node: SceneNode): string => {
 
   if (node.isComposite) {
     // Only 'cable' survives in MuJoCo 3.17 ('rope' is our alias for it). A
-    // saved 'cloth' or 'grid' composite would fail the whole compile, so it
-    // loads as a cable instead.
+    // saved 'cloth' or 'grid' composite carried a 2D count ('8 8 1') and often
+    // a 'sphere' geom, both of which fail MuJoCo 3.17's 1D cable compiler, so
+    // collapse them to a 1D capsule cable.
+    const rawType = node.compositeType as string | undefined;
+    const isLegacy2D = rawType === 'cloth' || rawType === 'grid';
     const type = 'cable';
-    const count = node.compositeCount || '15 1 1';
-    const size = node.compositeSize !== undefined ? node.compositeSize : '1.5';
+    const rawCountParts = (node.compositeCount || '15 1 1').trim().split(/\s+/).map(Number);
+    const hasMultiDimCount = rawCountParts.some((n, idx) => idx > 0 && Number.isFinite(n) && n > 1);
+    const count = isLegacy2D || hasMultiDimCount
+      ? `${Math.max(2, parseInt(node.compositeCount || '', 10) || 15)} 1 1`
+      : (node.compositeCount || '15 1 1');
+    const rawSize = node.compositeSize !== undefined ? String(node.compositeSize).trim() : '1.5';
+    const firstSize = parseFloat(rawSize.split(/\s+/)[0] || '');
+    const size = isLegacy2D || hasMultiDimCount || /\s/.test(rawSize)
+      ? String(Number.isFinite(firstSize) && firstSize > 0 ? firstSize : 1.5)
+      : rawSize;
     const prefix = node.compositePrefix || `${nameStr}_`;
-    const curve = node.compositeCurve || 's 0 0';
+    const rawCurve = (node.compositeCurve || 's 0 0').trim();
+    const curveParts = rawCurve.split(/\s+/);
+    const curve = isLegacy2D && curveParts.filter((c) => c !== '0').length > 1
+      ? `${curveParts[0] || 's'} 0 0`
+      : rawCurve;
 
     const damping = node.joints?.[0]?.damping !== undefined ? node.joints[0].damping : 0.05;
     const stiffness = node.joints?.[0]?.stiffness !== undefined ? node.joints[0].stiffness : 0.0;
 
     const geom = node.geoms?.[0];
-    const geomType = geom?.type || 'capsule';
-    const geomSize = geom?.size ? geom.size.join(' ') : '0.02';
+    const rawGeomType = geom?.type || 'capsule';
+    const validCableGeom = rawGeomType === 'capsule' || rawGeomType === 'cylinder' || rawGeomType === 'box';
+    const geomType = (isLegacy2D || !validCableGeom) ? 'capsule' : rawGeomType;
+    const geomSize = geomType === 'capsule' || geomType === 'cylinder'
+      ? String(geom?.size?.[0] ?? 0.02)
+      : (geom?.size ? geom.size.join(' ') : '0.02');
     const geomRgba = geom?.rgba ? geom.rgba.join(' ') : '0.8 0.4 0.2 1';
 
     const compositeXml = `<composite type="${type}" count="${count}" size="${size}" curve="${curve}" prefix="${xmlAttr(prefix)}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;

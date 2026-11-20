@@ -20,7 +20,8 @@ import { documentCtrlValues } from '../workers/carryState';
 import { clearBreakage, anyNode, applyShatterPieces } from './breakage';
 import {
   type PhysicsWindow, MUJOCO_SHIM, buildModelMirror, buildDataMirror, RECYCLE_HEAP_BYTES,
-  lastHeapBytes, setLastHeapBytes, lastScriptState, onNextPaint, liveModelGraph, recycleWorker,
+  lastHeapBytes, setLastHeapBytes, lastScriptState, lastClothState, setLastClothState,
+  onNextPaint, liveModelGraph, recycleWorker,
   getPhysicsWorkerClient, endVoltLink, prewarmSceneAcousticIRs,
 } from './physicsEngine';
 import type { PhysicsState } from './useStore';
@@ -266,6 +267,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
           console.info(`[PhysicsWorker] Shared memory (COOP/COEP) active: ${!!built.isShared}`);
         }
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);
+        setLastClothState((built as { clothState?: unknown }).clothState);
         // The error clears NOW, not with the rest on the next paint. The await
         // on recompile() resolves before that paint, and every MCP command
         // reads lastCompileError straight after it: deferred, a build that
@@ -352,6 +354,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
               ctrl: Array.from(live.ctrl as Float64Array),
               time: live.time as number,
               scriptState: lastScriptState,
+              ...(lastClothState !== undefined ? { clothState: lastClothState } : {}),
               // The set speeds that ctrl was running under; see applyEditedCtrl.
               docCtrl: documentCtrlValues(modelBuiltFrom().graph?.nodes),
             }
@@ -393,6 +396,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
                   ctrl: Array.from(live.ctrl as Float64Array),
                   time: live.time as number,
                   scriptState: lastScriptState,
+                  ...(lastClothState !== undefined ? { clothState: lastClothState } : {}),
                   // The set speeds that ctrl was running under; see applyEditedCtrl.
                   docCtrl: documentCtrlValues(modelBuiltFrom().graph?.nodes),
                 }
@@ -477,6 +481,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         client.setEnv(windX, windY, density, waterLevel, sceneGraph);
         const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
+        setLastClothState((built as { clothState?: unknown }).clothState);
         set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
         noteModelBuilt(docGraph);
         if (wasPlaying) { client.setPlaying(true); set({ isPlaying: true }); }
@@ -520,6 +525,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         // A fresh worker is a fresh realm: without this every script's api.state
         // (and, as ever, its globals) would be wiped mid-play.
         scriptState: lastScriptState,
+        ...(lastClothState !== undefined ? { clothState: lastClothState } : {}),
         // The set speeds that ctrl was running under; see applyEditedCtrl.
         docCtrl: documentCtrlValues(modelBuiltFrom().graph?.nodes),
       };
@@ -534,6 +540,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);
+        setLastClothState((built as { clothState?: unknown }).clothState);
         set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
         noteModelBuilt(docGraph);
         if (get().isPlaying) client.setPlaying(true);

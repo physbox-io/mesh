@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneJoint } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import { releaseFastenings } from '../utils/hardwareParts';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { getStickyRotation } from '../utils/geom';
@@ -19,9 +19,49 @@ import { MUJOCO_SHIM, getPhysicsWorkerClient } from './physicsEngine';
 import type { SliceDeps } from './sliceDeps';
 import { takeEnvironment } from './sceneEnvironment';
 import { assertGeomSizes } from '../utils/geomSize';
-import { mergeBodyForm } from '../utils/cloth/bodyFormEdit';
+import { bodyFormKey, mergeBodyForm } from '../utils/cloth/bodyFormEdit';
 import { reposeGarments } from '../utils/cloth/garmentRepose';
 import type { BodyFormMeasurements } from '../types/cloth';
+import { useGarmentSculpt } from './garmentSculptStore';
+
+/**
+ * Rewrites cloth references (`cloth.garment.fitTo`, `cloth.ties[].to`,
+ * `cloth.ties[].toCloth`) across `nodes` when `target` is renamed from
+ * `oldName` to `newName`.
+ */
+export function rewriteClothReferences(
+  nodes: SceneNode[],
+  target: Pick<SceneNode, 'bodyForm' | 'cloth' | 'isPulleyRope'>,
+  oldName: string,
+  newName: string,
+): void {
+  if (!oldName || oldName === newName) return;
+  const isForm = !!target.bodyForm;
+  const isCloth = !!target.cloth;
+  const isRigid = !target.cloth && !target.isPulleyRope;
+  const walk = (list: SceneNode[] | undefined) => {
+    for (const n of list || []) {
+      if (n.cloth) {
+        if (isForm && n.cloth.garment?.fitTo === oldName) {
+          n.cloth = { ...n.cloth, garment: { ...n.cloth.garment, fitTo: newName } };
+        }
+        if (n.cloth.ties?.length) {
+          let changed = false;
+          const ties = n.cloth.ties.map((t) => {
+            const nextTo = isRigid && t.to === oldName ? newName : t.to;
+            const nextCloth = isCloth && t.toCloth === oldName ? newName : t.toCloth;
+            if (nextTo === t.to && nextCloth === t.toCloth) return t;
+            changed = true;
+            return { ...t, ...(nextTo !== undefined ? { to: nextTo } : {}), ...(nextCloth !== undefined ? { toCloth: nextCloth } : {}) };
+          });
+          if (changed) n.cloth = { ...n.cloth, ties };
+        }
+      }
+      walk(n.children);
+    }
+  };
+  walk(nodes);
+}
 
 /** A node's own transform, as MJCF would apply it under its parent. */
 const localMatrixOf = (node: SceneNode): THREE.Matrix4 => {
@@ -49,7 +89,9 @@ export interface NodeActions {
   updateNodeRotation: (id: string, axis: 0 | 1 | 2, deg: number, rotateAroundCOM?: boolean) => void;
   updateNodeJoint: (id: string, updates: Partial<SceneJoint>, jointIndex?: number) => void;
   updateNodeScript: (id: string, script: string) => void;
-  updateNode: (id: string, updates: Partial<SceneNode>, skipRecompile?: boolean) => void;
+  updateNode: (id: string, updates: Partial<SceneNode>, skipRecompile?: boolean, settle?: boolean) => void;
+  /** Installs off-thread bodyForm geoms without recording a user undo entry or wiping redoStack. */
+  applyBodyFormGeoms: (id: string, geoms: SceneGeom[], key: string, skipRecompile?: boolean) => void;
   /**
    * Lift a body out of its parent and onto the top level, keeping it where
    * it looks like it is. MuJoCo allows a free joint only on a top-level
@@ -78,20 +120,52 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
     renameNode: (id, newName) => {
       get().prepareForDiscreteChange();
       const newScene = cloneSceneGraph(get().sceneGraph);
+      let renamed: SceneNode | null = null;
+      let oldEffectiveName = '';
+      const otherNames = new Set<string>();
+      const scanOthers = (nodes: SceneNode[] | undefined) => {
+        for (const n of nodes || []) {
+          if (n.id !== id && !n.isPulleyRope) otherNames.add(n.name || n.id);
+          scanOthers(n.children);
+        }
+      };
+      scanOthers(newScene.nodes);
       const traverse = (nodes: SceneNode[]) => {
         if (!nodes) return false;
         for (const node of nodes) {
           if (node.id === id) {
+            oldEffectiveName = node.name || node.id;
+            const wasBuilt = !!node.bodyForm && node.bodyFormBuilt === bodyFormKey(node);
             node.name = newName;
+            const nextPrefix = node.name || node.id;
+            if (node.bodyForm && oldEffectiveName !== nextPrefix) {
+              for (const g of node.geoms || []) {
+                if (g.name?.startsWith(`${oldEffectiveName}_`)) {
+                  g.name = `${nextPrefix}_${g.name.slice(oldEffectiveName.length + 1)}`;
+                }
+                if (g.colliderOf?.startsWith(`${oldEffectiveName}_`)) {
+                  g.colliderOf = `${nextPrefix}_${g.colliderOf.slice(oldEffectiveName.length + 1)}`;
+                }
+              }
+              if (wasBuilt) node.bodyFormBuilt = bodyFormKey(node);
+            }
+            renamed = node;
             return true;
           }
           if (traverse(node.children)) return true;
         }
         return false;
       };
-      traverse(newScene.nodes);
+      if (traverse(newScene.nodes) && renamed) {
+        const targetNode = renamed as SceneNode;
+        const desired = targetNode.name || targetNode.id;
+        // If `desired` clashes with another body, point cloth references at
+        // `targetNode.id` so `withUniqueNames` resolves them to `desired_2`.
+        const refTarget = otherNames.has(desired) && !otherNames.has(targetNode.id) ? targetNode.id : desired;
+        rewriteClothReferences(newScene.nodes, targetNode, oldEffectiveName, refTarget);
+      }
       set({ sceneGraph: newScene });
-      get().recompile(newScene);
+      get().recompile(get().sceneGraph);
     },
 
     updateNodePos: (id, newPos) => {
@@ -221,7 +295,7 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
       getPhysicsWorkerClient().updateScript(id, script);
     },
 
-    updateNode: (id, updates, skipRecompile) => {
+    updateNode: (id, updates, skipRecompile, settle) => {
       // A bad geom size is refused, not written for the compiler to guess at.
       if (updates.geoms) assertGeomSizes(updates.geoms, updates.name ?? id);
       if (!skipRecompile) get().recordInteraction('node');
@@ -250,6 +324,13 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
                 if (geom.csg === 'difference') continue;
                 geom.rgba = [rawRgba[0] ?? 0.8, rawRgba[1] ?? 0.8, rawRgba[2] ?? 0.8, rawRgba[3] ?? geom.rgba?.[3] ?? 1];
               }
+            } else if (updates.cloth === undefined && Array.isArray(rawRgba) && rawRgba.length >= 3 && node.cloth) {
+              const c = [rawRgba[0] ?? 0.8, rawRgba[1] ?? 0.8, rawRgba[2] ?? 0.8, rawRgba[3] ?? 1];
+              if (node.cloth.garment) {
+                node.cloth = { ...node.cloth, garment: { ...node.cloth.garment, rgba: c } };
+              } else if (node.cloth.pieces?.length) {
+                node.cloth = { ...node.cloth, pieces: node.cloth.pieces.map((p) => ({ ...p, rgba: [c[0], c[1], c[2], rawRgba[3] ?? p.rgba?.[3] ?? 1] })) };
+              }
             }
             // Same trap as updateNodeJointsList: an update that hands this node
             // its first joint (e.g. an MCP physics_update_object call, not just
@@ -269,8 +350,28 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
         for (const r of reposed) newScene.nodes = reposeGarments(newScene.nodes, r.form, r.from, r.to);
         set({ sceneGraph: newScene });
         // Recompile so aerodynamics flag propagates to physics loop
-        if (!skipRecompile) get().recompile(newScene, undefined, false);
+        if (!skipRecompile) get().recompile(newScene, undefined, false, undefined, settle);
       }
+    },
+
+    applyBodyFormGeoms: (id, geoms, key, skipRecompile) => {
+      const find = (nodes: SceneNode[] | undefined): SceneNode | null => {
+        for (const n of nodes || []) {
+          if (n.id === id) return n;
+          const c = find(n.children);
+          if (c) return c;
+        }
+        return null;
+      };
+      const current = find(get().sceneGraph.nodes);
+      if (!current || !current.bodyForm || bodyFormKey(current) !== key) return;
+      const newScene = cloneSceneGraph(get().sceneGraph);
+      const node = find(newScene.nodes);
+      if (!node) return;
+      node.geoms = geoms;
+      node.bodyFormBuilt = key;
+      set({ sceneGraph: newScene });
+      if (!skipRecompile) get().recompile(get().sceneGraph, undefined, false);
     },
 
     /*
@@ -421,6 +522,8 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
         const forms = (nodes: SceneNode[]) => { for (const n of nodes) { if (gone.includes(n.id) && n.bodyForm) goneForms.push(n); forms(n.children || []); } };
         forms(get().sceneGraph.nodes);
         newScene.nodes = releaseGarments(newScene.nodes, goneForms);
+        const sculptTarget = useGarmentSculpt.getState().target;
+        if (sculptTarget && gone.includes(sculptTarget)) useGarmentSculpt.getState().set({ target: null });
         set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [] });
         get().recompile(newScene, null);
       }

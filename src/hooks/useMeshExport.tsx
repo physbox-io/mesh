@@ -337,6 +337,7 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     };
     scene.traverse((obj) => {
       if (!(obj as THREE.Mesh).isMesh) return;
+      if (obj.userData?.skipExport) return;
       if (isBackgroundObj(obj)) return;
       // An instanced mesh is owned instance by instance; see below.
       if (only && !(obj as THREE.InstancedMesh).isInstancedMesh && !ownedByOnly(obj)) return;

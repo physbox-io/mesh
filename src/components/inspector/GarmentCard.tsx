@@ -20,8 +20,8 @@ export function GarmentCard({ node }: { node: SceneNode }) {
   const model = useStore((s) => s.model) as ModelMirror | null;
   const name = node.name || node.id;
   const pieces = useMemo<PatternPiece[]>(() => (model?.flexes ?? [])
-    .filter((f) => f.flat && f.name.startsWith(`${name}__`))
-    .map((f) => ({ name: f.name.slice(name.length + 2), ...f.flat! })), [model, name]);
+    .filter((f) => f.flat && f.name.slice(0, f.name.lastIndexOf('__')) === name)
+    .map((f) => ({ name: f.name.slice(f.name.lastIndexOf('__') + 2), ...f.flat! })), [model, name]);
   const layout = useMemo(() => layoutPattern(pieces), [pieces]);
   // A stroke unit for the overlays, so they read at the card's size whatever the pieces' extent.
   const u = layout.width / 250;
@@ -49,11 +49,11 @@ export function GarmentCard({ node }: { node: SceneNode }) {
   const kind = node.cloth.garment?.garment ?? 'cloth';
   const asPieces = node.cloth.layout === 'pieces';
   const setLayout = (layoutMode: 'worn' | 'pieces') => updateNode(node.id, { cloth: { ...node.cloth!, layout: layoutMode } } as Partial<SceneNode>);
-  const setPattern = (next: ClothPatternPrint | undefined) => {
+  const setPattern = (next: ClothPatternPrint | undefined, settle = false) => {
     if (node.cloth!.garment) {
-      updateNode(node.id, { cloth: { ...node.cloth!, garment: { ...node.cloth!.garment, pattern: next } } } as Partial<SceneNode>);
+      updateNode(node.id, { cloth: { ...node.cloth!, garment: { ...node.cloth!.garment, pattern: next } } } as Partial<SceneNode>, false, settle);
     } else {
-      updateNode(node.id, { cloth: { ...node.cloth!, pattern: next } } as Partial<SceneNode>);
+      updateNode(node.id, { cloth: { ...node.cloth!, pattern: next } } as Partial<SceneNode>, false, settle);
     }
   };
   const onPickSvg = async (file: File | undefined) => {
@@ -64,16 +64,16 @@ export function GarmentCard({ node }: { node: SceneNode }) {
   const tileMm = Math.max(20, (pattern?.scale ?? 0.25) * 1000);
   const patternDefId = `cloth-print-${node.id}`;
   return (
-    <div className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-200/60 rounded-lg">
+    <div className="flex flex-col gap-2 p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800 rounded-lg">
       <div className="flex justify-between items-center">
-        <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Pattern</label>
-        <span className="text-[10px] text-slate-500">{kind}, {pieces.length} piece{pieces.length === 1 ? '' : 's'}</span>
+        <label className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Pattern</label>
+        <span className="text-[10px] text-slate-500 dark:text-slate-400">{kind}, {pieces.length} piece{pieces.length === 1 ? '' : 's'}</span>
       </div>
       {node.cloth.garment && (
-        <div className="flex rounded-lg border border-slate-200 overflow-hidden text-[11px] font-semibold">
+        <div className="flex rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden text-[11px] font-semibold">
           {([['worn', 'Worn', 'Sewn and on the form'], ['pieces', 'Pieces', 'Laid out flat round the form; play to sew them up onto it']] as const).map(([id, label, tip]) => (
             <button key={id} onClick={() => setLayout(id)} title={tip}
-              className={`flex-1 py-1.5 transition-colors cursor-pointer ${(asPieces ? 'pieces' : 'worn') === id ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'}`}>
+              className={`flex-1 py-1.5 transition-colors cursor-pointer ${(asPieces ? 'pieces' : 'worn') === id ? 'bg-purple-600 text-white' : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>
               {label}
             </button>
           ))}
@@ -83,16 +83,16 @@ export function GarmentCard({ node }: { node: SceneNode }) {
         <input ref={fileRef} type="file" accept=".svg,image/svg+xml" className="hidden" onChange={(e) => { void onPickSvg(e.target.files?.[0]); e.target.value = ''; }} />
         <button
           onClick={() => fileRef.current?.click()}
-          className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2 border border-slate-200 rounded-lg text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-100 transition-colors cursor-pointer"
+          className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2 border border-slate-200 dark:border-slate-700 rounded-lg text-[11px] font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
           title="Import an SVG graphic or motif to print onto the fabric"
         >
-          <ImagePlus className="w-3.5 h-3.5 text-purple-600" />
+          <ImagePlus className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
           {pattern ? 'Change fabric SVG' : 'Import fabric SVG'}
         </button>
         {pattern && (
           <button
             onClick={() => setPattern(undefined)}
-            className="p-1.5 border border-slate-200 rounded-lg text-slate-500 bg-white hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
+            className="p-1.5 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
             title="Remove fabric SVG print"
           >
             <X className="w-3.5 h-3.5" />
@@ -100,21 +100,21 @@ export function GarmentCard({ node }: { node: SceneNode }) {
         )}
       </div>
       {pattern && (
-        <div className="flex items-center gap-2 text-[10px] text-slate-600">
+        <div className="flex items-center gap-2 text-[10px] text-slate-600 dark:text-slate-300">
           <span>Repeat</span>
           <input
             type="range" min={0.05} max={0.8} step={0.01} value={pattern.scale ?? 0.25}
-            onChange={(e) => setPattern({ ...pattern, scale: parseFloat(e.target.value) })}
+            onChange={(e) => setPattern({ ...pattern, scale: parseFloat(e.target.value) }, true)}
             className="flex-1 accent-purple-600"
           />
           <span className="tabular-nums w-10 text-right">{Math.round((pattern.scale ?? 0.25) * 100)} cm</span>
         </div>
       )}
       {pieces.length === 0 ? (
-        <div className="text-xs text-slate-500">Built with the scene; run or rebuild to lay the pieces out.</div>
+        <div className="text-xs text-slate-500 dark:text-slate-400">Built with the scene; run or rebuild to lay the pieces out.</div>
       ) : (
         <>
-          <svg viewBox={`0 0 ${layout.width} ${layout.height}`} className="w-full bg-white border border-slate-200 rounded" preserveAspectRatio="xMidYMid meet">
+          <svg viewBox={`0 0 ${layout.width} ${layout.height}`} className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded" preserveAspectRatio="xMidYMid meet">
             {svgDataUri && (
               <defs>
                 <pattern id={patternDefId} patternUnits="userSpaceOnUse" width={tileMm} height={tileMm}>
@@ -131,12 +131,12 @@ export function GarmentCard({ node }: { node: SceneNode }) {
                 {p.marks.map((m, i) => (m.kind === 'zipper'
                   ? <circle key={i} cx={m.x} cy={m.y} r={1.3 * u} fill={OVERLAY.zipper} />
                   : <circle key={i} cx={m.x} cy={m.y} r={Math.max(2 * u, m.r)} fill="#fff" stroke={OVERLAY.trim} strokeWidth={0.7 * u} />))}
-                <text x={p.x + p.w / 2} y={p.y + p.h + 14} fontSize={Math.max(8, layout.width / 40)} textAnchor="middle" fill="#334">{p.name}</text>
+                <text x={p.x + p.w / 2} y={p.y + p.h + 14} fontSize={Math.max(8, layout.width / 40)} textAnchor="middle" fill="#64748b">{p.name}</text>
               </g>
             ))}
           </svg>
           {legend.length > 0 && (
-            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500 dark:text-slate-400">
               {legend.map(([label, colour, dashed]) => (
                 <span key={label} className="flex items-center gap-1">
                   <span className="inline-block w-3" style={{ borderTop: `2px ${dashed ? 'dashed' : 'solid'} ${colour}` }} />{label}
@@ -144,7 +144,7 @@ export function GarmentCard({ node }: { node: SceneNode }) {
               ))}
             </div>
           )}
-          <ul className="text-[10px] text-slate-500 grid grid-cols-2 gap-x-2">
+          <ul className="text-[10px] text-slate-500 dark:text-slate-400 grid grid-cols-2 gap-x-2">
             {layout.pieces.map((p) => (
               <li key={p.name} title="The width and height of the piece, and how far 95% of it had to give to lie flat: under a few percent cuts as it is; more wants a dart or a stretch fabric.">
                 {p.name}: {Math.round(p.w)}×{Math.round(p.h)} mm, {(p.strain95 * 100).toFixed(0)}%
@@ -153,7 +153,7 @@ export function GarmentCard({ node }: { node: SceneNode }) {
           </ul>
           <button
             onClick={() => downloadBlob(new Blob([patternSvg(pieces, name)], { type: 'image/svg+xml' }), `${name}_pattern.svg`)}
-            className="flex items-center justify-center gap-2 w-full py-2 border border-emerald-200 rounded-lg text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 hover:border-emerald-300 transition-colors shadow-sm cursor-pointer"
+            className="flex items-center justify-center gap-2 w-full py-2 border border-emerald-200 dark:border-emerald-800 rounded-lg text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 hover:border-emerald-300 transition-colors shadow-sm cursor-pointer"
             title="Download the pieces as an SVG in millimetres: outlines with no seam allowance, a grain line up each, named"
           >
             <Scissors className="w-4 h-4" /> Download pattern (SVG)

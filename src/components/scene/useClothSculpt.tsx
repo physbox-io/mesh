@@ -7,11 +7,12 @@
  * Points come off the cloth as drawn (the Z-up group's frame, MuJoCo's world)
  * and go into the garment's own frame, where its shell is modelled.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useThree, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { useGarmentSculpt } from '../../store/garmentSculptStore';
+import { useOrbitEnable } from './useOrbitEnable';
 import { walkBodiesWorld } from '../../utils/bodyWorld';
 import { clothFrame } from '../../utils/cloth/clothFrame';
 import { STROKE_SPACING, strokeDabs } from '../../utils/cloth/garmentSculpt';
@@ -22,6 +23,11 @@ import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
 
 const Z = new THREE.Vector3(0, 0, 1);
 const PEN_RING = 0.008;
+const RING_GEOM = new THREE.RingGeometry(0.9, 1, 48);
+const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xa855f7, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.85 });
+const MARK_GEOM = new THREE.SphereGeometry(1, 8, 6);
+const MARK_MAT = new THREE.MeshBasicMaterial({ color: 0xa855f7 });
+
 /** The frame the garment is modelled in (its form's, when fitted to one), from the graph as it is now. */
 function worldOf(id: string): THREE.Matrix4 | null {
   const nodes = useStore.getState().sceneGraph?.nodes;
@@ -37,9 +43,20 @@ const ROUTE_STEP = 0.06;
 export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
   const rebuiltWith = flex;
   const { camera, gl } = useThree();
+  const setOrbitEnabled = useOrbitEnable();
+  const holdingOrbit = useRef(false);
+  const releaseOrbit = () => {
+    if (holdingOrbit.current) {
+      holdingOrbit.current = false;
+      setOrbitEnabled(true);
+    }
+  };
   // Arranging: the point grabbed (by its place on its piece's pattern), the plane it is dragged in, the path so far.
   const grab = useRef<{ piece: string; at: [number, number]; plane: THREE.Plane; obj: THREE.Object3D; path: THREE.Vector3[] } | null>(null);
-  const active = useGarmentSculpt((s) => !!node && s.target === node.id);
+  const isPlaying = useStore((s) => s.isPlaying);
+  const toolTarget = useGarmentSculpt((s) => !!node && s.target === node.id);
+  // Suspended while playing so left-dragging grabs the live cloth instead of sculpting.
+  const active = toolTarget && !isPlaying;
   const pen = useGarmentSculpt((s) => s.tool === 'draw');
   const hand = useGarmentSculpt((s) => s.tool === 'arrange');
   const brushRadius = useGarmentSculpt((s) => s.radius);
@@ -51,9 +68,22 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
   const [marksFor, setMarksFor] = useState<{ build: unknown; marks: THREE.Vector3[] }>({ build: rebuiltWith, marks: [] });
   const marks = marksFor.build === rebuiltWith ? marksFor.marks : [];
   const setMarks = (f: (m: THREE.Vector3[]) => THREE.Vector3[]) => setMarksFor((cur) => ({ build: rebuiltWith, marks: f(cur.build === rebuiltWith ? cur.marks : []) }));
-  const ringGeom = useMemo(() => new THREE.RingGeometry(0.9, 1, 48), []);
-  const markGeom = useMemo(() => new THREE.SphereGeometry(1, 8, 6), []);
-  useEffect(() => () => { ringGeom.dispose(); markGeom.dispose(); }, [ringGeom, markGeom]);
+  useEffect(() => {
+    if (!active) {
+      grab.current = null;
+      stroke.current = null;
+      if (holdingOrbit.current) {
+        holdingOrbit.current = false;
+        setOrbitEnabled(true);
+      }
+    }
+  }, [active, setOrbitEnabled]);
+  useEffect(() => () => {
+    if (holdingOrbit.current) {
+      holdingOrbit.current = false;
+      setOrbitEnabled(true);
+    }
+  }, [setOrbitEnabled]);
 
   const local = (e: ThreeEvent<PointerEvent>) => e.object.worldToLocal(e.point.clone());
   const place = (e: ThreeEvent<PointerEvent>, at: THREE.Vector3) => {
@@ -68,6 +98,7 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
   const commitPull = () => {
     const g = grab.current;
     grab.current = null;
+    releaseOrbit();
     if (!g || !node || g.path.length < 2) return;
     const world = worldOf(node.id);
     let cur: SceneNode | undefined;
@@ -102,15 +133,24 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
       if (p.distanceTo(g.path[g.path.length - 1]) > 0.01) g.path.push(p);
     };
     const up = () => commitPull();
+    const cancel = () => { grab.current = null; releaseOrbit(); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
-    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', cancel);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', cancel);
+    };
   });
 
   const commit = () => {
     if (hand) return;
     const s = stroke.current;
     stroke.current = null;
+    releaseOrbit();
     if (!s || !node?.cloth?.garment || !s.points.length) return;
     const fresh = useStore.getState().sceneGraph?.nodes;
     let cur: SceneNode | undefined;
@@ -138,8 +178,15 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
   useEffect(() => {
     if (!active) return;
     const up = () => commit();
+    const cancel = () => { stroke.current = null; releaseOrbit(); };
     window.addEventListener('pointerup', up);
-    return () => window.removeEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', cancel);
+    return () => {
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', cancel);
+    };
   });
 
   const handlers = active ? {
@@ -154,10 +201,16 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
         for (const c of corners) { const d = at.distanceToSquared(new THREE.Vector3(pos.getX(c), pos.getY(c), pos.getZ(c))); if (d < bd) { bd = d; best = c % N; } }
         const uv = best >= 0 ? flex.flat?.uv?.[best] : undefined;
         if (!uv) return;
+        holdingOrbit.current = true;
+        setOrbitEnabled(false);
         const facing = camera.getWorldDirection(new THREE.Vector3());
-        grab.current = { piece: flex.name.split('__').slice(1).join('__'), at: [uv[0], uv[1]], plane: new THREE.Plane().setFromNormalAndCoplanarPoint(facing, e.point.clone()), obj: e.object, path: [at] };
+        const sep = flex.name.lastIndexOf('__');
+        const piece = sep >= 0 ? flex.name.slice(sep + 2) : flex.name;
+        grab.current = { piece, at: [uv[0], uv[1]], plane: new THREE.Plane().setFromNormalAndCoplanarPoint(facing, e.point.clone()), obj: e.object, path: [at] };
         return;
       }
+      holdingOrbit.current = true;
+      setOrbitEnabled(false);
       const at = local(e);
       stroke.current = { points: [at], pull: useGarmentSculpt.getState().pull !== e.shiftKey };
       place(e, at);
@@ -177,16 +230,8 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
 
   const overlay = active || marks.length ? (
     <>
-      {active && (
-        <mesh ref={ring} geometry={ringGeom} scale={radius} visible={false} renderOrder={10}>
-          <meshBasicMaterial color={0xa855f7} side={THREE.DoubleSide} depthTest={false} transparent opacity={0.85} />
-        </mesh>
-      )}
-      {marks.map((p, i) => (
-        <mesh key={i} geometry={markGeom} position={p} scale={0.004}>
-          <meshBasicMaterial color={0xa855f7} />
-        </mesh>
-      ))}
+      {active && <mesh ref={ring} geometry={RING_GEOM} material={RING_MAT} scale={radius} visible={false} renderOrder={10} />}
+      {marks.map((p, i) => <mesh key={i} geometry={MARK_GEOM} material={MARK_MAT} position={p} scale={0.004} />)}
     </>
   ) : null;
   return { handlers, overlay };

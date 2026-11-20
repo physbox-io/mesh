@@ -60,10 +60,16 @@ export function needsScadBuild(node: SceneNode): boolean {
  * Skips csgEnabled nodes deliberately: a boolean body's colliders are produced
  * by evaluateNodeCsg, in the same pass that builds its mesh. Two producers
  * writing colliders to one node would fight over them every compile.
+ *
+ * Also skips dress forms unless convex decomposition was explicitly requested
+ * (`collision === 'decompose'`): cloth collides against exact form SDFs, so
+ * decomposing 40 form meshes into ~600 convex pieces wasted seconds of WASM CPU.
  */
+const shouldDecomposeBodyForm = (node: SceneNode) => !node.bodyForm || node.collision === 'decompose';
+
 function collectStaleColliders(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
   for (const node of nodes || []) {
-    if (!node.csgEnabled && collidersAreStale(node)) out.push(node);
+    if (!node.csgEnabled && shouldDecomposeBodyForm(node) && collidersAreStale(node)) out.push(node);
     collectStaleColliders(node.children || [], out);
   }
   return out;
@@ -92,38 +98,69 @@ function collectUnbuiltBrickwork(nodes: SceneNode[], out: SceneNode[] = []): Sce
  * Body forms whose geoms were built from other measurements (a slider moved,
  * an MCP update, a body arriving as measurements alone). Built in the body
  * form worker; the old geoms stay until the new ones land, so a garment on
- * the form is not dropped meanwhile. One build per body and key at a time,
- * and a failed key is not retried until the measurements change.
+ * the form is not dropped meanwhile. Coalesced to at most one in-flight worker
+ * build per node id (re-running on completion if measurements moved on while
+ * it ran), and installed via `applyBodyFormGeoms` so background builds never
+ * dirty clean scenes or clobber `redoStack` after Undo.
  */
 const failedBodyForms = new Set<string>();
-const bodyFormsInFlight = new Set<string>();
-const bodyFormJob = (node: SceneNode) => `${node.id}|${bodyFormKey(node)}`;
+const bodyFormsInFlight = new Map<string, { key: string; done: Promise<void> }>();
+const bodyFormJob = (id: string, key: string) => `${id}|${key}`;
+
 function collectStaleBodyForms(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
   for (const node of nodes || []) {
-    if (needsBodyFormBuild(node) && !failedBodyForms.has(bodyFormJob(node)) && !bodyFormsInFlight.has(bodyFormJob(node))) out.push(node);
+    if (needsBodyFormBuild(node)) {
+      const key = bodyFormKey(node);
+      const running = bodyFormsInFlight.get(node.id);
+      if (!failedBodyForms.has(bodyFormJob(node.id, key)) && (!running || running.key !== key)) {
+        out.push(node);
+      }
+    }
     collectStaleBodyForms(node.children || [], out);
   }
   return out;
 }
 
+function runBodyFormBuild(nodeId: string): Promise<void> {
+  const existing = bodyFormsInFlight.get(nodeId);
+  if (existing) return existing.done;
+  const entry: { key: string; done: Promise<void> } = { key: '', done: Promise.resolve() };
+  entry.done = (async () => {
+    const { buildBodyFormOffThread } = await import('../utils/cloth/bodyFormClient');
+    while (true) {
+      const cur = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
+      if (!cur || !cur.bodyForm || !needsBodyFormBuild(cur)) break;
+      const key = bodyFormKey(cur);
+      const job = bodyFormJob(nodeId, key);
+      if (failedBodyForms.has(job)) break;
+      entry.key = key;
+      try {
+        const geoms = await buildBodyFormOffThread(cur.bodyForm, cur.name || cur.id);
+        const now = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
+        if (now && now.bodyForm && bodyFormKey(now) === key) {
+          useStore.getState().applyBodyFormGeoms(nodeId, finishBodyFormGeoms(geoms), key);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/supersed|abort|cancel/i.test(msg)) {
+          const now = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
+          if (now && bodyFormKey(now) === key) failedBodyForms.add(job);
+          console.error(`Building the body form failed for ${nodeId}:`, err);
+        }
+        break;
+      }
+    }
+  })().finally(() => {
+    if (bodyFormsInFlight.get(nodeId) === entry) bodyFormsInFlight.delete(nodeId);
+  });
+  bodyFormsInFlight.set(nodeId, entry);
+  return entry.done;
+}
+
 async function buildBodyForms(stale: SceneNode[]): Promise<void> {
   if (stale.length === 0) return;
-  const { buildBodyFormOffThread } = await import('../utils/cloth/bodyFormClient');
-  await Promise.all(stale.map(async (node) => {
-    const job = bodyFormJob(node), key = bodyFormKey(node);
-    bodyFormsInFlight.add(job);
-    try {
-      const geoms = await buildBodyFormOffThread(node.bodyForm!, node.name || node.id);
-      // Built from the measurements it still has: if they changed meanwhile, the next pass builds the new ones.
-      const now = findNodeById(useStore.getState().sceneGraph.nodes, node.id);
-      if (now && bodyFormKey(now) === key) useStore.getState().updateNode(node.id, { geoms: finishBodyFormGeoms(geoms), bodyFormBuilt: key });
-    } catch (err) {
-      failedBodyForms.add(job);
-      console.error(`Building the body form failed for ${node.id}:`, err);
-    } finally {
-      bodyFormsInFlight.delete(job);
-    }
-  }));
+  const uniqueIds = [...new Set(stale.map((n) => n.id))];
+  await Promise.all(uniqueIds.map((id) => runBodyFormBuild(id)));
 }
 
 function collectUnbuiltScad(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
@@ -161,7 +198,7 @@ export function pendingColliderBodies(): string[] {
   const out: string[] = [];
   const running = new Set(collidersInFlight.keys());
   const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => {
-    if ((!n.csgEnabled && collidersAreStale(n)) || running.has(n.id)) out.push(n.name);
+    if ((!n.csgEnabled && shouldDecomposeBodyForm(n) && collidersAreStale(n)) || running.has(n.id)) out.push(n.name);
     walk(n.children);
   });
   walk(useStore.getState().sceneGraph.nodes);

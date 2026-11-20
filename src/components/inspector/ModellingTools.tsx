@@ -84,10 +84,10 @@ export function ModellingTools({ node }: { node: SceneNode }) {
           disappears the next time a face moves — silently, and long
           after the decision that cost it. Baking says so up front,
           and it is an ordinary undo step. */}
-      {/* Not on a boolean body: what it shows is a mesh rebuilt from
-          its primitives on every change, so a stroke on it could
-          only ever be thrown away by the next compile. */}
-      {!node.csgEnabled && node.geoms?.some((g) => g.type === 'mesh' && !g.csgDerived && g.renderVertices?.length) && (
+      {/* Not on a boolean body or dress form: what they show is a mesh rebuilt
+          from their primitives or measurements on every change, so a stroke on
+          it could only ever be thrown away by the next compile. */}
+      {!node.csgEnabled && !node.bodyForm && node.geoms?.some((g) => g.type === 'mesh' && !g.csgDerived && g.renderVertices?.length) && (
         <button
           type="button"
           onClick={() => {

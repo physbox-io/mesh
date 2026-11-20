@@ -314,6 +314,46 @@ export const objectCommands: McpCommands = {
     if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each 0..1');
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
     if (!node) throw new Error(`No object with id '${targetId}'`);
+    if (node.cloth) {
+      const c = [rgba[0], rgba[1], rgba[2], rgba[3] ?? 1];
+      if (node.cloth.garment) {
+        if (geomName) {
+          const attached = node.cloth.garment.attached ?? [];
+          if (!attached.some((a) => a.name === geomName)) {
+            throw new Error(`Garment '${targetId}' has no attached piece named '${geomName}'`);
+          }
+          store.updateNode(targetId, {
+            cloth: {
+              ...node.cloth,
+              garment: {
+                ...node.cloth.garment,
+                attached: attached.map((a) => (a.name === geomName ? { ...a, rgba: [rgba[0], rgba[1], rgba[2], rgba[3] ?? a.rgba?.[3] ?? 1] } : a)),
+              },
+            },
+          });
+          return { ok: true, geomsColored: 1 };
+        }
+        store.updateNode(targetId, {
+          cloth: { ...node.cloth, garment: { ...node.cloth.garment, rgba: c } },
+        });
+        return { ok: true, geomsColored: 1 };
+      }
+      const pieces = node.cloth.pieces ?? [];
+      if (geomName && !pieces.some((p) => p.name === geomName)) {
+        throw new Error(`Cloth '${targetId}' has no piece named '${geomName}'`);
+      }
+      store.updateNode(targetId, {
+        cloth: {
+          ...node.cloth,
+          pieces: pieces.map((p) =>
+            !geomName || p.name === geomName
+              ? { ...p, rgba: [rgba[0], rgba[1], rgba[2], rgba[3] ?? p.rgba?.[3] ?? 1] }
+              : p,
+          ),
+        },
+      });
+      return { ok: true, geomsColored: geomName ? 1 : pieces.length };
+    }
     if (geomName && !(node.geoms || []).some((g: SceneGeom) => g.name === geomName)) {
       throw new Error(`Object '${targetId}' has no geom named '${geomName}'`);
     }

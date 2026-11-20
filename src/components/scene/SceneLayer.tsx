@@ -1241,11 +1241,13 @@ export const DragInteractionController = () => {
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
     window.addEventListener('pointercancel', handlePointerUp);
+    window.addEventListener('blur', handlePointerUp);
 
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('pointercancel', handlePointerUp);
+      window.removeEventListener('blur', handlePointerUp);
     };
   }, [camera, raycaster, gl, setOrbitEnabled]);
 
@@ -1286,10 +1288,13 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
     const mapIds = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
-        const { bId } = findHeaviest(n);
-        if (bId !== -1) {
-          c[n.id] = bId;
-          if (n.name) c[n.name] = bId;
+        // Cloth drags pull XPBD vertices directly (`useClothGrab`), never a rigid child body.
+        if (!n.cloth) {
+          const { bId } = findHeaviest(n);
+          if (bId !== -1) {
+            c[n.id] = bId;
+            if (n.name) c[n.name] = bId;
+          }
         }
         mapIds(n.children);
       }
@@ -1307,13 +1312,19 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
     const dragTarget = useStore.getState().dragTarget;
     // A sculpt stroke claims draggedNodeId too, and pulls on nothing. Not
     // culled: the geometry is rewritten in place and its bounds never are.
-    lineRef.current.visible = !!dragTarget;
     lineRef.current.frustumCulled = false;
-    if (!dragTarget) return;
+    if (!dragTarget) {
+      lineRef.current.visible = false;
+      return;
+    }
 
     try {
       const bId = bodyIdCache.current[draggedNodeId] ?? -1;
-      if (bId === -1) return;
+      if (bId === -1) {
+        lineRef.current.visible = false;
+        return;
+      }
+      lineRef.current.visible = true;
 
       const px = data.xpos[bId * 3];
       const py = data.xpos[bId * 3 + 1];
