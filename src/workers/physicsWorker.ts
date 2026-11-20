@@ -1877,7 +1877,8 @@ const rebuildHydroAndFlexureCaches = (
 
   // Case 4: MuJoCo `<composite>` (`grid` / `cloth` / unanchored aerodynamic `cable`)
   for (const comp of compositeNodes) {
-    const cType = comp.compositeType || 'cable';
+    // A string: scenes saved when MuJoCo had grid and cloth composites still name them.
+    const cType: string = comp.compositeType || 'cable';
     if (cType !== 'grid' && cType !== 'cloth' && !comp.isAerodynamic) continue;
     const prefix = comp.compositePrefix || `${comp.name || comp.id}_`;
     const compBodyIds: number[] = [];
