@@ -12,11 +12,12 @@
  * in the frame of the form as it now is, as it is drawn and read back.
  */
 
-import type { BodyFormMeasurements, ClothPull, FormLimbName, GarmentDraft, GarmentPoint } from '../../types/cloth';
+import type { BodyFormMeasurements, ClothPull, FormLimbName, GarmentDraft, GarmentPlane, GarmentPoint } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import { formLimbs, type FormLimb } from './formLimbs';
 import { proportions } from './formProportions';
 import { bodyFormSection, bodyLandmarks } from './bodyForm';
+import { formPlace } from './garmentDarts';
 
 /** The measurements that pose the form rather than size it. */
 export const POSE_FIELDS = ['armAngle', 'elbowBend', 'stance', 'kneeBend'] as const;
@@ -85,12 +86,25 @@ export function reposeDraft(draft: GarmentDraft, from: BodyFormMeasurements, to:
   const R = reposer(from, to), P = (p: number[]) => pt3(R.point(p));
   // Planes and heights are drawn on the legs hung straight from the hips
   // (garmentShell, straightened): over a leg they go down with the hips only.
-  const Rs = reposer(from, to, ['armL', 'armR']);
+  const Rs = reposer(from, to, ['armL', 'armR', 'head']);
   const gp = (g: GarmentPoint | undefined): GarmentPoint | undefined => (Array.isArray(g) ? P(g) : g);
-  const plane = <T extends { point: number[]; normal: number[]; z?: [number, number] }>(pl: T): T => ({
-    ...pl, point: pt3(Rs.point(pl.point)), normal: Rs.direction(pl.point, pl.normal).map(r6),
-    ...(pl.z ? { z: [r6(pl.z[0] + R.dz), r6(pl.z[1] + R.dz)] as [number, number] } : {}),
-  });
+  const plane = <T extends GarmentPlane>(pl: T): T => {
+    const isArmOnly = pl.on && pl.on.length > 0 && pl.on.every((part) => part === 'armL' || part === 'armR');
+    let z = pl.z;
+    if (z) {
+      if (isArmOnly) {
+        const z0 = Rs.point([pl.point[0], pl.point[1], z[0]])[2];
+        const z1 = Rs.point([pl.point[0], pl.point[1], z[1]])[2];
+        z = [r6(Math.min(z0, z1)), r6(Math.max(z0, z1))];
+      } else {
+        z = [r6(z[0] + R.dz), r6(z[1] + R.dz)];
+      }
+    }
+    return {
+      ...pl, point: pt3(Rs.point(pl.point)), normal: Rs.direction(pl.point, pl.normal).map(r6),
+      ...(z ? { z } : {}),
+    };
+  };
   const out: GarmentDraft = { ...draft };
   if (typeof draft.top === 'number') out.top = r6(draft.top + R.dz);
   if (draft.curves) out.curves = draft.curves.map((c) => ({ ...c, points: c.points.map(P) }));
@@ -99,10 +113,13 @@ export function reposeDraft(draft: GarmentDraft, from: BodyFormMeasurements, to:
   if (draft.cuts) out.cuts = draft.cuts.map(plane);
   if (draft.seams) out.seams = draft.seams.map(plane);
   if (Array.isArray(draft.darts)) {
-    out.darts = draft.darts.map((d) => ({
-      ...d, apex: gp(d.apex)!, ...(d.to !== undefined ? { to: gp(d.to) } : {}),
-      ...(d.direction && Array.isArray(d.apex) ? { direction: R.direction(d.apex, d.direction).map(r6) } : {}),
-    }));
+    out.darts = draft.darts.map((d) => {
+      const apexPt = formPlace(d.apex, from).point;
+      return {
+        ...d, apex: gp(d.apex)!, ...(d.to !== undefined ? { to: gp(d.to) } : {}),
+        ...(d.direction ? { direction: R.direction(apexPt, d.direction).map(r6) } : {}),
+      };
+    });
   }
   if (draft.belt && typeof draft.belt === 'object' && draft.belt.at !== undefined) out.belt = { ...draft.belt, at: r6(draft.belt.at + R.dz) };
   return out;

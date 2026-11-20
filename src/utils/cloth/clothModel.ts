@@ -132,8 +132,6 @@ const OPEN_GAP = 0.001;
 
 interface TrimPlace { trim: GarmentTrim; point: number; toward?: number; t?: number; offset: number; run: number; end: boolean; /** Done up (a fastening's part of the run below how far it is fastened). */ closed: boolean; /** How far up its run, 0 to 1 from the bottom (a fastening's). */ along?: number; /** A point of the cloth on its side of its line (a seam's two panels both hold the line): drawn on the panel that holds it. */ sideOf?: number }
 
-let trimRuns = 0;
-
 /**
  * Where a garment's trims sit: the lines named (`cuff` takes both cuffs)
  * chained into runs, and along each one every `spacing`, exactly there,
@@ -142,6 +140,7 @@ let trimRuns = 0;
  * zip's run ends at its top, where its slider is. Shell point indices.
  */
 function trimPoints(points: number[][], lines: { name: string; path: number[] }[], trims: GarmentTrim[], tris: number[] = []): TrimPlace[] {
+  let trimRuns = 0;
   const out: TrimPlace[] = [];
   // Which side of a run the cloth is on (an edge's one side; a seam's, one of
   // them, the same all along): an offset is into it. Left going along the
@@ -174,7 +173,8 @@ function trimPoints(points: number[][], lines: { name: string; path: number[] }[
       if (o === undefined) continue;
       const pa = points[a], ab = [0, 1, 2].map((c) => points[b][c] - pa[c]), ao = [0, 1, 2].map((c) => points[o][c] - pa[c]);
       // The triangle's own normal, wound outward, as the cloth's normal is drawn.
-      const t0 = tris.findIndex((_, i) => i % 3 === 0 && [tris[i], tris[i + 1], tris[i + 2]].includes(a) && [tris[i], tris[i + 1], tris[i + 2]].includes(b) && [tris[i], tris[i + 1], tris[i + 2]].includes(o));
+      const os = across.get(Math.min(a, b) * n + Math.max(a, b));
+      const t0 = os?.find((x) => x[0] === o)?.[1] ?? -1;
       if (t0 < 0) continue;
       const [q0, q1, q2] = [points[tris[t0]], points[tris[t0 + 1]], points[tris[t0 + 2]]];
       const u = [0, 1, 2].map((c) => q1[c] - q0[c]), v = [0, 1, 2].map((c) => q2[c] - q0[c]);
@@ -515,11 +515,49 @@ function joinGroup(group: ClothRenderGroup, piece: AddOnPiece, particleOf: (loca
   for (let t = 0; t < piece.tris.length; t += 3) group.tris.push(local[piece.tris[t]], local[piece.tris[t + 1]], local[piece.tris[t + 2]]);
   // Cut in one: the piece needs as much stretch to lie flat as the worse of the two did.
   flat.strain95 = Math.max(flat.strain95, piece.strain95 ?? 0);
-  // The outline from a to b one way round or the other: the shorter is the shared line.
+  // The outline from a to b one way round or the other: the shared seam is the arc carrying `piece.shared` vertices,
+  // AND any boundary vertices skipped over between shared points along the neckline/gorge (`neckPts` column thinning in
+  // `collarPieces`) are bridged by `joinPath` rather than left as an unreferenced triangle outside `flat.outline`.
   const m = flat.outline.length, fwd = (ib - ia + m) % m;
   const inner = path.slice(1, -1).map((i) => local[i]);
   const rot = [...flat.outline.slice(ia), ...flat.outline.slice(0, ia)];
-  flat.outline = fwd <= m - fwd ? [a, ...inner, ...rot.slice(fwd)] : [a, ...rot.slice(1, fwd + 1), ...inner.slice().reverse()];
+  const sharedLocal = new Set((piece.shared ?? []).map((sh) => localOf.get(particleOf(sh.local))).filter((v): v is number => v !== undefined));
+  let fwdHits = 0, bwdHits = 0;
+  for (let k = 1; k < fwd; k++) if (sharedLocal.has(rot[k])) fwdHits++;
+  for (let k = fwd + 1; k < m; k++) if (sharedLocal.has(rot[k])) bwdHits++;
+  // When both arcs have equal shared-vertex counts (e.g. a lapel whose roll line has 0 intermediate shared vertices
+  // on `flat.outline`, or 1 hit on a corner), compare the spliced polygon area against the 2D triangle mesh area
+  // so we never cut off the body of a cropped bolero!
+  let replaceFwd: boolean;
+  if (fwdHits !== bwdHits) {
+    replaceFwd = fwdHits > bwdHits;
+  } else {
+    let triAbs = 0;
+    for (let t = 0; t < group.tris.length; t += 3) {
+      const p = flat.uv[group.tris[t]], q = flat.uv[group.tris[t + 1]], r = flat.uv[group.tris[t + 2]];
+      triAbs += 0.5 * Math.abs((q[0] - p[0]) * (r[1] - p[1]) - (r[0] - p[0]) * (q[1] - p[1]));
+    }
+    const areaOf = (lp: number[]) => {
+      let s = 0;
+      for (let i = 0; i < lp.length; i++) {
+        const p = flat.uv[lp[i]], q = flat.uv[lp[(i + 1) % lp.length]];
+        s += p[0] * q[1] - q[0] * p[1];
+      }
+      return 0.5 * Math.abs(s);
+    };
+    const candFwd = [a, ...inner, ...rot.slice(fwd)];
+    const candBwd = [a, ...rot.slice(1, fwd + 1), ...inner.slice().reverse()];
+    replaceFwd = Math.abs(areaOf(candFwd) - triAbs) <= Math.abs(areaOf(candBwd) - triAbs);
+  }
+  let chosen = replaceFwd ? [a, ...inner, ...rot.slice(fwd)] : [a, ...rot.slice(1, fwd + 1), ...inner.slice().reverse()];
+  // Keep CCW winding (positive signed area, matching flattenPanel).
+  let s2 = 0;
+  for (let i = 0; i < chosen.length; i++) {
+    const p = flat.uv[chosen[i]], q = flat.uv[chosen[(i + 1) % chosen.length]];
+    s2 += p[0] * q[1] - q[0] * p[1];
+  }
+  if (s2 < 0) chosen = [chosen[0], ...chosen.slice(1).reverse()];
+  flat.outline = chosen;
   return true;
 }
 

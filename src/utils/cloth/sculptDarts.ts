@@ -68,8 +68,25 @@ export function sculptDarts(points: number[][], tris: number[], sculpted: (p: nu
   // Each candidate's curvature gathered over a dab's reach (domes positive; saddles take away).
   // Mirrored, the right side's points count too, as the left's mirror.
   const all: number[] = [];
-  for (let i = 0; i < points.length; i++) if (deficit[i] !== 0 && sculpted(points[i])) all.push(i);
-  const gathered = cand.map((i) => all.reduce((acc, j) => (near(points[i], points[j]) ? acc + deficit[j] : acc), 0));
+  const key = (ix: number, iy: number, iz: number) => ((ix + 1024) * 2048 + (iy + 1024)) * 2048 + (iz + 1024);
+  const buckets = new Map<number, number[]>();
+  for (let i = 0; i < points.length; i++) {
+    if (deficit[i] === 0 || !sculpted(points[i])) continue;
+    all.push(i);
+    const kk = key(Math.floor(points[i][0] / reach), Math.floor(points[i][1] / reach), Math.floor(points[i][2] / reach));
+    const b = buckets.get(kk);
+    if (b) b.push(i); else buckets.set(kk, [i]);
+  }
+  const gathered = cand.map((i) => {
+    const p = points[i], cx = Math.floor(p[0] / reach), cy = Math.floor(p[1] / reach), cz = Math.floor(p[2] / reach);
+    let acc = 0;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      const b = buckets.get(key(cx + dx, cy + dy, cz + dz));
+      if (!b) continue;
+      for (const j of b) if (near(p, points[j])) acc += deficit[j];
+    }
+    return acc;
+  });
   const order = cand.map((_, k) => k).sort((a, b) => gathered[b] - gathered[a]);
   const apexes: number[][] = [...taken];
   const out: DartLine[] = [];

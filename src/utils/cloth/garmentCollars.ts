@@ -234,9 +234,24 @@ function neckOf(form: BodyFormMeasurements) {
 
 /** Nearest points on a set of triangles, and the surface's normal there. */
 function surfaceOf(points: number[][], tris: number[], normals: number[][]) {
+  const cell = 0.03, key = (i: number, j: number, k: number) => ((i + 1024) * 2048 + (j + 1024)) * 2048 + (k + 1024);
+  const buckets = new Map<number, number[]>();
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  let maxR = 0;
+  for (let t = 0; t < tris.length; t += 3) {
+    const a = points[tris[t]], b = points[tris[t + 1]], c = points[tris[t + 2]];
+    const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
+    const r = Math.max(len(sub(a, [cx, cy, cz])), len(sub(b, [cx, cy, cz])), len(sub(c, [cx, cy, cz])));
+    if (r > maxR) maxR = r;
+    const ci = [Math.floor(cx / cell), Math.floor(cy / cell), Math.floor(cz / cell)];
+    for (let q = 0; q < 3; q++) { lo[q] = Math.min(lo[q], ci[q]); hi[q] = Math.max(hi[q], ci[q]); }
+    const kk = key(ci[0], ci[1], ci[2]), list = buckets.get(kk);
+    if (list) list.push(t); else buckets.set(kk, [t]);
+  }
+  const margin = maxR + cell * Math.SQRT2;
   return (p: V3): { p: V3; n: V3 } => {
     let best = { d: Infinity, p, n: [0, 0, 1] };
-    for (let t = 0; t < tris.length; t += 3) {
+    const test = (t: number) => {
       const a = points[tris[t]], b = points[tris[t + 1]], c = points[tris[t + 2]];
       const ab = sub(b, a), ac = sub(c, a), ap = sub(p, a);
       const d1 = dot(ab, ap), d2 = dot(ac, ap), d3 = dot(ab, ab), d4 = dot(ab, ac), d5 = dot(ac, ac), den = d3 * d5 - d4 * d4;
@@ -247,7 +262,25 @@ function surfaceOf(points: number[][], tris: number[], normals: number[][]) {
         const na = normals[tris[t]], nb = normals[tris[t + 1]], nc = normals[tris[t + 2]];
         best = { d, p: q, n: unit([0, 1, 2].map((k) => na[k] * (1 - v - w) + nb[k] * v + nc[k] * w)) };
       }
+    };
+    const ci = p.map((v) => Math.floor(v / cell));
+    const maxRing = Math.max(Math.abs(lo[0] - ci[0]), Math.abs(hi[0] - ci[0]), Math.abs(lo[1] - ci[1]), Math.abs(hi[1] - ci[1]), Math.abs(lo[2] - ci[2]), Math.abs(hi[2] - ci[2]));
+    for (let r = 0; r <= maxRing; r++) {
+      // Any centroid at L_infinity ring >= r lies outside [-r+1..r]^3 * cell, so its Euclidean distance
+      // to p in cell ci is at least (r - 1) * cell; subtract `margin` for centroid cell rounding + triangle radius.
+      if (r > 1 && best.d < (r - 1) * cell - margin) break;
+      const k0 = Math.max(-r, lo[2] - ci[2]), k1 = Math.min(r, hi[2] - ci[2]);
+      for (let i = Math.max(-r, lo[0] - ci[0]); i <= Math.min(r, hi[0] - ci[0]); i++) {
+        for (let j = Math.max(-r, lo[1] - ci[1]); j <= Math.min(r, hi[1] - ci[1]); j++) {
+          const side = Math.abs(i) === r || Math.abs(j) === r;
+          for (let k = side ? k0 : -r; k <= (side ? k1 : r); k += side || r === 0 ? 1 : 2 * r) {
+            if (k < k0 || k > k1) continue;
+            for (const t of buckets.get(key(ci[0] + i, ci[1] + j, ci[2] + k)) ?? []) test(t);
+          }
+        }
+      }
     }
+    if (!Number.isFinite(best.d)) for (let t = 0; t < tris.length; t += 3) test(t);
     return { p: best.p, n: best.n };
   };
 }

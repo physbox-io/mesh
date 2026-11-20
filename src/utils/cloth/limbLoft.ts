@@ -28,6 +28,15 @@ const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b
 const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const unit = (a: number[]) => { const l = Math.sqrt(dot(a, a)) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
+/** Orthogonalize `sd` against unit vector `t`, falling back to a perpendicular axis if nearly parallel. */
+function perpUnit(sd: number[], t: number[]): number[] {
+  const proj = sub(sd, t.map((v) => v * dot(sd, t)));
+  const l = Math.sqrt(dot(proj, proj));
+  if (l >= 1e-6) return [proj[0] / l, proj[1] / l, proj[2] / l];
+  const fb = Math.abs(t[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  return unit(sub(fb, t.map((v) => v * dot(fb, t))));
+}
+
 /**
  * The limb's mesh. `side` is the direction the sections' width lies along
  * (made square to the path at each point).
@@ -38,7 +47,7 @@ export function limbLoft(path: LimbSection[], side: number[], caps: { start?: nu
   const frames = path.map((s, i) => {
     const t = unit(sub(path[Math.min(n - 1, i + 1)].p, path[Math.max(0, i - 1)].p));
     const sd = s.side ?? side;
-    const w = unit(sub(sd, t.map((v) => v * dot(sd, t))));
+    const w = perpUnit(sd, t);
     return { t, w, u: cross(t, w) };
   });
   const rings: number[][][] = [];
@@ -66,12 +75,39 @@ export function limbLoft(path: LimbSection[], side: number[], caps: { start?: nu
     return out;
   };
   rings.push(...cap(path[0], frames[0], -1).reverse());
-  path.forEach((s, i) => rings.push(ring(s.p, frames[i], s.w, s.h, s.shape)));
-  rings.push(...cap(path[n - 1], frames[n - 1], 1));
+  const pathRings = path.map((s, i) => ring(s.p, frames[i], s.w, s.h, s.shape));
+  // At a sharp elbow or knee bend whose cross-section radius exceeds the centreline
+  // fillet radius, adjacent rings overtake each other on the inside of the crease
+  // and invert their faces (`windingMixed`). Clamp each vertex along the local
+  // ring-strip normal so every quad advances monotonically and keeps outward winding.
+  const MIN_ADV = 5e-4;
+  for (let i = 1; i < n; i++) {
+    const tAvg = unit([frames[i - 1].t[0] + frames[i].t[0], frames[i - 1].t[1] + frames[i].t[1], frames[i - 1].t[2] + frames[i].t[2]]);
+    for (let k = 0; k < ang; k++) {
+      const prev = pathRings[i - 1][k], cur = pathRings[i][k];
+      const prevNext = pathRings[i - 1][(k + 1) % ang], prevPrev = pathRings[i - 1][(k - 1 + ang) % ang];
+      // Ring tangent along +k; for outward winding, cross(ringTan, cur - prev) must point outward.
+      const ringTan = sub(prevNext, prevPrev);
+      const adv = dot(sub(cur, prev), tAvg);
+      // Also ensure the step does not cross backward relative to the local ring plane spanned by ringTan and outward radial.
+      const rad = sub(prev, path[i - 1].p);
+      const planeAdv = unit(cross(rad, ringTan));
+      const useAxis = dot(planeAdv, tAvg) > 0.2 ? planeAdv : tAvg;
+      const projAdv = dot(sub(cur, prev), useAxis);
+      if (adv < MIN_ADV || projAdv < MIN_ADV) {
+        const push = Math.max(MIN_ADV - adv, MIN_ADV - projAdv);
+        pathRings[i][k] = [cur[0] + useAxis[0] * push, cur[1] + useAxis[1] * push, cur[2] + useAxis[2] * push];
+      }
+    }
+  }
+  rings.push(...pathRings);
+  // End cap starts from the clamped last ring's centroid so it cannot cross pathRings[n - 1].
+  const endCentre = [0, 1, 2].map((j) => pathRings[n - 1].reduce((acc, q) => acc + q[j], 0) / ang);
+  rings.push(...cap({ ...path[n - 1], p: endCentre }, frames[n - 1], 1));
 
   const pts: number[][] = rings.flat();
   const tip0 = path[0].p.map((v, j) => v - frames[0].t[j] * depthAt(path[0], -1));
-  const tip1 = path[n - 1].p.map((v, j) => v + frames[n - 1].t[j] * depthAt(path[n - 1], 1));
+  const tip1 = endCentre.map((v, j) => v + frames[n - 1].t[j] * depthAt(path[n - 1], 1));
   pts.push(tip0, tip1);
   const i0 = pts.length - 2, i1 = pts.length - 1;
   const faces: number[] = [];

@@ -125,7 +125,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     }
     across = Math.min(across, Math.max(0.02, s1 - s0));
   }
-  const H = Math.min(H_MAX, Math.max(H_MIN, across / 2));
+  let H = Math.min(H_MAX, Math.max(H_MIN, across / 2));
   // The silhouette as sculpted: stand-off added round points, any shape.
   const sculpt = sculptField(draft.sculpt);
   const sculptReach = 1.25 * sculpt.most;
@@ -197,6 +197,10 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   // Symmetric about the middle, as the form is.
   const halfX = Math.max(-lo[0], hi[0]);
   lo[0] = -halfX; hi[0] = halfX;
+  // Bound total voxel count on full-span flared/trained garments (e.g. ballgown)
+  // while keeping wrists/cuffs several cells across.
+  const gridVol = Math.max(0, (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]));
+  if (gridVol > 1_800_000 * H * H * H) H = Math.min(H_MAX, Math.cbrt(gridVol / 1_800_000));
   const grid = gridOver(lo, hi, H);
   const sdf = new Map<Part, Float32Array>();
   // Each part as the cloth meets it: its hollows spanned as far as the fabric
@@ -237,59 +241,104 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   const rest = restOff(layer);
   const field = new Float32Array(grid.dims[0] * grid.dims[1] * grid.dims[2]);
   const sinkGrid = new Float32Array(field.length);
-  const [nx, ny] = grid.dims;
-  for (let idx = 0; idx < field.length; idx++) {
-    const i = idx % nx, j = Math.floor(idx / nx) % ny, k = Math.floor(idx / (nx * ny));
-    const p = [grid.min[0] + i * H, grid.min[1] + j * H, grid.min[2] + k * H];
-    let dmin = Infinity;
-    for (const part of parts) dmin = Math.min(dmin, sdf.get(part)![idx]);
-    if (dmin > reach + H) { field[idx] = dmin; continue; }
-    // Hung from what it rests on: its girth ease below it, not round it. The
-    // surface is the form's moved down by the ease there (a sleeve on an arm,
-    // slack underneath; a bodice's shoulder seam on the shoulder), so a girth
-    // is kept and what faces up is at the rest clearance. One move at a point
-    // for every part, blended as the ease is: moved apart, an arm's root
-    // stood up through a body moved further down. A flare is length, not
-    // girth, and is not moved.
-    // The move is the ease where it is read from, the lifted point (a snug
-    // band's eases off above it): found in a few steps, as it varies slowly.
-    const weights: number[] = [];
-    let w0 = 0;
-    for (const c of plan.covers) { const w = Math.exp(-(sdf.get(c.part)![idx] - dmin) / BLEND); weights.push(w < 1e-3 ? 0 : w); w0 += weights.at(-1)!; }
-    let sink = 0;
-    for (let it = 0; it < 3; it++) {
-      const at = [p[0], p[1], p[2] + sink];
-      let next = 0;
-      plan.covers.forEach((c, ci) => { if (weights[ci]) next += weights[ci] * Math.max(0, partOff(c, at, false) - rest); });
-      sink = next / w0;
-    }
-    sinkGrid[idx] = sink;
-    // The surface as the form has it, at the height it hangs from: each
-    // part's distance and stand-off (a flare by height, a snug band) read there.
-    const up = [p[0], p[1], p[2] + sink];
-    const d: number[] = [];
-    let hung = Infinity;
+  const [nx, ny, nz] = grid.dims;
+  const nCovers = plan.covers.length;
+  const partSdfs = plan.covers.map((c) => sdf.get(c.part)!);
+  // Precompute height-dependent stand-off upper bound per z-slice so far-field voxels
+  // (e.g. wide flare padding around the upper torso/arms) skip blend/sink/sampleGrid work.
+  // Include maxSink because lifting up = (x, y, z + sink) can reduce SDF by up to maxSink.
+  const maxSink = plan.covers.reduce((m, c) => Math.max(m, Math.max(c.off, c.snug?.off ?? 0) + (c.taper ? Math.max(0, c.taper.end - c.off) : 0) - rest), 0);
+  const reachByK = new Float64Array(nz);
+  for (let k = 0; k < nz; k++) {
+    const z = grid.min[2] + k * H;
+    let rMax = 0;
     for (const c of plan.covers) {
-      const v = sink > 0 ? sampleGrid(grid, sdf.get(c.part)!, up) : sdf.get(c.part)![idx];
-      d.push(v); hung = Math.min(hung, v);
+      const base = Math.max(c.off, c.snug?.off ?? 0) + (c.taper ? Math.max(0, c.taper.end - c.off) : 0) + sculptReach;
+      rMax = Math.max(rMax, base + Math.max(flareAt(c, z), flareAt(c, z + maxSink)));
     }
-    let wsum = 0, esum = 0;
-    plan.covers.forEach((c, ci) => {
-      const w = Math.exp(-(d[ci] - hung) / BLEND);
-      if (w < 1e-3) return;
-      wsum += w;
-      esum += w * partOff(c, up);
-    });
-    // Sculpted out, or in no closer than resting on what it covers.
-    const off = esum / wsum, more = sculpt.at(p);
-    field[idx] = hung - (more >= 0 ? off + more : Math.max(off + more, Math.min(off, rest)));
+    reachByK[k] = rMax + maxSink + 2 * H;
+  }
+  const weights = new Float64Array(nCovers);
+  const dArr = new Float64Array(nCovers);
+  const p = [0, 0, 0], at = [0, 0, 0], up = [0, 0, 0];
+  let idx = 0;
+  for (let k = 0; k < nz; k++) {
+    const zk = grid.min[2] + k * H, rk = reachByK[k];
+    for (let j = 0; j < ny; j++) {
+      const yj = grid.min[1] + j * H;
+      for (let i = 0; i < nx; i++, idx++) {
+        let dmin = Infinity;
+        for (let ci = 0; ci < nCovers; ci++) {
+          const v = partSdfs[ci][idx];
+          if (v < dmin) dmin = v;
+        }
+        if (dmin > rk) { field[idx] = dmin; continue; }
+        p[0] = grid.min[0] + i * H; p[1] = yj; p[2] = zk;
+        // Hung from what it rests on: its girth ease below it, not round it. The
+        // surface is the form's moved down by the ease there (a sleeve on an arm,
+        // slack underneath; a bodice's shoulder seam on the shoulder), so a girth
+        // is kept and what faces up is at the rest clearance. One move at a point
+        // for every part, blended as the ease is: moved apart, an arm's root
+        // stood up through a body moved further down. A flare is length, not
+        // girth, and is not moved.
+        // The move is the ease where it is read from, the lifted point (a snug
+        // band's eases off above it): found in a few steps, as it varies slowly.
+        let w0 = 0;
+        for (let ci = 0; ci < nCovers; ci++) {
+          const w = Math.exp(-(partSdfs[ci][idx] - dmin) / BLEND);
+          const wc = w < 1e-3 ? 0 : w;
+          weights[ci] = wc;
+          w0 += wc;
+        }
+        let sink = 0;
+        at[0] = p[0]; at[1] = p[1];
+        for (let it = 0; it < 3; it++) {
+          at[2] = zk + sink;
+          let next = 0;
+          for (let ci = 0; ci < nCovers; ci++) {
+            if (weights[ci]) next += weights[ci] * Math.max(0, partOff(plan.covers[ci], at, false) - rest);
+          }
+          sink = next / w0;
+        }
+        sinkGrid[idx] = sink;
+        // The surface as the form has it, at the height it hangs from: each
+        // part's distance and stand-off (a flare by height, a snug band) read there.
+        up[0] = p[0]; up[1] = p[1]; up[2] = zk + sink;
+        let hung = Infinity;
+        for (let ci = 0; ci < nCovers; ci++) {
+          const v = sink > 0 ? sampleGrid(grid, partSdfs[ci], up) : partSdfs[ci][idx];
+          dArr[ci] = v;
+          if (v < hung) hung = v;
+        }
+        let wsum = 0, esum = 0;
+        for (let ci = 0; ci < nCovers; ci++) {
+          const w = Math.exp(-(dArr[ci] - hung) / BLEND);
+          if (w < 1e-3) continue;
+          wsum += w;
+          esum += w * partOff(plan.covers[ci], up);
+        }
+        // Sculpted out, or in no closer than resting on what it covers.
+        const off = esum / wsum, more = sculpt.at(p);
+        field[idx] = hung - (more >= 0 ? off + more : Math.max(off + more, Math.min(off, rest)));
+      }
+    }
   }
   // Off the grid as fine as its thinnest part needs; then each part's
   // triangles as large as its own curvature allows.
   const net = surfaceNet(grid, field);
   const fieldAt = (p: number[]) => sampleGrid(grid, field, p);
   const fine = { points: net.points, tris: largestPieces(net.points.length, net.tris) };
-  const want = fine.points.map((p) => curvatureSize(fieldAt, p, H, H, H_MAX));
+  // On sweeping flared/trained garments (surface area >> 2.5 m^2), let low-curvature
+  // regions coarsen toward cloth spacing (~36 mm) while keeping curved regions fine.
+  let fineArea = 0;
+  for (let t = 0; t < fine.tris.length; t += 3) {
+    const a = fine.points[fine.tris[t]], b = fine.points[fine.tris[t + 1]], c = fine.points[fine.tris[t + 2]];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    fineArea += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) * 0.5;
+  }
+  const maxEdge = fineArea > 2.5 ? Math.min(0.036, H_MAX * Math.sqrt(fineArea / 2.5)) : H_MAX;
+  const want = fine.points.map((p) => curvatureSize(fieldAt, p, H, H, maxEdge));
   {
     const nbr: number[][] = fine.points.map(() => []);
     for (let t = 0; t < fine.tris.length; t += 3) for (let e = 0; e < 3; e++) nbr[fine.tris[t + e]].push(fine.tris[t + ((e + 1) % 3)]);

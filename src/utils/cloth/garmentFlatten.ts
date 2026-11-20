@@ -107,14 +107,32 @@ function triangleFrames(P: number[][], tris: number[]) {
  * map of a panel of several thousand triangles had not converged in its
  * budget of steps, and the layout folded over itself.
  */
-function cg(apply: (x: Float64Array, out: Float64Array) => void, b: Float64Array, x: Float64Array, diag: Float64Array, iters = 2000, tol = 1e-12) {
-  const n = b.length, r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), Ap = new Float64Array(n);
-  const inv = diag.map((d) => (d > 1e-300 ? 1 / d : 1));
+interface CgScratch {
+  r: Float64Array;
+  z: Float64Array;
+  p: Float64Array;
+  Ap: Float64Array;
+  inv: Float64Array;
+}
+
+function makeCgScratch(diag: Float64Array): CgScratch {
+  const n = diag.length;
+  const inv = new Float64Array(n);
+  for (let i = 0; i < n; i++) inv[i] = diag[i] > 1e-300 ? 1 / diag[i] : 1;
+  return { r: new Float64Array(n), z: new Float64Array(n), p: new Float64Array(n), Ap: new Float64Array(n), inv };
+}
+
+function cg(apply: (x: Float64Array, out: Float64Array) => void, b: Float64Array, x: Float64Array, diag: Float64Array, iters = 2000, tol = 1e-12, scratch?: CgScratch) {
+  const n = b.length;
+  const { r, z, p, Ap, inv } = scratch ?? makeCgScratch(diag);
   apply(x, Ap);
-  for (let i = 0; i < n; i++) { r[i] = b[i] - Ap[i]; z[i] = inv[i] * r[i]; p[i] = z[i]; }
-  let rz = 0, rr = 0;
-  for (let i = 0; i < n; i++) { rz += r[i] * z[i]; rr += r[i] * r[i]; }
-  const stop = tol * Math.max(1e-30, b.reduce((s, v) => s + v * v, 0));
+  let rz = 0, rr = 0, bb = 0;
+  for (let i = 0; i < n; i++) {
+    const ri = b[i] - Ap[i], zi = inv[i] * ri;
+    r[i] = ri; z[i] = zi; p[i] = zi;
+    rz += ri * zi; rr += ri * ri; bb += b[i] * b[i];
+  }
+  const stop = tol * Math.max(1e-30, bb);
   for (let it = 0; it < iters && rr > stop; it++) {
     apply(p, Ap);
     let pAp = 0;
@@ -122,9 +140,15 @@ function cg(apply: (x: Float64Array, out: Float64Array) => void, b: Float64Array
     if (Math.abs(pAp) < 1e-300) break;
     const alpha = rz / pAp;
     rr = 0;
-    for (let i = 0; i < n; i++) { x[i] += alpha * p[i]; r[i] -= alpha * Ap[i]; z[i] = inv[i] * r[i]; rr += r[i] * r[i]; }
     let rz2 = 0;
-    for (let i = 0; i < n; i++) rz2 += r[i] * z[i];
+    for (let i = 0; i < n; i++) {
+      x[i] += alpha * p[i];
+      const ri = r[i] - alpha * Ap[i];
+      const zi = inv[i] * ri;
+      r[i] = ri; z[i] = zi;
+      rr += ri * ri;
+      rz2 += ri * zi;
+    }
     const beta = rz2 / rz;
     rz = rz2;
     for (let i = 0; i < n; i++) p[i] = z[i] + beta * p[i];
@@ -181,7 +205,7 @@ function lscm(n: number, tris: number[], frames: { p: V2[]; area: number }[], pi
   for (let t = 0; t < T; t++) for (let c = 0; c < 2; c++) for (let j = 0; j < 3; j++) { const v = idx[3 * t + j], o = 6 * t + 3 * c + j; diag[2 * v] += cu[o] ** 2; diag[2 * v + 1] += cv[o] ** 2; }
   for (const i of pinned.keys()) { diag[2 * i] = 1; diag[2 * i + 1] = 1; }
   const free = new Float64Array(2 * n);
-  cg(apply, b, free, diag, 4000, 1e-20);
+  cg(apply, b, free, diag, 4000, 1e-18);
   const out: V2[] = [];
   for (let i = 0; i < n; i++) out.push(pinned.get(i) ?? [free[2 * i], free[2 * i + 1]]);
   return out;
@@ -195,16 +219,26 @@ function lscm(n: number, tris: number[], frames: { p: V2[]; area: number }[], pi
 function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], init: V2[], iters: number, eased: EasedTri[] = []): V2[] {
   const uv = init.map((q) => [q[0], q[1]] as V2);
   const frames0 = eased.length ? frames.map((f) => f.p.map((q) => [q[0], q[1]] as V2)) : [];
-  // Cotangent weights per triangle edge (half the cotangent of the opposite angle).
-  const cot = frames.map(({ p }) => [0, 1, 2].map((j) => {
-    const a = p[j], b = p[(j + 1) % 3], c = p[(j + 2) % 3];
-    const u = [b[0] - a[0], b[1] - a[1]], v = [c[0] - a[0], c[1] - a[1]];
-    const cr = Math.abs(u[0] * v[1] - u[1] * v[0]) || 1e-12;
-    return Math.max(1e-6, (u[0] * v[0] + u[1] * v[1]) / cr) / 2;
-  }));
-  // Edge opposite corner j of triangle t (between corners j+1 and j+2), its weight, flat.
-  const E = 3 * frames.length, ea = new Int32Array(E), eb = new Int32Array(E), ew = new Float64Array(E);
-  for (let t = 0; t < frames.length; t++) for (let j = 0; j < 3; j++) { ea[3 * t + j] = tris[3 * t + ((j + 1) % 3)]; eb[3 * t + j] = tris[3 * t + ((j + 2) % 3)]; ew[3 * t + j] = cot[t][j]; }
+  // Edge opposite corner j of triangle t (between corners j+1 and j+2), its cotangent weight, flat.
+  const nF = frames.length, E = 3 * nF;
+  const ea = new Int32Array(E), eb = new Int32Array(E), ew = new Float64Array(E);
+  const diag = new Float64Array(n);
+  for (let t = 0; t < nF; t++) {
+    const p = frames[t].p;
+    for (let j = 0; j < 3; j++) {
+      const a = p[j], b = p[(j + 1) % 3], c = p[(j + 2) % 3];
+      const ux = b[0] - a[0], uy = b[1] - a[1], vx = c[0] - a[0], vy = c[1] - a[1];
+      const cr = Math.abs(ux * vy - uy * vx) || 1e-12;
+      const w = Math.max(1e-6, (ux * vx + uy * vy) / cr) * 0.5;
+      const va = tris[3 * t + ((j + 1) % 3)], vb = tris[3 * t + ((j + 2) % 3)];
+      ea[3 * t + j] = va;
+      eb[3 * t + j] = vb;
+      ew[3 * t + j] = w;
+      diag[va] += w;
+      diag[vb] += w;
+    }
+  }
+  diag[0] += 1;
   const applyL = (x: Float64Array, out: Float64Array) => {
     out.fill(0);
     for (let e = 0; e < E; e++) {
@@ -213,51 +247,51 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
     }
     out[0] += x[0]; // anchor the first point, so the system is not singular
   };
-  const diag = new Float64Array(n);
-  for (let t = 0; t < frames.length; t++) for (let j = 0; j < 3; j++) { const w = cot[t][j]; diag[tris[3 * t + ((j + 1) % 3)]] += w; diag[tris[3 * t + ((j + 2) % 3)]] += w; }
-  diag[0] += 1;
+  const scratch = makeCgScratch(diag);
+  const bu = new Float64Array(n), bv = new Float64Array(n);
+  const xu = new Float64Array(n), xv = new Float64Array(n);
+  for (let i = 0; i < n; i++) { xu[i] = uv[i][0]; xv[i] = uv[i][1]; }
   for (let it = 0; it < iters; it++) {
     // Eased cloth rests as long along the seam as the layout makes it, between
     // its true length and that plus its ease: its triangle stretched that way.
     for (const { t, ease, dir } of eased) {
-      const p0 = frames0[t], ids = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
-      const a = [p0[1][0] - p0[0][0], p0[1][1] - p0[0][1]], b = [p0[2][0] - p0[0][0], p0[2][1] - p0[0][1]];
-      const det = a[0] * b[1] - a[1] * b[0];
+      const p0 = frames0[t], i0 = tris[3 * t], i1 = tris[3 * t + 1], i2 = tris[3 * t + 2];
+      const ax = p0[1][0] - p0[0][0], ay = p0[1][1] - p0[0][1], bx = p0[2][0] - p0[0][0], by = p0[2][1] - p0[0][1];
+      const det = ax * by - ay * bx;
       if (Math.abs(det) < 1e-16) continue;
       // The layout's stretch along the seam: F dir, F = (current edges) (true edges)^-1.
-      const x = (dir[0] * b[1] - dir[1] * b[0]) / det, y = (a[0] * dir[1] - a[1] * dir[0]) / det;
-      const u0 = uv[ids[0]], u1 = uv[ids[1]], u2 = uv[ids[2]];
-      const fx = x * (u1[0] - u0[0]) + y * (u2[0] - u0[0]), fy = x * (u1[1] - u0[1]) + y * (u2[1] - u0[1]);
+      const x = (dir[0] * by - dir[1] * bx) / det, y = (ax * dir[1] - ay * dir[0]) / det;
+      const fx = x * (xu[i1] - xu[i0]) + y * (xu[i2] - xu[i0]), fy = x * (xv[i1] - xv[i0]) + y * (xv[i2] - xv[i0]);
       const f = Math.min(1 + ease, Math.max(1, Math.hypot(fx, fy)));
       frames[t].p = p0.map((q) => { const along = (q[0] - p0[0][0]) * dir[0] + (q[1] - p0[0][1]) * dir[1]; return [q[0] + (f - 1) * along * dir[0], q[1] + (f - 1) * along * dir[1]] as V2; });
     }
-    const bu = new Float64Array(n), bv = new Float64Array(n);
-    for (let t = 0; t < frames.length; t++) {
-      const p = frames[t].p, ids = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
+    bu.fill(0); bv.fill(0);
+    for (let t = 0; t < nF; t++) {
+      const p = frames[t].p;
       // Best rotation: from the covariance of true and current edges.
       let s00 = 0, s01 = 0, s10 = 0, s11 = 0;
       for (let j = 0; j < 3; j++) {
-        const a = (j + 1) % 3, b = (j + 2) % 3, w = cot[t][j];
+        const a = (j + 1) % 3, b = (j + 2) % 3, e = 3 * t + j, w = ew[e], va = ea[e], vb = eb[e];
         const ex = p[a][0] - p[b][0], ey = p[a][1] - p[b][1];
-        const ux = uv[ids[a]][0] - uv[ids[b]][0], uy = uv[ids[a]][1] - uv[ids[b]][1];
+        const ux = xu[va] - xu[vb], uy = xv[va] - xv[vb];
         s00 += w * ux * ex; s01 += w * ux * ey; s10 += w * uy * ex; s11 += w * uy * ey;
       }
       const ang = Math.atan2(s10 - s01, s00 + s11), c = Math.cos(ang), s = Math.sin(ang);
       for (let j = 0; j < 3; j++) {
-        const a = (j + 1) % 3, b = (j + 2) % 3, w = cot[t][j];
+        const a = (j + 1) % 3, b = (j + 2) % 3, e = 3 * t + j, w = ew[e], va = ea[e], vb = eb[e];
         const ex = p[a][0] - p[b][0], ey = p[a][1] - p[b][1];
         const rx = c * ex - s * ey, ry = s * ex + c * ey;
-        bu[ids[a]] += w * rx; bu[ids[b]] -= w * rx;
-        bv[ids[a]] += w * ry; bv[ids[b]] -= w * ry;
+        bu[va] += w * rx; bu[vb] -= w * rx;
+        bv[va] += w * ry; bv[vb] -= w * ry;
       }
     }
-    bu[0] += uv[0][0]; bv[0] += uv[0][1];
-    const xu = Float64Array.from(uv.map((q) => q[0])), xv = Float64Array.from(uv.map((q) => q[1]));
-    // Warm-started from the last layout, so a few hundred steps converge.
-    cg(applyL, bu, xu, diag, 300, 1e-14);
-    cg(applyL, bv, xv, diag, 300, 1e-14);
-    for (let i = 0; i < n; i++) uv[i] = [xu[i], xv[i]];
+    bu[0] += xu[0]; bv[0] += xv[0];
+    // Warm-started from the last layout; intermediate steps only need modest CG accuracy.
+    const tol = it >= iters - 2 ? 1e-13 : 1e-10;
+    cg(applyL, bu, xu, diag, 300, tol, scratch);
+    cg(applyL, bv, xv, diag, 300, tol, scratch);
   }
+  for (let i = 0; i < n; i++) { uv[i][0] = xu[i]; uv[i][1] = xv[i]; }
   return uv;
 }
 
@@ -311,19 +345,38 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   for (const path of seamPaths) for (let k = 1; k < path.length; k++) { const a = path[k - 1], b = path[k]; seams.add(a < b ? a * n0 + b : b * n0 + a); }
   const { points, tris } = submesh(shellTris, panelTris, (a, b) => seams.has(a < b ? a * n0 + b : b * n0 + a));
   const P = points.map((g) => shellPoints[g]);
+  if (P.length < 3 || tris.length < 3) {
+    return { name, points, uv: P.map(() => [0, 0] as V2), tris, outline: outlineOf(P.length, tris), maxStrain: 0, strain95: 0, areaChange: 0 };
+  }
   const frames = triangleFrames(P, tris);
   // Pin the two points furthest apart, at their true distance, along u. A
   // panel across the body's middle (x = 0: a front, a back) is pinned at the
   // two ends of its centre line instead, so a piece the same either side
   // flattens the same either side: pinned at a sleeve's cuff and the hem's
   // far corner, a batwing gown's front came out lopsided, one sleeve higher.
-  let a = 0, b = 0, far = -1;
-  let xLo = Infinity, xHi = -Infinity;
-  for (const q of P) { xLo = Math.min(xLo, q[0]); xHi = Math.max(xHi, q[0]); }
-  const across = xHi - xLo, mid = across > 0 && xLo < -0.25 * across && xHi > 0.25 * across;
-  const onMid = mid ? P.map((_, i) => i).filter((i) => Math.abs(P[i][0]) < 0.02 * across) : [];
-  for (let i = 0; i < P.length; i += Math.max(1, Math.floor(P.length / 200))) {
+  let a = 0, b = 1, far = -1;
+  let xLo = Infinity, xHi = -Infinity, yLo = Infinity, yHi = -Infinity, ySum = 0;
+  for (const q of P) {
+    xLo = Math.min(xLo, q[0]); xHi = Math.max(xHi, q[0]);
+    yLo = Math.min(yLo, q[1]); yHi = Math.max(yHi, q[1]);
+    ySum += q[1];
+  }
+  const across = xHi - xLo, depth = yHi - yLo;
+  const mid = across > 0 && xLo < -0.25 * across && xHi > 0.25 * across;
+  const rawMid = mid ? P.map((_, i) => i).filter((i) => Math.abs(P[i][0]) < 0.02 * across) : [];
+  // Only restrict `onMid` to the dominant front/back side when `rawMid` itself spans BOTH front (-y)
+  // and back (+y) across the body's depth (e.g. a 1-piece dual-crossing panel wrapping over head/shoulders),
+  // never on an arc/collar whose centre-back naturally sits on one side while its tips curve forward!
+  let midYLo = Infinity, midYHi = -Infinity;
+  for (const i of rawMid) { midYLo = Math.min(midYLo, P[i][1]); midYHi = Math.max(midYHi, P[i][1]); }
+  const dualCrossing = depth > 0 && midYLo < -0.15 * depth && midYHi > 0.15 * depth && (midYHi - midYLo) > 0.5 * depth;
+  const domSign = ySum >= 0 ? 1 : -1;
+  const sameSideMid = dualCrossing ? rawMid.filter((i) => P[i][1] * domSign >= 0) : rawMid;
+  const onMid = sameSideMid.length >= 2 ? sameSideMid : rawMid;
+  const stride = Math.max(1, Math.floor(P.length / 200));
+  for (let i = 0; i < P.length; i += stride) {
     for (let j = 0; j < P.length; j++) {
+      if (i === j) continue;
       const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
       if (dd > far) { far = dd; a = i; b = j; }
     }
@@ -331,12 +384,15 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   // Only where the centre line runs most of the piece: two pins close together
   // (a one-shouldered front that crosses the middle for a hand's breadth) would
   // leave the map's turn and scale to chance.
-  let midFar = -1, ma = 0, mb = 0;
-  for (const i of onMid) for (const j of onMid) {
+  let midFar = -1, ma = 0, mb = 0, midOff = Infinity;
+  for (let ii = 0; ii < onMid.length; ii++) for (let jj = ii + 1; jj < onMid.length; jj++) {
+    const i = onMid[ii], j = onMid[jj];
     const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
-    if (dd > midFar) { midFar = dd; ma = i; mb = j; }
+    const xOff = Math.abs(P[i][0]) + Math.abs(P[j][0]);
+    if (dd > midFar + 1e-6 || (Math.abs(dd - midFar) <= 1e-6 && xOff < midOff)) { midFar = dd; ma = i; mb = j; midOff = xOff; }
   }
-  if (midFar >= 0.5 * far) { far = midFar; a = ma; b = mb; }
+  if (ma !== mb && midFar >= 0.6 * far && midFar > 1e-6) { far = midFar; a = ma; b = mb; }
+  if (a === b || !(far > 1e-9)) { a = 0; b = 1; far = Math.max(1e-6, Math.hypot(P[0][0] - P[1][0], P[0][1] - P[1][1], P[0][2] - P[1][2])); }
   let uv = lscm(P.length, tris, frames, [[a, [0, 0]], [b, [far, 0]]]);
   const eased: EasedTri[] = [];
   if (edgeEase) {

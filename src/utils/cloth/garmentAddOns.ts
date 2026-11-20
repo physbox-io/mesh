@@ -94,8 +94,51 @@ const cross = (a: V3, b: V3) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] *
 const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const unit = (a: V3) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
+const flatGridCache = new WeakMap<HostPanel, { cell: number; buckets: Map<number, number[]>; u0: number; v0: number }>();
+
+function panelFlatGrid(panel: HostPanel) {
+  let g = flatGridCache.get(panel);
+  if (g) return g;
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (const [u, v] of panel.uv) { u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
+  const cell = Math.max(0.015, Math.max(u1 - u0, v1 - v0) / 32);
+  const key = (iu: number, iv: number) => (iu + 2048) * 4096 + (iv + 2048);
+  const buckets = new Map<number, number[]>();
+  for (let t = 0; t < panel.tris.length; t += 3) {
+    const a = panel.uv[panel.tris[t]], b = panel.uv[panel.tris[t + 1]], c = panel.uv[panel.tris[t + 2]];
+    const i0 = Math.floor((Math.min(a[0], b[0], c[0]) - u0) / cell), i1 = Math.floor((Math.max(a[0], b[0], c[0]) - u0) / cell);
+    const j0 = Math.floor((Math.min(a[1], b[1], c[1]) - v0) / cell), j1 = Math.floor((Math.max(a[1], b[1], c[1]) - v0) / cell);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const kk = key(i, j), list = buckets.get(kk);
+      if (list) list.push(t); else buckets.set(kk, [t]);
+    }
+  }
+  g = { cell, buckets, u0, v0 };
+  flatGridCache.set(panel, g);
+  return g;
+}
+
 /** A point in a panel's flat layout: the triangle it is in (or nearest), and where. */
 function locateFlat(panel: HostPanel, q: number[]): { t: number; bary: [number, number, number]; inside: boolean } {
+  const g = panelFlatGrid(panel);
+  const iu = Math.floor((q[0] - g.u0) / g.cell), iv = Math.floor((q[1] - g.v0) / g.cell);
+  const hit = g.buckets.get((iu + 2048) * 4096 + (iv + 2048));
+  if (hit) {
+    for (const t of hit) {
+      const a = panel.uv[panel.tris[t]], b = panel.uv[panel.tris[t + 1]], c = panel.uv[panel.tris[t + 2]];
+      const d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+      if (Math.abs(d) < 1e-14) continue;
+      const l0 = ((b[1] - c[1]) * (q[0] - c[0]) + (c[0] - b[0]) * (q[1] - c[1])) / d;
+      const l1 = ((c[1] - a[1]) * (q[0] - c[0]) + (a[0] - c[0]) * (q[1] - c[1])) / d;
+      const l2 = 1 - l0 - l1;
+      const out = Math.max(0, -l0) + Math.max(0, -l1) + Math.max(0, -l2);
+      if (out < 1e-9) {
+        const cl = [Math.max(0, l0), Math.max(0, l1), Math.max(0, l2)], s = cl[0] + cl[1] + cl[2] || 1;
+        return { t, bary: [cl[0] / s, cl[1] / s, cl[2] / s], inside: true };
+      }
+    }
+  }
+  // Point is outside all panel triangles: search outward by 2D grid rings using exact Euclidean triangle distance.
   let best = { t: 0, bary: [1, 0, 0] as [number, number, number], inside: false }, bestOut = Infinity;
   for (let t = 0; t < panel.tris.length; t += 3) {
     const a = panel.uv[panel.tris[t]], b = panel.uv[panel.tris[t + 1]], c = panel.uv[panel.tris[t + 2]];
@@ -378,22 +421,80 @@ export function beltPaths(belt: GarmentBelt, width: number, lines: { run: number
   return (onBody.length ? onBody : loops).map((l) => l.pts);
 }
 
+const tackGridCache = new WeakMap<number[], WeakMap<number[][], { cell: number; buckets: Map<number, number[]>; maxR: number; lo: number[]; hi: number[] }>>();
+
+function hostTackGrid(hostTris: number[], x: number[][]) {
+  let byX = tackGridCache.get(hostTris);
+  if (!byX) { byX = new WeakMap(); tackGridCache.set(hostTris, byX); }
+  let g = byX.get(x);
+  if (g) return g;
+  const cell = 0.035;
+  const key = (i: number, j: number, k: number) => ((i + 1024) * 2048 + (j + 1024)) * 2048 + (k + 1024);
+  const buckets = new Map<number, number[]>();
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  let maxR = 0;
+  for (let t = 0; t < hostTris.length; t += 3) {
+    const a = x[hostTris[t]], b = x[hostTris[t + 1]], c = x[hostTris[t + 2]];
+    const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
+    const r = Math.max(Math.hypot(a[0] - cx, a[1] - cy, a[2] - cz), Math.hypot(b[0] - cx, b[1] - cy, b[2] - cz), Math.hypot(c[0] - cx, c[1] - cy, c[2] - cz));
+    if (r > maxR) maxR = r;
+    const ci = [Math.floor(cx / cell), Math.floor(cy / cell), Math.floor(cz / cell)];
+    for (let q = 0; q < 3; q++) { lo[q] = Math.min(lo[q], ci[q]); hi[q] = Math.max(hi[q], ci[q]); }
+    const kk = key(ci[0], ci[1], ci[2]), list = buckets.get(kk);
+    if (list) list.push(t); else buckets.set(kk, [t]);
+  }
+  g = { cell, buckets, maxR, lo, hi };
+  byX.set(x, g);
+  return g;
+}
+
 /** Nearest point on the garment's triangles to `q`, as a tack `offset` out (wound to face out by `normalOf`). */
 export function nearestTack(q: V3, hostTris: number[], x: number[][], normalOf: (p: number) => number[], offset: number, lift: boolean, local: number): { tack: AddOnTack; at: V3 } {
   let best = { d: Infinity, t: 0, bary: [1, 0, 0] as [number, number, number], p: q };
-  for (let t = 0; t < hostTris.length; t += 3) {
-    const a = x[hostTris[t]], b = x[hostTris[t + 1]], c = x[hostTris[t + 2]];
-    // Quick reject: further than the best by its bounding sphere.
-    const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
-    const r = Math.max(Math.hypot(a[0] - cx, a[1] - cy, a[2] - cz), Math.hypot(b[0] - cx, b[1] - cy, b[2] - cz), Math.hypot(c[0] - cx, c[1] - cy, c[2] - cz));
-    if (Math.hypot(q[0] - cx, q[1] - cy, q[2] - cz) - r > best.d) continue;
-    const ab = sub(b, a), ac = sub(c, a), ap = sub(q, a);
-    const d1 = dot(ab, ap), d2 = dot(ac, ap), d3 = dot(ab, ab), d4 = dot(ab, ac), d5 = dot(ac, ac), den = d3 * d5 - d4 * d4;
-    let v = den > 1e-14 ? (d5 * d1 - d4 * d2) / den : 0, w = den > 1e-14 ? (d3 * d2 - d4 * d1) / den : 0;
-    v = Math.max(0, Math.min(1, v)); w = Math.max(0, Math.min(1 - v, w));
-    const p = [a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w];
-    const d = Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
-    if (d < best.d) best = { d, t, bary: [1 - v - w, v, w], p };
+  if (hostTris.length >= 60) {
+    const g = hostTackGrid(hostTris, x), cell = g.cell, ci = q.map((v) => Math.floor(v / cell));
+    const key = (i: number, j: number, k: number) => ((i + 1024) * 2048 + (j + 1024)) * 2048 + (k + 1024);
+    const maxRing = Math.max(Math.abs(g.lo[0] - ci[0]), Math.abs(g.hi[0] - ci[0]), Math.abs(g.lo[1] - ci[1]), Math.abs(g.hi[1] - ci[1]), Math.abs(g.lo[2] - ci[2]), Math.abs(g.hi[2] - ci[2]));
+    const margin = g.maxR + cell * Math.SQRT2;
+    for (let r = 0; r <= maxRing; r++) {
+      if (r > 1 && best.d < (r - 1) * cell - margin) break;
+      const k0 = Math.max(-r, g.lo[2] - ci[2]), k1 = Math.min(r, g.hi[2] - ci[2]);
+      for (let i = Math.max(-r, g.lo[0] - ci[0]); i <= Math.min(r, g.hi[0] - ci[0]); i++) {
+        for (let j = Math.max(-r, g.lo[1] - ci[1]); j <= Math.min(r, g.hi[1] - ci[1]); j++) {
+          const side = Math.abs(i) === r || Math.abs(j) === r;
+          for (let k = side ? k0 : -r; k <= (side ? k1 : r); k += side || r === 0 ? 1 : 2 * r) {
+            if (k < k0 || k > k1) continue;
+            const list = g.buckets.get(key(ci[0] + i, ci[1] + j, ci[2] + k));
+            if (!list) continue;
+            for (const t of list) {
+              const a = x[hostTris[t]], b = x[hostTris[t + 1]], c = x[hostTris[t + 2]];
+              const ab = sub(b, a), ac = sub(c, a), ap = sub(q, a);
+              const d1 = dot(ab, ap), d2 = dot(ac, ap), d3 = dot(ab, ab), d4 = dot(ab, ac), d5 = dot(ac, ac), den = d3 * d5 - d4 * d4;
+              let v = den > 1e-14 ? (d5 * d1 - d4 * d2) / den : 0, w = den > 1e-14 ? (d3 * d2 - d4 * d1) / den : 0;
+              v = Math.max(0, Math.min(1, v)); w = Math.max(0, Math.min(1 - v, w));
+              const p = [a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w];
+              const d = Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+              if (d < best.d) best = { d, t, bary: [1 - v - w, v, w], p };
+            }
+          }
+        }
+      }
+    }
+  }
+  if (!Number.isFinite(best.d)) {
+    for (let t = 0; t < hostTris.length; t += 3) {
+      const a = x[hostTris[t]], b = x[hostTris[t + 1]], c = x[hostTris[t + 2]];
+      const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
+      const r = Math.max(Math.hypot(a[0] - cx, a[1] - cy, a[2] - cz), Math.hypot(b[0] - cx, b[1] - cy, b[2] - cz), Math.hypot(c[0] - cx, c[1] - cy, c[2] - cz));
+      if (Math.hypot(q[0] - cx, q[1] - cy, q[2] - cz) - r > best.d) continue;
+      const ab = sub(b, a), ac = sub(c, a), ap = sub(q, a);
+      const d1 = dot(ab, ap), d2 = dot(ac, ap), d3 = dot(ab, ab), d4 = dot(ab, ac), d5 = dot(ac, ac), den = d3 * d5 - d4 * d4;
+      let v = den > 1e-14 ? (d5 * d1 - d4 * d2) / den : 0, w = den > 1e-14 ? (d3 * d2 - d4 * d1) / den : 0;
+      v = Math.max(0, Math.min(1, v)); w = Math.max(0, Math.min(1 - v, w));
+      const p = [a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w];
+      const d = Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+      if (d < best.d) best = { d, t, bary: [1 - v - w, v, w], p };
+    }
   }
   const ids: [number, number, number] = [hostTris[best.t], hostTris[best.t + 1], hostTris[best.t + 2]];
   const n = unit([0, 1, 2].map((k) => ids.reduce((acc, i, j) => acc + best.bary[j] * normalOf(i)[k], 0)));

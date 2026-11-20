@@ -51,11 +51,23 @@ export function coarsenSurface(
     for (const [k, c] of count) if (c !== 2) { fixed[Math.floor(k / n)] = 1; fixed[k % n] = 1; }
   }
   const has = (t: number, v: number) => T[3 * t] === v || T[3 * t + 1] === v || T[3 * t + 2] === v;
-  const around = (v: number) => (vt[v] = vt[v].filter((t) => !dead[t] && has(t, v)));
+  const around = (v: number) => {
+    const list = vt[v];
+    let w = 0;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (!dead[t] && has(t, v)) list[w++] = t;
+    }
+    list.length = w;
+    return list;
+  };
   const ring = (v: number) => { const s = new Set<number>(); for (const t of around(v)) for (let q = 0; q < 3; q++) if (T[3 * t + q] !== v) s.add(T[3 * t + q]); return s; };
   const normal = (t: number, v?: number, at?: number[]) => {
-    const c = [0, 1, 2].map((q) => (T[3 * t + q] === v ? at! : P[T[3 * t + q]]));
-    return cross(sub(c[1], c[0]), sub(c[2], c[0]));
+    const i0 = T[3 * t], i1 = T[3 * t + 1], i2 = T[3 * t + 2];
+    const a = i0 === v ? at! : P[i0], b = i1 === v ? at! : P[i1], c = i2 === v ? at! : P[i2];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
   };
   const turnsOk = (t: number, v: number, at: number[]) => {
     const n0 = normal(t), n1 = normal(t, v, at), l0 = Math.hypot(n0[0], n0[1], n0[2]), l1 = Math.hypot(n1[0], n1[1], n1[2]);
@@ -70,16 +82,23 @@ export function coarsenSurface(
   // surface took it across the gap to the other leg's side.
   const live = () => { const out: number[] = []; for (let t = 0; t < nT; t++) if (!dead[t]) out.push(T[3 * t], T[3 * t + 1], T[3 * t + 2]); return out; };
   const crossedAtFirst = crossedPoints(P, T);
+  const rebuildVt = () => {
+    for (let i = 0; i < vt.length; i++) vt[i].length = 0;
+    for (let t = 0; t < nT; t++) if (!dead[t]) for (let q = 0; q < 3; q++) vt[T[3 * t + q]].push(t);
+  };
   const uncrossed = (pass: () => number): number => {
     for (let attempt = 0; ; attempt++) {
-      const saved = { P: P.slice(), T: T.slice(), dead: dead.slice(), gone: gone.slice(), vt: vt.map((l) => l.slice()), size: size.slice() };
+      const savedP = P.slice(), savedT = T.slice(), savedDead = dead.slice(), savedGone = gone.slice(), savedSize = size.slice();
       const done = pass();
       if (done <= 0) return done;
-      const fresh = [...crossedPoints(P, live())].filter((v) => !crossedAtFirst.has(v));
+      const crossed = crossedPoints(P, live());
+      const fresh: number[] = [];
+      for (const v of crossed) if (!crossedAtFirst.has(v)) fresh.push(v);
       if (!fresh.length) return done;
-      for (let i = 0; i < P.length; i++) { P[i] = saved.P[i]; vt[i] = saved.vt[i]; size[i] = saved.size[i]; }
-      for (let i = 0; i < T.length; i++) T[i] = saved.T[i];
-      dead.set(saved.dead); gone.set(saved.gone);
+      for (let i = 0; i < P.length; i++) { P[i] = savedP[i]; size[i] = savedSize[i]; }
+      T.splice(0, T.length, ...savedT);
+      dead.set(savedDead); gone.set(savedGone);
+      rebuildVt();
       if (attempt >= 20) return 0;
       for (const v of fresh) fixed[v] = 1;
     }
@@ -207,30 +226,32 @@ export function coarsenSurface(
  */
 export function curvatureSize(field: (p: number[]) => number, p: number[], step: number, min: number, max: number): number {
   const f0 = field(p), e = step;
-  const at = (dx: number, dy: number, dz: number) => field([p[0] + dx, p[1] + dy, p[2] + dz]);
-  const g = [(at(e, 0, 0) - at(-e, 0, 0)) / (2 * e), (at(0, e, 0) - at(0, -e, 0)) / (2 * e), (at(0, 0, e) - at(0, 0, -e)) / (2 * e)];
-  const gl = Math.hypot(g[0], g[1], g[2]);
+  const q = [0, 0, 0];
+  const at = (dx: number, dy: number, dz: number) => { q[0] = p[0] + dx; q[1] = p[1] + dy; q[2] = p[2] + dz; return field(q); };
+  const gx = (at(e, 0, 0) - at(-e, 0, 0)) / (2 * e);
+  const gy = (at(0, e, 0) - at(0, -e, 0)) / (2 * e);
+  const gz = (at(0, 0, e) - at(0, 0, -e)) / (2 * e);
+  const gl = Math.hypot(gx, gy, gz);
   if (gl < 1e-9) return min;
-  const H = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-  const ax = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-  for (let i = 0; i < 3; i++) {
-    const [x, y, z] = ax[i];
-    H[i][i] = (at(e * x, e * y, e * z) - 2 * f0 + at(-e * x, -e * y, -e * z)) / (e * e);
-    for (let j = i + 1; j < 3; j++) {
-      const [u, v, w] = ax[j];
-      H[i][j] = H[j][i] = (at(e * (x + u), e * (y + v), e * (z + w)) - at(e * (x - u), e * (y - v), e * (z - w)) - at(e * (u - x), e * (v - y), e * (w - z)) + at(-e * (x + u), -e * (y + v), -e * (z + w))) / (4 * e * e);
-    }
-  }
+  const invE2 = 1 / (e * e), inv4E2 = 0.25 * invE2;
+  const h00 = (at(e, 0, 0) - 2 * f0 + at(-e, 0, 0)) * invE2;
+  const h11 = (at(0, e, 0) - 2 * f0 + at(0, -e, 0)) * invE2;
+  const h22 = (at(0, 0, e) - 2 * f0 + at(0, 0, -e)) * invE2;
+  const h01 = (at(e, e, 0) - at(e, -e, 0) - at(-e, e, 0) + at(-e, -e, 0)) * inv4E2;
+  const h02 = (at(e, 0, e) - at(e, 0, -e) - at(-e, 0, e) + at(-e, 0, -e)) * inv4E2;
+  const h12 = (at(0, e, e) - at(0, e, -e) - at(0, -e, e) + at(0, -e, -e)) * inv4E2;
   // The shape operator: the Hessian across the surface (I - n n) H (I - n n) / |g|; its size, sqrt(k1^2 + k2^2).
-  const n = g.map((c) => c / gl);
-  const Pm = [0, 1, 2].map((i) => [0, 1, 2].map((j) => (i === j ? 1 : 0) - n[i] * n[j]));
-  let k2 = 0;
-  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
-    let s = 0;
-    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) s += Pm[i][a] * H[a][b] * Pm[b][j];
-    k2 += (s / gl) ** 2;
-  }
-  const k = Math.sqrt(k2);
+  const nx = gx / gl, ny = gy / gl, nz = gz / gl;
+  const p00 = 1 - nx * nx, p01 = -nx * ny, p02 = -nx * nz;
+  const p11 = 1 - ny * ny, p12 = -ny * nz, p22 = 1 - nz * nz;
+  // First compute M = H * P
+  const m00 = h00 * p00 + h01 * p01 + h02 * p02, m01 = h00 * p01 + h01 * p11 + h02 * p12, m02 = h00 * p02 + h01 * p12 + h02 * p22;
+  const m10 = h01 * p00 + h11 * p01 + h12 * p02, m11 = h01 * p01 + h11 * p11 + h12 * p12, m12 = h01 * p02 + h11 * p12 + h12 * p22;
+  const m20 = h02 * p00 + h12 * p01 + h22 * p02, m21 = h02 * p01 + h12 * p11 + h22 * p12, m22 = h02 * p02 + h12 * p12 + h22 * p22;
+  // Then S = P * M (symmetric)
+  const s00 = p00 * m00 + p01 * m10 + p02 * m20, s01 = p00 * m01 + p01 * m11 + p02 * m21, s02 = p00 * m02 + p01 * m12 + p02 * m22;
+  const s11 = p01 * m01 + p11 * m11 + p12 * m21, s12 = p01 * m02 + p11 * m12 + p12 * m22, s22 = p02 * m02 + p12 * m12 + p22 * m22;
+  const k = Math.sqrt(s00 * s00 + s11 * s11 + s22 * s22 + 2 * (s01 * s01 + s02 * s02 + s12 * s12)) / gl;
   return Math.min(max, Math.max(min, k > 1e-9 ? SEGMENT / k : max));
 }
 

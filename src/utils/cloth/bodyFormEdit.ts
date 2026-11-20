@@ -20,15 +20,15 @@ export function mergeBodyForm(prev: BodyFormMeasurements | undefined, patch: Par
   return clampBodyForm(refigured ? { ...patch } : { ...prev, ...patch });
 }
 
-/** What a form's geoms are built from: its measurements and the name they are prefixed with. */
-export function bodyFormKey(node: Pick<SceneNode, 'bodyForm' | 'name' | 'id'>): string {
+/** What a form's geoms are built from: its measurements alone (renaming renames geom prefixes in-place without re-meshing). */
+export function bodyFormKey(node: Pick<SceneNode, 'bodyForm'>): string {
   const m = (node.bodyForm ?? {}) as unknown as Record<string, unknown>;
-  return JSON.stringify([Object.keys(m).sort().map((k) => [k, m[k]]), node.name || node.id]);
+  return JSON.stringify(Object.keys(m).sort().map((k) => [k, m[k]]));
 }
 
 /** Whether a form's geoms were built from something other than its measurements as they now are. */
 export function needsBodyFormBuild(node: SceneNode): boolean {
-  return !!node.bodyForm && node.bodyFormBuilt !== bodyFormKey(node);
+  return !!node.bodyForm && (!node.geoms?.length || node.bodyFormBuilt !== bodyFormKey(node));
 }
 
 /**

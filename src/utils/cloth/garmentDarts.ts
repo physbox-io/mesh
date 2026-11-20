@@ -124,18 +124,24 @@ function onSurface(place: FormPlace, points: number[][], tris: number[]): { p: n
   const o = place.facing ? place.point.map((v, k) => v - 0.02 * place.facing![k]) : place.point;
   let best: { p: number[]; tri: number } | null = null, bt = Infinity;
   if (place.facing) {
-    const dir = place.facing;
+    const dir = place.facing, d0 = dir[0], d1 = dir[1], d2 = dir[2];
+    const o0 = o[0], o1 = o[1], o2 = o[2];
     for (let t = 0; t < tris.length; t += 3) {
-      // Moller-Trumbore.
-      const a = points[tris[t]], e1 = sub(points[tris[t + 1]], a), e2 = sub(points[tris[t + 2]], a);
-      const pv = cross(dir, e2), det = dot(e1, pv);
+      // Moller-Trumbore without inner-loop array allocations.
+      const a = points[tris[t]], b = points[tris[t + 1]], c = points[tris[t + 2]];
+      const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2];
+      const e2x = c[0] - a[0], e2y = c[1] - a[1], e2z = c[2] - a[2];
+      const pvx = d1 * e2z - d2 * e2y, pvy = d2 * e2x - d0 * e2z, pvz = d0 * e2y - d1 * e2x;
+      const det = e1x * pvx + e1y * pvy + e1z * pvz;
       if (Math.abs(det) < 1e-14) continue;
-      const tv = sub(o, a), u = dot(tv, pv) / det;
+      const inv = 1 / det, tvx = o0 - a[0], tvy = o1 - a[1], tvz = o2 - a[2];
+      const u = (tvx * pvx + tvy * pvy + tvz * pvz) * inv;
       if (u < 0 || u > 1) continue;
-      const qv = cross(tv, e1), v = dot(dir, qv) / det;
+      const qvx = tvy * e1z - tvz * e1y, qvy = tvz * e1x - tvx * e1z, qvz = tvx * e1y - tvy * e1x;
+      const v = (d0 * qvx + d1 * qvy + d2 * qvz) * inv;
       if (v < 0 || u + v > 1) continue;
-      const d = dot(e2, qv) / det;
-      if (d > 0 && d < bt) { bt = d; best = { p: o.map((x, k) => x + dir[k] * d), tri: t / 3 }; }
+      const d = (e2x * qvx + e2y * qvy + e2z * qvz) * inv;
+      if (d > 0 && d < bt) { bt = d; best = { p: [o0 + d0 * d, o1 + d1 * d, o2 + d2 * d], tri: t / 3 }; }
     }
     if (best) return best;
   }

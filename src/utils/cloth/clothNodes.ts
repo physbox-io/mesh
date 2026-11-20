@@ -8,6 +8,8 @@ import type { SceneNode } from '../../types/scene';
 import { bodyFormGeoms, clampBodyForm } from './bodyForm';
 import { GARMENT_DEFAULTS } from './garments';
 import { bodyFormKey, finishBodyFormGeoms } from './bodyFormEdit';
+import { bodyLocalMatrix, walkBodiesWorld } from '../bodyWorld';
+import * as THREE from 'three';
 
 /** A static dress form standing at `pos`. */
 export function bodyFormNode(id: string, name: string, measurements: Partial<BodyFormMeasurements> = {}, pos: number[] = [0, 0, 0]): SceneNode {
@@ -15,6 +17,16 @@ export function bodyFormNode(id: string, name: string, measurements: Partial<Bod
   const node = { id, name, pos: [...pos], bodyForm: m, geoms: finishBodyFormGeoms(bodyFormGeoms(m, name)), joints: [], children: [] } as unknown as SceneNode;
   node.bodyFormBuilt = bodyFormKey(node);
   return node;
+}
+
+/**
+ * A dress form authored as measurements alone (`geoms: []`), so presets load
+ * at once without meshing on the main thread; `useCsgCompile` (and headless
+ * `prepareScene`) builds its geoms when the scene is opened or compiled.
+ */
+export function lazyBodyFormNode(id: string, name: string, measurements: Partial<BodyFormMeasurements> = {}, pos: number[] = [0, 0, 0]): SceneNode {
+  const m = clampBodyForm(measurements);
+  return { id, name, pos: [...pos], bodyForm: m, geoms: [], joints: [], children: [] } as unknown as SceneNode;
 }
 
 /**
@@ -68,19 +80,53 @@ export function looseGarmentNode(id: string, name: string, draft: Omit<GarmentDr
  * scene would not build).
  */
 export function releaseGarments(nodes: SceneNode[], forms: SceneNode[]): SceneNode[] {
-  const by = new Map(forms.filter((f) => f.bodyForm).map((f) => [f.name || f.id, f.bodyForm!]));
+  const worldPose = new Map<string, THREE.Matrix4>();
+  const recordPose = (list: SceneNode[]) => walkBodiesWorld(list, (f, w) => {
+    if (f.bodyForm) worldPose.set(f.name || f.id, w);
+  });
+  recordPose(forms);
+  recordPose(nodes);
+  const by = new Map(forms.filter((f) => f.bodyForm).map((f) => [f.name || f.id, { m: f.bodyForm!, form: f, world: worldPose.get(f.name || f.id) }]));
   if (!by.size) return nodes;
-  const walk = (list: SceneNode[]): SceneNode[] => {
-    const out = list.map(one);
+  const walk = (list: SceneNode[], parentWorld = new THREE.Matrix4()): SceneNode[] => {
+    const out = list.map((n) => one(n, parentWorld));
     return out.every((n, i) => n === list[i]) ? list : out;
   };
-  const one = (n: SceneNode): SceneNode => {
-    const children = n.children?.length ? walk(n.children) : n.children;
-    const draft = n.cloth?.garment, m = draft?.fitTo ? by.get(draft.fitTo) : undefined;
-    if (!m && children === n.children) return n;
-    if (!m) return { ...n, children };
+  const one = (n: SceneNode, parentWorld: THREE.Matrix4): SceneNode => {
+    const ownWorld = parentWorld.clone().multiply(bodyLocalMatrix(n));
+    const children = n.children?.length ? walk(n.children, ownWorld) : n.children;
+    const draft = n.cloth?.garment, hit = draft?.fitTo ? by.get(draft.fitTo) : undefined;
+    if (!hit && children === n.children) return n;
+    if (!hit) return { ...n, children };
     const { fitTo: _fitTo, ...rest } = draft!;
-    return { ...n, children, cloth: { ...n.cloth!, garment: { ...rest, form: structuredClone(m) } } };
+    // Preserve the deleted form's world pose on the released garment so it falls in place rather than teleporting to [0, 0, 0].
+    let pos: number[] = [...(hit.form.pos ?? n.pos ?? [0, 0, 0])];
+    let quat: number[] | undefined = hit.form.quat ? [...hit.form.quat] : undefined;
+    let euler: number[] | undefined = !quat && hit.form.euler ? [...hit.form.euler] : undefined;
+    if (hit.world) {
+      const localM = parentWorld.clone().invert().multiply(hit.world);
+      const lp = new THREE.Vector3(), lq = new THREE.Quaternion(), ls = new THREE.Vector3();
+      localM.decompose(lp, lq, ls);
+      pos = [lp.x, lp.y, lp.z];
+      const isIdentity = Math.abs(lq.w - 1) < 1e-9 && Math.abs(lq.x) < 1e-9 && Math.abs(lq.y) < 1e-9 && Math.abs(lq.z) < 1e-9;
+      if (!isIdentity) {
+        if (!hit.form.quat && hit.form.euler && parentWorld.equals(new THREE.Matrix4())) {
+          quat = undefined;
+          euler = [...hit.form.euler];
+        } else {
+          quat = [lq.w, lq.x, lq.y, lq.z];
+          euler = undefined;
+        }
+      } else {
+        quat = undefined;
+        euler = undefined;
+      }
+    }
+    const next: SceneNode = { ...n, pos, children, cloth: { ...n.cloth!, garment: { ...rest, form: structuredClone(hit.m) } } };
+    if (quat) { next.quat = quat; delete next.euler; }
+    else if (euler) { next.euler = euler; delete next.quat; }
+    else { delete next.quat; delete next.euler; }
+    return next;
   };
   return walk(nodes);
 }

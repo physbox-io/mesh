@@ -25,12 +25,13 @@ describe('body form measurements', () => {
     expect(mergeBodyForm(male, { waist: 9 }).waist).toBe(1.6);
   });
 
-  it('keys the geoms by measurements and name, whatever the key order', () => {
+  it('keys the geoms by measurements alone, whatever the key order or body name', () => {
     const a = { id: 'f', name: 'f', bodyForm: { ...FIGURE_DEFAULTS.male } } as SceneNode;
     const reordered = Object.fromEntries(Object.entries(FIGURE_DEFAULTS.male).reverse());
     const b = { id: 'f', name: 'f', bodyForm: reordered } as unknown as SceneNode;
     expect(bodyFormKey(a)).toBe(bodyFormKey(b));
-    expect(bodyFormKey({ ...a, name: 'g' })).not.toBe(bodyFormKey(a));
+    expect(bodyFormKey({ ...a, name: 'g' })).toBe(bodyFormKey(a));
+    expect(bodyFormKey({ ...a, bodyForm: { ...FIGURE_DEFAULTS.male, waist: 0.9 } })).not.toBe(bodyFormKey(a));
   });
 
   it('marks a new form built, and every one of its geoms internal', () => {

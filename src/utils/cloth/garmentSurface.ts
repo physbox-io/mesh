@@ -369,9 +369,11 @@ export function healFlatTriangles(points: number[][], tris: number[], minArea: n
     const byEdge = new Map<string, number>();
     for (let t = 0; t < out.length; t += 3) for (let e = 0; e < 3; e++) byEdge.set(`${out[t + e]},${out[t + ((e + 1) % 3)]}`, t);
     const gone = new Set<number>();
+    const touched = new Set<number>();
     let changed = false;
-    for (let t = 0; t < out.length; t += 3) {
-      if (gone.has(t)) continue;
+    const origLen = out.length;
+    for (let t = 0; t < origLen; t += 3) {
+      if (gone.has(t) || touched.has(t)) continue;
       const tri = [out[t], out[t + 1], out[t + 2]];
       if (area(tri[0], tri[1], tri[2]) >= minArea) continue;
       const ls = [len(tri[0], tri[1]), len(tri[1], tri[2]), len(tri[2], tri[0])];
@@ -386,12 +388,13 @@ export function healFlatTriangles(points: number[][], tris: number[], minArea: n
       const longest = ls.indexOf(Math.max(...ls));
       const a = tri[longest], c = tri[(longest + 1) % 3], b = tri[(longest + 2) % 3];
       const n = byEdge.get(`${c},${a}`);
-      if (n === undefined || gone.has(n)) continue;
+      if (n === undefined || gone.has(n) || touched.has(n)) continue;
       const ntri = [out[n], out[n + 1], out[n + 2]];
       const d = ntri.find((id) => id !== a && id !== c)!;
       // (c, a, d) becomes (c, b, d) and (b, a, d), keeping the winding.
       out[n] = c; out[n + 1] = b; out[n + 2] = d;
       out.push(b, a, d);
+      touched.add(n);
       split.set(keyOf(a, c), b);
       gone.add(t); changed = true;
     }

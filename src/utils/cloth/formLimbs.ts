@@ -81,10 +81,13 @@ function table(rows: number[][], x: number): number[] {
   return rows[rows.length - 1].slice(1);
 }
 
-/** A section square to the line at s: `side` made square to it, `up` the third axis. */
+/** A section square to the line at s: `side` made square to it (with orthogonal fallback), `up` the third axis. */
 function frame(path: LimbPath, s: number, side: number[], c: number[], w: number, h: number, shape?: (a: number) => [number, number]): LimbSectionAt {
   const t = path.tangent(s);
-  const sd = unit(side.map((v, k) => v - t[k] * dot(side, t)));
+  const proj = side.map((v, k) => v - t[k] * dot(side, t));
+  const pl = Math.sqrt(dot(proj, proj));
+  const fb = Math.abs(t[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const sd = pl >= 1e-6 ? proj.map((v) => v / pl) : unit(fb.map((v, k) => v - t[k] * dot(fb, t)));
   return { c, w, h, side: sd, up: cross(t, sd), ...(shape ? { shape } : {}) };
 }
 
@@ -261,7 +264,7 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
       const zr = straight.at(s)[2] + hipDrop;
       const [w0, h0, drop] = along < -0.02 * S ? [...table(legRows, zr), 0] : table(footRows, along);
       const p = path.at(s), c = [p[0], p[1], p[2] - drop];
-      const tuck = legTuck(p[2], P.crotchZ, S), w = w0 - tuck, h = h0 - tuck;
+      const tuck = legTuck(p[2], P.crotchZ, S), w = Math.max(0.015 * S, w0 - tuck), h = Math.max(0.015 * S, h0 - tuck);
       // Round the leg: `out` is away from the other leg, `fwd` to the front
       // (as it stands straight, turning with it as posed). Gone by the instep.
       const straightSec = straight === path ? null : frame(straight, s, [1, 0, 0], c, w, h);
@@ -332,12 +335,22 @@ function head(m: BodyFormMeasurements): FormLimb {
 
 const cache = new Map<string, Record<LimbName, FormLimb>>();
 
-/** The form's limbs (cached on its measurements); both legs always. */
-export function formLimbs(m: BodyFormMeasurements): Record<LimbName, FormLimb> {
+/** The form's limbs (cached on its measurements); head is constructed lazily unless requested. */
+export function formLimbs(m: BodyFormMeasurements, _withHead = true): Record<LimbName, FormLimb> {
   const key = JSON.stringify(m);
   let hit = cache.get(key);
   if (!hit) {
-    hit = { armL: arm(m, 1), armR: arm(m, -1), legL: leg(m, 1), legR: leg(m, -1), head: head(m) };
+    let headLimb: FormLimb | undefined;
+    hit = {
+      armL: arm(m, 1),
+      armR: arm(m, -1),
+      legL: leg(m, 1),
+      legR: leg(m, -1),
+      get head() {
+        headLimb ??= head(m);
+        return headLimb;
+      },
+    } as Record<LimbName, FormLimb>;
     if (cache.size > 16) cache.clear();
     cache.set(key, hit);
   }

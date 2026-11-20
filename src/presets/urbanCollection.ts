@@ -19,7 +19,7 @@
 
 import type { SceneGraph, SceneNode } from '../types/scene';
 import type { ClothFastening, ClothPiece, ClothSeam, GarmentCurve, GarmentSculpt, UV } from '../types/cloth';
-import { bodyFormNode, garmentNode } from '../utils/cloth/clothNodes';
+import { garmentNode, lazyBodyFormNode as bodyFormNode } from '../utils/cloth/clothNodes';
 import { bodyFormSection, bodyLandmarks } from '../utils/cloth/bodyForm';
 import { formLimbs } from '../utils/cloth/formLimbs';
 import type { BodyFormMeasurements } from '../types/cloth';
@@ -501,4 +501,13 @@ function urbanCollection(): SceneGraph {
   return { nodes: [...pufferLook(-0.48), ...hoodieLook(0.48)] } as SceneGraph;
 }
 
-export const urbanCollectionPreset = urbanCollection();
+let cachedUrbanNodes: SceneNode[] | undefined;
+export const urbanCollectionPreset: SceneGraph = {
+  get nodes() {
+    cachedUrbanNodes ??= urbanCollection().nodes;
+    return cachedUrbanNodes;
+  },
+  set nodes(v: SceneNode[]) {
+    cachedUrbanNodes = v;
+  },
+} as SceneGraph;

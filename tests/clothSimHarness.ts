@@ -12,8 +12,27 @@ import { buildClothWorld } from '../src/utils/cloth/clothWorld';
 import { clothCrossings, type Crossing } from './clothIntersections';
 import { compileToMJCF } from '../src/utils/mjcf';
 import { withoutMeshData } from '../src/store/physicsWorkerClient';
+import { bodyFormGeoms } from '../src/utils/cloth/bodyForm';
+import { bodyFormKey, finishBodyFormGeoms } from '../src/utils/cloth/bodyFormEdit';
 import load_mujoco from '@mujoco/mujoco';
 import type { SceneGraph } from '../src/types/scene';
+
+/** Ensure lazy preset bodyForm nodes (`geoms: []`) have their geoms built in headless test runs, as `useCsgCompile` does in the app. */
+function withBuiltBodyForms(nodes: SceneNode[]): SceneNode[] {
+  let changed = false;
+  const out = nodes.map((n) => {
+    const children = n.children?.length ? withBuiltBodyForms(n.children) : n.children;
+    if (n.bodyForm && (!n.geoms || n.geoms.length === 0)) {
+      changed = true;
+      const built: SceneNode = { ...n, geoms: finishBodyFormGeoms(bodyFormGeoms(n.bodyForm, n.name || n.id)), children };
+      built.bodyFormBuilt = bodyFormKey(built);
+      return built;
+    }
+    if (children !== n.children) { changed = true; return { ...n, children }; }
+    return n;
+  });
+  return changed ? out : nodes;
+}
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let mjPromise: Promise<any> | null = null;
@@ -37,7 +56,7 @@ export interface ClothRun {
 
 export async function clothRun(scene: SceneNode[]): Promise<ClothRun> {
   const mj = await mujocoReady();
-  const graph = { nodes: scene } as SceneGraph;
+  const graph = { nodes: withBuiltBodyForms(scene) } as SceneGraph;
   const model = mj.MjModel.from_xml_string(compileToMJCF(graph));
   const data = new mj.MjData(model);
   mj.mj_forward(model, data);

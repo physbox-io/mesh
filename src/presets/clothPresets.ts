@@ -7,7 +7,7 @@
 
 import type { SceneGraph, SceneNode } from '../types/scene';
 import type { ClothEdge, ClothPiece, ClothSeam, ClothTie, UV } from '../types/cloth';
-import { bodyFormNode, garmentNode } from '../utils/cloth/clothNodes';
+import { garmentNode, lazyBodyFormNode as bodyFormNode } from '../utils/cloth/clothNodes';
 import { bodyFormSection, bodyLandmarks } from '../utils/cloth/bodyForm';
 import { GARMENT_DEFAULTS } from '../utils/cloth/garments';
 import { samplePathStations } from '../utils/cloth/clothMesh';
@@ -21,8 +21,22 @@ function formWearing(garment: 'tshirt' | 'dress'): SceneGraph {
   } as SceneGraph;
 }
 
-export const tshirtOnFormPreset = formWearing('tshirt');
-export const dressOnFormPreset = formWearing('dress');
+/** Lazily computes `.nodes` on first access so importing presets at app startup takes ~0 ms. */
+function lazyScene(build: () => SceneGraph): SceneGraph {
+  let cached: SceneNode[] | undefined;
+  return {
+    get nodes() {
+      cached ??= build().nodes;
+      return cached;
+    },
+    set nodes(v: SceneNode[]) {
+      cached = v;
+    },
+  } as SceneGraph;
+}
+
+export const tshirtOnFormPreset = lazyScene(() => formWearing('tshirt'));
+export const dressOnFormPreset = lazyScene(() => formWearing('dress'));
 
 /** A garment worn as `layer` (0 next to the body). */
 function wearing(id: string, draft: Parameters<typeof garmentNode>[2], form: SceneNode, layer: number): SceneNode {
@@ -400,15 +414,15 @@ function gathersAndPleats(): SceneGraph {
   } as SceneGraph;
 }
 
-export const gathersAndPleatsPreset = gathersAndPleats();
-export const knitwearPreset = knitwear();
-export const skirtPreset = skirt();
-export const menswearPreset = menswear();
-export const ballgownPreset = ballgown();
-export const tailoredOutfitPreset = tailoredOutfit();
-export const bonedGownPreset = bonedGown();
-export const shirtAndJacketPreset = shirtAndJacket();
-export const dartedSheathPreset = dartedSheath();
+export const gathersAndPleatsPreset = lazyScene(gathersAndPleats);
+export const knitwearPreset = lazyScene(knitwear);
+export const skirtPreset = lazyScene(skirt);
+export const menswearPreset = lazyScene(menswear);
+export const ballgownPreset = lazyScene(ballgown);
+export const tailoredOutfitPreset = lazyScene(tailoredOutfit);
+export const bonedGownPreset = lazyScene(bonedGown);
+export const shirtAndJacketPreset = lazyScene(shirtAndJacket);
+export const dartedSheathPreset = lazyScene(dartedSheath);
 
 /** A sail edge from `a` to `b`, cut in toward the middle by `sag` of its length, as sails are. */
 function catenaryEdge(id: string, a: UV, b: UV, sag: number): ClothEdge {

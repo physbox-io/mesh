@@ -93,7 +93,17 @@ export function clampBodyForm(m: Partial<BodyFormMeasurements>): BodyFormMeasure
     const v = Number(out[k]);
     (out as unknown as Record<string, number>)[k] = Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : base[k] as number;
   }
-  out.underbust = Math.min(out.underbust, out.chest);
+  const s = out.height / 1.75;
+  // Anatomical coupling so extreme independent slider combinations cannot invert or self-intersect:
+  // underbust stays within a realistic bust projection of chest, shoulders stay outside the upper ribcage,
+  // and thighs cannot deeply overlap across the midline.
+  out.underbust = Math.min(out.chest, Math.max(BODY_FORM_LIMITS.underbust[0], out.underbust, +(out.chest - 0.32 * s).toFixed(6)));
+  const minShoulder = Math.min(BODY_FORM_LIMITS.shoulderWidth[1], +(2 * ellipseHalfWidth(out.chest, 0.7) * 0.75).toFixed(6));
+  if (out.shoulderWidth < minShoulder) out.shoulderWidth = minShoulder;
+  if (out.thigh !== undefined) {
+    const maxThigh = Math.max(BODY_FORM_LIMITS.thigh[0], +(0.75 * out.hip).toFixed(6));
+    if (out.thigh > maxThigh) out.thigh = maxThigh;
+  }
   // A form always has legs: one saved with them off gets them.
   delete (out as { legs?: unknown }).legs;
   // The heights set, as resolveHeights placed them in order: a set one it had
@@ -171,7 +181,7 @@ function bustGeometry(m: BodyFormMeasurements, chest = formTapes(m).chest) {
     }
     return hullPerimeter(pts);
   };
-  let lo = 0, hi = 0.15 * s;
+  let lo = 0, hi = Math.min(0.18 * s, Math.max(0.15 * s, 0.4 * (chest - m.underbust)));
   for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (girth(mid) < chest) lo = mid; else hi = mid; }
   const p = (lo + hi) / 2;
   return { prominence: p, centreY: front - p + r.y, radii: r };
@@ -180,6 +190,29 @@ function bustGeometry(m: BodyFormMeasurements, chest = formTapes(m).chest) {
 /** What each tape height is built to: for the bust, the chest the bust is sized to. */
 interface Tapes { chest: number; waist: number; hip: number }
 const tapesCache = new Map<string, Tapes>();
+
+/** The parts the torso's skin is lofted round — built without lofting arms, legs, or head. */
+function bodyFormTorsoParts(m: BodyFormMeasurements, prefix: string, T: Tapes = formTapes(m)): SceneGeom[] {
+  const P = proportions(m), L = limbLandmarks(m), s = P.s;
+  const rgba = [0.93, 0.89, 0.82, 1];
+  const geoms: SceneGeom[] = [];
+  const add = (name: string, g: Omit<SceneGeom, 'name' | 'rgba'>) => geoms.push({ name: `${prefix}_${name}`, rgba, ...g } as SceneGeom);
+  const bust = bustGeometry(m, T.chest);
+  if (bust) {
+    for (const side of [1, -1]) {
+      add(`bust${side > 0 ? 'L' : 'R'}`, { type: 'ellipsoid', size: [r4(bust.radii.x), r4(bust.radii.y), r4(bust.radii.z)], pos: [r4(side * P.bustSpan / 2), r4(bust.centreY), r4(P.bustZ)] });
+    }
+  }
+  const sx = m.shoulderWidth / 2 - P.shoulderR * 0.6;
+  const spZ = P.shoulderZ - P.shoulderDrop;
+  for (const side of [1, -1]) {
+    const tag = side > 0 ? 'L' : 'R';
+    add(`shoulder${tag}`, { type: 'capsule', size: [r4(P.shoulderR)], fromto: [r4(side * L.neckRadius * 0.8), 0, r4(P.shoulderZ), r4(side * sx), 0, r4(spZ)] });
+    add(`deltoid${tag}`, { type: 'sphere', size: [r4(P.shoulderR * 1.05)], pos: [r4(side * (sx - 0.01 * s)), 0, r4(spZ - 0.015 * s)] });
+  }
+  add('neck', { type: 'capsule', size: [r4(L.neckRadius)], fromto: [0, 0, r4(P.shoulderZ - 0.02 * s), 0, r4(-0.012 * s), r4(P.neckTop)] });
+  return geoms;
+}
 
 /**
  * What to build chest, waist and hip to so that a tape round the form as
@@ -194,11 +227,16 @@ function formTapes(m: BodyFormMeasurements): Tapes {
   if (t) return t;
   t = { chest: m.chest, waist: m.waist, hip: m.hip };
   const P = proportions(m);
+  const clampTape = (v: number, ref: number) => Math.min(ref * 1.5, Math.max(ref * 0.5, v));
   for (let it = 0; it < 5; it++) {
-    const rows = torsoRows(m, torsoParts(bodyFormGeomsRaw(m, 'form', t)), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, t));
+    const rows = torsoRows(m, bodyFormTorsoParts(m, 'form', t), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, t), false);
     const read = { chest: sectionGirth(sectionAt(rows, P.bustZ)), waist: sectionGirth(sectionAt(rows, P.waistZ)), hip: sectionGirth(sectionAt(rows, P.hipZ)) };
     if ((Object.keys(read) as (keyof Tapes)[]).every((k) => Math.abs(read[k] / m[k] - 1) < 0.003)) break;
-    t = { chest: t.chest * m.chest / read.chest, waist: t.waist * m.waist / read.waist, hip: t.hip * m.hip / read.hip };
+    t = {
+      chest: clampTape(t.chest * m.chest / Math.max(1e-3, read.chest), m.chest),
+      waist: clampTape(t.waist * m.waist / Math.max(1e-3, read.waist), m.waist),
+      hip: clampTape(t.hip * m.hip / Math.max(1e-3, read.hip), m.hip),
+    };
   }
   if (tapesCache.size > 32) tapesCache.clear();
   tapesCache.set(key, t);
@@ -471,8 +509,8 @@ export interface TorsoRow { z: number; centreY: number; radii: number[] }
  * round its centre, then evened out up each column (the hull of each section
  * is smooth round the body but not up it, and followed every slice's bulge).
  */
-function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: number, torso: ReturnType<typeof torsoProfile>): TorsoRow[] {
-  const ANG = TORSO_ANGLES, ROWS = Math.max(8, Math.round((z1 - z0) / 0.012));
+function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: number, torso: ReturnType<typeof torsoProfile>, withHead = true, ang = TORSO_ANGLES, rowStep = 0.012): TorsoRow[] {
+  const ANG = ang, ROWS = Math.max(8, Math.round((z1 - z0) / rowStep));
   const rows: TorsoRow[] = [];
   for (let r = 0; r <= ROWS; r++) {
     const z = z0 + ((z1 - z0) * r) / ROWS;
@@ -533,7 +571,7 @@ function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: 
     }
   }
   const P = proportions(m), S = P.s;
-  blendLimbRoots(m, rows, P);
+  blendLimbRoots(m, rows, P, withHead);
   // The muscles, on the smoothed shape: evened out with it they would be gone.
   const marks = { bustZ: P.bustZ / S, shoulderZ: P.shoulderZ / S, waistZ: P.waistZ / S, hipZ: P.hipZ / S, crotchZ: P.crotchZ / S };
   for (const row of rows) {
@@ -569,8 +607,8 @@ function rayEllipse(th: number, cx: number, cy: number, a: number, b: number): n
  * the limbs grow out of the body. Their own surfaces only crossed the torso's,
  * and each met it in a crease all the way round, like a doll's joint.
  */
-function blendLimbRoots(m: BodyFormMeasurements, rows: TorsoRow[], P: ReturnType<typeof proportions>) {
-  const limbs = formLimbs(m), S = P.s, N = rows[0].radii.length;
+function blendLimbRoots(m: BodyFormMeasurements, rows: TorsoRow[], P: ReturnType<typeof proportions>, withHead = true) {
+  const limbs = formLimbs(m, withHead), S = P.s, N = rows[0].radii.length;
   const ease = (t: number) => { const u = Math.min(1, Math.max(0, t)); return u * u * (3 - 2 * u); };
   {
     // From the section at the top of the legs to one round the thighs at the
@@ -679,9 +717,6 @@ function convexHull(pts: [number, number][]): [number, number][] {
 }
 
 const rowsCache = new Map<string, TorsoRow[]>();
-/** The torso's rows for these measurements (cached: garments ask for them often). */
-/** The parts the torso's skin is lofted round. */
-const torsoParts = (geoms: SceneGeom[]) => geoms.filter((g) => /_(bust\w*|shoulder\w*|deltoid\w*|neck)$/.test(g.name));
 
 /** The section at height z between rows (clamped to the first and last). */
 function sectionAt(rows: TorsoRow[], z: number): { centreY: number; radii: number[] } {
@@ -700,7 +735,7 @@ function formRows(m: BodyFormMeasurements): TorsoRow[] {
   let rows = rowsCache.get(key);
   if (!rows) {
     const P = proportions(m);
-    rows = torsoRows(m, torsoParts(bodyFormGeomsRaw(m, 'form')), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, formTapes(m)));
+    rows = torsoRows(m, bodyFormTorsoParts(m, 'form'), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, formTapes(m)), false);
     if (rowsCache.size > 16) rowsCache.clear();
     rowsCache.set(key, rows);
   }

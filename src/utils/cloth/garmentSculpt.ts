@@ -34,11 +34,13 @@ function reachOf(d: GarmentSculpt, p: number[]): number {
 export function sculptField(list: GarmentSculpt[] | undefined): SculptField {
   const dabs = sculptDabs(list);
   if (!dabs.length) return NONE;
-  const cell = Math.max(...dabs.map((d) => d.radius));
-  const key = (i: number, j: number, k: number) => `${i},${j},${k}`;
-  const buckets = new Map<string, GarmentSculpt[]>();
+  // Cap cell size so one wide dab never collapses hundreds of fine stroke dabs into a single bucket,
+  // and use integer spatial keys to avoid allocating millions of strings during grid evaluation.
+  const cell = Math.max(0.01, Math.min(0.05, Math.max(...dabs.map((d) => d.radius))));
+  const key = (i: number, j: number, k: number) => ((i + 1024) * 2048 + (j + 1024)) * 2048 + (k + 1024);
+  const buckets = new Map<number, GarmentSculpt[]>();
   for (const d of dabs) {
-    const keys = new Set<string>();
+    const keys = new Set<number>();
     for (const x of d.mirror !== false ? [d.at[0], -d.at[0]] : [d.at[0]]) {
       const c = [x, d.at[1], d.at[2]];
       const lo = c.map((v) => Math.floor((v - d.radius) / cell)), hi = c.map((v) => Math.floor((v + d.radius) / cell));
@@ -56,10 +58,18 @@ export function sculptField(list: GarmentSculpt[] | undefined): SculptField {
     for (const d of b) v += d.amount * reachOf(d, p);
     return v;
   };
-  // Overlapping dabs add: the most is bounded by every positive one at once,
-  // which is far too much for a stroke; sampled at each dab's middle instead.
+  // Overlapping dabs add: sample at each dab's centre and midpoints between nearby dabs.
   let most = 0;
-  for (const d of dabs) most = Math.max(most, at(d.at));
+  for (let i = 0; i < dabs.length; i++) {
+    const d = dabs[i];
+    most = Math.max(most, at(d.at));
+    if (d.mirror !== false && Math.abs(d.at[0]) < d.radius) most = Math.max(most, at([0, d.at[1], d.at[2]]));
+    for (let j = i + 1; j < dabs.length && j < i + 8; j++) {
+      const e = dabs[j];
+      const dist = Math.hypot(d.at[0] - e.at[0], d.at[1] - e.at[1], d.at[2] - e.at[2]);
+      if (dist < d.radius + e.radius) most = Math.max(most, at([(d.at[0] + e.at[0]) / 2, (d.at[1] + e.at[1]) / 2, (d.at[2] + e.at[2]) / 2]));
+    }
+  }
   return { at, most };
 }
 

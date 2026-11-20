@@ -10,22 +10,48 @@ export function delaunay(pts: [number, number][]): number[] {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const [x, y] of pts) { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
   const d = Math.max(maxX - minX, maxY - minY) || 1, mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
+  // Deduplicate near-coincident points and apply tiny deterministic jitter to break
+  // exact collinearity / cocircularity without changing point indices or geometry.
+  const eps = 1e-9 * d, cell = 1 / eps;
+  const seen = new Map<string, number>();
+  const unique: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const gx = Math.round((pts[i][0] - mx) * cell), gy = Math.round((pts[i][1] - my) * cell);
+    let dup = false;
+    for (let ox = -1; ox <= 1 && !dup; ox++) for (let oy = -1; oy <= 1 && !dup; oy++) {
+      const prev = seen.get(`${gx + ox},${gy + oy}`);
+      if (prev !== undefined && Math.hypot(pts[i][0] - pts[prev][0], pts[i][1] - pts[prev][1]) < eps) dup = true;
+    }
+    if (!dup) { seen.set(`${gx},${gy}`, i); unique.push(i); }
+  }
+  if (unique.length < 3) return [];
+  // Normalize coordinates around (mx, my) with sub-picometre deterministic perturbation
+  // so collinear/cocircular grids cannot suffer catastrophic cancellation.
+  const P: [number, number][] = pts.map(([x, y], i) => [
+    (x - mx) / d + Math.sin(i * 12.9898 + 1.234) * 1e-11,
+    (y - my) / d + Math.cos(i * 78.233 + 5.678) * 1e-11,
+  ]);
   // A super-triangle well clear of every point; its corners are n, n+1, n+2.
-  const P: [number, number][] = [...pts, [mx - 20 * d, my - d], [mx, my + 20 * d], [mx + 20 * d, my - d]];
+  P.push([-20, -1], [0, 20], [20, -1]);
 
   type Tri = { a: number; b: number; c: number; cx: number; cy: number; r2: number };
-  const make = (a: number, b: number, c: number): Tri => {
+  const make = (a: number, b: number, c: number): Tri | null => {
     const [ax, ay] = P[a], [bx, by] = P[b], [cx, cy] = P[c];
-    const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    let D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if (Math.abs(D) < 1e-15) return null;
     // Orient counter-clockwise.
-    if (D < 0) [b, c] = [c, b];
-    const a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = cx * cx + cy * cy;
-    const ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / D;
-    const uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / D;
-    return { a, b, c, cx: ux, cy: uy, r2: (ax - ux) ** 2 + (ay - uy) ** 2 };
+    if (D < 0) { [b, c] = [c, b]; D = -D; }
+    const dx1 = P[b][0] - ax, dy1 = P[b][1] - ay, dx2 = P[c][0] - ax, dy2 = P[c][1] - ay;
+    const l1 = dx1 * dx1 + dy1 * dy1, l2 = dx2 * dx2 + dy2 * dy2;
+    const ux = ax + (l1 * dy2 - l2 * dy1) / D;
+    const uy = ay + (dx1 * l2 - dx2 * l1) / D;
+    const r2 = (ax - ux) ** 2 + (ay - uy) ** 2;
+    return Number.isFinite(r2) ? { a, b, c, cx: ux, cy: uy, r2 } : null;
   };
-  let tris: Tri[] = [make(n, n + 1, n + 2)];
-  for (let i = 0; i < n; i++) {
+  const root = make(n, n + 1, n + 2);
+  if (!root) return [];
+  let tris: Tri[] = [root];
+  for (const i of unique) {
     const [x, y] = P[i];
     const keep: Tri[] = [];
     const edges = new Map<string, [number, number]>();
@@ -40,7 +66,7 @@ export function delaunay(pts: [number, number][]): number[] {
     }
     for (const [p, q] of edges.values()) {
       const t = make(p, q, i);
-      if (Number.isFinite(t.r2)) keep.push(t);
+      if (t) keep.push(t);
     }
     tris = keep;
   }

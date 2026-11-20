@@ -50,6 +50,8 @@ export function layoutPattern(pieces: PatternPiece[]): PatternLayout {
   return { pieces: out, width: x - GAP + MARGIN, height: height + 2 * MARGIN + 24 };
 }
 
+const escXml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
 /** The layout as an SVG document, 1 unit = 1 mm. */
 export function patternSvg(pieces: PatternPiece[], title = 'pattern'): string {
   const L = layoutPattern(pieces);
@@ -58,14 +60,14 @@ export function patternSvg(pieces: PatternPiece[], title = 'pattern'): string {
     return [
       `<path d="${p.path}" fill="none" stroke="#000" stroke-width="0.5"/>`,
       ...p.channels.map((d) => `<path d="${d}" fill="none" stroke="#000" stroke-width="0.4" stroke-dasharray="3 1.5"><title>boning channel</title></path>`),
-      ...p.marks.map((m) => `<circle cx="${m.x.toFixed(1)}" cy="${m.y.toFixed(1)}" r="${Math.max(0.8, m.r).toFixed(1)}" fill="${m.kind === 'zipper' ? '#000' : 'none'}" stroke="#000" stroke-width="0.4"><title>${m.kind}</title></circle>`),
+      ...p.marks.map((m) => `<circle cx="${m.x.toFixed(1)}" cy="${m.y.toFixed(1)}" r="${Math.max(0.8, m.r).toFixed(1)}" fill="${m.kind === 'zipper' ? '#000' : 'none'}" stroke="#000" stroke-width="0.4"><title>${escXml(m.kind)}</title></circle>`),
       `<line x1="${gx.toFixed(1)}" y1="${g1.toFixed(1)}" x2="${gx.toFixed(1)}" y2="${g0.toFixed(1)}" stroke="#888" stroke-width="0.4" marker-end="url(#arrow)"/>`,
-      `<text x="${(p.x + p.w / 2).toFixed(1)}" y="${(p.y + p.h + 14).toFixed(1)}" font-size="8" font-family="sans-serif" text-anchor="middle">${p.name} · ${Math.round(p.w)}×${Math.round(p.h)} mm · ease to lie flat ${(p.strain95 * 100).toFixed(0)}%</text>`,
+      `<text x="${(p.x + p.w / 2).toFixed(1)}" y="${(p.y + p.h + 14).toFixed(1)}" font-size="8" font-family="sans-serif" text-anchor="middle">${escXml(p.name)} · ${Math.round(p.w)}×${Math.round(p.h)} mm · ease to lie flat ${(p.strain95 * 100).toFixed(0)}%</text>`,
     ].join('\n');
   }).join('\n');
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${L.width.toFixed(0)}mm" height="${L.height.toFixed(0)}mm" viewBox="0 0 ${L.width.toFixed(1)} ${L.height.toFixed(1)}">`,
-    `<title>${title}</title>`,
+    `<title>${escXml(title)}</title>`,
     `<defs><marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4" markerHeight="4" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#888"/></marker></defs>`,
     body,
     `</svg>`,
