@@ -199,18 +199,26 @@ export function solveContactFrictionVoice(
 
   const slipSpeed = Math.max(0, tangentSpeed * (1 - 0.85 * rollingRatio));
 
+  const rubAlign = typeof event.circumferentialRub === 'number'
+    ? clamp(event.circumferentialRub, 0, 1)
+    : event.circumferentialRub
+      ? 0.85
+      : 0;
+
   const profA = opts.primaryProfile ?? null;
   const profB = opts.partnerProfile ?? null;
-  // Choose primary structural resonator (prefer body with audible modes & bodyIr or stronger radiation)
+  // Choose primary structural resonator (prefer body with audible modes & bodyIr or high-Q singing shell)
   const scoreProfile = (p: BodyModalProfile | null): number => {
     if (!p) return 0;
     const hasModes = p.modes.length > 0 ? 1.0 : 0.25;
     const widthBoost = clamp((p.radiatingWidthM ?? 0.03) / 0.03, 0.3, 2.5);
     const qBoost = clamp(Math.log10(10 + p.material.qualityQ) / 2.5, 0.4, 1.5);
-    return hasModes * widthBoost * qBoost;
+    const rimBoost = rubAlign >= 0.45 && p.material.qualityQ >= 280 ? 1.6 : 1.0;
+    return hasModes * widthBoost * qBoost * rimBoost;
   };
   const usePartner = scoreProfile(profB) > scoreProfile(profA) * 1.25;
   const activeProf = usePartner ? profB : profA;
+  const activeNode = usePartner ? (opts.partnerNode ?? null) : (opts.primaryNode ?? null);
 
   const propsA = inferColliderContactProps(opts.primaryNode ?? null, event.selfGeomName);
   const propsB = inferColliderContactProps(opts.partnerNode ?? null, event.otherGeomName);
@@ -252,12 +260,6 @@ export function solveContactFrictionVoice(
   const mode1Q = +clamp(2.2 + Math.sqrt(matQ) * 0.42, 2.0, 22.0).toFixed(2);
   const mode2Q = +clamp(mode1Q * 0.82, 1.8, 18.0).toFixed(2);
 
-  const rubAlign = typeof event.circumferentialRub === 'number'
-    ? clamp(event.circumferentialRub, 0, 1)
-    : event.circumferentialRub
-      ? 0.85
-      : 0;
-
   let regime: ContactFrictionRegime;
   let noiseCenterHz: number;
   let noiseQ: number;
@@ -271,6 +273,8 @@ export function solveContactFrictionVoice(
   let tonalGain = 0;
   let tonalDrive = 0.5;
   let attackTauSec: number;
+  let outMode1Hz = baseF1;
+  let outMode2Hz = baseF2;
   let mode1GainDb: number;
   let mode2GainDb: number;
 
@@ -282,11 +286,11 @@ export function solveContactFrictionVoice(
     rollingRatio < 0.55 &&
     matQ >= 280 &&
     slipSpeed >= 0.015 &&
-    slipSpeed <= 0.80 &&
+    slipSpeed <= 0.95 &&
     normalForce >= 0.05 &&
     normalForce <= 20.0 &&
     mu >= 0.14 &&
-    durSec >= 0.05;
+    durSec >= 0.02;
 
   // -------------------------------------------------------------------------
   // Check Regime 3: Stribeck Negative-Slope Stick-Slip Squeal (Brake / Metal)
@@ -297,6 +301,7 @@ export function solveContactFrictionVoice(
   const squealInstability = normalForce * stribeckSlope * (eStar >= 15e9 ? 1.0 : 0.25) * (matQ / 220);
   const canSqueal =
     !canRimSing &&
+    rubAlign < 0.40 &&
     rollingRatio < 0.45 &&
     mu >= 0.34 &&
     eStar >= 15e9 &&
@@ -333,7 +338,45 @@ export function solveContactFrictionVoice(
     // -----------------------------------------------------------------------
     regime = 'rim_singing';
     tonalActive = true;
-    tonalFreqHz = +clamp(baseF1, 80, 4200).toFixed(2);
+
+    // Lock strictly onto the bowl/goblet's lowest flexural (2,0) rim fundamental
+    // (honoring explicit `tunedPitchHz` when tuned, skipping low-Q cavity air modes,
+    // and never locking onto shrill 900-2500 Hz upper partials!).
+    let lowestFlexuralHz: number | undefined;
+    if (
+      typeof activeNode?.tunedPitchHz === 'number' &&
+      Number.isFinite(activeNode.tunedPitchHz) &&
+      activeNode.tunedPitchHz >= 45
+    ) {
+      lowestFlexuralHz = activeNode.tunedPitchHz;
+    } else if (activeProf) {
+      const structFreqs: number[] = [];
+      const rf = activeProf.rawFreqsHz ?? [];
+      const rq = activeProf.rawModeQs;
+      for (let i = 0; i < rf.length; i++) {
+        const f = rf[i];
+        if (!Number.isFinite(f) || f < 55) continue;
+        if (rq && rq[i] !== undefined && rq[i] < 60) continue; // skip Helmholtz / pipe air mode
+        structFreqs.push(f);
+      }
+      if (structFreqs.length === 0) {
+        for (const m of rawModes) {
+          if (Number.isFinite(m.freqHz) && m.freqHz >= 55) {
+            structFreqs.push(m.freqHz);
+          }
+        }
+      }
+      if (structFreqs.length > 0) {
+        lowestFlexuralHz = Math.min(...structFreqs);
+      } else if (Number.isFinite(activeProf.fundamentalHz) && activeProf.fundamentalHz >= 55) {
+        lowestFlexuralHz = activeProf.fundamentalHz;
+      }
+    }
+    const rimF0 = clamp(lowestFlexuralHz ?? baseF1, 65, 880);
+    tonalFreqHz = +rimF0.toFixed(2);
+    // Track (2,0) rim fundamental + warm Rayleigh (3,0) bell/goblet overtone (~2.76 * f0)
+    outMode1Hz = tonalFreqHz;
+    outMode2Hz = +clamp(tonalFreqHz * 2.76, 150, 2430).toFixed(1);
 
     // Revolving quadrupole nodal-line beat frequency: df_orbit = v_slip / (pi * R_rim)
     const lp = event.localPoint;
@@ -343,20 +386,20 @@ export function solveContactFrictionVoice(
     tonalBeatFreqHz = +(tonalFreqHz + orbitBeatHz).toFixed(3);
 
     // Sweet-spot bowing/rubbing window across speed & normal pressure
-    const speedWindow = smoothstep(0.015, 0.06, slipSpeed) * (1 - 0.55 * smoothstep(0.45, 0.85, slipSpeed));
+    const speedWindow = smoothstep(0.015, 0.06, slipSpeed) * (1 - 0.55 * smoothstep(0.50, 0.95, slipSpeed));
     const forceWindow = smoothstep(0.05, 0.35, normalForce) * (1 - 0.45 * smoothstep(8.0, 20.0, normalForce));
-    const durBloom = smoothstep(0.05, 0.32, durSec);
-    tonalGain = +clamp(0.32 * speedWindow * forceWindow * durBloom * rubAlign, 0.015, 0.38).toFixed(4);
+    const durBloom = 0.15 + 0.85 * smoothstep(0.02, 0.30, durSec);
+    tonalGain = +clamp(0.34 * speedWindow * forceWindow * durBloom * rubAlign, 0.015, 0.38).toFixed(4);
     tonalDrive = 0.38; // warm, pure sinusoidal quadrupole bloom
     attackTauSec = 0.18;
 
-    // Silky subtle finger/mallet rim friction whisper
-    noiseCenterHz = +clamp(tonalFreqHz * 1.5, 220, 3800).toFixed(1);
-    patchLowpassHz = +clamp(tonalFreqHz * 3.0, 600, 5200).toFixed(1);
-    noiseQ = 2.0;
-    noiseGain = +clamp(0.022 * speedWindow * (0.2 + roughness), 0.002, 0.032).toFixed(4);
-    mode1GainDb = 8.5;
-    mode2GainDb = 6.0;
+    // Gentle warm suede/finger rim friction whisper (no harsh >1.9 kHz screech)
+    noiseCenterHz = +clamp(tonalFreqHz * 1.35, 160, 1200).toFixed(1);
+    patchLowpassHz = +clamp(tonalFreqHz * 2.9, 460, 1850).toFixed(1);
+    noiseQ = 2.2;
+    noiseGain = +clamp(0.014 * speedWindow * (0.18 + 0.65 * roughness), 0.0016, 0.018).toFixed(4);
+    mode1GainDb = 9.0;
+    mode2GainDb = 5.0;
   } else if (canSqueal) {
     // -----------------------------------------------------------------------
     // Regime 3: Stribeck Stick-Slip Brake / Metal-on-Metal Squeal
@@ -426,10 +469,10 @@ export function solveContactFrictionVoice(
     tonalGain,
     tonalDrive,
     attackTauSec,
-    mode1Hz: +clamp(baseF1, 65, 7500).toFixed(1),
+    mode1Hz: +clamp(outMode1Hz, 65, 7500).toFixed(1),
     mode1Q,
     mode1GainDb,
-    mode2Hz: +clamp(baseF2, 110, 9500).toFixed(1),
+    mode2Hz: +clamp(outMode2Hz, 110, 9500).toFixed(1),
     mode2Q,
     mode2GainDb,
     bodyIr: activeProf?.bodyIr ?? null,
