@@ -159,9 +159,70 @@ function planRenames(nodes: SceneNode[]): Renames {
   return renames;
 }
 
+/**
+ * The joint names an instrument or tube refers to, rewritten for the joints
+ * that were renamed in its own subtree. A tonehole key, a brass valve or a
+ * vibraphone vane names its MuJoCo joint by string, so a copy whose joint
+ * became `key_2` has to follow it, or the wind solver finds the ORIGINAL's
+ * joint (or none). Scoped per subtree: a joint renamed elsewhere in the scene
+ * is not this instrument's. Null when nothing it names was renamed.
+ */
+function acousticJointRewrites(
+  node: SceneNode, renames: Renames,
+): Pick<SceneNode, 'windInstrument' | 'resonatorTube'> | null {
+  const wind = node.windInstrument;
+  const tube = node.resonatorTube;
+  if (!wind?.toneholeJoints?.length && !wind?.valveJoints?.length && !tube?.vaneJointName) return null;
+  const kept = new Set<string>();
+  const to = new Map<string, string>();
+  const walk = (n: SceneNode) => {
+    if (!n.isPulleyRope) {
+      (n.joints || []).forEach((j, i) => {
+        if (!j.name) return;
+        const renamed = renames.get(n)?.joints?.get(i);
+        if (renamed) { if (!to.has(j.name)) to.set(j.name, renamed); } else kept.add(j.name);
+      });
+    }
+    for (const c of n.children || []) walk(c);
+  };
+  walk(node);
+  for (const k of kept) to.delete(k);
+  if (to.size === 0) return null;
+  const out: Pick<SceneNode, 'windInstrument' | 'resonatorTube'> = {};
+  if (wind) {
+    const rename = <T extends { jointName: string }>(list: T[] | undefined) =>
+      list?.some((e) => to.has(e.jointName)) ? list.map((e) => (to.has(e.jointName) ? { ...e, jointName: to.get(e.jointName)! } : e)) : list;
+    const toneholeJoints = rename(wind.toneholeJoints);
+    const valveJoints = rename(wind.valveJoints);
+    if (toneholeJoints !== wind.toneholeJoints || valveJoints !== wind.valveJoints) {
+      out.windInstrument = {
+        ...wind,
+        ...(toneholeJoints ? { toneholeJoints } : {}),
+        ...(valveJoints ? { valveJoints } : {}),
+      };
+    }
+  }
+  if (tube?.vaneJointName && to.has(tube.vaneJointName)) {
+    out.resonatorTube = { ...tube, vaneJointName: to.get(tube.vaneJointName)! };
+  }
+  return out.windInstrument || out.resonatorTube ? out : null;
+}
+
 /** Renames clashing bodies and geoms in place. For a copy that is the caller's to change. */
 export function uniquifyNamesInPlace(nodes: SceneNode[]): void {
-  for (const [node, { id, name, geoms, joints, prefix }] of planRenames(nodes)) {
+  const renames = planRenames(nodes);
+  // Read against the joints as they were, before any of them is renamed.
+  const acoustic: [SceneNode, NonNullable<ReturnType<typeof acousticJointRewrites>>][] = [];
+  const consider = (list: SceneNode[]) => {
+    for (const n of list) {
+      const rw = renames.size ? acousticJointRewrites(n, renames) : null;
+      if (rw) acoustic.push([n, rw]);
+      consider(n.children || []);
+    }
+  };
+  consider(nodes);
+  for (const [node, rw] of acoustic) Object.assign(node, rw);
+  for (const [node, { id, name, geoms, joints, prefix }] of renames) {
     if (id) node.id = id;
     if (name) node.name = name;
     if (prefix) node.compositePrefix = prefix;
@@ -183,10 +244,12 @@ export function withUniqueNames(scene: SceneGraph): SceneGraph {
     const out = list.map((node) => {
       const children = node.children ? rebuild(node.children) : node.children;
       const r = renames.get(node);
-      if (!r && children === node.children) return node;
+      const rw = acousticJointRewrites(node, renames);
+      if (!r && !rw && children === node.children) return node;
       changed = true;
       return {
         ...node,
+        ...rw,
         ...(r?.id ? { id: r.id } : {}),
         ...(r?.name ? { name: r.name } : {}),
         ...(r?.prefix ? { compositePrefix: r.prefix } : {}),

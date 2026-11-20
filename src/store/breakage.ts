@@ -177,6 +177,32 @@ const applyDeformed = (
 export const effectiveSceneGraph = applyShatterPieces;
 
 /**
+ * The acoustic fields that name another body: a string's soundbox
+ * (`acousticString.resonatorNodeId`, `resonatorNodeId`), a drumhead's shell
+ * and a resonator tube's bar. `to` moves them to another body; null cuts them.
+ * Returns the same node when none of them names `fromId`.
+ */
+const moveAcousticRefs = (n: SceneNode, fromId: string, to: string | null): SceneNode => {
+  const hits =
+    n.resonatorNodeId === fromId ||
+    n.acousticString?.resonatorNodeId === fromId ||
+    n.acousticMembrane?.shellNodeId === fromId ||
+    n.resonatorTube?.coupledBarNodeId === fromId;
+  if (!hits) return n;
+  const next: SceneNode = { ...n };
+  const re = <T extends object>(spec: T, key: keyof T): T => {
+    const copy = { ...spec };
+    if (to) (copy[key] as unknown) = to; else delete copy[key];
+    return copy;
+  };
+  if (n.resonatorNodeId === fromId) { if (to) next.resonatorNodeId = to; else delete next.resonatorNodeId; }
+  if (n.acousticString?.resonatorNodeId === fromId) next.acousticString = re(n.acousticString, 'resonatorNodeId');
+  if (n.acousticMembrane?.shellNodeId === fromId) next.acousticMembrane = re(n.acousticMembrane, 'shellNodeId');
+  if (n.resonatorTube?.coupledBarNodeId === fromId) next.resonatorTube = re(n.resonatorTube, 'coupledBarNodeId');
+  return next;
+};
+
+/**
  * Cut every constraint that pointed at a body which no longer exists.
  *
  * A weld names its target by id, and `mjcf.ts` writes that id straight into
@@ -193,8 +219,9 @@ export const detachReferencesTo = (nodes: SceneNode[], goneId: string): SceneNod
     const children = detachReferencesTo(n.children || [], goneId);
     const severed =
       n.weldTargetId === goneId || n.connectTargetId === goneId || n.coupleTargetId === goneId;
-    if (!severed && children === n.children) return n;
-    const next: SceneNode = { ...n, children };
+    const acoustic = moveAcousticRefs(n, goneId, null);
+    if (!severed && acoustic === n && children === n.children) return n;
+    const next: SceneNode = { ...acoustic, children };
     if (next.weldTargetId === goneId) { delete next.weldTargetId; delete next.weldRigid; }
     if (next.connectTargetId === goneId) { delete next.connectTargetId; delete next.connectAnchor; delete next.connectAnchorLocal; }
     if (next.coupleTargetId === goneId) { delete next.coupleTargetId; delete next.coupleRatio; }
@@ -209,14 +236,17 @@ export const detachReferencesTo = (nodes: SceneNode[], goneId: string): SceneNod
  * it just belongs to a different body. Left alone the weld names a body that
  * no longer exists and MuJoCo refuses the whole model. A weld that would now
  * join `toId` to itself is cut, and a gear coupling is cut rather than moved,
- * since it names the old body's joint, not its shape.
+ * since it names the old body's joint, not its shape. The acoustic ids (a
+ * string's soundbox, a drumhead's shell, a tube's bar) move the same way; on
+ * `toId` itself one that would name its own body is cut.
  */
 export const retargetReferences = (nodes: SceneNode[], fromId: string, toId: string): SceneNode[] => {
   const move = (list: SceneNode[]): SceneNode[] => (list || []).map((n) => {
     const children = move(n.children || []);
     const moves = (n.weldTargetId === fromId || n.connectTargetId === fromId) && n.id !== toId;
-    if (!moves && children === n.children) return n;
-    const next: SceneNode = { ...n, children };
+    const acoustic = moveAcousticRefs(n, fromId, n.id === toId ? null : toId);
+    if (!moves && acoustic === n && children === n.children) return n;
+    const next: SceneNode = { ...acoustic, children };
     if (n.id !== toId) {
       if (next.weldTargetId === fromId) next.weldTargetId = toId;
       if (next.connectTargetId === fromId) next.connectTargetId = toId;

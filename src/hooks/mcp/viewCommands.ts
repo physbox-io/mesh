@@ -6,6 +6,7 @@
 
 import { useViewQuality } from '../../store/viewQualityStore';
 import { useCapture } from '../../store/captureStore';
+import { useSoundStore } from '../../store/soundStore';
 import { renderViewportNow } from '../../utils/viewportCapture';
 import { authoredQuat, orientationOf } from '../../utils/bodyOrientation';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
@@ -64,6 +65,8 @@ export const viewCommands: McpCommands = {
       floorFriction: store.floorFriction,
       floorBounce:   store.floorBounce,
       lastCompileError: store.lastCompileError,
+      soundEnabled: useSoundStore.getState().soundEnabled,
+      reverbEnabled: useSoundStore.getState().reverbEnabled,
     };
   },
   GET_CAMERA: async (_msg, { store }) => {
@@ -287,7 +290,7 @@ export const viewCommands: McpCommands = {
       : null;
     if (page && 'error' in page) throw new Error(page.error);
     return {
-      ...objectReply(found, { full: msg.full === true, world }),
+      ...objectReply(found, { full: msg.full === true, world, scene: store.sceneGraph.nodes }),
       ...(sealChecks.length ? { sealChecks } : {}),
       ...(page ? { meshPage: page } : {}),
     };
@@ -637,6 +640,15 @@ export const viewCommands: McpCommands = {
         csgHoleAxis:   `'auto'|'x'|'y'|'z' — axis the hole runs along, for decomposition. 'auto' takes the longest axis of the largest negative geom.`,
         csgMass:       'DEPRECATED alias of collisionMass on a boolean body, still read so older scenes keep their weight. collisionMass, or a body-level mass, wins when set.',
         csgFn:         'number — OpenSCAD $fn (facet count) for the generated primitives (default 32).',
+        deformMaterial: '\'steel\' | \'softMetal\' | \'hardwood\' | \'softwood\' | \'plastic\' | \'rubber\' | \'ceramic\' | \'glass\' | \'stone\' | \'pasta\' | \'custom\' — the body\'s Physical Material preset (anything else is refused). Sets modal impact sound synthesis (Young\'s modulus E, density fallback, mechanical Q sustain, and transient brightness — e.g. steel rings high/long, hardwood gives a warm marimba knock, ceramic/glass chime crisply, plastic gives a short muted thud, rubber a dull thump) and provides default strength when `loadStrength: true` is used. \'custom\' keeps your own density and contact numbers. For pitched bodies see nodeFields.acoustics.',
+        acousticString: 'object: `{ material?: \'steel\'|\'bronze\'|\'nylon\'|\'gut\' (default \'bronze\'), diameterMm?: number > 0 (default 0.65), tensionN?: number > 0 (default 50), pluckPos?: number (x/L, clamped to 0.03..0.5), resonatorNodeId?: string (soundbox body id for bridge coupling), nonlinearPitchDroop?: boolean | number }` — makes a capsule/cylinder a taut musical string: Mersenne\'s law with Fletcher stiff-string inharmonicity, a breaking-stress check, and bridge coupling into a hollow soundbox it spans. A string needs a transverse slide joint to be pluckable: `tuneTo` (below) adds one. Missing numbers are filled with the defaults; an unknown material or a non-positive number is refused with the valid values. Read the result in physics_get_object `acoustics.string` (fundamentalHz, stressRatio, lengthM, warnings, bridgeCoupling).',
+        windInstrument: 'object: `{ exciter: \'reed\'|\'brass_lip\'|\'flute_jet\'|\'flap_valve\' (required), breathKPa?: number >= 0 (default 0 = silent; playing is 1.5..7 kPa), embouchureHz?: number > 0 (reed / lip / flap-valve natural frequency; default 260, 55 for flap_valve), boreLengthM?, mouthRadiusM?, bellRadiusM?, flareExponent?: number > 0 (a coiled or folded horn\'s unwrapped bore, mouthpiece, bell, and flare; read from the 3D geometry when omitted), toneholeJoints?: [{ jointName, axialFraction, diameterMm }], valveJoints?: [{ jointName, semitones, strokeM? }] }` — a hollow body becomes a 1D waveguide wind instrument whose pitch is the bore\'s resonance the exciter locks to. \'flap_valve\' is an autonomous compliant valve (a whoopee cushion, a raspberry): its pitch is embouchureHz itself. A script blows it with `api.state.breathKPa` and `api.state.embouchureHz` (they override the spec\'s while set). A bad exciter is refused with the valid four. Read physics_get_object `acoustics.wind` (boreShape, lengthM, resonantModesHz, muteFactor, breachFactor).',
+        acousticMembrane: 'object: `{ material?: \'mylar\'|\'coated_film\'|\'calfskin\'|\'kevlar\' (default \'mylar\'), tensionNPerM?: number > 0 (default 1800), thicknessMm?: number > 0 (default 0.19), shape?: \'circular\'|\'rectangular\' (inferred from the geometry), shellNodeId?: string (the kettle or shell body; found by position when omitted), kettleCoupling?: 0..1, snareBuzz?: 0..1, pitchGlideSemitones?: number, pitchGlideDecayMs?: number > 0, nonlinearGlide?: 0..2 }` — a thin disc or sheet becomes a tensioned drumhead (Bessel modes, air-cavity coupling, a harder hit sounds a little sharp then settles). Read physics_get_object `acoustics.membrane` (fundamentalHz, overtoneRatio, warnings).',
+        nonlinearPlate: 'object: `{ enabled?: boolean, crashSensitivity?: number (0 = linear, 1 = physical default, above 1 = a dramatic tam-tam), bloomDelayMs?: number (50..250), pitchGlideCents?: number, shimmerMix?: 0..1, archRatio?: number (dome rise / plate thickness; above 0.3 glides like an opera gong) }` — von Karman geometric nonlinearity for a thin metal plate, cymbal or gong: a hard hit blooms upward in energy. Thin stiff plates are detected without it; the spec tunes or disables it. All numbers must be finite. physics_get_object `acoustics.nonlinearPlate` is true when the body counts as one.',
+        resonatorTube: 'object: `{ endCondition?: \'open_closed\' (quarter-wave stopped tube) | \'open_open\' (half-wave pipe) — detected when omitted, coupledBarNodeId?: string (the bar over its mouth), vaneJointName?: string (a motor-driven vibraphone fan hinge), vaneMaxOcclusion?: 0..1 (default 0.88), tuningHz?: number > 0 }` — a hollow tube\'s air column as a resonator under a bar (a marimba or vibraphone). Read physics_get_object `acoustics.resonatorTube` (fundamentalHz, endCondition). An invalid endCondition is refused.',
+        acousticBow: 'object: `{ rosinGrip?: 0.2..2 (default 1), rosinFriction?: 0.20..0.65 (default 0.38), hairWidthMm?: 3..18 (default 9), forceScale?: number > 0 (default 1) }` — makes the body a rosined horsehair bow for strings (stick-slip, the Schelleng bow-force wedge). Out-of-range numbers are clamped. Setting it stamps horsehair contact on the body\'s first solid geom, only for the fields that geom lacks: condim 3, friction [rosinFriction, 0.004, 0.0004], solref [0.005, 1.25].',
+        tunedPitchHz: 'number — READ-ONLY: the concert pitch (Hz) the body was last tuned to, stamped by `tuneTo` or the app\'s Tune card. Writing it does not tune anything; use `tuneTo`.',
+        tuneTo: 'note | number | object — a request, not a field (never stored): tunes the body to a pitch as it is built, and is applied after every default is filled. `\'A4\'`, `\'F#3\'` (concert pitch, A4 = 440) or a number of Hz, or `{ note | hz, drillNodalHole?: boolean }` (a body-level `drillNodalHole` is read too). Accepted on a body in physics_build_scene, physics_add_object and physics_update_object. It picks the tuner for what the body is: acousticString sets tension and gauge for the span it vibrates over (and adds a pluck joint), acousticMembrane the head tension, resonatorTube the tube\'s length, windInstrument the bore\'s length (or a flap valve\'s embouchureHz), any other body (a bar, chime tube, plate, block) its dimensions, with `drillNodalHole` also drilling the nodal suspension hole. The result is in `tunedPitchHz`; physics_get_object `acoustics` says what the body now sounds like. In physics_update_object a partial acoustic spec (`windInstrument: { breathKPa: 4 }`) merges into the body\'s own, and null removes a subfield. A bad pitch or spec is refused with the reason.',
       },
       tips: [
         'ONE-CALL SCENE BUILDING — You can include `cuts`, `roundEdges`, `patterns`, `paint`, `lattice`, and `sculpt` directly on any body inside `physics_build_scene` or `physics_add_object`. Everything compiles in a single pass without needing 20 follow-up tool calls.',
@@ -650,6 +662,7 @@ export const viewCommands: McpCommands = {
         'HOLLOW AND CONCAVE SHAPES JUST WORK — do not build proxy walls. `collision: "auto"` (the default) measures solidity and decomposes any concave mesh body into convex pieces automatically so balls land inside cups, bowls, funnels, and housings.',
         'GOTCHA — rgba alpha below 1 draws a geom translucent and 0 draws nothing, but it still collides and has mass: alpha hides nothing from the physics. Use `role: "collision"` for invisible colliders, `role: "visual"` for non-colliding visuals, and delete what should not be there.',
         'OpenSCAD shapes: set scad="cube([0.5,0.5,0.5]);" on a body node. If geoms is omitted, it automatically creates a dynamic mesh geom and compiles the SCAD code to vertices/faces.',
+        'SOUND — set `deformMaterial` for how a body rings when hit. Pitched instruments: `acousticString`, `windInstrument`, `acousticMembrane`, `resonatorTube`, `acousticBow` (nodeFields.acoustics), tuned declaratively with `tuneTo: \'A4\'` (or Hz) on the body. Read what a body sounds like in physics_get_object `acoustics`; turn the audio on with physics_set_environment `sound: true`.',
         'Bouncy objects: set solref=[0.04, 0.2] and solimp=[0.99, 0.9999, 0.0001, 0.5, 2]. dampingRatio 0.2 = lively bounce. The floor has dampingRatio=0.0 so ball+floor averages to 0.1 (still bouncy).',
       ],
     };

@@ -12,6 +12,7 @@ import { useStore, scaleMeshGeoms, cloneSceneGraph } from '../store/useStore';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import * as THREE from 'three';
 import { geomBounds, reconcileCuts } from './csg';
+import { measureStringLengthM } from './stringAcoustics';
 
 /**
  * How one geom's size responds to a per-axis scale.
@@ -107,6 +108,46 @@ function scaleCutIntent(g: SceneGeom, sx: number, sy: number, sz: number) {
 }
 
 /**
+ * What an acoustic body says about its size, brought along with the shape.
+ *
+ * - A string's pluck joint is a spring of 4 T / L, so it is recomputed for the
+ *   new length (damping follows as tuneStringToPitch sets it).
+ * - A wind instrument's explicit bore length goes by the mean factor (the bore
+ *   axis is not known here, and a coiled horn has no single axis), its mouth
+ *   and bell radii and tonehole diameters by the radial one, a valve's stroke
+ *   by the mean.
+ * - A drumhead keeps its tension per metre and its shell by id.
+ * - A tuned pitch was solved for the old size, so it is dropped.
+ */
+function scaleAcoustics(n: SceneNode, sx: number, sy: number, sz: number) {
+  const [ax, ay, az] = [Math.abs(sx), Math.abs(sy), Math.abs(sz)];
+  const mean = (ax + ay + az) / 3;
+  const radial = (ax + ay) / 2;
+  delete n.tunedPitchHz;
+
+  if (n.acousticString && n.joints?.length) {
+    const k = +(4 * Math.max(0, Number(n.acousticString.tensionN) || 0) / Math.max(0.02, measureStringLengthM(n))).toFixed(1);
+    n.joints = n.joints.map((j, i) =>
+      i === 0 && j.type === 'slide' && k > 0
+        ? { ...j, stiffness: k, damping: +Math.max(0.04, k * 0.0008).toFixed(4) }
+        : j);
+  }
+
+  const wind = n.windInstrument;
+  if (wind) {
+    const next = { ...wind };
+    if (typeof next.boreLengthM === 'number') next.boreLengthM *= mean;
+    if (typeof next.mouthRadiusM === 'number') next.mouthRadiusM *= radial;
+    if (typeof next.bellRadiusM === 'number') next.bellRadiusM *= radial;
+    if (next.toneholeJoints) next.toneholeJoints = next.toneholeJoints.map((t) => ({ ...t, diameterMm: t.diameterMm * radial }));
+    if (next.valveJoints) {
+      next.valveJoints = next.valveJoints.map((v) => (typeof v.strokeM === 'number' ? { ...v, strokeM: v.strokeM * mean } : v));
+    }
+    n.windInstrument = next;
+  }
+}
+
+/**
  * Multiplies a body, and everything under it, by a per-axis factor.
  *
  * The axes are the BODY's own — the same ones its size and position rows use.
@@ -185,6 +226,13 @@ export function scaleNodeTree(nodeId: string, sx: number, sy: number, sz: number
     if (Array.isArray(points)) {
       p.curvePoints = points.map((point) => [point[0] * sx, point[1] * sy, point[2] * sz]);
     }
+
+    // A joint's anchor is a point in the body's frame, so it moves with the shape.
+    for (const j of n.joints ?? []) {
+      if (j.pos) j.pos = [j.pos[0] * sx, j.pos[1] * sy, j.pos[2] * sz];
+    }
+
+    scaleAcoustics(n, sx, sy, sz);
 
     // Child offsets travel with the scale, or an assembly comes apart.
     for (const child of (n.children ?? [])) {

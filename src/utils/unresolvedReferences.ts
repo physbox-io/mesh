@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SceneNode } from '../types/scene';
-import { REFERENCE_FIELDS } from './danglingReferences';
+import { ACOUSTIC_REFERENCES, REFERENCE_FIELDS } from './danglingReferences';
 
 type ReferenceField = keyof typeof REFERENCE_FIELDS;
 const FIELDS = Object.keys(REFERENCE_FIELDS) as ReferenceField[];
@@ -23,15 +23,33 @@ const NEEDS_JOINT = new Set<ReferenceField>(['coupleTargetId', 'leftTargetId', '
 export interface UnresolvedReference {
   bodyId: string;
   bodyName: string;
-  field: ReferenceField;
+  /** A body-reference field, or an acoustic one such as `acousticString.resonatorNodeId` or `windInstrument.valveJoints[0].jointName`. */
+  field: ReferenceField | string;
   target: string;
-  /** missing: no body by that id or name; byName: a name where an id is needed; noJoint: nothing to couple. */
-  reason: 'missing' | 'byName' | 'noJoint';
+  /**
+   * missing: no body by that id or name; byName: a name where an id is needed; noJoint: nothing to couple;
+   * missingJoint: an instrument names a joint no body in its subtree has.
+   */
+  reason: 'missing' | 'byName' | 'noJoint' | 'missingJoint';
 }
 
 const walk = (nodes: SceneNode[], fn: (n: SceneNode) => void) => {
   for (const n of nodes || []) { fn(n); walk(n.children || [], fn); }
 };
+
+/** The joint names a body's wind instrument or resonator tube refers to. */
+function namedJoints(n: SceneNode): { field: string; target: string }[] {
+  const out: { field: string; target: string }[] = [];
+  (n.windInstrument?.toneholeJoints || []).forEach((t, i) => {
+    if (typeof t?.jointName === 'string') out.push({ field: `windInstrument.toneholeJoints[${i}].jointName`, target: t.jointName });
+  });
+  (n.windInstrument?.valveJoints || []).forEach((v, i) => {
+    if (typeof v?.jointName === 'string') out.push({ field: `windInstrument.valveJoints[${i}].jointName`, target: v.jointName });
+  });
+  const vane = n.resonatorTube?.vaneJointName;
+  if (typeof vane === 'string') out.push({ field: 'resonatorTube.vaneJointName', target: vane });
+  return out;
+}
 
 /**
  * Every reference in `nodes` that resolves to nothing the model can use.
@@ -50,6 +68,23 @@ export function unresolvedReferences(nodes: SceneNode[], only?: Set<string>): Un
   const out: UnresolvedReference[] = [];
   walk(nodes, (n) => {
     if (only && !only.has(n.id)) return;
+    // Acoustic hosts: a soundbox, a shell, a bar. Dropped when nothing has the id.
+    for (const ref of ACOUSTIC_REFERENCES) {
+      const target = ref.read(n);
+      if (typeof target !== 'string') continue;
+      if (!byId.has(target) && !names.has(target) && !prefixes.some((p) => target.startsWith(p))) {
+        out.push({ bodyId: n.id, bodyName: n.name ?? n.id, field: ref.field, target, reason: 'missing' });
+      }
+    }
+    // Joints an instrument names by string must exist on it or under it.
+    const named = namedJoints(n);
+    if (named.length) {
+      const have = new Set<string>();
+      walk([n], (m) => { if (!m.isPulleyRope) for (const j of m.joints || []) if (j.name) have.add(j.name); });
+      for (const { field, target } of named) {
+        if (!have.has(target)) out.push({ bodyId: n.id, bodyName: n.name ?? n.id, field, target, reason: 'missingJoint' });
+      }
+    }
     for (const field of FIELDS) {
       const target = n[field];
       if (typeof target !== 'string') continue;
@@ -75,6 +110,7 @@ export function unresolvedReferences(nodes: SceneNode[], only?: Set<string>): Un
 export function unresolvedReferenceWarnings(refs: UnresolvedReference[]): string[] {
   return refs.map((r) => {
     const where = `${r.field} '${r.target}' on ${r.bodyName}`;
+    if (r.reason === 'missingJoint') return `${where} names no joint on that body or the bodies under it, so it does nothing. Check the joint's name.`;
     if (r.reason === 'missing') return `${where} names no body in the scene, so it was dropped and does nothing. Check the id (physics_get_scene_summary lists them).`;
     if (r.reason === 'byName') return `${where} is a body's name; ${r.field} needs its id, so nothing is coupled.`;
     return `${where}: ${r.target === r.bodyId ? r.bodyName : `'${r.target}'`} has no joint, so nothing is coupled. Give it a hinge or slide.`;

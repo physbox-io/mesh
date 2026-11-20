@@ -381,6 +381,23 @@ export function DocsModal({ tab, onTab, onClose }: {
                   </div>
                 </div>
 
+                <div className="bg-violet-50 border border-violet-100 rounded-xl p-4 flex flex-col gap-2">
+                  <strong className="text-slate-800 font-semibold text-xs">🎛️ Authoring an Instrument: Sound Roles</strong>
+                  <p className="text-slate-600 text-xs leading-relaxed">
+                    Open <strong>Shape → Concert Pitch</strong> and pick a <strong>Sound role</strong> for the body. The list only offers what the geometry can be:
+                  </p>
+                  <ul className="list-disc pl-4 text-slate-600 text-xs leading-relaxed flex flex-col gap-1">
+                    <li><strong>Taut string</strong>: a long thin wire. Choose wire, gauge, tension and pluck point, then audition with <strong>Pluck</strong>, <strong>Strike</strong> or hold <strong>Bow</strong> and move the <code className="font-mono">β</code> / speed / force sliders: the Schelleng window tells you whether you are in <em>flautando</em>, <em>Helmholtz lock</em> or <em>raucous</em> crunch.</li>
+                    <li><strong>Wind bore</strong>: a hollow tube, horn or bladder spout with a <em>reed</em>, <em>brass lip</em>, <em>air jet</em> or compliant <em>flap-valve</em> exciter. The pitch shown is the one the bore plays, and <strong>Tune</strong> scales the bore (or the flap frequency), never the pipe wall.</li>
+                    <li><strong>Acoustic bow</strong>: a long thin body given rosined horsehair contact, so drawing it across a string by a joint or script excites stick-slip.</li>
+                    <li><strong>Tensioned membrane</strong>: a drum head (<em>mylar</em>, <em>coated film</em>, <em>calfskin</em>, <em>kevlar</em>) with tension, kettle-shell air coupling, snare buzz and the hard-strike pitch drop.</li>
+                    <li><strong>Tube resonator</strong> and <strong>nonlinear crash plate</strong> are switches on a hollow tube and on a thin hard plate: a λ/4 or λ/2 air column that a bar rings into, with an optional motor-driven tremolo fan, and a von Kármán crash that blooms and glides.</li>
+                  </ul>
+                  <p className="text-slate-500 text-xs leading-relaxed">
+                    Every one of these fields is also on the MCP: <code className="font-mono">acousticString</code>, <code className="font-mono">windInstrument</code>, <code className="font-mono">acousticBow</code>, <code className="font-mono">acousticMembrane</code>, <code className="font-mono">resonatorTube</code>, <code className="font-mono">nonlinearPlate</code>, and a <code className="font-mono">tuneTo</code> note on any body; <code className="font-mono">physics_get_object</code> reports the resulting pitch.
+                  </p>
+                </div>
+
                 <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex flex-col gap-2">
                   <strong className="text-slate-800 font-semibold text-xs">🎼 Luthier Tuning &amp; Room Reverb</strong>
                   <p className="text-slate-600 text-xs leading-relaxed">

@@ -15,7 +15,7 @@ import { patternSurfaces } from '../../utils/facePatternPick';
 import { carryAcrossCut, knifeSoups, seamsAcross } from '../../utils/knife';
 import { splitSeams } from '../../utils/surfaceTexture';
 import { Vector3 } from 'three';
-import { checkIncomingBody } from '../../utils/incomingBodyCheck';
+import { checkIncomingBody, normalizeAcousticFields } from '../../utils/incomingBodyCheck';
 import type { SceneNode, SceneGeom, SceneJoint, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
@@ -27,7 +27,7 @@ import {
 import { sculptHistory } from './sculptState';
 import {
   pendingDeclarativeOps, normalizeRgba, fillGeomDefaults, resolveUpdatedGeoms, resolveBreakFields,
-  fillBodyDefaults,
+  fillBodyDefaults, parseTuneTo, applyTuneTo, applyPendingTuneTo,
 } from './bodyDefaults';
 import {
   movingPieceOf, sealCheckFor, applySingleCutToBody, applyRoundEdgesToBody,
@@ -50,6 +50,10 @@ function syncFreeJointToDocument(id: string) {
   const pose = freeJointPose(node, nodes.some((n) => n.id === id));
   if (pose) getPhysicsWorkerClient().setQpos(pose.joint, 0, pose.qpos);
 }
+
+/** Acoustic fields a body update is checked for (utils/incomingBodyCheck.ts normalizeAcousticFields). */
+const SPEC_FIELDS = ['acousticString', 'windInstrument', 'acousticMembrane', 'nonlinearPlate', 'resonatorTube', 'acousticBow'] as const;
+const ACOUSTIC_FIELDS = ['deformMaterial', ...SPEC_FIELDS];
 
 export const objectCommands: McpCommands = {
     /*
@@ -89,9 +93,10 @@ export const objectCommands: McpCommands = {
         pendingDeclarativeOps.set(node.id, pending);
       }
     }
-    const nodes = parent
+    // A string or head given a `tuneTo` is retuned now the scene is around it.
+    const nodes = applyPendingTuneTo(parent
       ? withChild(store.sceneGraph.nodes, parent.id, node)
-      : [...store.sceneGraph.nodes, node];
+      : [...store.sceneGraph.nodes, node]);
     // Read before the store drops them: a typo in a target id did nothing, ok:true.
     const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes, new Set([node.id])));
     store.updateScene({ ...store.sceneGraph, nodes }, true);
@@ -163,6 +168,11 @@ export const objectCommands: McpCommands = {
       : updates.paint && typeof updates.paint === 'object'
         ? [updates.paint]
         : undefined;
+    // Transient: a request to tune, not a field of the body.
+    const tuneRaw = updates.tuneTo;
+    const drillRaw = updates.drillNodalHole;
+    delete updates.tuneTo;
+    delete updates.drillNodalHole;
     delete updates.cuts;
     delete updates.roundEdges;
     delete updates.roundings;
@@ -185,17 +195,44 @@ export const objectCommands: McpCommands = {
       }
     }
 
+    // Acoustic specs: a partial one merges into the body's own (null drops a
+    // subfield), is filled and checked, and `tuneTo` is applied last. What
+    // that changed (specs, a tuned string's joint and geoms, tunedPitchHz) goes
+    // into `updates`, so the store sees it.
+    let next = { ...target, ...updates } as SceneNode;
+    const replaced = (list: SceneNode[]): SceneNode[] =>
+      list.map((n) => (n.id === targetId ? next : { ...n, children: replaced(n.children || []) }));
+    try {
+      const touched = ACOUSTIC_FIELDS.filter((k) => k in rawUpdates);
+      if (touched.length > 0 || tuneRaw !== undefined) {
+        const sentFields = updates as Record<string, unknown>;
+        for (const k of SPEC_FIELDS) {
+          const had = (target as unknown as Record<string, unknown>)[k];
+          const sent = sentFields[k];
+          if (sent && typeof sent === 'object' && !Array.isArray(sent) && had && typeof had === 'object') {
+            sentFields[k] = withoutNulls({ ...(had as object), ...(sent as object) });
+          }
+        }
+        const before = { ...target, ...updates } as Record<string, unknown>;
+        next = { ...before } as unknown as SceneNode;
+        normalizeAcousticFields(next, touched);
+        if (tuneRaw !== undefined) {
+          const flat = replaced(store.sceneGraph.nodes);
+          next = applyTuneTo(next, parseTuneTo(tuneRaw, drillRaw), flat);
+        }
+        for (const [k, v] of Object.entries(next)) if (v !== before[k]) sentFields[k] = v;
+      }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     // A geom type, coordinate or size MuJoCo would refuse with an XML line
     // number is refused here, by name, before the body is touched.
-    const next = { ...target, ...updates } as SceneNode;
     try {
       checkIncomingBody(next, (next.joints || []).length > 0);
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     // Read before the store drops them: a typo in a target id did nothing, ok:true.
-    const replaced = (list: SceneNode[]): SceneNode[] =>
-      list.map((n) => (n.id === targetId ? next : { ...n, children: replaced(n.children || []) }));
     const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(replaced(store.sceneGraph.nodes), new Set([targetId])));
 
     if (rawCuts || normRoundEdges || rawPatterns || rawPaint) {

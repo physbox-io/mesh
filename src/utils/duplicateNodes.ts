@@ -87,6 +87,25 @@ export function renumber(roots: SceneNode[]): void {
           for (const extra of REFERENCE_FIELDS[f]) delete fields[extra];
         }
       }
+      // Acoustic ids: a string's soundbox, a drumhead's shell and a tube's
+      // coupled bar. One inside the copy follows it to the new id. A soundbox
+      // or shell outside it is still a valid host, so it stays; a coupled bar
+      // outside it would tie the copy to the original's bar, so it is cut (the
+      // tube then finds a bar by position, as it does when none is named).
+      if (typeof n.resonatorNodeId === 'string' && ids.has(n.resonatorNodeId)) n.resonatorNodeId = ids.get(n.resonatorNodeId);
+      if (n.acousticString && typeof n.acousticString.resonatorNodeId === 'string' && ids.has(n.acousticString.resonatorNodeId)) {
+        n.acousticString = { ...n.acousticString, resonatorNodeId: ids.get(n.acousticString.resonatorNodeId) };
+      }
+      if (n.acousticMembrane && typeof n.acousticMembrane.shellNodeId === 'string' && ids.has(n.acousticMembrane.shellNodeId)) {
+        n.acousticMembrane = { ...n.acousticMembrane, shellNodeId: ids.get(n.acousticMembrane.shellNodeId) };
+      }
+      const bar = n.resonatorTube?.coupledBarNodeId;
+      if (n.resonatorTube && typeof bar === 'string') {
+        const tube = { ...n.resonatorTube };
+        if (ids.has(bar)) tube.coupledBarNodeId = ids.get(bar);
+        else delete tube.coupledBarNodeId;
+        n.resonatorTube = tube;
+      }
     });
   }
 }

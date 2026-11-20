@@ -34,7 +34,8 @@ import {
   type PhysicsWindow, workerStatusNow, countBodies, type Msg, HEADLESS_WAIT_FOR_COLLIDERS_MS,
   SUSPICIOUSLY_LARGE_DIAGONAL_M, findNodeInScene,
 } from './bridgeUtils';
-import { fillBodyDefaults } from './bodyDefaults';
+import { fillBodyDefaults, applyPendingTuneTo } from './bodyDefaults';
+import { useSoundStore } from '../../store/soundStore';
 import { settleScene } from './settleScene';
 import { withUniqueRawIds } from '../../utils/uniqueNames';
 import { scriptWarnings } from '../../utils/scriptCheck';
@@ -539,7 +540,8 @@ export const sceneCommands: McpCommands = {
     // doesn't crash compileToMJCF's unconditional .forEach on those fields.
     // Two bodies with one id were one body to every lookup; the later is renamed.
     const { bodies: uniqueNodes, renamed } = withUniqueRawIds(rawNodes);
-    const nodes = uniqueNodes.map((b) => fillBodyDefaults(b));
+    // Strings and heads with a `tuneTo` are retuned with the whole scene in view.
+    const nodes = applyPendingTuneTo(uniqueNodes.map((b) => fillBodyDefaults(b)));
     // What the scene says about itself. The object form is GET_SCENE's answer
     // coming back, and carries all of it: fidelity, pictures, environment,
     // cast prep, name and note cards. A bare array is new bodies for the scene
@@ -572,8 +574,8 @@ export const sceneCommands: McpCommands = {
     return withRenamedIds(withScriptWarnings(result, nodes), renamed);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
-    const { gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
-      msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; background?: string; waterLevel?: number | null | false; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
+    const { gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm, sound, reverb } =
+      msg as Msg<{ sound?: boolean; reverb?: boolean; gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; background?: string; waterLevel?: number | null | false; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
     // The board on the bench: what every carve, export and fit check uses.
     const stockPatch = {
       ...(typeof stockWidthMm === 'number' && stockWidthMm > 0 ? { widthMm: stockWidthMm } : {}),
@@ -605,6 +607,13 @@ export const sceneCommands: McpCommands = {
       env.waterLevel = typeof waterLevel === 'number' && Number.isFinite(waterLevel) ? waterLevel : null;
     }
     if (Object.keys(env).length > 0) store.setEnvironment(env);
+    // Sound is the app's own switch (header speaker, settings): the store and
+    // the worker both, as the header does. Reverb is the store's alone.
+    if (typeof sound === 'boolean') {
+      useSoundStore.getState().setSoundEnabled(sound);
+      getPhysicsWorkerClient().setSound(sound);
+    }
+    if (typeof reverb === 'boolean') useSoundStore.getState().setReverbEnabled(reverb);
     return {
       ok: true,
       ...(Object.keys(stockPatch).length > 0
@@ -624,7 +633,7 @@ export const sceneCommands: McpCommands = {
 
     // Two bodies with one id were one body to every lookup; the later is renamed.
     const { bodies: uniqueBodies, renamed } = withUniqueRawIds(bodies);
-    const nodes = uniqueBodies.map((b) => fillBodyDefaults(b));
+    const nodes = applyPendingTuneTo(uniqueBodies.map((b) => fillBodyDefaults(b)));
     const result = withRenamedIds(withScriptWarnings(await settleScene(nodes, { freshStart: true }), nodes), renamed);
     // What the scene is called: the scene button shows it in place of
     // "Modified scene", the save dialog starts from it and exports are named
