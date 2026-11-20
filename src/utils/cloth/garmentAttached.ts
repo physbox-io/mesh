@@ -241,7 +241,8 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
       const m = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2], step = Math.min(1e-3, l / 4);
       if (insideOutline([m[0] - (dy / l) * step, m[1] + (dx / l) * step], a.outline)) votes += l; else votes -= l;
     }
-    const flat = mesh.uv.map((q) => fromEdge(q, sewnEdge, votes >= 0 ? 1 : -1));
+    const inward = votes >= 0 ? 1 : -1;
+    const flat = mesh.uv.map((q) => fromEdge(q, sewnEdge, inward));
     // Its rest shape set in a curve (bend): round an axis out from the middle
     // of its sewn side, across the chord of that side, its sides down off its
     // face, the side the garment is on (the outline runs round anticlockwise
@@ -249,7 +250,7 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
     let rest3: number[][] | undefined;
     if (a.bend && Math.abs(a.bend) > 1e-3) {
       const e0 = sewnEdge[0], e1 = sewnEdge[sewnEdge.length - 1], cl = Math.hypot(e1[0] - e0[0], e1[1] - e0[1]) || 1;
-      const c = [(e1[0] - e0[0]) / cl, (e1[1] - e0[1]) / cl], mid = [(e0[0] + e1[0]) / 2, (e0[1] + e1[1]) / 2], R = Math.abs(a.bend), down = Math.sign(a.bend);
+      const c = [(e1[0] - e0[0]) / cl, (e1[1] - e0[1]) / cl], mid = [(e0[0] + e1[0]) / 2, (e0[1] + e1[1]) / 2], R = Math.abs(a.bend), down = Math.sign(a.bend) * inward;
       rest3 = mesh.uv.map((q) => {
         const s0 = (q[0] - mid[0]) * c[0] + (q[1] - mid[1]) * c[1], w = -(q[0] - mid[0]) * c[1] + (q[1] - mid[1]) * c[0], th = s0 / R;
         const s1 = R * Math.sin(th);
@@ -403,7 +404,24 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           if (swing >= 0 || clear < 0.005) { const tk = nearestTack(lineAt[i].p, hostTris, x, normalOf, off, false, i); tacks.push(tk.tack); start[i] = tk.at; }
           else stitches.push({ local: i, particle: lineAt[i].particle, sew: true });
         }
-        out.push({ name, rgba: a.rgba ?? colour, ...(a.material ? { material: a.material } : {}), ...(a.pattern ? { pattern: a.pattern } : {}), ...(a.materialOverrides ? { materialOverrides: a.materialOverrides } : {}), ...(rest3 ? { rest3 } : {}), uv: mesh.uv, tris: mesh.tris, outline: a.outline.flatMap((_, k) => mesh.edgeVerts[`s${k}`].slice(0, -1)), start, tacks, ...(stitches.length ? { stitches } : {}), ...(swing > 1e-6 ? { drop: true } : {}), ...(selfStitches.length ? { selfStitches } : {}) });
+        // Outward normal of the attached sheet: at swing = 0 (hanging) it faces +out away from the garment;
+        // swung out by `swing` (e.g. ~90 deg for a level cap visor or hat brim) it rotates with the sheet to
+        // cos(swing)*out - sin(swing)*down (+Z upward on a visor, instead of grazing ~90 deg against the crown).
+        let facing = hangs.map((h, i) => {
+          if (swing < 0) return outward[i];
+          const c0 = Math.cos(swing), s0 = Math.sin(swing);
+          return unit([c0 * h.out[0] - s0 * h.down[0], c0 * h.out[1] - s0 * h.down[1], c0 * h.out[2] - s0 * h.down[2]]) ?? h.out;
+        });
+        if (swing >= 0 && Math.cos(swing) < -0.5 && others.length) {
+          let bodyAlign = 0;
+          start.forEach((q, i) => {
+            if (atSeam(i)) return;
+            const hit = others[0](q, 0.25);
+            if (hit) bodyAlign += dot(facing[i], hit.n);
+          });
+          if (bodyAlign < 0) facing = facing.map((f) => [-f[0], -f[1], -f[2]]);
+        }
+        out.push({ name, rgba: a.rgba ?? colour, ...(a.material ? { material: a.material } : {}), ...(a.pattern ? { pattern: a.pattern } : {}), ...(a.materialOverrides ? { materialOverrides: a.materialOverrides } : {}), ...(rest3 ? { rest3 } : {}), facing, uv: mesh.uv, tris: mesh.tris, outline: a.outline.flatMap((_, k) => mesh.edgeVerts[`s${k}`].slice(0, -1)), start, tacks, ...(stitches.length ? { stitches } : {}), ...(swing > 1e-6 ? { drop: true } : {}), ...(selfStitches.length ? { selfStitches } : {}) });
       }
     });
   }

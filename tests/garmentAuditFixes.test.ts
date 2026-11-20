@@ -12,6 +12,7 @@ import { flattenPanel } from '../src/utils/cloth/garmentFlatten';
 import { delaunay } from '../src/utils/cloth/delaunay';
 import { healFlatTriangles } from '../src/utils/cloth/garmentSurface';
 import { reposeDraft } from '../src/utils/cloth/garmentRepose';
+import { clothRun } from './clothSimHarness';
 import type { SceneNode } from '../src/types/scene';
 
 afterEach(() => {
@@ -313,4 +314,118 @@ describe('garment & body-form audit regression fixes', () => {
     const newZ = reposed.cuts![0].z!;
     expect(newZ[0]).not.toBeCloseTo(elbowL[2] - 0.05, 2);
   });
+
+  it('builds and settles a manifold, hole-free, smooth upward-facing baseball cap brim in urban_collection and coherent collar/lapel winding', async () => {
+    const { urbanCollectionPreset } = await import('../src/presets/urbanCollection');
+    const { shirtAndJacketPreset } = await import('../src/presets/clothPresets');
+
+    const countDuplicateHalfEdges = (tris: number[]) => {
+      const seen = new Set<string>();
+      let dup = 0;
+      for (let t = 0; t < tris.length; t += 3) {
+        for (let e = 0; e < 3; e++) {
+          const a = tris[t + e], b = tris[t + ((e + 1) % 3)];
+          const key = `${a}->${b}`;
+          if (seen.has(key)) dup++;
+          seen.add(key);
+        }
+      }
+      return dup;
+    };
+
+    // 1. Collared/lapelled jacket groups must have 0 duplicate half-edges across joined lapels and collar pieces.
+    const sjNodes = shirtAndJacketPreset.nodes;
+    const sjJacket = sjNodes.find((n) => n.name === 'jacket')!;
+    const sjModel = clothModel(sjJacket, new THREE.Matrix4(), sjNodes);
+    for (const grpName of ['jacket__frontL', 'jacket__frontR', 'jacket__collarStand', 'jacket__collar']) {
+      const grp = sjModel.groups.find((g) => g.name === grpName)!;
+      expect(grp, grpName).toBeDefined();
+      expect(countDuplicateHalfEdges(grp.tris), grpName).toBe(0);
+    }
+
+    // 2. Baseball cap visor (`cap__peak`) in urban_collection: hole-free 2D triangulation & 100% manifold winding at build.
+    const uNodes = urbanCollectionPreset.nodes;
+    const formA = uNodes.find((n) => n.name === 'formA')!;
+    const cap = uNodes.find((n) => n.name === 'cap')!;
+
+    const cm = clothModel(cap, new THREE.Matrix4(), uNodes);
+    const peak = cm.groups.find((g) => g.name === 'cap__peak')!;
+    expect(peak).toBeDefined();
+    expect(countDuplicateHalfEdges(peak.tris)).toBe(0);
+
+    const { uv, outline } = peak.flat!;
+    let polyArea = 0;
+    const outlineEdges = new Set<string>();
+    for (let i = 0; i < outline.length; i++) {
+      const a = outline[i], b = outline[(i + 1) % outline.length];
+      polyArea += uv[a][0] * uv[b][1] - uv[b][0] * uv[a][1];
+      outlineEdges.add(a < b ? `${a},${b}` : `${b},${a}`);
+    }
+    polyArea = 0.5 * Math.abs(polyArea);
+
+    let triArea = 0;
+    const edgeUse = new Map<string, number>();
+    for (let t = 0; t < peak.tris.length; t += 3) {
+      const ids = [peak.tris[t], peak.tris[t + 1], peak.tris[t + 2]];
+      const [pa, pb, pc] = ids.map((k) => uv[k]);
+      triArea += 0.5 * Math.abs((pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]));
+      for (let e = 0; e < 3; e++) {
+        const a = ids[e], b = ids[(e + 1) % 3];
+        const k = a < b ? `${a},${b}` : `${b},${a}`;
+        edgeUse.set(k, (edgeUse.get(k) ?? 0) + 1);
+      }
+    }
+    expect(Math.abs(polyArea - triArea)).toBeLessThan(1e-5);
+    for (const [k, cnt] of edgeUse) {
+      expect(cnt, `edge ${k} manifold`).toBeLessThanOrEqual(2);
+      if (cnt === 1) expect(outlineEdges.has(k), `interior hole edge ${k}`).toBe(true);
+    }
+
+    // 3. Settle & drape urban_collection baseball cap on formA:
+    // every peak triangle must face upward (+Z) with smooth adjacent normals (zero craters/dimples/inversions).
+    const r = await clothRun([formA, cap]);
+    let capBase = 0;
+    for (const m of r.models) {
+      if (m.name === 'cap') break;
+      capBase += m.invMass.length;
+    }
+
+    const inspectPeak3D = (x: Float64Array) => {
+      const normals: number[][] = [];
+      let downCount = 0;
+      const triByEdge = new Map<string, number[]>();
+      for (let t = 0; t < peak.tris.length; t += 3) {
+        const ids = [peak.tris[t], peak.tris[t + 1], peak.tris[t + 2]];
+        const [pa, pb, pc] = ids.map((l) => capBase + peak.particles[l]);
+        const ux = x[3 * pb] - x[3 * pa], uy = x[3 * pb + 1] - x[3 * pa + 1], uz = x[3 * pb + 2] - x[3 * pa + 2];
+        const vx = x[3 * pc] - x[3 * pa], vy = x[3 * pc + 1] - x[3 * pa + 1], vz = x[3 * pc + 2] - x[3 * pa + 2];
+        const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const nl = Math.hypot(nx, ny, nz);
+        expect(nl).toBeGreaterThan(1e-8);
+        normals.push([nx / nl, ny / nl, nz / nl]);
+        if (nz <= 0) downCount++;
+        for (let e = 0; e < 3; e++) {
+          const a = ids[e], b = ids[(e + 1) % 3];
+          const k = a < b ? `${a},${b}` : `${b},${a}`;
+          (triByEdge.get(k) ?? triByEdge.set(k, []).get(k)!).push(t / 3);
+        }
+      }
+      let minAdjDot = 1;
+      for (const [, ts] of triByEdge) {
+        if (ts.length !== 2) continue;
+        const n0 = normals[ts[0]], n1 = normals[ts[1]];
+        minAdjDot = Math.min(minAdjDot, n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]);
+      }
+      return { downCount, minAdjDot };
+    };
+
+    const atSettle = inspectPeak3D(r.sim.x);
+    expect(atSettle.downCount).toBe(0);
+    expect(atSettle.minAdjDot).toBeGreaterThan(0.7);
+
+    r.run(0.5);
+    const afterDrape = inspectPeak3D(r.sim.x);
+    expect(afterDrape.downCount).toBe(0);
+    expect(afterDrape.minAdjDot).toBeGreaterThan(0.88);
+  }, 120_000);
 });

@@ -77,6 +77,8 @@ export interface AddOnPiece {
   pressed?: boolean;
   /** Its rest shape where not flat (GarmentAttachment.bend): a point per uv, metres, in its own frame. */
   rest3?: number[][];
+  /** Outward unit normal at each local point when known by the builder (e.g. an attached brim, ruffle or hood). */
+  facing?: number[][];
   /**
    * Cut in one with this panel: `uv` is in the panel's flat frame, and
    * `joinPath` (from its first shared point round its own edges to its last)

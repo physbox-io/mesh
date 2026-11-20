@@ -33,7 +33,7 @@ export const BOARD_STIFFNESS = 0.05;
 /** Each point's neighbourhood: this many rings of triangles round it. */
 const RINGS = 1;
 
-interface Cluster { ids: Int32Array; /** Rest offsets from its centre, 3 per point. */ rest: Float64Array; /** Its rest shape is flat (z 0 throughout): its third axis made square to the other two. */ flat: boolean; /** Blend weight of this cluster when averaging goals (higher for the whole-board cluster). */ blend: number; weight?: Float64Array; /** Its last rotation, a unit quaternion (w, x, y, z): where the next fit starts. */ q: Float64Array }
+interface Cluster { ids: Int32Array; /** Rest offsets from its centre, 3 per point. */ rest: Float64Array; /** Its rest shape is flat (z 0 throughout): its third axis made square to the other two. */ flat: boolean; /** Blend weight of this cluster when averaging goals (higher for the whole-board cluster). */ blend: number; /** Index of this board's whole-piece cluster, for cold-start orientation seeding. */ root: number; /** Whether `q` has been converged at least once from the 3D pose. */ warm: boolean; weight?: Float64Array; /** Its last rotation, a unit quaternion (w, x, y, z): where the next fit starts. */ q: Float64Array }
 
 export class BoardShapes {
   private clusters: Cluster[] = [];
@@ -62,13 +62,17 @@ export class BoardShapes {
         ids.forEach((j, k) => { for (let d = 0; d < 3; d++) rest[3 * k + d] = (b.rest[j][d] ?? 0) - c[d]; });
         return rest;
       };
-      if (m >= 3) this.clusters.push({ ids: Int32Array.from(b.particles), rest: restOf(b.particles.map((_, k) => k)), flat, blend: 21, q: Float64Array.of(1, 0, 0, 0) });
+      let root = -1;
+      if (m >= 3) {
+        root = this.clusters.length;
+        this.clusters.push({ ids: Int32Array.from(b.particles), rest: restOf(b.particles.map((_, k) => k)), flat, blend: 21, root, warm: false, q: Float64Array.of(1, 0, 0, 0) });
+      }
       for (let i = 0; i < m; i++) {
         let ring = new Set<number>([i]);
         for (let r = 0; r < RINGS; r++) { const next = new Set(ring); for (const j of ring) for (const k of nbr[j]) next.add(k); ring = next; }
         const ids = [...ring];
         if (ids.length < 3) continue;
-        this.clusters.push({ ids: Int32Array.from(ids, (j) => b.particles[j]), rest: restOf(ids), flat, blend: 1, q: Float64Array.of(1, 0, 0, 0) });
+        this.clusters.push({ ids: Int32Array.from(ids, (j) => b.particles[j]), rest: restOf(ids), flat, blend: 1, root, warm: false, q: Float64Array.of(1, 0, 0, 0) });
         for (const j of ids) members.add(b.particles[j]);
       }
     }
@@ -90,8 +94,9 @@ export class BoardShapes {
   restoreQuats(q: ArrayLike<number>) {
     if (q.length !== 4 * this.clusters.length) return;
     for (let i = 0; i < this.clusters.length; i++) {
-      const cq = this.clusters[i].q, o = 4 * i;
+      const c = this.clusters[i], cq = c.q, o = 4 * i;
       cq[0] = q[o]; cq[1] = q[o + 1]; cq[2] = q[o + 2]; cq[3] = q[o + 3];
+      c.warm = true;
     }
   }
 
@@ -102,7 +107,8 @@ export class BoardShapes {
     const members = this.members, A = this.A, R = this.R;
     for (let k = 0; k < members.length; k++) { const i = members[k]; goal[3 * i] = goal[3 * i + 1] = goal[3 * i + 2] = 0; count[i] = 0; }
     for (let ci = 0; ci < this.clusters.length; ci++) {
-      const { ids, rest, weight, q, flat, blend } = this.clusters[ci];
+      const cluster = this.clusters[ci];
+      const { ids, rest, weight, q, flat, blend, root } = cluster;
       const m = ids.length;
       let cx = 0, cy = 0, cz = 0, ws = 0;
       for (let k = 0; k < m; k++) {
@@ -137,7 +143,24 @@ export class BoardShapes {
         if (l3 < 1e-18 || s3 < 1e-12) continue;
         A[2] *= s3 / l3; A[5] *= s3 / l3; A[8] *= s3 / l3;
       }
-      rotationOf(A, q, R);
+      let iters = 4;
+      if (!cluster.warm) {
+        if (root >= 0 && root !== ci && this.clusters[root].warm) {
+          q.set(this.clusters[root].q);
+          iters = 12;
+        } else {
+          // Avoid 180-degree saddle points on cold start (e.g. a visor rotated ~180 deg around X from pattern space):
+          // pick whichever Klein four-group quaternion {1, i, j, k} maximizes tr(R(q)^T A), guaranteeing <= 90 deg initial error.
+          const t0 = A[0] + A[4] + A[8], tx = A[0] - A[4] - A[8], ty = -A[0] + A[4] - A[8], tz = -A[0] - A[4] + A[8];
+          if (tx >= t0 && tx >= ty && tx >= tz) { q[0] = 0; q[1] = 1; q[2] = 0; q[3] = 0; }
+          else if (ty >= t0 && ty >= tx && ty >= tz) { q[0] = 0; q[1] = 0; q[2] = 1; q[3] = 0; }
+          else if (tz >= t0 && tz >= tx && tz >= ty) { q[0] = 0; q[1] = 0; q[2] = 0; q[3] = 1; }
+          else { q[0] = 1; q[1] = 0; q[2] = 0; q[3] = 0; }
+          iters = 20;
+        }
+        cluster.warm = true;
+      }
+      rotationOf(A, q, R, iters);
       for (let k = 0; k < m; k++) {
         const i = ids[k], u = rest[3 * k] - ru, v = rest[3 * k + 1] - rv, t = rest[3 * k + 2] - rw;
         goal[3 * i] += blend * (cx + R[0] * u + R[1] * v + R[2] * t);
@@ -161,8 +184,8 @@ export class BoardShapes {
  * turns do; started afresh each time, the polar decomposition took a cluster
  * twenty and the boards half a second a simulated second.
  */
-function rotationOf(A: Float64Array, q: Float64Array, R: Float64Array) {
-  for (let it = 0; it < 4; it++) {
+function rotationOf(A: Float64Array, q: Float64Array, R: Float64Array, iters = 4) {
+  for (let it = 0; it < iters; it++) {
     const w = q[0], x = q[1], y = q[2], z = q[3];
     R[0] = 1 - 2 * (y * y + z * z); R[1] = 2 * (x * y - w * z); R[2] = 2 * (x * z + w * y);
     R[3] = 2 * (x * y + w * z); R[4] = 1 - 2 * (x * x + z * z); R[5] = 2 * (y * z - w * x);

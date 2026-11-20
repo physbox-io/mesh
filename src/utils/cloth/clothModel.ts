@@ -324,6 +324,8 @@ export interface ClothModel {
   bendArea: number[];
   /** The curvature each stencil rests at: none within a piece; across a seam, as modelled. */
   bendRest: number[];
+  /** Dihedral sign (-1, 0, or 1) of each non-zero rest curvature stencil in rest space. */
+  bendSign?: number[];
   /** Each stencil's bending stiffness over the material's. */
   bendStiffness?: number[];
   /** Pairs of particles two edges apart, and their flat distance: the most they may stretch to. */
@@ -423,7 +425,7 @@ function addLimits(tris: number[], uv: number[][], particleOf: (local: number) =
 
 /** Bending stencils, one per edge two triangles of the same flat layout share. */
 class BendSet {
-  quads: number[] = []; weights: number[] = []; area: number[] = []; rest: number[] = [];
+  quads: number[] = []; weights: number[] = []; area: number[] = []; rest: number[] = []; sign: number[] = [];
   /** Each stencil's stiffness over the material's. */
   scale: number[] = [];
 }
@@ -450,6 +452,7 @@ function addBends(tris: number[], uv: number[][], particleOf: (local: number) =>
  */
 function addStencil(ids: number[], rest: number[][], out: BendSet, scale = 1) {
   const sub = (p: number[], q: number[]) => [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+  const cross = (u: number[], v: number[]) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
   const crossLen = (u: number[], v: number[]) => Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]);
   const cot = (u: number[], v: number[]) => (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / Math.max(1e-12, crossLen(u, v));
   const [x0, x1, x2, x3] = rest;
@@ -459,10 +462,14 @@ function addStencil(ids: number[], rest: number[][], out: BendSet, scale = 1) {
   const c01 = cot(e0, e1), c02 = cot(e0, e2), c03 = cot(ne0, e3), c04 = cot(ne0, e4);
   const K = [c03 + c04, c01 + c02, -c01 - c03, -c02 - c04];
   const v = [0, 1, 2].map((k) => K.reduce((sum, w, j) => sum + w * rest[j][k], 0));
+  const mag = Math.hypot(v[0], v[1], v[2]);
+  const h = cross(e0, sub(e1, e2));
+  const dot = v[0] * h[0] + v[1] * h[1] + v[2] * h[2];
   out.quads.push(...ids);
   out.weights.push(...K);
   out.area.push(area);
-  out.rest.push(Math.hypot(v[0], v[1], v[2]));
+  out.rest.push(mag);
+  out.sign.push(mag > 1e-9 && Math.abs(dot) > 1e-18 ? (dot >= 0 ? 1 : -1) : 0);
   out.scale.push(scale);
 }
 
@@ -816,7 +823,17 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           for (let q = before; q < bends.quads.length / 4; q++) {
             let vx = 0, vy = 0, vz = 0, kept = 0;
             for (let j = 0; j < 4; j++) { const l = localOf.get(bends.quads[4 * q + j])!, p = spread.start[l], kk = bends.weights[4 * q + j]; vx += kk * p[0]; vy += kk * p[1]; vz += kk * p[2]; kept += spread.set[l] / 4; }
-            bends.rest[q] = kept * Math.hypot(vx, vy, vz);
+            const mag = kept * Math.hypot(vx, vy, vz);
+            bends.rest[q] = mag;
+            if (mag > 1e-9) {
+              const p0 = spread.start[localOf.get(bends.quads[4 * q])!], p1 = spread.start[localOf.get(bends.quads[4 * q + 1])!];
+              const p2 = spread.start[localOf.get(bends.quads[4 * q + 2])!], p3 = spread.start[localOf.get(bends.quads[4 * q + 3])!];
+              const e0x = p1[0] - p0[0], e0y = p1[1] - p0[1], e0z = p1[2] - p0[2];
+              const d12x = p2[0] - p3[0], d12y = p2[1] - p3[1], d12z = p2[2] - p3[2];
+              const hx = e0y * d12z - e0z * d12y, hy = e0z * d12x - e0x * d12z, hz = e0x * d12y - e0y * d12x;
+              const dot = vx * hx + vy * hy + vz * hz;
+              bends.sign[q] = Math.abs(dot) > 1e-18 ? (dot >= 0 ? 1 : -1) : 0;
+            } else bends.sign[q] = 0;
           }
         }
       }
@@ -1145,26 +1162,65 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       // Its triangles as wound for the solver, in its own points, to draw it
       // by: drawn as meshed, a button stand's faced the body, and its buttons,
       // set out along its normals, were drawn on its inside.
+      // Oriented coherently across each manifold piece so grazing ~90 deg angles
+      // (a horizontal cap visor sewn to a vertical crown band, or collar tips at
+      // a gorge) never flip individual interior triangles into duplicate half-edges.
+      const nTris = piece.tris.length / 3;
+      const triDot = new Float64Array(nTris);
+      let pieceAlign = 0;
+      for (let t = 0; t < piece.tris.length; t += 3) {
+        const [i, j, l] = [piece.tris[t], piece.tris[t + 1], piece.tris[t + 2]];
+        const [pi, pj, pl] = [particleOf(i), particleOf(j), particleOf(l)];
+        let n: number[];
+        if (piece.facing) {
+          const fi = piece.facing[i], fj = piece.facing[j], fl = piece.facing[l];
+          const sx = fi[0] + fj[0] + fl[0], sy = fi[1] + fj[1] + fl[1], sz = fi[2] + fj[2] + fl[2];
+          const sl = Math.hypot(sx, sy, sz) || 1;
+          n = [sx / sl, sy / sl, sz / sl];
+        } else {
+          const tk = tackOf.get(i) ?? tackOf.get(j) ?? tackOf.get(l);
+          n = tk ? triNormal(x0, tk.tri) : [0, 0, 0];
+          if (!tk && facing.length) {
+            const c = [0, 1, 2].map((k) => (x0[pi][k] + x0[pj][k] + x0[pl][k]) / 3);
+            let bd = Infinity;
+            for (const f of facing) { const d = (f.at[0] - c[0]) ** 2 + (f.at[1] - c[1]) ** 2 + (f.at[2] - c[2]) ** 2; if (d < bd) { bd = d; n = f.n; } }
+          }
+        }
+        const ux = x0[pj][0] - x0[pi][0], uy = x0[pj][1] - x0[pi][1], uz = x0[pj][2] - x0[pi][2];
+        const vx = x0[pl][0] - x0[pi][0], vy = x0[pl][1] - x0[pi][1], vz = x0[pl][2] - x0[pi][2];
+        const fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vz;
+        const fl = Math.hypot(fx, fy, fz);
+        const wDot = fx * n[0] + fy * n[1] + fz * n[2];
+        pieceAlign += wDot;
+        triDot[t / 3] = fl > 1e-12 ? wDot / fl : 0;
+      }
+      const flipPiece = pieceAlign < 0;
+      const host = piece.joinPanel ? groups.find((gr) => gr.name === `${name}__${piece.joinPanel}`) : undefined;
+      let flipRender = flipPiece;
+      if (host) {
+        const hostHalf = new Set<string>();
+        for (let t = 0; t < host.tris.length; t += 3) {
+          const hp = [host.particles[host.tris[t]], host.particles[host.tris[t + 1]], host.particles[host.tris[t + 2]]];
+          for (let e = 0; e < 3; e++) hostHalf.add(`${hp[e]}->${hp[(e + 1) % 3]}`);
+        }
+        let sameDir = 0, oppDir = 0;
+        for (let t = 0; t < piece.tris.length; t += 3) {
+          const pp = [particleOf(piece.tris[t]), particleOf(piece.tris[t + 1]), particleOf(piece.tris[t + 2])];
+          for (let e = 0; e < 3; e++) {
+            const a = pp[e], b = pp[(e + 1) % 3];
+            if (hostHalf.has(`${a}->${b}`)) sameDir++;
+            if (hostHalf.has(`${b}->${a}`)) oppDir++;
+          }
+        }
+        if (sameDir + oppDir > 0) flipRender = sameDir > oppDir;
+      }
       const wound: number[] = [];
       for (let t = 0; t < piece.tris.length; t += 3) {
         const [i, j, l] = [piece.tris[t], piece.tris[t + 1], piece.tris[t + 2]];
         const [pi, pj, pl] = [particleOf(i), particleOf(j), particleOf(l)];
-        // Facing out, as the garment it is on: as its own tack's triangle,
-        // else as the nearest point of it whose outside is known. (Taken from
-        // its first tack, a collar's fall over its stand at the back faced as
-        // the lapel at its far end, into the neck; a stand with no tack kept
-        // whichever way it was meshed. Layer contact reads a garment's
-        // outside by its triangles' facing, and pushed the cloth over them
-        // through them.)
-        const tk = tackOf.get(i) ?? tackOf.get(j) ?? tackOf.get(l);
-        let n = tk ? triNormal(x0, tk.tri) : [0, 0, 0];
-        if (!tk && facing.length) {
-          const c = [0, 1, 2].map((k) => (x0[pi][k] + x0[pj][k] + x0[pl][k]) / 3);
-          let bd = Infinity;
-          for (const f of facing) { const d = (f.at[0] - c[0]) ** 2 + (f.at[1] - c[1]) ** 2 + (f.at[2] - c[2]) ** 2; if (d < bd) { bd = d; n = f.n; } }
-        }
-        const face = triNormal(x0, [pi, pj, pl]);
-        if (face[0] * n[0] + face[1] * n[1] + face[2] * n[2] < 0) { tris.push(pi, pl, pj); wound.push(i, l, j); } else { tris.push(pi, pj, pl); wound.push(i, j, l); }
+        const flipSolver = piece.facing ? flipPiece : triDot[t / 3] < 0;
+        if (flipSolver) tris.push(pi, pl, pj); else tris.push(pi, pj, pl);
+        if (flipRender) wound.push(i, l, j); else wound.push(i, j, l);
         addFacing(tris.slice(-3));
         for (const [a, c] of [[i, j], [j, l], [l, i]]) edges.add(particleOf(a), particleOf(c), Math.hypot(uv[a][0] - uv[c][0], uv[a][1] - uv[c][1]), stretch);
         const m = (pm.arealDensity * flatArea(uv[i], uv[j], uv[l])) / 3;
@@ -1199,7 +1255,6 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       // Drawn in, it gathers the cloth under it, which bunches rather than squeezes (as under an elastic).
       if (piece.shrink && piece.shrink < 1) for (const tk of piece.tacks) for (let e = 0; e < 3; e++) edges.setMinRatio(tk.tri[e], tk.tri[(e + 1) % 3], piece.shrink);
       const trims: ClothTrim[] = (piece.trims ?? []).map(({ trim, local }) => ({ kind: trim.kind, particle: local, size: trim.size ?? TRIM_DEFAULTS[trim.kind].size, rgba: trim.rgba ?? TRIM_DEFAULTS[trim.kind].rgba }));
-      const host = piece.joinPanel ? groups.find((gr) => gr.name === `${name}__${piece.joinPanel}`) : undefined;
       if (host && joinGroup(host, { ...piece, tris: wound }, particleOf)) continue;
       groups.push({
         name: `${name}__${piece.name}`, rgba: piece.rgba, material: piece.material ?? materialName,
@@ -1320,7 +1375,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     x0: x, invMass: Float64Array.from(mass, (m) => (m > 0 ? 1 / m : 0)),
     tris, overlayTrisStart, edges: edgePairs, edgeRest, edgeMin, edgeStiffness: edges.scales(),
     elastics, elasticRest, elasticFlat, elasticAlpha,
-    bends: bends.quads, bendWeights: bends.weights, bendArea: bends.area, bendRest: bends.rest, bendStiffness: bends.scale,
+    bends: bends.quads, bendWeights: bends.weights, bendArea: bends.area, bendRest: bends.rest, bendSign: bends.sign, bendStiffness: bends.scale,
     limits: limitPairs, limitRest,
     stitches, stitchSew, ...(zips.length ? { zips } : {}), tacks, ties, groups, ...(boards.length ? { boards } : {}),
     ...(rods.links.length ? { rods } : {}),

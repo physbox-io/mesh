@@ -232,7 +232,7 @@ export class ClothSim {
     this.x = new Float64Array(3 * n); this.prev = new Float64Array(3 * n); this.v = new Float64Array(3 * n);
     this.w = new Float64Array(n); this.ext = new Float64Array(3 * n); this.floatUntil = new Float64Array(n);
     const E: number[] = [], ER: number[] = [], EM: number[] = [], EA: number[] = [], EP: number[] = [];
-    const B: number[] = [], BR: number[] = [], BA: number[] = [], BC: number[] = [], BP: number[] = [], BSI: number[] = [];
+    const B: number[] = [], BR: number[] = [], BA: number[] = [], BC: number[] = [], BS: (number | undefined)[] = [], BP: number[] = [], BSI: number[] = [];
     const EL: number[] = [], ELF: number[] = [], ELR: number[] = [], ELA: number[] = [];
     const RL: number[] = [], RLR: number[] = [], RB: number[] = [], RBR: number[] = [], RBA: number[] = [];
     const S: number[] = [], SS: number[] = [], T: number[] = [], TC: number[] = [], TP: number[] = [], LP: number[] = [], LR: number[] = [];
@@ -308,7 +308,10 @@ export class ClothSim {
         BSI.push(1 / Math.max(0.008, Math.sqrt(Math.max(1e-6, A))));
       });
       // Not spread: a gown has more stencils than a worker's stack has room for arguments.
-      for (const v of m.bendRest) BC.push(v);
+      for (let k = 0; k < m.bendRest.length; k++) {
+        BC.push(m.bendRest[k]);
+        BS.push(m.bendSign ? m.bendSign[k] : undefined);
+      }
       for (let k = 0; k < m.limits.length; k += 2) { LP.push(base + m.limits[k], base + m.limits[k + 1]); LR.push(m.limitRest[k / 2]); }
       for (let k = 0; k < m.stitches.length; k += 2) {
         S.push(base + m.stitches[k], base + m.stitches[k + 1]);
@@ -389,6 +392,10 @@ export class ClothSim {
     this.bendSign = new Int8Array(BA.length);
     for (let s = 0; s < BA.length; s++) {
       if (this.bendRest[s] <= 1e-9) continue;
+      if (BS[s] !== undefined) {
+        this.bendSign[s] = BS[s]!;
+        continue;
+      }
       const i0 = 3 * this.bends[4 * s], i1 = 3 * this.bends[4 * s + 1], i2 = 3 * this.bends[4 * s + 2], i3 = 3 * this.bends[4 * s + 3];
       const e0x = this.x[i1] - this.x[i0], e0y = this.x[i1 + 1] - this.x[i0 + 1], e0z = this.x[i1 + 2] - this.x[i0 + 2];
       const e1x = this.x[i2] - this.x[i0], e1y = this.x[i2 + 1] - this.x[i0 + 1], e1z = this.x[i2 + 2] - this.x[i0 + 2];
