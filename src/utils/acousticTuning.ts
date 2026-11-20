@@ -326,18 +326,89 @@ export function tuneWindInstrumentToPitch(
   const embRatio = (spec.embouchureHz || curHz) / curHz;
   const nextEmbHz = Math.max(35, Math.min(2000, targetHz * embRatio));
 
-  let scaled = applyBoreScale(node, curHz / targetHz, nextEmbHz);
-  // 1-step TMM end-correction fine trim so open-end radiation reactance lands within < 5 cents!
-  const midBore = extractBoreWaveguide(scaled, jointPositions);
-  if (midBore) {
-    const midSolved = solvePlayableWindVoice(midBore, testBreath, nextEmbHz);
-    const midHz = midSolved.active ? midSolved.pitchHz : (midBore.resonantModesHz[0] ?? targetHz);
-    if (Math.abs(midHz - targetHz) / targetHz > 0.003) {
-      scaled = applyBoreScale(scaled, midHz / targetHz, nextEmbHz);
+  const clampScale = (s: number) => Math.max(0.18, Math.min(5.5, s));
+  let bestNode = applyBoreScale(node, curHz / targetHz, nextEmbHz);
+  let bestHz = targetHz;
+  let bestErrOct = Infinity;
+
+  const evalCandidate = (rawScale: number): { scale: number; node: SceneNode; hz: number } => {
+    const cs = clampScale(rawScale);
+    const cand = applyBoreScale(node, cs, nextEmbHz);
+    const bore = extractBoreWaveguide(cand, jointPositions);
+    if (!bore) return { scale: cs, node: cand, hz: targetHz };
+    const solved = solvePlayableWindVoice(bore, testBreath, nextEmbHz);
+    const hz = Math.max(20, solved.active ? solved.pitchHz : (bore.resonantModesHz[0] ?? targetHz));
+    const errOct = Math.abs(Math.log2(hz / targetHz));
+    if (errOct < bestErrOct) {
+      bestErrOct = errOct;
+      bestNode = cand;
+      bestHz = hz;
+    }
+    return { scale: cs, node: cand, hz };
+  };
+
+  // Iterative TMM refinement across nonlinear Norris-Sheng radiation impedance Z_rad & end corrections (<= ~2 cents)
+  const tolRel = 0.0012;
+  let p0 = evalCandidate(curHz / targetHz);
+  if (Math.abs(p0.hz - targetHz) / targetHz > tolRel) {
+    let p1 = evalCandidate(p0.scale * (p0.hz / targetHz));
+
+    // If p0 and p1 remain on the same side of targetHz, expand once to bracket the root
+    if (
+      Math.abs(p1.hz - targetHz) / targetHz > tolRel &&
+      (p0.hz - targetHz) * (p1.hz - targetHz) > 0
+    ) {
+      const nextS = clampScale(p1.scale * Math.pow(p1.hz / targetHz, 1.35));
+      if (Math.abs(nextS - p1.scale) >= 1e-5) {
+        p0 = p1;
+        p1 = evalCandidate(nextS);
+      }
+    }
+
+    if (Math.abs(bestHz - targetHz) / targetHz > tolRel) {
+      if ((p0.hz - targetHz) * (p1.hz - targetHz) < 0) {
+        let lo = p0.hz > p1.hz ? p0 : p1;
+        let hi = p0.hz > p1.hz ? p1 : p0;
+        for (let iter = 0; iter < 4; iter++) {
+          if (Math.abs(bestHz - targetHz) / targetHz <= tolRel) break;
+          if (Math.abs(hi.scale - lo.scale) <= 1e-5) break;
+          const denom = lo.hz - hi.hz;
+          let secantS =
+            denom > 1e-6
+              ? lo.scale + ((lo.hz - targetHz) / denom) * (hi.scale - lo.scale)
+              : 0.5 * (lo.scale + hi.scale);
+          const span = hi.scale - lo.scale;
+          const minS = lo.scale + 0.15 * span;
+          const maxS = hi.scale - 0.15 * span;
+          if (secantS < minS || secantS > maxS || iter === 1) {
+            secantS = iter === 1 ? 0.5 * (lo.scale + hi.scale) : Math.max(minS, Math.min(maxS, secantS));
+          }
+          const mid = evalCandidate(secantS);
+          if (mid.hz > targetHz) {
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+        }
+      } else {
+        for (let iter = 0; iter < 2; iter++) {
+          if (Math.abs(bestHz - targetHz) / targetHz <= tolRel) break;
+          const df = p1.hz - p0.hz;
+          let nextS =
+            Math.abs(df) > 0.05 && Math.abs(p1.scale - p0.scale) > 1e-5
+              ? p1.scale + ((targetHz - p1.hz) / df) * (p1.scale - p0.scale)
+              : p1.scale * (p1.hz / targetHz);
+          nextS = Math.max(p1.scale * 0.75, Math.min(p1.scale * 1.33, nextS));
+          const pNext = evalCandidate(nextS);
+          p0 = p1;
+          p1 = pNext;
+        }
+      }
     }
   }
-  scaled.tunedPitchHz = +targetHz.toFixed(2);
-  return scaled;
+
+  bestNode.tunedPitchHz = +targetHz.toFixed(2);
+  return bestNode;
 }
 
 export function tuneBodyToPitch(
