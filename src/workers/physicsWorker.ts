@@ -79,6 +79,7 @@ import {
   selectMultiFingerStopFraction,
   shouldEmitPairImpact,
 } from '../utils/contactFrictionAcoustics';
+import { isCriticallyDampedDamperPress } from '../utils/voiceSympathyPool';
 import { HistoryRing } from './historyRing';
 import { buildImpactWatches, checkImpacts as detectImpacts, type ImpactWatches } from './impactWatch';
 import { JOINT_NV, applyEditedCtrl, captureState, copyCarriedActuators as copyCarriedActuatorsByName, copyJointsByName, documentCtrlValues, seedNewBodies, type CarriedState } from './carryState';
@@ -2348,6 +2349,34 @@ const sampleAudioImpacts = (stepSize: number) => {
     const prevStart = continuousPairStartSimTime.get(cKey);
     if (prevStart === undefined || simTime < prevStart) {
       continuousPairStartSimTime.set(cKey, simTime);
+    }
+    // Critically-damped soft felt/rubber dampers (`softness >= 0.85 && solDamp >= 0.85`, e.g. `vibe_damper_bar`
+    // or `cymbal_choke_arm`) gently pressing against a distinct resonator mute via `AUDIO_DAMPING` — never
+    // re-strike the resonator via `AUDIO_IMPACTS` or overwrite `lastNodeStrikeSimTime`!
+    if (
+      partnerBId > 0 &&
+      distinctAcousticChildBodyIds.has(targetBId) &&
+      !distinctAcousticChildBodyIds.has(partnerBId)
+    ) {
+      const partnerSoft = bodySoftnessByBodyId?.[partnerBId] ?? 0.24;
+      const gSolref = model!.geom_solref;
+      const pSt = gSolref[otherGeom * 2] ?? 0.004;
+      const pSd = gSolref[otherGeom * 2 + 1] ?? 1.0;
+      const partnerSolDamp = pSt > 0 && pSd > 0 ? pSd : 0.5;
+      if (partnerSoft >= 0.85 && partnerSolDamp >= 0.85) {
+        const views = velocityViews(model!, data!);
+        const vTarget = bodyPointVelocity(views, targetBId, worldPos);
+        const vPartner = bodyPointVelocity(views, partnerBId, worldPos);
+        const relSpeed = Math.hypot(
+          vPartner[0] - vTarget[0],
+          vPartner[1] - vTarget[1],
+          vPartner[2] - vTarget[2],
+        );
+        const partnerMassKg = Math.max(0.02, model!.body_mass[partnerBId] || 0.06);
+        if (isCriticallyDampedDamperPress(partnerSoft, partnerSolDamp, relSpeed, effImpulseNs, partnerMassKg)) {
+          return;
+        }
+      }
     }
     const pairKey = `${targetNodeId}:${partnerNodeId}`;
     if (!shouldEmitPairImpact(lastAudioEmitSim.get(pairKey), simTime, effImpulseNs, solTime)) return;

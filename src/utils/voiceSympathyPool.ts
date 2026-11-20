@@ -150,6 +150,16 @@ export interface ActiveModeState {
   droopTauSec: number;
 }
 
+export interface ActiveAuxEnvelopeState {
+  env: GainNode;
+  kind: 'shimmer' | 'snare';
+  anchorTime: number;
+  anchorGain: number;
+  peakGain: number;
+  attackEndTime: number;
+  tauSec: number;
+}
+
 export interface ActiveModalVoiceGroup {
   key: string;
   nodeId: string;
@@ -170,6 +180,8 @@ export interface ActiveModalVoiceGroup {
   lenBounds?: [number, number];
   principalLenDir?: [number, number, number];
   principalOrigin?: [number, number, number];
+  shimmerEnv: GainNode | null;
+  auxEnvelopes: Set<ActiveAuxEnvelopeState>;
   transientSources: Set<AudioScheduledSourceNode>;
   transientNodes: Set<AudioNode>;
   createdAtAudioTime: number;
@@ -397,14 +409,51 @@ export function evaluateModeAmplitudeAt(mode: ActiveModeState, now: number): num
   return Math.max(0, mode.peakGain * Math.exp(-dt / Math.max(0.004, mode.tauSec)));
 }
 
+/** Evaluates analytic instantaneous auxiliary envelope amplitude (crash shimmer / snare rattle) at `now`. */
+export function evaluateAuxEnvelopeAmplitudeAt(aux: ActiveAuxEnvelopeState, now: number): number {
+  if (now <= aux.anchorTime) return Math.max(0, aux.anchorGain);
+  if (now < aux.attackEndTime) {
+    const span = Math.max(1e-5, aux.attackEndTime - aux.anchorTime);
+    const u = Math.max(0, Math.min(1, (now - aux.anchorTime) / span));
+    return Math.max(0, aux.anchorGain + (aux.peakGain - aux.anchorGain) * u);
+  }
+  const dt = now - aux.attackEndTime;
+  return Math.max(0, aux.peakGain * Math.exp(-dt / Math.max(0.004, aux.tauSec)));
+}
+
+/**
+ * Pure worker impact gate distinguishing a gentle viscoelastic felt/rubber damper press
+ * (`softness >= 0.85 && damperSolDamp >= 0.85`, e.g. `vibe_damper_bar` or `cymbal_choke_arm`)
+ * from an elastic/ballistic mallet or dropped-ball strike (`solDamp < 0.85` or high closing speed).
+ */
+export function isCriticallyDampedDamperPress(
+  damperSoftness: number,
+  damperSolDamp: number,
+  relSpeedMps: number,
+  effImpulseNs: number,
+  damperMassKg: number,
+): boolean {
+  if (!(damperSoftness >= 0.85 && damperSolDamp >= 0.85)) return false;
+  if (!(effImpulseNs < 0.08)) return false;
+  const approxClosingSpeed = Math.max(
+    Math.max(0, relSpeedMps),
+    effImpulseNs / Math.max(0.02, damperMassKg),
+  );
+  return approxClosingSpeed < 0.65;
+}
+
 function evaluateGroupInstantLoudness(group: ActiveModalVoiceGroup, now: number): number {
   let modeSum = 0;
   for (const m of group.modes) {
     modeSum += evaluateModeAmplitudeAt(m, now);
   }
+  let auxSum = 0;
+  for (const aux of group.auxEnvelopes) {
+    auxSum += evaluateAuxEnvelopeAmplitudeAt(aux, now);
+  }
   const pulseDt = Math.max(0, now - group.pulseStartTime);
   const pulseCur = group.pulsePeakGain * Math.exp(-pulseDt / Math.max(0.004, group.pulseDecayTauSec));
-  return Math.max(pulseCur, modeSum);
+  return Math.max(pulseCur, modeSum + auxSum);
 }
 
 function destroyVoiceGroup(bank: ContextModalBank, group: ActiveModalVoiceGroup): void {
@@ -417,6 +466,8 @@ function destroyVoiceGroup(bank: ContextModalBank, group: ActiveModalVoiceGroup)
     try { m.env.disconnect(); } catch { /* ignore */ }
   }
   group.modes.length = 0;
+  group.auxEnvelopes.clear();
+  group.shimmerEnv = null;
 
   for (const src of group.transientSources) {
     try { src.stop(); } catch { /* ignore */ }
@@ -750,9 +801,10 @@ function attachSnareRattle(
   bp.Q.setValueAtTime(1.1, now);
 
   const env = ctx.createGain();
+  const bloom = 0.006;
   const peak = Math.min(0.45, level * snare.gain * 0.55);
   env.gain.setValueAtTime(0.0001, now);
-  env.gain.linearRampToValueAtTime(peak, now + 0.006);
+  env.gain.linearRampToValueAtTime(peak, now + bloom);
   env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
   env.gain.linearRampToValueAtTime(0, now + dur + 0.006);
 
@@ -760,11 +812,22 @@ function attachSnareRattle(
   bp.connect(env);
   env.connect(group.master);
 
+  const auxState: ActiveAuxEnvelopeState = {
+    env,
+    kind: 'snare',
+    anchorTime: now,
+    anchorGain: 0.0001,
+    peakGain: peak,
+    attackEndTime: now + bloom,
+    tauSec: Math.max(0.005, (dur - bloom) / Math.max(1e-4, Math.log(Math.max(1.0002, peak / 0.0001)))),
+  };
+  group.auxEnvelopes.add(auxState);
   group.transientSources.add(src);
   group.transientNodes.add(bp);
   group.transientNodes.add(env);
 
   src.onended = () => {
+    group.auxEnvelopes.delete(auxState);
     group.transientSources.delete(src);
     group.transientNodes.delete(bp);
     group.transientNodes.delete(env);
@@ -812,11 +875,24 @@ function attachCrashShimmer(
   hp.connect(env);
   env.connect(group.master);
 
+  const auxState: ActiveAuxEnvelopeState = {
+    env,
+    kind: 'shimmer',
+    anchorTime: now,
+    anchorGain: 0.0001,
+    peakGain: peak,
+    attackEndTime: now + bloom,
+    tauSec: Math.max(0.005, (dur - bloom) / Math.max(1e-4, Math.log(Math.max(1.0002, peak / 0.0001)))),
+  };
+  group.shimmerEnv = env;
+  group.auxEnvelopes.add(auxState);
   group.transientSources.add(src);
   group.transientNodes.add(hp);
   group.transientNodes.add(env);
 
   src.onended = () => {
+    group.auxEnvelopes.delete(auxState);
+    if (group.shimmerEnv === env) group.shimmerEnv = null;
     group.transientSources.delete(src);
     group.transientNodes.delete(hp);
     group.transientNodes.delete(env);
@@ -1207,6 +1283,8 @@ export function triggerOrMutateModalVoice(opts: TriggerModalImpactOptions): Acti
     lenBounds: opts.lenBounds,
     principalLenDir: opts.principalLenDir,
     principalOrigin: opts.principalOrigin,
+    shimmerEnv: null,
+    auxEnvelopes: new Set(),
     transientSources: new Set(),
     transientNodes: new Set(),
     createdAtAudioTime: now,
@@ -1438,6 +1516,49 @@ export function chokeBodyVoice(
       m.tauSec = nextTau;
       const mExp = now + endDur + 0.025;
       if (mExp > maxNewExpire) maxNewExpire = mExp;
+      groupChoked = true;
+      chokedAny = true;
+    }
+
+    // Smoothly choke broadband von Kármán crash shimmer & snare rattle envelopes alongside modal partials
+    for (const aux of group.auxEnvelopes) {
+      const curAuxG = evaluateAuxEnvelopeAmplitudeAt(aux, now);
+      if (curAuxG <= 0.00012) continue;
+
+      let nextAuxTau: number;
+      if (isGrab) {
+        nextAuxTau = aux.kind === 'shimmer' ? 0.028 : 0.032;
+      } else {
+        const fN = Math.max(0, opts.normalForceN ?? 0.25);
+        const softness = Math.max(0, Math.min(1, opts.softness ?? 0.5));
+        const baseRate = Math.max(0.5, opts.dampingRate ?? 14.0);
+        const broadbandCoupling = Math.min(
+          1.2,
+          (0.65 + 0.35 * softness) * (1 + 0.22 * softness * Math.min(2.5, fN)),
+        );
+        const deltaAlpha = baseRate * broadbandCoupling * (aux.kind === 'shimmer' ? 1.35 : 1.15);
+        if (deltaAlpha < 0.12) {
+          const keepExp = now + aux.tauSec * LN_10000 + 0.04;
+          if (keepExp > maxNewExpire) maxNewExpire = keepExp;
+          continue;
+        }
+        nextAuxTau = 1 / (1 / Math.max(0.005, aux.tauSec) + deltaAlpha);
+      }
+
+      cancelParam(aux.env.gain, now);
+      aux.env.gain.setValueAtTime(Math.max(0.0001, curAuxG), now);
+      const decayRatio = Math.max(1.0002, curAuxG / 0.0001);
+      const auxEndDur = Math.max(0.014, nextAuxTau * Math.log(decayRatio));
+      aux.env.gain.exponentialRampToValueAtTime(0.0001, now + auxEndDur);
+      aux.env.gain.linearRampToValueAtTime(0, now + auxEndDur + 0.006);
+
+      aux.anchorTime = now;
+      aux.anchorGain = curAuxG;
+      aux.peakGain = curAuxG;
+      aux.attackEndTime = now;
+      aux.tauSec = nextAuxTau;
+      const auxExp = now + auxEndDur + 0.025;
+      if (auxExp > maxNewExpire) maxNewExpire = auxExp;
       groupChoked = true;
       chokedAny = true;
     }
