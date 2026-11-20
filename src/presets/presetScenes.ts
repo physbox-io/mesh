@@ -27,6 +27,9 @@ import { bowedCelloPreset } from './bowedCello';
 import { compliantFlexuresPreset } from './compliantFlexures';
 import { flexuresAtWorkPreset } from './flexuresAtWork';
 import { windInstrumentsPreset } from './windInstruments';
+import { percussionKitPreset } from './percussionKit';
+import { singingBowlFrictionPreset } from './singingBowlFriction';
+import { vibraphoneResonatorsPreset } from './vibraphoneResonators';
 import { hydrostaticFlotationPreset } from './hydrostaticFlotation';
 import { spaghettiBridgePreset, spaghettiTowersPreset } from './spaghetti';
 import { pipeStructureScene } from '../utils/tubeAndWireExporter';
@@ -3740,6 +3743,24 @@ export const PRESETS = {
     emoji: '🎺',
     scene: windInstrumentsPreset,
     camera: { position: [0.32, -0.42, 0.25], target: [0.0, 0, 0.068] } satisfies PresetCamera,
+  },
+  percussion_kit: {
+    name: 'Timpani, Snare & Crash Gong',
+    emoji: '🥁',
+    scene: percussionKitPreset,
+    camera: { position: [0.08, -0.68, 0.42], target: [0, 0, 0.17] } satisfies PresetCamera,
+  },
+  singing_bowl_friction: {
+    name: 'Singing Bowl & Rolling Chute',
+    emoji: '🥣',
+    scene: singingBowlFrictionPreset,
+    camera: { position: [0.04, -0.62, 0.36], target: [0.02, 0, 0.13] } satisfies PresetCamera,
+  },
+  vibraphone_resonators: {
+    name: 'Motorized Vibraphone',
+    emoji: '🎹',
+    scene: vibraphoneResonatorsPreset,
+    camera: { position: [0.28, -0.58, 0.46], target: [0, -0.02, 0.24] } satisfies PresetCamera,
   },
   hydrostatic_flotation: {
     name: 'Self-Righting Buoy, Skiff & Flooding Cup',

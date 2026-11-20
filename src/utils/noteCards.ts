@@ -758,6 +758,41 @@ Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed s
 - Turn on **Sound** in **⚙️ Environment** (top right) and press **Run**
 - Hold down a **Silver Key** or **Piston Valve** with your mouse while it plays — the waveguide length and pitch respond live!`,
 
+  percussion_kit: `# 🥁 Timpani, Snare & Crash Gong
+
+Three **2D membrane** and **nonlinear thin-plate** percussion voices spread across the stereo stage, plus **physical felt-pad contact choking**:
+
+1. **Parabolic Copper Kettle Timpani** (left, **F3 = 174.6 Hz**): an enclosed ~18 L spun-copper kettle stiffens the axisymmetric $(0,1)$ head mode while air-mass loading shifts the azimuthal Bessel modes $(1,1):(2,1):(3,1)$ from inharmonic $1 : 1.59 : 2.14$ into orchestral **$1 : 1.50 : 1.99$**!
+2. **Dual-Head Concert Snare Drum** (center, **G3**): coated batter film over a vented maple shell and bottom mylar snare head, modeling **hard-strike tension pitch-glide** and sympathetic **coiled snare-wire rattle**.
+3. **Thin B20 Bronze Crash Cymbal & Felt Choke Arm** (right): high-energy strikes cross the **von Kármán** deflection threshold ($w_{\\max}/h > 0.5$), pumping energy upward over 50–250 ms into shimmering Rossing–Chladni cascade modes — until the hinged **crimson felt damper arm** drops onto the bow at $t = 0.96\\text{ s}$ and physically chokes the sustain!
+
+## Try it
+- Turn on **Sound** in **⚙️ Environment** and press **Run**
+- Grab the **Thin B20 Bronze Crash Cymbal** with your mouse right after a crash hit to choke it by hand, or hold the **Felt Cymbal Choke Damper** clear so the shimmer rings out!`,
+
+  singing_bowl_friction: `# 🥣 Singing Bowl & Rolling Chute
+
+Real-time **tribological contact-friction synthesis** driven directly by MuJoCo normal force $F_n$, slip speed $v_{\\text{slip}}$, rolling ratio, and surface roughness $R_a$:
+
+1. **Cast-Bronze Tibetan Singing Bowl** (left): a motorized suede-wrapped rosewood **puja mallet** circles the Ø164 mm hollow bronze rim at $1.75\\text{ rad/s}$ ($F_n \\approx 1.4\\text{ N}$). Circumferential tangential slip locks onto the bowl's quadrupole shell modes (convolved through its **3D vibro-acoustic impulse response**) with a revolving nodal-line shimmer beat $\\Delta f = v_{\\text{slip}} / (\\pi R_{\\text{rim}})$.
+2. **Stepped Hardwood & Slate Zig-Zag Chute** (right): **bearing-steel** and **cobalt-glass** marbles roll down a maple track, drop onto a rough slate tier ($R_a \\approx 0.85$), and land in a motorized **±9.5° rocking soundboard trough** alongside a gliding **slate whetstone block** — contrasting pure Hertzian **rolling**, broadband **scraping**, and **singing-rim** lock-in!
+
+## Try it
+- Turn on **Sound** in **⚙️ Environment** and press **Run**
+- Pull the **Leather-Wrapped Rosewood Puja Mallet** away from the bowl rim with your mouse to hear the singing bloom release, or change \`puja_orbit_hinge\`'s motor speed to shift the quadrupole shimmer beat!`,
+
+  vibraphone_resonators: `# 🎹 Motorized Vibraphone
+
+Six arch-tuned **6061 aluminum vibraphone bars** (**C4–D4–E4–G4–A4–C5**, $Q \\approx 780$) suspended on cord rails over individual open-top / closed-bottom **quarter-wave ($\\lambda/4$) cylindrical resonator tubes**:
+
+1. **Bar ↔ Tube Radiation Tradeoff**: each stopped tube ($f_1 = c / [4(L + 0.6133r)]$) boosts its bar's fundamental radiation by ~+8 dB while drawing vibrational energy out of the bar faster when open, and restoring long dry bell sustain when closed.
+2. **Rotating Butterfly Tremolo Fans**: a single motor shaft spins six golden disks inside the tube mouths at $\\Omega = 5.5\\pi\\text{ rad/s}$, opening and occluding each resonator **twice per shaft revolution** ($f_{\\text{trem}} = |\\Omega|/\\pi = 5.5\\text{ Hz}$ amplitude + throat-formant shimmer).
+3. **Spring-Return Pedal Felt Damper Bar**: cord-wound mallets voice jazz **C6** and **Dm7/G9** chords before the crimson felt damper bar lifts against the underside of all six bars ($t = 1.42\\text{–}1.96\\text{ s}$) to mute the harmony cleanly!
+
+## Try it
+- Turn on **Sound** in **⚙️ Environment** and press **Run**
+- Select **Rotating Butterfly Tremolo Fans** (\`tremolo_motor_shaft\`) and vary \`vibe_tremolo_shaft\`'s actuator speed — or stop it at $0\\text{ rad/s}$ to compare open vs closed tube sustain!`,
+
   hydrostatic_flotation: `# ⛵ Self-Righting Buoy, Skiff & Flooding Cup
 
 Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **inverse auto-balance (\`Stand / Spin / Float\`)** inside a bounded **Glass Aquarium Tank** (80% water fill):
