@@ -13,11 +13,26 @@ import { compliantFlexuresPreset } from '../src/presets/compliantFlexures';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { simulate } from './helpers/simulate';
 import {
+  chokeBodyVoice,
   estimateBodyModes,
   inferAcousticMaterial,
+  inferColliderContactProps,
+  playModalImpact,
   resolveTwoBodyImpact,
+  silenceModalVoices,
   solveVariableBeamModes,
+  triggerSympatheticStringPluck,
 } from '../src/utils/modalAudio';
+import {
+  isAcousticAuditionActive,
+  prewarmSceneAcousticIRs,
+  setAcousticAuditionHold,
+  silenceAllLiveAcoustics,
+} from '../src/store/physicsEngine';
+import { getModalVoicePoolStats, MAX_ACTIVE_IMPACTS } from '../src/utils/voiceSympathyPool';
+import { solveContactFrictionVoice } from '../src/utils/contactFrictionAcoustics';
+import { resolveSpatialAcousticParams } from '../src/utils/spatialAcoustics';
+import { tuneResonatorTubeToPitch } from '../src/utils/resonatorAcoustics';
 import {
   analyzeSoundboxResonance,
   evaluateTautString,
@@ -1338,7 +1353,7 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
             node: stringNodes[expectedStrIdx],
             sceneNodes: bowedCelloPreset.nodes,
             bowVelocityMps: Math.abs(vBowStroke),
-            bowForceN: 0.78 - 0.08 * expectedStrIdx,
+            bowForceN: 0.94 - 0.08 * expectedStrIdx,
             bowBeta: 0.094,
             stoppedLengthFraction: stopFrac,
           });
@@ -1539,6 +1554,296 @@ describe('Modal Impact Acoustics & Concert Pitch Tuning', () => {
       expect(closeHits).toBeLessThanOrEqual(2);
     } finally {
       sim.dispose();
+    }
+  });
+
+  it('clears mallet_rail at t = 0 across all marimbaCascadePreset bars and C5 steel chime', async () => {
+    const sim = await simulate(marimbaCascadePreset);
+    try {
+      sim.step(5);
+      for (const jn of ['bar_c4_pad', 'bar_d4_pad', 'bar_e4_pad', 'bar_g4_pad', 'bar_a4_pad', 'chime_c5_cord']) {
+        expect(Math.abs(sim.jointPos(jn)), `resting clearance on ${jn}`).toBeLessThan(0.0005);
+      }
+    } finally {
+      sim.dispose();
+    }
+  });
+
+  it('integrates Starters #1–#6 (membranes/kettle, nonlinear plate crash, pluck droop, tube resonator tremolo, voice choking/sympathy, contact friction, spatial pan & audition hold) end-to-end', () => {
+    // 1. Rubber material Q & per-geom density/mass in inferColliderContactProps
+    const rubberDamper: SceneNode = {
+      id: 'rubber_pad',
+      name: 'Rubber Damper',
+      pos: [0, 0, 0.05],
+      deformMaterial: 'rubber',
+      geoms: [{ name: 'pad', type: 'sphere', size: [0.012] }],
+      joints: [],
+      children: [],
+    };
+    expect(inferAcousticMaterial(rubberDamper).qualityQ).toBe(18);
+
+    const compositeMallet: SceneNode = {
+      id: 'comp_mallet',
+      name: 'Brass-Headed Mallet',
+      pos: [0, 0, 0.1],
+      deformMaterial: 'softwood',
+      geoms: [
+        { name: 'stick', type: 'capsule', fromto: [0, 0, 0, 0, 0.16, 0], size: [0.003], density: 650 },
+        { name: 'head', type: 'sphere', pos: [0, 0.165, 0], size: [0.014], density: 8500 },
+      ],
+      joints: [],
+      children: [],
+    };
+    const malletProps = inferColliderContactProps(compositeMallet, 'head');
+    // Brass sphere r=14 mm at 8500 kg/m³ weighs ~97.6 g (far above 650 kg/m³ wood stick alone!)
+    expect(malletProps.massKg).toBeGreaterThan(0.09);
+
+    // 2. Starter #1: Tensioned 2D Membrane + Closed Timpani Kettle Harmonicity + Snare Rattle + Pitch Glide
+    const kettleShell: SceneNode = {
+      id: 'timpani_kettle',
+      name: 'Copper Kettle Shell',
+      pos: [0, 0, 0.25],
+      deformMaterial: 'softMetal',
+      csgEnabled: true,
+      geoms: [
+        { name: 'outer', type: 'cylinder', size: [0.165, 0.14], pos: [0, 0, -0.14] },
+        { name: 'inner', type: 'cylinder', size: [0.158, 0.134], pos: [0, 0, -0.134], csg: 'difference' },
+      ],
+      joints: [],
+      children: [],
+    };
+    const drumHead: SceneNode = {
+      id: 'timpani_head',
+      name: 'Mylar Drumhead',
+      pos: [0, 0, 0.251],
+      acousticMembrane: {
+        material: 'mylar',
+        tensionNPerM: 2600,
+        thicknessMm: 0.19,
+        shellNodeId: 'timpani_kettle',
+        kettleCoupling: 1.0,
+        snareBuzz: 0.65,
+      },
+      geoms: [{ name: 'head', type: 'cylinder', size: [0.16, 0.0005] }],
+      joints: [],
+      children: [],
+    };
+    const headModes = estimateBodyModes(drumHead, false, [kettleShell, drumHead]);
+    expect(headModes.overtoneRatio).toBeGreaterThan(1.42);
+    expect(headModes.overtoneRatio).toBeLessThan(1.58);
+    const headImpact = resolveTwoBodyImpact(headModes, drumHead, {
+      impulseNs: 0.65,
+      localPoint: [0.10, 0, 0],
+      sceneNodes: [kettleShell, drumHead],
+    });
+    expect(headImpact.voices.length).toBeGreaterThanOrEqual(4);
+    expect(headImpact.voices[0].pitchDroopFrac).toBeGreaterThan(0.002);
+    expect(headImpact.snare).toBeDefined();
+    expect(headImpact.snare!.gain).toBeGreaterThan(0.05);
+
+    // 3. Starter #4a: von Kármán Nonlinear Plate Crash wired through resolveTwoBodyImpact
+    const thinCymbal: SceneNode = {
+      id: 'crash_cymbal',
+      name: 'Bronze Crash Cymbal',
+      pos: [0, 0, 0.4],
+      deformMaterial: 'softMetal',
+      nonlinearPlate: { enabled: true, crashSensitivity: 1.0, shimmerMix: 0.75 },
+      geoms: [{ name: 'disk', type: 'cylinder', size: [0.20, 0.00045] }],
+      joints: [],
+      children: [],
+    };
+    const cymbalProfile = estimateBodyModes(thinCymbal);
+    const softTap = resolveTwoBodyImpact(cymbalProfile, thinCymbal, { impulseNs: 0.006 });
+    const hardCrash = resolveTwoBodyImpact(cymbalProfile, thinCymbal, { impulseNs: 1.85 });
+    expect(softTap.crashShimmer).toBeUndefined();
+    expect(hardCrash.crashEnvelope?.active).toBe(true);
+    expect(hardCrash.crashShimmer?.gain).toBeGreaterThan(0.05);
+    expect(hardCrash.voices.some((v) => (v.bloomAttackSec ?? 0) >= 0.035)).toBe(true);
+
+    // 4. Starter #4b: Plucked String Kirchhoff Pitch Droop & Double-Filter-Free rawIrVoices
+    const lyre = soundboxLyrePreset.nodes[0];
+    const lyreStr = lyre.children.find((c) => c.acousticString)!;
+    const strEvalHard = evaluateTautString(lyreStr, soundboxLyrePreset.nodes, { impulseNs: 0.95 })!;
+    const pluckImpact = resolveTwoBodyImpact(strEvalHard.profile, lyreStr, {
+      impulseNs: 0.95,
+      isPluck: true,
+      sceneNodes: soundboxLyrePreset.nodes,
+    });
+    expect(pluckImpact.rawIrVoices).toBeDefined();
+    expect(pluckImpact.rawIrVoices!.length).toBeLessThan(pluckImpact.voices.length);
+    expect(pluckImpact.voices[0].pitchDroopFrac).toBeGreaterThan(0.005);
+
+    // 5. Starter #5: External Tube Resonator + Motor-Driven Rotating Vane Tremolo (f_trem = |Ω| / π)
+    const c4Bar = { ...marimbaCascadePreset.nodes.find((n) => n.id === 'marimba_bar_c4')!, pos: [0, 0, 0.28] };
+    const barProfile = estimateBodyModes(c4Bar);
+    const rawTube: SceneNode = {
+      id: 'vibe_tube_c4',
+      name: 'C4 Resonator Tube',
+      pos: [0, 0, 0.13],
+      deformMaterial: 'softMetal',
+      csgEnabled: true,
+      resonatorTube: {
+        endCondition: 'open_closed',
+        coupledBarNodeId: c4Bar.id,
+        vaneJointName: 'vibe_fan_shaft',
+      },
+      geoms: [
+        { name: 'outer', type: 'cylinder', size: [0.024, 0.135] },
+        { name: 'bore', type: 'cylinder', size: [0.022, 0.133], pos: [0, 0, 0.004], csg: 'difference' },
+      ],
+      joints: [],
+      children: [],
+    };
+    const tunedTube = tuneResonatorTubeToPitch(rawTube, barProfile.fundamentalHz);
+    const shaftOmega = 6 * Math.PI; // 3 rev/s -> 6 Hz acoustic tremolo!
+    const coupledHit = resolveTwoBodyImpact(barProfile, c4Bar, {
+      impulseNs: 0.25,
+      sceneNodes: [c4Bar, tunedTube],
+      liveKinematics: {
+        jointPositions: { vibe_fan_shaft: Math.PI / 4 },
+        jointVelocities: { vibe_fan_shaft: shaftOmega },
+      },
+    });
+    expect(coupledHit.resonator).not.toBeNull();
+    expect(coupledHit.voices[0].gain).toBeGreaterThan(barProfile.modes[0].gain * 1.15);
+    expect(coupledHit.voices[0].decaySec).toBeLessThan(barProfile.modes[0].decaySec);
+    expect(coupledHit.tremolo?.rateHz).toBeCloseTo(6.0, 2);
+    expect(coupledHit.tremolo?.depth).toBeGreaterThan(0.15);
+
+    // 6. Starter #2 & #6c: Contact Friction & Camera-Relative Stereo Spatial Projection + Audition Hold
+    const glassBowl: SceneNode = {
+      id: 'singing_bowl',
+      name: 'Singing Glass Bowl',
+      pos: [0.22, 0, 0.08],
+      deformMaterial: 'glass',
+      csgEnabled: true,
+      geoms: [
+        { name: 'outer', type: 'cylinder', size: [0.075, 0.055] },
+        { name: 'inner', type: 'cylinder', size: [0.071, 0.052], pos: [0, 0, 0.004], csg: 'difference' },
+      ],
+      joints: [],
+      children: [],
+    };
+    const bowlProfile = estimateBodyModes(glassBowl);
+    // Camera at Three.js [0, 0.25, 0.55] looking -Z (+X right): MuJoCo +X (+0.22) projects to right ear (pan > 0), -X (-0.22) to left ear (pan < 0)
+    const mockCam = {
+      matrixWorld: {
+        elements: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0.25, 0.55, 1],
+      },
+    };
+    const rightSpatial = resolveSpatialAcousticParams([0.22, 0, 0.08], mockCam);
+    const leftSpatial = resolveSpatialAcousticParams([-0.22, 0, 0.08], mockCam);
+    expect(rightSpatial.pan).toBeGreaterThan(0.15);
+    expect(leftSpatial.pan).toBeLessThan(-0.15);
+
+    const rimVoice = solveContactFrictionVoice(
+      {
+        nodeId: glassBowl.id,
+        tangentSpeed: 0.14,
+        normalForce: 1.2,
+        muFriction: 0.45,
+        rollingRatio: 0.05,
+        roughness: 0.08,
+        contactDurationSec: 0.35,
+        circumferentialRub: 1,
+      },
+      { primaryProfile: bowlProfile, primaryNode: glassBowl, spatial: rightSpatial },
+    );
+    expect(rimVoice.active).toBe(true);
+    expect(rimVoice.regime).toBe('rim_singing');
+    expect(rimVoice.tonalBeatFreqHz).toBeGreaterThan(rimVoice.tonalFreqHz);
+    expect(rimVoice.pan).toBeCloseTo(rightSpatial.pan, 3);
+
+    // Audition hold contract prevents live frame overwrites while active
+    setAcousticAuditionHold(500);
+    expect(isAcousticAuditionActive()).toBe(true);
+    setAcousticAuditionHold(0);
+    expect(isAcousticAuditionActive()).toBe(false);
+
+    // 7. Starter #3: Bounded playModalImpact pool on zero-mode clacks, re-strike mutation, grab choke, sympathy & silenceAllLiveAcoustics
+    const prevWin = (globalThis as { window?: unknown }).window;
+    let mockNow = 2.0;
+    const makeParam = (init = 0) => ({
+      value: init,
+      setValueAtTime(v: number) { this.value = v; return this; },
+      linearRampToValueAtTime(v: number) { this.value = v; return this; },
+      exponentialRampToValueAtTime(v: number) { this.value = v; return this; },
+      setTargetAtTime(v: number) { this.value = v; return this; },
+      cancelScheduledValues() { return this; },
+    });
+    const makeNode = (extra: Record<string, unknown> = {}) => ({
+      connect: () => {},
+      disconnect: () => {},
+      ...extra,
+    });
+    const mockAudioCtx = {
+      sampleRate: 48000,
+      state: 'running',
+      get currentTime() { return mockNow; },
+      destination: makeNode(),
+      createGain: () => makeNode({ gain: makeParam(1) }),
+      createOscillator: () => makeNode({ type: 'sine', frequency: makeParam(440), detune: makeParam(0), start: () => {}, stop: () => {}, setPeriodicWave: () => {} }),
+      createBiquadFilter: () => makeNode({ type: 'lowpass', frequency: makeParam(800), Q: makeParam(1), gain: makeParam(0) }),
+      createStereoPanner: () => makeNode({ pan: makeParam(0) }),
+      createConvolver: () => makeNode({ normalize: false, buffer: null }),
+      createWaveShaper: () => makeNode({ curve: null, oversample: 'none' }),
+      createDynamicsCompressor: () => makeNode({ threshold: makeParam(-3), knee: makeParam(6), ratio: makeParam(10), attack: makeParam(0.002), release: makeParam(0.12) }),
+      createBuffer: (_ch: number, len: number, sr: number) => ({
+        sampleRate: sr,
+        length: len,
+        getChannelData: () => new Float32Array(len),
+      }),
+      createBufferSource: () => makeNode({ buffer: null, loop: false, start: () => {}, stop: () => {} }),
+      createPeriodicWave: () => ({}),
+      resume: () => Promise.resolve(),
+      suspend: () => Promise.resolve(),
+    } as unknown as AudioContext;
+
+    try {
+      (globalThis as Record<string, unknown>).window = {
+        AudioContext: function () { return mockAudioCtx; },
+        __physboxSharedAudioCtx: mockAudioCtx,
+      };
+      useSoundStore.setState({ soundEnabled: true });
+      prewarmSceneAcousticIRs([c4Bar]);
+
+      // 40 rapid zero-mode rigid clack hits stay strictly bounded by MAX_ACTIVE_IMPACTS (24)!
+      const cradleProfile = estimateBodyModes(newtonsCradlePreset.nodes.find((n) => n.id === 'cradle_0')!);
+      expect(cradleProfile.modes.length).toBe(0);
+      for (let i = 0; i < 40; i++) {
+        playModalImpact({ ...cradleProfile, nodeId: `clack_${i}` }, 0.25);
+      }
+      expect(getModalVoicePoolStats(mockAudioCtx).activeGroups).toBeLessThanOrEqual(MAX_ACTIVE_IMPACTS);
+      silenceModalVoices(mockAudioCtx, 0);
+      expect(getModalVoicePoolStats(mockAudioCtx).activeGroups).toBe(0);
+
+      // Re-striking the same bar mutates its single group in place (1 group, 0 duplicate groups!) & grab chokes it
+      const g1 = playModalImpact(barProfile, 0.30, false, { ...coupledHit, nodeId: c4Bar.id, pan: rightSpatial.pan });
+      mockNow += 0.04;
+      const g2 = playModalImpact(barProfile, 0.40, false, { ...coupledHit, nodeId: c4Bar.id, pan: leftSpatial.pan });
+      expect(g1).not.toBeNull();
+      expect(g2).toBe(g1);
+      expect(getModalVoicePoolStats(mockAudioCtx).activeGroups).toBe(1);
+      expect(chokeBodyVoice(mockAudioCtx, c4Bar.id, { mode: 'grab' })).toBe(true);
+
+      // Sympathetic string pluck excites unplayed sibling strings on soundboxLyrePreset!
+      const sympCount = triggerSympatheticStringPluck(
+        mockAudioCtx,
+        mockAudioCtx.destination,
+        lyreStr,
+        soundboxLyrePreset.nodes,
+        0.55,
+      );
+      expect(sympCount).toBeGreaterThanOrEqual(1);
+
+      silenceAllLiveAcoustics();
+      mockNow += 0.05;
+      expect(getModalVoicePoolStats(mockAudioCtx).activeGroups).toBe(0);
+    } finally {
+      silenceModalVoices(mockAudioCtx, 0);
+      useSoundStore.setState({ soundEnabled: false });
+      if (prevWin === undefined) delete (globalThis as Record<string, unknown>).window;
+      else (globalThis as Record<string, unknown>).window = prevWin;
     }
   });
 });

@@ -18,29 +18,69 @@ import { store } from './storeRef';
 import { noteWorkerFrame } from './modelProvenance';
 import { useSoundStore } from './soundStore';
 import {
+  chokeBodyVoice,
   estimateBodyModes,
+  getSharedOutputBusForContext,
   inferAcousticMaterial,
+  peekSharedAudioContext,
   playAeroSnapPulse,
   playModalImpact,
   resolveTwoBodyImpact,
   silenceAeroVoices,
   silenceBowedVoices,
+  silenceFrictionVoices,
+  silenceModalVoices,
   silenceWindVoices,
+  triggerSympatheticStringPluck,
   updateLiveAeroVoices,
   updateLiveBowedVoices,
+  updateLiveFrictionVoices,
   updateLiveWindVoices,
   type BodyModalProfile,
+  type ModalVoice,
 } from '../utils/modalAudio';
 import { solveAeroAcousticVoice, solveClothSnapPulse } from '../utils/aeroAcoustics';
-import { simulate3DVibroAcousticIR } from '../utils/solidAcoustics3D';
+import { solveContactFrictionVoice } from '../utils/contactFrictionAcoustics';
+import { resolveExternalTubeResonator } from '../utils/resonatorAcoustics';
+import { simulate3DVibroAcousticIR, type VibroAcousticIRResult } from '../utils/solidAcoustics3D';
+import {
+  resolveBodyWorldPosMuJoCo,
+  resolveSpatialAcousticParams,
+  type ModelIdMapsLike,
+  type SpatialAcousticParams,
+} from '../utils/spatialAcoustics';
 import {
   evaluateTautString,
   resolveStringBetaFromPoint,
   solveBowedStringVoice,
   type StringPluckImpactContext,
 } from '../utils/stringAcoustics';
+import {
+  applyAudioDampingEvents,
+  updateSympatheticBowedVoices,
+  updateVoiceSpatialPan,
+  updateVoiceTremolo,
+} from '../utils/voiceSympathyPool';
 import { extractBoreWaveguide } from '../utils/windAcoustics';
 import type { SceneGeom, SceneNode } from '../types/scene';
+
+type GlobalWithAuditionHold = typeof globalThis & {
+  __physboxAcousticAuditionUntilMs?: number;
+};
+
+/**
+ * Holds Inspector Blow / Bow preview auditions open for `ms` milliseconds so live
+ * `syncLiveWindAudio` / `onBowedStrings` frames do not overwrite or silence them.
+ */
+export function setAcousticAuditionHold(ms: number): void {
+  const dur = Number.isFinite(ms) ? Math.max(0, ms) : 0;
+  (globalThis as GlobalWithAuditionHold).__physboxAcousticAuditionUntilMs =
+    dur > 0 ? performance.now() + dur : 0;
+}
+
+export function isAcousticAuditionActive(): boolean {
+  return ((globalThis as GlobalWithAuditionHold).__physboxAcousticAuditionUntilMs ?? 0) > performance.now();
+}
 
 function collectWeldedSolids(node: SceneNode, isRoot = true, out: SceneGeom[] = []): SceneGeom[] {
   if (!isRoot && ((node.joints?.length ?? 0) > 0 || node.acousticString || node.simulation)) {
@@ -66,7 +106,35 @@ const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
   return null;
 };
 
-const modalCache = new WeakMap<SceneNode, BodyModalProfile>();
+const modalCache = new WeakMap<
+  SceneNode,
+  { geomsRef: SceneNode['geoms']; sculptVer: number | undefined; profile: BodyModalProfile }
+>();
+const windIrCache = new WeakMap<
+  SceneNode,
+  { geomsRef: SceneNode['geoms']; deformMat: string | undefined; sculptVer: number | undefined; result: VibroAcousticIRResult | null }
+>();
+
+function getCachedWindIr(wn: SceneNode): VibroAcousticIRResult | null {
+  const hit = windIrCache.get(wn);
+  if (
+    hit &&
+    hit.geomsRef === wn.geoms &&
+    hit.deformMat === wn.deformMaterial &&
+    hit.sculptVer === wn.sculptVersion
+  ) {
+    return hit.result;
+  }
+  const result = simulate3DVibroAcousticIR(wn, inferAcousticMaterial(wn)) ?? null;
+  windIrCache.set(wn, {
+    geomsRef: wn.geoms,
+    deformMat: wn.deformMaterial,
+    sculptVer: wn.sculptVersion,
+    result,
+  });
+  return result;
+}
+
 const cachedModesFor = (
   node: SceneNode,
   sceneNodes?: SceneNode[],
@@ -74,27 +142,53 @@ const cachedModesFor = (
 ): BodyModalProfile => {
   if (node.acousticString) {
     const strEval = evaluateTautString(node, sceneNodes, pluckCtx);
-    if (strEval) return strEval.profile;
+    if (strEval) {
+      return { ...strEval.profile, nodeId: node.id };
+    }
   }
-  let m = modalCache.get(node);
-  if (!m) {
-    m = estimateBodyModes(node, true);
-    modalCache.set(node, m);
+  if (node.acousticMembrane) {
+    return estimateBodyModes(node, true, sceneNodes);
   }
-  return m;
+  const hit = modalCache.get(node);
+  if (hit && hit.geomsRef === node.geoms && hit.sculptVer === node.sculptVersion) {
+    return hit.profile;
+  }
+  const profile = estimateBodyModes(node, true, sceneNodes);
+  modalCache.set(node, { geomsRef: node.geoms, sculptVer: node.sculptVersion, profile });
+  return profile;
 };
 
+const SYNC_PREWARM_BUDGET_MS = 16;
+const DEFERRED_PREWARM_SLICE_MS = 6;
+let deferredPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelDeferredPrewarm(): void {
+  if (deferredPrewarmTimer !== null) {
+    clearTimeout(deferredPrewarmTimer);
+    deferredPrewarmTimer = null;
+  }
+}
+
 /**
- * Pre-computes and caches all 3D Vibro-Acoustic FIRs (`simulate3DVibroAcousticIR`)
- * for strings, wind bores, and collidable solid bodies BEFORE simulation starts stepping,
- * preventing any main-thread FDTD computation glitches during playback.
+ * Pre-computes and caches 3D Vibro-Acoustic FIRs (`simulate3DVibroAcousticIR`)
+ * within a strict 16 ms synchronous frame budget (prioritizing musical instruments
+ * first and deferring generic rigid bodies across 6 ms idle slices so Play and
+ * mid-play Sound-ON never stall the main thread).
  */
 export function prewarmSceneAcousticIRs(nodes: SceneNode[]): void {
+  cancelDeferredPrewarm();
   if (!useSoundStore.getState().soundEnabled || !nodes?.length) return;
   let hasDynamicOrInstrument = false;
   const checkActive = (list: SceneNode[]) => {
     for (const n of list) {
-      if ((n.joints?.length ?? 0) > 0 || n.acousticString || n.windInstrument) {
+      if (
+        (n.joints?.length ?? 0) > 0 ||
+        n.acousticString ||
+        n.acousticMembrane ||
+        n.windInstrument ||
+        n.resonatorTube ||
+        n.nonlinearPlate
+      ) {
         hasDynamicOrInstrument = true;
         return;
       }
@@ -105,24 +199,69 @@ export function prewarmSceneAcousticIRs(nodes: SceneNode[]): void {
   checkActive(nodes);
   if (!hasDynamicOrInstrument) return;
 
-  const visit = (list: SceneNode[]) => {
+  const priorityQueue: (() => void)[] = [];
+  const secondaryQueue: (() => void)[] = [];
+
+  const collectTasks = (list: SceneNode[]) => {
     for (const n of list) {
       if (n.acousticString) {
-        evaluateTautString(n, nodes);
+        priorityQueue.push(() => {
+          evaluateTautString(n, nodes);
+        });
+      } else if (n.acousticMembrane) {
+        priorityQueue.push(() => {
+          cachedModesFor(n, nodes);
+        });
       } else if (n.windInstrument) {
-        simulate3DVibroAcousticIR(n, inferAcousticMaterial(n));
+        if ((n.windInstrument.breathKPa ?? 0) > 0.01 || n.script) {
+          priorityQueue.push(() => {
+            getCachedWindIr(n);
+          });
+        } else {
+          secondaryQueue.push(() => {
+            getCachedWindIr(n);
+          });
+        }
       } else if (!isWindSubtreeOrNonColliding(n, nodes)) {
         const hasCollidableSolid = collectWeldedSolids(n).some(
           (g) => !(g.contype === 0 && g.conaffinity === 0),
         );
         if (hasCollidableSolid) {
-          cachedModesFor(n, nodes);
+          const isTunedOrPlate = typeof n.tunedPitchHz === 'number' || !!n.nonlinearPlate || !!n.resonatorTube;
+          (isTunedOrPlate ? priorityQueue : secondaryQueue).push(() => {
+            cachedModesFor(n, nodes);
+          });
         }
       }
-      if (n.children?.length) visit(n.children);
+      if (n.children?.length) collectTasks(n.children);
     }
   };
-  visit(nodes);
+  collectTasks(nodes);
+
+  const allTasks = [...priorityQueue, ...secondaryQueue];
+  const tStart = performance.now();
+  let cursor = 0;
+  while (cursor < allTasks.length) {
+    allTasks[cursor++]();
+    if (cursor < allTasks.length && performance.now() - tStart >= SYNC_PREWARM_BUDGET_MS) {
+      break;
+    }
+  }
+
+  if (cursor < allTasks.length) {
+    const drainSlice = () => {
+      deferredPrewarmTimer = null;
+      if (!useSoundStore.getState().soundEnabled) return;
+      const sliceStart = performance.now();
+      while (cursor < allTasks.length && performance.now() - sliceStart < DEFERRED_PREWARM_SLICE_MS) {
+        allTasks[cursor++]();
+      }
+      if (cursor < allTasks.length) {
+        deferredPrewarmTimer = setTimeout(drainSlice, 16);
+      }
+    };
+    deferredPrewarmTimer = setTimeout(drainSlice, 16);
+  }
 }
 
 /** Name<->id lookup tables the worker builds; `${type}Rev` maps ids back to names. */
@@ -286,8 +425,36 @@ export const liveModelGraph = (s: Pick<PhysicsState, 'sceneGraph' | 'shatteredBo
 };
 
 let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
+let lastWindAudioSyncMs = 0;
+let lastTremoloSyncMs = 0;
+let hadActiveWindVoices = false;
+let hadActiveFrictionVoices = false;
+let hadActiveBowedSympathy = false;
+
+interface ActiveTremoloBarState {
+  nodeId: string;
+  profile: BodyModalProfile;
+  baseVoices: ModalVoice[];
+  expiresAtMs: number;
+}
+const activeTremoloBars = new Map<string, ActiveTremoloBarState>();
+
+/** Silences all live modal, wind, bowed, aero, and contact-friction voices immediately. */
+export function silenceAllLiveAcoustics(): void {
+  cancelDeferredPrewarm();
+  hadActiveWindVoices = false;
+  hadActiveFrictionVoices = false;
+  hadActiveBowedSympathy = false;
+  activeTremoloBars.clear();
+  silenceModalVoices();
+  silenceWindVoices();
+  silenceBowedVoices();
+  silenceAeroVoices();
+  silenceFrictionVoices();
+}
 
 export const recycleWorker = () => {
+  silenceAllLiveAcoustics();
   physicsWorkerClientSingleton?.terminate();
   physicsWorkerClientSingleton = null;
   // A fresh worker is a fresh WASM realm, so the heap starts over too.
@@ -300,8 +467,26 @@ export const recycleWorker = () => {
  * draws on demand would otherwise miss one that arrives while the simulation
  * is stopped — a joint slider's SET_QPOS, say. See RenderOnChange in App.
  */
-let lastWindAudioSyncMs = 0;
-let hadActiveWindVoices = false;
+function resolveNodeSpatial(
+  nodeId: string,
+  node?: SceneNode | null,
+  localPoint?: [number, number, number] | null,
+  explicitWorldPos?: [number, number, number] | null,
+): SpatialAcousticParams {
+  const s = store().getState();
+  const camera =
+    typeof window !== 'undefined' ? ((window as unknown as PhysicsWindow)._physics_camera ?? null) : null;
+  const mjPos =
+    explicitWorldPos ??
+    resolveBodyWorldPosMuJoCo(
+      nodeId,
+      s.model as unknown as ModelIdMapsLike | null,
+      s.data,
+      localPoint ?? null,
+      node?.pos ?? null,
+    );
+  return resolveSpatialAcousticParams(mjPos, camera);
+}
 
 function isWindSubtreeOrNonColliding(node: SceneNode, roots: SceneNode[]): boolean {
   if (node.windInstrument) return true;
@@ -317,7 +502,7 @@ function isWindSubtreeOrNonColliding(node: SceneNode, roots: SceneNode[]): boole
 
   // Non-colliding mechanism bodies (e.g. contype=0 music drums, cams) only hit internal joint stops;
   // include jointless welded child bodies (e.g. `cradle_bob_body_*` under `cradle_*` in Newton's Cradle!).
-  if (typeof node.tunedPitchHz !== 'number' && !node.acousticString) {
+  if (typeof node.tunedPitchHz !== 'number' && !node.acousticString && !node.acousticMembrane) {
     const solids = collectWeldedSolids(node);
     if (solids.length > 0 && solids.every((g) => g.contype === 0 && g.conaffinity === 0)) {
       return true;
@@ -335,6 +520,7 @@ function collectWindNodes(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[
 }
 
 function syncLiveWindAudio() {
+  if (isAcousticAuditionActive()) return;
   if (!useSoundStore.getState().soundEnabled) {
     if (hadActiveWindVoices) {
       hadActiveWindVoices = false;
@@ -370,7 +556,6 @@ function syncLiveWindAudio() {
   const jposAddr = s.model.jnt_qposadr;
   const jdofAddr = s.model.jnt_dofadr;
 
-  const jointPositions: Record<string, number> = {};
   const readJointPos = (name: string): number => {
     const jid = jMap[name];
     if (jid === undefined || !jposAddr) return 0;
@@ -382,22 +567,29 @@ function syncLiveWindAudio() {
     return qvel[jdofAddr[jid]] ?? 0;
   };
 
-  for (const jName of Object.keys(jMap)) {
-    jointPositions[jName] = readJointPos(jName);
-  }
+  let jointPositions: Record<string, number> | null = null;
+  const ensureJointPositions = (): Record<string, number> => {
+    if (!jointPositions) {
+      jointPositions = {};
+      for (const jName of Object.keys(jMap)) {
+        jointPositions[jName] = readJointPos(jName);
+      }
+    }
+    return jointPositions;
+  };
 
   const envWindSpeed = Math.hypot(s.windX || 0, s.windY || 0);
-  const payloads = windNodes.map((wn) => {
+  const payloads = [];
+  for (const wn of windNodes) {
     const spec = wn.windInstrument!;
-    const bore = extractBoreWaveguide(wn, jointPositions);
     const scriptSt = lastScriptState?.[wn.id] as Record<string, unknown> | undefined;
     // Base breath from spec + ambient wind, overridden smoothly if script sets `api.state.breathKPa` or child bellows
     let breathKPa =
-      typeof scriptSt?.breathKPa === 'number'
+      typeof scriptSt?.breathKPa === 'number' && Number.isFinite(scriptSt.breathKPa)
         ? scriptSt.breathKPa
-        : spec.breathKPa + envWindSpeed * 0.45;
+        : (spec.breathKPa ?? 0) + envWindSpeed * 0.45;
     let embouchureHz =
-      typeof scriptSt?.embouchureHz === 'number'
+      typeof scriptSt?.embouchureHz === 'number' && Number.isFinite(scriptSt.embouchureHz)
         ? scriptSt.embouchureHz
         : spec.embouchureHz;
     for (const ch of wn.children ?? []) {
@@ -411,8 +603,14 @@ function syncLiveWindAudio() {
         }
       }
     }
-    const windIr = simulate3DVibroAcousticIR(wn, inferAcousticMaterial(wn));
-    return {
+
+    // Skip expensive TMM bore extraction & 3D FDTD IR lookup on idle wind instruments!
+    if (!(breathKPa > 0.01)) continue;
+
+    const bore = extractBoreWaveguide(wn, ensureJointPositions());
+    const windIr = getCachedWindIr(wn);
+    const spatial = resolveNodeSpatial(wn.id, wn);
+    payloads.push({
       id: wn.id,
       exciter: spec.exciter,
       breathKPa: Math.max(0, Math.min(8, breathKPa)),
@@ -434,11 +632,62 @@ function syncLiveWindAudio() {
       shunts: (bore?.toneholes ?? [])
         .filter((th) => th.openAmount > 0.05)
         .map((th) => ({ cell: th.cellIndex, coeff: th.shuntCoeff * th.openAmount })),
-    };
-  });
+      pan: spatial.pan,
+      distanceGain: spatial.distanceGain,
+    });
+  }
+
+  if (payloads.length === 0) {
+    if (hadActiveWindVoices) {
+      hadActiveWindVoices = false;
+      updateLiveWindVoices([]);
+    }
+    return;
+  }
 
   hadActiveWindVoices = payloads.some((p) => p.breathKPa > 0.05);
   updateLiveWindVoices(payloads);
+}
+
+/** Updates rotating vibraphone fan tremolo & spatial stereo pan on actively ringing resonator bars. */
+function syncLiveTremoloVoices() {
+  if (activeTremoloBars.size === 0 || !useSoundStore.getState().soundEnabled) return;
+  const now = performance.now();
+  if (now - lastTremoloSyncMs < 24) return;
+  lastTremoloSyncMs = now;
+
+  const s = store().getState();
+  if (!s.isPlaying || !s.model || !s.data) return;
+  const nodes = liveModelGraph(s).graph.nodes;
+  const ctx = peekSharedAudioContext();
+
+  for (const [nodeId, entry] of Array.from(activeTremoloBars.entries())) {
+    if (now >= entry.expiresAtMs) {
+      activeTremoloBars.delete(nodeId);
+      continue;
+    }
+    const barNode = findNode(nodes, nodeId);
+    if (!barNode) {
+      activeTremoloBars.delete(nodeId);
+      continue;
+    }
+    const res = resolveExternalTubeResonator(barNode, entry.profile, entry.baseVoices, nodes, {
+      model: s.model,
+      data: s.data,
+    });
+    if (res) {
+      updateVoiceTremolo(ctx, nodeId, {
+        rateHz: res.tremolo.tremoloHz,
+        depth: res.tremolo.active ? res.tremolo.amDepth : 0,
+        formantHz: res.tube.fundamentalHz,
+        occlusionGain: res.tremolo.active
+          ? res.tremolo.meanOpenFactor
+          : res.tremolo.instantaneousOpenFactor,
+      });
+    }
+    const spatial = resolveNodeSpatial(nodeId, barNode);
+    updateVoiceSpatialPan(ctx, nodeId, spatial.pan, spatial.distanceGain);
+  }
 }
 
 let physicsFrameListener: (() => void) | null = null;
@@ -470,6 +719,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       }
       physicsFrameListener?.();
       syncLiveWindAudio();
+      syncLiveTremoloVoices();
     };
     client.onBreak = (event) => {
       // Append rather than replace: several welds can go in the same step, and
@@ -483,8 +733,24 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       });
       if (useSoundStore.getState().soundEnabled) {
         const s = store().getState();
-        const node = findNode(liveModelGraph(s).graph.nodes, event.nodeId);
-        if (node) playModalImpact(cachedModesFor(node), Math.max(0.2, event.forceN * 0.015));
+        const nodes = liveModelGraph(s).graph.nodes;
+        const node = findNode(nodes, event.nodeId);
+        if (node) {
+          const profile = cachedModesFor(node, nodes);
+          const spatial = resolveNodeSpatial(node.id, node);
+          const impulseNs = Math.max(0.2, event.forceN * 0.015);
+          const twoBody = resolveTwoBodyImpact(profile, node, {
+            impulseNs,
+            sceneNodes: nodes,
+            liveKinematics: { model: s.model, data: s.data },
+          });
+          playModalImpact(profile, impulseNs, false, {
+            ...twoBody,
+            nodeId: node.id,
+            pan: spatial.pan,
+            distanceGain: spatial.distanceGain,
+          });
+        }
       }
     };
     client.onImpact = (event) => {
@@ -494,6 +760,11 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       if (!useSoundStore.getState().soundEnabled) return;
       const s = store().getState();
       const nodes = liveModelGraph(s).graph.nodes;
+      const pluckedBatchIds = new Set<string>();
+      for (const ev of events) {
+        if (ev.impulseNs >= 0.0015) pluckedBatchIds.add(ev.nodeId);
+      }
+
       for (const ev of events) {
         if (ev.impulseNs < 0.0015) continue;
         const node = findNode(nodes, ev.nodeId);
@@ -509,6 +780,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
                 localPoint: ev.localPoint,
                 strikerNode,
                 strikerGeomName: ev.otherGeomName,
+                impulseNs: ev.impulseNs,
               }
             : undefined,
         );
@@ -519,44 +791,103 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           strikerGeomName: ev.otherGeomName,
           localPoint: ev.localPoint,
           isPluck,
+          sceneNodes: nodes,
+          liveKinematics: { model: s.model, data: s.data },
         });
-        playModalImpact(profile, ev.impulseNs, isPluck, twoBody);
+        const spatial = resolveNodeSpatial(node.id, node, ev.localPoint);
+        playModalImpact(profile, ev.impulseNs, isPluck, {
+          ...twoBody,
+          nodeId: node.id,
+          pan: spatial.pan,
+          distanceGain: spatial.distanceGain,
+        });
+
+        // Starter #3: Weinreich bridge-admittance sympathetic string excitation across sibling strings!
+        if (isPluck) {
+          const ctx = peekSharedAudioContext();
+          const bus = getSharedOutputBusForContext(ctx);
+          if (ctx && bus) {
+            triggerSympatheticStringPluck(ctx, bus, node, nodes, ev.impulseNs, {
+              sourcePitchHz: profile.fundamentalHz,
+              excludedNodeIds: pluckedBatchIds,
+              pan: spatial.pan,
+              distanceGain: spatial.distanceGain,
+            });
+          }
+        }
+
+        // Starter #5: Track ringing vibraphone bars over motor-driven tremolo resonator tubes
+        if (twoBody.resonator?.tremolo.vaneJointName) {
+          activeTremoloBars.set(node.id, {
+            nodeId: node.id,
+            profile,
+            baseVoices: profile.modes,
+            expiresAtMs: performance.now() + 3800,
+          });
+        }
       }
     };
     client.onBowedStrings = (contacts) => {
+      if (isAcousticAuditionActive()) return;
       if (!useSoundStore.getState().soundEnabled || !store().getState().isPlaying) {
         silenceBowedVoices();
         return;
       }
       if (contacts.length === 0) {
         updateLiveBowedVoices([]);
+        if (hadActiveBowedSympathy) {
+          hadActiveBowedSympathy = false;
+          const ctx = peekSharedAudioContext();
+          const bus = getSharedOutputBusForContext(ctx);
+          updateSympatheticBowedVoices(ctx, bus, [], liveModelGraph(store().getState()).graph.nodes);
+        }
         return;
       }
       const s = store().getState();
       const nodes = liveModelGraph(s).graph.nodes;
       const bowedPayloads = [];
+      const activeBowedForSympathy: {
+        node: SceneNode;
+        pitchHz: number;
+        amplitude: number;
+        stringHarmonicWeights?: number[];
+      }[] = [];
+
       for (const ev of contacts) {
         const strNode = findNode(nodes, ev.stringNodeId);
         if (!strNode || !strNode.acousticString) continue;
         const bowNode = findNode(nodes, ev.bowNodeId);
+        const bowSpec = bowNode?.acousticBow;
         const bowGeom = bowNode?.geoms?.find((g) => g.name === ev.bowGeomName) ?? bowNode?.geoms?.[0];
         let bowRibbonWidthM = 0.009;
-        if (bowGeom?.type === 'box' && bowGeom.size.length >= 3) {
+        if (typeof bowSpec?.hairWidthMm === 'number' && Number.isFinite(bowSpec.hairWidthMm) && bowSpec.hairWidthMm > 0) {
+          bowRibbonWidthM = Math.max(0.002, Math.min(0.025, bowSpec.hairWidthMm * 1e-3));
+        } else if (bowGeom?.type === 'box' && bowGeom.size.length >= 3) {
           const sorted = [...bowGeom.size.slice(0, 3)].sort((a, b) => a - b);
           bowRibbonWidthM = Math.max(0.003, Math.min(0.024, sorted[1] * 2));
         } else if (bowGeom && (bowGeom.type === 'capsule' || bowGeom.type === 'cylinder')) {
           bowRibbonWidthM = Math.max(0.003, Math.min(0.020, (bowGeom.size[0] ?? 0.004) * 2));
         }
-        const bowBeta = resolveStringBetaFromPoint(strNode, ev.localPoint);
+        const forceScale =
+          typeof bowSpec?.forceScale === 'number' && Number.isFinite(bowSpec.forceScale) && bowSpec.forceScale > 0
+            ? Math.max(0.1, Math.min(5.0, bowSpec.forceScale))
+            : 1.0;
+        const bowBeta = resolveStringBetaFromPoint(
+          strNode,
+          ev.localPoint,
+          ev.stoppedLengthFraction,
+          nodes,
+        );
         const solved = solveBowedStringVoice({
           node: strNode,
           sceneNodes: nodes,
           bowVelocityMps: ev.bowVelocityMps,
-          bowForceN: ev.bowForceN,
+          bowForceN: ev.bowForceN * forceScale,
           bowBeta,
           stoppedLengthFraction: ev.stoppedLengthFraction,
           bowRibbonWidthM,
         });
+        const spatial = resolveNodeSpatial(ev.stringNodeId, strNode, ev.localPoint);
         bowedPayloads.push({
           id: ev.stringNodeId,
           active: solved.active,
@@ -578,20 +909,99 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           lowpassHz: solved.lowpassHz,
           rosinNoiseGain: solved.rosinNoiseGain,
           rosinCenterHz: solved.rosinCenterHz,
+          pan: spatial.pan,
+          distanceGain: spatial.distanceGain,
         });
+        if (solved.active) {
+          activeBowedForSympathy.push({
+            node: strNode,
+            pitchHz: solved.pitchHz,
+            amplitude: solved.amplitude,
+            stringHarmonicWeights: solved.stringHarmonicWeights,
+          });
+        }
       }
       updateLiveBowedVoices(bowedPayloads);
+      if (activeBowedForSympathy.length > 0 || hadActiveBowedSympathy) {
+        hadActiveBowedSympathy = activeBowedForSympathy.length > 0;
+        const ctx = peekSharedAudioContext();
+        const bus = getSharedOutputBusForContext(ctx);
+        if (ctx && bus) {
+          updateSympatheticBowedVoices(ctx, bus, activeBowedForSympathy, nodes);
+        }
+      }
     };
     client.onAeroAudio = (voices, snaps) => {
       if (!useSoundStore.getState().soundEnabled || !store().getState().isPlaying) {
         silenceAeroVoices();
         return;
       }
-      const solvedVoices = voices.map(solveAeroAcousticVoice);
+      const s = store().getState();
+      const nodes = liveModelGraph(s).graph.nodes;
+      const solvedVoices = voices.map((v) => {
+        const solved = solveAeroAcousticVoice(v);
+        const aeroNode = findNode(nodes, solved.id);
+        const spatial = resolveNodeSpatial(solved.id, aeroNode);
+        return {
+          ...solved,
+          pan: spatial.pan,
+          distanceGain: spatial.distanceGain,
+        };
+      });
       updateLiveAeroVoices(solvedVoices);
       for (const sn of snaps) {
-        playAeroSnapPulse(solveClothSnapPulse(sn));
+        const snapParams = solveClothSnapPulse(sn);
+        const snapNode = findNode(nodes, sn.nodeId);
+        const spatial = resolveNodeSpatial(sn.nodeId, snapNode);
+        playAeroSnapPulse(snapParams, spatial);
       }
+    };
+    client.onContactFriction = (contacts) => {
+      if (!useSoundStore.getState().soundEnabled || !store().getState().isPlaying) {
+        if (hadActiveFrictionVoices) {
+          hadActiveFrictionVoices = false;
+          silenceFrictionVoices();
+        }
+        return;
+      }
+      if (contacts.length === 0) {
+        if (hadActiveFrictionVoices) {
+          hadActiveFrictionVoices = false;
+          updateLiveFrictionVoices([]);
+        }
+        return;
+      }
+      const s = store().getState();
+      const nodes = liveModelGraph(s).graph.nodes;
+      const payloads = contacts.map((ev) => {
+        const primaryNode = findNode(nodes, ev.nodeId);
+        const partnerNode =
+          ev.otherNodeId && ev.otherNodeId !== 'world' ? findNode(nodes, ev.otherNodeId) : null;
+        const primaryProfile = primaryNode ? cachedModesFor(primaryNode, nodes) : null;
+        const partnerProfile = partnerNode ? cachedModesFor(partnerNode, nodes) : null;
+        const spatial = resolveNodeSpatial(
+          ev.nodeId,
+          primaryNode,
+          ev.localPoint ?? null,
+          ev.contactPointWorld ?? null,
+        );
+        return solveContactFrictionVoice(ev, {
+          primaryProfile,
+          primaryNode,
+          partnerProfile,
+          partnerNode,
+          spatial,
+        });
+      });
+      hadActiveFrictionVoices = payloads.some((p) => p.active);
+      updateLiveFrictionVoices(payloads);
+    };
+    client.onAudioDamping = (contacts) => {
+      if (!useSoundStore.getState().soundEnabled || contacts.length === 0) return;
+      const ctx = peekSharedAudioContext();
+      if (!ctx) return;
+      const s = store().getState();
+      applyAudioDampingEvents(ctx, contacts, liveModelGraph(s).graph.nodes);
     };
     client.setSound(useSoundStore.getState().soundEnabled);
     client.onError = (message, fatal, lastState) => {
@@ -624,24 +1034,34 @@ export const endVoltLink = () => {
   void getPhysicsWorkerClient().stepFor(0, {}, []).catch(() => {});
 };
 
+let prevSoundEnabled = useSoundStore.getState().soundEnabled;
 useSoundStore.subscribe((state) => {
+  const wasEnabled = prevSoundEnabled;
+  prevSoundEnabled = state.soundEnabled;
   physicsWorkerClientSingleton?.setSound(state.soundEnabled);
   if (!state.soundEnabled) {
-    silenceWindVoices();
-    silenceBowedVoices();
-    silenceAeroVoices();
+    silenceAllLiveAcoustics();
+  } else if (!wasEnabled) {
+    try {
+      const s = store().getState();
+      if (s.isPlaying) {
+        prewarmSceneAcousticIRs(liveModelGraph(s).graph.nodes);
+      }
+    } catch {
+      // Store not initialized in pure unit-test imports
+    }
   }
 });
 
-// Silence continuous wind waveguides, bowed strings, and aeroacoustic voices whenever simulation stops
+// Silence modal & continuous voices on simulation pause, and physically choke grabbed bodies!
 setTimeout(() => {
   try {
     store().subscribe((state, prev) => {
       if (prev.isPlaying && !state.isPlaying) {
-        hadActiveWindVoices = false;
-        silenceWindVoices();
-        silenceBowedVoices();
-        silenceAeroVoices();
+        silenceAllLiveAcoustics();
+      }
+      if (state.draggedNodeId && state.draggedNodeId !== prev.draggedNodeId) {
+        chokeBodyVoice(null, state.draggedNodeId, { mode: 'grab' });
       }
     });
   } catch {
