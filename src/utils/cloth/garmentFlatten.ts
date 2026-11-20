@@ -312,12 +312,27 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   const { points, tris } = submesh(shellTris, panelTris, (a, b) => seams.has(a < b ? a * n0 + b : b * n0 + a));
   const P = points.map((g) => shellPoints[g]);
   const frames = triangleFrames(P, tris);
-  // Pin the two points furthest apart, at their true distance, along u.
+  // Pin the two points furthest apart, at their true distance, along u. A
+  // panel across the body's middle (x = 0: a front, a back) is pinned at the
+  // two ends of its centre line instead, so a piece the same either side
+  // flattens the same either side: pinned at a sleeve's cuff and the hem's
+  // far corner, a batwing gown's front came out lopsided, one sleeve higher.
   let a = 0, b = 0, far = -1;
-  for (let i = 0; i < P.length; i += Math.max(1, Math.floor(P.length / 200))) {
-    for (let j = 0; j < P.length; j++) {
+  let xLo = Infinity, xHi = -Infinity;
+  for (const q of P) { xLo = Math.min(xLo, q[0]); xHi = Math.max(xHi, q[0]); }
+  const across = xHi - xLo, mid = across > 0 && xLo < -0.25 * across && xHi > 0.25 * across;
+  const onMid = mid ? P.map((_, i) => i).filter((i) => Math.abs(P[i][0]) < 0.02 * across) : [];
+  if (onMid.length >= 2) {
+    for (const i of onMid) for (const j of onMid) {
       const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
       if (dd > far) { far = dd; a = i; b = j; }
+    }
+  } else {
+    for (let i = 0; i < P.length; i += Math.max(1, Math.floor(P.length / 200))) {
+      for (let j = 0; j < P.length; j++) {
+        const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
+        if (dd > far) { far = dd; a = i; b = j; }
+      }
     }
   }
   let uv = lscm(P.length, tris, frames, [[a, [0, 0]], [b, [far, 0]]]);
