@@ -6,7 +6,7 @@ import type { ClothMaterialName, ClothSpec } from '../../types/cloth';
 import { CLOTH_MATERIALS } from '../../utils/cloth/clothMesh';
 import { cornerHold, holdCorner, pieceSize, resizePiece } from '../../utils/cloth/clothSheet';
 import { solveAeroAcousticVoice, solveClothSnapPulse } from '../../utils/aeroAcoustics';
-import { playAeroSnapPulse, unlockAudioContext } from '../../utils/modalAudio';
+import { auditionClothSnap } from '../../utils/modalAudio';
 import { FABRICS } from './garmentFields';
 
 const hex = (rgba: number[]) => `#${rgba.slice(0, 3).map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0')).join('')}`;
@@ -57,8 +57,7 @@ export function ClothCard({ node }: { node: SceneNode }) {
     arealDensityKgM2: mat.arealDensity,
   });
   const auditionWhipSnap = () => {
-    unlockAudioContext();
-    playAeroSnapPulse(snapPreview);
+    auditionClothSnap(mat.arealDensity, node.id, refWindMps, 0.08);
   };
   const others: string[] = [];
   const walk = (list: SceneNode[]) => { for (const n of list) { if (n.id !== node.id && !n.cloth) others.push(n.name || n.id); walk(n.children ?? []); } };

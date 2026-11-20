@@ -281,4 +281,168 @@ describe('Flag-in-the-Wind Aeroacoustics, Ripstop Fabric & MCP Parity', () => {
     expect(sysPrompt).toContain('flag_in_wind');
     expect(sysPrompt).toContain('cloth_aero');
   });
+
+  it('drives end-to-end ClothSim.consumeAeroTelemetry on flag_in_wind (billow voices, fly whip-snaps, flagpole tie impacts, Aeolian hum, and calm silence)', async () => {
+    const nodes = flagInWindPreset.nodes;
+    const flagpole = nodes.find((n) => n.id === 'flagpole')!;
+    const shackle = flagpole.children!.find((c) => c.id === 'halyard_shackle')!;
+    const poleProfile = estimateBodyModes(flagpole, true);
+
+    const r = await clothRun(nodes);
+    const windEnv = {
+      wind: [8.8, 0.6, 0] as [number, number, number],
+      gustAt: evaluateGustWind,
+    };
+
+    const allSnaps: ReturnType<typeof r.sim.consumeAeroTelemetry>['snaps'] = [];
+    const allTieImpacts: ReturnType<typeof r.sim.consumeAeroTelemetry>['tieImpacts'] = [];
+    const latestVoiceById = new Map<string, ReturnType<typeof r.sim.consumeAeroTelemetry>['voices'][number]>();
+
+    // Step 2.4 s in 40 ms worker-equivalent telemetry windows
+    for (let step = 0; step < 60; step++) {
+      r.run(0.04, windEnv);
+      const tel = r.sim.consumeAeroTelemetry(1.225, false);
+      for (const v of tel.voices) latestVoiceById.set(v.hubOrBodyId, v);
+      allSnaps.push(...tel.snaps);
+      allTieImpacts.push(...tel.tieImpacts);
+    }
+
+    const ensignVoice = latestVoiceById.get('ensign_flag');
+    const burgeeVoice = latestVoiceById.get('burgee_pennant');
+    expect(ensignVoice).toBeDefined();
+    expect(burgeeVoice).toBeDefined();
+    expect(ensignVoice!.isCloth).toBe(true);
+    expect(ensignVoice!.worldPos).toBeDefined();
+
+    const solvedEnsign = solveAeroAcousticVoice(ensignVoice!);
+    const solvedBurgee = solveAeroAcousticVoice(burgeeVoice!);
+    expect(solvedEnsign.active).toBe(true);
+    expect(solvedEnsign.noiseGain).toBeGreaterThan(0);
+    expect(solvedEnsign.rustleGain).toBeGreaterThan(0);
+    expect(solvedEnsign.amRateHz).toBeGreaterThanOrEqual(2.5);
+    expect(solvedEnsign.amRateHz).toBeLessThanOrEqual(16.0);
+    // Ultralight ripstop ensign has brighter weave rustle than heavy canvas burgee
+    expect(solvedEnsign.rustleFreqHz).toBeGreaterThan(solvedBurgee.rustleFreqHz);
+
+    // Free fly corners emit genuine whip-snaps with 3D worldPos and monotonic seq
+    expect(allSnaps.length).toBeGreaterThanOrEqual(1);
+    expect(allSnaps[0].worldPos).toBeDefined();
+    expect(allSnaps[0].seq).toBeGreaterThanOrEqual(1);
+    for (let i = 1; i < allSnaps.length; i++) {
+      expect(allSnaps[i].seq!).toBeGreaterThan(allSnaps[i - 1].seq!);
+    }
+    const solvedSnap = solveClothSnapPulse(allSnaps[0]);
+    expect(solvedSnap.gain).toBeGreaterThan(0);
+
+    // Grommet tie jerks target `flagpole` at hoist anchor points and excite structural modal voices
+    expect(allTieImpacts.length).toBeGreaterThanOrEqual(1);
+    expect(allTieImpacts.every((ti) => ti.bodyName === 'flagpole')).toBe(true);
+    const poleExcitation = resolveTwoBodyImpact(poleProfile, flagpole, {
+      impulseNs: allTieImpacts[0].impulseNs,
+      strikerNode: allTieImpacts[0].isGrommetClink ? shackle : undefined,
+      localPoint: allTieImpacts[0].anchorLocal ?? undefined,
+    });
+    expect(poleExcitation.voices.some((v) => v.gain > 0)).toBe(true);
+
+    // Static slender cylindrical flagpole / halyard stay emits subtle high-Q (Q > 2.8) Strouhal Aeolian hum in 8.8 m/s wind and 0 voices in calm/vacuum
+    const sim = await simulate(flagInWindPreset, { windX: 8.8, windY: 0.6 });
+    try {
+      const poleBid = sim.bodyId('flagpole');
+      expect(sim.model.body_dofnum[poleBid]).toBe(0);
+      const gStart = sim.model.body_geomadr[poleBid];
+      const gCount = sim.model.body_geomnum[poleBid];
+      let minSlenderD = Infinity;
+      let slenderAreaSum = 0;
+      for (let k = 0; k < gCount; k++) {
+        const g = gStart + k;
+        const gt = sim.model.geom_type[g];
+        if (gt !== 3 && gt !== 5) continue;
+        const rad = sim.model.geom_size[g * 3] || 0;
+        const halfLen = sim.model.geom_size[g * 3 + 1] || 0;
+        const diam = 2 * rad;
+        const fullLen = gt === 3 ? 2 * halfLen + diam : 2 * halfLen;
+        if (diam >= 0.004 && diam <= 0.16 && fullLen / diam >= 6.0) {
+          if (diam < minSlenderD) minSlenderD = diam;
+          slenderAreaSum += diam * fullLen;
+        }
+      }
+      expect(Number.isFinite(minSlenderD)).toBe(true);
+      expect(slenderAreaSum).toBeGreaterThan(0.01);
+
+      const uPerp = Math.hypot(8.8, 0.6);
+      const fDrag = 0.5 * 1.225 * 1.1 * Math.min(2.0, slenderAreaSum) * uPerp * uPerp;
+      const aeolianVoice = solveAeroAcousticVoice({
+        hubOrBodyId: 'flagpole',
+        bladeCount: 0,
+        omegaRadPerSec: 0,
+        tipSpeedMps: uPerp,
+        relSpeedMps: uPerp,
+        alphaDeg: 4.0,
+        areaM2: Math.min(2.0, slenderAreaSum),
+        chordM: minSlenderD,
+        thicknessM: minSlenderD,
+        aeroForceN: fDrag,
+        arealDensityKgM2: 1.5,
+        bendRateRadPerSec: 0,
+        gainScale: 0.28,
+      });
+      expect(aeolianVoice.active).toBe(true);
+      expect(aeolianVoice.noiseQ).toBeGreaterThan(2.8);
+      expect(aeolianVoice.noiseGain).toBeGreaterThan(0);
+
+      const vacuumAeolian = solveAeroAcousticVoice({
+        hubOrBodyId: 'flagpole',
+        bladeCount: 0,
+        omegaRadPerSec: 0,
+        tipSpeedMps: uPerp,
+        relSpeedMps: uPerp,
+        alphaDeg: 4.0,
+        areaM2: Math.min(2.0, slenderAreaSum),
+        chordM: minSlenderD,
+        thicknessM: minSlenderD,
+        aeroForceN: fDrag,
+        isVacuum: true,
+        gainScale: 0.28,
+      });
+      expect(vacuumAeolian.active).toBe(false);
+    } finally {
+      sim.dispose();
+    }
+
+    // Live XPBD fabric swap (`ripstop` -> `woven` -> `canvas`) shifts live-extracted snap & rustle frequencies downward
+    const wovenNodes = nodes.map((n) =>
+      n.id === 'ensign_flag' ? { ...n, cloth: { ...n.cloth!, material: 'woven' as const } } : n,
+    );
+    const wovenRun = await clothRun(wovenNodes);
+    let wovenVoice: ReturnType<typeof wovenRun.sim.consumeAeroTelemetry>['voices'][number] | undefined;
+    const wovenSnaps: ReturnType<typeof wovenRun.sim.consumeAeroTelemetry>['snaps'] = [];
+    for (let step = 0; step < 45; step++) {
+      wovenRun.run(0.04, windEnv);
+      const tel = wovenRun.sim.consumeAeroTelemetry(1.225, false);
+      const ev = tel.voices.find((v) => v.hubOrBodyId === 'ensign_flag');
+      if (ev) wovenVoice = ev;
+      wovenSnaps.push(...tel.snaps.filter((s) => s.nodeId === 'ensign_flag'));
+    }
+    expect(wovenVoice).toBeDefined();
+    const solvedWoven = solveAeroAcousticVoice(wovenVoice!);
+    expect(solvedEnsign.rustleFreqHz).toBeGreaterThan(solvedWoven.rustleFreqHz);
+    expect(solvedWoven.rustleFreqHz).toBeGreaterThan(solvedBurgee.rustleFreqHz);
+    const ensignSnap = allSnaps.find((s) => s.nodeId === 'ensign_flag');
+    const burgeeSnap = allSnaps.find((s) => s.nodeId === 'burgee_pennant');
+    if (ensignSnap && wovenSnaps[0]) {
+      expect(solveClothSnapPulse(ensignSnap).centerHz).toBeGreaterThan(solveClothSnapPulse(wovenSnaps[0]).centerHz);
+    }
+    if (wovenSnaps[0] && burgeeSnap) {
+      expect(solveClothSnapPulse(wovenSnaps[0]).centerHz).toBeGreaterThan(solveClothSnapPulse(burgeeSnap).centerHz);
+    }
+
+    // Calm air ([0, 0, 0]) after settle produces 0 snaps and inactive voices
+    const calm = await clothRun(nodes);
+    calm.run(2.8, { wind: [0, 0, 0] });
+    calm.sim.consumeAeroTelemetry(1.225, false); // clear transient gravity-drop drape
+    calm.run(0.3, { wind: [0, 0, 0] });
+    const calmTel = calm.sim.consumeAeroTelemetry(1.225, false);
+    expect(calmTel.snaps).toHaveLength(0);
+    expect(calmTel.voices.every((v) => !solveAeroAcousticVoice(v).active)).toBe(true);
+  }, 120_000);
 });
