@@ -27,7 +27,7 @@ import type { LoadStrength, SceneGeom, SceneNode } from '../types/scene';
 import { meshVolumeAndCentroid } from './csg';
 
 export type DeformMaterialId =
-  | 'glass' | 'ceramic' | 'stone' | 'plastic'
+  | 'glass' | 'ceramic' | 'stone' | 'plastic' | 'rubber'
   | 'softwood' | 'hardwood' | 'softMetal' | 'steel' | 'pasta';
 
 export interface ShatterProfile {
@@ -138,6 +138,15 @@ export const DEFORM_MATERIALS: DeformMaterial[] = [
     note: 'ABS / nylon polymer: muted, short-decay knock and lower pitch.',
   },
   {
+    id: 'rubber', label: 'Rubber / Elastomer', density: 1150,
+    contact: { solref: [0.022, 0.85], solimp: DEFAULT_SOLIMP(0.96), friction: [0.85, 0.008, 0.0004] },
+    shatter: null,
+    dent: { yieldNs: 8, depthPerNs: 0.0015, maxDepth: 0.004, pierceNs: 35 },
+    strength: { flexuralMPa: 12, tensileMPa: 15, modulusGPa: 0.05, ductile: true },
+    natural: { shatter: false, dent: false, load: true },
+    note: 'Compliant, high-grip elastomer with soft, heavily damped impact thud.',
+  },
+  {
     id: 'ceramic', label: 'Ceramic', density: 2400,
     contact: { solref: [0.007, 0.3], solimp: DEFAULT_SOLIMP(0.995), friction: [0.4, 0.003, 0.0001] },
     shatter: { breakSpeedMs: 3.5, pieces: 8, pattern: 'radial', depth: 1, spread: 0.2, thicknessRef: 0.006 },
@@ -194,10 +203,18 @@ export function geomVolume(g: SceneGeom): number {
     case 'box': return 8 * (s[0] ?? 0) * (s[1] ?? 0) * (s[2] ?? 0);
     case 'sphere': return (4 / 3) * Math.PI * (s[0] ?? 0) ** 3;
     case 'ellipsoid': return (4 / 3) * Math.PI * (s[0] ?? 0) * (s[1] ?? 0) * (s[2] ?? 0);
-    case 'cylinder': return Math.PI * (s[0] ?? 0) ** 2 * 2 * (s[1] ?? 0);
+    case 'cylinder': {
+      const len = g.fromto && g.fromto.length >= 6
+        ? Math.hypot(g.fromto[3] - g.fromto[0], g.fromto[4] - g.fromto[1], g.fromto[5] - g.fromto[2])
+        : 2 * (s[1] ?? 0);
+      return Math.PI * (s[0] ?? 0) ** 2 * len;
+    }
     case 'capsule': {
       const r = s[0] ?? 0;
-      return Math.PI * r * r * 2 * (s[1] ?? 0) + (4 / 3) * Math.PI * r ** 3;
+      const len = g.fromto && g.fromto.length >= 6
+        ? Math.hypot(g.fromto[3] - g.fromto[0], g.fromto[4] - g.fromto[1], g.fromto[5] - g.fromto[2])
+        : 2 * (s[1] ?? 0);
+      return Math.PI * r * r * len + (4 / 3) * Math.PI * r ** 3;
     }
     case 'mesh': {
       const v = g.renderVertices || g.vertices;

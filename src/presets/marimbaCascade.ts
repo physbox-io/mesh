@@ -34,7 +34,7 @@ for (let i = 0; i < score.length; i++) {
   const dur = score[i][1] * unitSec;
   const dt = tLoop - cursor;
   if (dt >= 0 && dt < 0.042) {
-    api.applyJointForce(joints[score[i][0]], -2.35);
+    api.applyJointForce(joints[score[i][0]], -3.85);
   }
   cursor += dur;
 }
@@ -64,21 +64,22 @@ for (let i = 0; i < score.length; i++) {
     script: controllerScript,
     joints: [],
     geoms: [
-      // Frame rails sit at z_top = 0.022 m (5.5 mm clear below z_bottom = 0.0275 m of the sprung bars!)
+      // Frame rails sit at z_top = 0.022 m (5.5 mm clear below z_bottom = 0.0275 m of the sprung bars!),
+      // and mallet_rail sits at y = -0.230 m (back face y = -0.221 m, >= 15 mm clear of the 410 mm C4 bar!).
       { name: 'rail_front', type: 'box', size: [0.175, 0.008, 0.011], pos: [0.02, -0.052, 0.011], rgba: [0.36, 0.24, 0.15, 1] },
       { name: 'rail_back', type: 'box', size: [0.175, 0.008, 0.011], pos: [0.02, 0.052, 0.011], rgba: [0.36, 0.24, 0.15, 1] },
-      { name: 'side_tie_l', type: 'box', size: [0.008, 0.095, 0.009], pos: [-0.155, -0.035, 0.009], rgba: [0.30, 0.20, 0.13, 1] },
-      { name: 'side_tie_r', type: 'box', size: [0.008, 0.095, 0.009], pos: [0.195, -0.035, 0.009], rgba: [0.30, 0.20, 0.13, 1] },
-      { name: 'mallet_rail', type: 'box', size: [0.175, 0.009, 0.032], pos: [0.02, -0.125, 0.032], rgba: [0.30, 0.20, 0.13, 1] },
-      { name: 'drum_post_l', type: 'box', size: [0.008, 0.012, 0.048], pos: [-0.155, -0.165, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
-      { name: 'drum_post_r', type: 'box', size: [0.008, 0.012, 0.048], pos: [0.195, -0.165, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'side_tie_l', type: 'box', size: [0.008, 0.175, 0.009], pos: [-0.155, -0.115, 0.009], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'side_tie_r', type: 'box', size: [0.008, 0.175, 0.009], pos: [0.195, -0.115, 0.009], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'mallet_rail', type: 'box', size: [0.175, 0.009, 0.032], pos: [0.02, -0.230, 0.032], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'drum_post_l', type: 'box', size: [0.008, 0.012, 0.048], pos: [-0.155, -0.270, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
+      { name: 'drum_post_r', type: 'box', size: [0.008, 0.012, 0.048], pos: [0.195, -0.270, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
     ],
     children: [
       {
         id: 'music_drum',
         name: 'Pinned Music Cylinder',
         type: 'body',
-        pos: [0.02, -0.165, 0.082],
+        pos: [0.02, -0.270, 0.082],
         deformMaterial: 'softMetal',
         joints: [
           {
@@ -112,7 +113,7 @@ for (let i = 0; i < score.length; i++) {
       id: `mallet_${idx + 1}`,
       name: `Mallet ${label}`,
       type: 'body',
-      pos: [x, -0.12, 0.070],
+      pos: [x, -0.225, 0.070],
       deformMaterial: headMat,
       joints: [
         {
@@ -120,12 +121,12 @@ for (let i = 0; i < score.length; i++) {
           type: 'hinge',
           axis: [1, 0, 0],
           pos: [0, 0, 0],
-          stiffness: 0.72,
-          springref: 0.02,
-          damping: 0.032,
+          stiffness: 1.45,
+          springref: 0.035,
+          damping: 0.065,
           limited: true,
-          // Stop at -14° prevents dragging the beater head through the 17 mm bar; 55° upper headroom avoids rebound stop-slams!
-          range: [-14, 55],
+          // Stop at -7.8° prevents dragging the beater head through the 17 mm bar; 55° upper headroom avoids rebound stop-slams!
+          range: [-7.8, 55],
           hardStop: false,
         },
       ],
@@ -134,7 +135,7 @@ for (let i = 0; i < score.length; i++) {
         {
           name: `shaft_${idx}`,
           type: 'capsule',
-          fromto: [0, 0.018, 0, 0, 0.118, 0],
+          fromto: [0, 0.018, 0, 0, 0.223, 0],
           size: [0.0025],
           density: 650,
           solref: [0.004, 0.5],
@@ -143,7 +144,7 @@ for (let i = 0; i < score.length; i++) {
         {
           name: `mallet_head_${idx}`,
           type: 'sphere',
-          pos: [0, 0.12, -0.003],
+          pos: [0, 0.225, -0.003],
           size: [isSteel ? 0.010 : 0.0115],
           density: isSteel ? 7800 : 1850,
           solref: [0.004, 0.25],

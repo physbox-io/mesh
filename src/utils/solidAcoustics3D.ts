@@ -53,10 +53,17 @@ interface PreparedSolidGeom {
   meshGrids?: Map<number, MeshBinGrid2D>;
 }
 
+export interface NodeRayCsgGroup {
+  positives: PreparedSolidGeom[];
+  differences: PreparedSolidGeom[];
+  intersections: PreparedSolidGeom[];
+}
+
 export interface BodyRayScene {
   positives: PreparedSolidGeom[];
   differences: PreparedSolidGeom[];
   intersections: PreparedSolidGeom[];
+  nodeGroups?: NodeRayCsgGroup[];
   bounds: [number, number, number, number, number, number];
 }
 
@@ -71,10 +78,14 @@ export interface Solid3DSectionAnalysis {
   dimsSortedAsc: [number, number, number];
   /** Corresponding body-local axes [thickAxis, widthAxis, lenAxis]. */
   axisOrderAsc: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2];
-  /** Actual non-empty solid span [sMin, sMax] along lenAxis. */
+  /** Actual non-empty solid span [sMin, sMax] along lenAxis (or principalLenDir when oriented). */
   lenBounds: [number, number];
   /** Actual non-empty solid span [wMin, wMax] along widthAxis. */
   widthBounds: [number, number];
+  /** Unit principal longitudinal direction in body-local Z-up frame (present when a single solid geom is rotated / `fromto`). */
+  principalLenDir?: [number, number, number];
+  /** Body-local Z-up origin for `principalLenDir` projection when oriented. */
+  principalOrigin?: [number, number, number];
   /** Integrated 3D solid material volume (m³). */
   solidVolumeM3: number;
   /** Fraction of interior cross-sectional rays that pierce >= 2 separated walls (hollow tube/shell/bell/box). */
@@ -99,6 +110,8 @@ export interface DetectedPort3D {
   eqRadiusM: number;
   neckLengthM: number;
   conductanceM: number;
+  normalAxis?: 0 | 1 | 2;
+  sideSign?: 1 | -1;
 }
 
 export interface Cavity3DAnalysis {
@@ -113,6 +126,8 @@ export interface Cavity3DAnalysis {
   ports: DetectedPort3D[];
   totalConductanceM: number;
   openAreaFraction: number;
+  cavityRegime?: 'helmholtz' | 'quarter_wave_tube' | 'half_wave_tube' | 'open_shell' | 'sealed';
+  airResonanceHz?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -441,8 +456,32 @@ function rayIntersectPreparedGeom(
   }
 }
 
+const zUpMeshVertsCache = new WeakMap<object, Float64Array>();
+
+/**
+ * Returns mesh vertices in MuJoCo Z-up space: prefers `renderVertices` (already Z-up),
+ * and converts Three.js Y-up `vertices` via `(x, y, z) -> (x, -z, y)` when `renderVertices` is absent.
+ */
+export function getZUpMeshVertices(g: SceneGeom): ArrayLike<number> | undefined {
+  if (g.renderVertices && g.renderVertices.length >= 9) return g.renderVertices;
+  const yup = g.vertices;
+  if (!yup || yup.length < 9) return undefined;
+  const key = yup as unknown as object;
+  let cached = zUpMeshVertsCache.get(key);
+  if (!cached || cached.length !== yup.length) {
+    cached = new Float64Array(yup.length);
+    for (let i = 0; i + 2 < yup.length; i += 3) {
+      cached[i] = yup[i];
+      cached[i + 1] = -yup[i + 2];
+      cached[i + 2] = yup[i + 1];
+    }
+    zUpMeshVertsCache.set(key, cached);
+  }
+  return cached;
+}
+
 function computeLocalBoundsInFrame(g: SceneGeom, mat: THREE.Matrix4): [number, number, number, number, number, number] {
-  const verts = g.renderVertices ?? g.vertices;
+  const verts = getZUpMeshVertices(g);
   if (g.type === 'mesh' && verts && verts.length >= 9) {
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     const e = mat.elements;
@@ -480,7 +519,11 @@ function computeLocalBoundsInFrame(g: SceneGeom, mat: THREE.Matrix4): [number, n
   return [cx - ex, cx + ex, cy - ey, cy + ey, cz - ez, cz + ez];
 }
 
-function prepareGeomWithMatrix(g: SceneGeom, worldMat: THREE.Matrix4): PreparedSolidGeom | null {
+function prepareGeomWithMatrix(
+  g: SceneGeom,
+  worldMat: THREE.Matrix4,
+  csgEnabledOnNode = true,
+): PreparedSolidGeom | null {
   if (g.type === 'plane') return null;
   let localMat: THREE.Matrix4;
   let effectiveSize = g.size;
@@ -497,26 +540,39 @@ function prepareGeomWithMatrix(g: SceneGeom, worldMat: THREE.Matrix4): PreparedS
     effectiveSize === g.size ? g : { ...g, size: effectiveSize, fromto: undefined },
     fullMat,
   );
-  const verts = g.renderVertices ?? g.vertices;
+  const verts = g.type === 'mesh' ? getZUpMeshVertices(g) : undefined;
+  const op = !csgEnabledOnNode
+    ? 'union'
+    : g.csg === 'difference'
+      ? 'difference'
+      : g.csg === 'intersection'
+        ? 'intersection'
+        : 'union';
   return {
-    op: g.csg === 'difference' ? 'difference' : g.csg === 'intersection' ? 'intersection' : 'union',
+    op,
     type: g.type,
     size: effectiveSize,
     invMat: Float64Array.from(invThree.elements),
     detScale: Math.cbrt(Math.abs(fullMat.determinant()) || 1),
-    verts: g.type === 'mesh' ? verts : undefined,
+    verts,
     faces: g.type === 'mesh' ? g.faces : undefined,
     localBounds: bounds,
   };
 }
 
-export function buildBodyRayScene(node: SceneNode, includeAllGeoms = false): BodyRayScene | null {
+export function buildBodyRayScene(
+  node: SceneNode,
+  includeAllGeoms = false,
+  rootMat?: THREE.Matrix4,
+  shellFootprintBounds?: [number, number, number, number, number, number],
+): BodyRayScene | null {
   const positives: PreparedSolidGeom[] = [];
   const differences: PreparedSolidGeom[] = [];
   const intersections: PreparedSolidGeom[] = [];
+  const nodeGroups: NodeRayCsgGroup[] = [];
 
   const collectFrom = (n: SceneNode, parentMat: THREE.Matrix4, isRoot: boolean, passOnlyColliding: boolean) => {
-    if (!isRoot && ((n.joints?.length ?? 0) > 0 || n.simulation || n.acousticString)) return;
+    if (!isRoot && ((n.joints?.length ?? 0) > 0 || n.simulation || n.acousticString || n.acousticMembrane)) return;
     let curMat = parentMat;
     if (!isRoot) {
       const childLocal = geomMatrixOf({
@@ -538,15 +594,52 @@ export function buildBodyRayScene(node: SceneNode, includeAllGeoms = false): Bod
       ? sourceGeoms
       : geoms.filter((g) => g.csgDerived === 'visual' && g.type === 'mesh');
 
+    // If `shellFootprintBounds` is supplied (cavity analysis), skip external non-colliding child appendages
+    // (such as necks, pegboxes, tailpieces, or standing bridges protruding well outside the shell corpus)
+    // while keeping internal non-colliding bracing (soundposts, bass bars) inside the shell!
+    const allNonCollidingChild =
+      !isRoot &&
+      chosenList.length > 0 &&
+      chosenList.every((g) => g.contype === 0 && g.conaffinity === 0);
+
+    const group: NodeRayCsgGroup = { positives: [], differences: [], intersections: [] };
+    const allowCsg = n.csgEnabled !== false;
+
     for (const g of chosenList) {
-      if (passOnlyColliding && g.csg !== 'difference' && g.csg !== 'intersection') {
+      const effectiveOp = allowCsg ? g.csg : undefined;
+      if (passOnlyColliding && effectiveOp !== 'difference' && effectiveOp !== 'intersection') {
         if (g.contype === 0 && g.conaffinity === 0) continue;
       }
-      const pg = prepareGeomWithMatrix(g, curMat);
+      const pg = prepareGeomWithMatrix(g, curMat, allowCsg);
       if (!pg) continue;
-      if (pg.op === 'difference') differences.push(pg);
-      else if (pg.op === 'intersection') intersections.push(pg);
-      else positives.push(pg);
+      if (allNonCollidingChild && shellFootprintBounds && pg.op === 'union') {
+        const b = pg.localBounds;
+        const sb = shellFootprintBounds;
+        if (
+          b[0] < sb[0] - 0.025 ||
+          b[1] > sb[1] + 0.025 ||
+          b[2] < sb[2] - 0.025 ||
+          b[3] > sb[3] + 0.025 ||
+          b[4] < sb[4] - 0.020 ||
+          b[5] > sb[5] + 0.020
+        ) {
+          continue;
+        }
+      }
+      if (pg.op === 'difference') {
+        group.differences.push(pg);
+        differences.push(pg);
+      } else if (pg.op === 'intersection') {
+        group.intersections.push(pg);
+        intersections.push(pg);
+      } else {
+        group.positives.push(pg);
+        positives.push(pg);
+      }
+    }
+
+    if (group.positives.length > 0) {
+      nodeGroups.push(group);
     }
 
     for (const ch of n.children ?? []) {
@@ -554,12 +647,13 @@ export function buildBodyRayScene(node: SceneNode, includeAllGeoms = false): Bod
     }
   };
 
-  const identity = new THREE.Matrix4();
-  collectFrom(node, identity, true, !includeAllGeoms);
+  const baseMat = rootMat ?? new THREE.Matrix4();
+  collectFrom(node, baseMat, true, !includeAllGeoms);
   if (positives.length === 0 && !includeAllGeoms) {
     differences.length = 0;
     intersections.length = 0;
-    collectFrom(node, identity, true, false);
+    nodeGroups.length = 0;
+    collectFrom(node, baseMat, true, false);
   }
   if (positives.length === 0) return null;
 
@@ -576,8 +670,46 @@ export function buildBodyRayScene(node: SceneNode, includeAllGeoms = false): Bod
     positives,
     differences,
     intersections,
+    nodeGroups,
     bounds: [x0, x1, y0, y1, z0, z1],
   };
+}
+
+function castGroupRay(
+  group: NodeRayCsgGroup,
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+): Interval1D[] {
+  const posRaw: Interval1D[] = [];
+  for (let i = 0; i < group.positives.length; i++) {
+    rayIntersectPreparedGeom(group.positives[i], ox, oy, oz, dx, dy, dz, posRaw);
+  }
+  let cur = normalizeIntervals(posRaw);
+  if (cur.length === 0) return cur;
+
+  if (group.differences.length > 0) {
+    const negRaw: Interval1D[] = [];
+    for (let i = 0; i < group.differences.length; i++) {
+      rayIntersectPreparedGeom(group.differences[i], ox, oy, oz, dx, dy, dz, negRaw);
+    }
+    if (negRaw.length > 0) {
+      cur = subtractIntervals(cur, normalizeIntervals(negRaw));
+      if (cur.length === 0) return cur;
+    }
+  }
+
+  for (let i = 0; i < group.intersections.length; i++) {
+    const intRaw: Interval1D[] = [];
+    rayIntersectPreparedGeom(group.intersections[i], ox, oy, oz, dx, dy, dz, intRaw);
+    cur = intersectIntervals(cur, normalizeIntervals(intRaw));
+    if (cur.length === 0) return cur;
+  }
+
+  return cur;
 }
 
 export function castSceneRay(
@@ -589,32 +721,18 @@ export function castSceneRay(
   dy: number,
   dz: number,
 ): Interval1D[] {
-  const posRaw: Interval1D[] = [];
-  for (let i = 0; i < scene.positives.length; i++) {
-    rayIntersectPreparedGeom(scene.positives[i], ox, oy, oz, dx, dy, dz, posRaw);
-  }
-  let cur = normalizeIntervals(posRaw);
-  if (cur.length === 0) return cur;
-
-  if (scene.differences.length > 0) {
-    const negRaw: Interval1D[] = [];
-    for (let i = 0; i < scene.differences.length; i++) {
-      rayIntersectPreparedGeom(scene.differences[i], ox, oy, oz, dx, dy, dz, negRaw);
+  if (scene.nodeGroups && scene.nodeGroups.length > 0) {
+    if (scene.nodeGroups.length === 1) {
+      return castGroupRay(scene.nodeGroups[0], ox, oy, oz, dx, dy, dz);
     }
-    if (negRaw.length > 0) {
-      cur = subtractIntervals(cur, normalizeIntervals(negRaw));
-      if (cur.length === 0) return cur;
+    const merged: Interval1D[] = [];
+    for (let g = 0; g < scene.nodeGroups.length; g++) {
+      const ivs = castGroupRay(scene.nodeGroups[g], ox, oy, oz, dx, dy, dz);
+      for (let k = 0; k < ivs.length; k++) merged.push(ivs[k]);
     }
+    return normalizeIntervals(merged);
   }
-
-  for (let i = 0; i < scene.intersections.length; i++) {
-    const intRaw: Interval1D[] = [];
-    rayIntersectPreparedGeom(scene.intersections[i], ox, oy, oz, dx, dy, dz, intRaw);
-    cur = intersectIntervals(cur, normalizeIntervals(intRaw));
-    if (cur.length === 0) return cur;
-  }
-
-  return cur;
+  return castGroupRay(scene, ox, oy, oz, dx, dy, dz);
 }
 
 // ---------------------------------------------------------------------------
@@ -862,9 +980,10 @@ function computeNodeGeomSignature(node: SceneNode): string {
     node.id,
     String(node.deformMaterial ?? ''),
     String(node.density ?? ''),
+    String(node.mass ?? ''),
     String(node.sculptVersion ?? 0),
     node.sculptEdited ? '1' : '0',
-    node.csgEnabled ? '1' : '0',
+    node.csgEnabled === false ? '0' : node.csgEnabled ? '1' : 'u',
     String(node.outerRadius ?? ''),
     String(node.innerRadius ?? ''),
     String(node.height ?? ''),
@@ -872,24 +991,42 @@ function computeNodeGeomSignature(node: SceneNode): string {
   const visit = (n: SceneNode, prefix: string) => {
     for (const g of n.geoms ?? []) {
       if (g.csgDerived || g.role === 'visual' || g.type === 'plane') continue;
-      const rv = g.renderVertices ?? g.vertices;
+      const rv = g.type === 'mesh' ? getZUpMeshVertices(g) : (g.renderVertices ?? g.vertices);
       let meshHash = '';
       if (rv && rv.length > 0) {
-        // Sample 16 evenly spaced coordinates + length + faces length so any sculpt/resize invalidates cache
-        const step = Math.max(1, Math.floor(rv.length / 16));
-        let acc = rv.length * 31 + (g.faces?.length ?? 0);
+        // Sample up to 256 coordinates + exact min/max AABB so local sculpt/dent/lattice strokes always invalidate cache!
+        const step = Math.max(1, Math.floor(rv.length / 256));
+        let acc = (rv.length * 31 + (g.faces?.length ?? 0)) | 0;
+        let minC = Infinity;
+        let maxC = -Infinity;
         for (let i = 0; i < rv.length; i += step) {
-          acc = (acc * 131 + Math.round(rv[i] * 1e5)) | 0;
+          const v = rv[i];
+          if (v < minC) minC = v;
+          if (v > maxC) maxC = v;
+          acc = (Math.imul(acc, 131) + Math.round(v * 1e5)) | 0;
         }
-        meshHash = `${rv.length}:${g.faces?.length ?? 0}:${acc}`;
+        // Also scan full coordinate min/max cheaply when mesh is <= 12k floats so sparse local brushes never hide
+        if (rv.length <= 12000 && step > 1) {
+          for (let i = 0; i < rv.length; i++) {
+            const v = rv[i];
+            if (v < minC) minC = v;
+            if (v > maxC) maxC = v;
+            if ((i & 31) === 0) acc = (Math.imul(acc, 33) + Math.round(v * 1e5)) | 0;
+          }
+        }
+        const spanTag = Number.isFinite(minC) ? `${Math.round(minC * 1e5)}:${Math.round(maxC * 1e5)}` : '0';
+        meshHash = `${rv.length}:${g.faces?.length ?? 0}:${acc}:${spanTag}`;
       }
       parts.push(
-        `${prefix}${g.name ?? ''}:${g.type}:${g.csg ?? 'u'}:${(g.size ?? []).join(',')}:${(g.pos ?? []).join(',')}:${(g.quat ?? []).join(',')}:${(g.euler ?? []).join(',')}:${(g.fromto ?? []).join(',')}:${meshHash}`,
+        `${prefix}${g.name ?? ''}:${g.type}:${g.csg ?? 'u'}:${(g.size ?? []).join(',')}:${(g.pos ?? []).join(',')}:${(g.quat ?? []).join(',')}:${(g.euler ?? []).join(',')}:${(g.fromto ?? []).join(',')}:${g.density ?? ''}:${g.mass ?? ''}:${g.contype ?? ''}:${g.conaffinity ?? ''}:${meshHash}`,
       );
     }
     for (const ch of n.children ?? []) {
-      if ((ch.joints?.length ?? 0) > 0 || ch.simulation || ch.acousticString) continue;
-      visit(ch, `${prefix}${ch.id}/${(ch.pos ?? []).join(',')}/`);
+      if ((ch.joints?.length ?? 0) > 0 || ch.simulation || ch.acousticString || ch.acousticMembrane) continue;
+      visit(
+        ch,
+        `${prefix}${ch.id}/${(ch.pos ?? []).join(',')}/${(ch.quat ?? []).join(',')}/${(ch.euler ?? []).join(',')}/${ch.deformMaterial ?? ''}:${ch.density ?? ''}:${ch.csgEnabled === false ? '0' : '1'}/`,
+      );
     }
   };
   visit(node, '');
@@ -1032,12 +1169,54 @@ function sliceSceneAlongAxis(
   };
 }
 
+function detectSingleSolidPrincipalPose(node: SceneNode): THREE.Matrix4 | null {
+  let singlePos: SceneGeom | null = null;
+  let hasWeldedChildSolid = false;
+  for (const ch of node.children ?? []) {
+    if ((ch.joints?.length ?? 0) > 0 || ch.simulation || ch.acousticString || ch.acousticMembrane) continue;
+    if ((ch.geoms ?? []).some((g) => !g.csgDerived && g.role !== 'visual' && g.type !== 'plane' && g.csg !== 'difference')) {
+      hasWeldedChildSolid = true;
+      break;
+    }
+  }
+  if (hasWeldedChildSolid) return null;
+
+  const allowCsg = node.csgEnabled !== false;
+  const sourceGeoms = (node.geoms ?? []).filter((g) => !g.csgDerived && g.role !== 'visual' && g.type !== 'plane');
+  for (const g of sourceGeoms) {
+    const op = allowCsg ? g.csg : undefined;
+    if (op === 'difference' || op === 'intersection') continue;
+    if (singlePos) return null; // Multiple unioned solids -> analyze in shared body frame
+    singlePos = g;
+  }
+  if (!singlePos) return null;
+
+  let mat: THREE.Matrix4;
+  if ((singlePos.type === 'cylinder' || singlePos.type === 'capsule') && singlePos.fromto && singlePos.fromto.length >= 6) {
+    mat = fromtoFrame(singlePos.fromto).matrix;
+  } else if (singlePos.quat || singlePos.euler) {
+    mat = geomMatrixOf(singlePos);
+  } else {
+    return null;
+  }
+
+  // Only switch to oriented principal frame when rotation is NOT already a clean 90° axis permutation!
+  const e = mat.elements;
+  const c0Max = Math.max(Math.abs(e[0]), Math.abs(e[1]), Math.abs(e[2]));
+  const c1Max = Math.max(Math.abs(e[4]), Math.abs(e[5]), Math.abs(e[6]));
+  const c2Max = Math.max(Math.abs(e[8]), Math.abs(e[9]), Math.abs(e[10]));
+  if (c0Max > 0.9995 && c1Max > 0.9995 && c2Max > 0.9995) return null;
+  return mat;
+}
+
 export function analyze3DSolidCrossSections(node: SceneNode): Solid3DSectionAnalysis {
   const sig = computeNodeGeomSignature(node);
   const cached = sectionCache.get(sig);
   if (cached) return cached;
 
-  const scene = buildBodyRayScene(node);
+  const principalPose = detectSingleSolidPrincipalPose(node);
+  const invPrincipal = principalPose ? principalPose.clone().invert() : undefined;
+  const scene = buildBodyRayScene(node, false, invPrincipal);
   if (!scene) {
     const fallback: Solid3DSectionAnalysis = {
       dimsSortedAsc: [0.02, 0.04, 0.08],
@@ -1059,9 +1238,9 @@ export function analyze3DSolidCrossSections(node: SceneNode): Solid3DSectionAnal
 
   const [bx0, bx1, by0, by1, bz0, bz1] = scene.bounds;
   const rawLens: { len: number; axis: 0 | 1 | 2; lo: number; hi: number }[] = [
-    { len: Math.max(0.001, bx1 - bx0), axis: 0, lo: bx0, hi: bx1 },
-    { len: Math.max(0.001, by1 - by0), axis: 1, lo: by0, hi: by1 },
-    { len: Math.max(0.001, bz1 - bz0), axis: 2, lo: bz0, hi: bz1 },
+    { len: Math.max(0.0001, bx1 - bx0), axis: 0, lo: bx0, hi: bx1 },
+    { len: Math.max(0.0001, by1 - by0), axis: 1, lo: by0, hi: by1 },
+    { len: Math.max(0.0001, bz1 - bz0), axis: 2, lo: bz0, hi: bz1 },
   ];
   rawLens.sort((a, b) => a.len - b.len);
   let thickAxis = rawLens[0].axis;
@@ -1086,7 +1265,7 @@ export function analyze3DSolidCrossSections(node: SceneNode): Solid3DSectionAnal
 
   let realLen = Number.isFinite(pass.actualSMax) ? Math.max(0.002, pass.actualSMax - pass.actualSMin) : rawLens[2].len;
   let realWidth = Number.isFinite(pass.actualWMax) ? Math.max(0.002, pass.actualWMax - pass.actualWMin) : rawLens[1].len;
-  let realThick = Number.isFinite(pass.actualTMax) ? Math.max(0.001, pass.actualTMax - pass.actualTMin) : rawLens[0].len;
+  let realThick = Number.isFinite(pass.actualTMax) ? Math.max(0.0001, pass.actualTMax - pass.actualTMin) : rawLens[0].len;
 
   // If a boolean cut trimmed the former longest axis shorter than another axis, re-orient to the true post-cut axes!
   const trimmedSpan = (pass.actualSMax - pass.actualSMin) / Math.max(1e-6, rawLens[2].len);
@@ -1113,7 +1292,7 @@ export function analyze3DSolidCrossSections(node: SceneNode): Solid3DSectionAnal
     );
     realLen = Number.isFinite(pass.actualSMax) ? Math.max(0.002, pass.actualSMax - pass.actualSMin) : postAxes[2].len;
     realWidth = Number.isFinite(pass.actualWMax) ? Math.max(0.002, pass.actualWMax - pass.actualWMin) : postAxes[1].len;
-    realThick = Number.isFinite(pass.actualTMax) ? Math.max(0.001, pass.actualTMax - pass.actualTMin) : postAxes[0].len;
+    realThick = Number.isFinite(pass.actualTMax) ? Math.max(0.0001, pass.actualTMax - pass.actualTMin) : postAxes[0].len;
   }
 
   // Secondary slice along widthAxis for 2D plate / shell mode coupling
@@ -1138,6 +1317,18 @@ export function analyze3DSolidCrossSections(node: SceneNode): Solid3DSectionAnal
   const dimsSortedAsc: [number, number, number] = [realThick, realWidth, realLen];
   const axisOrderAsc: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2] = [thickAxis, widthAxis, lenAxis];
 
+  let principalLenDir: [number, number, number] | undefined;
+  let principalOrigin: [number, number, number] | undefined;
+  if (principalPose) {
+    const pe = principalPose.elements;
+    const dx = pe[4 * lenAxis];
+    const dy = pe[4 * lenAxis + 1];
+    const dz = pe[4 * lenAxis + 2];
+    const dNorm = Math.hypot(dx, dy, dz) || 1;
+    principalLenDir = [dx / dNorm, dy / dNorm, dz / dNorm];
+    principalOrigin = [pe[12], pe[13], pe[14]];
+  }
+
   const hollowFraction = pass.hitRays > 0 ? pass.hollowRays / pass.hitRays : 0;
   const meanWallThicknessM = pass.wallSegmentCount > 0
     ? pass.wallThicknessSum / pass.wallSegmentCount
@@ -1155,6 +1346,7 @@ export function analyze3DSolidCrossSections(node: SceneNode): Solid3DSectionAnal
     axisOrderAsc,
     lenBounds: [sLo, sHi],
     widthBounds: [wLo, wHi],
+    ...(principalLenDir ? { principalLenDir, principalOrigin } : {}),
     solidVolumeM3: Math.max(1e-10, pass.volume),
     hollowFraction,
     meanWallThicknessM,
@@ -1218,7 +1410,12 @@ function refinePortPatch(
 
   const dir: [number, number, number] = [0, 0, 0];
   dir[normalAxis] = 1;
+  const uDir: [number, number, number] = [0, 0, 0];
+  uDir[uAxis] = 1;
+  const vDir: [number, number, number] = [0, 0, 0];
+  vDir[vAxis] = 1;
   const org: [number, number, number] = [0, 0, 0];
+  const latOrg: [number, number, number] = [0, 0, 0];
 
   let openCount = 0;
   let rimWallSum = 0;
@@ -1245,9 +1442,22 @@ function refinePortPatch(
       if (!wallOnSide) {
         // Verify this ray actually passes over the interior laterally (not outside the body's perimeter!)
         if (u >= uMin - marginU * 0.5 && u <= uMax + marginU * 0.5 && v >= vMin - marginV * 0.5 && v <= vMax + marginV * 0.5) {
-          // Confirm at least the opposite wall exists on this ray (so we're over the box, not past its outer edge)
           if (ivs.length >= 1) {
             openCount++;
+          } else {
+            // Through-all cut (`cutDepth: 0`) or aligned opposite ports: verify lateral cavity walls bracket (u, v) at cavityMidNormalCoord!
+            latOrg[normalAxis] = cavityMidNormalCoord;
+            latOrg[uAxis] = 0;
+            latOrg[vAxis] = v;
+            const uIvs = castSceneRay(scene, latOrg[0], latOrg[1], latOrg[2], uDir[0], uDir[1], uDir[2]);
+            if (bracketedBySolidWalls(uIvs, u)) {
+              openCount++;
+            } else {
+              latOrg[uAxis] = u;
+              latOrg[vAxis] = 0;
+              const vIvs = castSceneRay(scene, latOrg[0], latOrg[1], latOrg[2], vDir[0], vDir[1], vDir[2]);
+              if (bracketedBySolidWalls(vIvs, v)) openCount++;
+            }
           }
         }
       } else {
@@ -1267,7 +1477,12 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
   const cached = cavityCache.get(sig);
   if (cached) return cached;
 
-  const scene = buildBodyRayScene(node, true);
+  // Bound the cavity voxel grid and plate spans on the colliding shell corpus when present so external
+  // non-colliding appendages (cello necks, pegboxes, standing bridges, tailpieces) never inflate corpus dimensions!
+  const shellOnly = buildBodyRayScene(node, false);
+  const scene = shellOnly
+    ? (buildBodyRayScene(node, true, undefined, shellOnly.bounds) ?? shellOnly)
+    : buildBodyRayScene(node, true);
   if (!scene) {
     return {
       hasHollowCavity: false,
@@ -1281,10 +1496,12 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
       ports: [],
       totalConductanceM: 0,
       openAreaFraction: 0,
+      cavityRegime: 'sealed',
+      airResonanceHz: null,
     };
   }
 
-  const [x0, x1, y0, y1, z0, z1] = scene.bounds;
+  const [x0, x1, y0, y1, z0, z1] = shellOnly ? shellOnly.bounds : scene.bounds;
   const dxSpan = Math.max(0.002, x1 - x0);
   const dySpan = Math.max(0.002, y1 - y0);
   const dzSpan = Math.max(0.002, z1 - z0);
@@ -1398,7 +1615,47 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
   }
 
   const meanWallThicknessM = allWallCount > 0 ? allWallSum / allWallCount : Math.min(dxSpan, dySpan, dzSpan) * 0.08;
-  const topPlateThicknessM = topWallCount > 0 ? topWallSum / topWallCount : meanWallThicknessM;
+  // Measure `topPlateThicknessM` strictly from the solid wall segment immediately bounding the +Z roof of `state === 2`
+  // cavity voxels so hovering bridges, fingerboards, or tailpieces never pollute soundboard thickness!
+  let cavRoofSum = 0;
+  let cavRoofCount = 0;
+  const cavAxisMin: [number, number, number] = [Infinity, Infinity, Infinity];
+  const cavAxisMax: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let ix = 0; ix < nx; ix++) {
+    const xLo = x0 + ix * hx, xHi = xLo + hx;
+    for (let iy = 0; iy < ny; iy++) {
+      const yLo = y0 + iy * hy, yHi = yLo + hy;
+      let topCavIz = -1;
+      for (let iz = 0; iz < nz; iz++) {
+        if (state[idxOf(ix, iy, iz)] === 2) {
+          topCavIz = iz;
+          const zLo = z0 + iz * hz, zHi = zLo + hz;
+          if (xLo < cavAxisMin[0]) cavAxisMin[0] = xLo;
+          if (xHi > cavAxisMax[0]) cavAxisMax[0] = xHi;
+          if (yLo < cavAxisMin[1]) cavAxisMin[1] = yLo;
+          if (yHi > cavAxisMax[1]) cavAxisMax[1] = yHi;
+          if (zLo < cavAxisMin[2]) cavAxisMin[2] = zLo;
+          if (zHi > cavAxisMax[2]) cavAxisMax[2] = zHi;
+        }
+      }
+      if (topCavIz >= 0) {
+        const zCavTop = z0 + (topCavIz + 0.5) * hz;
+        const zr = zRays[ix * ny + iy];
+        for (let s = 0; s < zr.length; s++) {
+          if (zr[s][1] > zCavTop + 1e-6 && zr[s][0] >= zCavTop - hz) {
+            cavRoofSum += zr[s][1] - zr[s][0];
+            cavRoofCount++;
+            break;
+          }
+        }
+      }
+    }
+  }
+  const topPlateThicknessM = cavRoofCount > 0
+    ? cavRoofSum / cavRoofCount
+    : topWallCount > 0
+      ? topWallSum / topWallCount
+      : meanWallThicknessM;
   const solidVolumeM3 = solidCount * voxelVol;
 
   const sortedSpans = [dxSpan, dySpan, dzSpan].sort((a, b) => a - b);
@@ -1418,6 +1675,8 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
       ports: [],
       totalConductanceM: 0,
       openAreaFraction: 0,
+      cavityRegime: 'sealed',
+      airResonanceHz: null,
     };
     cavityCache.set(sig, none);
     return none;
@@ -1566,6 +1825,8 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
         eqRadiusM,
         neckLengthM,
         conductanceM,
+        normalAxis: nAxis,
+        sideSign,
       });
       portNeckVolTotal += areaM2 * neckLengthM;
     }
@@ -1581,50 +1842,105 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
       // Small narrow cutter (not the main chamber void itself!)
       if (maxDim < Math.max(dxSpan, dySpan, dzSpan) * 0.35 && minDim > 0.0015) {
         const cx = 0.5 * (b[0] + b[1]), cy = 0.5 * (b[2] + b[3]), cz = 0.5 * (b[4] + b[5]);
-        // Pick axis along which cutter is farthest from cavity center
+        // Pick axis along which cutter is farthest from cavity center (or longest through-cut axis when centered!)
         const rel: [number, number, number] = [
           Math.abs(cx - cavMid[0]) / dxSpan,
           Math.abs(cy - cavMid[1]) / dySpan,
           Math.abs(cz - cavMid[2]) / dzSpan,
         ];
-        const pAxis = (rel[2] >= rel[0] && rel[2] >= rel[1] ? 2 : rel[1] >= rel[0] ? 1 : 0) as 0 | 1 | 2;
-        const sideSign = ([cx, cy, cz][pAxis] >= cavMid[pAxis] ? 1 : -1) as 1 | -1;
+        const maxRel = Math.max(rel[0], rel[1], rel[2]);
+        const pAxis: 0 | 1 | 2 = maxRel > 0.08
+          ? (rel[2] >= rel[0] && rel[2] >= rel[1] ? 2 : rel[1] >= rel[0] ? 1 : 0)
+          : (wZ >= wX && wZ >= wY ? 2 : wY >= wX ? 1 : 0);
         const uAx = ((pAxis + 1) % 3) as 0 | 1 | 2;
         const vAx = ((pAxis + 2) % 3) as 0 | 1 | 2;
-        const refined = refinePortPatch(
-          scene,
-          pAxis,
-          sideSign,
-          b[2 * uAx],
-          b[2 * uAx + 1],
-          b[2 * vAx],
-          b[2 * vAx + 1],
-          cavMid[pAxis],
-          meanWallThicknessM,
-        );
-        if (refined.areaM2 > 3e-6) {
-          const eqRadiusM = Math.sqrt(refined.areaM2 / Math.PI);
-          const neckLengthM = Math.max(0.0012, refined.neckLengthM);
-          ports.push({
-            areaM2: refined.areaM2,
-            eqRadiusM,
-            neckLengthM,
-            conductanceM: refined.areaM2 / (neckLengthM + 1.7 * eqRadiusM),
-          });
-          portNeckVolTotal += refined.areaM2 * neckLengthM;
+        // A through-cut (`cutDepth: 0`) centered on `cavMid` can pierce BOTH +1 and -1 faces!
+        const candidateSigns: (1 | -1)[] = [];
+        if (b[2 * pAxis + 1] > cavAxisMax[pAxis] - 1e-4) candidateSigns.push(1);
+        if (b[2 * pAxis] < cavAxisMin[pAxis] + 1e-4) candidateSigns.push(-1);
+        if (candidateSigns.length === 0) {
+          candidateSigns.push(([cx, cy, cz][pAxis] >= cavMid[pAxis] ? 1 : -1) as 1 | -1);
+        }
+        for (const sideSign of candidateSigns) {
+          const refined = refinePortPatch(
+            scene,
+            pAxis,
+            sideSign,
+            b[2 * uAx],
+            b[2 * uAx + 1],
+            b[2 * vAx],
+            b[2 * vAx + 1],
+            cavMid[pAxis],
+            meanWallThicknessM,
+          );
+          if (refined.areaM2 > 3e-6) {
+            const eqRadiusM = Math.sqrt(refined.areaM2 / Math.PI);
+            const neckLengthM = Math.max(0.0012, refined.neckLengthM);
+            ports.push({
+              areaM2: refined.areaM2,
+              eqRadiusM,
+              neckLengthM,
+              conductanceM: refined.areaM2 / (neckLengthM + 1.7 * eqRadiusM),
+              normalAxis: pAxis,
+              sideSign,
+            });
+            portNeckVolTotal += refined.areaM2 * neckLengthM;
+          }
         }
       }
     }
   }
 
   ports.sort((a, b) => b.areaM2 - a.areaM2);
-  const cavityVolumeM3 = Math.max(0, enclosedCount * voxelVol - portNeckVolTotal);
+  let cavityVolumeM3 = Math.max(0, enclosedCount * voxelVol - portNeckVolTotal);
   const openAreaFraction = totalSurfaceArea > 1e-9 ? totalOpenFaceArea / totalSurfaceArea : 0;
-  // If > 22% of total cavity surface is wide open (an entire missing roof/side), it's an open cup/trough/shell, not a Helmholtz neck!
-  const isOpenCupOrShell = openAreaFraction > 0.22;
-  const totalConductanceM = isOpenCupOrShell
-    ? 0
-    : ports.reduce((acc, p) => acc + p.conductanceM, 0);
+
+  // Detect unconstricted open standing-wave tubes (λ/4 closed-bottom or λ/2 open-open) so wide-open tube mouths
+  // are never plugged into lumped flanged-neck Helmholtz conductance (which would overpredict pitch by ~2x / 1 octave)!
+  let cavityRegime: Cavity3DAnalysis['cavityRegime'] = ports.length === 0 ? 'sealed' : 'helmholtz';
+  let tubeResonanceHz: number | null = null;
+  if (ports.length === 1 || ports.length === 2) {
+    const p0 = ports[0];
+    const tAxis = p0.normalAxis;
+    const sameAxisOpposite =
+      ports.length === 1 ||
+      (ports[1].normalAxis === tAxis && ports[1].sideSign !== undefined && p0.sideSign !== ports[1].sideSign);
+    if (tAxis !== undefined && sameAxisOpposite && Number.isFinite(cavAxisMax[tAxis])) {
+      // Unconstricted open tube: interior air column includes the open mouth voxel layer
+      const rawCavVol = enclosedCount * voxelVol;
+      const axialLenM = Math.max(0.005, cavAxisMax[tAxis] - cavAxisMin[tAxis]);
+      const meanCrossAreaM2 = rawCavVol / axialLenM;
+      const eqBoreDiamM = 2 * Math.sqrt(Math.max(1e-9, meanCrossAreaM2) / Math.PI);
+      if (axialLenM >= 1.45 * eqBoreDiamM && p0.areaM2 >= 0.55 * meanCrossAreaM2) {
+        cavityVolumeM3 = rawCavVol;
+        if (ports.length === 1) {
+          cavityRegime = 'quarter_wave_tube';
+          tubeResonanceHz = 343.0 / (4 * (axialLenM + 0.6133 * p0.eqRadiusM));
+        } else {
+          cavityRegime = 'half_wave_tube';
+          const rMean = 0.5 * (p0.eqRadiusM + ports[1].eqRadiusM);
+          tubeResonanceHz = 343.0 / (2 * (axialLenM + 2 * 0.6133 * rMean));
+        }
+      }
+    }
+  }
+
+  // If > 22% of total cavity surface is wide open AND it is not an elongated standing-wave tube, it's an open cup/trough/shell!
+  const isOpenCupOrShell = tubeResonanceHz === null && openAreaFraction > 0.22;
+  if (isOpenCupOrShell) cavityRegime = 'open_shell';
+
+  let totalConductanceM = 0;
+  let airResonanceHz: number | null = null;
+  if (!isOpenCupOrShell && cavityVolumeM3 > 1e-6) {
+    if (tubeResonanceHz !== null) {
+      airResonanceHz = +tubeResonanceHz.toFixed(2);
+      // Equivalent conductance so existing `(343 / 2π) * sqrt(G / V)` callers resolve the exact λ/4 or λ/2 standing-wave pitch!
+      totalConductanceM = cavityVolumeM3 * Math.pow((2 * Math.PI * tubeResonanceHz) / 343.0, 2);
+    } else if (ports.length > 0) {
+      totalConductanceM = ports.reduce((acc, p) => acc + p.conductanceM, 0);
+      airResonanceHz = +((343.0 / (2 * Math.PI)) * Math.sqrt(totalConductanceM / cavityVolumeM3)).toFixed(2);
+    }
+  }
 
   const result: Cavity3DAnalysis = {
     hasHollowCavity: cavityVolumeM3 > 1e-6,
@@ -1638,6 +1954,8 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
     ports: isOpenCupOrShell ? [] : ports,
     totalConductanceM,
     openAreaFraction,
+    cavityRegime,
+    airResonanceHz,
   };
 
   if (cavityCache.size > 256) {
@@ -1714,7 +2032,9 @@ export function simulate3DVibroAcousticIR(
     hostSig,
     `${hostMat.modulusGPa.toFixed(3)}:${hostMat.density.toFixed(0)}:${hostMat.qualityQ.toFixed(0)}`,
     bridgeSig,
-    bridgeNode ? `${bxOff.toFixed(3)},${byOff.toFixed(3)},${bzOff.toFixed(3)}` : '',
+    bridgeNode
+      ? `${bxOff.toFixed(3)},${byOff.toFixed(3)},${bzOff.toFixed(3)}:${(bridgeNode.quat ?? []).join(',')}:${(bridgeNode.euler ?? []).join(',')}`
+      : '',
     bridgeMat ? `${bridgeMat.modulusGPa.toFixed(3)}:${bridgeMat.density.toFixed(0)}:${bridgeMat.qualityQ.toFixed(0)}` : '',
     dpKey,
   ].join('|');
@@ -1724,43 +2044,58 @@ export function simulate3DVibroAcousticIR(
 
   const hostScene = buildBodyRayScene(hostNode, false) ?? buildBodyRayScene(hostNode, true);
   if (!hostScene) return null;
-  const bridgeScene = bridgeNode ? buildBodyRayScene(bridgeNode, true) : null;
+  const bridgePoseMat = bridgeNode
+    ? geomMatrixOf({
+        name: '',
+        type: 'box',
+        size: [1, 1, 1],
+        pos: bridgeNode.pos,
+        quat: bridgeNode.quat,
+        euler: bridgeNode.euler,
+      })
+    : undefined;
+  const bridgeScene = bridgeNode ? buildBodyRayScene(bridgeNode, true, bridgePoseMat) : null;
   const cav = analyze3DCavityAndPorts(hostNode);
 
   // Collect internal welded structural bracing (e.g. Spruce Soundpost & Bass Bar inside a cello corpus)
   // whose bounds overlap `hostScene.bounds` so CSG cavity differences don't subtract out internal bracing!
   const [hx0, hx1, hy0, hy1, hz0, hz1] = hostScene.bounds;
-  const internalBraceScenes: { scene: BodyRayScene; ox: number; oy: number; oz: number }[] = [];
+  const internalBraceScenes: BodyRayScene[] = [];
   for (const ch of hostNode.children ?? []) {
-    if (ch === bridgeNode || ch.acousticString || (ch.joints?.length ?? 0) > 0) continue;
-    const ox = ch.pos?.[0] ?? 0;
-    const oy = ch.pos?.[1] ?? 0;
-    const oz = ch.pos?.[2] ?? 0;
-    const cs = buildBodyRayScene(ch, true);
+    if (ch === bridgeNode || ch.acousticString || ch.acousticMembrane || (ch.joints?.length ?? 0) > 0) continue;
+    const chMat = geomMatrixOf({
+      name: '',
+      type: 'box',
+      size: [1, 1, 1],
+      pos: ch.pos,
+      quat: ch.quat,
+      euler: ch.euler,
+    });
+    const cs = buildBodyRayScene(ch, true, chMat);
     if (!cs) continue;
     const cb = cs.bounds;
     // Only include internal/surface bracing largely inside the corpus XYZ footprint (skip external necks/tailpieces)
     if (
-      cb[0] + ox >= hx0 - 0.02 &&
-      cb[1] + ox <= hx1 + 0.02 &&
-      cb[2] + oy >= hy0 - 0.02 &&
-      cb[3] + oy <= hy1 + 0.02 &&
-      cb[4] + oz >= hz0 - 0.015 &&
-      cb[5] + oz <= hz1 + 0.015
+      cb[0] >= hx0 - 0.02 &&
+      cb[1] <= hx1 + 0.02 &&
+      cb[2] >= hy0 - 0.02 &&
+      cb[3] <= hy1 + 0.02 &&
+      cb[4] >= hz0 - 0.015 &&
+      cb[5] <= hz1 + 0.015
     ) {
-      internalBraceScenes.push({ scene: cs, ox, oy, oz });
+      internalBraceScenes.push(cs);
     }
   }
 
   let [x0, x1, y0, y1, z0, z1] = hostScene.bounds;
   if (bridgeScene) {
     const bb = bridgeScene.bounds;
-    x0 = Math.min(x0, bb[0] + bxOff);
-    x1 = Math.max(x1, bb[1] + bxOff);
-    y0 = Math.min(y0, bb[2] + byOff);
-    y1 = Math.max(y1, bb[3] + byOff);
-    z0 = Math.min(z0, bb[4] + bzOff);
-    z1 = Math.max(z1, bb[5] + bzOff);
+    x0 = Math.min(x0, bb[0]);
+    x1 = Math.max(x1, bb[1]);
+    y0 = Math.min(y0, bb[2]);
+    y1 = Math.max(y1, bb[3]);
+    z0 = Math.min(z0, bb[4]);
+    z1 = Math.max(z1, bb[5]);
   }
 
   const spanX = Math.max(0.03, x1 - x0);
@@ -1802,7 +2137,7 @@ export function simulate3DVibroAcousticIR(
   const cellType = new Uint8Array(nCells);
   const cellWallThick = new Float32Array(nCells);
 
-  // Pre-cast orthogonal ray pencils across the grid centers
+  // Pre-cast orthogonal ray pencils across the grid centers (`bridgeScene` and `internalBraceScenes` already carry full pose matrices!)
   const zHostRays: Interval1D[][] = new Array(nx * ny);
   const zBridgeRays: Interval1D[][] = new Array(nx * ny);
   for (let ix = 0; ix < nx; ix++) {
@@ -1811,7 +2146,7 @@ export function simulate3DVibroAcousticIR(
       const cy = gy0 + (iy + 0.5) * h;
       zHostRays[ix * ny + iy] = castSceneRay(hostScene, cx, cy, 0, 0, 0, 1);
       zBridgeRays[ix * ny + iy] = bridgeScene
-        ? castSceneRay(bridgeScene, cx - bxOff, cy - byOff, 0, 0, 0, 1).map(([a, b]) => [a + bzOff, b + bzOff])
+        ? castSceneRay(bridgeScene, cx, cy, 0, 0, 0, 1)
         : [];
     }
   }
@@ -1824,7 +2159,7 @@ export function simulate3DVibroAcousticIR(
       const cz = gz0 + (iz + 0.5) * h;
       xHostRays[iy * nz + iz] = castSceneRay(hostScene, 0, cy, cz, 1, 0, 0);
       xBridgeRays[iy * nz + iz] = bridgeScene
-        ? castSceneRay(bridgeScene, 0, cy - byOff, cz - bzOff, 1, 0, 0).map(([a, b]) => [a + bxOff, b + bxOff])
+        ? castSceneRay(bridgeScene, 0, cy, cz, 1, 0, 0)
         : [];
     }
   }
@@ -1837,7 +2172,7 @@ export function simulate3DVibroAcousticIR(
       const cz = gz0 + (iz + 0.5) * h;
       yHostRays[ix * nz + iz] = castSceneRay(hostScene, cx, 0, cz, 0, 1, 0);
       yBridgeRays[ix * nz + iz] = bridgeScene
-        ? castSceneRay(bridgeScene, cx - bxOff, 0, cz - bzOff, 0, 1, 0).map(([a, b]) => [a + byOff, b + byOff])
+        ? castSceneRay(bridgeScene, cx, 0, cz, 0, 1, 0)
         : [];
     }
   }
@@ -1874,11 +2209,11 @@ export function simulate3DVibroAcousticIR(
         let hitBrace = false;
         for (let bi = 0; bi < internalBraceScenes.length; bi++) {
           const br = internalBraceScenes[bi];
-          const zIvs = castSceneRay(br.scene, cx - br.ox, cy - br.oy, 0, 0, 0, 1).map(([a, b]): Interval1D => [a + br.oz, b + br.oz]);
+          const zIvs = castSceneRay(br, cx, cy, 0, 0, 0, 1);
           const zH = intervalsTouchCell(zIvs, cz, h);
           if (!zH.hit) continue;
-          const xIvs = castSceneRay(br.scene, 0, cy - br.oy, cz - br.oz, 1, 0, 0).map(([a, b]): Interval1D => [a + br.ox, b + br.ox]);
-          const yIvs = castSceneRay(br.scene, cx - br.ox, 0, cz - br.oz, 0, 1, 0).map(([a, b]): Interval1D => [a + br.oy, b + br.oy]);
+          const xIvs = castSceneRay(br, 0, cy, cz, 1, 0, 0);
+          const yIvs = castSceneRay(br, cx, 0, cz, 0, 1, 0);
           const xH = intervalsTouchCell(xIvs, cx, h);
           const yH = intervalsTouchCell(yIvs, cy, h);
           if (xH.hit || yH.hit || zH.chordM > 0.02) {
@@ -1933,16 +2268,42 @@ export function simulate3DVibroAcousticIR(
         }
       }
     }
-    // Fallback if narrow slit fell between coarse grid centers: open `portCount` cells around negative CSG centers or cavity top
+    // Fallback if narrow slit fell between coarse grid centers: open cells along top-plate negative CSG port cutters
+    // (sorted by proximity to the +Z top plate so interior main-chamber voids at z ≈ 0 never masquerade as soundholes!)
     if (portCandidates.length === 0) {
-      const diffGeoms = (hostNode.geoms ?? []).filter((g) => g.csg === 'difference' && g.pos);
-      const seeds: [number, number][] =
-        diffGeoms.length > 0
-          ? diffGeoms
-              .filter((g) => (g.pos?.[2] ?? 0) > midZ)
-              .slice(0, cav.ports.length)
-              .map((g) => [g.pos![0], g.pos![1]])
-          : [[0.5 * (x0 + x1), 0.5 * (y0 + y1)]];
+      const topPlateCutters = (hostNode.geoms ?? [])
+        .filter((g) => g.csg === 'difference' && g.pos && g.pos[2] > midZ + 0.18 * spanZ)
+        .sort((a, b) => (b.pos![2] ?? 0) - (a.pos![2] ?? 0))
+        .slice(0, Math.max(1, cav.ports.length));
+      const seedSet = new Set<string>();
+      const seeds: [number, number][] = [];
+      const addSeedCell = (px: number, py: number) => {
+        const ix = Math.max(2, Math.min(nx - 3, Math.floor((px - gx0) / h)));
+        const iy = Math.max(2, Math.min(ny - 3, Math.floor((py - gy0) / h)));
+        const key = `${ix},${iy}`;
+        if (!seedSet.has(key)) {
+          seedSet.add(key);
+          seeds.push([gx0 + (ix + 0.5) * h, gy0 + (iy + 0.5) * h]);
+        }
+      };
+      if (topPlateCutters.length > 0) {
+        for (const g of topPlateCutters) {
+          const px = g.pos![0];
+          const py = g.pos![1];
+          const halfSlotY = g.type === 'box' ? (g.size[1] ?? 0) : (g.size[0] ?? 0);
+          if (halfSlotY > 0.75 * h) {
+            const nPts = Math.max(3, Math.ceil((2 * halfSlotY) / h) + 1);
+            for (let k = 0; k < nPts; k++) {
+              const yk = py - halfSlotY + (2 * halfSlotY * k) / (nPts - 1);
+              addSeedCell(px, yk);
+            }
+          } else {
+            addSeedCell(px, py);
+          }
+        }
+      } else {
+        addSeedCell(0.5 * (x0 + x1), 0.5 * (y0 + y1));
+      }
       for (const [px, py] of seeds) {
         const ix = Math.max(2, Math.min(nx - 3, Math.floor((px - gx0) / h)));
         const iy = Math.max(2, Math.min(ny - 3, Math.floor((py - gy0) / h)));
@@ -1956,7 +2317,14 @@ export function simulate3DVibroAcousticIR(
       }
     }
     if (portCandidates.length > 0) {
-      const perCellAper = Math.max(0.08, Math.min(1.15, totalPortArea / (portCandidates.length * h * h)));
+      // Match discrete 3D FDTD throat conductance `G_fdtd = nPortCols * perCellAper * h / mzSeries`
+      // to physical `cav.totalConductanceM` so narrow f-holes radiate true ~98 Hz Helmholtz bloom without choked-throat 1 kHz pipe ringing!
+      const colSet = new Set<number>();
+      for (const pc of portCandidates) colSet.add(Math.floor(pc / strideY));
+      const nPortCols = Math.max(1, colSet.size);
+      const mzSeries = Math.max(1, portCandidates.length / nPortCols) + 1;
+      const targetG = cav.totalConductanceM > 0 ? cav.totalConductanceM : totalPortArea / Math.max(0.01, h);
+      const perCellAper = Math.max(0.08, Math.min(1.15, (mzSeries * targetG) / (nPortCols * h)));
       for (const pc of portCandidates) {
         faceApertureZ[pc] = perCellAper;
         if (pc - 1 >= 0) faceApertureZ[pc - 1] = perCellAper;
@@ -2182,9 +2550,14 @@ export function simulate3DVibroAcousticIR(
   let hpBridgeState = 0;
   let velPotMic = 0;
 
-  // Band-limited 6-sample raised-cosine impulse (unit 1e-3 N·s momentum kick)
-  const pulseLen = 6;
+  // Band-limited 0.25 ms raised-cosine impulse (6 samples @ 24 kHz, 12 samples @ 48 kHz; unit 1e-3 N·s momentum kick)
+  const rateScale = 24000 / simRate;
+  const pulseLen = Math.max(6, Math.round(6 * (simRate / 24000)));
   const pulseAmp = (1.0e-3 / dt) * (2 / pulseLen);
+  const velPotPole = Math.pow(0.985, rateScale);
+  const accelRateScale = simRate / 24000;
+  const hpBridgeAlpha = 1 - Math.pow(1 - 0.24, rateScale);
+  const sheenStartStep = pulseLen + Math.round(2 * accelRateScale);
 
   for (let step = 0; step < nSteps; step++) {
     // 1. Save boundary pressure for 1st-order Sommerfeld/Mur radiation absorption
@@ -2302,38 +2675,41 @@ export function simulate3DVibroAcousticIR(
       pMic += p[micCells[m]];
     }
     pMic *= invMicCount;
-    velPotMic = 0.985 * velPotMic + pMic * (2 * Math.PI * 320 * dt);
+    velPotMic = velPotPole * velPotMic + pMic * (2 * Math.PI * 320 * dt);
 
     let bVel = 0;
     for (let i = 0; i < pickupSolidNodes.length; i++) {
       bVel += vu[pickupSolidNodes[i]];
     }
     bVel *= driveShare;
-    const bAccel = bVel - prevBridgeVel;
+    const bAccel = (bVel - prevBridgeVel) * accelRateScale;
     prevBridgeVel = bVel;
-    hpBridgeState += 0.24 * (bAccel - hpBridgeState);
-    const highFreqSheen = step >= pulseLen + 2 ? bAccel - hpBridgeState : 0;
+    hpBridgeState += hpBridgeAlpha * (bAccel - hpBridgeState);
+    const highFreqSheen = step >= sheenStartStep ? bAccel - hpBridgeState : 0;
 
-    irAir[step] = 0.42 * pMic + 0.78 * velPotMic;
+    irAir[step] = cav.hasHollowCavity ? 0.25 * pMic + 0.94 * velPotMic : 0.42 * pMic + 0.78 * velPotMic;
     irSolid[step] = highFreqSheen;
   }
 
-  // Post-process both radiated air pressure & free solid/bridge modes separately
+  // Post-process both radiated air pressure & free solid/bridge modes separately (sample-rate-consistent poles & 16 ms fade)
   let dcAx = 0, dcAy = 0;
   let dcSx = 0, dcSy = 0;
   let sumSqAir = 0;
   let sumSqSolid = 0;
-  const tailStart = nSteps - 384;
+  const dcAirPole = Math.pow(0.993, rateScale);
+  const dcSolidPole = Math.pow(0.986, rateScale);
+  const tailSamples = Math.round(384 * (simRate / 24000));
+  const tailStart = nSteps - tailSamples;
   for (let i = 0; i < nSteps; i++) {
     const xa = Number.isFinite(irAir[i]) ? irAir[i] : 0;
     const xs = Number.isFinite(irSolid[i]) ? irSolid[i] : 0;
-    dcAy = xa - dcAx + 0.993 * dcAy;
+    dcAy = xa - dcAx + dcAirPole * dcAy;
     dcAx = xa;
-    dcSy = xs - dcSx + 0.986 * dcSy;
+    dcSy = xs - dcSx + dcSolidPole * dcSy;
     dcSx = xs;
     let win = 1.0;
     if (i >= tailStart) {
-      const uTail = (i - tailStart) / (nSteps - tailStart);
+      const uTail = (i - tailStart) / tailSamples;
       win = 0.5 * (1 + Math.cos(Math.PI * uTail));
     }
     const ya = dcAy * win;
@@ -2348,34 +2724,52 @@ export function simulate3DVibroAcousticIR(
   const airL2 = Math.sqrt(sumSqAir);
   const solidL2 = Math.sqrt(sumSqSolid);
   const scaleAir = airL2 > 1e-14 ? 0.88 / airL2 : 0;
-  const scaleSolid = solidL2 > 1e-14 ? (airL2 > 1e-14 ? 0.24 : 0.84) / solidL2 : 0;
+  const solidBlend = cav.hasHollowCavity ? 0.14 : 0.24;
+  const scaleSolid = solidL2 > 1e-14 ? (airL2 > 1e-14 ? solidBlend : 0.84) / solidL2 : 0;
 
   const ir24k = new Float32Array(nSteps);
   for (let i = 0; i < nSteps; i++) {
     ir24k[i] = irAir[i] * scaleAir + irSolid[i] * scaleSolid;
   }
 
-  let peak = 0;
   if (simRate === 24000) {
-    // 2x Catmull-Rom cubic upsample from 2048 @ 24 kHz -> 4096 @ 48 kHz
+    // 2x Catmull-Rom cubic upsample from 2048 @ 24 kHz -> 4096 @ 48 kHz (1/sqrt(2) preserves 4096-tap L2 energy!)
+    const invSqrt2 = Math.SQRT1_2;
     for (let i = 0; i < nSteps; i++) {
       const y0s = ir24k[Math.max(0, i - 1)];
       const y1s = ir24k[i];
       const y2s = ir24k[Math.min(nSteps - 1, i + 1)];
       const y3s = ir24k[Math.min(nSteps - 1, i + 2)];
       const mid = 0.5625 * (y1s + y2s) - 0.0625 * (y0s + y3s);
-      ir[2 * i] = y1s * 0.7071;
-      ir[2 * i + 1] = mid * 0.7071;
-      const av = Math.max(Math.abs(ir[2 * i]), Math.abs(ir[2 * i + 1]));
-      if (av > peak) peak = av;
+      ir[2 * i] = y1s * invSqrt2;
+      ir[2 * i + 1] = mid * invSqrt2;
     }
   } else {
+    // Direct 48 kHz simulation already has 4096 taps at target L2 energy (no 2x upsample attenuation!)
     for (let i = 0; i < nOutSamples; i++) {
-      const s = ir24k[i] * 0.7071;
-      ir[i] = s;
-      const av = Math.abs(s);
-      if (av > peak) peak = av;
+      ir[i] = ir24k[i];
     }
+  }
+
+  // Exact post-window zero-DC removal (tapered at both ends so ir[nOutSamples - 1] stays strictly 0)
+  let dcSum = 0;
+  let wSum = 0;
+  const outTailStart = nOutSamples - 768;
+  for (let i = 0; i < nOutSamples; i++) {
+    const v = Number.isFinite(ir[i]) ? ir[i] : 0;
+    ir[i] = v;
+    dcSum += v;
+    const w = i < outTailStart ? 1.0 : 0.5 * (1 + Math.cos((Math.PI * (i - outTailStart)) / 768));
+    wSum += w;
+  }
+  const dcOffset = wSum > 1e-6 ? dcSum / wSum : 0;
+  let peak = 0;
+  for (let i = 0; i < nOutSamples; i++) {
+    const w = i < outTailStart ? 1.0 : 0.5 * (1 + Math.cos((Math.PI * (i - outTailStart)) / 768));
+    const s = ir[i] - dcOffset * w;
+    ir[i] = s;
+    const av = Math.abs(s);
+    if (av > peak) peak = av;
   }
   if (peak < 1e-6) return null;
   if (peak > 0.72) {
@@ -2402,27 +2796,42 @@ export function simulate3DVibroAcousticIR(
   return out;
 }
 
-/** Resamples a 48 kHz impulse response to `targetSampleRate` (e.g. 44.1 kHz on Windows WASAPI) so WebAudio ConvolverNode never throws! */
+/**
+ * Resamples a 48 kHz impulse response to `targetSampleRate` (e.g. 44.1 kHz WASAPI or 96 kHz studio)
+ * with non-finite sanitization and `sourceSampleRate / targetSampleRate` tap-gain scaling so discrete
+ * convolution `sum_k x[n - k] * h[k]` has identical dB transfer gain across all sample rates!
+ */
 export function resampleIrToContextRate(
   ir48k: Float32Array,
   targetSampleRate: number,
   sourceSampleRate = 48000,
 ): Float32Array<ArrayBuffer> {
-  if (Math.abs(targetSampleRate - sourceSampleRate) < 1) {
+  const safeTargetRate = Number.isFinite(targetSampleRate) && targetSampleRate >= 8000 ? targetSampleRate : sourceSampleRate;
+  const safeSourceRate = Number.isFinite(sourceSampleRate) && sourceSampleRate >= 8000 ? sourceSampleRate : 48000;
+  if (ir48k.length === 0) {
+    return new Float32Array(new ArrayBuffer(64 * 4));
+  }
+  if (Math.abs(safeTargetRate - safeSourceRate) < 1) {
     const copy = new Float32Array(new ArrayBuffer(ir48k.length * 4));
-    copy.set(ir48k);
+    for (let i = 0; i < ir48k.length; i++) {
+      const v = ir48k[i];
+      copy[i] = Number.isFinite(v) ? v : 0;
+    }
     return copy;
   }
-  const outLen = Math.max(64, Math.round((ir48k.length * targetSampleRate) / sourceSampleRate));
+  const outLen = Math.max(64, Math.round((ir48k.length * safeTargetRate) / safeSourceRate));
   const out = new Float32Array(new ArrayBuffer(outLen * 4));
-  const ratio = sourceSampleRate / targetSampleRate;
+  const ratio = safeSourceRate / safeTargetRate;
+  const gainScale = ratio; // dt_target / dt_source = f_source / f_target preserves |H(f)| when conv.normalize === false
   const maxIdx = ir48k.length - 1;
   for (let i = 0; i < outLen; i++) {
     const srcPos = i * ratio;
     const i0 = Math.min(maxIdx, Math.floor(srcPos));
     const i1 = Math.min(maxIdx, i0 + 1);
     const frac = srcPos - i0;
-    out[i] = ir48k[i0] + (ir48k[i1] - ir48k[i0]) * frac;
+    const s0 = Number.isFinite(ir48k[i0]) ? ir48k[i0] : 0;
+    const s1 = Number.isFinite(ir48k[i1]) ? ir48k[i1] : 0;
+    out[i] = (s0 + (s1 - s0) * frac) * gainScale;
   }
   return out;
 }
