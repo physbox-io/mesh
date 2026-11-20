@@ -160,8 +160,9 @@ export function solveVonKarmanPlateImpact(
 
   const glideTauSec = Math.max(0.050, Math.min(0.250, baseBloomSec * 1.05));
 
-  // Energy conservation: upward cascade pumps kinetic/strain energy out of low modes into high modes
-  const lowModeDecayScale = Math.max(0.38, 1 / (1 + 0.85 * cascadeStrength));
+  // Energy conservation: upward cascade transfers part of low-mode energy into the upper Chladni cascade
+  // while preserving realistic multi-second fundamental sustain (~3.5–5.0 s on thin bronze cymbals & gongs!)
+  const lowModeDecayScale = Math.max(0.80, 1 / (1 + 0.22 * cascadeStrength));
 
   // Build 10 Rossing–Chladni upper plate cascade partials (inharmonic ~ (m + 2n)^1.42 dispersion)
   // Higher partials reach peak amplitude LATER as the turbulent wavefront cascades to short wavelengths!
@@ -169,7 +170,8 @@ export function solveVonKarmanPlateImpact(
   const cascadeVoices: NonlinearCascadeVoice[] = [];
   const aspectSkew = Math.min(1.15, Math.max(0.92, lMax / Math.max(1e-4, bMid)));
   const qBase = Math.max(80, profile.material.qualityQ);
-  // Softer mallets (longer tauC) still feed the nonlinear internal cascade from low modes, though very soft yarn slightly tempers peak ультра-highs
+  const qNorm = Math.min(1.35, qBase / 700);
+  // Softer mallets (longer tauC) still feed the nonlinear internal cascade from low modes, though very soft yarn slightly tempers peak ultra-highs
   const malletCoupling = Math.max(0.45, Math.min(1.15, Math.pow(0.0012 / Math.max(0.0003, tauC), 0.25)));
 
   for (let k = 1; k <= nCascade; k++) {
@@ -189,8 +191,15 @@ export function solveVonKarmanPlateImpact(
     const peakGain = Math.min(0.42, 0.34 * cascadeStrength * spectralEnv * malletCoupling);
     if (peakGain < 0.004) continue;
 
-    const modeQ = qBase / (1 + 0.55 * k * Math.sqrt(k));
-    const decaySec = Math.max(0.08, Math.min(3.4, (modeQ / (Math.PI * freqHz)) * 3.6 + bloomAttackSec * 0.8));
+    // Wave-turbulence energy reservoir continually feeds upper bronze partials across multi-second sustain
+    // (Fletcher & Rossing §20.2: 3.5–5.5 s shimmer sustain on high-Q bronze cymbals vs fast decay on low-Q plates)
+    const modeQ = qBase / (1 + 0.32 * k * Math.sqrt(k));
+    const linearRingSec = (modeQ / (Math.PI * freqHz)) * 4.2;
+    const reservoirRingSec = qNorm * (4.6 / (1 + 0.20 * (k - 1))) * (0.65 + 0.35 * cascadeStrength);
+    const decaySec = Math.max(
+      0.16,
+      Math.min(5.2, Math.max(linearRingSec, reservoirRingSec) + bloomAttackSec * 0.8),
+    );
 
     cascadeVoices.push({
       freqHz: +freqHz.toFixed(2),
@@ -203,7 +212,7 @@ export function solveVonKarmanPlateImpact(
   const shimmerMix = Math.max(0, Math.min(1, spec.shimmerMix ?? (0.55 * profile.material.brightness)));
   const shimmerPeakGain = +(Math.min(0.38, 0.36 * cascadeStrength * shimmerMix * malletCoupling)).toFixed(4);
   const shimmerBloomSec = +Math.max(0.045, Math.min(0.240, baseBloomSec * 0.92)).toFixed(4);
-  const shimmerDecaySec = +Math.max(0.18, Math.min(2.8, (qBase / 950) * 1.45 * (0.6 + 0.6 * cascadeStrength))).toFixed(4);
+  const shimmerDecaySec = +Math.max(0.22, Math.min(4.8, (qBase / 780) * 3.45 * (0.65 + 0.45 * cascadeStrength))).toFixed(4);
   const shimmerBandHz = +Math.max(2400, Math.min(8200, f1 * 14)).toFixed(1);
 
   return {
