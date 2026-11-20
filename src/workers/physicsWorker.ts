@@ -1131,6 +1131,7 @@ interface BluffBodyAeroEntry {
   chordM: number;
   thicknessM: number;
   sigmaKgM2: number;
+  isAeolian?: boolean;
 }
 
 let cachedHydroByNodeId = new Map<string, HydroBodyModel>();
@@ -1960,13 +1961,46 @@ const rebuildHydroAndFlexureCaches = (
   const bodyGeomNum = mdl.body_geomnum;
   const bodyDofNum = mdl.body_dofnum;
   for (let b = 1; b < nbody; b++) {
-    if (bodyDofNum[b] <= 0 || aeroCoveredBodyIds.has(b) || acousticStringBodyIds.has(b) || windSubtreeBodyIds.has(b)) {
+    if (aeroCoveredBodyIds.has(b) || acousticStringBodyIds.has(b) || windSubtreeBodyIds.has(b)) {
       continue;
     }
     const nodeId = bodyNodeById[b];
     if (!nodeId || nodeId === 'world') continue;
     const gStart = bodyGeomAdr[b] ?? 0;
     const gCount = bodyGeomNum[b] ?? 0;
+
+    if (bodyDofNum[b] <= 0) {
+      // Static slender cylindrical/capsule bodies (e.g. flagpoles, masts, halyards: L/D >= 6, D in [0.004, 0.16] m):
+      // emit subtle high-Q Strouhal Aeolian vortex-shedding hum in wind >= 2.5 m/s!
+      let minSlenderD = Infinity;
+      let slenderAreaSum = 0;
+      for (let k = 0; k < gCount; k++) {
+        const g = gStart + k;
+        const gt = gTypes[g];
+        if (gt !== 3 && gt !== 5) continue; // capsule (3) or cylinder (5)
+        const r = gSizes[g * 3] || 0;
+        const halfLen = gSizes[g * 3 + 1] || 0;
+        const diam = 2 * r;
+        const fullLen = gt === 3 ? 2 * halfLen + diam : 2 * halfLen;
+        if (diam >= 0.004 && diam <= 0.16 && fullLen / diam >= 6.0) {
+          if (diam < minSlenderD) minSlenderD = diam;
+          slenderAreaSum += diam * fullLen;
+        }
+      }
+      if (Number.isFinite(minSlenderD) && slenderAreaSum > 1e-5) {
+        const mKg = Math.max(0.02, bodyMass[b] || slenderAreaSum * minSlenderD * 2700);
+        bluffBodyAeroByBodyId.set(b, {
+          nodeId,
+          areaM2: Math.min(2.0, slenderAreaSum),
+          chordM: minSlenderD,
+          thicknessM: minSlenderD,
+          sigmaKgM2: Math.max(0.05, Math.min(2.5, mKg / Math.max(1e-4, slenderAreaSum))),
+          isAeolian: true,
+        });
+      }
+      continue;
+    }
+
     let areaSum = 0;
     let minDim = Infinity;
     let maxDim = 0.03;
@@ -3224,8 +3258,16 @@ const sampleAeroSnaps = (stepSize: number) => {
  *   clear frame when all aero bodies go quiet (`hadActiveAeroVoices` guard).
  */
 const flushAeroAudio = () => {
-  if (!soundEnabled || (aeroVoiceGroups.length === 0 && bluffBodyAeroByBodyId.size === 0) || !model || !data) {
+  if (
+    !soundEnabled ||
+    (aeroVoiceGroups.length === 0 && bluffBodyAeroByBodyId.size === 0 && !cloth) ||
+    !model ||
+    !data
+  ) {
     pendingAeroSnaps.clear();
+    if (cloth) {
+      cloth.sim.consumeAeroTelemetry(0, true);
+    }
     for (const grp of aeroVoiceGroups) {
       grp.accForceSum = 0;
       grp.accRelSpeedSum = 0;
@@ -3249,7 +3291,44 @@ const flushAeroAudio = () => {
   const views = velocityViews(model, data);
   const xpos = data.xpos;
   const isVacuum = envDensity < 0;
+  const rho = isVacuum ? 0 : envDensity > 0 ? envDensity : 1.225;
   const voices: AeroVoiceTelemetry[] = [];
+  let clothSnaps: AeroSnapEvent[] = [];
+
+  if (cloth) {
+    const clothTelemetry = cloth.sim.consumeAeroTelemetry(rho, isVacuum);
+    for (const cv of clothTelemetry.voices) voices.push(cv);
+    clothSnaps = clothTelemetry.snaps;
+    if (clothTelemetry.tieImpacts.length > 0) {
+      for (const ti of clothTelemetry.tieImpacts) {
+        const bId = bodyIdCache[ti.bodyName];
+        const targetNodeId = bId !== undefined ? bodyNodeById[bId] : undefined;
+        if (!targetNodeId || targetNodeId === 'world') continue;
+        // When `isGrommetClink` is true, attribute partner to a hard metallic halyard/shackle node if present in the scene,
+        // else `'world'` (which `inferColliderContactProps` models as hard mineral/steel at 65 GPa!).
+        let strikerPartnerId = 'world';
+        if (ti.isGrommetClink) {
+          for (const key of Object.keys(bodyIdCache)) {
+            if (/shackle|clew|halyard/i.test(key) && bodyNodeById[bodyIdCache[key]]) {
+              strikerPartnerId = bodyNodeById[bodyIdCache[key]];
+              break;
+            }
+          }
+        }
+        const pairKey = `${targetNodeId}:cloth_tie_${ti.anchorLocal ? ti.anchorLocal.map((c) => c.toFixed(3)).join('_') : 'origin'}`;
+        const prev = pendingAudioImpacts.get(pairKey);
+        if (!prev || ti.impulseNs > prev.impulseNs) {
+          pendingAudioImpacts.set(pairKey, {
+            nodeId: targetNodeId,
+            impulseNs: ti.impulseNs,
+            otherNodeId: strikerPartnerId,
+            ...(ti.anchorLocal ? { localPoint: ti.anchorLocal } : {}),
+            solTime: ti.isGrommetClink ? 0.0025 : 0.006,
+          });
+        }
+      }
+    }
+  }
 
   for (const grp of aeroVoiceGroups) {
     // Effective rotor angular rate relative to air: `|qvel[hubJoint] + ω_parent · axis_world|`
@@ -3357,13 +3436,48 @@ const flushAeroAudio = () => {
     }
   }
 
-  // Fast-moving non-`isAerodynamic` dynamic bodies (pendulums, whipped rods, projectiles >= 2.2 m/s):
-  // emit passive Strouhal bluff-body whoosh without disturbing rigid-body solver trajectories!
+  // Fast-moving non-`isAerodynamic` dynamic bodies (pendulums, whipped rods, projectiles >= 2.2 m/s)
+  // AND static slender cylindrical masts/poles (`isAeolian: true`, wind >= 2.5 m/s):
+  // emit passive Strouhal whoosh / Aeolian wind hum without disturbing rigid-body solver trajectories!
   if (!isVacuum && bluffBodyAeroByBodyId.size > 0) {
-    const rho = envDensity > 0 ? envDensity : 1.225;
     const bluffCandidates: { score: number; v: AeroVoiceTelemetry }[] = [];
+    const envWindMag = Math.hypot(envWindX || 0, envWindY || 0);
     for (const [bId, meta] of bluffBodyAeroByBodyId) {
       if (bId <= 0 || bId >= model.nbody) continue;
+      if (meta.isAeolian) {
+        if (envWindMag < 2.5) continue;
+        // Sample live gust speed at the mast's world position so Aeolian pitch & gain glide with gusts!
+        const [gx, gy, gz] = evaluateGustWind(
+          envWindX || 0,
+          envWindY || 0,
+          xpos[bId * 3],
+          xpos[bId * 3 + 1],
+          xpos[bId * 3 + 2] + 1.0,
+          data.time,
+        );
+        const uPerp = Math.hypot(gx, gy, gz * 0.25);
+        if (uPerp < 2.5) continue;
+        const fDrag = 0.5 * rho * 1.1 * meta.areaM2 * uPerp * uPerp;
+        bluffCandidates.push({
+          score: fDrag * uPerp * 0.5,
+          v: {
+            hubOrBodyId: meta.nodeId,
+            bladeCount: 0,
+            omegaRadPerSec: 0,
+            tipSpeedMps: +uPerp.toFixed(4),
+            relSpeedMps: +uPerp.toFixed(4),
+            alphaDeg: 4.0,
+            areaM2: +meta.areaM2.toFixed(5),
+            chordM: +meta.chordM.toFixed(4),
+            thicknessM: +meta.thicknessM.toFixed(5),
+            aeroForceN: +fDrag.toFixed(4),
+            arealDensityKgM2: +meta.sigmaKgM2.toFixed(4),
+            bendRateRadPerSec: 0,
+            gainScale: 0.28,
+          },
+        });
+        continue;
+      }
       const [vx, vy, vz] = bodyPointVelocity(views, bId, [xpos[bId * 3], xpos[bId * 3 + 1], xpos[bId * 3 + 2]]);
       const [wx, wy, wz] = bodyAngularVelocity(views, bId);
       const linRel = Math.hypot(vx - (envWindX || 0), vy - (envWindY || 0), vz);
@@ -3395,7 +3509,9 @@ const flushAeroAudio = () => {
     }
   }
 
-  const snaps = Array.from(pendingAeroSnaps.values());
+  const snaps = clothSnaps.length > 0
+    ? [...Array.from(pendingAeroSnaps.values()), ...clothSnaps]
+    : Array.from(pendingAeroSnaps.values());
   pendingAeroSnaps.clear();
 
   if (voices.length > 0 || snaps.length > 0 || hadActiveAeroVoices) {
@@ -4057,9 +4173,9 @@ const postFrame = () => {
   framePending = false;
   lastFramePost = performance.now();
   postScriptStatus();
+  flushAeroAudio();
   flushAudioImpacts();
   flushBowedStrings();
-  flushAeroAudio();
   const snap = snapshot();
   if (isSharedSupported) {
     post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot(), ...clothFrame() });

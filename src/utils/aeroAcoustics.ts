@@ -84,6 +84,10 @@ export interface SnapSynthParams {
   lowpassHz: number;
   /** Output peak amplitude [0..0.60]. */
   gain: number;
+  /** Physical Curle dipole impulse (N·s), preserved for deterministic PRNG seeding. */
+  impulseNs?: number;
+  /** Monotonic event sequence number for deterministic non-repeating white-noise phase seeding. */
+  seq?: number;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -258,7 +262,12 @@ export function solveAeroAcousticVoice(
     }
   }
 
-  noiseGain = +clamp(noiseGain, 0, 0.32).toFixed(4);
+  const gainScale =
+    typeof telemetry.gainScale === 'number' && Number.isFinite(telemetry.gainScale)
+      ? clamp(telemetry.gainScale, 0, 2.0)
+      : 1.0;
+  tonalGain = +(tonalGain * gainScale).toFixed(4);
+  noiseGain = +clamp(noiseGain * gainScale, 0, 0.32).toFixed(4);
   amRateHz = +clamp(amRateHz, 0, 16000).toFixed(3);
   amDepth = +clamp(amDepth, 0, 0.85).toFixed(3);
 
@@ -274,13 +283,14 @@ export function solveAeroAcousticVoice(
     rustleFreqHz = +clamp(2200 + 3300 * lightness, 2200, 5500).toFixed(1);
     const bendNorm = clamp(bendRate / 18.0, 0, 1.5);
     rustleGain = +clamp(
-      0.085 * rhoScale * bendNorm * (0.55 + 0.45 * smoothstep(0.2, 3.0, effSpeed)),
+      0.085 * rhoScale * bendNorm * (0.55 + 0.45 * smoothstep(0.2, 3.0, effSpeed)) * gainScale,
       0,
       0.16,
     ).toFixed(4);
   }
 
   const active = tonalGain >= 0.0015 || noiseGain >= 0.0015 || rustleGain >= 0.0015;
+  tonalActive = tonalActive && tonalGain >= 0.0015;
 
   return {
     id,
@@ -320,6 +330,8 @@ export function solveClothSnapPulse(snap: AeroSnapEvent): SnapSynthParams {
       bandpassQ: 1.2,
       lowpassHz: 2400,
       gain: 0,
+      impulseNs: impulse,
+      ...(snap.seq !== undefined ? { seq: snap.seq } : {}),
     };
   }
 
@@ -349,6 +361,8 @@ export function solveClothSnapPulse(snap: AeroSnapEvent): SnapSynthParams {
     bandpassQ,
     lowpassHz,
     gain,
+    impulseNs: +impulse.toFixed(5),
+    ...(snap.seq !== undefined ? { seq: snap.seq } : {}),
   };
 }
 

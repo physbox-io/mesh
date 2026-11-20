@@ -520,6 +520,10 @@ export interface AeroVoiceTelemetry {
   isVacuum?: boolean;
   /** True when this voice represents a flexible cloth/grid/membrane sheet. */
   isCloth?: boolean;
+  /** Optional gain scale factor (e.g. 0.28 for subtle static cylindrical Aeolian wind hum). */
+  gainScale?: number;
+  /** Live 3D centroid in MuJoCo Z-up world coordinates [x, y, z] (m), for spatial panning on non-body nodes like XPBD cloth. */
+  worldPos?: [number, number, number];
 }
 
 export interface AeroSnapEvent {
@@ -527,6 +531,17 @@ export interface AeroSnapEvent {
   impulseNs: number;
   arealDensityKgM2: number;
   relSpeedMps: number;
+  /** Live 3D snap point in MuJoCo Z-up world coordinates [x, y, z] (m), for exact corner whip-snap spatial panning. */
+  worldPos?: [number, number, number];
+  /** Monotonic event sequence number for deterministic non-repeating DSP white-noise phase seeding. */
+  seq?: number;
+}
+
+export interface ClothTieImpactEvent {
+  bodyName: string;
+  anchorLocal: [number, number, number] | null;
+  impulseNs: number;
+  isGrommetClink: boolean;
 }
 
 export type WorkerToMainMessage =

@@ -1729,7 +1729,11 @@ export function postWorkletAeroSnap(
   const buf = ctx.createBuffer(1, len, sr);
   const ch = buf.getChannelData(0);
 
-  let seed = 0x51a7c0de;
+  let seed =
+    (Math.imul(Math.round((snap.impulseNs ?? 0.045) * 1e6), 2654435761) ^
+      Math.round(snap.centerHz * 17) ^
+      (snap.seq ?? 0)) |
+    1;
   for (let i = 0; i < len; i++) {
     const t = i / sr;
     let nWave: number;
@@ -1763,6 +1767,16 @@ export function postWorkletAeroSnap(
   const outGain = ctx.createGain();
   outGain.gain.setValueAtTime(gain, now);
 
+  // Parallel low-mid Curle air-displacement dipole billow-thump bandpass (115–340 Hz, Q = 1.4)
+  const thumpBp = ctx.createBiquadFilter();
+  thumpBp.type = 'bandpass';
+  const rawThumpHz = safeClamp(0.22 * snap.centerHz, 165, 115, 340);
+  thumpBp.frequency.setValueAtTime(clampAudioFreq(ctx, rawThumpHz, 165, 60), now);
+  thumpBp.Q.setValueAtTime(1.4, now);
+
+  const thumpGain = ctx.createGain();
+  thumpGain.gain.setValueAtTime(gain * 0.32, now);
+
   const resolvedSpatial = spatial ?? (snap.pan !== undefined || snap.distanceGain !== undefined
     ? { pan: snap.pan, distanceGain: snap.distanceGain }
     : null);
@@ -1772,12 +1786,19 @@ export function postWorkletAeroSnap(
   bp.connect(lp);
   lp.connect(outGain);
   outGain.connect(spatialSend.input);
+
+  src.connect(thumpBp);
+  thumpBp.connect(thumpGain);
+  thumpGain.connect(spatialSend.input);
+
   src.start(now);
   src.onended = () => {
     try { src.disconnect(); } catch { /* ignore */ }
     try { bp.disconnect(); } catch { /* ignore */ }
     try { lp.disconnect(); } catch { /* ignore */ }
     try { outGain.disconnect(); } catch { /* ignore */ }
+    try { thumpBp.disconnect(); } catch { /* ignore */ }
+    try { thumpGain.disconnect(); } catch { /* ignore */ }
     spatialSend.disconnect();
   };
 }

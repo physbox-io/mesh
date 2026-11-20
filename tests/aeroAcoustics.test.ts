@@ -19,6 +19,7 @@ import {
 import { dronePreset, paperPlanePreset, windmillPreset } from '../src/presets/presetScenes';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics } from '../src/workers/bodyKinematics';
 import { autoResetCount } from '../src/utils/mujocoAutoReset';
+import { clothRun } from './clothSimHarness';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 let mjPromise: Promise<Mujoco> | null = null;
@@ -877,5 +878,149 @@ describe('Unified 3D Aeroacoustics (Rotors, Wings, Windmills & Cloth)', () => {
     // DocsModal Sound tab documents the new Rotors, Wings & Cloth Aeroacoustics section
     const docsSrc = fs.readFileSync(path.resolve(__dirname, '../src/components/docs/DocsModal.tsx'), 'utf8');
     expect(docsSrc).toContain('Rotors, Wings &amp; Cloth Aeroacoustics');
+  });
+
+  it('drives XPBD ClothSim Kármán wake flutter, witness whip-snaps, mast tie impacts, dipole thump & deterministic PRNG seeding while silent in calm/vacuum', async () => {
+    const mastH = 2.2;
+    const flagW = 0.72;
+    const flagH = 0.44;
+    const mastNode: SceneNode = {
+      id: 'mast',
+      name: 'mast',
+      pos: [0, 0, mastH / 2],
+      deformMaterial: 'softMetal',
+      geoms: [{ name: 'mast_tube', type: 'cylinder', size: [0.025, mastH / 2] }],
+      joints: [],
+    } as unknown as SceneNode;
+
+    const flagNode: SceneNode = {
+      id: 'ensign',
+      name: 'ensign',
+      pos: [0.032 + flagW / 2, 0, 1.75],
+      cloth: {
+        material: 'taffeta',
+        spacing: 0.04,
+        sewTime: 0,
+        pieces: [
+          {
+            name: 'sheet',
+            edges: [
+              { id: 'bottom', pts: [[-flagW / 2, -flagH / 2], [flagW / 2, -flagH / 2]] },
+              { id: 'fly', pts: [[flagW / 2, -flagH / 2], [flagW / 2, flagH / 2]] },
+              { id: 'top', pts: [[flagW / 2, flagH / 2], [-flagW / 2, flagH / 2]] },
+              { id: 'hoist', pts: [[-flagW / 2, flagH / 2], [-flagW / 2, -flagH / 2]] },
+            ],
+            placement: { kind: 'plane', origin: [0, 0, 0], uAxis: [1, 0, 0], vAxis: [0, 0, 1] },
+          },
+        ],
+        ties: [
+          { name: 'upper_hoist', piece: 'sheet', edge: 'hoist', at: 0.0, to: 'mast', anchor: [0.028, 0, 1.75 + flagH / 2 - mastH / 2] },
+          { name: 'lower_hoist', piece: 'sheet', edge: 'hoist', at: 1.0, to: 'mast', anchor: [0.028, 0, 1.75 - flagH / 2 - mastH / 2] },
+        ],
+      },
+    } as unknown as SceneNode;
+
+    // 1. Calm air & vacuum produce zero snaps, zero tie impacts, and inactive continuous voices once draped at rest
+    const calmRun = await clothRun([mastNode, flagNode]);
+    calmRun.run(2.8, { wind: [0, 0, 0] });
+    calmRun.sim.consumeAeroTelemetry(1.225, false); // clear initial gravity drop swing
+    calmRun.run(0.4, { wind: [0, 0, 0] });
+    const calmTel = calmRun.sim.consumeAeroTelemetry(1.225, false);
+    expect(calmTel.snaps).toHaveLength(0);
+    expect(calmTel.tieImpacts).toHaveLength(0);
+    expect(calmTel.voices).toHaveLength(0);
+
+    // 2. Strong wind behind slender cylindrical mast excites Kármán wake flutter, whip-snaps, and grommet tie impacts
+    const windRun = await clothRun([mastNode, flagNode]);
+    const allSnaps: AeroSnapEvent[] = [];
+    const allTieImpacts: { bodyName: string; impulseNs: number; isGrommetClink: boolean }[] = [];
+    let latestVoices: AeroVoiceTelemetry[] = [];
+    for (let step = 0; step < 60; step++) {
+      windRun.run(0.04, { wind: [9.2, 0.5, 0], gustAt: evaluateGustWind });
+      const tel = windRun.sim.consumeAeroTelemetry(1.225, false);
+      if (tel.voices.length > 0) latestVoices = tel.voices;
+      allSnaps.push(...tel.snaps);
+      allTieImpacts.push(...tel.tieImpacts);
+    }
+
+    expect(latestVoices.length).toBeGreaterThanOrEqual(1);
+    const clothVoice = latestVoices[0];
+    expect(clothVoice.isCloth).toBe(true);
+    expect(clothVoice.worldPos).toBeDefined();
+    expect(clothVoice.aeroForceN).toBeGreaterThan(0.05);
+    expect(clothVoice.bendRateRadPerSec).toBeGreaterThan(0.5);
+    const solvedCloth = solveAeroAcousticVoice(clothVoice);
+    expect(solvedCloth.active).toBe(true);
+    expect(solvedCloth.noiseGain).toBeGreaterThan(0.01);
+    expect(solvedCloth.rustleGain).toBeGreaterThan(0.002);
+
+    expect(allSnaps.length).toBeGreaterThanOrEqual(1);
+    expect(allSnaps[0].worldPos).toBeDefined();
+    expect(allSnaps[0].seq).toBeGreaterThanOrEqual(1);
+
+    expect(allTieImpacts.length).toBeGreaterThanOrEqual(1);
+    expect(allTieImpacts[0].bodyName).toBe('mast');
+    expect(allTieImpacts[0].impulseNs).toBeGreaterThanOrEqual(0.002);
+
+    // Vacuum drain returns empty telemetry immediately
+    windRun.run(0.04, { wind: [9.2, 0.5, 0], airDensity: 0 });
+    const vacTel = windRun.sim.consumeAeroTelemetry(0, true);
+    expect(vacTel.voices).toHaveLength(0);
+    expect(vacTel.snaps).toHaveLength(0);
+    expect(vacTel.tieImpacts).toHaveLength(0);
+
+    // 3. DSP Snap upgrade: non-repeating deterministic LCG seed across seq & parallel Curle thump bandpass (115–340 Hz, Q=1.4)
+    const createdBuffers: Float32Array[] = [];
+    const createdFilters: { type: string; freq: number; q: number }[] = [];
+    const snapMockCtx = {
+      state: 'running',
+      sampleRate: 48000,
+      currentTime: 0,
+      destination: {},
+      createGain: () => ({
+        gain: { value: 1, setValueAtTime(v: number) { this.value = v; }, setTargetAtTime(v: number) { this.value = v; }, cancelScheduledValues() {} },
+        connect() {},
+        disconnect() {},
+      }),
+      createBiquadFilter: () => {
+        const rec = { type: 'lowpass', freq: 1000, q: 1 };
+        createdFilters.push(rec);
+        return {
+          get type() { return rec.type; },
+          set type(t: string) { rec.type = t; },
+          frequency: { value: 1000, setValueAtTime(v: number) { this.value = v; rec.freq = v; }, setTargetAtTime(v: number) { this.value = v; rec.freq = v; }, cancelScheduledValues() {} },
+          Q: { value: 1, setValueAtTime(v: number) { this.value = v; rec.q = v; }, setTargetAtTime(v: number) { this.value = v; rec.q = v; }, cancelScheduledValues() {} },
+          gain: { value: 0, setValueAtTime() {}, setTargetAtTime() {}, cancelScheduledValues() {} },
+          connect() {},
+          disconnect() {},
+        };
+      },
+      createWaveShaper: () => ({ curve: null, oversample: 'none', connect() {}, disconnect() {} }),
+      createDynamicsCompressor: () => ({
+        threshold: { setValueAtTime() {} }, knee: { setValueAtTime() {} }, ratio: { setValueAtTime() {} }, attack: { setValueAtTime() {} }, release: { setValueAtTime() {} }, connect() {},
+      }),
+      createConvolver: () => ({ normalize: false, buffer: null, connect() {}, disconnect() {} }),
+      createBuffer: (_ch: number, len: number, sr: number) => {
+        const arr = new Float32Array(len);
+        createdBuffers.push(arr);
+        return { sampleRate: sr, length: len, getChannelData: () => arr };
+      },
+      createBufferSource: () => ({ buffer: null, loop: false, onended: null, connect() {}, disconnect() {}, start() {}, stop() {} }),
+    } as unknown as AudioContext;
+
+    const s1 = solveClothSnapPulse({ nodeId: 'ensign', impulseNs: 0.05, arealDensityKgM2: 0.09, relSpeedMps: 8.8, seq: 1 });
+    const s2 = solveClothSnapPulse({ nodeId: 'ensign', impulseNs: 0.05, arealDensityKgM2: 0.09, relSpeedMps: 8.8, seq: 2 });
+    postWorkletAeroSnap(snapMockCtx, s1);
+    postWorkletAeroSnap(snapMockCtx, s2);
+    // Note: first createBuffer call on fresh ctx may be studio reverb IR; last two are s1 & s2!
+    const buf1 = createdBuffers[createdBuffers.length - 2];
+    const buf2 = createdBuffers[createdBuffers.length - 1];
+    let maxDiff = 0;
+    for (let i = 0; i < Math.min(buf1.length, buf2.length); i++) {
+      maxDiff = Math.max(maxDiff, Math.abs(buf1[i] - buf2[i]));
+    }
+    expect(maxDiff).toBeGreaterThan(0.05);
+    const thumpFilter = createdFilters.find((f) => f.type === 'bandpass' && f.freq >= 115 && f.freq <= 340 && Math.abs(f.q - 1.4) < 1e-3);
+    expect(thumpFilter).toBeDefined();
   });
 });

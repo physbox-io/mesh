@@ -966,7 +966,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       const solvedVoices = voices.map((v) => {
         const solved = solveAeroAcousticVoice(v);
         const aeroNode = findNode(nodes, solved.id);
-        const spatial = resolveNodeSpatial(solved.id, aeroNode);
+        const spatial = resolveNodeSpatial(solved.id, aeroNode, null, v.worldPos ?? null);
         return {
           ...solved,
           pan: spatial.pan,
@@ -977,7 +977,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       for (const sn of snaps) {
         const snapParams = solveClothSnapPulse(sn);
         const snapNode = findNode(nodes, sn.nodeId);
-        const spatial = resolveNodeSpatial(sn.nodeId, snapNode);
+        const spatial = resolveNodeSpatial(sn.nodeId, snapNode, null, sn.worldPos ?? null);
         playAeroSnapPulse(snapParams, spatial);
       }
     };

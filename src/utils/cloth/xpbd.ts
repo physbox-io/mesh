@@ -18,6 +18,7 @@
 import * as THREE from 'three';
 import type { ClothModel, ClothTrim, FlatPattern } from './clothModel';
 import type { ClothMaterialName, ClothPatternPrint } from '../../types/cloth';
+import type { AeroSnapEvent, AeroVoiceTelemetry, ClothTieImpactEvent } from '../../workers/physicsWorkerProtocol';
 import { LayerContacts } from './clothLayers';
 import { SelfContacts } from './clothSelf';
 import { BoardShapes, type Board } from './clothBoards';
@@ -119,6 +120,15 @@ interface Piece {
   base: number; // first particle
 }
 
+interface SlenderWakeCylinder {
+  ci: number;
+  diam: number;
+  axLocal: [number, number, number];
+  bxLocal: [number, number, number];
+  ax: number; ay: number; az: number;
+  bx: number; by: number; bz: number;
+}
+
 export class ClothSim {
   readonly n: number;
   readonly x: Float64Array;
@@ -144,7 +154,44 @@ export class ClothSim {
   private rodLinks: Int32Array; private rodLinkRest: Float64Array; private rodBends: Int32Array; private rodBendRest: Float64Array; private rodBendAlpha: Float64Array; private rodBendLambda: Float64Array; private rodBendDir: Float64Array;
   private tacks: { p: number; a: number; b: number; c: number; w0: number; w1: number; w2: number; offset: number; lift: boolean }[];
   private ties: { name: string; p: number; body: string | null; anchor: number[] | null; anchorWorld: number[] | null; from: number[]; sew: number; lambda: number }[];
-  private tris: Int32Array; private triCd: Float64Array;
+  private tris: Int32Array; private triCd: Float64Array; private triPiece: Int32Array;
+  private edgePiece: Int32Array; private edgePrevLen: Float64Array;
+  private bendPiece: Int32Array; private bendSpanInv: Float64Array; private bendPrevC: Float64Array; private bendCurC: Float64Array;
+  private wakeCylinders: SlenderWakeCylinder[] = [];
+  private pieceFlatArea: Float64Array;
+  private pieceChord: Float64Array;
+  private pieceAccForceSum: Float64Array;
+  private pieceAccRelSpeedAreaSum: Float64Array;
+  private pieceAccAlphaAreaSum: Float64Array;
+  private pieceAccAreaSum: Float64Array;
+  private pieceAccTipMax: Float64Array;
+  private pieceAccBendRateSum: Float64Array;
+  private pieceAccBendCount: Int32Array;
+  private pieceAccStrainRateSum: Float64Array;
+  private pieceAccStrainCount: Int32Array;
+  private pieceSubstepsCounted: Int32Array;
+  private witnessParticles: Int32Array;
+  private witnessPiece: Int32Array;
+  private witnessEffMass: Float64Array;
+  private witnessTris: Int32Array;
+  private witnessTriOffsets: Int32Array;
+  private witnessEdges: Int32Array;
+  private witnessEdgeOffsets: Int32Array;
+  private witnessPrevVNorm: Float64Array;
+  private witnessPrevSpeedSq: Float64Array;
+  private witnessPrevTension: Float64Array;
+  private witnessPrevRelSpeed: Float64Array;
+  private witnessLastSnapTime: Float64Array;
+  private witnessInit: Uint8Array;
+  private snapSeqCounter = 0;
+  private pendingSnaps: AeroSnapEvent[] = [];
+  private tiePrevLambda: Float64Array;
+  private tieFastLambda: Float64Array;
+  private tieAvgLambda: Float64Array;
+  private tieMinLambdaWindow: Float64Array;
+  private tieLastImpactTime: Float64Array;
+  private tieInit: Uint8Array;
+  private pendingTieImpacts: ClothTieImpactEvent[] = [];
   private floatUntil: Float64Array;
   private colliders: Collider[];
   private contactN: Float64Array; private contactPush: Float64Array; private contactMu: Float64Array; private contactHeld: Float64Array; private contactDisp: Float64Array;
@@ -184,13 +231,29 @@ export class ClothSim {
     this.n = n;
     this.x = new Float64Array(3 * n); this.prev = new Float64Array(3 * n); this.v = new Float64Array(3 * n);
     this.w = new Float64Array(n); this.ext = new Float64Array(3 * n); this.floatUntil = new Float64Array(n);
-    const E: number[] = [], ER: number[] = [], EM: number[] = [], EA: number[] = [], B: number[] = [], BR: number[] = [], BA: number[] = [], BC: number[] = [];
+    const E: number[] = [], ER: number[] = [], EM: number[] = [], EA: number[] = [], EP: number[] = [];
+    const B: number[] = [], BR: number[] = [], BA: number[] = [], BC: number[] = [], BP: number[] = [], BSI: number[] = [];
     const EL: number[] = [], ELF: number[] = [], ELR: number[] = [], ELA: number[] = [];
     const RL: number[] = [], RLR: number[] = [], RB: number[] = [], RBR: number[] = [], RBA: number[] = [];
-    const S: number[] = [], SS: number[] = [], T: number[] = [], TC: number[] = [], LP: number[] = [], LR: number[] = [];
+    const S: number[] = [], SS: number[] = [], T: number[] = [], TC: number[] = [], TP: number[] = [], LP: number[] = [], LR: number[] = [];
     this.tacks = [];
     this.ties = [];
-    for (const { model: m, base } of this.pieces) {
+    const nPieces = this.pieces.length;
+    this.pieceFlatArea = new Float64Array(nPieces);
+    this.pieceChord = new Float64Array(nPieces);
+    this.pieceAccForceSum = new Float64Array(nPieces);
+    this.pieceAccRelSpeedAreaSum = new Float64Array(nPieces);
+    this.pieceAccAlphaAreaSum = new Float64Array(nPieces);
+    this.pieceAccAreaSum = new Float64Array(nPieces);
+    this.pieceAccTipMax = new Float64Array(nPieces);
+    this.pieceAccBendRateSum = new Float64Array(nPieces);
+    this.pieceAccBendCount = new Int32Array(nPieces);
+    this.pieceAccStrainRateSum = new Float64Array(nPieces);
+    this.pieceAccStrainCount = new Int32Array(nPieces);
+    this.pieceSubstepsCounted = new Int32Array(nPieces);
+
+    for (let pi = 0; pi < nPieces; pi++) {
+      const { model: m, base } = this.pieces[pi];
       this.x.set(m.x0, 3 * base);
       this.w.set(m.invMass, base);
       const mat = m.material;
@@ -204,6 +267,7 @@ export class ClothSim {
         ER.push(rest);
         EM.push(m.edgeMin ? m.edgeMin[k / 2] : rest);
         EA.push(stretchAlpha / (m.edgeStiffness?.[k / 2] ?? 1));
+        EP.push(pi);
       }
       if (m.elastics && m.elasticRest && m.elasticAlpha) {
         for (let k = 0; k < m.elastics.length; k += 2) {
@@ -238,7 +302,11 @@ export class ClothSim {
       // Energy (3 k / A) |sum K_i x_i|^2 / 2 over a stencil of area A, so a
       // constraint |sum K_i x_i| = 0 of compliance A / (3 k).
       for (let k = 0; k < m.bends.length; k++) { B.push(base + m.bends[k]); BR.push(m.bendWeights[k]); }
-      m.bendArea.forEach((A, k) => BA.push(A / (3 * Math.max(1e-12, bendK * (m.bendStiffness?.[k] ?? 1)))));
+      m.bendArea.forEach((A, k) => {
+        BA.push(A / (3 * Math.max(1e-12, bendK * (m.bendStiffness?.[k] ?? 1))));
+        BP.push(pi);
+        BSI.push(1 / Math.max(0.008, Math.sqrt(Math.max(1e-6, A))));
+      });
       // Not spread: a gown has more stencils than a worker's stack has room for arguments.
       for (const v of m.bendRest) BC.push(v);
       for (let k = 0; k < m.limits.length; k += 2) { LP.push(base + m.limits[k], base + m.limits[k + 1]); LR.push(m.limitRest[k / 2]); }
@@ -246,8 +314,27 @@ export class ClothSim {
         S.push(base + m.stitches[k], base + m.stitches[k + 1]);
         SS.push(m.stitchSew ? m.stitchSew[k / 2] : m.sewTime);
       }
-      for (let k = 0; k < m.tris.length; k++) T.push(base + m.tris[k]);
-      for (let k = 0; k < m.tris.length / 3; k++) TC.push(mat.windCd);
+      let flatArea = 0;
+      let minX0 = Infinity, maxX0 = -Infinity, minY0 = Infinity, maxY0 = -Infinity, minZ0 = Infinity, maxZ0 = -Infinity;
+      for (let vp = 0; vp < m.x0.length; vp += 3) {
+        const px = m.x0[vp], py = m.x0[vp + 1], pz = m.x0[vp + 2];
+        if (px < minX0) minX0 = px; if (px > maxX0) maxX0 = px;
+        if (py < minY0) minY0 = py; if (py > maxY0) maxY0 = py;
+        if (pz < minZ0) minZ0 = pz; if (pz > maxZ0) maxZ0 = pz;
+      }
+      for (let k = 0; k < m.tris.length; k += 3) {
+        const ia = m.tris[k], ib = m.tris[k + 1], ic = m.tris[k + 2];
+        T.push(base + ia, base + ib, base + ic);
+        TC.push(mat.windCd);
+        TP.push(pi);
+        const ux = m.x0[3 * ib] - m.x0[3 * ia], uy = m.x0[3 * ib + 1] - m.x0[3 * ia + 1], uz = m.x0[3 * ib + 2] - m.x0[3 * ia + 2];
+        const vx = m.x0[3 * ic] - m.x0[3 * ia], vy = m.x0[3 * ic + 1] - m.x0[3 * ia + 1], vz = m.x0[3 * ic + 2] - m.x0[3 * ia + 2];
+        flatArea += 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+      }
+      this.pieceFlatArea[pi] = Math.max(1e-5, flatArea);
+      const spanHoriz = Math.hypot(maxX0 - minX0, maxY0 - minY0);
+      const spanMax = Math.max(spanHoriz, maxZ0 - minZ0);
+      this.pieceChord[pi] = Math.max(0.04, spanHoriz > 0.05 ? spanHoriz : Math.sqrt(Math.max(1e-4, flatArea)) || spanMax);
       for (const t of m.ties) if (!t.cloth) this.ties.push({ name: t.name, p: base + t.particle, body: t.body, anchor: t.anchor, anchorWorld: null, from: [], sew: m.sewTime, lambda: 0 });
       // Held weightless while its stitches close, as garment CAD sews: falling
       // meanwhile would drop the pieces before they meet.
@@ -285,6 +372,7 @@ export class ClothSim {
       this.zips.push({ cloth: m.name, trim: z.trim, stitch: Int32Array.from({ length: count }, (_, k) => first + k), at: Float64Array.from(z.at), length, fastened: z.fastened, want: z.fastened });
     }
     this.edges = Int32Array.from(E); this.edgeRest = Float64Array.from(ER); this.edgeMin = Float64Array.from(EM); this.edgeAlpha = Float64Array.from(EA); this.edgeLambda = new Float64Array(ER.length);
+    this.edgePiece = Int32Array.from(EP); this.edgePrevLen = Float64Array.from(ER);
     this.rodLinks = Int32Array.from(RL); this.rodLinkRest = Float64Array.from(RLR); this.rodBends = Int32Array.from(RB); this.rodBendRest = Float64Array.from(RBR); this.rodBendAlpha = Float64Array.from(RBA); this.rodBendLambda = new Float64Array(RBR.length);
     this.rodBendDir = new Float64Array(3 * RBR.length);
     for (let k = 0; k < RBR.length; k++) {
@@ -296,6 +384,8 @@ export class ClothSim {
     }
     this.elastics = Int32Array.from(EL); this.elasticFlat = Float64Array.from(ELF); this.elasticRest = Float64Array.from(ELR); this.elasticAlpha = Float64Array.from(ELA); this.elasticLambda = new Float64Array(ELR.length);
     this.bends = Int32Array.from(B); this.bendWeights = Float64Array.from(BR); this.bendAlpha = Float64Array.from(BA); this.bendRest = Float64Array.from(BC); this.bendLambda = new Float64Array(BA.length);
+    this.bendPiece = Int32Array.from(BP); this.bendSpanInv = Float64Array.from(BSI);
+    this.bendPrevC = Float64Array.from(BC); this.bendCurC = Float64Array.from(BC);
     this.bendSign = new Int8Array(BA.length);
     for (let s = 0; s < BA.length; s++) {
       if (this.bendRest[s] <= 1e-9) continue;
@@ -318,8 +408,26 @@ export class ClothSim {
     this.stitches = Int32Array.from(S); this.stitchSew = Float64Array.from(SS); this.stitchGap = new Float64Array(S.length / 2);
     this.stitchOn = new Uint8Array(S.length / 2).fill(1); this.stitchClose = new Float64Array(S.length / 2);
     for (const z of this.zips) z.stitch.forEach((k, j) => { this.stitchOn[k] = z.at[j] <= z.fastened + 1e-9 ? 1 : 0; });
-    this.tris = Int32Array.from(T); this.triCd = Float64Array.from(TC);
+    this.tris = Int32Array.from(T); this.triCd = Float64Array.from(TC); this.triPiece = Int32Array.from(TP);
     this.colliders = colliders;
+    this.wakeCylinders = [];
+    for (let ci = 0; ci < colliders.length; ci++) {
+      const sh = colliders[ci].shape;
+      if (sh.kind !== 'cylinder' && sh.kind !== 'capsule') continue;
+      const diam = 2 * sh.r;
+      if (diam < 0.01 || diam > 0.25) continue;
+      const lenAxis = Math.hypot(sh.b[0] - sh.a[0], sh.b[1] - sh.a[1], sh.b[2] - sh.a[2]);
+      const fullLen = sh.kind === 'capsule' ? lenAxis + diam : lenAxis;
+      if (fullLen / diam < 5) continue;
+      this.wakeCylinders.push({
+        ci,
+        diam,
+        axLocal: [sh.a[0], sh.a[1], sh.a[2]],
+        bxLocal: [sh.b[0], sh.b[1], sh.b[2]],
+        ax: sh.a[0], ay: sh.a[1], az: sh.a[2],
+        bx: sh.b[0], by: sh.b[1], bz: sh.b[2],
+      });
+    }
     this.contactN = new Float64Array(3 * n); this.contactPush = new Float64Array(n); this.contactMu = new Float64Array(n); this.contactHeld = new Float64Array(n); this.contactDisp = new Float64Array(3 * n);
     this.world = colliders.map(() => new THREE.Matrix4());
     this.prevWorld = colliders.map(() => new THREE.Matrix4());
@@ -333,6 +441,26 @@ export class ClothSim {
     for (const pc of this.pieces) for (const b of pc.model.boards ?? []) boards.push({ ...b, particles: b.particles.map((q) => pc.base + q) });
     this.boards = new BoardShapes(boards, this.n);
     this.clearBudget = new Float64Array(n); this.nearest = new Float64Array(n); this.skip = new Uint8Array(n);
+    this.tiePrevLambda = new Float64Array(this.ties.length);
+    this.tieFastLambda = new Float64Array(this.ties.length);
+    this.tieAvgLambda = new Float64Array(this.ties.length);
+    this.tieMinLambdaWindow = new Float64Array(this.ties.length);
+    this.tieLastImpactTime = new Float64Array(this.ties.length).fill(-1);
+    this.tieInit = new Uint8Array(this.ties.length);
+    this.witnessParticles = new Int32Array(0);
+    this.witnessPiece = new Int32Array(0);
+    this.witnessEffMass = new Float64Array(0);
+    this.witnessTris = new Int32Array(0);
+    this.witnessTriOffsets = new Int32Array(1);
+    this.witnessEdges = new Int32Array(0);
+    this.witnessEdgeOffsets = new Int32Array(1);
+    this.witnessPrevVNorm = new Float64Array(0);
+    this.witnessPrevSpeedSq = new Float64Array(0);
+    this.witnessPrevTension = new Float64Array(0);
+    this.witnessPrevRelSpeed = new Float64Array(0);
+    this.witnessLastSnapTime = new Float64Array(0);
+    this.witnessInit = new Uint8Array(0);
+    this.initAeroWitnesses();
     this.prev.set(this.x);
     this.aim();
   }
@@ -427,6 +555,20 @@ export class ClothSim {
       if (tie.anchorWorld) { tie.anchorWorld[0] = p.x; tie.anchorWorld[1] = p.y; tie.anchorWorld[2] = p.z; }
       else tie.anchorWorld = [p.x, p.y, p.z];
     }
+    // Update cached world endpoints for slender cylindrical/capsule colliders (Kármán wake street).
+    for (let wi = 0; wi < this.wakeCylinders.length; wi++) {
+      const wc = this.wakeCylinders[wi];
+      if (!this.worldInit[wc.ci]) continue;
+      const we = this.world[wc.ci].elements;
+      const a0 = wc.axLocal[0], a1 = wc.axLocal[1], a2 = wc.axLocal[2];
+      const b0 = wc.bxLocal[0], b1 = wc.bxLocal[1], b2 = wc.bxLocal[2];
+      wc.ax = we[0] * a0 + we[4] * a1 + we[8] * a2 + we[12];
+      wc.ay = we[1] * a0 + we[5] * a1 + we[9] * a2 + we[13];
+      wc.az = we[2] * a0 + we[6] * a1 + we[10] * a2 + we[14];
+      wc.bx = we[0] * b0 + we[4] * b1 + we[8] * b2 + we[12];
+      wc.by = we[1] * b0 + we[5] * b1 + we[9] * b2 + we[13];
+      wc.bz = we[2] * b0 + we[6] * b1 + we[10] * b2 + we[14];
+    }
   }
 
   /** Moves the cloth on by `dt`, in whole substeps (the remainder carries over). */
@@ -492,8 +634,25 @@ export class ClothSim {
     this.ext.fill(0);
     if (env.airDensity <= 0) return;
     const [wx0, wy0, wz0] = env.wind;
-    const hasMeanWind = wx0 !== 0 || wy0 !== 0 || wz0 !== 0;
+    const meanSpeed = Math.hypot(wx0, wy0, wz0);
+    const hasMeanWind = meanSpeed > 0;
+    const horizSpeed = Math.hypot(wx0, wy0);
+    const doTurbulence = this.settled && meanSpeed >= 0.5 && horizSpeed >= 1e-4;
+    const uxWind = horizSpeed >= 1e-4 ? wx0 / horizSpeed : 1;
+    const uyWind = horizSpeed >= 1e-4 ? wy0 / horizSpeed : 0;
     const gustAt = hasMeanWind ? env.gustAt : undefined;
+    const wakeCyls = doTurbulence ? this.wakeCylinders : null;
+    const nWake = wakeCyls ? wakeCyls.length : 0;
+    const simTime = this.time;
+    const kaimalMod = doTurbulence
+      ? 1.0 +
+        0.14 * Math.sin(2 * Math.PI * 0.33 * simTime + 0.4) +
+        0.08 * Math.sin(2 * Math.PI * 0.79 * simTime + 1.9)
+      : 1.0;
+    const recordAero = this.settled;
+    if (recordAero) {
+      for (let pi = 0; pi < this.pieces.length; pi++) this.pieceSubstepsCounted[pi]++;
+    }
     const x = this.x, v = this.v, T = this.tris, W = this.w, ext = this.ext;
     // Passive explicit-Euler cap per substep: aerodynamic force cannot reverse
     // relative air velocity within a single substep.
@@ -510,20 +669,87 @@ export class ClothSim {
       if (len < 1e-12) continue;
       const area = len / 2; nx /= len; ny /= len; nz /= len;
       let wx = wx0, wy = wy0, wz = wz0;
+      const needCentroid = !!gustAt || doTurbulence;
+      const cx = needCentroid ? (x[a] + x[b] + x[c]) / 3 : 0;
+      const cy = needCentroid ? (x[a + 1] + x[b + 1] + x[c + 1]) / 3 : 0;
+      const cz = needCentroid ? (x[a + 2] + x[b + 2] + x[c + 2]) / 3 : 0;
       if (gustAt) {
-        const cx = (x[a] + x[b] + x[c]) / 3, cy = (x[a + 1] + x[b + 1] + x[c + 1]) / 3, cz = (x[a + 2] + x[b + 2] + x[c + 2]) / 3;
-        const g = gustAt(wx0, wy0, cx, cy, cz, this.time);
-        wx = g[0]; wy = g[1]; wz = g[2];
+        const g = gustAt(wx0, wy0, cx, cy, cz, simTime);
+        wx = g[0] * kaimalMod; wy = g[1] * kaimalMod; wz = g[2] * kaimalMod;
+      } else if (doTurbulence) {
+        const sAdv = cx * uxWind + cy * uyWind - 0.72 * meanSpeed * simTime;
+        const sLat = -cx * uyWind + cy * uxWind;
+        const eddy1 = Math.sin(4.7 * sAdv + 6.1 * cz + 1.9 * simTime);
+        const eddy2 = Math.cos(8.3 * sAdv - 5.3 * sLat + 3.7 * simTime);
+        const longMod = kaimalMod * (1.0 + 0.075 * eddy1 + 0.03 * eddy2);
+        const latMod = meanSpeed * (0.065 * eddy2 + 0.035 * Math.sin(11.9 * cz + 7.1 * sLat - 4.3 * simTime));
+        wx = wx0 * longMod - uyWind * latMod;
+        wy = wy0 * longMod + uxWind * latMod;
+        wz = wz0 * kaimalMod + meanSpeed * 0.03 * Math.sin(6.4 * sAdv + 2.8 * simTime);
+      }
+      if (nWake > 0 && wakeCyls) {
+        const triIdx = t / 3;
+        const chordRef = this.pieceChord[this.triPiece[triIdx]] || 0.5;
+        for (let wi = 0; wi < nWake; wi++) {
+          const wc = wakeCyls[wi];
+          if (!this.worldInit[wc.ci]) continue;
+          const abx = wc.bx - wc.ax, aby = wc.by - wc.ay, abz = wc.bz - wc.az;
+          const ab2 = abx * abx + aby * aby + abz * abz;
+          if (ab2 < 1e-10) continue;
+          const tSeg = Math.max(0, Math.min(1, ((cx - wc.ax) * abx + (cy - wc.ay) * aby + (cz - wc.az) * abz) / ab2));
+          const px = wc.ax + abx * tSeg, py = wc.ay + aby * tSeg, pz = wc.az + abz * tSeg;
+          const dx = cx - px, dy = cy - py, dz = cz - pz;
+          const D = wc.diam;
+          if (Math.abs(dz) > 2.5 * D + 0.04 && Math.abs(abz) > 0.5 * Math.sqrt(ab2)) continue;
+          const sStream = dx * uxWind + dy * uyWind;
+          if (sStream <= 0 || sStream >= 16 * D) continue;
+          const sCross = -dx * uyWind + dy * uxWind;
+          if (Math.abs(sCross) >= 3.2 * D) continue;
+          const abLen = Math.sqrt(ab2);
+          const axUx = abx / abLen, axUy = aby / abLen, axUz = abz / abLen;
+          // Transverse wake velocity direction: wind × cylinder_axis (perpendicular to both flow and mast)
+          let pvx = uyWind * axUz, pvy = -uxWind * axUz, pvz = uxWind * axUy - uyWind * axUx;
+          const pvLen = Math.hypot(pvx, pvy, pvz);
+          if (pvLen > 1e-6) {
+            pvx /= pvLen; pvy /= pvLen; pvz /= pvLen;
+          } else {
+            pvx = -uyWind; pvy = uxWind; pvz = 0;
+          }
+          const dEff = Math.max(D, Math.min(0.28 * chordRef, 3.2 * D));
+          const fWake = Math.max(2.5, Math.min(14.0, (0.20 * meanSpeed) / dEff));
+          const envStream = Math.exp(-sStream / (14 * D));
+          const ratioCross = sCross / (2.2 * D);
+          const envCross = Math.exp(-ratioCross * ratioCross);
+          const phase = 2 * Math.PI * fWake * (simTime - sStream / (0.72 * meanSpeed)) + 0.8 * cz;
+          const uWake = 0.36 * meanSpeed * envStream * envCross * Math.sin(phase);
+          wx += pvx * uWake;
+          wy += pvy * uWake;
+          wz += pvz * uWake;
+        }
       }
       const rx = wx - vtx, ry = wy - vty, rz = wz - vtz;
       const s2 = rx * rx + ry * ry + rz * rz;
       if (s2 < 1e-8) continue;
       const s = Math.sqrt(s2), vn = rx * nx + ry * ny + rz * nz;
+      const sinAlpha = Math.min(1, Math.abs(vn) / s);
+      const alphaRad = Math.asin(sinAlpha);
+      const triIdx = t / 3;
       const qa = (0.5 * env.airDensity * s2 * area) / 3;
-      const pn = Math.sign(vn) * qa * clothNormalCoefficient(Math.asin(Math.min(1, Math.abs(vn) / s)), this.triCd[t / 3]);
+      const pn = Math.sign(vn) * qa * clothNormalCoefficient(alphaRad, this.triCd[triIdx]);
       const tx = rx - vn * nx, ty = ry - vn * ny, tz = rz - vn * nz, pt = (qa * SKIN_FRICTION) / s;
       const fx = pn * nx + pt * tx, fy = pn * ny + pt * ty, fz = pn * nz + pt * tz;
       const fMag = Math.hypot(fx, fy, fz);
+      if (recordAero) {
+        const pi = this.triPiece[triIdx];
+        // Total force across all 3 corners of this triangle is 3 * fMag
+        this.pieceAccForceSum[pi] += 3 * fMag;
+        this.pieceAccRelSpeedAreaSum[pi] += s * area;
+        this.pieceAccAlphaAreaSum[pi] += ((alphaRad * 180) / Math.PI) * area;
+        this.pieceAccAreaSum[pi] += area;
+        const vTriMag = Math.hypot(vtx, vty, vtz);
+        const effTip = Math.max(s, vTriMag);
+        if (effTip > this.pieceAccTipMax[pi]) this.pieceAccTipMax[pi] = effTip;
+      }
       const maxAccel = maxAccelPerSpeed * s;
       const applyCorner = (idx: number, k3: number) => {
         const wi = W[idx];
@@ -546,8 +772,10 @@ export class ClothSim {
    */
   settleNow() {
     if (this.settled) return;
-    this.settled = true;
-    if (this.time !== 0) return;
+    if (this.time !== 0) {
+      this.settled = true;
+      return;
+    }
     // Untangling (clothUntangle) is not run yet: on garments the tacks, which
     // hold layers a fabric's thickness apart, pull back what it parts, and the
     // crossings grew (gathers and pleats 129 -> 711 over 300 steps; with tacks
@@ -633,7 +861,7 @@ export class ClothSim {
           break;
         }
         const h = t >= fineFrom ? CLOTH_SUBSTEP : PRESEW_STEP;
-        this.substep(h, env);
+        this.substep(h, env, true);
         if (pulls.length && t >= letGo && t < letGo + h) for (const pl of pulls) this.w[pl.p] = held[pl.p];
         if (pulls.length && t >= pullFrom && t < letGo) {
           const f = Math.min(1, (t - pullFrom) / PULL_TIME), e = f * f * (3 - 2 * f);
@@ -687,6 +915,23 @@ export class ClothSim {
     this.untangle();
     this.ccdFrom = Float64Array.from(this.x);
     this.ccdSince = 0;
+    this.syncAeroBaselines();
+    this.settled = true;
+  }
+
+  /** Synchronizes rest/current bend & edge baselines after settle/untangle/restore so frame 1 reports zero false strain jump. */
+  private syncAeroBaselines() {
+    const x = this.x;
+    for (let k = 0; k < this.edgeRest.length; k++) {
+      const a = 3 * this.edges[2 * k], b = 3 * this.edges[2 * k + 1];
+      this.edgePrevLen[k] = Math.hypot(x[a] - x[b], x[a + 1] - x[b + 1], x[a + 2] - x[b + 2]);
+    }
+    this.bendPrevC.set(this.bendCurC);
+    this.witnessInit.fill(0);
+    this.witnessLastSnapTime.fill(-1);
+    this.tieInit.fill(0);
+    this.tieLastImpactTime.fill(-1);
+    this.consumeAeroTelemetry(0, true);
   }
 
   /** What the last untangle found and left: crossings before, after, and steps taken. */
@@ -838,8 +1083,8 @@ export class ClothSim {
     }
   }
 
-  private substep(h: number, env: ClothEnv) {
-    if (!this.settled) this.settleNow();
+  private substep(h: number, env: ClothEnv, skipSettleCheck = false) {
+    if (!skipSettleCheck && !this.settled) this.settleNow();
     const { x, prev, v, w, ext, n } = this;
     const [gx, gy, gz] = env.gravity;
     this.time += h;
@@ -960,6 +1205,9 @@ export class ClothSim {
       v[k] = vx;
       v[k + 1] = vy;
       v[k + 2] = vz;
+    }
+    if (this.settled && env.airDensity > 0) {
+      this.sampleSubstepAeroTelemetry(h, env);
     }
   }
 
@@ -1207,6 +1455,7 @@ export class ClothSim {
         cVal = cMag;
       }
       const at = A[s] / h2, dl = (-(cVal - this.bendRest[s]) - at * this.bendLambda[s]) / (den + at);
+      this.bendCurC[s] = cVal;
       this.bendLambda[s] += dl;
       const f0 = w[q0] * k0 * dl, f1 = w[q1] * k1 * dl, f2 = w[q2] * k2 * dl, f3 = w[q3] * k3 * dl;
       x[3 * q0] += f0 * nx; x[3 * q0 + 1] += f0 * ny; x[3 * q0 + 2] += f0 * nz;
@@ -1477,6 +1726,470 @@ export class ClothSim {
     return this.ties.map((t) => ({ name: t.name, newtons: t.lambda }));
   }
 
+  /**
+   * Detects free boundary witness vertices (up to 4 per ClothModel, prioritizing
+   * sharp free outline corners > 35° plus mid-leech) from `tris`, `stitches`, and `ties`.
+   */
+  private initAeroWitnesses() {
+    const sewn = new Uint8Array(this.n);
+    for (let k = 0; k < this.stitches.length; k++) sewn[this.stitches[k]] = 1;
+    const tied = new Uint8Array(this.n);
+    for (const t of this.ties) tied[t.p] = 1;
+
+    // Global incident triangle and distance-edge adjacency per particle
+    const globalTrisByVert: number[][] = Array.from({ length: this.n }, () => []);
+    for (let t = 0; t < this.tris.length; t += 3) {
+      const triIdx = t / 3;
+      globalTrisByVert[this.tris[t]].push(triIdx);
+      globalTrisByVert[this.tris[t + 1]].push(triIdx);
+      globalTrisByVert[this.tris[t + 2]].push(triIdx);
+    }
+    const globalEdgesByVert: number[][] = Array.from({ length: this.n }, () => []);
+    for (let k = 0; k < this.edges.length; k += 2) {
+      const edgeIdx = k / 2;
+      globalEdgesByVert[this.edges[k]].push(edgeIdx);
+      globalEdgesByVert[this.edges[k + 1]].push(edgeIdx);
+    }
+
+    const wParticles: number[] = [];
+    const wPiece: number[] = [];
+    const wEffMass: number[] = [];
+    const wTrisFlat: number[] = [];
+    const wTriOffsets: number[] = [0];
+    const wEdgesFlat: number[] = [];
+    const wEdgeOffsets: number[] = [0];
+
+    for (let pi = 0; pi < this.pieces.length; pi++) {
+      const { model: m, base } = this.pieces[pi];
+      const nv = m.invMass.length;
+      if (nv === 0 || m.tris.length < 3) continue;
+
+      // Count undirected triangle-edge shares within main cloth triangles (excluding tacked overlays)
+      const triEnd = m.overlayTrisStart !== undefined ? m.overlayTrisStart : m.tris.length;
+      const edgeShare = new Map<number, { a: number; b: number; count: number; dirA: number; dirB: number }>();
+      for (let t = 0; t < triEnd; t += 3) {
+        for (let e = 0; e < 3; e++) {
+          const la = m.tris[t + e], lb = m.tris[t + ((e + 1) % 3)];
+          const lo = la < lb ? la : lb, hi = la < lb ? lb : la;
+          const key = lo * nv + hi;
+          const cur = edgeShare.get(key);
+          if (cur) cur.count++;
+          else edgeShare.set(key, { a: lo, b: hi, count: 1, dirA: la, dirB: lb });
+        }
+      }
+
+      // Build directed free boundary adjacency (unshared, unsewn)
+      const outNext = new Map<number, number[]>();
+      const inPrev = new Map<number, number[]>();
+      for (const entry of edgeShare.values()) {
+        if (entry.count !== 1) continue;
+        const ga = base + entry.dirA, gb = base + entry.dirB;
+        if (sewn[ga] && sewn[gb]) continue;
+        (outNext.get(ga) ?? outNext.set(ga, []).get(ga)!).push(gb);
+        (inPrev.get(gb) ?? inPrev.set(gb, []).get(gb)!).push(ga);
+      }
+
+      // Compute distance of each vertex in this piece to nearest pinned/tied anchor (preferring free fly edge!)
+      const anchorPts: number[] = [];
+      for (let lv = 0; lv < nv; lv++) {
+        const gp = base + lv;
+        if (tied[gp] || this.w[gp] <= 0) anchorPts.push(gp);
+      }
+
+      interface CandidateWitness {
+        gp: number;
+        turnDeg: number;
+        anchorDist: number;
+        score: number;
+      }
+      const sharpCorners: CandidateWitness[] = [];
+      const smoothFree: CandidateWitness[] = [];
+
+      for (let lv = 0; lv < nv; lv++) {
+        const gp = base + lv;
+        if (this.w[gp] <= 0 || tied[gp] || sewn[gp]) continue;
+        const prevs = inPrev.get(gp);
+        const nexts = outNext.get(gp);
+        if (!prevs?.length && !nexts?.length) continue;
+
+        let minAnchorDist = 0.25;
+        if (anchorPts.length > 0) {
+          let bestD = Infinity;
+          const px = this.x[3 * gp], py = this.x[3 * gp + 1], pz = this.x[3 * gp + 2];
+          for (let ai = 0; ai < anchorPts.length; ai++) {
+            const ap = anchorPts[ai];
+            const d = Math.hypot(px - this.x[3 * ap], py - this.x[3 * ap + 1], pz - this.x[3 * ap + 2]);
+            if (d < bestD) bestD = d;
+          }
+          minAnchorDist = bestD;
+        }
+        // Skip vertices practically sitting right on top of a grommet/tie (< 1.5 cm)
+        if (anchorPts.length > 0 && minAnchorDist < 0.015) continue;
+
+        let turnDeg = 0;
+        if (prevs?.length && nexts?.length) {
+          const p0 = prevs[0], p2 = nexts[0];
+          const t1x = this.x[3 * gp] - this.x[3 * p0], t1y = this.x[3 * gp + 1] - this.x[3 * p0 + 1], t1z = this.x[3 * gp + 2] - this.x[3 * p0 + 2];
+          const t2x = this.x[3 * p2] - this.x[3 * gp], t2y = this.x[3 * p2 + 1] - this.x[3 * gp + 1], t2z = this.x[3 * p2 + 2] - this.x[3 * gp + 2];
+          const l1 = Math.hypot(t1x, t1y, t1z), l2 = Math.hypot(t2x, t2y, t2z);
+          if (l1 > 1e-9 && l2 > 1e-9) {
+            const cosTurn = Math.max(-1, Math.min(1, (t1x * t2x + t1y * t2y + t1z * t2z) / (l1 * l2)));
+            turnDeg = (Math.acos(cosTurn) * 180) / Math.PI;
+          }
+        } else {
+          turnDeg = 90;
+        }
+
+        const cand: CandidateWitness = {
+          gp,
+          turnDeg,
+          anchorDist: minAnchorDist,
+          score: minAnchorDist * (1 + turnDeg / 90),
+        };
+        if (turnDeg > 35) sharpCorners.push(cand);
+        else smoothFree.push(cand);
+      }
+
+      sharpCorners.sort((a, b) => b.score - a.score);
+      smoothFree.sort((a, b) => b.anchorDist - a.anchorDist);
+
+      const chosen: number[] = [];
+      const minSep = Math.max(0.035, 0.14 * (this.pieceChord[pi] || 0.4));
+      const tryPick = (gp: number, sep: number): boolean => {
+        if (chosen.includes(gp)) return false;
+        const px = this.x[3 * gp], py = this.x[3 * gp + 1], pz = this.x[3 * gp + 2];
+        for (const c of chosen) {
+          if (Math.hypot(px - this.x[3 * c], py - this.x[3 * c + 1], pz - this.x[3 * c + 2]) < sep) return false;
+        }
+        if (globalTrisByVert[gp].length === 0) return false;
+        chosen.push(gp);
+        return true;
+      };
+
+      // Prioritize sharp free corners (> 35°, e.g. upper & lower fly corners), then mid-leech
+      for (const sc of sharpCorners) {
+        if (chosen.length >= 3) break;
+        tryPick(sc.gp, minSep);
+      }
+      for (const sf of smoothFree) {
+        if (chosen.length >= 4) break;
+        tryPick(sf.gp, minSep);
+      }
+      for (const sc of sharpCorners) {
+        if (chosen.length >= 4) break;
+        tryPick(sc.gp, minSep * 0.5);
+      }
+
+      const avgTriArea = this.pieceFlatArea[pi] / Math.max(1, triEnd / 3);
+      const effMass = Math.max(0.0015, 4 * m.material.arealDensity * avgTriArea);
+
+      for (const gp of chosen) {
+        wParticles.push(gp);
+        wPiece.push(pi);
+        wEffMass.push(effMass);
+        for (const ti of globalTrisByVert[gp]) wTrisFlat.push(ti);
+        wTriOffsets.push(wTrisFlat.length);
+        for (const ei of globalEdgesByVert[gp]) wEdgesFlat.push(ei);
+        wEdgeOffsets.push(wEdgesFlat.length);
+      }
+    }
+
+    const nw = wParticles.length;
+    this.witnessParticles = Int32Array.from(wParticles);
+    this.witnessPiece = Int32Array.from(wPiece);
+    this.witnessEffMass = Float64Array.from(wEffMass);
+    this.witnessTris = Int32Array.from(wTrisFlat);
+    this.witnessTriOffsets = Int32Array.from(wTriOffsets);
+    this.witnessEdges = Int32Array.from(wEdgesFlat);
+    this.witnessEdgeOffsets = Int32Array.from(wEdgeOffsets);
+    this.witnessPrevVNorm = new Float64Array(nw);
+    this.witnessPrevSpeedSq = new Float64Array(nw);
+    this.witnessPrevTension = new Float64Array(nw);
+    this.witnessPrevRelSpeed = new Float64Array(nw);
+    this.witnessLastSnapTime = new Float64Array(nw).fill(-1);
+    this.witnessInit = new Uint8Array(nw);
+  }
+
+  /**
+   * Zero-allocation per-substep aeroacoustic witness, strain/bend rate, and tie-jerk sampler.
+   */
+  private sampleSubstepAeroTelemetry(h: number, env: ClothEnv) {
+    const invH = 1 / h;
+    const invH2 = invH * invH;
+    const x = this.x, v = this.v, T = this.tris;
+    const [wx0, wy0, wz0] = env.wind;
+    const t = this.time;
+
+    // 1. Accumulate hinge bend angular rate |c_val - c_prev| / h normalized by stencil span
+    const nBends = this.bendAlpha.length;
+    for (let s = 0; s < nBends; s++) {
+      const curC = this.bendCurC[s];
+      const dThetaDt = Math.abs(curC - this.bendPrevC[s]) * invH * this.bendSpanInv[s];
+      this.bendPrevC[s] = curC;
+      const pi = this.bendPiece[s];
+      this.pieceAccBendRateSum[pi] += dThetaDt;
+      this.pieceAccBendCount[pi]++;
+    }
+
+    // 2. Accumulate mean tensile strain rate |eps_dot| across distance edges (sampled stride-4 on dense meshes for <5 us cost)
+    const nEdges = this.edgeRest.length;
+    const edgeStride = nEdges > 600 ? 4 : 1;
+    const startEdge = ((Math.round(t * invH) % edgeStride) + edgeStride) % edgeStride;
+    for (let k = startEdge; k < nEdges; k += edgeStride) {
+      const a = 3 * this.edges[2 * k], b = 3 * this.edges[2 * k + 1];
+      const len = Math.hypot(x[a] - x[b], x[a + 1] - x[b + 1], x[a + 2] - x[b + 2]);
+      const rest = this.edgeRest[k];
+      const prevLen = this.edgePrevLen[k];
+      this.edgePrevLen[k] = len;
+      if (rest > 1e-6) {
+        const epsDot = Math.abs(len - prevLen) * (invH / (rest * edgeStride));
+        const pi = this.edgePiece[k];
+        this.pieceAccStrainRateSum[pi] += epsDot;
+        this.pieceAccStrainCount[pi]++;
+      }
+    }
+
+    // 3. Per-witness trailing-edge / free-corner whip-snap detector
+    const nw = this.witnessParticles.length;
+    for (let wi = 0; wi < nw; wi++) {
+      const gp = this.witnessParticles[wi];
+      if (t < this.floatUntil[gp] + 0.05) continue;
+      const p3 = 3 * gp;
+      const vx = v[p3], vy = v[p3 + 1], vz = v[p3 + 2];
+      const speedSq = vx * vx + vy * vy + vz * vz;
+
+      // Area-weighted vertex normal from incident triangles
+      let nx = 0, ny = 0, nz = 0;
+      const tStart = this.witnessTriOffsets[wi], tEnd = this.witnessTriOffsets[wi + 1];
+      for (let ti = tStart; ti < tEnd; ti++) {
+        const triOff = 3 * this.witnessTris[ti];
+        const ia = 3 * T[triOff], ib = 3 * T[triOff + 1], ic = 3 * T[triOff + 2];
+        const ux = x[ib] - x[ia], uy = x[ib + 1] - x[ia + 1], uz = x[ib + 2] - x[ia + 2];
+        const wxv = x[ic] - x[ia], wyv = x[ic + 1] - x[ia + 1], wzv = x[ic + 2] - x[ia + 2];
+        nx += uy * wzv - uz * wyv;
+        ny += uz * wxv - ux * wzv;
+        nz += ux * wyv - uy * wxv;
+      }
+      const nl = Math.hypot(nx, ny, nz);
+      if (nl < 1e-12) continue;
+      nx /= nl; ny /= nl; nz /= nl;
+
+      const vNorm = vx * nx + vy * ny + vz * nz;
+
+      // Incident XPBD membrane tension T_p = sum_{e ni p} |lambda_e| / h^2 (N)
+      let tensionN = 0;
+      const eStart = this.witnessEdgeOffsets[wi], eEnd = this.witnessEdgeOffsets[wi + 1];
+      for (let ei = eStart; ei < eEnd; ei++) {
+        tensionN += Math.abs(this.edgeLambda[this.witnessEdges[ei]]) * invH2;
+      }
+
+      const relSpeed = Math.hypot(vx - wx0, vy - wy0, vz - wz0);
+
+      if (!this.witnessInit[wi]) {
+        this.witnessPrevVNorm[wi] = vNorm;
+        this.witnessPrevSpeedSq[wi] = speedSq;
+        this.witnessPrevTension[wi] = tensionN;
+        this.witnessPrevRelSpeed[wi] = relSpeed;
+        this.witnessInit[wi] = 1;
+        continue;
+      }
+
+      const prevVN = this.witnessPrevVNorm[wi];
+      const prevSpSq = this.witnessPrevSpeedSq[wi];
+      const prevTen = this.witnessPrevTension[wi];
+      const prevRel = this.witnessPrevRelSpeed[wi];
+
+      const dvNorm = Math.abs(vNorm - prevVN);
+      const accelNorm = dvNorm * invH;
+      const effRel = Math.max(relSpeed, prevRel);
+      const isReversal = vNorm * prevVN <= 0.02 || speedSq < 0.70 * prevSpSq;
+      const isTensionSpike = tensionN > 1.12 * prevTen + 0.08 || accelNorm > 75.0;
+
+      this.witnessPrevVNorm[wi] = vNorm;
+      this.witnessPrevSpeedSq[wi] = speedSq;
+      this.witnessPrevTension[wi] = tensionN;
+      this.witnessPrevRelSpeed[wi] = relSpeed;
+
+      if (
+        effRel >= 1.2 &&
+        accelNorm > 32.0 &&
+        isReversal &&
+        isTensionSpike &&
+        t - this.witnessLastSnapTime[wi] >= 0.065
+      ) {
+        this.witnessLastSnapTime[wi] = t;
+        const deltaT = Math.max(0, tensionN - prevTen);
+        const impulseNs = Math.max(0, Math.min(0.65, this.witnessEffMass[wi] * dvNorm + 0.0012 * deltaT));
+        if (impulseNs >= 0.0005 && this.pendingSnaps.length < 16) {
+          const pi = this.witnessPiece[wi];
+          const m = this.pieces[pi].model;
+          this.pendingSnaps.push({
+            nodeId: m.name,
+            impulseNs: +impulseNs.toFixed(5),
+            arealDensityKgM2: m.material.arealDensity,
+            relSpeedMps: +effRel.toFixed(3),
+            worldPos: [+x[p3].toFixed(4), +x[p3 + 1].toFixed(4), +x[p3 + 2].toFixed(4)],
+            seq: ++this.snapSeqCounter,
+          });
+        }
+      }
+    }
+
+    // 4. Mast / rigid-body tie tension jerk -> ClothTieImpactEvent
+    //    Tracks both single-substep tension jerk `(T - T_prev)/h > 160 N/s` AND ~5 ms wave-arrival
+    //    tension rise `T - T_fast >= 0.45 N` (since a traveling membrane wave builds grommet tension
+    //    over 2–4 substeps = 3–6 ms at 600 Hz!).
+    for (let ti = 0; ti < this.ties.length; ti++) {
+      const tie = this.ties[ti];
+      if (!tie.body) continue;
+      const curT = tie.lambda;
+      if (!this.tieInit[ti] || t <= tie.sew + 0.05) {
+        this.tiePrevLambda[ti] = curT;
+        this.tieFastLambda[ti] = curT;
+        this.tieAvgLambda[ti] = curT;
+        this.tieMinLambdaWindow[ti] = curT;
+        this.tieInit[ti] = 1;
+        continue;
+      }
+      const prevT = this.tiePrevLambda[ti];
+      const fastT = this.tieFastLambda[ti];
+      const avgT = this.tieAvgLambda[ti];
+      const minWin = this.tieMinLambdaWindow[ti];
+
+      const dSub = curT - prevT;
+      const dWave = curT - fastT;
+      const dT = Math.max(dSub, dWave);
+      const dTdt = Math.max(dSub * invH, dWave / 0.0022);
+
+      // Update ~20 ms wave-trough baseline, ~110 ms EMA tension baseline, and sliding slack minimum
+      this.tiePrevLambda[ti] = curT;
+      this.tieFastLambda[ti] = fastT + 0.08 * (curT - fastT);
+      this.tieAvgLambda[ti] = avgT + 0.015 * (curT - avgT);
+      this.tieMinLambdaWindow[ti] = curT < minWin ? curT : minWin + 0.008 * (curT - minWin);
+
+      if (dTdt > 160.0 && dT >= 0.45 && t - this.tieLastImpactTime[ti] >= 0.075) {
+        this.tieLastImpactTime[ti] = t;
+        this.tieFastLambda[ti] = curT;
+        const isSlackSnap = minWin < 0.35 * avgT || minWin < 0.6;
+        // Reset slack window after snap so a single arrest does not double-count as slack
+        this.tieMinLambdaWindow[ti] = curT;
+        const impulseNs = Math.max(0.002, Math.min(0.25, 0.0028 * dT * (isSlackSnap ? 1.8 : 1.0)));
+        if (this.pendingTieImpacts.length < 16) {
+          this.pendingTieImpacts.push({
+            bodyName: tie.body,
+            anchorLocal: tie.anchor && tie.anchor.length >= 3 ? [tie.anchor[0], tie.anchor[1], tie.anchor[2]] : null,
+            impulseNs: +impulseNs.toFixed(5),
+            isGrommetClink: isSlackSnap,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Drains accumulated per-piece continuous `AeroVoiceTelemetry`, trailing-edge `AeroSnapEvent`s,
+   * and rigid-body `ClothTieImpactEvent`s since the previous read, resetting all accumulators cleanly.
+   */
+  consumeAeroTelemetry(
+    airDensity: number,
+    isVacuum: boolean,
+  ): {
+    voices: AeroVoiceTelemetry[];
+    snaps: AeroSnapEvent[];
+    tieImpacts: ClothTieImpactEvent[];
+  } {
+    const nPieces = this.pieces.length;
+    if (isVacuum || !(airDensity > 0)) {
+      this.pieceAccForceSum.fill(0);
+      this.pieceAccRelSpeedAreaSum.fill(0);
+      this.pieceAccAlphaAreaSum.fill(0);
+      this.pieceAccAreaSum.fill(0);
+      this.pieceAccTipMax.fill(0);
+      this.pieceAccBendRateSum.fill(0);
+      this.pieceAccBendCount.fill(0);
+      this.pieceAccStrainRateSum.fill(0);
+      this.pieceAccStrainCount.fill(0);
+      this.pieceSubstepsCounted.fill(0);
+      this.pendingSnaps.length = 0;
+      this.pendingTieImpacts.length = 0;
+      return { voices: [], snaps: [], tieImpacts: [] };
+    }
+
+    const voices: AeroVoiceTelemetry[] = [];
+    const x = this.x;
+
+    for (let pi = 0; pi < nPieces; pi++) {
+      const substeps = this.pieceSubstepsCounted[pi];
+      const areaSum = this.pieceAccAreaSum[pi];
+      const forceSum = this.pieceAccForceSum[pi];
+      const relAreaSum = this.pieceAccRelSpeedAreaSum[pi];
+      const alphaAreaSum = this.pieceAccAlphaAreaSum[pi];
+      const tipMax = this.pieceAccTipMax[pi];
+      const bendSum = this.pieceAccBendRateSum[pi];
+      const bendCnt = this.pieceAccBendCount[pi];
+      const strainSum = this.pieceAccStrainRateSum[pi];
+      const strainCnt = this.pieceAccStrainCount[pi];
+
+      this.pieceAccForceSum[pi] = 0;
+      this.pieceAccRelSpeedAreaSum[pi] = 0;
+      this.pieceAccAlphaAreaSum[pi] = 0;
+      this.pieceAccAreaSum[pi] = 0;
+      this.pieceAccTipMax[pi] = 0;
+      this.pieceAccBendRateSum[pi] = 0;
+      this.pieceAccBendCount[pi] = 0;
+      this.pieceAccStrainRateSum[pi] = 0;
+      this.pieceAccStrainCount[pi] = 0;
+      this.pieceSubstepsCounted[pi] = 0;
+
+      if (substeps <= 0) continue;
+
+      const { model: m, base } = this.pieces[pi];
+      const relSpeedMps = areaSum > 1e-8 ? relAreaSum / areaSum : 0;
+      const alphaDeg = areaSum > 1e-8 ? alphaAreaSum / areaSum : 0;
+      const aeroForceN = forceSum / substeps;
+      const meanBendRate = bendCnt > 0 ? bendSum / bendCnt : 0;
+      const meanStrainRate = strainCnt > 0 ? strainSum / strainCnt : 0;
+      const bendRateRadPerSec = meanBendRate + 8.0 * meanStrainRate;
+
+      // Calm / resting cloth guard: emit zero voices when effectively motionless in still air
+      // (a free sheet dropped from horizontal in still air takes several seconds for gravity pendulum
+      // swing to damp out; require actual flow speed >= 0.45 m/s or rapid flapping bendRate >= 2.2 rad/s).
+      if (relSpeedMps < 0.45 && (tipMax < 0.85 || aeroForceN < 0.015) && bendRateRadPerSec < 2.2) continue;
+
+      const nv = m.invMass.length;
+      let cx = 0, cy = 0, cz = 0;
+      if (nv > 0) {
+        for (let lv = 0; lv < nv; lv++) {
+          const k = 3 * (base + lv);
+          cx += x[k]; cy += x[k + 1]; cz += x[k + 2];
+        }
+        cx /= nv; cy /= nv; cz /= nv;
+      }
+
+      voices.push({
+        hubOrBodyId: m.name,
+        bladeCount: 0,
+        omegaRadPerSec: 0,
+        tipSpeedMps: +tipMax.toFixed(4),
+        relSpeedMps: +relSpeedMps.toFixed(4),
+        alphaDeg: +alphaDeg.toFixed(3),
+        areaM2: +this.pieceFlatArea[pi].toFixed(5),
+        chordM: +this.pieceChord[pi].toFixed(4),
+        thicknessM: +Math.max(0.0002, m.material.thickness).toFixed(5),
+        aeroForceN: +aeroForceN.toFixed(4),
+        arealDensityKgM2: +m.material.arealDensity.toFixed(4),
+        bendRateRadPerSec: +bendRateRadPerSec.toFixed(4),
+        isCloth: true,
+        worldPos: [+cx.toFixed(4), +cy.toFixed(4), +cz.toFixed(4)],
+      });
+    }
+
+    const snaps = this.pendingSnaps.length > 0 ? this.pendingSnaps.splice(0) : [];
+    const tieImpacts = this.pendingTieImpacts.length > 0 ? this.pendingTieImpacts.splice(0) : [];
+
+    return { voices, snaps, tieImpacts };
+  }
+
   /** Positions, velocities, accumulator, float timers, board quaternions, and zipper/stitch state to carry cloth across a rebuild or worker recycle. */
   state() {
     return {
@@ -1537,6 +2250,7 @@ export class ClothSim {
     const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches)), crossings = findCrossings(this.x, m);
     this.ccdOf().setTangled(crossings);
     this.ccdFrom = Float64Array.from(this.x); this.ccdSince = 0;
+    this.syncAeroBaselines();
     return true;
   }
 }

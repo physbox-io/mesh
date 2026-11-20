@@ -15,6 +15,7 @@
 
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { useSoundStore } from '../store/soundStore';
+import { solveClothSnapPulse, type SnapSynthParams } from './aeroAcoustics';
 import { deformMaterial, geomVolume } from './deformMaterials';
 import {
   analyze3DCavityAndPorts,
@@ -1448,6 +1449,8 @@ export function updateLiveAeroVoices(voices: SpatialAeroSynthParams[]): void {
   postWorkletAeroUpdate(ctx, voices);
 }
 
+let auditionSnapSeq = 1;
+
 /** Triggers an impulsive trailing-edge cloth / flag N-wave whip-snap through the shared acoustic bus. */
 export function playAeroSnapPulse(
   snap: SpatialSnapSynthParams,
@@ -1457,6 +1460,25 @@ export function playAeroSnapPulse(
   const ctx = getAudioContext();
   if (!ctx) return;
   postWorkletAeroSnap(ctx, snap, spatial);
+}
+
+/** Auditions a clean cloth whip-snap at areal density `arealDensityKgM2` (e.g. from the Inspector). */
+export function auditionClothSnap(
+  arealDensityKgM2: number,
+  nodeId = 'audition_cloth',
+  relSpeedMps = 8.5,
+  impulseNs = 0.055,
+): SnapSynthParams {
+  unlockAudioContext();
+  const snapParams = solveClothSnapPulse({
+    nodeId,
+    impulseNs,
+    arealDensityKgM2,
+    relSpeedMps,
+    seq: auditionSnapSeq++,
+  });
+  playAeroSnapPulse(snapParams);
+  return snapParams;
 }
 
 /** Immediately fades out all continuous aeroacoustic voices (on Stop or Mute). */
