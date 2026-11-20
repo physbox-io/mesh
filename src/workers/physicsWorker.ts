@@ -81,6 +81,7 @@ import {
   selectMultiFingerStopFraction,
   shouldEmitPairImpact,
 } from '../utils/contactFrictionAcoustics';
+import { isCriticallyDampedDamperPress } from '../utils/voiceSympathyPool';
 import { HistoryRing } from './historyRing';
 import { buildImpactWatches, checkImpacts as detectImpacts, type ImpactWatches } from './impactWatch';
 import { JOINT_NV, applyEditedCtrl, captureState, copyCarriedActuators as copyCarriedActuatorsByName, copyJointsByName, documentCtrlValues, seedNewBodies, type CarriedState } from './carryState';
@@ -1163,6 +1164,7 @@ const recentPluckTouchSite = new Map<
   { otherBodyId: number; selfGeom: number; otherGeom: number; worldPos: [number, number, number]; atSimTime: number }
 >();
 const continuousPairStartSimTime = new Map<string, number>();
+const lastNodeStrikeSimTime = new Map<string, number>();
 let lastBowEmitMs = 0;
 let hadActiveBowedStrings = false;
 let hadActiveFrictionContacts = false;
@@ -1227,10 +1229,10 @@ let hadActiveAeroVoices = false;
 const SOFTNESS_BY_MATERIAL: Record<string, number> = {
   rubber: 0.92,
   plastic: 0.58,
-  softwood: 0.42,
-  pasta: 0.35,
-  hardwood: 0.32,
-  stone: 0.18,
+  pasta: 0.24,
+  softwood: 0.20,
+  hardwood: 0.16,
+  stone: 0.14,
   ceramic: 0.10,
   softMetal: 0.08,
   glass: 0.06,
@@ -1268,6 +1270,7 @@ const rebuildHydroAndFlexureCaches = (
   prevActiveStringsByBow.clear();
   recentPluckTouchSite.clear();
   continuousPairStartSimTime.clear();
+  lastNodeStrikeSimTime.clear();
   prevConstraintDof = null;
   prevStringVelDof = null;
   aeroVoiceGroups = [];
@@ -1493,11 +1496,11 @@ const rebuildHydroAndFlexureCaches = (
             const movingBodyId = rider ? bodyIdCache[rider.id] : undefined;
             if (!rider || movingBodyId === undefined || movingBodyId <= 0) continue;
 
-            // Suppress rigid end-stop clacks on heavily overdamped pneumatic/dashpot joints (e.g. `cushion_squash` damping=110)
+            // Suppress rigid end-stop clacks on joints explicitly marked `hardStop: false` or heavily overdamped dashpots
             const approxMass = Math.max(0.05, bodyMass[movingBodyId] ?? 0.25);
             const jDamp = j.damping ?? 0;
             const dampPerKg = jDamp / approxMass;
-            if (dampPerKg > 45 || (!j.hardStop && jDamp > 25)) continue;
+            if (j.hardStop === false || dampPerKg > 45 || (!j.hardStop && jDamp > 25)) continue;
             const dampingScale = dampPerKg > 15 ? Math.max(0.15, 1 - (dampPerKg - 15) / 35) : 1.0;
 
             jointStopWatches.push({
@@ -2353,6 +2356,7 @@ const sampleAudioImpacts = (stepSize: number) => {
   const enqueuePairImpact = (
     targetBId: number,
     targetNodeId: string,
+    partnerBId: number,
     partnerNodeId: string,
     selfGeom: number,
     otherGeom: number,
@@ -2361,8 +2365,52 @@ const sampleAudioImpacts = (stepSize: number) => {
     solTime: number,
   ) => {
     if (effImpulseNs < 0.0015 || windSubtreeBodyIds.has(targetBId)) return;
+    // When an untuned mallet/beater/plectrum strikes an explicitly tuned musical resonator (`tunedPitchHz`,
+    // `acousticMembrane`, `nonlinearPlate`, `acousticString`), the striker's Hertzian compliance & mass are
+    // already modeled in `resolveTwoBodyImpact` on the resonator — never emit a second dull beater-stick thud!
+    if (
+      partnerBId > 0 &&
+      distinctAcousticChildBodyIds.has(partnerBId) &&
+      !distinctAcousticChildBodyIds.has(targetBId)
+    ) {
+      return;
+    }
+    const cKey = `${Math.min(targetBId, partnerBId)}:${Math.max(targetBId, partnerBId)}`;
+    const prevStart = continuousPairStartSimTime.get(cKey);
+    if (prevStart === undefined || simTime < prevStart) {
+      continuousPairStartSimTime.set(cKey, simTime);
+    }
+    // Critically-damped soft felt/rubber dampers (`softness >= 0.85 && solDamp >= 0.85`, e.g. `vibe_damper_bar`
+    // or `cymbal_choke_arm`) gently pressing against a distinct resonator mute via `AUDIO_DAMPING` — never
+    // re-strike the resonator via `AUDIO_IMPACTS` or overwrite `lastNodeStrikeSimTime`!
+    if (
+      partnerBId > 0 &&
+      distinctAcousticChildBodyIds.has(targetBId) &&
+      !distinctAcousticChildBodyIds.has(partnerBId)
+    ) {
+      const partnerSoft = bodySoftnessByBodyId?.[partnerBId] ?? 0.24;
+      const gSolref = model!.geom_solref;
+      const pSt = gSolref[otherGeom * 2] ?? 0.004;
+      const pSd = gSolref[otherGeom * 2 + 1] ?? 1.0;
+      const partnerSolDamp = pSt > 0 && pSd > 0 ? pSd : 0.5;
+      if (partnerSoft >= 0.85 && partnerSolDamp >= 0.85) {
+        const views = velocityViews(model!, data!);
+        const vTarget = bodyPointVelocity(views, targetBId, worldPos);
+        const vPartner = bodyPointVelocity(views, partnerBId, worldPos);
+        const relSpeed = Math.hypot(
+          vPartner[0] - vTarget[0],
+          vPartner[1] - vTarget[1],
+          vPartner[2] - vTarget[2],
+        );
+        const partnerMassKg = Math.max(0.02, model!.body_mass[partnerBId] || 0.06);
+        if (isCriticallyDampedDamperPress(partnerSoft, partnerSolDamp, relSpeed, effImpulseNs, partnerMassKg)) {
+          return;
+        }
+      }
+    }
     const pairKey = `${targetNodeId}:${partnerNodeId}`;
     if (!shouldEmitPairImpact(lastAudioEmitSim.get(pairKey), simTime, effImpulseNs, solTime)) return;
+    lastNodeStrikeSimTime.set(targetNodeId, simTime);
     const ox = data!.xpos[targetBId * 3];
     const oy = data!.xpos[targetBId * 3 + 1];
     const oz = data!.xpos[targetBId * 3 + 2];
@@ -2407,6 +2455,7 @@ const sampleAudioImpacts = (stepSize: number) => {
     enqueuePairImpact(
       bId,
       nodeId,
+      site.otherBodyId,
       otherNodeId,
       site.selfGeom,
       site.otherGeom,
@@ -2426,6 +2475,7 @@ const sampleAudioImpacts = (stepSize: number) => {
       enqueuePairImpact(
         site.otherBodyId,
         otherNodeId,
+        bId,
         nodeId,
         site.otherGeom,
         site.selfGeom,
@@ -2922,6 +2972,7 @@ const flushBowedStrings = () => {
     const avgSlip = agg.weightedSlipSum * invF;
     const avgRoll = agg.weightedRollSum * invF;
     const patchMotion = Math.max(avgSlip, avgRoll);
+    let isRimRub = false;
 
     if (patchMotion >= 0.012 && agg.totalForceN >= 0.015) {
       const rollingRatio = Math.max(0, Math.min(1, avgRoll / Math.max(1e-5, avgSlip + avgRoll)));
@@ -2942,7 +2993,10 @@ const flushBowedStrings = () => {
           const tx = -localPoint[1] / rRim;
           const ty = localPoint[0] / rRim;
           const align = Math.abs(vtLocal[0] * tx + vtLocal[1] * ty) / vtNorm;
-          if (align >= 0.65) circumferentialRub = +align.toFixed(3);
+          if (align >= 0.65) {
+            circumferentialRub = +align.toFixed(3);
+            isRimRub = true;
+          }
         }
       }
 
@@ -2970,10 +3024,16 @@ const flushBowedStrings = () => {
       });
     }
 
-    // Viscoelastic modal damping (Starter #3): sustained contact >= 35 ms against a soft/damping body
-    if (agg.durSec >= 0.035 && agg.totalForceN >= 0.05) {
+    // Viscoelastic modal damping (Starter #3): ONLY newly arriving post-strike contacts (`cStart > lastStrikeT + 0.06s`)
+    // from a soft/felt damper body (`bPartner > 0 && damperSoft >= 0.45 && !isRimRub`) apply contact choking!
+    // Pre-existing resting mounts, frame rails, pins, cushions, static floor, and the striking mallet itself NEVER choke!
+    if (bPartner > 0 && !isRimRub && agg.durSec >= 0.035 && agg.totalForceN >= 0.05) {
       const damperSoft = bodySoftnessByBodyId?.[bPartner] ?? 0.14;
-      if (damperSoft >= 0.28 || (bPartner === 0 && agg.totalForceN >= 1.5)) {
+      const cStart = continuousPairStartSimTime.get(agg.pairKey) ?? (data.time - agg.durSec);
+      const lastStrikeT = lastNodeStrikeSimTime.get(nodeId);
+      const isPostStrikeArrival =
+        lastStrikeT !== undefined ? cStart > lastStrikeT + 0.060 : cStart > 0.060;
+      if (damperSoft >= 0.45 && isPostStrikeArrival) {
         const mTarget = Math.max(0.02, bodyMass[bPrimary] || 0.25);
         const dampingRate = computeContactDampingRate(agg.totalForceN, damperSoft, mTarget);
         if (dampingRate >= 0.6) {

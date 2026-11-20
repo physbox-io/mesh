@@ -26,7 +26,11 @@ import { pointList, toRenderVertices } from './bridgeUtils';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 import { latticeBodyPos } from '../../utils/latticeFrame';
 import { sceneContentBounds } from '../../utils/frameScene';
-import { checkIncomingBody } from '../../utils/incomingBodyCheck';
+import { checkIncomingBody, normalizeAcousticFields } from '../../utils/incomingBodyCheck';
+import { noteToHz, tuneBodyToPitch, tuneWindInstrumentToPitch } from '../../utils/acousticTuning';
+import { tuneStringToPitch } from '../../utils/stringAcoustics';
+import { tuneMembraneToPitch } from '../../utils/membraneAcoustics';
+import { tuneResonatorTubeToPitch } from '../../utils/resonatorAcoustics';
 import { geomSizeProblem } from '../../utils/geomSize';
 import { withoutNulls } from '../../utils/withoutNulls';
 import { clampBodyForm } from '../../utils/cloth/bodyForm';
@@ -282,6 +286,71 @@ export const resolveBreakFields = (fields: Record<string, any>, materialId: stri
   } else if ('joinMaterial' in fields) fields.joinMaterial = undefined;
   return null;
 };
+
+/** A declarative `tuneTo`, parsed: the pitch to tune a body to, in Hz. */
+export interface TuneToSpec { hz: number; drillNodalHole: boolean }
+
+/**
+ * `tuneTo` as an agent writes it: a note ('A4', 'F#3'), a number of Hz, or
+ * { note | hz, drillNodalHole? }; a body-level `drillNodalHole` also counts.
+ * Throws an Error saying what is accepted.
+ */
+export function parseTuneTo(raw: unknown, drill?: unknown): TuneToSpec {
+  const obj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+  const value = obj ? (obj.hz ?? obj.note) : raw;
+  let hz: number | null = null;
+  if (typeof value === 'number') hz = value;
+  else if (typeof value === 'string') hz = noteToHz(value) ?? (Number.isFinite(Number(value)) && value.trim() !== '' ? Number(value) : null);
+  if (hz === null || !Number.isFinite(hz) || hz <= 0) {
+    throw new Error(`tuneTo is ${JSON.stringify(raw)}, not a note like 'A4' or 'F#3' or a pitch in Hz above 0 (or { note | hz, drillNodalHole }).`);
+  }
+  return { hz, drillNodalHole: (obj?.drillNodalHole ?? drill) === true };
+}
+
+/**
+ * Tunes `node` to the spec with the tuner for what it is: a string's tension
+ * and gauge, a head's tension, a resonator tube's or wind bore's length, and
+ * for any other body (a bar, chime, plate) its dimensions. `sceneNodes` lets a
+ * string know the soundbox span it is coupled to.
+ */
+export function applyTuneTo(node: SceneNode, spec: TuneToSpec, sceneNodes?: SceneNode[]): SceneNode {
+  try {
+    if (node.acousticString) return tuneStringToPitch(node, spec.hz, sceneNodes);
+    if (node.acousticMembrane) return tuneMembraneToPitch(node, spec.hz, sceneNodes);
+    if (node.resonatorTube) return tuneResonatorTubeToPitch(node, spec.hz);
+    if (node.windInstrument) return tuneWindInstrumentToPitch(node, spec.hz);
+    return tuneBodyToPitch(node, spec.hz, { drillNodalHole: spec.drillNodalHole, sceneNodes }).node;
+  } catch (err) {
+    throw new Error(`Body '${node.name || node.id}' could not be tuned to ${spec.hz} Hz: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+}
+
+/**
+ * Strings and heads are tuned as their body is filled in, before the rest of
+ * the scene exists; the ones that were are retuned here with it in view (the
+ * soundbox a string is coupled to changes the span it vibrates over).
+ */
+const retuneWithScene = new WeakMap<SceneNode, TuneToSpec>();
+
+/** `nodes` with every string and head that came in with a `tuneTo` retuned against the whole of `nodes`. */
+export function applyPendingTuneTo(nodes: SceneNode[]): SceneNode[] {
+  const walk = (list: SceneNode[]): SceneNode[] => {
+    let changed = false;
+    const out = list.map((n) => {
+      const children = n.children?.length ? walk(n.children) : n.children;
+      let next = children === n.children ? n : { ...n, children };
+      const spec = retuneWithScene.get(n);
+      if (spec) {
+        next = applyTuneTo(next, spec, nodes);
+        retuneWithScene.delete(n);
+      }
+      if (next !== n) changed = true;
+      return next;
+    });
+    return changed ? out : list;
+  };
+  return walk(nodes);
+}
 
 export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = null): SceneNode => {
   const b = withoutNulls(rawB);
@@ -545,6 +614,8 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rest = { ...b } as Record<string, any>;
   if (bodyRgba) rest.rgba = bodyRgba;
+  delete rest.tuneTo;
+  delete rest.drillNodalHole;
   delete rest.dynamic;
   delete rest.static;
   delete rest.fixed;
@@ -663,6 +734,15 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
     const own = sceneContentBounds([{ ...node, pos: [0, 0, 0] }]);
     if (own && Number.isFinite(own.min[2]) && own.max[2] > own.min[2]) node.pos = [0, 0, Math.round(-own.min[2] * 1e6) / 1e6];
   }
-  checkIncomingBody(node, resolvedJoints.length > 0);
-  return node;
+  // Acoustic specs are filled and checked, then `tuneTo` (transient: it is a
+  // request, not a field; tunedPitchHz records what it did) is applied.
+  normalizeAcousticFields(node);
+  let out = node;
+  if (bAny.tuneTo !== undefined) {
+    const spec = parseTuneTo(bAny.tuneTo, bAny.drillNodalHole);
+    out = applyTuneTo(node, spec);
+    if (node.acousticString || node.acousticMembrane) retuneWithScene.set(out, spec);
+  }
+  checkIncomingBody(out, resolvedJoints.length > 0);
+  return out;
 };

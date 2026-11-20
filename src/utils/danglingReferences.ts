@@ -32,6 +32,48 @@ export const REFERENCE_FIELDS = {
 type ReferenceField = keyof typeof REFERENCE_FIELDS;
 const FIELDS = Object.keys(REFERENCE_FIELDS) as ReferenceField[];
 
+/**
+ * The acoustic fields that name another body: a string's soundbox (on its spec
+ * and on the node), a drumhead's shell and a resonator tube's coupled bar.
+ * They sit apart from REFERENCE_FIELDS because most live inside a spec object
+ * and clearing one must not write into a spec shared with an earlier state.
+ */
+export interface AcousticReference {
+  field: string;
+  read: (node: SceneNode) => string | undefined;
+  /** Removes the reference from `node`, replacing the spec it sits in rather than editing it. */
+  clear: (node: SceneNode) => void;
+}
+
+const omit = <T extends object, K extends keyof T>(spec: T, key: K): T => {
+  const copy = { ...spec };
+  delete copy[key];
+  return copy;
+};
+
+export const ACOUSTIC_REFERENCES: readonly AcousticReference[] = [
+  {
+    field: 'resonatorNodeId',
+    read: (n) => n.resonatorNodeId,
+    clear: (n) => { delete n.resonatorNodeId; },
+  },
+  {
+    field: 'acousticString.resonatorNodeId',
+    read: (n) => n.acousticString?.resonatorNodeId,
+    clear: (n) => { if (n.acousticString) n.acousticString = omit(n.acousticString, 'resonatorNodeId'); },
+  },
+  {
+    field: 'acousticMembrane.shellNodeId',
+    read: (n) => n.acousticMembrane?.shellNodeId,
+    clear: (n) => { if (n.acousticMembrane) n.acousticMembrane = omit(n.acousticMembrane, 'shellNodeId'); },
+  },
+  {
+    field: 'resonatorTube.coupledBarNodeId',
+    read: (n) => n.resonatorTube?.coupledBarNodeId,
+    clear: (n) => { if (n.resonatorTube) n.resonatorTube = omit(n.resonatorTube, 'coupledBarNodeId'); },
+  },
+];
+
 interface Present { names: Set<string>; prefixes: string[]; forms: Set<string>; cloths: Set<string> }
 
 /**
@@ -115,11 +157,18 @@ function clearCloth(node: SceneNode, live: Present): void {
   node.cloth = cloth;
 }
 
-function clear(node: SceneNode, fields: ReferenceField[]): void {
+const danglingAcoustic = (node: SceneNode, live: Present): AcousticReference[] =>
+  ACOUSTIC_REFERENCES.filter((r) => {
+    const to = r.read(node);
+    return typeof to === 'string' && !isLive(to, live);
+  });
+
+function clear(node: SceneNode, fields: ReferenceField[], acoustic: AcousticReference[] = []): void {
   for (const f of fields) {
     delete node[f];
     for (const extra of REFERENCE_FIELDS[f]) delete (node as unknown as Record<string, unknown>)[extra];
   }
+  for (const r of acoustic) r.clear(node);
 }
 
 /** Clears dangling references in place. For a copy that is the caller's to change. */
@@ -127,7 +176,7 @@ export function dropDanglingReferencesInPlace(nodes: SceneNode[]): void {
   const live = present(nodes);
   const walk = (list: SceneNode[]) => {
     for (const n of list || []) {
-      clear(n, dangling(n, live));
+      clear(n, dangling(n, live), danglingAcoustic(n, live));
       if (hasDanglingCloth(n, live)) clearCloth(n, live);
       walk(n.children || []);
     }
@@ -148,11 +197,12 @@ export function withoutDanglingReferences(scene: SceneGraph): SceneGraph {
     const out = list.map((node) => {
       const children = node.children ? rebuild(node.children) : node.children;
       const gone = dangling(node, live);
+      const goneAcoustic = danglingAcoustic(node, live);
       const goneCloth = hasDanglingCloth(node, live);
-      if (!gone.length && !goneCloth && children === node.children) return node;
+      if (!gone.length && !goneAcoustic.length && !goneCloth && children === node.children) return node;
       changed = true;
       const next: SceneNode = { ...node, ...(node.children ? { children } : {}) };
-      clear(next, gone);
+      clear(next, gone, goneAcoustic);
       if (goneCloth) clearCloth(next, live);
       return next;
     });

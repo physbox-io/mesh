@@ -22,7 +22,7 @@ import {
   type PhysicsWindow, MUJOCO_SHIM, buildModelMirror, buildDataMirror, RECYCLE_HEAP_BYTES,
   lastHeapBytes, setLastHeapBytes, lastScriptState, lastClothState, setLastClothState,
   onNextPaint, liveModelGraph, recycleWorker,
-  getPhysicsWorkerClient, endVoltLink, prewarmSceneAcousticIRs,
+  getPhysicsWorkerClient, endVoltLink, prewarmSceneAcousticIRs, silenceAllLiveAcoustics,
 } from './physicsEngine';
 import type { PhysicsState } from './useStore';
 import type { SliceDeps } from './sliceDeps';
@@ -110,6 +110,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
     }),
 
     resetSimulation: () => {
+      silenceAllLiveAcoustics();
       getPhysicsWorkerClient().setPlaying(false);
       // Clearing all of this before the rebuild is what puts a broken object back
       // together: the scene graph was never edited, so a build with nothing in

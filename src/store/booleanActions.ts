@@ -307,6 +307,8 @@ export function booleanActions({ set, get }: SliceDeps): BooleanActions {
       if (brought.length === 0 && mergedFaces === 0) return;
 
       node.geoms = [...(node.geoms || []), ...brought];
+      // The shape this body was tuned to is not the shape it has now.
+      delete node.tunedPitchHz;
       if (mergedResult && mergedFaces > 0) {
         node.latticeCage = serializeCage(mergedResult);
         // A new cage is a new document to the editor, which remounts on this.

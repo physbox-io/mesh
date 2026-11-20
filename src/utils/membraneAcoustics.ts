@@ -41,6 +41,8 @@ import {
 import {
   analyze3DCavityAndPorts,
   analyze3DSolidCrossSections,
+  buildBodyRayScene,
+  castSceneRay,
   simulate3DVibroAcousticIR,
 } from './solidAcoustics3D';
 
@@ -213,6 +215,46 @@ function findNodeById(nodes: SceneNode[] | undefined, id: string): SceneNode | n
   return null;
 }
 
+function hasSiblingHeadOnShell(
+  headNode: SceneNode,
+  shellNode: SceneNode,
+  sceneNodes?: SceneNode[],
+): boolean {
+  if (!sceneNodes) return false;
+  let found = false;
+  const walk = (list: SceneNode[]) => {
+    for (const n of list) {
+      if (found) return;
+      if (n.id !== headNode.id && n.acousticMembrane) {
+        if (n.acousticMembrane.shellNodeId === shellNode.id || n.acousticMembrane.shellNodeId === shellNode.name) {
+          found = true;
+          return;
+        }
+      }
+      if (n.children?.length) walk(n.children);
+    }
+  };
+  walk(sceneNodes);
+  return found;
+}
+
+function shellHasClosedAxialEnd(shellNode: SceneNode, normalAxis: 0 | 1 | 2): boolean {
+  if (shellNode.isTube) return false;
+  const rayScene = buildBodyRayScene(shellNode, false) ?? buildBodyRayScene(shellNode, true);
+  if (!rayScene) return false;
+  const b = rayScene.bounds;
+  const org: [number, number, number] = [
+    0.5 * (b[0] + b[1]),
+    0.5 * (b[2] + b[3]),
+    0.5 * (b[4] + b[5]),
+  ];
+  org[normalAxis] = b[2 * normalAxis] - 0.05;
+  const dir: [number, number, number] = [0, 0, 0];
+  dir[normalAxis] = 1;
+  const ivs = castSceneRay(rayScene, org[0], org[1], org[2], dir[0], dir[1], dir[2]);
+  return ivs.length >= 1;
+}
+
 function findParentNode(nodes: SceneNode[] | undefined, childId: string): SceneNode | null {
   if (!nodes) return null;
   for (const n of nodes) {
@@ -380,67 +422,94 @@ export function evaluateTensionedMembrane(
   }
 
   // Shell / kettle cavity coupling
+  const snareAmount = Math.max(0, Math.min(1, spec.snareBuzz ?? 0));
   const shellNode = resolveCoupledDrumShell(node, spec, a, sceneNodes);
   let hasShellCavity = false;
   let isClosedKettle = false;
+  let isDualHeadOrVentedSnare = snareAmount > 0.05;
   let shellVolumeM3 = 0;
+  let shellDepthM = 0.14;
   let shellHelmholtzHz: number | null = null;
 
   if (shellNode) {
     const shellCav = analyze3DCavityAndPorts(shellNode);
     const shellSec = analyze3DSolidCrossSections(shellNode);
+    const [shThick, shW, shL] = shellSec.dimsSortedAsc;
+    shellDepthM = Math.max(0.06, shThick > 0.04 ? shThick : 0.45 * shW);
+    const hasClosedBottom = shellHasClosedAxialEnd(shellNode, plan.normalAxis);
+    const hasSiblingHead = hasSiblingHeadOnShell(node, shellNode, sceneNodes);
+    if (hasSiblingHead || !hasClosedBottom) {
+      isDualHeadOrVentedSnare = isDualHeadOrVentedSnare || hasSiblingHead;
+    }
+
     if (shellCav.hasHollowCavity && shellCav.cavityVolumeM3 > 1e-5) {
       hasShellCavity = true;
       shellVolumeM3 = shellCav.cavityVolumeM3;
       // An open-top kettle bowl whose single wide rim opening (>= 35% of head area) is capped by this membrane
-      // forms a sealed enclosed timpani kettle! Small side vent ports (< 35% of head area) remain Helmholtz vents.
+      // AND whose opposite bottom end is closed (zero wide opposite openings, zero side vents, no snare wires)
+      // forms a sealed enclosed timpani kettle! Dual-head / vented cylindrical snare & tom shells do NOT seal air on (0,1).
+      const wideRimPorts = shellCav.ports.filter((p) => p.areaM2 >= 0.35 * areaM2);
       const ventPorts = shellCav.ports.filter((p) => p.areaM2 < 0.35 * areaM2);
-      if (
-        shellCav.ports.length === 0 ||
-        shellCav.isOpenCupOrShell ||
-        shellCav.cavityRegime === 'quarter_wave_tube' ||
+      if (spec.kettleCoupling !== undefined) {
+        isClosedKettle = spec.kettleCoupling >= 0.45 && hasClosedBottom;
+      } else if (
+        !isDualHeadOrVentedSnare &&
+        hasClosedBottom &&
+        wideRimPorts.length <= 1 &&
         ventPorts.length === 0
       ) {
         isClosedKettle = true;
-      } else {
+      }
+
+      if (!isClosedKettle && ventPorts.length > 0) {
         const ventConductance = ventPorts.reduce((acc, p) => acc + p.conductanceM, 0);
         if (ventConductance > 0) {
           shellHelmholtzHz = (SPEED_OF_SOUND_AIR / (2 * Math.PI)) * Math.sqrt(ventConductance / shellVolumeM3);
-        } else {
-          isClosedKettle = true;
         }
+      } else if (!isClosedKettle && !hasClosedBottom && !isDualHeadOrVentedSnare) {
+        const tubeDepth = Math.max(0.08, shellNode.height ?? shL * 0.6);
+        shellHelmholtzHz = SPEED_OF_SOUND_AIR / (2 * (tubeDepth + 1.2266 * a));
       }
     } else if (shellCav.isOpenCupOrShell || shellNode.isTube || shellSec.hollowFraction >= 0.18) {
-      // Open-top kettle or cylindrical drum shell whose open mouth is sealed by this membrane!
-      const [shThick, shW, shL] = shellSec.dimsSortedAsc;
-      const estDepth = Math.max(0.06, shThick > 0.04 ? shThick : 0.45 * shW);
-      shellVolumeM3 = Math.max(1e-4, areaM2 * estDepth);
+      // Shallow open-top kettle bowl vs open-ended cylindrical snare / concert-tom ring:
+      shellVolumeM3 = Math.max(1e-4, areaM2 * shellDepthM);
       hasShellCavity = true;
-      isClosedKettle = spec.kettleCoupling !== undefined ? spec.kettleCoupling >= 0.35 : !shellNode.isTube;
-      if (!isClosedKettle && shellNode.isTube) {
-        // Open-bottom concert tom / cylindrical shell: quarter/half-wave shell air resonance
-        const tubeDepth = Math.max(0.08, node.height ?? shL * 0.6);
+      if (spec.kettleCoupling !== undefined) {
+        isClosedKettle = spec.kettleCoupling >= 0.45 && hasClosedBottom;
+      } else {
+        isClosedKettle = !isDualHeadOrVentedSnare && hasClosedBottom && !shellNode.isTube;
+      }
+      if (!isClosedKettle && !isDualHeadOrVentedSnare && (shellNode.isTube || !hasClosedBottom)) {
+        // Open-bottom concert tom / cylindrical shell: half-wave shell air resonance
+        const tubeDepth = Math.max(0.08, shellNode.height ?? shellDepthM);
         shellHelmholtzHz = SPEED_OF_SOUND_AIR / (2 * (tubeDepth + 1.2266 * a));
       }
     }
-  } else if (spec.kettleCoupling !== undefined && spec.kettleCoupling > 0.05) {
+  } else if (spec.kettleCoupling !== undefined && spec.kettleCoupling >= 0.45) {
     // Explicit kettle coupling slider even without a separate shell body: virtual hemispherical kettle V = (2/3) π a³
     hasShellCavity = true;
     isClosedKettle = true;
     shellVolumeM3 = (2 / 3) * Math.PI * a * a * a;
   }
 
+  // On a dual-head vented snare/tom (`isDualHeadOrVentedSnare`), the bottom resonant head moves in phase with the
+  // batter head on (0,1) (Rossing §3.2–3.5: zero net sealed-kettle air compression -> default kettleStrength = 0!).
   const kettleStrength = Math.max(
     0,
-    Math.min(1.5, spec.kettleCoupling ?? (isClosedKettle ? 1.0 : hasShellCavity ? 0.55 : 0)),
+    Math.min(
+      1.5,
+      spec.kettleCoupling ??
+        (isClosedKettle ? 1.0 : isDualHeadOrVentedSnare ? 0 : hasShellCavity && shellHelmholtzHz !== null ? 0.35 : 0),
+    ),
   );
 
   // Air radiation mass loading: baffled circular piston adds front air inertia proportional to rho_air * a * chi_{mn},
   // plus Christian–Davis–Tubis (1984) evanescent internal kettle air sloshing inertia on enclosed timpani bowls!
   const airMassScale = 0.85 + 0.35 * kettleStrength;
 
-  // Normalize strike coordinates in head plane
-  let normRadius = 0.58; // Default musical timpani / drum "normal strike spot" (~0.58 R) when tapped without localPoint
+  // Normalize strike coordinates in head plane:
+  // Default audition spot is ~0.18 R (fat center backbeat) on snare drums vs ~0.58 R (musical spot) on timpani/open heads.
+  let normRadius = snareAmount > 0.05 ? 0.18 : 0.58;
   let normU = 0.37;
   let normV = 0.41;
   if (strikeCtx?.localPoint) {
@@ -468,14 +537,18 @@ export function evaluateTensionedMembrane(
         const lkOverA = Math.max(0.35, shellVolumeM3 / Math.max(1e-5, areaM2 * a));
         const cothTerm = 1 / Math.tanh(Math.min(8, bm.jmn * lkOverA * 0.45));
         sigmaKettleAir = kettleStrength * ((3.5 * AIR_DENSITY_KGM3 * a) / Math.pow(bm.jmn, 1.55)) * cothTerm;
+      } else if (bm.m === 0 && bm.n === 1 && isDualHeadOrVentedSnare && hasShellCavity) {
+        // Dual-head snare/tom in-phase (0,1) mode carries the internal shell air plug without compressing it,
+        // slightly lowering f_{01} into a warm, fat studio snare fundamental (~170–195 Hz)!
+        sigmaKettleAir = 0.28 * AIR_DENSITY_KGM3 * Math.min(0.22, shellDepthM);
       }
       const sigmaEff = sigmaFilm + sigmaFrontAir + sigmaKettleAir;
       const stiffFactor = Math.sqrt(1 + (D * Math.pow(bm.jmn, 4)) / Math.max(1e-6, tensionNPerM * a * a));
       let fMode = (bm.jmn / (2 * Math.PI * a)) * Math.sqrt(tensionNPerM / sigmaEff) * stiffFactor;
 
-      // Axisymmetric modes (m === 0) displace net air volume and couple to the enclosed kettle/shell cavity!
+      // Axisymmetric modes (m === 0) displace net air volume and couple to an enclosed kettle or Helmholtz shell!
       if (bm.m === 0 && hasShellCavity && shellVolumeM3 > 1e-5 && kettleStrength > 0) {
-        if (isClosedKettle || shellHelmholtzHz === null) {
+        if (isClosedKettle) {
           // Adiabatic enclosed kettle bulk stiffness raises (0,1) (and slightly (0,2)) without shifting m >= 1 modes
           const netVolShare = bm.n === 1 ? 0.432 : 0.085;
           const cavStiffShiftHzSq =
@@ -484,10 +557,10 @@ export function evaluateTensionedMembrane(
             ((AIR_DENSITY_KGM3 * SPEED_OF_SOUND_AIR * SPEED_OF_SOUND_AIR * areaM2) /
               (4 * Math.PI * Math.PI * shellVolumeM3 * sigmaEff));
           fMode = Math.sqrt(fMode * fMode + cavStiffShiftHzSq);
-        } else if (bm.n === 1 && shellHelmholtzHz > 15) {
-          // Vented drum shell: 2x2 coupled-oscillator upper branch raising batter fundamental slightly
+        } else if (bm.n === 1 && shellHelmholtzHz !== null && shellHelmholtzHz > 15) {
+          // Single-head vented drum shell: gentle coupled-oscillator shift
           const fH = shellHelmholtzHz;
-          const kappa = 0.24 * kettleStrength;
+          const kappa = 0.18 * kettleStrength;
           const sumSq = fMode * fMode + fH * fH;
           const diffSq = fMode * fMode - fH * fH;
           fMode = Math.sqrt(0.5 * (sumSq + Math.sqrt(diffSq * diffSq + 4 * kappa * kappa * fMode * fMode * fH * fH)));
@@ -508,13 +581,23 @@ export function evaluateTensionedMembrane(
           : Math.max(0.05, jVal);
 
       // Axisymmetric m = 0 modes radiate strongly as acoustic monopoles (fast radiation damping -> lower Q ~ 18..32),
-      // whereas azimuthal m >= 1 dipole/quadrupole modes sustain with lush musical timpani ring!
+      // whereas azimuthal m >= 1 dipole/quadrupole modes sustain on timpani, while snare-wire contact chatter on snare
+      // drums (`snareAmount > 0.05`) damps high timbale/bongo ring so the fat (0,1) body dominates cleanly!
+      const snareRingDamp =
+        snareAmount > 0.05 && idx > 0 ? 1 + 2.4 * snareAmount * Math.sqrt(idx) : 1.0;
       const modeQ = bm.m === 0
-        ? Math.min(mat.intrinsicQ * 0.42, 26)
-        : mat.intrinsicQ / (1 + 0.16 * idx);
+        ? Math.min(mat.intrinsicQ * 0.42, 26) / (bm.n >= 2 && snareAmount > 0.05 ? 1 + 1.5 * snareAmount : 1)
+        : mat.intrinsicQ / ((1 + 0.16 * idx) * snareRingDamp);
+
+      const modeWeight =
+        snareAmount > 0.05 && idx === 0
+          ? bm.baseWeight * (1 + 0.22 * snareAmount)
+          : snareAmount > 0.05 && (bm.m >= 2 || bm.n >= 2)
+            ? bm.baseWeight * (1 - 0.34 * snareAmount)
+            : bm.baseWeight;
 
       rawFreqsHz.push(fMode);
-      rawBaseGains.push(bm.baseWeight);
+      rawBaseGains.push(modeWeight);
       rawModeQs.push(modeQ);
       spatialWeights.push(spatial);
     }
@@ -648,17 +731,17 @@ export function evaluateTensionedMembrane(
       ? Math.max(0.012, Math.min(0.60, spec.pitchGlideDecayMs * 1e-3))
       : Math.max(0.032, Math.min(0.22, 0.38 * fundamentalDecaySec));
 
-  // Bottom-head snare wire rattle (`snareBuzz` in [0, 1])
-  const snareAmount = Math.max(0, Math.min(1, spec.snareBuzz ?? 0));
+  // Bottom-head snare wire rattle (`snareBuzz` in [0, 1]): crisp 1.2–3.2 kHz steel wire snap
+  // balanced so it complements rather than masks the fat ~180 Hz drum body!
   const snareExcitation = snareAmount * Math.min(1.2, Math.pow(Math.max(0, impulseNs - 0.004) * 5.5, 0.65));
   const snareRattle: SnareRattleEnvelope | null =
     snareExcitation > 0.015
       ? {
-          gain: +(0.42 * snareExcitation).toFixed(4),
-          decaySec: +Math.max(0.055, Math.min(0.48, fundamentalDecaySec * 0.68)).toFixed(4),
-          modHz: +(sortedFreqs[0] ?? 140).toFixed(2),
-          bandpassHz: 2450,
-          highshelfHz: 5600,
+          gain: +(0.34 * snareExcitation).toFixed(4),
+          decaySec: +Math.max(0.14, Math.min(0.42, fundamentalDecaySec * 1.12)).toFixed(4),
+          modHz: +(sortedFreqs[0] ?? 180).toFixed(2),
+          bandpassHz: 2150,
+          highshelfHz: 4800,
         }
       : null;
 

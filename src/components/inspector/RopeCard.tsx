@@ -4,9 +4,10 @@ import { useStore } from '../../store/useStore';
 import type { SceneNode, StringMaterialId } from '../../types/scene';
 import { RangeInput } from '../RangeInput';
 import { hzToNoteInfo } from '../../utils/acousticTuning';
-import { playModalImpact } from '../../utils/modalAudio';
+import { playModalImpact, unlockAudioContext } from '../../utils/modalAudio';
 import { findNodeById } from '../../utils/sceneTree';
 import { analyzeSoundboxResonance, STRING_MATERIALS } from '../../utils/stringAcoustics';
+import { safeStringSpec } from '../../utils/acousticAuthoring';
 
 export function RopeCard({ node }: { node: SceneNode }) {
   const updateRopeParams = useStore((s) => s.updateRopeParams);
@@ -128,8 +129,10 @@ export function RopeCard({ node }: { node: SceneNode }) {
               (bodyB.pos[2] ?? 0) - (bodyA.pos[2] ?? 0),
             ))
           : 0.32;
-        const spec = node.acousticString;
-        const mat = STRING_MATERIALS[spec?.material ?? 'bronze'];
+        // A spec that arrived half-written (over MCP, say) must not take the card down with it.
+        const rawSpec = node.acousticString;
+        const spec = rawSpec ? safeStringSpec(rawSpec) : undefined;
+        const mat = STRING_MATERIALS[spec?.material ?? 'bronze'] ?? STRING_MATERIALS.bronze;
         const r = (spec?.diameterMm ?? 0.65) / 2000;
         const mu = mat.densityKgM3 * Math.PI * r * r;
         const tension = spec?.tensionN ?? 55;
@@ -166,6 +169,7 @@ export function RopeCard({ node }: { node: SceneNode }) {
                   <button
                     type="button"
                     onClick={() => {
+                      unlockAudioContext();
                       const voices = Array.from({ length: 8 }, (_, k) => ({
                         freqHz: +(f0 * (k + 1)).toFixed(2),
                         gain: +(0.8 / Math.pow(k + 1, 1.3)).toFixed(3),
@@ -210,6 +214,9 @@ export function RopeCard({ node }: { node: SceneNode }) {
                       className="w-full accent-violet-500 cursor-pointer"
                     />
                   </div>
+                </div>
+                <div className="text-[10px] text-slate-400 leading-snug">
+                  A rope is not a simulated body, so this string sounds only from Pluck here. To pluck or bow a wire live, give a capsule body the Taut string role (Shape tab → Sound role).
                 </div>
                 {bestBox && (
                   <div className="text-[10px] text-amber-700 bg-amber-50/70 rounded px-2 py-1">

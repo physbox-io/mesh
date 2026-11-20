@@ -57,6 +57,9 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   soundbox_lyre: 'Make it',
   bowed_cello: 'Make it',
   wind_instruments: 'Make it',
+  percussion_kit: 'Make it',
+  singing_bowl_friction: 'Make it',
+  vibraphone_resonators: 'Make it',
   hydrostatic_flotation: 'Make it',
 
   pendulum: 'Mechanisms',

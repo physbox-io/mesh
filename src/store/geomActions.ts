@@ -128,6 +128,9 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
                 placed by hand keeps its own numbers. See reconcileCuts.
               */
               if (structural) reconcileCuts(node);
+              // A tuned pitch was solved for the shape this body had; once the
+              // shape changes it is a stale claim (modalAudio would still ring it).
+              if (structural) delete node.tunedPitchHz;
               if (updates.pos || updates.euler || updates.quat) promotePosedStaticMeshes(node);
             }
             return true;
@@ -218,6 +221,7 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
       // is a hole nobody asked for.
       const group = node.geoms[geomIndex].hardware?.group;
       node.geoms = node.geoms.filter((g: SceneGeom, i: number) => i !== geomIndex && !(group && g.hardware?.group === group));
+      delete node.tunedPitchHz;
       // Losing the last boolean operator leaves an ordinary compound body; drop
       // the derived mesh with it so the primitives come back into view.
       if (node.csgEnabled && !hasBooleanOps(node)) {
@@ -266,6 +270,7 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
       if (copies.length === 0) return;
 
       node.geoms = [...node.geoms, ...copies];
+      delete node.tunedPitchHz;
       node.csgEnabled = true;
       if (node.csgCollision === undefined) node.csgCollision = 'auto';
       if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
