@@ -249,6 +249,15 @@ describe('slip spare over the opening', () => {
     expect(cast.warnings.some((w) => w.includes('sealed off') && w.includes('mm)'))).toBe(true);
   });
 
+  it('trims the spare clean off: nothing of the casting stands above the part', () => {
+    // The trim used to share the spare's walls with the cavity, and the cut
+    // left hair-thin slivers standing up them: spikes out of the cast's mouth.
+    const mold = buildSlipMold(wasm, soupOf(vase()), { slip: 'porcelain-slip' });
+    const r = mold.report;
+    const cast = simulateSlipCast(wasm, { cavity: mold.cavity, spare: mold.spare, partTopMm: r.partTopMm, footMm: r.footMm, scale: r.scale, slip: mold.slip }, 4);
+    expect(cast.sizeMm[2]).toBeCloseTo(140, 0);
+  });
+
   it('stands the spare on a mouth whose rim rises on one side, and keeps the high side out of it', () => {
     // A cup whose rim slants from 80 mm up on one side to 95 mm on the other.
     const cup = wasm.Manifold.cylinder(100, 40, 40, 96).subtract(wasm.Manifold.cylinder(100, 36, 36, 96).translate([0, 0, 4]));

@@ -102,6 +102,9 @@ export const DEFAULT_SLIP_MOLD_OPTIONS: SlipMoldOptions = {
   slip: 'porcelain-slip',
 };
 
+/** How far past the cavity's walls a casting's spare is trimmed, mm: clear of float round-off, far below a wall's tolerance. */
+const SPARE_TRIM_GROW_MM = 0.05;
+
 /** The least share of the part's volume an inside must hold to take the spare and be warned of. */
 const INSIDE_SHARE = 0.1;
 
@@ -1434,7 +1437,16 @@ function build(
   }
   const cavity = filled.add(sp.spare);
   // What a casting is trimmed of: the spare, less the part standing in it.
-  const spareOnly = sp.spare.subtract(filled);
+  // Grown a hair past the cavity's walls first. Cut to the spare exactly, the
+  // casting's clay in the spare and the trim shared those walls, each rounded
+  // to float and triangulated its own way, and the cut left hair-thin slivers
+  // standing up the spare's walls: spikes rising out of the cast's mouth.
+  // The spare is a hull, so a hull of it nudged along each axis grows it.
+  const nudged = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+    .map(([x, y, z]) => sp.spare.translate([x * SPARE_TRIM_GROW_MM, y * SPARE_TRIM_GROW_MM, z * SPARE_TRIM_GROW_MM]));
+  const grownSpare = wasm.Manifold.hull(nudged);
+  const spareOnly = grownSpare.subtract(filled);
+  free(grownSpare, ...nudged);
   free(sp.spare);
 
   // --- The block --------------------------------------------------------------
