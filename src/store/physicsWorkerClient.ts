@@ -316,6 +316,10 @@ export class PhysicsWorkerClient {
   onAudioImpacts: ((events: import('../workers/physicsWorkerProtocol').AudioImpactEvent[]) => void) | null = null;
   /** Throttled continuous bowed-string contact events when audio synthesis is unmuted. */
   onBowedStrings: ((contacts: import('../workers/physicsWorkerProtocol').BowedStringContactEvent[]) => void) | null = null;
+  /** Throttled continuous rolling/sliding/scraping contact friction events when audio synthesis is unmuted. */
+  onContactFriction: ((contacts: import('../workers/physicsWorkerProtocol').ContinuousContactEvent[]) => void) | null = null;
+  /** Throttled sustained viscoelastic contact modal-damping events when audio synthesis is unmuted. */
+  onAudioDamping: ((contacts: import('../workers/physicsWorkerProtocol').AudioDampingEvent[]) => void) | null = null;
   /** Throttled aerodynamic rotor, wing, and cloth voice + snap events when audio synthesis is unmuted. */
   onAeroAudio: ((
     voices: import('../workers/physicsWorkerProtocol').AeroVoiceTelemetry[],
@@ -364,6 +368,12 @@ export class PhysicsWorkerClient {
           break;
         case 'BOWED_STRINGS':
           this.onBowedStrings?.(msg.contacts);
+          break;
+        case 'CONTACT_FRICTION':
+          this.onContactFriction?.(msg.contacts);
+          break;
+        case 'AUDIO_DAMPING':
+          this.onAudioDamping?.(msg.contacts);
           break;
         case 'AERO_AUDIO':
           this.onAeroAudio?.(msg.voices, msg.snaps);
