@@ -36,7 +36,6 @@ import { useVertexPaint } from '../../hooks/useVertexPaint';
 import { buildMeshPaintGeometry, buildPaintGeometry, colorsForCopy, isPaintable, paintArgsFromSize, paintMeshResolution, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
 import { sampleCatmullRom } from '../../utils/geom';
 import { resolveCsgGeoms } from '../../utils/csg';
-import { DEFAULT_UNIT } from '../../utils/latticeMesh';
 import { facesWatertight } from '../../utils/sculptMesh';
 import { creasedGeometry } from '../../utils/creasedNormals';
 import { cachedTexturedSurface, geomHalfLen } from '../../utils/geomSurface';
@@ -246,21 +245,15 @@ export const CameraController = () => {
   /*
    * How close the camera may come, and where the near plane sits.
    *
-   * 20 mm is close enough for a part laid out in centimetres and nowhere near
-   * close enough for the 0.1 mm grid: at that distance the whole dot field is a
-   * couple of millimetres across — a smudge a hundred pixels wide, with its
-   * dots a fraction of a pixel each — which is why the finest grid read as not
-   * drawn at all rather than as too small. In lattice mode the limit follows
-   * the grid step, about sixty steps back, and the near plane follows the limit
-   * — a near plane further out than the closest orbit distance would clip the
-   * model away exactly as you reached it. Outside lattice mode both go back to
-   * what they were, so nothing else in the app sees a shallower depth buffer.
+   * 1 mm, everywhere. The limit used to be 20 mm outside lattice mode, which
+   * on a 10 mm part is a wall one part-width away: the dolly is
+   * multiplicative, so each wheel step crept less and less toward that wall
+   * and zooming seemed to run out. The near plane follows at half the limit —
+   * further out than the closest orbit distance it would clip the model away
+   * just as you reached it — and the logarithmic depth buffer (SceneCanvas)
+   * keeps a near plane that close from costing precision at a distance.
    */
-  const latticeNodeId = useStore((state) => state.latticeNodeId);
-  const latticeSnap = useStore((state) => state.latticeSnap);
-  const minDistance = latticeNodeId
-    ? Math.min(0.02, Math.max(0.002, latticeSnap * DEFAULT_UNIT * 60))
-    : 0.02;
+  const minDistance = 0.001;
   // Read through R3F's `get()` rather than the camera captured in render, the
   // same way useOrbitEnable does: this writes to the live camera object, and a
   // value taken during render is not ours to modify.
@@ -299,7 +292,7 @@ export const CameraController = () => {
           controls follow whichever is the default. Its frustum is the canvas
           in pixels, so `zoom` is pixels per metre. */}
       {drawing && <OrthographicCamera makeDefault near={0.001} far={1000} />}
-      <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} onEnd={leaveFlatView} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />
+      <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} onEnd={leaveFlatView} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} zoomToCursor mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />
     </>
   );
 };
