@@ -114,7 +114,7 @@ describe('a mixed-thickness rack on one bed, zeroed once on the first sheet', ()
 
   it('starts counting from a sheet a new bit was touched off on', () => {
     const r = generateLaserCutGcode([panel('a', 8, 0), panel('b', 8, 1)], {
-      ...cnc, cutDepthZ: 10, sheetStockThicknessMm: [10, 14], faceToThickness: true,
+      ...cnc, cutDepthZ: 10, sheetStockThicknessMm: [10, 14], faceToThickness: true, facingBitDiameterMm: 25,
     });
     const lines = r.gcode.split('\n');
     const m6 = lines.map((l, i) => (/M6\b/.test(l) ? i : -1)).filter((i) => i >= 0);

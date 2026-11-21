@@ -73,11 +73,11 @@ export interface GcodeExportOptions {
    */
   sheetSizeMm?: { widthMm: number; heightMm: number }[];
   /**
-   * The bit doing the facing, in mm. A surfacing cutter is what this wants; a
-   * plain flat end mill works and simply takes far longer, which is the
-   * operator's trade to make rather than a reason to refuse the job.
+   * A separate bit for the facing, in mm, when the job genuinely has one (a
+   * surfacing cutter). Unset, the facing runs on the job's own end mill
+   * (`bitDiameterMm`): a facing pass must never ask for a tool nobody fitted.
    */
-  facingBitDiameterMm: number;
+  facingBitDiameterMm?: number;
   /** Stepover as a fraction of the facing bit's diameter. */
   facingStepoverFraction: number;
   /** How much depth the facing bit takes per pass, in mm. */
@@ -153,10 +153,8 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
   safeZ: 5.0,
   cutDepthZ: 3.0,
   faceToThickness: false,
-  // A 25 mm surfacing bit at 60% stepover, 1 mm a pass: unremarkable numbers
-  // for a hobby router, and slow-but-safe for anyone who puts a 6 mm end mill
-  // in instead.
-  facingBitDiameterMm: 25,
+  // Facing runs on the profile bit unless a facing bit is given; 60% stepover,
+  // 1 mm a pass.
   facingStepoverFraction: 0.6,
   facingDepthPerPassMm: 1.0,
   zStepdown: 3.0,
@@ -458,13 +456,20 @@ function attachmentZ(s: number, spans: AttachmentSpan[], cutZ: number, topZ: num
  *
  * Serpentine, because lifting and returning across a cleared pocket for every
  * line doubles the travel for nothing.
+ *
+ * `keepClear` is every other part on the sheet that is not being faced as
+ * deep, in sheet coordinates. The footprint is a bounding box, so it can reach
+ * over a neighbour (one standing in an L's notch, or simply close by); each
+ * row is clipped so the bit's edge stays off them, and a move between two
+ * clipped stretches lifts over them rather than ploughing through.
  */
 function facingLines(
   panel: LaserPanel,
   removalMm: number,
   options: GcodeExportOptions,
   f: (n: number) => string,
-  sheet?: { widthMm: number; heightMm: number }
+  sheet?: { widthMm: number; heightMm: number },
+  keepClear: Point2D[][] = []
 ): {
   lines: string[];
   distanceMm: number;
@@ -476,9 +481,9 @@ function facingLines(
 } {
   const lines: string[] = [];
   const pos = panel.placedPos2D || { x: 0, y: 0 };
-  const bit = Math.max(1, options.facingBitDiameterMm);
+  const bit = facingBitOf(options);
   const r = bit / 2;
-  const stepover = Math.max(0.5, bit * Math.min(Math.max(options.facingStepoverFraction, 0.05), 1));
+  const stepover = Math.max(Math.min(0.5, bit / 2), bit * Math.min(Math.max(options.facingStepoverFraction, 0.05), 1));
   const perPass = Math.max(0.1, options.facingDepthPerPassMm);
 
   /*
@@ -510,47 +515,199 @@ function facingLines(
     pos.x < r || pos.y < r ||
     (sheet !== undefined && (sheet.widthMm - (pos.x + w) < r || sheet.heightMm - (pos.y + h) < r));
 
+  /*
+   * The box is wider than the work wherever the part is not a rectangle: in an
+   * L's notch, a centre further than (kerf + radius) from the part faces only
+   * stock that is thrown away. Rows are trimmed to the part grown by that
+   * much, which leaves a rectangle's box exactly as it was.
+   */
+  const region = panel.outerPolygon2D.length >= 3
+    ? offsetRegion(panel.outerPolygon2D, [], kerf + r).outer.map((l) => l.map((q) => ({ x: q.x + pos.x, y: q.y + pos.y })))
+    : [];
+
+  // Only the neighbours the footprint (plus the bit) can reach matter.
+  const near = keepClear.filter((poly) => {
+    let ax = Infinity, ay = Infinity, bx = -Infinity, by = -Infinity;
+    for (const p of poly) { ax = Math.min(ax, p.x); ay = Math.min(ay, p.y); bx = Math.max(bx, p.x); by = Math.max(by, p.y); }
+    return bx > x0 - r && ax < x1 + r && by > y0 - r && ay < y1 + r;
+  });
+  // A hair inside the radius, so a stretch ending exactly on the limit counts as clear.
+  const clearR = r + 1e-3;
+
+  // Rows evenly spaced from edge to edge, none further apart than the
+  // stepover: stepping by the stepover itself stopped short of the far edge.
+  const rows = Math.max(1, Math.ceil((y1 - y0) / stepover - 1e-9));
+  const pitch = (y1 - y0) / rows;
+  const rowSpans: { y: number; spans: [number, number][] }[] = [];
+  for (let row = 0; row <= rows; row++) {
+    const yy = y0 + row * pitch;
+    const inside = region.length ? insideRow(x0, x1, yy, region) : [[x0, x1] as [number, number]];
+    const spans = near.length ? inside.flatMap(([a, b]) => clipRow(a, b, yy, near, clearR)) : inside;
+    rowSpans.push({ y: yy, spans });
+  }
+
   const passes = Math.ceil(removalMm / perPass);
   let distanceMm = 0;
   let lastPoint: Point2D = { x: x0, y: y0 };
+  let rx0 = Infinity, rx1 = -Infinity, ry0 = Infinity, ry1 = -Infinity;
 
   for (let p = 1; p <= passes; p++) {
     const z = -Math.min(removalMm, p * perPass);
     lines.push(`; Facing pass ${p} of ${passes} at Z${f(z)}`);
     let forward = true;
-    let first = true;
-    // Rows evenly spaced from edge to edge, none further apart than the
-    // stepover: stepping by the stepover itself stopped short of the far edge.
-    const rows = Math.max(1, Math.ceil((y1 - y0) / stepover - 1e-9));
-    const pitch = (y1 - y0) / rows;
-    for (let row = 0; row <= rows; row++) {
-      const yy = y0 + row * pitch;
-      const from = forward ? x0 : x1;
-      const to = forward ? x1 : x0;
-      if (first) {
-        lines.push(`G0 Z${f(options.safeZ)}`);
-        lines.push(`G0 X${f(from)} Y${f(yy)}`);
-        lines.push(`G1 Z${f(z)} F${Math.round(options.plungeFeedrate)}`);
-        first = false;
-      } else {
-        lines.push(`G1 X${f(from)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
-        distanceMm += pitch;
+    let at: Point2D | null = null;
+    for (const { y: yy, spans } of rowSpans) {
+      if (spans.length === 0) continue;
+      const ordered = forward ? spans : [...spans].reverse();
+      for (const [sa, sb] of ordered) {
+        const from = { x: forward ? sa : sb, y: yy };
+        const to = { x: forward ? sb : sa, y: yy };
+        if (at && (near.length === 0 || segmentClear(at, from, near, clearR))) {
+          lines.push(`G1 X${f(from.x)} Y${f(from.y)} F${Math.round(options.cutFeedrate)}`);
+          distanceMm += Math.hypot(from.x - at.x, from.y - at.y);
+        } else {
+          lines.push(`G0 Z${f(options.safeZ)}`);
+          lines.push(`G0 X${f(from.x)} Y${f(from.y)}`);
+          lines.push(`G1 Z${f(z)} F${Math.round(options.plungeFeedrate)}`);
+        }
+        lines.push(`G1 X${f(to.x)} Y${f(to.y)} F${Math.round(options.cutFeedrate)}`);
+        distanceMm += Math.abs(to.x - from.x);
+        at = to;
+        rx0 = Math.min(rx0, sa); rx1 = Math.max(rx1, sb); ry0 = Math.min(ry0, yy); ry1 = Math.max(ry1, yy);
       }
-      lines.push(`G1 X${f(to)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
-      distanceMm += Math.abs(to - from);
-      lastPoint = { x: to, y: yy };
       forward = !forward;
     }
+    if (at) lastPoint = at;
     lines.push(`G0 Z${f(options.safeZ)}`);
   }
 
-    return {
+  if (!isFinite(rx0)) { rx0 = x0; rx1 = x1; ry0 = y0; ry1 = y1; }
+  return {
     lines,
     distanceMm,
     lastPoint,
-    reach: { minX: x0 - r, minY: y0 - r, maxX: x1 + r, maxY: y1 + r },
+    reach: { minX: rx0 - r, minY: ry0 - r, maxX: rx1 + r, maxY: ry1 + r },
     marginShort,
   };
+}
+
+/** The bit a facing pass runs on: a configured facing bit, else the job's own. */
+function facingBitOf(options: GcodeExportOptions): number {
+  const d = options.facingBitDiameterMm;
+  return d !== undefined && d > 0 ? d : options.bitDiameterMm;
+}
+
+/**
+ * The stretches of the row y = `y`, between `x0` and `x1`, where a bit centre
+ * stays at least `r` from every polygon (and outside them). Exact: a point is
+ * within r of a polygon when it is inside it or within r of one of its edges,
+ * and the set of such points on a line is, per edge, a single interval (the
+ * line through a capsule), and, for the inside, the even-odd crossings.
+ */
+function clipRow(x0: number, x1: number, y: number, polys: Point2D[][], r: number): [number, number][] {
+  const blocked: [number, number][] = [];
+  for (const poly of polys) {
+    const n = poly.length;
+    const xs: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const iv = capsuleRow(a, b, y, r);
+      if (iv) blocked.push(iv);
+      if ((a.y > y) !== (b.y > y)) xs.push(a.x + ((y - a.y) * (b.x - a.x)) / (b.y - a.y));
+    }
+    xs.sort((p, q) => p - q);
+    for (let i = 0; i + 1 < xs.length; i += 2) blocked.push([xs[i], xs[i + 1]]);
+  }
+  blocked.sort((p, q) => p[0] - q[0]);
+  const free: [number, number][] = [];
+  let cur = x0;
+  for (const [a, b] of blocked) {
+    if (b <= cur) continue;
+    if (a > cur) free.push([cur, Math.min(a, x1)]);
+    cur = Math.max(cur, b);
+    if (cur >= x1) break;
+  }
+  if (cur < x1) free.push([cur, x1]);
+  return free.filter(([a, b]) => b - a > 1e-6 && a < x1 && b > x0);
+}
+
+/** The stretches of the row y = `y`, between `x0` and `x1`, inside any of `loops` (even-odd per loop). */
+function insideRow(x0: number, x1: number, y: number, loops: Point2D[][]): [number, number][] {
+  const spans: [number, number][] = [];
+  for (const loop of loops) {
+    const xs: number[] = [];
+    for (let i = 0; i < loop.length; i++) {
+      const a = loop[i], b = loop[(i + 1) % loop.length];
+      if ((a.y > y) !== (b.y > y)) xs.push(a.x + ((y - a.y) * (b.x - a.x)) / (b.y - a.y));
+    }
+    xs.sort((p, q) => p - q);
+    for (let i = 0; i + 1 < xs.length; i += 2) {
+      const a = Math.max(x0, xs[i]), b = Math.min(x1, xs[i + 1]);
+      if (b - a > 1e-6) spans.push([a, b]);
+    }
+  }
+  spans.sort((p, q) => p[0] - q[0]);
+  // Loops of one offset never overlap, but merge touching stretches all the same.
+  const merged: [number, number][] = [];
+  for (const sp of spans) {
+    const last = merged[merged.length - 1];
+    if (last && sp[0] <= last[1] + 1e-9) last[1] = Math.max(last[1], sp[1]);
+    else merged.push([sp[0], sp[1]]);
+  }
+  return merged;
+}
+
+/** Where the line y = `y` passes within r of segment ab, as an x interval, or null. */
+function capsuleRow(a: Point2D, b: Point2D, y: number, r: number): [number, number] | null {
+  let lo = Infinity, hi = -Infinity;
+  for (const c of [a, b]) {
+    const dy = y - c.y;
+    if (Math.abs(dy) <= r) {
+      const dx = Math.sqrt(r * r - dy * dy);
+      lo = Math.min(lo, c.x - dx); hi = Math.max(hi, c.x + dx);
+    }
+  }
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  if (len > 1e-12) {
+    // The band either side of the segment: a parallelogram, cut by the line.
+    const nx = (-(b.y - a.y) / len) * r, ny = ((b.x - a.x) / len) * r;
+    const quad = [
+      { x: a.x + nx, y: a.y + ny }, { x: b.x + nx, y: b.y + ny },
+      { x: b.x - nx, y: b.y - ny }, { x: a.x - nx, y: a.y - ny },
+    ];
+    for (let i = 0; i < 4; i++) {
+      const p = quad[i], q = quad[(i + 1) % 4];
+      if ((p.y - y) * (q.y - y) <= 0 && p.y !== q.y) {
+        const x = p.x + ((y - p.y) * (q.x - p.x)) / (q.y - p.y);
+        lo = Math.min(lo, x); hi = Math.max(hi, x);
+      }
+    }
+  }
+  return lo <= hi ? [lo, hi] : null;
+}
+
+/** Whether a bit of radius r moved from p to q stays clear of (and outside) every polygon. */
+function segmentClear(p: Point2D, q: Point2D, polys: Point2D[][], r: number): boolean {
+  for (const poly of polys) {
+    if (pointInLoop2D(p, poly) || pointInLoop2D(q, poly)) return false;
+    for (let i = 0; i < poly.length; i++) {
+      if (segmentDistance(p, q, poly[i], poly[(i + 1) % poly.length]) < r - 2e-3) return false;
+    }
+  }
+  return true;
+}
+
+function segmentDistance(p: Point2D, q: Point2D, a: Point2D, b: Point2D): number {
+  const cross = (o: Point2D, u: Point2D, v: Point2D) => (u.x - o.x) * (v.y - o.y) - (u.y - o.y) * (v.x - o.x);
+  const d1 = cross(a, b, p), d2 = cross(a, b, q), d3 = cross(p, q, a), d4 = cross(p, q, b);
+  if (((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))) return 0;
+  const toSeg = (c: Point2D, u: Point2D, v: Point2D) => {
+    const dx = v.x - u.x, dy = v.y - u.y;
+    const L = dx * dx + dy * dy;
+    const t = L > 0 ? Math.max(0, Math.min(1, ((c.x - u.x) * dx + (c.y - u.y) * dy) / L)) : 0;
+    return Math.hypot(c.x - u.x - t * dx, c.y - u.y - t * dy);
+  };
+  return Math.min(toSeg(p, a, b), toSeg(q, a, b), toSeg(a, p, q), toSeg(b, p, q));
 }
 
 function pointInLoop2D(pt: Point2D, loop: Point2D[]): boolean {
@@ -825,7 +982,7 @@ export function generateLaserCutGcode(
    * (Mesh's streamer lifts and waits), and the new bit is touched off
    * before it goes on. Whichever is needed first is the one fitted at the start.
    */
-  const facingBit = Math.max(1, options.facingBitDiameterMm);
+  const facingBit = facingBitOf(options);
   const twoBits = options.pauseOnToolChange && Math.abs(facingBit - options.bitDiameterMm) > 0.01;
   let fitted: 'facing' | 'profile' | null = null;
   const fit = (bit: 'facing' | 'profile', sIdx: number) => {
@@ -919,16 +1076,53 @@ export function generateLaserCutGcode(
      */
     if (options.machineMode === 'cnc' && options.faceToThickness) {
       const stockMm = options.sheetStockThicknessMm?.[sKey];
+      // Below a tenth of a millimetre there is nothing to take off, and sheet
+      // goods are not flat enough for the attempt to mean anything.
+      const removalOf = (panel: LaserPanel) => {
+        const removal = stockMm !== undefined ? stockMm - panel.thickness * 1000 : 0;
+        return removal > 0.1 ? removal : 0;
+      };
+      const placedOuter = (panel: LaserPanel) => {
+        const at = panel.placedPos2D || { x: 0, y: 0 };
+        return panel.outerPolygon2D.map((p) => ({ x: p.x + at.x, y: p.y + at.y }));
+      };
       for (const panel of sheetPanels) {
         const target = panel.thickness * 1000;
-        const removal = stockMm !== undefined ? stockMm - target : 0;
-        // Below a tenth of a millimetre there is nothing to take off, and sheet
-        // goods are not flat enough for the attempt to mean anything.
-        if (!(removal > 0.1)) continue;
+        const removal = removalOf(panel);
+        if (!(removal > 0)) continue;
+
+        /*
+         * The parts the bit must stay off: every other one on the sheet that
+         * is not coming down as far. And if the bit cannot reach this part's
+         * own profile slot without touching one of them, there is no right way
+         * to face it, so the job is refused rather than left with a lip.
+         */
+        const keepClear = sheetPanels
+          .filter((o) => o !== panel && o.outerPolygon2D.length >= 3 && removalOf(o) < removal - 0.01)
+          .map((o) => ({ panel: o, poly: placedOuter(o) }));
+        if (keepClear.length > 0 && panel.outerPolygon2D.length >= 3) {
+          // The slot's far wall is this far out; the bit's centre has to get
+          // within a radius of it, which is how close it then comes to them.
+          const at = panel.placedPos2D || { x: 0, y: 0 };
+          const slotWall = radius > 0 ? 2 * radius : options.bitDiameterMm / 2;
+          const reach = Math.max(0, slotWall - facingBit / 2);
+          const slot = (reach > 1e-6 ? offsetRegion(panel.outerPolygon2D, [], reach).outer : [panel.outerPolygon2D])
+            .map((l) => l.map((p) => ({ x: p.x + at.x, y: p.y + at.y })));
+          for (const { panel: other, poly } of keepClear) {
+            const hit = slot.some((loop) =>
+              loop.some((p, i) => !segmentClear(p, loop[(i + 1) % loop.length], [poly], facingBit / 2)));
+            if (hit) {
+              return refusedResult(
+                `${panel.name} cannot be faced without cutting into ${other.name}: move them at least ` +
+                  `${f(Math.max(slotWall, facingBit / 2))} mm apart, or cut them from separate sheets.`
+              );
+            }
+          }
+        }
 
         fit('facing', sIdx);
         facedDownMm.set(panel.id, removal);
-        const faced = facingLines(panel, removal, options, f, options.sheetSizeMm?.[sKey]);
+        const faced = facingLines(panel, removal, options, f, options.sheetSizeMm?.[sKey], keepClear.map((k) => k.poly));
         faceMinX = Math.min(faceMinX, faced.reach.minX);
         faceMinY = Math.min(faceMinY, faced.reach.minY);
         faceMaxX = Math.max(faceMaxX, faced.reach.maxX);
