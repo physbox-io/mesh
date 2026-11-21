@@ -221,10 +221,17 @@ export abstract class ProbingMachine extends SetupMachine {
       // drag there. Relative like every other Z move here, and only off a datum
       // that means something: with none, the reading is no measure of the gap.
       await this.awaitStatus();
-      const short = PROBE_LIFT_MM - this.state.wpos.z;
-      if (!this.state.needsZZero && short > 0.001) {
+      // With no datum the gap is unknown, so the tool goes up one hop's lift
+      // from wherever it stands (short of the top of travel, where that is
+      // known) and the first stab searches that much further down.
+      let firstSearchExtra = 0;
+      const top = this.state.hasHomed ? this.zTravelTop() : null;
+      const room = top === null ? Infinity : top - 1 - this.state.mpos.z;
+      const short = this.state.needsZZero ? Math.min(PROBE_LIFT_MM, room) : PROBE_LIFT_MM - this.state.wpos.z;
+      if (short > 0.001) {
         await this.sendAndWait(`G91 G0 Z${short.toFixed(3)}`);
         await this.sendAndWait('G90');
+        if (this.state.needsZZero) firstSearchExtra = short;
       }
 
       // Machine Z of the first contact. Every later point is reported against it,
@@ -243,7 +250,7 @@ export abstract class ProbingMachine extends SetupMachine {
           await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
           // Straight down, slowly, until the probe triggers or the search runs
           // out. `probePoint` issues `G91 G38.2 Z-<search>`, a relative plunge.
-          const contactZ = await this.probeOnce(PROBE_SEARCH_MM, PROBE_FEED);
+          const contactZ = await this.probeOnce(PROBE_SEARCH_MM + (probed === 0 ? firstSearchExtra : 0), PROBE_FEED);
 
           // A miss means the plunge ran its whole length without the probe
           // triggering: a clip that fell off, a broken wire, a non-conductive

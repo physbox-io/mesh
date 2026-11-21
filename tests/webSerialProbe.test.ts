@@ -118,6 +118,7 @@ describe('probeGrid against a live machine', () => {
 
   it('probes each point with relative Z moves only, never an absolute one', async () => {
     fake = attachFakeGrbl(() => -5);
+    (fake.state() as { needsZZero?: boolean }).needsZZero = false;
     await webSerialManager.probeGrid(bounds, 3, 3);
 
     expect(fake.sent.filter(l => l.includes('G38.2'))).toHaveLength(9);
@@ -135,6 +136,18 @@ describe('probeGrid against a live machine', () => {
     expect(fake.sent[probeIdx]).toMatch(/^G91 G38\.2 Z-10\.000 F50/);
     expect(fake.sent[probeIdx + 1]).toBe('G90');
     expect(fake.sent[probeIdx + 2]).toMatch(/^G91 G0 Z5\.000/);
+  });
+
+  it('lifts before the first hop with no Z zero set, and searches that much further', async () => {
+    fake = attachFakeGrbl(() => -5);
+    (fake.state() as { needsZZero?: boolean }).needsZZero = true;
+    await webSerialManager.probeGrid(bounds, 2, 2);
+
+    const firstHop = fake.sent.indexOf('G0 X0.000 Y0.000');
+    expect(fake.sent.slice(0, firstHop)).toContain('G91 G0 Z5.000');
+    const stabs = fake.sent.filter(l => l.includes('G38.2'));
+    expect(stabs[0]).toMatch(/^G91 G38\.2 Z-15\.000 F50/);
+    expect(stabs.slice(1).every(l => /Z-10\.000/.test(l))).toBe(true);
   });
 
   it('stops on the first missed contact instead of driving down at every point', async () => {
