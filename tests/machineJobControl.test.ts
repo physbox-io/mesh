@@ -820,6 +820,7 @@ describe('a run from a line in another bit\'s section', () => {
     // The stop for the swap, with the prompt for the right bit.
     expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
     expect(webSerialManager.getState().pauseMessage).toContain('T2');
+    expect(webSerialManager.getState().pauseMessage).toContain('16,000 RPM');
     // Nothing of T2's section before the chosen line runs: not now, and not after the swap.
     for (const skipped of ['G0 X30 Y0', 'G1 Z-1 F200', 'G1 X40 F600']) expect(fake.lines()).not.toContain(skipped);
 

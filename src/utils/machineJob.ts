@@ -420,7 +420,12 @@ export abstract class JobMachine extends ProbingMachine {
     const what = named || (tool ? `tool T${tool[1]}` : 'the next tool');
 
     let rpm = '';
-    for (let i = this.currentQueueIndex + 1; i < Math.min(this.gcodeQueue.length, this.currentQueueIndex + 6); i++) {
+    // A tool change run ahead of a resume preamble finds its speed in that
+    // preamble, which is longer than the few lines a program puts after an M6.
+    const lookTo = this.fittingToolAt === this.currentQueueIndex
+      ? this.cutFloorLine - this.jobLineBase
+      : this.currentQueueIndex + 6;
+    for (let i = this.currentQueueIndex + 1; i < Math.min(this.gcodeQueue.length, lookTo); i++) {
       const m = this.gcodeQueue[i].match(/\bM0*3\b.*?\bS(\d+)/i);
       if (m) {
         const s = parseInt(m[1], 10);
