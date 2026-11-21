@@ -209,6 +209,17 @@ describe('no probe runs on a circuit nobody has proved', () => {
     expect(fake.sent).toContain('G10 L20 P1 Z12.000');
   });
 
+  it('forgets the proof on an alarm, said as a line or as the state word', async () => {
+    fake = attachFakeGrbl(() => -5);
+    fake.report('ALARM:5');
+    expect(fake.state().probeCircuitSeen).toBe(false);
+
+    fake.proveProbeCircuit();
+    expect(fake.state().probeCircuitSeen).toBe(true);
+    fake.report('<Alarm|MPos:0,0,0|WCO:0,0,0|Pn:P>');
+    expect(fake.state().probeCircuitSeen).toBe(false);
+  });
+
   it('forgets the proof when the machine goes away', async () => {
     fake = attachFakeGrbl(() => -5);
     expect(fake.state().probeCircuitSeen).toBe(true);

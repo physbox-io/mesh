@@ -328,6 +328,9 @@ class WebSerialManager extends RecoveryMachine {
    * machine has been rehomed and the tool re-zeroed.
    */
   protected onAlarm(): void {
+    // A probe that found nothing alarms too: whatever proved the circuit no
+    // longer does, and the next stab has to be proved again.
+    if (this.state.probeCircuitSeen) this.updateState({ probeCircuitSeen: false });
     if (this.isJobRunning || this.isPaused) this.abandonJob('alarm');
     this.parkToResume('alarm');
     void this.restoreLaserMode();
@@ -367,7 +370,13 @@ class WebSerialManager extends RecoveryMachine {
     // asserted, so a report with no `Pn` field means the probe is open.
     const probePinActive = /P/.test(report.pins ?? '');
     if (probePinActive !== this.state.probePinActive) patch.probePinActive = probePinActive;
-    if (probePinActive && !this.state.probeCircuitSeen) patch.probeCircuitSeen = true;
+    // Not every controller says `ALARM:`; the word does what `onAlarm` does,
+    // and a pin read closed in an alarm (ALARM:4) proves nothing.
+    if (machineWord === 'Alarm') {
+      if (this.state.probeCircuitSeen) patch.probeCircuitSeen = false;
+    } else if (probePinActive && !this.state.probeCircuitSeen) {
+      patch.probeCircuitSeen = true;
+    }
 
     // The alarm word as well as the `ALARM:` line, which a controller does not
     // always send: the job is dropped so nothing streams on into a machine
