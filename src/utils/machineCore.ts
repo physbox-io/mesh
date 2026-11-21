@@ -144,6 +144,12 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
    * clamps rather than counting backwards.
    */
   protected jobLineBase = 0;
+  /**
+   * The queue position of a tool change a resume runs ahead of its preamble
+   * (see `toolChangeToFit`), or null. The preamble after it puts the machine
+   * back for the chosen line, so the stop is not restored from the program.
+   */
+  protected fittingToolAt: number | null = null;
 
   /**
    * The program on the clock, line by line, for reading progress off the line

@@ -807,16 +807,36 @@ describe('a run from a line in another bit\'s section', () => {
     fake.detach();
   });
 
-  it('starts at that section\'s tool change when Z was zeroed with the other bit', async () => {
+  it('runs that section\'s tool change, then the chosen line\'s preamble, skipping what lies between', async () => {
     mgr().zeroedWithTool = 1;
-    const res = webSerialManager.resumeFromLine(PROGRAM.indexOf('G1 X50'));
+    const at = PROGRAM.indexOf('G1 X50');
+    const preview = webSerialManager.previewResume(at);
+    expect(preview?.fromLine).toBe(at);
+    expect(preview?.preamble[0]).toBe('T2 M6');
+
+    const res = webSerialManager.resumeFromLine(at);
     expect(res.ok).toBe(true);
-    expect(res.message).toContain(`line ${PROGRAM.indexOf('T2 M6')}`);
     await advance(30);
+    // The stop for the swap, with the prompt for the right bit.
     expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
-    // Nothing of T2's section was cut before the change.
-    expect(fake.lines()).not.toContain('G1 X40 F600');
-    expect(fake.lines()).not.toContain('G1 X50');
+    expect(webSerialManager.getState().pauseMessage).toContain('T2');
+    // Nothing of T2's section before the chosen line runs: not now, and not after the swap.
+    for (const skipped of ['G0 X30 Y0', 'G1 Z-1 F200', 'G1 X40 F600']) expect(fake.lines()).not.toContain(skipped);
+
+    (webSerialManager as unknown as { state: Record<string, unknown> }).state.zDatumTrusted = true;
+    (webSerialManager as unknown as { state: Record<string, unknown> }).state.needsZZero = false;
+    const sentBefore = fake.lines().length;
+    await webSerialManager.resumeJob();
+    await advance(40);
+    const after = fake.lines().slice(sentBefore);
+    for (const skipped of ['G0 X30 Y0', 'G1 Z-1 F200', 'G1 X40 F600']) expect(after).not.toContain(skipped);
+    // Then the chosen line's preamble: over the point it stopped at, down, and on from there.
+    const over = after.findIndex((l) => /^G0 X40\.000 Y0\.000/.test(l));
+    const down = after.findIndex((l) => /^G1 Z-1\.000 F200/.test(l));
+    const chosen = after.indexOf('G1 X50');
+    expect(over).toBeGreaterThanOrEqual(0);
+    expect(down).toBeGreaterThan(over);
+    expect(chosen).toBeGreaterThan(down);
   });
 
   it('starts at the line itself when the bit Z describes is the one it needs', async () => {

@@ -133,6 +133,7 @@ export abstract class JobMachine extends ProbingMachine {
         this.program = [];
         this.gcodeNotes = [];
         this.jobLineBase = 0;
+        this.fittingToolAt = null;
         clearCheckpoint();
         this.beginHandedOverJob(options.origin === 'mcp' ? 'agent' : undefined);
       }
@@ -200,6 +201,7 @@ export abstract class JobMachine extends ProbingMachine {
     this.programKind = { program: prepared, laser };
     this.gcodeNotes = prepared.map(l => l.note);
     this.jobLineBase = 0;
+    this.fittingToolAt = null;
     this.jobPeakWorkZ = null;
     this.drainedPause = null;
 
@@ -447,7 +449,12 @@ export abstract class JobMachine extends ProbingMachine {
     const type = kind === 'tool' ? 'PAUSED_TOOL' : 'PAUSED_MATERIAL';
     const message = this.state.pauseMessage ?? '';
     // The stream has stepped past the pause line, which is the line just taken.
-    const pauseLine = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex - 1));
+    // Never behind where this run started: a tool change a resume runs ahead of
+    // its preamble stands for the chosen line, not the lines before it.
+    const pauseLine = Math.max(
+      this.cutFloorLine,
+      Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex - 1)
+    );
 
     await this.sendAndWait('M5', QUICK_REPLY_TIMEOUT_MS); // Laser/Spindle OFF
     // An alarm or a cancel meanwhile has already dealt with the job; a lift and
@@ -631,6 +638,9 @@ export abstract class JobMachine extends ProbingMachine {
    */
   protected async restoreAfterProgramPause(): Promise<void> {
     if (this.program.length === 0) return;
+    // The resume preamble that follows a fitted tool change does this itself,
+    // for the chosen line rather than for a line it skipped.
+    if (this.fittingToolAt !== null && this.currentQueueIndex - 1 === this.fittingToolAt) return;
     const at = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
     // The retract is clamped to the live Z, so read it from now.
     await this.awaitStatus();

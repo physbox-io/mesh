@@ -179,14 +179,18 @@ export abstract class RecoveryMachine extends JobMachine {
       return { ok: false, message: blocked };
     }
 
-    const from = this.startForTool(fromLine);
-    const plan = planResume(this.program.map((l) => l.code), from, {
+    const plan = planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
       isLaser: this.jobIsLaser(options?.isLaser),
       currentZ: this.state.wpos.z,
-      arrivingAtPause: this.lineIsPause(from),
+      arrivingAtPause: this.lineIsPause(fromLine),
     });
-    const preamble = prepareJobLines(plan.preamble.join('\n'));
+    // The section's own tool change goes first when the bit Z describes is not
+    // the one it cuts with: the stop, the swap and the re-zero, and then the
+    // preamble for the chosen line. Nothing between the two is run again.
+    const change = this.toolChangeToFit(plan.fromLine);
+    const prefix = change === null ? [] : [this.program[change]];
+    const preamble = [...prefix, ...prepareJobLines(plan.preamble.join('\n'))];
     const tail = this.program.slice(plan.fromLine);
     // From wherever the tool was jogged to, the rest of the job still has to
     // fit the machine.
@@ -204,6 +208,7 @@ export abstract class RecoveryMachine extends JobMachine {
     // The preamble's lines are not in the program, so the program line that
     // queue position 0 corresponds to is behind where it picks up.
     this.jobLineBase = plan.fromLine - preamble.length;
+    this.fittingToolAt = change === null ? null : 0;
     this.jobPeakWorkZ = null;
     this.drainedPause = null;
 
@@ -265,32 +270,33 @@ export abstract class RecoveryMachine extends JobMachine {
    */
   public previewResume(fromLine: number, options?: ResumeOptions) {
     if (this.program.length === 0) return null;
-    const from = this.startForTool(fromLine);
-    return planResume(this.program.map((l) => l.code), from, {
+    const plan = planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
       isLaser: this.jobIsLaser(options?.isLaser),
-      arrivingAtPause: this.lineIsPause(from),
+      arrivingAtPause: this.lineIsPause(fromLine),
     });
+    const change = this.toolChangeToFit(plan.fromLine);
+    return change === null ? plan : { ...plan, preamble: [this.program[change].code, ...plan.preamble] };
   }
 
   /**
-   * Where a run from `fromLine` has to start so that it cuts with the right
-   * bit: `fromLine` itself, unless the tool change that opens its section asks
-   * for a different T than the one Z was zeroed with. Then it starts at that
-   * change, which stops for the swap and its re-zero like any other, instead
-   * of cutting the section with the wrong bit at the wrong length. When the
-   * bit Z describes is not known this session, the operator's zero stands.
+   * The tool change a run from `fromLine` has to make first, or null: the one
+   * that opens its section, when it asks for a different T than the bit Z was
+   * zeroed with. Run alone ahead of the resume preamble, it stops for the swap
+   * and its re-zero like any other, instead of the section being cut with the
+   * wrong bit at the wrong length. When the bit Z describes is not known this
+   * session, the operator's zero stands.
    */
-  protected startForTool(fromLine: number): number {
+  protected toolChangeToFit(fromLine: number): number | null {
     const { zeroedWith } = this.toolsInUse();
-    if (zeroedWith === null || this.lineIsPause(fromLine)) return fromLine;
+    if (zeroedWith === null || this.lineIsPause(fromLine)) return null;
     for (let i = Math.min(fromLine, this.program.length) - 1; i >= 0; i--) {
       const code = this.program[i].code;
       if (classifyJobLine(code) !== 'tool-change') continue;
       const wanted = /\bT0*(\d+)\b/i.exec(code.replace(/\([^)]*\)|;.*$/g, ''));
-      return wanted && parseInt(wanted[1], 10) !== zeroedWith ? i : fromLine;
+      return wanted && parseInt(wanted[1], 10) !== zeroedWith ? i : null;
     }
-    return fromLine;
+    return null;
   }
 
   /**
