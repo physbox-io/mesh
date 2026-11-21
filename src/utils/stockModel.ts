@@ -272,6 +272,34 @@ export class StockModel {
     return { low, high };
   }
 
+  /**
+   * Visits every cell the disc of `radius` round (x, y) reaches whose
+   * material stands above `level`, with the cell's extent.
+   */
+  forEachNear(
+    x: number, y: number, radius: number, level: number,
+    visit: (x0: number, y0: number, x1: number, y1: number, z: number) => void
+  ): void {
+    const c = this.cell;
+    const i0 = Math.max(0, Math.floor((x - radius - this.x0) / c));
+    const i1 = Math.min(this.cols - 1, Math.floor((x + radius - this.x0) / c));
+    const j0 = Math.max(0, Math.floor((y - radius - this.y0) / c));
+    const j1 = Math.min(this.rows - 1, Math.floor((y + radius - this.y0) / c));
+    const reachSq = radius * radius;
+    for (let j = j0; j <= j1; j++) {
+      const ya = this.y0 + j * c, yb = Math.min(this.y1, ya + c);
+      const dy = y < ya ? ya - y : y > yb ? y - yb : 0;
+      for (let i = i0; i <= i1; i++) {
+        const z = this.z[j * this.cols + i];
+        if (z <= level) continue;
+        const xa = this.x0 + i * c, xb = Math.min(this.x1, xa + c);
+        const dx = x < xa ? xa - x : x > xb ? x - xb : 0;
+        if (dx * dx + dy * dy > reachSq) continue;
+        visit(xa, ya, xb, yb, z);
+      }
+    }
+  }
+
   /** Highest material a cutter of `radius` would touch flying from one point to another. */
   highestAlong(x0: number, y0: number, x1: number, y1: number, radius: number): number {
     let best = -Infinity;

@@ -20,6 +20,7 @@ import {
   type PathPoint,
 } from './reliefPaths';
 import { MAX_REACH_DIAMETERS, describeCutter } from './reliefTooling';
+import { bodyHold } from './bodyHold';
 import { FLAT_PROFILE, ballProfile, vProfile } from './stockModel';
 import { bodyFor, centreWindow, type SurfaceJob } from './surfaceJob';
 import { finishingCutter } from './surfaceToolingWarnings';
@@ -302,191 +303,235 @@ export function finishSurface(
   const placedLevels = planGroups.map((group) => group.map((plan) =>
     plan.length > 0 ? waterlineLevel(plan[0]) : undefined));
 
-  for (const limit of finishLimits) {
-    if (finishLimits.length > 1) {
-      w.gcode.push(`; layer down to Z${f(limit)}`);
-    }
+  /*
+   * Each layer, and the same layer again wherever the tool's body was held up
+   * over stock standing above the surface (see `bodyHold`), once the sweep
+   * has cut what held it: a valley the roughing bit could not enter is taken
+   * down a flute length a sweep, as far as the finished walls let the shank
+   * go. Where nothing held the body up, a layer is one sweep, as it always was.
+   */
+  const hold = bodyHold(w.stock, surface, finishBody);
+  const sampleOf = (x: number, y: number) =>
+    Math.min(finishMap.rows - 1, Math.max(0, Math.round((y - finishMap.minY) / (finishMap.stepY || 1)))) * finishMap.cols +
+    Math.min(finishMap.cols - 1, Math.max(0, Math.round((x - finishMap.minX) / (finishMap.stepX || 1))));
+  for (let li = 0; li < finishLimits.length; li++) {
+    const limit = finishLimits[li];
+    // The samples the sweep before was held up over, and by how much in all.
+    let heldOver: Uint8Array | null = null;
+    let heldBefore = Infinity;
+    for (let sweep = 0; ; sweep++) {
+      if (sweep === 0 && finishLimits.length > 1) {
+        w.gcode.push(`; layer down to Z${f(limit)}`);
+      } else if (sweep > 0) {
+        w.gcode.push('; again, where the tool body was held clear of the stock');
+      }
 
-    // Whether the cutter is down on the surface at the end of a run, from
-    // where the next may be linked to without lifting.
-    let down = false;
+      // Whether the cutter is down on the surface at the end of a run, from
+      // where the next may be linked to without lifting.
+      let down = false;
 
-    for (let g = 0; g < placed.length; g++) {
-      const group = placed[g];
-      const { runs, runLevels } = layerRuns(group, placedLevels[g], limit, prevLimit, floorZ, stepover, res);
-
-      /*
-       * Nearest run next, from either end, or from anywhere round a loop.
-       *
-       * The runs come out of the generator in its own order — row after row
-       * across the whole stock for a raster, level after level for a waterline
-       * — and once they are split where they leave the material, cutting them
-       * in that order flies the width of the stock between every two pieces of
-       * neighbouring rows. On a giraffe hide that was 761 runs and more
-       * distance in the air than cutting. Taken nearest first, the pieces of
-       * one patch are finished, row to row, before the tool leaves it — the
-       * same order the roughing pockets were given.
-       */
-      const closed = runs.map((r) =>
-        r.length > 3 && Math.hypot(r[0].x - r[r.length - 1].x, r[0].y - r[r.length - 1].y) < 1e-6
-      );
-      // A loop's candidate starting points, thinned so the search stays cheap
-      // on long contours. The chosen loop is then turned to its exact nearest.
-      const probes = runs.map((r, i) => {
-        if (!closed[i]) return [0, r.length - 1];
-        const step = Math.max(1, Math.floor((r.length - 1) / 32));
-        const out: number[] = [];
-        for (let k = 0; k < r.length - 1; k += step) out.push(k);
-        return out;
-      });
-      const used = new Uint8Array(runs.length);
-
-      /*
-       * ...except down a wall, which is cut top first.
-       *
-       * Nearest in plan alone ignores height, and stepping from one wall to the
-       * next it took whichever level of the next happened to be closest - as
-       * often as not the deepest - and worked the wall upward from there, the
-       * cutter's flank buried in the allowance standing over it the whole way.
-       * A waterline waits for every higher one near it (see
-       * `higherWaterlinesNear`); everything else is nearest first as before.
-       */
-      const waterlineReach = Math.max(
-        opts.finishingToolDiaMm,
-        stepover / Math.tan((Math.max(5, opts.finishingSteepAngleDeg || 35) * Math.PI) / 180) + res * 2
-      );
-      const waitingFor = higherWaterlinesNear(runs, runLevels, waterlineReach);
-      const pending = waitingFor.map((w) => w.length);
-      const releases: number[][] = runs.map(() => []);
-      waitingFor.forEach((w, i) => { for (const j of w) releases[j].push(i); });
-
-      for (let n = 0; n < runs.length; n++) {
-        let best = -1;
-        let bestAt = 0;
-        let bestD = Infinity;
-        for (let i = 0; i < runs.length; i++) {
-          if (used[i] || pending[i] > 0) continue;
-          for (const k of probes[i]) {
-            const d = Math.hypot(runs[i][k].x - w.atX, runs[i][k].y - w.atY);
-            if (d < bestD) {
-              bestD = d;
-              best = i;
-              bestAt = k;
-            }
-          }
-        }
-        if (best < 0) best = runs.findIndex((_, i) => !used[i]);
-        used[best] = 1;
-        for (const i of releases[best]) pending[i]--;
-        let r = runs[best];
-        if (closed[best]) {
-          let near = bestAt;
-          for (let k = 0; k < r.length - 1; k++) {
-            if (Math.hypot(r[k].x - w.atX, r[k].y - w.atY) < Math.hypot(r[near].x - w.atX, r[near].y - w.atY)) near = k;
-          }
-          r = [...r.slice(near, r.length - 1), ...r.slice(0, near), r[near]];
-        } else if (bestAt !== 0) {
-          r = [...r].reverse();
-        }
-
-        let pass = simplifyPass(squareUpWalls(r), PATH_SIMPLIFY_MM);
-        finishingRasterLines++;
-        const head = pass[0];
-
-        // Across to the head along the surface, where it is close and the
-        // material in the way is no more than a pass would take anyway.
-        let link: PathPoint[] | null = null;
-        const gap = Math.hypot(head.x - w.atX, head.y - w.atY);
-        if (down && gap <= linkMaxMm) {
-          const steps = Math.max(1, Math.ceil(gap / res));
-          const pts: PathPoint[] = [];
-          for (let i = 1; i < steps; i++) {
-            const x = w.atX + ((head.x - w.atX) * i) / steps;
-            const y = w.atY + ((head.y - w.atY) * i) / steps;
-            pts.push({ x, y, z: finishZAt(x, y, limit) });
-          }
-          pts.push({ x: head.x, y: head.y, z: head.z });
-          // Squared up at each wall as the runs are, or a link across a step
-          // runs straight through its edge; then measured as the cut it would
-          // be, against the cutter's profile.
-          const candidate = simplifyPass(squareUpWalls([{ x: w.atX, y: w.atY, z: w.atZ }, ...pts]), PATH_SIMPLIFY_MM);
-          let ok = true;
-          for (let i = 1; i < candidate.length && ok; i++) {
-            const a = candidate[i - 1], b = candidate[i];
-            ok =
-              w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, w.cutter.radius / 2) <= linkBiteMm &&
-              w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, linkRimWithin) <= linkBiteMm;
-          }
-          if (ok) link = candidate;
-        }
+      const only = heldOver;
+      const heldNow = hold ? new Uint8Array(finishMap.cols * finishMap.rows) : null;
+      let heldBy = 0;
+      for (let g = 0; g < placed.length; g++) {
+        const group = only
+          ? placed[g].map((plan) => plan.map((pt) => only[sampleOf(pt.x, pt.y)] ? pt : { x: pt.x, y: pt.y, z: 0 }))
+          : placed[g];
+        const { runs, runLevels } = layerRuns(group, placedLevels[g], limit, prevLimit, floorZ, stepover, res);
 
         /*
-         * A link's straight drops - the foot of a wall it squares up at, or the
-         * step from one waterline level to the next - go down at the plunge
-         * rate, as a pass's own do. They went at the cutting feed: 150 times
-         * on one bracket, a 3.8 mm vertical plunge at 2240 mm/min on a monkey,
-         * three times the rate the bit is rated to go straight down at.
+         * Nearest run next, from either end, or from anywhere round a loop.
+         *
+         * The runs come out of the generator in its own order — row after row
+         * across the whole stock for a raster, level after level for a waterline
+         * — and once they are split where they leave the material, cutting them
+         * in that order flies the width of the stock between every two pieces of
+         * neighbouring rows. On a giraffe hide that was 761 runs and more
+         * distance in the air than cutting. Taken nearest first, the pieces of
+         * one patch are finished, row to row, before the tool leaves it — the
+         * same order the roughing pockets were given.
          */
-        let linkRate = 0;
-        if (link) {
-          for (let i = 1; i < link.length; i++) {
-            const p = link[i], prev = link[i - 1];
-            const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
-            linkRate = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
-            w.cutTo(p.x, p.y, p.z);
-            w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)} F${Math.round(linkRate)}`);
-          }
-        } else {
-          /*
-           * Where the material actually is at the head of this pass.
-           *
-           * This used to be told `Z0` — the stock's top face — whatever roughing
-           * had already taken off. With a 10 mm ${noun} and roughing on, the real
-           * material stands at about `surface + 0.5 mm`, so the ramp was handed a
-           * 10 mm drop instead of half a millimetre and spent 37 mm descending
-           * through open air at the plunge rate before it touched anything, then
-           * retraced the same 37 mm on the way back. About fifteen seconds a run,
-           * for roughly one second of cutting, across every raster line in the
-           * job — which is most of where "it spent a long time cutting air" came
-           * from.
-           *
-           * The lower of the two is what is standing: whichever of roughing and
-           * the finishing layer above cut deepest here is the one that decides
-           * the height, and cutting the same place twice does not raise it.
-           */
-          const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
-          pass = w.leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
-        }
-
-        // GRBL keeps the last feedrate, so it is only stated when it changes:
-        // at the start, and either side of the straight drops `squareUpWalls`
-        // puts at the foot of a wall, which go down at the plunge rate. A link
-        // stated the feed already.
-        // A link that ended on a drop left the plunge rate set.
-        let rate = link ? linkRate : 0;
-        for (let i = 1; i < pass.length; i++) {
-          const p = pass[i];
-          const prev = pass[i - 1];
-          const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
-          const want = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
-          w.cutTo(p.x, p.y, p.z);
-          w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)}${want !== rate ? ` F${Math.round(want)}` : ''}`);
-          rate = want;
-        }
-        down = true;
-
-        w.segments.push({
-          type: 'finishing',
-          points: link ? [...link.slice(0, -1), ...pass] : pass,
-          // A linked pass never lifted, so it has no traverse of its own: it
-          // starts where the tool already was. It used to carry the last
-          // `leadIn`'s height, and after a long flight at the safe height the
-          // preview drew and timed that whole lift at every link after it.
-          traverseZ: link ? link[0].z : w.lastTraverseZ,
+        const closed = runs.map((r) =>
+          r.length > 3 && Math.hypot(r[0].x - r[r.length - 1].x, r[0].y - r[r.length - 1].y) < 1e-6
+        );
+        // A loop's candidate starting points, thinned so the search stays cheap
+        // on long contours. The chosen loop is then turned to its exact nearest.
+        const probes = runs.map((r, i) => {
+          if (!closed[i]) return [0, r.length - 1];
+          const step = Math.max(1, Math.floor((r.length - 1) / 32));
+          const out: number[] = [];
+          for (let k = 0; k < r.length - 1; k += step) out.push(k);
+          return out;
         });
-      }
-    }
+        const used = new Uint8Array(runs.length);
 
+        /*
+         * ...except down a wall, which is cut top first.
+         *
+         * Nearest in plan alone ignores height, and stepping from one wall to the
+         * next it took whichever level of the next happened to be closest - as
+         * often as not the deepest - and worked the wall upward from there, the
+         * cutter's flank buried in the allowance standing over it the whole way.
+         * A waterline waits for every higher one near it (see
+         * `higherWaterlinesNear`); everything else is nearest first as before.
+         */
+        const waterlineReach = Math.max(
+          opts.finishingToolDiaMm,
+          stepover / Math.tan((Math.max(5, opts.finishingSteepAngleDeg || 35) * Math.PI) / 180) + res * 2
+        );
+        const waitingFor = higherWaterlinesNear(runs, runLevels, waterlineReach);
+        const pending = waitingFor.map((w) => w.length);
+        const releases: number[][] = runs.map(() => []);
+        waitingFor.forEach((w, i) => { for (const j of w) releases[j].push(i); });
+
+        for (let n = 0; n < runs.length; n++) {
+          let best = -1;
+          let bestAt = 0;
+          let bestD = Infinity;
+          for (let i = 0; i < runs.length; i++) {
+            if (used[i] || pending[i] > 0) continue;
+            for (const k of probes[i]) {
+              const d = Math.hypot(runs[i][k].x - w.atX, runs[i][k].y - w.atY);
+              if (d < bestD) {
+                bestD = d;
+                best = i;
+                bestAt = k;
+              }
+            }
+          }
+          if (best < 0) best = runs.findIndex((_, i) => !used[i]);
+          used[best] = 1;
+          for (const i of releases[best]) pending[i]--;
+          let r = runs[best];
+          if (closed[best]) {
+            let near = bestAt;
+            for (let k = 0; k < r.length - 1; k++) {
+              if (Math.hypot(r[k].x - w.atX, r[k].y - w.atY) < Math.hypot(r[near].x - w.atX, r[near].y - w.atY)) near = k;
+            }
+            r = [...r.slice(near, r.length - 1), ...r.slice(0, near), r[near]];
+          } else if (bestAt !== 0) {
+            r = [...r].reverse();
+          }
+
+          if (hold && heldNow) {
+            r = r.map((p) => {
+              const need = Math.min(0, hold(p.x, p.y, p.z));
+              if (need <= p.z + 1e-6) return p;
+              // Scrap - the channel and frame away from the part - is left
+              // where the body held it: nobody keeps it, and going back for it
+              // a flute length at a time cost a solid job a quarter again.
+              if (!job.scrap?.(p.x, p.y)) {
+                heldNow[sampleOf(p.x, p.y)] = 1;
+                heldBy += need - p.z;
+              }
+              return { x: p.x, y: p.y, z: need };
+            });
+          }
+
+          let pass = simplifyPass(squareUpWalls(r), PATH_SIMPLIFY_MM);
+          finishingRasterLines++;
+          const head = pass[0];
+
+          // Across to the head along the surface, where it is close and the
+          // material in the way is no more than a pass would take anyway.
+          let link: PathPoint[] | null = null;
+          const gap = Math.hypot(head.x - w.atX, head.y - w.atY);
+          if (down && gap <= linkMaxMm) {
+            const steps = Math.max(1, Math.ceil(gap / res));
+            const pts: PathPoint[] = [];
+            for (let i = 1; i < steps; i++) {
+              const x = w.atX + ((head.x - w.atX) * i) / steps;
+              const y = w.atY + ((head.y - w.atY) * i) / steps;
+              pts.push({ x, y, z: finishZAt(x, y, limit) });
+            }
+            pts.push({ x: head.x, y: head.y, z: head.z });
+            // Squared up at each wall as the runs are, or a link across a step
+            // runs straight through its edge; then measured as the cut it would
+            // be, against the cutter's profile.
+            const candidate = simplifyPass(squareUpWalls([{ x: w.atX, y: w.atY, z: w.atZ }, ...pts]), PATH_SIMPLIFY_MM);
+            let ok = true;
+            for (let i = 1; i < candidate.length && ok; i++) {
+              const a = candidate[i - 1], b = candidate[i];
+              ok =
+                w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, w.cutter.radius / 2) <= linkBiteMm &&
+                w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, linkRimWithin) <= linkBiteMm;
+            }
+            // Nor where the tool body would meet the stock on the way.
+            if (hold) ok = ok && candidate.every((p) => hold(p.x, p.y, p.z) <= p.z + 1e-6);
+            if (ok) link = candidate;
+          }
+
+          /*
+           * A link's straight drops - the foot of a wall it squares up at, or the
+           * step from one waterline level to the next - go down at the plunge
+           * rate, as a pass's own do. They went at the cutting feed: 150 times
+           * on one bracket, a 3.8 mm vertical plunge at 2240 mm/min on a monkey,
+           * three times the rate the bit is rated to go straight down at.
+           */
+          let linkRate = 0;
+          if (link) {
+            for (let i = 1; i < link.length; i++) {
+              const p = link[i], prev = link[i - 1];
+              const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
+              linkRate = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
+              w.cutTo(p.x, p.y, p.z);
+              w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)} F${Math.round(linkRate)}`);
+            }
+          } else {
+            /*
+             * Where the material actually is at the head of this pass.
+             *
+             * This used to be told `Z0` — the stock's top face — whatever roughing
+             * had already taken off. With a 10 mm ${noun} and roughing on, the real
+             * material stands at about `surface + 0.5 mm`, so the ramp was handed a
+             * 10 mm drop instead of half a millimetre and spent 37 mm descending
+             * through open air at the plunge rate before it touched anything, then
+             * retraced the same 37 mm on the way back. About fifteen seconds a run,
+             * for roughly one second of cutting, across every raster line in the
+             * job — which is most of where "it spent a long time cutting air" came
+             * from.
+             *
+             * The lower of the two is what is standing: whichever of roughing and
+             * the finishing layer above cut deepest here is the one that decides
+             * the height, and cutting the same place twice does not raise it.
+             */
+            const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
+            pass = w.leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
+          }
+
+          // GRBL keeps the last feedrate, so it is only stated when it changes:
+          // at the start, and either side of the straight drops `squareUpWalls`
+          // puts at the foot of a wall, which go down at the plunge rate. A link
+          // stated the feed already.
+          // A link that ended on a drop left the plunge rate set.
+          let rate = link ? linkRate : 0;
+          for (let i = 1; i < pass.length; i++) {
+            const p = pass[i];
+            const prev = pass[i - 1];
+            const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
+            const want = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
+            w.cutTo(p.x, p.y, p.z);
+            w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)}${want !== rate ? ` F${Math.round(want)}` : ''}`);
+            rate = want;
+          }
+          down = true;
+
+          w.segments.push({
+            type: 'finishing',
+            points: link ? [...link.slice(0, -1), ...pass] : pass,
+            // A linked pass never lifted, so it has no traverse of its own: it
+            // starts where the tool already was. It used to carry the last
+            // `leadIn`'s height, and after a long flight at the safe height the
+            // preview drew and timed that whole lift at every link after it.
+            traverseZ: link ? link[0].z : w.lastTraverseZ,
+          });
+        }
+      }
+
+      if (!heldNow || heldBy < 1e-6 || sweep >= MAX_BODY_SWEEPS || heldBy >= heldBefore - 1e-3) break;
+      heldOver = heldNow;
+      heldBefore = heldBy;
+    }
     prevLimit = limit;
   }
 
@@ -495,6 +540,9 @@ export function finishSurface(
   }
   return { finishingRasterLines };
 }
+
+/** Most sweeps one layer takes while the tool body is still being held up. */
+const MAX_BODY_SWEEPS = 32;
 
 /**
  * One layer's runs in a group of passes, in no particular order yet, and the
