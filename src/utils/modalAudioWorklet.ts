@@ -183,16 +183,26 @@ interface NativeAeroVoiceSlot {
   propOsc: OscillatorNode;
   propLowpass: BiquadFilterNode;
   tonalGain: GainNode;
+  aeolianDriftDepth: GainNode;
   strouhalFilter: BiquadFilterNode;
+  aeroLowpass: BiquadFilterNode;
   noiseGain: GainNode;
   amOsc: OscillatorNode;
   amDepth: GainNode;
+  amFreqDepth: GainNode;
+  gustFormantDepth: GainNode;
+  gustGainDepth: GainNode;
   rustleShelf: BiquadFilterNode;
+  rustleLowpass: BiquadFilterNode;
   rustleGain: GainNode;
+  rustleAmDepth: GainNode;
   spatial: SlotSpatialStage;
 }
 
 interface NativeAeroBankState {
+  noiseSource: AudioBufferSourceNode | null;
+  gustOscSlow: OscillatorNode | null;
+  gustOscMed: OscillatorNode | null;
   slots: NativeAeroVoiceSlot[];
 }
 
@@ -257,7 +267,11 @@ type AudioContextWithWindGraph = AudioContext & {
   __physboxNativeBowedV5?: { slots: { voiceGain: GainNode; rosinGain?: GainNode; osc?: OscillatorNode; osc2?: OscillatorNode; osc3?: OscillatorNode; vibOsc?: OscillatorNode }[] };
   __physboxNativeBowedV6?: NativeBowedBankState;
   __physboxNativeBowedV7?: NativeBowedBankState;
-  __physboxNativeAeroV1?: NativeAeroBankState;
+  __physboxNativeAeroV1?: {
+    noiseSource?: AudioBufferSourceNode | null;
+    slots: { propOsc?: OscillatorNode; amOsc?: OscillatorNode; spatial?: { input?: GainNode } }[];
+  };
+  __physboxNativeAeroV2?: NativeAeroBankState;
   __physboxNativeFrictionV1?: NativeFrictionBankState;
 };
 
@@ -1491,23 +1505,155 @@ export function postWorkletBowedSilence(ctx: AudioContext | null): void {
   }
 }
 
+/**
+ * Synthesizes a seamless-looping, sample-rate-invariant Kolmogorov 1/f^alpha
+ * pink/brown atmospheric turbulence AudioBuffer (-7.5 to -10 dB/oct above ~160 Hz,
+ * warm 55..450 Hz outdoor breeze chest, 28 Hz DC/sub-rumble cut, zero loop click).
+ * Keeps `windBank.noiseSource` untouched so woodwinds, bowed rosin, and contact
+ * friction retain flat broadband white noise.
+ */
+function buildKolmogorovAeroNoiseBuffer(ctx: AudioContext): AudioBuffer {
+  const sr = ctx.sampleRate && Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 48000;
+  const len = Math.max(512, Math.floor(sr * 3.2));
+  const xfade = Math.min(256, Math.floor(len / 8));
+  const warmup = Math.max(128, Math.floor(sr * 0.15));
+  const totalGen = warmup + len + xfade;
+  const raw = new Float32Array(len + xfade);
+
+  // Continuous-time PSD scaling sqrt(sr / 48000) before matched-Z 1-pole filters
+  const whiteScale = Math.sqrt(sr / 48000);
+  const a1 = 1 - Math.exp((-2 * Math.PI * 110) / sr);
+  const a2 = 1 - Math.exp((-2 * Math.PI * 360) / sr);
+  const a3 = 1 - Math.exp((-2 * Math.PI * 1080) / sr);
+  const aOut = 1 - Math.exp((-2 * Math.PI * 1380) / sr);
+  const aHp = 1 - Math.exp((-2 * Math.PI * 28) / sr);
+
+  let seed = 0x5f3759df;
+  let lp1 = 0;
+  let lp2 = 0;
+  let lp3 = 0;
+  let lpOut = 0;
+  let hp = 0;
+
+  for (let i = 0; i < totalGen; i++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
+    const w = (seed / 2147483648) * whiteScale;
+    lp1 += a1 * (w - lp1);
+    lp2 += a2 * (w - lp2);
+    lp3 += a3 * (w - lp3);
+    const kolm = 0.68 * lp1 + 0.24 * lp2 + 0.08 * lp3;
+    lpOut += aOut * (kolm - lpOut);
+    hp += aHp * (lpOut - hp);
+    const y = lpOut - hp;
+    if (i >= warmup) {
+      raw[i - warmup] = y;
+    }
+  }
+
+  const buf = ctx.createBuffer(1, len, sr);
+  const ch = buf.getChannelData(0);
+  // Equal-power cosine/sine seam crossfade so looping is 100% click-free
+  for (let i = 0; i < len; i++) {
+    if (i < xfade) {
+      const phi = (0.5 * Math.PI * i) / xfade;
+      ch[i] = raw[i] * Math.sin(phi) + raw[len + i] * Math.cos(phi);
+    } else {
+      ch[i] = raw[i];
+    }
+  }
+
+  let mean = 0;
+  for (let i = 0; i < len; i++) mean += ch[i];
+  mean /= len;
+
+  let sumSq = 0;
+  for (let i = 0; i < len; i++) {
+    const c = ch[i] - mean;
+    ch[i] = c;
+    sumSq += c * c;
+  }
+  const rms = Math.sqrt(sumSq / len);
+  const targetGain = rms > 1e-9 ? 0.38 / rms : 1.0;
+  let postMean = 0;
+  for (let i = 0; i < len; i++) {
+    const v = ch[i] * targetGain;
+    const clipped = Math.abs(v) > 0.75 ? Math.tanh(v) : v;
+    ch[i] = clipped;
+    postMean += clipped;
+  }
+  postMean /= len;
+  for (let i = 0; i < len; i++) {
+    ch[i] -= postMean;
+  }
+
+  return buf;
+}
+
 export function ensureNativeAeroBank(ctx: AudioContext): NativeAeroBankState | null {
   const c = ctx as AudioContextWithWindGraph;
-  if (c.__physboxNativeAeroV1) return c.__physboxNativeAeroV1;
+  if (c.__physboxNativeAeroV1) {
+    const old = c.__physboxNativeAeroV1;
+    try { old.noiseSource?.stop(); } catch { /* ignore */ }
+    try { old.noiseSource?.disconnect(); } catch { /* ignore */ }
+    for (const sl of old.slots) {
+      try { sl.propOsc?.stop(); } catch { /* ignore */ }
+      try { sl.amOsc?.stop(); } catch { /* ignore */ }
+      try { sl.spatial?.input?.disconnect(); } catch { /* ignore */ }
+    }
+    delete c.__physboxNativeAeroV1;
+  }
+  if (c.__physboxNativeAeroV2) return c.__physboxNativeAeroV2;
   const windBank = ensureNativeWindBank(ctx);
   if (!windBank) return null;
 
   const sharedBus = getSharedAcousticOutputBus(ctx);
   const now = finiteOr(ctx.currentTime, 0);
+
+  let aeroNoiseSource: AudioBufferSourceNode | null = null;
+  if (typeof ctx.createBuffer === 'function' && typeof ctx.createBufferSource === 'function') {
+    aeroNoiseSource = ctx.createBufferSource();
+    aeroNoiseSource.buffer = buildKolmogorovAeroNoiseBuffer(ctx);
+    aeroNoiseSource.loop = true;
+    aeroNoiseSource.start(now);
+  }
+
+  // Slow incommensurate atmospheric gust LFOs (0.23 Hz + 0.59 Hz) so outdoor wind
+  // gently sweeps its resonant formant & breath envelope instead of droning statically
+  const gustOscSlow = ctx.createOscillator();
+  gustOscSlow.type = 'sine';
+  gustOscSlow.frequency.setValueAtTime(0.23, now);
+  gustOscSlow.start(now);
+
+  const gustOscMed = ctx.createOscillator();
+  gustOscMed.type = 'sine';
+  gustOscMed.frequency.setValueAtTime(0.59, now);
+  gustOscMed.start(now);
+
+  const gustMix = ctx.createGain();
+  gustMix.gain.setValueAtTime(1.0, now);
+  const gSlowWeight = ctx.createGain();
+  gSlowWeight.gain.setValueAtTime(0.68, now);
+  const gMedWeight = ctx.createGain();
+  gMedWeight.gain.setValueAtTime(0.32, now);
+  gustOscSlow.connect(gSlowWeight);
+  gustOscMed.connect(gMedWeight);
+  gSlowWeight.connect(gustMix);
+  gMedWeight.connect(gustMix);
+
   const slots: NativeAeroVoiceSlot[] = [];
 
   for (let i = 0; i < 8; i++) {
     const spatial = createSlotSpatialStage(ctx, sharedBus);
 
-    // 1. Gutin Propeller / Rotor Tonal PeriodicWave Oscillator
+    // 1. Gutin Propeller PeriodicWave OR Understated Aeolian Breeze Sine Oscillator
     const propOsc = ctx.createOscillator();
     propOsc.type = 'sawtooth';
     propOsc.frequency.setValueAtTime(clampAudioFreq(ctx, 55.0 + i * 0.3), now);
+
+    const aeolianDriftDepth = ctx.createGain();
+    aeolianDriftDepth.gain.setValueAtTime(0, now);
+    gustMix.connect(aeolianDriftDepth);
+    aeolianDriftDepth.connect(propOsc.frequency);
 
     const propLowpass = ctx.createBiquadFilter();
     propLowpass.type = 'lowpass';
@@ -1521,11 +1667,16 @@ export function ensureNativeAeroBank(ctx: AudioContext): NativeAeroBankState | n
     propLowpass.connect(tonalGain);
     tonalGain.connect(spatial.input);
 
-    // 2. Curle Strouhal Vortex-Shedding Bandpass + Raised-Cosine Blade-Pass / Flutter AM
+    // 2. Kolmogorov Outdoor Wind Whoosh / Strouhal Bandpass + Steep Butterworth Lowpass + Gust/Billow AM
     const strouhalFilter = ctx.createBiquadFilter();
     strouhalFilter.type = 'bandpass';
-    strouhalFilter.frequency.setValueAtTime(clampAudioFreq(ctx, 600), now);
-    strouhalFilter.Q.setValueAtTime(1.8, now);
+    strouhalFilter.frequency.setValueAtTime(clampAudioFreq(ctx, 220, 220, 45), now);
+    strouhalFilter.Q.setValueAtTime(1.6, now);
+
+    const aeroLowpass = ctx.createBiquadFilter();
+    aeroLowpass.type = 'lowpass';
+    aeroLowpass.frequency.setValueAtTime(clampAudioFreq(ctx, 560, 560, 110), now);
+    aeroLowpass.Q.setValueAtTime(0.707, now);
 
     const noiseGain = ctx.createGain();
     noiseGain.gain.setValueAtTime(0, now);
@@ -1539,22 +1690,51 @@ export function ensureNativeAeroBank(ctx: AudioContext): NativeAeroBankState | n
     amOsc.connect(amDepth);
     amDepth.connect(noiseGain.gain);
 
-    // 3. Cloth / Sail Weave-Rubbing High-Shelf Rustle (2.2..5.5 kHz)
+    const amFreqDepth = ctx.createGain();
+    amFreqDepth.gain.setValueAtTime(0, now);
+    amOsc.connect(amFreqDepth);
+    amFreqDepth.connect(strouhalFilter.frequency);
+    amFreqDepth.connect(aeroLowpass.frequency);
+
+    const gustFormantDepth = ctx.createGain();
+    gustFormantDepth.gain.setValueAtTime(0, now);
+    gustMix.connect(gustFormantDepth);
+    gustFormantDepth.connect(strouhalFilter.frequency);
+    gustFormantDepth.connect(aeroLowpass.frequency);
+
+    const gustGainDepth = ctx.createGain();
+    gustGainDepth.gain.setValueAtTime(0, now);
+    gustMix.connect(gustGainDepth);
+    gustGainDepth.connect(noiseGain.gain);
+
+    // 3. Band-Limited Cloth Billow / Weave Swish (Kolmogorov source -> bandpass -> lowpass, gated by billow AM; NEVER flat highpass hiss!)
     const rustleShelf = ctx.createBiquadFilter();
-    rustleShelf.type = 'highpass';
-    rustleShelf.frequency.setValueAtTime(clampAudioFreq(ctx, 2800), now);
-    rustleShelf.Q.setValueAtTime(0.8, now);
+    rustleShelf.type = 'bandpass';
+    rustleShelf.frequency.setValueAtTime(clampAudioFreq(ctx, 980), now);
+    rustleShelf.Q.setValueAtTime(1.35, now);
+
+    const rustleLowpass = ctx.createBiquadFilter();
+    rustleLowpass.type = 'lowpass';
+    rustleLowpass.frequency.setValueAtTime(clampAudioFreq(ctx, 1450), now);
+    rustleLowpass.Q.setValueAtTime(0.707, now);
 
     const rustleGain = ctx.createGain();
     rustleGain.gain.setValueAtTime(0, now);
 
-    if (windBank.noiseSource) {
-      windBank.noiseSource.connect(strouhalFilter);
-      strouhalFilter.connect(noiseGain);
+    const rustleAmDepth = ctx.createGain();
+    rustleAmDepth.gain.setValueAtTime(0, now);
+    amOsc.connect(rustleAmDepth);
+    rustleAmDepth.connect(rustleGain.gain);
+
+    if (aeroNoiseSource) {
+      aeroNoiseSource.connect(strouhalFilter);
+      strouhalFilter.connect(aeroLowpass);
+      aeroLowpass.connect(noiseGain);
       noiseGain.connect(spatial.input);
 
-      windBank.noiseSource.connect(rustleShelf);
-      rustleShelf.connect(rustleGain);
+      aeroNoiseSource.connect(rustleShelf);
+      rustleShelf.connect(rustleLowpass);
+      rustleLowpass.connect(rustleGain);
       rustleGain.connect(spatial.input);
     }
 
@@ -1568,18 +1748,30 @@ export function ensureNativeAeroBank(ctx: AudioContext): NativeAeroBankState | n
       propOsc,
       propLowpass,
       tonalGain,
+      aeolianDriftDepth,
       strouhalFilter,
+      aeroLowpass,
       noiseGain,
       amOsc,
       amDepth,
+      amFreqDepth,
+      gustFormantDepth,
+      gustGainDepth,
       rustleShelf,
+      rustleLowpass,
       rustleGain,
+      rustleAmDepth,
       spatial,
     });
   }
 
-  const aeroBank: NativeAeroBankState = { slots };
-  c.__physboxNativeAeroV1 = aeroBank;
+  const aeroBank: NativeAeroBankState = {
+    noiseSource: aeroNoiseSource,
+    gustOscSlow,
+    gustOscMed,
+    slots,
+  };
+  c.__physboxNativeAeroV2 = aeroBank;
   return aeroBank;
 }
 
@@ -1598,8 +1790,8 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
     .filter((v) => v && v.active)
     .sort(
       (a, b) =>
-        finiteOr(b.tonalGain, 0) + finiteOr(b.noiseGain, 0) + finiteOr(b.rustleGain, 0) -
-        (finiteOr(a.tonalGain, 0) + finiteOr(a.noiseGain, 0) + finiteOr(a.rustleGain, 0)),
+        finiteOr(b.tonalGain, 0) + finiteOr(b.noiseGain, 0) + finiteOr(b.rustleGain, 0) + finiteOr(b.aeolianGain, 0) -
+        (finiteOr(a.tonalGain, 0) + finiteOr(a.noiseGain, 0) + finiteOr(a.rustleGain, 0) + finiteOr(a.aeolianGain, 0)),
     )
     .slice(0, bank.slots.length);
 
@@ -1621,8 +1813,9 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
 
     const bpfHz = clampAudioFreq(ctx, v.bpfHz, 55, 18);
     const hw = Array.isArray(v.harmonicWeights) ? v.harmonicWeights : [];
+    const aeolianGainVal = safeClamp(v.aeolianGain, 0, 0, 0.12);
 
-    // 1. Tonal Gutin Propeller Branch
+    // 1. Tonal Gutin Propeller Branch OR Understated Aeolian Breeze Hum
     if (v.tonalActive && finiteOr(v.bpfHz, 0) >= 22 && hw.length > 0) {
       const waveSig = `${hw.length}:${hw.map((w) => Math.round(finiteOr(w, 0) * 30)).join(',')}`;
       if (isFresh || slot.lastWaveSig !== waveSig) {
@@ -1646,6 +1839,7 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
       const stallRough = safeClamp(v.stallRoughness, 0, 0, 1);
       const rawLpHz = Math.min(8500, Math.max(650, bpfHz * (5.5 + 8.0 * (1 - stallRough))));
       const lpHz = clampAudioFreq(ctx, rawLpHz, 2800, 120);
+      slot.aeolianDriftDepth.gain.setTargetAtTime(0, now, 0.015);
       if (isFresh) {
         slot.propOsc.frequency.cancelScheduledValues(now);
         slot.propOsc.frequency.setValueAtTime(bpfHz, now);
@@ -1655,39 +1849,91 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
         slot.propLowpass.frequency.setTargetAtTime(lpHz, now, 0.022);
       }
       slot.tonalGain.gain.setTargetAtTime(safeClamp(v.tonalGain, 0, 0, 1.0), now, 0.018);
+    } else if (aeolianGainVal > 0.0008) {
+      if (slot.lastWaveSig !== '__aeolian_sine__') {
+        slot.propOsc.type = 'sine';
+        slot.lastWaveSig = '__aeolian_sine__';
+      }
+      const aeolHz = clampAudioFreq(ctx, v.aeolianFreqHz ?? v.noiseCenterHz, 165, 55);
+      const aeolLpHz = clampAudioFreq(ctx, aeolHz * 2.1, 350, 120);
+      slot.aeolianDriftDepth.gain.setTargetAtTime(aeolHz * 0.035, now, 0.040);
+      if (isFresh) {
+        slot.propOsc.frequency.cancelScheduledValues(now);
+        slot.propOsc.frequency.setValueAtTime(aeolHz, now);
+        slot.propLowpass.frequency.setValueAtTime(aeolLpHz, now);
+      } else {
+        slot.propOsc.frequency.setTargetAtTime(aeolHz, now, 0.045);
+        slot.propLowpass.frequency.setTargetAtTime(aeolLpHz, now, 0.045);
+      }
+      slot.tonalGain.gain.setTargetAtTime(aeolianGainVal, now, 0.035);
     } else {
+      slot.aeolianDriftDepth.gain.setTargetAtTime(0, now, 0.015);
       slot.tonalGain.gain.setTargetAtTime(0, now, 0.014);
     }
 
-    // 2. Broadband Strouhal Vortex-Shedding + Blade-Pass / Stall Flutter AM Branch
-    const strouhalHz = clampAudioFreq(ctx, v.noiseCenterHz, 600, 60);
+    // 2. Kolmogorov Wind Whoosh + Steep Lowpass + Gust Breath & Kármán Billow / Blade-Pass AM
+    const strouhalHz = clampAudioFreq(ctx, v.noiseCenterHz, 220, 45);
     const strouhalQ = safeClamp(v.noiseQ, 1.5, 0.2, 18);
+    const aeroLpHz = clampAudioFreq(
+      ctx,
+      v.lowpassHz ?? Math.min(2400, strouhalHz * 2.0 + 180),
+      580,
+      110,
+    );
     const noiseGainVal = safeClamp(v.noiseGain, 0, 0, 1.0);
     if (isFresh) {
       slot.strouhalFilter.frequency.setValueAtTime(strouhalHz, now);
       slot.strouhalFilter.Q.setValueAtTime(strouhalQ, now);
+      slot.aeroLowpass.frequency.setValueAtTime(aeroLpHz, now);
     } else {
-      slot.strouhalFilter.frequency.setTargetAtTime(strouhalHz, now, 0.022);
-      slot.strouhalFilter.Q.setTargetAtTime(strouhalQ, now, 0.022);
+      slot.strouhalFilter.frequency.setTargetAtTime(strouhalHz, now, 0.028);
+      slot.strouhalFilter.Q.setTargetAtTime(strouhalQ, now, 0.025);
+      slot.aeroLowpass.frequency.setTargetAtTime(aeroLpHz, now, 0.028);
     }
-    slot.noiseGain.gain.setTargetAtTime(noiseGainVal, now, 0.018);
 
     const amRate = safeClamp(v.amRateHz, 0, 0, 48);
     const amDepth = safeClamp(v.amDepth, 0, 0, 1);
-    if (amRate >= 0.4 && amDepth > 0.01 && noiseGainVal > 0.001) {
+    const hasBillowAm = amRate >= 0.4 && amDepth > 0.01 && noiseGainVal > 0.001;
+    // Deep rhythmic raised-cosine-like billow modulation (`whuff-whuff`) without negative gain inversion
+    const baseNoiseGain = hasBillowAm ? noiseGainVal * (1 - 0.44 * amDepth) : noiseGainVal;
+    slot.noiseGain.gain.setTargetAtTime(baseNoiseGain, now, 0.020);
+
+    if (hasBillowAm) {
       slot.amOsc.frequency.setTargetAtTime(amRate, now, 0.025);
-      slot.amDepth.gain.setTargetAtTime(noiseGainVal * amDepth * 0.55, now, 0.020);
+      slot.amDepth.gain.setTargetAtTime(noiseGainVal * amDepth * 0.50, now, 0.020);
+      // Synchronized formant bloom on each billow/blade-pass crest (kept <= 0.24 * strouhalHz for strict pole safety)
+      slot.amFreqDepth.gain.setTargetAtTime(strouhalHz * 0.24 * amDepth, now, 0.025);
     } else {
       slot.amDepth.gain.setTargetAtTime(0, now, 0.016);
+      slot.amFreqDepth.gain.setTargetAtTime(0, now, 0.016);
     }
 
-    // 3. Cloth Weave-Rubbing High-Shelf Branch
+    // Organic outdoor breeze LFO swell on non-propeller wind voices
+    if (!v.tonalActive && noiseGainVal > 0.001) {
+      slot.gustFormantDepth.gain.setTargetAtTime(strouhalHz * 0.18, now, 0.045);
+      slot.gustGainDepth.gain.setTargetAtTime(baseNoiseGain * 0.22, now, 0.045);
+    } else {
+      slot.gustFormantDepth.gain.setTargetAtTime(0, now, 0.020);
+      slot.gustGainDepth.gain.setTargetAtTime(0, now, 0.020);
+    }
+
+    // 3. Band-Limited Cloth Fold / Weave Swish (modulated by billow AM, zero high-kHz white hiss!)
     const rustleGainVal = safeClamp(v.rustleGain, 0, 0, 0.8);
     if (rustleGainVal > 0.001) {
-      slot.rustleShelf.frequency.setTargetAtTime(clampAudioFreq(ctx, v.rustleFreqHz, 2800, 200), now, 0.022);
-      slot.rustleGain.gain.setTargetAtTime(rustleGainVal, now, 0.018);
+      const effRustleHz = clampAudioFreq(ctx, 320 + 0.20 * finiteOr(v.rustleFreqHz, 3200), 920, 220);
+      const effRustleLpHz = clampAudioFreq(ctx, effRustleHz * 1.28, 1300, 280);
+      const effRustleBase = rustleGainVal * 0.36 * (hasBillowAm ? 1 - 0.48 * amDepth : 1);
+      slot.rustleShelf.frequency.setTargetAtTime(effRustleHz, now, 0.024);
+      slot.rustleLowpass.frequency.setTargetAtTime(effRustleLpHz, now, 0.024);
+      slot.rustleGain.gain.setTargetAtTime(effRustleBase, now, 0.020);
+      slot.rustleAmDepth.gain.setTargetAtTime(
+        hasBillowAm ? rustleGainVal * 0.36 * amDepth * 0.56 : 0,
+        now,
+        0.020,
+      );
     } else {
       slot.rustleGain.gain.setTargetAtTime(0, now, 0.015);
+      slot.rustleAmDepth.gain.setTargetAtTime(0, now, 0.015);
     }
 
     slot.spatial.apply(v.pan, v.distanceGain, now, isFresh);
@@ -1699,9 +1945,14 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
       const slot = bank.slots[i];
       if (slot.wasActive) {
         slot.tonalGain.gain.setTargetAtTime(0, now, 0.018);
+        slot.aeolianDriftDepth.gain.setTargetAtTime(0, now, 0.016);
         slot.noiseGain.gain.setTargetAtTime(0, now, 0.018);
         slot.amDepth.gain.setTargetAtTime(0, now, 0.016);
+        slot.amFreqDepth.gain.setTargetAtTime(0, now, 0.016);
+        slot.gustFormantDepth.gain.setTargetAtTime(0, now, 0.016);
+        slot.gustGainDepth.gain.setTargetAtTime(0, now, 0.016);
         slot.rustleGain.gain.setTargetAtTime(0, now, 0.016);
+        slot.rustleAmDepth.gain.setTargetAtTime(0, now, 0.016);
         slot.wasActive = false;
       }
     }
@@ -1806,18 +2057,28 @@ export function postWorkletAeroSnap(
 export function postWorkletAeroSilence(ctx: AudioContext | null): void {
   if (!ctx) return;
   const c = ctx as AudioContextWithWindGraph;
-  const bank = c.__physboxNativeAeroV1;
+  const bank = c.__physboxNativeAeroV2;
   if (!bank) return;
   const now = finiteOr(ctx.currentTime, 0);
   for (const slot of bank.slots) {
     slot.tonalGain.gain.cancelScheduledValues(now);
     slot.tonalGain.gain.setTargetAtTime(0, now, 0.010);
+    slot.aeolianDriftDepth.gain.cancelScheduledValues(now);
+    slot.aeolianDriftDepth.gain.setTargetAtTime(0, now, 0.010);
     slot.noiseGain.gain.cancelScheduledValues(now);
     slot.noiseGain.gain.setTargetAtTime(0, now, 0.010);
     slot.amDepth.gain.cancelScheduledValues(now);
     slot.amDepth.gain.setTargetAtTime(0, now, 0.010);
+    slot.amFreqDepth.gain.cancelScheduledValues(now);
+    slot.amFreqDepth.gain.setTargetAtTime(0, now, 0.010);
+    slot.gustFormantDepth.gain.cancelScheduledValues(now);
+    slot.gustFormantDepth.gain.setTargetAtTime(0, now, 0.010);
+    slot.gustGainDepth.gain.cancelScheduledValues(now);
+    slot.gustGainDepth.gain.setTargetAtTime(0, now, 0.010);
     slot.rustleGain.gain.cancelScheduledValues(now);
     slot.rustleGain.gain.setTargetAtTime(0, now, 0.010);
+    slot.rustleAmDepth.gain.cancelScheduledValues(now);
+    slot.rustleAmDepth.gain.setTargetAtTime(0, now, 0.010);
     slot.wasActive = false;
   }
 }

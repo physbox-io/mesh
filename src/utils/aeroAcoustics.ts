@@ -53,22 +53,28 @@ export interface AeroSynthParams {
   harmonicWeights: number[];
   /** Tonal rotor dipole level [0..0.45]. */
   tonalGain: number;
-  /** Strouhal vortex-shedding bandpass center frequency [120..4200 Hz]. */
+  /** Strouhal vortex-shedding / billow-whoosh bandpass center frequency [85..4200 Hz]. */
   noiseCenterHz: number;
-  /** Strouhal bandpass Q (high ~3.2 for sleek attached flow, low ~0.75 in deep stall). */
+  /** Strouhal bandpass Q (high ~3.2 for sleek attached flow, warm ~1.4 for cloth billow, ~0.75 in deep stall). */
   noiseQ: number;
-  /** Broadband Strouhal / boundary-layer noise level [0..0.42]. */
+  /** Post-bandpass Kolmogorov turbulence lowpass cutoff (Hz) stripping flat high-kHz hiss. */
+  lowpassHz?: number;
+  /** Broadband Strouhal / boundary-layer / billow whoosh level [0..0.42]. */
   noiseGain: number;
-  /** High-shelf weave-rubbing rustle gain [0..0.25] for articulated/composite cloth. */
+  /** Weave-rubbing / cloth-fold rustle gain [0..0.25] for articulated/composite/XPBD cloth. */
   rustleGain: number;
-  /** High-shelf weave-rubbing frequency [2200..5500 Hz]. */
+  /** Characteristic weave-rubbing spectral parameter [2200..5500 Hz] scaled by fabric lightness. */
   rustleFreqHz: number;
-  /** Amplitude-modulation rate (Hz): sub-audible blade-pass swoosh or stall/cloth flutter! */
+  /** Amplitude-modulation rate (Hz): sub-audible blade-pass swoosh or Kármán cloth/stall flutter! */
   amRateHz: number;
-  /** Amplitude-modulation depth [0..0.85] applied to the broadband noise branch. */
+  /** Amplitude-modulation depth [0..0.85] applied to the broadband whoosh & cloth rustle branches. */
   amDepth: number;
   /** Separated-flow stall roughness factor [0 = attached laminar/sleek, 1 = deep stall]. */
   stallRoughness: number;
+  /** Optional understated tonal Aeolian vortex-shedding hum frequency (Hz) for slender masts/stays. */
+  aeolianFreqHz?: number;
+  /** Optional understated tonal Aeolian vortex-shedding hum gain [0..0.05] for slender masts/stays. */
+  aeolianGain?: number;
 }
 
 export interface SnapSynthParams {
@@ -134,12 +140,15 @@ export function solveAeroAcousticVoice(
       tonalGain: 0,
       noiseCenterHz: 400,
       noiseQ: 1.5,
+      lowpassHz: 600,
       noiseGain: 0,
       rustleGain: 0,
       rustleFreqHz: 3200,
       amRateHz: 0,
       amDepth: 0,
       stallRoughness: 0,
+      aeolianFreqHz: 0,
+      aeolianGain: 0,
     };
   }
 
@@ -152,45 +161,102 @@ export function solveAeroAcousticVoice(
   const aeroForce = Math.min(1e6, finiteNonNeg(telemetry.aeroForceN));
   const rho = clamp(telemetry.airDensityKgM3 ?? 1.225, 0.005, 25.0);
   const rhoScale = Math.pow(rho / 1.225, 0.85);
+  const gainScale =
+    typeof telemetry.gainScale === 'number' && Number.isFinite(telemetry.gainScale)
+      ? clamp(telemetry.gainScale, 0, 2.0)
+      : 1.0;
+
+  // Detect static slender cylindrical masts / stays (`chord ≈ thickness = D`, attenuated `gainScale <= 0.55`):
+  // these emit a warm, understated Aeolian vortex-shedding hum (~115..210 Hz) rather than broadband hiss.
+  const isAeolianCylinder =
+    !telemetry.isCloth &&
+    blades === 0 &&
+    absOmega < 0.05 &&
+    bendRate < 0.05 &&
+    gainScale > 0 &&
+    gainScale <= 0.55 &&
+    thickness >= 0.75 * chord;
 
   // -------------------------------------------------------------------------
-  // 1. Stall separation factor & Strouhal vortex-shedding bandpass
+  // 1. Stall separation factor & Strouhal vortex-shedding / billow whoosh
   // -------------------------------------------------------------------------
   // Attached below 10°, progressive trailing-edge separation 10°..22°, deep bluff stall above 22°
   const stallRoughness = smoothstep(10.0, 22.0, absAlphaDeg);
 
-  // Effective bluff/trailing-edge wake thickness:
-  // At attached angles, trailing-edge boundary-layer displacement thickness δ* ≈ t_geom + 0.06 * c * |sin(α)|;
-  // past stall, separated shear-layer wake opens to ~0.45 * c * |sin(α)|!
   const wakeProjScale = 0.08 + 0.37 * stallRoughness;
   const dEff = Math.max(0.0012, thickness + wakeProjScale * chord * Math.abs(Math.sin(alphaRad)));
   const rawStrouhalHz = (0.21 * Math.max(0.25, effSpeed)) / dEff;
-  const noiseCenterHz = +clamp(rawStrouhalHz, 120, 4200).toFixed(2);
 
-  // Narrow whistling Q (~3.2) at sleek attached angles (|α| < 10°), widening into
-  // rough separated buffeting (Q ≈ 0.75) past stall (|α| > 15..22°)!
-  const noiseQ = +(3.2 - (3.2 - 0.75) * stallRoughness).toFixed(3);
+  let noiseCenterHz: number;
+  let noiseQ: number;
+  let lowpassHz: number;
+  if (telemetry.isCloth) {
+    // Flexible billowing flag / sail: boundary-layer & billow-fold shear thickness
+    // d_shear ~ 0.010 + 0.008 * c + 0.014 * c * |sin(alpha)| (~13..22 mm), producing a warm,
+    // deep 85..280 Hz outdoor wind-whoosh formant that sweeps organically with coastal gusts!
+    const dShear = Math.max(0.008, 0.010 + chord * (0.008 + 0.014 * Math.abs(Math.sin(alphaRad))));
+    const billowLift = 1.0 + 0.16 * clamp(bendRate / 22.0, 0, 1.35);
+    noiseCenterHz = +clamp(((0.21 * Math.max(0.25, effSpeed)) / dShear) * billowLift, 85, 280).toFixed(2);
+    noiseQ = +(1.55 - 0.40 * stallRoughness).toFixed(3);
+    lowpassHz = +clamp(noiseCenterHz * 2.35 + 90 * clamp(bendRate / 20.0, 0, 1.2), 280, 680).toFixed(1);
+  } else if (isAeolianCylinder) {
+    // Hollow mast + stay coupled Aeolian lock-in (~115..210 Hz, gliding gently with wind gusts)
+    const aeolianBaseHz =
+      rawStrouhalHz > 210
+        ? 115 + 95 * Math.tanh((rawStrouhalHz - 115) / 250)
+        : clamp(rawStrouhalHz, 115, 210);
+    noiseCenterHz = +aeolianBaseHz.toFixed(2);
+    noiseQ = 3.8;
+    lowpassHz = +clamp(aeolianBaseHz * 1.65, 210, 380).toFixed(1);
+  } else {
+    // Rigid wings, rotors, windmills & bluff bodies:
+    // Narrow whistling Q (~3.2) at sleek attached angles (|α| < 10°), widening into
+    // rough separated buffeting (Q ≈ 0.75) past stall (|α| > 15..22°)!
+    noiseCenterHz = +clamp(rawStrouhalHz, 120, 4200).toFixed(2);
+    noiseQ = +(3.2 - (3.2 - 0.75) * stallRoughness).toFixed(3);
+    lowpassHz = +clamp(noiseCenterHz * (1.75 + 0.45 * stallRoughness) + 180, 420, 2800).toFixed(1);
+  }
 
   // -------------------------------------------------------------------------
-  // 2. Gutin Rotor BPF & Harmonic Spectrum vs Free-Stream Wing/Cloth
+  // 2. Gutin Rotor BPF & Harmonic Spectrum vs Free-Stream Wing/Cloth/Aeolian
   //    Smoothly crossfaded across bpfHz ∈ [0.30..0.80] and [22.0..34.0] Hz!
   // -------------------------------------------------------------------------
   const bpfHz = blades >= 1 ? Math.min(16000, (blades * absOmega) / (2 * Math.PI)) : 0;
   const machTip = clamp(tipSpeed / SPEED_OF_SOUND_AIR, 0, 0.88);
 
-  // Free-flying wing / glider / vane / cloth sheet (Curle dipole law with smooth saturation)
   const speedRamp = smoothstep(0.25, 0.85, effSpeed);
-  const stallBoost = 1.0 + 0.85 * stallRoughness;
-  const curleDrive = rhoScale * Math.sqrt(area) * Math.pow(effSpeed, 2.0) * stallBoost;
-  const freeNoiseGain = clamp(0.32 * Math.tanh(0.042 * curleDrive) * speedRamp, 0, 0.32);
+  let freeNoiseGain: number;
+  if (telemetry.isCloth) {
+    // Separate steady freestream tangential slip from UNSTEADY cloth billow & normal loading:
+    // a taut sheet aligned parallel to laminar flow (`bendRate = 0, sin(alpha) = 0`) radiates minimal
+    // dipole sound, whereas active Kármán billowing & coastal gusts swell organically without flatlining!
+    const gustQ = rhoScale * Math.sqrt(area) * Math.pow(effSpeed / 8.5, 1.85);
+    const normalLoadDrive =
+      aeroForce > 0
+        ? clamp(aeroForce / Math.max(0.15, 3.2 * area), 0, 1.6)
+        : 0.45 * Math.abs(Math.sin(alphaRad));
+    const billowActivity = clamp(
+      0.12 + 0.62 * clamp(bendRate / 14.0, 0, 1.25) + 0.26 * normalLoadDrive,
+      0.12,
+      1.15,
+    );
+    freeNoiseGain = clamp(0.27 * Math.tanh(0.52 * gustQ) * billowActivity * speedRamp, 0, 0.27);
+  } else {
+    // Free-flying wing / glider / vane / bluff body (Curle dipole law with smooth saturation)
+    const stallBoost = 1.0 + 0.85 * stallRoughness;
+    const curleDrive = rhoScale * Math.sqrt(area) * Math.pow(effSpeed, 2.0) * stallBoost;
+    freeNoiseGain = clamp(0.32 * Math.tanh(0.042 * curleDrive) * speedRamp, 0, 0.32);
+  }
 
   let freeAmRateHz = 0;
   let freeAmDepth = 0;
   if (telemetry.isCloth) {
-    // Cloth flutter modulation driven by emergent flapping rate (`bendRateRadPerSec`) or Strouhal wake
-    const flapHz = bendRate > 0.4 ? bendRate / (2 * Math.PI) : 3.5 + 0.65 * effSpeed;
-    freeAmRateHz = clamp(flapHz, 1.8, 20.0);
-    freeAmDepth = clamp(0.28 + 0.38 * Math.min(1, bendRate / 14.0) + 0.15 * stallRoughness, 0.20, 0.78);
+    // Traveling billow-wave Kármán cadence along flag chord St_L ≈ 0.46 * U / L_chord (typically 3..7 Hz),
+    // blended with emergent flexural bend rate and given deep rhythmic *whuff-whuff* modulation!
+    const chordFlapHz = clamp((0.46 * Math.max(1.0, effSpeed)) / Math.max(0.22, chord), 2.5, 6.8);
+    const bendFlapHz = clamp(bendRate / (2 * Math.PI * 1.4), 2.4, 7.2);
+    freeAmRateHz = bendRate > 0.4 ? 0.65 * chordFlapHz + 0.35 * bendFlapHz : chordFlapHz;
+    freeAmDepth = clamp(0.46 + 0.38 * clamp(bendRate / 9.5, 0, 1.0) + 0.08 * stallRoughness, 0.38, 0.84);
   } else if (stallRoughness > 0.05) {
     // Separated stall buffeting flutter (8..18 Hz)
     freeAmRateHz = clamp(8.0 + 0.55 * effSpeed + 4.0 * stallRoughness, 8.0, 18.0);
@@ -262,17 +328,19 @@ export function solveAeroAcousticVoice(
     }
   }
 
-  const gainScale =
-    typeof telemetry.gainScale === 'number' && Number.isFinite(telemetry.gainScale)
-      ? clamp(telemetry.gainScale, 0, 2.0)
-      : 1.0;
   tonalGain = +(tonalGain * gainScale).toFixed(4);
-  noiseGain = +clamp(noiseGain * gainScale, 0, 0.32).toFixed(4);
+  const aeolianScale = isAeolianCylinder ? 0.44 : 1.0;
+  noiseGain = +clamp(noiseGain * gainScale * aeolianScale, 0, 0.32).toFixed(4);
   amRateHz = +clamp(amRateHz, 0, 16000).toFixed(3);
   amDepth = +clamp(amDepth, 0, 0.85).toFixed(3);
 
+  const aeolianFreqHz = isAeolianCylinder ? noiseCenterHz : 0;
+  const aeolianGain = isAeolianCylinder
+    ? +clamp(freeNoiseGain * gainScale * 0.30, 0.004, 0.024).toFixed(4)
+    : 0;
+
   // -------------------------------------------------------------------------
-  // 3. Cloth / Sail Weave-Rubbing High-Shelf Rustle (2.2..5.5 kHz)
+  // 3. Cloth / Sail Weave-Rubbing Rustle Contour (2.2..5.5 kHz index)
   // -------------------------------------------------------------------------
   let rustleGain = 0;
   let rustleFreqHz = 3200;
@@ -289,7 +357,11 @@ export function solveAeroAcousticVoice(
     ).toFixed(4);
   }
 
-  const active = tonalGain >= 0.0015 || noiseGain >= 0.0015 || rustleGain >= 0.0015;
+  const active =
+    tonalGain >= 0.0015 ||
+    noiseGain >= 0.0015 ||
+    rustleGain >= 0.0015 ||
+    aeolianGain >= 0.0015;
   tonalActive = tonalActive && tonalGain >= 0.0015;
 
   return {
@@ -301,12 +373,14 @@ export function solveAeroAcousticVoice(
     tonalGain,
     noiseCenterHz,
     noiseQ,
+    lowpassHz,
     noiseGain,
     rustleGain,
     rustleFreqHz,
     amRateHz,
     amDepth,
     stallRoughness: +stallRoughness.toFixed(4),
+    ...(aeolianGain > 0 ? { aeolianFreqHz, aeolianGain } : {}),
   };
 }
 
@@ -391,13 +465,18 @@ export function evaluateGustWind(
   const sStream = x * ux + y * uy - 0.72 * meanSpeed * timeSec;
   const sCross = -x * uy + y * ux;
 
-  // Incompressible-style multi-scale sinusoidal eddies bounded strictly within ±12%
+  // Coherent multi-second Kaimal outdoor gust breathing (~0.31 Hz primary swell + ~0.73 Hz secondary eddy)
+  // paired with incompressible-style advected spatial eddies
+  const coherentGust =
+    1.0 +
+    0.19 * Math.sin(2 * Math.PI * 0.31 * timeSec + 0.35) +
+    0.11 * Math.sin(2 * Math.PI * 0.73 * timeSec - 1.1);
   const e1 = Math.sin(4.7 * sStream + 6.1 * z + 1.9 * timeSec);
   const e2 = Math.cos(8.3 * sStream - 5.3 * sCross + 3.7 * timeSec);
   const e3 = Math.sin(11.9 * z + 7.1 * sCross - 4.3 * timeSec);
 
-  const longGain = 1.0 + 0.085 * e1 + 0.035 * e2;
-  const latShear = meanSpeed * (0.075 * e2 + 0.040 * e3);
+  const longGain = coherentGust * (1.0 + 0.075 * e1 + 0.030 * e2);
+  const latShear = meanSpeed * coherentGust * (0.070 * e2 + 0.038 * e3);
   const vertShear = meanSpeed * (0.055 * e1 * e3 + 0.035 * Math.sin(6.4 * sStream + 2.8 * timeSec));
 
   return [

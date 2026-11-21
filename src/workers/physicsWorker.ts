@@ -3478,10 +3478,22 @@ const flushAeroAudio = () => {
         });
         continue;
       }
-      const [vx, vy, vz] = bodyPointVelocity(views, bId, [xpos[bId * 3], xpos[bId * 3 + 1], xpos[bId * 3 + 2]]);
+      const px = xpos[bId * 3];
+      const py = xpos[bId * 3 + 1];
+      const pz = xpos[bId * 3 + 2];
+      const [vx, vy, vz] = bodyPointVelocity(views, bId, [px, py, pz]);
       const [wx, wy, wz] = bodyAngularVelocity(views, bId);
-      const linRel = Math.hypot(vx - (envWindX || 0), vy - (envWindY || 0), vz);
+      const bodySpeed = Math.hypot(vx, vy, vz);
       const tipSwish = Math.hypot(wx, wy, wz) * meta.chordM;
+      // Tiny nearly-stationary hardware fittings (< 0.008 m², e.g. halyard shackles) do not emit standalone bluff wind hiss
+      if (meta.areaM2 < 0.008 && bodySpeed < 1.2 && tipSwish < 1.2) continue;
+      let locWx = envWindX || 0;
+      let locWy = envWindY || 0;
+      let locWz = 0;
+      if (envWindMag >= 0.5) {
+        [locWx, locWy, locWz] = evaluateGustWind(locWx, locWy, px, py, pz, data.time);
+      }
+      const linRel = Math.hypot(vx - locWx, vy - locWy, vz - locWz);
       const effRel = Math.max(linRel, tipSwish * 0.65);
       if (effRel < 2.2) continue;
       const fDrag = 0.5 * rho * 0.47 * meta.areaM2 * effRel * effRel;

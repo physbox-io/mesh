@@ -846,6 +846,31 @@ describe('Unified 3D Aeroacoustics (Rotors, Wings, Windmills & Cloth)', () => {
     const aeroBank = ensureNativeAeroBank(mockCtx);
     expect(aeroBank).not.toBeNull();
     expect(aeroBank!.slots).toHaveLength(8);
+    expect(aeroBank!.noiseSource?.buffer).toBeTruthy();
+
+    // Dedicated Kolmogorov 1/f^alpha pink/brown turbulence source (zero-mean, steep high-frequency rolloff, never white hiss)
+    const kolmCh = aeroBank!.noiseSource!.buffer!.getChannelData(0);
+    let kolmMean = 0;
+    let kolmSq = 0;
+    let kolmDiffSq = 0;
+    for (let i = 0; i < kolmCh.length; i++) {
+      kolmMean += kolmCh[i];
+      kolmSq += kolmCh[i] * kolmCh[i];
+      if (i > 0) {
+        const d = kolmCh[i] - kolmCh[i - 1];
+        kolmDiffSq += d * d;
+      }
+    }
+    kolmMean /= kolmCh.length;
+    expect(Math.abs(kolmMean)).toBeLessThan(1e-4);
+    expect(Math.sqrt(kolmSq / kolmCh.length)).toBeGreaterThan(0.2);
+    // White noise has sqrt(diffSq / sq) ≈ 1.414; Kolmogorov pink/brown turbulence is strongly low-frequency weighted (< 0.45)
+    expect(Math.sqrt(kolmDiffSq / kolmSq)).toBeLessThan(0.45);
+    // Every Aero slot enforces bandpass + lowpass rolloff on both whoosh and cloth-swish branches (never unbounded highpass)
+    expect(aeroBank!.slots[0].strouhalFilter.type).toBe('bandpass');
+    expect(aeroBank!.slots[0].aeroLowpass.type).toBe('lowpass');
+    expect(aeroBank!.slots[0].rustleShelf.type).toBe('bandpass');
+    expect(aeroBank!.slots[0].rustleLowpass.type).toBe('lowpass');
 
     const droneVoice = solveAeroAcousticVoice({
       hubOrBodyId: 'rotor1',
@@ -864,6 +889,32 @@ describe('Unified 3D Aeroacoustics (Rotors, Wings, Windmills & Cloth)', () => {
     postWorkletAeroUpdate(mockCtx, [droneVoice]);
     expect(aeroBank!.slots[0].wasActive).toBe(true);
     expect(aeroBank!.slots[0].tonalGain.gain.value).toBeGreaterThan(0.01);
+
+    // Static slender cylindrical Aeolian mast voice engages understated sinusoidal Aeolian resonance (115–210 Hz)
+    const mastVoice = solveAeroAcousticVoice({
+      hubOrBodyId: 'flagpole',
+      bladeCount: 0,
+      omegaRadPerSec: 0,
+      tipSpeedMps: 8.8,
+      relSpeedMps: 8.8,
+      alphaDeg: 4.0,
+      areaM2: 0.16,
+      chordM: 0.006,
+      thicknessM: 0.006,
+      aeroForceN: 7.5,
+      arealDensityKgM2: 1.5,
+      bendRateRadPerSec: 0,
+      gainScale: 0.28,
+    });
+    expect(mastVoice.aeolianFreqHz).toBeGreaterThanOrEqual(115);
+    expect(mastVoice.aeolianFreqHz).toBeLessThanOrEqual(210);
+    expect(mastVoice.aeolianGain).toBeGreaterThan(0.005);
+    postWorkletAeroUpdate(mockCtx, [mastVoice]);
+    const mastSlot = aeroBank!.slots.find((s) => s.id === 'flagpole')!;
+    expect(mastSlot).toBeDefined();
+    expect(mastSlot.propOsc.type).toBe('sine');
+    expect(mastSlot.tonalGain.gain.value).toBeGreaterThan(0.005);
+    expect(mastSlot.aeroLowpass.frequency.value).toBeLessThanOrEqual(380);
 
     postWorkletAeroSnap(
       mockCtx,
