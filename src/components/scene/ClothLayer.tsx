@@ -1,11 +1,11 @@
 /**
- * Draws cloth (utils/cloth): one mesh per piece, its vertices read each frame
- * from the worker's flexvert_xpos. Mounted inside SceneLayer's Z-up group, so
- * MuJoCo's world coordinates go in as they are.
+ * Draws cloth (utils/cloth): one closed manifold slab per piece, its vertices
+ * read each frame from the worker's flexvert_xpos. Mounted inside SceneLayer's
+ * Z-up group, so MuJoCo's world coordinates go in as they are.
  *
- * Two-sided on purpose. Cloth has an inside and an outside that are both
- * seen, unlike a solid, whose back faces must stay culled (CLAUDE.md, face
- * winding).
+ * The slab has outward CCW triangles on both faces plus boundary side walls, so
+ * `THREE.FrontSide` draws both the inside and outside of the cloth cleanly while
+ * culling interior back-faces.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
@@ -16,7 +16,7 @@ import type { SceneGraph, SceneNode } from '../../types/scene';
 import type { ClothMaterialName } from '../../types/cloth';
 import type { DataMirror, FrameFlagWindow, ModelMirror } from '../../types/sceneLayer';
 import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
-import { CLOTH_THICKNESS } from '../../utils/cloth/xpbd';
+import { CLOTH_MATERIALS } from '../../utils/cloth/clothMesh';
 import { garmentSettings } from '../../utils/cloth/garments';
 import { acquirePrintTexture } from './clothPrintTexture';
 import { useClothSculpt } from './useClothSculpt';
@@ -77,6 +77,14 @@ function livePieceRgba(node: SceneNode | undefined, flex: FlexInfo, pieceName: s
   return flex.rgba;
 }
 
+/** Physical half-thickness (metres) of a cloth piece from its real fabric material (`0.1 mm` ripstop .. `0.8 mm` velvet). */
+// eslint-disable-next-line react-refresh/only-export-components
+export function clothPieceHalfThickness(flex: Pick<FlexInfo, 'material'>, node?: SceneNode): number {
+  const overrideT = node?.cloth?.materialOverrides?.thickness;
+  const matT = CLOTH_MATERIALS[flex.material ?? 'jersey']?.thickness ?? 0.0008;
+  return Math.max(5e-5, (overrideT ?? matT) * 0.5);
+}
+
 /** Synced cloth slab geometry from `src` (`flexvert_xpos`), returning `true` only when vertex positions changed. */
 // eslint-disable-next-line react-refresh/only-export-components
 export function syncClothSlabGeometry(
@@ -84,13 +92,16 @@ export function syncClothSlabGeometry(
   flex: FlexInfo,
   src: ArrayLike<number>,
   sewn: [number, number[]][],
-  scratch: { p: Float32Array; n: Float32Array },
+  scratch: { p: Float32Array; n: Float32Array; maxH?: Float32Array },
+  halfThickness = clothPieceHalfThickness(flex),
 ): boolean {
   const N = flex.vertnum;
   if (src.length < 3 * (flex.vertadr + N)) return false;
   const pos = g.attributes.position as THREE.BufferAttribute;
   const arr = pos.array as Float32Array;
   const { p, n } = scratch;
+  if (scratch.maxH?.length !== N) scratch.maxH = new Float32Array(N);
+  const maxH = scratch.maxH;
   const o = 3 * flex.vertadr;
   for (let i = 0; i < 3 * N; i++) p[i] = src[o + i];
   // A stitched vertex is drawn where it and its partners meet, once they
@@ -114,12 +125,45 @@ export function syncClothSlabGeometry(
     const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     for (const i of [a, b, c]) { n[i] += nx; n[i + 1] += ny; n[i + 2] += nz; }
   }
-  const h = CLOTH_THICKNESS / 2;
-  let moved = !prevNormal;
+  // Normalize middle-surface vertex normals in place and clamp `h_i` across curved folds so
+  // `(p_j - p_i + (h_j n_j - h_i n_i)) · n_face` never lets the bottom slab face cross the top face.
   for (let i = 0; i < N; i++) {
     const l = Math.hypot(n[3 * i], n[3 * i + 1], n[3 * i + 2]) || 1;
+    n[3 * i] /= l;
+    n[3 * i + 1] /= l;
+    n[3 * i + 2] /= l;
+    maxH[i] = halfThickness;
+  }
+  for (let t = 0; t < flex.elems.length; t += 3) {
+    const ia = flex.elems[t], ib = flex.elems[t + 1], ic = flex.elems[t + 2];
+    const verts = [ia, ib, ic];
+    for (let e = 0; e < 3; e++) {
+      const u = verts[e], v = verts[(e + 1) % 3];
+      const dx = p[3 * v] - p[3 * u], dy = p[3 * v + 1] - p[3 * u + 1], dz = p[3 * v + 2] - p[3 * u + 2];
+      // Symmetric normal-bend sagitta bound along edge (u, v): `|(n_v - n_u) · (p_v - p_u)|`.
+      const dnx = n[3 * v] - n[3 * u], dny = n[3 * v + 1] - n[3 * u + 1], dnz = n[3 * v + 2] - n[3 * u + 2];
+      const edgeLen = Math.hypot(dx, dy, dz);
+      const cosTurn = n[3 * u] * n[3 * v] + n[3 * u + 1] * n[3 * v + 1] + n[3 * u + 2] * n[3 * v + 2];
+      if (cosTurn < 0.995 && edgeLen > 1e-5) {
+        // Prevent slab self-pinching or chord crossing across curved folds:
+        // 1) Concave fold pinch: local radius of curvature `R ≈ L^2 / -(Δp · Δn)` must stay above `h / 0.35`.
+        // 2) Coarse-triangle chord crossing: across a turning angle θ (`sin(θ/2) = sqrt((1 - cos θ)/2)`),
+        //    keep `h` safely below local curvature limits so bottom (`p - h n`) never crosses top (`p + h n`).
+        const pinch = Math.abs(dx * dnx + dy * dny + dz * dnz);
+        if (pinch > 1e-6) {
+          const rCurv = (edgeLen * edgeLen) / pinch;
+          const safeH = Math.max(2e-5, 0.35 * rCurv);
+          if (safeH < maxH[u]) maxH[u] = safeH;
+          if (safeH < maxH[v]) maxH[v] = safeH;
+        }
+      }
+    }
+  }
+  let moved = !prevNormal;
+  for (let i = 0; i < N; i++) {
+    const hi = maxH[i];
     for (let k = 0; k < 3; k++) {
-      const d = (n[3 * i + k] / l) * h;
+      const d = n[3 * i + k] * hi;
       const top = Math.fround(p[3 * i + k] + d);
       const bot = Math.fround(p[3 * i + k] - d);
       if (arr[3 * i + k] !== top || arr[3 * (i + N) + k] !== bot) moved = true;
@@ -223,7 +267,7 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
       sheen: look.sheen ?? 0,
       sheenRoughness: 0.8,
       sheenColor: new THREE.Color(1, 1, 1),
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide,
       transparent: translucent,
       opacity: alpha,
       depthWrite: !translucent,
@@ -303,8 +347,9 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
     filled.current = true;
     if (scratch.current?.p.length !== 3 * N) scratch.current = { p: new Float32Array(3 * N), n: new Float32Array(3 * N) };
     const { p, n } = scratch.current;
-    const geomChanged = syncClothSlabGeometry(g, flex, src, sewn, scratch.current);
-    const trimsChanged = trims.place(p, n, CLOTH_THICKNESS / 2, zips);
+    const halfThickness = clothPieceHalfThickness(flex, node);
+    const geomChanged = syncClothSlabGeometry(g, flex, src, sewn, scratch.current, halfThickness);
+    const trimsChanged = trims.place(p, n, halfThickness, zips);
     lastSyncRef.current = {
       geometry: g,
       trimsKey: trims.objects,
@@ -348,7 +393,12 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
       <mesh
         ref={meshRef}
         name={pieceName}
-        userData={{ geomName: pieceName, ...(node ? { bodyId: node.id } : {}) }}
+        userData={{
+          geomName: pieceName,
+          clothVertCount: N,
+          clothTriCount: flex.elems.length / 3,
+          ...(node ? { bodyId: node.id } : {}),
+        }}
         geometry={geometry}
         material={material}
         frustumCulled={false}

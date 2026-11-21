@@ -3,9 +3,10 @@ import * as THREE from 'three';
 import { StaticGeometryGenerator } from 'three-gpu-pathtracer/src/core/utils/StaticGeometryGenerator.js';
 import { CLOTH_THICKNESS } from '../src/utils/cloth/xpbd';
 import { weaveTexture } from '../src/components/scene/clothWeaveTexture';
-import { syncClothSlabGeometry } from '../src/components/scene/ClothLayer';
+import { clothPieceHalfThickness, syncClothSlabGeometry } from '../src/components/scene/ClothLayer';
 import { buildClothTrims, placeClothTrims } from '../src/components/scene/clothTrims';
 import {
+  buildRefinedClothTracedGeometry,
   buildTracedScene,
   collectBodies,
   sameSignature,
@@ -199,15 +200,16 @@ describe('PathTracedView + ClothLayer stability', () => {
     const selectedClothMat = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(0.3, 0.5, 0.8),
       roughness: 0.9,
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide,
       normalMap: weave,
       normalScale: new THREE.Vector2(0.6, 0.6),
     });
-    // Selected garment tint in raster view (`ClothLayer.tsx:175`).
+    // Selected garment tint in raster view (`ClothLayer.tsx`).
     selectedClothMat.emissive.set(0x223355);
 
     const clothMesh = new THREE.Mesh(geom, selectedClothMat);
     clothMesh.castShadow = true;
+    clothMesh.userData = { clothVertCount: flex.vertnum, clothTriCount: flex.elems.length / 3 };
 
     const src = new Float64Array([
       0.0, 0.0, 1.0,
@@ -255,15 +257,20 @@ describe('PathTracedView + ClothLayer stability', () => {
     );
     traced.updateMatrixWorld(true);
 
-    // 1. Selected garment's raster blue emissive tint (`0x223355`) must have `emissiveIntensity === 0` in Render mode!
+    // 1. Selected garment's raster blue emissive tint (`0x223355`) must have `emissiveIntensity === 0` in Render mode,
+    // and its live `FrontSide` closed slab is refined into a `DoubleSide` 4x4 PN-triangle middle surface (2 * 16 = 32 tris, 25 welded verts)!
     const tracedMeshes: THREE.Mesh[] = [];
     traced.traverse((o) => {
       if ((o as THREE.Mesh).isMesh && o !== floor) tracedMeshes.push(o as THREE.Mesh);
     });
-    const tracedCloth = tracedMeshes.find((m) => m.geometry.getAttribute('position').count === geom.getAttribute('position').count);
+    const tracedCloth = tracedMeshes.find((m) => m.geometry.getIndex()?.count === 2 * 16 * 3);
     expect(tracedCloth).toBeDefined();
+    expect(tracedCloth!.geometry.getAttribute('position').count).toBe(25);
     const tracedClothMat = tracedCloth!.material as THREE.MeshPhysicalMaterial;
     expect(tracedClothMat.emissiveIntensity).toBe(0);
+    expect(tracedClothMat.side).toBe(THREE.DoubleSide);
+    // Live raster material stays `FrontSide`!
+    expect(selectedClothMat.side).toBe(THREE.FrontSide);
 
     // 2. Unprinted cloth's `uv1` (pattern metres) is promoted onto `uv` so `three-gpu-pathtracer`
     // samples `weaveTexture` at true metre scale instead of stretching 12 mm across the whole panel.
@@ -359,21 +366,27 @@ describe('PathTracedView + ClothLayer stability', () => {
         map: printTex,
         normalMap: weaveTexture(flex.material),
         normalScale: new THREE.Vector2(0.6, 0.6),
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide,
       });
       const mesh = new THREE.Mesh(geom, mat);
       mesh.castShadow = true;
+      mesh.userData = { clothVertCount: flex.vertnum, clothTriCount: flex.elems.length / 3 };
       zUpGroup.add(mesh);
 
       const trims = buildClothTrims(flex);
       for (const g of trims.groups) zUpGroup.add(g.mesh);
       for (const t of trims.tapes) zUpGroup.add(t.mesh);
 
+      const halfH = clothPieceHalfThickness(flex);
       const scratch = { p: new Float32Array(3 * flex.vertnum), n: new Float32Array(3 * flex.vertnum) };
-      expect(syncClothSlabGeometry(geom, flex, src, [], scratch)).toBe(true);
-      expect(placeClothTrims(trims, flex.name, scratch.p, scratch.n, CLOTH_THICKNESS / 2)).toBe(true);
-      return { flex, geom, mat, printTex, trims, scratch };
+      expect(syncClothSlabGeometry(geom, flex, src, [], scratch, halfH)).toBe(true);
+      expect(placeClothTrims(trims, flex.name, scratch.p, scratch.n, halfH)).toBe(true);
+      return { flex, geom, mat, printTex, trims, scratch, halfH };
     });
+
+    // Ripstop ensign (`0.2 mm` fabric -> `0.1 mm` half-thickness) is 20x thinner than the old 4 mm solver margin!
+    expect(pieces[0].halfH).toBeCloseTo(0.0001, 6);
+    expect(pieces[1].halfH).toBeCloseTo(0.0005, 6);
 
     live.updateMatrixWorld(true);
     const sig0 = sceneSignature(collectBodies(live));
@@ -381,8 +394,8 @@ describe('PathTracedView + ClothLayer stability', () => {
     // Repeated paused re-renders on `flag_in_wind` keep `sceneSignature` 100% invariant.
     for (let k = 0; k < 5; k++) {
       for (const pc of pieces) {
-        expect(syncClothSlabGeometry(pc.geom, pc.flex, src, [], pc.scratch)).toBe(false);
-        expect(placeClothTrims(pc.trims, pc.flex.name, pc.scratch.p, pc.scratch.n, CLOTH_THICKNESS / 2)).toBe(false);
+        expect(syncClothSlabGeometry(pc.geom, pc.flex, src, [], pc.scratch, pc.halfH)).toBe(false);
+        expect(placeClothTrims(pc.trims, pc.flex.name, pc.scratch.p, pc.scratch.n, pc.halfH)).toBe(false);
       }
       expect(sameSignature(sceneSignature(collectBodies(live)), sig0, SCENE_TOLERANCE)).toBe(true);
     }
@@ -391,13 +404,17 @@ describe('PathTracedView + ClothLayer stability', () => {
     const mats: THREE.Material[] = [];
     const texs: THREE.Texture[] = [];
     const geos: THREE.BufferGeometry[] = [];
+    const t0 = performance.now();
     const traced = buildTracedScene(live, collectBodies(live), floor, '#f8fafc', 'studio', mats, texs, geos);
+    const buildMs = performance.now() - t0;
+    expect(buildMs).toBeLessThan(1000);
     traced.updateMatrixWorld(true);
 
     const generator = new StaticGeometryGenerator(traced);
     generator.attributes = ['position', 'normal', 'tangent', 'color', 'uv', 'uv2'];
     const merged = generator.generate();
-    expect(merged.geometry.getAttribute('position').count).toBeGreaterThan(200);
+    // 16x curved PN-triangle middle-surface refinement turns ~800 coarse flag triangles into > 10,000 smooth facets!
+    expect(merged.geometry.getIndex()!.count / 3).toBeGreaterThan(8000);
 
     for (const pc of pieces) {
       pc.geom.dispose();
@@ -407,5 +424,80 @@ describe('PathTracedView + ClothLayer stability', () => {
     for (const m of mats) m.dispose();
     for (const t of texs) t.dispose();
     for (const g of geos) g.dispose();
+  });
+
+  it('curves coarse cloth triangles smoothly onto a cylinder via PN-triangle middle-surface refinement with zero twin-slab crossings', () => {
+    // Build a 4-column curved strip (`c = 0, 1, 2, 3`) on a cylinder of radius R = 0.08 m (80 mm)
+    // with 40 mm chords (angle step θ = 0.5 rad ≈ 28.6°), where interior columns `c = 1, 2` have
+    // symmetric neighbor triangles so their vertex normals match the true radial cylinder normal!
+    const R = 0.08;
+    const angles = [0, 0.5, 1.0, 1.5];
+    const flex: FlexInfo = {
+      name: 'curved__strip',
+      vertadr: 0,
+      vertnum: 8,
+      elems: [
+        0, 1, 5, 0, 5, 4,
+        1, 2, 6, 1, 6, 5,
+        2, 3, 7, 2, 7, 6,
+      ],
+      rgba: [0.95, 0.95, 0.98, 1],
+      material: 'ripstop',
+      flat: {
+        uv: [
+          [0, 0], [0.04, 0], [0.08, 0], [0.12, 0],
+          [0, 0.04], [0.04, 0.04], [0.08, 0.04], [0.12, 0.04],
+        ],
+        outline: [0, 1, 2, 3, 7, 6, 5, 4],
+        strain95: 0,
+        marks: [],
+      },
+    };
+    const src = new Float64Array(24);
+    for (let c = 0; c < 4; c++) {
+      const a = angles[c];
+      for (let r = 0; r < 2; r++) {
+        const idx = r * 4 + c;
+        src[3 * idx] = R * Math.sin(a);
+        src[3 * idx + 1] = r * 0.04;
+        src[3 * idx + 2] = R * Math.cos(a);
+      }
+    }
+    const slab = makeClothSlabGeometry(flex);
+    const scratch = { p: new Float32Array(24), n: new Float32Array(24) };
+    syncClothSlabGeometry(slab, flex, src, [], scratch);
+
+    // 1. Raster slab check on interior bay `(1 -> 2)`: top face radius strictly > bottom face radius!
+    const slabPos = slab.getAttribute('position') as THREE.BufferAttribute;
+    const topMidX = 0.5 * (slabPos.getX(1) + slabPos.getX(2));
+    const topMidZ = 0.5 * (slabPos.getZ(1) + slabPos.getZ(2));
+    const botMidX = 0.5 * (slabPos.getX(9) + slabPos.getX(10));
+    const botMidZ = 0.5 * (slabPos.getZ(9) + slabPos.getZ(10));
+    expect(Math.hypot(topMidX, topMidZ)).toBeGreaterThan(Math.hypot(botMidX, botMidZ));
+
+    // 2. Path-traced PN-triangle refinement check on interior bay `(1 -> 2 -> 6 -> 5)`:
+    // Flat chord midpoint had radius `R * cos(0.25) = 77.513 mm` (2.49 mm flat sagitta error!).
+    // Refined PN-triangle interior vertices arch smoothly outward onto `R ≈ 80.0 mm` (within < 0.25 mm of true cylinder!).
+    const refined = buildRefinedClothTracedGeometry(slab, 8, 6, 4)!;
+    expect(refined).not.toBeNull();
+    expect(refined.getIndex()!.count / 3).toBe(6 * 16); // 96 smooth sub-triangles
+    const rPos = refined.getAttribute('position') as THREE.BufferAttribute;
+    const rIdx = refined.getIndex()!;
+    // Sub-triangles `2 * 16 .. 4 * 16 - 1` (`32 .. 63`) belong to the middle bay `[1, 2, 6, 5]`.
+    let minInteriorRad = Infinity;
+    let maxInteriorRad = -Infinity;
+    for (let t = 32; t < 64; t++) {
+      for (let k = 0; k < 3; k++) {
+        const vi = rIdx.getX(3 * t + k);
+        const rad = Math.hypot(rPos.getX(vi), rPos.getZ(vi));
+        minInteriorRad = Math.min(minInteriorRad, rad);
+        maxInteriorRad = Math.max(maxInteriorRad, rad);
+      }
+    }
+    expect(minInteriorRad).toBeGreaterThan(R - 0.00025);
+    expect(maxInteriorRad).toBeLessThan(R + 0.00025);
+
+    slab.dispose();
+    refined.dispose();
   });
 });

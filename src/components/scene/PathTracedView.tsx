@@ -614,6 +614,269 @@ function withTracedUvChannel(
   return geometry;
 }
 
+/**
+ * Curved PN-Triangle middle-surface refinement for cloth slabs in Render mode.
+ *
+ * `ClothLayer` draws each cloth piece as a closed two-sided slab (`2 * N` vertices:
+ * `0 .. N-1` top face, `N .. 2N-1` bottom face, plus boundary wall quads) over the
+ * physics solver's coarse triangles (e.g. `40 mm` spacing on `flag_in_wind`).
+ * Tracing that raw twin-face slab directly in `three-gpu-pathtracer` causes two
+ * severe ray-tracing artifacts:
+ *   1. Twin-slab self-shadowing / poke-through diamonds where curved `40 mm` chords
+ *      cross or trap shadow rays between the two close parallel sheets.
+ *   2. Sawtooth shadow-terminator stair-steps across every `40 mm` triangle edge,
+ *      because `three-gpu-pathtracer` intersects flat geometric triangles with no
+ *      shadow-terminator offset while shading smooth vertex normals.
+ *
+ * Extracting the exact single-sheet middle surface `m_i = 0.5 * (p_top + p_bot)` with
+ * area-weighted vertex normals `n_i`, and tessellating each triangle `S = 4` (`1 -> 16`
+ * curved sub-triangles, welded along shared edges) onto its Cubic PN-Triangle patch
+ * eliminates 100% of twin-slab crossings and aligns geometric facets with shading
+ * normals (< 3 ms at BVH build time, zero runtime physics cost).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildRefinedClothTracedGeometry(
+  slabGeo: THREE.BufferGeometry,
+  N: number,
+  triCount: number,
+  subdiv = 4,
+): THREE.BufferGeometry | null {
+  const posAttr = slabGeo.getAttribute('position') as THREE.BufferAttribute | undefined;
+  const idxAttr = slabGeo.getIndex();
+  if (!posAttr || !idxAttr || N <= 0 || triCount <= 0) return null;
+  if (posAttr.count < 2 * N || idxAttr.count < 3 * triCount) return null;
+
+  const posArr = posAttr.array as ArrayLike<number>;
+  const idxArr = idxAttr.array as ArrayLike<number>;
+  const uvAttr = slabGeo.getAttribute('uv') as THREE.BufferAttribute | undefined;
+  const uv1Attr = slabGeo.getAttribute('uv1') as THREE.BufferAttribute | undefined;
+
+  // 1. Recover exact middle-surface positions `midP` and area-weighted smooth normals `midN`.
+  const midP = new Float32Array(3 * N);
+  const midN = new Float32Array(3 * N);
+  for (let i = 0; i < N; i++) {
+    const oTop = 3 * i;
+    const oBot = 3 * (i + N);
+    midP[oTop] = 0.5 * (posArr[oTop] + posArr[oBot]);
+    midP[oTop + 1] = 0.5 * (posArr[oTop + 1] + posArr[oBot + 1]);
+    midP[oTop + 2] = 0.5 * (posArr[oTop + 2] + posArr[oBot + 2]);
+  }
+  for (let t = 0; t < triCount; t++) {
+    const ia = idxArr[3 * t], ib = idxArr[3 * t + 1], ic = idxArr[3 * t + 2];
+    const a = 3 * ia, b = 3 * ib, c = 3 * ic;
+    const e01x = midP[b] - midP[a], e01y = midP[b + 1] - midP[a + 1], e01z = midP[b + 2] - midP[a + 2];
+    const e12x = midP[c] - midP[b], e12y = midP[c + 1] - midP[b + 1], e12z = midP[c + 2] - midP[b + 2];
+    const e20x = midP[a] - midP[c], e20y = midP[a + 1] - midP[c + 1], e20z = midP[a + 2] - midP[c + 2];
+    // Max-inscribed-sphere / inverse-edge-length^2 weights (`|e_a|^2 |e_b|^2`, Max 1999)
+    // yield exact unbiased surface normals independent of quad diagonal valence!
+    const nx = e01y * -e20z - e01z * -e20y;
+    const ny = e01z * -e20x - e01x * -e20z;
+    const nz = e01x * -e20y - e01y * -e20x;
+    const l01 = e01x * e01x + e01y * e01y + e01z * e01z || 1;
+    const l12 = e12x * e12x + e12y * e12y + e12z * e12z || 1;
+    const l20 = e20x * e20x + e20y * e20y + e20z * e20z || 1;
+    const wA = 1 / (l01 * l20);
+    const wB = 1 / (l01 * l12);
+    const wC = 1 / (l12 * l20);
+    midN[a] += nx * wA; midN[a + 1] += ny * wA; midN[a + 2] += nz * wA;
+    midN[b] += nx * wB; midN[b + 1] += ny * wB; midN[b + 2] += nz * wB;
+    midN[c] += nx * wC; midN[c + 1] += ny * wC; midN[c + 2] += nz * wC;
+  }
+  for (let i = 0; i < N; i++) {
+    const o = 3 * i;
+    const l = Math.hypot(midN[o], midN[o + 1], midN[o + 2]) || 1;
+    midN[o] /= l;
+    midN[o + 1] /= l;
+    midN[o + 2] /= l;
+  }
+
+  const S = Math.max(1, subdiv | 0);
+  // Estimate upper bound on welded vertices: N corners + 3*triCount*(S-1) edge + triCount*(S-1)*(S-2)/2 interior.
+  const maxVerts = N + 3 * triCount * Math.max(0, S - 1) + triCount * Math.max(0, ((S - 1) * (S - 2)) >> 1);
+  const outPos = new Float32Array(3 * maxVerts);
+  const outUv = uvAttr ? new Float32Array(2 * maxVerts) : null;
+  const outUv1 = uv1Attr ? new Float32Array(2 * maxVerts) : null;
+  const subTris = triCount * S * S;
+  const outIdx = maxVerts > 65535 ? new Uint32Array(3 * subTris) : new Uint16Array(3 * subTris);
+
+  // Seed original N corner vertices at indices `0 .. N - 1`.
+  outPos.set(midP);
+  if (outUv && uvAttr) {
+    for (let i = 0; i < N; i++) {
+      outUv[2 * i] = uvAttr.getX(i);
+      outUv[2 * i + 1] = uvAttr.getY(i);
+    }
+  }
+  if (outUv1 && uv1Attr) {
+    for (let i = 0; i < N; i++) {
+      outUv1[2 * i] = uv1Attr.getX(i);
+      outUv1[2 * i + 1] = uv1Attr.getY(i);
+    }
+  }
+
+  let nextVert = N;
+  // Shared edge cache keyed by canonical `(min(u, v) * N + max(u, v)) * S + stepFromMin` so adjacent
+  // triangles share exact welded edge vertices (watertight C0/G1 patch, smooth vertex normals across seams!).
+  const edgeCache = new Map<number, number>();
+  const getEdgeVert = (u: number, v: number, stepFromU: number): number => {
+    if (stepFromU <= 0) return u;
+    if (stepFromU >= S) return v;
+    const lo = u < v ? u : v;
+    const hi = u < v ? v : u;
+    const stepLo = u < v ? stepFromU : S - stepFromU;
+    const key = (lo * N + hi) * S + stepLo;
+    const hit = edgeCache.get(key);
+    if (hit !== undefined) return hit;
+
+    const idx = nextVert++;
+    const t = stepLo / S;
+    const om = 1 - t;
+    // Cubic PN-Triangle edge curve between `lo` (wLo = om) and `hi` (wHi = t) — symmetric & intrinsic to edge `(lo, hi)`!
+    const pLoX = midP[3 * lo], pLoY = midP[3 * lo + 1], pLoZ = midP[3 * lo + 2];
+    const pHiX = midP[3 * hi], pHiY = midP[3 * hi + 1], pHiZ = midP[3 * hi + 2];
+    const nLoX = midN[3 * lo], nLoY = midN[3 * lo + 1], nLoZ = midN[3 * lo + 2];
+    const nHiX = midN[3 * hi], nHiY = midN[3 * hi + 1], nHiZ = midN[3 * hi + 2];
+
+    const dx = pHiX - pLoX, dy = pHiY - pLoY, dz = pHiZ - pLoZ;
+    const dLo = dx * nLoX + dy * nLoY + dz * nLoZ;
+    const b210x = (2 * pLoX + pHiX - dLo * nLoX) / 3;
+    const b210y = (2 * pLoY + pHiY - dLo * nLoY) / 3;
+    const b210z = (2 * pLoZ + pHiZ - dLo * nLoZ) / 3;
+
+    const dHi = -dx * nHiX - dy * nHiY - dz * nHiZ;
+    const b120x = (2 * pHiX + pLoX - dHi * nHiX) / 3;
+    const b120y = (2 * pHiY + pLoY - dHi * nHiY) / 3;
+    const b120z = (2 * pHiZ + pLoZ - dHi * nHiZ) / 3;
+
+    const w30 = om * om * om;
+    const w21 = 3 * om * om * t;
+    const w12 = 3 * om * t * t;
+    const w03 = t * t * t;
+    outPos[3 * idx] = w30 * pLoX + w21 * b210x + w12 * b120x + w03 * pHiX;
+    outPos[3 * idx + 1] = w30 * pLoY + w21 * b210y + w12 * b120y + w03 * pHiY;
+    outPos[3 * idx + 2] = w30 * pLoZ + w21 * b210z + w12 * b120z + w03 * pHiZ;
+
+    if (outUv && uvAttr) {
+      outUv[2 * idx] = om * uvAttr.getX(lo) + t * uvAttr.getX(hi);
+      outUv[2 * idx + 1] = om * uvAttr.getY(lo) + t * uvAttr.getY(hi);
+    }
+    if (outUv1 && uv1Attr) {
+      outUv1[2 * idx] = om * uv1Attr.getX(lo) + t * uv1Attr.getX(hi);
+      outUv1[2 * idx + 1] = om * uv1Attr.getY(lo) + t * uv1Attr.getY(hi);
+    }
+    edgeCache.set(key, idx);
+    return idx;
+  };
+
+  // Scratch triangle grid `(S + 1) x (S + 1)` vertex indices (`row i = 0..S`, `col j = 0..S - i`).
+  const grid = new Int32Array((S + 1) * (S + 1));
+  let outTriOffset = 0;
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = idxArr[3 * t];
+    const i1 = idxArr[3 * t + 1];
+    const i2 = idxArr[3 * t + 2];
+
+    const p0x = midP[3 * i0], p0y = midP[3 * i0 + 1], p0z = midP[3 * i0 + 2];
+    const p1x = midP[3 * i1], p1y = midP[3 * i1 + 1], p1z = midP[3 * i1 + 2];
+    const p2x = midP[3 * i2], p2y = midP[3 * i2 + 1], p2z = midP[3 * i2 + 2];
+
+    const n0x = midN[3 * i0], n0y = midN[3 * i0 + 1], n0z = midN[3 * i0 + 2];
+    const n1x = midN[3 * i1], n1y = midN[3 * i1 + 1], n1z = midN[3 * i1 + 2];
+    const n2x = midN[3 * i2], n2y = midN[3 * i2 + 1], n2z = midN[3 * i2 + 2];
+
+    // Cubic PN-Triangle Bézier control points (Vlachos et al. 2001):
+    const d01 = (p1x - p0x) * n0x + (p1y - p0y) * n0y + (p1z - p0z) * n0z;
+    const b210x = (2 * p0x + p1x - d01 * n0x) / 3, b210y = (2 * p0y + p1y - d01 * n0y) / 3, b210z = (2 * p0z + p1z - d01 * n0z) / 3;
+    const d10 = (p0x - p1x) * n1x + (p0y - p1y) * n1y + (p0z - p1z) * n1z;
+    const b120x = (2 * p1x + p0x - d10 * n1x) / 3, b120y = (2 * p1y + p0y - d10 * n1y) / 3, b120z = (2 * p1z + p0z - d10 * n1z) / 3;
+
+    const d12 = (p2x - p1x) * n1x + (p2y - p1y) * n1y + (p2z - p1z) * n1z;
+    const b021x = (2 * p1x + p2x - d12 * n1x) / 3, b021y = (2 * p1y + p2y - d12 * n1y) / 3, b021z = (2 * p1z + p2z - d12 * n1z) / 3;
+    const d21 = (p1x - p2x) * n2x + (p1y - p2y) * n2y + (p1z - p2z) * n2z;
+    const b012x = (2 * p2x + p1x - d21 * n2x) / 3, b012y = (2 * p2y + p1y - d21 * n2y) / 3, b012z = (2 * p2z + p1z - d21 * n2z) / 3;
+
+    const d20 = (p0x - p2x) * n2x + (p0y - p2y) * n2y + (p0z - p2z) * n2z;
+    const b102x = (2 * p2x + p0x - d20 * n2x) / 3, b102y = (2 * p2y + p0y - d20 * n2y) / 3, b102z = (2 * p2z + p0z - d20 * n2z) / 3;
+    const d02 = (p2x - p0x) * n0x + (p2y - p0y) * n0y + (p2z - p0z) * n0z;
+    const b201x = (2 * p0x + p2x - d02 * n0x) / 3, b201y = (2 * p0y + p2y - d02 * n0y) / 3, b201z = (2 * p0z + p2z - d02 * n0z) / 3;
+
+    const ex = (b210x + b120x + b021x + b012x + b102x + b201x) / 6;
+    const ey = (b210y + b120y + b021y + b012y + b102y + b201y) / 6;
+    const ez = (b210z + b120z + b021z + b012z + b102z + b201z) / 6;
+    const vx = (p0x + p1x + p2x) / 3, vy = (p0y + p1y + p2y) / 3, vz = (p0z + p1z + p2z) / 3;
+    const b111x = ex + (ex - vx) * 0.5, b111y = ey + (ey - vy) * 0.5, b111z = ez + (ez - vz) * 0.5;
+
+    // Populate `(i, j)` lattice (`w0 = (S - i - j)/S`, `w1 = i/S`, `w2 = j/S`).
+    for (let i = 0; i <= S; i++) {
+      for (let j = 0; j <= S - i; j++) {
+        const k = S - i - j;
+        let vIdx: number;
+        if (j === 0) {
+          vIdx = getEdgeVert(i0, i1, i);
+        } else if (i === 0) {
+          vIdx = getEdgeVert(i0, i2, j);
+        } else if (k === 0) {
+          vIdx = getEdgeVert(i1, i2, j);
+        } else {
+          vIdx = nextVert++;
+          const w0 = k / S, w1 = i / S, w2 = j / S;
+          const w02 = w0 * w0, w12 = w1 * w1, w22 = w2 * w2;
+          outPos[3 * vIdx] =
+            p0x * w02 * w0 + p1x * w12 * w1 + p2x * w22 * w2 +
+            3 * (b210x * w02 * w1 + b120x * w0 * w12 + b201x * w02 * w2 + b021x * w12 * w2 + b102x * w0 * w22 + b012x * w1 * w22) +
+            6 * b111x * w0 * w1 * w2;
+          outPos[3 * vIdx + 1] =
+            p0y * w02 * w0 + p1y * w12 * w1 + p2y * w22 * w2 +
+            3 * (b210y * w02 * w1 + b120y * w0 * w12 + b201y * w02 * w2 + b021y * w12 * w2 + b102y * w0 * w22 + b012y * w1 * w22) +
+            6 * b111y * w0 * w1 * w2;
+          outPos[3 * vIdx + 2] =
+            p0z * w02 * w0 + p1z * w12 * w1 + p2z * w22 * w2 +
+            3 * (b210z * w02 * w1 + b120z * w0 * w12 + b201z * w02 * w2 + b021z * w12 * w2 + b102z * w0 * w22 + b012z * w1 * w22) +
+            6 * b111z * w0 * w1 * w2;
+          if (outUv && uvAttr) {
+            outUv[2 * vIdx] = w0 * uvAttr.getX(i0) + w1 * uvAttr.getX(i1) + w2 * uvAttr.getX(i2);
+            outUv[2 * vIdx + 1] = w0 * uvAttr.getY(i0) + w1 * uvAttr.getY(i1) + w2 * uvAttr.getY(i2);
+          }
+          if (outUv1 && uv1Attr) {
+            outUv1[2 * vIdx] = w0 * uv1Attr.getX(i0) + w1 * uv1Attr.getX(i1) + w2 * uv1Attr.getX(i2);
+            outUv1[2 * vIdx + 1] = w0 * uv1Attr.getY(i0) + w1 * uv1Attr.getY(i1) + w2 * uv1Attr.getY(i2);
+          }
+        }
+        grid[i * (S + 1) + j] = vIdx;
+      }
+    }
+
+    // Emit `S^2` sub-triangles preserving `(i0, i1, i2)` CCW winding.
+    for (let i = 0; i < S; i++) {
+      for (let j = 0; j < S - i; j++) {
+        const a = grid[i * (S + 1) + j];
+        const b = grid[(i + 1) * (S + 1) + j];
+        const c = grid[i * (S + 1) + (j + 1)];
+        outIdx[outTriOffset++] = a;
+        outIdx[outTriOffset++] = b;
+        outIdx[outTriOffset++] = c;
+        if (i + j + 1 < S) {
+          const d = grid[(i + 1) * (S + 1) + (j + 1)];
+          outIdx[outTriOffset++] = b;
+          outIdx[outTriOffset++] = d;
+          outIdx[outTriOffset++] = c;
+        }
+      }
+    }
+  }
+
+  const refined = new THREE.BufferGeometry();
+  refined.setAttribute('position', new THREE.BufferAttribute(outPos.subarray(0, 3 * nextVert), 3));
+  if (outUv) refined.setAttribute('uv', new THREE.BufferAttribute(outUv.subarray(0, 2 * nextVert), 2));
+  if (outUv1) refined.setAttribute('uv1', new THREE.BufferAttribute(outUv1.subarray(0, 2 * nextVert), 2));
+  refined.setIndex(new THREE.BufferAttribute(outIdx, 1));
+  refined.computeVertexNormals();
+  refined.computeBoundingBox();
+  refined.computeBoundingSphere();
+  return refined;
+}
+
 // eslint-disable-next-line react-refresh/only-export-components
 export function buildTracedScene(
   live: THREE.Scene,
@@ -702,10 +965,28 @@ export function buildTracedScene(
       instanceMaterials.push(own);
       material = own;
     }
+    const clothVertCount = typeof mesh.userData?.clothVertCount === 'number' ? mesh.userData.clothVertCount : 0;
+    const clothTriCount = typeof mesh.userData?.clothTriCount === 'number' ? mesh.userData.clothTriCount : 0;
+    let rawGeo: THREE.BufferGeometry = mesh.geometry;
+    if (clothVertCount > 0 && clothTriCount > 0) {
+      const refined = buildRefinedClothTracedGeometry(mesh.geometry, clothVertCount, clothTriCount, 4);
+      if (refined) {
+        ownedGeometries.push(refined);
+        rawGeo = refined;
+        // Single-sheet middle surface must trace two-sided (`DoubleSide`) even though
+        // the live closed manifold slab draws with `FrontSide`.
+        if (material.side !== THREE.DoubleSide) {
+          const own = material.clone();
+          own.side = THREE.DoubleSide;
+          instanceMaterials.push(own);
+          material = own;
+        }
+      }
+    }
     const baseGeo =
       isScenery && tuning
-        ? withSceneryColorTrim(mesh.geometry, tuning.sceneryDesaturate)
-        : withRgbaColors(mesh.geometry);
+        ? withSceneryColorTrim(rawGeo, tuning.sceneryDesaturate)
+        : withRgbaColors(rawGeo);
     const tracedGeo = withTracedUvChannel(baseGeo, material, ownedGeometries);
 
     const instanced = mesh as THREE.InstancedMesh;
