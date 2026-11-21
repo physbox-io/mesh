@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect } from 'vitest';
 import { webSerialManager } from '../src/utils/webSerialManager';
 import { warpGcode, type ProbeGrid } from '../src/utils/meshLeveler';
+import { gridStillHolds, probedGridStamp } from '../src/utils/probedGrid';
 
 /**
  * Stands in for a GRBL board on the other end of the serial port: acknowledges
@@ -307,3 +308,28 @@ describe('zeroZ from a touch plate', () => {
   });
 });
 
+
+describe('a bed probe grid after the work moves under it', () => {
+  it('is dropped by a re-zero of X, Y or Z, and kept through its own probing', async () => {
+    fake = attachFakeGrbl((x) => -5 + x / 1000);
+    const grid = await webSerialManager.probeGrid(bounds, 2, 2);
+    const stock = { widthMm: 100, depthMm: 100, thicknessMm: 12 };
+    const held = { grid, stamp: probedGridStamp(webSerialManager.getState().datumEpoch, stock) };
+    const now = () => probedGridStamp(webSerialManager.getState().datumEpoch, stock);
+    expect(gridStillHolds(held, now())).toBe(grid);
+
+    await webSerialManager.zeroXY();
+    expect(gridStillHolds(held, now())).toBeNull();
+
+    const again = { grid, stamp: now() };
+    expect((await webSerialManager.zeroZ(12)).success).toBe(true);
+    expect(gridStillHolds(again, now())).toBeNull();
+  });
+
+  it('is dropped when the stock changes', () => {
+    const grid = { points: [] };
+    const held = { grid, stamp: probedGridStamp(3, { widthMm: 100, depthMm: 100, thicknessMm: 12 }) };
+    expect(gridStillHolds(held, probedGridStamp(3, { widthMm: 100, depthMm: 100, thicknessMm: 12 }))).toBe(grid);
+    expect(gridStillHolds(held, probedGridStamp(3, { widthMm: 100, depthMm: 100, thicknessMm: 18 }))).toBeNull();
+  });
+});

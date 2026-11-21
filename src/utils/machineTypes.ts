@@ -175,6 +175,12 @@ export interface MachineState extends BaseMachineState {
    */
   probeCircuitSeen: boolean;
   /**
+   * Counts every re-take of the work datum, X, Y or Z. A bed probe grid is a
+   * set of heights at work positions, so one taken before the count moved is
+   * measured against a zero that is no longer there.
+   */
+  datumEpoch: number;
+  /**
    * The last job that ran to its final line, for the "Job Succeeded" notice.
    *
    * Set in one place only: the pump, when the last line of the program has

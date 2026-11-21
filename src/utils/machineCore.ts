@@ -334,6 +334,7 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
       controllerSilent: false,
       probePinActive: false,
       probeCircuitSeen: false,
+      datumEpoch: 0,
       lastCompletedJob: null,
       setupPending: null,
     };

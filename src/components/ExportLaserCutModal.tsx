@@ -25,6 +25,7 @@ import {
   recommendSpeeds,
 } from '../utils/feedsAndSpeeds';
 import type { ProbeGrid } from '../utils/meshLeveler';
+import { gridStillHolds, probedGridStamp, type ProbedGridStamp } from '../utils/probedGrid';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { HintAnchor } from './ExportFields';
 import { RackToolPicker } from './RackToolPicker';
@@ -261,9 +262,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [attachmentWidthMm, setAttachmentWidthMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentWidthMm);
   const [attachmentSpacingMm, setAttachmentSpacingMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentSpacingMm);
   const [attachmentHeightMm, setAttachmentHeightMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentHeightMm);
-  const [probedGrid, setProbedGrid] = useState<ProbeGrid | null>(null);
+  const [heldGrid, setHeldGrid] = useState<{ grid: ProbeGrid; stamp: ProbedGridStamp } | null>(null);
   const [isProbing, setIsProbing] = useState<boolean>(false);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
+  // Dropped by a re-zero or another stock, which leave it describing somewhere else.
+  const probeStock = useStore((s) => s.stock);
+  const probedGrid = gridStillHolds(heldGrid, probedGridStamp(machineState.datumEpoch, probeStock));
   const { laserMaxPower, laserPower, engravePower, pickLaserMaxPower, setLaserPower, setEngravePower } = useLaserPowers(machineMode, machineState);
 
   /**
@@ -544,7 +548,11 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     if (!gcodeResult?.bounds) return;
     setIsProbing(true);
     try {
-      setProbedGrid(await webSerialManager.probeGrid(gcodeResult.bounds, 3, 3));
+      const grid = await webSerialManager.probeGrid(gcodeResult.bounds, 3, 3);
+      setHeldGrid({
+        grid,
+        stamp: probedGridStamp(webSerialManager.getState().datumEpoch, useStore.getState().stock),
+      });
     } finally {
       setIsProbing(false);
     }

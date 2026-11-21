@@ -19,6 +19,7 @@ import {
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MATERIALS, describeSpeedRecommendation, recommendSpeeds } from '../utils/feedsAndSpeeds';
 import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
+import { gridStillHolds, probedGridStamp, type ProbedGridStamp } from '../utils/probedGrid';
 import { useStore } from '../store/useStore';
 import { useSettled } from '../hooks/useSettled';
 
@@ -301,6 +302,13 @@ export function useCarveTooling<T extends CarveTooling>(
   };
 }
 
+/** `MachineState.datumEpoch`, kept current. */
+export function useDatumEpoch(): number {
+  const [epoch, setEpoch] = useState(webSerialManager.getState().datumEpoch);
+  useEffect(() => webSerialManager.addListener((s) => setEpoch(s.datumEpoch)), []);
+  return epoch;
+}
+
 /**
  * The bed probe: how many points, whether it is running, and what it found.
  *
@@ -312,7 +320,12 @@ export function useBedProbe(onProbed: (grid: ProbeGrid) => void) {
   const [probeRows, setProbeRows] = useState(3);
   const [isProbing, setIsProbing] = useState(false);
   const [probeProgress, setProbeProgress] = useState({ current: 0, total: 0 });
-  const [probedGrid, setProbedGrid] = useState<ProbeGrid | null>(null);
+  const [held, setHeld] = useState<{ grid: ProbeGrid; stamp: ProbedGridStamp } | null>(null);
+  // A re-zero or another stock and the grid describes somewhere else: it is
+  // dropped, and the dialog shows the probe as needed again.
+  const datumEpoch = useDatumEpoch();
+  const stock = useStore((s) => s.stock);
+  const probedGrid = gridStillHolds(held, probedGridStamp(datumEpoch, stock));
 
   const probe = async (bounds: { minX: number; minY: number; maxX: number; maxY: number }) => {
     setIsProbing(true);
@@ -321,7 +334,10 @@ export function useBedProbe(onProbed: (grid: ProbeGrid) => void) {
       const grid = await webSerialManager.probeGrid(bounds, probeCols, probeRows, (current, total) =>
         setProbeProgress({ current, total })
       );
-      setProbedGrid(grid);
+      setHeld({
+        grid,
+        stamp: probedGridStamp(webSerialManager.getState().datumEpoch, useStore.getState().stock),
+      });
       onProbed(grid);
     } catch {
       // Probing throws without a connected machine; the button is disabled in

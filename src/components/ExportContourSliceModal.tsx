@@ -171,7 +171,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [kerfMm, setKerfMm] = useState(0.15);
   const [pinCount, setPinCount] = useState(2);
   const [pinDiameterOverrideMm, setPinDiameterOverrideMm] = useState<number | null>(null);
-  const [probeState, setProbeState] = useState<{ scene: SceneGraph; key: string; grid: ProbeGrid } | null>(null);
+  const [probeState, setProbeState] = useState<{ scene: SceneGraph; key: string; grid: ProbeGrid; datumEpoch: number } | null>(null);
   const [isProbing, setIsProbing] = useState(false);
   const [autoScale, setAutoScale] = useState<boolean>(false);
   const [maxSheets, setMaxSheets] = useState<number>(2);
@@ -284,7 +284,9 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     [liveSliceFields, machineMode, bitDiameterMm],
   );
   const probedGrid =
-    probeState && probeState.scene === scene && probeState.key === probeParamsKey
+    // A re-zero moves every point of it, as a change of stock does.
+    probeState && probeState.scene === scene && probeState.key === probeParamsKey &&
+    probeState.datumEpoch === machineState.datumEpoch
       ? probeState.grid
       : null;
   const sliceFields = useSettled(liveSliceFields, 250);
@@ -468,7 +470,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     setIsProbing(true);
     try {
       const grid = await webSerialManager.probeGrid(gcodeResult.bounds, 3, 3);
-      setProbeState({ scene, key: probeParamsKey, grid });
+      setProbeState({ scene, key: probeParamsKey, grid, datumEpoch: webSerialManager.getState().datumEpoch });
     } finally {
       setIsProbing(false);
     }

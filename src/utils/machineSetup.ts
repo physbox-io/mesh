@@ -20,12 +20,14 @@ export abstract class SetupMachine extends GuideSpotMachine {
   protected recordZDatum(): void {
     super.recordZDatum();
     this.zZeroedAt = ++this.datumSeq;
+    this.updateState({ datumEpoch: this.datumSeq });
   }
 
   protected recordXYDatum(axes: { x?: boolean; y?: boolean } = { x: true, y: true }): void {
     const at = ++this.datumSeq;
     if (axes.x) this.xZeroedAt = at;
     if (axes.y) this.yZeroedAt = at;
+    this.updateState({ datumEpoch: at });
   }
 
   /**
