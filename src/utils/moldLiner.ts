@@ -63,6 +63,7 @@ import { channelSolid, sprueNeckDiaMm, withPourMouth } from './moldSprue';
 import { boreSolids, type BoreCut } from './moldGating';
 import { unprintableRoofs, ROOF_LAYER_MM, ROOF_REACH_MM, type CavityRoof } from './moldRoofs';
 import { DEFAULT_PRINTER, printLimits } from './printLimits';
+import { packOnBed } from './printPlate';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
 
@@ -290,19 +291,25 @@ function halfSpans(field: ColumnField, grid: Grid, partingZ: number, flipped: bo
 }
 
 /**
- * The deepest PVA lies from a face water can reach, once the shell is off.
+ * The deepest soluble liner lies from a face solvent can reach.
  *
- * The liner is voxelised on the mold grid, the casting in it is a wall water
- * cannot pass, and every voxel that is neither — the shell's side of the
- * envelope, or above the parting face — is open water. A chamfer distance
- * transform, two sweeps each way, then gives each PVA voxel its distance to
- * water through PVA alone. Not the exact solid, but it measures the right
- * thing: an undercut is slow to dissolve because of how far in it goes, not
- * how tall it is.
+ * In `'insert'` mode the reusable holder lifts straight off, exposing the
+ * insert's floor, side walls and parting face to solvent (`OPEN = 0`).
+ * In `'combined'` mode, when the rigid shell is mechanically locked onto the
+ * cured casting (undercuts, buried bottom-fill runner, or reverse-tapered
+ * sprue/vent cones), the waterproof shell blocks the floor and side walls so
+ * solvent only enters from the open parting face (`z = 0`) and travels through
+ * the liner alone.
  */
-export function thickestPvaMm(envelope: Float64Array, spans: Float64Array[], grid: Grid): number {
+export function thickestPvaMm(
+  envelope: Float64Array,
+  spans: Float64Array[],
+  grid: Grid,
+  construction: LinerConstruction = 'insert',
+): number {
   const { stepX, stepY } = grid;
-  // Only the envelope's own footprint, one column of water round it.
+  const shellBlocks = construction === 'combined';
+  // Only the envelope's own footprint, one column round it.
   let c0 = Infinity, c1 = -Infinity, r0 = Infinity, r1 = -Infinity, maxDepth = 0;
   for (let r = 0; r < grid.rows; r++) {
     for (let c = 0; c < grid.cols; c++) {
@@ -317,20 +324,21 @@ export function thickestPvaMm(envelope: Float64Array, spans: Float64Array[], gri
   c1 = Math.min(grid.cols - 1, c1 + 1); r1 = Math.min(grid.rows - 1, r1 + 1);
   const cols = c1 - c0 + 1;
   const rows = r1 - r0 + 1;
-  const dz = Math.max(Math.min(stepX, stepY), maxDepth / 120);
-  const layers = Math.ceil(maxDepth / dz);
+  const dz = Math.max(maxDepth / 160, Math.min(stepX, stepY, 0.6));
+  const layers = Math.max(1, Math.ceil(maxDepth / dz));
   const plane = cols * rows;
 
   const OPEN = 0;
   const PART = -1;
   const dist = new Float32Array(plane * layers);
+  let hasLiner = false;
   for (let i = 0; i < plane; i++) {
     const src = (r0 + Math.floor(i / cols)) * grid.cols + c0 + (i % cols);
     const env = envelope[src];
     const sp = spans[src];
     for (let k = 0; k < layers; k++) {
       const z = -(k + 0.5) * dz;
-      let value: number = OPEN;
+      let value: number = shellBlocks ? PART : OPEN;
       if (env > 0 && z >= -env) {
         value = Infinity;
         for (let s = 0; s + 1 < sp.length; s += 2) {
@@ -339,21 +347,33 @@ export function thickestPvaMm(envelope: Float64Array, spans: Float64Array[], gri
             break;
           }
         }
+        if (value === Infinity) hasLiner = true;
       }
       dist[k * plane + i] = value;
     }
   }
+  if (!hasLiner) return 0;
 
-  const neighbours: Array<[number, number, number, number]> = [];
+  const dcArr: number[] = [];
+  const drArr: number[] = [];
+  const dkArr: number[] = [];
+  const wArr: number[] = [];
   for (let dk = -1; dk <= 1; dk++) {
     for (let dr = -1; dr <= 1; dr++) {
       for (let dc = -1; dc <= 1; dc++) {
         const before = dk < 0 || (dk === 0 && (dr < 0 || (dr === 0 && dc < 0)));
-        if (before) neighbours.push([dc, dr, dk, Math.hypot(dc * stepX, dr * stepY, dk * dz)]);
+        if (before) {
+          dcArr.push(dc);
+          drArr.push(dr);
+          dkArr.push(dk);
+          wArr.push(Math.hypot(dc * stepX, dr * stepY, dk * dz));
+        }
       }
     }
   }
-  const sweep = (sign: 1 | -1) => {
+  const nNbr = dcArr.length;
+  const sweep = (sign: 1 | -1): number => {
+    let maxDelta = 0;
     const start = sign > 0 ? 0 : plane * layers - 1;
     for (let idx = start, step = 0; step < plane * layers; step++, idx += sign) {
       const here = dist[idx];
@@ -363,23 +383,35 @@ export function thickestPvaMm(envelope: Float64Array, spans: Float64Array[], gri
       const r = Math.floor(rem / cols);
       const c = rem - r * cols;
       let best = here;
-      for (const [dc0, dr0, dk0, w] of neighbours) {
-        const cc = c + dc0 * sign;
-        const rr = r + dr0 * sign;
-        const kk = k + dk0 * sign;
-        // Off the grid is water: above the face, under the floor, or out past the flange.
-        const d = cc < 0 || rr < 0 || kk < 0 || cc >= cols || rr >= rows || kk >= layers
-          ? OPEN
-          : dist[kk * plane + rr * cols + cc];
+      for (let n = 0; n < nNbr; n++) {
+        const cc = c + dcArr[n] * sign;
+        const rr = r + drArr[n] * sign;
+        const kk = k + dkArr[n] * sign;
+        let d: number;
+        if (kk < 0) {
+          d = OPEN;
+        } else if (cc < 0 || rr < 0 || cc >= cols || rr >= rows || kk >= layers) {
+          d = shellBlocks ? PART : OPEN;
+        } else {
+          d = dist[kk * plane + rr * cols + cc];
+        }
         if (d === PART) continue;
-        if (d + w < best) best = d + w;
+        const cand = d + wArr[n];
+        if (cand < best) best = cand;
       }
-      dist[idx] = best;
+      if (best < here) {
+        const delta = Number.isFinite(here) ? here - best : 1e6;
+        if (delta > maxDelta) maxDelta = delta;
+        dist[idx] = best;
+      }
     }
+    return maxDelta;
   };
-  for (let pass = 0; pass < 2; pass++) {
-    sweep(1);
-    sweep(-1);
+  const maxPasses = shellBlocks ? 12 : 3;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const d1 = sweep(1);
+    const d2 = sweep(-1);
+    if (Math.max(d1, d2) < 0.02) break;
   }
 
   let thickest = 0;
@@ -387,7 +419,7 @@ export function thickestPvaMm(envelope: Float64Array, spans: Float64Array[], gri
     const d = dist[i];
     if (d > 0 && Number.isFinite(d) && d > thickest) thickest = d;
   }
-  return thickest;
+  return thickest > 0 ? thickest : maxDepth;
 }
 
 const flipAbout = (z: number): Mat4Tuple => [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, z, 1];
@@ -568,10 +600,32 @@ interface HalfPair {
   spans: Float64Array[];
   /** Part volume outside the envelope: where the shell would touch the casting. */
   escapedMm3: number;
-  /** Cut height separating protruding through-floor channel sleeves from the insert's flat base, when present. */
-  floorCutZ?: number;
   /** An insert cut into pieces that each print with nothing over the casting (splitInsert), bottom first; together they are `liner`. */
   pieces?: Manifold[];
+}
+
+function circlePoly(x: number, y: number, r: number, segs = 48): SimplePolygon {
+  const ring: [number, number][] = [];
+  for (let k = 0; k < segs; k++) {
+    const a = (2 * Math.PI * k) / segs;
+    ring.push([x + r * Math.cos(a), y + r * Math.sin(a)]);
+  }
+  return ring;
+}
+
+function barPoly(ax: number, ay: number, bx: number, by: number, halfW: number): SimplePolygon | null {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return null;
+  const nx = (-dy / len) * halfW;
+  const ny = (dx / len) * halfW;
+  return [
+    [ax + nx, ay + ny],
+    [ax - nx, ay - ny],
+    [bx - nx, by - ny],
+    [bx + nx, by + ny],
+  ];
 }
 
 /**
@@ -616,10 +670,21 @@ function carryPartingFlats(wasm: ManifoldToplevel, part: Manifold): Manifold {
  * The part in one half's own frame (cavity below z = 0), as that half's mold
  * casts it: drafted, and carried up through the face where it ends on it.
  */
-function halfPart(ctx: LinerContext, rawPart: Manifold, flipped: boolean, rawDepth: Float64Array): Manifold {
+function halfPart(
+  ctx: LinerContext,
+  rawPart: Manifold,
+  flipped: boolean,
+  rawDepth: Float64Array,
+  isBackingLid = false,
+): Manifold {
   const { wasm, grid, partingZ } = ctx;
   let part = flipped ? rawPart.transform(flipAbout(partingZ)) : rawPart.translate([0, 0, -partingZ]);
-  if (ctx.opts.moldType !== 'open' && !ctx.lidIsBackingPlate) {
+  if (isBackingLid) {
+    // A backing-plate lid has zero cavity below z = 0; lift it clear of the
+    // parting plane so coplanar float32 facets never dent the lid's landing pad.
+    return replace(part, part.translate([0, 0, 0.05]));
+  }
+  if (ctx.opts.moldType !== 'open') {
     part = carryPartingFlats(wasm, part);
   }
   // The casting as the draft leaves it; the shell's envelope then has to hold
@@ -627,12 +692,17 @@ function halfPart(ctx: LinerContext, rawPart: Manifold, flipped: boolean, rawDep
   const { draftAngleDeg, draftMode } = ctx.opts;
   const drafted = draftPart(wasm, part, grid, rawDepth, draftAngleDeg, draftMode);
   if (drafted !== part) part = replace(part, drafted);
-  if (ctx.opts.moldType === 'open' || ctx.lidIsBackingPlate) {
+  if (ctx.opts.moldType === 'open') {
     // Here the part ends exactly on the block's face, and a solid cut by
     // another that shares its face is left with a sheet of nothing there. So
     // the part's outline at the face is carried up through it, as the exact
     // open mold does.
-    part = withPourMouth(wasm, part, ctx.opts.moldType === 'open' ? sprueNeckDiaMm(ctx.opts.sprueBottomDiaMm, ctx.castMaterial) : 0);
+    part = withPourMouth(wasm, part, sprueNeckDiaMm(ctx.opts.sprueBottomDiaMm, ctx.castMaterial));
+  } else if (ctx.lidIsBackingPlate) {
+    const above = part.slice(0.01);
+    const needsMouth = above.isEmpty();
+    above.delete();
+    if (needsMouth) part = withPourMouth(wasm, part, 0);
   }
   return part;
 }
@@ -690,12 +760,7 @@ function buildHalfPair(
   let shell: Manifold;
   let liner: Manifold;
   let face: CrossSection;
-  let floorCutZ: number | undefined;
   if (ctx.construction === 'insert') {
-    // Compute the insert's flat base strictly over cavity, landing, blind-vent
-    // and bore columns (clamped so at least MIN_FLOOR_MM of rigid holder back
-    // floor remains below the pocket clearance). Only through-channel sleeves
-    // punch through the holder's back floor.
     const floorLimit = Math.max(ctx.skinMm, blockHeight - MIN_FLOOR_MM - INSERT_CLEARANCE_MM);
     const nonThrough = sleeveColumnDepth({ ...features, channels: [] }, grid, blockHeight, ctx.skinMm);
     const cavityRaw = envelope.map((d, i) => Math.min(floorLimit, Math.max(d, nonThrough[i])));
@@ -722,83 +787,190 @@ function buildHalfPair(
       }
     }
 
-    const baseFlat = flatBase(cavityRaw, floorLimit);
-    let baseDepth = 0;
-    for (const d of baseFlat) if (d > baseDepth) baseDepth = d;
-    if (baseDepth > 0 && features.channels.length > 0 && blockHeight - baseDepth > 0.4) {
-      floorCutZ = Math.round((-baseDepth - CUT_UNDER_MM) * 1000) / 1000;
-    }
-
-    let outer: Manifold | null = baseDepth > 0 ? envelopeSolid(wasm, grid, baseFlat) : null;
-    if (boreFoot && !boreFoot.isEmpty() && baseDepth > 0) {
-      const boreCol = wasm.Manifold.extrude(boreFoot, baseDepth + ENVELOPE_TOP).translate([0, 0, -baseDepth]);
-      outer = outer ? replace(outer, outer.add(boreCol)) : boreCol;
-      if (outer !== boreCol) boreCol.delete();
-    }
-    if (outer && baseDepth > 0 && features.channels.length > 0) {
-      for (const ch of features.channels) {
-        const rSleeve = Math.max(ch.outerR, ch.innerR) + ctx.skinMm;
-        const chCol = wasm.Manifold.cylinder(baseDepth + ENVELOPE_TOP, rSleeve, rSleeve, 48, false).translate([ch.x, ch.y, -baseDepth]);
-        outer = replace(outer, outer.add(chCol));
-        chCol.delete();
+    if (features.channels.length > 0) {
+      // Through-channel half (clamshell lid): take the insert's base flush to
+      // z = -blockHeight as ONE flat-backed piece so sprue and vent bores stay
+      // continuously sleeved without an unsealed floorCutZ cut, while a 45°
+      // beveled back shoulder seats against a captive retaining lip on the
+      // holder so the insert cannot push or fall out the back.
+      let bodyCs: CrossSection;
+      if (cavityRaw.some((d) => d > 0)) {
+        const fullDepth = cavityRaw.map((d) => (d > 0 ? blockHeight : 0));
+        const gridCol = envelopeSolid(wasm, grid, fullDepth);
+        bodyCs = gridCol.slice(-0.05);
+        gridCol.delete();
+      } else {
+        bodyCs = new wasm.CrossSection([]);
       }
-    }
-
-    const shapeParts: Manifold[] = [];
-    if (outer) shapeParts.push(outer);
-    if (sleeves) shapeParts.push(sleeves);
-    if (landing) shapeParts.push(landing);
-    const shape = shapeParts.length > 1
-      ? wasm.Manifold.union(shapeParts)
-      : shapeParts[0] ?? wasm.Manifold.cube([0, 0, 0]);
-    shape.numTri();
-    const inBlock = shape.intersect(block);
-    inBlock.numTri();
-    if (shape !== outer && shape !== sleeves && shape !== landing) shape.delete();
-    liner = inBlock.subtract(part);
-    liner.numTri();
-    inBlock.delete();
-
-    // Build the holder's straight-pull pocket from exact 2D CrossSection offsets
-    // and dilated sleeve cylinders so lateral and axial clearance is >= 0.25 mm
-    // regardless of grid step size.
-    const pocketParts: Manifold[] = [];
-    if (outer && baseDepth > 0) {
-      let outerFace = outer.slice(0);
-      if (boreFoot && !boreFoot.isEmpty()) outerFace = replace2(outerFace, outerFace.add(boreFoot));
-      if (!outerFace.isEmpty()) {
-        const grownFace = outerFace.offset(INSERT_CLEARANCE_MM, 'Round');
-        const pDepth = baseDepth + INSERT_CLEARANCE_MM;
-        pocketParts.push(wasm.Manifold.extrude(grownFace, pDepth + ENVELOPE_TOP).translate([0, 0, -pDepth]));
-        grownFace.delete();
+      if (boreFoot && !boreFoot.isEmpty()) bodyCs = replace2(bodyCs, bodyCs.add(boreFoot));
+      if (landingFoot && !landingFoot.isEmpty()) bodyCs = replace2(bodyCs, bodyCs.add(landingFoot));
+      if (!bodyCs.isEmpty()) {
+        const outerBody = bodyCs.toPolygons().filter((p) => contourArea(p) > 0);
+        if (outerBody.length) bodyCs = replace2(bodyCs, new wasm.CrossSection(outerBody, 'Positive'));
       }
-      outerFace.delete();
-    }
-    for (const ch of features.channels) {
-      const rClear = Math.max(ch.outerR, ch.innerR) + ctx.skinMm + INSERT_CLEARANCE_MM;
-      pocketParts.push(
-        wasm.Manifold.cylinder(blockHeight + 2 + ENVELOPE_TOP, rClear, rClear, 48, false).translate([ch.x, ch.y, -blockHeight - 2]),
+
+      const chPolys: SimplePolygon[] = features.channels.map((ch) =>
+        circlePoly(ch.x, ch.y, Math.max(ch.outerR, ch.innerR) + ctx.skinMm, 48),
       );
-    }
-    for (const v of features.topVents ?? []) {
-      if (v.zRoof < -0.1 && v.zRoof > -blockHeight + 0.5) {
-        const z0 = v.zRoof - 0.3 - ctx.skinMm - INSERT_CLEARANCE_MM;
-        const rClear = v.r + ctx.skinMm + INSERT_CLEARANCE_MM;
-        pocketParts.push(
-          wasm.Manifold.cylinder(1.0 - z0 + ENVELOPE_TOP, rClear, rClear, 32, false).translate([v.x, v.y, z0]),
-        );
+      const channelCs = new wasm.CrossSection(chPolys, 'Positive');
+      let topCs = bodyCs.isEmpty() ? channelCs.offset(0, 'Round') : bodyCs.add(channelCs);
+      {
+        const outerTop = topCs.toPolygons().filter((p) => contourArea(p) > 0);
+        if (outerTop.length) topCs = replace2(topCs, new wasm.CrossSection(outerTop, 'Positive'));
       }
-    }
-    if (landingFoot) {
-      const grownLanding = landingFoot.offset(INSERT_CLEARANCE_MM, 'Round');
-      const deep = ctx.skinMm + INSERT_CLEARANCE_MM;
-      pocketParts.push(wasm.Manifold.extrude(grownLanding, deep + ENVELOPE_TOP).translate([0, 0, -deep]));
-      grownLanding.delete();
-    }
-    boreFoot?.delete();
-    outer?.delete();
 
-    if (pocketParts.length > 0) {
+      // Connect any flange channel island to the main insert body so the lid
+      // insert prints and seats as one monolithic captive piece.
+      let bridgesCs: CrossSection | null = null;
+      const islands = topCs.decompose().sort((a, b) => b.area() - a.area());
+      if (islands.length > 1) {
+        const mb = islands[0].bounds();
+        const mcx = (mb.min[0] + mb.max[0]) / 2;
+        const mcy = (mb.min[1] + mb.max[1]) / 2;
+        const mainVerts = islands[0].toPolygons().flat();
+        const barPolys: SimplePolygon[] = [];
+        for (let idx = 1; idx < islands.length; idx++) {
+          const b = islands[idx].bounds();
+          const cx = (b.min[0] + b.max[0]) / 2;
+          const cy = (b.min[1] + b.max[1]) / 2;
+          let bestV: [number, number] = mainVerts[0] ?? [mcx, mcy];
+          let bestD = Infinity;
+          for (const v of mainVerts) {
+            const d = Math.hypot(v[0] - cx, v[1] - cy);
+            if (d < bestD) {
+              bestD = d;
+              bestV = v;
+            }
+          }
+          const dx = bestV[0] - cx;
+          const dy = bestV[1] - cy;
+          const len = Math.hypot(dx, dy) || 1;
+          const tx = bestV[0] + (dx / len) * 1.5;
+          const ty = bestV[1] + (dy / len) * 1.5;
+          const hw = Math.max(1.5, ctx.skinMm);
+          const bar = barPoly(cx, cy, tx, ty, hw);
+          if (bar) barPolys.push(bar);
+          barPolys.push(circlePoly(cx, cy, hw, 24));
+          barPolys.push(circlePoly(tx, ty, hw, 24));
+        }
+        if (barPolys.length) {
+          let rawBridge = new wasm.CrossSection(barPolys, 'Positive');
+          if (features.pins.length > 0) {
+            const pinKeepout = new wasm.CrossSection(
+              features.pins.map((p) => circlePoly(p.x, p.y, p.baseR + INSERT_CLEARANCE_MM + 0.6, 32)),
+              'Positive',
+            );
+            rawBridge = replace2(rawBridge, rawBridge.subtract(pinKeepout));
+            pinKeepout.delete();
+          }
+          if (!rawBridge.isEmpty()) {
+            bridgesCs = rawBridge;
+            topCs = replace2(topCs, topCs.add(bridgesCs));
+          } else {
+            rawBridge.delete();
+          }
+        }
+      }
+      for (const isl of islands) isl.delete();
+
+      const lipMm = Math.min(1.5, Math.max(0, blockHeight - ctx.skinMm - 1.0));
+      let botCs: CrossSection;
+      if (lipMm >= 0.6 && !bodyCs.isEmpty()) {
+        const eroded = bodyCs.offset(-lipMm, 'Round');
+        if (!eroded.isEmpty()) {
+          botCs = eroded.add(channelCs);
+          eroded.delete();
+          if (bridgesCs) botCs = replace2(botCs, botCs.add(bridgesCs));
+          botCs = replace2(botCs, botCs.intersect(topCs));
+        } else {
+          eroded.delete();
+          botCs = topCs.offset(0, 'Round');
+        }
+      } else {
+        botCs = topCs.offset(0, 'Round');
+      }
+      // Drop any sub-12 mm² corner specks on the bottom face so every first-layer
+      // island on the bed is wide and stable, and fill any interior holes.
+      {
+        const keptBot: SimplePolygon[] = [];
+        for (const comp of botCs.decompose()) {
+          if (comp.area() >= 12) {
+            for (const poly of comp.toPolygons()) {
+              if (contourArea(poly) > 0) keptBot.push(poly);
+            }
+          }
+          comp.delete();
+        }
+        if (keptBot.length) botCs = replace2(botCs, new wasm.CrossSection(keptBot, 'Positive').intersect(topCs));
+      }
+
+      const shapeParts: Manifold[] = [];
+      const pocketParts: Manifold[] = [];
+      const pocketTop = topCs.offset(INSERT_CLEARANCE_MM, 'Round');
+
+      if (lipMm >= 0.6) {
+        const nSteps = Math.max(4, Math.ceil(lipMm / 0.15));
+        for (let s = 0; s < nSteps; s++) {
+          const z0 = -blockHeight + (s * lipMm) / nSteps;
+          const cs = s === 0
+            ? botCs.offset(0, 'Round')
+            : botCs.offset((s * lipMm) / nSteps, 'Round').intersect(topCs);
+          if (!cs.isEmpty()) {
+            shapeParts.push(wasm.Manifold.extrude(cs, ENVELOPE_TOP - z0).translate([0, 0, z0]));
+          }
+          cs.delete();
+        }
+        const zTop0 = -blockHeight + lipMm;
+        shapeParts.push(wasm.Manifold.extrude(topCs, ENVELOPE_TOP - zTop0).translate([0, 0, zTop0]));
+
+        const backClear = INSERT_CLEARANCE_MM + 0.20;
+        const p0 = botCs.offset(backClear, 'Round').intersect(pocketTop);
+        if (!p0.isEmpty()) {
+          pocketParts.push(wasm.Manifold.extrude(p0, blockHeight + 2 + ENVELOPE_TOP).translate([0, 0, -blockHeight - 2]));
+        }
+        p0.delete();
+        const pocketSpanZ = Math.max(0.1, lipMm - 0.30);
+        for (let s = 1; s < nSteps; s++) {
+          const frac = s / nSteps;
+          const z0 = -blockHeight + frac * pocketSpanZ;
+          const off = backClear + frac * (lipMm + INSERT_CLEARANCE_MM - backClear);
+          const ps = botCs.offset(off, 'Round').intersect(pocketTop);
+          if (!ps.isEmpty()) {
+            pocketParts.push(wasm.Manifold.extrude(ps, ENVELOPE_TOP - z0).translate([0, 0, z0]));
+          }
+          ps.delete();
+        }
+        const zPocketTop = -blockHeight + pocketSpanZ;
+        pocketParts.push(wasm.Manifold.extrude(pocketTop, ENVELOPE_TOP - zPocketTop).translate([0, 0, zPocketTop]));
+      } else {
+        shapeParts.push(wasm.Manifold.extrude(topCs, blockHeight + ENVELOPE_TOP).translate([0, 0, -blockHeight]));
+        pocketParts.push(wasm.Manifold.extrude(pocketTop, blockHeight + 2 + ENVELOPE_TOP).translate([0, 0, -blockHeight - 2]));
+      }
+      if (sleeves) shapeParts.push(sleeves);
+      for (const v of features.topVents ?? []) {
+        if (v.zRoof < -0.1 && v.zRoof > -blockHeight + 0.5) {
+          const z0 = v.zRoof - 0.3 - ctx.skinMm - INSERT_CLEARANCE_MM;
+          const rClear = v.r + ctx.skinMm + INSERT_CLEARANCE_MM;
+          pocketParts.push(
+            wasm.Manifold.cylinder(1.0 - z0 + ENVELOPE_TOP, rClear, rClear, 32, false).translate([v.x, v.y, z0]),
+          );
+        }
+      }
+
+      const shape = shapeParts.length > 1
+        ? wasm.Manifold.union(shapeParts)
+        : shapeParts[0] ?? wasm.Manifold.cube([0, 0, 0]);
+      shape.numTri();
+      for (const sp of shapeParts) {
+        if (sp !== shape && sp !== sleeves) sp.delete();
+      }
+      const inBlock = shape.intersect(block);
+      inBlock.numTri();
+      if (shape !== sleeves) shape.delete();
+      liner = inBlock.subtract(part);
+      liner.numTri();
+      inBlock.delete();
+
       const pocket = pocketParts.length === 1 ? pocketParts[0] : wasm.Manifold.union(pocketParts);
       pocket.numTri();
       if (pocketParts.length > 1) for (const p of pocketParts) p.delete();
@@ -806,10 +978,86 @@ function buildHalfPair(
       shell.numTri();
       face = faceOutline(wasm, pocket);
       pocket.delete();
+
+      pocketTop.delete();
+      botCs.delete();
+      topCs.delete();
+      channelCs.delete();
+      bodyCs.delete();
+      bridgesCs?.delete();
+      boreFoot?.delete();
     } else {
-      shell = block.translate([0, 0, 0]);
-      shell.numTri();
-      face = block.slice(10);
+      // Blind-pocket half (open mold, cavity half, or unchannelled lid): keep
+      // a solid rigid holder back floor of at least MIN_FLOOR_MM.
+      const baseFlat = flatBase(cavityRaw, floorLimit);
+      let baseDepth = 0;
+      for (const d of baseFlat) if (d > baseDepth) baseDepth = d;
+
+      let outer: Manifold | null = baseDepth > 0 ? envelopeSolid(wasm, grid, baseFlat) : null;
+      if (boreFoot && !boreFoot.isEmpty() && baseDepth > 0) {
+        const boreCol = wasm.Manifold.extrude(boreFoot, baseDepth + ENVELOPE_TOP).translate([0, 0, -baseDepth]);
+        outer = outer ? replace(outer, outer.add(boreCol)) : boreCol;
+        if (outer !== boreCol) boreCol.delete();
+      }
+
+      const shapeParts: Manifold[] = [];
+      if (outer) shapeParts.push(outer);
+      if (sleeves) shapeParts.push(sleeves);
+      if (landing) shapeParts.push(landing);
+      const shape = shapeParts.length > 1
+        ? wasm.Manifold.union(shapeParts)
+        : shapeParts[0] ?? wasm.Manifold.cube([0, 0, 0]);
+      shape.numTri();
+      const inBlock = shape.intersect(block);
+      inBlock.numTri();
+      if (shape !== outer && shape !== sleeves && shape !== landing) shape.delete();
+      liner = inBlock.subtract(part);
+      liner.numTri();
+      inBlock.delete();
+
+      const pocketParts: Manifold[] = [];
+      if (outer && baseDepth > 0) {
+        let outerFace = outer.slice(0);
+        if (boreFoot && !boreFoot.isEmpty()) outerFace = replace2(outerFace, outerFace.add(boreFoot));
+        if (!outerFace.isEmpty()) {
+          const grownFace = outerFace.offset(INSERT_CLEARANCE_MM, 'Round');
+          const pDepth = baseDepth + INSERT_CLEARANCE_MM;
+          pocketParts.push(wasm.Manifold.extrude(grownFace, pDepth + ENVELOPE_TOP).translate([0, 0, -pDepth]));
+          grownFace.delete();
+        }
+        outerFace.delete();
+      }
+      for (const v of features.topVents ?? []) {
+        if (v.zRoof < -0.1 && v.zRoof > -blockHeight + 0.5) {
+          const z0 = v.zRoof - 0.3 - ctx.skinMm - INSERT_CLEARANCE_MM;
+          const rClear = v.r + ctx.skinMm + INSERT_CLEARANCE_MM;
+          pocketParts.push(
+            wasm.Manifold.cylinder(1.0 - z0 + ENVELOPE_TOP, rClear, rClear, 32, false).translate([v.x, v.y, z0]),
+          );
+        }
+      }
+      if (landingFoot) {
+        const grownLanding = landingFoot.offset(INSERT_CLEARANCE_MM, 'Round');
+        const deep = ctx.skinMm + INSERT_CLEARANCE_MM;
+        pocketParts.push(wasm.Manifold.extrude(grownLanding, deep + ENVELOPE_TOP).translate([0, 0, -deep]));
+        grownLanding.delete();
+      }
+      boreFoot?.delete();
+      outer?.delete();
+
+      if (pocketParts.length > 0) {
+        const pocket = pocketParts.length === 1 ? pocketParts[0] : wasm.Manifold.union(pocketParts);
+        pocket.numTri();
+        if (pocketParts.length > 1) for (const p of pocketParts) p.delete();
+        shell = block.subtract(pocket);
+        shell.numTri();
+        face = faceOutline(wasm, pocket);
+        pocket.delete();
+      } else {
+        shell = block.translate([0, 0, 0]);
+        shell.numTri();
+        face = block.slice(10);
+      }
     }
   } else {
     const cavity = linerReach.add(part);
@@ -857,7 +1105,7 @@ function buildHalfPair(
     for (const tool of boreSolids(wasm, cut)) cutBoth(tool);
   }
 
-  return { shell, liner, face, blockFace, envelope, spans: halfSpans(ctx.field, grid, partingZ, flipped), escapedMm3, floorCutZ };
+  return { shell, liner, face, blockFace, envelope, spans: halfSpans(ctx.field, grid, partingZ, flipped), escapedMm3 };
 }
 
 /** Below this, a column whose part stops short of the face counts as touching it, mm. */
@@ -1020,67 +1268,110 @@ function upwardFlats(wasm: ManifoldToplevel, m: Manifold, minAreaMm2 = 1): Array
 const CUT_UNDER_MM = 0.02;
 /** Minimum vertical spacing between two insert cuts so no cut slices out a sub-millimetre wafer, mm. */
 const MIN_CUT_STEP_MM = 0.8;
-/** A peg on each cut face of an insert in pieces, into a hole in the piece above, mm. */
-const PEG_R = 1.0;
-const PEG_TOP_R = 0.8;
-const PEG_H = 1.5;
-const PEG_HOLE_CLEAR = 0.15;
-const PEG_HOLE_DEEP = 1.8;
-/** Kept between a peg's hole and the casting, the insert's edge or anything else, mm. */
-const PEG_MARGIN = 0.8;
 /** Two pegs at least this far apart fix a piece's turn as well as its place, mm. */
 const PEG_SPREAD = 6;
+
+interface PegSpec {
+  pegR: number;
+  pegTopR: number;
+  pegH: number;
+  holeClear: number;
+  holeDeep: number;
+  margin: number;
+  roofMargin: number;
+}
+
+const PEG_TIERS: readonly PegSpec[] = [
+  { pegR: 1.0, pegTopR: 0.8, pegH: 1.5, holeClear: 0.15, holeDeep: 1.8, margin: 0.8, roofMargin: 0.6 },
+  { pegR: 0.85, pegTopR: 0.68, pegH: 1.0, holeClear: 0.15, holeDeep: 1.2, margin: 0.65, roofMargin: 0.4 },
+  { pegR: 0.75, pegTopR: 0.6, pegH: 0.7, holeClear: 0.15, holeDeep: 0.85, margin: 0.55, roofMargin: 0.3 },
+  { pegR: 0.68, pegTopR: 0.54, pegH: 0.5, holeClear: 0.15, holeDeep: 0.62, margin: 0.5, roofMargin: 0.25 },
+];
 
 /**
  * Pieces of an insert keyed to each other. The holder's pocket alone lets a
  * piece shift by its clearance, a step in the casting at every cut; a pair of
- * pegs on each cut face, in holes in the piece above, holds it. Only where the
- * two pieces meet solid, clear of the casting and their edges, with the piece
- * above deep enough for the hole: a cut too small for even one is left plain.
- * `cuts` are the heights of the cuts, bottom first, one between each pair of
- * `pieces`; the pieces are consumed.
+ * pegs on each cut face, in holes in the piece above, holds it. Scales down
+ * pegs for thinner wafers (down to ~1.7 mm) while sampling continuous Z slices
+ * (step <= 0.25 mm) up to the hole cone tip so no hole pierces an intermediate
+ * runner or undercut cavity. Any cut genuinely too thin or narrow is reported.
  */
-function pegPieces(wasm: ManifoldToplevel, pieces: Manifold[], cuts: number[]): { pieces: Manifold[]; pegs: number } {
+function pegPieces(
+  wasm: ManifoldToplevel,
+  pieces: Manifold[],
+  cuts: number[],
+): { pieces: Manifold[]; pegs: number; unpeggedCutsMm: number[] } {
   const out = [...pieces];
   let pegs = 0;
-  const rHole = PEG_R + PEG_HOLE_CLEAR;
+  const unpeggedCutsMm: number[] = [];
   for (let k = 0; k + 1 < out.length && k < cuts.length; k++) {
     const z = cuts[k];
+    const upperMaxZ = out[k + 1].boundingBox().max[2];
     const below = out[k].slice(z - 0.05);
-    const above = out[k + 1].slice(z + 0.05);
-    // Solid all the way up the hole and its 45° conical roof, not only at the cut.
-    let solid = below.intersect(above);
-    for (const h of [0.5, 1, PEG_HOLE_DEEP, PEG_HOLE_DEEP + rHole + PEG_MARGIN]) {
-      const at = out[k + 1].slice(z + h);
-      solid = replace2(solid, solid.intersect(at));
-      at.delete();
+    if (below.isEmpty()) {
+      below.delete();
+      unpeggedCutsMm.push(Math.round(-(z + CUT_UNDER_MM) * 100) / 100);
+      continue;
     }
-    const room = solid.offset(-(rHole + PEG_MARGIN), 'Round');
-    for (const c of [below, above, solid]) c.delete();
-    const spots = room.toPolygons().flat();
-    room.delete();
-    if (!spots.length) continue;
-    // The two spots furthest apart, or one.
-    let best: [number, number][] = [spots[0]];
-    let far = 0;
-    for (let i = 0; i < spots.length; i += Math.max(1, Math.floor(spots.length / 200))) {
-      for (let j = i + 1; j < spots.length; j += Math.max(1, Math.floor(spots.length / 200))) {
-        const d = Math.hypot(spots[i][0] - spots[j][0], spots[i][1] - spots[j][1]);
-        if (d > far) {
-          far = d;
-          best = [spots[i], spots[j]];
+
+    let chosen: { tier: PegSpec; spots: [number, number][] } | null = null;
+    for (const tier of PEG_TIERS) {
+      const rHole = tier.pegR + tier.holeClear;
+      const hMax = tier.holeDeep + rHole + tier.roofMargin;
+      if (upperMaxZ < z + hMax) continue;
+
+      let solid = below.offset(0, 'Round');
+      const heights: number[] = [];
+      for (let h = 0.05; h < hMax - 1e-6; h += 0.25) heights.push(h);
+      heights.push(hMax);
+      for (const h of heights) {
+        const at = out[k + 1].slice(z + h);
+        solid = replace2(solid, solid.intersect(at));
+        at.delete();
+        if (solid.isEmpty()) break;
+      }
+      const room = solid.isEmpty() ? solid : solid.offset(-(rHole + tier.margin), 'Round');
+      if (room !== solid) solid.delete();
+      const rawSpots = room.toPolygons().flat();
+      room.delete();
+      if (!rawSpots.length) continue;
+
+      let best: [number, number][] = [rawSpots[0]];
+      let far = 0;
+      const stride = Math.max(1, Math.floor(rawSpots.length / 200));
+      for (let i = 0; i < rawSpots.length; i += stride) {
+        for (let j = i + 1; j < rawSpots.length; j += stride) {
+          const d = Math.hypot(rawSpots[i][0] - rawSpots[j][0], rawSpots[i][1] - rawSpots[j][1]);
+          if (d > far) {
+            far = d;
+            best = [rawSpots[i], rawSpots[j]];
+          }
         }
       }
+      if (far < PEG_SPREAD) best = [best[0]];
+      if (!chosen) chosen = { tier, spots: best };
+      if (best.length === 2) {
+        chosen = { tier, spots: best };
+        break;
+      }
     }
-    if (far < PEG_SPREAD) best = [best[0]];
+    below.delete();
+
+    if (!chosen) {
+      unpeggedCutsMm.push(Math.round(-(z + CUT_UNDER_MM) * 100) / 100);
+      continue;
+    }
+
+    const { tier, spots } = chosen;
+    const rHole = tier.pegR + tier.holeClear;
     const holeCs = new wasm.CrossSection(
-      [[[0, -0.05], [rHole, -0.05], [rHole, PEG_HOLE_DEEP], [0, PEG_HOLE_DEEP + rHole]]],
+      [[[0, -0.05], [rHole, -0.05], [rHole, tier.holeDeep], [0, tier.holeDeep + rHole]]],
       'Positive',
     );
     const holeShape = wasm.Manifold.revolve(holeCs, 24);
     holeCs.delete();
-    for (const [x, y] of best) {
-      const peg = wasm.Manifold.cylinder(PEG_H + 0.05, PEG_R, PEG_TOP_R, 24, false).translate([x, y, z - 0.05]);
+    for (const [x, y] of spots) {
+      const peg = wasm.Manifold.cylinder(tier.pegH + 0.05, tier.pegR, tier.pegTopR, 24, false).translate([x, y, z - 0.05]);
       out[k] = replace(out[k], out[k].add(peg));
       peg.delete();
       const hole = holeShape.translate([x, y, z]);
@@ -1090,7 +1381,7 @@ function pegPieces(wasm: ManifoldToplevel, pieces: Manifold[], cuts: number[]): 
     }
     holeShape.delete();
   }
-  return { pieces: out, pegs };
+  return { pieces: out, pegs, unpeggedCutsMm };
 }
 
 /**
@@ -1107,26 +1398,10 @@ function splitInsert(
   liner: Manifold,
   cast: Manifold,
   bridgeMm: number,
-  initialCutZ?: number,
-): { pieces: Manifold[]; cutsMm: number[]; pegs: number; left: LeftRoof[] } {
+): { pieces: Manifold[]; cutsMm: number[]; pegs: number; unpeggedCutsMm: number[]; left: LeftRoof[] } {
   const flats = upwardFlats(wasm, cast, 2);
   const cuts: number[] = [];
   let pieces: Manifold[] = [liner];
-  if (initialCutZ !== undefined) {
-    const lBox = liner.boundingBox();
-    if (initialCutZ > lBox.min[2] + 0.4 && initialCutZ < lBox.max[2] - 0.4) {
-      const [above, below] = liner.splitByPlane([0, 0, 1], initialCutZ);
-      const cleanBelow = withoutCrumbs(wasm, below);
-      const cleanAbove = withoutCrumbs(wasm, above);
-      if (!cleanBelow.isEmpty() && !cleanAbove.isEmpty()) {
-        cuts.push(initialCutZ);
-        pieces = [cleanBelow, cleanAbove];
-      } else {
-        cleanBelow.delete();
-        cleanAbove.delete();
-      }
-    }
-  }
   // The roofs the last round found that no cut could fix.
   let left: LeftRoof[] = [];
   for (let round = 0; round < 8; round++) {
@@ -1216,8 +1491,15 @@ function splitInsert(
   // Pegs stand on a piece's top and go into holes opening on the next one's
   // bed: neither hangs over anything, so what was left stays what is left.
   let pegs = 0;
-  if (pieces.length > 1) ({ pieces, pegs } = pegPieces(wasm, pieces, cuts));
-  return { pieces, cutsMm: cuts.map((z) => Math.round(-(z + CUT_UNDER_MM) * 100) / 100), pegs, left: left.sort((p, q) => q.areaMm2 - p.areaMm2) };
+  let unpeggedCutsMm: number[] = [];
+  if (pieces.length > 1) ({ pieces, pegs, unpeggedCutsMm } = pegPieces(wasm, pieces, cuts));
+  return {
+    pieces,
+    cutsMm: cuts.map((z) => Math.round(-(z + CUT_UNDER_MM) * 100) / 100),
+    pegs,
+    unpeggedCutsMm,
+    left: left.sort((p, q) => q.areaMm2 - p.areaMm2),
+  };
 }
 
 /** Everything the exact-CSG mold build has, plus what the liner needs from the column field. */
@@ -1321,11 +1603,20 @@ export function linerSteps(o: {
   roofsLeft?: boolean;
   /** Inserts cut into pieces (splitInsert): which half, how far below the face each cut is, mm, and the pegs keying them. */
   insertCuts?: Array<{ half: string; cutsMm: number[]; pegs?: number }>;
+  /** In 'combined' mode, whether flared sprue/vent cones sit at the shell's back face. */
+  flaredChannels?: boolean;
+  /** In 'combined' mode, whether undercuts, a buried runner or flared cones lock the shell onto the casting. */
+  shellLocked?: boolean;
 }): string[] {
   const { pair, construction, clamshell, sealed } = o;
   const insert = construction === 'insert';
   const shell = pair.shell.name;
   const sol = pair.liner.name;
+  const combinedDemold = o.flaredChannels
+    ? `Unclamp, then snip or drill any flared sprue and vent plugs flush with the back of the ${shell} shell so they cannot rivet the lid on. Pull the ${shell} shell off along the pull if it slides free; if an undercut or bottom runner locks it on, soak the whole mold in ${pair.solvent} so the solvent works in from the open seam until the shell lets go.`
+    : o.shellLocked
+      ? `${clamshell ? 'Unclamp and pull' : 'Pull'} the ${shell} shell off along the pull if it slides free; where an undercut or runner locks it on, soak the whole mold in ${pair.solvent} so the solvent works in from the open ${clamshell ? 'seam' : 'mouth'} until the shell lets go.`
+      : `${clamshell ? 'Unclamp and lift' : 'Lift'} the ${shell} shell off along the pull. If it holds on, soak it in the solvent for an hour first.`;
   return [
     insert
       ? `Print the ${clamshell ? 'two holder halves' : 'holder'} in ${shell} and the ${clamshell ? 'two inserts' : 'insert'} in ${sol}, each on its own. Print them parting face up with supports off: nothing in them needs any${o.roofsLeft ? ' but the roof the warnings name, which prints unsupported and a little rough (the slicer calls it a floating region)' : ''}, and support printed inside the cavity would take the casting's place.`
@@ -1334,21 +1625,20 @@ export function linerSteps(o: {
       `The ${c.half}'s insert comes in ${c.cutsMm.length + 1} pieces, cut ${[...c.cutsMm].sort((a, b) => a - b).join(' and ')} mm below the parting face so that nothing in it hangs over the casting as it prints. ` +
       'Print each piece the way up it lies in the 3MF, the upper ones standing on their flat cut faces, and stack them in the holder from the bottom up' +
       (c.pegs ? ', each on the pegs of the one below.' : '.')),
-    ...(insert ? [`Press each insert into its holder${clamshell ? ', and close the halves dry once to check they seat flat' : ''}.`] : []),
+    ...(insert ? [`Press each insert into its holder${clamshell ? ' (the lid holder\'s back lip stops it going through; hold the lid insert in place as you turn the lid over, and close the halves dry once to check they seat flat)' : ''}.`] : []),
     clamshell
       ? `Wipe a thin film of mold release or petroleum jelly over both parting faces${sealed ? ', the sealing ridge and its groove' : ''}, the pins and sockets, and the sprue and vent mouths. The cavity needs none: the ${sol} dissolves.`
       : `Wipe a thin film of mold release or petroleum jelly over the top face and round the rim. The cavity needs none: the ${sol} dissolves.`,
     ...(clamshell
       ? [
-          `Close the halves${sealed ? ' with the tongue in its groove' : ''} and clamp them: binder clips round the edge, or at least ${o.clampG} g on the lid. Once the pour reaches the funnel it can lift a lid that is only taped, and resin gets into the seam.` +
-            (insert ? " Lay a flat board across the lid's back first, clear of the funnel and vents, so the clamping presses on the lid's insert as well as its holder: where the sprue and vents go through, the insert goes right through its holder, held only by its sides." : ''),
+          `Close the halves${sealed ? ' with the tongue in its groove' : ''} and clamp them: binder clips round the edge, or at least ${o.clampG} g on the lid. Once the pour reaches the funnel it can lift a lid that is only taped, and resin gets into the seam.`,
         ]
       : []),
     `Pour the ${o.castLabel} slowly into the funnel until it shows at every vent, then leave it to cure.`,
     insert
       ? `Unclamp, lift the holder off and push the ${clamshell ? 'inserts' : 'insert'} out with the casting inside. The holder is reusable.`
-      : `Unclamp and lift the ${shell} shell off along the pull. If it holds on, soak it in the solvent for an hour first.`,
-    `Dissolve the ${sol} off the casting in ${pair.solvent}: about ${o.dissolveHours} h for its thickest ${o.thickestMm} mm${insert ? ', now that the solvent reaches every side' : ''}. ${pair.dissolveTip}`,
+      : combinedDemold,
+    `Dissolve the ${sol} off the casting in ${pair.solvent}: about ${o.dissolveHours} h for its thickest ${o.thickestMm} mm${insert ? ', now that the solvent reaches every side' : o.shellLocked ? ' from the open seam while the shell stays on' : ''}. ${pair.dissolveTip}`,
   ];
 }
 
@@ -1393,24 +1683,35 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     rawPart.delete();
     return fail(material.error);
   }
+  const construction: LinerConstruction = ctx.construction ?? 'combined';
   const notes = [...warnings, ...material.warnings];
-  if (opts.baseThicknessMm < ctx.skinMm + MIN_FLOOR_MM) {
+  const minFloorNeed = ctx.skinMm + MIN_FLOOR_MM + (construction === 'insert' ? INSERT_CLEARANCE_MM : 0);
+  if (opts.baseThicknessMm < minFloorNeed) {
     notes.push(
-      `The ${opts.baseThicknessMm} mm floor leaves under ${MIN_FLOOR_MM} mm of ${pair.shell.name} below a ${ctx.skinMm} mm liner; ` +
-      `a floor of ${Math.ceil((ctx.skinMm + MIN_FLOOR_MM + 1) * 10) / 10} mm or more keeps the shell stiff.`
+      `The ${opts.baseThicknessMm} mm floor leaves under ${MIN_FLOOR_MM} mm of ${pair.shell.name} below a ${ctx.skinMm} mm ${construction === 'insert' ? 'insert and its clearance' : 'liner'}; ` +
+      `a floor of ${Math.ceil((minFloorNeed + 1) * 10) / 10} mm or more keeps the ${construction === 'insert' ? 'holder' : 'shell'} stiff.`
+    );
+  }
+  const minShellWallMm = 1.2;
+  const gridPadMm = Math.hypot(ctx.grid.stepX, ctx.grid.stepY) / 2;
+  const minWallNeed = ctx.skinMm + (construction === 'insert' ? INSERT_CLEARANCE_MM : 0) + gridPadMm + minShellWallMm;
+  if (opts.wallMarginMm < minWallNeed) {
+    notes.push(
+      `The ${opts.wallMarginMm} mm wall margin leaves under ${minShellWallMm} mm of ${pair.shell.name} outside a ${ctx.skinMm} mm ${construction === 'insert' ? 'insert and its clearance' : 'liner'}; ` +
+      `a wall margin of ${Math.ceil((minWallNeed + 0.5) * 10) / 10} mm or more keeps the ${construction === 'insert' ? 'holder' : 'shell'} wall solid.`
     );
   }
 
   const clamshell = opts.moldType === 'clamshell';
-  const basePart = halfPart(ctx, rawPart, ctx.detailIsAbove, ctx.rawBaseDepth);
-  const lidPart = clamshell ? halfPart(ctx, rawPart, !ctx.detailIsAbove, ctx.rawLidDepth) : null;
+  const basePart = halfPart(ctx, rawPart, ctx.detailIsAbove, ctx.rawBaseDepth, false);
+  const lidPart = clamshell ? halfPart(ctx, rawPart, !ctx.detailIsAbove, ctx.rawLidDepth, ctx.lidIsBackingPlate) : null;
   rawPart.delete();
   // Liner roofing one half's cavity up to the face goes to the other half, so
   // that neither prints with liner hanging over the casting (roofFootprint).
   const limits = opts.printLimits ?? printLimits(DEFAULT_PRINTER);
   let baseRoof: CrossSection | null = null;
   let lidRoof: CrossSection | null = null;
-  if (lidPart && !ctx.lidIsBackingPlate) {
+  if (lidPart) {
     const baseShadow = halfShadow(wasm, basePart);
     const lidShadow = halfShadow(wasm, lidPart);
     const lidInBase = lidShadow.mirror([0, 1]);
@@ -1425,7 +1726,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   // shell (or on an insert's clearance, which the resin then fills). And
   // wherever liner lifted off the other half lands.
   const landingFor = (roof: CrossSection | null, otherPart: Manifold | null) => {
-    if (!otherPart || ctx.lidIsBackingPlate) return null;
+    if (!otherPart) return null;
     const touch = otherPart.slice(-FACE_TOUCH_MM);
     const both = roof ? touch.add(roof) : touch;
     if (both !== touch) touch.delete();
@@ -1448,7 +1749,6 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
   baseRoof?.delete();
   lidRoof?.delete();
 
-  const construction: LinerConstruction = ctx.construction ?? 'combined';
   let sealed = false;
   if (lid && ctx.sealRidge !== false) {
     const ring = sealRing(
@@ -1492,10 +1792,16 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     const cast = castSpace(wasm, halfParts[i], halfFeatures[i], halfHeights[i]);
     let left: LeftRoof[];
     if (construction === 'insert') {
-      const split = splitInsert(wasm, h.liner, cast, bridgeMm, h.floorCutZ);
+      const split = splitInsert(wasm, h.liner, cast, bridgeMm);
       if (split.cutsMm.length) {
         h.pieces = split.pieces;
         insertCuts.push({ half: roofNames[i], cutsMm: split.cutsMm, pegs: split.pegs });
+        for (const unpeggedDepth of split.unpeggedCutsMm) {
+          notes.push(
+            `The cut ${unpeggedDepth} mm below the ${roofNames[i]}'s parting face is too thin or narrow for alignment pegs; ` +
+            'seat that piece carefully against the holder wall before pouring.'
+          );
+        }
       } else {
         for (const p of split.pieces) if (p !== h.liner) p.delete();
       }
@@ -1511,9 +1817,11 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     // the parting face is not sloped or curved: do not falsely claim it is.
     const curvedLeft = left.filter((r) => !r.flatWafer);
     if (construction === 'insert' && curvedLeft.length === 0) return;
-    roofsLeft = true;
     const reported = construction === 'insert' ? curvedLeft : left;
-    const total = Math.round(reported.reduce((sum, r) => sum + r.areaMm2, 0));
+    const rawTotal = reported.reduce((sum, r) => sum + r.areaMm2, 0);
+    if (rawTotal < 0.5) return;
+    roofsLeft = true;
+    const total = Math.max(1, Math.round(rawTotal));
     const at = reported[0].depthMm;
     // The last resort: support in a filament the liner survives the solvent of, washed out before the pour.
     const support = pair.waterSoluble
@@ -1574,40 +1882,92 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
 
   const pvaVolumeMm3 = all.reduce((s, h) => s + h.liner.volume(), 0);
   const plaVolumeMm3 = all.reduce((s, h) => s + h.shell.volume(), 0);
-  const thickest = Math.max(...halves.map((h) => thickestPvaMm(h.envelope, h.spans, ctx.grid)));
+  const allFeatures = lid ? [ctx.baseFeatures, ctx.lidFeatures] : [ctx.baseFeatures];
+  const flaredChannels =
+    construction === 'combined' &&
+    allFeatures.some((f) => f.channels.some((c) => c.outerR > c.innerR + 1e-3));
+  const hasBuriedRunner =
+    construction === 'combined' &&
+    allFeatures.some((f) => Boolean(f.bores?.length));
+  const shellLocked = construction === 'combined' && (ctx.undercutColumns > 0 || hasBuriedRunner || flaredChannels);
+  const rawThickest = Math.max(...halves.map((h) => thickestPvaMm(h.envelope, h.spans, ctx.grid, shellLocked ? 'combined' : 'insert')));
+  const thickest = rawThickest > 0 ? rawThickest : ctx.skinMm;
   const dissolveHours = Math.max(1, Math.ceil(thickest / pair.dissolveMmPerHour));
 
   const names = lid ? ['Cavity half', 'Lid half'] : ['Open mold'];
-  const insertGapMm = 10;
-  const assemblies: ThreeMfAssembly[] = construction === 'insert'
-    // Four separate prints: the holders in a row, the inserts in a row in front of them.
-    ? [
-        ...all.map((h, i) => ({ name: `${names[i]} holder`, parts: [meshPart(h.shell, `${names[i]} holder (${pair.shell.name})`, 1, true)] })),
-        ...all.flatMap((h, i) => {
-          if (!h.pieces) {
-            const box = h.liner.boundingBox();
-            const moved = h.liner.translate([0, -(ctx.moldDepthMm + insertGapMm), -box.min[2]]);
-            const part = meshPart(moved, `${names[i]} insert (${pair.liner.name})`, 2, true);
-            moved.delete();
-            return [{ name: `${names[i]} insert`, parts: [part] }];
-          }
-          // Each piece on its own bottom face, in a row going away from the holders.
-          let top = -ctx.moldDepthMm / 2 - insertGapMm;
-          return h.pieces.map((p, k) => {
-            const box = p.boundingBox();
-            const moved = p.translate([0, top - box.max[1], -box.min[2]]);
-            top -= box.max[1] - box.min[1] + insertGapMm;
-            const label = `${names[i]} insert, piece ${k + 1} of ${h.pieces!.length}${k === 0 ? ' (bottom)' : k === h.pieces!.length - 1 ? ' (top)' : ''}`;
-            const part = meshPart(moved, `${label} (${pair.liner.name})`, 2, true);
-            moved.delete();
-            return { name: label, parts: [part] };
-          });
-        }),
-      ]
-    : all.map((h, i) => ({
+  const assemblies: ThreeMfAssembly[] = (() => {
+    if (construction !== 'insert') {
+      return all.map((h, i) => ({
         name: names[i],
-        parts: [meshPart(h.shell, `${names[i]} shell (${pair.shell.name})`, 1, true), meshPart(h.liner, `${names[i]} liner (${pair.liner.name})`, 2, true)],
+        parts: [
+          meshPart(h.shell, `${names[i]} shell (${pair.shell.name})`, 1, true),
+          meshPart(h.liner, `${names[i]} liner (${pair.liner.name})`, 2, true),
+        ],
       }));
+    }
+    const bedItems = [
+      ...all.map((h, i) => ({
+        assemblyName: `${names[i]} holder`,
+        partName: `${names[i]} holder (${pair.shell.name})`,
+        extruder: 1,
+        manifold: h.shell,
+      })),
+      ...all.flatMap((h, i) => {
+        if (!h.pieces) {
+          return [{
+            assemblyName: `${names[i]} insert`,
+            partName: `${names[i]} insert (${pair.liner.name})`,
+            extruder: 2,
+            manifold: h.liner,
+          }];
+        }
+        return h.pieces.map((p, k) => {
+          const label = `${names[i]} insert, piece ${k + 1} of ${h.pieces!.length}${k === 0 ? ' (bottom)' : k === h.pieces!.length - 1 ? ' (top)' : ''}`;
+          return {
+            assemblyName: label,
+            partName: `${label} (${pair.liner.name})`,
+            extruder: 2,
+            manifold: p,
+          };
+        });
+      }),
+    ];
+    const bedMm = { widthMm: 250, depthMm: 250 };
+    const bedPlateGapMm = 20;
+    const boxes = bedItems.map((it) => it.manifold.boundingBox());
+    const rects = boxes.map((b) => ({ w: b.max[0] - b.min[0], d: b.max[1] - b.min[1] }));
+    const places = packOnBed(rects, bedMm, 5, 8);
+    let p0MinX = Infinity, p0MaxX = -Infinity, p0MinY = Infinity, p0MaxY = -Infinity;
+    places.forEach((pl, idx) => {
+      if (pl.plate !== 0) return;
+      const w = pl.turned ? rects[idx].d : rects[idx].w;
+      const d = pl.turned ? rects[idx].w : rects[idx].d;
+      p0MinX = Math.min(p0MinX, pl.x);
+      p0MaxX = Math.max(p0MaxX, pl.x + w);
+      p0MinY = Math.min(p0MinY, pl.y);
+      p0MaxY = Math.max(p0MaxY, pl.y + d);
+    });
+    const shiftX = Number.isFinite(p0MinX) ? (p0MinX + p0MaxX) / 2 : 0;
+    const shiftY = Number.isFinite(p0MinY) ? (p0MinY + p0MaxY) / 2 : 0;
+
+    return bedItems.map((it, idx) => {
+      const b = boxes[idx];
+      const pl = places[idx];
+      let moved = it.manifold.translate([-b.min[0], -b.min[1], -b.min[2]]);
+      if (pl.turned) {
+        const rotated = moved.rotate([0, 0, 90]);
+        moved.delete();
+        moved = rotated.translate([rects[idx].d, 0, 0]);
+        rotated.delete();
+      }
+      const plateX = pl.plate * (bedMm.widthMm + bedPlateGapMm);
+      const placedM = moved.translate([plateX + pl.x - shiftX, pl.y - shiftY, 0]);
+      moved.delete();
+      const part = meshPart(placedM, it.partName, it.extruder, true);
+      placedM.delete();
+      return { name: it.assemblyName, parts: [part] };
+    });
+  })();
 
   const halfOf = (h: { shell: Manifold; liner: Manifold; pieces?: Manifold[] }, name: string, blockHeight: number, pinRise: number): MoldMeshHalf => {
     const shell = manifoldToTriangles(h.shell);
@@ -1623,7 +1983,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
       widthMm: ctx.moldWidthMm,
       depthMm: ctx.moldDepthMm,
       heightMm: Math.round((blockHeight + pinRise) * 10) / 10,
-      partingZMm: Math.round(blockHeight * 100) / 100,
+      partingZMm: blockHeight,
       triangleCount: triangles.length,
     };
   };
@@ -1671,6 +2031,8 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
       thickestMm: thickR,
       ...(insertCuts.length ? { insertCuts } : {}),
       ...(roofsLeft ? { roofsLeft } : {}),
+      ...(flaredChannels ? { flaredChannels } : {}),
+      ...(shellLocked ? { shellLocked } : {}),
     }),
   };
 

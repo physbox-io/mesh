@@ -175,21 +175,25 @@ describe('sealing ridge', () => {
 });
 
 describe('holder and insert', () => {
-  it('prints as support-free holders and inserts (splitting lid sleeve stems from solid holder floor)', () => {
+  it('prints as support-free 1-piece holders and captive flat-backed inserts with no loose stem cuts', () => {
     expect(insert.success, insert.error).toBe(true);
     expect(insert.liner!.construction).toBe('insert');
     expect(moldSummary(insert).parts.map((p) => p.name)).toEqual([
       'Cavity Half holder',
       'Cavity Half insert',
       'Lid Half (Pins, Sprue & Vents) holder',
-      'Lid Half (Pins, Sprue & Vents) insert, piece 1 of 2 (bottom)',
-      'Lid Half (Pins, Sprue & Vents) insert, piece 2 of 2 (top)',
+      'Lid Half (Pins, Sprue & Vents) insert',
     ]);
+    expect(insert.liner!.steps.join(' ')).not.toMatch(/comes in \d+ pieces/);
     const model = strFromU8(unzipSync(insert.threeMf!)['3D/3dmodel.model']);
     expect(model.match(/holder \(ASA\)/g)).toHaveLength(2);
-    expect(model.match(/insert(?:, piece \d of \d(?: \((?:bottom|top)\))?)? \(HIPS\)/g)).toHaveLength(3);
+    expect(model.match(/insert \(HIPS\)/g)).toHaveLength(2);
 
-    // Without through-floor channels, each half prints as one holder + one insert (4 bodies total).
+    // Combined clamshell warns about snipping flared sprue/vent plugs and computes longer seam-first dissolution than insert.
+    expect(combined.liner!.steps.join(' ')).toMatch(/snip or drill any flared sprue and vent plugs flush/);
+    expect(combined.liner!.thickestLinerMm).toBeGreaterThan(insert.liner!.thickestLinerMm * 2);
+
+    // Without through-floor channels, each half also prints as one holder + one insert (4 bodies total).
     const unchannelled = generateMoldMeshes(
       ball,
       { ...OPTS, linerConstruction: 'insert', includeSprue: false, includeVents: false },

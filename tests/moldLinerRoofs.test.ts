@@ -324,7 +324,35 @@ describe('an insert a printer can bridge', () => {
     } as unknown as SceneGraph;
     const fdmGears = generateMoldMeshes(stackedOnShaft, { ...OPTS, pullDirection: '+z', linerConstruction: 'insert', printLimits: { minSkinMm: 0.2, minWallMm: 0.4, bridgeMm: 5 } }, wasm);
     expect(fdmGears.success, fdmGears.error).toBe(true);
-    expect(fdmGears.liner!.steps.join(' ')).toMatch(/lid's insert comes in 4 pieces/);
+    expect(fdmGears.liner!.steps.join(' ')).toMatch(/lid's insert comes in 3 pieces/);
+    expect(fdmGears.liner!.steps.join(' ')).toMatch(/each on the pegs of the one below/);
+    // Pack all 3MF objects compactly onto a <= 250 x 250 mm print bed without overlapping.
+    const gearObjs = objects(fdmGears.threeMf!);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const footprints: Array<[number, number, number, number]> = [];
+    for (const [name, o] of gearObjs) {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity;
+      for (let i = 0; i < o.positions.length; i += 3) {
+        x0 = Math.min(x0, o.positions[i]); x1 = Math.max(x1, o.positions[i]);
+        y0 = Math.min(y0, o.positions[i + 1]); y1 = Math.max(y1, o.positions[i + 1]);
+        z0 = Math.min(z0, o.positions[i + 2]);
+      }
+      expect(z0, `${name} sits on z = 0`).toBeCloseTo(0, 2);
+      minX = Math.min(minX, x0); maxX = Math.max(maxX, x1);
+      minY = Math.min(minY, y0); maxY = Math.max(maxY, y1);
+      footprints.push([x0, y0, x1, y1]);
+    }
+    expect(maxX - minX).toBeLessThanOrEqual(250);
+    expect(maxY - minY).toBeLessThanOrEqual(250);
+    for (let i = 0; i < footprints.length; i++) {
+      for (let j = i + 1; j < footprints.length; j++) {
+        const [ax0, ay0, ax1, ay1] = footprints[i];
+        const [bx0, by0, bx1, by1] = footprints[j];
+        const overlapX = Math.min(ax1, bx1) - Math.max(ax0, bx0);
+        const overlapY = Math.min(ay1, by1) - Math.max(ay0, by0);
+        expect(Math.min(overlapX, overlapY)).toBeLessThan(0.01);
+      }
+    }
     // Every scene part is closed and manifold too.
     const allTris = [...fdmGears.bottomHalf.triangles, ...(fdmGears.topHalf?.triangles ?? [])];
     let off = 0;
@@ -389,8 +417,9 @@ describe('the cut pieces', () => {
     const names = moldSummary(insert).parts.map((p) => p.name);
     expect(names).toContain('Cavity Half insert, piece 1 of 2 (bottom)');
     expect(names).toContain('Cavity Half insert, piece 2 of 2 (top)');
-    // The top piece is 0.6 mm thick: no room for a peg's hole, so none.
+    // The top piece is 0.6 mm thick: no room for a peg's hole, so none — and it warns clearly.
     expect(insert.liner!.steps.join(' ')).not.toMatch(/pegs/);
+    expect(insert.warnings.join(' ')).toMatch(/too thin or narrow for alignment pegs/);
     // Read as solids, holder and pieces cast the same part the one-print mold does.
     const a = await simulateCastFromMoldResult(insert, { trimChannels: true });
     const b = await simulateCastFromMoldResult(combined, { trimChannels: true });
@@ -501,5 +530,63 @@ describe('a curved roof', () => {
     }, wasm);
     expect(res.success, res.error).toBe(true);
     expect(res.warnings.join(' ')).not.toMatch(/sloped or curved/);
+  }, 120_000);
+
+  it('keys ~2.1 mm upper wafers with scaled-down pegs while never piercing intermediate horizontal tunnels', () => {
+    // Parted at z = 4 (top of lowerFlange): in the lid (z = 4..11), upperFlange (z = 6.1..11) sits 2.1 mm
+    // from the parting face (inside the 1.8–3.75 mm wafer range that previously got 0 pegs!), leaving an
+    // 11 mm wide ring of solid liner around the central shaft both above and below the 2.1 mm cut.
+    const thinWafer = {
+      nodes: [{
+        id: 'tw',
+        name: 'thinWafer',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [
+          box('lowerFlange', -16, -16, 0, 16, 16, 4),
+          box('stem', -4, -4, 0, 4, 4, 11),
+          box('upperFlange', -14, -14, 6.1, 14, 14, 11),
+        ],
+        joints: [],
+        children: [],
+      }],
+      castPrep: { draftDeg: 0.01, draftMode: 'remove', partingZ: 4 * MM, edges: null, originals: {} },
+    } as unknown as SceneGraph;
+    const waferRes = generateMoldMeshes(thinWafer, { ...OPTS, draftAngleDeg: 0, wallMarginMm: 14, linerConstruction: 'insert' }, wasm);
+    expect(waferRes.success, waferRes.error).toBe(true);
+    expect(waferRes.liner!.steps.join(' ')).toMatch(/insert comes in 2 pieces, cut 2\.1 mm below the parting face.*each on the pegs of the one below/);
+    expect(waferRes.warnings.join(' ')).not.toMatch(/too thin or narrow for alignment pegs/);
+
+    // Now place a horizontal cavity gallery at 2.1..3.1 mm above the cut (inside the old [1.8, 3.75] blind spot!)
+    // so dense 0.25 mm Z-slicing must keep peg holes completely clear of the intermediate gallery.
+    const galleryScene = {
+      nodes: [{
+        id: 'gal',
+        name: 'gallery',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [
+          box('baseShelf', -18, -18, 0, 18, 18, 5.5),
+          box('shaft', -3, -3, 0, 3, 3, 14),
+          // Horizontal ring gallery at z = 7.6..8.7 (2.1..3.2 mm above z = 5.5 cut!)
+          box('galF', -16, -15, 7.6, 16, -8, 8.7),
+          box('galB', -16, 8, 7.6, 16, 15, 8.7),
+          box('galL', -15, -15, 7.6, -8, 15, 8.7),
+          box('galR', 8, -15, 7.6, 15, 15, 8.7),
+          box('galTie', -3, -12, 7.6, 3, 12, 8.7),
+          box('topCap', -18, -18, 10, 18, 18, 14),
+        ],
+        joints: [],
+        children: [],
+      }],
+      castPrep: { draftDeg: 0, draftMode: 'remove', partingZ: 10 * MM, edges: null, originals: {} },
+    } as unknown as SceneGraph;
+    const galRes = generateMoldMeshes(galleryScene, { ...OPTS, draftAngleDeg: 0, wallMarginMm: 15, linerConstruction: 'insert' }, wasm);
+    expect(galRes.success, galRes.error).toBe(true);
+    for (const [name, o] of objects(galRes.threeMf!)) {
+      const a = analyzeMesh(o.positions, o.faces)!;
+      expect(a.closed, name).toBe(true);
+      expect(a.consistentlyWound, name).toBe(true);
+    }
   }, 120_000);
 });

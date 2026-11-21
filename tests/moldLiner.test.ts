@@ -174,15 +174,22 @@ describe('PVA-lined mold', () => {
     expect(res.error).toMatch(/geometry engine/);
   });
 
-  it('reports the liner, and says how long it takes to dissolve', () => {
-    const res = generateMoldMeshes(hourglass, LINED, wasm);
-    const info = moldSummary(res).liner!;
-    expect(info.castVolumeMl).toBeCloseTo((40 * 40 * 15 + 14 * 14 * 17 + 40 * 40 * 10) / 1000, 0);
-    // The PVA under the head reaches 13 mm in from its rim to the waist.
-    expect(info.thickestLinerMm).toBeGreaterThan(10);
-    expect(info.thickestLinerMm).toBeLessThan(20);
-    expect(info.dissolveHours).toBeGreaterThanOrEqual(Math.ceil(info.thickestLinerMm));
-    expect(info.steps.join(' ')).toMatch(/extruder 2/);
+  it('reports the liner, and distinguishes combined locked-shell vs insert dissolve times', () => {
+    const resInsert = generateMoldMeshes(hourglass, { ...LINED, linerConstruction: 'insert' }, wasm);
+    const infoInsert = moldSummary(resInsert).liner!;
+    expect(infoInsert.castVolumeMl).toBeCloseTo((40 * 40 * 15 + 14 * 14 * 17 + 40 * 40 * 10) / 1000, 0);
+    // Once the reusable holder lifts off, PVA under the head is ~13 mm in from its rim to the waist.
+    expect(infoInsert.thickestLinerMm).toBeGreaterThan(10);
+    expect(infoInsert.thickestLinerMm).toBeLessThan(20);
+    expect(infoInsert.dissolveHours).toBeGreaterThanOrEqual(Math.ceil(infoInsert.thickestLinerMm));
+
+    // In 'combined' mode the undercut locks the waterproof PLA shell on, so water enters only from the open mouth.
+    const resCombined = generateMoldMeshes(hourglass, LINED, wasm);
+    const infoCombined = moldSummary(resCombined).liner!;
+    expect(infoCombined.thickestLinerMm).toBeGreaterThan(infoInsert.thickestLinerMm * 2);
+    expect(infoCombined.dissolveHours).toBeGreaterThan(infoInsert.dissolveHours * 2);
+    expect(infoCombined.steps.join(' ')).toMatch(/extruder 2/);
+    expect(infoCombined.steps.join(' ')).toMatch(/open mouth/);
   });
 
   it('writes a 3MF with the shell on extruder 1 and the liner on extruder 2', () => {
@@ -244,9 +251,18 @@ describe('liner envelope', () => {
     expect(open).toBeGreaterThan(1.5);
     expect(open).toBeLessThan(2.6);
     // Cast a 1 mm skin over all of its top and water no longer gets in from
-    // there: the middle is then 3 mm from the bottom.
-    const cast = none.map((_, i) => (env[i] > 0 ? Float64Array.from([-1, 0]) : new Float64Array(0)));
-    expect(thickestPvaMm(env, cast, grid)).toBeGreaterThan(2.5);
+    // there: in 'insert' mode the middle is ~3 mm from the open bottom, while
+    // in 'combined' mode the waterproof shell blocks the bottom and sides so
+    // solvent must travel in from the exposed top perimeter rim (~5+ mm).
+    const cast = env.map((d, rIdx) => {
+      const r = Math.floor(rIdx / 21), c = rIdx % 21;
+      const inner = r >= 7 && r <= 13 && c >= 7 && c <= 13;
+      return d > 0 && inner ? Float64Array.from([-1, 0]) : new Float64Array(0);
+    });
+    const insertDist = thickestPvaMm(env, cast, grid, 'insert');
+    const combinedDist = thickestPvaMm(env, cast, grid, 'combined');
+    expect(insertDist).toBeGreaterThan(2.2);
+    expect(combinedDist).toBeGreaterThan(insertDist + 1.5);
   });
 });
 
@@ -356,10 +372,14 @@ describe('large >128 mm insert mold clearance, solid lid floor, pin sockets & ca
       sI.delete();
     }
 
-    // Lid holder retains its solid structural back floor (>90% of block area, 1 lump) and avoids soluble block waste.
+    // Cavity holder retains its solid structural back floor (>90% of block area), and lid insert is 1 captive piece with no floorCutZ split.
+    expect(bH.decompose()).toHaveLength(1);
+    expect(bH.slice(0.5).area()).toBeGreaterThan(res.moldWidthMm * res.moldDepthMm * 0.9);
     expect(tH.decompose()).toHaveLength(1);
-    expect(tH.slice(0.5).area()).toBeGreaterThan(res.moldWidthMm * res.moldDepthMm * 0.9);
-    expect(tI.volume()).toBeLessThan(partVol);
+    expect(tI.decompose()).toHaveLength(1);
+    expect(res.topHalf!.liner!.pieceTriangles).toBeUndefined();
+    // Lid holder's back lip is narrower than its pocket mouth, holding the 1-piece lid insert captive against blow-out.
+    expect(tH.slice(0.05).area()).toBeGreaterThan(tH.slice(res.topHalf!.partingZMm - 2).area() + 100);
 
     // Pin sockets in bottomHalf holder stay completely outside the pocket (4 distinct socket cavities near parting face).
     const bCx = (res.bottomHalf.bounds.minX + res.bottomHalf.bounds.maxX) / 2;
@@ -405,5 +425,156 @@ describe('large >128 mm insert mold clearance, solid lid floor, pin sockets & ca
     }, wasm);
     expect(res.success, res.error).toBe(true);
     expect(res.features!.pryNotches.every((n) => n.atMm[1] === 0 && Math.abs(n.atMm[0]) > 0)).toBe(true);
+  });
+
+  it('lines a flat-backed clamshell lid (lidIsBackingPlate) in both combined and insert modes with zero bare-shell contact or pocket flooding', async () => {
+    const MM = 0.001;
+    const frustum = wasm.Manifold.cylinder(20, 20, 14, 48, false);
+    const partVol = frustum.volume();
+    const pm = frustum.getMesh();
+    const verts: number[] = [];
+    for (let i = 0; i < pm.vertProperties.length; i += pm.numProp) {
+      verts.push(pm.vertProperties[i] * MM, pm.vertProperties[i + 1] * MM, pm.vertProperties[i + 2] * MM);
+    }
+    frustum.delete();
+    const frustumScene: SceneGraph = {
+      nodes: [{
+        id: 'fr',
+        name: 'frustum',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: verts, vertices: verts, faces: Array.from(pm.triVerts) } as unknown as SceneGeom],
+        joints: [],
+        children: [],
+      }],
+    };
+
+    const toM = (tris: Triangle3D[]) => {
+      const arr = new Float64Array(tris.length * 9);
+      tris.forEach((t, i) => arr.set([...t.a, ...t.b, ...t.c], i * 9));
+      const w = weldTriangles(arr, 0);
+      return new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: w.positions, triVerts: w.faces }));
+    };
+
+    for (const construction of ['combined', 'insert'] as const) {
+      const res = generateMoldMeshes(frustumScene, {
+        ...DEFAULT_MOLD_OPTIONS,
+        moldType: 'clamshell',
+        pullDirection: '+z',
+        sprueFeed: 'bottom',
+        wallMarginMm: 16,
+        dissolvableLiner: true,
+        linerConstruction: construction,
+        castMaterial: 'epoxy',
+      }, wasm);
+      expect(res.success, res.error).toBe(true);
+      expect(res.lidIsBackingPlate).toBe(true);
+
+      // Reconstruct the closed mold in the cavity half's frame and check direct CSG void & bare-shell contact.
+      const bOff = (res.bottomHalf.bounds.minX + res.bottomHalf.bounds.maxX) / 2;
+      const tOff = (res.topHalf!.bounds.minX + res.topHalf!.bounds.maxX) / 2;
+      const bShell = toM(res.bottomHalf.liner!.shell).translate([-bOff, 0, -res.bottomHalf.partingZMm]);
+      const bLiner = toM(res.bottomHalf.liner!.liner).translate([-bOff, 0, -res.bottomHalf.partingZMm]);
+      const tShell = toM(res.topHalf!.liner!.shell).translate([-tOff, 0, -res.topHalf!.partingZMm]).rotate([180, 0, 0]);
+      const tLiner = toM(res.topHalf!.liner!.liner).translate([-tOff, 0, -res.topHalf!.partingZMm]).rotate([180, 0, 0]);
+
+      // Lid liner must cover the entire r = 20 mm cavity mouth at z = 0 (+0.2 mm into the lid).
+      const mouthDisc = new wasm.CrossSection([
+        Array.from({ length: 48 }, (_, k) => [20 * Math.cos((k * Math.PI) / 24), 20 * Math.sin((k * Math.PI) / 24)] as [number, number]),
+      ], 'Positive');
+      const lidFaceLiner = tLiner.slice(0.2);
+      // Subtracting any vent holes on the mouth still leaves >90% of the r=20 disc lined by soluble liner, and 0% bare shell.
+      expect(lidFaceLiner.intersect(mouthDisc).area()).toBeGreaterThan(Math.PI * 20 * 20 * 0.9);
+      const lidFaceShell = tShell.slice(0.05);
+      expect(lidFaceShell.intersect(mouthDisc).area()).toBeLessThan(1e-4);
+      mouthDisc.delete();
+      lidFaceLiner.delete();
+      lidFaceShell.delete();
+
+      // Raw unsealed CSG cavity must not flood into the holder pocket or touch bare shell/holder!
+      const probe = wasm.Manifold.cube([res.moldWidthMm - 2, res.moldDepthMm - 2, res.bottomHalf.partingZMm + res.topHalf!.partingZMm - 0.2], false)
+        .translate([-(res.moldWidthMm - 2) / 2, -(res.moldDepthMm - 2) / 2, -res.bottomHalf.partingZMm + 0.1]);
+      const rawVoid = probe.subtract(bShell).subtract(bLiner).subtract(tShell).subtract(tLiner);
+      probe.delete();
+      const comps = rawVoid.decompose().sort((a, b) => b.volume() - a.volume());
+      rawVoid.delete();
+      const mainCast = comps[0];
+      // Cavity + sprue/runner/vents is ~19,500-20,800 mm³, never flooded by +5,000+ mm³ of holder clearance pocket!
+      expect(mainCast.volume()).toBeGreaterThan(partVol * 0.98);
+      expect(mainCast.volume()).toBeLessThan(partVol + 3000);
+      // Dilating mainCast by 0.05 mm along X/Y/Z must have ZERO intersection with bare bShell or tShell!
+      for (const shift of [[0, 0, 0.05], [0, 0, -0.05], [0.05, 0, 0], [-0.05, 0, 0], [0, 0.05, 0], [0, -0.05, 0]] as [number, number, number][]) {
+        const nudged = mainCast.translate(shift);
+        expect(nudged.intersect(bShell).volume(), `${construction} bShell touch`).toBeLessThan(1e-4);
+        expect(nudged.intersect(tShell).volume(), `${construction} tShell touch`).toBeLessThan(1e-4);
+        nudged.delete();
+      }
+      for (const c of comps) c.delete();
+      for (const m of [bShell, bLiner, tShell, tLiner]) m.delete();
+
+      const cast = await simulateCastFromMoldResult(res, { trimChannels: true });
+      expect(cast.success, cast.error).toBe(true);
+      expect(Math.abs(cast.castVolumeMm3 - partVol) / partVol).toBeLessThan(0.02);
+      expect(cast.warnings.some((w) => /another cavity|another pocket/i.test(w))).toBe(false);
+    }
+  }, 120_000);
+
+  it('keeps exact partingZMm on an upright torus insert mold so cast simulation never leaks the seam or emits 0 mm² roof warnings', async () => {
+    const MM = 0.001;
+    const torusCs = new wasm.CrossSection(
+      [Array.from({ length: 32 }, (_, k) => [18 + 6 * Math.cos((k * Math.PI) / 16), 6 * Math.sin((k * Math.PI) / 16)] as [number, number])],
+      'Positive',
+    );
+    const uprightTorus = wasm.Manifold.revolve(torusCs, 48).rotate([90, 0, 0]).translate([0, 0, 24]);
+    torusCs.delete();
+    const torusVol = uprightTorus.volume();
+    const pm = uprightTorus.getMesh();
+    const verts: number[] = [];
+    for (let i = 0; i < pm.vertProperties.length; i += pm.numProp) {
+      verts.push(pm.vertProperties[i] * MM, pm.vertProperties[i + 1] * MM, pm.vertProperties[i + 2] * MM);
+    }
+    uprightTorus.delete();
+    const torusScene: SceneGraph = {
+      nodes: [{
+        id: 'tor',
+        name: 'upright_torus',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: verts, vertices: verts, faces: Array.from(pm.triVerts) } as unknown as SceneGeom],
+        joints: [],
+        children: [],
+      }],
+    };
+
+    for (const construction of ['insert', 'combined'] as const) {
+      const res = generateMoldMeshes(torusScene, {
+        ...DEFAULT_MOLD_OPTIONS,
+        moldType: 'clamshell',
+        pullDirection: '+z',
+        wallMarginMm: 15,
+        dissolvableLiner: true,
+        linerConstruction: construction,
+        castMaterial: 'epoxy',
+      }, wasm);
+      expect(res.success, res.error).toBe(true);
+      expect(res.warnings.join(' ')).not.toMatch(/\b0 mm²\b/);
+
+      if (construction === 'insert') {
+        const cast = await simulateCastFromMoldResult(res, { trimChannels: true });
+        expect(cast.success, cast.error).toBe(true);
+        expect(cast.castVolumeMm3).toBeGreaterThan(torusVol * 0.95);
+      }
+    }
+  }, 120_000);
+
+  it('warns when wallMarginMm is too thin to leave a solid rigid holder or shell wall outside a thick liner', () => {
+    const res = generateMoldMeshes(hourglass, {
+      ...LINED,
+      wallMarginMm: 4,
+      linerSkinMm: 3.5,
+      linerConstruction: 'insert',
+    }, wasm);
+    expect(res.success, res.error).toBe(true);
+    expect(res.warnings.join(' ')).toMatch(/wall margin leaves under 1\.2 mm.*holder wall solid/);
   });
 });
