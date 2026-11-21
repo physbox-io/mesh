@@ -75,7 +75,14 @@ describe('Flag-in-the-Wind Aeroacoustics, Ripstop Fabric & MCP Parity', () => {
     expect(flagpole.deformMaterial).toBe('softMetal');
     expect(shackle).toBeDefined();
     expect(ensign?.cloth?.material).toBe('ripstop');
-    expect(ensign?.cloth?.pattern?.svg).toContain('<svg');
+    const ensignSvg = ensign?.cloth?.pattern?.svg ?? '';
+    expect(ensignSvg).toContain('<svg');
+    // Isotropic 920×920 square viewBox matching ClothLayer `span = max(0.92, 0.56) = 0.92` -> zero stretch on 920×560 (y ∈ [180, 740])
+    expect(ensignSvg).toContain('viewBox="0 0 920 920"');
+    expect(ensignSvg).toContain('id="pb-sil"');
+    expect(ensignSvg).toContain('physbox<tspan fill="#4f46e5">.</tspan>io');
+    expect(ensign?.cloth?.pattern?.tile).toBe(false);
+    expect(ensign?.cloth?.pattern?.scale).toBe(1);
     expect(burgee?.cloth?.material).toBe('canvas');
     expect(burgee?.cloth?.pattern?.svg).toContain('<svg');
 
