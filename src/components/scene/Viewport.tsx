@@ -20,6 +20,28 @@ import { SceneCanvas } from './SceneCanvas';
 import { ViewControls } from './ViewControls';
 
 /**
+ * Isolated Render-mode status badge so `usePathTraceStatus` phase transitions
+ * (`waiting` -> `building` -> `compiling` -> `rendering`) and 8-sample counter
+ * ticks never re-render `<Viewport>` or the `<SceneCanvas>` tree underneath.
+ */
+function PathTraceBadge({ isPlaying }: { isPlaying: boolean }) {
+  const pathTrace = useViewQuality((s) => s.pathTrace);
+  const pathTracePhase = usePathTraceStatus((s) => s.phase);
+  const pathTraceSamples = usePathTraceStatus((s) => s.samples);
+  if (!pathTrace) return null;
+  return (
+    <div className="absolute bottom-14 right-4 z-10 px-2 py-0.5 rounded text-[10px] font-medium tabular-nums bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 pointer-events-none">
+      {isPlaying ? 'Render paused while playing'
+        : pathTracePhase === 'waiting' ? 'Render: waiting for the view to settle'
+        : pathTracePhase === 'building' ? 'Render: preparing scene'
+        : pathTracePhase === 'compiling' ? 'Render: compiling the tracer'
+        : pathTracePhase === 'rendering' ? `Render: ${pathTraceSamples} samples`
+        : `Render: done, ${pathTraceSamples} samples`}
+    </div>
+  );
+}
+
+/**
  * The middle of the app: the 3D canvas and everything floating over it —
  * status pills, the axis legend, the view buttons, the sculpt and lattice
  * palettes, the DFM HUD and the note cards.
@@ -32,9 +54,6 @@ export function Viewport({ threeSceneRef, darkMode, doc, onImportSceneJson }: {
 }) {
   const { noteCards, setNoteCards, editingCardId, setEditingCardId } = doc;
   const axisCanvasRef = useRef<HTMLCanvasElement>(null);
-  const pathTrace = useViewQuality(s => s.pathTrace);
-  const pathTracePhase = usePathTraceStatus(s => s.phase);
-  const pathTraceSamples = usePathTraceStatus(s => s.samples);
   const openDocs = usePanels((s) => s.openDocs);
   const { isPlaying, isLoaded, mcpActiveCount, scadCompileCount } = useStore(useShallow((s) => ({
     isPlaying: s.isPlaying, isLoaded: s.isLoaded, mcpActiveCount: s.mcpActiveCount, scadCompileCount: s.scadCompileCount,
@@ -117,16 +136,7 @@ export function Viewport({ threeSceneRef, darkMode, doc, onImportSceneJson }: {
   
       <SceneCanvas threeSceneRef={threeSceneRef} axisCanvasRef={axisCanvasRef} darkMode={darkMode} onImportSceneJson={onImportSceneJson} />
 
-      {pathTrace && (
-        <div className="absolute bottom-14 right-4 z-10 px-2 py-0.5 rounded text-[10px] font-medium tabular-nums bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 pointer-events-none">
-          {isPlaying ? 'Render paused while playing'
-            : pathTracePhase === 'waiting' ? 'Render: waiting for the view to settle'
-            : pathTracePhase === 'building' ? 'Render: preparing scene'
-            : pathTracePhase === 'compiling' ? 'Render: compiling the tracer'
-            : pathTracePhase === 'rendering' ? `Render: ${pathTraceSamples} samples`
-            : `Render: done, ${pathTraceSamples} samples`}
-        </div>
-      )}
+      <PathTraceBadge isPlaying={isPlaying} />
 
       <ViewControls />
       <ReferenceImagesCard />

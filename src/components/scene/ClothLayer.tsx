@@ -77,6 +77,63 @@ function livePieceRgba(node: SceneNode | undefined, flex: FlexInfo, pieceName: s
   return flex.rgba;
 }
 
+/** Synced cloth slab geometry from `src` (`flexvert_xpos`), returning `true` only when vertex positions changed. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function syncClothSlabGeometry(
+  g: THREE.BufferGeometry,
+  flex: FlexInfo,
+  src: ArrayLike<number>,
+  sewn: [number, number[]][],
+  scratch: { p: Float32Array; n: Float32Array },
+): boolean {
+  const N = flex.vertnum;
+  if (src.length < 3 * (flex.vertadr + N)) return false;
+  const pos = g.attributes.position as THREE.BufferAttribute;
+  const arr = pos.array as Float32Array;
+  const { p, n } = scratch;
+  const o = 3 * flex.vertadr;
+  for (let i = 0; i < 3 * N; i++) p[i] = src[o + i];
+  // A stitched vertex is drawn where it and its partners meet, once they
+  // nearly have: before (pieces laid out apart, still being sewn) each is
+  // drawn where it is, or every seam edge was dragged to the midpoint.
+  for (const [v, ps] of sewn) {
+    const vx = src[o + 3 * v], vy = src[o + 3 * v + 1], vz = src[o + 3 * v + 2];
+    if (ps.some((q) => Math.hypot(src[3 * q] - vx, src[3 * q + 1] - vy, src[3 * q + 2] - vz) > MEET)) continue;
+    for (let k = 0; k < 3; k++) {
+      let sum = src[o + 3 * v + k];
+      for (const q of ps) sum += src[3 * q + k];
+      p[3 * v + k] = sum / (ps.length + 1);
+    }
+  }
+  // Area-weighted normals of the middle surface; the two faces half the thickness along them.
+  const prevNormal = g.attributes.normal as THREE.BufferAttribute | undefined;
+  n.fill(0);
+  for (let t = 0; t < flex.elems.length; t += 3) {
+    const a = 3 * flex.elems[t], b = 3 * flex.elems[t + 1], c = 3 * flex.elems[t + 2];
+    const ux = p[b] - p[a], uy = p[b + 1] - p[a + 1], uz = p[b + 2] - p[a + 2], vx = p[c] - p[a], vy = p[c + 1] - p[a + 1], vz = p[c + 2] - p[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const i of [a, b, c]) { n[i] += nx; n[i + 1] += ny; n[i + 2] += nz; }
+  }
+  const h = CLOTH_THICKNESS / 2;
+  let moved = !prevNormal;
+  for (let i = 0; i < N; i++) {
+    const l = Math.hypot(n[3 * i], n[3 * i + 1], n[3 * i + 2]) || 1;
+    for (let k = 0; k < 3; k++) {
+      const d = (n[3 * i + k] / l) * h;
+      const top = Math.fround(p[3 * i + k] + d);
+      const bot = Math.fround(p[3 * i + k] - d);
+      if (arr[3 * i + k] !== top || arr[3 * (i + N) + k] !== bot) moved = true;
+      arr[3 * i + k] = top;
+      arr[3 * (i + N) + k] = bot;
+    }
+  }
+  if (!moved) return false;
+  pos.needsUpdate = true;
+  g.computeVertexNormals();
+  g.computeBoundingSphere();
+  return true;
+}
+
 function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; node: SceneNode | undefined; selected: boolean; data: DataMirror; partners: Map<number, number[]> }) {
   const sep = flex.name.lastIndexOf('__');
   const pieceName = sep >= 0 ? flex.name.slice(sep + 2) : flex.name;
@@ -98,15 +155,19 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   const pattern = node?.cloth
     ? (pieceSpec?.pattern ?? (node.cloth.garment ? node.cloth.garment.pattern : node.cloth.pattern))
     : flex.pattern;
+  const patSvg = pattern?.svg ?? '';
+  const patTile = pattern?.tile !== false;
+  const patScale = pattern?.scale;
+  const patAngle = pattern?.angle;
   const geometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6 * N), 3));
     const uvAttr = new Float32Array(4 * N);
     const flatUv = flex.flat?.uv;
     if (flatUv && flatUv.length === N) {
-      const tile = pattern?.tile !== false;
-      const scale = Math.max(0.01, pattern?.scale ?? (tile ? 0.25 : 1));
-      const ang = ((pattern?.angle ?? 0) * Math.PI) / 180;
+      const tile = patTile;
+      const scale = Math.max(0.01, patScale ?? (tile ? 0.25 : 1));
+      const ang = ((patAngle ?? 0) * Math.PI) / 180;
       const ca = Math.cos(ang), sa = Math.sin(ang);
       let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
       for (const [u, v] of flatUv) { u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
@@ -140,7 +201,7 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
     }
     g.setIndex(index);
     return g;
-  }, [flex, N, pattern]);
+  }, [flex, N, patTile, patScale, patAngle]);
   // Mutable work buffers and the mesh as drawn, reached through refs: what
   // useMemo returns is not to be written to after render.
   const scratch = useRef<{ p: Float32Array; n: Float32Array } | null>(null);
@@ -177,16 +238,16 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
   const invalidate = useThree((s) => s.invalidate);
   // Live colour updates when no SVG print overrides `material.color`.
   useEffect(() => {
-    if (!pattern?.svg) {
+    if (!patSvg) {
       material.color.setRGB(r, gCol, b);
       invalidate();
     }
-  }, [material, r, gCol, b, pattern?.svg, invalidate]);
+  }, [material, r, gCol, b, patSvg, invalidate]);
   // A print: one texture per print and colour, shared by every panel wearing it.
   useEffect(() => {
-    if (!pattern?.svg || typeof document === 'undefined') return;
+    if (!patSvg || typeof document === 'undefined') return;
     const baseColor = [r, gCol, b, alpha];
-    const release = acquirePrintTexture(pattern, baseColor, (tex) => {
+    const release = acquirePrintTexture({ svg: patSvg, tile: patTile }, baseColor, (tex) => {
       material.map = tex;
       material.color.set(0xffffff);
       material.needsUpdate = true;
@@ -199,61 +260,71 @@ function ClothPiece({ flex, node, selected, data, partners }: { flex: FlexInfo; 
       material.needsUpdate = true;
       invalidate();
     };
-  }, [pattern, r, gCol, b, alpha, material, invalidate]);
+  }, [patSvg, patTile, r, gCol, b, alpha, material, invalidate]);
 
   // Positions before the first frame too, so a paused scene shows its cloth.
   // Read from the store, not the prop: after a rebuild this mounts with the
   // new layout before the prop catches up with the new buffers, and filled
   // from the old ones it drew nothing until the next render.
   const filled = useRef(false);
-  const sync = () => {
-    const src = (useStore.getState().data as DataMirror | null)?.flexvert_xpos ?? data.flexvert_xpos;
-    if (!src || src.length < 3 * (flex.vertadr + N)) return;
+  const lastSyncRef = useRef<{
+    geometry: THREE.BufferGeometry;
+    trimsKey: unknown;
+    flex: FlexInfo;
+    sewn: [number, number[]][];
+    src: ArrayLike<number>;
+    time: number;
+    zips: DataMirror['clothZips'];
+  } | null>(null);
+  const sync = (): boolean => {
+    const liveData = (useStore.getState().data as DataMirror | null) ?? data;
+    const src = liveData?.flexvert_xpos ?? data.flexvert_xpos;
+    if (!src || src.length < 3 * (flex.vertadr + N)) return false;
     const g = meshRef.current?.geometry;
-    if (!g) return;
+    if (!g) return false;
+    const time = liveData?.time ?? data.time ?? -1;
+    const zips = liveData?.clothZips ?? data.clothZips;
+    const prev = lastSyncRef.current;
+    // Fast O(1) short-circuit when re-rendering a paused scene whose buffers,
+    // geometry, trims, and timestamp are identical to the last synced commit.
+    if (
+      filled.current &&
+      prev &&
+      prev.geometry === g &&
+      prev.trimsKey === trims.objects &&
+      prev.flex === flex &&
+      prev.sewn === sewn &&
+      prev.src === src &&
+      prev.time === time &&
+      prev.zips === zips
+    ) {
+      return false;
+    }
     filled.current = true;
     if (scratch.current?.p.length !== 3 * N) scratch.current = { p: new Float32Array(3 * N), n: new Float32Array(3 * N) };
-    const pos = g.attributes.position as THREE.BufferAttribute;
-    const arr = pos.array as Float32Array, { p, n } = scratch.current;
-    const o = 3 * flex.vertadr;
-    for (let i = 0; i < 3 * N; i++) p[i] = src[o + i];
-    // A stitched vertex is drawn where it and its partners meet, once they
-    // nearly have: before (pieces laid out apart, still being sewn) each is
-    // drawn where it is, or every seam edge was dragged to the midpoint.
-    for (const [v, ps] of sewn) {
-      const vx = src[o + 3 * v], vy = src[o + 3 * v + 1], vz = src[o + 3 * v + 2];
-      if (ps.some((q) => Math.hypot(src[3 * q] - vx, src[3 * q + 1] - vy, src[3 * q + 2] - vz) > MEET)) continue;
-      for (let k = 0; k < 3; k++) {
-        let sum = src[o + 3 * v + k];
-        for (const q of ps) sum += src[3 * q + k];
-        p[3 * v + k] = sum / (ps.length + 1);
-      }
-    }
-    // Area-weighted normals of the middle surface; the two faces half the thickness along them.
-    n.fill(0);
-    for (let t = 0; t < flex.elems.length; t += 3) {
-      const a = 3 * flex.elems[t], b = 3 * flex.elems[t + 1], c = 3 * flex.elems[t + 2];
-      const ux = p[b] - p[a], uy = p[b + 1] - p[a + 1], uz = p[b + 2] - p[a + 2], vx = p[c] - p[a], vy = p[c + 1] - p[a + 1], vz = p[c + 2] - p[a + 2];
-      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      for (const i of [a, b, c]) { n[i] += nx; n[i + 1] += ny; n[i + 2] += nz; }
-    }
-    const h = CLOTH_THICKNESS / 2;
-    for (let i = 0; i < N; i++) {
-      const l = Math.hypot(n[3 * i], n[3 * i + 1], n[3 * i + 2]) || 1;
-      for (let k = 0; k < 3; k++) { const d = (n[3 * i + k] / l) * h; arr[3 * i + k] = p[3 * i + k] + d; arr[3 * (i + N) + k] = p[3 * i + k] - d; }
-    }
-    pos.needsUpdate = true;
-    g.computeVertexNormals();
-    g.computeBoundingSphere();
-    trims.place(p, n, h);
+    const { p, n } = scratch.current;
+    const geomChanged = syncClothSlabGeometry(g, flex, src, sewn, scratch.current);
+    const trimsChanged = trims.place(p, n, CLOTH_THICKNESS / 2, zips);
+    lastSyncRef.current = {
+      geometry: g,
+      trimsKey: trims.objects,
+      flex,
+      sewn,
+      src,
+      time,
+      zips,
+    };
+    return geomChanged || trimsChanged;
   };
   // A layout effect, so the new geometry is filled in the commit that made it.
   // Any rebuild hands this a new flex, and from a passive effect a frame could
   // land first: the cloth gone and its trims a box round the legs.
-  // And a frame asked for once filled: on demand, nothing else asks for one
-  // (the cloth stayed vanished until the next pointer event).
-  // Every render, on purpose.
-  useLayoutEffect(() => { sync(); if (filled.current) invalidate(); });
+  // And a frame asked for only when geometry or trims actually changed: while
+  // paused, unrelated React re-renders must leave buffer versions untouched so
+  // PathTracedView does not treat them as body movement and restart settling.
+  useLayoutEffect(() => {
+    if (sync()) invalidate();
+  });
   const lastTime = useRef(-1);
   useFrame(() => {
     if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;

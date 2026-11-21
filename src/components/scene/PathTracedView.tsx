@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { WebGLPathTracer, ShapedAreaLight, DenoiseMaterial } from 'three-gpu-pathtracer';
 import { useStore } from '../../store/useStore';
@@ -182,6 +183,7 @@ export function PathTracedView({ background }: { background: string }) {
     building: false,
     instanceMaterials: [] as THREE.Material[],
     ownedTextures: [] as THREE.Texture[],
+    ownedGeometries: [] as THREE.BufferGeometry[],
     /** Index into TILE_STEPS; it only ever goes up, for as long as Render mode is on. */
     tileStep: 0,
     /** When the last sample was drawn, if it was drawn in the frame before this one. */
@@ -217,6 +219,8 @@ export function PathTracedView({ background }: { background: string }) {
       s.instanceMaterials = [];
       for (const t of s.ownedTextures) t.dispose();
       s.ownedTextures = [];
+      for (const g of s.ownedGeometries) g.dispose();
+      s.ownedGeometries = [];
       s.sceneDirty = true;
       s.buildArmed = false;
       s.building = false;
@@ -305,9 +309,15 @@ export function PathTracedView({ background }: { background: string }) {
       s.buildArmed = false;
       const nextMaterials: THREE.Material[] = [];
       const nextTextures: THREE.Texture[] = [];
-      const disposeBatch = (materials: THREE.Material[], textures: THREE.Texture[]) => {
+      const nextGeometries: THREE.BufferGeometry[] = [];
+      const disposeBatch = (
+        materials: THREE.Material[],
+        textures: THREE.Texture[],
+        geometries: THREE.BufferGeometry[],
+      ) => {
         for (const m of materials) m.dispose();
         for (const t of textures) t.dispose();
+        for (const g of geometries) g.dispose();
       };
       const fail = (e: unknown) => {
         // A geometry the tracer cannot take would otherwise throw on every
@@ -331,32 +341,34 @@ export function PathTracedView({ background }: { background: string }) {
           activePreset,
           nextMaterials,
           nextTextures,
+          nextGeometries,
         );
         const started = performance.now();
         s.building = true;
         pathTracer.setSceneAsync(s.traced, camera).then(
           () => {
             if (engineRef.current !== engine) {
-              disposeBatch(nextMaterials, nextTextures);
+              disposeBatch(nextMaterials, nextTextures, nextGeometries);
               return;
             }
-            // Only dispose the previous scene's materials & equirect textures AFTER
-            // setSceneAsync has bound the new backgroundMap / envMapInfo on the GPU.
-            disposeBatch(s.instanceMaterials, s.ownedTextures);
+            // Only dispose the previous scene's materials, equirect textures & baked geometries
+            // AFTER setSceneAsync has bound the new backgroundMap / envMapInfo / BVH on the GPU.
+            disposeBatch(s.instanceMaterials, s.ownedTextures, s.ownedGeometries);
             s.instanceMaterials = nextMaterials;
             s.ownedTextures = nextTextures;
+            s.ownedGeometries = nextGeometries;
             engine.glowScale = nextGlowScale;
             console.info(`[PathTracedView] scene built in ${Math.round(performance.now() - started)} ms`);
             s.building = false;
             invalidate();
           },
           (e) => {
-            disposeBatch(nextMaterials, nextTextures);
+            disposeBatch(nextMaterials, nextTextures, nextGeometries);
             if (engineRef.current === engine) fail(e);
           },
         );
       } catch (e) {
-        disposeBatch(nextMaterials, nextTextures);
+        disposeBatch(nextMaterials, nextTextures, nextGeometries);
         s.building = false;
         fail(e);
         return;
@@ -470,12 +482,15 @@ function tracedMaterial(live: THREE.MeshStandardMaterial, owned: THREE.Material[
   return material;
 }
 
-/** The bodies and realistic background scenery: visible standard-material meshes that cast shadows or mark `tracedScenery`. */
-function collectBodies(scene: THREE.Scene): THREE.Mesh[] {
+/** The bodies, cloth trims, and realistic background scenery: visible standard-material meshes that cast shadows or mark `tracedScenery` / `tracedTrim`. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function collectBodies(scene: THREE.Scene): THREE.Mesh[] {
   const bodies: THREE.Mesh[] = [];
   scene.traverseVisible((o) => {
     const mesh = o as THREE.Mesh;
-    if (!mesh.isMesh || (!mesh.castShadow && !mesh.userData?.tracedScenery)) return;
+    if (!mesh.isMesh || (!mesh.castShadow && !mesh.userData?.tracedScenery && !mesh.userData?.tracedTrim)) return;
+    const instanced = mesh as THREE.InstancedMesh;
+    if (instanced.isInstancedMesh && instanced.count <= 0) return;
     const material = mesh.material as THREE.MeshStandardMaterial;
     if (Array.isArray(mesh.material) || !material.isMeshStandardMaterial) return;
     if (material.wireframe || material.opacity <= 0) return;
@@ -504,7 +519,8 @@ function materialKey(material: THREE.Material): number {
  * Everything about the bodies that changes the picture, as numbers: where each
  * one is, which geometry and material it draws with, and their versions.
  */
-function sceneSignature(bodies: THREE.Mesh[]): number[] {
+// eslint-disable-next-line react-refresh/only-export-components
+export function sceneSignature(bodies: THREE.Mesh[]): number[] {
   const sig: number[] = [];
   for (const mesh of bodies) {
     sig.push(...mesh.matrixWorld.elements);
@@ -512,7 +528,19 @@ function sceneSignature(bodies: THREE.Mesh[]): number[] {
     const color = mesh.geometry.getAttribute('color') as THREE.BufferAttribute | undefined;
     sig.push(mesh.geometry.id, position ? (position as THREE.BufferAttribute).version : -1, color ? color.version : -1);
     const material = mesh.material as THREE.MeshStandardMaterial;
-    sig.push(materialKey(material), material.version, material.color.r, material.color.g, material.color.b, material.opacity, material.emissiveIntensity);
+    const mapKey = material.map ? material.map.version : -1;
+    const normalKey = material.normalMap ? material.normalMap.version : -1;
+    sig.push(
+      materialKey(material),
+      material.version,
+      mapKey,
+      normalKey,
+      material.color.r,
+      material.color.g,
+      material.color.b,
+      material.opacity,
+      material.emissiveIntensity,
+    );
     const instanced = mesh as THREE.InstancedMesh;
     if (instanced.isInstancedMesh) {
       sig.push(instanced.count, instanced.instanceMatrix.version, instanced.instanceColor?.version ?? -1);
@@ -538,10 +566,11 @@ function cameraSignature(camera: THREE.Camera): number[] {
  * the camera moved and started the wait over. The ids and versions in a
  * signature are integers, so a change in one is never inside the tolerance.
  */
-const SCENE_TOLERANCE = 1e-6;
+export const SCENE_TOLERANCE = 1e-6;
 const CAMERA_TOLERANCE = 1e-5;
 
-function sameSignature(a: number[], b: number[], tolerance: number): boolean {
+// eslint-disable-next-line react-refresh/only-export-components
+export function sameSignature(a: number[], b: number[], tolerance: number): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > tolerance) return false;
   return true;
@@ -553,7 +582,40 @@ const _instanceColor = new THREE.Color();
 const _keyPosition = new THREE.Vector3();
 const _keyTarget = new THREE.Vector3();
 
-function buildTracedScene(
+/**
+ * Cloth meshes bind their metre-scaled weave `normalMap` to `channel = 1` (`uv1`),
+ * whereas `three-gpu-pathtracer` samples `normalMap` exclusively on `ATTR_UV` (`uv`).
+ * When a material has no `map` using `uv` (or when `uv1` carries the real weave
+ * layout for an unprinted cloth panel), promote `uv1` onto a zero-copy-shared
+ * `BufferGeometry`'s `uv` attribute so weave normals trace at true scale instead
+ * of stretching a single 12 mm knit/twill tile across an entire garment panel.
+ */
+function withTracedUvChannel(
+  geometry: THREE.BufferGeometry,
+  material: THREE.MeshStandardMaterial,
+  ownedGeometries: THREE.BufferGeometry[],
+): THREE.BufferGeometry {
+  if (!material.map && material.normalMap && material.normalMap.channel === 1) {
+    const uv1 = geometry.getAttribute('uv1');
+    if (uv1) {
+      const g = new THREE.BufferGeometry();
+      g.setIndex(geometry.index);
+      for (const [name, attr] of Object.entries(geometry.attributes)) {
+        if (name !== 'uv') g.setAttribute(name, attr);
+      }
+      g.setAttribute('uv', uv1);
+      for (const group of geometry.groups) g.addGroup(group.start, group.count, group.materialIndex);
+      g.boundingBox = geometry.boundingBox ? geometry.boundingBox.clone() : null;
+      g.boundingSphere = geometry.boundingSphere ? geometry.boundingSphere.clone() : null;
+      ownedGeometries.push(g);
+      return g;
+    }
+  }
+  return geometry;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildTracedScene(
   live: THREE.Scene,
   bodies: THREE.Mesh[],
   floor: THREE.Mesh,
@@ -561,6 +623,7 @@ function buildTracedScene(
   backgroundPreset: BackgroundId,
   instanceMaterials: THREE.Material[],
   ownedTextures: THREE.Texture[],
+  ownedGeometries: THREE.BufferGeometry[] = [],
 ): THREE.Scene {
   const traced = new THREE.Scene();
   const realisticBackdrop = backgroundPreset !== 'studio';
@@ -608,6 +671,15 @@ function buildTracedScene(
 
   for (const mesh of bodies) {
     let material = tracedMaterial(mesh.material as THREE.MeshStandardMaterial, instanceMaterials);
+    // Decorative stitch runs carry `castShadow = false` on the live mesh; propagate that onto
+    // the traced material (`sample 14 .g`) so hundreds of thread dashes render with crisp PBR
+    // shading without casting noisy micro-shadows.
+    if (!mesh.castShadow && (material as THREE.MeshStandardMaterial & { castShadow?: boolean }).castShadow !== false) {
+      const own = material.clone();
+      (own as THREE.MeshStandardMaterial & { castShadow?: boolean }).castShadow = false;
+      instanceMaterials.push(own);
+      material = own;
+    }
     const isScenery = Boolean(mesh.userData?.tracedScenery);
     if (isScenery && tuning) {
       const own = material.clone();
@@ -621,15 +693,44 @@ function buildTracedScene(
       instanceMaterials.push(own);
       material = own;
     }
-    const tracedGeo =
+    // When an SVG print `map` occupies `uv` while a metre-scaled weave `normalMap` asks for `uv1`
+    // (`channel === 1`), `three-gpu-pathtracer` only samples `ATTR_UV`, which would stretch one
+    // tiny weave tile across the whole print motif; drop `normalMap` on the traced clone in that case.
+    if (material.map && material.normalMap && material.normalMap.channel === 1) {
+      const own = material.clone();
+      own.normalMap = null;
+      instanceMaterials.push(own);
+      material = own;
+    }
+    const baseGeo =
       isScenery && tuning
         ? withSceneryColorTrim(mesh.geometry, tuning.sceneryDesaturate)
         : withRgbaColors(mesh.geometry);
+    const tracedGeo = withTracedUvChannel(baseGeo, material, ownedGeometries);
 
     const instanced = mesh as THREE.InstancedMesh;
     if (!instanced.isInstancedMesh) {
       place(tracedGeo, material, mesh.matrixWorld);
       continue;
+    }
+    // Uncoloured InstancedMeshes with many uniform instances (zipper teeth, decorative stitch runs,
+    // studs) merge cleanly into a single static BufferGeometry so StaticGeometryGenerator doesn't
+    // pay O(N) per-mesh sort/diff/merge overhead on hundreds of tiny trims.
+    if (!instanced.instanceColor && instanced.count > 8) {
+      const parts: THREE.BufferGeometry[] = [];
+      for (let i = 0; i < instanced.count; i++) {
+        instanced.getMatrixAt(i, _instanceMatrix);
+        const clone = tracedGeo.clone();
+        clone.applyMatrix4(_instanceMatrix);
+        parts.push(clone);
+      }
+      const merged = mergeGeometries(parts, false);
+      for (const p of parts) p.dispose();
+      if (merged) {
+        ownedGeometries.push(merged);
+        place(merged, material, instanced.matrixWorld);
+        continue;
+      }
     }
     // The tracer reads plain meshes only, so each instance becomes one, with
     // its instance colour folded into a material of its own.
