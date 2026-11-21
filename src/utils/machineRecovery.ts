@@ -179,11 +179,12 @@ export abstract class RecoveryMachine extends JobMachine {
       return { ok: false, message: blocked };
     }
 
-    const plan = planResume(this.program.map((l) => l.code), fromLine, {
+    const from = this.startForTool(fromLine);
+    const plan = planResume(this.program.map((l) => l.code), from, {
       ...options,
       isLaser: this.jobIsLaser(options?.isLaser),
       currentZ: this.state.wpos.z,
-      arrivingAtPause: this.lineIsPause(fromLine),
+      arrivingAtPause: this.lineIsPause(from),
     });
     const preamble = prepareJobLines(plan.preamble.join('\n'));
     const tail = this.program.slice(plan.fromLine);
@@ -264,11 +265,32 @@ export abstract class RecoveryMachine extends JobMachine {
    */
   public previewResume(fromLine: number, options?: ResumeOptions) {
     if (this.program.length === 0) return null;
-    return planResume(this.program.map((l) => l.code), fromLine, {
+    const from = this.startForTool(fromLine);
+    return planResume(this.program.map((l) => l.code), from, {
       ...options,
       isLaser: this.jobIsLaser(options?.isLaser),
-      arrivingAtPause: this.lineIsPause(fromLine),
+      arrivingAtPause: this.lineIsPause(from),
     });
+  }
+
+  /**
+   * Where a run from `fromLine` has to start so that it cuts with the right
+   * bit: `fromLine` itself, unless the tool change that opens its section asks
+   * for a different T than the one Z was zeroed with. Then it starts at that
+   * change, which stops for the swap and its re-zero like any other, instead
+   * of cutting the section with the wrong bit at the wrong length. When the
+   * bit Z describes is not known this session, the operator's zero stands.
+   */
+  protected startForTool(fromLine: number): number {
+    const { zeroedWith } = this.toolsInUse();
+    if (zeroedWith === null || this.lineIsPause(fromLine)) return fromLine;
+    for (let i = Math.min(fromLine, this.program.length) - 1; i >= 0; i--) {
+      const code = this.program[i].code;
+      if (classifyJobLine(code) !== 'tool-change') continue;
+      const wanted = /\bT0*(\d+)\b/i.exec(code.replace(/\([^)]*\)|;.*$/g, ''));
+      return wanted && parseInt(wanted[1], 10) !== zeroedWith ? i : fromLine;
+    }
+    return fromLine;
   }
 
   /**

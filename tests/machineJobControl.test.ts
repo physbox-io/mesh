@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { webSerialManager } from '../src/utils/webSerialManager';
+import { prepareJobLines } from '../src/utils/machineJobLines';
 
 /**
  * A GRBL board that acknowledges everything and records what it was sent.
@@ -778,6 +779,50 @@ describe('getting clear of the work for a tool change', () => {
     // Nothing but the cycle start: a retract here would lift out of a cut the
     // machine is about to carry straight on with.
     expect(fake.sent.slice(atPause).filter((l) => l.length > 1)).toHaveLength(0);
+  });
+});
+
+/*
+ * A run from a line in another bit's section than the one Z was zeroed with
+ * starts at that section's tool change, so the swap and its re-zero come first
+ * rather than the section being cut with the wrong bit at the wrong length.
+ */
+describe('a run from a line in another bit\'s section', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+  const mgr = () =>
+    webSerialManager as unknown as { program: unknown[]; zeroedWithTool: number | null };
+  const PROGRAM = [
+    'G21', 'G90', 'T1 M6', 'M3 S18000', 'G0 Z5', 'G1 Z-2 F300', 'G1 X10 F600', 'G1 X20', 'G0 Z5',
+    'T2 M6', 'M3 S16000', 'G0 X30 Y0', 'G1 Z-1 F200', 'G1 X40 F600', 'G1 X50', 'G1 X60', 'G0 Z5', 'M5',
+  ];
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+    mgr().program = prepareJobLines(PROGRAM.join('\n'));
+  });
+  afterEach(async () => {
+    await webSerialManager.cancelJob();
+    webSerialManager.clearResumePoint();
+    mgr().zeroedWithTool = null;
+    fake.detach();
+  });
+
+  it('starts at that section\'s tool change when Z was zeroed with the other bit', async () => {
+    mgr().zeroedWithTool = 1;
+    const res = webSerialManager.resumeFromLine(PROGRAM.indexOf('G1 X50'));
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain(`line ${PROGRAM.indexOf('T2 M6')}`);
+    await advance(30);
+    expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
+    // Nothing of T2's section was cut before the change.
+    expect(fake.lines()).not.toContain('G1 X40 F600');
+    expect(fake.lines()).not.toContain('G1 X50');
+  });
+
+  it('starts at the line itself when the bit Z describes is the one it needs', async () => {
+    mgr().zeroedWithTool = 2;
+    const res = webSerialManager.resumeFromLine(PROGRAM.indexOf('G1 X50'));
+    expect(res.message).toContain(`line ${PROGRAM.indexOf('G1 X50')}`);
   });
 });
 
