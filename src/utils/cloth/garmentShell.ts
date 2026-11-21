@@ -80,6 +80,9 @@ const BLEND_REACH = 7 * BLEND;
 const BRIDGE = 0.04;
 const HUG_GIVE = 0.4;
 
+/** Shell area, m^2, past which low-curvature regions coarsen toward cloth spacing. */
+const COARSEN_FROM_M2 = 4;
+
 export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, layer = 0): GarmentShell {
   const plan = garmentPlan(draft, form, layer);
   const L = bodyLandmarks(form);
@@ -328,7 +331,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   const net = surfaceNet(grid, field);
   const fieldAt = (p: number[]) => sampleGrid(grid, field, p);
   const fine = { points: net.points, tris: largestPieces(net.points.length, net.tris) };
-  // On sweeping flared/trained garments (surface area >> 2.5 m^2), let low-curvature
+  // On sweeping flared/trained garments (surface area past COARSEN_FROM_M2), let low-curvature
   // regions coarsen toward cloth spacing (~36 mm) while keeping curved regions fine.
   let fineArea = 0;
   for (let t = 0; t < fine.tris.length; t += 3) {
@@ -337,7 +340,10 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
     fineArea += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) * 0.5;
   }
-  const maxEdge = fineArea > 2.5 ? Math.min(0.036, H_MAX * Math.sqrt(fineArea / 2.5)) : H_MAX;
+  // Only past COARSEN_FROM_M2: a jacket (2.8 m^2) or a shirt is everyday wear,
+  // and its collar and stand, tacked a millimetre apart, cross each other on a
+  // shell coarsened by even 6%. A gown with a train (6.2 m^2) is what this is for.
+  const maxEdge = fineArea > COARSEN_FROM_M2 ? Math.min(0.036, H_MAX * Math.sqrt(fineArea / 2.5)) : H_MAX;
   const want = fine.points.map((p) => curvatureSize(fieldAt, p, H, H, maxEdge));
   {
     const nbr: number[][] = fine.points.map(() => []);
