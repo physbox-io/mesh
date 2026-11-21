@@ -54,8 +54,13 @@ export function patternSteps(summary: CastSummary | null, addGating: boolean, lo
         : 'Print the pattern and smooth layer lines.',
       'Place the pattern parting-face down in the drag on a molding board and dust with parting powder.',
       'Ram sand firmly over the pattern, strike off flat, and flip the drag over.',
-      'Dust the parting face, place the cope on top, and ram full' + (addGating ? ' around the printed sprue and riser.' : ' around sprue and riser pins.'),
-      'Lift the cope, draw the pattern straight out, cut a gate if needed, and add vent holes.',
+      'Dust the parting face, place the cope on top, and ram full' +
+        (addGating
+          ? summary && summary.copeDragHeightMm > 0
+            ? ` around the printed sprue and riser, striking off flush with the ${round(summary.copeDragHeightMm / 2)} mm cope.`
+            : ' around the printed sprue and riser.'
+          : ' around sprue and riser pins.'),
+      'Lift the cope, draw the pattern straight out' + (addGating ? ', and bell the top of the sprue into a pouring funnel.' : ', cut a gate, and add vent holes.'),
       'Close and weight or clamp the flask halves together.',
       summary
         ? `Melt and pour ~${round(summary.pourWeightG)} g of ${metalLabel.toLowerCase()} at ~${summary.pourC}°C steadily keeping the sprue full.`

@@ -139,6 +139,8 @@ export const castCommands: McpCommands = {
         ? { sprueAtMm: [msg.sprueAtMm[0], msg.sprueAtMm[1]] as [number, number] } : {}),
       ...(typeof msg.riserDiaMm === 'number' ? { riserDiaMm: msg.riserDiaMm } : {}),
       ...(typeof msg.addRiser === 'boolean' ? { addRiser: msg.addRiser } : {}),
+      ...(typeof msg.copeDragHeightMm === 'number' && Number.isFinite(msg.copeDragHeightMm) && msg.copeDragHeightMm >= 0
+        ? { copeDragHeightMm: msg.copeDragHeightMm } : {}),
       // The Sand tab starts with 2° on the pattern; Lost PLA with none.
       draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : msg.method === 'lost-pla' ? 0 : DEFAULT_TAB_DRAFT.sand,
       ...(typeof msg.shrinkPercent === 'number' && msg.shrinkPercent >= 0 ? { shrinkPercent: msg.shrinkPercent } : {}),

@@ -91,6 +91,14 @@ export interface CastOptions {
   /** A riser feeds shrinkage; leave it off only for the thinnest, flattest parts. */
   addRiser: boolean;
   /**
+   * Sand: total Cope + Drag flask height, mm (assuming cope and drag are equal
+   * height, e.g. 100 mm for two 50 mm frames). 0 sizes the sprue from the part
+   * height (`max(part, 20) + 15 mm`); when > 0, the sprue reaches the top of
+   * the cope (`partingZ + copeDragHeightMm / 2`) and warns if the part or riser
+   * does not fit inside the cope/drag halves.
+   */
+  copeDragHeightMm: number;
+  /**
    * Draft on the printed pattern, degrees, tapered from the parting plane. The
    * model is left as it is. Ignored when Prepare for Casting has already put
    * draft into the model, so it is never applied twice.
@@ -113,6 +121,7 @@ export const DEFAULT_CAST_OPTIONS: CastOptions = {
   sprueDiaMm: 0,
   riserDiaMm: 0,
   addRiser: true,
+  copeDragHeightMm: 100,
   draftDeg: 0,
 };
 
@@ -143,13 +152,16 @@ export interface CastSummary {
   castWeightG: number;
   /** Plus the gating, which is remelted; a rough guide to how much to pour. */
   pourWeightG: number;
-  /**
-   * Volume of the sprue, runner, gate and riser actually printed, mm³ — the
+  /** Volume of the sprue, runner, gate and riser actually printed, mm³ — the
    * metal that fills the channels rather than the part. Carried separately so
    * the pour weight can be checked against the rig instead of taken on faith.
    */
   gatingVolumeMm3: number;
   sprueDiaMm: number;
+  /** Sand: total height of the printed down-sprue from Z = 0, mm. */
+  sprueHeightMm: number;
+  /** Sand: total Cope + Drag flask height planned for (0 when auto-sized from part), mm. */
+  copeDragHeightMm: number;
   riserDiaMm: number;
   /**
    * Where the metal enters the casting, in pattern coordinates (plan, mm from
@@ -521,6 +533,8 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       pourWeightG: 0,
       gatingVolumeMm3: 0,
       sprueDiaMm: 0,
+      sprueHeightMm: 0,
+      copeDragHeightMm: 0,
       riserDiaMm: 0,
       gateAtMm: { x: 0, y: 0 },
       ventsMm: [],
@@ -769,9 +783,31 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // five-gram ring meant more metal in the gating than in three castings, and
   // an 8 mm scar on a 5 mm band.
 
-  // The head the metal falls through: the top of the sprue above the parting
-  // plane. Everything below is driven by it, so it is worked out first.
-  const sprueTop = Math.max(gPartH, 20) + 15;
+  // The plane in pattern coordinates: `parting` is measured on the part, and
+  // everything printed has been grown away from it by the shrink allowance.
+  const partingZ = parting * grow;
+  // The head the metal falls through: in sand with a Cope + Drag height set,
+  // the top of the cope sits half that total height above the parting plane
+  // (e.g. 50 mm cope + 50 mm drag = 100 mm total), so the printed sprue reaches
+  // flush with the top of the cope for striking off. When 0 (or Lost PLA),
+  // sized from the part height (`max(gPartH, 20) + 15`).
+  const halfFlaskMm = !lostPla && opts.copeDragHeightMm > 0 ? opts.copeDragHeightMm / 2 : 0;
+  const autoSprueTop = Math.max(gPartH, 20) + 15;
+  const sprueTop = halfFlaskMm > 0 ? partingZ + halfFlaskMm : autoSprueTop;
+  if (halfFlaskMm > 0) {
+    const partAboveParting = gPartH - partingZ;
+    const minSandCoverMm = 10;
+    if (partingZ > halfFlaskMm - minSandCoverMm) {
+      warnings.push(
+        `Drag depth (${Math.round(halfFlaskMm)} mm) leaves ${Math.max(0, Math.round(halfFlaskMm - partingZ))} mm of sand under the ${Math.round(partingZ)} mm lower section; use a deeper flask (${Math.ceil((partingZ + minSandCoverMm) * 2)} mm+ Cope + Drag) or lower the parting plane.`
+      );
+    }
+    if (partAboveParting > halfFlaskMm - minSandCoverMm) {
+      warnings.push(
+        `Cope height (${Math.round(halfFlaskMm)} mm) leaves ${Math.max(0, Math.round(halfFlaskMm - partAboveParting))} mm of sand over the ${Math.round(partAboveParting)} mm upper section; use a taller flask (${Math.ceil((partAboveParting + minSandCoverMm) * 2)} mm+ Cope + Drag) or raise the parting plane.`
+      );
+    }
+  }
 
   // Sprue choke, from the fill rate rather than a floor. Continuity at the
   // choke: mass / (density · time) = area · velocity, with the velocity from
@@ -972,9 +1008,6 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   const riserStand = standOff(riserPt, -awayX, -awayY, gap + riserDia / 2);
   const riserStandAt = riserStand.stand;
 
-  // The plane in pattern coordinates: `parting` is measured on the part, and
-  // everything printed has been grown away from it by the shrink allowance.
-  const partingZ = parting * grow;
   const gateLen = Math.min(5, Math.max(2, sprueDia));
   let gatingVolumeMm3 = 0;
   // The top of the printed rig, whatever the route: the flask has to swallow it.
@@ -1036,7 +1069,15 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       // 100 g of dead aluminium under its riser, and a warning that the gating
       // outweighed the part. Below the neck it is a 45° cone onto a slim post,
       // which still prints standing on the bed and still draws from the drag.
-      const riserH = riserDia * 1.5;
+      // When Cope + Drag height is set, keep a blind riser inside the cope if it
+      // fits, or cap it at the cope top so it strikes off flush with the sprue.
+      const rawRiserH = riserDia * 1.5;
+      const riserH = halfFlaskMm > 0 ? Math.min(rawRiserH, halfFlaskMm) : rawRiserH;
+      if (halfFlaskMm > 0 && rawRiserH > halfFlaskMm + 0.5) {
+        warnings.push(
+          `Riser height capped at ${Math.round(halfFlaskMm)} mm (open riser flush with the cope top) to fit the ${Math.round(opts.copeDragHeightMm)} mm Cope + Drag flask.`
+        );
+      }
       const riserR = riserDia / 2;
       const postR = Math.min(riserR, Math.max(3, riserR * 0.25));
       const coneH = Math.min(neckZ0, riserR - postR);
@@ -1393,6 +1434,8 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       pourWeightG,
       gatingVolumeMm3,
       sprueDiaMm: opts.addGating ? sprueDia : 0,
+      sprueHeightMm: !lostPla && opts.addGating ? sprueTop : 0,
+      copeDragHeightMm: !lostPla && opts.copeDragHeightMm > 0 ? opts.copeDragHeightMm : 0,
       riserDiaMm: opts.addGating && riserWanted ? riserDia : 0,
       gateAtMm: opts.addGating ? { x: gateAt.x, y: gateAt.y } : { x: 0, y: 0 },
       ...(lostPla && opts.addGating ? { sprueAtSceneMm: [+(gateAt.x / grow + cx).toFixed(1), +(gateAt.y / grow + cy).toFixed(1)] as [number, number] } : {}),

@@ -564,8 +564,11 @@ export async function metalChain(scene: SceneGraph, options: Partial<CastOptions
       flaskInfo = { shape: 'cylinder', sizeMm: [Math.round(dia), Math.round(dia), Math.round(height)] };
     } else {
       const c = SAND_COVER_MM;
-      const size: [number, number, number] = [max[0] - min[0] + 2 * c, max[1] - min[1] + 2 * c, max[2] - min[2] + c];
-      flask = own.take(wasm.Manifold.cube(size, false).translate([min[0] - c, min[1] - c, min[2] - c]));
+      const halfMm = s.copeDragHeightMm > 0 ? s.copeDragHeightMm / 2 : 0;
+      const zLo = halfMm > 0 ? Math.min(min[2] - c, s.partingFromBaseMm * grow - halfMm) : min[2] - c;
+      const zHi = halfMm > 0 ? Math.max(max[2], s.partingFromBaseMm * grow + halfMm) : max[2];
+      const size: [number, number, number] = [max[0] - min[0] + 2 * c, max[1] - min[1] + 2 * c, zHi - zLo];
+      flask = own.take(wasm.Manifold.cube(size, false).translate([min[0] - c, min[1] - c, zLo]));
       flaskInfo = { shape: 'box', sizeMm: size.map((v) => Math.round(v)) as [number, number, number] };
     }
     const mold = own.take(flask.subtract(P));

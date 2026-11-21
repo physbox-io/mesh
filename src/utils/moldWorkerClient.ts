@@ -600,6 +600,8 @@ async function runMcpChain(
       draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : remembered?.draftDeg ?? DEFAULT_TAB_DRAFT[tab],
       ...(typeof msg.shrinkPercent === 'number' && msg.shrinkPercent >= 0 ? { shrinkPercent: msg.shrinkPercent } : {}),
       ...(typeof msg.addGating === 'boolean' ? { addGating: msg.addGating } : {}),
+      ...(typeof msg.copeDragHeightMm === 'number' && Number.isFinite(msg.copeDragHeightMm) && msg.copeDragHeightMm >= 0
+        ? { copeDragHeightMm: msg.copeDragHeightMm } : {}),
     };
     const r = await client.metalChain(subject.scene, options);
     if (!r.ok) return { ok: false, error: r.error };

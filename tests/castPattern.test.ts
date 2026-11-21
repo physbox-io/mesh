@@ -1031,3 +1031,50 @@ describe('feeding a chunky casting', () => {
     expect(r.warnings.join(' ')).not.toMatch(/Gating mass/);
   });
 });
+
+describe('cope + drag flask height', () => {
+  const block20 = {
+    nodes: [{
+      id: 'blk', name: 'block', type: 'body', pos: [0, 0, 0],
+      geoms: [{ name: 'g', type: 'box', size: [0.02, 0.015, 0.01], pos: [0, 0, 0.01] }],
+      joints: [], children: [],
+    }],
+  } as unknown as SceneGraph;
+
+  it('defaults to 100 mm (50 mm cope + 50 mm drag) and brings the sprue STL top flush with the cope top', () => {
+    const r = generateCastPattern(block20, { method: 'sand', metalId: 'aluminium' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.copeDragHeightMm).toBe(100);
+    // Parted at the base (0 mm): the 50 mm cope half gives a 50 mm sprue above the parting plane.
+    expect(r.summary.partingFromBaseMm).toBeCloseTo(0, 1);
+    expect(r.summary.sprueHeightMm).toBeCloseTo(50, 1);
+    // Verify the exported STL vertices actually reach z = 50 mm (flush with cope top).
+    const view = new DataView(r.patternStl.buffer, r.patternStl.byteOffset, r.patternStl.byteLength);
+    const count = view.getUint32(80, true);
+    let maxZ = -Infinity;
+    for (let t = 0; t < count; t++) {
+      for (let k = 0; k < 3; k++) {
+        maxZ = Math.max(maxZ, view.getFloat32(84 + t * 50 + 12 + k * 12 + 8, true));
+      }
+    }
+    expect(maxZ).toBeCloseTo(50, 1);
+    expect(r.warnings.join(' ')).not.toMatch(/leaves \d+ mm of sand over/);
+  });
+
+  it('scales sprue height with custom Cope + Drag height and warns when sand cover is shallow', () => {
+    const tall = generateCastPattern(block20, { method: 'sand', metalId: 'aluminium', copeDragHeightMm: 140 });
+    expect(tall.summary.sprueHeightMm).toBeCloseTo(70, 1);
+
+    // 48 mm total flask = 24 mm cope + 24 mm drag; a ~20.3 mm grown block leaves only 4 mm sand cover in the cope!
+    const shallow = generateCastPattern(block20, { method: 'sand', metalId: 'aluminium', copeDragHeightMm: 48 });
+    expect(shallow.warnings.join(' ')).toMatch(/Cope height \(24 mm\) leaves 4 mm of sand over/);
+    expect(shallow.warnings.join(' ')).toMatch(/Riser height capped at 24 mm/);
+  });
+
+  it('falls back to auto sprue height when copeDragHeightMm is 0', () => {
+    const auto = generateCastPattern(block20, { method: 'sand', metalId: 'aluminium', copeDragHeightMm: 0 });
+    expect(auto.summary.copeDragHeightMm).toBe(0);
+    // 20 mm * 1.013 grown height + 15 mm clearance ≈ 35.26 mm.
+    expect(auto.summary.sprueHeightMm).toBeCloseTo(20 * 1.013 + 15, 1);
+  });
+});

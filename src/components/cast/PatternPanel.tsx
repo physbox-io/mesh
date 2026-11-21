@@ -145,6 +145,23 @@ export const PatternPanel: React.FC<{
               ? 'Taper on the printed pattern. A burnt-out pattern never draws, so it needs none. The model is left as it is.'
               : 'Taper on the printed pattern, so it pulls out of the sand. 1 to 3° is usual. The model is left as it is.'}
           />
+          {!lostPla && (
+            <Field
+              label="Cope + Drag height (mm)"
+              hint="Total closed height of your two-part sand flask, assuming cope and drag are equal height (e.g. 100 mm for two 50 mm frames). Sizes the printed sprue flush with the top of the cope so you can strike off flat, and warns if the part needs a deeper flask. Clear (0) to size from the part."
+            >
+              <NumberInput
+                step={5}
+                min={0}
+                max={600}
+                allowEmpty
+                placeholder="auto"
+                value={options.copeDragHeightMm || null}
+                onChange={(v) => set('copeDragHeightMm', v ?? 0)}
+                className={inputClass}
+              />
+            </Field>
+          )}
           {summary && (
             <div className="rounded-lg bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 px-2.5 py-2 space-y-1">
               <p className="font-mono text-[11px] text-slate-800 dark:text-slate-100">
@@ -152,6 +169,11 @@ export const PatternPanel: React.FC<{
                 ({summary.shrinkPercent}% over the {round1(summary.partSizeMm.x)} × {round1(summary.partSizeMm.y)} × {round1(summary.partSizeMm.z)} mm part) ·
                 {' '}{metalLabel} cast ≈ {round(summary.castWeightG)} g ·
                 {' '}pour ≈ {round(summary.pourWeightG)} g
+                {!lostPla && summary.copeDragHeightMm > 0 && (
+                  <>
+                    {' '}· flask {round(summary.copeDragHeightMm / 2)} + {round(summary.copeDragHeightMm / 2)} mm{summary.sprueHeightMm > 0 ? ` (sprue ${round(summary.sprueHeightMm)} mm)` : ''}
+                  </>
+                )}
               </p>
               {lostPla && summary.flaskDiaMm > 0 && (
                 <p className="font-mono text-[11px] text-slate-800 dark:text-slate-100">
