@@ -112,6 +112,74 @@ export function spillLevel(m: ManifoldT, b: Box, step = 0.25): number {
 /** A filled piece left out of the casting: its volume and middle, in the frame poured in. */
 export interface DroppedPocket { volumeMm3: number; atMm: [number, number, number] }
 
+/**
+ * Decomposes `m` into disconnected solid bodies while keeping any enclosed
+ * internal void shells (`volume() < 0`) composed inside their enclosing outer
+ * solid. Plain `m.decompose()` splits disconnected boundary shells regardless
+ * of orientation, which separates a submerged master + pour-hole pin void from
+ * the silicone cylinder surrounding it.
+ */
+export function decomposeSolids(wasm: ManifoldToplevel, m: ManifoldT): ManifoldT[] {
+  const raw = m.decompose();
+  if (raw.length <= 1) return raw;
+  const pos: ManifoldT[] = [];
+  const neg: ManifoldT[] = [];
+  for (const p of raw) {
+    if (p.volume() < 0) neg.push(p);
+    else pos.push(p);
+  }
+  if (neg.length === 0) return pos;
+  if (pos.length === 0) {
+    for (const n of neg) n.delete();
+    return [];
+  }
+  const posMeta = pos.map((p) => ({ b: p.boundingBox(), vol: p.volume() }));
+  const grouped: ManifoldT[][] = pos.map((p) => [p]);
+  for (const n of neg) {
+    const nb = n.boundingBox();
+    const pad = 1;
+    const cube = wasm.Manifold.cube(
+      [nb.max[0] - nb.min[0] + 2 * pad, nb.max[1] - nb.min[1] + 2 * pad, nb.max[2] - nb.min[2] + 2 * pad],
+      false,
+    ).translate([nb.min[0] - pad, nb.min[1] - pad, nb.min[2] - pad]);
+    const withHole = wasm.Manifold.compose([cube, n]);
+    withHole.numTri();
+    const posN = cube.subtract(withHole);
+    posN.numTri();
+    cube.delete();
+    withHole.delete();
+
+    const wantVol = Math.abs(n.volume()) * 0.5;
+    let bestIdx = -1;
+    let bestVol = Infinity;
+    for (let i = 0; i < pos.length; i++) {
+      const pb = posMeta[i].b;
+      if (
+        nb.min[0] < pb.min[0] - 1e-3 || nb.max[0] > pb.max[0] + 1e-3 ||
+        nb.min[1] < pb.min[1] - 1e-3 || nb.max[1] > pb.max[1] + 1e-3 ||
+        nb.min[2] < pb.min[2] - 1e-3 || nb.max[2] > pb.max[2] + 1e-3
+      ) continue;
+      const hit = pos[i].intersect(posN);
+      const hitVol = hit.volume();
+      hit.delete();
+      if (hitVol > wantVol && posMeta[i].vol < bestVol) {
+        bestVol = posMeta[i].vol;
+        bestIdx = i;
+      }
+    }
+    posN.delete();
+    if (bestIdx >= 0) grouped[bestIdx].push(n);
+    else n.delete();
+  }
+  return grouped.map((g) => {
+    if (g.length === 1) return g[0];
+    const composed = wasm.Manifold.compose(g);
+    composed.numTri();
+    for (const x of g) x.delete();
+    return composed;
+  });
+}
+
 const middleOf = (m: ManifoldT): [number, number, number] => {
   const { min, max } = m.boundingBox();
   return [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
@@ -121,9 +189,9 @@ const middleOf = (m: ManifoldT): [number, number, number] => {
  * The largest piece of `m` at or below `level` that stays clear of the sides
  * (null when none), and the other pieces that fill too but are not joined to it.
  */
-function filledBelow(m: ManifoldT, level: number, b: Box): { best: ManifoldT | null; others: DroppedPocket[] } {
+function filledBelow(wasm: ManifoldToplevel, m: ManifoldT, level: number, b: Box): { best: ManifoldT | null; others: DroppedPocket[] } {
   const below = m.trimByPlane([0, 0, -1], -level);
-  const parts = below.decompose();
+  const parts = decomposeSolids(wasm, below);
   below.delete();
   let best: ManifoldT | null = null;
   let bestVol = 0;
@@ -194,7 +262,7 @@ export function pourIntoCavity(
   box: Box,
   options: PourOptions = {},
 ): { casting: ManifoldT; info: PourInfo; pieces: number; dropped: DroppedPocket[] } | null {
-  const parts = cavity.decompose();
+  const parts = decomposeSolids(wasm, cavity);
   const pieces = parts.length;
   const dirs = !options.direction || options.direction === 'auto' ? POUR_DIRECTIONS : [options.direction];
 
@@ -235,7 +303,7 @@ export function pourIntoCavity(
       }
       const depthMm = level - min[2];
       const filledMm = options.fillMm && options.fillMm > 0 ? Math.min(options.fillMm, depthMm) : depthMm;
-      const { best: casting, others } = filledBelow(turned, min[2] + filledMm, b);
+      const { best: casting, others } = filledBelow(wasm, turned, min[2] + filledMm, b);
       turned.delete();
       if (!casting) continue;
       const volume = casting.volume();

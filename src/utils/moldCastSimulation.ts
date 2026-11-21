@@ -34,9 +34,9 @@ import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform, getGeomFrame } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import { analyzeMesh } from './meshIntegrity';
-import type { MoldExportResult, MoldMeshHalf, MoldSummary } from './moldExporter';
+import type { MoldExportResult, MoldFeatureReport, MoldMeshHalf, MoldSummary } from './moldExporter';
 import { unrotateFromPull } from './moldPullDirection';
-import { pourIntoCavity, probeFacesTouched, type PourInfo, type PourOptions } from './pourCast';
+import { decomposeSolids, facesTouched, pourIntoCavity, probeFacesTouched, undercutArea, type PourInfo, type PourOptions } from './pourCast';
 import { castMaterial, type CastMaterialId } from './castMaterials';
 import { fillCellMm, simulateFill, voxelizeCavity, type FillDomain, type FillResult } from './pourFill';
 import { VENT_TAPER_MM } from './moldSprue';
@@ -58,6 +58,23 @@ export interface MoldCastSimulationOptions {
   castMaterial?: CastMaterialId;
   /** Pour a closed mold with the air in it (pourFill.ts), so what cannot fill is left out (default true). */
   airAware?: boolean;
+}
+
+export interface MoldCastBufferOptions extends MoldCastSimulationOptions {
+  /** Soluble liner preview triangle positions for the cavity half (`moldPreviewBuffers.liner.bottom.positions`). */
+  bottomLinerPositions?: Float32Array | null;
+  /** Soluble liner preview triangle positions for the lid half (`moldPreviewBuffers.liner.top.positions`). */
+  topLinerPositions?: Float32Array | null;
+}
+
+/** A top-fed sprue or blind vent trimmed from `faceZ` down to where its bore meets the wider part cavity. */
+interface DynamicChannelTrim {
+  x: number;
+  y: number;
+  r: number;
+  faceZ: number;
+  funnelOuterR?: number;
+  funnelDepth?: number;
 }
 
 /** What a closed mold's pour left unfilled, air it could not let out. */
@@ -114,10 +131,14 @@ export interface RawMoldTexture {
 
 export type InternalCastOptions = MoldCastSimulationOptions & {
   isClamshell?: boolean;
-  /** What comes off a clamshell's casting along its own bores: a bottom fill's route, the vents' stubs. */
+  /** What comes off a clamshell's or open mold's casting along known bores: a bottom fill's route, peak vents, or blind vents. */
   feedTrim?: BoreCut[];
-  /** True when `feedTrim` already cuts the sprue/gate route, so no blind top-slice channel trim is needed. */
+  /** Top-fed sprue or vents whose junction with the cavity is located dynamically along their axis. */
+  dynamicChannelTrims?: DynamicChannelTrim[];
+  /** True when exact feature metadata governs channel trimming, so heuristic top-slice trimming must not run. */
   hasSprueTrim?: boolean;
+  /** True when an open scene mold's featureLines indicate blind vents that should be trimmed off the open pour mouth. */
+  trimOpenBlindVents?: boolean;
   flipUpright?: boolean;
   partingZ?: number;
   halves?: (Float64Array | number[])[];
@@ -362,7 +383,10 @@ export async function simulateCastFromMoldNode(
   }
 
   // Close a separable 2-half open mold spaced on the plate before pouring.
-  const splitShift = node.simulation?.mold?.splitOpenShiftMm;
+  const moldRec = node.simulation?.mold;
+  const hasMoldMeta = Boolean(moldRec);
+  const hasOpenBlindVents = Boolean(moldRec && !moldRec.laidOpen && moldRec.featureLines?.some((l) => l.startsWith('Blind vents:')));
+  const splitShift = moldRec?.splitOpenShiftMm;
   if (splitShift && geomShellsMm.length === 2) {
     const len = Math.hypot(splitShift[0], splitShift[1]) || 1;
     const kx = splitShift[0] + (splitShift[0] / len) * 0.02;
@@ -386,12 +410,14 @@ export async function simulateCastFromMoldNode(
     const res = await simulateCastFromMoldTriangles(mergedMm, {
       ...options,
       halves: geomShellsMm,
+      hasSprueTrim: hasMoldMeta || undefined,
+      trimOpenBlindVents: hasOpenBlindVents || undefined,
       negativeHalves: negativeShellsMm.length > 0 ? negativeShellsMm : undefined,
       rawTextures: rawTextures.length > 0 ? rawTextures : undefined,
       moldName: node.name,
     });
     if (warnings.length > 0) res.warnings.push(...warnings);
-    return res;
+    return restoreOpenNodeFrame(res, node, options);
   }
 
   const closed = await castLaidOpenClamshell(node, geomShellsMm, geomNames, options);
@@ -421,12 +447,14 @@ export async function simulateCastFromMoldNode(
       halves: [joined],
       halfPieceTriangles: [counts],
       isInsertLiner: true,
+      hasSprueTrim: hasMoldMeta || undefined,
+      trimOpenBlindVents: hasOpenBlindVents || undefined,
       negativeHalves: negativeShellsMm.length > 0 ? negativeShellsMm : undefined,
       rawTextures: rawTextures.length > 0 ? rawTextures : undefined,
       moldName: node.name,
     });
     if (warnings.length > 0) res.warnings.push(...warnings);
-    return res;
+    return restoreOpenNodeFrame(res, node, options);
   }
 
   const allTrisMm = new Float64Array(allTrisMetres.length);
@@ -437,6 +465,8 @@ export async function simulateCastFromMoldNode(
   const res = await simulateCastFromMoldTriangles(allTrisMm, {
     ...options,
     halves: geomShellsMm.length > 0 ? geomShellsMm : undefined,
+    hasSprueTrim: hasMoldMeta || undefined,
+    trimOpenBlindVents: hasOpenBlindVents || undefined,
     negativeHalves: negativeShellsMm.length > 0 ? negativeShellsMm : undefined,
     rawTextures: rawTextures.length > 0 ? rawTextures : undefined,
     moldName: node.name,
@@ -444,7 +474,31 @@ export async function simulateCastFromMoldNode(
   if (warnings.length > 0) {
     res.warnings.push(...warnings);
   }
-  return res;
+  return restoreOpenNodeFrame(res, node, options);
+}
+
+function restoreOpenNodeFrame(
+  res: MoldCastSimulationResult,
+  node: SceneNode,
+  options?: MoldCastSimulationOptions,
+): MoldCastSimulationResult {
+  const rec = node.simulation?.mold;
+  if (!rec || rec.laidOpen || !rec.pullDirection) return res;
+  if (res.pour && res.pour.direction !== '+z') return res;
+  return restorePartFrame(
+    res,
+    { moldType: 'open', pullDirection: rec.pullDirection, cavityHoldsTop: Boolean(rec.cavityHoldsTop), topHalf: undefined },
+    options,
+  );
+}
+
+function blindVentBoresOf(f: MoldFeatureReport | undefined, faceZ: number): BoreCut[] | undefined {
+  if (!f?.blindVents?.length) return undefined;
+  return f.blindVents.map((v): BoreCut => ({
+    a: [v.atMm[0], v.atMm[1], faceZ + 1],
+    b: [v.atMm[0], v.atMm[1], faceZ - (v.depthMm ?? 0) - 0.05],
+    r: v.diaMm / 2 + 0.15,
+  }));
 }
 
 /**
@@ -515,12 +569,14 @@ export async function simulateCastFromMoldResult(
         ventStubsOf(mold.features),
         [piecesOf(mold.bottomHalf), piecesOf(mold.topHalf)],
         isInsertLiner,
+        mold.features,
       ),
       mold,
       options,
     );
   } else {
     // 1-part open mold (or 2-half separable open mold spaced on the plate)
+    const openBlindTrim = blindVentBoresOf(mold.features, botPartingZ);
     const splitOpen = mold.bottomHalf.splitOpen;
     if (splitOpen && splitOpen.pieceTriangles[0] + splitOpen.pieceTriangles[1] === mold.bottomHalf.triangles.length) {
       const [n1] = splitOpen.pieceTriangles;
@@ -539,8 +595,11 @@ export async function simulateCastFromMoldResult(
         await simulateCastFromMoldTriangles(closedMm, {
           ...options,
           isClamshell: false,
+          partingZ: botPartingZ,
           flipUpright: options?.orientUpright ?? true,
           halves: [h1, h2],
+          feedTrim: openBlindTrim,
+          hasSprueTrim: Boolean(mold.features),
         }),
         mold,
         options,
@@ -556,6 +615,8 @@ export async function simulateCastFromMoldResult(
         halves: [botTrisMm],
         ...(openPieces ? { halfPieceTriangles: [openPieces] } : {}),
         isInsertLiner,
+        feedTrim: openBlindTrim,
+        hasSprueTrim: Boolean(mold.features),
       }),
       mold,
       options,
@@ -584,7 +645,8 @@ function pourWithAir(
   const b = cavity.boundingBox();
   const size: [number, number, number] = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
   if (!(size[0] > 0 && size[1] > 0 && size[2] > 0)) return null;
-  const dom = voxelizeCavity(flat, fillCellMm(size));
+  const volume = cavity.volume();
+  const dom = voxelizeCavity(flat, fillCellMm(size, volume));
   const res = simulateFill(dom, castMaterial(material).bubbleRiseMm);
   const report: CastFillReport = {
     filledShare: Math.round(res.filledShare * 1000) / 1000,
@@ -593,7 +655,6 @@ function pourWithAir(
     largestPocketMm3: Math.round(res.pockets[0]?.volumeMm3 ?? 0),
   };
   const pocketTops = res.pockets.slice(0, 5).map((p) => ({ at: p.topMm, volumeMm3: Math.round(p.volumeMm3) }));
-  const volume = cavity.volume();
   // A cell's worth here and there is the voxels, not air.
   if (res.trappedMm3 < Math.max(2, volume * 0.003)) return { casting: cavity, report, pocketTops };
   const air = airSolid(wasm, dom, res);
@@ -663,6 +724,89 @@ function airSolid(wasm: ManifoldToplevel, d: FillDomain, res: FillResult): Manif
 }
 
 /**
+ * Recovers the exact float parting-face Z of a mold half near `nominalZ`, so
+ * 2-decimal rounded `partingZMm` metadata never shifts halves 0.01 mm apart.
+ */
+function exactPartingZNear(positions: ArrayLike<number>, nominalZ: number, tol = 0.025): number {
+  const counts = new Map<number, { zSum: number; n: number }>();
+  for (let i = 0; i + 8 < positions.length; i += 9) {
+    const az = positions[i + 2], bz = positions[i + 5], cz = positions[i + 8];
+    if (Math.abs(az - bz) < 1e-4 && Math.abs(bz - cz) < 1e-4 && Math.abs(az - nominalZ) <= tol) {
+      const key = Math.round(az * 1e4);
+      const prev = counts.get(key);
+      if (prev) {
+        prev.zSum += az;
+        prev.n++;
+      } else {
+        counts.set(key, { zSum: az, n: 1 });
+      }
+    }
+  }
+  let best: { zSum: number; n: number } | null = null;
+  for (const entry of counts.values()) {
+    if (!best || entry.n > best.n) best = entry;
+  }
+  return best ? best.zSum / best.n : nominalZ;
+}
+
+function topDynamicTrimsOf(f: MoldFeatureReport | undefined, face: number): DynamicChannelTrim[] {
+  if (!f) return [];
+  const out: DynamicChannelTrim[] = [];
+  if (f.feed !== 'bottom' && f.sprue) {
+    out.push({
+      x: f.sprue.atMm[0],
+      y: -f.sprue.atMm[1],
+      r: (f.sprue.narrowDiaMm ?? f.sprue.diaMm) / 2,
+      faceZ: face,
+      funnelOuterR: f.sprue.diaMm / 2,
+      funnelDepth: f.sprue.depthMm ?? 0,
+    });
+  }
+  for (const v of f.vents) {
+    if (v.pocketZMm === undefined) {
+      out.push({
+        x: v.atMm[0],
+        y: -v.atMm[1],
+        r: v.diaMm / 2,
+        faceZ: face,
+        funnelOuterR: v.diaMm / 2 + VENT_TAPER_MM,
+        funnelDepth: 0,
+      });
+    }
+  }
+  return out;
+}
+
+function topDynamicTrimsFromFeatureLines(lines: string[] | undefined, hasBottomFeed: boolean, hasVentStubs: boolean, face: number): DynamicChannelTrim[] {
+  if (!lines?.length) return [];
+  const out: DynamicChannelTrim[] = [];
+  for (const line of lines) {
+    if (!hasBottomFeed && line.startsWith('Sprue (pour hole):')) {
+      const m = line.match(/^Sprue \(pour hole\): ⌀([\d.]+) mm funnel ([\d.]+) mm deep, then a ⌀([\d.]+) mm neck through the lid at \((-?[\d.]+), (-?[\d.]+)\)/);
+      if (m) {
+        out.push({
+          x: Number(m[4]),
+          y: -Number(m[5]),
+          r: Number(m[3]) / 2,
+          faceZ: face,
+          funnelOuterR: Number(m[1]) / 2,
+          funnelDepth: Number(m[2]),
+        });
+      }
+    } else if (!hasVentStubs && line.startsWith('Vents:')) {
+      const m = line.match(/^Vents: \d+× ⌀([\d.]+) mm through the lid at (.+)$/);
+      if (m) {
+        const r = Number(m[1]) / 2;
+        for (const pt of m[2].matchAll(/\((-?[\d.]+), (-?[\d.]+)\)/g)) {
+          out.push({ x: Number(pt[1]), y: -Number(pt[2]), r, faceZ: face });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * A clamshell's halves closed and poured: `bot` and `top` as they print, each
  * centred on x = 0, the lid turned over about X onto the cavity half, parting
  * face to parting face: (x, -y, botPartingZ + lidPartingZ - z).
@@ -677,17 +821,21 @@ async function castClosedClamshell(
   ventStubs?: VentStub[],
   pieceTriangles?: [number[] | undefined, number[] | undefined],
   isInsertLiner?: boolean,
+  features?: MoldFeatureReport,
+  featureLines?: string[],
 ): Promise<MoldCastSimulationResult> {
-  const seamZ = Math.fround(botPartingZ);
+  const exactBotZ = exactPartingZNear(bot, botPartingZ);
+  const exactLidZ = exactPartingZNear(top, lidPartingZ);
+  const seamZ = Math.fround(exactBotZ);
   for (let i = 2; i < bot.length; i += 3) {
-    if (Math.abs(bot[i] - botPartingZ) < 1e-4) bot[i] = seamZ;
+    if (Math.abs(bot[i] - exactBotZ) < 0.015) bot[i] = seamZ;
   }
   const turned = new Float64Array(top.length);
   for (let i = 0; i < top.length; i += 3) {
     turned[i] = top[i];
     turned[i + 1] = -top[i + 1];
     const zTop = top[i + 2];
-    turned[i + 2] = Math.abs(zTop - lidPartingZ) < 1e-4 ? seamZ : botPartingZ + lidPartingZ - zTop;
+    turned[i + 2] = Math.abs(zTop - exactLidZ) < 0.015 ? seamZ : exactBotZ + exactLidZ - zTop;
   }
   const assembled = new Float64Array(bot.length + turned.length);
   assembled.set(bot, 0);
@@ -695,22 +843,26 @@ async function castClosedClamshell(
   // The route a little fatter than it was cut, so no skin of it is left on the
   // casting; the down-sprue and funnel much fatter, since a depth-field lid
   // draws them a grid cell ragged, and the down-sprue is a wall clear of the part.
-  const z = (v: number) => botPartingZ + v;
+  const z = (v: number) => exactBotZ + v;
   const ragged = FEED_WALL_MM - 0.1;
-  const face = botPartingZ + lidPartingZ;
+  const face = exactBotZ + exactLidZ;
   const feedTrim: BoreCut[] = [
     ...(ventStubs ?? []).map((v): BoreCut => ({ a: [v.at[0], v.at[1], face + 1], b: [v.at[0], v.at[1], z(v.z)], r: v.r + VENT_TAPER_MM + 0.1, rB: v.r + 0.1 })),
     ...(feed ? feedTrimOf(feed, face, z, ragged) : []),
   ];
+  const dynamicChannelTrims = features
+    ? topDynamicTrimsOf(features, face)
+    : topDynamicTrimsFromFeatureLines(featureLines, Boolean(feed), Boolean(ventStubs?.length), face);
   return simulateCastFromMoldTriangles(assembled, {
     ...options,
     isClamshell: true,
-    partingZ: botPartingZ,
+    partingZ: exactBotZ,
     halves: [bot, turned],
     ...(pieceTriangles ? { halfPieceTriangles: pieceTriangles } : {}),
     isInsertLiner,
     feedTrim,
-    hasSprueTrim: Boolean(feed),
+    dynamicChannelTrims: dynamicChannelTrims.length > 0 ? dynamicChannelTrims : undefined,
+    hasSprueTrim: Boolean(feed || features || featureLines),
   });
 }
 
@@ -823,6 +975,8 @@ async function castLaidOpenClamshell(
     rec.ventStubs,
     [counts(botParts), counts(topParts)],
     isInsertLiner,
+    undefined,
+    rec.featureLines,
   );
   return restorePartFrame(
     res,
@@ -850,15 +1004,19 @@ function restorePartFrame(
   const halfTurned = Boolean(mold.cavityHoldsTop) !== open;
   if (!halfTurned && mold.pullDirection === '+z') return res;
 
-  const pos = new Float32Array(res.mesh.positions);
-  let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity, mnZ = Infinity, mxZ = -Infinity;
-  for (let i = 0; i < pos.length; i += 3) {
-    let x = pos[i], y = pos[i + 1], z = pos[i + 2];
+  const mapPt = (px: number, py: number, pz: number): [number, number, number] => {
+    let y = py, z = pz;
     if (halfTurned) {
       y = -y;
       z = -z;
     }
-    [x, y, z] = unrotateFromPull(mold.pullDirection, x, y, z);
+    return unrotateFromPull(mold.pullDirection, px, y, z);
+  };
+
+  const pos = new Float32Array(res.mesh.positions);
+  let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity, mnZ = Infinity, mxZ = -Infinity;
+  for (let i = 0; i < pos.length; i += 3) {
+    const [x, y, z] = mapPt(pos[i], pos[i + 1], pos[i + 2]);
     pos[i] = x;
     pos[i + 1] = y;
     pos[i + 2] = z;
@@ -875,8 +1033,18 @@ function restorePartFrame(
     pos[i + 1] -= cy;
     pos[i + 2] -= mnZ;
   }
+  const fill = res.fill?.pocketsAtMm
+    ? {
+        ...res.fill,
+        pocketsAtMm: res.fill.pocketsAtMm.map((p) => {
+          const [x, y, z] = mapPt(p.atMm[0], p.atMm[1], p.atMm[2]);
+          return { atMm: [x - cx, y - cy, z - mnZ] as [number, number, number], volumeMm3: p.volumeMm3 };
+        }),
+      }
+    : res.fill;
   return {
     ...res,
+    ...(fill ? { fill } : {}),
     mesh: { positions: pos, faces: res.mesh.faces },
     sizeMm: {
       width: Math.round((mxX - mnX) * 100) / 100,
@@ -907,13 +1075,16 @@ function findPartingZFromPositions(positions: ArrayLike<number>): number {
 }
 
 /**
- * Simulates casting from worker preview buffers (MoldSummary + bottom/top Float32Array positions).
+ * Simulates casting from worker preview buffers (MoldSummary + bottom/top Float32Array positions,
+ * plus optional soluble-liner preview buffers when `summary.liner` is present).
  */
 export async function simulateCastFromMoldBuffers(
   summary: MoldSummary,
   bottomPositions: Float32Array,
   topPositions?: Float32Array | null,
-  options?: MoldCastSimulationOptions,
+  options?: MoldCastBufferOptions,
+  bottomLinerPositions?: Float32Array | null,
+  topLinerPositions?: Float32Array | null,
 ): Promise<MoldCastSimulationResult> {
   if (!summary.success || bottomPositions.length < 9) {
     return {
@@ -927,39 +1098,126 @@ export async function simulateCastFromMoldBuffers(
     };
   }
 
+  const botLiner = bottomLinerPositions ?? options?.bottomLinerPositions ?? null;
+  const topLiner = topLinerPositions ?? options?.topLinerPositions ?? null;
+  const isInsertLiner = summary.liner?.construction === 'insert';
+
+  // Strip trailing sliding C-clip triangles if `moldPreviewBuffers` appended them.
+  const clipTriCount = (summary.parts ?? [])
+    .filter((p) => p.role === 'clip')
+    .reduce((s, p) => s + p.triangles, 0);
+  const stripTrailingClips = (buf: Float32Array, hasClipsHere: boolean) => {
+    if (!hasClipsHere || clipTriCount <= 0) return buf;
+    const totalTris = buf.length / 9;
+    return totalTris > clipTriCount ? buf.subarray(0, (totalTris - clipTriCount) * 9) : buf;
+  };
+  const botShellSrc = stripTrailingClips(bottomPositions, !summary.topHalf);
+  const topShellSrc = topPositions ? stripTrailingClips(topPositions, Boolean(summary.topHalf)) : null;
+
+  const buildHalfTris = (
+    shellPos: Float32Array,
+    linerPos: Float32Array | null,
+    centerX: number,
+    isLid: boolean,
+  ): { tris: Float64Array; pieceCounts?: number[] } => {
+    const shellTris = shellPos.length / 9;
+    const linerTris = linerPos && linerPos.length >= 9 ? linerPos.length / 9 : 0;
+    const out = new Float64Array((shellTris + linerTris) * 9);
+    for (let i = 0; i < shellTris * 9; i += 3) {
+      out[i] = shellPos[i] - centerX;
+      out[i + 1] = shellPos[i + 1];
+      out[i + 2] = shellPos[i + 2];
+    }
+    if (linerPos && linerTris > 0) {
+      const base = shellTris * 9;
+      for (let i = 0; i < linerTris * 9; i += 3) {
+        out[base + i] = linerPos[i] - centerX;
+        out[base + i + 1] = linerPos[i + 1];
+        out[base + i + 2] = linerPos[i + 2];
+      }
+      // Recover multi-piece insert counts from `summary.parts` when available.
+      const prefix = isLid ? summary.topHalf?.name : summary.bottomHalf.name;
+      const partLinerCounts = prefix
+        ? (summary.parts ?? [])
+            .filter((p) => p.role === 'liner' && p.name.startsWith(prefix))
+            .map((p) => p.triangles)
+        : [];
+      const sumLiner = partLinerCounts.reduce((s, n) => s + n, 0);
+      const pieceCounts = sumLiner === linerTris && partLinerCounts.length > 0
+        ? [shellTris, ...partLinerCounts]
+        : [shellTris, linerTris];
+      return { tris: out, pieceCounts };
+    }
+    return { tris: out };
+  };
+
   const botCenterX = (summary.bottomHalf.bounds.minX + summary.bottomHalf.bounds.maxX) / 2;
   const botPartingZ = summary.bottomHalf.partingZMm || summary.bottomHalf.bounds.maxZ;
+  const botBuilt = buildHalfTris(botShellSrc, botLiner, botCenterX, false);
 
-  const botTrisMm = new Float64Array(bottomPositions.length);
-  for (let i = 0; i < bottomPositions.length; i += 3) {
-    botTrisMm[i] = bottomPositions[i] - botCenterX;
-    botTrisMm[i + 1] = bottomPositions[i + 1];
-    botTrisMm[i + 2] = bottomPositions[i + 2];
+  if (summary.topHalf && topShellSrc && topShellSrc.length >= 9) {
+    const topCenterX = (summary.topHalf.bounds.minX + summary.topHalf.bounds.maxX) / 2;
+    const lidPartingZ = summary.topHalf.partingZMm || findPartingZFromPositions(topShellSrc) || summary.topHalf.bounds.maxZ;
+    const topBuilt = buildHalfTris(topShellSrc, topLiner, topCenterX, true);
+    return restorePartFrame(
+      await castClosedClamshell(
+        botBuilt.tris,
+        topBuilt.tris,
+        botPartingZ,
+        lidPartingZ,
+        options,
+        feedRouteOf(summary.features),
+        ventStubsOf(summary.features),
+        [botBuilt.pieceCounts, topBuilt.pieceCounts],
+        isInsertLiner,
+        summary.features,
+      ),
+      summary,
+      options,
+    );
   }
 
-  if (summary.topHalf && topPositions && topPositions.length >= 9) {
-    const topCenterX = (summary.topHalf.bounds.minX + summary.topHalf.bounds.maxX) / 2;
-    const lidPartingZ = summary.topHalf.partingZMm || findPartingZFromPositions(topPositions) || summary.topHalf.bounds.maxZ;
-
-    const topTrisMm = new Float64Array(topPositions.length);
-    for (let i = 0; i < topPositions.length; i += 3) {
-      topTrisMm[i] = topPositions[i] - topCenterX;
-      topTrisMm[i + 1] = topPositions[i + 1];
-      topTrisMm[i + 2] = topPositions[i + 2];
-    }
+  const openBlindTrim = blindVentBoresOf(summary.features, botPartingZ);
+  const splitOpen = summary.bottomHalf.splitOpen;
+  if (splitOpen && !botBuilt.pieceCounts && (splitOpen.pieceTriangles[0] + splitOpen.pieceTriangles[1]) * 9 === botBuilt.tris.length) {
+    const [n1] = splitOpen.pieceTriangles;
+    const [sx, sy] = splitOpen.closeShiftMm;
+    const len = Math.hypot(sx, sy) || 1;
+    const kx = sx + (sx / len) * 0.02;
+    const ky = sy + (sy / len) * 0.02;
+    const h1 = botBuilt.tris.slice(0, n1 * 9);
+    const h2 = botBuilt.tris.slice(n1 * 9);
+    for (let i = 0; i < h1.length; i += 3) { h1[i] += kx; h1[i + 1] += ky; }
+    for (let i = 0; i < h2.length; i += 3) { h2[i] -= kx; h2[i + 1] -= ky; }
+    const closedMm = new Float64Array(h1.length + h2.length);
+    closedMm.set(h1, 0);
+    closedMm.set(h2, h1.length);
     return restorePartFrame(
-      await castClosedClamshell(botTrisMm, topTrisMm, botPartingZ, lidPartingZ, options, feedRouteOf(summary.features), ventStubsOf(summary.features)),
+      await simulateCastFromMoldTriangles(closedMm, {
+        ...options,
+        isClamshell: false,
+        partingZ: botPartingZ,
+        flipUpright: options?.orientUpright ?? true,
+        halves: [h1, h2],
+        feedTrim: openBlindTrim,
+        hasSprueTrim: Boolean(summary.features),
+      }),
       summary,
       options,
     );
   }
 
   return restorePartFrame(
-    await simulateCastFromMoldTriangles(botTrisMm, {
+    await simulateCastFromMoldTriangles(botBuilt.tris, {
       ...options,
       isClamshell: false,
+      partingZ: botPartingZ,
       flipUpright: options?.orientUpright ?? true,
-      halves: [botTrisMm],
+      halves: [botBuilt.tris],
+      ...(botBuilt.pieceCounts ? { halfPieceTriangles: [botBuilt.pieceCounts] } : {}),
+      isInsertLiner,
+      feedTrim: openBlindTrim,
+      hasSprueTrim: Boolean(summary.features),
     }),
     summary,
     options,
@@ -1125,7 +1383,7 @@ export async function simulateCastFromMoldTriangles(
         const comp = innerBox.subtract(merged);
         comp.numTri();
         innerBox.delete();
-        const voids = comp.decompose();
+        const voids = decomposeSolids(wasm, comp);
         comp.delete();
         const fillVoids: ManifoldT[] = [];
         for (const v of voids) {
@@ -1135,8 +1393,13 @@ export async function simulateCastFromMoldTriangles(
             continue;
           }
           const vb = v.boundingBox();
+          const area = v.surfaceArea();
+          const meanThickMm = area > 1e-6 ? (2 * vol) / area : Infinity;
           const enclosedPegVoid = vol < 10 && vb.min[2] > zLo + 0.05 && vb.max[2] < zHi - 0.05;
-          const isSeatingGap = enclosedPegVoid || (touchesSolid(v, holder) && touchesSolid(v, ins));
+          // Bound seating clearance voids by mean shell thickness (a 0.25 mm gap has
+          // 2*V/S ≈ 0.25 mm) so a main casting cavity that touches `holder` at a fine
+          // grid-escape spot is never mistaken for the seating gap and filled solid.
+          const isSeatingGap = enclosedPegVoid || (meanThickMm <= 0.65 && touchesSolid(v, holder) && touchesSolid(v, ins));
           if (isSeatingGap) {
             fillVoids.push(v);
             if (vb.min[2] <= zLo + 0.02) fillVoids.push(v.translate([0, 0, -0.01]));
@@ -1231,37 +1494,38 @@ export async function simulateCastFromMoldTriangles(
 
     if (shells.length > 0) {
       let cavity: ManifoldT;
-      if (options?.isClamshell) {
-        // Clamshell: subtract each half sequentially to avoid coplanar parting face union issues
+      if (options?.isClamshell || !(options?.negativeHalves && options.negativeHalves.length > 0)) {
+        // Subtract each solid shell sequentially (evaluating before delete!) to avoid
+        // lazy-DAG use-after-free and tangent-vertex / coplanar-face union singularities.
         let cur = probeBox;
         for (const shell of shells) {
           const next = cur.subtract(shell);
+          next.numTri();
           cur.delete();
           shell.delete();
           cur = next;
         }
         cavity = cur;
       } else {
-        // Single mold body: union positive geoms into a single solid, subtract any uncompiled negative CSG geoms, then subtract from probeBox
-        let moldSolid = shells[0];
-        for (let i = 1; i < shells.length; i++) {
-          const unioned = moldSolid.add(shells[i]);
-          moldSolid.delete();
-          shells[i].delete();
-          moldSolid = unioned;
+        // Uncompiled CSG mold body with negative difference geoms: union positive shells,
+        // subtract negative geoms, then subtract from probeBox (forcing evaluation at each step).
+        let moldSolid = shells.length === 1 ? shells[0] : wasm.Manifold.union(shells);
+        moldSolid.numTri();
+        if (shells.length > 1) {
+          for (const s of shells) s.delete();
         }
-        if (options?.negativeHalves && options.negativeHalves.length > 0) {
-          for (const negSoup of options.negativeHalves) {
-            const negM = convertSoupToManifold(negSoup);
-            if (negM) {
-              const diffed = moldSolid.subtract(negM);
-              moldSolid.delete();
-              negM.delete();
-              moldSolid = diffed;
-            }
+        for (const negSoup of options.negativeHalves) {
+          const negM = convertSoupToManifold(negSoup);
+          if (negM) {
+            const diffed = moldSolid.subtract(negM);
+            diffed.numTri();
+            moldSolid.delete();
+            negM.delete();
+            moldSolid = diffed;
           }
         }
         cavity = probeBox.subtract(moldSolid);
+        cavity.numTri();
         probeBox.delete();
         moldSolid.delete();
       }
@@ -1311,8 +1575,12 @@ export async function simulateCastFromMoldTriangles(
           }
         }
         if (options.trimChannels) {
-          const trimmed = trimRunnerChannels(wasm, casting);
-          if (trimmed !== casting) casting = trimmed;
+          if (options.trimOpenBlindVents && poured.info.direction === '+z') {
+            casting = trimOpenMouthBlindVents(wasm, casting);
+          } else if (!options.hasSprueTrim) {
+            casting = trimRunnerChannels(wasm, casting);
+          }
+          casting = dropSlivers(wasm, casting);
         }
         const raw = manifoldToMeshMm(casting);
         casting.delete();
@@ -1325,7 +1593,7 @@ export async function simulateCastFromMoldTriangles(
       }
 
       if (!cavity.isEmpty()) {
-        const parts = cavity.decompose();
+        const parts = decomposeSolids(wasm, cavity);
         cavity.delete();
         const cavityComponents = parts.length;
 
@@ -1342,10 +1610,24 @@ export async function simulateCastFromMoldTriangles(
               best = p;
             }
           }
-          // Another cavity that would pour, left out: it gets no casting.
+          // Another cavity that would pour (or was split off across a coplanar seam
+          // or ungated island), left out: warn clearly while ignoring pin-socket
+          // clearance films and side-wall pry notches.
           const placed: PlacedWarning[] = [];
           const bestVol = best.volume();
-          const others = parts.filter((p) => p !== best && probeFacesTouched(p, probe) <= 1 && p.volume() > Math.max(1, bestVol * 0.01));
+          const isMoldHardwareVoid = (p: ManifoldT): boolean => {
+            const ft = facesTouched(p, probe);
+            const count = ft.filter(Boolean).length;
+            const v = p.volume();
+            const area = p.surfaceArea();
+            const meanThick = area > 1e-6 ? (2 * v) / area : Infinity;
+            if (count === 0 && meanThick <= 0.65) return true;
+            if (count === 1 && !ft[5] && v < 40) return true;
+            return false;
+          };
+          const others = parts.filter(
+            (p) => p !== best && probeFacesTouched(p, probe) <= 1 && p.volume() > Math.max(2, bestVol * 0.01) && !isMoldHardwareVoid(p),
+          );
           if (others.length) {
             const centres = others.slice(0, 3).map((p) => {
               const ob = p.boundingBox();
@@ -1362,8 +1644,8 @@ export async function simulateCastFromMoldTriangles(
           }
           let fill: CastFillReport | undefined;
           let pocketTops: { at: [number, number, number]; volumeMm3: number }[] = [];
-          if (options?.isClamshell && options.airAware !== false) {
-            const poured = pourWithAir(wasm, best, options.castMaterial ?? 'epoxy');
+          if (options?.airAware !== false && (options?.isClamshell || undercutArea(best) > 0)) {
+            const poured = pourWithAir(wasm, best, options?.castMaterial ?? 'epoxy');
             if (poured) {
               fill = poured.report;
               pocketTops = poured.pocketTops;
@@ -1374,9 +1656,11 @@ export async function simulateCastFromMoldTriangles(
               if (poured.warning) placed.push(poured.warning);
             }
           }
-          // Trimmed, the bottom fill's down-sprue, runner and gate come off along
-          // their own bores, and then the sprue and vents off the top.
+          // Trimmed: bottom-fill route, peak vents, top-fed sprue + funnel, and open-mold blind vents
+          // come off along their own bores; only raw unannotated molds fall back to top slicing.
           if (options?.trimChannels && options.feedTrim?.length) best = cutBores(wasm, best, options.feedTrim);
+          if (options?.trimChannels && options.dynamicChannelTrims?.length) best = cutDynamicChannels(wasm, best, options.dynamicChannelTrims);
+          if (options?.trimChannels && options.trimOpenBlindVents) best = trimOpenMouthBlindVents(wasm, best);
           if (options?.trimChannels && !options.hasSprueTrim) best = trimRunnerChannels(wasm, best);
           // Trimming along a depth-field lid's ragged holes leaves slivers of
           // nothing floating where they were; they are not casting.
@@ -1420,9 +1704,120 @@ export async function simulateCastFromMoldTriangles(
   return fallbackColumnSpansCast(trisMm, boxMinX, boxMaxX, boxMinY, boxMaxY, minZ, maxZ, options, warnings);
 }
 
+/**
+ * Cuts top-fed sprues (funnel + vertical neck) or vertical vents down from `faceZ`
+ * to the exact Z height where each channel widens into the casting cavity. Consumes `casting`.
+ */
+function cutDynamicChannels(wasm: ManifoldToplevel, casting: ManifoldT, trims: DynamicChannelTrim[]): ManifoldT {
+  let out = casting;
+  for (const ch of trims) {
+    const funnelDepth = ch.funnelDepth ?? 0;
+    const zFoot = ch.faceZ - funnelDepth;
+    if (funnelDepth > 0 && ch.funnelOuterR && ch.funnelOuterR > ch.r) {
+      const cone = wasm.Manifold.cylinder(
+        funnelDepth + 1.1,
+        ch.r + 0.25,
+        ch.funnelOuterR + 1.25,
+        32,
+        false,
+      ).translate([ch.x, ch.y, zFoot - 0.1]);
+      const next = out.subtract(cone);
+      next.numTri();
+      out.delete();
+      cone.delete();
+      out = next;
+    }
+
+    const b = out.boundingBox();
+    const zMin = b.min[2];
+    const zStart = Math.min(b.max[2], funnelDepth > 0 ? zFoot : ch.faceZ) - 0.1;
+    if (!(zStart > zMin + 0.1)) continue;
+
+    // Local 2D annular ring around `(ch.x, ch.y)` outside the bore radius `ch.r`:
+    // zero area while inside the straight neck, non-zero as soon as it meets the part cavity.
+    const inner = wasm.CrossSection.circle(ch.r + 0.25, 32).translate([ch.x, ch.y]);
+    const outer = wasm.CrossSection.circle(ch.r + 2.2, 32).translate([ch.x, ch.y]);
+    const ring = outer.subtract(inner);
+    inner.delete();
+    outer.delete();
+
+    let zEnter = zStart;
+    let found = false;
+    for (let z = zStart; z > zMin; z -= 0.2) {
+      const s = out.slice(z);
+      const hit = s.intersect(ring);
+      const area = hit.area();
+      s.delete();
+      hit.delete();
+      if (area > 0.25) {
+        // Refine by 0.1 mm upward so we cut right at the junction without nicking the part roof.
+        const sUp = out.slice(z + 0.1);
+        const hitUp = sUp.intersect(ring);
+        const areaUp = hitUp.area();
+        sUp.delete();
+        hitUp.delete();
+        zEnter = areaUp > 0.25 ? z + 0.2 : z + 0.1;
+        found = true;
+        break;
+      }
+    }
+    ring.delete();
+    if (!found) continue;
+
+    const cutH = ch.faceZ + 1 - zEnter;
+    if (cutH > 0.05) {
+      const neck = wasm.Manifold.cylinder(cutH, ch.r + 0.2, ch.r + 0.2, 32, false).translate([ch.x, ch.y, zEnter]);
+      const next = out.subtract(neck);
+      next.numTri();
+      out.delete();
+      neck.delete();
+      out = next;
+    }
+  }
+  return out;
+}
+
+/**
+ * Finds and trims blind-vent riser rods reaching the open pour face (`maxZ`) of an
+ * open scene mold whose `featureLines` record blind vents. Consumes `casting`.
+ */
+function trimOpenMouthBlindVents(wasm: ManifoldToplevel, casting: ManifoldT): ManifoldT {
+  const { min, max } = casting.boundingBox();
+  const zTop = max[2];
+  if (!(zTop - min[2] > 1)) return casting;
+  const topSlice = casting.slice(zTop - 0.25);
+  const contours = topSlice.decompose();
+  topSlice.delete();
+  if (contours.length <= 1) {
+    for (const c of contours) c.delete();
+    return casting;
+  }
+  const areas = contours.map((c) => c.area());
+  const maxArea = Math.max(...areas);
+  const ventTrims: DynamicChannelTrim[] = [];
+  contours.forEach((c, i) => {
+    const area = areas[i];
+    const cb = c.bounds();
+    const w = cb.max[0] - cb.min[0];
+    const d = cb.max[1] - cb.min[1];
+    const span = Math.max(w, d);
+    // Blind vents are small round risers (⌀2–7 mm) much smaller than the main pour mouth.
+    if (area > 1.5 && area < Math.min(45, maxArea * 0.3) && span <= 7.5 && Math.min(w, d) >= span * 0.65) {
+      ventTrims.push({
+        x: (cb.min[0] + cb.max[0]) / 2,
+        y: (cb.min[1] + cb.max[1]) / 2,
+        r: span / 2,
+        faceZ: zTop,
+      });
+    }
+    c.delete();
+  });
+  return ventTrims.length > 0 ? cutDynamicChannels(wasm, casting, ventTrims) : casting;
+}
+
 /** The casting less any piece under a cubic millimetre, or a thousandth of it. Consumes `casting`. */
 function dropSlivers(wasm: ManifoldToplevel, casting: ManifoldT): ManifoldT {
-  const parts = casting.decompose();
+  const parts = decomposeSolids(wasm, casting);
   if (parts.length <= 1) {
     for (const p of parts) p.delete();
     return casting;
@@ -1433,14 +1828,16 @@ function dropSlivers(wasm: ManifoldToplevel, casting: ManifoldT): ManifoldT {
   if (kept.length === 0) return casting;
   casting.delete();
   const out = wasm.Manifold.compose(kept);
+  out.numTri();
   for (const p of kept) p.delete();
   return out;
 }
 
 /**
- * Cuts the narrow sprue and vent channels off the top of a casting: slices
- * down from the top until one is wider than a sprue and vent together, and
- * takes everything above it. Consumes `casting`.
+ * Fallback channel trimmer for raw unannotated mold geometry: cuts a narrow
+ * top sprue stem only when the top cross-section is small (<= 75 mm²) and
+ * widens abruptly (>= 2.5× step jump) onto the part body, avoiding smoothly
+ * tapered spires or narrow part towers. Consumes `casting`.
  */
 function trimRunnerChannels(wasm: ManifoldToplevel, casting: ManifoldT): ManifoldT {
   const { min, max } = casting.boundingBox();
@@ -1449,23 +1846,29 @@ function trimRunnerChannels(wasm: ManifoldToplevel, casting: ManifoldT): Manifol
   if (spanH <= 2) return casting;
   const w = max[0] - min[0];
   const d = max[1] - min[1];
-  // Check slices from top down to find where narrow channel widens to part body
-  let cutZ = zTop;
-  for (let z = zTop - 0.5; z >= zTop - spanH * 0.4; z -= 0.5) {
-    const sliceBox = wasm.Manifold.cube([w * 2, d * 2, 0.5], false).translate([min[0] - w / 2, min[1] - d / 2, z - 0.25]);
-    const slice = casting.intersect(sliceBox);
-    const sliceArea = slice.volume() / 0.5;
-    sliceBox.delete();
+  const areaAt = (z: number) => {
+    const slice = casting.slice(z);
+    const a = slice.area();
     slice.delete();
-    // A sprue + vent channel total area is <= 65 mm²
-    if (sliceArea > 75) {
+    return a;
+  };
+  const topArea = areaAt(zTop - 0.5);
+  if (!(topArea > 0 && topArea <= 75)) return casting;
+
+  let prevArea = topArea;
+  let cutZ = zTop;
+  for (let z = zTop - 1.0; z >= zTop - spanH * 0.4; z -= 0.5) {
+    const sliceArea = areaAt(z);
+    if (sliceArea > Math.max(75, prevArea * 2.5)) {
       cutZ = z + 0.5;
       break;
     }
+    prevArea = Math.max(prevArea, sliceArea);
   }
   if (!(cutZ < zTop - 0.5)) return casting;
   const cutter = wasm.Manifold.cube([w * 2, d * 2, zTop - cutZ + 1], false).translate([min[0] - w / 2, min[1] - d / 2, cutZ]);
   const trimmed = casting.subtract(cutter);
+  trimmed.numTri();
   cutter.delete();
   casting.delete();
   return trimmed;

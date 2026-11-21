@@ -984,8 +984,9 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
   const dragShare = totalArea > 0 ? dragArea / totalArea : 0;
   const heightMm = (b.maxZ - b.minZ) * 1000;
 
-  // An undercut means the pattern physically does not come out, so the bar is
-  // low — unlike everything else here, a small one is still a broken mould.
+  // An undercut means the pattern physically does not come out of a rigid draw
+  // mould, so the bar is low — though a dissolvable liner, silicone pour box,
+  // or lost-PLA burnout releases undercuts cleanly.
   if (undercutShare > T.castUndercutShare) {
     findings.push({
       id: 'cast_undercut',
@@ -993,7 +994,7 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       severity: 'critical',
       title: 'Undercut locks pattern in mould',
       detail: `${(undercutShare * 100).toFixed(0)}% of the surface leans back up to ${worstDeg.toFixed(0)}° along the draw.`,
-      fix: 'Use Prepare for Casting → Remove Undercuts, split the pattern, or use Lost PLA.',
+      fix: 'Use a Dissolvable Liner or Silicone Pour Box (for resin or plaster), or split the pattern / use Lost PLA (for metal).',
       position: hotSpot(tris, heat, 0.9) ?? [0, 0, partingZ],
       metric: undercutShare,
     });
@@ -1009,7 +1010,7 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       severity: 'warning',
       title: `Walls have < ${limits.draftDeg}° draft`,
       detail: `${(dragShare * 100).toFixed(0)}% of the surface has less than ${limits.draftDeg}° draft over ${heightMm.toFixed(0)} mm height.`,
-      fix: `Taper walls by ${limits.draftDeg}° (e.g., via Prepare for Casting).`,
+      fix: `Taper walls by ${limits.draftDeg}° (Mold → Draft, or skip draft with a Dissolvable Liner or Silicone Pour Box).`,
       position: hotSpot(tris, heat, 0.05) ?? [0, 0, partingZ],
       metric: dragShare,
     });

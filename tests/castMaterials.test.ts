@@ -5,6 +5,7 @@ import {
   CAST_MATERIALS,
   CAST_METALS,
   SILICONES,
+  castMaterial,
   castMaterialWarnings,
   castWeightG,
   mixGrams,
@@ -70,14 +71,41 @@ describe('the material list', () => {
 });
 
 describe('warnings come from the data', () => {
-  it('warns about a big epoxy pour in PLA only', () => {
+  it('warns about a big epoxy pour dynamically by mold softening point and in silicone', () => {
+    expect(castMaterial('epoxy').mixNote).toMatch(/1:1.*2:1/);
     expect(castMaterialWarnings('epoxy', 150, { pla: true })).toEqual([]);
-    expect(castMaterialWarnings('epoxy', 250, { pla: true })[0]).toMatch(/A 250 ml epoxy pour.*60 °C/);
-    expect(castMaterialWarnings('epoxy', 250, { pla: false })).toEqual([]);
+    expect(castMaterialWarnings('epoxy', 150, { pla: false })).toEqual([]);
+    expect(castMaterialWarnings('epoxy', 250, { pla: true })[0]).toMatch(/A 250 ml epoxy pour.*PLA's ~60 °C/);
+    expect(castMaterialWarnings('epoxy', 250, { pla: true, softenC: 60, name: 'PETG + PVA' })[0]).toMatch(/PETG \+ PVA's ~60 °C/);
+
+    // High-temp ABS + HIPS (95 °C) never claims PLA's ~60 °C softening point.
+    const absNotes = castMaterialWarnings('epoxy', 250, { pla: true, softenC: 95, name: 'ABS + HIPS' });
+    expect(absNotes).toHaveLength(1);
+    expect(absNotes[0]).toMatch(/ABS \+ HIPS.*95 °C/);
+    expect(absNotes[0]).not.toMatch(/PLA|60 °C/);
+
+    // Thick/large pours in insulating silicone still warn about standard casting epoxy exotherm.
+    const silNotes = castMaterialWarnings('epoxy', 250, { pla: false });
+    expect(silNotes).toHaveLength(1);
+    expect(silNotes[0]).toMatch(/250 ml.*deep-pour epoxy/i);
+    expect(silNotes[0]).not.toMatch(/PLA/);
   });
 
-  it('warns about anything poured hotter than PLA takes', () => {
+  it('warns about polyurethane moisture foaming on water-soluble liners and fast exotherm on big pours', () => {
+    expect(castMaterialWarnings('polyurethane', 50, { pla: true })).toEqual([]);
+    expect(castMaterialWarnings('polyurethane', 50, { pla: false })).toEqual([]);
+    const pvaNotes = castMaterialWarnings('polyurethane', 50, { pla: true, softenC: 60, name: 'PLA + PVA' });
+    expect(pvaNotes).toHaveLength(1);
+    expect(pvaNotes[0]).toMatch(/foams.*moisture.*PLA \+ PVA/i);
+    const bvohNotes = castMaterialWarnings('polyurethane', 50, { pla: true, softenC: 60, name: 'PLA + BVOH' });
+    expect(bvohNotes[0]).toMatch(/foams.*moisture/i);
+    expect(castMaterialWarnings('polyurethane', 50, { pla: true, softenC: 95, name: 'ABS + HIPS' })).toEqual([]);
+    expect(castMaterialWarnings('polyurethane', 200, { pla: true, softenC: 60, name: 'PLA' })[0]).toMatch(/200 ml polyurethane.*60 °C/);
+  });
+
+  it('warns about anything poured hotter than the printed mold takes', () => {
     expect(castMaterialWarnings('wax', 10, { pla: true })[0]).toMatch(/avoid softening a PLA mold/);
+    expect(castMaterialWarnings('wax', 10, { pla: true, softenC: 95, name: 'ABS + HIPS' })).toEqual([]);
     expect(castMaterialWarnings('wax', 10, { pla: false })).toEqual([]);
     expect(castMaterialWarnings('chocolate', 10, { pla: true }).join(' ')).not.toMatch(/soften/);
   });

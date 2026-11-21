@@ -301,8 +301,8 @@ export function DfmHUD() {
                 ? <p className="py-1 text-xs text-emerald-700 dark:text-emerald-300">{castReport.summary}</p>
                 : <Findings entries={castReport.findings.map(fromFinding)} />}
               <p className="mt-2 text-[10px] leading-snug text-slate-400">
-                Judged against a flat parting plane at mid-height, pulled along Z. The mould and cast-pattern
-                exports search for a better line than that.
+                Judged against a flat two-part parting line across all six draw axes and heights. Undercuts only lock a
+                rigid draw mould — a dissolvable liner, silicone pour box, or lost-PLA burnout keeps them.
               </p>
             </div>
           )}

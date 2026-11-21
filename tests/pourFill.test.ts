@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Manifold, ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
-import { voxelizeCavity, simulateFill } from '../src/utils/pourFill';
+import { voxelizeCavity, simulateFill, fillCellMm } from '../src/utils/pourFill';
 
 // Cavities as poured, +z up: what is drawn is where the liquid can go, with
 // the sprue and vents reaching up to the mold's top face at z = 30.
@@ -84,5 +84,26 @@ describe('pouring with air in the mold', () => {
     // What air is left is not in the bulb or the post (x, y past 7.5, below the plate).
     const inBulb = withVent.pockets.filter((p) => p.topMm[0] > 7.5 && p.topMm[1] > 7.5 && p.topMm[2] < 20);
     expect(inBulb.reduce((s, p) => s + p.volumeMm3, 0)).toBeLessThan(5);
+  });
+
+  it('bounds fillCellMm to <= 700k grid cells while filtering stair-step boundary pips on vented domes', () => {
+    const smallCell = fillCellMm([30, 30, 25]);
+    expect(smallCell).toBeGreaterThanOrEqual(0.35);
+    expect(smallCell).toBeLessThanOrEqual(0.45);
+    const largeCell = fillCellMm([120, 100, 80]);
+    expect(Math.ceil(120 / largeCell) * Math.ceil(100 / largeCell) * Math.ceil(80 / largeCell)).toBeLessThanOrEqual(700_000);
+
+    // Fully vented sphere cavity: curved boundary stair-steps must not report dozens of 0-volume pockets.
+    const sphere = wasm.Manifold.sphere(15, 36).translate([0, 0, 15]);
+    const sprue = tube(0, 0, 28, 35, 8);
+    const cavity = union(sphere, sprue);
+    const t0 = performance.now();
+    const dom = voxelizeCavity(flat(cavity), fillCellMm([30, 30, 35], cavity.volume()));
+    const r = simulateFill(dom, 3.5);
+    const elapsedMs = performance.now() - t0;
+    expect(elapsedMs).toBeLessThan(2500);
+    expect(r.filledShare).toBe(1);
+    expect(r.pockets).toHaveLength(0);
+    expect(r.trappedMm3).toBe(0);
   });
 });

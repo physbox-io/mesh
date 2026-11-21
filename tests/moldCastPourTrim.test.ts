@@ -60,4 +60,32 @@ describe('pouring into a mold body', () => {
     expect(sprueEnd(upright.mesh)).toBe('bottom');
     expect(sprueEnd(asPoured.mesh)).toBe('top');
   });
+
+  it('does not chop smoothly tapered spires off raw open-mold castings when trimChannels is true', async () => {
+    // Open mold for an upright pyramid/cone-like stepped spire (widening smoothly, < 2.5x per 0.5 mm step).
+    const { loadManifold } = await import('../src/utils/sculptCut');
+    const { manifoldToMeshMm } = await import('../src/utils/timberBreakdown');
+    const { simulateCastFromMoldTriangles } = await import('../src/utils/moldCastSimulation');
+    const wasm = await loadManifold();
+    const block = wasm.Manifold.cube([40, 40, 35], false).translate([-20, -20, 0]);
+    // Inverted cone cavity open at Z = 35 (base R = 12 at Z = 35 tapering to tip R = 1 at Z = 5 -> when flipped, tip is at Z = 30? Wait: before flip in open mold, Z=35 is wide base! In a closed unannotated mold, Z=30 is narrow spire tip!).
+    // Closed raw mold with a tapered cone spire pointing +Z (R = 12 at Z = 5 tapering smoothly to R = 1 at Z = 30):
+    const spire = wasm.Manifold.cylinder(25, 12, 1, 32, false).translate([0, 0, 5]);
+    const tinyOpen = wasm.Manifold.cylinder(6, 1, 1, 24, false).translate([0, 0, 29.5]);
+    const closedSpireMold = block.subtract(spire).subtract(tinyOpen);
+    const raw = manifoldToMeshMm(closedSpireMold);
+    const tris = new Float64Array(raw.faces.length * 3);
+    for (let i = 0; i < raw.faces.length; i++) {
+      const v = raw.faces[i] * 3;
+      tris[i * 3] = raw.positionsMm[v];
+      tris[i * 3 + 1] = raw.positionsMm[v + 1];
+      tris[i * 3 + 2] = raw.positionsMm[v + 2];
+    }
+    spire.delete(); tinyOpen.delete(); block.delete(); closedSpireMold.delete();
+
+    const trimmed = await simulateCastFromMoldTriangles(tris, { isClamshell: true, trimChannels: true, airAware: false });
+    expect(trimmed.success).toBe(true);
+    // Smooth cone spire is preserved (>= 29 mm tall), not chopped by 40%!
+    expect(trimmed.sizeMm.height).toBeGreaterThan(29);
+  });
 });

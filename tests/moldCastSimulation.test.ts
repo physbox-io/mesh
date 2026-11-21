@@ -2,11 +2,22 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import {
   simulateCastFromMoldResult,
   simulateCastFromMoldNode,
+  simulateCastFromMoldBuffers,
   simulateCastFromMoldTriangles,
   weldTriangles,
   computeMeshVolume,
 } from '../src/utils/moldCastSimulation';
-import { generateMoldMeshes as generateWithEngine, DEFAULT_MOLD_OPTIONS } from '../src/utils/moldExporter';
+import {
+  generateMoldMeshes as generateWithEngine,
+  moldPreviewBuffers,
+  moldSummary,
+  DEFAULT_MOLD_OPTIONS,
+} from '../src/utils/moldExporter';
+import { siliconeChain } from '../src/utils/castChain';
+import { moldMasterRecord, moldSceneParts } from '../src/utils/moldWorkerClient';
+import { simulatedBody } from '../src/utils/simulatedPart';
+import { stlToMesh } from '../src/utils/stlMesh';
+import { sphereMesh, torusMesh, zupToYupFlat } from './helpers/meshes';
 import type { SceneGraph, SceneGeom, SceneNode } from '../src/types/scene';
 import { loadManifold } from '../src/utils/sculptCut';
 import { manifoldToMeshMm } from '../src/utils/timberBreakdown';
@@ -304,5 +315,281 @@ describe('Mold Cast Simulation', () => {
       expect(count).toBeGreaterThan(0);
       expect(sumX / count).toBeGreaterThan(10);
     }
+  });
+
+  it('casts a clean sphere through a silicone pour-box hole (C4)', async () => {
+    const expectedVol = (4 / 3) * Math.PI * Math.pow(15, 3); // ~14,137 mm³
+    // 1. Primitive sphere
+    const primScene: SceneGraph = {
+      nodes: [{
+        id: 'sp', name: 'sphere', type: 'body', pos: [0, 0, 0.015], joints: [], children: [],
+        geoms: [{ name: 'g', type: 'sphere', size: [0.015] } as SceneGeom],
+      }],
+    };
+    const primRes = await siliconeChain(primScene, ['sp'], { hole: 'pour' }, 'epoxy');
+    expect(primRes.ok).toBe(true);
+    if (primRes.ok) {
+      expect(primRes.piece.volumeMm3).toBeGreaterThan(expectedVol * 0.94);
+      expect(primRes.piece.volumeMm3).toBeLessThan(expectedVol * 1.04);
+      expect(primRes.deviation?.maxMm ?? 0).toBeLessThan(1.5);
+    }
+
+    // 2. Mesh sphere
+    const sm = sphereMesh(0.015, 24, 16);
+    const meshScene: SceneGraph = {
+      nodes: [{
+        id: 'spm', name: 'mesh_sphere', type: 'body', pos: [0, 0, 0.015], joints: [], children: [],
+        geoms: [{ name: 'gm', type: 'mesh', size: [1], renderVertices: sm.verts, vertices: zupToYupFlat(sm.verts), faces: sm.faces } as SceneGeom],
+      }],
+    };
+    const meshRes = await siliconeChain(meshScene, ['spm'], { hole: 'pour' }, 'epoxy');
+    expect(meshRes.ok).toBe(true);
+    if (meshRes.ok) {
+      expect(meshRes.piece.volumeMm3).toBeGreaterThan(expectedVol * 0.92);
+      expect(meshRes.piece.volumeMm3).toBeLessThan(expectedVol * 1.05);
+    }
+  });
+
+  it('closes clamshell seams cleanly even when partingZMm is rounded to 0.01 mm on an upright torus (C3)', async () => {
+    const tm = torusMesh(0.018, 0.006, 32, 16);
+    // Rotate upright about X: (x, y, z) -> (x, -z, y + 0.024)
+    const upVerts: number[] = [];
+    for (let i = 0; i < tm.verts.length; i += 3) {
+      upVerts.push(tm.verts[i], -tm.verts[i + 2], tm.verts[i + 1] + 0.024);
+    }
+    const torusScene: SceneGraph = {
+      nodes: [{
+        id: 't1', name: 'torus', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        geoms: [{ name: 'gt', type: 'mesh', size: [1], renderVertices: upVerts, vertices: zupToYupFlat(upVerts), faces: tm.faces } as SceneGeom],
+      }],
+    };
+    const mold = generateMoldMeshes(torusScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      wallMarginMm: 15,
+      dissolvableLiner: true,
+      linerConstruction: 'insert',
+    });
+    expect(mold.success, mold.error).toBe(true);
+    // Force legacy 2-decimal rounding on partingZMm to ensure seam tolerance holds
+    const roundedMold = {
+      ...mold,
+      bottomHalf: { ...mold.bottomHalf, partingZMm: Math.round(mold.bottomHalf.partingZMm * 100) / 100 },
+      topHalf: mold.topHalf ? { ...mold.topHalf, partingZMm: Math.round(mold.topHalf.partingZMm * 100) / 100 } : undefined,
+    };
+    const sim = await simulateCastFromMoldResult(roundedMold, { trimChannels: true });
+    expect(sim.success).toBe(true);
+    const expectedTorusVol = 2 * Math.PI * Math.PI * 18 * 36; // ~12,791 mm³
+    expect(sim.castVolumeMm3).toBeGreaterThan(expectedTorusVol * 0.9);
+  });
+
+  it('trims top-fed epoxy sprue and funnel without gouging a narrow spire (C6)', async () => {
+    const spireScene: SceneGraph = {
+      nodes: [{
+        id: 'sp1', name: 'spire_part', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        geoms: [
+          { name: 'base', type: 'box', size: [0.015, 0.015, 0.0075], pos: [0, 0, 0.0075] } as SceneGeom,
+          { name: 'tower', type: 'box', size: [0.003, 0.003, 0.0055], pos: [0, 0, 0.0195] } as SceneGeom,
+        ],
+      }],
+    };
+    const mold = generateMoldMeshes(spireScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      wallMarginMm: 14,
+      dissolvableLiner: true,
+      sprueFeed: 'top',
+      castMaterial: 'epoxy',
+    });
+    expect(mold.success, mold.error).toBe(true);
+    const untrimmed = await simulateCastFromMoldResult(mold, { trimChannels: false });
+    const trimmed = await simulateCastFromMoldResult(mold, { trimChannels: true });
+    expect(trimmed.success).toBe(true);
+    expect(trimmed.castVolumeMm3).toBeLessThan(untrimmed.castVolumeMm3 - 100);
+    // Master is 25 mm tall (13,860 mm³): sprue above 25 mm is gone, spire is intact!
+    expect(trimmed.sizeMm.height).toBeCloseTo(25, 0);
+    expect(trimmed.castVolumeMm3).toBeGreaterThan(13_860 * 0.95);
+    expect(trimmed.castVolumeMm3).toBeLessThan(13_860 * 1.04);
+  });
+
+  it('trims open-mold blind vents and detects trapped air on unvented open-mold recesses (H8)', async () => {
+    // Spool in an open mold (`allowUndercuts: true` + `includeVents: true`): whichever Z face is
+    // the open mouth, the opposite 30×30 flange is a submerged overhang vented by 4 blind vents.
+    const spoolScene: SceneGraph = {
+      nodes: [{
+        id: 'fl1', name: 'spool', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        geoms: [
+          { name: 'foot', type: 'box', size: [0.015, 0.015, 0.003], pos: [0, 0, 0.003] } as SceneGeom,
+          { name: 'waist', type: 'box', size: [0.006, 0.006, 0.007], pos: [0, 0, 0.012] } as SceneGeom,
+          { name: 'cap', type: 'box', size: [0.015, 0.015, 0.003], pos: [0, 0, 0.021] } as SceneGeom,
+        ],
+      }],
+    };
+    const openMold = generateMoldMeshes(spoolScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'open',
+      pullDirection: '+z',
+      allowUndercuts: true,
+      includeVents: true,
+    });
+    expect(openMold.success).toBe(true);
+    expect((openMold.features?.blindVents.length ?? 0)).toBeGreaterThan(0);
+
+    const untrimmed = await simulateCastFromMoldResult(openMold, { trimChannels: false });
+    const trimmed = await simulateCastFromMoldResult(openMold, { trimChannels: true });
+    // Spool volume: 2 * (30 * 30 * 6) + (12 * 12 * 12) = 10,800 + 1,728 = 12,528 mm³
+    const masterVol = 2 * (30 * 30 * 6) + 12 * 12 * 12;
+    expect(trimmed.castVolumeMm3).toBeLessThan(untrimmed.castVolumeMm3 - 100);
+    expect(trimmed.castVolumeMm3).toBeGreaterThan(masterVol * 0.96);
+    expect(trimmed.castVolumeMm3).toBeLessThan(masterVol * 1.04);
+
+    // Unvented open mold with a dome pocket recessed up into an overhang ceiling traps air in simulateCastFromMoldTriangles:
+    const wasm = await loadManifold();
+    const mBlock = wasm.Manifold.cube([50, 50, 25], false).translate([-25, -25, 0]);
+    const mainCav = wasm.Manifold.cube([30, 30, 20.1], false).translate([-15, -15, 5]);
+    const shelf = wasm.Manifold.cube([15, 30, 8], false).translate([-15, -15, 17]);
+    const trappedPocket = wasm.Manifold.cube([8, 20, 5], false).translate([-13, -10, 16]);
+    const unventedOpen = mBlock.subtract(mainCav.subtract(shelf).add(trappedPocket));
+    const meshMm = manifoldToMeshMm(unventedOpen);
+    const soup = new Float64Array(meshMm.faces.length * 3);
+    for (let i = 0; i < meshMm.faces.length; i++) {
+      const v = meshMm.faces[i] * 3;
+      soup[i * 3] = meshMm.positionsMm[v];
+      soup[i * 3 + 1] = meshMm.positionsMm[v + 1];
+      soup[i * 3 + 2] = meshMm.positionsMm[v + 2];
+    }
+    mBlock.delete(); mainCav.delete(); shelf.delete(); trappedPocket.delete(); unventedOpen.delete();
+    const unventedCast = await simulateCastFromMoldTriangles(soup, { isClamshell: false });
+    expect(unventedCast.fill).toBeDefined();
+    expect(unventedCast.fill!.trappedMm3).toBeGreaterThan(300);
+  });
+
+  it('never obliterates the main insert cavity if a fine feature touches the holder (C7)', async () => {
+    const wasm = await loadManifold();
+    // Holder: 50x50x25 block with a 30.5x30.5x18.25 pocket (0.25 mm seating gap around a 30x30x18 insert)
+    const holderBlock = wasm.Manifold.cube([50, 50, 25], false).translate([-25, -25, 0]);
+    const holderPocket = wasm.Manifold.cube([30.5, 30.5, 18.3], false).translate([-15.25, -15.25, 6.75]);
+    const holder = holderBlock.subtract(holderPocket);
+    // Insert: 30x30x18 block with a 20x20x12 cavity PLUS a tiny 1x1 mm grid-escape slot reaching the holder wall!
+    const insBlock = wasm.Manifold.cube([30, 30, 18], false).translate([-15, -15, 7]);
+    const cav = wasm.Manifold.cube([20, 20, 12.1], false).translate([-10, -10, 13]);
+    const escapeSlot = wasm.Manifold.cube([6, 1.5, 2], false).translate([10, -0.75, 16]);
+    const ins = insBlock.subtract(cav).subtract(escapeSlot);
+
+    const toSoup = (m: typeof holder) => {
+      const mm = manifoldToMeshMm(m);
+      const out = new Float64Array(mm.faces.length * 3);
+      for (let i = 0; i < mm.faces.length; i++) {
+        const v = mm.faces[i] * 3;
+        out[i * 3] = mm.positionsMm[v];
+        out[i * 3 + 1] = mm.positionsMm[v + 1];
+        out[i * 3 + 2] = mm.positionsMm[v + 2];
+      }
+      return out;
+    };
+    const hSoup = toSoup(holder);
+    const iSoup = toSoup(ins);
+    holderBlock.delete(); holderPocket.delete(); holder.delete();
+    insBlock.delete(); cav.delete(); escapeSlot.delete(); ins.delete();
+
+    const joined = new Float64Array(hSoup.length + iSoup.length);
+    joined.set(hSoup, 0);
+    joined.set(iSoup, hSoup.length);
+    const res = await simulateCastFromMoldTriangles(joined, {
+      isClamshell: false,
+      partingZ: 25,
+      halves: [joined],
+      halfPieceTriangles: [[hSoup.length / 9, iSoup.length / 9]],
+      isInsertLiner: true,
+    });
+    expect(res.success).toBe(true);
+    // Cavity is 20*20*12 = 4,800 mm³ (plus tiny escape slot + seating strip there), NOT 0 mm³!
+    expect(res.castVolumeMm3).toBeGreaterThan(4_500);
+  });
+
+  it('restores part orientation for open molds poured as SceneNodes and supports liner preview buffers (H1, H5, H6)', async () => {
+    const box = (name: string, sx: number, sz: number, x: number, z: number) =>
+      ({ name, type: 'box', size: [sx, 0.005, sz], pos: [x, 0, z] }) as SceneGeom;
+    const frame: SceneGraph = {
+      nodes: [{
+        id: 'f1', name: 'frame', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        geoms: [
+          box('bottom', 0.02, 0.005, 0, 0.005),
+          box('top', 0.02, 0.005, 0, 0.035),
+          box('left', 0.005, 0.01, -0.015, 0.02),
+          box('right', 0.005, 0.01, 0.015, 0.02),
+          box('lug', 0.003, 0.003, 0.016, 0.043),
+        ],
+      }],
+    };
+    // H1: Open lined mold with non-+z pullDirection poured as a SceneNode
+    const openLined = generateMoldMeshes(frame, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'open',
+      dissolvableLiner: true,
+      includeVents: false,
+    });
+    expect(openLined.success).toBe(true);
+    expect(openLined.pullDirection === '+y' || openLined.pullDirection === '-y').toBe(true);
+    const sum = moldSummary(openLined);
+    const mesh = stlToMesh(openLined.binarySTL);
+    const sceneMoldNode: SceneNode = {
+      ...simulatedBody(
+        { positions: mesh.positions, faces: mesh.faces, cellMm: 0, toleranceMm: 0 },
+        { workOriginMm: [0, 0, 0], modelOriginMm: [0, 0, 0], scale: [1, 1, 1], modelMinMm: [0, 0, 0], modelMaxMm: [0, 0, 0] },
+        { id: 'sim_open', name: 'Open Lined Mold', kind: 'mold', placement: 'beside', parts: moldSceneParts(sum) },
+      ),
+    };
+    sceneMoldNode.simulation = { ...sceneMoldNode.simulation!, mold: moldMasterRecord(frame, sum) };
+    const nodeCast = await simulateCastFromMoldNode(sceneMoldNode, { pour: {} });
+    expect(nodeCast.success).toBe(true);
+    expect(nodeCast.sizeMm.width).toBeCloseTo(40, 0);
+    expect(nodeCast.sizeMm.depth).toBeCloseTo(10, 0);
+    expect(nodeCast.sizeMm.height).toBeCloseTo(46, 0);
+
+    // H5: simulateCastFromMoldBuffers with liner buffers matches true sphere volume (not +41% bare shell)
+    const sphereScene: SceneGraph = {
+      nodes: [{
+        id: 's1', name: 's1', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        geoms: [{ name: 'gs', type: 'sphere', size: [0.015], pos: [0, 0, 0] } as SceneGeom],
+      }],
+    };
+    const linedSphereMold = generateMoldMeshes(sphereScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      wallMarginMm: 14,
+      dissolvableLiner: true,
+    });
+    expect(linedSphereMold.success).toBe(true);
+    const bufs = moldPreviewBuffers(linedSphereMold);
+    const bufSim = await simulateCastFromMoldBuffers(
+      moldSummary(linedSphereMold),
+      bufs.bottom.positions,
+      bufs.top?.positions,
+      { trimChannels: true },
+      bufs.liner?.bottom.positions,
+      bufs.liner?.top?.positions,
+    );
+    expect(bufSim.success).toBe(true);
+    const sphereVol = (4 / 3) * Math.PI * Math.pow(15, 3);
+    expect(bufSim.castVolumeMm3).toBeGreaterThan(sphereVol * 0.94);
+    expect(bufSim.castVolumeMm3).toBeLessThan(sphereVol * 1.06);
+
+    // H6: Secondary disconnected cavity emits dropped-cavity warning
+    const wasm = await loadManifold();
+    const twoCavMold = wasm.Manifold.cube([60, 30, 20], false).translate([-30, -15, 0])
+      .subtract(wasm.Manifold.cube([16, 16, 15.1], false).translate([-24, -8, 5]))
+      .subtract(wasm.Manifold.cube([12, 12, 15.1], false).translate([8, -6, 5]));
+    const twoMesh = manifoldToMeshMm(twoCavMold);
+    const twoSoup = new Float64Array(twoMesh.faces.length * 3);
+    for (let i = 0; i < twoMesh.faces.length; i++) {
+      const v = twoMesh.faces[i] * 3;
+      twoSoup[i * 3] = twoMesh.positionsMm[v];
+      twoSoup[i * 3 + 1] = twoMesh.positionsMm[v + 1];
+      twoSoup[i * 3 + 2] = twoMesh.positionsMm[v + 2];
+    }
+    twoCavMold.delete();
+    const twoCast = await simulateCastFromMoldTriangles(twoSoup, { isClamshell: false });
+    expect(twoCast.warnings.some((w) => /another cavity/i.test(w))).toBe(true);
   });
 });

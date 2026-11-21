@@ -46,15 +46,25 @@ export type CastMix =
     };
 
 /**
- * A note that applies when its conditions hold. `{ml}` in the text is
- * replaced by the pour's volume.
+ * A note that applies when its conditions hold. `{ml}`, `{mold}` and `{softenC}`
+ * in the text are replaced by the pour's volume and the mold's filament/softening temperature.
  */
 export interface CastMaterialWarning {
   text: string;
   /** Only when the pour is bigger than this, ml. */
   aboveMl?: number;
-  /** Only in a printed PLA mold. */
+  /** Only when the pour is at most this, ml. */
+  atMostMl?: number;
+  /** Only in a printed mold (`mold.pla === true`). */
   inPla?: boolean;
+  /** Only in a non-printed mold (`mold.pla === false`, e.g. silicone). */
+  inNonPla?: boolean;
+  /** Only when the printed mold's `softenC` is below this temperature, °C. */
+  maxSoftenC?: number;
+  /** Only when the printed mold's `softenC` is at least this temperature, °C. */
+  minSoftenC?: number;
+  /** Only when paired with a hygroscopic water-soluble liner (PVA or BVOH). */
+  inWaterSolubleLiner?: boolean;
 }
 
 export interface CastMaterial {
@@ -89,6 +99,8 @@ export interface CastMaterial {
   /** Rough pouring temperature, °C. Left out for what pours at room temperature. */
   pourC?: number;
   mix?: CastMix;
+  /** Plain workshop guidance when Part A:B ratios vary across brands instead of one fixed ratio. */
+  mixNote?: string;
   /** It cures in water, so it dissolves a PVA liner. */
   waterBased: boolean;
   /**
@@ -131,14 +143,57 @@ export const PLA_SOFTEN_C = 60;
 
 export const CAST_MATERIALS: CastMaterial[] = [
   {
-    id: 'epoxy', label: 'Epoxy resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.15, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.94, 0.88, 0.6],
-    warnings: [{
-      aboveMl: 200,
-      inPla: true,
-      text: 'A {ml} ml epoxy pour may exceed PLA\'s ~60 °C softening point during cure; pour in layers or use deep-pour epoxy.',
-    }],
+    id: 'epoxy', label: 'Epoxy resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.15,
+    mixNote: 'Hobby epoxy ratios vary by brand (craft resins are often 1:1 by volume / ~2:1 by weight; deep-pour resins 2:1 or 3:1) — check your bottle.',
+    waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.94, 0.88, 0.6],
+    warnings: [
+      {
+        aboveMl: 200,
+        inPla: true,
+        maxSoftenC: 90,
+        text: 'A {ml} ml epoxy pour may exceed {mold}\'s ~{softenC} °C softening point during cure; pour in layers or use deep-pour epoxy (and check your bottle\'s Part A:B ratio — often 1:1 by volume or ~2:1 by weight).',
+      },
+      {
+        aboveMl: 200,
+        inPla: true,
+        minSoftenC: 90,
+        text: 'A {ml} ml pour of standard casting epoxy heats strongly as it cures ({mold} holds to ~{softenC} °C, but thick sections can still yellow or crack); use deep-pour epoxy or pour in layers, and check your bottle\'s mix ratio.',
+      },
+      {
+        aboveMl: 200,
+        inNonPla: true,
+        text: 'A {ml} ml pour of standard casting epoxy heats strongly as it cures (especially in insulating silicone, which can yellow or crack); use deep-pour epoxy or pour in layers, and check your bottle\'s mix ratio (often 1:1 by volume or ~2:1 by weight).',
+      },
+    ],
   },
-  { id: 'polyurethane', label: 'Polyurethane resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.05, waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.9, 0.82, 1], warnings: [] },
+  {
+    id: 'polyurethane', label: 'Polyurethane resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.05,
+    mixNote: 'Check your bottle\'s Part A:B ratio (often 1:1 by weight or volume) and keep tooling bone-dry — trace moisture makes polyurethane foam.',
+    waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.9, 0.82, 1],
+    warnings: [
+      {
+        inWaterSolubleLiner: true,
+        text: 'Polyurethane resin foams on contact with trace moisture, which {mold} pulls from the air; dry the liner thoroughly right before pouring, or use HIPS, PVB or silicone instead.',
+      },
+      {
+        aboveMl: 150,
+        inPla: true,
+        maxSoftenC: 90,
+        text: 'A {ml} ml polyurethane pour cures fast and hot enough to soften {mold} (~{softenC} °C), and foams if damp; use a slow-set resin or thinner lifts.',
+      },
+      {
+        aboveMl: 150,
+        inPla: true,
+        minSoftenC: 90,
+        text: 'A {ml} ml polyurethane pour cures fast and hot in thick sections (and foams if damp); use a slow-set resin and dry tooling.',
+      },
+      {
+        aboveMl: 150,
+        inNonPla: true,
+        text: 'A {ml} ml polyurethane pour cures fast and hot in thick sections, and foams on contact with moisture; use a slow-set resin and keep the mold dry.',
+      },
+    ],
+  },
   {
     id: 'platinum', label: 'Platinum-cure silicone', minSectionMm: 1.5, sprueNeckMm: 8, bubbleRiseMm: 3.2, densityGcm3: 1.08, mix: { kind: 'ab', a: 1, b: 1 },
     waterBased: false, metal: false, silicone: true, rgba: [0.9, 0.94, 0.92, 0.6], warnings: [],
@@ -248,19 +303,31 @@ export function mixGrams(id: CastMaterialId, curedGrams: number): { a: number; b
 export function castMaterialWarnings(
   id: CastMaterialId,
   volumeMl: number,
-  /** `pla`: a printed mold. `softenC` and `name` say what it is printed in (default PLA, 60 °C). */
-  mold: { pla: boolean; softenC?: number; name?: string },
+  /** `pla`: a printed mold. `softenC`, `name`, and `waterSoluble` say what it is printed in (default PLA, 60 °C). */
+  mold: { pla: boolean; softenC?: number; name?: string; waterSoluble?: boolean },
 ): string[] {
   const m = castMaterial(id);
   const out: string[] = [];
   const soften = mold.softenC ?? PLA_SOFTEN_C;
+  const moldLabel = mold.name ?? 'PLA';
+  const hygroscopicLiner = Boolean(mold.waterSoluble) || /\b(PVA|BVOH)\b/i.test(mold.name ?? '');
   if (mold.pla && m.pourC !== undefined && m.pourC > soften) {
-    out.push(`Pour ${m.label} below ~${soften} °C to avoid softening a ${mold.name ?? 'PLA'} mold.`);
+    out.push(`Pour ${m.label} below ~${soften} °C to avoid softening a ${moldLabel} mold.`);
   }
   for (const w of m.warnings) {
     if (w.inPla && !mold.pla) continue;
+    if (w.inNonPla && mold.pla) continue;
+    if (w.maxSoftenC !== undefined && !(soften < w.maxSoftenC)) continue;
+    if (w.minSoftenC !== undefined && !(soften >= w.minSoftenC)) continue;
+    if (w.inWaterSolubleLiner && !hygroscopicLiner) continue;
     if (w.aboveMl !== undefined && !(volumeMl > w.aboveMl)) continue;
-    out.push(w.text.replace('{ml}', String(Math.round(volumeMl))));
+    if (w.atMostMl !== undefined && !(volumeMl <= w.atMostMl)) continue;
+    out.push(
+      w.text
+        .replace(/\{ml\}/g, String(Math.round(volumeMl)))
+        .replace(/\{mold\}/g, moldLabel)
+        .replace(/\{softenC\}/g, String(soften)),
+    );
   }
   return out;
 }
