@@ -13,7 +13,14 @@ import {
 import { webSerialManager, ZERO_SEARCH_MM } from './webSerialManager';
 import type { ResumeOptions } from '@physbox-io/machining';
 import { fetchMachineDevices } from './apiClient';
-import { generateSolidMachining, measurePart, deriveSolidOptions, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
+import {
+  measurePart,
+  deriveSolidOptions,
+  DEFAULT_SOLID_OPTIONS,
+  type SolidMachiningOptions,
+  type SolidMachiningResult,
+} from './solidMachiningExporter';
+import { ExportWorkerClient } from './exportWorkerClient';
 import { FACE_NAME, parseSetups } from './orient';
 import { MATERIALS } from './feedsAndSpeeds';
 import { runSettings } from './runSettings';
@@ -129,15 +136,29 @@ export function carveOptions(args: Record<string, unknown>) {
 }
 
 /**
+ * A carve's program, planned on the export worker as the export tools plan
+ * it: a solid's plan takes up to half a minute, and on the page it froze the
+ * tab for all of it.
+ */
+async function planCarve(scene: SceneGraph, options: SolidMachiningOptions): Promise<SolidMachiningResult> {
+  const client = new ExportWorkerClient();
+  try {
+    return await client.run('solid', scene, options);
+  } finally {
+    client.dispose();
+  }
+}
+
+/**
  * The stock outline, for a framing lap.
  *
  * Taken from the machining program rather than the scene's bounding box: the
  * stock is what is clamped to the bed, and it is bigger than the part by
  * whatever the exporter decided it needed.
  */
-export function jobBounds(): { minX: number; minY: number; maxX: number; maxY: number } | null {
+export async function jobBounds(): Promise<{ minX: number; minY: number; maxX: number; maxY: number } | null> {
   if (!currentScene?.nodes?.length) return null;
-  const result = generateSolidMachining(currentScene, carveOptions(lastCarveArgs).options);
+  const result = await planCarve(currentScene, carveOptions(lastCarveArgs).options);
   if (!result.success || !result.stock) return null;
   const planned = (result.plan || lastCarveArgs.setups !== undefined) && result.setups ? result.setups : null;
   const { side } = pickCarveTarget(lastCarveArgs, planned, result.sides);
@@ -181,14 +202,27 @@ export function pickCarveTarget<P extends { index: number }, S extends { side: '
  * picks it; the default is the first.
  */
 async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summary: string }> {
-  if (!currentScene?.nodes?.length) {
+  const scene = currentScene;
+  if (!scene?.nodes?.length) {
     throw new Error('The scene is empty — there is nothing to machine.');
   }
+
+  // The machine is asked first and the plan made after: refused, a carve
+  // plans nothing. And asked again once the plan is back, for whatever
+  // started while it was being made.
+  const refuseBusy = () => {
+    if (!webSerialManager.getState().connected) throw new Error('No machine is connected. Connect one first.');
+    if (webSerialManager.isRunning() || webSerialManager.isJobPaused()) {
+      throw new Error('A job is already running or paused. Cancel it before starting another.');
+    }
+  };
+  refuseBusy();
 
   lastCarveArgs = { ...args };
   const { options, dia, stockFrom } = carveOptions(args);
 
-  const result = generateSolidMachining(currentScene, options);
+  const result = await planCarve(scene, options);
+  refuseBusy();
   if (!result.success) {
     throw new Error(result.error || 'The machining program could not be generated.');
   }
@@ -216,9 +250,6 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     );
   }
 
-  const state = webSerialManager.getState();
-  if (!state.connected) throw new Error('No machine is connected. Connect one first.');
-
   const locate = 'locate' in side
     ? side.locate
     : result.pins.length > 0 && side.side === 'B'
@@ -227,6 +258,10 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
   const setupSeconds = side.estimatedTimeSeconds ?? result.estimatedTimeSeconds;
   const resolvedThicknessMm = result.stock.thicknessMm;
 
+  // The run handler said the next stream is the agent's, for a few seconds;
+  // a big part's plan takes longer than that, and the job then started as a
+  // person's, which a disarm does not stop.
+  webSerialManager.expectAgentJob();
   const run = await webSerialManager.runJob(side.gcode, {
     name: planned ? `carve setup ${wanted}` : `carve side ${side.side}`,
     // Every setup after the first needs the block turned by hand, so the runner refuses it here.
@@ -365,7 +400,6 @@ export function createMeshMachineHandlers(): Record<
     gate: machineArming,
     options: {
       runJob: carveCurrentScene,
-      jobBounds,
       /*
        * This app's own framing, because on a laser the lap is traced with the
        * guide beam lit — that is the whole point of it, since the operator is
@@ -375,7 +409,7 @@ export function createMeshMachineHandlers(): Record<
         const { guidePower, safeZMm } = frameArgs(args);
         return webSerialManager.frameJob(bounds, guidePower, {
           // The lap of a carve is a router's, whatever `$32` says.
-          ...(args.bounds ? {} : { laserMode: false }),
+          ...(args.bounds && !args.carveStock ? {} : { laserMode: false }),
           safeZMm,
         });
       },
@@ -412,7 +446,16 @@ export function createMeshMachineHandlers(): Record<
       return shared.goto_origin(args);
     },
     MACHINE_ZERO_XY: shared.zero_xy,
-    MACHINE_FRAME_JOB: shared.frame_job,
+    MACHINE_FRAME_JOB: async (args: McpArgs) => {
+      if (args.bounds && typeof args.bounds === 'object') return shared.frame_job(args);
+      // Round the carve's stock, which takes planning the carve: on the
+      // worker, and only once the lap would not be refused anyway.
+      machineArming.requireArmed('frame_job');
+      if (!webSerialManager.getState().connected) throw new Error('No machine is connected. Connect one first.');
+      refuseWhileJobHoldsMachine(machine, 'frame the job');
+      const bounds = await jobBounds();
+      return shared.frame_job(bounds ? { ...args, bounds, carveStock: true } : args);
+    },
     MACHINE_TRIM: shared.trim,
     MACHINE_PAUSE: shared.pause,
     MACHINE_RESUME: shared.resume,
@@ -479,7 +522,7 @@ export function createMeshMachineHandlers(): Record<
       const bounds =
         args.bounds && typeof args.bounds === 'object'
           ? probeBounds(args.bounds as Record<string, unknown>)
-          : jobBounds();
+          : await jobBounds();
       if (!bounds) {
         throw new Error('There is nothing to probe: pass bounds, or load a scene first.');
       }

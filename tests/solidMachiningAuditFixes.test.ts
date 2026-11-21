@@ -319,7 +319,7 @@ describe('S-C4: machineMcp bench stock XY origin alignment, face-list setups, an
       expect(carved.stock.depthMm).toBe(100);
       expect((carved.partBounds.minX + carved.partBounds.maxX) / 2).toBeCloseTo(60, 2);
       expect((carved.partBounds.minY + carved.partBounds.maxY) / 2).toBeCloseTo(50, 2);
-      expect(jobBounds()).toEqual({ minX: 0, minY: 0, maxX: 120, maxY: 100 });
+      expect(await jobBounds()).toEqual({ minX: 0, minY: 0, maxX: 120, maxY: 100 });
 
       // Face-list setups parsed cleanly
       const withSetups = carveOptions({ toolDiaMm: 6, setups: ['-y', '+z'] });
@@ -358,7 +358,7 @@ describe('S-C4: machineMcp bench stock XY origin alignment, face-list setups, an
         expect(reply.summary).toContain('Cutting setup 1 of 2 (front up)');
         expect(reply.summary).not.toContain('undefined');
         // Bounds for the active -y setup match the block standing on its back (width x thickness)
-        expect(jobBounds()).toEqual({
+        expect(await jobBounds()).toEqual({
           minX: 0,
           minY: 0,
           maxX: pocketCarved.setups![0].stock.widthMm,
