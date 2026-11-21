@@ -11,6 +11,7 @@ import { clearingRings } from './adaptiveClearing';
 import { commentText } from './gcodeComments';
 import { measureGcodeBounds } from './workEnvelope';
 import { routerStepdownMm } from './sheetCutRecipe';
+import type { RackTool } from '@physbox-io/machining';
 
 export interface GcodeExportOptions {
   machineMode: 'laser' | 'cnc';
@@ -78,6 +79,10 @@ export interface GcodeExportOptions {
    * (`bitDiameterMm`): a facing pass must never ask for a tool nobody fitted.
    */
   facingBitDiameterMm?: number;
+  /** That bit's T number in the tool rack, so the tool change names the real bit. */
+  facingToolNumber?: number;
+  /** The profile bit's T number in the rack, when it is in it. */
+  profileToolNumber?: number;
   /** Stepover as a fraction of the facing bit's diameter. */
   facingStepoverFraction: number;
   /** How much depth the facing bit takes per pass, in mm. */
@@ -132,6 +137,28 @@ export interface GcodeExportOptions {
   cutterCompensation: 'auto' | 'off';
   /** Cutter diameter in mm, which is what the compensation is half of. */
   bitDiameterMm: number;
+}
+
+/**
+ * Stock thicker than the part by no more than this is left alone: sheet goods
+ * vary by about that much, so facing it off would chase the sheet's own
+ * tolerance (and stop for a tool change) for nothing.
+ */
+export const FACING_MIN_EXCESS_MM = 0.1;
+
+/**
+ * The bit from the tool rack to face with: the widest flat one at least twice
+ * the job's bit and at least 10 mm across, which is what makes a second bit
+ * worth a tool change. None, and the job's own bit faces (no tool change).
+ */
+export function pickFacingTool(tools: readonly RackTool[], jobBitMm: number): RackTool | null {
+  const min = Math.max(2 * jobBitMm, 10);
+  let best: RackTool | null = null;
+  for (const t of tools) {
+    if (t.shape !== 'flat' || !(t.diameterMm >= min)) continue;
+    if (!best || t.diameterMm > best.diameterMm) best = t;
+  }
+  return best;
 }
 
 export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
@@ -984,12 +1011,15 @@ export function generateLaserCutGcode(
    */
   const facingBit = facingBitOf(options);
   const twoBits = options.pauseOnToolChange && Math.abs(facingBit - options.bitDiameterMm) > 0.01;
+  // Rack numbers when the caller has them; otherwise 1 and 2, never the same.
+  const facingT = options.facingToolNumber ?? (options.profileToolNumber === 1 ? 2 : 1);
+  const profileT = options.profileToolNumber ?? (facingT === 2 ? 1 : 2);
   let fitted: 'facing' | 'profile' | null = null;
   const fit = (bit: 'facing' | 'profile', sIdx: number) => {
     if (fitted !== null && fitted !== bit && twoBits) {
       const dia = bit === 'facing' ? facingBit : options.bitDiameterMm;
       const what = bit === 'facing' ? 'facing bit' : 'end mill for the profiles';
-      const toolNumber = bit === 'facing' ? 1 : 2;
+      const toolNumber = bit === 'facing' ? facingT : profileT;
       operations.push({ id: `tool_${operations.length}`, name: `Fit the ${f(dia)}mm ${what}`, type: 'pause_tool', sheetIndex: sIdx, toolNumber });
       const travel = f(Math.max(options.safeZ, 20));
       lines.push(``);
@@ -1006,6 +1036,10 @@ export function generateLaserCutGcode(
       lines.push(`G0 Z${travel} ; back to travel height after the change`);
       lines.push(`M3 S${Math.round(options.spindleRpm)}`);
       lines.push(`G4 P2`);
+    }
+    // The job starts on the facing bit: name it, as the change back names the other.
+    if (fitted === null && bit === 'facing' && twoBits) {
+      lines.push(`; Start with T${facingT} fitted: the ${f(facingBit)}mm facing bit`);
     }
     fitted = bit;
   };
@@ -1076,11 +1110,10 @@ export function generateLaserCutGcode(
      */
     if (options.machineMode === 'cnc' && options.faceToThickness) {
       const stockMm = options.sheetStockThicknessMm?.[sKey];
-      // Below a tenth of a millimetre there is nothing to take off, and sheet
-      // goods are not flat enough for the attempt to mean anything.
+      // Within the sheet's own tolerance there is nothing to take off.
       const removalOf = (panel: LaserPanel) => {
         const removal = stockMm !== undefined ? stockMm - panel.thickness * 1000 : 0;
-        return removal > 0.1 ? removal : 0;
+        return removal > FACING_MIN_EXCESS_MM ? removal : 0;
       };
       const placedOuter = (panel: LaserPanel) => {
         const at = panel.placedPos2D || { x: 0, y: 0 };

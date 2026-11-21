@@ -21,6 +21,7 @@ import type { LaserPanel, Point2D, SheetSpec } from './laserCutExporter';
 import type { ContourLayer } from './contourSliceExporter';
 import type { StockTransform } from './reliefCarveExporter';
 import { enclosedVolume } from './simulationMesh';
+import { FACING_MIN_EXCESS_MM } from './gcodeExporter';
 
 export interface SheetPart {
   /** Outlines, holes and islands, mm in the part's plane. Nesting, not winding, says which is which. */
@@ -193,7 +194,7 @@ export function laserSheetParts(
     };
     const drawnMm = panel.thickness * 1000;
     const stockMm = sheets?.[panel.sheetIndex ?? 0]?.thicknessMm ?? drawnMm;
-    const t = options?.faceToThickness && stockMm - drawnMm > 0.1 ? drawnMm : stockMm;
+    const t = options?.faceToThickness && stockMm - drawnMm > FACING_MIN_EXCESS_MM ? drawnMm : stockMm;
     const o = panel.origin3D, u = panel.uAxis3D, v = panel.vAxis3D;
     return {
       loops: [panel.outerPolygon2D, ...panel.innerCutouts2D].map((l) => l.map(back)),

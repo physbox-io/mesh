@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../src/utils/gcodeExporter';
+import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS, pickFacingTool, FACING_MIN_EXCESS_MM } from '../src/utils/gcodeExporter';
+import type { RackTool } from '@physbox-io/machining';
 import type { LaserPanel, Point2D } from '../src/utils/laserCutExporter';
 
 /**
@@ -127,5 +128,54 @@ describe('sheet facing never cuts into a neighbouring part (H30)', () => {
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/^a cannot be faced without cutting into b/);
     expect(r.error!.split(/\.\s/).length).toBe(1);
+  });
+});
+
+describe('facing picks its bit from the tool rack (H30)', () => {
+  const tool = (toolNumber: number, diameterMm: number, shape: 'flat' | 'ball' | 'vbit' | 'drill' = 'flat') =>
+    ({ uid: `t${toolNumber}`, toolNumber, name: `${diameterMm} mm ${shape}`, shape, diameterMm }) as RackTool;
+  const job = (rack: RackTool[], stockMm = 10) => {
+    const pick = pickFacingTool(rack, 3.175);
+    return generateLaserCutGcode([panel('a', rect(100, 60), { x: 40, y: 40 }, 8)], {
+      ...cnc, sheetStockThicknessMm: [stockMm],
+      facingBitDiameterMm: pick?.diameterMm, facingToolNumber: pick?.toolNumber,
+    });
+  };
+
+  it('faces with a wide flat bit from the rack, calling it by its own T number', () => {
+    const r = job([tool(1, 3.175), tool(4, 22), tool(5, 30, 'ball'), tool(6, 6)]);
+    expect(r.success).toBe(true);
+    expect(r.gcode).toMatch(/^; Start with T4 fitted: the 22\.000mm facing bit/m);
+    // Back to the profile bit afterwards, under a different number.
+    expect(r.gcode).toMatch(/^T(?!4\b)\d+ M6 ; fit the 3\.175mm end mill/m);
+    const cuts = facingCuts(r.gcode);
+    expect(r.bounds.minX).toBeCloseTo(Math.min(...cuts.flatMap((c) => [c.a.x, c.b.x])) - 11, 3);
+  });
+
+  it('changes back to that T number to face the next sheet', () => {
+    const pick = pickFacingTool([tool(1, 3.175), tool(4, 22)], 3.175)!;
+    const two = [panel('a', rect(100, 60), { x: 40, y: 40 }, 8), { ...panel('b', rect(100, 60), { x: 40, y: 40 }, 8), sheetIndex: 1 } as LaserPanel];
+    const r = generateLaserCutGcode(two, {
+      ...cnc, sheetStockThicknessMm: [10, 10], sheetSizeMm: [{ widthMm: 600, heightMm: 400 }, { widthMm: 600, heightMm: 400 }],
+      facingBitDiameterMm: pick.diameterMm, facingToolNumber: pick.toolNumber, profileToolNumber: 1,
+    });
+    expect(r.gcode).toMatch(/^T4 M6 ; fit the 22\.000mm facing bit/m);
+    expect(r.gcode).toMatch(/^T1 M6 ; fit the 3\.175mm end mill/m);
+    expect(r.operations.some((o) => o.type === 'pause_tool' && o.toolNumber === 4)).toBe(true);
+  });
+
+  it('faces with the job bit, no tool change, when the rack has nothing wide enough', () => {
+    const r = job([tool(1, 3.175), tool(2, 6), tool(3, 8)]);
+    expect(pickFacingTool([tool(1, 3.175), tool(2, 6), tool(3, 8)], 3.175)).toBeNull();
+    expect(r.success).toBe(true);
+    expect(r.operations.some((o) => o.type === 'facing')).toBe(true);
+    expect(r.gcode).not.toMatch(/\bM6\b/);
+  });
+
+  it('does not face at all, nor change tools, for stock a sheet tolerance thick', () => {
+    const r = job([tool(4, 22)], 8.05);
+    expect(r.operations.some((o) => o.type === 'facing')).toBe(false);
+    expect(r.gcode).not.toMatch(/\bM6\b/);
+    expect(FACING_MIN_EXCESS_MM).toBe(0.1);
   });
 });

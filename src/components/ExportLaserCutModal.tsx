@@ -8,7 +8,8 @@ import { canStartSheetJob, defaultCornerRelief, layoutCutOutset, layoutKerf, lay
 import { useLaserPowers } from '../hooks/useLaserPowers';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { buildEtchHandoffUrl, openInEtch } from '../utils/etchHandoff';
-import { DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
+import { DEFAULT_GCODE_OPTIONS, FACING_MIN_EXCESS_MM, pickFacingTool } from '../utils/gcodeExporter';
+import { rackToolsFor, useToolRack } from '../utils/toolRack';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
@@ -376,6 +377,19 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       materialThicknessMm, attachments, attachmentWidthMm, attachmentSpacingMm,
       attachmentHeightMm, bitDiameterMm]);
   const gcodeFields = useSettled(liveGcodeFields, 250);
+  // Facing runs on the widest flat bit in the rack worth a tool change, else on
+  // the job's own bit; the rack's T numbers name both at the change.
+  const toolRack = useToolRack();
+  const rackTooling = useMemo(() => {
+    const flats = rackToolsFor(toolRack, ['flat']);
+    const facing = pickFacingTool(flats, gcodeFields.bitDiameterMm);
+    const profile = flats.find((t) => Math.abs(t.diameterMm - gcodeFields.bitDiameterMm) < 1e-3 && t !== facing);
+    return {
+      facingBitDiameterMm: facing?.diameterMm,
+      facingToolNumber: facing?.toolNumber,
+      profileToolNumber: profile?.toolNumber,
+    };
+  }, [toolRack, gcodeFields.bitDiameterMm]);
 
   // Compute G-Code output result
   // Offsetting a dense outline for the router bit is real work; it runs on the
@@ -389,7 +403,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       !!sheetStockThicknessMm &&
       exportResult.panels.some((p) => {
         const stockMm = sheetStockThicknessMm[p.sheetIndex ?? 0];
-        return stockMm !== undefined && stockMm - p.thickness * 1000 > 0.1;
+        return stockMm !== undefined && stockMm - p.thickness * 1000 > FACING_MIN_EXCESS_MM;
       });
     return client.run('laserGcode', scene, {
       panels: exportResult.panels,
@@ -406,6 +420,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
         engraveFeedrate: f.engraveFeedrate,
         cutDepthZ: f.materialThicknessMm,
         faceToThickness,
+        ...rackTooling,
         // Each sheet's own thickness and stepdown, for a rack of mixed stock.
         sheetStockThicknessMm,
         sheetZStepdownMm: exportResult.sheets?.map((s) => routerStepdownMm(s.thicknessMm, f.bitDiameterMm)),
@@ -420,7 +435,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       },
       probedGrid,
     });
-  }, [exportResult, gcodeFields, machineState.motion, probedGrid, scene]);
+  }, [exportResult, gcodeFields, machineState.motion, probedGrid, rackTooling, scene]);
   const gcodeResult = exportResult?.success && exportResult.panels ? gcodeJob.result : null;
   const failure = exportResult?.success ? (gcodeResult?.error ?? gcodeJob.failure) : exportResult?.error;
 
@@ -448,7 +463,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       !!exportResult.sheets &&
       exportResult.panels.some((p) => {
         const stockMm = exportResult.sheets?.[p.sheetIndex ?? 0]?.thicknessMm;
-        return stockMm !== undefined && stockMm - p.thickness * 1000 > 0.1;
+        return stockMm !== undefined && stockMm - p.thickness * 1000 > FACING_MIN_EXCESS_MM;
       });
     const distinctStockMm = exportResult.sheets
       ? Array.from(new Set(exportResult.sheets.map((s) => s.thicknessMm)))
