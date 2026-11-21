@@ -176,9 +176,10 @@ describe('jobResume', () => {
       expect(joined).toContain('G0 Z1.000');
       // And the plunge is the program's own, in its own units.
       expect(joined).toMatch(/G1 Z-0\.100 F10\b/);
-      // With none to go by, 300 mm/min, not 300 in/min.
+      // With no plunge to go by, the bit's own slowest feed in inches, never a
+      // made-up 300 mm/min.
       const noPlunge = ['G20', 'G90', 'G0 Z0.2', 'M3 S10000', 'G0 X1 Y1 Z-0.1', 'G1 X2 F10'];
-      expect(planResume(noPlunge, 6).preamble.join('\n')).toMatch(/G1 Z-0\.100 F12\b/);
+      expect(planResume(noPlunge, 6).preamble.join('\n')).toMatch(/G1 Z-0\.100 F10\b/);
     });
   });
 
