@@ -21,6 +21,60 @@ function buffersToGeometry(buf: MoldHalfBuffers): THREE.BufferGeometry {
   return geo;
 }
 
+/** Zero-copy triangle-range subview of a `MoldHalfBuffers`. */
+function sliceBuffers(buf: MoldHalfBuffers, startTri: number, triCount: number): MoldHalfBuffers | null {
+  const start = Math.max(0, startTri * 9);
+  const end = Math.min(buf.positions.length, (startTri + triCount) * 9);
+  if (end <= start) return null;
+  return {
+    positions: buf.positions.subarray(start, end),
+    normals: buf.normals.subarray(start, end),
+  };
+}
+
+function bufferBounds(buf: MoldHalfBuffers): { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number } | null {
+  const p = buf.positions;
+  if (p.length < 3) return null;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    const x = p[i], y = p[i + 1], z = p[i + 2];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  return { minX, maxX, minY, maxY, minZ, maxZ };
+}
+
+/**
+ * Splits `result.parts` into per-half liner piece triangle counts (for `Holder + insert`
+ * plate layout) and total trailing C-clip triangle count (for `separable` molds).
+ */
+function parseMoldPreviewParts(result: MoldSummary): {
+  bottomLinerPieces: number[];
+  topLinerPieces: number[];
+  clipTriangles: number;
+} {
+  const bottomLinerPieces: number[] = [];
+  const topLinerPieces: number[] = [];
+  let clipTriangles = 0;
+  let shellSeen = 0;
+  for (const part of result.parts) {
+    if (part.role === 'clip') {
+      clipTriangles += part.triangles;
+    } else if (part.role === 'shell') {
+      // A split open mold has two 'shell' halves and no liner; lined halves have one 'shell' each.
+      shellSeen++;
+    } else if (part.role === 'liner') {
+      if (shellSeen <= 1) bottomLinerPieces.push(part.triangles);
+      else topLinerPieces.push(part.triangles);
+    }
+  }
+  return { bottomLinerPieces, topLinerPieces, clipTriangles };
+}
+
 function indexedMeshToGeometry(mesh: IndexedMesh): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
@@ -49,6 +103,7 @@ export function MoldPreviewView({
   const mountRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<THREE.Group | null>(null);
   const effectiveViewMode = effectiveMoldView(moldType, viewMode);
+  const hasClips = result.parts.some((p) => p.role === 'clip');
 
   // Setup WebGL Three.js Scene and OrbitControls
   useEffect(() => {
@@ -138,7 +193,7 @@ export function MoldPreviewView({
   // Update Three.js meshes whenever result, viewMode, isXRay, or explodeGap changes
   useEffect(() => {
     const group = contentRef.current;
-    if (!group || !result.success) return;
+    if (!group) return;
 
     const disposeGroup = (g: THREE.Group) => {
       g.traverse((o) => {
@@ -150,12 +205,36 @@ export function MoldPreviewView({
       });
       g.clear();
     };
+    // Always clear previous geometry first so a logical refusal (`!result.success`)
+    // never leaves a stale 3D mold lingering on screen above zeroed stats.
     disposeGroup(group);
+    if (!result.success) return;
 
-    const bottomBuf = preview?.bottom ?? null;
-    const topBuf = preview?.top ?? null;
+    const rawBottomBuf = preview?.bottom ?? null;
+    const rawTopBuf = preview?.top ?? null;
     const linerBottomBuf = preview?.liner?.bottom ?? null;
     const linerTopBuf = preview?.liner?.top ?? null;
+
+    // Separate trailing sliding C-clip triangles from whichever half buffer
+    // `moldPreviewBuffers` appended them to, so clips render in slate on Z = 0
+    // rather than flipping upside-down in mid-air with the purple clamshell lid.
+    const { bottomLinerPieces, topLinerPieces, clipTriangles } = parseMoldPreviewParts(result);
+    let bottomBuf = rawBottomBuf;
+    let topBuf = rawTopBuf;
+    let clipsBuf: MoldHalfBuffers | null = null;
+    if (clipTriangles > 0) {
+      if (rawTopBuf) {
+        const totalTris = Math.floor(rawTopBuf.positions.length / 9);
+        const shellTris = Math.max(0, totalTris - clipTriangles);
+        topBuf = sliceBuffers(rawTopBuf, 0, shellTris);
+        clipsBuf = sliceBuffers(rawTopBuf, shellTris, clipTriangles);
+      } else if (rawBottomBuf) {
+        const totalTris = Math.floor(rawBottomBuf.positions.length / 9);
+        const shellTris = Math.max(0, totalTris - clipTriangles);
+        bottomBuf = sliceBuffers(rawBottomBuf, 0, shellTris);
+        clipsBuf = sliceBuffers(rawBottomBuf, shellTris, clipTriangles);
+      }
+    }
 
     // Materials
     const bottomMat = new THREE.MeshStandardMaterial({
@@ -178,13 +257,23 @@ export function MoldPreviewView({
       side: THREE.DoubleSide,
     });
 
-    // The PVA liner: what dissolves, drawn pale so the shell reads as the mold.
+    // The soluble liner or insert: drawn pale so the rigid shell/holder reads apart from it.
     const linerMat = new THREE.MeshStandardMaterial({
       color: 0xf1f5f9,
       roughness: 0.6,
       metalness: 0,
       transparent: isXRay,
       opacity: isXRay ? 0.5 : 1.0,
+      depthWrite: !isXRay,
+      side: THREE.DoubleSide,
+    });
+
+    const clipMat = new THREE.MeshStandardMaterial({
+      color: 0x94a3b8, // Slate
+      roughness: 0.35,
+      metalness: 0.15,
+      transparent: isXRay,
+      opacity: isXRay ? 0.45 : 1.0,
       depthWrite: !isXRay,
       side: THREE.DoubleSide,
     });
@@ -197,10 +286,39 @@ export function MoldPreviewView({
       place: (m: THREE.Mesh) => void = () => {},
     ) => {
       for (const [b, m] of [[buf, mat], [linerBuf, linerMat]] as const) {
-        if (!b) continue;
+        if (!b || b.positions.length === 0) continue;
         const mesh = new THREE.Mesh(buffersToGeometry(b), m);
         place(mesh);
         group.add(mesh);
+      }
+    };
+
+    /**
+     * In `Holder + insert` mode on the Print Plate, lay each soluble insert (and
+     * any split upper insert pieces) flat on Z = 0 in front of its holder, just as
+     * the exported 3MF prints them rather than hidden inside the holder's pocket.
+     */
+    const addPlatedInsertPieces = (
+      linerBuf: MoldHalfBuffers | null,
+      pieceCounts: number[],
+      holderMinY: number,
+    ) => {
+      if (!linerBuf || linerBuf.positions.length === 0) return;
+      const totalTris = Math.floor(linerBuf.positions.length / 9);
+      const counts = pieceCounts.length > 0 ? pieceCounts : [totalTris];
+      const gapMm = 10;
+      let cursorTri = 0;
+      let nextMaxY = holderMinY - gapMm;
+      for (const count of counts) {
+        const piece = sliceBuffers(linerBuf, cursorTri, count);
+        cursorTri += count;
+        if (!piece) continue;
+        const bb = bufferBounds(piece);
+        if (!bb) continue;
+        const mesh = new THREE.Mesh(buffersToGeometry(piece), linerMat);
+        mesh.position.set(0, nextMaxY - bb.maxY, -bb.minZ);
+        group.add(mesh);
+        nextMaxY -= (bb.maxY - bb.minY) + gapMm;
       }
     };
 
@@ -218,11 +336,26 @@ export function MoldPreviewView({
     const topCenterX = result.topHalf
       ? (result.topHalf.bounds.minX + result.topHalf.bounds.maxX) / 2
       : 0;
+    const isInsertMode = result.liner?.construction === 'insert';
 
+    let maxExtent = result.moldWidthMm * 2.5;
     if (effectiveViewMode === 'plate') {
-      // Build Plate Layout: Both halves flat side-by-side at Z=0
-      addHalf(bottomBuf, linerBottomBuf, bottomMat);
-      if (moldType === 'clamshell') addHalf(topBuf, linerTopBuf, topMat);
+      if (isInsertMode) {
+        addHalf(bottomBuf, null, bottomMat);
+        addPlatedInsertPieces(linerBottomBuf, bottomLinerPieces, result.bottomHalf.bounds.minY);
+        if (moldType === 'clamshell') {
+          addHalf(topBuf, null, topMat);
+          addPlatedInsertPieces(linerTopBuf, topLinerPieces, result.topHalf?.bounds.minY ?? result.bottomHalf.bounds.minY);
+        }
+        maxExtent = Math.max(maxExtent, (result.moldDepthMm + 12) * 3);
+      } else {
+        // Build Plate Layout: Both halves flat side-by-side at Z=0
+        addHalf(bottomBuf, linerBottomBuf, bottomMat);
+        if (moldType === 'clamshell') addHalf(topBuf, linerTopBuf, topMat);
+      }
+      if (clipsBuf) {
+        group.add(new THREE.Mesh(buffersToGeometry(clipsBuf), clipMat));
+      }
     } else if (effectiveViewMode === 'clamshell_exploded') {
       // Exploded View: Bottom cavity at Z=0, Top core/lid elevated above it facing downward
       addHalf(bottomBuf, linerBottomBuf, bottomMat, (m) => m.position.set(-botCenterX, 0, 0));
@@ -233,6 +366,14 @@ export function MoldPreviewView({
           m.rotation.x = Math.PI;
           m.position.set(-topCenterX, 0, botTopZ + lidTopZ + explodeGap);
         });
+      }
+      if (clipsBuf) {
+        const clipBounds = bufferBounds(clipsBuf);
+        const halfRightX = result.bottomHalf.bounds.maxX - botCenterX;
+        const shiftX = clipBounds ? halfRightX + 12 - clipBounds.minX : 0;
+        const clipMesh = new THREE.Mesh(buffersToGeometry(clipsBuf), clipMat);
+        clipMesh.position.set(shiftX, 0, clipBounds ? -clipBounds.minZ : 0);
+        group.add(clipMesh);
       }
     } else if (effectiveViewMode === 'bottom_only') {
       addHalf(bottomBuf, linerBottomBuf, bottomMat, (m) => m.position.set(-botCenterX, 0, 0));
@@ -246,7 +387,7 @@ export function MoldPreviewView({
     }
 
     // Grid on Z=0
-    const gridDim = Math.max(120, result.moldWidthMm * 2.5);
+    const gridDim = Math.max(120, maxExtent);
     const grid = new THREE.GridHelper(gridDim, 24, 0x94a3b8, 0x334155);
     grid.rotation.x = Math.PI / 2; // Lie flat in XY plane
     group.add(grid);
@@ -412,12 +553,34 @@ export function MoldPreviewView({
             <>
               <div className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full bg-cyan-400" />
-                <span className="text-slate-200">Bottom Cavity</span>
+                <span className="text-slate-200">
+                  {result.liner
+                    ? `Bottom ${result.liner.construction === 'insert' ? 'Holder' : 'Shell'} (${result.liner.shellMaterial})`
+                    : 'Bottom Cavity'}
+                </span>
               </div>
               {moldType === 'clamshell' && (
                 <div className="flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full bg-purple-400" />
-                  <span className="text-slate-200">Top Lid (Pins &amp; Sprue)</span>
+                  <span className="text-slate-200">
+                    {result.liner
+                      ? `Top ${result.liner.construction === 'insert' ? 'Holder' : 'Shell'} (${result.liner.shellMaterial})`
+                      : 'Top Lid (Pins & Sprue)'}
+                  </span>
+                </div>
+              )}
+              {result.liner && (
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-slate-100 border border-slate-400" />
+                  <span className="text-slate-200">
+                    Soluble {result.liner.construction === 'insert' ? 'Insert' : 'Liner'} ({result.liner.linerMaterial})
+                  </span>
+                </div>
+              )}
+              {hasClips && (effectiveViewMode === 'plate' || effectiveViewMode === 'clamshell_exploded') && (
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-slate-400" />
+                  <span className="text-slate-200">Sliding Clips</span>
                 </div>
               )}
             </>

@@ -2,6 +2,7 @@ import type { PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { PocketSpec } from '../utils/pocketCutter';
 import type { PourBoxOptions } from '../utils/siliconeMold';
+import type { LinerPairId } from '../utils/linerMaterials';
 import type { BrickworkOptions } from '../utils/brickwork';
 import type { ClothSpec, BodyFormMeasurements } from './cloth';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
@@ -1259,6 +1260,17 @@ export interface SceneNode {
       ventStubs?: VentStub[];
       /** What every hole and peg is, in words (moldFeatureLines), for the mold's inspector card. */
       featureLines?: string[];
+      /** When the mold has a dissolvable liner: its filament pair, solvent solubility, softening limit, and how it prints. */
+      liner?: {
+        pair: LinerPairId;
+        label: string;
+        shellMaterial: string;
+        linerMaterial: string;
+        solvent: string;
+        waterSoluble: boolean;
+        softenC: number;
+        construction: 'combined' | 'insert';
+      };
     };
   };
 }

@@ -10,10 +10,12 @@ import { loadManifold } from '../src/utils/sculptCut';
 import { stlToMesh } from '../src/utils/stlMesh';
 import { analyzeMesh, meshShells } from '../src/utils/meshIntegrity';
 import { simulatedBody } from '../src/utils/simulatedPart';
-import { moldMasterRecord, moldOptionsFor, moldSceneParts, pourShortfallWarning } from '../src/utils/moldWorkerClient';
+import { moldMasterRecord, moldOptionsFor, moldSceneParts, pourShortfallWarning, runMcpMoldSimulation } from '../src/utils/moldWorkerClient';
 import { simulateCastFromMoldNode } from '../src/utils/moldCastSimulation';
 import { meshIntegrity } from '../src/utils/sceneSummary';
 import { exportBaseName } from '../src/utils/exportBaseName';
+import { findNodeInScene } from '../src/hooks/mcp/bridgeUtils';
+import { useStore } from '../src/store/useStore';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
 
 const ball: SceneGraph = {
@@ -470,5 +472,71 @@ describe('separable and clip-clamped rigid molds', () => {
         expect(cast.castVolumeMm3).toBeLessThan(record.masterVolumeMm3 * 1.10);
       }
     }
+  });
+
+  it('preserves liner metadata on moldMasterRecord and guards scene pours against water/bath conflicts while keeping PLA thermal notes', async () => {
+    const pvaRes = generateMoldMeshes(ball, { ...CLAMSHELL, dissolvableLiner: true, linerPair: 'pla_pva', castMaterial: 'epoxy', wallMarginMm: 14 }, wasm);
+    const pvaSummary = moldSummary(pvaRes);
+    const pvaRecord = moldMasterRecord(ball, pvaSummary);
+    expect(pvaRecord.liner).toMatchObject({
+      pair: 'pla_pva',
+      label: 'PLA + PVA',
+      waterSoluble: true,
+      softenC: 60,
+      construction: 'combined',
+    });
+
+    const hipsRes = generateMoldMeshes(ball, { ...CLAMSHELL, dissolvableLiner: true, linerPair: 'abs_hips', castMaterial: 'plaster', wallMarginMm: 14 }, wasm);
+    const hipsRecord = moldMasterRecord(ball, moldSummary(hipsRes));
+    expect(hipsRecord.liner).toMatchObject({
+      pair: 'abs_hips',
+      label: 'ABS + HIPS',
+      waterSoluble: false,
+      softenC: 95,
+    });
+
+    const mesh = stlToMesh(pvaRes.binarySTL);
+    const pvaNode = simulatedBody(
+      { ...mesh, cellMm: 0, toleranceMm: 0 },
+      { modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [1, 1, 1], modelMinMm: [-20, -20, 0], modelMaxMm: [20, 20, 40] },
+      { id: 'sim_pva', name: 'PVA Mold', kind: 'mold', placement: 'beside', parts: moldSceneParts(pvaSummary) },
+    );
+    pvaNode.simulation = { ...pvaNode.simulation!, mold: pvaRecord };
+
+    const sceneWithMold: SceneGraph = { nodes: [...ball.nodes, pvaNode] };
+    useStore.getState().updateScene(sceneWithMold);
+
+    // Water-based plaster into a water-soluble PVA-lined scene mold must be refused.
+    const plasterReply = await runMcpMoldSimulation({
+      msg: { kind: 'mold_cast', bodyId: 'sim_pva', castMaterial: 'plaster' },
+      scene: sceneWithMold,
+      placement: 'beside',
+      toId: (s) => s,
+      findNodeInScene,
+    });
+    expect(plasterReply.ok).toBe(false);
+    expect(String(plasterReply.error)).toMatch(/water-soluble liner/i);
+
+    // Chocolate (meltsInBath) into any lined scene mold must be refused.
+    const chocReply = await runMcpMoldSimulation({
+      msg: { kind: 'mold_cast', bodyId: 'sim_pva', castMaterial: 'chocolate' },
+      scene: sceneWithMold,
+      placement: 'beside',
+      toId: (s) => s,
+      findNodeInScene,
+    });
+    expect(chocReply.ok).toBe(false);
+    expect(String(chocReply.error)).toMatch(/melts/i);
+
+    // Hot wax (70 °C > 60 °C PLA+PVA softening point) into a printed scene mold emits thermal materialNotes.
+    const waxReply = await runMcpMoldSimulation({
+      msg: { kind: 'mold_cast', bodyId: 'sim_pva', castMaterial: 'wax', airAware: false },
+      scene: sceneWithMold,
+      placement: 'beside',
+      toId: (s) => s,
+      findNodeInScene,
+    });
+    expect(waxReply.ok, String(waxReply.error)).toBe(true);
+    expect((waxReply.materialNotes as string[] | undefined)?.some((n) => n.includes('60 °C'))).toBe(true);
   });
 });

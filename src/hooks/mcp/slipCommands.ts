@@ -114,7 +114,7 @@ export const slipCommands: McpCommands = {
     const deg = num(msg.draftDeg) ?? DEFAULT_TAB_DRAFT.draft;
     if (deg <= 0 || deg > MAX_ADD_DRAFT_DEG) return { ok: false, error: `draft_deg is more than 0 and at most ${MAX_ADD_DRAFT_DEG}.` };
     if (msg.keep !== undefined && msg.keep !== 'top' && msg.keep !== 'base') return { ok: false, error: "keep is 'top' (add material) or 'base' (remove material)." };
-    if (store.sceneGraph.castPrep?.draftDeg) return { ok: false, error: 'Prepare for Casting has already drafted the part; switch it off first (physics_set_cast_prep enabled: false).' };
+    if (store.sceneGraph.castPrep?.draftDeg) return { ok: false, error: 'Prepare for Casting has already drafted the part; switch it off first (physics_set_cast_prep off: true).' };
     const r = applyAddDraft(subject.ids, deg, msg.keep === 'base' ? 'remove' : 'add');
     if (r.error) return { ok: false, error: r.error };
     return {

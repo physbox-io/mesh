@@ -42,7 +42,8 @@ import {
   type CastMaterialId,
 } from './castMaterials';
 import { stlToMesh } from './stlMesh';
-import { LINER_PAIRS, resolveLinerPair } from './linerMaterials';
+import { LINER_PAIRS, linerPair, pairSoftenC, resolveLinerPair } from './linerMaterials';
+import { MELTS_REFUSAL, WATER_BASED_REFUSAL } from './moldLiner';
 import { dfmReportFor } from './dfmWorkerClient';
 import type { SimulationPart } from './simulatedPart';
 import { appendSolidTriangles, collectSceneTriangles } from './contourSliceExporter';
@@ -64,10 +65,10 @@ import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
 export interface MoldPreview {
   summary: MoldSummary;
-  /** Each half as drawn: with a liner, its PLA shell only. */
+  /** Each half as drawn: with a liner, its rigid shell/holder only. */
   bottom: MoldHalfBuffers;
   top: MoldHalfBuffers | null;
-  /** The PVA liner of each half, when the mold has one. */
+  /** The soluble liner or insert of each half, when the mold has one. */
   liner: { bottom: MoldHalfBuffers; top: MoldHalfBuffers | null } | null;
 }
 
@@ -172,7 +173,7 @@ export class MoldWorkerClient {
     return this.send<Uint8Array>({ type: 'STL' });
   }
 
-  /** The lined mold as a two-material 3MF (PLA shell on filament 1, PVA liner on 2). */
+  /** The lined mold as a 3MF (two-filament assembly, or separate holder + insert objects on the bed). */
   async threeMf(): Promise<Uint8Array> {
     if (!this.worker) {
       const bytes = this.lastResult?.threeMf;
@@ -258,11 +259,12 @@ async function thinSectionWarnings(scene: SceneGraph, material: CastMaterialId |
 /** What a mold body records about its master (see SceneNode.simulation.mold). */
 export function moldMasterRecord(
   scene: SceneGraph,
-  summary: Pick<MoldSummary, 'moldType' | 'pullDirection' | 'cavityHoldsTop' | 'bottomHalf' | 'topHalf' | 'features'>,
+  summary: Pick<MoldSummary, 'moldType' | 'pullDirection' | 'cavityHoldsTop' | 'bottomHalf' | 'topHalf' | 'features'> & { liner?: MoldSummary['liner'] },
 ): NonNullable<NonNullable<SceneNode['simulation']>['mold']> {
   // Scene triangles are in metres.
   const volumeMm3 = Math.abs(soupVolume(collectSceneTriangles(scene).tris)) * 1e9;
   const laidOpen = summary.moldType === 'clamshell' && Boolean(summary.topHalf);
+  const lp = summary.liner ? linerPair(summary.liner.pair) : null;
   return {
     masterVolumeMm3: Math.round(volumeMm3),
     laidOpen,
@@ -273,6 +275,20 @@ export function moldMasterRecord(
     ...(feedRouteOf(summary.features) ? { feed: feedRouteOf(summary.features) } : {}),
     ...(ventStubsOf(summary.features) ? { ventStubs: ventStubsOf(summary.features) } : {}),
     ...(summary.features ? { featureLines: moldFeatureLines(summary.features) } : {}),
+    ...(summary.liner && lp
+      ? {
+          liner: {
+            pair: summary.liner.pair,
+            label: lp.label,
+            shellMaterial: summary.liner.shellMaterial,
+            linerMaterial: summary.liner.linerMaterial,
+            solvent: summary.liner.solvent,
+            waterSoluble: lp.waterSoluble,
+            softenC: pairSoftenC(lp),
+            construction: summary.liner.construction,
+          },
+        }
+      : {}),
   };
 }
 
@@ -535,14 +551,28 @@ async function runMcpChain(
       // else one at its default sizes, with any hole through the silicone asked for.
       const madeBox = pourBoxOptionsFor(scene, subject.ids);
       const boxOptions: Partial<PourBoxOptions> = { ...madeBox };
+      const splitSleeve = msg.splitSleeve ?? msg.split_sleeve;
+      if (typeof splitSleeve === 'boolean') boxOptions.splitSleeve = splitSleeve;
+      const coverMm = msg.coverMm ?? msg.cover_mm;
+      if (typeof coverMm === 'number' && Number.isFinite(coverMm) && coverMm > 0) boxOptions.coverMm = coverMm;
+      const siliconeBudgetG = msg.siliconeBudgetG ?? msg.silicone_budget_g;
+      if (typeof siliconeBudgetG === 'number' && Number.isFinite(siliconeBudgetG) && siliconeBudgetG > 0) {
+        boxOptions.siliconeBudgetG = siliconeBudgetG;
+      }
+      if (msg.shape !== undefined) {
+        if (msg.shape === 'fit' || msg.shape === 'round' || msg.shape === 'box') boxOptions.shape = msg.shape;
+        else return { ok: false, error: "shape is 'fit', 'round' or 'box'." };
+      }
       if (msg.hole === 'wick' || msg.hole === 'pour' || msg.hole === 'fixing') boxOptions.hole = msg.hole;
       else if (msg.hole === 'none') boxOptions.hole = null;
       else if (msg.hole !== undefined && msg.hole !== null) {
         return { ok: false, error: "hole is 'wick', 'pour', 'fixing' or 'none'." };
       }
-      if (typeof msg.holeDiaMm === 'number' && msg.holeDiaMm > 0) boxOptions.holeDiaMm = msg.holeDiaMm;
-      if (Array.isArray(msg.holeAtMm) && msg.holeAtMm.length === 2 && msg.holeAtMm.every((v) => typeof v === 'number')) {
-        boxOptions.holeAtMm = msg.holeAtMm as [number, number];
+      const holeDia = msg.holeDiaMm ?? msg.hole_dia_mm;
+      if (typeof holeDia === 'number' && holeDia > 0) boxOptions.holeDiaMm = holeDia;
+      const holeAt = msg.holeAtMm ?? msg.hole_at_mm;
+      if (Array.isArray(holeAt) && holeAt.length === 2 && holeAt.every((v) => typeof v === 'number')) {
+        boxOptions.holeAtMm = holeAt as [number, number];
       }
       const silicone = resolveCastMaterial(msg.silicone);
       if (silicone && castMaterialSpec(silicone).silicone) boxOptions.silicone = silicone as PourBoxOptions['silicone'];
@@ -592,10 +622,14 @@ async function runMcpChain(
 }
 
 /** What a pour weighs in this material, and how to mix it. */
-function pourWeight(material: CastMaterialId, volumeMm3: number): Record<string, unknown> {
+function pourWeight(
+  material: CastMaterialId,
+  volumeMm3: number,
+  mold: { pla: boolean; softenC?: number; name?: string } = { pla: true },
+): Record<string, unknown> {
   const grams = castWeightG(material, volumeMm3);
   const mix = mixGrams(material, grams);
-  const notes = castMaterialWarnings(material, volumeMm3 / 1000, { pla: false });
+  const notes = castMaterialWarnings(material, volumeMm3 / 1000, mold);
   return {
     castMaterial: material,
     weightG: Math.round(grams * 10) / 10,
@@ -669,20 +703,30 @@ export async function runMcpMoldSimulation(params: {
         };
       }
       const moldNode = picked.node;
-      if (msg.castMaterial !== undefined && moldOpts.castMaterial && castMaterialSpec(moldOpts.castMaterial).silicone && isSiliconeMold(moldNode)) {
-        return { ok: false, error: 'That mold is silicone, and silicone sticks to silicone: pour resin, wax, plaster or another cast_material into it.' };
+      const moldLiner = moldNode.simulation?.mold?.liner;
+      if (msg.castMaterial !== undefined && moldOpts.castMaterial) {
+        const spec = castMaterialSpec(moldOpts.castMaterial);
+        if (spec.silicone && isSiliconeMold(moldNode)) {
+          return { ok: false, error: 'That mold is silicone, and silicone sticks to silicone: pour resin, wax, plaster or another cast_material into it.' };
+        }
+        if (moldLiner) {
+          if (spec.meltsInBath) return { ok: false, error: MELTS_REFUSAL(spec.label) };
+          if (spec.waterBased && moldLiner.waterSoluble) return { ok: false, error: WATER_BASED_REFUSAL };
+        }
       }
       // A master in its pour box fills to the box's line from the top, unless told otherwise.
       const box = pourBoxIn(moldNode);
       const fillMm = typeof msg.fillMm === 'number' && msg.fillMm > 0 ? msg.fillMm : box?.pourDepthMm;
+      const orientOpt = msg.orientUpright ?? msg.orient_upright;
+      const airOpt = msg.airAware ?? msg.air_aware;
       const castRes = await withWorker((c) =>
         c.castNode(moldNode, {
           trimChannels: msg.trimChannels === true,
-          orientUpright: msg.orientUpright !== false,
+          orientUpright: orientOpt !== false,
           ...(moldOpts.castMaterial ? { castMaterial: moldOpts.castMaterial } : {}),
           // Silicone poured round a master in its box is degassed and poured
           // slowly; the air that matters is in what is later poured into it.
-          ...(box ? { airAware: false } : {}),
+          ...(typeof airOpt === 'boolean' ? { airAware: airOpt } : box ? { airAware: false } : {}),
           pour: {
             direction: POUR_DIRECTIONS.includes(msg.pourDirection as PourDirection) ? (msg.pourDirection as PourDirection) : box ? '+z' : 'auto',
             ...(fillMm ? { fillMm } : {}),
@@ -718,7 +762,13 @@ export async function runMcpMoldSimulation(params: {
               ofMasterPercent: Math.round((castRes.castVolumeMm3 / moldNode.simulation.mold.masterVolumeMm3) * 100),
             }
           : {}),
-        ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
+        ...(moldOpts.castMaterial && msg.castMaterial !== undefined
+          ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3, {
+              pla: !isSiliconeMold(moldNode),
+              softenC: moldLiner?.softenC,
+              name: moldLiner?.label,
+            })
+          : {}),
         cavityComponents: castRes.cavityComponents,
         // What the pour asks of whoever pours it: a hole to plug, and an
         // undercut a rigid mold cannot let go of (silicone, either side, bends).
@@ -735,12 +785,15 @@ export async function runMcpMoldSimulation(params: {
       return { ok: false, error: subject.error };
     }
     const scene = subject.scene;
+    const orientOpt = msg.orientUpright ?? msg.orient_upright;
+    const airOpt = msg.airAware ?? msg.air_aware;
     const { preview, castRes } = await withWorker(async (c) => {
       const p = await c.generate(scene, moldOpts);
       if (!p.summary.success) return { preview: p, castRes: null };
       const cr = await c.cast({
         trimChannels: msg.trimChannels === true,
-        orientUpright: msg.orientUpright !== false,
+        orientUpright: orientOpt !== false,
+        ...(typeof airOpt === 'boolean' ? { airAware: airOpt } : {}),
         ...(moldOpts.castMaterial ? { castMaterial: moldOpts.castMaterial } : {}),
       }, true);
       return { preview: p, castRes: cr };
@@ -775,6 +828,7 @@ export async function runMcpMoldSimulation(params: {
         useStore.getState().setGeomTextures(added.id, castGeom.name, castRes.textures);
       }
     }
+    const lp = moldRes.liner ? linerPair(moldRes.liner.pair) : null;
     return {
       ok: true,
       id: added.id,
@@ -793,7 +847,13 @@ export async function runMcpMoldSimulation(params: {
       volumeMm3: Math.round(castRes.castVolumeMm3),
       ...(castRes.fill ? { fill: castRes.fill } : {}),
       ...(castRes.deviation ? { deviationMm: castRes.deviation } : {}),
-      ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
+      ...(moldOpts.castMaterial && msg.castMaterial !== undefined
+        ? pourWeight(
+            moldOpts.castMaterial,
+            castRes.castVolumeMm3,
+            lp ? { pla: true, softenC: pairSoftenC(lp), name: lp.label } : { pla: true },
+          )
+        : {}),
       cavityComponents: castRes.cavityComponents,
       warnings: [
         ...moldRes.warnings,
@@ -853,12 +913,14 @@ export async function runMcpMoldSimulation(params: {
     volumeMm3: Math.round(added.volumeMm3),
     ...(moldRes.liner ? { liner: moldRes.liner } : {}),
     warnings: [...moldRes.warnings, ...(await thinSectionWarnings(scene, moldOpts.castMaterial))],
-    // The two-material print file; its bytes only when the caller keeps them.
-    ...(threeMf && describeFiles
+    // The printable mold file (3MF when lined, STL when unlined); bytes encoded only when kept.
+    ...(describeFiles
       ? {
           files: describeFiles(
-            [{ name: `casting_mold_${moldRes.moldType === 'open' ? 'open' : 'plate'}_${moldRes.liner?.pair ?? 'pla_pva'}.3mf`, bytes: threeMf }],
-            msg.includeFiles === true,
+            threeMf
+              ? [{ name: `casting_mold_${moldRes.moldType === 'open' ? 'open' : 'plate'}_${moldRes.liner?.pair ?? 'pla_pva'}.3mf`, bytes: threeMf }]
+              : [{ name: 'casting-mold.stl', bytes: stl }],
+            msg.includeFiles !== false,
           ),
         }
       : {}),

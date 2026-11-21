@@ -525,8 +525,10 @@ opens the pattern editor on it.
 
 ### Mold and Cast
 
-**Mold** is one dialog with a tab per kind of mold: Rigid (the printed mold designer, with the PVA
-liner), Silicone (the pour box), Slip Cast (a plaster mold for clay slip), Sand and Lost PLA (the
+**Mold** is one dialog with six tabs: Rigid (the printed mold designer — open or two-part clamshell,
+bottom- or top-fed gating, optional separable C-clips, and multi-pair dissolvable liners in `One print`
+or `Holder + insert` 3MF construction across PLA+PVA, PLA+BVOH, PETG+PVA, ABS/ASA+HIPS and PLA+PVB),
+Silicone (the pour box), Slip Cast (a plaster mold for clay slip), Sand and Lost PLA (the
 metal pattern), and Draft, which is not a mold but tapers the part itself. Every tab molds the selected
 part, children included, where it stands, or every non-simulated body when nothing is selected
 (`utils/moldSubject.ts`, which hands the engines a SceneGraph of just that). The tab opens on the one
@@ -785,7 +787,7 @@ stops sampling the scene altogether.
 | --- | --- | --- |
 | 3D print | Face angle from vertical; wall thickness through all three axes | Overhang the loaded filament will not hold; walls under its minimum; ceilings it cannot bridge; shrinkage on a large flat |
 | 3-axis CNC | Column top down to the stock bottom, against real material | Material under an overhang the cutter cannot reach; pockets narrower than the bit; depth no standard bit reaches; ribs too thin for the stock |
-| Casting (engine only) | Face angle relative to a ±Z pull about a mid-height parting plane | Undercuts that lock the pattern in; walls with no draft on a part deep enough to drag |
+| Casting (`DfmHUD` + `CHECK_DFM`) | 6-axis parting search + wall thickness + inside corners | Undercuts that lock a rigid mold (pointing to Dissolvable Liner, Silicone, splitting or Lost PLA); steep walls short of draft; sections thinner than `castMaterial` fills; sharp slip inside corners |
 
 **The limits come from the bench, not from `dfm.ts`.** `dfmLimitsFor` reads the
 store's `material`, `filament` and `stock`: overhang angle, minimum wall,
@@ -898,7 +900,7 @@ as the matching export.
 | Solid Machining | side A from the top, side B mirrored back from the bottom (`cols-1-c`), one solid; with setups on the block's sides, every setup in its own frame (below) |
 | Laser Cut | the panels, extruded at their sheet's thickness, back in their place in the assembly |
 | Contour Slice | the layers, stacked at the sheet thickness |
-| Cast, Mold | **Add to Scene**: the pattern or mold halves, as exported, beside the model |
+| Cast, Mold | **Add Mold / Pour Box / Pattern** (tooling beside the model) and **Simulate Cast** (one-click chain pouring rigid, silicone, slip, sand or lost-PLA to the finished cast piece) |
 | Sheet Unfold | the net folded back up along its own lines, fitted to the model and measured |
 | Pipes | the cut list made up: every tube cut to its length and seated hub to hub |
 | Timber Breakdown | each window's program milled in the frame the part sits in on the bed, each tenon pushed into what it leaves |

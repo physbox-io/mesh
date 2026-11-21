@@ -9,7 +9,7 @@ import { isSiliconeMold, pourBoxIn } from '../../utils/pourTarget';
 import type { MoldCastSimulationResult } from '../../utils/moldCastSimulation';
 import type { SceneNode } from '../../types/scene';
 import { PanelBody, PanelFooter } from './CastDialogFrame';
-import { castMaterialWarnings, castWeightG, mixGrams, type CastMaterialId } from '../../utils/castMaterials';
+import { castMaterial, castMaterialWarnings, castWeightG, mixGrams, type CastMaterialId } from '../../utils/castMaterials';
 import { tabMaterials } from '../../utils/moldTabs';
 
 const SIDE_NAMES: Record<PourDirection, string> = {
@@ -48,14 +48,44 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
   const [box] = useState(() => pourBoxIn(moldNode));
   // Silicone sticks to a mold that was poured in silicone, so none is offered.
   const [siliconeMold] = useState(() => isSiliconeMold(moldNode));
+  const moldMeta = moldNode.simulation?.mold;
+  const moldLiner = moldMeta?.liner;
+  const closedMold = Boolean(moldMeta?.laidOpen);
+  const hasChannels = Boolean(
+    moldMeta && (
+      moldMeta.laidOpen ||
+      moldMeta.feed ||
+      moldMeta.ventStubs?.length ||
+      moldMeta.featureLines?.some((l) => /sprue|vent/i.test(l))
+    ),
+  );
+  // Trim sprue, runner and vent stubs by default so scene pours match the part
+  // rather than carrying +20% runner scrap; uncheck to inspect the full tree.
+  const [trimChannels, setTrimChannels] = useState(true);
   const [direction, setDirection] = useState<PourDirection | 'auto'>(box ? '+z' : 'auto');
   /** Fill depth in mm; null fills to the rim. */
   const [fill, setFill] = useState<number | null>(box ? box.pourDepthMm : null);
+
+  const matSpec = castMaterial(material);
+  const linerRefusal = useMemo(() => {
+    if (!moldLiner) return null;
+    if (matSpec.meltsInBath) {
+      return `${matSpec.label} melts or spoils in the ${moldLiner.solvent} bath before the ${moldLiner.linerMaterial} liner can dissolve; use a silicone mold instead.`;
+    }
+    if (matSpec.waterBased && moldLiner.waterSoluble) {
+      return `Water-based ${matSpec.label.toLowerCase()} dissolves this mold's water-soluble ${moldLiner.linerMaterial} liner while it cures; pour resin or wax instead, or rebuild the mold with an ABS + HIPS or PLA + PVB liner.`;
+    }
+    return null;
+  }, [moldLiner, matSpec]);
+
   // Memoised: a fresh literal each render restarted the settle timer on every
   // render, so each pour's own busy flag set off the next — the dialog re-poured
   // about once a second and Simulate Cast blinked disabled with it.
-  const pourOptions = useMemo(() => ({ direction, fill }), [direction, fill]);
+  const effectiveTrim = hasChannels && trimChannels;
+  const pourOptions = useMemo(() => ({ direction, fill, trimChannels: effectiveTrim }), [direction, fill, effectiveTrim]);
   const settled = useSettled(pourOptions, 300);
+  const isBusy = !linerRefusal && (busy || settled !== pourOptions);
+
   // One worker for the dialog's life, not one per change of side or depth.
   const clientRef = useRef<MoldWorkerClient | null>(null);
   useEffect(() => {
@@ -69,11 +99,15 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
 
   useEffect(() => {
     const client = clientRef.current;
-    if (!client) return;
+    if (!client || linerRefusal) return;
     let live = true;
     setBusy(true);
     client
-      .castNode(moldNode, { castMaterial: material, pour: { direction: settled.direction, ...(settled.fill ? { fillMm: settled.fill } : {}) } })
+      .castNode(moldNode, {
+        castMaterial: material,
+        trimChannels: settled.trimChannels,
+        pour: { direction: settled.direction, ...(settled.fill ? { fillMm: settled.fill } : {}) },
+      })
       .then((res) => {
         if (!live) return;
         if (res.success) {
@@ -93,10 +127,10 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
     return () => {
       live = false;
     };
-  }, [moldNode, settled, material]);
+  }, [moldNode, settled, material, linerRefusal]);
 
   const handleAdd = async () => {
-    if (!cast) return;
+    if (!cast || linerRefusal) return;
     setAdding(true);
     try {
       await addPourToScene(moldNode, cast, 'beside', material);
@@ -108,14 +142,21 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
     }
   };
 
-  const pour = cast?.pour;
-  const closedMold = Boolean(moldNode.simulation?.mold?.laidOpen);
-  const grams = cast ? castWeightG(material, cast.castVolumeMm3) : 0;
-  const mix = cast ? mixGrams(material, grams) : null;
-  const notes = cast ? castMaterialWarnings(material, cast.castVolumeMm3 / 1000, { pla: false }) : [];
+  const shownCast = linerRefusal ? null : cast;
+  const shownError = linerRefusal ?? failure;
+  const pour = shownCast?.pour;
+  const grams = shownCast ? castWeightG(material, shownCast.castVolumeMm3) : 0;
+  const mix = shownCast ? mixGrams(material, grams) : null;
+  const notes = shownCast
+    ? castMaterialWarnings(material, shownCast.castVolumeMm3 / 1000, {
+        pla: !siliconeMold,
+        softenC: moldLiner?.softenC,
+        name: moldLiner?.label,
+      })
+    : [];
   const undercut = pour ? pourUndercutWarning(pour) : null;
   const plug = pour ? pourPlugNote(pour) : null;
-  const short = cast ? pourShortfallWarning(moldNode, cast.castVolumeMm3) : null;
+  const short = shownCast ? pourShortfallWarning(moldNode, shownCast.castVolumeMm3) : null;
   return (
     <>
       <PanelBody>
@@ -178,14 +219,31 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
               </label>
             </>
           )}
+          {hasChannels && (
+            <label
+              className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300 col-span-2 cursor-pointer"
+              title="Cut the sprue, runner and vent stubs off the simulated casting so its volume and weight reflect the finished part."
+            >
+              <input
+                type="checkbox"
+                checked={trimChannels}
+                onChange={(e) => setTrimChannels(e.target.checked)}
+                className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+              />
+              <span>Trim sprue &amp; vents</span>
+            </label>
+          )}
         </div>
-        {failure ? (
-          <p className="text-red-600 dark:text-red-400">{failure}</p>
-        ) : !cast ? (
+        {shownError ? (
+          <div className="flex items-start gap-2 text-xs rounded-lg px-2.5 py-2 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{shownError}</span>
+          </div>
+        ) : !shownCast ? (
           <p className="text-slate-500 dark:text-slate-400">Pouring…</p>
         ) : (
           <>
-            <p className={`text-slate-600 dark:text-slate-300 ${busy ? 'opacity-50' : ''}`}>
+            <p className={`text-slate-600 dark:text-slate-300 ${isBusy ? 'opacity-50' : ''}`}>
               {pour ? (
                 <>
                   {box && fill === box.pourDepthMm ? "To the pour box's fill line: " : ''}
@@ -193,21 +251,26 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
                   {pour.filledMm < pour.depthMm ? `, ${pour.filledMm} of ${pour.depthMm} mm deep` : ', to the rim'}.
                 </>
               ) : (
-                <>Closed and poured through its sprue{moldNode.simulation?.mold?.feed ? ', from the bottom' : ''}.</>
+                <>Closed and poured through its sprue{moldMeta?.feed ? ', from the bottom' : ''}.</>
               )}
             </p>
-            <dl className={`grid grid-cols-2 gap-y-1 text-xs ${busy ? 'opacity-50' : ''}`}>
-              <dt className="text-slate-500 dark:text-slate-400">Volume</dt>
-              <dd className="font-mono">{Math.round(cast.castVolumeMm3).toLocaleString()} mm³</dd>
-              <dt className="text-slate-500 dark:text-slate-400">Weight</dt>
+            <dl className={`grid grid-cols-2 gap-y-1 text-xs ${isBusy ? 'opacity-50' : ''}`}>
+              <dt className="text-slate-500 dark:text-slate-400">{effectiveTrim ? 'Part volume' : 'Volume'}</dt>
+              <dd className="font-mono">{Math.round(shownCast.castVolumeMm3).toLocaleString()} mm³</dd>
+              <dt className="text-slate-500 dark:text-slate-400">{effectiveTrim ? 'Part weight' : 'Weight'}</dt>
               <dd className="font-mono">
                 {Math.round(grams).toLocaleString()} g
                 {mix ? ` (${Math.round(mix.a)} g ${mix.aLabel} + ${Math.round(mix.b)} g ${mix.bLabel})` : ''}
               </dd>
               <dt className="text-slate-500 dark:text-slate-400">Size</dt>
-              <dd className="font-mono">{cast.sizeMm.width} × {cast.sizeMm.depth} × {cast.sizeMm.height} mm</dd>
+              <dd className="font-mono">{shownCast.sizeMm.width} × {shownCast.sizeMm.depth} × {shownCast.sizeMm.height} mm</dd>
             </dl>
-            {cast.warnings.map((w) => (
+            {effectiveTrim && (
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Mix ~15–25% extra in the cup to fill the sprue, runner and vents during the real pour.
+              </p>
+            )}
+            {shownCast.warnings.map((w) => (
               <p key={w} className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>{w}</span>
@@ -223,7 +286,7 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
               <p key={n} className="text-xs text-amber-700 dark:text-amber-400">{n}</p>
             ))}
             {plug && <p className="text-xs text-slate-600 dark:text-slate-300">{plug}</p>}
-            {undercut && (
+            {undercut && !moldLiner && (
               <p className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>{undercut}</span>
@@ -242,7 +305,7 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
           Make a mold of it instead
         </button>
         <AddSimulationButton
-          disabled={!cast || adding || busy}
+          disabled={!shownCast || adding || isBusy}
           onSimulate={() => void handleAdd()}
           progress={adding ? 0.5 : null}
           label="Simulate Cast"

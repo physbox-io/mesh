@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Download } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useSettled } from '../../hooks/useSettled';
@@ -8,7 +8,9 @@ import { addPourBoxToScene, pourBoxStlFiles } from '../../utils/pourBoxActions';
 import { downloadBlob } from '../../utils/downloadBlob';
 import { zipStore } from '../../utils/zipStore';
 import { stlFileName } from '../../utils/meshStlExport';
-import { DEFAULT_POUR_BOX_OPTIONS, HOLE_DIA_MM, type HolePurpose, type PourBox, type PourBoxOptions, type PourBoxShape } from '../../utils/siliconeMold';
+import { DEFAULT_POUR_BOX_OPTIONS, HOLE_DIA_MM, soupVolume, type HolePurpose, type PourBox, type PourBoxOptions, type PourBoxShape } from '../../utils/siliconeMold';
+import { collectSceneTriangles } from '../../utils/contourSliceExporter';
+import { moldSubject } from '../../utils/moldSubject';
 import { SILICONES, castMaterialWarnings, type CastMaterialId, type SiliconeId } from '../../utils/castMaterials';
 import { AdvancedBlock, CastTopFields, MaterialNotes } from './CastTopFields';
 import { PanelBody, PanelFooter } from './CastDialogFrame';
@@ -115,6 +117,12 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
     };
   });
 
+  const sceneGraph = useStore((s) => s.sceneGraph);
+  const partVolumeMl = useMemo(() => {
+    const sub = moldSubject(sceneGraph, ids);
+    return Math.abs(soupVolume(collectSceneTriangles(sub.scene).tris)) * 1e6;
+  }, [sceneGraph, ids]);
+
   const r = box?.report;
   // Where the hole came out last, to start a picked point from.
   const holeTop: [number, number] | null = r?.holeTopMm ? [r.holeTopMm[0], r.holeTopMm[1]] : null;
@@ -131,7 +139,7 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
           draftFixedReason="Silicone stretches off the casting, so its cavity takes no draft."
           draftHint=""
         />
-        <MaterialNotes notes={castMaterialWarnings(material, 0, { pla: false })} />
+        <MaterialNotes notes={castMaterialWarnings(material, partVolumeMl, { pla: false })} />
 
         <label
           className="block space-y-1 text-xs"

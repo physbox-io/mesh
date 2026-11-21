@@ -16,8 +16,17 @@ export function MoldCard({ node }: { node: SceneNode }) {
   // Without their coordinates, which a narrow sidebar turns into a wall of
   // numbers; the note card and an agent's reply keep them.
   const lines = (mold.featureLines ?? []).map((l) => l.replace(/ at \(-?[\d.]+, -?[\d.]+\)(, \(-?[\d.]+, -?[\d.]+\))*/g, ''));
+  const pieceDesc = mold.liner
+    ? mold.liner.construction === 'insert'
+      ? mold.laidOpen ? 'Two reusable holders + soluble inserts' : 'Reusable holder + soluble insert, open on top'
+      : mold.laidOpen ? 'Two lined halves, laid out as they print' : 'Lined open mold'
+    : mold.laidOpen
+      ? 'Two halves, laid out as they print'
+      : mold.splitOpenShiftMm
+        ? 'Two split halves + sliding clips, open on top'
+        : 'One piece, open on top';
   const summary = [
-    mold.laidOpen ? 'Two halves, laid out as they print' : 'One piece, open on top',
+    pieceDesc,
     mold.feed ? 'filled from the bottom' : null,
   ].filter(Boolean).join(', ');
 
@@ -32,6 +41,11 @@ export function MoldCard({ node }: { node: SceneNode }) {
         )}
       </div>
       <div className="text-xs text-slate-700 dark:text-slate-200">{summary}.</div>
+      {mold.liner && (
+        <div className="text-[11px] text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/40 border border-purple-200/70 dark:border-purple-900/60 rounded px-2 py-1 leading-snug">
+          <strong>{mold.liner.label}</strong> ({mold.liner.construction === 'insert' ? 'holder + insert' : 'one two-filament print'}) · dissolves in {mold.liner.solvent}. Export via <strong>3MF</strong> on the bottom bar (STL merges materials).
+        </div>
+      )}
       {lines.length > 0 && (
         <ul className="flex flex-col gap-1 text-[10px] leading-snug text-slate-500 dark:text-slate-400 list-disc pl-3.5">
           {lines.map((l) => (

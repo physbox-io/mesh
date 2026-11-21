@@ -1,6 +1,7 @@
 import React from 'react';
 import { Droplets, Layers, Hand } from 'lucide-react';
 import type { MoldExportResult } from '../utils/moldExporter';
+import { castMaterial, type CastMaterialId } from '../utils/castMaterials';
 
 /** Only the findings are needed here, so a summary from the worker will do. */
 type CastingFacts = Pick<
@@ -8,49 +9,111 @@ type CastingFacts = Pick<
   'cavityDepthMm' | 'minDraftDeg' | 'flexibleMoldAdvised' | 'lidIsBackingPlate'
 >;
 
-/**
- * What to actually do with the two blocks once they are printed.
- *
- * The export modal knew everything needed to answer this and said none of it: it
- * handed over an STL and left the casting itself — release agent, pour depth,
- * whether the mold can even let go — to be found somewhere else. Most of it is
- * not a matter of taste, and the parts that are numbers are numbers this file
- * already has, so they are computed here rather than written out as advice that
- * quietly stops matching the geometry.
- *
- * Two facts drive nearly all of it:
- *
- *   - Epoxy cures exothermically, and a deep pour insulates its own middle. WEST
- *     SYSTEM put the ceiling for their casting system at a quarter inch a pour
- *     and the manual at 10-12 mm; past that the middle can pass 150 C, which
- *     yellows and cracks the casting and softens a PLA mold around it. So the
- *     cavity depth decides the number of lifts, and it is stated as such.
- *   - A printed mold is porous and its layer lines are mechanical keys. Sealing
- *     and releasing is not optional the way it is with silicone.
- *   - Whether a mold lets go is a question about stiffness, not about which
- *     rigid filament. PLA, PETG, ABS and ASA sit between roughly 2 and 3 GPa --
- *     a factor of two, which demolds nothing. TPU is nearer 0.02, a hundred
- *     times softer, and that is the whole difference. So the panel never offers
- *     a rigid filament as a fix for grip; it offers draft, TPU, or silicone, and
- *     names ASA and PETG only where they genuinely help, which is heat: PLA goes
- *     soft around 60 C and a fast hardener in a deep pour can reach that.
- *
- * It carries no links. A URL in a shipped panel is a promise about somebody
- * else's CMS, and the ones worth citing here — a release-agent reference, an
- * epoxy maker's exotherm note — are exactly the pages that get reorganised. The
- * facts are short enough to state outright, so they are stated outright, and the
- * provenance for the numbers lives in this comment where it cannot 404.
- */
-
-/** Deepest lift most casting epoxies will take without cooking themselves, mm. */
+/** Deepest lift most standard hobby casting epoxies take in an open pour without overheating, mm. */
 const SAFE_LIFT_MM = 10;
 
-export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshell' | 'open' }> = ({
+/**
+ * Plain-English workshop steps for an unlined rigid 3D-printed mold, adapted to
+ * what is actually being poured (`material`) and whether the mold is open-top or
+ * a closed two-part clamshell (`moldType`).
+ *
+ * Hidden when a dissolvable liner is active (`dissolvableLiner === true`),
+ * because `result.liner.steps` gives exact instructions for the chosen filament
+ * pair and solvent bath — whereas telling a maker to seal layer lines with
+ * primer or epoxy sealer would waterproof a soluble PVA/BVOH/HIPS liner so it
+ * can never dissolve.
+ */
+export const CastingGuide: React.FC<{
+  result: CastingFacts;
+  moldType?: 'clamshell' | 'open';
+  material?: CastMaterialId;
+  dissolvableLiner?: boolean;
+}> = ({
   result,
   moldType = 'clamshell',
+  material = 'epoxy',
+  dissolvableLiner = false,
 }) => {
+  if (dissolvableLiner) return null;
+
+  const mat = castMaterial(material);
   const lifts = Math.max(1, Math.ceil(result.cavityDepthMm / SAFE_LIFT_MM));
   const isOpen = moldType === 'open';
+  const isFoodOrIce = Boolean(mat.meltsInBath);
+  const isMineralSlurry = mat.waterBased && !mat.meltsInBath;
+
+  const printLine = isFoodOrIce
+    ? 'Print flat with 4+ perimeters using clean hardware; raw FDM layer lines trap food residue, so press thin food-safe wrap in or use this print to make a food-grade silicone mold.'
+    : 'Print flat with fine layers and 4+ perimeters so liquid cannot seep into the infill.';
+
+  let sealLine: string;
+  if (isFoodOrIce) {
+    sealLine =
+      material === 'water'
+        ? 'Do not use primer, paint, or chemical mold release for ice; leave clean plastic bare so warm air loosens the frozen block.'
+        : 'Never apply hardware primers, epoxy sealers, or petroleum release for chocolate; use only food-safe cocoa butter or casting film.';
+  } else if (isMineralSlurry) {
+    sealLine = `Brush a light coat of petroleum jelly, mineral oil, or soapy mold release onto the cavity and parting faces so set ${mat.label.toLowerCase()} slips free of FDM layer lines.`;
+  } else if (material === 'wax') {
+    sealLine = 'Mist a light silicone or soapy release onto steep walls, and let melted wax cool below ~55–60 °C before pouring so PLA walls do not soften.';
+  } else if (mat.silicone) {
+    sealLine =
+      material === 'platinum'
+        ? 'Brush dish-soap/alcohol or wax release onto layer lines, and keep sulfur clay, latex gloves, and uncured SLA UV resin away (they poison platinum silicone).'
+        : 'Smooth heavy layer lines if needed and brush on wax or soapy mold release before pouring the silicone.';
+  } else if (material === 'polyurethane') {
+    sealLine = 'Keep the printed mold bone-dry (trace moisture foams polyurethane resin), seal layer lines with acrylic primer, and apply polyurethane mold release.';
+  } else {
+    sealLine = 'Seal FDM layer lines with acrylic primer or sanding sealer, then apply paste wax or PVA/silicone mold release before pouring so cured epoxy cannot key into the print.';
+  }
+
+  let pourHeading: string;
+  let pourLine: string;
+  if (material === 'water') {
+    pourHeading = 'Fill & freeze:';
+    pourLine = 'Fill with boiled-and-cooled water for clearer ice, leave a little headroom for expansion, and freeze solid.';
+  } else if (material === 'chocolate') {
+    pourHeading = 'Temper & chill:';
+    pourLine = 'Pour tempered chocolate (~31 °C), tap the mold gently on the counter to pop air bubbles, and chill until it contracts slightly from the walls.';
+  } else if (isMineralSlurry) {
+    pourHeading = 'Mix & tap out bubbles:';
+    pourLine = isOpen
+      ? `Pour ${mat.label.toLowerCase()} into the lowest spot first, tap or vibrate the sides for a minute to shake air bubbles off the walls, and screed the top flat.`
+      : `Clamp or clip the halves firmly shut, pour ${mat.label.toLowerCase()} steadily into the top funnel while tapping the sides to work air up the vents.`;
+  } else if (material === 'wax') {
+    pourHeading = 'Pour & top up:';
+    pourLine = 'Pour steadily below ~58 °C, then top up the center or sprue funnel as the wax cools and shrinks.';
+  } else if (mat.silicone) {
+    pourHeading = 'Pour a thin stream:';
+    pourLine = 'Scrape the mixing cup sides and bottom thoroughly, then pour a thin ribbon into the lowest point so bubbles stretch and pop on the way in.';
+  } else if (material === 'polyurethane') {
+    pourHeading = 'Pour in one go:';
+    pourLine = 'Polyurethane sets fast — weigh and mix accurately, then pour steadily in one pass before it thickens.';
+  } else if (isOpen) {
+    pourHeading = `Pour in ${lifts} ${lifts === 1 ? 'lift' : 'lifts'}:`;
+    pourLine =
+      result.cavityDepthMm > SAFE_LIFT_MM
+        ? `Check your epoxy bottle's ratio (often 1:1 by volume or 2:1 by weight — brands vary). Brush a thin coat into surface details, then pour this ${result.cavityDepthMm} mm open cavity in ~${SAFE_LIFT_MM} mm layers (or use deep-pour epoxy) so cure heat does not warp PLA.`
+        : `Check your epoxy bottle's ratio (often 1:1 by volume or 2:1 by weight — brands vary), stir slowly, brush a thin coat into details to release bubbles, then fill the ${result.cavityDepthMm} mm cavity.`;
+  } else {
+    pourHeading = result.cavityDepthMm > SAFE_LIFT_MM * 2 ? 'Use slow / deep-pour epoxy:' : 'Mix & pour slowly:';
+    pourLine =
+      result.cavityDepthMm > SAFE_LIFT_MM * 2
+        ? `A closed ${result.cavityDepthMm} mm cavity cannot be poured in open layers: use slow-cure / deep-pour casting epoxy so cure heat stays under PLA's ~60 °C softening point. Follow your bottle's ratio (commonly 1:1 by volume or 2:1 by weight).`
+        : `Follow your epoxy bottle's exact ratio (commonly 1:1 by volume or 2:1 by weight), stir slowly for 2–3 minutes scraping the sides, and let bubbles rise before pouring.`;
+  }
+
+  let closeLine: string;
+  if (isOpen) {
+    closeLine =
+      material === 'water'
+        ? 'Let the mold sit at room temperature for a minute so the surface glazes free, then flex or Ease the ice out.'
+        : 'Let self-level and wait for a full cure/set before flexing or tapping the part out.';
+  } else if (result.lidIsBackingPlate) {
+    closeLine = 'Fill the open cavity half first, press the waxed flat backing lid onto the pins, weight it down, and pry at the side notches once cured.';
+  } else {
+    closeLine = 'Seat the lid on the registration pins, clamp or weight it shut (tape alone lets the lid float), pour slowly into the funnel until liquid shows at every vent, and pry at the side notches once cured.';
+  }
 
   return (
     <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-3 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
@@ -60,48 +123,32 @@ export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshel
         <li className="flex items-start gap-2">
           <Layers className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Print cavity-up:</strong> Print flat with fine layers and 4+ perimeters so resin cannot wick into the infill.
+            <strong>Print cavity-up:</strong> {printLine}
           </span>
         </li>
         <li className="flex items-start gap-2">
           <Droplets className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Seal &amp; release:</strong> Seal FDM layer lines with primer or epoxy sealer, then apply mold release before pouring.
+            <strong>{isFoodOrIce ? 'Surface safety:' : 'Seal & release:'}</strong> {sealLine}
           </span>
         </li>
         <li className="flex items-start gap-2">
           <Droplets className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>
-              Pour in {lifts} {lifts === 1 ? 'lift' : 'lifts'}:
-            </strong>{' '}
-            {result.cavityDepthMm > SAFE_LIFT_MM
-              ? `Pour ${result.cavityDepthMm} mm depth in ~${SAFE_LIFT_MM} mm layers (or use deep-pour epoxy) after brushing details to release bubbles.`
-              : `Brush a thin coat into details to release bubbles, then fill the ${result.cavityDepthMm} mm cavity.`}
+            <strong>{pourHeading}</strong> {pourLine}
           </span>
         </li>
         <li className="flex items-start gap-2">
           <Hand className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            {isOpen ? (
-              <>
-                <strong>Pour &amp; level:</strong> Pour into the deepest point, screed or let self-level, and demold after full cure.
-              </>
-            ) : (
-              <>
-                <strong>Close &amp; cure:</strong>{' '}
-                {result.lidIsBackingPlate
-                  ? 'Leave the flat backing lid off or press it on after pouring, then pry at the side notches once cured.'
-                  : 'Seat the lid on the registration pins, pour through the sprue until vents fill, and pry open once cured.'}
-              </>
-            )}
+            <strong>{isOpen ? 'Cure & demold:' : 'Close & cure:'}</strong> {closeLine}
           </span>
         </li>
-        {result.flexibleMoldAdvised && (
+        {result.flexibleMoldAdvised && !isFoodOrIce && (
           <li className="flex items-start gap-2">
             <Hand className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
             <span>
-              <strong>Demold:</strong> Wax steep walls thoroughly, or increase <strong>Draft</strong> to 3° if parts stick.
+              <strong>Steep walls:</strong> Wax vertical walls well, or add <strong>3° Draft</strong> / a <strong>Dissolvable Liner</strong> / <strong>Silicone</strong> if parts grip layer lines.
             </span>
           </li>
         )}

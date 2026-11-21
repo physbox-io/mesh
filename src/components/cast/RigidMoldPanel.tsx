@@ -151,6 +151,50 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
   );
   /** What a lined mold is printed in, and what dissolves its liner. */
   const pair = linerPair(options.linerPair);
+  const matSpec = castMaterial(material);
+
+  const toggleDissolvableLiner = (on: boolean) => {
+    setOptions((prev) => {
+      if (!on) return { ...prev, dissolvableLiner: false };
+      const currentPair = linerPair(prev.linerPair);
+      return {
+        ...prev,
+        dissolvableLiner: true,
+        // Separable sliding clips are for unlined rigid molds; clear any sticky state.
+        separable: false,
+        // Liners dissolve off the casting rather than pulling off, so reset any
+        // rigid-release draft (e.g. from clicking "Add 3° draft") back to 0°.
+        draftAngleDeg: 0,
+        ...(matSpec.waterBased && currentPair.waterSoluble ? { linerPair: 'abs_hips' as const } : {}),
+      };
+    });
+  };
+
+  const handleMaterialChange = (nextId: CastMaterialId) => {
+    const nextMat = castMaterial(nextId);
+    if (options.dissolvableLiner) {
+      if (nextMat.meltsInBath) {
+        setOptions((prev) => ({ ...prev, dissolvableLiner: false }));
+      } else if (nextMat.waterBased && pair.waterSoluble) {
+        setOptions((prev) => ({ ...prev, linerPair: 'abs_hips' }));
+      }
+    }
+    onMaterial(nextId);
+  };
+
+  const downloadBaseStem = useMemo(() => {
+    const raw =
+      (scene.name && scene.name !== 'empty' ? scene.name : '') ||
+      (scene.nodes.length === 1 ? scene.nodes[0]?.name : '') ||
+      '';
+    const slug = raw
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    if (!slug || slug === 'empty' || slug === 'modified_scene') return 'casting_mold';
+    return `${slug}_mold`;
+  }, [scene]);
 
   const [viewMode, setViewMode] = useState<PreviewViewMode>('clamshell_exploded');
   const [trimCastChannels, setTrimCastChannels] = useState(false);
@@ -169,6 +213,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
   // 12; the first is work nobody wanted, and on a relief it is most of a
   // second of it.
   const settledOptions = useSettled(options, 250);
+  const isBusy = busy || settledOptions !== options;
 
   useEffect(() => {
     const client = new MoldWorkerClient();
@@ -192,6 +237,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
       .then((next) => {
         if (!live) return;
         setPreview(next);
+        if (!next.summary.success) setCastPreview(null);
         setFailure(null);
       })
       .catch((e: Error) => {
@@ -274,6 +320,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
       kind: 'mold',
       label: 'Mold',
       placement: 'beside',
+      select: false,
       details: [...moldFeatureLines(preview?.summary.features), ...(preview ? moldStepLines(preview.summary) : [])],
     });
   };
@@ -304,6 +351,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
         kind: 'cast',
         label: 'Mold cast',
         placement,
+        select: false,
         material,
         details: [
           ...lines,
@@ -354,6 +402,16 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
     }, 0);
   };
 
+  const errorBanner = failure
+    ? `The mold could not be built: ${failure}`
+    : preview && !result.success
+      ? (result.error ?? 'The mold could not be built.')
+      : null;
+  const visibleWarnings = !result.success && result.error
+    ? result.warnings.filter((w) => w !== result.error)
+    : result.warnings;
+  const hasClips = result.parts.some((p) => p.role === 'clip');
+
   return (
     <>
       <PanelBody className="p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -365,8 +423,8 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             moldType={moldType}
             viewMode={viewMode}
             onViewMode={setViewMode}
-            busy={busy}
-            castPreview={castPreview}
+            busy={isBusy}
+            castPreview={result.success ? castPreview : null}
             castPreviewBusy={castPreviewBusy}
             trimCastChannels={trimCastChannels}
             onTrimCastChannels={setTrimCastChannels}
@@ -387,7 +445,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
               </span>
             </div>
             <div className="bg-slate-100 dark:bg-slate-800 p-2.5 rounded-lg">
-              <span className="text-slate-400 block text-[10px] uppercase font-semibold">STL Triangles</span>
+              <span className="text-slate-400 block text-[10px] uppercase font-semibold">{result.liner ? '3MF Triangles' : 'STL Triangles'}</span>
               <span className="font-mono font-medium">{result.totalTriangles.toLocaleString()}</span>
             </div>
             <div className="bg-slate-100 dark:bg-slate-800 p-2.5 rounded-lg">
@@ -402,10 +460,10 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">{result.setupNote}</p>
           )}
 
-          {failure && (
+          {errorBanner && (
             <div className="flex items-start gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
-              <span>The mold could not be built: {failure}</span>
+              <span>{errorBanner}</span>
             </div>
           )}
 
@@ -423,9 +481,9 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             </Field>
           )}
 
-          {result.warnings.length > 0 && (
+          {(visibleWarnings.length > 0 || (result.lidIsBackingPlate && moldType === 'clamshell')) && (
             <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
-              {result.warnings.map((w, i) => (
+              {visibleWarnings.map((w, i) => (
                 <div
                   key={i}
                   className="flex items-start gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200"
@@ -454,15 +512,17 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             <CastTopFields
               tab="rigid"
               material={material}
-              onMaterial={onMaterial}
+              onMaterial={handleMaterialChange}
               draftDeg={draftLocked ? bakedDraftDeg : chosen.draftAngleDeg}
               onDraft={(v) => set('draftAngleDeg', v)}
               draftLocked={draftLocked}
               draftHint={
-              'Taper on the cavity walls, off the pull direction. A vertical wall grips the casting; ' +
-              'a couple of degrees lets a rigid mold let go. It costs depth x tan(angle) of lateral ' +
-              `detail, here ${(result.cavityDepthMm * Math.tan((Math.max(chosen.draftAngleDeg, 0.0001) * Math.PI) / 180)).toFixed(2)} mm at the deepest wall. ` +
-              'Set 0 to reproduce the part exactly and demold by hand.'
+                options.dissolvableLiner
+                  ? `A dissolvable liner melts away in ${pair.solvent} instead of pulling off the casting, so 0° draft keeps exact vertical walls and undercuts. Set above 0° only if you want tapered walls on the part itself.`
+                  : 'Taper on the cavity walls, off the pull direction. A vertical wall grips the casting; ' +
+                    'a couple of degrees lets a rigid mold let go. It costs depth x tan(angle) of lateral ' +
+                    `detail, here ${(result.cavityDepthMm * Math.tan((Math.max(chosen.draftAngleDeg, 0.0001) * Math.PI) / 180)).toFixed(2)} mm at the deepest wall. ` +
+                    'Set 0 to reproduce the part exactly and demold by hand.'
               }
             />
             <MaterialNotes notes={castMaterialWarnings(material, (castPreview?.castVolumeMm3 ?? partVolumeMm3) / 1000,
@@ -471,16 +531,13 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             {locksOn && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-900 text-purple-800 dark:text-purple-200">
                 <span className="basis-full">
-                  Undercut area detected. Rigid molds may lock; consider a Silicone Pour Box{!castMaterial(material).meltsInBath ? ' or a dissolvable liner' : ''}.
+                  Undercut area detected. Rigid molds may lock; consider a Silicone Pour Box{!matSpec.meltsInBath ? ' or a dissolvable liner' : ''}.
                 </span>
                 {/* A water-based cast dissolves a water-soluble liner, so it is offered HIPS, which limonene takes; ice and chocolate melt in any bath. */}
-                {!castMaterial(material).meltsInBath && (
-                  <button type="button" onClick={() => {
-                      if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
-                      set('dissolvableLiner', true);
-                    }}
+                {!matSpec.meltsInBath && (
+                  <button type="button" onClick={() => toggleDissolvableLiner(true)}
                     className="font-semibold px-2 py-1 rounded-md border border-purple-300 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/40 cursor-pointer">
-                    {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
+                    {matSpec.waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
                   </button>
                 )}
                 <button type="button" onClick={onSilicone}
@@ -493,7 +550,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             {steepWallsGrip && (
               <div className="flex flex-wrap items-center gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200">
                 <span className="basis-full">
-                  Steep cavity walls ({result.minDraftDeg.toFixed(1)}° min draft over {result.cavityDepthMm.toFixed(1)} mm depth) can lock rigid castings onto print layer lines. Add 3° draft,{!castMaterial(material).meltsInBath ? ' a dissolvable liner,' : ''} or use Silicone.
+                  Steep cavity walls ({result.minDraftDeg.toFixed(1)}° min draft over {result.cavityDepthMm.toFixed(1)} mm depth) can lock rigid castings onto print layer lines. Add 3° draft,{!matSpec.meltsInBath ? ' a dissolvable liner,' : ''} or use Silicone.
                 </span>
                 {!draftLocked && (
                   <button type="button" onClick={() => set('draftAngleDeg', 3)}
@@ -507,13 +564,10 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
                     Split + sliding clips
                   </button>
                 )}
-                {!castMaterial(material).meltsInBath && (
-                  <button type="button" onClick={() => {
-                      if (castMaterial(material).waterBased && pair.waterSoluble) set('linerPair', 'abs_hips');
-                      set('dissolvableLiner', true);
-                    }}
+                {!matSpec.meltsInBath && (
+                  <button type="button" onClick={() => toggleDissolvableLiner(true)}
                     className="font-semibold px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer">
-                    {castMaterial(material).waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
+                    {matSpec.waterBased && pair.waterSoluble ? 'ABS + HIPS liner' : `${pair.liner.name} liner`}
                   </button>
                 )}
                 <button type="button" onClick={onSilicone}
@@ -524,13 +578,23 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             )}
 
             <div className="flex flex-wrap items-center gap-2">
-              <HintAnchor hint="A rigid shell with a soluble liner wherever the pour touches: cavity, sprue, vents, runner. Keeps every undercut.">
-                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+              <HintAnchor
+                hint={
+                  matSpec.meltsInBath
+                    ? `${matSpec.label} melts or spoils in a solvent bath before any soluble liner can dissolve; use the Silicone tab for undercuts instead.`
+                    : 'A rigid shell with a soluble liner wherever the pour touches: cavity, sprue, vents, runner. Keeps every undercut.'
+                }
+              >
+                <label
+                  title={matSpec.meltsInBath ? `${matSpec.label} cannot soak in a solvent bath; use Silicone instead.` : undefined}
+                  className={`flex items-center gap-2 text-xs font-semibold ${matSpec.meltsInBath ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                >
                   <input
                     type="checkbox"
                     checked={Boolean(options.dissolvableLiner)}
-                    onChange={(e) => set('dissolvableLiner', e.target.checked)}
-                    className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                    disabled={Boolean(matSpec.meltsInBath)}
+                    onChange={(e) => toggleDissolvableLiner(e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500 disabled:cursor-not-allowed"
                   />
                   Dissolvable Liner
                 </label>
@@ -878,7 +942,9 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
           </div>
           </AdvancedBlock>
           <ChainResult title="Simulated: poured and taken out" lines={castLines} />
-          <CastingGuide result={result} moldType={moldType} />
+          {!options.dissolvableLiner && !result.liner && (
+            <CastingGuide result={result} moldType={moldType} material={material} dissolvableLiner={false} />
+          )}
         </div>
       </PanelBody>
 
@@ -887,9 +953,11 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
         <div className="text-xs text-slate-500 dark:text-slate-400">
           Export layout:{' '}
           <strong className="text-slate-700 dark:text-slate-200">
-            {moldType === 'open'
-              ? 'Single open mold flat on Z=0 build plate'
-              : 'Both halves flat on Z=0 build plate'}
+            {result.liner?.construction === 'insert'
+              ? 'Holders & soluble inserts flat on Z=0 build plate'
+              : moldType === 'open'
+                ? hasClips ? 'Split open mold + 2 sliding clips on Z=0 build plate' : 'Single open mold flat on Z=0 build plate'
+                : hasClips ? 'Both halves + 2 sliding clips on Z=0 build plate' : 'Both halves flat on Z=0 build plate'}
           </strong>
         </div>
 
@@ -902,7 +970,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
           </button>
 
           <AddSimulationButton
-            disabled={!result.success || result.totalTriangles === 0 || busy || saving || castBusy}
+            disabled={!result.success || result.totalTriangles === 0 || isBusy || saving || castBusy}
             onSimulate={(placement) => void handleSimulateCast(placement)}
             progress={castBusy ? 0.5 : addCastToScene.progress}
             error={castError ?? addCastToScene.error}
@@ -910,7 +978,7 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
           />
 
           <AddSimulationButton
-            disabled={!result.success || result.totalTriangles === 0 || busy || saving}
+            disabled={!result.success || result.totalTriangles === 0 || isBusy || saving}
             onSimulate={() => void handleAddToScene()}
             progress={addToScene.progress}
             error={addToScene.error}
@@ -922,11 +990,11 @@ export const RigidMoldPanel: React.FC<RigidMoldPanelProps> = ({ scene, material,
             onClick={() =>
               void handleDownload(
                 result.liner
-                  ? `casting_mold_${moldType === 'open' ? 'open' : 'plate'}_${pair.id}.3mf`
-                  : moldType === 'open' ? 'casting_mold_open.stl' : 'casting_mold_plate.stl'
+                  ? `${downloadBaseStem}_${moldType === 'open' ? 'open' : 'plate'}_${pair.id}.3mf`
+                  : `${downloadBaseStem}_${moldType === 'open' ? 'open' : 'plate'}.stl`
               )
             }
-            disabled={!result.success || result.totalTriangles === 0 || busy || saving}
+            disabled={!result.success || result.totalTriangles === 0 || isBusy || saving}
             className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-xl shadow-md hover:shadow-lg disabled:opacity-50 transition-all cursor-pointer"
           >
             <Download className="w-4 h-4" />
