@@ -13,15 +13,102 @@
  */
 
 import { limbLoft } from './limbLoft';
-import { ellipseHalfWidth, formHeightMeasurements, KNEE_MAX, legTuck, proportions } from './formProportions';
+import { ellipseHalfWidth, formHeightMeasurements, KNEE_MAX, proportions } from './formProportions';
 import { neckAxisY } from './formHead';
 
 export { ellipseHalfWidth } from './formProportions';
-import { formLimbs, HAND_LENGTH, limbSections } from './formLimbs';
+import { formLimbs, HAND_LENGTH, limbSections, type FormLimb } from './formLimbs';
 import { torsoRelief } from './formMuscles';
 import type { LimbPath } from './limbPath';
 import type { BodyFigure, BodyFormMeasurements } from '../../types/cloth';
 import type { SceneGeom } from '../../types/scene';
+
+/** Neutral studio-plaster colour when `skinTone` is unset. */
+export const DEFAULT_MANNEQUIN_RGBA: [number, number, number, number] = [0.93, 0.89, 0.82, 1];
+
+/**
+ * Curated human-complexion stops along `[0, 1]`, following a physiological
+ * melanin + hemoglobin/undertone curve across deep espresso, reddish mahogany,
+ * warm umber, sienna, golden bronze, terracotta, warm olive, honey, peach and
+ * rosy porcelain rather than a dead linear grey-brown ramp.
+ */
+export const SKIN_TONE_STOPS: { at: number; label: string; rgb: [number, number, number] }[] = [
+  { at: 0.00, label: 'Deep ebony', rgb: [0.15, 0.10, 0.09] },
+  { at: 0.09, label: 'Espresso', rgb: [0.23, 0.14, 0.11] },
+  { at: 0.18, label: 'Mahogany', rgb: [0.33, 0.18, 0.13] },
+  { at: 0.28, label: 'Warm umber', rgb: [0.44, 0.27, 0.18] },
+  { at: 0.38, label: 'Sienna', rgb: [0.54, 0.33, 0.22] },
+  { at: 0.48, label: 'Golden bronze', rgb: [0.62, 0.42, 0.27] },
+  { at: 0.57, label: 'Terracotta', rgb: [0.69, 0.46, 0.34] },
+  { at: 0.66, label: 'Warm olive', rgb: [0.75, 0.58, 0.43] },
+  { at: 0.75, label: 'Golden honey', rgb: [0.83, 0.65, 0.51] },
+  { at: 0.84, label: 'Warm peach', rgb: [0.88, 0.68, 0.58] },
+  { at: 0.92, label: 'Rosy fair', rgb: [0.93, 0.75, 0.69] },
+  { at: 1.00, label: 'Porcelain rose', rgb: [0.96, 0.83, 0.79] },
+];
+
+const srgbToLin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const linToSrgb = (c: number) => (c <= 0.0031308 ? 12.92 * Math.max(0, c) : 1.055 * Math.max(0, c) ** (1 / 2.4) - 0.055);
+
+function rgbToOklab([r, g, b]: [number, number, number]): [number, number, number] {
+  const lr = srgbToLin(r), lg = srgbToLin(g), lb = srgbToLin(b);
+  const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
+  const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
+  const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+  return [
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+  ];
+}
+
+function oklabToRgb([L, a, B]: [number, number, number]): [number, number, number] {
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * B;
+  const m_ = L - 0.1055613458 * a - 0.0638541728 * B;
+  const s_ = L - 0.0894841775 * a - 1.2914855480 * B;
+  const l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+  const lr = +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  const lg = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  const lb = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+  const clamp01 = (v: number) => +Math.min(1, Math.max(0, v)).toFixed(4);
+  return [clamp01(linToSrgb(lr)), clamp01(linToSrgb(lg)), clamp01(linToSrgb(lb))];
+}
+
+const OKLAB_STOPS = SKIN_TONE_STOPS.map((s) => ({ ...s, lab: rgbToOklab(s.rgb) }));
+
+/** Evaluates `skinTone` (`0..1`) in perceptual Oklab space; `undefined` returns neutral studio plaster. */
+export function skinToneRgba(skinTone?: number | null): [number, number, number, number] {
+  if (skinTone === undefined || skinTone === null || !Number.isFinite(skinTone)) return [...DEFAULT_MANNEQUIN_RGBA];
+  const t = Math.min(1, Math.max(0, skinTone));
+  for (let i = 1; i < OKLAB_STOPS.length; i++) {
+    const a = OKLAB_STOPS[i - 1], b = OKLAB_STOPS[i];
+    if (t <= b.at + 1e-9) {
+      const u = Math.min(1, Math.max(0, (t - a.at) / Math.max(1e-9, b.at - a.at)));
+      const lab: [number, number, number] = [
+        a.lab[0] + (b.lab[0] - a.lab[0]) * u,
+        a.lab[1] + (b.lab[1] - a.lab[1]) * u,
+        a.lab[2] + (b.lab[2] - a.lab[2]) * u,
+      ];
+      return [...oklabToRgb(lab), 1];
+    }
+  }
+  return [...SKIN_TONE_STOPS[SKIN_TONE_STOPS.length - 1].rgb, 1];
+}
+
+/** Human-readable name for the nearest stop along `skinTone` (`"Studio plaster"` when unset). */
+export function skinToneLabel(skinTone?: number | null): string {
+  if (skinTone === undefined || skinTone === null || !Number.isFinite(skinTone)) return 'Studio plaster';
+  const t = Math.min(1, Math.max(0, skinTone));
+  let best = SKIN_TONE_STOPS[0];
+  for (const s of SKIN_TONE_STOPS) if (Math.abs(s.at - t) < Math.abs(best.at - t)) best = s;
+  return best.label;
+}
+
+/** CSS `linear-gradient` spanning all curated human skin-tone stops for the inspector slider track. */
+export const SKIN_TONE_CSS_GRADIENT = `linear-gradient(to right, ${SKIN_TONE_STOPS.map((s) => {
+  const hex = s.rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+  return `#${hex} ${Math.round(s.at * 100)}%`;
+}).join(', ')})`;
 
 /** A typical figure of each kind: what a new form starts from. */
 export const FIGURE_DEFAULTS: Record<BodyFigure, BodyFormMeasurements> = {
@@ -48,7 +135,7 @@ const HEIGHT_MEASUREMENTS = ['inseam', 'rise', 'waistToHip', 'backLength', 'shou
  * heights are also kept in order against each other and the form's height
  * (formProportions resolveHeights), which can narrow these.
  */
-export const BODY_FORM_LIMITS: Record<Exclude<keyof BodyFormMeasurements, 'figure'>, [number, number]> = {
+export const BODY_FORM_LIMITS: Record<Exclude<keyof BodyFormMeasurements, 'figure' | 'skinTone'>, [number, number]> = {
   height: [0.9, 2.2],
   chest: [0.5, 1.6],
   underbust: [0.45, 1.5],
@@ -92,6 +179,12 @@ export function clampBodyForm(m: Partial<BodyFormMeasurements>): BodyFormMeasure
     if (optional.has(k) && (out[k] === undefined || out[k] === null || !Number.isFinite(Number(out[k])))) { delete (out as unknown as Record<string, unknown>)[k]; continue; }
     const v = Number(out[k]);
     (out as unknown as Record<string, number>)[k] = Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : base[k] as number;
+  }
+  // Optional visual skinTone in [0, 1]; null or non-finite resets back to studio plaster (unset).
+  if (out.skinTone === undefined || out.skinTone === null || !Number.isFinite(Number(out.skinTone))) {
+    delete out.skinTone;
+  } else {
+    out.skinTone = +Math.min(1, Math.max(0, Number(out.skinTone))).toFixed(4);
   }
   const s = out.height / 1.75;
   // Anatomical coupling so extreme independent slider combinations cannot invert or self-intersect:
@@ -214,6 +307,12 @@ function bodyFormTorsoParts(m: BodyFormMeasurements, prefix: string, T: Tapes = 
   return geoms;
 }
 
+const geomCacheKey = (m: BodyFormMeasurements) => {
+  const { skinTone: _st, ...geomM } = m;
+  void _st;
+  return JSON.stringify(geomM);
+};
+
 /**
  * What to build chest, waist and hip to so that a tape round the form as
  * built reads the measurements: corrected against the built form's own
@@ -222,7 +321,7 @@ function bodyFormTorsoParts(m: BodyFormMeasurements, prefix: string, T: Tapes = 
  * read 6% over and a male one's hip 3% under.
  */
 function formTapes(m: BodyFormMeasurements): Tapes {
-  const key = JSON.stringify(m);
+  const key = geomCacheKey(m);
   let t = tapesCache.get(key);
   if (t) return t;
   t = { chest: m.chest, waist: m.waist, hip: m.hip };
@@ -270,7 +369,7 @@ function hullPerimeter(pts: [number, number][]): number {
 const landmarksCache = new Map<string, BodyLandmarks>();
 /** Where things are on a form (cached: the bust alone is a bisection, and garments ask constantly). */
 export function bodyLandmarks(m: BodyFormMeasurements): BodyLandmarks {
-  const key = JSON.stringify(m);
+  const key = geomCacheKey(m);
   let hit = landmarksCache.get(key);
   if (!hit) {
     hit = computeLandmarks(m);
@@ -369,8 +468,8 @@ export function bodyFormGeoms(m: BodyFormMeasurements, prefix: string): SceneGeo
   // into, below the surface you could see.
   const isTorsoPart = (g: SceneGeom) => /_(bust\w*|shoulder\w*|deltoid\w*|neck)$/.test(g.name);
   const rows = prefix === 'form' ? formRows(m) : torsoRows(m, geoms.filter(isTorsoPart), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, formTapes(m)));
-  const rgba = geoms[0]?.rgba ?? [0.93, 0.89, 0.82, 1];
-  return [...geoms.filter((g) => !isTorsoPart(g)), torsoSkin(rows, `${prefix}_skin`, rgba), ...torsoSlabs(rows, `${prefix}_torso`)];
+  const rgba = skinToneRgba(m.skinTone);
+  return [...geoms.filter((g) => !isTorsoPart(g)), torsoSkin(rows, `${prefix}_skin`, rgba), ...torsoSlabs(rows, `${prefix}_torso`, rgba)];
 }
 
 /**
@@ -407,12 +506,12 @@ function torsoProfile(m: BodyFormMeasurements, T: Tapes): (z: number) => { a: nu
     if (z < bottom) {
       if (z <= crotchBottom) return null;
       const l = keys[keys.length - 1], base = ellipse(l[1], l[2], l[3]);
-      // Pelvic wedge: narrows along the groin creases between the thighs, then rounds under the crotch.
+      // Pelvic wedge: narrows gently along the groin creases between the thighs;
+      // `loft(..., true)` closes the pelvic floor with a smooth equal-angle dome.
       const u = (bottom - z) / (bottom - crotchBottom);
       const sCurve = u * u * (3 - 2 * u);
-      const round = u > 0.7 ? Math.sqrt(Math.max(0.02, 1 - ((u - 0.7) / 0.3) ** 2)) : 1;
-      const a = (base.a * (1 - sCurve) + 0.038 * s * sCurve) * round;
-      const b = (base.b * (1 - 0.42 * sCurve)) * round;
+      const a = base.a * (1 - sCurve) + 0.042 * s * sCurve;
+      const b = base.b * (1 - 0.34 * sCurve);
       return { a, b, cy: l[3] * (1 - 0.3 * sCurve) };
     }
     for (let i = 0; i < keys.length - 1; i++) {
@@ -432,7 +531,7 @@ function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string, tune: Tapes =
   const T = tune;
   const L = limbLandmarks(m);
   const s = P.s;
-  const rgba = [0.93, 0.89, 0.82, 1];
+  const rgba = skinToneRgba(m.skinTone);
   const geoms: SceneGeom[] = [];
   const add = (name: string, g: Omit<SceneGeom, 'name' | 'rgba'>) => geoms.push({ name: `${prefix}_${name}`, rgba, ...g } as SceneGeom);
 
@@ -459,40 +558,48 @@ function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string, tune: Tapes =
   add('head', { type: 'ellipsoid', role: 'collision', size: [r4(0.075 * s), r4(0.095 * s), r4(0.115 * s)], pos: [0, r4(-0.015 * s), r4(P.crown - 0.115 * s)] });
 
   // Arms: one smooth limb each, tapering from the shoulder through the elbow
-  // to the wrist and on into a mitten hand, palm to the body, with a thumb.
+  // to the wrist and on into a slender hand, palm to the body, with a sculpted thumb.
   const rA = L.armRadius;
-  // Arms, legs and head: each one smooth limb (formLimbs), drawn and what
-  // cloth lies on; MuJoCo collides with capsules along it, as the torso's
-  // skin has its slabs (a concave mesh would be decomposed).
   const limbs = formLimbs(m);
+  const handL = HAND_LENGTH * s;
   for (const side of [1, -1] as const) {
     const tag = side > 0 ? 'L' : 'R';
     const limb = limbs[side > 0 ? 'armL' : 'armR'], path = limb.path, A = m.armLength;
-    add(`arm${tag}`, { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(limb), [0, 1, 0]) });
-    const o = path.at(0), elbow = path.at(path.jointAt), wrist = path.at(A), tip = path.at(A + (HAND_LENGTH - 0.01) * s);
+    add(`arm${tag}`, { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(limb, 0.008), [0, 1, 0], { end: limb.endCap, capRings: 6 }) });
+    const o = path.at(0), elbow = path.at(path.jointAt), wrist = path.at(A), tip = path.at(A + handL);
     add(`upperArm${tag}`, { type: 'capsule', role: 'collision', size: [r4(rA * 0.9)], fromto: [...o, ...elbow].map(r4) });
     add(`forearm${tag}`, { type: 'capsule', role: 'collision', size: [r4(rA * 0.7)], fromto: [...elbow, ...wrist].map(r4) });
-    add(`hand${tag}`, { type: 'capsule', role: 'collision', size: [r4(0.015 * s)], fromto: [...wrist, ...tip].map(r4) });
-    // The thumb at the palm's front edge, out and along it.
-    const h0 = limb.section(A + 0.024 * s), h1 = limb.section(A + 0.09 * s);
-    const thumb0 = h0.c.map((v, k) => v + h0.side[k] * 0.036 * s), thumb1 = h1.c.map((v, k) => v + h1.side[k] * 0.05 * s);
-    add(`thumb${tag}`, { type: 'capsule', size: [r4(0.011 * s)], fromto: [...thumb0, ...thumb1].map(r4) });
+    add(`hand${tag}`, { type: 'capsule', role: 'collision', size: [r4(0.013 * s)], fromto: [...wrist, ...tip].map(r4) });
+    // Tapered anatomical thumb emerging smoothly from the radial-palmar thenar eminence.
+    const thumbStation = (u: number, outOff: number, palmOff: number, w: number, h: number) => {
+      const hs = limb.section(A + u * handL);
+      const p = hs.c.map((v, k) => v + hs.side[k] * outOff * s - hs.up[k] * palmOff * s);
+      return { p, w: w * s, h: h * s, side: hs.side };
+    };
+    const tSecs = [
+      thumbStation(0.08, 0.017, 0.004, 0.0112, 0.0098),
+      thumbStation(0.22, 0.029, 0.0058, 0.0098, 0.0086),
+      thumbStation(0.37, 0.0385, 0.0062, 0.0082, 0.0074),
+      thumbStation(0.51, 0.044, 0.0052, 0.0068, 0.006),
+    ];
+    add(`thumb${tag}`, { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(tSecs, tSecs[0].side, { start: 0.008 * s, end: 0.0085 * s, angles: 24, capRings: 5 }) });
+    add(`thumbCol${tag}`, { type: 'capsule', role: 'collision', size: [r4(0.0075 * s)], fromto: [...tSecs[0].p, ...tSecs[tSecs.length - 1].p].map(r4) });
   }
   {
     const head = limbs.head;
-    add('headSkin', { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(head, 0.004), [1, 0, 0], { start: head.startCap, end: head.endCap, angles: 96 }) });
+    add('headSkin', { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(head, 0.004), [1, 0, 0], { start: head.startCap, end: head.endCap, partialEnd: true, angles: 96 }) });
   }
 
   for (const side of [1, -1] as const) {
     const tag = side > 0 ? 'L' : 'R';
     const limb = limbs[side > 0 ? 'legL' : 'legR'], path = limb.path;
-    add(`leg${tag}`, { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(limb), [1, 0, 0]) });
+    add(`leg${tag}`, { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(limb, 0.008), [1, 0, 0], { start: limb.startCap, end: limb.endCap, capRings: 6 }) });
     // Thigh and calf meet at a bent knee (hip, knee, ankle); with the knee straight, a little below it.
     const kneeAt = path.joints.length > 2 ? path.joints[path.joints.length - 2].at : path.jointAt * 0.55;
     const hip = path.at(0), knee = path.at(kneeAt), ankle = path.at(path.jointAt), toe = path.at(limb.length - 0.02 * s);
     add(`thigh${tag}`, { type: 'capsule', role: 'collision', size: [r4(limb.section(0).w * 0.8)], fromto: [...hip, ...knee].map(r4) });
     add(`calf${tag}`, { type: 'capsule', role: 'collision', size: [r4(limb.section(path.jointAt * 0.7).w * 0.7)], fromto: [...knee, ...ankle].map(r4) });
-    add(`sole${tag}`, { type: 'capsule', role: 'collision', size: [r4(0.025 * s)], fromto: [...ankle, ...toe].map(r4) });
+    add(`sole${tag}`, { type: 'capsule', role: 'collision', size: [r4(0.022 * s)], fromto: [...ankle, ...toe].map(r4) });
   }
   return geoms;
 }
@@ -555,11 +662,11 @@ function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: 
     }
     rows.push({ z, centreY: cy, radii });
   }
-  // A running mean up each column, twice, over about +-4 cm.
+  // A running mean up each column, twice, over about +-4 cm (including row 0 so the pelvic bottom has no unsmoothed step).
   const W = 3;
   for (let pass = 0; pass < 2; pass++) {
     const copy = rows.map((r) => ({ ...r, radii: r.radii.slice() }));
-    for (let r = 1; r + 1 < rows.length; r++) {
+    for (let r = 0; r + 1 < rows.length; r++) {
       let cy = 0, n = 0;
       const sum = new Array(ANG).fill(0);
       for (let q = Math.max(0, r - W); q <= Math.min(rows.length - 1, r + W); q++) {
@@ -571,8 +678,9 @@ function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: 
     }
   }
   const P = proportions(m), S = P.s;
-  blendLimbRoots(m, rows, P, withHead);
-  // The muscles, on the smoothed shape: evened out with it they would be gone.
+  // The muscles, on the smoothed shape: applied before blending limb roots so
+  // gluteal/abdominal relief cannot push the bottom of the pelvis back outside
+  // the upper thighs.
   const marks = { bustZ: P.bustZ / S, shoulderZ: P.shoulderZ / S, waistZ: P.waistZ / S, hipZ: P.hipZ / S, crotchZ: P.crotchZ / S };
   for (const row of rows) {
     row.radii = row.radii.map((r, i) => {
@@ -581,6 +689,43 @@ function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: 
       return r + torsoRelief(m.figure, (r * c) / S, row.z / S, front, back, marks) * S;
     });
   }
+  blendLimbRoots(m, rows, P, withHead);
+  // Smooth the pelvic/inguinal contours azimuthally and vertically below hipZ
+  // (and lightly in the armpit) so the groin-to-thigh saddle has zero sharp creases
+  // while bustZ, waistZ and hipZ tape circumferences stay exact.
+  {
+    for (let pass = 0; pass < 4; pass++) {
+      for (const row of rows) {
+        if (row.z >= P.hipZ - 0.004 * S) continue;
+        const w = Math.min(1, (P.hipZ - 0.004 * S - row.z) / (0.022 * S));
+        const src = row.radii.slice();
+        for (let i = 0; i < ANG; i++) {
+          const avg = (
+            src[(i - 2 + ANG) % ANG] +
+            4 * src[(i - 1 + ANG) % ANG] +
+            6 * src[i] +
+            4 * src[(i + 1) % ANG] +
+            src[(i + 2) % ANG]
+          ) / 16;
+          row.radii[i] = src[i] * (1 - w) + avg * w;
+        }
+      }
+    }
+    for (let pass = 0; pass < 2; pass++) {
+      const snap = rows.map((r) => r.radii.slice());
+      for (let r = 0; r + 1 < rows.length; r++) {
+        const z = rows[r].z;
+        const inHip = z < P.hipZ - 0.006 * S ? Math.min(1, (P.hipZ - 0.006 * S - z) / (0.02 * S)) : 0;
+        const inPit = z > P.shoulderZ - P.shoulderDrop - 0.04 * S && z < P.shoulderZ + 0.04 * S
+          ? Math.sin(Math.PI * (z - (P.shoulderZ - P.shoulderDrop - 0.04 * S)) / Math.max(1e-3, P.shoulderDrop + 0.08 * S))
+          : 0;
+        const w = 0.65 * Math.max(inHip, inPit);
+        if (w <= 0) continue;
+        const lo = Math.max(0, r - 1), hi = Math.min(rows.length - 1, r + 1);
+        rows[r].radii = snap[r].map((v, i) => v * (1 - w) + 0.25 * (snap[lo][i] + 2 * v + snap[hi][i]) * w);
+      }
+    }
+  }
   // Above the shoulders the skin is the neck: evened out with them it ran up
   // wider, and stood as a collar round the head's own neck. Tucked inside that,
   // so the join never shows.
@@ -588,68 +733,78 @@ function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: 
   for (const row of rows) {
     const t = Math.min(1, Math.max(0, (row.z - (P.shoulderZ - 0.012 * S)) / (0.075 * S))), k = t * t * (3 - 2 * t);
     const up = Math.min(1, Math.max(0, (row.z - (P.shoulderZ + 0.02 * S)) / (P.neckTop - (P.shoulderZ + 0.02 * S))));
-    if (k > 0) row.radii = row.radii.map((r) => r + (Math.min(r, neckR * (1.03 - 0.12 * up)) - r) * k);
+    if (k > 0) row.radii = row.radii.map((r) => r + (Math.min(r, neckR * (1.03 - 0.14 * up)) - r) * k);
     if (k > 0) row.centreY += (neckAxisY(row.z, P.crown, S) - row.centreY) * k;
   }
-  if (rows.length >= 2) rows[rows.length - 1].radii = rows[rows.length - 1].radii.map((r) => r * 0.9);
   return rows;
 }
 
-/** How far along a ray from (0, 0) at angle th the ellipse at (cx, cy), half-sizes a by b, reaches; 0 if the ray misses it. */
-function rayEllipse(th: number, cx: number, cy: number, a: number, b: number): number {
+/**
+ * Ray from `(0, 0)` at angle `th` against the ellipse at `(cx, cy)` with
+ * semi-axes `(a, b)`: returns `{ r, chord }` where `chord` (`0` at a grazing
+ * tangent hit, `1` through the ellipse's centre) weights limb-root blends to `0`
+ * at tangency so grazing rays never jump discontinuously.
+ */
+function rayEllipseHit(th: number, cx: number, cy: number, a: number, b: number): { r: number; chord: number } {
   const dx = Math.cos(th) / a, dy = Math.sin(th) / b, ox = -cx / a, oy = -cy / b;
   const A = dx * dx + dy * dy, B = ox * dx + oy * dy, C = ox * ox + oy * oy - 1, D = B * B - A * C;
-  return D <= 0 ? 0 : Math.max(0, (-B + Math.sqrt(D)) / A);
+  if (D <= 0) return { r: 0, chord: 0 };
+  const r = Math.max(0, (-B + Math.sqrt(D)) / A);
+  return r > 0 ? { r, chord: Math.sqrt(Math.max(0, D / A)) } : { r: 0, chord: 0 };
+}
+
+/** Find a leg's cross-section at world/form height `z` (accurate across both straight and posed legs). */
+function legSectionAtZ(leg: FormLimb, z: number) {
+  const zTop = leg.path.at(0)[2];
+  if (z > zTop) return null;
+  let lo = 0, hi = Math.min(leg.length, 0.35 * leg.length + 0.12);
+  for (let it = 0; it < 12; it++) {
+    const mid = 0.5 * (lo + hi);
+    if (leg.path.at(mid)[2] > z) lo = mid;
+    else hi = mid;
+  }
+  return leg.section(0.5 * (lo + hi));
 }
 
 /**
- * Runs the skin out over the tops of the legs and the roots of the arms, so
- * the limbs grow out of the body. Their own surfaces only crossed the torso's,
- * and each met it in a crease all the way round, like a doll's joint.
+ * Runs the skin smoothly into the tops of the legs and over the shoulder
+ * acromion, without overhanging the thighs at the crotch or jutting a shelf
+ * into the armpit.
  */
 function blendLimbRoots(m: BodyFormMeasurements, rows: TorsoRow[], P: ReturnType<typeof proportions>, withHead = true) {
   const limbs = formLimbs(m, withHead), S = P.s, N = rows[0].radii.length;
   const ease = (t: number) => { const u = Math.min(1, Math.max(0, t)); return u * u * (3 - 2 * u); };
   {
-    // From the section at the top of the legs to one round the thighs at the
-    // crotch, wherever a thigh is on that ray: what would be a loft from hip to thigh.
-    // (From the hips, the widest section: below them the evened-out torso is already drawing in.)
-    const legs = [limbs.legL, limbs.legR], legTop = legs[0].path.at(0)[2], top = P.hipZ, low = P.crotchZ + 0.02 * S;
-    const from = sectionAt(rows, top), tuck = legTuck(low, P.crotchZ, S);
-    const thigh = legs.map((leg) => leg.section((legTop - low) / Math.max(0.5, -leg.path.tangent(0)[2])));
-    const bottom = from.radii.map((_, i) => Math.max(...thigh.map((sec) => rayEllipse((2 * Math.PI * i) / N, sec.c[0], sec.c[1] - from.centreY, sec.w + tuck, sec.h + tuck))));
+    // Loft smoothly from the hip section at `hipZ` to a cross-section tucked 3.5 mm
+    // inside the full (untucked) thighs at `crotchZ`, so the torso skin never dips in
+    // early at `hipZ - 2 cm` and never overhangs the legs at `crotchZ`.
+    const legs = [limbs.legL, limbs.legR], top = P.hipZ, zLow = rows[0].z;
+    const from = sectionAt(rows, top);
+    const zRef = P.crotchZ + 0.005 * S;
+    const secs = legs.map((leg) => legSectionAtZ(leg, zRef)).filter((q): q is NonNullable<typeof q> => q !== null);
     for (const row of rows) {
-      if (row.z >= top) continue;
-      const t = ease((top - row.z) / (top - low)), under = 0.01 * S * ease((P.crotchZ + 0.008 * S - row.z) / (0.012 * S));
-      // That taken over from the torso's own shape, which rounds in under the
-      // hips and would leave a ledge over the leg: round the flanks, fading out
-      // toward the middle, where the groin's crease is meant to be.
+      if (row.z >= top || !secs.length) continue;
+      const u = Math.min(1, Math.max(0, (top - row.z) / Math.max(1e-4, top - zLow)));
+      const t = ease(u);
+      const inset = 0.004 * S * ease((u - 0.2) / 0.65);
       row.radii = row.radii.map((r, i) => {
-        if (bottom[i] <= 0) return r;
-        const flank = ease((Math.abs(Math.cos((2 * Math.PI * i) / N)) - 0.3) / 0.45);
-        return r + (from.radii[i] + (bottom[i] - from.radii[i]) * t - under - r) * flank;
+        const th = (2 * Math.PI * i) / N;
+        let bestR = 0, bestW = 0;
+        for (const sec of secs) {
+          const a = sec.w / Math.max(0.55, Math.abs(sec.side[0]));
+          const b = sec.h / Math.max(0.55, Math.abs(sec.up[1]));
+          const hit = rayEllipseHit(th, sec.c[0], sec.c[1] - row.centreY, a, b);
+          const wHit = ease(hit.chord / 0.55);
+          if (wHit > bestW || (wHit === bestW && hit.r > bestR)) {
+            bestW = wHit;
+            bestR = hit.r;
+          }
+        }
+        if (bestW <= 0 || bestR <= 0) return r;
+        const lofted = from.radii[i] + (Math.max(0.02 * S, bestR - inset) - from.radii[i]) * t;
+        return r + (lofted - r) * bestW;
       });
     }
-  }
-  // The top of the arm's root, a run of balls a little inside it, cut at each
-  // height: over the shoulder only, since below it a star of radii round the
-  // torso's centre would fill the armpit in.
-  for (const row of rows) {
-    const reach: { cx: number; cy: number; q: number; w: number }[] = [];
-    for (const arm of [limbs.armL, limbs.armR]) {
-      for (let f = 0; f <= 1; f += 0.0625) {
-        const sec = arm.section(0.14 * m.armLength * f), r = Math.max(sec.w, sec.h) * 0.93, dz = row.z - sec.c[2];
-        if (dz <= 0 || dz >= r) continue;
-        reach.push({ cx: sec.c[0], cy: sec.c[1] - row.centreY, q: Math.sqrt(r * r - dz * dz), w: ease(dz / (0.5 * r)) });
-      }
-    }
-    if (!reach.length) continue;
-    row.radii = row.radii.map((r, i) => {
-      const th = (2 * Math.PI * i) / N;
-      let out = r;
-      for (const e of reach) out = Math.max(out, r + (rayEllipse(th, e.cx, e.cy, e.q, e.q) - r) * e.w);
-      return out;
-    });
   }
 }
 
@@ -663,12 +818,35 @@ const rowPoints = (row: TorsoRow) => row.radii.map((r, i) => {
  * Rows lofted into a closed mesh, MuJoCo Z-up points converted to Three.js
  * Y-up (x, z, -y) as mesh geoms take them; wound outward (CLAUDE.md, face
  * winding): counter-clockwise round z then up, and the caps facing down and up.
+ * When `roundCaps` is true (for `torsoSkin`), closes the pelvic floor and neck
+ * top with equal-normal-angle semi-ellipsoid domes instead of flat 90° lids.
  */
-function loft(rows: TorsoRow[]): { vertices: number[]; faces: number[] } {
+function loft(rows: TorsoRow[], roundCaps = false): { vertices: number[]; faces: number[] } {
   const ANG = rows[0].radii.length;
+  let allRows = rows;
+  let botTipZ = rows[0].z, topTipZ = rows[rows.length - 1].z;
+  if (roundCaps && rows.length >= 2) {
+    const capDome = (base: TorsoRow, dir: -1 | 1, depth: number, rings: number): TorsoRow[] => {
+      const rMax = Math.max(depth, ...base.radii);
+      const aspect = Math.min(1, depth / Math.max(1e-6, rMax));
+      const out: TorsoRow[] = [];
+      for (let c = 1; c <= rings; c++) {
+        const psi = (c / (rings + 1)) * (Math.PI / 2);
+        const a = aspect < 1 ? Math.atan(aspect * Math.tan(psi)) : psi;
+        const k = Math.cos(a), zOff = depth * Math.sin(a);
+        out.push({ z: base.z + dir * zOff, centreY: base.centreY, radii: base.radii.map((r) => r * k) });
+      }
+      return out;
+    };
+    const span = rows[rows.length - 1].z - rows[0].z;
+    const botDepth = 0.032 * span, topDepth = 0.02 * span;
+    botTipZ = rows[0].z - botDepth;
+    topTipZ = rows[rows.length - 1].z + topDepth;
+    allRows = [...capDome(rows[0], -1, botDepth, 7).reverse(), ...rows, ...capDome(rows[rows.length - 1], 1, topDepth, 6)];
+  }
   const vertices: number[] = [];
   const push = (p: number[]) => { vertices.push(p[0], p[2], -p[1]); return vertices.length / 3 - 1; };
-  const idx = rows.map((row) => rowPoints(row).map(push));
+  const idx = allRows.map((row) => rowPoints(row).map(push));
   const faces: number[] = [];
   for (let r = 0; r + 1 < idx.length; r++) {
     for (let i = 0; i < ANG; i++) {
@@ -676,8 +854,8 @@ function loft(rows: TorsoRow[]): { vertices: number[]; faces: number[] } {
       faces.push(a, b, c, a, c, d);
     }
   }
-  const capAt = (row: TorsoRow) => push([0, row.centreY, row.z]);
-  const bottom = capAt(rows[0]), top = capAt(rows[rows.length - 1]);
+  const bottom = push([0, allRows[0].centreY, botTipZ]);
+  const top = push([0, allRows[allRows.length - 1].centreY, topTipZ]);
   for (let i = 0; i < ANG; i++) {
     faces.push(bottom, idx[0][(i + 1) % ANG], idx[0][i]);
     faces.push(top, idx[idx.length - 1][i], idx[idx.length - 1][(i + 1) % ANG]);
@@ -687,7 +865,7 @@ function loft(rows: TorsoRow[]): { vertices: number[]; faces: number[] } {
 
 /** The torso's surface, drawn only. */
 function torsoSkin(rows: TorsoRow[], name: string, rgba: number[]): SceneGeom {
-  return { name, type: 'mesh', size: [1, 1, 1], role: 'visual', rgba, ...loft(rows) } as SceneGeom;
+  return { name, type: 'mesh', size: [1, 1, 1], role: 'visual', rgba, ...loft(rows, true) } as SceneGeom;
 }
 
 /**
@@ -695,14 +873,14 @@ function torsoSkin(rows: TorsoRow[], name: string, rgba: number[]): SceneGeom {
  * the loft between two rows, both convex, so MuJoCo's hull of it is the slab
  * itself, and the slabs together are the surface that is drawn.
  */
-function torsoSlabs(rows: TorsoRow[], prefix: string): SceneGeom[] {
+function torsoSlabs(rows: TorsoRow[], prefix: string, rgba: number[]): SceneGeom[] {
   const every = Math.max(1, Math.round(0.04 / Math.max(1e-3, rows[1].z - rows[0].z)));
   const picks: number[] = [];
   for (let r = 0; r < rows.length; r += every) picks.push(r);
   if (picks[picks.length - 1] !== rows.length - 1) picks.push(rows.length - 1);
   const out: SceneGeom[] = [];
   for (let k = 0; k + 1 < picks.length; k++) {
-    out.push({ name: `${prefix}${k}`, type: 'mesh', size: [1, 1, 1], role: 'collision', ...loft([rows[picks[k]], rows[picks[k + 1]]]) } as SceneGeom);
+    out.push({ name: `${prefix}${k}`, type: 'mesh', size: [1, 1, 1], role: 'collision', rgba: [...rgba], ...loft([rows[picks[k]], rows[picks[k + 1]]]) } as SceneGeom);
   }
   return out;
 }
@@ -731,7 +909,7 @@ function sectionAt(rows: TorsoRow[], z: number): { centreY: number; radii: numbe
 }
 
 function formRows(m: BodyFormMeasurements): TorsoRow[] {
-  const key = JSON.stringify(m);
+  const key = geomCacheKey(m);
   let rows = rowsCache.get(key);
   if (!rows) {
     const P = proportions(m);

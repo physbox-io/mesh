@@ -41,27 +41,31 @@ function cone(x: number, y: number, z: number, a: V, b: V, ra: number, rb: numbe
 /** Signed distance (about) to the head, negative inside. `neckR` is the neck's radius at this scale. */
 export function headField(figure: BodyFigure, neckR: number): (x: number, y: number, z: number) => number {
   const f = figure === 'female';
-  const jawW = f ? 0.053 : 0.06, jawZ = f ? -0.183 : -0.186, chinR = f ? 0.019 : 0.023;
-  const nose = f ? 0.86 : 1, lip = f ? 1.1 : 1;
+  const jawW = f ? 0.053 : 0.06, jawZ = f ? -0.183 : -0.186, chinR = f ? 0.0185 : 0.022;
+  const nose = f ? 0.88 : 1, lip = f ? 1.08 : 1;
   return (x, y, z) => {
     const ax = Math.abs(x); // the two sides mirror
+    // Cranial vault, temples & back of skull kept identical so fitted hats & baseball caps keep exact fit.
     let d = ellipsoid(x, y, z, [0, 0.012, -0.096], [f ? 0.074 : 0.077, f ? 0.095 : 0.098, 0.096]);
     d = smin(d, ellipsoid(x, y, z, [0, -0.024, -0.15], [f ? 0.066 : 0.069, 0.066, 0.086]), 0.03);
     d = smin(d, ellipsoid(x, y, z, [0, -0.032, jawZ], [jawW, 0.06, 0.04]), 0.03);
-    d = smin(d, ellipsoid(x, y, z, [0, -0.076, -0.214], [chinR * 1.2, chinR, chinR * 0.8]), 0.024);
-    // No ridge for the brow: the sockets leave one. The closed eye in each.
-    d = smax(d, -ellipsoid(ax, y, z, [0.031, -0.0965, -0.119], [0.0165, 0.0105, 0.0085]), 0.013);
-    d = smin(d, ellipsoid(ax, y, z, [0.031, -0.0715, -0.119], [0.0125, 0.0135, 0.0072]), 0.007);
-    // The nose: its bridge running down to a ball of a tip, with a wing either side.
-    d = smin(d, cone(x, y, z, [0, -0.086, -0.11], [0, -(0.09 + 0.0115 * nose), -0.149], 0.0068 * nose, 0.0088 * nose), 0.013);
-    d = smin(d, ellipsoid(x, y, z, [0, -(0.09 + 0.0125 * nose), -0.1525], [0.0115 * nose, 0.0118 * nose, 0.0102 * nose]), 0.008);
-    d = smin(d, ellipsoid(ax, y, z, [0.0125 * nose, -(0.09 + 0.0025 * nose), -0.1565], [0.0085, 0.0105, 0.0072]), 0.009);
-    // The lips and the line between them.
-    d = smin(d, ellipsoid(x, y, z, [0, -0.088, -0.1775], [0.0235, 0.0105, 0.0062 * lip]), 0.01);
-    d = smin(d, ellipsoid(x, y, z, [0, -0.0865, -0.1885], [0.0205, 0.0105, 0.0068 * lip]), 0.01);
-    d = smax(d, -ellipsoid(x, y, z, [0, -0.1035, -0.1827], [0.0255, 0.0095, 0.0011]), 0.004);
-    // An ear, level between the brow and the base of the nose.
-    d = smin(d, ellipsoid(ax, y, z, [0.0765, 0.012, -0.124], [0.0058, 0.0165, 0.029]), 0.016);
+    d = smin(d, ellipsoid(x, y, z, [0, -0.075, -0.212], [chinR * 1.15, chinR * 0.95, chinR * 0.82]), 0.024);
+    // Soft sculptural orbital recess & serene closed lid (leaves a clean natural brow plane above without gouged craters).
+    d = smax(d, -ellipsoid(ax, y, z, [0.031, -0.0955, -0.119], [0.0175, 0.009, 0.0088]), 0.0145);
+    d = smin(d, ellipsoid(ax, y, z, [0.031, -0.073, -0.119], [0.0126, 0.0128, 0.0074]), 0.0105);
+    // Refined straight nasal bridge from below the brow to a delicate tip, understated alar wings,
+    // and a smooth subnasale/philtrum transition so the underside of the nose has no horizontal cliff.
+    d = smin(d, cone(x, y, z, [0, -0.085, -0.115], [0, -(0.090 + 0.0085 * nose), -0.150], 0.007 * nose, 0.0088 * nose), 0.016);
+    d = smin(d, ellipsoid(x, y, z, [0, -(0.091 + 0.009 * nose), -0.1515], [0.0092 * nose, 0.0085 * nose, 0.0088 * nose]), 0.013);
+    d = smin(d, ellipsoid(ax, y, z, [0.0105 * nose, -0.0895, -0.1545], [0.0072, 0.0078, 0.0072]), 0.014);
+    d = smin(d, cone(x, y, z, [0, -(0.089 + 0.007 * nose), -0.152], [0, -0.0875, -0.169], 0.0075 * nose, 0.0105), 0.015);
+    // Understated sculptural lips with a gentle labial parting contour and mentolabial hollow.
+    d = smin(d, ellipsoid(x, y, z, [0, -0.087, -0.1755], [0.022, 0.009, 0.0068 * lip]), 0.014);
+    d = smin(d, ellipsoid(x, y, z, [0, -0.0855, -0.1875], [0.0195, 0.009, 0.007 * lip]), 0.014);
+    d = smax(d, -ellipsoid(x, y, z, [0, -0.0985, -0.1815], [0.021, 0.0048, 0.0042]), 0.012);
+    d = smax(d, -ellipsoid(x, y, z, [0, -0.094, -0.1975], [0.018, 0.0042, 0.0065]), 0.014);
+    // Clean studio ear plane, level between brow and nasal base (flush enough not to snag hats or crease >30°).
+    d = smin(d, ellipsoid(ax, y, z, [f ? 0.0725 : 0.075, 0.012, -0.132], [0.0048, 0.015, 0.025]), 0.018);
     // The neck, into the base of the skull behind the jaw.
     return smin(d, cone(x, y, z, [0, 0, -0.33], [0, 0.02, -0.15], neckR * 0.92, neckR), 0.024); // the axis is neckAxisY's
   };
@@ -80,8 +84,9 @@ function rayHit(field: (x: number, y: number, z: number) => number, z: number, c
 
 /**
  * How far out from the axis the head's surface lies at height z, at angle a
- * (0 = +x, pi/2 = back), a little evened round the ring so the steep side of
- * a nose or an ear is a slope between the mesh's points rather than a cliff.
+ * (0 = +x, pi/2 = back): exact 3-tap skull contour above the brow (`z > -0.114`)
+ * so hats & caps keep their exact crown fit, smoothly transitioning into 2D
+ * ring+height smoothing across the face and ears below (`z < -0.124`).
  */
 export function headRadius(field: (x: number, y: number, z: number) => number, z: number, a: number): number {
   const d = 0.035, at = (t: number) => rayHit(field, z, Math.cos(t), Math.sin(t));

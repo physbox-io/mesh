@@ -41,9 +41,10 @@ function perpUnit(sd: number[], t: number[]): number[] {
  * The limb's mesh. `side` is the direction the sections' width lies along
  * (made square to the path at each point).
  */
-export function limbLoft(path: LimbSection[], side: number[], caps: { start?: number; end?: number; angles?: number } = {}): { vertices: number[]; faces: number[] } {
+export function limbLoft(path: LimbSection[], side: number[], caps: { start?: number; end?: number; partialEnd?: boolean; angles?: number; capRings?: number } = {}): { vertices: number[]; faces: number[] } {
   const n = path.length;
   const ang = caps.angles ?? (path.some((s) => s.shape) ? 48 : ANG);
+  const capRings = caps.capRings ?? CAP_RINGS;
   const frames = path.map((s, i) => {
     const t = unit(sub(path[Math.min(n - 1, i + 1)].p, path[Math.max(0, i - 1)].p));
     const sd = s.side ?? side;
@@ -64,10 +65,13 @@ export function limbLoft(path: LimbSection[], side: number[], caps: { start?: nu
   const cap = (s: LimbSection, f: { t: number[]; w: number[]; u: number[] }, dir: number) => {
     const out: number[][][] = [];
     const depth = depthAt(s, dir);
-    const a0 = dir > 0 && caps.end !== undefined ? Math.acos(0.6) : 0;
+    const a0 = dir > 0 && caps.partialEnd ? Math.acos(0.6) : 0;
     const s0 = Math.sin(a0), c0 = Math.cos(a0);
-    for (let r = 1; r <= CAP_RINGS; r++) {
-      const a = a0 + (r / (CAP_RINGS + 1)) * (Math.PI / 2 - a0), k = Math.cos(a) / c0;
+    const aspect = a0 === 0 && caps.capRings !== undefined ? Math.min(1, depth / Math.max(1e-6, depth, s.w, s.h)) : 1;
+    for (let r = 1; r <= capRings; r++) {
+      const psi = a0 + (r / (capRings + 1)) * (Math.PI / 2 - a0);
+      const a = aspect < 1 ? Math.atan(aspect * Math.tan(psi)) : psi;
+      const k = Math.cos(a) / c0;
       const zOff = depth * (Math.sin(a) - s0) / (1 - s0);
       const capShape = s.shape ? (ang: number): [number, number] => { const [cw, sh] = s.shape!(ang); return [cw * k, sh * k]; } : undefined;
       out.push(ring(s.p.map((v, j) => v + f.t[j] * dir * zOff), f, s.w * k, s.h * k, capShape));

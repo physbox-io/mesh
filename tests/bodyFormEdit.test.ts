@@ -7,8 +7,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { useStore } from '../src/store/useStore';
 import { compileCsgNodes } from '../src/hooks/useCsgCompile';
 import { bodyFormNode } from '../src/utils/cloth/clothNodes';
-import { bodyFormKey, mergeBodyForm, needsBodyFormBuild } from '../src/utils/cloth/bodyFormEdit';
-import { FIGURE_DEFAULTS, bodyLandmarks, clampBodyForm } from '../src/utils/cloth/bodyForm';
+import { applySkinTone, bodyFormKey, mergeBodyForm, needsBodyFormBuild } from '../src/utils/cloth/bodyFormEdit';
+import { DEFAULT_MANNEQUIN_RGBA, FIGURE_DEFAULTS, SKIN_TONE_STOPS, bodyLandmarks, clampBodyForm, skinToneLabel, skinToneRgba } from '../src/utils/cloth/bodyForm';
 import { formHeightMeasurements, LANDMARK_GAPS, proportions } from '../src/utils/cloth/formProportions';
 import { defaultLimbGirths, formLimbs } from '../src/utils/cloth/formLimbs';
 import { resolveUpdatedGeoms } from '../src/hooks/mcp/bodyDefaults';
@@ -157,5 +157,84 @@ describe('a geom marked internal over MCP', () => {
     const r = resolveUpdatedGeoms(form, [{ name, internal: false }]);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.geoms.find((g) => g.name === name)!.internal).toBe(false);
+  });
+});
+
+describe('human-inclusive skinTone spectrum and O(1) zero-rebuild updates', () => {
+  it('spans non-linear reddish, brown, golden/olive, and rosy-pink human complexions and defaults to studio plaster', () => {
+    expect(skinToneRgba(undefined)).toEqual(DEFAULT_MANNEQUIN_RGBA);
+    expect(skinToneLabel(undefined)).toBe('Studio plaster');
+    expect(SKIN_TONE_STOPS.length).toBeGreaterThanOrEqual(10);
+
+    // Monotonically increasing luminance from deep ebony (0) to rosy porcelain (1),
+    // with genuinely non-collinear RGB chromaticity shifts across undertones.
+    const samples = Array.from({ length: 21 }, (_, i) => skinToneRgba(i / 20));
+    const lum = ([r, g, b]: number[]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    expect(lum(samples[0])).toBeLessThan(0.14);
+    expect(lum(samples[samples.length - 1])).toBeGreaterThan(0.82);
+    for (let i = 1; i < samples.length; i++) {
+      expect(lum(samples[i])).toBeGreaterThan(lum(samples[i - 1]));
+    }
+
+    // Verify chromaticity (r/(r+g+b), g/(r+g+b)) is curved/non-linear across reddish mahogany, olive, and rosy pink:
+    const chrom = ([r, g, b]: number[]) => {
+      const s = r + g + b;
+      return [r / s, g / s] as const;
+    };
+    const cMahogany = chrom(skinToneRgba(0.18));
+    const cOlive = chrom(skinToneRgba(0.66));
+    const cRosy = chrom(skinToneRgba(0.92));
+    // Cross product of chromaticity vectors != 0 proves non-linear undertone curve (not a 2-endpoint lerp).
+    const area2 = Math.abs(
+      (cOlive[0] - cMahogany[0]) * (cRosy[1] - cMahogany[1]) -
+      (cOlive[1] - cMahogany[1]) * (cRosy[0] - cMahogany[0]),
+    );
+    expect(area2).toBeGreaterThan(1e-3);
+
+    // Preserves skinTone across figure switches and unsets on null.
+    const m1 = mergeBodyForm(FIGURE_DEFAULTS.male, { skinTone: 0.35 });
+    expect(m1.skinTone).toBeCloseTo(0.35, 4);
+    const m2 = mergeBodyForm(m1, { figure: 'female' });
+    expect(m2.figure).toBe('female');
+    expect(m2.skinTone).toBeCloseTo(0.35, 4);
+    expect(mergeBodyForm(m2, { skinTone: null } as unknown as Partial<BodyFormMeasurements>).skinTone).toBeUndefined();
+  });
+
+  it('updates skinTone in O(1) sharing mesh buffers without invalidating bodyFormKey or triggering compileCsgNodes', async () => {
+    const initial = bodyFormNode('form', 'form', { figure: 'female' });
+    expect(initial.geoms.every((g) => g.rgba?.slice(0, 3).every((v, k) => Math.abs(v - DEFAULT_MANNEQUIN_RGBA[k]) < 1e-4))).toBe(true);
+    useStore.setState({ sceneGraph: { nodes: [initial] }, model: null, data: null, undoStack: [] });
+
+    const beforeSkin = useStore.getState().sceneGraph.nodes[0].geoms.find((g) => g.name === 'form_skin')!;
+    const beforeKey = bodyFormKey(initial);
+
+    // Simulate dragging the Skin Tone slider in BodyFormCard (skipRecompile = true, O(1) applySkinTone).
+    for (const tone of [0.18, 0.48, 0.66, 0.92]) {
+      const cur = useStore.getState().sceneGraph.nodes[0];
+      useStore.getState().updateNode(
+        'form',
+        { bodyForm: { skinTone: tone }, geoms: applySkinTone(cur.geoms, tone) } as Partial<SceneNode>,
+        true,
+      );
+    }
+
+    const updated = useStore.getState().sceneGraph.nodes[0];
+    expect(updated.bodyForm?.skinTone).toBeCloseTo(0.92, 4);
+    expect(bodyFormKey(updated)).toBe(beforeKey);
+    expect(needsBodyFormBuild(updated)).toBe(false);
+
+    const afterSkin = updated.geoms.find((g) => g.name === 'form_skin')!;
+    expect(afterSkin.rgba).toEqual(skinToneRgba(0.92));
+    // Vertex and face buffers are shared by reference — zero re-meshing or array copying!
+    expect(afterSkin.vertices).toBe(beforeSkin.vertices);
+    expect(afterSkin.faces).toBe(beforeSkin.faces);
+
+    // Background compiler must perform 0 rebuilds when only skinTone changed.
+    const builtCount = await compileCsgNodes(true, { colliders: false });
+    expect(builtCount).toBe(0);
+
+    // Fresh builds also emit skinToneRgba directly.
+    const fresh = bodyFormNode('f2', 'f2', { figure: 'male', skinTone: 0.28 });
+    expect(fresh.geoms.find((g) => g.name === 'f2_headSkin')!.rgba).toEqual(skinToneRgba(0.28));
   });
 });

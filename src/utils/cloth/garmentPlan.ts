@@ -133,10 +133,14 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
   const topOff = standOff(d.waistEase ?? 0.02, layer);
   // A trouser hem is down the leg hung straight (garmentShell, straightened):
   // on a form with bent knees or a wide stance that reaches L.drop below the floor.
+  // A skirt or strapless gown cut from a band (`fromWaist`) keeps its full cut
+  // length too — `garmentShell` pools whatever reaches below `FLOOR`, while
+  // clamping at `0.06 * form.height` shortened a floor-length gown by `L.drop`
+  // into a knee-length skirt whenever the wearer squatted.
   const hem = d.legs
     ? Math.max(0.06 * form.height - L.drop, waistTop - d.length)
     : fromWaist
-      ? Math.max(0.06 * form.height, waistTop - Math.max(0.03, d.length))
+      ? Math.max(0.06 * form.height - L.drop, waistTop - Math.max(0.03, d.length))
       : L.waistZ - Math.max(0.02, d.length);
   const sleeved = !fromWaist && d.sleeve > 0.03;
   // A batwing: sleeve and bodice cut in one, very full under the arm.

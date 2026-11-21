@@ -96,7 +96,8 @@ export function coarsenSurface(
       for (const v of crossed) if (!crossedAtFirst.has(v)) fresh.push(v);
       if (!fresh.length) return done;
       for (let i = 0; i < P.length; i++) { P[i] = savedP[i]; size[i] = savedSize[i]; }
-      T.splice(0, T.length, ...savedT);
+      T.length = savedT.length;
+      for (let i = 0; i < savedT.length; i++) T[i] = savedT[i];
       dead.set(savedDead); gone.set(savedGone);
       rebuildVt();
       if (attempt >= 20) return 0;

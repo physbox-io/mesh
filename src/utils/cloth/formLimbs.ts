@@ -54,8 +54,8 @@ export interface FormLimb {
 
 /** Where the elbow falls along the arm: the upper arm is the longer of the two. */
 const ELBOW_AT = 0.55;
-/** A hand's length past the wrist, at a 1.75 m figure. */
-export const HAND_LENGTH = 0.168;
+/** A hand's length past the wrist (before its fingertip cap), at a 1.75 m figure. */
+export const HAND_LENGTH = 0.148;
 
 /** The radius a bent knee turns on, at a 1.75 m figure: about the knee's own depth, so the back of it does not fold through itself. */
 const KNEE_FILLET = 0.09;
@@ -71,14 +71,48 @@ const smooth = (t0: number, t1: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
-/** Linear through a table of [x, ...values]; clamped at the ends. */
-function table(rows: number[][], x: number): number[] {
-  if (x <= rows[0][0]) return rows[0].slice(1);
-  for (let i = 1; i < rows.length; i++) if (x <= rows[i][0]) {
-    const a = rows[i - 1], b = rows[i], t = (x - a[0]) / (b[0] - a[0] || 1);
-    return a.slice(1).map((v, k) => v + (b[k + 1] - v) * t);
-  }
-  return rows[rows.length - 1].slice(1);
+/**
+ * Monotone cubic Hermite (Fritsch–Carlson PCHIP) through a sorted table of
+ * `[x, ...values]`, clamped flat outside the ends. Exact at every knot and C1
+ * continuous with zero overshoot, so lofted limbs have no slope creases at
+ * profile knots.
+ */
+function makeSmoothTable(rows: number[][]): (x: number) => number[] {
+  const n = rows.length, cols = rows[0].length - 1;
+  const xs = rows.map((r) => r[0]);
+  const ys = Array.from({ length: cols }, (_, c) => rows.map((r) => r[c + 1]));
+  const ms = ys.map((y) => {
+    if (n < 2) return [0];
+    const h = Array.from({ length: n - 1 }, (_, k) => Math.max(1e-9, xs[k + 1] - xs[k]));
+    const d = h.map((hk, k) => (y[k + 1] - y[k]) / hk);
+    if (n === 2) return [d[0], d[0]];
+    const m = new Array<number>(n).fill(0);
+    for (let k = 1; k < n - 1; k++) {
+      if (d[k - 1] * d[k] > 0) {
+        const w1 = 2 * h[k] + h[k - 1], w2 = h[k] + 2 * h[k - 1];
+        m[k] = (w1 + w2) / (w1 / d[k - 1] + w2 / d[k]);
+      }
+    }
+    const endSlope = (h0: number, h1: number, d0: number, d1: number) => {
+      let s = ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+      if (s * d0 <= 0) return 0;
+      if (Math.abs(s) > 3 * Math.abs(d0)) s = 3 * d0;
+      return s;
+    };
+    m[0] = endSlope(h[0], h[1], d[0], d[1]);
+    m[n - 1] = endSlope(h[n - 2], h[n - 3], d[n - 2], d[n - 3]);
+    return m;
+  });
+  return (x: number) => {
+    if (x <= xs[0]) return ys.map((y) => y[0]);
+    if (x >= xs[n - 1]) return ys.map((y) => y[n - 1]);
+    let k = 0;
+    while (k + 2 < n && x > xs[k + 1]) k++;
+    const hk = Math.max(1e-9, xs[k + 1] - xs[k]), t = (x - xs[k]) / hk;
+    const t2 = t * t, omt = 1 - t, omt2 = omt * omt;
+    const h00 = (1 + 2 * t) * omt2, h10 = t * omt2, h01 = t2 * (3 - 2 * t), h11 = t2 * (t - 1);
+    return ys.map((y, c) => h00 * y[k] + h10 * hk * ms[c][k] + h01 * y[k + 1] + h11 * hk * ms[c][k + 1]);
+  };
 }
 
 /** A section square to the line at s: `side` made square to it (with orthogonal fallback), `up` the third axis. */
@@ -131,21 +165,32 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const th = (m.armAngle * Math.PI) / 180;
   const rA = m.upperArm / (2 * Math.PI);
   const origin = [side * (m.shoulderWidth / 2 - P.shoulderR * 0.6), 0, P.shoulderZ - P.shoulderDrop - 0.01 * S];
-  const path = makeLimbPath(origin, [side * Math.cos(th), 0, -Math.sin(th)], [0, -1, 0], m.armLength * ELBOW_AT, m.armLength, m.elbowBend, 0.07 * S);
+  const path = makeLimbPath(origin, [side * Math.cos(th), 0, -Math.sin(th)], [0, -1, 0], m.armLength * ELBOW_AT, m.armLength, m.elbowBend, 0.08 * S);
   const A = m.armLength;
   // Real proportions (a man's arm about 31, 26, 27 and 17 cm round at the
-  // bicep, elbow, forearm and wrist): [distance along, half width, half
-  // height]; then the hand, a mitten curling a little toward the body:
-  // [past the wrist, curl, half width, half height].
+  // bicep, elbow, forearm and wrist), flowing smoothly through the wrist into
+  // a slender, tapered studio-mannequin hand.
   const E = ELBOW_AT;
   // The wrist measurement scales the wrist, and half as much the forearm above it.
-  const fw = girthScales(m).wrist, fwa = fw === 1 ? 1 : (1 + fw) / 2, [wa, wb] = wristAxes(S);
-  const armRows = [[0, rA * 0.8, rA * 0.8], [0.1 * A, rA * 0.92, rA * 0.92], [0.25 * A, rA * 0.97, rA * 0.97], [(E - 0.09) * A, rA * 0.9, rA * 0.88], [E * A, rA * 0.82, rA * 0.76], [(E + 0.11) * A, rA * 0.84, rA * 0.74], [0.86 * A, rA * 0.66 * fwa, rA * 0.54 * fwa], [A, wa * fw, wb * fw]];
+  const fw = girthScales(m).wrist, fwa = fw === 1 ? 1 : (1 + fw) / 2, fwh = Math.sqrt(fw), [wa, wb] = wristAxes(S);
   const handL = HAND_LENGTH * S;
-  const handRows = [[0, 0, wa * fw, wb * fw], [0.23 * handL, 0, 0.042 * S, 0.022 * S], [0.5 * handL, 0.004 * S, 0.045 * S, 0.019 * S], [0.75 * handL, 0.012 * S, 0.042 * S, 0.014 * S], [handL, 0.026 * S, 0.034 * S, 0.011 * S]];
+  const armHandProfile = makeSmoothTable([
+    [0, rA * 0.8, rA * 0.8],
+    [0.1 * A, rA * 0.92, rA * 0.92],
+    [0.25 * A, rA * 0.97, rA * 0.97],
+    [(E - 0.09) * A, rA * 0.9, rA * 0.88],
+    [E * A, rA * 0.82, rA * 0.76],
+    [(E + 0.11) * A, rA * 0.84, rA * 0.74],
+    [0.85 * A, rA * 0.64 * fwa, rA * 0.52 * fwa],
+    [A, wa * fw, wb * fw],
+    [A + 0.28 * handL, 0.0365 * S * fwh, 0.015 * S * fwh],
+    [A + 0.56 * handL, 0.034 * S, 0.0118 * S],
+    [A + 0.82 * handL, 0.0275 * S, 0.009 * S],
+    [A + handL, 0.0185 * S, 0.0072 * S],
+  ]);
   // The palm faces the body; across it lies the hand's width, thumb side to
   // the front and up. Widths elsewhere are square to the elbow's axis (so
-  // the sections stay square through the turn), twisting to the hand's.
+  // the sections stay square through the turn), twisting smoothly to the hand's.
   const tw = path.tangent(A);
   const toBody = [-side, 0, 0].map((v, k) => v - tw[k] * -side * tw[0]);
   const inward = unit(toBody);
@@ -153,11 +198,12 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   if (-across[1] + across[2] < 0) across = across.map((v) => -v);
   const axis = cross(path.tangent(0), tw);
   const widthAt = (s: number) => {
+    if (s >= A) return across;
     const t = path.tangent(s);
     let base = cross(axis, t);
     if (Math.sqrt(dot(base, base)) < 1e-6) base = [0, 1, 0];
     if (dot(base, across) < 0) base = base.map((v) => -v);
-    const f = Math.min(1, Math.max(0, (s / A - 0.6) / 0.4));
+    const f = smooth(0.55 * A, A, s);
     return unit(base.map((v, k) => v * (1 - f) + across[k] * f));
   };
   // Which way a point on the arm faces: into the elbow's crook, and out away from the body.
@@ -170,11 +216,14 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
     return { fwd, out: cross(fwd, t).map((v) => v * side) };
   };
   return {
-    name: side > 0 ? 'armL' : 'armR', path, length: A + handL,
+    name: side > 0 ? 'armL' : 'armR', path, length: A + handL, endCap: 0.014 * S,
     section(s) {
+      const [w, h] = armHandProfile(s);
+      const uHand = s > A ? Math.min(1, (s - A) / handL) : 0;
+      const curl = uHand > 0 ? 0.018 * S * uHand * uHand * (1.4 - 0.4 * uHand) : 0;
+      const c = curl > 0 ? path.at(s).map((v, k) => v + inward[k] * curl) : path.at(s);
+      const sec = frame(path, s, widthAt(s), c, w, h);
       if (s <= A) {
-        const [w, h] = table(armRows, s);
-        const sec = frame(path, s, widthAt(s), path.at(s), w, h);
         const { fwd, out } = facings(s), u = Math.min(1, Math.max(0, s / A));
         const shape = (ang: number): [number, number] => {
           const ca = Math.cos(ang), sa = Math.sin(ang);
@@ -184,8 +233,14 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
         };
         return { ...sec, shape };
       }
-      const [curl, w, h] = table(handRows, s - A);
-      return frame(path, s, across, path.at(s).map((v, k) => v + inward[k] * curl), w, h);
+      // Subtle anatomical thenar eminence on the radial-palmar side (+side, -up) where the thumb originates.
+      const thenarAmp = 0.0042 * S * Math.sin(Math.PI * smooth(0.02, 0.55, uHand));
+      const shape = (ang: number): [number, number] => {
+        const ca = Math.cos(ang), sa = Math.sin(ang);
+        const thn = thenarAmp * Math.max(0, ca) ** 1.6 * Math.max(0, -sa * 0.75 + 0.35);
+        return [ca * (w + thn), sa * (h + 0.65 * thn)];
+      };
+      return { ...sec, shape };
     },
   };
 }
@@ -211,7 +266,7 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const fwd = unit([0, -1, 0].map((v, k) => v - down[k] * -down[1]));
   const bend = (Math.acos(Math.max(-1, Math.min(1, -down[1]))) * 180) / Math.PI;
   const upper = Math.sqrt(dot(ankle.map((v, k) => v - top[k]), ankle.map((v, k) => v - top[k])));
-  const foot = 0.15 * S;
+  const foot = 0.184 * S;
   // Rounded well at the ankle: sharp, the crease over the instep wedged a
   // hem or a sock's top and crushed it.
   const straight = makeLimbPath(top, down, fwd, upper, upper + foot, bend, 0.08 * S);
@@ -241,37 +296,61 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   // Down the leg by height: [height, half width (across), half depth].
   // Each girth measurement scales its own row, and the rows between take the mean.
   const mid = (a: number, b: number) => (a === b ? a : (a + b) / 2);
-  const legRows = [
-    [lz(0.035 * S + 0.03 * S), calfR * 0.56 * g.ankle, calfR * 0.66 * g.ankle],
+  const legProfile = makeSmoothTable([
+    [lz(0.035 * S + 0.025 * S), calfR * 0.50 * g.ankle, calfR * 0.57 * g.ankle],
     [lz(0.05 * H + 0.015 * S), calfR * 0.53 * g.ankle, calfR * 0.6 * g.ankle],
     [lz(0.05 * H + 0.1 * S), calfR * 0.66 * mid(g.ankle, g.calf), calfR * 0.72 * mid(g.ankle, g.calf)],
     [lz(0.285 * H - 0.12 * S), calfR * 0.86 * g.calf, calfR * 0.94 * g.calf],
     [lz(0.285 * H - 0.035 * S), thighR * 0.6 * g.knee, thighR * 0.6 * g.knee],
     [lz(0.285 * H + 0.03 * S), thighR * 0.62 * g.knee, thighR * 0.64 * g.knee],
     [crotchZ - (crotchZ - kneeZ) * 0.45, thighR * 0.78 * g.thigh, thighR * 0.92 * g.thigh],
-    [crotchZ, hipHalf * 0.5, hipDepth * 0.86],
-    [topZ, hipHalf * 0.47, hipDepth * 0.72],
-  ];
+    [crotchZ, hipHalf * 0.5, hipDepth * 0.85],
+    [topZ, hipHalf * 0.49, hipDepth * 0.82],
+  ]);
   // Along the foot past the ankle: [distance, half width, half height, how far its centre drops].
-  const footRows = [[-0.02 * S, calfR * 0.5 * g.ankle, calfR * 0.56 * g.ankle, 0], [0.01 * S, 0.034 * S, 0.033 * S, 0], [0.05 * S, 0.04 * S, 0.03 * S, 0.003 * S], [0.1 * S, 0.045 * S, 0.022 * S, 0.01 * S], [foot, 0.035 * S, 0.015 * S, 0.017 * S]];
+  const gAnk = Math.sqrt(g.ankle);
+  const footProfile = makeSmoothTable([
+    [-0.055 * S, calfR * 0.51 * g.ankle, calfR * 0.58 * g.ankle, 0],
+    [-0.01 * S, 0.033 * S * gAnk, 0.031 * S * gAnk, 0.001 * S],
+    [0.04 * S, 0.039 * S, 0.0265 * S, 0.005 * S],
+    [0.105 * S, 0.0435 * S, 0.019 * S, 0.012 * S],
+    [0.148 * S, 0.0375 * S, 0.0135 * S, 0.016 * S],
+    [foot, 0.026 * S, 0.0095 * S, 0.0185 * S],
+  ]);
   const soleZ = FOOT_ROOM + 0.004 * S;
-  const yHeel = ankle[1] + calfR * 0.54;
+  const yHeel = ankle[1] + calfR * 0.55 * gAnk;
   return {
-    name: side > 0 ? 'legL' : 'legR', path, straight, length: upper + foot, startCap: 0.045 * S,
+    name: side > 0 ? 'legL' : 'legR', path, straight, length: upper + foot, startCap: 0.045 * S, endCap: 0.015 * S,
     section(s) {
       const along = s - upper;
       // Its height standing straight: what the rows and the muscles are placed by.
       const zr = straight.at(s)[2] + hipDrop;
-      const [w0, h0, drop] = along < -0.02 * S ? [...table(legRows, zr), 0] : table(footRows, along);
+      let w0: number, h0: number, drop: number;
+      if (along <= -0.055 * S) {
+        [w0, h0] = legProfile(zr);
+        drop = 0;
+      } else if (along >= 0.015 * S) {
+        [w0, h0, drop] = footProfile(along);
+      } else {
+        const [lw, lh] = legProfile(zr), [fw, fh, fd] = footProfile(along);
+        const bf = smooth(-0.055 * S, 0.015 * S, along);
+        w0 = lw + (fw - lw) * bf;
+        h0 = lh + (fh - lh) * bf;
+        drop = fd * bf;
+      }
       const p = path.at(s), c = [p[0], p[1], p[2] - drop];
-      const tuck = legTuck(p[2], P.crotchZ, S), w = Math.max(0.015 * S, w0 - tuck), h = Math.max(0.015 * S, h0 - tuck);
+      const tuck = legTuck(p[2], P.crotchZ, S), w = Math.max(0.012 * S, w0 - tuck), h = Math.max(0.009 * S, h0 - tuck);
       // Round the leg: `out` is away from the other leg, `fwd` to the front
-      // (as it stands straight, turning with it as posed). Gone by the instep.
+      // (as it stands straight, turning with it as posed). Fades cleanly into
+      // both the hip root above and the ankle below.
       const straightSec = straight === path ? null : frame(straight, s, [1, 0, 0], c, w, h);
+      const hipFade = 1 - smooth(crotchZ - 0.06 * S, crotchZ - 0.008 * S, zr);
+      const ankleFade = 1 - smooth(-0.065 * S, -0.02 * S, along);
       const relief = (ang: number, sec: LimbSectionAt) => {
+        if (hipFade <= 0 || ankleFade <= 0) return 0;
         const ca = Math.cos(ang), sa = Math.sin(ang), rest = straightSec ?? sec;
         const d = rest.side.map((v, k) => v * ca + rest.up[k] * sa);
-        return legRelief(m.figure, (zr - kneeZ) / S, -d[1], d[0] * side) * S * (1 - smooth(-0.06 * S, -0.02 * S, along));
+        return legRelief(m.figure, (zr - kneeZ) / S, -d[1], d[0] * side) * S * hipFade * ankleFade;
       };
       if (along < -0.08 * S) {
         const sec = frame(path, s, [1, 0, 0], c, w, h);
@@ -289,13 +368,15 @@ function leg(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
       // to the Achilles line yHeel and down flat to soleZ from heel to toe.
       const toFloor = uz > 0.15 ? (rc[2] - floorZ) / uz : Infinity;
       const toAchilles = -uy > 0.15 ? (yHeel - rc[1]) / -uy : Infinity;
-      // Smooth min (smin) at the back of the heel so the heel pad rounds onto the floor.
-      const k = 0.018 * S, d = Math.max(0, k - Math.abs(toFloor - toAchilles)) / k;
+      // Generous calcaneal heel-pad rounding (0.048 S) so the back of the heel curves smoothly onto the sole.
+      const k = 0.048 * S, d = Math.max(0, k - Math.abs(toFloor - toAchilles)) / k;
       let hBot = Math.max(h, Math.min(toFloor, toAchilles) - 0.25 * k * d * d);
       if (straightSec && base.up[2] > 0.15) hBot = Math.max(h, Math.min(hBot, (c[2] - soleZ) / base.up[2]));
       const shape = (ang: number): [number, number] => {
         const ca = Math.cos(ang), sa = Math.sin(ang), r = relief(ang, base);
-        return [ca * (w + r), sa * ((sa < 0 ? hBot : h) + r)];
+        const botBlend = sa < 0 ? (-sa) ** 1.45 : 0;
+        const radH = h + (hBot - h) * botBlend;
+        return [ca * (w + r), sa * (radH + r)];
       };
       return frame(path, s, [1, 0, 0], c, w, h, shape);
     },
@@ -337,7 +418,9 @@ const cache = new Map<string, Record<LimbName, FormLimb>>();
 
 /** The form's limbs (cached on its measurements); head is constructed lazily unless requested. */
 export function formLimbs(m: BodyFormMeasurements, _withHead = true): Record<LimbName, FormLimb> {
-  const key = JSON.stringify(m);
+  const { skinTone: _st, ...geomM } = m;
+  void _st;
+  const key = JSON.stringify(geomM);
   let hit = cache.get(key);
   if (!hit) {
     let headLimb: FormLimb | undefined;

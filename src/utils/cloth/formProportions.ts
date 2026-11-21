@@ -21,12 +21,12 @@ export const NECK_TOP = 0.875;
 
 /**
  * How far inside the skin a leg's own surface runs above the crotch, at scale
- * s: there the skin is the leg (bodyForm, blendLimbRoots), and the two would
- * otherwise lie on each other.
+ * s: eased with a C2 quintic curve from just below the crotch up into the hip
+ * so the upper thigh transitions smoothly without a horizontal slope crease.
  */
 export function legTuck(z: number, crotchZ: number, s: number): number {
-  const t = Math.min(1, Math.max(0, (z - crotchZ) / (0.05 * s)));
-  return 0.022 * s * t * t * (3 - 2 * t);
+  const t = Math.min(1, Math.max(0, (z - (crotchZ - 0.02 * s)) / (0.075 * s)));
+  return 0.018 * s * t * t * t * (10 - 15 * t + 6 * t * t);
 }
 
 /**

@@ -56,6 +56,11 @@ export function torsoRelief(figure: BodyFigure, x: number, z: number, front: num
   return r;
 }
 
+const smooth01 = (t0: number, t1: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - t0) / (t1 - t0 || 1)));
+  return t * t * (3 - 2 * t);
+};
+
 /**
  * Over an arm. `u` runs shoulder to wrist; `elbow` is where the joint falls on
  * that. `fwd` is how much the point faces the inside of the elbow, `out` how
@@ -69,13 +74,14 @@ export function armRelief(figure: BodyFigure, u: number, elbow: number, fwd: num
   r += 0.0095 * M * bump(ue, 0.62, 0.22, 0.27) * facing(fwd, 1.6); // biceps
   r += 0.0085 * M * bump(ue, 0.55, 0.3) * facing(-fwd * 0.9 + out * 0.3, 1.6); // triceps
   r -= 0.0024 * M * bump(ue, 0.66, 0.24) * facing(out * 0.95 + fwd * 0.2, 7); // the groove between them
-  // The point of the elbow, and the crease inside it.
-  r += 0.0055 * bump(u, elbow, 0.04) * facing(-fwd, 3);
-  r -= 0.0035 * bump(u, elbow, 0.035) * facing(fwd, 2);
+  // The point of the elbow, and a gentle antecubital hollow inside it (broad enough not to crease when bent).
+  r += 0.0046 * bump(u, elbow, 0.05) * facing(-fwd, 2.6);
+  r -= 0.0018 * bump(u, elbow, 0.065) * facing(fwd, 1.8);
   // The forearm's two masses, off the elbow.
   r += 0.0085 * (M * 0.5 + 0.5) * bump(uf, 0.22, 0.14, 0.26) * facing(out * 0.8 + fwd * 0.6, 2);
   r += 0.0055 * (M * 0.5 + 0.5) * bump(uf, 0.25, 0.14, 0.3) * facing(-out * 0.8 + fwd * 0.5, 2);
-  return r;
+  // Fade cleanly into the wrist so the arm-to-hand join has zero step or slope jump.
+  return r * (1 - smooth01(0.84, 0.99, u));
 }
 
 /**

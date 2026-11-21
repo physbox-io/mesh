@@ -12,7 +12,7 @@
  * in the frame of the form as it now is, as it is drawn and read back.
  */
 
-import type { BodyFormMeasurements, ClothPull, FormLimbName, GarmentDraft, GarmentPlane, GarmentPoint } from '../../types/cloth';
+import type { BodyFormMeasurements, ClothPiece, ClothPlacement, ClothPull, FormLimbName, GarmentDraft, GarmentPlane, GarmentPoint } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import { formLimbs, type FormLimb } from './formLimbs';
 import { proportions } from './formProportions';
@@ -122,6 +122,7 @@ export function reposeDraft(draft: GarmentDraft, from: BodyFormMeasurements, to:
     });
   }
   if (draft.belt && typeof draft.belt === 'object' && draft.belt.at !== undefined) out.belt = { ...draft.belt, at: r6(draft.belt.at + R.dz) };
+  if (draft.rods) out.rods = draft.rods.map((r) => (r.z ? { ...r, z: [r6(r.z[0] + R.dz), r6(r.z[1] + R.dz)] } : r));
   return out;
 }
 
@@ -129,20 +130,59 @@ const reposePull = (pull: ClothPull, R: ReturnType<typeof reposer>): ClothPull =
   ...pull, to: pt3(R.point(pull.to)), ...(pull.via ? { via: pull.via.map((p) => pt3(R.point(p))) } : {}),
 });
 
+const reposePiece = (pc: ClothPiece, dz: number): ClothPiece => {
+  const shiftPlacement = (pl: ClothPlacement | undefined): ClothPlacement | undefined => {
+    if (!pl) return pl;
+    switch (pl.kind) {
+      case 'path':
+        return { ...pl, stations: pl.stations.map((s) => ({ ...s, p: [s.p[0], s.p[1], r6(s.p[2] + dz)] })) };
+      case 'girth':
+      case 'wrap':
+        return { ...pl, origin: [pl.origin[0], pl.origin[1], r6(pl.origin[2] + dz)] };
+      case 'plane':
+        return pl.origin ? { ...pl, origin: [pl.origin[0], pl.origin[1], r6(pl.origin[2] + dz)] } : pl;
+      case 'along':
+        return pl;
+    }
+  };
+  return {
+    ...pc,
+    ...(pc.placement ? { placement: shiftPlacement(pc.placement) } : {}),
+    ...(pc.start ? { start: shiftPlacement(pc.start) } : {}),
+  };
+};
+
 /**
- * `nodes` with every garment fitted to the form named `form` carried from its
- * pose `from` to `to`; the same array when there is none, or the pose is the same.
+ * `nodes` with every garment fitted to the form named `form` (and any plain-piece
+ * cloth tied to one of those garments, e.g. a back bow) carried from its pose
+ * `from` to `to`; the same array when there is none, or the pose is the same.
  */
 export function reposeGarments(nodes: SceneNode[], form: string, from: BodyFormMeasurements, to: BodyFormMeasurements): SceneNode[] {
   if (!posedDifferently(from, to)) return nodes;
   let R: ReturnType<typeof reposer> | null = null;
+  const garmentNames = new Set<string>();
+  const collect = (list: SceneNode[]) => {
+    for (const n of list) {
+      if (n.cloth?.garment?.fitTo === form) garmentNames.add(n.name || n.id);
+      if (n.children?.length) collect(n.children);
+    }
+  };
+  collect(nodes);
   const one = (n: SceneNode): SceneNode => {
     const children = n.children?.length ? walk(n.children) : n.children;
     const draft = n.cloth?.garment;
-    if (draft?.fitTo !== form) return children === n.children ? n : { ...n, children };
-    R ??= reposer(from, to);
-    const arrange = n.cloth!.arrange;
-    return { ...n, children, cloth: { ...n.cloth!, garment: reposeDraft(draft, from, to), ...(arrange ? { arrange: arrange.map((a) => ('to' in a ? reposePull(a, R!) : a)) } : {}) } };
+    if (draft?.fitTo === form) {
+      R ??= reposer(from, to);
+      const arrange = n.cloth!.arrange;
+      return { ...n, children, cloth: { ...n.cloth!, garment: reposeDraft(draft, from, to), ...(arrange ? { arrange: arrange.map((a) => ('to' in a ? reposePull(a, R!) : a)) } : {}) } };
+    }
+    if (garmentNames.size && n.cloth?.pieces?.length && n.cloth.ties?.some((t) => t.toCloth && garmentNames.has(t.toCloth))) {
+      R ??= reposer(from, to);
+      if (Math.abs(R.dz) > 1e-9) {
+        return { ...n, children, cloth: { ...n.cloth, pieces: n.cloth.pieces.map((pc) => reposePiece(pc, R!.dz)) } };
+      }
+    }
+    return children === n.children ? n : { ...n, children };
   };
   const walk = (list: SceneNode[]): SceneNode[] => { const out = list.map(one); return out.every((n, i) => n === list[i]) ? list : out; };
   return walk(nodes);

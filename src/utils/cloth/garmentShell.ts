@@ -830,6 +830,85 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     p[2] = z;
   }
   const cut = points.map((p) => p.slice());
+  // A skirt (`skin` carried below the seat, not cut into trouser legs) keeps its
+  // exact standing pattern (`cut`), while its starting 3D placement (`points`)
+  // clears posed knees, shins, and feet radially from the hip axis so `settleNow()`
+  // drapes the real cut over the legs from outside rather than spawning sliced
+  // through a bent knee or wide-stance foot.
+  if (skin?.skin?.downTo !== undefined && !covers.has('legL') && !covers.has('legR')) {
+    const legGeoms = [meshes.legL?.points, meshes.legR?.points].filter((q): q is number[][] => !!q?.length);
+    const posed = (form.kneeBend ?? 0) > 0 || (form.stance ?? 0) !== 0;
+    if (posed && legGeoms.length) {
+      const N_ANG = 72, DZ = 0.015;
+      const zMin = 0, zMax = L.hipZ + 0.02;
+      const nZ = Math.max(2, Math.ceil((zMax - zMin) / DZ) + 1);
+      const env = new Float64Array(nZ * N_ANG);
+      const cyHip = centreY(L.hipZ);
+      const clear = Math.max(0.022, rest + 0.016);
+      for (const lpts of legGeoms) {
+        for (const lp of lpts) {
+          if (lp[2] < zMin - 0.03 || lp[2] > zMax + 0.03) continue;
+          const dx = lp[0], dy = lp[1] - cyHip, r = Math.hypot(dx, dy);
+          if (r < 1e-4) continue;
+          const th = Math.atan2(dy, dx), fi = ((th < 0 ? th + 2 * Math.PI : th) / (2 * Math.PI)) * N_ANG;
+          const i0 = Math.floor(fi);
+          const kz0 = Math.max(0, Math.floor((lp[2] - 0.03 - zMin) / DZ));
+          const kz1 = Math.min(nZ - 1, Math.ceil((lp[2] + 0.03 - zMin) / DZ));
+          for (let kz = kz0; kz <= kz1; kz++) {
+            const zk = zMin + kz * DZ, vz = Math.max(0, 0.03 - Math.abs(lp[2] - zk));
+            for (let da = -5; da <= 5; da++) {
+              const ia = ((i0 + da) % N_ANG + N_ANG) % N_ANG;
+              let dth = Math.abs(th - (2 * Math.PI * ia) / N_ANG);
+              if (dth > Math.PI) dth = 2 * Math.PI - dth;
+              const pad = clear * Math.cos(Math.min(Math.PI / 2, dth * 2.0));
+              if (pad <= 0) continue;
+              const want = r * Math.cos(Math.min(Math.PI / 3, dth)) + pad + 0.5 * vz;
+              if (want > env[kz * N_ANG + ia]) env[kz * N_ANG + ia] = want;
+            }
+          }
+        }
+      }
+      // Monotone non-increasing upward so a forward knee tents the skirt down to
+      // the floor rather than folding the hem back underneath the shin, then
+      // max-buffered + smoothed so peaks never erode below the knee cap.
+      for (let kz = nZ - 2; kz >= 0; kz--) {
+        for (let ia = 0; ia < N_ANG; ia++) {
+          if (env[(kz + 1) * N_ANG + ia] > env[kz * N_ANG + ia]) env[kz * N_ANG + ia] = env[(kz + 1) * N_ANG + ia];
+        }
+      }
+      {
+        const peak = Float64Array.from(env);
+        for (let pass = 0; pass < 2; pass++) {
+          const prev = Float64Array.from(env);
+          for (let kz = 0; kz < nZ; kz++) {
+            const kzLo = Math.max(0, kz - 1), kzHi = Math.min(nZ - 1, kz + 1);
+            for (let ia = 0; ia < N_ANG; ia++) {
+              const iL = (ia - 1 + N_ANG) % N_ANG, iR = (ia + 1) % N_ANG;
+              const ring = 0.25 * prev[kz * N_ANG + iL] + 0.5 * prev[kz * N_ANG + ia] + 0.25 * prev[kz * N_ANG + iR];
+              env[kz * N_ANG + ia] = Math.max(peak[kz * N_ANG + ia], 0.25 * prev[kzLo * N_ANG + ia] + 0.5 * ring + 0.25 * prev[kzHi * N_ANG + ia]);
+            }
+          }
+        }
+      }
+      for (const p of points) {
+        if (p[2] > zMax) continue;
+        const zClamped = Math.min(zMax, Math.max(zMin, p[2]));
+        const fz = (zClamped - zMin) / DZ, kz = Math.min(nZ - 2, Math.max(0, Math.floor(fz))), tz = fz - kz;
+        const dx = p[0], dy = p[1] - cyHip, r = Math.hypot(dx, dy) || 1e-6;
+        const th = Math.atan2(dy, dx), fi = ((th < 0 ? th + 2 * Math.PI : th) / (2 * Math.PI)) * N_ANG;
+        const i0 = Math.floor(fi) % N_ANG, i1 = (i0 + 1) % N_ANG, ta = fi - Math.floor(fi);
+        const r0 = env[kz * N_ANG + i0] * (1 - ta) + env[kz * N_ANG + i1] * ta;
+        const r1 = env[(kz + 1) * N_ANG + i0] * (1 - ta) + env[(kz + 1) * N_ANG + i1] * ta;
+        const rMin = r0 * (1 - tz) + r1 * tz;
+        if (r < rMin) {
+          const blend = p[2] > L.hipZ - 0.04 ? Math.min(1, Math.max(0, (zMax - p[2]) / 0.06)) : 1;
+          const rNew = r + (rMin - r) * blend;
+          p[0] = (dx / r) * rNew;
+          p[1] = cyHip + (dy / r) * rNew;
+        }
+      }
+    }
+  }
   for (const p of points) {
     if (p[2] >= FLOOR) continue;
     const cy = centreY(L.hipZ), dx = p[0], dy = p[1] - cy, l = Math.hypot(dx, dy) || 1;

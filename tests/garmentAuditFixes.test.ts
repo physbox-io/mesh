@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { limbLoft } from '../src/utils/cloth/limbLoft';
 import { formLimbs, limbSections } from '../src/utils/cloth/formLimbs';
 import { clampBodyForm, bodyLandmarks } from '../src/utils/cloth/bodyForm';
-import { bodyFormKey, needsBodyFormBuild } from '../src/utils/cloth/bodyFormEdit';
+import { bodyFormKey, mergeBodyForm, needsBodyFormBuild } from '../src/utils/cloth/bodyFormEdit';
 import { buildBodyFormOffThread, BodyFormSupersededError } from '../src/utils/cloth/bodyFormClient';
 import { bodyFormNode, garmentNode, releaseGarments } from '../src/utils/cloth/clothNodes';
 import { clothModel } from '../src/utils/cloth/clothModel';
@@ -11,7 +11,8 @@ import { patternSvg } from '../src/utils/cloth/patternSvg';
 import { flattenPanel } from '../src/utils/cloth/garmentFlatten';
 import { delaunay } from '../src/utils/cloth/delaunay';
 import { healFlatTriangles } from '../src/utils/cloth/garmentSurface';
-import { reposeDraft } from '../src/utils/cloth/garmentRepose';
+import { reposeDraft, reposeGarments } from '../src/utils/cloth/garmentRepose';
+import { closestOnTri } from '../src/utils/cloth/clothColliders';
 import { clothRun } from './clothSimHarness';
 import type { SceneNode } from '../src/types/scene';
 
@@ -428,4 +429,181 @@ describe('garment & body-form audit regression fixes', () => {
     expect(afterDrape.downCount).toBe(0);
     expect(afterDrape.minAdjDot).toBeGreaterThan(0.88);
   }, 120_000);
+
+  it('eliminates harsh >=30° FeatureEdges seams at hips/thighs/wrists/elbows/ankles and keeps proportional hands, face, and feet', () => {
+    const maxDihedralOf = (vertices: number[], faces: number[], zFilter?: (z: number) => boolean) => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i < vertices.length; i += 3) pts.push([vertices[i], -vertices[i + 2], vertices[i + 1]]);
+      const normals: [number, number, number][] = [];
+      const edgeTris = new Map<string, number[]>();
+      for (let t = 0; t < faces.length; t += 3) {
+        const ia = faces[t], ib = faces[t + 1], ic = faces[t + 2];
+        const a = pts[ia], b = pts[ib], c = pts[ic];
+        const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+        const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+        const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const nl = Math.hypot(nx, ny, nz) || 1e-12;
+        normals.push([nx / nl, ny / nl, nz / nl]);
+        for (const [p, q] of [[ia, ib], [ib, ic], [ic, ia]]) {
+          const k = p < q ? `${p},${q}` : `${q},${p}`;
+          let list = edgeTris.get(k);
+          if (!list) { list = []; edgeTris.set(k, list); }
+          list.push(t / 3);
+        }
+      }
+      let maxDeg = 0, over30 = 0;
+      for (const [k, ts] of edgeTris) {
+        if (ts.length !== 2) continue;
+        const [ia, ib] = k.split(',').map(Number);
+        const zMid = 0.5 * (pts[ia][2] + pts[ib][2]);
+        if (zFilter && !zFilter(zMid)) continue;
+        const n0 = normals[ts[0]], n1 = normals[ts[1]];
+        const d = Math.max(-1, Math.min(1, n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]));
+        const deg = (Math.acos(d) * 180) / Math.PI;
+        if (deg > maxDeg) maxDeg = deg;
+        if (deg >= 30) over30++;
+      }
+      return { maxDeg, over30, pts };
+    };
+
+    for (const figure of ['male', 'female'] as const) {
+      const form = bodyFormNode('form', 'form', { figure });
+      const m = form.bodyForm!;
+      const L = bodyLandmarks(m);
+      const skin = form.geoms.find((g) => g.name === 'form_skin')!;
+      const legL = form.geoms.find((g) => g.name === 'form_legL')!;
+      const armL = form.geoms.find((g) => g.name === 'form_armL')!;
+      const thumbL = form.geoms.find((g) => g.name === 'form_thumbL')!;
+      const headSkin = form.geoms.find((g) => g.name === 'form_headSkin')!;
+
+      // 1. Zero >=30° sharp edges across torso, hips/groin, legs, ankles, elbows, wrists, hands, and thumbs!
+      expect(maxDihedralOf(skin.vertices!, skin.faces!).over30, `${figure} skin >=30°`).toBe(0);
+      expect(maxDihedralOf(legL.vertices!, legL.faces!).over30, `${figure} legL >=30°`).toBe(0);
+      expect(maxDihedralOf(armL.vertices!, armL.faces!).over30, `${figure} armL >=30°`).toBe(0);
+      expect(maxDihedralOf(thumbL.vertices!, thumbL.faces!).over30, `${figure} thumbL >=30°`).toBe(0);
+
+      // 2. Hip/crotch join: torso skin tucks cleanly inside upper thighs at crotchZ (no outer overhang shelf).
+      const skinStats = maxDihedralOf(skin.vertices!, skin.faces!);
+      const legStats = maxDihedralOf(legL.vertices!, legL.faces!);
+      const skinOuterAtCrotch = Math.max(...skinStats.pts.filter((p) => Math.abs(p[2] - L.crotchZ) < 0.008).map((p) => p[0]));
+      const legOuterAtCrotch = Math.max(...legStats.pts.filter((p) => Math.abs(p[2] - L.crotchZ) < 0.008).map((p) => p[0]));
+      expect(skinOuterAtCrotch).toBeLessThan(legOuterAtCrotch);
+
+      // 3. Hand proportions: sleek palm width (< 8.2 cm) and proportional wrist-to-tip reach (< 17.5 cm).
+      const limbs = formLimbs(m);
+      const palmSec = limbs.armL.section(m.armLength + 0.04);
+      expect(2 * palmSec.w).toBeLessThan(0.082);
+      expect(2 * palmSec.w).toBeGreaterThan(0.062);
+      const handReach = limbs.armL.length - m.armLength + (limbs.armL.endCap ?? 0);
+      expect(handReach).toBeLessThan(0.175);
+      expect(handReach).toBeGreaterThan(0.145);
+
+      // 4. Face smoothness (no jagged >34° nose/mouth/brow gashes) & distinct nose projection.
+      const faceStats = maxDihedralOf(headSkin.vertices!, headSkin.faces!, (z) => z < m.height - 0.03);
+      expect(faceStats.maxDeg, `${figure} face maxDihedral`).toBeLessThan(34);
+      const noseMinY = Math.min(...faceStats.pts.filter((p) => Math.abs(p[0]) < 0.01 && p[2] > m.height - 0.17 && p[2] < m.height - 0.14).map((p) => p[1]));
+      const philtrumMinY = Math.min(...faceStats.pts.filter((p) => Math.abs(p[0]) < 0.01 && p[2] > m.height - 0.18 && p[2] < m.height - 0.168).map((p) => p[1]));
+      expect(noseMinY).toBeLessThan(philtrumMinY - 0.005);
+
+      // 5. Ankle & foot bounds: clears floor (z >= 0.012) with natural adult heel-to-toe length (22–27 cm).
+      const footPts = legStats.pts.filter((p) => p[2] < 0.09);
+      const minFootZ = Math.min(...footPts.map((p) => p[2]));
+      const footLenY = Math.max(...footPts.map((p) => p[1])) - Math.min(...footPts.map((p) => p[1]));
+      expect(minFootZ).toBeGreaterThanOrEqual(0.012);
+      expect(footLenY).toBeGreaterThan(0.22);
+      expect(footLenY).toBeLessThan(0.27);
+    }
+  });
+
+  it('keeps visual thumbs attached as meshes and prevents feet/knees from poking through ballgown in a deep squat', async () => {
+    const { ballgownPreset } = await import('../src/presets/clothPresets');
+    const nodes = structuredClone(ballgownPreset.nodes);
+    const prev = nodes[0].bodyForm!;
+    const squat = mergeBodyForm(prev, { kneeBend: 95, stance: 10 });
+    nodes[0].bodyForm = squat;
+    const reposed = reposeGarments(nodes, nodes[0].name || nodes[0].id, prev, squat);
+
+    // 1. Visual thumbs are lofted `type: 'mesh'` geoms anchored directly on the squatting hands (never stale primitive capsules).
+    const builtForm = bodyFormNode('form', 'form', squat);
+    for (const side of ['L', 'R'] as const) {
+      const thumb = builtForm.geoms.find((g) => g.name === `form_thumb${side}`)!;
+      const arm = builtForm.geoms.find((g) => g.name === `form_arm${side}`)!;
+      expect(thumb.type).toBe('mesh');
+      expect(thumb.role).toBe('visual');
+      // Thumb base sits within 15 mm of the palm mesh in the squatting pose.
+      const tx = thumb.vertices![0], ty = -thumb.vertices![2], tz = thumb.vertices![1];
+      let minHandDist = Infinity;
+      for (let i = 0; i < arm.vertices!.length; i += 3) {
+        const ax = arm.vertices![i], ay = -arm.vertices![i + 2], az = arm.vertices![i + 1];
+        minHandDist = Math.min(minHandDist, Math.hypot(tx - ax, ty - ay, tz - az));
+      }
+      expect(minHandDist).toBeLessThan(0.015);
+    }
+
+    // 2. Standing 2D pattern cut (`flat.uv` area) is unchanged by kneeBend/stance (no faked pattern pouch),
+    // while 3D placement + XPBD settle drapes the ballgown cleanly over the squatting knees and feet with zero poke-through!
+    const standingModel = clothModel(ballgownPreset.nodes[1], new THREE.Matrix4(), [bodyFormNode('form', 'form', prev), ...ballgownPreset.nodes.slice(1)]);
+    const cr = await clothRun(reposed);
+    cr.sim.settleNow();
+    const sumUvArea = (m: ReturnType<typeof clothModel>) =>
+      m.groups.reduce((acc, g) => {
+        if (!g.flat) return acc;
+        let area = 0;
+        for (let t = 0; t < g.tris.length; t += 3) {
+          const a = g.flat.uv[g.tris[t]], b = g.flat.uv[g.tris[t + 1]], c = g.flat.uv[g.tris[t + 2]];
+          area += 0.5 * Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]));
+        }
+        return acc + area;
+      }, 0);
+    expect(Math.abs(sumUvArea(cr.models[0]) / sumUvArea(standingModel) - 1)).toBeLessThan(0.015);
+
+    const rayHits = (ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, x: Float64Array, tris: ArrayLike<number>) => {
+      let hits = 0;
+      for (let t = 0; t < tris.length; t += 3) {
+        const ia = 3 * tris[t], ib = 3 * tris[t + 1], ic = 3 * tris[t + 2];
+        const ax = x[ia], ay = x[ia + 1], az = x[ia + 2];
+        const e1x = x[ib] - ax, e1y = x[ib + 1] - ay, e1z = x[ib + 2] - az;
+        const e2x = x[ic] - ax, e2y = x[ic + 1] - ay, e2z = x[ic + 2] - az;
+        const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
+        const det = e1x * px + e1y * py + e1z * pz;
+        if (Math.abs(det) < 1e-12) continue;
+        const inv = 1 / det;
+        const tx = ox - ax, ty = oy - ay, tz = oz - az;
+        const u = (tx * px + ty * py + tz * pz) * inv;
+        if (u < 0 || u > 1) continue;
+        const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+        const v = (dx * qx + dy * qy + dz * qz) * inv;
+        if (v < 0 || u + v > 1) continue;
+        if ((e2x * qx + e2y * qy + e2z * qz) * inv > 0) hits++;
+      }
+      return hits;
+    };
+
+    const x = cr.sim.x, tris = cr.models[0].tris;
+    const q = [0, 0, 0];
+    let footExposed = 0;
+    let worstProtrusion = 0;
+    for (const gName of ['form_legL', 'form_legR']) {
+      const g = builtForm.geoms.find((m) => m.name === gName)!;
+      for (let i = 0; i < g.vertices!.length; i += 6) {
+        const lx = g.vertices![i], ly = -g.vertices![i + 2], lz = g.vertices![i + 1];
+        if (lz > 0.45) continue;
+        const dx = lx, dy = ly - 0.02, rl = Math.hypot(dx, dy) || 1;
+        if (rayHits(lx, ly, lz, dx / rl, dy / rl, 0.005, x, tris) === 0) {
+          if (lz < 0.20) footExposed++;
+          let bestDist = Infinity;
+          for (let t = 0; t < tris.length; t += 3) {
+            const ia = 3 * tris[t], ib = 3 * tris[t + 1], ic = 3 * tris[t + 2];
+            closestOnTri(lx, ly, lz, [x[ia], x[ia + 1], x[ia + 2]], [x[ib], x[ib + 1], x[ib + 2]], [x[ic], x[ic + 1], x[ic + 2]], q);
+            bestDist = Math.min(bestDist, Math.hypot(lx - q[0], ly - q[1], lz - q[2]));
+          }
+          worstProtrusion = Math.max(worstProtrusion, bestDist);
+        }
+      }
+    }
+    expect(footExposed).toBe(0);
+    expect(worstProtrusion).toBeLessThan(0.002);
+    expect(cr.clearance()).toBeGreaterThan(-0.004);
+    expect(cr.crossings().length).toBe(0);
+  }, 120000);
 });

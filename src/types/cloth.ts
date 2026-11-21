@@ -879,4 +879,11 @@ export interface BodyFormMeasurements {
   calf?: number;
   /** Round the narrowest part of the leg above the ankle bone. */
   ankle?: number;
+  /**
+   * Complexion along a perceptual human-tone spectrum (0..1, spanning deep
+   * espresso, reddish mahogany, warm umber, golden bronze, terracotta, olive,
+   * honey, peach and rosy porcelain). Unset: neutral studio plaster. Visual
+   * only — does not alter form geometry or garment fitting.
+   */
+  skinTone?: number;
 }
