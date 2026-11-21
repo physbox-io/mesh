@@ -124,7 +124,20 @@ export abstract class JobMachine extends ProbingMachine {
       // the relay rather than being counted out here.
       // Nothing streams from here, so there is no line to read progress off.
       this.timeline = null;
+      if (result.delivered) {
+        // A running job like any other to everything but the streamer: the
+        // reports keep it RUNNING, Pause and a disarm stop it, nothing starts
+        // over it and nothing moves the machine by hand under it. The last
+        // program's stop offers go, as a new start's do: a resume of the old
+        // program onto what this one has cut would cut the wrong thing.
+        this.program = [];
+        this.gcodeNotes = [];
+        this.jobLineBase = 0;
+        clearCheckpoint();
+        this.beginHandedOverJob(options.origin === 'mcp' ? 'agent' : undefined);
+      }
       this.updateState({
+        ...(result.delivered ? { resume: null, park: null, lastCompletedJob: null } : {}),
         status: result.delivered ? 'RUNNING' : 'IDLE',
         estimatedSeconds: options.estimatedSeconds ?? null,
         elapsedSeconds: 0,
