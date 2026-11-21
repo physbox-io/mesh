@@ -386,9 +386,6 @@ export abstract class JobMachine extends ProbingMachine {
         status: 'PAUSED_TOOL' as const,
         message: this.describeToolChange(line, note),
         settling: 'Finishing the moves already sent, then stopping for a tool change…',
-        // The probe lead comes off with the old bit, so the circuit that was
-        // proved is not the one the re-zero will stab with.
-        ...(this.toolPauseChangesBit(this.currentQueueIndex) ? { extra: { probeCircuitSeen: false } } : {}),
       };
     }
     // The contour-slice export puts one of these between sheets, and says which

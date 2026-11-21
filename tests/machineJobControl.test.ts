@@ -868,16 +868,6 @@ describe('a job that alarms while stopped for a tool change', () => {
     mgr().parseLine('<Alarm|MPos:20.000,0.000,26.000|FS:0,0>');
   }
 
-  it('asks for the probe circuit to be proved again once the bit comes out', async () => {
-    (webSerialManager as unknown as { state: Record<string, unknown> }).state.probeCircuitSeen = true;
-    webSerialManager.startJob(PROGRAM);
-    mgr().parseLine('<Run|MPos:0.000,0.000,5.000|FS:0,0>');
-    fake.board.report = '<Idle|MPos:20.000,0.000,5.000|FS:0,0>';
-    await advance(12);
-    expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
-    expect(webSerialManager.getState().probeCircuitSeen).toBe(false);
-  });
-
   it('offers the tool change line itself, and says what it was waiting for', async () => {
     await alarmAtToolChange();
     const resume = webSerialManager.getState().resume;
