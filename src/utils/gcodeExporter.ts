@@ -1148,7 +1148,7 @@ export function generateLaserCutGcode(
       }
     }
 
-    for (const panel of sheetPanels) {
+    const cutPanel = (panel: LaserPanel) => {
       const pos = panel.placedPos2D || { x: 0, y: 0 };
       if (options.machineMode === 'cnc') fit('profile', sIdx);
       lines.push(`; --- Panel: ${commentText(panel.name)} ---`);
@@ -1244,46 +1244,85 @@ export function generateLaserCutGcode(
         }
       }
 
-      // 1. Cut inner cutouts/mortises FIRST so material doesn't shift, nearest first
-      for (const cIdx of nearestFirst(holePaths, head, pos)) {
-        if (holePaths[cIdx].length < 3) continue;
-        const cutout = startNear(holePaths[cIdx], head, pos);
-        head = { x: pos.x + cutout[0].x, y: pos.y + cutout[0].y };
-
-        operations.push({
-          id: `${panel.id}_cutout_${cIdx}`,
-          name: `${panel.name} Cutout #${cIdx + 1}`,
-          type: 'cut',
-          sheetIndex: sIdx,
-        });
-
-        totalCutDistanceMm += polygonPerimeter(cutout) * loopPassCount(sheetOptions, fromDepthMm);
-        lines.push(...generateLoopGcode(cutout, pos, sheetOptions, [], fromDepthMm));
+      /*
+       * Every loop after all the loops inside it, so nothing is freed before
+       * its own features are cut: an island standing in a hole goes before
+       * the hole, a hole before the outline round it. Nesting depth among the
+       * panel's own paths sets the levels, deepest first; nearest-first
+       * within a level. A plain panel is its holes, then its outline(s).
+       */
+      const own: { kind: 'cutout' | 'outer'; idx: number; path: Point2D[] }[] = [
+        ...holePaths.map((path, idx) => ({ kind: 'cutout' as const, idx, path })),
+        ...outerPaths.map((path, idx) => ({ kind: 'outer' as const, idx, path })),
+      ].filter((l) => l.path.length >= 3);
+      const depth = nestingDepths(own.map((l) => l.path));
+      const levels = [...new Set(depth)].sort((a, b) => b - a);
+      for (const level of levels) {
+        const group = own.filter((_, i) => depth[i] === level);
+        for (const gi of nearestFirst(group.map((l) => l.path), head, pos)) {
+          const { kind, idx, path } = group[gi];
+          const loop = startNear(path, head, pos);
+          head = { x: pos.x + loop[0].x, y: pos.y + loop[0].y };
+          if (kind === 'cutout') {
+            operations.push({
+              id: `${panel.id}_cutout_${idx}`,
+              name: `${panel.name} Cutout #${idx + 1}`,
+              type: 'cut',
+              sheetIndex: sIdx,
+            });
+            totalCutDistanceMm += polygonPerimeter(loop) * loopPassCount(sheetOptions, fromDepthMm);
+            lines.push(...generateLoopGcode(loop, pos, sheetOptions, [], fromDepthMm));
+          } else {
+            operations.push({
+              id: outerPaths.length > 1 ? `${panel.id}_outer_${idx}` : `${panel.id}_outer`,
+              name: outerPaths.length > 1
+                ? `${panel.name} Outline (part ${idx + 1} of ${outerPaths.length})`
+                : `${panel.name} Outline`,
+              type: 'cut',
+              sheetIndex: sIdx,
+            });
+            // Only the outline gets attachments: it is the cut that frees the panel,
+            // and a bridge left across a mortise would block the tab meant to enter it.
+            const spans = planAttachments(polygonPerimeter(loop), options);
+            attachmentCount += spans.length;
+            totalCutDistanceMm += polygonPerimeter(loop) * loopPassCount(sheetOptions, fromDepthMm);
+            lines.push(...generateLoopGcode(loop, pos, sheetOptions, spans, fromDepthMm));
+          }
+        }
       }
+    };
 
-      // 2. Cut outer boundary polygon LAST
-      for (const oIdx of nearestFirst(outerPaths, head, pos)) {
-        if (outerPaths[oIdx].length < 3) continue;
-        const outline = startNear(outerPaths[oIdx], head, pos);
-        head = { x: pos.x + outline[0].x, y: pos.y + outline[0].y };
-
-        operations.push({
-          id: outerPaths.length > 1 ? `${panel.id}_outer_${oIdx}` : `${panel.id}_outer`,
-          name: outerPaths.length > 1
-            ? `${panel.name} Outline (part ${oIdx + 1} of ${outerPaths.length})`
-            : `${panel.name} Outline`,
-          type: 'cut',
-          sheetIndex: sIdx,
-        });
-
-        // Only the outline gets attachments: it is the cut that frees the panel,
-        // and a bridge left across a mortise would block the tab meant to enter it.
-        const spans = planAttachments(polygonPerimeter(outline), options);
-        attachmentCount += spans.length;
-        totalCutDistanceMm += polygonPerimeter(outline) * loopPassCount(sheetOptions, fromDepthMm);
-        lines.push(...generateLoopGcode(outline, pos, sheetOptions, spans, fromDepthMm));
+    /*
+     * Parts nest in each other's cutouts (a small part packed into a big
+     * one's window, another in its hole): each must be cut out whole before
+     * the cutout round it frees the slug it stands on. So a part's nested
+     * parts are cut first, nearest first, recursively; parts that do not
+     * nest keep the order they came in, exactly as before.
+     */
+    const placedLoop = (panel: LaserPanel, loop: Point2D[]) => {
+      const at = panel.placedPos2D || { x: 0, y: 0 };
+      return loop.map((q) => ({ x: q.x + at.x, y: q.y + at.y }));
+    };
+    const holesOnSheet = new Map(sheetPanels.map((pnl) => [
+      pnl, pnl.innerCutouts2D.filter((c) => c.length >= 3).map((c) => placedLoop(pnl, c)),
+    ]));
+    const nestedIn = (outer: LaserPanel) => sheetPanels.filter((inner) => {
+      if (inner === outer || inner.outerPolygon2D.length < 3) return false;
+      const probe = placedLoop(inner, [inner.outerPolygon2D[0]])[0];
+      return holesOnSheet.get(outer)!.some((hole) => pointInLoop2D(probe, hole));
+    });
+    const state = new Map<LaserPanel, 'visiting' | 'done'>();
+    const visit = (panel: LaserPanel) => {
+      if (state.has(panel)) return;
+      state.set(panel, 'visiting');
+      const inner = nestedIn(panel).filter((q) => !state.has(q));
+      if (inner.length) {
+        for (const qi of nearestFirst(inner.map((q) => placedLoop(q, q.outerPolygon2D)), head, { x: 0, y: 0 })) visit(inner[qi]);
       }
-    }
+      cutPanel(panel);
+      state.set(panel, 'done');
+    };
+    for (const panel of sheetPanels) visit(panel);
   }
 
   // Program End
