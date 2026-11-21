@@ -108,6 +108,8 @@ export interface CastMaterial {
    * bath ruin it, so no dissolvable liner takes it.
    */
   meltsInBath?: true;
+  /** How a rigid printed mold is poured and released for this material (CastingGuide). */
+  rigidGuide?: 'resin' | 'fast-resin' | 'slurry' | 'hot-melt' | 'temper' | 'freeze' | 'addition-silicone' | 'condensation-silicone';
   /**
    * Poured from the top of a closed mold unless asked otherwise: a mineral
    * slurry carries sand or aggregate that settles in, and jams, a runner
@@ -144,6 +146,7 @@ export const PLA_SOFTEN_C = 60;
 export const CAST_MATERIALS: CastMaterial[] = [
   {
     id: 'epoxy', label: 'Epoxy resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.15,
+    rigidGuide: 'resin',
     mixNote: 'Hobby epoxy ratios vary by brand (craft resins are often 1:1 by volume / ~2:1 by weight; deep-pour resins 2:1 or 3:1) — check your bottle.',
     waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.94, 0.88, 0.6],
     warnings: [
@@ -168,6 +171,7 @@ export const CAST_MATERIALS: CastMaterial[] = [
   },
   {
     id: 'polyurethane', label: 'Polyurethane resin', minSectionMm: 1.0, sprueNeckMm: 6, bubbleRiseMm: 3.5, densityGcm3: 1.05,
+    rigidGuide: 'fast-resin',
     mixNote: 'Check your bottle\'s Part A:B ratio (often 1:1 by weight or volume) and keep tooling bone-dry — trace moisture makes polyurethane foam.',
     waterBased: false, metal: false, silicone: false, rgba: [0.93, 0.9, 0.82, 1],
     warnings: [
@@ -196,24 +200,26 @@ export const CAST_MATERIALS: CastMaterial[] = [
   },
   {
     id: 'platinum', label: 'Platinum-cure silicone', minSectionMm: 1.5, sprueNeckMm: 8, bubbleRiseMm: 3.2, densityGcm3: 1.08, mix: { kind: 'ab', a: 1, b: 1 },
+    rigidGuide: 'addition-silicone',
     waterBased: false, metal: false, silicone: true, rgba: [0.9, 0.94, 0.92, 0.6], warnings: [],
   },
   {
     id: 'tin', label: 'Tin-cure silicone', minSectionMm: 1.5, sprueNeckMm: 8, bubbleRiseMm: 3.2, densityGcm3: 1.15, mix: { kind: 'ab', a: 10, b: 1 },
+    rigidGuide: 'condensation-silicone',
     waterBased: false, metal: false, silicone: true, rgba: [0.95, 0.76, 0.78, 1], warnings: [],
   },
-  { id: 'wax', label: 'Wax', minSectionMm: 1.5, sprueNeckMm: 5, bubbleRiseMm: 3.2, densityGcm3: 0.9, pourC: 70, waterBased: false, metal: false, silicone: false, rgba: [0.98, 0.94, 0.82, 0.9], warnings: [] },
+  { id: 'wax', label: 'Wax', minSectionMm: 1.5, sprueNeckMm: 5, bubbleRiseMm: 3.2, densityGcm3: 0.9, pourC: 70, rigidGuide: 'hot-melt', waterBased: false, metal: false, silicone: false, rgba: [0.98, 0.94, 0.82, 0.9], warnings: [] },
   {
-    id: 'chocolate', label: 'Chocolate', minSectionMm: 2.0, sprueNeckMm: 8, bubbleRiseMm: 4, densityGcm3: 1.3, pourC: 31, meltsInBath: true, waterBased: false, metal: false, silicone: false, rgba: [0.36, 0.2, 0.1, 1],
+    id: 'chocolate', label: 'Chocolate', minSectionMm: 2.0, sprueNeckMm: 8, bubbleRiseMm: 4, densityGcm3: 1.3, pourC: 31, meltsInBath: true, rigidGuide: 'temper', waterBased: false, metal: false, silicone: false, rgba: [0.36, 0.2, 0.1, 1],
     warnings: [],
   },
   {
-    id: 'water', label: 'Water (ice)', minSectionMm: 2.0, sprueNeckMm: 5, bubbleRiseMm: 5.3, densityGcm3: 0.92, meltsInBath: true, waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
+    id: 'water', label: 'Water (ice)', minSectionMm: 2.0, sprueNeckMm: 5, bubbleRiseMm: 5.3, densityGcm3: 0.92, meltsInBath: true, rigidGuide: 'freeze', waterBased: true, metal: false, silicone: false, rgba: [0.86, 0.93, 0.98, 0.6],
     warnings: [],
   },
-  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70, wetDensityGcm3: PLASTER_SLURRY_GCM3 }, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
-  { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, sprueNeckMm: 15, bubbleRiseMm: 10, densityGcm3: 2.4, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
-  { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, pourFromTop: true, waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
+  { id: 'plaster', label: 'Plaster', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.2, mix: { kind: 'powder', powder: 100, water: 70, wetDensityGcm3: PLASTER_SLURRY_GCM3 }, pourFromTop: true, rigidGuide: 'slurry', waterBased: true, metal: false, silicone: false, rgba: [0.97, 0.97, 0.95, 1], warnings: [] },
+  { id: 'concrete', label: 'Concrete', minSectionMm: 10.0, sprueNeckMm: 15, bubbleRiseMm: 10, densityGcm3: 2.4, pourFromTop: true, rigidGuide: 'slurry', waterBased: true, metal: false, silicone: false, rgba: [0.62, 0.62, 0.6, 1], warnings: [] },
+  { id: 'jesmonite', label: 'Jesmonite', minSectionMm: 3.0, sprueNeckMm: 8, bubbleRiseMm: 5, densityGcm3: 1.9, mix: { kind: 'powder', powder: 2.5, water: 1 }, pourFromTop: true, rigidGuide: 'slurry', waterBased: true, metal: false, silicone: false, rgba: [0.92, 0.9, 0.86, 1], warnings: [] },
   // Densities are of the fired body; shrink is linear, wet to fired, typical of each.
   { id: 'porcelain-slip', label: 'Porcelain slip', minSectionMm: 2.0, sprueNeckMm: 20, bubbleRiseMm: 6, densityGcm3: 2.4, shrinkPercent: 13, waterBased: true, metal: false, silicone: false, slip: true, rgba: [0.97, 0.96, 0.94, 1], warnings: [] },
   { id: 'stoneware-slip', label: 'Stoneware slip', minSectionMm: 2.5, sprueNeckMm: 20, bubbleRiseMm: 6, densityGcm3: 2.3, shrinkPercent: 12, waterBased: true, metal: false, silicone: false, slip: true, rgba: [0.78, 0.74, 0.68, 1], warnings: [] },
