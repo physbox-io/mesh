@@ -141,11 +141,16 @@ export function trimTriangles(
 }
 
 /**
- * Four registration pins on the ring, at its extremes along the diagonals,
- * the first moved along the ring by `keyMm` so the halves close one way only.
+ * Four registration pins on the ring, well-spaced around concave or L-shaped
+ * outlines as well as convex ones, with one pin shifted along the ring by
+ * `keyMm` (while keeping >= `minSepMm` from every other pin) so the halves
+ * close one way only.
  */
-export function pinsOnRing(ring: Outline, keyMm: number): Array<[number, number]> {
+export function pinsOnRing(ring: Outline, keyMm: number, minSepMm = Math.max(keyMm, (keyMm - 1) * 1.25)): Array<[number, number]> {
   const loop = ring.reduce((best, l) => (Math.abs(signedArea(l)) > Math.abs(signedArea(best)) ? l : best)) as unknown as number[][];
+  const n = loop.length;
+  if (n < 4) return loop.map((p) => [p[0], p[1]] as [number, number]);
+  const dist = (a: readonly number[], b: readonly number[]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
   const extreme = (sx: number, sy: number) => {
     let bi = 0, bv = -Infinity;
     loop.forEach((p, i) => {
@@ -154,26 +159,82 @@ export function pinsOnRing(ring: Outline, keyMm: number): Array<[number, number]
     });
     return bi;
   };
-  const picks = [extreme(-1, -1), extreme(1, -1), extreme(1, 1), extreme(-1, 1)];
+  let picks = [extreme(-1, -1), extreme(1, -1), extreme(1, 1), extreme(-1, 1)];
   const at = (i: number): [number, number] => [loop[i][0], loop[i][1]];
-  // Walk the first pin `keyMm` along the ring.
-  let i = picks[0], walked = 0;
-  while (walked < keyMm) {
-    const j = (i + 1) % loop.length;
-    walked += Math.hypot(loop[j][0] - loop[i][0], loop[j][1] - loop[i][1]);
-    i = j;
-    if (i === picks[0]) break;
+
+  // On concave L- or T-shapes, two diagonal extremes can land on the same arm tip.
+  // Replace any pick closer than 1.5 * minSepMm to an earlier pick with the loop
+  // vertex farthest from all kept picks, then sort in ring order.
+  const kept: number[] = [];
+  for (const idx of picks) {
+    if (kept.every((k) => dist(loop[idx], loop[k]) >= minSepMm * 1.5)) kept.push(idx);
   }
-  return [at(i), at(picks[1]), at(picks[2]), at(picks[3])];
+  while (kept.length < 4) {
+    let bestIdx = 0;
+    let bestClear = -1;
+    for (let i = 0; i < n; i++) {
+      const d = kept.length ? Math.min(...kept.map((k) => dist(loop[i], loop[k]))) : Infinity;
+      if (d > bestClear) {
+        bestClear = d;
+        bestIdx = i;
+      }
+    }
+    kept.push(bestIdx);
+  }
+  picks = kept.sort((a, b) => a - b);
+
+  const walkBy = (start: number, step: 1 | -1, mm: number): number => {
+    let i = start, walked = 0;
+    while (walked < mm) {
+      const j = (i + step + n) % n;
+      walked += dist(loop[j], loop[i]);
+      i = j;
+      if (i === start) break;
+    }
+    return i;
+  };
+  const minPairDist = (pts: Array<[number, number]>) => {
+    let m = Infinity;
+    for (let a = 0; a < pts.length; a++) {
+      for (let b = a + 1; b < pts.length; b++) m = Math.min(m, dist(pts[a], pts[b]));
+    }
+    return m;
+  };
+  const rotMiss = (pts: Array<[number, number]>) =>
+    // Keying against 180° reversal about the mold half's origin (0, 0).
+    Math.max(...pts.map(([x, y]) => Math.min(...pts.map(([sx, sy]) => Math.hypot(-x - sx, -y - sy)))));
+
+  let bestPts: Array<[number, number]> | null = null;
+  let bestClear = -Infinity;
+  for (let k = 0; k < 4; k++) {
+    for (const dir of [1, -1] as const) {
+      const moved = picks.map((idx, m) => at(m === k ? walkBy(idx, dir, keyMm) : idx));
+      const clear = minPairDist(moved);
+      const asym = rotMiss(moved);
+      if (clear >= minSepMm && asym >= keyMm * 0.5) return moved;
+      const score = clear + (asym >= keyMm * 0.4 ? 0 : -100);
+      if (score > bestClear) {
+        bestClear = score;
+        bestPts = moved;
+      }
+    }
+  }
+  return bestPts ?? picks.map(at);
 }
 
-/** Pry notches at the outline's left and right extremes, 1 mm in from the edge. */
-export function notchesOnOutline(outline: Outline): Array<[number, number]> {
+/**
+ * Pry notches at the outline's extremes along `axis` ('x' by default; 'y' when
+ * separable clamping rails occupy the ±X long edges), 1 mm in from the edge.
+ */
+export function notchesOnOutline(outline: Outline, axis: 'x' | 'y' = 'x'): Array<[number, number]> {
   const pts = outline.flat() as unknown as number[][];
+  const c = axis === 'x' ? 0 : 1;
   let lo = pts[0], hi = pts[0];
   for (const p of pts) {
-    if (p[0] < lo[0]) lo = p;
-    if (p[0] > hi[0]) hi = p;
+    if (p[c] < lo[c]) lo = p;
+    if (p[c] > hi[c]) hi = p;
   }
-  return [[hi[0] - 1, hi[1]], [lo[0] + 1, lo[1]]];
+  return axis === 'x'
+    ? [[hi[0] - 1, hi[1]], [lo[0] + 1, lo[1]]]
+    : [[hi[0], hi[1] - 1], [lo[0], lo[1] + 1]];
 }

@@ -20,7 +20,7 @@ import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import type { ManifoldToplevel, Manifold } from 'manifold-3d';
 import { treatThinGaps, thinGapWarning, type ThinGapMode } from './thinGaps';
-import type { PrintLimits } from './printLimits';
+import { DEFAULT_PRINTER, type PrintLimits } from './printLimits';
 import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, sameFloat32, unsolidPartRefusal, type Mat4Tuple, type Triangle3D } from './moldManifold';
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { applyDraft, draftBreaksSide, shallowestDraft, type DraftMode } from './moldDraft';
@@ -30,7 +30,7 @@ import { buildLinerMold, draftPart, DEFAULT_LINER_SKIN_MM, INSERT_CLEARANCE_MM, 
 import { castMaterial, defaultSprueFeed, type CastMaterialId } from './castMaterials';
 import { linerPair, type LinerPairId } from './linerMaterials';
 import { funnelClearDepths, gateDiaMm, planSprue, sprueNeckDiaMm, ventBoreDiaMm, withPourMouth, VENT_TAPER_MM } from './moldSprue';
-import { bottomFillFloorMm, feedEdgeMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
+import { bottomFillFloorMm, cavityIslands, feedEdgeMm, cutHalfFeatures, cutHalfTriangles, everyOtherColumn, exactPourSpans, mouthSinkMm, planBottomFill, planPeakVents, rigidPourSpans, FEED_WALL_MM, type BoreCut, type BottomFill } from './moldGating';
 import { fittedBlock, moldOutlines, notchesOnOutline, pinsOnRing, trimTriangles, type MoldOutlines } from './moldOutline';
 import { addClamshellSlidingClips, splitOpenRigidMold } from './moldSeparable';
 
@@ -334,9 +334,11 @@ function placePourChannels(
   ventR: number,
   ventCount: number,
   lidSideDepth?: Float64Array,
+  allowedCols?: Set<number>,
 ): { sprue: { x: number; y: number }; vents: Array<{ x: number; y: number }> } {
   const { cols, rows, stepX, stepY } = grid;
   const n = cols * rows;
+  const isHit = (i: number) => Boolean(field.hit[i]) && (!allowedCols || allowedCols.has(i));
 
   const xOf = (i: number) => -grid.halfW + (i % cols) * stepX;
   const yOf = (i: number) => -grid.halfD + Math.floor(i / cols) * stepY;
@@ -344,7 +346,7 @@ function placePourChannels(
   // How far each column lies inside the footprint: a two-pass chamfer
   // distance to the nearest column the part misses.
   const inside = new Float64Array(n);
-  for (let i = 0; i < n; i++) inside[i] = field.hit[i] ? Infinity : 0;
+  for (let i = 0; i < n; i++) inside[i] = isHit(i) ? Infinity : 0;
   const diag = Math.hypot(stepX, stepY);
   const relax = (i: number, c: number, r: number, dc: number, dr: number, w: number) => {
     const cc = c + dc;
@@ -377,7 +379,7 @@ function placePourChannels(
   // spine) the one nearest the middle.
   let sprue = -1;
   for (let i = 0; i < n; i++) {
-    if (!field.hit[i]) continue;
+    if (!isHit(i)) continue;
     if (
       sprue < 0 ||
       inside[i] > inside[sprue] + 1e-9 ||
@@ -394,7 +396,7 @@ function placePourChannels(
   let candidates: number[] = [];
   for (const need of [room, ventR, 0]) {
     candidates = [];
-    for (let i = 0; i < n; i++) if (field.hit[i] && inside[i] >= need) candidates.push(i);
+    for (let i = 0; i < n; i++) if (isHit(i) && inside[i] >= need) candidates.push(i);
     if (candidates.length > 0) break;
   }
 
@@ -440,50 +442,95 @@ function placeOpenMoldBlindVents(
   partingZ: number,
   detailIsAbove: boolean,
   moldWidthMm: number,
-): Array<{ x: number; y: number; zRoof: number }> {
-  if (ventCount <= 0) return [];
+  minBoreSepMm = 5.5,
+): { vents: Array<{ x: number; y: number; zRoof: number }>; unvented: Array<{ x: number; y: number; zRoof: number }> } {
+  if (ventCount <= 0) return { vents: [], unvented: [] };
   const { cols, rows, stepX, stepY } = grid;
   const n = cols * rows;
   const xOf = (i: number) => -grid.halfW + (i % cols) * stepX;
   const yOf = (i: number) => -grid.halfD + Math.floor(i / cols) * stepY;
 
   const zRoof = new Float64Array(n).fill(-Infinity);
+  const openMouth = new Uint8Array(n);
   let hasBlindPockets = false;
 
   for (let i = 0; i < n; i++) {
     if (!field.hit[i]) continue;
     const sp = field.spans?.[i];
     let deepestPocketDepth = -Infinity;
+    let touchesOpen = false;
 
     if (sp && sp.length >= 2) {
       for (let k = 0; k + 1 < sp.length; k += 2) {
         const z0 = sp[k];
         const z1 = sp[k + 1];
         const dStart = detailIsAbove ? z0 - partingZ : partingZ - z1;
+        if (dStart <= 0.1) touchesOpen = true;
         if (dStart > 0.1 && dStart > deepestPocketDepth) {
           deepestPocketDepth = dStart;
         }
       }
     } else {
       const dStart = detailIsAbove ? field.minZ[i] - partingZ : partingZ - field.maxZ[i];
+      if (dStart <= 0.1) touchesOpen = true;
       if (dStart > 0.1) {
         deepestPocketDepth = dStart;
       }
     }
 
+    if (touchesOpen) openMouth[i] = 1;
     if (deepestPocketDepth > 0.1) {
       zRoof[i] = -deepestPocketDepth;
       hasBlindPockets = true;
     }
   }
 
-  if (!hasBlindPockets) return [];
+  if (!hasBlindPockets) return { vents: [], unvented: [] };
+
+  // Group blind-pocket columns into 4-connected regions so distinct blind pockets
+  // are tracked individually (ignoring smooth curved walls that rise monotonically
+  // right into the open pour mouth with no overhang ceiling step).
+  const compId = new Int32Array(n).fill(-1);
+  const compPeaks: number[] = [];
+  const compTrulyBlind: boolean[] = [];
+  for (let start = 0; start < n; start++) {
+    if (zRoof[start] <= -Infinity || compId[start] >= 0) continue;
+    const id = compPeaks.length;
+    compId[start] = id;
+    const queue = [start];
+    let bestCol = start;
+    let maxAdjOpenStep = Infinity;
+    for (let q = 0; q < queue.length; q++) {
+      const col = queue[q];
+      if (zRoof[col] > zRoof[bestCol]) bestCol = col;
+      const r = Math.floor(col / cols), c = col - r * cols;
+      for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const cc = c + dc, rr = r + dr;
+        if (cc < 0 || cc >= cols || rr < 0 || rr >= rows) continue;
+        const nb = rr * cols + cc;
+        if (openMouth[nb]) maxAdjOpenStep = Math.min(maxAdjOpenStep, -zRoof[col]);
+        if (zRoof[nb] > -Infinity && compId[nb] < 0) {
+          compId[nb] = id;
+          queue.push(nb);
+        }
+      }
+    }
+    compPeaks.push(bestCol);
+    // A smooth slope (like a sphere's lower half) meets openMouth at ~0.1-0.4 mm
+    // step and rises straight into the open mouth; a true blind pocket either has
+    // a step >= 0.8 mm at the mouth or a local peak higher than its mouth neck.
+    compTrulyBlind.push(
+      zRoof[bestCol] <= -0.5 &&
+      (maxAdjOpenStep === Infinity || maxAdjOpenStep >= 0.8 || zRoof[bestCol] > -maxAdjOpenStep + 0.5),
+    );
+  }
 
   const candidates: number[] = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const i = r * cols + c;
       if (zRoof[i] <= -Infinity) continue;
+      if (compId[i] >= 0 && !compTrulyBlind[compId[i]]) continue;
       const val = zRoof[i];
       let isLocalMax = true;
       for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
@@ -502,18 +549,43 @@ function placeOpenMoldBlindVents(
 
   candidates.sort((a, b) => zRoof[b] - zRoof[a]);
   const minDist = Math.max(15, moldWidthMm * 0.12);
-  const blindVents: Array<{ x: number; y: number; zRoof: number }> = [];
+  const blindVents: Array<{ x: number; y: number; zRoof: number; comp: number }> = [];
 
+  const unvented: Array<{ x: number; y: number; zRoof: number }> = [];
   for (const i of candidates) {
     const x = xOf(i);
     const y = yOf(i);
     if (blindVents.every((v) => Math.hypot(x - v.x, y - v.y) >= minDist)) {
-      blindVents.push({ x, y, zRoof: zRoof[i] });
-      if (blindVents.length >= ventCount) break;
+      if (blindVents.length < ventCount) {
+        blindVents.push({ x, y, zRoof: zRoof[i], comp: compId[i] });
+      } else if (unvented.every((u) => Math.hypot(x - u.x, y - u.y) >= minDist)) {
+        unvented.push({ x, y, zRoof: zRoof[i] });
+      }
     }
   }
 
-  return blindVents;
+  // Ensure separate disconnected blind pockets closer than `minDist` still get
+  // vented when their bores stay clear of existing vents, and record any left out.
+  const ventedComps = new Set(blindVents.map((v) => v.comp));
+  const compOrder = compPeaks
+    .map((peakCol, cid) => ({ cid, peakCol }))
+    .filter(({ cid }) => compTrulyBlind[cid] && !ventedComps.has(cid))
+    .sort((a, b) => zRoof[b.peakCol] - zRoof[a.peakCol]);
+
+  for (const { cid, peakCol } of compOrder) {
+    const x = xOf(peakCol), y = yOf(peakCol);
+    if (blindVents.length < ventCount && blindVents.every((v) => Math.hypot(x - v.x, y - v.y) >= minBoreSepMm)) {
+      blindVents.push({ x, y, zRoof: zRoof[peakCol], comp: cid });
+      ventedComps.add(cid);
+    } else if (unvented.every((u) => Math.hypot(x - u.x, y - u.y) >= minBoreSepMm)) {
+      unvented.push({ x, y, zRoof: zRoof[peakCol] });
+    }
+  }
+
+  return {
+    vents: blindVents.map(({ x, y, zRoof: zr }) => ({ x, y, zRoof: zr })),
+    unvented,
+  };
 }
 
 /**
@@ -902,7 +974,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
         widthMm: moldWidthMm,
         depthMm: moldDepthMm,
         heightMm: Math.round(blockHeight * 10) / 10,
-        partingZMm: Math.round(blockHeight * 100) / 100,
+        partingZMm: Math.round(blockHeight * 1e5) / 1e5,
         triangleCount: plateBottomTris.length,
       },
       topHalf: undefined,
@@ -1014,7 +1086,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
       widthMm: moldWidthMm,
       depthMm: moldDepthMm,
       heightMm: Math.round(baseBlockHeight * 10) / 10,
-      partingZMm: Math.round(baseBlockHeight * 100) / 100,
+      partingZMm: Math.round(baseBlockHeight * 1e5) / 1e5,
       triangleCount: plateBottomTris.length,
     },
     topHalf: {
@@ -1024,7 +1096,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | { error: string } {
       widthMm: moldWidthMm,
       depthMm: moldDepthMm,
       heightMm: Math.round((lidBlockHeight + opts.pinHeightMm) * 10) / 10,
-      partingZMm: Math.round(lidBlockHeight * 100) / 100,
+      partingZMm: Math.round(lidBlockHeight * 1e5) / 1e5,
       triangleCount: plateTopTris.length,
     },
     combinedTriangles,
@@ -1061,11 +1133,25 @@ function describeMoldFeatures(
     ...(bottomFill
       ? {
           downSprue: { half: 'cavity half' as const, atMm: at(bottomFill.down.x, bottomFill.down.y), diaMm: r1(bottomFill.r * 2), depthMm: r1(bottomFill.r - bottomFill.runnerZ) },
-          gate: { half: 'cavity half' as const, atMm: at(bottomFill.gate.x, bottomFill.gate.y), diaMm: r1(bottomFill.gateR * 2), depthMm: r1(-bottomFill.gate.z) },
+          gate: {
+            half: 'cavity half' as const,
+            atMm: at(bottomFill.gate.x, bottomFill.gate.y),
+            diaMm: r1(bottomFill.gateR * 2),
+            depthMm: r1(-bottomFill.gate.z),
+            trimZMm: Math.round(bottomFill.gateTrimZ * 1000) / 1000,
+          },
         }
       : {}),
     vents: vents.map((v) => ({ half: 'lid half' as const, atMm: at(v.x, v.y), diaMm: r1(v.innerR * 2), ...(v.pocketZMm !== undefined ? { pocketZMm: r1(v.pocketZMm) } : {}) })),
-    blindVents: (base.topVents ?? []).map((v) => ({ half: baseHalf, atMm: at(v.x, v.y), diaMm: r1(v.r * 2), depthMm: r1(Math.abs(v.zRoof)) })),
+    blindVents: (base.topVents ?? []).map((v) => ({
+      half: baseHalf,
+      atMm: at(v.x, v.y),
+      x: r1(v.x),
+      y: r1(v.y),
+      diaMm: r1(v.r * 2),
+      depthMm: r1(Math.abs(v.zRoof)),
+      zRoofMm: Math.round(v.zRoof * 1000) / 1000,
+    })),
     pins: lid.pins.map((p) => ({ half: 'lid half' as const, atMm: at(p.x, p.y), diaMm: r1(p.baseR * 2), narrowDiaMm: r1(p.topR * 2), heightMm: r1(p.height) })),
     sockets: sockets.map((k) => ({ half: baseHalf, atMm: at(k.x, k.y), diaMm: r1(k.rimR * 2), narrowDiaMm: r1(k.botR * 2), depthMm: r1(k.depth) })),
     pryNotches: notches.map((k) => ({ half: baseHalf, atMm: at(k.x, k.y), diaMm: r1(k.rimR * 2), depthMm: r1(k.depth) })),
@@ -1103,6 +1189,9 @@ export interface MoldFeature {
   half: 'cavity half' | 'lid half' | 'open mold';
   /** From the centre of that half, mm, as it prints: parting face (or open top) up. */
   atMm: [number, number];
+  /** Convenience X/Y coordinates matching `atMm` (for blind vents). */
+  x?: number;
+  y?: number;
   diaMm: number;
   /** For a tapered one, the diameter at its narrow end. */
   narrowDiaMm?: number;
@@ -1110,6 +1199,10 @@ export interface MoldFeature {
   heightMm?: number;
   /** A vent's: where it meets its pocket, mm above the parting face in the closed mold. */
   pocketZMm?: number;
+  /** An open-mold blind vent's roof height in half-space (negative, mm below open top). */
+  zRoofMm?: number;
+  /** A bottom-fill gate's trim top height in cavity-half Z (negative, mm below parting face). */
+  trimZMm?: number;
 }
 
 /**
@@ -1149,7 +1242,12 @@ export const OPEN_MOLD_ALLOWANCE = 0.01;
  */
 const pullCache = new WeakMap<SceneGraph, { open?: PullChoice; clamshell?: PullChoice }>();
 
-function pullChoiceFor(scene: SceneGraph, tris: ArrayLike<number>, type: 'open' | 'clamshell'): PullChoice {
+function pullChoiceFor(scene: SceneGraph, tris: ArrayLike<number>, type: 'open' | 'clamshell', useCache = true): PullChoice {
+  if (!useCache) {
+    const mm = new Float64Array(tris.length);
+    for (let i = 0; i < tris.length; i++) mm[i] = tris[i] * 1000;
+    return choosePullDirection(mm, type === 'open');
+  }
   let entry = pullCache.get(scene);
   if (!entry) {
     entry = {};
@@ -1162,6 +1260,35 @@ function pullChoiceFor(scene: SceneGraph, tris: ArrayLike<number>, type: 'open' 
     entry[type] = choosePullDirection(mm, type === 'open');
   }
   return entry[type];
+}
+
+/**
+ * Picks the pull direction for an open lined mold that leaves least unprintable
+ * liner roof hanging over the casting when printed open-mouth up on the bed.
+ */
+function openLinerPullChoice(trisMm: ArrayLike<number>, preferred: PullDirection): PullDirection | null {
+  const dirs: PullDirection[] = ['+z', '-z', '+y', '-y', '+x', '-x'];
+  const results = dirs.map((dir) => {
+    const turned = dir === '+z' ? trisMm : rotateTrianglesForPull(trisMm, dir);
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 2; i < turned.length; i += 3) {
+      lo = Math.min(lo, turned[i]);
+      hi = Math.max(hi, turned[i]);
+    }
+    const zEps = Math.max(1e-6, (hi - lo) * 1e-4);
+    let covBottom = 0, covTop = 0;
+    for (let i = 2; i < turned.length; i += 3) {
+      if (turned[i] <= lo + zEps) covBottom++;
+      if (turned[i] >= hi - zEps) covTop++;
+    }
+    const plane = covTop > covBottom ? hi : lo;
+    const s = linerPartingChoice(turned, plane, plane, plane);
+    return { dir, score: s.curvedMm2 + 0.2 * s.flatMm2 };
+  });
+  const mine = results.find((r) => r.dir === preferred) ?? results[0];
+  const best = results.reduce((a, b) => (b.score < a.score ? b : a));
+  if (best.dir === mine.dir || best.score >= mine.score * 0.95 - 0.5) return null;
+  return best.dir;
 }
 
 const AXIS_WORDS: Record<PullDirection, string> = {
@@ -1180,14 +1307,15 @@ const AXIS_WORDS: Record<PullDirection, string> = {
 function resolveMoldSetup(
   scene: SceneGraph,
   sceneTris: ArrayLike<number>,
-  opts: MoldOptions
+  opts: MoldOptions,
+  useCache = true,
 ): { moldType: 'clamshell' | 'open'; direction: PullDirection; note?: string } {
   const prepped = Boolean(scene.castPrep && scene.castPrep.draftDeg > 0);
   const fixedDirection: PullDirection | null =
     opts.pullDirection && opts.pullDirection !== 'auto' ? opts.pullDirection : prepped ? '+z' : null;
 
   const lossOf = (type: 'open' | 'clamshell') => {
-    const choice = pullChoiceFor(scene, sceneTris, type);
+    const choice = pullChoiceFor(scene, sceneTris, type, useCache);
     if (!fixedDirection) return { direction: choice.direction, lost: choice.lostFraction, depth: choice.depthMm };
     // A clamshell opens both ways at once, so it was only measured on +axes.
     const measured = type === 'open' ? fixedDirection : (`+${fixedDirection[1]}` as PullDirection);
@@ -1208,12 +1336,12 @@ function resolveMoldSetup(
     moldType = opts.moldType;
     direction = fixedDirection ?? lossOf(moldType).direction;
   }
-  // A lined clamshell loses no undercut whichever way it opens; it is turned
+  // A lined mold loses no undercut whichever way it opens; it is turned
   // to the axis that leaves least liner it cannot print over the casting.
-  if (opts.dissolvableLiner && moldType === 'clamshell' && !fixedDirection) {
+  if (opts.dissolvableLiner && !fixedDirection) {
     const mm = new Float64Array(sceneTris.length);
     for (let i = 0; i < sceneTris.length; i++) mm[i] = sceneTris[i] * 1000;
-    direction = linerPullChoice(mm, direction) ?? direction;
+    direction = (moldType === 'clamshell' ? linerPullChoice(mm, direction) : openLinerPullChoice(mm, direction)) ?? direction;
   }
 
   let note: string | undefined;
@@ -1249,11 +1377,43 @@ export function generateMoldMeshes(
     return emptyMoldResult('Scene contains no visible 3D geometry to mold.');
   }
 
+  const callerUsedDefaultWall =
+    options.wallMarginMm === undefined || options.wallMarginMm === DEFAULT_MOLD_OPTIONS.wallMarginMm;
+
+  if (opts.separable && opts.dissolvableLiner) {
+    warnings.push(
+      'Sliding clips and separable split halves are only for unlined rigid molds and were skipped because Dissolvable Liner is on; clamp or weight the lined mold instead.'
+    );
+  }
+
+  // Scale scene Z height to `cavityDepthMm` BEFORE `resolveMoldSetup` chooses or
+  // rotates to a non-Z pull axis, so X/Y pull directions never scale the wrong axis.
+  let effectiveSceneTris: ArrayLike<number> = sceneTris;
+  let sceneZScale = 1.0;
+  let sceneMidZM = 0;
+  if (opts.cavityDepthMm > 0) {
+    let sMinZM = Infinity, sMaxZM = -Infinity;
+    for (let i = 2; i < sceneTris.length; i += 3) {
+      if (sceneTris[i] < sMinZM) sMinZM = sceneTris[i];
+      if (sceneTris[i] > sMaxZM) sMaxZM = sceneTris[i];
+    }
+    const rawSceneHeightMm = (sMaxZM - sMinZM) * 1000 || 5;
+    sceneMidZM = (sMinZM + sMaxZM) / 2;
+    sceneZScale = rawSceneHeightMm > 0 ? opts.cavityDepthMm / rawSceneHeightMm : 1.0;
+    const scaled = new Float64Array(sceneTris.length);
+    for (let i = 0; i < sceneTris.length; i += 3) {
+      scaled[i] = sceneTris[i];
+      scaled[i + 1] = sceneTris[i + 1];
+      scaled[i + 2] = sceneMidZM + (sceneTris[i + 2] - sceneMidZM) * sceneZScale;
+    }
+    effectiveSceneTris = scaled;
+  }
+
   // Everything below builds a mold that opens along +Z, so the part is turned
   // to put the chosen direction there first.
-  const setup = resolveMoldSetup(scene, sceneTris, opts);
+  const setup = resolveMoldSetup(scene, effectiveSceneTris, opts, opts.cavityDepthMm <= 0);
   opts.moldType = setup.moldType;
-  const partTris = setup.direction === '+z' ? sceneTris : rotateTrianglesForPull(sceneTris, setup.direction);
+  const partTris = setup.direction === '+z' ? effectiveSceneTris : rotateTrianglesForPull(effectiveSceneTris, setup.direction);
 
   // Find model bounding box in mm
   let mnX = Infinity, mxX = -Infinity;
@@ -1274,9 +1434,7 @@ export function generateMoldMeshes(
 
   const partWidthMm = mxX - mnX || 10;
   const partDepthMm = mxY - mnY || 10;
-  const rawPartHeightMm = mxZ - mnZ || 5;
-  const partHeightMm = opts.cavityDepthMm > 0 ? opts.cavityDepthMm : rawPartHeightMm;
-  const zScale = opts.cavityDepthMm > 0 && rawPartHeightMm > 0 ? opts.cavityDepthMm / rawPartHeightMm : 1.0;
+  const partHeightMm = mxZ - mnZ || 5;
 
   // Center the part on the origin in XY, and on its own mid-height in Z.
   const cx = (mnX + mxX) / 2;
@@ -1288,29 +1446,99 @@ export function generateMoldMeshes(
   for (let i = 0; i < partTris.length; i += 3) {
     tris[i] = partTris[i] * 1000 - cx;
     tris[i + 1] = partTris[i + 1] * 1000 - cy;
-    tris[i + 2] = (partTris[i + 2] * 1000 - cz) * zScale;
+    tris[i + 2] = partTris[i + 2] * 1000 - cz;
   }
 
-  // Gaps in the casting thinner than the printer can line: named, filled or
-  // opened before anything is built round them.
+  // Gaps in the casting thinner than the printer can line (and, on lined molds,
+  // slots narrower than two liner skins where no rigid shell backing fits).
+  const reqLinerSkinMm = opts.dissolvableLiner
+    ? (opts.linerSkinMm && opts.linerSkinMm > 0 ? opts.linerSkinMm : DEFAULT_LINER_SKIN_MM)
+    : 0;
   let partSolidIds = sceneSolidIds;
-  if (activeWasm && opts.printLimits) {
+  let exactIslandCount: number | null = null;
+  let exactUnfedVols: number[] = [];
+  if (activeWasm && (opts.printLimits || opts.dissolvableLiner)) {
     const { part: whole } = buildPartManifold(activeWasm, tris, sceneSolidIds);
     if (whole) {
-      const mode = opts.thinGaps ?? 'leave';
-      const { part: treated, report } = treatThinGaps(activeWasm, whole, opts.printLimits, mode);
-      const line = thinGapWarning(report, opts.printLimits, mode);
-      if (line) warnings.push(line);
-      if (treated !== whole) {
-        const out = manifoldToTriangles(treated);
-        tris = new Float64Array(out.length * 9);
-        out.forEach((t, k) => tris.set([...t.a, ...t.b, ...t.c], k * 9));
-        triCount = out.length;
-        partSolidIds = [];
-        treated.delete();
+      let current = whole;
+      let printerWallArea = 0;
+      if (opts.printLimits) {
+        const fdmLimits: PrintLimits = opts.dissolvableLiner
+          ? {
+              minSkinMm: Math.max(DEFAULT_PRINTER.layerMm, opts.printLimits.minSkinMm),
+              minWallMm: Math.max(DEFAULT_PRINTER.nozzleMm, opts.printLimits.minWallMm),
+              bridgeMm: opts.printLimits.bridgeMm,
+            }
+          : opts.printLimits;
+        const mode = opts.thinGaps ?? 'leave';
+        const { part: treated, report } = treatThinGaps(activeWasm, whole, fdmLimits, mode);
+        printerWallArea = report.wall.areaMm2;
+        const line = thinGapWarning(report, fdmLimits, mode);
+        if (line) warnings.push(line);
+        if (treated !== whole) {
+          const out = manifoldToTriangles(treated);
+          tris = new Float64Array(out.length * 9);
+          out.forEach((t, k) => tris.set([...t.a, ...t.b, ...t.c], k * 9));
+          triCount = out.length;
+          partSolidIds = [];
+          current = treated;
+        }
       }
+      if (opts.dissolvableLiner && reqLinerSkinMm > 0) {
+        const twoSkinsMm = Math.round(2 * reqLinerSkinMm * 100) / 100;
+        const { report: linerGap } = treatThinGaps(
+          activeWasm,
+          current,
+          { minSkinMm: 0, minWallMm: twoSkinsMm, bridgeMm: 5 },
+          'leave',
+        );
+        if (linerGap.wall.areaMm2 >= 0.05 && linerGap.wall.areaMm2 > printerWallArea + 0.1) {
+          const atText = linerGap.wall.atMm
+            ? ` (near ${linerGap.wall.atMm[0]}, ${linerGap.wall.atMm[1]}, ${linerGap.wall.atMm[2]} mm)`
+            : '';
+          warnings.push(
+            `The casting has ${Math.round(linerGap.wall.areaMm2 * 10) / 10} mm\u00b2 of narrow slots under ${twoSkinsMm} mm wide ` +
+            `(down to ${linerGap.wall.thinnestMm.toFixed(2)} mm${atText}): two ${reqLinerSkinMm} mm liner skins leave no room for ` +
+            'rigid shell backing there, so only a thin soluble fin stands between those walls during the pour.'
+          );
+        }
+      }
+      // Measure exact 3D connected solid components while `current` is in hand.
+      const lumps = current.decompose();
+      if (lumps.length > 1) {
+        const vols = lumps.map((l) => l.volume()).sort((a, b) => b - a);
+        const keepFloor = Math.max(1, vols[0] * 0.005);
+        const keptVols = vols.filter((v) => v >= keepFloor);
+        exactIslandCount = keptVols.length;
+        exactUnfedVols = keptVols.slice(1);
+      } else {
+        exactIslandCount = 1;
+      }
+      for (const l of lumps) l.delete();
+      if (current !== whole) current.delete();
       whole.delete();
     }
+  }
+
+  // Auto-expand the default 10 mm wall margin on lined clamshells (just as
+  // `baseFloorMm` auto-expands `baseThicknessMm` for bottom-fill runners) so
+  // `Holder + insert`, bottom-fill down-sprue sleeves, registration sockets, and
+  // the sealing ridge fit out of the box without spurious refusals.
+  if (callerUsedDefaultWall && opts.dissolvableLiner && opts.moldType === 'clamshell') {
+    const isInsert = opts.linerConstruction === 'insert';
+    const willFeed = opts.includeSprue ? (opts.sprueFeed ?? defaultSprueFeed(opts.castMaterial ?? 'epoxy')) : 'top';
+    const reqNeckR = sprueNeckDiaMm(opts.sprueBottomDiaMm, opts.castMaterial) / 2;
+    const insertFunnelExtra = isInsert ? Math.min(4, Math.max(0, Math.max(opts.sprueTopDiaMm / 2, reqNeckR * 2) - reqNeckR)) : 0;
+    const estSpan = Math.max(partWidthMm, partDepthMm) + 32;
+    const estStep = Math.min(1.5, Math.max(0.3, estSpan / 150));
+    const estDiag = Math.hypot(estStep, estStep);
+    const estSleeve = reqLinerSkinMm + (isInsert ? INSERT_CLEARANCE_MM + estDiag : 0);
+    const estSeal = opts.sealRidge !== false ? SEAL_RING_ROOM_MM : 0;
+    const needPins = opts.pinDiameterMm + 2 * opts.pinToleranceMm + 2.5 + reqLinerSkinMm + estDiag + (isInsert ? INSERT_CLEARANCE_MM : 0) + estSeal;
+    const needFeed = willFeed === 'bottom'
+      ? reqNeckR + FEED_WALL_MM + feedEdgeMm(reqNeckR, estSleeve + estSeal + insertFunnelExtra) + 0.5
+      : 0;
+    opts.wallMarginMm = Math.max(opts.wallMarginMm, Math.ceil(Math.max(needPins, needFeed)));
   }
 
   const partHalfW = partWidthMm / 2;
@@ -1360,7 +1588,10 @@ export function generateMoldMeshes(
     }
     partingZ = covTop > covBottom ? zMax : zMin;
   } else if (scene.castPrep?.partingZ !== undefined && scene.castPrep.draftDeg > 0 && setup.direction === '+z') {
-    const preppedZ = (scene.castPrep.partingZ * 1000 - cz) * zScale;
+    const preppedSceneZM = opts.cavityDepthMm > 0
+      ? sceneMidZM + (scene.castPrep.partingZ - sceneMidZM) * sceneZScale
+      : scene.castPrep.partingZ;
+    const preppedZ = preppedSceneZM * 1000 - cz;
     partingZ =
       preppedZ >= zMin - zEps && preppedZ <= zMax + zEps
         ? Math.max(zMin, Math.min(zMax, preppedZ))
@@ -1497,8 +1728,11 @@ export function generateMoldMeshes(
   const cavityGrowMm = extraDraftMm + (linerSkinMm > 0
     ? linerSkinMm + Math.hypot(grid.stepX, grid.stepY) + (opts.linerConstruction === 'insert' ? INSERT_CLEARANCE_MM : 0)
     : 0);
+  const wantSealRing = linerSkinMm > 0 && opts.moldType === 'clamshell' && opts.sealRidge !== false;
   const pinInset = cavityGrowMm > 0
-    ? Math.min(opts.wallMarginMm / 2, Math.max(socketRimR + 0.6, (opts.wallMarginMm - cavityGrowMm) / 2))
+    ? wantSealRing
+      ? Math.min(opts.wallMarginMm / 2, Math.max(socketRimR + 1.0, opts.wallMarginMm - cavityGrowMm - SEAL_RING_ROOM_MM - socketRimR - 0.6))
+      : Math.min(opts.wallMarginMm / 2, Math.max(socketRimR + 0.6, (opts.wallMarginMm - cavityGrowMm) / 2))
     : opts.wallMarginMm / 2;
   const pinInsetX = pinInset;
   const pinInsetY = pinInset;
@@ -1507,10 +1741,10 @@ export function generateMoldMeshes(
   const keyOffsetX = Math.min(maxKeyOffsetX, socketRimR + pinTopR + 1);
 
   // A block that follows the part: its plan, with the pins on a ring halfway
-  // out into the wall (or clear of the cavity/pocket by a socket and a margin).
+  // out into the wall (or clear of the cavity/pocket and sealing ridge).
   const fitPinRingMm = Math.min(
-    Math.max(opts.wallMarginMm / 2, cavityGrowMm + socketRimR + 0.8),
-    Math.max(socketRimR + 0.6, opts.wallMarginMm + extraDraftMm - socketRimR - 0.6),
+    Math.max(opts.wallMarginMm / 2, cavityGrowMm + (wantSealRing ? SEAL_RING_ROOM_MM : 0) + socketRimR + 0.8),
+    Math.max(socketRimR + 0.6, opts.wallMarginMm + extraDraftMm - socketRimR - 0.8),
   );
   const outlines: MoldOutlines | null = opts.blockShape === 'fit' && activeWasm
     ? moldOutlines(activeWasm, tris, partSolidIds, {
@@ -1526,7 +1760,7 @@ export function generateMoldMeshes(
   }
 
   const pinPositions: Array<[number, number]> = outlines
-    ? pinsOnRing(outlines.pinRing, Math.max(5, 2 * socketRimR + 1))
+    ? pinsOnRing(outlines.pinRing, Math.max(5, 2 * socketRimR + 1), Math.max(2.5 * socketRimR, 2 * socketRimR + 1))
     : [
         [-mw2 + pinInsetX + keyOffsetX, -md2 + pinInsetY],
         [mw2 - pinInsetX, -md2 + pinInsetY],
@@ -1542,14 +1776,31 @@ export function generateMoldMeshes(
     );
   }
 
-  // Pry notches sit at the midpoints of the left and right outer edges along the
-  // parting seam, clear of all four corner registration pins and the cavity.
+  // Pry notches sit at the midpoints of the outer edges along the parting seam,
+  // clear of the corner registration pins and (when separable clips are active)
+  // placed on the short ends rather than underneath the long-edge clamping rails.
   const notchRimR = Math.min(3, Math.max(1.5, opts.wallMarginMm * 0.35));
+  const notchesOnY = Boolean(
+    opts.separable && !opts.dissolvableLiner && (outlines
+      ? (() => {
+          let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+          for (const poly of outlines.base) {
+            for (const p of poly) {
+              if (p[0] < x0) x0 = p[0];
+              if (p[0] > x1) x1 = p[0];
+              if (p[1] < y0) y0 = p[1];
+              if (p[1] > y1) y1 = p[1];
+            }
+          }
+          return (y1 - y0) >= (x1 - x0) - 1e-6;
+        })()
+      : moldDepthMm >= moldWidthMm),
+  );
   const notchPositions: Array<[number, number]> =
     opts.moldType === 'clamshell' && opts.includePryNotches
       ? outlines
-        ? notchesOnOutline(outlines.base)
-        : opts.separable && !opts.dissolvableLiner && moldDepthMm >= moldWidthMm
+        ? notchesOnOutline(outlines.base, notchesOnY ? 'y' : 'x')
+        : notchesOnY
           ? [[0, md2 - 1], [0, -md2 + 1]]
           : [[mw2 - 1, 0], [-mw2 + 1, 0]]
       : [];
@@ -1568,16 +1819,18 @@ export function generateMoldMeshes(
   const ventDiaMm = ventBoreDiaMm(opts.ventDiaMm, opts.castMaterial);
   const ventR = ventDiaMm / 2;
   const ventMouthR = ventR + VENT_TAPER_MM;
-  const pour = placePourChannels(field, grid, ventR, 0, detailIsAbove ? below : above);
+  const exactCavity = Boolean(opts.dissolvableLiner) || Boolean(opts.allowUndercuts && undercutColumns > 0);
 
-  if (opts.moldType === 'open' && opts.includeVents && undercutColumns > 0) {
-    const blindVents = placeOpenMoldBlindVents(
+  if (opts.moldType === 'open' && opts.includeVents && exactCavity && undercutColumns > 0) {
+    const minBlindSep = 2 * ventR + 2 * linerSkinMm + 1.5;
+    const { vents: blindVents, unvented } = placeOpenMoldBlindVents(
       field,
       grid,
-      4,
+      8,
       partingZ,
       detailIsAbove,
       moldWidthMm,
+      minBlindSep,
     );
     baseFeatures.topVents = blindVents.map((v) => ({
       x: v.x,
@@ -1585,6 +1838,18 @@ export function generateMoldMeshes(
       r: ventR,
       zRoof: v.zRoof,
     }));
+    if (unvented.length > 0) {
+      const totalBlind = blindVents.length + unvented.length;
+      const sampleAt = unvented
+        .slice(0, 3)
+        .map((v) => `(${v.x.toFixed(0)}, ${(detailIsAbove ? -v.y : v.y).toFixed(0)} mm)`)
+        .join(', ');
+      warnings.push(
+        `Air would be trapped under ${totalBlind} blind overhang${totalBlind === 1 ? '' : 's'} in this open mold; ` +
+        `${blindVents.length} ${blindVents.length === 1 ? 'is' : 'are'} vented and ${unvented.length} could not be ` +
+        `(${sampleAt}${unvented.length > 3 ? ' and more' : ''}). Tilt the part or switch to a two-part clamshell.`
+      );
+    }
   }
 
   // `pour` is in the unmirrored `field` frame. When `detailIsAbove` is true,
@@ -1616,7 +1881,6 @@ export function generateMoldMeshes(
   // The closed mold as it is poured, lid up, in the cavity half's frame: the
   // exact part where undercuts are kept, the depth fields where they are filled.
   const clamshell = opts.moldType === 'clamshell';
-  const exactCavity = Boolean(opts.dissolvableLiner) || Boolean(opts.allowUndercuts && undercutColumns > 0);
   const pourSpans = !clamshell ? null : exactCavity
     ? exactPourSpans(
         field,
@@ -1627,6 +1891,72 @@ export function generateMoldMeshes(
         opts.draftAngleDeg > 0 ? lidDepth : undefined,
       )
     : rigidPourSpans(baseDepth, lidDepth, grid);
+
+  // Detect disconnected 3D cavity islands so single-sprue gating never silently
+  // leaves extra parts unfed while placing vents over every island.
+  const spansForIslands = pourSpans ?? (exactCavity
+    ? exactPourSpans(field, grid, partingZ, detailIsAbove)
+    : rigidPourSpans(baseDepth, new Float64Array(n), grid));
+  const gridIslands = cavityIslands(spansForIslands, grid);
+  let mainFieldCols: Set<number> | undefined;
+  if (gridIslands.length > 0) {
+    if (detailIsAbove) {
+      mainFieldCols = new Set<number>();
+      for (const col of gridIslands[0].cols) {
+        const r = Math.floor(col / cols), c = col - r * cols;
+        mainFieldCols.add((rows - 1 - r) * cols + c);
+      }
+    } else {
+      mainFieldCols = gridIslands[0].cols;
+    }
+  }
+  const pour = placePourChannels(field, grid, ventR, 0, detailIsAbove ? below : above, mainFieldCols);
+
+  if (exactCavity && exactIslandCount === null && activeWasm && gridIslands.length <= 1) {
+    const { part: checkWhole } = buildPartManifold(activeWasm, tris, partSolidIds);
+    if (checkWhole) {
+      const lumps = checkWhole.decompose();
+      if (lumps.length > 1) {
+        const vols = lumps.map((l) => l.volume()).sort((a, b) => b - a);
+        const keepFloor = Math.max(1, vols[0] * 0.005);
+        const keptVols = vols.filter((v) => v >= keepFloor);
+        exactIslandCount = keptVols.length;
+        exactUnfedVols = keptVols.slice(1);
+      } else {
+        exactIslandCount = 1;
+      }
+      for (const l of lumps) l.delete();
+      checkWhole.delete();
+    }
+  }
+  const effectiveIslandCount = exactCavity && exactIslandCount !== null
+    ? (exactIslandCount === 1 ? 1 : Math.max(gridIslands.length, exactIslandCount))
+    : gridIslands.length;
+  if (clamshell && opts.includeSprue && effectiveIslandCount > 1) {
+    const unfedCount = effectiveIslandCount - 1;
+    const matLabel = castMaterial(opts.castMaterial ?? 'epoxy').label.toLowerCase();
+    const unfedSummary = gridIslands.length > 1
+      ? gridIslands.slice(1, 4).map((isl) => `${Math.round(isl.volumeMm3)} mm\u00b3 near (${isl.centerMm[0].toFixed(0)}, ${isl.centerMm[1].toFixed(0)}) mm`).join(', ')
+      : exactUnfedVols.slice(0, 3).map((v) => `${Math.round(v)} mm\u00b3`).join(', ');
+    warnings.push(
+      `The model has ${effectiveIslandCount} disconnected cavities, and the single sprue/runner only feeds the largest one: ` +
+      `${unfedCount === 1 ? '1 other cavity' : `${unfedCount} other cavities`}` +
+      `${unfedSummary ? ` (${unfedSummary}${unfedCount > 3 ? ' and more' : ''})` : ''} ` +
+      `will receive no ${matLabel}${opts.includeVents ? ' (any vents over unfed cavities are unreached)' : ''}. ` +
+      'Connect the parts with a runner bar or mold them one at a time.'
+    );
+  } else if (!clamshell && effectiveIslandCount > 1) {
+    const buried = gridIslands.filter((isl) => isl.maxZ < -0.2);
+    if (buried.length > 0) {
+      warnings.push(
+        `${buried.length === 1 ? '1 disconnected cavity is' : `${buried.length} disconnected cavities are`} completely buried below the open pour face with no way for ${castMaterial(opts.castMaterial ?? 'epoxy').label.toLowerCase()} to enter; connect ${buried.length === 1 ? 'it' : 'them'} to the main part or mold separately.`
+      );
+    } else {
+      warnings.push(
+        `The open mold holds ${effectiveIslandCount} separate, unconnected cavities: each opening must be poured on its own (or mold the parts one at a time).`
+      );
+    }
+  }
 
   // A vent at every high point: up from the top of each pocket the rising
   // level would close over, through the cavity half if it is in it, and
@@ -1937,7 +2267,7 @@ export function generateMoldMeshes(
       widthMm: moldWidthMm,
       depthMm: moldDepthMm,
       heightMm: Math.round((base.blockHeightMm + base.pinRiseMm) * 10) / 10,
-      partingZMm: Math.round(base.blockHeightMm * 100) / 100,
+      partingZMm: Math.round(base.blockHeightMm * 1e5) / 1e5,
       triangleCount: plateBottomTris.length,
     },
     topHalf: lid
@@ -1948,7 +2278,7 @@ export function generateMoldMeshes(
           widthMm: moldWidthMm,
           depthMm: moldDepthMm,
           heightMm: Math.round((lid.blockHeightMm + lid.pinRiseMm) * 10) / 10,
-          partingZMm: Math.round(lid.blockHeightMm * 100) / 100,
+          partingZMm: Math.round(lid.blockHeightMm * 1e5) / 1e5,
           triangleCount: plateTopTris.length,
         }
       : undefined,

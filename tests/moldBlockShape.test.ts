@@ -82,4 +82,63 @@ describe('a block that follows the part', () => {
     expect(moldOptionsFor({ blockShape: 'fit' }).options.blockShape).toBe('fit');
     expect(moldOptionsFor({ blockShape: 'round' }).error).toMatch(/block_shape/);
   });
+
+  it('spaces all four registration pins >= 2.5 * socketRimR apart on a concave L-shape while keeping 180° keying', () => {
+    // 60 x 60 mm concave L-shape (missing +X/+Y quadrant):
+    const lShape: SceneGraph = {
+      nodes: [{
+        id: 'l', name: 'l_shape', type: 'body', pos: [0, 0, 0],
+        geoms: [
+          { name: 'armX', type: 'box', size: [0.03, 0.008, 0.006], pos: [0, -0.022, 0.006] } as SceneGeom,
+          { name: 'armY', type: 'box', size: [0.008, 0.03, 0.006], pos: [-0.022, 0, 0.006] } as SceneGeom,
+        ],
+        joints: [], children: [],
+      }],
+    };
+    const res = generateMoldMeshes(lShape, { ...CLAM, blockShape: 'fit', wallMarginMm: 12 }, wasm);
+    expect(res.success, res.error).toBe(true);
+    const sockets = res.features!.sockets;
+    expect(sockets).toHaveLength(4);
+    const socketRimR = sockets[0].diaMm / 2;
+    for (let i = 0; i < sockets.length; i++) {
+      for (let j = i + 1; j < sockets.length; j++) {
+        const d = Math.hypot(sockets[i].atMm[0] - sockets[j].atMm[0], sockets[i].atMm[1] - sockets[j].atMm[1]);
+        expect(d).toBeGreaterThanOrEqual(2.5 * socketRimR);
+      }
+    }
+    const pts = sockets.map((s) => s.atMm);
+    const matches180 = pts.every(([x, y]) => pts.some(([u, v]) => Math.hypot(-x - u, -y - v) < 1));
+    expect(matches180).toBe(false);
+    expect(closed(res.bottomHalf.triangles)).toBe(true);
+    expect(closed(res.topHalf!.triangles)).toBe(true);
+  });
+
+  it('places pry notches on ±Y short ends instead of under ±X clamping rails on separable fit clamshells', () => {
+    // 30 x 48 mm capsule/oval deeper in Y than X: sliding-clip rails sit on ±X long edges.
+    const deepOval: SceneGraph = {
+      nodes: [{
+        id: 'o', name: 'oval', type: 'body', pos: [0, 0, 0.012],
+        geoms: [
+          { name: 'c1', type: 'cylinder', size: [0.015, 0.008], pos: [0, -0.009, 0] } as SceneGeom,
+          { name: 'c2', type: 'cylinder', size: [0.015, 0.008], pos: [0, 0.009, 0] } as SceneGeom,
+          { name: 'mid', type: 'box', size: [0.015, 0.009, 0.008], pos: [0, 0, 0] } as SceneGeom,
+        ],
+        joints: [], children: [],
+      }],
+    };
+    const res = generateMoldMeshes(deepOval, {
+      ...CLAM,
+      blockShape: 'fit',
+      separable: true,
+      includePryNotches: true,
+    }, wasm);
+    expect(res.success, res.error).toBe(true);
+    expect(res.clips).toHaveLength(2);
+    const notches = res.features!.pryNotches;
+    expect(notches).toHaveLength(2);
+    // Notches must sit near the ±Y ends (|y| > 25 mm), clear of the mid-side clamping rails near y = 0.
+    for (const n of notches) {
+      expect(Math.abs(n.atMm[1])).toBeGreaterThan(25);
+    }
+  });
 });

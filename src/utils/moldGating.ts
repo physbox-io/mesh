@@ -330,8 +330,97 @@ export interface BottomFill {
   gateR: number;
   /** Where the gate stops, mm: inside the cavity, as far as gives it a mouth as wide as it is. */
   gateTopZ: number;
+  /** Where trimming cuts the gate off the casting, mm (reaches gateTopZ + gateR on sloped floors, flush on flat floors). */
+  gateTrimZ: number;
   /** How wide the funnel above it may be and stay inside a block that follows the part. */
   roomR: number;
+}
+
+export interface CavityIsland {
+  /** Grid column indices belonging to this 3D cavity component. */
+  cols: Set<number>;
+  volumeMm3: number;
+  centerMm: [number, number, number];
+  minZ: number;
+  maxZ: number;
+}
+
+/**
+ * Connected 3D cavity components in `spans` (8-connected in XY with overlapping
+ * Z intervals), largest first, filtering sub-millimetre dust crumbs.
+ */
+export function cavityIslands(spans: PourSpans, grid: Grid): CavityIsland[] {
+  const { cols, rows, stepX, stepY, halfW, halfD } = grid;
+  const cellArea = stepX * stepY;
+  const zTol = Math.max(0.05, Math.min(stepX, stepY) * 0.5);
+  // Node key: col * 16 + spanPairIdx (with fallback Map for >16 spans per column).
+  const visited = new Set<string>();
+  const keyOf = (col: number, k: number) => `${col}:${k}`;
+  const islands: CavityIsland[] = [];
+
+  for (let startCol = 0; startCol < spans.length; startCol++) {
+    const s0 = spans[startCol];
+    for (let startK = 0; startK + 1 < s0.length; startK += 2) {
+      if (s0[startK + 1] - s0[startK] <= 1e-6) continue;
+      const startKey = keyOf(startCol, startK);
+      if (visited.has(startKey)) continue;
+      visited.add(startKey);
+      const queue: Array<[number, number]> = [[startCol, startK]];
+      const colSet = new Set<number>();
+      let vol = 0, wx = 0, wy = 0, wz = 0;
+      let minZ = Infinity, maxZ = -Infinity;
+
+      for (let q = 0; q < queue.length; q++) {
+        const [col, k] = queue[q];
+        const sp = spans[col];
+        const a0 = sp[k], a1 = sp[k + 1];
+        const dv = (a1 - a0) * cellArea;
+        const r = Math.floor(col / cols), c = col - r * cols;
+        const x = -halfW + c * stepX, y = -halfD + r * stepY;
+        colSet.add(col);
+        vol += dv;
+        wx += x * dv;
+        wy += y * dv;
+        wz += ((a0 + a1) / 2) * dv;
+        if (a0 < minZ) minZ = a0;
+        if (a1 > maxZ) maxZ = a1;
+
+        for (let dr = -1; dr <= 1; dr++) {
+          for (let dc = -1; dc <= 1; dc++) {
+            if (dc === 0 && dr === 0) continue;
+            const cc = c + dc, rr = r + dr;
+            if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) continue;
+            const nbCol = rr * cols + cc;
+            const nbSp = spans[nbCol];
+            for (let nk = 0; nk + 1 < nbSp.length; nk += 2) {
+              if (nbSp[nk + 1] - nbSp[nk] <= 1e-6) continue;
+              if (Math.min(a1, nbSp[nk + 1]) >= Math.max(a0, nbSp[nk]) - zTol) {
+                const nkKey = keyOf(nbCol, nk);
+                if (!visited.has(nkKey)) {
+                  visited.add(nkKey);
+                  queue.push([nbCol, nk]);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (vol > 0) {
+        islands.push({
+          cols: colSet,
+          volumeMm3: vol,
+          centerMm: [wx / vol, wy / vol, wz / vol],
+          minZ,
+          maxZ,
+        });
+      }
+    }
+  }
+  islands.sort((a, b) => b.volumeMm3 - a.volumeMm3);
+  if (islands.length <= 1) return islands;
+  const minKeep = Math.max(1, islands[0].volumeMm3 * 0.005);
+  return islands.filter((isl) => isl.volumeMm3 >= minKeep);
 }
 
 /** Wall between a down-sprue and the cavity or the block's edge, mm. */
@@ -354,24 +443,26 @@ export function bottomFillFloorMm(r: number, linerSkinMm = 0): number {
 }
 
 /**
- * Where a gate of radius `gateR` meets the cavity's lowest point. On a flat
- * underside every column is equally low, and taking the first found put the
- * gate on the part's corner, three quarters of it in solid mold. So: inside
- * the low region by the gate's radius (or as far as it goes), and of those the
- * spot nearest the block's edge, for the shortest runner.
+ * Where a gate of radius `gateR` meets the cavity's lowest point (on the main
+ * cavity island when disconnected islands exist). On a flat underside every
+ * column is equally low, and taking the first found put the gate on the part's
+ * corner, three quarters of it in solid mold. So: inside the low region by the
+ * gate's radius (or as far as it goes), and of those the spot nearest the
+ * block's edge, for the shortest runner.
  */
-function lowestSpot(spans: PourSpans, grid: Grid, gateR: number): BottomFill['gate'] | null {
+function lowestSpot(spans: PourSpans, grid: Grid, gateR: number, allowedCols?: Set<number>): BottomFill['gate'] | null {
   const { cols, rows, stepX, stepY, halfW, halfD } = grid;
   let start = -1;
   let z = Infinity;
   for (let i = 0; i < spans.length; i++) {
+    if (allowedCols && !allowedCols.has(i)) continue;
     if (spans[i].length && spans[i][0] < z) {
       z = spans[i][0];
       start = i;
     }
   }
   if (start < 0) return null;
-  const low = floodRegion(start, cols, rows, (n) => spans[n].length > 0 && spans[n][0] <= z + MOUTH_SINK_MM);
+  const low = floodRegion(start, cols, rows, (n) => (!allowedCols || allowedCols.has(n)) && spans[n].length > 0 && spans[n][0] <= z + MOUTH_SINK_MM);
   const depth = peelRegion(low, cols, rows);
   const cell = Math.min(stepX, stepY);
   const need = Math.min(Math.ceil(gateR / cell), Math.max(...depth.values()));
@@ -421,7 +512,8 @@ export function planBottomFill(
   const xOf = (c: number) => -halfW + c * stepX;
   const yOf = (row: number) => -halfD + row * stepY;
   const gateR = Math.min(r, gateDia / 2);
-  const gate = lowestSpot(spans, grid, gateR);
+  const islands = cavityIslands(spans, grid);
+  const gate = lowestSpot(spans, grid, gateR, islands[0]?.cols);
   if (!gate) return null;
   const hit = new Uint8Array(cols * rows);
   for (let i = 0; i < spans.length; i++) if (spans[i].length) hit[i] = 1;
@@ -477,13 +569,38 @@ export function planBottomFill(
   }
   if (roomy) best = roomy;
   if (!best) return null;
+  const gateTopZ = gate.z + mouthSinkMm(spans, grid, gate, gateR, 1, Math.PI * gateR * gateR, gateR);
+  // Check whether the cavity floor slopes up across the gate's circle: on a flat
+  // floor, trimming stops flush at gate.z (+ 0.05 mm) so thin plates are never
+  // gouged; on a sloped floor, boreSolids caps the gate at gateTopZ with a 45°
+  // cone up to gateTopZ + gateR, so trimming reaches up to clear that collar.
+  let maxFloorInGate = gate.z;
+  let missedInGate = false;
+  const c0 = Math.max(0, Math.floor((gate.x - gateR + halfW) / stepX));
+  const c1 = Math.min(cols - 1, Math.ceil((gate.x + gateR + halfW) / stepX));
+  const r0 = Math.max(0, Math.floor((gate.y - gateR + halfD) / stepY));
+  const r1 = Math.min(rows - 1, Math.ceil((gate.y + gateR + halfD) / stepY));
+  for (let row = r0; row <= r1; row++) {
+    for (let c = c0; c <= c1; c++) {
+      if (Math.hypot(xOf(c) - gate.x, yOf(row) - gate.y) > gateR) continue;
+      const s = spans[row * cols + c];
+      if (!s.length) missedInGate = true;
+      else if (s[0] > maxFloorInGate) maxFloorInGate = s[0];
+    }
+  }
+  const tipTopZ = Math.min(-0.05, gateTopZ + Math.min(Math.max(0, -gateTopZ), gateR));
+  const isSlopedFloor = missedInGate || maxFloorInGate > gate.z + 0.15;
+  const gateTrimZ = isSlopedFloor
+    ? Math.min(tipTopZ, Math.max(gateTopZ, maxFloorInGate) + 0.05)
+    : Math.min(0, gate.z + 0.05);
   return {
     down: { x: best.x, y: best.y },
     gate,
     runnerZ: gate.z - linerSkinMm - RUNNER_CLEARANCE_MM - r,
     r,
     gateR,
-    gateTopZ: gate.z + mouthSinkMm(spans, grid, gate, gateR, 1, Math.PI * gateR * gateR, gateR),
+    gateTopZ,
+    gateTrimZ,
     roomR: maxFromPartMm - best.fromPart,
   };
 }
@@ -656,7 +773,7 @@ export function feedRouteOf(f: MoldFeatureReport | undefined): FeedRoute | undef
   const r = f.downSprue.diaMm / 2;
   return {
     down: f.downSprue.atMm,
-    gate: [f.gate.atMm[0], f.gate.atMm[1], -(f.gate.depthMm ?? 0)],
+    gate: [f.gate.atMm[0], f.gate.atMm[1], f.gate.trimZMm ?? -(f.gate.depthMm ?? 0)],
     runnerZ: r - (f.downSprue.depthMm ?? 0),
     r,
     gateR: f.gate.diaMm / 2,

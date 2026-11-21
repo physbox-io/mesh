@@ -173,3 +173,52 @@ describe('the bottom-fill funnel', () => {
     expect(wider.features!.sprue!.diaMm).toBeGreaterThanOrEqual(14);
   });
 });
+
+describe('multi-island warning & sloped-floor gate trim', () => {
+  it('warns unmistakably when disconnected cavity islands are not reached by the single sprue/runner, and gates the largest island', () => {
+    // Island 1 (small crumb, slightly lower in Z) and Island 2 (main 20x20x20 mm block):
+    const twoIslands: SceneGraph = {
+      nodes: [
+        {
+          id: 'i1', name: 'small_island', type: 'body', pos: [-0.022, 0, 0.009],
+          geoms: [{ name: 'g1', type: 'box', size: [0.004, 0.004, 0.005] } as SceneGeom],
+          joints: [], children: [],
+        },
+        {
+          id: 'i2', name: 'main_island', type: 'body', pos: [0.015, 0, 0.015],
+          geoms: [{ name: 'g2', type: 'box', size: [0.01, 0.01, 0.01] } as SceneGeom],
+          joints: [], children: [],
+        },
+      ],
+    };
+    for (const blockShape of ['box', 'fit'] as const) {
+      const r = generateMoldMeshes(twoIslands, { ...OPTS, blockShape }, wasm);
+      expect(r.success, r.error).toBe(true);
+      expect(r.warnings.some((w) => /2 disconnected cavities.*1 other cavity.*receive no epoxy/i.test(w))).toBe(true);
+      // Gate lands on the main (+X) island, never hijacked by the small (-X) island.
+      expect(r.features!.gate!.atMm[0]).toBeGreaterThan(0);
+    }
+  });
+
+  it('reaches up into a sloped floor on feedRouteOf so bottom-fill gate collars trim cleanly', async () => {
+    // A 30x20 mm block tilted 35° around Y so its underside is a steep sloped floor:
+    const tiltedScene: SceneGraph = {
+      nodes: [{
+        id: 't1', name: 'tilted', type: 'body', pos: [0, 0, 0.02], euler: [0, 35, 0],
+        geoms: [{ name: 'g', type: 'box', size: [0.015, 0.01, 0.008] } as SceneGeom],
+        joints: [], children: [],
+      }],
+    };
+    const r = generateMoldMeshes(tiltedScene, { ...OPTS, wallMarginMm: 16 }, wasm);
+    expect(r.success, r.error).toBe(true);
+    const route = feedRouteOf(r.features)!;
+    expect(route).toBeDefined();
+    // On a 35° sloped floor, `route.gate[2]` advances well above `-gate.depthMm` (`gate.z`)
+    // toward `gateTopZ + gateR` to trim off the sloped gate collar.
+    expect(route.gate[2]).toBeGreaterThan(-(r.features!.gate!.depthMm!) + 0.5);
+    const cast = await simulateCastFromMoldResult(r, { castMaterial: 'epoxy', trimChannels: true });
+    expect(cast.success, cast.error).toBe(true);
+    const trueVol = 30 * 20 * 16;
+    expect(Math.abs(cast.castVolumeMm3 - trueVol) / trueVol).toBeLessThan(0.03);
+  });
+});

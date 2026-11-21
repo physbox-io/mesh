@@ -167,6 +167,25 @@ describe('a hole through the mold', () => {
   it('refuses a point that is not over the master', () => {
     expect(() => buildPourBox(wasm, brick, { hole: 'fixing', holeAtMm: [60, 0] })).toThrow(/not over the master/);
   });
+
+  it('keeps a pour pin on a thin hollow cup rim instead of plunging to the cup floor, and warns that the hole overhangs the rim', () => {
+    // Upright hollow cup: outer r = 20 mm, inner r = 17 mm (3 mm rim wall), z = 0..30 mm, floor z = 0..3 mm.
+    const cupOuter = wasm.Manifold.cylinder(30, 20, 20, 48, false);
+    const cupInner = wasm.Manifold.cylinder(27, 17, 17, 48, false).translate([0, 0, 3]);
+    const cup = cupOuter.subtract(cupInner);
+    const gm = cup.getMesh();
+    const cupSoup: number[] = [];
+    for (let i = 0; i < gm.triVerts.length; i++) {
+      const v = gm.triVerts[i] * gm.numProp;
+      cupSoup.push(gm.vertProperties[v], gm.vertProperties[v + 1], gm.vertProperties[v + 2]);
+    }
+    for (const m of [cupOuter, cupInner, cup]) m.delete();
+
+    const box = buildPourBox(wasm, cupSoup, { hole: 'pour', holeAtMm: [18.5, 0] });
+    // Pin foot stays at the 30 mm rim (29.5 mm with 0.5 mm bite), NOT down at z = 2.5 mm on the cup floor!
+    expect(box.hole!.footMm[2]).toBeCloseTo(29.5, 2);
+    expect(box.report.warnings.some((w) => /wider than the narrow rim/i.test(w))).toBe(true);
+  });
 });
 
 describe('a pour box round a long master', () => {

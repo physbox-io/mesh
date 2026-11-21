@@ -133,50 +133,259 @@ export function treatThinGaps(wasm: ManifoldToplevel, part: Manifold, limits: Pr
     }
   }
 
-  // Walls: the part's slice in each band between flat heights, closed by half a wall.
-  const r = limits.minWallMm / 2;
+  // Sloped/curved stacked faces (where |nz| < 0.999 missed flatFaces): ray-cast on
+  // an XY grid when the part has non-horizontal, non-vertical faces and minSkinMm > 0.
   const box = part.boundingBox();
+  const mesh = part.getMesh();
+  const vp = mesh.vertProperties;
+  const st = mesh.numProp;
+  const tv = mesh.triVerts;
+  const triCount = Math.floor(tv.length / 3);
+  const triZMin = new Float64Array(triCount);
+  const triZMax = new Float64Array(triCount);
+  const triNz = new Float64Array(triCount);
+  let hasSlopedSkinCandidate = false;
+  let hasNonPrismaticFace = false;
+  for (let ti = 0; ti < triCount; ti++) {
+    const a = tv[ti * 3] * st, b = tv[ti * 3 + 1] * st, c = tv[ti * 3 + 2] * st;
+    const z0 = vp[a + 2], z1 = vp[b + 2], z2 = vp[c + 2];
+    triZMin[ti] = Math.min(z0, z1, z2);
+    triZMax[ti] = Math.max(z0, z1, z2);
+    const ux = vp[b] - vp[a], uy = vp[b + 1] - vp[a + 1], uz = z1 - z0;
+    const vx = vp[c] - vp[a], vy = vp[c + 1] - vp[a + 1], vz = z2 - z0;
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz);
+    const unz = len > 1e-12 ? nz / len : 0;
+    triNz[ti] = unz;
+    const anz = Math.abs(unz);
+    if (anz > 1e-3 && anz < 0.999) {
+      hasNonPrismaticFace = true;
+      if (anz > 0.5) hasSlopedSkinCandidate = true;
+    }
+  }
+
+  if (hasSlopedSkinCandidate && limits.minSkinMm > FLAT_SNAP_MM) {
+    const spanX = box.max[0] - box.min[0];
+    const spanY = box.max[1] - box.min[1];
+    if (spanX > 1e-3 && spanY > 1e-3) {
+      const ds = Math.max(0.3, Math.min(0.6, Math.max(spanX, spanY) / 72));
+      const nx = Math.max(2, Math.ceil(spanX / ds));
+      const ny = Math.max(2, Math.ceil(spanY / ds));
+      const dx = spanX / nx;
+      const dy = spanY / ny;
+      const buckets: number[][] = Array.from({ length: nx * ny }, () => []);
+      for (let ti = 0; ti < triCount; ti++) {
+        if (Math.abs(triNz[ti]) < 1e-4) continue;
+        const a = tv[ti * 3] * st, b = tv[ti * 3 + 1] * st, c = tv[ti * 3 + 2] * st;
+        const x0 = Math.min(vp[a], vp[b], vp[c]), x1 = Math.max(vp[a], vp[b], vp[c]);
+        const y0 = Math.min(vp[a + 1], vp[b + 1], vp[c + 1]), y1 = Math.max(vp[a + 1], vp[b + 1], vp[c + 1]);
+        const c0 = Math.max(0, Math.floor((x0 - box.min[0]) / dx));
+        const c1 = Math.min(nx - 1, Math.floor((x1 - box.min[0]) / dx));
+        const r0 = Math.max(0, Math.floor((y0 - box.min[1]) / dy));
+        const r1 = Math.min(ny - 1, Math.floor((y1 - box.min[1]) / dy));
+        for (let r = r0; r <= r1; r++) {
+          for (let col = c0; col <= c1; col++) buckets[r * nx + col].push(ti);
+        }
+      }
+      let slopedArea = 0;
+      let slopedThin = Infinity;
+      let slopedWx = 0, slopedWy = 0, slopedWz = 0, slopedW = 0;
+      for (let r = 0; r < ny; r++) {
+        const y = box.min[1] + (r + 0.5) * dy;
+        for (let col = 0; col < nx; col++) {
+          const cand = buckets[r * nx + col];
+          if (cand.length < 4) continue;
+          const x = box.min[0] + (col + 0.5) * dx;
+          const hits: Array<{ z: number; nz: number }> = [];
+          for (const ti of cand) {
+            const a = tv[ti * 3] * st, b = tv[ti * 3 + 1] * st, c = tv[ti * 3 + 2] * st;
+            const ax = vp[a], ay = vp[a + 1], bx = vp[b], by = vp[b + 1], cx = vp[c], cy = vp[c + 1];
+            const det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+            if (Math.abs(det) < 1e-12) continue;
+            const l1 = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / det;
+            const l2 = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / det;
+            const l3 = 1 - l1 - l2;
+            if (l1 < -1e-7 || l2 < -1e-7 || l3 < -1e-7) continue;
+            const z = l1 * vp[a + 2] + l2 * vp[b + 2] + l3 * vp[c + 2];
+            hits.push({ z, nz: triNz[ti] });
+          }
+          if (hits.length < 4) continue;
+          hits.sort((p, q) => p.z - q.z);
+          // Collapse shared-edge duplicate crossings of the same sign.
+          const clean: Array<{ z: number; nz: number }> = [];
+          for (const h of hits) {
+            const prev = clean[clean.length - 1];
+            if (prev && Math.abs(h.z - prev.z) < 1e-4 && Math.sign(h.nz) === Math.sign(prev.nz)) continue;
+            clean.push(h);
+          }
+          for (let k = 0; k + 3 < clean.length; k += 2) {
+            const enterLo = clean[k], leaveLo = clean[k + 1], enterHi = clean[k + 2], leaveHi = clean[k + 3];
+            if (!(leaveLo.nz > 0.3 && enterHi.nz < -0.3)) continue;
+            // Purely horizontal flat-to-flat pairs were already measured above.
+            if (leaveLo.nz >= 0.999 && enterHi.nz <= -0.999) continue;
+            const dz = enterHi.z - leaveLo.z;
+            const cosTilt = Math.min(Math.abs(leaveLo.nz), Math.abs(enterHi.nz));
+            const gNorm = dz * cosTilt;
+            if (!(dz > FLAT_SNAP_MM && gNorm < limits.minSkinMm - 1e-6)) continue;
+            const cellArea = (dx * dy) / Math.max(0.5, cosTilt);
+            slopedArea += cellArea;
+            slopedThin = Math.min(slopedThin, gNorm);
+            slopedWx += x * cellArea;
+            slopedWy += y * cellArea;
+            slopedWz += ((leaveLo.z + enterHi.z) / 2) * cellArea;
+            slopedW += cellArea;
+            if (mode === 'close') {
+              const padLo = Math.min(0.15, Math.max(0.02, (leaveLo.z - enterLo.z) * 0.35));
+              const padHi = Math.min(0.15, Math.max(0.02, (leaveHi.z - enterHi.z) * 0.35));
+              fills.push(
+                wasm.Manifold.cube([dx + 0.04, dy + 0.04, dz + padLo + padHi], false)
+                  .translate([x - dx / 2 - 0.02, y - dy / 2 - 0.02, leaveLo.z - padLo]),
+              );
+            } else if (mode === 'fix') {
+              const needDz = limits.minSkinMm / Math.max(0.5, cosTilt);
+              const half = Math.max(0.02, (needDz - dz) / 2);
+              cuts.push(
+                wasm.Manifold.cube([dx + 0.04, dy + 0.04, dz + 2 * half], false)
+                  .translate([x - dx / 2 - 0.02, y - dy / 2 - 0.02, leaveLo.z - half]),
+              );
+            }
+          }
+        }
+      }
+      if (slopedArea >= MIN_GAP_AREA_MM2) {
+        report.skin.areaMm2 += slopedArea;
+        report.skin.thinnestMm = Math.min(report.skin.thinnestMm, slopedThin);
+        if (slopedArea > worstSkinArea && slopedW > 0) {
+          report.skin.atMm = [
+            Math.round((slopedWx / slopedW) * 10) / 10,
+            Math.round((slopedWy / slopedW) * 10) / 10,
+            Math.round((slopedWz / slopedW) * 10) / 10,
+          ];
+        }
+      }
+    }
+  }
+
+  // Walls: the part's slice in each band between flat heights, closed by half a wall.
+  // Where a band contains sloped or curved faces, subdivide into thin sub-bands so
+  // equatorial/curved gaps are caught and 'close'/'fix' never extrudes vertical fins.
+  const r = limits.minWallMm / 2;
+  const minWallPieceArea = Math.max(MIN_GAP_AREA_MM2, 0.35 * limits.minWallMm * limits.minWallMm);
   const heights = [...new Set([box.min[2], box.max[2], ...up.keys(), ...down.keys()])].sort((a, b) => a - b);
   let worstWallArea = 0;
-  for (let i = 0; i + 1 < heights.length; i++) {
-    const a = heights[i], b = heights[i + 1];
-    if (b - a < FLAT_SNAP_MM) continue;
-    const slice = part.slice((a + b) / 2);
-    const grown = slice.offset(r, 'Round');
-    const closed = grown.offset(-r, 'Round');
-    grown.delete();
-    const gaps = closed.subtract(slice);
-    closed.delete();
-    // A closing also rounds every inside corner a hair; a gap is a piece much
-    // bigger than that fillet.
-    const pieces = gaps.decompose().filter((g) => {
-      const keep = g.area() >= Math.max(MIN_GAP_AREA_MM2, 2 * limits.minWallMm * limits.minWallMm);
-      if (!keep) g.delete();
-      return keep;
-    });
-    gaps.delete();
-    for (const g of pieces) {
-      const area = g.area();
-      report.wall.areaMm2 += area;
-      // Mean width of a strip: twice its area over its outline.
-      const perimeter = g.toPolygons().reduce((sum, poly) => sum + poly.reduce((s, pt, k) => {
-        const q = poly[(k + 1) % poly.length];
-        return s + Math.hypot(q[0] - pt[0], q[1] - pt[1]);
-      }, 0), 0);
-      report.wall.thinnestMm = Math.min(report.wall.thinnestMm, perimeter > 0 ? (2 * area) / perimeter : 0);
-      if (area > worstWallArea) {
-        worstWallArea = area;
-        report.wall.atMm = where(g, (a + b) / 2);
+  if (r > 1e-6) {
+    for (let i = 0; i + 1 < heights.length; i++) {
+      const a = heights[i], b = heights[i + 1];
+      if (b - a < FLAT_SNAP_MM) continue;
+      let bandCurved = false;
+      if (hasNonPrismaticFace && b - a > 0.8) {
+        for (let ti = 0; ti < triCount; ti++) {
+          const anz = Math.abs(triNz[ti]);
+          if (anz > 1e-3 && anz < 0.999 && triZMax[ti] > a + FLAT_SNAP_MM && triZMin[ti] < b - FLAT_SNAP_MM) {
+            bandCurved = true;
+            break;
+          }
+        }
       }
-      if (mode === 'close') fills.push(wasm.Manifold.extrude(g, b - a).translate([0, 0, a]));
-      else if (mode === 'fix') {
-        const opened = g.offset(r, 'Round');
-        cuts.push(wasm.Manifold.extrude(opened, b - a).translate([0, 0, a]));
-        opened.delete();
+      const subStep = mode === 'leave' ? 0.8 : 0.5;
+      const steps = bandCurved ? Math.min(40, Math.max(1, Math.ceil((b - a) / subStep))) : 1;
+      const dh = (b - a) / steps;
+      let bandUnion: CrossSection | null = null;
+      let bandAtZ = (a + b) / 2;
+      let bandMaxSubArea = 0;
+
+      for (let s = 0; s < steps; s++) {
+        const z0 = a + s * dh;
+        const z1 = z0 + dh;
+        const zMid = (z0 + z1) / 2;
+        const slice = part.slice(zMid);
+        const grown = slice.offset(r, 'Round');
+        const closed = grown.offset(-r, 'Round');
+        grown.delete();
+        const gaps = closed.subtract(slice);
+        closed.delete();
+        // A closing also rounds every inside corner a hair (~0.054 * minWallMm² for 90°);
+        // a real gap between two walls is appreciably larger than a corner fillet.
+        const pieces = gaps.decompose().filter((g) => {
+          const keep = g.area() >= minWallPieceArea;
+          if (!keep) g.delete();
+          return keep;
+        });
+        gaps.delete();
+
+        // For curved sub-bands in 'close' mode, clip the gap to the intersection of
+        // the grown slices near z0 and z1 so the web follows the curve without fins.
+        let clipGuard: CrossSection | null = null;
+        if (bandCurved && mode === 'close' && pieces.length > 0) {
+          const eps = Math.min(0.05, dh * 0.15);
+          const sLo = part.slice(z0 + eps);
+          const sHi = part.slice(z1 - eps);
+          const gLo = sLo.offset(r * 1.25, 'Round');
+          const gHi = sHi.offset(r * 1.25, 'Round');
+          sLo.delete();
+          sHi.delete();
+          clipGuard = gLo.intersect(gHi);
+          gLo.delete();
+          gHi.delete();
+        }
+
+        for (const g of pieces) {
+          const area = g.area();
+          const perimeter = g.toPolygons().reduce((sum, poly) => sum + poly.reduce((acc, pt, k) => {
+            const q = poly[(k + 1) % poly.length];
+            return acc + Math.hypot(q[0] - pt[0], q[1] - pt[1]);
+          }, 0), 0);
+          report.wall.thinnestMm = Math.min(report.wall.thinnestMm, perimeter > 0 ? (2 * area) / perimeter : 0);
+
+          if (!bandCurved) {
+            report.wall.areaMm2 += area;
+            if (area > worstWallArea) {
+              worstWallArea = area;
+              report.wall.atMm = where(g, zMid);
+            }
+          } else {
+            if (bandUnion) {
+              const nextUnion: CrossSection = bandUnion.add(g);
+              bandUnion.delete();
+              bandUnion = nextUnion;
+            } else {
+              bandUnion = g.offset(0);
+            }
+            if (area > bandMaxSubArea) {
+              bandMaxSubArea = area;
+              bandAtZ = zMid;
+            }
+          }
+
+          if (mode === 'close') {
+            const fillCs = clipGuard ? g.intersect(clipGuard) : g;
+            if (!fillCs.isEmpty()) {
+              fills.push(wasm.Manifold.extrude(fillCs, dh).translate([0, 0, z0]));
+            }
+            if (fillCs !== g) fillCs.delete();
+          } else if (mode === 'fix') {
+            const opened = g.offset(r, 'Round');
+            cuts.push(wasm.Manifold.extrude(opened, dh).translate([0, 0, z0]));
+            opened.delete();
+          }
+          g.delete();
+        }
+        clipGuard?.delete();
+        slice.delete();
       }
-      g.delete();
+
+      if (bandUnion) {
+        const area = bandUnion.area();
+        if (area >= MIN_GAP_AREA_MM2) {
+          report.wall.areaMm2 += area;
+          if (area > worstWallArea) {
+            worstWallArea = area;
+            report.wall.atMm = where(bandUnion, bandAtZ);
+          }
+        }
+        bandUnion.delete();
+      }
     }
-    slice.delete();
   }
 
   if (!fills.length && !cuts.length) return { part, report };

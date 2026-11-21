@@ -826,3 +826,200 @@ describe('auto pull direction between equal losses', () => {
     expect(generateMoldMeshes(box, { moldType: 'clamshell' }).pullDirection).toBe('+z');
   });
 });
+
+describe('audit regressions: partingZMm precision, separable+liner warning, cavityDepthMm order, blind vents & thin gaps', () => {
+  it('preserves >0.01 mm precision on partingZMm instead of rounding to 2 decimals', () => {
+    const oddBox = bodyWith({ type: 'box', size: [0.015, 0.015, 0.006125] }, [0, 0, 0.006125]); // 12.25 mm -> half = 6.125 mm
+    const res = generateMoldMeshes(oddBox, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      pullDirection: '+z',
+      sprueFeed: 'top',
+      baseThicknessMm: 5.004,
+    });
+    expect(res.success).toBe(true);
+    // Flat-backed 12.25 mm box sits in bottomHalf + 5.004 mm floor = 17.254 mm (would have rounded to 17.25 under 2-decimal rounding)
+    expect(Math.abs(res.bottomHalf.partingZMm - 17.254)).toBeLessThan(1e-3);
+    expect(res.bottomHalf.partingZMm).not.toBe(17.25);
+  });
+
+  it('emits an explicit warning when separable and dissolvableLiner are both enabled', () => {
+    const res = generateMoldMeshes(box, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      pullDirection: '+z',
+      dissolvableLiner: true,
+      separable: true,
+    });
+    expect(res.success, res.error).toBe(true);
+    expect(res.clips).toBeUndefined();
+    expect(res.warnings.some((w) => /sliding clips.*unlined rigid molds.*Dissolvable Liner/i.test(w))).toBe(true);
+  });
+
+  it('auto-expands default wallMarginMm on lined clamshells so Holder + insert + bottom-fill + sealRidge succeed out of the box', () => {
+    const res = generateMoldMeshes(box, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      pullDirection: '+z',
+      dissolvableLiner: true,
+      linerConstruction: 'insert',
+      castMaterial: 'epoxy',
+    });
+    expect(res.success, res.error).toBe(true);
+    expect(res.features?.feed).toBe('bottom');
+    expect(res.liner?.sealRidge).toBe(true);
+    expect(res.warnings.some((w) => /No room for the sealing ridge/i.test(w))).toBe(false);
+    expect(res.warnings.some((w) => /wall margin is narrower than the.*pins/i.test(w))).toBe(false);
+  });
+
+  it('scales scene Z height for cavityDepthMm BEFORE rotating to a non-Z pull direction', () => {
+    // Frame standing in XZ (40 mm wide in X, 10 mm deep in Y, 40 mm tall in scene Z):
+    // when cavityDepthMm overrides scene Z height from 40 mm to 20 mm and pullDirection is '+y',
+    // the molded part's span along scene Z (which rotates onto mold -Y, i.e. partDepthMm) must be 20 mm,
+    // while its 10 mm scene-Y thickness (which rotates onto mold +Z, i.e. partHeightMm) stays 10 mm!
+    const bar = (name: string, sx: number, sz: number, x: number, z: number) =>
+      ({ name, type: 'box', size: [sx, 0.005, sz], pos: [x, 0, z] }) as SceneGeom;
+    const uprightFrame: SceneGraph = {
+      nodes: [{
+        id: 'uf', name: 'frame', type: 'body', pos: [0, 0, 0],
+        geoms: [
+          bar('bottom', 0.02, 0.005, 0, 0.005),
+          bar('top', 0.02, 0.005, 0, 0.035),
+          bar('left', 0.005, 0.01, -0.015, 0.02),
+          bar('right', 0.005, 0.01, 0.015, 0.02),
+        ],
+        joints: [], children: [],
+      }],
+    };
+    const res = generateMoldMeshes(uprightFrame, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      pullDirection: '+y',
+      cavityDepthMm: 20,
+    });
+    expect(res.success, res.error).toBe(true);
+    expect(res.pullDirection).toBe('+y');
+    expect(res.partWidthMm).toBeCloseTo(40, 0);
+    expect(res.partDepthMm).toBeCloseTo(20, 0);
+    expect(res.partHeightMm).toBeCloseTo(10, 0);
+  });
+
+  it('places blind vents on lined open molds, records zRoofMm in features.blindVents, and warns when pockets exceed capacity', async () => {
+    const wasm = await loadManifold();
+    const statueOpen: SceneGraph = {
+      nodes: [{
+        id: 'st', name: 'statue', type: 'body', pos: [0, 0, 0],
+        geoms: [
+          { name: 'ped', type: 'box', size: [0.02, 0.02, 0.01], pos: [0, 0, 0.01] } as SceneGeom,
+          { name: 'shoulders', type: 'box', size: [0.035, 0.018, 0.01], pos: [0, 0, 0.03] } as SceneGeom,
+        ],
+        joints: [], children: [],
+      }],
+    };
+    const linedOpen = generateMoldMeshes(statueOpen, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'open',
+      pullDirection: '+z',
+      dissolvableLiner: true,
+      includeVents: true,
+      castMaterial: 'epoxy',
+    }, wasm);
+    expect(linedOpen.success, linedOpen.error).toBe(true);
+    expect(linedOpen.features!.blindVents.length).toBeGreaterThanOrEqual(2);
+    for (const bv of linedOpen.features!.blindVents) {
+      expect(typeof bv.x).toBe('number');
+      expect(typeof bv.y).toBe('number');
+      expect(bv.diaMm).toBeGreaterThanOrEqual(4);
+      expect(bv.zRoofMm).toBeLessThan(-10);
+    }
+    // Both shell and liner remain closed watertight solids with blind vents bored and sleeved.
+    for (const tris of [linedOpen.bottomHalf.liner!.shell, linedOpen.bottomHalf.liner!.liner]) {
+      const m = stlToMesh(exportBinarySTL(tris));
+      expect(analyzeMesh(Array.from(m.positions), Array.from(m.faces))!.closed).toBe(true);
+    }
+
+    // Comb with 10 separate overhanging teeth along Y = +22 mm (pedestal at z = 0..8 mm has 6600 mm² > top,
+    // so z = 0 is the open pour face and all 10 teeth at z = 14..22 mm are disconnected blind overhangs > max 8 vents):
+    const combGeoms: SceneGeom[] = [
+      { name: 'ped', type: 'box', size: [0.11, 0.015, 0.004], pos: [0, 0, 0.004] } as SceneGeom,
+      { name: 'spine', type: 'box', size: [0.10, 0.006, 0.009], pos: [0, 0.009, 0.013] } as SceneGeom,
+    ];
+    for (let k = 0; k < 10; k++) {
+      const tx = (-90 + k * 20) / 1000;
+      combGeoms.push({
+        name: `tooth_${k}`,
+        type: 'box',
+        size: [0.003, 0.006, 0.004],
+        pos: [tx, 0.021, 0.018],
+      } as SceneGeom);
+    }
+    const multiPocketOpen = generateMoldMeshes({
+      nodes: [{ id: 'mp', name: 'comb', type: 'body', pos: [0, 0, 0], geoms: combGeoms, joints: [], children: [] }],
+    }, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'open',
+      pullDirection: '+z',
+      allowUndercuts: true,
+      includeVents: true,
+    }, wasm);
+    expect(multiPocketOpen.success).toBe(true);
+    expect(multiPocketOpen.features!.blindVents).toHaveLength(8);
+    expect(multiPocketOpen.warnings.some((w) => /blind overhang.*could not be/i.test(w))).toBe(true);
+  });
+
+  it('detects curved sphere thin gaps without growing vertical fins on close, detects tilted plate gaps, and warns on <2*linerSkinMm slots', async () => {
+    const wasm = await loadManifold();
+    const { treatThinGaps } = await import('../src/utils/thinGaps');
+    const fdm = { minSkinMm: 0.2, minWallMm: 0.4, bridgeMm: 5 };
+
+    // 1. Two r = 10 mm spheres 0.15 mm apart at equator, joined by a base bridge:
+    const s1 = wasm.Manifold.sphere(10, 48).translate([-10.075, 0, 10]);
+    const s2 = wasm.Manifold.sphere(10, 48).translate([10.075, 0, 10]);
+    const baseBar = wasm.Manifold.cube([24, 4, 2], false).translate([-12, -2, -2]);
+    const twoSpheres = wasm.Manifold.union([s1, s2, baseBar]);
+    const { report: spLeave } = treatThinGaps(wasm, twoSpheres, fdm, 'leave');
+    expect(spLeave.wall.areaMm2).toBeGreaterThan(0.1);
+    expect(spLeave.wall.thinnestMm).toBeLessThan(0.4);
+
+    const { part: spClosed } = treatThinGaps(wasm, twoSpheres, fdm, 'close');
+    // Closing must only add a small equatorial web (< 15 mm³), never a 20 mm tall fin across z = [0, 20]!
+    const addedVol = spClosed.volume() - twoSpheres.volume();
+    expect(addedVol).toBeGreaterThan(0.05);
+    expect(addedVol).toBeLessThan(20);
+    // Near the top of the spheres (z = 18.5), the closed gap must NOT stick a fin into empty air at x = 0:
+    expect(spClosed.slice(18.5).decompose().length).toBe(2);
+    for (const m of [s1, s2, baseBar, twoSpheres, spClosed]) m.delete();
+
+    // 2. Two 10x10x2 mm plates separated by a 0.10 mm gap tilted 15°:
+    const pLo = wasm.Manifold.cube([10, 10, 2], false);
+    const pHi = wasm.Manifold.cube([10, 10, 2], false).translate([0, 0, 2.1]);
+    const post = wasm.Manifold.cube([2, 10, 4.1], false).translate([-2, 0, 0]);
+    const tilted = wasm.Manifold.union([pLo, pHi, post]).rotate([15, 0, 0]);
+    const { report: tiltRep } = treatThinGaps(wasm, tilted, fdm, 'leave');
+    expect(tiltRep.skin.areaMm2).toBeGreaterThan(60);
+    expect(tiltRep.skin.thinnestMm).toBeLessThan(0.15);
+    for (const m of [pLo, pHi, post, tilted]) m.delete();
+
+    // 3. Lined mold with a 1.0 mm vertical slot (< 2 * 1.2 = 2.4 mm liner skin):
+    const slottedScene: SceneGraph = {
+      nodes: [{
+        id: 'sl', name: 'slotted', type: 'body', pos: [0, 0, 0],
+        geoms: [
+          { name: 'base', type: 'box', size: [0.012, 0.01, 0.002], pos: [0, 0, 0.002] } as SceneGeom,
+          { name: 'j1', type: 'box', size: [0.003, 0.008, 0.006], pos: [-0.0035, 0, 0.01] } as SceneGeom,
+          { name: 'j2', type: 'box', size: [0.003, 0.008, 0.006], pos: [0.0035, 0, 0.01] } as SceneGeom, // 1.0 mm gap between x=-0.5 and x=+0.5 mm!
+        ],
+        joints: [], children: [],
+      }],
+    };
+    const linedSlot = generateMoldMeshes(slottedScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'clamshell',
+      pullDirection: '+z',
+      dissolvableLiner: true,
+      linerSkinMm: 1.2,
+    }, wasm);
+    expect(linedSlot.success).toBe(true);
+    expect(linedSlot.warnings.some((w) => /narrow slots under 2\.4 mm wide/i.test(w))).toBe(true);
+  });
+});

@@ -642,12 +642,19 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
     const centreZ = topZAt(masterSoup, hx, hy);
     if (centreZ === null) throw new Error(`The hole at ${hx.toFixed(1)}, ${hy.toFixed(1)} mm is not over the master: pick a point on it.`);
     // On a sloped top the pin goes down to the lowest point under its rim, so
-    // no silicone runs in under it and closes the hole.
+    // no silicone runs in under it and closes the hole; if the rim overhangs a
+    // cliff or hollow bore (drop > diaMm, or misses the master), keep the pin
+    // on the rim rather than plunging into a cup's floor, and warn on pour holes.
     let footZ = centreZ;
+    let overhangSamples = 0;
     for (let k = 0; k < 12; k++) {
       const a = (k / 12) * 2 * Math.PI;
       const z = topZAt(masterSoup, hx + (diaMm / 2) * Math.cos(a), hy + (diaMm / 2) * Math.sin(a));
-      if (z !== null) footZ = Math.min(footZ, z);
+      if (z === null || centreZ - z > diaMm) {
+        overhangSamples++;
+      } else {
+        footZ = Math.min(footZ, z);
+      }
     }
     hole = {
       footMm: [hx, hy, footZ - 0.5],
@@ -657,6 +664,12 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
     };
     if (o.hole === 'pour' && diaMm < MIN_POUR_HOLE_MM) {
       warnings.push(`Pour hole diameter (${diaMm} mm) is below the ${MIN_POUR_HOLE_MM} mm minimum.`);
+    }
+    if (o.hole === 'pour' && overhangSamples > 0) {
+      warnings.push(
+        `The ⌀${diaMm} mm pour hole at (${hx.toFixed(1)}, ${hy.toFixed(1)}) mm is wider than the narrow rim or ledge under it, ` +
+        `which pinches the pour opening or trims the rim: move hole_at_mm onto a wider face, or pour from the master's foot instead.`,
+      );
     }
     if (o.hole === 'pour') {
       // Resin poured through the hole fills the master's shape from the
