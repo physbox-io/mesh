@@ -160,3 +160,75 @@ export function sampleColumns(
   perTris.set(cacheKey, result);
   return result;
 }
+
+/**
+ * The part's upper and lower surface at any point of plan, not only on a
+ * grid: null where the point misses the part. For placing what the grid can
+ * only put somewhere in a cell - where a wall stands - to the model's own
+ * accuracy. Triangles are bucketed once, as `sampleColumns` does.
+ */
+export function columnProbe(
+  tris: Float64Array,
+  bounds: { minX: number; minY: number; maxX: number; maxY: number }
+): (x: number, y: number) => { top: number; bottom: number } | null {
+  const triCount = tris.length / 9;
+  // Each triangle goes only in the buckets it actually crosses, not every one
+  // its bounding box does: a cap fanned from its centre is slivers that each
+  // span the part, and by bounding box every bucket held a quarter of them.
+  const side = Math.max(1, Math.min(256, Math.round(Math.sqrt(triCount) * 2)));
+  const bw = (bounds.maxX - bounds.minX) / side || 1;
+  const bh = (bounds.maxY - bounds.minY) / side || 1;
+  const bucketCol = (x: number) => Math.min(side - 1, Math.max(0, Math.floor((x - bounds.minX) / bw)));
+  const bucketRow = (y: number) => Math.min(side - 1, Math.max(0, Math.floor((y - bounds.minY) / bh)));
+  const buckets: number[][] = Array.from({ length: side * side }, () => []);
+  /** Whether the triangle's plan crosses the box (separating axes: the box's two and the three edge normals). */
+  const crosses = (i: number, x0: number, y0: number, x1: number, y1: number) => {
+    const xs = [tris[i], tris[i + 3], tris[i + 6]], ys = [tris[i + 1], tris[i + 4], tris[i + 7]];
+    for (let e = 0; e < 3; e++) {
+      const ax = xs[e], ay = ys[e], bx = xs[(e + 1) % 3], by = ys[(e + 1) % 3], cx = xs[(e + 2) % 3], cy = ys[(e + 2) % 3];
+      const nx = ay - by, ny = bx - ax;
+      const side3 = nx * (cx - ax) + ny * (cy - ay);
+      const sign = side3 >= 0 ? 1 : -1;
+      // All four corners on the far side of this edge from the third vertex: apart.
+      let apart = true;
+      for (const [px, py] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) {
+        if (sign * (nx * (px - ax) + ny * (py - ay)) >= 0) { apart = false; break; }
+      }
+      if (apart) return false;
+    }
+    return true;
+  };
+  for (let t = 0; t < triCount; t++) {
+    const i = t * 9;
+    const xs = [tris[i], tris[i + 3], tris[i + 6]], ys = [tris[i + 1], tris[i + 4], tris[i + 7]];
+    if (Math.max(...xs) < bounds.minX || Math.min(...xs) > bounds.maxX) continue;
+    if (Math.max(...ys) < bounds.minY || Math.min(...ys) > bounds.maxY) continue;
+    // A vertical face has no plan area and no ray hits it.
+    if ((xs[2] - xs[0]) * (ys[1] - ys[0]) - (xs[1] - xs[0]) * (ys[2] - ys[0]) === 0) continue;
+    for (let r = bucketRow(Math.min(...ys)); r <= bucketRow(Math.max(...ys)); r++) {
+      for (let c = bucketCol(Math.min(...xs)); c <= bucketCol(Math.max(...xs)); c++) {
+        const x0 = bounds.minX + c * bw, y0 = bounds.minY + r * bh;
+        if (crosses(i, x0 - 1e-9, y0 - 1e-9, x0 + bw + 1e-9, y0 + bh + 1e-9)) buckets[r * side + c].push(i);
+      }
+    }
+  }
+  return (px, py) => {
+    if (px < bounds.minX || px > bounds.maxX || py < bounds.minY || py > bounds.maxY) return null;
+    let top = -Infinity, bottom = Infinity;
+    for (const i of buckets[bucketRow(py) * side + bucketCol(px)]) {
+      const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+      const v0x = tris[i + 6] - ax, v0y = tris[i + 7] - ay;
+      const v1x = tris[i + 3] - ax, v1y = tris[i + 4] - ay;
+      const v2x = px - ax, v2y = py - ay;
+      const den = v0x * v1y - v1x * v0y;
+      if (den === 0) continue;
+      const u = (v2x * v1y - v1x * v2y) / den;
+      const v = (v0x * v2y - v2x * v0y) / den;
+      if (u < 0 || v < 0 || u + v > 1) continue;
+      const z = az + u * (tris[i + 8] - az) + v * (tris[i + 5] - az);
+      if (z > top) top = z;
+      if (z < bottom) bottom = z;
+    }
+    return top === -Infinity ? null : { top, bottom };
+  };
+}

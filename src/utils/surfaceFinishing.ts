@@ -21,6 +21,7 @@ import {
 } from './reliefPaths';
 import { MAX_REACH_DIAMETERS, describeCutter } from './reliefTooling';
 import { bodyHold } from './bodyHold';
+import { exactWalls } from './exactWalls';
 import { FLAT_PROFILE, ballProfile, vProfile } from './stockModel';
 import { bodyFor, centreWindow, type SurfaceJob } from './surfaceJob';
 import { finishingCutter } from './surfaceToolingWarnings';
@@ -95,6 +96,10 @@ export function finishSurface(
     }
     return { x: p.x, y: p.y, z: Math.max(level, finishTipAt(p.x, p.y)) };
   };
+
+  // Where the job knows the surface exactly, a flat bit's waterlines go on
+  // the walls themselves (see `exactWalls`).
+  const exact = opts.finishingToolType === 'flat' ? exactWalls(job, finishRad, passRect) : null;
 
   // How much of the ${noun} the tool's own body puts out of reach. Left silent
   // this reads as a carve that simply came out shallow, so it is measured
@@ -291,14 +296,39 @@ export function finishSurface(
     for (const pt of plan) if (scrapWall(pt, level)) n++;
     return n > plan.length / 2;
   };
+  /*
+   * A pass point's height. Off the samples the dilated grid is a bilinear,
+   * and across a wall's cell that runs the cutter half way down the wall: a
+   * raster row between two sample rows went 0.27 mm into a 30 mm cylinder
+   * and 0.46 mm into the corners of a square. In a wall's cell the cutter is
+   * read under itself instead, as a waterline's is, and on the model itself
+   * where the job has it.
+   */
+  const passZ = (pt: { x: number; y: number }) => {
+    const z = sampleHeightmap(finishMap, pt.x, pt.y);
+    // Scrap's walls nobody keeps (see `scrapWall`).
+    if (!inWallCell(pt.x, pt.y) || job.scrap?.(pt.x, pt.y)) return z;
+    return Math.max(z, finishTipAt(pt.x, pt.y), exact ? exact.faceTop(pt.x, pt.y, true) : -Infinity);
+  };
+  /** Up the dilated grid's slope at a point, as a unit vector. */
+  const uphill = (p: { x: number; y: number }) => {
+    const gx = sampleHeightmap(finishMap, p.x + res / 2, p.y) - sampleHeightmap(finishMap, p.x - res / 2, p.y);
+    const gy = sampleHeightmap(finishMap, p.x, p.y + res / 2) - sampleHeightmap(finishMap, p.x, p.y - res / 2);
+    const g = Math.hypot(gx, gy);
+    return g > 1e-9 ? { x: gx / g, y: gy / g } : undefined;
+  };
+  const mended = (plan: { x: number; y: number }[], points: PathPoint[]) => {
+    const level = plan.length > 0 ? waterlineLevel(plan[0]) : undefined;
+    return exact && level !== undefined ? exact.mend(points, level) : points;
+  };
   const placed = planGroups.map((group) => group.map((plan) => onScrapWall(plan)
     ? plan.map((pt) => ({ x: pt.x, y: pt.y, z: 0 }))
-    : plan.map((pt) => {
+    : mended(plan, plan.map((pt) => {
       const level = waterlineLevel(pt);
       return level === undefined
-        ? { x: pt.x, y: pt.y, z: sampleHeightmap(finishMap, pt.x, pt.y) }
-        : holdOffWall(pt, level);
-    })));
+        ? { x: pt.x, y: pt.y, z: passZ(pt) }
+        : exact && inWallCell(pt.x, pt.y) ? exact.onWall(pt, level, uphill(pt)) ?? exact.settle(holdOffWall(pt, level)) : holdOffWall(pt, level);
+    }))));
   // The level each pass was traced at, where it is a waterline.
   const placedLevels = planGroups.map((group) => group.map((plan) =>
     plan.length > 0 ? waterlineLevel(plan[0]) : undefined));

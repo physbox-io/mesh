@@ -39,7 +39,7 @@ import {
 import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
 import { ORIENT_MATRIX, orient, type BlockFace, type UpAxis } from './orient';
 import { generateSetups, sidesAsSetups, type SetupPlanSummary, type SolidSetupResult } from './solidSetups';
-import { sampleColumns } from './partColumns';
+import { columnProbe, sampleColumns } from './partColumns';
 import { distanceTransform } from './distanceTransform';
 
 export type { UpAxis };
@@ -1076,6 +1076,7 @@ function generateSolidSides(
   const stepY = rows > 1 ? stockD / (rows - 1) : res;
 
   const { top, bottom, thickness, hit } = sampleColumns(tris, bounds, cols, rows);
+  const probe = columnProbe(tris, bounds);
 
   // What is round the part: the channel, the frame beyond it, and any hole
   // the part encloses.
@@ -1436,6 +1437,13 @@ function generateSolidSides(
       const src = side === 'A' ? r * cols + c : r * cols + (cols - 1 - c);
       return (moatMask[src] === 1 || frameMask[src] === 1) && !tabs.mask[src] && dist[src] > scrapBeyond;
     };
+    // The part's own faces between the samples, so its walls are finished
+    // where they stand rather than somewhere in the cell they were sampled in.
+    const exactAt = (px: number, py: number) => {
+      const at = probe(side === 'A' ? px : stockW - px, py);
+      if (!at) return NaN;
+      return Math.min(0, Math.max(-stockT, side === 'A' ? at.top : -stockT - at.bottom));
+    };
     const sideNotches = side === 'A' ? (opts.datumNotches ?? []) : [];
     const runOff = {
       minX: flush.has(side === 'A' ? '-x' : '+x') || sideNotches.some((n) => n.x0 <= 1e-6),
@@ -1446,7 +1454,7 @@ function generateSolidSides(
     const hasRunOff = runOff.minX || runOff.maxX || runOff.minY || runOff.maxY;
     const cut = machineSurface(
       {
-        surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut', touchOff, scrap,
+        surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut', touchOff, scrap, exactAt,
         // Until the channel is down to its floor, the part is not free of the block.
         ...(channel ? { mustReachMm: depthA } : {}),
         // Off a flush side or datum notch corner, as the relief runs off an open edge.

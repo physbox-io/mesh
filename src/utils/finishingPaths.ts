@@ -460,6 +460,31 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
     levels.push(Math.max(level, floorZ + 1e-6));
     if (level <= floorZ + 1e-6) break;
   }
+  /*
+   * ...and a level of its own just above every flat floor a flat bit stands
+   * on. A wall's foot is otherwise finished only by the waterline above it,
+   * whose side stops at its end, and by the floor's passes, which stop where
+   * the samples say the wall begins: a pocket's walls came out a millimetre
+   * proud over the bottom 2.7 mm. A floor counts once it is as big as the
+   * bit's own end.
+   */
+  if (input.flatWallMm && input.flatWallMm > step) {
+    const cellArea = Math.max(1e-9, (surface.stepX || 1) * (surface.stepY || 1));
+    const enough = Math.max(4, (Math.PI * (input.flatWallMm / 4) ** 2) / cellArea);
+    const counts = new Map<number, number>();
+    for (const v of surface.z) {
+      if (v < -1e-3 && v > floorZ + 1e-3) {
+        const k = Math.round(v * 1e4);
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+      }
+    }
+    const floors = [...counts].filter(([, n]) => n >= enough).map(([k]) => k / 1e4 + 1e-4);
+    if (floors.length > 0) {
+      const all = [...levels.filter((l) => !floors.some((f) => Math.abs(l - f) < 1e-3)), ...floors];
+      levels.length = 0;
+      levels.push(...all.sort((a, b) => b - a));
+    }
+  }
   let keep = levels.map(() => true);
   if (input.flatWallMm && input.flatWallMm > step) {
     const z = surface.z;

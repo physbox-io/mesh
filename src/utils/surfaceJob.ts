@@ -49,6 +49,13 @@ export interface SurfaceJob {
    */
   scrap?: (x: number, y: number) => boolean;
   /**
+   * The finished surface at any point where it is known more finely than the
+   * samples - a solid part's own faces - and NaN elsewhere. A waterline down
+   * a wall is put against it rather than half way across the cell the wall
+   * was sampled in (see `finishSurface`).
+   */
+  exactAt?: (x: number, y: number) => number;
+  /**
    * What the stock model cannot know when a spot is chosen to zero the new bit
    * on: the whole top face where `bounds` is only a window of it, and where
    * that face is gone, to pin bores or to setups that ran before this one.
