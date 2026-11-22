@@ -1094,11 +1094,28 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       const xUp = x0.map((q, i) => (i < nShell ? liftW(q, hang[i] ?? 0) : q));
       const shellUp = shell.points.map((p, i) => [p[0], p[1], p[2] + (hang[i] ?? 0)]);
       const letDown = (pieces: AddOnPiece[]) => {
-        for (const piece of pieces) piece.start = piece.start.map((q) => {
-          let best = 0, bd = Infinity;
-          for (let i = 0; i < nShell; i++) { const d = (xUp[i][0] - q[0]) ** 2 + (xUp[i][1] - q[1]) ** 2 + (xUp[i][2] - q[2]) ** 2; if (d < bd) { bd = d; best = i; } }
-          return liftW(q, -(hang[best] ?? 0));
-        });
+        for (const piece of pieces) {
+          const withLoc = piece as AddOnPiece & { loc?: (i: number, j: number) => number };
+          const rowsPerCol = withLoc.loc ? withLoc.loc(1, 0) - withLoc.loc(0, 0) : 0;
+          if (rowsPerCol > 1 && piece.start.length % rowsPerCol === 0) {
+            const mCols = piece.start.length / rowsPerCol;
+            const out: number[][] = new Array(piece.start.length);
+            for (let c = 0; c < mCols; c++) {
+              const q0 = piece.start[c * rowsPerCol];
+              let best = 0, bd = Infinity;
+              for (let i = 0; i < nShell; i++) { const d = (xUp[i][0] - q0[0]) ** 2 + (xUp[i][1] - q0[1]) ** 2 + (xUp[i][2] - q0[2]) ** 2; if (d < bd) { bd = d; best = i; } }
+              const h0 = hang[best] ?? 0;
+              for (let r = 0; r < rowsPerCol; r++) out[c * rowsPerCol + r] = liftW(piece.start[c * rowsPerCol + r], -h0);
+            }
+            piece.start = out;
+            continue;
+          }
+          piece.start = piece.start.map((q) => {
+            let best = 0, bd = Infinity;
+            for (let i = 0; i < nShell; i++) { const d = (xUp[i][0] - q[0]) ** 2 + (xUp[i][1] - q[1]) ** 2 + (xUp[i][2] - q[2]) ** 2; if (d < bd) { bd = d; best = i; } }
+            return liftW(q, -(hang[best] ?? 0));
+          });
+        }
       };
       const lapels = settings.lapels && settings.opening ? lapelPieces(settings.lapels, chainLineRuns(shell.edges, 'roll').map((r) => r.run), hostPanels, wornPanels, xUp, spacing) : [];
       for (const l of lapels) { l.piece.rgba = colour; addOns.push(l.piece); }

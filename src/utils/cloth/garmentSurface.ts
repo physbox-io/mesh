@@ -367,7 +367,18 @@ export function healFlatTriangles(points: number[][], tris: number[], minArea: n
   for (let pass = 0; pass < 4; pass++) {
     // Directed edges to their triangle, for finding the neighbour across one.
     const byEdge = new Map<string, number>();
-    for (let t = 0; t < out.length; t += 3) for (let e = 0; e < 3; e++) byEdge.set(`${out[t + e]},${out[t + ((e + 1) % 3)]}`, t);
+    const undirected = new Set<string>();
+    for (let t = 0; t < out.length; t += 3) for (let e = 0; e < 3; e++) {
+      const u = out[t + e], v = out[t + ((e + 1) % 3)];
+      byEdge.set(`${u},${v}`, t);
+      undirected.add(keyOf(u, v));
+    }
+    const normalOf = (i0: number, i1: number, i2: number) => {
+      const p = points[i0], q = points[i1], r = points[i2];
+      const ux = q[0] - p[0], uy = q[1] - p[1], uz = q[2] - p[2];
+      const vx = r[0] - p[0], vy = r[1] - p[1], vz = r[2] - p[2];
+      return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
+    };
     const gone = new Set<number>();
     const touched = new Set<number>();
     let changed = false;
@@ -384,16 +395,22 @@ export function healFlatTriangles(points: number[][], tris: number[], minArea: n
         gone.add(t); changed = true;
         continue;
       }
-      // The point between the other two lies on their edge: the neighbour across it takes it in.
+      // The point between the other two lies on their edge: the neighbour across it takes it in,
+      // provided b-d does not already exist (which would create a 4-face non-manifold edge) and
+      // neither replacement triangle flips the neighbour's outward normal.
       const longest = ls.indexOf(Math.max(...ls));
       const a = tri[longest], c = tri[(longest + 1) % 3], b = tri[(longest + 2) % 3];
       const n = byEdge.get(`${c},${a}`);
       if (n === undefined || gone.has(n) || touched.has(n)) continue;
       const ntri = [out[n], out[n + 1], out[n + 2]];
       const d = ntri.find((id) => id !== a && id !== c)!;
+      if (b === d || undirected.has(keyOf(b, d))) continue;
+      const n0 = normalOf(c, a, d), n1 = normalOf(c, b, d), n2 = normalOf(b, a, d);
+      if (n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2] <= 0 || n0[0] * n2[0] + n0[1] * n2[1] + n0[2] * n2[2] <= 0) continue;
       // (c, a, d) becomes (c, b, d) and (b, a, d), keeping the winding.
       out[n] = c; out[n + 1] = b; out[n + 2] = d;
       out.push(b, a, d);
+      undirected.add(keyOf(b, d));
       touched.add(n);
       split.set(keyOf(a, c), b);
       gone.add(t); changed = true;

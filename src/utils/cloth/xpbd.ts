@@ -160,7 +160,8 @@ export class ClothSim {
   private edges: Int32Array; private edgeRest: Float64Array; private edgeMin: Float64Array; private edgeAlpha: Float64Array; private edgeLambda: Float64Array;
   private elastics: Int32Array; private elasticFlat: Float64Array; private elasticRest: Float64Array; private elasticAlpha: Float64Array; private elasticLambda: Float64Array;
   private boards: BoardShapes;
-  private grabbed = -1; private grabW = 0; private grabTo: number[] | null = null;
+  private grabbed = -1; private grabTo: number[] | null = null;
+  private grabPatch: { p: number; origW: number; wt: number }[] = [];
   private bends: Int32Array; private bendWeights: Float64Array; private bendAlpha: Float64Array; private bendRest: Float64Array; private bendSign: Int8Array;
   /** Each bend's Lagrange multiplier over a substep's passes (XPBD), so passes converge on its compliance instead of each adding its own correction. */
   private bendLambda: Float64Array;
@@ -1123,8 +1124,12 @@ export class ClothSim {
     if (this.grabbed >= 0 && this.grabTo) {
       const k = 3 * this.grabbed, dx = this.grabTo[0] - x[k], dy = this.grabTo[1] - x[k + 1], dz = this.grabTo[2] - x[k + 2];
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz), step = Math.min(1, (GRAB_SPEED * h) / Math.max(d, 1e-12));
-      x[k] += dx * step; x[k + 1] += dy * step; x[k + 2] += dz * step;
-      v[k] = v[k + 1] = v[k + 2] = 0;
+      for (let gi = 0; gi < this.grabPatch.length; gi++) {
+        const gp = this.grabPatch[gi], gk = 3 * gp.p, s = step * gp.wt;
+        x[gk] += dx * s; x[gk + 1] += dy * s; x[gk + 2] += dz * s;
+        const keep = 1 - gp.wt;
+        v[gk] *= keep; v[gk + 1] *= keep; v[gk + 2] *= keep;
+      }
     }
     if (this.zips.length) this.runZips(h);
     // Predict.
@@ -1623,14 +1628,36 @@ export class ClothSim {
       }
     }
     if (particle !== this.grabbed) {
-      if (this.grabbed >= 0) {
+      if (this.grabPatch.length) {
         // Let go where it is, not flung by the last pull.
-        const k = 3 * this.grabbed;
-        this.w[this.grabbed] = this.grabW;
-        this.v[k] = this.v[k + 1] = this.v[k + 2] = 0;
+        for (const gp of this.grabPatch) {
+          const k = 3 * gp.p;
+          this.w[gp.p] = gp.origW;
+          this.v[k] = this.v[k + 1] = this.v[k + 2] = 0;
+        }
+        this.grabPatch = [];
       }
       this.grabbed = particle;
-      if (particle >= 0) { this.grabW = this.w[particle]; this.w[particle] = this.grabW / GRAB_HEAVY; }
+      if (particle >= 0 && this.w[particle] > 0) {
+        // Spread the finger pinch onto the immediate 1-ring edge neighbours so
+        // tugging stiff cloth does not concentrate all impulse on one vertex.
+        const patch = new Map<number, number>([[particle, 1]]);
+        for (let e = 0; e < this.edges.length; e += 2) {
+          const a = this.edges[e], b = this.edges[e + 1];
+          const q = a === particle ? b : b === particle ? a : -1;
+          if (q < 0 || !this.w[q]) continue;
+          const rest = this.edgeRest[e >> 1];
+          if (rest > 0.04) continue;
+          const wt = 0.55 * Math.max(0.35, 1 - rest / 0.05);
+          if (wt > (patch.get(q) ?? 0)) patch.set(q, wt);
+        }
+        for (const [p, wt] of patch) {
+          const origW = this.w[p];
+          const heavy = 1 + (GRAB_HEAVY - 1) * wt * wt;
+          this.w[p] = origW / heavy;
+          this.grabPatch.push({ p, origW, wt });
+        }
+      }
     }
     this.grabTo = particle >= 0 && to ? to.slice(0, 3) : null;
   }
@@ -2249,6 +2276,7 @@ export class ClothSim {
     zipWants?: ArrayLike<number>;
   }) {
     if (s.x.length !== this.x.length) return false;
+    this.grab(null, null);
     this.x.set(s.x); this.v.set(s.v); this.prev.set(s.x); this.time = s.time;
     this.accumulator = s.accumulator ?? 0;
     if (s.floatUntil && s.floatUntil.length === this.floatUntil.length) this.floatUntil.set(s.floatUntil);

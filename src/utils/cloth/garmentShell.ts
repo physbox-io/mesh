@@ -857,7 +857,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       const nZ = Math.max(2, Math.ceil((zMax - zMin) / DZ) + 1);
       const env = new Float64Array(nZ * N_ANG);
       const cyHip = centreY(L.hipZ);
-      const clear = Math.max(0.022, rest + 0.016);
+      const clear = Math.max(0.026, rest + 0.020);
       for (const lpts of legGeoms) {
         for (const lp of lpts) {
           if (lp[2] < zMin - 0.03 || lp[2] > zMax + 0.03) continue;

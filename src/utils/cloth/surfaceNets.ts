@@ -54,6 +54,63 @@ export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: numbe
       quad(cellId[cid(i - 1, j - 1, k)], cellId[cid(i, j - 1, k)], cellId[cid(i, j, k)], cellId[cid(i - 1, j, k)], f0 >= 0);
     }
   }
+  // Resolve checkerboard saddle pinches (edges shared by >2 triangles where a 2x2 face
+  // has diagonal signs): collapse (a, b) to its midpoint whenever the combined link
+  // forms a single manifold fan, eliminating microscopic non-manifold Z-folds before relax.
+  {
+    const nP = points.length;
+    const edgeCount = new Map<number, number>();
+    for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) {
+      const a = tris[t + e], b = tris[t + ((e + 1) % 3)], key = a < b ? a * nP + b : b * nP + a;
+      edgeCount.set(key, (edgeCount.get(key) ?? 0) + 1);
+    }
+    const pinch: [number, number][] = [];
+    for (const [key, cnt] of edgeCount) if (cnt > 2) pinch.push([Math.floor(key / nP), key % nP]);
+    if (pinch.length > 0) {
+      const vt: number[][] = points.map(() => []);
+      for (let t = 0; t < tris.length; t += 3) { vt[tris[t]].push(t); vt[tris[t + 1]].push(t); vt[tris[t + 2]].push(t); }
+      const parent = Array.from({ length: nP }, (_, i) => i);
+      const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+      for (const [ra, rb] of pinch) {
+        const a = find(ra), b = find(rb);
+        if (a === b) continue;
+        const star = new Set<number>([...vt[a], ...vt[b]]);
+        const next = new Map<number, number>(), prev = new Map<number, number>();
+        let manifold = true, links = 0;
+        for (const t of star) {
+          const i0 = find(tris[t]), i1 = find(tris[t + 1]), i2 = find(tris[t + 2]);
+          const m0 = i0 === a || i0 === b, m1 = i1 === a || i1 === b, m2 = i2 === a || i2 === b;
+          const mc = (m0 ? 1 : 0) + (m1 ? 1 : 0) + (m2 ? 1 : 0);
+          if (mc >= 2) continue;
+          const [u, v] = m0 ? [i1, i2] : m1 ? [i2, i0] : [i0, i1];
+          if (u === v || next.has(u) || prev.has(v)) { manifold = false; break; }
+          next.set(u, v); prev.set(v, u); links++;
+        }
+        if (!manifold || links === 0) continue;
+        // Verify all link edges form a single connected cycle or chain around the merged vertex.
+        let start = next.keys().next().value!;
+        for (let guard = 0; guard <= links && prev.has(start); guard++) {
+          const p = prev.get(start)!;
+          if (p === next.keys().next().value) break;
+          start = p;
+        }
+        let walked = 0, cur: number | undefined = start;
+        const seen = new Set<number>();
+        while (cur !== undefined && !seen.has(cur)) { seen.add(cur); cur = next.get(cur); if (cur !== undefined) walked++; }
+        if (seen.size < next.size && walked < links) continue;
+        points[a] = [(points[a][0] + points[b][0]) / 2, (points[a][1] + points[b][1]) / 2, (points[a][2] + points[b][2]) / 2];
+        parent[b] = a;
+        for (const t of vt[b]) if (!star.has(t) || !vt[a].includes(t)) vt[a].push(t);
+      }
+      const clean: number[] = [];
+      for (let t = 0; t < tris.length; t += 3) {
+        const a = find(tris[t]), b = find(tris[t + 1]), c = find(tris[t + 2]);
+        if (a !== b && b !== c && a !== c) clean.push(a, b, c);
+      }
+      tris.length = 0;
+      for (let i = 0; i < clean.length; i++) tris.push(clean[i]);
+    }
+  }
   // Even it out: each point toward its neighbours' mean, along the surface, then back onto it.
   const nbr: number[][] = points.map(() => []);
   for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) {

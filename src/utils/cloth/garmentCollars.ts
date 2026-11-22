@@ -506,6 +506,17 @@ export function collarPieces(collar: GarmentCollar, run0: number[], closed: bool
     const nP = onSurface(p).n;
     let away = unit(cross(nP, t));
     if (dot(away, offNeck(i) ?? sub(rhat, [0, 0, 1])) < 0) away = away.map((v) => -v);
+    // Along a sloped gorge (or the neckline corner turning onto it) on a folded
+    // collar, perpendicular-to-gorge points uphill onto the shoulder: keep the
+    // fall headed slightly downward so it folds below the roll line without
+    // turning down into the lapel.
+    if (!shawl && h > 0 && F > 0 && away[2] > -0.15) {
+      const horiz = Math.max(1e-6, Math.hypot(away[0], away[1]));
+      const k = Math.sqrt(1 - 0.15 * 0.15) / horiz;
+      const d = [away[0] * k, away[1] * k, -0.15];
+      const proj = sub(d, nP.map((v) => v * dot(d, nP)));
+      if (len(proj) > 1e-6) away = unit(proj);
+    }
     // The stand's outside: the side the fall comes down on, toward where it
     // then lies over the garment. (Taken as away from the neck's axis, it was
     // a guess along a gorge, which runs out from the neck: the stand there
@@ -612,7 +623,7 @@ export function collarPieces(collar: GarmentCollar, run0: number[], closed: bool
       // Over a lapel, a layer further off.
       const overLapel = lapelPts.some((q) => len(sub(q, w)) < 1.5 * ctx.spacing);
       const { tack, at } = nearestTack(w, ctx.tris, ctx.x, ctx.worldNormal, overLapel ? 2 * LAYER_OFF : LAYER_OFF, true, l);
-      if (overLapel) start[l] = at;
+      if (overLapel || !shawl) start[l] = at;
       tacks.push(tack);
     }
     const m = i1 - i0 + 1;

@@ -216,7 +216,7 @@ function lscm(n: number, tris: number[], frames: { p: V2[]; area: number }[], pi
  * rotation of its true shape onto the current layout, then the layout that
  * best fits those rotated triangles (a cotangent Laplacian, solved by CG).
  */
-function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], init: V2[], iters: number, eased: EasedTri[] = []): V2[] {
+function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], init: V2[], iters: number, eased: EasedTri[] = [], slitEdge?: (va: number, vb: number) => boolean): V2[] {
   const uv = init.map((q) => [q[0], q[1]] as V2);
   const frames0 = eased.length ? frames.map((f) => f.p.map((q) => [q[0], q[1]] as V2)) : [];
   // Edge opposite corner j of triangle t (between corners j+1 and j+2), its cotangent weight, flat.
@@ -229,8 +229,9 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
       const a = p[j], b = p[(j + 1) % 3], c = p[(j + 2) % 3];
       const ux = b[0] - a[0], uy = b[1] - a[1], vx = c[0] - a[0], vy = c[1] - a[1];
       const cr = Math.abs(ux * vy - uy * vx) || 1e-12;
-      const w = Math.max(1e-6, (ux * vx + uy * vy) / cr) * 0.5;
       const va = tris[3 * t + ((j + 1) % 3)], vb = tris[3 * t + ((j + 2) % 3)];
+      const boost = slitEdge?.(va, vb) ? 3.5 : 1;
+      const w = Math.max(1e-6, (ux * vx + uy * vy) / cr) * 0.5 * boost;
       ea[3 * t + j] = va;
       eb[3 * t + j] = vb;
       ew[3 * t + j] = w;
@@ -431,7 +432,23 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   }
   const easeOf = new Map(eased.map((et) => [et.t, et]));
   const frames3 = eased.length ? frames.map((f) => ({ p: f.p.map((q) => [q[0], q[1]] as V2), area: f.area })) : frames;
-  uv = arap(P.length, tris, frames3, uv, arapIters, eased);
+  // Edges where the piece was slit open along an internal seam or dart (both sides
+  // in this piece, sharing shell endpoints) sew back to each other, so keep both
+  // sides true to their shared 3D length.
+  const shellEdgeCount = new Map<number, number>();
+  for (let t = 0; t < tris.length; t += 3) for (let e = 0; e < 3; e++) {
+    const ga = points[tris[t + e]], gb = points[tris[t + ((e + 1) % 3)]];
+    const k = ga < gb ? ga * n0 + gb : gb * n0 + ga;
+    if (seams.has(k)) shellEdgeCount.set(k, (shellEdgeCount.get(k) ?? 0) + 1);
+  }
+  const isSlitEdge = shellEdgeCount.size
+    ? (va: number, vb: number) => {
+        const ga = points[va], gb = points[vb];
+        const k = ga < gb ? ga * n0 + gb : gb * n0 + ga;
+        return (shellEdgeCount.get(k) ?? 0) >= 2;
+      }
+    : undefined;
+  uv = arap(P.length, tris, frames3, uv, arapIters, eased, isSlitEdge);
   const outline = outlineOf(P.length, tris);
   // Fair smooth runs of the 2D outline between corners (Taubin lambda/mu
   // filter, which removes alternating triangle-split sawtooth noise without

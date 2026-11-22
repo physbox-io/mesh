@@ -56,8 +56,10 @@ export function addRod(out: RodConstraints, run: number[], closed: boolean, link
     mass[run[a]] += (kind.density * l) / 2;
     mass[run[b]] += (kind.density * l) / 2;
   }
-  for (const hop of [1, 2]) {
-    if (!closed && n < 2 * hop + 1) continue;
+  // Multigrid spans (1, 2, 4, 8 links) so a 100+ particle hoop converges against
+  // long-wavelength ovalization within the solver's passes per substep.
+  for (const hop of [1, 2, 4, 8]) {
+    if (closed ? n < 4 * hop : n < 2 * hop + 1) continue;
     const from = closed ? 0 : hop, to = closed ? n : n - hop;
     for (let i = from; i < to; i++) {
       const a = wrap(i - hop), b = wrap(i), c = wrap(i + hop);
