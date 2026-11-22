@@ -6,8 +6,9 @@
 // overlay, the header and the close button are here, so the four kinds of
 // mold can share one dialog and swap panels under one row of tabs.
 
-import React from 'react';
+import React, { useId, useRef } from 'react';
 import { X } from 'lucide-react';
+import { useDialogA11y } from '../../hooks/useDialogA11y';
 
 export function CastDialogFrame({
   icon, iconClass, title, subtitle, onClose, width = 'max-w-5xl', height = 'max-h-[95dvh]', tabs, children,
@@ -29,16 +30,30 @@ export function CastDialogFrame({
   /** A PanelBody and a PanelFooter. */
   children: React.ReactNode;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialogA11y(dialogRef, true);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className={`bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full ${width} ${height} flex flex-col overflow-hidden text-slate-800 dark:text-slate-100`}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200"
+      onClick={onClose}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        className={`bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full ${width} ${height} flex flex-col overflow-hidden text-slate-800 dark:text-slate-100`}
+      >
         <div className="shrink-0 flex items-center justify-between gap-3 px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50">
           <div className="flex items-center gap-3 min-w-0">
             <div className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center text-white shadow-md ${iconClass}`}>
               {icon}
             </div>
             <div className="min-w-0">
-              <h3 className="font-bold text-base">{title}</h3>
+              <h2 id={titleId} className="font-bold text-base">{title}</h2>
               {subtitle && <p className="text-xs text-slate-500 dark:text-slate-400 truncate">{subtitle}</p>}
             </div>
           </div>

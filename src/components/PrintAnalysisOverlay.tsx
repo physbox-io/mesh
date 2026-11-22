@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Html, Line } from '@react-three/drei';
 import { useStore } from '../store/useStore';
 import { type WeakSpot } from '../utils/printAnalysis';
@@ -18,27 +18,38 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
   // Driven by the DFM lens now: the markers are the same structural findings,
   // shown whenever a manufacturing check is open.
   const printAnalysisEnabled = useStore(state => state.dfmEnabled);
+  const printBed = useStore(state => state.printBed);
+  const machineTarget = useStore(state => state.machineTarget);
   const setSelectedNodeId = useStore(state => state.setSelectedNodeId);
 
   const [hoveredSpot, setHoveredSpot] = useState<WeakSpot | null>(null);
+
+  useEffect(() => {
+    if (!printAnalysisEnabled) setHoveredSpot(null);
+  }, [printAnalysisEnabled]);
 
   const weakSpots = useStructuralWeakSpots(sceneGraph, printAnalysisEnabled);
 
   if (!printAnalysisEnabled || !weakSpots) return null;
 
+  const bedW = (printBed?.widthMm || 220) / 1000;
+  const bedD = (printBed?.depthMm || 220) / 1000;
+
   return (
     <group name="print-analysis-overlay" renderOrder={999}>
-      {/* 3D Print Build Plate Reference Grid Footprint (220mm x 220mm at ground plane Z=0) */}
-      <mesh position={[0, 0, 0.001]}>
-        <planeGeometry args={[0.22, 0.22]} />
-        <meshBasicMaterial
-          color="#3b82f6"
-          wireframe
-          transparent
-          opacity={0.15}
-          depthWrite={false}
-        />
-      </mesh>
+      {/* 3D Print Build Plate Reference Grid Footprint (only for 3D printing) */}
+      {machineTarget === 'fdm' && (
+        <mesh position={[0, 0, 0.001]}>
+          <planeGeometry args={[bedW, bedD]} />
+          <meshBasicMaterial
+            color="#3b82f6"
+            wireframe
+            transparent
+            opacity={0.15}
+            depthWrite={false}
+          />
+        </mesh>
+      )}
 
       {/* Weak Spot 3D Markers with Anchored Surface Pins & Leader Lines */}
       {weakSpots.map((spot) => {
@@ -124,7 +135,7 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
                   center
                   style={{ pointerEvents: 'none', transition: 'all 0.15s ease-out' }}
                 >
-                  <div className="w-64 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 text-white rounded-xl shadow-2xl p-3 z-50 text-left pointer-events-auto select-none">
+                  <div className={`w-64 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 text-white rounded-xl shadow-2xl p-3 z-50 text-left select-none ${isActive ? 'pointer-events-auto' : 'pointer-events-none'}`}>
                     <div className="flex items-center justify-between gap-1.5 mb-1.5 border-b border-slate-800 pb-1.5">
                       <div className="flex items-center gap-1.5 truncate">
                         {spot.severity === 'critical' && <AlertOctagon className="w-4 h-4 text-red-400 shrink-0" />}
@@ -132,17 +143,20 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
                         {spot.severity === 'info' && <Info className="w-4 h-4 text-blue-400 shrink-0" />}
                         <div className="text-xs font-bold truncate text-slate-100">{spot.title}</div>
                       </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (onSelectSpot) onSelectSpot(null);
-                          setHoveredSpot(null);
-                        }}
-                        className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
-                        title="Close alert"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
+                      {isActive && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onSelectSpot) onSelectSpot(null);
+                            setHoveredSpot(null);
+                          }}
+                          className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
+                          title="Close alert"
+                          aria-label="Close alert"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
 
                     <div className="text-[11px] text-slate-300 mb-2 leading-relaxed">

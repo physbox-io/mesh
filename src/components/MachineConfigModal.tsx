@@ -363,6 +363,7 @@ export const MachineConfigModal: React.FC<{
                   onClick={() => void webSerialManager.refreshMachineSettings()}
                   disabled={!settingsReadable(machineState)}
                   title="Ask the controller for its $$ settings again"
+                  aria-label="Refresh GRBL settings"
                   className="ml-auto p-1 rounded-lg text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
@@ -379,23 +380,29 @@ export const MachineConfigModal: React.FC<{
               <label htmlFor="spindle-max-override" className="text-xs font-semibold">
                 Spindle top speed
               </label>
-              <NumberInput
-                id="spindle-max-override"
-                integer
-                allowEmpty
-                min={1000}
-                max={100000}
-                step={1000}
-                value={spindleMax}
-                placeholder={String(machineState.grblSettings[30] ?? DEFAULT_SPINDLE_RANGE.max)}
-                onChange={(v) => {
-                  spindleMaxRef.current = v;
-                  setSpindleMax(v);
+              <div
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLElement).blur();
                 }}
-                onCommit={() => commitSpindleMax(spindleMaxRef.current)}
-                className="w-24 px-2 py-1 rounded-lg text-xs font-mono bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
-                aria-label="Spindle top speed in RPM"
-              />
+              >
+                <NumberInput
+                  id="spindle-max-override"
+                  integer
+                  allowEmpty
+                  min={1000}
+                  max={100000}
+                  step={1000}
+                  value={spindleMax}
+                  placeholder={String(machineState.grblSettings[30] ?? DEFAULT_SPINDLE_RANGE.max)}
+                  onChange={(v) => {
+                    spindleMaxRef.current = v;
+                    setSpindleMax(v);
+                  }}
+                  onCommit={() => commitSpindleMax(spindleMaxRef.current)}
+                  className="w-24 px-2 py-1 rounded-lg text-xs font-mono bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+                  aria-label="Spindle top speed in RPM"
+                />
+              </div>
               <span className="text-xs text-slate-500">RPM</span>
               {spindleMax !== undefined && (
                 <button

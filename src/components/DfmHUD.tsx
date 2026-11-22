@@ -212,6 +212,10 @@ export function DfmHUD() {
             nothing is selected and the whole gear train gets measured. */}
         <span className="truncate text-xs font-semibold text-slate-700 dark:text-slate-300">
           DFM: {selectedName ?? 'whole scene'}
+          {lens && !report && (
+            <p className="py-1 text-xs italic text-slate-400 dark:text-slate-500">Analyzing…</p>
+          )}
+
           {lens && report && (
             <> · {PROCESS_LABEL[lens]} in {lens === 'print' ? filamentSpec(filament).label : materialSpec(material).label}</>
           )}
@@ -224,6 +228,7 @@ export function DfmHUD() {
             onClick={() => setPanel({ minimized: !panel.minimized })}
             className="rounded p-0.5 transition-colors hover:bg-slate-200 dark:hover:bg-slate-800"
             title={panel.minimized ? 'Expand' : 'Minimize'}
+            aria-label={panel.minimized ? 'Expand DFM panel' : 'Minimize DFM panel'}
           >
             {panel.minimized
               ? <ChevronDown className="h-3 w-3 text-slate-500 dark:text-slate-400" />
@@ -233,6 +238,7 @@ export function DfmHUD() {
             onClick={() => setDfmEnabled(false)}
             className="rounded p-0.5 transition-colors hover:bg-red-100 dark:hover:bg-red-950/40"
             title="Close"
+            aria-label="Close DFM panel"
           >
             <X className="h-3 w-3 text-slate-500 hover:text-red-500 dark:text-slate-400" />
           </button>
@@ -252,6 +258,10 @@ export function DfmHUD() {
             <p className="py-1 text-xs text-slate-500 dark:text-slate-400">
               DFM covers the printer and the router. There is no laser check yet.
             </p>
+          )}
+
+          {lens && !report && (
+            <p className="py-1 text-xs italic text-slate-400 dark:text-slate-500">Analyzing…</p>
           )}
 
           {lens && report && (

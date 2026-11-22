@@ -34,7 +34,7 @@
 //   not happen.
 // ---------------------------------------------------------------------------
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Circle, Square, Donut, Trash2, Move, RotateCw } from 'lucide-react';
 import { SettledNumberField } from './SettledInputs';
 import { ThreadField } from './ThreadField';
@@ -90,6 +90,7 @@ function CutRow({ node, geom, index }: {
   const setFaceFeatureBorder = useStore((s) => s.setFaceFeatureBorder);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const spot = useStore((s) => s.cutSpot);
+  const latticeActive = useStore((s) => !!s.latticeNodeId);
 
   const through = !(geom.cutDepth && geom.cutDepth > 0);
   const size = geom.size || [];
@@ -127,8 +128,11 @@ function CutRow({ node, geom, index }: {
         <button
           type="button"
           onClick={grab}
-          title="Slide this cut across the part. Click to put it down, Esc to put it back. G does the same from the list."
-          className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors flex items-center gap-0.5"
+          disabled={latticeActive}
+          title={latticeActive
+            ? 'Finish the lattice edit to slide cuts, or click a face and press Move here.'
+            : 'Slide this cut across the part. Click to put it down, Esc to put it back. G does the same from the list.'}
+          className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-0.5"
         >
           <Move className="w-2.5 h-2.5" />Move
         </button>
@@ -146,6 +150,7 @@ function CutRow({ node, geom, index }: {
           type="button"
           onClick={() => deleteNodeGeom(node.id, index)}
           title="Remove this cut. The material comes back"
+          aria-label={`Remove ${label.toLowerCase()}`}
           className="p-0.5 rounded text-slate-400 hover:text-rose-600 cursor-pointer"
         >
           <Trash2 className="w-3 h-3" />
@@ -218,7 +223,7 @@ function CutRow({ node, geom, index }: {
         {geom.type !== 'sphere' && !boss && (
           <button
             type="button"
-            onClick={() => setCutDepth(node.id, index, through ? mm(depth) / 2 : 0)}
+            onClick={() => setCutDepth(node.id, index, through ? (mm(depth) > 0 ? mm(depth) / 2 : 5) : 0)}
             title={through
               ? 'Going through the wall. Press to make it a blind hole half the depth, then type the depth you want.'
               : 'Make it go through the wall it is on, however thick that is or becomes.'}
@@ -272,10 +277,14 @@ function HardwareRow({ node, geom, index }: {
   const moveCutTo = useStore((s) => s.moveCutTo);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const spot = useStore((s) => s.cutSpot);
+  const latticeActive = useStore((s) => !!s.latticeNodeId);
   const hw = geom.hardware!;
   const info = HARDWARE_KINDS[hw.kind];
   const fitMm = hw.fit ? mm(hw.fit) : 0;
   const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    setProblem(null);
+  }, [hw.size, hw.fit, hw.length, geom.cutAt?.[0], geom.cutAt?.[1], geom.cutAt?.[2]]);
   // A size that does not fit where the groove is changes nothing; it says why.
   const setSize = (size: string) => {
     const spec = hardwareSpecOf(node.geoms, hw.group);
@@ -300,8 +309,11 @@ function HardwareRow({ node, geom, index }: {
         <button
           type="button"
           onClick={grab}
-          title="Slide this feature across the part. Click to put it down, Esc to put it back."
-          className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors flex items-center gap-0.5"
+          disabled={latticeActive}
+          title={latticeActive
+            ? 'Finish the lattice edit to slide features, or click a face and press Here.'
+            : 'Slide this feature across the part. Click to put it down, Esc to put it back.'}
+          className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-0.5"
         >
           <Move className="w-2.5 h-2.5" />Move
         </button>
@@ -319,6 +331,7 @@ function HardwareRow({ node, geom, index }: {
           type="button"
           onClick={() => deleteNodeGeom(node.id, index)}
           title={`Remove this ${info.label.toLowerCase()}`}
+          aria-label={`Remove ${info.label.toLowerCase()}`}
           className="p-0.5 rounded text-slate-400 hover:text-rose-600 cursor-pointer"
         >
           <Trash2 className="w-3 h-3" />

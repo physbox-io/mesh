@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Printer } from 'lucide-react';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 /**
  * Asks for the size to print at: the longest side of the longest part, in mm.
@@ -18,6 +19,9 @@ export function ExportScaleModal({
 }) {
   const [value, setValue] = useState(initialMm);
   const [error, setError] = useState<string | undefined>(undefined);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialogA11y(dialogRef, true);
 
   const confirm = () => {
     const targetMm = parseFloat(value);
@@ -34,6 +38,10 @@ export function ExportScaleModal({
       onClick={onCancel}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-md w-full p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
@@ -42,12 +50,13 @@ export function ExportScaleModal({
             <Printer className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">{title}</h2>
+            <h2 id={titleId} className="font-bold text-slate-800 dark:text-slate-100 text-base">{title}</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">Longest part&apos;s longest side (mm)</p>
           </div>
         </div>
         <input
           autoFocus
+          aria-label={title}
           type="number"
           min="0.1"
           step="any"
@@ -55,7 +64,10 @@ export function ExportScaleModal({
           onChange={(e) => { setValue(e.target.value); setError(undefined); }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') confirm();
-            if (e.key === 'Escape') onCancel();
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              onCancel();
+            }
           }}
           className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 font-mono"
         />

@@ -15,7 +15,7 @@
 // viewport until something downstream refuses the file.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { NumberInput } from '@physbox-io/ui';
 import {
   Paintbrush, Expand, Waves, Minimize2, Magnet, Hand,
@@ -167,17 +167,32 @@ function AxisSize({ label, value, onCommit }: { label: string; value: number; on
   // Reset from the clay by the key it is rendered with, not by an effect.
   const shown = +(value * 1000).toFixed(1);
   const [draft, setDraft] = useState<number | undefined>(shown);
+  const draftRef = useRef<number | undefined>(shown);
+  const minMm = MIN_SCULPT_SIZE * 1000;
+  const maxMm = MAX_SCULPT_SIZE * 1000;
   return (
-    <label className="flex items-center gap-0.5" title={`${label}: the clay's extent along this axis`}>
+    <label
+      className="flex items-center gap-0.5"
+      title={`${label}: the clay's extent along this axis`}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLElement).blur();
+      }}
+    >
       <span className="text-[9px] font-bold text-slate-400">{label}</span>
       <NumberInput
         aria-label={`Clay ${label} (mm)`}
         value={draft}
-        min={MIN_SCULPT_SIZE * 1000}
-        max={MAX_SCULPT_SIZE * 1000}
-        onChange={setDraft}
+        min={minMm}
+        max={maxMm}
+        onChange={(v) => {
+          draftRef.current = v;
+          setDraft(v);
+        }}
         onCommit={() => {
-          if (draft !== undefined && draft > 0 && Math.abs(draft - shown) > 0.05) onCommit(draft);
+          const raw = draftRef.current;
+          if (raw === undefined || raw <= 0) return;
+          const clamped = Math.min(maxMm, Math.max(minMm, raw));
+          if (Math.abs(clamped - shown) > 0.05) onCommit(clamped);
         }}
         className="w-11 px-1 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-transparent text-right font-mono tabular-nums text-[10px] text-slate-700 dark:text-slate-200"
       />
@@ -482,8 +497,8 @@ export function SculptPanel() {
           title="Which plane symmetry mirrors in. Y pairs a figure's left and right."
           className={`px-2 rounded-md text-xs font-semibold uppercase transition-colors ${
             brush.symmetryX
-              ? 'bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
-              : 'bg-white/5 text-slate-500 hover:bg-white/10'
+              ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300 hover:bg-sky-500/25'
+              : 'bg-slate-200/70 dark:bg-white/5 text-slate-600 dark:text-slate-400 hover:bg-slate-300/70 dark:hover:bg-white/10'
           }`}
         >
           {brush.symmetryAxis ?? 'x'}

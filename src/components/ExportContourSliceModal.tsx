@@ -480,7 +480,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-2 sm:p-4 animate-in fade-in duration-200">
-      <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-5xl max-h-[95dvh] sm:max-h-[90dvh] flex flex-col overflow-hidden">
+      <div role="dialog" aria-modal="true" aria-label="Export Contour Slices" className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-5xl max-h-[95dvh] sm:max-h-[90dvh] flex flex-col overflow-hidden">
 
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
@@ -625,7 +625,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   allowEmpty
                   placeholder={String(machineMode === 'cnc' ? speeds.feedMmMin : 1200)}
                   value={cutFeedrateOverride}
-                  onChange={(v) => v !== undefined && setCutFeedrateOverride(v)}
+                  onChange={(v) => setCutFeedrateOverride(v ?? null)}
                   className={inputClass}
                 />
               </Field>
@@ -639,7 +639,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   allowEmpty
                   placeholder={String(speeds.rpm)}
                   value={spindleRpmOverride}
-                  onChange={(v) => v !== undefined && setSpindleRpmOverride(v)}
+                  onChange={(v) => setSpindleRpmOverride(v ?? null)}
                   className={inputClass}
                 />
               </Field>

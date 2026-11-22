@@ -190,7 +190,7 @@ aside.glass-panel .text-slate-400 {
   transition: color 0.15s ease;
 }
 .dark aside.glass-panel .text-slate-400 {
-  color: #475569;
+  color: #94a3b8;
 }
 
 /* Headers inside Panels */
@@ -313,6 +313,30 @@ aside.glass-panel .bg-blue-50 {
   background-color: rgba(14, 165, 233, 0.15);
   border-color: rgba(56, 189, 248, 0.45);
   color: #7dd3fc;
+}
+
+.dark aside.glass-panel .bg-slate-200 {
+  background-color: #334155;
+}
+.dark aside.glass-panel .hover\:bg-slate-100:hover,
+.dark aside.glass-panel .hover\:bg-slate-200\/60:hover {
+  background-color: #1e293b;
+}
+.dark aside.glass-panel .hover\:bg-amber-100:hover {
+  background-color: rgba(245, 158, 11, 0.22);
+}
+.dark aside.glass-panel .hover\:bg-blue-100:hover {
+  background-color: rgba(2, 132, 199, 0.22);
+}
+.dark aside.glass-panel .hover\:bg-emerald-100:hover {
+  background-color: rgba(16, 185, 129, 0.22);
+}
+.dark aside.glass-panel .hover\:bg-violet-100:hover {
+  background-color: rgba(139, 92, 246, 0.22);
+}
+.dark aside.glass-panel .hover\:bg-red-100:hover,
+.dark aside.glass-panel .hover\:bg-rose-50:hover {
+  background-color: rgba(244, 63, 94, 0.22);
 }
 
 /* Reference Guide (DocsModal) dark mode overrides */

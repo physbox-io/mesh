@@ -21,11 +21,11 @@ export function TextureTabIntro({ node }: { node: SceneNode }) {
   };
 
   return (
-    <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+    <div className="p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col gap-2">
       <button
         onClick={() => arm('pattern')}
         disabled={busy}
-        className="flex items-center justify-center gap-2 w-full py-2 border border-fuchsia-200 rounded-lg text-xs font-semibold text-fuchsia-700 bg-fuchsia-50 hover:bg-fuchsia-100 hover:border-fuchsia-300 disabled:opacity-40 transition-colors shadow-sm cursor-pointer"
+        className="flex items-center justify-center gap-2 w-full py-2 border border-fuchsia-200 dark:border-fuchsia-800/60 rounded-lg text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300 bg-fuchsia-50 dark:bg-fuchsia-950/30 hover:bg-fuchsia-100 dark:hover:bg-fuchsia-900/40 hover:border-fuchsia-300 dark:hover:border-fuchsia-700 disabled:opacity-40 transition-colors shadow-sm cursor-pointer"
         title="Then click the face of this part to carve or emboss a pattern into"
       >
         <Sparkles className="w-4 h-4" /> Pattern a face…
@@ -33,7 +33,7 @@ export function TextureTabIntro({ node }: { node: SceneNode }) {
       <button
         onClick={() => arm('text')}
         disabled={busy}
-        className="flex items-center justify-center gap-2 w-full py-2 border border-fuchsia-200 rounded-lg text-xs font-semibold text-fuchsia-700 bg-white hover:bg-fuchsia-50 hover:border-fuchsia-300 disabled:opacity-40 transition-colors shadow-sm cursor-pointer"
+        className="flex items-center justify-center gap-2 w-full py-2 border border-fuchsia-200 dark:border-fuchsia-800/60 rounded-lg text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300 bg-white dark:bg-slate-900 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950/30 hover:border-fuchsia-300 dark:hover:border-fuchsia-700 disabled:opacity-40 transition-colors shadow-sm cursor-pointer"
         title="Then click the face of this part to engrave or emboss lettering on (Shift+T)"
       >
         <Type className="w-4 h-4" /> Text on a face…

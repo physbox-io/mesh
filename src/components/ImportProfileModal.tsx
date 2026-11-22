@@ -163,11 +163,11 @@ export const ImportProfileModal: React.FC<{
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90dvh]">
+      <div role="dialog" aria-modal="true" aria-label="Import Profile" className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90dvh]">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2">
             <Shapes className="w-5 h-5 text-emerald-500" />
-            <h3 className="font-bold text-slate-800 dark:text-slate-100 text-base">Import Profile</h3>
+            <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">Import Profile</h2>
           </div>
           <button aria-label="Close" title="Close" onClick={onClose}
             className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg transition-colors cursor-pointer">

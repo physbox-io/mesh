@@ -214,19 +214,24 @@ export function Field({
   className?: string;
   children: React.ReactNode;
 }) {
+  const autoId = React.useId();
+  const child = React.isValidElement<{ id?: string }>(children) && children.type !== 'div' && !children.props.id
+    ? React.cloneElement(children, { id: autoId })
+    : children;
+  const htmlFor = React.isValidElement<{ id?: string }>(child) ? child.props.id : undefined;
   return (
     <div className={`flex flex-col min-w-0 ${className ?? ''}`}>
       {hint ? (
         <HintAnchor hint={hint} align={hintAlign} className="relative flex items-center space-x-1 mb-1.5">
-          <label className={labelClass}>{label}</label>
+          <label htmlFor={htmlFor} className={labelClass}>{label}</label>
           <HintIcon />
         </HintAnchor>
       ) : (
         <div className="relative flex items-center space-x-1 mb-1.5">
-          <label className={labelClass}>{label}</label>
+          <label htmlFor={htmlFor} className={labelClass}>{label}</label>
         </div>
       )}
-      <div className="mt-auto">{children}</div>
+      <div className="mt-auto">{child}</div>
     </div>
   );
 }

@@ -42,37 +42,38 @@ export const JogPad: React.FC<{
       <div className="flex items-start space-x-3">
         <div className="grid grid-cols-3 gap-1 w-[132px]">
           <span />
-          <button disabled={disabled} onClick={() => jog(0, 1, 0)} title={`Y +${step} mm`} className={jogBtn}>
+          <button disabled={disabled} onClick={() => jog(0, 1, 0)} title={`Y +${step} mm`} aria-label={`Jog Y +${step} mm`} className={jogBtn}>
             <ArrowUp className="w-3.5 h-3.5" />
           </button>
           <span />
-          <button disabled={disabled} onClick={() => jog(-1, 0, 0)} title={`X -${step} mm`} className={jogBtn}>
+          <button disabled={disabled} onClick={() => jog(-1, 0, 0)} title={`X -${step} mm`} aria-label={`Jog X -${step} mm`} className={jogBtn}>
             <ArrowLeft className="w-3.5 h-3.5" />
           </button>
           <button
             disabled={disabled}
             onClick={() => webSerialManager.jogCancel()}
             title="Stop the current jog"
+            aria-label="Stop current jog"
             className={`${jogBtn} text-red-400`}
           >
             <Octagon className="w-3.5 h-3.5" />
           </button>
-          <button disabled={disabled} onClick={() => jog(1, 0, 0)} title={`X +${step} mm`} className={jogBtn}>
+          <button disabled={disabled} onClick={() => jog(1, 0, 0)} title={`X +${step} mm`} aria-label={`Jog X +${step} mm`} className={jogBtn}>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
           <span />
-          <button disabled={disabled} onClick={() => jog(0, -1, 0)} title={`Y -${step} mm`} className={jogBtn}>
+          <button disabled={disabled} onClick={() => jog(0, -1, 0)} title={`Y -${step} mm`} aria-label={`Jog Y -${step} mm`} className={jogBtn}>
             <ArrowDown className="w-3.5 h-3.5" />
           </button>
           <span />
         </div>
 
         <div className="grid grid-cols-1 gap-1 w-10">
-          <button disabled={disabled} onClick={() => jog(0, 0, 1)} title={`Z +${step} mm`} className={jogBtn}>
+          <button disabled={disabled} onClick={() => jog(0, 0, 1)} title={`Z +${step} mm`} aria-label={`Jog Z +${step} mm`} className={jogBtn}>
             <ChevronsUp className="w-3.5 h-3.5" />
           </button>
           <span className="text-[9px] text-center text-slate-500 font-bold leading-8">Z</span>
-          <button disabled={disabled} onClick={() => jog(0, 0, -1)} title={`Z -${step} mm`} className={jogBtn}>
+          <button disabled={disabled} onClick={() => jog(0, 0, -1)} title={`Z -${step} mm`} aria-label={`Jog Z -${step} mm`} className={jogBtn}>
             <ChevronsDown className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -98,6 +99,7 @@ export const JogPad: React.FC<{
         <div className="flex items-center space-x-2">
           <span className="text-[10px] uppercase font-bold text-slate-500 whitespace-nowrap">Feed</span>
           <NumberInput
+            aria-label="Jog feedrate (mm/min)"
             min={10}
             max={5000}
             step={50}

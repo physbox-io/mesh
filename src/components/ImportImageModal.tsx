@@ -226,11 +226,11 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90dvh]">
+      <div role="dialog" aria-modal="true" aria-label="Import Image as 3D Relief" className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90dvh]">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2">
             <ImageIcon className="w-5 h-5 text-fuchsia-500" />
-            <h3 className="font-bold text-slate-800 dark:text-slate-100 text-base">Import Image as 3D Relief</h3>
+            <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">Import Image as 3D Relief</h2>
           </div>
           <button aria-label="Close" title="Close"
             onClick={onClose}

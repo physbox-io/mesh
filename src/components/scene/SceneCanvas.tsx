@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Environment, Lightformer } from '@react-three/drei';
 import { Bloom, EffectComposer, N8AO } from '@react-three/postprocessing';
@@ -106,7 +106,11 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
     [outgoingGraph, sceneGraph, shatteredBodies],
   );
   const glows = useMemo(() => sceneGlows(effectiveGraph?.nodes), [effectiveGraph]);
+  const dfmEnabled = useStore((s) => s.dfmEnabled);
   const [activeWeakSpot, setActiveWeakSpot] = useState<WeakSpot | null>(null);
+  useEffect(() => {
+    if (!dfmEnabled) setActiveWeakSpot(null);
+  }, [dfmEnabled, sceneGraph]);
 
   /*
    * A click on a gizmo handle is a click on a mesh with no R3F handlers, so R3F

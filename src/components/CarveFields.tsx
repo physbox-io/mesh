@@ -8,7 +8,7 @@
 // two hundred lines of fields would drift apart within the month. The state
 // they edit comes from the hooks in carveTooling.ts.
 
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { AlertCircle, Info, ChevronRight, RefreshCw } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import type { ReliefCarveOptions, ReliefOverrides, DerivedReliefSettings } from '../utils/reliefCarveExporter';
@@ -48,16 +48,21 @@ export function Field({
   className?: string;
   children: React.ReactNode;
 }) {
+  const autoId = useId();
+  const child = React.isValidElement<{ id?: string }>(children) && children.type !== 'div' && !children.props.id
+    ? React.cloneElement(children, { id: autoId })
+    : children;
+  const htmlFor = React.isValidElement<{ id?: string }>(child) ? child.props.id : undefined;
   return (
     <div className={`flex flex-col min-w-0 ${className ?? ''}`}>
       {/* Portalled, not absolutely positioned: the dialog body scrolls, and a
           scroll container clips its positioned descendants, which cut the
           hints on the right-hand fields off at the dialog's edge. */}
       <HintAnchor hint={hint} align={hintAlign} className="flex items-center space-x-1 mb-1.5">
-        <label className={labelClass}>{label}</label>
+        <label htmlFor={htmlFor} className={labelClass}>{label}</label>
         <HintIcon />
       </HintAnchor>
-      <div className="mt-auto">{children}</div>
+      <div className="mt-auto">{child}</div>
     </div>
   );
 }

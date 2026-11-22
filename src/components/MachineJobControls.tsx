@@ -729,7 +729,7 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
       <div className="flex gap-1">
         <button className={step} onClick={() => nudge(-10)} title={`${hint}: down 10%`}>−10</button>
         <button className={step} onClick={() => nudge(-1)} title={`${hint}: down 1%`}>−1</button>
-        <button className={step} onClick={reset} title={`${hint}: back to what the program asked for`}>
+        <button className={step} onClick={reset} title={`${hint}: back to what the program asked for`} aria-label={`Reset ${hint.toLowerCase()}`}>
           <RotateCcw className="w-3 h-3" />
         </button>
         <button className={step} onClick={() => nudge(1)} title={`${hint}: up 1%`}>+1</button>

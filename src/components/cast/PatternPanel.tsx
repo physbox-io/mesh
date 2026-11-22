@@ -268,9 +268,16 @@ export const PatternPanel: React.FC<{
                     placeholder={summary?.sprueAtSceneMm ? String(Math.round(summary.sprueAtSceneMm[axis])) : 'auto'}
                     value={options.sprueAtMm?.[axis] ?? null}
                     onChange={(v) => setOptions((prev) => {
-                      if (v === undefined) return { ...prev, sprueAtMm: null };
+                      const fallback0 = Math.round(summary?.sprueAtSceneMm?.[0] ?? 0);
+                      const fallback1 = Math.round(summary?.sprueAtSceneMm?.[1] ?? 0);
+                      if (v === undefined) {
+                        if (!prev.sprueAtMm) return { ...prev, sprueAtMm: null };
+                        const cur: [number, number] = [...prev.sprueAtMm];
+                        cur[axis] = axis === 0 ? fallback0 : fallback1;
+                        return cur[0] === fallback0 && cur[1] === fallback1 ? { ...prev, sprueAtMm: null } : { ...prev, sprueAtMm: cur };
+                      }
                       // The other coordinate starts where the sprue is now, not at the origin.
-                      const cur: [number, number] = prev.sprueAtMm ? [...prev.sprueAtMm] : [summary?.sprueAtSceneMm?.[0] ?? 0, summary?.sprueAtSceneMm?.[1] ?? 0];
+                      const cur: [number, number] = prev.sprueAtMm ? [...prev.sprueAtMm] : [fallback0, fallback1];
                       cur[axis] = v;
                       return { ...prev, sprueAtMm: cur };
                     })}

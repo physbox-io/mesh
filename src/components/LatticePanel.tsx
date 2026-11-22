@@ -666,6 +666,8 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
             <button
               type="button"
               onClick={() => setPlaneHold(!planeHold)}
+              aria-label={planeHold ? 'Release work plane hold' : 'Hold work plane'}
+              aria-pressed={planeHold}
               title={planeHold
                 ? 'Let the plane follow the pointer again (Caps Lock)'
                 : 'Hold the plane where it is: the lit slice stops moving, reaches far past the shape, and only points on it can be clicked (Caps Lock)'}

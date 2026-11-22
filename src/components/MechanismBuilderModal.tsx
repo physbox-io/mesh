@@ -592,7 +592,7 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-2 sm:p-4 animate-in fade-in duration-200">
-      <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-4xl max-h-[92dvh] flex flex-col overflow-hidden">
+      <div role="dialog" aria-modal="true" aria-label="Mechanism & Transmission Synthesis" className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-4xl max-h-[92dvh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="flex items-center space-x-2.5">

@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
+import { useCastDialog } from '../../store/castDialogStore';
 import { dfmLensFor } from '../../utils/dfm';
 import { useDfmReport } from '../../utils/dfmWorkerClient';
 import { buildHeatGeometry } from '../../utils/dfmHeatGeometry';
@@ -37,9 +38,10 @@ export function DfmHeatmap() {
   // is worse than showing neither. Rolled up, it stops sampling entirely.
   const lens = dfmEnabled && !minimized ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
   // The same bench, key for key, as the panel's, so the two share one analysis.
+  const castMaterial = useCastDialog((s) => s.materialByTab.rigid);
   const bench = useMemo(
-    () => ({ material, filament, stock, printBed, nodeId: selectedNodeId }),
-    [material, filament, stock, printBed, selectedNodeId],
+    () => ({ material, filament, stock, printBed, nodeId: selectedNodeId, ...(castMaterial ? { castMaterial } : {}) }),
+    [material, filament, stock, printBed, selectedNodeId, castMaterial],
   );
   const report = useDfmReport(sceneGraph, lens, bench);
 

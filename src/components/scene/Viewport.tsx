@@ -78,7 +78,7 @@ export function Viewport({ threeSceneRef, darkMode, doc, onImportSceneJson }: {
       </div>
 
       {!isLoaded && (
-        <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none bg-slate-50/50 backdrop-blur-sm">
+        <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none bg-slate-50/50 dark:bg-slate-950/60 backdrop-blur-sm">
           <div className="text-slate-500 flex flex-col items-center gap-4 font-medium">
             <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
             Initializing Mesh...

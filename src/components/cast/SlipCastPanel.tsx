@@ -288,8 +288,15 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
                   placeholder={r ? String(Math.round(r.spareAtMm[axis])) : 'auto'}
                   value={options.spareAtMm?.[axis] ?? undefined}
                   onChange={(v) => setOptions((prev) => {
-                    const cur: [number, number] = prev.spareAtMm ? [...prev.spareAtMm] : [r?.spareAtMm[0] ?? 0, r?.spareAtMm[1] ?? 0];
-                    if (v === undefined) return { ...prev, spareAtMm: null };
+                    const fallback0 = Math.round(r?.spareAtMm[0] ?? 0);
+                    const fallback1 = Math.round(r?.spareAtMm[1] ?? 0);
+                    if (v === undefined) {
+                      if (!prev.spareAtMm) return { ...prev, spareAtMm: null };
+                      const cur: [number, number] = [...prev.spareAtMm];
+                      cur[axis] = axis === 0 ? fallback0 : fallback1;
+                      return cur[0] === fallback0 && cur[1] === fallback1 ? { ...prev, spareAtMm: null } : { ...prev, spareAtMm: cur };
+                    }
+                    const cur: [number, number] = prev.spareAtMm ? [...prev.spareAtMm] : [fallback0, fallback1];
                     cur[axis] = v;
                     return { ...prev, spareAtMm: cur };
                   })}
