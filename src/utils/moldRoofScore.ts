@@ -189,6 +189,7 @@ function roofLadder(f: Faces, zMin: number, zMax: number) {
  * `tris` are in mm, the mold opening along +Z.
  */
 export function linerPartingChoice(tris: ArrayLike<number>, zMin: number, zMax: number, preferZ: number): RoofScore {
+  if (!Number.isFinite(zMin) || !Number.isFinite(zMax)) return { z: 0, curvedMm2: 0, flatMm2: 0 };
   const f = facesOf(tris);
   const levels = new Set<number>();
   const flatLevels: number[] = [];
@@ -205,17 +206,19 @@ export function linerPartingChoice(tris: ArrayLike<number>, zMin: number, zMax: 
   const SAMPLES = 128;
   for (let s = 0; s <= SAMPLES; s++) {
     const z = zMin + ((zMax - zMin) * s) / SAMPLES;
-    if (!nearFlat(z)) levels.add(z);
+    if (Number.isFinite(z) && !nearFlat(z)) levels.add(z);
   }
-  if (!nearFlat(preferZ)) levels.add(preferZ);
+  if (Number.isFinite(preferZ) && !nearFlat(preferZ)) levels.add(preferZ);
+  if (!levels.size) levels.add(zMin);
   const ladder = roofLadder(f, zMin, zMax);
   const scored = [...levels].map((z) => ({ z, ...ladder(z) }));
   const least = Math.min(...scored.map(total));
   const near = scored.filter((s) => total(s) <= least + Math.max(0.5, least * 0.01));
-  near.sort((p, q) => Math.abs(p.z - preferZ) - Math.abs(q.z - preferZ));
+  const candidates = near.length ? near : scored;
+  candidates.sort((p, q) => Math.abs(p.z - preferZ) - Math.abs(q.z - preferZ));
   // Scored exactly, the winner, for what it reports.
-  const exact = scoreAt(f, near[0].z);
-  return { z: near[0].z, curvedMm2: exact.curved, flatMm2: exact.flat };
+  const exact = scoreAt(f, candidates[0].z);
+  return { z: candidates[0].z, curvedMm2: exact.curved, flatMm2: exact.flat };
 }
 
 /**
@@ -230,14 +233,17 @@ export function linerPullChoice(tris: ArrayLike<number>, preferred: PullDirectio
     const turned = dir === '+z' ? tris : rotateTrianglesForPull(tris, dir);
     let lo = Infinity, hi = -Infinity;
     for (let i = 2; i < turned.length; i += 3) {
-      lo = Math.min(lo, turned[i]);
-      hi = Math.max(hi, turned[i]);
+      const z = turned[i];
+      if (!Number.isFinite(z)) continue;
+      lo = Math.min(lo, z);
+      hi = Math.max(hi, z);
     }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { dir, score: Infinity };
     const s = linerPartingChoice(turned, lo, hi, (lo + hi) / 2);
     return { dir, score: s.curvedMm2 + FLAT_WEIGHT * s.flatMm2 };
   });
   const mine = results.find((r) => r.dir === `+${preferred[1]}`) ?? results[0];
   const best = results.reduce((a, b) => (b.score < a.score ? b : a));
-  if (best.dir === mine.dir || best.score >= mine.score * 0.95 - 0.5) return null;
+  if (!Number.isFinite(best.score) || best.dir === mine.dir || best.score >= mine.score * 0.95 - 0.5) return null;
   return best.dir;
 }

@@ -1272,14 +1272,19 @@ function openLinerPullChoice(trisMm: ArrayLike<number>, preferred: PullDirection
     const turned = dir === '+z' ? trisMm : rotateTrianglesForPull(trisMm, dir);
     let lo = Infinity, hi = -Infinity;
     for (let i = 2; i < turned.length; i += 3) {
-      lo = Math.min(lo, turned[i]);
-      hi = Math.max(hi, turned[i]);
+      const z = turned[i];
+      if (!Number.isFinite(z)) continue;
+      lo = Math.min(lo, z);
+      hi = Math.max(hi, z);
     }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { dir, score: Infinity };
     const zEps = Math.max(1e-6, (hi - lo) * 1e-4);
     let covBottom = 0, covTop = 0;
     for (let i = 2; i < turned.length; i += 3) {
-      if (turned[i] <= lo + zEps) covBottom++;
-      if (turned[i] >= hi - zEps) covTop++;
+      const z = turned[i];
+      if (!Number.isFinite(z)) continue;
+      if (z <= lo + zEps) covBottom++;
+      if (z >= hi - zEps) covTop++;
     }
     const plane = covTop > covBottom ? hi : lo;
     const s = linerPartingChoice(turned, plane, plane, plane);
@@ -1287,7 +1292,7 @@ function openLinerPullChoice(trisMm: ArrayLike<number>, preferred: PullDirection
   });
   const mine = results.find((r) => r.dir === preferred) ?? results[0];
   const best = results.reduce((a, b) => (b.score < a.score ? b : a));
-  if (best.dir === mine.dir || best.score >= mine.score * 0.95 - 0.5) return null;
+  if (!Number.isFinite(best.score) || best.dir === mine.dir || best.score >= mine.score * 0.95 - 0.5) return null;
   return best.dir;
 }
 
