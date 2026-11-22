@@ -54,6 +54,12 @@ export function bodyHold(
   const c = stock.cell;
   const sections = body.map((s) => ({ above: s.aboveTipMm, reach: Math.max(0, s.radiusMm - 2 * c) }));
   const lowestAbove = Math.min(...sections.map((s) => s.above));
+  // The model's rim at the block's own edge: the passes stop with the
+  // cutter's edge on it, and the cells there stay standing in the model
+  // though the cut reached them. Held over them, a 20 mm dome's finishing
+  // went round its border seventeen more times.
+  const atEdge = (x0: number, y0: number, x1: number, y1: number) =>
+    x0 < surface.minX + 2 * c || x1 > surface.maxX - 2 * c || y0 < surface.minY + 2 * c || y1 > surface.maxY - 2 * c;
   const isGround = (x0: number, y0: number, x1: number, y1: number, z: number) => {
     const n = 4;
     for (let b = 0; b <= n; b++) {
@@ -70,7 +76,7 @@ export function bodyHold(
     let need = tipZ;
     for (const s of sections) {
       stock.forEachNear(x, y, s.reach, need + s.above, (x0, y0, x1, y1, z) => {
-        if (z - s.above > need && !isGround(x0, y0, x1, y1, z)) { need = z - s.above; }
+        if (z - s.above > need && !atEdge(x0, y0, x1, y1) && !isGround(x0, y0, x1, y1, z)) need = z - s.above;
       });
     }
     return need;

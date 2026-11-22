@@ -341,6 +341,25 @@ export function finishSurface(
    * go. Where nothing held the body up, a layer is one sweep, as it always was.
    */
   const hold = bodyHold(w.stock, surface, finishBody);
+  /*
+   * Whether the body could meet anything here at all, from what roughing and
+   * the layer above left (`materialLevelAt`, the previous limit) rather than
+   * from the stock model, which is far dearer to ask: on a 20 mm dome
+   * finished in layers, asking it at every point took planning from 21 s to
+   * 40. Once anything has been held, the layer above is no longer a bound.
+   */
+  const bodyReach = Math.max(0, ...finishBody.map((s) => s.radiusMm));
+  const bodyAbove = Math.min(Infinity, ...finishBody.map((s) => s.aboveTipMm));
+  let everHeld = false;
+  const mayHold = (x: number, y: number, z: number, cap: number) => {
+    if (!everHeld && cap - bodyAbove <= z) return false;
+    let standing = -Infinity;
+    for (let k = 0; k <= 8; k++) {
+      const a = (Math.PI * k) / 4, d = k === 8 ? 0 : bodyReach;
+      standing = Math.max(standing, materialLevelAt(x + d * Math.cos(a), y + d * Math.sin(a)));
+    }
+    return Math.min(standing, everHeld ? 0 : cap) - bodyAbove > z;
+  };
   const sampleOf = (x: number, y: number) =>
     Math.min(finishMap.rows - 1, Math.max(0, Math.round((y - finishMap.minY) / (finishMap.stepY || 1)))) * finishMap.cols +
     Math.min(finishMap.cols - 1, Math.max(0, Math.round((x - finishMap.minX) / (finishMap.stepX || 1))));
@@ -445,8 +464,10 @@ export function finishSurface(
 
           if (hold && heldNow) {
             r = r.map((p) => {
+              if (!mayHold(p.x, p.y, p.z, prevLimit)) return p;
               const need = Math.min(0, hold(p.x, p.y, p.z));
               if (need <= p.z + 1e-6) return p;
+              everHeld = true;
               // Scrap - the channel and frame away from the part - is left
               // where the body held it: nobody keeps it, and going back for it
               // a flute length at a time cost a solid job a quarter again.
@@ -487,7 +508,7 @@ export function finishSurface(
                 w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, linkRimWithin) <= linkBiteMm;
             }
             // Nor where the tool body would meet the stock on the way.
-            if (hold) ok = ok && candidate.every((p) => hold(p.x, p.y, p.z) <= p.z + 1e-6);
+            if (hold) ok = ok && candidate.every((p) => !mayHold(p.x, p.y, p.z, prevLimit) || hold(p.x, p.y, p.z) <= p.z + 1e-6);
             if (ok) link = candidate;
           }
 

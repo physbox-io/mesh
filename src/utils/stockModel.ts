@@ -48,6 +48,9 @@ export interface StockBounds {
   maxY: number;
 }
 
+/** Cells per side of a block in `StockModel`'s coarse record of what stands. */
+const BLOCK = 8;
+
 export class StockModel {
   readonly cell: number;
   private readonly cols: number;
@@ -58,6 +61,15 @@ export class StockModel {
   private readonly y1: number;
   /** Highest material in each cell. Stock top is 0. */
   private readonly z: Float32Array;
+  /**
+   * Highest material in each block of BLOCK x BLOCK cells, never below the
+   * truth: a cut only marks the blocks it may have lowered stale, and a
+   * stale block is measured again when it is next asked about.
+   */
+  private readonly blockHigh: Float32Array;
+  private readonly blockStale: Uint8Array;
+  private readonly bCols: number;
+  private readonly bRows: number;
 
   /**
    * `cellMm` sets the price of the pessimism: a cell only counts as cut once
@@ -75,6 +87,10 @@ export class StockModel {
     this.cols = Math.max(1, Math.ceil((bounds.maxX - bounds.minX) / this.cell));
     this.rows = Math.max(1, Math.ceil((bounds.maxY - bounds.minY) / this.cell));
     this.z = new Float32Array(this.cols * this.rows); // all 0: the stock's face
+    this.bCols = Math.ceil(this.cols / BLOCK);
+    this.bRows = Math.ceil(this.rows / BLOCK);
+    this.blockHigh = new Float32Array(this.bCols * this.bRows);
+    this.blockStale = new Uint8Array(this.bCols * this.bRows);
   }
 
   /**
@@ -129,6 +145,14 @@ export class StockModel {
     profile: CutterProfile = FLAT_PROFILE
   ): void {
     if (Math.min(z0, z1) >= 0) return; // above the stock's face
+    {
+      const c = this.cell * BLOCK;
+      const bi0 = Math.max(0, Math.floor((Math.min(x0, x1) - radius - this.x0) / c));
+      const bi1 = Math.min(this.bCols - 1, Math.floor((Math.max(x0, x1) + radius - this.x0) / c));
+      const bj0 = Math.max(0, Math.floor((Math.min(y0, y1) - radius - this.y0) / c));
+      const bj1 = Math.min(this.bRows - 1, Math.floor((Math.max(y0, y1) + radius - this.y0) / c));
+      for (let bj = bj0; bj <= bj1; bj++) for (let bi = bi0; bi <= bi1; bi++) this.blockStale[bj * this.bCols + bi] = 1;
+    }
     // Whole cells only, each at the highest the cutter leaves across it.
     const half = this.cell * Math.SQRT1_2;
     // In pieces no longer than a cell, each taken at its own higher end, so a
@@ -272,6 +296,20 @@ export class StockModel {
     return { low, high };
   }
 
+  /** The highest material in a block, measured again if a cut has been near it since. */
+  private highInBlock(bi: number, bj: number): number {
+    const b = bj * this.bCols + bi;
+    if (this.blockStale[b]) {
+      let high = -Infinity;
+      for (let j = bj * BLOCK; j < Math.min(this.rows, (bj + 1) * BLOCK); j++) {
+        for (let i = bi * BLOCK; i < Math.min(this.cols, (bi + 1) * BLOCK); i++) high = Math.max(high, this.z[j * this.cols + i]);
+      }
+      this.blockHigh[b] = high;
+      this.blockStale[b] = 0;
+    }
+    return this.blockHigh[b];
+  }
+
   /**
    * Visits every cell the disc of `radius` round (x, y) reaches whose
    * material stands above `level`, with the cell's extent.
@@ -286,6 +324,15 @@ export class StockModel {
     const j0 = Math.max(0, Math.floor((y - radius - this.y0) / c));
     const j1 = Math.min(this.rows - 1, Math.floor((y + radius - this.y0) / c));
     const reachSq = radius * radius;
+    // Nothing in any block the disc reaches stands above the level: done,
+    // without visiting a cell. Most of a job's asks end here.
+    let any = false;
+    for (let bj = Math.floor(j0 / BLOCK); bj <= Math.floor(j1 / BLOCK) && !any; bj++) {
+      for (let bi = Math.floor(i0 / BLOCK); bi <= Math.floor(i1 / BLOCK) && !any; bi++) {
+        any = this.highInBlock(bi, bj) > level;
+      }
+    }
+    if (!any) return;
     for (let j = j0; j <= j1; j++) {
       const ya = this.y0 + j * c, yb = Math.min(this.y1, ya + c);
       const dy = y < ya ? ya - y : y > yb ? y - yb : 0;
