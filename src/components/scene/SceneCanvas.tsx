@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
+import { useCallback, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Environment, Lightformer } from '@react-three/drei';
 import { Bloom, EffectComposer, N8AO } from '@react-three/postprocessing';
@@ -107,10 +107,12 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
   );
   const glows = useMemo(() => sceneGlows(effectiveGraph?.nodes), [effectiveGraph]);
   const dfmEnabled = useStore((s) => s.dfmEnabled);
-  const [activeWeakSpot, setActiveWeakSpot] = useState<WeakSpot | null>(null);
-  useEffect(() => {
-    if (!dfmEnabled) setActiveWeakSpot(null);
-  }, [dfmEnabled, sceneGraph]);
+  const [weakSpotEntry, setWeakSpotEntry] = useState<{ spot: WeakSpot; graph: typeof sceneGraph } | null>(null);
+  const activeWeakSpot = dfmEnabled && weakSpotEntry?.graph === sceneGraph ? weakSpotEntry.spot : null;
+  const setActiveWeakSpot = useCallback(
+    (spot: WeakSpot | null) => setWeakSpotEntry(spot ? { spot, graph: sceneGraph } : null),
+    [sceneGraph],
+  );
 
   /*
    * A click on a gizmo handle is a click on a mesh with no R3F handlers, so R3F

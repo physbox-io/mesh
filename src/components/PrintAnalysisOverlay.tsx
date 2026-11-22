@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Html, Line } from '@react-three/drei';
 import { useStore } from '../store/useStore';
 import { type WeakSpot } from '../utils/printAnalysis';
@@ -22,13 +22,13 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
   const machineTarget = useStore(state => state.machineTarget);
   const setSelectedNodeId = useStore(state => state.setSelectedNodeId);
 
-  const [hoveredSpot, setHoveredSpot] = useState<WeakSpot | null>(null);
-
-  useEffect(() => {
-    if (!printAnalysisEnabled) setHoveredSpot(null);
-  }, [printAnalysisEnabled]);
+  const [rawHoveredSpot, setHoveredSpot] = useState<WeakSpot | null>(null);
 
   const weakSpots = useStructuralWeakSpots(sceneGraph, printAnalysisEnabled);
+  const hoveredSpot =
+    printAnalysisEnabled && rawHoveredSpot && weakSpots?.some((s) => s.id === rawHoveredSpot.id)
+      ? rawHoveredSpot
+      : null;
 
   if (!printAnalysisEnabled || !weakSpots) return null;
 

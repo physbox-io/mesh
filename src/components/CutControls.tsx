@@ -34,7 +34,7 @@
 //   not happen.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Circle, Square, Donut, Trash2, Move, RotateCw } from 'lucide-react';
 import { SettledNumberField } from './SettledInputs';
 import { ThreadField } from './ThreadField';
@@ -281,15 +281,14 @@ function HardwareRow({ node, geom, index }: {
   const hw = geom.hardware!;
   const info = HARDWARE_KINDS[hw.kind];
   const fitMm = hw.fit ? mm(hw.fit) : 0;
-  const [problem, setProblem] = useState<string | null>(null);
-  useEffect(() => {
-    setProblem(null);
-  }, [hw.size, hw.fit, hw.length, geom.cutAt?.[0], geom.cutAt?.[1], geom.cutAt?.[2]]);
+  const hwKey = `${hw.size}|${hw.fit ?? ''}|${hw.length ?? ''}|${geom.cutAt?.[0] ?? ''}|${geom.cutAt?.[1] ?? ''}|${geom.cutAt?.[2] ?? ''}`;
+  const [problemEntry, setProblemEntry] = useState<{ key: string; text: string } | null>(null);
+  const problem = problemEntry?.key === hwKey ? problemEntry.text : null;
   // A size that does not fit where the groove is changes nothing; it says why.
   const setSize = (size: string) => {
     const spec = hardwareSpecOf(node.geoms, hw.group);
     const why = spec && hardwareCutProblem({ ...spec, size }, node);
-    setProblem(why || null);
+    setProblemEntry(why ? { key: hwKey, text: why } : null);
     if (!why) setHardwareCut(node.id, hw.group, { size });
   };
   const centreline = hw.kind === 'seal_cord' ? rimCentreline(geom) : null;
