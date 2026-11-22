@@ -84,7 +84,7 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
           below `lg` the header wraps onto as many rows as its contents need,
           so its height is not knowable here and anything pinned 3.5rem from
           the top of the page tucks under a two-row navbar. */}
-      <aside className={`w-64 md:w-56 max-w-[85vw] shrink-0 glass-panel border-r border-slate-200 dark:border-slate-800 flex flex-col p-4 bg-white/90 dark:bg-slate-900/90 overflow-y-auto transition-transform duration-200 ease-in-out absolute md:relative inset-y-0 md:inset-auto left-0 z-20 max-md:z-[120] shadow-xl md:shadow-none ${
+      <aside data-tour="left-palette" className={`w-64 md:w-56 max-w-[85vw] shrink-0 glass-panel border-r border-slate-200 dark:border-slate-800 flex flex-col p-4 bg-white/90 dark:bg-slate-900/90 overflow-y-auto transition-transform duration-200 ease-in-out absolute md:relative inset-y-0 md:inset-auto left-0 z-20 max-md:z-[120] shadow-xl md:shadow-none ${
         isOpen ? 'flex translate-x-0' : 'hidden md:flex -translate-x-full md:translate-x-0'
       }`}>
         <div className="flex items-center justify-between mb-2.5">

@@ -4,6 +4,8 @@
  * how far it had to give to lie flat. Millimetres, as a cutter reads them.
  */
 
+import { offsetLoop } from '../polygonOffset';
+
 export interface PatternPiece {
   name: string;
   /** Flat positions, metres. */
@@ -19,16 +21,38 @@ export interface PatternPiece {
   darts?: number[][];
 }
 
+export interface PatternLayoutOptions {
+  /** Outward seam allowance in millimetres (0 = net sewing lines only). */
+  seamAllowanceMm?: number;
+}
+
 export interface PatternLayout {
-  pieces: { name: string; strain95: number; x: number; y: number; w: number; h: number; path: string; marks: { kind: string; x: number; y: number; r: number }[]; channels: string[] }[];
+  pieces: {
+    name: string;
+    strain95: number;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    /** Outer cutting line when seamAllowanceMm > 0, else net sewing outline. */
+    path: string;
+    /** Inner net sewing line when seamAllowanceMm > 0, else undefined. */
+    sewPath?: string;
+    marks: { kind: string; x: number; y: number; r: number }[];
+    channels: string[];
+  }[];
   width: number;
   height: number;
 }
 
 const MM = 1000, GAP = 30, MARGIN = 20;
 
+const ptsToPath = (pts: { x: number; y: number }[]) =>
+  pts.map((p, k) => `${k ? 'L' : 'M'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ') + ' Z';
+
 /** The pieces in a row, each in its own box; everything in mm, y down the page. */
-export function layoutPattern(pieces: PatternPiece[]): PatternLayout {
+export function layoutPattern(pieces: PatternPiece[], options?: PatternLayoutOptions): PatternLayout {
+  const sa = Math.max(0, options?.seamAllowanceMm ?? 0);
   let x = MARGIN, height = 0;
   const out: PatternLayout['pieces'] = [];
   for (const p of [...pieces].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -36,33 +60,47 @@ export function layoutPattern(pieces: PatternPiece[]): PatternLayout {
     const pts = p.outline.map((i) => p.uv[i]);
     const u0 = Math.min(...pts.map((q) => q[0])), u1 = Math.max(...pts.map((q) => q[0]));
     const v0 = Math.min(...pts.map((q) => q[1])), v1 = Math.max(...pts.map((q) => q[1]));
-    const w = (u1 - u0) * MM, h = (v1 - v0) * MM;
-    const X = (u: number) => x + (u - u0) * MM, Y = (v: number) => MARGIN + (v1 - v) * MM;
+    const pad = sa;
+    const w = (u1 - u0) * MM + 2 * pad, h = (v1 - v0) * MM + 2 * pad;
+    const X = (u: number) => x + pad + (u - u0) * MM, Y = (v: number) => MARGIN + pad + (v1 - v) * MM;
     const loop = (ids: number[]) => ids.map((i, k) => `${k ? 'L' : 'M'}${X(p.uv[i][0]).toFixed(1)} ${Y(p.uv[i][1]).toFixed(1)}`).join(' ') + ' Z';
-    const path = [p.outline, ...(p.darts ?? [])].map(loop).join(' ');
+    const sewLoops = [p.outline, ...(p.darts ?? [])].map(loop).join(' ');
+    let cutPath = sewLoops;
+    let sewPath: string | undefined;
+    if (sa > 0) {
+      const baseLoop = p.outline.map((i) => ({ x: X(p.uv[i][0]), y: Y(p.uv[i][1]) }));
+      const grown = offsetLoop(baseLoop, sa, { joinStyle: 'miter', miterLimit: 2.4 });
+      if (grown.length > 0) {
+        cutPath = [...grown.map(ptsToPath), ...(p.darts ?? []).map(loop)].join(' ');
+        sewPath = sewLoops;
+      }
+    }
     // Placement marks for what is sewn on at a point; topstitching is sewn after, not marked.
     const marks = (p.marks ?? []).filter((m) => m.kind !== 'stitch').map((m) => ({ kind: m.kind, x: X(p.uv[m.particle][0]), y: Y(p.uv[m.particle][1]), r: (m.size * MM) / 2 }));
     const channels = (p.lines ?? []).map((run) => run.map((i, k) => `${k ? 'L' : 'M'}${X(p.uv[i][0]).toFixed(1)} ${Y(p.uv[i][1]).toFixed(1)}`).join(' '));
-    out.push({ name: p.name, strain95: p.strain95, x, y: MARGIN, w, h, path, marks, channels });
+    out.push({ name: p.name, strain95: p.strain95, x, y: MARGIN, w, h, path: cutPath, sewPath, marks, channels });
     x += w + GAP;
     height = Math.max(height, h);
   }
-  return { pieces: out, width: x - GAP + MARGIN, height: height + 2 * MARGIN + 24 };
+  return { pieces: out, width: Math.max(100, x - GAP + MARGIN), height: height + 2 * MARGIN + 24 };
 }
 
 const escXml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /** The layout as an SVG document, 1 unit = 1 mm. */
-export function patternSvg(pieces: PatternPiece[], title = 'pattern'): string {
-  const L = layoutPattern(pieces);
+export function patternSvg(pieces: PatternPiece[], title = 'pattern', options?: PatternLayoutOptions): string {
+  const sa = Math.max(0, options?.seamAllowanceMm ?? 0);
+  const L = layoutPattern(pieces, options);
   const body = L.pieces.map((p) => {
     const gx = p.x + p.w / 2, g0 = p.y + p.h * 0.25, g1 = p.y + p.h * 0.75;
+    const saLabel = sa > 0 ? ` · +${Math.round(sa)} mm seam` : '';
     return [
-      `<path d="${p.path}" fill="none" stroke="#000" stroke-width="0.5"/>`,
-      ...p.channels.map((d) => `<path d="${d}" fill="none" stroke="#000" stroke-width="0.4" stroke-dasharray="3 1.5"><title>boning channel</title></path>`),
-      ...p.marks.map((m) => `<circle cx="${m.x.toFixed(1)}" cy="${m.y.toFixed(1)}" r="${Math.max(0.8, m.r).toFixed(1)}" fill="${m.kind === 'zipper' ? '#000' : 'none'}" stroke="#000" stroke-width="0.4"><title>${escXml(m.kind)}</title></circle>`),
-      `<line x1="${gx.toFixed(1)}" y1="${g1.toFixed(1)}" x2="${gx.toFixed(1)}" y2="${g0.toFixed(1)}" stroke="#888" stroke-width="0.4" marker-end="url(#arrow)"/>`,
-      `<text x="${(p.x + p.w / 2).toFixed(1)}" y="${(p.y + p.h + 14).toFixed(1)}" font-size="8" font-family="sans-serif" text-anchor="middle">${escXml(p.name)} · ${Math.round(p.w)}×${Math.round(p.h)} mm · ease to lie flat ${(p.strain95 * 100).toFixed(0)}%</text>`,
+      `<path d="${p.path}" data-operation="cut" fill="none" stroke="#000" stroke-width="0.5"/>`,
+      ...(p.sewPath ? [`<path d="${p.sewPath}" data-operation="etch" fill="none" stroke="#64748b" stroke-width="0.35" stroke-dasharray="2.5 1.5"><title>stitching line</title></path>`] : []),
+      ...p.channels.map((d) => `<path d="${d}" data-operation="etch" fill="none" stroke="#000" stroke-width="0.4" stroke-dasharray="3 1.5"><title>boning channel</title></path>`),
+      ...p.marks.map((m) => `<circle cx="${m.x.toFixed(1)}" cy="${m.y.toFixed(1)}" r="${Math.max(0.8, m.r).toFixed(1)}" data-operation="etch" fill="${m.kind === 'zipper' ? '#000' : 'none'}" stroke="#000" stroke-width="0.4"><title>${escXml(m.kind)}</title></circle>`),
+      `<line x1="${gx.toFixed(1)}" y1="${g1.toFixed(1)}" x2="${gx.toFixed(1)}" y2="${g0.toFixed(1)}" data-operation="etch" stroke="#888" stroke-width="0.4" marker-end="url(#arrow)"/>`,
+      `<text x="${(p.x + p.w / 2).toFixed(1)}" y="${(p.y + p.h + 14).toFixed(1)}" data-operation="etch" font-size="8" font-family="sans-serif" text-anchor="middle">${escXml(p.name)} · ${Math.round(p.w)}×${Math.round(p.h)} mm${saLabel} · ease to lie flat ${(p.strain95 * 100).toFixed(0)}%</text>`,
     ].join('\n');
   }).join('\n');
   return [

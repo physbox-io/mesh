@@ -1,11 +1,12 @@
-import { useMemo, useRef } from 'react';
-import { ImagePlus, Scissors, X } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
+import { ImagePlus, Printer, Scissors, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import type { ClothPatternPrint } from '../../types/cloth';
 import type { ModelMirror } from '../../types/sceneLayer';
 import { layoutPattern, patternSvg, type PatternPiece } from '../../utils/cloth/patternSvg';
 import { downloadBlob } from '../../utils/downloadBlob';
+import { openTiledPrintWindow, type PaperFormat } from '../../utils/tiledPaperPrint';
 
 /** Overlay colours on the pattern preview. */
 const OVERLAY = { boning: '#d97706', zipper: '#2563eb', trim: '#334' };
@@ -19,10 +20,12 @@ const OVERLAY = { boning: '#d97706', zipper: '#2563eb', trim: '#334' };
 export function GarmentCard({ node }: { node: SceneNode }) {
   const model = useStore((s) => s.model) as ModelMirror | null;
   const name = node.name || node.id;
+  const [seamAllowanceMm, setSeamAllowanceMm] = useState<number>(10);
+  const [paperFormat, setPaperFormat] = useState<PaperFormat>('a4');
   const pieces = useMemo<PatternPiece[]>(() => (model?.flexes ?? [])
     .filter((f) => f.flat && f.name.slice(0, f.name.lastIndexOf('__')) === name)
     .map((f) => ({ name: f.name.slice(f.name.lastIndexOf('__') + 2), ...f.flat! })), [model, name]);
-  const layout = useMemo(() => layoutPattern(pieces), [pieces]);
+  const layout = useMemo(() => layoutPattern(pieces, { seamAllowanceMm }), [pieces, seamAllowanceMm]);
   // A stroke unit for the overlays, so they read at the card's size whatever the pieces' extent.
   const u = layout.width / 250;
   const legend = useMemo(() => {
@@ -126,6 +129,9 @@ export function GarmentCard({ node }: { node: SceneNode }) {
             {layout.pieces.map((p) => (
               <g key={p.name}>
                 <path d={p.path} fillRule="evenodd" fill={svgDataUri ? `url(#${patternDefId})` : '#e9eef7'} stroke="#334" strokeWidth={Math.max(0.5, layout.width / 400)} />
+                {p.sewPath && (
+                  <path d={p.sewPath} fill="none" stroke="#7c3aed" strokeWidth={Math.max(0.4, layout.width / 520)} strokeDasharray={`${2.4 * u} ${1.4 * u}`} />
+                )}
                 {/* Drawn to be seen at this size, in colour (the download keeps true-size lines). */}
                 {p.channels.map((d, i) => <path key={`c${i}`} d={d} fill="none" stroke={OVERLAY.boning} strokeWidth={1.6 * u} strokeDasharray={`${3 * u} ${1.5 * u}`} />)}
                 {p.marks.map((m, i) => (m.kind === 'zipper'
@@ -151,13 +157,51 @@ export function GarmentCard({ node }: { node: SceneNode }) {
               </li>
             ))}
           </ul>
+          <div className="flex items-center gap-2 pt-1 border-t border-slate-200/70 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300" title="Outward seam allowance added round every piece (0 mm exports net sewing lines; 6 mm suits overlocked knits; 10–15 mm suits woven seams)">
+            <span className="font-medium shrink-0">Seam allowance</span>
+            <input
+              type="range"
+              min={0}
+              max={25}
+              step={1}
+              value={seamAllowanceMm}
+              onChange={(e) => setSeamAllowanceMm(parseInt(e.target.value, 10) || 0)}
+              className="flex-1 accent-purple-600 cursor-pointer"
+            />
+            <span className="tabular-nums font-mono w-11 text-right">{seamAllowanceMm} mm</span>
+          </div>
           <button
-            onClick={() => downloadBlob(new Blob([patternSvg(pieces, name)], { type: 'image/svg+xml' }), `${name}_pattern.svg`)}
+            onClick={() => downloadBlob(new Blob([patternSvg(pieces, name, { seamAllowanceMm })], { type: 'image/svg+xml' }), `${name}_pattern.svg`)}
             className="flex items-center justify-center gap-2 w-full py-2 border border-emerald-200 dark:border-emerald-800 rounded-lg text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 hover:border-emerald-300 transition-colors shadow-sm cursor-pointer"
-            title="Download the pieces as an SVG in millimetres: outlines with no seam allowance, a grain line up each, named"
+            title="Download the pieces as a 1:1 millimetre SVG (with seam allowance and dashed stitching line if > 0 mm)"
           >
             <Scissors className="w-4 h-4" /> Download pattern (SVG)
           </button>
+          <div className="flex items-center gap-1.5">
+            <select
+              value={paperFormat}
+              onChange={(e) => setPaperFormat(e.target.value as PaperFormat)}
+              aria-label="Home printer paper size"
+              className="px-2 py-1.5 border border-slate-200 dark:border-slate-700 rounded-lg text-[11px] font-semibold bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 cursor-pointer"
+            >
+              <option value="a4">A4</option>
+              <option value="letter">US Letter</option>
+            </select>
+            <button
+              type="button"
+              onClick={() =>
+                openTiledPrintWindow(patternSvg(pieces, name, { seamAllowanceMm }), {
+                  paper: paperFormat,
+                  title: `${name} Sewing Pattern`,
+                  fileStem: `${name}_pattern`,
+                })
+              }
+              className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2.5 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors shadow-xs cursor-pointer"
+              title="Tile 1:1 onto A4 or US Letter sheets with corner alignment diamonds and a 50 × 50 mm ruler scale box, ready for any home printer and scissors"
+            >
+              <Printer className="w-3.5 h-3.5" /> Print 1:1 on {paperFormat === 'a4' ? 'A4' : 'Letter'}
+            </button>
+          </div>
         </>
       )}
     </div>

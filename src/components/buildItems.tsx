@@ -1,8 +1,9 @@
-import { BrickWall, ListChecks, PersonStanding, Puzzle, Wrench } from 'lucide-react';
+import { BrickWall, ListChecks, PersonStanding, Puzzle, Scissors, Wrench } from 'lucide-react';
 import type { BuildItem } from './BuildMenu';
 
 /** The building methods, in the order a person would reach for them. */
 export function buildItems(actions: {
+  unfold?: () => void;
   pipes?: () => void;
   joinery?: () => void;
   brick?: () => void;
@@ -12,6 +13,9 @@ export function buildItems(actions: {
 }): BuildItem[] {
   const icon = 'w-3.5 h-3.5';
   return [
+    ...(actions.unfold
+      ? [{ label: 'Papercraft & leather', hint: 'Unfold 3D shapes into flat 1:1 patterns with glue tabs, stitch holes or bend lines — print on A4/Letter for scissors & craft knife, or send to Etch.', icon: <Scissors className={icon} />, run: actions.unfold }]
+      : []),
     ...(actions.pipes
       ? [{ label: 'Pipe frame', hint: 'Frame a shape in PVC, EMT or aluminium tube, with the cut list and printable hubs. Best for: shelters, carts, racks and greenhouses.', icon: <Wrench className={icon} />, run: actions.pipes }]
       : []),

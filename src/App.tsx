@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type * as THREE from 'three';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
@@ -34,6 +34,8 @@ import { ShareReportPortal } from './components/ShareReportPortal';
 import { SavePresetModal } from './components/SavePresetModal';
 import { ImportModals } from './components/ImportModals';
 import { FabricationModals } from './components/FabricationModals';
+import { WelcomeTourOverlay } from './components/WelcomeTourOverlay';
+import { parseMeshDeepLink, stripMeshDeepLinkSearch, START_TOUR_EVENT } from './utils/deepLink';
 
 // The status bar's "SCAD Compiling" pill counts compiles in flight. openscad.ts
 // reports them through a listener rather than importing the store; see there.
@@ -65,6 +67,28 @@ function App() {
   const presets = usePresetActions(doc);
   const shareState = useShareScene(noteCards, presets.loadUserPresetWithCard);
   const { exportJson, importSceneJson, importJson } = useSceneIo(doc);
+
+  // Apply deep-link URL query parameters once on initial mount (`?preset=...&machine=...&open=...`).
+  useEffect(() => {
+    const link = parseMeshDeepLink(window.location.search);
+    if (!link) return;
+    if (link.preset) presets.loadPresetWithCard(link.preset);
+    if (link.machine) useStore.getState().setMachineTarget(link.machine);
+    if (link.run && !useStore.getState().isPlaying) useStore.getState().togglePlay();
+    if (link.tour) window.dispatchEvent(new CustomEvent(START_TOUR_EVENT));
+    if (link.open) {
+      const openModal = link.open;
+      setTimeout(() => {
+        window.dispatchEvent(
+          new CustomEvent('physbox:open-fab', {
+            detail: { modal: openModal, moldTab: link.moldTab, unfoldMode: link.unfoldMode },
+          })
+        );
+      }, 80);
+    }
+    window.history.replaceState(null, '', stripMeshDeepLinkSearch(window.location.href));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // The three.js scene, captured inside the canvas; the STL and 3MF exports read it.
   const threeSceneRef = useRef<THREE.Scene | null>(null);
@@ -132,6 +156,8 @@ function App() {
       <ImportModals />
 
       <FabricationModals threeSceneRef={threeSceneRef} noteCards={noteCards} />
+
+      <WelcomeTourOverlay />
 
       {/* A job that was still cutting when this browser last closed. Mounted at
           the top level and not inside an export modal, because the session that

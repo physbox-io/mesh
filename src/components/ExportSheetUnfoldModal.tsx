@@ -9,6 +9,7 @@ import {
   ExternalLink,
   Info,
   ChevronRight,
+  Printer,
 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import type { SceneGraph } from '../types/scene';
@@ -19,6 +20,7 @@ import {
   type SheetUnfoldMode,
   type SheetUnfoldOptions,
 } from '../utils/sheetUnfoldExporter';
+import { openTiledPrintWindow, type PaperFormat } from '../utils/tiledPaperPrint';
 import { useStore } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { HintAnchor } from './ExportFields';
@@ -33,6 +35,7 @@ export interface ExportSheetUnfoldModalProps {
   isOpen: boolean;
   onClose: () => void;
   scene?: SceneGraph;
+  initialMode?: SheetUnfoldMode;
 }
 
 const inputClass =
@@ -137,13 +140,14 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
   onClose,
   scene: sceneProp,
   subjectLabel,
+  initialMode,
 }) => {
   useEscapeToClose(isOpen, onClose);
   const storeScene = useStore((s) => s.sceneGraph);
   const stock = useStore((s) => s.stock);
   const scene = sceneProp ?? storeScene;
 
-  const [mode, setMode] = useState<SheetUnfoldMode>(DEFAULT_SHEET_UNFOLD_OPTIONS.mode);
+  const [mode, setMode] = useState<SheetUnfoldMode>(initialMode ?? DEFAULT_SHEET_UNFOLD_OPTIONS.mode);
   const [coplanarToleranceDeg, setCoplanarToleranceDeg] = useState<number>(
     DEFAULT_SHEET_UNFOLD_OPTIONS.coplanarToleranceDeg
   );
@@ -181,6 +185,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
   const [includeLabels, setIncludeLabels] = useState<boolean>(true);
   const [includeSheetOutline, setIncludeSheetOutline] = useState<boolean>(true);
   const [previewActualSize, setPreviewActualSize] = useState<boolean>(false);
+  const [paperFormat, setPaperFormat] = useState<PaperFormat>('a4');
   const [etchError, setEtchError] = useState<string | null>(null);
 
   const options: SheetUnfoldOptions = useMemo(
@@ -743,6 +748,34 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
               progress={simulation.progress}
               error={simulation.error}
             />
+            <div className="flex items-center rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 overflow-hidden shadow-xs">
+              <select
+                value={paperFormat}
+                onChange={(e) => setPaperFormat(e.target.value as PaperFormat)}
+                aria-label="Home printer paper size"
+                className="px-2 py-2 text-xs font-semibold bg-transparent text-indigo-700 dark:text-indigo-300 border-r border-indigo-200 dark:border-indigo-800 cursor-pointer outline-none"
+              >
+                <option value="a4">A4</option>
+                <option value="letter">Letter</option>
+              </select>
+              <button
+                type="button"
+                disabled={!exportResult || !exportResult.success || !exportResult.svg}
+                onClick={() => {
+                  if (!exportResult?.svg) return;
+                  openTiledPrintWindow(exportResult.svg, {
+                    paper: paperFormat,
+                    title: `${subjectLabel || 'Unfolded Pattern'} (${mode})`,
+                    fileStem: `sheet_unfold_${mode}`,
+                  });
+                }}
+                title="Tile 1:1 onto A4 or US Letter sheets with corner alignment diamonds and a 50 × 50 mm ruler check square — cut with scissors or a craft knife"
+                className="flex items-center space-x-1.5 whitespace-nowrap px-3 py-2 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 disabled:opacity-40 text-indigo-700 dark:text-indigo-300 font-bold text-xs transition-colors cursor-pointer"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Print 1:1 Sheets</span>
+              </button>
+            </div>
             <button
               onClick={handleOpenInEtch}
               disabled={!exportResult || !exportResult.success}

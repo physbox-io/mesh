@@ -37,7 +37,7 @@ export function PresetPicker({ presets }: { presets: PresetActions }) {
   const closeDialog = useDialogs((s) => s.closeDialog);
   const showNotice = useDialogs((s) => s.showNotice);
   return (
-    <div className="flex items-center min-w-0 max-lg:flex-1 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+    <div data-tour="preset-picker" className="flex items-center min-w-0 max-lg:flex-1 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
       {/* The current scene's name, and the way to every other one. A button
           rather than the <select> it replaced: the select had grown to eighty
           entries, generators included, and could not search. */}

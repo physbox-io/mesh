@@ -16,6 +16,9 @@ import { ExportCastModal } from './ExportCastModal';
 import { SplitForPrintModal } from './SplitForPrintModal';
 import { TimberBreakdownModal } from './TimberBreakdownModal';
 import { ExportSheetUnfoldModal } from './ExportSheetUnfoldModal';
+import type { SheetUnfoldMode } from '../utils/sheetUnfoldExporter';
+import type { DeepLinkModal } from '../utils/deepLink';
+import type { MoldTab } from '../utils/moldTabs';
 import { ExportTubeAndWireModal } from './ExportTubeAndWireModal';
 import { BrickworkModal } from './BrickworkModal';
 import { addClothNode, frameForm } from './palette/clothStartActions';
@@ -55,6 +58,7 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
   const [isSheetUnfoldModalOpen, setIsSheetUnfoldModalOpen] = useState(false);
+  const [unfoldInitialMode, setUnfoldInitialMode] = useState<SheetUnfoldMode | undefined>(undefined);
   const [isTubeAndWireModalOpen, setIsTubeAndWireModalOpen] = useState(false);
   const [isBrickModalOpen, setIsBrickModalOpen] = useState(false);
 
@@ -80,6 +84,48 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   };
   const subject = useMemo(() => (sceneGraph ? moldSubject(sceneGraph, subjectIds) : null), [sceneGraph, subjectIds]);
   const subjectScene = subject?.scene ?? null;
+
+  // Open a fabrication dialog requested via deep-link URL (`?open=...`).
+  useEffect(() => {
+    const onOpenFab = (e: Event) => {
+      const detail = (e as CustomEvent<{ modal: DeepLinkModal; moldTab?: MoldTab; unfoldMode?: SheetUnfoldMode }>).detail;
+      if (!detail) return;
+      setSubjectIds(selectedIds(useStore.getState()));
+      switch (detail.modal) {
+        case 'mold':
+          if (detail.moldTab) useCastDialog.getState().requestTab({ tab: detail.moldTab, advanced: false });
+          setIsMoldModalOpen(true);
+          break;
+        case 'unfold':
+          setUnfoldInitialMode(detail.unfoldMode);
+          setIsSheetUnfoldModalOpen(true);
+          break;
+        case 'unwrap':
+          setIsLaserCutModalOpen(true);
+          break;
+        case 'contour':
+          setIsContourSliceModalOpen(true);
+          break;
+        case 'relief':
+          setIsReliefCarveModalOpen(true);
+          break;
+        case 'solid':
+          setIsSolidModalOpen(true);
+          break;
+        case 'joinery':
+          setIsJoineryModalOpen(true);
+          break;
+        case 'pipes':
+          setIsTubeAndWireModalOpen(true);
+          break;
+        case 'brick':
+          setIsBrickModalOpen(true);
+          break;
+      }
+    };
+    window.addEventListener('physbox:open-fab', onOpenFab);
+    return () => window.removeEventListener('physbox:open-fab', onOpenFab);
+  }, []);
 
   // Resume a previously connected USB or cloud machine once on app startup
   // even while MachineConfigModal is not mounted.
@@ -209,9 +255,13 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
       {isSheetUnfoldModalOpen && subjectScene && (
         <ExportSheetUnfoldModal
           isOpen={isSheetUnfoldModalOpen}
-          onClose={() => setIsSheetUnfoldModalOpen(false)}
+          onClose={() => {
+            setIsSheetUnfoldModalOpen(false);
+            setUnfoldInitialMode(undefined);
+          }}
           scene={subjectScene!}
           subjectLabel={subject!.label}
+          initialMode={unfoldInitialMode}
         />
       )}
 
@@ -241,7 +291,10 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           cast: () => setIsCastModalOpen(true),
           split: () => setIsSplitModalOpen(true),
           joinery: () => setIsJoineryModalOpen(true),
-          unfold: opening(setIsSheetUnfoldModalOpen),
+          unfold: () => {
+            setUnfoldInitialMode(undefined);
+            opening(setIsSheetUnfoldModalOpen)();
+          },
           pipes: opening(setIsTubeAndWireModalOpen),
           brick: () => setIsBrickModalOpen(true),
           dressForm: () => { const form = newFormNode(useStore.getState().sceneGraph.nodes, 'female'); addClothNode(form); frameForm(form); },
