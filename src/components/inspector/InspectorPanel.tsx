@@ -80,7 +80,7 @@ export function InspectorPanel({ threeSceneRef }: { threeSceneRef: RefObject<THR
         */
         <aside
           style={{ width: `${propertiesWidth}px` }}
-          className={`shrink-0 glass-panel border-l border-slate-200 dark:border-slate-800 flex flex-col p-4 z-20 bg-white/55 dark:bg-slate-900/55 overflow-y-auto relative max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-[110] max-lg:w-80! max-lg:max-w-[80vw] max-lg:shadow-xl max-lg:bg-white/95 max-lg:dark:bg-slate-900/95 max-lg:transition-transform max-lg:duration-200 ${
+          className={`shrink-0 glass-panel border-l border-slate-200 dark:border-slate-800 flex flex-col p-4 z-20 bg-white/55 dark:bg-slate-900/55 overflow-y-auto relative max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-[115] max-lg:w-80! max-lg:max-w-[80vw] max-lg:shadow-xl max-lg:bg-white/95 max-lg:dark:bg-slate-900/95 max-lg:transition-transform max-lg:duration-200 ${
             // Below `lg` the drawer waits off the right-hand edge until it is
             // asked for. `pointer-events-none` as well as the translate, so a
             // panel parked off screen cannot swallow taps meant for the model.

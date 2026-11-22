@@ -1,6 +1,7 @@
-import { Info, X } from 'lucide-react';
+import { Info, Sparkles, X } from 'lucide-react';
 import { useSoundStore } from '../../store/soundStore';
 import { DOCS_TABS, type DocsTabId } from '../../utils/docsTabs';
+import { START_TOUR_EVENT } from '../../utils/deepLink';
 import { QuickReference } from './QuickReference';
 
 /**
@@ -29,29 +30,40 @@ export function DocsModal({ tab, onTab, onClose }: {
             <Info className="w-5 h-5 text-blue-500" />
             <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">PhysBox Reference Guide</h2>
           </div>
-          <button aria-label="Close" title="Close" 
-            onClick={() => onClose()}
-            className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                window.dispatchEvent(new CustomEvent(START_TOUR_EVENT));
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-xs font-semibold transition-colors cursor-pointer"
+              title="Replay the 5-step interactive workspace tour"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Quick Tour</span>
+            </button>
+            <button aria-label="Close" title="Close" 
+              onClick={() => onClose()}
+              className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Modal Content Split */}
-        <div className="flex flex-1 overflow-hidden min-h-0">
+        <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0">
           {/* Tab Navigation */}
-          {/* The tab rail keeps every section reachable on a phone rather
-              than collapsing into a picker, but at a width that leaves the
-              prose it navigates worth reading. */}
-          <div className="w-48 max-sm:w-28 bg-slate-50 dark:bg-slate-950/60 border-r border-slate-150 dark:border-slate-800 p-3 max-sm:p-2 flex flex-col gap-1 shrink-0 overflow-y-auto">
+          <div className="w-full sm:w-48 bg-slate-50 dark:bg-slate-950/60 border-b sm:border-b-0 sm:border-r border-slate-150 dark:border-slate-800 p-2.5 sm:p-3 flex flex-row sm:flex-col gap-1.5 sm:gap-1 shrink-0 overflow-x-auto sm:overflow-y-auto">
             {DOCS_TABS.map(({ group, items }) => (
-              <div key={group} className="flex flex-col gap-1 mb-1.5">
-                <span className="px-1 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">{group}</span>
+              <div key={group} className="flex flex-row sm:flex-col gap-1 sm:mb-1.5 shrink-0">
+                <span className="hidden sm:block px-1 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">{group}</span>
                 {items.map(({ id, label }) => (
                   <button
                     key={id}
                     onClick={() => onTab(id)}
-                    className={`px-3 py-1.5 text-left rounded-lg text-xs font-semibold transition-all ${tab === id ? 'bg-blue-500 text-white shadow' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                    className={`px-3 py-1.5 text-left rounded-lg text-xs font-semibold transition-all whitespace-nowrap sm:whitespace-normal shrink-0 ${tab === id ? 'bg-blue-500 text-white shadow' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
                   >
                     {label}
                   </button>

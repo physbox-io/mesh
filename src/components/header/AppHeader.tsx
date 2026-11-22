@@ -83,7 +83,7 @@ export function AppHeader({
         {/* Center/Right: Simulation Toolbar & Files */}
         <div className="flex items-center gap-2 md:gap-3 min-w-0 max-lg:w-full max-lg:flex-wrap max-lg:justify-between max-lg:gap-y-1.5">
           {/* Simulation Controller Block */}
-          <div className={`flex items-center max-lg:shrink-0 p-0.5 rounded-lg border transition-all duration-300 ${
+          <div data-tour="sim-run" className={`flex items-center max-lg:shrink-0 p-0.5 rounded-lg border transition-all duration-300 ${
             isPlaying
               ? 'bg-emerald-50/80 dark:bg-emerald-950/35 border-emerald-400/60 dark:border-emerald-500/40 shadow-[0_0_12px_-2px_rgba(16,185,129,0.28)]'
               : 'bg-slate-100 dark:bg-slate-800/80 border-slate-200/80 dark:border-slate-700/60 shadow-inner'
@@ -256,7 +256,7 @@ export function AppHeader({
           </div>
 
           {/* Right Utilities (Dark Mode, Docs, Settings, Copilot, User Profile, GitHub) */}
-          <div className="flex items-center gap-1.5 max-lg:shrink-0">
+          <div data-tour="copilot-docs" className="flex flex-wrap items-center justify-end gap-1.5 max-w-full">
             {/* Dark Mode Toggle - immediately left of Docs button */}
             <button
               onClick={onToggleDarkMode}

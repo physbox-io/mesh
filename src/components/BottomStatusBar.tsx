@@ -470,7 +470,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             : []),
         ];
   // Built by hand from bought stock, whatever is on the bench.
-  const build = buildItems({ pipes: exports.pipes, joinery: exports.joinery, brick: exports.brick, dressForm: exports.dressForm, partsList: () => openHardwareList(), hasHardware });
+  const build = buildItems({ unfold: exports.unfold, pipes: exports.pipes, joinery: exports.joinery, brick: exports.brick, dressForm: exports.dressForm, partsList: () => openHardwareList(), hasHardware });
 
   return (
     /*
@@ -544,14 +544,14 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       </div>
 
       {/* What it is cut on, and what out of */}
-      <div className="flex items-center gap-2 max-lg:shrink-0">
+      <div data-tour="bench-bar" className="flex flex-wrap items-center gap-2 max-w-full">
         {/* Its own pill, outside the machine's: built by hand from bought
             stock, it does not change with the machine, the stock or the
             material, and inside that group it read as one of its exports. */}
         <div className="flex items-center px-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
           <BuildMenu items={build} />
         </div>
-        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+        <div className="flex flex-wrap items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 max-w-full">
           <Cpu className="w-3.5 h-3.5 text-amber-500" />
           <select
             value={machineTarget}

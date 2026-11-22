@@ -659,7 +659,7 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
             <Layers className="w-4 h-4 text-emerald-500" />
             <span>

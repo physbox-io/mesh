@@ -57,9 +57,9 @@ const AXES: Axis[] = ['x', 'y', 'z'];
  * gap underneath.
  */
 const panelClass =
-  'absolute top-20 left-4 z-30 w-60 rounded-xl border border-slate-200 dark:border-slate-800 ' +
+  'absolute top-20 left-4 z-30 w-60 max-w-[calc(100%-2rem)] rounded-xl border border-slate-200 dark:border-slate-800 ' +
   'bg-white/95 dark:bg-slate-900/95 backdrop-blur shadow-lg p-3 space-y-3 select-none ' +
-  'max-h-[calc(100vh-6rem)] overflow-y-auto overscroll-contain';
+  'max-h-[calc(100%-6rem)] overflow-y-auto overscroll-contain';
 
 const labelClass = 'text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500';
 

@@ -197,10 +197,12 @@ export const EdgeRoundTool = () => {
     const onCanvas = (event: PointerEvent) => event.target === gl.domElement;
     const down = (event: PointerEvent) => {
       if (event.button !== 0 || !onCanvas(event)) return;
+      pointer.current = { x: event.clientX, y: event.clientY };
+      const hit = hoverNow();
+      if (event.pointerType === 'touch' && !hit) return;
       event.preventDefault();
       event.stopPropagation();
-      pointer.current = { x: event.clientX, y: event.clientY };
-      toggle(hoverNow());
+      toggle(hit);
     };
     const swallow = (event: PointerEvent) => {
       if (event.button !== 0 || !onCanvas(event)) return;

@@ -142,13 +142,18 @@ export function HintAnchor({
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(false);
+    const onPointerDown = (e: PointerEvent) => {
+      if (anchor && !anchor.contains(e.target as Node)) setOpen(false);
+    };
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
+    window.addEventListener('pointerdown', onPointerDown, true);
     return () => {
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('resize', close);
+      window.removeEventListener('pointerdown', onPointerDown, true);
     };
-  }, [open]);
+  }, [open, anchor]);
 
   return (
     <span
@@ -157,6 +162,11 @@ export function HintAnchor({
       onMouseLeave={() => setOpen(false)}
       onFocus={() => setOpen(true)}
       onBlur={() => setOpen(false)}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpen((o) => !o);
+      }}
       className={className}
     >
       {children}
@@ -276,7 +286,7 @@ export function Segmented<T extends string>({
   value, options, onChange,
 }: { value: T; options: readonly (readonly [T, string])[]; onChange: (v: T) => void }) {
   return (
-    <div className="flex bg-slate-200 dark:bg-slate-700/60 p-0.5 rounded-lg">
+    <div className="flex flex-wrap gap-0.5 bg-slate-200 dark:bg-slate-700/60 p-0.5 rounded-lg">
       {options.map(([v, label]) => (
         <button
           key={v}
