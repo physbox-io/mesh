@@ -72,6 +72,16 @@ let SETTLE_BUDGET_MS = 20000;
 export function setSettleBudgetMs(ms: number): void {
   SETTLE_BUDGET_MS = ms;
 }
+
+/**
+ * How long the untangle after the settle may run, in wall-clock ms (it also
+ * stops at UNTANGLE_MAX passes). Tests set Infinity for the same reason as the
+ * settle: a 3 s cut gave a CI runner fewer passes than a desk machine, and
+ * collar and dart measures landed either side of their bounds.
+ */
+export function setUntangleBudgetMs(ms: number): void {
+  UNTANGLE_BUDGET = ms;
+}
 /** How long cloth that starts lifted is let fall, seconds, more. */
 const DROP_TIME = 0.6;
 /** An arrangement: after sewing, how long until points are pulled, how long the pull takes, how long they are held, seconds. */
@@ -89,7 +99,7 @@ const UNTANGLE_REACH = 0.05;
 /** Untangling at the build: at most this many steps, the whole checked again every so many. */
 const UNTANGLE_MAX = 1500, UNTANGLE_CHECK = 25;
 /** And for no longer than this at the build, ms: what is left stays free of continuous collision, to come apart as it runs. */
-const UNTANGLE_BUDGET = 3000;
+let UNTANGLE_BUDGET = 3000;
 /**
  * Continuous collision over this many substeps at a time (each stretch's end
  * is what is kept), and whatever is left before the cloth is drawn or read

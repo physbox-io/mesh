@@ -7,11 +7,12 @@ import * as THREE from 'three';
 import type { SceneNode } from '../src/types/scene';
 import type { ClothModel } from '../src/utils/cloth/clothModel';
 import { colliderContact, type Collider } from '../src/utils/cloth/clothColliders';
-import { setSettleBudgetMs, type ClothEnv, type ClothSim } from '../src/utils/cloth/xpbd';
+import { setSettleBudgetMs, setUntangleBudgetMs, type ClothEnv, type ClothSim } from '../src/utils/cloth/xpbd';
 
 // The physics, not the machine's speed: a settle cut short by the wall clock
 // leaves crossings a faster machine would have sewn out.
 setSettleBudgetMs(Infinity);
+setUntangleBudgetMs(Infinity);
 import { buildClothWorld } from '../src/utils/cloth/clothWorld';
 import { clothCrossings, type Crossing } from './clothIntersections';
 import { compileToMJCF } from '../src/utils/mjcf';
