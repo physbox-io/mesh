@@ -23,28 +23,28 @@ import type { LimbPath } from './limbPath';
 import type { BodyFigure, BodyFormMeasurements } from '../../types/cloth';
 import type { SceneGeom } from '../../types/scene';
 
-/** Neutral studio-plaster colour when `skinTone` is unset. */
+/** Neutral studio-plaster colour when `skinTone` is unset (or at `1` on the continuous gradient). */
 export const DEFAULT_MANNEQUIN_RGBA: [number, number, number, number] = [0.93, 0.89, 0.82, 1];
 
 /**
- * Curated human-complexion stops along `[0, 1]`, following a physiological
- * melanin + hemoglobin/undertone curve across deep espresso, reddish mahogany,
- * warm umber, sienna, golden bronze, terracotta, warm olive, honey, peach and
- * rosy porcelain rather than a dead linear grey-brown ramp.
+ * Control knots along `[0, 1]` for the continuous C1 Oklab complexion spline:
+ * sweeps smoothly through human skin tones (deep ebony, espresso, reddish mahogany,
+ * warm umber, sienna, golden bronze, terracotta, warm olive, honey, peach and rosy
+ * porcelain) and glides smoothly into neutral studio plaster at `1.0`.
  */
-export const SKIN_TONE_STOPS: { at: number; label: string; rgb: [number, number, number] }[] = [
-  { at: 0.00, label: 'Deep ebony', rgb: [0.15, 0.10, 0.09] },
-  { at: 0.09, label: 'Espresso', rgb: [0.23, 0.14, 0.11] },
-  { at: 0.18, label: 'Mahogany', rgb: [0.33, 0.18, 0.13] },
-  { at: 0.28, label: 'Warm umber', rgb: [0.44, 0.27, 0.18] },
-  { at: 0.38, label: 'Sienna', rgb: [0.54, 0.33, 0.22] },
-  { at: 0.48, label: 'Golden bronze', rgb: [0.62, 0.42, 0.27] },
-  { at: 0.57, label: 'Terracotta', rgb: [0.69, 0.46, 0.34] },
-  { at: 0.66, label: 'Warm olive', rgb: [0.75, 0.58, 0.43] },
-  { at: 0.75, label: 'Golden honey', rgb: [0.83, 0.65, 0.51] },
-  { at: 0.84, label: 'Warm peach', rgb: [0.88, 0.68, 0.58] },
-  { at: 0.92, label: 'Rosy fair', rgb: [0.93, 0.75, 0.69] },
-  { at: 1.00, label: 'Porcelain rose', rgb: [0.96, 0.83, 0.79] },
+export const SKIN_TONE_STOPS: { at: number; rgb: [number, number, number] }[] = [
+  { at: 0.00, rgb: [0.15, 0.10, 0.09] },
+  { at: 0.09, rgb: [0.23, 0.14, 0.11] },
+  { at: 0.18, rgb: [0.33, 0.18, 0.13] },
+  { at: 0.28, rgb: [0.44, 0.27, 0.18] },
+  { at: 0.38, rgb: [0.54, 0.33, 0.22] },
+  { at: 0.47, rgb: [0.62, 0.42, 0.27] },
+  { at: 0.56, rgb: [0.69, 0.48, 0.35] },
+  { at: 0.65, rgb: [0.75, 0.58, 0.43] },
+  { at: 0.74, rgb: [0.83, 0.65, 0.51] },
+  { at: 0.82, rgb: [0.89, 0.71, 0.61] },
+  { at: 0.90, rgb: [0.95, 0.81, 0.76] },
+  { at: 1.00, rgb: [0.93, 0.89, 0.82] },
 ];
 
 const srgbToLin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
@@ -74,40 +74,58 @@ function oklabToRgb([L, a, B]: [number, number, number]): [number, number, numbe
   return [clamp01(linToSrgb(lr)), clamp01(linToSrgb(lg)), clamp01(linToSrgb(lb))];
 }
 
-const OKLAB_STOPS = SKIN_TONE_STOPS.map((s) => ({ ...s, lab: rgbToOklab(s.rgb) }));
+const OKLAB_KNOTS = (() => {
+  const n = SKIN_TONE_STOPS.length;
+  const xs = SKIN_TONE_STOPS.map((s) => s.at);
+  const labs = SKIN_TONE_STOPS.map((s) => rgbToOklab(s.rgb));
+  const h = Array.from({ length: n - 1 }, (_, k) => Math.max(1e-9, xs[k + 1] - xs[k]));
+  const slopes = [0, 1, 2].map((ch) => {
+    const y = labs.map((v) => v[ch]);
+    const d = h.map((hk, k) => (y[k + 1] - y[k]) / hk);
+    const m = new Array<number>(n).fill(0);
+    for (let k = 1; k < n - 1; k++) {
+      if (d[k - 1] * d[k] > 0) {
+        const w1 = 2 * h[k] + h[k - 1], w2 = h[k] + 2 * h[k - 1];
+        m[k] = (w1 + w2) / (w1 / d[k - 1] + w2 / d[k]);
+      }
+    }
+    const endSlope = (h0: number, h1: number, d0: number, d1: number) => {
+      let s = ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+      if (s * d0 <= 0) return 0;
+      if (Math.abs(s) > 3 * Math.abs(d0)) s = 3 * d0;
+      return s;
+    };
+    m[0] = endSlope(h[0], h[1], d[0], d[1]);
+    m[n - 1] = endSlope(h[n - 2], h[n - 3], d[n - 2], d[n - 3]);
+    return m;
+  });
+  return { n, xs, labs, h, slopes };
+})();
 
-/** Evaluates `skinTone` (`0..1`) in perceptual Oklab space; `undefined` returns neutral studio plaster. */
+/** Evaluates `skinTone` (`0..1`) along the smooth C1 Oklab gradient ending at studio plaster (`1`); `undefined` returns studio plaster. */
 export function skinToneRgba(skinTone?: number | null): [number, number, number, number] {
   if (skinTone === undefined || skinTone === null || !Number.isFinite(skinTone)) return [...DEFAULT_MANNEQUIN_RGBA];
   const t = Math.min(1, Math.max(0, skinTone));
-  for (let i = 1; i < OKLAB_STOPS.length; i++) {
-    const a = OKLAB_STOPS[i - 1], b = OKLAB_STOPS[i];
-    if (t <= b.at + 1e-9) {
-      const u = Math.min(1, Math.max(0, (t - a.at) / Math.max(1e-9, b.at - a.at)));
-      const lab: [number, number, number] = [
-        a.lab[0] + (b.lab[0] - a.lab[0]) * u,
-        a.lab[1] + (b.lab[1] - a.lab[1]) * u,
-        a.lab[2] + (b.lab[2] - a.lab[2]) * u,
-      ];
-      return [...oklabToRgb(lab), 1];
-    }
-  }
-  return [...SKIN_TONE_STOPS[SKIN_TONE_STOPS.length - 1].rgb, 1];
+  if (t >= 1 - 1e-7) return [...DEFAULT_MANNEQUIN_RGBA];
+  if (t <= 1e-7) return [...SKIN_TONE_STOPS[0].rgb, 1];
+  const { n, xs, labs, h, slopes } = OKLAB_KNOTS;
+  let k = 0;
+  while (k + 2 < n && t > xs[k + 1]) k++;
+  const hk = h[k], u = Math.min(1, Math.max(0, (t - xs[k]) / hk));
+  const u2 = u * u, omu = 1 - u, omu2 = omu * omu;
+  const h00 = (1 + 2 * u) * omu2, h10 = u * omu2, h01 = u2 * (3 - 2 * u), h11 = u2 * (u - 1);
+  const lab: [number, number, number] = [0, 1, 2].map(
+    (ch) => h00 * labs[k][ch] + h10 * hk * slopes[ch][k] + h01 * labs[k + 1][ch] + h11 * hk * slopes[ch][k + 1],
+  ) as [number, number, number];
+  return [...oklabToRgb(lab), 1];
 }
 
-/** Human-readable name for the nearest stop along `skinTone` (`"Studio plaster"` when unset). */
-export function skinToneLabel(skinTone?: number | null): string {
-  if (skinTone === undefined || skinTone === null || !Number.isFinite(skinTone)) return 'Studio plaster';
-  const t = Math.min(1, Math.max(0, skinTone));
-  let best = SKIN_TONE_STOPS[0];
-  for (const s of SKIN_TONE_STOPS) if (Math.abs(s.at - t) < Math.abs(best.at - t)) best = s;
-  return best.label;
-}
-
-/** CSS `linear-gradient` spanning all curated human skin-tone stops for the inspector slider track. */
-export const SKIN_TONE_CSS_GRADIENT = `linear-gradient(to right, ${SKIN_TONE_STOPS.map((s) => {
-  const hex = s.rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
-  return `#${hex} ${Math.round(s.at * 100)}%`;
+/** Smooth continuous CSS `linear-gradient` sampled densely from `skinToneRgba(t)` all the way to studio plaster at `100%`. */
+export const SKIN_TONE_CSS_GRADIENT = `linear-gradient(to right, ${Array.from({ length: 33 }, (_, i) => {
+  const t = i / 32;
+  const [r, g, b] = skinToneRgba(t);
+  const hex = [r, g, b].map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+  return `#${hex} ${(t * 100).toFixed(2)}%`;
 }).join(', ')})`;
 
 /** A typical figure of each kind: what a new form starts from. */
@@ -555,7 +573,7 @@ function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string, tune: Tapes =
   }
   // The neck, carried a little forward of the shoulders.
   add('neck', { type: 'capsule', size: [r4(L.neckRadius)], fromto: [0, 0, r4(P.shoulderZ - 0.02 * s), 0, r4(-0.012 * s), r4(P.neckTop)] });
-  add('head', { type: 'ellipsoid', role: 'collision', size: [r4(0.075 * s), r4(0.095 * s), r4(0.115 * s)], pos: [0, r4(-0.015 * s), r4(P.crown - 0.115 * s)] });
+  add('head', { type: 'ellipsoid', role: 'collision', size: [r4(0.075 * s), r4(0.091 * s), r4(0.115 * s)], pos: [0, r4(-0.011 * s), r4(P.crown - 0.115 * s)] });
 
   // Arms: one smooth limb each, tapering from the shoulder through the elbow
   // to the wrist and on into a slender hand, palm to the body, with a sculpted thumb.
@@ -587,7 +605,7 @@ function bodyFormGeomsRaw(m: BodyFormMeasurements, prefix: string, tune: Tapes =
   }
   {
     const head = limbs.head;
-    add('headSkin', { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(head, 0.004), [1, 0, 0], { start: head.startCap, end: head.endCap, partialEnd: true, angles: 96 }) });
+    add('headSkin', { type: 'mesh', size: [1, 1, 1], role: 'visual', ...limbLoft(limbSections(head, 0.003), [1, 0, 0], { start: head.startCap, end: head.endCap, partialEnd: true, angles: 128 }) });
   }
 
   for (const side of [1, -1] as const) {

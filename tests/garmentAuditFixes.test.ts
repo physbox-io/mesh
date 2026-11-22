@@ -498,12 +498,42 @@ describe('garment & body-form audit regression fixes', () => {
       expect(handReach).toBeLessThan(0.175);
       expect(handReach).toBeGreaterThan(0.145);
 
-      // 4. Face smoothness (no jagged >34° nose/mouth/brow gashes) & distinct nose projection.
-      const faceStats = maxDihedralOf(headSkin.vertices!, headSkin.faces!, (z) => z < m.height - 0.03);
-      expect(faceStats.maxDeg, `${figure} face maxDihedral`).toBeLessThan(34);
-      const noseMinY = Math.min(...faceStats.pts.filter((p) => Math.abs(p[0]) < 0.01 && p[2] > m.height - 0.17 && p[2] < m.height - 0.14).map((p) => p[1]));
-      const philtrumMinY = Math.min(...faceStats.pts.filter((p) => Math.abs(p[0]) < 0.01 && p[2] > m.height - 0.18 && p[2] < m.height - 0.168).map((p) => p[1]));
-      expect(noseMinY).toBeLessThan(philtrumMinY - 0.005);
+      // 4. Face smoothness (zero >=30° FeatureEdges scratches across headSkin), supraorbital brow arch,
+      // clean nasion indentation (no top-of-nose bulge), and slender non-bulbous nasal tip.
+      const s = m.height / 1.75;
+      const faceStats = maxDihedralOf(headSkin.vertices!, headSkin.faces!);
+      expect(faceStats.over30, `${figure} headSkin >=30°`).toBe(0);
+      expect(faceStats.maxDeg, `${figure} headSkin maxDihedral`).toBeLessThan(30);
+
+      const frontMinY = (zRel: number, xAbs: number, xTol = 0.004, zTol = 0.003) =>
+        Math.min(
+          ...faceStats.pts
+            .filter((p) => p[1] < 0 && Math.abs(Math.abs(p[0]) - xAbs * s) < xTol * s && Math.abs(p[2] - (m.height + zRel * s)) < zTol * s)
+            .map((p) => p[1]),
+        );
+      // Brow arch at x = +-30 mm stands proud (-Y) of the recessed upper orbital sulcus beneath it.
+      const browY = frontMinY(-0.106, 0.030, 0.004, 0.002);
+      const orbitSulcusY = frontMinY(-0.115, 0.030, 0.004, 0.0018);
+      expect(browY, `${figure} brow arch proud of orbital sulcus`).toBeLessThan(orbitSulcusY - 0.0012 * s);
+
+      // Nasion at z = -0.112..-0.115 has no outward bulge ahead of glabella (-0.105) and steps out cleanly down the bridge.
+      const glabellaY = frontMinY(-0.105, 0, 0.004);
+      const nasionY = frontMinY(-0.111, 0, 0.004);
+      const midBridgeY = frontMinY(-0.135, 0, 0.004);
+      expect(nasionY, `${figure} no glabella/nasion bulge`).toBeGreaterThanOrEqual(glabellaY - 0.0005 * s);
+      expect(midBridgeY, `${figure} nasal bridge rises cleanly from nasion`).toBeLessThan(nasionY - 0.006 * s);
+
+      // Slender, refined nasal tip (projection 3–6 mm past philtrum, tip crest half-width < 8 mm — never bulbous).
+      const noseMinY = Math.min(...faceStats.pts.filter((p) => Math.abs(p[0]) < 0.01 * s && p[2] > m.height - 0.165 * s && p[2] < m.height - 0.140 * s).map((p) => p[1]));
+      const philtrumMinY = Math.min(...faceStats.pts.filter((p) => Math.abs(p[0]) < 0.01 * s && p[2] > m.height - 0.176 * s && p[2] < m.height - 0.166 * s).map((p) => p[1]));
+      expect(noseMinY).toBeLessThan(philtrumMinY - 0.0025 * s);
+      expect(noseMinY, `${figure} nose not overly protruding`).toBeGreaterThan(nasionY - 0.016 * s);
+      const tipCrestHalfWidth = Math.max(
+        ...faceStats.pts
+          .filter((p) => p[2] > m.height - 0.156 * s && p[2] < m.height - 0.144 * s && p[1] < noseMinY + 0.003 * s)
+          .map((p) => Math.abs(p[0])),
+      );
+      expect(tipCrestHalfWidth, `${figure} slender nasal tip crest`).toBeLessThan(0.009 * s);
 
       // 5. Ankle & foot bounds: clears floor (z >= 0.012) with natural adult heel-to-toe length (22–27 cm).
       const footPts = legStats.pts.filter((p) => p[2] < 0.09);

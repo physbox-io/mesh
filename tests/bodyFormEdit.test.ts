@@ -8,7 +8,7 @@ import { useStore } from '../src/store/useStore';
 import { compileCsgNodes, resolveBodyFormsForBuild } from '../src/hooks/useCsgCompile';
 import { bodyFormNode } from '../src/utils/cloth/clothNodes';
 import { applySkinTone, bodyFormKey, mergeBodyForm, needsBodyFormBuild } from '../src/utils/cloth/bodyFormEdit';
-import { DEFAULT_MANNEQUIN_RGBA, FIGURE_DEFAULTS, SKIN_TONE_STOPS, bodyLandmarks, clampBodyForm, skinToneLabel, skinToneRgba } from '../src/utils/cloth/bodyForm';
+import { DEFAULT_MANNEQUIN_RGBA, FIGURE_DEFAULTS, SKIN_TONE_CSS_GRADIENT, SKIN_TONE_STOPS, bodyLandmarks, clampBodyForm, skinToneRgba } from '../src/utils/cloth/bodyForm';
 import { formHeightMeasurements, LANDMARK_GAPS, proportions } from '../src/utils/cloth/formProportions';
 import { defaultLimbGirths, formLimbs } from '../src/utils/cloth/formLimbs';
 import { resolveUpdatedGeoms } from '../src/hooks/mcp/bodyDefaults';
@@ -161,35 +161,45 @@ describe('a geom marked internal over MCP', () => {
 });
 
 describe('human-inclusive skinTone spectrum and O(1) zero-rebuild updates', () => {
-  it('spans non-linear reddish, brown, golden/olive, and rosy-pink human complexions and defaults to studio plaster', () => {
+  it('sweeps a smooth C1 Oklab gradient through human complexions and ends continuously at studio plaster (t = 1)', () => {
     expect(skinToneRgba(undefined)).toEqual(DEFAULT_MANNEQUIN_RGBA);
-    expect(skinToneLabel(undefined)).toBe('Studio plaster');
-    expect(SKIN_TONE_STOPS.length).toBeGreaterThanOrEqual(10);
+    expect(skinToneRgba(null)).toEqual(DEFAULT_MANNEQUIN_RGBA);
+    expect(skinToneRgba(1)).toEqual(DEFAULT_MANNEQUIN_RGBA);
+    expect(SKIN_TONE_STOPS.length).toBeGreaterThanOrEqual(12);
+    expect(SKIN_TONE_CSS_GRADIENT.split('#').length - 1).toBeGreaterThanOrEqual(32);
+    expect(SKIN_TONE_CSS_GRADIENT).toContain('#ede3d1 100.00%');
 
-    // Monotonically increasing luminance from deep ebony (0) to rosy porcelain (1),
-    // with genuinely non-collinear RGB chromaticity shifts across undertones.
-    const samples = Array.from({ length: 21 }, (_, i) => skinToneRgba(i / 20));
+    // Continuous C1 Oklab spline: monotonically increasing luminance from deep ebony (0) all the way
+    // through rosy porcelain (~0.89) into neutral studio plaster (1.0), with zero discrete step jumps.
+    const dense = Array.from({ length: 201 }, (_, i) => skinToneRgba(i / 200));
     const lum = ([r, g, b]: number[]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    expect(lum(samples[0])).toBeLessThan(0.14);
-    expect(lum(samples[samples.length - 1])).toBeGreaterThan(0.82);
-    for (let i = 1; i < samples.length; i++) {
-      expect(lum(samples[i])).toBeGreaterThan(lum(samples[i - 1]));
+    expect(lum(dense[0])).toBeLessThan(0.14);
+    expect(lum(dense[dense.length - 1])).toBeCloseTo(lum(DEFAULT_MANNEQUIN_RGBA), 4);
+    for (let i = 1; i < dense.length; i++) {
+      expect(lum(dense[i])).toBeGreaterThan(lum(dense[i - 1]) - 1e-5);
+      const stepDist = Math.hypot(
+        dense[i][0] - dense[i - 1][0],
+        dense[i][1] - dense[i - 1][1],
+        dense[i][2] - dense[i - 1][2],
+      );
+      expect(stepDist).toBeLessThan(0.015);
     }
 
-    // Verify chromaticity (r/(r+g+b), g/(r+g+b)) is curved/non-linear across reddish mahogany, olive, and rosy pink:
+    // Verify chromaticity (r/(r+g+b), g/(r+g+b)) curves across reddish mahogany, warm olive, rosy porcelain, and plaster:
     const chrom = ([r, g, b]: number[]) => {
       const s = r + g + b;
       return [r / s, g / s] as const;
     };
-    const cMahogany = chrom(skinToneRgba(0.18));
-    const cOlive = chrom(skinToneRgba(0.66));
-    const cRosy = chrom(skinToneRgba(0.92));
-    // Cross product of chromaticity vectors != 0 proves non-linear undertone curve (not a 2-endpoint lerp).
+    const cMahogany = chrom(skinToneRgba(0.17));
+    const cOlive = chrom(skinToneRgba(0.62));
+    const cRosy = chrom(skinToneRgba(0.89));
+    const cPlaster = chrom(skinToneRgba(1));
     const area2 = Math.abs(
       (cOlive[0] - cMahogany[0]) * (cRosy[1] - cMahogany[1]) -
       (cOlive[1] - cMahogany[1]) * (cRosy[0] - cMahogany[0]),
     );
     expect(area2).toBeGreaterThan(1e-3);
+    expect(Math.hypot(cPlaster[0] - cRosy[0], cPlaster[1] - cRosy[1])).toBeGreaterThan(0.01);
 
     // Preserves skinTone across figure switches and unsets on null.
     const m1 = mergeBodyForm(FIGURE_DEFAULTS.male, { skinTone: 0.35 });
