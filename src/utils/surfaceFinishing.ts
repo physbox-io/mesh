@@ -300,16 +300,16 @@ export function finishSurface(
    * A pass point's height. Off the samples the dilated grid is a bilinear,
    * and across a wall's cell that runs the cutter half way down the wall: a
    * raster row between two sample rows went 0.27 mm into a 30 mm cylinder
-   * and 0.46 mm into the corners of a square. In a wall's cell the cutter is
-   * read under itself instead, as a waterline's is, and on the model itself
-   * where the job has it.
+   * and 0.46 mm into the corners of a square. Where the job knows its model
+   * (a solid), the cutter in a wall's cell is read on the model itself.
    */
   const passZ = (pt: { x: number; y: number }) => {
     const z = sampleHeightmap(finishMap, pt.x, pt.y);
     // Scrap's walls nobody keeps (see `scrapWall`).
-    if (!inWallCell(pt.x, pt.y) || job.scrap?.(pt.x, pt.y)) return z;
-    return Math.max(z, finishTipAt(pt.x, pt.y), exact ? exact.faceTop(pt.x, pt.y, true) : -Infinity);
+    if (!exact || !inWallCell(pt.x, pt.y) || job.scrap?.(pt.x, pt.y)) return z;
+    return Math.max(z, exact.faceTop(pt.x, pt.y, true));
   };
+
   /** Up the dilated grid's slope at a point, as a unit vector. */
   const uphill = (p: { x: number; y: number }) => {
     const gx = sampleHeightmap(finishMap, p.x + res / 2, p.y) - sampleHeightmap(finishMap, p.x - res / 2, p.y);
