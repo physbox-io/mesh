@@ -61,7 +61,17 @@ const PRESEW_STEP = 1 / 200;
  * continuous collision busy for 25 minutes and the worker answered nothing;
  * past this, what is not yet sewn finishes sewing as the scene runs.
  */
-const SETTLE_BUDGET_MS = 20000;
+let SETTLE_BUDGET_MS = 20000;
+
+/**
+ * How long the settle before the first frame may run, in wall-clock ms. The
+ * browser keeps 20 s so a tab stays responsive; the tests set Infinity, because
+ * a wall-clock cut makes what they measure depend on how busy the machine is
+ * (urban_collection settled on an idle machine and not on a loaded CI runner).
+ */
+export function setSettleBudgetMs(ms: number): void {
+  SETTLE_BUDGET_MS = ms;
+}
 /** How long cloth that starts lifted is let fall, seconds, more. */
 const DROP_TIME = 0.6;
 /** An arrangement: after sewing, how long until points are pulled, how long the pull takes, how long they are held, seconds. */
