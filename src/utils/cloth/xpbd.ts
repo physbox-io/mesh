@@ -96,8 +96,8 @@ const SETTLE_PASSES = 15;
 /** Untangling (clothUntangle): how far a contour moves a step, and how near a crossing is re-tested. */
 const UNTANGLE_STEP = 0.0005;
 const UNTANGLE_REACH = 0.05;
-/** Untangling at the build: at most this many steps, the whole checked again every so many. */
-const UNTANGLE_MAX = 1500, UNTANGLE_CHECK = 25;
+/** Untangling at the build: at most this many steps, the whole checked again every so many, stopping when global crossings stop falling for `UNTANGLE_STALL` steps. */
+const UNTANGLE_MAX = 1500, UNTANGLE_CHECK = 25, UNTANGLE_STALL = 150;
 /** And for no longer than this at the build, ms: what is left stays free of continuous collision, to come apart as it runs. */
 let UNTANGLE_BUDGET = 3000;
 /**
@@ -997,6 +997,9 @@ export class ClothSim {
     const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches));
     const ccd = this.ccdOf();
     let crossings = findCrossings(this.x, m);
+    let best = crossings.length;
+    const bestX = Float64Array.from(this.x);
+    let sinceBest = 0;
     let steps = 0;
     const dx = new Float64Array(3 * this.n), count = new Float64Array(this.n), x0 = new Float64Array(3 * this.n);
     // Its shape is held as it is now, not drawn to its cut lengths: the
@@ -1027,8 +1030,24 @@ export class ClothSim {
       ccd.resolve(x0, this.x, this.w);
       steps++;
       // Re-tested near where it crossed; the whole every so often, and the near ones found again.
-      if (steps % UNTANGLE_CHECK === 0) { crossings = findCrossings(this.x, m); near = crossings.length ? trianglesNear(this.x, m, crossings, UNTANGLE_REACH) : null; markRegion(); }
-      else crossings = findCrossings(this.x, m, near);
+      if (steps % UNTANGLE_CHECK === 0) {
+        crossings = findCrossings(this.x, m);
+        if (crossings.length < best) {
+          best = crossings.length;
+          bestX.set(this.x);
+          sinceBest = 0;
+        } else {
+          sinceBest += UNTANGLE_CHECK;
+          if (sinceBest >= UNTANGLE_STALL) {
+            this.x.set(bestX);
+            break;
+          }
+        }
+        near = crossings.length ? trianglesNear(this.x, m, crossings, UNTANGLE_REACH) : null;
+        markRegion();
+      } else {
+        crossings = findCrossings(this.x, m, near);
+      }
     }
     crossings = findCrossings(this.x, m);
     // What could not be untangled stays free of continuous collision, to come apart as it runs.

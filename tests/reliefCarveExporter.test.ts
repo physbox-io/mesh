@@ -30,6 +30,18 @@ const dome = bodyWith({ type: 'sphere', size: [0.05] }, [0, 0, 0]);
 /** A 100 mm cube, base on z = 0. */
 const cube = bodyWith({ type: 'box', size: [0.05, 0.05, 0.05] }, [0, 0, 0.05]);
 
+/** Memoized dome carve for read-only assertions that inspect different properties of the same `(dome, opts)` job. */
+const domeCache = new Map<string, ReturnType<typeof generateReliefCarveGcode>>();
+function carveDome(opts: Parameters<typeof generateReliefCarveGcode>[1] = DEFAULT_RELIEF_OPTIONS) {
+  const key = JSON.stringify(opts);
+  let hit = domeCache.get(key);
+  if (!hit) {
+    hit = generateReliefCarveGcode(dome, opts);
+    domeCache.set(key, hit);
+  }
+  return hit;
+}
+
 /** Every Z word in a G-code file. */
 function zValues(gcode: string): number[] {
   return [...gcode.matchAll(/Z(-?\d+(?:\.\d+)?)/g)].map((m) => parseFloat(m[1]));
@@ -317,6 +329,8 @@ describe('Relief carve exporter', () => {
   it('separates the shank fouling the cut from the bit being whippy', () => {
     const base = {
       ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 60,
+      stockDepthMm: 60,
       stockThicknessMm: 40,
       carveDepthMm: 20,
       finishingToolDiaMm: 1.6,
@@ -392,6 +406,8 @@ describe('Relief carve exporter', () => {
   it('never drops more than one finishing stepdown in a single move', () => {
     const result = generateReliefCarveGcode(dome, {
       ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 60,
+      stockDepthMm: 60,
       stockThicknessMm: 40,
       carveDepthMm: 20,
       roughingEnabled: false,
@@ -409,16 +425,18 @@ describe('Relief carve exporter', () => {
     // what is really standing, which at the stock's edge is a fin the cutter's
     // axis cannot get past, and a steep move down through air above the last
     // layer's floor takes nothing.
-    const deepest = cutStock(result.gcode, 150, 150, 0.8)
+    const deepest = cutStock(result.gcode, 60, 60, 0.8)
       .filter((c) => !c.rapid)
       .reduce((m, c) => Math.max(m, c.removedMm), 0);
     expect(deepest).toBeLessThanOrEqual(2.5 + 1e-6);
   });
 
-  // Two full finishing plans at 1.6 mm over a 20 mm dome: ~35 s on a CI runner, and runners vary 2x.
+  // Two finishing plans at 1.6 mm over a 20 mm dome on a 60 mm board (same 20 mm depth as 150 mm, 1/6th the raster).
   it('ramps into the cut instead of plunging, unless told not to', () => {
     const opts = {
       ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 60,
+      stockDepthMm: 60,
       stockThicknessMm: 40,
       carveDepthMm: 20,
       roughingEnabled: false,
@@ -674,8 +692,8 @@ describe('Adaptive roughing', () => {
   };
 
   it('takes far fewer, much deeper layers than the raster it replaces', () => {
-    const raster = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'raster' });
-    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    const raster = carveDome({ ...deep, roughingStrategy: 'raster' });
+    const adaptive = carveDome({ ...deep, roughingStrategy: 'adaptive' });
 
     expect(raster.success && adaptive.success).toBe(true);
     expect(adaptive.roughingPassCount).toBeLessThan(raster.roughingPassCount / 2);
@@ -685,8 +703,8 @@ describe('Adaptive roughing', () => {
     // A smaller radial bite means proportionally more path to walk, so the
     // deeper cut has to more than pay for it. If this ever inverts, adaptive
     // clearing is just a slower raster and the default should change back.
-    const raster = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'raster' });
-    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    const raster = carveDome({ ...deep, roughingStrategy: 'raster' });
+    const adaptive = carveDome({ ...deep, roughingStrategy: 'adaptive' });
     expect(adaptive.estimatedTimeSeconds).toBeLessThan(raster.estimatedTimeSeconds);
   });
 
@@ -700,7 +718,7 @@ describe('Adaptive roughing', () => {
     // and when the floor layer started clearing the background it really is
     // supposed to, adaptive gained a quarter more lines while its moves stayed
     // 13 mm long. A vertex per grid cell would be a third of a millimetre.
-    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    const adaptive = carveDome({ ...deep, roughingStrategy: 'adaptive' });
     let x = 0, y = 0, moves = 0, length = 0;
     for (const line of roughingOf(adaptive.gcode).split('\n')) {
       if (!line.startsWith('G1')) continue;
@@ -724,19 +742,19 @@ describe('Adaptive roughing', () => {
   });
 
   it('reports the bite it took', () => {
-    const res = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    const res = carveDome({ ...deep, roughingStrategy: 'adaptive' });
     expect(res.roughingBitePercent).toBeGreaterThanOrEqual(20);
     expect(res.roughingBitePercent).toBeLessThanOrEqual(45);
     expect(res.gcode).toContain(`(${res.roughingBitePercent}%)`);
   });
 
   it('says what bite it is taking and what that buys', () => {
-    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    const adaptive = carveDome({ ...deep, roughingStrategy: 'adaptive' });
     expect(adaptive.gcode).toMatch(/adaptive clear, [\d.]+ mm radial engagement \(\d+%\)/);
   });
 
   it('honours an explicit stepover', () => {
-    const res = generateReliefCarveGcode(dome, {
+    const res = carveDome({
       ...deep, roughingStrategy: 'adaptive', roughingToolDiaMm: 6, roughingStepoverMm: 1.5,
     });
     expect(res.gcode).toMatch(/1\.5 mm radial engagement \(25%\)/);
@@ -746,7 +764,7 @@ describe('Adaptive roughing', () => {
     // The last roughing layer sits at the floor and clears almost nothing, so a
     // stepdown as deep as the relief leaves no useful layer at all. A shallow
     // relief plus an ambitious adaptive stepdown is exactly that case.
-    const shallow = generateReliefCarveGcode(dome, {
+    const shallow = carveDome({
       ...DEFAULT_RELIEF_OPTIONS,
       stockWidthMm: 200, stockDepthMm: 200,
       fitMode: 'manual', scalePercent: 100,
@@ -759,7 +777,7 @@ describe('Adaptive roughing', () => {
   });
 
   it('keeps the roughing inside the model footprint, same as the raster does', () => {
-    const res = generateReliefCarveGcode(dome, {
+    const res = carveDome({
       ...DEFAULT_RELIEF_OPTIONS,
       stockWidthMm: 200, stockDepthMm: 200,
       fitMode: 'manual', scalePercent: 100,
@@ -777,7 +795,7 @@ describe('Adaptive roughing', () => {
   });
 
   it('ramps into each ring rather than plunging the tool centre in', () => {
-    const res = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    const res = carveDome({ ...deep, roughingStrategy: 'adaptive' });
     const rough = roughingOf(res.gcode);
     // A ramp is a feed move that changes X or Y as well as Z.
     expect(rough).toMatch(/^G1 X-?[\d.]+ Y-?[\d.]+ Z-?[\d.]+/m);
@@ -794,7 +812,7 @@ describe('Finishing pass strategies', () => {
 
   it('cuts the dome with every strategy', () => {
     for (const finishingStrategy of ['raster', 'crosshatch', 'concentric', 'spiral', 'contour', 'hybrid'] as const) {
-      const res = generateReliefCarveGcode(dome, { ...base, finishingStrategy });
+      const res = carveDome({ ...base, finishingStrategy });
       expect(res.success, finishingStrategy).toBe(true);
       expect(res.gcode, finishingStrategy).toContain(`; --- OP 2: finishing pass`);
       expect(res.totalCutDistanceMm, finishingStrategy).toBeGreaterThan(0);
@@ -802,7 +820,7 @@ describe('Finishing pass strategies', () => {
   });
 
   it('lifts clear of the work before the spindle stops or starts', () => {
-    const res = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true, finishingToolType: 'ball' });
+    const res = carveDome({ ...base, roughingEnabled: true, finishingToolType: 'ball' });
     expect(res.toolChange).toBe(true);
     const lines = res.gcode.split('\n').map((l) => l.replace(/;.*$/, '').trim()).filter(Boolean);
     const isLift = (l: string | undefined) => !!l && /^G0 Z/.test(l);
@@ -816,8 +834,8 @@ describe('Finishing pass strategies', () => {
   });
 
   it('stops after roughing when the finishing pass is off, and roughs to the surface', () => {
-    const full = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true });
-    const rough = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true, finishingEnabled: false });
+    const full = carveDome({ ...base, roughingEnabled: true });
+    const rough = carveDome({ ...base, roughingEnabled: true, finishingEnabled: false });
     expect(rough.success).toBe(true);
     expect(rough.gcode).not.toContain('OP 2');
     expect(rough.gcode).not.toContain('T2 M6');
@@ -835,15 +853,15 @@ describe('Finishing pass strategies', () => {
   });
 
   it('refuses a job with neither pass', () => {
-    const none = generateReliefCarveGcode(dome, { ...base, roughingEnabled: false, finishingEnabled: false });
+    const none = carveDome({ ...base, roughingEnabled: false, finishingEnabled: false });
     expect(none.success).toBe(false);
     expect(none.error).toMatch(/one of them has to cut/);
   });
 
   it('names the strategy in the G-code header, so a file says how it was cut', () => {
-    const waterline = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'contour' });
+    const waterline = carveDome({ ...base, finishingStrategy: 'contour' });
     expect(waterline.gcode).toContain('waterline');
-    const angled = generateReliefCarveGcode(dome, {
+    const angled = carveDome({
       ...base,
       finishingStrategy: 'raster',
       finishingAngleDeg: 45,
@@ -852,7 +870,7 @@ describe('Finishing pass strategies', () => {
   });
 
   it('takes the raster angle from the sweep axis when none is given', () => {
-    const alongY = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'raster', finishingDirection: 'y' });
+    const alongY = carveDome({ ...base, finishingStrategy: 'raster', finishingDirection: 'y' });
     expect(alongY.gcode).toContain('raster at 90 degrees');
   });
 
@@ -860,14 +878,14 @@ describe('Finishing pass strategies', () => {
     // A raster terraces every wall that runs along its passes, and a relief
     // has walls facing every way. Nobody should have to know that to get a
     // smooth valley, so the default sends the steep ground to a waterline.
-    const explicit = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'hybrid' });
-    const defaulted = generateReliefCarveGcode(dome, base);
+    const explicit = carveDome({ ...base, finishingStrategy: 'hybrid' });
+    const defaulted = carveDome(base);
     expect(defaulted.gcode).toBe(explicit.gcode);
     expect(defaulted.gcode).toContain('hybrid');
   });
 
   it('cuts an angled raster off both axes', () => {
-    const res = generateReliefCarveGcode(dome, {
+    const res = carveDome({
       ...base,
       finishingStrategy: 'raster',
       finishingAngleDeg: 45,
@@ -877,7 +895,7 @@ describe('Finishing pass strategies', () => {
       .split('\n')
       .map((l) => /^G1 X(-?[\d.]+) Y(-?[\d.]+)/.exec(l))
       .filter((m): m is RegExpExecArray => m !== null)
-      .map((m) => ({ x: parseFloat(m[1]), y: parseFloat(m[2]) }));
+      .map((m): { x: number; y: number } => ({ x: parseFloat(m[1]), y: parseFloat(m[2]) }));
     expect(moves.length).toBeGreaterThan(10);
 
     // A 45-degree raster moves in X and Y together; an axis raster never does.
@@ -887,14 +905,14 @@ describe('Finishing pass strategies', () => {
 
   it('spirals with far fewer retracts than a raster of the same stepover', () => {
     const retracts = (g: string) => (g.slice(g.indexOf('OP 2')).match(/^G0 Z/gm) ?? []).length;
-    const raster = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'raster' });
-    const spiral = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'spiral' });
+    const raster = carveDome({ ...base, finishingStrategy: 'raster' });
+    const spiral = carveDome({ ...base, finishingStrategy: 'spiral' });
     expect(retracts(spiral.gcode)).toBeLessThan(retracts(raster.gcode));
   });
 
   it('keeps every strategy inside the stock', () => {
     for (const finishingStrategy of ['crosshatch', 'concentric', 'spiral', 'contour', 'hybrid'] as const) {
-      const res = generateReliefCarveGcode(dome, { ...base, finishingStrategy });
+      const res = carveDome({ ...base, finishingStrategy });
       // The work origin is the stock's near-left corner, so the stock is
       // 0..width by 0..depth rather than centred on zero.
       for (const m of cutMoves(res.gcode)) {
@@ -912,7 +930,7 @@ describe('Finishing pass strategies', () => {
 
   it('never cuts below the floor, whichever strategy laid the passes down', () => {
     for (const finishingStrategy of ['crosshatch', 'concentric', 'spiral', 'contour', 'hybrid'] as const) {
-      const res = generateReliefCarveGcode(dome, { ...base, finishingStrategy });
+      const res = carveDome({ ...base, finishingStrategy });
       expect(Math.min(...zValues(res.gcode)), finishingStrategy).toBeGreaterThanOrEqual(-base.carveDepthMm - 1e-6);
     }
   });
