@@ -546,7 +546,10 @@ export function finishSurface(
              * the finishing layer above cut deepest here is the one that decides
              * the height, and cutting the same place twice does not raise it.
              */
-            const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
+            // On a repeat sweep (`; again`), `w.stock` already holds what the
+            // previous sweep left under the head; passing 0 forced `leadIn` to
+            // ramp from the untouched stock face through open air every repeat.
+            const entryZ = sweep > 0 ? -Infinity : Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
             pass = w.leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
           }
 
