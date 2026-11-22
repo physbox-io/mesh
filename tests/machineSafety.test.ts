@@ -40,6 +40,7 @@ const mgr = webSerialManager as unknown as {
   handleTransportDisconnect: (err?: Error) => void;
   starting: boolean;
   laserModeHome: 0 | 1 | null;
+  laserModeRestoring: Promise<void> | null;
   lostAxes: { x: boolean; y: boolean };
   setupEndedAt: number;
   zZeroedAt: number;
@@ -169,6 +170,7 @@ afterEach(async () => {
   release();
   await webSerialManager.cancelJob().catch(() => {});
   await vi.waitFor(() => expect(mgr.starting).toBe(false));
+  if (mgr.laserModeRestoring) await mgr.laserModeRestoring;
   mgr.transport = null;
   mgr.grblSettings.clear();
   mgr.state.connected = false;
@@ -425,7 +427,8 @@ describe('C5: the job is what the program says, not what $32 says', () => {
     await webSerialManager.runJob(ROUTER);
     await started();
     // The page dies: only what was written down survives.
-    mgr.isJobRunning = false;
+    mgr.handleTransportDisconnect();
+    await vi.waitFor(() => expect(mgr.starting).toBe(false));
     mgr.laserModeHome = null;
     attach();
     report = '<Idle|MPos:1,2,3|FS:0,0>';
@@ -440,6 +443,21 @@ describe('C5: the job is what the program says, not what $32 says', () => {
     };
     await webSerialManager.refreshMachineSettings(50, 1);
     await vi.waitFor(() => expect(sent).toContain('$32=1'));
+    await vi.waitFor(() => expect(webSerialManager.getState().grblSettings[32]).toBe(1));
+  });
+
+  it('does not overwrite an alarm or job refusal if the background $32 restore is refused', async () => {
+    laser32(1);
+    hold = (l) => l.startsWith('G1');
+    await webSerialManager.runJob(ROUTER);
+    await started();
+    refuse = (l) => (l.startsWith('$32') ? 'error:8' : null);
+    hold = () => false;
+    mgr.parseLine('ALARM:1');
+    await vi.waitFor(() => expect(sent).toContain('$32=1'));
+    if (mgr.laserModeRestoring) await mgr.laserModeRestoring;
+    expect(webSerialManager.getState().lastError).not.toMatch(/^Machine Error: error:8$/);
+    expect(mgr.laserModeHome).toBe(1);
   });
 
   it('falls back to the package’s refusal if the controller will not change it', async () => {

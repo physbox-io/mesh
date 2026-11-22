@@ -35,7 +35,9 @@ export abstract class RecoveryMachine extends JobMachine {
    */
   protected onRefused(reply: string, line: string | undefined): void {
     this.lastRefusal = { reply, line };
-    if (!this.isJobRunning && !this.isPaused) this.updateState({ lastError: `Machine Error: ${reply}` });
+    if (!this.isJobRunning && !this.isPaused && !this.starting && !this.restoringLaserMode) {
+      this.updateState({ lastError: `Machine Error: ${reply}` });
+    }
   }
 
   /**

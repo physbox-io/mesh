@@ -355,6 +355,8 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
   protected laserModeHome: 0 | 1 | null = null;
   /** The `$32` write under way, which a job starting has to wait out. */
   protected laserModeRestoring: Promise<void> | null = null;
+  /** True while a background `$32` restore is awaiting its ack, so a transient `error:8` does not overwrite `lastError`. */
+  protected restoringLaserMode = false;
   private laserModeRestoreAgain = false;
   protected guideJiggleRunning = false;
   /** What the running job is, as the run archive should remember it. */
@@ -709,10 +711,13 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
     await this.whenHalted();
     const home = this.laserModeHome;
     if (home === null) return;
+    this.restoringLaserMode = true;
     try {
       await this.sendLine(`$32=${home}`, { timeoutMs: QUICK_REPLY_TIMEOUT_MS });
     } catch {
       return;
+    } finally {
+      this.restoringLaserMode = false;
     }
     this.laserModeHome = null;
     writeLaserModeBorrowed(null);
