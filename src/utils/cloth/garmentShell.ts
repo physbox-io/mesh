@@ -647,13 +647,20 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
         const m = ring.length, order = Array.from({ length: m + 1 }, (_, k) => ring[(start + k) % m]);
         const arc = [0];
         for (let k = 1; k <= m; k++) arc.push(arc[k - 1] + Math.hypot(...[0, 1, 2].map((c) => order[k][c] - order[k - 1][c]) as [number, number, number]));
+        const reachPole = sm.n === 2;
         for (let k = 0; k < sm.n; k++) {
           const want = (arc[m] * k) / sm.n;
           let i = 1;
           while (i < m && arc[i] < want) i++;
           const f = (want - arc[i - 1]) / Math.max(1e-12, arc[i] - arc[i - 1]);
           const ang = angOf([0, 1, 2].map((c) => order[i - 1][c] + f * (order[i][c] - order[i - 1][c])));
-          runSeam(`seam${k + 1}`, (p) => comp(p, at(p), -Math.sin(ang), Math.cos(ang)), (c) => comp(c, at(c), Math.cos(ang), Math.sin(ang)) > 0);
+          runSeam(
+            `seam${k + 1}`,
+            (p) => comp(p, at(p), -Math.sin(ang), Math.cos(ang)),
+            reachPole
+              ? (c, corners) => corners.some((q) => comp(q, at(q), Math.cos(ang), Math.sin(ang)) > 0) && comp(c, at(c), Math.cos(ang), Math.sin(ang)) > -0.02
+              : (c) => comp(c, at(c), Math.cos(ang), Math.sin(ang)) > 0,
+          );
         }
         break;
       }

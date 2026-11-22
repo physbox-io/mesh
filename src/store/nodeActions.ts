@@ -19,7 +19,7 @@ import { MUJOCO_SHIM, getPhysicsWorkerClient } from './physicsEngine';
 import type { SliceDeps } from './sliceDeps';
 import { takeEnvironment } from './sceneEnvironment';
 import { assertGeomSizes } from '../utils/geomSize';
-import { bodyFormKey, mergeBodyForm } from '../utils/cloth/bodyFormEdit';
+import { applySkinTone, bodyFormKey, mergeBodyForm } from '../utils/cloth/bodyFormEdit';
 import { reposeGarments } from '../utils/cloth/garmentRepose';
 import type { BodyFormMeasurements } from '../types/cloth';
 import { useGarmentSculpt } from './garmentSculptStore';
@@ -312,6 +312,9 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
             // geoms are rebuilt from them in a worker (useCsgCompile).
             if (updates.bodyForm) {
               node.bodyForm = mergeBodyForm(prevBodyForm, updates.bodyForm);
+              if (updates.geoms === undefined && node.geoms?.length && node.bodyForm.skinTone !== prevBodyForm?.skinTone) {
+                node.geoms = applySkinTone(node.geoms, node.bodyForm.skinTone);
+              }
               // Posed differently, what is drawn on its garments goes with it (garmentRepose).
               if (prevBodyForm && prevBodyForm.figure === node.bodyForm.figure) reposed.push({ form: node.name || node.id, from: prevBodyForm, to: node.bodyForm });
             }

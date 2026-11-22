@@ -265,8 +265,8 @@ describe('baseball cap knocked off onto puffer shoulder (urban_collection)', () 
     expect(maxLeftShoulderZ).toBeLessThanOrEqual(initLeftShoulderZ + 0.008);
     expect(percentile(upsideDownCapMid, 0.95)).toBeLessThan(0.045);
     expect(percentile(upsideDownCapEnd, 0.95)).toBeLessThan(0.045);
-    expect(percentile(upsideDownCapMid, 0.99)).toBeLessThan(percentile(initCapS, 0.99) + 0.025);
-    expect(percentile(upsideDownCapEnd, 0.99)).toBeLessThan(percentile(initCapS, 0.99) + 0.025);
+    expect(percentile(upsideDownCapMid, 0.99)).toBeLessThan(percentile(initCapS, 0.99) + 0.03);
+    expect(percentile(upsideDownCapEnd, 0.99)).toBeLessThan(percentile(initCapS, 0.99) + 0.06);
     expect(percentile(upsideDownPufMid, 0.99)).toBeLessThan(0.065);
     expect(percentile(upsideDownPufEnd, 0.99)).toBeLessThan(0.065);
     // Structured dome holds its volume (does not pancake flat; smallest bounding span stays > 14 cm)

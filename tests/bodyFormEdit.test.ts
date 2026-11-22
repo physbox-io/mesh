@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useStore } from '../src/store/useStore';
-import { compileCsgNodes } from '../src/hooks/useCsgCompile';
+import { compileCsgNodes, resolveBodyFormsForBuild } from '../src/hooks/useCsgCompile';
 import { bodyFormNode } from '../src/utils/cloth/clothNodes';
 import { applySkinTone, bodyFormKey, mergeBodyForm, needsBodyFormBuild } from '../src/utils/cloth/bodyFormEdit';
 import { DEFAULT_MANNEQUIN_RGBA, FIGURE_DEFAULTS, SKIN_TONE_STOPS, bodyLandmarks, clampBodyForm, skinToneLabel, skinToneRgba } from '../src/utils/cloth/bodyForm';
@@ -236,5 +236,33 @@ describe('human-inclusive skinTone spectrum and O(1) zero-rebuild updates', () =
     // Fresh builds also emit skinToneRgba directly.
     const fresh = bodyFormNode('f2', 'f2', { figure: 'male', skinTone: 0.28 });
     expect(fresh.geoms.find((g) => g.name === 'f2_headSkin')!.rgba).toEqual(skinToneRgba(0.28));
+  });
+
+  it('resolveBodyFormsForBuild populates lazy preset geoms and re-posed form geoms without mutating store sceneGraph prematurely', async () => {
+    const lazyPresetForm: SceneNode = {
+      id: 'form',
+      name: 'form',
+      type: 'body',
+      pos: [-0.48, 0, 0],
+      bodyForm: clampBodyForm({ figure: 'female', skinTone: 0.48 }),
+      geoms: [],
+      joints: [],
+      children: [],
+    };
+    const inputGraph = { nodes: [lazyPresetForm] };
+    useStore.setState({ sceneGraph: inputGraph });
+
+    const resolved = await resolveBodyFormsForBuild(inputGraph);
+    // Live store sceneGraph stays untouched until recompile's atomic applyBuilt frame!
+    expect(useStore.getState().sceneGraph.nodes[0].geoms).toEqual([]);
+    // Resolved build graph has all 40+ dynamic/internal form geoms with skinTone applied and bodyFormBuilt set!
+    const builtForm = resolved.nodes[0];
+    expect(builtForm.geoms.length).toBeGreaterThan(20);
+    expect(needsBodyFormBuild(builtForm)).toBe(false);
+    expect(builtForm.geoms.find((g) => g.name === 'form_skin')!.rgba).toEqual(skinToneRgba(0.48));
+    expect(builtForm.geoms.find((g) => g.name === 'form_skin')!.dynamic).toBe(true);
+
+    // Calling again on an up-to-date graph is an O(1) identity return.
+    expect(await resolveBodyFormsForBuild(resolved)).toBe(resolved);
   });
 });

@@ -19,9 +19,10 @@
 
 import { useEffect } from 'react';
 import { useStore } from '../store/useStore';
+import { recompilesInFlight } from '../store/simulationActions';
 import { csgHashOf, evaluateNodeCsg, hasBooleanOps } from '../utils/csg';
 import { collidersAreStale, collisionHashOf, decomposeNodeColliders } from '../utils/convexDecomposition';
-import type { SceneNode } from '../types/scene';
+import type { SceneGraph, SceneNode } from '../types/scene';
 import { bodyEdges, bodyUp } from '../utils/edgeRoundBase';
 import { keepFoundEdges } from '../utils/edgeRound';
 import { findNodeById } from '../utils/sceneTree';
@@ -121,7 +122,7 @@ function collectStaleBodyForms(nodes: SceneNode[], out: SceneNode[] = []): Scene
   return out;
 }
 
-function runBodyFormBuild(nodeId: string): Promise<void> {
+function runBodyFormBuild(nodeId: string, skipRecompile = false): Promise<void> {
   const existing = bodyFormsInFlight.get(nodeId);
   if (existing) return existing.done;
   const entry: { key: string; done: Promise<void> } = { key: '', done: Promise.resolve() };
@@ -138,7 +139,7 @@ function runBodyFormBuild(nodeId: string): Promise<void> {
         const geoms = await buildBodyFormOffThread(cur.bodyForm, cur.name || cur.id, nodeId);
         const now = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
         if (now && now.bodyForm && bodyFormKey(now) === key) {
-          useStore.getState().applyBodyFormGeoms(nodeId, finishBodyFormGeoms(geoms), key);
+          useStore.getState().applyBodyFormGeoms(nodeId, finishBodyFormGeoms(geoms, now.bodyForm.skinTone), key, skipRecompile);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -157,10 +158,10 @@ function runBodyFormBuild(nodeId: string): Promise<void> {
   return entry.done;
 }
 
-async function buildBodyForms(stale: SceneNode[]): Promise<void> {
+async function buildBodyForms(stale: SceneNode[], skipRecompile = false): Promise<void> {
   if (stale.length === 0) return;
   const uniqueIds = [...new Set(stale.map((n) => n.id))];
-  await Promise.all(uniqueIds.map((id) => runBodyFormBuild(id)));
+  await Promise.all(uniqueIds.map((id) => runBodyFormBuild(id, skipRecompile)));
 }
 
 function collectUnbuiltScad(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
@@ -267,7 +268,7 @@ export async function compileCsgNodes(
   const unbuilt = collectUnbuiltScad(scene.nodes);
   const unlaid = collectUnbuiltBrickwork(scene.nodes);
   const staleForms = collectStaleBodyForms(scene.nodes);
-  await buildBodyForms(staleForms);
+  await buildBodyForms(staleForms, true);
   if (stale.length === 0 && unbuilt.length === 0 && unlaid.length === 0 && (!colliders || collectStaleColliders(scene.nodes).length === 0)) {
     if (!colliders && collectStaleColliders(scene.nodes).length > 0) scheduleCsgCompile();
     return staleForms.length;
@@ -390,8 +391,56 @@ export function useCsgAutoCompile() {
     if (collectStale(sceneGraph.nodes).length === 0 &&
         collectUnbuiltScad(sceneGraph.nodes).length === 0 &&
         collectUnbuiltBrickwork(sceneGraph.nodes).length === 0 &&
-        collectStaleBodyForms(sceneGraph.nodes).length === 0 &&
+        (recompilesInFlight > 0 || collectStaleBodyForms(sceneGraph.nodes).length === 0) &&
         collectStaleColliders(sceneGraph.nodes).length === 0) return;
     scheduleCsgCompile();
   }, [sceneGraph]);
+}
+
+/**
+ * Resolves stale or lazy (`geoms: []`) dress forms on a clone of `scene` off the
+ * main thread before `recompile` compiles MJCF and settles cloth, without writing
+ * `sceneGraph` early so the viewport never shows a re-posed mannequin detached
+ * from its still-compiling garment.
+ */
+export async function resolveBodyFormsForBuild(scene: SceneGraph): Promise<SceneGraph> {
+  const stale: SceneNode[] = [];
+  const walk = (nodes: SceneNode[] | undefined) => {
+    for (const n of nodes || []) {
+      if (needsBodyFormBuild(n)) stale.push(n);
+      walk(n.children);
+    }
+  };
+  walk(scene.nodes);
+  if (stale.length === 0) return scene;
+  const { buildBodyFormOffThread } = await import('../utils/cloth/bodyFormClient');
+  const builtById = new Map<string, { geoms: SceneNode['geoms']; key: string }>();
+  await Promise.all(stale.map(async (node) => {
+    const key = bodyFormKey(node);
+    const job = bodyFormJob(node.id, key);
+    if (failedBodyForms.has(job)) return;
+    try {
+      const raw = await buildBodyFormOffThread(node.bodyForm!, node.name || node.id, node.id);
+      builtById.set(node.id, { geoms: finishBodyFormGeoms(raw, node.bodyForm!.skinTone), key });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/supersed|abort|cancel/i.test(msg)) {
+        failedBodyForms.add(job);
+        console.error(`Building the body form failed for ${node.id}:`, err);
+      }
+    }
+  }));
+  if (builtById.size === 0) return scene;
+  const cloneNodes = (nodes: SceneNode[]): SceneNode[] =>
+    nodes.map((n) => {
+      const hit = builtById.get(n.id);
+      const children = n.children?.length ? cloneNodes(n.children) : n.children;
+      if (!hit && children === n.children) return n;
+      return {
+        ...n,
+        ...(hit ? { geoms: hit.geoms, bodyFormBuilt: hit.key } : {}),
+        children,
+      };
+    });
+  return { ...scene, nodes: cloneNodes(scene.nodes) };
 }

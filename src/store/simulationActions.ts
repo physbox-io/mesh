@@ -18,6 +18,7 @@ import { refusedGraphs, keptGraphs } from './editGuard';
 import { modelBuiltFrom, noteModelBuilt } from './modelProvenance';
 import { documentCtrlValues } from '../workers/carryState';
 import { clearBreakage, anyNode, applyShatterPieces } from './breakage';
+import { needsBodyFormBuild } from '../utils/cloth/bodyFormEdit';
 import {
   type PhysicsWindow, MUJOCO_SHIM, buildModelMirror, buildDataMirror, RECYCLE_HEAP_BYTES,
   lastHeapBytes, setLastHeapBytes, lastScriptState, lastClothState, setLastClothState,
@@ -232,7 +233,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       const deformed = get().deformedGeoms;
       const isRuntimeBuild = !overrideScene
         && (Object.keys(pieces).length > 0 || Object.keys(deformed).length > 0);
-      const sceneGraph = overrideScene ?? (isRuntimeBuild
+      let sceneGraph = overrideScene ?? (isRuntimeBuild
         ? applyShatterPieces(get().sceneGraph, pieces, deformed)
         : get().sceneGraph);
 
@@ -257,6 +258,21 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
        * compiler (keepFoundEdges) came back a moment later.
        */
       const graphAtBuildStart = overrideScene ? graphAtCall : get().sceneGraph;
+      // Resolve lazy (`geoms: []`) or re-posed dress forms off-thread BEFORE
+      // compiling MJCF and settling cloth, without writing `sceneGraph` early:
+      // presets never settle cloth against an empty form, pose sliders never
+      // settle a squatting dress against standing legs, and the new form mesh
+      // lands atomically on the exact same animation frame as the re-draped cloth.
+      if (anyNode(sceneGraph.nodes, needsBodyFormBuild)) {
+        const { resolveBodyFormsForBuild } = await import('../hooks/useCsgCompile');
+        sceneGraph = await resolveBodyFormsForBuild(sceneGraph);
+        if (token !== recompileToken) {
+          if (forceReset) pendingForceReset = true;
+          done();
+          await whenBuildsLand();
+          return;
+        }
+      }
       // Set once the worker is holding the model this build made; released when
       // that model is on screen.
       let heldClient: PhysicsWorkerClient | null = null;
