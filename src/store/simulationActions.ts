@@ -383,16 +383,34 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         const hold = (!!immediate && isRuntimeBuild && !forceReset) || get().isPlaying;
         const built = await client.build(xml, sceneGraph, !forceReset, seedState, get().brokenConstraints, hold);
         if (hold && built.ok) heldClient = client;
+        if (token !== recompileToken) {
+          heldClient?.resume();
+          heldClient = null;
+          if (forceReset) pendingForceReset = true;
+          done();
+          await whenBuildsLand();
+          return;
+        }
         if (!built.ok) {
           // Said in the scene's names, not the line numbers of XML nobody sees.
           throw new Error(explainCompileError(built.error || 'Unknown physics worker build error', xml));
         }
-        if (get().isPlaying) prewarmSceneAcousticIRs(sceneGraph.nodes);
+        if (get().isPlaying) {
+          try {
+            prewarmSceneAcousticIRs(sceneGraph.nodes);
+          } catch (irErr) {
+            heldClient?.resume();
+            heldClient = null;
+            throw irErr;
+          }
+        }
         applyBuilt(built);
         // A fresh worker starts paused. The other two recycles tell it to play;
         // this one didn't, so the simulation froze while the UI still said Play.
         if (recycled && get().isPlaying) client.setPlaying(true);
       } catch (e) {
+        heldClient?.resume();
+        heldClient = null;
         console.error("Failed to compile MJCF:", e);
         const msg = String(e instanceof Error ? e.message : e);
         if (/Aborted|enlarge memory|abort|bad_alloc/i.test(msg)) {
@@ -429,11 +447,21 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
             const hold = !!immediate && isRuntimeBuild && !forceReset;
             const built = await freshClient.build(xml, sceneGraph, !forceReset, recoverySeedState, get().brokenConstraints, hold);
             if (hold && built.ok) heldClient = freshClient;
+            if (token !== recompileToken) {
+              heldClient?.resume();
+              heldClient = null;
+              if (forceReset) pendingForceReset = true;
+              done();
+              await whenBuildsLand();
+              return;
+            }
             if (!built.ok) throw new Error(explainCompileError(built.error || 'Unknown physics worker build error', xml), { cause: e });
             applyBuilt(built);
             if (get().isPlaying) freshClient.setPlaying(true);
             return;
           } catch (recoveryError) {
+            heldClient?.resume();
+            heldClient = null;
             console.error('Worker respawn recovery failed, falling back to full page reload:', recoveryError);
             // Asked in the app's own dialog rather than a native alert, and with
             // the way out of losing the scene on it: the reload drops back to a
@@ -532,7 +560,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       // the worker mid-build fails a rebuild that was about to succeed (and an
       // MCP command driving one would be told its scene didn't build). The
       // recycle is purely housekeeping — 20s later is just as good.
-      if (getPhysicsWorkerClient().hasPendingWork()) return;
+      if (recompilesInFlight > 0 || getPhysicsWorkerClient().hasPendingWork()) return;
       console.warn(`Seamlessly recycling the physics worker mid-play: the WASM heap has reached ${(lastHeapBytes / 1048576).toFixed(0)} MB, past the ${(RECYCLE_HEAP_BYTES / 1048576).toFixed(0)} MB mark.`);
       const seedState = {
         qpos: Array.from(data.qpos as Float64Array),
@@ -555,6 +583,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         });
         client.setEnv(windX, windY, density, waterLevel, sceneGraph);
         const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);
+        if (recompilesInFlight > 0 || get().sceneGraph !== docGraph) return;
         if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
         if (built.heapBytes) setLastHeapBytes(built.heapBytes);
         setLastClothState(built.clothState);

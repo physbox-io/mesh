@@ -10,12 +10,13 @@ import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { getStickyRotation } from '../utils/geom';
 import { cloneSceneGraph } from './sceneClone';
 import {
-  isAllMeshNode, promoteMeshGeomsToDynamic, promotePosedStaticMeshes, restoreCollisionWhenMadeMovable, mapVerts,
-  translateMeshGeoms, rotateMeshGeomsAbsolute,
+  isAllMeshNode, promoteMeshGeomsToDynamic, promotePosedStaticMeshes, restoreCollisionWhenMadeMovable,
+  rotateMeshGeomsAbsolute,
 } from './meshGeomTransforms';
 import { detachReferencesTo } from './breakage';
 import { releaseGarments } from '../utils/cloth/clothNodes';
 import { MUJOCO_SHIM, getPhysicsWorkerClient } from './physicsEngine';
+import { refusedGraphs } from './editGuard';
 import type { SliceDeps } from './sliceDeps';
 import { takeEnvironment } from './sceneEnvironment';
 import { assertGeomSizes } from '../utils/geomSize';
@@ -171,24 +172,18 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
     updateNodePos: (id, newPos) => {
       get().recordInteraction('node-pos');
       const newScene = cloneSceneGraph(get().sceneGraph);
+      const promoteSubtree = (target: SceneNode) => {
+        promoteMeshGeomsToDynamic(target);
+        for (const child of target.children || []) promoteSubtree(child);
+      };
       const traverse = (nodes: SceneNode[]) => {
         if (!nodes) return false; for (const node of nodes) {
           if (node.id === id) {
-            if (isAllMeshNode(node)) {
-              // Mesh vertices are baked in world space — translate them directly
-              const [ox, oy, oz] = node.pos as number[];
-              const dx = newPos[0] - ox, dy = newPos[1] - oy, dz = newPos[2] - oz;
-              translateMeshGeoms(node, dx, dy, dz);
-              for (const g of node.geoms) {
-                if (g.baseVertices) {
-                  g.baseVertices = mapVerts([...g.baseVertices], (x, y, z) => [x + dx, y + dy, z + dz]);
-                }
-                // Z-up, as the collider it is the unturned copy of.
-                if (g.baseColliderVertices && !g.dynamic) {
-                  g.baseColliderVertices = mapVerts([...g.baseColliderVertices], (x, y, z) => [x + dx, y - dz, z + dy]);
-                }
-              }
-            }
+            // Static meshes render from world-baked vertices ignoring body pos,
+            // while MuJoCo applies `<body pos="...">`. Promoting moved static
+            // meshes to dynamic keeps Three.js visual position, MuJoCo mesh,
+            // and MuJoCo colliders in 100% agreement with zero double-translation.
+            promoteSubtree(node);
             node.pos = newPos;
             node.basePos = [...newPos];
             return true;
@@ -390,6 +385,16 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
      * they are positioned relative to this body either way.
      */
     detachToTopLevel: (id) => {
+      const hasNestedParent = (nodes: SceneNode[], above: SceneNode | null): boolean => {
+        for (const n of nodes) {
+          if (n.id === id) return above !== null;
+          if (hasNestedParent(n.children || [], n)) return true;
+        }
+        return false;
+      };
+      if (!hasNestedParent(get().sceneGraph.nodes, null)) return false;
+
+      get().prepareForDiscreteChange();
       const scene = cloneSceneGraph(get().sceneGraph);
 
       let parent: SceneNode | null = null;
@@ -410,7 +415,11 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
       const world = new THREE.Matrix4();
       const model = get().model as ModelMirror | null;
       const data = get().data as DataMirror | null;
-      const bodyId = MUJOCO_SHIM.mj_name2id(model, 'body', id);
+      const bodyName = found.name || found.id;
+      let bodyId = MUJOCO_SHIM.mj_name2id(model, 'body', bodyName);
+      if (bodyId < 0 && bodyName !== id) {
+        bodyId = MUJOCO_SHIM.mj_name2id(model, 'body', id);
+      }
       if (model && data && bodyId >= 0) {
         const o = bodyId * 3, m = bodyId * 9;
         // xmat is row-major body-to-world.
@@ -451,6 +460,7 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
       scene.nodes = [...scene.nodes, found];
 
       set({ sceneGraph: scene });
+      if (refusedGraphs.has(scene)) return false;
       get().recompile(scene, id, false, true);
       return true;
     },

@@ -35,17 +35,19 @@ export async function openingScene(label: string, load: () => Promise<boolean> |
   // Subscribed before the load, so a swap that finishes quickly is not missed.
   // finishSceneSwap bumps cameraResetToken once the new scene has painted.
   let unsubscribe = () => {};
+  let giveUpTimer: ReturnType<typeof setTimeout> | null = null;
   const shown = new Promise<void>((resolve) => {
     const start = useStore.getState().cameraResetToken;
     unsubscribe = useStore.subscribe((s) => {
       if (s.cameraResetToken !== start) resolve();
     });
-    setTimeout(resolve, GIVE_UP_MS);
+    giveUpTimer = setTimeout(resolve, GIVE_UP_MS);
   });
   try {
     if (await load()) await shown;
   } finally {
     unsubscribe();
+    if (giveUpTimer !== null) clearTimeout(giveUpTimer);
     if (id === current) useSceneLoad.setState({ opening: null });
   }
 }

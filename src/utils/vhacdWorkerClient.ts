@@ -78,8 +78,7 @@ const cavitiesByHulls = new WeakMap<Hull[], FilledCavity[]>();
 
 /** For tests: the worker to use instead of the real one. Resets the queue. */
 export function setVhacdWorkerFactory(factory: (() => WorkerLike | null) | null): void {
-  worker?.terminate();
-  worker = null;
+  stopWorker();
   if (running) clearTimeout(running.timer);
   running = null;
   queue.length = 0;
@@ -92,7 +91,10 @@ export function vhacdJobsPending(): number {
 }
 
 function stopWorker() {
-  worker?.terminate();
+  if (!worker) return;
+  worker.onmessage = null;
+  worker.onerror = null;
+  worker.terminate();
   worker = null;
 }
 
@@ -110,6 +112,7 @@ function ensureWorker(): WorkerLike | null {
   const w = spawn();
   if (!w) return null;
   w.onmessage = (evt: MessageEvent<VhacdResponse>) => {
+    if (worker !== w) return;
     const msg = evt.data;
     finish(msg.id, (job) => {
       if (msg.type === 'DECOMPOSE_ERROR') job.reject(new Error(msg.message));
@@ -132,8 +135,9 @@ function ensureWorker(): WorkerLike | null {
   // A worker that dies fails the job it was running, and only that one: the
   // jobs behind it get a new worker.
   w.onerror = () => {
+    if (worker !== w) return;
     noteWorkerStopped();
-    if (worker === w) stopWorker();
+    stopWorker();
     if (running) finish(running.id, (job) => job.reject(new Error('The convex decomposition worker stopped.')));
   };
   worker = w;

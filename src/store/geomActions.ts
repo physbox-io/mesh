@@ -8,7 +8,7 @@ import { reconcileEdgeRounds } from '../utils/edgeRound';
 import { CSG_DEFAULT_SECTORS, sourcePositiveBounds, reconcileCuts, hasBooleanOps } from '../utils/csg';
 import { insetNegatives } from '../utils/scaleNode';
 import { generateGearGeoms } from '../presets/presetScenes';
-import { cloneSceneGraph, findNode } from './sceneClone';
+import { cloneSceneGraph, findNode, type WorkingGeom } from './sceneClone';
 import { dropStaleColliders, rebuildAfterGeomEdit } from './geomEdits';
 import type { SliceDeps } from './sliceDeps';
 import { assertGeomSizes } from '../utils/geomSize';
@@ -57,11 +57,23 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
       const traverse = (nodes: SceneNode[]) => {
         if (!nodes) return false; for (const node of nodes) {
           if (node.id === id && node.geoms?.length > 0) {
-            if (id.includes('gear')) {
+            const isLegacyCog =
+              id.includes('gear') &&
+              (geomIndex === undefined || geomIndex === 0) &&
+              'size' in updates &&
+              Array.isArray(updates.size) &&
+              node.geoms.length > 1 &&
+              node.geoms[0]?.type === 'cylinder' &&
+              Array.isArray(node.geoms[0].size) &&
+              !node.scad &&
+              !node.toothForm &&
+              !node.geoms.some((g: SceneGeom) => g.type === 'mesh');
+            if (isLegacyCog) {
               const centerGeom = node.geoms[0];
               assertGeomSizes([{ ...centerGeom, ...updates }], node.name);
+              const pegGeom = node.geoms.find((g: SceneGeom) => g.name?.includes('peg'));
               const currentRadius = centerGeom.size[0];
-              const currentTeeth = node.geoms.length - 1;
+              const currentTeeth = node.geoms.filter((g: SceneGeom, idx: number) => idx > 0 && !g.name?.includes('peg')).length;
               const currentColor = centerGeom.rgba || [0.5, 0.5, 0.5, 1];
               const currentContype = centerGeom.contype !== undefined ? centerGeom.contype : 0;
               const currentConaffinity = centerGeom.conaffinity !== undefined ? centerGeom.conaffinity : 0;
@@ -89,7 +101,10 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
               const gearNum = parseInt(id.replace(/\D/g, '')) || 1;
               const isSecondGear = gearNum % 2 === 0;
             
-              node.geoms = generateGearGeoms(id, newRadius, currentTeeth, newColor, isSecondGear, newContype, newConaffinity);
+              const rebuilt = generateGearGeoms(id, newRadius, currentTeeth, newColor, isSecondGear, newContype, newConaffinity);
+              if (pegGeom) rebuilt.push(pegGeom);
+              node.geoms = rebuilt;
+              delete node.tunedPitchHz;
             } else {
               let targetGeom = node.geoms[0];
               if (geomIndex !== undefined && geomIndex >= 0 && geomIndex < node.geoms.length) {
@@ -155,9 +170,9 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
             if (!node.geoms) {
               node.geoms = [];
             }
-            let meshGeom = node.geoms.find((g: SceneGeom) => g.type === 'mesh');
+            let meshGeom = node.geoms.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived) as WorkingGeom | undefined;
             if (!meshGeom && node.geoms.length > 0) {
-              meshGeom = node.geoms[0];
+              meshGeom = node.geoms.find((g: SceneGeom) => !g.csgDerived) as WorkingGeom | undefined;
             }
             const nodeRgba = (node as { rgba?: number[] }).rgba;
             // number[], as SceneGeom.rgba is: a tuple here made the `as SceneGeom`
@@ -177,7 +192,7 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
                 dynamic: true,
                 rgba: fallbackRgba,
                 mass: 1
-              } as SceneGeom;
+              } as WorkingGeom;
               node.geoms.push(meshGeom);
             } else if (Array.isArray(nodeRgba) && nodeRgba.length >= 3 && !meshGeom.rgba) {
               meshGeom.rgba = fallbackRgba;
@@ -187,6 +202,11 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
             meshGeom.vertices = compiledData.vertices;
             meshGeom.faces = compiledData.faces;
             meshGeom.renderVertices = compiledData.renderVertices;
+            delete meshGeom.baseVertices;
+            delete meshGeom.baseRenderVertices;
+            delete meshGeom.baseColliderVertices;
+            dropStaleColliders(node);
+            delete node.tunedPitchHz;
             return true;
           }
           if (traverse(node.children)) return true;

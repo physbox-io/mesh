@@ -204,6 +204,9 @@ export function booleanActions({ set, get }: SliceDeps): BooleanActions {
     },
 
     setNodeCollisionError: (nodeId, error, hash) => {
+      const current = findNode(get().sceneGraph.nodes, nodeId);
+      if (!current) return;
+      if (error && hash && collisionHashOf(current) !== hash) return;
       const newScene = cloneSceneGraph(get().sceneGraph);
       const node = findNode(newScene.nodes, nodeId);
       if (!node) return;
@@ -220,6 +223,9 @@ export function booleanActions({ set, get }: SliceDeps): BooleanActions {
     },
 
     setNodeCsgError: (nodeId, error, hash) => {
+      const current = findNode(get().sceneGraph.nodes, nodeId);
+      if (!current) return;
+      if (error && hash && (!current.csgEnabled || csgHashOf(current) !== hash)) return;
       const newScene = cloneSceneGraph(get().sceneGraph);
       const node = findNode(newScene.nodes, nodeId);
       if (!node) return;
@@ -314,9 +320,11 @@ export function booleanActions({ set, get }: SliceDeps): BooleanActions {
         // A new cage is a new document to the editor, which remounts on this.
         node.latticeVersion = (node.latticeVersion ?? 1) + 1;
       }
-      // A boolean that happened on the cage has already happened; turning the
-      // evaluator on as well would subtract the source a second time.
-      if (op !== 'union' && !mergedResult) {
+      // A boolean that happened purely on the cage has already happened; but
+      // if any non-lattice source brought difference/intersection geoms, enable CSG
+      // so those cuts are evaluated too.
+      const hasBroughtBoolean = brought.some((g) => g.csg === 'difference' || g.csg === 'intersection');
+      if (hasBroughtBoolean || (op !== 'union' && !mergedResult)) {
         node.csgEnabled = true;
         if (node.csgCollision === undefined) node.csgCollision = 'auto';
         if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;

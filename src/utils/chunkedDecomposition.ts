@@ -134,33 +134,36 @@ export async function decomposeInChunks(
   // Breadth first, so the budget of chunks is spent evenly over the part.
   let queue: Manifold[] = [root];
   let next: Manifold[] = [];
+  let current: Manifold | null = null;
   let chunks = 1;
   try {
     while (queue.length) {
       next = [];
       while (queue.length) {
-        const m = queue.shift()!;
-        const chunk = fromManifold(m);
+        current = queue.shift()!;
+        const chunk = fromManifold(current);
         const { lo, hi } = bounds(chunk.verts);
         const longest = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
         const canCut = longest >= plan.minWalls * wall && chunks < plan.maxChunks;
         if (canCut && longest / wall >= plan.slender) {
-          const halves = bisect(m);
-          if (halves) { m.delete(); next.push(...halves); chunks++; continue; }
+          const halves = bisect(current);
+          if (halves) { current.delete(); current = null; next.push(...halves); chunks++; continue; }
         }
         const hulls = await decompose(chunk.verts, chunk.faces, paramsFor(chunk));
         const cavities = findFilledCavities(chunk.verts, chunk.faces, hulls);
         if (cavities.length > 0 && canCut) {
-          const halves = bisect(m);
-          if (halves) { m.delete(); next.push(...halves); chunks++; continue; }
+          const halves = bisect(current);
+          if (halves) { current.delete(); current = null; next.push(...halves); chunks++; continue; }
         }
-        m.delete();
+        current.delete();
+        current = null;
         done.push({ hulls, cavities });
       }
       queue = next;
     }
   } finally {
     // Whatever was not decomposed when something threw: each is deleted once.
+    current?.delete();
     for (const m of new Set([...queue, ...next])) m.delete();
   }
   // Cavities are named by piece index, so they are renumbered into the whole list.

@@ -6,10 +6,12 @@
 // snapshot is pushed once the scene has actually moved.
 // ---------------------------------------------------------------------------
 
-import type { SceneGraph } from '../types/scene';
+import type { BackgroundId, SceneGraph } from '../types/scene';
 import { sameValue, cloneSceneGraph, findNode } from './sceneClone';
 import { markUserEdit, withCastPrepBypass } from './editGuard';
+import { clearBreakage } from './breakage';
 import { rebuildBooleansAfterRestore } from './geomEdits';
+import { peekPhysicsWorkerClient, silenceAllLiveAcoustics } from './physicsEngine';
 import { recompilesInFlight } from './simulationActions';
 import type { SliceDeps } from './sliceDeps';
 
@@ -31,6 +33,8 @@ export interface UndoRedoState {
   density: number;
   floorFriction: number;
   floorBounce: number;
+  background: BackgroundId;
+  waterLevel: number | null;
   selectedNodeId: string | null;
   /**
    * Whether the lattice tools were open, and on what.
@@ -92,16 +96,19 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
       }
 
       if (!get().tempUndoState) {
+        const s = get();
         const snapshot: UndoRedoState = {
-          sceneGraph: cloneSceneGraph(get().sceneGraph),
-          gravityZ: get().gravityZ,
-          windX: get().windX,
-          windY: get().windY,
-          density: get().density,
-          floorFriction: get().floorFriction,
-          floorBounce: get().floorBounce,
-          selectedNodeId: get().selectedNodeId,
-          latticeNodeId: get().latticeNodeId,
+          sceneGraph: cloneSceneGraph(s.sceneGraph),
+          gravityZ: s.gravityZ,
+          windX: s.windX,
+          windY: s.windY,
+          density: s.density,
+          floorFriction: s.floorFriction,
+          floorBounce: s.floorBounce,
+          background: s.background,
+          waterLevel: s.waterLevel,
+          selectedNodeId: s.selectedNodeId,
+          latticeNodeId: s.latticeNodeId,
         };
         set({
           tempUndoState: snapshot,
@@ -129,6 +136,8 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           tempUndoState.density !== current.density ||
           tempUndoState.floorFriction !== current.floorFriction ||
           tempUndoState.floorBounce !== current.floorBounce ||
+          tempUndoState.background !== current.background ||
+          tempUndoState.waterLevel !== current.waterLevel ||
           !sameValue(tempUndoState.sceneGraph, current.sceneGraph);
 
         if (isDifferent) {
@@ -175,7 +184,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
     prepareForDiscreteChange: () => {
       markUserEdit();
       get().flushPendingUndo();
-      const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
+      const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
       const snapshot: UndoRedoState = {
         sceneGraph: cloneSceneGraph(sceneGraph),
         gravityZ,
@@ -184,6 +193,8 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
         density,
         floorFriction,
         floorBounce,
+        background,
+        waterLevel,
         selectedNodeId,
         latticeNodeId,
       };
@@ -198,7 +209,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
       if (get().castPrepBusy) return;
       withCastPrepBypass(() => {
         get().flushPendingUndo();
-        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
+        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
         if (undoStack.length === 0) return;
 
         const previousState = undoStack[undoStack.length - 1];
@@ -212,9 +223,16 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           density,
           floorFriction,
           floorBounce,
+          background,
+          waterLevel,
           selectedNodeId,
           latticeNodeId,
         };
+
+        silenceAllLiveAcoustics();
+        peekPhysicsWorkerClient()?.setPlaying(false);
+        peekPhysicsWorkerClient()?.setDrag(null, null);
+        clearBreakage(set);
 
         set({
           sceneGraph: previousState.sceneGraph,
@@ -224,18 +242,27 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           density: previousState.density,
           floorFriction: previousState.floorFriction,
           floorBounce: previousState.floorBounce,
+          background: previousState.background,
+          waterLevel: previousState.waterLevel,
           selectedNodeId: previousState.selectedNodeId,
+          extraSelectedIds: [],
+          activeGeomIndex: 0,
+          geomFocused: false,
+          draggedNodeId: null,
+          dragTarget: null,
+          edgeRoundSession: null,
+          gestureStatus: null,
           // The tools follow the document back. A body that has just stopped
           // existing cannot be the one being modelled, and the editor holding its
           // own copy of the cage is exactly how a ghost gets committed back in.
           ...latticeAfterUndo(previousState),
           undoStack: newUndoStack,
           redoStack: [...redoStack, currentStateSnapshot],
-          isPlaying: false
-      });
+          isPlaying: false,
+        });
 
-      get().recompile(previousState.sceneGraph, previousState.selectedNodeId, true, true);
-      rebuildBooleansAfterRestore();
+        get().recompile(previousState.sceneGraph, previousState.selectedNodeId, true, true);
+        rebuildBooleansAfterRestore();
       });
     },
 
@@ -243,7 +270,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
       if (get().castPrepBusy) return;
       withCastPrepBypass(() => {
         get().flushPendingUndo();
-        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
+        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
         if (redoStack.length === 0) return;
 
         const nextState = redoStack[redoStack.length - 1];
@@ -257,9 +284,16 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           density,
           floorFriction,
           floorBounce,
+          background,
+          waterLevel,
           selectedNodeId,
           latticeNodeId,
         };
+
+        silenceAllLiveAcoustics();
+        peekPhysicsWorkerClient()?.setPlaying(false);
+        peekPhysicsWorkerClient()?.setDrag(null, null);
+        clearBreakage(set);
 
         set({
           sceneGraph: nextState.sceneGraph,
@@ -269,15 +303,24 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           density: nextState.density,
           floorFriction: nextState.floorFriction,
           floorBounce: nextState.floorBounce,
+          background: nextState.background,
+          waterLevel: nextState.waterLevel,
           selectedNodeId: nextState.selectedNodeId,
+          extraSelectedIds: [],
+          activeGeomIndex: 0,
+          geomFocused: false,
+          draggedNodeId: null,
+          dragTarget: null,
+          edgeRoundSession: null,
+          gestureStatus: null,
           ...latticeAfterUndo(nextState),
           undoStack: [...undoStack, currentStateSnapshot],
           redoStack: newRedoStack,
-          isPlaying: false
-      });
+          isPlaying: false,
+        });
 
-      get().recompile(nextState.sceneGraph, nextState.selectedNodeId, true, true);
-      rebuildBooleansAfterRestore();
+        get().recompile(nextState.sceneGraph, nextState.selectedNodeId, true, true);
+        rebuildBooleansAfterRestore();
       });
     },
   };

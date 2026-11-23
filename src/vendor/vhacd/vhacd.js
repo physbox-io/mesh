@@ -43,25 +43,27 @@ function computeConvexHulls(vhacd, mesh, opts) {
         throw new Error("3 coordinates required per vertex");
     if (mesh.indices.length % 3 !== 0)
         throw new Error("Triangles required.");
-    const params = new vhacd.Parameters();
-    if (opts)
-        populateParameters(params, opts);
-    let messages = VHACD.MessageType.None;
-    switch (opts === null || opts === void 0 ? void 0 : opts.messages) {
-        case "all":
-            messages = VHACD.MessageType.All;
-            break;
-        case "log":
-            messages = VHACD.MessageType.Log;
-            break;
-        case "progress":
-            messages = VHACD.MessageType.Progress;
-            break;
-    }
     let pPoints = 0;
     let pTriangles = 0;
+    let params;
     let decomposer;
+    let hulls;
     try {
+        params = new vhacd.Parameters();
+        if (opts)
+            populateParameters(params, opts);
+        let messages = VHACD.MessageType.None;
+        switch (opts === null || opts === void 0 ? void 0 : opts.messages) {
+            case "all":
+                messages = VHACD.MessageType.All;
+                break;
+            case "log":
+                messages = VHACD.MessageType.Log;
+                break;
+            case "progress":
+                messages = VHACD.MessageType.Progress;
+                break;
+        }
         // Allocate everything first, in case memory grows.
         pPoints = vhacd._malloc(8 * mesh.positions.length);
         pTriangles = vhacd._malloc(4 * mesh.indices.length);
@@ -69,25 +71,34 @@ function computeConvexHulls(vhacd, mesh, opts) {
         vhacd.HEAPF64.set(mesh.positions, pPoints / 8);
         vhacd.HEAPU32.set(mesh.indices, pTriangles / 4);
         decomposer = new vhacd.MeshDecomposer(params, messages);
-        const hulls = decomposer.compute(pPoints, mesh.positions.length / 3, pTriangles, mesh.indices.length / 3);
+        hulls = decomposer.compute(pPoints, mesh.positions.length / 3, pTriangles, mesh.indices.length / 3);
         const meshes = [];
         const nHulls = hulls.size();
         for (let i = 0; i < nHulls; i++) {
             const hull = hulls.get(i);
-            const pts = hull.getPoints() / 8;
-            const tris = hull.getTriangles() / 4;
-            const mesh = {
-                positions: vhacd.HEAPF64.slice(pts, pts + hull.numPoints * 3),
-                indices: vhacd.HEAPU32.slice(tris, tris + hull.numTriangles * 3),
-            };
-            // console.log({ positions: Array.from(mesh.positions), indices: Array.from(mesh.indices) });
-            meshes.push(mesh);
+            try {
+                const pts = hull.getPoints() / 8;
+                const tris = hull.getTriangles() / 4;
+                const mesh = {
+                    positions: vhacd.HEAPF64.slice(pts, pts + hull.numPoints * 3),
+                    indices: vhacd.HEAPU32.slice(tris, tris + hull.numTriangles * 3),
+                };
+                // console.log({ positions: Array.from(mesh.positions), indices: Array.from(mesh.indices) });
+                meshes.push(mesh);
+            }
+            finally {
+                hull === null || hull === void 0 ? void 0 : hull.delete();
+            }
         }
         return meshes;
     }
     finally {
-        vhacd._free(pPoints);
-        vhacd._free(pTriangles);
+        hulls === null || hulls === void 0 ? void 0 : hulls.delete();
         decomposer === null || decomposer === void 0 ? void 0 : decomposer.dispose();
+        params === null || params === void 0 ? void 0 : params.delete();
+        if (pPoints)
+            vhacd._free(pPoints);
+        if (pTriangles)
+            vhacd._free(pTriangles);
     }
 }

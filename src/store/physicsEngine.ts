@@ -706,6 +706,8 @@ export const setPhysicsFrameListener = (listener: (() => void) | null) => {
   physicsFrameListener = listener;
 };
 
+export const peekPhysicsWorkerClient = (): PhysicsWorkerClient | null => physicsWorkerClientSingleton;
+
 export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
   if (!physicsWorkerClientSingleton) {
     const client = new PhysicsWorkerClient();

@@ -30,6 +30,14 @@ export type WorkingNode = SceneNode & { basePos?: number[] };
 export const sameValue = (a: unknown, b: unknown): boolean => {
   if (a === b) return true;
   if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (ArrayBuffer.isView(a) || ArrayBuffer.isView(b)) {
+    if (!ArrayBuffer.isView(a) || !ArrayBuffer.isView(b)) return false;
+    if (a.constructor !== b.constructor || a.byteLength !== b.byteLength) return false;
+    const ba = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const bb = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    for (let i = 0; i < ba.length; i++) if (ba[i] !== bb[i]) return false;
+    return true;
+  }
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (!sameValue(a[i], b[i])) return false;
@@ -68,6 +76,13 @@ export const SHARED_GEOM_KEYS = new Set([
 
 export const clonePlain = <T>(val: T): T => {
   if (val === null || typeof val !== 'object') return val;
+  if (ArrayBuffer.isView(val)) {
+    if (val instanceof DataView) {
+      return new DataView(val.buffer.slice(val.byteOffset, val.byteOffset + val.byteLength)) as unknown as T;
+    }
+    const ctor = val.constructor as { new (src: ArrayBufferView): T };
+    return new ctor(val);
+  }
   if (Array.isArray(val)) {
     const len = val.length;
     const out = new Array(len);
@@ -154,6 +169,8 @@ export const replaceNodeWith = (nodes: SceneNode[], id: string, replacements: Sc
 export const cloneSceneGraph = (sg: SceneGraph): SceneGraph => ({
   ...sg,
   ...(sg.brickwork ? { brickwork: clonePlain(sg.brickwork) } : {}),
+  ...(sg.castPrep ? { castPrep: clonePlain(sg.castPrep) } : {}),
+  ...(sg.referenceImages ? { referenceImages: clonePlain(sg.referenceImages) } : {}),
   nodes: (sg.nodes || []).map(cloneNode),
 });
 

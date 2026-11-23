@@ -13,7 +13,9 @@ import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { cloneSceneGraph } from './sceneClone';
 import { promoteJointedMeshGeomsDeep } from './meshGeomTransforms';
 import { clearBreakage } from './breakage';
-import { onNextPaint, getPhysicsWorkerClient } from './physicsEngine';
+import { withCastPrepBypass } from './editGuard';
+import { useGarmentSculpt } from './garmentSculptStore';
+import { onNextPaint, peekPhysicsWorkerClient, silenceAllLiveAcoustics } from './physicsEngine';
 import { framingPatch } from './sceneFraming';
 import { DEFAULT_ENVIRONMENT, environmentOf, takeEnvironment } from './sceneEnvironment';
 import type { PhysicsState } from './useStore';
@@ -99,33 +101,33 @@ export interface SceneSwapActions {
   loadGeneratedScene: (scene: SceneGraph, carve: Partial<ReliefCarveOptions> | null) => void;
 }
 
+const TRANSIENT_TOOL_RESET: Partial<PhysicsState> = {
+  isPlaying: false,
+  selectedNodeId: null,
+  extraSelectedIds: [],
+  activeGeomIndex: 0,
+  geomFocused: false,
+  hiddenNodeIds: [],
+  draggedNodeId: null,
+  dragTarget: null,
+  cameraOverride: null,
+  latticeNodeId: null,
+  latticeStats: null,
+  sculptNodeId: null,
+  sculptStats: null,
+  edgeRoundSession: null,
+  paintMode: false,
+  measureMode: null,
+  gestureStatus: null,
+  castPrepGuardOpen: false,
+};
+
 export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
   return {
     loadPreset: (name) => {
       const prev = get().activePreset;
-      get().prepareForDiscreteChange();
-      getPhysicsWorkerClient().setPlaying(false);
-      // Whatever broke in the last scene broke in THAT scene. Carried over, a
-      // reloaded vase was already "in pieces" and could never break again, and
-      // a weld whose key the new scene happens to share started out sheared.
-      clearBreakage(set);
       if (name.startsWith('user:')) {
-        set({
-          isPlaying: false,
-          selectedNodeId: null,
-          hiddenNodeIds: [],
-          activePreset: name,
-          carveSettings: null,
-          cameraOverride: null,
-          latticeNodeId: null,
-          latticeStats: null,
-          sculptNodeId: null,
-          sculptStats: null,
-          gestureStatus: null,
-        });
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
-        }
+        let found: SceneGraph | null;
         try {
           const saved = readUserPreset(name);
           // Two shapes are in circulation. App.tsx spreads the graph, so the nodes
@@ -143,39 +145,69 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
             thumbnail: _thumbnail, savedAt: _savedAt, noteCards: _notes, copilotMessages: _chat,
             ...savedGraph
           } = saved ?? {};
-          const found: SceneGraph | null =
+          found =
             saved && Array.isArray(saved.nodes) ? (savedGraph as unknown as SceneGraph)
             : nested && Array.isArray(nested.nodes) ? nested
             : null;
-          // A preset with no nodes is a corrupt or half-written entry rather than
-          // an empty scene; recompiling it would throw inside the MJCF builder.
-          if (found) {
-            const { graph: savedScene, environment } = takeEnvironment(found);
-            promoteJointedMeshGeomsDeep(savedScene.nodes);
-            // In the store now, as a built-in preset's is, not when the worker
-            // has built it: everything that reads the graph straight after the
-            // load (the boolean compile, the MCP reply, the note card) read the
-            // scene being left.
-            set((state) => ({
-              sceneGraph: savedScene,
-              outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
-              // A preset saved before the environment was saved gets the default
-              // world, not whatever the last scene was set to.
-              ...(environment ?? DEFAULT_ENVIRONMENT),
-            }));
-            // A saved scene never carries a camera, so it is framed entirely
-            // from its own bounds — the same as a preset that does not state
-            // one. After the rebuild, for the same reason the presets are.
-            finishSceneSwap(++sceneSwapId, get().recompile(savedScene, null, true, true), set,
-              () => framingPatch(savedScene, null));
-          }
         } catch (e) {
           console.error('Failed to load user preset', e);
+          return;
         }
+        // A preset with no nodes is a corrupt or half-written entry rather than
+        // an empty scene; recompiling it would throw inside the MJCF builder.
+        // Validate BEFORE mutating activePreset or clearing live state.
+        if (!found) return;
+
+        get().prepareForDiscreteChange();
+        silenceAllLiveAcoustics();
+        peekPhysicsWorkerClient()?.setPlaying(false);
+        peekPhysicsWorkerClient()?.setDrag(null, null);
+        // Whatever broke in the last scene broke in THAT scene. Carried over, a
+        // reloaded vase was already "in pieces" and could never break again, and
+        // a weld whose key the new scene happens to share started out sheared.
+        clearBreakage(set);
+        useGarmentSculpt.getState().set({ target: null });
+
+        const { graph: savedScene, environment } = takeEnvironment(found);
+        promoteJointedMeshGeomsDeep(savedScene.nodes);
+        const swap = ++sceneSwapId;
+        // In the store now, as a built-in preset's is, not when the worker
+        // has built it: everything that reads the graph straight after the
+        // load (the boolean compile, the MCP reply, the note card) read the
+        // scene being left. Bypass Cast-Prep editGuard so full scene swaps
+        // never get blocked while draft is baked in.
+        withCastPrepBypass(() => {
+          set((state) => ({
+            ...TRANSIENT_TOOL_RESET,
+            activePreset: name,
+            carveSettings: null,
+            sceneGraph: savedScene,
+            outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
+            // A preset saved before the environment was saved gets the default
+            // world, not whatever the last scene was set to.
+            ...(environment ?? DEFAULT_ENVIRONMENT),
+          }));
+        });
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+          window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
+        }
+        // A saved scene never carries a camera, so it is framed entirely
+        // from its own bounds — the same as a preset that does not state
+        // one. After the rebuild, for the same reason the presets are.
+        finishSceneSwap(swap, get().recompile(savedScene, null, true, true), set,
+          () => framingPatch(savedScene, null));
         return;
       }
+
       const preset: Preset | undefined = (PRESETS as Record<string, Preset>)[name];
       if (!preset) return;
+      get().prepareForDiscreteChange();
+      silenceAllLiveAcoustics();
+      peekPhysicsWorkerClient()?.setPlaying(false);
+      peekPhysicsWorkerClient()?.setDrag(null, null);
+      clearBreakage(set);
+      useGarmentSculpt.getState().set({ target: null });
+
       // Clone: PRESETS holds module-level objects, and handing one straight to the
       // store makes every later edit an edit of the preset itself — reloading it
       // would then restore the edited scene rather than the original.
@@ -198,37 +230,25 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
        */
       const framing = preset.camera ?? null;
       const swap = ++sceneSwapId;
-      set((state) => ({
-        isPlaying: false,
-        selectedNodeId: null,
-        hiddenNodeIds: [],
-        activePreset: name,
-        sceneGraph: scene,
-        // A load that overtakes another still shows what was on screen.
-        outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
-        // A preset that does not say how it is cut gets the exporter's defaults
-        // back, rather than inheriting the last one's.
-        carveSettings: preset.carve ?? null,
-        stock: stockFromCarve(preset.carve, state.stock),
-        // Back to the view every scene starts in, once it is on screen (see
-        // finishSceneSwap). Whatever the camera was doing belonged to the scene
-        // that has just gone: a view orbited round a 40 mm part, or zoomed to six
-        // millimetres inside a lattice, frames the next preset as a wall of
-        // geometry across the window.
-        cameraOverride: null,
-        // The modelling tools were open on a body that no longer exists.
-        latticeNodeId: null,
-        latticeStats: null,
-        sculptNodeId: null,
-        sculptStats: null,
-        gestureStatus: null,
-      }));
-      if (typeof window !== 'undefined') {
+      withCastPrepBypass(() => {
+        set((state) => ({
+          ...TRANSIENT_TOOL_RESET,
+          activePreset: name,
+          sceneGraph: scene,
+          // A load that overtakes another still shows what was on screen.
+          outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
+          // A preset that does not say how it is cut gets the exporter's defaults
+          // back, rather than inheriting the last one's.
+          carveSettings: preset.carve ?? null,
+          stock: stockFromCarve(preset.carve, state.stock),
+          // The preset's world, and the default for anything it does not mention.
+          // Gravity, air and floor friction used to carry over from the last scene.
+          ...environmentOf(preset.environment),
+        }));
+      });
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
         window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
       }
-      // The preset's world, and the default for anything it does not mention.
-      // Gravity, air and floor friction used to carry over from the last scene.
-      set(environmentOf(preset.environment));
       finishSceneSwap(swap, get().recompile(scene, null, true, true), set,
         () => framingPatch(scene, framing));
     },
@@ -245,31 +265,29 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
      */
     loadGeneratedScene: (scene, carve) => {
       get().prepareForDiscreteChange();
-      getPhysicsWorkerClient().setPlaying(false);
+      silenceAllLiveAcoustics();
+      peekPhysicsWorkerClient()?.setPlaying(false);
+      peekPhysicsWorkerClient()?.setDrag(null, null);
+      clearBreakage(set);
+      useGarmentSculpt.getState().set({ target: null });
       const swap = ++sceneSwapId;
-      set((state) => ({
-        isPlaying: false,
-        selectedNodeId: null,
-        hiddenNodeIds: [],
-        // A generated board is not a preset, and saying it is would make the
-        // dropdown offer to reload something that cannot be reloaded. `undefined`
-        // rather than null, which is what the field is typed as and what
-        // `activePresetLabel` already falls through to.
-        activePreset: undefined,
-        sceneGraph: scene,
-        outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
-        carveSettings: carve,
-        stock: stockFromCarve(carve, state.stock),
-        patternGeneratorId: null,
-        facePatternTarget: null,
-        cameraOverride: null,
-        latticeNodeId: null,
-        latticeStats: null,
-        sculptNodeId: null,
-        sculptStats: null,
-        gestureStatus: null,
-        ...DEFAULT_ENVIRONMENT,
-      }));
+      withCastPrepBypass(() => {
+        set((state) => ({
+          ...TRANSIENT_TOOL_RESET,
+          // A generated board is not a preset, and saying it is would make the
+          // dropdown offer to reload something that cannot be reloaded. `undefined`
+          // rather than null, which is what the field is typed as and what
+          // `activePresetLabel` already falls through to.
+          activePreset: undefined,
+          sceneGraph: scene,
+          outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
+          carveSettings: carve,
+          stock: stockFromCarve(carve, state.stock),
+          patternGeneratorId: null,
+          facePatternTarget: null,
+          ...DEFAULT_ENVIRONMENT,
+        }));
+      });
       // A generated board is sized from the stock it will be cut from, which
       // is usually a good deal smaller than the default view assumes.
       finishSceneSwap(swap, get().recompile(scene, null, true, true), set,

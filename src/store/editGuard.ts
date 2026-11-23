@@ -37,6 +37,14 @@ export function markUserEdit() {
   userEditTimer = setTimeout(() => { userEditPending = false; userEditTimer = null; }, 0);
 }
 
+export function clearUserEdit() {
+  userEditPending = false;
+  if (userEditTimer) {
+    clearTimeout(userEditTimer);
+    userEditTimer = null;
+  }
+}
+
 export function withCastPrepBypass<T>(fn: () => T): T {
   castPrepBypass++;
   try { return fn(); } finally { castPrepBypass--; }

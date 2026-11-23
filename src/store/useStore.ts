@@ -39,10 +39,10 @@ export { endVoltLink, getPhysicsWorkerClient, setPhysicsFrameListener } from './
 export type { EdgeRoundSession } from './edgeRoundActions';
 export type { UndoRedoState } from './historyActions';
 export type { AddPlacement } from './addComponentActions';
-import { userEditPending, castPrepBypass, refusedGraphs, keptGraphs, castPrepArmed, bodiesChanged } from './editGuard';
+import { userEditPending, castPrepBypass, refusedGraphs, keptGraphs, castPrepArmed, bodiesChanged, withCastPrepBypass, clearUserEdit } from './editGuard';
 import type { DeformedGeometry } from './breakage';
 import { shapeParamActions, type ShapeParamActions } from './shapeParamActions';
-import { getPhysicsWorkerClient, liveModelGraph } from './physicsEngine';
+import { getPhysicsWorkerClient, peekPhysicsWorkerClient, liveModelGraph } from './physicsEngine';
 import { initialPreset, initialScene, initialFraming, snapForGridMm } from './sceneFraming';
 import { latticeActions, type LatticeActions } from './latticeActions';
 import { sculptActions, type SculptActions } from './sculptActions';
@@ -458,24 +458,39 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
         // dense part's collision copy is rebuilt when its mesh has changed
         // (store/denseColliders).
         const offered = patch.sceneGraph;
-        patch.sceneGraph = withFreshDenseColliders(withConnectAnchorsFollowing(
+        const nextGraph = withFreshDenseColliders(withConnectAnchorsFollowing(
           get().sceneGraph,
           withUniqueNames(withoutDanglingReferences(patch.sceneGraph)),
-        ), () => useStore.getState().updateScene(useStore.getState().sceneGraph));
+        ), () => {
+          const current = get().sceneGraph;
+          const refreshed = withCastPrepBypass(() => {
+            set({ sceneGraph: current });
+            return get().sceneGraph;
+          });
+          if (refreshed !== current) {
+            void get().recompile(refreshed, undefined, false);
+          }
+        });
+        patch = { ...patch, sceneGraph: nextGraph } as typeof patch;
         const prev = get().sceneGraph;
-        shareUnchanged(prev, patch.sceneGraph);
-        if (userEditPending && castPrepBypass === 0 && castPrepArmed(prev) && bodiesChanged(prev, patch.sceneGraph)) {
+        shareUnchanged(prev, nextGraph);
+        if (userEditPending && castPrepBypass === 0 && castPrepArmed(prev) && bodiesChanged(prev, nextGraph)) {
           // Turned away: the rest of the patch (selection and the like) still applies.
+          clearUserEdit();
           refusedGraphs.add(offered);
-          refusedGraphs.add(patch.sceneGraph);
+          refusedGraphs.add(nextGraph);
           const { sceneGraph: _refused, ...rest } = patch;
           patch = { ...rest, castPrepGuardOpen: true, castPrepBlocked: get().castPrepBlocked + 1 } as typeof patch;
         } else {
-          keptGraphs.set(offered, patch.sceneGraph);
+          keptGraphs.set(offered, nextGraph);
         }
       }
       (rawSet as (p: typeof patch, r?: boolean) => void)(patch, replace);
     }) as typeof rawSet;
+    // Also wrap external `useStore.setState(...)` so direct callers cannot bypass
+    // dangling-reference cleanup, unique naming, dense colliders, or editGuard.
+    // `rawSet` is the original Zustand setter closure, so internal `set` never double-applies.
+    api.setState = set;
     return config(set, get, api);
   };
 
@@ -611,7 +626,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       get().recompile(get().sceneGraph);
     } else if ('waterLevel' in env) {
       const s = get();
-      getPhysicsWorkerClient().setEnv(
+      peekPhysicsWorkerClient()?.setEnv(
         s.windX,
         s.windY,
         s.density,

@@ -10,7 +10,7 @@ import { resolveCsgGeoms } from '../utils/csg';
 import { isBoughtIn } from '../utils/boughtIn';
 import { colouredGeomTriangles } from '../utils/printColours';
 import { needsColourCarry, sectionPaint, type ColourSource } from '../utils/sectionPaint';
-import { isNodeRotationBaked } from '../utils/sceneTree';
+import { isNodeRotationBaked, nodeLocalQuat, quatRotateVec } from '../utils/sceneTree';
 import { colliderTemplateOf, hullsToColliderGeoms, meshVolumeAndCentroid, statedBooleanMass, usableColliderHulls } from '../utils/csg';
 import { collisionHashOf } from '../utils/convexDecomposition';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
@@ -206,7 +206,8 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
         'isSculpt', 'sculptBase', 'sculptVersion', 'sculptEdited',
         'scad', 'csgEnabled', 'csgCollision', 'csgSectors', 'csgFn', 'csgHoleAxis', 'csgMass', 'csgHash', 'csgScad',
         'csgVolume', 'csgHullVolume', 'csgCentroid', 'csgWarning', 'csgError', 'edgeRounds', 'edgeRoundsLost',
-        'collisionHash', 'collisionDecomposed', 'collisionSolidity', 'collisionWarning', 'collisionError',
+        'collisionHash', 'collisionDecomposed', 'collisionSolidity', 'collisionCavities', 'collisionIntrusion', 'collisionUncovered', 'collisionWarning', 'collisionError',
+        'basePos', 'tunedPitchHz',
       ] as const;
       const strip = (n: SceneNode) => {
         for (const key of GENERATORS) delete (n as unknown as Record<string, unknown>)[key];
@@ -282,6 +283,9 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
 
       const baseName = first.name || first.id;
       const basePos: [number, number, number] = [first.pos?.[0] ?? 0, first.pos?.[1] ?? 0, first.pos?.[2] ?? 0];
+      const localQuat = baked ? null : nodeLocalQuat(first);
+      const parentOffset = (offset: [number, number, number]): [number, number, number] =>
+        localQuat ? quatRotateVec(localQuat, offset) : offset;
 
       const siblings = (() => {
         const walk = (list: SceneNode[]): SceneNode[] | null => {
@@ -316,6 +320,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
         const ids: string[] = [];
         sections.forEach((rawSec, k) => {
           const { sec, offset } = recenterSection(rawSec);
+          const po = parentOffset(offset);
           const id = `split_${Math.random().toString(36).substring(2, 10)}`;
           ids.push(id);
           const name = opts.names?.[k] || `${baseName}_part${k + 1}`;
@@ -325,7 +330,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
             id,
             name,
             pos: opts.centerOrigin
-              ? [basePos[0] + shiftX + offset[0], basePos[1] + offset[1], basePos[2] + offset[2]]
+              ? [basePos[0] + shiftX + po[0], basePos[1] + po[1], basePos[2] + po[2]]
               : [basePos[0] + shiftX, basePos[1], basePos[2]],
             joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${name}_${String(j.name || 'joint').split('_').pop()}` })),
             weldTargetId: undefined,
@@ -347,7 +352,8 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       strip(first);
       const firstCentered = recenterSection(sections[0]);
       if (opts.centerOrigin) {
-        first.pos = [basePos[0] + firstCentered.offset[0], basePos[1] + firstCentered.offset[1], basePos[2] + firstCentered.offset[2]];
+        const po = parentOffset(firstCentered.offset);
+        first.pos = [basePos[0] + po[0], basePos[1] + po[1], basePos[2] + po[2]];
       }
       if (opts.names?.[0]) first.name = opts.names[0];
       first.geoms = geomsFor(first.name || first.id, firstCentered.sec, 0, firstCentered.offset);
@@ -360,6 +366,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       const offsets: [number, number, number][] = [firstCentered.offset];
       sections.slice(1).forEach((rawSec, k) => {
         const { sec, offset } = recenterSection(rawSec);
+        const po = parentOffset(offset);
         const id = `split_${Math.random().toString(36).substring(2, 10)}`;
         ids.push(id);
         offsets.push(offset);
@@ -373,7 +380,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
           id,
           name,
           pos: opts.centerOrigin
-            ? [basePos[0] + offset[0], basePos[1] + offset[1], basePos[2] + offset[2]]
+            ? [basePos[0] + po[0], basePos[1] + po[1], basePos[2] + po[2]]
             : copy.pos,
           joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${name}_${String(j.name || 'joint').split('_').pop()}` })),
           // A section cut off a welded part is not welded to anything, and a

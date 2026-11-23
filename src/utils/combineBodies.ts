@@ -26,6 +26,7 @@ import * as THREE from 'three';
 import { createLattice, mergeLattice, type Lattice } from './latticeMesh';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { isNodeRotationBaked } from './sceneTree';
+import { denseFingerprintOf } from './denseMesh';
 
 /** How a combined shape takes part in the boolean it lands in. */
 export type CombineOp = 'union' | 'difference' | 'intersection';
@@ -130,16 +131,25 @@ export function rewriteGeom(geom: SceneGeom, relative: THREE.Matrix4): SceneGeom
   delete next.euler;
 
   if (geom.type === 'mesh') {
-    // A mesh's vertices ARE its position: they are written in the body frame
-    // and only shifted by an explicit pos, never turned by a quat (see
-    // geomBounds). So the transform goes into the vertices and the geom comes
-    // out sitting at the origin of its new body.
+    // Compose the geom's own pos/quat/euler with the body-to-body transform
+    // and bake it into both the render/visual vertices and any colliderVertices.
+    const wasDenseFresh = !geom.denseColliderOf || geom.denseColliderOf === denseFingerprintOf(geom);
+    const meshMat = relative.clone().multiply(geomMatrixOf(geom));
     const zup = geom.renderVertices ?? (geom.vertices ? yupToZupFlat(geom.vertices) : []);
-    const moved = transformFlat(zup, relative, geom.pos || [0, 0, 0]);
+    const moved = transformFlat(zup, meshMat);
     next.renderVertices = moved;
     next.vertices = zupToYupFlat(moved);
+    if (geom.colliderVertices?.length) {
+      next.colliderVertices = transformFlat(geom.colliderVertices, meshMat);
+    }
+    delete next.baseVertices;
+    delete next.baseRenderVertices;
+    delete next.baseColliderVertices;
     next.pos = [0, 0, 0];
     delete next.quat;
+    if (next.denseColliderOf && wasDenseFresh) {
+      next.denseColliderOf = denseFingerprintOf(next) ?? next.denseColliderOf;
+    }
     return next;
   }
 

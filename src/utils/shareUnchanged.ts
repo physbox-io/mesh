@@ -14,9 +14,10 @@
 // recompile(), so the top-level object has to be the one it was given.
 
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
+import { SHARED_GEOM_KEYS, type WorkingGeom } from '../store/sceneClone';
 
 /** Replaced wholesale, never edited in place, so compared by reference. See cloneGeom. */
-const SHARED_GEOM_ARRAYS = ['vertices', 'faces', 'renderVertices', 'baseVertices', 'baseRenderVertices', 'paint'] as const;
+const SHARED_GEOM_ARRAYS = Array.from(SHARED_GEOM_KEYS) as ReadonlyArray<keyof WorkingGeom>;
 
 function geomSignature(g: SceneGeom): string {
   const rest: Record<string, unknown> = { ...g };
@@ -35,8 +36,8 @@ function geomsEqual(a: SceneGeom[] | undefined, b: SceneGeom[] | undefined): boo
   if (x === y) return true;
   if (x.length !== y.length) return false;
   for (let i = 0; i < x.length; i++) {
-    const p = x[i];
-    const q = y[i];
+    const p = x[i] as WorkingGeom;
+    const q = y[i] as WorkingGeom;
     if (p === q) continue;
     for (const k of SHARED_GEOM_ARRAYS) if (p[k] !== q[k]) return false;
     if (geomSignature(p) !== geomSignature(q)) return false;

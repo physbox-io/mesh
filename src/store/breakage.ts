@@ -427,8 +427,10 @@ export const dentBody = (
   striker?: Imprint | null,
 ): void => {
   for (const geom of node.geoms || []) {
-    const source = geom.renderVertices ?? geom.vertices;
+    const source = geom.renderVertices ?? (geom.vertices ? yupToZup(geom.vertices) : null);
     if (!source || !geom.faces) continue;
+    const localPoint = bodyPointToGeomLocal(point, geom.pos, geom.quat, geom.euler);
+    const localNormal = bodyPointToGeomLocal(normal, undefined, geom.quat, geom.euler);
 
     // Piercing and denting are alternatives, not stages: there is nothing left
     // to crease where the material has gone.
@@ -436,8 +438,8 @@ export const dentBody = (
       useDentStore.getState().pierce(
         dentKey(node.id, geom.name),
         source, geom.faces,
-        [point[0], point[1], point[2]],
-        [normal[0], normal[1], normal[2]],
+        localPoint,
+        localNormal,
         Math.min(maxDentRadius(source), striker?.radius ?? geom.dentRadius ?? defaultDentRadius(source)),
       );
       if (geom.deformCollision) commitDamage(node.id, geom.name);
@@ -457,8 +459,8 @@ export const dentBody = (
     useDentStore.getState().dent(
       dentKey(node.id, geom.name),
       source, geom.faces,
-      [point[0], point[1], point[2]],
-      [normal[0], normal[1], normal[2]],
+      localPoint,
+      localNormal,
       depth,
       // Wider as well as deeper the harder it was hit — see dentSpread — but
       // never wider than the surface it is in.

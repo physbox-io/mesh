@@ -22,6 +22,7 @@ import { nodeWorldMatrix } from './combineBodies';
 import { sceneContentBounds } from './frameScene';
 import { clearAlongX } from './spawnPlacement';
 import { REFERENCE_FIELDS } from './danglingReferences';
+import { promoteMeshGeomsToDynamic } from '../store/meshGeomTransforms';
 
 /** References that make the copy part of the original's mechanism, cut when they lead out of it. */
 const MECHANISM_LINKS = new Set<string>(['connectTargetId', 'coupleTargetId']);
@@ -153,6 +154,20 @@ export function renumber(roots: SceneNode[]): void {
         else delete tube.coupledBarNodeId;
         n.resonatorTube = tube;
       }
+      const fastens = n.hardwarePart?.fastens;
+      if (n.hardwarePart && typeof fastens === 'string') {
+        const hw = { ...n.hardwarePart };
+        if (ids.has(fastens)) hw.fastens = ids.get(fastens)!;
+        else delete hw.fastens;
+        n.hardwarePart = hw;
+      }
+      const bridgeId = n.flexure?.bridgeNodeId;
+      if (n.flexure && typeof bridgeId === 'string') {
+        const fl = { ...n.flexure };
+        if (ids.has(bridgeId)) fl.bridgeNodeId = ids.get(bridgeId)!;
+        else delete fl.bridgeNodeId;
+        n.flexure = fl;
+      }
     });
   }
 }
@@ -201,6 +216,12 @@ export function pasteBodies(
     }
     return null;
   };
+  const syncMovedCopy = (copy: SceneNode) => {
+    delete (copy as SceneNode & { basePos?: number[] }).basePos;
+    // Static meshes render from world-baked vertices ignoring body pos;
+    // promote them to dynamic so shifted copies do not visually overlap the original.
+    walk(copy, promoteMeshGeomsToDynamic);
+  };
   const loose: SceneNode[] = [];
   copies.forEach((copy, i) => {
     const parentId = board.parents[i];
@@ -212,6 +233,7 @@ export function pasteBodies(
       const local = shift.clone().applyQuaternion(q);
       const p = copy.pos || [0, 0, 0];
       copy.pos = [(p[0] || 0) + local.x, (p[1] || 0) + local.y, (p[2] || 0) + local.z];
+      syncMovedCopy(copy);
       parent.children = [...(parent.children || []), copy];
     } else {
       const m = new THREE.Matrix4().fromArray(board.world[i]);
@@ -238,7 +260,10 @@ export function pasteBodies(
         max: [group.max[0] + dx, group.max[1] + dy],
       }, scene.nodes);
     }
-    for (const copy of loose) copy.pos = [copy.pos[0] + dx, copy.pos[1] + dy, copy.pos[2]];
+    for (const copy of loose) {
+      copy.pos = [copy.pos[0] + dx, copy.pos[1] + dy, copy.pos[2]];
+      syncMovedCopy(copy);
+    }
     scene.nodes = [...scene.nodes, ...loose];
   }
   return copies.map((c) => c.id);

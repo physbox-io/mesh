@@ -51,6 +51,9 @@ export const promoteMeshGeomsToDynamic = (node: SceneNode) => {
     if (!g.renderVertices && Array.isArray(g.vertices)) {
       g.renderVertices = toRenderVertices(g.vertices);
     }
+    if (!g.baseRenderVertices && Array.isArray(g.baseVertices)) {
+      g.baseRenderVertices = toRenderVertices(g.baseVertices);
+    }
   }
 };
 
@@ -165,13 +168,21 @@ const zUpCentroid = (v: number[]): [number, number, number] => {
   return [cx / n, -cz / n, cy / n];
 };
 
-// Translate static mesh geom vertices (Y-up world space)
+// Translate static mesh geom vertices by MuJoCo Z-up delta (dx, dy, dz).
+// Y-up (x, y, z) maps to Z-up (x, -z, y), so Z-up (dx, dy, dz) maps to Y-up (dx, dz, -dy).
+// colliderVertices are already in MuJoCo Z-up space, so they translate directly by (dx, dy, dz).
 export const translateMeshGeoms = (node: SceneNode, dx: number, dy: number, dz: number) => {
   for (const g of node.geoms) {
     if (isStaticMesh(g)) {
       const fresh = denseFresh(g);
-      g.vertices = mapVerts([...g.vertices], (x,y,z) => [x+dx, y+dy, z+dz]);
-      carryCollider(g, (x, y, z) => [x + dx, y - dz, z + dy]);
+      g.vertices = mapVerts([...g.vertices], (x, y, z) => [x + dx, y + dz, z - dy]);
+      carryCollider(g, (x, y, z) => [x + dx, y + dy, z + dz]);
+      if (g.baseVertices) {
+        g.baseVertices = mapVerts([...g.baseVertices], (x, y, z) => [x + dx, y + dz, z - dy]);
+      }
+      if (g.baseColliderVertices) {
+        g.baseColliderVertices = mapVerts([...g.baseColliderVertices], (x, y, z) => [x + dx, y + dy, z + dz]);
+      }
       remarkDense(g, fresh);
     }
     // Dynamic meshes are positioned via body pos — no vertex transform needed

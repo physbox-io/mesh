@@ -158,33 +158,50 @@ function bestPlane(c: Chunk, sharp: Edge[], all: Edge[]): (Plane & { air: number
  * out as one cube.
  */
 function solidComponents(wasm: ManifoldToplevel, m: Manifold): Manifold[] {
-  const parts = m.decompose();
-  m.delete();
+  let parts: Manifold[];
+  try {
+    parts = m.decompose();
+  } finally {
+    m.delete();
+  }
   const solids: Manifold[] = [], voids: Manifold[] = [];
-  for (const p of parts) {
-    const vol = p.volume();
-    if (vol > CRUMB_MM3) solids.push(p);
-    else if (vol < -CRUMB_MM3) voids.push(p);
-    else p.delete();
+  const live = new Set<Manifold>(parts);
+  const out: Manifold[] = [];
+  try {
+    for (const p of parts) {
+      const vol = p.volume();
+      if (vol > CRUMB_MM3) solids.push(p);
+      else if (vol < -CRUMB_MM3) voids.push(p);
+      else { p.delete(); live.delete(p); }
+    }
+    const holds = (o: Manifold, i: Manifold) => {
+      const a = o.boundingBox(), b = i.boundingBox();
+      return [0, 1, 2].every(k => a.min[k] <= b.min[k] && b.max[k] <= a.max[k]);
+    };
+    const inner = new Map<Manifold, Manifold[]>();
+    for (const h of voids) {
+      const round = solids.filter(o => holds(o, h)).sort((x, y) => x.volume() - y.volume())[0];
+      if (round) inner.set(round, [...(inner.get(round) ?? []), h]);
+      else { h.delete(); live.delete(h); }
+    }
+    for (const o of solids) {
+      const hs = inner.get(o);
+      if (!hs) {
+        live.delete(o);
+        out.push(o);
+        continue;
+      }
+      const whole = wasm.Manifold.compose([o, ...hs]);
+      o.delete();
+      live.delete(o);
+      for (const h of hs) { h.delete(); live.delete(h); }
+      out.push(whole);
+    }
+    return out;
+  } catch (err) {
+    for (const p of new Set([...live, ...out])) p.delete();
+    throw err;
   }
-  const holds = (o: Manifold, i: Manifold) => {
-    const a = o.boundingBox(), b = i.boundingBox();
-    return [0, 1, 2].every(k => a.min[k] <= b.min[k] && b.max[k] <= a.max[k]);
-  };
-  const inner = new Map<Manifold, Manifold[]>();
-  for (const h of voids) {
-    const round = solids.filter(o => holds(o, h)).sort((x, y) => x.volume() - y.volume())[0];
-    if (round) inner.set(round, [...(inner.get(round) ?? []), h]);
-    else h.delete();
-  }
-  return solids.map(o => {
-    const hs = inner.get(o);
-    if (!hs) return o;
-    const whole = wasm.Manifold.compose([o, ...hs]);
-    o.delete();
-    for (const h of hs) h.delete();
-    return whole;
-  });
 }
 
 /**
@@ -202,22 +219,26 @@ export function cutAtReflexEdges(wasm: ManifoldToplevel, verts: number[], faces:
 
   const convex: Chunk[] = [], rest: Chunk[] = [];
   let queue: Manifold[] = [];
+  let current: Manifold | null = null;
+  const unconsumed = new Set<Manifold>();
   let cuts = 0;
   try {
     queue = solidComponents(wasm, root);
     while (queue.length) {
       if (convex.length + rest.length + queue.length > maxCells) return null;
-      const m = queue.shift()!;
-      const cell = fromManifold(m);
+      current = queue.shift()!;
+      const cell = fromManifold(current);
       const edges = reflexEdges(cell);
       const sharp = edges.filter(e => e.deg > SHARP_REFLEX_DEG);
       const plane = sharp.length ? bestPlane(cell, sharp, edges) : null;
       if (!plane) {
-        m.delete();
+        current.delete();
+        current = null;
         (edges.length ? rest : convex).push(cell);
         continue;
       }
-      let sides = m.splitByPlane(plane.n, plane.d * MM);
+      let sides = current.splitByPlane(plane.n, plane.d * MM);
+      for (const side of sides) unconsumed.add(side);
       // An empty side: the wall the plane came from is still here. Float
       // noise landed the cut before this one inside the material, leaving a
       // skin a micron thick over the opening and the pocket whole behind it.
@@ -225,25 +246,32 @@ export function cutAtReflexEdges(wasm: ManifoldToplevel, verts: number[], faces:
       // stopped a peg at its rim. Take the cut a hair into the air, and the
       // skin off.
       if (sides.some(side => side.isEmpty())) {
-        for (const side of sides) side.delete();
-        sides = m.splitByPlane(plane.n, (plane.d + plane.air * SKIN) * MM);
+        for (const side of sides) { side.delete(); unconsumed.delete(side); }
+        sides = current.splitByPlane(plane.n, (plane.d + plane.air * SKIN) * MM);
+        for (const side of sides) unconsumed.add(side);
       }
-      m.delete();
+      current.delete();
+      current = null;
       // Still empty, and cutting again would not end. The cell goes on as it is.
       if (sides.some(side => side.isEmpty())) {
-        for (const side of sides) side.delete();
+        for (const side of sides) { side.delete(); unconsumed.delete(side); }
         rest.push(cell);
         continue;
       }
       const kept = sides.filter(side => {
         const whole = (2 * side.volume()) / side.surfaceArea() >= 2 * SKIN * MM;
-        if (!whole) side.delete();
+        if (!whole) { side.delete(); unconsumed.delete(side); }
         return whole;
       });
       cuts++;
-      for (const side of kept) queue.push(...solidComponents(wasm, side));
+      for (const side of kept) {
+        unconsumed.delete(side);
+        queue.push(...solidComponents(wasm, side));
+      }
     }
   } finally {
+    current?.delete();
+    for (const side of unconsumed) side.delete();
     for (const m of queue) m.delete();
   }
   return { convex, rest, cuts };
@@ -297,39 +325,60 @@ function concavityOf(c: Chunk): { depth: number; edge: Edge | null } {
 export function cutCurved(wasm: ManifoldToplevel, cells: Chunk[], maxCells: number, tolerance: number): { cells: Chunk[]; cuts: number } {
   const open: CurvedCell[] = [];
   const done: Chunk[] = [];
+  const pending = new Set<Manifold>();
   let cuts = 0;
   const judge = (m: Manifold): void => {
+    pending.add(m);
     const cell = fromManifold(m);
     const { depth, edge } = concavityOf(cell);
-    if (edge && depth > tolerance) open.push({ m, cell, depth, edge });
-    else { m.delete(); done.push(cell); }
+    if (edge && depth > tolerance) {
+      pending.delete(m);
+      open.push({ m, cell, depth, edge });
+    } else {
+      m.delete();
+      pending.delete(m);
+      done.push(cell);
+    }
   };
-  for (const c of cells) {
-    const m = toManifoldSolid(wasm, c.verts, c.faces);
-    if (m) judge(m);
-    else done.push(c);
-  }
   try {
+    for (const c of cells) {
+      const m = toManifoldSolid(wasm, c.verts, c.faces);
+      if (m) judge(m);
+      else done.push(c);
+    }
     while (open.length > 0 && open.length + done.length < maxCells) {
       let worst = 0;
       for (let i = 1; i < open.length; i++) if (open[i].depth > open[worst].depth) worst = i;
       const { m, cell, edge } = open.splice(worst, 1)[0];
+      pending.add(m);
       const [p1, p2] = edge!.planes;
       const n: [number, number, number] = [p1.n[0] - p2.n[0], p1.n[1] - p2.n[1], p1.n[2] - p2.n[2]];
       const len = Math.hypot(n[0], n[1], n[2]);
       const a = edge!.a * 3;
       const offset = len > 0 ? (n[0] * cell.verts[a] + n[1] * cell.verts[a + 1] + n[2] * cell.verts[a + 2]) / len : 0;
       const [pos, neg] = len > 0 ? m.splitByPlane([n[0] / len, n[1] / len, n[2] / len], offset * MM) : [null, null];
+      if (pos) pending.add(pos);
+      if (neg) pending.add(neg);
       if (!pos || !neg || pos.isEmpty() || neg.isEmpty()) {
-        pos?.delete(); neg?.delete(); m.delete();
+        if (pos) { pos.delete(); pending.delete(pos); }
+        if (neg) { neg.delete(); pending.delete(neg); }
+        m.delete();
+        pending.delete(m);
         done.push(cell);
         continue;
       }
       m.delete();
+      pending.delete(m);
       cuts++;
-      for (const side of [pos, neg]) for (const part of solidComponents(wasm, side)) judge(part);
+      for (const side of [pos, neg]) {
+        pending.delete(side);
+        const parts = solidComponents(wasm, side);
+        for (const part of parts) pending.add(part);
+        for (const part of parts) judge(part);
+      }
     }
   } finally {
+    for (const m of pending) m.delete();
     for (const o of open) { o.m.delete(); done.push(o.cell); }
   }
   return { cells: done, cuts };

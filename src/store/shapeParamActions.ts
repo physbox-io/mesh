@@ -12,8 +12,20 @@ import {
   generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS,
   DEFAULT_CURVE_SEGMENTS,
 } from '../utils/geom';
-import { cloneSceneGraph } from './sceneClone';
+import { cloneSceneGraph, type WorkingGeom } from './sceneClone';
+import { dropStaleColliders } from './geomEdits';
 import type { SliceDeps } from './sliceDeps';
+
+const MIN_TUBE_RADIUS = 0.001;
+const MIN_TUBE_WALL = 0.001;
+
+function clearMeshCaches(node: SceneNode, geom: WorkingGeom): void {
+  delete geom.baseVertices;
+  delete geom.baseRenderVertices;
+  delete geom.baseColliderVertices;
+  dropStaleColliders(node);
+  delete node.tunedPitchHz;
+}
 
 export interface ShapeParamActions {
   updateWedgeParams: (id: string, params: { width?: number; depth?: number; height?: number; wedgeAngle?: number }) => void;
@@ -31,7 +43,7 @@ export interface ShapeParamActions {
   updatePusherPeg: (gearId: string, updates: { offset?: number, size?: [number, number] }) => void;
 }
 
-export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
+export function shapeParamActions({ set, get }: SliceDeps): ShapeParamActions {
   return {
     updateWedgeParams: (id, params) => {
       get().recordInteraction('node-params');
@@ -70,14 +82,17 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
               const d = node.depth || 1.0;
               node.geoms[0].size = [L / 2, d / 2, 0.025];
             }
+            delete node.tunedPitchHz;
             return true;
           }
           if (traverse(node.children)) return true;
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene);
+      }
     },
 
     updatePyramidParams: (id, params) => {
@@ -99,6 +114,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
               node.geoms[0].vertices = vertices;
               node.geoms[0].faces = faces;
               node.geoms[0].renderVertices = renderVertices;
+              clearMeshCaches(node, node.geoms[0] as WorkingGeom);
             }
             return true;
           }
@@ -106,8 +122,10 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene);
+      }
     },
 
     updateConeParams: (id, params) => {
@@ -127,6 +145,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
               node.geoms[0].vertices = vertices;
               node.geoms[0].faces = faces;
               node.geoms[0].renderVertices = renderVertices;
+              clearMeshCaches(node, node.geoms[0] as WorkingGeom);
             }
             return true;
           }
@@ -134,8 +153,10 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene);
+      }
     },
 
     updateTorusParams: (id, params) => {
@@ -155,6 +176,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
               node.geoms[0].vertices = vertices;
               node.geoms[0].faces = faces;
               node.geoms[0].renderVertices = renderVertices;
+              clearMeshCaches(node, node.geoms[0] as WorkingGeom);
             }
             return true;
           }
@@ -162,8 +184,10 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene);
+      }
     },
 
     updateTubeParams: (id, params) => {
@@ -173,18 +197,31 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         if (!nodes) return false;
         for (const node of nodes) {
           if (node.id === id) {
-            if (params.innerRadius !== undefined) node.innerRadius = params.innerRadius;
-            if (params.outerRadius !== undefined) node.outerRadius = params.outerRadius;
-            if (params.height !== undefined) node.height = params.height;
+            let r1 = params.innerRadius !== undefined ? params.innerRadius : (node.innerRadius ?? 0.2);
+            let r2 = params.outerRadius !== undefined ? params.outerRadius : (node.outerRadius ?? 0.3);
+            let h = params.height !== undefined ? params.height : (node.height ?? 0.5);
+            if (!Number.isFinite(r1)) r1 = node.innerRadius ?? 0.2;
+            if (!Number.isFinite(r2)) r2 = node.outerRadius ?? 0.3;
+            if (!Number.isFinite(h) || h <= 0) h = Math.max(MIN_TUBE_RADIUS, node.height ?? 0.5);
+            r1 = Math.max(MIN_TUBE_RADIUS, r1);
+            r2 = Math.max(MIN_TUBE_RADIUS + MIN_TUBE_WALL, r2);
+            if (r1 >= r2) {
+              if (params.innerRadius !== undefined && params.outerRadius === undefined) {
+                r1 = Math.max(MIN_TUBE_RADIUS, r2 - MIN_TUBE_WALL);
+              } else {
+                r2 = r1 + MIN_TUBE_WALL;
+              }
+            }
+            node.innerRadius = r1;
+            node.outerRadius = r2;
+            node.height = h;
           
             if (node.geoms && node.geoms.length > 0) {
-              const r1 = node.innerRadius || 0.2;
-              const r2 = node.outerRadius || 0.3;
-              const h = node.height || 0.5;
               const { vertices, faces, renderVertices } = generateTubeMeshData(r1, r2, h, 24);
               node.geoms[0].vertices = vertices;
               node.geoms[0].faces = faces;
               node.geoms[0].renderVertices = renderVertices;
+              clearMeshCaches(node, node.geoms[0] as WorkingGeom);
             }
             return true;
           }
@@ -192,8 +229,10 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene);
+      }
     },
 
     updateCurveParams: (id, params) => {
@@ -221,14 +260,17 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
               node.curveClosed === true,
               node.curveBank || 0
             );
+            delete node.tunedPitchHz;
             return true;
           }
           if (traverse(node.children)) return true;
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene);
+      }
     },
 
     updatePulleyParams: (id, params) => {
@@ -256,8 +298,10 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene);
+      }
     },
 
     updateRopeParams: (id, params) => {
@@ -278,8 +322,10 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         }
         return false;
       };
-      traverse(newScene.nodes);
-      get().recompile(newScene, get().selectedNodeId);
+      if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene, get().selectedNodeId);
+      }
     },
 
     updateNodeComposite: (id, params) => {
@@ -296,8 +342,10 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         }
         return false;
       };
-      findAndMutate(newScene.nodes);
-      get().recompile(newScene, id, false, true);
+      if (findAndMutate(newScene.nodes)) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene, id, false, true);
+      }
     },
 
     updateGearTeeth: (id, teeth) => {
@@ -308,6 +356,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         for (const node of nodes) {
           if (node.id === id && node.geoms?.length > 0) {
             const centerGeom = node.geoms[0];
+            const pegGeom = node.geoms.find((g: SceneGeom) => g.name?.includes('peg'));
             const radius = centerGeom.size[0];
             const color = centerGeom.rgba || [0.5, 0.5, 0.5, 1];
             const gearNum = parseInt(id.replace(/\D/g, '')) || 1;
@@ -315,7 +364,9 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
             const contype = centerGeom.contype !== undefined ? centerGeom.contype : 0;
             const conaffinity = centerGeom.conaffinity !== undefined ? centerGeom.conaffinity : 0;
           
-            node.geoms = generateGearGeoms(id, radius, teeth, color, isSecondGear, contype, conaffinity);
+            const rebuilt = generateGearGeoms(id, radius, teeth, color, isSecondGear, contype, conaffinity);
+            if (pegGeom) rebuilt.push(pegGeom);
+            node.geoms = rebuilt;
             return true;
           }
           if (traverse(node.children)) return true;
@@ -323,6 +374,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         return false;
       };
       if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
         get().recompile(newScene, id);
       }
     },
@@ -334,7 +386,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         if (!nodes) return false;
         for (const node of nodes) {
           if (node.id === gearId && node.geoms?.length > 0) {
-            const hasPeg = node.geoms.some((g: SceneGeom) => g.name.includes('peg'));
+            const hasPeg = node.geoms.some((g: SceneGeom) => g.name?.includes('peg'));
             if (!hasPeg) {
               const radius = node.geoms[0].size[0];
               node.geoms.push({
@@ -354,6 +406,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         return false;
       };
       if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
         get().recompile(newScene, gearId);
       }
     },
@@ -365,7 +418,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         if (!nodes) return false;
         for (const node of nodes) {
           if (node.id === gearId && node.geoms?.length > 1) {
-            node.geoms = node.geoms.filter((g: SceneGeom) => !g.name.includes('peg'));
+            node.geoms = node.geoms.filter((g: SceneGeom) => !g.name?.includes('peg'));
             return true;
           }
           if (traverse(node.children)) return true;
@@ -373,6 +426,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         return false;
       };
       if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
         get().recompile(newScene, gearId);
       }
     },
@@ -384,7 +438,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         if (!nodes) return false;
         for (const node of nodes) {
           if (node.id === gearId && node.geoms?.length > 1) {
-            const peg = node.geoms.find((g: SceneGeom) => g.name.includes('peg'));
+            const peg = node.geoms.find((g: SceneGeom) => g.name?.includes('peg'));
             // generateGearGeoms always places the peg, so `pos` is there.
             if (peg && peg.pos) {
               if (updates.offset !== undefined) {
@@ -402,6 +456,7 @@ export function shapeParamActions({ get }: SliceDeps): ShapeParamActions {
         return false;
       };
       if (traverse(newScene.nodes)) {
+        set({ sceneGraph: newScene });
         get().recompile(newScene, gearId);
       }
     },
