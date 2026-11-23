@@ -480,7 +480,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     */
     <footer className="h-8 shrink-0 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors max-lg:h-auto max-lg:flex-wrap max-lg:justify-start max-lg:px-2 max-lg:py-1 max-lg:gap-x-3 max-lg:gap-y-1">
       {/* What the keyboard is doing right now */}
-      <div className="flex items-center gap-2 max-lg:shrink-0">
+      <div className="flex items-center gap-2 max-lg:shrink-0 max-lg:order-1">
         {/* First thing in the bar, because "which mode am I in" is the question
             asked most often and the one a modal keyboard makes expensive to
             get wrong. */}
@@ -544,7 +544,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       </div>
 
       {/* What it is cut on, and what out of */}
-      <div data-tour="bench-bar" className="flex items-center gap-2 max-lg:w-full max-lg:min-w-0">
+      <div data-tour="bench-bar" className="flex items-center gap-2 max-lg:w-full max-lg:min-w-0 max-lg:order-3">
         {/* Its own pill, outside the machine's: built by hand from bought
             stock, it does not change with the machine, the stock or the
             material, and inside that group it read as one of its exports. */}
@@ -785,7 +785,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       </div>
 
       {/* Running job and simulation status */}
-      <div className="flex items-center gap-3 max-lg:shrink-0">
+      <div className="flex items-center gap-3 max-lg:shrink-0 max-lg:order-2 max-lg:ml-auto">
 
         {/* A running job stays visible and stoppable with every panel closed. */}
         {running && (
