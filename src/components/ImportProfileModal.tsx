@@ -2,7 +2,7 @@
 // or a logo, made into a flat part of some thickness. The work is in
 // utils/profileImport.ts; this picks the file and shows what will be made.
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { X, Shapes, AlertCircle, Info } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import {
@@ -12,10 +12,11 @@ import {
   PROFILE_DEFAULTS,
   type Profile,
   type ProfileDetail,
+  type ProfileShape,
   type ProfileSubject,
   type TraceResult,
 } from '../utils/profileImport';
-import { decodeImageFile, type DecodedImage } from '../utils/decodeImage';
+import { decodeImageFile, isImageFile, type DecodedImage } from '../utils/decodeImage';
 import { useSettled } from '../hooks/useSettled';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import type { SceneNode } from '../types/scene';
@@ -66,11 +67,16 @@ const Segmented = <T extends string>({ value, options, onChange }: {
   </div>
 );
 
-/** The shapes as an SVG path, y flipped back to screen-down. */
-function previewPath(p: Profile): string {
+/** A list of profile shapes as an SVG path, y flipped back to screen-down. */
+export function shapesPath(shapes: ProfileShape[]): string {
   const ring = (l: { x: number; y: number }[]) =>
     'M' + l.map((q) => `${q.x.toFixed(2)},${(-q.y).toFixed(2)}`).join('L') + 'Z';
-  return p.shapes.map((s) => [s.outline, ...s.holes].map(ring).join('')).join('');
+  return shapes.map((s) => [s.outline, ...s.holes].map(ring).join('')).join('');
+}
+
+/** The shapes as an SVG path, y flipped back to screen-down. */
+function previewPath(p: Profile): string {
+  return shapesPath(p.shapes);
 }
 
 export const ImportProfileModal: React.FC<{
@@ -79,6 +85,8 @@ export const ImportProfileModal: React.FC<{
   initialFile?: File | null;
 }> = ({ onClose, onImportNode, initialFile }) => {
   useEscapeToClose(true, onClose);
+  const cutoutMaskId = useId();
+  const loadIdRef = useRef(0);
   const [source, setSource] = useState<Source | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -91,26 +99,35 @@ export const ImportProfileModal: React.FC<{
   /** null: the threshold the picture picks for itself. */
   const [threshold, setThreshold] = useState<number | null>(null);
 
+  useEffect(() => () => { loadIdRef.current++; }, []);
+
   const handleFile = useCallback(async (file: File) => {
+    const loadId = ++loadIdRef.current;
     setError(null);
+    setSource(null);
     setLoading(true);
     setSize(null);
     setThreshold(null);
     const name = file.name.replace(/\.[^.]+$/, '');
     try {
       if (/\.svg$/i.test(file.name) || file.type === 'image/svg+xml') {
-        setSource({ kind: 'svg', name, text: await file.text() });
-      } else if (file.type.startsWith('image/')) {
-        setSource({ kind: 'image', name, image: await decodeImageFile(file, MAX_TRACE_PX) });
+        const text = await file.text();
+        if (loadIdRef.current !== loadId) return;
+        setSource({ kind: 'svg', name, text });
+      } else if (isImageFile(file)) {
+        const image = await decodeImageFile(file, MAX_TRACE_PX);
+        if (loadIdRef.current !== loadId) return;
+        setSource({ kind: 'image', name, image });
       } else {
         setSource(null);
         setError(`"${file.name}" is neither an SVG nor a picture.`);
       }
     } catch (e) {
+      if (loadIdRef.current !== loadId) return;
       setSource(null);
       setError(`Could not read "${file.name}": ${(e as Error)?.message || String(e)}`);
     } finally {
-      setLoading(false);
+      if (loadIdRef.current === loadId) setLoading(false);
     }
   }, []);
 
@@ -154,7 +171,7 @@ export const ImportProfileModal: React.FC<{
   }, [profile]);
 
   const handleImport = () => {
-    if (!profile || !source) return;
+    if (!profile || !source || loading || pending) return;
     onImportNode(profileNode(profile, { name: source.name, thicknessMm }));
     onClose();
   };
@@ -213,8 +230,35 @@ export const ImportProfileModal: React.FC<{
               <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 flex items-center justify-center p-2 min-h-48">
                 {profile ? (
                   <svg viewBox={viewBox} className={`w-full max-h-64 transition-opacity ${pending ? 'opacity-40' : ''}`}>
-                    <path d={previewPath(profile)} fillRule="evenodd" className="fill-emerald-500/70 stroke-emerald-700 dark:stroke-emerald-300"
-                      strokeWidth={Math.max(profile.widthMm, profile.heightMm) / 300} />
+                    {profile.cutouts?.length ? (
+                      <defs>
+                        <mask id={cutoutMaskId}>
+                          <rect
+                            x={-profile.widthMm}
+                            y={-profile.heightMm}
+                            width={profile.widthMm * 2}
+                            height={profile.heightMm * 2}
+                            fill="white"
+                          />
+                          <path d={shapesPath(profile.cutouts)} fillRule="evenodd" fill="black" />
+                        </mask>
+                      </defs>
+                    ) : null}
+                    <path
+                      d={previewPath(profile)}
+                      fillRule="evenodd"
+                      mask={profile.cutouts?.length ? `url(#${cutoutMaskId})` : undefined}
+                      className="fill-emerald-500/70 stroke-emerald-700 dark:stroke-emerald-300"
+                      strokeWidth={Math.max(profile.widthMm, profile.heightMm) / 300}
+                    />
+                    {profile.cutouts?.length ? (
+                      <path
+                        d={shapesPath(profile.cutouts)}
+                        fill="none"
+                        className="stroke-emerald-700 dark:stroke-emerald-300"
+                        strokeWidth={Math.max(profile.widthMm, profile.heightMm) / 300}
+                      />
+                    ) : null}
                   </svg>
                 ) : (
                   <span className="text-xs text-slate-400">No outline</span>
@@ -292,7 +336,7 @@ export const ImportProfileModal: React.FC<{
             className="px-4 py-1.5 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors cursor-pointer">
             Cancel
           </button>
-          <button onClick={handleImport} disabled={!profile || pending}
+          <button onClick={handleImport} disabled={!profile || pending || loading}
             className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white shadow-xs transition-colors cursor-pointer">
             Import to Scene
           </button>

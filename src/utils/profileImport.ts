@@ -218,15 +218,59 @@ const isWhite = (paint: unknown) => {
  */
 const UNDRAWN = new Set(['clippath', 'mask', 'marker', 'pattern', 'title', 'desc', 'metadata']);
 
+type CssDecl = Record<string, string>;
+
+/** Parse simple `<style>` blocks (DOMParser's detached XML leaves `styleEl.sheet === null`). */
+function parseCssRules(root: Element): Map<string, CssDecl> {
+  const rules = new Map<string, CssDecl>();
+  const styleEls = root.querySelectorAll?.('style') ?? [];
+  for (const el of Array.from(styleEls)) {
+    const css = (el.textContent || '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const re = /([^{}]+)\{([^}]*)\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(css))) {
+      const selectors = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+      const decls: CssDecl = {};
+      for (const part of m[2].split(';')) {
+        const idx = part.indexOf(':');
+        if (idx < 0) continue;
+        const prop = part.slice(0, idx).trim().toLowerCase();
+        const val = part.slice(idx + 1).replace(/!important/i, '').trim().toLowerCase();
+        if (prop) decls[prop] = val;
+      }
+      for (const sel of selectors) {
+        rules.set(sel, { ...(rules.get(sel) || {}), ...decls });
+      }
+    }
+  }
+  return rules;
+}
+
+function cssPropsFor(el: Element, rules: Map<string, CssDecl>): CssDecl {
+  if (rules.size === 0) return {};
+  const tag = el.nodeName.toLowerCase().replace(/^svg:/, '');
+  let out: CssDecl = {};
+  if (rules.has(tag)) out = { ...out, ...rules.get(tag) };
+  const cls = (el.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean);
+  for (const c of cls) {
+    if (rules.has(`.${c}`)) out = { ...out, ...rules.get(`.${c}`) };
+    if (rules.has(`${tag}.${c}`)) out = { ...out, ...rules.get(`${tag}.${c}`) };
+  }
+  const id = el.getAttribute('id');
+  if (id && rules.has(`#${id}`)) out = { ...out, ...rules.get(`#${id}`) };
+  return out;
+}
+
 /** Whether an element, or anything round it, hides it: display, visibility, opacity, or an undrawn container. */
-function isHidden(node: Element | null | undefined): boolean {
+function isHidden(node: Element | null | undefined, cssRules?: Map<string, CssDecl>): boolean {
   for (let el: Element | null | undefined = node; el && el.nodeType === 1; el = el.parentElement) {
     const tag = el.nodeName.toLowerCase().replace(/^svg:/, '');
     if (UNDRAWN.has(tag)) return true;
     const style = (el.getAttribute('style') || '').toLowerCase();
+    const css = cssRules ? cssPropsFor(el, cssRules) : {};
     const prop = (name: string) => {
       const m = new RegExp(`(?:^|;)\\s*${name}\\s*:\\s*([^;]+)`).exec(style);
-      return (m?.[1] ?? el!.getAttribute(name) ?? '').trim().toLowerCase();
+      return (m?.[1] ?? css[name] ?? el!.getAttribute(name) ?? '').trim().toLowerCase();
     };
     if (prop('display') === 'none') return true;
     const vis = prop('visibility');
@@ -289,11 +333,20 @@ export interface SvgProfileOptions {
 }
 
 export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profile {
+  // Normalise namespace-prefixed <svg:svg> / <svg:rect> tags so Three's
+  // SVGLoader recognises both the root and its child elements.
+  let text = svgText.replace(/<(\/?)svg:/gi, '<$1');
   // SVG 2 writes <use href>; three's loader reads only xlink:href.
-  let text = svgText;
-  if (/<use\b[^>]*\shref=/i.test(text)) {
-    text = text.replace(/<use\b([^>]*?)\shref=/gi, '<use$1 xlink:href=');
-    if (!/xmlns:xlink=/.test(text)) text = text.replace(/<svg\b/i, '<svg xmlns:xlink="http://www.w3.org/1999/xlink"');
+  // Skip tags that already carry xlink:href so dual-attribute SVGs stay valid XML.
+  let rewroteUse = false;
+  text = text.replace(/<use\b[^>]*>/gi, (tag) => {
+    if (/\bxlink:href\s*=/i.test(tag)) return tag;
+    if (!/\shref\s*=/i.test(tag)) return tag;
+    rewroteUse = true;
+    return tag.replace(/\shref\s*=/i, ' xlink:href=');
+  });
+  if (rewroteUse && !/xmlns:xlink\s*=/i.test(text)) {
+    text = text.replace(/<((?:[a-z0-9_-]+:)?svg)\b/i, '<$1 xmlns:xlink="http://www.w3.org/1999/xlink"');
   }
   const loader = new SVGLoader();
   let data: ReturnType<SVGLoader['parse']>;
@@ -302,10 +355,11 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
   } catch (e) {
     throw new Error(`Could not read the SVG: ${(e as Error)?.message || String(e)}`, { cause: e });
   }
-  if (!data.xml || data.xml.nodeName.toLowerCase() !== 'svg') {
+  if (!data.xml || data.xml.nodeName.toLowerCase().replace(/^svg:/, '') !== 'svg') {
     throw new Error('That is not an SVG drawing (no <svg> element at the top).');
   }
   const root = data.xml as unknown as Element;
+  const cssRules = parseCssRules(root);
   const unit = svgUnitMm(root);
   const DIV = 24;
   const solids: ProfileShape[] = [];
@@ -314,11 +368,25 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
   let hidden = 0;
   for (const path of data.paths) {
     const node = (path.userData as { node?: Element } | undefined)?.node;
-    if (isHidden(node)) { hidden++; continue; }
-    const style = (path.userData?.style ?? {}) as { fill?: string; stroke?: string; fillOpacity?: number; strokeOpacity?: number };
+    const style = (path.userData?.style ?? {}) as {
+      fill?: string;
+      stroke?: string;
+      fillOpacity?: number;
+      strokeOpacity?: number;
+      display?: string;
+      visibility?: string;
+      opacity?: number | string;
+    };
+    const styleVis = String(style.visibility ?? '').trim().toLowerCase();
+    const styleHidden =
+      String(style.display ?? '').trim().toLowerCase() === 'none' ||
+      styleVis === 'hidden' ||
+      styleVis === 'collapse' ||
+      (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0);
+    if (isHidden(node, cssRules) || styleHidden) { hidden++; continue; }
     const filled = !isNone(style.fill) && style.fillOpacity !== 0;
     const stroked = !isNone(style.stroke) && style.strokeOpacity !== 0;
-    const tag = node?.nodeName.toLowerCase() ?? '';
+    const tag = node?.nodeName.toLowerCase().replace(/^svg:/, '') ?? '';
     // A cut line is a stroke, whether or not the drawing filled it white; a
     // <line> or <polyline> encloses nothing to fill.
     if ((stroked && (!filled || isWhite(style.fill))) || tag === 'line' || tag === 'polyline') {
@@ -355,14 +423,32 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
   const openStrokes = chained.open;
   solids.push(...shapesFromLoops(strokeLoops));
 
-  // Curves come in as straight runs of points; points on a line add nothing.
-  const tidy = (l: Point2D[]) => dropCollinear(l, 0.005 / unit);
+  const hasText = !!root.querySelector?.('text');
+  const emptySvgError = () =>
+    new Error(hasText
+      ? 'The SVG\'s only content is text, which is not imported. Convert the text to paths (Object to Path in Inkscape, Create Outlines in Illustrator) and import it again.'
+      : openStrokes
+        ? 'The SVG has only open lines, which enclose nothing. Close the paths, or give them a fill.'
+        : 'The SVG has no filled shapes and no closed outlines to make a part from.');
+
+  if (!solids.length) {
+    throw emptySvgError();
+  }
+
+  // Scale to final mm BEFORE dropping collinear points, so small-unit viewBoxes
+  // (e.g. viewBox="0 0 1 1" scaled via widthMm) keep their curved geometry.
+  const placed = placeShapes(solids, { ...opts, scale: unit, flipY: true, cutouts }, []);
+  const tidy = (l: Point2D[]) => dropCollinear(l, 0.005);
   const clean = (list: ProfileShape[]) => list
     .map((sh) => ({ outline: tidy(sh.outline), holes: sh.holes.map(tidy).filter((h) => h.length >= 3) }))
     .filter((sh) => sh.outline.length >= 3);
-  const cleaned = clean(solids);
-  const cleanedCuts = clean(cutouts);
-  const hasText = !!root.querySelector?.('text');
+  const cleaned = clean(placed.shapes);
+  const cleanedCuts = placed.cutouts ? clean(placed.cutouts) : [];
+
+  if (!cleaned.length) {
+    throw emptySvgError();
+  }
+
   const notes: string[] = [];
   if (openStrokes) {
     notes.push(`${openStrokes} open line${openStrokes === 1 ? '' : 's'} skipped: an open stroke encloses nothing. Close the path to make it an outline.`);
@@ -370,14 +456,15 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
   if (hidden) notes.push(`${hidden} hidden or clipping shape${hidden === 1 ? '' : 's'} left out.`);
   if (hasText && cleaned.length) notes.push('Text in the SVG is not imported: convert it to paths (Object to Path, Create Outlines) first.');
   if (cleanedCuts.length) notes.push(`${cleanedCuts.length} white shape${cleanedCuts.length === 1 ? '' : 's'} cut out of the others.`);
-  if (!cleaned.length) {
-    throw new Error(hasText
-      ? 'The SVG\'s only content is text, which is not imported. Convert the text to paths (Object to Path in Inkscape, Create Outlines in Illustrator) and import it again.'
-      : openStrokes
-        ? 'The SVG has only open lines, which enclose nothing. Close the paths, or give them a fill.'
-        : 'The SVG has no filled shapes and no closed outlines to make a part from.');
-  }
-  return placeShapes(cleaned, { ...opts, scale: unit, flipY: true, cutouts: cleanedCuts }, notes);
+
+  return {
+    shapes: cleaned,
+    ...(cleanedCuts.length ? { cutouts: cleanedCuts } : {}),
+    widthMm: placed.widthMm,
+    heightMm: placed.heightMm,
+    pointCount: countPoints(cleaned) + (cleanedCuts.length ? countPoints(cleanedCuts) : 0),
+    notes,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { openInEtch } from '../utils/etchHandoff';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   X,
   Cpu,
@@ -70,6 +70,23 @@ function findNodeById(nodes: SceneNode[], id: string | null): SceneNode | null {
   return null;
 }
 
+/** Suffix node IDs plus inner geom and joint names so repeat imports never collide. */
+function suffixNodeTree(node: SceneNode, suffix: string): SceneNode {
+  return {
+    ...node,
+    id: `${node.id}_${suffix}`,
+    geoms: (node.geoms || []).map((g) => ({
+      ...g,
+      name: g.name ? `${g.name}_${suffix}` : g.name,
+    })),
+    joints: (node.joints || []).map((j) => ({
+      ...j,
+      name: j.name ? `${j.name}_${suffix}` : j.name,
+    })),
+    children: (node.children || []).map((c) => suffixNodeTree(c, suffix)),
+  };
+}
+
 export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
   isOpen = true,
   onClose,
@@ -79,7 +96,6 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
 
   const sceneGraph = useStore((s) => s.sceneGraph);
   const selectedNodeId = useStore((s) => s.selectedNodeId);
-  const prepareForDiscreteChange = useStore((s) => s.prepareForDiscreteChange);
 
   const selectedNode = useMemo(
     () => findNodeById(sceneGraph.nodes, selectedNodeId),
@@ -87,7 +103,7 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
   );
 
   const [sourceTab, setSourceTab] = useState<SourceTab>(
-    typeof initialSpec === 'string' ? 'handoff' : 'preset',
+    initialSpec ? 'handoff' : 'preset',
   );
   const [presetKey, setPresetKey] = useState<string>('guitar_pedal_1590b');
   const [handoffInput, setHandoffInput] = useState<string>(() =>
@@ -97,6 +113,16 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
         ? JSON.stringify(initialSpec, null, 2)
         : '',
   );
+
+  useEffect(() => {
+    if (!initialSpec) return;
+    setSourceTab('handoff');
+    setHandoffInput(
+      typeof initialSpec === 'string'
+        ? initialSpec
+        : JSON.stringify(initialSpec, null, 2),
+    );
+  }, [initialSpec]);
 
   // Enclosure parameters
   const [buildMode, setBuildMode] = useState<BuildMode>('enclosure_with_lid');
@@ -122,6 +148,12 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
   const [includeDialTicks, setIncludeDialTicks] = useState<boolean>(true);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [etchError, setEtchError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+  }, []);
 
   const resolved = useMemo((): { spec: PcbMechanicalSpec | null; error: string | null } => {
     if (sourceTab === 'preset') {
@@ -147,16 +179,26 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
 
   const activeSpec = resolved.spec;
 
-  const enclosurePreview = useMemo(() => {
-    if (!activeSpec) return null;
-    return generatePcbEnclosure(activeSpec, {
-      standoffHeightMm,
-      wallThicknessMm,
-      boardClearanceMm,
-      topClearanceMm,
-      includeLid: buildMode !== 'enclosure_open',
-      boreType,
-    });
+  const enclosureResult = useMemo(() => {
+    if (!activeSpec) return { value: null, error: null as string | null };
+    try {
+      return {
+        value: generatePcbEnclosure(activeSpec, {
+          standoffHeightMm,
+          wallThicknessMm,
+          boardClearanceMm,
+          topClearanceMm,
+          includeLid: buildMode !== 'enclosure_open',
+          boreType,
+        }),
+        error: null as string | null,
+      };
+    } catch (err) {
+      return {
+        value: null,
+        error: err instanceof Error ? err.message : 'Failed to generate enclosure preview.',
+      };
+    }
   }, [
     activeSpec,
     standoffHeightMm,
@@ -166,6 +208,7 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
     buildMode,
     boreType,
   ]);
+  const enclosurePreview = enclosureResult.value;
 
   // The faceplate is the enclosure's own face, so it takes the same options.
   const faceplateOptions = useMemo(() => ({
@@ -182,10 +225,21 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
     thicknessMm: wallThicknessMm,
   }), [standoffHeightMm, wallThicknessMm, boardClearanceMm, topClearanceMm, buildMode, includeLabels, includeDialTicks]);
 
-  const faceplate = useMemo(() => {
-    if (!activeSpec) return null;
-    return exportPcbFaceplateSvg(activeSpec, previewFace, faceplateOptions);
+  const faceplateResult = useMemo(() => {
+    if (!activeSpec) return { value: null, error: null as string | null };
+    try {
+      return {
+        value: exportPcbFaceplateSvg(activeSpec, previewFace, faceplateOptions),
+        error: null as string | null,
+      };
+    } catch (err) {
+      return {
+        value: null,
+        error: err instanceof Error ? err.message : 'Failed to generate faceplate preview.',
+      };
+    }
   }, [activeSpec, previewFace, faceplateOptions]);
+  const faceplate = faceplateResult.value;
 
   const svgDataUri = useMemo(() => {
     if (!faceplate?.svg) return '';
@@ -204,7 +258,7 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleOpenInEtch = async () => {
@@ -228,7 +282,11 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
     try {
       await navigator.clipboard.writeText(link);
       setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 1800);
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => {
+        copiedTimerRef.current = null;
+        setCopiedLink(false);
+      }, 1800);
     } catch {
       // Fallback if clipboard API is unavailable
     }
@@ -236,81 +294,94 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
 
   const handleAddToScene = () => {
     if (!activeSpec) return;
-    prepareForDiscreteChange();
+    setActionError(null);
     const state = useStore.getState();
     const suffix = Math.random().toString(36).substring(2, 7);
 
-    if (buildMode === 'apply_to_selected' && selectedNode) {
-      const updatedHost = applyPcbToEnclosureBody(selectedNode, activeSpec, {
-        standoffHeightMm,
-        wallThicknessMm,
-        boardClearanceMm,
-        topClearanceMm,
-        boreType,
-      });
-      const replaceInTree = (nodes: SceneNode[]): SceneNode[] =>
-        nodes.map((n) =>
-          n.id === selectedNode.id
-            ? updatedHost
-            : { ...n, children: replaceInTree(n.children || []) },
-        );
-      const nextScene = {
-        ...state.sceneGraph,
-        nodes: replaceInTree(state.sceneGraph.nodes),
-      };
-      useStore.setState({ sceneGraph: nextScene, selectedNodeId: updatedHost.id });
-      state.recompile(nextScene, updatedHost.id, true);
-      onClose();
+    if (buildMode === 'apply_to_selected') {
+      if (!selectedNode) {
+        setActionError('Select a target body in the scene before applying bosses and cutouts.');
+        return;
+      }
+      try {
+        const updatedHost = applyPcbToEnclosureBody(selectedNode, activeSpec, {
+          standoffHeightMm,
+          wallThicknessMm,
+          boardClearanceMm,
+          topClearanceMm,
+          boreType,
+        });
+        const replaceInTree = (nodes: SceneNode[]): SceneNode[] =>
+          nodes.map((n) =>
+            n.id === selectedNode.id
+              ? updatedHost
+              : { ...n, children: replaceInTree(n.children || []) },
+          );
+        const nextScene = {
+          ...state.sceneGraph,
+          nodes: replaceInTree(state.sceneGraph.nodes),
+        };
+        state.updateScene(nextScene);
+        if (findNodeById(useStore.getState().sceneGraph.nodes, updatedHost.id)) {
+          state.setSelectedNodeId(updatedHost.id);
+        }
+        onClose();
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : 'Failed to apply PCB to selected body.');
+      }
       return;
     }
 
     if (buildMode === 'pcb_only') {
-      const pcbNode = buildPcbNode(activeSpec, {
-        id: `pcb_${suffix}`,
-        pos: [0, 0, Math.max(0.01, activeSpec.thicknessMm / 2000)],
-      });
-      const nextScene = {
-        ...state.sceneGraph,
-        nodes: [...state.sceneGraph.nodes, pcbNode],
-      };
-      useStore.setState({ sceneGraph: nextScene, selectedNodeId: pcbNode.id });
-      state.recompile(nextScene, pcbNode.id, true);
-      onClose();
+      try {
+        const pcbNode = buildPcbNode(activeSpec, {
+          id: `pcb_${suffix}`,
+          pos: [0, 0, Math.max(0.01, activeSpec.thicknessMm / 2000)],
+        });
+        const nextScene = {
+          ...state.sceneGraph,
+          nodes: [...state.sceneGraph.nodes, pcbNode],
+        };
+        state.updateScene(nextScene);
+        if (findNodeById(useStore.getState().sceneGraph.nodes, pcbNode.id)) {
+          state.setSelectedNodeId(pcbNode.id);
+        }
+        onClose();
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : 'Failed to build 3D PCB node.');
+      }
       return;
     }
 
-    const generated = generatePcbEnclosure(activeSpec, {
-      standoffHeightMm,
-      wallThicknessMm,
-      boardClearanceMm,
-      topClearanceMm,
-      includeLid: buildMode === 'enclosure_with_lid',
-      boreType,
-    });
-
-    const baseNode: SceneNode = {
-      ...generated.baseNode,
-      id: `${generated.baseNode.id}_${suffix}`,
-    };
-    const pcbNode: SceneNode = {
-      ...generated.pcbNode,
-      id: `${generated.pcbNode.id}_${suffix}`,
-    };
-    const newNodes: SceneNode[] = [baseNode, pcbNode];
-    if (generated.lidNode) {
-      newNodes.push({
-        ...generated.lidNode,
-        id: `${generated.lidNode.id}_${suffix}`,
+    try {
+      const generated = generatePcbEnclosure(activeSpec, {
+        standoffHeightMm,
+        wallThicknessMm,
+        boardClearanceMm,
+        topClearanceMm,
+        includeLid: buildMode === 'enclosure_with_lid',
+        boreType,
       });
-    }
 
-    const nextScene = {
-      ...state.sceneGraph,
-      nodes: [...state.sceneGraph.nodes, ...newNodes],
-    };
-    useStore.setState({ sceneGraph: nextScene, selectedNodeId: baseNode.id });
-    state.recompile(nextScene, baseNode.id, true);
-    onClose();
+      const baseNode = suffixNodeTree(generated.baseNode, suffix);
+      const pcbNode = suffixNodeTree(generated.pcbNode, suffix);
+      const newNodes: SceneNode[] = [baseNode, pcbNode];
+      if (generated.lidNode) {
+        newNodes.push(suffixNodeTree(generated.lidNode, suffix));
+      }
+
+      const nextScene = {
+        ...state.sceneGraph,
+        nodes: [...state.sceneGraph.nodes, ...newNodes],
+      };
+      state.updateScene(nextScene);
+      if (findNodeById(useStore.getState().sceneGraph.nodes, baseNode.id)) {
+        state.setSelectedNodeId(baseNode.id);
+      }
+      onClose();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to generate PCB enclosure.');
+    }
   };
 
   const report = enclosurePreview?.clearanceReport;
@@ -459,13 +530,19 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
                   <option value="enclosure_with_lid">Enclosure Base + Removable Lid + 3D PCB</option>
                   <option value="enclosure_open">Open-Top Enclosure Base + 3D PCB</option>
                   <option value="pcb_only">3D Populated PCB Assembly Only</option>
-                  {selectedNode && (
-                    <option value="apply_to_selected">
-                      Apply Bosses &amp; Cutouts to Selected ({selectedNode.name || selectedNode.id})
-                    </option>
-                  )}
+                  <option value="apply_to_selected" disabled={!selectedNode}>
+                    {selectedNode
+                      ? `Apply Bosses & Cutouts to Selected (${selectedNode.name || selectedNode.id})`
+                      : 'Apply Bosses & Cutouts to Selected (no body selected)'}
+                  </option>
                 </select>
               </Field>
+              {(enclosureResult.error || actionError) && (
+                <div className="flex items-center gap-2 text-xs text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 rounded-lg border border-rose-200 dark:border-rose-800/60">
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                  <span>{actionError || enclosureResult.error}</span>
+                </div>
+              )}
 
               {buildMode !== 'pcb_only' && (
                 <>
@@ -630,8 +707,8 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
                 )}
               </div>
 
-              {etchError && (
-                <div className="text-xs text-rose-600 dark:text-rose-400">{etchError}</div>
+              {(etchError || faceplateResult.error) && (
+                <div className="text-xs text-rose-600 dark:text-rose-400">{etchError || faceplateResult.error}</div>
               )}
 
               <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -678,7 +755,7 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
             </button>
             <button
               type="button"
-              disabled={!activeSpec}
+              disabled={!activeSpec || (buildMode === 'apply_to_selected' && !selectedNode) || (buildMode !== 'pcb_only' && !enclosurePreview)}
               onClick={handleAddToScene}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm disabled:opacity-40 transition-colors"
             >

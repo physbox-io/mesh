@@ -8,14 +8,16 @@ import {
   detectLevels,
   DEFAULT_HEIGHTMAP_OPTIONS,
   type HeightMapping,
+  type HeightmapMeshResult,
   type HeightProfile,
   type SlopeStyle,
 } from '../utils/heightmapMesh';
 import { drawHeightmapPreview } from '../utils/heightmapPreview';
+import { colliderCopyOf, DENSE_MESH_TRIANGLES, type ColliderCopy } from '../utils/denseMesh';
 import { useSettled } from '../hooks/useSettled';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
-import { decodeImageFile } from '../utils/decodeImage';
+import { decodeImageFile, isImageFile } from '../utils/decodeImage';
 import { usePanels } from '../store/panelsStore';
 
 interface ImportImageModalProps {
@@ -65,7 +67,18 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
   const openProfileImport = usePanels((s) => s.openProfileImport);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const loadIdRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      loadIdRef.current++;
+    };
+  }, []);
 
   const [widthMm, setWidthMm] = useState(100);
   const [maxHeightMm, setMaxHeightMm] = useState(15);
@@ -82,24 +95,29 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const handleFile = useCallback(async (file: File) => {
+  const handleFile = useCallback(async (picked: File) => {
+    const loadId = ++loadIdRef.current;
     setError(null);
+    setImage(null);
+    setFile(null);
     setIsProcessing(true);
-    if (!file.type.startsWith('image/')) {
-      setError(`"${file.name}" is not an image file.`);
-      setImage(null);
+    if (!isImageFile(picked)) {
+      setError(`"${picked.name}" is not an image file.`);
       setIsProcessing(false);
       return;
     }
     try {
-      setImage(await decodeImage(file));
-      setFile(file);
+      const decoded = await decodeImage(picked);
+      if (loadIdRef.current !== loadId) return;
+      setImage(decoded);
+      setFile(picked);
     } catch (err) {
+      if (loadIdRef.current !== loadId) return;
       setError(`Failed to read image: ${String(err)}`);
       setImage(null);
       setFile(null);
     } finally {
-      setIsProcessing(false);
+      if (loadIdRef.current === loadId) setIsProcessing(false);
     }
   }, []);
 
@@ -125,28 +143,35 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
   const meshFields = useSettled(liveMeshFields, 250);
   const meshPending = meshFields !== liveMeshFields;
 
-  const mesh = useMemo(() => {
-    if (!image) return null;
+  const meshResult = useMemo((): { mesh: HeightmapMeshResult | null; error: string | null } => {
+    if (!image) return { mesh: null, error: null };
     const f = meshFields;
     try {
-      return imageToHeightmapMesh(image.data, image.width, image.height, {
-        widthM: f.widthMm / 1000,
-        maxHeightM: f.maxHeightMm / 1000,
-        baseThicknessM: f.baseMm / 1000,
-        mapping: f.mapping,
-        gridCols: f.gridCols,
-        smoothPasses: f.smoothPasses,
-        floor: f.floorPct / 100,
-        profile: f.profile,
-        threshold: f.thresholdPct / 100,
-        slopeLevels: f.slopeLevels,
-        slopeWidthM: f.slopeWidthMm / 1000,
-        slopeStyle: f.slopeStyle,
-      });
-    } catch {
-      return null;
+      return {
+        mesh: imageToHeightmapMesh(image.data, image.width, image.height, {
+          widthM: f.widthMm / 1000,
+          maxHeightM: f.maxHeightMm / 1000,
+          baseThicknessM: f.baseMm / 1000,
+          mapping: f.mapping,
+          gridCols: f.gridCols,
+          smoothPasses: f.smoothPasses,
+          floor: f.floorPct / 100,
+          profile: f.profile,
+          threshold: f.thresholdPct / 100,
+          slopeLevels: f.slopeLevels,
+          slopeWidthM: f.slopeWidthMm / 1000,
+          slopeStyle: f.slopeStyle,
+        }),
+        error: null,
+      };
+    } catch (err) {
+      return {
+        mesh: null,
+        error: `Failed to build heightmap: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }, [image, meshFields]);
+  const mesh = meshResult.mesh;
 
   /**
    * How two-tone the source is, sampled coarsely — a logo or stencil is where
@@ -196,8 +221,23 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
     if (file) await handleFile(file);
   };
 
-  const handleImportClick = () => {
-    if (!mesh || !image) return;
+  const handleImportClick = async () => {
+    if (!mesh || !image || isProcessing || meshPending || isImporting) return;
+    let collider: ColliderCopy | null = null;
+    if (mesh.triangleCount > DENSE_MESH_TRIANGLES) {
+      setIsImporting(true);
+      try {
+        collider = await colliderCopyOf(mesh.renderVertices, mesh.faces);
+      } catch (err) {
+        if (mountedRef.current) {
+          setError(`Failed to simplify dense heightmap collider: ${err instanceof Error ? err.message : String(err)}`);
+          setIsImporting(false);
+        }
+        return;
+      }
+      if (!mountedRef.current) return;
+      setIsImporting(false);
+    }
     const id = `img_${Math.random().toString(36).slice(2, 7)}`;
     onImportNode({
       id,
@@ -212,6 +252,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
         vertices: mesh.vertices,
         renderVertices: mesh.renderVertices,
         faces: mesh.faces,
+        ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces, denseColliderOf: collider.source } : {}),
         dynamic: true,
       } as SceneGeom],
       joints: [{ name: `${id}_free`, type: 'free' }],
@@ -281,10 +322,10 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
             </button>
           </p>
 
-          {error && (
+          {(error || meshResult.error) && (
             <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 text-xs rounded-lg border border-red-200 dark:border-red-800">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              <span>{error}</span>
+              <span>{error || meshResult.error}</span>
             </div>
           )}
 
@@ -476,11 +517,11 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
             Cancel
           </button>
           <button
-            onClick={handleImportClick}
-            disabled={!mesh}
+            onClick={() => void handleImportClick()}
+            disabled={!mesh || isProcessing || meshPending || isImporting}
             className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-50 text-white shadow-xs transition-colors cursor-pointer"
           >
-            Import to Scene
+            {isImporting ? 'Preparing Collider…' : 'Import to Scene'}
           </button>
         </div>
       </div>

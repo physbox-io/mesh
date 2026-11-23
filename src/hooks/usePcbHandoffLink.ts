@@ -16,15 +16,21 @@ export function pcbHandoffFromHash(hash: string): string | null {
 }
 
 /**
- * Opens the PCB importer on a board sent from Volt, once, on load, and takes
+ * Opens the PCB importer on a board sent from Volt (both on initial load and on
+ * subsequent `hashchange` navigations while this tab is already open), and takes
  * the fragment back out of the address bar so a reload does not open it again.
  * Decoding is left to the importer, which shows what is wrong with a bad one.
  */
 export function usePcbHandoffLink(): void {
   useEffect(() => {
-    const handoff = pcbHandoffFromHash(window.location.hash);
-    if (!handoff) return;
-    clearShareFragment();
-    usePanels.getState().openPcbHandoff(handoff);
+    const applyHash = () => {
+      const handoff = pcbHandoffFromHash(window.location.hash);
+      if (!handoff) return;
+      clearShareFragment();
+      usePanels.getState().openPcbHandoff(handoff);
+    };
+    applyHash();
+    window.addEventListener('hashchange', applyHash);
+    return () => window.removeEventListener('hashchange', applyHash);
   }, []);
 }

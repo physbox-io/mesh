@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { X, Upload, Sliders, Box, Layers, Check, AlertCircle, Code } from 'lucide-react';
 import { parseSTL, type ParsedSTLResult } from '../utils/stlParser';
 import { colliderCopyOf, denseImportNote, type ColliderCopy } from '../utils/denseMesh';
@@ -29,8 +29,16 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
+  const loadIdRef = useRef(0);
+
+  useEffect(() => () => { loadIdRef.current++; }, []);
+
   const handleFile = useCallback(async (file: File) => {
+    const loadId = ++loadIdRef.current;
     setError(null);
+    setParsed(null);
+    setScadCode(null);
+    setCollider(null);
     setIsProcessing(true);
 
     const isScad = file.name.toLowerCase().endsWith('.scad');
@@ -39,18 +47,21 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
       setFileName(file.name.replace(/\.scad$/i, ''));
       try {
         const text = await file.text();
+        if (loadIdRef.current !== loadId) return;
         setScadCode(text);
         setParsed(null);
       } catch (err) {
+        if (loadIdRef.current !== loadId) return;
         setError(`Failed to read OpenSCAD file: ${String(err)}`);
         setScadCode(null);
       } finally {
-        setIsProcessing(false);
+        if (loadIdRef.current === loadId) setIsProcessing(false);
       }
       return;
     }
 
     if (!file.name.toLowerCase().endsWith('.stl')) {
+      setFileName('');
       setError(`"${file.name}" is not an .stl or .scad file.`);
       setIsProcessing(false);
       return;
@@ -61,18 +72,22 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
 
     try {
       const buffer = await file.arrayBuffer();
+      if (loadIdRef.current !== loadId) return;
       const result = parseSTL(buffer, { name: file.name.replace(/\.stl$/i, ''), recentre: true });
       // A dense part goes in as a mesh: its OpenSCAD modes have no code (the
       // compile runs out of memory), and the mesh collides as a lighter copy.
-      setCollider(result.dense ? await colliderCopyOf(result.renderVertices, result.faces) : null);
+      const copy = result.dense ? await colliderCopyOf(result.renderVertices, result.faces) : null;
+      if (loadIdRef.current !== loadId) return;
+      setCollider(copy);
       if (result.dense) setImportMode('mesh');
       setParsed(result);
     } catch (err) {
+      if (loadIdRef.current !== loadId) return;
       setError(`Failed to parse STL file: ${String(err)}`);
       setParsed(null);
       setCollider(null);
     } finally {
-      setIsProcessing(false);
+      if (loadIdRef.current === loadId) setIsProcessing(false);
     }
   }, []);
 
@@ -128,6 +143,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
   };
 
   const handleImportClick = () => {
+    if (isProcessing) return;
     if (scadCode) {
       const baseName = fileName || 'imported_scad';
       const id = `scad_${Math.random().toString(36).slice(2, 7)}`;
@@ -439,7 +455,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
           </button>
           <button
             onClick={handleImportClick}
-            disabled={!parsed && !scadCode}
+            disabled={isProcessing || (!parsed && !scadCode)}
             className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white shadow-xs transition-colors cursor-pointer"
           >
             Import to Scene

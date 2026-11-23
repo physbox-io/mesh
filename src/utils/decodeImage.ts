@@ -8,6 +8,18 @@ export interface DecodedImage {
   data: Uint8ClampedArray;
 }
 
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|avif|svg|ico|tiff?)$/i;
+
+/**
+ * Whether a dropped/picked file is an image, checking both MIME type and filename
+ * extension so files dropped with an empty `file.type` (common on Windows/Linux)
+ * are still accepted.
+ */
+export function isImageFile(file: { name: string; type?: string }): boolean {
+  if ((file.type ?? '').toLowerCase().startsWith('image/')) return true;
+  return IMAGE_EXT_RE.test(file.name);
+}
+
 /**
  * The picture at `src` (an object URL, a data URL or an http(s) URL),
  * scaled down so neither side is over `maxPx`.
@@ -22,6 +34,9 @@ export async function decodeImageUrl(src: string, maxPx: number): Promise<Decode
     img.onerror = () => reject(new Error('The browser could not load or decode this image.'));
     img.src = src;
   });
+  if (!(img.naturalWidth > 0) || !(img.naturalHeight > 0)) {
+    throw new Error('The image has zero intrinsic dimensions and cannot be decoded.');
+  }
   const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
   const w = Math.max(1, Math.round(img.naturalWidth * scale));
   const h = Math.max(1, Math.round(img.naturalHeight * scale));

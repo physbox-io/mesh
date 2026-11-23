@@ -101,20 +101,32 @@ export interface ParsedSTLResult {
   appliedScale: [number, number, number];
 }
 
+/** Upper bound on binary STL triangle count to guard against corrupt headers / multi-GB OOM. */
+export const MAX_STL_TRIANGLES = 5_000_000;
+
 /** Compute bounding box for flat [x,y,z,...] array */
-export function computeBoundingBox(verts: number[]): BoundingBox {
-  if (!verts || verts.length === 0) {
+export function computeBoundingBox(verts: ArrayLike<number>): BoundingBox {
+  if (!verts || verts.length < 3) {
     return { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0], center: [0, 0, 0] };
   }
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  let anyFinite = false;
 
-  for (let i = 0; i < verts.length; i += 3) {
-    for (let a = 0; a < 3; a++) {
-      const v = verts[i + a];
-      if (v < min[a]) min[a] = v;
-      if (v > max[a]) max[a] = v;
-    }
+  for (let i = 0; i + 2 < verts.length; i += 3) {
+    const x = verts[i], y = verts[i + 1], z = verts[i + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    anyFinite = true;
+    if (x < min[0]) min[0] = x;
+    if (x > max[0]) max[0] = x;
+    if (y < min[1]) min[1] = y;
+    if (y > max[1]) max[1] = y;
+    if (z < min[2]) min[2] = z;
+    if (z > max[2]) max[2] = z;
+  }
+
+  if (!anyFinite) {
+    return { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0], center: [0, 0, 0] };
   }
 
   const size: [number, number, number] = [
@@ -484,6 +496,13 @@ ${indent}  convexity = 6
 ${indent});`;
 }
 
+/** Whether all detected holes share a single diameter (within 2%). */
+function holesHaveUniformDiameter(holes: InferredHole[]): boolean {
+  if (holes.length <= 1) return true;
+  const r0 = holes[0].radius;
+  return holes.every(h => close(h.radius, r0, 0.02));
+}
+
 /** The body of one recognised island: its primitive, minus any holes. */
 function emitFitBody(fit: PrimitiveFit, holes: InferredHole[], vars: string, indent: string): string {
   let solid: string;
@@ -501,18 +520,33 @@ function emitFitBody(fit: PrimitiveFit, holes: InferredHole[], vars: string, ind
   const axis = holes[0].axis;
   const [p, q] = PERP[axis];
   const rot = rotateForAxis(axis) ?? '';
-  const positions = holes
-    .map(h => `[${fmt(h.center[p] - fit.center[p])}, ${fmt(h.center[q] - fit.center[q])}]`)
-    .join(', ');
-  // Holes are cut over-length so the end faces are cleanly open, never coplanar.
-  const offset: string[] = ['0', '0', '0'];
-  offset[p] = 'p[0]';
-  offset[q] = 'p[1]';
 
-  return `${indent}difference() {
+  if (holesHaveUniformDiameter(holes)) {
+    const positions = holes
+      .map(h => `[${fmt(h.center[p] - fit.center[p])}, ${fmt(h.center[q] - fit.center[q])}]`)
+      .join(', ');
+    // Holes are cut over-length so the end faces are cleanly open, never coplanar.
+    const offset: string[] = ['0', '0', '0'];
+    offset[p] = 'p[0]';
+    offset[q] = 'p[1]';
+
+    return `${indent}difference() {
 ${indent}  ${solid}
 ${indent}  for (p = [${positions}])
 ${indent}    translate([${offset.join(', ')}]) ${rot}cylinder(h = ${vars}hole_depth, d = ${vars}hole_d, center = true, $fn = 48);
+${indent}}`;
+  }
+
+  const cuts = holes.map((h, idx) => {
+    const offset: string[] = ['0', '0', '0'];
+    offset[p] = fmt(h.center[p] - fit.center[p]);
+    offset[q] = fmt(h.center[q] - fit.center[q]);
+    return `${indent}  translate([${offset.join(', ')}]) ${rot}cylinder(h = ${vars}hole_depth, d = ${vars}hole_${idx + 1}_d, center = true, $fn = 48);`;
+  });
+
+  return `${indent}difference() {
+${indent}  ${solid}
+${cuts.join('\n')}
 ${indent}}`;
 }
 
@@ -547,7 +581,11 @@ function emitFitVars(fit: PrimitiveFit, holes: InferredHole[], prefix: string): 
     decl('size_z', fit.size[2]);
   }
   if (holes.length > 0) {
-    decl('hole_d', holes[0].radius * 2);
+    if (holesHaveUniformDiameter(holes)) {
+      decl('hole_d', holes[0].radius * 2);
+    } else {
+      holes.forEach((h, idx) => decl(`hole_${idx + 1}_d`, h.radius * 2));
+    }
     decl('hole_depth', holes[0].depth * 2);
   }
   return lines.join('\n');
@@ -561,7 +599,11 @@ function describeFit(fit: PrimitiveFit, holes: InferredHole[]): string {
   else base = `box ${mm(fit.size[0])} × ${mm(fit.size[1])} × ${mm(fit.size[2])}`;
 
   if (holes.length > 0) {
-    base += ` with ${holes.length} through-hole${holes.length > 1 ? 's' : ''} Ø${mm(holes[0].radius * 2)}`;
+    if (holesHaveUniformDiameter(holes)) {
+      base += ` with ${holes.length} through-hole${holes.length > 1 ? 's' : ''} Ø${mm(holes[0].radius * 2)}`;
+    } else {
+      base += ` with ${holes.length} through-holes (${holes.map(h => `Ø${mm(h.radius * 2)}`).join(', ')})`;
+    }
   }
   return fit.exact
     ? base
@@ -605,21 +647,79 @@ function translateWrap(offset: [number, number, number], body: string, indent: s
 }
 
 /**
- * A binary STL trimmed to exactly the length its header promises.
+ * Validate and normalise raw STL input before handing it to Three's STLLoader.
  *
- * three's STLLoader calls a file binary only when its size is exactly
- * 84 + 50 * triangles; otherwise a file that starts with "solid" is read as
- * ASCII. Several CAD exporters write binary files whose 80-byte header begins
- * "solid" and pad the end by a few bytes, and those parsed as ASCII into zero
- * triangles. An ASCII file can't pass this check: bytes 80-83 of text read as
- * a count of millions of triangles, far past the end of the file.
+ * Prevents three classes of crashes inside STLLoader:
+ *  1. Buffers shorter than 84 bytes causing `RangeError` in `getUint32(80)`.
+ *  2. Truncated binary STLs (`84 + 50 * faces > byteLength`) or corrupt binary
+ *     headers declaring tens of millions of faces (multi-GB OOM).
+ *  3. Binary STLs whose 80-byte header starts with `"solid"` and has trailing
+ *     padding bytes, which STLLoader otherwise misreads as empty ASCII.
  */
-function asExactBinary(data: ArrayBuffer | string): ArrayBuffer | string {
-  if (typeof data === 'string' || data.byteLength < 84) return data;
+function prepareStlData(data: ArrayBuffer | string): ArrayBuffer | string {
+  if (typeof data === 'string') {
+    if (!data.trim()) throw new Error('The file contains no triangles.');
+    return data;
+  }
+
+  const byteLength = data.byteLength;
+  if (byteLength === 0) {
+    throw new Error('The file contains no triangles.');
+  }
+
+  const bytes = new Uint8Array(data);
+  const looksLikeAscii = (): boolean => {
+    const prefixLen = Math.min(byteLength, 1024);
+    for (let i = 0; i < prefixLen; i++) {
+      if (bytes[i] === 0) return false;
+    }
+    const head = new TextDecoder('latin1').decode(bytes.subarray(0, prefixLen));
+    if (!/^\s*solid\b/i.test(head)) return false;
+    if (/\bfacet\b|\bendsolid\b/i.test(head)) return true;
+    // Handle a very long solid name line before the first facet.
+    const full = new TextDecoder('latin1').decode(bytes);
+    return /\bfacet\b|\bendsolid\b/i.test(full);
+  };
+
+  if (byteLength < 84) {
+    if (looksLikeAscii()) {
+      const text = new TextDecoder('utf-8').decode(bytes);
+      if (!/\bfacet\b/i.test(text)) {
+        throw new Error('The file contains no triangles.');
+      }
+      return text;
+    }
+    throw new Error(`Invalid or truncated STL file (${byteLength} bytes; binary STL header requires at least 84 bytes).`);
+  }
+
   const triangles = new DataView(data).getUint32(80, true);
   const expected = 84 + 50 * triangles;
-  if (triangles > 0 && expected < data.byteLength) return data.slice(0, expected);
-  return data;
+
+  // Valid binary (exact or padded with trailing bytes) — check before ASCII so
+  // binary files whose 80-byte header happens to begin with "solid" still work.
+  if (triangles > 0 && triangles <= MAX_STL_TRIANGLES && expected <= byteLength) {
+    return expected < byteLength ? data.slice(0, expected) : data;
+  }
+
+  // If the binary length check failed, it may be an ASCII STL (whose bytes
+  // 80..83 decode as a huge uint32 count).
+  if (looksLikeAscii()) {
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  if (triangles === 0) {
+    throw new Error('The file contains no triangles.');
+  }
+
+  if (triangles > MAX_STL_TRIANGLES) {
+    throw new Error(
+      `STL header declares ${triangles.toLocaleString()} triangles, exceeding the maximum supported limit of ${MAX_STL_TRIANGLES.toLocaleString()}.`,
+    );
+  }
+
+  throw new Error(
+    `Truncated binary STL: header declares ${triangles.toLocaleString()} triangles (${expected.toLocaleString()} bytes), but file is only ${byteLength.toLocaleString()} bytes.`,
+  );
 }
 
 /** Parse STL data (ArrayBuffer or ASCII string) */
@@ -628,7 +728,7 @@ export function parseSTL(
   options: STLParseOptions = {}
 ): ParsedSTLResult {
   const loader = new STLLoader();
-  const geometry = loader.parse(asExactBinary(data));
+  const geometry = loader.parse(prepareStlData(data));
   const positionAttr = geometry.attributes.position;
 
   if (!positionAttr) {
@@ -638,12 +738,42 @@ export function parseSTL(
   const rawVerts = positionAttr.array as Float32Array;
   // Said here rather than let through: an empty mesh reaches the model as
   // MuJoCo's default 10 cm box, which looks like an import that worked.
-  if (rawVerts.length === 0) {
+  if (rawVerts.length < 9) {
     throw new Error('The file contains no triangles.');
   }
 
-  // Compute raw bounding box to check mm -> meter auto-scaling
-  const rawBbox = computeBoundingBox(Array.from(rawVerts));
+  // Compute raw bounding box over finite triangles only (avoiding Array.from
+  // boxing and preventing NaN/Infinity vertices from poisoning recentre/scale).
+  const rawMin: [number, number, number] = [Infinity, Infinity, Infinity];
+  const rawMax: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  let validRawTris = 0;
+  for (let i = 0; i + 8 < rawVerts.length; i += 9) {
+    let finite = true;
+    for (let k = 0; k < 9; k++) {
+      if (!Number.isFinite(rawVerts[i + k])) { finite = false; break; }
+    }
+    if (!finite) continue;
+    validRawTris++;
+    for (let v = 0; v < 9; v += 3) {
+      const vx = rawVerts[i + v], vy = rawVerts[i + v + 1], vz = rawVerts[i + v + 2];
+      if (vx < rawMin[0]) rawMin[0] = vx;
+      if (vx > rawMax[0]) rawMax[0] = vx;
+      if (vy < rawMin[1]) rawMin[1] = vy;
+      if (vy > rawMax[1]) rawMax[1] = vy;
+      if (vz < rawMin[2]) rawMin[2] = vz;
+      if (vz > rawMax[2]) rawMax[2] = vz;
+    }
+  }
+  if (validRawTris === 0) {
+    throw new Error('The file contains no valid finite triangles.');
+  }
+
+  const rawBbox: BoundingBox = {
+    min: rawMin,
+    max: rawMax,
+    size: [rawMax[0] - rawMin[0], rawMax[1] - rawMin[1], rawMax[2] - rawMin[2]],
+    center: [(rawMin[0] + rawMax[0]) / 2, (rawMin[1] + rawMax[1]) / 2, (rawMin[2] + rawMax[2]) / 2],
+  };
   const diagM = Math.hypot(...rawBbox.size);
 
   let scaleX = 1.0;
@@ -666,22 +796,17 @@ export function parseSTL(
     : [0, 0, 0];
 
   // Deduplicate into an index buffer, keeping both conventions in sync.
+  // Process triangle-by-triangle so triangles with NaN/Infinity vertices or
+  // triangles that collapse to degenerate edges under 1µm welding are dropped.
   const yUpVerts: number[] = [];
   const zUpVerts: number[] = [];
   const faces: number[] = [];
   const vertMap = new Map<string, number>();
 
-  for (let i = 0; i < rawVerts.length; i += 3) {
-    const x = rawVerts[i] * scaleX - ox;
-    const y = rawVerts[i + 1] * scaleY - oy;
-    const z = rawVerts[i + 2] * scaleZ - oz;
+  const weldKey = (x: number, y: number, z: number) =>
+    `${Math.round(x * 1e6) || 0},${Math.round(y * 1e6) || 0},${Math.round(z * 1e6) || 0}`;
 
-    // Weld on a 1µm grid. Rounding to an integer (rather than toFixed) matters:
-    // a coordinate of -1e-16 — which any lathe-like STL produces at the seam
-    // where the sweep closes — formats as "-0.000000" and would not weld to its
-    // "0.000000" twin, leaving a split seam that breaks hole and island
-    // detection downstream.
-    const key = `${Math.round(x * 1e6) || 0},${Math.round(y * 1e6) || 0},${Math.round(z * 1e6) || 0}`;
+  const intern = (key: string, x: number, y: number, z: number): number => {
     let idx = vertMap.get(key);
     if (idx === undefined) {
       idx = zUpVerts.length / 3;
@@ -689,11 +814,45 @@ export function parseSTL(
       zUpVerts.push(x, y, z);
       yUpVerts.push(x, z, -y);
     }
-    faces.push(idx);
+    return idx;
+  };
+
+  for (let i = 0; i + 8 < rawVerts.length; i += 9) {
+    const x0 = rawVerts[i] * scaleX - ox, y0 = rawVerts[i + 1] * scaleY - oy, z0 = rawVerts[i + 2] * scaleZ - oz;
+    const x1 = rawVerts[i + 3] * scaleX - ox, y1 = rawVerts[i + 4] * scaleY - oy, z1 = rawVerts[i + 5] * scaleZ - oz;
+    const x2 = rawVerts[i + 6] * scaleX - ox, y2 = rawVerts[i + 7] * scaleY - oy, z2 = rawVerts[i + 8] * scaleZ - oz;
+
+    if (
+      !Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(z0) ||
+      !Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(z1) ||
+      !Number.isFinite(x2) || !Number.isFinite(y2) || !Number.isFinite(z2)
+    ) {
+      continue;
+    }
+
+    // Weld on a 1µm grid. Rounding to an integer (rather than toFixed) matters:
+    // a coordinate of -1e-16 — which any lathe-like STL produces at the seam
+    // where the sweep closes — formats as "-0.000000" and would not weld to its
+    // "0.000000" twin, leaving a split seam that breaks hole and island
+    // detection downstream.
+    const k0 = weldKey(x0, y0, z0);
+    const k1 = weldKey(x1, y1, z1);
+    const k2 = weldKey(x2, y2, z2);
+    // Drop degenerate triangles collapsed by welding.
+    if (k0 === k1 || k1 === k2 || k2 === k0) continue;
+
+    const a = intern(k0, x0, y0, z0);
+    const b = intern(k1, x1, y1, z1);
+    const c = intern(k2, x2, y2, z2);
+    faces.push(a, b, c);
+  }
+
+  if (faces.length === 0) {
+    throw new Error('The file contains no valid triangles.');
   }
 
   const boundingBox = computeBoundingBox(zUpVerts);
-  const partName = options.name || 'imported_stl';
+  const partName = (options.name || 'imported_stl').replace(/[\r\n{}]+/g, ' ').trim() || 'imported_stl';
   const triangleCount = faces.length / 3;
   const dense = triangleCount > DENSE_MESH_TRIANGLES;
 
@@ -716,6 +875,15 @@ export function parseSTL(
   });
 
   const inferredSpacing = detectArray(subComponents);
+  const arrayElement = inferredSpacing
+    ? (() => {
+        const axisIndex = AXIS_NAME.indexOf(inferredSpacing.axis);
+        return subComponents.reduce(
+          (min, c) => (c.centroid[axisIndex] < min.centroid[axisIndex] ? c : min),
+          subComponents[0],
+        );
+      })()
+    : null;
 
   // --- Generated OpenSCAD --------------------------------------------------
 
@@ -739,8 +907,7 @@ size_z = ${fmt(sizeZ)}; ${slider(sizeZ)}
 
   if (dense) {
     scadParametric = '';
-  } else if (inferredSpacing) {
-    const element = subComponents[0];
+  } else if (inferredSpacing && arrayElement) {
     const axisIndex = AXIS_NAME.indexOf(inferredSpacing.axis);
     const offset = ['0', '0', '0'];
     offset[axisIndex] = `i * spacing`;
@@ -748,7 +915,7 @@ size_z = ${fmt(sizeZ)}; ${slider(sizeZ)}
 spacing = ${fmt(inferredSpacing.delta)}; ${slider(inferredSpacing.delta)}
 
 module element() {
-${emitPolyhedron(element.vertices, element.faces, '  ')}
+${emitPolyhedron(arrayElement.vertices, arrayElement.faces, '  ')}
 }
 
 scale([size_x / ${fmt(sizeX)}, size_y / ${fmt(sizeY)}, size_z / ${fmt(sizeZ)}])
@@ -778,22 +945,25 @@ ${emitPolyhedron(zUpVerts, faces, '  ')}
 ${vars ? `${vars}\n` : ''}
 ${emitIslandBody(c, '', '')}
 `;
-  } else if (inferredSpacing) {
-    const element = subComponents[0];
+  } else if (inferredSpacing && arrayElement) {
     const axisIndex = AXIS_NAME.indexOf(inferredSpacing.axis);
     const offset = ['0', '0', '0'];
     offset[axisIndex] = 'i * spacing';
+    const elementSummary = describeFit(arrayElement.fit, arrayElement.holes);
+    const elementVars = emitFitVars(arrayElement.fit, arrayElement.holes, '');
+    // `emitIslandBody` already places `element()` at its own centre (or baked
+    // polyhedron coordinates), so the loop only steps along `axisIndex`.
     scadCsg = `// Parametric CSG for ${partName} (Z-up, metres)
-// ${inferredSpacing.count} × ${summaries[0]}, spaced along ${inferredSpacing.axis.toUpperCase()}
-${emitFitVars(element.fit, element.holes, '') ? `${emitFitVars(element.fit, element.holes, '')}\n` : ''}element_count = ${inferredSpacing.count}; // [1:1:40]
+// ${inferredSpacing.count} × ${elementSummary}, spaced along ${inferredSpacing.axis.toUpperCase()}
+${elementVars ? `${elementVars}\n` : ''}element_count = ${inferredSpacing.count}; // [1:1:40]
 spacing = ${fmt(inferredSpacing.delta)}; ${slider(inferredSpacing.delta)}
 
 module element() {
-${emitIslandBody(element, '', '  ')}
+${emitIslandBody(arrayElement, '', '  ')}
 }
 
 for (i = [0 : element_count - 1])
-  translate([${offset.map((o, i) => (i === axisIndex ? o : (element.fit.exact ? fmt(element.fit.center[i]) : '0'))).join(', ')}]) element();
+  translate([${offset.join(', ')}]) element();
 `;
   } else {
     const blocks = subComponents.map((c, i) => {
@@ -816,19 +986,30 @@ ${blocks.map(b => b.body).join('\n')}
 
   // --- MuJoCo primitive fallback ------------------------------------------
 
+  const MIN_PRIM_SIZE = 1e-4;
   const topFit = subComponents.length === 1 ? subComponents[0].fit : null;
   let primitiveGeom: ParsedSTLResult['primitiveGeom'];
   if (topFit && topFit.kind === 'sphere') {
-    primitiveGeom = { type: 'sphere', size: [topFit.radius] };
+    primitiveGeom = { type: 'sphere', size: [Math.max(MIN_PRIM_SIZE, topFit.radius)] };
   } else if (topFit && topFit.kind === 'cylinder' && topFit.axis === 2) {
     // MuJoCo cylinders are Z-aligned; a sideways one is better served by a box.
-    primitiveGeom = { type: 'cylinder', size: [topFit.radius, topFit.height / 2] };
+    primitiveGeom = {
+      type: 'cylinder',
+      size: [Math.max(MIN_PRIM_SIZE, topFit.radius), Math.max(MIN_PRIM_SIZE, topFit.height / 2)],
+    };
   } else {
-    primitiveGeom = { type: 'box', size: [boundingBox.size[0] / 2, boundingBox.size[1] / 2, boundingBox.size[2] / 2] };
+    primitiveGeom = {
+      type: 'box',
+      size: [
+        Math.max(MIN_PRIM_SIZE, boundingBox.size[0] / 2),
+        Math.max(MIN_PRIM_SIZE, boundingBox.size[1] / 2),
+        Math.max(MIN_PRIM_SIZE, boundingBox.size[2] / 2),
+      ],
+    };
   }
 
-  const shapeSummary = inferredSpacing
-    ? `${inferredSpacing.count} × ${summaries[0]}, ${(inferredSpacing.delta * 1000).toFixed(1)}mm apart along ${inferredSpacing.axis.toUpperCase()}`
+  const shapeSummary = inferredSpacing && arrayElement
+    ? `${inferredSpacing.count} × ${describeFit(arrayElement.fit, arrayElement.holes)}, ${(inferredSpacing.delta * 1000).toFixed(1)}mm apart along ${inferredSpacing.axis.toUpperCase()}`
     : subComponents.length === 1
       ? summaries[0]
       : `${subComponents.length} parts: ${summaries.slice(0, 3).join('; ')}${summaries.length > 3 ? '; …' : ''}`;

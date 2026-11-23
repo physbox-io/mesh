@@ -912,48 +912,170 @@ function fromBase64UrlString(data: string): Uint8Array {
   return bytes;
 }
 
-function validatePcbSpec(raw: unknown): PcbMechanicalSpec {
-  if (!raw || typeof raw !== 'object') {
+const VALID_ENCLOSURE_FACES = new Set<string>(['top', 'front', 'back', 'left', 'right']);
+const VALID_CUTOUT_SHAPES = new Set<string>(['circle', 'rect', 'rounded_rect', 'd_shaft']);
+const VALID_FASTENERS = new Set<string>(['M2', 'M2.5', 'M3', 'M4']);
+const VALID_BOARD_COLORS = new Set<string>(['green', 'black', 'blue', 'red', 'white']);
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function assertFiniteNumber(val: unknown, label: string): number {
+  const n = Number(val);
+  if (typeof val === 'boolean' || val === null || val === '' || !Number.isFinite(n)) {
+    throw new Error(`Invalid PCB specification: ${label} must be a finite number.`);
+  }
+  return n;
+}
+
+function assertPositiveNumber(val: unknown, label: string): number {
+  const n = assertFiniteNumber(val, label);
+  if (n <= 0) {
+    throw new Error(`Invalid PCB specification: ${label} must be a positive number.`);
+  }
+  return n;
+}
+
+function validatePanelMount(raw: unknown, compLabel: string): PcbPanelMountSpec {
+  if (!isPlainObject(raw)) {
+    throw new Error(`Invalid PCB specification: ${compLabel}.panelMount must be an object.`);
+  }
+  if (typeof raw.face !== 'string' || !VALID_ENCLOSURE_FACES.has(raw.face)) {
+    throw new Error(
+      `Invalid PCB specification: ${compLabel}.panelMount.face must be one of top, front, back, left, right.`,
+    );
+  }
+  if (typeof raw.cutoutShape !== 'string' || !VALID_CUTOUT_SHAPES.has(raw.cutoutShape)) {
+    throw new Error(
+      `Invalid PCB specification: ${compLabel}.panelMount.cutoutShape must be one of circle, rect, rounded_rect, d_shaft.`,
+    );
+  }
+  const pm: PcbPanelMountSpec = {
+    ...(raw as unknown as PcbPanelMountSpec),
+    face: raw.face as PcbEnclosureFace,
+    cutoutShape: raw.cutoutShape as PcbCutoutShape,
+  };
+  if (raw.diameterMm !== undefined) pm.diameterMm = assertPositiveNumber(raw.diameterMm, `${compLabel}.panelMount.diameterMm`);
+  if (raw.widthMm !== undefined) pm.widthMm = assertPositiveNumber(raw.widthMm, `${compLabel}.panelMount.widthMm`);
+  if (raw.heightMm !== undefined) pm.heightMm = assertPositiveNumber(raw.heightMm, `${compLabel}.panelMount.heightMm`);
+  if (raw.shaftFlatMm !== undefined) pm.shaftFlatMm = assertPositiveNumber(raw.shaftFlatMm, `${compLabel}.panelMount.shaftFlatMm`);
+  if (raw.cornerRadiusMm !== undefined) {
+    const cr = assertFiniteNumber(raw.cornerRadiusMm, `${compLabel}.panelMount.cornerRadiusMm`);
+    if (cr < 0) throw new Error(`Invalid PCB specification: ${compLabel}.panelMount.cornerRadiusMm must be >= 0.`);
+    pm.cornerRadiusMm = cr;
+  }
+  if (raw.zOffsetMm !== undefined) pm.zOffsetMm = assertFiniteNumber(raw.zOffsetMm, `${compLabel}.panelMount.zOffsetMm`);
+  if (raw.clearanceMm !== undefined) {
+    const cl = assertFiniteNumber(raw.clearanceMm, `${compLabel}.panelMount.clearanceMm`);
+    if (cl < 0) throw new Error(`Invalid PCB specification: ${compLabel}.panelMount.clearanceMm must be >= 0.`);
+    pm.clearanceMm = cl;
+  }
+  if (raw.ClearanceMm !== undefined) {
+    const cl = assertFiniteNumber(raw.ClearanceMm, `${compLabel}.panelMount.ClearanceMm`);
+    if (cl < 0) throw new Error(`Invalid PCB specification: ${compLabel}.panelMount.ClearanceMm must be >= 0.`);
+    pm.ClearanceMm = cl;
+  }
+  return pm;
+}
+
+export function validatePcbSpec(raw: unknown): PcbMechanicalSpec {
+  if (!isPlainObject(raw)) {
     throw new Error('Invalid PCB specification: expected an object.');
   }
-  const obj = raw as Record<string, unknown>;
+  const obj = raw;
   const name = typeof obj.name === 'string' && obj.name.trim() ? obj.name.trim() : 'Custom PCB';
-  const widthMm = Number(obj.widthMm);
-  const depthMm = Number(obj.depthMm);
-  const thicknessMm = obj.thicknessMm !== undefined ? Number(obj.thicknessMm) : 1.6;
-  if (!Number.isFinite(widthMm) || widthMm <= 0 || !Number.isFinite(depthMm) || depthMm <= 0) {
-    throw new Error('Invalid PCB specification: widthMm and depthMm must be positive numbers.');
+  const widthMm = assertPositiveNumber(obj.widthMm, 'widthMm');
+  const depthMm = assertPositiveNumber(obj.depthMm, 'depthMm');
+  const thicknessMm = obj.thicknessMm !== undefined
+    ? assertPositiveNumber(obj.thicknessMm, 'thicknessMm')
+    : 1.6;
+  let cornerRadiusMm: number | undefined;
+  if (obj.cornerRadiusMm !== undefined) {
+    cornerRadiusMm = assertFiniteNumber(obj.cornerRadiusMm, 'cornerRadiusMm');
+    if (cornerRadiusMm < 0) {
+      throw new Error('Invalid PCB specification: cornerRadiusMm must be >= 0.');
+    }
   }
-  const mountingHoles = Array.isArray(obj.mountingHoles)
-    ? (obj.mountingHoles as PcbMountingHole[]).map((h, i) => ({
-        id: h.id || `mh_${i + 1}`,
-        xMm: Number(h.xMm) || 0,
-        yMm: Number(h.yMm) || 0,
-        drillMm: Number(h.drillMm) > 0 ? Number(h.drillMm) : 3.2,
-        ...(h.padDiameterMm !== undefined ? { padDiameterMm: Number(h.padDiameterMm) } : {}),
-        ...(h.fastener ? { fastener: h.fastener } : {}),
-      }))
+  let color: PcbBoardColor | undefined;
+  if (obj.color !== undefined) {
+    if (typeof obj.color !== 'string' || !VALID_BOARD_COLORS.has(obj.color)) {
+      throw new Error('Invalid PCB specification: color must be green, black, blue, red, or white.');
+    }
+    color = obj.color as PcbBoardColor;
+  }
+
+  const mountingHoles: PcbMountingHole[] = Array.isArray(obj.mountingHoles)
+    ? obj.mountingHoles.map((entry, i) => {
+        if (!isPlainObject(entry)) {
+          throw new Error(`Invalid PCB specification: mountingHoles[${i}] must be an object.`);
+        }
+        const label = `mountingHoles[${i}]`;
+        const xMm = entry.xMm === undefined ? 0 : assertFiniteNumber(entry.xMm, `${label}.xMm`);
+        const yMm = entry.yMm === undefined ? 0 : assertFiniteNumber(entry.yMm, `${label}.yMm`);
+        const drillMm = entry.drillMm === undefined ? 3.2 : assertPositiveNumber(entry.drillMm, `${label}.drillMm`);
+        const padDiameterMm = entry.padDiameterMm !== undefined
+          ? assertPositiveNumber(entry.padDiameterMm, `${label}.padDiameterMm`)
+          : undefined;
+        let fastener: PcbFastenerSize | undefined;
+        if (entry.fastener !== undefined) {
+          if (typeof entry.fastener !== 'string' || !VALID_FASTENERS.has(entry.fastener)) {
+            throw new Error(`Invalid PCB specification: ${label}.fastener must be M2, M2.5, M3, or M4.`);
+          }
+          fastener = entry.fastener as PcbFastenerSize;
+        }
+        return {
+          id: typeof entry.id === 'string' && entry.id.trim() ? entry.id : `mh_${i + 1}`,
+          xMm,
+          yMm,
+          drillMm,
+          ...(padDiameterMm !== undefined ? { padDiameterMm } : {}),
+          ...(fastener ? { fastener } : {}),
+        };
+      })
     : [];
-  const components = Array.isArray(obj.components)
-    ? (obj.components as PcbComponent3D[]).map((c, i) => ({
-        ...c,
-        id: c.id || `comp_${i + 1}`,
-        ref: c.ref || `U${i + 1}`,
-        kind: c.kind || 'custom',
-        xMm: Number(c.xMm) || 0,
-        yMm: Number(c.yMm) || 0,
-        widthMm: Number(c.widthMm) > 0 ? Number(c.widthMm) : 5,
-        depthMm: Number(c.depthMm) > 0 ? Number(c.depthMm) : 5,
-        heightMm: Number(c.heightMm) > 0 ? Number(c.heightMm) : 3,
-      }))
+
+  const components: PcbComponent3D[] = Array.isArray(obj.components)
+    ? obj.components.map((entry, i) => {
+        if (!isPlainObject(entry)) {
+          throw new Error(`Invalid PCB specification: components[${i}] must be an object.`);
+        }
+        const label = `components[${i}]`;
+        const xMm = entry.xMm === undefined ? 0 : assertFiniteNumber(entry.xMm, `${label}.xMm`);
+        const yMm = entry.yMm === undefined ? 0 : assertFiniteNumber(entry.yMm, `${label}.yMm`);
+        const width = entry.widthMm === undefined ? 5 : assertPositiveNumber(entry.widthMm, `${label}.widthMm`);
+        const depth = entry.depthMm === undefined ? 5 : assertPositiveNumber(entry.depthMm, `${label}.depthMm`);
+        const height = entry.heightMm === undefined ? 3 : assertPositiveNumber(entry.heightMm, `${label}.heightMm`);
+        const rotDeg = entry.rotDeg !== undefined ? assertFiniteNumber(entry.rotDeg, `${label}.rotDeg`) : undefined;
+        if (entry.side !== undefined && entry.side !== 'top' && entry.side !== 'bottom') {
+          throw new Error(`Invalid PCB specification: ${label}.side must be 'top' or 'bottom'.`);
+        }
+        const panelMount = entry.panelMount !== undefined
+          ? validatePanelMount(entry.panelMount, label)
+          : undefined;
+        return {
+          ...(entry as unknown as PcbComponent3D),
+          id: typeof entry.id === 'string' && entry.id.trim() ? entry.id : `comp_${i + 1}`,
+          ref: typeof entry.ref === 'string' && entry.ref.trim() ? entry.ref : `U${i + 1}`,
+          kind: (typeof entry.kind === 'string' && entry.kind ? entry.kind : 'custom') as PcbComponentKind,
+          xMm,
+          yMm,
+          widthMm: width,
+          depthMm: depth,
+          heightMm: height,
+          ...(rotDeg !== undefined ? { rotDeg } : {}),
+          ...(panelMount !== undefined ? { panelMount } : {}),
+        };
+      })
     : [];
+
   return {
     name,
     widthMm,
     depthMm,
-    thicknessMm: Number.isFinite(thicknessMm) && thicknessMm > 0 ? thicknessMm : 1.6,
-    ...(obj.cornerRadiusMm !== undefined ? { cornerRadiusMm: Number(obj.cornerRadiusMm) } : {}),
-    ...(obj.color ? { color: obj.color as PcbBoardColor } : {}),
+    thicknessMm,
+    ...(cornerRadiusMm !== undefined ? { cornerRadiusMm } : {}),
+    ...(color ? { color } : {}),
     mountingHoles,
     components,
   };
@@ -1309,6 +1431,8 @@ function faceNormalVector(face: PcbEnclosureFace): [number, number, number] {
       return [-1, 0, 0];
     case 'right':
       return [1, 0, 0];
+    default:
+      throw new Error(`Unsupported PCB enclosure face: ${String(face)}`);
   }
 }
 
@@ -1326,6 +1450,9 @@ function buildPanelCutoutGeom(
   const mjQuat = [quat.w, quat.x, quat.y, quat.z].map((v) => +v.toFixed(9));
 
   const cutLenMm = wallThicknessMm + 3.0;
+  // Cut only through the target wall (not `0` full-body through-cut which blows
+  // out the opposite enclosure wall when re-evaluated by `cutGeometry`).
+  const wallCutDepthM = mm(wallThicknessMm + 1.5);
   const geomName = `${nodeId}_cutout_${comp.id}`;
 
   if (pm.cutoutShape === 'circle' || pm.cutoutShape === 'd_shaft') {
@@ -1339,7 +1466,7 @@ function buildPanelCutoutGeom(
       csg: 'difference',
       cutAt: atM.map((v) => +v.toFixed(6)),
       cutNormal: [...normal],
-      cutDepth: 0,
+      cutDepth: wallCutDepthM,
       rgba: [0.9, 0.25, 0.35, 1],
     };
     return { geom, ...dims };
@@ -1372,7 +1499,7 @@ function buildPanelCutoutGeom(
     csg: 'difference',
     cutAt: atM.map((v) => +v.toFixed(6)),
     cutNormal: [...normal],
-    cutDepth: 0,
+    cutDepth: wallCutDepthM,
     ...(Math.abs(twist) > 1e-9 ? { cutTwist: +twist.toFixed(9) } : {}),
     rgba: [0.9, 0.25, 0.35, 1],
   };
@@ -1698,11 +1825,13 @@ export function generatePcbEnclosure(
 
     const [, insertDepthMm, bossOuterMm] = INSERTS[fastener] ?? INSERTS.M3;
     const bossRadiusM = mm(bossOuterMm / 2);
+    const standoffMm = Math.max(0.2, opts.standoffHeightMm);
     const standoffOverlapMm = Math.min(1.0, opts.wallThicknessMm * 0.5);
-    const bossTotalLenMm = opts.standoffHeightMm + standoffOverlapMm;
-    const bossCenterZMm = floorTopZMm + (opts.standoffHeightMm - standoffOverlapMm) / 2;
+    const bossTotalLenMm = standoffMm + standoffOverlapMm;
+    const bossCenterZMm = floorTopZMm + (standoffMm - standoffOverlapMm) / 2;
 
-    const boreDepthMm = Math.min(opts.standoffHeightMm - 0.4, insertDepthMm);
+    const maxBoreByStandoff = Math.min(Math.max(0, standoffMm - 0.4), standoffMm * 0.8);
+    const boreDepthMm = Math.max(0.05, Math.min(maxBoreByStandoff, insertDepthMm));
     const boreLenMm = boreDepthMm + 1.0;
     const boreCenterZMm = pcbBottomZMm - boreDepthMm / 2 + 0.5;
 
@@ -1712,7 +1841,7 @@ export function generatePcbEnclosure(
         piece.pos = [hxM, hyM, mm(bossCenterZMm)];
         piece.quat = [1, 0, 0, 0];
         piece.cutAt = [hxM, hyM, mm(floorTopZMm)];
-        piece.cutDepth = mm(opts.standoffHeightMm);
+        piece.cutDepth = mm(standoffMm);
         piece.rgba = [...baseRgba];
       } else if (piece.hardware?.part === 'bore') {
         const radiusM = piece.size?.[0] ?? mm((CLEARANCE_HOLES[fastener] ?? 3.4) / 2);
@@ -1740,21 +1869,18 @@ export function generatePcbEnclosure(
     const compCutZMm = boardSurfZMm + sign * (pm.zOffsetMm ?? comp.heightMm / 2);
 
     if (pm.face === 'top') {
-      const targetBody: 'base' | 'lid' = opts.includeLid ? 'lid' : 'base';
-      const targetId = opts.includeLid ? lidId : baseId;
-      const zFaceMm = opts.includeLid ? opts.wallThicknessMm / 2 : baseHeightMm / 2;
+      // Open-top enclosures have no lid or top wall to cut; never append top
+      // cutters onto `baseNode` where they would cut into the base/floor.
+      if (!opts.includeLid) continue;
+      const zFaceMm = opts.wallThicknessMm / 2;
       const { geom, widthMm, heightMm, diameterMm } = buildPanelCutoutGeom(
-        targetId,
+        lidId,
         comp,
         pm,
         [mm(comp.xMm), mm(comp.yMm), mm(zFaceMm)],
         opts.wallThicknessMm,
       );
-      if (opts.includeLid) {
-        lidCutoutGeoms.push(geom);
-      } else {
-        baseCutoutGeoms.push(geom);
-      }
+      lidCutoutGeoms.push(geom);
       cutouts.push({
         componentId: comp.id,
         ref: comp.ref,
@@ -1766,7 +1892,7 @@ export function generatePcbEnclosure(
         widthMm: +widthMm.toFixed(3),
         heightMm: +heightMm.toFixed(3),
         ...(diameterMm !== undefined ? { diameterMm: +diameterMm.toFixed(3) } : {}),
-        targetBody,
+        targetBody: 'lid',
         geomName: geom.name,
       });
     } else {
@@ -1899,13 +2025,17 @@ export function applyPcbToEnclosureBody(
     max: [mm(valid.widthMm / 2 + 4), mm(valid.depthMm / 2 + 4), mm(10)],
   };
 
+  const standoffMm = Math.max(0.2, opts.standoffHeightMm);
   const floorZ = bounds.min[2] + mm(opts.wallThicknessMm);
-  const pcbBottomZ = floorZ + mm(opts.standoffHeightMm);
+  const pcbBottomZ = floorZ + mm(standoffMm);
   const pcbTopZ = pcbBottomZ + mm(valid.thicknessMm);
 
   // Add mounting bosses
   valid.mountingHoles.forEach((hole, index) => {
     const fastener = normalizeFastener(hole);
+    const [, insertDepthMm] = INSERTS[fastener] ?? INSERTS.M3;
+    const maxBoreByStandoff = Math.min(Math.max(0, standoffMm - 0.4), standoffMm * 0.8);
+    const boreDepthMm = Math.max(0.05, Math.min(maxBoreByStandoff, insertDepthMm));
     const group = `pcb_standoff_${index + 1}`;
     const hxM = mm(hole.xMm);
     const hyM = mm(hole.yMm);
@@ -1922,6 +2052,12 @@ export function applyPcbToEnclosureBody(
       cloned,
     );
     for (const piece of pieces) {
+      if (piece.hardware?.part === 'boss') {
+        piece.cutDepth = mm(standoffMm);
+      } else if (piece.hardware?.part === 'bore') {
+        piece.cutAt = [hxM, hyM, pcbBottomZ];
+        piece.cutDepth = mm(boreDepthMm);
+      }
       cloned.geoms.push(piece);
       const derived = cutGeometry(cloned, piece);
       if (derived) Object.assign(piece, derived);
@@ -1932,7 +2068,10 @@ export function applyPcbToEnclosureBody(
   for (const comp of valid.components) {
     if (!comp.panelMount) continue;
     const pm = comp.panelMount;
-    const compZ = pcbTopZ + mm(pm.zOffsetMm ?? comp.heightMm / 2);
+    const side = comp.side ?? 'top';
+    const sign = side === 'bottom' ? -1 : 1;
+    const boardSurfZ = side === 'bottom' ? pcbBottomZ : pcbTopZ;
+    const compZ = boardSurfZ + sign * mm(pm.zOffsetMm ?? comp.heightMm / 2);
     const atM: [number, number, number] =
       pm.face === 'top'
         ? [mm(comp.xMm), mm(comp.yMm), bounds.max[2]]

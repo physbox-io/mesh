@@ -645,9 +645,38 @@ function buildHoledSolid(
   };
 }
 
+/** Cap total grid cells (`cols * rows`) so extreme aspect ratios never OOM the tab. */
+export const MAX_HEIGHTMAP_CELLS = 160_000;
+
 /** Rows that keep the image's aspect ratio at a given column count. */
 export function rowsForAspect(imgWidth: number, imgHeight: number, cols: number): number {
   return Math.max(2, Math.round(((cols - 1) * imgHeight) / imgWidth) + 1);
+}
+
+/**
+ * Compute grid dimensions `(cols, rows)` preserving image aspect ratio while
+ * capping total cells to `MAX_HEIGHTMAP_CELLS`.
+ */
+export function cappedGridDimensions(
+  imgWidth: number,
+  imgHeight: number,
+  requestedCols: number,
+  maxCells = MAX_HEIGHTMAP_CELLS,
+): { cols: number; rows: number } {
+  if (!(imgWidth > 0) || !(imgHeight > 0)) {
+    throw new Error('Image dimensions must be positive.');
+  }
+  let cols = Math.max(2, Math.round(requestedCols));
+  let rows = rowsForAspect(imgWidth, imgHeight, cols);
+  if (cols * rows > maxCells) {
+    const scale = Math.sqrt(maxCells / (cols * rows));
+    cols = Math.max(2, Math.floor(cols * scale));
+    rows = Math.max(2, Math.min(Math.floor(maxCells / cols), rowsForAspect(imgWidth, imgHeight, cols)));
+    if (cols * rows > maxCells) {
+      cols = Math.max(2, Math.floor(maxCells / rows));
+    }
+  }
+  return { cols, rows };
 }
 
 /** One-shot: RGBA pixels in, mesh out. */
@@ -657,8 +686,7 @@ export function imageToHeightmapMesh(
   imgHeight: number,
   options: HeightmapOptions
 ): HeightmapMeshResult {
-  const cols = Math.max(2, Math.round(options.gridCols));
-  const rows = rowsForAspect(imgWidth, imgHeight, cols);
+  const { cols, rows } = cappedGridDimensions(imgWidth, imgHeight, options.gridCols);
   const lum = sampleLuminanceGrid(data, imgWidth, imgHeight, cols, rows);
   return buildHeightmapMesh(lum, cols, rows, options);
 }

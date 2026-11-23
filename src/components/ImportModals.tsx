@@ -72,6 +72,7 @@ export function ImportModals() {
 
       {isPcbImportOpen && (
         <ImportPcbModal
+          key={pcbHandoff ?? 'preset'}
           onClose={() => setPcbImportOpen(false)}
           {...(pcbHandoff ? { initialSpec: pcbHandoff } : {})}
         />

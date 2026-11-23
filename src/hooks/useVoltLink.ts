@@ -20,7 +20,15 @@
 import { useEffect } from 'react';
 import { getPhysicsWorkerClient, useStore } from '../store/useStore';
 import { useCavityStore } from '../store/cavityStore';
-import { cavityChannels, envelope, isCoSimMessage, readCavityOutputs, voltOrigins, type CoSimBody } from '../utils/coSimLink';
+import {
+  cavityChannels,
+  envelope,
+  isCoSimMessage,
+  readCavityOutputs,
+  validateStepForPayload,
+  voltOrigins,
+  type CoSimBody,
+} from '../utils/coSimLink';
 
 /** The whole catalogue: the model's channels, and every measured cavity's. */
 async function catalogue() {
@@ -32,6 +40,16 @@ export function useVoltLink() {
   useEffect(() => {
     if (typeof window === 'undefined' || !window.opener) return;
     const allowed = voltOrigins();
+    let disposed = false;
+
+    const sendCatalogueIfStillLinked = async (origin: string) => {
+      const { channels, timestepMs } = await catalogue();
+      if (disposed || useStore.getState().voltLink?.origin !== origin) return;
+      window.opener?.postMessage(
+        envelope({ type: 'CATALOGUE', channels, timestepMs, scene: document.title }),
+        origin,
+      );
+    };
 
     const onMessage = async (evt: MessageEvent) => {
       if (evt.source !== window.opener || !allowed.includes(evt.origin) || !isCoSimMessage(evt.data)) return;
@@ -45,23 +63,36 @@ export function useVoltLink() {
           if (!state.isLoaded) return;
           if (state.isPlaying) state.togglePlay();
           useStore.setState({ voltLink: { origin: evt.origin } });
-          const { channels, timestepMs } = await catalogue();
-          reply({ type: 'CATALOGUE', channels, timestepMs, scene: document.title });
+          try {
+            await sendCatalogueIfStillLinked(evt.origin);
+          } catch (e) {
+            if (!disposed && useStore.getState().voltLink?.origin === evt.origin) {
+              useStore.setState({ voltLink: null });
+              reply({ type: 'ERROR', message: String((e as Error)?.message || e) });
+            }
+          }
           return;
         }
         case 'STEP_FOR': {
+          const parsed = validateStepForPayload(msg as unknown as Record<string, unknown>);
+          if (!parsed.ok) {
+            reply({ type: 'ERROR', ...(parsed.seq !== undefined ? { seq: parsed.seq } : {}), message: parsed.error });
+            return;
+          }
           if (!state.voltLink) {
-            reply({ type: 'ERROR', seq: msg.seq, message: 'Mesh is not linked. Link again from Volt.' });
+            reply({ type: 'ERROR', seq: parsed.seq, message: 'Mesh is not linked. Link again from Volt.' });
             return;
           }
           try {
-            const measured = readCavityOutputs(useCavityStore.getState().measured, msg.outputs ?? []);
-            const r = await getPhysicsWorkerClient().stepFor(msg.dtMs, msg.inputs, measured.rest);
+            const measured = readCavityOutputs(useCavityStore.getState().measured, parsed.outputs);
+            const r = await getPhysicsWorkerClient().stepFor(parsed.dtMs, parsed.inputs, measured.rest);
+            if (disposed) return;
             reply(r.ok
-              ? { type: 'STEPPED', seq: msg.seq, t: r.t, steps: r.steps, outputs: { ...r.outputs, ...measured.outputs }, unknown: r.unknown }
-              : { type: 'ERROR', seq: msg.seq, message: r.error });
+              ? { type: 'STEPPED', seq: parsed.seq, t: r.t, steps: r.steps, outputs: { ...r.outputs, ...measured.outputs }, unknown: r.unknown }
+              : { type: 'ERROR', seq: parsed.seq, message: r.error });
           } catch (e) {
-            reply({ type: 'ERROR', seq: msg.seq, message: String((e as Error)?.message || e) });
+            if (disposed) return;
+            reply({ type: 'ERROR', seq: parsed.seq, message: String((e as Error)?.message || e) });
           }
           return;
         }
@@ -77,12 +108,16 @@ export function useVoltLink() {
     };
 
     // A cavity measured while linked: tell Volt, so its picker lists it.
-    const unsubscribe = useCavityStore.subscribe((s, prev) => {
+    const unsubscribeCavity = useCavityStore.subscribe((s, prev) => {
       const link = useStore.getState().voltLink;
       if (!link || s.measured === prev.measured) return;
-      void catalogue().then(({ channels, timestepMs }) => {
-        window.opener?.postMessage(envelope({ type: 'CATALOGUE', channels, timestepMs, scene: document.title }), link.origin);
-      }).catch(() => {});
+      void sendCatalogueIfStillLinked(link.origin).catch(() => {});
+    });
+
+    // A scene edit/recompile while linked: re-emit the updated channel catalogue.
+    const unsubscribeStore = useStore.subscribe((s, prev) => {
+      if (!s.voltLink || !s.isLoaded || s.recompileId === prev.recompileId) return;
+      void sendCatalogueIfStillLinked(s.voltLink.origin).catch(() => {});
     });
 
     const onPageHide = () => {
@@ -94,9 +129,11 @@ export function useVoltLink() {
     window.addEventListener('message', onMessage);
     window.addEventListener('pagehide', onPageHide);
     return () => {
+      disposed = true;
       window.removeEventListener('message', onMessage);
       window.removeEventListener('pagehide', onPageHide);
-      unsubscribe();
+      unsubscribeCavity();
+      unsubscribeStore();
     };
   }, []);
 }

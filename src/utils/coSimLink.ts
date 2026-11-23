@@ -23,6 +23,8 @@ type MjData = InstanceType<Mujoco['MjData']>;
 
 export const COSIM_PROTOCOL = 'physbox-cosim';
 export const COSIM_VERSION = 1;
+/** Maximum allowed simulation slice in milliseconds for a single STEP_FOR request. */
+export const MAX_COSIM_DT_MS = 10_000;
 
 /** One number Volt can write or read. */
 export interface CoSimChannel {
@@ -57,6 +59,36 @@ export function isCoSimMessage(value: unknown): value is CoSimMessage {
   if (!value || typeof value !== 'object') return false;
   const m = value as Record<string, unknown>;
   return m.proto === COSIM_PROTOCOL && m.v === COSIM_VERSION && typeof m.type === 'string';
+}
+
+export type ValidatedStepFor =
+  | { ok: true; seq: number; dtMs: number; inputs: Record<string, number>; outputs: string[] }
+  | { ok: false; seq?: number; error: string };
+
+/** Validate untrusted STEP_FOR payload fields before forwarding to the physics worker. */
+export function validateStepForPayload(msg: Record<string, unknown>): ValidatedStepFor {
+  const seq = typeof msg.seq === 'number' && Number.isFinite(msg.seq) ? msg.seq : undefined;
+  if (seq === undefined) {
+    return { ok: false, error: 'STEP_FOR requires a finite numeric seq.' };
+  }
+  if (typeof msg.dtMs !== 'number' || !Number.isFinite(msg.dtMs) || msg.dtMs < 0 || msg.dtMs > MAX_COSIM_DT_MS) {
+    return { ok: false, seq, error: `STEP_FOR dtMs must be a finite number in [0, ${MAX_COSIM_DT_MS}].` };
+  }
+  const rawInputs = msg.inputs ?? {};
+  if (typeof rawInputs !== 'object' || rawInputs === null || Array.isArray(rawInputs)) {
+    return { ok: false, seq, error: 'STEP_FOR inputs must be a plain object.' };
+  }
+  const rawOutputs = msg.outputs ?? [];
+  if (!Array.isArray(rawOutputs) || !rawOutputs.every((o): o is string => typeof o === 'string')) {
+    return { ok: false, seq, error: 'STEP_FOR outputs must be an array of channel names.' };
+  }
+  return {
+    ok: true,
+    seq,
+    dtMs: msg.dtMs,
+    inputs: rawInputs as Record<string, number>,
+    outputs: rawOutputs,
+  };
 }
 
 /**
@@ -416,7 +448,7 @@ export function readOutputs(mj: Mujoco, model: MjModel, data: MjData, names: str
  * reads the scene before its first slice without moving it.
  */
 export function stepsFor(dtMs: number, timestepS: number): number {
-  if (!(dtMs > 0)) return 0;
+  if (!Number.isFinite(dtMs) || !Number.isFinite(timestepS) || !(dtMs > 0) || !(timestepS > 0)) return 0;
   return Math.max(1, Math.ceil(dtMs / 1000 / timestepS - 1e-9));
 }
 

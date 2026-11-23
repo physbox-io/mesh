@@ -126,9 +126,10 @@ export function sliceLoops(verts: number[], faces: number[], axis: 0 | 1 | 2, pl
     for (let e = 0; e < 3; e++) {
       const a = idx[e] * 3, b = idx[(e + 1) % 3] * 3;
       const da = verts[a + axis] - plane, db = verts[b + axis] - plane;
-      // Strict sign change only: an edge lying in the plane contributes
-      // nothing, and its two neighbouring edges supply the same points.
-      if ((da < 0 && db > 0) || (da > 0 && db < 0)) {
+      // Half-open plane test (d >= 0 vs d < 0): symbolically perturbs vertices
+      // lying exactly on the plane to the positive side so single vertices and
+      // in-plane edges on the cut plane produce clean, non-duplicated segments.
+      if ((da < 0 && db >= 0) || (da >= 0 && db < 0)) {
         const t = da / (da - db);
         hits.push([verts[a + p] + t * (verts[b + p] - verts[a + p]), verts[a + q] + t * (verts[b + q] - verts[a + q])]);
       }
@@ -166,8 +167,13 @@ export function sliceLoops(verts: number[], faces: number[], axis: 0 | 1 | 2, pl
       loop.push(step);
     }
     if (loop.length >= 3) {
-      const simplified = simplifyLoop(loop, tol);
-      if (Math.abs(loopArea(simplified)) > tol * tol) loops.push(simplified);
+      const last = loop[loop.length - 1];
+      const lastNeighbors = next.get(qkey(last[0], last[1])) || [];
+      const closes = lastNeighbors.some(c => qkey(c[0], c[1]) === startKey);
+      if (closes) {
+        const simplified = simplifyLoop(loop, tol);
+        if (Math.abs(loopArea(simplified)) > tol * tol) loops.push(simplified);
+      }
     }
   }
   return loops;
@@ -200,16 +206,84 @@ export function regionsArea(regions: Region[]): number {
   return regions.reduce((sum, r) => sum + Math.abs(loopArea(r.outer)) - r.holes.reduce((h, l) => h + Math.abs(loopArea(l)), 0), 0);
 }
 
-/** Do two cross-sections describe the same shape (i.e. is the slab prismatic)? */
-function regionsMatch(a: Region[], b: Region[], tol: number): boolean {
-  if (a.length !== b.length) return false;
-  const key = (r: Region) => {
-    const bounds = loopBounds(r.outer);
-    return [Math.abs(loopArea(r.outer)), bounds.center[0], bounds.center[1], r.holes.length];
+interface LoopSignature {
+  area: number;
+  perimeter: number;
+  bounds: ReturnType<typeof loopBounds>;
+}
+
+function loopSignature(loop: Loop): LoopSignature {
+  return {
+    area: Math.abs(loopArea(loop)),
+    perimeter: loopPerimeter(loop),
+    bounds: loopBounds(loop),
   };
-  const ka = a.map(key).sort((x, y) => x[0] - y[0]);
-  const kb = b.map(key).sort((x, y) => x[0] - y[0]);
-  return ka.every((k, i) => k.every((v, j) => Math.abs(v - kb[i][j]) <= tol));
+}
+
+function compareByCenterAndArea(a: LoopSignature, b: LoopSignature): number {
+  return (
+    a.bounds.center[0] - b.bounds.center[0] ||
+    a.bounds.center[1] - b.bounds.center[1] ||
+    a.area - b.area
+  );
+}
+
+/** Match two loops with dimensionally consistent tolerances: area in m², bounds/centre in m. */
+function loopsMatch(a: LoopSignature, b: LoopSignature, tol: number): boolean {
+  const areaTol = Math.max(Math.max(a.area, b.area) * 0.02, Math.max(a.perimeter, b.perimeter) * tol, tol * tol);
+  return (
+    Math.abs(a.area - b.area) <= areaTol &&
+    Math.abs(a.bounds.center[0] - b.bounds.center[0]) <= tol &&
+    Math.abs(a.bounds.center[1] - b.bounds.center[1]) <= tol &&
+    Math.abs(a.bounds.size[0] - b.bounds.size[0]) <= tol * 2 &&
+    Math.abs(a.bounds.size[1] - b.bounds.size[1]) <= tol * 2
+  );
+}
+
+/** Deterministically pair items from `a` and `b` by nearest centre. */
+function pairByNearestCenter<T>(
+  a: T[],
+  b: T[],
+  sigOf: (item: T) => LoopSignature,
+): [T, T][] | null {
+  if (a.length !== b.length) return null;
+  const sa = [...a].map(item => ({ item, sig: sigOf(item) })).sort((x, y) => compareByCenterAndArea(x.sig, y.sig));
+  const sb = [...b].map(item => ({ item, sig: sigOf(item) })).sort((x, y) => compareByCenterAndArea(x.sig, y.sig));
+  const used = new Uint8Array(sb.length);
+  const pairs: [T, T][] = [];
+  for (const ea of sa) {
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let j = 0; j < sb.length; j++) {
+      if (used[j]) continue;
+      const d = Math.hypot(
+        ea.sig.bounds.center[0] - sb[j].sig.bounds.center[0],
+        ea.sig.bounds.center[1] - sb[j].sig.bounds.center[1],
+      );
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = j;
+      }
+    }
+    if (bestIdx < 0) return null;
+    used[bestIdx] = 1;
+    pairs.push([ea.item, sb[bestIdx].item]);
+  }
+  return pairs;
+}
+
+/** Do two cross-sections describe the same shape (i.e. is the slab prismatic)? */
+export function regionsMatch(a: Region[], b: Region[], tol: number): boolean {
+  const pairs = pairByNearestCenter(a, b, r => loopSignature(r.outer));
+  if (!pairs) return false;
+  return pairs.every(([ra, rb]) => {
+    if (ra.holes.length !== rb.holes.length) return false;
+    if (!loopsMatch(loopSignature(ra.outer), loopSignature(rb.outer), tol)) return false;
+    if (ra.holes.length === 0) return true;
+    const holePairs = pairByNearestCenter(ra.holes, rb.holes, loopSignature);
+    if (!holePairs) return false;
+    return holePairs.every(([ha, hb]) => loopsMatch(loopSignature(ha), loopSignature(hb), tol));
+  });
 }
 
 /**
@@ -217,14 +291,15 @@ function regionsMatch(a: Region[], b: Region[], tol: number): boolean {
  * turn a tapered band into one profile plus a `chamfer` parameter instead of
  * two unrelated point lists.
  */
-function uniformOffset(bottom: Region[], top: Region[], tol: number): number | null {
-  if (bottom.length !== top.length) return null;
+export function uniformOffset(bottom: Region[], top: Region[], tol: number): number | null {
+  const pairs = pairByNearestCenter(bottom, top, r => loopSignature(r.outer));
+  if (!pairs) return null;
 
   let delta: number | null = null;
-  for (let i = 0; i < bottom.length; i++) {
-    const b = loopBounds(bottom[i].outer);
-    const t = loopBounds(top[i].outer);
-    if (bottom[i].holes.length !== top[i].holes.length) return null;
+  for (const [bReg, tReg] of pairs) {
+    if (bReg.holes.length !== tReg.holes.length) return null;
+    const b = loopBounds(bReg.outer);
+    const t = loopBounds(tReg.outer);
     // The outline has to shrink by the same amount on both sides of both axes,
     // otherwise it is a taper, not a chamfer.
     const dxLo = t.min[0] - b.min[0], dxHi = b.max[0] - t.max[0];
@@ -233,14 +308,41 @@ function uniformOffset(bottom: Region[], top: Region[], tol: number): number | n
     if (d <= tol) return null;
     if ([dxLo, dxHi, dyLo, dyHi].some(v => Math.abs(v - d) > Math.max(tol, d * 0.05))) return null;
 
-    // Cross-check against the area an offset of d would produce (exact to
-    // second order for a convex outline: A' = A - P·d + πd²).
-    const area = Math.abs(loopArea(bottom[i].outer));
-    const predicted = area - loopPerimeter(bottom[i].outer) * d + Math.PI * d * d;
-    if (Math.abs(predicted - Math.abs(loopArea(top[i].outer))) > Math.max(area * 0.05, tol * tol)) return null;
+    // Cross-check against the area an offset of d would produce:
+    // A' = A - P·d + k·d², where k = π for rounded corners and k = 4 for sharp/miter corners.
+    const area = Math.abs(loopArea(bReg.outer));
+    const perim = loopPerimeter(bReg.outer);
+    const actualTopArea = Math.abs(loopArea(tReg.outer));
+    const predRound = area - perim * d + Math.PI * d * d;
+    const predMiter = area - perim * d + 4 * d * d;
+    const areaErr = Math.min(Math.abs(predRound - actualTopArea), Math.abs(predMiter - actualTopArea));
+    if (areaErr > Math.max(area * 0.05, tol * tol)) return null;
 
     if (delta === null) delta = d;
     else if (Math.abs(delta - d) > Math.max(tol, delta * 0.05)) return null;
+
+    // Holes must either remain unchanged (straight bore through a chamfered
+    // outer edge) or expand uniformly outwards by the same chamfer offset `d`.
+    if (bReg.holes.length > 0) {
+      const holePairs = pairByNearestCenter(bReg.holes, tReg.holes, loopSignature);
+      if (!holePairs) return null;
+      for (const [bHole, tHole] of holePairs) {
+        const bSig = loopSignature(bHole);
+        const tSig = loopSignature(tHole);
+        if (loopsMatch(bSig, tSig, tol)) continue;
+        // Uniform outward expansion of a hole by `d`:
+        const hdxLo = bSig.bounds.min[0] - tSig.bounds.min[0];
+        const hdxHi = tSig.bounds.max[0] - bSig.bounds.max[0];
+        const hdyLo = bSig.bounds.min[1] - tSig.bounds.min[1];
+        const hdyHi = tSig.bounds.max[1] - bSig.bounds.max[1];
+        const holeTol = Math.max(tol, d * 0.05);
+        if ([hdxLo, hdxHi, hdyLo, hdyHi].some(v => Math.abs(v - d) > holeTol)) return null;
+        const hPredRound = bSig.area + bSig.perimeter * d + Math.PI * d * d;
+        const hPredMiter = bSig.area + bSig.perimeter * d + 4 * d * d;
+        const hAreaErr = Math.min(Math.abs(hPredRound - tSig.area), Math.abs(hPredMiter - tSig.area));
+        if (hAreaErr > Math.max(bSig.area * 0.05, tol * tol)) return null;
+      }
+    }
   }
   return delta;
 }
