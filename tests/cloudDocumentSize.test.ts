@@ -27,6 +27,7 @@ vi.mock('../src/utils/apiClient', () => ({
   getStoredAuthToken: () => 'token',
   putCloudDocument: (...args: unknown[]) => putCloudDocument(...(args as [])),
   fetchCloudDocument: async () => { throw new FakeApiError('nope', 404); },
+  deleteCloudDocument: async () => true,
   PhysBoxApiError: FakeApiError,
 }));
 
@@ -55,6 +56,8 @@ describe('cloud autosave size gate', () => {
 
   it('refuses to upload a document bigger than the account takes, and says so plainly', async () => {
     const { cloudAutosave } = await import('../src/utils/cloudDocuments');
+    // Edited work: autosave never writes a scene nobody has touched.
+    cloudAutosave.connectDocument(() => true, () => {});
 
     cloudAutosave.schedule('relief', documentOfSize(40 * MB));
     await vi.advanceTimersByTimeAsync(300000);
@@ -70,6 +73,8 @@ describe('cloud autosave size gate', () => {
 
   it('starts saving again once the document is small enough, without a reload', async () => {
     const { cloudAutosave } = await import('../src/utils/cloudDocuments');
+    // Edited work: autosave never writes a scene nobody has touched.
+    cloudAutosave.connectDocument(() => true, () => {});
 
     cloudAutosave.schedule('relief', documentOfSize(40 * MB));
     await vi.advanceTimersByTimeAsync(300000);
@@ -84,6 +89,8 @@ describe('cloud autosave size gate', () => {
 
   it('uploads a relief-sized document, on a slower clock than a small one', async () => {
     const { cloudAutosave } = await import('../src/utils/cloudDocuments');
+    // Edited work: autosave never writes a scene nobody has touched.
+    cloudAutosave.connectDocument(() => true, () => {});
 
     cloudAutosave.schedule('relief', documentOfSize(20 * MB));
 

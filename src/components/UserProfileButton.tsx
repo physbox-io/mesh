@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useReducer, useState } from 'react';
-import { AccountMenu, useAccountSession, type AccountSignIn } from '@physbox-io/ui';
+import { AccountMenu, CloudSaveStatus, useAccountSession, type AccountSignIn } from '@physbox-io/ui';
 import { getStoredUser, getStoredAuthToken, clearStoredAuth, fetchCurrentUser } from '../utils/apiClient';
 import { signInWithGooglePopup, disableGoogleAutoSelect } from '../utils/googleAuth';
 import { pullCloudState } from '../utils/cloudSync';
@@ -8,7 +8,7 @@ import { useStore } from '../store/useStore';
 import { webSerialManager } from '../utils/webSerialManager';
 import { RemoteMachiningModal } from './RemoteMachiningModal';
 import { JobHistoryModal } from './JobHistoryModal';
-import { CloudSaveStatus } from './CloudSaveStatus';
+import { cloudAutosave } from '../utils/cloudDocuments';
 import { GuestListModal } from './GuestListModal';
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -121,7 +121,7 @@ export const UserProfileButton: React.FC = () => {
         <JobHistoryModal isOpen={showHistoryModal} onClose={() => setShowHistoryModal(false)} />
       )}
       {/* Always on screen, so it hosts the auto-save status, which portals itself into a corner. */}
-      <CloudSaveStatus />
+      <CloudSaveStatus autosave={cloudAutosave} accentClassName="bg-cyan-600 hover:bg-cyan-500" />
       {showGuestModal && (
         <GuestListModal
           isOpen={showGuestModal}
