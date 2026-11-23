@@ -201,6 +201,24 @@ export interface TwoBodyImpactResult {
  * suspension strings/rods whenever colliding geoms exist.
  */
 function collectAcousticSubtree(node: SceneNode): { geoms: SceneGeom[]; materialHost: SceneNode } {
+  // Fast zero-wrapper path for leaf nodes (95%+ of bodies)
+  if (!node.children || node.children.length === 0) {
+    const raw = node.geoms;
+    if (!raw || raw.length === 0) return { geoms: [], materialHost: node };
+    const colliding: SceneGeom[] = [];
+    const allSolid: SceneGeom[] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const g = raw[i];
+      if (g.csgDerived || g.csg === 'difference' || g.role === 'visual' || g.type === 'plane') continue;
+      allSolid.push(g);
+      if (!(g.contype === 0 && g.conaffinity === 0)) colliding.push(g);
+    }
+    return {
+      geoms: colliding.length > 0 ? colliding : allSolid,
+      materialHost: node,
+    };
+  }
+
   const colliding: { geom: SceneGeom; host: SceneNode }[] = [];
   const allSolid: { geom: SceneGeom; host: SceneNode }[] = [];
 
@@ -240,17 +258,22 @@ const MATERIAL_Q_BY_ID: Record<string, { q: number; brightness: number }> = {
   rubber: { q: 18, brightness: 0.16 },
 };
 
-export function inferAcousticMaterial(node: SceneNode): AcousticMaterialProps {
+function inferAcousticMaterialWithSubtree(
+  node: SceneNode,
+): { mat: AcousticMaterialProps; geoms: SceneGeom[] } {
   const { geoms, materialHost } = collectAcousticSubtree(node);
   const dm = deformMaterial(node.deformMaterial ?? materialHost.deformMaterial);
   if (dm) {
     const qInfo = MATERIAL_Q_BY_ID[dm.id] ?? { q: 80, brightness: 0.5 };
     return {
-      label: dm.label,
-      density: node.density ?? materialHost.density ?? dm.density,
-      modulusGPa: dm.strength.modulusGPa,
-      qualityQ: qInfo.q,
-      brightness: qInfo.brightness,
+      geoms,
+      mat: {
+        label: dm.label,
+        density: node.density ?? materialHost.density ?? dm.density,
+        modulusGPa: dm.strength.modulusGPa,
+        qualityQ: qInfo.q,
+        brightness: qInfo.brightness,
+      },
     };
   }
   const firstSolid = geoms[0];
@@ -262,24 +285,28 @@ export function inferAcousticMaterial(node: SceneNode): AcousticMaterialProps {
   const stiffContact = (firstSolid?.solref?.[0] ?? 0) <= -3500;
   const rho = node.density ?? materialHost.density ?? firstSolid?.density ?? impliedRho ?? (stiffContact ? 7800 : 1150);
   if (node.hardwarePart || materialHost.hardwarePart || rho >= 5500) {
-    return { label: 'Steel', density: Math.min(8500, Math.max(7500, rho)), modulusGPa: 200, qualityQ: 920, brightness: 0.94 };
+    return { geoms, mat: { label: 'Steel', density: Math.min(8500, Math.max(7500, rho)), modulusGPa: 200, qualityQ: 920, brightness: 0.94 } };
   }
   if (rho >= 2550) {
-    return { label: 'Aluminium / Alloy', density: rho, modulusGPa: 69, qualityQ: 760, brightness: 0.84 };
+    return { geoms, mat: { label: 'Aluminium / Alloy', density: rho, modulusGPa: 69, qualityQ: 760, brightness: 0.84 } };
   }
   if (rho >= 2100) {
-    return { label: 'Glass / Ceramic', density: rho, modulusGPa: 70, qualityQ: 540, brightness: 0.92 };
+    return { geoms, mat: { label: 'Glass / Ceramic', density: rho, modulusGPa: 70, qualityQ: 540, brightness: 0.92 } };
   }
   if (rho >= 550 && rho <= 920) {
-    return { label: 'Hardwood', density: rho, modulusGPa: 12.5, qualityQ: 190, brightness: 0.46 };
+    return { geoms, mat: { label: 'Hardwood', density: rho, modulusGPa: 12.5, qualityQ: 190, brightness: 0.46 } };
   }
   if (rho < 550) {
-    return { label: 'Softwood', density: rho, modulusGPa: 9.0, qualityQ: 115, brightness: 0.42 };
+    return { geoms, mat: { label: 'Softwood', density: rho, modulusGPa: 9.0, qualityQ: 115, brightness: 0.42 } };
   }
   if (stiffContact) {
-    return { label: 'Hard Acrylic / Phenolic', density: rho, modulusGPa: 6.5, qualityQ: 120, brightness: 0.78 };
+    return { geoms, mat: { label: 'Hard Acrylic / Phenolic', density: rho, modulusGPa: 6.5, qualityQ: 120, brightness: 0.78 } };
   }
-  return { label: 'Polymer', density: rho, modulusGPa: 2.8, qualityQ: 45, brightness: 0.36 };
+  return { geoms, mat: { label: 'Polymer', density: rho, modulusGPa: 2.8, qualityQ: 45, brightness: 0.36 } };
+}
+
+export function inferAcousticMaterial(node: SceneNode): AcousticMaterialProps {
+  return inferAcousticMaterialWithSubtree(node).mat;
 }
 
 /**
@@ -302,8 +329,7 @@ export function inferColliderContactProps(
     };
   }
 
-  const mat = inferAcousticMaterial(node);
-  const { geoms } = collectAcousticSubtree(node);
+  const { mat, geoms } = inferAcousticMaterialWithSubtree(node);
   const hitGeom = (geomName
     ? geoms.find((g) => g.name === geomName) ?? (node.geoms ?? []).find((g) => g.name === geomName)
     : undefined) ?? geoms[0];
@@ -551,7 +577,7 @@ export function estimateBodyModes(
     }
   }
 
-  const mat = inferAcousticMaterial(node);
+  const { mat, geoms } = inferAcousticMaterialWithSubtree(node);
   const E = mat.modulusGPa * 1e9;
   const rho = Math.max(50, mat.density);
   const cLong = Math.sqrt(E / rho);
@@ -559,8 +585,8 @@ export function estimateBodyModes(
   const section = analyze3DSolidCrossSections(node);
   const [hMin, bMid, lMax] = section.dimsSortedAsc;
   const [, , lenAxis] = section.axisOrderAsc;
-  const { geoms } = collectAcousticSubtree(node);
   const primaryGeom = geoms[0];
+  let cachedCav: ReturnType<typeof analyze3DCavityAndPorts> | null = null;
 
   // Detect non-uniform cross-section (arches, sculpted bumps, holes, tapers)
   let minInteriorA = Infinity;
@@ -660,6 +686,7 @@ export function estimateBodyModes(
     regime = 'plate';
     const hWall = Math.max(0.001, section.meanWallThicknessM);
     const cav = analyze3DCavityAndPorts(node);
+    cachedCav = cav;
     const rShell = 0.25 * (lMax + bMid);
     // Rayleigh flexural shell / bell ring fundamental: f ∝ (h_wall / R_shell²) * c_L
     const fShell1 = Math.max(55, Math.min(6500, 0.21 * (hWall / Math.max(0.0016, rShell * rShell)) * cLong));
@@ -743,7 +770,7 @@ export function estimateBodyModes(
     (node.geoms ?? []).some(
       (g) => g.csg === 'difference' && g.name !== 'luthier_arch' && g.name !== 'nodal_hole',
     );
-  const cavityCheck = mightHaveCavity ? analyze3DCavityAndPorts(node) : null;
+  const cavityCheck = cachedCav ?? (mightHaveCavity ? analyze3DCavityAndPorts(node) : null);
   const hasAcousticCavity =
     isJoinedPanelBox ||
     section.hollowFraction >= 0.18 ||
@@ -1261,6 +1288,9 @@ export function unlockAudioContext(): AudioContext | null {
     const src = ctx.createBufferSource();
     src.buffer = silent;
     src.connect(ctx.destination);
+    src.onended = () => {
+      try { src.disconnect(); } catch { /* ignore */ }
+    };
     src.start(0);
   } catch {
     // Ignore in headless/mock contexts

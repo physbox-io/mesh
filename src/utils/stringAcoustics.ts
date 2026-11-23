@@ -50,6 +50,11 @@ import {
 
 const SPEED_OF_SOUND_AIR = 343; // m/s at 20 °C
 const LN_10000 = Math.log(10000); // -80 dB modal envelope decay factor (~9.21034)
+const SYMP_Q_POW_NEG_045 = Float64Array.from({ length: 13 }, (_, q) => (q > 0 ? Math.pow(q, -0.45) : 1));
+
+function roundN(v: number, scale: number): number {
+  return Math.round(v * scale) / scale;
+}
 
 export interface StringMaterialProps {
   id: StringMaterialId;
@@ -641,7 +646,7 @@ function doesChildBearOnHost(
   const maxTouchGap = Math.max(0.006, 0.015 * hostExtent);
 
   const oVec = new THREE.Vector3();
-  const dVec = new THREE.Vector3();
+  const e = childMat.elements;
   // Test Z first (fast 1-ray short-circuit on standard top-mounted bridges), then X and Y for vertical/rotated soundboxes
   const axes: (0 | 1 | 2)[] = [2, 0, 1];
   for (const axis of axes) {
@@ -654,14 +659,11 @@ function doesChildBearOnHost(
     const dxC = axis === 0 ? 1 : 0;
     const dyC = axis === 1 ? 1 : 0;
     const dzC = axis === 2 ? 1 : 0;
-    dVec.set(dxC, dyC, dzC).applyMatrix4(
-      new THREE.Matrix4().extractRotation(childMat),
-    );
-    // Account for any scale in childMat
-    const e = childMat.elements;
-    const sx = dxC * e[0] + dyC * e[4] + dzC * e[8];
-    const sy = dxC * e[1] + dyC * e[5] + dzC * e[9];
-    const sz = dxC * e[2] + dyC * e[6] + dzC * e[10];
+    // Account for rotation & any scale in childMat directly without allocating Matrix4
+    const colOff = axis * 4;
+    const sx = e[colOff];
+    const sy = e[colOff + 1];
+    const sz = e[colOff + 2];
     const dirScale = Math.hypot(sx, sy, sz) || 1;
     const dhx = sx / dirScale;
     const dhy = sy / dirScale;
@@ -977,10 +979,8 @@ function resolveResonatorHost(node: SceneNode, sceneNodes?: SceneNode[]): SceneN
   return resonatorNode;
 }
 
-function resolveCoupledSoundboxAndSpan(
-  node: SceneNode,
-  sceneNodes?: SceneNode[],
-): {
+interface CoupledSoundboxResult {
+  cacheKey: string;
   resonatorNode: SceneNode | null;
   soundbox: SoundboxResonance | null;
   bridgeCoupling: number;
@@ -990,28 +990,92 @@ function resolveCoupledSoundboxAndSpan(
   bridgeHillHz: number;
   bridgeHillGainDb: number;
   vibroIr: VibroAcousticIRResult | null;
-} {
+}
+
+const coupledSoundboxCache = new Map<string, CoupledSoundboxResult>();
+const MAX_COUPLED_SOUNDBOX_CACHE = 128;
+
+function fastGeomListSig(n: SceneNode): string {
+  let out = `${n.id}|${n.pos?.[0] ?? 0},${n.pos?.[1] ?? 0},${n.pos?.[2] ?? 0}|${n.quat ? n.quat.join(',') : ''}|${n.euler ? n.euler.join(',') : ''}|${n.deformMaterial ?? ''}|${n.density ?? ''}|${n.mass ?? ''}|${n.sculptVersion ?? 0}|${n.sculptEdited ? 1 : 0}|${n.csgEnabled === false ? 0 : 1}`;
+  const geoms = n.geoms;
+  if (geoms && geoms.length > 0) {
+    for (let i = 0; i < geoms.length; i++) {
+      const g = geoms[i];
+      if (g.csgDerived || g.role === 'visual' || g.type === 'plane') continue;
+      out += `;${g.name ?? ''}:${g.type}:${g.csg ?? ''}:${g.size ? g.size.join(',') : ''}:${g.pos ? g.pos.join(',') : ''}:${g.quat ? g.quat.join(',') : ''}:${g.euler ? g.euler.join(',') : ''}:${g.fromto ? g.fromto.join(',') : ''}:${g.contype ?? ''}:${g.conaffinity ?? ''}:${g.renderVertices?.length ?? g.vertices?.length ?? 0}:${g.faces?.length ?? 0}`;
+    }
+  }
+  return out;
+}
+
+function buildCoupledSoundboxCacheKey(
+  stringNode: SceneNode,
+  resonatorNode: SceneNode,
+  sceneNodes: SceneNode[],
+): string {
+  let key = `${fastGeomListSig(stringNode)}||${fastGeomListSig(resonatorNode)}`;
+  let isDirectChild = false;
+  const children = resonatorNode.children;
+  if (children && children.length > 0) {
+    for (let i = 0; i < children.length; i++) {
+      const ch = children[i];
+      if (ch.id === stringNode.id) {
+        isDirectChild = true;
+        continue;
+      }
+      if (ch.acousticString || (ch.joints?.length ?? 0) > 0) continue;
+      key += `|C:${fastGeomListSig(ch)}`;
+    }
+  }
+  if (!isDirectChild) {
+    const hw = resolveWorldMatrixWithOverride(resonatorNode, sceneNodes) ?? nodeLocalMatrix(resonatorNode);
+    const sw = resolveWorldMatrixWithOverride(stringNode, sceneNodes) ?? nodeLocalMatrix(stringNode);
+    const rel = hw.clone().invert().multiply(sw).elements;
+    key += `|R:${rel[0].toFixed(4)},${rel[1].toFixed(4)},${rel[2].toFixed(4)},${rel[4].toFixed(4)},${rel[5].toFixed(4)},${rel[6].toFixed(4)},${rel[8].toFixed(4)},${rel[9].toFixed(4)},${rel[10].toFixed(4)},${rel[12].toFixed(5)},${rel[13].toFixed(5)},${rel[14].toFixed(5)}`;
+  }
+  return key;
+}
+
+const EMPTY_COUPLED_SOUNDBOX: CoupledSoundboxResult = {
+  cacheKey: '',
+  resonatorNode: null,
+  soundbox: null,
+  bridgeCoupling: 0,
+  vibratingSpanFraction: 1.0,
+  speakingSpanBounds: [0, 1],
+  bridgeDrivePoint: [0, 0, 0],
+  bridgeHillHz: 2000,
+  bridgeHillGainDb: 0,
+  vibroIr: null,
+};
+
+function resolveCoupledSoundboxAndSpan(
+  node: SceneNode,
+  sceneNodes?: SceneNode[],
+): CoupledSoundboxResult {
   const spec = node.acousticString;
-  const empty = {
-    resonatorNode: null,
-    soundbox: null,
-    bridgeCoupling: 0,
-    vibratingSpanFraction: 1.0,
-    speakingSpanBounds: [0, 1] as [number, number],
-    bridgeDrivePoint: [0, 0, 0] as [number, number, number],
-    bridgeHillHz: 2000,
-    bridgeHillGainDb: 0,
-    vibroIr: null,
-  };
-  if (!spec || !sceneNodes?.length) return empty;
+  if (!spec || !sceneNodes?.length) return EMPTY_COUPLED_SOUNDBOX;
 
   const resonatorNode = resolveResonatorHost(node, sceneNodes);
-  if (!resonatorNode) return empty;
+  if (!resonatorNode) return EMPTY_COUPLED_SOUNDBOX;
+
+  const cacheKey = buildCoupledSoundboxCacheKey(node, resonatorNode, sceneNodes);
+  const cached = coupledSoundboxCache.get(cacheKey);
+  if (cached) {
+    coupledSoundboxCache.delete(cacheKey);
+    coupledSoundboxCache.set(cacheKey, cached);
+    return cached;
+  }
 
   const support = measurePhysicalStringSupport(node, resonatorNode, sceneNodes);
   if (support.bridgeCoupling <= 0.02) {
     // Floating string disconnected from bridge/nut: zero mechanical coupling to soundbox!
-    return empty;
+    if (coupledSoundboxCache.size >= MAX_COUPLED_SOUNDBOX_CACHE) {
+      const oldest = coupledSoundboxCache.keys().next().value;
+      if (oldest !== undefined) coupledSoundboxCache.delete(oldest);
+    }
+    coupledSoundboxCache.set(cacheKey, EMPTY_COUPLED_SOUNDBOX);
+    return EMPTY_COUPLED_SOUNDBOX;
   }
 
   // Solve actual 3D solid eigenmodes of the standing bridge (`support.bridgeNode`) if present!
@@ -1019,8 +1083,8 @@ function resolveCoupledSoundboxAndSpan(
   let bridgeHillGainDb = 0;
   if (support.bridgeNode) {
     const bridgeModes = estimateBodyModes(support.bridgeNode);
-    bridgeHillHz = +Math.max(350, Math.min(5500, bridgeModes.fundamentalHz)).toFixed(1);
-    bridgeHillGainDb = +(Math.min(5.2, 1.2 + 7.5 * bridgeModes.material.brightness) * support.bridgeCoupling).toFixed(2);
+    bridgeHillHz = roundN(Math.max(350, Math.min(5500, bridgeModes.fundamentalHz)), 10);
+    bridgeHillGainDb = roundN(Math.min(5.2, 1.2 + 7.5 * bridgeModes.material.brightness) * support.bridgeCoupling, 100);
   }
 
   // Run (cached ~4 ms) 3D coupled FDTD air-cavity + Kirchhoff shell impulse-response simulation
@@ -1040,10 +1104,11 @@ function resolveCoupledSoundboxAndSpan(
     ? baseRes
     : {
         ...baseRes,
-        radiationGain: +(0.22 + (baseRes.radiationGain - 0.22) * support.bridgeCoupling).toFixed(3),
+        radiationGain: roundN(0.22 + (baseRes.radiationGain - 0.22) * support.bridgeCoupling, 1000),
       };
 
-  return {
+  const result: CoupledSoundboxResult = {
+    cacheKey,
     resonatorNode,
     soundbox: scaledSoundbox,
     bridgeCoupling: support.bridgeCoupling,
@@ -1054,6 +1119,13 @@ function resolveCoupledSoundboxAndSpan(
     bridgeHillGainDb,
     vibroIr,
   };
+
+  if (coupledSoundboxCache.size >= MAX_COUPLED_SOUNDBOX_CACHE) {
+    const oldest = coupledSoundboxCache.keys().next().value;
+    if (oldest !== undefined) coupledSoundboxCache.delete(oldest);
+  }
+  coupledSoundboxCache.set(cacheKey, result);
+  return result;
 }
 
 /**
@@ -1264,7 +1336,7 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
 
     // Pure string Helmholtz stick-slip harmonics (fed directly into the 3D Vibro-Acoustic ConvolverNode!)
     const pureStrW = (1 / n) * cornerRoll * bowComb * ponticelloTilt * ribbonSinc * raucousBoost;
-    stringHarmonicWeights[n - 1] = +Math.min(1.6, pureStrW).toFixed(4);
+    stringHarmonicWeights[n - 1] = roundN(pureStrW < 1.6 ? pureStrW : 1.6, 10000);
 
     // Diagnostic / fallback composite weights
     let boxGain = 0.50;
@@ -1286,7 +1358,8 @@ export function solveBowedStringVoice(input: BowedStringContactInput): BowedStri
       }
       boxGain = Math.min(2.1, boxH * 0.62 * soundbox.radiationGain);
     }
-    harmonicWeights[n - 1] = +Math.min(1.6, pureStrW * boxGain).toFixed(4);
+    const colW = pureStrW * boxGain;
+    harmonicWeights[n - 1] = roundN(colW < 1.6 ? colW : 1.6, 10000);
   }
 
   // Blend analytical Skudrzyk radiation gain with measured 3D FDTD radiation RMS efficiency!
@@ -1429,6 +1502,9 @@ export function computePluckPitchDroop(
   };
 }
 
+const baseStringEvalCache = new Map<string, StringEvaluation>();
+const MAX_BASE_STRING_EVAL_CACHE = 64;
+
 /**
  * Evaluates a taut string's Mersenne + Fletcher stiff-string modes, breaking-stress safety,
  * coupled 3D soundbox resonance, un-colored `rawStringModes` (for double-filter-free 3D FIR convolution),
@@ -1442,8 +1518,20 @@ export function evaluateTautString(
   const spec = node.acousticString;
   if (!spec) return null;
 
-  const mat = resolveStringMaterial(spec.material);
   const coupled = resolveCoupledSoundboxAndSpan(node, sceneNodes);
+  let evalCacheKey: string | null = null;
+  if (!impactCtx) {
+    const geomSig = coupled.cacheKey ? '' : fastGeomListSig(node);
+    evalCacheKey = `${coupled.cacheKey}|${geomSig}|${spec.material}|${spec.diameterMm}|${spec.tensionN}|${spec.pluckPos ?? ''}|${spec.nonlinearPitchDroop ?? ''}|${sceneNodes?.length ? 1 : 0}`;
+    const cachedEval = baseStringEvalCache.get(evalCacheKey);
+    if (cachedEval) {
+      baseStringEvalCache.delete(evalCacheKey);
+      baseStringEvalCache.set(evalCacheKey, cachedEval);
+      return cachedEval;
+    }
+  }
+
+  const mat = resolveStringMaterial(spec.material);
   const soundbox = coupled.soundbox;
   const stopFrac =
     impactCtx?.stoppedLengthFraction !== undefined && Number.isFinite(impactCtx.stoppedLengthFraction)
@@ -1609,7 +1697,7 @@ export function evaluateTautString(
     bodyIrSig: coupled.vibroIr?.signature ?? '',
   };
 
-  return {
+  const result: StringEvaluation = {
     lengthM: +lengthM.toFixed(4),
     fundamentalHz: +fundamentalHz.toFixed(2),
     inharmonicityB: +inharmonicityB.toExponential(3),
@@ -1627,6 +1715,14 @@ export function evaluateTautString(
     soundbox,
     profile,
   };
+  if (evalCacheKey !== null) {
+    if (baseStringEvalCache.size >= MAX_BASE_STRING_EVAL_CACHE) {
+      const oldest = baseStringEvalCache.keys().next().value;
+      if (oldest !== undefined) baseStringEvalCache.delete(oldest);
+    }
+    baseStringEvalCache.set(evalCacheKey, result);
+  }
+  return result;
 }
 
 function collectStringNodes(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
@@ -1685,6 +1781,22 @@ export function solveSympatheticStringCoupling(
     ? Math.min(0.032, 1 / Math.max(25, 2.31 * hostMat.density * cLong * hTopM * hTopM))
     : 0.0018;
 
+  // Hoist soundbox transfer magnitude `hBox` per source partial ONCE (previously recomputed N_siblings * 12 times!)
+  const nSrcPartials = sourcePartials.length;
+  const srcPartialHBox = new Float64Array(nSrcPartials);
+  for (let i = 0; i < nSrcPartials; i++) {
+    const fSp = sourcePartials[i].freqHz;
+    let hBox = resonatorTransferGain(fSp, soundbox.topPlateHz, 8.0, 2.8);
+    hBox *= resonatorTransferGain(fSp, soundbox.bodyModeHz, 9.0, 1.8);
+    if (soundbox.helmholtzHz !== null) {
+      hBox *= resonatorTransferGain(fSp, soundbox.helmholtzHz, soundbox.helmholtzQ, 3.6);
+    }
+    if (srcCoupled.bridgeHillGainDb > 0.1) {
+      hBox *= resonatorTransferGain(fSp, srcCoupled.bridgeHillHz, 3.2, srcCoupled.bridgeHillGainDb * 0.4);
+    }
+    srcPartialHBox[i] = hBox < 3.6 ? hBox : 3.6;
+  }
+
   const allStrings = collectStringNodes(sceneNodes);
   const targets: SympatheticStringTarget[] = [];
 
@@ -1698,11 +1810,10 @@ export function solveSympatheticStringCoupling(
     const candEval = evaluateTautString(cand, sceneNodes);
     if (!candEval || candEval.bridgeCoupling <= 0.05) continue;
 
-    const distBridgeM = Math.hypot(
-      srcCoupled.bridgeDrivePoint[0] - candEval.bridgeDrivePoint[0],
-      srcCoupled.bridgeDrivePoint[1] - candEval.bridgeDrivePoint[1],
-      srcCoupled.bridgeDrivePoint[2] - candEval.bridgeDrivePoint[2],
-    );
+    const dxB = srcCoupled.bridgeDrivePoint[0] - candEval.bridgeDrivePoint[0];
+    const dyB = srcCoupled.bridgeDrivePoint[1] - candEval.bridgeDrivePoint[1];
+    const dzB = srcCoupled.bridgeDrivePoint[2] - candEval.bridgeDrivePoint[2];
+    const distBridgeM = Math.sqrt(dxB * dxB + dyB * dyB + dzB * dzB);
     const spatialBridgeTransfer = Math.exp(-distBridgeM / 0.18);
 
     const candMat = resolveStringMaterial(cand.acousticString!.material);
@@ -1711,11 +1822,13 @@ export function solveSympatheticStringCoupling(
     const candMu = candMat.densityKgM3 * Math.PI * candRadiusM * candRadiusM;
     const candF0Mersenne = Math.sqrt(candTensionN / candMu) / (2 * candEval.lengthM);
     const candB =
-      (Math.pow(Math.PI, 3) * candMat.modulusGPa * 1e9 * Math.pow(candRadiusM, 4)) /
+      (Math.PI * Math.PI * Math.PI * candMat.modulusGPa * 1e9 * candRadiusM * candRadiusM * candRadiusM * candRadiusM) /
       (4 * candTensionN * candEval.lengthM * candEval.lengthM);
 
     const zGeomMean = Math.sqrt(srcEval.waveImpedanceZ0 * candEval.waveImpedanceZ0);
     const bridgeLoadFactor = Math.max(0.68, 1.0 - 0.18 * soundbox.radiationGain);
+    const baseKappaFactor =
+      (srcCoupled.bridgeCoupling * candEval.bridgeCoupling * zGeomMean * y0Plate * spatialBridgeTransfer) / Math.PI;
 
     const sympModes: PluckedModalVoice[] = [];
     const sympRawModes: PluckedModalVoice[] = [];
@@ -1727,32 +1840,21 @@ export function solveSympatheticStringCoupling(
 
       const partialQ = (candMat.intrinsicQ * bridgeLoadFactor) / (1 + 0.22 * (q - 1) * (q - 1));
       // Lorentzian capture half-width combines intrinsic damping f/(2Q) and temperament/vibrato lock bandwidth (0.45% ≈ 7.8 cents)
-      const gammaHz = Math.hypot(fq / (2 * Math.max(20, partialQ)), 0.0045 * fq);
-      const gammaSq = gammaHz * gammaHz;
+      const g1 = fq / (2 * Math.max(20, partialQ));
+      const g2 = 0.0045 * fq;
+      const gammaSq = g1 * g1 + g2 * g2;
+      const qPow = SYMP_Q_POW_NEG_045[q];
 
       let energySum = 0;
-      for (const sp of sourcePartials) {
+      for (let i = 0; i < nSrcPartials; i++) {
+        const sp = sourcePartials[i];
         const df = sp.freqHz - fq;
         const lorentz = gammaSq / (df * df + gammaSq);
         if (lorentz < 0.015) continue;
 
-        let hBox = resonatorTransferGain(sp.freqHz, soundbox.topPlateHz, 8.0, 2.8);
-        hBox *= resonatorTransferGain(sp.freqHz, soundbox.bodyModeHz, 9.0, 1.8);
-        if (soundbox.helmholtzHz !== null) {
-          hBox *= resonatorTransferGain(sp.freqHz, soundbox.helmholtzHz, soundbox.helmholtzQ, 3.6);
-        }
-        if (srcCoupled.bridgeHillGainDb > 0.1) {
-          hBox *= resonatorTransferGain(sp.freqHz, srcCoupled.bridgeHillHz, 3.2, srcCoupled.bridgeHillGainDb * 0.4);
-        }
-
-        const kappa =
-          srcCoupled.bridgeCoupling *
-          candEval.bridgeCoupling *
-          ((zGeomMean * y0Plate * Math.min(3.6, hBox)) / Math.PI) *
-          spatialBridgeTransfer;
-
-        // Calibrated so a coincident cello partial (Z0 ~ 0.1 kg/s, 4 mm spruce top) transfers ~-26 dB sympathetic amplitude
-        const transferAmp = sp.gain * Math.min(0.26, 180.0 * kappa) * lorentz * Math.pow(q, -0.45);
+        const kappa = baseKappaFactor * srcPartialHBox[i];
+        const scaledKappa = 180.0 * kappa;
+        const transferAmp = sp.gain * (scaledKappa < 0.26 ? scaledKappa : 0.26) * lorentz * qPow;
         energySum += transferAmp * transferAmp;
       }
 
@@ -1767,19 +1869,21 @@ export function solveSympatheticStringCoupling(
       coloredSympGain *= Math.min(2.0, outBox * 0.65 * soundbox.radiationGain);
 
       const decaySec = Math.max(0.08, Math.min(5.5, (partialQ / (Math.PI * fq)) * 2.6));
-      const cleanRaw = +Math.min(0.35, rawSympGain).toFixed(4);
-      const cleanCol = +Math.min(0.42, Math.max(rawSympGain * 0.75, coloredSympGain)).toFixed(4);
+      const cleanRaw = roundN(Math.min(0.35, rawSympGain), 10000);
+      const cleanCol = roundN(Math.min(0.42, Math.max(rawSympGain * 0.75, coloredSympGain)), 10000);
       if (cleanCol > peakSympGain) peakSympGain = cleanCol;
 
+      const cleanFreq = roundN(fq, 100);
+      const cleanDecay = roundN(decaySec, 10000);
       sympRawModes.push({
-        freqHz: +fq.toFixed(2),
+        freqHz: cleanFreq,
         gain: cleanRaw,
-        decaySec: +decaySec.toFixed(4),
+        decaySec: cleanDecay,
       });
       sympModes.push({
-        freqHz: +fq.toFixed(2),
+        freqHz: cleanFreq,
         gain: cleanCol,
-        decaySec: +decaySec.toFixed(4),
+        decaySec: cleanDecay,
       });
     }
 
@@ -1789,7 +1893,7 @@ export function solveSympatheticStringCoupling(
         targetNodeId: cand.id,
         fundamentalHz: candEval.fundamentalHz,
         bridgeCoupling: candEval.bridgeCoupling,
-        couplingGain: +peakSympGain.toFixed(4),
+        couplingGain: roundN(peakSympGain, 10000),
         modes: sympModes,
         rawStringModes: sympRawModes,
         bodyIr: candEval.profile.bodyIr ?? null,

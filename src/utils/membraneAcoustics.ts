@@ -130,20 +130,26 @@ export const CIRCULAR_BESSEL_MODES: readonly CircularBesselMode[] = [
   { m: 2, n: 2, jmn: 8.41724414, peakAbsJm: 0.486499, airLoadingChi: 0.132, baseWeight: 0.22 },
 ];
 
+const BESSEL_FACTORIAL = [1, 1, 2, 6, 24, 120, 720, 5040];
+
 /** Evaluates Bessel function of the first kind J_m(x) for integer m >= 0 and x in [0, 16]. */
 export function besselJn(m: number, x: number): number {
-  const ax = Math.abs(x);
+  const ax = x < 0 ? -x : x;
   if (ax < 1e-12) return m === 0 ? 1 : 0;
-  let fact = 1;
-  for (let k = 2; k <= m; k++) fact *= k;
+  let fact = m < BESSEL_FACTORIAL.length ? BESSEL_FACTORIAL[m] : 1;
+  if (m >= BESSEL_FACTORIAL.length) {
+    for (let k = 2; k <= m; k++) fact *= k;
+  }
   const halfX = 0.5 * ax;
-  let term = Math.pow(halfX, m) / fact;
+  let term = (m === 0 ? 1 : m === 1 ? halfX : m === 2 ? halfX * halfX : Math.pow(halfX, m)) / fact;
   let sum = term;
   const negQuarterXSq = -halfX * halfX;
   for (let k = 1; k <= 28; k++) {
     term *= negQuarterXSq / (k * (k + m));
     sum += term;
-    if (Math.abs(term) < 1e-15 * Math.abs(sum)) break;
+    const absTerm = term < 0 ? -term : term;
+    const absSum = sum < 0 ? -sum : sum;
+    if (absTerm < 1e-15 * absSum) break;
   }
   return x < 0 && (m & 1) === 1 ? -sum : sum;
 }
@@ -238,21 +244,49 @@ function hasSiblingHeadOnShell(
   return found;
 }
 
+const closedAxialEndCache = new Map<string, boolean>();
+const MAX_CLOSED_AXIAL_CACHE = 128;
+
+function shellGeomFastSig(shellNode: SceneNode, normalAxis: 0 | 1 | 2): string {
+  let sig = `${shellNode.id}|${normalAxis}|${shellNode.isTube ? 1 : 0}|${shellNode.csgEnabled === false ? 0 : 1}|${shellNode.sculptVersion ?? 0}|${shellNode.sculptEdited ? 1 : 0}`;
+  const geoms = shellNode.geoms;
+  if (geoms) {
+    for (let i = 0; i < geoms.length; i++) {
+      const g = geoms[i];
+      if (g.csgDerived || g.role === 'visual' || g.type === 'plane') continue;
+      sig += `;${g.type}:${g.csg ?? ''}:${g.size ? g.size.join(',') : ''}:${g.pos ? g.pos.join(',') : ''}:${g.renderVertices?.length ?? g.vertices?.length ?? 0}`;
+    }
+  }
+  return sig;
+}
+
 function shellHasClosedAxialEnd(shellNode: SceneNode, normalAxis: 0 | 1 | 2): boolean {
   if (shellNode.isTube) return false;
+  const sig = shellGeomFastSig(shellNode, normalAxis);
+  const hit = closedAxialEndCache.get(sig);
+  if (hit !== undefined) return hit;
+
   const rayScene = buildBodyRayScene(shellNode, false) ?? buildBodyRayScene(shellNode, true);
-  if (!rayScene) return false;
-  const b = rayScene.bounds;
-  const org: [number, number, number] = [
-    0.5 * (b[0] + b[1]),
-    0.5 * (b[2] + b[3]),
-    0.5 * (b[4] + b[5]),
-  ];
-  org[normalAxis] = b[2 * normalAxis] - 0.05;
-  const dir: [number, number, number] = [0, 0, 0];
-  dir[normalAxis] = 1;
-  const ivs = castSceneRay(rayScene, org[0], org[1], org[2], dir[0], dir[1], dir[2]);
-  return ivs.length >= 1;
+  let closed = false;
+  if (rayScene) {
+    const b = rayScene.bounds;
+    const org: [number, number, number] = [
+      0.5 * (b[0] + b[1]),
+      0.5 * (b[2] + b[3]),
+      0.5 * (b[4] + b[5]),
+    ];
+    org[normalAxis] = b[2 * normalAxis] - 0.05;
+    const dir: [number, number, number] = [0, 0, 0];
+    dir[normalAxis] = 1;
+    const ivs = castSceneRay(rayScene, org[0], org[1], org[2], dir[0], dir[1], dir[2]);
+    closed = ivs.length >= 1;
+  }
+  if (closedAxialEndCache.size >= MAX_CLOSED_AXIAL_CACHE) {
+    const oldest = closedAxialEndCache.keys().next().value;
+    if (oldest !== undefined) closedAxialEndCache.delete(oldest);
+  }
+  closedAxialEndCache.set(sig, closed);
+  return closed;
 }
 
 function findParentNode(nodes: SceneNode[] | undefined, childId: string): SceneNode | null {
@@ -380,48 +414,26 @@ function inferMembranePlanform(
   };
 }
 
-/**
- * Evaluates a tensioned 2D circular or rectangular membrane (`node.acousticMembrane`),
- * including enclosed kettle / vented shell air coupling, strike-point modal weights,
- * nonlinear tension-modulation pitch drop, and snare wire rattle.
- */
-export function evaluateTensionedMembrane(
+interface ResolvedMembraneShellInfo {
+  plan: ReturnType<typeof inferMembranePlanform>;
+  shellNode: SceneNode | null;
+  hasShellCavity: boolean;
+  isClosedKettle: boolean;
+  isDualHeadOrVentedSnare: boolean;
+  shellVolumeM3: number;
+  shellDepthM: number;
+  shellHelmholtzHz: number | null;
+}
+
+function resolveMembraneShellInfo(
   node: SceneNode,
+  spec: AcousticMembraneSpec,
   sceneNodes?: SceneNode[],
-  strikeCtx?: MembraneStrikeContext,
-): MembraneEvaluation | null {
-  const spec = node.acousticMembrane;
-  if (!spec) return null;
-
-  const mat = MEMBRANE_MATERIALS[spec.material] ?? MEMBRANE_MATERIALS.mylar;
-  const thicknessMm = Number.isFinite(spec.thicknessMm) ? Math.max(0.04, Math.min(4.0, spec.thicknessMm)) : 0.25;
-  const h = thicknessMm * 1e-3;
-  const tensionNPerM = Number.isFinite(spec.tensionNPerM) ? Math.max(15, Math.min(80000, spec.tensionNPerM)) : 1800;
-
+): ResolvedMembraneShellInfo {
   const plan = inferMembranePlanform(node, spec);
   const { shape, radiusM: a, spanXM, spanYM } = plan;
   const areaM2 = shape === 'circular' ? Math.PI * a * a : spanXM * spanYM;
 
-  const E = mat.modulusGPa * 1e9;
-  const nu = mat.poisson;
-  const D = (E * h * h * h) / (12 * (1 - nu * nu));
-  const sigmaFilm = mat.densityKgM3 * h;
-  const waveSpeedMps = Math.sqrt(tensionNPerM / Math.max(1e-5, sigmaFilm));
-  const tensileStressMPa = (tensionNPerM / h) * 1e-6;
-  const stressRatio = tensileStressMPa / mat.ultimateStrengthMPa;
-
-  const warnings: string[] = [];
-  if (stressRatio >= 1.0) {
-    warnings.push(
-      `Head stress ${tensileStressMPa.toFixed(0)} MPa exceeds ${mat.label} tensile limit (${mat.ultimateStrengthMPa} MPa)`,
-    );
-  } else if (stressRatio >= 0.82) {
-    warnings.push(
-      `High head tension (${Math.round(stressRatio * 100)}% of ${mat.label} yield limit)`,
-    );
-  }
-
-  // Shell / kettle cavity coupling
   const snareAmount = Math.max(0, Math.min(1, spec.snareBuzz ?? 0));
   const shellNode = resolveCoupledDrumShell(node, spec, a, sceneNodes);
   let hasShellCavity = false;
@@ -445,24 +457,31 @@ export function evaluateTensionedMembrane(
     if (shellCav.hasHollowCavity && shellCav.cavityVolumeM3 > 1e-5) {
       hasShellCavity = true;
       shellVolumeM3 = shellCav.cavityVolumeM3;
-      // An open-top kettle bowl whose single wide rim opening (>= 35% of head area) is capped by this membrane
-      // AND whose opposite bottom end is closed (zero wide opposite openings, zero side vents, no snare wires)
-      // forms a sealed enclosed timpani kettle! Dual-head / vented cylindrical snare & tom shells do NOT seal air on (0,1).
-      const wideRimPorts = shellCav.ports.filter((p) => p.areaM2 >= 0.35 * areaM2);
-      const ventPorts = shellCav.ports.filter((p) => p.areaM2 < 0.35 * areaM2);
+      let wideRimPortCount = 0;
+      let ventPortCount = 0;
+      let ventConductance = 0;
+      const rimThresh = 0.35 * areaM2;
+      for (let i = 0; i < shellCav.ports.length; i++) {
+        const p = shellCav.ports[i];
+        if (p.areaM2 >= rimThresh) {
+          wideRimPortCount++;
+        } else {
+          ventPortCount++;
+          ventConductance += p.conductanceM;
+        }
+      }
       if (spec.kettleCoupling !== undefined) {
         isClosedKettle = spec.kettleCoupling >= 0.45 && hasClosedBottom;
       } else if (
         !isDualHeadOrVentedSnare &&
         hasClosedBottom &&
-        wideRimPorts.length <= 1 &&
-        ventPorts.length === 0
+        wideRimPortCount <= 1 &&
+        ventPortCount === 0
       ) {
         isClosedKettle = true;
       }
 
-      if (!isClosedKettle && ventPorts.length > 0) {
-        const ventConductance = ventPorts.reduce((acc, p) => acc + p.conductanceM, 0);
+      if (!isClosedKettle && ventPortCount > 0) {
         if (ventConductance > 0) {
           shellHelmholtzHz = (SPEED_OF_SOUND_AIR / (2 * Math.PI)) * Math.sqrt(ventConductance / shellVolumeM3);
         }
@@ -471,7 +490,6 @@ export function evaluateTensionedMembrane(
         shellHelmholtzHz = SPEED_OF_SOUND_AIR / (2 * (tubeDepth + 1.2266 * a));
       }
     } else if (shellCav.isOpenCupOrShell || shellNode.isTube || shellSec.hollowFraction >= 0.18) {
-      // Shallow open-top kettle bowl vs open-ended cylindrical snare / concert-tom ring:
       shellVolumeM3 = Math.max(1e-4, areaM2 * shellDepthM);
       hasShellCavity = true;
       if (spec.kettleCoupling !== undefined) {
@@ -480,17 +498,77 @@ export function evaluateTensionedMembrane(
         isClosedKettle = !isDualHeadOrVentedSnare && hasClosedBottom && !shellNode.isTube;
       }
       if (!isClosedKettle && !isDualHeadOrVentedSnare && (shellNode.isTube || !hasClosedBottom)) {
-        // Open-bottom concert tom / cylindrical shell: half-wave shell air resonance
         const tubeDepth = Math.max(0.08, shellNode.height ?? shellDepthM);
         shellHelmholtzHz = SPEED_OF_SOUND_AIR / (2 * (tubeDepth + 1.2266 * a));
       }
     }
   } else if (spec.kettleCoupling !== undefined && spec.kettleCoupling >= 0.45) {
-    // Explicit kettle coupling slider even without a separate shell body: virtual hemispherical kettle V = (2/3) π a³
     hasShellCavity = true;
     isClosedKettle = true;
     shellVolumeM3 = (2 / 3) * Math.PI * a * a * a;
   }
+
+  return {
+    plan,
+    shellNode,
+    hasShellCavity,
+    isClosedKettle,
+    isDualHeadOrVentedSnare,
+    shellVolumeM3,
+    shellDepthM,
+    shellHelmholtzHz,
+  };
+}
+
+function evaluateTensionedMembraneInternal(
+  node: SceneNode,
+  sceneNodes: SceneNode[] | undefined,
+  strikeCtx: MembraneStrikeContext | undefined,
+  preResolvedShell: ResolvedMembraneShellInfo | undefined,
+  skipShellIr: boolean,
+): MembraneEvaluation | null {
+  const spec = node.acousticMembrane;
+  if (!spec) return null;
+
+  const mat = MEMBRANE_MATERIALS[spec.material] ?? MEMBRANE_MATERIALS.mylar;
+  const thicknessMm = Number.isFinite(spec.thicknessMm) ? Math.max(0.04, Math.min(4.0, spec.thicknessMm)) : 0.25;
+  const h = thicknessMm * 1e-3;
+  const tensionNPerM = Number.isFinite(spec.tensionNPerM) ? Math.max(15, Math.min(80000, spec.tensionNPerM)) : 1800;
+
+  const resolved = preResolvedShell ?? resolveMembraneShellInfo(node, spec, sceneNodes);
+  const {
+    plan,
+    shellNode,
+    hasShellCavity,
+    isClosedKettle,
+    isDualHeadOrVentedSnare,
+    shellVolumeM3,
+    shellDepthM,
+    shellHelmholtzHz,
+  } = resolved;
+  const { shape, radiusM: a, spanXM, spanYM } = plan;
+  const areaM2 = shape === 'circular' ? Math.PI * a * a : spanXM * spanYM;
+
+  const E = mat.modulusGPa * 1e9;
+  const nu = mat.poisson;
+  const D = (E * h * h * h) / (12 * (1 - nu * nu));
+  const sigmaFilm = mat.densityKgM3 * h;
+  const waveSpeedMps = Math.sqrt(tensionNPerM / Math.max(1e-5, sigmaFilm));
+  const tensileStressMPa = (tensionNPerM / h) * 1e-6;
+  const stressRatio = tensileStressMPa / mat.ultimateStrengthMPa;
+
+  const warnings: string[] = [];
+  if (stressRatio >= 1.0) {
+    warnings.push(
+      `Head stress ${tensileStressMPa.toFixed(0)} MPa exceeds ${mat.label} tensile limit (${mat.ultimateStrengthMPa} MPa)`,
+    );
+  } else if (stressRatio >= 0.82) {
+    warnings.push(
+      `High head tension (${Math.round(stressRatio * 100)}% of ${mat.label} yield limit)`,
+    );
+  }
+
+  const snareAmount = Math.max(0, Math.min(1, spec.snareBuzz ?? 0));
 
   // On a dual-head vented snare/tom (`isDualHeadOrVentedSnare`), the bottom resonant head moves in phase with the
   // batter head on (0,1) (Rossing §3.2–3.5: zero net sealed-kettle air compression -> default kettleStrength = 0!).
@@ -649,12 +727,29 @@ export function evaluateTensionedMembrane(
     }
   }
 
-  // Sort modes ascending in frequency while keeping gains/Qs/spatial weights paired
-  const order = rawFreqsHz.map((_, i) => i).sort((i, j) => rawFreqsHz[i] - rawFreqsHz[j]);
-  const sortedFreqs = order.map((i) => rawFreqsHz[i]);
-  const sortedBaseGains = order.map((i) => rawBaseGains[i]);
-  const sortedQs = order.map((i) => rawModeQs[i]);
-  const sortedSpatial = order.map((i) => spatialWeights[i]);
+  // In-place insertion sort of 8 modes ascending in frequency (avoids 5 temporary array allocations per hit!)
+  for (let i = 1; i < rawFreqsHz.length; i++) {
+    const f = rawFreqsHz[i];
+    const g = rawBaseGains[i];
+    const q = rawModeQs[i];
+    const sp = spatialWeights[i];
+    let j = i - 1;
+    while (j >= 0 && rawFreqsHz[j] > f) {
+      rawFreqsHz[j + 1] = rawFreqsHz[j];
+      rawBaseGains[j + 1] = rawBaseGains[j];
+      rawModeQs[j + 1] = rawModeQs[j];
+      spatialWeights[j + 1] = spatialWeights[j];
+      j--;
+    }
+    rawFreqsHz[j + 1] = f;
+    rawBaseGains[j + 1] = g;
+    rawModeQs[j + 1] = q;
+    spatialWeights[j + 1] = sp;
+  }
+  const sortedFreqs = rawFreqsHz;
+  const sortedBaseGains = rawBaseGains;
+  const sortedQs = rawModeQs;
+  const sortedSpatial = spatialWeights;
 
   // Musical fundamental: on an enclosed kettle timpani, the (1,1) azimuthal mode is the perceived concert pitch
   // (with overtones (2,1)/(1,1) ≈ 1.50 and (3,1)/(1,1) ≈ 2.00!), whereas on open/vented drums it is f_{01} / f_{11}.
@@ -753,7 +848,7 @@ export function evaluateTensionedMembrane(
     brightness: strikerProps ? Math.min(mat.brightness, strikerProps.brightness) : mat.brightness,
   };
 
-  const shellIr = shellNode
+  const shellIr = !skipShellIr && shellNode
     ? simulate3DVibroAcousticIR(shellNode, {
         modulusGPa: 11.0,
         density: 680,
@@ -803,6 +898,19 @@ export function evaluateTensionedMembrane(
     },
     snareRattle,
   };
+}
+
+/**
+ * Evaluates a tensioned 2D circular or rectangular membrane (`node.acousticMembrane`),
+ * including enclosed kettle / vented shell air coupling, strike-point modal weights,
+ * nonlinear tension-modulation pitch drop, and snare wire rattle.
+ */
+export function evaluateTensionedMembrane(
+  node: SceneNode,
+  sceneNodes?: SceneNode[],
+  strikeCtx?: MembraneStrikeContext,
+): MembraneEvaluation | null {
+  return evaluateTensionedMembraneInternal(node, sceneNodes, strikeCtx, undefined, false);
 }
 
 /**
@@ -867,6 +975,8 @@ export function tuneMembraneToPitch(
       };
   const mat = MEMBRANE_MATERIALS[baseSpec.material] ?? MEMBRANE_MATERIALS.coated_film;
 
+  // Resolve planform & drum shell cavity ONCE before the 18-step bisection loop!
+  const sharedShellInfo = resolveMembraneShellInfo(node, baseSpec, sceneNodes);
   const evalAtTension = (T: number, thickMm: number): MembraneEvaluation => {
     const probe: SceneNode = {
       ...node,
@@ -876,7 +986,7 @@ export function tuneMembraneToPitch(
         thicknessMm: thickMm,
       },
     };
-    return evaluateTensionedMembrane(probe, sceneNodes)!;
+    return evaluateTensionedMembraneInternal(probe, sceneNodes, undefined, sharedShellInfo, true)!;
   };
 
   let thickMm = Math.max(0.08, Math.min(1.5, baseSpec.thicknessMm || 0.25));

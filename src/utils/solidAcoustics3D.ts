@@ -135,13 +135,22 @@ export interface Cavity3DAnalysis {
 // ---------------------------------------------------------------------------
 
 function normalizeIntervals(raw: Interval1D[]): Interval1D[] {
-  if (raw.length === 0) return [];
-  if (raw.length > 1) raw.sort((a, b) => a[0] - b[0]);
+  const n = raw.length;
+  if (n === 0) return raw;
+  if (n === 1) {
+    const iv = raw[0];
+    return iv[1] > iv[0] + 1e-9 ? raw : [];
+  }
+  raw.sort((a, b) => a[0] - b[0]);
   const out: Interval1D[] = [];
-  for (const [a, b] of raw) {
+  for (let i = 0; i < n; i++) {
+    const iv = raw[i];
+    const a = iv[0];
+    const b = iv[1];
     if (!(b > a + 1e-9)) continue;
-    if (out.length > 0 && a <= out[out.length - 1][1] + 1e-8) {
-      if (b > out[out.length - 1][1]) out[out.length - 1][1] = b;
+    const outLen = out.length;
+    if (outLen > 0 && a <= out[outLen - 1][1] + 1e-8) {
+      if (b > out[outLen - 1][1]) out[outLen - 1][1] = b;
     } else {
       out.push([a, b]);
     }
@@ -244,6 +253,45 @@ function buildMeshBinGrid(verts: ArrayLike<number>, faces: ArrayLike<number>, ax
   };
 }
 
+// Scratch buffer for mesh ray-triangle hits (single-threaded JS, zero per-ray alloc)
+const meshRayHitsScratch: number[] = [];
+
+function intersectMeshTriangle(
+  verts: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  t: number,
+  jx: number,
+  jy: number,
+  jz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  hits: number[],
+): void {
+  const f3 = 3 * t;
+  const i0 = faces[f3] * 3;
+  const i1 = faces[f3 + 1] * 3;
+  const i2 = faces[f3 + 2] * 3;
+  const ax = verts[i0], ay = verts[i0 + 1], az = verts[i0 + 2];
+  const e1x = verts[i1] - ax, e1y = verts[i1 + 1] - ay, e1z = verts[i1 + 2] - az;
+  const e2x = verts[i2] - ax, e2y = verts[i2 + 1] - ay, e2z = verts[i2 + 2] - az;
+  const px = dy * e2z - dz * e2y;
+  const py = dz * e2x - dx * e2z;
+  const pz = dx * e2y - dy * e2x;
+  const det = e1x * px + e1y * py + e1z * pz;
+  if (det > -1e-14 && det < 1e-14) return;
+  const invDet = 1 / det;
+  const tx = jx - ax, ty = jy - ay, tz = jz - az;
+  const u = (tx * px + ty * py + tz * pz) * invDet;
+  if (u < 0 || u > 1) return;
+  const qx = ty * e1z - tz * e1y;
+  const qy = tz * e1x - tx * e1z;
+  const qz = tx * e1y - ty * e1x;
+  const v = (dx * qx + dy * qy + dz * qz) * invDet;
+  if (v < 0 || u + v > 1) return;
+  hits.push((e2x * qx + e2y * qy + e2z * qz) * invDet);
+}
+
 function rayIntersectPreparedGeom(
   pg: PreparedSolidGeom,
   oxWorld: number,
@@ -254,6 +302,16 @@ function rayIntersectPreparedGeom(
   dzWorld: number,
   out: Interval1D[],
 ): void {
+  // Fast O(1) AABB reject for axis-aligned ray pencils (99%+ of acoustic rays!)
+  const lb = pg.localBounds;
+  if (dyWorld === 0 && dzWorld === 0) {
+    if (oyWorld < lb[2] - 1e-6 || oyWorld > lb[3] + 1e-6 || ozWorld < lb[4] - 1e-6 || ozWorld > lb[5] + 1e-6) return;
+  } else if (dxWorld === 0 && dzWorld === 0) {
+    if (oxWorld < lb[0] - 1e-6 || oxWorld > lb[1] + 1e-6 || ozWorld < lb[4] - 1e-6 || ozWorld > lb[5] + 1e-6) return;
+  } else if (dxWorld === 0 && dyWorld === 0) {
+    if (oxWorld < lb[0] - 1e-6 || oxWorld > lb[1] + 1e-6 || oyWorld < lb[2] - 1e-6 || oyWorld > lb[3] + 1e-6) return;
+  }
+
   const m = pg.invMat;
   const ox = m[0] * oxWorld + m[4] * oyWorld + m[8] * ozWorld + m[12];
   const oy = m[1] * oxWorld + m[5] * oyWorld + m[9] * ozWorld + m[13];
@@ -270,19 +328,41 @@ function rayIntersectPreparedGeom(
     const sz = Math.max(1e-6, s[2] ?? sx);
     let tMin = -Infinity;
     let tMax = Infinity;
-    const axes: [number, number, number][] = [[ox, dx, sx], [oy, dy, sy], [oz, dz, sz]];
-    for (const [o, d, half] of axes) {
-      if (Math.abs(d) < 1e-12) {
-        if (Math.abs(o) > half) return;
-      } else {
-        const inv = 1 / d;
-        let t1 = (-half - o) * inv;
-        let t2 = (half - o) * inv;
-        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
-        if (t1 > tMin) tMin = t1;
-        if (t2 < tMax) tMax = t2;
-        if (tMin >= tMax) return;
-      }
+    // Unrolled X slab
+    if (dx > -1e-12 && dx < 1e-12) {
+      if (ox < -sx || ox > sx) return;
+    } else {
+      const inv = 1 / dx;
+      let t1 = (-sx - ox) * inv;
+      let t2 = (sx - ox) * inv;
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      if (t1 > tMin) tMin = t1;
+      if (t2 < tMax) tMax = t2;
+      if (tMin >= tMax) return;
+    }
+    // Unrolled Y slab
+    if (dy > -1e-12 && dy < 1e-12) {
+      if (oy < -sy || oy > sy) return;
+    } else {
+      const inv = 1 / dy;
+      let t1 = (-sy - oy) * inv;
+      let t2 = (sy - oy) * inv;
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      if (t1 > tMin) tMin = t1;
+      if (t2 < tMax) tMax = t2;
+      if (tMin >= tMax) return;
+    }
+    // Unrolled Z slab
+    if (dz > -1e-12 && dz < 1e-12) {
+      if (oz < -sz || oz > sz) return;
+    } else {
+      const inv = 1 / dz;
+      let t1 = (-sz - oz) * inv;
+      let t2 = (sz - oz) * inv;
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      if (t1 > tMin) tMin = t1;
+      if (t2 < tMax) tMax = t2;
+      if (tMin >= tMax) return;
     }
     if (tMax > tMin + 1e-9) out.push([tMin, tMax]);
     return;
@@ -296,7 +376,8 @@ function rayIntersectPreparedGeom(
     const disc = b * b - 4 * a * c;
     if (disc <= 1e-14 || a < 1e-14) return;
     const sq = Math.sqrt(disc);
-    out.push([(-b - sq) / (2 * a), (-b + sq) / (2 * a)]);
+    const inv2a = 0.5 / a;
+    out.push([(-b - sq) * inv2a, (-b + sq) * inv2a]);
     return;
   }
 
@@ -312,41 +393,45 @@ function rayIntersectPreparedGeom(
     const disc = b * b - 4 * a * c;
     if (disc <= 1e-14 || a < 1e-14) return;
     const sq = Math.sqrt(disc);
-    out.push([(-b - sq) / (2 * a), (-b + sq) / (2 * a)]);
+    const inv2a = 0.5 / a;
+    out.push([(-b - sq) * inv2a, (-b + sq) * inv2a]);
     return;
   }
 
   if (pg.type === 'cylinder' || pg.type === 'capsule') {
     const r = Math.max(1e-6, s[0] ?? 0.01);
     const halfH = Math.max(1e-6, s[1] ?? 0.05);
+    const rSq = r * r;
     let tCylMin = -Infinity;
     let tCylMax = Infinity;
     const a = dx * dx + dy * dy;
     if (a < 1e-14) {
-      if (ox * ox + oy * oy > r * r) return;
+      if (ox * ox + oy * oy > rSq) return;
     } else {
       const b = 2 * (ox * dx + oy * dy);
-      const c = ox * ox + oy * oy - r * r;
+      const c = ox * ox + oy * oy - rSq;
       const disc = b * b - 4 * a * c;
       if (disc <= 0) {
         if (pg.type === 'cylinder') return;
         tCylMin = 1; tCylMax = -1;
       } else {
         const sq = Math.sqrt(disc);
-        tCylMin = (-b - sq) / (2 * a);
-        tCylMax = (-b + sq) / (2 * a);
+        const inv2a = 0.5 / a;
+        tCylMin = (-b - sq) * inv2a;
+        tCylMax = (-b + sq) * inv2a;
       }
     }
 
     let tZMin = -Infinity;
     let tZMax = Infinity;
-    if (Math.abs(dz) < 1e-12) {
-      if (Math.abs(oz) > halfH) {
+    if (dz > -1e-12 && dz < 1e-12) {
+      if (oz < -halfH || oz > halfH) {
         tZMin = 1; tZMax = -1;
       }
     } else {
-      let z1 = (-halfH - oz) / dz;
-      let z2 = (halfH - oz) / dz;
+      const invDz = 1 / dz;
+      let z1 = (-halfH - oz) * invDz;
+      let z2 = (halfH - oz) * invDz;
       if (z1 > z2) { const tmp = z1; z1 = z2; z2 = tmp; }
       tZMin = z1;
       tZMax = z2;
@@ -364,18 +449,22 @@ function rayIntersectPreparedGeom(
     if (trunkHi > trunkLo + 1e-9) localIntervals.push([trunkLo, trunkHi]);
     const a3 = dx * dx + dy * dy + dz * dz;
     if (a3 > 1e-14) {
-      for (const cz of [-halfH, halfH]) {
-        const ooz = oz - cz;
-        const b3 = 2 * (ox * dx + oy * dy + ooz * dz);
-        const c3 = ox * ox + oy * oy + ooz * ooz - r * r;
+      const inv2a3 = 0.5 / a3;
+      const oxDxOyDy = ox * dx + oy * dy;
+      const ox2Oy2MinR2 = ox * ox + oy * oy - rSq;
+      for (let cap = 0; cap < 2; cap++) {
+        const ooz = cap === 0 ? oz + halfH : oz - halfH;
+        const b3 = 2 * (oxDxOyDy + ooz * dz);
+        const c3 = ox2Oy2MinR2 + ooz * ooz;
         const disc = b3 * b3 - 4 * a3 * c3;
         if (disc > 1e-14) {
           const sq = Math.sqrt(disc);
-          localIntervals.push([(-b3 - sq) / (2 * a3), (-b3 + sq) / (2 * a3)]);
+          localIntervals.push([(-b3 - sq) * inv2a3, (-b3 + sq) * inv2a3]);
         }
       }
     }
-    for (const iv of normalizeIntervals(localIntervals)) out.push(iv);
+    const merged = normalizeIntervals(localIntervals);
+    for (let i = 0; i < merged.length; i++) out.push(merged[i]);
     return;
   }
 
@@ -393,33 +482,8 @@ function rayIntersectPreparedGeom(
     else if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6 && Math.abs(dy) > 0.5) alignedAxis = 1;
     else if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6 && Math.abs(dz) > 0.5) alignedAxis = 2;
 
-    const hits: number[] = [];
-
-    const testTri = (t: number) => {
-      const i0 = faces[3 * t] * 3;
-      const i1 = faces[3 * t + 1] * 3;
-      const i2 = faces[3 * t + 2] * 3;
-      const ax = verts[i0], ay = verts[i0 + 1], az = verts[i0 + 2];
-      const e1x = verts[i1] - ax, e1y = verts[i1 + 1] - ay, e1z = verts[i1 + 2] - az;
-      const e2x = verts[i2] - ax, e2y = verts[i2 + 1] - ay, e2z = verts[i2 + 2] - az;
-      // pvec = d x e2
-      const px = dy * e2z - dz * e2y;
-      const py = dz * e2x - dx * e2z;
-      const pz = dx * e2y - dy * e2x;
-      const det = e1x * px + e1y * py + e1z * pz;
-      if (Math.abs(det) < 1e-14) return;
-      const invDet = 1 / det;
-      const tx = jx - ax, ty = jy - ay, tz = jz - az;
-      const u = (tx * px + ty * py + tz * pz) * invDet;
-      if (u < 0 || u > 1) return;
-      const qx = ty * e1z - tz * e1y;
-      const qy = tz * e1x - tx * e1z;
-      const qz = tx * e1y - ty * e1x;
-      const v = (dx * qx + dy * qy + dz * qz) * invDet;
-      if (v < 0 || u + v > 1) return;
-      const tHit = (e2x * qx + e2y * qy + e2z * qz) * invDet;
-      hits.push(tHit);
-    };
+    const hits = meshRayHitsScratch;
+    hits.length = 0;
 
     if (alignedAxis !== -1) {
       if (!pg.meshGrids) pg.meshGrids = new Map();
@@ -428,29 +492,41 @@ function rayIntersectPreparedGeom(
         grid = buildMeshBinGrid(verts, faces, alignedAxis);
         pg.meshGrids.set(alignedAxis, grid);
       }
-      const oArr = [jx, jy, jz];
-      const uCoord = oArr[grid.uAxis];
-      const vCoord = oArr[grid.vAxis];
+      const uCoord = grid.uAxis === 0 ? jx : grid.uAxis === 1 ? jy : jz;
+      const vCoord = grid.vAxis === 0 ? jx : grid.vAxis === 1 ? jy : jz;
       const bu = Math.floor((uCoord - grid.uMin) * grid.invDu);
       const bv = Math.floor((vCoord - grid.vMin) * grid.invDv);
       if (bu < 0 || bu >= grid.nBins || bv < 0 || bv >= grid.nBins) return;
       const triList = grid.bins[bv * grid.nBins + bu];
-      for (let k = 0; k < triList.length; k++) testTri(triList[k]);
+      for (let k = 0; k < triList.length; k++) {
+        intersectMeshTriangle(verts, faces, triList[k], jx, jy, jz, dx, dy, dz, hits);
+      }
     } else {
       const nTris = Math.floor(faces.length / 3);
-      for (let t = 0; t < nTris; t++) testTri(t);
+      for (let t = 0; t < nTris; t++) {
+        intersectMeshTriangle(verts, faces, t, jx, jy, jz, dx, dy, dz, hits);
+      }
     }
 
-    if (hits.length < 2) return;
-    hits.sort((a, b) => a - b);
-    // Deduplicate near-coincident double hits (e.g. duplicate vertices across seams)
-    const dedup: number[] = [hits[0]];
-    for (let i = 1; i < hits.length; i++) {
-      if (hits[i] - dedup[dedup.length - 1] > 1e-6) dedup.push(hits[i]);
+    const nHits = hits.length;
+    if (nHits < 2) return;
+    if (nHits === 2) {
+      let h0 = hits[0], h1 = hits[1];
+      if (h0 > h1) { const tmp = h0; h0 = h1; h1 = tmp; }
+      if (h1 > h0 + 1e-6) out.push([h0, h1]);
+      return;
     }
-    for (let i = 0; i + 1 < dedup.length; i += 2) {
-      if (dedup[i + 1] > dedup[i] + 1e-8) {
-        out.push([dedup[i], dedup[i + 1]]);
+    hits.sort((a, b) => a - b);
+    // In-place deduplicate near-coincident double hits (e.g. duplicate vertices across seams)
+    let write = 1;
+    for (let i = 1; i < nHits; i++) {
+      if (hits[i] - hits[write - 1] > 1e-6) {
+        hits[write++] = hits[i];
+      }
+    }
+    for (let i = 0; i + 1 < write; i += 2) {
+      if (hits[i + 1] > hits[i] + 1e-8) {
+        out.push([hits[i], hits[i + 1]]);
       }
     }
   }
@@ -749,39 +825,79 @@ export function evaluateLegendrePoly(xi: number, maxOrder: number): number[] {
   return p;
 }
 
-function legendreBasisWithD2(xi: number, nBasis: number): { p: number[]; d2p: number[] } {
-  const p = new Array<number>(nBasis).fill(0);
-  const dp = new Array<number>(nBasis).fill(0);
-  const d2p = new Array<number>(nBasis).fill(0);
-  p[0] = 1;
-  if (nBasis > 1) {
-    p[1] = xi;
-    dp[1] = 1;
-  }
-  for (let k = 1; k + 1 < nBasis; k++) {
-    p[k + 1] = ((2 * k + 1) * xi * p[k] - k * p[k - 1]) / (k + 1);
-    dp[k + 1] = ((2 * k + 1) * (p[k] + xi * dp[k]) - k * dp[k - 1]) / (k + 1);
-    d2p[k + 1] = ((2 * k + 1) * (2 * dp[k] + xi * d2p[k]) - k * d2p[k - 1]) / (k + 1);
-  }
-  return { p, d2p };
+const BEAM_N_BASIS = 12;
+const BEAM_N_NORM_PTS = 25;
+
+interface LegendreQuadTable {
+  p: Float64Array; // [nStations * BEAM_N_BASIS]
+  d2p: Float64Array; // [nStations * BEAM_N_BASIS]
 }
 
-function jacobiEigenPairs(aIn: number[][]): { values: number[]; vectors: number[][] } {
-  const n = aIn.length;
-  const A = aIn.map((row) => row.slice());
-  const V = Array.from({ length: n }, (_, i) => {
-    const r = new Array<number>(n).fill(0);
-    r[i] = 1;
-    return r;
-  });
+const legendreQuadCache = new Map<number, LegendreQuadTable>();
+
+function getLegendreQuadTable(nStations: number): LegendreQuadTable {
+  let tab = legendreQuadCache.get(nStations);
+  if (tab) return tab;
+  const p = new Float64Array(nStations * BEAM_N_BASIS);
+  const d2p = new Float64Array(nStations * BEAM_N_BASIS);
+  const dp = new Float64Array(BEAM_N_BASIS);
+  for (let q = 0; q < nStations; q++) {
+    const xi = -1 + ((q + 0.5) * 2) / nStations;
+    const base = q * BEAM_N_BASIS;
+    p[base] = 1;
+    p[base + 1] = xi;
+    dp.fill(0);
+    dp[1] = 1;
+    for (let k = 1; k + 1 < BEAM_N_BASIS; k++) {
+      const invKp1 = 1 / (k + 1);
+      const twoKp1 = 2 * k + 1;
+      p[base + k + 1] = (twoKp1 * xi * p[base + k] - k * p[base + k - 1]) * invKp1;
+      dp[k + 1] = (twoKp1 * (p[base + k] + xi * dp[k]) - k * dp[k - 1]) * invKp1;
+      d2p[base + k + 1] = (twoKp1 * (2 * dp[k] + xi * d2p[base + k]) - k * d2p[base + k - 1]) * invKp1;
+    }
+  }
+  tab = { p, d2p };
+  if (legendreQuadCache.size > 16) legendreQuadCache.clear();
+  legendreQuadCache.set(nStations, tab);
+  return tab;
+}
+
+const LEGENDRE_NORM_TABLE: Float64Array = (() => {
+  const out = new Float64Array(BEAM_N_NORM_PTS * BEAM_N_BASIS);
+  for (let s = 0; s < BEAM_N_NORM_PTS; s++) {
+    const xi = -1 + (2 * s) / (BEAM_N_NORM_PTS - 1);
+    const base = s * BEAM_N_BASIS;
+    out[base] = 1;
+    out[base + 1] = xi;
+    for (let k = 1; k + 1 < BEAM_N_BASIS; k++) {
+      out[base + k + 1] = ((2 * k + 1) * xi * out[base + k] - k * out[base + k - 1]) / (k + 1);
+    }
+  }
+  return out;
+})();
+
+// Pre-allocated flat 12x12 scratch matrices for solveGeneralSectionBeamModes (single-threaded JS)
+const beamKScratch = new Float64Array(BEAM_N_BASIS * BEAM_N_BASIS);
+const beamMScratch = new Float64Array(BEAM_N_BASIS * BEAM_N_BASIS);
+const beamLScratch = new Float64Array(BEAM_N_BASIS * BEAM_N_BASIS);
+const beamLinvScratch = new Float64Array(BEAM_N_BASIS * BEAM_N_BASIS);
+const beamTmpScratch = new Float64Array(BEAM_N_BASIS * BEAM_N_BASIS);
+const beamCScratch = new Float64Array(BEAM_N_BASIS * BEAM_N_BASIS);
+const beamVScratch = new Float64Array(BEAM_N_BASIS * BEAM_N_BASIS);
+const beamOrderScratch = new Int32Array(BEAM_N_BASIS);
+
+function jacobiEigenPairsFlat(A: Float64Array, V: Float64Array, n: number): void {
+  V.fill(0);
+  for (let i = 0; i < n; i++) V[i * n + i] = 1;
 
   for (let sweep = 0; sweep < 50; sweep++) {
     let maxOff = 0;
     let p = 0;
     let q = 1;
     for (let i = 0; i < n; i++) {
+      const rowI = i * n;
       for (let j = i + 1; j < n; j++) {
-        const v = Math.abs(A[i][j]);
+        const v = Math.abs(A[rowI + j]);
         if (v > maxOff) {
           maxOff = v;
           p = i;
@@ -790,40 +906,42 @@ function jacobiEigenPairs(aIn: number[][]): { values: number[]; vectors: number[
       }
     }
     if (maxOff < 1e-13) break;
-    const diff = A[q][q] - A[p][p];
-    const t = Math.abs(A[p][q]) < Math.abs(diff) * 1e-18
-      ? A[p][q] / diff
-      : (() => {
-          const phi = diff / (2 * A[p][q]);
-          return (1 / (Math.abs(phi) + Math.sqrt(phi * phi + 1))) * (phi < 0 ? -1 : 1);
-        })();
+    const apq = A[p * n + q];
+    const diff = A[q * n + q] - A[p * n + p];
+    let t: number;
+    if (Math.abs(apq) < Math.abs(diff) * 1e-18) {
+      t = apq / diff;
+    } else {
+      const phi = diff / (2 * apq);
+      t = (1 / (Math.abs(phi) + Math.sqrt(phi * phi + 1))) * (phi < 0 ? -1 : 1);
+    }
     const c = 1 / Math.sqrt(1 + t * t);
     const s = t * c;
     const tau = s / (1 + c);
-    const apq = A[p][q];
-    A[p][q] = 0;
-    A[q][p] = 0;
-    A[p][p] -= t * apq;
-    A[q][q] += t * apq;
+    A[p * n + q] = 0;
+    A[q * n + p] = 0;
+    A[p * n + p] -= t * apq;
+    A[q * n + q] += t * apq;
+    const rowP = p * n;
+    const rowQ = q * n;
     for (let k = 0; k < n; k++) {
+      const rowK = k * n;
       if (k !== p && k !== q) {
-        const akp = A[k][p];
-        const akq = A[k][q];
-        A[k][p] = A[p][k] = akp - s * (akq + tau * akp);
-        A[k][q] = A[q][k] = akq + s * (akp - tau * akq);
+        const akp = A[rowK + p];
+        const akq = A[rowK + q];
+        const newAkp = akp - s * (akq + tau * akp);
+        const newAkq = akq + s * (akp - tau * akq);
+        A[rowK + p] = newAkp;
+        A[rowP + k] = newAkp;
+        A[rowK + q] = newAkq;
+        A[rowQ + k] = newAkq;
       }
-      const vkp = V[k][p];
-      const vkq = V[k][q];
-      V[k][p] = vkp - s * (vkq + tau * vkp);
-      V[k][q] = vkq + s * (vkp - tau * vkq);
+      const vkp = V[rowK + p];
+      const vkq = V[rowK + q];
+      V[rowK + p] = vkp - s * (vkq + tau * vkp);
+      V[rowK + q] = vkq + s * (vkp - tau * vkq);
     }
   }
-
-  const order = Array.from({ length: n }, (_, i) => i).sort((i, j) => A[i][i] - A[j][j]);
-  return {
-    values: order.map((idx) => A[idx][idx]),
-    vectors: order.map((col) => V.map((row) => row[col])),
-  };
 }
 
 /**
@@ -839,136 +957,189 @@ export function solveGeneralSectionBeamModes(
   inertiaSamples: Float64Array,
   applyTimoshenko = true,
 ): VariableSectionEigenResult {
-  const nBasis = 12; // P_0..P_11 -> 2 rigid modes + 10 elastic modes
+  const nBasis = BEAM_N_BASIS; // P_0..P_11 -> 2 rigid modes + 10 elastic modes
   const nStations = areaSamples.length;
-  const K = Array.from({ length: nBasis }, () => new Array<number>(nBasis).fill(0));
-  const M = Array.from({ length: nBasis }, () => new Array<number>(nBasis).fill(0));
+  const K = beamKScratch;
+  const M = beamMScratch;
+  K.fill(0);
+  M.fill(0);
 
   const halfL = Math.max(1e-4, lengthM * 0.5);
-  const invHalfL4 = 1 / Math.pow(halfL, 4);
+  const invHalfL3 = 1 / (halfL * halfL * halfL);
   const dxi = 2 / nStations;
+  const kScale = modulusPa * invHalfL3 * dxi;
+  const mScale = densityKgM3 * halfL * dxi;
 
   let maxArea = 0;
   let sumArea = 0;
   let sumInertia = 0;
   for (let q = 0; q < nStations; q++) {
-    if (areaSamples[q] > maxArea) maxArea = areaSamples[q];
-    sumArea += areaSamples[q];
+    const a = areaSamples[q];
+    if (a > maxArea) maxArea = a;
+    sumArea += a;
     sumInertia += inertiaSamples[q];
   }
   const floorArea = Math.max(1e-11, maxArea * 1e-3);
   const floorInertia = Math.max(1e-18, (sumInertia / Math.max(1, nStations)) * 1e-4);
 
+  const quad = getLegendreQuadTable(nStations);
+  const pTab = quad.p;
+  const d2pTab = quad.d2p;
+
   for (let q = 0; q < nStations; q++) {
-    const xi = -1 + ((q + 0.5) * 2) / nStations;
-    const area = Math.max(floorArea, areaSamples[q]);
-    const inertia = Math.max(floorInertia, inertiaSamples[q]);
-    const { p, d2p } = legendreBasisWithD2(xi, nBasis);
-    const wK = modulusPa * inertia * invHalfL4 * halfL * dxi;
-    const wM = densityKgM3 * area * halfL * dxi;
+    const area = areaSamples[q] > floorArea ? areaSamples[q] : floorArea;
+    const inertia = inertiaSamples[q] > floorInertia ? inertiaSamples[q] : floorInertia;
+    const wK = kScale * inertia;
+    const wM = mScale * area;
+    const qBase = q * nBasis;
     for (let i = 0; i < nBasis; i++) {
+      const rowI = i * nBasis;
+      const wK_d2i = wK * d2pTab[qBase + i];
+      const wM_pi = wM * pTab[qBase + i];
       for (let j = i; j < nBasis; j++) {
-        K[i][j] += wK * d2p[i] * d2p[j];
-        M[i][j] += wM * p[i] * p[j];
+        K[rowI + j] += wK_d2i * d2pTab[qBase + j];
+        M[rowI + j] += wM_pi * pTab[qBase + j];
       }
     }
   }
   for (let i = 0; i < nBasis; i++) {
+    const rowI = i * nBasis;
     for (let j = 0; j < i; j++) {
-      K[i][j] = K[j][i];
-      M[i][j] = M[j][i];
+      K[rowI + j] = K[j * nBasis + i];
+      M[rowI + j] = M[j * nBasis + i];
     }
   }
 
   // Cholesky M = L * L^T
-  const L = Array.from({ length: nBasis }, () => new Array<number>(nBasis).fill(0));
+  const L = beamLScratch;
+  L.fill(0);
   for (let i = 0; i < nBasis; i++) {
+    const rowI = i * nBasis;
     for (let j = 0; j <= i; j++) {
-      let sum = M[i][j];
-      for (let k = 0; k < j; k++) sum -= L[i][k] * L[j][k];
+      const rowJ = j * nBasis;
+      let sum = M[rowI + j];
+      for (let k = 0; k < j; k++) sum -= L[rowI + k] * L[rowJ + k];
       if (i === j) {
-        L[i][i] = Math.sqrt(Math.max(1e-30, sum));
+        L[rowI + i] = Math.sqrt(sum > 1e-30 ? sum : 1e-30);
       } else {
-        L[i][j] = sum / L[j][j];
+        L[rowI + j] = sum / L[rowJ + j];
       }
     }
   }
 
-  const Linv = Array.from({ length: nBasis }, () => new Array<number>(nBasis).fill(0));
+  const Linv = beamLinvScratch;
+  Linv.fill(0);
   for (let i = 0; i < nBasis; i++) {
-    Linv[i][i] = 1 / L[i][i];
+    const rowI = i * nBasis;
+    const invLii = 1 / L[rowI + i];
+    Linv[rowI + i] = invLii;
     for (let j = 0; j < i; j++) {
       let sum = 0;
-      for (let k = j; k < i; k++) sum += L[i][k] * Linv[k][j];
-      Linv[i][j] = -sum / L[i][i];
+      for (let k = j; k < i; k++) sum += L[rowI + k] * Linv[k * nBasis + j];
+      Linv[rowI + j] = -sum * invLii;
     }
   }
 
-  const tmp = Array.from({ length: nBasis }, () => new Array<number>(nBasis).fill(0));
+  const tmp = beamTmpScratch;
   for (let i = 0; i < nBasis; i++) {
+    const rowI = i * nBasis;
     for (let j = 0; j < nBasis; j++) {
       let s = 0;
-      for (let k = 0; k <= i; k++) s += Linv[i][k] * K[k][j];
-      tmp[i][j] = s;
+      for (let k = 0; k <= i; k++) s += Linv[rowI + k] * K[k * nBasis + j];
+      tmp[rowI + j] = s;
     }
   }
-  const C = Array.from({ length: nBasis }, () => new Array<number>(nBasis).fill(0));
+  const C = beamCScratch;
   for (let i = 0; i < nBasis; i++) {
+    const rowI = i * nBasis;
     for (let j = i; j < nBasis; j++) {
+      const rowJ = j * nBasis;
       let s = 0;
-      for (let k = 0; k <= j; k++) s += tmp[i][k] * Linv[j][k];
-      C[i][j] = C[j][i] = s;
+      for (let k = 0; k <= j; k++) s += tmp[rowI + k] * Linv[rowJ + k];
+      C[rowI + j] = s;
+      C[rowJ + i] = s;
     }
   }
 
-  const { values, vectors } = jacobiEigenPairs(C);
+  const V = beamVScratch;
+  jacobiEigenPairsFlat(C, V, nBasis);
+
+  // Insertion-sort eigenvalue column indices ascending (nBasis = 12)
+  const order = beamOrderScratch;
+  for (let i = 0; i < nBasis; i++) order[i] = i;
+  for (let i = 1; i < nBasis; i++) {
+    const cur = order[i];
+    const curVal = C[cur * nBasis + cur];
+    let j = i - 1;
+    while (j >= 0 && C[order[j] * nBasis + order[j]] > curVal) {
+      order[j + 1] = order[j];
+      j--;
+    }
+    order[j + 1] = cur;
+  }
+
   const meanA = Math.max(1e-11, sumArea / Math.max(1, nStations));
   const meanI = Math.max(1e-18, sumInertia / Math.max(1, nStations));
   const rgSqOverLSq = (meanI / meanA) / Math.max(1e-8, lengthM * lengthM);
   // Cowper rectangular Timoshenko transverse shear + rotary inertia coefficient
   const timoCoeff = 1.35;
+  const invTwoPi = 1 / (2 * Math.PI);
 
   const frequenciesHz: number[] = [];
   const modeVectors: number[][] = [];
 
-  for (let idx = 2; idx < Math.min(nBasis, 8); idx++) {
+  for (let idx = 2; idx < 8; idx++) {
+    const col = order[idx];
     const mElastic = idx - 1; // 1, 2, 3, ...
-    let omegaSq = Math.max(0, values[idx]);
+    let omegaSq = C[col * nBasis + col];
+    if (omegaSq < 0) omegaSq = 0;
     if (applyTimoshenko) {
-      const waveNumSq = Math.pow((mElastic + 0.5) * Math.PI, 2);
-      omegaSq /= 1 + timoCoeff * waveNumSq * rgSqOverLSq;
+      const wn = (mElastic + 0.5) * Math.PI;
+      omegaSq /= 1 + timoCoeff * wn * wn * rgSqOverLSq;
     }
-    frequenciesHz.push(Math.sqrt(omegaSq) / (2 * Math.PI));
+    frequenciesHz.push(Math.sqrt(omegaSq) * invTwoPi);
 
     // Back-transform eigenvector y -> c = L^-T * y in Legendre polynomial basis
-    const y = vectors[idx];
-    const coeffs = new Array<number>(nBasis).fill(0);
+    const coeffs = new Array<number>(nBasis);
     for (let i = 0; i < nBasis; i++) {
       let s = 0;
-      for (let k = i; k < nBasis; k++) s += Linv[k][i] * y[k];
+      for (let k = i; k < nBasis; k++) s += Linv[k * nBasis + i] * V[k * nBasis + col];
       coeffs[i] = s;
     }
-    // Normalize so max |ψ_m(ξ)| across [-1, 1] is 1.0
+    // Normalize so max |ψ_m(ξ)| across [-1, 1] is 1.0 using precomputed table
     let peak = 1e-12;
-    for (let s = 0; s <= 24; s++) {
-      const xi = -1 + (2 * s) / 24;
-      const p = evaluateLegendrePoly(xi, nBasis);
+    for (let s = 0; s < BEAM_N_NORM_PTS; s++) {
+      const base = s * nBasis;
       let val = 0;
-      for (let k = 0; k < nBasis; k++) val += coeffs[k] * p[k];
-      if (Math.abs(val) > peak) peak = Math.abs(val);
+      for (let k = 0; k < nBasis; k++) val += coeffs[k] * LEGENDRE_NORM_TABLE[base + k];
+      const av = val < 0 ? -val : val;
+      if (av > peak) peak = av;
     }
-    modeVectors.push(coeffs.map((c) => c / peak));
+    const invPeak = 1 / peak;
+    for (let k = 0; k < nBasis; k++) coeffs[k] *= invPeak;
+    modeVectors.push(coeffs);
   }
 
   return { frequenciesHz, modeVectors };
 }
 
 export function evaluateNormalizedModeShape(coeffs: number[], xi: number): number {
-  const clamped = Math.max(-1, Math.min(1, xi));
-  const p = evaluateLegendrePoly(clamped, coeffs.length);
-  let sum = 0;
-  for (let i = 0; i < coeffs.length; i++) sum += coeffs[i] * p[i];
-  return Math.abs(sum);
+  const n = coeffs.length;
+  if (n === 0) return 0;
+  const x = xi < -1 ? -1 : xi > 1 ? 1 : xi;
+  let sum = coeffs[0];
+  if (n > 1) {
+    let pPrev = 1;
+    let pCur = x;
+    sum += coeffs[1] * pCur;
+    for (let k = 1; k + 1 < n; k++) {
+      const pNext = ((2 * k + 1) * x * pCur - k * pPrev) / (k + 1);
+      sum += coeffs[k + 1] * pNext;
+      pPrev = pCur;
+      pCur = pNext;
+    }
+  }
+  return sum < 0 ? -sum : sum;
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,7 +1383,11 @@ function detectSingleSolidPrincipalPose(node: SceneNode): THREE.Matrix4 | null {
 export function analyze3DSolidCrossSections(node: SceneNode): Solid3DSectionAnalysis {
   const sig = computeNodeGeomSignature(node);
   const cached = sectionCache.get(sig);
-  if (cached) return cached;
+  if (cached) {
+    sectionCache.delete(sig);
+    sectionCache.set(sig, cached);
+    return cached;
+  }
 
   const principalPose = detectSingleSolidPrincipalPose(node);
   const invPrincipal = principalPose ? principalPose.clone().invert() : undefined;
@@ -1475,7 +1650,11 @@ function refinePortPatch(
 export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
   const sig = computeNodeGeomSignature(node);
   const cached = cavityCache.get(sig);
-  if (cached) return cached;
+  if (cached) {
+    cavityCache.delete(sig);
+    cavityCache.set(sig, cached);
+    return cached;
+  }
 
   // Bound the cavity voxel grid and plate spans on the colliding shell corpus when present so external
   // non-colliding appendages (cello necks, pegboxes, standing bridges, tailpieces) never inflate corpus dimensions!
@@ -1678,6 +1857,10 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
       cavityRegime: 'sealed',
       airResonanceHz: null,
     };
+    if (cavityCache.size >= 256) {
+      const firstKey = cavityCache.keys().next().value;
+      if (firstKey !== undefined) cavityCache.delete(firstKey);
+    }
     cavityCache.set(sig, none);
     return none;
   }
@@ -1690,8 +1873,11 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
 
   // Collect all open boundary faces between CAVITY_AIR (2) and EXTERIOR_AIR (0 or grid outside),
   // grouped by normal direction (0..5: -X, +X, -Y, +Y, -Z, +Z) and 2D connected component!
+  // Uses packed integer keys `(iu << 8) | iv` (zero string allocations across 32k voxels!).
   type OpenFaceCell = { dirId: number; iu: number; iv: number; u: number; v: number; faceArea: number };
-  const openFacesByDir: Map<string, OpenFaceCell>[] = Array.from({ length: 6 }, () => new Map());
+  const openFacesByDir: Map<number, OpenFaceCell>[] = [
+    new Map(), new Map(), new Map(), new Map(), new Map(), new Map(),
+  ];
 
   let totalSurfaceArea = 0;
   let totalOpenFaceArea = 0;
@@ -1706,33 +1892,39 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
   ];
 
   for (let ix = 0; ix < nx; ix++) {
+    const cx = x0 + (ix + 0.5) * hx;
+    const xBase = ix * ny;
     for (let iy = 0; iy < ny; iy++) {
+      const cy = y0 + (iy + 0.5) * hy;
+      const xyBase = (xBase + iy) * nz;
+      const zRay = zRays[xBase + iy];
       for (let iz = 0; iz < nz; iz++) {
-        if (state[idxOf(ix, iy, iz)] !== 2) continue;
-        const coords = [x0 + (ix + 0.5) * hx, y0 + (iy + 0.5) * hy, z0 + (iz + 0.5) * hz];
-        const ijk = [ix, iy, iz];
+        if (state[xyBase + iz] !== 2) continue;
+        const cz = z0 + (iz + 0.5) * hz;
         for (let d = 0; d < 6; d++) {
-          const [ddx, ddy, ddz, nAxis, , fArea] = dirs[d];
+          const dirInfo = dirs[d];
+          const ddx = dirInfo[0], ddy = dirInfo[1], ddz = dirInfo[2];
+          const nAxis = dirInfo[3], fArea = dirInfo[5];
           const nix = ix + ddx, niy = iy + ddy, niz = iz + ddz;
           const nState = (nix < 0 || nix >= nx || niy < 0 || niy >= ny || niz < 0 || niz >= nz)
             ? 0
-            : state[idxOf(nix, niy, niz)];
+            : state[(nix * ny + niy) * nz + niz];
           if (nState === 1) {
             totalSurfaceArea += fArea;
           } else if (nState === 0) {
             // Check exact 1D ray intervals along nAxis so thin curved/end walls narrower than one voxel step
             // are never mistaken for open ports!
             const stepH = nAxis === 0 ? hx : nAxis === 1 ? hy : hz;
-            const cFrom = coords[nAxis];
+            const cFrom = nAxis === 0 ? cx : nAxis === 1 ? cy : cz;
             const cTo = cFrom + (ddx + ddy + ddz) * stepH;
-            const segLo = Math.min(cFrom, cTo);
-            const segHi = Math.max(cFrom, cTo);
+            const segLo = cFrom < cTo ? cFrom : cTo;
+            const segHi = cFrom < cTo ? cTo : cFrom;
             const axisRay =
               nAxis === 0
                 ? xRays[iy * nz + iz]
                 : nAxis === 1
                   ? yRays[ix * nz + iz]
-                  : zRays[ix * ny + iy];
+                  : zRay;
             let wallBetween = false;
             for (let s = 0; s < axisRay.length; s++) {
               if (axisRay[s][1] > segLo + 1e-7 && axisRay[s][0] < segHi - 1e-7) {
@@ -1743,16 +1935,16 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
             totalSurfaceArea += fArea;
             if (wallBetween) continue;
             totalOpenFaceArea += fArea;
-            const uAxis = ((nAxis + 1) % 3) as 0 | 1 | 2;
-            const vAxis = ((nAxis + 2) % 3) as 0 | 1 | 2;
-            const iu = ijk[uAxis];
-            const iv = ijk[vAxis];
-            openFacesByDir[d].set(`${iu},${iv}`, {
+            const iu = nAxis === 0 ? iy : nAxis === 1 ? iz : ix;
+            const iv = nAxis === 0 ? iz : nAxis === 1 ? ix : iy;
+            const uVal = nAxis === 0 ? cy : nAxis === 1 ? cz : cx;
+            const vVal = nAxis === 0 ? cz : nAxis === 1 ? cx : cy;
+            openFacesByDir[d].set((iu << 8) | iv, {
               dirId: d,
               iu,
               iv,
-              u: coords[uAxis],
-              v: coords[vAxis],
+              u: uVal,
+              v: vVal,
               faceArea: fArea,
             });
           }
@@ -1769,7 +1961,7 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
     const faceMap = openFacesByDir[d];
     if (faceMap.size === 0) continue;
     const [, , , nAxis, sideSign] = dirs[d];
-    const visited = new Set<string>();
+    const visited = new Set<number>();
 
     for (const [startKey, startCell] of faceMap) {
       if (visited.has(startKey)) continue;
@@ -1786,9 +1978,13 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
         if (cur.v < vMin) vMin = cur.v;
         if (cur.v > vMax) vMax = cur.v;
         for (let du = -1; du <= 1; du++) {
+          const nu = cur.iu + du;
+          if (nu < 0) continue;
           for (let dv = -1; dv <= 1; dv++) {
             if (du === 0 && dv === 0) continue;
-            const nk = `${cur.iu + du},${cur.iv + dv}`;
+            const nv = cur.iv + dv;
+            if (nv < 0) continue;
+            const nk = (nu << 8) | nv;
             if (!visited.has(nk)) {
               const neigh = faceMap.get(nk);
               if (neigh) {
@@ -2040,7 +2236,11 @@ export function simulate3DVibroAcousticIR(
   ].join('|');
 
   const cached = vibroIrCache.get(fullSig);
-  if (cached) return cached;
+  if (cached) {
+    vibroIrCache.delete(fullSig);
+    vibroIrCache.set(fullSig, cached);
+    return cached;
+  }
 
   const hostScene = buildBodyRayScene(hostNode, false) ?? buildBodyRayScene(hostNode, true);
   if (!hostScene) return null;
@@ -2206,9 +2406,19 @@ export function simulate3DVibroAcousticIR(
         }
 
         // Check internal structural bracing (e.g. Soundpost coupling belly <-> back, Bass Bar under bass foot!)
+        // Fast AABB reject avoids casting 3D rays on ~98% of voxels outside the brace bounds!
         let hitBrace = false;
+        const halfCellPad = 0.55 * h;
         for (let bi = 0; bi < internalBraceScenes.length; bi++) {
           const br = internalBraceScenes[bi];
+          const bb = br.bounds;
+          if (
+            cx < bb[0] - halfCellPad || cx > bb[1] + halfCellPad ||
+            cy < bb[2] - halfCellPad || cy > bb[3] + halfCellPad ||
+            cz < bb[4] - halfCellPad || cz > bb[5] + halfCellPad
+          ) {
+            continue;
+          }
           const zIvs = castSceneRay(br, cx, cy, 0, 0, 0, 1);
           const zH = intervalsTouchCell(zIvs, cz, h);
           if (!zH.hit) continue;
@@ -2468,9 +2678,6 @@ export function simulate3DVibroAcousticIR(
   const driveNodes = driveList.slice(0, Math.min(4, driveList.length)).map((d) => d.s);
   const driveShare = 1 / Math.max(1, driveNodes.length);
 
-  // Also identify soundboard foot solid voxels right below the bridge for high-frequency (>2.5 kHz) direct radiation pickup
-  const pickupSolidNodes = driveNodes;
-
   // Virtual near-field listener ring in the exterior air shell (1 voxel inside Sommerfeld boundary)
   const micCells: number[] = [];
   const micIxMid = Math.floor(nx * 0.5);
@@ -2546,6 +2753,72 @@ export function simulate3DVibroAcousticIR(
   const murCoeff = (cAir * dt - h) / (cAir * dt + h);
   const faceArea = h * h;
 
+  // Precompute per-solid inverse-mass*dt, Rayleigh damping*mass, and coupled-face coefficients
+  // (eliminates millions of floating-point divisions inside the 2048/4096-step FDTD loop!)
+  const sInvMassDt = new Float32Array(nSolid);
+  const sDampMassMul = new Float32Array(nSolid);
+  for (let s = 0; s < nSolid; s++) {
+    sInvMassDt[s] = dt / sMass[s];
+    sDampMassMul[s] = sDampMass[s] * sMass[s];
+  }
+  const cForceCoeff = new Float32Array(nCoupledFaces);
+  const cPressCoeff = new Float32Array(nCoupledFaces);
+  for (let cf = 0; cf < nCoupledFaces; cf++) {
+    const s = cSolidArr[cf];
+    const sign = cSignArr[cf];
+    cForceCoeff[cf] = sInvMassDt[s] * faceArea * sign;
+    cPressCoeff[cf] = pCoeffAir * sign;
+  }
+
+  // Precompute compact flat lists of active AIR-AIR faces and interior AIR pressure cells
+  // so FDTD velocity/divergence steps run linear branch-free loops instead of 3D nested branchy scans!
+  const airVxList: number[] = [];
+  const airVyList: number[] = [];
+  const airVzList: number[] = [];
+  const airVzCoeffList: number[] = [];
+  for (let ix = 0; ix < nx - 1; ix++) {
+    const xOff = ix * strideX;
+    for (let iy = 0; iy < ny - 1; iy++) {
+      const xyOff = xOff + iy * strideY;
+      for (let iz = 0; iz < nz - 1; iz++) {
+        const c = xyOff + iz;
+        if (cellType[c] !== 0) continue;
+        if (cellType[c + strideX] === 0) airVxList.push(c);
+        if (cellType[c + strideY] === 0) airVyList.push(c);
+        if (cellType[c + 1] === 0) {
+          airVzList.push(c);
+          airVzCoeffList.push(velCoeffAir * faceApertureZ[c]);
+        }
+      }
+    }
+  }
+  const airVxIdx = Int32Array.from(airVxList);
+  const airVyIdx = Int32Array.from(airVyList);
+  const airVzIdx = Int32Array.from(airVzList);
+  const airVzCoeff = Float32Array.from(airVzCoeffList);
+  const nAirVx = airVxIdx.length;
+  const nAirVy = airVyIdx.length;
+  const nAirVz = airVzIdx.length;
+
+  const airPList: number[] = [];
+  for (let ix = 1; ix < nx - 1; ix++) {
+    const xOff = ix * strideX;
+    for (let iy = 1; iy < ny - 1; iy++) {
+      const xyOff = xOff + iy * strideY;
+      for (let iz = 1; iz < nz - 1; iz++) {
+        const c = xyOff + iz;
+        if (cellType[c] === 0) airPList.push(c);
+      }
+    }
+  }
+  const airPIdx = Int32Array.from(airPList);
+  const nAirP = airPIdx.length;
+
+  const driveNodesArr = Int32Array.from(driveNodes);
+  const nDrive = driveNodesArr.length;
+  const micCellsArr = Int32Array.from(micCells);
+  const nMics = micCellsArr.length;
+
   let prevBridgeVel = 0;
   let hpBridgeState = 0;
   let velPotMic = 0;
@@ -2555,9 +2828,12 @@ export function simulate3DVibroAcousticIR(
   const pulseLen = Math.max(6, Math.round(6 * (simRate / 24000)));
   const pulseAmp = (1.0e-3 / dt) * (2 / pulseLen);
   const velPotPole = Math.pow(0.985, rateScale);
+  const velPotGain = 2 * Math.PI * 320 * dt;
   const accelRateScale = simRate / 24000;
   const hpBridgeAlpha = 1 - Math.pow(1 - 0.24, rateScale);
   const sheenStartStep = pulseLen + Math.round(2 * accelRateScale);
+  const airPMicW = cav.hasHollowCavity ? 0.25 : 0.42;
+  const airVelPotW = cav.hasHollowCavity ? 0.94 : 0.78;
 
   for (let step = 0; step < nSteps; step++) {
     // 1. Save boundary pressure for 1st-order Sommerfeld/Mur radiation absorption
@@ -2597,22 +2873,20 @@ export function simulate3DVibroAcousticIR(
         vLap += vu[nbr] - vus;
       }
       const fElastic = -sKBend[s] * biharm + sKShear[s] * laps - sKArch[s] * u[s];
-      const fDamp = -sDampMass[s] * sMass[s] * vus + sDampVoigt[s] * vLap;
-      vu[s] += (dt / sMass[s]) * (fElastic + fDamp);
+      const fDamp = -sDampMassMul[s] * vus + sDampVoigt[s] * vLap;
+      vu[s] = vus + sInvMassDt[s] * (fElastic + fDamp);
     }
 
     if (fExt !== 0) {
-      for (let i = 0; i < driveNodes.length; i++) {
-        const ds = driveNodes[i];
-        vu[ds] += (dt / sMass[ds]) * fExt;
+      for (let i = 0; i < nDrive; i++) {
+        const ds = driveNodesArr[i];
+        vu[ds] += sInvMassDt[ds] * fExt;
       }
     }
 
     // Back-pressure reaction from interior/exterior air onto solid shell walls!
     for (let cf = 0; cf < nCoupledFaces; cf++) {
-      const s = cSolidArr[cf];
-      const ac = cAirArr[cf];
-      vu[s] -= (dt / sMass[s]) * p[ac] * faceArea * cSignArr[cf];
+      vu[cSolidArr[cf]] -= cForceCoeff[cf] * p[cAirArr[cf]];
     }
 
     // Advance solid displacement
@@ -2620,75 +2894,54 @@ export function simulate3DVibroAcousticIR(
       u[s] += dt * vu[s];
     }
 
-    // 4. Staggered 3D Acoustic Air Velocity Update across open AIR-AIR faces
-    for (let ix = 0; ix < nx - 1; ix++) {
-      const xOff = ix * strideX;
-      for (let iy = 0; iy < ny - 1; iy++) {
-        const xyOff = xOff + iy * strideY;
-        for (let iz = 0; iz < nz - 1; iz++) {
-          const c = xyOff + iz;
-          if (cellType[c] !== 0) continue;
-          const pc = p[c];
-          const cx1 = c + strideX;
-          if (cellType[cx1] === 0) vx[c] -= velCoeffAir * (p[cx1] - pc);
-          const cy1 = c + strideY;
-          if (cellType[cy1] === 0) vy[c] -= velCoeffAir * (p[cy1] - pc);
-          const cz1 = c + 1;
-          if (cellType[cz1] === 0) vz[c] -= velCoeffAir * faceApertureZ[c] * (p[cz1] - pc);
-        }
-      }
+    // 4. Staggered 3D Acoustic Air Velocity Update across compact active AIR-AIR faces
+    for (let i = 0; i < nAirVx; i++) {
+      const c = airVxIdx[i];
+      vx[c] -= velCoeffAir * (p[c + strideX] - p[c]);
+    }
+    for (let i = 0; i < nAirVy; i++) {
+      const c = airVyIdx[i];
+      vy[c] -= velCoeffAir * (p[c + strideY] - p[c]);
+    }
+    for (let i = 0; i < nAirVz; i++) {
+      const c = airVzIdx[i];
+      vz[c] -= airVzCoeff[i] * (p[c + 1] - p[c]);
     }
 
     // 5. Acoustic Air Pressure Update from velocity divergence + Solid-Wall Piston Velocity Injection!
-    for (let ix = 1; ix < nx - 1; ix++) {
-      const xOff = ix * strideX;
-      for (let iy = 1; iy < ny - 1; iy++) {
-        const xyOff = xOff + iy * strideY;
-        for (let iz = 1; iz < nz - 1; iz++) {
-          const c = xyOff + iz;
-          if (cellType[c] !== 0) continue;
-          const div =
-            (vx[c] - vx[c - strideX]) +
-            (vy[c] - vy[c - strideY]) +
-            (vz[c] - vz[c - 1]);
-          p[c] -= pCoeffAir * div;
-        }
-      }
+    for (let i = 0; i < nAirP; i++) {
+      const c = airPIdx[i];
+      p[c] -= pCoeffAir * ((vx[c] - vx[c - strideX]) + (vy[c] - vy[c - strideY]) + (vz[c] - vz[c - 1]));
     }
 
     for (let cf = 0; cf < nCoupledFaces; cf++) {
-      const s = cSolidArr[cf];
-      const ac = cAirArr[cf];
-      p[ac] += pCoeffAir * vu[s] * cSignArr[cf];
+      p[cAirArr[cf]] += cPressCoeff[cf] * vu[cSolidArr[cf]];
     }
 
     // 6. 1st-Order Sommerfeld / Mur Free-Space Radiation Boundary Absorption on all 6 outer faces
     for (let b = 0; b < nBound; b++) {
-      const inner = boundInner[b];
-      p[boundOuter[b]] = pPrevInner[b] + murCoeff * (p[inner] - pPrevOuter[b]);
+      p[boundOuter[b]] = pPrevInner[b] + murCoeff * (p[boundInner[b]] - pPrevOuter[b]);
     }
 
     // 7. Virtual Listener Array Readout: blend radiated pressure `pMic` + leaky acoustic velocity potential `velPotMic`
-    //    (compensating monopole d/dt high-pass tilt so 80-450 Hz Helmholtz & wood plate modes bloom naturally!)
     let pMic = 0;
-    for (let m = 0; m < micCells.length; m++) {
-      pMic += p[micCells[m]];
+    for (let m = 0; m < nMics; m++) {
+      pMic += p[micCellsArr[m]];
     }
     pMic *= invMicCount;
-    velPotMic = velPotPole * velPotMic + pMic * (2 * Math.PI * 320 * dt);
+    velPotMic = velPotPole * velPotMic + pMic * velPotGain;
 
     let bVel = 0;
-    for (let i = 0; i < pickupSolidNodes.length; i++) {
-      bVel += vu[pickupSolidNodes[i]];
+    for (let i = 0; i < nDrive; i++) {
+      bVel += vu[driveNodesArr[i]];
     }
     bVel *= driveShare;
     const bAccel = (bVel - prevBridgeVel) * accelRateScale;
     prevBridgeVel = bVel;
     hpBridgeState += hpBridgeAlpha * (bAccel - hpBridgeState);
-    const highFreqSheen = step >= sheenStartStep ? bAccel - hpBridgeState : 0;
 
-    irAir[step] = cav.hasHollowCavity ? 0.25 * pMic + 0.94 * velPotMic : 0.42 * pMic + 0.78 * velPotMic;
-    irSolid[step] = highFreqSheen;
+    irAir[step] = airPMicW * pMic + airVelPotW * velPotMic;
+    irSolid[step] = step >= sheenStartStep ? bAccel - hpBridgeState : 0;
   }
 
   // Post-process both radiated air pressure & free solid/bridge modes separately (sample-rate-consistent poles & 16 ms fade)

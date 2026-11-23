@@ -219,9 +219,12 @@ export interface ModalVoicePoolStats {
   groupKeys: string[];
 }
 
+const MAX_CACHED_CLICK_BUFFERS = 48;
+
 interface ContextModalBank {
   groups: Map<string, ActiveModalVoiceGroup>;
   irBufferCache: Map<string, AudioBuffer>;
+  clickBufferCache: Map<string, AudioBuffer>;
   noiseBuffer: AudioBuffer | null;
   ephemeralCounter: number;
   sweepTimer: ReturnType<typeof setInterval> | null;
@@ -238,6 +241,7 @@ function getBank(ctx: AudioContext): ContextModalBank {
     bank = {
       groups: new Map(),
       irBufferCache: new Map(),
+      clickBufferCache: new Map(),
       noiseBuffer: null,
       ephemeralCounter: 0,
       sweepTimer: null,
@@ -287,24 +291,30 @@ export function sanitizeAndResampleIrSamples(
   // Continuous-time convolution invariance dτ = 1 / srTarget requires tap scaling by srSource / srTarget!
   const rateGainScale = srSource / srTarget;
 
+  // Fast single-allocation path when source and target sample rates match (99% 48 kHz case!)
+  if (Math.abs(srTarget - srSource) < 1) {
+    const out = new Float32Array(new ArrayBuffer(ir48k.length * 4));
+    let energySq = 0;
+    for (let i = 0; i < ir48k.length; i++) {
+      const v = ir48k[i];
+      const safe = Number.isFinite(v) ? (v < -2.0 ? -2.0 : v > 2.0 ? 2.0 : v) : 0;
+      const scaled = safe * rateGainScale;
+      out[i] = scaled;
+      energySq += safe * safe;
+    }
+    return energySq > 1e-16 ? out : null;
+  }
+
   // Sanitize source samples first so not a single NaN/Inf can ever enter linear interpolation
   const cleanSrc = new Float32Array(ir48k.length);
   let energySq = 0;
   for (let i = 0; i < ir48k.length; i++) {
     const v = ir48k[i];
-    const safe = Number.isFinite(v) ? Math.max(-2.0, Math.min(2.0, v)) : 0;
+    const safe = Number.isFinite(v) ? (v < -2.0 ? -2.0 : v > 2.0 ? 2.0 : v) : 0;
     cleanSrc[i] = safe;
     energySq += safe * safe;
   }
   if (!(energySq > 1e-16)) return null;
-
-  if (Math.abs(srTarget - srSource) < 1) {
-    const copy = new Float32Array(new ArrayBuffer(cleanSrc.length * 4));
-    for (let i = 0; i < cleanSrc.length; i++) {
-      copy[i] = cleanSrc[i] * rateGainScale;
-    }
-    return copy;
-  }
 
   const outLen = Math.max(64, Math.round((cleanSrc.length * srTarget) / srSource));
   const out = new Float32Array(new ArrayBuffer(outLen * 4));
@@ -504,7 +514,7 @@ export function sweepExpiredVoiceGroups(ctx: AudioContext): void {
   const bank = banksByContext.get(ctx);
   if (!bank || bank.groups.size === 0) return;
   const now = ctx.currentTime;
-  for (const group of Array.from(bank.groups.values())) {
+  for (const group of bank.groups.values()) {
     if (now >= group.expiresAtAudioTime) {
       destroyVoiceGroup(bank, group);
     }
@@ -588,8 +598,11 @@ function enforcePoolBudget(
     // Never let a microscopic background brush steal a 4x louder foreground fortissimo strike unless >85% decayed
     if (cand.score > incomingEnergy * 4.0 && cand.score > 0.08) continue;
 
+    const victimOscs = cand.group.modes.length;
+    const victimHadConv = cand.group.irConv !== null;
     quickStealGroup(ctx, bank, cand.group);
-    ({ oscCount, convCount } = countPoolTotals(bank));
+    oscCount -= victimOscs;
+    if (victimHadConv) convCount--;
   }
 
   // Fallback pass if `onlyConvShortage` skipped non-convolver groups or vice versa
@@ -598,8 +611,11 @@ function enforcePoolBudget(
       if (!bank.groups.has(cand.group.key)) continue;
       if (!needsEviction()) break;
       if (cand.score > incomingEnergy * 6.0 && cand.score > 0.15) continue;
+      const victimOscs = cand.group.modes.length;
+      const victimHadConv = cand.group.irConv !== null;
       quickStealGroup(ctx, bank, cand.group);
-      ({ oscCount, convCount } = countPoolTotals(bank));
+      oscCount -= victimOscs;
+      if (victimHadConv) convCount--;
     }
   }
 
@@ -688,8 +704,71 @@ function scheduleModeEnvelopeAndPitch(
   return tEnd + 0.012;
 }
 
+function getOrCreateCachedClickPulseBuffer(
+  ctx: AudioContext,
+  bank: ContextModalBank,
+  tauC: number,
+  brightness: number,
+  isZeroVoice: boolean,
+): { buffer: AudioBuffer; totalPulseDur: number } {
+  const sr = ctx.sampleRate || 48000;
+  // Quantize tauC in ~4% log steps and brightness in 0.05 steps so rapid rolls reuse precomputed AudioBuffers!
+  const qTauIdx = Math.round(Math.log(tauC / 0.00025) / 0.04);
+  const qTau = Math.max(0.00025, Math.min(0.012, 0.00025 * Math.exp(qTauIdx * 0.04)));
+  const qBright = Math.round(Math.max(0, Math.min(1, brightness)) * 20) / 20;
+  const totalPulseDur = Math.max(0.012, qTau * 9);
+  const key = `${sr}:${qTauIdx}:${qBright}:${isZeroVoice ? 1 : 0}`;
+
+  const cached = bank.clickBufferCache.get(key);
+  if (cached) {
+    bank.clickBufferCache.delete(key);
+    bank.clickBufferCache.set(key, cached);
+    return { buffer: cached, totalPulseDur };
+  }
+
+  const sampleCount = Math.max(64, Math.ceil(sr * totalPulseDur));
+  const pulseBuf = ctx.createBuffer(1, sampleCount, sr);
+  const data = pulseBuf.getChannelData(0);
+  const invSr = 1 / sr;
+  const invTau = 1 / qTau;
+  const piOverTau = Math.PI * invTau;
+  const sampleScale = isZeroVoice ? 1.0 : 0.72;
+  const brightTexScale = 0.025 * qBright;
+  const texMul = Math.exp(-invSr / (qTau * 1.8));
+  const postDecMul = Math.exp((-1.2 * invSr) * invTau);
+  const tauSamples = Math.min(sampleCount, Math.ceil(qTau * sr));
+
+  let seed = ((qTauIdx * 2654435761) ^ (sampleCount * 7919) ^ 0x5bd1e995) | 1;
+  let texEnv = 1.0;
+  for (let i = 0; i < tauSamples; i++) {
+    const u = i * invSr * piOverTau;
+    const sinU = Math.sin(u);
+    const sample = 1.2 * Math.sqrt(sinU > 0 ? sinU : 0) * Math.cos(u);
+    seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
+    data[i] = sample * sampleScale + brightTexScale * (seed / 2147483648) * texEnv;
+    texEnv *= texMul;
+  }
+  let postDec = tauSamples < sampleCount ? Math.exp(-((tauSamples * invSr - qTau) * invTau) * 1.2) : 0;
+  for (let i = tauSamples; i < sampleCount; i++) {
+    const dt = (i * invSr - qTau) * invTau;
+    const sample = -0.32 * postDec * Math.cos(1.5 * dt);
+    postDec *= postDecMul;
+    seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
+    data[i] = sample * sampleScale + brightTexScale * (seed / 2147483648) * texEnv;
+    texEnv *= texMul;
+  }
+
+  if (bank.clickBufferCache.size >= MAX_CACHED_CLICK_BUFFERS) {
+    const oldest = bank.clickBufferCache.keys().next().value;
+    if (oldest !== undefined) bank.clickBufferCache.delete(oldest);
+  }
+  bank.clickBufferCache.set(key, pulseBuf);
+  return { buffer: pulseBuf, totalPulseDur };
+}
+
 function attachHertzianClickPulse(
   ctx: AudioContext,
+  bank: ContextModalBank,
   group: ActiveModalVoiceGroup,
   opts: TriggerModalImpactOptions,
   now: number,
@@ -700,27 +779,13 @@ function attachHertzianClickPulse(
   }
   const sr = ctx.sampleRate || 48000;
   const tauC = Math.max(0.00025, Math.min(0.012, opts.tauC));
-  const totalPulseDur = Math.max(0.012, tauC * 9);
-  const sampleCount = Math.max(64, Math.ceil(sr * totalPulseDur));
-  const pulseBuf = ctx.createBuffer(1, sampleCount, sr);
-  const data = pulseBuf.getChannelData(0);
-  let seed = ((Math.round(now * 10000) ^ (sampleCount * 7919)) | 1) >>> 0;
-  for (let i = 0; i < sampleCount; i++) {
-    const t = i / sr;
-    let sample: number;
-    if (t < tauC) {
-      const u = (Math.PI * t) / tauC;
-      sample = 1.2 * Math.sqrt(Math.max(0, Math.sin(u))) * Math.cos(u);
-    } else {
-      const dt = (t - tauC) / tauC;
-      sample = -0.32 * Math.exp(-dt * 1.2) * Math.cos(1.5 * dt);
-    }
-    seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
-    const white = seed / 2147483648;
-    const texEnv = Math.exp(-t / (tauC * 1.8));
-    const sampleScale = effectiveVoiceCount === 0 ? 1.0 : 0.72;
-    data[i] = sample * sampleScale + 0.025 * opts.brightness * white * texEnv;
-  }
+  const { buffer: pulseBuf, totalPulseDur } = getOrCreateCachedClickPulseBuffer(
+    ctx,
+    bank,
+    tauC,
+    opts.brightness,
+    effectiveVoiceCount === 0,
+  );
 
   const pulseSrc = ctx.createBufferSource();
   pulseSrc.buffer = pulseBuf;
@@ -1146,7 +1211,7 @@ export function triggerOrMutateModalVoice(opts: TriggerModalImpactOptions): Acti
       if (modeEnd > maxEnd) maxEnd = modeEnd;
     }
 
-    const pulseEnd = attachHertzianClickPulse(ctx, existing, opts, now, validSpecs.length);
+    const pulseEnd = attachHertzianClickPulse(ctx, bank, existing, opts, now, validSpecs.length);
     if (pulseEnd > maxEnd) maxEnd = pulseEnd;
     if (opts.snare) {
       const sEnd = attachSnareRattle(ctx, bank, existing, opts.snare, opts.level, now);
@@ -1341,7 +1406,7 @@ export function triggerOrMutateModalVoice(opts: TriggerModalImpactOptions): Acti
     group.modes.push(state);
   }
 
-  const pulseEnd = attachHertzianClickPulse(ctx, group, opts, now, maxModesThisVoice);
+  const pulseEnd = attachHertzianClickPulse(ctx, bank, group, opts, now, maxModesThisVoice);
   if (pulseEnd > maxEnd) maxEnd = pulseEnd;
   if (opts.snare) {
     const sEnd = attachSnareRattle(ctx, bank, group, opts.snare, opts.level, now);
@@ -1429,7 +1494,6 @@ export function chokeBodyVoice(
   if (!bank || bank.groups.size === 0) return false;
 
   const now = targetCtx.currentTime;
-  const keys = [nodeId, `${nodeId}:symp`];
   let chokedAny = false;
 
   const isGrab = (opts.mode ?? 'grab') === 'grab';
@@ -1443,8 +1507,9 @@ export function chokeBodyVoice(
     touchBeta = resolveStringBetaFromPoint(tNode, opts.localPoint, undefined, opts.sceneNodes);
   }
 
-  for (const key of keys) {
-    const group = bank.groups.get(key);
+  const checkSymp = bank.activeSympatheticKeys.size > 0;
+  for (let pass = 0; pass < (checkSymp ? 2 : 1); pass++) {
+    const group = bank.groups.get(pass === 0 ? nodeId : `${nodeId}:symp`);
     if (!group || now >= group.expiresAtAudioTime) continue;
 
     // Pre-existing resting support / rail / cushion / striker guard (60 ms post-strike window):

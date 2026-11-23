@@ -27,7 +27,6 @@
 import * as THREE from 'three';
 import type { ResonatorTubeEndCondition, SceneNode } from '../types/scene';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
-import { geomMatrixOf } from './csg';
 import { generateTubeMeshData } from './geom';
 import type { BodyModalProfile, ModalVoice } from './modalAudio';
 import {
@@ -100,7 +99,34 @@ export interface CoupledTubeResonatorResult {
 interface NodeWorldPose {
   node: SceneNode;
   pos: [number, number, number];
-  rotMat: THREE.Matrix4;
+  /** Column-major 3x3 rotation matrix: col0=[0..2], col1=[3..5], col2=[6..8] */
+  rot: [number, number, number, number, number, number, number, number, number];
+}
+
+const _posePos = new THREE.Vector3();
+const _poseQuat = new THREE.Quaternion();
+const _poseEuler = new THREE.Euler();
+const _poseScale = new THREE.Vector3(1, 1, 1);
+const _poseLocalMat = new THREE.Matrix4();
+const _poseWorldStack: THREE.Matrix4[] = [new THREE.Matrix4()];
+
+function composeNodeLocalMat(n: SceneNode, out: THREE.Matrix4): void {
+  const px = n.pos?.[0] ?? 0;
+  const py = n.pos?.[1] ?? 0;
+  const pz = n.pos?.[2] ?? 0;
+  if (n.quat) {
+    // MuJoCo [w, x, y, z] -> Three.js (x, y, z, w)
+    _poseQuat.set(n.quat[1], n.quat[2], n.quat[3], n.quat[0]).normalize();
+    _posePos.set(px, py, pz);
+    out.compose(_posePos, _poseQuat, _poseScale);
+  } else if (n.euler) {
+    _poseEuler.set(n.euler[0], n.euler[1], n.euler[2], 'XYZ');
+    _poseQuat.setFromEuler(_poseEuler);
+    _posePos.set(px, py, pz);
+    out.compose(_posePos, _poseQuat, _poseScale);
+  } else {
+    out.makeTranslation(px, py, pz);
+  }
 }
 
 function collectWorldPoses(
@@ -114,45 +140,62 @@ function collectWorldPoses(
   const xpos = liveKin?.data?.xpos;
   const xmat = liveKin?.data?.xmat;
 
-  const walk = (list: SceneNode[], parentMat: THREE.Matrix4) => {
-    for (const n of list) {
-      const localMat = geomMatrixOf({
-        name: '',
-        type: 'box',
-        size: [1, 1, 1],
-        pos: n.pos,
-        quat: n.quat,
-        euler: n.euler,
-      });
-      const worldMat = new THREE.Matrix4().multiplyMatrices(parentMat, localMat);
-      let pos: [number, number, number] = [
-        worldMat.elements[12],
-        worldMat.elements[13],
-        worldMat.elements[14],
-      ];
-      let rotMat = worldMat.clone();
-      rotMat.setPosition(0, 0, 0);
-
-      // Override with live MuJoCo world pose when running!
+  const walk = (list: SceneNode[], depth: number) => {
+    const parentMat = _poseWorldStack[depth];
+    let childMat = _poseWorldStack[depth + 1];
+    if (!childMat) {
+      childMat = new THREE.Matrix4();
+      _poseWorldStack[depth + 1] = childMat;
+    }
+    for (let i = 0; i < list.length; i++) {
+      const n = list[i];
+      const hasChildren = (n.children?.length ?? 0) > 0;
       const bId = bodyIdMap ? (bodyIdMap[n.name] ?? bodyIdMap[n.id]) : undefined;
-      if (bId !== undefined && bId > 0 && xpos && xmat && bId * 9 + 8 < xmat.length) {
-        pos = [xpos[bId * 3], xpos[bId * 3 + 1], xpos[bId * 3 + 2]];
-        // MuJoCo `xmat` is 3x3 row-major; THREE.Matrix4.set(...) takes row-major arguments!
+      const hasLive = bId !== undefined && bId > 0 && xpos !== undefined && xmat !== undefined && bId * 9 + 8 < xmat.length;
+
+      let pos: [number, number, number];
+      let rot: [number, number, number, number, number, number, number, number, number];
+
+      if (hasLive && !hasChildren) {
+        const m3 = bId * 3;
         const m9 = bId * 9;
-        rotMat = new THREE.Matrix4().set(
-          xmat[m9], xmat[m9 + 1], xmat[m9 + 2], 0,
-          xmat[m9 + 3], xmat[m9 + 4], xmat[m9 + 5], 0,
-          xmat[m9 + 6], xmat[m9 + 7], xmat[m9 + 8], 0,
-          0, 0, 0, 1,
-        );
+        pos = [xpos[m3], xpos[m3 + 1], xpos[m3 + 2]];
+        // MuJoCo xmat is row-major; store column-major so col c is rot[c*3..c*3+2]
+        rot = [
+          xmat[m9], xmat[m9 + 3], xmat[m9 + 6],
+          xmat[m9 + 1], xmat[m9 + 4], xmat[m9 + 7],
+          xmat[m9 + 2], xmat[m9 + 5], xmat[m9 + 8],
+        ];
+      } else {
+        composeNodeLocalMat(n, _poseLocalMat);
+        childMat.multiplyMatrices(parentMat, _poseLocalMat);
+        if (hasLive) {
+          const m3 = bId * 3;
+          const m9 = bId * 9;
+          pos = [xpos[m3], xpos[m3 + 1], xpos[m3 + 2]];
+          rot = [
+            xmat[m9], xmat[m9 + 3], xmat[m9 + 6],
+            xmat[m9 + 1], xmat[m9 + 4], xmat[m9 + 7],
+            xmat[m9 + 2], xmat[m9 + 5], xmat[m9 + 8],
+          ];
+        } else {
+          const e = childMat.elements;
+          pos = [e[12], e[13], e[14]];
+          rot = [
+            e[0], e[1], e[2],
+            e[4], e[5], e[6],
+            e[8], e[9], e[10],
+          ];
+        }
       }
 
-      out.set(n.id, { node: n, pos, rotMat });
-      if (n.children?.length) walk(n.children, worldMat);
+      out.set(n.id, { node: n, pos, rot });
+      if (hasChildren) walk(n.children!, depth + 1);
     }
   };
 
-  walk(nodes, new THREE.Matrix4());
+  _poseWorldStack[0].identity();
+  walk(nodes, 0);
   return out;
 }
 
@@ -177,41 +220,63 @@ function readLiveJointState(
   return { pos, vel };
 }
 
-/**
- * Extracts the 3D standing-wave air column of a hollow resonator tube (`isTube`,
- * CSG-hollowed cylinder/box, or `node.resonatorTube`), returning `null` for solid
- * un-hollowed rods/bars.
- */
-export function extractTubeAirColumn(
-  tubeNode: SceneNode,
-  liveKin?: ResonatorLiveKinematics,
-  poseOverride?: NodeWorldPose,
-): ExtractedTubeAirColumn | null {
-  if (tubeNode.acousticString || tubeNode.acousticMembrane || tubeNode.windInstrument) return null;
+interface CachedLocalTubeAirColumn {
+  tubeNodeId: string;
+  tubeName: string;
+  endCondition: ResonatorTubeEndCondition;
+  boreLengthM: number;
+  innerRadiusM: number;
+  outerRadiusM: number;
+  crossAreaM2: number;
+  fundamentalHz: number;
+  overtonesHz: number[];
+  qualityQ: number;
+  boreAxisLocal: 0 | 1 | 2;
+  uAxis: 0 | 1 | 2;
+  vAxis: 0 | 1 | 2;
+  centerU: number;
+  centerV: number;
+  boreLo: number;
+  boreHi: number;
+  fixedMouthSign: 1 | -1 | 0; // 0 = open both ends (resolved by world +Z)
+}
+
+const localTubeColumnCache = new Map<string, CachedLocalTubeAirColumn | null>();
+const MAX_LOCAL_TUBE_CACHE = 128;
+
+function tubeLocalGeometrySignature(n: SceneNode): string {
+  const spec = n.resonatorTube;
+  let sig = `${n.id}|${n.name}|${n.isTube ? 1 : 0}|${n.innerRadius ?? ''}|${n.outerRadius ?? ''}|${n.height ?? ''}|${n.csgEnabled === false ? 0 : 1}|${n.sculptVersion ?? 0}|${n.sculptEdited ? 1 : 0}|${spec?.endCondition ?? ''}|${spec?.tuningHz ?? ''}`;
+  const geoms = n.geoms;
+  if (geoms) {
+    for (let i = 0; i < geoms.length; i++) {
+      const g = geoms[i];
+      if (g.csgDerived || g.role === 'visual' || g.type === 'plane') continue;
+      sig += `;${g.name ?? ''}:${g.type}:${g.csg ?? ''}:${g.size ? g.size.join(',') : ''}:${g.pos ? g.pos.join(',') : ''}:${g.quat ? g.quat.join(',') : ''}:${g.euler ? g.euler.join(',') : ''}:${g.fromto ? g.fromto.join(',') : ''}:${g.renderVertices?.length ?? g.vertices?.length ?? 0}:${g.faces?.length ?? 0}`;
+    }
+  }
+  return sig;
+}
+
+function getOrAnalyzeLocalTubeAirColumn(tubeNode: SceneNode): CachedLocalTubeAirColumn | null {
+  const sig = tubeLocalGeometrySignature(tubeNode);
+  const hit = localTubeColumnCache.get(sig);
+  if (hit !== undefined) {
+    localTubeColumnCache.delete(sig);
+    localTubeColumnCache.set(sig, hit);
+    return hit;
+  }
 
   const spec = tubeNode.resonatorTube;
-  const pose: NodeWorldPose = poseOverride ?? (() => {
-    const m = geomMatrixOf({
-      name: '',
-      type: 'box',
-      size: [1, 1, 1],
-      pos: tubeNode.pos,
-      quat: tubeNode.quat,
-      euler: tubeNode.euler,
-    });
-    const r = m.clone();
-    r.setPosition(0, 0, 0);
-    return {
-      node: tubeNode,
-      pos: [tubeNode.pos?.[0] ?? 0, tubeNode.pos?.[1] ?? 0, tubeNode.pos?.[2] ?? 0],
-      rotMat: r,
-    };
-  })();
-  void liveKin;
-
-  // Fast exact parametric path when `isTube` has explicit `innerRadius` & `height` (plus check for bottom cap geom!)
   const scene = buildBodyRayScene(tubeNode, true);
-  if (!scene) return null;
+  if (!scene) {
+    if (localTubeColumnCache.size >= MAX_LOCAL_TUBE_CACHE) {
+      const oldest = localTubeColumnCache.keys().next().value;
+      if (oldest !== undefined) localTubeColumnCache.delete(oldest);
+    }
+    localTubeColumnCache.set(sig, null);
+    return null;
+  }
 
   const [bx0, bx1, by0, by1, bz0, bz1] = scene.bounds;
   const spans: [number, number, number] = [bx1 - bx0, by1 - by0, bz1 - bz0];
@@ -240,43 +305,49 @@ export function extractTubeAirColumn(
   axDir[boreAxis] = 1;
   const centerAxialIvs = castSceneRay(scene, axOrigin[0], axOrigin[1], axOrigin[2], axDir[0], axDir[1], axDir[2]);
 
-  // Cast two transverse rays through the middle to verify hollow bore and measure inner radius `r_in`
   const midAxial = 0.5 * (boundsMin[boreAxis] + boundsMax[boreAxis]);
-  const uOrigin: [number, number, number] = [0, 0, 0];
-  uOrigin[boreAxis] = midAxial;
-  uOrigin[vAxis] = centerV;
-  const uDir: [number, number, number] = [0, 0, 0];
-  uDir[uAxis] = 1;
-  const uIvs = castSceneRay(scene, uOrigin[0], uOrigin[1], uOrigin[2], uDir[0], uDir[1], uDir[2]);
-
-  const vOrigin: [number, number, number] = [0, 0, 0];
-  vOrigin[boreAxis] = midAxial;
-  vOrigin[uAxis] = centerU;
-  const vDir: [number, number, number] = [0, 0, 0];
-  vDir[vAxis] = 1;
-  const vIvs = castSceneRay(scene, vOrigin[0], vOrigin[1], vOrigin[2], vDir[0], vDir[1], vDir[2]);
 
   let innerRadiusM = 0;
   let outerRadiusM = 0.25 * (spans[uAxis] + spans[vAxis]);
   if (tubeNode.isTube && typeof tubeNode.innerRadius === 'number' && tubeNode.innerRadius > 0.001) {
     innerRadiusM = tubeNode.innerRadius;
     outerRadiusM = Math.max(innerRadiusM + 0.001, tubeNode.outerRadius ?? outerRadiusM);
-  } else if (uIvs.length >= 2 && vIvs.length >= 2) {
-    const gapU = uIvs[1][0] - uIvs[0][1];
-    const gapV = vIvs[1][0] - vIvs[0][1];
-    if (gapU > 0.002 && gapV > 0.002) {
-      innerRadiusM = 0.25 * (gapU + gapV);
-    }
   } else {
-    // Fallback to `analyze3DCavityAndPorts` for off-center or sculpted tubes
-    const cav = analyze3DCavityAndPorts(tubeNode);
-    if (!cav.hasHollowCavity || cav.ports.length === 0) return null;
-    innerRadiusM = cav.ports[0].eqRadiusM;
+    const uOrigin: [number, number, number] = [0, 0, 0];
+    uOrigin[boreAxis] = midAxial;
+    uOrigin[vAxis] = centerV;
+    const uDir: [number, number, number] = [0, 0, 0];
+    uDir[uAxis] = 1;
+    const uIvs = castSceneRay(scene, uOrigin[0], uOrigin[1], uOrigin[2], uDir[0], uDir[1], uDir[2]);
+
+    const vOrigin: [number, number, number] = [0, 0, 0];
+    vOrigin[boreAxis] = midAxial;
+    vOrigin[uAxis] = centerU;
+    const vDir: [number, number, number] = [0, 0, 0];
+    vDir[vAxis] = 1;
+    const vIvs = castSceneRay(scene, vOrigin[0], vOrigin[1], vOrigin[2], vDir[0], vDir[1], vDir[2]);
+
+    if (uIvs.length >= 2 && vIvs.length >= 2) {
+      const gapU = uIvs[1][0] - uIvs[0][1];
+      const gapV = vIvs[1][0] - vIvs[0][1];
+      if (gapU > 0.002 && gapV > 0.002) {
+        innerRadiusM = 0.25 * (gapU + gapV);
+      }
+    } else {
+      const cav = analyze3DCavityAndPorts(tubeNode);
+      if (!cav.hasHollowCavity || cav.ports.length === 0) {
+        localTubeColumnCache.set(sig, null);
+        return null;
+      }
+      innerRadiusM = cav.ports[0].eqRadiusM;
+    }
   }
 
-  if (innerRadiusM <= 0.0015) return null;
+  if (innerRadiusM <= 0.0015) {
+    localTubeColumnCache.set(sig, null);
+    return null;
+  }
 
-  // Determine end caps along `centerAxialIvs`
   let boreLo = boundsMin[boreAxis];
   let boreHi = boundsMax[boreAxis];
   let closedLo = false;
@@ -284,8 +355,10 @@ export function extractTubeAirColumn(
 
   for (const [a, b] of centerAxialIvs) {
     const segMid = 0.5 * (a + b);
-    // Solid plug across the entire bore interior? If solid covers >65% of axis it's a solid rod, NOT a hollow tube!
-    if (b - a > 0.65 * spans[boreAxis]) return null;
+    if (b - a > 0.65 * spans[boreAxis]) {
+      localTubeColumnCache.set(sig, null);
+      return null;
+    }
     if (segMid < midAxial) {
       closedLo = true;
       if (b > boreLo && b < midAxial) boreLo = b;
@@ -295,52 +368,23 @@ export function extractTubeAirColumn(
     }
   }
 
-  // Sealed at BOTH ends -> closed cylinder, cannot couple to external bar mouth!
-  if (closedLo && closedHi && !spec) return null;
+  if (closedLo && closedHi && !spec) {
+    localTubeColumnCache.set(sig, null);
+    return null;
+  }
 
   const boreLengthM = Math.max(0.015, boreHi - boreLo);
-  // Require reasonable tubular aspect ratio unless explicitly marked with `resonatorTube`
-  if (!spec && boreLengthM < 1.2 * innerRadiusM * 2) return null;
+  if (!spec && boreLengthM < 1.2 * innerRadiusM * 2) {
+    localTubeColumnCache.set(sig, null);
+    return null;
+  }
 
   const endCondition: ResonatorTubeEndCondition =
     spec?.endCondition ?? (closedLo !== closedHi ? 'open_closed' : 'open_open');
 
-  // Identify which side (+1 or -1 along `boreAxis`) is the open mouth facing upward (or toward the bar)
-  let mouthSignLocal: 1 | -1;
-  if (closedHi && !closedLo) {
-    mouthSignLocal = -1;
-  } else if (!closedHi && closedLo) {
-    mouthSignLocal = 1;
-  } else {
-    // Open at both ends: pick the end with higher world Z (`+Z` faces up toward suspended marimba bars!)
-    const axisVec = new THREE.Vector3(
-      boreAxis === 0 ? 1 : 0,
-      boreAxis === 1 ? 1 : 0,
-      boreAxis === 2 ? 1 : 0,
-    ).applyMatrix4(pose.rotMat);
-    mouthSignLocal = axisVec.z >= 0 ? 1 : -1;
-  }
+  const fixedMouthSign: 1 | -1 | 0 =
+    closedHi && !closedLo ? -1 : !closedHi && closedLo ? 1 : 0;
 
-  const axisLocalVec = new THREE.Vector3(
-    boreAxis === 0 ? mouthSignLocal : 0,
-    boreAxis === 1 ? mouthSignLocal : 0,
-    boreAxis === 2 ? mouthSignLocal : 0,
-  ).applyMatrix4(pose.rotMat).normalize();
-
-  const mouthLocalCoord = mouthSignLocal > 0 ? boreHi : boreLo;
-  const mouthLocalVec = new THREE.Vector3();
-  mouthLocalVec.setComponent(uAxis, centerU);
-  mouthLocalVec.setComponent(vAxis, centerV);
-  mouthLocalVec.setComponent(boreAxis, mouthLocalCoord);
-  mouthLocalVec.applyMatrix4(pose.rotMat);
-
-  const mouthCenterWorld: [number, number, number] = [
-    pose.pos[0] + mouthLocalVec.x,
-    pose.pos[1] + mouthLocalVec.y,
-    pose.pos[2] + mouthLocalVec.z,
-  ];
-
-  // Exact acoustic standing-wave frequency (or explicit `spec.tuningHz` override when set)
   const geomFundamentalHz =
     endCondition === 'open_closed'
       ? SPEED_OF_SOUND_AIR / (4 * (boreLengthM + UNFLANGED_END_CORRECTION * innerRadiusM))
@@ -353,16 +397,15 @@ export function extractTubeAirColumn(
 
   const overtonesHz =
     endCondition === 'open_closed'
-      ? [fundamentalHz, 3 * fundamentalHz, 5 * fundamentalHz]
-      : [fundamentalHz, 2 * fundamentalHz, 3 * fundamentalHz];
+      ? [+(fundamentalHz).toFixed(2), +(3 * fundamentalHz).toFixed(2), +(5 * fundamentalHz).toFixed(2)]
+      : [+(fundamentalHz).toFixed(2), +(2 * fundamentalHz).toFixed(2), +(3 * fundamentalHz).toFixed(2)];
 
-  // Viscothermal + radiation wall Q of a resonator tube (~24..42 for concert marimba/vibraphone tubes)
   const k1 = (2 * Math.PI * fundamentalHz) / SPEED_OF_SOUND_AIR;
   const radLoss = endCondition === 'open_closed' ? 0.25 * Math.pow(k1 * innerRadiusM, 2) : 0.5 * Math.pow(k1 * innerRadiusM, 2);
   const wallLoss = 1.2e-4 * Math.sqrt(fundamentalHz) / Math.max(0.003, innerRadiusM);
   const qualityQ = Math.max(14, Math.min(52, 1 / Math.max(0.018, radLoss + wallLoss)));
 
-  return {
+  const localCol: CachedLocalTubeAirColumn = {
     tubeNodeId: tubeNode.id,
     tubeName: tubeNode.name,
     endCondition,
@@ -371,11 +414,105 @@ export function extractTubeAirColumn(
     outerRadiusM: +outerRadiusM.toFixed(5),
     crossAreaM2: +(Math.PI * innerRadiusM * innerRadiusM).toFixed(6),
     fundamentalHz: +fundamentalHz.toFixed(2),
-    overtonesHz: overtonesHz.map((f) => +f.toFixed(2)),
+    overtonesHz,
     qualityQ: +qualityQ.toFixed(1),
     boreAxisLocal: boreAxis,
+    uAxis,
+    vAxis,
+    centerU,
+    centerV,
+    boreLo,
+    boreHi,
+    fixedMouthSign,
+  };
+
+  if (localTubeColumnCache.size >= MAX_LOCAL_TUBE_CACHE) {
+    const oldest = localTubeColumnCache.keys().next().value;
+    if (oldest !== undefined) localTubeColumnCache.delete(oldest);
+  }
+  localTubeColumnCache.set(sig, localCol);
+  return localCol;
+}
+
+/**
+ * Extracts the 3D standing-wave air column of a hollow resonator tube (`isTube`,
+ * CSG-hollowed cylinder/box, or `node.resonatorTube`), returning `null` for solid
+ * un-hollowed rods/bars.
+ */
+export function extractTubeAirColumn(
+  tubeNode: SceneNode,
+  liveKin?: ResonatorLiveKinematics,
+  poseOverride?: NodeWorldPose,
+): ExtractedTubeAirColumn | null {
+  if (tubeNode.acousticString || tubeNode.acousticMembrane || tubeNode.windInstrument) return null;
+  void liveKin;
+
+  const localCol = getOrAnalyzeLocalTubeAirColumn(tubeNode);
+  if (!localCol) return null;
+
+  let px: number, py: number, pz: number;
+  let r0: number, r1: number, r2: number, r3: number, r4: number, r5: number, r6: number, r7: number, r8: number;
+  if (poseOverride) {
+    px = poseOverride.pos[0];
+    py = poseOverride.pos[1];
+    pz = poseOverride.pos[2];
+    const rot = poseOverride.rot;
+    r0 = rot[0]; r1 = rot[1]; r2 = rot[2];
+    r3 = rot[3]; r4 = rot[4]; r5 = rot[5];
+    r6 = rot[6]; r7 = rot[7]; r8 = rot[8];
+  } else {
+    composeNodeLocalMat(tubeNode, _poseLocalMat);
+    const e = _poseLocalMat.elements;
+    px = e[12]; py = e[13]; pz = e[14];
+    r0 = e[0]; r1 = e[1]; r2 = e[2];
+    r3 = e[4]; r4 = e[5]; r5 = e[6];
+    r6 = e[8]; r7 = e[9]; r8 = e[10];
+  }
+
+  const bAx = localCol.boreAxisLocal;
+  const axX = bAx === 0 ? r0 : bAx === 1 ? r3 : r6;
+  const axY = bAx === 0 ? r1 : bAx === 1 ? r4 : r7;
+  const axZ = bAx === 0 ? r2 : bAx === 1 ? r5 : r8;
+  const mouthSignLocal: 1 | -1 = localCol.fixedMouthSign !== 0
+    ? localCol.fixedMouthSign
+    : (axZ >= 0 ? 1 : -1);
+
+  const axLen = Math.sqrt(axX * axX + axY * axY + axZ * axZ) || 1;
+  const invAxLen = mouthSignLocal / axLen;
+  const axisDirWorld: [number, number, number] = [axX * invAxLen, axY * invAxLen, axZ * invAxLen];
+
+  const mouthLocalCoord = mouthSignLocal > 0 ? localCol.boreHi : localCol.boreLo;
+  let lx = 0, ly = 0, lz = 0;
+  if (localCol.uAxis === 0) lx = localCol.centerU;
+  else if (localCol.uAxis === 1) ly = localCol.centerU;
+  else lz = localCol.centerU;
+  if (localCol.vAxis === 0) lx = localCol.centerV;
+  else if (localCol.vAxis === 1) ly = localCol.centerV;
+  else lz = localCol.centerV;
+  if (bAx === 0) lx = mouthLocalCoord;
+  else if (bAx === 1) ly = mouthLocalCoord;
+  else lz = mouthLocalCoord;
+
+  const mouthCenterWorld: [number, number, number] = [
+    px + r0 * lx + r3 * ly + r6 * lz,
+    py + r1 * lx + r4 * ly + r7 * lz,
+    pz + r2 * lx + r5 * ly + r8 * lz,
+  ];
+
+  return {
+    tubeNodeId: localCol.tubeNodeId,
+    tubeName: localCol.tubeName,
+    endCondition: localCol.endCondition,
+    boreLengthM: localCol.boreLengthM,
+    innerRadiusM: localCol.innerRadiusM,
+    outerRadiusM: localCol.outerRadiusM,
+    crossAreaM2: localCol.crossAreaM2,
+    fundamentalHz: localCol.fundamentalHz,
+    overtonesHz: localCol.overtonesHz,
+    qualityQ: localCol.qualityQ,
+    boreAxisLocal: localCol.boreAxisLocal,
     mouthSignLocal,
-    axisDirWorld: [axisLocalVec.x, axisLocalVec.y, axisLocalVec.z],
+    axisDirWorld,
     mouthCenterWorld,
   };
 }
@@ -436,6 +573,13 @@ export function resolveExternalTubeResonator(
   const [barThick, barWidth, barLen] = barSec.dimsSortedAsc;
   const [, , barLenAxis] = barSec.axisOrderAsc;
 
+  const barHalfL = Math.max(0.01, 0.5 * barLen);
+  const barRot = barPose.rot;
+  const barLenColOff = barLenAxis * 3;
+  const barLenAxisX = barRot[barLenColOff];
+  const barLenAxisY = barRot[barLenColOff + 1];
+  const barLenAxisZ = barRot[barLenColOff + 2];
+
   let bestTube: ExtractedTubeAirColumn | null = null;
   let bestTubeNode: SceneNode | null = null;
   let bestScore = -1;
@@ -465,14 +609,12 @@ export function resolveExternalTubeResonator(
     const dy = col.mouthCenterWorld[1] - barPose.pos[1];
     const dz = col.mouthCenterWorld[2] - barPose.pos[2];
 
-    // Project mouth offset into bar's local frame to find strike/antinode coordinate xi in [-1, 1]
-    const invBarRot = barPose.rotMat.clone().transpose();
-    const relLocal = new THREE.Vector3(dx, dy, dz).applyMatrix4(invBarRot);
-    const barHalfL = Math.max(0.01, 0.5 * barLen);
-    const xi = Math.max(-1, Math.min(1, relLocal.getComponent(barLenAxis) / barHalfL));
+    // Project mouth offset onto bar's longitudinal local axis via column dot product (R^T * d, zero Matrix4/Vector3 allocs!)
+    const relAlongLen = dx * barLenAxisX + dy * barLenAxisY + dz * barLenAxisZ;
+    const xi = Math.max(-1, Math.min(1, relAlongLen / barHalfL));
 
     const lateralCapture = 2.0 * col.innerRadiusM + 0.55 * barWidth;
-    const lateralDist = Math.hypot(dx, dy);
+    const lateralDist = Math.sqrt(dx * dx + dy * dy);
     const verticalGap = Math.max(0, Math.abs(dz) - 0.5 * barThick);
 
     if (!explicitMatch) {

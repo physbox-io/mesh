@@ -53,7 +53,9 @@ interface WindSlot {
   nextMinus: Float64Array;
   k: Float64Array;
   shunt: Float64Array;
+  holeAlpha: Float64Array;
   holeState: Float64Array;
+  hasOpenHoles: boolean;
   bellAlpha: number;
   bellLp: number;
   reedLp: number;
@@ -88,7 +90,9 @@ function createWindSlot(): WindSlot {
     nextMinus: new Float64Array(MAX_BORE_CELLS),
     k: new Float64Array(MAX_BORE_CELLS),
     shunt: new Float64Array(MAX_BORE_CELLS),
+    holeAlpha: new Float64Array(MAX_BORE_CELLS),
     holeState: new Float64Array(MAX_BORE_CELLS),
+    hasOpenHoles: false,
     bellAlpha: 0.25,
     bellLp: 0,
     reedLp: 0,
@@ -126,18 +130,65 @@ function clampFinite(v: number, lo: number, hi: number, fallback: number): numbe
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+function onePolePhaseDelay(a: number, sinW: number, cosW: number, invW: number): number {
+  const b = 1 - a;
+  return Math.atan2(b * sinW, 1 - b * cosW) * invW;
+}
+
 export class KellyLochbaumSynthBank {
   private readonly slots: WindSlot[];
+  private readonly logAreaScratch = new Float64Array(MAX_BORE_CELLS + 1);
+  private readonly seenIds: string[] = [];
   private rng = 0x2468ace1;
   private sampleRate: number;
+  private dt = 1 / REF_SAMPLE_RATE;
+  private srRatio = 1;
+  private envAlpha = 0;
+  private embAlpha = 0;
+  private cellLoss = 0.9995;
+  private holeIdleDecay = 0.85;
+  private dcR = 0;
+  private vibInc = 0;
 
   constructor(sampleRate = REF_SAMPLE_RATE, maxSlots = 4) {
     this.sampleRate = Number.isFinite(sampleRate) && sampleRate > 8000 ? sampleRate : REF_SAMPLE_RATE;
     this.slots = Array.from({ length: maxSlots }, () => createWindSlot());
+    this.recomputeRateConstants();
+  }
+
+  private recomputeRateConstants(): void {
+    const sr = this.sampleRate;
+    const srRatio = REF_SAMPLE_RATE / sr;
+    this.dt = 1 / sr;
+    this.srRatio = srRatio;
+    this.envAlpha = 1 - Math.exp(-0.0011 * srRatio);
+    this.embAlpha = 1 - Math.exp(-0.0020 * srRatio);
+    this.cellLoss = Math.pow(0.9995, srRatio);
+    this.holeIdleDecay = Math.pow(0.85, srRatio);
+    this.dcR = Math.exp((-2 * Math.PI * 18) / sr);
+    this.vibInc = (2 * Math.PI * 4.8) / sr;
+    // Refresh precomputed tonehole one-pole alphas for any active slots
+    for (let w = 0; w < this.slots.length; w++) {
+      const ws = this.slots[w];
+      if (!ws.hasOpenHoles) continue;
+      const M = ws.cellCount;
+      for (let c = 0; c < M; c++) {
+        const sh = ws.shunt[c];
+        if (sh < -0.001) {
+          const rawAHole = Math.min(0.96, Math.sqrt(-sh) * 1.04);
+          ws.holeAlpha[c] = sr === REF_SAMPLE_RATE ? rawAHole : 1 - Math.pow(1 - rawAHole, srRatio);
+        } else {
+          ws.holeAlpha[c] = 0;
+        }
+      }
+    }
   }
 
   setSampleRate(sr: number): void {
-    if (Number.isFinite(sr) && sr > 8000) this.sampleRate = sr;
+    if (Number.isFinite(sr) && sr > 8000 && sr !== this.sampleRate) {
+      this.sampleRate = sr;
+      this.recomputeRateConstants();
+    }
   }
 
   silenceAll(): void {
@@ -156,23 +207,29 @@ export class KellyLochbaumSynthBank {
 
   updateVoices(voices: WindVoiceConfig[]): void {
     const sr = this.sampleRate;
-    const dt = 1 / sr;
-    const seen = new Set<string>();
+    const dt = this.dt;
+    const srRatio = this.srRatio;
+    const seenIds = this.seenIds;
+    seenIds.length = 0;
 
     // Prioritize actively blown voices ahead of idle voices so >4 instruments never starve active audio!
-    const valid = voices.filter((v) => v && typeof v.id === 'string' && v.id.length > 0);
-    const ordered = valid.length > this.slots.length
-      ? [...valid].sort((a, b) => {
-          const aOn = Number.isFinite(a.breathKPa) && a.breathKPa >= 0.08 ? 1 : 0;
-          const bOn = Number.isFinite(b.breathKPa) && b.breathKPa >= 0.08 ? 1 : 0;
-          if (bOn !== aOn) return bOn - aOn;
-          return (Number.isFinite(b.breathKPa) ? b.breathKPa : 0) - (Number.isFinite(a.breathKPa) ? a.breathKPa : 0);
-        })
-      : valid;
+    const valid: WindVoiceConfig[] = [];
+    for (let i = 0; i < voices.length; i++) {
+      const v = voices[i];
+      if (v && typeof v.id === 'string' && v.id.length > 0) valid.push(v);
+    }
+    if (valid.length > this.slots.length) {
+      valid.sort((a, b) => {
+        const aOn = Number.isFinite(a.breathKPa) && a.breathKPa >= 0.08 ? 1 : 0;
+        const bOn = Number.isFinite(b.breathKPa) && b.breathKPa >= 0.08 ? 1 : 0;
+        if (bOn !== aOn) return bOn - aOn;
+        return (Number.isFinite(b.breathKPa) ? b.breathKPa : 0) - (Number.isFinite(a.breathKPa) ? a.breathKPa : 0);
+      });
+    }
 
-    for (let vIdx = 0; vIdx < ordered.length && vIdx < this.slots.length; vIdx++) {
-      const cfg = ordered[vIdx];
-      seen.add(cfg.id);
+    for (let vIdx = 0; vIdx < valid.length && vIdx < this.slots.length; vIdx++) {
+      const cfg = valid[vIdx];
+      seenIds.push(cfg.id);
 
       let slot: WindSlot | null = null;
       for (let i = 0; i < this.slots.length; i++) {
@@ -246,14 +303,13 @@ export class KellyLochbaumSynthBank {
           ? fOpenEst
           : Math.max(40, Math.min(1400, slot.embouchureHz * 0.92));
       const wRef = (2 * Math.PI * fRef) / sr;
-      const onePolePhaseDelay = (a: number): number => {
-        const b = 1 - a;
-        return Math.atan2(b * Math.sin(wRef), 1 - b * Math.cos(wRef)) / Math.max(1e-6, wRef);
-      };
-      const loopLagSamples = onePolePhaseDelay(slot.bellAlpha) + onePolePhaseDelay(alphaLoop);
+      const sinW = Math.sin(wRef);
+      const cosW = Math.cos(wRef);
+      const invW = 1 / Math.max(1e-6, wRef);
+      const loopLagSamples =
+        onePolePhaseDelay(slot.bellAlpha, sinW, cosW, invW) +
+        onePolePhaseDelay(alphaLoop, sinW, cosW, invW);
 
-      // 2nd-order Thiran allpass fractional termination over `D ∈ [1.5, 3.5)` round-trip samples:
-      // Zero clamping dead-zones across the full 2-sample cell step and all poles strictly inside `|z_p| <= 0.462`!
       const targetRoundTrip = clampFinite(
         2 * scaledExact - loopLagSamples,
         13.5,
@@ -265,11 +321,12 @@ export class KellyLochbaumSynthBank {
       slot.thiranA1 = -2 * ((D - 2) / (D + 1));
       slot.thiranA2 = ((D - 1) * (D - 2)) / ((D + 1) * (D + 2));
 
-      if (slot.cellCount !== M) {
-        if (M > slot.cellCount) {
-          const tailP = slot.pPlus[Math.max(0, slot.cellCount - 1)];
-          const tailM = slot.pMinus[Math.max(0, slot.cellCount - 1)];
-          for (let c = slot.cellCount; c < M; c++) {
+      const prevM = slot.cellCount;
+      if (prevM !== M) {
+        if (M > prevM) {
+          const tailP = slot.pPlus[Math.max(0, prevM - 1)];
+          const tailM = slot.pMinus[Math.max(0, prevM - 1)];
+          for (let c = prevM; c < M; c++) {
             slot.pPlus[c] = tailP;
             slot.pMinus[c] = tailM;
           }
@@ -277,24 +334,26 @@ export class KellyLochbaumSynthBank {
         slot.cellCount = M;
       }
 
-      // Log-area taper interpolation preserves exact total expansion `A_bell / A_mouth` across any `M` or sample rate!
+      const clearEnd = Math.min(MAX_BORE_CELLS, Math.max(prevM, M));
       const jk = Array.isArray(cfg.junctionK) ? cfg.junctionK : [];
-      slot.k.fill(0);
+      slot.k.fill(0, 0, clearEnd);
       if (jk.length > 0 && M >= 2) {
         if (jk.length === M - 1) {
           for (let i = 0; i < M - 1; i++) {
             slot.k[i] = clampFinite(jk[i], -0.92, 0.92, 0);
           }
         } else {
-          const nSrc = jk.length;
-          const logArea = new Float64Array(nSrc + 1);
+          const nSrc = Math.min(jk.length, MAX_BORE_CELLS);
+          const logArea = this.logAreaScratch;
+          logArea[0] = 0;
           for (let j = 0; j < nSrc; j++) {
             const kj = clampFinite(jk[j], -0.92, 0.92, 0);
             logArea[j + 1] = logArea[j] + Math.log((1 - kj) / (1 + kj));
           }
           let prevLogA = logArea[0];
+          const invMm1 = 1 / (M - 1);
           for (let c = 1; c < M; c++) {
-            const pos = (c / (M - 1)) * nSrc;
+            const pos = c * invMm1 * nSrc;
             const i0 = Math.min(nSrc, Math.floor(pos));
             const i1 = Math.min(nSrc, i0 + 1);
             const frac = pos - i0;
@@ -306,8 +365,10 @@ export class KellyLochbaumSynthBank {
         }
       }
 
-      // Combine parallel open-tonehole shunts cleanly if multiple holes map to the same cell
-      slot.shunt.fill(0);
+      // Combine parallel open-tonehole shunts and precompute per-cell `holeAlpha[c]` ONCE (zero Math.sqrt/Math.pow in render!)
+      slot.shunt.fill(0, 0, clearEnd);
+      slot.holeAlpha.fill(0, 0, clearEnd);
+      let anyOpenHole = false;
       const shunts = Array.isArray(cfg.shunts) ? cfg.shunts : [];
       const refDenom = Math.max(1, baseCellCount - 1);
       const cellScale = (M - 1) / refDenom;
@@ -319,23 +380,28 @@ export class KellyLochbaumSynthBank {
           const cNew = clampFinite(shItem.coeff, -0.92, 0, 0);
           if (cNew >= -1e-5) continue;
           const cPrev = slot.shunt[ci];
+          let cComb: number;
           if (cPrev < -1e-5) {
-            const yPrev = -cPrev / (1 + cPrev);
-            const yNew = -cNew / (1 + cNew);
-            const yTot = yPrev + yNew;
-            slot.shunt[ci] = Math.max(-0.92, -yTot / (1 + yTot));
+            const yTot = -cPrev / (1 + cPrev) + -cNew / (1 + cNew);
+            cComb = Math.max(-0.92, -yTot / (1 + yTot));
           } else {
-            slot.shunt[ci] = cNew;
+            cComb = cNew;
+          }
+          slot.shunt[ci] = cComb;
+          if (cComb < -0.001) {
+            const rawAHole = Math.min(0.96, Math.sqrt(-cComb) * 1.04);
+            slot.holeAlpha[ci] = sr === REF_SAMPLE_RATE ? rawAHole : 1 - Math.pow(1 - rawAHole, srRatio);
+            anyOpenHole = true;
           }
         }
       }
-
+      slot.hasOpenHoles = anyOpenHole;
       slot.active = true;
     }
 
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
-      if (s.active && !seen.has(s.id)) {
+      if (s.active && !seenIds.includes(s.id)) {
         s.targetBreath = 0;
       }
     }
@@ -366,14 +432,13 @@ export class KellyLochbaumSynthBank {
     }
 
     const sr = this.sampleRate;
-    const dt = 1 / sr;
-    const srRatio = REF_SAMPLE_RATE / sr;
-    const envAlpha = 1 - Math.exp(-0.0011 * srRatio);
-    const embAlpha = 1 - Math.exp(-0.0020 * srRatio);
-    const cellLoss = Math.pow(0.9995, srRatio);
-    const holeIdleDecay = Math.pow(0.85, srRatio);
-    const dcR = Math.exp((-2 * Math.PI * 18) / sr);
-    const vibInc = (2 * Math.PI * 4.8) / sr;
+    const dt = this.dt;
+    const envAlpha = this.envAlpha;
+    const embAlpha = this.embAlpha;
+    const cellLoss = this.cellLoss;
+    const holeIdleDecay = this.holeIdleDecay;
+    const dcR = this.dcR;
+    const vibInc = this.vibInc;
 
     for (let w = 0; w < this.slots.length; w++) {
       const ws = this.slots[w];
@@ -385,174 +450,217 @@ export class KellyLochbaumSynthBank {
       }
 
       const M = ws.cellCount;
+      const Mm1 = M - 1;
       const kArr = ws.k;
-      const shArr = ws.shunt;
+      const holeAlphaArr = ws.holeAlpha;
       const hState = ws.holeState;
+      const hasOpenHoles = ws.hasOpenHoles;
       const bellAlpha = ws.bellAlpha;
       const a1 = ws.thiranA1;
       const a2 = ws.thiranA2;
       const exc = ws.exciter;
+      const targetBreath = ws.targetBreath;
+      const embouchureHz = ws.embouchureHz;
+      const slotGain = ws.gain;
+      const turb = exc === 2 ? 0.032 : exc === 3 ? 0.018 : 0.007;
 
       const fOpenEst = sr / Math.max(8, 2 * ws.exactCellsScaled);
       const loopCutHz = exc === 0
-        ? Math.min(sr * 0.35, Math.max(280, ws.embouchureHz * 1.75))
+        ? Math.min(sr * 0.35, Math.max(280, embouchureHz * 1.75))
         : exc === 2
-          ? Math.min(sr * 0.42, Math.max(700, Math.max(ws.embouchureHz * 2.4, fOpenEst * 2.8)))
-          : Math.min(sr * 0.40, Math.max(380, ws.embouchureHz * 2.6));
+          ? Math.min(sr * 0.42, Math.max(700, Math.max(embouchureHz * 2.4, fOpenEst * 2.8)))
+          : Math.min(sr * 0.40, Math.max(380, embouchureHz * 2.6));
       const alphaLoop = dt / (1 / (2 * Math.PI * loopCutHz) + dt);
+      const alphaJetHp = Math.min(0.25, (2 * Math.PI * Math.max(45, fOpenEst * 0.35)) * dt);
 
-      const radCutHz = Math.min(sr * 0.42, 1300 + 1800 * Math.max(0.2, ws.targetBreath));
+      const radCutHz = Math.min(sr * 0.42, 1300 + 1800 * Math.max(0.2, targetBreath));
       const alphaRad = dt / (1 / (2 * Math.PI * radCutHz) + dt);
 
-      for (let i = 0; i < nFrames; i++) {
-        ws.breathEnv += envAlpha * (ws.targetBreath - ws.breathEnv);
-        ws.smoothEmbHz += embAlpha * (ws.embouchureHz - ws.smoothEmbHz);
-        ws.vibPhase += vibInc;
-        if (ws.vibPhase > Math.PI * 2) ws.vibPhase -= Math.PI * 2;
+      // Hoist slot arrays & state into locals for tight register-allocated inner loop
+      let pPlus = ws.pPlus;
+      let pMinus = ws.pMinus;
+      let nPlus = ws.nextPlus;
+      let nMinus = ws.nextMinus;
+      let breathEnv = ws.breathEnv;
+      let smoothEmbHz = ws.smoothEmbHz;
+      let vibPhase = ws.vibPhase;
+      let apS1 = ws.apS1;
+      let apS2 = ws.apS2;
+      let bellLp = ws.bellLp;
+      let reedLp = ws.reedLp;
+      let lipY = ws.lipY;
+      let lipV = ws.lipV;
+      let outLp1 = ws.outLp1;
+      let outLp2 = ws.outLp2;
+      let dcX1 = ws.dcX1;
+      let dcY1 = ws.dcY1;
 
-        const vib = 1 + 0.011 * Math.sin(ws.vibPhase);
-        const turb = exc === 2 ? 0.032 : exc === 3 ? 0.018 : 0.007;
-        const pMouth = ws.breathEnv * vib * (1 + turb * this.nextNoise());
+      for (let i = 0; i < nFrames; i++) {
+        breathEnv += envAlpha * (targetBreath - breathEnv);
+        smoothEmbHz += embAlpha * (embouchureHz - smoothEmbHz);
+        vibPhase += vibInc;
+        if (vibPhase > Math.PI * 2) vibPhase -= Math.PI * 2;
+
+        const vib = 1 + 0.011 * Math.sin(vibPhase);
+        const pMouth = breathEnv * vib * (1 + turb * this.nextNoise());
 
         // Open-end 2nd-order Thiran fractional boundary (DF-II Transposed) + spherical radiation
-        const pIncEnd = ws.pPlus[M - 1];
-        const pEnd = a2 * pIncEnd + ws.apS1;
-        ws.apS1 = a1 * (pIncEnd - pEnd) + ws.apS2;
-        ws.apS2 = pIncEnd - a2 * pEnd;
+        const pIncEnd = pPlus[Mm1];
+        const pEnd = a2 * pIncEnd + apS1;
+        apS1 = a1 * (pIncEnd - pEnd) + apS2;
+        apS2 = pIncEnd - a2 * pEnd;
 
-        ws.bellLp += bellAlpha * (pEnd - ws.bellLp);
-        const pReflBell = -0.968 * ws.bellLp;
-        let radiated = (pEnd - ws.bellLp) * 0.88 + 0.44 * ws.bellLp;
+        bellLp += bellAlpha * (pEnd - bellLp);
+        const pReflBell = -0.968 * bellLp;
+        let radiated = (pEnd - bellLp) * 0.88 + 0.44 * bellLp;
 
         let pIn0: number;
-        const pBack0 = ws.pMinus[0];
-        ws.reedLp += alphaLoop * (pBack0 - ws.reedLp);
+        const pBack0 = pMinus[0];
+        reedLp += alphaLoop * (pBack0 - reedLp);
 
         if (exc === 0) {
-          // Inward-striking compliant reed valve (smooth C^2 cubic pressure-reflection curve)
-          const dp = pMouth - ws.reedLp;
-          const dc = Math.max(-1.1, Math.min(1.1, dp));
+          const dp = pMouth - reedLp;
+          const dc = dp < -1.1 ? -1.1 : dp > 1.1 ? 1.1 : dp;
           let rReed = 0.24 + 0.88 * dc - 0.16 * dc * dc * dc;
           if (rReed < -0.90) rReed = -0.90;
           else if (rReed > 0.97) rReed = 0.97;
           pIn0 = pMouth - rReed * dp;
         } else if (exc === 1) {
-          // Passive bandpass-coupled 1-DOF brass lip-reed valve (sub-stepped if omega*dt > 0.45)
           const qLip = 3.6;
-          const omegaLip = 2 * Math.PI * ws.smoothEmbHz;
+          const omegaLip = 2 * Math.PI * smoothEmbHz;
           const subSteps = omegaLip * dt > 0.45 ? 2 : 1;
           const dtSub = dt / subSteps;
           const omegaLipSq = omegaLip * omegaLip;
           const dampLip = omegaLip / qLip;
 
           for (let st = 0; st < subSteps; st++) {
-            const acc = omegaLipSq * (ws.reedLp - ws.lipY - 0.35 * ws.lipY * ws.lipY * ws.lipY) - dampLip * ws.lipV;
-            ws.lipV += dtSub * acc;
-            ws.lipY += dtSub * ws.lipV;
-            if (ws.lipY < -1.2) {
-              ws.lipY = -1.2;
-              ws.lipV *= -0.15;
-            } else if (ws.lipY > 1.2) {
-              ws.lipY = 1.2;
-              ws.lipV *= -0.15;
+            const acc = omegaLipSq * (reedLp - lipY - 0.35 * lipY * lipY * lipY) - dampLip * lipV;
+            lipV += dtSub * acc;
+            lipY += dtSub * lipV;
+            if (lipY < -1.2) {
+              lipY = -1.2;
+              lipV *= -0.15;
+            } else if (lipY > 1.2) {
+              lipY = 1.2;
+              lipV *= -0.15;
             }
           }
 
-          const vBp = ws.lipV / Math.max(20, omegaLip * qLip);
+          const vBp = lipV / Math.max(20, omegaLip * qLip);
           const lipOpen = Math.max(0, 0.24 + 2.85 * vBp);
-          const dp = pMouth - 0.55 * ws.reedLp;
+          const dp = pMouth - 0.55 * reedLp;
           const flow = lipOpen * Math.tanh(dp * 1.6) * 0.72;
-          pIn0 = 0.94 * ws.reedLp + flow;
+          pIn0 = 0.94 * reedLp + flow;
         } else if (exc === 3) {
-          // Fletcher autonomous compliant flap-valve (sub-resonant relaxation slap-oscillator + Bernoulli suction)
           const qFlap = 1.85;
-          const omegaFlap = 2 * Math.PI * ws.smoothEmbHz;
+          const omegaFlap = 2 * Math.PI * smoothEmbHz;
           const omegaSq = omegaFlap * omegaFlap;
           const dampFlap = omegaFlap / qFlap;
-          const bernSuction = pMouth * (0.36 - 1.35 * Math.max(0, ws.lipY + 0.18));
-          const aeroVelDrive = pMouth * 1.55 * dampFlap * ws.lipV;
+          const bernSuction = pMouth * (0.36 - 1.35 * Math.max(0, lipY + 0.18));
+          const aeroVelDrive = pMouth * 1.55 * dampFlap * lipV;
           const acc =
-            omegaSq * (bernSuction + 0.38 * ws.reedLp - ws.lipY - 0.52 * ws.lipY * ws.lipY * ws.lipY) +
+            omegaSq * (bernSuction + 0.38 * reedLp - lipY - 0.52 * lipY * lipY * lipY) +
             aeroVelDrive -
-            dampFlap * ws.lipV;
-          ws.lipV += dt * acc;
-          ws.lipY += dt * ws.lipV;
-          if (ws.lipY < -1.05) {
-            ws.lipY = -1.05;
-            ws.lipV *= -0.10;
-          } else if (ws.lipY > 1.15) {
-            ws.lipY = 1.15;
-            ws.lipV *= -0.12;
+            dampFlap * lipV;
+          lipV += dt * acc;
+          lipY += dt * lipV;
+          if (lipY < -1.05) {
+            lipY = -1.05;
+            lipV *= -0.10;
+          } else if (lipY > 1.15) {
+            lipY = 1.15;
+            lipV *= -0.12;
           }
-          const flapOpen = Math.max(0, 0.16 + 1.15 * ws.lipY);
-          const dp = pMouth - 0.45 * ws.reedLp;
+          const flapOpen = Math.max(0, 0.16 + 1.15 * lipY);
+          const dp = pMouth - 0.45 * reedLp;
           const flow = flapOpen * Math.tanh(dp * 1.85) * 0.84;
-          pIn0 = 0.86 * ws.reedLp + flow;
+          pIn0 = 0.86 * reedLp + flow;
         } else {
-          // Open-embouchure air-jet flute: AC-coupled jet-labium deflection (`reedLp - lipY` -> zero DC gain,
-          // preventing open-open DC latch-up!) + negative open-end reflection (-0.78) -> pure lambda/2 limit cycle!
-          const alphaJetHp = Math.min(0.25, (2 * Math.PI * Math.max(45, fOpenEst * 0.35)) * dt);
-          ws.lipY += alphaJetHp * (ws.reedLp - ws.lipY);
-          const acBore = ws.reedLp - ws.lipY;
+          lipY += alphaJetHp * (reedLp - lipY);
+          const acBore = reedLp - lipY;
           const jetNoise = 0.06 * pMouth * this.nextNoise();
           const uJet = acBore * (1.85 + 0.85 * pMouth) + jetNoise;
           const jet = -pMouth * 0.72 * Math.tanh(uJet * 1.45);
-          pIn0 = -0.78 * ws.reedLp + jet;
+          pIn0 = -0.78 * reedLp + jet;
         }
 
         if (!Number.isFinite(pIn0)) {
+          ws.pPlus = pPlus; ws.pMinus = pMinus; ws.nextPlus = nPlus; ws.nextMinus = nMinus;
           clearWindSlotState(ws);
+          apS1 = 0; apS2 = 0; bellLp = 0; reedLp = 0; outLp1 = 0; outLp2 = 0; lipY = 0; lipV = 0; dcX1 = 0; dcY1 = 0;
           continue;
         }
         if (pIn0 > 1.5) pIn0 = 1.5;
         else if (pIn0 < -1.5) pIn0 = -1.5;
 
-        // 1-multiply Kelly–Lochbaum spatial scattering ladder + open tonehole shunts
-        const nPlus = ws.nextPlus;
-        const nMinus = ws.nextMinus;
+        // 1-multiply Kelly–Lochbaum spatial scattering ladder + precomputed open tonehole shunts
         nPlus[0] = pIn0;
-        nMinus[M - 1] = pReflBell;
-        for (let c = 0; c < M - 1; c++) {
-          let fp = ws.pPlus[c];
-          let bm = ws.pMinus[c + 1];
-          const sh = shArr[c];
-          if (sh < -0.001) {
-            const rawAHole = Math.min(0.96, Math.sqrt(-sh) * 1.04);
-            const aHole = sr === REF_SAMPLE_RATE ? rawAHole : 1 - Math.pow(1 - rawAHole, srRatio);
-            const targetW = -0.985 * (fp + bm);
-            hState[c] += aHole * (targetW - hState[c]);
-            const w = hState[c];
-            fp += w;
-            bm += w;
-            radiated -= w * 0.62;
-          } else {
-            const decayed = hState[c] * holeIdleDecay;
-            hState[c] = Math.abs(decayed) < 1e-18 ? 0 : decayed;
+        nMinus[Mm1] = pReflBell;
+        if (hasOpenHoles) {
+          for (let c = 0; c < Mm1; c++) {
+            let fp = pPlus[c];
+            let bm = pMinus[c + 1];
+            const aHole = holeAlphaArr[c];
+            if (aHole > 0) {
+              const targetW = -0.985 * (fp + bm);
+              const nextH = hState[c] + aHole * (targetW - hState[c]);
+              hState[c] = nextH;
+              fp += nextH;
+              bm += nextH;
+              radiated -= nextH * 0.62;
+            } else if (hState[c] !== 0) {
+              const decayed = hState[c] * holeIdleDecay;
+              hState[c] = decayed > -1e-18 && decayed < 1e-18 ? 0 : decayed;
+            }
+            const d = kArr[c] * (fp - bm);
+            nPlus[c + 1] = (fp + d) * cellLoss;
+            nMinus[c] = (bm + d) * cellLoss;
           }
-          const d = kArr[c] * (fp - bm);
-          nPlus[c + 1] = (fp + d) * cellLoss;
-          nMinus[c] = (bm + d) * cellLoss;
+        } else {
+          for (let c = 0; c < Mm1; c++) {
+            const fp = pPlus[c];
+            const bm = pMinus[c + 1];
+            const d = kArr[c] * (fp - bm);
+            nPlus[c + 1] = (fp + d) * cellLoss;
+            nMinus[c] = (bm + d) * cellLoss;
+          }
         }
 
-        const tmpP = ws.pPlus;
-        ws.pPlus = nPlus;
-        ws.nextPlus = tmpP;
-        const tmpM = ws.pMinus;
-        ws.pMinus = nMinus;
-        ws.nextMinus = tmpM;
+        const tmpP = pPlus; pPlus = nPlus; nPlus = tmpP;
+        const tmpM = pMinus; pMinus = nMinus; nMinus = tmpM;
 
         // Universal 2-pole radiation smoothing + sample-rate-scaled DC blocker
-        ws.outLp1 += alphaRad * (radiated - ws.outLp1);
-        ws.outLp2 += alphaRad * (ws.outLp1 - ws.outLp2);
-        const dcOut = ws.outLp2 - ws.dcX1 + dcR * ws.dcY1;
-        ws.dcX1 = ws.outLp2;
-        ws.dcY1 = Math.abs(dcOut) < 1e-20 ? 0 : dcOut;
+        outLp1 += alphaRad * (radiated - outLp1);
+        outLp2 += alphaRad * (outLp1 - outLp2);
+        const dcOut = outLp2 - dcX1 + dcR * dcY1;
+        dcX1 = outLp2;
+        dcY1 = dcOut > -1e-20 && dcOut < 1e-20 ? 0 : dcOut;
         if (!Number.isFinite(dcOut)) {
+          ws.pPlus = pPlus; ws.pMinus = pMinus; ws.nextPlus = nPlus; ws.nextMinus = nMinus;
           clearWindSlotState(ws);
+          apS1 = 0; apS2 = 0; bellLp = 0; reedLp = 0; outLp1 = 0; outLp2 = 0; lipY = 0; lipV = 0; dcX1 = 0; dcY1 = 0;
           continue;
         }
-        outL[i] += dcOut * ws.gain;
+        outL[i] += dcOut * slotGain;
       }
+
+      ws.pPlus = pPlus;
+      ws.pMinus = pMinus;
+      ws.nextPlus = nPlus;
+      ws.nextMinus = nMinus;
+      ws.breathEnv = breathEnv;
+      ws.smoothEmbHz = smoothEmbHz;
+      ws.vibPhase = vibPhase;
+      ws.apS1 = apS1;
+      ws.apS2 = apS2;
+      ws.bellLp = bellLp;
+      ws.reedLp = reedLp;
+      ws.lipY = lipY;
+      ws.lipV = lipV;
+      ws.outLp1 = outLp1;
+      ws.outLp2 = outLp2;
+      ws.dcX1 = dcX1;
+      ws.dcY1 = dcY1;
     }
 
     // C^1-continuous soft-knee safety limiter (exact value & unit slope at |s| = 0.28, ceiling 0.82)

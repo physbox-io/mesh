@@ -41,6 +41,21 @@ const SPEED_OF_SOUND_AIR = 343.0; // m/s at 20 °C
 const MIN_AUDIBLE_BPF_HZ = 22.0;
 const MIN_SUB_BPF_HZ = 0.5;
 const NUM_GUTIN_HARMONICS = 16;
+const GUST_OMEGA_1 = 2 * Math.PI * 0.31;
+const GUST_OMEGA_2 = 2 * Math.PI * 0.73;
+
+const GUTIN_HUMP_SIN = Float64Array.from(
+  { length: NUM_GUTIN_HARMONICS },
+  (_, i) => Math.sin(Math.min(Math.PI, (i / 6) * Math.PI)),
+);
+const GUTIN_INV_N_POW = Float64Array.from(
+  { length: NUM_GUTIN_HARMONICS },
+  (_, i) => 1 / Math.pow(i + 1, 0.32),
+);
+
+function roundN(v: number, scale: number): number {
+  return Math.round(v * scale) / scale;
+}
 
 export interface AeroSynthParams {
   id: string;
@@ -196,25 +211,25 @@ export function solveAeroAcousticVoice(
     // deep 85..280 Hz outdoor wind-whoosh formant that sweeps organically with coastal gusts!
     const dShear = Math.max(0.008, 0.010 + chord * (0.008 + 0.014 * Math.abs(Math.sin(alphaRad))));
     const billowLift = 1.0 + 0.16 * clamp(bendRate / 22.0, 0, 1.35);
-    noiseCenterHz = +clamp(((0.21 * Math.max(0.25, effSpeed)) / dShear) * billowLift, 85, 280).toFixed(2);
-    noiseQ = +(1.55 - 0.40 * stallRoughness).toFixed(3);
-    lowpassHz = +clamp(noiseCenterHz * 2.35 + 90 * clamp(bendRate / 20.0, 0, 1.2), 280, 680).toFixed(1);
+    noiseCenterHz = roundN(clamp(((0.21 * Math.max(0.25, effSpeed)) / dShear) * billowLift, 85, 280), 100);
+    noiseQ = roundN(1.55 - 0.40 * stallRoughness, 1000);
+    lowpassHz = roundN(clamp(noiseCenterHz * 2.35 + 90 * clamp(bendRate / 20.0, 0, 1.2), 280, 680), 10);
   } else if (isAeolianCylinder) {
     // Hollow mast + stay coupled Aeolian lock-in (~115..210 Hz, gliding gently with wind gusts)
     const aeolianBaseHz =
       rawStrouhalHz > 210
         ? 115 + 95 * Math.tanh((rawStrouhalHz - 115) / 250)
         : clamp(rawStrouhalHz, 115, 210);
-    noiseCenterHz = +aeolianBaseHz.toFixed(2);
+    noiseCenterHz = roundN(aeolianBaseHz, 100);
     noiseQ = 3.8;
-    lowpassHz = +clamp(aeolianBaseHz * 1.65, 210, 380).toFixed(1);
+    lowpassHz = roundN(clamp(aeolianBaseHz * 1.65, 210, 380), 10);
   } else {
     // Rigid wings, rotors, windmills & bluff bodies:
     // Narrow whistling Q (~3.2) at sleek attached angles (|α| < 10°), widening into
     // rough separated buffeting (Q ≈ 0.75) past stall (|α| > 15..22°)!
-    noiseCenterHz = +clamp(rawStrouhalHz, 120, 4200).toFixed(2);
-    noiseQ = +(3.2 - (3.2 - 0.75) * stallRoughness).toFixed(3);
-    lowpassHz = +clamp(noiseCenterHz * (1.75 + 0.45 * stallRoughness) + 180, 420, 2800).toFixed(1);
+    noiseCenterHz = roundN(clamp(rawStrouhalHz, 120, 4200), 100);
+    noiseQ = roundN(3.2 - (3.2 - 0.75) * stallRoughness, 1000);
+    lowpassHz = roundN(clamp(noiseCenterHz * (1.75 + 0.45 * stallRoughness) + 180, 420, 2800), 10);
   }
 
   // -------------------------------------------------------------------------
@@ -299,11 +314,14 @@ export function solveAeroAcousticVoice(
         0.90,
       );
 
+      let decayPow = 1.0;
       for (let n = 1; n <= NUM_GUTIN_HARMONICS; n++) {
         if (n * bpfHz > 18000) break;
-        const loadingHump = 1.0 + 0.55 * thrustLoadingNorm * Math.sin(Math.min(Math.PI, ((n - 1) / 6) * Math.PI));
-        const w = Math.pow(decayBase, n - 1) * loadingHump * (1 / Math.pow(n, 0.32));
-        harmonicWeights.push(+w.toFixed(4));
+        const idx = n - 1;
+        const loadingHump = 1.0 + 0.55 * thrustLoadingNorm * GUTIN_HUMP_SIN[idx];
+        const w = decayPow * loadingHump * GUTIN_INV_N_POW[idx];
+        harmonicWeights.push(roundN(w, 10000));
+        decayPow *= decayBase;
       }
 
       const kT = 0.85;
@@ -320,7 +338,7 @@ export function solveAeroAcousticVoice(
       const propAmRate = stallRoughness > 0.15 ? clamp(10 + 0.4 * effSpeed, 8, 18) : bpfHz;
       const propAmDepth = stallRoughness > 0.15 ? 0.22 * stallRoughness : 0;
 
-      tonalGain = +(propTonal * Math.max(0.08, tonalBlend)).toFixed(4);
+      tonalGain = roundN(propTonal * Math.max(0.08, tonalBlend), 10000);
       tonalActive = harmonicWeights.length > 0 && tonalGain >= 0.0015;
       noiseGain = noiseGain * (1 - tonalBlend) + wakeGain * tonalBlend;
       amDepth = amDepth * (1 - tonalBlend) + propAmDepth * tonalBlend;
@@ -328,15 +346,15 @@ export function solveAeroAcousticVoice(
     }
   }
 
-  tonalGain = +(tonalGain * gainScale).toFixed(4);
+  tonalGain = roundN(tonalGain * gainScale, 10000);
   const aeolianScale = isAeolianCylinder ? 0.44 : 1.0;
-  noiseGain = +clamp(noiseGain * gainScale * aeolianScale, 0, 0.32).toFixed(4);
-  amRateHz = +clamp(amRateHz, 0, 16000).toFixed(3);
-  amDepth = +clamp(amDepth, 0, 0.85).toFixed(3);
+  noiseGain = roundN(clamp(noiseGain * gainScale * aeolianScale, 0, 0.32), 10000);
+  amRateHz = roundN(clamp(amRateHz, 0, 16000), 1000);
+  amDepth = roundN(clamp(amDepth, 0, 0.85), 1000);
 
   const aeolianFreqHz = isAeolianCylinder ? noiseCenterHz : 0;
   const aeolianGain = isAeolianCylinder
-    ? +clamp(freeNoiseGain * gainScale * 0.30, 0.004, 0.024).toFixed(4)
+    ? roundN(clamp(freeNoiseGain * gainScale * 0.30, 0.004, 0.024), 10000)
     : 0;
 
   // -------------------------------------------------------------------------
@@ -348,13 +366,16 @@ export function solveAeroAcousticVoice(
     const sigma = clamp(telemetry.arealDensityKgM2 ?? 0.15, 0.02, 1.2);
     // Lighter ripstop crispness sits higher (4.5..5.5 kHz); heavier canvas sits warmer (2.2..3.0 kHz)
     const lightness = clamp((0.32 - sigma) / 0.28, 0, 1);
-    rustleFreqHz = +clamp(2200 + 3300 * lightness, 2200, 5500).toFixed(1);
+    rustleFreqHz = roundN(clamp(2200 + 3300 * lightness, 2200, 5500), 10);
     const bendNorm = clamp(bendRate / 18.0, 0, 1.5);
-    rustleGain = +clamp(
-      0.085 * rhoScale * bendNorm * (0.55 + 0.45 * smoothstep(0.2, 3.0, effSpeed)) * gainScale,
-      0,
-      0.16,
-    ).toFixed(4);
+    rustleGain = roundN(
+      clamp(
+        0.085 * rhoScale * bendNorm * (0.55 + 0.45 * smoothstep(0.2, 3.0, effSpeed)) * gainScale,
+        0,
+        0.16,
+      ),
+      10000,
+    );
   }
 
   const active =
@@ -367,7 +388,7 @@ export function solveAeroAcousticVoice(
   return {
     id,
     active,
-    bpfHz: +bpfHz.toFixed(3),
+    bpfHz: roundN(bpfHz, 1000),
     tonalActive,
     harmonicWeights,
     tonalGain,
@@ -379,7 +400,7 @@ export function solveAeroAcousticVoice(
     rustleFreqHz,
     amRateHz,
     amDepth,
-    stallRoughness: +stallRoughness.toFixed(4),
+    stallRoughness: roundN(stallRoughness, 10000),
     ...(aeolianGain > 0 ? { aeolianFreqHz, aeolianGain } : {}),
   };
 }
@@ -453,15 +474,17 @@ export function evaluateGustWind(
   z: number,
   timeSec: number,
 ): [number, number, number] {
-  if (!Number.isFinite(windX) || !Number.isFinite(windY) || !Number.isFinite(x + y + z + timeSec)) {
+  if (!Number.isFinite(windX + windY) || !Number.isFinite(x + y + z + timeSec)) {
     return [0, 0, 0];
   }
-  const meanSpeed = Math.hypot(windX, windY);
-  if (!(meanSpeed >= 1e-4)) return [0, 0, 0];
+  const meanSpeedSq = windX * windX + windY * windY;
+  if (!(meanSpeedSq >= 1e-8)) return [0, 0, 0];
+  const meanSpeed = Math.sqrt(meanSpeedSq);
 
   // Advected Taylor frozen-turbulence phase u = k · (x - V_conv * t)
-  const ux = windX / meanSpeed;
-  const uy = windY / meanSpeed;
+  const invMean = 1 / meanSpeed;
+  const ux = windX * invMean;
+  const uy = windY * invMean;
   const sStream = x * ux + y * uy - 0.72 * meanSpeed * timeSec;
   const sCross = -x * uy + y * ux;
 
@@ -469,8 +492,8 @@ export function evaluateGustWind(
   // paired with incompressible-style advected spatial eddies
   const coherentGust =
     1.0 +
-    0.19 * Math.sin(2 * Math.PI * 0.31 * timeSec + 0.35) +
-    0.11 * Math.sin(2 * Math.PI * 0.73 * timeSec - 1.1);
+    0.19 * Math.sin(GUST_OMEGA_1 * timeSec + 0.35) +
+    0.11 * Math.sin(GUST_OMEGA_2 * timeSec - 1.1);
   const e1 = Math.sin(4.7 * sStream + 6.1 * z + 1.9 * timeSec);
   const e2 = Math.cos(8.3 * sStream - 5.3 * sCross + 3.7 * timeSec);
   const e3 = Math.sin(11.9 * z + 7.1 * sCross - 4.3 * timeSec);

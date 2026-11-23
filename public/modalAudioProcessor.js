@@ -30,6 +30,7 @@ function createWindSlot() {
     nextMinus: new Float64Array(MAX_BORE_CELLS),
     k: new Float64Array(MAX_BORE_CELLS),
     shunt: new Float64Array(MAX_BORE_CELLS),
+    hasShunts: false,
     bellAlpha: 0.25,
     bellLp: 0,
     reedLp: 0,
@@ -84,8 +85,22 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
     this.bAlpha = new Float32Array(this.maxBursts);
     this.bCursor = 0;
 
-    // Pre-allocated Kelly–Lochbaum wind/brass bore slots (zero GC in process!)
+    // Pre-allocated Kelly–Lochbaum wind/brass bore slots & scratch buffers (zero GC in process/onmessage!)
     this.windSlots = [createWindSlot(), createWindSlot(), createWindSlot(), createWindSlot()];
+    this.logAreaScratch = new Float64Array(MAX_BORE_CELLS + 1);
+    this.seenIds = [];
+    this.validVoicesScratch = [];
+    this.activeVoiceCount = 0;
+    this.activeBurstCount = 0;
+
+    // Cached sample-rate-dependent constants (recomputed only if sampleRate changes)
+    this._cachedSr = 0;
+    this._dt = 1 / REF_SAMPLE_RATE;
+    this._envAlpha = 0;
+    this._embAlpha = 0;
+    this._cellLoss = 0.9994;
+    this._dcR = 0;
+    this._vibInc = 0;
 
     this.rng = 0x12345678;
     this.reportedRunning = false;
@@ -105,26 +120,47 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
     };
   }
 
-  updateWindVoices(voices) {
+  ensureRateConstants() {
     const sr = Number.isFinite(sampleRate) && sampleRate > 8000 ? sampleRate : REF_SAMPLE_RATE;
-    const dt = 1 / sr;
-    const seen = new Set();
+    if (sr !== this._cachedSr) {
+      this._cachedSr = sr;
+      const srRatio = REF_SAMPLE_RATE / sr;
+      this._dt = 1 / sr;
+      this._envAlpha = 1 - Math.exp(-0.00095 * srRatio);
+      this._embAlpha = 1 - Math.exp(-0.0015 * srRatio);
+      this._cellLoss = Math.pow(0.9994, srRatio);
+      this._dcR = Math.exp((-2 * Math.PI * 18) / sr);
+      this._vibInc = (2 * Math.PI * 4.9) / sr;
+    }
+    return sr;
+  }
 
-    const valid = Array.isArray(voices)
-      ? voices.filter((v) => v && typeof v.id === 'string' && v.id.length > 0)
-      : [];
-    const ordered = valid.length > this.windSlots.length
-      ? [...valid].sort((a, b) => {
-          const aOn = Number.isFinite(a.breathKPa) && a.breathKPa >= 0.08 ? 1 : 0;
-          const bOn = Number.isFinite(b.breathKPa) && b.breathKPa >= 0.08 ? 1 : 0;
-          if (bOn !== aOn) return bOn - aOn;
-          return (Number.isFinite(b.breathKPa) ? b.breathKPa : 0) - (Number.isFinite(a.breathKPa) ? a.breathKPa : 0);
-        })
-      : valid;
+  updateWindVoices(voices) {
+    const sr = this.ensureRateConstants();
+    const dt = this._dt;
+    const seenIds = this.seenIds;
+    seenIds.length = 0;
+    const valid = this.validVoicesScratch;
+    valid.length = 0;
 
-    for (let vIdx = 0; vIdx < ordered.length && vIdx < this.windSlots.length; vIdx++) {
-      const cfg = ordered[vIdx];
-      seen.add(cfg.id);
+    if (Array.isArray(voices)) {
+      for (let i = 0; i < voices.length; i++) {
+        const v = voices[i];
+        if (v && typeof v.id === 'string' && v.id.length > 0) valid.push(v);
+      }
+    }
+    if (valid.length > this.windSlots.length) {
+      valid.sort((a, b) => {
+        const aOn = Number.isFinite(a.breathKPa) && a.breathKPa >= 0.08 ? 1 : 0;
+        const bOn = Number.isFinite(b.breathKPa) && b.breathKPa >= 0.08 ? 1 : 0;
+        if (bOn !== aOn) return bOn - aOn;
+        return (Number.isFinite(b.breathKPa) ? b.breathKPa : 0) - (Number.isFinite(a.breathKPa) ? a.breathKPa : 0);
+      });
+    }
+
+    for (let vIdx = 0; vIdx < valid.length && vIdx < this.windSlots.length; vIdx++) {
+      const cfg = valid[vIdx];
+      seenIds.push(cfg.id);
 
       let slot = null;
       for (let i = 0; i < this.windSlots.length; i++) {
@@ -181,11 +217,12 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
       slot.thiranA1 = -2 * ((D - 2) / (D + 1));
       slot.thiranA2 = ((D - 1) * (D - 2)) / ((D + 1) * (D + 2));
 
-      if (slot.cellCount !== M) {
-        if (M > slot.cellCount) {
-          const tailP = slot.pPlus[Math.max(0, slot.cellCount - 1)];
-          const tailM = slot.pMinus[Math.max(0, slot.cellCount - 1)];
-          for (let c = slot.cellCount; c < M; c++) {
+      const prevM = slot.cellCount;
+      if (prevM !== M) {
+        if (M > prevM) {
+          const tailP = slot.pPlus[Math.max(0, prevM - 1)];
+          const tailM = slot.pMinus[Math.max(0, prevM - 1)];
+          for (let c = prevM; c < M; c++) {
             slot.pPlus[c] = tailP;
             slot.pMinus[c] = tailM;
           }
@@ -193,23 +230,26 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
         slot.cellCount = M;
       }
 
+      const clearEnd = Math.min(MAX_BORE_CELLS, Math.max(prevM, M));
       const jk = Array.isArray(cfg.junctionK) ? cfg.junctionK : [];
-      slot.k.fill(0);
+      slot.k.fill(0, 0, clearEnd);
       if (jk.length > 0 && M >= 2) {
         if (jk.length === M - 1) {
           for (let i = 0; i < M - 1; i++) {
             slot.k[i] = clampFinite(jk[i], -0.92, 0.92, 0);
           }
         } else {
-          const nSrc = jk.length;
-          const logArea = new Float64Array(nSrc + 1);
+          const nSrc = Math.min(jk.length, MAX_BORE_CELLS);
+          const logArea = this.logAreaScratch;
+          logArea[0] = 0;
           for (let j = 0; j < nSrc; j++) {
             const kj = clampFinite(jk[j], -0.92, 0.92, 0);
             logArea[j + 1] = logArea[j] + Math.log((1 - kj) / (1 + kj));
           }
           let prevLogA = logArea[0];
+          const invMm1 = 1 / (M - 1);
           for (let c = 1; c < M; c++) {
-            const pos = (c / (M - 1)) * nSrc;
+            const pos = c * invMm1 * nSrc;
             const i0 = Math.min(nSrc, Math.floor(pos));
             const i1 = Math.min(nSrc, i0 + 1);
             const frac = pos - i0;
@@ -221,7 +261,8 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
         }
       }
 
-      slot.shunt.fill(0);
+      slot.shunt.fill(0, 0, clearEnd);
+      let anyShunt = false;
       const shunts = Array.isArray(cfg.shunts) ? cfg.shunts : [];
       const cellScale = (M - 1) / Math.max(1, baseCells - 1);
       for (let s = 0; s < shunts.length; s++) {
@@ -232,21 +273,24 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
           const cNew = clampFinite(shItem.coeff, -0.85, 0, 0);
           if (cNew >= -1e-5) continue;
           const cPrev = slot.shunt[ci];
+          let cComb;
           if (cPrev < -1e-5) {
             const yTot = -cPrev / (1 + cPrev) + -cNew / (1 + cNew);
-            slot.shunt[ci] = Math.max(-0.85, -yTot / (1 + yTot));
+            cComb = Math.max(-0.85, -yTot / (1 + yTot));
           } else {
-            slot.shunt[ci] = cNew;
+            cComb = cNew;
           }
+          slot.shunt[ci] = cComb;
+          if (cComb < -0.001) anyShunt = true;
         }
       }
-
+      slot.hasShunts = anyShunt;
       slot.active = true;
     }
 
     for (let i = 0; i < this.windSlots.length; i++) {
       const s = this.windSlots[i];
-      if (s.active && !seen.has(s.id)) {
+      if (s.active && seenIds.indexOf(s.id) === -1) {
         s.targetBreath = 0;
       }
     }
@@ -276,6 +320,7 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
       const amp = level * clampFinite(v.gain, 0, 2.0, 0.1);
       this.y1[slot] = amp * r * sinW;
       this.y2[slot] = 0;
+      if (!this.active[slot]) this.activeVoiceCount++;
       this.active[slot] = 1;
     }
 
@@ -295,6 +340,7 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
     const dt = 1 / sr;
     this.bAlpha[bSlot] = dt / (rc + dt);
     this.bLpState[bSlot] = 0;
+    if (!this.bActive[bSlot]) this.activeBurstCount++;
     this.bActive[bSlot] = 1;
   }
 
@@ -342,71 +388,82 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
     const outChan = outL;
 
     // 1. Modal & stiff-string 2-pole resonators
-    for (let v = 0; v < this.maxVoices; v++) {
-      if (!this.active[v]) continue;
-      let s1 = this.y1[v];
-      let s2 = this.y2[v];
-      const a1 = this.c1[v];
-      const a2 = this.c2[v];
-      for (let i = 0; i < nFrames; i++) {
-        outChan[i] += s1;
-        const y0 = a1 * s1 - a2 * s2;
-        s2 = s1;
-        s1 = y0;
-      }
-      if (!Number.isFinite(s1) || !Number.isFinite(s2) || s1 * s1 + s2 * s2 < 1e-16) {
-        this.active[v] = 0;
-        this.y1[v] = 0;
-        this.y2[v] = 0;
-      } else {
-        this.y1[v] = s1;
-        this.y2[v] = s2;
+    if (this.activeVoiceCount > 0) {
+      for (let v = 0; v < this.maxVoices; v++) {
+        if (!this.active[v]) continue;
+        let s1 = this.y1[v];
+        let s2 = this.y2[v];
+        const a1 = this.c1[v];
+        const a2 = this.c2[v];
+        for (let i = 0; i < nFrames; i++) {
+          outChan[i] += s1;
+          const y0 = a1 * s1 - a2 * s2;
+          s2 = s1;
+          s1 = y0;
+        }
+        if (!Number.isFinite(s1) || !Number.isFinite(s2) || s1 * s1 + s2 * s2 < 1e-16) {
+          this.active[v] = 0;
+          this.activeVoiceCount--;
+          this.y1[v] = 0;
+          this.y2[v] = 0;
+        } else {
+          this.y1[v] = s1;
+          this.y2[v] = s2;
+        }
       }
     }
 
     // 2. Contact / plectrum bursts
-    for (let b = 0; b < this.maxBursts; b++) {
-      if (!this.bActive[b]) continue;
-      let step = this.bStep[b];
-      const total = this.bTotal[b];
-      const tau = this.bTauSamples[b];
-      const gain = this.bGain[b];
-      const bright = this.bBright[b];
-      const isPluck = this.bPluck[b] === 1;
-      const alpha = this.bAlpha[b];
-      let lp = this.bLpState[b];
+    if (this.activeBurstCount > 0) {
+      for (let b = 0; b < this.maxBursts; b++) {
+        if (!this.bActive[b]) continue;
+        let step = this.bStep[b];
+        const total = this.bTotal[b];
+        const tau = this.bTauSamples[b];
+        const invTau = 1 / tau;
+        const gain = this.bGain[b];
+        const brightScale = 0.08 * this.bBright[b];
+        const isPluck = this.bPluck[b] === 1;
+        const alpha = this.bAlpha[b];
+        let lp = this.bLpState[b];
+        const texDecayMul = Math.exp(-invTau / 2.2);
+        let texEnv = Math.exp(-step * invTau / 2.2);
 
-      for (let i = 0; i < nFrames && step < total; i++, step++) {
-        let raw;
-        if (isPluck) {
-          const u = step / tau;
-          raw = (u < 1 ? u : Math.exp(-(u - 1) * 1.8)) * (0.65 + 0.35 * this.nextNoise());
-        } else if (step < tau) {
-          const u = (Math.PI * step) / tau;
-          raw = 1.25 * Math.sqrt(Math.max(0, Math.sin(u))) * Math.cos(u);
-        } else {
-          const dt = (step - tau) / tau;
-          raw = -0.34 * Math.exp(-dt * 1.15) * Math.cos(1.6 * dt);
+        for (let i = 0; i < nFrames && step < total; i++, step++) {
+          let raw;
+          if (isPluck) {
+            const u = step * invTau;
+            raw = (u < 1 ? u : Math.exp(-(u - 1) * 1.8)) * (0.65 + 0.35 * this.nextNoise());
+          } else if (step < tau) {
+            const u = Math.PI * step * invTau;
+            raw = 1.25 * Math.sqrt(Math.max(0, Math.sin(u))) * Math.cos(u);
+          } else {
+            const dt = (step - tau) * invTau;
+            raw = -0.34 * Math.exp(-dt * 1.15) * Math.cos(1.6 * dt);
+          }
+          const tex = brightScale * this.nextNoise() * texEnv;
+          texEnv *= texDecayMul;
+          lp += alpha * ((raw + tex) - lp);
+          outChan[i] += lp * gain;
         }
-        const tex = 0.08 * bright * this.nextNoise() * Math.exp(-step / (tau * 2.2));
-        lp += alpha * ((raw + tex) - lp);
-        outChan[i] += lp * gain;
-      }
 
-      this.bStep[b] = step;
-      this.bLpState[b] = Number.isFinite(lp) ? lp : 0;
-      if (step >= total || !Number.isFinite(lp)) this.bActive[b] = 0;
+        this.bStep[b] = step;
+        this.bLpState[b] = Number.isFinite(lp) ? lp : 0;
+        if (step >= total || !Number.isFinite(lp)) {
+          this.bActive[b] = 0;
+          this.activeBurstCount--;
+        }
+      }
     }
 
     // 3. 1D Kelly–Lochbaum Wind / Brass / Reed / Flute / Flap-Valve Bore Waveguides
-    const sr = Number.isFinite(sampleRate) && sampleRate > 8000 ? sampleRate : REF_SAMPLE_RATE;
-    const dt = 1 / sr;
-    const srRatio = REF_SAMPLE_RATE / sr;
-    const envAlpha = 1 - Math.exp(-0.00095 * srRatio);
-    const embAlpha = 1 - Math.exp(-0.0015 * srRatio);
-    const cellLoss = Math.pow(0.9994, srRatio);
-    const dcR = Math.exp((-2 * Math.PI * 18) / sr);
-    const vibInc = (2 * Math.PI * 4.9) / sr;
+    const sr = this.ensureRateConstants();
+    const dt = this._dt;
+    const envAlpha = this._envAlpha;
+    const embAlpha = this._embAlpha;
+    const cellLoss = this._cellLoss;
+    const dcR = this._dcR;
+    const vibInc = this._vibInc;
 
     for (let w = 0; w < this.windSlots.length; w++) {
       const ws = this.windSlots[w];
@@ -418,151 +475,197 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
       }
 
       const M = ws.cellCount;
+      const Mm1 = M - 1;
       const kArr = ws.k;
       const shArr = ws.shunt;
+      const hasShunts = ws.hasShunts;
       const bellAlpha = ws.bellAlpha;
       const a1 = ws.thiranA1;
       const a2 = ws.thiranA2;
       const exc = ws.exciter;
+      const targetBreath = ws.targetBreath;
+      const embouchureHz = ws.embouchureHz;
+      const slotGain = ws.gain;
+      const noiseScale = exc === 2 ? 0.04 : 0.012;
       const fOpenEst = sr / Math.max(8, 2 * ws.exactCellsScaled);
       const reedCut = exc === 0
         ? Math.min(sr * 0.38, 1950)
         : exc === 2
-          ? Math.min(sr * 0.42, Math.max(700, Math.max(ws.embouchureHz * 2.4, fOpenEst * 2.8)))
-          : Math.min(sr * 0.4, Math.max(380, ws.embouchureHz * 4.2));
+          ? Math.min(sr * 0.42, Math.max(700, Math.max(embouchureHz * 2.4, fOpenEst * 2.8)))
+          : Math.min(sr * 0.4, Math.max(380, embouchureHz * 4.2));
       const alphaReed = dt / (1 / (2 * Math.PI * reedCut) + dt);
+      const alphaJetHp = Math.min(0.25, (2 * Math.PI * Math.max(45, fOpenEst * 0.35)) * dt);
+
+      let pPlus = ws.pPlus;
+      let pMinus = ws.pMinus;
+      let nPlus = ws.nextPlus;
+      let nMinus = ws.nextMinus;
+      let breathEnv = ws.breathEnv;
+      let smoothEmbHz = ws.smoothEmbHz;
+      let vibPhase = ws.vibPhase;
+      let apS1 = ws.apS1;
+      let apS2 = ws.apS2;
+      let bellLp = ws.bellLp;
+      let reedLp = ws.reedLp;
+      let cupLp = ws.cupLp;
+      let lipY = ws.lipY;
+      let lipV = ws.lipV;
+      let prevBack = ws.prevBack;
+      let dcX1 = ws.dcX1;
+      let dcY1 = ws.dcY1;
 
       for (let i = 0; i < nFrames; i++) {
-        ws.breathEnv += envAlpha * (ws.targetBreath - ws.breathEnv);
-        ws.smoothEmbHz += embAlpha * (ws.embouchureHz - ws.smoothEmbHz);
-        ws.vibPhase += vibInc;
-        if (ws.vibPhase > Math.PI * 2) ws.vibPhase -= Math.PI * 2;
-        const vib = 1 + 0.016 * Math.sin(ws.vibPhase);
-        const pMouth = ws.breathEnv * vib * (1 + (exc === 2 ? 0.04 : 0.012) * this.nextNoise());
+        breathEnv += envAlpha * (targetBreath - breathEnv);
+        smoothEmbHz += embAlpha * (embouchureHz - smoothEmbHz);
+        vibPhase += vibInc;
+        if (vibPhase > Math.PI * 2) vibPhase -= Math.PI * 2;
+        const vib = 1 + 0.016 * Math.sin(vibPhase);
+        const pMouth = breathEnv * vib * (1 + noiseScale * this.nextNoise());
 
-        // Bell open-end 2nd-order Thiran fractional delay + inverting lowpass radiation
-        const pIncEnd = ws.pPlus[M - 1];
-        const pEnd = a2 * pIncEnd + ws.apS1;
-        ws.apS1 = a1 * (pIncEnd - pEnd) + ws.apS2;
-        ws.apS2 = pIncEnd - a2 * pEnd;
+        const pIncEnd = pPlus[Mm1];
+        const pEnd = a2 * pIncEnd + apS1;
+        apS1 = a1 * (pIncEnd - pEnd) + apS2;
+        apS2 = pIncEnd - a2 * pEnd;
 
-        ws.bellLp += bellAlpha * (pEnd - ws.bellLp);
-        const pReflBell = -0.962 * ws.bellLp;
-        let radiated = (pEnd - ws.bellLp) * 0.85 + 0.42 * ws.bellLp;
+        bellLp += bellAlpha * (pEnd - bellLp);
+        const pReflBell = -0.962 * bellLp;
+        let radiated = (pEnd - bellLp) * 0.85 + 0.42 * bellLp;
 
-        // Mouthpiece nonlinear reed / brass lip-reed / flute jet / compliant flap-valve exciter
         let pIn0;
-        const pBack0 = ws.pMinus[0];
+        const pBack0 = pMinus[0];
         if (exc === 0) {
-          ws.reedLp += alphaReed * (pBack0 - ws.reedLp);
-          const dp = pMouth - ws.reedLp;
+          reedLp += alphaReed * (pBack0 - reedLp);
+          const dp = pMouth - reedLp;
           let rReed = 0.24 + 0.92 * dp;
           if (rReed < -0.92) rReed = -0.92;
           else if (rReed > 0.995) rReed = 0.995;
           pIn0 = pMouth - rReed * dp;
         } else if (exc === 1) {
-          const omegaLip = 2 * Math.PI * ws.smoothEmbHz;
+          const omegaLip = 2 * Math.PI * smoothEmbHz;
           const omegaLipSq = omegaLip * omegaLip;
           const dampLip = omegaLip / 6.8;
 
-          ws.reedLp += alphaReed * (pBack0 - ws.reedLp);
-          const dBackRate = (ws.reedLp - ws.prevBack) / Math.max(1e-5, omegaLip * dt);
-          ws.prevBack = ws.reedLp;
+          reedLp += alphaReed * (pBack0 - reedLp);
+          const dBackRate = (reedLp - prevBack) / Math.max(1e-5, omegaLip * dt);
+          prevBack = reedLp;
 
-          const drive = 0.28 * pMouth + 0.42 * ws.reedLp + 0.55 * ws.lipV / Math.max(50, omegaLip) * pMouth + 0.18 * dBackRate;
-          const acc = omegaLipSq * (drive - ws.lipY) - dampLip * ws.lipV - omegaLipSq * 0.45 * ws.lipY * ws.lipY * ws.lipY;
-          ws.lipV += dt * acc;
-          ws.lipY += dt * ws.lipV;
-          if (ws.lipY < -0.8) {
-            ws.lipY = -0.8;
-            ws.lipV *= -0.2;
-          } else if (ws.lipY > 1.1) {
-            ws.lipY = 1.1;
-            ws.lipV *= -0.2;
+          const drive = 0.28 * pMouth + 0.42 * reedLp + 0.55 * lipV / Math.max(50, omegaLip) * pMouth + 0.18 * dBackRate;
+          const acc = omegaLipSq * (drive - lipY) - dampLip * lipV - omegaLipSq * 0.45 * lipY * lipY * lipY;
+          lipV += dt * acc;
+          lipY += dt * lipV;
+          if (lipY < -0.8) {
+            lipY = -0.8;
+            lipV *= -0.2;
+          } else if (lipY > 1.1) {
+            lipY = 1.1;
+            lipV *= -0.2;
           }
-          const lipOpen = Math.max(0, 0.22 + 0.92 * ws.lipY);
-          const dp = pMouth - 0.65 * ws.reedLp;
+          const lipOpen = Math.max(0, 0.22 + 0.92 * lipY);
+          const dp = pMouth - 0.65 * reedLp;
           const flow = lipOpen * Math.tanh(dp * 1.65) * 0.78;
-          pIn0 = 0.88 * ws.reedLp + flow;
+          pIn0 = 0.88 * reedLp + flow;
 
-          const alphaCup = Math.min(0.45, dt * 2 * Math.PI * (ws.smoothEmbHz * 4.5));
-          ws.cupLp += alphaCup * ((radiated + 0.35 * flow) - ws.cupLp);
-          radiated = ws.cupLp;
+          const alphaCup = Math.min(0.45, dt * 2 * Math.PI * (smoothEmbHz * 4.5));
+          cupLp += alphaCup * ((radiated + 0.35 * flow) - cupLp);
+          radiated = cupLp;
         } else if (exc === 3) {
-          // Fletcher autonomous compliant flap-valve (sub-resonant relaxation slap-oscillator)
-          ws.reedLp += alphaReed * (pBack0 - ws.reedLp);
-          const omegaFlap = 2 * Math.PI * ws.smoothEmbHz;
+          reedLp += alphaReed * (pBack0 - reedLp);
+          const omegaFlap = 2 * Math.PI * smoothEmbHz;
           const omegaSq = omegaFlap * omegaFlap;
           const dampFlap = omegaFlap / 1.85;
-          const bernSuction = pMouth * (0.36 - 1.35 * Math.max(0, ws.lipY + 0.18));
+          const bernSuction = pMouth * (0.36 - 1.35 * Math.max(0, lipY + 0.18));
           const acc =
-            omegaSq * (bernSuction + 0.38 * ws.reedLp - ws.lipY - 0.52 * ws.lipY * ws.lipY * ws.lipY) +
-            pMouth * 1.55 * dampFlap * ws.lipV -
-            dampFlap * ws.lipV;
-          ws.lipV += dt * acc;
-          ws.lipY += dt * ws.lipV;
-          if (ws.lipY < -1.05) {
-            ws.lipY = -1.05;
-            ws.lipV *= -0.10;
-          } else if (ws.lipY > 1.15) {
-            ws.lipY = 1.15;
-            ws.lipV *= -0.12;
+            omegaSq * (bernSuction + 0.38 * reedLp - lipY - 0.52 * lipY * lipY * lipY) +
+            pMouth * 1.55 * dampFlap * lipV -
+            dampFlap * lipV;
+          lipV += dt * acc;
+          lipY += dt * lipV;
+          if (lipY < -1.05) {
+            lipY = -1.05;
+            lipV *= -0.10;
+          } else if (lipY > 1.15) {
+            lipY = 1.15;
+            lipV *= -0.12;
           }
-          const flapOpen = Math.max(0, 0.16 + 1.15 * ws.lipY);
-          const flow = flapOpen * Math.tanh((pMouth - 0.45 * ws.reedLp) * 1.85) * 0.84;
-          pIn0 = 0.86 * ws.reedLp + flow;
+          const flapOpen = Math.max(0, 0.16 + 1.15 * lipY);
+          const flow = flapOpen * Math.tanh((pMouth - 0.45 * reedLp) * 1.85) * 0.84;
+          pIn0 = 0.86 * reedLp + flow;
         } else {
-          // Open-embouchure air-jet flute: AC-coupled jet-labium deflection (zero DC gain) + negative reflection (-0.78)
-          ws.reedLp += alphaReed * (pBack0 - ws.reedLp);
-          const alphaJetHp = Math.min(0.25, (2 * Math.PI * Math.max(45, fOpenEst * 0.35)) * dt);
-          ws.lipY += alphaJetHp * (ws.reedLp - ws.lipY);
-          const acBore = ws.reedLp - ws.lipY;
+          reedLp += alphaReed * (pBack0 - reedLp);
+          lipY += alphaJetHp * (reedLp - lipY);
+          const acBore = reedLp - lipY;
           const uJet = acBore * (1.85 + 0.85 * pMouth) + 0.06 * pMouth * this.nextNoise();
           const jet = -pMouth * 0.72 * Math.tanh(uJet * 1.45);
-          pIn0 = -0.78 * ws.reedLp + jet;
+          pIn0 = -0.78 * reedLp + jet;
         }
         if (!Number.isFinite(pIn0)) {
+          ws.pPlus = pPlus; ws.pMinus = pMinus; ws.nextPlus = nPlus; ws.nextMinus = nMinus;
           clearWindSlotState(ws);
+          apS1 = 0; apS2 = 0; bellLp = 0; reedLp = 0; cupLp = 0; lipY = 0; lipV = 0; prevBack = 0; dcX1 = 0; dcY1 = 0;
           continue;
         }
         if (pIn0 > 1.6) pIn0 = 1.6;
         else if (pIn0 < -1.6) pIn0 = -1.6;
 
         // 1-multiply Kelly–Lochbaum scattering ladder + open tonehole shunts
-        const nPlus = ws.nextPlus;
-        const nMinus = ws.nextMinus;
         nPlus[0] = pIn0;
-        nMinus[M - 1] = pReflBell;
-        for (let c = 0; c < M - 1; c++) {
-          let fp = ws.pPlus[c];
-          let bm = ws.pMinus[c + 1];
-          const sh = shArr[c];
-          if (sh < -0.001) {
-            const w = sh * (fp + bm);
-            fp += w;
-            bm += w;
-            radiated -= w * 0.52;
+        nMinus[Mm1] = pReflBell;
+        if (hasShunts) {
+          for (let c = 0; c < Mm1; c++) {
+            let fp = pPlus[c];
+            let bm = pMinus[c + 1];
+            const sh = shArr[c];
+            if (sh < -0.001) {
+              const sw = sh * (fp + bm);
+              fp += sw;
+              bm += sw;
+              radiated -= sw * 0.52;
+            }
+            const d = kArr[c] * (fp - bm);
+            nPlus[c + 1] = (fp + d) * cellLoss;
+            nMinus[c] = (bm + d) * cellLoss;
           }
-          const d = kArr[c] * (fp - bm);
-          nPlus[c + 1] = (fp + d) * cellLoss;
-          nMinus[c] = (bm + d) * cellLoss;
+        } else {
+          for (let c = 0; c < Mm1; c++) {
+            const fp = pPlus[c];
+            const bm = pMinus[c + 1];
+            const d = kArr[c] * (fp - bm);
+            nPlus[c + 1] = (fp + d) * cellLoss;
+            nMinus[c] = (bm + d) * cellLoss;
+          }
         }
-        const tmpP = ws.pPlus;
-        ws.pPlus = nPlus;
-        ws.nextPlus = tmpP;
-        const tmpM = ws.pMinus;
-        ws.pMinus = nMinus;
-        ws.nextMinus = tmpM;
+        const tmpP = pPlus; pPlus = nPlus; nPlus = tmpP;
+        const tmpM = pMinus; pMinus = nMinus; nMinus = tmpM;
 
-        const dcOut = radiated - ws.dcX1 + dcR * ws.dcY1;
-        ws.dcX1 = radiated;
-        ws.dcY1 = Math.abs(dcOut) < 1e-20 ? 0 : dcOut;
+        const dcOut = radiated - dcX1 + dcR * dcY1;
+        dcX1 = radiated;
+        dcY1 = dcOut > -1e-20 && dcOut < 1e-20 ? 0 : dcOut;
         if (!Number.isFinite(dcOut)) {
+          ws.pPlus = pPlus; ws.pMinus = pMinus; ws.nextPlus = nPlus; ws.nextMinus = nMinus;
           clearWindSlotState(ws);
+          apS1 = 0; apS2 = 0; bellLp = 0; reedLp = 0; cupLp = 0; lipY = 0; lipV = 0; prevBack = 0; dcX1 = 0; dcY1 = 0;
           continue;
         }
-        outChan[i] += dcOut * ws.gain;
+        outChan[i] += dcOut * slotGain;
       }
+
+      ws.pPlus = pPlus;
+      ws.pMinus = pMinus;
+      ws.nextPlus = nPlus;
+      ws.nextMinus = nMinus;
+      ws.breathEnv = breathEnv;
+      ws.smoothEmbHz = smoothEmbHz;
+      ws.vibPhase = vibPhase;
+      ws.apS1 = apS1;
+      ws.apS2 = apS2;
+      ws.bellLp = bellLp;
+      ws.reedLp = reedLp;
+      ws.cupLp = cupLp;
+      ws.lipY = lipY;
+      ws.lipV = lipV;
+      ws.prevBack = prevBack;
+      ws.dcX1 = dcX1;
+      ws.dcY1 = dcY1;
     }
 
     // C^1-continuous soft-knee limiter + NaN guard

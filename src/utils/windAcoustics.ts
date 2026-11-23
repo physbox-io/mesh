@@ -26,6 +26,16 @@ const AIR_DENSITY = 1.18; // kg/m³
 const DEFAULT_SAMPLE_RATE = 48000;
 const MAX_WAVEGUIDE_CELLS = 1022;
 
+function roundN(v: number, scale: number): number {
+  return Math.round(v * scale) / scale;
+}
+
+const POLAR_N_RAYS = 36;
+const POLAR_COS_TAB = Float64Array.from({ length: POLAR_N_RAYS }, (_, m) => Math.cos((2 * Math.PI * m) / POLAR_N_RAYS));
+const POLAR_SIN_TAB = Float64Array.from({ length: POLAR_N_RAYS }, (_, m) => Math.sin((2 * Math.PI * m) / POLAR_N_RAYS));
+const polarHitCountsScratch = new Uint8Array(POLAR_N_RAYS);
+const polarRInsScratch = new Float64Array(POLAR_N_RAYS);
+
 export interface ToneholeStation {
   /** Cell index along the waveguide [1 .. M-2]. */
   cellIndex: number;
@@ -157,21 +167,37 @@ function getMeshBaseZupVertices(g: SceneGeom): number[] | null {
   return null;
 }
 
+const orientedVertsCache = new WeakMap<number[], Map<string, number[]>>();
+
 function getOrientedZupVertices(g: SceneGeom): { verts: number[]; cacheable: boolean } | null {
   const base = getMeshBaseZupVertices(g);
   if (!base) return null;
   if (!hasNonIdentityRot(g)) {
     return { verts: base, cacheable: true };
   }
-  const R = geomRot3(g);
-  const out = new Array<number>(base.length);
-  for (let i = 0; i + 2 < base.length; i += 3) {
-    const x = base[i], y = base[i + 1], z = base[i + 2];
-    out[i] = R[0] * x + R[1] * y + R[2] * z;
-    out[i + 1] = R[3] * x + R[4] * y + R[5] * z;
-    out[i + 2] = R[6] * x + R[7] * y + R[8] * z;
+  const rotKey = `${g.quat ? g.quat.join(',') : ''}|${g.euler ? g.euler.join(',') : ''}`;
+  let byRot = orientedVertsCache.get(base);
+  let out = byRot?.get(rotKey);
+  if (!out) {
+    const R = geomRot3(g);
+    out = new Array<number>(base.length);
+    for (let i = 0; i + 2 < base.length; i += 3) {
+      const x = base[i], y = base[i + 1], z = base[i + 2];
+      out[i] = R[0] * x + R[1] * y + R[2] * z;
+      out[i + 1] = R[3] * x + R[4] * y + R[5] * z;
+      out[i + 2] = R[6] * x + R[7] * y + R[8] * z;
+    }
+    if (!byRot) {
+      byRot = new Map();
+      orientedVertsCache.set(base, byRot);
+    }
+    if (byRot.size >= 8) {
+      const oldest = byRot.keys().next().value;
+      if (oldest !== undefined) byRot.delete(oldest);
+    }
+    byRot.set(rotKey, out);
   }
-  return { verts: out, cacheable: false };
+  return { verts: out, cacheable: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -268,14 +294,19 @@ function computeMeshTopology(rv: number[], faces: number[]): MeshTopologyInfo {
   };
 
   const edgeCounts = new Map<number, number>();
-  const edgeEndpoints = new Map<number, [number, number]>();
   const stride = weldedCount + 1;
   const faceFirstVert: number[] = [];
 
+  const recordEdge = (u: number, v: number) => {
+    const ek = u < v ? u * stride + v : v * stride + u;
+    edgeCounts.set(ek, (edgeCounts.get(ek) ?? 0) + 1);
+  };
+
   for (let f = 0; f < nFaces; f++) {
-    const ia = faces[f * 3];
-    const ib = faces[f * 3 + 1];
-    const ic = faces[f * 3 + 2];
+    const f3 = f * 3;
+    const ia = faces[f3];
+    const ib = faces[f3 + 1];
+    const ic = faces[f3 + 2];
     if (!(ia >= 0 && ia < nVerts && ib >= 0 && ib < nVerts && ic >= 0 && ic < nVerts)) continue;
     const a = vertToWeld[ia];
     const b = vertToWeld[ib];
@@ -287,13 +318,9 @@ function computeMeshTopology(rv: number[], faces: number[]): MeshTopologyInfo {
     used[c] = 1;
     unite(a, b);
     unite(b, c);
-
-    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) {
-      const ek = u < v ? u * stride + v : v * stride + u;
-      const prev = edgeCounts.get(ek) ?? 0;
-      edgeCounts.set(ek, prev + 1);
-      if (prev === 0) edgeEndpoints.set(ek, u < v ? [u, v] : [v, u]);
-    }
+    recordEdge(a, b);
+    recordEdge(b, c);
+    recordEdge(c, a);
   }
 
   // Per-component V, E, F and connected boundary-loop count B_loops:
@@ -311,8 +338,8 @@ function computeMeshTopology(rv: number[], faces: number[]): MeshTopologyInfo {
   for (let i = 0; i < weldedCount; i++) {
     if (used[i]) ensureComp(find(i)).v++;
   }
-  for (const fv of faceFirstVert) {
-    ensureComp(find(fv)).f++;
+  for (let i = 0; i < faceFirstVert.length; i++) {
+    ensureComp(find(faceFirstVert[i])).f++;
   }
 
   const bndParent = new Int32Array(weldedCount);
@@ -332,7 +359,8 @@ function computeMeshTopology(rv: number[], faces: number[]): MeshTopologyInfo {
 
   let boundaryEdges = 0;
   for (const [ek, cnt] of edgeCounts.entries()) {
-    const [u, v] = edgeEndpoints.get(ek)!;
+    const u = Math.floor(ek / stride);
+    const v = ek - u * stride;
     ensureComp(find(u)).e++;
     if (cnt === 1) {
       boundaryEdges++;
@@ -408,14 +436,10 @@ function analyzeBranchCluster(segs: Seg2D[], loopCount: number): BranchSliceInfo
   const seedU = sumW > 1e-5 ? inU / sumW : boxU;
   const seedV = sumW > 1e-5 ? inV / sumW : boxV;
 
-  const N_RAYS = 36;
-  const cosTab = new Float64Array(N_RAYS);
-  const sinTab = new Float64Array(N_RAYS);
-  for (let m = 0; m < N_RAYS; m++) {
-    const th = (2 * Math.PI * m) / N_RAYS;
-    cosTab[m] = Math.cos(th);
-    sinTab[m] = Math.sin(th);
-  }
+  const N_RAYS = POLAR_N_RAYS;
+  const cosTab = POLAR_COS_TAB;
+  const sinTab = POLAR_SIN_TAB;
+  const dTheta = (2 * Math.PI) / N_RAYS;
 
   const evalCandidate = (cu: number, cv: number) => {
     let airRayCount = 0;
@@ -423,8 +447,10 @@ function analyzeBranchCluster(segs: Seg2D[], loopCount: number): BranchSliceInfo
     let areaOuter = 0;
     let minRin = Infinity;
     let maxRin = 0;
-    const hitCounts = new Uint8Array(N_RAYS);
-    const rIns = new Float64Array(N_RAYS);
+    const hitCounts = polarHitCountsScratch;
+    const rIns = polarRInsScratch;
+    hitCounts.fill(0);
+    rIns.fill(0);
 
     for (let m = 0; m < N_RAYS; m++) {
       const du = cosTab[m];
@@ -439,12 +465,13 @@ function analyzeBranchCluster(segs: Seg2D[], loopCount: number): BranchSliceInfo
         const eu = s.u1 - s.u0;
         const ev = s.v1 - s.v0;
         const denom = du * ev - dv * eu;
-        if (Math.abs(denom) < 1e-12) continue;
+        if (denom > -1e-12 && denom < 1e-12) continue;
+        const invDenom = 1 / denom;
         const wu = s.u0 - cu;
         const wv = s.v0 - cv;
-        const t = (wu * ev - wv * eu) / denom;
+        const t = (wu * ev - wv * eu) * invDenom;
         if (t <= 1e-5) continue;
-        const uParam = (wu * dv - wv * du) / denom;
+        const uParam = (wu * dv - wv * du) * invDenom;
         if (uParam < -1e-4 || uParam > 1.0001) continue;
         hits++;
         if (t < nearestT) {
@@ -454,21 +481,18 @@ function analyzeBranchCluster(segs: Seg2D[], loopCount: number): BranchSliceInfo
         if (t > farthestT) farthestT = t;
       }
 
-      hitCounts[m] = Math.min(255, hits);
+      hitCounts[m] = hits > 255 ? 255 : hits;
       if (hits > 0 && Number.isFinite(nearestT)) {
-        // If ray from (cu, cv) hits inner wall from air into solid, ray opposes inward-pointing solid normal (nearestDot < 0)
         if (nearestDot < 0) {
           airRayCount++;
           rIns[m] = nearestT;
         } else {
-          // Candidate point is inside solid wall/wedge along this ray!
           rIns[m] = 0.0005;
         }
-        areaOuter += 0.5 * farthestT * farthestT * ((2 * Math.PI) / N_RAYS);
+        areaOuter += 0.5 * farthestT * farthestT * dTheta;
       }
     }
 
-    // Fill escaping rays with median hit radius for open-area integration, and measure contiguous escape arc
     let sumHitR = 0, cntHitR = 0;
     for (let m = 0; m < N_RAYS; m++) {
       if (hitCounts[m] > 0 && rIns[m] > 0.001) {
@@ -481,7 +505,7 @@ function analyzeBranchCluster(segs: Seg2D[], loopCount: number): BranchSliceInfo
     const avgR = cntHitR > 0 ? sumHitR / cntHitR : 0.25 * (spanU + spanV);
     for (let m = 0; m < N_RAYS; m++) {
       const rUse = hitCounts[m] === 0 ? avgR : rIns[m];
-      areaOpen += 0.5 * rUse * rUse * ((2 * Math.PI) / N_RAYS);
+      areaOpen += 0.5 * rUse * rUse * dTheta;
     }
 
     let maxEscapeRun = 0;
@@ -1063,7 +1087,38 @@ function coaxialHydraulicRadius(g: SceneGeom, boreAxis: 0 | 1 | 2): number {
   return Math.max(0.001, g.size[0] ?? 0.007);
 }
 
+const boreSliceCache = new Map<string, AxialBoreSlice>();
+const MAX_BORE_SLICE_CACHE = 96;
+
+function computeBoreGeomSig(node: SceneNode): string {
+  let sig = `${node.id}|${node.isTube ? 1 : 0}|${node.innerRadius ?? ''}|${node.sculptVersion ?? 0}|${node.sculptEdited ? 1 : 0}`;
+  const geoms = node.geoms;
+  if (geoms) {
+    for (let i = 0; i < geoms.length; i++) {
+      const g = geoms[i];
+      if (g.role === 'visual' || g.type === 'plane') continue;
+      const rv = g.renderVertices ?? g.vertices;
+      let mTag = '';
+      if (g.type === 'mesh' && rv && rv.length >= 9) {
+        const len = rv.length;
+        const mid = (len >> 1) - ((len >> 1) % 3);
+        mTag = `${len}:${g.faces?.length ?? 0}:${Math.round(rv[0] * 1e5)}:${Math.round(rv[mid] * 1e5)}:${Math.round(rv[len - 1] * 1e5)}`;
+      }
+      sig += `;${g.csgDerived ?? ''}:${g.csg ?? ''}:${g.type}:${g.size ? g.size.join(',') : ''}:${g.pos ? g.pos.join(',') : ''}:${g.quat ? g.quat.join(',') : ''}:${g.euler ? g.euler.join(',') : ''}:${g.fromto ? g.fromto.join(',') : ''}:${mTag}`;
+    }
+  }
+  return sig;
+}
+
 function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
+  const sig = computeBoreGeomSig(node);
+  const cached = boreSliceCache.get(sig);
+  if (cached) {
+    boreSliceCache.delete(sig);
+    boreSliceCache.set(sig, cached);
+    return cached;
+  }
+
   const geoms = node.geoms ?? [];
   // Keep `!csgDerived` authored positives primary; fall back to `csgDerived === 'visual'` ONLY when `rawPositives.length === 0`!
   const rawPositives = geoms.filter(
@@ -1176,7 +1231,7 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
 
   if (primaryMeshAnalysis) {
     const prof = primaryMeshAnalysis.profileRadii;
-    return {
+    const meshSlice: AxialBoreSlice = {
       boreAxis: primaryMeshAnalysis.boreAxis,
       minCoord: primaryMeshAnalysis.minCoord,
       maxCoord: primaryMeshAnalysis.maxCoord,
@@ -1184,66 +1239,86 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
       hasHollowFoldedMesh: primaryMeshAnalysis.unfoldedLengthM > bboxLengthM * 1.35,
       muteFactor,
       radiiAtStations: (nStations: number) => {
-        const out: number[] = [];
+        const out = new Array<number>(nStations);
+        const profLast = prof.length - 1;
+        const scale = nStations <= 1 ? 0 : profLast / (nStations - 1);
         for (let k = 0; k < nStations; k++) {
-          const u = nStations <= 1 ? 0 : (k / (nStations - 1)) * (prof.length - 1);
+          const u = k * scale;
           const idx0 = Math.floor(u);
-          const idx1 = Math.min(prof.length - 1, idx0 + 1);
+          const idx1 = idx0 < profLast ? idx0 + 1 : profLast;
           const frac = u - idx0;
-          out.push(prof[idx0] * (1 - frac) + prof[idx1] * frac);
+          out[k] = prof[idx0] * (1 - frac) + prof[idx1] * frac;
         }
         return out;
       },
       transverseHoles,
     };
+    if (boreSliceCache.size >= MAX_BORE_SLICE_CACHE) {
+      const oldest = boreSliceCache.keys().next().value;
+      if (oldest !== undefined) boreSliceCache.delete(oldest);
+    }
+    boreSliceCache.set(sig, meshSlice);
+    return meshSlice;
   }
+
+  // Precompute per-geom axial spans & radii ONCE (previously recomputed inside the O(nStations) station loop!)
+  const preparedCoaxial = coaxialBores.map((cb) => {
+    const [c0, c1] = geomSpanOnAxis(cb, boreAxis);
+    return { c0, c1, r: coaxialHydraulicRadius(cb, boreAxis) };
+  });
+  const preparedPositives = positives.map((p) => {
+    const [p0, p1] = geomSpanOnAxis(p, boreAxis);
+    let rOuter = 0.012;
+    let meshProfile: number[] | null = null;
+    if (p.type === 'cylinder' || p.type === 'capsule' || p.type === 'sphere') {
+      rOuter = p.size[0] ?? 0.01;
+    } else if (p.type === 'box') {
+      const [a0, a1] = geomSpanOnAxis(p, perpAxes[0]);
+      const [b0, b1] = geomSpanOnAxis(p, perpAxes[1]);
+      rOuter = Math.sqrt(Math.max(1e-8, ((a1 - a0) * (b1 - b0)) / Math.PI));
+    } else if (p.type === 'mesh' && p.faces && (p.renderVertices || p.vertices)) {
+      const ma = analyzeHollowMeshAirway(p);
+      if (ma) meshProfile = ma.profileRadii;
+    }
+    return { p0, p1, invSpan: 1 / Math.max(1e-4, p1 - p0), rOuter, meshProfile };
+  });
 
   const sampleRawStations = (nStations: number, reverseDir: boolean): number[] => {
     if (node.isTube && typeof node.innerRadius === 'number' && node.innerRadius > 0) {
       return new Array<number>(nStations).fill(node.innerRadius);
     }
 
-    const out: number[] = [];
+    const out = new Array<number>(nStations);
+    const invN = nStations <= 1 ? 0 : 1 / (nStations - 1);
     for (let k = 0; k < nStations; k++) {
-      const rawU = nStations <= 1 ? 0 : k / (nStations - 1);
+      const rawU = k * invN;
       const u = reverseDir ? 1 - rawU : rawU;
       const coord = minCoord + u * bboxLengthM;
 
       let rInner = 0;
-      for (const cb of coaxialBores) {
-        const [c0, c1] = geomSpanOnAxis(cb, boreAxis);
-        if (coord >= c0 - 1e-4 && coord <= c1 + 1e-4) {
-          rInner = Math.max(rInner, coaxialHydraulicRadius(cb, boreAxis));
+      for (let i = 0; i < preparedCoaxial.length; i++) {
+        const cb = preparedCoaxial[i];
+        if (coord >= cb.c0 - 1e-4 && coord <= cb.c1 + 1e-4) {
+          if (cb.r > rInner) rInner = cb.r;
         }
       }
 
       if (rInner <= 0) {
         let rOuterAtStation = 0;
-        for (const p of positives) {
-          const [p0, p1] = geomSpanOnAxis(p, boreAxis);
-          if (coord >= p0 - 1e-3 && coord <= p1 + 1e-3) {
-            let rCand: number;
-            if (p.type === 'cylinder' || p.type === 'capsule' || p.type === 'sphere') {
-              rCand = p.size[0] ?? 0.01;
-            } else if (p.type === 'box') {
-              const [a0, a1] = geomSpanOnAxis(p, perpAxes[0]);
-              const [b0, b1] = geomSpanOnAxis(p, perpAxes[1]);
-              rCand = Math.sqrt(Math.max(1e-8, ((a1 - a0) * (b1 - b0)) / Math.PI));
-            } else if (p.type === 'mesh' && p.faces && (p.renderVertices || p.vertices)) {
-              const ma = analyzeHollowMeshAirway(p);
-              if (ma) {
-                const localU = Math.max(0, Math.min(1, (coord - p0) / Math.max(1e-4, p1 - p0)));
-                const fIdx = localU * (ma.profileRadii.length - 1);
-                const i0 = Math.floor(fIdx);
-                const i1 = Math.min(ma.profileRadii.length - 1, i0 + 1);
-                rInner = Math.max(rInner, ma.profileRadii[i0] * (1 - (fIdx - i0)) + ma.profileRadii[i1] * (fIdx - i0));
-                continue;
-              }
-              rCand = 0.012;
-            } else {
-              rCand = 0.012;
+        for (let i = 0; i < preparedPositives.length; i++) {
+          const pp = preparedPositives[i];
+          if (coord >= pp.p0 - 1e-3 && coord <= pp.p1 + 1e-3) {
+            if (pp.meshProfile) {
+              const prof = pp.meshProfile;
+              const localU = Math.max(0, Math.min(1, (coord - pp.p0) * pp.invSpan));
+              const fIdx = localU * (prof.length - 1);
+              const i0 = Math.floor(fIdx);
+              const i1 = i0 + 1 < prof.length ? i0 + 1 : prof.length - 1;
+              const rMesh = prof[i0] * (1 - (fIdx - i0)) + prof[i1] * (fIdx - i0);
+              if (rMesh > rInner) rInner = rMesh;
+              continue;
             }
-            if (rCand > rOuterAtStation) rOuterAtStation = rCand;
+            if (pp.rOuter > rOuterAtStation) rOuterAtStation = pp.rOuter;
           }
         }
         if (rInner <= 0 && rOuterAtStation > 0) {
@@ -1251,11 +1326,11 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
         }
       }
 
-      out.push(rInner > 0 ? rInner : 0.0075);
+      out[k] = rInner > 0 ? rInner : 0.0075;
     }
 
     if (positives.length >= 2 && out.length >= 5) {
-      const smoothed = [...out];
+      const smoothed = out.slice();
       for (let i = 1; i + 1 < out.length; i++) {
         smoothed[i] = 0.25 * out[i - 1] + 0.5 * out[i] + 0.25 * out[i + 1];
       }
@@ -1272,13 +1347,13 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
   if (reversePrimitiveAxis && transverseHoles.length > 0) {
     transverseHoles = transverseHoles.map((h) => ({
       ...h,
-      axialFraction: +Math.max(0.08, Math.min(0.96, 1 - h.axialFraction)).toFixed(4),
+      axialFraction: roundN(Math.max(0.08, Math.min(0.96, 1 - h.axialFraction)), 10000),
     }));
   }
 
   const radiiAtStations = (nStations: number): number[] => sampleRawStations(nStations, reversePrimitiveAxis);
 
-  return {
+  const primSlice: AxialBoreSlice = {
     boreAxis,
     minCoord,
     maxCoord,
@@ -1288,6 +1363,12 @@ function inspectNodeBoreGeometry(node: SceneNode): AxialBoreSlice {
     radiiAtStations,
     transverseHoles,
   };
+  if (boreSliceCache.size >= MAX_BORE_SLICE_CACHE) {
+    const oldest = boreSliceCache.keys().next().value;
+    if (oldest !== undefined) boreSliceCache.delete(oldest);
+  }
+  boreSliceCache.set(sig, primSlice);
+  return primSlice;
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,21 +1406,41 @@ function solveConicalBoreTMM(
     .join(';');
   const cacheKey = `${Math.round(totalBoreLengthM * 20000)}|${rSig}|${hSig}|${isOpenInputFlute ? 1 : 0}|${Math.round(muteFactor * 100)}`;
   const hit = tmmCache.get(cacheKey);
-  if (hit) return hit;
-  if (tmmCache.size > 180) tmmCache.clear();
+  if (hit) {
+    tmmCache.delete(cacheKey);
+    tmmCache.set(cacheKey, hit);
+    return hit;
+  }
+  if (tmmCache.size >= 180) {
+    const oldest = tmmCache.keys().next().value;
+    if (oldest !== undefined) tmmCache.delete(oldest);
+  }
 
-  // Map open toneholes onto segment boundaries [1 .. nSegs - 1] with linear sub-segment interpolation!
-  const holesBySeg = new Map<number, { rHoleM: number; tEffM: number; open: number }[]>();
+  // Flat segment-indexed tonehole array (replaces Map.get inside 39,200-iteration loop!)
+  interface PreparedTmmHole {
+    rHoleM: number;
+    z0Hole: number;
+    resistOpen: number;
+    inertOpen: number;
+  }
+  const rhoC = AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR;
+  const holesBySeg: (PreparedTmmHole[] | null)[] = new Array(nSegs).fill(null);
   const addHoleWeight = (segIdx: number, rH: number, tEff: number, openW: number) => {
     if (openW <= 0.005 || segIdx < 1 || segIdx >= nSegs) return;
-    let list = holesBySeg.get(segIdx);
+    let list = holesBySeg[segIdx];
     if (!list) {
       list = [];
-      holesBySeg.set(segIdx, list);
+      holesBySeg[segIdx] = list;
     }
-    list.push({ rHoleM: rH, tEffM: tEff, open: openW });
+    list.push({
+      rHoleM: rH,
+      z0Hole: rhoC / (Math.PI * rH * rH),
+      resistOpen: 0.018 / Math.max(0.15, openW),
+      inertOpen: tEff / Math.max(0.08, openW),
+    });
   };
-  for (const th of toneholes) {
+  for (let i = 0; i < toneholes.length; i++) {
+    const th = toneholes[i];
     if (th.openAmount <= 0.02) continue;
     const exactSeg = Math.max(1, Math.min(nSegs - 1.001, th.axialFraction * nSegs));
     const s0 = Math.floor(exactSeg);
@@ -1350,124 +1451,164 @@ function solveConicalBoreTMM(
     addHoleWeight(s0 + 1, rH, tEff, th.openAmount * w1);
   }
 
+  // Precompute all frequency-independent segment geometry constants ONCE before the 1120-bin sweep!
+  const segInvRMean = new Float64Array(nSegs);
+  const segZc01 = new Float64Array(nSegs);
+  const segInvZc01 = new Float64Array(nSegs);
+  const segIsCyl = new Uint8Array(nSegs);
+  const segX0 = new Float64Array(nSegs);
+  const segX1 = new Float64Array(nSegs);
+  const segInvX0 = new Float64Array(nSegs);
+  const segInvX1 = new Float64Array(nSegs);
+  const segX1OverX0 = new Float64Array(nSegs);
+  const segX0OverX1 = new Float64Array(nSegs);
+  const segLOverX1 = new Float64Array(nSegs);
+  const segACoef = new Float64Array(nSegs);
+  const segDCoef = new Float64Array(nSegs);
+  const segVolFactor = new Float64Array(nSegs);
+
+  for (let s = 0; s < nSegs; s++) {
+    const r0 = Math.max(0.0018, radii[s]);
+    const r1 = Math.max(0.0018, radii[s + 1]);
+    segInvRMean[s] = 1 / (0.5 * (r0 + r1));
+    const zc = rhoC / (Math.PI * r0 * r1);
+    segZc01[s] = zc;
+    segInvZc01[s] = 1 / zc;
+    const dr = r1 - r0;
+    if (Math.abs(dr) < 1e-5) {
+      segIsCyl[s] = 1;
+    } else {
+      const x0 = (r0 * segLen) / dr;
+      const x1 = x0 + segLen;
+      segX0[s] = x0;
+      segX1[s] = x1;
+      segInvX0[s] = 1 / x0;
+      segInvX1[s] = 1 / x1;
+      segX1OverX0[s] = x1 / x0;
+      segX0OverX1[s] = x0 / x1;
+      segLOverX1[s] = segLen / x1;
+      segACoef[s] = (3 * x1 - segLen) / (6 * x0);
+      segDCoef[s] = (3 * x0 + segLen) / (6 * x1);
+      segVolFactor[s] = 1 + (segLen * segLen) / (3 * x0 * x1);
+    }
+  }
+
   const rMouth = Math.max(0.002, radii[0]);
   const rMid = Math.max(0.003, radii[Math.floor(nNodes * 0.5)]);
-  const z0Mouth = (AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR) / (Math.PI * rMouth * rMouth);
-  const zRef = (AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR) / (Math.PI * rMouth * rMid);
+  const z0Mouth = rhoC / (Math.PI * rMouth * rMouth);
+  const zRef = rhoC / (Math.PI * rMouth * rMid);
+  const invZRef = 1 / zRef;
   const rBell = Math.max(0.0025, radii[nNodes - 1]);
-  const z0Bell = (AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR) / (Math.PI * rBell * rBell);
+  const z0Bell = rhoC / (Math.PI * rBell * rBell);
+  const muteMassBoost = 1 + 2.4 * muteFactor;
+  const muteResistBoost = 1 + 3.5 * muteFactor * muteFactor;
+  const zBellResistBase = z0Bell * muteResistBoost;
+  const zBellMassBase = z0Bell * muteMassBoost;
 
   const fMin = 28;
   const fStep = 4.0;
-  const nFreqs = 1120; // 28 Hz .. 4504 Hz at 4 Hz resolution (captures bass pedals <63 Hz & short whistles >2.3 kHz!)
+  const nFreqs = 1120; // 28 Hz .. 4504 Hz at 4 Hz resolution
   const magNorm = new Array<number>(nFreqs);
+  const invSpeed = (2 * Math.PI) / SPEED_OF_SOUND_WARM_AIR;
 
   for (let m = 0; m < nFreqs; m++) {
     const f = fMin + m * fStep;
-    const omega = 2 * Math.PI * f;
-    const k = omega / SPEED_OF_SOUND_WARM_AIR;
+    const k = f * invSpeed;
+    const kSq = k * k;
+    // Hoist sin(kL), cos(kL), and sqrt(f) ONCE per frequency bin instead of per segment (35x fewer trig/sqrt calls!)
+    const kL = k * segLen;
+    const sinKL = Math.sin(kL);
+    const cosKL = Math.cos(kL);
+    const alphaBase = 1.05e-5 * Math.sqrt(f);
 
-    // Norris–Sheng rational unflanged pipe radiation impedance:
-    // Exact O((ka)^3) match to Levine–Schwinger at low ka, bounded smoothly (-> Z_0 + 0i) above bell cutoff!
     const ka = k * rBell;
     const ka2 = ka * ka;
-    const muteMassBoost = 1 + 2.4 * muteFactor;
-    const muteResistBoost = 1 + 3.5 * muteFactor * muteFactor;
-    let pRe = z0Bell * ((0.25 * ka2) / (1 + 0.25 * ka2)) * muteResistBoost;
-    let pIm = z0Bell * ((0.6133 * ka) / (1 + 0.38 * ka2)) * muteMassBoost;
+    let pRe = zBellResistBase * ((0.25 * ka2) / (1 + 0.25 * ka2));
+    let pIm = zBellMassBase * ((0.6133 * ka) / (1 + 0.38 * ka2));
     let uRe = 1.0;
     let uIm = 0.0;
 
     // Propagate (p, U) backward from bell (seg = nSegs - 1) to mouthpiece (seg = 0)
     for (let s = nSegs - 1; s >= 0; s--) {
-      const r0 = Math.max(0.0018, radii[s]);
-      const r1 = Math.max(0.0018, radii[s + 1]);
-      const rMean = 0.5 * (r0 + r1);
-
-      // Kirchhoff thermo-viscous boundary-layer attenuation alpha (Np/m)
-      const alpha = (1.05e-5 * Math.sqrt(f)) / rMean;
-      // Complex wavenumber k_tilde = k - i*alpha => sin(k_tilde * L) = sin(kL)cosh(aL) - i cos(kL)sinh(aL)
-      const kL = k * segLen;
+      const alpha = alphaBase * segInvRMean[s];
       const aL = alpha * segLen;
-      const sinKL = Math.sin(kL), cosKL = Math.cos(kL);
-      const coshAL = Math.cosh(aL), sinhAL = Math.sinh(aL);
+      const expAL = Math.exp(aL);
+      const invExpAL = 1 / expAL;
+      const coshAL = 0.5 * (expAL + invExpAL);
+      const sinhAL = 0.5 * (expAL - invExpAL);
 
       const sRe = sinKL * coshAL;
       const sIm = -cosKL * sinhAL;
       const cRe = cosKL * coshAL;
       const cIm = sinKL * sinhAL;
 
-      const zc01 = (AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR) / (Math.PI * r0 * r1);
+      const zc01 = segZc01[s];
+      const invZc01 = segInvZc01[s];
 
       let ARe: number, AIm: number;
       let BRe: number, BIm: number;
       let CRe: number, CIm: number;
       let DRe: number, DIm: number;
 
-      if (Math.abs(r1 - r0) < 1e-5) {
+      if (segIsCyl[s] === 1) {
         ARe = cRe; AIm = cIm;
         DRe = cRe; DIm = cIm;
         BRe = -zc01 * sIm; BIm = zc01 * sRe;
-        CRe = -sIm / zc01; CIm = sRe / zc01;
+        CRe = -sIm * invZc01; CIm = sRe * invZc01;
       } else {
-        // Exact spherical-wave conical frustum (Caussé et al. 1984) using FULL complex `1 / k_tilde`
-        // so the O(1 / (k_tilde * x0)) singularity cancels identically without 1,300x imaginary loss blowup!
-        const dr = r1 - r0;
-        const x0 = (r0 * segLen) / dr;
-        const x1 = x0 + segLen;
-
+        const x0 = segX0[s];
+        const x1 = segX1[s];
         if (Math.abs(k * x0) < 1e-3 || Math.abs(k * x1) < 1e-3) {
           const zRe = kL, zIm = -aL;
           const z2Re = zRe * zRe - zIm * zIm;
           const z2Im = 2 * zRe * zIm;
-          const aCoef = (3 * x1 - segLen) / (6 * x0);
-          const dCoef = (3 * x0 + segLen) / (6 * x1);
+          const aCoef = segACoef[s];
+          const dCoef = segDCoef[s];
           ARe = 1 - aCoef * z2Re;
           AIm = -aCoef * z2Im;
           DRe = 1 - dCoef * z2Re;
           DIm = -dCoef * z2Im;
           BRe = -zc01 * sIm;
           BIm = zc01 * sRe;
-          const volFactor = 1 + (segLen * segLen) / (3 * x0 * x1);
-          const mRe = zRe * volFactor;
-          const mIm = zIm * volFactor;
-          CRe = -mIm / zc01;
-          CIm = mRe / zc01;
+          const vf = segVolFactor[s];
+          CRe = -zIm * vf * invZc01;
+          CIm = zRe * vf * invZc01;
         } else {
-          const kMagSq = k * k + alpha * alpha;
-          // 1 / k_tilde = (k + i * alpha) / (k^2 + alpha^2)
-          const invKx0Re = k / (kMagSq * x0);
-          const invKx0Im = alpha / (kMagSq * x0);
-          const invKx1Re = k / (kMagSq * x1);
-          const invKx1Im = alpha / (kMagSq * x1);
+          const invKMagSq = 1 / (kSq + alpha * alpha);
+          const invKRe = k * invKMagSq;
+          const invKIm = alpha * invKMagSq;
+          const invX0 = segInvX0[s];
+          const invX1 = segInvX1[s];
+          const invKx0Re = invKRe * invX0;
+          const invKx0Im = invKIm * invX0;
+          const invKx1Re = invKRe * invX1;
+          const invKx1Im = invKIm * invX1;
 
-          // invKx0 * s
           const q0Re = invKx0Re * sRe - invKx0Im * sIm;
           const q0Im = invKx0Re * sIm + invKx0Im * sRe;
-          ARe = (x1 / x0) * cRe - q0Re;
-          AIm = (x1 / x0) * cIm - q0Im;
+          const x1Ox0 = segX1OverX0[s];
+          ARe = x1Ox0 * cRe - q0Re;
+          AIm = x1Ox0 * cIm - q0Im;
 
-          // invKx1 * s
           const q1Re = invKx1Re * sRe - invKx1Im * sIm;
           const q1Im = invKx1Re * sIm + invKx1Im * sRe;
-          DRe = (x0 / x1) * cRe + q1Re;
-          DIm = (x0 / x1) * cIm + q1Im;
+          const x0Ox1 = segX0OverX1[s];
+          DRe = x0Ox1 * cRe + q1Re;
+          DIm = x0Ox1 * cIm + q1Im;
 
           BRe = -zc01 * sIm;
           BIm = zc01 * sRe;
 
-          // M = (1 + invKx0 * invKx1) * s - (segLen / x1) * invKx0 * c
-          const invK2Re = invKx0Re * invKx1Re - invKx0Im * invKx1Im;
-          const invK2Im = invKx0Re * invKx1Im + invKx0Im * invKx1Re;
-          const k1Re = 1 + invK2Re;
-          const k1Im = invK2Im;
-          const k2Re = (segLen / x1) * invKx0Re;
-          const k2Im = (segLen / x1) * invKx0Im;
+          const k1Re = 1 + (invKx0Re * invKx1Re - invKx0Im * invKx1Im);
+          const k1Im = invKx0Re * invKx1Im + invKx0Im * invKx1Re;
+          const lOx1 = segLOverX1[s];
+          const k2Re = lOx1 * invKx0Re;
+          const k2Im = lOx1 * invKx0Im;
 
           const mRe = (k1Re * sRe - k1Im * sIm) - (k2Re * cRe - k2Im * cIm);
           const mIm = (k1Re * sIm + k1Im * sRe) - (k2Re * cIm + k2Im * cRe);
-          CRe = -mIm / zc01;
-          CIm = mRe / zc01;
+          CRe = -mIm * invZc01;
+          CIm = mRe * invZc01;
         }
       }
 
@@ -1482,17 +1623,17 @@ function solveConicalBoreTMM(
       uIm = nextUIm;
 
       // Apply parallel Keefe complex tonehole / sculpted-breach shunt admittance U <- U + Y_hole * p
-      const holes = holesBySeg.get(s);
-      if (holes) {
-        for (const h of holes) {
-          const z0Hole = (AIR_DENSITY * SPEED_OF_SOUND_WARM_AIR) / (Math.PI * h.rHoleM * h.rHoleM);
+      const holes = holesBySeg[s];
+      if (holes !== null) {
+        for (let hi = 0; hi < holes.length; hi++) {
+          const h = holes[hi];
           const kh = k * h.rHoleM;
           const kh2 = kh * kh;
-          const zHoleRe = z0Hole * ((0.25 * kh2) / (1 + 0.25 * kh2) + 0.018 / Math.max(0.15, h.open));
-          const zHoleIm = z0Hole * ((k * h.tEffM) / Math.max(0.08, h.open));
-          const denom = zHoleRe * zHoleRe + zHoleIm * zHoleIm + 1e-18;
-          const yRe = zHoleRe / denom;
-          const yIm = -zHoleIm / denom;
+          const zHoleRe = h.z0Hole * ((0.25 * kh2) / (1 + 0.25 * kh2) + h.resistOpen);
+          const zHoleIm = h.z0Hole * (k * h.inertOpen);
+          const invDenom = 1 / (zHoleRe * zHoleRe + zHoleIm * zHoleIm + 1e-18);
+          const yRe = zHoleRe * invDenom;
+          const yIm = -zHoleIm * invDenom;
           uRe += yRe * pRe - yIm * pIm;
           uIm += yRe * pIm + yIm * pRe;
         }
@@ -1506,13 +1647,13 @@ function solveConicalBoreTMM(
       const zEmbIm = z0Mouth * ((0.85 * km) / (1 + 0.45 * km2));
       pRe += zEmbRe * uRe - zEmbIm * uIm;
       pIm += zEmbRe * uIm + zEmbIm * uRe;
-      const pMag = Math.hypot(pRe, pIm) + 1e-12;
-      const uMag = Math.hypot(uRe, uIm);
+      const pMag = Math.sqrt(pRe * pRe + pIm * pIm) + 1e-12;
+      const uMag = Math.sqrt(uRe * uRe + uIm * uIm);
       magNorm[m] = (uMag * z0Mouth) / pMag;
     } else {
-      const uMag = Math.hypot(uRe, uIm) + 1e-12;
-      const pMag = Math.hypot(pRe, pIm);
-      magNorm[m] = pMag / (uMag * zRef);
+      const uMag = Math.sqrt(uRe * uRe + uIm * uIm) + 1e-12;
+      const pMag = Math.sqrt(pRe * pRe + pIm * pIm);
+      magNorm[m] = (pMag * invZRef) / uMag;
     }
   }
 
@@ -1579,6 +1720,9 @@ function smoothBlend(edge0: number, edge1: number, x: number): number {
 // Public Bore Extraction & Wave-Equation Voice Solver
 // ---------------------------------------------------------------------------
 
+const boreWaveguideCache = new Map<string, BoreWaveguideModel>();
+const MAX_BORE_WAVEGUIDE_CACHE = 64;
+
 /**
  * Slices `node`'s 3D bore (primitives + triangle meshes + sculpted holes/baffles)
  * and solves the 2x2 conical acoustic transfer matrix for its input impedance
@@ -1593,8 +1737,6 @@ export function extractBoreWaveguide(
   if (!spec) return null;
 
   const sr = Number.isFinite(sampleRate) && sampleRate > 8000 ? sampleRate : DEFAULT_SAMPLE_RATE;
-  const slice = inspectNodeBoreGeometry(node);
-  const dxCell = SPEED_OF_SOUND_WARM_AIR / sr;
 
   const jointByName = (spec.valveJoints?.length || spec.toneholeJoints?.length) ? collectSubtreeJoints(node) : null;
   const resolveJointTravel = (rawQ: number, jDef?: SceneJoint): number => {
@@ -1612,7 +1754,8 @@ export function extractBoreWaveguide(
   let valveLengthRatio = 1.0;
   if (spec.valveJoints?.length && jointPositions) {
     let totalSemitones = 0;
-    for (const vj of spec.valveJoints) {
+    for (let i = 0; i < spec.valveJoints.length; i++) {
+      const vj = spec.valveJoints[i];
       const rawQ = jointPositions[vj.jointName] ?? 0;
       const qVal = resolveJointTravel(rawQ, jointByName?.get(vj.jointName));
       const fullStroke = Math.max(0.003, vj.strokeM ?? 0.012);
@@ -1621,6 +1764,45 @@ export function extractBoreWaveguide(
     }
     valveLengthRatio = Math.pow(2, totalSemitones / 12);
   }
+
+  // Pre-resolve tonehole open amounts so steady-note 60 Hz frames hit boreWaveguideCache in O(1)
+  let holeOpenSig = '';
+  let preOpenAmounts: number[] | null = null;
+  if (spec.toneholeJoints?.length) {
+    preOpenAmounts = new Array<number>(spec.toneholeJoints.length);
+    for (let i = 0; i < spec.toneholeJoints.length; i++) {
+      const th = spec.toneholeJoints[i];
+      const jDef = th.jointName ? jointByName?.get(th.jointName) : undefined;
+      const rawQ = jointPositions && th.jointName ? jointPositions[th.jointName] ?? 0 : 0;
+      const qVal = resolveJointTravel(rawQ, jDef);
+      let openAmount = 0;
+      if (jointPositions) {
+        if (jDef?.type === 'slide') {
+          const maxRange = jDef.range
+            ? Math.max(Math.abs(jDef.range[0] ?? 0), Math.abs(jDef.range[1] ?? 0))
+            : 0.004;
+          const stroke = Math.max(0.0015, maxRange || 0.004);
+          openAmount = Math.max(0, Math.min(1, (qVal - stroke * 0.12) / (stroke * 0.53)));
+        } else {
+          openAmount = Math.max(0, Math.min(1, (qVal - 0.015) / 0.065));
+        }
+      }
+      const roundedOpen = roundN(openAmount, 1000);
+      preOpenAmounts[i] = roundedOpen;
+      holeOpenSig += `;${th.axialFraction}:${th.diameterMm}:${th.jointName ?? ''}:${roundedOpen}`;
+    }
+  }
+
+  const wgKey = `${computeBoreGeomSig(node)}|${spec.exciter}|${spec.boreLengthM ?? ''}|${spec.mouthRadiusM ?? ''}|${spec.bellRadiusM ?? ''}|${spec.flareExponent ?? ''}|${sr}|${Math.round(valveLengthRatio * 1e5)}|${holeOpenSig}`;
+  const cachedWg = boreWaveguideCache.get(wgKey);
+  if (cachedWg) {
+    boreWaveguideCache.delete(wgKey);
+    boreWaveguideCache.set(wgKey, cachedWg);
+    return cachedWg;
+  }
+
+  const slice = inspectNodeBoreGeometry(node);
+  const dxCell = SPEED_OF_SOUND_WARM_AIR / sr;
 
   // Always prefer live 3D geometry when sculpted or when spec overrides are omitted!
   const useLiveGeometry = !!node.sculptEdited || !spec.boreLengthM || spec.boreLengthM <= 0.05;
@@ -1656,13 +1838,14 @@ export function extractBoreWaveguide(
       })
     : slice.radiiAtStations(cellCount);
 
-  const areas = cellRadii.map((r) => Math.PI * r * r);
-  const junctionK: number[] = [];
+  const junctionK = new Array<number>(Math.max(0, cellCount - 1));
   for (let i = 0; i + 1 < cellCount; i++) {
-    const a0 = areas[i];
-    const a1 = areas[i + 1];
+    const r0 = cellRadii[i];
+    const r1 = cellRadii[i + 1];
+    const a0 = r0 * r0;
+    const a1 = r1 * r1;
     const k = (a0 - a1) / Math.max(1e-12, a0 + a1);
-    junctionK.push(+Math.max(-0.92, Math.min(0.92, k)).toFixed(5));
+    junctionK[i] = roundN(k < -0.92 ? -0.92 : k > 0.92 ? 0.92 : k, 100000);
   }
 
   const neckRadiusM = rawRadii[Math.floor((nTmmNodes - 1) * 0.20)] ?? mouthRadiusM;
@@ -1677,8 +1860,9 @@ export function extractBoreWaveguide(
         : 'conical';
 
   const toneholes: ToneholeStation[] = [];
-  if (spec.toneholeJoints?.length) {
-    for (const th of spec.toneholeJoints) {
+  if (spec.toneholeJoints?.length && preOpenAmounts) {
+    for (let i = 0; i < spec.toneholeJoints.length; i++) {
+      const th = spec.toneholeJoints[i];
       const frac = Math.max(0.1, Math.min(0.94, th.axialFraction));
       const cellIdx = Math.max(1, Math.min(cellCount - 2, Math.round(frac * (cellCount - 1))));
       const rBore = cellRadii[cellIdx] ?? 0.0075;
@@ -1687,28 +1871,13 @@ export function extractBoreWaveguide(
       const kRef = (2 * Math.PI * 300) / SPEED_OF_SOUND_WARM_AIR;
       const zRatio = (kRef * tEff * rBore * rBore) / (rHole * rHole);
       const shunt = -1 / (1 + 2 * zRatio);
-      const jDef = th.jointName ? jointByName?.get(th.jointName) : undefined;
-      const rawQ = jointPositions && th.jointName ? jointPositions[th.jointName] ?? 0 : 0;
-      const qVal = resolveJointTravel(rawQ, jDef);
-      let openAmount = 0;
-      if (jointPositions) {
-        if (jDef?.type === 'slide') {
-          const maxRange = jDef.range
-            ? Math.max(Math.abs(jDef.range[0] ?? 0), Math.abs(jDef.range[1] ?? 0))
-            : 0.004;
-          const stroke = Math.max(0.0015, maxRange || 0.004);
-          openAmount = Math.max(0, Math.min(1, (qVal - stroke * 0.12) / (stroke * 0.53)));
-        } else {
-          openAmount = Math.max(0, Math.min(1, (qVal - 0.015) / 0.065));
-        }
-      }
       toneholes.push({
         cellIndex: cellIdx,
         axialFraction: frac,
-        radiusMm: +(rHole * 2000).toFixed(1),
-        shuntCoeff: +Math.max(-0.85, Math.min(-0.08, shunt)).toFixed(4),
+        radiusMm: roundN(rHole * 2000, 10),
+        shuntCoeff: roundN(Math.max(-0.85, Math.min(-0.08, shunt)), 10000),
         keyJointName: th.jointName,
-        openAmount: +openAmount.toFixed(3),
+        openAmount: preOpenAmounts[i],
       });
     }
   }
@@ -1754,14 +1923,14 @@ export function extractBoreWaveguide(
     Math.max(420, SPEED_OF_SOUND_WARM_AIR / (2 * Math.PI * Math.max(0.004, bellRadiusM))),
   ).toFixed(1);
 
-  return {
+  const model: BoreWaveguideModel = {
     nodeId: node.id,
     exciter: spec.exciter,
-    lengthM: +baseBoreLengthM.toFixed(4),
-    mouthRadiusM: +mouthRadiusM.toFixed(5),
-    bellRadiusM: +bellRadiusM.toFixed(5),
+    lengthM: roundN(baseBoreLengthM, 10000),
+    mouthRadiusM: roundN(mouthRadiusM, 100000),
+    bellRadiusM: roundN(bellRadiusM, 100000),
     cellCount,
-    exactCells: +exactCells.toFixed(4),
+    exactCells: roundN(exactCells, 10000),
     sampleRate: sr,
     junctionK,
     bellCutoffHz,
@@ -1771,8 +1940,15 @@ export function extractBoreWaveguide(
     modeImpedancePeaks: tmm.peaksMag,
     impedanceGrid: { fMin: tmm.fMin, fStep: tmm.fStep, magNorm: tmm.magNorm },
     muteFactor: slice.muteFactor,
-    breachFactor: +breachFactor.toFixed(3),
+    breachFactor: roundN(breachFactor, 1000),
   };
+
+  if (boreWaveguideCache.size >= MAX_BORE_WAVEGUIDE_CACHE) {
+    const oldest = boreWaveguideCache.keys().next().value;
+    if (oldest !== undefined) boreWaveguideCache.delete(oldest);
+  }
+  boreWaveguideCache.set(wgKey, model);
+  return model;
 }
 
 export interface PlayableWindVoiceInput {
@@ -1972,12 +2148,16 @@ export function solvePlayableWindVoice(
     }
 
     const w = (1 - flapBlend) * wBore + flapBlend * wFlap;
-    harmonicWeights.push(+Math.max(0.001, w).toFixed(4));
+    harmonicWeights.push(roundN(w > 0.001 ? w : 0.001, 10000));
   }
 
-  const maxW = Math.max(1e-6, ...harmonicWeights);
+  let maxW = 1e-6;
   for (let i = 0; i < harmonicWeights.length; i++) {
-    harmonicWeights[i] = +(harmonicWeights[i] / maxW).toFixed(4);
+    if (harmonicWeights[i] > maxW) maxW = harmonicWeights[i];
+  }
+  const invMaxW = 1 / maxW;
+  for (let i = 0; i < harmonicWeights.length; i++) {
+    harmonicWeights[i] = roundN(harmonicWeights[i] * invMaxW, 10000);
   }
 
   const rawBlowAmp = 0.24 * Math.tanh(bNorm * 1.35);

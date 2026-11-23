@@ -306,6 +306,43 @@ export function clampAudioFreq(
   return safeClamp(hz, fallback, minHz, nyquistSafe);
 }
 
+const MAX_PERIODIC_WAVE_CACHE = 64;
+const periodicWaveCacheByCtx = new WeakMap<AudioContext, Map<string, PeriodicWave>>();
+
+function getCachedPeriodicWave(ctx: AudioContext, cacheKey: string): PeriodicWave | undefined {
+  const map = periodicWaveCacheByCtx.get(ctx);
+  if (!map) return undefined;
+  const hit = map.get(cacheKey);
+  if (hit) {
+    map.delete(cacheKey);
+    map.set(cacheKey, hit);
+  }
+  return hit;
+}
+
+function setCachedPeriodicWave(ctx: AudioContext, cacheKey: string, wave: PeriodicWave): void {
+  let map = periodicWaveCacheByCtx.get(ctx);
+  if (!map) {
+    map = new Map();
+    periodicWaveCacheByCtx.set(ctx, map);
+  }
+  if (map.size >= MAX_PERIODIC_WAVE_CACHE) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(cacheKey, wave);
+}
+
+function buildHarmonicWaveSig(prefix: string, hw: number[], maxCount: number, scale: number): string {
+  const limit = hw.length < maxCount ? hw.length : maxCount;
+  let sig = `${prefix}:${hw.length}:`;
+  for (let i = 0; i < limit; i++) {
+    if (i > 0) sig += ',';
+    sig += Math.round(finiteOr(hw[i], 0) * scale);
+  }
+  return sig;
+}
+
 /**
  * Sanitizes Fourier cosine/sine arrays for `ctx.createPeriodicWave`, replacing
  * non-finite bins with `0` and disabling normalization when all harmonic weights
@@ -566,15 +603,26 @@ function buildStudioChamberIR(ctx: AudioContext): AudioBuffer {
   let seedR = 0x9e3779b9;
   let lpL = 0, lpR = 0;
   let hpL = 0, hpR = 0;
-  for (let i = Math.floor(0.010 * sr); i < len; i++) {
-    const t = i / sr;
-    const env = Math.exp(-t / 0.18) * (1 - Math.exp(-t / 0.015));
+  const isNative48k = Math.abs(rateRatio - 1) < 1e-6;
+  const invSr = 1 / sr;
+  const startI = Math.floor(0.010 * sr);
+  const envDec1 = Math.exp(-invSr / 0.18);
+  const envDec2 = Math.exp(-invSr / 0.015);
+  const dampDec = Math.exp(-1.8 * invSr);
+  let e1 = Math.exp(-(startI * invSr) / 0.18);
+  let e2 = Math.exp(-(startI * invSr) / 0.015);
+  let dExp = Math.exp(-1.8 * startI * invSr);
+  for (let i = startI; i < len; i++) {
+    const env = e1 * (1 - e2);
+    e1 *= envDec1;
+    e2 *= envDec2;
     seedL = (Math.imul(seedL, 1664525) + 1013904223) | 0;
     seedR = (Math.imul(seedR, 22695477) + 1) | 0;
     const wL = seedL / 2147483648;
     const wR = seedR / 2147483648;
-    const damp48 = 0.34 * Math.exp(-t * 1.8) + 0.08;
-    const damp = 1 - Math.pow(Math.max(1e-4, 1 - damp48), rateRatio);
+    const damp48 = 0.34 * dExp + 0.08;
+    dExp *= dampDec;
+    const damp = isNative48k ? damp48 : 1 - Math.pow(Math.max(1e-4, 1 - damp48), rateRatio);
     lpL += damp * (wL - lpL);
     lpR += damp * (wR - lpR);
     hpL += hpAlpha * (lpL - hpL);
@@ -925,32 +973,45 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
   if (!bank) return;
 
   const now = finiteOr(ctx.currentTime, 0);
-  const usedSlots = new Set<number>();
+  let usedMask = 0;
 
   // Solve & filter ONLY active wind voices first so idle pipes (breathKPa = 0) never starve active ones!
-  const activeEntries = voices
-    .map((v) => ({
+  const activeEntries: { v: WorkletWindVoicePayload; solved: ReturnType<typeof solvePlayableWindVoice> }[] = [];
+  for (let i = 0; i < voices.length; i++) {
+    const v = voices[i];
+    if (!v) continue;
+    const solved = solvePlayableWindVoice(
       v,
-      solved: solvePlayableWindVoice(
-        v,
-        safeClamp(v.breathKPa, 0, 0, 25),
-        safeClamp(v.embouchureHz, 220, 15, 4500),
-      ),
-    }))
-    .filter((item) => item.solved.active && finiteOr(item.solved.amplitude, 0) > 0.0005)
-    .sort((a, b) => finiteOr(b.solved.amplitude, 0) - finiteOr(a.solved.amplitude, 0))
-    .slice(0, bank.slots.length);
+      safeClamp(v.breathKPa, 0, 0, 25),
+      safeClamp(v.embouchureHz, 220, 15, 4500),
+    );
+    if (solved.active && finiteOr(solved.amplitude, 0) > 0.0005) {
+      activeEntries.push({ v, solved });
+    }
+  }
+  if (activeEntries.length > bank.slots.length) {
+    activeEntries.sort((a, b) => finiteOr(b.solved.amplitude, 0) - finiteOr(a.solved.amplitude, 0));
+    activeEntries.length = bank.slots.length;
+  }
 
-  for (const { v, solved } of activeEntries) {
-    let idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && s.id === v.id);
-    if (idx === -1) {
-      idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && !s.wasActive);
+  for (let eIdx = 0; eIdx < activeEntries.length; eIdx++) {
+    const { v, solved } = activeEntries[eIdx];
+    let idx = -1;
+    for (let i = 0; i < bank.slots.length; i++) {
+      if ((usedMask & (1 << i)) === 0 && bank.slots[i].id === v.id) { idx = i; break; }
     }
     if (idx === -1) {
-      idx = bank.slots.findIndex((_s, i) => !usedSlots.has(i));
+      for (let i = 0; i < bank.slots.length; i++) {
+        if ((usedMask & (1 << i)) === 0 && !bank.slots[i].wasActive) { idx = i; break; }
+      }
+    }
+    if (idx === -1) {
+      for (let i = 0; i < bank.slots.length; i++) {
+        if ((usedMask & (1 << i)) === 0) { idx = i; break; }
+      }
     }
     if (idx === -1) continue;
-    usedSlots.add(idx);
+    usedMask |= 1 << idx;
 
     const slot = bank.slots[idx];
     const isNewId = slot.id !== v.id;
@@ -959,20 +1020,24 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
     // Update band-limited C++ PeriodicWave from TMM harmonic weights H_1..H_N whenever bore spectrum changes!
     const hw = Array.isArray(solved.harmonicWeights) ? solved.harmonicWeights : [];
     const coh = safeClamp(solved.phaseCoherence, 0, 0, 1);
-    const waveSig = `${Math.round(coh * 20)}:${hw.length}:${hw.slice(0, 10).map((w) => Math.round(finiteOr(w, 0) * 25)).join(',')}`;
+    const waveSig = buildHarmonicWaveSig(`w${Math.round(coh * 20)}`, hw, 10, 25);
     const isFreshAttack = !slot.wasActive || isNewId;
     if ((isFreshAttack || slot.lastWaveSig !== waveSig) && hw.length > 0) {
-      const nHarm = hw.length + 1;
-      const real = new Float32Array(new ArrayBuffer(nHarm * 4));
-      const imag = new Float32Array(new ArrayBuffer(nHarm * 4));
-      for (let h = 0; h < hw.length; h++) {
-        const amp = safeClamp(hw[h], 0, -4, 4);
-        const dispPhase = (h + 1) * 0.35;
-        const rosenPhase = -1.12 + (h + 1) * 0.085;
-        real[h + 1] = amp * ((1 - coh) * Math.sin(dispPhase) + coh * Math.cos(rosenPhase));
-        imag[h + 1] = amp * ((1 - coh) * Math.cos(dispPhase) + coh * Math.sin(rosenPhase));
+      let wave = getCachedPeriodicWave(ctx, waveSig);
+      if (!wave) {
+        const nHarm = hw.length + 1;
+        const real = new Float32Array(new ArrayBuffer(nHarm * 4));
+        const imag = new Float32Array(new ArrayBuffer(nHarm * 4));
+        for (let h = 0; h < hw.length; h++) {
+          const amp = safeClamp(hw[h], 0, -4, 4);
+          const dispPhase = (h + 1) * 0.35;
+          const rosenPhase = -1.12 + (h + 1) * 0.085;
+          real[h + 1] = amp * ((1 - coh) * Math.sin(dispPhase) + coh * Math.cos(rosenPhase));
+          imag[h + 1] = amp * ((1 - coh) * Math.cos(dispPhase) + coh * Math.sin(rosenPhase));
+        }
+        wave = safePeriodicWave(ctx, real, imag) ?? undefined;
+        if (wave) setCachedPeriodicWave(ctx, waveSig, wave);
       }
-      const wave = safePeriodicWave(ctx, real, imag);
       if (wave) {
         slot.osc.setPeriodicWave(wave);
         slot.lastWaveSig = waveSig;
@@ -1078,21 +1143,21 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
   }
 
   for (let i = 0; i < bank.slots.length; i++) {
-    if (!usedSlots.has(i)) {
+    if ((usedMask & (1 << i)) === 0) {
       const slot = bank.slots[i];
       if (slot.wasActive) {
         const tuckHz = clampAudioFreq(ctx, Math.max(320, slot.lastPitchHz * 1.35), 400, 80);
         slot.bellLowpass1.frequency.setTargetAtTime(tuckHz, now, 0.010);
         slot.bellLowpass2.frequency.setTargetAtTime(clampAudioFreq(ctx, tuckHz * 1.25, 500, 100), now, 0.010);
         slot.driveGain.gain.setTargetAtTime(0.45, now, 0.010);
+        slot.voiceGain.gain.setTargetAtTime(0, now, 0.010);
+        slot.noiseGain.gain.setTargetAtTime(0, now, 0.008);
+        slot.puffDepth.gain.setTargetAtTime(0, now, 0.008);
+        slot.vibDepth.gain.setTargetAtTime(0, now, 0.012);
+        // Decay squelchDepth faster (5 ms) than bellLowpass1 (10 ms) so cutoff never underflows during release tuck
+        slot.squelchDepth.gain.setTargetAtTime(0, now, 0.005);
+        slot.wasActive = false;
       }
-      slot.voiceGain.gain.setTargetAtTime(0, now, 0.010);
-      slot.noiseGain.gain.setTargetAtTime(0, now, 0.008);
-      slot.puffDepth.gain.setTargetAtTime(0, now, 0.008);
-      slot.vibDepth.gain.setTargetAtTime(0, now, 0.012);
-      // Decay squelchDepth faster (5 ms) than bellLowpass1 (10 ms) so cutoff never underflows during release tuck
-      slot.squelchDepth.gain.setTargetAtTime(0, now, 0.005);
-      slot.wasActive = false;
     }
   }
 }
@@ -1298,6 +1363,13 @@ function ensureNativeBowedBank(ctx: AudioContext): NativeBowedBankState | null {
 }
 
 export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVoicePayload[]): void {
+  const activeVoices: WorkletBowedVoicePayload[] = [];
+  for (let i = 0; i < voices.length; i++) {
+    const v = voices[i];
+    if (v && v.active && finiteOr(v.amplitude, 0) > 0.001) activeVoices.push(v);
+  }
+  const c = ctx as AudioContextWithWindGraph;
+  if (activeVoices.length === 0 && !c.__physboxNativeBowedV7) return;
   if (ctx.state === 'suspended') {
     void ctx.resume().catch(() => {});
   }
@@ -1305,20 +1377,26 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
   if (!bank) return;
 
   const now = finiteOr(ctx.currentTime, 0);
-  const usedSlots = new Set<number>();
+  let usedMask = 0;
 
-  // Filter ONLY active bowed voices first and sort loudest-first so inactive payloads never steal slots!
-  const activeVoices = voices
-    .filter((v) => v && v.active && finiteOr(v.amplitude, 0) > 0.001)
-    .sort((a, b) => finiteOr(b.amplitude, 0) - finiteOr(a.amplitude, 0))
-    .slice(0, bank.slots.length);
+  if (activeVoices.length > bank.slots.length) {
+    activeVoices.sort((a, b) => finiteOr(b.amplitude, 0) - finiteOr(a.amplitude, 0));
+    activeVoices.length = bank.slots.length;
+  }
 
-  for (const v of activeVoices) {
+  for (let vIdx = 0; vIdx < activeVoices.length; vIdx++) {
+    const v = activeVoices[vIdx];
     // 1. Exact string ID match
-    let idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && s.id === v.id);
+    let idx = -1;
+    for (let i = 0; i < bank.slots.length; i++) {
+      if ((usedMask & (1 << i)) === 0 && bank.slots[i].id === v.id) { idx = i; break; }
+    }
     // 2. Idle slot whose sympathetic release tail has fully finished (`now >= releaseUntilTime`)
     if (idx === -1) {
-      idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && !s.wasActive && now >= s.releaseUntilTime);
+      for (let i = 0; i < bank.slots.length; i++) {
+        const s = bank.slots[i];
+        if ((usedMask & (1 << i)) === 0 && !s.wasActive && now >= s.releaseUntilTime) { idx = i; break; }
+      }
     }
     // 3. Oldest releasing inactive slot (minimizing any audible tail pitch-jump!)
     if (idx === -1) {
@@ -1326,7 +1404,7 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
       let oldestRelease = Infinity;
       for (let i = 0; i < bank.slots.length; i++) {
         const s = bank.slots[i];
-        if (!usedSlots.has(i) && !s.wasActive && s.releaseUntilTime < oldestRelease) {
+        if ((usedMask & (1 << i)) === 0 && !s.wasActive && s.releaseUntilTime < oldestRelease) {
           oldestRelease = s.releaseUntilTime;
           bestIdx = i;
         }
@@ -1335,10 +1413,12 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
     }
     // 4. Fallback: any remaining unused slot
     if (idx === -1) {
-      idx = bank.slots.findIndex((_s, i) => !usedSlots.has(i));
+      for (let i = 0; i < bank.slots.length; i++) {
+        if ((usedMask & (1 << i)) === 0) { idx = i; break; }
+      }
     }
     if (idx === -1) continue;
-    usedSlots.add(idx);
+    usedMask |= 1 << idx;
 
     const slot = bank.slots[idx];
     const isNewId = slot.id !== v.id;
@@ -1383,32 +1463,42 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
     // Feed pure Helmholtz/Cremer string harmonics into the 3D Body Convolver (avoiding double body filtering!)
     const rawHw = hasIr && v.stringHarmonicWeights?.length ? v.stringHarmonicWeights : v.harmonicWeights;
     const hw = Array.isArray(rawHw) ? rawHw : [];
-    const waveSig = `${hasIr ? 'ir' : 'dry'}:${hw.length}:${hw.slice(0, 24).map((w) => Math.round(finiteOr(w, 0) * 40)).join(',')}`;
+    const waveSig = buildHarmonicWaveSig(hasIr ? 'bir' : 'bdry', hw, 24, 40);
     const isFreshAttack = !slot.wasActive || isNewId;
 
     if ((isFreshAttack || slot.lastWaveSig !== waveSig) && hw.length > 0) {
-      const nHarm = hw.length + 1;
-      const real = new Float32Array(new ArrayBuffer(nHarm * 4));
-      const imag = new Float32Array(new ArrayBuffer(nHarm * 4));
-      const real2 = new Float32Array(new ArrayBuffer(nHarm * 4));
-      const imag2 = new Float32Array(new ArrayBuffer(nHarm * 4));
-      const real3 = new Float32Array(new ArrayBuffer(nHarm * 4));
-      const imag3 = new Float32Array(new ArrayBuffer(nHarm * 4));
-      for (let h = 0; h < hw.length; h++) {
-        const n = h + 1;
-        const amp = safeClamp(hw[h], 0, -4, 4);
-        const sign = n % 2 === 1 ? 1 : -1;
-        imag[n] = sign * amp;
-        const phi2 = n * 0.19;
-        real2[n] = sign * amp * Math.sin(phi2);
-        imag2[n] = sign * amp * Math.cos(phi2);
-        const phi3 = -n * 0.27;
-        real3[n] = sign * amp * Math.sin(phi3);
-        imag3[n] = sign * amp * Math.cos(phi3);
+      let w1 = getCachedPeriodicWave(ctx, `${waveSig}:1`);
+      let w2 = getCachedPeriodicWave(ctx, `${waveSig}:2`);
+      let w3 = getCachedPeriodicWave(ctx, `${waveSig}:3`);
+      if (!w1 || !w2 || !w3) {
+        const nHarm = hw.length + 1;
+        const real = new Float32Array(new ArrayBuffer(nHarm * 4));
+        const imag = new Float32Array(new ArrayBuffer(nHarm * 4));
+        const real2 = new Float32Array(new ArrayBuffer(nHarm * 4));
+        const imag2 = new Float32Array(new ArrayBuffer(nHarm * 4));
+        const real3 = new Float32Array(new ArrayBuffer(nHarm * 4));
+        const imag3 = new Float32Array(new ArrayBuffer(nHarm * 4));
+        for (let h = 0; h < hw.length; h++) {
+          const n = h + 1;
+          const amp = safeClamp(hw[h], 0, -4, 4);
+          const sign = n % 2 === 1 ? 1 : -1;
+          imag[n] = sign * amp;
+          const phi2 = n * 0.19;
+          real2[n] = sign * amp * Math.sin(phi2);
+          imag2[n] = sign * amp * Math.cos(phi2);
+          const phi3 = -n * 0.27;
+          real3[n] = sign * amp * Math.sin(phi3);
+          imag3[n] = sign * amp * Math.cos(phi3);
+        }
+        w1 = safePeriodicWave(ctx, real, imag) ?? undefined;
+        w2 = safePeriodicWave(ctx, real2, imag2) ?? undefined;
+        w3 = safePeriodicWave(ctx, real3, imag3) ?? undefined;
+        if (w1 && w2 && w3) {
+          setCachedPeriodicWave(ctx, `${waveSig}:1`, w1);
+          setCachedPeriodicWave(ctx, `${waveSig}:2`, w2);
+          setCachedPeriodicWave(ctx, `${waveSig}:3`, w3);
+        }
       }
-      const w1 = safePeriodicWave(ctx, real, imag);
-      const w2 = safePeriodicWave(ctx, real2, imag2);
-      const w3 = safePeriodicWave(ctx, real3, imag3);
       if (w1 && w2 && w3) {
         slot.osc.setPeriodicWave(w1);
         slot.osc2.setPeriodicWave(w2);
@@ -1470,7 +1560,7 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
   }
 
   for (let i = 0; i < bank.slots.length; i++) {
-    if (!usedSlots.has(i)) {
+    if ((usedMask & (1 << i)) === 0) {
       const slot = bank.slots[i];
       if (slot.wasActive) {
         // Singing 115 ms open-string sympathetic ring connects legato crossings warmly without muddying 16th notes!
@@ -1776,6 +1866,13 @@ export function ensureNativeAeroBank(ctx: AudioContext): NativeAeroBankState | n
 }
 
 export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynthParams[]): void {
+  const activeVoices: SpatialAeroSynthParams[] = [];
+  for (let i = 0; i < voices.length; i++) {
+    const v = voices[i];
+    if (v && v.active) activeVoices.push(v);
+  }
+  const c = ctx as AudioContextWithWindGraph;
+  if (activeVoices.length === 0 && !c.__physboxNativeAeroV2) return;
   if (ctx.state === 'suspended') {
     void ctx.resume().catch(() => {});
   }
@@ -1783,28 +1880,35 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
   if (!bank) return;
 
   const now = finiteOr(ctx.currentTime, 0);
-  const usedSlots = new Set<number>();
+  let usedMask = 0;
 
-  // Filter active & prioritize the 8 loudest aero voices
-  const activeVoices = voices
-    .filter((v) => v && v.active)
-    .sort(
+  if (activeVoices.length > bank.slots.length) {
+    activeVoices.sort(
       (a, b) =>
         finiteOr(b.tonalGain, 0) + finiteOr(b.noiseGain, 0) + finiteOr(b.rustleGain, 0) + finiteOr(b.aeolianGain, 0) -
         (finiteOr(a.tonalGain, 0) + finiteOr(a.noiseGain, 0) + finiteOr(a.rustleGain, 0) + finiteOr(a.aeolianGain, 0)),
-    )
-    .slice(0, bank.slots.length);
+    );
+    activeVoices.length = bank.slots.length;
+  }
 
-  for (const v of activeVoices) {
-    let idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && s.id === v.id);
-    if (idx === -1) {
-      idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && !s.wasActive);
+  for (let vIdx = 0; vIdx < activeVoices.length; vIdx++) {
+    const v = activeVoices[vIdx];
+    let idx = -1;
+    for (let i = 0; i < bank.slots.length; i++) {
+      if ((usedMask & (1 << i)) === 0 && bank.slots[i].id === v.id) { idx = i; break; }
     }
     if (idx === -1) {
-      idx = bank.slots.findIndex((_s, i) => !usedSlots.has(i));
+      for (let i = 0; i < bank.slots.length; i++) {
+        if ((usedMask & (1 << i)) === 0 && !bank.slots[i].wasActive) { idx = i; break; }
+      }
+    }
+    if (idx === -1) {
+      for (let i = 0; i < bank.slots.length; i++) {
+        if ((usedMask & (1 << i)) === 0) { idx = i; break; }
+      }
     }
     if (idx === -1) continue;
-    usedSlots.add(idx);
+    usedMask |= 1 << idx;
 
     const slot = bank.slots[idx];
     const isNewId = slot.id !== v.id;
@@ -1817,19 +1921,23 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
 
     // 1. Tonal Gutin Propeller Branch OR Understated Aeolian Breeze Hum
     if (v.tonalActive && finiteOr(v.bpfHz, 0) >= 22 && hw.length > 0) {
-      const waveSig = `${hw.length}:${hw.map((w) => Math.round(finiteOr(w, 0) * 30)).join(',')}`;
+      const waveSig = buildHarmonicWaveSig('a', hw, hw.length, 30);
       if (isFresh || slot.lastWaveSig !== waveSig) {
-        const nHarm = hw.length + 1;
-        const real = new Float32Array(new ArrayBuffer(nHarm * 4));
-        const imag = new Float32Array(new ArrayBuffer(nHarm * 4));
-        for (let h = 0; h < hw.length; h++) {
-          const n = h + 1;
-          const w = safeClamp(hw[h], 0, -4, 4);
-          const phase = -0.75 + n * 0.23;
-          real[n] = w * Math.cos(phase);
-          imag[n] = w * Math.sin(phase);
+        let wave = getCachedPeriodicWave(ctx, waveSig);
+        if (!wave) {
+          const nHarm = hw.length + 1;
+          const real = new Float32Array(new ArrayBuffer(nHarm * 4));
+          const imag = new Float32Array(new ArrayBuffer(nHarm * 4));
+          for (let h = 0; h < hw.length; h++) {
+            const n = h + 1;
+            const w = safeClamp(hw[h], 0, -4, 4);
+            const phase = -0.75 + n * 0.23;
+            real[n] = w * Math.cos(phase);
+            imag[n] = w * Math.sin(phase);
+          }
+          wave = safePeriodicWave(ctx, real, imag) ?? undefined;
+          if (wave) setCachedPeriodicWave(ctx, waveSig, wave);
         }
-        const wave = safePeriodicWave(ctx, real, imag);
         if (wave) {
           slot.propOsc.setPeriodicWave(wave);
           slot.lastWaveSig = waveSig;
@@ -1941,7 +2049,7 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
   }
 
   for (let i = 0; i < bank.slots.length; i++) {
-    if (!usedSlots.has(i)) {
+    if ((usedMask & (1 << i)) === 0) {
       const slot = bank.slots[i];
       if (slot.wasActive) {
         slot.tonalGain.gain.setTargetAtTime(0, now, 0.018);
@@ -2232,6 +2340,15 @@ export function postWorkletFrictionUpdate(
   ctx: AudioContext,
   voices: WorkletFrictionVoicePayload[],
 ): void {
+  const activeVoices: WorkletFrictionVoicePayload[] = [];
+  for (let i = 0; i < voices.length; i++) {
+    const v = voices[i];
+    if (v && v.active && (finiteOr(v.noiseGain, 0) >= 0.0015 || finiteOr(v.tonalGain, 0) >= 0.0015)) {
+      activeVoices.push(v);
+    }
+  }
+  const c = ctx as AudioContextWithWindGraph;
+  if (activeVoices.length === 0 && !c.__physboxNativeFrictionV1) return;
   if (ctx.state === 'suspended') {
     void ctx.resume().catch(() => {});
   }
@@ -2239,27 +2356,35 @@ export function postWorkletFrictionUpdate(
   if (!bank) return;
 
   const now = finiteOr(ctx.currentTime, 0);
-  const usedSlots = new Set<number>();
+  let usedMask = 0;
 
-  const activeVoices = voices
-    .filter((v) => v && v.active && (finiteOr(v.noiseGain, 0) >= 0.0015 || finiteOr(v.tonalGain, 0) >= 0.0015))
-    .sort(
+  if (activeVoices.length > bank.slots.length) {
+    activeVoices.sort(
       (a, b) =>
         finiteOr(b.noiseGain, 0) + finiteOr(b.tonalGain, 0) -
         (finiteOr(a.noiseGain, 0) + finiteOr(a.tonalGain, 0)),
-    )
-    .slice(0, bank.slots.length);
+    );
+    activeVoices.length = bank.slots.length;
+  }
 
-  for (const v of activeVoices) {
-    let idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && s.id === v.id);
-    if (idx === -1) {
-      idx = bank.slots.findIndex((s, i) => !usedSlots.has(i) && !s.wasActive);
+  for (let vIdx = 0; vIdx < activeVoices.length; vIdx++) {
+    const v = activeVoices[vIdx];
+    let idx = -1;
+    for (let i = 0; i < bank.slots.length; i++) {
+      if ((usedMask & (1 << i)) === 0 && bank.slots[i].id === v.id) { idx = i; break; }
     }
     if (idx === -1) {
-      idx = bank.slots.findIndex((_s, i) => !usedSlots.has(i));
+      for (let i = 0; i < bank.slots.length; i++) {
+        if ((usedMask & (1 << i)) === 0 && !bank.slots[i].wasActive) { idx = i; break; }
+      }
+    }
+    if (idx === -1) {
+      for (let i = 0; i < bank.slots.length; i++) {
+        if ((usedMask & (1 << i)) === 0) { idx = i; break; }
+      }
     }
     if (idx === -1) continue;
-    usedSlots.add(idx);
+    usedMask |= 1 << idx;
 
     const slot = bank.slots[idx];
     const isNewId = slot.id !== v.id;
@@ -2372,7 +2497,7 @@ export function postWorkletFrictionUpdate(
   }
 
   for (let i = 0; i < bank.slots.length; i++) {
-    if (!usedSlots.has(i)) {
+    if ((usedMask & (1 << i)) === 0) {
       const slot = bank.slots[i];
       if (slot.wasActive) {
         // Gentle 65 ms decay lets singing-bowl / glass rim resonances ring down naturally without square-gate clicks

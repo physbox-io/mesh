@@ -99,6 +99,19 @@ const ROUGHNESS_BY_DEFORM_MATERIAL: Record<string, number> = {
   stone: 0.85,
 };
 
+function roundN(v: number, scale: number): number {
+  return Math.round(v * scale) / scale;
+}
+
+function scoreFrictionProfile(p: BodyModalProfile | null, rubAlign: number): number {
+  if (!p) return 0;
+  const hasModes = p.modes.length > 0 ? 1.0 : 0.25;
+  const widthBoost = clamp((p.radiatingWidthM ?? 0.03) / 0.03, 0.3, 2.5);
+  const qBoost = clamp(Math.log10(10 + p.material.qualityQ) / 2.5, 0.4, 1.5);
+  const rimBoost = rubAlign >= 0.45 && p.material.qualityQ >= 280 ? 1.6 : 1.0;
+  return hasModes * widthBoost * qBoost * rimBoost;
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   if (!Number.isFinite(v)) return lo;
   return v < lo ? lo : v > hi ? hi : v;
@@ -147,7 +160,7 @@ export function inferSurfaceRoughness(
     // Ultra-slick surfaces slightly smoother; high-grit surfaces rougher
     base = clamp(base * (0.78 + 0.32 * clamp(mu, 0.05, 1.5)), 0.04, 0.92);
   }
-  return +clamp(base, 0.04, 0.92).toFixed(3);
+  return roundN(clamp(base, 0.04, 0.92), 1000);
 }
 
 function makeSilentPayload(id: string): WorkletFrictionVoicePayload {
@@ -207,16 +220,7 @@ export function solveContactFrictionVoice(
 
   const profA = opts.primaryProfile ?? null;
   const profB = opts.partnerProfile ?? null;
-  // Choose primary structural resonator (prefer body with audible modes & bodyIr or high-Q singing shell)
-  const scoreProfile = (p: BodyModalProfile | null): number => {
-    if (!p) return 0;
-    const hasModes = p.modes.length > 0 ? 1.0 : 0.25;
-    const widthBoost = clamp((p.radiatingWidthM ?? 0.03) / 0.03, 0.3, 2.5);
-    const qBoost = clamp(Math.log10(10 + p.material.qualityQ) / 2.5, 0.4, 1.5);
-    const rimBoost = rubAlign >= 0.45 && p.material.qualityQ >= 280 ? 1.6 : 1.0;
-    return hasModes * widthBoost * qBoost * rimBoost;
-  };
-  const usePartner = scoreProfile(profB) > scoreProfile(profA) * 1.25;
+  const usePartner = scoreFrictionProfile(profB, rubAlign) > scoreFrictionProfile(profA, rubAlign) * 1.25;
   const activeProf = usePartner ? profB : profA;
   const activeNode = usePartner ? (opts.partnerNode ?? null) : (opts.primaryNode ?? null);
 
@@ -257,8 +261,8 @@ export function solveContactFrictionVoice(
   const matQ = clamp(activeProf?.material.qualityQ ?? Math.max(propsA.qualityQ, propsB.qualityQ), 25, 1800);
 
   // Coupled contact-damped modal Q for resonator filter peaks (bounded for Biquad stability)
-  const mode1Q = +clamp(2.2 + Math.sqrt(matQ) * 0.42, 2.0, 22.0).toFixed(2);
-  const mode2Q = +clamp(mode1Q * 0.82, 1.8, 18.0).toFixed(2);
+  const mode1Q = roundN(clamp(2.2 + Math.sqrt(matQ) * 0.42, 2.0, 22.0), 100);
+  const mode2Q = roundN(clamp(mode1Q * 0.82, 1.8, 18.0), 100);
 
   let regime: ContactFrictionRegime;
   let noiseCenterHz: number;
@@ -318,17 +322,17 @@ export function solveContactFrictionVoice(
     regime = 'rolling';
     const effRollV = Math.max(rollSpeed, patchSpeed * 0.85);
     const spatialCutoff = effRollV / (Math.PI * aHertz + 0.00038 + 0.0012 * roughness);
-    patchLowpassHz = +clamp(spatialCutoff, 110, 4600).toFixed(1);
-    noiseCenterHz = +clamp(0.56 * patchLowpassHz, 70, 2500).toFixed(1);
-    noiseQ = +(1.15 + 0.95 * (1 - roughness)).toFixed(2);
+    patchLowpassHz = roundN(clamp(spatialCutoff, 110, 4600), 10);
+    noiseCenterHz = roundN(clamp(0.56 * patchLowpassHz, 70, 2500), 10);
+    noiseQ = roundN(1.15 + 0.95 * (1 - roughness), 100);
 
     const speedRamp = smoothstep(0.015, 0.12, effRollV);
     const powerArg = 24 * Math.pow(normalForce, 0.65) * Math.pow(effRollV, 1.35) * (0.22 + roughness);
-    noiseGain = +clamp(0.15 * Math.log10(1 + powerArg) * speedRamp, 0, 0.28).toFixed(4);
+    noiseGain = roundN(clamp(0.15 * Math.log10(1 + powerArg) * speedRamp, 0, 0.28), 10000);
 
     // Subtle wheel/sphere rotation eccentricity & surface-wave modulation
-    grainRateHz = +clamp(effRollV / Math.max(0.015, 2 * Math.PI * rStar), 3.0, 32.0).toFixed(2);
-    grainDepth = +clamp(0.18 + 0.32 * roughness, 0.12, 0.52).toFixed(3);
+    grainRateHz = roundN(clamp(effRollV / Math.max(0.015, 2 * Math.PI * rStar), 3.0, 32.0), 100);
+    grainDepth = roundN(clamp(0.18 + 0.32 * roughness, 0.12, 0.52), 1000);
     mode1GainDb = 7.5;
     mode2GainDb = 5.0;
     attackTauSec = 0.022;
@@ -339,9 +343,6 @@ export function solveContactFrictionVoice(
     regime = 'rim_singing';
     tonalActive = true;
 
-    // Lock strictly onto the bowl/goblet's lowest flexural (2,0) rim fundamental
-    // (honoring explicit `tunedPitchHz` when tuned, skipping low-Q cavity air modes,
-    // and never locking onto shrill 900-2500 Hz upper partials!).
     let lowestFlexuralHz: number | undefined;
     if (
       typeof activeNode?.tunedPitchHz === 'number' &&
@@ -350,54 +351,51 @@ export function solveContactFrictionVoice(
     ) {
       lowestFlexuralHz = activeNode.tunedPitchHz;
     } else if (activeProf) {
-      const structFreqs: number[] = [];
-      const rf = activeProf.rawFreqsHz ?? [];
+      let minFreq = Infinity;
+      const rf = activeProf.rawFreqsHz;
       const rq = activeProf.rawModeQs;
-      for (let i = 0; i < rf.length; i++) {
-        const f = rf[i];
-        if (!Number.isFinite(f) || f < 55) continue;
-        if (rq && rq[i] !== undefined && rq[i] < 60) continue; // skip Helmholtz / pipe air mode
-        structFreqs.push(f);
-      }
-      if (structFreqs.length === 0) {
-        for (const m of rawModes) {
-          if (Number.isFinite(m.freqHz) && m.freqHz >= 55) {
-            structFreqs.push(m.freqHz);
-          }
+      if (rf) {
+        for (let i = 0; i < rf.length; i++) {
+          const f = rf[i];
+          if (!Number.isFinite(f) || f < 55) continue;
+          if (rq && rq[i] !== undefined && rq[i] < 60) continue;
+          if (f < minFreq) minFreq = f;
         }
       }
-      if (structFreqs.length > 0) {
-        lowestFlexuralHz = Math.min(...structFreqs);
+      if (!Number.isFinite(minFreq)) {
+        for (let i = 0; i < rawModes.length; i++) {
+          const f = rawModes[i].freqHz;
+          if (Number.isFinite(f) && f >= 55 && f < minFreq) minFreq = f;
+        }
+      }
+      if (Number.isFinite(minFreq)) {
+        lowestFlexuralHz = minFreq;
       } else if (Number.isFinite(activeProf.fundamentalHz) && activeProf.fundamentalHz >= 55) {
         lowestFlexuralHz = activeProf.fundamentalHz;
       }
     }
     const rimF0 = clamp(lowestFlexuralHz ?? baseF1, 65, 880);
-    tonalFreqHz = +rimF0.toFixed(2);
-    // Track (2,0) rim fundamental + warm Rayleigh (3,0) bell/goblet overtone (~2.76 * f0)
+    tonalFreqHz = roundN(rimF0, 100);
     outMode1Hz = tonalFreqHz;
-    outMode2Hz = +clamp(tonalFreqHz * 2.76, 150, 2430).toFixed(1);
+    outMode2Hz = roundN(clamp(tonalFreqHz * 2.76, 150, 2430), 10);
 
-    // Revolving quadrupole nodal-line beat frequency: df_orbit = v_slip / (pi * R_rim)
     const lp = event.localPoint;
     const localRimR = lp ? Math.hypot(lp[0] || 0, lp[1] || 0) : 0;
     const rRim = clamp(localRimR > 0.012 ? localRimR : (activeProf?.radiatingWidthM ?? 0.06) * 0.5, 0.02, 0.35);
     const orbitBeatHz = clamp(slipSpeed / (Math.PI * rRim), 0.35, 14.0);
-    tonalBeatFreqHz = +(tonalFreqHz + orbitBeatHz).toFixed(3);
+    tonalBeatFreqHz = roundN(tonalFreqHz + orbitBeatHz, 1000);
 
-    // Sweet-spot bowing/rubbing window across speed & normal pressure
     const speedWindow = smoothstep(0.015, 0.06, slipSpeed) * (1 - 0.55 * smoothstep(0.50, 0.95, slipSpeed));
     const forceWindow = smoothstep(0.05, 0.35, normalForce) * (1 - 0.45 * smoothstep(8.0, 20.0, normalForce));
     const durBloom = 0.15 + 0.85 * smoothstep(0.02, 0.30, durSec);
-    tonalGain = +clamp(0.34 * speedWindow * forceWindow * durBloom * rubAlign, 0.015, 0.38).toFixed(4);
-    tonalDrive = 0.38; // warm, pure sinusoidal quadrupole bloom
+    tonalGain = roundN(clamp(0.34 * speedWindow * forceWindow * durBloom * rubAlign, 0.015, 0.38), 10000);
+    tonalDrive = 0.38;
     attackTauSec = 0.18;
 
-    // Gentle warm suede/finger rim friction whisper (no harsh >1.9 kHz screech)
-    noiseCenterHz = +clamp(tonalFreqHz * 1.35, 160, 1200).toFixed(1);
-    patchLowpassHz = +clamp(tonalFreqHz * 2.9, 460, 1850).toFixed(1);
+    noiseCenterHz = roundN(clamp(tonalFreqHz * 1.35, 160, 1200), 10);
+    patchLowpassHz = roundN(clamp(tonalFreqHz * 2.9, 460, 1850), 10);
     noiseQ = 2.2;
-    noiseGain = +clamp(0.014 * speedWindow * (0.18 + 0.65 * roughness), 0.0016, 0.018).toFixed(4);
+    noiseGain = roundN(clamp(0.014 * speedWindow * (0.18 + 0.65 * roughness), 0.0016, 0.018), 10000);
     mode1GainDb = 9.0;
     mode2GainDb = 5.0;
   } else if (canSqueal) {
@@ -406,24 +404,32 @@ export function solveContactFrictionVoice(
     // -----------------------------------------------------------------------
     regime = 'stick_slip_squeal';
     tonalActive = true;
-    const squealMode = rawModes.find((m) => m.freqHz >= 650 && m.freqHz <= 5200)?.freqHz
-      ?? clamp(baseF1 >= 650 ? baseF1 : baseF2 >= 650 ? baseF2 : baseF1 * 2.756, 720, 4800);
-    tonalFreqHz = +squealMode.toFixed(2);
-    tonalBeatFreqHz = +(squealMode * 1.0035).toFixed(2);
+    let squealMode: number | undefined;
+    for (let i = 0; i < rawModes.length; i++) {
+      const f = rawModes[i].freqHz;
+      if (f >= 650 && f <= 5200) {
+        squealMode = f;
+        break;
+      }
+    }
+    if (squealMode === undefined) {
+      squealMode = clamp(baseF1 >= 650 ? baseF1 : baseF2 >= 650 ? baseF2 : baseF1 * 2.756, 720, 4800);
+    }
+    tonalFreqHz = roundN(squealMode, 100);
+    tonalBeatFreqHz = roundN(squealMode * 1.0035, 100);
 
     const squealStrength = smoothstep(0.95, 3.2, squealInstability);
-    tonalGain = +clamp(0.24 * squealStrength * smoothstep(0.01, 0.05, slipSpeed), 0.01, 0.30).toFixed(4);
-    tonalDrive = +clamp(1.15 + 0.55 * squealStrength, 1.0, 1.85).toFixed(2);
+    tonalGain = roundN(clamp(0.24 * squealStrength * smoothstep(0.01, 0.05, slipSpeed), 0.01, 0.30), 10000);
+    tonalDrive = roundN(clamp(1.15 + 0.55 * squealStrength, 1.0, 1.85), 100);
     attackTauSec = 0.016;
 
-    // Companion metallic scrape
     const corrLen = 0.00018 + 0.0020 * Math.pow(roughness, 1.3);
-    noiseCenterHz = +clamp(slipSpeed / corrLen, 350, 6200).toFixed(1);
-    patchLowpassHz = +clamp(noiseCenterHz * 1.9, 900, 9500).toFixed(1);
+    noiseCenterHz = roundN(clamp(slipSpeed / corrLen, 350, 6200), 10);
+    patchLowpassHz = roundN(clamp(noiseCenterHz * 1.9, 900, 9500), 10);
     noiseQ = 1.65;
     const powerArg = 14 * mu * normalForce * slipSpeed * (0.2 + roughness);
-    noiseGain = +clamp(0.11 * Math.log10(1 + powerArg), 0.005, 0.22).toFixed(4);
-    grainRateHz = +clamp(18 + 22 * slipSpeed, 14, 42).toFixed(1);
+    noiseGain = roundN(clamp(0.11 * Math.log10(1 + powerArg), 0.005, 0.22), 10000);
+    grainRateHz = roundN(clamp(18 + 22 * slipSpeed, 14, 42), 10);
     grainDepth = 0.28;
     mode1GainDb = 7.0;
     mode2GainDb = 5.5;
@@ -434,17 +440,16 @@ export function solveContactFrictionVoice(
     regime = 'scraping';
     const effSlip = Math.max(0.010, slipSpeed);
     const corrLen = 0.00018 + 0.0020 * Math.pow(roughness, 1.3);
-    noiseCenterHz = +clamp(effSlip / corrLen, 130, 6200).toFixed(1);
-    patchLowpassHz = +clamp(Math.max(noiseCenterHz * 1.85, effSlip / (Math.PI * aHertz + 0.00025)), 320, 9500).toFixed(1);
-    noiseQ = +(0.75 + 1.35 * (1 - roughness)).toFixed(2);
+    noiseCenterHz = roundN(clamp(effSlip / corrLen, 130, 6200), 10);
+    patchLowpassHz = roundN(clamp(Math.max(noiseCenterHz * 1.85, effSlip / (Math.PI * aHertz + 0.00025)), 320, 9500), 10);
+    noiseQ = roundN(0.75 + 1.35 * (1 - roughness), 100);
 
     const speedRamp = smoothstep(0.010, 0.065, effSlip);
     const powerArg = 18 * mu * normalForce * effSlip * (0.20 + roughness);
-    noiseGain = +clamp(0.165 * Math.log10(1 + powerArg) * speedRamp, 0, 0.34).toFixed(4);
+    noiseGain = roundN(clamp(0.165 * Math.log10(1 + powerArg) * speedRamp, 0, 0.34), 10000);
 
-    // Stick-slip asperity chatter modulation
-    grainRateHz = +clamp(12 + 28 * Math.min(1.2, effSlip) * (0.4 + 0.6 * roughness), 10, 46).toFixed(1);
-    grainDepth = +clamp(0.16 + 0.38 * mu * roughness, 0.10, 0.62).toFixed(3);
+    grainRateHz = roundN(clamp(12 + 28 * Math.min(1.2, effSlip) * (0.4 + 0.6 * roughness), 10, 46), 10);
+    grainDepth = roundN(clamp(0.16 + 0.38 * mu * roughness, 0.10, 0.62), 1000);
     mode1GainDb = 6.5;
     mode2GainDb = 4.5;
     attackTauSec = 0.018;
@@ -469,10 +474,10 @@ export function solveContactFrictionVoice(
     tonalGain,
     tonalDrive,
     attackTauSec,
-    mode1Hz: +clamp(outMode1Hz, 65, 7500).toFixed(1),
+    mode1Hz: roundN(clamp(outMode1Hz, 65, 7500), 10),
     mode1Q,
     mode1GainDb,
-    mode2Hz: +clamp(outMode2Hz, 110, 9500).toFixed(1),
+    mode2Hz: roundN(clamp(outMode2Hz, 110, 9500), 10),
     mode2Q,
     mode2GainDb,
     bodyIr: activeProf?.bodyIr ?? null,
@@ -693,8 +698,15 @@ export function resolveGuardedBowHold(
   prevActiveByBow: Map<string, Set<string>>,
   simTime: number,
 ): BowedStringContactEvent[] {
+  // Zero-allocation fast path when no bow is currently touching or in 32 ms hold window
+  if (currentEvents.length === 0 && recentEvents.size === 0) {
+    if (prevActiveByBow.size > 0) prevActiveByBow.clear();
+    return currentEvents;
+  }
+
   const curByBow = new Map<string, Set<string>>();
-  for (const ev of currentEvents) {
+  for (let i = 0; i < currentEvents.length; i++) {
+    const ev = currentEvents[i];
     let set = curByBow.get(ev.bowNodeId);
     if (!set) {
       set = new Set();
@@ -704,7 +716,7 @@ export function resolveGuardedBowHold(
     recentEvents.set(`${ev.bowNodeId}:${ev.stringNodeId}`, { event: ev, atSimTime: simTime });
   }
 
-  const out = [...currentEvents];
+  const out = currentEvents.slice();
   const crossedBows = new Set<string>();
   for (const [bowId, curSet] of curByBow) {
     const prevSet = prevActiveByBow.get(bowId);
@@ -716,7 +728,7 @@ export function resolveGuardedBowHold(
     }
   }
 
-  for (const [key, held] of Array.from(recentEvents.entries())) {
+  for (const [key, held] of recentEvents) {
     const bowId = held.event.bowNodeId;
     const strId = held.event.stringNodeId;
     const curSet = curByBow.get(bowId);

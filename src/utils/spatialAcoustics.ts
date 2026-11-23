@@ -172,43 +172,45 @@ export function resolveSpatialAcousticParams(
     return DEFAULT_SPATIAL_PARAMS;
   }
 
-  const rNorm = Math.hypot(rx, ry, rz);
-  if (rNorm < 1e-6) return DEFAULT_SPATIAL_PARAMS;
-  rx /= rNorm;
-  ry /= rNorm;
-  rz /= rNorm;
+  const rNormSq = rx * rx + ry * ry + rz * rz;
+  if (rNormSq < 1e-12) return DEFAULT_SPATIAL_PARAMS;
+  const invRNorm = 1 / Math.sqrt(rNormSq);
+  rx *= invRNorm;
+  ry *= invRNorm;
+  rz *= invRNorm;
 
-  const [tx, ty, tz] = mujocoWorldToThreeWorld([xm, ym, zm]);
-  const dx = tx - cx;
-  const dy = ty - cy;
-  const dz = tz - cz;
-  const distM = Math.hypot(dx, dy, dz);
+  // Inline MuJoCo Z-up -> Three.js Y-up (xm, zm, -ym) with zero temporary array allocation
+  const dx = xm - cx;
+  const dy = zm - cy;
+  const dz = -ym - cz;
+  const distM = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
   const dRight = dx * rx + dy * ry + dz * rz;
   const sinTheta = clamp(dRight / Math.max(0.08, distM), -1, 1);
   const theta = Math.asin(sinTheta);
   const nearFade = smoothstep(0.02, 0.10, distM);
 
-  const pan = +clamp(MAX_STEREO_PAN * sinTheta * nearFade, -MAX_STEREO_PAN, MAX_STEREO_PAN).toFixed(4);
+  const pan = Math.round(clamp(MAX_STEREO_PAN * sinTheta * nearFade, -MAX_STEREO_PAN, MAX_STEREO_PAN) * 10000) / 10000;
 
   // Woodworth–Schlosberg spherical-head ITD: (a / c) * (|theta| + |sin(theta)|)
   const rawItd = (HEAD_RADIUS_M / SPEED_OF_SOUND_AIR) * (Math.abs(theta) + Math.abs(sinTheta)) * nearFade;
-  const itdSec = +clamp(-Math.sign(sinTheta) * rawItd, -0.00048, 0.00048).toFixed(6);
+  const signSin = sinTheta > 0 ? 1 : sinTheta < 0 ? -1 : 0;
+  const itdSec = Math.round(clamp(-signSin * rawItd, -0.00048, 0.00048) * 1e6) / 1e6;
 
   // Adaptive reference distance scaled to camera framing radius (supports both 160 mm bench parts & 15 m scenes)
-  const camOriginDist = clamp(Math.hypot(cx, cy, cz), 0.18, 6.0);
+  const camOriginDist = clamp(Math.sqrt(cx * cx + cy * cy + cz * cz), 0.18, 6.0);
   const rawGain = Math.pow(camOriginDist / Math.max(0.35 * camOriginDist, distM), 0.65);
-  const distanceGain = +clamp(rawGain, 0.18, 1.25).toFixed(4);
+  const distanceGain = Math.round(clamp(rawGain, 0.18, 1.25) * 10000) / 10000;
 
-  const excessDist = Math.max(0, distM - camOriginDist);
-  const airLowpassHz = +clamp(18000 / (1 + 0.12 * excessDist), 2800, 18000).toFixed(1);
+  const excessDist = distM > camOriginDist ? distM - camOriginDist : 0;
+  const airLowpassHz = Math.round(clamp(18000 / (1 + 0.12 * excessDist), 2800, 18000) * 10) / 10;
 
   return {
     pan,
     distanceGain,
     airLowpassHz,
     itdSec,
-    distanceM: +distM.toFixed(4),
+    distanceM: Math.round(distM * 10000) / 10000,
   };
 }
 

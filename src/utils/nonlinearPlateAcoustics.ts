@@ -60,6 +60,15 @@ export interface NonlinearPlateCrashEnvelope {
   shimmerBandHz: number;
 }
 
+function roundN(v: number, scale: number): number {
+  return Math.round(v * scale) / scale;
+}
+
+const CASCADE_DETUNE_SIN = Array.from({ length: 10 }, (_, i) => Math.sin((i + 1) * 2.39996));
+const CASCADE_FREQ_BASE = Array.from({ length: 10 }, (_, i) => Math.pow(1.75 + 0.82 * (i + 1), 1.38));
+const CASCADE_SPEC_POW = Array.from({ length: 10 }, (_, i) => Math.pow(i + 1, -0.58));
+const CASCADE_Q_DIV = Array.from({ length: 10 }, (_, i) => 1 + 0.32 * (i + 1) * Math.sqrt(i + 1));
+
 /**
  * Returns true if `node` explicitly enables `nonlinearPlate` or is a thin, stiff,
  * high-Q metal/glass/ceramic plate/disk (`bMid / hMin >= 18`, `modulusGPa >= 45`).
@@ -91,14 +100,26 @@ export function solveVonKarmanPlateImpact(
   tauC = 0.0008,
 ): NonlinearPlateCrashEnvelope | null {
   if (!Number.isFinite(impulseNs) || impulseNs <= 0) return null;
-  if (!isNonlinearPlateCandidate(node, profile)) return null;
 
-  const spec: NonlinearPlateSpec = node.nonlinearPlate ?? {};
+  const explicitSpec = node.nonlinearPlate;
+  if (explicitSpec) {
+    if (explicitSpec.enabled === false || (explicitSpec.crashSensitivity ?? 1) <= 0) return null;
+  } else {
+    if (node.acousticString || node.acousticMembrane || node.windInstrument) return null;
+    if (profile.regime !== 'plate') return null;
+    if (profile.material.modulusGPa < 45 || profile.material.qualityQ < 220) return null;
+  }
+
+  const spec: NonlinearPlateSpec = explicitSpec ?? {};
   const sensitivity = Math.max(0, Math.min(5.0, spec.crashSensitivity ?? 1.0));
   if (sensitivity <= 1e-4) return null;
 
+  // Single 3D cross-section lookup (previously computed twice via isNonlinearPlateCandidate + here!)
   const sec = analyze3DSolidCrossSections(node);
   const [hRaw, bMid, lMax] = sec.dimsSortedAsc;
+  if (!explicitSpec) {
+    if (!(bMid / Math.max(1e-4, hRaw) >= 18 && lMax / Math.max(1e-4, bMid) <= 2.2)) return null;
+  }
   const hPlate = Math.max(0.0003, Math.min(hRaw, sec.meanWallThicknessM || hRaw));
   const f1 = Math.max(35, profile.fundamentalHz || 180);
   const omega1 = 2 * Math.PI * f1;
@@ -175,54 +196,55 @@ export function solveVonKarmanPlateImpact(
   const malletCoupling = Math.max(0.45, Math.min(1.15, Math.pow(0.0012 / Math.max(0.0003, tauC), 0.25)));
 
   for (let k = 1; k <= nCascade; k++) {
+    const idx = k - 1;
     // Quasi-irregular Chladni plate partial ratios avoiding artificial harmonic comb periodicity
-    const detune = 1 + 0.031 * Math.sin(k * 2.39996) * aspectSkew;
-    const freqHz = f1 * Math.pow(1.75 + 0.82 * k, 1.38) * detune;
+    const detune = 1 + 0.031 * CASCADE_DETUNE_SIN[idx] * aspectSkew;
+    const freqHz = f1 * CASCADE_FREQ_BASE[idx] * detune;
     if (freqHz > 14200 || freqHz < 90) continue;
 
     // Higher k blooms progressively later across 45..250 ms
-    const prog = (k - 1) / (nCascade - 1);
+    const prog = idx / (nCascade - 1);
     const bloomAttackSec = Math.max(
       0.035,
       Math.min(0.250, baseBloomSec * (0.55 + 0.85 * prog)),
     );
 
-    const spectralEnv = Math.pow(k, -0.58) * (0.45 + 0.55 * cascadeStrength);
+    const spectralEnv = CASCADE_SPEC_POW[idx] * (0.45 + 0.55 * cascadeStrength);
     const peakGain = Math.min(0.42, 0.34 * cascadeStrength * spectralEnv * malletCoupling);
     if (peakGain < 0.004) continue;
 
     // Wave-turbulence energy reservoir continually feeds upper bronze partials across multi-second sustain
     // (Fletcher & Rossing §20.2: 3.5–5.5 s shimmer sustain on high-Q bronze cymbals vs fast decay on low-Q plates)
-    const modeQ = qBase / (1 + 0.32 * k * Math.sqrt(k));
+    const modeQ = qBase / CASCADE_Q_DIV[idx];
     const linearRingSec = (modeQ / (Math.PI * freqHz)) * 4.2;
-    const reservoirRingSec = qNorm * (4.6 / (1 + 0.20 * (k - 1))) * (0.65 + 0.35 * cascadeStrength);
+    const reservoirRingSec = qNorm * (4.6 / (1 + 0.20 * idx)) * (0.65 + 0.35 * cascadeStrength);
     const decaySec = Math.max(
       0.16,
       Math.min(5.2, Math.max(linearRingSec, reservoirRingSec) + bloomAttackSec * 0.8),
     );
 
     cascadeVoices.push({
-      freqHz: +freqHz.toFixed(2),
-      peakGain: +peakGain.toFixed(4),
-      bloomAttackSec: +bloomAttackSec.toFixed(4),
-      decaySec: +decaySec.toFixed(4),
+      freqHz: roundN(freqHz, 100),
+      peakGain: roundN(peakGain, 10000),
+      bloomAttackSec: roundN(bloomAttackSec, 10000),
+      decaySec: roundN(decaySec, 10000),
     });
   }
 
   const shimmerMix = Math.max(0, Math.min(1, spec.shimmerMix ?? (0.55 * profile.material.brightness)));
-  const shimmerPeakGain = +(Math.min(0.38, 0.36 * cascadeStrength * shimmerMix * malletCoupling)).toFixed(4);
-  const shimmerBloomSec = +Math.max(0.045, Math.min(0.240, baseBloomSec * 0.92)).toFixed(4);
-  const shimmerDecaySec = +Math.max(0.22, Math.min(4.8, (qBase / 780) * 3.45 * (0.65 + 0.45 * cascadeStrength))).toFixed(4);
-  const shimmerBandHz = +Math.max(2400, Math.min(8200, f1 * 14)).toFixed(1);
+  const shimmerPeakGain = roundN(Math.min(0.38, 0.36 * cascadeStrength * shimmerMix * malletCoupling), 10000);
+  const shimmerBloomSec = roundN(Math.max(0.045, Math.min(0.240, baseBloomSec * 0.92)), 10000);
+  const shimmerDecaySec = roundN(Math.max(0.22, Math.min(4.8, (qBase / 780) * 3.45 * (0.65 + 0.45 * cascadeStrength))), 10000);
+  const shimmerBandHz = roundN(Math.max(2400, Math.min(8200, f1 * 14)), 10);
 
   return {
     active: true,
-    deflectionRatioEta: +eta.toFixed(4),
-    cascadeStrength: +cascadeStrength.toFixed(4),
-    pitchGlideRatio: +pitchGlideRatio.toFixed(5),
-    pitchGlideCents: +pitchGlideCents.toFixed(2),
-    glideTauSec: +glideTauSec.toFixed(4),
-    lowModeDecayScale: +lowModeDecayScale.toFixed(4),
+    deflectionRatioEta: roundN(eta, 10000),
+    cascadeStrength: roundN(cascadeStrength, 10000),
+    pitchGlideRatio: roundN(pitchGlideRatio, 100000),
+    pitchGlideCents: roundN(pitchGlideCents, 100),
+    glideTauSec: roundN(glideTauSec, 10000),
+    lowModeDecayScale: roundN(lowModeDecayScale, 10000),
     cascadeVoices,
     shimmerPeakGain,
     shimmerBloomSec,
