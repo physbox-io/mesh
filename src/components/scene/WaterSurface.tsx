@@ -26,7 +26,7 @@ export function WaterSurface({ darkMode }: { darkMode: boolean }) {
   if (basins.length > 0) {
     return (
       // Z-up -> Three.js Y-up group matching SceneLayer's primitive coordinate frame
-      <group rotation={[-Math.PI / 2, 0, 0]}>
+      <group rotation={[-Math.PI / 2, 0, 0]} userData={{ skipExport: true, isOverlay: true }}>
         {basins.map((b) => {
           const cx = 0.5 * (b.minX + b.maxX);
           const cy = 0.5 * (b.minY + b.maxY);
@@ -93,7 +93,7 @@ export function WaterSurface({ darkMode }: { darkMode: boolean }) {
   if (waterLevel === null || !Number.isFinite(waterLevel)) return null;
 
   return (
-    <group position={[0, waterLevel, 0]}>
+    <group position={[0, waterLevel, 0]} userData={{ skipExport: true, isOverlay: true }}>
       <mesh rotation={[-Math.PI / 2, 0, 0]} raycast={NOOP_RAYCAST} renderOrder={2}>
         <planeGeometry args={[12, 12, 1, 1]} />
         <meshPhysicalMaterial

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
-import { treatThinGaps, thinGapWarning } from '../src/utils/thinGaps';
+import { treatThinGaps, thinGapWarning, flatFaces } from '../src/utils/thinGaps';
 import { printLimits, DEFAULT_PRINTER } from '../src/utils/printLimits';
 import { clampPrinter } from '../src/utils/printerSettings';
 import { generateMoldMeshes, DEFAULT_MOLD_OPTIONS } from '../src/utils/moldExporter';
@@ -89,4 +89,93 @@ describe('thin gaps', () => {
     expect(closed.success, closed.error).toBe(true);
     expect(closed.warnings.join(' ')).toMatch(/Closed: filled with casting, 40 mm³ added/);
   }, 120_000);
+
+  it('merges coplanar flat faces straddling a FLAT_SNAP_MM rounding boundary (2.0005 mm)', () => {
+    // Two adjacent slabs whose top faces sit at 2.00045 mm and 2.00055 mm (0.0001 mm apart,
+    // straddling 2.0005 mm) with an upper slab at z = 2.1005 mm (0.10 mm skin gap).
+    const loA = slab(0, 0, 0, 5, 10, 2.00045);
+    const loB = slab(5, 0, 0, 10, 10, 2.00055);
+    const hi = slab(0, 0, 2.1005, 10, 10, 4);
+    const post = slab(-2, 0, 0, 0, 2, 4);
+    const part = wasm.Manifold.union([loA, loB, hi, post]);
+    try {
+      const flats = flatFaces(part);
+      // The two coplanar top faces around z ≈ 2.0005 must merge into ONE upward height bucket.
+      const nearTwo = [...flats.up.keys()].filter((z) => Math.abs(z - 2.0005) < 0.01);
+      expect(nearTwo).toHaveLength(1);
+      const { report } = treatThinGaps(wasm, part, FDM, 'leave');
+      expect(report.skin.areaMm2).toBeCloseTo(100, 0);
+      expect(report.skin.thinnestMm).toBeCloseTo(0.1, 3);
+    } finally {
+      for (const m of [loA, loB, hi, post, part]) m.delete();
+    }
+  });
+
+  it('keeps sloped-skin raycaster parity accurate across vertical steps and avoids wall double-counting', () => {
+    // A single solid stepped ramp (NO thin gap anywhere!) with a vertical riser at x = 5:
+    // Previously, un-nudged rays grazing the vertical step or paired by k+=2 could misread
+    // solid thickness as an air gap.
+    const base = slab(0, 0, 0, 10, 10, 5);
+    const step = slab(5, 0, 5, 10, 10, 8);
+    const stepped = wasm.Manifold.union([base, step]).rotate([12, 0, 0]);
+    try {
+      const { report } = treatThinGaps(wasm, stepped, FDM, 'leave');
+      expect(report.skin.areaMm2).toBe(0);
+      expect(report.wall.areaMm2).toBe(0);
+    } finally {
+      for (const m of [base, step, stepped]) m.delete();
+    }
+
+    // Two tilted plates 0.10 mm apart: sloped-skin should detect them without double-counting
+    // the exact same region as a side-by-side wall gap.
+    const pLo = slab(0, 0, 0, 10, 10, 2);
+    const pHi = slab(0, 0, 2.1, 10, 10, 4);
+    const post = slab(-2, 0, 0, 0, 10, 4.1);
+    const tilted = wasm.Manifold.union([pLo, pHi, post]).rotate([15, 0, 0]);
+    try {
+      const { report } = treatThinGaps(wasm, tilted, FDM, 'leave');
+      expect(report.skin.areaMm2).toBeGreaterThan(60);
+      expect(report.skin.thinnestMm).toBeLessThan(0.15);
+      expect(report.wall.areaMm2).toBeLessThan(2);
+    } finally {
+      for (const m of [pLo, pHi, post, tilted]) m.delete();
+    }
+  });
+
+  it('does not flag a wide-opening concave V-groove as a narrow side-by-side wall slot', () => {
+    // 20 x 20 x 5 mm block with a 40° concave V-notch opening wide to the +Y edge.
+    // Even under a 2.4 mm liner minWallMm (where a 40° closing spandrel exceeds 0.35 * minWallMm²),
+    // a wide-opening V-groove is NOT a narrow parallel slot.
+    const halfAngleRad = (20 * Math.PI) / 180;
+    const notchDepth = 10;
+    const halfMouth = notchDepth * Math.tan(halfAngleRad);
+    const profile: [number, number][] = [
+      [-10, 0], [10, 0], [10, 20], [halfMouth, 20], [0, 20 - notchDepth], [-halfMouth, 20], [-10, 20],
+    ];
+    const cs = new wasm.CrossSection([profile], 'Positive');
+    const vBlock = wasm.Manifold.extrude(cs, 5);
+    cs.delete();
+    try {
+      const linerLimits = { minSkinMm: 0.2, minWallMm: 2.4, bridgeMm: 5 };
+      const { report } = treatThinGaps(wasm, vBlock, linerLimits, 'leave');
+      expect(report.wall.areaMm2).toBe(0);
+    } finally {
+      vBlock.delete();
+    }
+  });
+
+  it('measures true width on a short pinch gap without hydraulic-diameter underestimation', () => {
+    // Two short blocks 0.30 mm apart over only 1.0 mm overlap length (L ≈ 3.3*w):
+    // 2 * area / totalPerimeter would underestimate at 0.23 mm; true gap is 0.30 mm.
+    const a = slab(0, 0, 0, 2, 1.0, 4);
+    const b = slab(2.3, 0, 0, 4.3, 1.0, 4);
+    const part = wasm.Manifold.union([a, b]);
+    try {
+      const { report } = treatThinGaps(wasm, part, FDM, 'leave');
+      expect(report.wall.areaMm2).toBeGreaterThan(0.2);
+      expect(report.wall.thinnestMm).toBeCloseTo(0.3, 2);
+    } finally {
+      for (const m of [a, b, part]) m.delete();
+    }
+  });
 });

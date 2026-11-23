@@ -177,6 +177,7 @@ const capped = (features: MateFeature[], limit: number): MateFeature[] => (
 /** The body a drawn object belongs to: the nearest named group above it. */
 function bodyOf(object: THREE.Object3D): string | null {
   for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+    if (node.userData?.isOverlay) return null;
     if (node.type === 'Group' && node.name) return node.name;
   }
   return null;

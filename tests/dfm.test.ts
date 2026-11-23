@@ -12,12 +12,15 @@ import {
   dfmLimitsFor,
   draftDeg,
   enclosedAir,
+  outsideFaces,
   overhangDeg,
   thinnestWall,
   supportArea,
   fitsBedSquareOn,
   DFM_DEFAULTS,
 } from '../src/utils/dfm';
+import { sampleColumns, sampleWallSpans } from '../src/utils/partColumns';
+import { bossFindings, hardwareFindings } from '../src/utils/hardwareChecks';
 import { buildHeatGeometry } from '../src/utils/dfmHeatGeometry';
 import { boxMesh, cupMesh, sphereMesh, toSoup, zupToYupFlat } from './helpers/meshes';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
@@ -192,11 +195,17 @@ describe('cnc analysis', () => {
     expect(r.findings.find(f => f.id === 'cnc_reach')).toBeUndefined();
   });
 
-  it('speaks up when the part is deeper than any bit reaches', () => {
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.02, 0.02, 0.05])]), 'cnc', { asPlaced: true });
-    const reach = r.findings.find(f => f.id === 'cnc_reach');
+  it('stays quiet for standard two-sided depth and warns past 2× max tool reach', () => {
+    // 100 mm is <= 2 * 50.8 mm (101.6 mm): ordinary two-sided machining, no noise.
+    const twoSided = analyseDfm(scene([boxBody([0, 0, 0.05], [0.02, 0.02, 0.05])]), 'cnc', { asPlaced: true });
+    expect(twoSided.findings.find(f => f.id === 'cnc_reach')).toBeUndefined();
+
+    // 120 mm exceeds 2 * 50.8 mm: warns.
+    const tooDeep = analyseDfm(scene([boxBody([0, 0, 0.06], [0.02, 0.02, 0.06])]), 'cnc', { asPlaced: true });
+    const reach = tooDeep.findings.find(f => f.id === 'cnc_reach');
     expect(reach).toBeDefined();
-    expect(reach!.metric!).toBeCloseTo(100, 0);
+    expect(reach!.severity).toBe('warning');
+    expect(reach!.metric!).toBeCloseTo(120, 0);
   });
 });
 
@@ -612,5 +621,323 @@ describe('the printer bed', () => {
   it('fits a box any of the six square-on ways up', () => {
     expect(fitsBedSquareOn([300, 100, 100], { widthMm: 100, depthMm: 100, heightMm: 300 })).toBe(true);
     expect(fitsBedSquareOn([300, 100, 100], { widthMm: 200, depthMm: 200, heightMm: 200 })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression suite: signal declutter, hollow walls, printPose, Resin SLA,
+// outsideFaces air-gap preservation, NaN safety, & hardware consolidation.
+// ---------------------------------------------------------------------------
+
+/** Builds a closed hollow box mesh with outer half-extents `ho` and wall thickness `wallM`. */
+function hollowBoxMesh(ho: [number, number, number], wallM: number) {
+  const outer = boxMesh([0, 0, ho[2]], ho);
+  const inner = boxMesh([0, 0, ho[2]], [ho[0] - wallM, ho[1] - wallM, ho[2] - wallM]);
+  const vOff = outer.verts.length / 3;
+  // Flip inner triangle winding so normals point inward into the cavity.
+  const innerFaces: number[] = [];
+  for (let i = 0; i < inner.faces.length; i += 3) {
+    innerFaces.push(inner.faces[i] + vOff, inner.faces[i + 2] + vOff, inner.faces[i + 1] + vOff);
+  }
+  return {
+    verts: [...outer.verts, ...inner.verts],
+    faces: [...outer.faces, ...innerFaces],
+  };
+}
+
+/** Builds a solid 20 mm relief block with peaked mountain ridges across its top face. */
+function reliefBlockMesh(widthM = 0.08, depthM = 0.08, baseH = 0.02, peakH = 0.006, nx = 24, ny = 24) {
+  const verts: number[] = [];
+  const faces: number[] = [];
+  const topIdx = (ix: number, iy: number) => iy * (nx + 1) + ix;
+  const botStart = (nx + 1) * (ny + 1);
+  const botIdx = (ix: number, iy: number) => botStart + iy * (nx + 1) + ix;
+  const heightAt = (u: number, v: number) => {
+    // Sharp mountain ridges with ~35° slopes
+    const r1 = Math.max(0, 1 - Math.abs(u - 0.3) * 6) * peakH;
+    const r2 = Math.max(0, 1 - Math.abs(u - 0.7) * 5) * peakH * 0.85;
+    const wave = 0.5 + 0.5 * Math.sin(v * Math.PI * 2);
+    return baseH + (r1 + r2) * wave;
+  };
+  for (let iy = 0; iy <= ny; iy++) {
+    for (let ix = 0; ix <= nx; ix++) {
+      const u = ix / nx, v = iy / ny;
+      verts.push((u - 0.5) * widthM, (v - 0.5) * depthM, heightAt(u, v));
+    }
+  }
+  for (let iy = 0; iy <= ny; iy++) {
+    for (let ix = 0; ix <= nx; ix++) {
+      const u = ix / nx, v = iy / ny;
+      verts.push((u - 0.5) * widthM, (v - 0.5) * depthM, 0);
+    }
+  }
+  // Top & bottom surfaces
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const a = topIdx(ix, iy), b = topIdx(ix + 1, iy), c = topIdx(ix + 1, iy + 1), d = topIdx(ix, iy + 1);
+      faces.push(a, b, c, a, c, d);
+      const ba = botIdx(ix, iy), bb = botIdx(ix + 1, iy), bc = botIdx(ix + 1, iy + 1), bd = botIdx(ix, iy + 1);
+      faces.push(ba, bc, bb, ba, bd, bc);
+    }
+  }
+  // Four side skirts
+  for (let ix = 0; ix < nx; ix++) {
+    // -Y side
+    faces.push(botIdx(ix, 0), botIdx(ix + 1, 0), topIdx(ix + 1, 0), botIdx(ix, 0), topIdx(ix + 1, 0), topIdx(ix, 0));
+    // +Y side
+    faces.push(botIdx(ix + 1, ny), botIdx(ix, ny), topIdx(ix, ny), botIdx(ix + 1, ny), topIdx(ix, ny), topIdx(ix + 1, ny));
+  }
+  for (let iy = 0; iy < ny; iy++) {
+    // -X side
+    faces.push(botIdx(0, iy + 1), botIdx(0, iy), topIdx(0, iy), botIdx(0, iy + 1), topIdx(0, iy), topIdx(0, iy + 1));
+    // +X side
+    faces.push(botIdx(nx, iy), botIdx(nx, iy + 1), topIdx(nx, iy + 1), botIdx(nx, iy), topIdx(nx, iy + 1), topIdx(nx, iy));
+  }
+  return { verts, faces };
+}
+
+describe('DFM engine declutter, wall thickness, pose, printer, & hardware regressions', () => {
+  it('catches a hollow box with 0.45 mm walls instead of summing both walls to 0.90 mm', () => {
+    const hollow = hollowBoxMesh([0.02, 0.02, 0.02], 0.00045);
+    const got = thinnestWall(toSoup(hollow), 0.8);
+    expect(got).not.toBeNull();
+    expect(got!.mm).toBeCloseTo(0.45, 1);
+    expect(got!.share).toBeGreaterThan(0.5);
+
+    const r = analyseDfm(scene([meshBody(hollow)]), 'print', { asPlaced: true });
+    const thin = r.findings.find((f) => f.id === 'print_thin_wall');
+    expect(thin).toBeDefined();
+    expect(thin!.metric!).toBeLessThan(0.55);
+    // Summary must describe the thin wall, not "0% of the surface overhangs."
+    expect(r.summary).not.toMatch(/0% of the surface overhangs/);
+    expect(r.summary).toMatch(/Wall down to/);
+  });
+
+  it('reports thin.at at the actual ray-axis midpoint rather than 0', () => {
+    // 0.4 mm thick plate located at x = 0.25 m (y in [-0.04, 0.04], z in [0, 0.08]).
+    const plate = boxMesh([0.25, 0.0, 0.04], [0.0002, 0.04, 0.04]);
+    const got = thinnestWall(toSoup(plate), 0.8);
+    expect(got).not.toBeNull();
+    expect(got!.mm).toBeCloseTo(0.4, 1);
+    expect(got!.at[0]).toBeCloseTo(0.25, 3);
+  });
+
+  it('does not false-fire thin-wall on solid mountain relief ridge crests', () => {
+    const relief = reliefBlockMesh();
+    const got = thinnestWall(toSoup(relief), 0.8);
+    // Solid 20 mm base block: every valid opposing wall span is >= 18 mm.
+    expect(got === null || got.mm > 15).toBe(true);
+    const r = analyseDfm(scene([meshBody(relief)]), 'print', { asPlaced: true });
+    expect(r.findings.find((f) => f.id === 'print_thin_wall')).toBeUndefined();
+  });
+
+  it('excludes intentional compliant flexure leaves from thin-wall findings', () => {
+    const flexNode: SceneNode = {
+      id: 'flex_body',
+      name: 'Compliant Hinge',
+      type: 'body',
+      pos: [0, 0, 0.02],
+      joints: [],
+      children: [],
+      flexure: {
+        kind: 'blade',
+        filament: 'petg',
+        thicknessMm: 0.5,
+        lengthMm: 15,
+        widthMm: 10,
+        stiffness: 0.1,
+        maxTravel: 20,
+      },
+      geoms: [
+        { name: 'body_block', type: 'box', size: [0.02, 0.02, 0.01] } as SceneGeom,
+        { name: 'flexure_blade', type: 'box', size: [0.00025, 0.0075, 0.005], pos: [0.025, 0, 0], role: 'visual' } as SceneGeom,
+      ],
+    };
+    const r = analyseDfm(scene([flexNode]), 'print', { nodeId: 'flex_body' });
+    expect(r.findings.find((f) => f.id === 'print_thin_wall')).toBeUndefined();
+  });
+
+  it('gates unselected multi-body avalanche with needsPartSelection and respects checkAllAsPlate', () => {
+    const bed = { widthMm: 220, depthMm: 220, heightMm: 220 };
+    const multi = scene([
+      boxBody([0, 0, 0.05], [0.15, 0.05, 0.05], 'partA'),
+      boxBody([0.5, 0, 0.05], [0.15, 0.05, 0.05], 'partB'),
+    ]);
+    const gated = analyseDfm(multi, 'print', { printBed: bed });
+    expect(gated.needsPartSelection).toEqual({ bodyCount: 2 });
+    expect(gated.findings.filter((f) => f.id.includes('print_exceeds_bed'))).toHaveLength(0);
+
+    const allPlate = analyseDfm(multi, 'print', { printBed: bed, checkAllAsPlate: true });
+    expect(allPlate.needsPartSelection).toBeUndefined();
+    expect(allPlate.findings.filter((f) => f.id.includes('print_exceeds_bed'))).toHaveLength(2);
+  });
+
+  it('lowers BED_BALLPARK to 2.2 so large simulation props stay quiet', () => {
+    // 700 mm tall tower on a 256 mm bed: ratio = 2.73 > 2.2 -> simulation prop, not a print near-miss.
+    const tower = scene([boxBody([0, 0, 0.35], [0.05, 0.05, 0.35], 'tower')]);
+    const r = analyseDfm(tower, 'print', { asPlaced: true, printBed: { widthMm: 256, depthMm: 256, heightMm: 256 } });
+    expect(r.findings.find((f) => f.id === 'print_exceeds_bed')).toBeUndefined();
+  });
+
+  it('respects node.printPose (overhangs & diagonal bed fit) and never paints phantom rotated heat', () => {
+    // T-shape as a single multi-geom body: wide top bar hangs over air unless flipped upside down.
+    const tNode: SceneNode = {
+      id: 't_part', name: 'T Part', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+      geoms: [
+        { name: 'stem', type: 'box', size: [0.01, 0.01, 0.02], pos: [0, 0, 0.02] } as SceneGeom,
+        { name: 'bar', type: 'box', size: [0.06, 0.06, 0.01], pos: [0, 0, 0.05] } as SceneGeom,
+      ],
+    };
+    // Without printPose: reports placed overhang, viewport heat matches placed overhang, and offers apply_print_pose!
+    const unposed = analyseDfm(scene([tNode]), 'print', { nodeId: 't_part' });
+    const oh = unposed.findings.find((f) => f.id === 'print_overhang');
+    expect(oh).toBeDefined();
+    expect(oh!.nodeId).toBe('t_part');
+    expect(oh!.actions?.some((a) => a.kind === 'apply_print_pose')).toBe(true);
+    expect([...unposed.heat].some((h) => h > 0.5)).toBe(true);
+
+    // With printPose flipped upside down: overhang disappears, heat is 0, judgedPoseLabel is set!
+    const flipped: SceneNode = { ...tNode, printPose: { up: [0, 0, -1], spin: 0 } };
+    const posed = analyseDfm(scene([flipped]), 'print', { nodeId: 't_part' });
+    expect(posed.findings.find((f) => f.id === 'print_overhang')).toBeUndefined();
+    expect(posed.heat.every((h) => h === 0)).toBe(true);
+    expect(posed.judgedPoseLabel).toBe('print pose');
+
+    // Diagonal 45° printPose fits a 280 x 30 x 20 mm bar onto a 250 x 250 x 250 mm bed.
+    const bar: SceneNode = boxBody([0, 0, 0.01], [0.14, 0.015, 0.01], 'bar');
+    const bed = { widthMm: 250, depthMm: 250, heightMm: 250 };
+    const unposedBar = analyseDfm(scene([bar]), 'print', { nodeId: 'bar', printBed: bed });
+    const bedErr = unposedBar.findings.find((f) => f.id === 'print_exceeds_bed');
+    expect(bedErr).toBeDefined();
+    expect(bedErr!.actions?.some((a) => a.kind === 'apply_print_pose')).toBe(true);
+    expect(bedErr!.actions?.some((a) => a.kind === 'open_split')).toBe(true);
+
+    const diagBar: SceneNode = { ...bar, printPose: { up: [0, 0, 1], spin: Math.PI / 4 } };
+    const posedBar = analyseDfm(scene([diagBar]), 'print', { nodeId: 'bar', printBed: bed });
+    expect(posedBar.findings.find((f) => f.id === 'print_exceeds_bed')).toBeUndefined();
+  });
+
+  it('connects bench.printer: scales FDM nozzle minWallMm and runs SLA trapped-cup check for resin', () => {
+    const lim08 = dfmLimitsFor({
+      material: 'hardwood',
+      filament: 'pla',
+      printer: { process: 'fdm', nozzleMm: 0.8, layerMm: 0.4, xyMm: 0.05 },
+    });
+    expect(lim08.minWallMm).toBeCloseTo(1.6, 5);
+
+    // 1.2 mm plate passes 0.4 mm nozzle PLA (0.8 mm min) but fails 0.8 mm nozzle (1.6 mm min).
+    const wall12 = scene([boxBody([0, 0, 0.02], [0.0006, 0.03, 0.02])]);
+    expect(analyseDfm(wall12, 'print', { asPlaced: true, printer: { process: 'fdm', nozzleMm: 0.4, layerMm: 0.2, xyMm: 0.05 } })
+      .findings.find((f) => f.id === 'print_thin_wall')).toBeUndefined();
+    expect(analyseDfm(wall12, 'print', { asPlaced: true, printer: { process: 'fdm', nozzleMm: 0.8, layerMm: 0.4, xyMm: 0.05 } })
+      .findings.find((f) => f.id === 'print_thin_wall')).toBeDefined();
+
+    // Resin SLA printer flags upright hollow cup (opening toward the vat) with sla_trapped_cup,
+    // and skips FDM warping/bridging; solid block has zero sla_trapped_cup findings.
+    const resin = { process: 'resin' as const, nozzleMm: 0.4, layerMm: 0.05, xyMm: 0.05 };
+    const cupReport = analyseDfm(scene([meshBody(cupMesh())]), 'print', { asPlaced: true, filament: 'abs', printer: resin });
+    expect(cupReport.findings.find((f) => f.id === 'sla_trapped_cup')).toBeDefined();
+    expect(cupReport.findings.find((f) => f.id === 'print_warp')).toBeUndefined();
+    expect(cupReport.findings.find((f) => f.id === 'print_no_bridge')).toBeUndefined();
+
+    const solidReport = analyseDfm(scene([boxBody([0, 0, 0.02], [0.02, 0.02, 0.02])]), 'print', { asPlaced: true, printer: resin });
+    expect(solidReport.findings.find((f) => f.id === 'sla_trapped_cup')).toBeUndefined();
+  });
+
+  it('measures bed-contact footprint for print_warp and requires > 5 mm ceiling span for print_no_bridge', () => {
+    // ABS mushroom: 40 mm stem touching bed, 160 mm canopy up in mid-air -> no bed warp!
+    const mushroom = scene([
+      boxBody([0, 0, 0.02], [0.02, 0.02, 0.02], 'stem'),
+      boxBody([0, 0, 0.05], [0.08, 0.08, 0.01], 'canopy'),
+    ]);
+    expect(analyseDfm(mushroom, 'print', { asPlaced: true, filament: 'abs' })
+      .findings.find((f) => f.id === 'print_warp')).toBeUndefined();
+
+    // ABS 160 mm flat plate resting on bed -> triggers print_warp with actions!
+    const flatAbs = scene([boxBody([0, 0, 0.005], [0.08, 0.08, 0.005])]);
+    const warp = analyseDfm(flatAbs, 'print', { asPlaced: true, filament: 'abs' })
+      .findings.find((f) => f.id === 'print_warp');
+    expect(warp).toBeDefined();
+    expect(warp!.actions?.some((a) => a.kind === 'set_filament' && a.filament === 'petg')).toBe(true);
+
+    // TPU tiny 3 mm horizontal ceiling overhang -> below 5 mm bridge span threshold, ignored.
+    const tinyCeiling = scene([
+      boxBody([0, 0, 0.005], [0.002, 0.002, 0.005], 'base'),
+      boxBody([0, 0, 0.011], [0.0015, 0.0015, 0.001], 'cap'),
+    ]);
+    expect(analyseDfm(tinyCeiling, 'print', { asPlaced: true, filament: 'tpu' })
+      .findings.find((f) => f.id === 'print_no_bridge')).toBeUndefined();
+  });
+
+  it('preserves opposing exterior faces across a 0.2 mm air gap in outsideFaces while removing flush buried faces', () => {
+    // Two 40 x 40 x 20 mm boxes separated by a 0.2 mm air gap along Z.
+    const a = toSoup(boxMesh([0, 0, 0.01], [0.02, 0.02, 0.01]));
+    const bGap = toSoup(boxMesh([0, 0, 0.0302], [0.02, 0.02, 0.01]));
+    const trisGap = new Float64Array(a.length + bGap.length);
+    trisGap.set(a, 0);
+    trisGap.set(bGap, a.length);
+    const solidsGap = new Int32Array(trisGap.length / 9);
+    solidsGap.fill(0, 0, a.length / 9);
+    solidsGap.fill(1, a.length / 9);
+    const keptGap = outsideFaces(trisGap, solidsGap);
+    expect(keptGap.index.length).toBe(trisGap.length / 9);
+
+    // Same two boxes touching flush at z = 0.02 -> the 4 touching interface triangles are removed.
+    const bTouch = toSoup(boxMesh([0, 0, 0.03], [0.02, 0.02, 0.01]));
+    const trisTouch = new Float64Array(a.length + bTouch.length);
+    trisTouch.set(a, 0);
+    trisTouch.set(bTouch, a.length);
+    const keptTouch = outsideFaces(trisTouch, solidsGap);
+    expect(keptTouch.index.length).toBe(trisTouch.length / 9 - 4);
+  });
+
+  it('safely handles NaN and zero-span triangle soups without throwing', () => {
+    const nanTris = new Float64Array([NaN, 0, 0, 1, 0, 0, 0, 1, 0]);
+    expect(() => thinnestWall(nanTris, 0.8)).not.toThrow();
+    expect(thinnestWall(nanTris, 0.8)).toBeNull();
+    expect(() => sampleColumns(nanTris, { minX: NaN, minY: 0, maxX: NaN, maxY: 1 }, NaN, 16)).not.toThrow();
+    expect(() => sampleWallSpans(nanTris, { minX: 0, minY: 0, maxX: 0, maxY: 0 }, 0, 0)).not.toThrow();
+  });
+
+  it('reports thin heat_set_boss walls via hardwareChecks with thicken_boss action and scopes by nodeId', () => {
+    const bossNode: SceneNode = {
+      id: 'boss_1',
+      name: 'M3 Boss',
+      type: 'body',
+      pos: [0.05, 0.02, 0.01],
+      joints: [],
+      children: [],
+      isHardwareComponent: true,
+      hardwareType: 'heat_set_boss',
+      hardwareSpec: { size: 'M3', outerDiameterMm: 6.0, innerHoleMm: 4.0 },
+      geoms: [{ name: 'boss_cyl', type: 'cylinder', size: [0.003, 0.005] } as SceneGeom],
+    };
+    const otherNode = boxBody([0.2, 0, 0.02], [0.02, 0.02, 0.02], 'unrelated');
+    const sc = scene([bossNode, otherNode]);
+
+    const direct = bossFindings(sc, 'print');
+    expect(direct).toHaveLength(1);
+    expect(direct[0].id).toBe('boss_wall_boss_1');
+    expect(direct[0].nodeId).toBe('boss_1');
+    expect(direct[0].actions?.[0]).toEqual({
+      kind: 'thicken_boss',
+      label: 'Thicken boss OD to 7.6 mm',
+      nodeId: 'boss_1',
+      outerDiameterMm: 7.6,
+    });
+
+    // Scoped to unrelated body: boss_wall_boss_1 is excluded!
+    expect(hardwareFindings(sc, 'print', sc, undefined, 'unrelated')).toHaveLength(0);
+    // Scoped to boss_1: boss_wall_boss_1 is included!
+    expect(hardwareFindings(sc, 'print', sc, undefined, 'boss_1')).toHaveLength(1);
+  });
+
+  it('fixes misleading CNC summary when stock_fit fires with 0% undercut', () => {
+    const near = scene([boxBody([0, 0, 0.005], [0.1, 0.1, 0.005])]);
+    const r = analyseDfm(near, 'cnc', { asPlaced: true, stock: { widthMm: 150, depthMm: 150, thicknessMm: 18 } });
+    expect(r.summary).not.toMatch(/0% unreachable from above/);
+    expect(r.summary).toMatch(/Exceeds stock dimensions/);
+    const fit = r.findings.find((f) => f.id === 'stock_fit');
+    expect(fit?.actions?.[0]?.kind).toBe('fit_stock');
   });
 });

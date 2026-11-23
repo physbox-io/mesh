@@ -18,6 +18,14 @@ function heatColor(h: number, out: THREE.Color): THREE.Color {
   );
 }
 
+/**
+ * Outward offset along each triangle's geometric face normal, in world metres
+ * (0.08 mm). SceneCanvas enables `logarithmicDepthBuffer: true`, which writes
+ * `gl_FragDepthEXT` and makes WebGL `polygonOffset` a hardware no-op; a tiny
+ * geometric normal lift prevents coplanar Z-fighting against the part surface.
+ */
+export const HEAT_NORMAL_OFFSET_M = 0.00008;
+
 export function buildHeatGeometry(report: DfmReport): THREE.BufferGeometry | null {
   const count = report.heat.length;
   if (!count) return null;
@@ -35,11 +43,34 @@ export function buildHeatGeometry(report: DfmReport): THREE.BufferGeometry | nul
     if (h <= 0.001) continue;
     heatColor(h, c);
     const src = t * 9;
-    for (let k = 0; k < 9; k++) positions[w * 9 + k] = report.tris[src + k];
+    const x0 = report.tris[src], y0 = report.tris[src + 1], z0 = report.tris[src + 2];
+    const x1 = report.tris[src + 3], y1 = report.tris[src + 4], z1 = report.tris[src + 5];
+    const x2 = report.tris[src + 6], y2 = report.tris[src + 7], z2 = report.tris[src + 8];
+    const ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
+    const vx = x2 - x0, vy = y2 - y0, vz = z2 - z0;
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz);
+    const ox = len > 1e-12 ? (nx / len) * HEAT_NORMAL_OFFSET_M : 0;
+    const oy = len > 1e-12 ? (ny / len) * HEAT_NORMAL_OFFSET_M : 0;
+    const oz = len > 1e-12 ? (nz / len) * HEAT_NORMAL_OFFSET_M : 0;
+
+    const dst = w * 9;
+    positions[dst] = x0 + ox;
+    positions[dst + 1] = y0 + oy;
+    positions[dst + 2] = z0 + oz;
+    positions[dst + 3] = x1 + ox;
+    positions[dst + 4] = y1 + oy;
+    positions[dst + 5] = z1 + oz;
+    positions[dst + 6] = x2 + ox;
+    positions[dst + 7] = y2 + oy;
+    positions[dst + 8] = z2 + oz;
+
     for (let v = 0; v < 3; v++) {
-      colors[w * 9 + v * 3] = c.r;
-      colors[w * 9 + v * 3 + 1] = c.g;
-      colors[w * 9 + v * 3 + 2] = c.b;
+      colors[dst + v * 3] = c.r;
+      colors[dst + v * 3 + 1] = c.g;
+      colors[dst + v * 3 + 2] = c.b;
     }
     w++;
   }
@@ -47,6 +78,5 @@ export function buildHeatGeometry(report: DfmReport): THREE.BufferGeometry | nul
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geom.computeVertexNormals();
   return geom;
 }

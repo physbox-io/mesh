@@ -53,6 +53,7 @@ const KIND_COLOUR: Record<string, string> = {
  */
 function isBodyGeometry(object: THREE.Object3D): boolean {
   for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+    if (node.userData?.isOverlay) return false;
     if (node.type === 'Group' && node.name) return true;
   }
   return false;

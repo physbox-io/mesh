@@ -3,11 +3,12 @@ import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { useCastDialog } from '../../store/castDialogStore';
 import { dfmLensFor } from '../../utils/dfm';
-import { useDfmReport } from '../../utils/dfmWorkerClient';
+import { getLivePosedScene, useDfmFocus, useDfmReport } from '../../utils/dfmWorkerClient';
 import { buildHeatGeometry } from '../../utils/dfmHeatGeometry';
+import { livePoses } from './bodyPose';
 
 /**
- * The DFM heat map: the whole scene's surface, drawn again in the colour of
+ * The DFM heat map: the analysed surface, drawn again in the colour of
  * whatever is wrong with it.
  *
  * One mesh for the entire scene rather than a colour attribute per body. The
@@ -16,10 +17,14 @@ import { buildHeatGeometry } from '../../utils/dfmHeatGeometry';
  * attribute — no indices, no per-geom bookkeeping, and no way for the colours to
  * end up on different triangles than the ones that were measured.
  *
- * Drawn slightly in front of the part with a polygon offset. Depth testing stays
- * ON, so the heat map is occluded by the geometry in front of it and reads as
- * paint on the surface rather than as an x-ray.
+ * Because SceneCanvas enables `logarithmicDepthBuffer: true` (making WebGL
+ * `polygonOffset` a no-op), `buildHeatGeometry` lifts each triangle slightly
+ * outward along its geometric face normal, and the material renders front faces
+ * with `depthWrite={false}` so faces never Z-fight or bleed through backfaces.
  */
+
+const NO_RAYCAST = () => null;
+const OVERLAY_USER_DATA = { isOverlay: true, skipExport: true } as const;
 
 export function DfmHeatmap() {
   const sceneGraph = useStore(state => state.sceneGraph);
@@ -31,46 +36,76 @@ export function DfmHeatmap() {
   const filament = useStore(state => state.filament);
   const stock = useStore(state => state.stock);
   const printBed = useStore(state => state.printBed);
+  const printer = useStore(state => state.printer);
   const selectedNodeId = useStore(state => state.selectedNodeId);
+  const recompileId = useStore(state => state.recompileId);
+  const isPlaying = useStore(state => state.isPlaying);
+  const { checkAllAsPlate } = useDfmFocus();
 
   // Follows the panel: the casting section takes the colours with it, because
   // reading about undercuts while the viewport is still shaded for overhangs
   // is worse than showing neither. Rolled up, it stops sampling entirely.
-  const lens = dfmEnabled && !minimized ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
+  const open = dfmEnabled && !minimized;
+  const lens = open ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
+
+  // Align heatmap triangles with post-simulation / VoltLink body poses using
+  // the exact same shared SceneGraph reference as DfmHUD so both hit one cache.
+  const live = useMemo(() => {
+    // Re-read mutable MuJoCo poses after a sim pause or reset (`recompileId`).
+    void recompileId;
+    if (!open || isPlaying || !sceneGraph) return null;
+    return livePoses(sceneGraph.nodes || []);
+  }, [open, sceneGraph, recompileId, isPlaying]);
+  const effectiveScene = useMemo(
+    () => (sceneGraph ? getLivePosedScene(sceneGraph, live) : null),
+    [sceneGraph, live],
+  );
+
   // The same bench, key for key, as the panel's, so the two share one analysis.
   const castMaterial = useCastDialog((s) => s.materialByTab.rigid);
   const bench = useMemo(
-    () => ({ material, filament, stock, printBed, nodeId: selectedNodeId, ...(castMaterial ? { castMaterial } : {}) }),
-    [material, filament, stock, printBed, selectedNodeId, castMaterial],
+    () => ({
+      material,
+      filament,
+      stock,
+      printBed,
+      printer,
+      nodeId: selectedNodeId,
+      ...(!selectedNodeId && checkAllAsPlate ? { checkAllAsPlate: true } : {}),
+      ...(castMaterial ? { castMaterial } : {}),
+    }),
+    [material, filament, stock, printBed, printer, selectedNodeId, checkAllAsPlate, castMaterial],
   );
-  const report = useDfmReport(sceneGraph, lens, bench);
+  const report = useDfmReport(effectiveScene, lens, bench);
 
   const geometry = useMemo(() => {
-    if (!report) return null;
+    if (!open || !report) return null;
     try {
       return buildHeatGeometry(report);
     } catch {
       // A scene the analyser cannot read should cost the viewport nothing.
       return null;
     }
-  }, [report]);
+  }, [open, report]);
   // Passed in as a prop, so react-three-fiber leaves it alone: each edit's
   // geometry is freed here, or its GPU buffers outlive it.
   useEffect(() => () => geometry?.dispose(), [geometry]);
 
-  if (!geometry) return null;
+  if (!open || !geometry) return null;
 
   return (
-    <mesh geometry={geometry} renderOrder={998} name="dfm-heatmap">
-      {/* Both sides: an overhang is seen from underneath more often than not. */}
+    <mesh
+      geometry={geometry}
+      renderOrder={998}
+      userData={OVERLAY_USER_DATA}
+      raycast={NO_RAYCAST}
+    >
       <meshBasicMaterial
         vertexColors
-        side={THREE.DoubleSide}
+        side={THREE.FrontSide}
         transparent
         opacity={0.85}
-        polygonOffset
-        polygonOffsetFactor={-2}
-        polygonOffsetUnits={-2}
+        depthWrite={false}
       />
     </mesh>
   );

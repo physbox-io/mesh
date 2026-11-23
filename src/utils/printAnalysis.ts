@@ -12,6 +12,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { resolveCsgGeoms, positiveBounds } from './csg';
 import { isBoughtIn } from './boughtIn';
 import { isNodeRotationBaked } from './sceneTree';
+import { getGeomFrame } from './laserCutExporter';
 import * as THREE from 'three';
 
 export type WeakSpotCategory = 'structural' | 'dynamic' | 'hardware' | 'manufacturing';
@@ -50,87 +51,65 @@ interface GeomTransform {
   pos: [number, number, number];
   mat: [number, number, number, number, number, number, number, number, number]; // 3x3 row-major matrix
   hasRotation: boolean;
+  matrix4: THREE.Matrix4;
+  halfLen?: number;
+}
+
+/** Local-to-world 4x4 matrix of a body node, composing parent rotations properly. */
+function getNodeWorldMatrix(node: SceneNode, parentMatrix?: THREE.Matrix4): THREE.Matrix4 {
+  const m = new THREE.Matrix4();
+  if (!isNodeRotationBaked(node)) {
+    if (node.quat && node.quat.length === 4 && (node.quat[0] !== 1 || node.quat[1] !== 0 || node.quat[2] !== 0 || node.quat[3] !== 0)) {
+      const q = new THREE.Quaternion(node.quat[1] || 0, node.quat[2] || 0, node.quat[3] || 0, node.quat[0] ?? 1).normalize();
+      m.makeRotationFromQuaternion(q);
+    } else if (node.rot && (node.rot[0] !== 0 || node.rot[1] !== 0 || node.rot[2] !== 0)) {
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(node.rot[0] || 0, node.rot[1] || 0, node.rot[2] || 0, 'XYZ'));
+      m.makeRotationFromQuaternion(q);
+    } else if (node.euler && (node.euler[0] !== 0 || node.euler[1] !== 0 || node.euler[2] !== 0)) {
+      const rx = (node.euler[0] * Math.PI) / 180;
+      const ry = (node.euler[1] * Math.PI) / 180;
+      const rz = (node.euler[2] * Math.PI) / 180;
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'XYZ'));
+      m.makeRotationFromQuaternion(q);
+    }
+  }
+  m.setPosition(node.pos?.[0] || 0, node.pos?.[1] || 0, node.pos?.[2] || 0);
+  return parentMatrix ? new THREE.Matrix4().multiplyMatrices(parentMatrix, m) : m;
 }
 
 /**
  * World position and rotation of a node/geom in raw MuJoCo Z-up space, as
- * drawn. Never the live sim pose: the DFM lens that shows these closes on Run,
- * and reading the store here kept this engine off the DFM worker.
+ * drawn. Composes parent body rotations and geom.quat / geom.euler / geom.fromto.
  */
 function getGeomWorldTransform(
-  node: SceneNode,
+  bodyMatrix: THREE.Matrix4,
   geom: SceneGeom | null,
-  parentPos: [number, number, number]
 ): GeomTransform {
-  const identityMat: [number, number, number, number, number, number, number, number, number] = [
-    1, 0, 0,
-    0, 1, 0,
-    0, 0, 1,
-  ];
-
-  // Scene graph node position & rotation
-  const nx = parentPos[0] + (node.pos?.[0] || 0);
-  const ny = parentPos[1] + (node.pos?.[1] || 0);
-  const nz = parentPos[2] + (node.pos?.[2] || 0);
-
-  let rotMat = identityMat;
-  let hasRotation = false;
-
-  if (!isNodeRotationBaked(node)) {
-    if (node.quat && node.quat.length === 4 && (node.quat[0] !== 1 || node.quat[1] !== 0 || node.quat[2] !== 0 || node.quat[3] !== 0)) {
-      hasRotation = true;
-      const q = new THREE.Quaternion(node.quat[1] || 0, node.quat[2] || 0, node.quat[3] || 0, node.quat[0] ?? 1).normalize();
-      const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
-      const me = m4.elements;
-      rotMat = [
-        me[0], me[4], me[8],
-        me[1], me[5], me[9],
-        me[2], me[6], me[10],
-      ];
-    } else if (node.rot && (node.rot[0] !== 0 || node.rot[1] !== 0 || node.rot[2] !== 0)) {
-      hasRotation = true;
-      const euler = new THREE.Euler(node.rot[0] || 0, node.rot[1] || 0, node.rot[2] || 0, 'XYZ');
-      const q = new THREE.Quaternion().setFromEuler(euler);
-      const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
-      const me = m4.elements;
-      rotMat = [
-        me[0], me[4], me[8],
-        me[1], me[5], me[9],
-        me[2], me[6], me[10],
-      ];
-    } else if (node.euler && (node.euler[0] !== 0 || node.euler[1] !== 0 || node.euler[2] !== 0)) {
-      hasRotation = true;
-      const rx = (node.euler[0] * Math.PI) / 180;
-      const ry = (node.euler[1] * Math.PI) / 180;
-      const rz = (node.euler[2] * Math.PI) / 180;
-      const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
-      const q = new THREE.Quaternion().setFromEuler(euler);
-      const m4 = new THREE.Matrix4().makeRotationFromQuaternion(q);
-      const me = m4.elements;
-      rotMat = [
-        me[0], me[4], me[8],
-        me[1], me[5], me[9],
-        me[2], me[6], me[10],
-      ];
-    }
+  let matrix4 = bodyMatrix;
+  let halfLen: number | undefined;
+  if (geom) {
+    const frame = getGeomFrame(geom);
+    matrix4 = new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix);
+    halfLen = frame.halfLen;
   }
-
-  const gx = geom?.pos?.[0] || 0;
-  const gy = geom?.pos?.[1] || 0;
-  const gz = geom?.pos?.[2] || 0;
-
-  const worldX = nx + rotMat[0] * gx + rotMat[1] * gy + rotMat[2] * gz;
-  const worldY = ny + rotMat[3] * gx + rotMat[4] * gy + rotMat[5] * gz;
-  const worldZ = nz + rotMat[6] * gx + rotMat[7] * gy + rotMat[8] * gz;
-
-  return { pos: [worldX, worldY, worldZ], mat: rotMat, hasRotation };
+  const me = matrix4.elements;
+  const mat: [number, number, number, number, number, number, number, number, number] = [
+    me[0], me[4], me[8],
+    me[1], me[5], me[9],
+    me[2], me[6], me[10],
+  ];
+  const hasRotation =
+    Math.abs(mat[0] - 1) > 1e-6 || Math.abs(mat[4] - 1) > 1e-6 || Math.abs(mat[8] - 1) > 1e-6 ||
+    Math.abs(mat[1]) > 1e-6 || Math.abs(mat[2]) > 1e-6 || Math.abs(mat[3]) > 1e-6 ||
+    Math.abs(mat[5]) > 1e-6 || Math.abs(mat[6]) > 1e-6 || Math.abs(mat[7]) > 1e-6;
+  return { pos: [me[12], me[13], me[14]], mat, hasRotation, matrix4, halfLen };
 }
 
 /**
  * Computes exact bounds in raw MuJoCo Z-up space
  */
-function getNodeRealWorldBounds(node: SceneNode, parentPos: [number, number, number] = [0, 0, 0]) {
-  const transform = getGeomWorldTransform(node, null, parentPos);
+function getNodeRealWorldBounds(node: SceneNode, bodyMatrix: THREE.Matrix4) {
+  const transform = getGeomWorldTransform(bodyMatrix, null);
   const nodeWorldPos = transform.pos;
 
   let min: [number, number, number] = [Infinity, Infinity, Infinity];
@@ -138,13 +117,27 @@ function getNodeRealWorldBounds(node: SceneNode, parentPos: [number, number, num
 
   const csgB = positiveBounds(node);
   if (csgB && isFinite(csgB.min[0]) && isFinite(csgB.max[0])) {
-    min = [nodeWorldPos[0] + csgB.min[0], nodeWorldPos[1] + csgB.min[1], nodeWorldPos[2] + csgB.min[2]];
-    max = [nodeWorldPos[0] + csgB.max[0], nodeWorldPos[1] + csgB.max[1], nodeWorldPos[2] + csgB.max[2]];
+    const v = new THREE.Vector3();
+    for (const cx of [csgB.min[0], csgB.max[0]]) {
+      for (const cy of [csgB.min[1], csgB.max[1]]) {
+        for (const cz of [csgB.min[2], csgB.max[2]]) {
+          v.set(cx, cy, cz).applyMatrix4(bodyMatrix);
+          if (v.x < min[0]) min[0] = v.x;
+          if (v.x > max[0]) max[0] = v.x;
+          if (v.y < min[1]) min[1] = v.y;
+          if (v.y > max[1]) max[1] = v.y;
+          if (v.z < min[2]) min[2] = v.z;
+          if (v.z > max[2]) max[2] = v.z;
+        }
+      }
+    }
   } else {
     const allGeoms = resolveCsgGeoms(node, 'render');
     for (const g of allGeoms) {
-      const gTransform = getGeomWorldTransform(node, g, parentPos);
+      if (g.role === 'collision') continue;
+      const gTransform = getGeomWorldTransform(bodyMatrix, g);
       const gPos = gTransform.pos;
+      const m = gTransform.mat;
       let sx = 0.05, sy = 0.05, sz = 0.05;
       if (g.size) {
         if (g.size.length >= 3) {
@@ -152,16 +145,19 @@ function getNodeRealWorldBounds(node: SceneNode, parentPos: [number, number, num
         } else if (g.type === 'sphere') {
           sx = sy = sz = g.size[0];
         } else if (g.type === 'cylinder' || g.type === 'capsule') {
-          sx = sy = g.size[0]; sz = g.size[1];
+          sx = sy = g.size[0]; sz = gTransform.halfLen ?? g.size[1] ?? g.size[0];
         }
       }
+      const ex = Math.abs(m[0]) * sx + Math.abs(m[1]) * sy + Math.abs(m[2]) * sz;
+      const ey = Math.abs(m[3]) * sx + Math.abs(m[4]) * sy + Math.abs(m[5]) * sz;
+      const ez = Math.abs(m[6]) * sx + Math.abs(m[7]) * sy + Math.abs(m[8]) * sz;
 
-      min[0] = Math.min(min[0], gPos[0] - sx);
-      max[0] = Math.max(max[0], gPos[0] + sx);
-      min[1] = Math.min(min[1], gPos[1] - sy);
-      max[1] = Math.max(max[1], gPos[1] + sy);
-      min[2] = Math.min(min[2], gPos[2] - sz);
-      max[2] = Math.max(max[2], gPos[2] + sz);
+      min[0] = Math.min(min[0], gPos[0] - ex);
+      max[0] = Math.max(max[0], gPos[0] + ex);
+      min[1] = Math.min(min[1], gPos[1] - ey);
+      max[1] = Math.max(max[1], gPos[1] + ey);
+      min[2] = Math.min(min[2], gPos[2] - ez);
+      max[2] = Math.max(max[2], gPos[2] + ez);
     }
   }
 
@@ -187,7 +183,7 @@ function getNodeRealWorldBounds(node: SceneNode, parentPos: [number, number, num
 function analyzeMeshOverhangClusters(
   node: SceneNode,
   geom: SceneGeom,
-  parentPos: [number, number, number]
+  bodyMatrix: THREE.Matrix4
 ): WeakSpot[] {
   const spots: WeakSpot[] = [];
 
@@ -195,7 +191,7 @@ function analyzeMeshOverhangClusters(
   const verts = geom.renderVertices || geom.vertices;
   if (!verts || verts.length < 9) return spots;
 
-  const { pos: gPos, mat: m, hasRotation } = getGeomWorldTransform(node, geom, parentPos);
+  const { pos: gPos, mat: m, hasRotation } = getGeomWorldTransform(bodyMatrix, geom);
   const useMat = hasRotation;
 
   const BUCKET_SIZE = 0.08; // 80mm spatial clusters
@@ -320,7 +316,7 @@ function analyzeMeshOverhangClusters(
   // --- NEW 3D PRINT FAILURE MODE 1: Sub-Optimal Print Orientation / Excessive Support Material ---
   if (totalFaceCount > 20 && overhangFaceCount / totalFaceCount > 0.25) {
     const overhangRatio = ((overhangFaceCount / totalFaceCount) * 100).toFixed(0);
-    const bounds = getNodeRealWorldBounds(node, parentPos);
+    const bounds = getNodeRealWorldBounds(node, bodyMatrix);
     spots.push({
       id: `print_orientation_${node.id}`,
       nodeId: node.id,
@@ -353,31 +349,29 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
     };
   }
 
-  const allNodes: { node: SceneNode; parentPos: [number, number, number] }[] = [];
-  const collect = (nodes: SceneNode[], parentPos: [number, number, number] = [0, 0, 0]) => {
+  const allNodes: { node: SceneNode; bodyMatrix: THREE.Matrix4 }[] = [];
+  const collect = (nodes: SceneNode[], parentMatrix?: THREE.Matrix4) => {
     for (const node of nodes) {
-      allNodes.push({ node, parentPos });
-      const curPos: [number, number, number] = [
-        parentPos[0] + (node.pos?.[0] || 0),
-        parentPos[1] + (node.pos?.[1] || 0),
-        parentPos[2] + (node.pos?.[2] || 0),
-      ];
-      if (node.children) collect(node.children, curPos);
+      const bodyMatrix = getNodeWorldMatrix(node, parentMatrix);
+      allNodes.push({ node, bodyMatrix });
+      if (node.children) collect(node.children, bodyMatrix);
     }
   };
   collect(sceneGraph.nodes);
 
-  for (const { node, parentPos } of allNodes) {
+  for (const { node, bodyMatrix } of allNodes) {
     // A bought bearing or screw is not made here, so has nothing to weaken.
     if (isBoughtIn(node)) continue;
-    const { min, max, dimensions, center } = getNodeRealWorldBounds(node, parentPos);
+    const { min, max, dimensions, center } = getNodeRealWorldBounds(node, bodyMatrix);
     const [dx, dy, dz] = dimensions;
     const isStatic = !node.joints || node.joints.length === 0;
 
     // --- PASS 1: PRIMITIVE GEOMS (node.geoms) ---
     const primGeoms = node.geoms || [];
     for (const g of primGeoms) {
-      const gTransform = getGeomWorldTransform(node, g, parentPos);
+      // Skip collision helpers and intentional visual-only/compliant flexure leaves.
+      if (g.role === 'collision' || g.role === 'visual' || g.name?.startsWith('flexure_') || g.bend) continue;
+      const gTransform = getGeomWorldTransform(bodyMatrix, g);
 
       // Thin Wall Section (<1.0mm)
       if (g.type === 'box' && g.size) {
@@ -399,12 +393,14 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
         }
       }
 
-      // Fragile Vertical Pins (<3.2mm diameter). A cut cylinder is a hole, not a pin.
+      // Fragile Vertical Pins (<3.2mm diameter). A cut cylinder is a hole, not a pin,
+      // and a horizontal cylinder (rotated via geom.quat/euler/fromto) is not a vertical pin.
       const cut = g.csg === 'difference';
       if ((g.type === 'cylinder' || g.type === 'capsule') && g.size && !cut) {
         const diameterMm = g.size[0] * 2 * 1000;
-        const lengthMm = g.size[1] * 2 * 1000;
-        if (diameterMm < 3.2 && lengthMm > 6.0) {
+        const lengthMm = (gTransform.halfLen ?? g.size[1] ?? 0) * 2 * 1000;
+        const axisWorldZ = Math.abs(gTransform.mat[8]);
+        if (axisWorldZ > 0.7 && diameterMm < 3.2 && lengthMm > 6.0) {
           weakSpots.push({
             id: `thin_pin_${node.id}_${g.name || 'pin'}`,
             nodeId: node.id,
@@ -454,9 +450,10 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
     const visitedMeshGeoms = new Set<string>();
 
     for (const g of allGeomsForMesh) {
+      if (g.role === 'collision') continue;
       if (g.type === 'mesh' && g.name && !visitedMeshGeoms.has(g.name)) {
         visitedMeshGeoms.add(g.name);
-        const meshOverhangs = analyzeMeshOverhangClusters(node, g, parentPos);
+        const meshOverhangs = analyzeMeshOverhangClusters(node, g, bodyMatrix);
         weakSpots.push(...meshOverhangs);
       }
     }
@@ -599,11 +596,10 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
 }
 
 /**
- * The weak spots the DFM lens shows, in its list and as markers alike: the
- * structural ones. Overhangs and orientation are analyseDfm's to judge, per
- * part and on its best side; this engine's as-placed guesses at them put
- * red pins all over a jar that prints without support.
+ * Retired from the DFM lens: `boss_wall_*` now lives in `hardwareChecks.ts`
+ * (with 1-click remediation), while thin-wall and orientation checks live in
+ * `dfm.ts`. Returning `[]` prevents redundant worker CPU and noisy cards.
  */
-export function structuralWeakSpots(scene: SceneGraph): WeakSpot[] {
-  return analyzeSceneMechanicalWeaknesses(scene).weakSpots.filter((w) => w.category !== 'manufacturing');
+export function structuralWeakSpots(_scene: SceneGraph): WeakSpot[] {
+  return [];
 }

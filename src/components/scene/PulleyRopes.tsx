@@ -201,7 +201,7 @@ export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeI
         const ringThickness = ringR * 0.2;
 
         return (
-          <group key={rope.id} position={threePos}>
+          <group key={rope.id} position={threePos} userData={{ skipExport: true, isOverlay: true }}>
             {/* Outer glowing torus ring */}
             <mesh
               rotation={[Math.PI / 2, 0, 0]}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { analyzeSceneMechanicalWeaknesses } from '../src/utils/printAnalysis';
+import { analyzeSceneMechanicalWeaknesses, structuralWeakSpots } from '../src/utils/printAnalysis';
 import { createDShaftHubNode } from '../src/utils/hardwareComponents';
 import type { SceneGraph } from '../src/types/scene';
 
@@ -149,5 +149,46 @@ describe('printAnalysis & hardwareComponents', () => {
     // After 180 deg X flip, the face points down and its Z position is rotated to world pos
     expect(overhangSpot?.position[0]).toBeCloseTo(0.2, 2);
     expect(overhangSpot?.position[1]).toBeCloseTo(0.2, 2);
+  });
+
+  it('retires structuralWeakSpots (returns []) and skips horizontal cylinders & visual flexure leaves', () => {
+    const sc: SceneGraph = {
+      nodes: [
+        {
+          id: 'parent',
+          name: 'Rotated Parent',
+          pos: [0, 0, 0.1],
+          euler: [0, 0, 90], // 90 deg around Z
+          geoms: [
+            // Horizontal slender cylinder via fromto: NOT a vertical pin!
+            { name: 'horiz_pin', type: 'cylinder', size: [0.00075], fromto: [0, 0, 0, 0.03, 0, 0] },
+            // Intentional visual flexure leaf (< 1 mm): skipped!
+            { name: 'flexure_blade', type: 'box', size: [0.00025, 0.02, 0.01], role: 'visual' },
+          ],
+          joints: [],
+          children: [
+            {
+              id: 'child',
+              name: 'Child Thin Box',
+              pos: [0.1, 0, 0], // Under 90 deg Z parent rotation, world pos is [0, 0.1, 0.1]
+              geoms: [{ name: 'child_thin', type: 'box', size: [0.0002, 0.05, 0.05] }],
+              joints: [],
+              children: [],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(structuralWeakSpots(sc)).toEqual([]);
+
+    const result = analyzeSceneMechanicalWeaknesses(sc);
+    expect(result.weakSpots.find((w) => w.id.includes('horiz_pin'))).toBeUndefined();
+    expect(result.weakSpots.find((w) => w.id.includes('flexure_blade'))).toBeUndefined();
+    const childSpot = result.weakSpots.find((w) => w.id === 'thin_wall_child_child_thin');
+    expect(childSpot).toBeDefined();
+    expect(childSpot!.position[0]).toBeCloseTo(0, 3);
+    expect(childSpot!.position[1]).toBeCloseTo(0.1, 3);
+    expect(childSpot!.position[2]).toBeCloseTo(0.1, 3);
   });
 });

@@ -38,6 +38,8 @@ export const dfmCommands: McpCommands = {
       filament: state.filament,
       stock: state.stock,
       printBed: state.printBed,
+      printer: state.printer,
+      checkAllAsPlate: true,
       ...(castMaterial ? { castMaterial } : {}),
     });
     if (!report) return { ok: false, error: 'The check could not be run: try again in a moment.' };

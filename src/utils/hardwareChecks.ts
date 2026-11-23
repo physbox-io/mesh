@@ -163,10 +163,103 @@ const mmText = (m: number) => `${(m * 1000).toFixed(2).replace(/\.?0+$/, '')} mm
 /**
  * Every hardware finding for the bodies in `scene`, measured against what is
  * around them in `whole` (the full scene, when only one body is analysed).
+ * When `scopeNodeId` is set, only findings involving that body (its subtree)
+ * or mating directly against it are returned.
  */
-export function hardwareFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
-  return [...sealFindings(scene, process, whole, poses), ...screwFindings(scene, process, whole, poses), ...runnerFindings(scene, process, whole, poses)]
-    .map((f) => ({ ...f, assembly: true as const }));
+export function hardwareFindings(
+  scene: SceneGraph,
+  process: DfmProcess,
+  whole: SceneGraph = scene,
+  poses?: LivePoses,
+  scopeNodeId?: string | null,
+): DfmFinding[] {
+  const scope = scopeNodeId ? subtreeIds(whole.nodes || [], scopeNodeId) : null;
+  const keep = (participants: Iterable<string | undefined>): boolean => {
+    if (!scope) return true;
+    for (const id of participants) if (id && scope.has(id)) return true;
+    return false;
+  };
+  return [
+    ...sealFindingsScoped(scene, process, whole, poses, keep),
+    ...screwFindingsScoped(scene, process, whole, poses, keep),
+    ...runnerFindingsScoped(scene, process, whole, poses, keep),
+    ...bossFindingsScoped(scene, process, whole, poses, keep),
+  ].map((f) => ({ ...f, assembly: true as const }));
+}
+
+function subtreeIds(nodes: SceneNode[], targetId: string): Set<string> | null {
+  const find = (list: SceneNode[]): SceneNode | null => {
+    for (const n of list) {
+      if (n.id === targetId) return n;
+      const hit = find(n.children || []);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const root = find(nodes);
+  if (!root) return null;
+  const ids = new Set<string>();
+  const add = (n: SceneNode) => {
+    ids.add(n.id);
+    for (const c of n.children || []) add(c);
+  };
+  add(root);
+  return ids;
+}
+
+/** One finding per heat-set insert boss whose wall around the insert is under 1.8 mm. */
+export function bossFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
+  return bossFindingsScoped(scene, process, whole, poses, () => true);
+}
+
+function bossFindingsScoped(
+  scene: SceneGraph,
+  process: DfmProcess,
+  whole: SceneGraph,
+  poses: LivePoses | undefined,
+  keep: (participants: Iterable<string | undefined>) => boolean,
+): DfmFinding[] {
+  const { worlds } = bodiesOf(whole, poses);
+  const out: DfmFinding[] = [];
+  const walk = (nodes: SceneNode[]) => {
+    for (const node of nodes) {
+      if (node.isHardwareComponent && node.hardwareType === 'heat_set_boss' && node.hardwareSpec) {
+        if (keep([node.id])) {
+          const spec = node.hardwareSpec;
+          const outerD = Number(spec.outerDiameterMm) || 8;
+          const innerH = Number(spec.innerHoleMm) || 4;
+          const bossWallMm = (outerD - innerH) / 2;
+          if (bossWallMm < 1.8) {
+            const world = worlds.get(node.id);
+            const pos = (world
+              ? new THREE.Vector3().setFromMatrixPosition(world).toArray()
+              : [node.pos?.[0] ?? 0, node.pos?.[1] ?? 0, node.pos?.[2] ?? 0]) as [number, number, number];
+            const targetOd = Number((innerH + 3.6).toFixed(1));
+            out.push({
+              id: `boss_wall_${node.id}`,
+              nodeId: node.id,
+              process,
+              severity: 'critical',
+              title: `Thin insert boss wall (${bossWallMm.toFixed(1)} mm)`,
+              detail: `Wall around ${spec.size ?? 'heat-set'} insert in ${node.name} is ${bossWallMm.toFixed(1)} mm (min 1.8 mm).`,
+              fix: `Increase boss OD to ≥ ${targetOd.toFixed(1)} mm.`,
+              position: pos,
+              metric: bossWallMm,
+              actions: [{
+                kind: 'thicken_boss',
+                label: `Thicken boss OD to ${targetOd.toFixed(1)} mm`,
+                nodeId: node.id,
+                outerDiameterMm: targetOd,
+              }],
+            });
+          }
+        }
+      }
+      walk(node.children || []);
+    }
+  };
+  walk(scene.nodes || []);
+  return out;
 }
 
 /** How far side space may be off a runner's 12.7 mm before the drawer binds or falls off it, mm. */
@@ -180,6 +273,16 @@ const SIDE_SPACE_SLACK_MM = 0.5;
  * mistake there is, and one a ruler finds only once it is built.
  */
 export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
+  return runnerFindingsScoped(scene, process, whole, poses, () => true);
+}
+
+function runnerFindingsScoped(
+  scene: SceneGraph,
+  process: DfmProcess,
+  whole: SceneGraph,
+  poses: LivePoses | undefined,
+  keep: (participants: Iterable<string | undefined>) => boolean,
+): DfmFinding[] {
   const { bodies, worlds } = bodiesOf(whole, poses);
   const everything: SceneNode[] = [];
   const collect = (nodes: SceneNode[]) => { for (const n of nodes) { everything.push(n); collect(n.children || []); } };
@@ -200,6 +303,17 @@ export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: Sc
     const drawer = led && everything.find((n) => n.weldTargetId === led)?.id;
     const world = worlds.get(runner.id);
     if (!carcass || !drawer || !world) continue;
+    const drawerRoot = everything.find((n) => n.id === drawer);
+    const carcassRoot = everything.find((n) => n.id === carcass);
+    const participants: (string | undefined)[] = [
+      runner.id,
+      slide?.id,
+      carcass,
+      drawer,
+      ...(drawerRoot ? rigidBodies(drawerRoot).map((n) => n.id) : []),
+      ...(carcassRoot ? rigidBodies(carcassRoot).map((n) => n.id) : []),
+    ];
+    if (!keep(participants)) continue;
     const L = Number(runner.hardwarePart!.size) / 1000;
     const middle = new THREE.Vector3(L / 2, 0, 0).applyMatrix4(world);
     const toward = new THREE.Vector3(0, 1, 0).transformDirection(world);
@@ -217,7 +331,7 @@ export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: Sc
     if (Math.abs(off) <= SIDE_SPACE_SLACK_MM) continue;
     const by = `${(Math.abs(off) * 2).toFixed(1)} mm`;
     out.push({
-      id: `runner_${runner.id}`, process, severity: 'critical',
+      id: `runner_${runner.id}`, nodeId: drawer, process, severity: 'critical',
       title: `${runner.name}: ${space.toFixed(1)} mm side space`,
       detail: `Drawer side gap is ${space.toFixed(1)} mm per side; runners require ${RUNNER_SIDE_SPACE_MM} mm (${(Math.abs(off) * 2).toFixed(1)} mm ${off > 0 ? 'over' : 'under'} total).`,
       fix: off < 0 ? `Make the drawer ${by} narrower, or the cabinet that much wider inside.` : `Make the drawer ${by} wider, or the cabinet that much narrower inside.`,
@@ -233,6 +347,16 @@ const UNDER_HEAD_DIAMETERS = 1.2;
 
 /** One finding per seated cap screw with too little under its head. */
 export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
+  return screwFindingsScoped(scene, process, whole, poses, () => true);
+}
+
+function screwFindingsScoped(
+  scene: SceneGraph,
+  process: DfmProcess,
+  whole: SceneGraph,
+  poses: LivePoses | undefined,
+  keep: (participants: Iterable<string | undefined>) => boolean,
+): DfmFinding[] {
   const { worlds } = bodiesOf(whole, poses);
   const out: DfmFinding[] = [];
   const walk = (nodes: SceneNode[]) => {
@@ -240,6 +364,7 @@ export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: Sce
       for (const child of host.children || []) {
         const p = child.hardwarePart;
         if (p?.kind !== 'screw' || !p.seat) continue;
+        if (!keep([host.id, child.id, p.fastens])) continue;
         const kind = host.geoms.find((g) => g.hardware?.group === p.seat)?.hardware?.kind;
         if (kind !== 'counterbore') continue;
         const grip = seatFor(host, p.seat, 'screw')?.gripM;
@@ -247,7 +372,7 @@ export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: Sce
         if (grip === undefined || grip >= UNDER_HEAD_DIAMETERS * d) continue;
         const world = worlds.get(child.id);
         out.push({
-          id: `screw_${child.id}`, process, severity: 'warning',
+          id: `screw_${child.id}`, nodeId: host.id, process, severity: 'warning',
           title: `${p.size} screw: ${mmText(grip)} under its head`,
           detail: `${child.name} has ${mmText(grip)} under its head in ${host.name} (recommended ≥ ${mmText(UNDER_HEAD_DIAMETERS * d)} / ${UNDER_HEAD_DIAMETERS}D).`,
           fix: `Sink the counterbore ${mmText(UNDER_HEAD_DIAMETERS * d - grip)} less, or thicken the wall under it.`,
@@ -264,6 +389,16 @@ export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: Sce
 
 /** One finding per O-ring groove in the scene: whether it seals, and if not, what to change. */
 export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
+  return sealFindingsScoped(scene, process, whole, poses, () => true);
+}
+
+function sealFindingsScoped(
+  scene: SceneGraph,
+  process: DfmProcess,
+  whole: SceneGraph,
+  poses: LivePoses | undefined,
+  keep: (participants: Iterable<string | undefined>) => boolean,
+): DfmFinding[] {
   const grooves: { host: SceneNode; g: SceneGeom }[] = [];
   const walk = (nodes: SceneNode[]) => {
     for (const n of nodes) {
@@ -287,17 +422,27 @@ export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: Scen
     const label = g.hardware!.kind === 'seal_cord' ? `Ø${size} cord seal` : `${size} O-ring`;
     const position = geo.centre.toArray() as [number, number, number];
     const finding = (severity: DfmFinding['severity'], title: string, detail: string, fix: string, metric?: number): DfmFinding => ({
-      id: `seal_${host.id}_${g.hardware!.group}`, process, severity, title, detail, fix, position, ...(metric !== undefined ? { metric } : {}),
+      id: `seal_${host.id}_${g.hardware!.group}`, nodeId: host.id, process, severity, title, detail, fix, position, ...(metric !== undefined ? { metric } : {}),
     });
 
     // The room the ring has at each sample, past the groove floor (radial) or the face (axial).
     const gaps: number[] = [];
+    const hitBodies = new Set<string>([host.id]);
     for (const ray of geo.rays) {
       const o = ray.from.clone().addScaledVector(ray.dir, -BACK);
       let best = Infinity;
-      for (const b of bodies) if (b.id !== host.id) best = Math.min(best, rayHit(b.tris, o, ray.dir, REACH + BACK));
-      if (Number.isFinite(best)) gaps.push(best - BACK);
+      let bestId: string | null = null;
+      for (const b of bodies) {
+        if (b.id === host.id) continue;
+        const d = rayHit(b.tris, o, ray.dir, REACH + BACK);
+        if (d < best) { best = d; bestId = b.id; }
+      }
+      if (Number.isFinite(best)) {
+        gaps.push(best - BACK);
+        if (bestId) hitBodies.add(bestId);
+      }
     }
+    if (!keep(hitBodies)) continue;
     if (gaps.length === 0) {
       // An open seal is not a sealed one, however good the groove.
       out.push(finding('warning', `${label}: nothing presses on it`,

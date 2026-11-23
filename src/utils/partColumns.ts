@@ -23,6 +23,26 @@ export function sampleColumns(
   cols: number,
   rows: number
 ): { top: Float32Array; bottom: Float32Array; thickness: Float32Array; hit: Uint8Array } {
+  const safeCols = Number.isFinite(cols) ? Math.max(0, Math.floor(cols)) : 0;
+  const safeRows = Number.isFinite(rows) ? Math.max(0, Math.floor(rows)) : 0;
+  if (
+    safeCols === 0 ||
+    safeRows === 0 ||
+    !Number.isFinite(bounds.minX) ||
+    !Number.isFinite(bounds.minY) ||
+    !Number.isFinite(bounds.maxX) ||
+    !Number.isFinite(bounds.maxY)
+  ) {
+    const n = safeCols * safeRows;
+    return {
+      top: new Float32Array(n).fill(-Infinity),
+      bottom: new Float32Array(n).fill(Infinity),
+      thickness: new Float32Array(n),
+      hit: new Uint8Array(n),
+    };
+  }
+  cols = safeCols;
+  rows = safeRows;
   const cacheKey = `${bounds.minX},${bounds.minY},${bounds.maxX},${bounds.maxY},${cols},${rows}`;
   let perTris = sampleColumnsCache.get(tris);
   if (perTris) {
@@ -32,30 +52,37 @@ export function sampleColumns(
     perTris = new Map();
     sampleColumnsCache.set(tris, perTris);
   }
-  const stepX = cols > 1 ? (bounds.maxX - bounds.minX) / (cols - 1) : 0;
-  const stepY = rows > 1 ? (bounds.maxY - bounds.minY) / (rows - 1) : 0;
+  const spanX = bounds.maxX - bounds.minX;
+  const spanY = bounds.maxY - bounds.minY;
+  const stepX = cols > 1 && Number.isFinite(spanX) ? spanX / (cols - 1) : 0;
+  const stepY = rows > 1 && Number.isFinite(spanY) ? spanY / (rows - 1) : 0;
   const top = new Float32Array(cols * rows).fill(-Infinity);
   const bottom = new Float32Array(cols * rows).fill(Infinity);
   const thickness = new Float32Array(cols * rows);
   const hit = new Uint8Array(cols * rows);
 
-  const triCount = tris.length / 9;
+  const triCount = Math.floor(tris.length / 9);
   if (triCount === 0) return { top, bottom, thickness, hit };
 
   // Bucketed by plan-view bounding box, as buildHeightmap does, so each column
   // only tests the triangles that could be over it.
   const side = Math.max(1, Math.min(128, Math.round(Math.sqrt(triCount / 2))));
-  const bw = (bounds.maxX - bounds.minX) / side || 1;
-  const bh = (bounds.maxY - bounds.minY) / side || 1;
+  const bw = spanX > 1e-12 && Number.isFinite(spanX) ? spanX / side : 1;
+  const bh = spanY > 1e-12 && Number.isFinite(spanY) ? spanY / side : 1;
   const buckets: number[][] = Array.from({ length: side * side }, () => []);
-  const bucketCol = (x: number) => Math.min(side - 1, Math.max(0, Math.floor((x - bounds.minX) / bw)));
-  const bucketRow = (y: number) => Math.min(side - 1, Math.max(0, Math.floor((y - bounds.minY) / bh)));
+  const bucketCol = (x: number) => (Number.isFinite(x) ? Math.min(side - 1, Math.max(0, Math.floor((x - bounds.minX) / bw))) : 0);
+  const bucketRow = (y: number) => (Number.isFinite(y) ? Math.min(side - 1, Math.max(0, Math.floor((y - bounds.minY) / bh))) : 0);
 
   for (let t = 0; t < triCount; t++) {
     const i = t * 9;
-    const ax = tris[i], ay = tris[i + 1];
-    const bx = tris[i + 3], by = tris[i + 4];
-    const cx = tris[i + 6], cy = tris[i + 7];
+    const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+    const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
+    const cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+    if (
+      !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az) ||
+      !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz) ||
+      !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)
+    ) continue;
     if (Math.max(ax, bx, cx) < bounds.minX || Math.min(ax, bx, cx) > bounds.maxX) continue;
     if (Math.max(ay, by, cy) < bounds.minY || Math.min(ay, by, cy) > bounds.maxY) continue;
     const c0 = bucketCol(Math.min(ax, bx, cx));
@@ -171,15 +198,26 @@ export function columnProbe(
   tris: Float64Array,
   bounds: { minX: number; minY: number; maxX: number; maxY: number }
 ): (x: number, y: number) => { top: number; bottom: number } | null {
-  const triCount = tris.length / 9;
+  const triCount = Math.floor(tris.length / 9);
+  if (
+    triCount === 0 ||
+    !Number.isFinite(bounds.minX) ||
+    !Number.isFinite(bounds.minY) ||
+    !Number.isFinite(bounds.maxX) ||
+    !Number.isFinite(bounds.maxY)
+  ) {
+    return () => null;
+  }
   // Each triangle goes only in the buckets it actually crosses, not every one
   // its bounding box does: a cap fanned from its centre is slivers that each
   // span the part, and by bounding box every bucket held a quarter of them.
   const side = Math.max(1, Math.min(256, Math.round(Math.sqrt(triCount) * 2)));
-  const bw = (bounds.maxX - bounds.minX) / side || 1;
-  const bh = (bounds.maxY - bounds.minY) / side || 1;
-  const bucketCol = (x: number) => Math.min(side - 1, Math.max(0, Math.floor((x - bounds.minX) / bw)));
-  const bucketRow = (y: number) => Math.min(side - 1, Math.max(0, Math.floor((y - bounds.minY) / bh)));
+  const spanX = bounds.maxX - bounds.minX;
+  const spanY = bounds.maxY - bounds.minY;
+  const bw = spanX > 1e-12 && Number.isFinite(spanX) ? spanX / side : 1;
+  const bh = spanY > 1e-12 && Number.isFinite(spanY) ? spanY / side : 1;
+  const bucketCol = (x: number) => (Number.isFinite(x) ? Math.min(side - 1, Math.max(0, Math.floor((x - bounds.minX) / bw))) : 0);
+  const bucketRow = (y: number) => (Number.isFinite(y) ? Math.min(side - 1, Math.max(0, Math.floor((y - bounds.minY) / bh))) : 0);
   const buckets: number[][] = Array.from({ length: side * side }, () => []);
   /** Whether the triangle's plan crosses the box (separating axes: the box's two and the three edge normals). */
   const crosses = (i: number, x0: number, y0: number, x1: number, y1: number) => {
@@ -230,5 +268,231 @@ export function columnProbe(
       if (z < bottom) bottom = z;
     }
     return top === -Infinity ? null : { top, bottom };
+  };
+}
+
+export interface WallSpanSample {
+  /** Per-column offset into `spanZ0` / `spanZ1` (length `cols * rows + 1`). */
+  spanStart: Uint32Array;
+  /** Entry Z of every closed solid span, in the soup's units. */
+  spanZ0: Float32Array;
+  /** Exit Z of every closed solid span, in the soup's units. */
+  spanZ1: Float32Array;
+  /** Minimum valid wall span thickness in each column (Infinity if no valid wall span). */
+  minWall: Float32Array;
+  /** Midpoint Z of that thinnest valid wall span. */
+  minWallMid: Float32Array;
+  /** Entry/exit Z of that thinnest valid wall span. */
+  minWallZ0: Float32Array;
+  minWallZ1: Float32Array;
+  /** 1 where the column hit at least one closed solid span. */
+  hit: Uint8Array;
+}
+
+/**
+ * Samples individual closed solid spans along Z for wall-thickness checks.
+ *
+ * Unlike `sampleColumns` (which sums all solid spans in a column for CNC
+ * undercut volume), this keeps every individual solid span separate so a
+ * hollow box with two thin walls does not sum them into one thick wall.
+ * It also records the entry/exit face normals of each span and only counts
+ * spans whose entry and exit faces oppose each other along the ray axis
+ * (`|n_in.z| >= 0.5`, `|n_out.z| >= 0.5`, `dot(n_in, n_out) <= -0.7`),
+ * rejecting grazing mountain-ridge crests, thread tips, and silhouette edges.
+ */
+export function sampleWallSpans(
+  tris: Float64Array,
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+  cols: number,
+  rows: number,
+): WallSpanSample {
+  const safeCols = Number.isFinite(cols) ? Math.max(0, Math.floor(cols)) : 0;
+  const safeRows = Number.isFinite(rows) ? Math.max(0, Math.floor(rows)) : 0;
+  const nCells = safeCols * safeRows;
+  const spanStart = new Uint32Array(nCells + 1);
+  const minWall = new Float32Array(nCells).fill(Infinity);
+  const minWallMid = new Float32Array(nCells);
+  const minWallZ0 = new Float32Array(nCells);
+  const minWallZ1 = new Float32Array(nCells);
+  const hit = new Uint8Array(nCells);
+
+  const triCount = Math.floor(tris.length / 9);
+  if (
+    nCells === 0 ||
+    triCount === 0 ||
+    !Number.isFinite(bounds.minX) ||
+    !Number.isFinite(bounds.minY) ||
+    !Number.isFinite(bounds.maxX) ||
+    !Number.isFinite(bounds.maxY)
+  ) {
+    return {
+      spanStart,
+      spanZ0: new Float32Array(0),
+      spanZ1: new Float32Array(0),
+      minWall,
+      minWallMid,
+      minWallZ0,
+      minWallZ1,
+      hit,
+    };
+  }
+
+  const spanX = bounds.maxX - bounds.minX;
+  const spanY = bounds.maxY - bounds.minY;
+  const stepX = safeCols > 1 && Number.isFinite(spanX) ? spanX / (safeCols - 1) : 0;
+  const stepY = safeRows > 1 && Number.isFinite(spanY) ? spanY / (safeRows - 1) : 0;
+
+  const side = Math.max(1, Math.min(128, Math.round(Math.sqrt(triCount / 2))));
+  const bw = spanX > 1e-12 && Number.isFinite(spanX) ? spanX / side : 1;
+  const bh = spanY > 1e-12 && Number.isFinite(spanY) ? spanY / side : 1;
+  const buckets: number[][] = Array.from({ length: side * side }, () => []);
+  const bucketCol = (x: number) => (Number.isFinite(x) ? Math.min(side - 1, Math.max(0, Math.floor((x - bounds.minX) / bw))) : 0);
+  const bucketRow = (y: number) => (Number.isFinite(y) ? Math.min(side - 1, Math.max(0, Math.floor((y - bounds.minY) / bh))) : 0);
+
+  for (let t = 0; t < triCount; t++) {
+    const i = t * 9;
+    const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+    const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
+    const cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+    if (
+      !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az) ||
+      !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz) ||
+      !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)
+    ) continue;
+    if (Math.max(ax, bx, cx) < bounds.minX || Math.min(ax, bx, cx) > bounds.maxX) continue;
+    if (Math.max(ay, by, cy) < bounds.minY || Math.min(ay, by, cy) > bounds.maxY) continue;
+    const c0 = bucketCol(Math.min(ax, bx, cx));
+    const c1 = bucketCol(Math.max(ax, bx, cx));
+    const r0 = bucketRow(Math.min(ay, by, cy));
+    const r1 = bucketRow(Math.max(ay, by, cy));
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) buckets[r * side + c].push(i);
+    }
+  }
+
+  const NUDGE = 0.0137;
+  const midRow = (safeRows - 1) * 0.5;
+  const midCol = (safeCols - 1) * 0.5;
+  const hitZ: number[] = [];
+  const hitDir: number[] = [];
+  const hitNx: number[] = [];
+  const hitNy: number[] = [];
+  const hitNz: number[] = [];
+  const order: number[] = [];
+  const rawZ0: number[] = [];
+  const rawZ1: number[] = [];
+
+  for (let row = 0; row < safeRows; row++) {
+    const nudgeY = row < midRow ? NUDGE : row > midRow ? -NUDGE : 0;
+    const py = bounds.minY + (row + nudgeY) * stepY;
+    const br = bucketRow(py);
+    for (let col = 0; col < safeCols; col++) {
+      const k = row * safeCols + col;
+      spanStart[k] = rawZ0.length;
+      const nudgeX = col < midCol ? NUDGE : col > midCol ? -NUDGE : 0;
+      const px = bounds.minX + (col + nudgeX) * stepX;
+      const bucket = buckets[br * side + bucketCol(px)];
+      if (bucket.length === 0) continue;
+
+      hitZ.length = 0;
+      hitDir.length = 0;
+      hitNx.length = 0;
+      hitNy.length = 0;
+      hitNz.length = 0;
+
+      for (const i of bucket) {
+        const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+        const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
+        const cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+        const v0x = cx - ax, v0y = cy - ay, v0z = cz - az;
+        const v1x = bx - ax, v1y = by - ay, v1z = bz - az;
+        const v2x = px - ax, v2y = py - ay;
+        const den = v0x * v1y - v1x * v0y;
+        if (den === 0) continue;
+        const u = (v2x * v1y - v1x * v2y) / den;
+        const v = (v0x * v2y - v2x * v0y) / den;
+        if (u < 0 || v < 0 || u + v > 1) continue;
+        // Outward unit normal = normalize((B - A) × (C - A)) = normalize(v1 × v0).
+        const nx = v1y * v0z - v1z * v0y;
+        const ny = v1z * v0x - v1x * v0z;
+        const nz = -den;
+        const nLen = Math.hypot(nx, ny, nz);
+        if (!(nLen > 1e-18)) continue;
+        hitZ.push(az + u * v0z + v * v1z);
+        hitDir.push(den > 0 ? 1 : -1);
+        hitNx.push(nx / nLen);
+        hitNy.push(ny / nLen);
+        hitNz.push(nz / nLen);
+      }
+      if (hitZ.length === 0) continue;
+
+      order.length = hitZ.length;
+      for (let h = 0; h < order.length; h++) order[h] = h;
+      order.sort((a, b) => hitZ[a] - hitZ[b]);
+
+      let depth = 0;
+      let lastZ = NaN;
+      let lastDir = 0;
+      let enteredAt = 0;
+      let enX = 0, enY = 0, enZ = 0;
+      let bestThick = Infinity;
+      let bestZ0 = 0, bestZ1 = 0;
+      let anySpan = false;
+
+      for (let h = 0; h < order.length; h++) {
+        const idx = order[h];
+        const z = hitZ[idx];
+        const dir = hitDir[idx];
+        if (dir === lastDir && Math.abs(z - lastZ) <= 1e-4) continue;
+        if (dir > 0) {
+          if (depth === 0) {
+            enteredAt = z;
+            enX = hitNx[idx]; enY = hitNy[idx]; enZ = hitNz[idx];
+          }
+          depth++;
+        } else if (depth > 0) {
+          depth--;
+          if (depth === 0 && z > enteredAt) {
+            anySpan = true;
+            rawZ0.push(enteredAt);
+            rawZ1.push(z);
+            const thick = z - enteredAt;
+            const exX = hitNx[idx], exY = hitNy[idx], exZ = hitNz[idx];
+            // A real wall has entry and exit faces aligned with the ray axis
+            // and opposing each other (not a grazing surface crest or sharp ridge).
+            const dot = enX * exX + enY * exY + enZ * exZ;
+            if (Math.abs(enZ) >= 0.5 && Math.abs(exZ) >= 0.5 && dot <= -0.7 && thick < bestThick) {
+              bestThick = thick;
+              bestZ0 = enteredAt;
+              bestZ1 = z;
+            }
+          }
+        }
+        lastZ = z;
+        lastDir = dir;
+      }
+
+      if (anySpan) {
+        hit[k] = 1;
+        if (bestThick < Infinity) {
+          minWall[k] = bestThick;
+          minWallZ0[k] = bestZ0;
+          minWallZ1[k] = bestZ1;
+          minWallMid[k] = (bestZ0 + bestZ1) * 0.5;
+        }
+      }
+    }
+  }
+  spanStart[nCells] = rawZ0.length;
+
+  return {
+    spanStart,
+    spanZ0: Float32Array.from(rawZ0),
+    spanZ1: Float32Array.from(rawZ1),
+    minWall,
+    minWallMid,
+    minWallZ0,
+    minWallZ1,
+    hit,
   };
 }

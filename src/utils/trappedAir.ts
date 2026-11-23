@@ -298,27 +298,101 @@ export function trappedAirInSoup(
   tris: Float64Array,
   level: number,
   solidIds?: ArrayLike<number>,
-  /** Openings already there (plan, mm): a patch touching one is vented by it. */
-  openings: { x: number; y: number; r: number }[] = [],
+  /** Openings already there (plan, mm): a top-exposed patch touching one is vented by it. */
+  openings: { x: number; y: number; r: number; z?: number }[] = [],
 ): { x: number; y: number; z: number }[] {
   const g = buildGraph(tris, solidIds, SILICONE_GRAPH);
   if (!g) return [];
+  const n = g.top.length;
+  if (n === 0) return [];
   const tol = Math.max(0.5, g.cell);
-  const trapped = new Uint8Array(g.top.length);
-  for (let n = 0; n < g.top.length; n++) {
-    if (g.top[n] >= level - tol) continue;
-    let escapes = false;
-    for (let j = g.adjStart[n]; j < g.adjStart[n + 1]; j++) if (g.top[g.adj[j]] > g.top[n] + 1e-4) { escapes = true; break; }
-    if (!escapes) trapped[n] = 1;
+
+  // Only top-of-column spans (or those matching an explicit opening Z) are
+  // vented by a vertical opening drilled from above: a pour hole on an upper
+  // canopy must never falsely vent a separate pocket deep underneath it.
+  const opened = (a: number) =>
+    g.isColumnTop[a] === 1 &&
+    openings.some(
+      (o) =>
+        Math.hypot(xOf(g, a) - o.x, yOf(g, a) - o.y) <= o.r &&
+        (o.z === undefined || Math.abs(g.top[a] - o.z) <= tol),
+    );
+
+  const outlets: number[] = [];
+  const isOutlet = new Uint8Array(n);
+  for (let a = 0; a < n; a++) {
+    if (g.top[a] >= level - tol || opened(a)) {
+      outlets.push(a);
+      isOutlet[a] = 1;
+    }
   }
-  const opened = (n: number) => openings.some((o) => Math.hypot(xOf(g, n) - o.x, yOf(g, n) - o.y) <= o.r);
-  return components(g, (n) => trapped[n] === 1)
-    .filter((comp) => !comp.some(opened))
-    .map((comp) => {
-      const best = comp.reduce((b, n) => (g.top[n] > g.top[b] ? n : b), comp[0]);
-      return { x: xOf(g, best), y: yOf(g, best), z: g.top[best] };
-    })
-    .sort((a, b) => b.z - a.z);
+
+  // Pick the best apex of a trapped component: highest ceiling, breaking ties
+  // toward the centre of its top-level cells so vents sit cleanly on flat roofs.
+  const pickApex = (comp: number[]): number => {
+    let maxTop = -Infinity;
+    for (const a of comp) if (g.top[a] > maxTop) maxTop = g.top[a];
+    const topCells = comp.filter((a) => g.top[a] >= maxTop - 1e-4);
+    let cx = 0, cy = 0;
+    for (const a of topCells) { cx += xOf(g, a); cy += yOf(g, a); }
+    cx /= topCells.length; cy /= topCells.length;
+    let best = topCells[0], bestD2 = Infinity;
+    for (const a of topCells) {
+      const dx = xOf(g, a) - cx, dy = yOf(g, a) - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) { bestD2 = d2; best = a; }
+    }
+    return best;
+  };
+
+  // Phase 1 — Global widest-path spill levels: finds gently sloped roofs climbing
+  // to a dead-end below `level`, blind domes, and nested pockets separated by
+  // internal saddles without misreading micro-facets as separate pockets.
+  const MIN_POCKET_DEPTH_MM = 0.05;
+  const MAX_POCKETS = 128;
+  const results: { x: number; y: number; z: number }[] = [];
+  for (let iter = 0; iter < MAX_POCKETS; iter++) {
+    const spill = spillLevels(g, outlets);
+    const pockets = components(g, (a) => g.top[a] > spill[a] + 1e-3)
+      .map((comp) => {
+        let deepest = 0;
+        let maxTop = -Infinity;
+        for (const a of comp) {
+          const d = spill[a] === -Infinity ? Infinity : g.top[a] - spill[a];
+          if (d > deepest) deepest = d;
+          if (g.top[a] > maxTop) maxTop = g.top[a];
+        }
+        return { comp, deepest, maxTop };
+      })
+      .filter((p) => p.deepest > MIN_POCKET_DEPTH_MM)
+      .sort((a, b) => b.maxTop - a.maxTop || b.deepest - a.deepest);
+    if (pockets.length === 0) break;
+    const apex = pickApex(pockets[0].comp);
+    results.push({ x: xOf(g, apex), y: yOf(g, apex), z: g.top[apex] });
+    outlets.push(apex);
+    isOutlet[apex] = 1;
+  }
+
+  // Phase 2 — Flat horizontal overhangs below `level` (e.g. a mushroom cap or
+  // spool flange in non-breathing silicone): air cannot climb off a level 0°
+  // ceiling to reach a distant vertical wall, so any flat local-maximum patch
+  // not already touching an outlet or Phase 1 vent gets its own vent too.
+  const flatTrap = new Uint8Array(n);
+  for (let a = 0; a < n; a++) {
+    if (g.top[a] >= level - tol) continue;
+    let escapes = false;
+    for (let j = g.adjStart[a]; j < g.adjStart[a + 1]; j++) {
+      if (g.top[g.adj[j]] > g.top[a] + 1e-4) { escapes = true; break; }
+    }
+    if (!escapes) flatTrap[a] = 1;
+  }
+  for (const comp of components(g, (a) => flatTrap[a] === 1)) {
+    if (comp.some((a) => isOutlet[a] === 1)) continue;
+    const apex = pickApex(comp);
+    results.push({ x: xOf(g, apex), y: yOf(g, apex), z: g.top[apex] });
+    isOutlet[apex] = 1;
+  }
+  return results.sort((a, b) => b.z - a.z);
 }
 
 export interface BurnoutVent {
@@ -480,7 +554,6 @@ export function planBurnoutVents(
   const unventableSpan = new Uint8Array(n);
   let tries = 0;
   for (;;) {
-    if (++tries > 4 * opts.maxVents + 64) { plan.leftOver = Math.max(plan.leftOver, 1); break; }
     const spill = spillLevels(g, [...outlets, ...ventNodes], walled);
     const depth = (a: number) => (walled[a] || spill[a] === -Infinity ? 0 : g.top[a] - spill[a]);
     const pockets = components(g, (a) => depth(a) > 1e-3)
@@ -495,7 +568,7 @@ export function planBurnoutVents(
       .filter((p) => p.deepest >= opts.minDepthMm || p.air >= opts.minAirMm3)
       .sort((a, b) => b.deepest - a.deepest || b.air - a.air);
     if (pockets.length === 0) break;
-    if (plan.vents.length >= opts.maxVents) {
+    if (plan.vents.length >= opts.maxVents || ++tries > 4 * opts.maxVents + 64) {
       plan.leftOver = pockets.length;
       plan.leftOverAt = pockets.map((q) => pointOf(highest(q.comp)));
       break;

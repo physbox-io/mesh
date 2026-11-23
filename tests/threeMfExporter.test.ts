@@ -8,7 +8,13 @@ import {
   linearToSrgbHex,
   type ThreeMfMesh,
 } from '../src/utils/threeMfExporter';
-import { filterVisibleScene, resolveExportMeshLabel } from '../src/hooks/useMeshExport';
+import * as THREE from 'three';
+import {
+  filterVisibleScene,
+  resolveExportMeshLabel,
+  collectExportGroup,
+  applyExportPlacement,
+} from '../src/hooks/useMeshExport';
 import type { SceneNode } from '../src/types/scene';
 
 /** Reads a stored-entry ZIP back out, which is all a 3MF reader has to do. */
@@ -460,5 +466,206 @@ describe('shared-vertex welding, degenerate/empty guards, and slicer assembly me
     const filtered = filterVisibleScene({ name: 'Demo', nodes: [singleBody, multiBody] }, new Set(['body_9f81a2']));
     expect(filtered.name).toBe('Demo');
     expect(filtered.nodes.map((n) => n.id)).toEqual(['body_77c4e0']);
+  });
+
+  it('cleans NaN/Infinity, collinear, and sub-0.1 µm collapsed triangles in exportThreeMfAssemblies', () => {
+    const asmRes = exportThreeMfAssemblies([
+      {
+        name: 'Dirty Mold',
+        parts: [
+          {
+            name: 'Shell',
+            extruder: 1,
+            positions: new Float32Array([
+              // Valid triangle (vertices 0, 1, 2)
+              0, 0, 0, 10, 0, 0, 0, 10, 0,
+              // Sub-0.1 µm duplicate of vertex 0 (vertex 3) -> collapses with vertex 0
+              1e-6, 0, 0,
+              // Collinear midpoint (vertex 4)
+              5, 0, 0,
+              // Non-finite vertex (vertex 5)
+              Number.NaN, 0, 0,
+            ]),
+            indices: new Uint32Array([
+              0, 1, 2, // valid
+              0, 3, 2, // collapses after 1e-4 mm quantization
+              0, 4, 1, // collinear zero-area
+              0, 1, 5, // NaN vertex
+            ]),
+          },
+          {
+            name: 'All Degenerate',
+            extruder: 2,
+            positions: new Float32Array([0, 0, 0, 5, 0, 0, 10, 0, 0]),
+            indices: new Uint32Array([0, 1, 2]),
+          },
+        ],
+      },
+    ]);
+    expect(asmRes.triangles).toBe(1);
+    expect(asmRes.extruders).toEqual([1]);
+    const files = unzip(asmRes.data);
+    const model = files.get('3D/3dmodel.model')!;
+    const prusa = files.get('Metadata/Slic3r_PE_model.config')!;
+    expect(model).not.toContain('NaN');
+    expect(model.match(/<vertex /g)).toHaveLength(3);
+    expect(model.match(/<triangle /g)).toHaveLength(1);
+    expect(prusa).toContain('<volume firstid="0" lastid="0">');
+  });
+
+  it('strips illegal XML 1.0 control chars and escapes single quotes in names', () => {
+    const mesh = triangle(null);
+    mesh.name = "Bob's\x00 \x07Part\x1F";
+    const model = unzip(exportThreeMf([mesh]).data).get('3D/3dmodel.model')!;
+    expect(model).toContain('name="Bob&apos;s Part"');
+    // eslint-disable-next-line no-control-regex
+    expect(model).not.toMatch(/[\x00-\x08\x0B\x0C\x0E-\x1F]/);
+  });
+
+  it('assigns a 100%-vertex-painted mesh its dominant painted slot without wasting a slot on unused white baseColor', () => {
+    const red = [[1, 0, 0], [1, 0, 0], [1, 0, 0]];
+    const blue = [[0, 0, 1], [0, 0, 1], [0, 0, 1]];
+    const quadTris = (n: number) =>
+      new Float32Array(Array.from({ length: n }, (_, t) => [t * 10, 0, 0, t * 10 + 5, 0, 0, t * 10, 5, 0]).flat());
+    const painted: ThreeMfMesh = {
+      name: 'fully_painted',
+      positions: quadTris(4),
+      indices: new Uint32Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+      // 3 red triangles, 1 blue triangle; Three.js painted material baseColor is white [1,1,1] with 0 white corners.
+      colors: new Float32Array([...red, ...red, ...red, ...blue].flat()),
+      baseColor: [1, 1, 1],
+    };
+
+    const result = exportThreeMf([painted]);
+    expect(result.palette.map((p) => [p.hex, p.triangles])).toEqual([
+      ['#ff0000', 3],
+      ['#0000ff', 1],
+    ]);
+    const files = unzip(result.data);
+    const model = files.get('3D/3dmodel.model')!;
+    const bambu = files.get('Metadata/model_settings.config')!;
+    // Volume extruder is slot 1 (red), so only the single blue triangle is stamped filament 2 ("8").
+    expect(bambu).toMatch(/<part id="\d+"[\s\S]*?key="extruder" value="1"/);
+    expect(model.match(/paint_color="8"/g)).toHaveLength(1);
+  });
+
+  it('handles required volume colors exceeding maxExtruders deterministically without dropping triangles', () => {
+    const triAt = (x: number, baseColor: number[]): ThreeMfMesh => ({
+      name: `p_${x}`,
+      positions: new Float32Array([x, 0, 0, x + 5, 0, 0, x, 5, 0]),
+      indices: new Uint32Array([0, 1, 2]),
+      colors: null,
+      baseColor,
+    });
+    const meshes = [
+      triAt(0, [1, 0, 0]),
+      triAt(20, [0, 1, 0]),
+      triAt(40, [0, 0, 1]),
+      triAt(60, [1, 1, 0]),
+    ];
+    const first = exportThreeMf(meshes, { maxExtruders: 2 });
+    const again = exportThreeMf(meshes, { maxExtruders: 2 });
+    expect(first.palette).toHaveLength(2);
+    expect(first.palette.reduce((s, p) => s + p.triangles, 0)).toBe(4);
+    expect(Array.from(first.data)).toEqual(Array.from(again.data));
+  });
+
+  it('rejects ZIP32 archives exceeding format limits with a RangeError', () => {
+    const fakeHuge = { byteLength: 0x1_0000_0000 } as unknown as Uint8Array;
+    expect(() => zipStore([{ path: 'huge.bin', data: fakeHuge }])).toThrow(RangeError);
+  });
+});
+
+describe('viewport export traversal, mirror winding, and Z=0 build plate placement', () => {
+  function signedVolume(geo: THREE.BufferGeometry): number {
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    const idx = geo.getIndex();
+    const triCount = idx ? idx.count / 3 : pos.count / 3;
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), cross = new THREE.Vector3();
+    let vol = 0;
+    for (let t = 0; t < triCount; t++) {
+      const i0 = idx ? idx.getX(t * 3) : t * 3;
+      const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+      const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      a.fromBufferAttribute(pos, i0);
+      b.fromBufferAttribute(pos, i1);
+      c.fromBufferAttribute(pos, i2);
+      vol += a.dot(cross.crossVectors(b, c)) / 6;
+    }
+    return vol;
+  }
+
+  it('excludes WaterSurface / PulleyRopeMarkers (skipExport) and overlays, preserves outward winding on mirrored meshes, and rests on Z = 0', () => {
+    const scene = new THREE.Scene();
+
+    // Real body floating at Y = 0.5 m (Three.js Y-up), with negative X mirror scale!
+    const bodyGroup = new THREE.Group();
+    bodyGroup.name = 'part_1';
+    const boxMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.02, 0.04, 0.01),
+      new THREE.MeshStandardMaterial({ color: '#cccccc' }),
+    );
+    boxMesh.position.set(0.1, 0.5, 0.2);
+    boxMesh.scale.set(-1, 1, 1); // negative determinant reflection!
+    bodyGroup.add(boxMesh);
+    scene.add(bodyGroup);
+
+    // WaterSurface-like 12 m x 12 m plane inside a skipExport group
+    const waterGroup = new THREE.Group();
+    waterGroup.userData = { skipExport: true, isOverlay: true };
+    const waterPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(12, 12),
+      new THREE.MeshPhysicalMaterial({ color: '#38bdf8', transparent: true, opacity: 0.25 }),
+    );
+    waterGroup.add(waterPlane);
+    scene.add(waterGroup);
+
+    // PulleyRopeMarkers-like torus inside a skipExport group
+    const markerGroup = new THREE.Group();
+    markerGroup.userData = { skipExport: true };
+    markerGroup.add(new THREE.Mesh(
+      new THREE.TorusGeometry(0.04, 0.008, 8, 24),
+      new THREE.MeshStandardMaterial({ color: '#10b981' }),
+    ));
+    scene.add(markerGroup);
+
+    // DFM overlay group tagged isOverlay
+    const overlayGroup = new THREE.Group();
+    overlayGroup.userData = { isOverlay: true };
+    overlayGroup.add(new THREE.Mesh(
+      new THREE.SphereGeometry(0.05),
+      new THREE.MeshStandardMaterial({ color: '#ff0000' }),
+    ));
+    scene.add(overlayGroup);
+
+    const nodesById = new Map<string, SceneNode>([
+      ['part_1', { id: 'part_1', name: 'Mirrored Block', type: 'body', pos: [0, 0, 0], geoms: [], joints: [], children: [] }],
+    ]);
+
+    const { exportGroup, bbox, longestPartDim } = collectExportGroup(scene, {
+      nodesById,
+      bought: new Set(),
+      hidden: new Set(),
+    });
+
+    // Only the real part is exported; the 12 m water plane did NOT corrupt longestPartDim!
+    expect(exportGroup.children).toHaveLength(1);
+    expect(exportGroup.children[0].name).toBe('Mirrored Block');
+    expect(longestPartDim).toBeCloseTo(0.04, 6);
+
+    // Mirrored mesh must still have positive signed volume (outward winding).
+    const bakedMesh = exportGroup.children[0] as THREE.Mesh;
+    expect(signedVolume(bakedMesh.geometry)).toBeGreaterThan(0);
+
+    // Apply placement at true size (1000 mm/m): X/Y centered at 0, Z resting squarely on Z = 0!
+    applyExportPlacement(exportGroup, bbox, 1000);
+    const outBox = new THREE.Box3().setFromBufferAttribute(
+      bakedMesh.geometry.getAttribute('position') as THREE.BufferAttribute,
+    );
+    expect((outBox.min.x + outBox.max.x) / 2).toBeCloseTo(0, 4);
+    expect((outBox.min.y + outBox.max.y) / 2).toBeCloseTo(0, 4);
+    expect(outBox.min.z).toBeCloseTo(0, 4);
+    expect(outBox.max.z).toBeCloseTo(40, 3);
+    expect(signedVolume(bakedMesh.geometry)).toBeGreaterThan(0);
   });
 });

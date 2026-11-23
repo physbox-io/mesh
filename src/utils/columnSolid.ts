@@ -66,7 +66,36 @@ export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpa
   }
   const maxX = minX + stepX * Math.max(0, cols - 1);
   const maxY = minY + stepY * Math.max(0, rows - 1);
-  const triCount = tris.length / 9;
+  const triCount = Math.floor(tris.length / 9);
+
+  // Determine inside-out winding ONCE per soup from its signed volume rather
+  // than per column from hitDir[order[0]]: a single grazing sliver triangle at
+  // the bottom of one column must never invert solid vs air for that column.
+  let tMinX = Infinity, tMinY = Infinity, tMinZ = Infinity;
+  let tMaxX = -Infinity, tMaxY = -Infinity, tMaxZ = -Infinity;
+  for (let i = 0; i + 2 < tris.length; i += 3) {
+    const x = tris[i], y = tris[i + 1], z = tris[i + 2];
+    if (x < tMinX) tMinX = x; if (x > tMaxX) tMaxX = x;
+    if (y < tMinY) tMinY = y; if (y > tMaxY) tMaxY = y;
+    if (z < tMinZ) tMinZ = z; if (z > tMaxZ) tMaxZ = z;
+  }
+  let signedVol6 = 0;
+  if (triCount > 0 && Number.isFinite(tMinX)) {
+    const refX = (tMinX + tMaxX) * 0.5;
+    const refY = (tMinY + tMaxY) * 0.5;
+    const refZ = (tMinZ + tMaxZ) * 0.5;
+    for (let t = 0; t < triCount; t++) {
+      const i = t * 9;
+      const ax = tris[i] - refX, ay = tris[i + 1] - refY, az = tris[i + 2] - refZ;
+      const bx = tris[i + 3] - refX, by = tris[i + 4] - refY, bz = tris[i + 5] - refZ;
+      const cx = tris[i + 6] - refX, cy = tris[i + 7] - refY, cz = tris[i + 8] - refZ;
+      signedVol6 +=
+        ax * (by * cz - bz * cy) +
+        ay * (bz * cx - bx * cz) +
+        az * (bx * cy - by * cx);
+    }
+  }
+  const flip = signedVol6 < -1e-12 ? -1 : 1;
   const side = Math.max(1, Math.min(128, Math.round(Math.sqrt(triCount / 2))));
   const bw = (maxX - minX) / side || 1;
   const bh = (maxY - minY) / side || 1;
@@ -123,8 +152,6 @@ export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpa
       order.length = hitZ.length;
       for (let h = 0; h < order.length; h++) order[h] = h;
       order.sort((a, b) => hitZ[a] - hitZ[b]);
-      // A mesh wound inside out enters through its up-facing faces; read it flipped.
-      const flip = hitDir[order[0]] < 0 ? -1 : 1;
       let depth = 0, lastZ = NaN, lastDir = 0, lastTri = -1, enteredAt = 0;
       for (const h of order) {
         const z = hitZ[h], dir = hitDir[h] * flip;

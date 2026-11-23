@@ -258,29 +258,43 @@ export function weldSoup(soup: ArrayLike<number>, quantum = 1e-4): { positions: 
   return { positions, faces };
 }
 
+function deleteAll(handles: { delete(): void }[]): void {
+  for (const h of handles) h.delete();
+  handles.length = 0;
+}
+
 /** Each body-frame metre soup as a solid, in millimetres, unioned into one. */
 function solidFrom(wasm: ManifoldToplevel, soups: ArrayLike<number>[]): { ok: true; solid: Manifold } | { ok: false; error: string } {
   const parts: Manifold[] = [];
-  for (const soup of soups) {
-    const mm = new Float64Array(soup.length);
-    for (let i = 0; i < soup.length; i++) mm[i] = soup[i] * MM;
-    const { positions, faces } = weldSoup(mm);
-    if (faces.length < 12) continue;
-    const made = toManifold(wasm, createSculptMesh(positions, faces));
-    if (!made.ok) {
-      for (const p of parts) p.delete();
-      return { ok: false, error: made.error.replace('cannot be cut', 'cannot be split') };
+  let solid: Manifold | null = null;
+  let transferred = false;
+  try {
+    for (const soup of soups) {
+      const mm = new Float64Array(soup.length);
+      for (let i = 0; i < soup.length; i++) mm[i] = soup[i] * MM;
+      const { positions, faces } = weldSoup(mm);
+      if (faces.length < 12) continue;
+      const made = toManifold(wasm, createSculptMesh(positions, faces));
+      if (!made.ok) {
+        return { ok: false, error: made.error.replace('cannot be cut', 'cannot be split') };
+      }
+      parts.push(made.manifold);
     }
-    parts.push(made.manifold);
+    if (!parts.length) return { ok: false, error: 'There is no solid here to split.' };
+    if (parts.length === 1) {
+      solid = parts.pop()!;
+    } else {
+      solid = wasm.Manifold.union(parts);
+    }
+    if (solid.isEmpty() || !(solid.volume() > 0)) {
+      return { ok: false, error: 'This body encloses no volume (it may be inside out), so it cannot be split.' };
+    }
+    transferred = true;
+    return { ok: true, solid };
+  } finally {
+    deleteAll(parts);
+    if (solid && !transferred) solid.delete();
   }
-  if (!parts.length) return { ok: false, error: 'There is no solid here to split.' };
-  const solid = parts.length === 1 ? parts[0] : wasm.Manifold.union(parts);
-  if (parts.length > 1) for (const p of parts) p.delete();
-  if (solid.isEmpty() || !(solid.volume() > 0)) {
-    solid.delete();
-    return { ok: false, error: 'This body encloses no volume (it may be inside out), so it cannot be split.' };
-  }
-  return { ok: true, solid };
 }
 
 /** A Manifold's surface as body-frame metres, ready for the scene graph. */
@@ -319,8 +333,12 @@ function geoOf(m: Manifold): PieceGeo {
     }
   }
   const h = m.hull();
-  const hm = h.getMesh();
-  h.delete();
+  let hm;
+  try {
+    hm = h.getMesh();
+  } finally {
+    h.delete();
+  }
   const hull = new Float64Array(hm.numVert * 3);
   for (let v = 0; v < hm.numVert; v++) {
     hull[v * 3] = hm.vertProperties[v * hm.numProp];
@@ -630,17 +648,26 @@ function judgeFace(cs: CrossSection, ctx: Ctx): { area: number; thin: boolean; n
   const area = cs.area();
   let thin = false, noRoom = 0;
   const parts = cs.decompose();
-  for (const part of parts) {
-    if (part.area() < MIN_JOINT_AREA_MM2) { part.delete(); continue; }
-    const wall = part.offset(-ctx.joinery.minWallMm, 'Round');
-    if (wall.isEmpty()) thin = true;
-    wall.delete();
-    if (ctx.joinery.kind !== 'none') {
-      const room = part.offset(-pinInset(ctx.joinery), 'Round');
-      if (room.isEmpty()) noRoom++;
-      room.delete();
+  try {
+    for (const part of parts) {
+      if (part.area() < MIN_JOINT_AREA_MM2) continue;
+      const wall = part.offset(-ctx.joinery.minWallMm, 'Round');
+      try {
+        if (wall.isEmpty()) thin = true;
+      } finally {
+        wall.delete();
+      }
+      if (ctx.joinery.kind !== 'none') {
+        const room = part.offset(-pinInset(ctx.joinery), 'Round');
+        try {
+          if (room.isEmpty()) noRoom++;
+        } finally {
+          room.delete();
+        }
+      }
     }
-    part.delete();
+  } finally {
+    deleteAll(parts);
   }
   return { area, thin, noRoom };
 }
@@ -681,16 +708,22 @@ function waistPlanes(piece: Piece, normals: Vec3[]): { n: Vec3; offset: number }
     const at = (i: number) => lo + ((i + 0.5) * (hi - lo)) / WAIST_SAMPLES;
     const t = piece.m.transform(toPlaneMatrix(n));
     const areas: number[] = [];
-    for (let i = 0; i < WAIST_SAMPLES; i++) {
-      // How far the section spreads, not how much of it there is: a hollow box
-      // has little in any section, and no neck. Measured by material, its walls
-      // all read as waists and it came to 48 sections for 8.
-      const cs = t.slice(at(i));
-      const { min, max } = cs.bounds();
-      areas.push(cs.isEmpty() ? 0 : (max[0] - min[0]) * (max[1] - min[1]));
-      cs.delete();
+    try {
+      for (let i = 0; i < WAIST_SAMPLES; i++) {
+        // How far the section spreads, not how much of it there is: a hollow box
+        // has little in any section, and no neck. Measured by material, its walls
+        // all read as waists and it came to 48 sections for 8.
+        const cs = t.slice(at(i));
+        try {
+          const { min, max } = cs.bounds();
+          areas.push(cs.isEmpty() ? 0 : (max[0] - min[0]) * (max[1] - min[1]));
+        } finally {
+          cs.delete();
+        }
+      }
+    } finally {
+      t.delete();
     }
-    t.delete();
     const narrow = WAIST_SHARE * Math.max(...areas);
     const isNarrow = (a: number) => a > 0 && a <= narrow;
     for (let i = 0; i < WAIST_SAMPLES;) {
@@ -730,9 +763,11 @@ function sectionsPast(piece: Piece, ctx: Ctx, depth = 0): number {
     }
   }
   if (!c) return predictedSections(piece, ctx);
-  const total = sectionsPast(c.pos, ctx, depth + 1) + sectionsPast(c.neg, ctx, depth + 1) + (c.thin ? THIN_SEAM_SECTIONS : 0);
-  dropChoice(c);
-  return total;
+  try {
+    return sectionsPast(c.pos, ctx, depth + 1) + sectionsPast(c.neg, ctx, depth + 1) + (c.thin ? THIN_SEAM_SECTIONS : 0);
+  } finally {
+    dropChoice(c);
+  }
 }
 
 /** The directions a piece is cut along: the world's and its own, without near repeats. */
@@ -753,22 +788,34 @@ function cutNormals(piece: Piece): Vec3[] {
  */
 function tryCut(piece: Piece, n: Vec3, offset: number, ctx: Ctx, slender = false): CutChoice | null {
   const [posM, negM] = piece.m.splitByPlane(n, offset);
-  const vp = posM.volume(), vn = negM.volume();
-  const least = slender ? 0 : SLIVER_SHARE * piece.geo.volume;
-  if (posM.isEmpty() || negM.isEmpty() || vp < least || vn < least) {
-    posM.delete(); negM.delete();
-    return null;
+  let transferred = false;
+  try {
+    const vp = posM.volume(), vn = negM.volume();
+    const least = slender ? 0 : SLIVER_SHARE * piece.geo.volume;
+    if (posM.isEmpty() || negM.isEmpty() || vp < least || vn < least) {
+      return null;
+    }
+    const cs = sliceAt(piece.m, n, offset);
+    let face;
+    try {
+      face = judgeFace(cs, ctx);
+    } finally {
+      cs.delete();
+    }
+    // The pos half's cut face looks back down the normal, and the neg half's along it.
+    const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], ctx);
+    const neg = makePiece(negM, [...piece.cutDowns, n], ctx);
+    const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
+    const support = pos.pose.supportMm2 + neg.pose.supportMm2;
+    const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area;
+    transferred = true;
+    return { n, offset, pos, neg, score, thin: face.thin };
+  } finally {
+    if (!transferred) {
+      posM.delete();
+      negM.delete();
+    }
   }
-  const cs = sliceAt(piece.m, n, offset);
-  const face = judgeFace(cs, ctx);
-  cs.delete();
-  // The pos half's cut face looks back down the normal, and the neg half's along it.
-  const pos = makePiece(posM, [...piece.cutDowns, neg3(n)], ctx);
-  const neg = makePiece(negM, [...piece.cutDowns, n], ctx);
-  const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
-  const support = pos.pose.supportMm2 + neg.pose.supportMm2;
-  const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area;
-  return { n, offset, pos, neg, score, thin: face.thin };
 }
 
 /**
@@ -777,24 +824,39 @@ function tryCut(piece: Piece, n: Vec3, offset: number, ctx: Ctx, slender = false
  * look along each direction, and splits as it would have.
  */
 function throughWaists(piece: Piece, normals: Vec3[], best: CutChoice | null, ctx: Ctx): CutChoice | null {
-  const planes = waistPlanes(piece, normals);
-  if (planes.length === 0) return best;
-  const count = (c: CutChoice) => sectionsPast(c.pos, ctx) + sectionsPast(c.neg, ctx) + (c.thin ? THIN_SEAM_SECTIONS : 0);
   let chosen = best;
-  let least = best ? count(best) : Infinity;
-  for (const { n, offset } of planes) {
-    const c = tryCut(piece, n, offset, ctx, true);
-    if (!c) continue;
-    const sections = count(c);
-    if (sections < least) {
-      if (chosen) dropChoice(chosen);
-      chosen = c;
-      least = sections;
-    } else {
-      dropChoice(c);
+  let transferred = false;
+  try {
+    const planes = waistPlanes(piece, normals);
+    if (planes.length === 0) {
+      transferred = true;
+      return chosen;
     }
+    const count = (c: CutChoice) => sectionsPast(c.pos, ctx) + sectionsPast(c.neg, ctx) + (c.thin ? THIN_SEAM_SECTIONS : 0);
+    let least = chosen ? count(chosen) : Infinity;
+    for (const { n, offset } of planes) {
+      const c = tryCut(piece, n, offset, ctx, true);
+      if (!c) continue;
+      let sections: number;
+      try {
+        sections = count(c);
+      } catch (err) {
+        dropChoice(c);
+        throw err;
+      }
+      if (sections < least) {
+        if (chosen) dropChoice(chosen);
+        chosen = c;
+        least = sections;
+      } else {
+        dropChoice(c);
+      }
+    }
+    transferred = true;
+    return chosen;
+  } finally {
+    if (!transferred && chosen) dropChoice(chosen);
   }
-  return chosen;
 }
 
 /** The best single cut of a piece that does not fit, or null if no cut works at all. */
@@ -806,38 +868,42 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
   // need cutting again, where thirds stand on edge).
   const usables = [...new Set([ctx.W, ctx.D, ctx.H])];
   let best: CutChoice | null = null;
-
-  for (const n of normals) {
-    let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < piece.geo.hull.length; i += 3) {
-      const s = dot(n, [piece.geo.hull[i], piece.geo.hull[i + 1], piece.geo.hull[i + 2]]);
-      if (s < lo) lo = s; if (s > hi) hi = s;
-    }
-    const extent = hi - lo;
-    if (!(extent > 1)) continue;
-    const slabCounts = [...new Set(usables.map((u) => Math.max(2, Math.ceil(extent / u - 1e-9))))];
-    for (const slabs of slabCounts) {
-      const slab = extent / slabs;
-      // From both ends, or a part cuts worse for facing the other way: what is
-      // left after the first cut decides where the next one can reach, so
-      // lo + slab and hi - slab do not come to the same planes. Two slabs share
-      // the one plane.
-      for (const start of slabs > 2 ? [lo + slab, hi - slab] : [lo + slab]) for (let step = -3; step <= 3; step++) {
-        const offset = start + step * 0.05 * slab;
-        if (offset <= lo + 0.5 || offset >= hi - 0.5) continue;
-        const c = tryCut(piece, n, offset, ctx);
-        if (!c) continue;
-        // Off the even split only for a reason: a tie goes to the even cut, so
-        // the sections come out the same size rather than one barely fitting.
-        c.score += Math.abs(step) * 0.01 * slab;
-        if (!best || c.score < best.score) {
-          if (best) dropChoice(best);
-          best = c;
-        } else {
-          dropChoice(c);
+  try {
+    for (const n of normals) {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i < piece.geo.hull.length; i += 3) {
+        const s = dot(n, [piece.geo.hull[i], piece.geo.hull[i + 1], piece.geo.hull[i + 2]]);
+        if (s < lo) lo = s; if (s > hi) hi = s;
+      }
+      const extent = hi - lo;
+      if (!(extent > 1)) continue;
+      const slabCounts = [...new Set(usables.map((u) => Math.max(2, Math.ceil(extent / u - 1e-9))))];
+      for (const slabs of slabCounts) {
+        const slab = extent / slabs;
+        // From both ends, or a part cuts worse for facing the other way: what is
+        // left after the first cut decides where the next one can reach, so
+        // lo + slab and hi - slab do not come to the same planes. Two slabs share
+        // the one plane.
+        for (const start of slabs > 2 ? [lo + slab, hi - slab] : [lo + slab]) for (let step = -3; step <= 3; step++) {
+          const offset = start + step * 0.05 * slab;
+          if (offset <= lo + 0.5 || offset >= hi - 0.5) continue;
+          const c = tryCut(piece, n, offset, ctx);
+          if (!c) continue;
+          // Off the even split only for a reason: a tie goes to the even cut, so
+          // the sections come out the same size rather than one barely fitting.
+          c.score += Math.abs(step) * 0.01 * slab;
+          if (!best || c.score < best.score) {
+            if (best) dropChoice(best);
+            best = c;
+          } else {
+            dropChoice(c);
+          }
         }
       }
     }
+  } catch (err) {
+    if (best) dropChoice(best);
+    throw err;
   }
   return throughWaists(piece, normals, best, ctx);
 }
@@ -916,13 +982,21 @@ function placePins(part: CrossSection, j: Joinery): [number, number][] {
     for (let i = 0; i < 20; i++) {
       const mid = (lo + hi) / 2;
       const s = region.offset(-mid, 'Round');
-      const empty = s.isEmpty();
-      s.delete();
+      let empty: boolean;
+      try {
+        empty = s.isEmpty();
+      } finally {
+        s.delete();
+      }
       if (empty) hi = mid; else lo = mid;
     }
     const core = region.offset(-lo, 'Round');
-    const corePts = core.toPolygons().flat();
-    core.delete();
+    let corePts;
+    try {
+      corePts = core.toPolygons().flat();
+    } finally {
+      core.delete();
+    }
     if (corePts.length) {
       const cx = corePts.reduce((s, p) => s + p[0], 0) / corePts.length;
       const cy = corePts.reduce((s, p) => s + p[1], 0) / corePts.length;
@@ -956,27 +1030,34 @@ function clearOfHoles(
   const depthNew = j.lengthMm / 2 + HOLE_EXTRA_MM;
   const discs: CrossSection[] = [];
   const seen = new Set<string>();
-  for (const { section, inward } of sides) {
-    for (const d of drilled) {
-      if (d.section !== section) continue;
-      const reach = rNew + d.radius + j.minWallMm;
-      const steps = Math.max(1, Math.ceil(d.depth / 0.5));
-      for (let k = 0; k <= steps; k++) {
-        const p = add3(d.at, scale3(d.axis, (d.depth * k) / steps));
-        const h = dot(inward, p) - dot(inward, scale3(n, offset));
-        if (h < -reach || h > depthNew + reach) continue;
-        const x = dot(u, p), y = dot(v, p);
-        const key = `${Math.round(x * 4)},${Math.round(y * 4)}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        discs.push(wasm.CrossSection.circle(reach, 24).translate([x, y]));
+  try {
+    for (const { section, inward } of sides) {
+      for (const d of drilled) {
+        if (d.section !== section) continue;
+        const reach = rNew + d.radius + j.minWallMm;
+        const steps = Math.max(1, Math.ceil(d.depth / 0.5));
+        for (let k = 0; k <= steps; k++) {
+          const p = add3(d.at, scale3(d.axis, (d.depth * k) / steps));
+          const h = dot(inward, p) - dot(inward, scale3(n, offset));
+          if (h < -reach || h > depthNew + reach) continue;
+          const x = dot(u, p), y = dot(v, p);
+          const key = `${Math.round(x * 4)},${Math.round(y * 4)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const circle = wasm.CrossSection.circle(reach, 24);
+          try {
+            discs.push(circle.translate([x, y]));
+          } finally {
+            circle.delete();
+          }
+        }
       }
     }
+    if (!discs.length) return null;
+    return wasm.CrossSection.union(discs);
+  } finally {
+    deleteAll(discs);
   }
-  if (!discs.length) return null;
-  const all = wasm.CrossSection.union(discs);
-  for (const disc of discs) disc.delete();
-  return all;
 }
 
 /**
@@ -990,16 +1071,27 @@ function backedRegion(n: Vec3, offset: number, neg: Manifold, pos: Manifold, j: 
   const reach = j.lengthMm / 2 + HOLE_EXTRA_MM + j.minWallMm;
   const K = Math.max(2, Math.ceil(reach));
   let region: CrossSection | null = null;
-  for (const [m, sign] of [[neg, -1], [pos, 1]] as const) {
-    for (let k = 1; k <= K; k++) {
-      const cs = sliceAt(m, n, offset + sign * (reach * k) / K);
-      if (!region) { region = cs; continue; }
-      const next: CrossSection = region.intersect(cs);
-      region.delete(); cs.delete();
-      region = next;
+  let transferred = false;
+  try {
+    for (const [m, sign] of [[neg, -1], [pos, 1]] as const) {
+      for (let k = 1; k <= K; k++) {
+        const cs = sliceAt(m, n, offset + sign * (reach * k) / K);
+        if (!region) { region = cs; continue; }
+        let next: CrossSection;
+        try {
+          next = region.intersect(cs);
+        } finally {
+          cs.delete();
+        }
+        region.delete();
+        region = next;
+      }
     }
+    transferred = true;
+    return region!;
+  } finally {
+    if (region && !transferred) region.delete();
   }
-  return region!;
 }
 
 /** A cylinder along `axis` from `start` for `length`, radius r1 at the start and r2 at the end. */
@@ -1027,11 +1119,13 @@ function pegSolid(wasm: ManifoldToplevel, at: Vec3, outward: Vec3, j: Joinery): 
   const chamfer = r > PEG_CHAMFER_MM * 1.5 ? PEG_CHAMFER_MM : 0;
   const shaft = cylinderAlong(wasm, add3(at, scale3(outward, -PEG_SINK_MM)), outward, length - chamfer + PEG_SINK_MM, r);
   if (!chamfer) return shaft;
-  const tip = cylinderAlong(wasm, add3(at, scale3(outward, length - chamfer)), outward, chamfer, r, r - chamfer);
+  let tip: Manifold | null = null;
   try {
+    tip = cylinderAlong(wasm, add3(at, scale3(outward, length - chamfer)), outward, chamfer, r, r - chamfer);
     return shaft.add(tip);
   } finally {
-    shaft.delete(); tip.delete();
+    shaft.delete();
+    tip?.delete();
   }
 }
 
@@ -1075,55 +1169,91 @@ function convexPieces(m: Manifold): Manifold[] {
   if (solidity(m) >= CONVEX_ENOUGH) return [];
   const done: Manifold[] = [];
   const todo: Manifold[] = [m.translate([0, 0, 0])];
-  while (todo.length) {
-    const p = todo.pop()!;
-    if (done.length + todo.length + 1 >= MAX_PIECES || solidity(p) >= CONVEX_ENOUGH) { done.push(p); continue; }
-    // The surface's flat regions, largest first, as planes n·x = d.
-    const mesh = p.getMesh();
-    const planes = new Map<string, { n: Vec3; d: number; area: number }>();
-    for (let t = 0; t < mesh.numTri; t++) {
-      const v = [0, 1, 2].map((k) => {
-        const i = mesh.triVerts[t * 3 + k] * mesh.numProp;
-        return [mesh.vertProperties[i], mesh.vertProperties[i + 1], mesh.vertProperties[i + 2]];
-      });
-      const c = cross([v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]], [v[2][0] - v[0][0], v[2][1] - v[0][1], v[2][2] - v[0][2]]);
-      const len = Math.hypot(c[0], c[1], c[2]);
-      if (!(len > 1e-9)) continue;
-      const n = scale3(c, 1 / len);
-      const d = dot(n, v[0]);
-      const key = `${n.map((x) => Math.round(x * 1e4)).join(',')}:${Math.round(d * 100)}`;
-      const e = planes.get(key);
-      if (e) e.area += len / 2; else planes.set(key, { n, d, area: len / 2 });
-    }
-    const pv = p.volume();
-    const h = p.hull();
-    let bestHull = h.volume() * 0.99; // a split has to earn its keep
-    h.delete();
-    let best: [Manifold, Manifold] | null = null;
-    for (const { n, d } of [...planes.values()].sort((a, b) => b.area - a.area).slice(0, MAX_PLANES)) {
-      const [a, b] = p.splitByPlane(n, d);
-      const va = a.volume(), vb = b.volume();
-      if (va < 1e-3 * pv || vb < 1e-3 * pv) { a.delete(); b.delete(); continue; }
-      const ha = a.hull(), hb = b.hull();
-      const total = ha.volume() + hb.volume();
-      ha.delete(); hb.delete();
-      if (total < bestHull - 1e-9) {
-        if (best) { best[0].delete(); best[1].delete(); }
-        best = [a, b];
-        bestHull = total;
-      } else {
-        a.delete(); b.delete();
+  let current: Manifold | null = null;
+  let best: [Manifold, Manifold] | null = null;
+  let transferred = false;
+  try {
+    while (todo.length) {
+      current = todo.pop()!;
+      const p = current;
+      if (done.length + todo.length + 1 >= MAX_PIECES || solidity(p) >= CONVEX_ENOUGH) {
+        done.push(p);
+        current = null;
+        continue;
       }
+      // The surface's flat regions, largest first, as planes n·x = d.
+      const mesh = p.getMesh();
+      const planes = new Map<string, { n: Vec3; d: number; area: number }>();
+      for (let t = 0; t < mesh.numTri; t++) {
+        const v = [0, 1, 2].map((k) => {
+          const i = mesh.triVerts[t * 3 + k] * mesh.numProp;
+          return [mesh.vertProperties[i], mesh.vertProperties[i + 1], mesh.vertProperties[i + 2]];
+        });
+        const c = cross([v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]], [v[2][0] - v[0][0], v[2][1] - v[0][1], v[2][2] - v[0][2]]);
+        const len = Math.hypot(c[0], c[1], c[2]);
+        if (!(len > 1e-9)) continue;
+        const n = scale3(c, 1 / len);
+        const d = dot(n, v[0]);
+        const key = `${n.map((x) => Math.round(x * 1e4)).join(',')}:${Math.round(d * 100)}`;
+        const e = planes.get(key);
+        if (e) e.area += len / 2; else planes.set(key, { n, d, area: len / 2 });
+      }
+      const pv = p.volume();
+      const h = p.hull();
+      let bestHull: number;
+      try {
+        bestHull = h.volume() * 0.99; // a split has to earn its keep
+      } finally {
+        h.delete();
+      }
+      best = null;
+      for (const { n, d } of [...planes.values()].sort((a, b) => b.area - a.area).slice(0, MAX_PLANES)) {
+        const [a, b] = p.splitByPlane(n, d);
+        let keepPair = false;
+        try {
+          const va = a.volume(), vb = b.volume();
+          if (va < 1e-3 * pv || vb < 1e-3 * pv) continue;
+          const ha = a.hull();
+          let hb: Manifold | null = null;
+          let total: number;
+          try {
+            hb = b.hull();
+            total = ha.volume() + hb.volume();
+          } finally {
+            ha.delete();
+            hb?.delete();
+          }
+          if (total < bestHull - 1e-9) {
+            if (best) { best[0].delete(); best[1].delete(); }
+            best = [a, b];
+            bestHull = total;
+            keepPair = true;
+          }
+        } finally {
+          if (!keepPair) { a.delete(); b.delete(); }
+        }
+      }
+      if (!best) {
+        done.push(p);
+        current = null;
+        continue;
+      }
+      p.delete();
+      current = null;
+      todo.push(best[0], best[1]);
+      best = null;
     }
-    if (!best) { done.push(p); continue; }
-    p.delete();
-    todo.push(best[0], best[1]);
+    if (done.some((p) => solidity(p) < CONVEX_ENOUGH)) {
+      return [];
+    }
+    transferred = true;
+    return done;
+  } finally {
+    if (current) current.delete();
+    if (best) { best[0].delete(); best[1].delete(); }
+    deleteAll(todo);
+    if (!transferred) deleteAll(done);
   }
-  if (done.some((p) => solidity(p) < CONVEX_ENOUGH)) {
-    for (const p of done) p.delete();
-    return [];
-  }
-  return done;
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,38 +1365,53 @@ function facePlates(
       const mx = (x0 + x1) / 2;
       if (across.some(([x]) => Math.abs(x - mx) < R)) continue; // the hole itself
       const cell = new wasm.CrossSection([[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]]);
-      const piece = patch.intersect(cell);
-      cell.delete();
-      for (const part of piece.decompose()) {
-        if (part.area() >= 0.5) {
-          const hull = part.hull();
-          const convex = hull.area() <= part.area() * 1.01;
-          hull.delete();
-          const polys = part.toPolygons();
-          const r = part.bounds();
-          const w = r.max[0] - r.min[0], h = r.max[1] - r.min[1];
-          if (convex && polys.length === 1 && Math.abs(part.area() - w * h) < 1e-6 * w * h + 1e-6) {
-            // A rectangle, which is what a rectangular face's cells all are:
-            // a box, because MuJoCo collides boxes with each other exactly and
-            // with several contacts, where two thin slabs of mesh go through
-            // the general convex routine and rock on a single point.
-            const { u, v } = planeAxes(n);
-            const centre = fromPlane(n, (faceAt + z1) / 2, (r.min[0] + r.max[0]) / 2, (r.min[1] + r.max[1]) / 2);
-            out.push({ role: 'socket', shape: 'box', pos: centre, quat: quatFromAxes(u, v, n), half: [w / 2, h / 2, LINING_MM / 2] });
-          } else if (convex && polys.length === 1) {
-            out.push(prism(n, polys[0] as [number, number][], faceAt, z1));
-          } else {
-            const pts = polys.flat() as [number, number][];
-            for (const [a, c, d] of wasm.triangulate(polys)) {
-              const ring: [number, number][] = [pts[a], pts[c], pts[d]];
-              const area = Math.abs((ring[1][0] - ring[0][0]) * (ring[2][1] - ring[0][1]) - (ring[2][0] - ring[0][0]) * (ring[1][1] - ring[0][1])) / 2;
-              if (area >= 0.5) out.push(prism(n, ring, faceAt, z1));
+      let piece: CrossSection;
+      try {
+        piece = patch.intersect(cell);
+      } finally {
+        cell.delete();
+      }
+      try {
+        const parts = piece.decompose();
+        try {
+          for (const part of parts) {
+            if (part.area() >= 0.5) {
+              const hull = part.hull();
+              let convex: boolean;
+              try {
+                convex = hull.area() <= part.area() * 1.01;
+              } finally {
+                hull.delete();
+              }
+              const polys = part.toPolygons();
+              const r = part.bounds();
+              const w = r.max[0] - r.min[0], h = r.max[1] - r.min[1];
+              if (convex && polys.length === 1 && Math.abs(part.area() - w * h) < 1e-6 * w * h + 1e-6) {
+                // A rectangle, which is what a rectangular face's cells all are:
+                // a box, because MuJoCo collides boxes with each other exactly and
+                // with several contacts, where two thin slabs of mesh go through
+                // the general convex routine and rock on a single point.
+                const { u, v } = planeAxes(n);
+                const centre = fromPlane(n, (faceAt + z1) / 2, (r.min[0] + r.max[0]) / 2, (r.min[1] + r.max[1]) / 2);
+                out.push({ role: 'socket', shape: 'box', pos: centre, quat: quatFromAxes(u, v, n), half: [w / 2, h / 2, LINING_MM / 2] });
+              } else if (convex && polys.length === 1) {
+                out.push(prism(n, polys[0] as [number, number][], faceAt, z1));
+              } else {
+                const pts = polys.flat() as [number, number][];
+                for (const [a, c, d] of wasm.triangulate(polys)) {
+                  const ring: [number, number][] = [pts[a], pts[c], pts[d]];
+                  const area = Math.abs((ring[1][0] - ring[0][0]) * (ring[2][1] - ring[0][1]) - (ring[2][0] - ring[0][0]) * (ring[1][1] - ring[0][1])) / 2;
+                  if (area >= 0.5) out.push(prism(n, ring, faceAt, z1));
+                }
+              }
             }
           }
+        } finally {
+          deleteAll(parts);
         }
-        part.delete();
+      } finally {
+        piece.delete();
       }
-      piece.delete();
     }
   }
   return out;
@@ -1310,234 +1455,314 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
 
   const cuts: SplitCut[] = [];
   const plain: Manifold[] = [];
+  const final: Manifold[] = [];
+  const jointPatches: CrossSection[] = [];
   const leafInfo: { cutDowns: Vec3[] }[] = [];
   let open = 1;
   let capped = false;
 
   const build = (piece: Piece): SplitTree => {
-    if (!piece.pose.fits && plain.length + open < maxSections) {
-      const choice = chooseCut(piece, ctx);
-      if (choice) {
-        if (choice.thin) ctx.warnings.push('One cut runs through material thinner than the minimum wall, because that came to the fewest sections. Check that seam before gluing.');
-        piece.m.delete();
-        const cut = cuts.length;
-        cuts.push({ normal: choice.n, offset: choice.offset / MM });
-        open++;
-        const neg = build(choice.neg);
-        const pos = build(choice.pos);
-        return { cut, neg, pos };
+    let consumed = false;
+    try {
+      if (!piece.pose.fits && plain.length + open < maxSections) {
+        const choice = chooseCut(piece, ctx);
+        if (choice) {
+          if (choice.thin) ctx.warnings.push('One cut runs through material thinner than the minimum wall, because that came to the fewest sections. Check that seam before gluing.');
+          piece.m.delete();
+          consumed = true;
+          const cut = cuts.length;
+          cuts.push({ normal: choice.n, offset: choice.offset / MM });
+          open++;
+          let neg: SplitTree;
+          try {
+            neg = build(choice.neg);
+          } catch (err) {
+            choice.pos.m.delete();
+            throw err;
+          }
+          const pos = build(choice.pos);
+          return { cut, neg, pos };
+        }
+      } else if (!piece.pose.fits) {
+        capped = true;
       }
-    } else if (!piece.pose.fits) {
-      capped = true;
+      open--;
+      plain.push(piece.m);
+      consumed = true;
+      leafInfo.push({ cutDowns: piece.cutDowns });
+      return { section: plain.length - 1 };
+    } finally {
+      if (!consumed) piece.m.delete();
     }
-    open--;
-    plain.push(piece.m);
-    leafInfo.push({ cutDowns: piece.cutDowns });
-    return { section: plain.length - 1 };
   };
 
-  const tree = build(makePiece(made.solid, [], ctx));
-  if (capped) ctx.warnings.push(`Stopped at ${maxSections} sections, and some of them still do not fit the bed.`);
+  try {
+    let rootPiece: Piece;
+    try {
+      rootPiece = makePiece(made.solid, [], ctx);
+    } catch (err) {
+      made.solid.delete();
+      throw err;
+    }
 
-  const explode = explodeVectors(tree, cuts, plain.length);
+    const tree = build(rootPiece);
+    if (capped) ctx.warnings.push(`Stopped at ${maxSections} sections, and some of them still do not fit the bed.`);
 
-  // --- Joints: the face each pair of neighbouring sections actually shares.
-  const joints: SplitJoint[] = [];
-  const jointPatches: CrossSection[] = [];
-  const leaves = (t: SplitTree): number[] => ('section' in t ? [t.section] : [...leaves(t.neg), ...leaves(t.pos)]);
-  const walk = (t: SplitTree) => {
-    if ('section' in t) return;
-    const { normal: n } = cuts[t.cut];
-    const o = cuts[t.cut].offset * MM;
-    const negLeaves = leaves(t.neg), posLeaves = leaves(t.pos);
-    const negFaces = negLeaves.map((s) => sliceAt(plain[s], n, o - FACE_EPS));
-    const posFaces = posLeaves.map((s) => sliceAt(plain[s], n, o + FACE_EPS));
-    negLeaves.forEach((a, i) => {
-      posLeaves.forEach((b, k) => {
-        const patch = negFaces[i].intersect(posFaces[k]);
-        const area = patch.area();
-        if (area < MIN_JOINT_AREA_MM2) { patch.delete(); return; }
-        joints.push({ cut: t.cut, neg: a, pos: b, areaMm2: area, pins: [] });
-        jointPatches.push(patch);
-      });
-    });
-    for (const f of [...negFaces, ...posFaces]) f.delete();
-    walk(t.neg); walk(t.pos);
-  };
-  walk(tree);
+    const explode = explodeVectors(tree, cuts, plain.length);
 
-  // --- Joinery, joint by joint.
-  const final: Manifold[] = plain.map((m) => m.translate([0, 0, 0]));
-  const features: JoineryFeature[][] = plain.map(() => []);
-  const colliders: FeatureCollider[][] = plain.map(() => []);
-  const drilled: Drilled[] = [];
-  if (joinery.kind !== 'none') {
-    joints.forEach((joint, ji) => {
-      const n = cuts[joint.cut].normal;
-      const o = cuts[joint.cut].offset * MM;
-      const centres: [number, number][] = [];
-      const parts = jointPatches[ji].decompose();
-      // Keep clear of every hole already drilled in either section: near a
-      // corner a hole from this face could otherwise run into one from the
-      // next, and two dowels crossing in a part cannot both go in.
-      const clear = clearOfHoles(wasm, n, o, [
-        { section: joint.neg, inward: neg3(n) },
-        { section: joint.pos, inward: n },
-      ], drilled, joinery);
-      const backed = backedRegion(n, o, plain[joint.neg], plain[joint.pos], joinery);
-      for (const whole of parts) {
-        if (whole.area() >= MIN_JOINT_AREA_MM2) {
-          const solid = whole.intersect(backed);
-          const part = clear ? solid.subtract(clear) : solid;
-          centres.push(...placePins(part, joinery));
-          if (part !== solid) part.delete();
-          solid.delete();
-        }
-        whole.delete();
-      }
-      clear?.delete();
-      backed.delete();
-      if (!centres.length) return;
-      const at = centres.map(([x, y]) => fromPlane(n, o, x, y));
-      joint.pins = at.map((p) => scale3(p, 1 / MM));
-
-      const r = (joinery.diameterMm + joinery.clearanceMm) / 2;
-      const depth = joinery.lengthMm / 2 + HOLE_EXTRA_MM;
-      const bore = (s: number, inward: Vec3) => {
-        const holes = at.map((p) => boreSolid(wasm, p, inward, joinery));
-        const all = wasm.Manifold.union(holes);
-        for (const h of holes) h.delete();
-        replace(final, s, final[s].subtract(all));
-        all.delete();
-        for (const p of at) {
-          drilled.push({ section: s, at: p, axis: inward, depth, radius: r });
-          features[s].push({ kind: 'bore', at: scale3(p, 1 / MM), axis: inward, radius: r / MM, depth: depth / MM, joint: ji });
-          colliders[s].push(...boreLining({ at: p, axis: inward, radius: r, depth }).map((c) => ({ ...c, group: ji })));
-        }
-        colliders[s].push(...facePlates(wasm, jointPatches[ji], n, o, dot(inward, n), centres, r).map((c) => ({ ...c, group: ji })));
-      };
-      const pegsOn = (s: number, outward: Vec3): Manifold => {
-        const pegs = at.map((p) => pegSolid(wasm, p, outward, joinery));
-        const all = wasm.Manifold.union(pegs);
-        for (const p of pegs) p.delete();
-        const out = final[s].add(all);
-        all.delete();
-        return out;
-      };
-
-      if (joinery.kind === 'dowel') {
-        bore(joint.neg, neg3(n));
-        bore(joint.pos, n);
-        return;
-      }
-
-      // Pegs go on whichever side minds them least. Standing a peg on a face
-      // rules that face out as the one to print on, so the side whose best
-      // pose gets worse by less takes them — measured on the real geometry.
-      const extraCost = (s: number, outward: Vec3) => {
-        const withPeg = pegsOn(s, outward);
-        const before = bestPose(geoOf(final[s]), leafInfo[s].cutDowns, ctx);
-        const after = bestPose(geoOf(withPeg), leafInfo[s].cutDowns, ctx);
-        const cost = !after.fits ? Infinity : after.cost - (before.fits ? before.cost : 0);
-        return { withPeg, cost, fitted: before.fits };
-      };
-      const onNeg = extraCost(joint.neg, n);
-      const onPos = extraCost(joint.pos, neg3(n));
-      // A section with half a peg's length to spare on neither side: standing
-      // pegs on either would push it off the bed. That joint gets a hole each
-      // side instead, for a loose dowel the peg's size, and says so.
-      if (onNeg.cost === Infinity && onPos.cost === Infinity && (onNeg.fitted || onPos.fitted)) {
-        onNeg.withPeg.delete(); onPos.withPeg.delete();
-        bore(joint.neg, neg3(n));
-        bore(joint.pos, n);
-        ctx.warnings.push(`Sections ${joint.neg + 1} and ${joint.pos + 1}: replaced printed pegs with Ø${joinery.diameterMm} × ${joinery.lengthMm} mm dowel bores so both sections fit the print bed.`);
-        return;
-      }
-      const pegNeg = onNeg.cost <= onPos.cost;
-      const [pegS, holeS, out] = pegNeg ? [joint.neg, joint.pos, n] : [joint.pos, joint.neg, neg3(n)];
-      replace(final, pegS, pegNeg ? onNeg.withPeg : onPos.withPeg);
-      (pegNeg ? onPos : onNeg).withPeg.delete();
-      const { u: pu } = planeAxes(out);
-      for (const p of at) {
-        // The peg's root is sunk into its own face: a hole drilled later into
-        // that section, from another face, keeps clear of it.
-        drilled.push({ section: pegS, at: p, axis: neg3(out), depth: PEG_SINK_MM, radius: joinery.diameterMm / 2 });
-        features[pegS].push({ kind: 'peg', at: scale3(p, 1 / MM), axis: out, radius: joinery.diameterMm / 2 / MM, depth: joinery.lengthMm / 2 / MM, joint: ji });
-        colliders[pegS].push({
-          role: 'pin',
-          group: ji,
-          shape: 'cylinder',
-          pos: add3(p, scale3(out, joinery.lengthMm / 4)),
-          quat: quatFromAxes(pu, cross(out, pu), out),
-          radius: joinery.diameterMm / 2,
-          halfLength: joinery.lengthMm / 4,
+    // --- Joints: the face each pair of neighbouring sections actually shares.
+    const joints: SplitJoint[] = [];
+    const leaves = (t: SplitTree): number[] => ('section' in t ? [t.section] : [...leaves(t.neg), ...leaves(t.pos)]);
+    const walk = (t: SplitTree) => {
+      if ('section' in t) return;
+      const { normal: n } = cuts[t.cut];
+      const o = cuts[t.cut].offset * MM;
+      const negLeaves = leaves(t.neg), posLeaves = leaves(t.pos);
+      const negFaces: CrossSection[] = [];
+      const posFaces: CrossSection[] = [];
+      try {
+        for (const s of negLeaves) negFaces.push(sliceAt(plain[s], n, o - FACE_EPS));
+        for (const s of posLeaves) posFaces.push(sliceAt(plain[s], n, o + FACE_EPS));
+        negLeaves.forEach((a, i) => {
+          posLeaves.forEach((b, k) => {
+            const patch = negFaces[i].intersect(posFaces[k]);
+            let kept = false;
+            try {
+              const area = patch.area();
+              if (area < MIN_JOINT_AREA_MM2) return;
+              joints.push({ cut: t.cut, neg: a, pos: b, areaMm2: area, pins: [] });
+              jointPatches.push(patch);
+              kept = true;
+            } finally {
+              if (!kept) patch.delete();
+            }
+          });
         });
+      } finally {
+        deleteAll(negFaces);
+        deleteAll(posFaces);
       }
-      bore(holeS, out);
-      joint.pegSide = pegNeg ? 'neg' : 'pos';
-    });
-  }
-  for (const p of jointPatches) p.delete();
+      walk(t.neg); walk(t.pos);
+    };
+    walk(tree);
 
-  // A face with no pin is simply glued, and most such faces are slivers where
-  // one cut ends against another, between sections that are pinned to the
-  // part elsewhere. What matters is a section — or a group of them — that no
-  // pin ties to the rest at all: that one has to be lined up by hand.
-  if (joinery.kind !== 'none' && plain.length > 1) {
-    const root = plain.map((_, i) => i);
-    const find = (i: number): number => (root[i] === i ? i : (root[i] = find(root[i])));
-    for (const j of joints) if (j.pins.length) root[find(j.neg)] = find(j.pos);
-    const groups = new Map<number, number[]>();
-    plain.forEach((_, i) => groups.set(find(i), [...(groups.get(find(i)) ?? []), i]));
-    if (groups.size > 1) {
-      const largest = [...groups.values()].sort((a, b) => b.length - a.length)[0];
-      for (const g of groups.values()) {
-        if (g === largest) continue;
-        const names = g.map((i) => i + 1).join(', ');
-        ctx.warnings.push(`Section${g.length > 1 ? 's' : ''} ${names} ${g.length > 1 ? 'have' : 'has'} insufficient wall margin (${joinery.minWallMm} mm) for a Ø${joinery.diameterMm} mm ${joinery.kind === 'dowel' ? 'dowel' : 'peg'} and must be aligned manually during glue-up.`);
+    // --- Joinery, joint by joint.
+    for (const m of plain) final.push(m.translate([0, 0, 0]));
+    const features: JoineryFeature[][] = plain.map(() => []);
+    const colliders: FeatureCollider[][] = plain.map(() => []);
+    const drilled: Drilled[] = [];
+    if (joinery.kind !== 'none') {
+      joints.forEach((joint, ji) => {
+        const n = cuts[joint.cut].normal;
+        const o = cuts[joint.cut].offset * MM;
+        const centres: [number, number][] = [];
+        const parts = jointPatches[ji].decompose();
+        let clear: CrossSection | null = null;
+        let backed: CrossSection | null = null;
+        try {
+          // Keep clear of every hole already drilled in either section: near a
+          // corner a hole from this face could otherwise run into one from the
+          // next, and two dowels crossing in a part cannot both go in.
+          clear = clearOfHoles(wasm, n, o, [
+            { section: joint.neg, inward: neg3(n) },
+            { section: joint.pos, inward: n },
+          ], drilled, joinery);
+          backed = backedRegion(n, o, plain[joint.neg], plain[joint.pos], joinery);
+          for (const whole of parts) {
+            if (whole.area() >= MIN_JOINT_AREA_MM2) {
+              const solid = whole.intersect(backed);
+              let part: CrossSection | null = null;
+              try {
+                part = clear ? solid.subtract(clear) : solid;
+                centres.push(...placePins(part, joinery));
+              } finally {
+                if (part && part !== solid) part.delete();
+                solid.delete();
+              }
+            }
+          }
+        } finally {
+          deleteAll(parts);
+          clear?.delete();
+          backed?.delete();
+        }
+        if (!centres.length) return;
+        const at = centres.map(([x, y]) => fromPlane(n, o, x, y));
+        joint.pins = at.map((p) => scale3(p, 1 / MM));
+
+        const r = (joinery.diameterMm + joinery.clearanceMm) / 2;
+        const depth = joinery.lengthMm / 2 + HOLE_EXTRA_MM;
+        const bore = (s: number, inward: Vec3) => {
+          const holes: Manifold[] = [];
+          let all: Manifold | null = null;
+          try {
+            for (const p of at) holes.push(boreSolid(wasm, p, inward, joinery));
+            all = wasm.Manifold.union(holes);
+            deleteAll(holes);
+            replace(final, s, final[s].subtract(all));
+          } finally {
+            deleteAll(holes);
+            all?.delete();
+          }
+          for (const p of at) {
+            drilled.push({ section: s, at: p, axis: inward, depth, radius: r });
+            features[s].push({ kind: 'bore', at: scale3(p, 1 / MM), axis: inward, radius: r / MM, depth: depth / MM, joint: ji });
+            colliders[s].push(...boreLining({ at: p, axis: inward, radius: r, depth }).map((c) => ({ ...c, group: ji })));
+          }
+          colliders[s].push(...facePlates(wasm, jointPatches[ji], n, o, dot(inward, n), centres, r).map((c) => ({ ...c, group: ji })));
+        };
+        const pegsOn = (s: number, outward: Vec3): Manifold => {
+          const pegs: Manifold[] = [];
+          let all: Manifold | null = null;
+          try {
+            for (const p of at) pegs.push(pegSolid(wasm, p, outward, joinery));
+            all = wasm.Manifold.union(pegs);
+            deleteAll(pegs);
+            return final[s].add(all);
+          } finally {
+            deleteAll(pegs);
+            all?.delete();
+          }
+        };
+
+        if (joinery.kind === 'dowel') {
+          bore(joint.neg, neg3(n));
+          bore(joint.pos, n);
+          return;
+        }
+
+        // Pegs go on whichever side minds them least. Standing a peg on a face
+        // rules that face out as the one to print on, so the side whose best
+        // pose gets worse by less takes them — measured on the real geometry.
+        const extraCost = (s: number, outward: Vec3) => {
+          const withPeg = pegsOn(s, outward);
+          try {
+            const before = bestPose(geoOf(final[s]), leafInfo[s].cutDowns, ctx);
+            const after = bestPose(geoOf(withPeg), leafInfo[s].cutDowns, ctx);
+            const cost = !after.fits ? Infinity : after.cost - (before.fits ? before.cost : 0);
+            return { withPeg, cost, fitted: before.fits };
+          } catch (err) {
+            withPeg.delete();
+            throw err;
+          }
+        };
+        const onNeg = extraCost(joint.neg, n);
+        let onPos: ReturnType<typeof extraCost>;
+        try {
+          onPos = extraCost(joint.pos, neg3(n));
+        } catch (err) {
+          onNeg.withPeg.delete();
+          throw err;
+        }
+        // A section with half a peg's length to spare on neither side: standing
+        // pegs on either would push it off the bed. That joint gets a hole each
+        // side instead, for a loose dowel the peg's size, and says so.
+        if (onNeg.cost === Infinity && onPos.cost === Infinity && (onNeg.fitted || onPos.fitted)) {
+          onNeg.withPeg.delete(); onPos.withPeg.delete();
+          bore(joint.neg, neg3(n));
+          bore(joint.pos, n);
+          ctx.warnings.push(`Sections ${joint.neg + 1} and ${joint.pos + 1}: replaced printed pegs with Ø${joinery.diameterMm} × ${joinery.lengthMm} mm dowel bores so both sections fit the print bed.`);
+          return;
+        }
+        const pegNeg = onNeg.cost <= onPos.cost;
+        const [pegS, holeS, out] = pegNeg ? [joint.neg, joint.pos, n] : [joint.pos, joint.neg, neg3(n)];
+        try {
+          replace(final, pegS, pegNeg ? onNeg.withPeg : onPos.withPeg);
+        } finally {
+          (pegNeg ? onPos : onNeg).withPeg.delete();
+        }
+        const { u: pu } = planeAxes(out);
+        for (const p of at) {
+          // The peg's root is sunk into its own face: a hole drilled later into
+          // that section, from another face, keeps clear of it.
+          drilled.push({ section: pegS, at: p, axis: neg3(out), depth: PEG_SINK_MM, radius: joinery.diameterMm / 2 });
+          features[pegS].push({ kind: 'peg', at: scale3(p, 1 / MM), axis: out, radius: joinery.diameterMm / 2 / MM, depth: joinery.lengthMm / 2 / MM, joint: ji });
+          colliders[pegS].push({
+            role: 'pin',
+            group: ji,
+            shape: 'cylinder',
+            pos: add3(p, scale3(out, joinery.lengthMm / 4)),
+            quat: quatFromAxes(pu, cross(out, pu), out),
+            radius: joinery.diameterMm / 2,
+            halfLength: joinery.lengthMm / 4,
+          });
+        }
+        bore(holeS, out);
+        joint.pegSide = pegNeg ? 'neg' : 'pos';
+      });
+    }
+    deleteAll(jointPatches);
+
+    // A face with no pin is simply glued, and most such faces are slivers where
+    // one cut ends against another, between sections that are pinned to the
+    // part elsewhere. What matters is a section — or a group of them — that no
+    // pin ties to the rest at all: that one has to be lined up by hand.
+    if (joinery.kind !== 'none' && plain.length > 1) {
+      const root = plain.map((_, i) => i);
+      const find = (i: number): number => (root[i] === i ? i : (root[i] = find(root[i])));
+      for (const j of joints) if (j.pins.length) root[find(j.neg)] = find(j.pos);
+      const groups = new Map<number, number[]>();
+      plain.forEach((_, i) => groups.set(find(i), [...(groups.get(find(i)) ?? []), i]));
+      if (groups.size > 1) {
+        const largest = [...groups.values()].sort((a, b) => b.length - a.length)[0];
+        for (const g of groups.values()) {
+          if (g === largest) continue;
+          const names = g.map((i) => i + 1).join(', ');
+          ctx.warnings.push(`Section${g.length > 1 ? 's' : ''} ${names} ${g.length > 1 ? 'have' : 'has'} insufficient wall margin (${joinery.minWallMm} mm) for a Ø${joinery.diameterMm} mm ${joinery.kind === 'dowel' ? 'dowel' : 'peg'} and must be aligned manually during glue-up.`);
+        }
       }
     }
+
+    // --- Final poses, on the real geometry.
+    const sections: SplitSection[] = final.map((m, s) => {
+      const geo = geoOf(m);
+      const pose = bestPose(geo, leafInfo[s].cutDowns, ctx);
+      const out = toMetres(m);
+      const raw = toMetres(plain[s]);
+      const hull = plain[s].hull();
+      let solidity: number;
+      try {
+        solidity = Math.min(1, plain[s].volume() / Math.max(1e-12, hull.volume()));
+      } finally {
+        hull.delete();
+      }
+      const pieces = convexPieces(plain[s]);
+      let convex: { positions: Float32Array; faces: Uint32Array }[];
+      try {
+        convex = pieces.map(toMetres);
+      } finally {
+        deleteAll(pieces);
+      }
+      return {
+        positions: out.positions,
+        faces: out.faces,
+        plainPositions: raw.positions,
+        plainFaces: raw.faces,
+        up: neg3(pose.down),
+        spin: pose.spin,
+        supportMm2: pose.supportMm2,
+        sizeMm: pose.sizeMm,
+        fits: pose.fits,
+        volumeMm3: geo.volume,
+        features: features[s],
+        colliders: colliders[s].map(colliderToMetres),
+        solidity,
+        convexPieces: convex,
+        explode: explode[s],
+      };
+    });
+
+    const misfits = sections.filter((s) => !s.fits).length;
+    if (misfits && !capped) {
+      ctx.warnings.push(`${misfits} section${misfits === 1 ? '' : 's'} could not be made to fit the bed.`);
+    }
+
+    return { ok: true, sections, cuts, joints, tree, joinery, warnings: ctx.warnings };
+  } finally {
+    deleteAll(jointPatches);
+    deleteAll(final);
+    deleteAll(plain);
   }
-
-  // --- Final poses, on the real geometry.
-  const sections: SplitSection[] = final.map((m, s) => {
-    const geo = geoOf(m);
-    const pose = bestPose(geo, leafInfo[s].cutDowns, ctx);
-    const out = toMetres(m);
-    const raw = toMetres(plain[s]);
-    const hull = plain[s].hull();
-    const solidity = Math.min(1, plain[s].volume() / Math.max(1e-12, hull.volume()));
-    hull.delete();
-    const pieces = convexPieces(plain[s]);
-    const convex = pieces.map(toMetres);
-    for (const piece of pieces) piece.delete();
-    return {
-      positions: out.positions,
-      faces: out.faces,
-      plainPositions: raw.positions,
-      plainFaces: raw.faces,
-      up: neg3(pose.down),
-      spin: pose.spin,
-      supportMm2: pose.supportMm2,
-      sizeMm: pose.sizeMm,
-      fits: pose.fits,
-      volumeMm3: geo.volume,
-      features: features[s],
-      colliders: colliders[s].map(colliderToMetres),
-      solidity,
-      convexPieces: convex,
-      explode: explode[s],
-    };
-  });
-  for (const m of final) m.delete();
-  for (const m of plain) m.delete();
-
-  const misfits = sections.filter((s) => !s.fits).length;
-  if (misfits && !capped) {
-    ctx.warnings.push(`${misfits} section${misfits === 1 ? '' : 's'} could not be made to fit the bed.`);
-  }
-
-  return { ok: true, sections, cuts, joints, tree, joinery, warnings: ctx.warnings };
 }
 
 /** What a straight cut through a body made: its pieces, or why there are none. */
@@ -1554,31 +1779,60 @@ export function cutAlongPlane(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
   const made = solidFrom(wasm, soups);
   if (!made.ok) return made;
   const n = unit(normal);
-  const [pos, neg] = made.solid.splitByPlane(n, dot(n, at) * MM);
-  const whole = made.solid.volume();
-  made.solid.delete();
+  let pos: Manifold;
+  let neg: Manifold;
+  let whole: number;
+  try {
+    [pos, neg] = made.solid.splitByPlane(n, dot(n, at) * MM);
+    whole = made.solid.volume();
+  } finally {
+    made.solid.delete();
+  }
+  const pieces: Manifold[] = [];
   try {
     // A sliver under a thousandth of the part is the plane grazing it, not a piece.
-    const pieces = [pos, neg].flatMap((half) => touchingGroups(wasm, half.decompose().filter((p) => {
-      if (p.volume() > whole * 1e-3) return true;
-      p.delete();
-      return false;
-    })));
+    for (const half of [pos, neg]) {
+      const decomposed = half.decompose();
+      const kept: Manifold[] = [];
+      let transferredToTouch = false;
+      try {
+        for (let i = 0; i < decomposed.length; i++) {
+          const p = decomposed[i];
+          if (p.volume() > whole * 1e-3) {
+            kept.push(p);
+          } else {
+            p.delete();
+          }
+          decomposed[i] = null as unknown as Manifold;
+        }
+        transferredToTouch = true;
+        pieces.push(...touchingGroups(wasm, kept));
+      } finally {
+        for (const p of decomposed) if (p) p.delete();
+        if (!transferredToTouch) deleteAll(kept);
+      }
+    }
     if (pieces.length < 2) {
-      for (const p of pieces) p.delete();
       return { ok: false, error: 'The line does not cut right through the part, so there is nothing to separate.' };
     }
     const sections = pieces.map((m): SplitSection => {
       const out = toMetres(m);
       const hull = m.hull();
-      const solidity = Math.min(1, m.volume() / Math.max(1e-12, hull.volume()));
-      hull.delete();
+      let solidity: number;
+      try {
+        solidity = Math.min(1, m.volume() / Math.max(1e-12, hull.volume()));
+      } finally {
+        hull.delete();
+      }
       const convex = convexPieces(m);
-      const convexOut = convex.map(toMetres);
-      for (const c of convex) c.delete();
+      let convexOut: { positions: Float32Array; faces: Uint32Array }[];
+      try {
+        convexOut = convex.map(toMetres);
+      } finally {
+        deleteAll(convex);
+      }
       const box = m.boundingBox();
       const volume = m.volume();
-      m.delete();
       return {
         positions: out.positions, faces: out.faces,
         plainPositions: out.positions.slice(), plainFaces: out.faces.slice(),
@@ -1590,6 +1844,7 @@ export function cutAlongPlane(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
     });
     return { ok: true, sections };
   } finally {
+    deleteAll(pieces);
     pos.delete();
     neg.delete();
   }
@@ -1608,21 +1863,38 @@ export function cutAlongPlane(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
 function touchingGroups(wasm: ManifoldToplevel, pieces: Manifold[]): Manifold[] {
   if (pieces.length < 2) return pieces;
   const TOUCH_MM = 0.05;
-  const root = pieces.map((_, i) => i);
-  const find = (i: number): number => (root[i] === i ? i : (root[i] = find(root[i])));
-  for (let i = 0; i < pieces.length; i++) {
-    for (let j = i + 1; j < pieces.length; j++) {
-      if (find(i) !== find(j) && pieces[i].minGap(pieces[j], TOUCH_MM * 2) <= TOUCH_MM) root[find(j)] = find(i);
+  const live = new Set<Manifold>(pieces);
+  const result: Manifold[] = [];
+  let transferred = false;
+  try {
+    const root = pieces.map((_, i) => i);
+    const find = (i: number): number => (root[i] === i ? i : (root[i] = find(root[i])));
+    for (let i = 0; i < pieces.length; i++) {
+      for (let j = i + 1; j < pieces.length; j++) {
+        if (find(i) !== find(j) && pieces[i].minGap(pieces[j], TOUCH_MM * 2) <= TOUCH_MM) root[find(j)] = find(i);
+      }
     }
+    const groups = new Map<number, Manifold[]>();
+    pieces.forEach((p, i) => groups.set(find(i), [...(groups.get(find(i)) ?? []), p]));
+    for (const group of groups.values()) {
+      if (group.length === 1) {
+        live.delete(group[0]);
+        result.push(group[0]);
+        continue;
+      }
+      const joined = wasm.Manifold.compose(group);
+      for (const p of group) {
+        live.delete(p);
+        p.delete();
+      }
+      result.push(joined);
+    }
+    transferred = true;
+    return result;
+  } finally {
+    for (const p of live) p.delete();
+    if (!transferred) deleteAll(result);
   }
-  const groups = new Map<number, Manifold[]>();
-  pieces.forEach((p, i) => groups.set(find(i), [...(groups.get(find(i)) ?? []), p]));
-  return [...groups.values()].map((group) => {
-    if (group.length === 1) return group[0];
-    const joined = wasm.Manifold.compose(group);
-    for (const p of group) p.delete();
-    return joined;
-  });
 }
 
 /** The print rotation for a section, as the plate layout and the preview use it. */
@@ -1666,9 +1938,12 @@ export function checkSplit(
   joints: Pick<SplitJoint, 'neg' | 'pos'>[],
   soups: ArrayLike<number>[],
 ): SplitChecks {
-  const printed = sections.map((s) => manifoldOf(wasm, s.positions, s.faces));
-  const plain = sections.map((s) => manifoldOf(wasm, s.plainPositions, s.plainFaces));
+  const printed: Manifold[] = [];
+  const plain: Manifold[] = [];
   try {
+    for (const s of sections) printed.push(manifoldOf(wasm, s.positions, s.faces));
+    for (const s of sections) plain.push(manifoldOf(wasm, s.plainPositions, s.plainFaces));
+
     let interferenceMm3 = 0;
     let worstPair: [number, number] | null = null, worst = 0;
     for (let a = 0; a < printed.length; a++) {
@@ -1677,8 +1952,12 @@ export function checkSplit(
         const bb = printed[b].boundingBox();
         if ([0, 1, 2].some((k) => ba.max[k] < bb.min[k] || bb.max[k] < ba.min[k])) continue;
         const both = printed[a].intersect(printed[b]);
-        const v = both.volume();
-        both.delete();
+        let v: number;
+        try {
+          v = both.volume();
+        } finally {
+          both.delete();
+        }
         interferenceMm3 += v;
         if (v > worst) { worst = v; worstPair = [a, b]; }
       }
@@ -1687,13 +1966,22 @@ export function checkSplit(
     let reunionErrorMm3 = Infinity;
     const original = solidFrom(wasm, soups);
     if (original.ok) {
-      const whole = wasm.Manifold.union(plain);
-      const extra = whole.subtract(original.solid);
-      const missing = original.solid.subtract(whole);
-      const sum = plain.reduce((v, m) => v + m.volume(), 0);
-      // Overlap between plain sections shows up as the sum exceeding the union.
-      reunionErrorMm3 = extra.volume() + missing.volume() + Math.max(0, sum - whole.volume());
-      for (const m of [whole, extra, missing, original.solid]) m.delete();
+      let whole: Manifold | null = null;
+      let extra: Manifold | null = null;
+      let missing: Manifold | null = null;
+      try {
+        whole = wasm.Manifold.union(plain);
+        extra = whole.subtract(original.solid);
+        missing = original.solid.subtract(whole);
+        const sum = plain.reduce((v, m) => v + m.volume(), 0);
+        // Overlap between plain sections shows up as the sum exceeding the union.
+        reunionErrorMm3 = extra.volume() + missing.volume() + Math.max(0, sum - whole.volume());
+      } finally {
+        missing?.delete();
+        extra?.delete();
+        whole?.delete();
+        original.solid.delete();
+      }
     }
 
     // Every pin on one side of a joint has its partner on the other, on the same axis.
@@ -1718,6 +2006,7 @@ export function checkSplit(
       ok: interferenceMm3 < 1e-6 * total + 1e-3 && reunionErrorMm3 < 1e-4 * total && misalignedPins === 0,
     };
   } finally {
-    for (const m of [...printed, ...plain]) m.delete();
+    deleteAll(printed);
+    deleteAll(plain);
   }
 }

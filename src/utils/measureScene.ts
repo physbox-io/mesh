@@ -48,6 +48,7 @@ export interface SceneSnap extends SnapCandidate {
  */
 export function bodyOf(object: THREE.Object3D): string | null {
   for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+    if (node.userData?.isOverlay) return null;
     // Said outright by a layer that draws a body outside the body's own group —
     // the lattice editor's is named `<id>_lattice`, which is no body's name.
     if (typeof node.userData?.bodyId === 'string') return node.userData.bodyId;

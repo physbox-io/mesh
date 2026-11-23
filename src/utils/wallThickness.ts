@@ -58,28 +58,177 @@ function closestOnTriangle(p: V3, a: V3, b: V3, c: V3): V3 {
 }
 
 /**
- * The wall thickness under `point`, in the mesh's own units, or null when the
- * mesh has no inside to measure (open, degenerate, or the ray never leaves).
- *
- * `verts`/`faces` are the body's mesh in the same frame as `point` — for a
- * body in the simulation, its renderVertices and the impact's local point.
- * Winding may be either way round; the signed volume says which is outward.
+ * Returns true if the triangle mesh has no unmatched boundary edges (i.e. is
+ * closed). First checks indexed edges; if any edge has count 1 (e.g. a
+ * non-indexed soup or UV-seamed mesh), welds candidate boundary endpoints by
+ * position within `weldTol` and checks whether every rim edge pairs up.
  */
-export function wallThicknessAt(verts: ArrayLike<number>, faces: ArrayLike<number>, point: V3): number | null {
-  const nTri = Math.floor(faces.length / 3);
-  if (nTri === 0) return null;
-  const P = (i: number): V3 => [verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2]];
+function isClosedMesh(verts: ArrayLike<number>, faces: ArrayLike<number>, nTri: number, weldTol: number): boolean {
+  const edgeCounts = new Map<string, number>();
+  const addEdge = (u: number, v: number) => {
+    if (u === v) return;
+    const key = u < v ? `${u}:${v}` : `${v}:${u}`;
+    edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
+  };
+  for (let t = 0; t < nTri; t++) {
+    const ia = faces[t * 3], ib = faces[t * 3 + 1], ic = faces[t * 3 + 2];
+    if (ia === ib || ib === ic || ic === ia) continue;
+    const ax = verts[ia * 3], ay = verts[ia * 3 + 1], az = verts[ia * 3 + 2];
+    const bx = verts[ib * 3], by = verts[ib * 3 + 1], bz = verts[ib * 3 + 2];
+    const cx = verts[ic * 3], cy = verts[ic * 3 + 1], cz = verts[ic * 3 + 2];
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    if (!(nx * nx + ny * ny + nz * nz > 1e-36)) continue;
+    addEdge(ia, ib);
+    addEdge(ib, ic);
+    addEdge(ic, ia);
+  }
+  if (edgeCounts.size === 0) return false;
 
-  // Which way is out. An inside-out mesh (see CLAUDE.md § face winding) would
-  // otherwise send the ray off into the air.
+  const boundary: [number, number][] = [];
+  for (const [key, count] of edgeCounts) {
+    if (count === 1) {
+      const sep = key.indexOf(':');
+      boundary.push([Number(key.slice(0, sep)), Number(key.slice(sep + 1))]);
+    }
+  }
+  if (boundary.length === 0) return true;
+
+  // Weld only endpoints of raw boundary edges by 27-neighbour spatial hashing
+  // so creased/non-indexed closed meshes and UV-seamed spheres pass without
+  // quantization-boundary splits.
+  const cell = Math.max(1e-9, weldTol * 2);
+  const tol2 = weldTol * weldTol;
+  const grid = new Map<string, number[]>();
+  const weldedPos: number[] = [];
+  const rawToWeld = new Map<number, number>();
+  const weldOf = (vi: number): number => {
+    const existing = rawToWeld.get(vi);
+    if (existing !== undefined) return existing;
+    const x = verts[vi * 3], y = verts[vi * 3 + 1], z = verts[vi * 3 + 2];
+    const gx = Math.floor(x / cell), gy = Math.floor(y / cell), gz = Math.floor(z / cell);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const bucket = grid.get(`${gx + dx},${gy + dy},${gz + dz}`);
+          if (!bucket) continue;
+          for (const wid of bucket) {
+            const wx = weldedPos[wid * 3] - x;
+            const wy = weldedPos[wid * 3 + 1] - y;
+            const wz = weldedPos[wid * 3 + 2] - z;
+            if (wx * wx + wy * wy + wz * wz <= tol2) {
+              rawToWeld.set(vi, wid);
+              return wid;
+            }
+          }
+        }
+      }
+    }
+    const wid = weldedPos.length / 3;
+    weldedPos.push(x, y, z);
+    const cellKey = `${gx},${gy},${gz}`;
+    let bucket = grid.get(cellKey);
+    if (!bucket) { bucket = []; grid.set(cellKey, bucket); }
+    bucket.push(wid);
+    rawToWeld.set(vi, wid);
+    return wid;
+  };
+
+  const weldedEdgeCounts = new Map<string, number>();
+  for (const [u, v] of boundary) {
+    const wu = weldOf(u), wv = weldOf(v);
+    if (wu === wv) continue; // Degenerate seam edge collapsed to a point
+    const key = wu < wv ? `${wu}:${wv}` : `${wv}:${wu}`;
+    weldedEdgeCounts.set(key, (weldedEdgeCounts.get(key) ?? 0) + 1);
+  }
+  for (const count of weldedEdgeCounts.values()) {
+    if (count === 1) return false;
+  }
+  return true;
+}
+
+export interface WallThicknessProbe {
+  /** Wall thickness under `point`, in the mesh's own units. */
+  thickness: number;
+  /** Squared distance from `point` to the nearest surface point on this mesh. */
+  dist2: number;
+}
+
+/**
+ * Like `wallThicknessAt`, also returning the squared distance from `point` to
+ * the mesh surface so callers with multi-geom bodies can pick the struck geom.
+ */
+export function probeWallThickness(
+  verts: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  point: V3,
+): WallThicknessProbe | null {
+  if (!Number.isFinite(point[0]) || !Number.isFinite(point[1]) || !Number.isFinite(point[2])) return null;
+  const nVert = Math.floor(verts.length / 3);
+  const nTri = Math.floor(faces.length / 3);
+  if (nVert < 3 || nTri === 0) return null;
+
+  // Validate indices, finiteness, bounds, and signed volume in one pass.
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  let refX = 0, refY = 0, refZ = 0, hasRef = false;
   let signedVol = 0;
   for (let t = 0; t < nTri; t++) {
-    const a = P(faces[t * 3]), b = P(faces[t * 3 + 1]), c = P(faces[t * 3 + 2]);
-    signedVol += dot(a, cross(b, c));
+    const ia = faces[t * 3], ib = faces[t * 3 + 1], ic = faces[t * 3 + 2];
+    if (
+      !Number.isInteger(ia) || !Number.isInteger(ib) || !Number.isInteger(ic) ||
+      ia < 0 || ib < 0 || ic < 0 || ia >= nVert || ib >= nVert || ic >= nVert
+    ) {
+      return null;
+    }
+    const ax = verts[ia * 3], ay = verts[ia * 3 + 1], az = verts[ia * 3 + 2];
+    const bx = verts[ib * 3], by = verts[ib * 3 + 1], bz = verts[ib * 3 + 2];
+    const cx = verts[ic * 3], cy = verts[ic * 3 + 1], cz = verts[ic * 3 + 2];
+    if (
+      !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az) ||
+      !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz) ||
+      !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)
+    ) {
+      return null;
+    }
+    if (!hasRef) { refX = ax; refY = ay; refZ = az; hasRef = true; }
+    if (ax < minX) minX = ax; if (ax > maxX) maxX = ax;
+    if (ay < minY) minY = ay; if (ay > maxY) maxY = ay;
+    if (az < minZ) minZ = az; if (az > maxZ) maxZ = az;
+    if (bx < minX) minX = bx; if (bx > maxX) maxX = bx;
+    if (by < minY) minY = by; if (by > maxY) maxY = by;
+    if (bz < minZ) minZ = bz; if (bz > maxZ) maxZ = bz;
+    if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+    if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+    if (cz < minZ) minZ = cz; if (cz > maxZ) maxZ = cz;
+    const rax = ax - refX, ray = ay - refY, raz = az - refZ;
+    const rbx = bx - refX, rby = by - refY, rbz = bz - refZ;
+    const rcx = cx - refX, rcy = cy - refY, rcz = cz - refZ;
+    signedVol +=
+      rax * (rby * rcz - rbz * rcy) +
+      ray * (rbz * rcx - rbx * rcz) +
+      raz * (rbx * rcy - rby * rcx);
   }
-  if (Math.abs(signedVol) < 1e-18) return null;
-  const outward = signedVol > 0 ? 1 : -1;
+  if (!(Math.abs(signedVol) >= 1e-18)) return null;
+  const diag = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+  if (!(diag >= 1e-12)) return null;
 
+  // Reject open/unclosed single-sheet meshes (e.g. an open bowl/hemisphere)
+  // so rays never cross an open cavity and report bowl diameter as wall.
+  if (!isClosedMesh(verts, faces, nTri, Math.max(1e-8, diag * 1e-5))) return null;
+
+  const outward = signedVol > 0 ? 1 : -1;
+  const P = (i: number): V3 => [verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2]];
+
+  // Scale-relative epsilon works identically in metres and millimetres.
+  const EPS = Math.max(1e-7, diag * 1e-5);
+  const tieTol = EPS;
+  const tieTol2 = tieTol * tieTol;
+
+  // Pass 1: find closest surface point and distance.
   let best = -1, bestD2 = Infinity;
   let start: V3 = point;
   for (let t = 0; t < nTri; t++) {
@@ -88,33 +237,101 @@ export function wallThicknessAt(verts: ArrayLike<number>, faces: ArrayLike<numbe
     const d2 = dot(d, d);
     if (d2 < bestD2) { bestD2 = d2; best = t; start = q; }
   }
-  const a0 = P(faces[best * 3]), b0 = P(faces[best * 3 + 1]), c0 = P(faces[best * 3 + 2]);
-  const n0 = cross(sub(b0, a0), sub(c0, a0));
-  const len = Math.hypot(n0[0], n0[1], n0[2]);
-  if (len < 1e-18) return null;
-  const dir: V3 = [-outward * n0[0] / len, -outward * n0[1] / len, -outward * n0[2] / len];
+  if (best < 0 || !Number.isFinite(bestD2)) return null;
+  const bestD = Math.sqrt(bestD2);
 
-  // Möller–Trumbore against every face; keep the nearest hit that is not the
-  // face we started on. Anything nearer than a micron is that face's neighbour
-  // along a shared edge.
-  const EPS = 1e-6;
-  let nearest = Infinity;
+  // Collect all faces tied at `start` (e.g. a sharp edge, corner, 45° chamfer,
+  // or thread crest) so we fire along the bisector inward normal instead of
+  // grazing/clipping an adjacent face microns away.
+  const skipTris = new Set<number>();
+  const uniqueNormals: V3[] = [];
   for (let t = 0; t < nTri; t++) {
-    if (t === best) continue;
+    const a = P(faces[t * 3]), b = P(faces[t * 3 + 1]), c = P(faces[t * 3 + 2]);
+    const q = closestOnTriangle(point, a, b, c);
+    const dp = sub(q, point);
+    const d = Math.sqrt(dot(dp, dp));
+    if (d > bestD + tieTol) continue;
+    const dq = sub(q, start);
+    if (dot(dq, dq) > tieTol2) continue;
+    skipTris.add(t);
+    const n = cross(sub(b, a), sub(c, a));
+    const nLen = Math.hypot(n[0], n[1], n[2]);
+    if (!(nLen >= 1e-18)) continue;
+    const un: V3 = [outward * n[0] / nLen, outward * n[1] / nLen, outward * n[2] / nLen];
+    if (!uniqueNormals.some((u) => dot(u, un) > 1 - 1e-4)) uniqueNormals.push(un);
+  }
+
+  let dirX = 0, dirY = 0, dirZ = 0;
+  for (const un of uniqueNormals) {
+    dirX -= un[0]; dirY -= un[1]; dirZ -= un[2];
+  }
+  let dirLen = Math.hypot(dirX, dirY, dirZ);
+  if (!(dirLen >= 1e-6)) {
+    const a0 = P(faces[best * 3]), b0 = P(faces[best * 3 + 1]), c0 = P(faces[best * 3 + 2]);
+    const n0 = cross(sub(b0, a0), sub(c0, a0));
+    const len = Math.hypot(n0[0], n0[1], n0[2]);
+    if (!(len >= 1e-18)) return null;
+    dirX = -outward * n0[0] / len;
+    dirY = -outward * n0[1] / len;
+    dirZ = -outward * n0[2] / len;
+    dirLen = 1;
+  }
+  const dir: V3 = [dirX / dirLen, dirY / dirLen, dirZ / dirLen];
+
+  // Möller–Trumbore against every non-tied face, tracking exiting vs entering
+  // hits by outward normal sign (`dot(dir, outwardNormal) = -outward * det`).
+  const BARY_EPS = 1e-7;
+  const hits: Array<{ dist: number; delta: number }> = [];
+  for (let t = 0; t < nTri; t++) {
+    if (skipTris.has(t)) continue;
     const a = P(faces[t * 3]), b = P(faces[t * 3 + 1]), c = P(faces[t * 3 + 2]);
     const e1 = sub(b, a), e2 = sub(c, a);
     const h = cross(dir, e2);
     const det = dot(e1, h);
-    if (Math.abs(det) < 1e-18) continue;
+    if (!(Math.abs(det) >= 1e-18)) continue;
     const inv = 1 / det;
     const s = sub(start, a);
     const u = dot(s, h) * inv;
-    if (u < 0 || u > 1) continue;
+    if (u < -BARY_EPS || u > 1 + BARY_EPS) continue;
     const q = cross(s, e1);
     const v = dot(dir, q) * inv;
-    if (v < 0 || u + v > 1) continue;
+    if (v < -BARY_EPS || u + v > 1 + BARY_EPS) continue;
     const dist = dot(e2, q) * inv;
-    if (dist > EPS && dist < nearest) nearest = dist;
+    if (!(dist > EPS)) continue;
+    // -outward * det = dot(dir, outwardNormal_t): > 0 exits solid, < 0 enters.
+    const delta = -outward * det > 0 ? -1 : 1;
+    hits.push({ dist, delta });
   }
-  return Number.isFinite(nearest) ? nearest : null;
+  if (hits.length === 0) return null;
+  hits.sort((p, q) => p.dist - q.dist);
+
+  // Deduplicate shared-edge hits of the same sign within EPS, then track solid
+  // nesting depth (starts at 1 inside the solid) so overlapping un-merged shells
+  // measure through the combined solid while single shells exit at the first
+  // exiting face.
+  let depth = 1;
+  let lastDist = -Infinity;
+  let lastDelta = 0;
+  let firstExit = Infinity;
+  for (const h of hits) {
+    if (h.delta === lastDelta && h.dist - lastDist <= EPS) continue;
+    lastDist = h.dist;
+    lastDelta = h.delta;
+    if (h.delta < 0 && h.dist < firstExit) firstExit = h.dist;
+    depth += h.delta;
+    if (depth === 0) return { thickness: h.dist, dist2: bestD2 };
+  }
+  return Number.isFinite(firstExit) ? { thickness: firstExit, dist2: bestD2 } : null;
+}
+
+/**
+ * The wall thickness under `point`, in the mesh's own units, or null when the
+ * mesh has no inside to measure (open, degenerate, or the ray never leaves).
+ *
+ * `verts`/`faces` are the body's mesh in the same frame as `point` — for a
+ * body in the simulation, its renderVertices and the impact's local point.
+ * Winding may be either way round; the signed volume says which is outward.
+ */
+export function wallThicknessAt(verts: ArrayLike<number>, faces: ArrayLike<number>, point: V3): number | null {
+  return probeWallThickness(verts, faces, point)?.thickness ?? null;
 }

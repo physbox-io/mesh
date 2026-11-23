@@ -10,7 +10,7 @@ import { dentDepth, dentSpread, pierceVerdict } from '../utils/breakThresholds';
 import { deformedGeometry, dentKey, useDentStore } from './dentStore';
 import type { Imprint } from '../utils/dentMesh';
 import { estimateBodyMass } from '../utils/deformMaterials';
-import { wallThicknessAt } from '../utils/wallThickness';
+import { probeWallThickness } from '../utils/wallThickness';
 import { replaceNodeWith } from './sceneClone';
 import type { PhysicsState } from './useStore';
 import { store } from './storeRef';
@@ -257,16 +257,83 @@ export const retargetReferences = (nodes: SceneNode[], fromId: string, toId: str
   return detachReferencesTo(move(nodes), fromId);
 };
 
+/** Transform body-local Z-up point into a geom's own local Z-up frame (inverse of pos + quat/euler). */
+const bodyPointToGeomLocal = (
+  p: ArrayLike<number>,
+  pos?: number[],
+  quat?: number[],
+  euler?: number[],
+): [number, number, number] => {
+  let x = p[0] - (pos?.[0] || 0);
+  let y = p[1] - (pos?.[1] || 0);
+  let z = p[2] - (pos?.[2] || 0);
+  if (quat && quat.length >= 4) {
+    // MuJoCo quat is [w, x, y, z]; inverse rotation uses conjugate [w, -qx, -qy, -qz].
+    const len = Math.hypot(quat[0] || 0, quat[1] || 0, quat[2] || 0, quat[3] || 0);
+    if (len > 1e-12) {
+      const w = (quat[0] || 0) / len, qx = -(quat[1] || 0) / len, qy = -(quat[2] || 0) / len, qz = -(quat[3] || 0) / len;
+      const tx = 2 * (qy * z - qz * y);
+      const ty = 2 * (qz * x - qx * z);
+      const tz = 2 * (qx * y - qy * x);
+      x = x + w * tx + (qy * tz - qz * ty);
+      y = y + w * ty + (qz * tx - qx * tz);
+      z = z + w * tz + (qx * ty - qy * tx);
+    }
+  } else if (euler && euler.length >= 3) {
+    // Forward rotation is Rx(ex) * Ry(ey) * Rz(ez) (degrees); inverse is Rz(-ez) * Ry(-ey) * Rx(-ex).
+    const deg = Math.PI / 180;
+    const rx = -(euler[0] || 0) * deg, ry = -(euler[1] || 0) * deg, rz = -(euler[2] || 0) * deg;
+    if (rx !== 0) {
+      const c = Math.cos(rx), s = Math.sin(rx);
+      const ny = c * y - s * z, nz = s * y + c * z;
+      y = ny; z = nz;
+    }
+    if (ry !== 0) {
+      const c = Math.cos(ry), s = Math.sin(ry);
+      const nx = c * x + s * z, nz = -s * x + c * z;
+      x = nx; z = nz;
+    }
+    if (rz !== 0) {
+      const c = Math.cos(rz), s = Math.sin(rz);
+      const nx = c * x - s * y, ny = s * x + c * y;
+      x = nx; y = ny;
+    }
+  }
+  return [x, y, z];
+};
+
+/** Three.js Y-up vertices `(x, y, z)` to MuJoCo Z-up `(x, -z, y)`. */
+const yupToZup = (v: ArrayLike<number>): Float64Array => {
+  const out = new Float64Array(v.length);
+  for (let i = 0; i + 2 < v.length; i += 3) {
+    out[i] = v[i];
+    out[i + 1] = -v[i + 2];
+    out[i + 2] = v[i + 1];
+  }
+  return out;
+};
+
 /**
  * How thick this body is where it was hit, in metres; null when it has no
- * closed mesh to measure. `localPoint` is in the body frame, which is the frame
- * renderVertices are in (Z-up, centroid at the origin).
+ * closed mesh to measure. `localPoint` is in the body frame (Z-up), and each
+ * solid mesh geom is probed in its own local Z-up frame so the struck geom wins.
  */
 export const wallAtImpact = (node: SceneNode, localPoint: ArrayLike<number>): number | null => {
-  const geom = (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
-  const verts = geom && (geom.renderVertices ?? geom.vertices);
-  if (!geom || !verts || !geom.faces) return null;
-  return wallThicknessAt(verts, geom.faces, [localPoint[0], localPoint[1], localPoint[2]]);
+  let bestThickness: number | null = null;
+  let bestDist2 = Infinity;
+  for (const geom of node.geoms || []) {
+    if (geom.csg === 'difference' || geom.role === 'visual') continue;
+    if (!geom.faces) continue;
+    const verts = geom.renderVertices ?? (geom.vertices ? yupToZup(geom.vertices) : null);
+    if (!verts) continue;
+    const pt = bodyPointToGeomLocal(localPoint, geom.pos, geom.quat, geom.euler);
+    const probe = probeWallThickness(verts, geom.faces, pt);
+    if (probe && probe.dist2 < bestDist2) {
+      bestDist2 = probe.dist2;
+      bestThickness = probe.thickness;
+    }
+  }
+  return bestThickness;
 };
 
 /**

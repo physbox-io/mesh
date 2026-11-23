@@ -259,6 +259,210 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
   return { exportStl, export3mf };
 }
 
+/** Reverses triangle winding when a negative-determinant mirror transform is baked into geometry. */
+function flipGeometryWinding(geo: THREE.BufferGeometry): void {
+  const index = geo.getIndex();
+  if (index) {
+    const arr = index.array as Uint16Array | Uint32Array;
+    for (let i = 0; i + 2 < arr.length; i += 3) {
+      const tmp = arr[i + 1];
+      arr[i + 1] = arr[i + 2];
+      arr[i + 2] = tmp;
+    }
+    index.needsUpdate = true;
+    return;
+  }
+  const pos = geo.getAttribute('position');
+  if (!pos) return;
+  for (const attr of Object.values(geo.attributes)) {
+    if (!(attr instanceof THREE.BufferAttribute)) continue;
+    const itemSize = attr.itemSize;
+    const arr = attr.array as Float32Array;
+    for (let v = 0; v + 2 < pos.count; v += 3) {
+      const a = (v + 1) * itemSize;
+      const b = (v + 2) * itemSize;
+      for (let k = 0; k < itemSize; k++) {
+        const tmp = arr[a + k];
+        arr[a + k] = arr[b + k];
+        arr[b + k] = tmp;
+      }
+    }
+    attr.needsUpdate = true;
+  }
+}
+
+export interface CollectExportOptions {
+  nodesById: ReadonlyMap<string, SceneNode>;
+  bought: ReadonlySet<string>;
+  hidden: ReadonlySet<string>;
+  only?: ReadonlySet<string>;
+}
+
+/**
+ * Walks a Three.js scene and collects printable world-baked meshes into a flat
+ * group, skipping overlays, water/pulley helpers, background objects, hidden
+ * and bought-in parts, and flipping triangle winding whenever a baked world
+ * transform has a negative determinant.
+ */
+export function collectExportGroup(
+  scene: THREE.Object3D,
+  { nodesById, bought, hidden, only }: CollectExportOptions,
+): { exportGroup: THREE.Group; meshBoxes: THREE.Box3[]; bbox: THREE.Box3; longestPartDim: number } {
+  const findNodeId = (obj: THREE.Object3D): string | null => {
+    for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+      if (typeof cur.userData?.bodyId === 'string') return cur.userData.bodyId;
+    }
+    let cur: THREE.Object3D | null = obj;
+    while (cur) {
+      if (cur.name) return cur.name;
+      cur = cur.parent;
+    }
+    return null;
+  };
+
+  const findGeomName = (obj: THREE.Object3D): string | null => {
+    for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+      if (typeof cur.userData?.geomName === 'string') return cur.userData.geomName;
+      if (typeof cur.userData?.bodyId === 'string') return obj.name || null;
+    }
+    return null;
+  };
+
+  const isExcludedObj = (obj: THREE.Object3D): boolean => {
+    for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+      if (cur.userData?.skipExport || cur.userData?.isOverlay || cur.userData?.isBackground) return true;
+    }
+    return false;
+  };
+
+  const ownedByOnly = (obj: THREE.Object3D) => {
+    for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+      if (only!.has(cur.name) || (typeof cur.userData?.bodyId === 'string' && only!.has(cur.userData.bodyId))) return true;
+    }
+    return false;
+  };
+
+  const exportGroup = new THREE.Group();
+  const meshBoxes: THREE.Box3[] = [];
+  let ungroupedIdx = 0;
+
+  scene.traverse((obj) => {
+    if (!(obj as THREE.Mesh).isMesh) return;
+    if (isExcludedObj(obj)) return;
+    // An instanced mesh is owned instance by instance; see below.
+    if (only && !(obj as THREE.InstancedMesh).isInstancedMesh && !ownedByOnly(obj)) return;
+    const owner = findNodeId(obj);
+    if (owner && (bought.has(owner) || hidden.has(owner))) return;
+    const mesh = obj as THREE.Mesh;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
+    // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
+    // shadow catcher are all basic/shadow materials and stay out of the file.
+    if (!standard) return;
+    // Nor is a surface drawn only from behind: the lattice and sculpt tools'
+    // shading of a body's inside, so a hole in it reads as one. Exported, it
+    // was every triangle of the body a second time.
+    if (standard.side === THREE.BackSide) return;
+    mesh.updateWorldMatrix(true, false);
+    /*
+     * Static boxes are drawn as one InstancedMesh: a unit cube, placed per
+     * instance. Taken as an ordinary mesh it went out as that unit cube - one
+     * metre on a side at the origin, every real box missing, and the size
+     * prompt scaling the parts against it. So each instance goes out as a
+     * box of its own, owned by its body and in its colour. A hidden one is
+     * drawn at zero scale and stays out.
+     */
+    const instanced = mesh as THREE.InstancedMesh;
+    if (instanced.isInstancedMesh) {
+      const owners = (instanced.userData?.nodeIds ?? []) as (string | undefined)[];
+      const geomNames = (instanced.userData?.geomNames ?? []) as (string | undefined)[];
+      const placed = new THREE.Matrix4();
+      for (let i = 0; i < instanced.count; i++) {
+        instanced.getMatrixAt(i, placed);
+        if (Math.abs(placed.determinant()) < 1e-18) continue;
+        const instanceOwner = owners[i];
+        if (instanceOwner && (bought.has(instanceOwner) || hidden.has(instanceOwner))) continue;
+        if (only && !(instanceOwner && only.has(instanceOwner))) continue;
+        const worldMat = placed.premultiply(instanced.matrixWorld);
+        const geo = instanced.geometry.clone().applyMatrix4(worldMat);
+        if (worldMat.determinant() < 0) flipGeometryWinding(geo);
+        const material = standard.clone();
+        material.wireframe = false;
+        if (instanced.instanceColor) instanced.getColorAt(i, material.color);
+        const exported = new THREE.Mesh(geo, material);
+        const label = resolveExportMeshLabel(
+          instanceOwner ? nodesById.get(instanceOwner) : undefined,
+          instanceOwner ?? null,
+          geomNames[i] ?? null,
+          `part_${ungroupedIdx++}`,
+        );
+        exported.name = label.name;
+        if (label.objectName) exported.userData = { objectName: label.objectName };
+        exportGroup.add(exported);
+        meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
+      }
+      return;
+    }
+    const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
+    if (mesh.matrixWorld.determinant() < 0) flipGeometryWinding(geo);
+    // The material is cloned so that turning the viewport to wireframe does
+    // not export a wireframe — that is a way of looking at the model, not a
+    // property of it.
+    const material = standard.clone();
+    material.wireframe = false;
+    const exported = new THREE.Mesh(geo, material);
+    const label = resolveExportMeshLabel(
+      owner ? nodesById.get(owner) : undefined,
+      owner,
+      findGeomName(mesh),
+      mesh.name || `part_${ungroupedIdx++}`,
+    );
+    exported.name = label.name;
+    if (label.objectName) exported.userData = { objectName: label.objectName };
+    exportGroup.add(exported);
+    meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
+  });
+
+  const bbox = new THREE.Box3().setFromObject(exportGroup);
+  let longestPartDim = 0;
+  if (meshBoxes.length > 0) {
+    // Three.js is Y-up here, so the bed is X and Z; 10 µm, in metres, as the 3MF writer's 0.01 mm.
+    const pieceOf = footprintGroups(
+      meshBoxes.map((b) => ({ min: b.min.toArray(), max: b.max.toArray() })),
+      { axes: [0, 2], minOverlap: 1e-5 },
+    );
+    const pieceBoxes = new Map<number, THREE.Box3>();
+    meshBoxes.forEach((box, i) => {
+      const piece = pieceBoxes.get(pieceOf[i]);
+      if (piece) piece.union(box);
+      else pieceBoxes.set(pieceOf[i], box.clone());
+    });
+    for (const pieceBox of pieceBoxes.values()) {
+      const size = pieceBox.getSize(new THREE.Vector3());
+      longestPartDim = Math.max(longestPartDim, size.x, size.y, size.z);
+    }
+  }
+  return { exportGroup, meshBoxes, bbox, longestPartDim };
+}
+
+/**
+ * Scales the Y-up export group to millimetres, converts it to Z-up, centres X
+ * and Y about the origin, and rests the lowest point squarely on the build
+ * plate (`Z = 0`) instead of half below the bed.
+ */
+export function applyExportPlacement(exportGroup: THREE.Group, bbox: THREE.Box3, scale: number): void {
+  const center = bbox.getCenter(new THREE.Vector3());
+  // Under +90° about X, Three.js Y-up (x, y, z) maps to Z-up (x, -z, y), so
+  // shifting by -bbox.min.y puts Z-up minZ at 0 while X and Y stay centred.
+  const transform = new THREE.Matrix4()
+    .makeRotationX(Math.PI / 2)
+    .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
+    .multiply(new THREE.Matrix4().makeTranslation(-center.x, -bbox.min.y, -center.z));
+  for (const child of exportGroup.children) {
+    (child as THREE.Mesh).geometry.applyMatrix4(transform);
+  }
+}
+
 /**
  * The scene, as meshes ready to be written to a file.
  *
@@ -282,34 +486,6 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       return;
     }
 
-    // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
-    // wrapper <group name={nodeId}>): it names each exported mesh, and bought
-    // hardware is left out by it.
-    // The lattice and sculpt tools draw a body under a group of their own,
-    // named for the tool and tagged with the body (`userData.bodyId`); its mesh
-    // is named for the geom. Read by name alone, an export with either tool
-    // open named the part after its geom, and a per-body export found nothing.
-    const findNodeId = (obj: THREE.Object3D): string | null => {
-      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
-        if (typeof cur.userData?.bodyId === 'string') return cur.userData.bodyId;
-      }
-      let cur: THREE.Object3D | null = obj;
-      while (cur) {
-        if (cur.name) return cur.name;
-        cur = cur.parent;
-      }
-      return null;
-    };
-
-    const exportGroup = new THREE.Group();
-    const meshBoxes: THREE.Box3[] = [];
-    let ungroupedIdx = 0;
-    const ownedByOnly = (obj: THREE.Object3D) => {
-      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
-        if (only!.has(cur.name) || (typeof cur.userData?.bodyId === 'string' && only!.has(cur.userData.bodyId))) return true;
-      }
-      return false;
-    };
     // Bought, not made: a bearing or a screw in the part is drawn, but not printed.
     const bought = new Set<string>();
     const nodesById = new Map<string, SceneNode>();
@@ -322,92 +498,12 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       }
     };
     indexNodes(useStore.getState().sceneGraph.nodes);
-    const findGeomName = (obj: THREE.Object3D): string | null => {
-      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
-        if (typeof cur.userData?.geomName === 'string') return cur.userData.geomName;
-        if (typeof cur.userData?.bodyId === 'string') return obj.name || null;
-      }
-      return null;
-    };
-    const isBackgroundObj = (obj: THREE.Object3D): boolean => {
-      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
-        if (cur.userData?.isBackground) return true;
-      }
-      return false;
-    };
-    scene.traverse((obj) => {
-      if (!(obj as THREE.Mesh).isMesh) return;
-      if (obj.userData?.skipExport) return;
-      if (isBackgroundObj(obj)) return;
-      // An instanced mesh is owned instance by instance; see below.
-      if (only && !(obj as THREE.InstancedMesh).isInstancedMesh && !ownedByOnly(obj)) return;
-      const owner = findNodeId(obj);
-      if (owner && (bought.has(owner) || hidden.has(owner))) return;
-      const mesh = obj as THREE.Mesh;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
-      // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
-      // shadow catcher are all basic/shadow materials and stay out of the file.
-      if (!standard) return;
-      // Nor is a surface drawn only from behind: the lattice and sculpt tools'
-      // shading of a body's inside, so a hole in it reads as one. Exported, it
-      // was every triangle of the body a second time.
-      if (standard.side === THREE.BackSide) return;
-      mesh.updateWorldMatrix(true, false);
-      /*
-       * Static boxes are drawn as one InstancedMesh: a unit cube, placed per
-       * instance. Taken as an ordinary mesh it went out as that unit cube - one
-       * metre on a side at the origin, every real box missing, and the size
-       * prompt scaling the parts against it. So each instance goes out as a
-       * box of its own, owned by its body and in its colour. A hidden one is
-       * drawn at zero scale and stays out.
-       */
-      const instanced = mesh as THREE.InstancedMesh;
-      if (instanced.isInstancedMesh) {
-        const owners = (instanced.userData?.nodeIds ?? []) as (string | undefined)[];
-        const geomNames = (instanced.userData?.geomNames ?? []) as (string | undefined)[];
-        const placed = new THREE.Matrix4();
-        for (let i = 0; i < instanced.count; i++) {
-          instanced.getMatrixAt(i, placed);
-          if (Math.abs(placed.determinant()) < 1e-18) continue;
-          const instanceOwner = owners[i];
-          if (instanceOwner && (bought.has(instanceOwner) || hidden.has(instanceOwner))) continue;
-          if (only && !(instanceOwner && only.has(instanceOwner))) continue;
-          const geo = instanced.geometry.clone().applyMatrix4(placed.premultiply(instanced.matrixWorld));
-          const material = standard.clone();
-          material.wireframe = false;
-          if (instanced.instanceColor) instanced.getColorAt(i, material.color);
-          const exported = new THREE.Mesh(geo, material);
-          const label = resolveExportMeshLabel(
-            instanceOwner ? nodesById.get(instanceOwner) : undefined,
-            instanceOwner ?? null,
-            geomNames[i] ?? null,
-            `part_${ungroupedIdx++}`,
-          );
-          exported.name = label.name;
-          if (label.objectName) exported.userData = { objectName: label.objectName };
-          exportGroup.add(exported);
-          meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
-        }
-        return;
-      }
-      const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
-      // The material is cloned so that turning the viewport to wireframe does
-      // not export a wireframe — that is a way of looking at the model, not a
-      // property of it.
-      const material = standard.clone();
-      material.wireframe = false;
-      const exported = new THREE.Mesh(geo, material);
-      const label = resolveExportMeshLabel(
-        owner ? nodesById.get(owner) : undefined,
-        owner,
-        findGeomName(mesh),
-        mesh.name || `part_${ungroupedIdx++}`,
-      );
-      exported.name = label.name;
-      if (label.objectName) exported.userData = { objectName: label.objectName };
-      exportGroup.add(exported);
-      meshBoxes.push(new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute));
+
+    const { exportGroup, bbox, longestPartDim } = collectExportGroup(scene, {
+      nodesById,
+      bought,
+      hidden,
+      only,
     });
 
     if (exportGroup.children.length === 0) {
@@ -418,46 +514,16 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
     }
 
     // Normalize: fit the LONGEST SINGLE PART's longest side to a user-specified
-    // target in mm (not the combined bounding box of everything visible), centered
-    // at origin. A part is what prints as one piece: meshes whose footprints
-    // overlap, by the rule the 3MF writer groups its objects with. Not a body,
-    // which can hold pieces laid side by side (a mold's two halves), nor a
-    // mesh, which can be a liner nested inside its shell. Also convert from Three.js Y-up (the scene's convention) to the
-    // Z-up convention STL/slicers expect - otherwise the export comes out on its
-    // side even though the on-screen render (Y-up, handled natively by Three.js)
-    // looks correct.
-    const bbox = new THREE.Box3().setFromObject(exportGroup);
-    // Three.js is Y-up here, so the bed is X and Z; 10 µm, in metres, as the 3MF writer's 0.01 mm.
-    const pieceOf = footprintGroups(
-      meshBoxes.map((b) => ({ min: b.min.toArray(), max: b.max.toArray() })),
-      { axes: [0, 2], minOverlap: 1e-5 },
-    );
-    const pieceBoxes = new Map<number, THREE.Box3>();
-    meshBoxes.forEach((box, i) => {
-      const piece = pieceBoxes.get(pieceOf[i]);
-      if (piece) piece.union(box);
-      else pieceBoxes.set(pieceOf[i], box.clone());
-    });
-    let longestPartDim = 0;
-    for (const pieceBox of pieceBoxes.values()) {
-      const size = pieceBox.getSize(new THREE.Vector3());
-      longestPartDim = Math.max(longestPartDim, size.x, size.y, size.z);
-    }
+    // target in mm (not the combined bounding box of everything visible),
+    // centred in X/Y on the build plate (Z = 0) and converted from Three.js
+    // Y-up to the Z-up convention STL/3MF slicers expect.
     if (longestPartDim > 0) {
       const defaultMm = Math.round(longestPartDim * 1000).toString();
       promptScale({
         title,
         value: defaultMm,
         onConfirm: (targetMm) => {
-          const scale = targetMm / longestPartDim;
-          const center = bbox.getCenter(new THREE.Vector3());
-          const transform = new THREE.Matrix4()
-            .makeRotationX(Math.PI / 2)
-            .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
-            .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
-          for (const child of exportGroup.children) {
-            (child as THREE.Mesh).geometry.applyMatrix4(transform);
-          }
+          applyExportPlacement(exportGroup, bbox, targetMm / longestPartDim);
           onReady(exportGroup);
         },
       });

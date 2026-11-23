@@ -113,9 +113,16 @@ function linearToSrgbByte(value: number): number {
   return Math.round(s * 255);
 }
 
+function rgbToSrgbPacked(r: number, g: number, b: number): number {
+  return (linearToSrgbByte(r) << 16) | (linearToSrgbByte(g) << 8) | linearToSrgbByte(b);
+}
+
+function srgbPackedToHex(packed: number): string {
+  return `#${packed.toString(16).padStart(6, '0')}`;
+}
+
 export function linearToSrgbHex(rgb: number[]): string {
-  const hex = (v: number) => linearToSrgbByte(v).toString(16).padStart(2, '0');
-  return `#${hex(rgb[0] ?? 0)}${hex(rgb[1] ?? 0)}${hex(rgb[2] ?? 0)}`;
+  return srgbPackedToHex(rgbToSrgbPacked(rgb[0] ?? 0, rgb[1] ?? 0, rgb[2] ?? 0));
 }
 
 /**
@@ -146,8 +153,17 @@ export function encodeTriangleState(extruder: number): string | null {
   return null;
 }
 
+// eslint-disable-next-line no-control-regex
+const XML_ILLEGAL_CONTROL_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
+
 const xmlEscape = (text: string) =>
-  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  text
+    .replace(XML_ILLEGAL_CONTROL_RE, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 
 /** Quantises a coordinate to 0.1 µm (4 decimal places in mm), normalising -0 to 0. */
 const quantizeCoord = (value: number): number => {
@@ -155,10 +171,66 @@ const quantizeCoord = (value: number): number => {
   return Object.is(rounded, -0) ? 0 : rounded;
 };
 
-/** Trims a coordinate to something a file does not need eight decimals of. */
-const num = (value: number) => String(quantizeCoord(value));
+/**
+ * Streams XML fragments into UTF-8 byte chunks so dense sculpts never hit V8's
+ * single-string length limit or allocate a 100+ MB intermediate UTF-16 string.
+ */
+class XmlByteBuilder {
+  private chunks: Uint8Array[] = [];
+  private buf: string[] = [];
+  private bufLen = 0;
+  private totalBytes = 0;
+  private static readonly FLUSH_CHARS = 1 << 18;
+
+  push(text: string): void {
+    if (!text) return;
+    this.buf.push(text);
+    this.bufLen += text.length;
+    if (this.bufLen >= XmlByteBuilder.FLUSH_CHARS) this.flush();
+  }
+
+  private flush(): void {
+    if (this.buf.length === 0) return;
+    const encoded = utf8(this.buf.join(''));
+    this.chunks.push(encoded);
+    this.totalBytes += encoded.byteLength;
+    this.buf.length = 0;
+    this.bufLen = 0;
+  }
+
+  toChunks(): Uint8Array[] {
+    this.flush();
+    return this.chunks;
+  }
+
+  get byteLength(): number {
+    this.flush();
+    return this.totalBytes;
+  }
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const p of parts) total += p.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.byteLength;
+  }
+  return out;
+}
 
 interface TriangleColor { r: number; g: number; b: number; }
+
+/** 4 bits a channel packed into an integer: two colours this close are one filament. */
+const colourKey3 = (r: number, g: number, b: number): number =>
+  (Math.round(Math.fround(r) * 15) << 8) |
+  (Math.round(Math.fround(g) * 15) << 4) |
+  Math.round(Math.fround(b) * 15);
+
+/** 4 bits a channel: two colours this close are one filament. */
+const colourKey = (c: number[]) => colourKey3(c[0] ?? 0, c[1] ?? 0, c[2] ?? 0);
 
 /**
  * Reduces every triangle in the export to a handful of filament colours.
@@ -175,55 +247,78 @@ interface TriangleColor { r: number; g: number; b: number; }
  * actually laid down; the triangle is then given whichever slot is nearest its
  * average.
  */
-function buildPalette(cornerColors: number[][], maxExtruders: number, required: number[][] = [], outerFirst: number[][] = []) {
-  const buckets = new Map<string, { color: TriangleColor; count: number }>();
-  for (const [r, g, b] of cornerColors) {
-    const c = { r, g, b };
-    // Quantised to 4 bits a channel before counting, so the soft edge of a
-    // brushed mark does not register as a hundred distinct colours.
-    const key = `${Math.round(c.r * 15)},${Math.round(c.g * 15)},${Math.round(c.b * 15)}`;
-    const bucket = buckets.get(key);
-    if (bucket) bucket.count++;
-    else buckets.set(key, { color: c, count: 1 });
+function buildPalette(
+  cornerColorArrays: Float32Array[],
+  maxExtruders: number,
+  required: number[][] = [],
+  outerFirst: number[][] = [],
+) {
+  const buckets = new Map<number, { key: number; color: TriangleColor; count: number; order: number }>();
+  let nextOrder = 0;
+  for (const arr of cornerColorArrays) {
+    for (let i = 0; i + 2 < arr.length; i += 3) {
+      const r = arr[i], g = arr[i + 1], b = arr[i + 2];
+      // Quantised to 4 bits a channel before counting, so the soft edge of a
+      // brushed mark does not register as a hundred distinct colours.
+      const key = colourKey3(r, g, b);
+      const bucket = buckets.get(key);
+      if (bucket) bucket.count++;
+      else buckets.set(key, { key, color: { r, g, b }, count: 1, order: nextOrder++ });
+    }
   }
 
-  const ranked = [...buckets.values()].sort((a, b) => b.count - a.count);
+  // Seed any required volume colour that has not yet appeared in corner buckets
+  // so an explicit volume material is never silently dropped.
+  const must = new Set<number>();
+  for (const c of required) {
+    const key = colourKey(c);
+    must.add(key);
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        key,
+        color: { r: c[0] ?? 0, g: c[1] ?? 0, b: c[2] ?? 0 },
+        count: 0,
+        order: nextOrder++,
+      });
+    }
+  }
+
+  const ranked = [...buckets.values()].sort((a, b) => b.count - a.count || a.order - b.order);
   // Volumes nested in one object (or material-paired mold parts) have a fixed
   // extruder order: shell/holder is filament 1 and soluble liner/insert is
   // filament 2, however fine the liner mesh is.
-  const outerRank = new Map<string, number>();
+  const outerRank = new Map<number, number>();
   for (const c of outerFirst) {
     const k = colourKey(c);
     if (!outerRank.has(k)) outerRank.set(k, outerRank.size);
   }
-  const rank = (b: { color: TriangleColor }) => outerRank.get(colourKey([b.color.r, b.color.g, b.color.b])) ?? outerRank.size;
+  const rank = (b: { key: number }) => outerRank.get(b.key) ?? outerRank.size;
   // A volume's own colour is a material chosen on purpose, so it keeps a slot
   // ahead of a paint colour however few corners it has.
-  const must = new Set(required.map(colourKey));
   const kept = ranked
-    .filter((b) => must.has(colourKey([b.color.r, b.color.g, b.color.b])))
-    .sort((a, b) => rank(a) - rank(b) || b.count - a.count);
-  const rest = ranked.filter((b) => !must.has(colourKey([b.color.r, b.color.g, b.color.b])));
+    .filter((b) => must.has(b.key))
+    .sort((a, b) => rank(a) - rank(b) || b.count - a.count || a.order - b.order);
+  const rest = ranked.filter((b) => !must.has(b.key));
   const room = Math.max(1, maxExtruders);
   const chosen = [...kept.slice(0, room), ...rest.slice(0, Math.max(0, room - kept.length))];
-  const slots = chosen.sort((a, b) => rank(a) - rank(b) || b.count - a.count).map((b) => b.color);
+  const slots = chosen
+    .sort((a, b) => rank(a) - rank(b) || b.count - a.count || a.order - b.order)
+    .map((b) => b.color);
 
-  const assign = (c: TriangleColor) => {
+  const assignRgb = (r: number, g: number, b: number) => {
     let best = 0;
     let bestDistance = Infinity;
     for (let i = 0; i < slots.length; i++) {
       const s = slots[i];
-      const d = (s.r - c.r) ** 2 + (s.g - c.g) ** 2 + (s.b - c.b) ** 2;
+      const dr = s.r - r, dg = s.g - g, db = s.b - b;
+      const d = dr * dr + dg * dg + db * db;
       if (d < bestDistance) { bestDistance = d; best = i; }
     }
     return best;
   };
 
-  return { slots, assign };
+  return { slots, assignRgb };
 }
-
-/** 4 bits a channel: two colours this close are one filament. */
-const colourKey = (c: number[]) => `${Math.round(c[0] * 15)},${Math.round(c[1] * 15)},${Math.round(c[2] * 15)}`;
 
 function meshBounds(positions: ArrayLike<number>): { min: number[]; max: number[] } {
   const min = [Infinity, Infinity, Infinity];
@@ -279,7 +374,7 @@ const MOLD_LINER_NAME_RE = /(?:^|[\s_-])(?:liner|insert)(?:$|[\s_,-])/i;
  *  3. Volumes sharing one composite object, outermost bounding box first.
  */
 function priorityMaterials(meshes: ThreeMfMesh[], positionsOf: ArrayLike<number>[], objectOf: string[]): number[][] {
-  const explicit = new Map<string, { colour: number[]; order: number; size: number }>();
+  const explicit = new Map<number, { colour: number[]; order: number; size: number }>();
   const boxSize = (i: number) => {
     const { min, max } = meshBounds(positionsOf[i]);
     return (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
@@ -311,13 +406,13 @@ function priorityMaterials(meshes: ThreeMfMesh[], positionsOf: ArrayLike<number>
     liners.sort((a, b) => b.size - a.size).forEach((l) => ordered.push(l.colour));
   }
 
-  const colours = new Map<string, Set<string>>();
+  const colours = new Map<string, Set<number>>();
   meshes.forEach((m, i) => {
-    const set = colours.get(objectOf[i]) ?? new Set<string>();
+    const set = colours.get(objectOf[i]) ?? new Set<number>();
     set.add(colourKey(m.baseColor));
     colours.set(objectOf[i], set);
   });
-  const largest = new Map<string, { colour: number[]; size: number }>();
+  const largest = new Map<number, { colour: number[]; size: number }>();
   meshes.forEach((m, i) => {
     if (colours.get(objectOf[i])!.size < 2) return;
     const size = boxSize(i);
@@ -330,8 +425,72 @@ function priorityMaterials(meshes: ThreeMfMesh[], positionsOf: ArrayLike<number>
   return ordered;
 }
 
+/**
+ * Shared Pass-1 mesh cleaner for both `exportThreeMf` and `exportThreeMfAssemblies`:
+ * quantises coordinates to the 0.1 µm grid, drops non-finite, duplicate-vertex,
+ * and collinear/zero-area (`|u × v|^2 <= 1e-20`) triangles, and welds vertices
+ * that collapse to the same quantised coordinate so 3MF output stays manifold.
+ */
+function weldMeshTriangles(
+  rawPositions: ArrayLike<number>,
+  rawIndices: ArrayLike<number> | null,
+  onValidTriangle?: (i0: number, i1: number, i2: number) => void,
+): { positions: number[]; indices: number[] } {
+  const rawVertexCount = Math.floor(rawPositions.length / 3);
+  const rawIndexCount = rawIndices ? rawIndices.length : rawVertexCount;
+
+  const weldedPositions: number[] = [];
+  const vertexMap = new Map<string, number>();
+  const weld = (x: number, y: number, z: number): number => {
+    const key = `${x},${y},${z}`;
+    let idx = vertexMap.get(key);
+    if (idx === undefined) {
+      idx = weldedPositions.length / 3;
+      vertexMap.set(key, idx);
+      weldedPositions.push(x, y, z);
+    }
+    return idx;
+  };
+
+  const indices: number[] = [];
+  for (let t = 0; t + 2 < rawIndexCount; t += 3) {
+    const i0 = rawIndices ? rawIndices[t] : t;
+    const i1 = rawIndices ? rawIndices[t + 1] : t + 1;
+    const i2 = rawIndices ? rawIndices[t + 2] : t + 2;
+    if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= rawVertexCount || i1 >= rawVertexCount || i2 >= rawVertexCount) continue;
+
+    const x0 = quantizeCoord(rawPositions[i0 * 3]);
+    const y0 = quantizeCoord(rawPositions[i0 * 3 + 1]);
+    const z0 = quantizeCoord(rawPositions[i0 * 3 + 2]);
+    const x1 = quantizeCoord(rawPositions[i1 * 3]);
+    const y1 = quantizeCoord(rawPositions[i1 * 3 + 1]);
+    const z1 = quantizeCoord(rawPositions[i1 * 3 + 2]);
+    const x2 = quantizeCoord(rawPositions[i2 * 3]);
+    const y2 = quantizeCoord(rawPositions[i2 * 3 + 1]);
+    const z2 = quantizeCoord(rawPositions[i2 * 3 + 2]);
+    if (!Number.isFinite(x0 + y0 + z0 + x1 + y1 + z1 + x2 + y2 + z2)) continue;
+
+    // Skip zero-area / collinear / duplicate-corner triangles on the 1e-4 grid.
+    const ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
+    const vx = x2 - x0, vy = y2 - y0, vz = z2 - z0;
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    if (nx * nx + ny * ny + nz * nz <= 1e-20) continue;
+
+    const w0 = weld(x0, y0, z0);
+    const w1 = weld(x1, y1, z1);
+    const w2 = weld(x2, y2, z2);
+    if (w0 === w1 || w1 === w2 || w2 === w0) continue;
+
+    indices.push(w0, w1, w2);
+    onValidTriangle?.(i0, i1, i2);
+  }
+  return { positions: weldedPositions, indices };
+}
+
 /** Zips a 3D model part with the package boilerplate every 3MF carries, plus any extra files. */
-function packModel(model: string, extra: ZipEntry[] = []): Uint8Array {
+function packModel(model: Uint8Array, extra: ZipEntry[] = []): Uint8Array {
   const contentTypes =
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -349,7 +508,7 @@ function packModel(model: string, extra: ZipEntry[] = []): Uint8Array {
   return zipStore([
     { path: '[Content_Types].xml', data: utf8(contentTypes) },
     { path: '_rels/.rels', data: utf8(rels) },
-    { path: '3D/3dmodel.model', data: utf8(model) },
+    { path: '3D/3dmodel.model', data: model },
     ...extra,
   ]);
 }
@@ -367,128 +526,108 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
   const maxExtruders = Math.min(32, Math.max(1, Math.round(options.maxExtruders ?? 5)));
 
   // Pass one: weld rounded vertices per mesh, drop degenerate triangles, and
-  // collect every valid triangle's colour so the palette can be decided across
-  // the whole export rather than per object — the same red has to be the same
-  // filament on the lid as on the box.
+  // pack every valid triangle's corner & face colour into flat Float32Arrays
+  // so dense meshes avoid allocating millions of 3-element JS arrays.
   interface Prepared {
     mesh: ThreeMfMesh;
     positions: number[];
     indices: number[];
-    cornerColors: number[][];    // three linear rgb triples per triangle
-    triangleColors: TriangleColor[];
+    /** Flat [r0,g0,b0, r1,g1,b1, r2,g2,b2, ...] per valid triangle. */
+    cornerColors: Float32Array;
+    /** Flat [r,g,b, ...] per valid triangle. */
+    triangleColors: Float32Array;
+    /** False when a vertex-painted mesh has zero corners matching `mesh.baseColor`. */
+    hasBaseColorCorner: boolean;
   }
 
   const prepared: Prepared[] = [];
-  const allCornerColors: number[][] = [];
 
   for (const mesh of meshes) {
-    const rawVertexCount = Math.floor(mesh.positions.length / 3);
-    const rawIndexCount = mesh.indices ? mesh.indices.length : rawVertexCount;
+    const baseR = mesh.baseColor[0] ?? 0.8;
+    const baseG = mesh.baseColor[1] ?? 0.8;
+    const baseB = mesh.baseColor[2] ?? 0.8;
+    const baseKey = colourKey3(baseR, baseG, baseB);
+    const colors = mesh.colors;
+    const colorsLen = colors ? colors.length : 0;
 
-    const colorAt = (v: number): number[] => {
-      if (!mesh.colors || v * 3 + 2 >= mesh.colors.length) return mesh.baseColor;
-      return [mesh.colors[v * 3], mesh.colors[v * 3 + 1], mesh.colors[v * 3 + 2]];
-    };
+    const cornerBuf: number[] = [];
+    const triBuf: number[] = [];
+    let hasBaseColorCorner = !colors;
 
-    const weldedPositions: number[] = [];
-    const vertexMap = new Map<string, number>();
-    const weld = (x: number, y: number, z: number): number => {
-      const key = `${x},${y},${z}`;
-      let idx = vertexMap.get(key);
-      if (idx === undefined) {
-        idx = weldedPositions.length / 3;
-        vertexMap.set(key, idx);
-        weldedPositions.push(x, y, z);
+    const { positions: weldedPositions, indices } = weldMeshTriangles(mesh.positions, mesh.indices, (i0, i1, i2) => {
+      let r0 = baseR, g0 = baseG, b0 = baseB;
+      let r1 = baseR, g1 = baseG, b1 = baseB;
+      let r2 = baseR, g2 = baseG, b2 = baseB;
+      if (colors) {
+        if (i0 * 3 + 2 < colorsLen) { r0 = colors[i0 * 3]; g0 = colors[i0 * 3 + 1]; b0 = colors[i0 * 3 + 2]; }
+        if (i1 * 3 + 2 < colorsLen) { r1 = colors[i1 * 3]; g1 = colors[i1 * 3 + 1]; b1 = colors[i1 * 3 + 2]; }
+        if (i2 * 3 + 2 < colorsLen) { r2 = colors[i2 * 3]; g2 = colors[i2 * 3 + 1]; b2 = colors[i2 * 3 + 2]; }
+        if (
+          !hasBaseColorCorner &&
+          (colourKey3(r0, g0, b0) === baseKey || colourKey3(r1, g1, b1) === baseKey || colourKey3(r2, g2, b2) === baseKey)
+        ) {
+          hasBaseColorCorner = true;
+        }
       }
-      return idx;
-    };
-
-    const indices: number[] = [];
-    const cornerColors: number[][] = [];
-    const triangleColors: TriangleColor[] = [];
-    for (let t = 0; t + 2 < rawIndexCount; t += 3) {
-      const i0 = mesh.indices ? mesh.indices[t] : t;
-      const i1 = mesh.indices ? mesh.indices[t + 1] : t + 1;
-      const i2 = mesh.indices ? mesh.indices[t + 2] : t + 2;
-      if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= rawVertexCount || i1 >= rawVertexCount || i2 >= rawVertexCount) continue;
-
-      const x0 = quantizeCoord(mesh.positions[i0 * 3]);
-      const y0 = quantizeCoord(mesh.positions[i0 * 3 + 1]);
-      const z0 = quantizeCoord(mesh.positions[i0 * 3 + 2]);
-      const x1 = quantizeCoord(mesh.positions[i1 * 3]);
-      const y1 = quantizeCoord(mesh.positions[i1 * 3 + 1]);
-      const z1 = quantizeCoord(mesh.positions[i1 * 3 + 2]);
-      const x2 = quantizeCoord(mesh.positions[i2 * 3]);
-      const y2 = quantizeCoord(mesh.positions[i2 * 3 + 1]);
-      const z2 = quantizeCoord(mesh.positions[i2 * 3 + 2]);
-      if (!Number.isFinite(x0 + y0 + z0 + x1 + y1 + z1 + x2 + y2 + z2)) continue;
-
-      // Skip zero-area / collinear / duplicate-corner triangles on the 1e-4 grid.
-      const ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
-      const vx = x2 - x0, vy = y2 - y0, vz = z2 - z0;
-      const nx = uy * vz - uz * vy;
-      const ny = uz * vx - ux * vz;
-      const nz = ux * vy - uy * vx;
-      if (nx * nx + ny * ny + nz * nz <= 1e-20) continue;
-
-      const w0 = weld(x0, y0, z0);
-      const w1 = weld(x1, y1, z1);
-      const w2 = weld(x2, y2, z2);
-      if (w0 === w1 || w1 === w2 || w2 === w0) continue;
-
-      indices.push(w0, w1, w2);
-      const a = colorAt(i0);
-      const b = colorAt(i1);
-      const c = colorAt(i2);
-      cornerColors.push(a, b, c);
+      cornerBuf.push(r0, g0, b0, r1, g1, b1, r2, g2, b2);
       // A slicer prints a whole triangle in one filament. Two corners alike
       // decide it, so a triangle across a hard-edged mark's boundary is one
       // colour or the other rather than a blend that snaps to some third
       // filament; otherwise the face's colour is the average of its corners,
       // which decides which side of a soft edge it falls on.
-      const same = (p: number[], q: number[]) => p[0] === q[0] && p[1] === q[1] && p[2] === q[2];
-      const two = same(a, b) || same(a, c) ? a : same(b, c) ? b : null;
-      triangleColors.push(two
-        ? { r: two[0], g: two[1], b: two[2] }
-        : { r: (a[0] + b[0] + c[0]) / 3, g: (a[1] + b[1] + c[1]) / 3, b: (a[2] + b[2] + c[2]) / 3 });
-    }
+      const eq01 = r0 === r1 && g0 === g1 && b0 === b1;
+      const eq02 = r0 === r2 && g0 === g2 && b0 === b2;
+      const eq12 = r1 === r2 && g1 === g2 && b1 === b2;
+      if (eq01 || eq02) triBuf.push(r0, g0, b0);
+      else if (eq12) triBuf.push(r1, g1, b1);
+      else triBuf.push((r0 + r1 + r2) / 3, (g0 + g1 + g2) / 3, (b0 + b1 + b2) / 3);
+    });
 
     if (indices.length === 0) continue;
-    prepared.push({ mesh, positions: weldedPositions, indices, cornerColors, triangleColors });
-    for (const c of cornerColors) allCornerColors.push(c);
+    prepared.push({
+      mesh,
+      positions: weldedPositions,
+      indices,
+      cornerColors: Float32Array.from(cornerBuf),
+      triangleColors: Float32Array.from(triBuf),
+      hasBaseColorCorner,
+    });
   }
 
   const validMeshes = prepared.map((p) => p.mesh);
   const validPositions = prepared.map((p) => p.positions);
   const objectOf = printedObjects(validMeshes, validPositions);
-  const { slots, assign } = buildPalette(
-    allCornerColors,
+  const requiredColors = prepared
+    .filter((p) => p.hasBaseColorCorner || p.mesh.filamentOrder !== undefined)
+    .map((p) => p.mesh.baseColor);
+  const { slots, assignRgb } = buildPalette(
+    prepared.map((p) => p.cornerColors),
     maxExtruders,
-    validMeshes.map((m) => m.baseColor),
+    requiredColors,
     priorityMaterials(validMeshes, validPositions, objectOf),
   );
   const slotCounts = new Array(slots.length).fill(0);
-  const filamentOf = (rgb: number[]) => assign({ r: rgb[0] ?? 0.8, g: rgb[1] ?? 0.8, b: rgb[2] ?? 0.8 }) + 1;
+  const filamentOf = (rgb: number[]) => assignRgb(rgb[0] ?? 0.8, rgb[1] ?? 0.8, rgb[2] ?? 0.8) + 1;
 
   // Pass two: the XML. Colours are pooled across the export so one <m:color>
   // serves every triangle corner that is that colour — a painted die has a few
   // dozen distinct colours, not one per vertex.
-  const colorIndex = new Map<string, number>();
+  const colorIndex = new Map<number, number>();
   const colorList: string[] = [];
-  const colorId = (rgb: number[]) => {
-    const hex = linearToSrgbHex(rgb);
-    let index = colorIndex.get(hex);
+  const colorId = (r: number, g: number, b: number) => {
+    const packed = rgbToSrgbPacked(r, g, b);
+    let index = colorIndex.get(packed);
     if (index === undefined) {
       index = colorList.length;
-      colorIndex.set(hex, index);
-      colorList.push(hex);
+      colorIndex.set(packed, index);
+      colorList.push(srgbPackedToHex(packed));
     }
     return index;
   };
 
   const COLORGROUP_ID = 1;
   let nextObjectId = 2;
-  const objects: string[] = [];
+  const objectsXml = new XmlByteBuilder();
   let triangleTotal = 0;
 
   // Every mesh is written as a volume of an object, the way the mold liner's
@@ -498,44 +637,68 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
   interface Volume { id: number; name: string; extruder: number; triangles: number }
   const printed = new Map<string, { name: string; volumes: Volume[] }>();
 
-  prepared.forEach(({ mesh, positions, indices, cornerColors, triangleColors }, meshIndex) => {
+  prepared.forEach(({ mesh, positions, indices, cornerColors, triangleColors, hasBaseColorCorner }, meshIndex) => {
     const objectId = nextObjectId++;
-    const extruder = filamentOf(mesh.baseColor);
-    const vertexCount = positions.length / 3;
+    const faceCount = indices.length / 3;
+    const triSlots = new Uint8Array(faceCount);
+    const localCounts = new Array<number>(slots.length).fill(0);
 
-    const vertexLines: string[] = [];
-    for (let v = 0; v < vertexCount; v++) {
-      vertexLines.push(
-        `<vertex x="${positions[v * 3]}" y="${positions[v * 3 + 1]}" z="${positions[v * 3 + 2]}"/>`
+    for (let face = 0; face < faceCount; face++) {
+      const slot = assignRgb(
+        triangleColors[face * 3],
+        triangleColors[face * 3 + 1],
+        triangleColors[face * 3 + 2],
       );
+      triSlots[face] = slot;
+      localCounts[slot]++;
+      slotCounts[slot]++;
     }
 
-    const triangleLines: string[] = [];
-    let face = 0;
-    for (let t = 0; t + 2 < indices.length; t += 3, face++) {
-      const p1 = colorId(cornerColors[face * 3]);
-      const p2 = colorId(cornerColors[face * 3 + 1]);
-      const p3 = colorId(cornerColors[face * 3 + 2]);
+    // For a 100%-vertex-painted mesh with no corners in its baseColor (e.g. a
+    // viewport-painted body whose Three.js material is white while its vertex
+    // attribute holds the real colours), assign its dominant painted slot as
+    // the volume's extruder instead of snapping an unused baseColor.
+    let extruder: number;
+    if (!hasBaseColorCorner && mesh.filamentOrder === undefined && slots.length > 0) {
+      let dominant = 0;
+      for (let s = 1; s < localCounts.length; s++) {
+        if (localCounts[s] > localCounts[dominant]) dominant = s;
+      }
+      extruder = dominant + 1;
+    } else {
+      extruder = filamentOf(mesh.baseColor);
+    }
 
-      const slot = assign(triangleColors[face]);
-      slotCounts[slot]++;
+    const vertexCount = positions.length / 3;
+    objectsXml.push(
+      `<object id="${objectId}" type="model" name="${xmlEscape(mesh.name)}" pid="${COLORGROUP_ID}" pindex="0"><mesh><vertices>`,
+    );
+    for (let v = 0; v < vertexCount; v++) {
+      objectsXml.push(
+        `<vertex x="${positions[v * 3]}" y="${positions[v * 3 + 1]}" z="${positions[v * 3 + 2]}"/>`,
+      );
+    }
+    objectsXml.push('</vertices><triangles>');
+    for (let face = 0; face < faceCount; face++) {
+      const cOff = face * 9;
+      const p1 = colorId(cornerColors[cOff], cornerColors[cOff + 1], cornerColors[cOff + 2]);
+      const p2 = colorId(cornerColors[cOff + 3], cornerColors[cOff + 4], cornerColors[cOff + 5]);
+      const p3 = colorId(cornerColors[cOff + 6], cornerColors[cOff + 7], cornerColors[cOff + 8]);
+
+      const slot = triSlots[face];
       const painted = slot + 1 === extruder ? null : encodeTriangleState(slot + 1);
       const paint = painted ? ` paint_color="${painted}" slic3rpe:mmu_segmentation="${painted}"` : '';
-
-      triangleLines.push(
-        `<triangle v1="${indices[t]}" v2="${indices[t + 1]}" v3="${indices[t + 2]}" p1="${p1}" p2="${p2}" p3="${p3}"${paint}/>`
+      const t = face * 3;
+      objectsXml.push(
+        `<triangle v1="${indices[t]}" v2="${indices[t + 1]}" v3="${indices[t + 2]}" p1="${p1}" p2="${p2}" p3="${p3}"${paint}/>`,
       );
-      triangleTotal++;
     }
+    objectsXml.push('</triangles></mesh></object>');
+    triangleTotal += faceCount;
 
-    objects.push(
-      `<object id="${objectId}" type="model" name="${xmlEscape(mesh.name)}" pid="${COLORGROUP_ID}" pindex="0">` +
-      `<mesh><vertices>${vertexLines.join('')}</vertices>` +
-      `<triangles>${triangleLines.join('')}</triangles></mesh></object>`
-    );
     const key = objectOf[meshIndex];
     const entry = printed.get(key) ?? { name: mesh.objectName ?? mesh.object ?? mesh.name, volumes: [] };
-    entry.volumes.push({ id: objectId, name: mesh.name, extruder, triangles: face });
+    entry.volumes.push({ id: objectId, name: mesh.name, extruder, triangles: faceCount });
     printed.set(key, entry);
   });
 
@@ -544,10 +707,10 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
   const prusaObjects: string[] = [];
   for (const { name, volumes } of printed.values()) {
     const assemblyId = nextObjectId++;
-    objects.push(
+    objectsXml.push(
       `<object id="${assemblyId}" type="model" name="${xmlEscape(name)}"><components>` +
       volumes.map((v) => `<component objectid="${v.id}"/>`).join('') +
-      '</components></object>'
+      '</components></object>',
     );
     items.push(`<item objectid="${assemblyId}"/>`);
     bambuObjects.push(
@@ -590,7 +753,7 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     ? '<metadata name="BambuStudio:3mfVersion">1</metadata>'
     : '';
 
-  const model =
+  const modelHeader = utf8(
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     `<model unit="millimeter" xml:lang="en-US" xmlns="${CORE_NS}" xmlns:m="${MATERIAL_NS}" xmlns:slic3rpe="${SLIC3R_NS}">` +
     `<metadata name="Application">${xmlEscape(options.application ?? 'PhysBox Studio')}</metadata>` +
@@ -598,13 +761,15 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     // The material extension is deliberately NOT in requiredextensions: colour
     // is decoration, and a reader that does not understand it should still open
     // the model rather than refuse the file.
-    `<resources>${colorGroupXml}${objects.join('')}</resources>` +
-    `<build>${items.join('')}</build></model>`;
+    `<resources>${colorGroupXml}`,
+  );
+  const modelFooter = utf8(`</resources><build>${items.join('')}</build></model>`);
+  const modelBytes = concatBytes([modelHeader, ...objectsXml.toChunks(), modelFooter]);
 
   const config = (body: string[]) => '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n' + body.join('') + '</config>\n';
 
   return {
-    data: packModel(model, [
+    data: packModel(modelBytes, [
       { path: 'Metadata/model_settings.config', data: utf8(config(bambuObjects)) },
       { path: 'Metadata/Slic3r_PE_model.config', data: utf8(config(prusaObjects)) },
     ]),
@@ -673,7 +838,7 @@ export function exportThreeMfAssemblies(
   options: { application?: string } = {},
 ): ThreeMfAssemblyResult {
   let nextId = 1;
-  const objects: string[] = [];
+  const objectsXml = new XmlByteBuilder();
   const items: string[] = [];
   const bambuObjects: string[] = [];
   const prusaObjects: string[] = [];
@@ -691,18 +856,12 @@ export function exportThreeMfAssemblies(
     let firstSet = false;
     let firstId = 0;
     for (const part of rawParts) {
-      const vertexCount = Math.floor(part.positions.length / 3);
-      const rawTriCount = Math.floor(part.indices.length / 3);
-      const triangleLines: string[] = [];
-      for (let t = 0; t < rawTriCount; t++) {
-        const v1 = part.indices[t * 3];
-        const v2 = part.indices[t * 3 + 1];
-        const v3 = part.indices[t * 3 + 2];
-        if (v1 < 0 || v2 < 0 || v3 < 0 || v1 >= vertexCount || v2 >= vertexCount || v3 >= vertexCount) continue;
-        if (v1 === v2 || v2 === v3 || v3 === v1) continue;
-        triangleLines.push(`<triangle v1="${v1}" v2="${v2}" v3="${v3}"/>`);
-      }
-      if (triangleLines.length === 0) continue;
+      // Share Pass-1 quantisation, finite guard, zero-area/collinear filtering,
+      // and post-rounding vertex welding so sub-0.1 µm edges never emit
+      // zero-area non-manifold triangles or NaN XML attributes.
+      const { positions, indices } = weldMeshTriangles(part.positions, part.indices);
+      const triangleCount = indices.length / 3;
+      if (triangleCount === 0) continue;
 
       if (!firstSet) {
         firstExtruder = part.extruder;
@@ -711,21 +870,21 @@ export function exportThreeMfAssemblies(
       const id = nextId++;
       partIds.push(id);
       extruders.add(part.extruder);
-
-      const vertexLines: string[] = [];
-      for (let v = 0; v < vertexCount; v++) {
-        vertexLines.push(
-          `<vertex x="${num(part.positions[v * 3])}" y="${num(part.positions[v * 3 + 1])}" z="${num(part.positions[v * 3 + 2])}"/>`
-        );
-      }
-      const triangleCount = triangleLines.length;
       triangleTotal += triangleCount;
 
-      objects.push(
-        `<object id="${id}" type="model" name="${xmlEscape(part.name)}">` +
-        `<mesh><vertices>${vertexLines.join('')}</vertices>` +
-        `<triangles>${triangleLines.join('')}</triangles></mesh></object>`
-      );
+      const vertexCount = positions.length / 3;
+      objectsXml.push(`<object id="${id}" type="model" name="${xmlEscape(part.name)}"><mesh><vertices>`);
+      for (let v = 0; v < vertexCount; v++) {
+        objectsXml.push(
+          `<vertex x="${positions[v * 3]}" y="${positions[v * 3 + 1]}" z="${positions[v * 3 + 2]}"/>`,
+        );
+      }
+      objectsXml.push('</vertices><triangles>');
+      for (let t = 0; t + 2 < indices.length; t += 3) {
+        objectsXml.push(`<triangle v1="${indices[t]}" v2="${indices[t + 1]}" v3="${indices[t + 2]}"/>`);
+      }
+      objectsXml.push('</triangles></mesh></object>');
+
       bambuParts.push(
         `    <part id="${id}" subtype="normal_part">\n` +
         `      <metadata key="name" value="${xmlEscape(part.name)}"/>\n` +
@@ -745,10 +904,10 @@ export function exportThreeMfAssemblies(
     if (partIds.length === 0) continue;
 
     const assemblyId = nextId++;
-    objects.push(
+    objectsXml.push(
       `<object id="${assemblyId}" type="model" name="${xmlEscape(assembly.name)}"><components>` +
       partIds.map((id) => `<component objectid="${id}"/>`).join('') +
-      '</components></object>'
+      '</components></object>',
     );
     items.push(`<item objectid="${assemblyId}"/>`);
     bambuObjects.push(
@@ -771,18 +930,20 @@ export function exportThreeMfAssemblies(
     ? '<metadata name="BambuStudio:3mfVersion">1</metadata>'
     : '';
 
-  const model =
+  const modelHeader = utf8(
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     `<model unit="millimeter" xml:lang="en-US" xmlns="${CORE_NS}">` +
     `<metadata name="Application">${xmlEscape(options.application ?? 'PhysBox Studio')}</metadata>` +
     bambuMeta +
-    `<resources>${objects.join('')}</resources>` +
-    `<build>${items.join('')}</build></model>`;
+    '<resources>',
+  );
+  const modelFooter = utf8(`</resources><build>${items.join('')}</build></model>`);
+  const modelBytes = concatBytes([modelHeader, ...objectsXml.toChunks(), modelFooter]);
 
   const config = (body: string[]) => '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n' + body.join('') + '</config>\n';
 
   return {
-    data: packModel(model, [
+    data: packModel(modelBytes, [
       { path: 'Metadata/model_settings.config', data: utf8(config(bambuObjects)) },
       { path: 'Metadata/Slic3r_PE_model.config', data: utf8(config(prusaObjects)) },
     ]),

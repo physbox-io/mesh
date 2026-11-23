@@ -49,67 +49,86 @@ const DOS_DATE = 0x0021;
 
 /** Packs entries into a ZIP archive with no compression. */
 export function zipStore(entries: ZipEntry[]): Uint8Array {
-  const locals: Uint8Array[] = [];
-  const centrals: Uint8Array[] = [];
+  if (entries.length > 0xffff) {
+    throw new RangeError(`ZIP32 supports at most 65535 entries (got ${entries.length}).`);
+  }
+
+  interface PreparedEntry {
+    name: Uint8Array;
+    data: Uint8Array;
+    crc: number;
+    size: number;
+    localOffset: number;
+  }
+
+  const prepared: PreparedEntry[] = new Array(entries.length);
   let offset = 0;
+  let centralSize = 0;
 
-  for (const entry of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     const name = utf8(entry.path);
+    if (name.length > 0xffff) {
+      throw new RangeError(`ZIP entry path exceeds 65535 UTF-8 bytes: ${entry.path.slice(0, 80)}`);
+    }
+    const size = entry.data.byteLength;
+    if (size > 0xffffffff) {
+      throw new RangeError(`ZIP32 entry "${entry.path}" exceeds 4 GiB limit (${size} bytes).`);
+    }
     const crc = crc32(entry.data);
-    const size = entry.data.length;
-
-    const local = new Uint8Array(30 + name.length + size);
-    const localView = new DataView(local.buffer);
-    localView.setUint32(0, 0x04034b50, true);  // local file header
-    localView.setUint16(4, 20, true);          // version needed
-    localView.setUint16(6, 0x0800, true);      // flags: UTF-8 names
-    localView.setUint16(8, 0, true);           // method: stored
-    localView.setUint16(10, DOS_TIME, true);
-    localView.setUint16(12, DOS_DATE, true);
-    localView.setUint32(14, crc, true);
-    localView.setUint32(18, size, true);       // compressed
-    localView.setUint32(22, size, true);       // uncompressed
-    localView.setUint16(26, name.length, true);
-    localView.setUint16(28, 0, true);          // extra field length
-    local.set(name, 30);
-    local.set(entry.data, 30 + name.length);
-    locals.push(local);
-
-    const central = new Uint8Array(46 + name.length);
-    const centralView = new DataView(central.buffer);
-    centralView.setUint32(0, 0x02014b50, true); // central directory header
-    centralView.setUint16(4, 20, true);         // version made by
-    centralView.setUint16(6, 20, true);         // version needed
-    centralView.setUint16(8, 0x0800, true);
-    centralView.setUint16(10, 0, true);
-    centralView.setUint16(12, DOS_TIME, true);
-    centralView.setUint16(14, DOS_DATE, true);
-    centralView.setUint32(16, crc, true);
-    centralView.setUint32(20, size, true);
-    centralView.setUint32(24, size, true);
-    centralView.setUint16(28, name.length, true);
-    centralView.setUint32(42, offset, true);    // offset of the local header
-    central.set(name, 46);
-    centrals.push(central);
-
-    offset += local.length;
+    prepared[i] = { name, data: entry.data, crc, size, localOffset: offset };
+    offset += 30 + name.length + size;
+    centralSize += 46 + name.length;
   }
 
-  const centralSize = centrals.reduce((sum, c) => sum + c.length, 0);
-  const end = new Uint8Array(22);
-  const endView = new DataView(end.buffer);
-  endView.setUint32(0, 0x06054b50, true);       // end of central directory
-  endView.setUint16(8, entries.length, true);   // entries on this disk
-  endView.setUint16(10, entries.length, true);  // entries total
-  endView.setUint32(12, centralSize, true);
-  endView.setUint32(16, offset, true);          // where the directory starts
+  const total = offset + centralSize + 22;
+  if (offset > 0xffffffff || centralSize > 0xffffffff || total > 0xffffffff) {
+    throw new RangeError(`ZIP32 archive exceeds 4 GiB limit (${total} bytes).`);
+  }
 
-  const total = offset + centralSize + end.length;
   const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
   let cursor = 0;
-  for (const part of [...locals, ...centrals, end]) {
-    out.set(part, cursor);
-    cursor += part.length;
+
+  for (const { name, data, crc, size } of prepared) {
+    view.setUint32(cursor, 0x04034b50, true);       // local file header
+    view.setUint16(cursor + 4, 20, true);           // version needed
+    view.setUint16(cursor + 6, 0x0800, true);       // flags: UTF-8 names
+    view.setUint16(cursor + 8, 0, true);            // method: stored
+    view.setUint16(cursor + 10, DOS_TIME, true);
+    view.setUint16(cursor + 12, DOS_DATE, true);
+    view.setUint32(cursor + 14, crc, true);
+    view.setUint32(cursor + 18, size, true);        // compressed
+    view.setUint32(cursor + 22, size, true);        // uncompressed
+    view.setUint16(cursor + 26, name.length, true);
+    view.setUint16(cursor + 28, 0, true);           // extra field length
+    out.set(name, cursor + 30);
+    out.set(data, cursor + 30 + name.length);
+    cursor += 30 + name.length + size;
   }
+
+  for (const { name, crc, size, localOffset } of prepared) {
+    view.setUint32(cursor, 0x02014b50, true);       // central directory header
+    view.setUint16(cursor + 4, 20, true);           // version made by
+    view.setUint16(cursor + 6, 20, true);           // version needed
+    view.setUint16(cursor + 8, 0x0800, true);
+    view.setUint16(cursor + 10, 0, true);
+    view.setUint16(cursor + 12, DOS_TIME, true);
+    view.setUint16(cursor + 14, DOS_DATE, true);
+    view.setUint32(cursor + 16, crc, true);
+    view.setUint32(cursor + 20, size, true);
+    view.setUint32(cursor + 24, size, true);
+    view.setUint16(cursor + 28, name.length, true);
+    view.setUint32(cursor + 42, localOffset, true); // offset of the local header
+    out.set(name, cursor + 46);
+    cursor += 46 + name.length;
+  }
+
+  view.setUint32(cursor, 0x06054b50, true);         // end of central directory
+  view.setUint16(cursor + 8, entries.length, true); // entries on this disk
+  view.setUint16(cursor + 10, entries.length, true);// entries total
+  view.setUint32(cursor + 12, centralSize, true);
+  view.setUint32(cursor + 16, offset, true);        // where the directory starts
+
   return out;
 }

@@ -9,7 +9,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
 import { cutAlongPlane, splitForPrint, sectionPoseMatrix, type SplitResult } from '../src/utils/printSplit';
-import { layoutOnBed, packOnBed, rotatePoints, type Vec3 } from '../src/utils/printPlate';
+import { layoutOnBed, layoutSetsOnBed, packOnBed, rotatePoints, type Vec3 } from '../src/utils/printPlate';
+import { exportPrintFiles } from '../src/utils/printExport';
 import { supportArea } from '../src/utils/printSupport';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 
@@ -256,6 +257,36 @@ describe('packOnBed', () => {
     }
     expect(Math.max(...places.map((p) => p.plate))).toBeGreaterThan(0);
   });
+
+  it('flags parts exceeding bed.heightMm in packOnBed, layoutSetsOnBed, and exportPrintFiles', () => {
+    const places = packOnBed(
+      [{ w: 50, d: 50, h: 120 }, { w: 50, d: 50, h: 250 }],
+      { widthMm: 200, depthMm: 200, heightMm: 200 },
+    );
+    expect(places[0].exceedsHeight).toBeUndefined();
+    expect(places[1].exceedsHeight).toBe(true);
+
+    const sets = layoutSetsOnBed(
+      [[box(40, 40, 260)]],
+      { widthMm: 200, depthMm: 200, heightMm: 200 },
+    );
+    expect(sets[0].heightMm).toBeCloseTo(260, 2);
+    expect(sets[0].exceedsHeight).toBe(true);
+
+    const tallScene = {
+      nodes: [{
+        id: 'tower', name: 'Tall Tower', type: 'body' as const, pos: [0, 0, 0.13],
+        geoms: [{ name: 'tower_g', type: 'box' as const, size: [0.02, 0.02, 0.13], rgba: [0.5, 0.5, 0.5, 1] }],
+        joints: [], children: [],
+      }],
+    };
+    const exported = exportPrintFiles(tallScene, {
+      format: '3mf',
+      plate: true,
+      bed: { widthMm: 200, depthMm: 200, heightMm: 200 },
+    });
+    expect(exported.warnings.some((w) => /Tall Tower.*exceeds.*max Z height.*200 mm/i.test(w))).toBe(true);
+  });
 });
 
 describe('layoutOnBed', () => {
@@ -496,6 +527,42 @@ describe('Split for Print: necks', () => {
         .add(wasm.Manifold.cube([515 - at, 60, 60]).translate([at + 5, 0, 0]))
         .add(wasm.Manifold.cube([10, 3, 3]).translate([at - 5, 28.5, 28.5]));
       expect(count(bar)).toBe(3);
+    }
+  });
+});
+
+describe('splitForPrint — WASM handle hygiene', () => {
+  it('deletes every CrossSection.circle allocated by clearOfHoles on multi-cut dowel splits', () => {
+    let created = 0;
+    let deleted = 0;
+    const origCircle = wasm.CrossSection.circle.bind(wasm.CrossSection);
+    const wrappedCircle = ((...args: Parameters<typeof wasm.CrossSection.circle>) => {
+      const cs = origCircle(...args);
+      created++;
+      const origDelete = cs.delete.bind(cs);
+      cs.delete = () => {
+        deleted++;
+        origDelete();
+      };
+      return cs;
+    }) as typeof wasm.CrossSection.circle;
+
+    const origDesc = Object.getOwnPropertyDescriptor(wasm.CrossSection, 'circle');
+    wasm.CrossSection.circle = wrappedCircle;
+    try {
+      // Compact 120 × 120 × 30 mm block on a 70 mm bed forces perpendicular cuts
+      // whose dowel holes come within reach of the neighbouring joint face,
+      // exercising clearOfHoles' CrossSection.circle loop.
+      const r = ok(splitForPrint(wasm, [box(120, 120, 30)], {
+        bed: { widthMm: 70, depthMm: 70, heightMm: 70 },
+        joinery: { kind: 'dowel' },
+      }));
+      expect(r.sections.length).toBeGreaterThanOrEqual(4);
+      expect(created).toBeGreaterThan(0);
+      expect(deleted).toBe(created);
+    } finally {
+      if (origDesc) Object.defineProperty(wasm.CrossSection, 'circle', origDesc);
+      else wasm.CrossSection.circle = origCircle;
     }
   });
 });

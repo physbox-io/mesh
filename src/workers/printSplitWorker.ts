@@ -24,56 +24,113 @@ const post = (msg: PrintSplitResponse, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
 
 let mujoco: Promise<MujocoLike> | null = null;
+let activeJobId: number | null = null;
+let activeAborted = false;
+
+async function instantiateMujocoWasm(
+  imports: WebAssembly.Imports,
+): Promise<WebAssembly.WebAssemblyInstantiatedSource> {
+  const response = await fetch(mujocoWasmUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch MuJoCo WASM (${response.status} ${response.statusText}).`);
+  }
+  if (typeof WebAssembly.instantiateStreaming === 'function') {
+    try {
+      return await WebAssembly.instantiateStreaming(response.clone(), imports);
+    } catch {
+      // Fallback when the server serves .wasm with a non-application/wasm MIME type.
+    }
+  }
+  const bytes = await response.arrayBuffer();
+  return WebAssembly.instantiate(bytes, imports);
+}
+
 function loadMujoco(): Promise<MujocoLike> {
-  mujoco ??= new Promise<MujocoLike>((resolve, reject) => {
-    load_mujoco({
-      instantiateWasm: (
-        imports: WebAssembly.Imports,
-        done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
-      ) => {
-        WebAssembly.instantiateStreaming(fetch(mujocoWasmUrl), imports).then(
-          (result) => done(result.instance, result.module),
-          reject,
-        );
-        return {};
-      },
-    } as Parameters<typeof load_mujoco>[0]).then((m) => resolve(m as unknown as MujocoLike), reject);
-  });
-  mujoco.catch(() => { mujoco = null; });
+  if (!mujoco) {
+    mujoco = new Promise<MujocoLike>((resolve, reject) => {
+      let settled = false;
+      const fail = (err: unknown) => {
+        mujoco = null;
+        if (!settled) {
+          settled = true;
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      };
+      load_mujoco({
+        instantiateWasm: (
+          imports: WebAssembly.Imports,
+          done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
+        ) => {
+          instantiateMujocoWasm(imports).then(
+            (result) => done(result.instance, result.module),
+            fail,
+          );
+          return {};
+        },
+        onAbort: (what: unknown) => {
+          const reason = `MuJoCo aborted: ${what instanceof Error ? what.message : String(what)}`;
+          mujoco = null;
+          if (!settled) {
+            fail(new Error(reason));
+          } else if (activeJobId !== null && !activeAborted) {
+            activeAborted = true;
+            post({ type: 'FAILED', id: activeJobId, error: reason });
+          }
+        },
+      } as Parameters<typeof load_mujoco>[0]).then(
+        (m) => {
+          if (!settled) {
+            settled = true;
+            resolve(m as unknown as MujocoLike);
+          }
+        },
+        fail,
+      );
+    });
+    mujoco.catch(() => { mujoco = null; });
+  }
   return mujoco;
 }
 
-const buffersOf = (s: SplitSection): ArrayBuffer[] => [
-  s.positions.buffer, s.faces.buffer, s.plainPositions.buffer, s.plainFaces.buffer,
-  ...s.convexPieces.flatMap((p) => [p.positions.buffer, p.faces.buffer]),
-] as ArrayBuffer[];
+const buffersOf = (sections: SplitSection[]): ArrayBuffer[] => Array.from(
+  new Set(
+    sections.flatMap((s) => [
+      s.positions.buffer, s.faces.buffer, s.plainPositions.buffer, s.plainFaces.buffer,
+      ...s.convexPieces.flatMap((p) => [p.positions.buffer, p.faces.buffer]),
+    ] as ArrayBuffer[]),
+  ),
+);
 
-self.onmessage = async (evt: MessageEvent<PrintSplitRequest>) => {
-  const msg = evt.data;
+async function handleMessage(msg: PrintSplitRequest): Promise<void> {
   if (msg.type === 'WARM') {
-    void loadManifold().catch(() => undefined);
+    await loadManifold().catch(() => undefined);
     return;
   }
+  activeJobId = msg.id;
+  activeAborted = false;
   try {
     if (msg.type === 'SPLIT') {
       const wasm = await loadManifold();
       const result = splitForPrint(wasm, msg.soups, msg.options);
       const checks = result.ok ? checkSplit(wasm, result.sections, result.joints, msg.soups) : null;
-      post({ type: 'SPLIT_DONE', id: msg.id, result, checks }, result.ok ? result.sections.flatMap(buffersOf) : []);
+      post({ type: 'SPLIT_DONE', id: msg.id, result, checks }, result.ok ? buffersOf(result.sections) : []);
       return;
     }
     if (msg.type === 'PLANE_CUT') {
       const wasm = await loadManifold();
       const result = cutAlongPlane(wasm, msg.soups, msg.at, msg.normal);
-      post({ type: 'PLANE_CUT_DONE', id: msg.id, result }, result.ok ? result.sections.flatMap(buffersOf) : []);
+      post({ type: 'PLANE_CUT_DONE', id: msg.id, result }, result.ok ? buffersOf(result.sections) : []);
       return;
     }
     const mj = await loadMujoco();
-    msg.stages.forEach(({ xml, stage }, k) => {
+    for (let k = 0; k < msg.stages.length; k++) {
+      if (activeAborted) return;
+      const { xml, stage } = msg.stages[k];
       let result;
       try {
         result = runStage(mj, xml, stage);
       } catch (err) {
+        if (activeAborted) return;
         result = {
           label: stage.label, kind: stage.kind, cut: stage.cut, ok: false, seated: false,
           gapMm: NaN, lateralMm: NaN, angleDeg: NaN, playMm: null, twistDeg: null,
@@ -82,10 +139,24 @@ self.onmessage = async (evt: MessageEvent<PrintSplitRequest>) => {
           frames: [],
         };
       }
+      if (activeAborted) return;
       post({ type: 'ASSEMBLE_PROGRESS', id: msg.id, done: k + 1, total: msg.stages.length, result });
-    });
-    post({ type: 'ASSEMBLE_DONE', id: msg.id });
+    }
+    if (!activeAborted) post({ type: 'ASSEMBLE_DONE', id: msg.id });
   } catch (err) {
-    post({ type: 'FAILED', id: msg.id, error: err instanceof Error ? err.message : String(err) });
+    if (!activeAborted) {
+      post({ type: 'FAILED', id: msg.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  } finally {
+    activeJobId = null;
+    activeAborted = false;
   }
+}
+
+// Serialize all incoming messages so concurrent arrivals during async WASM
+// instantiation never interleave out of order.
+let queue: Promise<void> = Promise.resolve();
+self.onmessage = (evt: MessageEvent<PrintSplitRequest>) => {
+  const msg = evt.data;
+  queue = queue.then(() => handleMessage(msg));
 };

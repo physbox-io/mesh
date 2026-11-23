@@ -414,11 +414,22 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
   const filaments: NonNullable<PrintExportResult['filaments']> = [];
   const used = new Map<string, number>();
   const files = groups.map((group) => {
-    const mm = plated
-      ? layoutSetsOnBed(group.map((p) => p.volumes.map((v) => (p.turn ? rotatePoints(p.turn, v.tris) : v.tris))), bed!, margin).flatMap((p) => p.sets)
+    let mm: Float32Array[];
+    if (plated) {
+      const placed = layoutSetsOnBed(group.map((p) => p.volumes.map((v) => (p.turn ? rotatePoints(p.turn, v.tris) : v.tris))), bed!, margin);
+      if (bed!.heightMm !== undefined) {
+        placed.forEach((entry, i) => {
+          if (entry.exceedsHeight) {
+            warnings.push(`${group[i].name}: height (${entry.heightMm.toFixed(1)} mm) exceeds the printer's max Z height (${bed!.heightMm} mm).`);
+          }
+        });
+      }
+      mm = placed.flatMap((p) => p.sets);
+    } else {
       // A file of its own stands a section the way it prints; together, the
       // parts keep their places relative to each other.
-      : toBedMm(group.flatMap((p) => p.volumes.map((v) => (options.separate && p.turn ? Array.from(rotatePoints(p.turn, v.tris)) : v.tris))));
+      mm = toBedMm(group.flatMap((p) => p.volumes.map((v) => (options.separate && p.turn ? Array.from(rotatePoints(p.turn, v.tris)) : v.tris))));
+    }
     // Names are unique per body but not once lowercased and stripped.
     let name = options.separate ? safeName(group[0].name) : plated ? `${base}_plate` : base;
     const seen = used.get(name) ?? 0;

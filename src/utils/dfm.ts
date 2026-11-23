@@ -33,15 +33,29 @@ import { isBoughtIn } from './boughtIn';
 import { hardwareFindings, type LivePoses } from './hardwareChecks';
 import { DEFAULT_MATERIAL, materialSpec, type MaterialId } from './feedsAndSpeeds';
 import { DEFAULT_FILAMENT, filamentSpec, type FilamentId } from './filaments';
+import { printLimits, type PrinterSettings } from './printLimits';
+import { poseMatrix, rotatePoints, type Mat3 } from './printPlate';
 import { MAX_AVAILABLE_REACH_DIAMETERS, STANDARD_BIT_DIAS } from './reliefCarveExporter';
-import { sampleColumns } from './partColumns';
+import { sampleColumns, sampleWallSpans } from './partColumns';
 import { squaredDistanceTransform } from './heightmapMesh';
 import { overhangDeg, supportArea } from './printSupport';
+import { trappedAirInSoup } from './trappedAir';
 import { castMaterial, type CastMaterialId } from './castMaterials';
 import type { SceneGraph, SceneNode } from '../types/scene';
 
 export type DfmProcess = 'print' | 'cnc' | 'cast';
 export type DfmSeverity = 'critical' | 'warning' | 'info';
+
+/** Serializable 1-click remediation actions attached to findings; executed by DfmHUD. */
+export type DfmAction =
+  | { kind: 'open_split'; label: string; nodeId?: string }
+  | { kind: 'apply_print_pose'; label: string; nodeId: string; up: [number, number, number]; spin: number }
+  | { kind: 'set_filament'; label: string; filament: FilamentId }
+  | { kind: 'set_nozzle'; label: string; nozzleMm: number }
+  | { kind: 'fit_stock'; label: string; widthMm: number; depthMm: number; thicknessMm: number }
+  | { kind: 'open_fab'; label: string; modal: 'solid' | 'mold'; moldTab?: string }
+  | { kind: 'open_edge_round'; label: string; nodeId?: string; radiusMm?: number }
+  | { kind: 'thicken_boss'; label: string; nodeId: string; outerDiameterMm: number };
 
 /**
  * The limits each process is judged against.
@@ -84,6 +98,10 @@ export interface DfmLimits {
   castMinSectionMm: number;
   /** The casting is clay slip in plaster: sharp inside corners crack as it dries and fires. */
   castSlip?: boolean;
+  /** Printer process ('fdm' | 'resin'). Resin runs SLA suction-cup checks instead of FDM bridging/warping. */
+  printerProcess?: 'fdm' | 'resin';
+  /** Active FDM nozzle diameter, mm (used for thin-wall remediation suggestions). */
+  nozzleMm?: number;
 }
 
 /**
@@ -154,17 +172,15 @@ export interface DfmBench {
   filament: FilamentId;
   stock?: { widthMm: number; depthMm: number; thicknessMm: number } | null;
   printBed?: { widthMm: number; depthMm: number; heightMm: number } | null;
+  /** Active printer settings (FDM nozzle/layer or Resin SLA pixel/layer). */
+  printer?: PrinterSettings | null;
   /**
-   * The body to judge. Absent means the whole scene.
-   *
-   * This matters more than it looks. A Mesh scene is usually a SIMULATION — a
-   * pendulum, a gear train, a bridge — not a part, and asking "will this make?"
-   * of a whole scene produces true but worthless answers: the Golden Gate does
-   * not fit on a 150 mm board, and two bodies hanging in space are trivially
-   * "under an overhang" with respect to each other. Fabrication is per part, so
-   * the question is per part.
+   * The body to judge. Absent means the whole scene (gated on multi-body scenes
+   * unless `checkAllAsPlate` is true).
    */
   nodeId?: string | null;
+  /** When true with `nodeId == null` on a multi-body scene, run per-part DFM on every body. */
+  checkAllAsPlate?: boolean;
   /** What is poured, for the casting lens's thinnest section (default epoxy). */
   castMaterial?: CastMaterialId;
 }
@@ -180,12 +196,22 @@ export interface DfmBench {
 export function dfmLimitsFor(bench: DfmBench): DfmLimits {
   const mat = materialSpec(bench.material);
   const fil = filamentSpec(bench.filament);
+  const printer = bench.printer ?? null;
+  const isResin = printer?.process === 'resin';
+  const pLim = printer ? printLimits(printer) : null;
+  // Two extrusion beads for FDM (so a 0.8 mm nozzle checks 1.6 mm walls, and 0.4 mm matches PLA's 0.8 mm).
+  // For Resin SLA, at least 0.5 mm structural wall or the printer's pixel limit.
+  const minWallMm = isResin
+    ? Math.max(0.5, pLim!.minWallMm)
+    : pLim
+      ? Math.max(fil.minWallMm, 2 * pLim.minWallMm)
+      : fil.minWallMm;
   const biggestBit = STANDARD_BIT_DIAS[STANDARD_BIT_DIAS.length - 1];
   return {
-    overhangDeg: fil.maxOverhangDeg,
-    minWallMm: fil.minWallMm,
-    bridges: fil.bridges,
-    warpsOnLargeFlats: fil.warpsOnLargeFlats,
+    overhangDeg: isResin ? 45 : fil.maxOverhangDeg,
+    minWallMm,
+    bridges: isResin ? true : fil.bridges,
+    warpsOnLargeFlats: isResin ? false : fil.warpsOnLargeFlats,
     toolDiaMm: 3.175,
     maxToolReachMm: biggestBit * MAX_AVAILABLE_REACH_DIAMETERS,
     draftDeg: 2,
@@ -194,6 +220,8 @@ export function dfmLimitsFor(bench: DfmBench): DfmLimits {
     cncMinWallMm: mat.minWallMm,
     castMinSectionMm: Math.max(PRINTED_DETAIL_MM, castMaterial(bench.castMaterial ?? 'epoxy').minSectionMm),
     castSlip: Boolean(castMaterial(bench.castMaterial ?? 'epoxy').slip),
+    printerProcess: isResin ? 'resin' : 'fdm',
+    nozzleMm: printer?.nozzleMm ?? 0.4,
   };
 }
 
@@ -259,6 +287,8 @@ export const DFM_DEFAULTS: DfmLimits = dfmLimitsFor({
 
 export interface DfmFinding {
   id: string;
+  /** The body this finding belongs to, for click-to-select & spatial focus. */
+  nodeId?: string;
   process: DfmProcess;
   severity: DfmSeverity;
   title: string;
@@ -276,11 +306,13 @@ export interface DfmFinding {
    */
   passed?: true;
   /**
-   * From the assembly checks (seals, screws, runners), which read where the
-   * parts sit relative to each other, so can be re-run on live poses; see
-   * withLivePoses.
+   * From the assembly checks (seals, screws, runners, insert bosses), which
+   * read where the parts sit relative to each other, so can be re-run on live
+   * poses; see withLivePoses.
    */
   assembly?: true;
+  /** Optional 1-click remediation chips rendered by DfmHUD. */
+  actions?: DfmAction[];
 }
 
 export interface DfmReport {
@@ -300,6 +332,12 @@ export interface DfmReport {
   score: number;
   summary: string;
   warnings: string[];
+  /** Set on unselected multi-body scenes when per-part avalanche checks were gated. */
+  needsPartSelection?: { bodyCount: number };
+  /** Label when the report was evaluated in a non-default pose (e.g. 'print pose'). */
+  judgedPoseLabel?: string;
+  /** The scoped body id this report was generated for, preserved across withLivePoses. */
+  nodeId?: string | null;
 }
 
 const RAD = 180 / Math.PI;
@@ -338,12 +376,14 @@ function bounds(tris: Float64Array) {
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
   for (let i = 0; i < tris.length; i += 3) {
-    if (tris[i] < minX) minX = tris[i];
-    if (tris[i] > maxX) maxX = tris[i];
-    if (tris[i + 1] < minY) minY = tris[i + 1];
-    if (tris[i + 1] > maxY) maxY = tris[i + 1];
-    if (tris[i + 2] < minZ) minZ = tris[i + 2];
-    if (tris[i + 2] > maxZ) maxZ = tris[i + 2];
+    const x = tris[i], y = tris[i + 1], z = tris[i + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
   }
   return { minX, minY, minZ, maxX, maxY, maxZ };
 }
@@ -409,27 +449,211 @@ export function enclosedAir(hit: Uint8Array, cols: number, rows: number): Uint8A
   return enclosed;
 }
 
-/** A grid fine enough to see the limits being measured, and no finer. */
+/** A grid fine enough to see the limits being measured, and no finer. NaN/zero-span safe. */
 function gridFor(span: number, featureMm: number) {
+  if (!Number.isFinite(span) || span <= 1e-6 || !Number.isFinite(featureMm)) return 0;
   const target = Math.ceil((span * 1000) / Math.max(0.2, featureMm / 2));
   return Math.max(16, Math.min(320, target));
+}
+
+const SEVERITY_RANK: Record<DfmSeverity, number> = { critical: 3, warning: 2, info: 1 };
+
+function primaryFindingSummary(findings: DfmFinding[]): string {
+  const open = findings.filter((f) => !f.passed);
+  if (open.length === 0) return '';
+  let best = open[0];
+  for (const f of open) {
+    if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[best.severity]) best = f;
+  }
+  return open.length === 1 ? `${best.title}.` : `${best.title} (+${open.length - 1} more).`;
 }
 
 // ---------------------------------------------------------------------------
 // 3D printing
 // ---------------------------------------------------------------------------
 
-function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'process' | 'tris' | 'warnings'> {
-  const count = tris.length / 9;
+/** Maximum horizontal XY span (mm) of any connected cluster of unbridgeable ceiling triangles. */
+function maxCeilingClusterSpanMm(tris: Float64Array, ceilingTris: number[]): number {
+  if (ceilingTris.length === 0) return 0;
+  const CELL = 0.005; // 5 mm clustering grid
+  const cells = new Map<string, number[]>();
+  const keyOf = (ix: number, iy: number, iz: number) => `${ix},${iy},${iz}`;
+  const triCells: [number, number, number][] = [];
+  for (let idx = 0; idx < ceilingTris.length; idx++) {
+    const c = triCentroid(tris, ceilingTris[idx]);
+    const ix = Math.floor(c[0] / CELL);
+    const iy = Math.floor(c[1] / CELL);
+    const iz = Math.floor(c[2] / CELL);
+    triCells.push([ix, iy, iz]);
+    const k = keyOf(ix, iy, iz);
+    let list = cells.get(k);
+    if (!list) cells.set(k, (list = []));
+    list.push(idx);
+  }
+  const visited = new Uint8Array(ceilingTris.length);
+  let maxSpanMm = 0;
+  const queue: number[] = [];
+  for (let start = 0; start < ceilingTris.length; start++) {
+    if (visited[start]) continue;
+    visited[start] = 1;
+    queue.length = 0;
+    queue.push(start);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (let qi = 0; qi < queue.length; qi++) {
+      const cur = queue[qi];
+      const o = ceilingTris[cur] * 9;
+      for (let v = 0; v < 9; v += 3) {
+        const x = tris[o + v], y = tris[o + v + 1];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      const [ix, iy, iz] = triCells[cur];
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const neigh = cells.get(keyOf(ix + dx, iy + dy, iz + dz));
+            if (!neigh) continue;
+            for (const nxt of neigh) {
+              if (!visited[nxt]) { visited[nxt] = 1; queue.push(nxt); }
+            }
+          }
+        }
+      }
+    }
+    const spanMm = Math.max(maxX - minX, maxY - minY) * 1000;
+    if (spanMm > maxSpanMm) maxSpanMm = spanMm;
+  }
+  return maxSpanMm;
+}
+
+/** Outward-wound axis-aligned box triangles (12 triangles, 108 floats). */
+function appendBoxSoup(out: Float64Array, offset: number, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) {
+  const faces: [number, number, number][][] = [
+    // -Z (outward normal 0,0,-1)
+    [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], [[x0, y0, z0], [x1, y1, z0], [x1, y0, z0]],
+    // +Z (outward normal 0,0,+1)
+    [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1]], [[x0, y0, z1], [x1, y1, z1], [x0, y1, z1]],
+    // -Y (outward normal 0,-1,0)
+    [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1]], [[x0, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+    // +Y (outward normal 0,+1,0)
+    [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1]], [[x0, y1, z0], [x1, y1, z1], [x1, y1, z0]],
+    // -X (outward normal -1,0,0)
+    [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1]], [[x0, y0, z0], [x0, y1, z1], [x0, y1, z0]],
+    // +X (outward normal +1,0,0)
+    [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], [[x1, y0, z0], [x1, y1, z1], [x1, y0, z1]],
+  ];
+  let k = offset;
+  for (const tri of faces) {
+    for (const v of tri) {
+      out[k++] = v[0]; out[k++] = v[1]; out[k++] = v[2];
+    }
+  }
+}
+
+/**
+ * SLA / Resin suction-cup detection.
+ *
+ * In bottom-up resin printing, the build plate sits at `minZ` and pulls upward
+ * out of the vat so the model's `+Z` points downward into the liquid resin.
+ * Inverting Z (`z' = -z`) turns the part's solid into an inward-wound void inside
+ * an enclosing air box (`[-maxZ - 0.02, -minZ + 2]` mm), so `trappedAirInSoup`
+ * locates cavities/cups that trap air or resin suction against the FEP film.
+ */
+function findSlaTrappedCups(tris: Float64Array, b: ReturnType<typeof bounds>): { x: number; y: number; z: number }[] {
+  if (!Number.isFinite(b.minX) || !(b.maxZ - b.minZ > 0.002)) return [];
+  const minXMm = b.minX * 1000, maxXMm = b.maxX * 1000;
+  const minYMm = b.minY * 1000, maxYMm = b.maxY * 1000;
+  const minZMm = b.minZ * 1000, maxZMm = b.maxZ * 1000;
+  const pad = 2;
+  const zBot = -maxZMm - 0.02; // < MIN_SPAN_MM (0.05) so solid top faces don't create false air slivers
+  const zTop = -minZMm + 2;
+
+  const airSoup = new Float64Array(108 + tris.length);
+  appendBoxSoup(airSoup, 0, minXMm - pad, minYMm - pad, zBot, maxXMm + pad, maxYMm + pad, zTop);
+  for (let i = 0; i < tris.length; i += 3) {
+    airSoup[108 + i] = tris[i] * 1000;
+    airSoup[108 + i + 1] = tris[i + 1] * 1000;
+    airSoup[108 + i + 2] = -tris[i + 2] * 1000;
+  }
+
+  const raw = trappedAirInSoup(airSoup, zTop);
+  if (raw.length === 0) return [];
+
+  // Confirm each candidate pocket is horizontally enclosed by part walls (not an open flat shelf).
+  const checkEnclosed = (px: number, py: number, pzOrig: number): boolean => {
+    const zProbe = pzOrig + 0.001; // 1 mm into the cup opening along +Z (toward mouth)
+    let hitPosX = false, hitNegX = false, hitPosY = false, hitNegY = false;
+    for (let t = 0; t + 8 < tris.length; t += 9) {
+      const az = tris[t + 2], bz = tris[t + 5], cz = tris[t + 8];
+      if ((az < zProbe && bz < zProbe && cz < zProbe) || (az > zProbe && bz > zProbe && cz > zProbe)) continue;
+      // Intersect triangle with plane z = zProbe to get a 2D segment in XY.
+      const pts: [number, number][] = [];
+      const vs: [number, number, number][] = [
+        [tris[t], tris[t + 1], az],
+        [tris[t + 3], tris[t + 4], bz],
+        [tris[t + 6], tris[t + 7], cz],
+      ];
+      for (let e = 0; e < 3; e++) {
+        const p0 = vs[e], p1 = vs[(e + 1) % 3];
+        const d0 = p0[2] - zProbe, d1 = p1[2] - zProbe;
+        if ((d0 <= 0 && d1 >= 0) || (d0 >= 0 && d1 <= 0)) {
+          const denom = p1[2] - p0[2];
+          if (Math.abs(denom) > 1e-12) {
+            const f = (zProbe - p0[2]) / denom;
+            pts.push([p0[0] + f * (p1[0] - p0[0]), p0[1] + f * (p1[1] - p0[1])]);
+          }
+        }
+      }
+      if (pts.length < 2) continue;
+      const [x0, y0] = pts[0], [x1, y1] = pts[1];
+      // Horizontal ray along ±X at y = py:
+      if ((y0 <= py && y1 > py) || (y1 <= py && y0 > py)) {
+        const xHit = x0 + ((py - y0) / (y1 - y0)) * (x1 - x0);
+        if (xHit > px) hitPosX = true;
+        else if (xHit < px) hitNegX = true;
+      }
+      // Horizontal ray along ±Y at x = px:
+      if ((x0 <= px && x1 > px) || (x1 <= px && x0 > px)) {
+        const yHit = y0 + ((px - x0) / (x1 - x0)) * (y1 - y0);
+        if (yHit > py) hitPosY = true;
+        else if (yHit < py) hitNegY = true;
+      }
+      if (hitPosX && hitNegX && hitPosY && hitNegY) return true;
+    }
+    return hitPosX && hitNegX && hitPosY && hitNegY;
+  };
+
+  const out: { x: number; y: number; z: number }[] = [];
+  for (const p of raw) {
+    const x = p.x / 1000;
+    const y = p.y / 1000;
+    const z = -p.z / 1000;
+    if (checkEnclosed(x, y, z)) out.push({ x, y, z });
+  }
+  return out;
+}
+
+function analysePrint(
+  tris: Float64Array,
+  limits: DfmLimits,
+  wallTris: Float64Array = tris,
+  posedForBed = false,
+): Omit<DfmReport, 'process' | 'tris' | 'warnings'> {
+  const count = Math.floor(tris.length / 9);
   const heat = new Float32Array(count);
   const findings: DfmFinding[] = [];
   const b = bounds(tris);
+  const isResin = limits.printerProcess === 'resin';
 
   let worstDeg = 0, unbridgeable = 0;
+  const ceilingTris: number[] = [];
   const { area: overhangArea, totalArea } = supportArea(tris, limits.overhangDeg, 0.0005, (t, deg, area) => {
     heat[t] = Math.min(1, (deg - limits.overhangDeg) / (90 - limits.overhangDeg));
     if (deg > worstDeg) worstDeg = deg;
-    if (deg >= T.bridgeDeg) unbridgeable += area;
+    if (deg >= T.bridgeDeg) {
+      unbridgeable += area;
+      ceilingTris.push(t);
+    }
   });
 
   const share = totalArea > 0 ? overhangArea / totalArea : 0;
@@ -451,61 +675,112 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
     });
   }
 
-  // A filament that will not bridge cannot print a flat ceiling at all, however
-  // little of it there is. That is a failed print rather than an expensive one.
-  if (!limits.bridges && unbridgeable > 0 && totalArea > 0 && unbridgeable / totalArea > 0.01) {
-    findings.push({
-      id: 'print_no_bridge',
-      process: 'print',
-      severity: 'critical',
-      title: 'Unsupported horizontal span',
-      detail: 'Horizontal faces span open air; selected filament requires support across gaps.',
-      fix: 'Reorient the part or enable supports.',
-      position: hotSpot(tris, heat, 0.8) ?? [0, 0, b.maxZ],
-      metric: unbridgeable / totalArea,
-    });
+  if (isResin) {
+    // SLA / Resin: check for downward-facing suction cups / trapped resin cavities
+    // instead of FDM bridging or bed-shrinkage warping.
+    const cups = findSlaTrappedCups(tris, b);
+    if (cups.length > 0) {
+      const first = cups[0];
+      findings.push({
+        id: 'sla_trapped_cup',
+        process: 'print',
+        severity: 'critical',
+        title: cups.length === 1 ? 'Resin suction cup / trapped cavity' : `${cups.length} resin suction cups / trapped cavities`,
+        detail: `${cups.length === 1 ? 'A hollow cavity opens' : `${cups.length} cavities open`} toward the vat with no drain vent, creating peel suction and trapping uncured resin.`,
+        fix: 'Tilt the part 20–45°, flip it open-side toward the build plate, or add a ≥ 2 mm drain hole at the lowest point.',
+        position: [first.x, first.y, first.z],
+        metric: cups.length,
+      });
+    }
+  } else {
+    // A filament that will not bridge cannot print a wide flat ceiling (> 5 mm)
+    // without supports. Tiny screw-hole ceilings (<= 5 mm) are skipped.
+    if (!limits.bridges && unbridgeable > 0 && totalArea > 0 && unbridgeable / totalArea > 0.01) {
+      const ceilingSpanMm = maxCeilingClusterSpanMm(tris, ceilingTris);
+      if (ceilingSpanMm > 5) {
+        findings.push({
+          id: 'print_no_bridge',
+          process: 'print',
+          severity: 'critical',
+          title: 'Unsupported horizontal span',
+          detail: `Horizontal faces span ${ceilingSpanMm.toFixed(0)} mm over open air; selected filament requires support across gaps.`,
+          fix: 'Reorient the part or enable supports.',
+          position: hotSpot(tris, heat, 0.8) ?? [0, 0, b.maxZ],
+          metric: unbridgeable / totalArea,
+        });
+      }
+    }
+
+    // Shrinkage warping depends on actual bed-contact footprint (z <= minZ + 1.5 mm),
+    // not a wide mid-air canopy above a narrow stem.
+    if (limits.warpsOnLargeFlats && Number.isFinite(b.minZ)) {
+      const zCut = b.minZ + 0.0015;
+      let fMinX = Infinity, fMaxX = -Infinity, fMinY = Infinity, fMaxY = -Infinity;
+      for (let i = 0; i < tris.length; i += 3) {
+        const x = tris[i], y = tris[i + 1], z = tris[i + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+        if (z <= zCut) {
+          if (x < fMinX) fMinX = x; if (x > fMaxX) fMaxX = x;
+          if (y < fMinY) fMinY = y; if (y > fMaxY) fMaxY = y;
+        }
+      }
+      const spanMm = fMaxX > fMinX || fMaxY > fMinY ? Math.max(fMaxX - fMinX, fMaxY - fMinY) * 1000 : 0;
+      if (spanMm > T.warpSpanMm) {
+        findings.push({
+          id: 'print_warp',
+          process: 'print',
+          severity: 'warning',
+          title: `Large footprint (${spanMm.toFixed(0)} mm) in high-shrinkage filament`,
+          detail: `${spanMm.toFixed(0)} mm bed-contact span may warp or lift at the corners during cooling.`,
+          fix: 'Use an enclosure and brim, bevel the base, or switch to PLA/PETG.',
+          position: [(fMinX + fMaxX) / 2, (fMinY + fMaxY) / 2, b.minZ],
+          metric: spanMm,
+          actions: [
+            { kind: 'set_filament', label: 'Switch to PETG', filament: 'petg' },
+            { kind: 'open_edge_round', label: 'Bevel base', radiusMm: 1 },
+          ],
+        });
+      }
+    }
   }
 
-  // Shrinkage only matters once the flat is big enough for the corners to have
-  // real leverage. A small ABS part is perfectly happy on an open printer.
-  const spanMm = Math.max(b.maxX - b.minX, b.maxY - b.minY) * 1000;
-  if (limits.warpsOnLargeFlats && spanMm > T.warpSpanMm) {
-    findings.push({
-      id: 'print_warp',
-      process: 'print',
-      severity: 'warning',
-      title: `Large footprint (${spanMm.toFixed(0)} mm) in high-shrinkage filament`,
-      detail: `${spanMm.toFixed(0)} mm span may warp or lift at the corners during cooling.`,
-      fix: 'Use an enclosure and brim, or switch to PLA/PETG.',
-      position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.minZ],
-      metric: spanMm,
-    });
-  }
-
-  const thin = thinnestWall(tris, limits.minWallMm);
+  const thin = wallTris.length >= 9 ? thinnestWall(wallTris, limits.minWallMm) : null;
   if (thin && thin.mm < limits.minWallMm && thin.share > T.thinCellShare) {
+    const actions: DfmAction[] = [];
+    const nozzle = limits.nozzleMm ?? 0.4;
+    if (!isResin) {
+      if (nozzle > 0.4 && thin.mm >= 0.8) actions.push({ kind: 'set_nozzle', label: 'Use 0.4 mm nozzle', nozzleMm: 0.4 });
+      else if (nozzle > 0.2) actions.push({ kind: 'set_nozzle', label: 'Use 0.2 mm nozzle', nozzleMm: 0.2 });
+    }
     findings.push({
       id: 'print_thin_wall',
       process: 'print',
       severity: thin.mm < limits.minWallMm / 2 ? 'critical' : 'warning',
       title: `Wall down to ${thin.mm.toFixed(2)} mm`,
-      detail: `Minimum wall is ${thin.mm.toFixed(2)} mm (min ${limits.minWallMm} mm for this filament).`,
+      detail: `Minimum wall is ${thin.mm.toFixed(2)} mm (min ${limits.minWallMm} mm for this ${isResin ? 'resin printer' : 'printer & filament'}).`,
       fix: `Thicken walls to at least ${limits.minWallMm} mm.`,
       position: thin.at,
       metric: thin.mm,
+      ...(actions.length ? { actions } : {}),
     });
   }
 
-  findings.push(...bedFindings(b, limits));
+  findings.push(...bedFindings(b, limits, tris, posedForBed));
+
+  const summary = findings.length === 0
+    ? (isResin ? 'Nothing here should give a resin printer trouble.' : 'Nothing here should give a printer trouble.')
+    : share > 0.005 && findings.some((f) => f.id === 'print_overhang')
+      ? `${(share * 100).toFixed(0)}% of the surface overhangs.`
+      : primaryFindingSummary(findings);
 
   return {
     findings,
     heat,
-    legend: `Unsupported overhang — red is flat over air, amber is just past ${limits.overhangDeg}°`,
+    legend: isResin
+      ? `Unsupported overhang — red faces straight down, amber is just past ${limits.overhangDeg}°`
+      : `Unsupported overhang — red is flat over air, amber is just past ${limits.overhangDeg}°`,
     score: scoreOf(findings),
-    summary: findings.length === 0
-      ? 'Nothing here should give a printer trouble.'
-      : `${(share * 100).toFixed(0)}% of the surface overhangs.`,
+    summary,
   };
 }
 
@@ -517,25 +792,70 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
  * Same ballpark rule as the stock: a part many times the bed is a scene, not a
  * print, and telling someone their bridge will not fit a printer is noise.
  */
-const BED_BALLPARK = 6;
+const BED_BALLPARK = 2.2;
 
-function bedFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFinding[] {
+/** Checks if a 45° diagonal spin on any of the 6 square-on orientations fits the bed. */
+function findDiagonalBedPose(
+  tris: Float64Array,
+  bed: { widthMm: number; depthMm: number; heightMm: number },
+): { up: [number, number, number]; spin: number } | null {
+  const spin = Math.PI / 4;
+  for (const side of SIDES) {
+    const m = poseMatrix({ up: side.up, spin });
+    const rot = rotatePoints(m, tris);
+    const rb = bounds(rot);
+    const w = (rb.maxX - rb.minX) * 1000;
+    const d = (rb.maxY - rb.minY) * 1000;
+    const h = (rb.maxZ - rb.minZ) * 1000;
+    if (((w <= bed.widthMm && d <= bed.depthMm) || (d <= bed.widthMm && w <= bed.depthMm)) && h <= bed.heightMm) {
+      return { up: side.up, spin };
+    }
+  }
+  return null;
+}
+
+function bedFindings(
+  b: ReturnType<typeof bounds>,
+  limits: DfmLimits,
+  tris?: Float64Array,
+  posedForBed = false,
+): DfmFinding[] {
   const bed = limits.bedMm;
-  if (!bed) return [];
+  if (!bed || !Number.isFinite(b.minX)) return [];
   const size = [(b.maxX - b.minX) * 1000, (b.maxY - b.minY) * 1000, (b.maxZ - b.minZ) * 1000];
+  if (posedForBed) {
+    // In an explicit printPose, check the posed XY footprint & Z height directly
+    // (allowing a 90° XY table swap) before falling back to square-on check.
+    const fitsPosed =
+      ((size[0] <= bed.widthMm && size[1] <= bed.depthMm) || (size[1] <= bed.widthMm && size[0] <= bed.depthMm)) &&
+      size[2] <= bed.heightMm;
+    if (fitsPosed) return [];
+  }
   if (fitsBedSquareOn(size, bed)) return [];
   const worst = Math.max(...size) / Math.max(bed.widthMm, bed.depthMm, bed.heightMm);
   if (worst > BED_BALLPARK) return [];
   const over = Math.max(size[0] - bed.widthMm, size[1] - bed.depthMm, size[2] - bed.heightMm, 0);
+  const actions: DfmAction[] = [{ kind: 'open_split', label: 'Split for Print…' }];
+  const diag = tris && !posedForBed ? findDiagonalBedPose(tris, bed) : null;
+  if (diag) {
+    actions.unshift({
+      kind: 'apply_print_pose',
+      label: 'Auto-orient to fit (45°)',
+      nodeId: '',
+      up: diag.up,
+      spin: diag.spin,
+    });
+  }
   return [{
     id: 'print_exceeds_bed',
     process: 'print',
     severity: 'critical',
     title: 'Exceeds print bed',
     detail: `Part is ${size.map((v) => v.toFixed(0)).join(' × ')} mm; bed is ${bed.widthMm} × ${bed.depthMm} × ${bed.heightMm} mm (${over.toFixed(0)} mm over limit).`,
-    fix: 'Scale down or use Split for Print.',
+    fix: diag ? 'Rotate diagonally on the bed, scale down, or use Split for Print.' : 'Scale down or use Split for Print.',
     position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ],
     metric: worst,
+    actions,
   }];
 }
 
@@ -562,7 +882,7 @@ const STOCK_BALLPARK = 3;
 
 function stockFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFinding[] {
   const stock = limits.stockMm;
-  if (!stock) return [];
+  if (!stock || !Number.isFinite(b.minX)) return [];
   const w = (b.maxX - b.minX) * 1000;
   const d = (b.maxY - b.minY) * 1000;
   const h = (b.maxZ - b.minZ) * 1000;
@@ -581,6 +901,9 @@ function stockFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFind
     fitsPlan ? 0 : Math.min(Math.max(w - stock.widthMm, d - stock.depthMm), Math.max(d - stock.widthMm, w - stock.depthMm)),
     Math.max(0, h - stock.thicknessMm),
   );
+  const fitW = Math.max(stock.widthMm, Math.ceil(w + 10));
+  const fitD = Math.max(stock.depthMm, Math.ceil(d + 10));
+  const fitT = Math.max(stock.thicknessMm, Math.ceil(h + 2));
   return [{
     id: 'stock_fit',
     process: 'cnc',
@@ -589,36 +912,55 @@ function stockFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFind
     detail: `Part is ${size.map((v) => v.toFixed(0)).join(' × ')} mm; bench stock is ${stockDims.map((v) => v.toFixed(0)).join(' × ')} mm (${over.toFixed(1)} mm over).`,
     fix: 'Increase stock dimensions or scale the part down.',
     position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ],
+    actions: [{
+      kind: 'fit_stock',
+      label: 'Fit stock (+10 mm)',
+      widthMm: fitW,
+      depthMm: fitD,
+      thicknessMm: fitT,
+    }],
   }];
 }
 
 /**
  * The thinnest material anywhere in the part, and how much of it is that thin.
  *
- * Looks through each axis in turn and takes the smallest interior column. Column
- * thickness is exact for a wall square to the axis and an overestimate for one
- * at a slant, so the minimum across three axes converges on the true wall from
- * above — the safe direction to be wrong in, since it under-reports a thin
- * diagonal rib rather than inventing one.
+ * Looks through each axis in turn and inspects individual closed solid spans
+ * (`sampleWallSpans`) rather than summing across hollow cavities, rejecting
+ * grazing surface crests / mountain ridges where entry and exit normals do not
+ * oppose each other or where the span ends without neighbour backing.
  */
 export function thinnestWall(
   tris: Float64Array,
   minWallMm: number,
 ): { mm: number; at: [number, number, number]; share: number } | null {
+  if (tris.length < 9 || !Number.isFinite(minWallMm)) return null;
   let best: { mm: number; at: [number, number, number]; share: number } | null = null;
 
   for (const axis of [0, 1, 2]) {
-    // Rotate the soup so `axis` becomes Z, then the existing plan-view column
-    // sampler does the work. Proper rotations only, so winding holds.
+    // Rotate the soup so `axis` becomes Z, then sample individual wall spans.
+    // Proper rotations only, so winding holds.
     const rotated = axis === 2 ? tris : rotateAxisToZ(tris, axis);
     const rb = bounds(rotated);
-    const cols = gridFor(rb.maxX - rb.minX, minWallMm);
-    const rows = gridFor(rb.maxY - rb.minY, minWallMm);
+    const spanX = rb.maxX - rb.minX;
+    const spanY = rb.maxY - rb.minY;
+    const cols = gridFor(spanX, minWallMm);
+    const rows = gridFor(spanY, minWallMm);
     if (cols < 3 || rows < 3) continue;
-    const { thickness, hit } = sampleColumns(rotated, rb, cols, rows);
+    const { spanStart, spanZ0, spanZ1, minWall, minWallMid, minWallZ0, minWallZ1, hit } = sampleWallSpans(rotated, rb, cols, rows);
 
-    const stepX = (rb.maxX - rb.minX) / (cols - 1);
-    const stepY = (rb.maxY - rb.minY) / (rows - 1);
+    const stepX = spanX / (cols - 1);
+    const stepY = spanY / (rows - 1);
+    const baseMargin = Math.max(stepX, stepY) * 2.5;
+
+    const neighborHasSpanNear = (ni: number, z0: number, z1: number, margin: number): boolean => {
+      const s0 = spanStart[ni], s1 = spanStart[ni + 1];
+      for (let s = s0; s < s1; s++) {
+        if (spanZ1[s] >= z0 - margin && spanZ0[s] <= z1 + margin) return true;
+      }
+      return false;
+    };
+
     let thinnest = Infinity;
     let at: [number, number, number] | null = null;
     let solidCells = 0, thinCells = 0;
@@ -627,17 +969,29 @@ export function thinnestWall(
       for (let c = 1; c < cols - 1; c++) {
         const i = r * cols + c;
         if (!hit[i]) continue;
-        // INTERIOR COLUMNS ONLY. Any curved body is genuinely thin where it
-        // turns away at its own silhouette — the edge of a sphere really is a
-        // sliver — and counting those reported every round part as having
-        // paper-thin walls. A column with material on all four sides is
-        // measuring a wall; one on the boundary is measuring a tangent.
+        // INTERIOR COLUMNS ONLY.
         if (!hit[i - 1] || !hit[i + 1] || !hit[i - cols] || !hit[i + cols]) continue;
-        const mm = thickness[i] * 1000;
+        const wallM = minWall[i];
+        if (!Number.isFinite(wallM)) continue;
+        const mm = wallM * 1000;
         if (mm < 0.01) continue;
+        // Verify this specific span is backed by overlapping spans in all 4
+        // neighbours, not a 1-cell summit/ridge crest sitting in front of
+        // unrelated geometry further along the ray.
+        const z0 = minWallZ0[i], z1 = minWallZ1[i];
+        const margin = baseMargin + wallM;
+        if (
+          !neighborHasSpanNear(i - 1, z0, z1, margin) ||
+          !neighborHasSpanNear(i + 1, z0, z1, margin) ||
+          !neighborHasSpanNear(i - cols, z0, z1, margin) ||
+          !neighborHasSpanNear(i + cols, z0, z1, margin)
+        ) continue;
         solidCells++;
         if (mm < minWallMm) thinCells++;
-        if (mm < thinnest) { thinnest = mm; at = [rb.minX + c * stepX, rb.minY + r * stepY, 0]; }
+        if (mm < thinnest) {
+          thinnest = mm;
+          at = [rb.minX + c * stepX, rb.minY + r * stepY, minWallMid[i]];
+        }
       }
     }
     if (!at || !solidCells) continue;
@@ -670,14 +1024,27 @@ function unrotateFromZ(p: [number, number, number], axis: number): [number, numb
 // 3-axis CNC
 // ---------------------------------------------------------------------------
 
-function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'process' | 'tris' | 'warnings'> {
-  const count = tris.length / 9;
+function analyseCnc(
+  tris: Float64Array,
+  limits: DfmLimits,
+  wallTris: Float64Array = tris,
+): Omit<DfmReport, 'process' | 'tris' | 'warnings'> {
+  const count = Math.floor(tris.length / 9);
   const heat = new Float32Array(count);
   const findings: DfmFinding[] = [];
   const b = bounds(tris);
 
   const cols = gridFor(b.maxX - b.minX, limits.toolDiaMm);
   const rows = gridFor(b.maxY - b.minY, limits.toolDiaMm);
+  if (cols === 0 || rows === 0) {
+    return {
+      findings,
+      heat,
+      legend: 'Amber is reachable by flipping or turning onto a side; red is trapped from every face',
+      score: 100,
+      summary: 'A 3-axis machine can reach all of this from one side.',
+    };
+  }
   const { top, bottom, thickness, hit } = sampleColumns(tris, b, cols, rows);
   const stepX = (b.maxX - b.minX) / Math.max(1, cols - 1);
   const stepY = (b.maxY - b.minY) / Math.max(1, rows - 1);
@@ -826,6 +1193,7 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
       fix: fixText,
       position: hotSpot(tris, heat, 0.5) ?? [0, 0, b.maxZ],
       metric: trappedShare,
+      actions: [{ kind: 'open_fab', label: 'Solid Machining (Auto Setups)', modal: 'solid' }],
     });
   }
 
@@ -857,10 +1225,24 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
       const dHolds = squaredDistanceTransform(holds, cols, rows);
 
       let stranded = 0;
-      for (let i = 0; i < cols * rows; i++) if (enclosed[i] && dHolds[i] > r2) stranded++;
+      let worstDist = -1;
+      let worstC = -1, worstR = -1;
+      for (let i = 0; i < cols * rows; i++) {
+        if (enclosed[i] && dHolds[i] > r2) {
+          stranded++;
+          if (dHolds[i] > worstDist) {
+            worstDist = dHolds[i];
+            worstC = i % cols;
+            worstR = (i - worstC) / cols;
+          }
+        }
+      }
       const strandedShare = stranded / pocketCells;
 
       if (strandedShare > T.strandedShare) {
+        const pos: [number, number, number] = worstC >= 0
+          ? [b.minX + worstC * stepX, b.minY + worstR * stepY, (b.minZ + b.maxZ) / 2]
+          : [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ];
         findings.push({
           id: 'cnc_corner_radius',
           process: 'cnc',
@@ -868,29 +1250,24 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
           title: `Inside corner radius < ${(limits.toolDiaMm / 2).toFixed(1)} mm`,
           detail: `${(strandedShare * 100).toFixed(0)}% of enclosed pocket area is narrower than a ⌀${limits.toolDiaMm} mm end mill.`,
           fix: `Fillet to ≥ R${(limits.toolDiaMm / 2).toFixed(1)} mm, widen slots past ${limits.toolDiaMm} mm, or use a smaller bit.`,
-          position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ],
+          position: pos,
           metric: strandedShare,
         });
       }
     }
   }
 
-  // Depth. Stepping down in passes is ordinary, and a longer bit is a normal
-  // answer, so this only fires when NO bit a workshop is likely to own reaches
-  // the bottom — the same stickout rule reliefCarveExporter sizes real tooling
-  // with, applied to the largest standard diameter.
+  // Depth. Two-sided flipping up to 2× maxToolReachMm is standard CNC work and
+  // does not emit a finding; only warn when no standard bit reaches even flipped.
   const depthMm = (b.maxZ - b.minZ) * 1000;
-  if (depthMm > limits.maxToolReachMm) {
-    // Up to twice the reach is a part cut from both sides: an ordinary second
-    // setup, worth knowing and no fault. Past that, no bit gets there at all.
-    const flips = depthMm <= 2 * limits.maxToolReachMm;
+  if (depthMm > 2 * limits.maxToolReachMm) {
     findings.push({
       id: 'cnc_reach',
       process: 'cnc',
-      severity: flips ? 'info' : 'warning',
-      title: flips ? `${depthMm.toFixed(0)} mm deep — cut from both sides` : `${depthMm.toFixed(0)} mm deep — exceeds max tool reach`,
-      detail: `Part height is ${depthMm.toFixed(0)} mm (max standard tool reach ~${limits.maxToolReachMm.toFixed(0)} mm).`,
-      fix: flips ? 'Machine from both sides.' : 'Reduce depth or split the part into layers.',
+      severity: 'warning',
+      title: `${depthMm.toFixed(0)} mm deep — exceeds max tool reach`,
+      detail: `Part height is ${depthMm.toFixed(0)} mm (max two-sided standard tool reach ~${(2 * limits.maxToolReachMm).toFixed(0)} mm).`,
+      fix: 'Reduce depth or split the part into layers.',
       position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.minZ],
       metric: depthMm,
     });
@@ -898,7 +1275,7 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
 
   // Thin material, judged by what is being CUT rather than what is printed —
   // a 1.2 mm rib is fine in aluminium and crumbles in MDF.
-  const thin = thinnestWall(tris, limits.cncMinWallMm);
+  const thin = wallTris.length >= 9 ? thinnestWall(wallTris, limits.cncMinWallMm) : null;
   if (thin && thin.mm < limits.cncMinWallMm && thin.share > T.thinCellShare) {
     findings.push({
       id: 'cnc_thin_wall',
@@ -914,14 +1291,18 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
 
   findings.push(...stockFindings(b, limits));
 
+  const summary = findings.length === 0
+    ? 'A 3-axis machine can reach all of this from one side.'
+    : trappedShare > T.undercutShare
+      ? `${(trappedShare * 100).toFixed(0)}% unreachable from above, ${depthMm.toFixed(0)} mm deep.`
+      : primaryFindingSummary(findings);
+
   return {
     findings,
     heat,
     legend: 'Amber is reachable by flipping or turning onto a side; red is trapped from every face',
     score: scoreOf(findings),
-    summary: findings.length === 0
-      ? 'A 3-axis machine can reach all of this from one side.'
-      : `${(trappedShare * 100).toFixed(0)}% unreachable from above, ${depthMm.toFixed(0)} mm deep.`,
+    summary,
   };
 }
 
@@ -929,8 +1310,12 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
 // Casting
 // ---------------------------------------------------------------------------
 
-function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'process' | 'tris' | 'warnings'> {
-  const count = tris.length / 9;
+function analyseCast(
+  tris: Float64Array,
+  limits: DfmLimits,
+  wallTris: Float64Array = tris,
+): Omit<DfmReport, 'process' | 'tris' | 'warnings'> {
+  const count = Math.floor(tris.length / 9);
   const heat = new Float32Array(count);
   const findings: DfmFinding[] = [];
   const b = bounds(tris);
@@ -997,6 +1382,10 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       fix: 'Use a Dissolvable Liner or Silicone Pour Box (for resin or plaster), or split the pattern / use Lost PLA (for metal).',
       position: hotSpot(tris, heat, 0.9) ?? [0, 0, partingZ],
       metric: undercutShare,
+      actions: [
+        { kind: 'open_fab', label: 'Silicone Box', modal: 'mold', moldTab: 'silicone' },
+        { kind: 'open_fab', label: 'PVA Liner', modal: 'mold', moldTab: 'rigid' },
+      ],
     });
   }
 
@@ -1013,12 +1402,13 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       fix: `Taper walls by ${limits.draftDeg}° (Mold → Draft, or skip draft with a Dissolvable Liner or Silicone Pour Box).`,
       position: hotSpot(tris, heat, 0.05) ?? [0, 0, partingZ],
       metric: dragShare,
+      actions: [{ kind: 'open_fab', label: `Add ${limits.draftDeg}° Draft`, modal: 'mold', moldTab: 'rigid' }],
     });
   }
 
   // Too thin to cast: below what the material fills, or what a printed mold
   // can draw. Spokes and fins a hair wide came out of a mold as nothing.
-  const thin = thinnestWall(tris, limits.castMinSectionMm);
+  const thin = wallTris.length >= 9 ? thinnestWall(wallTris, limits.castMinSectionMm) : null;
   if (thin && thin.mm < limits.castMinSectionMm && thin.share > T.thinCellShare) {
     findings.push({
       id: 'cast_thin_section',
@@ -1046,18 +1436,23 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
         fix: 'Round inside corners to at least the cast wall (about 3 mm), and blend joins such as a handle into the body.',
         position: sharp.at,
         metric: sharp.length,
+        actions: [{ kind: 'open_edge_round', label: 'Round edges', radiusMm: 3 }],
       });
     }
   }
+
+  const summary = findings.length === 0
+    ? `Everything draws cleanly along Z.`
+    : (undercutShare > T.castUndercutShare || (dragShare > T.dragShare && heightMm > T.dragMinHeightMm))
+      ? `${(undercutShare * 100).toFixed(0)}% undercut, ${(dragShare * 100).toFixed(0)}% short of draft.`
+      : primaryFindingSummary(findings);
 
   return {
     findings,
     heat,
     legend: `Red is undercut and will not pull; amber is under ${limits.draftDeg}° of draft`,
     score: scoreOf(findings),
-    summary: findings.length === 0
-      ? `Everything draws cleanly along Z.`
-      : `${(undercutShare * 100).toFixed(0)}% undercut, ${(dragShare * 100).toFixed(0)}% short of draft.`,
+    summary,
   };
 }
 
@@ -1090,54 +1485,259 @@ function parentMatrixOf(nodes: SceneNode[], id: string, parent?: THREE.Matrix4):
 }
 
 /** Past this many triangles, faces buried between a part's own shapes are not looked for. */
-const MAX_BURIED_CHECK = 20_000;
+const MAX_BURIED_CHECK = 40_000;
+
+interface FlatTriBvh {
+  minX: Float64Array;
+  minY: Float64Array;
+  minZ: Float64Array;
+  maxX: Float64Array;
+  maxY: Float64Array;
+  maxZ: Float64Array;
+  /** Left child index (>= 0) for internal nodes, or -(start + 1) for leaves. */
+  left: Int32Array;
+  /** Right child index for internal nodes, or count for leaves. */
+  right: Int32Array;
+  order: Int32Array;
+  nodeCount: number;
+}
+
+function buildFlatTriBvh(tris: Float64Array, count: number): FlatTriBvh {
+  const order = new Int32Array(count);
+  const tMinX = new Float64Array(count), tMinY = new Float64Array(count), tMinZ = new Float64Array(count);
+  const tMaxX = new Float64Array(count), tMaxY = new Float64Array(count), tMaxZ = new Float64Array(count);
+  const cx = new Float64Array(count), cy = new Float64Array(count), cz = new Float64Array(count);
+
+  for (let t = 0; t < count; t++) {
+    order[t] = t;
+    const i = t * 9;
+    const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+    const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
+    const dx = tris[i + 6], dy = tris[i + 7], dz = tris[i + 8];
+    tMinX[t] = Math.min(ax, bx, dx); tMaxX[t] = Math.max(ax, bx, dx);
+    tMinY[t] = Math.min(ay, by, dy); tMaxY[t] = Math.max(ay, by, dy);
+    tMinZ[t] = Math.min(az, bz, dz); tMaxZ[t] = Math.max(az, bz, dz);
+    cx[t] = (ax + bx + dx) / 3;
+    cy[t] = (ay + by + dy) / 3;
+    cz[t] = (az + bz + dz) / 3;
+  }
+
+  const maxNodes = Math.max(1, count * 2);
+  const minX = new Float64Array(maxNodes), minY = new Float64Array(maxNodes), minZ = new Float64Array(maxNodes);
+  const maxX = new Float64Array(maxNodes), maxY = new Float64Array(maxNodes), maxZ = new Float64Array(maxNodes);
+  const left = new Int32Array(maxNodes);
+  const right = new Int32Array(maxNodes);
+  let nodeCount = 0;
+
+  const build = (start: number, end: number): number => {
+    const idx = nodeCount++;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity;
+    let x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    let cx0 = Infinity, cy0 = Infinity, cz0 = Infinity;
+    let cx1 = -Infinity, cy1 = -Infinity, cz1 = -Infinity;
+    for (let k = start; k < end; k++) {
+      const t = order[k];
+      if (tMinX[t] < x0) x0 = tMinX[t]; if (tMaxX[t] > x1) x1 = tMaxX[t];
+      if (tMinY[t] < y0) y0 = tMinY[t]; if (tMaxY[t] > y1) y1 = tMaxY[t];
+      if (tMinZ[t] < z0) z0 = tMinZ[t]; if (tMaxZ[t] > z1) z1 = tMaxZ[t];
+      if (cx[t] < cx0) cx0 = cx[t]; if (cx[t] > cx1) cx1 = cx[t];
+      if (cy[t] < cy0) cy0 = cy[t]; if (cy[t] > cy1) cy1 = cy[t];
+      if (cz[t] < cz0) cz0 = cz[t]; if (cz[t] > cz1) cz1 = cz[t];
+    }
+    minX[idx] = x0; minY[idx] = y0; minZ[idx] = z0;
+    maxX[idx] = x1; maxY[idx] = y1; maxZ[idx] = z1;
+
+    const len = end - start;
+    if (len <= 8) {
+      left[idx] = -(start + 1);
+      right[idx] = len;
+      return idx;
+    }
+    const sx = cx1 - cx0, sy = cy1 - cy0, sz = cz1 - cz0;
+    const cArr = sx >= sy && sx >= sz ? cx : sy >= sz ? cy : cz;
+    const midVal = sx >= sy && sx >= sz ? (cx0 + cx1) * 0.5 : sy >= sz ? (cy0 + cy1) * 0.5 : (cz0 + cz1) * 0.5;
+    let lo = start, hi = end - 1;
+    while (lo <= hi) {
+      if (cArr[order[lo]] < midVal) lo++;
+      else {
+        const tmp = order[lo];
+        order[lo] = order[hi];
+        order[hi] = tmp;
+        hi--;
+      }
+    }
+    let split = lo;
+    if (split === start || split === end) split = (start + end) >> 1;
+    left[idx] = build(start, split);
+    right[idx] = build(split, end);
+    return idx;
+  };
+
+  if (count > 0) build(0, count);
+  return { minX, minY, minZ, maxX, maxY, maxZ, left, right, order, nodeCount };
+}
 
 /**
- * A part's triangles less those that lie against another of its own shapes —
- * the underside of a knob on a lid, a sheet laid on a plate. Two shapes of one
- * body are one solid once made, so those faces are inside it; judged as
- * surface, a knob read as a 90° undercut. A face is buried when a short step
- * out along its own normal is already inside another shape's triangles, which
- * a ray that far finds facing it back.
+ * A part's triangles less those that lie buried inside another of its own
+ * shapes — the underside of a knob sitting flush on a lid, a gusset sunk into
+ * an arm. Two shapes of one body are one solid once made, so buried interior
+ * faces should not trigger overhang/undercut findings.
+ *
+ * Uses a flat AABB-BVH + per-solid AABB pre-filter with zero inner allocations,
+ * and checks whether `c + eps * n` (`eps = 0.01 mm`) actually lies INSIDE
+ * another solid (nearest forward ray hit on that solid is an EXITING face with
+ * `dot(d, otherOutwardNormal) > 0`), so opposing exterior faces separated by a
+ * real `0.05–0.3 mm` air gap are never deleted.
  */
-function outsideFaces(tris: Float64Array, solids: Int32Array): { tris: Float64Array; index: number[] } {
-  const count = tris.length / 9;
+export function outsideFaces(tris: Float64Array, solids: Int32Array): { tris: Float64Array; index: number[] } {
+  const count = Math.floor(tris.length / 9);
   const all = Array.from({ length: count }, (_, t) => t);
-  if (count > MAX_BURIED_CHECK || new Set(solids).size < 2) return { tris, index: all };
-  const STEP = 0.0003;
+  if (count === 0 || count > MAX_BURIED_CHECK) return { tris, index: all };
+
+  // Map distinct solid ids to dense 0..S-1 indices and compute per-solid AABBs.
+  const solidIdToIdx = new Map<number, number>();
+  const solidIdxOfTri = new Int32Array(count);
+  for (let t = 0; t < count; t++) {
+    const sid = solids[t];
+    let idx = solidIdToIdx.get(sid);
+    if (idx === undefined) {
+      idx = solidIdToIdx.size;
+      solidIdToIdx.set(sid, idx);
+    }
+    solidIdxOfTri[t] = idx;
+  }
+  const numSolids = solidIdToIdx.size;
+  if (numSolids < 2) return { tris, index: all };
+
+  const sMinX = new Float64Array(numSolids).fill(Infinity);
+  const sMinY = new Float64Array(numSolids).fill(Infinity);
+  const sMinZ = new Float64Array(numSolids).fill(Infinity);
+  const sMaxX = new Float64Array(numSolids).fill(-Infinity);
+  const sMaxY = new Float64Array(numSolids).fill(-Infinity);
+  const sMaxZ = new Float64Array(numSolids).fill(-Infinity);
+  for (let t = 0; t < count; t++) {
+    const s = solidIdxOfTri[t];
+    const i = t * 9;
+    for (let v = 0; v < 9; v += 3) {
+      const x = tris[i + v], y = tris[i + v + 1], z = tris[i + v + 2];
+      if (x < sMinX[s]) sMinX[s] = x; if (x > sMaxX[s]) sMaxX[s] = x;
+      if (y < sMinY[s]) sMinY[s] = y; if (y > sMaxY[s]) sMaxY[s] = y;
+      if (z < sMinZ[s]) sMinZ[s] = z; if (z > sMaxZ[s]) sMaxZ[s] = z;
+    }
+  }
+
+  const bvh = buildFlatTriBvh(tris, count);
+  const EPS = 1e-5; // 0.01 mm: inside touching/overlapping solids, strictly inside >= 0.05 mm air gaps
   const keep: number[] = [];
-  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), p = new THREE.Vector3(), q = new THREE.Vector3(), s = new THREE.Vector3();
-  const o = new THREE.Vector3(), d = new THREE.Vector3();
+  const stack = new Int32Array(64);
+  const candFlag = new Uint8Array(numSolids);
+  const bestDist = new Float64Array(numSolids);
+  const bestDot = new Float64Array(numSolids);
+  const candList = new Int32Array(numSolids);
+
   for (let t = 0; t < count; t++) {
     const tri = triNormal(tris, t);
     if (!tri) { keep.push(t); continue; }
     const c = triCentroid(tris, t);
-    d.set(...tri.n);
-    // From just inside the face, out through it, a little way.
-    o.set(c[0], c[1], c[2]).addScaledVector(d, -STEP * 0.1);
+    const dx = tri.n[0], dy = tri.n[1], dz = tri.n[2];
+    const ox = c[0] + dx * EPS;
+    const oy = c[1] + dy * EPS;
+    const oz = c[2] + dz * EPS;
+    const mySolid = solidIdxOfTri[t];
+
+    // Pre-filter: only solids whose AABB contains P can contain P.
+    let candCount = 0;
+    for (let s = 0; s < numSolids; s++) {
+      if (s === mySolid) { candFlag[s] = 0; continue; }
+      if (ox >= sMinX[s] && ox <= sMaxX[s] && oy >= sMinY[s] && oy <= sMaxY[s] && oz >= sMinZ[s] && oz <= sMaxZ[s]) {
+        candFlag[s] = 1;
+        bestDist[s] = Infinity;
+        bestDot[s] = 0;
+        candList[candCount++] = s;
+      } else {
+        candFlag[s] = 0;
+      }
+    }
+    if (candCount === 0) {
+      keep.push(t);
+      continue;
+    }
+
+    const invX = Math.abs(dx) > 1e-18 ? 1 / dx : (dx >= 0 ? 1e18 : -1e18);
+    const invY = Math.abs(dy) > 1e-18 ? 1 / dy : (dy >= 0 ? 1e18 : -1e18);
+    const invZ = Math.abs(dz) > 1e-18 ? 1 / dz : (dz >= 0 ? 1e18 : -1e18);
+
+    let sp = 0;
+    stack[sp++] = 0;
+    while (sp > 0) {
+      const ni = stack[--sp];
+      // Ray-AABB slab test for dist >= 0
+      const tx1 = (bvh.minX[ni] - ox) * invX, tx2 = (bvh.maxX[ni] - ox) * invX;
+      let tmin = tx1 < tx2 ? tx1 : tx2;
+      let tmax = tx1 > tx2 ? tx1 : tx2;
+      const ty1 = (bvh.minY[ni] - oy) * invY, ty2 = (bvh.maxY[ni] - oy) * invY;
+      const tminY = ty1 < ty2 ? ty1 : ty2, tmaxY = ty1 > ty2 ? ty1 : ty2;
+      if (tminY > tmin) tmin = tminY;
+      if (tmaxY < tmax) tmax = tmaxY;
+      const tz1 = (bvh.minZ[ni] - oz) * invZ, tz2 = (bvh.maxZ[ni] - oz) * invZ;
+      const tminZ = tz1 < tz2 ? tz1 : tz2, tmaxZ = tz1 > tz2 ? tz1 : tz2;
+      if (tminZ > tmin) tmin = tminZ;
+      if (tmaxZ < tmax) tmax = tmaxZ;
+      if (tmax < 0 || tmin > tmax) continue;
+
+      const l = bvh.left[ni];
+      if (l < 0) {
+        const start = -(l + 1);
+        const end = start + bvh.right[ni];
+        for (let k = start; k < end; k++) {
+          const u = bvh.order[k];
+          const su = solidIdxOfTri[u];
+          if (!candFlag[su]) continue;
+          const i = u * 9;
+          const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+          const e1x = tris[i + 3] - ax, e1y = tris[i + 4] - ay, e1z = tris[i + 5] - az;
+          const e2x = tris[i + 6] - ax, e2y = tris[i + 7] - ay, e2z = tris[i + 8] - az;
+          // p = d × e2
+          const px = dy * e2z - dz * e2y;
+          const py = dz * e2x - dx * e2z;
+          const pz = dx * e2y - dy * e2x;
+          const det = e1x * px + e1y * py + e1z * pz;
+          if (Math.abs(det) < 1e-18) continue;
+          const inv = 1 / det;
+          const sx = ox - ax, sy = oy - ay, sz = oz - az;
+          const bu = (sx * px + sy * py + sz * pz) * inv;
+          if (bu < -1e-9 || bu > 1 + 1e-9) continue;
+          // q = s × e1
+          const qx = sy * e1z - sz * e1y;
+          const qy = sz * e1x - sx * e1z;
+          const qz = sx * e1y - sy * e1x;
+          const bv = (dx * qx + dy * qy + dz * qz) * inv;
+          if (bv < -1e-9 || bu + bv > 1 + 1e-9) continue;
+          const dist = (e2x * qx + e2y * qy + e2z * qz) * inv;
+          if (dist > 0 && dist < bestDist[su]) {
+            bestDist[su] = dist;
+            // (e1 × e2) · d = -det (Wait: (e1 × e2) · d = e1 · (e2 × d) = -e1 · (d × e2) = -det!)
+            bestDot[su] = -det;
+          }
+        }
+      } else {
+        stack[sp++] = l;
+        stack[sp++] = bvh.right[ni];
+      }
+    }
+
     let buried = false;
-    for (let u = 0; u < count && !buried; u++) {
-      if (solids[u] === solids[t]) continue;
-      const i = u * 9;
-      e1.set(tris[i + 3] - tris[i], tris[i + 4] - tris[i + 1], tris[i + 5] - tris[i + 2]);
-      e2.set(tris[i + 6] - tris[i], tris[i + 7] - tris[i + 1], tris[i + 8] - tris[i + 2]);
-      // Only a face looking back at this one closes it off.
-      if (e1.clone().cross(e2).dot(d) >= 0) continue;
-      p.crossVectors(d, e2);
-      const det = e1.dot(p);
-      if (Math.abs(det) < 1e-18) continue;
-      const inv = 1 / det;
-      s.set(o.x - tris[i], o.y - tris[i + 1], o.z - tris[i + 2]);
-      const bu = s.dot(p) * inv;
-      if (bu < -1e-9 || bu > 1 + 1e-9) continue;
-      q.crossVectors(s, e1);
-      const bv = d.dot(q) * inv;
-      if (bv < -1e-9 || bu + bv > 1 + 1e-9) continue;
-      const dist = e2.dot(q) * inv;
-      if (dist >= -STEP && dist <= STEP) buried = true;
+    for (let k = 0; k < candCount; k++) {
+      const s = candList[k];
+      // Nearest forward hit on candidate solid `s` is an exiting face -> P lies inside solid `s`.
+      if (bestDist[s] < Infinity && bestDot[s] > 0) {
+        buried = true;
+        break;
+      }
     }
     if (!buried) keep.push(t);
   }
+
   if (keep.length === count) return { tris, index: all };
   const out = new Float64Array(keep.length * 9);
   keep.forEach((t, k) => out.set(tris.subarray(t * 9, t * 9 + 9), k * 9));
@@ -1161,39 +1761,120 @@ const MAX_TURNED_TRIANGLES = 50_000;
 
 type Analysis = Omit<DfmReport, 'process' | 'tris' | 'warnings'>;
 
+function transposeMat3(m: Mat3): Mat3 {
+  return [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+}
+
+function applyMat3Vec(m: Mat3, p: [number, number, number]): [number, number, number] {
+  return [
+    m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
+    m[3] * p[0] + m[4] * p[1] + m[5] * p[2],
+    m[6] * p[0] + m[7] * p[1] + m[8] * p[2],
+  ];
+}
+
+const PRINT_ORIENTATION_IDS = new Set(['print_overhang', 'print_no_bridge', 'print_exceeds_bed', 'sla_trapped_cup']);
+
 /**
- * One part, judged the way up that suits the process best: a slicer, a
- * fixture and a mould all start by turning the part, so a warning that one
- * turn would make go away is no warning at all. As placed comes first and
- * wins a tie.
+ * Evaluates a single part without silently painting phantom rotated heat onto
+ * unrotated viewport triangles.
+ *
+ * - For 3D printing without `node.printPose`: evaluates `placed` (matching the
+ *   viewport mesh and heatmap) and, if turning the part improves the score,
+ *   attaches a 1-click `apply_print_pose` action chip rather than silently
+ *   overwriting the viewport heatmap with a hidden rotated orientation.
+ * - For CNC / Casting: searches the six orientations when placed has findings,
+ *   zeroing out heat when a cleaner turn eliminates all findings (so unrotated
+ *   faces never glow red when `findings.length === 0`).
  */
-function analyseBestSide(tris: Float64Array, process: DfmProcess, lim: DfmLimits): Analysis & { side: string } {
-  const run = (t: Float64Array) => (process === 'print' ? analysePrint(t, lim) : process === 'cnc' ? analyseCnc(t, lim) : analyseCast(t, lim));
-  const placed = run(tris);
+function analyseBestSide(
+  tris: Float64Array,
+  wallTris: Float64Array,
+  process: DfmProcess,
+  lim: DfmLimits,
+  nodeId: string,
+): Analysis & { side: string } {
+  const run = (t: Float64Array, wt: Float64Array) => (
+    process === 'print' ? analysePrint(t, lim, wt, false)
+      : process === 'cnc' ? analyseCnc(t, lim, wt)
+        : analyseCast(t, lim, wt)
+  );
+  const placed = run(tris, wallTris);
   if (tris.length / 9 > MAX_TURNED_TRIANGLES || placed.findings.length === 0) return { ...placed, side: '' };
+
   const b = bounds(tris);
   const c = new THREE.Vector3((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2);
-  let best = { ...placed, side: '' };
   const badness = (a: Analysis) => 100 - a.score;
-  for (const side of SIDES.slice(1)) {
-    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(...side.up), new THREE.Vector3(0, 0, 1));
+  const sameWalls = wallTris === tris;
+
+  const rotateSoupAroundCenter = (src: Float64Array, q: THREE.Quaternion): Float64Array => {
     const v = new THREE.Vector3();
-    const turned = new Float64Array(tris.length);
-    for (let i = 0; i < tris.length; i += 3) {
-      v.set(tris[i] - c.x, tris[i + 1] - c.y, tris[i + 2] - c.z).applyQuaternion(q);
+    const turned = new Float64Array(src.length);
+    for (let i = 0; i < src.length; i += 3) {
+      v.set(src[i] - c.x, src[i + 1] - c.y, src[i + 2] - c.z).applyQuaternion(q);
       turned[i] = v.x + c.x; turned[i + 1] = v.y + c.y; turned[i + 2] = v.z + c.z;
     }
-    const a = run(turned);
-    if (badness(a) >= badness(best)) continue;
-    // Where to look is said in the scene as it stands, not in the turned copy.
-    const back = q.clone().invert();
-    a.findings = a.findings.map((f) => {
-      const p = new THREE.Vector3(...f.position).sub(c).applyQuaternion(back).add(c);
-      return { ...f, position: [p.x, p.y, p.z] };
-    });
-    best = { ...a, side: side.text };
+    return turned;
+  };
+
+  let bestTurn: { analysis: Analysis; side: { up: [number, number, number]; text: string }; q: THREE.Quaternion } | null = null;
+  let bestBadness = badness(placed);
+
+  for (const side of SIDES.slice(1)) {
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(...side.up), new THREE.Vector3(0, 0, 1));
+    const turned = rotateSoupAroundCenter(tris, q);
+    const turnedWalls = sameWalls ? turned : rotateSoupAroundCenter(wallTris, q);
+    const a = run(turned, turnedWalls);
+    const scoreBad = badness(a);
+    if (scoreBad >= bestBadness) continue;
+    bestBadness = scoreBad;
+    bestTurn = { analysis: a, side, q };
   }
-  return best;
+
+  if (!bestTurn) return { ...placed, side: '' };
+
+  if (process === 'print') {
+    // Keep `placed` findings AND `placed` heat so the viewport heatmap matches
+    // the visible geometry, and attach a 1-click `apply_print_pose` action!
+    const poseAction: DfmAction = {
+      kind: 'apply_print_pose',
+      label: `Lay ${bestTurn.side.text}`,
+      nodeId,
+      up: bestTurn.side.up,
+      spin: 0,
+    };
+    const findings = placed.findings.map((f) => {
+      if (!PRINT_ORIENTATION_IDS.has(f.id)) return f;
+      const existing = f.actions ?? [];
+      const hasPose = existing.some((a) => a.kind === 'apply_print_pose');
+      return {
+        ...f,
+        actions: hasPose ? existing : [poseAction, ...existing],
+      };
+    });
+    return { ...placed, findings, side: '' };
+  }
+
+  // CNC / Casting: use the better setup's findings (positions mapped back to
+  // body space), and never paint rotated heat when the turn clears all issues.
+  const back = bestTurn.q.clone().invert();
+  const findings = bestTurn.analysis.findings.map((f) => {
+    const p = new THREE.Vector3(...f.position).sub(c).applyQuaternion(back).add(c);
+    return { ...f, position: [p.x, p.y, p.z] as [number, number, number] };
+  });
+  const heat = findings.length === 0 ? new Float32Array(placed.heat.length) : placed.heat;
+  return { ...bestTurn.analysis, findings, heat, side: bestTurn.side.text };
+}
+
+/** Populate `nodeId` on any finding action that references the current part. */
+function attachNodeToActions(actions: DfmAction[] | undefined, nodeId: string): DfmAction[] | undefined {
+  if (!actions || actions.length === 0) return undefined;
+  return actions.map((a) => {
+    if (a.kind === 'open_split' && !a.nodeId) return { ...a, nodeId };
+    if (a.kind === 'open_edge_round' && !a.nodeId) return { ...a, nodeId };
+    if (a.kind === 'apply_print_pose' && !a.nodeId) return { ...a, nodeId };
+    return a;
+  });
 }
 
 /**
@@ -1218,11 +1899,13 @@ export function analyseDfm(
       filament: bench.filament ?? DEFAULT_FILAMENT,
       stock: bench.stock ?? null,
       printBed: bench.printBed ?? null,
+      printer: bench.printer ?? null,
       castMaterial: bench.castMaterial,
     }),
     ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
   };
   const target = bench.nodeId ? findNode(scene.nodes || [], bench.nodeId) : null;
+  const scopeNodeId = target ? target.id : null;
   // Said as the walk goes, not by sampling the whole scene a second time for
   // its warnings alone.
   const warnings: string[] = [];
@@ -1230,7 +1913,13 @@ export function analyseDfm(
 
   // Each body is a part, judged in its own frame — a board modelled tilted
   // is still a board — and put back where it stands for the overlay.
-  const bodies: { node: SceneNode; local: Float64Array; solids: Int32Array; world: THREE.Matrix4 }[] = [];
+  const bodies: {
+    node: SceneNode;
+    local: Float64Array;
+    solids: Int32Array;
+    flexureTri: Uint8Array;
+    world: THREE.Matrix4;
+  }[] = [];
   const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
     for (const n of nodes) {
       const world = getNodeWorldTransform(n, parent);
@@ -1240,6 +1929,7 @@ export function analyseDfm(
         if (uncompiled) warnings.push(uncompiled);
         const out: number[] = [];
         const solids: number[] = [];
+        const flexFlags: number[] = [];
         let solid = 0;
         for (const g of resolveCsgGeoms(n, 'render')) {
           if (g.role === 'collision') continue;
@@ -1248,10 +1938,22 @@ export function analyseDfm(
             skipped.push(`${n.name} (${g.name || g.type})`);
             continue;
           }
-          for (let i = before; i < out.length; i += 9) solids.push(solid);
+          const isFlexureLeaf = Boolean(g.bend || g.name?.startsWith('flexure_') || (n.flexure && g.role === 'visual'));
+          for (let i = before; i < out.length; i += 9) {
+            solids.push(solid);
+            flexFlags.push(isFlexureLeaf ? 1 : 0);
+          }
           solid++;
         }
-        if (out.length >= 9) bodies.push({ node: n, local: Float64Array.from(out), solids: Int32Array.from(solids), world });
+        if (out.length >= 9) {
+          bodies.push({
+            node: n,
+            local: Float64Array.from(out),
+            solids: Int32Array.from(solids),
+            flexureTri: Uint8Array.from(flexFlags),
+            world,
+          });
+        }
       }
       walk(n.children || [], world);
     }
@@ -1260,17 +1962,80 @@ export function analyseDfm(
   walk(target ? [target] : (scene.nodes || []), targetParent);
   if (skipped.length) warnings.push(`Not analysed: ${skipped.join(', ')}.`);
 
+  // Gate whole-scene multi-body avalanche when no part is selected (unless caller
+  // explicitly asked for checkAllAsPlate: true). Cross-part assembly checks still run.
+  if (!target && bodies.length > 1 && !bench.checkAllAsPlate) {
+    const findings = hardwareFindings(scene, process, scene, undefined, null);
+    const open = findings.filter((f) => !f.passed);
+    const procName = process === 'print' ? '3D printing' : process === 'cnc' ? 'CNC' : 'casting';
+    return {
+      process,
+      tris: new Float64Array(0),
+      heat: new Float32Array(0),
+      warnings,
+      findings,
+      legend: '',
+      score: scoreOf(findings),
+      summary: open.length === 0
+        ? `Select a part to check ${procName} (${bodies.length} parts in scene).`
+        : `${open.length} assembly issue${open.length === 1 ? '' : 's'}; select a part for fabrication checks.`,
+      needsPartSelection: { bodyCount: bodies.length },
+      nodeId: null,
+    };
+  }
+
   const allTris: number[] = [];
   const allHeat: number[] = [];
   const findings: DfmFinding[] = [];
   let legend = '';
   let summaries: string[] = [];
+  let judgedPoseLabel: string | undefined;
   const named = bodies.length > 1;
-  for (const { node, local, solids, world } of bodies) {
+  for (const { node, local, solids, flexureTri, world } of bodies) {
     // Faces where one of the part's shapes sits on another are inside the
     // part, not on it: judged without them, and given no heat.
     const kept = outsideFaces(local, solids);
-    const a = analyseBestSide(kept.tris, process, lim);
+
+    // Exclude intentional compliant flexure leaves from thin-wall false positives.
+    let hasFlex = false;
+    for (let k = 0; k < kept.index.length; k++) {
+      if (flexureTri[kept.index[k]]) { hasFlex = true; break; }
+    }
+    let wallTris = kept.tris;
+    if (hasFlex) {
+      const keepWall: number[] = [];
+      for (let k = 0; k < kept.index.length; k++) {
+        if (!flexureTri[kept.index[k]]) keepWall.push(k);
+      }
+      const wt = new Float64Array(keepWall.length * 9);
+      keepWall.forEach((k, idx) => wt.set(kept.tris.subarray(k * 9, k * 9 + 9), idx * 9));
+      wallTris = wt;
+    }
+
+    let a: Analysis & { side: string };
+    if (process === 'print' && node.printPose) {
+      // Evaluate overhang, bed fit (including cutFor?.bedMm and oblique/diagonal
+      // footprint), and heatmap directly in the body's explicit `node.printPose`.
+      const m = poseMatrix(node.printPose);
+      const mInv = transposeMat3(m);
+      const posedTris = rotatePoints(m, kept.tris);
+      const posedWallTris = wallTris === kept.tris ? posedTris : rotatePoints(m, wallTris);
+      const cutBed = node.printPose.cutFor?.bedMm;
+      const bodyLim: DfmLimits = !lim.bedMm && cutBed
+        ? { ...lim, bedMm: { widthMm: cutBed[0], depthMm: cutBed[1], heightMm: cutBed[2] } }
+        : lim;
+      const posed = analysePrint(posedTris, bodyLim, posedWallTris, true);
+      posed.findings = posed.findings.map((f) => ({
+        ...f,
+        position: applyMat3Vec(mInv, f.position),
+      }));
+      a = { ...posed, side: '' };
+      judgedPoseLabel = 'print pose';
+    } else {
+      a = analyseBestSide(kept.tris, wallTris, process, lim, node.id);
+      if (a.side) judgedPoseLabel = a.side;
+    }
+
     const heat = new Float32Array(local.length / 9);
     kept.index.forEach((t, k) => { heat[t] = a.heat[k]; });
     a.heat = heat;
@@ -1284,30 +2049,37 @@ export function analyseDfm(
     summaries.push(a.summary);
     for (const f of a.findings) {
       const p = new THREE.Vector3(...f.position).applyMatrix4(world);
+      const actions = attachNodeToActions(f.actions, node.id);
       findings.push({
         ...f,
         id: named ? `${node.id}:${f.id}` : f.id,
+        nodeId: node.id,
         title: named ? `${node.name}: ${f.title}` : f.title,
         detail: a.side ? `${f.detail} Judged ${a.side}, the best way up for it.` : f.detail,
         position: [p.x, p.y, p.z],
+        ...(actions ? { actions } : {}),
       });
     }
   }
   const parts = bodies.length;
-  // Seals, screws and runners are between parts: every one in the scene is
-  // judged, whichever part is picked — a lid moved off its jar is a seal that
-  // fails, though the lid has no groove of its own.
-  findings.push(...hardwareFindings(scene, process, scene));
+  // Assembly checks (seals, screws, runners, insert bosses), scoped to the
+  // selected body and its mating parts when `nodeId` is specified.
+  findings.push(...hardwareFindings(scene, process, scene, undefined, scopeNodeId));
 
   const tris = Float64Array.from(allTris);
   if (parts === 0) {
-    return { process, tris, warnings, findings, heat: new Float32Array(0), legend: '', score: scoreOf(findings), summary: 'Nothing in the scene to analyse.' };
+    return {
+      process, tris, warnings, findings, heat: new Float32Array(0), legend: '',
+      score: scoreOf(findings), summary: 'Nothing in the scene to analyse.', nodeId: scopeNodeId,
+    };
   }
   const open = findings.filter((f) => !f.passed);
   if (parts > 1) summaries = [open.length === 0 ? `All ${parts} parts come out clean.` : `${open.length} to look at across ${parts} parts.`];
   return {
     process, tris, warnings, findings,
     heat: Float32Array.from(allHeat), legend, score: scoreOf(findings), summary: summaries[0] ?? '',
+    ...(judgedPoseLabel ? { judgedPoseLabel } : {}),
+    nodeId: scopeNodeId,
   };
 }
 
@@ -1326,11 +2098,13 @@ function analyseDfmAsPlaced(
       filament: bench.filament ?? DEFAULT_FILAMENT,
       stock: bench.stock ?? null,
       printBed: bench.printBed ?? null,
+      printer: bench.printer ?? null,
       castMaterial: bench.castMaterial,
     }),
     ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
   };
   const target = bench.nodeId ? findNode(scene.nodes || [], bench.nodeId) : null;
+  const scopeNodeId = target ? target.id : null;
   const collected = collectSceneTriangles(target ? { ...scene, nodes: [target] } : scene);
   const tris = Float64Array.from(collected.tris);
   const warnings = [...collected.warnings];
@@ -1344,28 +2118,39 @@ function analyseDfmAsPlaced(
       findings: [], heat: new Float32Array(0),
       legend: '', score: 100,
       summary: 'Nothing in the scene to analyse.',
+      nodeId: scopeNodeId,
     };
   }
 
   const body = process === 'print' ? analysePrint(tris, lim)
     : process === 'cnc' ? analyseCnc(tris, lim)
       : analyseCast(tris, lim);
-  // Seals and screws are judged the same whatever makes the part.
-  const hardware = hardwareFindings(target ? { ...scene, nodes: [target] } : scene, process, scene);
+  if (scopeNodeId) {
+    body.findings = body.findings.map((f) => ({
+      ...f,
+      nodeId: f.nodeId ?? scopeNodeId,
+      ...(f.actions ? { actions: attachNodeToActions(f.actions, scopeNodeId) } : {}),
+    }));
+  }
+  // Seals, screws, runners, and insert bosses are judged the same whatever makes the part.
+  const hardware = hardwareFindings(target ? { ...scene, nodes: [target] } : scene, process, scene, undefined, scopeNodeId);
   if (hardware.length) {
     body.findings = [...body.findings, ...hardware];
     body.score = scoreOf(body.findings);
   }
 
-  return { process, tris, warnings, ...body };
+  return { process, tris, warnings, ...body, nodeId: scopeNodeId };
 }
 
 /**
  * The report with its assembly findings measured where the bodies are now
  * rather than where they were drawn. A part's own shape does not change when
- * the sim moves it, so only the seals, screws and runners are run again.
+ * the sim moves it, so only the seals, screws, runners and bosses are run again.
  */
 export function withLivePoses(report: DfmReport, scene: SceneGraph, poses: LivePoses): DfmReport {
-  const findings = [...report.findings.filter((f) => !f.assembly), ...hardwareFindings(scene, report.process, scene, poses)];
+  const findings = [
+    ...report.findings.filter((f) => !f.assembly),
+    ...hardwareFindings(scene, report.process, scene, poses, report.nodeId ?? null),
+  ];
   return { ...report, findings, score: scoreOf(findings) };
 }

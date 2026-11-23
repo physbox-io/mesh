@@ -115,6 +115,8 @@ export interface PlateRect {
   w: number;
   /** Footprint along the bed's Y, mm. */
   d: number;
+  /** Optional height along the bed's Z, mm (checked against `bed.heightMm` when provided). */
+  h?: number;
 }
 
 export interface Placement {
@@ -125,6 +127,8 @@ export interface Placement {
   turned: boolean;
   /** Which plate: 0 is the bed, 1 the next one over, and so on. */
   plate: number;
+  /** True when the part's Z height exceeds `bed.heightMm`. */
+  exceedsHeight?: boolean;
 }
 
 /**
@@ -139,7 +143,7 @@ export interface Placement {
  */
 export function packOnBed(
   rects: PlateRect[],
-  bed: { widthMm: number; depthMm: number },
+  bed: { widthMm: number; depthMm: number; heightMm?: number },
   marginMm = 5,
   gapMm = 5,
 ): Placement[] {
@@ -152,7 +156,8 @@ export function packOnBed(
     if (long <= W && short <= D) turned = r.w < r.d;
     else if (r.w <= W && r.d <= D) turned = false;
     else turned = r.d <= W && r.w <= D;
-    return { i, w: turned ? r.d : r.w, d: turned ? r.w : r.d, turned };
+    const exceedsHeight = bed.heightMm !== undefined && r.h !== undefined && r.h > bed.heightMm + 1e-6;
+    return { i, w: turned ? r.d : r.w, d: turned ? r.w : r.d, turned, exceedsHeight };
   });
   const order = [...shaped].sort((a, b) => b.d - a.d || b.w - a.w);
   const out: Placement[] = new Array(rects.length);
@@ -170,7 +175,13 @@ export function packOnBed(
       plate++;
       rowY = 0; cursorX = 0; rowDepth = 0;
     }
-    out[s.i] = { x: marginMm + cursorX, y: marginMm + rowY, turned: s.turned, plate };
+    out[s.i] = {
+      x: marginMm + cursorX,
+      y: marginMm + rowY,
+      turned: s.turned,
+      plate,
+      ...(s.exceedsHeight ? { exceedsHeight: true } : {}),
+    };
     plateUsed = true;
     cursorX += s.w + gapMm;
     rowDepth = Math.max(rowDepth, s.d);
@@ -198,6 +209,8 @@ export interface PlatedPart {
   indices: Uint32Array;
   colour: [number, number, number];
   plate: number;
+  /** True when the posed part's Z height exceeds `bed.heightMm`. */
+  exceedsHeight?: boolean;
 }
 
 /** Room between plates when a job needs more than one bed's worth. */
@@ -213,12 +226,17 @@ const PLATE_GAP_MM = 20;
  */
 export function layoutOnBed(
   parts: PosedPart[],
-  bed: { widthMm: number; depthMm: number },
+  bed: { widthMm: number; depthMm: number; heightMm?: number },
   marginMm = 5,
 ): PlatedPart[] {
   const placed = layoutSetsOnBed(parts.map((p) => [rotatePoints(poseMatrix(p.pose), p.positions)]), bed, marginMm);
   return parts.map((p, i) => ({
-    name: p.name, positions: placed[i].sets[0], indices: Uint32Array.from(p.faces), colour: p.colour, plate: placed[i].plate,
+    name: p.name,
+    positions: placed[i].sets[0],
+    indices: Uint32Array.from(p.faces),
+    colour: p.colour,
+    plate: placed[i].plate,
+    ...(placed[i].exceedsHeight ? { exceedsHeight: true } : {}),
   }));
 }
 
@@ -231,9 +249,9 @@ export function layoutOnBed(
  */
 export function layoutSetsOnBed(
   parts: ArrayLike<number>[][],
-  bed: { widthMm: number; depthMm: number },
+  bed: { widthMm: number; depthMm: number; heightMm?: number },
   marginMm = 5,
-): { sets: Float32Array[]; plate: number }[] {
+): { sets: Float32Array[]; plate: number; heightMm: number; exceedsHeight: boolean }[] {
   const sized = parts.map((sets) => {
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     for (const set of sets) {
@@ -245,14 +263,18 @@ export function layoutSetsOnBed(
         }
       }
     }
-    return { sets, lo, size: [hi[0] - lo[0], hi[1] - lo[1]] };
+    const empty = !Number.isFinite(lo[0]);
+    const size = empty ? [0, 0, 0] : [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    return { sets, lo: empty ? [0, 0, 0] : lo, size };
   });
-  const places = packOnBed(sized.map(({ size }) => ({ w: size[0], d: size[1] })), bed, marginMm);
+  const places = packOnBed(sized.map(({ size }) => ({ w: size[0], d: size[1], h: size[2] })), bed, marginMm);
   return sized.map(({ sets, lo, size }, i) => {
     const place = places[i];
     const plateX = place.plate * (bed.widthMm + PLATE_GAP_MM);
     return {
       plate: place.plate,
+      heightMm: size[2],
+      exceedsHeight: !!place.exceedsHeight,
       sets: sets.map((set) => {
         const out = new Float32Array(set.length);
         for (let v = 0; v + 2 < set.length; v += 3) {

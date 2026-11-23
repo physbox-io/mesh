@@ -88,10 +88,13 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   // Open a fabrication dialog requested via deep-link URL (`?open=...`).
   useEffect(() => {
     const onOpenFab = (e: Event) => {
-      const detail = (e as CustomEvent<{ modal: DeepLinkModal; moldTab?: MoldTab; unfoldMode?: SheetUnfoldMode }>).detail;
+      const detail = (e as CustomEvent<{ modal: DeepLinkModal | 'split'; moldTab?: MoldTab; unfoldMode?: SheetUnfoldMode }>).detail;
       if (!detail) return;
       setSubjectIds(selectedIds(useStore.getState()));
       switch (detail.modal) {
+        case 'split':
+          setIsSplitModalOpen(true);
+          break;
         case 'mold':
           if (detail.moldTab) useCastDialog.getState().requestTab({ tab: detail.moldTab, advanced: false });
           setIsMoldModalOpen(true);

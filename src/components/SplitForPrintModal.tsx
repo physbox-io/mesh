@@ -289,7 +289,7 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
                     </p>
                     {split.sections.length === 1 && (
                       <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                        {`Part already fits the bed (${printBed.widthMm} × ${printBed.depthMm} × ${printBed.heightMm} mm). Select an axis below to split anyway.`}
+                        {`Part already fits the bed (${printBed.widthMm} × ${printBed.depthMm} × ${printBed.heightMm} mm) — no cuts needed. Apply saves its lowest-support print orientation.`}
                       </p>
                     )}
                     {misfits > 0 && (
@@ -363,9 +363,11 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
                       <Loader2 className="w-3.5 h-3.5 animate-spin" /> Putting it back together…
                     </p>
                   )}
-                  <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">
-                    Boolean split failed at this plane. Nudge the cut offset by 1–2 mm or run Repair Mesh first.
-                  </p>
+                  {!assembly.running && assembly.results.some((r) => !r.ok) && (
+                    <p className="text-[10px] leading-snug text-amber-700 dark:text-amber-400">
+                      One or more assembly stages did not seat cleanly. Check the stage notes above, or adjust joinery / clearance and test again.
+                    </p>
+                  )}
                 </div>
               )}
             </>

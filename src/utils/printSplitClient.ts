@@ -61,90 +61,217 @@ export function selectionSoups(scene: SceneGraph, ids: string[]): { soups: Float
   return out;
 }
 
-type Pending =
-  | { kind: 'split'; resolve: (o: SplitOutcome) => void; timer: ReturnType<typeof setTimeout> }
-  | { kind: 'plane'; resolve: (r: PlaneCutResult) => void; timer: ReturnType<typeof setTimeout> }
+export interface PrintSplitWorkerLike {
+  onmessage: ((evt: MessageEvent<PrintSplitResponse>) => void) | null;
+  onerror: ((evt: ErrorEvent) => void) | null;
+  onmessageerror: ((evt: MessageEvent) => void) | null;
+  postMessage(message: PrintSplitRequest, transfer?: Transferable[]): void;
+  terminate(): void;
+}
+
+export type PrintSplitWorkerFactory = () => PrintSplitWorkerLike | null;
+
+type QueuedJob =
   | {
+    id: number;
+    kind: 'split';
+    soups: Float64Array[];
+    options: SplitOptions;
+    resolve: (o: SplitOutcome) => void;
+  }
+  | {
+    id: number;
+    kind: 'plane';
+    soups: Float64Array[];
+    at: [number, number, number];
+    normal: [number, number, number];
+    resolve: (r: PlaneCutResult) => void;
+  }
+  | {
+    id: number;
     kind: 'assemble';
+    stages: { xml: string; stage: AssemblyPlan['stages'][number] extends infer S ? Omit<S, 'scene'> : never }[];
     resolve: (r: StageResult[]) => void;
     reject: (e: Error) => void;
     onProgress?: (done: number, total: number, result: StageResult) => void;
     results: StageResult[];
-    timer: ReturnType<typeof setTimeout>;
-    total: number;
   };
 
-let worker: Worker | null = null;
-let seq = 0;
-const pending = new Map<number, Pending>();
+type ActiveJob = QueuedJob & { timer: ReturnType<typeof setTimeout> };
 
-function failAll(error: string) {
-  for (const [, p] of pending) {
-    clearTimeout(p.timer);
-    if (p.kind === 'split') p.resolve({ result: { ok: false, error }, checks: null });
-    else if (p.kind === 'plane') p.resolve({ ok: false, error });
-    else p.reject(new Error(error));
-  }
-  pending.clear();
+let workerFactory: PrintSplitWorkerFactory | null = null;
+let worker: PrintSplitWorkerLike | null = null;
+let seq = 0;
+let inFlight: ActiveJob | null = null;
+const queued: QueuedJob[] = [];
+
+function resolveJobFailure(job: QueuedJob, error: string): void {
+  if (job.kind === 'split') job.resolve({ result: { ok: false, error }, checks: null });
+  else if (job.kind === 'plane') job.resolve({ ok: false, error });
+  else job.reject(new Error(error));
 }
 
-function ensureWorker(): Worker | null {
+function terminateWorker(): void {
+  const w = worker;
+  worker = null;
+  if (w) {
+    w.onmessage = null;
+    w.onerror = null;
+    w.onmessageerror = null;
+    w.terminate();
+  }
+}
+
+function failAll(error: string): void {
+  const active = inFlight;
+  inFlight = null;
+  const waiting = queued.splice(0, queued.length);
+  if (active) {
+    clearTimeout(active.timer);
+    resolveJobFailure(active, error);
+  }
+  for (const job of waiting) resolveJobFailure(job, error);
+}
+
+function createWorkerInstance(): PrintSplitWorkerLike | null {
+  if (workerFactory) return workerFactory();
   if (typeof Worker === 'undefined') return null;
+  return new Worker(new URL('../workers/printSplitWorker.ts', import.meta.url), { type: 'module' });
+}
+
+function canUseWorker(): boolean {
+  return workerFactory !== null || typeof Worker !== 'undefined';
+}
+
+function ensureWorker(): PrintSplitWorkerLike | null {
   if (worker) return worker;
+  if (!canUseWorker()) return null;
   try {
-    worker = new Worker(new URL('../workers/printSplitWorker.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (evt: MessageEvent<PrintSplitResponse>) => {
+    const w = createWorkerInstance();
+    if (!w) return null;
+    worker = w;
+    w.onmessage = (evt: MessageEvent<PrintSplitResponse>) => {
+      if (worker !== w) return;
       const msg = evt.data;
-      const p = pending.get(msg.id);
-      if (!p) return;
-      if (msg.type === 'SPLIT_DONE' && p.kind === 'split') {
-        pending.delete(msg.id);
-        clearTimeout(p.timer);
-        p.resolve({ result: msg.result, checks: msg.checks });
-      } else if (msg.type === 'PLANE_CUT_DONE' && p.kind === 'plane') {
-        pending.delete(msg.id);
-        clearTimeout(p.timer);
-        p.resolve(msg.result);
-      } else if (msg.type === 'ASSEMBLE_PROGRESS' && p.kind === 'assemble') {
-        p.results.push(msg.result);
-        p.onProgress?.(msg.done, msg.total, msg.result);
-        clearTimeout(p.timer);
-        p.timer = setTimeout(() => abandon(msg.id, 'A stage of the assembly test took too long and was abandoned.'), STAGE_TIMEOUT_MS);
-      } else if (msg.type === 'ASSEMBLE_DONE' && p.kind === 'assemble') {
-        pending.delete(msg.id);
-        clearTimeout(p.timer);
-        p.resolve(p.results);
+      const active = inFlight;
+      if (!active || active.id !== msg.id) return;
+      if (msg.type === 'SPLIT_DONE' && active.kind === 'split') {
+        inFlight = null;
+        clearTimeout(active.timer);
+        active.resolve({ result: msg.result, checks: msg.checks });
+        drainQueue();
+      } else if (msg.type === 'PLANE_CUT_DONE' && active.kind === 'plane') {
+        inFlight = null;
+        clearTimeout(active.timer);
+        active.resolve(msg.result);
+        drainQueue();
+      } else if (msg.type === 'ASSEMBLE_PROGRESS' && active.kind === 'assemble') {
+        active.results.push(msg.result);
+        active.onProgress?.(msg.done, msg.total, msg.result);
+        clearTimeout(active.timer);
+        active.timer = setTimeout(
+          () => abandon(msg.id, 'A stage of the assembly test took too long and was abandoned.'),
+          STAGE_TIMEOUT_MS,
+        );
+      } else if (msg.type === 'ASSEMBLE_DONE' && active.kind === 'assemble') {
+        inFlight = null;
+        clearTimeout(active.timer);
+        active.resolve(active.results);
+        drainQueue();
       } else if (msg.type === 'FAILED') {
-        pending.delete(msg.id);
-        clearTimeout(p.timer);
-        if (p.kind === 'split') p.resolve({ result: { ok: false, error: msg.error }, checks: null });
-        else if (p.kind === 'plane') p.resolve({ ok: false, error: msg.error });
-        else p.reject(new Error(msg.error));
+        inFlight = null;
+        clearTimeout(active.timer);
+        resolveJobFailure(active, msg.error);
+        drainQueue();
       }
     };
-    worker.onerror = () => {
+    const onWorkerBroken = (error: string) => {
+      if (worker !== w) return;
       noteWorkerStopped();
-      failAll('Split for Print stopped working. Try again.');
-      worker?.terminate();
-      worker = null;
+      terminateWorker();
+      failAll(error);
     };
+    w.onerror = () => onWorkerBroken('Split for Print stopped working. Try again.');
+    w.onmessageerror = () => onWorkerBroken('Split for Print could not read the worker response. Try again.');
   } catch {
     worker = null;
   }
   return worker;
 }
 
-function abandon(id: number, error: string) {
-  const p = pending.get(id);
-  if (!p) return;
-  pending.delete(id);
-  if (p.kind === 'split') p.resolve({ result: { ok: false, error }, checks: null });
-  else if (p.kind === 'plane') p.resolve({ ok: false, error });
-  else p.reject(new Error(error));
-  // A wedged worker is no use to the next request either.
-  worker?.terminate();
-  worker = null;
-  failAll(error);
+function timeoutMessageFor(job: QueuedJob): string {
+  if (job.kind === 'split') return 'The split took too long and was abandoned.';
+  if (job.kind === 'plane') return 'The cut took too long and was abandoned.';
+  return 'The assembly test took too long and was abandoned.';
+}
+
+function timeoutMsFor(job: QueuedJob): number {
+  return job.kind === 'assemble' ? STAGE_TIMEOUT_MS : SPLIT_TIMEOUT_MS;
+}
+
+function drainQueue(): void {
+  while (!inFlight && queued.length > 0) {
+    const next = queued.shift()!;
+    const w = ensureWorker();
+    if (!w) {
+      resolveJobFailure(next, 'Split for Print stopped working. Try again.');
+      continue;
+    }
+    const timer = setTimeout(() => abandon(next.id, timeoutMessageFor(next)), timeoutMsFor(next));
+    const active: ActiveJob = { ...next, timer };
+    inFlight = active;
+    try {
+      if (active.kind === 'split') {
+        // Copies, not the caller's arrays: they are transferred.
+        const req: PrintSplitRequest = {
+          type: 'SPLIT',
+          id: active.id,
+          soups: active.soups.map((s) => s.slice()),
+          options: active.options,
+        };
+        w.postMessage(req, req.soups.map((s) => s.buffer));
+      } else if (active.kind === 'plane') {
+        const req: PrintSplitRequest = {
+          type: 'PLANE_CUT',
+          id: active.id,
+          soups: active.soups.map((s) => s.slice()),
+          at: active.at,
+          normal: active.normal,
+        };
+        w.postMessage(req, req.soups.map((s) => s.buffer));
+      } else {
+        const req: PrintSplitRequest = { type: 'ASSEMBLE', id: active.id, stages: active.stages };
+        w.postMessage(req);
+      }
+      return;
+    } catch (err) {
+      clearTimeout(active.timer);
+      inFlight = null;
+      resolveJobFailure(active, err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
+function abandon(id: number, error: string): void {
+  const active = inFlight;
+  if (!active || active.id !== id) return;
+  inFlight = null;
+  clearTimeout(active.timer);
+  // A wedged worker is no use to the next request either; replace it so any
+  // queued requests that never ran on it can execute cleanly on a fresh one.
+  terminateWorker();
+  resolveJobFailure(active, error);
+  drainQueue();
+}
+
+/**
+ * Test seam: override how the print-split worker is constructed. Pass `null`
+ * to restore the default `new Worker(...)` behaviour and reset client state.
+ */
+export function setPrintSplitWorkerFactory(factory: PrintSplitWorkerFactory | null): void {
+  terminateWorker();
+  failAll('Split for Print worker was reset.');
+  workerFactory = factory;
 }
 
 /** Start the worker and its wasm loading before the dialog asks for anything. */
@@ -155,20 +282,25 @@ export function prewarmPrintSplit(): void {
 
 /** Splits off the main thread where it can, inline where it cannot. Never rejects. */
 export async function splitOffThread(soups: Float64Array[], options: SplitOptions): Promise<SplitOutcome> {
-  const w = ensureWorker();
-  if (!w) {
+  if (!canUseWorker() || (!worker && !ensureWorker())) {
     const [{ loadManifold }, { splitForPrint, checkSplit }] = await Promise.all([import('./sculptCut'), import('./printSplit')]);
     const wasm = await loadManifold();
     const result = splitForPrint(wasm, soups, options);
     return { result, checks: result.ok ? checkSplit(wasm, result.sections, result.joints, soups) : null };
   }
   return new Promise<SplitOutcome>((resolve) => {
+    // Latest-wins coalescing: supersede any queued split that has not started yet
+    // so rapid slider/input edits never queue obsolete multi-second splits back-to-back.
+    for (let i = queued.length - 1; i >= 0; i--) {
+      const existing = queued[i];
+      if (existing.kind === 'split') {
+        queued.splice(i, 1);
+        existing.resolve({ result: { ok: false, error: 'Superseded by a newer split request.' }, checks: null });
+      }
+    }
     const id = ++seq;
-    const timer = setTimeout(() => abandon(id, 'The split took too long and was abandoned.'), SPLIT_TIMEOUT_MS);
-    pending.set(id, { kind: 'split', resolve, timer });
-    // Copies, not the caller's arrays: they are transferred.
-    const req: PrintSplitRequest = { type: 'SPLIT', id, soups: soups.map((s) => s.slice()), options };
-    w.postMessage(req, req.soups.map((s) => s.buffer));
+    queued.push({ id, kind: 'split', soups: soups.map((s) => s.slice()), options, resolve });
+    drainQueue();
   });
 }
 
@@ -178,17 +310,14 @@ export async function cutAlongPlaneOffThread(
   at: [number, number, number],
   normal: [number, number, number],
 ): Promise<PlaneCutResult> {
-  const w = ensureWorker();
-  if (!w) {
+  if (!canUseWorker() || (!worker && !ensureWorker())) {
     const [{ loadManifold }, { cutAlongPlane }] = await Promise.all([import('./sculptCut'), import('./printSplit')]);
     return cutAlongPlane(await loadManifold(), soups, at, normal);
   }
   return new Promise<PlaneCutResult>((resolve) => {
     const id = ++seq;
-    const timer = setTimeout(() => abandon(id, 'The cut took too long and was abandoned.'), SPLIT_TIMEOUT_MS);
-    pending.set(id, { kind: 'plane', resolve, timer });
-    const req: PrintSplitRequest = { type: 'PLANE_CUT', id, soups: soups.map((s) => s.slice()), at, normal };
-    w.postMessage(req, req.soups.map((s) => s.buffer));
+    queued.push({ id, kind: 'plane', soups: soups.map((s) => s.slice()), at, normal, resolve });
+    drainQueue();
   });
 }
 
@@ -207,8 +336,7 @@ export async function testAssemblyOffThread(
 ): Promise<{ plan: AssemblyPlan; results: StageResult[] }> {
   const plan = buildAssemblyPlan(split);
   const stages = plan.stages.map(({ scene, ...stage }) => ({ xml: compileStage(scene), stage }));
-  const w = ensureWorker();
-  if (!w) {
+  if (!canUseWorker() || (!worker && !ensureWorker())) {
     const [{ default: loadMujoco }, { runStage }] = await Promise.all([import('@mujoco/mujoco'), import('./printAssembly')]);
     const mj = (await loadMujoco()) as unknown as MujocoLike;
     const results: StageResult[] = [];
@@ -221,9 +349,8 @@ export async function testAssemblyOffThread(
   }
   const results = await new Promise<StageResult[]>((resolve, reject) => {
     const id = ++seq;
-    const timer = setTimeout(() => abandon(id, 'The assembly test took too long and was abandoned.'), STAGE_TIMEOUT_MS);
-    pending.set(id, { kind: 'assemble', resolve, reject, onProgress, results: [], timer, total: stages.length });
-    w.postMessage({ type: 'ASSEMBLE', id, stages } satisfies PrintSplitRequest);
+    queued.push({ id, kind: 'assemble', stages, resolve, reject, onProgress, results: [] });
+    drainQueue();
   });
   return { plan, results };
 }
