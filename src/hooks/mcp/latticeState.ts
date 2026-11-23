@@ -6,7 +6,7 @@
 import { useStore } from '../../store/useStore';
 import {
   addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, dimensionSelectionMm, extrudeMm,
-  insetFaceMm, removeFacesMm, revolveMm, sharpenEdgesMm,
+  insetFaceMm, MAX_RING_SIDES, removeFacesMm, revolveMm, sharpenEdgesMm,
 } from '../../utils/latticeCommands';
 import type { SceneNode } from '../../types/scene';
 import {
@@ -27,12 +27,52 @@ export const latticeHistory = new Map<string, Lattice[]>();
 
 export const LATTICE_HISTORY_DEPTH = 8;
 
-/**
- * The sculptable mesh on a node, rebuilt from the geom arrays it is stored as.
- *
- * renderVertices, not vertices: that is the Z-up copy sculptMesh works in, and
- * the one toSceneGeom will write back.
- */
+/** Validates an axis ('x' | 'y' | 'z', case-insensitive). Rejects anything else. */
+export function parseAxis(v: unknown, field = 'axis', required = false): LatticeAxis | undefined {
+  if (v === undefined || v === null) {
+    if (required) throw new Error(`${field} must be 'x', 'y' or 'z'`);
+    return undefined;
+  }
+  if (typeof v === 'string') {
+    const lower = v.toLowerCase();
+    if (lower === 'x' || lower === 'y' || lower === 'z') return lower;
+  }
+  throw new Error(`${field} must be 'x', 'y' or 'z'`);
+}
+
+/** Validates a bevel mode ('chamfer' | 'fillet' | 'round', mapping 'round' -> 'fillet'). */
+export function parseBevelMode(v: unknown): 'chamfer' | 'fillet' {
+  if (v === undefined || v === null) return 'chamfer';
+  if (v === 'chamfer') return 'chamfer';
+  if (v === 'fillet' || v === 'round') return 'fillet';
+  throw new Error("mode must be 'chamfer', 'fillet' or 'round'");
+}
+
+/** Validates smoothing subdivision level (0, 1, or 2). */
+export function parseSubdiv(v: unknown, field = 'level'): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 2) {
+    throw new Error(`${field} must be a finite number between 0 and 2`);
+  }
+  return Math.round(v);
+}
+
+/** Validates a non-negative wall thickness in millimetres. */
+export function parseThicknessMm(v: unknown, field = 'thicknessMm'): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+    throw new Error(`${field} must be a non-negative finite number of millimetres`);
+  }
+  return v;
+}
+
+/** Validates sides / segments count: 0 (auto) or integer in [3, 256]. */
+export function parseRingCount(v: unknown, field: string): number {
+  if (v === undefined || v === null) return 0;
+  if (typeof v !== 'number' || !Number.isInteger(v) || (v !== 0 && (v < 3 || v > MAX_RING_SIDES))) {
+    throw new Error(`${field} must be 0 (auto) or an integer from 3 to ${MAX_RING_SIDES}`);
+  }
+  return v;
+}
+
 /** The editable cage on a node, or a refusal that says what to do instead. */
 export function latticeOf(node: SceneNode | null | undefined): Lattice {
   if (!node?.latticeCage) {
@@ -107,77 +147,96 @@ export function runLatticeOps(
   initialThicknessMm = 0,
   { fuse = true }: { fuse?: boolean } = {},
 ): { subdiv: number; thicknessMm: number; results: Record<string, unknown>[] } {
-  let subdiv = Math.max(0, Math.min(2, Math.round(Number(initialSubdiv) || 0)));
-  let thicknessMm = Math.max(0, Number(initialThicknessMm) || 0);
+  let subdiv = parseSubdiv(initialSubdiv, 'subdiv');
+  let thicknessMm = parseThicknessMm(initialThicknessMm, 'thicknessMm');
+  if (ops !== undefined && !Array.isArray(ops)) {
+    throw new Error('ops must be an array of lattice operations');
+  }
+  const finiteNum = (v: unknown, field: string): number => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      throw new Error(`${field} must be a finite number`);
+    }
+    return v;
+  };
   const results: Record<string, unknown>[] = [];
   for (const item of ops || []) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error('Each entry in ops must be an object');
+    }
     const opName = String(item.op ?? item.type ?? item.kind ?? '').toLowerCase();
     switch (opName) {
       case 'extrude': {
-        const d = Number(item.distanceMm ?? item.amountMm ?? 10);
-        results.push({ op: 'extrude', ...extrudeMm(lattice, item.face, d, item.axis as LatticeAxis | undefined, item.mirror as LatticeAxis | undefined) });
+        const d = finiteNum(item.distanceMm ?? item.amountMm ?? 10, 'distanceMm');
+        const ax = parseAxis(item.axis, 'axis', false);
+        const mir = parseAxis(item.mirror, 'mirror', false);
+        results.push({ op: 'extrude', ...extrudeMm(lattice, item.face, d, ax, mir) });
         break;
       }
       case 'inset': {
-        const amt = Number(item.amountMm ?? item.distanceMm ?? 5);
-        results.push({ op: 'inset', ...insetFaceMm(lattice, item.face, amt, item.mirror as LatticeAxis | undefined) });
+        const amt = finiteNum(item.amountMm ?? item.distanceMm ?? 5, 'amountMm');
+        const mir = parseAxis(item.mirror, 'mirror', false);
+        results.push({ op: 'inset', ...insetFaceMm(lattice, item.face, amt, mir) });
         break;
       }
       case 'bevel': {
-        const amt = Number(item.amountMm ?? item.distanceMm ?? 5);
-        results.push({ op: 'bevel', ...bevelFaceMm(lattice, item.face, amt, item.mirror as LatticeAxis | undefined) });
+        const amt = finiteNum(item.amountMm ?? item.distanceMm ?? 5, 'amountMm');
+        const mir = parseAxis(item.mirror, 'mirror', false);
+        results.push({ op: 'bevel', ...bevelFaceMm(lattice, item.face, amt, mir) });
         break;
       }
       case 'bevel_edges':
       case 'beveledges': {
-        const rad = Number(item.radiusMm ?? item.amountMm ?? item.sizeMm ?? 3);
-        const mode = item.mode === 'fillet' || item.mode === 'round' ? 'fillet' : 'chamfer';
-        results.push({ op: 'bevel_edges', ...bevelEdgesMm(lattice, item.edges, rad, mode, item.mirror as LatticeAxis | undefined, item.loop === true) });
+        const rad = finiteNum(item.radiusMm ?? item.amountMm ?? item.sizeMm ?? 3, 'radiusMm');
+        const mode = parseBevelMode(item.mode);
+        const mir = parseAxis(item.mirror, 'mirror', false);
+        results.push({ op: 'bevel_edges', ...bevelEdgesMm(lattice, item.edges, rad, mode, mir, item.loop === true) });
         break;
       }
       case 'faces':
       case 'add_faces':
       case 'addfaces': {
-        results.push({ op: 'faces', ...addFacesMm(lattice, item.faces, item.mirror as LatticeAxis | undefined) });
+        const mir = parseAxis(item.mirror, 'mirror', false);
+        results.push({ op: 'faces', ...addFacesMm(lattice, item.faces, mir) });
         break;
       }
       case 'delete_faces':
       case 'deletefaces':
       case 'remove_faces': {
-        results.push({ op: 'delete_faces', ...removeFacesMm(lattice, item.faces, item.mirror as LatticeAxis | undefined) });
+        const mir = parseAxis(item.mirror, 'mirror', false);
+        results.push({ op: 'delete_faces', ...removeFacesMm(lattice, item.faces, mir) });
         break;
       }
       case 'sharpen': {
-        results.push({ op: 'sharpen', ...sharpenEdgesMm(lattice, item.edges, item.sharp !== false, item.mirror as LatticeAxis | undefined, item.loop === true) });
+        const mir = parseAxis(item.mirror, 'mirror', false);
+        results.push({ op: 'sharpen', ...sharpenEdgesMm(lattice, item.edges, item.sharp !== false, mir, item.loop === true) });
         break;
       }
       case 'circle':
       case 'ring': {
+        const dia = finiteNum(item.diameterMm ?? 10, 'diameterMm');
+        const ax = parseAxis(item.axis, 'axis', false) ?? 'z';
+        const sides = parseRingCount(item.sides, 'sides');
+        const mir = parseAxis(item.mirror, 'mirror', false);
         results.push({
           op: 'circle',
-          ...addRingMm(
-            lattice,
-            item.centre ?? item.center,
-            Number(item.diameterMm ?? 10),
-            (item.axis as LatticeAxis) || 'z',
-            typeof item.sides === 'number' ? item.sides : 0,
-            item.mirror as LatticeAxis | undefined,
-          ),
+          ...addRingMm(lattice, item.centre ?? item.center, dia, ax, sides, mir),
         });
         break;
       }
       case 'revolve': {
+        const ax = parseAxis(item.axis, 'axis', false) ?? 'z';
+        const deg = item.degrees === undefined ? 360 : finiteNum(item.degrees, 'degrees');
+        const segs = parseRingCount(item.segments, 'segments');
         results.push({
           op: 'revolve',
           ...revolveMm(
             lattice,
             item.profile,
-            (item.axis as LatticeAxis) || 'z',
-            typeof item.degrees === 'number' ? item.degrees : 360,
+            ax,
+            deg,
             {
-              throughMm: Array.isArray(item.throughMm) ? item.throughMm : undefined,
-              segments: typeof item.segments === 'number' ? item.segments : 0,
+              throughMm: item.throughMm,
+              segments: segs,
               closed: item.closed === true,
             },
           ),
@@ -189,9 +248,13 @@ export function runLatticeOps(
         break;
       }
       case 'dimension': {
-        const which = (item.axis === 'x' || item.axis === 'y' || item.axis === 'z') ? item.axis : 'x';
+        const which = item.axis === undefined ? 'x' : parseAxis(item.axis, 'axis', true)!;
+        if (item.mode !== undefined && item.mode !== 'size' && item.mode !== 'position') {
+          throw new Error("mode must be 'size' or 'position'");
+        }
         const how = item.mode === 'position' ? 'position' : 'size';
-        results.push({ op: 'dimension', ...dimensionSelectionMm(lattice, item.corners, which, how, Number(item.valueMm ?? 10)) });
+        const val = finiteNum(item.valueMm ?? 10, 'valueMm');
+        results.push({ op: 'dimension', ...dimensionSelectionMm(lattice, item.corners, which, how, val) });
         break;
       }
       case 'orient': {
@@ -199,12 +262,12 @@ export function runLatticeOps(
         break;
       }
       case 'smooth': {
-        subdiv = Math.max(0, Math.min(2, Math.round(Number(item.level ?? item.subdiv ?? 1))));
+        subdiv = parseSubdiv(item.level ?? item.subdiv ?? 1, 'level');
         results.push({ op: 'smooth', level: subdiv });
         break;
       }
       case 'wall': {
-        thicknessMm = Math.max(0, Number(item.thicknessMm ?? 0));
+        thicknessMm = parseThicknessMm(item.thicknessMm ?? 0, 'thicknessMm');
         results.push({ op: 'wall', thicknessMm });
         break;
       }

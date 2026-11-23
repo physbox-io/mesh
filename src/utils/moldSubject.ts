@@ -100,13 +100,17 @@ export function mcpMoldSubject(
   resolve: (id: string) => SceneNode | null,
   /** What is being made, for the errors: 'mold', 'carve', 'machine', 'cut'. */
   verb = 'mold',
+  paramName = 'master_id',
 ): MoldSubject | { error: string } {
+  if (masterId !== undefined && masterId !== null && typeof masterId !== 'string') {
+    return { error: `${paramName} must be a body id or name string.` };
+  }
   const named = typeof masterId === 'string' ? masterId.split(',').map((x) => x.trim()).filter(Boolean) : [];
   const missing = named.filter((id) => !resolve(id));
   if (missing.length) return { error: `No body called ${missing.join(', ')}.` };
   const ids = named.map((id) => resolve(id)!.id);
   if (ids.length && ids.every((id) => isSimulation(scene.nodes, id))) {
-    return { error: `${named.join(', ')} ${named.length === 1 ? 'is a simulation or a pour box' : 'are simulations or pour boxes'}, not part of the design: pass master_id for the part to ${verb}.` };
+    return { error: `${named.join(', ')} ${named.length === 1 ? 'is a simulation or a pour box' : 'are simulations or pour boxes'}, not part of the design: pass ${paramName} for the part to ${verb}.` };
   }
   const subject = moldSubject(scene, ids);
   if (!subject.ids.length) return { error: `There is nothing to ${verb}: the scene holds only earlier simulations. Add the part first.` };

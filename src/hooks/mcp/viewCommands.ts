@@ -42,7 +42,97 @@ import { stateNode } from '../../utils/objectReply';
 import { sealCheckFor } from './bodyFeatures';
 import { bodyNamer, jointTypes, resolveBodyFilter } from '../../utils/headlessReport';
 import { digestTelemetry } from '../../utils/telemetryDigest';
+import type { NoteCard } from '../../utils/noteCards';
 import type { McpCommands } from './types';
+
+const getPhysicsWindow = (): PhysicsWindow | null =>
+  (typeof window !== 'undefined' ? (window as unknown as PhysicsWindow) : null);
+
+const isFiniteVec3 = (v: unknown): v is [number, number, number] =>
+  Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && Number.isFinite(n));
+
+const VALID_HISTORY_INCLUDE = new Set(['bodies', 'joints', 'contacts', 'aero']);
+
+/** Serializes overlapping SCREENSHOT calls so temporary view toggles cannot corrupt each other. */
+let screenshotQueue: Promise<unknown> = Promise.resolve();
+
+const waitTwoFramesOrTimeout = (fallbackMs = 100): Promise<void> => new Promise((resolve) => {
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    resolve();
+  };
+  const timer = setTimeout(finish, fallbackMs);
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+  } else {
+    finish();
+  }
+});
+
+async function takeScreenshot(msg: Record<string, unknown>) {
+  const win = getPhysicsWindow();
+  const gl = win?._physics_gl;
+  if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
+
+  const viewQuality = useViewQuality.getState();
+  const before = {
+    colliders: viewQuality.showColliders,
+    edges: useStore.getState().showEdges,
+    wireframe: useStore.getState().wireframe,
+  };
+  const wanted = {
+    colliders: typeof msg.showColliders === 'boolean' ? msg.showColliders : before.colliders,
+    edges: typeof msg.showEdges === 'boolean' ? msg.showEdges : before.edges,
+    wireframe: typeof msg.wireframe === 'boolean' ? msg.wireframe : before.wireframe,
+  };
+  const apply = (v: typeof before) => {
+    if (useViewQuality.getState().showColliders !== v.colliders) useViewQuality.getState().setShowColliders(v.colliders);
+    const s = useStore.getState();
+    if (s.showEdges !== v.edges) s.toggleShowEdges();
+    if (s.wireframe !== v.wireframe) s.toggleWireframe();
+  };
+  const overridden = wanted.colliders !== before.colliders
+    || wanted.edges !== before.edges || wanted.wireframe !== before.wireframe;
+  const clean = msg.clean === true;
+  if (overridden) apply(wanted);
+  if (clean) useCapture.setState({ clean: true });
+  let dataUrl: string;
+  try {
+    if (overridden || clean) await waitTwoFramesOrTimeout(100);
+    // Through the composer when there is one; see renderViewportNow.
+    renderViewportNow();
+    dataUrl = gl.domElement.toDataURL('image/png');
+  } finally {
+    if (overridden) apply(before);
+    if (clean) useCapture.setState({ clean: false });
+  }
+
+  const ink = (typeof document !== 'undefined' && document.documentElement?.classList?.contains('dark')) ? 'white' : 'black';
+  const notes: string[] = [];
+  if (wanted.edges) {
+    notes.push(`Edges view is on: the thin ${ink} lines along corners, and ${ink} specks on fine detail (text, patterns, sculpted creases, small holes), are ink lines drawn on edges sharper than 20-30 degrees, not geometry or defects. Pass show_edges: false for a frame without them.`);
+  }
+  if (wanted.wireframe) {
+    notes.push('Wireframe view is on: bodies are drawn as their triangle edges, see-through, not as shaded solids. Pass wireframe: false for a shaded frame.');
+  }
+  if (wanted.colliders) {
+    notes.push('Collider overlay is on: coloured outlines are what the physics collides, drawn over the bodies.');
+  }
+  return {
+    ok: true,
+    dataUrl,
+    width: gl.domElement.width,
+    height: gl.domElement.height,
+    // Says whether the frame was drawn to order or is whatever the
+    // canvas happened to be holding.
+    rendered: Boolean(win?._physics_scene && win?._physics_camera),
+    view: { ...wanted, clean },
+    ...(notes.length ? { note: notes.join(' ') } : {}),
+  };
+}
 
 export const viewCommands: McpCommands = {
   GET_STATE: async (msg, { store }) => {
@@ -91,35 +181,42 @@ export const viewCommands: McpCommands = {
     // (perspective) pose. Both position and target are in MuJoCo world
     // space, same convention as every other pos field in this API.
     // `dims` switches the Dims overlay with either form, or alone.
-    if (msg.dims !== undefined) {
-      if (typeof msg.dims !== 'boolean') return { ok: false, error: 'dims must be true or false' };
-      store.setDimsEnabled(msg.dims);
+    // Validate ALL parameters before mutating store state.
+    if (msg.dims !== undefined && typeof msg.dims !== 'boolean') {
+      return { ok: false, error: 'dims must be true or false' };
     }
     if (msg.preset !== undefined) {
-      if (!CAMERA_VIEWS.includes(msg.preset as CameraView)) {
+      if (typeof msg.preset !== 'string' || !CAMERA_VIEWS.includes(msg.preset as CameraView)) {
         return { ok: false, error: `preset must be one of ${CAMERA_VIEWS.map((v) => `'${v}'`).join(', ')}` };
       }
+      if (msg.dims !== undefined) store.setDimsEnabled(msg.dims);
       store.setCameraView(msg.preset as CameraView);
       return { ok: true };
     }
-    if (msg.dims !== undefined && msg.position === undefined) return { ok: true };
-    if (!Array.isArray(msg.position) || msg.position.length !== 3) {
-      return { ok: false, error: 'position must be a [x,y,z] array in MuJoCo world space (or pass preset instead)' };
+    if (msg.dims !== undefined && msg.position === undefined && msg.target === undefined) {
+      store.setDimsEnabled(msg.dims);
+      return { ok: true };
     }
-    if (msg.target !== undefined && (!Array.isArray(msg.target) || msg.target.length !== 3)) {
-      return { ok: false, error: 'target must be a [x,y,z] array in MuJoCo world space' };
+    if (!isFiniteVec3(msg.position)) {
+      return { ok: false, error: 'position must be a [x,y,z] array of finite numbers in MuJoCo world space (or pass preset instead)' };
     }
-    store.setCameraOverride({
-      position: msg.position as [number, number, number],
-      target: (msg.target ?? [0, 0, 0]) as [number, number, number],
-    });
+    if (msg.target !== undefined && !isFiniteVec3(msg.target)) {
+      return { ok: false, error: 'target must be a [x,y,z] array of finite numbers in MuJoCo world space' };
+    }
+    const target: [number, number, number] = msg.target ? [msg.target[0], msg.target[1], msg.target[2]] : [0, 0, 0];
+    const position: [number, number, number] = [msg.position[0], msg.position[1], msg.position[2]];
+    if (Math.hypot(position[0] - target[0], position[1] - target[1], position[2] - target[2]) < 1e-6) {
+      return { ok: false, error: 'position and target must not be coincident' };
+    }
+    if (msg.dims !== undefined) store.setDimsEnabled(msg.dims);
+    store.setCameraOverride({ position, target });
     return { ok: true };
   },
   // Everything UPDATE_SCENE needs to put the scene back as it was: the
   // environment and the note cards live outside the graph, so they are added.
   GET_SCENE: async (_msg, { store }) => ({
     ...withEnvironment(store.sceneGraph, store),
-    noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() ?? [],
+    noteCards: getPhysicsWindow()?._physics_getNoteCards?.() ?? [],
   }),
   GET_SCENE_SUMMARY: async (_msg, { store }) => {
     // Bodies the installed model was not built from, as they now stand:
@@ -206,20 +303,25 @@ export const viewCommands: McpCommands = {
       return { ok: true, removed: id, referenceImages: listed(rest) };
     }
     const patch: Parameters<typeof upsertReferenceImage>[2] = readReferencePatch(msg);
-    if (msg.height !== undefined && msg.width === undefined) {
-      const h = Number(msg.height);
-      if (!Number.isFinite(h) || h <= 0 || h > 20) throw new Error('height must be more than 0 and at most 20 m');
-      patch.height = h;
+    if (msg.height !== undefined) {
+      if (typeof msg.height !== 'number' || !Number.isFinite(msg.height) || msg.height <= 0 || msg.height > 20) {
+        throw new Error('height must be a finite number more than 0 and at most 20 m');
+      }
+      if (msg.width === undefined) patch.height = msg.height;
     }
     if (typeof image === 'string' && image) {
       Object.assign(patch, await normalizeReferencePicture(image.startsWith('data:') ? image : `data:image/png;base64,${image}`));
     } else if (!id) {
       throw new Error('Give path (or image) to add a reference image, or imageId to change one');
     }
+    const latest = useStore.getState();
     const { images, image: placed } = upsertReferenceImage(
-      useStore.getState().sceneGraph.referenceImages, id, patch, sceneContentBounds(store.sceneGraph.nodes),
+      latest.sceneGraph.referenceImages, id, patch, sceneContentBounds(latest.sceneGraph.nodes),
     );
-    store.setReferenceImages(images);
+    if (placed.width > 20) {
+      throw new Error('Resulting reference image width exceeds maximum of 20 m');
+    }
+    latest.setReferenceImages(images);
     return { ok: true, ...describeReferenceImage(placed), referenceImages: listed(images) };
   },
   GET_TELEMETRY: async () => {
@@ -229,24 +331,42 @@ export const viewCommands: McpCommands = {
     // The worker holds up to 5000 frames, ~14 MB of JSON when full. No
     // agent can read that, so unless maxFrames is given (0 = no cap) the
     // stride is raised to fit 200 frames across whatever window was asked for.
-    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    if (msg.sinceTime !== undefined && !(typeof msg.sinceTime === 'number' && Number.isFinite(msg.sinceTime))) {
+      return { ok: false, error: 'sinceTime must be a finite number' };
+    }
+    if (msg.last !== undefined && !(typeof msg.last === 'number' && Number.isFinite(msg.last) && msg.last >= 0)) {
+      return { ok: false, error: 'last must be a non-negative finite number' };
+    }
+    if (msg.stride !== undefined && !(typeof msg.stride === 'number' && Number.isFinite(msg.stride) && msg.stride >= 1)) {
+      return { ok: false, error: 'stride must be a finite number >= 1' };
+    }
+    if (msg.maxFrames !== undefined && !(typeof msg.maxFrames === 'number' && Number.isFinite(msg.maxFrames) && msg.maxFrames >= 0)) {
+      return { ok: false, error: 'maxFrames must be a non-negative finite number' };
+    }
+    if (msg.bodies !== undefined && (!Array.isArray(msg.bodies) || msg.bodies.some((b) => typeof b !== 'string'))) {
+      return { ok: false, error: 'bodies must be an array of body names or ids' };
+    }
+    if (msg.include !== undefined && (!Array.isArray(msg.include) || msg.include.some((k) => typeof k !== 'string' || !VALID_HISTORY_INCLUDE.has(k)))) {
+      return { ok: false, error: "include must be an array containing only 'bodies', 'joints', 'contacts', or 'aero'" };
+    }
     // Names or ids, as physics_run_headless takes them; frames are keyed by id.
     const filter = resolveBodyFilter(store.sceneGraph, msg.bodies);
     const summaryOnly = msg.summary === true;
     const { frames, total, stride } = await getPhysicsWorkerClient().getHistory({
-      sinceTime: num(msg.sinceTime),
-      last: num(msg.last),
-      stride: num(msg.stride),
-      maxFrames: num(msg.maxFrames) ?? (summaryOnly ? 400 : 200),
+      sinceTime: msg.sinceTime as number | undefined,
+      last: msg.last as number | undefined,
+      stride: msg.stride as number | undefined,
+      maxFrames: (msg.maxFrames as number | undefined) ?? (summaryOnly ? 400 : 200),
       // Nothing matched keeps nothing, not everything.
       bodies: filter.ids ? (filter.ids.size ? [...filter.ids] : ['\u0000none']) : undefined,
-      include: Array.isArray(msg.include) ? (msg.include as HistoryQuery['include']) : undefined,
+      include: msg.include as HistoryQuery['include'] | undefined,
     });
     const unknown = filter.unknown.length ? { warning: `bodies: no body has the name or id ${filter.unknown.map((u) => `"${u}"`).join(', ')}.` } : {};
+    const latestGraph = useStore.getState().sceneGraph;
     if (summaryOnly) {
       return {
         total, stride,
-        digest: digestTelemetry(frames, { jointTypes: jointTypes(store.sceneGraph), nameOf: bodyNamer(store.sceneGraph) }),
+        digest: digestTelemetry(frames, { jointTypes: jointTypes(latestGraph), nameOf: bodyNamer(latestGraph) }),
         ...unknown,
       };
     }
@@ -280,6 +400,12 @@ export const viewCommands: McpCommands = {
     // Every O-ring groove on it, checked against what is round it now.
     const grooves = [...new Set((found.geoms || []).filter((g) => g.hardware?.part === 'groove').map((g) => g.hardware!.group))];
     const sealChecks = grooves.map((group) => ({ group, ...sealCheckFor(store.sceneGraph, found.id, group) }));
+    if (msg.offset !== undefined && !(typeof msg.offset === 'number' && Number.isFinite(msg.offset) && msg.offset >= 0)) {
+      throw new Error('offset must be a non-negative finite number');
+    }
+    if (msg.limit !== undefined && !(typeof msg.limit === 'number' && Number.isFinite(msg.limit) && msg.limit >= 1)) {
+      throw new Error('limit must be a finite number >= 1');
+    }
     // One geom's triangles, a page at a time, when asked for (utils/meshPage.ts).
     const wantsMesh = typeof msg.geom === 'string' || typeof msg.offset === 'number' || typeof msg.limit === 'number';
     const page = wantsMesh
@@ -296,24 +422,22 @@ export const viewCommands: McpCommands = {
       ...(page ? { meshPage: page } : {}),
     };
   },
-  MEASURE: async (msg, { store }) => {
+  MEASURE: async (msg, { store, toId }) => {
     const { from, to, corner, snap, withinMm } = msg;
     // Which way a body points, rather than a distance: `body` with an
     // optional local `axis`. Read from the simulation's latest frame when
     // it has one, else from the body as authored.
-    if (typeof msg.body === 'string') {
-      const wanted = msg.body;
-      const byName = (list: SceneNode[]): SceneNode | null => {
-        for (const n of list) {
-          if (n.name === wanted) return n;
-          const hit = byName(n.children || []);
-          if (hit) return hit;
-        }
-        return null;
-      };
-      const node = findNodeInScene(store.sceneGraph.nodes, wanted) ?? byName(store.sceneGraph.nodes);
-      if (!node) return { ok: false, error: `No body with id or name "${wanted}"` };
-      const axis = msg.axis === 'x' || msg.axis === 'y' ? msg.axis : 'z';
+    if (msg.body !== undefined) {
+      if (typeof msg.body !== 'string' || !msg.body) {
+        return { ok: false, error: 'body must be a non-empty body id or name' };
+      }
+      if (msg.axis !== undefined && msg.axis !== 'x' && msg.axis !== 'y' && msg.axis !== 'z') {
+        return { ok: false, error: "axis must be 'x', 'y' or 'z'" };
+      }
+      const resolved = toId(msg.body);
+      const node = typeof resolved === 'string' ? findNodeInScene(store.sceneGraph.nodes, resolved) : null;
+      if (!node) return { ok: false, error: `No body with id or name "${msg.body}"` };
+      const axis = (msg.axis ?? 'z') as 'x' | 'y' | 'z';
       const { frames } = await getPhysicsWorkerClient().getHistory({ last: 1, bodies: [node.id], maxFrames: 1 });
       const live = frames[frames.length - 1]?.bodies?.[node.id]?.quat;
       const quat = live ?? authoredQuat(node);
@@ -327,6 +451,9 @@ export const viewCommands: McpCommands = {
         ...orientationOf(quat, axis),
       };
     }
+    if (withinMm !== undefined && !(typeof withinMm === 'number' && Number.isFinite(withinMm) && withinMm >= 0 && withinMm <= 10000)) {
+      return { ok: false, error: 'withinMm must be a finite number between 0 and 10000' };
+    }
     const point = (value: unknown, name: string): [number, number, number] => {
       if (!Array.isArray(value) || value.length < 3 || !value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
         throw new Error(`${name} must be a point [x, y, z] in metres, in the world frame`);
@@ -336,7 +463,7 @@ export const viewCommands: McpCommands = {
     // The DRAWN scene, not the document: that is where the transforms
     // have been applied, where a boolean has been evaluated, and where a
     // lattice cage has already become the mesh anybody would measure.
-    const root = (window as unknown as { _physics_scene?: Object3D })._physics_scene ?? null;
+    const root = (getPhysicsWindow()?._physics_scene as Object3D | undefined) ?? null;
     const measured = measureInScene(root, point(from, 'from'), point(to, 'to'), {
       corner: corner === undefined ? undefined : point(corner, 'corner'),
       snap: snap !== false,
@@ -358,12 +485,14 @@ export const viewCommands: McpCommands = {
      */
   GET_EDGES: async (msg, { store }) => {
     const { targetId } = msg as Msg<{ targetId: string }>;
+    if (typeof targetId !== 'string' || !targetId) return { ok: false, error: 'Missing targetId' };
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
     const why = whyNotRoundable(node);
     if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
     const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
+    const latestNode = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) ?? node!;
     const mm = (p: number[]) => p.map((v) => Math.round(v * 1e6) / 1e3);
-    const roundedBy = (e: EdgeCandidate) => (node!.edgeRounds ?? []).findIndex((f) => f.edges.some((x) => sameEdge(x, e.edge)));
+    const roundedBy = (e: EdgeCandidate) => (latestNode.edgeRounds ?? []).findIndex((f) => f.edges.some((x) => sameEdge(x, e.edge)));
     return {
       ok: true,
       id: targetId,
@@ -382,7 +511,7 @@ export const viewCommands: McpCommands = {
       })),
       // Edges that were found but are neither straight nor a full circle.
       unroundable: found.other.length,
-      roundings: (node!.edgeRounds ?? []).map((f, i) => ({
+      roundings: (latestNode.edgeRounds ?? []).map((f, i) => ({
         index: i, mode: f.mode === 'fillet' ? 'round' : 'bevel', sizeMm: Math.round(f.size * 1e5) / 100, edges: f.edges.length,
       })),
     };
@@ -433,98 +562,41 @@ export const viewCommands: McpCommands = {
     };
   },
   SCREENSHOT: async (msg) => {
-    const win = window as unknown as PhysicsWindow;
-    const gl = win._physics_gl;
-    if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
-
-    /*
-     * Draw a frame before reading one.
-     *
-     * This used to rely on r3f redrawing every animation frame and on
-     * preserveDrawingBuffer keeping the last one about. That holds while
-     * something is moving; it does not when the viewport goes idle — a
-     * paused simulation, a backgrounded tab — and then toDataURL returns
-     * whatever was last painted, which can be minutes old and framed by a
-     * camera that has since moved. The caller cannot tell: they get a
-     * perfectly good PNG of a scene that is not there any more. That is
-     * worse than an error, and it is exactly what happened while building
-     * a model through this bridge — five camera moves, five identical
-     * frames of empty floor, with the model sitting in the scene the whole
-     * time.
-     */
-    // The view modes, for this frame only: each override is switched, given
-    // two frames to mount (the collider overlay has bodies to track), and put
-    // back afterwards. Edges is on by default, and an agent that is not told
-    // so reads its ink lines — specks on fine detail — as holes or stray
-    // geometry, so the reply always says which modes drew the frame.
-    const viewQuality = useViewQuality.getState();
-    const before = {
-      colliders: viewQuality.showColliders,
-      edges: useStore.getState().showEdges,
-      wireframe: useStore.getState().wireframe,
-    };
-    const wanted = {
-      colliders: typeof msg.showColliders === 'boolean' ? msg.showColliders : before.colliders,
-      edges: typeof msg.showEdges === 'boolean' ? msg.showEdges : before.edges,
-      wireframe: typeof msg.wireframe === 'boolean' ? msg.wireframe : before.wireframe,
-    };
-    const apply = (v: typeof before) => {
-      if (useViewQuality.getState().showColliders !== v.colliders) useViewQuality.getState().setShowColliders(v.colliders);
-      const s = useStore.getState();
-      if (s.showEdges !== v.edges) s.toggleShowEdges();
-      if (s.wireframe !== v.wireframe) s.toggleWireframe();
-    };
-    const overridden = wanted.colliders !== before.colliders
-      || wanted.edges !== before.edges || wanted.wireframe !== before.wireframe;
-    // clean: the model alone, without the gizmo, dimension arrows, tool
-    // handles or selection tint of whatever the user has picked. The
-    // selection is left alone; only this frame draws without it.
-    const clean = msg.clean === true;
-    if (overridden) apply(wanted);
-    if (clean) useCapture.setState({ clean: true });
-    let dataUrl: string;
-    try {
-      if (overridden || clean) await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      // Through the composer when there is one; see renderViewportNow.
-      renderViewportNow();
-      dataUrl = gl.domElement.toDataURL('image/png');
-    } finally {
-      if (overridden) apply(before);
-      if (clean) useCapture.setState({ clean: false });
-    }
-
-    const ink = document.documentElement.classList.contains('dark') ? 'white' : 'black';
-    const notes: string[] = [];
-    if (wanted.edges) {
-      notes.push(`Edges view is on: the thin ${ink} lines along corners, and ${ink} specks on fine detail (text, patterns, sculpted creases, small holes), are ink lines drawn on edges sharper than 20-30 degrees, not geometry or defects. Pass show_edges: false for a frame without them.`);
-    }
-    if (wanted.wireframe) {
-      notes.push('Wireframe view is on: bodies are drawn as their triangle edges, see-through, not as shaded solids. Pass wireframe: false for a shaded frame.');
-    }
-    if (wanted.colliders) {
-      notes.push('Collider overlay is on: coloured outlines are what the physics collides, drawn over the bodies.');
-    }
-    return {
-      ok: true,
-      dataUrl,
-      width: gl.domElement.width,
-      height: gl.domElement.height,
-      // Says whether the frame was drawn to order or is whatever the
-      // canvas happened to be holding.
-      rendered: Boolean(win._physics_scene && win._physics_camera),
-      view: { ...wanted, clean },
-      ...(notes.length ? { note: notes.join(' ') } : {}),
-    };
+    const run = screenshotQueue.then(() => takeScreenshot(msg), () => takeScreenshot(msg));
+    screenshotQueue = run.then(() => undefined, () => undefined);
+    return run;
   },
   GET_NOTE_CARDS: async () => {
-    const getter = (window as unknown as PhysicsWindow)._physics_getNoteCards;
+    const getter = getPhysicsWindow()?._physics_getNoteCards;
     return { ok: true, noteCards: getter ? getter() : [] };
   },
   SET_NOTE_CARDS: async (msg) => {
-    const setter = (window as unknown as PhysicsWindow)._physics_setNoteCards;
+    const setter = getPhysicsWindow()?._physics_setNoteCards;
     if (!setter) return { ok: false, error: 'Note card state not available' };
     if (!Array.isArray(msg.noteCards)) return { ok: false, error: 'noteCards must be an array' };
-    setter(msg.noteCards);
+    for (let i = 0; i < msg.noteCards.length; i++) {
+      const card = msg.noteCards[i];
+      if (!card || typeof card !== 'object' || Array.isArray(card)) {
+        return { ok: false, error: `noteCards[${i}] must be an object` };
+      }
+      const c = card as Record<string, unknown>;
+      if (typeof c.id !== 'string' || c.id.length === 0) {
+        return { ok: false, error: `noteCards[${i}].id must be a non-empty string` };
+      }
+      if (typeof c.markdown !== 'string') {
+        return { ok: false, error: `noteCards[${i}].markdown must be a string` };
+      }
+      if (c.x !== undefined && !(typeof c.x === 'number' && Number.isFinite(c.x))) {
+        return { ok: false, error: `noteCards[${i}].x must be a finite number` };
+      }
+      if (c.y !== undefined && !(typeof c.y === 'number' && Number.isFinite(c.y))) {
+        return { ok: false, error: `noteCards[${i}].y must be a finite number` };
+      }
+      if (c.minimized !== undefined && typeof c.minimized !== 'boolean') {
+        return { ok: false, error: `noteCards[${i}].minimized must be a boolean` };
+      }
+    }
+    setter(msg.noteCards as NoteCard[]);
     return { ok: true };
   },
   GET_SCHEMA: async () => {
@@ -536,7 +608,7 @@ export const viewCommands: McpCommands = {
         turnedOrAxisymmetricParts: 'Use `type: "lathe"` (or `"revolve"`) with `profile: [[r,z], ...]` (metres) on a geom or body, OR a declarative lattice `{ lattice: { empty: true, subdiv: 1, ops: [{ op: "revolve", profile: [[xMm,0,zMm], ...] }] } }`.',
         conesWedgesToriTubes: 'Use parametric geom types directly: `cone` (`size: [r, hh]`), `pyramid` (`size: [hx, hy, hh]`), `wedge` (`size: [hx, hy, hz]`), `torus` (`size: [R, r]`), `tube` / `pipe` (`size: [outerR, innerR, hh]`).',
         subdivisionAndGridPolyhedra: 'Use declarative `lattice: { sizeMm: 40, subdiv: 1, thicknessMm: 0, ops: [{ op: "extrude" | "inset" | "bevel" | "bevel_edges" | "circle" | "revolve" | "bridge" | "faces" | "delete_faces" | "sharpen" | "dimension" | "orient" | "smooth" | "wall", ... }] }` on the body, or pass `ops: [...]` to `physics_create_lattice`.',
-        organicClayShapes: 'Use declarative `sculpt: { base: "sphere" | "Bust" | ..., strokes: [...], cuts: [...] }` on the body, or pass batch `strokes: [...]` to `physics_sculpt`.',
+        organicClayShapes: 'Use declarative `sculpt: { base: "sphere" | "cube" | "cylinder" | "humanoid" | "quadruped" | "bird" | "fish" | "hand" | "head", strokes: [...], cuts: [...] }` on the body, or pass batch `strokes: [...]` to `physics_sculpt`.',
         curvedTracksAndRamps: 'Set `isCurve: true` and `curvePoints: [[x,y,z], ...]` (Z-up metres) on the body.',
         ropesCablesChains: 'Set `isComposite: true`, `compositeType: "cable"`, `compositeCount`, `compositeSize` on the body.',
         customPolyhedra: 'If you must supply raw triangles (`type: "mesh"`), pass `verticesZUp: [x0,y0,z0, ...]` in standard MuJoCo Z-up metres (auto-converted to Y-up `vertices` and `renderVertices`, with inside-out closed meshes auto-flipped). Avoid hand-typing hundreds of coordinates when `extrude`, `lathe`, `lattice`, or `scad` can express the shape in 5 lines.',
@@ -595,12 +667,12 @@ export const viewCommands: McpCommands = {
         euler:         'number[3] — body orientation in degrees, alternative to quat',
         static:        'boolean — if true (or `fixed: true` / `dynamic: false`), omits the default free joint so a top-level body is fixed in world space',
         geoms:         'SceneGeom[] — one or more geoms composing the body shape (optional if body-level `type`/`size` shorthand, `lattice`, `sculpt`, `isCurve`, or `scad` is used)',
-        cuts:          'DeclarativeCut[] — array of hole/slot/dish/hardware cut specs `{ shape?: "cylinder"|"slot"|"dish"|"counterbore"|"countersink"|"hex_socket"|"nut_trap"|"heat_set_insert"|"bearing_seat"|"o_ring_groove"|"t_slot", at?: [xMm,yMm,zMm], normal?: [nx,ny,nz], diameterMm?, widthMm?, lengthMm?, depthMm?, threadPitchMm?, size?: "M3"|"M4"|..., bore?, fitMm? }` applied automatically when the body is built or updated',
+        cuts:          'DeclarativeCut[] — array of hole/slot/pocket/hardware cut specs `{ shape?: "cylinder"|"box"|"pocket"|"slot"|"nut_trap"|"nut_slot"|"counterbore"|"insert"|"insert_boss"|"bearing"|"oring"|"seal_cord"|"rail_seat"|"rod_clamp"|"lm_housing"|"snap_hook"|"snap_catch", at?: [xMm,yMm,zMm], normal?: [nx,ny,nz], diameterMm?, widthMm?, lengthMm?, depthMm?, threadPitchMm?, size?: "M3"|"M4"|..., bore?, fitMm? }` applied automatically when the body is built or updated',
         roundEdges:    'DeclarativeRound[] | DeclarativeRound — `{ edges?: "all"|"top"|"bottom"|"vertical"|"inside"|number[], sizeMm: number, mode?: "round"|"bevel" }` (or array of them; alias `roundings`) applied automatically after cuts',
         patterns:      'DeclarativePattern[] — array of surface textures `{ at: [xMm,yMm,zMm], normal?: [nx,ny,nz], pattern: "knurl"|"hex"|"ribs"|"grid"|"wave"|"dimples"|"voronoi"|"flutes"|"threads"|"text", depthMm?: number, emboss?: boolean, options?: {...} }` applied automatically to the body faces',
         paint:         'DeclarativePaint[] — array of paint strokes `{ at: [x,y,z] | [[x,y,z],...], rgba: [r,g,b,a?], radius?: number, flow?: number, geomName?: string }` (in metres) applied automatically after CSG',
         lattice:       '`{ sizeMm?: number, empty?: boolean, subdiv?: 0|1|2, thicknessMm?: number, ops?: LatticeOp[] }` — builds a lattice body inline in a single pass. Each op in `ops` is `{ op: "extrude"|"inset"|"bevel"|"bevel_edges"|"circle"|"revolve"|"bridge"|"faces"|"delete_faces"|"sharpen"|"dimension"|"orient"|"smooth"|"wall", ... }` in mm.',
-        sculpt:        '`{ base?: "sphere"|"cube"|"cylinder"|"torus"|"capsule"|"cone"|"Bust"|"Head"|"Hand", strokes?: SculptStroke[], cuts?: SculptCut[] }` — builds a sculpted clay body inline in a single pass.',
+        sculpt:        '`{ base?: "sphere"|"cube"|"cylinder"|"humanoid"|"quadruped"|"bird"|"fish"|"hand"|"head", strokes?: SculptStroke[], cuts?: SculptCut[] }` — builds a sculpted clay body inline in a single pass.',
         joints:        'SceneJoint[] — joints attaching this body to its parent',
         children:      'SceneNode[] — child bodies (rigidly offset unless they have joints)',
         coupleTargetId:'string — id of another body; couples their first hinge or slide joints with coupleRatio',

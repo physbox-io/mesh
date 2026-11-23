@@ -10,12 +10,13 @@ import {
 } from '../../utils/latticeCommands';
 import type { SceneNode, SceneGeom } from '../../types/scene';
 import {
-  boxLattice, cloneLattice, createLattice, deserializeCage, orientFaces, serializeCage,
-  toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT, type Axis as LatticeAxis,
+  boxLattice, cloneLattice, createLattice, deserializeCage, faceCount, orientFaces, serializeCage,
+  toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
 } from '../../utils/latticeMesh';
 import { type Msg, resolveParent, withChild, findNodeInScene } from './bridgeUtils';
 import {
   latticeHistory, latticeOf, latticeTarget, pushLatticeHistory, commitLattice, runLatticeOps,
+  parseAxis, parseBevelMode, parseSubdiv, parseThicknessMm, parseRingCount,
 } from './latticeState';
 import { settleScene } from './settleScene';
 import { collidersAreStale } from '../../utils/convexDecomposition';
@@ -36,15 +37,23 @@ export const latticeCommands: McpCommands = {
   CREATE_LATTICE: async (msg) => {
     const { name, pos, sizeMm, edit, empty, ops, subdiv: initSubdiv, thicknessMm: initThickness } = msg;
     const parent = resolveParent(useStore.getState().sceneGraph.nodes, msg.parent);
-    if (Array.isArray(pos) && pos.length === 3 && pos.some((v: unknown) => typeof v !== 'number' || !Number.isFinite(v))) {
-      throw new Error('pos must be [x, y, z] finite numbers in metres');
+    if (pos !== undefined) {
+      if (!Array.isArray(pos) || pos.length !== 3 || pos.some((v: unknown) => typeof v !== 'number' || !Number.isFinite(v))) {
+        throw new Error('pos must be [x, y, z] finite numbers in metres');
+      }
     }
-    if (sizeMm !== undefined && !(typeof sizeMm === 'number' && Number.isFinite(sizeMm) && sizeMm >= 0)) {
-      throw new Error('sizeMm must be a non-negative finite number of millimetres');
+    if (sizeMm !== undefined && !(typeof sizeMm === 'number' && Number.isFinite(sizeMm) && sizeMm >= 0 && sizeMm <= 200_000)) {
+      throw new Error('sizeMm must be a non-negative finite number of millimetres (at most 200000)');
     }
-    const position: [number, number, number] = Array.isArray(pos) && pos.length === 3 ? [pos[0], pos[1], pos[2]] : [0, 0, 0.2];
-    const firstOp = Array.isArray(ops) && ops.length > 0
-      ? String(ops[0]?.op ?? ops[0]?.type ?? '').toLowerCase()
+    if (ops !== undefined && !Array.isArray(ops)) {
+      throw new Error('ops must be an array of lattice operations');
+    }
+    const parsedSubdiv = initSubdiv !== undefined ? parseSubdiv(initSubdiv, 'subdiv') : 0;
+    const parsedThickness = initThickness !== undefined ? parseThicknessMm(initThickness, 'thicknessMm') : 0;
+    const position: [number, number, number] = pos !== undefined ? [pos[0], pos[1], pos[2]] : [0, 0, 0.2];
+    const firstItem = Array.isArray(ops) && ops.length > 0 ? ops[0] : null;
+    const firstOp = firstItem && typeof firstItem === 'object' && !Array.isArray(firstItem)
+      ? String(firstItem.op ?? firstItem.type ?? '').toLowerCase()
       : '';
     const startEmpty = empty === true || sizeMm === 0 || (sizeMm === undefined && firstOp === 'revolve');
     const size = typeof sizeMm === 'number' && Number.isFinite(sizeMm) && sizeMm > 0 ? sizeMm : 40;
@@ -55,8 +64,8 @@ export const latticeCommands: McpCommands = {
     const { subdiv, thicknessMm } = runLatticeOps(
       lat,
       Array.isArray(ops) ? ops : [],
-      typeof initSubdiv === 'number' ? initSubdiv : 0,
-      typeof initThickness === 'number' ? initThickness : 0,
+      parsedSubdiv,
+      parsedThickness,
     );
     const cage = serializeCage(lat);
     const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(deserializeCage(cage), subdiv, thicknessMm / 1000);
@@ -126,8 +135,9 @@ export const latticeCommands: McpCommands = {
   LATTICE_FACES: async (msg, { store }) => {
     const { targetId, faces, mirror } = msg as Msg<{ targetId: string }>;
     const { node, lattice } = latticeTarget(store, targetId);
+    const mir = parseAxis(mirror, 'mirror', false);
     const before = cloneLattice(lattice);
-    const result = addFacesMm(lattice, faces, mirror as LatticeAxis | undefined);
+    const result = addFacesMm(lattice, faces, mir);
     if (result.added === 0) {
       return { ok: false, id: targetId, error: 'No face was added', ...result, ...latticeSummary(lattice) };
     }
@@ -141,8 +151,10 @@ export const latticeCommands: McpCommands = {
     if (typeof distanceMm !== 'number' || !Number.isFinite(distanceMm)) {
       throw new Error('distanceMm must be a number of millimetres to push the face out by');
     }
+    const ax = parseAxis(axis, 'axis', false);
+    const mir = parseAxis(mirror, 'mirror', false);
     const before = cloneLattice(lattice);
-    const result = extrudeMm(lattice, face, distanceMm, axis as LatticeAxis | undefined, mirror as LatticeAxis | undefined);
+    const result = extrudeMm(lattice, face, distanceMm, ax, mir);
     pushLatticeHistory(targetId, before);
     commitLattice(node, lattice);
     return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
@@ -150,10 +162,19 @@ export const latticeCommands: McpCommands = {
   LATTICE_DELETE_FACES: async (msg, { store }) => {
     const { targetId, faces, mirror } = msg as Msg<{ targetId: string }>;
     const { node, lattice } = latticeTarget(store, targetId);
+    const mir = parseAxis(mirror, 'mirror', false);
     const before = cloneLattice(lattice);
-    const result = removeFacesMm(lattice, faces, mirror as LatticeAxis | undefined);
+    const result = removeFacesMm(lattice, faces, mir);
     if (result.removed === 0) {
       return { ok: false, id: targetId, error: 'No face was removed', ...result, ...latticeSummary(lattice) };
+    }
+    if (faceCount(lattice) === 0) {
+      return {
+        ok: false,
+        id: targetId,
+        error: 'Deleting those faces would leave 0 faces in the lattice cage, which cannot compile. Use physics_delete_object to delete the whole body instead.',
+        ...latticeSummary(before),
+      };
     }
     pushLatticeHistory(targetId, before);
     commitLattice(node, lattice);
@@ -162,8 +183,9 @@ export const latticeCommands: McpCommands = {
   LATTICE_SHARPEN: async (msg, { store }) => {
     const { targetId, edges, sharp, mirror, loop } = msg as Msg<{ targetId: string }>;
     const { node, lattice } = latticeTarget(store, targetId);
+    const mir = parseAxis(mirror, 'mirror', false);
     const before = cloneLattice(lattice);
-    const result = sharpenEdgesMm(lattice, edges, sharp !== false, mirror as LatticeAxis | undefined, loop === true);
+    const result = sharpenEdgesMm(lattice, edges, sharp !== false, mir, loop === true);
     if (result.changed === 0) {
       return { ok: false, id: targetId, error: 'No edge changed', ...result, ...latticeSummary(lattice) };
     }
@@ -174,8 +196,7 @@ export const latticeCommands: McpCommands = {
   LATTICE_SMOOTH: async (msg, { store }) => {
     const { targetId, level } = msg as Msg<{ targetId: string }>;
     const { node } = latticeTarget(store, targetId);
-    const raw = Number(level);
-    const wanted = Math.max(0, Math.min(2, Math.round(Number.isFinite(raw) ? raw : 0)));
+    const wanted = parseSubdiv(level, 'level');
     useStore.getState().setLatticeSubdiv(node.id, wanted);
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
     const mesh = after?.geoms?.find((g: SceneGeom) => g.latticeGeom)
@@ -191,8 +212,9 @@ export const latticeCommands: McpCommands = {
   LATTICE_INSET: async (msg, { store }) => {
     const { targetId, face, amountMm, mirror } = msg as Msg<{ targetId: string; amountMm: number }>;
     const { node, lattice } = latticeTarget(store, targetId);
+    const mir = parseAxis(mirror, 'mirror', false);
     const before = cloneLattice(lattice);
-    const result = insetFaceMm(lattice, face, amountMm, mirror as LatticeAxis | undefined);
+    const result = insetFaceMm(lattice, face, amountMm, mir);
     pushLatticeHistory(targetId, before);
     commitLattice(node, lattice);
     return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
@@ -200,8 +222,9 @@ export const latticeCommands: McpCommands = {
   LATTICE_BEVEL: async (msg, { store }) => {
     const { targetId, face, amountMm, mirror } = msg as Msg<{ targetId: string; amountMm: number }>;
     const { node, lattice } = latticeTarget(store, targetId);
+    const mir = parseAxis(mirror, 'mirror', false);
     const before = cloneLattice(lattice);
-    const result = bevelFaceMm(lattice, face, amountMm, mirror as LatticeAxis | undefined);
+    const result = bevelFaceMm(lattice, face, amountMm, mir);
     pushLatticeHistory(targetId, before);
     commitLattice(node, lattice);
     return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
@@ -209,11 +232,13 @@ export const latticeCommands: McpCommands = {
   LATTICE_BEVEL_EDGES: async (msg, { store }) => {
     const { targetId, edges, radiusMm, mode, mirror, loop } = msg as Msg<{ targetId: string; radiusMm: number }>;
     const { node, lattice } = latticeTarget(store, targetId);
+    const bevelMode = parseBevelMode(mode);
+    const mir = parseAxis(mirror, 'mirror', false);
     const before = cloneLattice(lattice);
     const result = bevelEdgesMm(
       lattice, edges, radiusMm,
-      mode === 'fillet' ? 'fillet' : 'chamfer',
-      mirror as LatticeAxis | undefined,
+      bevelMode,
+      mir,
       loop === true,
     );
     pushLatticeHistory(targetId, before);
@@ -221,14 +246,18 @@ export const latticeCommands: McpCommands = {
     return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
   },
   LATTICE_CIRCLE: async (msg, { store }) => {
-    const { targetId, centre, diameterMm, axis, sides, mirror } = msg as Msg<{ targetId: string; diameterMm: number }>;
+    const { targetId, diameterMm, axis, sides, mirror } = msg as Msg<{ targetId: string; diameterMm: number }>;
+    const centre = msg.centre ?? msg.center;
     const { node, lattice } = latticeTarget(store, targetId);
+    const ax = parseAxis(axis, 'axis', false) ?? 'z';
+    const mir = parseAxis(mirror, 'mirror', false);
+    const sideCount = parseRingCount(sides, 'sides');
     const before = cloneLattice(lattice);
     const result = addRingMm(
       lattice, centre, diameterMm,
-      (axis as LatticeAxis) || 'z',
-      typeof sides === 'number' ? sides : 0,
-      mirror as LatticeAxis | undefined,
+      ax,
+      sideCount,
+      mir,
     );
     pushLatticeHistory(targetId, before);
     commitLattice(node, lattice);
@@ -237,13 +266,18 @@ export const latticeCommands: McpCommands = {
   LATTICE_REVOLVE: async (msg, { store }) => {
     const { targetId, profile, axis, degrees, throughMm, segments, closed } = msg as Msg<{ targetId: string }>;
     const { node, lattice } = latticeTarget(store, targetId);
+    const ax = parseAxis(axis, 'axis', false) ?? 'z';
+    if (degrees !== undefined && (typeof degrees !== 'number' || !Number.isFinite(degrees))) {
+      throw new Error('degrees must be a finite number between 1 and 360');
+    }
+    const segs = parseRingCount(segments, 'segments');
     const before = cloneLattice(lattice);
     const result = revolveMm(
-      lattice, profile, (axis as LatticeAxis) || 'z',
-      typeof degrees === 'number' ? degrees : 360,
+      lattice, profile, ax,
+      degrees === undefined ? 360 : degrees,
       {
-        throughMm: Array.isArray(throughMm) ? throughMm : undefined,
-        segments: typeof segments === 'number' ? segments : 0,
+        throughMm: throughMm as number[] | undefined,
+        segments: segs,
         closed: closed === true,
       },
     );
@@ -263,8 +297,15 @@ export const latticeCommands: McpCommands = {
   LATTICE_DIMENSION: async (msg, { store }) => {
     const { targetId, corners, axis, mode, valueMm } = msg as Msg<{ targetId: string }>;
     const { node, lattice } = latticeTarget(store, targetId);
-    const which = (axis === 'x' || axis === 'y' || axis === 'z') ? axis : null;
-    if (!which) return { ok: false, error: "axis must be 'x', 'y' or 'z'" };
+    let which;
+    try {
+      which = parseAxis(axis, 'axis', true)!;
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (mode !== undefined && mode !== 'size' && mode !== 'position') {
+      return { ok: false, error: "mode must be 'size' or 'position'" };
+    }
     const how = mode === 'position' ? 'position' : 'size';
     if (typeof valueMm !== 'number' || !Number.isFinite(valueMm)) {
       return { ok: false, error: 'valueMm must be a number, in millimetres' };
@@ -299,8 +340,7 @@ export const latticeCommands: McpCommands = {
   LATTICE_WALL: async (msg, { store }) => {
     const { targetId, thicknessMm } = msg as Msg<{ targetId: string }>;
     const { node } = latticeTarget(store, targetId);
-    const raw = Number(thicknessMm);
-    const mm = Math.max(0, Number.isFinite(raw) ? raw : 0);
+    const mm = parseThicknessMm(thicknessMm, 'thicknessMm');
     useStore.getState().setLatticeThickness(node.id, mm);
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
     const mesh = after?.geoms?.find((g: SceneGeom) => g.latticeGeom)

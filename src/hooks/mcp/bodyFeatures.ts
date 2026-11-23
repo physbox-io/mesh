@@ -28,9 +28,9 @@ import type { SceneGraph, SceneNode, SceneGeom, HardwareBore, HardwareCutKind, S
 import { HARDWARE_KINDS, hardwareCutProblem, hardwareSpecOf, quarterDirection, quarterFacing } from '../../utils/hardwareCuts';
 import { SNAP_SIZES, snapBeamLength, snapLipHeight } from '../../utils/snapFits';
 import { sealFindings } from '../../utils/hardwareChecks';
-import { pointList, findNodeInScene } from './bridgeUtils';
+import { isFiniteNumber, isFiniteVec3, isPlainObject, pointList, findNodeInScene } from './bridgeUtils';
 import { sculptMeshOf } from './sculptState';
-import { pendingDeclarativeOps } from './bodyDefaults';
+import { normalizeRgba, pendingDeclarativeOps, type PendingDeclarativeOps } from './bodyDefaults';
 
 /**
  * The piece of a part that a body is fixed to, to move with it: a carriage
@@ -50,22 +50,68 @@ export function sealCheckFor(scene: SceneGraph, nodeId: string, group: string) {
   return f ? { seals: !!f.passed, title: f.title, detail: f.detail, fix: f.fix } : null;
 }
 
+const PRIMITIVE_CUT_SHAPES = new Set(['hole', 'cylinder', 'slot', 'box', 'dish', 'sphere']);
+const SEAL_TYPES = new Set<SealType>(['face', 'bore', 'piston']);
+const POCKET_OUTLINES = new Set(['rect', 'ellipse', 'circle']);
+const POCKET_FLOORS = new Set(['flat', 'bowl']);
+const ROUND_MODES = new Set(['round', 'fillet', 'bevel', 'chamfer']);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applySingleCutToBody(targetId: string, spec: Record<string, any>): Record<string, any> {
+  if (!isPlainObject(spec)) return { ok: false, error: 'Cut specification must be a plain object' };
   const store = useStore.getState();
   const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned, facing } = spec;
-  const quarterIn = spec.quarter === undefined || spec.quarter === null ? undefined : Number(spec.quarter);
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) return { ok: false, error: `No object with id '${targetId}'` };
-  const spotIn = Array.isArray(at) && at.length >= 3
+  if (at !== undefined && !isFiniteVec3(at)) {
+    return { ok: false, error: 'at must be [x, y, z] of finite numbers in millimetres' };
+  }
+  if (normal !== undefined) {
+    if (!isFiniteVec3(normal)) return { ok: false, error: 'normal must be [x, y, z] of finite numbers' };
+    if (Math.hypot(normal[0], normal[1], normal[2]) < 1e-9) return { ok: false, error: 'normal must not be [0, 0, 0]' };
+  }
+  const spotIn = at !== undefined
     ? {
       at: [at[0] / 1000, at[1] / 1000, at[2] / 1000],
-      normal: Array.isArray(normal) && normal.length >= 3 ? [...normal] : [0, 0, 1],
+      normal: normal !== undefined ? [...normal] : [0, 0, 1],
     }
     : undefined;
 
-  if (typeof shape === 'string' && shape in HARDWARE_KINDS) {
+  if (shape !== undefined && typeof shape !== 'string') {
+    return { ok: false, error: 'shape must be a string' };
+  }
+
+  if (typeof shape === 'string' && Object.hasOwn(HARDWARE_KINDS, shape)) {
     const hwKind = shape as HardwareCutKind;
+    const info = HARDWARE_KINDS[hwKind];
+    if (size !== undefined && !info.sizes.includes(String(size))) {
+      return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
+    }
+    if (bore !== undefined) {
+      if (!info.bores) {
+        return { ok: false, error: `${info.label} does not accept a bore option` };
+      }
+      if (typeof bore !== 'string' || !info.bores.includes(bore as HardwareBore)) {
+        return { ok: false, error: `bore for ${info.label} must be one of ${info.bores.join(', ')}; got '${String(bore)}'` };
+      }
+    }
+    if (fitMm !== undefined && !isFiniteNumber(fitMm)) {
+      return { ok: false, error: 'fitMm must be a finite number' };
+    }
+    if (seal !== undefined && (typeof seal !== 'string' || !SEAL_TYPES.has(seal as SealType))) {
+      return { ok: false, error: "seal must be 'face', 'bore', or 'piston'" };
+    }
+    if (hwKind === 'rail_seat' && lengthMm !== undefined && (!isFiniteNumber(lengthMm) || lengthMm <= 0)) {
+      return { ok: false, error: 'lengthMm must be a positive finite number' };
+    }
+    if (spec.quarter !== undefined && spec.quarter !== null && !isFiniteNumber(spec.quarter)) {
+      return { ok: false, error: 'quarter must be a finite number' };
+    }
+    if (facing !== undefined) {
+      if (!isFiniteVec3(facing)) return { ok: false, error: 'facing must be [x, y, z] of finite numbers' };
+      if (Math.hypot(facing[0], facing[1], facing[2]) < 1e-9) return { ok: false, error: 'facing must not be [0, 0, 0]' };
+    }
+    const quarterIn = spec.quarter === undefined || spec.quarter === null ? undefined : Number(spec.quarter);
     const group = store.addHardwareCut(targetId, hwKind, spotIn);
     if (!group) return { ok: false, error: store.hardwareCutProblemAt(targetId, hwKind, spotIn) ?? 'That body has no solid shape to cut into' };
     const railSeat = hwKind === 'rail_seat' && (typeof lengthMm === 'number' || typeof turned === 'boolean');
@@ -73,10 +119,15 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     // `facing`, a direction in the body's frame, is the easy way to say it: the nearest quarter on this face.
     const placed = turns ? findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) : null;
     const faceNormal = (placed && hardwareSpecOf(placed.geoms ?? [], group)?.normal) ?? spotIn?.normal ?? [0, 0, 1];
-    const quarter = turns && Array.isArray(facing) && facing.length >= 3
+    const quarter = turns && isFiniteVec3(facing)
       ? quarterFacing(faceNormal, facing.map(Number))
       : quarterIn;
     const turnable = turns && typeof quarter === 'number' && Number.isFinite(quarter);
+    const removeAddedHardwareCut = () => {
+      const cur = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+      const index = (cur?.geoms ?? []).findIndex((g) => g.hardware?.group === group && !g.csgDerived);
+      if (index >= 0) useStore.getState().deleteNodeGeom(targetId, index);
+    };
     if (size !== undefined || bore !== undefined || fitMm !== undefined || seal !== undefined || railSeat || turnable) {
       const current = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
       const before = current && hardwareSpecOf(current.geoms ?? [], group);
@@ -84,7 +135,7 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
         ...(size !== undefined ? { size: String(size) } : {}),
         ...(bore !== undefined ? { bore: bore as HardwareBore } : {}),
         ...(typeof fitMm === 'number' ? { fitMm } : {}),
-        ...(seal === 'face' || seal === 'bore' || seal === 'piston' ? { seal: seal as SealType } : {}),
+        ...(seal !== undefined ? { seal: seal as SealType } : {}),
         // A rail seat's own length and direction.
         ...(hwKind === 'rail_seat' && typeof lengthMm === 'number' ? { lengthMm } : {}),
         ...(hwKind === 'rail_seat' && typeof turned === 'boolean' ? { turned } : {}),
@@ -95,16 +146,15 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
       const why = current && before && hardwareCutProblem({ ...before, ...changes }, current);
       if (why) {
         // Nothing half-made is left behind: the groove added at its own size goes too.
-        const index = (current.geoms ?? []).findIndex((g) => g.hardware?.group === group && !g.csgDerived);
-        if (index >= 0) useStore.getState().deleteNodeGeom(targetId, index);
+        removeAddedHardwareCut();
         return { ok: false, error: why };
       }
       useStore.getState().setHardwareCut(targetId, group, changes);
     }
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
     const hwSpec = hardwareSpecOf(after?.geoms ?? [], group);
-    const info = HARDWARE_KINDS[hwKind];
     if (size !== undefined && hwSpec && hwSpec.size !== String(size)) {
+      removeAddedHardwareCut();
       return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
     }
     return {
@@ -131,6 +181,30 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
   }
 
   if (shape === 'pocket') return applyPocketCut(targetId, spec, spotIn);
+
+  if (shape !== undefined && !PRIMITIVE_CUT_SHAPES.has(shape)) {
+    const valid = [...PRIMITIVE_CUT_SHAPES, 'pocket', ...Object.keys(HARDWARE_KINDS)].join(', ');
+    return { ok: false, error: `Unknown cut shape '${shape}'. Valid shapes: ${valid}` };
+  }
+
+  if (widthMm !== undefined && (!isFiniteNumber(widthMm) || widthMm <= 0)) {
+    return { ok: false, error: 'widthMm must be a positive finite number' };
+  }
+  if (lengthMm !== undefined && (!isFiniteNumber(lengthMm) || lengthMm <= 0)) {
+    return { ok: false, error: 'lengthMm must be a positive finite number' };
+  }
+  if (diameterMm !== undefined && (!isFiniteNumber(diameterMm) || diameterMm <= 0)) {
+    return { ok: false, error: 'diameterMm must be a positive finite number' };
+  }
+  if (depthMm !== undefined && (!isFiniteNumber(depthMm) || depthMm < 0)) {
+    return { ok: false, error: 'depthMm must be a non-negative finite number (0 for through-cut)' };
+  }
+  if (threadPitchMm !== undefined && (!isFiniteNumber(threadPitchMm) || threadPitchMm <= 0)) {
+    return { ok: false, error: 'threadPitchMm must be a positive finite number' };
+  }
+  if (threadFitMm !== undefined && !isFiniteNumber(threadFitMm)) {
+    return { ok: false, error: 'threadFitMm must be a finite number' };
+  }
 
   const kind = shape === 'slot' || shape === 'box' ? 'box'
     : shape === 'dish' || shape === 'sphere' ? 'sphere' : 'cylinder';
@@ -187,13 +261,30 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applyPocketCut(targetId: string, spec: Record<string, any>, spotIn?: { at: number[]; normal: number[] }): Record<string, any> {
-  const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+  if (spec.outline !== undefined && (typeof spec.outline !== 'string' || !POCKET_OUTLINES.has(spec.outline))) {
+    return { ok: false, error: "outline must be 'rect', 'ellipse', or 'circle'" };
+  }
+  if (spec.floor !== undefined && (typeof spec.floor !== 'string' || !POCKET_FLOORS.has(spec.floor))) {
+    return { ok: false, error: "floor must be 'flat' or 'bowl'" };
+  }
+  if (spec.cornerRadiusMm !== undefined && (!isFiniteNumber(spec.cornerRadiusMm) || spec.cornerRadiusMm < 0)) {
+    return { ok: false, error: 'cornerRadiusMm must be a non-negative finite number' };
+  }
+  if (spec.floorRadiusMm !== undefined && (!isFiniteNumber(spec.floorRadiusMm) || spec.floorRadiusMm < 0)) {
+    return { ok: false, error: 'floorRadiusMm must be a non-negative finite number' };
+  }
+  for (const key of ['widthMm', 'lengthMm', 'diameterMm', 'depthMm'] as const) {
+    if (spec[key] !== undefined && (!isFiniteNumber(spec[key]) || spec[key] <= 0)) {
+      return { ok: false, error: `${key} must be a positive finite number` };
+    }
+  }
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
   const outline = spec.outline === 'ellipse' || spec.outline === 'circle' ? 'ellipse' : 'rect';
   const widthMm = num(spec.widthMm) ?? num(spec.diameterMm);
   const lengthMm = num(spec.lengthMm) ?? (outline === 'ellipse' ? widthMm : undefined);
   const depthMm = num(spec.depthMm);
   if (!widthMm || !lengthMm || !depthMm) {
-    return { ok: false, error: 'A pocket needs widthMm and lengthMm (or diameterMm for a round one) and depthMm' };
+    return { ok: false, error: 'A pocket needs positive finite widthMm and lengthMm (or diameterMm for a round one) and depthMm' };
   }
   const pocket: PocketSpec = {
     outline,
@@ -254,30 +345,56 @@ export async function applyRoundEdgesToBody(targetId: string, specs: Record<stri
   const why = whyNotRoundable(node);
   if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
   const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
-  let totalChanged = 0;
+  // Validate every spec in the batch before mutating the store so a bad entry
+  // never leaves earlier specs applied in a half-baked state.
+  type PlannedRound =
+    | { remove: true; edges: (typeof found.edges)[number]['edge'][] }
+    | { remove: false; mode: 'fillet' | 'chamfer'; size: number; edges: (typeof found.edges)[number]['edge'][] };
+  const planned: PlannedRound[] = [];
 
   for (const spec of specs) {
+    if (!isPlainObject(spec)) return { ok: false, error: 'Each rounding specification must be a plain object' };
     const { edges, sizeMm, mode, remove } = spec;
-    const which = Array.isArray(edges) ? edges.map(Number)
-      : edges === undefined ? 'all'
-      : ['all', 'top', 'bottom', 'vertical', 'inside'].includes(String(edges)) ? String(edges) as EdgeGroup : null;
+    let which: EdgeGroup | number[] | null = null;
+    if (Array.isArray(edges)) {
+      if (edges.some((e) => !isFiniteNumber(e) || !Number.isInteger(e))) {
+        return { ok: false, error: 'edges list must contain integer edge ids from physics_get_edges' };
+      }
+      which = edges as number[];
+    } else if (edges === undefined) {
+      which = 'all';
+    } else if (typeof edges === 'string' && ['all', 'top', 'bottom', 'vertical', 'inside'].includes(edges)) {
+      which = edges as EdgeGroup;
+    }
     if (which === null) return { ok: false, error: "edges must be 'all', 'top', 'bottom', 'vertical', 'inside' or a list of ids from physics_get_edges" };
     const { picked, unknown } = selectEdges(found.edges, which);
     if (unknown.length) return { ok: false, error: `No edge with id ${unknown.join(', ')} — physics_get_edges lists them` };
     if (picked.length === 0) return { ok: false, error: `This part has no ${Array.isArray(which) ? '' : which + ' '}edges that can be rounded` };
 
     if (remove === true) {
-      useStore.getState().unroundEdges(targetId, picked.map((e) => e.edge));
+      planned.push({ remove: true, edges: picked.map((e) => e.edge) });
     } else {
+      if (mode !== undefined && (typeof mode !== 'string' || !ROUND_MODES.has(mode))) {
+        return { ok: false, error: "mode must be 'round', 'fillet', 'bevel', or 'chamfer'" };
+      }
       const kind: 'fillet' | 'chamfer' = mode === 'bevel' || mode === 'chamfer' ? 'chamfer' : 'fillet';
-      if (typeof sizeMm !== 'number' || !(sizeMm > 0)) return { ok: false, error: 'sizeMm must be a positive number of millimetres' };
+      if (!isFiniteNumber(sizeMm) || !(sizeMm > 0)) return { ok: false, error: 'sizeMm must be a positive finite number of millimetres' };
       const most = maxSizeFor(picked, kind);
       if (sizeMm / 1000 > most + 1e-9) {
         return { ok: false, error: `${sizeMm} mm is too big for ${picked.length === 1 ? 'this edge' : 'these edges'} — ${Math.floor(most * 1e5) / 100} mm is the most that fits` };
       }
-      useStore.getState().roundEdges(targetId, { mode: kind, size: sizeMm / 1000, edges: picked.map((e) => e.edge) });
+      planned.push({ remove: false, mode: kind, size: sizeMm / 1000, edges: picked.map((e) => e.edge) });
     }
-    totalChanged += picked.length;
+  }
+
+  let totalChanged = 0;
+  for (const step of planned) {
+    if (step.remove) {
+      useStore.getState().unroundEdges(targetId, step.edges);
+    } else {
+      useStore.getState().roundEdges(targetId, { mode: step.mode, size: step.size, edges: step.edges });
+    }
+    totalChanged += step.edges.length;
   }
 
   if (compileNow) {
@@ -286,6 +403,8 @@ export async function applyRoundEdgesToBody(targetId: string, specs: Record<stri
   }
   const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
   if (after?.csgError) return { ok: false, error: `Rounding failed: ${after.csgError}` };
+  const compileError = compileNow ? useStore.getState().lastCompileError : null;
+  if (compileError) return { ok: false, error: compileError };
   return {
     ok: true,
     id: targetId,
@@ -299,17 +418,24 @@ export async function applyRoundEdgesToBody(targetId: string, specs: Record<stri
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function applySinglePatternToBody(targetId: string, m: Record<string, any>): Promise<Record<string, any>> {
+  if (!isPlainObject(m)) return { ok: false, error: 'Pattern specification must be a plain object' };
   const store = useStore.getState();
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-  if (!node) throw new Error(`No object with id '${targetId}'`);
+  if (!node) return { ok: false, error: `No object with id '${targetId}'` };
   const at = pointList(m.at)[0];
-  if (!at) throw new Error("Missing at: a point [x, y, z] on the face, in the body's own frame in millimetres.");
-  const pick = patternPickAt(node, at.map((v) => v / 1000), Array.isArray(m.normal) ? m.normal : undefined);
+  if (!isFiniteVec3(at)) {
+    return { ok: false, error: "Missing or invalid at: expected [x, y, z] of finite numbers in the body's own frame in millimetres." };
+  }
+  if (m.normal !== undefined) {
+    if (!isFiniteVec3(m.normal)) return { ok: false, error: 'normal must be [x, y, z] of finite numbers.' };
+    if (Math.hypot(m.normal[0], m.normal[1], m.normal[2]) < 1e-9) return { ok: false, error: 'normal must not be [0, 0, 0].' };
+  }
+  const pick = patternPickAt(node, at.map((v) => v / 1000), m.normal);
   if (!pick) {
-    throw new Error(`No surface of '${targetId}' within 10 mm of [${at.join(', ')}] mm. Points are in the body's own frame in millimetres; physics_get_object gives the shapes, and normal says which way the face looks.`);
+    return { ok: false, error: `No surface of '${targetId}' within 10 mm of [${at.join(', ')}] mm. Points are in the body's own frame in millimetres; physics_get_object gives the shapes, and normal says which way the face looks.` };
   }
   const geom = (node.geoms || []).find((g) => g.name === pick.geomName);
-  if (!geom) throw new Error(`The face picked belongs to '${pick.geomName}', which is not on the body.`);
+  if (!geom) return { ok: false, error: `The face picked belongs to '${pick.geomName}', which is not on the body.` };
   const existing = geom.textures ?? [];
   const describe = (t: SurfaceTexture) =>
     `${patternById(t.pattern)?.label ?? t.pattern}, ${t.depthM > 0 ? 'embossed' : 'engraved'} ${(Math.abs(t.depthM) * 1000).toFixed(1)} mm`;
@@ -326,31 +452,49 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
   const known = () =>
     faceable.map((p) => `${p.id} (${p.fields.map((f) => f.key).join(', ')})`).join('; ');
   const patternId = m.pattern ?? prev?.pattern;
-  if (!patternId) throw new Error(`Missing pattern. One of, with its options: ${known()}.`);
+  if (!patternId || typeof patternId !== 'string') return { ok: false, error: `Missing pattern. One of, with its options: ${known()}.` };
   const spec = patternById(patternId);
   if (!spec || spec.throughCut) {
-    throw new Error(`'${patternId}' is not a pattern that goes on a face. One of, with its options: ${known()}.`);
+    return { ok: false, error: `'${patternId}' is not a pattern that goes on a face. One of, with its options: ${known()}.` };
   }
   const projections: TextureProjection[] = ['auto', 'planar', 'cylindrical', 'revolved', 'unwrap'];
-  if (m.projection !== undefined && !projections.includes(m.projection as TextureProjection)) {
-    throw new Error(`projection is one of ${projections.join(', ')}.`);
+  if (m.projection !== undefined && (typeof m.projection !== 'string' || !projections.includes(m.projection as TextureProjection))) {
+    return { ok: false, error: `projection is one of ${projections.join(', ')}.` };
+  }
+  if (m.options !== undefined && !isPlainObject(m.options)) {
+    return { ok: false, error: 'options must be a plain object.' };
   }
   const optionKeys = new Set(spec.fields.map((f) => f.key));
   const unknown = Object.keys(m.options ?? {}).filter((k) => !optionKeys.has(k));
-  const depthMm = m.depthMm ?? (prev ? Math.abs(prev.depthM) * 1000 : 1.5);
-  if (!(depthMm > 0)) throw new Error('depthMm must be more than 0.');
+  const depthMm = m.depthMm !== undefined ? m.depthMm : (prev ? Math.abs(prev.depthM) * 1000 : 1.5);
+  if (!isFiniteNumber(depthMm) || !(depthMm > 0)) return { ok: false, error: 'depthMm must be a positive finite number.' };
+  if (m.borderMm !== undefined && (!isFiniteNumber(m.borderMm) || m.borderMm < 0)) {
+    return { ok: false, error: 'borderMm must be a non-negative finite number.' };
+  }
+  if (m.cellMm !== undefined && (!isFiniteNumber(m.cellMm) || m.cellMm <= 0)) {
+    return { ok: false, error: 'cellMm must be a positive finite number.' };
+  }
+  if (m.stopAtDeg !== undefined && !isFiniteNumber(m.stopAtDeg)) {
+    return { ok: false, error: 'stopAtDeg must be a finite number.' };
+  }
+  if (m.twistDeg !== undefined && !isFiniteNumber(m.twistDeg)) {
+    return { ok: false, error: 'twistDeg must be a finite number.' };
+  }
+  if (m.scale !== undefined && (!isFiniteNumber(m.scale) || m.scale <= 0)) {
+    return { ok: false, error: 'scale must be a positive finite number.' };
+  }
   const emboss = m.emboss ?? (prev ? prev.depthM > 0 : false);
   const projection = (m.projection ?? prev?.projection) as TextureProjection | undefined;
   // [r, g, b] 0..1 or '#rrggbb' for the part the pattern moves; null or 'none' clears it.
   let color: number[] | undefined = prev?.color;
   if (m.color === null || m.color === 'none') color = undefined;
   else if (typeof m.color === 'string' && /^#[0-9a-f]{6}$/i.test(m.color)) color = hexToRgb(m.color);
-  else if (Array.isArray(m.color) && m.color.length >= 3 && m.color.slice(0, 3).every((v: unknown) => typeof v === 'number')) {
-    color = m.color.slice(0, 3).map((v: number) => Math.min(1, Math.max(0, v)));
-  } else if (m.color !== undefined) throw new Error("color is [r, g, b] each 0..1, or '#rrggbb', or 'none'.");
+  else if (Array.isArray(m.color) && (m.color.length === 3 || m.color.length === 4) && m.color.slice(0, 3).every((v: unknown) => isFiniteNumber(v) && v >= 0 && v <= 1)) {
+    color = m.color.slice(0, 3) as number[];
+  } else if (m.color !== undefined) return { ok: false, error: "color is [r, g, b] each a finite number in 0..1, or '#rrggbb', or 'none'." };
   const texture: SurfaceTexture = {
     pattern: spec.id,
-    options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...(m.options ?? {}) },
+    options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...((m.options as SurfaceTexture['options']) ?? {}) },
     depthM: ((emboss ? 1 : -1) * depthMm) / 1000,
     borderM: m.borderMm !== undefined ? Math.max(0, m.borderMm) / 1000 : prev?.borderM ?? DEFAULT_TEXTURE_BORDER_M,
     // Lettering's strokes want finer triangles than a texture does.
@@ -371,10 +515,17 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   }
-  const index = pick.index ?? existing.length;
-  const list = [...existing];
+  // Re-read fresh node/geom after await so concurrent texture edits aren't clobbered.
+  const freshNodeAfterPrepare = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+  const freshGeomAfterPrepare = (freshNodeAfterPrepare?.geoms || []).find((g) => g.name === geom.name);
+  if (!freshNodeAfterPrepare || !freshGeomAfterPrepare) {
+    return { ok: false, error: `Body '${node.id}' or geom '${geom.name}' was removed while preparing the pattern.` };
+  }
+  const freshExisting = freshGeomAfterPrepare.textures ?? [];
+  const index = pick.index !== undefined && pick.index < freshExisting.length ? pick.index : freshExisting.length;
+  const list = [...freshExisting];
   list[index] = texture;
-  const surface = await requestTexturedSurface({ ...geom, textures: list }, geomHalfLen(geom));
+  const surface = await requestTexturedSurface({ ...freshGeomAfterPrepare, textures: list }, geomHalfLen(freshGeomAfterPrepare));
   const region = surface?.regions.find((r) => r.index === index);
   const warnings = [
     ...(surface?.warnings ?? [])
@@ -385,7 +536,20 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
   if (!region?.applied) {
     return { ok: false, error: region?.reason ?? 'The pattern could not be laid on that face.', warnings };
   }
-  if (!m.preview) useStore.getState().setGeomTextures(node.id, geom.name, list);
+  if (!m.preview) {
+    const latestNode = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+    const latestGeom = (latestNode?.geoms || []).find((g) => g.name === geom.name);
+    if (!latestNode || !latestGeom) {
+      return { ok: false, error: `Body '${node.id}' or geom '${geom.name}' was removed while building the pattern.` };
+    }
+    const latestTextures = [...(latestGeom.textures ?? [])];
+    if (pick.index !== undefined && pick.index < latestTextures.length) {
+      latestTextures[pick.index] = texture;
+    } else {
+      latestTextures.push(texture);
+    }
+    useStore.getState().setGeomTextures(latestNode.id, latestGeom.name, latestTextures);
+  }
   const mm = (v: number) => Math.round(v * 10000) / 10;
   return {
     ok: true,
@@ -411,6 +575,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>): Record<string, any> {
+  if (!isPlainObject(m)) throw new Error('Paint stroke must be a plain object');
   const store = useStore.getState();
   const { geomName, at, radius, rgba, flow, erase, line, hardness } = m;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
@@ -426,11 +591,21 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   if (!isPaintable(geom.type, !!node.isWedge)) {
     throw new Error(`A '${geom.type}' geom cannot hold paint — paintable types are box, sphere, ellipsoid, cylinder, capsule and mesh`);
   }
-  if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b], each 0..1');
+  const normColor = normalizeRgba(rgba);
+  if (!normColor) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1');
 
   const points: number[][] = pointList(at);
-  if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
-    throw new Error("at must be [x, y, z] or a list of them, in the geom's own frame (metres)");
+  if (!points.length || points.some((p: unknown) => !isFiniteVec3(p))) {
+    throw new Error("at must be [x, y, z] or a list of them, with finite numbers in the geom's own frame (metres)");
+  }
+  if (radius !== undefined && (!isFiniteNumber(radius) || radius <= 0)) {
+    throw new Error('radius must be a positive finite number');
+  }
+  if (flow !== undefined && (!isFiniteNumber(flow) || flow < 0 || flow > 1)) {
+    throw new Error('flow must be a finite number in 0..1');
+  }
+  if (hardness !== undefined && (!isFiniteNumber(hardness) || hardness < 0 || hardness > 1)) {
+    throw new Error('hardness must be a finite number in 0..1');
   }
   const brush = typeof radius === 'number' ? radius : 0.008;
 
@@ -469,7 +644,7 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
     if (applyDab(canvas, positions, {
       x, y, z,
       radius: brush,
-      color: rgba,
+      color: normColor,
       flow: typeof flow === 'number' ? flow : 1,
       erase: !!erase,
       hardness: typeof hardness === 'number' ? hardness : DEFAULT_PAINT_HARDNESS,
@@ -507,10 +682,13 @@ function alongSurface(points: number[][], positions: ArrayLike<number>, step: nu
   return out;
 }
 
-export async function applyDeclarativePreCsgFeatures(nodes: SceneNode[]): Promise<void> {
+export async function applyDeclarativePreCsgFeatures(
+  nodes: SceneNode[],
+  opsMap: Map<string, PendingDeclarativeOps> = pendingDeclarativeOps,
+): Promise<void> {
   const walk = async (list: SceneNode[]) => {
     for (const n of list || []) {
-      const pending = pendingDeclarativeOps.get(n.id);
+      const pending = opsMap.get(n.id);
       if (pending) {
         if (pending.sculptCuts && pending.sculptCuts.length > 0) {
           for (const cutSpec of pending.sculptCuts) {
@@ -555,12 +733,15 @@ export async function applyDeclarativePreCsgFeatures(nodes: SceneNode[]): Promis
   await walk(nodes);
 }
 
-export async function applyDeclarativePostCsgFeatures(nodes: SceneNode[]): Promise<void> {
+export async function applyDeclarativePostCsgFeatures(
+  nodes: SceneNode[],
+  opsMap: Map<string, PendingDeclarativeOps> = pendingDeclarativeOps,
+): Promise<void> {
   const walk = async (list: SceneNode[]) => {
     for (const n of list || []) {
-      const pending = pendingDeclarativeOps.get(n.id);
+      const pending = opsMap.get(n.id);
       if (pending) {
-        pendingDeclarativeOps.delete(n.id);
+        opsMap.delete(n.id);
         if (pending.paint && pending.paint.length > 0) {
           for (const paintSpec of pending.paint) {
             const res = applyPaintStrokeToBody(n.id, paintSpec);

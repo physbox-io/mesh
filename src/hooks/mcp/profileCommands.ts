@@ -15,7 +15,7 @@ import {
   type TraceResult,
 } from '../../utils/profileImport';
 import { settleScene } from './settleScene';
-import { findNodeInScene } from './bridgeUtils';
+import { findNodeInScene, isFiniteNumber, isFiniteVec3 } from './bridgeUtils';
 import type { McpCommands } from './types';
 
 /** The dialog's own cap on a traced picture's long side. */
@@ -27,57 +27,85 @@ const DETAILS: ProfileDetail[] = ['fine', 'normal', 'coarse'];
 export const profileCommands: McpCommands = {
   IMPORT_PROFILE: async (msg) => {
     const m = msg as {
-      svg?: string; imageData?: string; name?: string;
-      widthMm?: number; heightMm?: number; thicknessMm?: number;
-      threshold?: number; subject?: string; detail?: string;
-      pos?: [number, number, number];
+      svg?: unknown; imageData?: unknown; name?: unknown;
+      widthMm?: unknown; heightMm?: unknown; thicknessMm?: unknown;
+      threshold?: unknown; subject?: unknown; detail?: unknown;
+      pos?: unknown;
     };
-    if (!m.svg === !m.imageData) {
+    if (m.svg !== undefined && m.svg !== null && typeof m.svg !== 'string') {
+      return { ok: false, error: 'svg must be a string.' };
+    }
+    if (m.imageData !== undefined && m.imageData !== null && typeof m.imageData !== 'string') {
+      return { ok: false, error: 'imageData must be a string.' };
+    }
+    const svg = typeof m.svg === 'string' && m.svg.length > 0 ? m.svg : undefined;
+    const imageData = typeof m.imageData === 'string' && m.imageData.length > 0 ? m.imageData : undefined;
+    if (!svg === !imageData) {
       return { ok: false, error: 'Give exactly one of svg (the drawing\'s text) or imageData (a picture, as a data URL or base64).' };
     }
-    if (m.subject !== undefined && !SUBJECTS.includes(m.subject as ProfileSubject)) {
+    if (m.subject !== undefined && (typeof m.subject !== 'string' || !SUBJECTS.includes(m.subject as ProfileSubject))) {
       return { ok: false, error: `subject is one of ${SUBJECTS.join(', ')}.` };
     }
-    if (m.detail !== undefined && !DETAILS.includes(m.detail as ProfileDetail)) {
+    if (m.detail !== undefined && (typeof m.detail !== 'string' || !DETAILS.includes(m.detail as ProfileDetail))) {
       return { ok: false, error: `detail is one of ${DETAILS.join(', ')}.` };
     }
-    if (m.threshold !== undefined && !(m.threshold > 0 && m.threshold < 1)) {
-      return { ok: false, error: 'threshold is a brightness between 0 and 1 (omit it to let the picture choose).' };
+    if (m.threshold !== undefined && (!isFiniteNumber(m.threshold) || !(m.threshold > 0 && m.threshold < 1))) {
+      return { ok: false, error: 'threshold is a finite brightness between 0 and 1 (omit it to let the picture choose).' };
     }
+    if (m.widthMm !== undefined && (!isFiniteNumber(m.widthMm) || m.widthMm <= 0)) {
+      return { ok: false, error: 'widthMm must be a positive finite number.' };
+    }
+    if (m.heightMm !== undefined && (!isFiniteNumber(m.heightMm) || m.heightMm <= 0)) {
+      return { ok: false, error: 'heightMm must be a positive finite number.' };
+    }
+    if (m.thicknessMm !== undefined && (!isFiniteNumber(m.thicknessMm) || m.thicknessMm <= 0)) {
+      return { ok: false, error: 'thicknessMm must be a positive finite number.' };
+    }
+    if (m.pos !== undefined && !isFiniteVec3(m.pos)) {
+      return { ok: false, error: 'pos must be [x, y, z] of finite numbers in metres.' };
+    }
+    const widthMm = m.widthMm as number | undefined;
+    const heightMm = m.heightMm as number | undefined;
     const sized = {
-      ...(m.widthMm && m.widthMm > 0 ? { widthMm: m.widthMm } : {}),
-      ...(m.heightMm && m.heightMm > 0 && !(m.widthMm && m.widthMm > 0) ? { heightMm: m.heightMm } : {}),
+      ...(widthMm !== undefined ? { widthMm } : {}),
+      ...(heightMm !== undefined && widthMm === undefined ? { heightMm } : {}),
     };
 
     let profile: Profile;
     try {
-      if (m.svg) {
-        profile = svgProfile(m.svg, sized);
+      if (svg) {
+        profile = svgProfile(svg, sized);
       } else {
-        const src = m.imageData!.startsWith('data:') ? m.imageData! : `data:image/png;base64,${m.imageData!.trim()}`;
+        const src = imageData!.startsWith('data:') ? imageData! : `data:image/png;base64,${imageData!.trim()}`;
         const image = await decodeImageUrl(src, MAX_TRACE_PX);
         profile = traceProfile(image.data, image.width, image.height, {
           ...sized,
           subject: (m.subject as ProfileSubject) ?? PROFILE_DEFAULTS.subject,
           detail: (m.detail as ProfileDetail) ?? PROFILE_DEFAULTS.detail,
-          ...(m.threshold !== undefined ? { threshold: m.threshold } : {}),
+          ...(m.threshold !== undefined ? { threshold: m.threshold as number } : {}),
         });
       }
     } catch (e) {
       return { ok: false, error: (e as Error)?.message || String(e) };
     }
 
-    const thicknessMm = m.thicknessMm && m.thicknessMm > 0 ? m.thicknessMm : PROFILE_DEFAULTS.thicknessMm;
-    const pos = Array.isArray(m.pos) && m.pos.length === 3 ? m.pos : undefined;
-    const node = profileNode(profile, { name: m.name || (m.svg ? 'svg_profile' : 'traced_profile'), thicknessMm, ...(pos ? { pos } : {}) });
+    const thicknessMm = (m.thicknessMm as number | undefined) ?? PROFILE_DEFAULTS.thicknessMm;
+    const pos = m.pos as [number, number, number] | undefined;
+    const name = typeof m.name === 'string' && m.name.trim() ? m.name.trim() : (svg ? 'svg_profile' : 'traced_profile');
+    const node = profileNode(profile, { name, thicknessMm, ...(pos ? { pos } : {}) });
     const res = await settleScene([...(useStore.getState().sceneGraph.nodes || []), node], { replacesScene: false });
     // The scad compile only logs a failure, so look for the mesh it should have made.
     const built = findNodeInScene(useStore.getState().sceneGraph.nodes || [], node.id);
     const compiled = !!built?.geoms?.some((g) => (g.renderVertices?.length ?? g.vertices?.length ?? 0) > 0);
-    if (res.ok && !compiled) {
-      return { ok: false, nodeId: node.id, error: 'The outline was read but its OpenSCAD body did not compile, so the part has no shape. Try detail "coarse" (fewer points) or a simpler drawing.' };
+    if (!compiled && (res.ok || res.scadErrors?.length)) {
+      useStore.getState().deleteNode(node.id);
+      return {
+        ok: false,
+        nodeId: node.id,
+        error: res.error || 'The outline was read but its OpenSCAD body did not compile, so the part has no shape. Try detail "coarse" (fewer points) or a simpler drawing.',
+      };
     }
-    const traced = m.imageData ? (profile as TraceResult) : null;
+    const traced = imageData ? (profile as TraceResult) : null;
     return {
       ok: res.ok,
       ...(res.error ? { error: res.error } : {}),

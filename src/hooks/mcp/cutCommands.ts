@@ -25,15 +25,40 @@ import type { McpCommands } from './types';
 
 const KINDS = ['panels', 'contour', 'unfold'] as const;
 type CutKind = (typeof KINDS)[number];
+const SHEET_MODES = ['papercraft', 'sheet_metal', 'soft_goods'] as const;
+const JOINT_MODES = ['finger', 'slot', 'glue'] as const;
 
 const fileSafe = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'cut';
+
+function checkPos(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+    return { ok: false, error: `${name} must be a positive finite number.` };
+  }
+  return { ok: true, value: v };
+}
+
+function checkNonNeg(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+    return { ok: false, error: `${name} must be a non-negative finite number.` };
+  }
+  return { ok: true, value: v };
+}
 
 export const cutCommands: McpCommands = {
   EXPORT_CUT: async (msg, { store, toId }) => {
     const kind = (msg.kind ?? 'panels') as CutKind;
     if (!KINDS.includes(kind)) return { ok: false, error: "kind is 'panels', 'contour' or 'unfold'." };
-    if (msg.machine !== undefined && msg.machine !== 'laser' && msg.machine !== 'cnc' && msg.machine !== 'router') {
+    if (msg.machine !== undefined && msg.machine !== null && msg.machine !== 'laser' && msg.machine !== 'cnc' && msg.machine !== 'router') {
       return { ok: false, error: "machine is 'laser' or 'cnc' (default: the bench's)." };
+    }
+    if (msg.jointMode !== undefined && msg.jointMode !== null
+      && (typeof msg.jointMode !== 'string' || !(JOINT_MODES as readonly string[]).includes(msg.jointMode))) {
+      return { ok: false, error: `jointMode is one of ${JOINT_MODES.join(', ')}.` };
+    }
+    if (msg.masterId !== undefined && msg.masterId !== null && typeof msg.masterId !== 'string') {
+      return { ok: false, error: 'masterId must be a string.' };
     }
     const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string), 'cut');
     if ('error' in subject) return { ok: false, error: subject.error };
@@ -64,38 +89,64 @@ export const cutCommands: McpCommands = {
     });
 
     if (kind === 'unfold') {
-      const mode = msg.sheetMode ?? msg.mode;
-      const thick = typeof msg.thicknessMm === 'number' && msg.thicknessMm > 0
-        ? msg.thicknessMm
-        : typeof msg.materialThicknessMm === 'number' && msg.materialThicknessMm > 0
-          ? msg.materialThicknessMm
-          : DEFAULT_SHEET_UNFOLD_OPTIONS.thicknessMm;
+      const rawMode = msg.sheetMode ?? msg.mode;
+      if (rawMode !== undefined && rawMode !== null
+        && (typeof rawMode !== 'string' || !(SHEET_MODES as readonly string[]).includes(rawMode))) {
+        return { ok: false, error: `sheetMode is one of ${SHEET_MODES.join(', ')}.` };
+      }
+      const t1 = checkPos(msg.thicknessMm, 'thicknessMm');
+      if (!t1.ok) return t1;
+      const t2 = checkPos(msg.materialThicknessMm, 'materialThicknessMm');
+      if (!t2.ok) return t2;
+      const bend = checkNonNeg(msg.bendRadiusMm, 'bendRadiusMm');
+      if (!bend.ok) return bend;
+      const scale = checkPos(msg.scaleFactor, 'scaleFactor');
+      if (!scale.ok) return scale;
+      const tabW = checkNonNeg(msg.tabWidthMm, 'tabWidthMm');
+      if (!tabW.ok) return tabW;
+      const seam = checkNonNeg(msg.seamAllowanceMm, 'seamAllowanceMm');
+      if (!seam.ok) return seam;
+      const stitch = checkNonNeg(msg.stitchPitchMm, 'stitchPitchMm');
+      if (!stitch.ok) return stitch;
+      if (msg.kFactor !== undefined && msg.kFactor !== null
+        && (typeof msg.kFactor !== 'number' || !Number.isFinite(msg.kFactor) || msg.kFactor < 0 || msg.kFactor > 1)) {
+        return { ok: false, error: 'kFactor must be a finite number between 0 and 1.' };
+      }
+      const thick = t1.value ?? t2.value ?? DEFAULT_SHEET_UNFOLD_OPTIONS.thicknessMm;
       const options: SheetUnfoldOptions & { material?: typeof state.material; machine?: 'laser' | 'cnc' } = {
         ...DEFAULT_SHEET_UNFOLD_OPTIONS,
-        ...(mode === 'papercraft' || mode === 'sheet_metal' || mode === 'soft_goods' ? { mode } : {}),
+        ...(rawMode ? { mode: rawMode as SheetUnfoldOptions['mode'] } : {}),
         thicknessMm: thick,
         sheetWidthMm: stock.widthMm,
         sheetHeightMm: stock.depthMm,
-        ...(typeof msg.bendRadiusMm === 'number' && msg.bendRadiusMm >= 0 ? { bendRadiusMm: msg.bendRadiusMm } : {}),
-        ...(typeof msg.kFactor === 'number' && msg.kFactor >= 0 && msg.kFactor <= 1 ? { kFactor: msg.kFactor } : {}),
-        ...(typeof msg.scaleFactor === 'number' && msg.scaleFactor > 0 ? { scaleFactor: msg.scaleFactor } : {}),
-        ...(typeof msg.tabWidthMm === 'number' && msg.tabWidthMm >= 0 ? { tabWidthMm: msg.tabWidthMm } : {}),
-        ...(typeof msg.seamAllowanceMm === 'number' && msg.seamAllowanceMm >= 0 ? { seamAllowanceMm: msg.seamAllowanceMm } : {}),
-        ...(typeof msg.stitchPitchMm === 'number' && msg.stitchPitchMm >= 0 ? { stitchPitchMm: msg.stitchPitchMm } : {}),
+        ...(bend.value !== undefined ? { bendRadiusMm: bend.value } : {}),
+        ...(typeof msg.kFactor === 'number' ? { kFactor: msg.kFactor } : {}),
+        ...(scale.value !== undefined ? { scaleFactor: scale.value } : {}),
+        ...(tabW.value !== undefined ? { tabWidthMm: tabW.value } : {}),
+        ...(seam.value !== undefined ? { seamAllowanceMm: seam.value } : {}),
+        ...(stitch.value !== undefined ? { stitchPitchMm: stitch.value } : {}),
         material: state.material,
         machine,
       };
-      const res = exportSheetUnfold(subject.scene, options);
-      if (!res.success || !res.svg) return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
-      const sheets: EtchSheetSpec[] = res.sheets.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm, thicknessMm: thick }));
-      return pack(res.svg, thick, { mode: res.mode, pieces: res.islands.length, sheets: res.sheets.length || 1 }, res.warnings, sheets);
+      try {
+        const res = exportSheetUnfold(subject.scene, options);
+        if (!res.success || !res.svg) return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
+        const sheets: EtchSheetSpec[] = res.sheets.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm, thicknessMm: thick }));
+        return pack(res.svg, thick, { mode: res.mode, pieces: res.islands.length, sheets: res.sheets.length || 1 }, res.warnings, sheets);
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
     }
 
     const client = new ExportWorkerClient();
     try {
       if (kind === 'panels') {
         // As the Etch button lays it out: the bench's machine and stock.
-        const res: LaserCutResult = await client.run('laser', subject.scene, etchLayoutOptions({ machine, stock }));
+        const layoutOpts = etchLayoutOptions({ machine, stock });
+        if (typeof msg.jointMode === 'string') {
+          layoutOpts.jointMode = msg.jointMode as typeof layoutOpts.jointMode;
+        }
+        const res: LaserCutResult = await client.run('laser', subject.scene, layoutOpts);
         if (!res.success || !res.svg || !res.panels?.length) {
           return { ok: false, error: res.error || 'Nothing here lays flat into panels to cut.', warnings: res.warnings ?? [] };
         }
@@ -122,6 +173,8 @@ export const cutCommands: McpCommands = {
         thicknessMm: stock.thicknessMm,
       }));
       return pack(res.svg, stock.thicknessMm, { layers: res.layers.length, sheets: sheetCount }, res.warnings ?? [], sheets);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     } finally {
       client.dispose();
     }

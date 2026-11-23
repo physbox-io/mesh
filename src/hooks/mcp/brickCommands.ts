@@ -1,6 +1,7 @@
 // Brickwork over MCP: the Brick dialog's count, and its bricks put in the scene.
 
 import type { McpCommands } from './types';
+import { useStore } from '../../store/useStore';
 import { BRICK_STANDARDS, DEFAULT_BRICKWORK_OPTIONS, type BrickBond, type BrickStandardId } from '../../utils/brickwork';
 import { layBricksOffThread } from '../../utils/brickworkClient';
 import { normalToySize, TOY_SIZES, type ToyInventory, type ToySize } from '../../utils/toyBricks';
@@ -11,12 +12,15 @@ const BONDS: BrickBond[] = ['stretcher', 'english', 'flemish', 'stack'];
 const PLACEMENTS = ['beside', 'replace', 'none'] as const;
 
 export const brickCommands: McpCommands = {
-  BUILD_BRICKWORK: async (msg, { store }) => {
+  BUILD_BRICKWORK: async (msg, { store, toId }) => {
+    if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
+      return { ok: false, error: 'bodyId must be a string.' };
+    }
     const rawBody = typeof msg.bodyId === 'string' && msg.bodyId ? msg.bodyId : null;
-    const found = rawBody ? findNodeInScene(store.sceneGraph.nodes, rawBody) : null;
+    const found = rawBody ? findNodeInScene(store.sceneGraph.nodes, toId(rawBody) as string) : null;
     if (rawBody && !found) return { ok: false, error: `No body '${rawBody}'.` };
     const bodyId = found ? found.id : null;
-    if (msg.standardId !== undefined && !(String(msg.standardId) in BRICK_STANDARDS)) {
+    if (msg.standardId !== undefined && (typeof msg.standardId !== 'string' || !Object.hasOwn(BRICK_STANDARDS, msg.standardId))) {
       return { ok: false, error: `standardId is one of ${Object.keys(BRICK_STANDARDS).join(', ')}.` };
     }
     if (msg.bond !== undefined && !BONDS.includes(msg.bond as BrickBond)) return { ok: false, error: `bond is one of ${BONDS.join(', ')}.` };
@@ -81,9 +85,13 @@ export const brickCommands: McpCommands = {
     }
     const r = outcome.result;
     if (placement !== 'none') {
-      await settleScene(outcome.nodes, { replacesScene: false, sceneFields: { brickwork } });
-      if (placement === 'replace' && store.selectedNodeId && !findNodeInScene(outcome.nodes, store.selectedNodeId)) {
-        store.setSelectedNodeId(null);
+      const settled = await settleScene(outcome.nodes, { replacesScene: false, sceneFields: { brickwork } });
+      if (!settled.ok) {
+        return { ok: false, error: settled.error || 'Scene failed to compile after laying brickwork.' };
+      }
+      const latest = useStore.getState();
+      if (placement === 'replace' && latest.selectedNodeId && !findNodeInScene(outcome.nodes, latest.selectedNodeId)) {
+        latest.setSelectedNodeId(null);
       }
     }
     return {

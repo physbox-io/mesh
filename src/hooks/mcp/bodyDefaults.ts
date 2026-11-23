@@ -22,7 +22,7 @@ import {
   DEFAULT_UNIT as LATTICE_UNIT,
 } from '../../utils/latticeMesh';
 import { generatedMeshMass } from '../../utils/generatedMeshMass';
-import { pointList, toRenderVertices } from './bridgeUtils';
+import { isFiniteNumber, isFiniteVec3, isPlainObject, pointList, toRenderVertices } from './bridgeUtils';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 import { latticeBodyPos } from '../../utils/latticeFrame';
 import { sceneContentBounds } from '../../utils/frameScene';
@@ -51,24 +51,66 @@ export interface PendingDeclarativeOps {
 
 export const pendingDeclarativeOps = new Map<string, PendingDeclarativeOps>();
 
+/** Removes any queued declarative ops for `nodes` and all their descendants. */
+export function clearPendingDeclarativeOps(
+  nodes: SceneNode[],
+  opsMap: Map<string, PendingDeclarativeOps> = pendingDeclarativeOps,
+): void {
+  const walk = (list: SceneNode[] | undefined) => {
+    for (const n of list || []) {
+      opsMap.delete(n.id);
+      if (n.children?.length) walk(n.children);
+    }
+  };
+  walk(nodes);
+}
+
 export const normalizeRgba = (
-  rgba: number[] | undefined,
+  rgba: unknown,
   fallbackAlpha = 1,
 ): [number, number, number, number] | undefined => {
-  if (!Array.isArray(rgba) || rgba.length < 3) return undefined;
-  return [
-    Number(rgba[0]) || 0,
-    Number(rgba[1]) || 0,
-    Number(rgba[2]) || 0,
-    rgba[3] !== undefined ? Number(rgba[3]) : fallbackAlpha,
-  ];
+  if (!Array.isArray(rgba) || (rgba.length !== 3 && rgba.length !== 4)) return undefined;
+  for (let i = 0; i < rgba.length; i++) {
+    const v = rgba[i];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) return undefined;
+  }
+  const alpha = rgba.length === 4 ? (rgba[3] as number) : fallbackAlpha;
+  if (typeof alpha !== 'number' || !Number.isFinite(alpha) || alpha < 0 || alpha > 1) return undefined;
+  return [rgba[0] as number, rgba[1] as number, rgba[2] as number, alpha];
 };
 
+const PARAMETRIC_POSITIVE_DIM_KEYS = [
+  'radius', 'height', 'width', 'depth', 'majorRadius', 'minorRadius',
+  'tubeRadius', 'innerRadius', 'outerRadius', 'wallThickness',
+] as const;
+
+const PARAMETRIC_SEGMENT_KEYS = ['segments', 'radialSegments', 'tubularSegments'] as const;
+const MAX_PARAMETRIC_SEGMENTS = 512;
+
 export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
+  if (!isPlainObject(rawG)) {
+    throw new Error(`Geom ${idx} on body "${bodyName}" must be a plain object.`);
+  }
   // A null field is an unset one (utils/withoutNulls.ts).
   const g: RawGeom = withoutNulls({ ...rawG });
+  const geomName = g.name ?? `${bodyName}_geom_${idx}`;
+  if (g.rgba !== undefined && !normalizeRgba(g.rgba)) {
+    throw new Error(`Geom "${geomName}" on body "${bodyName}": rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1.`);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const gAny = g as Record<string, any>;
+  for (const key of PARAMETRIC_POSITIVE_DIM_KEYS) {
+    if (gAny[key] !== undefined && (!isFiniteNumber(gAny[key]) || gAny[key] <= 0)) {
+      throw new Error(`Geom "${geomName}" on body "${bodyName}": ${key} must be a positive finite number.`);
+    }
+  }
+  for (const key of PARAMETRIC_SEGMENT_KEYS) {
+    if (gAny[key] !== undefined && (!isFiniteNumber(gAny[key]) || !Number.isInteger(gAny[key]) || gAny[key] < 3 || gAny[key] > MAX_PARAMETRIC_SEGMENTS)) {
+      throw new Error(`Geom "${geomName}" on body "${bodyName}": ${key} must be an integer between 3 and ${MAX_PARAMETRIC_SEGMENTS}.`);
+    }
+  }
   // Refused, not repaired: a negative or text size used to compile as 0.1 m.
-  const sizeProblem = geomSizeProblem({ ...g, name: g.name ?? `${bodyName}_geom_${idx}` }, bodyName);
+  const sizeProblem = geomSizeProblem({ ...g, name: geomName }, bodyName);
   if (sizeProblem) throw new Error(sizeProblem);
   normalizeMeshGeomData(g);
   const isMesh = (g.type ?? 'box') === 'mesh';
@@ -82,7 +124,7 @@ export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, b
     // margin, gap, paint, thread and the dent and pierce fields were dropped
     // without a word, so a documented `density: 700` weighed as water.
     ...(g as SceneGeom),
-    name:    g.name    ?? `${bodyName}_geom_${idx}`,
+    name:    geomName,
     type:    g.type    ?? 'box',
     size:    g.size    ?? [0.25, 0.25, 0.25],
     rgba:    normalizeRgba(g.rgba) ?? [0.6, 0.6, 0.9, 1],
@@ -143,8 +185,11 @@ export function resolveUpdatedGeoms(
   let anyStructuralChange = false;
 
   for (let i = 0; i < rawGeoms.length; i++) {
+    if (!isPlainObject(rawGeoms[i])) {
+      return { ok: false, error: `Geom at index ${i} on object "${target.id}" must be a plain object.` };
+    }
     // A null in the patch removes that field from the geom it merges into.
-    const patch = (rawGeoms[i] ?? {}) as RawGeom;
+    const patch = rawGeoms[i] as RawGeom;
     const cleared = Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] === null);
     const g = withoutNulls(patch);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -187,9 +232,16 @@ export function resolveUpdatedGeoms(
 
       let resolved: SceneGeom;
       if (!changesType && !changesVertices && existing.type === 'mesh') {
-        const nextRgba = g.rgba !== undefined
-          ? normalizeRgba(g.rgba, existing.rgba?.[3] ?? 1)
-          : (bodyRgba ?? existing.rgba);
+        let nextRgba: [number, number, number, number] | number[] | undefined;
+        if (g.rgba !== undefined) {
+          const norm = normalizeRgba(g.rgba, existing.rgba?.[3] ?? 1);
+          if (!norm) {
+            return { ok: false, error: 'rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1' };
+          }
+          nextRgba = norm;
+        } else {
+          nextRgba = bodyRgba ?? existing.rgba;
+        }
         resolved = {
           ...existing,
           ...(g as Partial<SceneGeom>),
@@ -217,7 +269,11 @@ export function resolveUpdatedGeoms(
           delete base.paint;
         }
         if (g.rgba === undefined && bodyRgba !== undefined) base.rgba = bodyRgba;
-        resolved = fillGeomDefaults(base, bodyName, i, moves);
+        try {
+          resolved = fillGeomDefaults(base, bodyName, i, moves);
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
       }
       resolvedList.push(resolved);
       matchedMap.set(existing, resolved);
@@ -225,7 +281,11 @@ export function resolveUpdatedGeoms(
       allPartialPatches = false;
       const base: RawGeom = { ...g };
       if (base.rgba === undefined && bodyRgba !== undefined) base.rgba = bodyRgba;
-      resolvedList.push(fillGeomDefaults(base, bodyName, i, moves));
+      try {
+        resolvedList.push(fillGeomDefaults(base, bodyName, i, moves));
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
     }
   }
 
@@ -352,10 +412,31 @@ export function applyPendingTuneTo(nodes: SceneNode[]): SceneNode[] {
   return walk(nodes);
 }
 
-export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = null): SceneNode => {
-  const b = withoutNulls(rawB);
+export const fillBodyDefaults = (
+  rawB: RawNode,
+  parentMoves: boolean | null = null,
+  opsMap: Map<string, PendingDeclarativeOps> = pendingDeclarativeOps,
+): SceneNode => {
+  if (!isPlainObject(rawB)) {
+    throw new Error('Each body descriptor must be a plain object.');
+  }
+  const b = withoutNulls({ ...rawB });
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
+  const breakError = resolveBreakFields(b as Record<string, unknown>, undefined);
+  if (breakError) throw new Error(breakError);
+  if (b.rgba !== undefined && !normalizeRgba(b.rgba)) {
+    throw new Error(`Body '${name}': rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1.`);
+  }
+  if (b.geoms !== undefined && (!Array.isArray(b.geoms) || !b.geoms.every(isPlainObject))) {
+    throw new Error(`Body '${name}': geoms must be an array of plain objects.`);
+  }
+  if (b.joints !== undefined && (!Array.isArray(b.joints) || !b.joints.every(isPlainObject))) {
+    throw new Error(`Body '${name}': joints must be an array of plain objects.`);
+  }
+  if (b.children !== undefined && (!Array.isArray(b.children) || !b.children.every(isPlainObject))) {
+    throw new Error(`Body '${name}': children must be an array of plain objects.`);
+  }
   const nested = parentMoves !== null;
   // MuJoCo allows a free joint only on a top-level body; written inside another
   // one it fails the whole compile with a message that names neither body.
@@ -364,6 +445,20 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
   }
   // Curve (rigid curved track): generate convex box segments from the spline
   // params so agents can author curves declaratively without hand-placing geoms.
+  if (b.isCurve === true) {
+    if (b.curveSegments !== undefined && (!isFiniteNumber(b.curveSegments) || !Number.isInteger(b.curveSegments) || b.curveSegments < 1 || b.curveSegments > 500)) {
+      throw new Error(`Body '${name}': curveSegments must be an integer between 1 and 500.`);
+    }
+    if (b.curveWidth !== undefined && (!isFiniteNumber(b.curveWidth) || b.curveWidth <= 0)) {
+      throw new Error(`Body '${name}': curveWidth must be a positive finite number.`);
+    }
+    if (b.curveThickness !== undefined && (!isFiniteNumber(b.curveThickness) || b.curveThickness <= 0)) {
+      throw new Error(`Body '${name}': curveThickness must be a positive finite number.`);
+    }
+    if (b.curveBank !== undefined && !isFiniteNumber(b.curveBank)) {
+      throw new Error(`Body '${name}': curveBank must be a finite number.`);
+    }
+  }
   const curveGeoms = (b.isCurve === true && b.geoms === undefined)
     ? generateCurveGeoms(
         id,
@@ -371,7 +466,7 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
         b.curveWidth ?? DEFAULT_CURVE_WIDTH,
         b.curveThickness ?? DEFAULT_CURVE_THICKNESS,
         b.curveSegments ?? DEFAULT_CURVE_SEGMENTS,
-        b.rgba ?? [0.85, 0.45, 0.15, 1],
+        normalizeRgba(b.rgba) ?? [0.85, 0.45, 0.15, 1],
         b.curveClosed === true,
         b.curveBank ?? 0
       )
@@ -409,7 +504,19 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
   } | undefined;
   let latticeFields: Partial<SceneNode> | null = null;
   let latticeGeoms: RawGeom[] | null = null;
+  if ((b as Record<string, unknown>).lattice !== undefined && !isPlainObject((b as Record<string, unknown>).lattice)) {
+    throw new Error(`Body '${name}': lattice must be a plain object.`);
+  }
   if (latSpec && typeof latSpec === 'object') {
+    if (latSpec.sizeMm !== undefined && (!isFiniteNumber(latSpec.sizeMm) || latSpec.sizeMm < 0 || latSpec.sizeMm > 10_000)) {
+      throw new Error(`Body '${name}': lattice.sizeMm must be a finite number between 0 and 10000.`);
+    }
+    if (latSpec.subdiv !== undefined && (!isFiniteNumber(latSpec.subdiv) || !Number.isInteger(latSpec.subdiv) || latSpec.subdiv < 0 || latSpec.subdiv > 4)) {
+      throw new Error(`Body '${name}': lattice.subdiv must be an integer between 0 and 4.`);
+    }
+    if (latSpec.thicknessMm !== undefined && (!isFiniteNumber(latSpec.thicknessMm) || latSpec.thicknessMm < 0)) {
+      throw new Error(`Body '${name}': lattice.thicknessMm must be a non-negative finite number.`);
+    }
     const firstOp = Array.isArray(latSpec.ops) && latSpec.ops.length > 0
       ? String(latSpec.ops[0]?.op ?? latSpec.ops[0]?.type ?? '').toLowerCase()
       : '';
@@ -437,7 +544,7 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
       name: `${id}_mesh`,
       type: 'mesh',
       size: [1],
-      rgba: b.rgba ?? [0.55, 0.68, 0.85, 1],
+      rgba: normalizeRgba(b.rgba) ?? [0.55, 0.68, 0.85, 1],
       ...generatedMeshMass(b as { mass?: unknown; density?: unknown }),
       condim: 3,
       dynamic: true,
@@ -465,7 +572,13 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
   } | undefined;
   let sculptFields: Partial<SceneNode> | null = null;
   let sculptGeoms: RawGeom[] | null = null;
+  if ((b as Record<string, unknown>).sculpt !== undefined && !isPlainObject((b as Record<string, unknown>).sculpt)) {
+    throw new Error(`Body '${name}': sculpt must be a plain object.`);
+  }
   if (sculptSpec && typeof sculptSpec === 'object') {
+    if (sculptSpec.sizeMm !== undefined && (!isFiniteNumber(sculptSpec.sizeMm) || sculptSpec.sizeMm <= 0 || sculptSpec.sizeMm > 10_000)) {
+      throw new Error(`Body '${name}': sculpt.sizeMm must be a positive finite number up to 10000.`);
+    }
     const baseId = (sculptSpec.base ?? b.sculptBase ?? 'sphere') as SculptBaseId;
     if (!SCULPT_BASES.some((sb) => sb.id === baseId)) {
       throw new Error(`Unknown sculpt base '${baseId}'. Available: ${SCULPT_BASES.map((sb) => sb.id).join(', ')}`);
@@ -477,8 +590,8 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
       for (const s of sculptSpec.strokes) {
         if (!s || typeof s !== 'object') continue;
         const pts = pointList(s.at);
-        if (!pts.length || pts.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
-          throw new Error("sculpt stroke 'at' must be [x, y, z] or a list of them, in the body's own frame (metres)");
+        if (!pts.length || pts.some((p: unknown) => !isFiniteVec3(p))) {
+          throw new Error("sculpt stroke 'at' must be [x, y, z] or a list of them, with finite numbers in the body's own frame (metres)");
         }
         applySculptStroke(mesh, {
           brush: s.brush,
@@ -510,7 +623,7 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
       name: `${id}_sculpt`,
       type: 'mesh',
       size: [0.12, 0.12, 0.12],
-      rgba: b.rgba ?? [0.82, 0.72, 0.62, 1],
+      rgba: normalizeRgba(b.rgba) ?? [0.82, 0.72, 0.62, 1],
       ...generatedMeshMass(b as { mass?: unknown; density?: unknown }),
       condim: 3,
       dynamic: true,
@@ -544,15 +657,16 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
     ? sculptSpec!.cuts
     : undefined;
 
-  if (rawCuts || normRoundEdges || rawPatterns || rawPaint || rawSculptCuts) {
-    pendingDeclarativeOps.set(id, {
-      ...(rawSculptCuts ? { sculptCuts: rawSculptCuts } : {}),
-      ...(rawCuts ? { cuts: rawCuts } : {}),
-      ...(normRoundEdges ? { roundEdges: normRoundEdges } : {}),
-      ...(rawPatterns ? { patterns: rawPatterns } : {}),
-      ...(rawPaint ? { paint: rawPaint } : {}),
-    });
-  }
+  const declarativeOps: PendingDeclarativeOps | null =
+    (rawCuts || normRoundEdges || rawPatterns || rawPaint || rawSculptCuts)
+      ? {
+          ...(rawSculptCuts ? { sculptCuts: rawSculptCuts } : {}),
+          ...(rawCuts ? { cuts: rawCuts } : {}),
+          ...(normRoundEdges ? { roundEdges: normRoundEdges } : {}),
+          ...(rawPatterns ? { patterns: rawPatterns } : {}),
+          ...(rawPaint ? { paint: rawPaint } : {}),
+        }
+      : null;
 
   const bodyRgba = normalizeRgba(b.rgba);
 
@@ -656,6 +770,16 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
     ),
   );
 
+  const builtChildren: SceneNode[] = [];
+  try {
+    for (const c of b.children ?? []) {
+      builtChildren.push(fillBodyDefaults(c, moves, opsMap));
+    }
+  } catch (err) {
+    clearPendingDeclarativeOps(builtChildren, opsMap);
+    throw err;
+  }
+
   const node: SceneNode = {
     ...(rest as SceneNode),
     ...(generated ? { bodyForm: clampBodyForm((b as { bodyForm: Partial<BodyFormMeasurements> }).bodyForm) } : {}),
@@ -677,7 +801,7 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
     ...(b.euler !== undefined ? { euler: b.euler } : {}),
     geoms:    resolvedGeoms,
     joints:   resolvedJoints,
-    children: (b.children ?? []).map((c) => fillBodyDefaults(c, moves)),
+    children: builtChildren,
     ...(b.coupleTargetId  !== undefined ? { coupleTargetId: b.coupleTargetId }   : {}),
     ...(b.coupleRatio     !== undefined ? { coupleRatio: b.coupleRatio }         : {}),
     ...(b.weldTargetId    !== undefined ? { weldTargetId: b.weldTargetId }       : {}),
@@ -736,13 +860,19 @@ export const fillBodyDefaults = (rawB: RawNode, parentMoves: boolean | null = nu
   }
   // Acoustic specs are filled and checked, then `tuneTo` (transient: it is a
   // request, not a field; tunedPitchHz records what it did) is applied.
-  normalizeAcousticFields(node);
-  let out = node;
-  if (bAny.tuneTo !== undefined) {
-    const spec = parseTuneTo(bAny.tuneTo, bAny.drillNodalHole);
-    out = applyTuneTo(node, spec);
-    if (node.acousticString || node.acousticMembrane) retuneWithScene.set(out, spec);
+  try {
+    normalizeAcousticFields(node);
+    let out = node;
+    if (bAny.tuneTo !== undefined) {
+      const spec = parseTuneTo(bAny.tuneTo, bAny.drillNodalHole);
+      out = applyTuneTo(node, spec);
+      if (node.acousticString || node.acousticMembrane) retuneWithScene.set(out, spec);
+    }
+    checkIncomingBody(out, resolvedJoints.length > 0);
+    if (declarativeOps) opsMap.set(id, declarativeOps);
+    return out;
+  } catch (err) {
+    clearPendingDeclarativeOps(builtChildren, opsMap);
+    throw err;
   }
-  checkIncomingBody(out, resolvedJoints.length > 0);
-  return out;
 };

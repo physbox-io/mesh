@@ -16,11 +16,17 @@ import { findNodeInScene } from './bridgeUtils';
 import type { McpCommands } from './types';
 
 export const sectionCommands: McpCommands = {
-  SECTION: async (msg, { store }) => {
+  SECTION: async (msg, { store, toId }) => {
+    if (msg.axis !== undefined && typeof msg.axis !== 'string') {
+      return { ok: false, error: "axis is 'x', 'y' or 'z': the world axis the cut is square to." };
+    }
     const axis = (typeof msg.axis === 'string' ? msg.axis.toLowerCase() : 'z') as SectionAxis;
     if (!['x', 'y', 'z'].includes(axis)) return { ok: false, error: "axis is 'x', 'y' or 'z': the world axis the cut is square to." };
     if (msg.atMm !== undefined && !(typeof msg.atMm === 'number' && Number.isFinite(msg.atMm))) return { ok: false, error: 'at_mm is a distance along the axis, scene mm.' };
-    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, id), 'cut');
+    if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
+      return { ok: false, error: 'bodyId must be a body id or name string.' };
+    }
+    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string), 'cut', 'body_id');
     if ('error' in subject) return { ok: false, error: subject.error };
     const options = { axis, ...(typeof msg.atMm === 'number' ? { atMm: msg.atMm } : {}) };
     let result: SectionResult;
@@ -31,7 +37,7 @@ export const sectionCommands: McpCommands = {
         try { result = await client.run('section', subject.scene, options); } finally { client.dispose(); }
       }
     } catch (e) {
-      return { ok: false, error: (e as Error).message };
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
     const outside = result.atMm < result.spanMm[0] || result.atMm > result.spanMm[1];
     return {

@@ -10,7 +10,7 @@ import { useStore } from '../store/useStore';
 import { createMeshMachineHandlers, setCurrentScene } from '../utils/machineMcp';
 import type { SceneNode } from '../types/scene';
 import { findNodeInScene } from './mcp/bridgeUtils';
-import { encodeReply } from './mcp/replySize';
+import { encodeError, encodeReply } from './mcp/replySize';
 import type { McpCommands } from './mcp/types';
 import { sculptCommands } from './mcp/sculptCommands';
 import { latticeCommands } from './mcp/latticeCommands';
@@ -36,16 +36,67 @@ export {
 } from './mcp/bodyFeatures';
 
 /*
- * Commands that change a sculpt's clay run one after another, in the order
- * they arrived. Each reads the mesh, works on it (a cut or a carve in a
- * worker, for a while), and writes it back; two at once read the same mesh,
- * and the second to finish found the body changed under it and was refused
- * ("The body changed while it was being cut"), so an agent sending a face's
- * features together lost half of them. One queue for all bodies, not one per
- * body: a body named one way and id'd another would otherwise get two.
+ * Read-only and non-body control commands never modify sceneGraph.nodes: they
+ * must never be falsely failed by a concurrent castPrepBlocked increment, nor
+ * blocked behind a slow scene mutation.
  */
-const SERIAL_SCULPT_COMMANDS = new Set(['SCULPT', 'SCULPT_CUT', 'SCULPT_CARVE', 'UNDO_SCULPT', 'RESIZE_SCULPT', 'SET_SCULPT_BASE']);
-let sculptQueue: Promise<unknown> = Promise.resolve();
+export function isReadOnlyCommand(cmd: string): boolean {
+  return (
+    cmd.startsWith('GET_') ||
+    cmd.startsWith('LIST_') ||
+    cmd.startsWith('CHECK_') ||
+    cmd.startsWith('EXPORT_') ||
+    cmd === 'SCREENSHOT' ||
+    cmd === 'MEASURE' ||
+    cmd === 'SECTION' ||
+    cmd === 'VALIDATE_SCAD' ||
+    cmd === 'PROBE_SCULPT' ||
+    cmd === 'RUN_HEADLESS'
+  );
+}
+
+const NON_BODY_CONTROL_COMMANDS = new Set([
+  'PLAY', 'STOP', 'TOGGLE_PLAY', 'SET_CAMERA', 'SET_VIEW', 'RESET_CAMERA', 'SET_DISPLAY',
+]);
+
+/*
+ * Commands that mutate scene bodies (sculpts, lattices, creates, edits, cuts,
+ * imports, scene swaps) run one after another in arrival order. Two concurrent
+ * mutations otherwise race on sceneGraph snapshots, waitForNewNode, and the
+ * global castPrepBlocked guard counter.
+ */
+export function shouldSerializeCommand(cmd: string): boolean {
+  return !isReadOnlyCommand(cmd) && !NON_BODY_CONTROL_COMMANDS.has(cmd);
+}
+
+let mutationQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Guard one command against the Cast-prep edit refusal without letting
+ * unrelated read-only commands fail when another edit increments castPrepBlocked.
+ */
+export async function runGuardedCommand(
+  cmd: string,
+  run: () => Promise<unknown>,
+  isMachineCmd = false,
+): Promise<unknown> {
+  if (isMachineCmd || !shouldSerializeCommand(cmd)) {
+    return run();
+  }
+  const queued = mutationQueue.then(async () => {
+    const blockedBefore = useStore.getState().castPrepBlocked;
+    const data = await run();
+    if (useStore.getState().castPrepBlocked === blockedBefore) return data;
+    useStore.getState().closeCastPrepGuard();
+    return {
+      ok: false,
+      error: 'The scene is prepared for casting with draft baked in, so that edit was not made. '
+        + 'Call physics_set_cast_prep with off=true to restore the original shapes, or bake=true to keep the drafted ones, then retry.',
+    };
+  });
+  mutationQueue = queued.catch(() => undefined);
+  return queued;
+}
 
 /** How often a running command tells the hub it is still at work (the hub gives up after 10 s without word). */
 const WORKING_EVERY_MS = 2000;
@@ -86,9 +137,16 @@ export function useMCPBridge() {
       if (dead) return;
       const params = new URLSearchParams(location.search);
       const wsPort = params.get('mcpPort') || '3142';
-      ws = new WebSocket(`ws://localhost:${wsPort}`);
+      const socket = new WebSocket(`ws://localhost:${wsPort}`);
+      ws = socket;
 
-      ws.onopen = () =>
+      const safeSend = (payload: string) => {
+        if (!dead && socket.readyState === WebSocket.OPEN) {
+          socket.send(payload);
+        }
+      };
+
+      socket.onopen = () =>
         /*
          * The handshake also offers this tab's API token, if it has one, as a
          * fallback credential for the MCP server's cloud tools: the ones that
@@ -99,7 +157,7 @@ export function useMCPBridge() {
          * why the session token is never sent. It is localhost only, and the
          * server binds loopback.
          */
-        ws!.send(JSON.stringify({
+        safeSend(JSON.stringify({
           event: 'HELLO',
           app: 'physics',
           port: location.port,
@@ -115,7 +173,7 @@ export function useMCPBridge() {
           ...tabIdentity(),
         }));
 
-      ws.onmessage = (evt) => {
+      socket.onmessage = (evt) => {
         let msg: Record<string, unknown>;
         try { msg = JSON.parse(evt.data); } catch { return; }
         if (!msg || typeof msg !== 'object') return;
@@ -140,7 +198,7 @@ export function useMCPBridge() {
         try {
           result = guardedHandle(cmd, msg);
         } catch (e) {
-          ws?.send(JSON.stringify({ event: 'ERROR', cmd, id, error: String(e) }));
+          safeSend(encodeError(cmd, id, e));
           done();
           return;
         }
@@ -148,16 +206,19 @@ export function useMCPBridge() {
         // command (a scene of cloth loading, an export) is not reported as
         // timed out while it runs, and a tab that has died still is, quickly.
         const working = result instanceof Promise
-          ? setInterval(() => ws?.send(JSON.stringify({ event: 'WORKING', cmd, id })), WORKING_EVERY_MS)
+          ? setInterval(() => safeSend(JSON.stringify({ event: 'WORKING', cmd, id })), WORKING_EVERY_MS)
           : undefined;
         Promise.resolve(result)
-          .then(data => ws?.send(encodeReply(cmd, id, data)))
-          .catch(e  => ws?.send(JSON.stringify({ event: 'ERROR', cmd, id, error: String(e) })))
+          .then(data => safeSend(encodeReply(cmd, id, data)))
+          .catch(e  => safeSend(encodeError(cmd, id, e)))
           .finally(() => { clearInterval(working); done(); });
       };
 
-      ws.onclose = () => { if (!dead) retryTimer = setTimeout(connect, 2000); };
-      ws.onerror = () => ws?.close();
+      socket.onclose = () => {
+        if (ws === socket) ws = null;
+        if (!dead) retryTimer = setTimeout(connect, 2000);
+      };
+      socket.onerror = () => socket.close();
     };
 
     /*
@@ -179,26 +240,8 @@ export function useMCPBridge() {
      * get past it. The guard's modal is for a person; an agent has its answer,
      * so the modal is closed again.
      */
-    const guardedHandle = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
-      if (SERIAL_SCULPT_COMMANDS.has(cmd)) {
-        const run = sculptQueue.then(() => guardedNow(cmd, msg));
-        sculptQueue = run.catch(() => undefined);
-        return run;
-      }
-      return guardedNow(cmd, msg);
-    };
-
-    const guardedNow = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
-      const blockedBefore = useStore.getState().castPrepBlocked;
-      const data = await handle(cmd, msg);
-      if (useStore.getState().castPrepBlocked === blockedBefore) return data;
-      useStore.getState().closeCastPrepGuard();
-      return {
-        ok: false,
-        error: 'The scene is prepared for casting with draft baked in, so that edit was not made. '
-          + 'Call physics_set_cast_prep with off=true to restore the original shapes, or bake=true to keep the drafted ones, then retry.',
-      };
-    };
+    const guardedHandle = (cmd: string, msg: Record<string, unknown>): Promise<unknown> =>
+      runGuardedCommand(cmd, () => handle(cmd, msg), Object.hasOwn(machineHandlers, cmd));
 
     const handle = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
       // Access Zustand store directly — works outside React render

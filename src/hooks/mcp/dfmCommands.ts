@@ -21,9 +21,10 @@ const PROCESSES: Record<string, DfmProcess> = { print: 'print', fdm: 'print', cn
 const mm = (v: number) => Math.round(v * 10000) / 10;
 
 export const dfmCommands: McpCommands = {
-  CHECK_DFM: async (msg, { store, toId }) => {
+  CHECK_DFM: async (msg, { toId }) => {
     const state = useStore.getState();
-    const asked = typeof msg.process === 'string' ? PROCESSES[msg.process] : undefined;
+    const rawProcess = typeof msg.process === 'string' ? msg.process.toLowerCase() : undefined;
+    const asked = rawProcess !== undefined && Object.hasOwn(PROCESSES, rawProcess) ? PROCESSES[rawProcess] : undefined;
     if (msg.process !== undefined && !asked) return { ok: false, error: "process is 'print', 'cnc' or 'cast'." };
     // Default: what the bench is set up for, as the panel's lens follows it.
     const process: DfmProcess = asked ?? (state.machineTarget === 'fdm' ? 'print' : 'cnc');
@@ -31,7 +32,10 @@ export const dfmCommands: McpCommands = {
     if (msg.castMaterial !== undefined && !castMaterial) {
       return { ok: false, error: `cast_material is one of ${CAST_MATERIALS.map((m) => m.id).join(', ')}.` };
     }
-    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string), 'check');
+    if (msg.masterId !== undefined && msg.masterId !== null && typeof msg.masterId !== 'string') {
+      return { ok: false, error: 'master_id must be a body id or name string.' };
+    }
+    const subject = mcpMoldSubject(state.sceneGraph, msg.masterId, (id) => findNodeInScene(state.sceneGraph.nodes, toId(id) as string), 'check');
     if ('error' in subject) return { ok: false, error: subject.error };
     const report = await dfmReportFor(subject.scene, process, {
       material: state.material,

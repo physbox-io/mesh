@@ -33,49 +33,43 @@ export const sculptCommands: McpCommands = {
   */
   CREATE_SCULPT: async (msg, { store }) => {
     const { name, base, pos, sizeMm } = msg as Msg<{ name?: string; base?: SculptBaseId; sizeMm?: number }>;
-    if (sizeMm !== undefined && !(typeof sizeMm === 'number' && Number.isFinite(sizeMm) && sizeMm > 0)) {
-      throw new Error('sizeMm must be a positive number of millimetres');
+    const minMm = MIN_SCULPT_SIZE * 1000;
+    const maxMm = MAX_SCULPT_SIZE * 1000;
+    if (sizeMm !== undefined && !(typeof sizeMm === 'number' && Number.isFinite(sizeMm) && sizeMm >= minMm && sizeMm <= maxMm)) {
+      throw new Error(`sizeMm must be between ${minMm} and ${maxMm} millimetres`);
     }
     const parent = resolveParent(store.sceneGraph.nodes, msg.parent);
-    const given = Array.isArray(pos) && pos.length === 3;
-    if (given && pos.some((v: unknown) => typeof v !== 'number' || !Number.isFinite(v))) {
-      throw new Error('pos must be [x, y, z] finite numbers in metres');
+    const given = pos !== undefined;
+    if (given) {
+      if (!Array.isArray(pos) || pos.length !== 3 || pos.some((v: unknown) => typeof v !== 'number' || !Number.isFinite(v))) {
+        throw new Error('pos must be [x, y, z] finite numbers in metres');
+      }
     }
     // With no pos, it stands on the floor at the middle of the view, as the
     // palette places one. The old default, 0.3 m up, was above the default
     // view: all a caller saw of the new body was its shadow.
-    const position = given ? pos : [0, 0, 0];
+    const position = given ? (pos as number[]) : [0, 0, 0];
     if (base !== undefined && !SCULPT_BASES.some(b => b.id === base)) {
       throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
     }
-    /*
-      addComponent picks its own id and finishes with a DEBOUNCED, async
-      recompile, so the store still holds the old scene when it returns —
-      reading the node list straight afterwards gives you the scene as it
-      was.
-
-      Taking "the last node" was that bug: it returned whatever the scene
-      already ended with, and the rename below then renamed the user's
-      existing body. So: remember every id, ask for the
-      component, and wait for the one that appears.
-    */
     const before = collectNodeIds(store.sceneGraph.nodes);
     // Under the `parent` asked for, or at the top level - never under
     // whatever happens to be selected. addComponent takes a world
     // position, and `pos` here is relative to the parent, as everywhere
     // else in the scene graph.
     const parentWorld = parent ? getNodeWorldPos(store.sceneGraph.nodes, parent.id) ?? [0, 0, 0] : [0, 0, 0];
-    store.addComponent('sculpt', position.map((v: number, i: number) => v + parentWorld[i]), parent?.id ?? null, { exact: true });
+    const addedId = store.addComponent('sculpt', position.map((v: number, i: number) => v + parentWorld[i]), parent?.id ?? null, { exact: true });
 
-    const created = await waitForNewNode(before, 10000);
+    const created = (typeof addedId === 'string' ? findNodeInScene(useStore.getState().sceneGraph.nodes, addedId) : null)
+      ?? await waitForNewNode(before, 10000);
     if (!created) throw new Error('The sculpt body was not created (timed out waiting for the scene to settle)');
 
     // Nested, it is fixed rigidly to its parent, like any body added
     // under one over MCP; the editor's own adds give a child a hinge.
-    if (parent) store.updateNodeJointsList(created.id, []);
-    if (base && base !== created.sculptBase) store.setSculptBase(created.id, base);
+    if (parent) useStore.getState().updateNodeJointsList(created.id, []);
+    if (base && base !== created.sculptBase) useStore.getState().setSculptBase(created.id, base);
     if (sizeMm !== undefined) useStore.getState().resizeSculpt(created.id, sizeMm / 1000);
-    if (typeof name === 'string' && name.trim()) store.renameNode(created.id, name.trim());
+    if (typeof name === 'string' && name.trim()) useStore.getState().renameNode(created.id, name.trim());
     // Placed once base and size are known, since both change its bounds.
     if (!given && !parent) {
       const nodes = useStore.getState().sceneGraph.nodes;
@@ -121,12 +115,15 @@ export const sculptCommands: McpCommands = {
     if (!node) throw new Error(`No object with id '${targetId}'`);
     if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
     const limits = [MIN_SCULPT_SIZE * 1000, MAX_SCULPT_SIZE * 1000];
-    const valid = (v: unknown) => typeof v === 'number' && v >= limits[0] && v <= limits[1];
+    const valid = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= limits[0] && v <= limits[1];
     // A number is the longest side; [width, depth, height] sizes each
     // axis, a null keeping that one as it is.
     if (Array.isArray(sizeMm)) {
       if (sizeMm.length !== 3 || sizeMm.some((v) => v !== null && !valid(v))) {
         throw new Error(`sizeMm as a list is [width, depth, height] in mm, each ${limits[0]} to ${limits[1]} or null`);
+      }
+      if (sizeMm.every((v) => v === null)) {
+        throw new Error('sizeMm must specify at least one axis (cannot be [null, null, null])');
       }
       store.resizeSculpt(targetId, sizeMm.map((v) => (v === null ? null : v / 1000)));
     } else {
@@ -155,21 +152,27 @@ export const sculptCommands: McpCommands = {
       }>;
     const { node, geomIndex } = sculptTarget(store, targetId);
 
-    const strokeList = Array.isArray(strokes) && strokes.length > 0
+    if (strokes !== undefined) {
+      if (!Array.isArray(strokes) || strokes.length === 0) {
+        throw new Error('strokes must be a non-empty array of stroke objects');
+      }
+    }
+    const strokeList = strokes !== undefined
       ? strokes
       : [{ brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness }];
-
-    const mesh = sculptMeshOf(node, geomIndex);
-    let lastResult: ReturnType<typeof applySculptStroke> | null = null;
-    const perStroke: { brush?: string; applied: number; missed: number; moved: number; topologyChanged?: boolean }[] = [];
 
     const isFiniteVec3 = (p: unknown): p is number[] =>
       Array.isArray(p) && p.length >= 3 &&
       typeof p[0] === 'number' && typeof p[1] === 'number' && typeof p[2] === 'number' &&
       Number.isFinite(p[0] + p[1] + p[2]);
 
+    // Validate ALL strokes upfront before mutating mesh or sculptHistory.
+    const validatedStrokes: { spec: Record<string, unknown>; points: number[][] }[] = [];
     for (const s of strokeList) {
-      if (s.brush !== undefined && !BRUSH_TYPES.includes(s.brush)) {
+      if (!s || typeof s !== 'object' || Array.isArray(s)) {
+        throw new Error('Each stroke must be an object');
+      }
+      if (s.brush !== undefined && (typeof s.brush !== 'string' || !BRUSH_TYPES.includes(s.brush as BrushType))) {
         throw new Error(`Unknown brush '${s.brush}'. Available: ${BRUSH_TYPES.join(', ')}`);
       }
       const points: number[][] = pointList(s.at);
@@ -182,8 +185,8 @@ export const sculptCommands: McpCommands = {
       if (s.radius !== undefined && !(typeof s.radius === 'number' && Number.isFinite(s.radius) && s.radius > 0)) {
         throw new Error('radius must be a positive number in metres');
       }
-      if (s.strength !== undefined && !(typeof s.strength === 'number' && Number.isFinite(s.strength))) {
-        throw new Error('strength must be a finite number');
+      if (s.strength !== undefined && !(typeof s.strength === 'number' && Number.isFinite(s.strength) && s.strength >= 0 && s.strength <= 1)) {
+        throw new Error('strength must be a finite number between 0 and 1');
       }
       if (s.detail !== undefined && !(typeof s.detail === 'number' && Number.isFinite(s.detail) && s.detail > 0)) {
         throw new Error('detail must be a positive number');
@@ -191,38 +194,45 @@ export const sculptCommands: McpCommands = {
       if (s.depthMm !== undefined && !(typeof s.depthMm === 'number' && Number.isFinite(s.depthMm) && s.depthMm >= 0)) {
         throw new Error('depthMm must be a non-negative number of millimetres');
       }
-      if (s.hardness !== undefined && !(typeof s.hardness === 'number' && Number.isFinite(s.hardness))) {
+      if (s.hardness !== undefined && !(typeof s.hardness === 'number' && Number.isFinite(s.hardness) && s.hardness >= 0 && s.hardness <= 1)) {
         throw new Error('hardness must be a finite number between 0 and 1');
       }
+      if (s.symmetry !== undefined && s.symmetry !== 'x' && s.symmetry !== 'y' && s.symmetry !== 'z') {
+        throw new Error("symmetry must be 'x', 'y' or 'z'");
+      }
+      validatedStrokes.push({ spec: s, points });
+    }
+
+    const mesh = sculptMeshOf(node, geomIndex);
+    let lastResult: ReturnType<typeof applySculptStroke> | null = null;
+    const perStroke: { brush?: string; applied: number; missed: number; moved: number; topologyChanged?: boolean }[] = [];
+    const pendingUndos: SculptUndoEntry[] = [];
+
+    for (const { spec: s, points } of validatedStrokes) {
       const sink: { undo?: SculptUndoEntry | null } = {};
       lastResult = applySculptStroke(mesh, {
-        brush: s.brush,
+        brush: s.brush as BrushType | undefined,
         at: points,
-        radius: s.radius,
-        strength: s.strength,
-        invert: s.invert,
-        symmetryX: s.symmetryX,
-        symmetry: s.symmetry,
-        detail: s.detail,
-        dynamicTopology: s.dynamicTopology,
-        delta: s.delta,
-        depthMm: s.depthMm,
-        hardness: s.hardness,
+        radius: s.radius as number | undefined,
+        strength: s.strength as number | undefined,
+        invert: s.invert as boolean | undefined,
+        symmetryX: s.symmetryX as boolean | undefined,
+        symmetry: s.symmetry as 'x' | 'y' | 'z' | undefined,
+        detail: s.detail as number | undefined,
+        dynamicTopology: s.dynamicTopology as boolean | undefined,
+        delta: s.delta as number[] | undefined,
+        depthMm: s.depthMm as number | undefined,
+        hardness: s.hardness as number | undefined,
       }, sink);
       perStroke.push({
-        brush: s.brush ?? 'draw',
+        brush: (s.brush as string | undefined) ?? 'draw',
         applied: Number(lastResult.applied ?? 0),
         missed: Array.isArray(lastResult.missed) ? lastResult.missed.length : 0,
         moved: lastResult.moved ?? 0,
         ...(lastResult.topologyChanged ? { topologyChanged: true } : {}),
       });
 
-      if (sink.undo) {
-        const stack = sculptHistory.get(targetId) ?? [];
-        stack.push(sink.undo);
-        while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
-        sculptHistory.set(targetId, stack);
-      }
+      if (sink.undo) pendingUndos.push(sink.undo);
     }
 
     /*
@@ -237,17 +247,25 @@ export const sculptCommands: McpCommands = {
     const { vertices, renderVertices, faces } = toSceneGeom(mesh);
     store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
-    const error = useStore.getState().lastCompileError;
+    if (pendingUndos.length > 0) {
+      const stack = sculptHistory.get(targetId) ?? [];
+      for (const entry of pendingUndos) {
+        stack.push(entry);
+        while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
+      }
+      sculptHistory.set(targetId, stack);
+    }
+
     // A batch reports each stroke and their totals. It used to spread the
     // LAST stroke's applied/missed/moved over the whole reply beside a
     // total of its own, and the two never agreed.
-    const batch = strokeList.length > 1;
+    const batch = validatedStrokes.length > 1;
     const { applied: _a, missed: _m, moved: _v, maxDisplacement: _d, topologyChanged: _t, ...meshFields } = lastResult ?? ({} as Partial<ReturnType<typeof applySculptStroke>>);
     return {
-      ok: !error, ...(error ? { error } : {}), id: targetId,
+      ok: true, id: targetId,
       ...(batch ? meshFields : lastResult ?? {}),
       ...(batch ? {
-        strokesApplied: strokeList.length,
+        strokesApplied: validatedStrokes.length,
         dabsApplied: perStroke.reduce((n, r) => n + r.applied, 0),
         pointsMissed: perStroke.reduce((n, r) => n + r.missed, 0),
         strokes: perStroke,
@@ -295,8 +313,8 @@ export const sculptCommands: McpCommands = {
     if (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !isFiniteVec3(p))) {
       throw new Error("polygon must be three or more [x, y, z] points, in the body's own frame (metres)");
     }
-    if (direction !== undefined && !isFiniteVec3(direction)) {
-      throw new Error('direction must be [x, y, z]');
+    if (direction !== undefined && (!isFiniteVec3(direction) || Math.hypot(direction[0], direction[1], direction[2]) <= 1e-12)) {
+      throw new Error('direction must be a non-zero [x, y, z] vector');
     }
     if (mode !== undefined && mode !== 'remove' && mode !== 'keep') {
       throw new Error("mode must be 'remove' (take the prism out) or 'keep' (keep only the prism)");

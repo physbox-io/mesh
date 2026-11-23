@@ -90,8 +90,13 @@ export async function applySculptCutResult(
   // its convex pieces as geoms, so the old index and the old object both
   // refused the next carve while the clay itself was untouched.
   const live = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
-  const liveIndex = live?.geoms?.findIndex((g) => g.name === geomBefore?.name) ?? -1;
-  if (!live || liveIndex < 0 || !sameMesh(live.geoms[liveIndex], geomBefore)) {
+  const byName = geomBefore?.name
+    ? (live?.geoms?.findIndex((g) => g.name === geomBefore.name && sameMesh(g, geomBefore)) ?? -1)
+    : -1;
+  const liveIndex = byName >= 0
+    ? byName
+    : (live?.geoms?.[geomIndex] && sameMesh(live.geoms[geomIndex], geomBefore) ? geomIndex : -1);
+  if (!live || liveIndex < 0) {
     return { ok: false, id: targetId, error: 'The body changed while it was being cut; nothing was applied.' };
   }
   geomIndex = liveIndex;
@@ -110,12 +115,11 @@ export async function applySculptCutResult(
       undoDepth: (sculptHistory.get(targetId) ?? []).length,
     };
   }
-  if (pieces.length > 1) {
+  if (!opts.add && pieces.length > 1) {
     const bodies = useStore.getState().separateSculpt(targetId, pieces, geomBefore?.name);
     sculptHistory.delete(targetId);
-    const error = useStore.getState().lastCompileError;
     return {
-      ok: !error, ...(error ? { error } : {}), id: targetId,
+      ok: true, id: targetId,
       facesBefore: result.facesBefore, facesAfter: pieces[0].faceCount,
       pieces: pieces.length, bodies,
       ...sculptSummary(pieces[0]),
@@ -135,9 +139,8 @@ export async function applySculptCutResult(
   const { vertices, renderVertices, faces } = toSceneGeom(result.mesh);
   latest.updateNodeGeom(targetId, { vertices, renderVertices, faces, paint: undefined }, geomIndex);
 
-  const error = useStore.getState().lastCompileError;
   return {
-    ok: !error, ...(error ? { error } : {}), id: targetId,
+    ok: true, id: targetId,
     facesBefore: result.facesBefore, facesAfter: result.facesAfter, pieces: result.pieces,
     ...sculptSummary(result.mesh),
     undoDepth: stack.length,

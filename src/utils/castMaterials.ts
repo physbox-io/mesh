@@ -238,7 +238,7 @@ const BY_ID = new Map(CAST_MATERIALS.map((m) => [m.id, m]));
 /** The id a name stands for, aliases included, or null. */
 export function resolveCastMaterial(value: unknown): CastMaterialId | null {
   if (typeof value !== 'string') return null;
-  const id = ALIASES[value] ?? value;
+  const id = Object.hasOwn(ALIASES, value) ? ALIASES[value] : value;
   return BY_ID.has(id as CastMaterialId) ? (id as CastMaterialId) : null;
 }
 

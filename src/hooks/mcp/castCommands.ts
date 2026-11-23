@@ -35,6 +35,22 @@ function exportFileBase(store: { sceneGraph: { name?: string; nodes: SceneNode[]
   return store.sceneGraph.name || only || preset || 'model';
 }
 
+function checkPos(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+    return { ok: false, error: `${name} must be a positive finite number.` };
+  }
+  return { ok: true, value: v };
+}
+
+function checkNonNeg(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+    return { ok: false, error: `${name} must be a non-negative finite number.` };
+  }
+  return { ok: true, value: v };
+}
+
 export const castCommands: McpCommands = {
     /*
      * A printed pour box for a silicone mold of the given bodies (default:
@@ -42,18 +58,39 @@ export const castCommands: McpCommands = {
      * optional hole through the silicone (wick, pour or fixing). Reports the fill line and the silicone; apply adds
      * the pieces to the scene; files come back as for EXPORT_CAST.
      */
-  MAKE_POUR_BOX: async (msg, { store }) => {
+  MAKE_POUR_BOX: async (msg, { store, toId }) => {
+    const rawTarget = msg.bodyId ?? msg.masterId;
+    if (rawTarget !== undefined && rawTarget !== null && typeof rawTarget !== 'string') {
+      return { ok: false, error: 'bodyId/masterId must be a string.' };
+    }
     // The master: body_id, else every body (never the UI selection, which an agent cannot see).
-    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, id));
+    const subject = mcpMoldSubject(store.sceneGraph, rawTarget, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string));
     if ('error' in subject) return { ok: false, error: subject.error };
     const ids = subject.ids;
-    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
     const options: Partial<PourBoxOptions> = {};
-    for (const key of ['coverMm', 'wallMm', 'clearanceMm', 'baseMm', 'grooveMm', 'freeboardMm', 'siliconeBudgetG'] as const) {
-      const v = num(msg[key]);
-      if (v !== undefined) options[key] = v;
+    for (const key of ['coverMm', 'wallMm', 'baseMm', 'siliconeBudgetG'] as const) {
+      const chk = checkPos(msg[key], key);
+      if (!chk.ok) return chk;
+      if (chk.value !== undefined) options[key] = chk.value;
     }
-    if (msg.shape === 'fit' || msg.shape === 'round' || msg.shape === 'box') options.shape = msg.shape;
+    const floorChk = checkPos(msg.floorMm, 'floorMm');
+    if (!floorChk.ok) return floorChk;
+    for (const key of ['clearanceMm', 'grooveMm', 'freeboardMm'] as const) {
+      const chk = checkNonNeg(msg[key], key);
+      if (!chk.ok) return chk;
+      if (chk.value !== undefined) options[key] = chk.value;
+    }
+    if (msg.shape !== undefined && msg.shape !== null) {
+      if (msg.shape !== 'fit' && msg.shape !== 'round' && msg.shape !== 'box') {
+        return { ok: false, error: "shape is 'fit', 'round' or 'box'." };
+      }
+      options.shape = msg.shape;
+    }
+    if (msg.parting !== undefined && msg.parting !== null) {
+      if (msg.parting !== 'auto' && msg.parting !== 'bottom' && msg.parting !== 'mid' && msg.parting !== 'top') {
+        return { ok: false, error: "parting is 'auto', 'bottom', 'mid' or 'top'." };
+      }
+    }
     if (typeof msg.splitSleeve === 'boolean') options.splitSleeve = msg.splitSleeve;
     // A hole through the silicone and what it is for; `pin` is the older
     // name for a wick hole, and still means one.
@@ -63,12 +100,22 @@ export const castCommands: McpCommands = {
       }
       options.hole = msg.hole;
     } else if (msg.pin === true) options.hole = 'wick';
-    const holeDia = num(msg.holeDiaMm) ?? num(msg.pinDiaMm);
+    const holeDiaChk = checkPos(msg.holeDiaMm, 'holeDiaMm');
+    if (!holeDiaChk.ok) return holeDiaChk;
+    const pinDiaChk = checkPos(msg.pinDiaMm, 'pinDiaMm');
+    if (!pinDiaChk.ok) return pinDiaChk;
+    const holeDia = holeDiaChk.value ?? pinDiaChk.value;
     if (holeDia !== undefined) options.holeDiaMm = holeDia;
-    if (Array.isArray(msg.holeAtMm) && msg.holeAtMm.length === 2 && msg.holeAtMm.every((v) => typeof v === 'number')) {
+    if (msg.holeAtMm !== undefined && msg.holeAtMm !== null) {
+      if (!Array.isArray(msg.holeAtMm) || msg.holeAtMm.length !== 2 || !msg.holeAtMm.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+        return { ok: false, error: 'holeAtMm must be [x, y] of finite numbers in mm.' };
+      }
       options.holeAtMm = msg.holeAtMm as [number, number];
     }
-    if (typeof msg.silicone === 'string') {
+    if (msg.silicone !== undefined && msg.silicone !== null) {
+      if (typeof msg.silicone !== 'string') {
+        return { ok: false, error: `silicone is one of ${SILICONES.map((m) => m.id).join(', ')}.` };
+      }
       const silicone = resolveCastMaterial(msg.silicone);
       if (!isSiliconeId(silicone)) return { ok: false, error: `silicone is one of ${SILICONES.map((m) => m.id).join(', ')}.` };
       options.silicone = silicone;
@@ -77,9 +124,16 @@ export const castCommands: McpCommands = {
     try {
       box = await planPourBox(store.sceneGraph, ids, options);
     } catch (e) {
-      return { ok: false, error: (e as Error).message };
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
-    const added = msg.apply === true ? await addPourBoxToScene(ids, options, box) : null;
+    let added = null;
+    if (msg.apply === true) {
+      try {
+        added = await addPourBoxToScene(ids, options, box);
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
     const { warnings, ...summary } = box.report;
     return {
       ok: true,
@@ -109,16 +163,43 @@ export const castCommands: McpCommands = {
      * never hands the bytes to the agent, which is the whole reason they are
      * separated from the summary.
      */
-  EXPORT_CAST: async (msg, { store }) => {
+  EXPORT_CAST: async (msg, { store, toId }) => {
     if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
+    if (msg.masterId !== undefined && msg.masterId !== null && typeof msg.masterId !== 'string') {
+      return { ok: false, error: 'masterId must be a string.' };
+    }
     // What is cast: master_id, else every body.
-    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, id));
+    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string));
     if ('error' in subject) return { ok: false, error: subject.error };
     const scene = subject.scene;
-    const metal = msg.metalId ?? msg.metal;
-    if (metal !== undefined && !CAST_METALS.some((m) => m.id === metal)) {
+    const metal = msg.metalId ?? msg.metal ?? msg.material;
+    if (metal !== undefined && metal !== null && (typeof metal !== 'string' || !CAST_METALS.some((m) => m.id === metal))) {
       return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
     }
+    if (msg.method !== undefined && msg.method !== null && msg.method !== 'sand' && msg.method !== 'lost-pla') {
+      return { ok: false, error: "method is 'sand' or 'lost-pla'." };
+    }
+    let partingFromBaseMm: number | 'auto' | undefined;
+    if (msg.partingFromBaseMm !== undefined && msg.partingFromBaseMm !== null) {
+      if (msg.partingFromBaseMm === 'auto') {
+        partingFromBaseMm = 'auto';
+      } else if (typeof msg.partingFromBaseMm === 'number' && Number.isFinite(msg.partingFromBaseMm) && msg.partingFromBaseMm >= 0) {
+        partingFromBaseMm = msg.partingFromBaseMm;
+      } else {
+        return { ok: false, error: "partingFromBaseMm must be 'auto' or a non-negative finite number." };
+      }
+    }
+    // 0 means "size from the part" (the MCP server sends 0 by default); negative or non-finite is invalid.
+    const sprueDia = checkNonNeg(msg.sprueDiaMm, 'sprueDiaMm');
+    if (!sprueDia.ok) return sprueDia;
+    const riserDia = checkNonNeg(msg.riserDiaMm, 'riserDiaMm');
+    if (!riserDia.ok) return riserDia;
+    const copeDrag = checkNonNeg(msg.copeDragHeightMm, 'copeDragHeightMm');
+    if (!copeDrag.ok) return copeDrag;
+    const draftChk = checkNonNeg(msg.draftDeg, 'draftDeg');
+    if (!draftChk.ok) return draftChk;
+    const shrinkChk = checkNonNeg(msg.shrinkPercent, 'shrinkPercent');
+    if (!shrinkChk.ok) return shrinkChk;
     if (msg.sprueAtMm !== undefined && msg.sprueAtMm !== null
       && !(Array.isArray(msg.sprueAtMm) && msg.sprueAtMm.length >= 2 && msg.sprueAtMm.slice(0, 2).every((v: unknown) => typeof v === 'number' && Number.isFinite(v)))) {
       return { ok: false, error: 'sprue_at_mm is [x, y] in scene mm.' };
@@ -128,30 +209,31 @@ export const castCommands: McpCommands = {
       // `metal` is what the MCP tool calls it; `metalId` is what the
       // exporter's own options call it. Both are accepted so neither side
       // has to know the other's spelling.
-      ...(typeof msg.metal === 'string' ? { metalId: msg.metal } : {}),
-      ...(typeof msg.metalId === 'string' ? { metalId: msg.metalId } : {}),
-      ...(msg.partingFromBaseMm === 'auto' || typeof msg.partingFromBaseMm === 'number'
-        ? { partingFromBaseMm: msg.partingFromBaseMm as number | 'auto' } : {}),
+      ...(typeof metal === 'string' ? { metalId: metal } : {}),
+      ...(partingFromBaseMm !== undefined ? { partingFromBaseMm } : {}),
       ...(msg.method === 'sand' || msg.method === 'lost-pla' ? { method: msg.method as CastMethod } : {}),
       ...(typeof msg.addGating === 'boolean' ? { addGating: msg.addGating } : {}),
-      ...(typeof msg.sprueDiaMm === 'number' ? { sprueDiaMm: msg.sprueDiaMm } : {}),
+      ...(sprueDia.value !== undefined ? { sprueDiaMm: sprueDia.value } : {}),
       ...(Array.isArray(msg.sprueAtMm) && msg.sprueAtMm.length >= 2 && msg.sprueAtMm.slice(0, 2).every((v: unknown) => typeof v === 'number' && Number.isFinite(v))
         ? { sprueAtMm: [msg.sprueAtMm[0], msg.sprueAtMm[1]] as [number, number] } : {}),
-      ...(typeof msg.riserDiaMm === 'number' ? { riserDiaMm: msg.riserDiaMm } : {}),
+      ...(riserDia.value !== undefined ? { riserDiaMm: riserDia.value } : {}),
       ...(typeof msg.addRiser === 'boolean' ? { addRiser: msg.addRiser } : {}),
-      ...(typeof msg.copeDragHeightMm === 'number' && Number.isFinite(msg.copeDragHeightMm) && msg.copeDragHeightMm >= 0
-        ? { copeDragHeightMm: msg.copeDragHeightMm } : {}),
+      ...(copeDrag.value !== undefined ? { copeDragHeightMm: copeDrag.value } : {}),
       // The Sand tab starts with 2° on the pattern; Lost PLA with none.
-      draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : msg.method === 'lost-pla' ? 0 : DEFAULT_TAB_DRAFT.sand,
-      ...(typeof msg.shrinkPercent === 'number' && msg.shrinkPercent >= 0 ? { shrinkPercent: msg.shrinkPercent } : {}),
+      draftDeg: draftChk.value !== undefined ? draftChk.value : msg.method === 'lost-pla' ? 0 : DEFAULT_TAB_DRAFT.sand,
+      ...(shrinkChk.value !== undefined ? { shrinkPercent: shrinkChk.value } : {}),
     };
     // On the export worker, as the Sand and Lost PLA tabs run it: finding
     // every air pocket in a big pattern takes seconds, not a frame.
     let result: CastResult;
-    if (typeof Worker === 'undefined') result = generateCastPattern(scene, options);
-    else {
-      const client = new ExportWorkerClient();
-      try { result = await client.run('cast', scene, options); } finally { client.dispose(); }
+    try {
+      if (typeof Worker === 'undefined') result = generateCastPattern(scene, options);
+      else {
+        const client = new ExportWorkerClient();
+        try { result = await client.run('cast', scene, options); } finally { client.dispose(); }
+      }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     if (!result.success) return { ok: false, error: result.error || 'The cast pattern could not be generated.', warnings: result.warnings ?? [] };
     // physics_add_simulation's sand and lost-PLA chains simulate this pattern next.
@@ -173,27 +255,58 @@ export const castCommands: McpCommands = {
      * utils/castPrep.ts.
      */
   SET_CAST_PREP: async (msg, { store }) => {
-    if (msg.off === true) {
-      if (!store.sceneGraph.castPrep) return { ok: true, on: false, note: 'Prep was not on.' };
-      const { restored, kept } = store.clearCastPrep();
-      await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
-      return { ok: true, on: false, restored: restored.length, keptAsTheyAre: kept.map((k) => k.name) };
+    try {
+      if (msg.off === true) {
+        if (!store.sceneGraph.castPrep) return { ok: true, on: false, note: 'Prep was not on.' };
+        const { restored, kept } = store.clearCastPrep();
+        await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+        return { ok: true, on: false, restored: restored.length, keptAsTheyAre: kept.map((k) => k.name) };
+      }
+      if (msg.bake === true) {
+        if (!store.sceneGraph.castPrep) return { ok: false, error: 'Prep is not on, so there is nothing to bake in.' };
+        store.bakeCastPrep();
+        return { ok: true, on: false, baked: true };
+      }
+      if (msg.method !== undefined && msg.method !== null && msg.method !== 'sand' && msg.method !== 'lost-pla') {
+        return { ok: false, error: "method is 'sand' or 'lost-pla'." };
+      }
+      if (msg.draftMode !== undefined && msg.draftMode !== null && msg.draftMode !== 'add' && msg.draftMode !== 'remove') {
+        return { ok: false, error: "draftMode is 'add' or 'remove'." };
+      }
+      let draftDeg = 2;
+      if (msg.draftDeg !== undefined && msg.draftDeg !== null) {
+        if (typeof msg.draftDeg !== 'number' || !Number.isFinite(msg.draftDeg) || msg.draftDeg < 0 || msg.draftDeg > 15) {
+          return { ok: false, error: 'draftDeg must be a finite number between 0 and 15.' };
+        }
+        draftDeg = msg.draftDeg;
+      }
+      let edgeSizeMm: number | 'auto' = 'auto';
+      if (msg.edgeSizeMm !== undefined && msg.edgeSizeMm !== null && msg.edgeSizeMm !== 'auto') {
+        if (typeof msg.edgeSizeMm !== 'number' || !Number.isFinite(msg.edgeSizeMm) || msg.edgeSizeMm <= 0) {
+          return { ok: false, error: "edgeSizeMm must be 'auto' or a positive finite number." };
+        }
+        edgeSizeMm = msg.edgeSizeMm;
+      }
+      let partingFromBaseMm: number | 'auto' = 'auto';
+      if (msg.partingFromBaseMm !== undefined && msg.partingFromBaseMm !== null && msg.partingFromBaseMm !== 'auto') {
+        if (typeof msg.partingFromBaseMm !== 'number' || !Number.isFinite(msg.partingFromBaseMm) || msg.partingFromBaseMm < 0) {
+          return { ok: false, error: "partingFromBaseMm must be 'auto' or a non-negative finite number." };
+        }
+        partingFromBaseMm = msg.partingFromBaseMm;
+      }
+      const method = msg.method === 'lost-pla' ? 'lost-pla' : 'sand';
+      const report = await runCastPrep({
+        method,
+        draftDeg,
+        draftMode: msg.draftMode === 'remove' ? 'remove' : 'add',
+        edges: msg.edges !== false,
+        edgeSizeMm,
+        partingFromBaseMm,
+      });
+      return report.ok ? { ...report, on: true } : report;
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
-    if (msg.bake === true) {
-      if (!store.sceneGraph.castPrep) return { ok: false, error: 'Prep is not on, so there is nothing to bake in.' };
-      store.bakeCastPrep();
-      return { ok: true, on: false, baked: true };
-    }
-    const method = msg.method === 'lost-pla' ? 'lost-pla' : 'sand';
-    const report = await runCastPrep({
-      method,
-      draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : 2,
-      draftMode: msg.draftMode === 'remove' ? 'remove' : 'add',
-      edges: msg.edges !== false,
-      edgeSizeMm: typeof msg.edgeSizeMm === 'number' && msg.edgeSizeMm > 0 ? msg.edgeSizeMm : 'auto',
-      partingFromBaseMm: typeof msg.partingFromBaseMm === 'number' ? msg.partingFromBaseMm : 'auto',
-    });
-    return report.ok ? { ...report, on: true } : report;
   },
     /*
      * Split for Print, as the dialog does it: cut a body into sections
@@ -201,40 +314,75 @@ export const castCommands: McpCommands = {
      * sections; `testAssembly` puts them back together in MuJoCo first,
      * and `apply` replaces the body with them. See utils/printSplit.ts.
      */
-  SPLIT_FOR_PRINT: async (msg, { store }) => {
+  SPLIT_FOR_PRINT: async (msg, { store, toId }) => {
+    if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
+      return { ok: false, error: 'bodyId must be a string.' };
+    }
+    const resolveNode = (id: string) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string);
     const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : store.selectedNodeId;
-    const node = bodyId ? findNodeInScene(store.sceneGraph.nodes, bodyId) : null;
+    const node = bodyId ? resolveNode(bodyId) : null;
     if (!node) return { ok: false, error: bodyId ? `No body called ${bodyId}.` : 'Give bodyId, or select a body first.' };
     // More bodies to split as one part with it, in its frame.
+    if (msg.withIds !== undefined && msg.withIds !== null && (!Array.isArray(msg.withIds) || !msg.withIds.every((v) => typeof v === 'string'))) {
+      return { ok: false, error: 'withIds must be an array of body IDs or names.' };
+    }
     const others = (Array.isArray(msg.withIds) ? msg.withIds : []).filter((v): v is string => typeof v === 'string');
-    const missing = others.filter((id) => !findNodeInScene(store.sceneGraph.nodes, id));
+    const missing = others.filter((id) => !resolveNode(id));
     if (missing.length) return { ok: false, error: `No body called ${missing.join(', ')}.` };
-    const { soups, absorbed } = selectionSoups(store.sceneGraph, [node.id, ...others.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!.id)]);
+    const { soups, absorbed } = selectionSoups(store.sceneGraph, [node.id, ...others.map((id) => resolveNode(id)!.id)]);
     if (!soups.length) return { ok: false, error: `${node.name} has no solid geometry to split.` };
-    const bedArr = Array.isArray(msg.bedMm) ? (msg.bedMm as number[]) : null;
-    const bed = bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
-      ? { widthMm: bedArr[0], depthMm: bedArr[1], heightMm: bedArr[2] }
-      : store.printBed;
-    const kind = msg.joinery === 'none' || msg.joinery === 'peg' || msg.joinery === 'dowel' ? msg.joinery : 'dowel';
-    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    let bed = store.printBed;
+    if (msg.bedMm !== undefined && msg.bedMm !== null) {
+      if (!Array.isArray(msg.bedMm) || msg.bedMm.length !== 3 || !msg.bedMm.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) {
+        return { ok: false, error: 'bedMm must be [width, depth, height] of positive finite numbers in mm.' };
+      }
+      bed = { widthMm: msg.bedMm[0], depthMm: msg.bedMm[1], heightMm: msg.bedMm[2] };
+    }
+    const rawJoinery = msg.joinery ?? msg.connector;
+    if (rawJoinery !== undefined && rawJoinery !== null && rawJoinery !== 'none' && rawJoinery !== 'peg' && rawJoinery !== 'dowel') {
+      return { ok: false, error: "joinery/connector is 'dowel', 'peg' or 'none'." };
+    }
+    const kind = rawJoinery === 'none' || rawJoinery === 'peg' || rawJoinery === 'dowel' ? rawJoinery : 'dowel';
+    const diaChk = checkPos(msg.diameterMm, 'diameterMm');
+    if (!diaChk.ok) return diaChk;
+    const lenChk = checkPos(msg.lengthMm, 'lengthMm');
+    if (!lenChk.ok) return lenChk;
+    const minWallChk = checkPos(msg.minWallMm, 'minWallMm');
+    if (!minWallChk.ok) return minWallChk;
+    const clearChk = checkNonNeg(msg.clearanceMm, 'clearanceMm');
+    if (!clearChk.ok) return clearChk;
+    const marginChk = checkNonNeg(msg.marginMm, 'marginMm');
+    if (!marginChk.ok) return marginChk;
+    let maxSections: number | undefined;
+    if (msg.maxSections !== undefined && msg.maxSections !== null) {
+      if (typeof msg.maxSections !== 'number' || !Number.isFinite(msg.maxSections) || !Number.isInteger(msg.maxSections) || msg.maxSections < 2) {
+        return { ok: false, error: 'maxSections must be an integer >= 2.' };
+      }
+      maxSections = msg.maxSections;
+    }
     const joinery = Object.fromEntries(Object.entries({
       kind,
-      diameterMm: num(msg.diameterMm),
-      lengthMm: num(msg.lengthMm),
-      clearanceMm: num(msg.clearanceMm),
-      minWallMm: num(msg.minWallMm),
+      diameterMm: diaChk.value,
+      lengthMm: lenChk.value,
+      clearanceMm: clearChk.value,
+      minWallMm: minWallChk.value,
     }).filter(([, v]) => v !== undefined));
-    const marginMm = num(msg.marginMm) ?? 5;
+    const marginMm = marginChk.value ?? 5;
     const placement = msg.placement === 'beside' ? 'beside' : msg.placement === undefined || msg.placement === 'replace' ? 'replace' : null;
     if (!placement) return { ok: false, error: "placement is 'replace' or 'beside'." };
-    const maxSections = num(msg.maxSections);
-    const { result, checks } = await splitOffThread(soups, {
-      bed,
-      marginMm,
-      overhangDeg: filamentSpec(store.filament).maxOverhangDeg,
-      joinery,
-      ...(maxSections !== undefined ? { maxSections } : {}),
-    });
+    let splitOut;
+    try {
+      splitOut = await splitOffThread(soups, {
+        bed,
+        marginMm,
+        overhangDeg: filamentSpec(store.filament).maxOverhangDeg,
+        joinery,
+        ...(maxSections !== undefined ? { maxSections } : {}),
+      });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    const { result, checks } = splitOut;
     if (!result.ok) return { ok: false, error: result.error };
 
     let assembly: Record<string, unknown> | undefined;
@@ -257,7 +405,7 @@ export const castCommands: McpCommands = {
     }
 
     const ids = msg.apply === true
-      ? store.splitBodyForPrint(node.id, result.sections, absorbed, {
+      ? useStore.getState().splitBodyForPrint(node.id, result.sections, absorbed, {
         cutFor: { bed, marginMm }, placement, ...(msg.centerOrigin === true ? { centerOrigin: true } : {}),
       })
       : null;
@@ -296,19 +444,40 @@ export const castCommands: McpCommands = {
      * there is no size prompt and no waiting on a frame. Files come back as
      * for EXPORT_CAST.
      */
-  EXPORT_PRINT: async (msg, { store }) => {
+  EXPORT_PRINT: async (msg, { store, toId }) => {
     if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to print.' };
     const format = msg.format === undefined ? 'stl' : msg.format;
     if (format !== 'stl' && format !== '3mf') return { ok: false, error: "format is 'stl' or '3mf'." };
+    if (msg.ids !== undefined && msg.ids !== null
+      && typeof msg.ids !== 'string'
+      && !(Array.isArray(msg.ids) && msg.ids.every((v) => typeof v === 'string'))) {
+      return { ok: false, error: 'ids must be a body ID/name or an array of body IDs/names.' };
+    }
+    const resolveNode = (id: string) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string);
     const asked = (Array.isArray(msg.ids) ? msg.ids : typeof msg.ids === 'string' ? [msg.ids] : [])
       .filter((v): v is string => typeof v === 'string');
-    const unknown = asked.filter((id) => !findNodeInScene(store.sceneGraph.nodes, id));
+    const unknown = asked.filter((id) => !resolveNode(id));
     if (unknown.length) return { ok: false, error: `No body called ${unknown.join(', ')}.` };
-    const ids = asked.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!.id);
-    const bedArr = Array.isArray(msg.bedMm) ? (msg.bedMm as number[]) : null;
-    const exportBed = bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
-      ? { widthMm: bedArr[0], depthMm: bedArr[1], heightMm: bedArr[2] }
-      : store.printBed;
+    const ids = asked.map((id) => resolveNode(id)!.id);
+    if (msg.filaments !== undefined && msg.filaments !== null) {
+      if (typeof msg.filaments !== 'number' || !Number.isFinite(msg.filaments) || !Number.isInteger(msg.filaments) || msg.filaments < 1 || msg.filaments > 32) {
+        return { ok: false, error: 'filaments must be an integer from 1 to 32.' };
+      }
+    }
+    let exportBed = store.printBed;
+    if (msg.bedMm !== undefined && msg.bedMm !== null) {
+      if (!Array.isArray(msg.bedMm) || (msg.bedMm.length !== 2 && msg.bedMm.length !== 3)
+        || !msg.bedMm.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) {
+        return { ok: false, error: 'bedMm must be [width, depth] or [width, depth, height] of positive finite numbers in mm.' };
+      }
+      exportBed = {
+        widthMm: msg.bedMm[0],
+        depthMm: msg.bedMm[1],
+        heightMm: msg.bedMm.length === 3 ? msg.bedMm[2] : store.printBed.heightMm,
+      };
+    }
+    const marginChk = checkNonNeg(msg.marginMm, 'marginMm');
+    if (!marginChk.ok) return marginChk;
     /*
      * An STL is one soup: split sections in it stand assembled, as big as the
      * part that would not fit the bed - a 478 mm beam for a 256 mm bed, every
@@ -318,16 +487,21 @@ export const castCommands: McpCommands = {
     const exported = ids.length ? ids.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!) : store.sceneGraph.nodes;
     const posed = (nodes: SceneNode[]): boolean => nodes.some((n) => !!n.printPose || posed(n.children ?? []));
     const separate = typeof msg.separate === 'boolean' ? msg.separate : format === 'stl' && posed(exported);
-    const result = exportPrintFiles(store.sceneGraph, {
-      format,
-      ids,
-      separate,
-      ...(typeof msg.plate === 'boolean' ? { plate: msg.plate } : {}),
-      ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
-      bed: exportBed,
-      ...(typeof msg.marginMm === 'number' && Number.isFinite(msg.marginMm) && msg.marginMm >= 0 ? { marginMm: msg.marginMm } : {}),
-      baseName: exportFileBase(store, ids),
-    });
+    let result;
+    try {
+      result = exportPrintFiles(store.sceneGraph, {
+        format,
+        ids,
+        separate,
+        ...(typeof msg.plate === 'boolean' ? { plate: msg.plate } : {}),
+        ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
+        bed: exportBed,
+        ...(marginChk.value !== undefined ? { marginMm: marginChk.value } : {}),
+        baseName: exportFileBase(store, ids),
+      });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     if (!result.files.length) {
       return { ok: false, error: 'Nothing printable in what was asked for: no body with solid geometry (bought-in hardware and simulated cuts are left out).', warnings: result.warnings };
     }

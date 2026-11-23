@@ -31,6 +31,40 @@ import { findNodeInScene } from './bridgeUtils';
 import { settleScene } from './settleScene';
 import type { McpCommands, McpHandler } from './types';
 
+const PIPE_STRUCTURE_PRESETS = ['mini_greenhouse', 'yard_pub', 'carport', 'geodesic_dome'] as const;
+
+function checkPos(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+    return { ok: false, error: `${name} must be a positive finite number.` };
+  }
+  return { ok: true, value: v };
+}
+
+function checkNonNeg(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+    return { ok: false, error: `${name} must be a non-negative finite number.` };
+  }
+  return { ok: true, value: v };
+}
+
+function checkFiniteNum(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    return { ok: false, error: `${name} must be a finite number.` };
+  }
+  return { ok: true, value: v };
+}
+
+function checkVec3(v: unknown, name: string): { ok: true; value: [number, number, number] | undefined } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: undefined };
+  if (!Array.isArray(v) || v.length !== 3 || !v.every((x) => typeof x === 'number' && Number.isFinite(x))) {
+    return { ok: false, error: `${name} must be a 3-element array of finite numbers.` };
+  }
+  return { ok: true, value: [v[0], v[1], v[2]] };
+}
+
   /*
    * Timber & Joinery Breakdown (`physics_timber_breakdown` / `BREAKDOWN_JOINERY`):
    * Decompose either:
@@ -42,19 +76,24 @@ import type { McpCommands, McpHandler } from './types';
    */
 const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
   const resolveId = (id: string) => (toId ? String(toId(id)) : id);
-  const rawBodyId =
-    typeof msg.bodyId === 'string'
-      ? msg.bodyId
-      : typeof msg.body_id === 'string'
-        ? msg.body_id
-        : null;
+  const rawBodyInput = msg.bodyId ?? msg.body_id;
+  if (rawBodyInput !== undefined && rawBodyInput !== null && typeof rawBodyInput !== 'string') {
+    return { ok: false, error: 'bodyId must be a string.' };
+  }
+  const rawBodyId = typeof rawBodyInput === 'string' ? rawBodyInput : null;
   const explicitBodyId = rawBodyId ? resolveId(rawBodyId) : null;
-  const rawWithIds = Array.isArray(msg.withIds)
-    ? msg.withIds
-    : Array.isArray(msg.with_ids)
-      ? msg.with_ids
-      : [];
-  const others = rawWithIds.filter((v): v is string => typeof v === 'string').map(resolveId);
+  const rawWithInput = msg.withIds ?? msg.with_ids;
+  if (rawWithInput !== undefined && rawWithInput !== null) {
+    if (!Array.isArray(rawWithInput) || !rawWithInput.every((v) => typeof v === 'string')) {
+      return { ok: false, error: 'withIds must be an array of body IDs or names.' };
+    }
+  }
+  const rawWithIds: string[] = Array.isArray(rawWithInput) ? (rawWithInput as string[]) : [];
+  const missingWith = rawWithIds.filter((raw) => !findNodeInScene(store.sceneGraph.nodes, resolveId(raw)));
+  if (missingWith.length) {
+    return { ok: false, error: `No body called ${missingWith.join(', ')}.` };
+  }
+  const others = rawWithIds.map((raw) => findNodeInScene(store.sceneGraph.nodes, resolveId(raw))!.id);
   const targetIds = explicitBodyId
     ? [explicitBodyId, ...others]
     : resolveTimberTargetIds(store.sceneGraph.nodes, store.selectedNodeId, others);
@@ -65,7 +104,42 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
   const { items, absorbed } = collectIndividualPartSoups(store.sceneGraph, targetIds);
   if (!items.length) return { ok: false, error: `${primary.name} has no solid geometry to break down.` };
 
-  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const boardThick = checkPos(msg.boardThicknessMm ?? msg.board_thickness_mm, 'boardThicknessMm');
+  if (!boardThick.ok) return boardThick;
+  const wallThick = checkPos(msg.wallThicknessMm ?? msg.wall_thickness_mm, 'wallThicknessMm');
+  if (!wallThick.ok) return wallThick;
+  const maxBoardW = checkPos(msg.maxBoardWidthMm ?? msg.max_board_width_mm, 'maxBoardWidthMm');
+  if (!maxBoardW.ok) return maxBoardW;
+  const maxBoardL = checkPos(msg.maxBoardLengthMm ?? msg.max_board_length_mm, 'maxBoardLengthMm');
+  if (!maxBoardL.ok) return maxBoardL;
+  const fingerW = checkPos(msg.fingerWidthMm ?? msg.finger_width_mm, 'fingerWidthMm');
+  if (!fingerW.ok) return fingerW;
+  const dowelDia = checkNonNeg(msg.dowelDiaMm ?? msg.dowel_dia_mm, 'dowelDiaMm');
+  if (!dowelDia.ok) return dowelDia;
+  const dowelLen = checkNonNeg(msg.dowelLengthMm ?? msg.dowel_length_mm, 'dowelLengthMm');
+  if (!dowelLen.ok) return dowelLen;
+  const clearance = checkNonNeg(msg.clearanceMm ?? msg.clearance_mm, 'clearanceMm');
+  if (!clearance.ok) return clearance;
+  const cutterDia = checkPos(msg.cutterDiaMm ?? msg.cutter_dia_mm, 'cutterDiaMm');
+  if (!cutterDia.ok) return cutterDia;
+  const shoulder = checkNonNeg(msg.shoulderMm ?? msg.shoulder_mm, 'shoulderMm');
+  if (!shoulder.ok) return shoulder;
+  const tenonLen = checkPos(msg.tenonLengthMm ?? msg.tenon_length_mm, 'tenonLengthMm');
+  if (!tenonLen.ok) return tenonLen;
+  const edgeRad = checkNonNeg(msg.edgeRadiusMm ?? msg.edge_radius_mm, 'edgeRadiusMm');
+  if (!edgeRad.ok) return edgeRad;
+  const stopMargin = checkNonNeg(msg.stopMarginMm ?? msg.stop_margin_mm, 'stopMarginMm');
+  if (!stopMargin.ok) return stopMargin;
+  const stockLen = checkPos(msg.stockLengthMm ?? msg.stock_length_mm, 'stockLengthMm');
+  if (!stockLen.ok) return stockLen;
+
+  const rawBed = msg.cncBedMm ?? msg.cnc_bed_mm;
+  if (rawBed !== undefined && rawBed !== null) {
+    if (!Array.isArray(rawBed) || rawBed.length !== 3 || !rawBed.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)) {
+      return { ok: false, error: 'cncBedMm must be [width, depth, height] of positive finite numbers in mm.' };
+    }
+  }
+
   const placement: 'replace' | 'beside' = msg.placement === 'beside' ? 'beside' : 'replace';
 
   const rawJointType = msg.jointType ?? msg.joint_type;
@@ -89,129 +163,45 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
     msg.maxBoardLengthMm !== undefined ||
     msg.max_board_length_mm !== undefined;
 
-  const wasm = await loadManifold();
-  const soups = items.map((it) => it.soup);
+  try {
+    const wasm = await loadManifold();
+    const soups = items.map((it) => it.soup);
 
-  if (hasPlankSpecificArg && msg.mode !== 'frame') {
-    const jointType: PlankJointType =
-      rawJointType === 'miter' || rawJointType === 'finger' || rawJointType === 'butt' || rawJointType === 'glue'
-        ? rawJointType
-        : 'rabbet';
-    const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
-      boardThicknessMm: num(msg.boardThicknessMm ?? msg.board_thickness_mm),
-      wallThicknessMm: num(msg.wallThicknessMm ?? msg.wall_thickness_mm),
-      maxBoardWidthMm: num(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
-      maxBoardLengthMm: num(msg.maxBoardLengthMm ?? msg.max_board_length_mm),
-      jointType,
-      fingerWidthMm: num(msg.fingerWidthMm ?? msg.finger_width_mm),
-      dowelDiaMm: num(msg.dowelDiaMm ?? msg.dowel_dia_mm),
-      dowelLengthMm: num(msg.dowelLengthMm ?? msg.dowel_length_mm),
-      clearanceMm: num(msg.clearanceMm ?? msg.clearance_mm),
-      hollowInterior:
-        typeof msg.hollowInterior === 'boolean'
-          ? msg.hollowInterior
-          : typeof msg.hollow_interior === 'boolean'
-            ? msg.hollow_interior
-            : undefined,
-    });
-    if (!plankRes.ok) return plankRes;
+    if (hasPlankSpecificArg && msg.mode !== 'frame') {
+      const jointType: PlankJointType =
+        rawJointType === 'miter' || rawJointType === 'finger' || rawJointType === 'butt' || rawJointType === 'glue'
+          ? rawJointType
+          : 'rabbet';
+      const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
+        boardThicknessMm: boardThick.value,
+        wallThicknessMm: wallThick.value,
+        maxBoardWidthMm: maxBoardW.value,
+        maxBoardLengthMm: maxBoardL.value,
+        jointType,
+        fingerWidthMm: fingerW.value,
+        dowelDiaMm: dowelDia.value,
+        dowelLengthMm: dowelLen.value,
+        clearanceMm: clearance.value,
+        hollowInterior:
+          typeof msg.hollowInterior === 'boolean'
+            ? msg.hollowInterior
+            : typeof msg.hollow_interior === 'boolean'
+              ? msg.hollow_interior
+              : undefined,
+      });
+      if (!plankRes.ok) return plankRes;
 
-    const names = plankRes.planks.map((p) => p.id);
-    const ids =
-      msg.apply === true
-        ? store.splitBodyForPrint(primary.id, plankRes.sections, absorbed, {
-            plain: false,
-            names,
-            centerOrigin: true,
-            placement,
-          })
-        : null;
-
-    return {
-      ok: true,
-      mode: 'planks',
-      applied: !!ids,
-      placement: ids ? placement : undefined,
-      options: plankRes.options,
-      totalVolumeMm3: plankRes.totalVolumeMm3,
-      originalVolumeMm3: plankRes.originalVolumeMm3,
-      hollowedVolumeMm3: plankRes.hollowedVolumeMm3,
-      layFlatSheetMm: plankRes.layFlatSheetMm,
-      planks: plankRes.planks.map((p, idx) => ({
-        index: idx,
-        id: p.id,
-        ...(ids ? { sceneNodeId: ids[idx] } : {}),
-        name: p.name,
-        wallFace: p.wallFace,
-        dimensionsMm: p.dimensionsMm,
-        grainAxis: p.grainAxis,
-        volumeMm3: p.volumeMm3,
-        explodedOffsetMm: p.explodedOffsetMm,
-        layFlatOffsetMm: p.layFlatOffsetMm,
-        layFlatSizeMm: p.layFlatSizeMm,
-        dowelCount: p.dowelHoles.length,
-        jointSummary: p.jointSummary,
-        joints: p.joints,
-      })),
-      bomMarkdown: plankRes.bomMarkdown,
-      warnings: plankRes.warnings,
-    };
-  }
-
-  const rawJointMode = msg.jointMode ?? msg.joint_mode;
-  const jointMode: TimberJointMode =
-    rawJointMode === 'dowel' || rawJointMode === 'dado' || rawJointMode === 'butt'
-      ? rawJointMode
-      : rawJointMode === 'glue'
-        ? 'butt'
-        : 'mortise_tenon';
-  const rawCornerFit = msg.tenonCornerFit ?? msg.tenon_corner_fit;
-  const tenonCornerFit: TenonCornerFit =
-    rawCornerFit === 'round_tenon' || rawCornerFit === 'chisel_square' ? rawCornerFit : 'dogbone';
-  const rawEdgeProfile = msg.edgeProfile ?? msg.edge_profile;
-  const edgeProfile: TimberEdgeProfile =
-    rawEdgeProfile === 'chamfer' || rawEdgeProfile === 'square' ? rawEdgeProfile : 'roundover';
-  const rawCutMethod = msg.tenonCutMethod ?? msg.tenon_cut_method;
-  const rawClips = msg.tabletopClips ?? msg.tabletop_clips;
-
-  const outcome = synthesizeTimberJoinery(
-    wasm,
-    soups,
-    {
-      jointMode,
-      tenonCornerFit,
-      edgeProfile,
-      cutterDiaMm: num(msg.cutterDiaMm ?? msg.cutter_dia_mm),
-      shoulderMm: num(msg.shoulderMm ?? msg.shoulder_mm),
-      tenonLengthMm: num(msg.tenonLengthMm ?? msg.tenon_length_mm),
-      clearanceMm: num(msg.clearanceMm ?? msg.clearance_mm),
-      edgeRadiusMm: num(msg.edgeRadiusMm ?? msg.edge_radius_mm),
-      stopMarginMm: num(msg.stopMarginMm ?? msg.stop_margin_mm),
-      maxBoardWidthMm: num(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
-      tabletopClips: typeof rawClips === 'boolean' ? rawClips : undefined,
-      tenonCutMethod: rawCutMethod === 'cnc' ? 'cnc' : 'bandsaw',
-    },
-  );
-  if (!outcome.ok) return outcome;
-
-  // If auto-mode was called on a single unframed solid block (1 part, 0 joints)
-  // and msg.mode !== 'frame', fall back to hollow-shell / plank breakdown!
-  if (msg.mode !== 'frame' && outcome.parts.length <= 1 && outcome.joints.length === 0 && rawJointMode === undefined) {
-    const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
-      maxBoardWidthMm: num(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
-      clearanceMm: num(msg.clearanceMm ?? msg.clearance_mm),
-    });
-    if (plankRes.ok && plankRes.planks.length > 1) {
       const names = plankRes.planks.map((p) => p.id);
       const ids =
         msg.apply === true
-          ? store.splitBodyForPrint(primary.id, plankRes.sections, absorbed, {
+          ? useStore.getState().splitBodyForPrint(primary.id, plankRes.sections, absorbed, {
               plain: false,
               names,
               centerOrigin: true,
               placement,
             })
           : null;
+
       return {
         ok: true,
         mode: 'planks',
@@ -242,233 +232,416 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
         warnings: plankRes.warnings,
       };
     }
+
+    const rawJointMode = msg.jointMode ?? msg.joint_mode;
+    const jointMode: TimberJointMode =
+      rawJointMode === 'dowel' || rawJointMode === 'dado' || rawJointMode === 'butt'
+        ? rawJointMode
+        : rawJointMode === 'glue'
+          ? 'butt'
+          : 'mortise_tenon';
+    const rawCornerFit = msg.tenonCornerFit ?? msg.tenon_corner_fit;
+    const tenonCornerFit: TenonCornerFit =
+      rawCornerFit === 'round_tenon' || rawCornerFit === 'chisel_square' ? rawCornerFit : 'dogbone';
+    const rawEdgeProfile = msg.edgeProfile ?? msg.edge_profile;
+    const edgeProfile: TimberEdgeProfile =
+      rawEdgeProfile === 'chamfer' || rawEdgeProfile === 'square' ? rawEdgeProfile : 'roundover';
+    const rawCutMethod = msg.tenonCutMethod ?? msg.tenon_cut_method;
+    const rawClips = msg.tabletopClips ?? msg.tabletop_clips;
+
+    const outcome = synthesizeTimberJoinery(
+      wasm,
+      soups,
+      {
+        jointMode,
+        tenonCornerFit,
+        edgeProfile,
+        cutterDiaMm: cutterDia.value,
+        shoulderMm: shoulder.value,
+        tenonLengthMm: tenonLen.value,
+        clearanceMm: clearance.value,
+        edgeRadiusMm: edgeRad.value,
+        stopMarginMm: stopMargin.value,
+        maxBoardWidthMm: maxBoardW.value,
+        tabletopClips: typeof rawClips === 'boolean' ? rawClips : undefined,
+        tenonCutMethod: rawCutMethod === 'cnc' ? 'cnc' : 'bandsaw',
+      },
+    );
+    if (!outcome.ok) return outcome;
+
+    // If auto-mode was called on a single unframed solid block (1 part, 0 joints)
+    // and msg.mode !== 'frame', fall back to hollow-shell / plank breakdown!
+    if (msg.mode !== 'frame' && outcome.parts.length <= 1 && outcome.joints.length === 0 && rawJointMode === undefined) {
+      const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
+        maxBoardWidthMm: maxBoardW.value,
+        clearanceMm: clearance.value,
+      });
+      if (plankRes.ok && plankRes.planks.length > 1) {
+        const names = plankRes.planks.map((p) => p.id);
+        const ids =
+          msg.apply === true
+            ? useStore.getState().splitBodyForPrint(primary.id, plankRes.sections, absorbed, {
+                plain: false,
+                names,
+                centerOrigin: true,
+                placement,
+              })
+            : null;
+        return {
+          ok: true,
+          mode: 'planks',
+          applied: !!ids,
+          placement: ids ? placement : undefined,
+          options: plankRes.options,
+          totalVolumeMm3: plankRes.totalVolumeMm3,
+          originalVolumeMm3: plankRes.originalVolumeMm3,
+          hollowedVolumeMm3: plankRes.hollowedVolumeMm3,
+          layFlatSheetMm: plankRes.layFlatSheetMm,
+          planks: plankRes.planks.map((p, idx) => ({
+            index: idx,
+            id: p.id,
+            ...(ids ? { sceneNodeId: ids[idx] } : {}),
+            name: p.name,
+            wallFace: p.wallFace,
+            dimensionsMm: p.dimensionsMm,
+            grainAxis: p.grainAxis,
+            volumeMm3: p.volumeMm3,
+            explodedOffsetMm: p.explodedOffsetMm,
+            layFlatOffsetMm: p.layFlatOffsetMm,
+            layFlatSizeMm: p.layFlatSizeMm,
+            dowelCount: p.dowelHoles.length,
+            jointSummary: p.jointSummary,
+            joints: p.joints,
+          })),
+          bomMarkdown: plankRes.bomMarkdown,
+          warnings: plankRes.warnings,
+        };
+      }
+    }
+
+    const latestStore = useStore.getState();
+    const bedArr = Array.isArray(rawBed) ? (rawBed as number[]) : null;
+    const cncBedMm: [number, number, number] =
+      bedArr
+        ? [bedArr[0], bedArr[1], bedArr[2]]
+        : [latestStore.cncBed.widthMm, latestStore.cncBed.depthMm, latestStore.cncBed.heightMm];
+    const motion = webSerialManager.getState().motion;
+
+    const cutPlan = buildTimberCutPlan(outcome, {
+      cncBedMm,
+      defaultStockLengthMm: stockLen.value ?? 1800,
+      spindle: motion.spindle,
+      maxFeedMmMin: Math.min(motion.maxRate.x, motion.maxRate.y),
+    });
+
+    const names = outcome.parts.map((p) => p.member.id);
+    const ids =
+      msg.apply === true
+        ? useStore.getState().splitBodyForPrint(primary.id, outcome.sections, absorbed, {
+            plain: false,
+            names,
+            centerOrigin: true,
+            placement,
+          })
+        : null;
+
+    return {
+      ok: true,
+      mode: 'frame',
+      applied: !!ids,
+      placement: ids ? placement : undefined,
+      parts: outcome.parts.map((p, idx) => ({
+        index: idx,
+        id: p.member.id,
+        ...(ids ? { sceneNodeId: ids[idx] } : {}),
+        title: p.member.title,
+        role: p.member.role,
+        mirrorOf: p.member.mirrorOf,
+        finishedDimsMm: [p.totalFinishedLengthMm, p.crossSectionMm[0], p.crossSectionMm[1]],
+        shoulderToShoulderMm: p.shoulderToShoulderMm,
+        face1: p.member.face1.label,
+        face2: p.member.face2.label,
+        mortiseCount: p.mortises.length,
+        tenonCount: p.tenons.length,
+        zClipSlotCount: p.zClipSlots.length,
+        stoppedEdgeZones: p.stoppedEdgeZones,
+      })),
+      joints: outcome.joints.map((j) => ({
+        id: j.id,
+        kind: j.kind,
+        between: [j.memberAId, j.memberBId],
+        miteredCornerTenon: j.tenon?.miteredTip ?? false,
+        notes: j.notes,
+      })),
+      stockBars: cutPlan.stockBars,
+      hardwareBom: cutPlan.hardwareBom,
+      cncSetups: cutPlan.allCncSetups.map((s) => ({
+        id: s.id,
+        partId: s.partId,
+        faceUpLabel: s.faceUpLabel,
+        fenceFaceLabel: s.fenceFaceLabel,
+        indexOffsetFromTopMm: s.indexOffsetFromTopMm,
+        overhangMm: s.overhangMm,
+        estimatedMinutes: s.estimatedMinutes,
+        operationsSummary: s.operationsSummary,
+        gcode: s.gcode,
+      })),
+      buildGuideMarkdown: cutPlan.buildGuideMarkdown,
+      warnings: outcome.warnings,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-
-  const rawBed = msg.cncBedMm ?? msg.cnc_bed_mm;
-  const bedArr = Array.isArray(rawBed) ? (rawBed as number[]) : null;
-  const cncBedMm: [number, number, number] =
-    bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
-      ? [bedArr[0], bedArr[1], bedArr[2]]
-      : [store.cncBed.widthMm, store.cncBed.depthMm, store.cncBed.heightMm];
-  const motion = webSerialManager.getState().motion;
-
-  const cutPlan = buildTimberCutPlan(outcome, {
-    cncBedMm,
-    defaultStockLengthMm: num(msg.stockLengthMm ?? msg.stock_length_mm) ?? 1800,
-    spindle: motion.spindle,
-    maxFeedMmMin: Math.min(motion.maxRate.x, motion.maxRate.y),
-  });
-
-  const names = outcome.parts.map((p) => p.member.id);
-  const ids =
-    msg.apply === true
-      ? store.splitBodyForPrint(primary.id, outcome.sections, absorbed, {
-          plain: false,
-          names,
-          centerOrigin: true,
-          placement,
-        })
-      : null;
-
-  return {
-    ok: true,
-    mode: 'frame',
-    applied: !!ids,
-    placement: ids ? placement : undefined,
-    parts: outcome.parts.map((p, idx) => ({
-      index: idx,
-      id: p.member.id,
-      ...(ids ? { sceneNodeId: ids[idx] } : {}),
-      title: p.member.title,
-      role: p.member.role,
-      mirrorOf: p.member.mirrorOf,
-      finishedDimsMm: [p.totalFinishedLengthMm, p.crossSectionMm[0], p.crossSectionMm[1]],
-      shoulderToShoulderMm: p.shoulderToShoulderMm,
-      face1: p.member.face1.label,
-      face2: p.member.face2.label,
-      mortiseCount: p.mortises.length,
-      tenonCount: p.tenons.length,
-      zClipSlotCount: p.zClipSlots.length,
-      stoppedEdgeZones: p.stoppedEdgeZones,
-    })),
-    joints: outcome.joints.map((j) => ({
-      id: j.id,
-      kind: j.kind,
-      between: [j.memberAId, j.memberBId],
-      miteredCornerTenon: j.tenon?.miteredTip ?? false,
-      notes: j.notes,
-    })),
-    stockBars: cutPlan.stockBars,
-    hardwareBom: cutPlan.hardwareBom,
-    cncSetups: cutPlan.allCncSetups.map((s) => ({
-      id: s.id,
-      partId: s.partId,
-      faceUpLabel: s.faceUpLabel,
-      fenceFaceLabel: s.fenceFaceLabel,
-      indexOffsetFromTopMm: s.indexOffsetFromTopMm,
-      overhangMm: s.overhangMm,
-      estimatedMinutes: s.estimatedMinutes,
-      operationsSummary: s.operationsSummary,
-      gcode: s.gcode,
-    })),
-    buildGuideMarkdown: cutPlan.buildGuideMarkdown,
-    warnings: outcome.warnings,
-  };
 };
 
 const exportSheetUnfoldCommand: McpHandler = async (msg, { store, toId }) => {
   const resolveId = (id: string) => (toId ? String(toId(id)) : id);
+  const rawMode = msg.mode ?? msg.sheetMode;
+  if (rawMode !== undefined && rawMode !== null
+    && rawMode !== 'papercraft' && rawMode !== 'sheet_metal' && rawMode !== 'soft_goods') {
+    return { ok: false, error: "mode is 'papercraft', 'sheet_metal' or 'soft_goods'." };
+  }
+  const thickChk = checkPos(msg.thicknessMm, 'thicknessMm');
+  if (!thickChk.ok) return thickChk;
+  const scaleChk = checkPos(msg.scaleFactor, 'scaleFactor');
+  if (!scaleChk.ok) return scaleChk;
+  const bendChk = checkNonNeg(msg.bendRadiusMm, 'bendRadiusMm');
+  if (!bendChk.ok) return bendChk;
+  const tabChk = checkNonNeg(msg.tabWidthMm, 'tabWidthMm');
+  if (!tabChk.ok) return tabChk;
+  const seamChk = checkNonNeg(msg.seamAllowanceMm, 'seamAllowanceMm');
+  if (!seamChk.ok) return seamChk;
+  const stitchChk = checkNonNeg(msg.stitchPitchMm, 'stitchPitchMm');
+  if (!stitchChk.ok) return stitchChk;
+  if (msg.kFactor !== undefined && msg.kFactor !== null
+    && (typeof msg.kFactor !== 'number' || !Number.isFinite(msg.kFactor) || msg.kFactor < 0 || msg.kFactor > 1)) {
+    return { ok: false, error: 'kFactor must be a finite number between 0 and 1.' };
+  }
   const targetIds = Array.isArray(msg.targetIds)
     ? msg.targetIds.filter((x): x is string => typeof x === 'string').map(resolveId)
     : typeof msg.targetId === 'string'
       ? [resolveId(msg.targetId)]
       : undefined;
-  const res = exportSheetUnfold(
-    store.sceneGraph,
-    msg as Partial<SheetUnfoldOptions>,
-    targetIds,
-  );
-  if (!res.success) {
+  try {
+    const res = exportSheetUnfold(
+      store.sceneGraph,
+      msg as Partial<SheetUnfoldOptions>,
+      targetIds,
+    );
+    if (!res.success) {
+      return {
+        ok: false,
+        error: res.error || 'No unfoldable 3D faces found in the scene.',
+        warnings: res.warnings,
+      };
+    }
     return {
-      ok: false,
-      error: res.error || 'No unfoldable 3D faces found in the scene.',
+      ok: true,
+      mode: res.mode,
+      totalFaces: res.totalFaces,
+      foldCount: res.foldCount,
+      seamCount: res.seamCount,
+      glueTabCount: res.glueTabCount,
+      stitchHoleCount: res.stitchHoleCount,
+      sheetCount: res.sheets.length,
+      islands: res.islands.map((isl) => ({
+        id: isl.id,
+        nodeId: isl.nodeId,
+        nodeName: isl.nodeName,
+        faceCount: isl.faceCount,
+        boundsMm: isl.boundsMm,
+      })),
+      svg: res.svg,
+      etchUrl: res.etchUrl,
       warnings: res.warnings,
     };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return {
-    ok: true,
-    mode: res.mode,
-    totalFaces: res.totalFaces,
-    foldCount: res.foldCount,
-    seamCount: res.seamCount,
-    glueTabCount: res.glueTabCount,
-    stitchHoleCount: res.stitchHoleCount,
-    sheetCount: res.sheets.length,
-    islands: res.islands.map((isl) => ({
-      id: isl.id,
-      nodeId: isl.nodeId,
-      nodeName: isl.nodeName,
-      faceCount: isl.faceCount,
-      boundsMm: isl.boundsMm,
-    })),
-    svg: res.svg,
-    etchUrl: res.etchUrl,
-    warnings: res.warnings,
-  };
 };
 
 const syncPcbEnclosureCommand: McpHandler = async (msg, { store }) => {
+  if (msg.preset !== undefined && msg.preset !== null) {
+    if (typeof msg.preset !== 'string' || !Object.hasOwn(PCB_PRESETS, msg.preset)) {
+      return { ok: false, error: `Unknown PCB preset '${String(msg.preset)}'. Choose one of: ${Object.keys(PCB_PRESETS).join(', ')}.` };
+    }
+  }
+  const wallChk = checkPos(msg.wallThicknessMm, 'wallThicknessMm');
+  if (!wallChk.ok) return wallChk;
+  const clearChk = checkNonNeg(msg.boardClearanceMm, 'boardClearanceMm');
+  if (!clearChk.ok) return clearChk;
+  const standoffChk = checkNonNeg(msg.standoffHeightMm, 'standoffHeightMm');
+  if (!standoffChk.ok) return standoffChk;
+  const topClearChk = checkNonNeg(msg.topClearanceMm, 'topClearanceMm');
+  if (!topClearChk.ok) return topClearChk;
+  const posChk = checkVec3(msg.pos, 'pos');
+  if (!posChk.ok) return posChk;
+
   const presetKey = typeof msg.preset === 'string' ? msg.preset : undefined;
   let spec: PcbMechanicalSpec | null;
-  if (presetKey && presetKey in PCB_PRESETS) {
-    spec = PCB_PRESETS[presetKey];
-  } else if (typeof msg.handoff === 'string') {
-    spec = decodePcbHandoff(msg.handoff);
-  } else if (msg.spec && typeof msg.spec === 'object') {
-    spec = msg.spec as PcbMechanicalSpec;
-  } else {
-    spec = PCB_PRESETS.arduino_uno;
-  }
-  if (!spec) return { ok: false, error: 'Invalid PCB specification or handoff payload.' };
+  try {
+    if (presetKey && Object.hasOwn(PCB_PRESETS, presetKey)) {
+      spec = PCB_PRESETS[presetKey];
+    } else if (typeof msg.handoff === 'string') {
+      spec = decodePcbHandoff(msg.handoff);
+    } else if (msg.spec && typeof msg.spec === 'object') {
+      spec = msg.spec as PcbMechanicalSpec;
+    } else {
+      spec = PCB_PRESETS.arduino_uno;
+    }
+    if (!spec) return { ok: false, error: 'Invalid PCB specification or handoff payload.' };
 
-  const face: PcbEnclosureFace =
-    msg.face === 'front' || msg.face === 'back' || msg.face === 'left' || msg.face === 'right'
-      ? msg.face
-      : 'top';
-  // Sized to the enclosure built from the same options, lid screws and all.
-  const faceplate = exportPcbFaceplateSvg(spec, face, { enclosure: msg as Partial<PcbEnclosureOptions> });
+    if (msg.face !== undefined && msg.face !== null
+      && msg.face !== 'top' && msg.face !== 'front' && msg.face !== 'back' && msg.face !== 'left' && msg.face !== 'right') {
+      return { ok: false, error: "face is 'top', 'front', 'back', 'left' or 'right'." };
+    }
+    const face: PcbEnclosureFace =
+      msg.face === 'front' || msg.face === 'back' || msg.face === 'left' || msg.face === 'right'
+        ? msg.face
+        : 'top';
+    // Sized to the enclosure built from the same options, lid screws and all.
+    const faceplate = exportPcbFaceplateSvg(spec, face, { enclosure: msg as Partial<PcbEnclosureOptions> });
 
-  if (msg.pcbOnly === true) {
-    const pcbNode = buildPcbNode(spec);
-    const nextNodes = [...store.sceneGraph.nodes.filter((n) => n.id !== pcbNode.id), pcbNode];
-    // Added to the scene: its notes, fidelity and pictures stay.
-    await settleScene(nextNodes, { replacesScene: false });
+    if (msg.pcbOnly === true) {
+      const pcbNode = buildPcbNode(spec);
+      const nextNodes = [...store.sceneGraph.nodes.filter((n) => n.id !== pcbNode.id), pcbNode];
+      // Added to the scene: its notes, fidelity and pictures stay.
+      const settled = await settleScene(nextNodes, { replacesScene: false });
+      if (!settled.ok) return { ok: false, error: settled.error || 'Scene failed to compile after adding PCB.' };
+      return {
+        ok: true,
+        pcbId: pcbNode.id,
+        faceplateSvg: faceplate.svg,
+        etchUrl: faceplate.etchUrl,
+      };
+    }
+
+    const enc = generatePcbEnclosure(spec, msg as Partial<PcbEnclosureOptions>);
+    const addedIds = new Set([enc.baseNode.id, enc.pcbNode.id, ...(enc.lidNode ? [enc.lidNode.id] : [])]);
+    const nextNodes = [
+      ...store.sceneGraph.nodes.filter((n) => !addedIds.has(n.id)),
+      enc.baseNode,
+      enc.pcbNode,
+      ...(enc.lidNode ? [enc.lidNode] : []),
+    ];
+    const settled = await settleScene(nextNodes, { replacesScene: false });
+    if (!settled.ok) return { ok: false, error: settled.error || 'Scene failed to compile after building PCB enclosure.' };
     return {
       ok: true,
-      pcbId: pcbNode.id,
+      baseId: enc.baseNode.id,
+      lidId: enc.lidNode?.id,
+      pcbId: enc.pcbNode.id,
+      cutouts: enc.cutouts,
+      clearanceReport: enc.clearanceReport,
       faceplateSvg: faceplate.svg,
       etchUrl: faceplate.etchUrl,
     };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-
-  const enc = generatePcbEnclosure(spec, msg as Partial<PcbEnclosureOptions>);
-  const addedIds = new Set([enc.baseNode.id, enc.pcbNode.id, ...(enc.lidNode ? [enc.lidNode.id] : [])]);
-  const nextNodes = [
-    ...store.sceneGraph.nodes.filter((n) => !addedIds.has(n.id)),
-    enc.baseNode,
-    enc.pcbNode,
-    ...(enc.lidNode ? [enc.lidNode] : []),
-  ];
-  await settleScene(nextNodes, { replacesScene: false });
-  return {
-    ok: true,
-    baseId: enc.baseNode.id,
-    lidId: enc.lidNode?.id,
-    pcbId: enc.pcbNode.id,
-    cutouts: enc.cutouts,
-    clearanceReport: enc.clearanceReport,
-    faceplateSvg: faceplate.svg,
-    etchUrl: faceplate.etchUrl,
-  };
 };
 
-const buildMechanismCommand: McpHandler = async (msg, { store }) => {
-  // Added to the scene as it is; see utils/buildMechanism.ts.
-  const built = buildMechanism(msg as MechanismRequest, store.sceneGraph.nodes);
-  if ('error' in built) return { ok: false, error: built.error };
-  // Added to the scene: its notes, fidelity and pictures stay, as for any body
-  // added (replacing the scene dropped them). And the reply comes once the
-  // parts are built, not after their convex pieces: those follow in the
-  // background (collisionPending), and waiting on them pushed a build past
-  // send_command's ten seconds although it had worked.
-  const settled = await settleScene(built.nodes, { replacesScene: false, waitForColliders: false });
-  // Said, not done quietly: a 0.5 mm lead built as 1 mm runs twice as far.
-  const warnings = adjustmentWarnings(built.family, built.adjusted);
-  return {
-    ok: settled.ok,
-    ...(settled.error ? { error: settled.error } : {}),
-    family: built.family,
-    addedIds: built.addedIds,
-    ...(built.arborId ? { arborId: built.arborId } : {}),
-    metrics: built.metrics,
-    ...(built.adjusted.length ? { adjusted: built.adjusted, warnings } : {}),
-    ...(settled.collisionPending ? { collisionPending: settled.collisionPending, note: settled.note } : {}),
+const buildMechanismCommand: McpHandler = async (msg, { store, toId }) => {
+  if (msg.arborId !== undefined && msg.arborId !== null && typeof msg.arborId !== 'string') {
+    return { ok: false, error: 'arborId must be a string.' };
+  }
+  const originChk = checkVec3(msg.origin, 'origin');
+  if (!originChk.ok) return originChk;
+  const axisChk = checkVec3(msg.axis, 'axis');
+  if (!axisChk.ok) return axisChk;
+  const resolvedMsg: MechanismRequest = {
+    ...(msg as MechanismRequest),
+    ...(typeof msg.arborId === 'string' ? { arborId: String(toId(msg.arborId)) } : {}),
   };
+  try {
+    // Added to the scene as it is; see utils/buildMechanism.ts.
+    const built = buildMechanism(resolvedMsg, store.sceneGraph.nodes);
+    if ('error' in built) return { ok: false, error: built.error };
+    // Added to the scene: its notes, fidelity and pictures stay, as for any body
+    // added (replacing the scene dropped them). And the reply comes once the
+    // parts are built, not after their convex pieces: those follow in the
+    // background (collisionPending), and waiting on them pushed a build past
+    // send_command's ten seconds although it had worked.
+    const settled = await settleScene(built.nodes, { replacesScene: false, waitForColliders: false });
+    // Said, not done quietly: a 0.5 mm lead built as 1 mm runs twice as far.
+    const warnings = adjustmentWarnings(built.family, built.adjusted);
+    return {
+      ok: settled.ok,
+      ...(settled.error ? { error: settled.error } : {}),
+      family: built.family,
+      addedIds: built.addedIds,
+      ...(built.arborId ? { arborId: built.arborId } : {}),
+      metrics: built.metrics,
+      ...(built.adjusted.length ? { adjusted: built.adjusted, warnings } : {}),
+      ...(settled.collisionPending ? { collisionPending: settled.collisionPending, note: settled.note } : {}),
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 };
 
 const breakdownPipeFrameCommand: McpHandler = async (msg) => {
-  if (typeof msg.preset === 'string') {
-    const presetNodes = generatePipeStructurePreset(msg.preset as PipeStructurePresetId, {
-      pipeStandardId: (typeof msg.pipeStandardId === 'string' && msg.pipeStandardId in PIPE_STANDARDS
-        ? msg.pipeStandardId
-        : 'pvc_sch40_3_4') as PipeStandardId,
-      widthMm: typeof msg.widthMm === 'number' ? msg.widthMm : undefined,
-      depthMm: typeof msg.depthMm === 'number' ? msg.depthMm : undefined,
-      heightMm: typeof msg.heightMm === 'number' ? msg.heightMm : undefined,
-      roofPitchDeg: typeof msg.roofPitchDeg === 'number' ? msg.roofPitchDeg : undefined,
-    });
-    await settleScene(presetNodes);
+  if (msg.preset !== undefined && msg.preset !== null) {
+    if (typeof msg.preset !== 'string' || !(PIPE_STRUCTURE_PRESETS as readonly string[]).includes(msg.preset)) {
+      return { ok: false, error: `Unknown preset '${String(msg.preset)}'. Choose one of: ${PIPE_STRUCTURE_PRESETS.join(', ')}.` };
+    }
   }
-  const bd = breakdownPipeFrame(useStore.getState().sceneGraph, msg as Partial<PipeFrameOptions>);
-  let addedHubIds: string[] = [];
-  if (msg.addPrintableHubs === true) {
-    const hubNodes = await buildHubsOffThread(bd);
-    addedHubIds = hubNodes.map((h) => h.id);
-    const nextNodes = [...withoutHubsAt(useStore.getState().sceneGraph.nodes, hubNodes), ...hubNodes];
-    await settleScene(nextNodes, { replacesScene: false });
+  if (msg.pipeStandardId !== undefined && msg.pipeStandardId !== null) {
+    if (typeof msg.pipeStandardId !== 'string' || !Object.hasOwn(PIPE_STANDARDS, msg.pipeStandardId)) {
+      return { ok: false, error: `Unknown pipeStandardId '${String(msg.pipeStandardId)}'. Choose one of: ${Object.keys(PIPE_STANDARDS).join(', ')}.` };
+    }
   }
-  return {
-    ok: true,
-    pipeSpec: bd.pipeSpec,
-    strutCount: bd.struts.length,
-    hubCount: bd.hubs.length,
-    sticksRequired: bd.sticksRequired,
-    totalPipeLengthMm: bd.totalPipeLengthMm,
-    shoppingList: bd.shoppingList,
-    sticks: bd.sticks,
-    addedHubIds,
-    warnings: bd.warnings,
-  };
+  const widthChk = checkPos(msg.widthMm, 'widthMm');
+  if (!widthChk.ok) return widthChk;
+  const depthChk = checkPos(msg.depthMm, 'depthMm');
+  if (!depthChk.ok) return depthChk;
+  const heightChk = checkPos(msg.heightMm, 'heightMm');
+  if (!heightChk.ok) return heightChk;
+  const stockLenChk = checkPos(msg.stockLengthMm, 'stockLengthMm');
+  if (!stockLenChk.ok) return stockLenChk;
+  const pitchChk = checkFiniteNum(msg.roofPitchDeg, 'roofPitchDeg');
+  if (!pitchChk.ok) return pitchChk;
+
+  try {
+    if (typeof msg.preset === 'string') {
+      const pipeStandardId: PipeStandardId =
+        typeof msg.pipeStandardId === 'string' && Object.hasOwn(PIPE_STANDARDS, msg.pipeStandardId)
+          ? (msg.pipeStandardId as PipeStandardId)
+          : 'pvc_sch40_3_4';
+      const presetNodes = generatePipeStructurePreset(msg.preset as PipeStructurePresetId, {
+        pipeStandardId,
+        widthMm: widthChk.value,
+        depthMm: depthChk.value,
+        heightMm: heightChk.value,
+        roofPitchDeg: pitchChk.value,
+      });
+      const settled = await settleScene(presetNodes);
+      if (!settled.ok) return { ok: false, error: settled.error || 'Scene failed to compile after loading pipe preset.' };
+    }
+    const bd = breakdownPipeFrame(useStore.getState().sceneGraph, msg as Partial<PipeFrameOptions>);
+    let addedHubIds: string[] = [];
+    if (msg.addPrintableHubs === true) {
+      const hubNodes = await buildHubsOffThread(bd);
+      addedHubIds = hubNodes.map((h) => h.id);
+      const nextNodes = [...withoutHubsAt(useStore.getState().sceneGraph.nodes, hubNodes), ...hubNodes];
+      const settled = await settleScene(nextNodes, { replacesScene: false });
+      if (!settled.ok) return { ok: false, error: settled.error || 'Scene failed to compile after adding printable hubs.' };
+    }
+    return {
+      ok: true,
+      pipeSpec: bd.pipeSpec,
+      strutCount: bd.struts.length,
+      hubCount: bd.hubs.length,
+      sticksRequired: bd.sticksRequired,
+      totalPipeLengthMm: bd.totalPipeLengthMm,
+      shoppingList: bd.shoppingList,
+      sticks: bd.sticks,
+      addedHubIds,
+      warnings: bd.warnings,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 };
 
 export const partBuildCommands: McpCommands = {
@@ -483,46 +656,69 @@ export const partBuildCommands: McpCommands = {
   PHYSICS_BUILD_MECHANISM: buildMechanismCommand,
   BREAKDOWN_PIPE_FRAME: breakdownPipeFrameCommand,
   PHYSICS_BREAKDOWN_PIPE_FRAME: breakdownPipeFrameCommand,
-  BUILD_PIPE_FRAME: async (msg, { store }) => {
+  BUILD_PIPE_FRAME: async (msg, { store, toId }) => {
     // A lattice sketch or any solid, framed in pipe and stood up.
     // A body, or the whole scene when none is given.
-    const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : WHOLE_SCENE;
-    const body = bodyId === WHOLE_SCENE ? { id: WHOLE_SCENE, name: 'the scene' } : findNodeInScene(store.sceneGraph.nodes, bodyId);
-    if (!body) return { ok: false, error: `No body '${bodyId}'.` };
-    const pipeStandardId = (typeof msg.pipeStandardId === 'string' && msg.pipeStandardId in PIPE_STANDARDS
+    if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
+      return { ok: false, error: 'bodyId must be a string.' };
+    }
+    const rawBodyId = typeof msg.bodyId === 'string' ? msg.bodyId : WHOLE_SCENE;
+    const body = rawBodyId === WHOLE_SCENE
+      ? { id: WHOLE_SCENE, name: 'the scene' }
+      : findNodeInScene(store.sceneGraph.nodes, toId(rawBodyId) as string);
+    if (!body) return { ok: false, error: `No body '${rawBodyId}'.` };
+    if (msg.pipeStandardId !== undefined && msg.pipeStandardId !== null) {
+      if (typeof msg.pipeStandardId !== 'string' || !Object.hasOwn(PIPE_STANDARDS, msg.pipeStandardId)) {
+        return { ok: false, error: `Unknown pipeStandardId '${String(msg.pipeStandardId)}'. Choose one of: ${Object.keys(PIPE_STANDARDS).join(', ')}.` };
+      }
+    }
+    const maxSpanChk = checkPos(msg.maxSpanMm, 'maxSpanMm');
+    if (!maxSpanChk.ok) return maxSpanChk;
+    if (msg.placement !== undefined && msg.placement !== null && msg.placement !== 'replace' && msg.placement !== 'beside') {
+      return { ok: false, error: "placement is 'replace' or 'beside'." };
+    }
+    if (msg.style !== undefined && msg.style !== null && msg.style !== 'auto' && msg.style !== 'edges' && msg.style !== 'centrelines') {
+      return { ok: false, error: "style is 'auto', 'edges' or 'centrelines'." };
+    }
+    const pipeStandardId = (typeof msg.pipeStandardId === 'string' && Object.hasOwn(PIPE_STANDARDS, msg.pipeStandardId)
       ? msg.pipeStandardId : 'pvc_sch40_3_4') as PipeStandardId;
-    const { nodes, skeleton, added } = await frameBodyOffThread(store.sceneGraph, body.id, {
-      maxSpanMm: typeof msg.maxSpanMm === 'number' ? msg.maxSpanMm : undefined,
-      diagonals: msg.diagonals === true,
-      posts: msg.posts !== false,
-      placement: msg.placement === 'beside' ? 'beside' : 'replace',
-      style: msg.style === 'edges' || msg.style === 'centrelines' ? msg.style : 'auto',
-      pipeStandardId,
-    });
-    store.prepareForDiscreteChange();
-    // Adds to the scene: its note card and settings stay.
-    await settleScene(nodes, { replacesScene: false });
-    const kinds: Record<string, number> = {};
-    for (const m of skeleton.members) kinds[m.kind] = (kinds[m.kind] ?? 0) + 1;
-    const bd = breakdownPipeFrame(useStore.getState().sceneGraph, {
-      pipeStandardId: skeleton.pipeStandardId,
-      stockLengthMm: PIPE_STANDARDS[skeleton.pipeStandardId].stockLengthMm,
-    });
-    return {
-      ok: true,
-      source: skeleton.source,
-      style: skeleton.style,
-      pipe: skeleton.pipeStandardId,
-      ...(skeleton.resizedFrom ? { note: `${PIPE_STANDARDS[skeleton.resizedFrom].label} is too big for ${body.name}: framed in ${PIPE_STANDARDS[skeleton.pipeStandardId].label}.` } : {}),
-      maxSpanMm: skeleton.maxSpanMm,
-      pipes: skeleton.members.length,
-      joints: skeleton.nodes.length,
-      byKind: kinds,
-      bodiesAdded: added,
-      sticksRequired: bd.sticksRequired,
-      totalPipeLengthMm: bd.totalPipeLengthMm,
-      shoppingList: bd.shoppingList,
-      warnings: bd.warnings,
-    };
+    try {
+      const { nodes, skeleton, added } = await frameBodyOffThread(store.sceneGraph, body.id, {
+        maxSpanMm: maxSpanChk.value,
+        diagonals: msg.diagonals === true,
+        posts: msg.posts !== false,
+        placement: msg.placement === 'beside' ? 'beside' : 'replace',
+        style: msg.style === 'edges' || msg.style === 'centrelines' ? msg.style : 'auto',
+        pipeStandardId,
+      });
+      useStore.getState().prepareForDiscreteChange();
+      // Adds to the scene: its note card and settings stay.
+      const settled = await settleScene(nodes, { replacesScene: false });
+      if (!settled.ok) return { ok: false, error: settled.error || 'Scene failed to compile after building pipe frame.' };
+      const kinds: Record<string, number> = {};
+      for (const m of skeleton.members) kinds[m.kind] = (kinds[m.kind] ?? 0) + 1;
+      const bd = breakdownPipeFrame(useStore.getState().sceneGraph, {
+        pipeStandardId: skeleton.pipeStandardId,
+        stockLengthMm: PIPE_STANDARDS[skeleton.pipeStandardId].stockLengthMm,
+      });
+      return {
+        ok: true,
+        source: skeleton.source,
+        style: skeleton.style,
+        pipe: skeleton.pipeStandardId,
+        ...(skeleton.resizedFrom ? { note: `${PIPE_STANDARDS[skeleton.resizedFrom].label} is too big for ${body.name}: framed in ${PIPE_STANDARDS[skeleton.pipeStandardId].label}.` } : {}),
+        maxSpanMm: skeleton.maxSpanMm,
+        pipes: skeleton.members.length,
+        joints: skeleton.nodes.length,
+        byKind: kinds,
+        bodiesAdded: added,
+        sticksRequired: bd.sticksRequired,
+        totalPipeLengthMm: bd.totalPipeLengthMm,
+        shoppingList: bd.shoppingList,
+        warnings: bd.warnings,
+      };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   },
 };

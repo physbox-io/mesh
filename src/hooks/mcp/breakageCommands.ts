@@ -6,9 +6,13 @@ import { useStore } from '../../store/useStore';
 import { useDentStore } from '../../store/dentStore';
 import { isDentable, needsConversionForDenting } from '../../utils/dentMesh';
 import type { DentConfig } from '../../utils/breakThresholds';
-import type { SceneNode } from '../../types/scene';
+import { MIN_FRACTURE_PIECES, MAX_FRACTURE_PIECES } from '../../utils/fracture';
+import type { SceneGeom, SceneNode } from '../../types/scene';
 import { type Msg, findNodeInScene } from './bridgeUtils';
 import type { McpCommands } from './types';
+
+const isNonNegFinite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+const isPosFinite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
 
 export const breakageCommands: McpCommands = {
     /*
@@ -47,10 +51,39 @@ export const breakageCommands: McpCommands = {
         : `'${targetId}' has no hinge or slider to crumple — a free or ball joint has no single axis to fold about` };
     }
 
+    if (crumpleTorqueNm !== undefined && crumpleTorqueNm !== null && !isNonNegFinite(crumpleTorqueNm)) {
+      return { ok: false, error: 'crumpleTorqueNm must be a non-negative finite number or null' };
+    }
+    if (crumpleRangeDeg !== undefined && crumpleRangeDeg !== null) {
+      if (
+        !Array.isArray(crumpleRangeDeg) ||
+        crumpleRangeDeg.length !== 2 ||
+        typeof crumpleRangeDeg[0] !== 'number' ||
+        typeof crumpleRangeDeg[1] !== 'number' ||
+        !Number.isFinite(crumpleRangeDeg[0]) ||
+        !Number.isFinite(crumpleRangeDeg[1]) ||
+        crumpleRangeDeg[0] > crumpleRangeDeg[1]
+      ) {
+        return { ok: false, error: 'crumpleRangeDeg must be [minDeg, maxDeg] finite numbers with min <= max, or null' };
+      }
+    }
+    if (crumpleDampingAfter !== undefined && crumpleDampingAfter !== null && !isNonNegFinite(crumpleDampingAfter)) {
+      return { ok: false, error: 'crumpleDampingAfter must be a non-negative finite number or null' };
+    }
+
     const updates: Partial<typeof joint> = {};
     if (crumpleTorqueNm !== undefined) updates.crumpleTorqueNm = crumpleTorqueNm ?? undefined;
-    if (crumpleRangeDeg !== undefined) updates.crumpleRangeDeg = crumpleRangeDeg;
-    if (crumpleDampingAfter !== undefined) updates.crumpleDampingAfter = crumpleDampingAfter;
+    if (crumpleRangeDeg !== undefined) {
+      updates.crumpleRangeDeg = crumpleRangeDeg === null ? undefined : [crumpleRangeDeg[0], crumpleRangeDeg[1]];
+    } else if (crumpleTorqueNm === null) {
+      // Clearing crumple also clears range/damping unless explicitly replaced so limited="true" isn't stranded.
+      updates.crumpleRangeDeg = undefined;
+    }
+    if (crumpleDampingAfter !== undefined) {
+      updates.crumpleDampingAfter = crumpleDampingAfter ?? undefined;
+    } else if (crumpleTorqueNm === null) {
+      updates.crumpleDampingAfter = undefined;
+    }
     store.updateNodeJoint(node.id, updates, joints.indexOf(joint));
 
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id)
@@ -97,13 +130,93 @@ export const breakageCommands: McpCommands = {
         targetId: string;
         shatterImpulseNs?: number | null; shatterPieces?: number; shatterSeed?: number;
         shatterPattern?: 'uniform' | 'radial'; shatterSpread?: number; shatterDepth?: number;
-        dentYieldNs?: number | null; dentDepthPerNs?: number; dentRadius?: number; dentMaxDepth?: number;
+        dentYieldNs?: number | null; dentDepthPerNs?: number | null; dentRadius?: number | null; dentMaxDepth?: number | null;
         pierceImpulseNs?: number | null; deformCollision?: boolean;
         geomName?: string;
       }>;
     if (!targetId) throw new Error('Missing targetId');
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
     if (!node) throw new Error(`No object with id '${targetId}'`);
+
+    // Validate ALL parameters upfront before mutating store state.
+    if (shatterImpulseNs !== undefined && shatterImpulseNs !== null && !isPosFinite(shatterImpulseNs)) {
+      return { ok: false, error: 'shatterImpulseNs must be a positive finite number or null' };
+    }
+    if (shatterPieces !== undefined && (typeof shatterPieces !== 'number' || !Number.isInteger(shatterPieces) || shatterPieces < MIN_FRACTURE_PIECES || shatterPieces > MAX_FRACTURE_PIECES)) {
+      return { ok: false, error: `shatterPieces must be an integer between ${MIN_FRACTURE_PIECES} and ${MAX_FRACTURE_PIECES}` };
+    }
+    if (shatterSeed !== undefined && !(typeof shatterSeed === 'number' && Number.isFinite(shatterSeed))) {
+      return { ok: false, error: 'shatterSeed must be a finite number' };
+    }
+    if (shatterPattern !== undefined && shatterPattern !== 'radial' && shatterPattern !== 'uniform') {
+      return { ok: false, error: "shatterPattern must be 'radial' or 'uniform'" };
+    }
+    if (shatterSpread !== undefined && !isNonNegFinite(shatterSpread)) {
+      return { ok: false, error: 'shatterSpread must be a non-negative finite number' };
+    }
+    if (shatterDepth !== undefined && (typeof shatterDepth !== 'number' || !Number.isInteger(shatterDepth) || shatterDepth < 0 || shatterDepth > 2)) {
+      return { ok: false, error: 'shatterDepth must be an integer between 0 and 2' };
+    }
+    if (dentYieldNs !== undefined && dentYieldNs !== null && !isPosFinite(dentYieldNs)) {
+      return { ok: false, error: 'dentYieldNs must be a positive finite number or null' };
+    }
+    if (dentDepthPerNs !== undefined && dentDepthPerNs !== null && !isPosFinite(dentDepthPerNs)) {
+      return { ok: false, error: 'dentDepthPerNs must be a positive finite number or null' };
+    }
+    if (dentRadius !== undefined && dentRadius !== null && !isPosFinite(dentRadius)) {
+      return { ok: false, error: 'dentRadius must be a positive finite number or null' };
+    }
+    if (dentMaxDepth !== undefined && dentMaxDepth !== null && !isPosFinite(dentMaxDepth)) {
+      return { ok: false, error: 'dentMaxDepth must be a positive finite number or null' };
+    }
+    if (pierceImpulseNs !== undefined && pierceImpulseNs !== null && !isPosFinite(pierceImpulseNs)) {
+      return { ok: false, error: 'pierceImpulseNs must be a positive finite number or null' };
+    }
+    if (deformCollision !== undefined && typeof deformCollision !== 'boolean') {
+      return { ok: false, error: 'deformCollision must be a boolean' };
+    }
+    if (geomName !== undefined && typeof geomName !== 'string') {
+      return { ok: false, error: 'geomName must be a string' };
+    }
+
+    const wantsDent = dentYieldNs !== undefined || dentDepthPerNs !== undefined
+      || dentRadius !== undefined || dentMaxDepth !== undefined || pierceImpulseNs !== undefined
+      || deformCollision !== undefined;
+    const enablingDent = typeof dentYieldNs === 'number' || typeof dentDepthPerNs === 'number'
+      || typeof dentRadius === 'number' || typeof dentMaxDepth === 'number'
+      || typeof pierceImpulseNs === 'number' || deformCollision === true;
+
+    const geoms = node.geoms || [];
+    let dentIdx = -1;
+    if (wantsDent) {
+      if (enablingDent) {
+        dentIdx = geomName
+          ? geoms.findIndex((g) => g.name === geomName)
+          : geoms.findIndex((g) => isDentable(g) || needsConversionForDenting(g));
+        if (dentIdx < 0) {
+          return { ok: false, error: geomName
+            ? `'${targetId}' has no geom named '${geomName}'`
+            : `'${targetId}' has no surface that can be dented` };
+        }
+        if (!isDentable(geoms[dentIdx]) && !needsConversionForDenting(geoms[dentIdx])) {
+          return { ok: false, error: `'${geoms[dentIdx].name}' is a ${geoms[dentIdx].type}, which has no surface a dent can be made in` };
+        }
+      } else {
+        // Clearing-only path (e.g. dentYieldNs: null / pierceImpulseNs: null / deformCollision: false):
+        // Never convert primitives to meshes just to clear dent properties.
+        if (geomName) {
+          dentIdx = geoms.findIndex((g) => g.name === geomName);
+          if (dentIdx < 0) {
+            return { ok: false, error: `'${targetId}' has no geom named '${geomName}'` };
+          }
+        } else {
+          dentIdx = geoms.findIndex((g) =>
+            g.dentYieldNs !== undefined || g.pierceImpulseNs !== undefined || g.deformCollision !== undefined
+            || g.dentDepthPerNs !== undefined || g.dentRadius !== undefined || g.dentMaxDepth !== undefined,
+          );
+        }
+      }
+    }
 
     const nodeUpdates: Partial<SceneNode> = {};
     if (shatterImpulseNs !== undefined) nodeUpdates.shatterImpulseNs = shatterImpulseNs ?? undefined;
@@ -114,46 +227,44 @@ export const breakageCommands: McpCommands = {
     if (shatterDepth !== undefined) nodeUpdates.shatterDepth = shatterDepth;
     if (Object.keys(nodeUpdates).length > 0) store.updateNode(node.id, nodeUpdates);
 
-    const wantsDent = dentYieldNs !== undefined || dentDepthPerNs !== undefined
-      || dentRadius !== undefined || dentMaxDepth !== undefined || pierceImpulseNs !== undefined
-      || deformCollision !== undefined;
     let dentedGeom: string | null = null;
     let convertedToMesh = false;
-    if (wantsDent) {
-      /*
-       * A primitive is converted rather than refused.
-       *
-       * A dent moves vertices and a primitive has none — a box is six
-       * numbers the solver evaluates, not eight corners — so making one
-       * dentable means rebuilding it as the mesh it already looked like.
-       * `makeDentable` does that, and is the same path the inspector's
-       * checkbox takes.
-       */
-      const geoms = node.geoms || [];
-      const idx = geomName
-        ? geoms.findIndex((g) => g.name === geomName)
-        : geoms.findIndex((g) => isDentable(g) || needsConversionForDenting(g));
-      if (idx < 0) {
-        return { ok: false, error: geomName
-          ? `'${targetId}' has no geom named '${geomName}'`
-          : `'${targetId}' has no surface that can be dented` };
+    if (wantsDent && dentIdx >= 0) {
+      if (enablingDent) {
+        const cfg: DentConfig = {};
+        if (dentYieldNs !== undefined) cfg.dentYieldNs = dentYieldNs ?? undefined;
+        if (dentDepthPerNs !== undefined) cfg.dentDepthPerNs = dentDepthPerNs ?? undefined;
+        if (dentRadius !== undefined) cfg.dentRadius = dentRadius ?? undefined;
+        if (dentMaxDepth !== undefined) cfg.dentMaxDepth = dentMaxDepth ?? undefined;
+        if (pierceImpulseNs !== undefined) cfg.pierceImpulseNs = pierceImpulseNs ?? undefined;
+        if (deformCollision !== undefined) cfg.deformCollision = deformCollision || undefined;
+        const converted = needsConversionForDenting(geoms[dentIdx]);
+        if (!store.makeDentable(node.id, dentIdx, cfg)) {
+          return { ok: false, error: `'${geoms[dentIdx].name}' is a ${geoms[dentIdx].type}, which has no surface a dent can be made in` };
+        }
+        dentedGeom = geoms[dentIdx].name;
+        if (converted) convertedToMesh = true;
+      } else {
+        const clearUpdates: Partial<SceneGeom> = {};
+        if (dentYieldNs === null) {
+          clearUpdates.dentYieldNs = undefined;
+          clearUpdates.dentDepthPerNs = undefined;
+          clearUpdates.dentRadius = undefined;
+          clearUpdates.dentMaxDepth = undefined;
+          clearUpdates.deformCollision = undefined;
+        }
+        if (dentDepthPerNs === null) clearUpdates.dentDepthPerNs = undefined;
+        if (dentRadius === null) clearUpdates.dentRadius = undefined;
+        if (dentMaxDepth === null) clearUpdates.dentMaxDepth = undefined;
+        if (pierceImpulseNs === null) clearUpdates.pierceImpulseNs = undefined;
+        if (deformCollision === false) clearUpdates.deformCollision = undefined;
+        store.updateNodeGeom(node.id, clearUpdates, dentIdx);
+        dentedGeom = geoms[dentIdx].name;
       }
-      const cfg: DentConfig = {};
-      if (dentYieldNs !== undefined) cfg.dentYieldNs = dentYieldNs ?? undefined;
-      if (dentDepthPerNs !== undefined) cfg.dentDepthPerNs = dentDepthPerNs;
-      if (dentRadius !== undefined) cfg.dentRadius = dentRadius;
-      if (dentMaxDepth !== undefined) cfg.dentMaxDepth = dentMaxDepth;
-      if (pierceImpulseNs !== undefined) cfg.pierceImpulseNs = pierceImpulseNs ?? undefined;
-      if (deformCollision !== undefined) cfg.deformCollision = deformCollision || undefined;
-      const converted = needsConversionForDenting(geoms[idx]);
-      if (!store.makeDentable(node.id, idx, cfg)) {
-        return { ok: false, error: `'${geoms[idx].name}' is a ${geoms[idx].type}, which has no surface a dent can be made in` };
-      }
-      dentedGeom = geoms[idx].name;
-      if (converted) convertedToMesh = true;
     }
 
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+    const afterGeom = dentedGeom ? (after?.geoms || []).find((g) => g.name === dentedGeom) : undefined;
     return {
       ok: true, id: node.id, name: node.name,
       shatterImpulseNs: after?.shatterImpulseNs ?? null,
@@ -161,18 +272,20 @@ export const breakageCommands: McpCommands = {
       dentGeom: dentedGeom,
       // Worth saying: the body's geom type changed under the caller.
       convertedToMesh,
-      dentYieldNs: dentedGeom
-        ? (after?.geoms || []).find((g) => g.name === dentedGeom)?.dentYieldNs ?? null
-        : null,
+      dentYieldNs: afterGeom?.dentYieldNs ?? null,
+      ...(pierceImpulseNs !== undefined ? { pierceImpulseNs: afterGeom?.pierceImpulseNs ?? null } : {}),
     };
   },
   RESTORE_BREAK: async (msg) => {
-    const { key } = msg as Msg<{ key?: string }>;
+    const { key } = msg as Msg<{ key?: unknown }>;
     const state = useStore.getState();
-    if (!key) {
+    if (key === undefined || key === null) {
       // No key means "put everything back", which is what Reset does.
       state.resetSimulation();
       return { ok: true, restored: 'all' };
+    }
+    if (typeof key !== 'string' || key.length === 0) {
+      return { ok: false, error: 'key must be a non-empty broken constraint key string (or omit to reset all)' };
     }
     if (!state.brokenConstraints.includes(key)) {
       return { ok: false, error: `'${key}' is not broken` };

@@ -112,24 +112,37 @@ export type Msg<T> = Record<string, unknown> & T;
 export const pointList = (v: unknown): number[][] =>
   (Array.isArray(v) && Array.isArray(v[0]) ? v : [v]) as number[][];
 
+export const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === 'object' && !Array.isArray(v);
+
+export const isFiniteNumber = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isFinite(v);
+
+export const isFiniteTuple = (v: unknown, len: number): v is number[] =>
+  Array.isArray(v) && v.length === len && v.every(isFiniteNumber);
+
+export const isFiniteVec3 = (v: unknown): v is [number, number, number] =>
+  isFiniteTuple(v, 3);
+
 /**
  * Where a new body asked to go under `parent` (an id or a name) lands: the
  * parent's real id, and whether it or anything above it has a joint. Throws
  * when there is no such body, rather than quietly adding at the top level.
+ * Exact id matches across the whole tree take precedence over name matches.
  */
 export const resolveParent = (nodes: SceneNode[], parent: unknown): { id: string; moves: boolean } | null => {
   if (parent === undefined || parent === null || parent === '') return null;
   if (typeof parent !== 'string') throw new Error('parent must be the id or name of an existing body');
-  const walk = (list: SceneNode[], aboveMoves: boolean): { id: string; moves: boolean } | null => {
+  const walk = (list: SceneNode[], aboveMoves: boolean, byId: boolean): { id: string; moves: boolean } | null => {
     for (const n of list || []) {
       const moves = aboveMoves || (n.joints?.length ?? 0) > 0 || n.isComposite === true;
-      if (n.id === parent || n.name === parent) return { id: n.id, moves };
-      const found = walk(n.children || [], moves);
+      if (byId ? n.id === parent : n.name === parent) return { id: n.id, moves };
+      const found = walk(n.children || [], moves, byId);
       if (found) return found;
     }
     return null;
   };
-  const found = walk(nodes, false);
+  const found = walk(nodes, false, true) ?? walk(nodes, false, false);
   if (!found) throw new Error(`No body '${parent}' to put the new one under`);
   return found;
 };
@@ -140,14 +153,27 @@ export const withChild = (nodes: SceneNode[], parentId: string, child: SceneNode
     ? { ...n, children: [...(n.children || []), child] }
     : n.children?.length ? { ...n, children: withChild(n.children, parentId, child) } : n);
 
-export const findNodeInScene = (nodes: SceneNode[], id: string): SceneNode | null => {
+const findNodeByIdExact = (nodes: SceneNode[], id: string): SceneNode | null => {
   for (const node of nodes || []) {
-    if (node.id === id || node.name === id) return node;
-    const child = findNodeInScene(node.children || [], id);
+    if (node.id === id) return node;
+    const child = findNodeByIdExact(node.children || [], id);
     if (child) return child;
   }
   return null;
 };
+
+const findNodeByNameExact = (nodes: SceneNode[], name: string): SceneNode | null => {
+  for (const node of nodes || []) {
+    if (node.name === name) return node;
+    const child = findNodeByNameExact(node.children || [], name);
+    if (child) return child;
+  }
+  return null;
+};
+
+/** Finds a node by exact id anywhere in the tree first, then falls back to exact name. */
+export const findNodeInScene = (nodes: SceneNode[], id: string): SceneNode | null =>
+  findNodeByIdExact(nodes, id) ?? findNodeByNameExact(nodes, id);
 
 // Lives with the other pure reply shapers, so it can be tested without the store.
 export { stripMeshArrays } from '../../utils/objectReply';

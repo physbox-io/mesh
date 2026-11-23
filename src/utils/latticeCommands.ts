@@ -35,6 +35,11 @@ import {
 /** Millimetres per grid step. */
 const mmPerStep = (unit: number) => unit * 1000;
 
+/** Upper bound on grid steps for a single dimension/extrusion/radius (100 m at 0.1 mm/step). */
+const MAX_LATTICE_STEPS = 1_000_000;
+/** Upper bound on polygon sides / revolve segments to prevent OOM or tab freeze. */
+export const MAX_RING_SIDES = 256;
+
 /**
  * Millimetres as a whole number of grid steps.
  *
@@ -187,13 +192,19 @@ export function extrudeMm(
   axis?: Axis,
   mirror?: Axis,
 ): { steps: number; distanceMm: number; sides: number; cap: number[][] } {
+  if (typeof distanceMm !== 'number' || !Number.isFinite(distanceMm)) {
+    throw new Error('distanceMm must be a finite number of millimetres');
+  }
   const index = findFaceMm(lattice, face);
   if (index === -1) {
     throw new Error('No face has those corners — read the shape back with physics_get_lattice and use the corners it reports');
   }
-  const steps = Math.round(distanceMm / mmPerStep(lattice.unit));
-  if (steps === 0) {
+  const steps = stepsOf(distanceMm, mmPerStep(lattice.unit));
+  if (!Number.isFinite(steps) || steps === 0) {
     throw new Error(`A distance of ${distanceMm} mm is less than half a grid step (${mmPerStep(lattice.unit)} mm), so it would move nothing`);
+  }
+  if (Math.abs(steps) > MAX_LATTICE_STEPS) {
+    throw new Error(`A distance of ${distanceMm} mm exceeds the maximum lattice span`);
   }
 
   const partner = mirror ? findMirrorFace(lattice, index, mirror) : -1;
@@ -290,9 +301,15 @@ export function sharpenEdgesMm(
 
 /** Steps for a distance in millimetres, at least one. */
 function stepsFromMm(mm: unknown, unit: number): number {
-  const steps = stepsOf(typeof mm === 'number' ? mm : 0, mmPerStep(unit));
-  if (steps < 1) {
+  if (typeof mm !== 'number' || !Number.isFinite(mm)) {
+    throw new Error('Distance must be a finite number of millimetres');
+  }
+  const steps = stepsOf(mm, mmPerStep(unit));
+  if (!(steps >= 1)) {
     throw new Error(`That is less than one grid step (${unit * 1000} mm), so it would change nothing`);
+  }
+  if (steps > MAX_LATTICE_STEPS) {
+    throw new Error(`Distance of ${mm} mm exceeds the maximum lattice span`);
   }
   return steps;
 }
@@ -462,8 +479,11 @@ export function addRingMm(
   if (!validPoint(centre)) {
     throw new Error('centre must be a point [x, y, z] in millimetres');
   }
-  if (typeof diameterMm !== 'number' || !(diameterMm > 0)) {
-    throw new Error('diameterMm must be a positive number of millimetres');
+  if (typeof diameterMm !== 'number' || !Number.isFinite(diameterMm) || !(diameterMm > 0)) {
+    throw new Error('diameterMm must be a positive finite number of millimetres');
+  }
+  if (sides !== 0 && (!Number.isInteger(sides) || sides < 3 || sides > MAX_RING_SIDES)) {
+    throw new Error(`sides must be 0 (auto) or an integer from 3 to ${MAX_RING_SIDES}`);
   }
   const middle = coordFromMm(centre, lattice.unit);
   const radius = stepsFromMm(diameterMm / 2, lattice.unit);
@@ -508,11 +528,21 @@ export function revolveMm(
   if (!Array.isArray(profile) || profile.length < 2 || !profile.every(validPoint)) {
     throw new Error('profile must be two or more points [x, y, z] in millimetres, in the order they run along the profile');
   }
-  const spin = typeof degrees === 'number' && Number.isFinite(degrees) ? degrees : 360;
+  if (typeof degrees !== 'number' || !Number.isFinite(degrees)) {
+    throw new Error('degrees must be a finite number between 1 and 360');
+  }
+  const spin = degrees;
   if (Math.abs(spin) < 1 || Math.abs(spin) > 360) {
     throw new Error('degrees must be between 1 and 360 — a full turn closes the shape onto itself, anything less leaves both ends open');
   }
-  const through = validPoint(options.throughMm)
+  if (options.throughMm !== undefined && !validPoint(options.throughMm)) {
+    throw new Error('throughMm must be a point [x, y, z] in millimetres');
+  }
+  const segs = options.segments ?? 0;
+  if (segs !== 0 && (!Number.isInteger(segs) || segs < 3 || segs > MAX_RING_SIDES)) {
+    throw new Error(`segments must be 0 (auto) or an integer from 3 to ${MAX_RING_SIDES}`);
+  }
+  const through = options.throughMm !== undefined
     ? coordFromMm(options.throughMm, lattice.unit)
     : ([0, 0, 0] as LatticeCoord);
 
@@ -521,7 +551,7 @@ export function revolveMm(
   const run = closed ? [...points, points[0]] : points;
   const chain = run.map(([i, j, k]) => vertexAt(lattice, i, j, k));
 
-  const result = revolveChain(lattice, chain, axis, through, options.segments ?? 0, spin);
+  const result = revolveChain(lattice, chain, axis, through, segs, spin);
   if (!result) {
     throw new Error('That profile could not be swept — it needs at least two distinct points, and at least one of them off the axis');
   }
@@ -601,6 +631,7 @@ export function dimensionMm(
   mode: 'size' | 'position',
   valueMm: number,
 ): boolean {
+  if (typeof valueMm !== 'number' || !Number.isFinite(valueMm)) return false;
   const corners = [...new Set(vertices)].filter((v) => v >= 0 && v < vertexCount(lattice));
   const bounds = selectionBoundsMm(lattice, corners);
   if (!bounds) return false;
@@ -608,6 +639,7 @@ export function dimensionMm(
   const k = AXIS_INDEX[axis];
   const step = mmPerStep(lattice.unit);
   const wanted = stepsOf(valueMm, step);
+  if (Math.abs(wanted) > MAX_LATTICE_STEPS) return false;
   const min = stepsOf(bounds.minMm[k], step);
   const max = stepsOf(bounds.maxMm[k], step);
 
@@ -649,16 +681,19 @@ export function dimensionSelectionMm(
   mode: 'size' | 'position',
   valueMm: number,
 ): { changed: boolean; corners: number[][]; missing: number[][] } {
+  if (typeof valueMm !== 'number' || !Number.isFinite(valueMm)) {
+    throw new Error('valueMm must be a finite number of millimetres');
+  }
   if (!Array.isArray(selection) || selection.length === 0) {
     throw new Error('Give the corners to measure, as [x, y, z] points in millimetres — read them back with physics_get_lattice');
   }
   const vertices: number[] = [];
   const missing: number[][] = [];
   for (const point of selection) {
-    if (!Array.isArray(point) || point.length < 3) {
+    if (!validPoint(point)) {
       throw new Error('Every corner must be an [x, y, z] point in millimetres');
     }
-    const coord = coordFromMm(point as number[], lattice.unit);
+    const coord = coordFromMm(point, lattice.unit);
     const found = findVertex(lattice, coord[0], coord[1], coord[2]);
     if (found === -1) missing.push(mmFromCoord(coord, lattice.unit));
     else vertices.push(found);

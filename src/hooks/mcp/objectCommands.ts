@@ -23,11 +23,12 @@ import { withoutNulls } from '../../utils/withoutNulls';
 import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import {
   countBodies, collectNodeIds, type Msg, pointList, resolveParent, withChild, findNodeInScene,
+  isPlainObject, isFiniteNumber, isFiniteVec3,
 } from './bridgeUtils';
 import { sculptHistory } from './sculptState';
 import {
-  pendingDeclarativeOps, normalizeRgba, fillGeomDefaults, resolveUpdatedGeoms, resolveBreakFields,
-  fillBodyDefaults, parseTuneTo, applyTuneTo, applyPendingTuneTo,
+  normalizeRgba, fillGeomDefaults, fillJointDefaults, resolveUpdatedGeoms, resolveBreakFields,
+  fillBodyDefaults, parseTuneTo, applyTuneTo, applyPendingTuneTo, type PendingDeclarativeOps,
 } from './bodyDefaults';
 import {
   movingPieceOf, sealCheckFor, applySingleCutToBody, applyRoundEdgesToBody,
@@ -55,6 +56,40 @@ function syncFreeJointToDocument(id: string) {
 const SPEC_FIELDS = ['acousticString', 'windInstrument', 'acousticMembrane', 'nonlinearPlate', 'resonatorTube', 'acousticBow'] as const;
 const ACOUSTIC_FIELDS = ['deformMaterial', ...SPEC_FIELDS];
 
+/** Deduplicates ids across an incoming raw body subtree against `taken` BEFORE fillBodyDefaults runs. */
+function dedupeRawSubtree(raw: RawNode, taken: Set<string>): RawNode {
+  if (!isPlainObject(raw)) return raw;
+  const baseId = typeof raw.id === 'string' && raw.id ? raw.id : (typeof raw.name === 'string' && raw.name ? raw.name : undefined);
+  let nextId = baseId;
+  let renamed = false;
+  if (baseId) {
+    if (taken.has(baseId)) {
+      let n = 2;
+      while (taken.has(`${baseId}_${n}`)) n++;
+      nextId = `${baseId}_${n}`;
+      renamed = true;
+    }
+    taken.add(nextId!);
+  }
+  const children = Array.isArray(raw.children)
+    ? raw.children.map((c) => dedupeRawSubtree(c as RawNode, taken))
+    : raw.children;
+  return {
+    ...raw,
+    ...(renamed ? { id: nextId, ...(!raw.name ? { name: nextId } : {}) } : {}),
+    ...(children !== undefined ? { children } : {}),
+  };
+}
+
+function isDescendantOf(ancestor: SceneNode, targetId: string): boolean {
+  for (const child of ancestor.children || []) {
+    if (child.id === targetId || isDescendantOf(child, targetId)) return true;
+  }
+  return false;
+}
+
+const COMBINE_OPS = new Set(['union', 'difference', 'subtract', 'intersection', 'intersect']);
+
 export const objectCommands: McpCommands = {
     /*
      * Add ONE body, leaving everything already in the scene alone.
@@ -69,41 +104,50 @@ export const objectCommands: McpCommands = {
      */
   ADD_OBJECT: async (msg, { store }) => {
     const raw = msg.body as RawNode | undefined;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new Error('Missing body: pass one body descriptor, the same shape as an element of physics_build_scene\'s bodies array');
+    if (!isPlainObject(raw)) {
+      return { ok: false, error: 'Missing body: pass one body descriptor, the same shape as an element of physics_build_scene\'s bodies array' };
     }
-    const parent = resolveParent(store.sceneGraph.nodes, msg.parent);
-    const rawFields = { ...raw } as Record<string, unknown>;
-    const breakError = resolveBreakFields(rawFields, undefined);
-    if (breakError) return { ok: false, error: breakError };
-    const node = fillBodyDefaults(rawFields as RawNode, parent ? parent.moves : null);
-    // A clashing id would make every later call ambiguous about which body
-    // it meant, so it is corrected here rather than refused: the reply says
-    // what the body ended up called.
+    let parent: { id: string; moves: boolean } | null;
+    try {
+      parent = resolveParent(store.sceneGraph.nodes, msg.parent);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    // Deduplicate the entire incoming subtree against existing scene IDs BEFORE
+    // fillBodyDefaults runs so pending declarative ops and autoCompileScad keys
+    // match the actual stored IDs (root AND children).
     const taken = collectNodeIds(store.sceneGraph.nodes);
-    if (taken.has(node.id)) {
-      const oldId = node.id;
-      let n = 2;
-      while (taken.has(`${node.id}_${n}`)) n++;
-      node.id = `${node.id}_${n}`;
-      if (!raw.name) node.name = node.id;
-      const pending = pendingDeclarativeOps.get(oldId);
-      if (pending) {
-        pendingDeclarativeOps.delete(oldId);
-        pendingDeclarativeOps.set(node.id, pending);
-      }
+    const dedupedRaw = dedupeRawSubtree(raw, taken);
+    const opsMap = new Map<string, PendingDeclarativeOps>();
+    let node: SceneNode;
+    try {
+      node = fillBodyDefaults(dedupedRaw, parent ? parent.moves : null, opsMap);
+    } catch (err) {
+      opsMap.clear();
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     // A string or head given a `tuneTo` is retuned now the scene is around it.
-    const nodes = applyPendingTuneTo(parent
-      ? withChild(store.sceneGraph.nodes, parent.id, node)
-      : [...store.sceneGraph.nodes, node]);
+    let nodes: SceneNode[];
+    try {
+      nodes = applyPendingTuneTo(parent
+        ? withChild(store.sceneGraph.nodes, parent.id, node)
+        : [...store.sceneGraph.nodes, node]);
+    } catch (err) {
+      opsMap.clear();
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     // Read before the store drops them: a typo in a target id did nothing, ok:true.
     const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes, new Set([node.id])));
     store.updateScene({ ...store.sceneGraph, nodes }, true);
-    const scadErrors = await autoCompileScad([node]);
-    await applyDeclarativePreCsgFeatures([node]);
-    await compileCsgNodes(true);
-    await applyDeclarativePostCsgFeatures([node]);
+    let scadErrors: Awaited<ReturnType<typeof autoCompileScad>>;
+    try {
+      scadErrors = await autoCompileScad([node]);
+      await applyDeclarativePreCsgFeatures([node], opsMap);
+      await compileCsgNodes(true);
+      await applyDeclarativePostCsgFeatures([node], opsMap);
+    } finally {
+      opsMap.clear();
+    }
     await useStore.getState().recompile(useStore.getState().sceneGraph, node.id, false, true);
     const compileError = useStore.getState().lastCompileError;
     const addError = [compileError, scadErrors.length ? scadFailureError(scadErrors) : null].filter(Boolean).join(' ') || null;
@@ -117,6 +161,7 @@ export const objectCommands: McpCommands = {
     return {
       ok: !addError && !!landed,
       ...(addError ? { error: addError } : {}),
+      ...(scadErrors.length ? { scadErrors } : {}),
       ...(added.length ? { scriptWarnings: added } : {}),
       ...(referenceWarnings.length ? { referenceWarnings } : {}),
       ...(axes.length ? { warnings: axes } : {}),
@@ -129,26 +174,47 @@ export const objectCommands: McpCommands = {
   },
   UPDATE_OBJECT: async (msg, { store }) => {
     const requestedId = typeof msg.targetId === 'string' ? msg.targetId : '';
+    if (!requestedId) return { ok: false, error: 'Missing object id' };
+    if (!isPlainObject(msg.updates)) {
+      return { ok: false, error: 'Missing or invalid updates payload (must be a plain object)' };
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rawUpdates = msg.updates as Partial<SceneNode> & Record<string, any>;
-    if (!requestedId) throw new Error('Missing object id');
-    if (!rawUpdates) throw new Error('Missing updates payload');
     // The store edits by id alone and ignores one it doesn't know, which
     // this handler then reported as ok:true.
     const target = findNodeInScene(store.sceneGraph.nodes, requestedId);
     if (!target) return { ok: false, error: `No object with id "${requestedId}"` };
     const targetId = target.id;
 
+    if (rawUpdates.id !== undefined && rawUpdates.id !== null && rawUpdates.id !== targetId) {
+      return { ok: false, error: 'Body id cannot be changed via update_object' };
+    }
+
     // Extract declarative feature arrays if passed in updates. A null field
     // removes it from the body (and, in a geom or joint, from that).
     const updates = { ...rawUpdates };
+    delete updates.id;
     // A body cannot be without an id, a name or a place, so a null there is ignored.
     for (const k of Object.keys(updates)) {
       if (updates[k] !== null) continue;
       if (k === 'id' || k === 'name' || k === 'pos') delete updates[k];
       else updates[k] = undefined;
     }
-    if (Array.isArray(updates.joints)) updates.joints = updates.joints.map((j: SceneJoint) => withoutNulls(j));
+    if (updates.joints !== undefined) {
+      if (!Array.isArray(updates.joints) || !updates.joints.every(isPlainObject)) {
+        return { ok: false, error: 'joints must be an array of joint objects' };
+      }
+      const isTopLevel = store.sceneGraph.nodes.some((n) => n.id === targetId);
+      const bodyName = typeof updates.name === 'string' ? updates.name : (target.name ?? targetId);
+      const filledJoints: SceneJoint[] = updates.joints.map((j, i) => fillJointDefaults(j, bodyName, i));
+      if (!isTopLevel && filledJoints.some((j) => j.type === 'free')) {
+        return {
+          ok: false,
+          error: `Body '${bodyName}' sits inside another body and cannot have a free joint. Leave joints empty to fix it rigidly to its parent, or use a hinge or slide.`,
+        };
+      }
+      updates.joints = filledJoints;
+    }
     const breakError = resolveBreakFields(updates, target.deformMaterial);
     if (breakError) return { ok: false, error: breakError };
     const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;
@@ -182,17 +248,29 @@ export const objectCommands: McpCommands = {
 
     if (updates.rgba !== undefined) {
       const norm = normalizeRgba(updates.rgba);
-      if (!norm) return { ok: false, error: 'rgba must be [r, g, b] or [r, g, b, a], each 0..1' };
+      if (!norm) return { ok: false, error: 'rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1' };
       updates.rgba = norm;
     }
 
-    if (Array.isArray(updates.geoms)) {
+    if (updates.geoms !== undefined) {
+      if (!Array.isArray(updates.geoms)) {
+        return { ok: false, error: 'geoms must be an array of geom descriptors' };
+      }
       const geomResult = resolveUpdatedGeoms(target, updates.geoms, updates);
       if (!geomResult.ok) return { ok: false, error: geomResult.error };
       updates.geoms = geomResult.geoms;
       if (updates.geoms.some((g: SceneGeom) => g.csg === 'difference' || g.csg === 'intersection' || (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0))) {
         updates.csgEnabled = true;
       }
+    }
+
+    // null or "" detaches the source: the body keeps the mesh it last
+    // compiled to (or whatever geoms came with this call) as a plain
+    // mesh. Compiling it would fail, and used to, leaving deleting and
+    // re-adding the body as the only way out.
+    if (updates.scad === null || updates.scad === '') updates.scad = undefined;
+    if (updates.scad !== undefined && typeof updates.scad !== 'string') {
+      return { ok: false, error: 'scad must be a string (or null/"" to detach)' };
     }
 
     // Acoustic specs: a partial one merges into the body's own (null drops a
@@ -235,8 +313,9 @@ export const objectCommands: McpCommands = {
     // Read before the store drops them: a typo in a target id did nothing, ok:true.
     const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(replaced(store.sceneGraph.nodes), new Set([targetId])));
 
+    const opsMap = new Map<string, PendingDeclarativeOps>();
     if (rawCuts || normRoundEdges || rawPatterns || rawPaint) {
-      pendingDeclarativeOps.set(targetId, {
+      opsMap.set(targetId, {
         ...(rawCuts ? { cuts: rawCuts } : {}),
         ...(normRoundEdges ? { roundEdges: normRoundEdges } : {}),
         ...(rawPatterns ? { patterns: rawPatterns } : {}),
@@ -244,76 +323,80 @@ export const objectCommands: McpCommands = {
       });
     }
 
-    // null or "" detaches the source: the body keeps the mesh it last
-    // compiled to (or whatever geoms came with this call) as a plain
-    // mesh. Compiling it would fail, and used to, leaving deleting and
-    // re-adding the body as the only way out.
-    if (updates.scad === null || updates.scad === '') updates.scad = undefined;
-
-    if (updates.scad !== undefined) {
-      let compiled: Awaited<ReturnType<typeof compileSCAD>> | null = null;
-      let lastErr: unknown = null;
-      for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
-        if (attempt > 0) await new Promise(r => setTimeout(r, 100));
-        try {
-          const result = await compileSCAD(updates.scad);
-          if (result.faces.length === 0) {
-            lastErr = new Error('Compile produced an empty mesh (0 faces)');
-            continue;
+    try {
+      if (updates.scad !== undefined) {
+        let compiled: Awaited<ReturnType<typeof compileSCAD>> | null = null;
+        let lastErr: unknown = null;
+        for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 100));
+          try {
+            const result = await compileSCAD(updates.scad);
+            if (result.faces.length === 0) {
+              lastErr = new Error('Compile produced an empty mesh (0 faces)');
+              continue;
+            }
+            compiled = result;
+          } catch (err) {
+            lastErr = err;
           }
-          compiled = result;
-        } catch (err) {
-          lastErr = err;
+        }
+        if (!compiled) {
+          return { ok: false, error: `Failed to compile SCAD: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}` };
+        }
+        // Every other field in the same call goes in first: a SCAD body
+        // sent with a new geoms array, a position or a name used to have
+        // all of them dropped while the reply still said ok. The compiled
+        // mesh then lands in the first mesh geom of whatever geoms the
+        // body now has; a geoms array with no mesh in it gets one in front,
+        // rather than having its first primitive overwritten.
+        const { scad, ...rest } = updates;
+        if (Array.isArray(rest.geoms) && !rest.geoms.some((g: SceneGeom) => g.type === 'mesh')) {
+          const name = rest.name ?? target.name;
+          const moves = (rest.joints ?? target.joints ?? []).length > 0;
+          const meshRgba = updates.rgba ?? target.geoms?.find((g: SceneGeom) => g.type === 'mesh')?.rgba;
+          rest.geoms = [{ ...fillGeomDefaults({ type: 'mesh', ...(meshRgba ? { rgba: meshRgba } : {}) }, name, 0, moves), name: `${name}_mesh` }, ...rest.geoms];
+        }
+        // skipRecompile = true: UPDATE_OBJECT runs its own awaited recompile below.
+        if (Object.keys(rest).length > 0) store.updateNode(targetId, rest, true);
+        if (touchesPose(rest)) syncFreeJointToDocument(targetId);
+        store.updateNodeScad(targetId, scad, compiled, true);
+        const freshPre = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) ?? target;
+        await applyDeclarativePreCsgFeatures([freshPre], opsMap);
+        if (findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.csgEnabled) {
+          await compileCsgNodes(true);
+        }
+        const freshPost = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) ?? freshPre;
+        await applyDeclarativePostCsgFeatures([freshPost], opsMap);
+        await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+      } else {
+        if (Object.keys(updates).length > 0) {
+          store.updateNode(targetId, updates, true);
+          if (touchesPose(updates)) syncFreeJointToDocument(targetId);
+        }
+        const freshPre = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) ?? target;
+        await applyDeclarativePreCsgFeatures([freshPre], opsMap);
+        // An update that touches a boolean body (its geoms, its collision
+        // mode, a csg marker) invalidates the generated mesh. The editor's
+        // debounced auto-compiler would get to it eventually, but an MCP
+        // caller is told ok:true synchronously — so do it here and await it.
+        const compiled = await compileCsgNodes(true);
+        const freshPost = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) ?? freshPre;
+        await applyDeclarativePostCsgFeatures([freshPost], opsMap);
+        await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+        if (compiled > 0) {
+          const node = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          if (node?.csgError) return { ok: false, error: `Boolean failed: ${node.csgError}` };
         }
       }
-      if (!compiled) {
-        pendingDeclarativeOps.delete(targetId);
-        throw new Error(`Failed to compile SCAD: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
-      }
-      // Every other field in the same call goes in first: a SCAD body
-      // sent with a new geoms array, a position or a name used to have
-      // all of them dropped while the reply still said ok. The compiled
-      // mesh then lands in the first mesh geom of whatever geoms the
-      // body now has; a geoms array with no mesh in it gets one in front,
-      // rather than having its first primitive overwritten.
-      const { scad, ...rest } = updates;
-      if (Array.isArray(rest.geoms) && !rest.geoms.some((g: SceneGeom) => g.type === 'mesh')) {
-        const name = rest.name ?? target.name;
-        const moves = (rest.joints ?? target.joints ?? []).length > 0;
-        const meshRgba = updates.rgba ?? target.geoms?.find((g: SceneGeom) => g.type === 'mesh')?.rgba;
-        rest.geoms = [{ ...fillGeomDefaults({ type: 'mesh', ...(meshRgba ? { rgba: meshRgba } : {}) }, name, 0, moves), name: `${name}_mesh` }, ...rest.geoms];
-      }
-      if (Object.keys(rest).length > 0) store.updateNode(targetId, rest);
-      if (touchesPose(rest)) syncFreeJointToDocument(targetId);
-      store.updateNodeScad(targetId, scad, compiled, false);
-      await applyDeclarativePreCsgFeatures([target]);
-      if (findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.csgEnabled) {
-        await compileCsgNodes(true);
-      }
-      await applyDeclarativePostCsgFeatures([target]);
-      await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
-    } else {
-      if (Object.keys(updates).length > 0) {
-        store.updateNode(targetId, updates);
-        if (touchesPose(updates)) syncFreeJointToDocument(targetId);
-      }
-      await applyDeclarativePreCsgFeatures([target]);
-      // An update that touches a boolean body (its geoms, its collision
-      // mode, a csg marker) invalidates the generated mesh. The editor's
-      // debounced auto-compiler would get to it eventually, but an MCP
-      // caller is told ok:true synchronously — so do it here and await it.
-      const compiled = await compileCsgNodes(true);
-      await applyDeclarativePostCsgFeatures([target]);
-      await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
-      if (compiled > 0) {
-        const node = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
-        if (node?.csgError) return { ok: false, error: `Boolean failed: ${node.csgError}` };
-      }
+    } finally {
+      opsMap.clear();
     }
-    updateOrCreateNotecard({
-      mode: 'mcp',
-      nodes: useStore.getState().sceneGraph.nodes
-    });
+    if (typeof window !== 'undefined') {
+      updateOrCreateNotecard({
+        mode: 'mcp',
+        nodes: useStore.getState().sceneGraph.nodes
+      });
+    }
     const error = useStore.getState().lastCompileError;
     // A script is applied even when it does not compile; the reply says so.
     const scriptError = typeof rawUpdates.script === 'string' ? scriptSyntaxError(rawUpdates.script) : null;
@@ -346,30 +429,35 @@ export const objectCommands: McpCommands = {
   SET_COLOR: async (msg, { store }) => {
     // The base colour of a body — what "make the imported bracket blue"
     // means. Paint (below) sits on top of this and is not disturbed by it.
-    const { targetId, geomName, rgba } = msg as Msg<{ targetId: string; geomName?: string; rgba: number[] }>;
-    if (!targetId) throw new Error('Missing targetId');
-    if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each 0..1');
+    const { targetId, geomName, rgba } = msg as Msg<{ targetId: string; geomName?: string; rgba: unknown }>;
+    if (!targetId) return { ok: false, error: 'Missing targetId' };
+    const validatedRgba = normalizeRgba(rgba);
+    if (!validatedRgba) {
+      return { ok: false, error: 'rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1' };
+    }
+    const rawRgba = rgba as number[];
+    const explicitAlpha = rawRgba.length === 4 ? rawRgba[3] : undefined;
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-    if (!node) throw new Error(`No object with id '${targetId}'`);
+    if (!node) return { ok: false, error: `No object with id '${targetId}'` };
     if (node.cloth) {
-      const c = [rgba[0], rgba[1], rgba[2], rgba[3] ?? 1];
       if (node.cloth.garment) {
         if (geomName) {
           const attached = node.cloth.garment.attached ?? [];
           if (!attached.some((a) => a.name === geomName)) {
-            throw new Error(`Garment '${targetId}' has no attached piece named '${geomName}'`);
+            return { ok: false, error: `Garment '${targetId}' has no attached piece named '${geomName}'` };
           }
           store.updateNode(targetId, {
             cloth: {
               ...node.cloth,
               garment: {
                 ...node.cloth.garment,
-                attached: attached.map((a) => (a.name === geomName ? { ...a, rgba: [rgba[0], rgba[1], rgba[2], rgba[3] ?? a.rgba?.[3] ?? 1] } : a)),
+                attached: attached.map((a) => (a.name === geomName ? { ...a, rgba: [rawRgba[0], rawRgba[1], rawRgba[2], explicitAlpha ?? a.rgba?.[3] ?? 1] } : a)),
               },
             },
           });
           return { ok: true, geomsColored: 1 };
         }
+        const c = [rawRgba[0], rawRgba[1], rawRgba[2], explicitAlpha ?? node.cloth.garment.rgba?.[3] ?? 1];
         store.updateNode(targetId, {
           cloth: { ...node.cloth, garment: { ...node.cloth.garment, rgba: c } },
         });
@@ -377,14 +465,14 @@ export const objectCommands: McpCommands = {
       }
       const pieces = node.cloth.pieces ?? [];
       if (geomName && !pieces.some((p) => p.name === geomName)) {
-        throw new Error(`Cloth '${targetId}' has no piece named '${geomName}'`);
+        return { ok: false, error: `Cloth '${targetId}' has no piece named '${geomName}'` };
       }
       store.updateNode(targetId, {
         cloth: {
           ...node.cloth,
           pieces: pieces.map((p) =>
             !geomName || p.name === geomName
-              ? { ...p, rgba: [rgba[0], rgba[1], rgba[2], rgba[3] ?? p.rgba?.[3] ?? 1] }
+              ? { ...p, rgba: [rawRgba[0], rawRgba[1], rawRgba[2], explicitAlpha ?? p.rgba?.[3] ?? 1] }
               : p,
           ),
         },
@@ -392,9 +480,9 @@ export const objectCommands: McpCommands = {
       return { ok: true, geomsColored: geomName ? 1 : pieces.length };
     }
     if (geomName && !(node.geoms || []).some((g: SceneGeom) => g.name === geomName)) {
-      throw new Error(`Object '${targetId}' has no geom named '${geomName}'`);
+      return { ok: false, error: `Object '${targetId}' has no geom named '${geomName}'` };
     }
-    store.setGeomColor(targetId, geomName, rgba);
+    store.setGeomColor(targetId, geomName, explicitAlpha !== undefined ? validatedRgba : rawRgba.slice(0, 3));
     return { ok: true, geomsColored: geomName ? 1 : (node.geoms || []).length };
   },
   PAINT: async (msg) => {
@@ -407,8 +495,11 @@ export const objectCommands: McpCommands = {
     // to apply multiple colours/brushes in one round-trip.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { targetId, strokes } = msg as Msg<{ targetId: string; strokes?: Record<string, any>[] }>;
-    if (!targetId) throw new Error('Missing targetId');
-    if (Array.isArray(strokes) && strokes.length > 0) {
+    if (!targetId) return { ok: false, error: 'Missing targetId' };
+    if (strokes !== undefined) {
+      if (!Array.isArray(strokes) || strokes.length === 0) {
+        return { ok: false, error: 'strokes must be a non-empty array of paint stroke objects' };
+      }
       // A stroke that misses is reported in its place in `results` and the
       // rest still land: one miss used to fail the call after the strokes
       // before it had been applied.
@@ -429,21 +520,31 @@ export const objectCommands: McpCommands = {
         results,
       };
     }
-    return applyPaintStrokeToBody(targetId, msg);
+    try {
+      return applyPaintStrokeToBody(targetId, msg);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   },
   CLEAR_PAINT: async (msg, { store }) => {
-    const { targetId, geomName } = msg as Msg<{ targetId: string; geomName?: string }>;
+    const { targetId, geomName } = msg as Msg<{ targetId?: string; geomName?: string }>;
     if (!targetId) {
+      if (geomName) {
+        return { ok: false, error: 'geomName requires id: specify the body id when clearing paint on one geom.' };
+      }
       store.clearAllPaint();
       return { ok: true, scope: 'scene' };
     }
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-    if (!node) throw new Error(`No object with id '${targetId}'`);
+    if (!node) return { ok: false, error: `No object with id '${targetId}'` };
+    if (geomName && !(node.geoms || []).some((g) => g.name === geomName)) {
+      return { ok: false, error: `Object '${targetId}' has no geom named '${geomName}'` };
+    }
     for (const geom of node.geoms || []) {
       if (geomName && geom.name !== geomName) continue;
-      if (geom.paint) store.setGeomPaint(targetId, geom.name, undefined);
+      if (geom.paint) store.setGeomPaint(node.id, geom.name, undefined);
     }
-    return { ok: true, scope: geomName || targetId };
+    return { ok: true, scope: geomName || node.id };
   },
     /*
      * Weld one body to another, and say what it takes to shear the weld off.
@@ -456,12 +557,12 @@ export const objectCommands: McpCommands = {
   SET_CONSTRAINT: async (msg, { store }) => {
     const { targetId, weldTo, connectTo, breakForceN, breakTorqueNm, breakHoldSteps } =
       msg as Msg<{
-        targetId: string; weldTo?: string | null; connectTo?: string | null;
-        breakForceN?: number | null; breakTorqueNm?: number | null; breakHoldSteps?: number | null;
+        targetId: string; weldTo?: unknown; connectTo?: unknown;
+        breakForceN?: unknown; breakTorqueNm?: unknown; breakHoldSteps?: unknown;
       }>;
-    if (!targetId) throw new Error('Missing targetId');
+    if (!targetId) return { ok: false, error: 'Missing targetId' };
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-    if (!node) throw new Error(`No object with id '${targetId}'`);
+    if (!node) return { ok: false, error: `No object with id '${targetId}'` };
 
     const updates: Partial<SceneNode> = {};
     for (const [field, value] of [
@@ -469,16 +570,32 @@ export const objectCommands: McpCommands = {
     ] as const) {
       if (value === undefined) continue;
       if (value === null || value === '') { updates[field] = undefined; continue; }
+      if (typeof value !== 'string') return { ok: false, error: `${field === 'weldTargetId' ? 'weldTo' : 'connectTo'} must be a body id or name (string), or null to clear` };
       const target = findNodeInScene(store.sceneGraph.nodes, value);
-      if (!target) throw new Error(`No object with id '${value}' to attach to`);
+      if (!target) return { ok: false, error: `No object with id '${value}' to attach to` };
       if (target.id === node.id) return { ok: false, error: 'A body cannot be attached to itself' };
       updates[field] = target.id;
     }
     // null clears a threshold; undefined leaves it alone. Without the
     // distinction there is no way to make a weld unbreakable again.
-    if (breakForceN !== undefined) updates.weldBreakForceN = breakForceN ?? undefined;
-    if (breakTorqueNm !== undefined) updates.weldBreakTorqueNm = breakTorqueNm ?? undefined;
-    if (breakHoldSteps !== undefined) updates.weldBreakHoldSteps = breakHoldSteps ?? undefined;
+    if (breakForceN !== undefined) {
+      if (breakForceN !== null && (!isFiniteNumber(breakForceN) || breakForceN <= 0)) {
+        return { ok: false, error: 'breakForceN must be a positive finite number, or null to clear' };
+      }
+      updates.weldBreakForceN = breakForceN ?? undefined;
+    }
+    if (breakTorqueNm !== undefined) {
+      if (breakTorqueNm !== null && (!isFiniteNumber(breakTorqueNm) || breakTorqueNm <= 0)) {
+        return { ok: false, error: 'breakTorqueNm must be a positive finite number, or null to clear' };
+      }
+      updates.weldBreakTorqueNm = breakTorqueNm ?? undefined;
+    }
+    if (breakHoldSteps !== undefined) {
+      if (breakHoldSteps !== null && (!isFiniteNumber(breakHoldSteps) || !Number.isInteger(breakHoldSteps) || breakHoldSteps < 1)) {
+        return { ok: false, error: 'breakHoldSteps must be a positive integer, or null to clear' };
+      }
+      updates.weldBreakHoldSteps = breakHoldSteps ?? undefined;
+    }
 
     store.updateNode(node.id, updates);
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
@@ -492,29 +609,50 @@ export const objectCommands: McpCommands = {
     };
   },
   COMBINE_BODIES: async (msg, { store }) => {
-    const { targetId, withIds, op } = msg as Msg<{ targetId: string }>;
-    const sources = Array.isArray(withIds) ? withIds.filter((v: unknown): v is string => typeof v === 'string') : [];
+    const { targetId, withIds, op } = msg as Msg<{ targetId: string; withIds?: unknown; op?: unknown }>;
+    const rawSources = Array.isArray(withIds) ? withIds.filter((v: unknown): v is string => typeof v === 'string') : [];
+    const sources = [...new Set(rawSources)];
     if (sources.length === 0) return { ok: false, error: 'Give the ids of the bodies to merge in, as withIds' };
+    if (op !== undefined && (typeof op !== 'string' || !COMBINE_OPS.has(op))) {
+      return { ok: false, error: `op must be 'union', 'difference' ('subtract'), or 'intersection' ('intersect'), not '${String(op)}'` };
+    }
     const target = findNodeInScene(store.sceneGraph.nodes, targetId);
     if (!target) return { ok: false, error: `No object with id '${targetId}'` };
-    const missing = sources.filter((id: string) => !findNodeInScene(store.sceneGraph.nodes, id));
+    const resolvedSources: SceneNode[] = [];
+    const missing: string[] = [];
+    for (const id of sources) {
+      const found = findNodeInScene(store.sceneGraph.nodes, id);
+      if (!found) missing.push(id);
+      else resolvedSources.push(found);
+    }
     if (missing.length > 0) return { ok: false, error: `No object with id '${missing.join("', '")}'` };
+    const sourceIds = [...new Set(resolvedSources.map((n) => n.id))];
+    if (sourceIds.includes(target.id)) {
+      return { ok: false, error: `Cannot combine body '${target.id}' with itself` };
+    }
+    for (const src of resolvedSources) {
+      if (isDescendantOf(src, target.id)) {
+        return { ok: false, error: `Cannot combine ancestor body '${src.id}' into its descendant '${target.id}'` };
+      }
+    }
     const how = op === 'difference' || op === 'subtract' ? 'difference'
       : op === 'intersection' || op === 'intersect' ? 'intersection' : 'union';
 
     // Counted the same way as after, without the generated geoms a
     // recompile replaces: counting those made a union report -8.
     const before = (target.geoms || []).filter((g: SceneGeom) => !g.csgDerived).length;
-    store.combineBodies(targetId, sources, how);
+    store.combineBodies(target.id, sourceIds, how);
     await compileCsgNodes(true);
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
-    const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+    const after = findNodeInScene(useStore.getState().sceneGraph.nodes, target.id);
     if (after?.csgError) return { ok: false, error: `Combine boolean failed: ${after.csgError}` };
+    const compileError = useStore.getState().lastCompileError;
+    if (compileError) return { ok: false, error: compileError };
     return {
       ok: true,
-      id: targetId,
+      id: target.id,
       op: how,
-      merged: sources,
+      merged: sourceIds,
       shapesAdded: (after?.geoms || []).filter((g: SceneGeom) => !g.csgDerived).length - before,
       geoms: (after?.geoms || []).filter((g: SceneGeom) => !g.csgDerived).map((g: SceneGeom) => g.name),
     };
@@ -522,6 +660,9 @@ export const objectCommands: McpCommands = {
   ROUND_EDGES: async (msg) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { targetId, roundings } = msg as Msg<{ targetId: string; roundings?: Record<string, any>[] }>;
+    if (roundings !== undefined && (!Array.isArray(roundings) || roundings.length === 0)) {
+      return { ok: false, error: 'roundings must be a non-empty array of rounding specifications' };
+    }
     const specs = Array.isArray(roundings) && roundings.length > 0 ? roundings : [msg];
     return await applyRoundEdgesToBody(targetId, specs, true);
   },
@@ -530,27 +671,43 @@ export const objectCommands: McpCommands = {
     const { targetId, cuts } = msg as Msg<{ targetId: string; cuts?: Record<string, any>[] }>;
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
     if (!node) return { ok: false, error: `No object with id '${targetId}'` };
+    if (cuts !== undefined && (!Array.isArray(cuts) || cuts.length === 0)) {
+      return { ok: false, error: 'cuts must be a non-empty array of cut specifications' };
+    }
     const specs = Array.isArray(cuts) && cuts.length > 0 ? cuts : [msg];
+    const beforeScene = useStore.getState().sceneGraph;
     const results = [];
     for (const spec of specs) {
-      const res = applySingleCutToBody(targetId, spec);
-      if (!res.ok) return res;
+      const res = applySingleCutToBody(node.id, spec);
+      if (!res.ok) {
+        if (results.length > 0) useStore.getState().updateScene(beforeScene, true);
+        return res;
+      }
       results.push(res);
     }
     await compileCsgNodes(true);
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
-    const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+    const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
     if (after?.csgError) return { ok: false, error: `Cut boolean failed: ${after.csgError}` };
+    const compileError = useStore.getState().lastCompileError;
+    if (compileError) return { ok: false, error: compileError };
     if (results.length === 1) return results[0];
-    return { ok: true, id: targetId, cutsApplied: results.length, cuts: results };
+    return { ok: true, id: node.id, cutsApplied: results.length, cuts: results };
   },
-  ADD_HARDWARE: async (msg, { store }) => {
+  ADD_HARDWARE: async (msg, { store, toId }) => {
     // `partId`, not `id`: `id` is the request's own, so a part named that way
     // was never seen, and every call read the request id as a part's.
-    const { kind, size, lengthMm, washer, into, group, at, fixTo, partId: existing, between } = msg as Msg<{
-      kind: string; size?: string | number; lengthMm?: number; washer?: boolean; into?: string; group?: string; at?: number[];
-      fixTo?: string; partId?: string; between?: string[];
+    const { kind, size, lengthMm, washer, into: rawInto, group, at, fixTo: rawFixTo, partId: rawExisting, between: rawBetween } = msg as Msg<{
+      kind: unknown; size?: string | number; lengthMm?: unknown; washer?: unknown; into?: unknown; group?: string; at?: unknown;
+      fixTo?: unknown; partId?: unknown; between?: unknown;
     }>;
+    const existing = typeof rawExisting === 'string' && rawExisting ? String(toId(rawExisting)) : undefined;
+    const into = typeof rawInto === 'string' && rawInto ? String(toId(rawInto)) : undefined;
+    const fixTo = typeof rawFixTo === 'string' && rawFixTo ? String(toId(rawFixTo)) : undefined;
+    const between = Array.isArray(rawBetween)
+      ? rawBetween.map((v) => (typeof v === 'string' ? String(toId(v)) : v))
+      : undefined;
+
     // A part already in the scene: only fix a body to its moving piece.
     if (existing) {
       const part = findNodeInScene(store.sceneGraph.nodes, existing);
@@ -560,7 +717,7 @@ export const objectCommands: McpCommands = {
       const why = store.fixToPiece(piece.id, fixTo);
       return why ? { ok: false, error: why } : { ok: true, id: existing, pieceId: piece.id, fixed: fixTo };
     }
-    if (typeof kind !== 'string' || !(kind in HARDWARE_PARTS)) {
+    if (typeof kind !== 'string' || !Object.hasOwn(HARDWARE_PARTS, kind)) {
       return { ok: false, error: `kind must be one of ${Object.keys(HARDWARE_PARTS).join(', ')}` };
     }
     const partKind = kind as HardwarePartKind;
@@ -568,7 +725,16 @@ export const objectCommands: McpCommands = {
     if (size !== undefined && !info.sizes.includes(String(size))) {
       return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
     }
-    if (into && !findNodeInScene(store.sceneGraph.nodes, into)) return { ok: false, error: `No object with id '${into}'` };
+    if (lengthMm !== undefined && (!isFiniteNumber(lengthMm) || lengthMm <= 0)) {
+      return { ok: false, error: 'lengthMm must be a positive finite number' };
+    }
+    if (at !== undefined && !isFiniteVec3(at)) {
+      return { ok: false, error: 'at must be [x, y, z] of finite numbers in millimetres' };
+    }
+    if (rawInto !== undefined && rawInto !== null && typeof rawInto !== 'string') {
+      return { ok: false, error: 'into must be a body id or name (string)' };
+    }
+    if (into && !findNodeInScene(store.sceneGraph.nodes, into)) return { ok: false, error: `No object with id '${rawInto}'` };
     let id: string | null;
     const housing = into && group ? findNodeInScene(store.sceneGraph.nodes, into)?.geoms?.find((g) => g.hardware?.group === group)?.hardware?.kind === 'lm_housing' : false;
     if (housing) {
@@ -594,7 +760,9 @@ export const objectCommands: McpCommands = {
     // Extrusion: a joining piece goes where two profiles meet, a carriage onto its V-slot.
     const joinKind = kind === 'corner_bracket' || kind === 'joint_plate' || kind === 'end_tap' ? kind : null;
     if (joinKind) {
-      if (!Array.isArray(between) || between.length !== 2) return { ok: false, error: `A ${info.label.toLowerCase()} joins two profiles: give their ids as between: [a, b]` };
+      if (!Array.isArray(between) || between.length !== 2 || typeof between[0] !== 'string' || typeof between[1] !== 'string') {
+        return { ok: false, error: `A ${info.label.toLowerCase()} joins two profiles: give their ids as between: [a, b]` };
+      }
       const joined = store.joinProfiles(between[0], between[1], joinKind, size !== undefined ? String(size) : undefined);
       if ('problem' in joined) return { ok: false, error: joined.problem };
       id = joined.id;
@@ -607,7 +775,7 @@ export const objectCommands: McpCommands = {
       id = store.seatHardwarePart(into, group, partKind);
       if (!id) return { ok: false, error: `'${into}' has no hardware cut '${group}' that takes a ${info.label.toLowerCase()}` };
     } else {
-      const placed = Array.isArray(at) && at.length >= 3;
+      const placed = isFiniteVec3(at);
       const pos = placed ? at.map((v) => v / 1000) : [0, 0, 0.03];
       // `at` is where it goes, exactly; `into` a body with no cut for it
       // fixes it there (a stepper bolted to its frame).
@@ -652,12 +820,19 @@ export const objectCommands: McpCommands = {
   APPLY_PATTERN: async (msg) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { targetId, patterns } = msg as Msg<{ targetId: string; patterns?: Record<string, any>[] }>;
-    if (!targetId) throw new Error('Missing targetId');
-    if (Array.isArray(patterns) && patterns.length > 0) {
+    if (!targetId) return { ok: false, error: 'Missing targetId' };
+    if (patterns !== undefined) {
+      if (!Array.isArray(patterns) || patterns.length === 0) {
+        return { ok: false, error: 'patterns must be a non-empty array of pattern objects' };
+      }
+      const beforeScene = useStore.getState().sceneGraph;
       const results = [];
       for (const p of patterns) {
         const res = await applySinglePatternToBody(targetId, p);
-        if (!res.ok) return res;
+        if (!res.ok) {
+          if (results.length > 0) useStore.getState().updateScene(beforeScene, true);
+          return res;
+        }
         results.push(res);
       }
       return { ok: true, id: targetId, patternsApplied: results.length, patterns: results };
@@ -665,12 +840,14 @@ export const objectCommands: McpCommands = {
     return await applySinglePatternToBody(targetId, msg);
   },
   KNIFE: async (msg, { store }) => {
-    const m = msg as Msg<{ targetId: string; at?: number[]; normal?: number[]; cut?: boolean; remove?: boolean }>;
-    if (!m.targetId) throw new Error('Missing targetId');
+    const m = msg as Msg<{ targetId: string; at?: unknown; normal?: unknown; cut?: boolean; remove?: boolean }>;
+    if (!m.targetId) return { ok: false, error: 'Missing targetId' };
     const node = findNodeInScene(store.sceneGraph.nodes, m.targetId);
-    if (!node) throw new Error(`No object with id '${m.targetId}'`);
+    if (!node) return { ok: false, error: `No object with id '${m.targetId}'` };
     const atMm = pointList(m.at)[0];
-    if (!atMm) throw new Error('Missing at: a point [x, y, z] the plane passes through, in the body\'s own frame in millimetres.');
+    if (!isFiniteVec3(atMm)) {
+      return { ok: false, error: "Missing or invalid at: expected [x, y, z] of finite numbers in the body's own frame in millimetres." };
+    }
     const at = new Vector3(...atMm.map((v) => v / 1000));
 
     if (m.remove) {
@@ -697,19 +874,22 @@ export const objectCommands: McpCommands = {
       return { ok: true, removed: true, geomName: geom.name, remaining: left.length };
     }
 
-    if (!Array.isArray(m.normal) || m.normal.length !== 3 || !m.normal.every(Number.isFinite)) {
-      throw new Error('Missing normal: the direction [x, y, z] square to the plane, in the body\'s own frame.');
+    if (!isFiniteVec3(m.normal)) {
+      return { ok: false, error: "Missing or invalid normal: expected [x, y, z] of finite numbers in the body's own frame." };
     }
     const normal = new Vector3(...m.normal);
-    if (normal.lengthSq() < 1e-18) throw new Error('normal must not be [0, 0, 0].');
+    if (normal.lengthSq() < 1e-18) return { ok: false, error: 'normal must not be [0, 0, 0].' };
     normal.normalize();
 
     if (m.cut) {
       const { soups, absorbed } = knifeSoups(node);
       const result = await cutAlongPlaneOffThread(soups, at.toArray(), normal.toArray());
       if (!result.ok) return { ok: false, error: result.error };
-      const carry = carryAcrossCut(node, result.sections, at.toArray(), normal.toArray());
-      const ids = useStore.getState().splitBodyForPrint(node.id, result.sections, absorbed, { plain: true, carry });
+      // Verify the target node still exists after awaiting the worker cut.
+      const freshNode = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+      if (!freshNode) return { ok: false, error: `Body '${node.id}' was deleted while cutting.` };
+      const carry = carryAcrossCut(freshNode, result.sections, at.toArray(), normal.toArray());
+      const ids = useStore.getState().splitBodyForPrint(freshNode.id, result.sections, absorbed, { plain: true, carry });
       return {
         ok: true,
         cut: true,

@@ -3,10 +3,12 @@
 // ---------------------------------------------------------------------------
 
 import { useStore } from '../../store/useStore';
+import { clearBreakage } from '../../store/breakage';
 import { compileSCAD } from '../../utils/openscad';
 import { compileCsgNodes, pendingColliderBodies } from '../useCsgCompile';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import { type PhysicsWindow, countBodies } from './bridgeUtils';
+import { clearPendingDeclarativeOps, pendingDeclarativeOps, type PendingDeclarativeOps } from './bodyDefaults';
 import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from './bodyFeatures';
 import { unresolvedReferences, unresolvedReferenceWarnings } from '../../utils/unresolvedReferences';
 import { couplingWarnings } from '../../utils/sceneCouplings';
@@ -99,12 +101,15 @@ export const settleScene = async (
   nodes: SceneNode[],
   {
     replacesScene = true, freshStart = false, waitForColliders = true, sceneFields = {},
+    opsMap = pendingDeclarativeOps,
   }: {
     replacesScene?: boolean; freshStart?: boolean;
     /** What a replacing scene says about itself (fidelity, pictures, environment...). */
     sceneFields?: Omit<SceneGraph, 'nodes'>;
     /** false: reply once the body is built; its convex pieces follow in the background. */
     waitForColliders?: boolean;
+    /** Per-call declarative ops map so failed or concurrent calls never leak or collide. */
+    opsMap?: Map<string, PendingDeclarativeOps>;
   } = {},
 ): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[]; couplingWarnings?: string[]; scadErrors?: ScadFailure[] }> => {
   const store = useStore.getState();
@@ -116,27 +121,39 @@ export const settleScene = async (
   // it here rather than relying on callers to remember to. Not for a caller
   // that only adds a body to the scene (CREATE_LATTICE, IMPORT_STL): that
   // wiped the user's own notes.
-  if (replacesScene) (window as unknown as PhysicsWindow)._physics_setNoteCards?.([]);
+  if (replacesScene) {
+    if (typeof window !== 'undefined') {
+      (window as unknown as PhysicsWindow)._physics_setNoteCards?.([]);
+    }
+    // Clear stale runtime breakage (shattered bodies, broken welds, dents)
+    // from the replaced scene so reused ids never inherit old wreckage.
+    clearBreakage(useStore.setState);
+  }
   // skipRecompile: this initial set uses placeholder (pre-scad) mesh geoms, so
   // an immediate recompile here would be both wasted work and another stale
   // build racing against the final one below.
   // A caller that only adds a body keeps what the scene says about itself:
   // print fidelity, cast prep, reference pictures, its name.
   store.updateScene(replacesScene ? { ...sceneFields, nodes } : { ...store.sceneGraph, ...sceneFields, nodes }, true);
-  const scadErrors = await autoCompileScad(nodes);
-  await applyDeclarativePreCsgFeatures(nodes);
-  // Boolean bodies compile through the same OpenSCAD pool, and just as
-  // asynchronously — a caller that got ok:true before they finished would be
-  // told a scene built when its geometry didn't exist yet. skipFinalRecompile:
-  // the single build below covers it. Convex pieces get a few seconds of
-  // the command's 60 s, not all of it (see SETTLE_WAIT_FOR_COLLIDERS_MS).
-  // Late ones land on their own; the reply and the summary say
-  // collisionPending until they do. A caller that only added a body does not
-  // wait for them at all.
-  await compileCsgNodes(true, waitForColliders
-    ? { colliderWaitMs: SETTLE_WAIT_FOR_COLLIDERS_MS }
-    : { colliders: false });
-  await applyDeclarativePostCsgFeatures(nodes);
+  let scadErrors: ScadFailure[];
+  try {
+    scadErrors = await autoCompileScad(nodes);
+    await applyDeclarativePreCsgFeatures(nodes, opsMap);
+    // Boolean bodies compile through the same OpenSCAD pool, and just as
+    // asynchronously — a caller that got ok:true before they finished would be
+    // told a scene built when its geometry didn't exist yet. skipFinalRecompile:
+    // the single build below covers it. Convex pieces get a few seconds of
+    // the command's 60 s, not all of it (see SETTLE_WAIT_FOR_COLLIDERS_MS).
+    // Late ones land on their own; the reply and the summary say
+    // collisionPending until they do. A caller that only added a body does not
+    // wait for them at all.
+    await compileCsgNodes(true, waitForColliders
+      ? { colliderWaitMs: SETTLE_WAIT_FOR_COLLIDERS_MS }
+      : { colliders: false });
+    await applyDeclarativePostCsgFeatures(nodes, opsMap);
+  } finally {
+    clearPendingDeclarativeOps(nodes, opsMap);
+  }
   // This is now the ONLY recompile triggered by this load, so there's nothing
   // left to race against. forceReset is false so recompile() preserves qpos/qvel
   // when the edit didn't change the DOF count (e.g. tweaking a color or adding a
@@ -148,12 +165,13 @@ export const settleScene = async (
   const error = [compileError, scadErrors.length ? scadFailureError(scadErrors) : null].filter(Boolean).join(' ') || null;
   // nodeCount is every body, nested ones included: a ten-body ride built as
   // one tower with everything hung off it used to report nodeCount 1.
+  const finalNodes = useStore.getState().sceneGraph.nodes;
   const pending = pendingColliderBodies();
   // A coupling the compiler had to leave out, said by name: it used to go
   // quietly, and the run reported every constraint held.
-  const coupling = couplingWarnings(useStore.getState().sceneGraph.nodes);
+  const coupling = couplingWarnings(finalNodes);
   return {
-    ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(nodes), topLevelCount: nodes.length,
+    ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(finalNodes), topLevelCount: finalNodes.length,
     ...(scadErrors.length ? { scadErrors } : {}),
     ...(referenceWarnings.length ? { referenceWarnings } : {}),
     ...(coupling.length ? { couplingWarnings: coupling } : {}),

@@ -9,6 +9,7 @@ import { announcePresetSave } from '../../utils/presetNotices';
 import { bodyNamer, emptySceneRefusal, frameSections, jointTypes, reportHeadless } from '../../utils/headlessReport';
 import { digestTelemetry } from '../../utils/telemetryDigest';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
+import { clearBreakage } from '../../store/breakage';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../../utils/noteCards';
@@ -32,9 +33,9 @@ import { BACKGROUND_OPTIONS, isBackgroundId, withEnvironment } from '../../store
 import type { HeadlessResult } from '../../workers/physicsWorkerProtocol';
 import {
   type PhysicsWindow, workerStatusNow, countBodies, type Msg, HEADLESS_WAIT_FOR_COLLIDERS_MS,
-  SUSPICIOUSLY_LARGE_DIAGONAL_M, findNodeInScene,
+  SUSPICIOUSLY_LARGE_DIAGONAL_M, findNodeInScene, isPlainObject, isFiniteNumber, isFiniteVec3,
 } from './bridgeUtils';
-import { fillBodyDefaults, applyPendingTuneTo } from './bodyDefaults';
+import { fillBodyDefaults, applyPendingTuneTo, type PendingDeclarativeOps } from './bodyDefaults';
 import { useSoundStore } from '../../store/soundStore';
 import { settleScene } from './settleScene';
 import { withUniqueRawIds } from '../../utils/uniqueNames';
@@ -69,9 +70,51 @@ const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R 
   };
 };
 
+const FORBIDDEN_PRESET_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const HEADLESS_SECTIONS = new Set(['bodies', 'joints', 'contacts', 'aero']);
+const STL_IMPORT_MODES = new Set(['scad_parametric', 'scad_raw', 'mesh', 'primitive']);
+
+function validateRawNodeTree(list: unknown[], path = 'bodies'): string | null {
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    if (!isPlainObject(item)) {
+      return `${path}[${i}] must be a plain object.`;
+    }
+    if (item.children !== undefined) {
+      if (!Array.isArray(item.children)) {
+        return `${path}[${i}].children must be an array of body descriptors.`;
+      }
+      const childErr = validateRawNodeTree(item.children, `${path}[${i}].children`);
+      if (childErr) return childErr;
+    }
+  }
+  return null;
+}
+
 export const sceneCommands: McpCommands = {
   RUN_HEADLESS: async (msg) => {
-    const ticks = Number(msg.ticks) || 300;
+    let ticks = 300;
+    if (msg.ticks !== undefined) {
+      if (!isFiniteNumber(msg.ticks) || !Number.isInteger(msg.ticks) || msg.ticks < 1 || msg.ticks > 1_000_000) {
+        return { ok: false, error: 'ticks must be a positive integer between 1 and 1000000' };
+      }
+      ticks = msg.ticks;
+    }
+    let requestedStride = 1;
+    if (msg.stride !== undefined) {
+      if (!isFiniteNumber(msg.stride) || !Number.isInteger(msg.stride) || msg.stride < 1) {
+        return { ok: false, error: 'stride must be a positive integer' };
+      }
+      requestedStride = msg.stride;
+    }
+    if (msg.bodies !== undefined && (!Array.isArray(msg.bodies) || !msg.bodies.every((b) => typeof b === 'string'))) {
+      return { ok: false, error: 'bodies must be an array of body ids or names (strings)' };
+    }
+    if (msg.include !== undefined) {
+      if (!Array.isArray(msg.include) || !msg.include.every((s) => typeof s === 'string' && HEADLESS_SECTIONS.has(s))) {
+        return { ok: false, error: "include must be an array of 'bodies', 'joints', 'contacts', 'aero'" };
+      }
+    }
     // A body still being broken into convex pieces collides as its hull
     // until they land, so a run straight after a load could throw a car
     // off a track that is solid across its channel and say nothing. Wait
@@ -109,7 +152,7 @@ export const sceneCommands: McpCommands = {
     // summary: the digest is read from the frames, and a few hundred across
     // the run is plenty for it; the frames themselves are not returned.
     const summaryOnly = msg.summary === true;
-    const stride = Math.max(1, Math.floor(Number(msg.stride) || 1), summaryOnly ? Math.ceil(ticks / 400) : 1);
+    const stride = Math.max(1, requestedStride, summaryOnly ? Math.ceil(ticks / 400) : 1);
     // Every blow is judged as the live run's are: a body that shatters is
     // rebuilt as its pieces at that tick (with sleeping on, as live), and
     // dents are recorded. See headlessImpacts.ts.
@@ -190,8 +233,16 @@ export const sceneCommands: McpCommands = {
     return { ok: true };
   },
   LOAD_PRESET: async (msg, { store }) => {
-    const name = msg.preset as Parameters<typeof store.loadPreset>[0];
-    if (!name) return { ok: false, error: 'Missing preset name' };
+    if (typeof msg.preset !== 'string' || !msg.preset.trim()) {
+      return { ok: false, error: 'Missing preset name (must be a non-empty string)' };
+    }
+    const name = msg.preset.trim() as Parameters<typeof store.loadPreset>[0];
+    if (name.startsWith('user:')) {
+      const key = name.slice('user:'.length);
+      if (!key || FORBIDDEN_PRESET_KEYS.has(key)) {
+        return { ok: false, error: `Invalid preset name "${name}".` };
+      }
+    }
     // loadPreset ignores a name it doesn't know, and this handler used to
     // report ok and then clear the note cards and chat anyway.
     const known = name.startsWith('user:')
@@ -213,7 +264,7 @@ export const sceneCommands: McpCommands = {
     // it) instead of leaving a stale card from whatever was loaded before -
     // this path (MCP LOAD_PRESET) used to skip that entirely, since it
     // calls store.loadPreset directly rather than through those UI wrappers.
-    const setter = (window as unknown as PhysicsWindow)._physics_setNoteCards;
+    const setter = typeof window !== 'undefined' ? (window as unknown as PhysicsWindow)._physics_setNoteCards : undefined;
     if (setter) {
       if (name.startsWith('user:')) {
         const saved = readUserPreset(name);
@@ -223,7 +274,7 @@ export const sceneCommands: McpCommands = {
         setter(presetCard ? [presetCard] : []);
       }
     }
-    const msgSetter = (window as unknown as PhysicsWindow)._physics_setCopilotMessages;
+    const msgSetter = typeof window !== 'undefined' ? (window as unknown as PhysicsWindow)._physics_setCopilotMessages : undefined;
     if (msgSetter) {
       if (name.startsWith('user:')) {
         const saved = readUserPreset(name);
@@ -238,9 +289,13 @@ export const sceneCommands: McpCommands = {
     return { ok: true, preset: name };
   },
   SAVE_PRESET: async (msg, { store }) => {
-    const name = String(msg.preset || msg.name || '').trim();
-    if (!name) return { ok: false, error: 'Missing preset name' };
-    const userPresetKey = name.replace(/^user:/, '');
+    const rawName = msg.preset !== undefined ? msg.preset : msg.name;
+    if (typeof rawName !== 'string') return { ok: false, error: 'Missing preset name (must be a string)' };
+    const userPresetKey = rawName.trim().replace(/^user:/, '').trim();
+    if (!userPresetKey) return { ok: false, error: 'Missing preset name' };
+    if (FORBIDDEN_PRESET_KEYS.has(userPresetKey)) {
+      return { ok: false, error: `Invalid preset name "${userPresetKey}"` };
+    }
     // Through savePreset, the path the Save button takes, so an agent's
     // save lands where a person's would: in this browser and the account,
     // or the account alone when the browser cannot hold it. This used to
@@ -257,8 +312,8 @@ export const sceneCommands: McpCommands = {
     const thumbnail = captureViewportThumb();
     const preset = {
       ...withEnvironment(store.sceneGraph, store),
-      noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() || [],
-      copilotMessages: (window as unknown as PhysicsWindow)._physics_getCopilotMessages?.() || [],
+      noteCards: (typeof window !== 'undefined' ? (window as unknown as PhysicsWindow)._physics_getNoteCards?.() : undefined) || [],
+      copilotMessages: (typeof window !== 'undefined' ? (window as unknown as PhysicsWindow)._physics_getCopilotMessages?.() : undefined) || [],
       ...(thumbnail ? { thumbnail } : {}),
     };
     const result = await savePreset(userPresetKey, preset);
@@ -277,13 +332,20 @@ export const sceneCommands: McpCommands = {
     };
   },
   DELETE_PRESET: async (msg) => {
-    const name = String(msg.preset || msg.name || '').trim();
-    if (!name) return { ok: false, error: 'Missing preset name' };
-    const userPresetKey = name.replace(/^user:/, '');
+    const rawName = msg.preset !== undefined ? msg.preset : msg.name;
+    if (typeof rawName !== 'string') return { ok: false, error: 'Missing preset name (must be a string)' };
+    const userPresetKey = rawName.trim().replace(/^user:/, '').trim();
+    if (!userPresetKey) return { ok: false, error: 'Missing preset name' };
+    if (FORBIDDEN_PRESET_KEYS.has(userPresetKey)) {
+      return { ok: false, error: `Invalid preset name "${userPresetKey}"` };
+    }
+    if (!listUserPresetNames().includes(userPresetKey)) {
+      return { ok: false, error: `No user preset named "user:${userPresetKey}". Call physics_list_presets for existing presets.` };
+    }
     if (!deleteUserPreset(userPresetKey)) {
       return { ok: false, error: 'Could not write the preset list to local storage' };
     }
-    return { ok: true, preset: name };
+    return { ok: true, preset: `user:${userPresetKey}` };
   },
   LIST_PRESETS: async () => {
     const userKeys = listUserPresetNames().map(k => `user:${k}`);
@@ -291,15 +353,33 @@ export const sceneCommands: McpCommands = {
   },
   IMPORT_STL: async (msg, { store }) => {
     const { stlData, name, importMode, pos, scale, dynamic, replaceId } =
-      msg as Msg<{ stlData?: string; name?: string; importMode?: string; scale?: number | [number, number, number]; dynamic?: boolean; replaceId?: string }>;
+      msg as Msg<{ stlData?: unknown; name?: unknown; importMode?: unknown; pos?: unknown; scale?: unknown; dynamic?: unknown; replaceId?: unknown }>;
+    if (replaceId !== undefined && typeof replaceId !== 'string') {
+      return { ok: false, error: 'replaceId must be a string' };
+    }
     // A body imported before, to take the new file's shape in its place.
     const replacing = replaceId ? findNodeInScene(store.sceneGraph.nodes, replaceId) : null;
     if (replaceId && !replacing) return { ok: false, error: `No body called ${replaceId} to replace.` };
-    if (!stlData) return { ok: false, error: 'Missing stlData (Base64 string or ASCII text)' };
+    if (typeof stlData !== 'string' || stlData.length === 0) {
+      return { ok: false, error: 'Missing or invalid stlData (must be a non-empty Base64 string or ASCII STL text)' };
+    }
+    if (importMode !== undefined && (typeof importMode !== 'string' || !STL_IMPORT_MODES.has(importMode))) {
+      return { ok: false, error: `importMode must be one of ${[...STL_IMPORT_MODES].join(', ')}, not '${String(importMode)}'.` };
+    }
+    if (scale !== undefined) {
+      const validScalar = isFiniteNumber(scale) && scale > 0;
+      const validTuple = isFiniteVec3(scale) && scale.every((v) => v > 0);
+      if (!validScalar && !validTuple) {
+        return { ok: false, error: 'scale must be a positive finite number or [sx, sy, sz] of positive finite numbers' };
+      }
+    }
+    if (pos !== undefined && !isFiniteVec3(pos)) {
+      return { ok: false, error: 'pos must be [x, y, z] of finite numbers in metres' };
+    }
 
     let data: ArrayBuffer | string;
     try {
-      if (typeof stlData === 'string' && stlData.startsWith('data:')) {
+      if (stlData.startsWith('data:')) {
         // Not split(',', 1): its limit keeps only the first piece, so the
         // payload was never found and every data URL failed to decode.
         const b64 = stlData.slice(stlData.indexOf(',') + 1);
@@ -307,7 +387,7 @@ export const sceneCommands: McpCommands = {
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         data = bytes.buffer;
-      } else if (typeof stlData === 'string' && !stlData.includes('solid')) {
+      } else if (!stlData.includes('solid')) {
         try {
           const binary = atob(stlData.trim());
           const bytes = new Uint8Array(binary.length);
@@ -323,16 +403,17 @@ export const sceneCommands: McpCommands = {
       return { ok: false, error: `Failed to decode STL payload: ${String(e)}` };
     }
 
-    const baseName = name || replacing?.name || 'imported_stl';
+    const baseName = (typeof name === 'string' && name) || replacing?.name || 'imported_stl';
+    const dynamicBool = typeof dynamic === 'boolean' ? dynamic : undefined;
     // Replacing a body keeps it static or moving, as it was, unless told otherwise.
-    const dynamicNow = dynamic ?? (replacing ? replacing.geoms?.[0]?.dynamic !== false && (replacing.joints?.length ?? 0) > 0 : undefined);
+    const dynamicNow = dynamicBool ?? (replacing ? replacing.geoms?.[0]?.dynamic !== false && (replacing.joints?.length ?? 0) > 0 : undefined);
     let parsed: ReturnType<typeof parseSTL>;
     try {
       // Recentred as the import dialog does (footprint centre at the origin,
       // underside at z = 0): an STL keeps whatever origin its CAD gave it, and
       // a part modelled 1 m off its origin came in floating 1 m up. A
       // replacement keeps the file's own frame, as the body it replaces did.
-      parsed = parseSTL(data, { name: baseName, scale, recentre: !replacing });
+      parsed = parseSTL(data, { name: baseName, scale: scale as number | [number, number, number] | undefined, recentre: !replacing });
     } catch (e) {
       return { ok: false, error: `Could not read the STL: ${(e as Error)?.message || String(e)}` };
     }
@@ -341,7 +422,7 @@ export const sceneCommands: McpCommands = {
     // memory, and the body was left a placeholder box under a reply of ok),
     // and collides as a simplified copy of itself (utils/denseMesh.ts).
     const warnings: string[] = [];
-    const requested = importMode || 'scad_parametric';
+    const requested = (importMode as string | undefined) || 'scad_parametric';
     const scadMode = requested === 'scad_parametric' || requested === 'scad_raw';
     if (parsed.dense && scadMode) {
       warnings.push(`importMode '${requested}' was not used: ${parsed.triangleCount.toLocaleString()} triangles is too many for an OpenSCAD polyhedron, which runs out of memory compiling, so the part was imported as a mesh.`);
@@ -356,14 +437,22 @@ export const sceneCommands: McpCommands = {
         warnings.push('It was imported static (dynamic: false), and a static mesh is found by the renderer in the physics model, so its full mesh stays in the model. Import it dynamic unless it has to be fixed in place.');
       }
     }
-    const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0];
-    const id = replacing?.id ?? `stl_${Math.random().toString(36).slice(2, 7)}`;
+    // Re-read fresh scene nodes after awaiting colliderCopyOf so concurrent
+    // additions/edits/deletions are never overwritten by a stale snapshot.
+    const currentNodes = useStore.getState().sceneGraph.nodes || [];
+    const freshReplacing = replaceId ? findNodeInScene(currentNodes, replaceId) : null;
+    if (replaceId && !freshReplacing) {
+      return { ok: false, error: `Body '${replaceId}' was deleted while importing the STL.` };
+    }
+    const effectiveName = (typeof name === 'string' && name) || freshReplacing?.name || 'imported_stl';
+    const nodePos: [number, number, number] = isFiniteVec3(pos) ? [...pos] : [0, 0, 0];
+    const id = freshReplacing?.id ?? `stl_${Math.random().toString(36).slice(2, 7)}`;
     let newNode: SceneNode;
 
     if (mode === 'scad_parametric') {
       newNode = {
         id,
-        name: baseName,
+        name: effectiveName,
         pos: nodePos,
         scad: parsed.scadParametric,
         geoms: [{ type: 'mesh', size: [1], dynamic: dynamicNow !== false } as SceneGeom],
@@ -373,7 +462,7 @@ export const sceneCommands: McpCommands = {
     } else if (mode === 'scad_raw') {
       newNode = {
         id,
-        name: baseName,
+        name: effectiveName,
         pos: nodePos,
         scad: parsed.scadRaw,
         geoms: [{ type: 'mesh', size: [1], dynamic: dynamicNow !== false } as SceneGeom],
@@ -383,7 +472,7 @@ export const sceneCommands: McpCommands = {
     } else if (mode === 'mesh') {
       newNode = {
         id,
-        name: baseName,
+        name: effectiveName,
         pos: nodePos,
         geoms: [{
           name: `${id}_geom`,
@@ -400,7 +489,7 @@ export const sceneCommands: McpCommands = {
     } else {
       newNode = {
         id,
-        name: baseName,
+        name: effectiveName,
         pos: nodePos,
         geoms: [{
           type: parsed.primitiveGeom.type,
@@ -415,29 +504,28 @@ export const sceneCommands: McpCommands = {
     // Marked with what its copy was made from, in the terms the store checks
     // it by (store/denseColliders): renderVertices if it moves, else vertices.
     if (collider) newNode.geoms[0].denseColliderOf = denseFingerprintOf(newNode.geoms[0]) ?? collider.source;
-    const currentNodes = store.sceneGraph.nodes || [];
     let updatedNodes: SceneNode[];
-    if (replacing) {
+    if (freshReplacing) {
       // The new shape in the old body: where it stands, how it is jointed,
       // what hangs off it and its colour stay; only the shape changes.
-      const colour = replacing.geoms?.[0]?.rgba;
+      const colour = freshReplacing.geoms?.[0]?.rgba;
       const swapped: SceneNode = {
         ...newNode,
-        pos: Array.isArray(pos) && pos.length === 3 ? pos : replacing.pos,
-        ...(replacing.quat ? { quat: replacing.quat } : {}),
-        ...(replacing.euler ? { euler: replacing.euler } : {}),
-        joints: replacing.joints ?? newNode.joints,
-        children: replacing.children ?? [],
+        pos: isFiniteVec3(pos) ? [...pos] : freshReplacing.pos,
+        ...(freshReplacing.quat ? { quat: freshReplacing.quat } : {}),
+        ...(freshReplacing.euler ? { euler: freshReplacing.euler } : {}),
+        joints: freshReplacing.joints ?? newNode.joints,
+        children: freshReplacing.children ?? [],
         geoms: newNode.geoms.map((g, i) => (i === 0 && colour ? { ...g, rgba: colour } : g)),
       };
-      const put = (list: SceneNode[]): SceneNode[] => list.map((n) => (n.id === replacing.id ? swapped : { ...n, children: put(n.children || []) }));
+      const put = (list: SceneNode[]): SceneNode[] => list.map((n) => (n.id === freshReplacing.id ? swapped : { ...n, children: put(n.children || []) }));
       updatedNodes = put(currentNodes);
     } else {
       // Given no pos, it stands on the floor at the origin, stepped aside
       // past anything already there.
       // Measured on the parsed mesh: an OpenSCAD-mode body has no vertices
       // until its compile lands, so it had no extent to step aside by.
-      if (!(Array.isArray(pos) && pos.length === 3)) {
+      if (!isFiniteVec3(pos)) {
         const extent = { ...newNode, pos: [0, 0, 0], geoms: [{ type: 'mesh', renderVertices: parsed.renderVertices, faces: parsed.faces } as SceneGeom] };
         newNode.pos = restingPos(extent, currentNodes, [0, 0]);
       }
@@ -448,9 +536,11 @@ export const sceneCommands: McpCommands = {
     return {
       ok: res.ok,
       ...(res.error ? { error: res.error } : {}),
+      ...(res.collisionPending ? { collisionPending: res.collisionPending } : {}),
+      ...(res.note ? { note: res.note } : {}),
       nodeId: id,
-      name: baseName,
-      ...(replacing ? { replaced: true } : {}),
+      name: effectiveName,
+      ...(freshReplacing ? { replaced: true } : {}),
       posM: (updatedNodes.length && findNodeInScene(updatedNodes, id)?.pos) || nodePos,
       importMode: mode,
       vertCount: parsed.vertices.length / 3,
@@ -464,10 +554,10 @@ export const sceneCommands: McpCommands = {
     };
   },
   VALIDATE_SCAD: async (msg) => {
-    const scadCode = msg.scad as string | undefined;
-    if (scadCode === undefined) {
-      return { ok: false, error: 'Missing scad parameter' };
+    if (typeof msg.scad !== 'string') {
+      return { ok: false, error: 'Missing or invalid scad parameter (must be a string)' };
     }
+    const scadCode = msg.scad;
     try {
       const result = await compileSCAD(scadCode);
       if (!result || result.faces.length === 0) {
@@ -497,30 +587,38 @@ export const sceneCommands: McpCommands = {
     // castPrep and simFidelity included, no default-filling - the file came
     // out of this app), its note cards and chat, the sim stopped, and no
     // preset claiming the scene, so Save cannot overwrite one with it.
-    const scene = unpackMeshArrays(msg.scene) as (SceneGraph & { noteCards?: unknown; copilotMessages?: unknown }) | undefined;
-    if (!scene || !Array.isArray(scene.nodes)) {
+    let scene: (SceneGraph & { noteCards?: unknown; copilotMessages?: unknown }) | undefined;
+    try {
+      scene = unpackMeshArrays(msg.scene) as (SceneGraph & { noteCards?: unknown; copilotMessages?: unknown }) | undefined;
+    } catch (e) {
+      return { ok: false, error: `Could not unpack scene file: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    if (!isPlainObject(scene) || !Array.isArray(scene.nodes)) {
       return { ok: false, error: 'The file is not a Mesh scene: it has no "nodes" array.' };
     }
     const { noteCards, copilotMessages, ...graph } = scene;
     if (store.isPlaying) store.togglePlay();
+    clearBreakage(useStore.setState);
     store.setSculptNodeId(null);
     store.setLatticeNodeId(null);
     store.setActivePreset(undefined);
-    store.updateScene(graph, true);
+    store.updateScene(graph as SceneGraph, true);
     // Awaited, unlike Import JSON's: the reply has to say whether it built.
     // From rest: a new scene with as many degrees of freedom as the old one
     // used to inherit its poses and clock. That fresh build also clears the
     // history, so the old scene's frames cannot mix with this one's.
     await useStore.getState().recompile(useStore.getState().sceneGraph, null, true, true);
-    const win = window as unknown as PhysicsWindow;
-    win._physics_setNoteCards?.(Array.isArray(noteCards) ? noteCards as NoteCard[] : []);
-    win._physics_setCopilotMessages?.(Array.isArray(copilotMessages) ? copilotMessages as SavedCopilotMessage[] : []);
+    if (typeof window !== 'undefined') {
+      const win = window as unknown as PhysicsWindow;
+      win._physics_setNoteCards?.(Array.isArray(noteCards) ? noteCards as NoteCard[] : []);
+      win._physics_setCopilotMessages?.(Array.isArray(copilotMessages) ? copilotMessages as SavedCopilotMessage[] : []);
+    }
     const error = useStore.getState().lastCompileError;
     return {
       ok: !error,
       ...(error ? { error } : {}),
-      nodeCount: countBodies(graph.nodes),
-      topLevelCount: graph.nodes.length,
+      nodeCount: countBodies((graph as SceneGraph).nodes),
+      topLevelCount: (graph as SceneGraph).nodes.length,
       noteCardCount: Array.isArray(noteCards) ? noteCards.length : 0,
     };
   },
@@ -530,18 +628,32 @@ export const sceneCommands: McpCommands = {
     // BUILD_SCENE's convention); also accept the internal { nodes: [...] } shape,
     // which is what GET_SCENE answers with.
     const rawScene = msg.sceneGraph as RawNode[] | (Omit<SceneGraph, 'nodes'> & { nodes?: RawNode[]; noteCards?: unknown });
+    if (!Array.isArray(rawScene) && !isPlainObject(rawScene)) {
+      return { ok: false, error: 'sceneGraph must be an array of nodes, or an object of the form { nodes: SceneNode[] }' };
+    }
     const rawNodes = Array.isArray(rawScene) ? rawScene : rawScene.nodes;
     if (!Array.isArray(rawNodes)) {
       return { ok: false, error: 'sceneGraph must be an array of nodes, or an object of the form { nodes: SceneNode[] }' };
     }
+    const shapeErr = validateRawNodeTree(rawNodes, 'sceneGraph');
+    if (shapeErr) return { ok: false, error: shapeErr };
     // Run through the same default-filling as BUILD_SCENE so a node missing
     // joints/geoms/children (very easy to hand-author without, e.g. by
     // editing the output of GET_SCENE_SUMMARY, which strips these arrays)
     // doesn't crash compileToMJCF's unconditional .forEach on those fields.
     // Two bodies with one id were one body to every lookup; the later is renamed.
-    const { bodies: uniqueNodes, renamed } = withUniqueRawIds(rawNodes);
-    // Strings and heads with a `tuneTo` are retuned with the whole scene in view.
-    const nodes = applyPendingTuneTo(uniqueNodes.map((b) => fillBodyDefaults(b)));
+    const opsMap = new Map<string, PendingDeclarativeOps>();
+    let nodes: SceneNode[];
+    let renamed: { from: string; to: string }[];
+    try {
+      const unique = withUniqueRawIds(rawNodes);
+      renamed = unique.renamed;
+      // Strings and heads with a `tuneTo` are retuned with the whole scene in view.
+      nodes = applyPendingTuneTo(unique.bodies.map((b) => fillBodyDefaults(b, null, opsMap)));
+    } catch (err) {
+      opsMap.clear();
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     // What the scene says about itself. The object form is GET_SCENE's answer
     // coming back, and carries all of it: fidelity, pictures, environment,
     // cast prep, name and note cards. A bare array is new bodies for the scene
@@ -562,38 +674,81 @@ export const sceneCommands: McpCommands = {
       sceneFields = fields;
       if (Array.isArray(cards)) noteCards = cards as NoteCard[];
     }
-    const result = await settleScene(nodes, { sceneFields });
-    if (noteCards) {
-      (window as unknown as PhysicsWindow)._physics_setNoteCards?.(noteCards);
-    } else {
-      updateOrCreateNotecard({
-        mode: 'mcp',
-        nodes: useStore.getState().sceneGraph.nodes
-      });
+    const result = await settleScene(nodes, { sceneFields, opsMap });
+    const liveNodes = useStore.getState().sceneGraph.nodes;
+    if (typeof window !== 'undefined') {
+      if (noteCards) {
+        (window as unknown as PhysicsWindow)._physics_setNoteCards?.(noteCards);
+      } else {
+        updateOrCreateNotecard({
+          mode: 'mcp',
+          nodes: liveNodes
+        });
+      }
     }
-    return withRenamedIds(withScriptWarnings(result, nodes), renamed);
+    return withRenamedIds(withScriptWarnings(result, liveNodes), renamed);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
     const { gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm, sound, reverb } =
-      msg as Msg<{ sound?: boolean; reverb?: boolean; gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; background?: string; waterLevel?: number | null | false; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
+      msg as Msg<{ sound?: unknown; reverb?: unknown; gravityZ?: unknown; windX?: unknown; windY?: unknown; density?: unknown; floorFriction?: unknown; floorBounce?: unknown; background?: unknown; waterLevel?: unknown; fidelity?: unknown; stockWidthMm?: unknown; stockDepthMm?: unknown; stockThicknessMm?: unknown }>;
+
+    // Validate EVERY field before mutating any store state so a rejected call
+    // never leaves partial stock/fidelity/environment edits behind.
+    if (stockWidthMm !== undefined && (!isFiniteNumber(stockWidthMm) || stockWidthMm <= 0)) {
+      return { ok: false, error: 'stockWidthMm must be a positive finite number.' };
+    }
+    if (stockDepthMm !== undefined && (!isFiniteNumber(stockDepthMm) || stockDepthMm <= 0)) {
+      return { ok: false, error: 'stockDepthMm must be a positive finite number.' };
+    }
+    if (stockThicknessMm !== undefined && (!isFiniteNumber(stockThicknessMm) || stockThicknessMm <= 0)) {
+      return { ok: false, error: 'stockThicknessMm must be a positive finite number.' };
+    }
+    if (fidelity !== undefined && fidelity !== 'standard' && fidelity !== 'print' && fidelity !== 'high') {
+      return { ok: false, error: `fidelity must be 'standard', 'print' or 'high', not '${String(fidelity)}'.` };
+    }
+    if (background !== undefined && (typeof background !== 'string' || !isBackgroundId(background))) {
+      return {
+        ok: false,
+        error: `background must be one of ${BACKGROUND_OPTIONS.map((o) => `'${o.id}'`).join(', ')}, not '${String(background)}'.`,
+      };
+    }
+    if (gravityZ !== undefined && !isFiniteNumber(gravityZ)) {
+      return { ok: false, error: 'gravityZ must be a finite number.' };
+    }
+    if (windX !== undefined && !isFiniteNumber(windX)) {
+      return { ok: false, error: 'windX must be a finite number.' };
+    }
+    if (windY !== undefined && !isFiniteNumber(windY)) {
+      return { ok: false, error: 'windY must be a finite number.' };
+    }
+    if (density !== undefined && (!isFiniteNumber(density) || density < 0)) {
+      return { ok: false, error: 'density must be a non-negative finite number.' };
+    }
+    if (floorFriction !== undefined && (!isFiniteNumber(floorFriction) || floorFriction < 0)) {
+      return { ok: false, error: 'floorFriction must be a non-negative finite number.' };
+    }
+    if (floorBounce !== undefined && (!isFiniteNumber(floorBounce) || floorBounce < 0 || floorBounce > 1)) {
+      return { ok: false, error: 'floorBounce must be a finite number between 0 and 1.' };
+    }
+    if (waterLevel !== undefined && waterLevel !== null && waterLevel !== false && !isFiniteNumber(waterLevel)) {
+      return { ok: false, error: 'waterLevel must be a finite number, null, or false.' };
+    }
+    if (sound !== undefined && typeof sound !== 'boolean') {
+      return { ok: false, error: 'sound must be a boolean.' };
+    }
+    if (reverb !== undefined && typeof reverb !== 'boolean') {
+      return { ok: false, error: 'reverb must be a boolean.' };
+    }
+
     // The board on the bench: what every carve, export and fit check uses.
     const stockPatch = {
-      ...(typeof stockWidthMm === 'number' && stockWidthMm > 0 ? { widthMm: stockWidthMm } : {}),
-      ...(typeof stockDepthMm === 'number' && stockDepthMm > 0 ? { depthMm: stockDepthMm } : {}),
-      ...(typeof stockThicknessMm === 'number' && stockThicknessMm > 0 ? { thicknessMm: stockThicknessMm } : {}),
+      ...(typeof stockWidthMm === 'number' ? { widthMm: stockWidthMm } : {}),
+      ...(typeof stockDepthMm === 'number' ? { depthMm: stockDepthMm } : {}),
+      ...(typeof stockThicknessMm === 'number' ? { thicknessMm: stockThicknessMm } : {}),
     };
     if (Object.keys(stockPatch).length > 0) store.setStock(stockPatch);
     if (fidelity !== undefined) {
-      if (fidelity !== 'standard' && fidelity !== 'print' && fidelity !== 'high') {
-        return { ok: false, error: `fidelity must be 'standard', 'print' or 'high', not '${fidelity}'.` };
-      }
       store.setSimFidelity(fidelity === 'standard' ? 'standard' : 'print');
-    }
-    if (background !== undefined && !isBackgroundId(background)) {
-      return {
-        ok: false,
-        error: `background must be one of ${BACKGROUND_OPTIONS.map((o) => `'${o.id}'`).join(', ')}, not '${background}'.`,
-      };
     }
     const env: Parameters<typeof store.setEnvironment>[0] = {};
     if (gravityZ !== undefined) env.gravityZ = gravityZ;
@@ -604,7 +759,7 @@ export const sceneCommands: McpCommands = {
     if (floorBounce !== undefined) env.floorBounce = floorBounce;
     if (background !== undefined) env.background = background;
     if (waterLevel !== undefined) {
-      env.waterLevel = typeof waterLevel === 'number' && Number.isFinite(waterLevel) ? waterLevel : null;
+      env.waterLevel = typeof waterLevel === 'number' ? waterLevel : null;
     }
     if (Object.keys(env).length > 0) store.setEnvironment(env);
     // Sound is the app's own switch (header speaker, settings): the store and
@@ -630,17 +785,33 @@ export const sceneCommands: McpCommands = {
     if (!Array.isArray(bodies)) {
       return { ok: false, error: 'bodies must be an array of body descriptors ([] clears the scene)' };
     }
+    const shapeErr = validateRawNodeTree(bodies, 'bodies');
+    if (shapeErr) return { ok: false, error: shapeErr };
 
     // Two bodies with one id were one body to every lookup; the later is renamed.
-    const { bodies: uniqueBodies, renamed } = withUniqueRawIds(bodies);
-    const nodes = applyPendingTuneTo(uniqueBodies.map((b) => fillBodyDefaults(b)));
-    const result = withRenamedIds(withScriptWarnings(await settleScene(nodes, { freshStart: true }), nodes), renamed);
+    const opsMap = new Map<string, PendingDeclarativeOps>();
+    let nodes: SceneNode[];
+    let renamed: { from: string; to: string }[];
+    try {
+      const unique = withUniqueRawIds(bodies);
+      renamed = unique.renamed;
+      nodes = applyPendingTuneTo(unique.bodies.map((b) => fillBodyDefaults(b, null, opsMap)));
+    } catch (err) {
+      opsMap.clear();
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     // What the scene is called: the scene button shows it in place of
     // "Modified scene", the save dialog starts from it and exports are named
-    // for it. A fresh start drops any earlier name.
+    // for it. A fresh start drops any earlier name and clears activePreset.
     const name = typeof msg.name === 'string' ? msg.name.trim().slice(0, 120) : '';
-    const settled = useStore.getState().sceneGraph;
-    if (name || settled.name) useStore.getState().updateScene({ ...settled, name: name || undefined }, true);
+    useStore.getState().setActivePreset(undefined);
+    const settled = await settleScene(nodes, {
+      freshStart: true,
+      sceneFields: name ? { name } : {},
+      opsMap,
+    });
+    const liveNodes = useStore.getState().sceneGraph.nodes;
+    const result = withRenamedIds(withScriptWarnings(settled, liveNodes), renamed);
     // An empty list clears the scene. It used to be refused, which left
     // physics_update_scene([]) as the only way to start from nothing; there
     // is no scene to frame or describe on a card.
@@ -649,10 +820,12 @@ export const sceneCommands: McpCommands = {
     // child and geom at its real pose. The camera used to stay wherever
     // it was, which for a 300 mm ride was a close-up of its base.
     useStore.setState(framingPatch(useStore.getState().sceneGraph, null));
-    updateOrCreateNotecard({
-      mode: 'mcp',
-      nodes: useStore.getState().sceneGraph.nodes
-    });
+    if (typeof window !== 'undefined') {
+      updateOrCreateNotecard({
+        mode: 'mcp',
+        nodes: liveNodes
+      });
+    }
     return result;
   },
 };
