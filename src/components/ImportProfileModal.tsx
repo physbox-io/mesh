@@ -68,6 +68,7 @@ const Segmented = <T extends string>({ value, options, onChange }: {
 );
 
 /** A list of profile shapes as an SVG path, y flipped back to screen-down. */
+// eslint-disable-next-line react-refresh/only-export-components
 export function shapesPath(shapes: ProfileShape[]): string {
   const ring = (l: { x: number; y: number }[]) =>
     'M' + l.map((q) => `${q.x.toFixed(2)},${(-q.y).toFixed(2)}`).join('L') + 'Z';

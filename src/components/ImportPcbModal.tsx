@@ -114,15 +114,18 @@ export const ImportPcbModal: React.FC<ImportPcbModalProps> = ({
         : '',
   );
 
-  useEffect(() => {
-    if (!initialSpec) return;
-    setSourceTab('handoff');
-    setHandoffInput(
-      typeof initialSpec === 'string'
-        ? initialSpec
-        : JSON.stringify(initialSpec, null, 2),
-    );
-  }, [initialSpec]);
+  const [prevInitialSpec, setPrevInitialSpec] = useState(initialSpec);
+  if (initialSpec !== prevInitialSpec) {
+    setPrevInitialSpec(initialSpec);
+    if (initialSpec) {
+      setSourceTab('handoff');
+      setHandoffInput(
+        typeof initialSpec === 'string'
+          ? initialSpec
+          : JSON.stringify(initialSpec, null, 2),
+      );
+    }
+  }
 
   // Enclosure parameters
   const [buildMode, setBuildMode] = useState<BuildMode>('enclosure_with_lid');

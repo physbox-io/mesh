@@ -74,9 +74,10 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
 
   useEffect(() => {
     mountedRef.current = true;
+    const ref = loadIdRef;
     return () => {
       mountedRef.current = false;
-      loadIdRef.current++;
+      ref.current++;
     };
   }, []);
 

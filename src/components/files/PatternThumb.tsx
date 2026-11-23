@@ -64,6 +64,7 @@ function enqueue(job: ThumbJob) {
  * Computes a preview stock thickness and carve depth that always satisfy
  * `buildPatternPlank`'s minimum base + floor constraints, even on thin laser stock (<= 3 mm).
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function previewStockForThumb(spec: PatternSpec, stock: StockSize): { stock: StockSize; depthMm: number } {
   const minThicknessMm = PANEL_BASE_MM + RELIEF_FLOOR_MM + MIN_SENSIBLE_DEPTH_MM;
   const previewStock: StockSize = spec.throughCut || stock.thicknessMm >= minThicknessMm

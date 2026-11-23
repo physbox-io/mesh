@@ -11,7 +11,6 @@ import { JobHistoryModal } from './JobHistoryModal';
 import { cloudAutosave } from '../utils/cloudDocuments';
 import { GuestListModal } from './GuestListModal';
 
-// eslint-disable-next-line react-refresh/only-export-components
 export { SIGN_IN_REQUESTED_EVENT, SIGNED_IN_EVENT } from '@physbox-io/ui';
 
 const AVATAR_KEY = 'physbox_user_avatar';
