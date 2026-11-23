@@ -1,6 +1,5 @@
 import { useEffect } from 'react';
 import { useStore } from '../store/useStore';
-import { loadCompiler } from '../utils/openscad';
 
 /**
  * Delete / Backspace deletes the selection; Ctrl-D duplicates it, Ctrl-C and
@@ -85,28 +84,56 @@ export function useEditShortcuts() {
   }, []);
 }
 
+interface NetworkInformationLike {
+  saveData?: boolean;
+  effectiveType?: string;
+}
+
+/**
+ * Returns true when speculative background preloads (e.g. 19 MB of OpenSCAD
+ * WASM + fonts) should be skipped because the user opted into Data Saver or is
+ * on a 2G cellular link. On-demand compilation still loads the worker normally.
+ */
+export function isConstrainedNetwork(nav: { connection?: NetworkInformationLike } | undefined = typeof navigator !== 'undefined' ? (navigator as Navigator & { connection?: NetworkInformationLike }) : undefined): boolean {
+  const conn = nav?.connection;
+  if (!conn) return false;
+  return Boolean(conn.saveData || conn.effectiveType === 'slow-2g' || conn.effectiveType === '2g');
+}
+
 /*
  * Pre-load the OpenSCAD compiler in the background, so the first boolean is
- * quick — but only once physics is up and the page is idle.
+ * quick — but only once physics is up, initial paint/shader compilation has
+ * settled, and the page is idle (and never speculatively on Data Saver / 2G).
  *
- * It is 11 MB of wasm and 8 MB of fonts. On a fixed two-second timer it went
- * out while MuJoCo's own 9 MB could still be downloading on a slow link, and
- * the scene the user came to see waited behind a compiler it may never need.
- * A scene with booleans in it does not wait for this either way: compiling
- * starts the pool itself.
+ * It is 11 MB of wasm and 8 MB of fonts. A scene with booleans in it does not
+ * wait for this either way: compiling starts the pool itself.
  */
 export function useCompilerPreload() {
   const mujoco = useStore((s) => s.mujoco);
   useEffect(() => {
-    if (!mujoco) return;
+    if (!mujoco || isConstrainedNetwork()) return;
+    let cancelled = false;
+    let idleHandle: number | null = null;
     const preload = () => {
-      loadCompiler().catch(err => console.warn('Failed to pre-load OpenSCAD compiler in background:', err));
+      if (cancelled) return;
+      import('../utils/openscad')
+        .then(({ loadCompiler }) => loadCompiler())
+        .catch((err) => console.warn('Failed to pre-load OpenSCAD compiler in background:', err));
     };
-    if (typeof window.requestIdleCallback === 'function') {
-      const handle = window.requestIdleCallback(preload, { timeout: 10000 });
-      return () => window.cancelIdleCallback(handle);
-    }
-    const timer = setTimeout(preload, 3000);
-    return () => clearTimeout(timer);
+    const settleTimer = setTimeout(() => {
+      if (cancelled) return;
+      if (typeof window.requestIdleCallback === 'function') {
+        idleHandle = window.requestIdleCallback(preload, { timeout: 15000 });
+      } else {
+        preload();
+      }
+    }, 4000);
+    return () => {
+      cancelled = true;
+      clearTimeout(settleTimer);
+      if (idleHandle !== null && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleHandle);
+      }
+    };
   }, [mujoco]);
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type RefObject } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState, type RefObject } from 'react';
 import type * as THREE from 'three';
 import { useStore } from '../store/useStore';
 import { usePanels } from '../store/panelsStore';
@@ -6,28 +6,54 @@ import type { NoteCard } from '../utils/noteCards';
 import { useMeshExport } from '../hooks/useMeshExport';
 import { webSerialManager } from '../utils/webSerialManager';
 import { readMachineLink } from '@physbox-io/ui';
-import { ExportLaserCutModal } from './ExportLaserCutModal';
-import { ExportContourSliceModal } from './ExportContourSliceModal';
-import { ExportReliefCarveModal } from './ExportReliefCarveModal';
-import { ExportMoldModal } from './ExportMoldModal';
-import { ExportSolidMachiningModal } from './ExportSolidMachiningModal';
 import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
-import { ExportCastModal } from './ExportCastModal';
-import { SplitForPrintModal } from './SplitForPrintModal';
-import { TimberBreakdownModal } from './TimberBreakdownModal';
-import { ExportSheetUnfoldModal } from './ExportSheetUnfoldModal';
 import type { SheetUnfoldMode } from '../utils/sheetUnfoldExporter';
 import type { DeepLinkModal } from '../utils/deepLink';
 import type { MoldTab } from '../utils/moldTabs';
-import { ExportTubeAndWireModal } from './ExportTubeAndWireModal';
-import { BrickworkModal } from './BrickworkModal';
 import { addClothNode, frameForm } from './palette/clothStartActions';
 import { newFormNode } from '../utils/cloth/clothStart';
 import { BottomStatusBar } from './BottomStatusBar';
-import { MachineConfigModal } from './MachineConfigModal';
 import { moldSubject, selectedIds } from '../utils/moldSubject';
 import { useCastDialog } from '../store/castDialogStore';
-import { openSceneInEtch } from '../utils/etchSceneHandoff';
+
+// Heavy fabrication modals are loaded on demand so cold start only pays for the
+// lightweight bottom bar + event/auto-connect shell until a user opens a modal.
+const ExportLaserCutModal = lazy(() =>
+  import('./ExportLaserCutModal').then((m) => ({ default: m.ExportLaserCutModal })),
+);
+const ExportContourSliceModal = lazy(() =>
+  import('./ExportContourSliceModal').then((m) => ({ default: m.ExportContourSliceModal })),
+);
+const ExportReliefCarveModal = lazy(() =>
+  import('./ExportReliefCarveModal').then((m) => ({ default: m.ExportReliefCarveModal })),
+);
+const ExportMoldModal = lazy(() =>
+  import('./ExportMoldModal').then((m) => ({ default: m.ExportMoldModal })),
+);
+const ExportSolidMachiningModal = lazy(() =>
+  import('./ExportSolidMachiningModal').then((m) => ({ default: m.ExportSolidMachiningModal })),
+);
+const ExportCastModal = lazy(() =>
+  import('./ExportCastModal').then((m) => ({ default: m.ExportCastModal })),
+);
+const SplitForPrintModal = lazy(() =>
+  import('./SplitForPrintModal').then((m) => ({ default: m.SplitForPrintModal })),
+);
+const TimberBreakdownModal = lazy(() =>
+  import('./TimberBreakdownModal').then((m) => ({ default: m.TimberBreakdownModal })),
+);
+const ExportSheetUnfoldModal = lazy(() =>
+  import('./ExportSheetUnfoldModal').then((m) => ({ default: m.ExportSheetUnfoldModal })),
+);
+const ExportTubeAndWireModal = lazy(() =>
+  import('./ExportTubeAndWireModal').then((m) => ({ default: m.ExportTubeAndWireModal })),
+);
+const BrickworkModal = lazy(() =>
+  import('./BrickworkModal').then((m) => ({ default: m.BrickworkModal })),
+);
+const MachineConfigModal = lazy(() =>
+  import('./MachineConfigModal').then((m) => ({ default: m.MachineConfigModal })),
+);
 
 /**
  * The bottom bar and everything it opens: the fabrication exports, Split for
@@ -163,123 +189,128 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
     }
     setEtchBusy(true);
     setEtchError(null);
-    openSceneInEtch({
-      scene: subject.scene,
-      name: subject.label,
-      machine: state.machineTarget === 'laser' ? 'laser' : 'cnc',
-      stock: state.stock,
-      material: state.material,
-    })
+    import('../utils/etchSceneHandoff')
+      .then(({ openSceneInEtch }) =>
+        openSceneInEtch({
+          scene: subject.scene,
+          name: subject.label,
+          machine: state.machineTarget === 'laser' ? 'laser' : 'cnc',
+          stock: state.stock,
+          material: state.material,
+        }),
+      )
       .catch((e: Error) => setEtchError(e.message))
       .finally(() => setEtchBusy(false));
   };
   return (
     <>
-      {/* Mounted only while open so closed modals do not run hooks, worker
-          settle timers, or scene tree walks on every edit. */}
-      {isLaserCutModalOpen && subjectScene && (
-        <ExportLaserCutModal
-          isOpen={isLaserCutModalOpen}
-          onClose={() => setIsLaserCutModalOpen(false)}
-          scene={subjectScene!}
-          subjectLabel={subject!.label}
-        />
-      )}
+      {/* Mounted only while open so closed modals do not fetch chunks, run hooks,
+          worker settle timers, or scene tree walks on every edit. */}
+      <Suspense fallback={null}>
+        {isLaserCutModalOpen && subjectScene && (
+          <ExportLaserCutModal
+            isOpen={isLaserCutModalOpen}
+            onClose={() => setIsLaserCutModalOpen(false)}
+            scene={subjectScene!}
+            subjectLabel={subject!.label}
+          />
+        )}
 
-      {isContourSliceModalOpen && subjectScene && (
-        <ExportContourSliceModal
-          isOpen={isContourSliceModalOpen}
-          onClose={() => setIsContourSliceModalOpen(false)}
-          scene={subjectScene!}
-          subjectLabel={subject!.label}
-        />
-      )}
+        {isContourSliceModalOpen && subjectScene && (
+          <ExportContourSliceModal
+            isOpen={isContourSliceModalOpen}
+            onClose={() => setIsContourSliceModalOpen(false)}
+            scene={subjectScene!}
+            subjectLabel={subject!.label}
+          />
+        )}
 
-      {isReliefCarveModalOpen && subjectScene && (
-        <ExportReliefCarveModal
-          isOpen={isReliefCarveModalOpen}
-          onClose={() => setIsReliefCarveModalOpen(false)}
-          scene={subjectScene!}
-          subjectLabel={subject!.label}
-          onMachineAsPart={(seed) => {
-            setIsReliefCarveModalOpen(false);
-            setSolidSeed(seed);
-            setIsSolidModalOpen(true);
-          }}
-        />
-      )}
+        {isReliefCarveModalOpen && subjectScene && (
+          <ExportReliefCarveModal
+            isOpen={isReliefCarveModalOpen}
+            onClose={() => setIsReliefCarveModalOpen(false)}
+            scene={subjectScene!}
+            subjectLabel={subject!.label}
+            onMachineAsPart={(seed) => {
+              setIsReliefCarveModalOpen(false);
+              setSolidSeed(seed);
+              setIsSolidModalOpen(true);
+            }}
+          />
+        )}
 
-      {isMoldModalOpen && sceneGraph && (
-        <ExportMoldModal
-          isOpen={isMoldModalOpen}
-          onClose={() => setIsMoldModalOpen(false)}
-          scene={sceneGraph}
-        />
-      )}
+        {isMoldModalOpen && sceneGraph && (
+          <ExportMoldModal
+            isOpen={isMoldModalOpen}
+            onClose={() => setIsMoldModalOpen(false)}
+            scene={sceneGraph}
+          />
+        )}
 
-      {isSolidModalOpen && subjectScene && (
-        <ExportSolidMachiningModal
-          isOpen={isSolidModalOpen}
-          onClose={() => {
-            setIsSolidModalOpen(false);
-            setSolidSeed(null);
-          }}
-          scene={subjectScene!}
-          subjectLabel={subject!.label}
-          seed={solidSeed}
-        />
-      )}
+        {isSolidModalOpen && subjectScene && (
+          <ExportSolidMachiningModal
+            isOpen={isSolidModalOpen}
+            onClose={() => {
+              setIsSolidModalOpen(false);
+              setSolidSeed(null);
+            }}
+            scene={subjectScene!}
+            subjectLabel={subject!.label}
+            seed={solidSeed}
+          />
+        )}
 
-      {isCastModalOpen && sceneGraph && (
-        <ExportCastModal
-          isOpen={isCastModalOpen}
-          onClose={() => setIsCastModalOpen(false)}
-          onOpenMold={() => {
-            setIsCastModalOpen(false);
-            setIsMoldModalOpen(true);
-          }}
-        />
-      )}
+        {isCastModalOpen && sceneGraph && (
+          <ExportCastModal
+            isOpen={isCastModalOpen}
+            onClose={() => setIsCastModalOpen(false)}
+            onOpenMold={() => {
+              setIsCastModalOpen(false);
+              setIsMoldModalOpen(true);
+            }}
+          />
+        )}
 
-      {isSplitModalOpen && (
-        <SplitForPrintModal
-          isOpen={isSplitModalOpen}
-          onClose={() => setIsSplitModalOpen(false)}
-        />
-      )}
+        {isSplitModalOpen && (
+          <SplitForPrintModal
+            isOpen={isSplitModalOpen}
+            onClose={() => setIsSplitModalOpen(false)}
+          />
+        )}
 
-      {isJoineryModalOpen && (
-        <TimberBreakdownModal
-          isOpen={isJoineryModalOpen}
-          onClose={() => setIsJoineryModalOpen(false)}
-        />
-      )}
+        {isJoineryModalOpen && (
+          <TimberBreakdownModal
+            isOpen={isJoineryModalOpen}
+            onClose={() => setIsJoineryModalOpen(false)}
+          />
+        )}
 
-      {isSheetUnfoldModalOpen && subjectScene && (
-        <ExportSheetUnfoldModal
-          isOpen={isSheetUnfoldModalOpen}
-          onClose={() => {
-            setIsSheetUnfoldModalOpen(false);
-            setUnfoldInitialMode(undefined);
-          }}
-          scene={subjectScene!}
-          subjectLabel={subject!.label}
-          initialMode={unfoldInitialMode}
-        />
-      )}
+        {isSheetUnfoldModalOpen && subjectScene && (
+          <ExportSheetUnfoldModal
+            isOpen={isSheetUnfoldModalOpen}
+            onClose={() => {
+              setIsSheetUnfoldModalOpen(false);
+              setUnfoldInitialMode(undefined);
+            }}
+            scene={subjectScene!}
+            subjectLabel={subject!.label}
+            initialMode={unfoldInitialMode}
+          />
+        )}
 
-      {isTubeAndWireModalOpen && subjectScene && (
-        <ExportTubeAndWireModal
-          isOpen={isTubeAndWireModalOpen}
-          onClose={() => setIsTubeAndWireModalOpen(false)}
-          scene={subjectScene!}
-          subjectLabel={subject!.label}
-        />
-      )}
+        {isTubeAndWireModalOpen && subjectScene && (
+          <ExportTubeAndWireModal
+            isOpen={isTubeAndWireModalOpen}
+            onClose={() => setIsTubeAndWireModalOpen(false)}
+            scene={subjectScene!}
+            subjectLabel={subject!.label}
+          />
+        )}
 
-      {isBrickModalOpen && (
-        <BrickworkModal isOpen={isBrickModalOpen} onClose={() => setIsBrickModalOpen(false)} />
-      )}
+        {isBrickModalOpen && (
+          <BrickworkModal isOpen={isBrickModalOpen} onClose={() => setIsBrickModalOpen(false)} />
+        )}
+      </Suspense>
 
       <BottomStatusBar
         onOpenMachineConfig={() => setMachineConfigOpen(true)}
@@ -305,14 +336,16 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         }}
       />
 
-      {isMachineConfigOpen && (
-        <MachineConfigModal
-          isOpen={isMachineConfigOpen}
-          onClose={() => setMachineConfigOpen(false)}
-          onOpenDocs={() => openDocs('zeroing')}
-          machineTarget={machineTarget}
-        />
-      )}
+      <Suspense fallback={null}>
+        {isMachineConfigOpen && (
+          <MachineConfigModal
+            isOpen={isMachineConfigOpen}
+            onClose={() => setMachineConfigOpen(false)}
+            onOpenDocs={() => openDocs('zeroing')}
+            machineTarget={machineTarget}
+          />
+        )}
+      </Suspense>
     </>
   );
 }

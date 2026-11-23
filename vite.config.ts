@@ -128,6 +128,37 @@ export default defineConfig({
       }
     }
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        // Coalesce initial vendor modules into stable long-term cached chunks
+        // and collapse tiny shared icon/helper fragments without ever pulling
+        // lazy-only modules into the cold-start graph (`tags: ['$initial']`).
+        codeSplitting: {
+          groups: [
+            {
+              name: 'vendor-react',
+              tags: ['$initial'],
+              test: /node_modules[\\/](react|react-dom|scheduler|zustand)[\\/]/,
+              priority: 30,
+            },
+            {
+              name: 'vendor-three',
+              tags: ['$initial'],
+              test: /node_modules[\\/](three|@react-three|three-stdlib|three-mesh-bvh|postprocessing)[\\/]/,
+              priority: 20,
+            },
+            {
+              name: 'vendor-icons',
+              tags: ['$initial'],
+              test: /node_modules[\\/]lucide-react[\\/]/,
+              priority: 15,
+            },
+          ],
+        },
+      },
+    },
+  },
   worker: {
     // ES modules, not Vite's default IIFE: a worker that splits into more than
     // one chunk (a dynamic import, or a module shared with the page) cannot be
