@@ -119,7 +119,7 @@ export function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimiz
             />
           ) : (
             <div
-              className="prose-sm dark:prose-invert max-h-64 overflow-y-auto text-slate-700 dark:text-slate-300"
+              className="prose-sm dark:prose-invert max-h-64 max-sm:max-h-36 overflow-y-auto text-slate-700 dark:text-slate-300"
               dangerouslySetInnerHTML={{ __html: parseNoteMarkdown(card.markdown) }}
             />
           )}

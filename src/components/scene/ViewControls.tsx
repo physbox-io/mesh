@@ -29,7 +29,7 @@ export function ViewControls() {
     gridCellSizeMm: s.gridCellSizeMm, setGridCellSizeMm: s.setGridCellSizeMm,
   })));
   return (
-    <div className="absolute bottom-4 right-4 z-10 max-w-[calc(100%-2rem)] overflow-x-auto flex items-center gap-1 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 p-1 rounded-lg shadow-sm">
+    <div className="absolute bottom-4 right-4 z-10 max-w-[calc(100%-2rem)] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>button]:whitespace-nowrap [&>button]:shrink-0 flex items-center gap-1 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 p-1 rounded-lg shadow-sm">
       {/* No Perspective button: it is the view everything opens in, and
           orbiting out of any of these goes back to it (see CameraController). */}
       {([

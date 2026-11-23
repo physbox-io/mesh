@@ -480,7 +480,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     */
     <footer className="h-8 shrink-0 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors max-lg:h-auto max-lg:flex-wrap max-lg:justify-start max-lg:px-2 max-lg:py-1 max-lg:gap-x-3 max-lg:gap-y-1">
       {/* What the keyboard is doing right now */}
-      <div className="flex items-center gap-3 max-lg:shrink-0">
+      <div className="flex items-center gap-2 max-lg:shrink-0">
         {/* First thing in the bar, because "which mode am I in" is the question
             asked most often and the one a modal keyboard makes expensive to
             get wrong. */}
@@ -544,14 +544,14 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       </div>
 
       {/* What it is cut on, and what out of */}
-      <div data-tour="bench-bar" className="flex flex-wrap items-center gap-2 max-w-full">
+      <div data-tour="bench-bar" className="flex items-center gap-2 max-lg:w-full max-lg:min-w-0">
         {/* Its own pill, outside the machine's: built by hand from bought
             stock, it does not change with the machine, the stock or the
             material, and inside that group it read as one of its exports. */}
-        <div className="flex items-center px-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+        <div className="flex items-center shrink-0 px-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
           <BuildMenu items={build} />
         </div>
-        <div className="flex flex-wrap items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 max-w-full">
+        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 min-w-0 max-lg:flex-1 max-lg:overflow-x-auto max-lg:[scrollbar-width:none] max-lg:[&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
           <Cpu className="w-3.5 h-3.5 text-amber-500" />
           <select
             value={machineTarget}

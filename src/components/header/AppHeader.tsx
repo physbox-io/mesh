@@ -136,7 +136,7 @@ export function AppHeader({
           </div>
 
           {/* Files Segmented Group */}
-          <div className="flex items-center max-lg:shrink-0 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+          <div className="flex items-center max-md:flex-1 max-md:min-w-0 max-md:overflow-x-auto max-md:[scrollbar-width:none] max-md:[&::-webkit-scrollbar]:hidden [&>button]:shrink-0 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
             <button 
               onClick={handleSavePresetClick}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
@@ -256,7 +256,7 @@ export function AppHeader({
           </div>
 
           {/* Right Utilities (Dark Mode, Docs, Settings, Copilot, User Profile, GitHub) */}
-          <div data-tour="copilot-docs" className="flex flex-wrap items-center justify-end gap-1.5 max-w-full">
+          <div data-tour="copilot-docs" className="flex flex-wrap items-center justify-end gap-1.5 max-sm:gap-1 max-w-full">
             {/* Dark Mode Toggle - immediately left of Docs button */}
             <button
               onClick={onToggleDarkMode}
