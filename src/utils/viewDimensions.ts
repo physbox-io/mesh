@@ -247,12 +247,14 @@ export function omittedLink(lengths: number[], keep: boolean[] = []): number {
 
 /** A length on the sheet, in mm, as a drawing writes it: one decimal, none when whole. */
 export function formatDim(metres: number): string {
+  if (!Number.isFinite(metres)) return '0';
   const mm = Math.round(metres * 10000) / 10;
   return Number.isInteger(mm) ? mm.toFixed(0) : mm.toFixed(1);
 }
 
 /** An angle as a drawing writes it: one decimal, none when whole. */
 export function formatAngle(degrees: number): string {
+  if (!Number.isFinite(degrees)) return '0°';
   const d = Math.round(degrees * 10) / 10;
   return `${Number.isInteger(d) ? d.toFixed(0) : d.toFixed(1)}°`;
 }
@@ -261,11 +263,28 @@ export function formatAngle(degrees: number): string {
  * A part's own axes as a view draws them. The one nearest the line of sight
  * is depth; of the other two, the one nearer screen right is u. Each is turned
  * to point right, up and away, as the view's own do, so a part square to the
- * view gets the view's axes exactly.
+ * view gets the view's axes exactly. Falls back to WORLD if `frame` is degenerate.
  */
 export function sheetAxes(frame: [Vec3, Vec3, Vec3] | undefined, view: DrawingView): SheetAxes {
   const { forward, right, up } = VIEW_AXES[view];
-  const axes = frame ?? WORLD;
+  let axes: [Vec3, Vec3, Vec3] = WORLD;
+  if (frame) {
+    const normed: Vec3[] = [];
+    let valid = true;
+    for (let i = 0; i < 3; i++) {
+      const a = frame[i];
+      if (!a || !Number.isFinite(a[0]) || !Number.isFinite(a[1]) || !Number.isFinite(a[2])) { valid = false; break; }
+      const l = Math.hypot(a[0], a[1], a[2]);
+      if (!(l > 1e-9)) { valid = false; break; }
+      normed.push([a[0] / l, a[1] / l, a[2] / l]);
+    }
+    if (valid &&
+      Math.abs(dot(normed[0], normed[1])) < 1e-2 &&
+      Math.abs(dot(normed[0], normed[2])) < 1e-2 &&
+      Math.abs(dot(normed[1], normed[2])) < 1e-2) {
+      axes = normed as [Vec3, Vec3, Vec3];
+    }
+  }
   let wi = 0;
   for (let i = 1; i < 3; i++) if (Math.abs(dot(axes[i], forward)) > Math.abs(dot(axes[wi], forward)) + 1e-9) wi = i;
   let [a, b] = axes.filter((_, i) => i !== wi);
@@ -371,34 +390,92 @@ function chainStops(stops: Stop[], lo: number, hi: number, across: number, loAnc
 /**
  * Whether a point on the part's sheet is covered by any of its triangles, as
  * drawn looking along w: what tells a rim that shows from one buried in other
- * material. Built on first use, as most parts have no rim to ask about.
+ * material. Built on first use with a 2D spatial grid so high-poly meshes stay fast.
  */
 function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: SheetAxes) {
-  let tris: Float64Array | null = null;
+  let built = false;
+  let tris: Float64Array = new Float64Array(0);
+  let triCount = 0;
+  let gridN = 0;
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  let invU = 0, invV = 0;
+  let cells: number[][] | null = null;
+  const eps = 1e-9;
+
+  const init = () => {
+    built = true;
+    const rawCount = Math.floor(faces.length / 3);
+    if (rawCount <= 0) return;
+    const pLen = positions.length;
+    const buf = new Float64Array(rawCount * 6);
+    let k = 0;
+    for (let t = 0; t < rawCount; t++) {
+      const i0 = faces[t * 3] * 3, i1 = faces[t * 3 + 1] * 3, i2 = faces[t * 3 + 2] * 3;
+      if (i0 < 0 || i1 < 0 || i2 < 0 || i0 + 2 >= pLen || i1 + 2 >= pLen || i2 + 2 >= pLen) continue;
+      const ax = positions[i0] * axes.u[0] + positions[i0 + 1] * axes.u[1] + positions[i0 + 2] * axes.u[2];
+      const ay = positions[i0] * axes.v[0] + positions[i0 + 1] * axes.v[1] + positions[i0 + 2] * axes.v[2];
+      const bx = positions[i1] * axes.u[0] + positions[i1 + 1] * axes.u[1] + positions[i1 + 2] * axes.u[2];
+      const by = positions[i1] * axes.v[0] + positions[i1 + 1] * axes.v[1] + positions[i1 + 2] * axes.v[2];
+      const cx = positions[i2] * axes.u[0] + positions[i2 + 1] * axes.u[1] + positions[i2 + 2] * axes.u[2];
+      const cy = positions[i2] * axes.v[0] + positions[i2 + 1] * axes.v[1] + positions[i2 + 2] * axes.v[2];
+      if (!Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(bx) ||
+          !Number.isFinite(by) || !Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+      buf[k++] = ax; buf[k++] = ay; buf[k++] = bx; buf[k++] = by; buf[k++] = cx; buf[k++] = cy;
+      if (ax < minU) minU = ax; if (ax > maxU) maxU = ax;
+      if (bx < minU) minU = bx; if (bx > maxU) maxU = bx;
+      if (cx < minU) minU = cx; if (cx > maxU) maxU = cx;
+      if (ay < minV) minV = ay; if (ay > maxV) maxV = ay;
+      if (by < minV) minV = by; if (by > maxV) maxV = by;
+      if (cy < minV) minV = cy; if (cy > maxV) maxV = cy;
+    }
+    triCount = k / 6;
+    tris = buf.subarray(0, k);
+    if (triCount > 64 && maxU > minU && maxV > minV) {
+      gridN = Math.min(64, Math.max(8, Math.ceil(Math.sqrt(triCount / 4))));
+      invU = gridN / (maxU - minU);
+      invV = gridN / (maxV - minV);
+      cells = Array.from({ length: gridN * gridN }, () => []);
+      for (let ti = 0; ti < triCount; ti++) {
+        const o = ti * 6;
+        const tMinU = Math.min(tris[o], tris[o + 2], tris[o + 4]) - eps;
+        const tMaxU = Math.max(tris[o], tris[o + 2], tris[o + 4]) + eps;
+        const tMinV = Math.min(tris[o + 1], tris[o + 3], tris[o + 5]) - eps;
+        const tMaxV = Math.max(tris[o + 1], tris[o + 3], tris[o + 5]) + eps;
+        const x0 = Math.max(0, Math.min(gridN - 1, Math.floor((tMinU - minU) * invU)));
+        const x1 = Math.max(0, Math.min(gridN - 1, Math.floor((tMaxU - minU) * invU)));
+        const y0 = Math.max(0, Math.min(gridN - 1, Math.floor((tMinV - minV) * invV)));
+        const y1 = Math.max(0, Math.min(gridN - 1, Math.floor((tMaxV - minV) * invV)));
+        for (let cy = y0; cy <= y1; cy++) {
+          const row = cy * gridN;
+          for (let cx = x0; cx <= x1; cx++) cells[row + cx].push(ti);
+        }
+      }
+    }
+  };
+
+  const hitTri = (o: number, pu: number, pv: number): boolean => {
+    const ax = tris[o], ay = tris[o + 1], bx = tris[o + 2], by = tris[o + 3], cx = tris[o + 4], cy = tris[o + 5];
+    if (pu < Math.min(ax, bx, cx) - eps || pu > Math.max(ax, bx, cx) + eps) return false;
+    if (pv < Math.min(ay, by, cy) - eps || pv > Math.max(ay, by, cy) + eps) return false;
+    const d1 = (bx - ax) * (pv - ay) - (by - ay) * (pu - ax);
+    const d2 = (cx - bx) * (pv - by) - (cy - by) * (pu - bx);
+    const d3 = (ax - cx) * (pv - cy) - (ay - cy) * (pu - cx);
+    const area = Math.abs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
+    const tol = eps * Math.max(1, area);
+    return ((d1 >= -tol && d2 >= -tol && d3 >= -tol) || (d1 <= tol && d2 <= tol && d3 <= tol)) && area > 0;
+  };
+
   return (pu: number, pv: number): boolean => {
-    if (!tris) {
-      tris = new Float64Array((faces.length / 3) * 6);
-      for (let t = 0, k = 0; t < faces.length; t++) {
-        const i = faces[t] * 3;
-        const q = [positions[i], positions[i + 1], positions[i + 2]];
-        tris[k++] = dot(q, axes.u);
-        tris[k++] = dot(q, axes.v);
-      }
+    if (!built) init();
+    if (triCount === 0 || pu < minU - eps || pu > maxU + eps || pv < minV - eps || pv > maxV + eps) return false;
+    if (cells) {
+      const cx = Math.max(0, Math.min(gridN - 1, Math.floor((pu - minU) * invU)));
+      const cy = Math.max(0, Math.min(gridN - 1, Math.floor((pv - minV) * invV)));
+      const bucket = cells[cy * gridN + cx];
+      for (let i = 0; i < bucket.length; i++) if (hitTri(bucket[i] * 6, pu, pv)) return true;
+      return false;
     }
-    const eps = 1e-9;
-    for (let k = 0; k < tris.length; k += 6) {
-      const ax = tris[k], ay = tris[k + 1], bx = tris[k + 2], by = tris[k + 3], cx = tris[k + 4], cy = tris[k + 5];
-      if (pu < Math.min(ax, bx, cx) - eps || pu > Math.max(ax, bx, cx) + eps) continue;
-      if (pv < Math.min(ay, by, cy) - eps || pv > Math.max(ay, by, cy) + eps) continue;
-      const d1 = (bx - ax) * (pv - ay) - (by - ay) * (pu - ax);
-      const d2 = (cx - bx) * (pv - by) - (cy - by) * (pu - bx);
-      const d3 = (ax - cx) * (pv - cy) - (ay - cy) * (pu - cx);
-      const area = Math.abs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
-      const tol = eps * Math.max(1, area);
-      if ((d1 >= -tol && d2 >= -tol && d3 >= -tol) || (d1 <= tol && d2 <= tol && d3 <= tol)) {
-        if (area > 0) return true;
-      }
-    }
+    for (let o = 0; o < tris.length; o += 6) if (hitTri(o, pu, pv)) return true;
     return false;
   };
 }
@@ -476,6 +553,7 @@ function slantDims(slants: Slant[], squares: SquareEdge[], U: Vec3, V: Vec3): { 
     const [p0, p1] = startAtA ? [s.pa, s.pb] : [s.pb, s.pa];
     const d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
     const k = Math.hypot(d[0], d[1], d[2]);
+    if (!(k > SAME_M)) continue;
     const to: Vec3 = [d[0] / k, d[1] / k, d[2] / k];
     const axis = level ? U : V;
     const from: Vec3 = dot(to, axis) >= 0 ? axis : neg(axis);
@@ -644,7 +722,10 @@ function proudRound(
   cu: number,
   cv: number,
   radius: number,
+  lo: number,
+  hi: number,
 ): { from: number; tip: number } | null {
+  if (!(radius > SAME_M) || !Number.isFinite(radius)) return null;
   const centre = along === 'v' ? cv : cu;
   const at = (s: number, off: number) => along === 'v' ? covered(cu + off, s) : covered(s, cv + off);
   const onAxis = (s: number) => at(s, 0);
@@ -662,7 +743,10 @@ function proudRound(
   /** From `s`, along `dir` while `test` holds: the last step it held and the first it did not. */
   const walk = (s: number, dir: number, test: (s: number) => boolean) => {
     let next = s + dir * step;
-    for (let k = 0; k < 100000 && test(next); k++) { s = next; next = s + dir * step; }
+    for (let k = 0; k < 4096 && next >= lo - step && next <= hi + step && test(next); k++) {
+      s = next;
+      next = s + dir * step;
+    }
     return { last: s, first: next };
   };
   let p: number | null = null;
@@ -698,7 +782,13 @@ function proudRound(
 function bossTest(positions: ArrayLike<number>, faces: ArrayLike<number>, triangleSurface: number[]) {
   const first = new Map<number, number>();
   triangleSurface.forEach((s, t) => { if (s >= 0 && !first.has(s)) first.set(s, t); });
-  return (surfaces: [number, number], centre: ArrayLike<number>, axis: ArrayLike<number>): boolean => {
+  return (
+    surfaces: [number, number],
+    centre: ArrayLike<number>,
+    axis: ArrayLike<number>,
+    nWall?: ArrayLike<number>,
+    ref?: ArrayLike<number>,
+  ): boolean => {
     let best: { across: number; outward: number } | null = null;
     for (const s of surfaces) {
       const t = first.get(s);
@@ -719,41 +809,113 @@ function bossTest(positions: ArrayLike<number>, faces: ArrayLike<number>, triang
       // The wall is the surface square to the axis.
       if (!best || along < best.across) best = { across: along, outward: dot(n, radial) };
     }
-    return !!best && best.across < 0.5 && best.outward > 0;
+    if (best && best.across < 0.5) return best.outward > 0;
+    // Fallback when a curved wall surface blends into a flat face so its first
+    // triangle wasn't on the cylindrical wall: featureEdges already computed
+    // the rim-adjacent wall normal `n2` against the outward radial `ref`.
+    if (nWall && ref) return dot(nWall, ref) > 0;
+    return false;
   };
 }
 
 /**
  * Whether a point is behind the part's own surface, seen along w: some
- * triangle covering it on the sheet lies nearer. Built on first use.
+ * triangle covering it on the sheet lies nearer. Built on first use with a 2D
+ * spatial grid so high-poly meshes stay fast.
  */
 function occlusion(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: SheetAxes) {
-  let tris: Float64Array | null = null;
-  return (pu: number, pv: number, pw: number): boolean => {
-    if (!tris) {
-      tris = new Float64Array(faces.length * 3);
-      for (let t = 0, k = 0; t < faces.length; t++) {
-        const i = faces[t] * 3;
-        const q = [positions[i], positions[i + 1], positions[i + 2]];
-        tris[k++] = dot(q, axes.u);
-        tris[k++] = dot(q, axes.v);
-        tris[k++] = dot(q, axes.w);
+  let built = false;
+  let tris: Float64Array = new Float64Array(0);
+  let triCount = 0;
+  let gridN = 0;
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  let invU = 0, invV = 0;
+  let cells: number[][] | null = null;
+  const pad = 1e-9;
+
+  const init = () => {
+    built = true;
+    const rawCount = Math.floor(faces.length / 3);
+    if (rawCount <= 0) return;
+    const pLen = positions.length;
+    const buf = new Float64Array(rawCount * 9);
+    let k = 0;
+    for (let t = 0; t < rawCount; t++) {
+      const i0 = faces[t * 3] * 3, i1 = faces[t * 3 + 1] * 3, i2 = faces[t * 3 + 2] * 3;
+      if (i0 < 0 || i1 < 0 || i2 < 0 || i0 + 2 >= pLen || i1 + 2 >= pLen || i2 + 2 >= pLen) continue;
+      const ax = positions[i0] * axes.u[0] + positions[i0 + 1] * axes.u[1] + positions[i0 + 2] * axes.u[2];
+      const ay = positions[i0] * axes.v[0] + positions[i0 + 1] * axes.v[1] + positions[i0 + 2] * axes.v[2];
+      const aw = positions[i0] * axes.w[0] + positions[i0 + 1] * axes.w[1] + positions[i0 + 2] * axes.w[2];
+      const bx = positions[i1] * axes.u[0] + positions[i1 + 1] * axes.u[1] + positions[i1 + 2] * axes.u[2];
+      const by = positions[i1] * axes.v[0] + positions[i1 + 1] * axes.v[1] + positions[i1 + 2] * axes.v[2];
+      const bw = positions[i1] * axes.w[0] + positions[i1 + 1] * axes.w[1] + positions[i1 + 2] * axes.w[2];
+      const cx = positions[i2] * axes.u[0] + positions[i2 + 1] * axes.u[1] + positions[i2 + 2] * axes.u[2];
+      const cy = positions[i2] * axes.v[0] + positions[i2 + 1] * axes.v[1] + positions[i2 + 2] * axes.v[2];
+      const cw = positions[i2] * axes.w[0] + positions[i2 + 1] * axes.w[1] + positions[i2 + 2] * axes.w[2];
+      if (!Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(aw) ||
+          !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bw) ||
+          !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cw)) continue;
+      buf[k++] = ax; buf[k++] = ay; buf[k++] = aw;
+      buf[k++] = bx; buf[k++] = by; buf[k++] = bw;
+      buf[k++] = cx; buf[k++] = cy; buf[k++] = cw;
+      if (ax < minU) minU = ax; if (ax > maxU) maxU = ax;
+      if (bx < minU) minU = bx; if (bx > maxU) maxU = bx;
+      if (cx < minU) minU = cx; if (cx > maxU) maxU = cx;
+      if (ay < minV) minV = ay; if (ay > maxV) maxV = ay;
+      if (by < minV) minV = by; if (by > maxV) maxV = by;
+      if (cy < minV) minV = cy; if (cy > maxV) maxV = cy;
+    }
+    triCount = k / 9;
+    tris = buf.subarray(0, k);
+    if (triCount > 64 && maxU > minU && maxV > minV) {
+      gridN = Math.min(64, Math.max(8, Math.ceil(Math.sqrt(triCount / 4))));
+      invU = gridN / (maxU - minU);
+      invV = gridN / (maxV - minV);
+      cells = Array.from({ length: gridN * gridN }, () => []);
+      for (let ti = 0; ti < triCount; ti++) {
+        const o = ti * 9;
+        const tMinU = Math.min(tris[o], tris[o + 3], tris[o + 6]) - pad;
+        const tMaxU = Math.max(tris[o], tris[o + 3], tris[o + 6]) + pad;
+        const tMinV = Math.min(tris[o + 1], tris[o + 4], tris[o + 7]) - pad;
+        const tMaxV = Math.max(tris[o + 1], tris[o + 4], tris[o + 7]) + pad;
+        const x0 = Math.max(0, Math.min(gridN - 1, Math.floor((tMinU - minU) * invU)));
+        const x1 = Math.max(0, Math.min(gridN - 1, Math.floor((tMaxU - minU) * invU)));
+        const y0 = Math.max(0, Math.min(gridN - 1, Math.floor((tMinV - minV) * invV)));
+        const y1 = Math.max(0, Math.min(gridN - 1, Math.floor((tMaxV - minV) * invV)));
+        for (let cy = y0; cy <= y1; cy++) {
+          const row = cy * gridN;
+          for (let cx = x0; cx <= x1; cx++) cells[row + cx].push(ti);
+        }
       }
     }
-    for (let k = 0; k < tris.length; k += 9) {
-      const ax = tris[k], ay = tris[k + 1], aw = tris[k + 2];
-      const bx = tris[k + 3], by = tris[k + 4], bw = tris[k + 5];
-      const cx = tris[k + 6], cy = tris[k + 7], cw = tris[k + 8];
-      if (Math.min(aw, bw, cw) >= pw - PAST_M) continue;
-      if (pu < Math.min(ax, bx, cx) || pu > Math.max(ax, bx, cx)) continue;
-      if (pv < Math.min(ay, by, cy) || pv > Math.max(ay, by, cy)) continue;
-      const det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-      if (Math.abs(det) < 1e-18) continue;
-      const l1 = ((pu - ax) * (cy - ay) - (pv - ay) * (cx - ax)) / det;
-      const l2 = ((bx - ax) * (pv - ay) - (by - ay) * (pu - ax)) / det;
-      if (l1 < 0 || l2 < 0 || l1 + l2 > 1) continue;
-      if (aw + l1 * (bw - aw) + l2 * (cw - aw) < pw - PAST_M) return true;
+  };
+
+  const hitTri = (o: number, pu: number, pv: number, pw: number): boolean => {
+    const ax = tris[o], ay = tris[o + 1], aw = tris[o + 2];
+    const bx = tris[o + 3], by = tris[o + 4], bw = tris[o + 5];
+    const cx = tris[o + 6], cy = tris[o + 7], cw = tris[o + 8];
+    if (Math.min(aw, bw, cw) >= pw - PAST_M) return false;
+    if (pu < Math.min(ax, bx, cx) || pu > Math.max(ax, bx, cx)) return false;
+    if (pv < Math.min(ay, by, cy) || pv > Math.max(ay, by, cy)) return false;
+    const det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (Math.abs(det) < 1e-18) return false;
+    const l1 = ((pu - ax) * (cy - ay) - (pv - ay) * (cx - ax)) / det;
+    const l2 = ((bx - ax) * (pv - ay) - (by - ay) * (pu - ax)) / det;
+    if (l1 < 0 || l2 < 0 || l1 + l2 > 1) return false;
+    return aw + l1 * (bw - aw) + l2 * (cw - aw) < pw - PAST_M;
+  };
+
+  return (pu: number, pv: number, pw: number): boolean => {
+    if (!built) init();
+    if (triCount === 0 || pu < minU - pad || pu > maxU + pad || pv < minV - pad || pv > maxV + pad) return false;
+    if (cells) {
+      const cx = Math.max(0, Math.min(gridN - 1, Math.floor((pu - minU) * invU)));
+      const cy = Math.max(0, Math.min(gridN - 1, Math.floor((pv - minV) * invV)));
+      const bucket = cells[cy * gridN + cx];
+      for (let i = 0; i < bucket.length; i++) if (hitTri(bucket[i] * 9, pu, pv, pw)) return true;
+      return false;
     }
+    for (let o = 0; o < tris.length; o += 9) if (hitTri(o, pu, pv, pw)) return true;
     return false;
   };
 }
@@ -762,75 +924,186 @@ function occlusion(positions: ArrayLike<number>, faces: ArrayLike<number>, axes:
 const POLYGON_NAMES: Record<number, string> = { 3: 'tri', 4: 'square', 5: 'pent', 6: 'hex', 8: 'oct' };
 
 /**
- * Regular polygonal holes seen end on — a hex bore, a square drive: a closed
- * ring of equal straight edges lying in the sheet round an empty middle. A
- * drawing gives one figure across its flats and locates its centre, as it does
- * a round hole; its sides are not outline edges to chain and slant. Returns the
- * holes and the edges that make them.
+ * Regular polygonal holes seen end on (3..12 sides — hex bore, square drive,
+ * through OR blind) AND coarse-tessellated circular rims (13..64 sides, e.g.
+ * 16-sided OpenSCAD/Manifold cylinders whose 22.5° facet angle exceeds the 20°
+ * crease threshold so featureEdges splits them into line segments).
+ *
+ * Returns polygonal holes, coarse end-on circles, coarse side-on circles, and
+ * every edge ID belonging to those rims (plus longitudinal facet creases of
+ * coarse cylinders so they do not pollute straight-edge chains).
  */
-function polygonHoles(
-  edges: EdgeCandidate[], axes: SheetAxes, covered: (u: number, v: number) => boolean,
-): { holes: { centre: [number, number]; radius: number; sides: number }[]; edgeIds: Set<number> } {
+function lineRings(
+  edges: EdgeCandidate[],
+  surfaces: { normal: Vec3; flat: boolean }[],
+  axes: SheetAxes,
+  viewAxes: { right: Vec3; up: Vec3; forward: Vec3 },
+  covered: (u: number, v: number) => boolean,
+  hidden: (u: number, v: number, w: number) => boolean,
+): {
+  holes: { centre: [number, number]; radius: number; sides: number }[];
+  endOnCircles: { centre: [number, number]; radius: number; segments: number }[];
+  sideOnCircles: { along: 'u' | 'v'; cu: number; cv: number; radius: number; segments: number; isBoss: boolean }[];
+  edgeIds: Set<number>;
+} {
   const { u: U, v: V, w: W } = axes;
-  const key = (p: ArrayLike<number>) => [0, 1, 2].map((i) => Math.round(p[i] / MERGE_M * 4)).join(',');
-  type Line = { id: number; a: number[]; b: number[] };
-  const lines: Line[] = [];
-  for (const c of edges) {
-    if (c.edge.kind !== 'line') continue;
-    const { a, b } = c.edge;
-    const d = [0, 1, 2].map((i) => b[i] - a[i]);
-    const length = Math.hypot(d[0], d[1], d[2]);
-    if (length > SAME_M && Math.abs(dot(d, W)) / length < IN_SHEET) lines.push({ id: c.id, a, b });
-  }
-  const at = new Map<string, Line[]>();
-  for (const c of lines) {
-    for (const p of [c.a, c.b]) {
-      const k = key(p);
-      at.set(k, [...(at.get(k) ?? []), c]);
-    }
-  }
+  const { right, up, forward } = viewAxes;
+  const key = (p: ArrayLike<number>) => [0, 1, 2].map((i) => Math.round((p[i] / MERGE_M) * 4)).join(',');
+  type Line = { id: number; a: number[]; b: number[]; surfaces: [number, number] };
   const holes: { centre: [number, number]; radius: number; sides: number }[] = [];
+  const endOnCircles: { centre: [number, number]; radius: number; segments: number }[] = [];
+  const sideOnCircles: { along: 'u' | 'v'; cu: number; cv: number; radius: number; segments: number; isBoss: boolean }[] = [];
   const edgeIds = new Set<number>();
-  const visited = new Set<number>();
-  for (const start of lines) {
-    if (visited.has(start.id)) continue;
-    // Walk the ring corner to corner, through corners shared by exactly two.
-    const ring: Line[] = [start];
-    const points: ArrayLike<number>[] = [start.a, start.b];
-    visited.add(start.id);
-    let corner = key(start.b);
-    let closed = false;
-    while (ring.length <= 12) {
-      const here = at.get(corner) ?? [];
-      if (here.length !== 2) break;
-      const next = here.find((c) => c !== ring[ring.length - 1])!;
-      if (next === start) { closed = true; break; }
-      if (visited.has(next.id)) break;
-      visited.add(next.id);
-      ring.push(next);
-      const far = key(next.a) === corner ? next.b : next.a;
-      points.push(far);
-      corner = key(far);
+  const coarseWallSurfaces = new Set<number>();
+
+  const even = (xs: number[]) => {
+    const hi = Math.max(...xs);
+    return hi > 0 && hi - Math.min(...xs) <= 0.02 * hi;
+  };
+  const rimVisible = (pts: ArrayLike<number>[]) => {
+    const step = Math.max(1, Math.floor(pts.length / 8));
+    for (let i = 0; i < pts.length; i += step) {
+      const q = pts[i];
+      if (!hidden(dot(q, right), dot(q, up), dot(q, forward))) return true;
     }
-    if (!closed || ring.length < 3 || ring.length > 12) continue;
-    const corners = points.slice(0, ring.length).map((q) => [dot(q, U), dot(q, V)]);
-    const centre: [number, number] = [
-      corners.reduce((t, q) => t + q[0], 0) / corners.length,
-      corners.reduce((t, q) => t + q[1], 0) / corners.length,
-    ];
-    const lengths = ring.map((c) => Math.hypot(...[0, 1, 2].map((i) => c.b[i] - c.a[i])));
-    const spokes = corners.map((q) => Math.hypot(q[0] - centre[0], q[1] - centre[1]));
-    const even = (xs: number[]) => Math.max(...xs) - Math.min(...xs) <= 0.02 * Math.max(...xs);
-    if (!even(lengths) || !even(spokes) || covered(centre[0], centre[1])) continue;
-    for (const c of ring) edgeIds.add(c.id);
-    const radius = (spokes.reduce((t, x) => t + x, 0) / spokes.length) * Math.cos(Math.PI / ring.length);
-    // Both rims of a through hole are one hole.
-    if (!holes.some((h) => h.sides === ring.length && Math.abs(h.radius - radius) < SAME_M &&
-      Math.hypot(h.centre[0] - centre[0], h.centre[1] - centre[1]) < SAME_M)) {
-      holes.push({ centre, radius, sides: ring.length });
+    return false;
+  };
+
+  /** Determine wall orientation (positive = outward boss, negative = inward hole) and wall surfaces. */
+  const classifyWall = (ring: Line[], centre3: Vec3, planeNormal: Vec3) => {
+    let outward = 0;
+    let inward = 0;
+    const walls: number[] = [];
+    for (const c of ring) {
+      const mid = [(c.a[0] + c.b[0]) / 2 - centre3[0], (c.a[1] + c.b[1]) / 2 - centre3[1], (c.a[2] + c.b[2]) / 2 - centre3[2]];
+      const h = dot(mid, planeNormal);
+      const radial = [mid[0] - planeNormal[0] * h, mid[1] - planeNormal[1] * h, mid[2] - planeNormal[2] * h];
+      for (const s of c.surfaces) {
+        const n = surfaces[s]?.normal;
+        if (!n || Math.abs(dot(n, planeNormal)) >= 0.5) continue;
+        walls.push(s);
+        const side = dot(n, radial);
+        if (side > 0) outward++;
+        else if (side < 0) inward++;
+      }
+    }
+    return { isBoss: outward > inward, isHole: inward > outward, walls };
+  };
+
+  const walkPlane = (planeNormal: Vec3, pA: Vec3, pB: Vec3, kind: 'end' | 'v' | 'u') => {
+    const lines: Line[] = [];
+    for (const c of edges) {
+      if (edgeIds.has(c.id) || c.edge.kind !== 'line') continue;
+      const { a, b } = c.edge;
+      const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const length = Math.hypot(d[0], d[1], d[2]);
+      if (length > SAME_M && Math.abs(dot(d, planeNormal)) / length < IN_SHEET) {
+        lines.push({ id: c.id, a, b, surfaces: c.surfaces });
+      }
+    }
+    const at = new Map<string, Line[]>();
+    for (const c of lines) {
+      for (const p of [c.a, c.b]) {
+        const k = key(p);
+        const list = at.get(k);
+        if (list) list.push(c); else at.set(k, [c]);
+      }
+    }
+    const visited = new Set<number>();
+    const maxSides = 64;
+    for (const start of lines) {
+      if (visited.has(start.id)) continue;
+      const ring: Line[] = [start];
+      const points: ArrayLike<number>[] = [start.a, start.b];
+      visited.add(start.id);
+      let corner = key(start.b);
+      let closed = false;
+      while (ring.length <= maxSides) {
+        const here = at.get(corner) ?? [];
+        if (here.length !== 2) break;
+        const next = here.find((c) => c !== ring[ring.length - 1])!;
+        if (next === start) { closed = true; break; }
+        if (visited.has(next.id)) break;
+        visited.add(next.id);
+        ring.push(next);
+        const far = key(next.a) === corner ? next.b : next.a;
+        points.push(far);
+        corner = key(far);
+      }
+      if (!closed || ring.length < 3 || ring.length > maxSides) continue;
+      const ringPts = points.slice(0, ring.length);
+      const centre3: Vec3 = [
+        ringPts.reduce((t, q) => t + q[0], 0) / ringPts.length,
+        ringPts.reduce((t, q) => t + q[1], 0) / ringPts.length,
+        ringPts.reduce((t, q) => t + q[2], 0) / ringPts.length,
+      ];
+      // Verify all corners lie in one plane normal to planeNormal.
+      const planeD = dot(centre3, planeNormal);
+      if (ringPts.some((q) => Math.abs(dot(q, planeNormal) - planeD) > MERGE_M)) continue;
+      const corners = ringPts.map((q) => [dot(q, pA), dot(q, pB)] as [number, number]);
+      const centre2: [number, number] = [dot(centre3, pA), dot(centre3, pB)];
+      const lengths = ring.map((c) => Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1], c.b[2] - c.a[2]));
+      const spokes = corners.map((q) => Math.hypot(q[0] - centre2[0], q[1] - centre2[1]));
+      if (!even(lengths) || !even(spokes)) continue;
+      const circumRadius = spokes.reduce((t, x) => t + x, 0) / spokes.length;
+      if (!(circumRadius > SAME_M)) continue;
+
+      if (kind === 'end') {
+        if (ring.length <= 12) {
+          // Polygonal hole: through-hole (uncovered centre) OR blind polygonal pocket (inward walls & visible rim).
+          const wall = classifyWall(ring, centre3, planeNormal);
+          const isThrough = !covered(centre2[0], centre2[1]);
+          const isBlind = !isThrough && wall.isHole && rimVisible(ringPts);
+          if (!isThrough && !isBlind) continue;
+          for (const c of ring) edgeIds.add(c.id);
+          const radius = circumRadius * Math.cos(Math.PI / ring.length);
+          if (!holes.some((h) => h.sides === ring.length && Math.abs(h.radius - radius) < SAME_M &&
+            Math.hypot(h.centre[0] - centre2[0], h.centre[1] - centre2[1]) < SAME_M)) {
+            holes.push({ centre: centre2, radius, sides: ring.length });
+          }
+        } else {
+          // 13..64 sides: coarse-tessellated circular rim seen end-on (cylinder or hole).
+          for (const c of ring) edgeIds.add(c.id);
+          if (rimVisible(ringPts)) {
+            endOnCircles.push({ centre: centre2, radius: circumRadius, segments: ring.length });
+          }
+        }
+      } else if (ring.length >= 13) {
+        // 13..64 sides seen side-on (e.g., 16-sided cylinder rim in Front/Side view).
+        const wall = classifyWall(ring, centre3, planeNormal);
+        for (const c of ring) edgeIds.add(c.id);
+        for (const s of wall.walls) coarseWallSurfaces.add(s);
+        sideOnCircles.push({
+          along: kind,
+          cu: dot(centre3, U),
+          cv: dot(centre3, V),
+          radius: circumRadius,
+          segments: ring.length,
+          isBoss: wall.isBoss,
+        });
+      }
+    }
+  };
+
+  walkPlane(W, U, V, 'end');
+  walkPlane(V, U, W, 'v');
+  walkPlane(U, V, W, 'u');
+
+  // Suppress longitudinal facet crease lines between adjacent coarse cylinder wall facets.
+  if (coarseWallSurfaces.size > 0) {
+    for (const c of edges) {
+      if (c.edge.kind === 'line' && coarseWallSurfaces.has(c.surfaces[0]) && coarseWallSurfaces.has(c.surfaces[1])) {
+        edgeIds.add(c.id);
+      }
     }
   }
-  return { holes, edgeIds };
+
+  return { holes, endOnCircles, sideOnCircles, edgeIds };
+}
+
+/** Maximum radial sagitta error of an N-sided polygon inscribed in a circle of `radius`, plus SAME_M. */
+function sagittaTol(radius: number, segments = 32): number {
+  return Math.max(SAME_M, radius * (1 - Math.cos(Math.PI / Math.max(8, segments))) + SAME_M);
 }
 
 /** A gear figure to the hundredth of a mm, or of a module: no trailing zeros. */
@@ -887,40 +1160,64 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   const axes = sheetAxes(body.frame, view);
   const { u: U, v: V, w: W } = axes;
   const p = body.positions;
-  if (p.length < 9) return null;
+  const f = body.faces;
+  if (p.length < 9 || f.length < 3) return null;
 
-  // --- the outline, on the part's own axes ---------------------------------
+  // Verify the mesh has at least one finite, in-bounds triangle and measure
+  // bounds strictly from finite vertices referenced by valid triangles.
+  let validTris = 0;
   let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity, w0 = Infinity, w1 = -Infinity;
-  for (let i = 0; i < p.length; i += 3) {
-    const q = [p[i], p[i + 1], p[i + 2]];
-    const u = dot(q, U), v = dot(q, V), w = dot(q, W);
-    if (u < u0) u0 = u;
-    if (u > u1) u1 = u;
-    if (v < v0) v0 = v;
-    if (v > v1) v1 = v;
-    if (w < w0) w0 = w;
-    if (w > w1) w1 = w;
+  for (let t = 0; t + 2 < f.length; t += 3) {
+    const i0 = f[t] * 3, i1 = f[t + 1] * 3, i2 = f[t + 2] * 3;
+    if (i0 < 0 || i1 < 0 || i2 < 0 || i0 + 2 >= p.length || i1 + 2 >= p.length || i2 + 2 >= p.length) continue;
+    const x0 = p[i0], y0 = p[i0 + 1], z0 = p[i0 + 2];
+    const x1 = p[i1], y1 = p[i1 + 1], z1 = p[i1 + 2];
+    const x2 = p[i2], y2 = p[i2 + 1], z2 = p[i2 + 2];
+    if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(z0) ||
+        !Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(z1) ||
+        !Number.isFinite(x2) || !Number.isFinite(y2) || !Number.isFinite(z2)) continue;
+    validTris++;
+    for (const [px, py, pz] of [[x0, y0, z0], [x1, y1, z1], [x2, y2, z2]]) {
+      const u = px * U[0] + py * U[1] + pz * U[2];
+      const v = px * V[0] + py * V[1] + pz * V[2];
+      const w = px * W[0] + py * W[1] + pz * W[2];
+      if (u < u0) u0 = u;
+      if (u > u1) u1 = u;
+      if (v < v0) v0 = v;
+      if (v > v1) v1 = v;
+      if (w < w0) w0 = w;
+      if (w > w1) w1 = w;
+    }
   }
+  if (validTris === 0) return null;
+  if (!Number.isFinite(u0) || !Number.isFinite(u1) || !Number.isFinite(v0) ||
+      !Number.isFinite(v1) || !Number.isFinite(w0) || !Number.isFinite(w1)) return null;
   if (!(u1 - u0 > SAME_M || v1 - v0 > SAME_M)) return null;
-  const width = u1 - u0;
-  const height = v1 - v0;
+  let width = u1 - u0;
+  let height = v1 - v0;
   let u0Anchor = Infinity, u1Anchor = Infinity, v0Anchor = Infinity, v1Anchor = Infinity;
-  for (let i = 0; i < p.length; i += 3) {
-    const q = [p[i], p[i + 1], p[i + 2]];
-    const u = dot(q, U), v = dot(q, V);
+  for (let i = 0; i + 2 < p.length; i += 3) {
+    const px = p[i], py = p[i + 1], pz = p[i + 2];
+    if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) continue;
+    const u = px * U[0] + py * U[1] + pz * U[2];
+    const v = px * V[0] + py * V[1] + pz * V[2];
     if (u <= u0 + MERGE_M && v < u0Anchor) u0Anchor = v;
     if (u >= u1 - MERGE_M && v < u1Anchor) u1Anchor = v;
     if (v <= v0 + MERGE_M && u < v0Anchor) v0Anchor = u;
     if (v >= v1 - MERGE_M && u < v1Anchor) v1Anchor = u;
   }
+  if (!Number.isFinite(u0Anchor)) u0Anchor = v0;
+  if (!Number.isFinite(u1Anchor)) u1Anchor = v0;
+  if (!Number.isFinite(v0Anchor)) v0Anchor = u0;
+  if (!Number.isFinite(v1Anchor)) v1Anchor = u0;
   const covered = coverage(body.positions, body.faces, axes);
 
   // --- the edges -----------------------------------------------------------
   const uStops: Stop[] = [];
   const vStops: Stop[] = [];
-  const circles: { centre: [number, number]; radius: number }[] = [];
-  let polygons: ReturnType<typeof polygonHoles>['holes'] = [];
-  const balls: { centre: [number, number]; radius: number }[] = [];
+  const circles: { centre: [number, number]; radius: number; segments?: number }[] = [];
+  let polygons: ReturnType<typeof lineRings>['holes'] = [];
+  const balls: { centre: [number, number]; radius: number; segments?: number }[] = [];
   const hidden = occlusion(body.positions, body.faces, { u: right, v: up, w: forward });
   /**
    * Whether any of a round's near face shows past the rest of the part: its
@@ -936,7 +1233,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     return at(0, 0) || at(0.7, 0) || at(-0.7, 0) || at(0, 0.7) || at(0, -0.7);
   };
   // Rounds lying in the view: across them, from silhouette to silhouette, is a diameter.
-  const sideOn: { axis: 'u' | 'v'; lo: number; hi: number }[] = [];
+  const sideOn: { axis: 'u' | 'v'; lo: number; hi: number; segments?: number }[] = [];
   // Whether something straight runs along each axis, which is what makes the
   // part's turn in the view an angle worth giving: a plain disc's is not.
   const straight = { u: false, v: false };
@@ -950,21 +1247,46 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   // Arcs of the edges, for their radii (see arcsOf).
   const arcs: Arc[] = [];
   // Rounds standing out of the part whose rims are buried (see proudRound).
-  const pegs: { along: 'u' | 'v'; cu: number; cv: number; radius: number }[] = [];
+  const pegs: { along: 'u' | 'v'; cu: number; cv: number; radius: number; segments?: number }[] = [];
 
   /**
    * A round seen side on, its axis along `along`: its silhouette is a stop each
    * side across it, and a diameter between them. `at` is where to stand along
    * the axis to look across.
    */
-  const silhouette = (along: 'u' | 'v', cu: number, cv: number, radius: number, weight: number) => {
+  const silhouette = (along: 'u' | 'v', cu: number, cv: number, radius: number, weight: number, segments?: number) => {
     if (along === 'v') {
       uStops.push({ at: cu - radius, anchor: cv, weight }, { at: cu + radius, anchor: cv, weight });
-      sideOn.push({ axis: 'u', lo: cu - radius, hi: cu + radius });
+      sideOn.push({ axis: 'u', lo: cu - radius, hi: cu + radius, segments });
     } else {
       vStops.push({ at: cv - radius, anchor: cu, weight }, { at: cv + radius, anchor: cu, weight });
-      sideOn.push({ axis: 'v', lo: cv - radius, hi: cv + radius });
+      sideOn.push({ axis: 'v', lo: cv - radius, hi: cv + radius, segments });
     }
+  };
+
+  /** Handle a round rim seen side-on (regular circle edge OR coarse 13..64-sided ring). */
+  const handleSideOnBoss = (along: 'u' | 'v', cu: number, cv: number, radius: number, segments?: number) => {
+    const r = 0.9 * radius;
+    const shows = along === 'v'
+      ? [cv - PAST_M, cv + PAST_M].some((v) => !covered(cu - r, v) || !covered(cu + r, v))
+      : [cu - PAST_M, cu + PAST_M].some((u) => !covered(u, cv - r) || !covered(u, cv + r));
+    if (!shows) {
+      // Covered both sides can still be a peg: the plate on one side, the
+      // peg itself on the other, out to a domed tip that has no edge.
+      const peg = proudRound(covered, along, cu, cv, radius, along === 'v' ? v0 : u0, along === 'v' ? v1 : u1);
+      if (!peg) return;
+      const stops = along === 'v' ? vStops : uStops;
+      const across = along === 'v' ? cu : cv;
+      stops.push(
+        { at: peg.from, anchor: across - radius, weight: 2 * radius },
+        { at: peg.tip, anchor: across - radius, weight: 2 * radius },
+      );
+      pegs.push({ along, cu, cv, radius, segments });
+      return;
+    }
+    if (along === 'v') vStops.push({ at: cv, anchor: cu - radius, weight: 2 * radius });
+    else uStops.push({ at: cu, anchor: cv - radius, weight: 2 * radius });
+    silhouette(along, cu, cv, radius, 2 * radius, segments);
   };
 
   if (body.faces.length / 3 <= MAX_DIM_TRIANGLES) {
@@ -1005,7 +1327,10 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         const run = visibleRun(seen);
         if (!run) return;
         const pa = point(run[0]), pb = point(run[1]);
-        slants.push({ a: [dot(pa, U), dot(pa, V)], b: [dot(pb, U), dot(pb, V)], pa, pb });
+        const pa2: [number, number] = [dot(pa, U), dot(pa, V)];
+        const pb2: [number, number] = [dot(pb, U), dot(pb, V)];
+        if (Math.hypot(pb2[0] - pa2[0], pb2[1] - pa2[1]) <= SAME_M) return;
+        slants.push({ a: pa2, b: pb2, pa, pb });
         return;
       }
       // A hidden edge is not dimensioned (a rib's end buried in the plate it
@@ -1030,10 +1355,23 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         if (drawn >= share && Math.abs(du) / length > 1 - SQUARE) straight.u = true;
       }
     };
-    const polygonal = polygonHoles(found.edges, axes, covered);
-    polygons = polygonal.holes;
+    const rings = lineRings(found.edges, found.surfaces, axes, { right, up, forward }, covered, hidden);
+    polygons = rings.holes;
+    for (const c of rings.endOnCircles) circles.push(c);
+    for (const s of rings.sideOnCircles) {
+      if (s.isBoss) handleSideOnBoss(s.along, s.cu, s.cv, s.radius, s.segments);
+    }
+    const circleRimVisible = (pts: Vec3[]) => {
+      if (!pts.length) return true;
+      const step = Math.max(1, Math.floor(pts.length / 8));
+      for (let i = 0; i < pts.length; i += step) {
+        const q = pts[i];
+        if (!hidden(dot(q, right), dot(q, up), dot(q, forward))) return true;
+      }
+      return false;
+    };
     for (const candidate of found.edges) {
-      if (polygonal.edgeIds.has(candidate.id)) continue;
+      if (rings.edgeIds.has(candidate.id)) continue;
       const e = candidate.edge;
       if (e.kind === 'line') {
         // Only an edge where at least one of its two faces stands square to the
@@ -1052,7 +1390,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         const facing = Math.abs(dot(e.axis, W));
         const cu = dot(e.centre, U), cv = dot(e.centre, V);
         if (facing > END_ON) {
-          circles.push({ centre: [cu, cv], radius: e.radius });
+          if (circleRimVisible(candidate.points)) {
+            circles.push({ centre: [cu, cv], radius: e.radius, segments: e.segments });
+          }
           continue;
         }
         if (facing >= 1 - END_ON) continue;
@@ -1063,28 +1403,8 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         // rim is buried (a shaft's end inside the sail it carries).
         const along = Math.abs(dot(e.axis, V)) > END_ON ? 'v' : Math.abs(dot(e.axis, U)) > END_ON ? 'u' : null;
         // A hole seen side on is out of sight inside the part: only a boss shows.
-        if (!along || !isBoss(candidate.surfaces, e.centre, e.axis)) continue;
-        const r = 0.9 * e.radius;
-        const shows = along === 'v'
-          ? [cv - PAST_M, cv + PAST_M].some((v) => !covered(cu - r, v) || !covered(cu + r, v))
-          : [cu - PAST_M, cu + PAST_M].some((u) => !covered(u, cv - r) || !covered(u, cv + r));
-        if (!shows) {
-          // Covered both sides can still be a peg: the plate on one side, the
-          // peg itself on the other, out to a domed tip that has no edge.
-          const peg = proudRound(covered, along, cu, cv, e.radius);
-          if (!peg) continue;
-          const stops = along === 'v' ? vStops : uStops;
-          const across = along === 'v' ? cu : cv;
-          stops.push(
-            { at: peg.from, anchor: across - e.radius, weight: 2 * e.radius },
-            { at: peg.tip, anchor: across - e.radius, weight: 2 * e.radius },
-          );
-          pegs.push({ along, cu, cv, radius: e.radius });
-          continue;
-        }
-        if (along === 'v') vStops.push({ at: cv, anchor: cu - e.radius, weight: 2 * e.radius });
-        else uStops.push({ at: cu, anchor: cv - e.radius, weight: 2 * e.radius });
-        silhouette(along, cu, cv, e.radius, 2 * e.radius);
+        if (!along || !isBoss(candidate.surfaces, e.centre, e.axis, e.n2, e.ref)) continue;
+        handleSideOnBoss(along, cu, cv, e.radius, e.segments);
       }
     }
     // Edges that are neither line nor circle: an outline running round a
@@ -1114,7 +1434,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   for (const peg of pegs) {
     const inLine = circles.some((c) => Math.abs(c.radius - peg.radius) < 0.1 * peg.radius &&
       (peg.along === 'v' ? Math.abs(c.centre[0] - peg.cu) : Math.abs(c.centre[1] - peg.cv)) < MERGE_M);
-    if (!inLine) silhouette(peg.along, peg.cu, peg.cv, peg.radius, 2 * peg.radius);
+    if (!inLine) silhouette(peg.along, peg.cu, peg.cv, peg.radius, 2 * peg.radius, peg.segments);
   }
 
   // Rods: seen end-on, a circle; seen side on, a silhouette each side, and the
@@ -1150,6 +1470,21 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     if (looks) silhouette(along, cu, cv, rod.radius, 2 * rod.radius);
   }
 
+  // Expand tessellation-clipped cylinder silhouettes out to their true circle
+  // radius when vertex AABB fell short purely by polygonal chord sagitta.
+  for (const s of sideOn) {
+    const tol = sagittaTol((s.hi - s.lo) / 2, s.segments);
+    if (s.axis === 'u') {
+      if (s.lo < u0 && u0 - s.lo <= tol) u0 = s.lo;
+      if (s.hi > u1 && s.hi - u1 <= tol) u1 = s.hi;
+    } else {
+      if (s.lo < v0 && v0 - s.lo <= tol) v0 = s.lo;
+      if (s.hi > v1 && s.hi - v1 <= tol) v1 = s.hi;
+    }
+  }
+  width = u1 - u0;
+  height = v1 - v0;
+
   // A sphere wholly inside another is out of sight (an eye socket inside a
   // skull) and gets nothing. The rest get their diameter, but no chain stop:
   // a sphere's centre is not an edge anyone measures to on a drawing.
@@ -1162,7 +1497,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   }
 
   // --- circles: one per hole, one label per size ---------------------------
-  const holes: { centre: [number, number]; radius: number }[] = [];
+  const holes: { centre: [number, number]; radius: number; segments?: number }[] = [];
   // An arc of more than half a circle is given by its diameter, as a drawing
   // gives it: a D-shaft bore is "⌀5" with its flat, not "R2.5".
   const overHalf = arcs
@@ -1177,10 +1512,28 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     if (!same) holes.push(c);
   }
   // Seen end-on, a plain cylinder is its circle: the width and height are the
-  // diameter, and three labels saying so is two too many.
-  const wholeDisc = holes.find((h) =>
-    Math.abs(2 * h.radius - width) < SAME_M && Math.abs(2 * h.radius - height) < SAME_M &&
-    Math.abs(h.centre[0] - (u0 + u1) / 2) < SAME_M && Math.abs(h.centre[1] - (v0 + v1) / 2) < SAME_M);
+  // diameter, and three labels saying so is two too many. Account for chord
+  // sagitta on tessellated cylinders (e.g. 16- or 32-sided rotated cylinders)
+  // while verifying every vertex stays inside the circle (so an inscribed hole
+  // inside a square plate never matches).
+  const isWholeDisc = (h: { centre: [number, number]; radius: number; segments?: number }) => {
+    const tol = sagittaTol(h.radius, h.segments);
+    if (u0 < h.centre[0] - h.radius - SAME_M || u0 > h.centre[0] - h.radius + tol) return false;
+    if (u1 > h.centre[0] + h.radius + SAME_M || u1 < h.centre[0] + h.radius - tol) return false;
+    if (v0 < h.centre[1] - h.radius - SAME_M || v0 > h.centre[1] - h.radius + tol) return false;
+    if (v1 > h.centre[1] + h.radius + SAME_M || v1 < h.centre[1] + h.radius - tol) return false;
+    const maxR = h.radius + SAME_M;
+    const maxR2 = maxR * maxR;
+    for (let i = 0; i + 2 < p.length; i += 3) {
+      const px = p[i], py = p[i + 1], pz = p[i + 2];
+      if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) continue;
+      const du = px * U[0] + py * U[1] + pz * U[2] - h.centre[0];
+      const dv = px * V[0] + py * V[1] + pz * V[2] - h.centre[1];
+      if (du * du + dv * dv > maxR2) return false;
+    }
+    return true;
+  };
+  const wholeDisc = holes.find(isWholeDisc);
 
   const dims: ViewDim[] = [...slanted.dims];
   if (body.toothForm) dims.push(gearDim(body.toothForm, axes, forward));
@@ -1396,7 +1749,7 @@ export interface LocationDim {
 
 export function locationDimensions(links: { id: string; from: Vec3; to: Vec3 }[], view: DrawingView): LocationDim[] {
   const { right, up } = VIEW_AXES[view];
-  const figure = (d: number) => (Math.abs(d) < MERGE_M ? null : {
+  const figure = (d: number) => (!Number.isFinite(d) || Math.abs(d) < MERGE_M ? null : {
     valueMm: Math.round(Math.abs(d) * 10000) / 10,
     label: formatDim(Math.abs(d)),
   });
@@ -1404,6 +1757,7 @@ export function locationDimensions(links: { id: string; from: Vec3; to: Vec3 }[]
   for (const link of links) {
     const from: [number, number] = [dot(link.from, right), dot(link.from, up)];
     const to: [number, number] = [dot(link.to, right), dot(link.to, up)];
+    if (!Number.isFinite(from[0]) || !Number.isFinite(from[1]) || !Number.isFinite(to[0]) || !Number.isFinite(to[1])) continue;
     const across = figure(to[0] - from[0]);
     const upFigure = figure(to[1] - from[1]);
     if (across || upFigure) out.push({ id: link.id, from, to, across, up: upFigure });

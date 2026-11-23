@@ -39,22 +39,52 @@ export interface SceneSnap extends SnapCandidate {
   movedBy: number;
 }
 
+/** True when `object` or any ancestor is an overlay or background scenery rather than model geometry. */
+export function isIgnoredSceneObject(object: THREE.Object3D): boolean {
+  for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+    if (node.userData?.isOverlay || node.userData?.isBackground) return true;
+  }
+  return false;
+}
+
+/** True when a mesh's material is actually visible (not hidden or translucent-zero `rgba[3] === 0`). */
+export function isMeshMaterialVisible(mesh: THREE.Mesh): boolean {
+  const mat = mesh.material;
+  if (!mat) return true;
+  const visibleOne = (m: THREE.Material) => m.visible !== false && !(m.transparent && m.opacity <= 0);
+  return Array.isArray(mat) ? mat.some(visibleOne) : visibleOne(mat);
+}
+
+/** True when a transform matrix has finite entries and non-zero scale on all three axes. */
+export function hasNonZeroScale(matrix: THREE.Matrix4): boolean {
+  const e = matrix.elements;
+  for (let i = 0; i < 16; i++) if (!Number.isFinite(e[i])) return false;
+  const sx = Math.hypot(e[0], e[1], e[2]);
+  const sy = Math.hypot(e[4], e[5], e[6]);
+  const sz = Math.hypot(e[8], e[9], e[10]);
+  return sx > 1e-9 && sy > 1e-9 && sz > 1e-9;
+}
+
 /**
  * True when this object is part of a body rather than part of the scenery.
  *
  * Every geom is drawn inside a `<group name={nodeId}>` and nothing else in the
  * canvas is, which separates the model from the floor grid and the overlays
- * without keeping a list of them.
+ * without keeping a list of them. Walks all the way to the root so an
+ * `isOverlay` or `isBackground` ancestor always wins over a named descendant.
  */
 export function bodyOf(object: THREE.Object3D): string | null {
+  let found: string | null = null;
   for (let node: THREE.Object3D | null = object; node; node = node.parent) {
-    if (node.userData?.isOverlay) return null;
-    // Said outright by a layer that draws a body outside the body's own group —
-    // the lattice editor's is named `<id>_lattice`, which is no body's name.
-    if (typeof node.userData?.bodyId === 'string') return node.userData.bodyId;
-    if (node.type === 'Group' && node.name) return node.name;
+    if (node.userData?.isOverlay || node.userData?.isBackground) return null;
+    if (found === null) {
+      // Said outright by a layer that draws a body outside the body's own group —
+      // the lattice editor's is named `<id>_lattice`, which is no body's name.
+      if (typeof node.userData?.bodyId === 'string' && node.userData.bodyId) found = node.userData.bodyId;
+      else if (node.type === 'Group' && node.name) found = node.name;
+    }
   }
-  return null;
+  return found;
 }
 
 /**
@@ -95,18 +125,34 @@ function analyticCentres(mesh: THREE.Mesh, nodeId: string | null): SnapCandidate
   const named = (label: string) => (nodeId ? `${label} of ${nodeId}` : label);
   const id = nodeId ?? undefined;
 
+  const scale = new THREE.Vector3().setFromMatrixScale(mesh.matrixWorld);
+  const e = mesh.matrixWorld.elements;
+
   if (type === 'SphereGeometry') {
-    out.push({ point: world(0, 0, 0), kind: 'centre', label: named('sphere centre'), radius: parameters?.radius, nodeId: id });
+    const even = scale.x > 1e-9 &&
+      Math.abs(scale.x - scale.y) <= 1e-3 * scale.x &&
+      Math.abs(scale.x - scale.z) <= 1e-3 * scale.x;
+    const radius = even && parameters?.radius !== undefined ? parameters.radius * scale.x : undefined;
+    out.push({
+      point: world(0, 0, 0),
+      kind: 'centre',
+      label: named(even ? 'sphere centre' : 'ellipsoid centre'),
+      radius,
+      nodeId: id,
+    });
   } else if (type === 'CylinderGeometry' || type === 'CapsuleGeometry') {
     const half = ((parameters?.height ?? parameters?.length ?? 0) as number) / 2;
-    const radius = (parameters?.radiusTop ?? parameters?.radius) as number | undefined;
+    const rawRadius = (parameters?.radiusTop ?? parameters?.radius) as number | undefined;
+    const evenRadial = Math.max(scale.x, scale.z) > 1e-9 &&
+      Math.abs(scale.x - scale.z) <= 1e-3 * Math.max(scale.x, scale.z);
+    const radius = evenRadial && rawRadius !== undefined ? rawRadius * scale.x : undefined;
     /*
      * A cylinder is built along its OWN +Y whatever the group holding it has
      * been turned to, so the axis in world space is that direction carried
-     * through the mesh's world rotation. This is the direction a peg goes into
-     * a hole along, and the one thing a bounding box could never tell you.
+     * through the mesh's world matrix (column 1, which handles both rotations
+     * and reflections).
      */
-    const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(mesh.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    const dir = new THREE.Vector3(e[4], e[5], e[6]).normalize();
     const axis: Vec3 = [dir.x, dir.y, dir.z];
     out.push({ point: world(0, 0, 0), kind: 'centre', label: named('axis centre'), radius, nodeId: id, normal: axis });
     if (half > 0) {
@@ -145,22 +191,27 @@ function analyticCentres(mesh: THREE.Mesh, nodeId: string | null): SnapCandidate
 function instancedCandidates(
   mesh: THREE.InstancedMesh, near: THREE.Vector3, radius: number, exclude?: string,
 ): SnapCandidate[] {
-  if (mesh.userData?.isBackground) return [];
+  if (isIgnoredSceneObject(mesh) || !isMeshMaterialVisible(mesh)) return [];
   const parameters = (mesh.geometry as unknown as { parameters?: Record<string, number> }).parameters;
   if (mesh.geometry.type !== 'BoxGeometry' || !parameters) return [];
   const ids = (mesh.userData?.nodeIds ?? []) as string[];
   const out: SnapCandidate[] = [];
   const matrix = new THREE.Matrix4();
   const world = new THREE.Matrix4();
+  const instScale = new THREE.Vector3();
   const [w, h, d] = [parameters.width ?? 1, parameters.height ?? 1, parameters.depth ?? 1];
 
   for (let i = 0; i < mesh.count; i++) {
     mesh.getMatrixAt(i, matrix);
     world.multiplyMatrices(mesh.matrixWorld, matrix);
+    // StaticBoxInstances zeros hidden/uncompiled slots with makeScale(0, 0, 0);
+    // never emit phantom candidates at the origin for them.
+    if (!hasNonZeroScale(world)) continue;
     const centre = new THREE.Vector3().setFromMatrixPosition(world);
     // The half-diagonal of the instance, so a box is considered whenever any
     // part of it could be within reach rather than only when its middle is.
-    const spread = new THREE.Vector3().setFromMatrixScale(world).length() / 2;
+    instScale.setFromMatrixScale(world);
+    const spread = Math.hypot(instScale.x * w, instScale.y * h, instScale.z * d) / 2;
     if (centre.distanceTo(near) > radius + spread) continue;
 
     const id = ids[i];
@@ -208,9 +259,10 @@ export function sceneCandidates(
   const maxMeshVertices = options.maxMeshVertices ?? 400_000;
   const vertexLimit = options.vertexLimit ?? 4096;
 
-  root.traverse((object) => {
+  root.traverseVisible((object) => {
     const mesh = object as THREE.Mesh;
     if (!mesh.isMesh || !mesh.geometry) return;
+    if (!isMeshMaterialVisible(mesh)) return;
 
     // Static boxes are drawn as ONE InstancedMesh of unit cubes — one draw call
     // for a whole curve track — so they have no named group and their real
@@ -225,6 +277,7 @@ export function sceneCandidates(
 
     const nodeId = bodyOf(mesh);
     if (!nodeId) return;
+    if (!hasNonZeroScale(mesh.matrixWorld)) return;
     /*
      * Dropped BEFORE the vertex scan, not filtered out of the result. A body
      * dragging against its own features would go nowhere, and the scan — a
@@ -248,32 +301,32 @@ export function sceneCandidates(
     const local = mesh.worldToLocal(here.clone());
     const spread = new THREE.Vector3();
     mesh.getWorldScale(spread);
-    const perUnit = Math.max(1e-9, (Math.abs(spread.x) + Math.abs(spread.y) + Math.abs(spread.z)) / 3);
-    const near = nearbyVertices(position.array as ArrayLike<number>, [local.x, local.y, local.z], radius / perUnit, vertexLimit);
+    // Use the smallest scale axis as the local search bound so non-uniformly
+    // scaled meshes never miss vertices within `radius` in world space.
+    const minScale = Math.max(1e-9, Math.min(Math.abs(spread.x), Math.abs(spread.y), Math.abs(spread.z)));
+    const near = nearbyVertices(position.array as ArrayLike<number>, [local.x, local.y, local.z], radius / minScale, vertexLimit);
 
+    const worldNear: Vec3[] = [];
+    const v = new THREE.Vector3();
+    const rLimit = radius + 1e-9;
     for (const point of near) {
-      const at = mesh.localToWorld(new THREE.Vector3(...point));
-      found.push({ point: [at.x, at.y, at.z], kind: 'vertex', label: `corner of ${nodeId}`, nodeId });
+      v.set(point[0], point[1], point[2]).applyMatrix4(mesh.matrixWorld);
+      if (v.distanceTo(here) > rLimit) continue;
+      const wp: Vec3 = [v.x, v.y, v.z];
+      worldNear.push(wp);
+      found.push({ point: wp, kind: 'vertex', label: `corner of ${nodeId}`, nodeId });
     }
-    // The circle hunt: this is what finds the middle of a hole the boolean
-    // evaluator left behind, where nothing in the document remembers there was
-    // ever a cylinder there.
-    const circle = detectCircle(near);
+    // The circle hunt in world space: exact even when the mesh is non-uniformly
+    // scaled or reflected, where a local-space fit would skew radius and normal.
+    const circle = detectCircle(worldNear);
     if (circle) {
-      const centre = mesh.localToWorld(new THREE.Vector3(...circle.centre));
-      // The fit's normal is a DIRECTION in the mesh's local frame, so it goes
-      // through the rotation alone — `localToWorld` would add the translation
-      // and turn an axis into a point somewhere near the part.
-      const dir = new THREE.Vector3(...circle.normal)
-        .applyQuaternion(mesh.getWorldQuaternion(new THREE.Quaternion()))
-        .normalize();
       found.push({
-        point: [centre.x, centre.y, centre.z],
+        point: circle.centre,
         kind: 'centre',
         label: `circle centre on ${nodeId}`,
-        radius: circle.radius * perUnit,
+        radius: circle.radius,
         nodeId,
-        normal: [dir.x, dir.y, dir.z],
+        normal: circle.normal,
       });
     }
   });

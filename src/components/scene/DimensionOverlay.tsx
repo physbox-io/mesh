@@ -27,13 +27,15 @@ import { isDrawingView, SQUARE_TO_VIEW, VIEW_AXES, type DrawingView } from '../.
 import {
   bodyViewDimensions, locationDimensions, type BodyDimensions, type BodyMesh, type LocationDim,
 } from '../../utils/viewDimensions';
-import { bodyOf } from '../../utils/measureScene';
+import {
+  bodyOf, hasNonZeroScale, isIgnoredSceneObject, isMeshMaterialVisible,
+} from '../../utils/measureScene';
 import { setLiveDimensions, type LiveDimension } from '../../utils/liveDimensions';
 import { bestSectionAt, sectionOf, sectionPlane } from '../../utils/sectionSlice';
 import { loadSectionMerge, sectionMerge } from '../../utils/sectionMerge';
 import { useSection, type DrawnCut } from '../../store/sectionStore';
 import type { SceneNode } from '../../types/scene';
-import { findNodeById } from '../../utils/sceneTree';
+import { findNodeById, isNodeRotationBaked } from '../../utils/sceneTree';
 import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer';
 
 const COLOUR = '#d97706';
@@ -63,7 +65,7 @@ const MAX_LOCATIONS = 12;
 
 type Vec3 = [number, number, number];
 
-interface DrawnPiece { id: string; geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }
+export interface DrawnPiece { id: string; geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }
 
 /** Three's Y-up scene frame and the document's Z-up, both ways. */
 const toDoc = (v: THREE.Vector3): Vec3 => [v.x, -v.z, v.y];
@@ -71,7 +73,11 @@ const toThree = (v: ArrayLike<number>) => new THREE.Vector3(v[0], v[2], -v[1]);
 
 const evenScale = (matrix: THREE.Matrix4) => {
   const scale = new THREE.Vector3().setFromMatrixScale(matrix);
-  return { scale, even: Math.abs(scale.x - scale.y) <= 1e-3 * scale.x && Math.abs(scale.x - scale.z) <= 1e-3 * scale.x };
+  const valid = Number.isFinite(scale.x) && Number.isFinite(scale.y) && Number.isFinite(scale.z) && scale.x > 1e-9;
+  return {
+    scale,
+    even: valid && Math.abs(scale.x - scale.y) <= 1e-3 * scale.x && Math.abs(scale.x - scale.z) <= 1e-3 * scale.x,
+  };
 };
 
 /**
@@ -84,19 +90,20 @@ function sphereOf({ geometry, matrix }: DrawnPiece): { centre: Vec3; radius: num
   const p = (geometry as THREE.SphereGeometry).parameters;
   if (Math.abs(p.phiLength - Math.PI * 2) > 1e-6 || Math.abs(p.thetaLength - Math.PI) > 1e-6) return null;
   const { scale, even } = evenScale(matrix);
-  if (!even) return null;
+  if (!even || !(p.radius > 0)) return null;
   return { centre: toDoc(new THREE.Vector3().setFromMatrixPosition(matrix)), radius: p.radius * scale.x };
 }
 
 /** The rod a capsule is: the ends of its straight part, and its radius. */
 function rodOf({ geometry, matrix }: DrawnPiece): { a: Vec3; b: Vec3; radius: number } | null {
   if (geometry.type !== 'CapsuleGeometry') return null;
-  const p = (geometry as THREE.CapsuleGeometry).parameters;
+  const p = (geometry as THREE.CapsuleGeometry).parameters as { radius: number; height?: number; length?: number };
   const { scale, even } = evenScale(matrix);
-  if (!even) return null;
+  if (!even || !(p.radius > 0)) return null;
+  const h = p.height ?? p.length ?? 0;
   return {
-    a: toDoc(new THREE.Vector3(0, -p.height / 2, 0).applyMatrix4(matrix)),
-    b: toDoc(new THREE.Vector3(0, p.height / 2, 0).applyMatrix4(matrix)),
+    a: toDoc(new THREE.Vector3(0, -h / 2, 0).applyMatrix4(matrix)),
+    b: toDoc(new THREE.Vector3(0, h / 2, 0).applyMatrix4(matrix)),
     radius: p.radius * scale.x,
   };
 }
@@ -107,30 +114,43 @@ function rodOf({ geometry, matrix }: DrawnPiece): { a: Vec3; b: Vec3; radius: nu
  * edges run along; a curve or gear built from segments turned against one
  * another has no single piece's frame, and is measured on the sheet's axes.
  */
-function frameOf(pieces: DrawnPiece[]): [Vec3, Vec3, Vec3] | undefined {
+// eslint-disable-next-line react-refresh/only-export-components
+export function frameOf(pieces: DrawnPiece[]): [Vec3, Vec3, Vec3] | undefined {
   let best: DrawnPiece | null = null;
   let bestSize = -1;
   const size = new THREE.Vector3();
-  const pieceAxes = (piece: DrawnPiece): [Vec3, Vec3, Vec3] => {
+  const pieceAxes = (piece: DrawnPiece): [Vec3, Vec3, Vec3] | null => {
     const e = piece.matrix.elements;
-    const axis = (i: number) => toDoc(new THREE.Vector3(e[i * 4], e[i * 4 + 1], e[i * 4 + 2]).normalize());
-    return [axis(0), axis(1), axis(2)];
+    const axis = (i: number): Vec3 | null => {
+      const x = e[i * 4], y = e[i * 4 + 1], z = e[i * 4 + 2];
+      const len = Math.hypot(x, y, z);
+      if (!(len > 1e-9) || !Number.isFinite(len)) return null;
+      return toDoc(new THREE.Vector3(x / len, y / len, z / len));
+    };
+    const a0 = axis(0), a1 = axis(1), a2 = axis(2);
+    if (!a0 || !a1 || !a2) return null;
+    // Reject sheared matrices whose basis vectors are not mutually orthogonal.
+    if (Math.abs(dot(a0, a1)) > 1e-3 || Math.abs(dot(a0, a2)) > 1e-3 || Math.abs(dot(a1, a2)) > 1e-3) return null;
+    return [a0, a1, a2];
   };
-  const nonSphere: DrawnPiece[] = [];
+  const nonSphere: { piece: DrawnPiece; axes: [Vec3, Vec3, Vec3] }[] = [];
   for (const piece of pieces) {
     // A true sphere's axes say nothing; an ellipsoid (a sphere scaled unevenly) has its own.
     if (sphereOf(piece)) continue;
-    nonSphere.push(piece);
+    const axes = pieceAxes(piece);
+    if (!axes) return undefined;
+    nonSphere.push({ piece, axes });
     if (!piece.geometry.boundingBox) piece.geometry.computeBoundingBox();
-    piece.geometry.boundingBox!.getSize(size).multiply(new THREE.Vector3().setFromMatrixScale(piece.matrix));
+    const bb = piece.geometry.boundingBox;
+    if (!bb || bb.isEmpty()) continue;
+    bb.getSize(size).multiply(new THREE.Vector3().setFromMatrixScale(piece.matrix));
     const across = size.length();
-    if (across > bestSize) { best = piece; bestSize = across; }
+    if (Number.isFinite(across) && across > bestSize) { best = piece; bestSize = across; }
   }
   if (!best) return undefined;
-  const candidate = pieceAxes(best);
-  for (const piece of nonSphere) {
+  const candidate = nonSphere.find((x) => x.piece === best)!.axes;
+  for (const { piece, axes } of nonSphere) {
     if (piece === best) continue;
-    const axes = pieceAxes(piece);
     for (const a of axes) {
       const match = Math.max(
         Math.abs(dot(a, candidate[0])),
@@ -144,25 +164,70 @@ function frameOf(pieces: DrawnPiece[]): [Vec3, Vec3, Vec3] | undefined {
 }
 
 /**
+ * A body's own axes, accounting for baked rotations on all-mesh bodies.
+ * `rotateMeshGeomsAbsolute` bakes `node.euler` (Z * Y * X in Z-up doc space)
+ * into mesh vertices so `matrixWorld` is identity; composing that rotation
+ * restores the part's true local axes so rotated meshes are not measured as
+ * world-AABB diagonals.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function nodeFrameOf(pieces: DrawnPiece[], node: SceneNode | null | undefined): [Vec3, Vec3, Vec3] | undefined {
+  const base = frameOf(pieces);
+  if (!base || !node || !isNodeRotationBaked(node) || !node.euler) return base;
+  const [rx, ry, rz] = node.euler;
+  if (!(Math.abs(rx) > 1e-6 || Math.abs(ry) > 1e-6 || Math.abs(rz) > 1e-6)) return base;
+  const deg = Math.PI / 180;
+  const rotZup = new THREE.Matrix4().multiplyMatrices(
+    new THREE.Matrix4().makeRotationZ(rz * deg),
+    new THREE.Matrix4().multiplyMatrices(
+      new THREE.Matrix4().makeRotationY(ry * deg),
+      new THREE.Matrix4().makeRotationX(rx * deg),
+    ),
+  );
+  const re = rotZup.elements;
+  // Dynamic mesh geoms sit inside the Z-up→Y-up group, so their matrixWorld
+  // columns are already doc (X, Y, Z). Static mesh geoms sit outside it with
+  // Y-up vertices, so their columns are Three (X, Y=docZ, Z=-docY).
+  const isDynamic = (node.geoms ?? []).some((g) => g.type === 'mesh' && g.dynamic);
+  const bx: Vec3 = base[0];
+  const by: Vec3 = isDynamic ? base[1] : [-base[2][0], -base[2][1], -base[2][2]];
+  const bz: Vec3 = isDynamic ? base[2] : base[1];
+  const col = (j: number): Vec3 => {
+    const c0 = re[j * 4], c1 = re[j * 4 + 1], c2 = re[j * 4 + 2];
+    return unit([
+      bx[0] * c0 + by[0] * c1 + bz[0] * c2,
+      bx[1] * c0 + by[1] * c1 + bz[1] * c2,
+      bx[2] * c0 + by[2] * c1 + bz[2] * c2,
+    ]);
+  };
+  return [col(0), col(1), col(2)];
+}
+
+/**
  * The meshes that make up each body as drawn, and a signature per body that
  * changes when any of them moves or is rebuilt. Cheap: nothing is copied, so
  * it can be asked a few times a second.
  *
- * Only meshes that cast a shadow: that is the part's own surface, and it
- * leaves out everything drawn alongside it in the same group — the inside wall
- * of a hollow mesh, the DFM heat map, a brush cursor, cut ghosts.
+ * Only visible shadow-casting meshes with visible materials and non-zero scale:
+ * that is the part's own surface, leaving out hidden/zero-alpha proxy geoms,
+ * zero-scale uncompiled StaticBoxInstances slots, background scenery, the
+ * inside wall of a hollow mesh, the DFM heat map, a brush cursor, and cut ghosts.
  */
-function drawnPieces(root: THREE.Object3D, only: Set<string> | null): Map<string, { pieces: DrawnPiece[]; signature: string }> {
+// eslint-disable-next-line react-refresh/only-export-components
+export function drawnPieces(root: THREE.Object3D, only: Set<string> | null): Map<string, { pieces: DrawnPiece[]; signature: string }> {
   const out = new Map<string, { pieces: DrawnPiece[]; signature: string }>();
   const push = (id: string, geometry: THREE.BufferGeometry, matrix: THREE.Matrix4) => {
     let entry = out.get(id);
     if (!entry) out.set(id, (entry = { pieces: [], signature: '' }));
     entry.pieces.push({ id, geometry, matrix });
-    entry.signature += `${geometry.uuid}:${(geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.version ?? 0}:${matrix.elements.map((e) => e.toFixed(6)).join(',')};`;
+    const posVer = (geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.version ?? 0;
+    const idxVer = geometry.index?.version ?? 0;
+    entry.signature += `${geometry.uuid}:${posVer}:${idxVer}:${matrix.elements.map((e) => e.toFixed(6)).join(',')};`;
   };
   root.traverseVisible((object) => {
     const mesh = object as THREE.Mesh;
     if (!mesh.isMesh || !mesh.geometry || !mesh.castShadow) return;
+    if (!isMeshMaterialVisible(mesh) || isIgnoredSceneObject(mesh)) return;
     const instanced = mesh as unknown as THREE.InstancedMesh;
     if (instanced.isInstancedMesh) {
       // Static boxes, one instance each; see measureScene's instancedCandidates.
@@ -172,19 +237,28 @@ function drawnPieces(root: THREE.Object3D, only: Set<string> | null): Map<string
         if (!id || (only && !only.has(id))) continue;
         const m = new THREE.Matrix4();
         instanced.getMatrixAt(i, m);
-        push(id, instanced.geometry, m.premultiply(instanced.matrixWorld));
+        m.premultiply(instanced.matrixWorld);
+        if (!hasNonZeroScale(m)) continue;
+        push(id, instanced.geometry, m);
       }
       return;
     }
     const id = bodyOf(mesh);
     if (!id || (only && !only.has(id))) return;
+    if (!hasNonZeroScale(mesh.matrixWorld)) return;
     push(id, mesh.geometry, mesh.matrixWorld.clone());
   });
   return out;
 }
 
 /** One body's triangles, world space, document frame (Z-up), with its frame, exact rounds and gear data. */
-function bodyMesh(id: string, pieces: DrawnPiece[], toothForm?: BodyMesh['toothForm']): BodyMesh {
+// eslint-disable-next-line react-refresh/only-export-components
+export function bodyMesh(
+  id: string,
+  pieces: DrawnPiece[],
+  toothForm?: BodyMesh['toothForm'],
+  node?: SceneNode | null,
+): BodyMesh {
   const positions: number[] = [];
   const faces: number[] = [];
   const p = new THREE.Vector3();
@@ -192,17 +266,31 @@ function bodyMesh(id: string, pieces: DrawnPiece[], toothForm?: BodyMesh['toothF
     const position = geometry.getAttribute('position');
     if (!position) continue;
     const base = positions.length / 3;
+    const mirrored = matrix.determinant() < 0;
     for (let i = 0; i < position.count; i++) {
       p.fromBufferAttribute(position, i).applyMatrix4(matrix);
       positions.push(...toDoc(p));
     }
     const index = geometry.index;
-    if (index) for (let i = 0; i < index.count; i++) faces.push(base + index.getX(i));
-    else for (let i = 0; i < position.count; i++) faces.push(base + i);
+    if (index) {
+      for (let i = 0; i + 2 < index.count; i += 3) {
+        const a = base + index.getX(i);
+        const b = base + index.getX(i + 1);
+        const c = base + index.getX(i + 2);
+        if (mirrored) faces.push(a, c, b);
+        else faces.push(a, b, c);
+      }
+    } else {
+      for (let i = 0; i + 2 < position.count; i += 3) {
+        if (mirrored) faces.push(base + i, base + i + 2, base + i + 1);
+        else faces.push(base + i, base + i + 1, base + i + 2);
+      }
+    }
   }
   const spheres = pieces.map(sphereOf).filter((x): x is NonNullable<typeof x> => x !== null);
   const rods = pieces.map(rodOf).filter((x): x is NonNullable<typeof x> => x !== null);
-  return { id, positions, faces, spheres, rods, frame: frameOf(pieces), ...(toothForm ? { toothForm } : {}) };
+  const frame = node !== undefined ? nodeFrameOf(pieces, node) : frameOf(pieces);
+  return { id, positions, faces, spheres, rods, frame, ...(toothForm ? { toothForm } : {}) };
 }
 
 type Mirrors = { model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null };
@@ -211,13 +299,19 @@ type Mirrors = { model: ModelMirror | null; data: DataMirror | null; mujoco: Muj
  * A body's pose in MuJoCo, where a simulated body actually is: its origin and
  * its rotation (row-major), or null for a body MuJoCo does not know.
  */
-function mjPose(node: SceneNode, { model, data, mujoco }: Mirrors): { at: Vec3; r: (i: number, j: number) => number } | null {
+// eslint-disable-next-line react-refresh/only-export-components
+export function mjPose(node: SceneNode, { model, data, mujoco }: Mirrors): { at: Vec3; r: (i: number, j: number) => number } | null {
   if (!model || !data || !mujoco) return null;
   try {
-    const b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
+    let b = node.name ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name) : -1;
+    if (b < 0 && node.id && node.id !== node.name) {
+      b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.id);
+    }
     if (b < 0) return null;
+    const x = data.xpos[b * 3], y = data.xpos[b * 3 + 1], z = data.xpos[b * 3 + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
     return {
-      at: [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]],
+      at: [x, y, z],
       r: (i, j) => data.xmat[b * 9 + i * 3 + j],
     };
   } catch {
@@ -226,13 +320,14 @@ function mjPose(node: SceneNode, { model, data, mujoco }: Mirrors): { at: Vec3; 
 }
 
 /** A toothed body's gear data and the frame it is stated in: the body's own, as it now stands. */
-function toothFormOf(id: string): BodyMesh['toothForm'] {
-  const node = findNodeById(useStore.getState().sceneGraph.nodes, id);
-  if (!node?.toothForm) return undefined;
-  const pose = mjPose(node, useStore.getState() as unknown as Mirrors);
+// eslint-disable-next-line react-refresh/only-export-components
+export function toothFormOf(id: string, node?: SceneNode | null, mirrorsOverride?: Mirrors): BodyMesh['toothForm'] {
+  const resolvedNode = node !== undefined ? node : findNodeById(useStore.getState().sceneGraph.nodes, id);
+  if (!resolvedNode?.toothForm) return undefined;
+  const pose = mjPose(resolvedNode, mirrorsOverride ?? (useStore.getState() as unknown as Mirrors));
   if (!pose) return undefined;
   const column = (j: number): Vec3 => [pose.r(0, j), pose.r(1, j), pose.r(2, j)];
-  return { form: node.toothForm, origin: pose.at, axes: [column(0), column(1), column(2)] };
+  return { form: resolvedNode.toothForm, origin: pose.at, axes: [column(0), column(1), column(2)] };
 }
 
 /**
@@ -240,8 +335,13 @@ function toothFormOf(id: string): BodyMesh['toothForm'] {
  * body's, or the world's — from MuJoCo, where a simulated body actually is.
  * A part MuJoCo does not know is left out.
  */
-function locationLinks(ids: Iterable<string>, nodes: SceneNode[]): { id: string; parent: string | null; from: Vec3; to: Vec3 }[] {
-  const mirrors = useStore.getState() as unknown as Mirrors;
+// eslint-disable-next-line react-refresh/only-export-components
+export function locationLinks(
+  ids: Iterable<string>,
+  nodes: SceneNode[],
+  mirrorsOverride?: Mirrors,
+): { id: string; parent: string | null; from: Vec3; to: Vec3 }[] {
+  const mirrors = mirrorsOverride ?? (useStore.getState() as unknown as Mirrors);
   if (!mirrors.model || !mirrors.data || !mirrors.mujoco) return [];
   const parentOf = new Map<string, SceneNode | null>();
   const byId = new Map<string, SceneNode>();
@@ -249,8 +349,9 @@ function locationLinks(ids: Iterable<string>, nodes: SceneNode[]): { id: string;
     for (const node of list ?? []) {
       byId.set(node.id, node);
       parentOf.set(node.id, parent);
-      // A pulley rope is not a part: its children hang off whatever it hangs off.
-      walk(node.children, node.isPulleyRope ? parent : node);
+      // Pulley ropes and cloth emit <frame>, not <body>, in MJCF: their
+      // children hang off whatever rigid body they hang off.
+      walk(node.children, node.isPulleyRope || node.cloth ? parent : node);
     }
   };
   walk(nodes, null);
@@ -305,12 +406,26 @@ const unit = (a: Vec3): Vec3 => {
 };
 
 /** Lay the dimensions out on the sheet at this many metres per pixel. Works in the document frame throughout. */
-function layOut(found: BodyDimensions[], locations: LocationDim[], view: DrawingView, mpp: number): Drawing {
+// eslint-disable-next-line react-refresh/only-export-components
+export function layOut(found: BodyDimensions[], locations: LocationDim[], view: DrawingView, mpp: number): Drawing {
+  if (!(mpp > 0) || !Number.isFinite(mpp)) {
+    return {
+      lines: new Float32Array(0),
+      arrows: new Float32Array(0),
+      locationLines: new Float32Array(0),
+      locationArrows: new Float32Array(0),
+      labels: [],
+    };
+  }
   const { forward, right, up } = VIEW_AXES[view];
   const out = { lines: [] as number[], arrows: [] as number[], locationLines: [] as number[], locationArrows: [] as number[] };
   const labels: Drawing['labels'] = [];
   /** A direction as it shows on the sheet: its depth dropped. */
-  const onSheet = (d: Vec3) => unit(add(d, forward, -dot(d, forward)));
+  const onSheet = (d: Vec3): Vec3 => {
+    const proj = add(d, forward, -dot(d, forward));
+    const l = Math.hypot(proj[0], proj[1], proj[2]);
+    return l > 1e-9 ? [proj[0] / l, proj[1] / l, proj[2] / l] : right;
+  };
   const line = (target: number[], a: Vec3, b: Vec3) => {
     const p = toThree(a), q = toThree(b);
     target.push(p.x, p.y, p.z, q.x, q.y, q.z);
@@ -476,7 +591,7 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         // drawing has it; the gear data on a leader out from it, a line each.
         // In 4 px steps: six on, one off, one on, one off — a long dash and a dot.
         const chain = (p: (t: number) => Vec3, lengthPx: number) => {
-          const steps = Math.max(9, Math.round(lengthPx / 4));
+          const steps = Math.min(2000, Math.max(9, Math.round(lengthPx / 4)));
           for (let s = 0; s < steps; s++) {
             if (s % 9 !== 6 && s % 9 !== 8) line(out.lines, p(s / steps), p((s + 1) / steps));
           }
@@ -507,6 +622,7 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         const centre = at(...d.centre);
         if (already(d.label, centre, add(centre, d.to, mpp * 40))) return;
         const theta = Math.acos(Math.min(1, Math.max(-1, dot(d.from, d.to))));
+        if (!(theta > 1e-6) || !Number.isFinite(theta)) return;
         const g = unit(add(d.to, d.from, -dot(d.to, d.from)));
         const reach = (ARC_PX + ARC_OVERRUN_PX) * mpp;
         line(out.lines, centre, add(centre, d.from, reach));
@@ -565,7 +681,8 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
  * and back walls, seen from the front) give the same figure at the same place;
  * the first keeps it and names the rest in `sharedWith`.
  */
-function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Map<string, string | null>, view: DrawingView): LiveDimension[] {
+// eslint-disable-next-line react-refresh/only-export-components
+export function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Map<string, string | null>, view: DrawingView): LiveDimension[] {
   const { right, up } = VIEW_AXES[view];
   const out: LiveDimension[] = [];
   const seen = new Map<string, LiveDimension>();
@@ -637,20 +754,27 @@ export function DimensionOverlay() {
 
   // Tagged with what it was measured for, so a change of view or selection
   // never draws the last one's figures on the new sheet while it re-measures.
-  const [found, setFound] = useState<{ key: string; dims: BodyDimensions[]; locations: LocationDim[]; cut: DrawnCut | null; at: number | null }>(
-    { key: '', dims: [], locations: [], cut: null, at: null });
+  const [found, setFound] = useState<{
+    key: string;
+    dims: BodyDimensions[];
+    locations: LocationDim[];
+    live: LiveDimension[];
+    cut: DrawnCut | null;
+    at: number | null;
+  }>({ key: '', dims: [], locations: [], live: [], cut: null, at: null });
   const measuring = `${view}|${selectedNodeId ?? ''}|${latticeNodeId ?? ''}|${sectionOn ? `cut:${sectionAt ?? 'auto'}:${mergeReady}` : ''}`;
   const [mpp, setMpp] = useState(0);
   const [square, setSquare] = useState(false);
   const cache = useRef(new Map<string, { signature: string; dims: BodyDimensions | null }>());
-  const lastSignature = useRef('');
+  // null (not '') so an empty scene or hidden selected node still runs once and clears stale state.
+  const lastSignature = useRef<string | null>(null);
   const lastPoll = useRef(0);
   const forward = useMemo(() => new THREE.Vector3(), []);
 
   // A new view or a new selection measures from scratch.
   useEffect(() => {
     cache.current.clear();
-    lastSignature.current = '';
+    lastSignature.current = null;
     lastPoll.current = 0;
     if (!on) setLiveDimensions([]);
   }, [on, view, selectedNodeId, latticeNodeId, sectionOn, sectionAt, mergeReady]);
@@ -667,48 +791,83 @@ export function DimensionOverlay() {
     if (isSquare !== square) setSquare(isSquare);
 
     const perPixel = (ortho.top - ortho.bottom) / (ortho.zoom * Math.max(1, size.height));
-    if (!(mpp > 0) || Math.abs(perPixel / mpp - 1) > 0.01) setMpp(perPixel);
+    if (Number.isFinite(perPixel) && perPixel > 0 && (!(mpp > 0) || Math.abs(perPixel / mpp - 1) > 0.01)) {
+      setMpp(perPixel);
+    }
 
     const now = performance.now();
     if (now - lastPoll.current < POLL_MS) return;
     lastPoll.current = now;
     const only = selectedNodeId ? new Set([selectedNodeId, ...(latticeNodeId ? [latticeNodeId] : [])]) : null;
     const pieces = drawnPieces(scene, only);
+    const nodes = useStore.getState().sceneGraph.nodes;
+    const nodeMap = new Map<string, SceneNode | null>();
+    const toothMap = new Map<string, BodyMesh['toothForm']>();
+    const bodySigs = new Map<string, string>();
     let signature = '';
-    for (const [id, entry] of pieces) signature += `${id}=${entry.signature.length}:${hashOf(entry.signature)}|`;
+    for (const [id, entry] of pieces) {
+      const node = findNodeById(nodes, id);
+      nodeMap.set(id, node);
+      const tooth = sectionOn ? undefined : toothFormOf(id, node);
+      toothMap.set(id, tooth);
+      const bakedEuler = node && isNodeRotationBaked(node) && node.euler ? node.euler.join(',') : '';
+      const toothSig = tooth ? JSON.stringify(tooth) : '';
+      const fullSig = `${entry.signature}|e:${bakedEuler}|t:${toothSig}`;
+      bodySigs.set(id, fullSig);
+      signature += `${id}=${fullSig.length}:${hashOf(fullSig)}|`;
+    }
+    const links = sectionOn ? [] : locationLinks(pieces.keys(), nodes);
+    if (links.length > 0) {
+      let locSig = '';
+      for (const l of links) {
+        locSig += `${l.id}:${l.parent ?? ''}:${l.from.map((v) => v.toFixed(5)).join(',')}>${l.to.map((v) => v.toFixed(5)).join(',')};`;
+      }
+      signature += `#L=${locSig.length}:${hashOf(locSig)}`;
+    }
     if (signature === lastSignature.current) return;
     lastSignature.current = signature;
 
     if (sectionOn) {
-      const cut = measureSection(pieces, view, sectionAt);
-      setFound({ key: measuring, dims: cut.dims, locations: [], cut: cut.cut, at: cut.at });
-      setLiveDimensions(liveList(cut.dims, [], new Map(), view));
+      const cut = measureSection(pieces, view, sectionAt, nodeMap);
+      const live = liveList(cut.dims, [], new Map(), view);
+      setFound({ key: measuring, dims: cut.dims, locations: [], live, cut: cut.cut, at: cut.at });
       return;
     }
 
     // Per body, so a sim moving one part re-measures that part alone.
     const next: BodyDimensions[] = [];
+    const keptIds = new Set<string>();
     for (const [id, entry] of pieces) {
+      const fullSig = bodySigs.get(id) ?? entry.signature;
       let hit = cache.current.get(id);
-      if (!hit || hit.signature !== entry.signature) {
-        hit = { signature: entry.signature, dims: bodyViewDimensions(bodyMesh(id, entry.pieces, toothFormOf(id)), view) };
+      if (!hit || hit.signature !== fullSig) {
+        hit = {
+          signature: fullSig,
+          dims: bodyViewDimensions(bodyMesh(id, entry.pieces, toothMap.get(id), nodeMap.get(id)), view),
+        };
         cache.current.set(id, hit);
       }
       const d = hit.dims;
       if (!d) continue;
       if (d.bounds.u[1] - d.bounds.u[0] > MAX_PART_M || d.bounds.v[1] - d.bounds.v[0] > MAX_PART_M) continue;
       next.push(d);
+      keptIds.add(id);
     }
-    const links = locationLinks(next.map((d) => d.id), useStore.getState().sceneGraph.nodes);
-    const located = selectedNodeId || links.length <= MAX_LOCATIONS ? locationDimensions(links, view) : [];
-    setFound({ key: measuring, dims: next, locations: located, cut: null, at: null });
-    setLiveDimensions(liveList(next, located, new Map(links.map((l) => [l.id, l.parent])), view));
+    const keptLinks = links.filter((l) => keptIds.has(l.id));
+    const located = selectedNodeId || keptLinks.length <= MAX_LOCATIONS ? locationDimensions(keptLinks, view) : [];
+    const live = liveList(next, located, new Map(keptLinks.map((l) => [l.id, l.parent])), view);
+    setFound({ key: measuring, dims: next, locations: located, live, cut: null, at: null });
   });
 
   const drawing = useMemo(
     () => (on && view && square && mpp > 0 && found.key === measuring ? layOut(found.dims, found.locations, view, mpp) : null),
     [on, view, square, mpp, found, measuring],
   );
+  // Keep liveDimensions strictly in sync with what is actually drawn on screen
+  // (empty when off-axis, perspective, dims off, empty/hidden selection, or mpp === 0).
+  useEffect(() => {
+    setLiveDimensions(drawing ? found.live : []);
+  }, [drawing, found.live]);
   // The cut is drawn by SectionCut, only while the figures are.
   useEffect(() => {
     setCut(drawing && found.cut ? found.cut : null, drawing ? found.at : null);
@@ -771,26 +930,49 @@ export function DimensionOverlay() {
 /**
  * The section through the parts: one plane square to the view for all of
  * them, where `at` says along their depth or, unset, where it shows most; each
- * part's cut face, dimensioned. Parts the plane misses are left out.
+ * part's cut face, dimensioned. Parts the plane misses (or oversized floor/sky
+ * slabs > MAX_PART_M) are left out.
  */
-function measureSection(
+// eslint-disable-next-line react-refresh/only-export-components
+export function measureSection(
   pieces: Map<string, { pieces: DrawnPiece[] }>,
   view: DrawingView,
   at: number | null,
+  nodeMap?: Map<string, SceneNode | null>,
 ): { dims: BodyDimensions[]; cut: DrawnCut | null; at: number | null } {
+  const { forward, right, up } = VIEW_AXES[view];
+  const withinPartLimit = (m: BodyMesh) => {
+    const p = m.positions;
+    if (p.length < 9 || m.faces.length < 3) return false;
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (let i = 0; i + 2 < p.length; i += 3) {
+      const x = p[i], y = p[i + 1], z = p[i + 2];
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+      const u = x * right[0] + y * right[1] + z * right[2];
+      const v = x * up[0] + y * up[1] + z * up[2];
+      if (u < u0) u0 = u; if (u > u1) u1 = u;
+      if (v < v0) v0 = v; if (v > v1) v1 = v;
+    }
+    return Number.isFinite(u0) && Number.isFinite(u1) && Number.isFinite(v0) && Number.isFinite(v1) &&
+      u1 - u0 <= MAX_PART_M && v1 - v0 <= MAX_PART_M;
+  };
   // Each part whole, and each of its pieces on its own: a part built from
   // overlapping solids is cut piece by piece and the cuts merged.
-  const parts3 = [...pieces].map(([id, entry]) => ({
-    mesh: bodyMesh(id, entry.pieces),
-    pieces: entry.pieces.map((piece) => bodyMesh(id, [piece])),
-  }));
+  const parts3 = [...pieces]
+    .map(([id, entry]) => ({
+      mesh: bodyMesh(id, entry.pieces, undefined, nodeMap?.get(id)),
+      pieces: entry.pieces.map((piece) => bodyMesh(id, [piece])),
+    }))
+    .filter(({ mesh }) => withinPartLimit(mesh));
   const merge = sectionMerge() ?? undefined;
-  const all: BodyMesh = { id: 'all', positions: [], faces: [] };
+  const allPositions: number[] = [];
+  const allFaces: number[] = [];
   for (const { mesh: m } of parts3) {
-    const base = (all.positions as number[]).length / 3;
-    (all.positions as number[]).push(...(m.positions as number[]));
-    (all.faces as number[]).push(...(m.faces as number[]).map((i) => i + base));
+    const base = allPositions.length / 3;
+    for (let i = 0; i < m.positions.length; i++) allPositions.push(m.positions[i]);
+    for (let i = 0; i < m.faces.length; i++) allFaces.push(m.faces[i] + base);
   }
+  const all: BodyMesh = { id: 'all', positions: allPositions, faces: allFaces };
   if (!all.faces.length) return { dims: [], cut: null, at: null };
   const chosen = at ?? bestSectionAt(all, view, parts3.flatMap((p) => p.pieces), merge);
   const { normal, offset } = sectionPlane(all, view, chosen);
@@ -799,7 +981,14 @@ function measureSection(
   for (const { mesh, pieces: own } of parts3) {
     const section = sectionOf(mesh, view, offset, own, merge);
     if (!section) continue;
-    const d = bodyViewDimensions(section.body, view);
+    // The cut face is a 2D slab lying in the view's cut plane. If the part's 3D
+    // frame is tilted out of that plane (no axis aligned with `forward`), measuring
+    // the slab on the tilted frame foreshortens its true cross-section by cos(theta).
+    const frameAlignedToCut = section.body.frame?.some((a) => Math.abs(dot(a, forward)) > 0.999) ?? false;
+    const sectionBody = section.body.frame && !frameAlignedToCut
+      ? { ...section.body, frame: undefined }
+      : section.body;
+    const d = bodyViewDimensions(sectionBody, view);
     if (d) dims.push(d);
     parts.push({ id: mesh.id, fill: section.fill, loops: section.loops });
   }

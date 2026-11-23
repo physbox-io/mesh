@@ -107,6 +107,7 @@ export function fitPlane(points: Vec3[]): { centroid: Vec3; normal: Vec3 } | nul
   if (points.length < 3) return null;
   const centroid: Vec3 = [0, 0, 0];
   for (const p of points) {
+    if (!Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) return null;
     centroid[0] += p[0];
     centroid[1] += p[1];
     centroid[2] += p[2];
@@ -125,7 +126,7 @@ export function fitPlane(points: Vec3[]): { centroid: Vec3; normal: Vec3 } | nul
     for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) cov[i][j] += d[i] * d[j];
   }
   const normal = smallestEigenvector(cov);
-  if (length(normal) < 0.5) return null;
+  if (!(length(normal) >= 0.5)) return null;
   return { centroid, normal };
 }
 
@@ -210,6 +211,7 @@ export function fitCircle(points: Vec3[]): CircleFit | null {
   const solved = solve3(a, rhs);
   if (!solved) return null;
   const [D, E, F] = solved;
+  if (!Number.isFinite(D) || !Number.isFinite(E) || !Number.isFinite(F)) return null;
   const cx = -D / 2;
   const cy = -E / 2;
   const inside = cx * cx + cy * cy - F;
@@ -226,6 +228,7 @@ export function fitCircle(points: Vec3[]): CircleFit | null {
     angles.push(Math.atan2(dy, dx));
   }
   const error = Math.sqrt(sum / flat.length) / radius;
+  if (!Number.isFinite(error)) return null;
 
   angles.sort((p, q) => p - q);
   let widestGap = angles[0] + 2 * Math.PI - angles[angles.length - 1];
@@ -279,21 +282,25 @@ export function nearbyVertices(
   radius: number,
   limit = 4096,
 ): Vec3[] {
+  if (!(radius >= 0) || !Number.isFinite(radius) || limit <= 0) return [];
+  if (!Number.isFinite(centre[0]) || !Number.isFinite(centre[1]) || !Number.isFinite(centre[2])) return [];
   const found: Vec3[] = [];
   const seen = new Set<string>();
   const r2 = radius * radius;
   for (let i = 0; i + 2 < positions.length; i += 3) {
-    const dx = positions[i] - centre[0];
-    const dy = positions[i + 1] - centre[1];
-    const dz = positions[i + 2] - centre[2];
+    const px = positions[i], py = positions[i + 1], pz = positions[i + 2];
+    if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) continue;
+    const dx = px - centre[0];
+    const dy = py - centre[1];
+    const dz = pz - centre[2];
     if (dx * dx + dy * dy + dz * dz > r2) continue;
     // Quantised to a nanometre before the duplicate check: welded corners are
     // bit-identical, but a corner that came from two different CSG operands is
     // the same corner to every eye and a hair apart in the buffer.
-    const key = `${Math.round(positions[i] * 1e9)},${Math.round(positions[i + 1] * 1e9)},${Math.round(positions[i + 2] * 1e9)}`;
+    const key = `${Math.round(px * 1e9)},${Math.round(py * 1e9)},${Math.round(pz * 1e9)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    found.push([positions[i], positions[i + 1], positions[i + 2]]);
+    found.push([px, py, pz]);
     if (found.length >= limit) break;
   }
   return found;
@@ -358,6 +365,7 @@ export function chooseSnap(
     const screen = project(candidate.point);
     if (!screen) continue;
     const away = Math.hypot(screen.x - pointer.x, screen.y - pointer.y);
+    if (!Number.isFinite(away)) continue;
     const rank = RANK[candidate.kind];
     // A surface point is the fallback and never has to be within the window;
     // everything else has to be close enough to have been aimed at.
@@ -392,6 +400,7 @@ export function chooseSnapNear(
   let bestAway = Infinity;
   for (const candidate of candidates) {
     const away = distance(candidate.point, point);
+    if (!Number.isFinite(away)) continue;
     if (candidate.kind !== 'surface' && away > radius) continue;
     const rank = RANK[candidate.kind];
     // A better kind wins unless the nearer one is nearer by a clear margin —
@@ -432,7 +441,7 @@ export function measureDistance(a: Vec3, b: Vec3): DistanceReading {
 export function measureAngle(armA: Vec3, vertex: Vec3, armB: Vec3): number | null {
   const a = normalize(sub(armA, vertex));
   const b = normalize(sub(armB, vertex));
-  if (length(a) < 0.5 || length(b) < 0.5) return null;
+  if (!(length(a) >= 0.5) || !(length(b) >= 0.5)) return null;
   return (Math.acos(Math.max(-1, Math.min(1, dot(a, b)))) * 180) / Math.PI;
 }
 
