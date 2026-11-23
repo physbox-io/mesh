@@ -10,57 +10,17 @@ import {
   type ToolpathPreviewResult,
 } from '../utils/toolpathPreviewPath';
 import { moveIndexAt, trackPlayhead, PLAYHEAD_START, type PlayheadState } from '../utils/livePlayhead';
+import {
+  DEPTH_RAMP_GRADIENT,
+  computeDeepestCutZ,
+  fillToolpathColours,
+  fillToolpathPositions,
+} from '../utils/toolpathBuffers';
 
 /** How long a full simulated run takes on screen, before the speed multiplier. */
 const PLAYBACK_SECONDS = 45;
-
-/**
- * A depth ramp: where the tool is on the surface, and where it is at the floor.
- *
- * Sampled from viridis, which is perceptually uniform — equal steps in depth
- * look like equal steps in colour — and keeps its ordering when read by a
- * colourblind eye or printed in grey. That matters more here than prettiness:
- * the whole reason to colour a relief by depth is to be able to see, at a
- * glance, that the tool goes deepest where the model is highest, and a ramp
- * with a bright band in the middle of it invents a feature that is not there.
- */
-const DEPTH_RAMP: [number, number, number][] = [
-  [0.267, 0.005, 0.329],
-  [0.283, 0.141, 0.458],
-  [0.254, 0.265, 0.530],
-  [0.207, 0.372, 0.553],
-  [0.164, 0.471, 0.558],
-  [0.128, 0.567, 0.551],
-  [0.135, 0.659, 0.518],
-  [0.267, 0.749, 0.441],
-  [0.478, 0.821, 0.318],
-  [0.741, 0.873, 0.150],
-  [0.993, 0.906, 0.144],
-];
-
-/**
- * Colour for a cut at height `z`, with the stock's top face at 0.
- *
- * `deepest` is taken from the path itself rather than from the carve depth
- * setting, so the ramp always spans what is actually on screen: a relief that
- * only uses half its allowance still gets the full range of colour, instead of
- * coming out uniformly pale against a scale nothing reaches the end of.
- */
-function depthColour(z: number, deepest: number, out: THREE.Color): THREE.Color {
-  const span = Math.abs(deepest);
-  // Deep is the ramp's dark end, surface its bright one.
-  const t = span > 1e-6 ? Math.min(1, Math.max(0, 1 - Math.abs(z) / span)) : 1;
-  const pos = t * (DEPTH_RAMP.length - 1);
-  const i = Math.min(DEPTH_RAMP.length - 2, Math.floor(pos));
-  const f = pos - i;
-  const a = DEPTH_RAMP[i];
-  const b = DEPTH_RAMP[i + 1];
-  return out.setRGB(
-    a[0] + (b[0] - a[0]) * f,
-    a[1] + (b[1] - a[1]) * f,
-    a[2] + (b[2] - a[2]) * f
-  );
-}
+/** Throttle React HUD readout updates during dry-run playback (3D canvas updates at full 60fps). */
+const HUD_CLOCK_SYNC_MS = 80;
 
 /**
  * Interactive toolpath viewport, with a dry run of the cut and a live trace of
@@ -97,9 +57,12 @@ export function ToolpathView({
   const sceneRef = useRef<THREE.Scene | null>(null);
   /** Set by the geometry effect, read by the frame loop. */
   const cutRef = useRef<THREE.LineSegments | null>(null);
+  const pathGeoRef = useRef<THREE.BufferGeometry | null>(null);
   const toolRef = useRef<THREE.Object3D | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  /** Demand-render trigger: wakes the single RAF loop only when something changed. */
+  const requestRenderRef = useRef<() => void>(() => {});
   /** Set once the operator orbits, pans or zooms; stops the auto-fit taking over. */
   const userMovedRef = useRef(false);
   /** Lets the mount effect's `resize` reach the fit without depending on it. */
@@ -118,6 +81,8 @@ export function ToolpathView({
    * finishing raster is one colour whatever it is cutting.
    */
   const [colourMode, setColourMode] = useState<'depth' | 'operation'>('depth');
+  const colourModeRef = useRef(colourMode);
+  useEffect(() => { colourModeRef.current = colourMode; }, [colourMode]);
 
   /**
    * The deepest cutting move in the path — the far end of the depth ramp.
@@ -126,15 +91,7 @@ export function ToolpathView({
    * including them would stretch the scale over air and wash out the range the
    * carve actually occupies.
    */
-  const deepest = useMemo(() => {
-    let z = 0;
-    for (const m of path.moves) {
-      if (m.rapid) continue;
-      if (m.z1 < z) z = m.z1;
-      if (m.z2 < z) z = m.z2;
-    }
-    return z;
-  }, [path]);
+  const deepest = useMemo(() => computeDeepestCutZ(path.moves), [path]);
   /** Job seconds, not wall-clock seconds. */
   const [clock, setClock] = useState(0);
 
@@ -209,11 +166,33 @@ export function ToolpathView({
     contentRef.current = group;
     scene.add(group);
 
+    // Render on demand: only schedule/draw when geometry, playhead, resize,
+    // or OrbitControls damping moves the camera — zero idle GPU load when paused.
+    let raf = 0;
+    let dirty = true;
+    const tick = () => {
+      raf = 0;
+      const moved = controls.update();
+      if (dirty || moved) {
+        dirty = false;
+        renderer.render(scene, camera);
+      }
+      if (moved) {
+        raf = requestAnimationFrame(tick);
+      }
+    };
+    const scheduleRender = () => {
+      dirty = true;
+      if (!raf) raf = requestAnimationFrame(tick);
+    };
+    requestRenderRef.current = scheduleRender;
+
     // Any deliberate orbit, pan or zoom means the framing is the operator's
     // now, and re-fitting under them would be the viewport snatching the view
     // back every time a setting changed.
-    const onUserMove = () => { userMovedRef.current = true; };
+    const onUserMove = () => { userMovedRef.current = true; scheduleRender(); };
     controls.addEventListener('start', onUserMove);
+    controls.addEventListener('change', scheduleRender);
 
     const resize = () => {
       const w = mount.clientWidth || 600;
@@ -224,23 +203,19 @@ export function ToolpathView({
       // A narrower viewport needs the camera further back for the same content,
       // so the fit is aspect-dependent and has to be redone on a resize.
       if (!userMovedRef.current) fitRef.current?.();
+      scheduleRender();
     };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(mount);
-
-    let raf = 0;
-    const tick = () => {
-      raf = requestAnimationFrame(tick);
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    tick();
+    scheduleRender();
 
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
+      requestRenderRef.current = () => {};
       observer.disconnect();
       controls.removeEventListener('start', onUserMove);
+      controls.removeEventListener('change', scheduleRender);
       controls.dispose();
       scene.traverse((o) => {
         const m = o as THREE.Mesh;
@@ -254,6 +229,7 @@ export function ToolpathView({
       contentRef.current = null;
       sceneRef.current = null;
       cutRef.current = null;
+      pathGeoRef.current = null;
       toolRef.current = null;
       cameraRef.current = null;
       controlsRef.current = null;
@@ -289,42 +265,13 @@ export function ToolpathView({
     // animation does — reveal, rewind, follow the machine — is then a draw
     // range on this, and the colours say what each move is for.
     const moves = path.moves;
-    const positions = new Float32Array(moves.length * 6);
-    const colours = new Float32Array(moves.length * 6);
-    const ROUGH = new THREE.Color(0xf59e0b);
-    const FINISH = new THREE.Color(0x3b82f6);
-    const TRAVEL = new THREE.Color(0x475569);
-    const scratch = new THREE.Color();
-
-    for (let i = 0; i < moves.length; i++) {
-      const m = moves[i];
-      positions.set([m.x1, m.y1, m.z1, m.x2, m.y2, m.z2], i * 6);
-
-      if (m.rapid) {
-        // Travel stays grey in both modes. It is the one thing on screen that
-        // is not cutting, and colouring it by the height it happens to fly at
-        // would put it at the bright end of the depth ramp — the loudest
-        // colour on the screen given to the moves that remove no material.
-        colours.set([TRAVEL.r, TRAVEL.g, TRAVEL.b, TRAVEL.r, TRAVEL.g, TRAVEL.b], i * 6);
-        continue;
-      }
-
-      if (colourMode === 'depth') {
-        // Per end, not per move: a plunge or a ramp spans a range of depths,
-        // and giving it one flat colour is exactly the moment the relief stops
-        // reading as a surface.
-        const a = depthColour(m.z1, deepest, scratch).clone();
-        const b = depthColour(m.z2, deepest, scratch);
-        colours.set([a.r, a.g, a.b, b.r, b.g, b.b], i * 6);
-      } else {
-        const c = m.pass === 'roughing' ? ROUGH : FINISH;
-        colours.set([c.r, c.g, c.b, c.r, c.g, c.b], i * 6);
-      }
-    }
+    const positions = fillToolpathPositions(moves);
+    const colours = fillToolpathColours(moves, colourModeRef.current, deepest);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
+    pathGeoRef.current = geo;
     dispose.push(geo);
 
     // The whole path, faint: where the tool is going.
@@ -368,10 +315,12 @@ export function ToolpathView({
     (grid.material as THREE.Material).transparent = true;
     (grid.material as THREE.Material).opacity = 0.25;
     group.add(grid);
+    requestRenderRef.current();
 
     return () => {
       group.clear();
       cutRef.current = null;
+      pathGeoRef.current = null;
       toolRef.current = null;
       for (const d of dispose) d.dispose();
       grid.geometry.dispose();
@@ -383,9 +332,20 @@ export function ToolpathView({
     options.stockDepthMm,
     options.stockThicknessMm,
     options.finishingToolDiaMm,
-    colourMode,
     deepest,
   ]);
+
+  // Refill vertex colours in place when toggling Depth / Pass without tearing
+  // down or rebuilding the stock, grid, tool, or position buffer.
+  useEffect(() => {
+    const geo = pathGeoRef.current;
+    if (!geo) return;
+    const colorAttr = geo.getAttribute('color') as THREE.BufferAttribute | undefined;
+    if (!colorAttr) return;
+    fillToolpathColours(path.moves, colourMode, deepest, colorAttr.array as Float32Array);
+    colorAttr.needsUpdate = true;
+    requestRenderRef.current();
+  }, [colourMode, path, deepest]);
 
   /**
    * Frames the stock and the toolpath, whatever size they are.
@@ -446,6 +406,7 @@ export function ToolpathView({
     camera.far = dist * 10;
     camera.updateProjectionMatrix();
     controls.update();
+    requestRenderRef.current();
   }, [options.stockWidthMm, options.stockDepthMm, options.stockThicknessMm, result.carveBounds, deepest]);
 
   useEffect(() => { fitRef.current = fitView; }, [fitView]);
@@ -506,6 +467,7 @@ export function ToolpathView({
       // mesh by that much to put the tip on the path.
       tool.position.z += Math.max(5, options.finishingToolDiaMm * 3) / 2;
     }
+    requestRenderRef.current();
   }, [options.finishingToolDiaMm]);
 
   useEffect(() => {
@@ -556,22 +518,34 @@ export function ToolpathView({
   }, [live, wposX, wposY, wposZ]);
 
   // The dry run. Compressed onto a fixed screen duration, because the thing
-  // being previewed can be a four-hour carve.
+  // being previewed can be a four-hour carve. Advances the 3D playhead directly
+  // at 60fps while throttling React scrubber/readout state updates to ~12Hz.
   useEffect(() => {
     if (live || !playing || path.seconds <= 0) return;
     let raf = 0;
     let last = performance.now();
+    let lastHudSync = last;
     const step = (now: number) => {
       const dt = (now - last) / 1000;
       last = now;
       const advance = (path.seconds / PLAYBACK_SECONDS) * speed * dt;
-      const next = clockRef.current + advance;
-      setClock(next >= path.seconds ? 0 : next);
+      const rawNext = clockRef.current + advance;
+      const wrapped = rawNext >= path.seconds;
+      const next = wrapped ? 0 : rawNext;
+      clockRef.current = next;
+      applyClock(next);
+      if (wrapped || now - lastHudSync >= HUD_CLOCK_SYNC_MS) {
+        lastHudSync = now;
+        setClock(next);
+      }
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [live, playing, speed, path]);
+    return () => {
+      cancelAnimationFrame(raf);
+      setClock(clockRef.current);
+    };
+  }, [live, playing, speed, path, applyClock]);
 
   const done = path.seconds > 0 ? Math.round((clock / path.seconds) * 100) : 0;
 
@@ -589,11 +563,7 @@ export function ToolpathView({
               <span className="text-[9px] font-mono text-slate-400">0</span>
               <div
                 className="h-1.5 w-24 rounded-full"
-                style={{
-                  background: `linear-gradient(to left, ${DEPTH_RAMP.map(
-                    ([r, g, b]) => `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`
-                  ).join(',')})`,
-                }}
+                style={{ background: DEPTH_RAMP_GRADIENT }}
               />
               <span className="text-[9px] font-mono text-slate-400">
                 {deepest.toFixed(1)} mm

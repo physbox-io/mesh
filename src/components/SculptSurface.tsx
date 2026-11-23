@@ -80,12 +80,19 @@ const findSceneNode = (nodes: SceneNode[] | undefined, id: string): SceneNode | 
   return null;
 };
 
+const NOOP_RAYCAST = () => null;
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
 export function SculptSurface({
   nodeId, geomName, color, mujoco, model, data, renderVertices, faces,
 }: SculptSurfaceProps) {
   const groupRef = useRef<THREE.Group>(null);
   const meshRef = useRef<THREE.Mesh>(null);
   const cursorRef = useRef<THREE.Mesh>(null);
+  const resolveInvRef = useRef(new THREE.Matrix4());
+  const resolveOriginRef = useRef(new THREE.Vector3());
+  const resolveDirRef = useRef(new THREE.Vector3());
+  const cursorNormalRef = useRef(new THREE.Vector3());
 
   const brush = useStore((s) => s.sculptBrush);
   // An open surface — the scissors with Fill cut off — shows its inside, and
@@ -95,7 +102,7 @@ export function SculptSurface({
   // whose tessellation you most want to be able to look at.
   const wireframe = useStore((s) => s.wireframe);
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
-  const { gl } = useThree();
+  const gl = useThree((state) => state.gl);
   // Same trick the rest of the app uses to stop the camera mid-gesture: reach
   // the live controls through R3F's `get()` rather than a render value, because
   // `makeDefault` registers them after the scene's meshes have mounted.
@@ -139,10 +146,29 @@ export function SculptSurface({
   const drawCarveLine = useCallback((path: number[][] | null) => {
     const line = carveLineRef.current;
     if (!line) return;
-    const pairs: number[] = [];
-    if (path) for (let i = 1; i < path.length; i++) pairs.push(...path[i - 1], ...path[i]);
-    line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pairs, 3));
-    line.visible = pairs.length > 0;
+    const segCount = path && path.length > 1 ? path.length - 1 : 0;
+    const vertexCount = segCount * 2;
+    const neededFloats = vertexCount * 3;
+    const geo = line.geometry;
+    if (neededFloats > 0) {
+      let posAttr = geo.getAttribute('position') as THREE.BufferAttribute | undefined;
+      if (!posAttr || posAttr.array.length < neededFloats) {
+        if (posAttr) geo.dispose();
+        const capacity = Math.max(neededFloats, 128 * 3);
+        posAttr = new THREE.BufferAttribute(new Float32Array(capacity), 3);
+        geo.setAttribute('position', posAttr);
+      }
+      const arr = posAttr.array as Float32Array;
+      let o = 0;
+      for (let i = 1; i < path!.length; i++) {
+        const a = path![i - 1], b = path![i];
+        arr[o++] = a[0]; arr[o++] = a[1]; arr[o++] = a[2];
+        arr[o++] = b[0]; arr[o++] = b[1]; arr[o++] = b[2];
+      }
+      posAttr.needsUpdate = true;
+    }
+    geo.setDrawRange(0, vertexCount);
+    line.visible = vertexCount > 0;
     invalidate();
   }, [invalidate]);
   /** The mesh this component currently holds, for a cut that finishes after it was replaced. */
@@ -314,9 +340,9 @@ export function SculptSurface({
     const group = groupRef.current;
     if (!group) return null;
 
-    const inverse = new THREE.Matrix4().copy(group.matrixWorld).invert();
-    const origin = event.ray.origin.clone().applyMatrix4(inverse);
-    const direction = event.ray.direction.clone().transformDirection(inverse).normalize();
+    const inverse = resolveInvRef.current.copy(group.matrixWorld).invert();
+    const origin = resolveOriginRef.current.copy(event.ray.origin).applyMatrix4(inverse);
+    const direction = resolveDirRef.current.copy(event.ray.direction).transformDirection(inverse).normalize();
 
     const hit = raycastMesh(mesh, origin.x, origin.y, origin.z, direction.x, direction.y, direction.z);
     if (!hit) return null;
@@ -334,8 +360,8 @@ export function SculptSurface({
     cursor.visible = true;
     cursor.position.set(point.x, point.y, point.z);
     cursor.quaternion.setFromUnitVectors(
-      new THREE.Vector3(0, 0, 1),
-      new THREE.Vector3(point.nx, point.ny, point.nz)
+      Z_AXIS,
+      cursorNormalRef.current.set(point.nx, point.ny, point.nz),
     );
     const scale = Math.max(1e-4, brushRef.current.radius);
     cursor.scale.set(scale, scale, scale);
@@ -871,7 +897,8 @@ export function SculptSurface({
     }
   }, [setOrbitEnabled]);
 
-  const rgb = bodyColor(color, [0.82, 0.72, 0.62]);
+  const rgb = useMemo(() => bodyColor(color, [0.82, 0.72, 0.62]), [color]);
+  const insideRgb = useMemo(() => rgb.clone().multiplyScalar(0.45), [rgb]);
 
   return (
     <group ref={groupRef} name={`${nodeId}_sculpt`} userData={{ bodyId: nodeId }}>
@@ -895,19 +922,19 @@ export function SculptSurface({
           see-through ghost rather than a hollow. Darker, so it reads as the
           inside, and only while the surface is open. */}
       {surfaceOpen && (
-        <mesh geometry={geometry} raycast={() => null}>
-          <meshStandardMaterial color={rgb.clone().multiplyScalar(0.45)} roughness={0.95} metalness={0} side={THREE.BackSide} wireframe={wireframe} />
+        <mesh geometry={geometry} raycast={NOOP_RAYCAST}>
+          <meshStandardMaterial color={insideRgb} roughness={0.95} metalness={0} side={THREE.BackSide} wireframe={wireframe} />
         </mesh>
       )}
 
-      <lineSegments ref={carveLineRef} visible={false} renderOrder={10} frustumCulled={false} raycast={() => null}>
+      <lineSegments ref={carveLineRef} visible={false} renderOrder={10} frustumCulled={false} raycast={NOOP_RAYCAST}>
         <bufferGeometry />
         <lineBasicMaterial color="#38bdf8" depthTest={false} transparent />
       </lineSegments>
 
       {/* The brush ring. Drawn on top of the surface so it stays readable in a
           hollow the surface would otherwise occlude it in. */}
-      <mesh ref={cursorRef} visible={false} raycast={() => null}>
+      <mesh ref={cursorRef} visible={false} raycast={NOOP_RAYCAST}>
         <ringGeometry args={[0.92, 1, 48]} />
         <meshBasicMaterial color="#38bdf8" transparent opacity={0.9} side={THREE.DoubleSide} depthTest={false} />
       </mesh>

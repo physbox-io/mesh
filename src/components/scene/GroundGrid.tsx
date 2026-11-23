@@ -21,14 +21,21 @@ const BEHIND = 0.002;
  * Settings as SceneCanvas explains them where this is used; the fade is taken
  * over each frame by GridFadeFollowsCamera, which finds the grid by its name.
  */
+const FLOOR_POSE: { position: [number, number, number]; rotation: [number, number, number] } = {
+  position: [0, -0.005, 0],
+  rotation: [0, 0, 0],
+};
+
 export function GroundGrid({ cellSizeMm, darkMode }: { cellSizeMm: number; darkMode: boolean }) {
   const cameraView = useStore((s) => s.cameraView);
-  const sceneGraph = useStore((s) => s.sceneGraph);
+  // Only subscribe to sceneGraph.nodes in Front/Side drawing views where the grid
+  // stands behind the parts; in Perspective/TopDown, scene edits need not re-render Grid.
+  const wallNodes = useStore((s) => (s.cameraView === 'front' || s.cameraView === 'side' ? s.sceneGraph?.nodes ?? null : null));
 
   // Three.js frame (Y-up); the document is Z-up: (x, y, z) -> (x, z, -y).
   const pose = useMemo((): { position: [number, number, number]; rotation: [number, number, number] } => {
     if (cameraView === 'front' || cameraView === 'side') {
-      const bounds = sceneContentBounds(sceneGraph?.nodes ?? []);
+      const bounds = sceneContentBounds(wallNodes ?? []);
       if (cameraView === 'front') {
         // Looking along +Y, so behind is the far +Y side.
         const y = (bounds?.max[1] ?? 0) + BEHIND;
@@ -38,8 +45,8 @@ export function GroundGrid({ cellSizeMm, darkMode }: { cellSizeMm: number; darkM
       const x = (bounds?.min[0] ?? 0) - BEHIND;
       return { position: [x, 0, 0], rotation: [0, 0, Math.PI / 2] };
     }
-    return { position: [0, -0.005, 0], rotation: [0, 0, 0] };
-  }, [cameraView, sceneGraph]);
+    return FLOOR_POSE;
+  }, [cameraView, wallNodes]);
 
   return (
     <Grid

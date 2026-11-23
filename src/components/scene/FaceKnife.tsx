@@ -93,8 +93,21 @@ function planeSection(positions: ArrayLike<number>, faces: ArrayLike<number>, at
   return out;
 }
 
+function disposeLineGroup(group: THREE.Group) {
+  const disposed = new Set<THREE.BufferGeometry>();
+  group.traverse((o) => {
+    if (o instanceof THREE.LineSegments && !disposed.has(o.geometry)) {
+      disposed.add(o.geometry);
+      o.geometry.dispose();
+    }
+  });
+}
+
 export const FaceKnife = () => {
-  const { scene, camera, gl, invalidate } = useThree();
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  const invalidate = useThree((s) => s.invalidate);
   const setGestureStatus = useStore((s) => s.setGestureStatus);
   const armed = useRef(false);
   const drag = useRef<Drag | null>(null);
@@ -220,7 +233,7 @@ export const FaceKnife = () => {
   const redraw = useCallback(() => {
     if (layer.current) {
       layer.current.removeFromParent();
-      layer.current.traverse((o) => { if (o instanceof THREE.LineSegments) o.geometry.dispose(); });
+      disposeLineGroup(layer.current);
       layer.current = null;
     }
     const ui = ensureOverlay();
@@ -235,7 +248,8 @@ export const FaceKnife = () => {
     const add = (segments: ArrayLike<number>, kind: keyof typeof MATERIALS) => {
       if (!segments.length) return;
       const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(Array.from(segments), 3));
+      const arr = segments instanceof Float32Array ? segments : new Float32Array(segments);
+      geometry.setAttribute('position', new THREE.BufferAttribute(arr, 3));
       for (const material of MATERIALS[kind]) group.add(new THREE.LineSegments(geometry, material));
     };
     for (const seam of seamsOf(node)) {
@@ -518,7 +532,11 @@ export const FaceKnife = () => {
 
   useEffect(() => () => {
     cancelAnimationFrame(frame.current);
-    layer.current?.removeFromParent();
+    if (layer.current) {
+      layer.current.removeFromParent();
+      disposeLineGroup(layer.current);
+      layer.current = null;
+    }
     overlay.current?.svg.remove();
     overlay.current = null;
   }, []);

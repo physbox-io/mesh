@@ -32,6 +32,8 @@ interface Props {
   scale?: [number, number, number];
 }
 
+const NOOP_RAYCAST = () => null;
+
 export const FeatureEdges = ({ geometry, threshold, rotation, scale }: Props) => {
   const edges = useMemo(() => {
     if (!geometry) return null;
@@ -50,7 +52,7 @@ export const FeatureEdges = ({ geometry, threshold, rotation, scale }: Props) =>
 
   if (!edges || edges.getAttribute('position').count === 0) return null;
   return (
-    <lineSegments geometry={edges} rotation={rotation} raycast={() => null}>
+    <lineSegments geometry={edges} rotation={rotation} raycast={NOOP_RAYCAST}>
       <lineBasicMaterial color={lineColor} toneMapped={false} />
     </lineSegments>
   );

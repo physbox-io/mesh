@@ -18,8 +18,8 @@
 // body. The viewport orbits on the right button, so nothing is lost.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useFrame, useThree } from '@react-three/fiber';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useThree } from '@react-three/fiber';
 import { Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
@@ -55,7 +55,48 @@ function startRoundingSelected(): boolean {
 }
 
 export const EdgeRoundTool = () => {
-  const { camera, gl } = useThree();
+  const hasSession = useStore((s) => s.edgeRoundSession !== null);
+
+  // E opens the tool on the selected part; Enter keeps the result, Esc puts it back.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const state = useStore.getState();
+      if (state.edgeRoundSession) {
+        if (key === 'escape') { event.stopImmediatePropagation(); state.cancelEdgeRound(); }
+        else if (key === 'enter') { event.stopImmediatePropagation(); state.applyEdgeRound(); }
+        else if (key === 'e') { event.stopImmediatePropagation(); state.applyEdgeRound(); }
+        return;
+      }
+      if (key !== 'e') return;
+      if (state.gestureStatus || state.draggedNodeId || state.paintMode || state.measureMode) return;
+      if (startRoundingSelected()) event.stopImmediatePropagation();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+
+  // Asked for from the mode menu; any other mode there keeps what is on screen.
+  useEffect(() => {
+    const onAsked = (event: Event) => {
+      const kind = (event as CustomEvent<{ kind: string }>).detail?.kind;
+      if (kind === 'round-edges') startRoundingSelected();
+      else useStore.getState().applyEdgeRound();
+    };
+    window.addEventListener('physbox:gesture', onAsked);
+    return () => window.removeEventListener('physbox:gesture', onAsked);
+  }, []);
+
+  if (!hasSession) return null;
+  return <EdgeRoundToolActive />;
+};
+
+const EdgeRoundToolActive = () => {
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
   const session = useStore((s) => s.edgeRoundSession);
   const node = useStore((s) => (s.edgeRoundSession ? findNodeById(s.sceneGraph.nodes, s.edgeRoundSession.nodeId) : null));
   const { edges: body } = useBodyEdges(session ? node : null);
@@ -74,13 +115,13 @@ export const EdgeRoundTool = () => {
     return DOC_TO_THREE.clone().multiply(docMatrix).multiply(new THREE.Matrix4().makeTranslation(-offset[0], -offset[1], -offset[2]));
   }, [session, node]);
 
-  useFrame(() => {
+  useLayoutEffect(() => {
     const group = frameRef.current;
     if (!group || !frame) return;
     group.matrixAutoUpdate = false;
     group.matrix.copy(frame);
     group.matrixWorldNeedsUpdate = true;
-  });
+  }, [frame, body]);
 
   // An invisible copy of the unrounded solid, for the pointer to hit.
   const pickMesh = useMemo(() => {
@@ -91,7 +132,11 @@ export const EdgeRoundTool = () => {
     geometry.computeBoundingSphere();
     return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
   }, [body]);
-  useEffect(() => () => pickMesh?.geometry.dispose(), [pickMesh]);
+  useEffect(() => () => {
+    if (!pickMesh) return;
+    pickMesh.geometry.dispose();
+    (pickMesh.material as THREE.Material).dispose();
+  }, [pickMesh]);
 
   // First open: a suggested size, and — on a part with no roundings yet —
   // every edge, so the very first thing seen is the whole part softened.
@@ -222,39 +267,6 @@ export const EdgeRoundTool = () => {
       setHover(null);
     };
   }, [gl, hoverNow, session, toggle]);
-
-  // E opens the tool on the selected part; Enter keeps the result, Esc puts it back.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)) return;
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const key = event.key.toLowerCase();
-      const state = useStore.getState();
-      if (state.edgeRoundSession) {
-        if (key === 'escape') { event.stopImmediatePropagation(); state.cancelEdgeRound(); }
-        else if (key === 'enter') { event.stopImmediatePropagation(); state.applyEdgeRound(); }
-        else if (key === 'e') { event.stopImmediatePropagation(); state.applyEdgeRound(); }
-        return;
-      }
-      if (key !== 'e') return;
-      if (state.gestureStatus || state.draggedNodeId || state.paintMode || state.measureMode) return;
-      if (startRoundingSelected()) event.stopImmediatePropagation();
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, []);
-
-  // Asked for from the mode menu; any other mode there keeps what is on screen.
-  useEffect(() => {
-    const onAsked = (event: Event) => {
-      const kind = (event as CustomEvent<{ kind: string }>).detail?.kind;
-      if (kind === 'round-edges') startRoundingSelected();
-      else useStore.getState().applyEdgeRound();
-    };
-    window.addEventListener('physbox:gesture', onAsked);
-    return () => window.removeEventListener('physbox:gesture', onAsked);
-  }, []);
 
   // Selecting another part, or starting the simulation, keeps the result.
   const selectedNodeId = useStore((s) => s.selectedNodeId);

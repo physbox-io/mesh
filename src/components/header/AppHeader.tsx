@@ -5,7 +5,7 @@ import { getPhysicsWorkerClient } from '../../store/physicsEngine';
 import { useSoundStore } from '../../store/soundStore';
 import { unlockAudioContext } from '../../utils/modalAudio';
 import { usePanels } from '../../store/panelsStore';
-import { useSelectedNode } from '../../hooks/useSelectedNode';
+import { findNodeById } from '../../utils/sceneTree';
 import type { PresetActions } from '../../hooks/usePresetActions';
 import { pressHistoryKey } from '../../utils/historyKeys';
 import { SHOW_EXPORTS_EVENT } from '../BottomStatusBar';
@@ -26,30 +26,31 @@ export function AppHeader({
   onToggleDarkMode: () => void;
 }) {
   const { handleSavePresetClick } = presets;
-  const isLeftSidebarOpen = usePanels((s) => s.isLeftSidebarOpen);
-  const setIsLeftSidebarOpen = usePanels((s) => s.setLeftSidebarOpen);
-  const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
-  const setIsPropertiesOpen = usePanels((s) => s.setPropertiesOpen);
-  const isCopilotOpen = usePanels((s) => s.isCopilotOpen);
-  const setCopilotOpen = usePanels((s) => s.setCopilotOpen);
-  const openDocs = usePanels((s) => s.openDocs);
-  const openStlImport = usePanels((s) => s.openStlImport);
-  const openImageImport = usePanels((s) => s.openImageImport);
-  const openProfileImport = usePanels((s) => s.openProfileImport);
-  const setPcbImportOpen = usePanels((s) => s.setPcbImportOpen);
+  const {
+    isLeftSidebarOpen, setLeftSidebarOpen: setIsLeftSidebarOpen,
+    isPropertiesOpen, setPropertiesOpen: setIsPropertiesOpen,
+    isCopilotOpen, setCopilotOpen,
+    openDocs, openStlImport, openImageImport, openProfileImport, setPcbImportOpen,
+  } = usePanels(useShallow((s) => ({
+    isLeftSidebarOpen: s.isLeftSidebarOpen, setLeftSidebarOpen: s.setLeftSidebarOpen,
+    isPropertiesOpen: s.isPropertiesOpen, setPropertiesOpen: s.setPropertiesOpen,
+    isCopilotOpen: s.isCopilotOpen, setCopilotOpen: s.setCopilotOpen,
+    openDocs: s.openDocs, openStlImport: s.openStlImport, openImageImport: s.openImageImport,
+    openProfileImport: s.openProfileImport, setPcbImportOpen: s.setPcbImportOpen,
+  })));
   const {
     isPlaying, togglePlay, isLoaded, resetSimulation,
     isSettingsOpen, setSettingsOpen,
-    selectedNodeId, extraSelectedIds, geomFocused, sculptNodeId, latticeNodeId,
-    canUndo, canRedo,
+    selectedNodeId, hasExtraSelected, geomFocused, sculptNodeId, latticeNodeId,
+    canUndo, canRedo, hasSelectedNode,
   } = useStore(useShallow((s) => ({
     isPlaying: s.isPlaying, togglePlay: s.togglePlay, isLoaded: s.isLoaded, resetSimulation: s.resetSimulation,
     isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
-    selectedNodeId: s.selectedNodeId, extraSelectedIds: s.extraSelectedIds, geomFocused: s.geomFocused,
+    selectedNodeId: s.selectedNodeId, hasExtraSelected: s.extraSelectedIds.length > 0, geomFocused: s.geomFocused,
     sculptNodeId: s.sculptNodeId, latticeNodeId: s.latticeNodeId,
     canUndo: s.undoStack.length > 0, canRedo: s.redoStack.length > 0,
+    hasSelectedNode: Boolean(s.selectedNodeId && findNodeById(s.sceneGraph.nodes, s.selectedNodeId)),
   })));
-  const selectedNode = useSelectedNode();
   const soundEnabled = useSoundStore((s) => s.soundEnabled);
   return (
     <>
@@ -162,7 +163,7 @@ export function AppHeader({
               className="flex items-center justify-center p-1 rounded-md hover:bg-red-50 dark:hover:bg-red-950/40 text-red-500 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
               title={
                 selectedNodeId
-                  ? geomFocused && extraSelectedIds.length === 0
+                  ? geomFocused && !hasExtraSelected
                     ? "Delete selected sub-shape (Delete / Backspace)"
                     : "Delete selected item (Delete / Backspace)"
                   : "No item selected"
@@ -276,13 +277,13 @@ export function AppHeader({
             */}
             <button
               onClick={() => setIsPropertiesOpen(!isPropertiesOpen)}
-              disabled={!selectedNode || isPlaying}
+              disabled={!hasSelectedNode || isPlaying}
               className={`lg:hidden flex items-center justify-center w-8 h-8 rounded-full border transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs disabled:opacity-40 disabled:cursor-not-allowed ${
                 isPropertiesOpen
                   ? 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-950 dark:border-blue-700 dark:text-blue-400'
                   : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900'
               }`}
-              title={isPlaying ? 'Stop the simulation to edit properties' : selectedNode ? 'Properties' : 'Select a component to see its properties'}
+              title={isPlaying ? 'Stop the simulation to edit properties' : hasSelectedNode ? 'Properties' : 'Select a component to see its properties'}
             >
               <PanelRight className="w-4 h-4" />
             </button>

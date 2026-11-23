@@ -1,26 +1,56 @@
 import { useRef, type RefObject } from 'react';
-import { useFrame, useThree } from '@react-three/fiber';
+import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
+
+const LEGEND_AXES = [
+  { dx: 1, dy: 0, dz: 0, color: '#ef4444', label: 'X', shadow: '#7f1d1d' },
+  { dx: 0, dy: 1, dz: 0, color: '#22c55e', label: 'Y', shadow: '#14532d' },
+  { dx: 0, dy: 0, dz: 1, color: '#3b82f6', label: 'Z', shadow: '#1e3a8a' },
+] as const;
+
+interface ProjectedAxis {
+  color: string;
+  label: string;
+  shadow: string;
+  px: number;
+  py: number;
+  depth: number;
+}
 
 // AxisLegendDrawer — lives inside the R3F Canvas, reads camera every frame and draws
 // MuJoCo XYZ axes onto an external HTML canvas element passed via ref.
 // MuJoCo coord system: X=right (red), Y=into screen (green), Z=up (blue)
 // Three.js Y-up mapping: mujoco(x,y,z) → three(x, z, -y)
 export const AxisLegendDrawer = ({ externalRef }: { externalRef: RefObject<HTMLCanvasElement | null> }) => {
-  const { camera } = useThree();
   // The legend depends on nothing but the camera's orientation, so a frame
   // where that has not turned (every frame of a simulation watched from a
   // still camera) leaves the drawing as it is.
-  const drawn = useRef<{ el: HTMLCanvasElement; quaternion: THREE.Quaternion; width: number; height: number } | null>(null);
+  const drawn = useRef<{ el: HTMLCanvasElement | null; quaternion: THREE.Quaternion; width: number; height: number; valid: boolean }>({
+    el: null,
+    quaternion: new THREE.Quaternion(),
+    width: 0,
+    height: 0,
+    valid: false,
+  });
+  const tmpDir = useRef(new THREE.Vector3());
+  const projectedRef = useRef<ProjectedAxis[]>([
+    { color: LEGEND_AXES[0].color, label: LEGEND_AXES[0].label, shadow: LEGEND_AXES[0].shadow, px: 0, py: 0, depth: 0 },
+    { color: LEGEND_AXES[1].color, label: LEGEND_AXES[1].label, shadow: LEGEND_AXES[1].shadow, px: 0, py: 0, depth: 0 },
+    { color: LEGEND_AXES[2].color, label: LEGEND_AXES[2].label, shadow: LEGEND_AXES[2].shadow, px: 0, py: 0, depth: 0 },
+  ]);
 
-  useFrame(() => {
+  useFrame(({ camera }) => {
     const el = externalRef.current;
     if (!el) return;
     const last = drawn.current;
-    if (last && last.el === el && last.width === el.width && last.height === el.height && last.quaternion.equals(camera.quaternion)) return;
+    if (last.valid && last.el === el && last.width === el.width && last.height === el.height && last.quaternion.equals(camera.quaternion)) return;
     const ctx = el.getContext('2d');
     if (!ctx) return;
-    drawn.current = { el, quaternion: camera.quaternion.clone(), width: el.width, height: el.height };
+    last.el = el;
+    last.quaternion.copy(camera.quaternion);
+    last.width = el.width;
+    last.height = el.height;
+    last.valid = true;
 
     const W = el.width;
     const H = el.height;
@@ -30,29 +60,21 @@ export const AxisLegendDrawer = ({ externalRef }: { externalRef: RefObject<HTMLC
 
     ctx.clearRect(0, 0, W, H);
 
-    // Project a MuJoCo direction vector through the live camera view matrix
-    const projectAxis = (dx: number, dy: number, dz: number): [number, number] => {
+    // Compute projections into preallocated scratch structs and sort back-to-front
+    const dir = tmpDir.current;
+    const projected = projectedRef.current;
+    for (let i = 0; i < 3; i++) {
+      const a = LEGEND_AXES[i];
       // MuJoCo(x,y,z) → Three.js world direction: three(x, z, -y)
-      const worldDir = new THREE.Vector3(dx, dz, -dy);
-      worldDir.normalize();
-      const viewDir = worldDir.clone().transformDirection(camera.matrixWorldInverse);
-      // view space: x=right, y=up → screen: x=right, y=down
-      return [viewDir.x * len, -viewDir.y * len];
-    };
-
-    const axes = [
-      { dir: [1, 0, 0] as const, color: '#ef4444', label: 'X', shadow: '#7f1d1d' },
-      { dir: [0, 1, 0] as const, color: '#22c55e', label: 'Y', shadow: '#14532d' },
-      { dir: [0, 0, 1] as const, color: '#3b82f6', label: 'Z', shadow: '#1e3a8a' },
-    ];
-
-    // Compute projections and sort back-to-front
-    const projected = axes.map(a => {
-      const [px, py] = projectAxis(a.dir[0], a.dir[1], a.dir[2]);
-      const worldDir = new THREE.Vector3(a.dir[0], a.dir[2], -a.dir[1]);
-      const viewDir = worldDir.clone().transformDirection(camera.matrixWorldInverse);
-      return { ...a, px, py, depth: viewDir.z };
-    });
+      dir.set(a.dx, a.dz, -a.dy).transformDirection(camera.matrixWorldInverse);
+      const slot = projected[i];
+      slot.color = a.color;
+      slot.label = a.label;
+      slot.shadow = a.shadow;
+      slot.px = dir.x * len;
+      slot.py = -dir.y * len;
+      slot.depth = dir.z;
+    }
     projected.sort((a, b) => a.depth - b.depth);
 
     const arrowHead = (x: number, y: number, ax: number, ay: number, size: number) => {

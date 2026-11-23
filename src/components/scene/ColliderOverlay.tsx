@@ -47,6 +47,7 @@ const BodyColliders = ({ node, geoms, model, data, mujoco }: {
   node: SceneNode; geoms: SceneGeom[]; model: ModelMirror; data: DataMirror; mujoco: MujocoShim;
 }) => {
   const groupRef = useRef<THREE.Group>(null);
+  const rotMatRef = useRef(new THREE.Matrix4());
   const bodyId = useMemo(
     () => mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id),
     [model, mujoco, node.name, node.id],
@@ -58,14 +59,14 @@ const BodyColliders = ({ node, geoms, model, data, mujoco }: {
     try {
       const o = bodyId * 9;
       const m = data.xmat;
-      const mat = new THREE.Matrix4().set(
+      rotMatRef.current.set(
         m[o], m[o + 1], m[o + 2], 0,
         m[o + 3], m[o + 4], m[o + 5], 0,
         m[o + 6], m[o + 7], m[o + 8], 0,
         0, 0, 0, 1,
       );
       groupRef.current.position.set(data.xpos[bodyId * 3], data.xpos[bodyId * 3 + 1], data.xpos[bodyId * 3 + 2]);
-      groupRef.current.quaternion.setFromRotationMatrix(mat);
+      groupRef.current.quaternion.setFromRotationMatrix(rotMatRef.current);
     } catch { /* body deleted mid-frame */ }
   });
   if (bodyId < 0) return null;

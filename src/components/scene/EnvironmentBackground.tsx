@@ -26,6 +26,14 @@ import {
 const NOOP_RAYCAST: THREE.Object3D['raycast'] = () => null;
 const SCENERY_USER_DATA = Object.freeze({ isBackground: true, tracedScenery: true });
 const ROOT_USER_DATA = Object.freeze({ isBackground: true });
+const NORMAL_SCALE_MEADOW = new THREE.Vector2(0.42, 0.42);
+const NORMAL_SCALE_MOUNTAIN = new THREE.Vector2(0.68, 0.68);
+const NORMAL_SCALE_SIDEWALK = new THREE.Vector2(0.65, 0.65);
+const NORMAL_SCALE_BRICK = new THREE.Vector2(0.85, 0.85);
+const NORMAL_SCALE_OAK = new THREE.Vector2(0.45, 0.45);
+const NORMAL_SCALE_WALNUT = new THREE.Vector2(0.35, 0.35);
+const NORMAL_SCALE_RUG = new THREE.Vector2(0.75, 0.75);
+const NORMAL_SCALE_FLOOR = new THREE.Vector2(0.38, 0.38);
 
 /**
  * Realistic-scale 3D background world (skybox, PBR lighting environment, and
@@ -102,7 +110,7 @@ function MeadowScenery() {
           vertexColors
           map={assets.tex.map}
           normalMap={assets.tex.normalMap}
-          normalScale={new THREE.Vector2(0.42, 0.42)}
+          normalScale={NORMAL_SCALE_MEADOW}
           roughness={0.86}
           metalness={0}
         />
@@ -167,7 +175,7 @@ function MountainsScenery() {
           vertexColors
           map={assets.tex.map}
           normalMap={assets.tex.normalMap}
-          normalScale={new THREE.Vector2(0.68, 0.68)}
+          normalScale={NORMAL_SCALE_MOUNTAIN}
           roughness={0.82}
           metalness={0.03}
         />
@@ -234,7 +242,7 @@ function UrbanScenery() {
         <meshStandardMaterial
           map={assets.sidewalkTex.map}
           normalMap={assets.sidewalkTex.normalMap}
-          normalScale={new THREE.Vector2(0.65, 0.65)}
+          normalScale={NORMAL_SCALE_SIDEWALK}
           roughness={0.88}
           metalness={0.02}
         />
@@ -250,7 +258,7 @@ function UrbanScenery() {
           vertexColors
           map={assets.brickTex.map}
           normalMap={assets.brickTex.normalMap}
-          normalScale={new THREE.Vector2(0.85, 0.85)}
+          normalScale={NORMAL_SCALE_BRICK}
           roughness={0.84}
           metalness={0.02}
         />
@@ -265,7 +273,7 @@ function UrbanScenery() {
         <meshStandardMaterial
           map={assets.wallTex.map}
           normalMap={assets.wallTex.normalMap}
-          normalScale={new THREE.Vector2(0.85, 0.85)}
+          normalScale={NORMAL_SCALE_BRICK}
           roughness={0.76}
           metalness={0.03}
           polygonOffset
@@ -284,7 +292,7 @@ function UrbanScenery() {
           vertexColors
           map={assets.leftWallTex.map}
           normalMap={assets.leftWallTex.normalMap}
-          normalScale={new THREE.Vector2(0.85, 0.85)}
+          normalScale={NORMAL_SCALE_BRICK}
           roughness={0.76}
           metalness={0.03}
           polygonOffset
@@ -303,7 +311,7 @@ function UrbanScenery() {
           vertexColors
           map={assets.rightWallTex.map}
           normalMap={assets.rightWallTex.normalMap}
-          normalScale={new THREE.Vector2(0.85, 0.85)}
+          normalScale={NORMAL_SCALE_BRICK}
           roughness={0.76}
           metalness={0.03}
           polygonOffset
@@ -378,7 +386,7 @@ function WorkbenchScenery() {
           vertexColors
           map={assets.oakTex.map}
           normalMap={assets.oakTex.normalMap}
-          normalScale={new THREE.Vector2(0.45, 0.45)}
+          normalScale={NORMAL_SCALE_OAK}
           roughness={0.42}
           metalness={0.02}
           clearcoat={0.18}
@@ -482,7 +490,7 @@ function CoffeeTableScenery() {
           vertexColors
           map={assets.walnutTex.map}
           normalMap={assets.walnutTex.normalMap}
-          normalScale={new THREE.Vector2(0.35, 0.35)}
+          normalScale={NORMAL_SCALE_WALNUT}
           roughness={0.3}
           metalness={0.02}
           clearcoat={0.28}
@@ -498,7 +506,7 @@ function CoffeeTableScenery() {
         <meshStandardMaterial
           map={assets.rugTex.map}
           normalMap={assets.rugTex.normalMap}
-          normalScale={new THREE.Vector2(0.75, 0.75)}
+          normalScale={NORMAL_SCALE_RUG}
           roughness={0.94}
           metalness={0}
         />
@@ -512,7 +520,7 @@ function CoffeeTableScenery() {
         <meshPhysicalMaterial
           map={assets.floorTex.map}
           normalMap={assets.floorTex.normalMap}
-          normalScale={new THREE.Vector2(0.38, 0.38)}
+          normalScale={NORMAL_SCALE_FLOOR}
           roughness={0.44}
           metalness={0.01}
           clearcoat={0.2}

@@ -319,7 +319,10 @@ const SCALE_REACH_M = 0.35;
 const SCALE_BAND_WEIGHT = 3;
 
 export const ObjectGestureController = () => {
-  const { scene, camera, gl, invalidate } = useThree();
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  const invalidate = useThree((s) => s.invalidate);
   const gesture = useRef<Gesture | null>(null);
   const pointer = useRef({ x: 0, y: 0, alt: false });
   const setGestureStatus = useStore((s) => s.setGestureStatus);

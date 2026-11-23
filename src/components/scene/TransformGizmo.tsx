@@ -52,7 +52,7 @@ import { metresPerPixel } from '../../utils/cameraScale';
 import { getStickyRotation } from '../../utils/geom';
 import { solveMate, solveAlignAboutAxis, type MateFeature, type MateSolution, type AlignSolution } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, transformFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
-import { bodyPoseOf, toParentFrame } from './bodyPose';
+import { bodyPoseOf, readBodyPoseInto, toParentFrame, type BodyPoseCache } from './bodyPose';
 import { setGizmoBusy } from './gizmoBusy';
 import { ensureModifierKeys, modifiers } from '../../utils/modifierKeys';
 
@@ -421,12 +421,14 @@ const AlignHint = ({ hint }: { hint: Extract<Hint, { type: 'align' }> }) => {
 };
 
 export const TransformGizmo = () => {
-  const { scene, camera, gl } = useThree();
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
 
   const isPlaying = useStore((s) => s.isPlaying);
   const selectedNodeId = useStore((s) => s.selectedNodeId);
-  const extraSelectedIds = useStore((s) => s.extraSelectedIds);
-  const sceneGraph = useStore((s) => s.sceneGraph);
+  const hasExtraSelected = useStore((s) => s.extraSelectedIds.length > 0);
+  const node = useStore((s) => (s.isPlaying || !s.selectedNodeId ? null : findNode(s.sceneGraph?.nodes ?? [], s.selectedNodeId)));
   const recompileId = useStore((s) => s.recompileId);
   const paintMode = useStore((s) => s.paintMode);
   const measureMode = useStore((s) => s.measureMode);
@@ -474,8 +476,6 @@ export const TransformGizmo = () => {
   const [dragging, setDragging] = useState(false);
   const [hint, setHint] = useState<Hint | null>(null);
 
-  const node = selectedNodeId ? findNode(sceneGraph?.nodes ?? [], selectedNodeId) : null;
-
   /*
    * Every mode that owns the pointer, and the one selection shape this cannot
    * do yet. Moving several bodies means one `updateNodePos` and one rebuild
@@ -485,7 +485,7 @@ export const TransformGizmo = () => {
   const garmentToolActive = useGarmentSculpt((s) => s.target !== null);
   const suppressed =
     isPlaying || !node || Boolean(node.cloth?.garment?.fitTo) || garmentToolActive ||
-    extraSelectedIds.length > 0 || multiSelectMode ||
+    hasExtraSelected || multiSelectMode ||
     paintMode || measureMode !== null || latticeNodeId !== null ||
     sculptNodeId !== null || draggedNodeId !== null;
 
@@ -572,6 +572,11 @@ export const TransformGizmo = () => {
    * floating where the body used to be. Reading the live pose is a couple of
    * array lookups, so it may as well be read every frame and never be wrong.
    */
+  const poseCacheRef = useRef<BodyPoseCache>({ model: null, nodeId: '', bodyId: -1 });
+  const framePosePos = useRef(new THREE.Vector3());
+  const framePoseRot = useRef(new THREE.Matrix3());
+  const frameInvRot = useRef(new THREE.Matrix3());
+
   useFrame(() => {
     const proxy = proxyRef.current;
     if (!proxy || !node || drag.current) return;
@@ -581,7 +586,7 @@ export const TransformGizmo = () => {
       proxy.quaternion.copy(held.quat);
       return;
     }
-    const pose = bodyPoseOf(node.id, node.pos);
+    const isLive = readBodyPoseInto(node.id, node.pos, framePosePos.current, framePoseRot.current, poseCacheRef.current);
     /*
      * A rebuild replaces the model and the data, and for the frame or two in
      * between every body lookup falls back to the authored position with an
@@ -591,15 +596,15 @@ export const TransformGizmo = () => {
      * simply was not redrawn at all. Staying put through the gap is right:
      * where the body was last seen is where it still is.
      */
-    if (!pose.live) return;
+    if (!isLive) return;
     if (remeasure.current > 0) {
       remeasure.current -= 1;
       if (remeasure.current === 0) {
         const box = drawnBox(groupsFor(node.id));
         if (box) {
-          centreOffset.current = box.getCenter(new THREE.Vector3())
-            .sub(pose.pos)
-            .applyMatrix3(pose.rot.clone().invert());
+          box.getCenter(centreOffset.current)
+            .sub(framePosePos.current)
+            .applyMatrix3(frameInvRot.current.copy(framePoseRot.current).invert());
         } else {
           // Nothing drawn yet. Keep the last good offset — treating the centre
           // as the origin would put the handles off the body — and look again
@@ -608,7 +613,7 @@ export const TransformGizmo = () => {
         }
       }
     }
-    proxy.position.copy(centreOffset.current).applyMatrix3(pose.rot).add(pose.pos);
+    proxy.position.copy(centreOffset.current).applyMatrix3(framePoseRot.current).add(framePosePos.current);
     /*
      * The handles are NOT turned with the body. They stay on MuJoCo's world
      * axes — which, inside this Z-up group, is the identity — so red is always

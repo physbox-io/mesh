@@ -24,18 +24,30 @@ import { findNode } from '../../store/sceneClone';
 export function SelectionOutline() {
   const effect = useRef<OutlineEffect>(null);
   const scene = useThree((s) => s.scene);
-  const lastKeyRef = useRef('');
+  const lastRef = useRef<{
+    recompileId: number;
+    selectedNodeId: string | null;
+    extraSelectedIds: string[];
+    geomFocused: boolean;
+    activeGeomIndex: number;
+    sceneGraph: unknown;
+  } | null>(null);
 
   useFrame(() => {
     const outline = effect.current;
     if (!outline) return;
     const { selectedNodeId, extraSelectedIds, recompileId, geomFocused, activeGeomIndex, sceneGraph } = useStore.getState();
-    const focusedGeomName = geomFocused && selectedNodeId
-      ? findNode(sceneGraph?.nodes, selectedNodeId)?.geoms?.[activeGeomIndex]?.name ?? null
-      : null;
-    const key = `${recompileId}|${selectedNodeId ?? ''}|${extraSelectedIds.join(',')}|${focusedGeomName ?? ''}`;
     const current = outline.selection;
-    if (key === lastKeyRef.current) {
+    const prev = lastRef.current;
+    if (
+      prev
+      && prev.recompileId === recompileId
+      && prev.selectedNodeId === selectedNodeId
+      && prev.extraSelectedIds === extraSelectedIds
+      && prev.geomFocused === geomFocused
+      && prev.activeGeomIndex === activeGeomIndex
+      && (!geomFocused || prev.sceneGraph === sceneGraph)
+    ) {
       let allMounted = true;
       for (const obj of current) {
         if (!obj.parent) {
@@ -47,7 +59,16 @@ export function SelectionOutline() {
         return;
       }
     }
-    lastKeyRef.current = key;
+    lastRef.current = { recompileId, selectedNodeId, extraSelectedIds, geomFocused, activeGeomIndex, sceneGraph };
+
+    if (!selectedNodeId && extraSelectedIds.length === 0) {
+      if (current.size > 0) current.clear();
+      return;
+    }
+
+    const focusedGeomName = geomFocused && selectedNodeId
+      ? findNode(sceneGraph?.nodes, selectedNodeId)?.geoms?.[activeGeomIndex]?.name ?? null
+      : null;
 
     const ids = new Set(extraSelectedIds);
     if (selectedNodeId) ids.add(selectedNodeId);
@@ -77,8 +98,14 @@ export function SelectionOutline() {
       });
     }
 
-    if (current.size === meshes.size && [...meshes].every((m) => current.has(m))) return;
-    current.set([...meshes]);
+    if (current.size === meshes.size) {
+      let same = true;
+      for (const m of meshes) {
+        if (!current.has(m)) { same = false; break; }
+      }
+      if (same) return;
+    }
+    current.set(Array.from(meshes));
   });
 
   return (

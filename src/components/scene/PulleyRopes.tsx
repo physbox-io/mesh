@@ -34,11 +34,58 @@ interface PulleyRopeMarkersProps {
 /** A rope to draw: its layout, or just the two bodies it joins when it has none. */
 interface DrawnRope { id: string; leftId: string; rightId: string; layout?: RopeLayout }
 
+/** Write polyline segments into a reusable BufferGeometry without per-frame attribute churn. */
+function writePolylineSegments(geometry: THREE.BufferGeometry, lines: V3[][]): void {
+  let vertexCount = 0;
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li];
+    if (l.length > 1) vertexCount += (l.length - 1) * 2;
+  }
+  const neededFloats = vertexCount * 3;
+  let posAttr = geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+  if (!posAttr || posAttr.array.length < neededFloats) {
+    // Free the old WebGL buffer before replacing the attribute with a larger one.
+    if (posAttr) geometry.dispose();
+    const capacity = Math.max(neededFloats, 64 * 3);
+    posAttr = new THREE.BufferAttribute(new Float32Array(capacity), 3);
+    geometry.setAttribute('position', posAttr);
+  }
+  const arr = posAttr.array as Float32Array;
+  let offset = 0;
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li];
+    for (let i = 0; i + 1 < l.length; i++) {
+      const a = l[i], b = l[i + 1];
+      arr[offset++] = a[0]; arr[offset++] = a[1]; arr[offset++] = a[2];
+      arr[offset++] = b[0]; arr[offset++] = b[1]; arr[offset++] = b[2];
+    }
+  }
+  geometry.setDrawRange(0, vertexCount);
+  posAttr.needsUpdate = true;
+}
+
+function bodyPoseChanged(cache: Float64Array, startIdx: number, data: DataMirror, b: number): boolean {
+  const po = b * 3, mo = b * 9;
+  const xpos = data.xpos, xmat = data.xmat;
+  let changed = false;
+  for (let i = 0; i < 3; i++) {
+    const v = xpos[po + i];
+    if (cache[startIdx + i] !== v) { cache[startIdx + i] = v; changed = true; }
+  }
+  for (let i = 0; i < 9; i++) {
+    const v = xmat[mo + i];
+    if (cache[startIdx + 3 + i] !== v) { cache[startIdx + 3 + i] = v; changed = true; }
+  }
+  return changed;
+}
+
 // Dynamic glowing pulley cable/rope renderer
 export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyRopesRendererProps) => {
   const lineRefs = useRef<{ [ropeId: string]: THREE.LineSegments | null }>({});
   const bodyIdCache = useRef<Record<string, number>>({});
+  const lastRopePoses = useRef<Map<string, Float64Array>>(new Map());
   useEffect(() => {
+    lastRopePoses.current.clear();
     if (!model || !mujoco) return;
     const c: Record<string, number> = {};
     for (let b = 0; b < model.nbody; b++) {
@@ -83,12 +130,14 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
     }));
   }, [sceneGraph, hiddenNodeIds]);
 
+  useEffect(() => { lastRopePoses.current.clear(); }, [pulleyRopes, data]);
+
   useFrame(() => {
     const activeModel = useStore.getState().model;
     const activeData = useStore.getState().data;
     if (model !== activeModel || data !== activeData) return;
     if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
-    if (!model || !data || !mujoco) return;
+    if (!model || !data || !mujoco || pulleyRopes.length === 0) return;
 
     const body = (id: string) => bodyIdCache.current[id] ?? -1;
     const pos = (b: number): V3 => [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]];
@@ -111,25 +160,34 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
       if (!line) continue;
       const leftB = body(rope.leftId), rightB = body(rope.rightId);
       if (leftB === -1 || rightB === -1) continue;
-      let lines: V3[][];
       const lay = rope.layout;
+      const wheelB = lay?.wheel ? body(lay.wheel.nodeId) : -1;
+
+      let cache = lastRopePoses.current.get(rope.id);
+      let dirty = !cache || !line.geometry.getAttribute('position');
+      if (!cache) {
+        cache = new Float64Array(36);
+        cache.fill(Number.NaN);
+        lastRopePoses.current.set(rope.id, cache);
+      }
+      if (bodyPoseChanged(cache, 0, data, leftB)) dirty = true;
+      if (bodyPoseChanged(cache, 12, data, rightB)) dirty = true;
+      if (wheelB !== -1 && bodyPoseChanged(cache, 24, data, wheelB)) dirty = true;
+      if (!dirty) continue;
+
+      let lines: V3[][];
       if (!lay) {
         // Not a rope the model couples (an end that cannot slide): drawn
         // straight between the bodies, so it can be seen and fixed.
         lines = [[pos(leftB), pos(rightB)]];
       } else {
         const end = (b: number, e: RopeLayout['left']) => ({ attach: at(b, e.attachLocal), axis: rot(b, e.axisLocal), sign: e.sign, strands: e.strands });
-        const wheelB = lay.wheel ? body(lay.wheel.nodeId) : -1;
         const wheel = lay.wheel && wheelB !== -1
           ? { centre: pos(wheelB), axis: rot(wheelB, lay.wheel.axisLocal), radius: lay.wheel.radius }
           : null;
         lines = ropePolylines(end(leftB, lay.left), end(rightB, lay.right), wheel);
       }
-      const points: THREE.Vector3[] = [];
-      for (const l of lines) {
-        for (let i = 0; i + 1 < l.length; i++) points.push(new THREE.Vector3(...l[i]), new THREE.Vector3(...l[i + 1]));
-      }
-      line.geometry.setFromPoints(points);
+      writePolylineSegments(line.geometry, lines);
     }
   });
 
@@ -138,7 +196,7 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
   return (
     <>
       {pulleyRopes.map((rope) => (
-        <lineSegments key={rope.id} ref={(el: THREE.LineSegments | null) => { lineRefs.current[rope.id] = el; }}>
+        <lineSegments key={rope.id} frustumCulled={false} ref={(el: THREE.LineSegments | null) => { lineRefs.current[rope.id] = el; }}>
           <bufferGeometry />
           <lineBasicMaterial color="#3b82f6" linewidth={3.5} transparent opacity={0.9} />
         </lineSegments>
@@ -149,7 +207,6 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
 
 // Rope node placeholder marker – renders a glowing ring for each pulley_rope scene node
 export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: PulleyRopeMarkersProps) => {
-  const isPlaying = useStore(state => state.isPlaying);
   const setOrbitEnabled = useOrbitEnable();
 
   // The wheel a rope runs over, so the handle can be sized relative to it.
@@ -207,7 +264,7 @@ export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeI
               rotation={[Math.PI / 2, 0, 0]}
               onClick={(e: ThreeEvent<MouseEvent>) => { e.stopPropagation(); setSelectedNodeId(rope.id); }}
               onPointerDown={(e: ThreeEvent<PointerEvent>) => {
-                if (isPlaying) {
+                if (useStore.getState().isPlaying) {
                   e.stopPropagation();
                   // Same reason as the body drag handlers: the orbit gesture
                   // and the drag gesture are the same single touch, so the

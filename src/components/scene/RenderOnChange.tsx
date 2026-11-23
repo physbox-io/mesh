@@ -32,22 +32,37 @@ export const RenderOnChange = () => {
   const viewport = useThree((state) => state.gl.domElement.parentElement);
   useEffect(() => {
     const ask = () => invalidate();
+    // Track whether an active pointer drag originated inside the 3D viewport so
+    // drags that wander outside the canvas keep rendering, while drags on sidebars,
+    // panel resizers, or text selection outside the canvas do not spin the WebGL loop.
+    let dragInViewport = false;
+    const clearDrag = () => { dragInViewport = false; };
     const onPointer = (e: PointerEvent | WheelEvent) => {
-      if (e.buttons !== 0) return invalidate();
+      const target = e.target as Node | null;
+      const inViewport = Boolean(viewport && target && viewport.contains(target));
+      if (e.type === 'pointerdown') {
+        dragInViewport = inViewport;
+      } else if (e.type === 'pointerup') {
+        const wasDrag = dragInViewport;
+        dragInViewport = false;
+        if (wasDrag) return invalidate();
+      }
+      if (e.buttons !== 0 && (dragInViewport || inViewport)) return invalidate();
       const s = useStore.getState();
+      if (s.gestureStatus) return invalidate();
       if (
-        s.gestureStatus ||
-        s.measureMode ||
-        s.paintMode ||
-        s.sculptNodeId ||
-        s.edgeRoundSession ||
-        s.latticeNodeId
+        inViewport && (
+          s.measureMode ||
+          s.paintMode ||
+          s.sculptNodeId ||
+          s.edgeRoundSession ||
+          s.latticeNodeId
+        )
       ) {
         return invalidate();
       }
       if (e.type === 'pointermove') return;
-      const target = e.target as Node | null;
-      if (viewport && target && viewport.contains(target)) invalidate();
+      if (inViewport) invalidate();
     };
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -61,6 +76,8 @@ export const RenderOnChange = () => {
     const pointerEvents = ['pointermove', 'pointerdown', 'pointerup', 'wheel'] as const;
     const keyEvents = ['keydown', 'keyup'] as const;
     for (const e of pointerEvents) window.addEventListener(e, onPointer, { passive: true });
+    window.addEventListener('pointercancel', clearDrag, { passive: true });
+    window.addEventListener('blur', clearDrag, { passive: true });
     for (const e of keyEvents) window.addEventListener(e, onKey, { passive: true });
     return () => {
       unsubscribe();
@@ -68,6 +85,8 @@ export const RenderOnChange = () => {
       unsubscribeQuality();
       setPhysicsFrameListener(null);
       for (const e of pointerEvents) window.removeEventListener(e, onPointer);
+      window.removeEventListener('pointercancel', clearDrag);
+      window.removeEventListener('blur', clearDrag);
       for (const e of keyEvents) window.removeEventListener(e, onKey);
     };
   }, [invalidate, viewport]);

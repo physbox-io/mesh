@@ -62,7 +62,7 @@ const FindingPin: React.FC<FindingPinProps> = ({
   const scaledRef = useRef<THREE.Group>(null);
   const ringRef = useRef<THREE.Mesh>(null);
   const tmpWorld = useRef(new THREE.Vector3());
-  const { camera, size } = useThree();
+  const getThree = useThree((s) => s.get);
 
   const color = SEVERITY_COLOR[target.severity] ?? '#f59e0b';
 
@@ -84,8 +84,9 @@ const FindingPin: React.FC<FindingPinProps> = ({
 
   // Size immediately before the first paint so a 1 m unit sphere never flashes.
   useLayoutEffect(() => {
-    applyScale(camera, size.height, 1);
-  });
+    const { camera: cam, size: viewSize } = getThree();
+    applyScale(cam, viewSize.height, 1);
+  }, [getThree, target.position]);
 
   useFrame(({ camera: cam, size: viewSize, clock }) => {
     const pulse = isActive ? 1 + 0.14 * Math.sin(clock.getElapsedTime() * 5) : 1;

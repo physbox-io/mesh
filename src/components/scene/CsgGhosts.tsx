@@ -27,6 +27,7 @@ interface CsgNegativeGhostsProps {
 // guesswork, and drawing them always would clutter every other body.
 export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNodeId }: CsgNegativeGhostsProps) => {
   const groupRef = useRef<THREE.Group>(null);
+  const rotMatRef = useRef(new THREE.Matrix4());
 
   const target = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -66,14 +67,14 @@ export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNod
     try {
       const o = bodyId * 9;
       const m = data.xmat;
-      const mat = new THREE.Matrix4().set(
+      rotMatRef.current.set(
         m[o], m[o + 1], m[o + 2], 0,
         m[o + 3], m[o + 4], m[o + 5], 0,
         m[o + 6], m[o + 7], m[o + 8], 0,
         0, 0, 0, 1
       );
       groupRef.current.position.set(data.xpos[bodyId * 3], data.xpos[bodyId * 3 + 1], data.xpos[bodyId * 3 + 2]);
-      groupRef.current.quaternion.setFromRotationMatrix(mat);
+      groupRef.current.quaternion.setFromRotationMatrix(rotMatRef.current);
     } catch { /* body deleted mid-frame */ }
   });
 

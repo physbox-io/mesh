@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Printer, Puzzle, Scissors, Send, Wrench,
 } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { FloatingStop, JobWaitingButton, NumberInput, RemoteJobChip, jobPauseKind } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
 import {
@@ -236,40 +237,46 @@ export const SHOW_EXPORTS_EVENT = 'physbox:show-exports';
  * because you closed a dialog, so the stop button must be reachable with every
  * modal shut.
  */
-export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; exports: ExportActions }> = ({
-  onOpenMachineConfig,
-  exports,
-}) => {
-  const isPlaying = useStore((s) => s.isPlaying);
-  const machineTarget = useStore((s) => s.machineTarget);
-  // Prepare for Casting changes the model itself, so say so where the Cast
-  // button is, which is on screen the whole time.
-  const castPrep = useStore((s) => s.sceneGraph.castPrep);
-  // Whether there is any bought hardware to list.
-  const hasHardware = useStore((s) => {
-    const any = (nodes: SceneNode[]): boolean => nodes.some((n) => !!n.hardwarePart || any(n.children || []));
-    return any(s.sceneGraph.nodes || []);
-  });
-  const setMachineTarget = useStore((s) => s.setMachineTarget);
-  const material = useStore((s) => s.material);
-  const setMaterial = useStore((s) => s.setMaterial);
-  const filament = useStore((s) => s.filament);
-  const setFilament = useStore((s) => s.setFilament);
-  const stock = useStore((s) => s.stock);
-  const setStock = useStore((s) => s.setStock);
-  const printBed = useStore((s) => s.printBed);
-  const setPrintBed = useStore((s) => s.setPrintBed);
-  const printing = machineTarget === 'fdm';
+/** WeakMap cache keyed by `sceneGraph.nodes` identity so Zustand selector checks stay O(1). */
+const hardwareNodesCache = new WeakMap<SceneNode[], boolean>();
 
-  const gestureStatus = useStore((s) => s.gestureStatus);
-  const latticeNodeId = useStore((s) => s.latticeNodeId);
-  const latticeTool = useStore((s) => s.latticeTool);
-  const sculptNodeId = useStore((s) => s.sculptNodeId);
-  const selectedNodeId = useStore((s) => s.selectedNodeId);
-  const setLatticeTool = useStore((s) => s.setLatticeTool);
-  const measureMode = useStore((s) => s.measureMode);
-  const multiSelectMode = useStore((s) => s.multiSelectMode);
-  const extraSelectedCount = useStore((s) => s.extraSelectedIds.length);
+function hasHardwareInNodes(nodes: SceneNode[] | undefined): boolean {
+  if (!nodes || nodes.length === 0) return false;
+  const cached = hardwareNodesCache.get(nodes);
+  if (cached !== undefined) return cached;
+  const walk = (list: SceneNode[]): boolean => list.some((n) => !!n.hardwarePart || (n.children ? walk(n.children) : false));
+  const result = walk(nodes);
+  hardwareNodesCache.set(nodes, result);
+  return result;
+}
+
+/**
+ * Isolated mode pill & menu. Subscribes to high-frequency `gestureStatus` and
+ * `draggedNodeId` updates so 60fps pointer drags never re-render the rest of
+ * `BottomStatusBar`.
+ */
+const ModeStatusChip = React.memo(function ModeStatusChip() {
+  const {
+    isPlaying, gestureStatus, draggedNodeId, latticeNodeId, latticeTool,
+    sculptNodeId, sculptBrush, paintMode, selectedNodeId, setLatticeTool,
+    measureMode, multiSelectMode, extraSelectedCount, modelMode,
+  } = useStore(useShallow((s) => ({
+    isPlaying: s.isPlaying,
+    gestureStatus: s.gestureStatus,
+    draggedNodeId: s.draggedNodeId,
+    latticeNodeId: s.latticeNodeId,
+    latticeTool: s.latticeTool,
+    sculptNodeId: s.sculptNodeId,
+    sculptBrush: s.sculptBrush.type,
+    paintMode: s.paintMode,
+    selectedNodeId: s.selectedNodeId,
+    setLatticeTool: s.setLatticeTool,
+    measureMode: s.measureMode,
+    multiSelectMode: s.multiSelectMode,
+    extraSelectedCount: s.extraSelectedIds.length,
+    modelMode: modelModeFor(s.sceneGraph?.nodes, s.selectedNodeId),
+  })));
+
   // Esc leaves Select Multiple, as it leaves every other mode.
   useEffect(() => {
     if (!multiSelectMode) return;
@@ -279,14 +286,15 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [multiSelectMode]);
+
   const mode = modeLabel({
     gestureStatus,
-    draggedNodeId: useStore((s) => s.draggedNodeId),
+    draggedNodeId,
     latticeNodeId,
     latticeTool,
-    sculptNodeId: sculptNodeId,
-    sculptBrush: useStore((s) => s.sculptBrush.type),
-    paintMode: useStore((s) => s.paintMode),
+    sculptNodeId,
+    sculptBrush,
+    paintMode,
     measureMode,
     multiSelect: multiSelectMode ? (selectedNodeId ? 1 : 0) + extraSelectedCount : null,
   });
@@ -297,9 +305,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // Gestures need something to act on: the body being modelled, or the body
   // selected in the scene. Sculpting has its own brushes in its own palette.
   const canGesture = !!latticeNodeId || (!sculptNodeId && !!selectedNodeId);
-  // A string, not the node, so an edit elsewhere in the scene does not
-  // re-render the bar.
-  const modelMode = useStore((s) => modelModeFor(s.sceneGraph?.nodes, s.selectedNodeId));
   const enterChoice = latticeNodeId || sculptNodeId ? null
     : modelMode === 'lattice' ? ENTER_LATTICE
     : modelMode === 'sculpt' ? ENTER_SCULPT
@@ -308,8 +313,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // already dead then (the control scripts own the letters), but the menu
   // still offered them, and a Move or a Scale started under a running sim
   // fought the solver for the body.
-  const playing = useStore((s) => s.isPlaying);
-  const choices: ModeChoice[] = playing
+  const choices: ModeChoice[] = isPlaying
     ? [NOTHING, ...MEASURE]
     : [
         NOTHING,
@@ -324,15 +328,11 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const choose = (choice: ModeChoice) => {
     setModeMenuOpen(false);
     if (choice.none) {
-      // Announced like any other choice, so the measure tool hears a mode that
-      // is not measuring and puts its tape away (see MeasureTool).
       window.dispatchEvent(new CustomEvent('physbox:gesture', { detail: { kind: 'none' } }));
       const store = useStore.getState();
       store.setMeasureMode(null);
       store.setMultiSelectMode(false);
       store.applyEdgeRound();
-      // The same as each mode's own Done button: the edits are already in the
-      // scene, so leaving throws nothing away.
       store.setSculptNodeId(null);
       store.setLatticeNodeId(null);
       store.setSelectedNodeId(null);
@@ -356,22 +356,213 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     }
     if (choice.tool) {
       setLatticeTool(choice.tool);
-      // A lattice tool is not a gesture, but choosing one is just as much a
-      // decision to stop measuring.
       useStore.getState().setMeasureMode(null);
     }
-    // The gesture belongs to whichever surface is listening — the lattice tools
-    // when they are open, the viewport otherwise. Announced rather than called,
-    // because the status bar has no business knowing which of them is mounted.
     if (choice.gesture) {
       window.dispatchEvent(new CustomEvent('physbox:gesture', { detail: { kind: choice.gesture } }));
     }
   };
 
-  // Seeded from the manager rather than a literal, so a bar that mounts after a
-  // connection shows the real state instead of a disconnected one.
+  return (
+    <div className="flex items-center gap-2 max-lg:shrink-0 max-lg:order-1">
+      {/* First thing in the bar, because "which mode am I in" is the question
+          asked most often and the one a modal keyboard makes expensive to
+          get wrong. */}
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setModeMenuOpen((open) => !open)}
+          className={`flex items-center gap-1 px-2 py-0.5 rounded-md border font-semibold tabular-nums transition-colors ${MODE_TONES[mode.tone]} cursor-pointer hover:brightness-95`}
+          title={'What the keyboard is doing right now. Click to pick a mode instead. A gesture in progress shows how far it has gone; click or Enter keeps it, Esc puts it back.'}
+        >
+          <MousePointer2 className="w-3 h-3" />
+          {mode.text}
+          <ChevronUp className={`w-3 h-3 opacity-50 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        {modeMenuOpen && (
+          <>
+            {/* Anything outside closes it, including a click into the
+                viewport — which would otherwise both close the menu and
+                answer whatever gesture it had just started. */}
+            <div className="fixed inset-0 z-40" onClick={() => setModeMenuOpen(false)} />
+            <div className="absolute bottom-full left-0 mb-1.5 z-50 w-64 max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-lg p-1">
+              {choices.map((choice) => (
+                <button
+                  key={choice.label}
+                  type="button"
+                  onClick={() => choose(choice)}
+                  title={choice.hint}
+                  className={`w-full flex items-start gap-2 px-2 py-1.5 rounded-md text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer ${
+                    (choice.tool && choice.tool === latticeTool) ||
+                    (measureMode && choice.gesture === `measure-${measureMode}`)
+                      ? 'bg-indigo-50 dark:bg-indigo-950/40'
+                      : ''
+                  }`}
+                >
+                  <kbd className="mt-px font-mono font-bold text-[10px] text-slate-500 dark:text-slate-400 w-6 shrink-0">{choice.key}</kbd>
+                  <span className="min-w-0">
+                    <span className="block font-semibold text-slate-700 dark:text-slate-200">{choice.label}</span>
+                    <span className="block text-[10px] leading-snug text-slate-400 dark:text-slate-500 whitespace-normal">{choice.hint}</span>
+                  </span>
+                </button>
+              ))}
+              <p className="px-2 py-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-slate-800 mt-1">
+                Click to confirm, Esc to cancel, hold Alt to disable snapping.
+              </p>
+            </div>
+          </>
+        )}
+      </div>
+      {/* Alt turns every snap off — grid, floor, mates, slider stops. Said
+          out loud while it is held, because a drag that suddenly stops
+          landing on round numbers otherwise looks like a bug. */}
+      {snapOff && (
+        <span
+          className="px-2 py-0.5 rounded-md border font-semibold border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300"
+          title="Alt is held: drags and sliders move freely (0.1 mm steps) instead of snapping to the grid, the floor or other parts."
+        >
+          Snap off
+        </span>
+      )}
+    </div>
+  );
+});
+
+/** Isolated machine connection readout so 3Hz WebSerial status polls never re-render the bench bar. */
+const MachineConnectionStatus = React.memo(function MachineConnectionStatus({
+  onOpenMachineConfig,
+}: {
+  onOpenMachineConfig: () => void;
+}) {
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
   useEffect(() => webSerialManager.addListener(setMachineState), []);
+  return (
+    <>
+      <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
+      <span
+        className={`w-2 h-2 rounded-full ${
+          machineState.connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400 dark:bg-slate-600'
+        }`}
+      />
+      <span>Machine:</span>
+      <span
+        className={
+          machineState.connected
+            ? 'text-emerald-600 dark:text-emerald-400 font-bold'
+            : 'text-slate-400'
+        }
+      >
+        {machineState.status}
+      </span>
+      <button
+        onClick={onOpenMachineConfig}
+        className="p-1 rounded text-amber-600 dark:text-amber-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+        title="Connect the machine, home it, and set the work origin"
+      >
+        <Wrench className="w-3.5 h-3.5" />
+      </button>
+    </>
+  );
+});
+
+/** Isolated running-job progress & stop controls so live machine ticks never re-render the rest of the footer. */
+const RunningJobStatus = React.memo(function RunningJobStatus() {
+  const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
+  useEffect(() => webSerialManager.addListener(setMachineState), []);
+
+  const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
+  const paused = machineState.status.startsWith('PAUSED');
+  const showPause = jobPause.show;
+  const parked = machineState.status === 'PAUSED_PARKED';
+  const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
+
+  return (
+    <>
+      {running && (
+        <div className="flex items-center gap-2">
+          <span className="text-slate-700 dark:text-slate-200">
+            {parked ? 'Parked' : paused ? 'Paused' : 'Cutting'}
+          </span>
+          <span className="tabular-nums text-slate-700 dark:text-slate-200">
+            {formatDuration(machineState.elapsedSeconds)}
+            {machineState.remainingSeconds !== null && (
+              <span className="text-slate-400">
+                {' '}({formatDuration(machineState.remainingSeconds)} left)
+              </span>
+            )}
+          </span>
+          <div
+            className="w-20 h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
+            title="How far through the job the cutter is"
+          >
+            <div
+              className="h-full bg-emerald-500 transition-all"
+              style={{ width: `${Math.min(100, machineState.progressPercent)}%` }}
+            />
+          </div>
+          <span className="text-slate-400">
+            line {machineState.currentLine}/{machineState.totalLines}
+          </span>
+          {machineState.pauseMessage && (
+            <span className="text-amber-600 dark:text-amber-400 truncate max-w-[22rem]">
+              {machineState.pauseMessage}
+            </span>
+          )}
+          {paused ? (
+            <JobWaitingButton
+              kind={machineState.status === 'PAUSED_TOOL' ? 'tool' : (jobPauseKind(machineState.status) ?? 'hold')}
+              needsZero={needsReZero}
+              onOpen={showPause}
+            />
+          ) : (
+            <button
+              onClick={() => void webSerialManager.pauseJob()}
+              title="Pause the job"
+              className="p-0.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+            >
+              <Pause className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* The one stop, above every dialog (see FloatingStop). */}
+      <FloatingStop
+        stop={stopControl(machineState)}
+        onCancelJob={() => void webSerialManager.cancelJob()}
+        onEStop={() => void webSerialManager.eStop()}
+      />
+    </>
+  );
+});
+
+export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; exports: ExportActions }> = ({
+  onOpenMachineConfig,
+  exports,
+}) => {
+  const {
+    isPlaying, machineTarget, castPrep, hasHardware, setMachineTarget,
+    material, setMaterial, filament, setFilament, stock, setStock,
+    printBed, setPrintBed, selectedNodeId, extraSelectedCount,
+  } = useStore(useShallow((s) => ({
+    isPlaying: s.isPlaying,
+    machineTarget: s.machineTarget,
+    castPrep: s.sceneGraph.castPrep,
+    hasHardware: hasHardwareInNodes(s.sceneGraph.nodes),
+    setMachineTarget: s.setMachineTarget,
+    material: s.material,
+    setMaterial: s.setMaterial,
+    filament: s.filament,
+    setFilament: s.setFilament,
+    stock: s.stock,
+    setStock: s.setStock,
+    printBed: s.printBed,
+    setPrintBed: s.setPrintBed,
+    selectedNodeId: s.selectedNodeId,
+    extraSelectedCount: s.extraSelectedIds.length,
+  })));
+  const printing = machineTarget === 'fdm';
 
   // A ring and a note on the export group when something elsewhere sends the
   // user here. Time-limited so a bar that is glanced at later is not still
@@ -413,13 +604,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       clearTimeout(settleTimer);
     };
   }, []);
-
-  const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
-  const paused = machineState.status.startsWith('PAUSED');
-  const showPause = jobPause.show;
-  const parked = machineState.status === 'PAUSED_PARKED';
-  // The same gate the job panel's banner applies: a new bit, and no Z datum for it yet.
-  const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
 
   const selectClass =
     'bg-transparent text-slate-800 dark:text-slate-200 font-semibold rounded px-1 py-0.5 outline-none cursor-pointer border-none';
@@ -502,68 +686,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     */
     <footer className="h-8 shrink-0 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors max-lg:h-auto max-lg:flex-wrap max-lg:justify-start max-lg:px-2 max-lg:py-1 max-lg:gap-x-3 max-lg:gap-y-1">
       {/* What the keyboard is doing right now */}
-      <div className="flex items-center gap-2 max-lg:shrink-0 max-lg:order-1">
-        {/* First thing in the bar, because "which mode am I in" is the question
-            asked most often and the one a modal keyboard makes expensive to
-            get wrong. */}
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setModeMenuOpen((open) => !open)}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded-md border font-semibold tabular-nums transition-colors ${MODE_TONES[mode.tone]} cursor-pointer hover:brightness-95`}
-            title={'What the keyboard is doing right now. Click to pick a mode instead. A gesture in progress shows how far it has gone; click or Enter keeps it, Esc puts it back.'}
-          >
-            <MousePointer2 className="w-3 h-3" />
-            {mode.text}
-            <ChevronUp className={`w-3 h-3 opacity-50 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`} />
-          </button>
-
-          {modeMenuOpen && (
-            <>
-              {/* Anything outside closes it, including a click into the
-                  viewport — which would otherwise both close the menu and
-                  answer whatever gesture it had just started. */}
-              <div className="fixed inset-0 z-40" onClick={() => setModeMenuOpen(false)} />
-              <div className="absolute bottom-full left-0 mb-1.5 z-50 w-64 max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-lg p-1">
-                {choices.map((choice) => (
-                  <button
-                    key={choice.label}
-                    type="button"
-                    onClick={() => choose(choice)}
-                    title={choice.hint}
-                    className={`w-full flex items-start gap-2 px-2 py-1.5 rounded-md text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer ${
-                      (choice.tool && choice.tool === latticeTool) ||
-                      (measureMode && choice.gesture === `measure-${measureMode}`)
-                        ? 'bg-indigo-50 dark:bg-indigo-950/40'
-                        : ''
-                    }`}
-                  >
-                    <kbd className="mt-px font-mono font-bold text-[10px] text-slate-500 dark:text-slate-400 w-6 shrink-0">{choice.key}</kbd>
-                    <span className="min-w-0">
-                      <span className="block font-semibold text-slate-700 dark:text-slate-200">{choice.label}</span>
-                      <span className="block text-[10px] leading-snug text-slate-400 dark:text-slate-500 whitespace-normal">{choice.hint}</span>
-                    </span>
-                  </button>
-                ))}
-                <p className="px-2 py-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-slate-800 mt-1">
-                  Click to confirm, Esc to cancel, hold Alt to disable snapping.
-                </p>
-              </div>
-            </>
-          )}
-        </div>
-        {/* Alt turns every snap off — grid, floor, mates, slider stops. Said
-            out loud while it is held, because a drag that suddenly stops
-            landing on round numbers otherwise looks like a bug. */}
-        {snapOff && (
-          <span
-            className="px-2 py-0.5 rounded-md border font-semibold border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300"
-            title="Alt is held: drags and sliders move freely (0.1 mm steps) instead of snapping to the grid, the floor or other parts."
-          >
-            Snap off
-          </span>
-        )}
-      </div>
+      <ModeStatusChip />
 
       {/* What it is cut on, and what out of */}
       <div data-tour="bench-bar" className="flex items-center gap-2 max-lg:w-full max-lg:min-w-0 max-lg:order-3">
@@ -783,105 +906,14 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               {printerOpen && <PrinterSettingsModal onClose={() => setPrinterOpen(false)} />}
             </>
           ) : (
-            <>
-              <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
-              {/* The connection, beside the machine it is a connection to. Not
-                  shown for a printer, which is never driven from here. */}
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  machineState.connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400 dark:bg-slate-600'
-                }`}
-              />
-              <span>Machine:</span>
-              <span
-                className={
-                  machineState.connected
-                    ? 'text-emerald-600 dark:text-emerald-400 font-bold'
-                    : 'text-slate-400'
-                }
-              >
-                {machineState.status}
-              </span>
-              {/* Next to the status it acts on. A disconnected machine is the
-                  moment someone wants this button. */}
-              <button
-                onClick={onOpenMachineConfig}
-                className="p-1 rounded text-amber-600 dark:text-amber-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-                title="Connect the machine, home it, and set the work origin"
-              >
-                <Wrench className="w-3.5 h-3.5" />
-              </button>
-            </>
+            <MachineConnectionStatus onOpenMachineConfig={onOpenMachineConfig} />
           )}
         </div>
       </div>
 
       {/* Running job and simulation status */}
       <div className="flex items-center gap-3 max-lg:shrink-0 max-lg:order-2 max-lg:ml-auto">
-
-        {/* A running job stays visible and stoppable with every panel closed. */}
-        {running && (
-          <div className="flex items-center gap-2">
-            <span className="text-slate-700 dark:text-slate-200">
-              {parked ? 'Parked' : paused ? 'Paused' : 'Cutting'}
-            </span>
-            {/* Progress is read off the line the cutter is on, weighted by the
-                time each line takes (see `progressPercent` in webSerialManager).
-                Elapsed is the wall clock, shown for what it is. */}
-            <span className="tabular-nums text-slate-700 dark:text-slate-200">
-              {formatDuration(machineState.elapsedSeconds)}
-              {machineState.remainingSeconds !== null && (
-                <span className="text-slate-400">
-                  {' '}({formatDuration(machineState.remainingSeconds)} left)
-                </span>
-              )}
-            </span>
-            <div
-              className="w-20 h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
-              title="How far through the job the cutter is"
-            >
-              <div
-                className="h-full bg-emerald-500 transition-all"
-                style={{ width: `${Math.min(100, machineState.progressPercent)}%` }}
-              />
-            </div>
-            <span className="text-slate-400">
-              line {machineState.currentLine}/{machineState.totalLines}
-            </span>
-            {/* Why it stopped, next to the button that restarts it — a tool
-                change is an instruction, and it is no use only in a panel the
-                operator has closed. */}
-            {machineState.pauseMessage && (
-              <span className="text-amber-600 dark:text-amber-400 truncate max-w-[22rem]">
-                {machineState.pauseMessage}
-              </span>
-            )}
-            {/* Paused, the way back to the dialog: Resume and the re-zero are
-                there, and Hide only ever tucked them away. */}
-            {paused ? (
-              <JobWaitingButton
-                kind={machineState.status === 'PAUSED_TOOL' ? 'tool' : (jobPauseKind(machineState.status) ?? 'hold')}
-                needsZero={needsReZero}
-                onOpen={showPause}
-              />
-            ) : (
-              <button
-                onClick={() => void webSerialManager.pauseJob()}
-                title="Pause the job"
-                className="p-0.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white cursor-pointer"
-              >
-                <Pause className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* The one stop, above every dialog (see FloatingStop). */}
-        <FloatingStop
-          stop={stopControl(machineState)}
-          onCancelJob={() => void webSerialManager.cancelJob()}
-          onEStop={() => void webSerialManager.eStop()}
-        />
+        <RunningJobStatus />
 
         <RemoteJobChip subscribe={subscribeRemoteJob} recheck={recheckInterruptedJob} />
 

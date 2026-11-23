@@ -5,6 +5,7 @@ import { useStore } from '../../store/useStore';
 import { collectWaterBasins } from '../../utils/hydrostatics';
 
 const NOOP_RAYCAST = () => null;
+const EMPTY_BASINS: ReturnType<typeof collectWaterBasins> = [];
 
 /**
  * Renders translucent 3D freshwater volumes strictly inside open-top containers
@@ -13,14 +14,19 @@ const NOOP_RAYCAST = () => null;
  * dragging floating objects works straight through the water.
  */
 export function WaterSurface({ darkMode }: { darkMode: boolean }) {
-  const sceneGraph = useStore((s) => s.sceneGraph);
+  const nodes = useStore((s) => s.sceneGraph?.nodes);
   const waterLevel = useStore((s) => s.waterLevel);
   const invalidate = useThree((s) => s.invalidate);
 
-  const basins = useMemo(() => collectWaterBasins(sceneGraph?.nodes ?? []), [sceneGraph]);
+  const basins = useMemo(() => {
+    const found = collectWaterBasins(nodes ?? []);
+    return found.length > 0 ? found : EMPTY_BASINS;
+  }, [nodes]);
 
   useEffect(() => {
-    invalidate();
+    if (basins.length > 0 || (waterLevel !== null && Number.isFinite(waterLevel))) {
+      invalidate();
+    }
   }, [basins, waterLevel, darkMode, invalidate]);
 
   if (basins.length > 0) {

@@ -728,19 +728,23 @@ export function liveList(found: BodyDimensions[], locations: LocationDim[], pare
   return out;
 }
 
+const NOOP_RAYCAST = () => null;
+
 export function DimensionOverlay() {
-  const cameraView = useStore((s) => s.cameraView);
-  const dimsEnabled = useStore((s) => s.dimsEnabled);
+  const view = useStore((s) => (s.dimsEnabled && isDrawingView(s.cameraView) ? s.cameraView : null));
+  if (!view) return null;
+  return <DimensionOverlayActive view={view} />;
+}
+
+function DimensionOverlayActive({ view }: { view: DrawingView }) {
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   // The body open in the lattice editor is measured too, selected or not: it
   // is the one being drawn, and selecting another to line it up against
   // should not take its figures away.
   const latticeNodeId = useStore((s) => s.latticeNodeId);
   const scene = useThree((s) => s.scene);
-  const view = isDrawingView(cameraView) ? cameraView : null;
-  const on = dimsEnabled && view !== null;
   // A section view dimensions the cut face instead of the outside.
-  const sectionOn = useSection((s) => s.enabled) && on;
+  const sectionOn = useSection((s) => s.enabled);
   const sectionAt = useSection((s) => s.at);
   const setCut = useSection((s) => s.setCut);
   // The merge for parts drawn as overlapping pieces; measured again once it loads.
@@ -776,18 +780,17 @@ export function DimensionOverlay() {
     cache.current.clear();
     lastSignature.current = null;
     lastPoll.current = 0;
-    if (!on) setLiveDimensions([]);
-  }, [on, view, selectedNodeId, latticeNodeId, sectionOn, sectionAt, mergeReady]);
+  }, [view, selectedNodeId, latticeNodeId, sectionOn, sectionAt, mergeReady]);
 
   useFrame(({ camera, size }) => {
-    if (!on || !view) return;
     const ortho = camera as THREE.OrthographicCamera;
     if (!ortho.isOrthographicCamera) {
       if (square) setSquare(false);
       return;
     }
     camera.getWorldDirection(forward);
-    const isSquare = forward.dot(toThree(VIEW_AXES[view].forward)) >= SQUARE_TO_VIEW;
+    const vf = VIEW_AXES[view].forward;
+    const isSquare = (forward.x * vf[0] + forward.y * vf[2] - forward.z * vf[1]) >= SQUARE_TO_VIEW;
     if (isSquare !== square) setSquare(isSquare);
 
     const perPixel = (ortho.top - ortho.bottom) / (ortho.zoom * Math.max(1, size.height));
@@ -860,8 +863,8 @@ export function DimensionOverlay() {
   });
 
   const drawing = useMemo(
-    () => (on && view && square && mpp > 0 && found.key === measuring ? layOut(found.dims, found.locations, view, mpp) : null),
-    [on, view, square, mpp, found, measuring],
+    () => (square && mpp > 0 && found.key === measuring ? layOut(found.dims, found.locations, view, mpp) : null),
+    [view, square, mpp, found, measuring],
   );
   // Keep liveDimensions strictly in sync with what is actually drawn on screen
   // (empty when off-axis, perspective, dims off, empty/hidden selection, or mpp === 0).
@@ -895,10 +898,10 @@ export function DimensionOverlay() {
     <group>
       {([['lines', 'arrows', COLOUR], ['locationLines', 'locationArrows', LOCATION_COLOUR]] as const).map(([lines, arrows, colour]) => (
         <group key={lines}>
-          <lineSegments geometry={geometries[lines]} raycast={() => null} renderOrder={997}>
+          <lineSegments geometry={geometries[lines]} raycast={NOOP_RAYCAST} renderOrder={997}>
             <lineBasicMaterial color={colour} depthTest={false} transparent toneMapped={false} />
           </lineSegments>
-          <mesh geometry={geometries[arrows]} raycast={() => null} renderOrder={998}>
+          <mesh geometry={geometries[arrows]} raycast={NOOP_RAYCAST} renderOrder={998}>
             <meshBasicMaterial color={colour} depthTest={false} side={THREE.DoubleSide} transparent toneMapped={false} />
           </mesh>
         </group>

@@ -49,6 +49,8 @@ import { getNodeWorldPos } from '../../utils/sceneTree';
 
 type OrbitControlsImpl = React.ComponentRef<typeof OrbitControls>;
 
+const NOOP_RAYCAST = () => null;
+
 /**
  * Ends a paint stroke wherever it is let go.
  *
@@ -110,7 +112,7 @@ function dropMomentum(controls: OrbitControlsImpl) {
 }
 
 export const CameraController = () => {
-  const { camera } = useThree();
+  const camera = useThree((state) => state.camera);
   const cameraView = useStore(state => state.cameraView);
   const drawing = isDrawingView(cameraView);
   // Loading a preset asks for the starting view back. See cameraResetToken:
@@ -237,7 +239,7 @@ export const CameraController = () => {
     if (isDrawingView(store.cameraView)) {
       const { forward } = VIEW_AXES[store.cameraView];
       live.getWorldDirection(lookDirection);
-      off = lookDirection.dot(new THREE.Vector3(forward[0], forward[2], -forward[1])) < SQUARE_TO_VIEW;
+      off = (lookDirection.x * forward[0] + lookDirection.y * forward[2] - lookDirection.z * forward[1]) < SQUARE_TO_VIEW;
     }
     if (off !== store.cameraOffAxis) store.setCameraOffAxis(off);
   });
@@ -478,7 +480,6 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // the picked one when a geom, not the body, was chosen in the hierarchy.
   // A member's far half after a break (`<geom>~2`) counts as the member.
   const geomTag = useMemo(() => ({ geomName: name.replace(/~2$/, '') }), [name]);
-  const isPlaying = useStore(state => state.isPlaying);
   
   const geomId = useMemo(() => {
     if (providedGeomId !== undefined) return providedGeomId;
@@ -666,7 +667,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       publishCutSpot(nodeId!, e);
     },
     onPointerDown: (e: ThreeEvent<PointerEvent>) => {
-      if (isPlaying) {
+      if (useStore.getState().isPlaying) {
         e.stopPropagation();
         setOrbitEnabled(false);
         useStore.getState().setDraggedNodeId(nodeId!);
@@ -711,7 +712,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
         setOrbitEnabled(true);
       }
     }
-  }), [isPlaying, nodeId, setSelectedNodeId, setOrbitEnabled]);
+  }), [nodeId, setSelectedNodeId, setOrbitEnabled]);
 
   // For dynamic meshes, use body xpos/xmat so renderVertices (centroid-local) align correctly.
   const bodyId = useMemo(() => {
@@ -997,11 +998,40 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // The ring showing where the brush will land. Drawn on top of the surface so
   // it stays readable in a hollow that would otherwise occlude it.
   const brushCursor = showPaint && paintMode ? (
-    <mesh ref={cursorRef} visible={false} raycast={() => null}>
+    <mesh ref={cursorRef} visible={false} raycast={NOOP_RAYCAST}>
       <ringGeometry args={[0.9, 1, 48]} />
       <meshBasicMaterial color="#f0abfc" transparent opacity={0.95} side={THREE.DoubleSide} depthTest={false} toneMapped={false} />
     </mesh>
   ) : null;
+
+  // Memoize dynamic-mesh local offset transform so R3F does not receive fresh
+  // Quaternion/array instances on every re-render.
+  const { localPos, localQuat } = useMemo(() => {
+    if (type !== 'mesh' || !isDynamic || !geomEntry || geomEntry.csgDerived) {
+      return { localPos: undefined as [number, number, number] | undefined, localQuat: undefined as THREE.Quaternion | undefined };
+    }
+    const hasLocalOffset = (
+      (Array.isArray(geomEntry.pos) && (geomEntry.pos[0] !== 0 || geomEntry.pos[1] !== 0 || geomEntry.pos[2] !== 0)) ||
+      (Array.isArray(geomEntry.quat) && geomEntry.quat.length === 4) ||
+      (Array.isArray(geomEntry.euler) && (geomEntry.euler[0] !== 0 || geomEntry.euler[1] !== 0 || geomEntry.euler[2] !== 0))
+    );
+    if (!hasLocalOffset) {
+      return { localPos: undefined as [number, number, number] | undefined, localQuat: undefined as THREE.Quaternion | undefined };
+    }
+    const pos: [number, number, number] | undefined = Array.isArray(geomEntry.pos) && geomEntry.pos.length === 3
+      ? [geomEntry.pos[0], geomEntry.pos[1], geomEntry.pos[2]]
+      : undefined;
+    let quat: THREE.Quaternion | undefined;
+    if (Array.isArray(geomEntry.quat) && geomEntry.quat.length === 4) {
+      quat = new THREE.Quaternion(geomEntry.quat[1], geomEntry.quat[2], geomEntry.quat[3], geomEntry.quat[0]).normalize();
+    } else if (Array.isArray(geomEntry.euler) && geomEntry.euler.length === 3) {
+      const deg = Math.PI / 180;
+      quat = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(geomEntry.euler[0] * deg, geomEntry.euler[1] * deg, geomEntry.euler[2] * deg, 'XYZ'),
+      );
+    }
+    return { localPos: pos, localQuat: quat };
+  }, [type, isDynamic, geomEntry]);
 
   /**
    * The primitive's surface as a geometry, for the edge pass. Mirrors the JSX
@@ -1009,9 +1039,13 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
    * 32-segment cylinder there — so the lines land on the corners drawn. Built
    * only while edges are on: the JSX path stays as it is for everyone else.
    */
+  const isWedge = node?.isWedge;
+  const wedgeWidth = node?.width;
+  const wedgeDepth = node?.depth;
+  const wedgeHeight = node?.height;
   const edgeGeometry = useMemo(() => {
     if (!showEdges || type === 'mesh') return null;
-    if (node?.isWedge) return wedgeGeometry(node.width || 2.0, node.depth || 1.0, node.height || 0.5);
+    if (isWedge) return wedgeGeometry(wedgeWidth || 2.0, wedgeDepth || 1.0, wedgeHeight || 0.5);
     if (!geometryArgs || geometryArgs.length === 0 || geometryArgs.some(arg => arg === undefined || isNaN(arg))) return null;
     const a = geometryArgs;
     switch (type) {
@@ -1022,7 +1056,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       case 'cylinder': return new THREE.CylinderGeometry(a[0], a[0], a[1] * 2, segments.radial);
       default: return null;
     }
-  }, [showEdges, type, node?.isWedge, node?.width, node?.depth, node?.height, geometryArgs, segments]);
+  }, [showEdges, type, isWedge, wedgeWidth, wedgeDepth, wedgeHeight, geometryArgs, segments]);
   useEffect(() => () => { edgeGeometry?.dispose(); }, [edgeGeometry]);
 
   const primitiveEdges = showEdges && edgeGeometry ? (
@@ -1045,31 +1079,12 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     // The inside of a sculpt the scissors left open — see SculptSurface, which
     // draws the same thing while the tools are up.
     const insideWall = openSculpt ? (
-      <mesh geometry={meshBufferGeometry} raycast={() => null}>
+      <mesh geometry={meshBufferGeometry} raycast={NOOP_RAYCAST}>
         <meshStandardMaterial color={insideColor} roughness={0.95} metalness={0} side={THREE.BackSide} />
       </mesh>
     ) : null;
 
     if (isDynamic) {
-      const hasLocalOffset = geomEntry && !geomEntry.csgDerived && (
-        (Array.isArray(geomEntry.pos) && (geomEntry.pos[0] !== 0 || geomEntry.pos[1] !== 0 || geomEntry.pos[2] !== 0)) ||
-        (Array.isArray(geomEntry.quat) && geomEntry.quat.length === 4) ||
-        (Array.isArray(geomEntry.euler) && (geomEntry.euler[0] !== 0 || geomEntry.euler[1] !== 0 || geomEntry.euler[2] !== 0))
-      );
-      const localPos: [number, number, number] | undefined = hasLocalOffset && Array.isArray(geomEntry?.pos) && geomEntry.pos.length === 3
-        ? [geomEntry.pos[0], geomEntry.pos[1], geomEntry.pos[2]]
-        : undefined;
-      let localQuat: THREE.Quaternion | undefined;
-      if (hasLocalOffset && geomEntry) {
-        if (Array.isArray(geomEntry.quat) && geomEntry.quat.length === 4) {
-          localQuat = new THREE.Quaternion(geomEntry.quat[1], geomEntry.quat[2], geomEntry.quat[3], geomEntry.quat[0]).normalize();
-        } else if (Array.isArray(geomEntry.euler) && geomEntry.euler.length === 3) {
-          const deg = Math.PI / 180;
-          localQuat = new THREE.Quaternion().setFromEuler(
-            new THREE.Euler(geomEntry.euler[0] * deg, geomEntry.euler[1] * deg, geomEntry.euler[2] * deg, 'XYZ')
-          );
-        }
-      }
       return (
         <group name={nodeId} userData={geomTag} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
           <group position={localPos} quaternion={localQuat}>
@@ -1197,10 +1212,13 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
 
 // Drag interaction controller that handles window-level mouse/pointer movements
 export const DragInteractionController = () => {
-  const { camera, raycaster, gl } = useThree();
+  const getThree = useThree((s) => s.get);
+  const gl = useThree((s) => s.gl);
   const setOrbitEnabled = useOrbitEnable();
 
   useEffect(() => {
+    const ndc = new THREE.Vector2();
+    const targetPt = new THREE.Vector3();
     const handlePointerMove = (e: PointerEvent) => {
       const { draggedNodeId, dragDistance } = useStore.getState();
       if (!draggedNodeId) return;
@@ -1210,12 +1228,10 @@ export const DragInteractionController = () => {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       
-      const ndcX = (x / rect.width) * 2 - 1;
-      const ndcY = -(y / rect.height) * 2 + 1;
+      ndc.set((x / rect.width) * 2 - 1, -(y / rect.height) * 2 + 1);
 
-      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
-      
-      const targetPt = new THREE.Vector3();
+      const { camera, raycaster } = getThree();
+      raycaster.setFromCamera(ndc, camera);
       raycaster.ray.at(dragDistance, targetPt);
 
       // Transform standard Three.js world coordinates (Y-up) to MuJoCo coordinate space (Z-up)
@@ -1249,7 +1265,7 @@ export const DragInteractionController = () => {
       window.removeEventListener('pointercancel', handlePointerUp);
       window.removeEventListener('blur', handlePointerUp);
     };
-  }, [camera, raycaster, gl, setOrbitEnabled]);
+  }, [getThree, gl, setOrbitEnabled]);
 
   return null;
 };
@@ -1263,6 +1279,12 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
   // only to hand useFrame a value it can read for itself.
   const lineRef = useRef<THREE.Line>(null);
   const bodyIdCache = useRef<Record<string, number>>({});
+  const lineGeometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+    return geo;
+  }, []);
+  useEffect(() => () => lineGeometry.dispose(), [lineGeometry]);
   useEffect(() => {
     if (!model || !mujoco) return;
     const c: Record<string, number> = {};
@@ -1332,11 +1354,11 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
 
       // Parent group has rotation={[-Math.PI / 2, 0, 0]} which converts MuJoCo Z-up space to Three.js Y-up.
       // Inside this group, local coordinates ARE MuJoCo Z-up (x, y, z).
-      const points = [
-        new THREE.Vector3(px, py, pz),
-        new THREE.Vector3(dragTarget.x, dragTarget.y, dragTarget.z)
-      ];
-      lineRef.current.geometry.setFromPoints(points);
+      const posAttr = lineGeometry.getAttribute('position') as THREE.BufferAttribute;
+      const arr = posAttr.array as Float32Array;
+      arr[0] = px; arr[1] = py; arr[2] = pz;
+      arr[3] = dragTarget.x; arr[4] = dragTarget.y; arr[5] = dragTarget.z;
+      posAttr.needsUpdate = true;
     } catch {
       // Safe check
     }
@@ -1350,7 +1372,7 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
        the DOM one wins. R3F's reconciler renders a THREE.Line here, so only the
        ref's declared type needs correcting. */
     <line ref={lineRef as unknown as React.Ref<SVGLineElement>}>
-      <bufferGeometry />
+      <primitive object={lineGeometry} attach="geometry" />
       <lineBasicMaterial color="#f43f5e" linewidth={4} transparent opacity={0.9} />
     </line>
   );
@@ -1359,7 +1381,7 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
 
 
 export const SceneCapture = ({ sceneRef }: { sceneRef: React.MutableRefObject<THREE.Scene | null> }) => {
-  const { scene } = useThree();
+  const scene = useThree((s) => s.scene);
   useEffect(() => { sceneRef.current = scene; }, [scene, sceneRef]);
   return null;
 };
@@ -1371,11 +1393,20 @@ export const SceneCapture = ({ sceneRef }: { sceneRef: React.MutableRefObject<TH
 // is the orbit gesture, so the drag has to switch the controls off for its
 // duration or the camera swings while the point is being placed.
 export const CurveControlHandles = () => {
+  const activeCurveSelected = useStore((s) => {
+    if (s.isPlaying || !s.selectedNodeId) return false;
+    return Boolean(findSceneNode(s.sceneGraph?.nodes ?? [], s.selectedNodeId)?.isCurve);
+  });
+  if (!activeCurveSelected) return null;
+  return <CurveControlHandlesActive />;
+};
+
+const CurveControlHandlesActive = () => {
   const sceneGraph = useStore(s => s.sceneGraph);
   const selectedNodeId = useStore(s => s.selectedNodeId);
   const isPlaying = useStore(s => s.isPlaying);
   const updateCurveParams = useStore(s => s.updateCurveParams);
-  const { camera } = useThree();
+  const camera = useThree((s) => s.camera);
   const setOrbitEnabled = useOrbitEnable();
   const coarsePointer = useCoarsePointer();
   const [dragIdx, setDragIdx] = useState<number | null>(null);
@@ -1505,6 +1536,7 @@ interface StaticBoxInstancesProps {
 export const StaticBoxInstances = React.memo(function StaticBoxInstances({ geoms, model, data, mujoco, setSelectedNodeId }: StaticBoxInstancesProps) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const nodeIdByInstance = useMemo(() => geoms.map((g) => g.nodeId), [geoms]);
+  const instanceUserData = useMemo(() => ({ nodeIds: nodeIdByInstance }), [nodeIdByInstance]);
   const wireframe = useStore(state => state.wireframe);
 
   /*
@@ -1564,7 +1596,7 @@ export const StaticBoxInstances = React.memo(function StaticBoxInstances({ geoms
          off the closure; anything walking the scene from outside — the measure
          tool, which has to name what it snapped to — cannot, and an instanced
          box is the one geom in the app with no named group around it. */
-      userData={{ nodeIds: nodeIdByInstance }}
+      userData={instanceUserData}
       onClick={(e: ThreeEvent<MouseEvent>) => {
         e.stopPropagation();
         if (useStore.getState().paintMode) return;
@@ -1612,9 +1644,9 @@ const findSceneNode = (nodes: SceneNode[], id: string): SceneNode | null => {
  * does. It draws in the same Z-up wrapper group as everything else.
  */
 export const LatticeEditorLayer = ({ model, data, mujoco }: { model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null }) => {
-  const sceneGraph = useStore((state) => state.sceneGraph);
-  const latticeNodeId = useStore((state) => state.latticeNodeId);
-  const node = latticeNodeId ? findSceneNode(sceneGraph?.nodes ?? [], latticeNodeId) : undefined;
+  const node = useStore((state) => (
+    state.latticeNodeId ? findSceneNode(state.sceneGraph?.nodes ?? [], state.latticeNodeId) : null
+  ));
   const geom = node?.geoms?.find((g) => g.latticeGeom) ?? node?.geoms?.find((g) => g.type === 'mesh' && !g.csgDerived);
   if (!node?.isLattice || !node.latticeCage || !geom || !model || !data || !mujoco) return null;
   return (
@@ -1836,7 +1868,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
   }, [geoms, paintMode, selectedNodeId, sculptNodeId, latticeNodeId]);
   // Picking a different base replaces the mesh wholesale, so the sculpting
   // surface has to be remounted rather than left holding the old one.
-  const sculptVersion = sculptNodeId ? (findSceneNode(sceneGraph?.nodes ?? [], sculptNodeId)?.sculptVersion ?? 1) : 1;
+  const sculptVersion = sculptNodeId ? (nodeById.get(sculptNodeId)?.sculptVersion ?? 1) : 1;
 
   if (!model || !data || !mujoco) return null;
 

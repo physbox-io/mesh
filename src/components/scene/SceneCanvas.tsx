@@ -134,6 +134,16 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
     [addComponent],
   );
 
+  const handleUnsupportedDrop = useCallback(
+    (msg: string) => showNotice('Unsupported file', msg, 'amber'),
+    [showNotice],
+  );
+
+  const setComposerRef = useCallback((instance: ComponentRef<typeof EffectComposer> | null) => {
+    composerRef.current = instance;
+    physicsGlobals._physics_composer = instance;
+  }, []);
+
   return (
     <Canvas
       camera={CAMERA_CONFIG}
@@ -182,7 +192,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
     >
       <SceneCapture sceneRef={threeSceneRef} />
       <RenderOnChange />
-      <DropHandler addComponent={addComponentUnderSelection} onImportFile={openStlImport} onImportImageFile={openImageImport} onImportProfileFile={openProfileImport} onImportSceneJson={onImportSceneJson} onUnsupportedDrop={(msg) => showNotice('Unsupported file', msg, 'amber')} />
+      <DropHandler addComponent={addComponentUnderSelection} onImportFile={openStlImport} onImportImageFile={openImageImport} onImportProfileFile={openProfileImport} onImportSceneJson={onImportSceneJson} onUnsupportedDrop={handleUnsupportedDrop} />
       {background === 'studio' ? (
         <>
           <StudioBackdrop darkMode={darkMode} />
@@ -288,10 +298,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
           _physics_composer, and SCREENSHOT in useMCPBridge) or it would
           silently capture a frame with no AO applied. */}
       <EffectComposer
-        ref={(instance) => {
-          composerRef.current = instance;
-          physicsGlobals._physics_composer = instance;
-        }}
+        ref={setComposerRef}
         // MSAA on the composer's own target, which is where the scene is
         // drawn — the canvas's antialias flag only ever smoothed the
         // copy-out quad, so with this at 0 nothing in the viewport was

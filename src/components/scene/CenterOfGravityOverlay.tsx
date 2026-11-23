@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { useFrame, useThree } from '@react-three/fiber';
+import { useFrame } from '@react-three/fiber';
 import { Html, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
@@ -8,8 +8,13 @@ import { analyzeStability } from '../../utils/balancePart';
 import { resolveWaterSurfaceAt } from '../../utils/hydrostatics';
 import { findNodeById } from '../../utils/sceneTree';
 import { metresPerPixel } from '../../utils/cameraScale';
-import { bodyPoseOf } from './bodyPose';
+import { readBodyPoseInto, type BodyPoseCache } from './bodyPose';
 import type { FrameFlagWindow } from '../../types/sceneLayer';
+
+const NOOP_RAYCAST = () => null;
+const CROSS_X: [number, number, number][] = [[-1.8, 0, 0], [1.8, 0, 0]];
+const CROSS_Y: [number, number, number][] = [[0, -1.8, 0], [0, 1.8, 0]];
+const CROSS_Z: [number, number, number][] = [[0, 0, -1.8], [0, 0, 1.8]];
 
 /** MuJoCo world Z-up [x, y, z] -> Three.js Y-up [x, z, -y]. */
 function toThree(x: number, y: number, z: number): THREE.Vector3 {
@@ -22,15 +27,19 @@ function toThree(x: number, y: number, z: number): THREE.Vector3 {
  */
 export function CenterOfGravityOverlay() {
   const showCog = useViewQuality((s) => s.showCenterOfGravity);
+  if (!showCog) return null;
+  return <CenterOfGravityOverlayActive />;
+}
+
+function CenterOfGravityOverlayActive() {
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   const sceneGraph = useStore((s) => s.sceneGraph);
   const waterLevel = useStore((s) => s.waterLevel);
   const isPlaying = useStore((s) => s.isPlaying);
-  const { camera, size } = useThree();
 
   const node = useMemo(
-    () => (showCog && selectedNodeId ? findNodeById(sceneGraph.nodes, selectedNodeId) : null),
-    [showCog, selectedNodeId, sceneGraph.nodes],
+    () => (selectedNodeId ? findNodeById(sceneGraph.nodes, selectedNodeId) : null),
+    [selectedNodeId, sceneGraph.nodes],
   );
 
   const effectiveWaterZ = useMemo(
@@ -49,6 +58,13 @@ export function CenterOfGravityOverlay() {
 
   const cogGroupRef = useRef<THREE.Group>(null);
   const dropDotRef = useRef<THREE.Mesh>(null);
+  const poseCacheRef = useRef<BodyPoseCache>({ model: null, nodeId: '', bodyId: -1 });
+  const tmpPosePos = useRef(new THREE.Vector3());
+  const tmpPoseRot = useRef(new THREE.Matrix3());
+  const tmpLocalCom = useRef(new THREE.Vector3());
+  const tmpCogThree = useRef(new THREE.Vector3());
+  const tmpDropThree = useRef(new THREE.Vector3());
+  const lastPlumb = useRef<[number, number, number, number]>([NaN, NaN, NaN, NaN]);
 
   const plumbGeo = useMemo(() => {
     const geo = new THREE.BufferGeometry();
@@ -73,7 +89,7 @@ export function CenterOfGravityOverlay() {
   const plumbLineObj = useMemo(() => {
     const line = new THREE.Line(plumbGeo, plumbMat);
     line.renderOrder = 996;
-    line.raycast = () => null;
+    line.raycast = NOOP_RAYCAST;
     return line;
   }, [plumbGeo, plumbMat]);
 
@@ -84,7 +100,7 @@ export function CenterOfGravityOverlay() {
     };
   }, [plumbGeo, plumbMat]);
 
-  useFrame(() => {
+  useFrame(({ camera, size }) => {
     if (!report || !node || !cogGroupRef.current) return;
     if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
 
@@ -92,16 +108,17 @@ export function CenterOfGravityOverlay() {
     let worldX = report.comWorld[0];
     let worldY = report.comWorld[1];
     let worldZ = report.comWorld[2];
-    const pose = bodyPoseOf(node.id, node.pos);
-    if (pose.live) {
-      const localCom = new THREE.Vector3(...report.comLocal);
-      localCom.applyMatrix3(pose.rot).add(pose.pos);
-      worldX = localCom.x;
-      worldY = localCom.y;
-      worldZ = localCom.z;
+    if (readBodyPoseInto(node.id, node.pos, tmpPosePos.current, tmpPoseRot.current, poseCacheRef.current)) {
+      tmpLocalCom.current
+        .set(report.comLocal[0], report.comLocal[1], report.comLocal[2])
+        .applyMatrix3(tmpPoseRot.current)
+        .add(tmpPosePos.current);
+      worldX = tmpLocalCom.current.x;
+      worldY = tmpLocalCom.current.y;
+      worldZ = tmpLocalCom.current.z;
     }
 
-    const cogThree = toThree(worldX, worldY, worldZ);
+    const cogThree = tmpCogThree.current.set(worldX, worldZ, -worldY);
     cogGroupRef.current.position.copy(cogThree);
 
     // Keep screen-space size crisp regardless of zoom or orthographic/perspective view
@@ -111,12 +128,16 @@ export function CenterOfGravityOverlay() {
     cogGroupRef.current.scale.setScalar(radiusM);
 
     const floorZ = isPlaying ? Math.min(0, report.stand.baseZ) : report.stand.baseZ;
-    const dropThree = toThree(worldX, worldY, floorZ);
-    const posAttr = plumbGeo.getAttribute('position') as THREE.BufferAttribute;
-    posAttr.setXYZ(0, cogThree.x, cogThree.y, cogThree.z);
-    posAttr.setXYZ(1, dropThree.x, dropThree.y, dropThree.z);
-    posAttr.needsUpdate = true;
-    plumbLineObj.computeLineDistances();
+    const dropThree = tmpDropThree.current.set(worldX, floorZ, -worldY);
+    const lp = lastPlumb.current;
+    if (lp[0] !== worldX || lp[1] !== worldY || lp[2] !== worldZ || lp[3] !== floorZ) {
+      lp[0] = worldX; lp[1] = worldY; lp[2] = worldZ; lp[3] = floorZ;
+      const posAttr = plumbGeo.getAttribute('position') as THREE.BufferAttribute;
+      posAttr.setXYZ(0, cogThree.x, cogThree.y, cogThree.z);
+      posAttr.setXYZ(1, dropThree.x, dropThree.y, dropThree.z);
+      posAttr.needsUpdate = true;
+      plumbLineObj.computeLineDistances();
+    }
 
     if (dropDotRef.current) {
       dropDotRef.current.position.copy(dropThree);
@@ -124,7 +145,7 @@ export function CenterOfGravityOverlay() {
     }
   });
 
-  if (!showCog || !node || !report) return null;
+  if (!node || !report) return null;
 
   const stands = report.stand.stands;
   const accentColor = stands ? '#10b981' : '#f59e0b';
@@ -144,7 +165,7 @@ export function CenterOfGravityOverlay() {
       <primitive object={plumbLineObj} />
 
       {/* Projected plumb point on the base plane */}
-      <mesh ref={dropDotRef} position={initialDropThree} raycast={() => null} renderOrder={997}>
+      <mesh ref={dropDotRef} position={initialDropThree} raycast={NOOP_RAYCAST} renderOrder={997}>
         <sphereGeometry args={[1, 14, 14]} />
         <meshBasicMaterial color={accentColor} depthTest={false} toneMapped={false} />
       </mesh>
@@ -165,44 +186,17 @@ export function CenterOfGravityOverlay() {
       {/* 3D Centre of Gravity marker (unit radius, scaled to crisp pixel size in useFrame) */}
       <group ref={cogGroupRef} position={initialCogThree}>
         {/* High-contrast dark outer ring + amber core + crosshair axes */}
-        <mesh raycast={() => null} renderOrder={998}>
+        <mesh raycast={NOOP_RAYCAST} renderOrder={998}>
           <sphereGeometry args={[1.0, 18, 18]} />
           <meshBasicMaterial color="#0f172a" depthTest={false} toneMapped={false} />
         </mesh>
-        <mesh raycast={() => null} renderOrder={999}>
+        <mesh raycast={NOOP_RAYCAST} renderOrder={999}>
           <sphereGeometry args={[0.72, 16, 16]} />
           <meshBasicMaterial color="#f59e0b" depthTest={false} toneMapped={false} />
         </mesh>
-        <Line
-          points={[
-            [-1.8, 0, 0],
-            [1.8, 0, 0],
-          ]}
-          color="#f59e0b"
-          lineWidth={1.5}
-          depthTest={false}
-          renderOrder={999}
-        />
-        <Line
-          points={[
-            [0, -1.8, 0],
-            [0, 1.8, 0],
-          ]}
-          color="#f59e0b"
-          lineWidth={1.5}
-          depthTest={false}
-          renderOrder={999}
-        />
-        <Line
-          points={[
-            [0, 0, -1.8],
-            [0, 0, 1.8],
-          ]}
-          color="#f59e0b"
-          lineWidth={1.5}
-          depthTest={false}
-          renderOrder={999}
-        />
+        <Line points={CROSS_X} color="#f59e0b" lineWidth={1.5} depthTest={false} renderOrder={999} />
+        <Line points={CROSS_Y} color="#f59e0b" lineWidth={1.5} depthTest={false} renderOrder={999} />
+        <Line points={CROSS_Z} color="#f59e0b" lineWidth={1.5} depthTest={false} renderOrder={999} />
         <Html center style={{ pointerEvents: 'none', transform: 'translate(0, -20px)' }}>
           <span className="px-1.5 py-0.5 rounded bg-slate-900/90 border border-amber-400/60 text-[9px] font-mono font-bold text-amber-300 shadow whitespace-nowrap">
             CoG ({(report.comWorld[0] * 1000).toFixed(0)}, {(report.comWorld[1] * 1000).toFixed(0)}, {(report.comWorld[2] * 1000).toFixed(0)} mm)

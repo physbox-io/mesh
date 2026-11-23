@@ -297,7 +297,7 @@ export function LatticeSurface({
   const applyLattice = useStore((s) => s.applyLattice);
   const nudgeLatticePlane = useStore((s) => s.nudgeLatticePlane);
 
-  const { gl } = useThree();
+  const gl = useThree((state) => state.gl);
   const getThree = useThree((state) => state.get);
   const setOrbitEnabled = useCallback((on: boolean) => {
     const controls = getThree().controls as { enabled?: boolean } | null;
@@ -520,6 +520,7 @@ export function LatticeSurface({
   const rotation = useRef(new THREE.Matrix4());
   useFrame(() => {
     if (!groupRef.current || bodyId === -1 || !data) return;
+    if (data !== useStore.getState().data) return;
     try {
       const offset = bodyId * 9;
       const m = data.xmat;

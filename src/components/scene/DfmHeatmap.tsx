@@ -27,11 +27,15 @@ const NO_RAYCAST = () => null;
 const OVERLAY_USER_DATA = { isOverlay: true, skipExport: true } as const;
 
 export function DfmHeatmap() {
+  const open = useStore((state) => state.dfmEnabled && !state.dfmPanel.minimized);
+  if (!open) return null;
+  return <DfmHeatmapActive />;
+}
+
+function DfmHeatmapActive() {
   const sceneGraph = useStore(state => state.sceneGraph);
-  const dfmEnabled = useStore(state => state.dfmEnabled);
   const machineTarget = useStore(state => state.machineTarget);
   const castOpen = useStore(state => state.dfmCastOpen);
-  const minimized = useStore(state => state.dfmPanel.minimized);
   const material = useStore(state => state.material);
   const filament = useStore(state => state.filament);
   const stock = useStore(state => state.stock);
@@ -45,17 +49,16 @@ export function DfmHeatmap() {
   // Follows the panel: the casting section takes the colours with it, because
   // reading about undercuts while the viewport is still shaded for overhangs
   // is worse than showing neither. Rolled up, it stops sampling entirely.
-  const open = dfmEnabled && !minimized;
-  const lens = open ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
+  const lens = castOpen ? 'cast' : dfmLensFor(machineTarget);
 
   // Align heatmap triangles with post-simulation / VoltLink body poses using
   // the exact same shared SceneGraph reference as DfmHUD so both hit one cache.
   const live = useMemo(() => {
     // Re-read mutable MuJoCo poses after a sim pause or reset (`recompileId`).
     void recompileId;
-    if (!open || isPlaying || !sceneGraph) return null;
+    if (isPlaying || !sceneGraph) return null;
     return livePoses(sceneGraph.nodes || []);
-  }, [open, sceneGraph, recompileId, isPlaying]);
+  }, [sceneGraph, recompileId, isPlaying]);
   const effectiveScene = useMemo(
     () => (sceneGraph ? getLivePosedScene(sceneGraph, live) : null),
     [sceneGraph, live],
@@ -79,19 +82,19 @@ export function DfmHeatmap() {
   const report = useDfmReport(effectiveScene, lens, bench);
 
   const geometry = useMemo(() => {
-    if (!open || !report) return null;
+    if (!report) return null;
     try {
       return buildHeatGeometry(report);
     } catch {
       // A scene the analyser cannot read should cost the viewport nothing.
       return null;
     }
-  }, [open, report]);
+  }, [report]);
   // Passed in as a prop, so react-three-fiber leaves it alone: each edit's
   // geometry is freed here, or its GPU buffers outlive it.
   useEffect(() => () => geometry?.dispose(), [geometry]);
 
-  if (!open || !geometry) return null;
+  if (!geometry) return null;
 
   return (
     <mesh

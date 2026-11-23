@@ -22,6 +22,13 @@ import { useLlmSettings } from '../../hooks/useLlmSettings';
  * opening this.
  */
 export function SettingsPopover() {
+  const isSettingsOpen = useStore((s) => s.isSettingsOpen);
+  const llm = useLlmSettings(isSettingsOpen);
+  if (!isSettingsOpen) return null;
+  return <SettingsPopoverBody llm={llm} />;
+}
+
+function SettingsPopoverBody({ llm }: { llm: ReturnType<typeof useLlmSettings> }) {
   const hiRes = useViewQuality(s => s.hiRes);
   const setHiRes = useViewQuality(s => s.setHiRes);
   const soundEnabled = useSoundStore((s) => s.soundEnabled);
@@ -30,14 +37,12 @@ export function SettingsPopover() {
   const setSimFidelity = useStore((s) => s.setSimFidelity);
   const highFidelity = simFidelity === 'print';
   const {
-    isSettingsOpen, setSettingsOpen,
+    setSettingsOpen,
     gravityZ, windX, windY, density, floorFriction, floorBounce, background, setEnvironment,
   } = useStore(useShallow((s) => ({
-    isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
+    setSettingsOpen: s.setSettingsOpen,
     gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, background: s.background, setEnvironment: s.setEnvironment,
   })));
-  const llm = useLlmSettings(isSettingsOpen);
-  if (!isSettingsOpen) return null;
   return (
     /* Anchored to the settings button on a desktop. Below `lg` there is
        nothing reliable to anchor to — the header wraps, so the button

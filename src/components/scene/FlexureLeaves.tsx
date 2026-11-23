@@ -8,7 +8,7 @@
  * position: the end held by the frame stays put, the end on the body follows it,
  * and the leaf flexes between (bendLeafPoint).
  */
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
@@ -98,6 +98,11 @@ export const FlexureLeaves = ({ model, data, mujoco, sceneGraph }: FlexureLeaves
 
   const point = useRef<[number, number, number]>([0, 0, 0]);
   const bent = useRef<[number, number, number]>([0, 0, 0]);
+  // Cache last applied (q, xpos[3], xmat[9]) per leaf so paused/orbiting frames
+  // skip vertex bending, normal recomputation, and GPU buffer uploads when stationary.
+  const lastPose = useRef<Map<string, Float64Array>>(new Map());
+  useEffect(() => { lastPose.current.clear(); }, [leaves, model, data]);
+
   useFrame(() => {
     const st = useStore.getState();
     if (model !== st.model || data !== st.data) return;
@@ -108,13 +113,34 @@ export const FlexureLeaves = ({ model, data, mujoco, sceneGraph }: FlexureLeaves
       const mesh = meshes.current[l.key];
       if (!a || !mesh) continue;
       const geometry = mesh.geometry;
+      let resized = false;
       if (!geometry.getAttribute('position') || geometry.getAttribute('position').array.length !== l.rest.length) {
         geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(l.rest.length), 3));
         geometry.setIndex(l.index);
+        resized = true;
       }
       const q = a.qadr >= 0 ? data.qpos[a.qadr] : 0;
       const o = a.body * 3, m = data.xmat, r = a.body * 9;
       const px = data.xpos[o], py = data.xpos[o + 1], pz = data.xpos[o + 2];
+      let cached = lastPose.current.get(l.key);
+      if (!resized && cached
+        && cached[0] === q
+        && cached[1] === px && cached[2] === py && cached[3] === pz
+        && cached[4] === m[r] && cached[5] === m[r + 1] && cached[6] === m[r + 2]
+        && cached[7] === m[r + 3] && cached[8] === m[r + 4] && cached[9] === m[r + 5]
+        && cached[10] === m[r + 6] && cached[11] === m[r + 7] && cached[12] === m[r + 8]) {
+        continue;
+      }
+      if (!cached) {
+        cached = new Float64Array(13);
+        lastPose.current.set(l.key, cached);
+      }
+      cached[0] = q;
+      cached[1] = px; cached[2] = py; cached[3] = pz;
+      cached[4] = m[r]; cached[5] = m[r + 1]; cached[6] = m[r + 2];
+      cached[7] = m[r + 3]; cached[8] = m[r + 4]; cached[9] = m[r + 5];
+      cached[10] = m[r + 6]; cached[11] = m[r + 7]; cached[12] = m[r + 8];
+
       const pos = geometry.getAttribute('position') as THREE.BufferAttribute;
       const arr = pos.array as Float32Array;
       const p = point.current, b = bent.current;

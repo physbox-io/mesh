@@ -34,32 +34,89 @@ export interface BodyPose {
 }
 
 export function bodyPoseOf(nodeId: string, fallbackPos: number[] = [0, 0, 0]): BodyPose {
-  const fallback: BodyPose = {
-    pos: new THREE.Vector3(fallbackPos[0] ?? 0, fallbackPos[1] ?? 0, fallbackPos[2] ?? 0),
-    rot: new THREE.Matrix3(),
-    live: false,
-  };
   const state = useStore.getState();
   const model = state.model as ModelMirror | null;
   const data = state.data as DataMirror | null;
   const mujoco = state.mujoco as MujocoShim | null;
-  if (!model || !data || !mujoco) return fallback;
-  try {
-    const bodyId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, nodeId);
-    if (bodyId < 0) return fallback;
-    const o = bodyId * 3;
-    const m = bodyId * 9;
-    // xmat is row-major body-to-world; Matrix3.set takes rows, so no transpose
-    // here. publishCutSpot transposes because it wants world-to-body.
-    const rot = new THREE.Matrix3().set(
-      data.xmat[m], data.xmat[m + 1], data.xmat[m + 2],
-      data.xmat[m + 3], data.xmat[m + 4], data.xmat[m + 5],
-      data.xmat[m + 6], data.xmat[m + 7], data.xmat[m + 8],
-    );
-    return { pos: new THREE.Vector3(data.xpos[o], data.xpos[o + 1], data.xpos[o + 2]), rot, live: true };
-  } catch {
-    return fallback;
+  if (model && data && mujoco) {
+    try {
+      const bodyId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, nodeId);
+      if (bodyId >= 0) {
+        const o = bodyId * 3;
+        const m = bodyId * 9;
+        // xmat is row-major body-to-world; Matrix3.set takes rows, so no transpose
+        // here. publishCutSpot transposes because it wants world-to-body.
+        const rot = new THREE.Matrix3().set(
+          data.xmat[m], data.xmat[m + 1], data.xmat[m + 2],
+          data.xmat[m + 3], data.xmat[m + 4], data.xmat[m + 5],
+          data.xmat[m + 6], data.xmat[m + 7], data.xmat[m + 8],
+        );
+        return { pos: new THREE.Vector3(data.xpos[o], data.xpos[o + 1], data.xpos[o + 2]), rot, live: true };
+      }
+    } catch {
+      // Fall through to authored fallback below.
+    }
   }
+  return {
+    pos: new THREE.Vector3(fallbackPos[0] ?? 0, fallbackPos[1] ?? 0, fallbackPos[2] ?? 0),
+    rot: new THREE.Matrix3(),
+    live: false,
+  };
+}
+
+export interface BodyPoseCache {
+  model: ModelMirror | null;
+  nodeId: string;
+  bodyId: number;
+}
+
+/**
+ * Zero-allocation variant of `bodyPoseOf` for per-frame `useFrame` loops.
+ * Writes directly into caller-owned `outPos` and `outRot`, caching `mj_name2id`
+ * per `(model, nodeId)` when a cache ref is supplied.
+ */
+export function readBodyPoseInto(
+  nodeId: string,
+  fallbackPos: number[],
+  outPos: THREE.Vector3,
+  outRot: THREE.Matrix3,
+  cache?: BodyPoseCache,
+): boolean {
+  const state = useStore.getState();
+  const model = state.model as ModelMirror | null;
+  const data = state.data as DataMirror | null;
+  const mujoco = state.mujoco as MujocoShim | null;
+  if (model && data && mujoco) {
+    try {
+      let bodyId: number;
+      if (cache && cache.model === model && cache.nodeId === nodeId) {
+        bodyId = cache.bodyId;
+      } else {
+        bodyId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, nodeId);
+        if (cache) {
+          cache.model = model;
+          cache.nodeId = nodeId;
+          cache.bodyId = bodyId;
+        }
+      }
+      if (bodyId >= 0) {
+        const o = bodyId * 3;
+        const m = bodyId * 9;
+        outPos.set(data.xpos[o], data.xpos[o + 1], data.xpos[o + 2]);
+        outRot.set(
+          data.xmat[m], data.xmat[m + 1], data.xmat[m + 2],
+          data.xmat[m + 3], data.xmat[m + 4], data.xmat[m + 5],
+          data.xmat[m + 6], data.xmat[m + 7], data.xmat[m + 8],
+        );
+        return true;
+      }
+    } catch {
+      // Fall through to authored fallback below.
+    }
+  }
+  outPos.set(fallbackPos[0] ?? 0, fallbackPos[1] ?? 0, fallbackPos[2] ?? 0);
+  outRot.identity();
+  return false;
 }
 
 /** The body a node hangs from, or null when it sits at the top of the scene. */
@@ -111,18 +168,24 @@ const TURNED_RAD = THREE.MathUtils.degToRad(0.5);
 export function livePoses(nodes: SceneNode[]): Map<string, THREE.Matrix4> | null {
   const poses = new Map<string, THREE.Matrix4>();
   let moved = false;
+  const tmpPos = new THREE.Vector3();
+  const tmpRot = new THREE.Matrix3();
+  const tmpAt = new THREE.Vector3();
+  const tmpQ1 = new THREE.Quaternion();
+  const tmpQ2 = new THREE.Quaternion();
   // A body the model lacks (a rebuild in flight, or one not simulated) stays
   // where it is drawn, and so does everything on it.
   const walk = (list: SceneNode[], parent?: THREE.Matrix4) => {
     for (const n of list) {
       const drawn = getNodeWorldTransform(n, parent);
-      const pose = bodyPoseOf(n.id, n.pos);
-      if (!pose.live) { walk(n.children ?? [], drawn); continue; }
-      const live = new THREE.Matrix4().setFromMatrix3(pose.rot).setPosition(pose.pos);
-      const at = new THREE.Vector3().setFromMatrixPosition(drawn);
-      const turn = new THREE.Quaternion().setFromRotationMatrix(drawn)
-        .angleTo(new THREE.Quaternion().setFromRotationMatrix(live));
-      if (at.distanceTo(pose.pos) > MOVED_M || turn > TURNED_RAD) moved = true;
+      const isLive = readBodyPoseInto(n.id, n.pos, tmpPos, tmpRot);
+      if (!isLive) { walk(n.children ?? [], drawn); continue; }
+      const live = new THREE.Matrix4().setFromMatrix3(tmpRot).setPosition(tmpPos);
+      if (!moved) {
+        tmpAt.setFromMatrixPosition(drawn);
+        const turn = tmpQ1.setFromRotationMatrix(drawn).angleTo(tmpQ2.setFromRotationMatrix(live));
+        if (tmpAt.distanceTo(tmpPos) > MOVED_M || turn > TURNED_RAD) moved = true;
+      }
       poses.set(n.id, live);
       walk(n.children ?? [], live);
     }
