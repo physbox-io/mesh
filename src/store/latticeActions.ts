@@ -4,20 +4,100 @@
 // bakeLattice)
 // ---------------------------------------------------------------------------
 
-import * as THREE from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import {
   deserializeCage, serializeCage, separablePieces, DRAWING_TOOLS, toSceneGeom as latticeToSceneGeom,
   type Axis as LatticeAxis, type LatticeCage, type SnapMultiple, type LatticeTool,
 } from '../utils/latticeMesh';
 import { reconcileCuts } from '../utils/csg';
-import { keepJointsAndChildrenOnShape } from '../utils/latticeFrame';
+import { keepJointsAndChildrenOnShape, rotateByBody } from '../utils/latticeFrame';
 import { cloneSceneGraph, findNode } from './sceneClone';
+import { dropStaleColliders } from './geomEdits';
 import { getPhysicsWorkerClient } from './physicsEngine';
 import { initialFraming, snapForGridMm } from './sceneFraming';
 import type { PhysicsState } from './useStore';
 import type { SliceDeps } from './sliceDeps';
 import { generatedMeshMass } from '../utils/generatedMeshMass';
+
+/** Rebuilds one lattice node's mesh from `cage` and recentres its frame on the new CoM. */
+function applyCageToNode(node: SceneNode, cage: LatticeCage, subdiv?: number): void {
+  const rawLevel = subdiv ?? node.latticeSubdiv ?? 0;
+  const level = Math.max(0, Math.min(2, Math.round(Number.isFinite(rawLevel) ? rawLevel : 0)));
+  const thickness = Number.isFinite(node.latticeThickness) ? Math.max(0, node.latticeThickness!) : 0;
+  const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(
+    deserializeCage(cage), level, thickness,
+  );
+  /*
+    The cage owns ONE geom, and it says so. A lattice body may now carry
+    other shapes — a cut to subtract, and the boolean evaluator's own
+    output, which is a mesh too — so "the first mesh geom" long ago
+    stopped naming one thing. Older saves have no marker, so the first
+    mesh that isn't generated is adopted as the cage's and marked.
+  */
+  const geom = node.geoms?.find((g: SceneGeom) => g.latticeGeom)
+    ?? node.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived)
+    ?? node.geoms?.[0];
+  if (geom) {
+    if (geom.paint && geom.vertices && geom.vertices.length !== vertices.length) delete geom.paint;
+    Object.assign(geom, { vertices, renderVertices, faces, latticeGeom: true });
+  }
+  dropStaleColliders(node);
+  delete node.tunedPitchHz;
+
+  /*
+    The mesh comes back centred on its own centre of mass, so the body
+    spins about the shape rather than swinging it around a point off to
+    one side — see latticeMesh.toSceneGeom. The body then has to move by
+    however much the shape moved, or extruding away from the origin
+    would drag the whole thing across the scene.
+
+    The offset is in the body's own axes, so it is rotated into world
+    space by the body's own orientation before it is added to a world
+    position. Only the CHANGE is applied: the offset already baked into
+    the mesh is remembered on the node, because every commit recomputes
+    it from scratch.
+  */
+  const previous = node.latticeOrigin ?? [0, 0, 0];
+  const local = [
+    origin[0] - previous[0],
+    origin[1] - previous[1],
+    origin[2] - previous[2],
+  ];
+  if (local[0] !== 0 || local[1] !== 0 || local[2] !== 0) {
+    /*
+      Everything else on the body is positioned in the body's frame, and
+      the recentring below moves the body out from under it. A cut sits
+      where it was put ON THE SHAPE — so the shapes that aren't the cage's
+      are walked back by the same amount the cage's vertices just moved,
+      or extruding a face on one side of a part would drag the hole on
+      the other side along with it.
+    */
+    for (const other of node.geoms ?? []) {
+      if (other === geom || other.csgDerived) continue;
+      if (other.cutAt && other.cutNormal) {
+        other.cutAt = other.cutAt.map((v, a) => v - local[a]);
+        continue;
+      }
+      const at = other.pos ?? [0, 0, 0];
+      other.pos = [at[0] - local[0], at[1] - local[1], at[2] - local[2]];
+    }
+    keepJointsAndChildrenOnShape(node, local);
+    const worldDelta = rotateByBody(node, local);
+    node.pos = [
+      (node.pos?.[0] ?? 0) + worldDelta[0],
+      (node.pos?.[1] ?? 0) + worldDelta[1],
+      (node.pos?.[2] ?? 0) + worldDelta[2],
+    ];
+    if (node.basePos) node.basePos = [...node.pos];
+  }
+
+  reconcileCuts(node);
+
+  node.latticeOrigin = origin;
+  node.latticeCage = cage;
+  node.latticeSubdiv = level;
+  node.latticeEdited = true;
+}
 
 export interface LatticeActions {
   // The state here is the state of the TOOL, not of the shape: the shape lives
@@ -226,23 +306,35 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
 
     latticeBevelMm: 1,
 
-    setLatticeBevelMm: (mm) => set({ latticeBevelMm: Math.max(0, mm) }),
+    setLatticeBevelMm: (mm) => {
+      if (!Number.isFinite(mm)) return;
+      set({ latticeBevelMm: Math.max(0, mm) });
+    },
 
     latticeBevelRequest: null,
 
-    requestLatticeBevel: (mode, mm) => set((state) => ({
-      latticeBevelRequest: { mode, mm, nonce: (state.latticeBevelRequest?.nonce ?? 0) + 1 },
-    })),
+    requestLatticeBevel: (mode, mm) => {
+      if (!Number.isFinite(mm)) return;
+      set((state) => ({
+        latticeBevelRequest: { mode, mm, nonce: (state.latticeBevelRequest?.nonce ?? 0) + 1 },
+      }));
+    },
 
     latticeShapeSides: 0,
 
-    setLatticeShapeSides: (sides) => set({ latticeShapeSides: Math.max(0, Math.floor(sides)) }),
+    setLatticeShapeSides: (sides) => {
+      if (!Number.isFinite(sides)) return;
+      set({ latticeShapeSides: Math.max(0, Math.floor(sides)) });
+    },
 
     latticeRevolveRequest: null,
 
-    requestLatticeRevolve: (axis, degrees) => set((state) => ({
-      latticeRevolveRequest: { axis, degrees, nonce: (state.latticeRevolveRequest?.nonce ?? 0) + 1 },
-    })),
+    requestLatticeRevolve: (axis, degrees) => {
+      if (!Number.isFinite(degrees)) return;
+      set((state) => ({
+        latticeRevolveRequest: { axis, degrees, nonce: (state.latticeRevolveRequest?.nonce ?? 0) + 1 },
+      }));
+    },
 
     setLatticeStats: (stats) => set({ latticeStats: stats }),
 
@@ -253,99 +345,7 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
         if (!nodes) return false;
         for (const node of nodes) {
           if (node.id === nodeId) {
-            const level = subdiv ?? node.latticeSubdiv ?? 0;
-            const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(
-              deserializeCage(cage), level, node.latticeThickness ?? 0,
-            );
-            /*
-              The cage owns ONE geom, and it says so. A lattice body may now carry
-              other shapes — a cut to subtract, and the boolean evaluator's own
-              output, which is a mesh too — so "the first mesh geom" long ago
-              stopped naming one thing. Older saves have no marker, so the first
-              mesh that isn't generated is adopted as the cage's and marked.
-            */
-            const geom = node.geoms?.find((g: SceneGeom) => g.latticeGeom)
-              ?? node.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived)
-              ?? node.geoms?.[0];
-            if (geom) Object.assign(geom, { vertices, renderVertices, faces, latticeGeom: true });
-
-            /*
-              The mesh comes back centred on its own centre of mass, so the body
-              spins about the shape rather than swinging it around a point off to
-              one side — see latticeMesh.toSceneGeom. The body then has to move by
-              however much the shape moved, or extruding away from the origin
-              would drag the whole thing across the scene.
-
-              The offset is in the body's own axes, so it is rotated into world
-              space by the body's own orientation before it is added to a world
-              position. Only the CHANGE is applied: the offset already baked into
-              the mesh is remembered on the node, because every commit recomputes
-              it from scratch.
-            */
-            const previous = node.latticeOrigin ?? [0, 0, 0];
-            const local = [
-              origin[0] - previous[0],
-              origin[1] - previous[1],
-              origin[2] - previous[2],
-            ];
-            const delta = new THREE.Vector3(local[0], local[1], local[2]);
-            if (delta.lengthSq() > 0) {
-              /*
-                Everything else on the body is positioned in the body's frame, and
-                the recentring below moves the body out from under it. A cut sits
-                where it was put ON THE SHAPE — so the shapes that aren't the cage's
-                are walked back by the same amount the cage's vertices just moved,
-                or extruding a face on one side of a part would drag the hole on
-                the other side along with it.
-              */
-              for (const other of node.geoms ?? []) {
-                if (other === geom || other.csgDerived) continue;
-                // A cut is rebuilt from its anchor by reconcileCuts below, which
-                // throws its `pos` away — so it is the anchor that has to walk
-                // back. Walking only `pos` slid every hole sideways off the spot
-                // it was put on, and left a face prism a stray offset that grew
-                // with every edit.
-                if (other.cutAt && other.cutNormal) {
-                  other.cutAt = other.cutAt.map((v, a) => v - local[a]);
-                  continue;
-                }
-                const at = other.pos ?? [0, 0, 0];
-                other.pos = [at[0] - local[0], at[1] - local[1], at[2] - local[2]];
-              }
-              // Hinges and the bodies hung off this one are on the shape too:
-              // left alone, extruding an arm slid its pivot along with the
-              // centre of mass, away from the root it was put at.
-              keepJointsAndChildrenOnShape(node, local);
-              if (node.quat) {
-                delta.applyQuaternion(new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0]));
-              } else if (node.euler) {
-                const rad = (d: number) => (d * Math.PI) / 180;
-                delta.applyEuler(new THREE.Euler(rad(node.euler[0]), rad(node.euler[1]), rad(node.euler[2]), 'XYZ'));
-              }
-              node.pos = [
-                (node.pos?.[0] ?? 0) + delta.x,
-                (node.pos?.[1] ?? 0) + delta.y,
-                (node.pos?.[2] ?? 0) + delta.z,
-              ];
-              // basePos is what the rotation code rewinds to; leaving it behind
-              // would teleport the body back to where the shape used to be the
-              // next time somebody turned a rotation slider.
-              if (node.basePos) node.basePos = [...node.pos];
-            }
-
-            /*
-              And the cuts follow the shape. The walk-back above keeps a cut where
-              it was put ACROSS its face; this puts it back at the right depth
-              INTO it, now that the face has moved. Without it, pushing the top of
-              a part up leaves a hole sealed inside the material — a void nothing
-              in the viewport shows.
-            */
-            reconcileCuts(node);
-
-            node.latticeOrigin = origin;
-            node.latticeCage = cage;
-            node.latticeSubdiv = level;
-            node.latticeEdited = true;
+            applyCageToNode(node, cage, subdiv);
             return true;
           }
           if (traverse(node.children)) return true;
@@ -371,11 +371,14 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
       const newScene = cloneSceneGraph(get().sceneGraph);
       const first = findNode(newScene.nodes, nodeId);
       if (!first) return;
-      first.latticeCage = serializeCage(pieces[0]);
-      first.latticeVersion = (first.latticeVersion ?? 1) + 1;
-
+      const originalPos = [...(first.pos ?? [0, 0, 0])];
+      const originalOrigin = [...(first.latticeOrigin ?? [0, 0, 0])];
       const cageGeom = (first.geoms || []).find((g: SceneGeom) => g.latticeGeom) ?? first.geoms?.[0];
-      const ids: string[] = [nodeId];
+      if (cageGeom) delete cageGeom.paint;
+
+      first.latticeVersion = (first.latticeVersion ?? 1) + 1;
+      applyCageToNode(first, serializeCage(pieces[0]), first.latticeSubdiv ?? 0);
+
       // The parent the original hangs from, so the pieces hang there too and
       // the copied pose means the same thing.
       const siblings = (() => {
@@ -391,19 +394,18 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
       })();
       pieces.slice(1).forEach((piece) => {
         const id = `lattice_${Math.random().toString(36).substring(2, 10)}`;
-        ids.push(id);
         /*
           The same pose and the same cage frame: every piece's coordinates are
           the original cage's, so a copy of the original's origin puts the piece
-          exactly where it was drawn, and applyLattice then recentres each body
-          on its own piece by the difference — which is how the original works
-          after any edit.
+          exactly where it was drawn, and applyCageToNode then recentres each
+          body on its own piece by the difference — all in one undo step,
+          without writing an empty-vertices intermediate scene to history.
         */
-        siblings.push({
+        const sibling: SceneNode = {
           id,
           name: id,
           type: 'body',
-          pos: [...(first.pos ?? [0, 0, 0])],
+          pos: [...originalPos],
           ...(first.quat ? { quat: [...first.quat] } : {}),
           ...(first.euler ? { euler: [...first.euler] } : {}),
           joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${id}_${String(j.name || 'joint').split('_').pop()}` })),
@@ -412,7 +414,7 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
           latticeSubdiv: first.latticeSubdiv ?? 0,
           latticeThickness: first.latticeThickness,
           latticeVersion: 1,
-          latticeOrigin: [...(first.latticeOrigin ?? [0, 0, 0])],
+          latticeOrigin: [...originalOrigin],
           geoms: [{
             name: `${id}_mesh`,
             type: 'mesh',
@@ -428,15 +430,12 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
             latticeGeom: true,
           }],
           children: [],
-        });
+        };
+        applyCageToNode(sibling, sibling.latticeCage!, sibling.latticeSubdiv ?? 0);
+        siblings.push(sibling);
       });
       set({ sceneGraph: newScene, extraSelectedIds: [] });
-      // Rebuilds each body's mesh from its cage and recentres it; the last one
-      // recompiles with all of them in place.
-      ids.forEach((id, i) => {
-        const n = findNode(get().sceneGraph.nodes, id);
-        if (n?.latticeCage) get().applyLattice(id, n.latticeCage, n.latticeSubdiv ?? 0, i < ids.length - 1);
-      });
+      get().recompile(newScene, undefined, true);
     },
 
     bakeLattice: (nodeId) => {
@@ -458,18 +457,21 @@ export function latticeActions({ set, get }: SliceDeps): LatticeActions {
     },
 
     setLatticeSubdiv: (nodeId, level) => {
+      if (!Number.isFinite(level)) return;
       const node = findNode(get().sceneGraph.nodes, nodeId);
       if (!node?.latticeCage) return;
       get().applyLattice(nodeId, node.latticeCage, Math.max(0, Math.min(2, Math.round(level))));
     },
 
     setLatticeThickness: (nodeId, mm) => {
+      if (!Number.isFinite(mm)) return;
       const node = findNode(get().sceneGraph.nodes, nodeId);
       if (!node?.latticeCage) return;
-      // Written to the node first, because applyLattice reads the thickness off
-      // the node when it builds the mesh — the same ordering the version bump
-      // needs, and for the same reason.
-      get().updateNode(nodeId, { latticeThickness: Math.max(0, mm) / 1000 });
+      // Written to the node first (quietly, under the 'lattice' undo key),
+      // because applyLattice reads the thickness off the node when it builds
+      // the mesh.
+      get().recordInteraction('lattice');
+      get().updateNode(nodeId, { latticeThickness: Math.max(0, mm) / 1000 }, true);
       get().applyLattice(nodeId, node.latticeCage, node.latticeSubdiv ?? 0);
     },
   };

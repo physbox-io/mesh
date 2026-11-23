@@ -36,6 +36,9 @@ self.onmessage = (evt: MessageEvent<MeshBvhRequest>) => {
     if (indirect) transfer.push(indirect.buffer as ArrayBuffer);
     post({ id, ok: true, serialized, position }, transfer);
   } catch (e) {
-    post({ id, ok: false, error: e instanceof Error ? e.message : String(e) });
+    const transfer: Transferable[] = [];
+    if (position?.buffer) transfer.push(position.buffer as ArrayBuffer);
+    if (index?.buffer && index.buffer !== position?.buffer) transfer.push(index.buffer as ArrayBuffer);
+    post({ id, ok: false, error: e instanceof Error ? e.message : String(e), position, index }, transfer);
   }
 };

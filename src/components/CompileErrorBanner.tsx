@@ -29,7 +29,7 @@ export function CompileErrorBanner() {
   if (!error) return null;
 
   return (
-    <div className="pointer-events-auto max-w-[min(32rem,calc(100vw-2rem))] flex items-start gap-2 rounded-lg bg-red-50/95 dark:bg-red-950/90 border border-red-400 dark:border-red-700 px-3 py-2 text-[11px] leading-relaxed text-red-800 dark:text-red-200 shadow-lg backdrop-blur-md">
+    <div role="alert" className="pointer-events-auto max-w-[min(32rem,calc(100vw-2rem))] flex items-start gap-2 rounded-lg bg-red-50/95 dark:bg-red-950/90 border border-red-400 dark:border-red-700 px-3 py-2 text-[11px] leading-relaxed text-red-800 dark:text-red-200 shadow-lg backdrop-blur-md">
       <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
       <span>
         <strong className="font-bold">Scene failed to compile (running last valid state):</strong>

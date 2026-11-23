@@ -29,7 +29,10 @@ type CompiledScad = { vertices: number[]; faces: number[]; renderVertices: numbe
 // - N workers give genuine N-way parallelism for scenes with several scad nodes.
 // Leave headroom for the main thread and the physics worker rather than claiming
 // every core, and cap the pool since each worker holds multi-MB WASM memory.
-const MAX_POOL_SIZE = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 2));
+const MAX_POOL_SIZE = Math.max(
+  1,
+  Math.min(4, ((typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : 4) || 4) - 2),
+);
 
 // Each compile instantiates a fresh WASM module whose linear memory is never
 // released - noExitRuntime:true and no dispose/free is exposed, and the CGAL
@@ -81,6 +84,14 @@ let loadSettle: { resolve: () => void; reject: (e: unknown) => void } | null = n
 const compileCache = new Map<string, CompiledScad>();
 const COMPILE_CACHE_MAX = 50;
 
+function cloneCompiled(c: CompiledScad): CompiledScad {
+  return {
+    vertices: c.vertices.slice(),
+    faces: c.faces.slice(),
+    renderVertices: c.renderVertices.slice(),
+  };
+}
+
 function retire(pw: PoolWorker) {
   const idx = pool.indexOf(pw);
   if (idx !== -1) pool.splice(idx, 1);
@@ -108,13 +119,21 @@ function spawn(): PoolWorker {
       case 'LOAD_ERROR': {
         // This worker can never compile anything. Fail whatever it was given and
         // drop it - don't respawn, or a persistently unreachable CDN would spin.
+        const err = new Error(msg.message);
         const job = pw.job;
         pw.job = null;
         retire(pw);
-        job?.reject(new Error(msg.message));
-        loadSettle?.reject(new Error(msg.message));
-        loadSettle = null;
-        loadingPromise = null; // reset to allow retries
+        job?.reject(err);
+        if (pool.some((p) => !p.job && p.ready)) {
+          dispatch();
+        } else if (pool.length === 0) {
+          loadSettle?.reject(err);
+          loadSettle = null;
+          loadingPromise = null; // reset to allow retries
+          while (queue.length > 0) {
+            queue.shift()!.reject(new Error(msg.message));
+          }
+        }
         break;
       }
 
@@ -158,6 +177,11 @@ function spawn(): PoolWorker {
     retire(pw);
     job?.reject(new Error('SCAD worker crashed.'));
     dispatch();
+    if (loadSettle && pool.length === 0) {
+      loadSettle.reject(new Error('SCAD worker crashed.'));
+      loadSettle = null;
+      loadingPromise = null;
+    }
   };
 
   pool.push(pw);
@@ -211,7 +235,11 @@ export function isCompilerReady(): boolean {
  */
 export async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   const cached = compileCache.get(scadCode);
-  if (cached) return cached;
+  if (cached) {
+    compileCache.delete(scadCode);
+    compileCache.set(scadCode, cached);
+    return cloneCompiled(cached);
+  }
 
   compileListener?.(1);
   try {
@@ -225,11 +253,12 @@ export async function compileSCAD(scadCode: string): Promise<CompiledScad> {
     // model. Caching that would make a caller's retry-on-empty logic pointless,
     // since the retry would just hit the same bad cached result forever.
     if (result.faces.length > 0) {
-      if (compileCache.size >= COMPILE_CACHE_MAX) {
+      if (!compileCache.has(scadCode) && compileCache.size >= COMPILE_CACHE_MAX) {
         const oldestKey = compileCache.keys().next().value;
         if (oldestKey !== undefined) compileCache.delete(oldestKey);
       }
-      compileCache.set(scadCode, result);
+      compileCache.delete(scadCode);
+      compileCache.set(scadCode, cloneCompiled(result));
     }
 
     return result;

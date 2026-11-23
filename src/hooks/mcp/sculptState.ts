@@ -38,7 +38,10 @@ export function sculptMeshOf(node: SceneNode | null | undefined, geomIndex = scu
  */
 export function sculptGeomIndex(node: SceneNode | null | undefined): number {
   const geoms = node?.geoms ?? [];
-  if (node?.isSculpt) return geoms.findIndex((g) => g.type === 'mesh');
+  if (node?.isSculpt) {
+    const nonDerived = geoms.findIndex((g) => g.type === 'mesh' && !g.csgDerived);
+    return nonDerived >= 0 ? nonDerived : geoms.findIndex((g) => g.type === 'mesh');
+  }
   return geoms.findIndex((g) => g.type === 'mesh' && !g.csgDerived && !!g.renderVertices?.length && !!g.faces?.length);
 }
 
@@ -125,11 +128,12 @@ export async function applySculptCutResult(
   while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
   sculptHistory.set(targetId, stack);
 
-  // Metadata first, geometry second — see SCULPT.
+  // Metadata and geometry coalesced into a single 'node-geom' undo entry & recompile.
   const latest = useStore.getState();
-  latest.updateNode(targetId, { sculptEdited: true, sculptVersion: (live.sculptVersion ?? 1) + 1 });
+  latest.recordInteraction('node-geom');
+  latest.updateNode(targetId, { sculptEdited: true, sculptVersion: (live.sculptVersion ?? 1) + 1 }, true);
   const { vertices, renderVertices, faces } = toSceneGeom(result.mesh);
-  latest.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+  latest.updateNodeGeom(targetId, { vertices, renderVertices, faces, paint: undefined }, geomIndex);
 
   const error = useStore.getState().lastCompileError;
   return {

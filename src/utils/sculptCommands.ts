@@ -299,18 +299,27 @@ export function applySculptStroke(
    */
   sink?: { undo?: SculptUndoEntry | null },
 ): SculptStrokeResult {
+  const rawRadius = request.radius !== undefined && Number.isFinite(request.radius) && request.radius > 0
+    ? request.radius
+    : defaultRadiusFor(mesh);
+  const rawStrength = request.strength !== undefined && Number.isFinite(request.strength)
+    ? Math.max(0, Math.min(1, request.strength))
+    : DEFAULT_BRUSH.strength;
+  const rawDetail = request.detail !== undefined && Number.isFinite(request.detail) && request.detail > 0
+    ? request.detail
+    : DEFAULT_BRUSH.detail;
   const settings: BrushSettings = {
     ...DEFAULT_BRUSH,
     type: request.brush ?? 'draw',
-    radius: request.radius ?? defaultRadiusFor(mesh),
-    strength: request.strength ?? DEFAULT_BRUSH.strength,
+    radius: rawRadius,
+    strength: rawStrength,
     invert: request.invert ?? false,
     symmetryX: request.symmetryX ?? Boolean(request.symmetry),
     symmetryAxis: request.symmetry ?? 'x',
-    detail: request.detail ?? DEFAULT_BRUSH.detail,
+    detail: rawDetail,
     dynamicTopology: request.dynamicTopology ?? DEFAULT_BRUSH.dynamicTopology,
-    depth: request.depthMm !== undefined ? Math.max(0, request.depthMm) / 1000 : undefined,
-    hardness: request.hardness !== undefined ? Math.max(0, Math.min(1, request.hardness)) : undefined,
+    depth: request.depthMm !== undefined && Number.isFinite(request.depthMm) ? Math.max(0, request.depthMm) / 1000 : undefined,
+    hardness: request.hardness !== undefined && Number.isFinite(request.hardness) ? Math.max(0, Math.min(1, request.hardness)) : undefined,
   };
 
   // The mesh arrives from the scene graph with no normals computed; the brush
@@ -335,7 +344,13 @@ export function applySculptStroke(
   const fill = settings.type !== 'grab';
   const spacing = Math.max(1e-5, settings.radius * 0.25);
   let previous: number[] | null = null;
+  const finiteNum = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   for (const point of request.at) {
+    if (!Array.isArray(point) || point.length < 3 || !Number.isFinite(point[0] + point[1] + point[2])) {
+      missed.push({ at: point, nearest: null, distance: null });
+      previous = null;
+      continue;
+    }
     if (fill && previous) {
       const d = Math.hypot(point[0] - previous[0], point[1] - previous[1], point[2] - previous[2]);
       const steps = d <= settings.radius * GAP_RADII ? Math.min(64, Math.floor(d / spacing)) : 0;
@@ -363,7 +378,7 @@ export function applySculptStroke(
     applyBrush(session, settings, {
       ...stamp,
       ...(request.delta
-        ? { dx: request.delta[0] ?? 0, dy: request.delta[1] ?? 0, dz: request.delta[2] ?? 0 }
+        ? { dx: finiteNum(request.delta[0]), dy: finiteNum(request.delta[1]), dz: finiteNum(request.delta[2]) }
         : {}),
     });
     applied++;
@@ -468,6 +483,9 @@ export function undoSculptStroke(mesh: SculptMesh, entry: SculptUndoEntry): Scul
 export function probeSurface(mesh: SculptMesh, points: number[][]) {
   recomputeNormals(mesh);
   return points.map((point) => {
+    if (!Array.isArray(point) || point.length < 3 || !Number.isFinite(point[0] + point[1] + point[2])) {
+      return { at: point, nearest: null, normal: null, distance: null };
+    }
     const found = nearestSurfacePoint(mesh, point);
     if (!found) return { at: point, nearest: null, normal: null, distance: null };
     return {

@@ -42,6 +42,37 @@ function collectStale(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
 // Source that failed to compile, so a broken body isn't retried on every scene
 // change. Keyed by the source itself: editing it arms the retry again.
 const failedScad = new Set<string>();
+const scadInFlight = new Map<string, { scad: string; done: Promise<boolean> }>();
+
+function runScadBuild(nodeId: string, scad: string): Promise<boolean> {
+  const existing = scadInFlight.get(nodeId);
+  if (existing && existing.scad === scad) return existing.done;
+  const done: Promise<boolean> = (async () => {
+    const { compileSCAD } = await import('../utils/openscad');
+    try {
+      const compiled = await compileSCAD(scad);
+      if (!compiled.faces || compiled.faces.length === 0) {
+        failedScad.add(scad);
+        console.error(`OpenSCAD compilation produced empty geometry for ${nodeId}.`);
+        return false;
+      }
+      const now = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
+      if (now && now.scad === scad && needsScadBuild(now)) {
+        useStore.getState().updateNodeScad(nodeId, scad, compiled, true);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      failedScad.add(scad);
+      console.error(`OpenSCAD compilation failed for ${nodeId}:`, err);
+      return false;
+    }
+  })().finally(() => {
+    if (scadInFlight.get(nodeId)?.done === done) scadInFlight.delete(nodeId);
+  });
+  scadInFlight.set(nodeId, { scad, done });
+  return done;
+}
 
 /**
  * True for a body carrying OpenSCAD source that has never been built into a
@@ -264,13 +295,17 @@ export async function compileCsgNodes(
 ): Promise<number> {
   const colliders = opts.colliders ?? true;
   const scene = useStore.getState().sceneGraph;
-  const stale = collectStale(scene.nodes);
+  const initialStale = collectStale(scene.nodes);
   const unbuilt = collectUnbuiltScad(scene.nodes);
   const unlaid = collectUnbuiltBrickwork(scene.nodes);
   const staleForms = collectStaleBodyForms(scene.nodes);
   await buildBodyForms(staleForms, true);
-  if (stale.length === 0 && unbuilt.length === 0 && unlaid.length === 0 && (!colliders || collectStaleColliders(scene.nodes).length === 0)) {
-    if (!colliders && collectStaleColliders(scene.nodes).length > 0) scheduleCsgCompile();
+  let meshesChanged = staleForms.length > 0;
+  if (initialStale.length === 0 && unbuilt.length === 0 && unlaid.length === 0 && (!colliders || collectStaleColliders(useStore.getState().sceneGraph.nodes).length === 0)) {
+    if (!colliders && collectStaleColliders(useStore.getState().sceneGraph.nodes).length > 0) scheduleCsgCompile();
+    if (!skipFinalRecompile && meshesChanged) {
+      await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);
+    }
     return staleForms.length;
   }
   if (unlaid.length > 0) {
@@ -282,6 +317,7 @@ export async function compileCsgNodes(
         const now = findNodeById(useStore.getState().sceneGraph.nodes, node.id);
         if (now && brickworkKey(now) === brickworkKey(node) && !now.geoms?.length) {
           useStore.getState().updateNode(node.id, { geoms }, true);
+          meshesChanged = true;
         }
       } catch (err) {
         failedBrickwork.add(brickworkKey(node));
@@ -291,18 +327,14 @@ export async function compileCsgNodes(
   }
 
   if (unbuilt.length > 0) {
-    const { compileSCAD } = await import('../utils/openscad');
-    await Promise.all(unbuilt.map(async node => {
-      const scad = node.scad!;
-      try {
-        const compiled = await compileSCAD(scad);
-        useStore.getState().updateNodeScad(node.id, scad, compiled, true);
-      } catch (err) {
-        failedScad.add(scad);
-        console.error(`OpenSCAD compilation failed for ${node.id}:`, err);
-      }
-    }));
+    const builtFlags = await Promise.all(unbuilt.map((node) => runScadBuild(node.id, node.scad!)));
+    if (builtFlags.some(Boolean)) meshesChanged = true;
   }
+
+  // Re-collect stale boolean bodies after SCAD/brickwork/bodyForm geoms have
+  // landed, so a node with both unbuilt `scad` and `csgEnabled` evaluates its
+  // boolean against the freshly installed base mesh rather than an empty node.
+  const stale = collectStale(useStore.getState().sceneGraph.nodes);
 
   await Promise.all(stale.map(async staleNode => {
     let node = staleNode;
@@ -319,6 +351,7 @@ export async function compileCsgNodes(
         const { features, lost } = keepFoundEdges(node.edgeRounds, found.edges.map((c) => c.edge));
         if (lost > 0) {
           useStore.getState().dropLostEdgeRounds(node.id, features, lost);
+          meshesChanged = true;
           node = findNodeById(useStore.getState().sceneGraph.nodes, node.id) ?? node;
           if (csgHashOf(node) === node.csgHash) return;
         }
@@ -326,7 +359,11 @@ export async function compileCsgNodes(
       const result = await evaluateNodeCsg(node);
       // skipRecompile: one build at the end, so several boolean bodies in a
       // scene can't race overlapping MJCF/WASM builds against each other.
-      if (result) useStore.getState().applyNodeCsg(node.id, result, true);
+      if (result) {
+        const beforeGraph = useStore.getState().sceneGraph;
+        useStore.getState().applyNodeCsg(node.id, result, true);
+        if (useStore.getState().sceneGraph !== beforeGraph) meshesChanged = true;
+      }
     } catch (err) {
       const message = await describeLoadFailure(err instanceof Error ? err.message : String(err));
       console.error(`CSG evaluation failed for ${node.id}:`, err);
@@ -356,7 +393,6 @@ export async function compileCsgNodes(
     }
   }
 
-  const meshesChanged = stale.length + unbuilt.length + unlaid.length + staleForms.length > 0;
   if (!skipFinalRecompile && (meshesChanged || colliderPiecesChanged(staleColliders))) {
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);
   }

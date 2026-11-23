@@ -126,7 +126,7 @@ export const readJoint = (j: JointInfo, v: JointViews): JointHistory => {
     if (j.drive) {
       if (j.drive.actuators.length) out.ctrl = v.ctrl[j.drive.actuators[0]];
       out.actuatorForce = v.qfrcActuator[j.drive.dofadr];
-      out.clutchTorque = -v.qfrcConstraint[j.drive.dofadr];
+      out.clutchTorque = (-v.qfrcConstraint[j.drive.dofadr]) || 0;
     } else if (j.actuators.length) {
       out.ctrl = v.ctrl[j.actuators[0]];
       out.actuatorForce = v.qfrcActuator[j.dofadr];
@@ -169,13 +169,21 @@ export const raycast = (
   mj: Mujoco, model: MjModel, data: MjData,
   origin: number[], dir: number[], maxDist: number, excludeBody: number, names: SensorNames,
 ): RayHit | null => {
+  if (!Array.isArray(origin) || origin.length < 3 || !Number.isFinite(origin[0]) || !Number.isFinite(origin[1]) || !Number.isFinite(origin[2])) {
+    throw new Error('raycast: origin must be a finite [x, y, z]');
+  }
+  if (!Array.isArray(dir) || dir.length < 3 || !Number.isFinite(dir[0]) || !Number.isFinite(dir[1]) || !Number.isFinite(dir[2])) {
+    throw new Error('raycast: dir must be a non-zero [x, y, z]');
+  }
   const len = Math.hypot(dir[0], dir[1], dir[2]);
-  if (!(len > 0)) throw new Error('raycast: dir must be a non-zero [x, y, z]');
+  if (!(len > 0) || !Number.isFinite(len)) throw new Error('raycast: dir must be a non-zero [x, y, z]');
+  if (!(maxDist >= 0)) return null;
+  const safeExclude = Number.isInteger(excludeBody) ? excludeBody : -1;
   const unit = [dir[0] / len, dir[1] / len, dir[2] / len];
   const geomid = new mj.IntBuffer(1);
   const normal = new mj.DoubleBuffer(3);
   try {
-    const dist = mj.mj_ray(model, data, [origin[0], origin[1], origin[2]], unit, ALL_GROUPS, true, excludeBody, geomid, normal);
+    const dist = mj.mj_ray(model, data, [origin[0], origin[1], origin[2]], unit, ALL_GROUPS, true, safeExclude, geomid, normal);
     const g = geomid.GetView()[0];
     if (!(dist >= 0) || g < 0 || dist > maxDist) return null;
     return {
@@ -226,7 +234,13 @@ export const contactsOfBody = (mj: Mujoco, model: MjModel, data: MjData, bodyId:
           mj.mj_contactForce(model, data, i, wrench);
           force = wrench.GetView()[0];
         }
-        out.push({ otherBody: names.bodyNode(otherBody), otherGeom: other >= 0 ? names.geomName(other) : 'cloth', geom: mine >= 0 ? names.geomName(mine) : 'cloth', dist: c.dist, force });
+        out.push({
+          otherBody: otherBody >= 0 ? names.bodyNode(otherBody) : 'unknown',
+          otherGeom: other >= 0 ? names.geomName(other) : 'cloth',
+          geom: mine >= 0 ? names.geomName(mine) : 'cloth',
+          dist: c.dist,
+          force,
+        });
       } finally {
         c.delete();
       }

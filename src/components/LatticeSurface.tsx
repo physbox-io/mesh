@@ -2346,7 +2346,7 @@ export function LatticeSurface({
       const swept = revolveChain(lattice, run, axis, [0, 0, 0], 0, degrees);
       if (!swept) return false;
       if (fromFace === -1) return;
-      if (degrees >= 360) {
+      if (Math.abs(degrees) >= 359.999) {
         // A full turn brings the wall back through the face it started from,
         // which leaves it buried inside the solid — invisible, and a surface
         // the exporter has to make some decision about.
@@ -2445,6 +2445,12 @@ export function LatticeSurface({
         restoreLattice(lattice, snapshot);
         setSelectedFaces([]);
         setSelectedVertices([]);
+        setSelectedEdges([]);
+        setHoveredFace(null);
+        setHoveredEdge(null);
+        setShape(null);
+        setStroke(null);
+        setFreehand(false);
         // The wire indices this hand was holding mean nothing in the snapshot.
         setPending([]);
         wireRef.current = -1;

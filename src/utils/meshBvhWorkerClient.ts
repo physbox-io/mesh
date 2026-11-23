@@ -24,8 +24,22 @@ export class MeshBvhWorkerClient {
     const worker = this.worker;
     if (!worker) return Promise.reject(new Error('BVH worker has been disposed'));
     if (this.pending) return Promise.reject(new Error('BVH worker is already building'));
+    const posAttr = geometry.attributes.position as BufferAttribute | undefined;
+    if (!posAttr || !(posAttr.array instanceof Float32Array)) {
+      return Promise.reject(new Error('BVH worker requires a Float32Array position attribute'));
+    }
     const id = ++this.seq;
     return new Promise<MeshBVH>((resolve, reject) => {
+      const standalone = <T extends Float32Array | Uint32Array | Uint16Array>(arr: T): T =>
+        arr.byteOffset === 0 && arr.byteLength === arr.buffer.byteLength ? arr : (arr.slice() as T);
+      const position = standalone(posAttr.array as Float32Array);
+      const rawIndex = (geometry.index?.array ?? null) as Uint32Array | Uint16Array | null;
+      const index = rawIndex
+        ? (rawIndex.buffer === position.buffer ? (rawIndex.slice() as Uint32Array | Uint16Array) : standalone(rawIndex))
+        : null;
+      const detachedPos = position === posAttr.array;
+      const detachedIdx = !!rawIndex && index === rawIndex;
+
       this.pending = { id, reject };
       worker.onerror = (e) => {
         this.pending = null;
@@ -36,22 +50,26 @@ export class MeshBvhWorkerClient {
         if (msg.id !== id) return;
         this.pending = null;
         if (!msg.ok) {
+          if (detachedPos && msg.position) posAttr.array = msg.position;
+          if (detachedIdx && msg.index && geometry.index) geometry.index.array = msg.index;
           reject(new Error(msg.error));
           return;
         }
-        (geometry.attributes.position as BufferAttribute).array = msg.position;
-        const index = msg.serialized.index as Uint32Array | Uint16Array | null;
-        if (index) {
-          if (geometry.index) geometry.index.array = index;
-          else geometry.setIndex(new BufferAttribute(index, 1, false));
+        if (detachedPos) posAttr.array = msg.position;
+        const outIndex = msg.serialized.index as Uint32Array | Uint16Array | null;
+        if (outIndex) {
+          if (geometry.index && geometry.index.array.constructor === outIndex.constructor && geometry.index.count === outIndex.length) {
+            geometry.index.array = outIndex;
+            geometry.index.needsUpdate = true;
+          } else {
+            geometry.setIndex(new BufferAttribute(outIndex, 1, false));
+          }
         }
         const bvh = MeshBVH.deserialize(msg.serialized, geometry, { setIndex: false });
         geometry.boundingBox = bvh.getBoundingBox(new Box3());
         resolve(bvh);
       };
 
-      const position = geometry.attributes.position.array as Float32Array;
-      const index = (geometry.index?.array ?? null) as Uint32Array | Uint16Array | null;
       const transfer: Transferable[] = [position.buffer as ArrayBuffer];
       if (index) transfer.push(index.buffer as ArrayBuffer);
       const { onProgress: _onProgress, ...rest } = options;

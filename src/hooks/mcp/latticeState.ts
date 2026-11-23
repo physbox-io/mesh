@@ -70,7 +70,8 @@ export function pushLatticeHistory(targetId: string, snapshot: Lattice) {
 export function commitLattice(node: SceneNode, lattice: Lattice) {
   fuseTouchingParts(lattice);
   const store = useStore.getState();
-  store.updateNode(node.id, { latticeVersion: (node.latticeVersion ?? 1) + 1 });
+  store.recordInteraction('lattice');
+  store.updateNode(node.id, { latticeVersion: (node.latticeVersion ?? 1) + 1 }, true);
   store.applyLattice(node.id, serializeCage(lattice), node.latticeSubdiv ?? 0);
 }
 

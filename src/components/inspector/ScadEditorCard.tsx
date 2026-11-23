@@ -3,6 +3,7 @@ import { Settings, Zap } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { compileCsgNodes } from '../../hooks/useCsgCompile';
 import { compileSCAD, isCompilerReady } from '../../utils/openscad';
+import { findNodeById } from '../../utils/sceneTree';
 import { generateScadForNode, parseScadVariables, replaceVarInCode } from '../../utils/scadSource';
 import type { SceneNode } from '../../types/scene';
 import { RangeInput } from '../RangeInput';
@@ -40,18 +41,6 @@ function ScadEditor({ node }: { node: SceneNode }) {
   const [scadError, setScadError] = useState<string | null>(null);
   const [isScadCompiling, setIsScadCompiling] = useState(false);
 
-  // The editor follows the stored source: a compile, an undo or the MCP
-  // bridge can each change it underneath the textarea. Only the source — an
-  // edit anywhere else on the body leaves an unsaved draft alone.
-  const [shownScad, setShownScad] = useState(node.scad);
-  if (node.scad !== shownScad) {
-    setShownScad(node.scad);
-    setScadText(node.scad ?? '');
-    setScadError(null);
-  }
-
-  const scadVars = useMemo(() => parseScadVariables(scadText), [scadText]);
-
   // OpenSCAD Slider Debouncing State
   const [slidingValues, setSlidingValues] = useState<Record<string, number>>({});
 
@@ -65,67 +54,167 @@ function ScadEditor({ node }: { node: SceneNode }) {
     slidingValuesRef.current = slidingValues;
   }, [slidingValues]);
 
-  const updateCodeTimeoutRef = useRef<number | null>(null);
+  const updateCodeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const compileGenRef = useRef(0);
+  const mountedRef = useRef(true);
+  const lastCommittedScadRef = useRef<string | undefined>(node.scad);
   const nodeId = node.id;
+
+  const cancelPendingSlide = useCallback(() => {
+    if (updateCodeTimeoutRef.current !== null) {
+      clearTimeout(updateCodeTimeoutRef.current);
+      updateCodeTimeoutRef.current = null;
+    }
+    slidingValuesRef.current = {};
+    if (mountedRef.current) {
+      setSlidingValues({});
+    }
+  }, []);
+
+  // The editor follows the stored source: a compile, an undo or the MCP
+  // bridge can each change it underneath the textarea. Only the source — an
+  // edit anywhere else on the body leaves an unsaved draft alone.
+  const [shownScad, setShownScad] = useState(node.scad);
+  if (node.scad !== shownScad) {
+    setShownScad(node.scad);
+    setScadText(node.scad ?? '');
+    setScadError(null);
+    setSlidingValues({});
+  }
+
+  // An external source change (Undo, preset reload, MCP) supersedes any
+  // in-flight compile or pending slider timer from before it.
+  useEffect(() => {
+    if (node.scad !== lastCommittedScadRef.current) {
+      lastCommittedScadRef.current = node.scad;
+      compileGenRef.current += 1;
+      setIsScadCompiling(false);
+      if (updateCodeTimeoutRef.current !== null) {
+        clearTimeout(updateCodeTimeoutRef.current);
+        updateCodeTimeoutRef.current = null;
+      }
+      slidingValuesRef.current = {};
+      scadTextRef.current = node.scad ?? '';
+    }
+  }, [node.scad]);
+
+  const scadVars = useMemo(() => parseScadVariables(scadText), [scadText]);
 
   // Writes the slider values into the source and compiles it, for this body.
   const commitSlide = useCallback(async () => {
     updateCodeTimeoutRef.current = null;
+    const pendingSlides = slidingValuesRef.current;
+    // Clear taken slider deltas now rather than in `finally`, so a new slider
+    // drag made while WASM compiles is preserved for the next debounce.
+    slidingValuesRef.current = {};
+    if (mountedRef.current) {
+      setSlidingValues({});
+    }
+
+    if (!findNodeById(useStore.getState().sceneGraph.nodes, nodeId)) {
+      return;
+    }
+
     let updated = scadTextRef.current;
-    for (const [name, value] of Object.entries(slidingValuesRef.current)) {
+    for (const [name, value] of Object.entries(pendingSlides)) {
       updated = replaceVarInCode(updated, name, value);
     }
-    setScadText(updated);
+    scadTextRef.current = updated;
+    if (mountedRef.current) {
+      setScadText(updated);
+      setIsScadCompiling(true);
+      setScadError(null);
+    }
 
-    setIsScadCompiling(true);
-    setScadError(null);
+    const myGen = ++compileGenRef.current;
     try {
       const compiled = await compileSCAD(updated);
+      if (myGen !== compileGenRef.current) return;
+      const current = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
+      if (!current) return;
+      lastCommittedScadRef.current = updated;
       useStore.getState().updateNodeScad(nodeId, updated, compiled);
+      if (findNodeById(useStore.getState().sceneGraph.nodes, nodeId)?.csgEnabled) {
+        await compileCsgNodes();
+      }
     } catch (e) {
+      if (myGen !== compileGenRef.current) return;
       console.error('OpenSCAD Auto-Compilation Error:', e);
-      setScadError((e as Error).message || 'Auto-compilation failed.');
+      if (mountedRef.current) {
+        setScadError((e as Error).message || 'Auto-compilation failed.');
+      }
     } finally {
-      setIsScadCompiling(false);
-      setSlidingValues({});
+      if (mountedRef.current && myGen === compileGenRef.current) {
+        setIsScadCompiling(false);
+      }
     }
   }, [nodeId]);
 
   const debouncedUpdateCode = useCallback(() => {
-    if (updateCodeTimeoutRef.current) {
-      window.clearTimeout(updateCodeTimeoutRef.current);
+    if (updateCodeTimeoutRef.current !== null) {
+      clearTimeout(updateCodeTimeoutRef.current);
     }
-    updateCodeTimeoutRef.current = window.setTimeout(commitSlide, 300);
+    updateCodeTimeoutRef.current = setTimeout(commitSlide, 300);
   }, [commitSlide]);
 
   // A slide still waiting when the editor goes (another body selected) is
   // saved now, to the body it was made on, rather than dropped.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (updateCodeTimeoutRef.current) {
-        window.clearTimeout(updateCodeTimeoutRef.current);
+      mountedRef.current = false;
+      if (updateCodeTimeoutRef.current !== null) {
+        clearTimeout(updateCodeTimeoutRef.current);
+        updateCodeTimeoutRef.current = null;
         void commitSlide();
       }
     };
   }, [commitSlide]);
 
   const handleCompileScad = useCallback(async () => {
+    let sourceToCompile = scadTextRef.current;
+    if (updateCodeTimeoutRef.current !== null || Object.keys(slidingValuesRef.current).length > 0) {
+      if (updateCodeTimeoutRef.current !== null) {
+        clearTimeout(updateCodeTimeoutRef.current);
+        updateCodeTimeoutRef.current = null;
+      }
+      for (const [name, value] of Object.entries(slidingValuesRef.current)) {
+        sourceToCompile = replaceVarInCode(sourceToCompile, name, value);
+      }
+      slidingValuesRef.current = {};
+      setSlidingValues({});
+      scadTextRef.current = sourceToCompile;
+      setScadText(sourceToCompile);
+    }
+
+    const myGen = ++compileGenRef.current;
     setIsScadCompiling(true);
     setScadError(null);
     try {
-      const compiled = await compileSCAD(scadText);
-      useStore.getState().updateNodeScad(node.id, scadText, compiled);
+      const compiled = await compileSCAD(sourceToCompile);
+      if (myGen !== compileGenRef.current) return;
+      const current = findNodeById(useStore.getState().sceneGraph.nodes, nodeId);
+      if (!current) return;
+      lastCommittedScadRef.current = sourceToCompile;
+      useStore.getState().updateNodeScad(nodeId, sourceToCompile, compiled);
       // A part with a cut or a rounding is a boolean over this mesh: build it
       // now rather than leave it to the debounced auto-compiler, which does
       // not reliably pick up a source change (see compileCsgNodes).
-      if (node.csgEnabled) await compileCsgNodes();
+      if (findNodeById(useStore.getState().sceneGraph.nodes, nodeId)?.csgEnabled) {
+        await compileCsgNodes();
+      }
     } catch (e) {
+      if (myGen !== compileGenRef.current) return;
       console.error('OpenSCAD Compilation Error:', e);
-      setScadError((e as Error).message || 'Compilation failed.');
+      if (mountedRef.current) {
+        setScadError((e as Error).message || 'Compilation failed.');
+      }
     } finally {
-      setIsScadCompiling(false);
+      if (mountedRef.current && myGen === compileGenRef.current) {
+        setIsScadCompiling(false);
+      }
     }
-  }, [node, scadText]);
+  }, [nodeId]);
 
   return (
     <>
@@ -164,6 +253,11 @@ function ScadEditor({ node }: { node: SceneNode }) {
           <select
             onChange={(e) => {
               const templateVal = e.target.value;
+              if (!templateVal) return;
+              cancelPendingSlide();
+              compileGenRef.current += 1;
+              setIsScadCompiling(false);
+              setScadError(null);
               if (templateVal === 'hollow_cube') {
                 setScadText(`// Hollow Cube\nsize = 0.6; // [0.2:0.05:1.2]\nhole_d = 0.75; // [0.3:0.05:1.5]\ndifference() {\n  cube([size, size, size], center=true);\n  sphere(d=hole_d, $fn=24);\n}`);
               } else if (templateVal === 'wheel') {
@@ -239,7 +333,12 @@ function ScadEditor({ node }: { node: SceneNode }) {
         <div className="relative">
           <textarea
             value={scadText}
-            onChange={(e) => setScadText(e.target.value)}
+            onChange={(e) => {
+              cancelPendingSlide();
+              compileGenRef.current += 1;
+              setIsScadCompiling(false);
+              setScadText(e.target.value);
+            }}
             placeholder="// Write OpenSCAD here... e.g. cube(10);"
             className="w-full h-44 font-mono text-[11px] leading-relaxed p-2.5 bg-slate-950 text-violet-300 rounded-lg border border-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent resize-y shadow-inner"
             spellCheck={false}

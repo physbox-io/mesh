@@ -82,19 +82,22 @@ export function sculptActions({ set, get }: SliceDeps): SculptActions {
     // At the size the body already is, so swapping a base never jumps in scale.
     setSculptBase: (nodeId, base) => {
       const node = findNode(get().sceneGraph.nodes, nodeId);
-      const geomIndex = Math.max(0, (node?.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
-      const old = node?.geoms?.[geomIndex];
+      if (!node?.geoms?.length) return;
+      const nonDerived = node.geoms.findIndex((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
+      const geomIndex = nonDerived >= 0 ? nonDerived : Math.max(0, node.geoms.findIndex((g: SceneGeom) => g.type === 'mesh'));
+      const old = node.geoms[geomIndex];
       const size = old?.renderVertices?.length && old.faces?.length
         ? longestSide(fromSceneGeom(old.renderVertices, old.faces))
         : DEFAULT_SCULPT_SIZE;
       const mesh = buildSculptBaseSized(base, size || DEFAULT_SCULPT_SIZE);
       const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-      get().updateNodeGeom(nodeId, { vertices, renderVertices, faces }, geomIndex);
+      get().recordInteraction('node-geom');
       get().updateNode(nodeId, {
         sculptBase: base,
-        sculptVersion: (node?.sculptVersion ?? 1) + 1,
+        sculptVersion: (node.sculptVersion ?? 1) + 1,
         sculptEdited: false,
-      });
+      }, true);
+      get().updateNodeGeom(nodeId, { vertices, renderVertices, faces, paint: undefined }, geomIndex);
     },
 
     resizeSculpt: (nodeId, size) => {
@@ -104,25 +107,28 @@ export function sculptActions({ set, get }: SliceDeps): SculptActions {
       if (!geom?.renderVertices?.length || !geom.faces?.length) return;
       const source = fromSceneGeom(geom.renderVertices, geom.faces);
       const mesh = Array.isArray(size) ? resizeSculptMeshAxes(source, size) : resizeSculptMesh(source, size);
+      get().recordInteraction('node-geom');
+      get().updateNode(nodeId, { sculptVersion: (node!.sculptVersion ?? 1) + 1 }, true);
       get().updateNodeGeom(nodeId, toSceneGeom(mesh), geomIndex);
-      get().updateNode(nodeId, { sculptVersion: (node?.sculptVersion ?? 1) + 1 });
     },
 
     setSculptBrush: (patch) => set((state) => ({ sculptBrush: { ...state.sculptBrush, ...patch } })),
 
     separateSculpt: (nodeId, pieces, geomName) => {
       const node = findNode(get().sceneGraph.nodes, nodeId);
-      if (!node || pieces.length === 0) return [nodeId];
+      if (!node?.geoms?.length || pieces.length === 0) return [nodeId];
       get().prepareForDiscreteChange();
       const newScene = cloneSceneGraph(get().sceneGraph);
       const first = findNode(newScene.nodes, nodeId);
-      if (!first) return [nodeId];
+      if (!first?.geoms?.length) return [nodeId];
 
       const index = (() => {
         const byName = geomName ? (first.geoms ?? []).findIndex((g: SceneGeom) => g.name === geomName) : -1;
         return byName >= 0 ? byName : Math.max(0, (first.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived));
       })();
       const template = first.geoms[index];
+      if (!template) return [nodeId];
+      delete template.paint;
       Object.assign(template, toSceneGeom(pieces[0]));
       dropStaleColliders(first);
       first.sculptEdited = true;

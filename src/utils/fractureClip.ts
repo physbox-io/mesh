@@ -102,41 +102,59 @@ export function fractureSolid(
   faces: number[],
   opts: SeedOptions = {},
 ): FractureCell[] {
-  const hull = convexHullOf(Array.from({ length: verts.length / 3 }, (_, i) => [verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2]]));
+  const pts: [number, number, number][] = [];
+  for (let i = 0; i + 2 < verts.length; i += 3) pts.push([verts[i], verts[i + 1], verts[i + 2]]);
+  const hull = convexHullOf(pts);
   const solid = solidOf(wasm, verts, faces);
   const hullCells = () => voronoiCells(verts, faces, seedPoints(verts, opts));
   if (!solid || !hull) { solid?.delete(); return hullCells(); }
-  const volume = solid.volume();
-  if (volume / hull.volume > CONVEX_ENOUGH) { solid.delete(); return hullCells(); }
-
-  const cells = voronoiCells(verts, faces, seedsInside(verts, faces, opts));
-  const shards: FractureCell[] = [];
   try {
-    for (const cell of cells) {
-      const points: [number, number, number][] = [];
-      for (let i = 0; i < cell.verts.length; i += 3) points.push([cell.verts[i], cell.verts[i + 1], cell.verts[i + 2]]);
-      const region = wasm.Manifold.hull(points);
-      const piece = solid.intersect(region);
-      region.delete();
-      const parts = piece.decompose();
-      piece.delete();
-      for (const part of parts) {
-        if (part.volume() >= volume * MIN_SHARD_SHARE) {
-          const shard = cellOf(part);
-          if (shard) shards.push(shard);
+    const volume = solid.volume();
+    if (volume / hull.volume > CONVEX_ENOUGH) return hullCells();
+
+    const clipCells = (cells: FractureCell[]): FractureCell[] => {
+      const out: FractureCell[] = [];
+      for (const cell of cells) {
+        const points: [number, number, number][] = [];
+        for (let i = 0; i + 2 < cell.verts.length; i += 3) points.push([cell.verts[i], cell.verts[i + 1], cell.verts[i + 2]]);
+        const region = wasm.Manifold.hull(points);
+        let piece: ManifoldT | null = null;
+        let parts: ManifoldT[] = [];
+        try {
+          piece = solid.intersect(region);
+          parts = piece.decompose();
+          for (const part of parts) {
+            if (part.volume() >= volume * MIN_SHARD_SHARE) {
+              const shard = cellOf(part);
+              if (shard) out.push(shard);
+            }
+          }
+        } finally {
+          for (const part of parts) part.delete();
+          piece?.delete();
+          region.delete();
         }
-        part.delete();
       }
+      return out;
+    };
+
+    const inside = seedsInside(verts, faces, opts);
+    let shards = inside.length >= 2 ? clipCells(voronoiCells(verts, faces, inside)) : [];
+    // Thin-walled hollow meshes can reject nearly every random bounding-box seed;
+    // clipping the hull's own Voronoi cells against `solid` still yields hollow
+    // wall shards rather than solid hull bricks.
+    if (shards.length < 2) {
+      shards = clipCells(hullCells());
     }
+    // A cell can fall across two parts of the body and give two shards; past
+    // twice what was asked for, the smallest go (their mass goes with the rest,
+    // which buildShatterGraph shares out by volume), or the shard budget the
+    // store set would be overrun.
+    const cap = 2 * clampPieces(opts.pieces ?? DEFAULT_FRACTURE_PIECES);
+    if (shards.length > cap) shards.sort((a, b) => b.volume - a.volume).length = cap;
+    // A cut that came to nothing usable is no reason not to break at all.
+    return shards.length >= 2 ? shards : hullCells();
   } finally {
     solid.delete();
   }
-  // A cell can fall across two parts of the body and give two shards; past
-  // twice what was asked for, the smallest go (their mass goes with the rest,
-  // which buildShatterGraph shares out by volume), or the shard budget the
-  // store set would be overrun.
-  const cap = 2 * clampPieces(opts.pieces ?? DEFAULT_FRACTURE_PIECES);
-  if (shards.length > cap) shards.sort((a, b) => b.volume - a.volume).length = cap;
-  // A cut that came to nothing usable is no reason not to break at all.
-  return shards.length >= 2 ? shards : hullCells();
 }

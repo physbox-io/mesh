@@ -44,6 +44,7 @@ export const EdgeRoundPanel: React.FC = () => {
   const mostMm = Math.floor(most * 1e5) / 100;
 
   const setSize = (metres: number) => {
+    if (!Number.isFinite(metres)) return;
     if (most > 0 && metres > most + 1e-9) {
       setNotice(`${mm(metres)} mm is too big for ${pickedCandidates.length === 1 ? 'this edge' : 'these edges'} — ${mostMm} mm is the most that fits, so it is set to that.`);
       store.updateEdgeRoundDraft({ size: Math.floor(most * 1e5) / 1e5 });
@@ -70,6 +71,7 @@ export const EdgeRoundPanel: React.FC = () => {
     if (!body) return;
     const bottom = selectEdges(body.edges, 'bottom').picked;
     const fits = maxSizeFor(bottom, 'chamfer');
+    if (bottom.length === 0 || !(fits > 0)) return;
     store.updateEdgeRoundDraft({ mode: 'chamfer', picked: bottom.map((c) => c.edge), size: Math.min(0.0005, fits) });
   };
 

@@ -36,12 +36,18 @@ export const latticeCommands: McpCommands = {
   CREATE_LATTICE: async (msg) => {
     const { name, pos, sizeMm, edit, empty, ops, subdiv: initSubdiv, thicknessMm: initThickness } = msg;
     const parent = resolveParent(useStore.getState().sceneGraph.nodes, msg.parent);
+    if (Array.isArray(pos) && pos.length === 3 && pos.some((v: unknown) => typeof v !== 'number' || !Number.isFinite(v))) {
+      throw new Error('pos must be [x, y, z] finite numbers in metres');
+    }
+    if (sizeMm !== undefined && !(typeof sizeMm === 'number' && Number.isFinite(sizeMm) && sizeMm >= 0)) {
+      throw new Error('sizeMm must be a non-negative finite number of millimetres');
+    }
     const position: [number, number, number] = Array.isArray(pos) && pos.length === 3 ? [pos[0], pos[1], pos[2]] : [0, 0, 0.2];
     const firstOp = Array.isArray(ops) && ops.length > 0
       ? String(ops[0]?.op ?? ops[0]?.type ?? '').toLowerCase()
       : '';
     const startEmpty = empty === true || sizeMm === 0 || (sizeMm === undefined && firstOp === 'revolve');
-    const size = typeof sizeMm === 'number' && sizeMm > 0 ? sizeMm : 40;
+    const size = typeof sizeMm === 'number' && Number.isFinite(sizeMm) && sizeMm > 0 ? sizeMm : 40;
     const halfSteps = Math.max(1, Math.round((size / 2) / (LATTICE_UNIT * 1000)));
 
     const id = `lattice_${Math.random().toString(36).substring(2, 10)}`;
@@ -168,10 +174,12 @@ export const latticeCommands: McpCommands = {
   LATTICE_SMOOTH: async (msg, { store }) => {
     const { targetId, level } = msg as Msg<{ targetId: string }>;
     const { node } = latticeTarget(store, targetId);
-    const wanted = Math.max(0, Math.min(2, Math.round(Number(level) || 0)));
+    const raw = Number(level);
+    const wanted = Math.max(0, Math.min(2, Math.round(Number.isFinite(raw) ? raw : 0)));
     useStore.getState().setLatticeSubdiv(node.id, wanted);
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
-    const mesh = after?.geoms?.find((g: SceneGeom) => g.type === 'mesh');
+    const mesh = after?.geoms?.find((g: SceneGeom) => g.latticeGeom)
+      ?? after?.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
     return {
       ok: true, id: node.id, level: wanted,
       ...latticeSummary(latticeOf(after)),
@@ -291,10 +299,12 @@ export const latticeCommands: McpCommands = {
   LATTICE_WALL: async (msg, { store }) => {
     const { targetId, thicknessMm } = msg as Msg<{ targetId: string }>;
     const { node } = latticeTarget(store, targetId);
-    const mm = Math.max(0, Number(thicknessMm) || 0);
+    const raw = Number(thicknessMm);
+    const mm = Math.max(0, Number.isFinite(raw) ? raw : 0);
     useStore.getState().setLatticeThickness(node.id, mm);
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
-    const mesh = after?.geoms?.find((g: SceneGeom) => g.type === 'mesh');
+    const mesh = after?.geoms?.find((g: SceneGeom) => g.latticeGeom)
+      ?? after?.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
     return {
       ok: true, id: node.id, thicknessMm: mm,
       ...latticeSummary(latticeOf(after)),

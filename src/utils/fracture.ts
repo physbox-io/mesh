@@ -105,7 +105,7 @@ export function seedPoints(verts: number[], opts: SeedOptions = {}): [number, nu
 
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < verts.length; i += 3) {
+  for (let i = 0; i + 2 < verts.length; i += 3) {
     if (verts[i] < minX) minX = verts[i];
     if (verts[i] > maxX) maxX = verts[i];
     if (verts[i + 1] < minY) minY = verts[i + 1];
@@ -223,7 +223,7 @@ export function voronoiCells(
 function boundingPlanes(verts: number[]): Plane[] {
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < verts.length; i += 3) {
+  for (let i = 0; i + 2 < verts.length; i += 3) {
     if (verts[i] < minX) minX = verts[i]; if (verts[i] > maxX) maxX = verts[i];
     if (verts[i + 1] < minY) minY = verts[i + 1]; if (verts[i + 1] > maxY) maxY = verts[i + 1];
     if (verts[i + 2] < minZ) minZ = verts[i + 2]; if (verts[i + 2] > maxZ) maxZ = verts[i + 2];
@@ -303,7 +303,7 @@ function spreadPoints(points: [number, number, number][], max: number): [number,
 
 function pointsOf(verts: number[]): [number, number, number][] {
   const out: [number, number, number][] = [];
-  for (let i = 0; i < verts.length; i += 3) out.push([verts[i], verts[i + 1], verts[i + 2]]);
+  for (let i = 0; i + 2 < verts.length; i += 3) out.push([verts[i], verts[i + 1], verts[i + 2]]);
   return out;
 }
 
@@ -338,8 +338,9 @@ function hullPlanes(verts: number[], faces: number[]): Plane[] {
 
   const planes: Plane[] = [];
   const seen = new Set<string>();
-  for (let f = 0; f < hf.length; f += 3) {
+  for (let f = 0; f + 2 < hf.length; f += 3) {
     const a = hf[f] * 3, b = hf[f + 1] * 3, c = hf[f + 2] * 3;
+    if (a + 2 >= hv.length || b + 2 >= hv.length || c + 2 >= hv.length) continue;
     const ux = hv[b] - hv[a], uy = hv[b + 1] - hv[a + 1], uz = hv[b + 2] - hv[a + 2];
     const vx = hv[c] - hv[a], vy = hv[c + 1] - hv[a + 1], vz = hv[c + 2] - hv[a + 2];
     let nx = uy * vz - uz * vy;

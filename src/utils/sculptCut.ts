@@ -50,8 +50,9 @@ export function loadManifold(): Promise<ManifoldToplevel> {
     loading = (async () => {
       const { default: Module } = await import('manifold-3d');
       let config: { locateFile: () => string } | undefined;
-      // A window or a worker is a Vite bundle; neither is Node.
-      if (typeof window !== 'undefined' || typeof (globalThis as { importScripts?: unknown }).importScripts === 'function') {
+      // A window or a worker is a Vite bundle; neither is Node (even when a test shims `window`).
+      const isNode = Boolean((globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node);
+      if (!isNode && (typeof window !== 'undefined' || typeof (globalThis as { importScripts?: unknown }).importScripts === 'function')) {
         const { default: wasmUrl } = await import('manifold-3d/manifold.wasm?url');
         config = { locateFile: () => wasmUrl };
       }
@@ -369,6 +370,10 @@ export function polygonPrismMap(
   direction?: number[],
 ): { loop: [number, number][]; map: PrismMap } | null {
   if (polygon.length < 3) return null;
+  if (polygon.some((p) => !Array.isArray(p) || p.length < 3 || !Number.isFinite(p[0] + p[1] + p[2]))) return null;
+  if (direction !== undefined && (!Array.isArray(direction) || direction.length < 3 || !Number.isFinite(direction[0] + direction[1] + direction[2]))) {
+    return null;
+  }
   const c = [0, 0, 0];
   for (const p of polygon) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
   c[0] /= polygon.length; c[1] /= polygon.length; c[2] /= polygon.length;
@@ -386,7 +391,7 @@ export function polygonPrismMap(
     d = n;
   }
   const dl = Math.hypot(d[0], d[1], d[2]);
-  if (dl < 1e-12) return null;
+  if (!Number.isFinite(dl) || dl < 1e-12) return null;
   const w = [d[0] / dl, d[1] / dl, d[2] / dl];
   // Any vector not parallel to w, crossed with it, gives the plane's axes.
   const helper = Math.abs(w[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];

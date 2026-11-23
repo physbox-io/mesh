@@ -25,7 +25,7 @@
 // base can be swapped for any other without the object jumping in scale.
 // ---------------------------------------------------------------------------
 
-import { createSculptMesh, type SculptMesh, icosphere, meshBounds } from './sculptMesh';
+import { createSculptMesh, type SculptMesh, icosphere, meshBounds, recomputeNormals } from './sculptMesh';
 import { surfaceNets, skeletonField, skeletonBounds, type Bone } from './surfaceNets';
 
 /** Roughly how big any base comes out, longest axis, in metres. */
@@ -523,12 +523,14 @@ export function longestSide(mesh: SculptMesh): number {
  * and a base sitting on z = 0 still does.
  */
 export function resizeSculptMesh(mesh: SculptMesh, size: number): SculptMesh {
+  if (!Number.isFinite(size)) return mesh;
   const current = longestSide(mesh);
   const target = Math.min(MAX_SCULPT_SIZE, Math.max(MIN_SCULPT_SIZE, size));
   if (!(current > 0)) return mesh;
   const k = target / current;
   for (let i = 0; i < mesh.vertexCount * 3; i++) mesh.positions[i] *= k;
   mesh.revision++;
+  recomputeNormals(mesh);
   return mesh;
 }
 
@@ -543,13 +545,14 @@ export function resizeSculptMeshAxes(mesh: SculptMesh, size: (number | null)[]):
   const k = [0, 1, 2].map((i) => {
     const want = size[i];
     const extent = max[i] - min[i];
-    if (want == null || !(extent > 0)) return 1;
+    if (want == null || !Number.isFinite(want) || !(extent > 0)) return 1;
     return Math.min(MAX_SCULPT_SIZE, Math.max(MIN_SCULPT_SIZE, want)) / extent;
   });
   for (let v = 0; v < mesh.vertexCount; v++) {
     for (let i = 0; i < 3; i++) mesh.positions[v * 3 + i] *= k[i];
   }
   mesh.revision++;
+  recomputeNormals(mesh);
   return mesh;
 }
 

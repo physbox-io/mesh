@@ -51,10 +51,14 @@ export function wedgeAngle(edge: RoundEdge): number {
   return Math.acos(Math.max(-1, Math.min(1, dot(edge.t1, edge.t2))));
 }
 
+const MIN_WEDGE_ANGLE = 1e-4;
+const MAX_WEDGE_ANGLE = Math.PI - 1e-4;
+
 /** How far back along each face a rounding of this size starts. */
 export function setbackOf(edge: RoundEdge, mode: 'fillet' | 'chamfer', size: number): number {
   if (mode === 'chamfer') return size;
-  return size / Math.tan(wedgeAngle(edge) / 2);
+  const theta = Math.max(MIN_WEDGE_ANGLE, Math.min(MAX_WEDGE_ANGLE, wedgeAngle(edge)));
+  return size / Math.tan(theta / 2);
 }
 
 /**
@@ -63,7 +67,7 @@ export function setbackOf(edge: RoundEdge, mode: 'fillet' | 'chamfer', size: num
  * pushed-T1, T1, [arc…], T2, pushed-T2, pushed-C.
  */
 export function crossSection(edge: RoundEdge, mode: 'fillet' | 'chamfer', size: number, arcSegments: number): Vec3[] {
-  const theta = wedgeAngle(edge);
+  const theta = Math.max(MIN_WEDGE_ANGLE, Math.min(MAX_WEDGE_ANGLE, wedgeAngle(edge)));
   const d = setbackOf(edge, mode, size);
   const t1 = norm(edge.t1);
   const t2 = norm(edge.t2);
@@ -77,17 +81,19 @@ export function crossSection(edge: RoundEdge, mode: 'fillet' | 'chamfer', size: 
   const T2 = scale(t2, d);
   const out: Vec3[] = [add(T1, scale(o1, eps)), T1];
   if (mode === 'fillet') {
-    const bis = norm(add(t1, t2));
+    const sumT = add(t1, t2);
+    const bis = len(sumT) > 1e-9 ? norm(sumT) : norm(add(o1, o2));
     const O = scale(bis, size / Math.sin(theta / 2));
     const a1 = sub(T1, O);
     const a2 = sub(T2, O);
     const sweep = Math.PI - theta; // the arc's angle, always under 180°
+    const sinSweep = Math.sin(sweep);
     const n = Math.max(2, arcSegments);
     for (let k = 1; k < n; k++) {
       const f = k / n;
       // Slerp between the two radii: both have length `size`.
-      const w1 = Math.sin((1 - f) * sweep) / Math.sin(sweep);
-      const w2 = Math.sin(f * sweep) / Math.sin(sweep);
+      const w1 = sinSweep > 1e-6 ? Math.sin((1 - f) * sweep) / sinSweep : 1 - f;
+      const w2 = sinSweep > 1e-6 ? Math.sin(f * sweep) / sinSweep : f;
       out.push(add(O, add(scale(a1, w1), scale(a2, w2))));
     }
   }
@@ -145,7 +151,7 @@ export function edgeSolidScad(edge: RoundEdge, mode: 'fillet' | 'chamfer', size:
   const ref = norm(edge.ref);
   const axis = norm(edge.axis);
   const side = cross(axis, ref);
-  const pts = section.map((p) => `[${fmt(edge.radius + dot(p, ref))},${fmt(dot(p, axis))}]`).join(',');
+  const pts = section.map((p) => `[${fmt(Math.max(0, edge.radius + dot(p, ref)))},${fmt(dot(p, axis))}]`).join(',');
   return `multmatrix(${matrixRows([ref, side, axis], edge.centre)}) rotate_extrude($fn=${Math.max(3, edge.segments)}) polygon([${pts}]);`;
 }
 
@@ -238,13 +244,13 @@ export function edgeRoundSolids(features: EdgeRoundFeature[] | undefined, fn: nu
   const filletsBySize = new Map<number, RoundEdge[]>();
   const concave: { edge: Extract<RoundEdge, { kind: 'line' }>; mode: 'fillet' | 'chamfer'; size: number }[] = [];
   for (const feature of features || []) {
-    if (!(feature.size > 0)) continue;
+    if (!Number.isFinite(feature.size) || !(feature.size > 0)) continue;
     for (const edge of feature.edges) {
       if (edge.kind === 'line' && !edge.convex) concave.push({ edge, mode: feature.mode, size: feature.size });
     }
   }
   for (const feature of features || []) {
-    if (!(feature.size > 0)) continue;
+    if (!Number.isFinite(feature.size) || !(feature.size > 0)) continue;
     for (const edge of feature.edges) {
       const solid = edgeSolidScad(edge.convex ? stopShortOfFillers(edge, concave) : edge, feature.mode, feature.size, fn);
       (edge.convex ? cutters : fillers).push(solid);
@@ -261,7 +267,7 @@ export function edgeRoundSolids(features: EdgeRoundFeature[] | undefined, fn: nu
 }
 
 export function hasEdgeRounds(node: SceneNode): boolean {
-  return !!node.edgeRounds?.some((f) => f.size > 0 && f.edges.length > 0);
+  return !!node.edgeRounds?.some((f) => Number.isFinite(f.size) && f.size > 0 && f.edges.length > 0);
 }
 
 /**
@@ -312,7 +318,7 @@ export function withRoundFeature(
   feature: EdgeRoundFeature,
   replace: number | null,
 ): EdgeRoundFeature[] {
-  const keep = feature.edges.length > 0 && feature.size > 0;
+  const keep = feature.edges.length > 0 && Number.isFinite(feature.size) && feature.size > 0;
   const out: EdgeRoundFeature[] = [];
   (features || []).forEach((f, i) => {
     if (i === replace) {

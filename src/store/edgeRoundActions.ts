@@ -6,7 +6,7 @@
 import type { SceneGeom, EdgeRoundFeature, RoundEdge } from '../types/scene';
 import { withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import { hasBooleanOps } from '../utils/csg';
-import { cloneSceneGraph, findNode } from './sceneClone';
+import { cloneSceneGraph, findNode, sameValue } from './sceneClone';
 import { writeEdgeRounds } from './geomEdits';
 import type { SliceDeps } from './sliceDeps';
 
@@ -82,6 +82,7 @@ export function edgeRoundActions({ set, get }: SliceDeps): EdgeRoundActions {
     updateEdgeRoundDraft: (patch) => {
       const session = get().edgeRoundSession;
       if (!session) return;
+      if (patch.size !== undefined && !Number.isFinite(patch.size)) return;
       const next = { ...session, ...patch };
       set({ edgeRoundSession: next });
       writeEdgeRounds(get, set, next.nodeId, draftRounds(next));
@@ -91,11 +92,17 @@ export function edgeRoundActions({ set, get }: SliceDeps): EdgeRoundActions {
       const session = get().edgeRoundSession;
       if (!session) return;
       set({ edgeRoundSession: null });
+      if (!findNode(get().sceneGraph.nodes, session.nodeId)) return;
+      const next = draftRounds(session);
+      if (sameValue(session.base, next)) {
+        writeEdgeRounds(get, set, session.nodeId, session.base);
+        return;
+      }
       // One undo step for the whole session: the snapshot is taken of the body as
       // it was before the draft, then the result goes on top of it.
       writeEdgeRounds(get, set, session.nodeId, session.base, false);
       get().prepareForDiscreteChange();
-      writeEdgeRounds(get, set, session.nodeId, draftRounds(session));
+      writeEdgeRounds(get, set, session.nodeId, next);
     },
 
     cancelEdgeRound: () => {
@@ -109,6 +116,7 @@ export function edgeRoundActions({ set, get }: SliceDeps): EdgeRoundActions {
       const node = findNode(get().sceneGraph.nodes, nodeId);
       const feature = node?.edgeRounds?.[index];
       if (!feature) return;
+      if (patch.size !== undefined && (!Number.isFinite(patch.size) || patch.size <= 0)) return;
       get().recordInteraction('edge-round');
       const features = [...node!.edgeRounds!];
       features[index] = { ...feature, ...patch };

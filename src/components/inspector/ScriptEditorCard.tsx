@@ -1,15 +1,18 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useSyncExternalStore } from 'react';
 import { Code, Info, Zap } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
+import { clearScriptStatus, lastScriptStatus, subscribeScriptStatus } from '../../store/scriptStatus';
+import { scriptSyntaxError } from '../../utils/scriptCheck';
 import type { SceneNode } from '../../types/scene';
 
 /** The body's control script: JavaScript run once per physics step. */
 export function ScriptEditorCard({ node }: { node: SceneNode }) {
   const updateNodeScript = useStore((s) => s.updateNodeScript);
   const openDocs = usePanels((s) => s.openDocs);
+  const liveStatus = useSyncExternalStore(subscribeScriptStatus, lastScriptStatus, () => null);
   const [scriptText, setScriptText] = useState(node.script || '');
-  const [scriptError, setScriptError] = useState<string | null>(null);
+  const [scriptError, setScriptError] = useState<string | null>(() => scriptSyntaxError(node.script));
   const [showApiRef, setShowApiRef] = useState(false);
 
   // The editor follows the stored script, so the MCP bridge or an undo shows,
@@ -19,21 +22,31 @@ export function ScriptEditorCard({ node }: { node: SceneNode }) {
   if (node.id !== shown.id || node.script !== shown.script) {
     setShown({ id: node.id, script: node.script });
     setScriptText(node.script || '');
-    setScriptError(null);
+    setScriptError(scriptSyntaxError(node.script));
   }
 
+  const nodeId = node.id;
+  const nodeName = node.name || node.id;
+  const hasActiveScript = Boolean(node.script?.trim());
+  const isDraftUnmodified = scriptText === (node.script || '');
+  const runtimeProblems = hasActiveScript && isDraftUnmodified
+    ? (liveStatus?.problems.filter((p) => p.body === nodeName) ?? [])
+    : [];
+  const displayError = scriptError ?? (runtimeProblems.length > 0 ? runtimeProblems.map((p) => p.message).join(' · ') : null);
+
   const handleSaveScript = useCallback(() => {
-    try {
-      if (scriptText.trim() !== '') {
-        // Syntax compilation check
-        new Function('api', scriptText);
+    const trimmed = scriptText.trim();
+    if (trimmed !== '') {
+      const err = scriptSyntaxError(scriptText);
+      if (err) {
+        setScriptError(err || 'Compilation Error');
+        return;
       }
-      setScriptError(null);
-      updateNodeScript(node.id, scriptText);
-    } catch (e) {
-      setScriptError((e as Error).message || 'Compilation Error');
     }
-  }, [node, scriptText, updateNodeScript]);
+    setScriptError(null);
+    clearScriptStatus(nodeName);
+    updateNodeScript(nodeId, trimmed === '' ? '' : scriptText);
+  }, [nodeId, nodeName, scriptText, updateNodeScript]);
 
   return (
     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2.5">
@@ -52,11 +65,18 @@ export function ScriptEditorCard({ node }: { node: SceneNode }) {
           </button>
         </span>
         <div className="flex items-center gap-1.5">
-          {node.script ? (
-            <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-100 animate-pulse">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              Active
-            </span>
+          {hasActiveScript ? (
+            displayError ? (
+              <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded-full border border-amber-200">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                Error
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-100 animate-pulse">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                Active
+              </span>
+            )
           ) : (
             <span className="text-[10px] font-medium text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded-full border border-slate-100">
               Disabled
@@ -141,11 +161,11 @@ api.applyForce([force, 0, 0]);
         </div>
       </div>
 
-      {/* Compilation Error Display */}
-      {scriptError && (
+      {/* Compilation / Runtime Error Display */}
+      {displayError && (
         <div className="p-2.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg text-[10px] flex gap-1.5 items-start leading-tight">
           <span className="font-bold shrink-0">⚠️ Error:</span>
-          <span className="font-mono text-slate-700 break-all">{scriptError}</span>
+          <span className="font-mono text-slate-700 break-all">{displayError}</span>
         </div>
       )}
 

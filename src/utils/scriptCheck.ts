@@ -12,7 +12,7 @@ import type { SceneNode } from '../types/scene';
 
 /** The compile error of a script, or null when it compiles (or is empty). */
 export function scriptSyntaxError(src: string | undefined | null): string | null {
-  if (!src || src.trim() === '') return null;
+  if (typeof src !== 'string' || src.trim() === '') return null;
   try {
     new Function('api', src);
     return null;

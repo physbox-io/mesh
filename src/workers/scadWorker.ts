@@ -58,7 +58,20 @@ const BACKEND_ARGS = ['--backend', 'Manifold', '--export-format', 'binstl'];
 let compiledModule: Promise<WebAssembly.Module> | null = null;
 function compiledWasm(): Promise<WebAssembly.Module> {
   if (!compiledModule) {
-    compiledModule = WebAssembly.compileStreaming(fetch(wasmUrl)).catch((err) => {
+    compiledModule = (async () => {
+      const res = await fetch(wasmUrl);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch OpenSCAD WASM (HTTP ${res.status})`);
+      }
+      if (typeof WebAssembly.compileStreaming === 'function') {
+        try {
+          return await WebAssembly.compileStreaming(res.clone());
+        } catch {
+          // Fall back to ArrayBuffer compile if MIME type is not application/wasm.
+        }
+      }
+      return WebAssembly.compile(await res.arrayBuffer());
+    })().catch((err) => {
       compiledModule = null; // a failed fetch can be retried
       throw err;
     });
@@ -68,13 +81,15 @@ function compiledWasm(): Promise<WebAssembly.Module> {
 
 async function freshInstance(io: { print: (l: string) => void; printErr: (l: string) => void }): Promise<OpenSCAD> {
   const module = await compiledWasm();
-  return createOpenSCAD({
-    noInitialRun: true,
-    ...io,
-    instantiateWasm: (imports: WebAssembly.Imports, done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void) => {
-      WebAssembly.instantiate(module, imports).then((instance) => done(instance, module));
-      return {};
-    },
+  return new Promise<OpenSCAD>((resolve, reject) => {
+    createOpenSCAD({
+      noInitialRun: true,
+      ...io,
+      instantiateWasm: (imports: WebAssembly.Imports, done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void) => {
+        WebAssembly.instantiate(module, imports).then((instance) => done(instance, module), reject);
+        return {};
+      },
+    }).then(resolve, reject);
   });
 }
 
@@ -111,6 +126,25 @@ async function loadCompiler(): Promise<void> {
  * a few hundred thousand triangles, which as text is tens of megabytes to
  * write, hand over and parse; as binary it is fifty bytes a triangle.
  */
+function mkdirp(fs: OpenSCAD['FS'], dir: string): void {
+  const parts = dir.split('/').filter(Boolean);
+  let cur = '';
+  for (const part of parts) {
+    cur += `/${part}`;
+    try {
+      fs.mkdir(cur);
+    } catch {
+      /* already there */
+    }
+  }
+}
+
+function summarizeStderr(stderr: string[]): string {
+  const flagged = stderr.filter((l) => /ERROR|WARNING/i.test(l));
+  const lines = flagged.length > 0 ? flagged : stderr.filter((l) => l.trim() !== '');
+  return lines.slice(-3).join(' · ');
+}
+
 async function renderToStl(scadCode: string): Promise<Uint8Array> {
   const stderr: string[] = [];
   const instance: OpenSCAD = await freshInstance({
@@ -125,18 +159,30 @@ async function renderToStl(scadCode: string): Promise<Uint8Array> {
   // Mesh's own modules (utils/scadLibrary.ts), so `use <physbox/pocket.scad>` resolves.
   for (const [path, source] of Object.entries(SCAD_LIBRARY)) {
     const dir = path.slice(0, path.lastIndexOf('/'));
-    try { instance.FS.mkdir(dir); } catch { /* already there */ }
+    if (dir) mkdirp(instance.FS, dir);
     instance.FS.writeFile(path, source);
   }
   instance.FS.writeFile('/input.scad', scadCode);
-  const exit = instance.callMain(['/input.scad', ...BACKEND_ARGS, '-o', '/output.stl']);
+  let exit: number;
+  try {
+    exit = instance.callMain(['/input.scad', ...BACKEND_ARGS, '-o', '/output.stl']);
+  } catch (err) {
+    const said = summarizeStderr(stderr);
+    const raw = err instanceof Error ? err.message : String(err);
+    throw new Error(`OpenSCAD failed${said ? `: ${said}` : ` (${raw})`}`, { cause: err });
+  }
   if (exit !== 0) {
     // The last few lines are where OpenSCAD puts the ERROR: it stopped on,
     // which is a better message than an exit code.
-    const said = stderr.filter((l) => /ERROR|WARNING/.test(l)).slice(-3).join(' · ');
+    const said = summarizeStderr(stderr);
     throw new Error(`OpenSCAD failed (exit ${exit})${said ? `: ${said}` : ''}`);
   }
-  return instance.FS.readFile('/output.stl', { encoding: 'binary' });
+  try {
+    return instance.FS.readFile('/output.stl', { encoding: 'binary' });
+  } catch (err) {
+    const said = summarizeStderr(stderr);
+    throw new Error(`OpenSCAD produced no STL output${said ? `: ${said}` : ''}`, { cause: err });
+  }
 }
 
 /**
@@ -146,7 +192,7 @@ async function renderToStl(scadCode: string): Promise<Uint8Array> {
 async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   await loadCompiler();
   const stl = await renderToStl(scadCode);
-  if (!stl || stl.byteLength === 0) {
+  if (!stl || stl.byteLength <= 84) {
     throw new Error('Compilation produced empty output.');
   }
 
@@ -155,11 +201,15 @@ async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   const geometry = loader.parse(stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength) as ArrayBuffer);
 
   const positionAttr = geometry.attributes.position;
-  if (!positionAttr) {
-    throw new Error('Parsed STL geometry does not contain position attributes.');
+  if (!positionAttr || positionAttr.count === 0) {
+    throw new Error('Compilation produced empty output.');
   }
 
-  return indexScadTriangles(positionAttr.array);
+  const compiled = indexScadTriangles(positionAttr.array);
+  if (compiled.faces.length === 0) {
+    throw new Error('Compilation produced empty geometry (all triangles collapsed).');
+  }
+  return compiled;
 }
 
 // onmessage handlers run to their first await and then interleave, so two

@@ -373,23 +373,37 @@ export const FaceKnife = () => {
     if (d.separate) {
       busy.current = true;
       setGestureStatus('Knife · cutting…');
-      const { soups, absorbed } = knifeSoups(node);
-      const result = await cutAlongPlaneOffThread(soups, cut.at.toArray(), cut.normal.toArray());
-      busy.current = false;
-      if (!result.ok) { flash(result.error); return; }
-      const carry = carryAcrossCut(node, result.sections, cut.at.toArray(), cut.normal.toArray());
-      useStore.getState().splitBodyForPrint(node.id, result.sections, absorbed, { plain: true, carry });
-      flash(`Cut into ${result.sections.length} pieces`);
+      try {
+        const { soups, absorbed } = knifeSoups(node);
+        const result = await cutAlongPlaneOffThread(soups, cut.at.toArray(), cut.normal.toArray());
+        if (!result.ok) { flash(result.error); return; }
+        const liveStore = useStore.getState();
+        const liveNode = findNodeById(liveStore.sceneGraph.nodes, node.id);
+        if (liveStore.isPlaying || !liveNode) return;
+        const carry = carryAcrossCut(liveNode, result.sections, cut.at.toArray(), cut.normal.toArray());
+        liveStore.splitBodyForPrint(node.id, result.sections, absorbed, { plain: true, carry });
+        flash(`Cut into ${result.sections.length} pieces`);
+      } catch (err) {
+        flash(err instanceof Error ? err.message : 'Knife cut failed');
+      } finally {
+        busy.current = false;
+      }
       return;
+    }
+    const byGeom = new Map<string, ReturnType<typeof seamsAcross>[number]['split'][]>();
+    for (const { geomName, split } of seamsAcross(node, cut.at, cut.normal, cut.seeds)) {
+      const list = byGeom.get(geomName) ?? [];
+      list.push(split);
+      byGeom.set(geomName, list);
     }
     let made = 0;
     // Kept only where it divides something: a line along an edge leaves no seam.
-    for (const { geomName, split } of seamsAcross(node, cut.at, cut.normal, cut.seeds)) {
-      // The geom as the scene graph has it, which is where the list is kept.
-      const own = node.geoms?.find((g) => g.name === geomName);
+    for (const [geomName, added] of byGeom) {
+      const liveNode = findNodeById(useStore.getState().sceneGraph.nodes, node.id);
+      const own = liveNode?.geoms?.find((g) => g.name === geomName);
       if (!own) continue;
-      store.setGeomFaceSplits(node.id, geomName, [...(own.faceSplits ?? []), split]);
-      made++;
+      useStore.getState().setGeomFaceSplits(node.id, geomName, [...(own.faceSplits ?? []), ...added]);
+      made += added.length;
     }
     if (!made) flash('Draw the line across the part to split its face');
   }, [cutOf, flash, seamAt, selected, setGestureStatus, snapped]);

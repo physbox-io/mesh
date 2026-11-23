@@ -11,4 +11,4 @@ export interface MeshBvhRequest {
 
 export type MeshBvhResponse =
   | { id: number; ok: true; serialized: SerializedBVH; position: Float32Array }
-  | { id: number; ok: false; error: string };
+  | { id: number; ok: false; error: string; position?: Float32Array; index?: Uint32Array | Uint16Array | null };

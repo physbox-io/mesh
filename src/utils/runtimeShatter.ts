@@ -130,8 +130,9 @@ export interface ShatterResult {
  */
 export function volumeCentroid(verts: number[], faces: number[]): { volume: number; centroid: [number, number, number] } {
   let vol = 0, cx = 0, cy = 0, cz = 0;
-  for (let f = 0; f < faces.length; f += 3) {
+  for (let f = 0; f + 2 < faces.length; f += 3) {
     const a = faces[f] * 3, b = faces[f + 1] * 3, c = faces[f + 2] * 3;
+    if (a + 2 >= verts.length || b + 2 >= verts.length || c + 2 >= verts.length) continue;
     const ax = verts[a], ay = verts[a + 1], az = verts[a + 2];
     const bx = verts[b], by = verts[b + 1], bz = verts[b + 2];
     const cxx = verts[c], cyy = verts[c + 1], czz = verts[c + 2];
@@ -141,7 +142,15 @@ export function volumeCentroid(verts: number[], faces: number[]): { volume: numb
     cy += (ay + by + cyy) * d;
     cz += (az + bz + czz) * d;
   }
-  if (Math.abs(vol) < 1e-15) return { volume: 0, centroid: [0, 0, 0] };
+  if (Math.abs(vol) < 1e-15) {
+    const n = Math.floor(verts.length / 3);
+    if (n === 0) return { volume: 0, centroid: [0, 0, 0] };
+    let sx = 0, sy = 0, sz = 0;
+    for (let i = 0; i + 2 < verts.length; i += 3) {
+      sx += verts[i]; sy += verts[i + 1]; sz += verts[i + 2];
+    }
+    return { volume: 0, centroid: [sx / n, sy / n, sz / n] };
+  }
   return { volume: vol / 6, centroid: [cx / (4 * vol), cy / (4 * vol), cz / (4 * vol)] };
 }
 
@@ -156,21 +165,23 @@ export function rotate(xmat: number[], v: [number, number, number]): [number, nu
 
 /** A row-major 3x3 as the [w,x,y,z] quaternion a SceneNode carries. */
 export function matToQuat(m: number[]): [number, number, number, number] {
+  let q: [number, number, number, number];
   const trace = m[0] + m[4] + m[8];
   if (trace > 0) {
-    const s = Math.sqrt(trace + 1) * 2;
-    return [s / 4, (m[7] - m[5]) / s, (m[2] - m[6]) / s, (m[3] - m[1]) / s];
+    const s = Math.sqrt(Math.max(0, trace + 1)) * 2;
+    q = s > 0 ? [s / 4, (m[7] - m[5]) / s, (m[2] - m[6]) / s, (m[3] - m[1]) / s] : [1, 0, 0, 0];
+  } else if (m[0] > m[4] && m[0] > m[8]) {
+    const s = Math.sqrt(Math.max(0, 1 + m[0] - m[4] - m[8])) * 2;
+    q = s > 0 ? [(m[7] - m[5]) / s, s / 4, (m[1] + m[3]) / s, (m[2] + m[6]) / s] : [1, 0, 0, 0];
+  } else if (m[4] > m[8]) {
+    const s = Math.sqrt(Math.max(0, 1 + m[4] - m[0] - m[8])) * 2;
+    q = s > 0 ? [(m[2] - m[6]) / s, (m[1] + m[3]) / s, s / 4, (m[5] + m[7]) / s] : [1, 0, 0, 0];
+  } else {
+    const s = Math.sqrt(Math.max(0, 1 + m[8] - m[0] - m[4])) * 2;
+    q = s > 0 ? [(m[3] - m[1]) / s, (m[2] + m[6]) / s, (m[5] + m[7]) / s, s / 4] : [1, 0, 0, 0];
   }
-  if (m[0] > m[4] && m[0] > m[8]) {
-    const s = Math.sqrt(1 + m[0] - m[4] - m[8]) * 2;
-    return [(m[7] - m[5]) / s, s / 4, (m[1] + m[3]) / s, (m[2] + m[6]) / s];
-  }
-  if (m[4] > m[8]) {
-    const s = Math.sqrt(1 + m[4] - m[0] - m[8]) * 2;
-    return [(m[2] - m[6]) / s, (m[1] + m[3]) / s, s / 4, (m[5] + m[7]) / s];
-  }
-  const s = Math.sqrt(1 + m[8] - m[0] - m[4]) * 2;
-  return [(m[3] - m[1]) / s, (m[2] + m[6]) / s, (m[5] + m[7]) / s, s / 4];
+  const n = Math.hypot(q[0], q[1], q[2], q[3]);
+  return n > 0 ? [q[0] / n, q[1] / n, q[2] / n, q[3] / n] : [1, 0, 0, 0];
 }
 
 /** A [w,x,y,z] quaternion as a row-major 3x3. */

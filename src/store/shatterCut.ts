@@ -21,12 +21,35 @@ export function shardRoom(broken: Record<string, SceneNode[]>, nodeId: string): 
   return MAX_LIVE_SHARDS - live.length + (live.some((s) => s.id === nodeId) ? 1 : 0);
 }
 
+/** Three.js Y-up `vertices` turned into the MuJoCo Z-up frame `buildShatterGraph` expects. */
+export function yupToZup(verts: number[]): number[] {
+  const out = new Array(verts.length - (verts.length % 3));
+  for (let i = 0; i + 2 < verts.length; i += 3) {
+    out[i] = verts[i];
+    out[i + 1] = -verts[i + 2];
+    out[i + 2] = verts[i + 1];
+  }
+  return out;
+}
+
 /** The body's own mesh, never one of the convex pieces it collides as; null when it has none. */
 export function shatterSourceOf(node: SceneNode): { geom: SceneGeom; verts: number[]; faces: number[] } | null {
-  const geom = (node.geoms || []).find((g) => !g.csgDerived && (g.renderVertices ?? g.vertices) && g.faces)
-    ?? (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
-  const verts = geom && (geom.renderVertices ?? geom.vertices);
-  if (!geom || !verts || !geom.faces) return null;
+  const geoms = node.geoms || [];
+  const hasMesh = (g: SceneGeom) =>
+    ((g.renderVertices?.length ?? g.vertices?.length ?? 0) >= 9) && ((g.faces?.length ?? 0) >= 3);
+  // A boolean body's actual shape is its compiled `visual` mesh; raw geoms on
+  // it include uncut primitives and negative `difference` cutters.
+  const geom = node.csgEnabled
+    ? (geoms.find((g) => g.csgDerived === 'visual' && hasMesh(g))
+      ?? geoms.find((g) => !g.csgDerived && g.csg !== 'difference' && hasMesh(g)))
+    : geoms.find((g) => !g.csgDerived && g.csg !== 'difference' && hasMesh(g));
+  if (!geom || !geom.faces) return null;
+  const verts = geom.renderVertices?.length
+    ? geom.renderVertices
+    : geom.vertices?.length
+      ? yupToZup(geom.vertices)
+      : null;
+  if (!verts || verts.length < 9) return null;
   return { geom, verts, faces: geom.faces };
 }
 

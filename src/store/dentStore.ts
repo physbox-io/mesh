@@ -91,7 +91,14 @@ export const useDentStore = create<DentState>((set, get) => ({
   dents: {},
 
   dent: (key, sourceVertices, faces, point, normal, depth, radius, profile = 'dish') => {
-    if (!(depth > 0) || !(radius > 0)) return;
+    if (
+      !Number.isFinite(depth) || !(depth > 0) ||
+      !Number.isFinite(radius) || !(radius > 0) ||
+      !point.every(Number.isFinite) || !normal.every(Number.isFinite)
+    ) return;
+    const [nx, ny, nz] = normal;
+    const nLen = Math.hypot(nx, ny, nz);
+    if (!(nLen > 0)) return;
 
     const existing = get().dents[key];
     const mesh = existing ? existing.mesh : createSculptMesh(sourceVertices, faces);
@@ -110,8 +117,6 @@ export const useDentStore = create<DentState>((set, get) => ({
      * ACROSS the normal, so an oblique blow still leaves a round crater rather
      * than a foreshortened one that fades out on the far side.
      */
-    const [nx, ny, nz] = normal;
-    const nLen = Math.hypot(nx, ny, nz) || 1;
     const ux = nx / nLen, uy = ny / nLen, uz = nz / nLen;
     const r2 = radius * radius;
 
@@ -153,13 +158,17 @@ export const useDentStore = create<DentState>((set, get) => ({
   },
 
   pierce: (key, sourceVertices, faces, point, normal, radius) => {
-    if (!(radius > 0)) return;
+    if (
+      !Number.isFinite(radius) || !(radius > 0) ||
+      !point.every(Number.isFinite) || !normal.every(Number.isFinite)
+    ) return;
+    const [nx, ny, nz] = normal;
+    const nLen = Math.hypot(nx, ny, nz);
+    if (!(nLen > 0)) return;
 
     const existing = get().dents[key];
     const mesh = existing ? existing.mesh : createSculptMesh(sourceVertices, faces);
 
-    const [nx, ny, nz] = normal;
-    const nLen = Math.hypot(nx, ny, nz) || 1;
     const ux = nx / nLen, uy = ny / nLen, uz = nz / nLen;
 
     /** How far a point sits from the line the striker went in along. */
@@ -170,27 +179,13 @@ export const useDentStore = create<DentState>((set, get) => ({
       return Math.hypot(ax, ay, az);
     };
 
-    // Draw the rim in first, while the triangles that form it are still there.
-    const rim = radius * 1.6;
     const pos = mesh.positions;
-    for (let i = 0; i < mesh.vertexCount; i++) {
-      const d = acrossAxis(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
-      if (d >= rim || d < radius) continue;
-      const t = (d - radius) / (rim - radius);
-      const pull = radius * 0.25 * (1 - t) * (1 - t);
-      pos[i * 3] -= ux * pull;
-      pos[i * 3 + 1] -= uy * pull;
-      pos[i * 3 + 2] -= uz * pull;
-    }
-
     /*
-     * Then drop every triangle whose middle lies inside the bore — on BOTH
-     * faces of the sheet, and all the way through, because a hole that only
-     * goes through the side that was struck is a dimple with a lid.
-     *
-     * By centroid rather than by vertex: dropping a triangle if ANY corner is
-     * inside eats a ring of extra material and the hole comes out noticeably
-     * wider than the thing that made it.
+     * Test which triangles lie inside the bore BEFORE pulling the rim, so a
+     * blow that is refused (because it would remove the whole surface or missed
+     * every triangle centroid) neither deforms the rim nor counts as a hole.
+     * Note that pulling rim vertices purely along `u` leaves `acrossAxis` of
+     * every centroid unchanged, so the kept face set is identical.
      */
     const kept: number[] = [];
     for (let f = 0; f < mesh.faceCount; f++) {
@@ -203,13 +198,24 @@ export const useDentStore = create<DentState>((set, get) => ({
     }
     // A blow that would remove the whole surface is refused rather than obeyed:
     // a body that vanishes reads as a bug, not as a hole.
-    if (kept.length >= 12 && kept.length < mesh.faceCount * 3) {
+    const pierced = kept.length >= 12 && kept.length < mesh.faceCount * 3;
+    if (pierced) {
+      const rim = radius * 1.6;
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        const d = acrossAxis(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+        if (d >= rim || d < radius) continue;
+        const t = (d - radius) / (rim - radius);
+        const pull = radius * 0.25 * (1 - t) * (1 - t);
+        pos[i * 3] -= ux * pull;
+        pos[i * 3 + 1] -= uy * pull;
+        pos[i * 3 + 2] -= uz * pull;
+      }
       mesh.faces.set(kept);
       mesh.faceCount = kept.length / 3;
       mesh.topologyRevision++;
+      mesh.revision++;
+      recomputeNormals(mesh);
     }
-    mesh.revision++;
-    recomputeNormals(mesh);
 
     set((state) => ({
       dents: {
@@ -218,8 +224,8 @@ export const useDentStore = create<DentState>((set, get) => ({
           mesh,
           version: (existing?.version ?? 0) + 1,
           count: (existing?.count ?? 0) + 1,
-          deepest: Math.max(existing?.deepest ?? 0, radius),
-          holes: (existing?.holes ?? 0) + 1,
+          deepest: pierced ? Math.max(existing?.deepest ?? 0, radius) : (existing?.deepest ?? 0),
+          holes: (existing?.holes ?? 0) + (pierced ? 1 : 0),
         },
       },
     }));

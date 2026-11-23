@@ -147,35 +147,54 @@ export function queryFlatBvhRay(
   dx: number, dy: number, dz: number,
   outTriangles: number[],
 ): void {
-  if (bvh.nodeCount === 0) return;
-  const invX = 1 / dx;
-  const invY = 1 / dy;
-  const invZ = 1 / dz;
+  if (bvh.nodeCount === 0 || !Number.isFinite(ox + oy + oz + dx + dy + dz)) return;
+  const parallelX = Math.abs(dx) < 1e-30;
+  const parallelY = Math.abs(dy) < 1e-30;
+  const parallelZ = Math.abs(dz) < 1e-30;
+  if (parallelX && parallelY && parallelZ) return;
+  const invX = parallelX ? 0 : 1 / dx;
+  const invY = parallelY ? 0 : 1 / dy;
+  const invZ = parallelZ ? 0 : 1 / dz;
   const { bounds, leftOrStart, countOrRight, triOrder } = bvh;
   const stack: number[] = [0];
 
   while (stack.length > 0) {
     const node = stack.pop()!;
     const b = node * 6;
-    const tx1 = (bounds[b] - ox) * invX;
-    const tx2 = (bounds[b + 3] - ox) * invX;
-    let tmin = tx1 < tx2 ? tx1 : tx2;
-    let tmax = tx1 > tx2 ? tx1 : tx2;
+    let tmin = -Infinity;
+    let tmax = Infinity;
 
-    const ty1 = (bounds[b + 1] - oy) * invY;
-    const ty2 = (bounds[b + 4] - oy) * invY;
-    const tyMin = ty1 < ty2 ? ty1 : ty2;
-    const tyMax = ty1 > ty2 ? ty1 : ty2;
-    if (tmin > tyMax || tyMin > tmax) continue;
-    if (tyMin > tmin) tmin = tyMin;
-    if (tyMax < tmax) tmax = tyMax;
+    if (parallelX) {
+      if (ox < bounds[b] || ox > bounds[b + 3]) continue;
+    } else {
+      const tx1 = (bounds[b] - ox) * invX;
+      const tx2 = (bounds[b + 3] - ox) * invX;
+      tmin = tx1 < tx2 ? tx1 : tx2;
+      tmax = tx1 > tx2 ? tx1 : tx2;
+    }
 
-    const tz1 = (bounds[b + 2] - oz) * invZ;
-    const tz2 = (bounds[b + 5] - oz) * invZ;
-    const tzMin = tz1 < tz2 ? tz1 : tz2;
-    const tzMax = tz1 > tz2 ? tz1 : tz2;
-    if (tmin > tzMax || tzMin > tmax) continue;
-    if (tzMax < tmax) tmax = tzMax;
+    if (parallelY) {
+      if (oy < bounds[b + 1] || oy > bounds[b + 4]) continue;
+    } else {
+      const ty1 = (bounds[b + 1] - oy) * invY;
+      const ty2 = (bounds[b + 4] - oy) * invY;
+      const tyMin = ty1 < ty2 ? ty1 : ty2;
+      const tyMax = ty1 > ty2 ? ty1 : ty2;
+      if (tmin > tyMax || tyMin > tmax) continue;
+      if (tyMin > tmin) tmin = tyMin;
+      if (tyMax < tmax) tmax = tyMax;
+    }
+
+    if (parallelZ) {
+      if (oz < bounds[b + 2] || oz > bounds[b + 5]) continue;
+    } else {
+      const tz1 = (bounds[b + 2] - oz) * invZ;
+      const tz2 = (bounds[b + 5] - oz) * invZ;
+      const tzMin = tz1 < tz2 ? tz1 : tz2;
+      const tzMax = tz1 > tz2 ? tz1 : tz2;
+      if (tmin > tzMax || tzMin > tmax) continue;
+      if (tzMax < tmax) tmax = tzMax;
+    }
     if (tmax < 0) continue;
 
     const cr = countOrRight[node];

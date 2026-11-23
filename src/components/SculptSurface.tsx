@@ -161,17 +161,23 @@ export function SculptSurface({
     const own = committed.current;
     if (renderVertices === own.renderVertices && faces === own.faces) return;
     committed.current = { renderVertices, faces };
-    if (sessionRef.current) {
-      endStroke(sessionRef.current);
+    if (sessionRef.current || carvePath.current || grabPlane.current || carvePlane.current) {
+      if (sessionRef.current) endStroke(sessionRef.current);
       sessionRef.current = null;
       lastPoint.current = null;
+      grabPlane.current = null;
+      carvePlane.current = null;
+      if (carvePath.current) {
+        carvePath.current = null;
+        drawCarveLine(null);
+      }
       setOrbitEnabled(true);
       useStore.getState().setDraggedNodeId(null);
     }
     undoStack.current.length = 0;
     redoStack.current.length = 0;
     setMesh(fromSceneGeom(renderVertices, faces));
-  }, [renderVertices, faces, setOrbitEnabled]);
+  }, [renderVertices, faces, setOrbitEnabled, drawCarveLine]);
   // The brush the next dab will use. Held in a ref so the pointer handlers do
   // not have to be rebuilt — and written in an effect rather than in render,
   // because a ref written during render is not a render output.
@@ -339,6 +345,16 @@ export function SculptSurface({
   const commit = useCallback((atBudget = false) => {
     const geom = toSceneGeom(mesh);
     committed.current = { renderVertices: geom.renderVertices, faces: geom.faces };
+    // Marked once, not on every stroke: the flag exists so that changing the
+    // base shape knows whether it is throwing work away, and writing it each
+    // time would be a scene-graph update per stroke for a boolean that only
+    // ever goes one way. Coalesced into the 'node-geom' undo entry below.
+    if (!markedEdited.current) {
+      markedEdited.current = true;
+      const store = useStore.getState();
+      store.recordInteraction('node-geom');
+      store.updateNode(nodeId, { sculptEdited: true }, true);
+    }
     // Into the geom this surface was opened on, found by name. Always index 0
     // used to write a body's first geom whatever it was — on an imported part
     // with several meshes, the wrong one, so the stroke showed while the tools
@@ -346,15 +362,6 @@ export function SculptSurface({
     const live = findSceneNode(useStore.getState().sceneGraph.nodes, nodeId);
     const index = Math.max(0, live?.geoms?.findIndex((g) => g.name === geomName) ?? 0);
     updateNodeGeom(nodeId, { vertices: geom.vertices, renderVertices: geom.renderVertices, faces: geom.faces }, index);
-
-    // Marked once, not on every stroke: the flag exists so that changing the
-    // base shape knows whether it is throwing work away, and writing it each
-    // time would be a scene-graph update per stroke for a boolean that only
-    // ever goes one way.
-    if (!markedEdited.current) {
-      markedEdited.current = true;
-      useStore.getState().updateNode(nodeId, { sculptEdited: true });
-    }
 
     publishStats(mesh, atBudget);
   }, [mesh, nodeId, geomName, updateNodeGeom, publishStats]);
@@ -535,23 +542,26 @@ export function SculptSurface({
     const b = brushRef.current;
     cutting.current = true;
     useStore.getState().setSculptNotice({ text: 'Carving…', tone: 'busy' });
-    const result = await cutSculptOffThread(target, {
-      kind: 'carvePath',
-      path,
-      width: b.radius * 2,
-      depth: (b.depth ?? 0) > 0 ? b.depth! : DEFAULT_CARVE_DEPTH,
-      profile: b.carveProfile ?? 'round',
-      fill: b.carveFill === true && !b.carveAdd && path.length >= 3,
-      ...(b.symmetryX ? { mirror: b.symmetryAxis ?? 'x' } : {}),
-      ...(b.carveTaper ? { taper: b.carveTaper } : {}),
-      ...(b.carveAngle ? { tilt: (b.carveAngle * Math.PI) / 180 } : {}),
-      add: b.carveAdd === true,
-      ...(b.carveAdd && plane && (b.carveThickness ?? 1) < 1
-        ? { flatten: { normal: [plane.normal.x, plane.normal.y, plane.normal.z], ratio: b.carveThickness! } }
-        : {}),
-    }, { mode: b.carveAdd ? 'add' : 'remove' });
-    cutting.current = false;
-    return applyCutResult(target, revision, result);
+    try {
+      const result = await cutSculptOffThread(target, {
+        kind: 'carvePath',
+        path,
+        width: b.radius * 2,
+        depth: (b.depth ?? 0) > 0 ? b.depth! : DEFAULT_CARVE_DEPTH,
+        profile: b.carveProfile ?? 'round',
+        fill: b.carveFill === true && !b.carveAdd && path.length >= 3,
+        ...(b.symmetryX ? { mirror: b.symmetryAxis ?? 'x' } : {}),
+        ...(b.carveTaper ? { taper: b.carveTaper } : {}),
+        ...(b.carveAngle ? { tilt: (b.carveAngle * Math.PI) / 180 } : {}),
+        add: b.carveAdd === true,
+        ...(b.carveAdd && plane && (b.carveThickness ?? 1) < 1
+          ? { flatten: { normal: [plane.normal.x, plane.normal.y, plane.normal.z], ratio: b.carveThickness! } }
+          : {}),
+      }, { mode: b.carveAdd ? 'add' : 'remove' });
+      return applyCutResult(target, revision, result);
+    } finally {
+      cutting.current = false;
+    }
   }, [mesh, applyCutResult]);
 
   const finishStroke = useCallback(() => {
@@ -733,14 +743,17 @@ export function SculptSurface({
 
     cutting.current = true;
     useStore.getState().setSculptNotice({ text: 'Cutting…', tone: 'busy' });
-    const result = await cutSculptOffThread(target, {
-      kind: 'view',
-      loop,
-      projectionInverse: Array.from(camera.projectionMatrixInverse.elements),
-      viewToLocal: Array.from(viewToLocal.elements),
-    }, { mode: keep ? 'keep' : 'remove', cap: brushRef.current.capCut ?? true });
-    cutting.current = false;
-    return applyCutResult(target, revision, result);
+    try {
+      const result = await cutSculptOffThread(target, {
+        kind: 'view',
+        loop,
+        projectionInverse: Array.from(camera.projectionMatrixInverse.elements),
+        viewToLocal: Array.from(viewToLocal.elements),
+      }, { mode: keep ? 'keep' : 'remove', cap: brushRef.current.capCut ?? true });
+      return applyCutResult(target, revision, result);
+    } finally {
+      cutting.current = false;
+    }
   }, [mesh, getThree, applyCutResult]);
 
 
@@ -846,12 +859,17 @@ export function SculptSurface({
 
   // A stroke left open by an unmount would leave the camera disabled.
   useEffect(() => () => {
-    if (sessionRef.current) {
-      endStroke(sessionRef.current);
+    if (sessionRef.current || carvePath.current || grabPlane.current || carvePlane.current) {
+      if (sessionRef.current) endStroke(sessionRef.current);
       sessionRef.current = null;
+      lastPoint.current = null;
+      grabPlane.current = null;
+      carvePlane.current = null;
+      carvePath.current = null;
+      setOrbitEnabled(true);
       useStore.getState().setDraggedNodeId(null);
     }
-  }, []);
+  }, [setOrbitEnabled]);
 
   const rgb = bodyColor(color, [0.82, 0.72, 0.62]);
 

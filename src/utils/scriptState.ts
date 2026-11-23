@@ -19,13 +19,15 @@
 
 export type ScriptStateMap = Record<string, Record<string, unknown>>;
 
+const emptyStateMap = (): ScriptStateMap => Object.create(null) as ScriptStateMap;
+
 export class ScriptStateStore {
-  private states: ScriptStateMap = {};
+  private states: ScriptStateMap = emptyStateMap();
   private warnedUncloneable = false;
 
   /** The node's state object, created empty on first use. */
   stateFor(nodeId: string): Record<string, unknown> {
-    let s = this.states[nodeId];
+    let s = Object.prototype.hasOwnProperty.call(this.states, nodeId) ? this.states[nodeId] : undefined;
     if (!s) {
       s = {};
       this.states[nodeId] = s;
@@ -35,41 +37,48 @@ export class ScriptStateStore {
 
   /** Empties every node's state: Reset, a preset load, a fresh build. */
   clear(): void {
-    this.states = {};
+    this.states = emptyStateMap();
+    this.warnedUncloneable = false;
   }
 
   /**
    * A structured-clone copy of every non-empty state, for the seed a fresh
    * worker is built from. `undefined` when there is nothing to carry, or when
-   * a state holds something that cannot cross a worker boundary (a function,
-   * say) — then it is left behind, as globals always were, with one warning.
+   * every state holds something that cannot cross a worker boundary (a function,
+   * say) — an uncloneable body state is left behind, with one warning, without
+   * dropping other bodies' valid state.
    */
   snapshot(): ScriptStateMap | undefined {
     const out: ScriptStateMap = {};
     let any = false;
     for (const [id, s] of Object.entries(this.states)) {
       if (Object.keys(s).length === 0) continue;
-      out[id] = s;
-      any = true;
-    }
-    if (!any) return undefined;
-    try {
-      return structuredClone(out);
-    } catch (e) {
-      if (!this.warnedUncloneable) {
-        this.warnedUncloneable = true;
-        console.warn('[Scripts] api.state holds something that cannot be carried across a physics worker restart (keep it to plain values, arrays and objects):', e);
+      try {
+        out[id] = structuredClone(s);
+        any = true;
+      } catch (e) {
+        if (!this.warnedUncloneable) {
+          this.warnedUncloneable = true;
+          console.warn('[Scripts] api.state holds something that cannot be carried across a physics worker restart (keep it to plain values, arrays and objects):', e);
+        }
       }
-      return undefined;
     }
+    return any ? out : undefined;
   }
 
-  /** Replaces every state with a snapshot's (from a seed). */
+  /** Replaces every state with an isolated copy of a snapshot's (from a seed). */
   restore(snapshot: ScriptStateMap | undefined): void {
-    this.states = {};
-    if (!snapshot) return;
+    this.states = emptyStateMap();
+    this.warnedUncloneable = false;
+    if (!snapshot || typeof snapshot !== 'object') return;
     for (const [id, s] of Object.entries(snapshot)) {
-      if (s && typeof s === 'object') this.states[id] = s;
+      if (s && typeof s === 'object' && !Array.isArray(s)) {
+        try {
+          this.states[id] = structuredClone(s);
+        } catch {
+          this.states[id] = { ...s };
+        }
+      }
     }
   }
 }

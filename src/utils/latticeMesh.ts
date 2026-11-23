@@ -917,7 +917,9 @@ export function unitStep(from: LatticeCoord, to: LatticeCoord): { dir: LatticeCo
  */
 export function bevelFace(lattice: Lattice, face: number, steps: number): boolean {
   const verts = lattice.faces[face];
-  if (!verts || steps <= 0) return false;
+  if (!verts || !Number.isFinite(steps) || steps <= 0) return false;
+  const nSteps = Math.round(steps);
+  if (nSteps <= 0) return false;
   if (verts.some((v) => (lattice.vertexFaces.get(v)?.size ?? 0) > 1)) return false;
 
   const ring = verts.map((v) => coordOf(lattice, v));
@@ -929,14 +931,16 @@ export function bevelFace(lattice: Lattice, face: number, steps: number): boolea
     const back = unitStep(ring[i], previous);
     const forward = unitStep(ring[i], next);
     if (!back || !forward) return false;
-    // Cutting deeper than half an edge from both ends would cross over the
-    // corner coming the other way and turn the ring inside out.
-    if (steps * 2 > back.length || steps * 2 > forward.length) return false;
+    // Cutting half an edge or deeper from both ends makes adjacent cuts meet or
+    // cross over, which either collapses an edge to a duplicate corner or turns
+    // the ring inside out.
+    if (nSteps * 2 >= back.length || nSteps * 2 >= forward.length) return false;
     cut.push(
-      ring[i].map((c, k) => c + back.dir[k] * steps) as LatticeCoord,
-      ring[i].map((c, k) => c + forward.dir[k] * steps) as LatticeCoord,
+      ring[i].map((c, k) => c + back.dir[k] * nSteps) as LatticeCoord,
+      ring[i].map((c, k) => c + forward.dir[k] * nSteps) as LatticeCoord,
     );
   }
+  if (new Set(cut.map(([i, j, k]) => `${i},${j},${k}`)).size !== cut.length) return false;
 
   const creased = verts.map((v, i) => isCrease(lattice, v, verts[(i + 1) % verts.length]));
   removeFace(lattice, face);

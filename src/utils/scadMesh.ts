@@ -28,14 +28,14 @@ export function indexScadTriangles(raw: ArrayLike<number>): CompiledScad {
   const Q = 1e5;
   const buckets = new Map<number, number[]>();
   const quantised = (v: number) => Math.round(v * Q);
-  for (let i = 0; i < raw.length; i += 3) {
-    const yUpX = raw[i];
-    const yUpY = raw[i + 2];
-    const yUpZ = -raw[i + 1];
+  const addVertex = (x: number, y: number, z: number): number => {
+    const yUpX = x || 0;
+    const yUpY = z || 0;
+    const yUpZ = (-y) || 0;
     const qx = quantised(yUpX), qy = quantised(yUpY), qz = quantised(yUpZ);
-    // Three large primes, xor-folded: cheap, and collisions only cost a
-    // comparison against the bucket's other members.
-    const hash = ((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) | 0;
+    // Three large primes, xor-folded with 32-bit exact integer multiply: cheap,
+    // exact at any coordinate scale, and collisions only cost a bucket scan.
+    const hash = (Math.imul(qx, 73856093) ^ Math.imul(qy, 19349663) ^ Math.imul(qz, 83492791)) | 0;
     let bucket = buckets.get(hash);
     let idx = -1;
     if (bucket) {
@@ -55,7 +55,22 @@ export function indexScadTriangles(raw: ArrayLike<number>): CompiledScad {
       uniqueVerts.push(yUpX, yUpY, yUpZ);
       bucket.push(idx);
     }
-    welded.push(idx);
+    return idx;
+  };
+
+  const triEnd = raw.length - (raw.length % 9);
+  for (let i = 0; i < triEnd; i += 9) {
+    const x0 = raw[i], y0 = raw[i + 1], z0 = raw[i + 2];
+    const x1 = raw[i + 3], y1 = raw[i + 4], z1 = raw[i + 5];
+    const x2 = raw[i + 6], y2 = raw[i + 7], z2 = raw[i + 8];
+    if (
+      !Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(z0) ||
+      !Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(z1) ||
+      !Number.isFinite(x2) || !Number.isFinite(y2) || !Number.isFinite(z2)
+    ) {
+      continue;
+    }
+    welded.push(addVertex(x0, y0, z0), addVertex(x1, y1, z1), addVertex(x2, y2, z2));
   }
 
   // The weld collapses the triangles a profile on the axis fans into, and a
@@ -70,9 +85,9 @@ export function indexScadTriangles(raw: ArrayLike<number>): CompiledScad {
     const y = uniqueVerts[i + 1];
     const z = uniqueVerts[i + 2];
     renderVertices.push(
-      Number(x.toFixed(5)),
-      Number((-z).toFixed(5)),
-      Number(y.toFixed(5))
+      Number(x.toFixed(5)) || 0,
+      Number((-z).toFixed(5)) || 0,
+      Number(y.toFixed(5)) || 0
     );
   }
 

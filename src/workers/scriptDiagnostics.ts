@@ -72,6 +72,12 @@ export class ScriptProblemLog {
     for (const [key, p] of this.problems) {
       if (bodies.has(p.body)) { this.problems.delete(key); changed = true; }
     }
+    if (changed && this.problems.size < MAX_SCRIPT_PROBLEMS && this.overflow > 0) {
+      this.overflow = 0;
+    } else if (!changed && bodies.size > 0 && this.problems.size === 0 && this.overflow > 0) {
+      this.overflow = 0;
+      changed = true;
+    }
     if (changed) this.version++;
   }
 
@@ -99,15 +105,27 @@ export interface ScriptLogLine {
 /** Longest single line kept, in characters. */
 export const MAX_LOG_LINE = 500;
 
+const safeString = (a: unknown): string => {
+  try {
+    return String(a);
+  } catch {
+    return '[object Object]';
+  }
+};
+
 /** A log argument as text: strings as they are, everything else as JSON where it can be. */
 export const logText = (args: unknown[]): string => {
   const parts = args.map((a) => {
     if (typeof a === 'string') return a;
     if (typeof a === 'number' || typeof a === 'boolean' || a === null || a === undefined) return String(a);
+    if (a instanceof Error) {
+      const name = a.name || 'Error';
+      return a.message ? `${name}: ${a.message}` : name;
+    }
     try {
-      return JSON.stringify(a) ?? String(a);
+      return JSON.stringify(a) ?? safeString(a);
     } catch {
-      return String(a);
+      return safeString(a);
     }
   });
   const text = parts.join(' ');
@@ -123,14 +141,15 @@ export class ScriptLogRing {
   readonly capacity: number;
 
   constructor(capacity = 200) {
-    this.capacity = capacity;
+    this.capacity = Math.max(0, Math.floor(capacity));
   }
 
   push(t: number, body: string, args: unknown[]): void {
+    this.total++;
+    if (this.capacity === 0) return;
     const line = { t, body, msg: logText(args) };
     if (this.buf.length < this.capacity) this.buf.push(line);
     else { this.buf[this.head] = line; this.head = (this.head + 1) % this.capacity; }
-    this.total++;
   }
 
   /** Lines pushed but no longer held. */
@@ -141,7 +160,9 @@ export class ScriptLogRing {
   /** Oldest first; `last` keeps only the newest N. */
   entries(last?: number): ScriptLogLine[] {
     const ordered = this.buf.length < this.capacity ? [...this.buf] : [...this.buf.slice(this.head), ...this.buf.slice(0, this.head)];
-    return last !== undefined && last < ordered.length ? ordered.slice(ordered.length - last) : ordered;
+    if (last === undefined || !Number.isFinite(last)) return ordered;
+    const n = Math.max(0, Math.floor(last));
+    return n < ordered.length ? ordered.slice(ordered.length - n) : ordered;
   }
 
   clear(): void {
@@ -201,7 +222,7 @@ export class ScriptTiming {
     return {
       scriptMsPerStep: this.scriptMs / this.steps,
       realtimeFactor,
-      scriptShare: wallMs > 0 ? Math.min(1, this.scriptMs / wallMs) : 0,
+      scriptShare: wallMs > 0 ? Math.min(1, Math.max(0, this.scriptMs / wallMs)) : 0,
       ...(slowest ? { slowest } : {}),
       measuredOverMs: wallMs,
     };
@@ -212,7 +233,7 @@ export class ScriptTiming {
    * TIMING_WINDOW_MS, and returns true when that produced a new report.
    */
   tick(nowWallMs: number, simTime: number): boolean {
-    if (this.windowStartWall === null) {
+    if (this.windowStartWall === null || nowWallMs < this.windowStartWall || simTime < this.windowStartSim) {
       this.windowStartWall = nowWallMs;
       this.windowStartSim = simTime;
       this.resetCounters();
@@ -234,6 +255,12 @@ export class ScriptTiming {
     this.resetCounters();
   }
 
+  /** Clears both the active window and `last` (for full scene resets). */
+  clear(): void {
+    this.last = null;
+    this.restart();
+  }
+
   private resetCounters(): void {
     this.steps = 0;
     this.scriptMs = 0;
@@ -253,8 +280,8 @@ export const SCRIPT_DOMINANT_SHARE = 0.3;
 export const headlessCostWarning = (
   ticks: number, wallMs: number, scriptMs: number, timestepS: number, slowest?: { body: string; msPerStep: number },
 ): string | null => {
-  if (ticks <= 0 || wallMs <= 0) return null;
-  const share = scriptMs / wallMs;
+  if (ticks <= 0 || wallMs <= 0 || !(timestepS > 0)) return null;
+  const share = Math.min(1, Math.max(0, scriptMs / wallMs));
   const msPerStep = wallMs / ticks;
   const liveRtf = (timestepS * 1000) / msPerStep;
   if (share < 0.5 || liveRtf >= SLOW_RTF) return null;
